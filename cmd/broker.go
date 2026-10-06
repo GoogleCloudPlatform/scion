@@ -21,6 +21,14 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/signal"
+	slashpath "path"
+	"path/filepath"
+	"slices"
+	"strconv"
+	"strings"
+	"sync"
+	"syscall"
 	"text/tabwriter"
 	"time"
 
@@ -37,6 +45,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/version"
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
+	"gopkg.in/yaml.v3"
 )
 
 var (
@@ -73,6 +82,11 @@ var (
 
 	// broker hubs flags
 	brokerHubsJSON bool
+
+	// --port for register, deregister, status, stop and hubs. Read through
+	// resolveBrokerPort, never directly: when the flag is not set, the port
+	// saved by the last 'runtime-broker start' is used.
+	brokerPort int
 )
 
 // brokerCmd represents the runtime-broker command group.
@@ -132,7 +146,12 @@ Examples:
   scion runtime-broker register --force
 
   # Register with auto-provide enabled
-  scion runtime-broker register --auto-provide`,
+  scion runtime-broker register --auto-provide
+
+  # Register a broker on a non-default port. Not needed when the broker
+  # was started with 'scion runtime-broker start --port 19800': the port
+  # used by the last start is the default.
+  scion runtime-broker register --port 19800`,
 	RunE: runBrokerRegister,
 }
 
@@ -313,6 +332,9 @@ of scion to pick up the updated binary.
 
 If the broker is not running as a daemon, this command will return an error.
 
+The new daemon keeps the --port, --auto-provide and --debug values the
+running daemon was started with, unless you pass them again.
+
 Examples:
   # Restart the broker daemon
   scion runtime-broker restart
@@ -340,13 +362,18 @@ func init() {
 	brokerCmd.AddCommand(brokerHubsCmd)
 
 	// Restart flags
-	brokerRestartCmd.Flags().IntVar(&brokerRestartPort, "port", DefaultBrokerPort, "Runtime Broker API port")
-	brokerRestartCmd.Flags().BoolVar(&brokerRestartAutoProvide, "auto-provide", false, "Automatically add as provider for new projects")
-	brokerRestartCmd.Flags().BoolVar(&brokerRestartDebug, "debug", false, "Enable debug logging (verbose output)")
+	brokerRestartCmd.Flags().IntVar(&brokerRestartPort, "port", 0, "Runtime Broker API port; when not set, the port the running daemon was started with, else server.broker.port from settings, else 9800")
+	brokerRestartCmd.Flags().BoolVar(&brokerRestartAutoProvide, "auto-provide", false, "Automatically add as provider for new projects; when not set, as the running daemon was started")
+	brokerRestartCmd.Flags().BoolVar(&brokerRestartDebug, "debug", false, "Enable debug logging (verbose output); when not set, as the running daemon was started")
 
 	// Status flags
 	brokerStatusCmd.Flags().BoolVar(&brokerStatusJSON, "json", false, "Output in JSON format")
 	brokerStatusCmd.Flags().StringVar(&brokerBrokerID, "broker", "", "Broker ID to query (for remote broker status)")
+
+	// Local broker port for the subcommands that talk to a running broker.
+	for _, c := range []*cobra.Command{brokerRegisterCmd, brokerDeregisterCmd, brokerStatusCmd, brokerStopCmd, brokerHubsCmd} {
+		c.Flags().IntVar(&brokerPort, "port", 0, brokerPortFlagUsage)
+	}
 
 	// Register flags
 	brokerRegisterCmd.Flags().BoolVar(&brokerForceRegister, "force", false, "Force re-registration even if already registered")
@@ -364,7 +391,7 @@ func init() {
 
 	// Start flags
 	brokerStartCmd.Flags().BoolVar(&brokerStartForeground, "foreground", false, "Run in foreground instead of as daemon")
-	brokerStartCmd.Flags().IntVar(&brokerStartPort, "port", DefaultBrokerPort, "Runtime Broker API port")
+	brokerStartCmd.Flags().IntVar(&brokerStartPort, "port", 0, "Runtime Broker API port; when not set, server.broker.port from settings, else 9800")
 	brokerStartCmd.Flags().BoolVar(&brokerStartAutoProvide, "auto-provide", false, "Automatically add as provider for new projects")
 	brokerStartCmd.Flags().BoolVar(&brokerStartDebug, "debug", false, "Enable debug logging (verbose output)")
 
@@ -374,7 +401,7 @@ func init() {
 	brokerProvideCmd.Flags().StringVar(&brokerBrokerID, "broker", "", "Broker name or ID to use (for remote broker operations)")
 	brokerProvideCmd.Flags().BoolVar(&brokerMakeDefault, "make-default", false, "Set this broker as the default for the project")
 	brokerProvideCmd.Flags().StringVar(&brokerHubFlag, "hub", "", "Hub connection name (from 'scion runtime-broker hubs')")
-	brokerProvideCmd.Flags().StringVar(&brokerProvidePath, "path", "", "Local project path to register for this broker (default with --project: none sent; an existing provider path is kept unless it is the global directory, otherwise the broker uses its hub-managed project directory)")
+	brokerProvideCmd.Flags().StringVar(&brokerProvidePath, "path", "", "Project path to register for this broker, resolved on this host (default with --project: none sent; an existing provider path is kept unless it is the global directory, otherwise the broker uses its hub-managed project directory). With --broker naming another host's broker, give the absolute path to the project root (the directory containing .scion) on that host; it is sent as given")
 
 	brokerWithdrawCmd.Flags().StringVar(&brokerProjectID, "project", "", "Project name or ID to remove as provider from")
 
@@ -405,9 +432,10 @@ func runBrokerRegister(cmd *cobra.Command, args []string) error {
 	}
 
 	// Step 1: Check if local broker server is running
-	health, err := checkLocalBrokerServer(DefaultBrokerPort)
+	port := resolveBrokerPort(cmd)
+	health, err := checkLocalBrokerServer(port)
 	if err != nil {
-		return fmt.Errorf("broker server not running on port %d.\n\nStart it with: scion runtime-broker start\n\nError: %w", DefaultBrokerPort, err)
+		return fmt.Errorf("broker server not running on port %d.\n\nStart it with: scion runtime-broker start (or pass --port if it runs on another port)\n\nError: %w", port, err)
 	}
 	fmt.Printf("Broker server is running (status: %s, version: %s)\n", health.Status, health.Version)
 
@@ -727,9 +755,10 @@ func runBrokerDeregister(cmd *cobra.Command, args []string) error {
 	defer cancel()
 
 	// Check local broker-server health (warning only)
-	health, err := checkLocalBrokerServer(DefaultBrokerPort)
+	port := resolveBrokerPort(cmd)
+	health, err := checkLocalBrokerServer(port)
 	if err != nil {
-		fmt.Printf("Note: Broker server is not running (port %d)\n", DefaultBrokerPort)
+		fmt.Printf("Note: Broker server is not running (port %d)\n", port)
 	} else {
 		fmt.Printf("Broker server is running (status: %s)\n", health.Status)
 	}
@@ -762,10 +791,11 @@ func runBrokerDeregister(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Remove hub_connections entry from global settings
+	// Remove hub_connections entry from global settings, leaving every other
+	// key in the file as it is.
 	globalDir, globalErr := config.GetGlobalDir()
 	if globalErr == nil && hubName != "" {
-		if err := config.DeleteHubConnection(globalDir, hubName, false); err != nil {
+		if err := removeHubConnectionSetting(globalDir, hubName); err != nil {
 			fmt.Printf("Warning: failed to remove hub connection from settings: %v\n", err)
 		}
 	}
@@ -854,19 +884,31 @@ func runBrokerStart(cmd *cobra.Command, args []string) error {
 	}
 
 	// Foreground mode - just run the server command directly
-	if brokerStartForeground {
-		serverArgs := buildBrokerForegroundArgs(brokerStartPort, brokerStartAutoProvide, brokerStartDebug)
+	// The port the server will listen on: --port, else the settings port
+	// (server.broker.port), else DefaultBrokerPort.
+	port := resolveBrokerStartPort(cmd)
 
-		fmt.Printf("Starting broker in foreground on port %d...\n", brokerStartPort)
+	if brokerStartForeground {
+		serverArgs := pinBrokerPort(buildBrokerForegroundArgs(port, brokerStartAutoProvide, brokerStartDebug), port)
+		// Saved so the other subcommands find the port while this broker
+		// runs, and removed when it exits (also on SIGTERM, e.g. systemctl
+		// stop). Skipped when another broker owns the record: a broker
+		// daemon, or a broker already answering on this port (this run
+		// will fail to bind and must not remove that broker's record).
+		if recordArgs, ok := claimForegroundBrokerRecord(globalDir, port); ok {
+			saveBrokerArgs(globalDir, recordArgs)
+			stopSignals := removeBrokerRecordOnSIGTERM(globalDir, recordArgs)
+			defer func() {
+				stopSignals()
+				removeBrokerArgsIfOwned(globalDir, recordArgs)
+			}()
+		}
+
+		fmt.Printf("Starting broker in foreground on port %d...\n", port)
 		fmt.Println("Press Ctrl+C to stop.")
 		fmt.Println()
 
-		// Parse the flags for serverStartCmd before calling RunE
-		// (SetArgs only works with Execute, not RunE)
-		if err := serverStartCmd.ParseFlags(serverArgs); err != nil {
-			return fmt.Errorf("failed to parse server flags: %w", err)
-		}
-		return serverStartCmd.RunE(serverStartCmd, []string{})
+		return runForegroundBrokerServer(serverArgs)
 	}
 
 	// Daemon mode
@@ -884,20 +926,25 @@ func runBrokerStart(cmd *cobra.Command, args []string) error {
 	}
 
 	// Build args for the daemon process
-	daemonArgs := buildBrokerDaemonArgs(brokerStartPort, brokerStartAutoProvide, brokerStartDebug)
+	daemonArgs := pinBrokerPort(buildBrokerDaemonArgs(port, brokerStartAutoProvide, brokerStartDebug), port)
 
 	// Start daemon
-	fmt.Printf("Starting broker as daemon on port %d...\n", brokerStartPort)
-	if err := daemon.Start(executable, daemonArgs, globalDir); err != nil {
+	fmt.Printf("Starting broker as daemon on port %d...\n", port)
+	// Nothing is saved until the daemon is up, so the failure paths leave
+	// any existing record (for example a live foreground broker's) alone.
+	if err := startBrokerDaemon(executable, daemonArgs, globalDir); err != nil {
 		return fmt.Errorf("failed to start daemon: %w", err)
 	}
 
 	// Verify it started
-	time.Sleep(500 * time.Millisecond)
+	time.Sleep(brokerStartVerifyDelay)
 	running, pid, _ = daemon.Status(globalDir)
 	if !running {
 		return fmt.Errorf("daemon failed to start. Check log at: %s", daemon.GetLogPath(globalDir))
 	}
+	// Saved so the other subcommands find the port and restart keeps
+	// --port, --auto-provide and --debug.
+	saveBrokerArgs(globalDir, daemonArgs)
 
 	fmt.Printf("Broker started (PID: %d)\n", pid)
 	fmt.Printf("Log file: %s\n", daemon.GetLogPath(globalDir))
@@ -926,7 +973,7 @@ func runBrokerStop(cmd *cobra.Command, args []string) error {
 	running, pid, _ := daemon.Status(globalDir)
 	if !running {
 		// Check if server is running on the port (might be foreground)
-		health, err := checkLocalBrokerServer(DefaultBrokerPort)
+		health, err := checkLocalBrokerServer(resolveBrokerPort(cmd))
 		if err == nil {
 			return fmt.Errorf("broker server is running (status: %s) but not as a daemon, if running in foreground use Ctrl+C to stop it", health.Status)
 		}
@@ -946,6 +993,7 @@ func runBrokerStop(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("daemon may still be running, check with 'scion runtime-broker status'")
 	}
 
+	removeBrokerArgs(globalDir)
 	fmt.Println("Broker daemon stopped.")
 	return nil
 }
@@ -966,12 +1014,18 @@ func runBrokerRestart(cmd *cobra.Command, args []string) error {
 	running, pid, _ := daemon.Status(globalDir)
 	if !running {
 		// Check if server is running on the port (might be foreground)
-		health, err := checkLocalBrokerServer(DefaultBrokerPort)
+		health, err := checkLocalBrokerServer(resolveBrokerPort(cmd))
 		if err == nil {
 			return fmt.Errorf("broker server is running (status: %s) but not as a daemon, if running in foreground use Ctrl+C to stop it and then 'scion runtime-broker start' to restart", health.Status)
 		}
 		return fmt.Errorf("broker daemon is not running, use 'scion runtime-broker start' to start it")
 	}
+
+	// Flags given to restart win; anything else keeps the value the running
+	// daemon was started with.
+	saved := loadBrokerArgs(globalDir)
+	port, autoProvide, debug := resolveBrokerRestartOptions(cmd, saved)
+	daemonArgs := pinBrokerPort(buildBrokerDaemonArgs(port, autoProvide, debug), port)
 
 	// Stop the daemon
 	fmt.Printf("Stopping broker daemon (PID: %d)...\n", pid)
@@ -991,12 +1045,10 @@ func runBrokerRestart(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to find scion executable: %w", err)
 	}
 
-	// Build args for the daemon process
-	daemonArgs := buildBrokerDaemonArgs(brokerRestartPort, brokerRestartAutoProvide, brokerRestartDebug)
-
 	// Start new daemon
-	fmt.Printf("Starting broker with new binary...\n")
+	fmt.Printf("Starting broker with new binary on port %d...\n", port)
 	if err := daemon.Start(executable, daemonArgs, globalDir); err != nil {
+		removeBrokerArgs(globalDir)
 		return fmt.Errorf("failed to start daemon: %w", err)
 	}
 
@@ -1004,8 +1056,10 @@ func runBrokerRestart(cmd *cobra.Command, args []string) error {
 	time.Sleep(500 * time.Millisecond)
 	running, pid, _ = daemon.Status(globalDir)
 	if !running {
+		removeBrokerArgs(globalDir)
 		return fmt.Errorf("daemon failed to start. Check log at: %s", daemon.GetLogPath(globalDir))
 	}
+	saveBrokerArgs(globalDir, daemonArgs)
 
 	fmt.Printf("Broker restarted (PID: %d)\n", pid)
 	fmt.Printf("Log file: %s\n", daemon.GetLogPath(globalDir))
@@ -1132,13 +1186,22 @@ func runBrokerProvide(cmd *cobra.Command, args []string) error {
 		if brokerName == "" {
 			brokerName = brokerID[:8]
 		}
+		// The current project's path names a directory on this host only,
+		// so it is never registered for another host's broker
+		// (ptone/scion#2839); the broker then uses its hub-managed project
+		// directory. An explicit --path below is still sent. A --broker
+		// naming this host's own broker keeps the path.
+		if brokerID != getLocalBrokerID() {
+			localProjectPath = ""
+		}
 	}
 
 	// An explicit --path replaces the current-project path. With --project
 	// and no --path, no path is sent: the current directory need not belong
 	// to the named project.
 	if brokerProvidePath != "" {
-		explicitPath, err := resolveProvidePath(brokerProvidePath, projectName, projectSlug)
+		remote := isRemoteBroker && brokerID != getLocalBrokerID()
+		explicitPath, err := resolveProvidePath(brokerProvidePath, projectName, projectSlug, remote)
 		if err != nil {
 			return err
 		}
@@ -1166,7 +1229,7 @@ func runBrokerProvide(cmd *cobra.Command, args []string) error {
 	fmt.Println()
 	fmt.Printf("Broker '%s' added as provider for project '%s'\n", brokerName, resp.Project.Name)
 	if localProjectPath != "" {
-		fmt.Printf("Local project path: %s\n", localProjectPath)
+		fmt.Println(providePathSummary(localProjectPath, brokerName, isRemoteBroker && brokerID != getLocalBrokerID()))
 	} else {
 		fmt.Println("No local path sent; an existing provider path for this broker is kept (a stored global-directory path is cleared), otherwise the broker uses its hub-managed project directory.")
 	}
@@ -1219,7 +1282,27 @@ func runBrokerProvide(cmd *cobra.Command, args []string) error {
 // the target project is the global project (hub slug "global"): registering
 // that directory for any other project makes the broker treat its global
 // directory as that project.
-func resolveProvidePath(path, projectName, projectSlug string) (string, error) {
+//
+// For a remote broker (one that is not this host's broker) the path is the
+// absolute project root (the directory containing .scion) on the broker's
+// host, so it is not resolved or checked against this host's filesystem: it
+// is sent as given, cleaned with slash-only path rules (separators are not
+// translated). A path naming the .scion directory itself is
+// refused with a hint to pass its parent (ptone/scion#3157).
+func resolveProvidePath(path, projectName, projectSlug string, remote bool) (string, error) {
+	if remote {
+		// The path is in the remote broker's form, so it is checked and
+		// cleaned with the slash-only path package, never this host's
+		// filepath rules, and its separators are not translated.
+		if !slashpath.IsAbs(path) {
+			return "", fmt.Errorf("--path %q must be an absolute path on the broker's host when --broker names a remote broker", path)
+		}
+		cleaned := slashpath.Clean(path)
+		if slashpath.Base(cleaned) == config.DotScion {
+			return "", fmt.Errorf("--path %q names a .scion directory; for a remote broker pass the project root that contains it: %s", path, slashpath.Dir(cleaned))
+		}
+		return cleaned, nil
+	}
 	resolved, isGlobal, err := config.ResolveProjectPath(path)
 	if err != nil {
 		return "", fmt.Errorf("failed to resolve --path %q: %w", path, err)
@@ -1401,10 +1484,11 @@ func runBrokerStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	// Check if broker server is responding (could be foreground or daemon)
-	health, err := checkLocalBrokerServer(DefaultBrokerPort)
+	port := resolveBrokerPort(cmd)
+	health, err := checkLocalBrokerServer(port)
 	if err == nil {
 		status.ServerRunning = true
-		status.ServerPort = DefaultBrokerPort
+		status.ServerPort = port
 		status.ServerStatus = health.Status
 		status.ServerVersion = health.Version
 	}
@@ -1533,7 +1617,7 @@ func runBrokerStatus(cmd *cobra.Command, args []string) error {
 	// Hub Connections
 	if len(status.HubConnections) > 0 {
 		// Try to get live status from running broker server
-		liveStatus := queryBrokerHubConnections(DefaultBrokerPort)
+		liveStatus := queryBrokerHubConnections(port)
 		liveStatusMap := make(map[string]string)
 		if liveStatus != nil {
 			for _, conn := range liveStatus.Connections {
@@ -1657,7 +1741,7 @@ func runBrokerHubs(cmd *cobra.Command, args []string) error {
 	}
 
 	// Try to get live status from running broker server
-	liveStatus := queryBrokerHubConnections(DefaultBrokerPort)
+	liveStatus := queryBrokerHubConnections(resolveBrokerPort(cmd))
 
 	// Build a lookup map for live status by connection name
 	liveStatusMap := make(map[string]string)
@@ -1980,6 +2064,15 @@ func buildBrokerProfiles(settings *config.Settings) []hubclient.BrokerProfile {
 		return nil
 	}
 
+	// GSA-to-KSA mappings are read from the broker's global settings only,
+	// the same source the broker resolves them from at dispatch
+	// (resolveKubernetesAssignIdentity). If they cannot be read, profiles
+	// are reported without them (MappingsReported=false: unknown).
+	mappingVS, mappingErr := loadBrokerMappingSettings()
+	if mappingErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not read global settings for kubernetes_service_account_mappings; the Hub will treat this broker's mappings as unknown: %v\n", mappingErr)
+	}
+
 	var profiles []hubclient.BrokerProfile
 	for name, profileCfg := range settings.Profiles {
 		// Determine runtime type from the profile's runtime reference
@@ -1987,6 +2080,7 @@ func buildBrokerProfiles(settings *config.Settings) []hubclient.BrokerProfile {
 		if runtimeType == "" {
 			runtimeType = "docker" // default
 		}
+		mappings, reported := brokerProfileSAMappings(mappingVS, mappingErr, name)
 
 		// Look up runtime config to get additional info (context, namespace for K8s)
 		var context, namespace string
@@ -1998,15 +2092,47 @@ func buildBrokerProfiles(settings *config.Settings) []hubclient.BrokerProfile {
 		}
 
 		profiles = append(profiles, hubclient.BrokerProfile{
-			Name:      name,
-			Type:      runtimeType,
-			Available: true,
-			Context:   context,
-			Namespace: namespace,
+			Name:                   name,
+			Type:                   runtimeType,
+			Available:              true,
+			Context:                context,
+			Namespace:              namespace,
+			ServiceAccountMappings: mappings,
+			MappingsReported:       reported,
 		})
 	}
 
 	return profiles
+}
+
+// loadBrokerMappingSettings loads the broker's global settings (plus the
+// DB-backed overlay, when one is installed) for reporting
+// kubernetes_service_account_mappings at join. A variable so tests can
+// substitute settings.
+var loadBrokerMappingSettings = func() (*config.VersionedSettings, error) {
+	vs, _, err := config.LoadGlobalSettingsWithOverlay()
+	return vs, err
+}
+
+// brokerProfileSAMappings returns the GSAs profileName maps to a KSA (its
+// own mapping plus its runtime entry's) and whether they are reported. Only
+// Kubernetes profiles report (by resolved runtime type, so a custom entry
+// key with type kubernetes counts). Not reported when the settings could not
+// be loaded or do not have the profile: the Hub then treats the profile's
+// mappings as unknown instead of empty.
+func brokerProfileSAMappings(vs *config.VersionedSettings, loadErr error, profileName string) ([]hubclient.BrokerProfileSAMapping, bool) {
+	if loadErr != nil {
+		return nil, false
+	}
+	gsas, isKubernetes, known := vs.ProfileKubernetesSAMappings(profileName)
+	if !known || !isKubernetes {
+		return nil, false
+	}
+	var out []hubclient.BrokerProfileSAMapping
+	for _, gsa := range gsas {
+		out = append(out, hubclient.BrokerProfileSAMapping{GSA: gsa})
+	}
+	return out, true
 }
 
 // brokerRegistrationDefaultProfile returns the broker's default (active)
@@ -2123,4 +2249,303 @@ func queryBrokerHubConnections(port int) *BrokerHubConnectionsResponse {
 	}
 
 	return &result
+}
+
+// brokerDaemonComponent is the daemon component name of the standalone
+// broker (broker.pid, broker.log, broker-args.json).
+const brokerDaemonComponent = "broker"
+
+const brokerPortFlagUsage = "Local Runtime Broker API port; when not set, the port of the broker started by 'runtime-broker start', else server.broker.port from settings, else 9800"
+
+// saveBrokerArgs records the args a running broker was launched with, so
+// later subcommands can find its port and restart can keep the original
+// flags. It is written once the broker is up and removed when it stops. A
+// failure only loses that convenience, so it is a warning.
+func saveBrokerArgs(globalDir string, args []string) {
+	if err := daemon.SaveArgs(brokerDaemonComponent, globalDir, args); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to save broker launch args: %v\n", err)
+	}
+}
+
+// removeBrokerArgs removes the saved launch args once the broker they
+// describe is gone, so they cannot point later subcommands at a stale port.
+func removeBrokerArgs(globalDir string) {
+	if err := daemon.RemoveArgs(brokerDaemonComponent, globalDir); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to remove saved broker launch args: %v\n", err)
+	}
+}
+
+// Seams for tests: launching the daemon, running the foreground server and
+// interrupting this process.
+var (
+	startBrokerDaemon      = daemon.Start
+	brokerStartVerifyDelay = 500 * time.Millisecond
+
+	// runForegroundBrokerServer runs 'server start' in-process with args.
+	runForegroundBrokerServer = func(args []string) error {
+		// Parse the flags for serverStartCmd before calling RunE
+		// (SetArgs only works with Execute, not RunE)
+		if err := serverStartCmd.ParseFlags(args); err != nil {
+			return fmt.Errorf("failed to parse server flags: %w", err)
+		}
+		return serverStartCmd.RunE(serverStartCmd, []string{})
+	}
+
+	// interruptSelf asks this process to shut down the way Ctrl+C does.
+	interruptSelf = func() {
+		if p, err := os.FindProcess(os.Getpid()); err == nil {
+			_ = p.Signal(os.Interrupt)
+		}
+	}
+)
+
+// claimForegroundBrokerRecord returns the record a foreground broker on
+// port should save, and false when another broker owns the record: a broker
+// daemon is running, or a broker already answers on port.
+func claimForegroundBrokerRecord(globalDir string, port int) ([]string, bool) {
+	if running, _, _ := daemon.Status(globalDir); running {
+		return nil, false
+	}
+	if _, err := checkLocalBrokerServer(port); err == nil {
+		return nil, false
+	}
+	return pinBrokerPort(buildBrokerDaemonArgs(port, brokerStartAutoProvide, brokerStartDebug), port), true
+}
+
+// removeBrokerArgsIfOwned removes the saved launch args only if they are
+// still the args this process saved, so a broker that has since saved its
+// own record keeps it.
+func removeBrokerArgsIfOwned(globalDir string, owned []string) {
+	saved, err := daemon.LoadArgs(brokerDaemonComponent, globalDir)
+	if err != nil || saved == nil || !slices.Equal(saved, owned) {
+		return
+	}
+	removeBrokerArgs(globalDir)
+}
+
+// removeBrokerRecordOnSIGTERM makes SIGTERM (systemd's stop signal) remove
+// this foreground broker's record and then shut the server down like Ctrl+C
+// (the server traps only os.Interrupt, so SIGTERM would otherwise kill the
+// process before deferred cleanup runs). The returned func stops handling.
+func removeBrokerRecordOnSIGTERM(globalDir string, owned []string) (stop func()) {
+	ch := make(chan os.Signal, 1)
+	done := make(chan struct{})
+	signal.Notify(ch, syscall.SIGTERM)
+	go func() {
+		select {
+		case <-ch:
+			removeBrokerArgsIfOwned(globalDir, owned)
+			interruptSelf()
+		case <-done:
+		}
+	}()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			signal.Stop(ch)
+			close(done)
+		})
+	}
+}
+
+// loadBrokerArgs returns the saved broker launch args, or nil when there
+// are none. An unreadable file is reported on stderr and treated as none.
+func loadBrokerArgs(globalDir string) []string {
+	saved, err := daemon.LoadArgs(brokerDaemonComponent, globalDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: ignoring saved broker launch args %s: %v; using the settings or default port (pass --port to override)\n",
+			filepath.Join(globalDir, daemon.ArgsFileName(brokerDaemonComponent)), err)
+		return nil
+	}
+	return saved
+}
+
+// settingsBrokerPort returns the port 'server start' gives the runtime
+// broker when no --runtime-broker-port is passed: server.broker.port from
+// the global settings (or its SCION_SERVER_ environment override), else
+// DefaultBrokerPort. It reads the configuration the same way the server
+// does (config.LoadGlobalConfig with no --config path).
+var settingsBrokerPort = func() int {
+	cfg, err := config.LoadGlobalConfig("")
+	if err != nil || cfg == nil || cfg.RuntimeBroker.Port <= 0 {
+		return DefaultBrokerPort
+	}
+	return cfg.RuntimeBroker.Port
+}
+
+// resolveBrokerStartPort returns the port 'runtime-broker start' runs the
+// broker on: --port when given, else the settings port.
+func resolveBrokerStartPort(cmd *cobra.Command) int {
+	if cmd.Flags().Changed("port") && brokerStartPort > 0 {
+		return brokerStartPort
+	}
+	return settingsBrokerPort()
+}
+
+// pinBrokerPort makes the launch args name port explicitly when the
+// builders left it out (it is the default) but the settings would move the
+// server to another port, for example 'start --port 9800' with
+// server.broker.port set.
+func pinBrokerPort(args []string, port int) []string {
+	if port == DefaultBrokerPort && settingsBrokerPort() != DefaultBrokerPort {
+		return append(args, fmt.Sprintf("--runtime-broker-port=%d", port))
+	}
+	return args
+}
+
+// resolveBrokerPort returns the local broker port for cmd: its --port flag
+// when set, else the port saved by the running broker's start, else the
+// settings port (server.broker.port), else DefaultBrokerPort. cmd may be
+// any command (runBrokerStatus is also called from start and restart); only
+// an explicitly set "port" flag is used.
+func resolveBrokerPort(cmd *cobra.Command) int {
+	if cmd != nil {
+		if f := cmd.Flags().Lookup("port"); f != nil && f.Changed {
+			if p, err := strconv.Atoi(f.Value.String()); err == nil && p > 0 {
+				return p
+			}
+		}
+	}
+	if globalDir, err := config.GetGlobalDir(); err == nil {
+		if saved := loadBrokerArgs(globalDir); saved != nil {
+			return brokerPortFromArgs(saved)
+		}
+	}
+	return settingsBrokerPort()
+}
+
+// brokerPortFromArgs returns the --runtime-broker-port in saved broker
+// launch args, or DefaultBrokerPort when they don't set one (the start
+// builders omit it for the default port).
+func brokerPortFromArgs(args []string) int {
+	for i, a := range args {
+		var v string
+		switch {
+		case strings.HasPrefix(a, "--runtime-broker-port="):
+			v = strings.TrimPrefix(a, "--runtime-broker-port=")
+		case a == "--runtime-broker-port" && i+1 < len(args):
+			v = args[i+1]
+		default:
+			continue
+		}
+		if p, err := strconv.Atoi(v); err == nil && p > 0 {
+			return p
+		}
+	}
+	return DefaultBrokerPort
+}
+
+// argsContain reports whether flag appears in args.
+func argsContain(args []string, flag string) bool {
+	for _, a := range args {
+		if a == flag {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveBrokerRestartOptions returns the port, auto-provide and debug
+// options restart relaunches the daemon with: each flag given to restart
+// wins; otherwise the value from the saved launch args of the running
+// daemon; otherwise the flag default (for the port, the settings port).
+func resolveBrokerRestartOptions(cmd *cobra.Command, saved []string) (port int, autoProvide, debug bool) {
+	flags := cmd.Flags()
+	port, autoProvide, debug = brokerRestartPort, brokerRestartAutoProvide, brokerRestartDebug
+	if saved != nil && !flags.Changed("port") {
+		port = brokerPortFromArgs(saved)
+	}
+	if port <= 0 {
+		// No saved args (for example a daemon started by an older binary):
+		// the port the server takes from settings, else the default.
+		port = settingsBrokerPort()
+	}
+	if saved == nil {
+		return port, autoProvide, debug
+	}
+	if !flags.Changed("auto-provide") {
+		autoProvide = argsContain(saved, "--auto-provide")
+	}
+	if !flags.Changed("debug") {
+		debug = argsContain(saved, "--debug")
+	}
+	return port, autoProvide, debug
+}
+
+// removeHubConnectionSetting removes hub_connections.<name> from the
+// settings file in dir and leaves every other setting as it is.
+//
+//   - No file, or no entry for name: the file is not touched.
+//   - Versioned YAML file: the entry is deleted in place
+//     (config.PrepareSettingsPathEdits), so comments and every other key,
+//     including v1 keys such as image_registry, default_harness_config and
+//     server.broker, survive. An emptied hub_connections map is removed too.
+//   - Unversioned (legacy-format) file: config.DeleteHubConnection, the
+//     writer for that schema, as before. An in-place edit would stamp
+//     schema_version without migrating the legacy keys (harnesses, ...), so
+//     they would stop being read; the legacy file is migrated by the next
+//     settings write instead, as it always was.
+//   - Versioned JSON file: refused with a request to edit it by hand.
+//     config.DeleteHubConnection would rewrite it through the legacy struct
+//     and drop every v1 key, and the in-place editor does not handle JSON.
+func removeHubConnectionSetting(dir, name string) error {
+	// Held from the read to the write, so the entry check and the
+	// last-entry decision below use the file as it is written back.
+	// (config.LockSettingsFile serialises writers in this process only.)
+	unlock := config.LockSettingsFile()
+	defer unlock()
+
+	path := config.GetSettingsPath(dir)
+	if path == "" {
+		return nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	isJSON := filepath.Ext(path) == ".json"
+
+	var raw map[string]interface{}
+	if isJSON {
+		err = util.UnmarshalJSONC(data, &raw)
+	} else {
+		err = yaml.Unmarshal(data, &raw)
+	}
+	if err != nil {
+		return fmt.Errorf("failed to parse %s: %w", path, err)
+	}
+	conns, _ := raw["hub_connections"].(map[string]interface{})
+	if _, ok := conns[name]; !ok {
+		// Nothing to remove: don't touch the file.
+		return nil
+	}
+
+	_, versioned := raw["schema_version"]
+	if !versioned && !isJSON {
+		// DetectSettingsFormat also recognises a v1 file that lacks
+		// schema_version by its v1-only runtime keys.
+		version, _ := config.DetectSettingsFormat(data)
+		versioned = version != ""
+	}
+	if !versioned {
+		return config.DeleteHubConnection(dir, name, false)
+	}
+	if isJSON {
+		return fmt.Errorf("%s is JSON and cannot be edited in place; remove hub_connections.%s from it by hand", path, name)
+	}
+
+	edit := config.SettingsPathEdit{Path: []string{"hub_connections", name}, Delete: true}
+	if len(conns) == 1 {
+		// The last entry: drop the map rather than leave hub_connections: {}.
+		edit.Path = []string{"hub_connections"}
+	}
+	edits := []config.SettingsPathEdit{edit}
+	staged, err := config.PrepareSettingsPathEdits(dir, edits)
+	if err != nil {
+		return fmt.Errorf("%w; remove hub_connections.%s from %s by hand", err, name, path)
+	}
+	return staged.Commit()
 }

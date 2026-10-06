@@ -44,6 +44,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
@@ -282,6 +283,11 @@ type ServerConfig struct {
 	// Used by the metrics dashboard to query Cloud Monitoring.
 	// Falls back to GCPProjectID if empty.
 	TelemetryProjectID string
+	// DisableCloudLogQuery skips building the Cloud Logging query service
+	// even when a GCP project ID is found in the environment
+	// (logging.ResolveProjectID). Tests set it so that constructing a server
+	// never creates real Cloud Logging clients from ambient env.
+	DisableCloudLogQuery bool
 	// GCPMintCapPerProject is the maximum number of minted service accounts allowed per project.
 	// Zero means unlimited (default).
 	GCPMintCapPerProject int
@@ -1350,6 +1356,9 @@ type Server struct {
 	// Web chat store for webchat_* tables (thread prefs, chat threads, etc.) — nil = disabled.
 	webChatStore WebChatStore
 
+	// Artifact store for the artifact_* tables (pkg/artifacts) — nil = artifacts unavailable.
+	artifactStore artifacts.Store
+
 	// Chat notifier for human mention + DM received notifications (W6). Nil-safe.
 	chatNotifier *ChatNotifier
 
@@ -1525,8 +1534,7 @@ type Server struct {
 	// startClaimCfg holds the current start-claim settings (see
 	// start_claim_settings.go); set at New and by ApplySnapshot.
 	startClaimCfg atomic.Pointer[StartClaimSettings]
-	// startClaimsOn turns start claims on (start_claim.go). Off until every
-	// start trigger runs under a claim.
+	// startClaimsOn turns start claims on (start_claim.go); New sets it.
 	startClaimsOn bool
 	// startClaimTestHook, when set, adjusts a claim run before its renewal
 	// starts (tests only).
@@ -1534,6 +1542,12 @@ type Server struct {
 	// claimStops records when the start-claim reaper last stopped an
 	// agent's container (agent ID -> time.Time), to rate-limit it.
 	claimStops sync.Map
+	// intentStops records when the hub last stopped an agent that ran with
+	// run intent stopped (agent ID -> time.Time), to rate-limit it.
+	intentStops sync.Map
+	// httpDrains marks brokers with a heartbeat-triggered drain of queued
+	// stops running on this node (http_broker_drain.go).
+	httpDrains sync.Map
 
 	// Subsystem loggers for handler methods
 	agentLifecycleLog *slog.Logger
@@ -1690,6 +1704,17 @@ func newInstanceID() string {
 // InstanceID returns the per-process unique identifier for this hub instance.
 func (s *Server) InstanceID() string { return s.instanceID }
 
+// cloudLogQueryProjectID returns the GCP project New() builds the Cloud
+// Logging query service for, or "" when that service must not be built:
+// cfg.DisableCloudLogQuery is set, or no project ID is found in the
+// environment (logging.ResolveProjectID).
+func cloudLogQueryProjectID(cfg ServerConfig) string {
+	if cfg.DisableCloudLogQuery {
+		return ""
+	}
+	return logging.ResolveProjectID()
+}
+
 // New creates a new Hub API server.
 func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	// Apply defaults for zero-value fields that have meaningful defaults.
@@ -1753,6 +1778,8 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	// the configured hub_name is unset.
 	srv.startupHubName = cfg.HubName
 	srv.setStartClaimSettings(cfg.StartClaim)
+	// Every start trigger runs under a start claim.
+	srv.startClaimsOn = true
 
 	// Wire tunnel disconnect handler: when an agent's port-forward tunnel
 	// closes (readLoop exits), clear its exposed port registrations so stale
@@ -2155,6 +2182,13 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	// Shipped with unlimited defaults (DefaultValue=0) per sponsor decision OQ-2.
 	seedLimitDefinitions(ctx, s)
 
+	// Remove group memberships whose user and agent were both deleted
+	// (ON DELETE SET NULL leaves the row with both IDs NULL). Such rows are
+	// always orphans and would otherwise count toward group roles
+	// (ptone/scion#2769). Idempotent; runs on every startup, before the
+	// role-binding backfill reads group memberships. Non-fatal.
+	sweepOrphanedGroupMemberships(ctx, s)
+
 	// Backfill role bindings from existing User.Role and project group memberships.
 	// Must run after reconcileBuiltInRoles so the role definitions exist.
 	// Members receive hub-member permissions via the canonical Hub Members group,
@@ -2282,8 +2316,9 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 		srv.authConfig.ProxyUserProvisioner = MakeProxyUserProvisioner(srv)
 	}
 
-	// Initialize Cloud Logging query service (optional, gated on GCP project ID)
-	if projectID := logging.ResolveProjectID(); projectID != "" {
+	// Initialize Cloud Logging query service (optional, gated on GCP project
+	// ID and on cfg.DisableCloudLogQuery)
+	if projectID := cloudLogQueryProjectID(cfg); projectID != "" {
 		logQuerySvc, err := NewLogQueryService(ctx, projectID)
 		if err != nil {
 			slog.Warn("Failed to initialize Cloud Logging query service", "error", err)
@@ -3998,6 +4033,7 @@ func (s *Server) autoSuspendStalledAgents(ctx context.Context, agents []store.Ag
 				continue
 			}
 		}
+		supersedes := agent.StartClaimID
 		priorIntent, intentAt, err := s.swapRunIntent(ctx, agent, store.RunIntentStopped)
 		if err != nil {
 			slog.Error("Scheduler: auto-suspend intent write failed",
@@ -4026,6 +4062,13 @@ func (s *Server) autoSuspendStalledAgents(ctx context.Context, agents []store.Ag
 				continue
 			}
 		}
+		// The superseded start claim is released last on each path below,
+		// after the status write and the quota release (see suspendAgent).
+		releaseClaim := func() {
+			if agent.RuntimeBrokerID != "" {
+				s.releaseSupersededClaim(ctx, agent.ID, supersedes, intentAt)
+			}
+		}
 
 		statusUpdate := store.AgentStatusUpdate{
 			Phase:           string(state.PhaseSuspended),
@@ -4039,9 +4082,11 @@ func (s *Server) autoSuspendStalledAgents(ctx context.Context, agents []store.Ag
 		if err != nil {
 			slog.Error("Scheduler: auto-suspend status update failed",
 				"agent_id", agent.ID, "agent_name", agent.Name, "error", err)
+			releaseClaim()
 			continue
 		}
 		if !recorded {
+			releaseClaim()
 			continue
 		}
 
@@ -4052,6 +4097,7 @@ func (s *Server) autoSuspendStalledAgents(ctx context.Context, agents []store.Ag
 		// max_agents_per_broker reservation (ptone/scion#1963), mirroring
 		// suspendAgent's HTTP-path behavior.
 		s.releaseBrokerQuota(ctx, agent)
+		releaseClaim()
 		s.events.PublishAgentStatus(ctx, agent)
 		suspended++
 	}
@@ -4393,7 +4439,8 @@ func (s *Server) scheduledCreatorIdentity(ctx context.Context, createdBy string)
 // applyScheduledProjectDefaultGCPIdentity is the scheduler-path twin of the
 // project-default/hub-default GCP identity ladder in createAgentInProject
 // (handlers_agents_core.go). A scheduled dispatch carries no explicit
-// gcp_identity, so the ladder here starts one rung down: project default,
+// gcp_identity, so the ladder here starts one rung down: the per-profile
+// default for the profile the agent runs under, then the project default,
 // then — when the project has no default at all — the hub default, then
 // block (#1927). The same checks run in the same order at each assign rung
 // (SA reachable from the project, SA verified, then the full
@@ -4423,6 +4470,20 @@ func (s *Server) scheduledCreatorIdentity(ctx context.Context, createdBy string)
 func (s *Server) applyScheduledProjectDefaultGCPIdentity(ctx context.Context, agent *store.Agent, project *store.Project) error {
 	if agent.AppliedConfig == nil {
 		agent.AppliedConfig = &store.AgentAppliedConfig{}
+	}
+	// A per-profile default for the profile this agent runs under wins over
+	// the project-wide default, as on the create path.
+	if profileName, profileSAID := s.projectProfileDefaultSA(ctx, agent.RuntimeBrokerID, project, agent.AppliedConfig.Profile); profileSAID != "" {
+		cfg, err := s.resolveDefaultSAAssignmentCore(ctx, nil, agent.ProjectID,
+			profileSAID, SurfaceProjectDefault, profileDefaultTier(profileName))
+		if err != nil {
+			return err
+		}
+		agent.AppliedConfig.GCPIdentity = cfg
+		pinResolvedProfile(agent.AppliedConfig, profileName)
+		slog.Debug("GCP identity chosen by default", "source", "project-profile-default",
+			"project_id", agent.ProjectID, "agent", agent.Name, "profile", profileName, "sa_id", cfg.ServiceAccountID)
+		return nil
 	}
 	projectSettings := projectSettingsFromAnnotations(project)
 	switch projectSettings.DefaultGCPIdentityMode {
@@ -4772,7 +4833,9 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 		// Apply project-level defaults, hub operational defaults, and the
 		// template/harness-config derivation pipeline, exactly as on the
 		// agent-create path. See deriveAgentConfig.
-		s.deriveAgentConfig(ctx, agent, project, tmpl)
+		if err := s.deriveAgentConfig(ctx, agent, project, tmpl); err != nil {
+			return fmt.Errorf("scheduled dispatch of agent %q: %w", slug, err)
+		}
 
 		// Scheduled creates have no waiting client, so they opt in to
 		// asynchronous launch server-side. It only takes effect when
@@ -4852,10 +4915,19 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 			return nil
 		}
 
-		if _, err := s.recordRunIntent(ctx, agent, store.RunIntentRunning); err != nil {
-			return fmt.Errorf("failed to dispatch agent %q: %w", slug, err)
+		// The create-and-start runs under a start claim, which records run
+		// intent running.
+		created, err := s.createUnderClaim(ctx, agent, func(ctx context.Context) (*CreateDispatchResult, error) {
+			return dispatcher.DispatchAgentCreate(ctx, agent)
+		})
+		var held *store.ClaimHeldError
+		if errors.As(err, &held) {
+			// The agent is already being started by the claim holder: the
+			// event is skipped (not retried), not failed.
+			slog.Info("Scheduler: agent already starting; event skipped",
+				"eventID", evt.ID, "agent_id", agent.ID, "holder", string(held.Kind))
+			return nil
 		}
-		created, err := dispatcher.DispatchAgentCreate(ctx, agent)
 		if err != nil {
 			slog.Error("Scheduler: failed to dispatch agent creation",
 				"eventID", evt.ID,
@@ -6569,4 +6641,23 @@ func (s *Server) a2aBridgeSweepHandler(externalURL string) func(ctx context.Cont
 				"status", resp.StatusCode, "url", externalURL)
 		}
 	}
+}
+
+// sweepOrphanedGroupMemberships deletes group memberships whose user and
+// agent are both NULL and logs how many it removed. It runs on every startup
+// and is idempotent. A failure is logged at Warn and startup continues: the
+// rows are inert apart from role counts, and the next startup retries. The
+// count is logged at Info only when rows were removed; the usual no-op run
+// logs at Debug.
+func sweepOrphanedGroupMemberships(ctx context.Context, s store.Store) {
+	n, err := s.DeleteOrphanedGroupMemberships(ctx)
+	if err != nil {
+		slog.Warn("failed to delete orphaned group memberships", "error", err)
+		return
+	}
+	if n > 0 {
+		slog.Info("deleted orphaned group memberships", "count", n)
+		return
+	}
+	slog.Debug("deleted orphaned group memberships", "count", n)
 }

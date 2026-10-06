@@ -315,6 +315,13 @@ func (s claimOnRunningIntentStore) SwapRunIntent(ctx context.Context, agentID st
 	return s.Store.SwapRunIntent(ctx, agentID, intent)
 }
 
+// ClaimAgentStart is the running-intent write of a start that runs under a
+// start claim.
+func (s claimOnRunningIntentStore) ClaimAgentStart(ctx context.Context, agentID, owner string, kind store.StartClaimKind, target string, ttl time.Duration) (store.StartClaim, error) {
+	seedAgentDeletion(s.t, s.Store, agentID, seedLiveDeleting)
+	return s.Store.ClaimAgentStart(ctx, agentID, owner, kind, target, ttl)
+}
+
 // A fresh create whose running-intent write meets a delete claim answers
 // 409 delete_in_progress (details.agentId) with no create dispatch
 // (ptone/scion#2550, round 7 nit-3).
