@@ -160,6 +160,7 @@ func newDiscordRoutedFixture(t *testing.T) *discordRoutedFixture {
 
 	// Seed agent cache so legacy path resolves agents without a hub client.
 	require.NoError(t, f.store.SetProjectAgents(ctx, &ProjectAgents{
+		User:        "user:testuser@example.com",
 		ProjectID:   "proj-001",
 		AgentSlugs:  []string{"alpha", "beta", "gamma"},
 		RefreshedAt: time.Now(),
@@ -663,7 +664,9 @@ func TestRoutedEnabled_ContextSavedAfterPreflightExpiry(t *testing.T) {
 		},
 	}
 
-	f.broker.handleRoutedInbound(ctx, f.session, m, f.store, link, "C-TEST", "BOT123", "alpha")
+	mapping, err := f.store.GetUserMapping(context.Background(), "U-SENDER")
+	require.NoError(t, err)
+	f.broker.handleRoutedInbound(ctx, f.session, m, f.store, link, mapping, "C-TEST", "BOT123", "alpha")
 
 	// The context save must succeed despite the expired parent ctx, because
 	// handleRoutedInbound now creates a fresh bounded context for the store call.
@@ -1233,7 +1236,7 @@ func TestHubError_UserFacingMessage_NewCodes(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.code, func(t *testing.T) {
 			he := &hubError{Code: tt.code, Message: "test"}
-			assert.Contains(t, he.userFacingMessage(), tt.contains)
+			assert.Contains(t, he.userFacingMessage("", ""), tt.contains)
 		})
 	}
 }

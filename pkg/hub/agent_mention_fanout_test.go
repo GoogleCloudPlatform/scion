@@ -314,9 +314,8 @@ func TestMentionFanout_RateLimitedDoesNotConsumePairCap(t *testing.T) {
 	fakeNow := time.Now()
 	srv.mentionPairLimiter = newMentionPairLimiterWithParams(1, time.Minute, func() time.Time { return fakeNow })
 	srv.chatSendLimiter = newChatSendLimiterWithRates(map[chatSenderClass]float64{
-		chatSenderHuman:       chatSendHumanRatePerMinute,
-		chatSenderAgent:       1,
-		chatSenderAgentMirror: chatSendAgentMirrorRatePerMinute,
+		chatSenderHuman: chatSendHumanRatePerMinute,
+		chatSenderAgent: 1,
 	}, func() time.Time { return fakeNow })
 	// The bucket always starts full (floored at 1 token), so drain it first:
 	// this call is charged to the sender's budget but is not itself a
@@ -869,9 +868,8 @@ func TestMentionFanout_BudgetExhaustion(t *testing.T) {
 	// Allow exactly 1 agent-class send per minute so the second mention in
 	// one fan-out call exhausts the aggregate budget.
 	srv.chatSendLimiter = newChatSendLimiterWithRates(map[chatSenderClass]float64{
-		chatSenderHuman:       chatSendHumanRatePerMinute,
-		chatSenderAgent:       1,
-		chatSenderAgentMirror: chatSendAgentMirrorRatePerMinute,
+		chatSenderHuman: chatSendHumanRatePerMinute,
+		chatSenderAgent: 1,
 	}, func() time.Time { return fakeNow })
 
 	// Three targets are needed: with only two, the second is rejected

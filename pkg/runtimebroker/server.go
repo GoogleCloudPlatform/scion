@@ -55,6 +55,10 @@ import (
 
 // ServerConfig holds configuration for the Runtime Broker API server.
 type ServerConfig struct {
+	// DeleteClock, for tests only, replaces time.Now as the clock the delete
+	// notAfter check reads (see delete_not_after.go). nil means time.Now.
+	DeleteClock func() time.Time
+
 	// Port is the HTTP port to listen on.
 	Port int
 	// Host is the address to bind to (e.g., "0.0.0.0" or "127.0.0.1").
@@ -294,6 +298,12 @@ type Server struct {
 	// access — resolving a real Kubernetes runtime calls Verify() against
 	// the API server.
 	resolveAuxiliaryRuntime func(projectPath, agentName, profileFlag string) scionrt.Runtime
+
+	// loadSettings, when non-nil, replaces config.LoadEffectiveSettings in
+	// resolveManagerForOptsStrict (handlers.go). nil, the default, uses the
+	// real loader; tests set it per fixture to exercise each settings
+	// outcome.
+	loadSettings func(projectDir string) (*config.VersionedSettings, []string, error)
 
 	// agentOwnRuntimes memoises the runtime an existing agent's saved
 	// profile resolves to (see ensureAgentOwnRuntime), keyed by project dir
