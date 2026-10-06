@@ -480,8 +480,8 @@ export class ScionPageAgents extends LitElement {
         font-size: 0.875rem;
       }
 
-      /* Tighter buttons first, so the status filter still fits one row on
-         a 320px screen. */
+      /* Tighter buttons on narrow phones, so the status filter wraps less.
+         It may still wrap to a second row there. */
       @media (max-width: 400px) {
         .scope-toggle button {
           padding: 0 0.4375rem;
