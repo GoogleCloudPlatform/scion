@@ -149,8 +149,8 @@ hand. See "Destroy".
 default, the GKE NEG controller creates a standalone NEG only in the zones
 where the cluster has nodes." The cluster's `node_locations` lists every zone
 nodes *may* run in, and a small Autopilot cluster often has no nodes in some of
-them. Without the `zones` field below, `hub-lb`'s read of the NEG in such a zone fails with
-a not-found error on every apply, and re-running does not help.
+them. Without the `zones` field below, `hub-lb`'s read of the NEG in such a
+zone fails with a not-found error on every apply, and re-running does not help.
 
 So `hub-gke` adds the optional `zones` field to the NEG annotation:
 
