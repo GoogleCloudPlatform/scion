@@ -321,6 +321,10 @@ func TestAppliedConfigEnvCleanupSameTimestampAcrossPageBoundary(t *testing.T) {
 		a := &store.Agent{
 			ID: tid(fmt.Sprintf("page-tie-agent-%03d", i)), Slug: fmt.Sprintf("page-tie-agent-%03d", i),
 			Name: fmt.Sprintf("page tie agent %03d", i), ProjectID: f.agent.ProjectID,
+			// Same owner as the fixture agent, so USER_SECRET (a user-scope
+			// secret of that owner) is reachable and stripped by the narrow
+			// rule from CreateInputs.
+			OwnerID: f.agent.OwnerID,
 			AppliedConfig: &store.AgentAppliedConfig{
 				Image:        "example/image:3",
 				Env:          map[string]string{"GITHUB_TOKEN": "value-must-not-appear-in-log"},
