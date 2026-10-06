@@ -4876,6 +4876,84 @@ func TestHandleAgentExec_DispatchesToRuntimeBroker(t *testing.T) {
 	assert.Equal(t, 0, resp2.ExitCode)
 }
 
+// TestHandleAgentExec_BrokerAgentNotFound pins ptone/scion#3443: when the
+// broker answers exec with 404 agent_not_found (the agent's container or pod
+// is gone), the hub reports 409 agent_not_running instead of a 502 broker
+// failure. Other broker errors keep the 502.
+func TestHandleAgentExec_BrokerAgentNotFound(t *testing.T) {
+	cases := []struct {
+		name       string
+		status     int
+		body       string
+		wantStatus int
+		wantCode   string
+		wantMsg    string
+	}{
+		{
+			name:       "agent_not_found",
+			status:     http.StatusNotFound,
+			body:       `{"error":{"code":"agent_not_found","message":"agent not found"}}`,
+			wantStatus: http.StatusConflict,
+			wantCode:   ErrCodeAgentNotRunning,
+			wantMsg:    "Agent has no running container on its runtime broker",
+		},
+		{
+			name:       "other 404 code",
+			status:     http.StatusNotFound,
+			body:       `{"error":{"code":"not_found","message":"no such route"}}`,
+			wantStatus: http.StatusBadGateway,
+			wantCode:   ErrCodeRuntimeError,
+			wantMsg:    "Failed to execute command on runtime broker",
+		},
+		{
+			name:       "broker internal error",
+			status:     http.StatusInternalServerError,
+			body:       `{"error":{"code":"internal_error","message":"boom"}}`,
+			wantStatus: http.StatusBadGateway,
+			wantCode:   ErrCodeRuntimeError,
+			wantMsg:    "Failed to execute command on runtime broker",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, s := testServer(t)
+			ctx := context.Background()
+
+			fakeBroker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			t.Cleanup(fakeBroker.Close)
+
+			project := &store.Project{ID: tid("project-exec-anf"), Name: "Exec ANF", Slug: "exec-anf"}
+			require.NoError(t, s.CreateProject(ctx, project))
+			broker := &store.RuntimeBroker{
+				ID: tid("broker-exec-anf"), Name: "Exec ANF Broker", Slug: "exec-anf-broker",
+				Endpoint: fakeBroker.URL, Status: store.BrokerStatusOnline,
+			}
+			require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+			agent := &store.Agent{
+				ID: tid("agent-exec-anf"), Slug: tid("agent-exec-anf"), Name: "Exec ANF Agent",
+				ProjectID: project.ID, RuntimeBrokerID: broker.ID, Phase: string(state.PhaseRunning),
+			}
+			require.NoError(t, s.CreateAgent(ctx, agent))
+
+			srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(s, NewHTTPRuntimeBrokerClient(), false, slog.Default()))
+
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/exec", map[string]interface{}{
+				"command": []string{"tmux", "capture-pane", "-p"},
+			})
+			require.Equal(t, tc.wantStatus, rec.Code, "response body: %s", rec.Body.String())
+
+			var errResp ErrorResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp))
+			assert.Equal(t, tc.wantCode, errResp.Error.Code)
+			assert.Contains(t, errResp.Error.Message, tc.wantMsg)
+		})
+	}
+}
+
 // TestSubmitAgentEnv_ReservedTarget_Rejected verifies that POST
 // /api/v1/agents/{id}/env — the CLI's env-gather submission endpoint — is
 // also a reserved-target write site: a caller cannot use it to set a scion
