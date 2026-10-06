@@ -170,13 +170,14 @@ func (s *Server) rollbackMove(ctx context.Context, md agentMoveDispatcher, agent
 			"agent_id", agentID, "source_broker_id", mv.SourceBrokerID, "error", err)
 		return
 	}
-	// The target's start may have recorded its own run; put the source's
-	// back (unless a newer run was recorded since), so later deletes and
-	// launch reports address the run that exists on the source. Only once
-	// the agent is assigned to the source again, so the row never pairs the
-	// target with the source's run.
+	// The target's start may have recorded its own run; revert to the
+	// source's (unless a newer run was recorded since), so later deletes and
+	// launch reports address the run that exists on the source. A revert,
+	// not a settle: the runs listed before the move may still have entries.
+	// Only once the agent is assigned to the source again, so the row never
+	// pairs the target with the source's run.
 	if cur.RunID != src.RunID {
-		if _, err := s.store.CompareAndSwapAgentRunID(ctx, agentID, cur.RunID, src.RunID); err != nil {
+		if _, err := s.store.RevertAgentRunID(ctx, agentID, cur.RunID, src.RunID); err != nil {
 			s.agentLifecycleLog.Warn("move rollback: failed to restore the agent's source run ID",
 				"agent_id", agentID, "error", err)
 		}

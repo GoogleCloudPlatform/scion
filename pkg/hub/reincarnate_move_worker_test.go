@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -836,4 +837,65 @@ func TestReincarnateMove_RollbackAssignmentRestoreFailureKeepsTargetRun(t *testi
 	assert.Equal(t, f.dst.ID, a.RuntimeBrokerID, "the assignment could not be restored")
 	assert.NotEqual(t, "run-src", a.RunID, "the target's run stays with the target")
 	assert.NotEmpty(t, a.RunID)
+}
+
+// moveBySessionUser runs a real (non-self) move of the fixture agent by a
+// session user holding agent.lifecycle and agent delegation in the project,
+// and returns that user and the settled record. The agent starts with an
+// edge delegated by someone else (returned as old).
+func moveBySessionUser(t *testing.T, f *moveFixture) (*store.User, *store.DelegationEdge, *store.AgentReincarnation) {
+	t.Helper()
+	old := seedAgentEdge(t, f.s, tid("delegator"), f.agent)
+	user := newReincarnateAuthzUser(t, f.s, tidSlugSafe(t.Name()))
+	grantAgentLifecycleAtProject(t, f.s, user.ID, f.project.ID)
+	grantAgentDelegationAtProject(t, f.s, user.ID, f.project.ID)
+	id := NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "web")
+
+	rec := httptest.NewRecorder()
+	f.srv.handleReincarnateAgent(rec, reincarnateRequest(t, f.agent.ID, id, ReincarnateAgentRequest{Handoff: "h", TargetBroker: f.dst.ID}), f.agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	r := waitForReincarnationSettled(t, f.s, f.agent.ID)
+	return user, old, r
+}
+
+// assertEdgeReRecordedTo asserts the agent's single active delegation edge
+// was re-recorded (replacing old) with user as delegator.
+func assertEdgeReRecordedTo(t *testing.T, f *moveFixture, user *store.User, old *store.DelegationEdge) {
+	t.Helper()
+	edges, err := f.s.GetDelegationEdgesForDelegate(context.Background(), store.DelegationPrincipalAgent, f.agent.ID)
+	require.NoError(t, err)
+	require.Len(t, edges, 1)
+	assert.NotEqual(t, old.ID, edges[0].ID, "the edge is re-recorded")
+	assert.Equal(t, store.DelegationPrincipalUser, edges[0].DelegatorType)
+	assert.Equal(t, user.ID, edges[0].DelegatorID)
+	assertReincarnateReplacedEdge(t, f.s, f.agent.ID, old.ID)
+}
+
+// A move by a session user re-records the agent's authority to that user,
+// in the same claim transaction as a plain reincarnation.
+func TestReincarnateMove_SessionUserReRecordsEdge(t *testing.T) {
+	f := setupMoveFixture(t, true, func(dst *store.RuntimeBroker) { dst.AutoProvide = true })
+	prepareMoveWorkerFixture(t, f)
+
+	user, old, r := moveBySessionUser(t, f)
+	require.Equal(t, store.AgentReincarnationStateCompleted, r.State, r.Error)
+	a, err := f.s.GetAgent(context.Background(), f.agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, f.dst.ID, a.RuntimeBrokerID)
+	assertEdgeReRecordedTo(t, f, user, old)
+}
+
+// A rolled-back move keeps the authority re-recorded at the claim: the
+// edge stays the requesting user's (the re-record is not part of the
+// rollback).
+func TestReincarnateMove_SessionUserRollbackKeepsUserEdge(t *testing.T) {
+	f := setupMoveFixture(t, true, func(dst *store.RuntimeBroker) { dst.AutoProvide = true })
+	prepareMoveWorkerFixture(t, f)
+	f.disp.moveProvisionErr = errors.New("broker returned 409")
+
+	user, old, r := moveBySessionUser(t, f)
+	a, err := f.s.GetAgent(context.Background(), f.agent.ID)
+	require.NoError(t, err)
+	assertRolledBackToSource(t, f, r, a)
+	assertEdgeReRecordedTo(t, f, user, old)
 }
