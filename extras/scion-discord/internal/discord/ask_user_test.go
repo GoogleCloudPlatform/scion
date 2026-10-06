@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/bwmarrin/discordgo"
@@ -548,4 +549,74 @@ func TestAskUser_FallbackPostsPlainText(t *testing.T) {
 			assert.Empty(t, rt.postedButtons(t, channelID), "the question should have no buttons")
 		})
 	}
+}
+
+// cleanupCountingStore wraps a Store and counts expired ask-user cleanups
+// and pending ask-user writes.
+type cleanupCountingStore struct {
+	Store
+	mu       sync.Mutex
+	cleanups int
+	creates  int
+}
+
+func (c *cleanupCountingStore) CreatePendingAskUser(ctx context.Context, req *PendingAskUser) error {
+	c.mu.Lock()
+	c.creates++
+	c.mu.Unlock()
+	return c.Store.CreatePendingAskUser(ctx, req)
+}
+
+func (c *cleanupCountingStore) createCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.creates
+}
+
+func (c *cleanupCountingStore) DeleteExpiredAskUsers(ctx context.Context) (int, error) {
+	c.mu.Lock()
+	c.cleanups++
+	c.mu.Unlock()
+	return c.Store.DeleteExpiredAskUsers(ctx)
+}
+
+func (c *cleanupCountingStore) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.cleanups
+}
+
+// TestAskUser_ExpiredCleanupRunsOncePerInterval checks that posting
+// questions deletes expired ask-user entries on the first send and then at
+// most once per askUserCleanupInterval, while every question still gets
+// its pending entry.
+func TestAskUser_ExpiredCleanupRunsOncePerInterval(t *testing.T) {
+	ctx := context.Background()
+	const channelID = "chan-ask"
+	b, _, _, _ := newAskUserFixture(t, channelID)
+	store := &cleanupCountingStore{Store: b.store}
+	b.store = store
+
+	start := time.Date(2026, 10, 6, 12, 0, 0, 0, time.UTC)
+	now := start
+	b.now = func() time.Time { return now }
+
+	topic := projectkeys.UserTopic("proj-1", "alice")
+	steps := []struct {
+		at           time.Time
+		wantCleanups int
+	}{
+		{start, 1},                  // first send cleans up
+		{start.Add(time.Minute), 1}, // within the interval
+		{start.Add(askUserCleanupInterval - time.Second), 1}, // just before the boundary
+		{start.Add(askUserCleanupInterval), 2},               // at the boundary
+		{start.Add(askUserCleanupInterval + time.Minute), 2}, // within the next interval
+	}
+	for i, step := range steps {
+		now = step.at
+		require.NoError(t, b.Publish(ctx, topic, askUserQuestion(fmt.Sprintf("Question %d?", i), `["yes","no"]`)))
+		assert.Equal(t, step.wantCleanups, store.count(), "cleanups after send %d", i)
+	}
+
+	assert.Equal(t, len(steps), store.createCount(), "every question records a pending entry")
 }

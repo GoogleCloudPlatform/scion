@@ -47,6 +47,11 @@ const (
 	// modal answers.
 	askUserExpiry = 24 * time.Hour
 
+	// askUserCleanupInterval is the minimum time between deletions of
+	// expired ask-user entries. Answer handlers check expiry themselves,
+	// so cleanup only needs to run occasionally.
+	askUserCleanupInterval = time.Hour
+
 	// OriginMarkerKey is the config key injected into outbound messages
 	// to identify messages originating from the scion hub.
 	OriginMarkerKey = "scion_origin"
@@ -219,6 +224,15 @@ type DiscordBroker struct {
 	// channel, sender and reply kind.
 	replyCooldown   map[string]time.Time
 	replyCooldownMu sync.Mutex
+
+	// lastAskUserCleanup is when expired ask-user entries were last
+	// deleted; askUserCleanupMu guards it.
+	lastAskUserCleanup time.Time
+	askUserCleanupMu   sync.Mutex
+
+	// now returns the current time; nil means time.Now. Tests set it to
+	// control the ask-user cleanup cadence.
+	now func() time.Time
 
 	agentCacheTTL  time.Duration
 	projectSlugMap map[string]string // injected by hub: projectID -> slug
@@ -929,15 +943,36 @@ func (b *DiscordBroker) sendInputNeeded(
 	if sent != nil {
 		pending.MessageID = sent.ID
 	}
-	if _, delErr := store.DeleteExpiredAskUsers(ctx); delErr != nil {
-		b.log.Warn("Failed to delete expired ask-user entries", "error", delErr)
+	if b.askUserCleanupDue() {
+		if _, delErr := store.DeleteExpiredAskUsers(ctx); delErr != nil {
+			b.log.Warn("Failed to delete expired ask-user entries", "error", delErr)
+		}
 	}
+	// The message is already posted, so a failed write is logged rather
+	// than returned; returning it would not make the buttons answerable.
 	if createErr := store.CreatePendingAskUser(ctx, pending); createErr != nil {
 		b.log.Error("Failed to record pending ask-user; its buttons will not work",
 			"request_id", requestID, "channel_id", channelID,
 			"message_id", pending.MessageID, "error", createErr)
 	}
 	return nil
+}
+
+// askUserCleanupDue reports whether expired ask-user entries should be
+// deleted now, and if so records the time. Cleanup runs on the first call
+// and then at most once per askUserCleanupInterval.
+func (b *DiscordBroker) askUserCleanupDue() bool {
+	now := time.Now()
+	if b.now != nil {
+		now = b.now()
+	}
+	b.askUserCleanupMu.Lock()
+	defer b.askUserCleanupMu.Unlock()
+	if !b.lastAskUserCleanup.IsZero() && now.Sub(b.lastAskUserCleanup) < askUserCleanupInterval {
+		return false
+	}
+	b.lastAskUserCleanup = now
+	return true
 }
 
 // Close shuts down the Discord broker, closing the gateway session,
