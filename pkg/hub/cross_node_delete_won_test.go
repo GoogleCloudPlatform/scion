@@ -256,3 +256,19 @@ func TestWaitForLifecycleOutcome_DoneDeleteWonEndsWait(t *testing.T) {
 	assert.Less(t, time.Since(began), 1500*time.Millisecond)
 	assert.Equal(t, []string{landedRunRemovedWarning}, warns.Warnings(), "the owner's warnings are added to the requester's collector")
 }
+
+// The rolling window that expires on a done row reporting DeleteWon (its
+// done event and the row poll both missed) ends with nil too, not 502.
+func TestWaitForLifecycleOutcome_RollingWindowFindsDeleteWon(t *testing.T) {
+	setLifecycleTimings(t, 300*time.Millisecond, 10*time.Second, 0)
+	f := newCrossNodeFixture(t, nil, false)
+	go func() {
+		row, ok := f.claimPending(t)
+		if !ok {
+			return
+		}
+		res := marshalLifecycleResult(LifecycleDispatchResult{DeleteWon: true})
+		assert.NoError(t, f.store.CompleteBrokerDispatch(context.Background(), row.ID, res)) // no done event
+	}()
+	require.NoError(t, f.requester.DispatchAgentStart(crossNodeCtx(t), f.agent, "", false))
+}

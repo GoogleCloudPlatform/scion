@@ -33,8 +33,9 @@ import (
 // (a concurrent create may have made it). It must not adopt an agent that is
 // being deleted: not after the hub answered the create delete_in_progress,
 // and not a listed row whose deletion view reads deleting or that is
-// soft-deleted. A failed delete leaves the agent live, so it is still
-// adopted (ptone/scion#3455).
+// soft-deleted, or that failed while finalizing (teardown has run). Any
+// other failed delete leaves the agent live, so it is still adopted
+// (ptone/scion#3455).
 
 const resolveTestSlug = "auto-agent"
 
@@ -62,6 +63,13 @@ func deletingView() *hubclient.DeletionInfo {
 	return &hubclient.DeletionInfo{State: hubclient.DeletionStateDeleting, Claim: 1, StartedAt: time.Now()}
 }
 
+// finalizingExpiredView is the hub's view of a delete that failed while
+// finalizing (its lease lapsed): state failed, stage finalizing. Teardown
+// has run and the hub still holds the agent.
+func finalizingExpiredView() *hubclient.DeletionInfo {
+	return &hubclient.DeletionInfo{State: hubclient.DeletionStateFailed, Code: "abandoned", Stage: hubclient.DeletionStageFinalizing, Claim: 1, StartedAt: time.Now()}
+}
+
 func failedView() *hubclient.DeletionInfo {
 	return &hubclient.DeletionInfo{State: hubclient.DeletionStateFailed, Code: "runtime_error", Claim: 1, StartedAt: time.Now()}
 }
@@ -87,7 +95,7 @@ func failCreate(err error) (func(context.Context, *hubclient.CreateAgentRequest)
 }
 
 func deleteInProgressErr() error {
-	return &apiclient.APIError{StatusCode: http.StatusConflict, Code: "delete_in_progress", Message: "agent was deleted while it was being created"}
+	return &apiclient.APIError{StatusCode: http.StatusConflict, Code: errCodeDeleteInProgress, Message: "agent was deleted while it was being created"}
 }
 
 // A create answered delete_in_progress is not followed by adopt-by-name,
@@ -141,6 +149,7 @@ func TestResolveContext_Fallback_SkipsDeletingRows(t *testing.T) {
 	}{
 		{"deleting", hubclient.Agent{ID: "a-3", Slug: resolveTestSlug, Name: resolveTestSlug, Deletion: deletingView()}, false},
 		{"soft-deleted", hubclient.Agent{ID: "a-3", Slug: resolveTestSlug, Name: resolveTestSlug, DeletedAt: time.Now()}, false},
+		{"finalizing expired", hubclient.Agent{ID: "a-3", Slug: resolveTestSlug, Name: resolveTestSlug, Deletion: finalizingExpiredView()}, false},
 		{"delete failed", hubclient.Agent{ID: "a-3", Slug: resolveTestSlug, Name: resolveTestSlug, Deletion: failedView()}, true},
 	}
 	for _, tc := range cases {
@@ -181,6 +190,7 @@ func TestResolveContext_FirstLookup_SkipsDeletingRows(t *testing.T) {
 	}{
 		{"deleting", hubclient.Agent{ID: "a-4", Slug: resolveTestSlug, Name: resolveTestSlug, Deletion: deletingView()}, true},
 		{"soft-deleted", hubclient.Agent{ID: "a-4", Slug: resolveTestSlug, Name: resolveTestSlug, DeletedAt: time.Now()}, true},
+		{"finalizing expired", hubclient.Agent{ID: "a-4", Slug: resolveTestSlug, Name: resolveTestSlug, Deletion: finalizingExpiredView()}, true},
 		{"delete failed", hubclient.Agent{ID: "a-4", Slug: resolveTestSlug, Name: resolveTestSlug, Deletion: failedView()}, false},
 		{"no delete", hubclient.Agent{ID: "a-4", Slug: resolveTestSlug, Name: resolveTestSlug}, false},
 	}

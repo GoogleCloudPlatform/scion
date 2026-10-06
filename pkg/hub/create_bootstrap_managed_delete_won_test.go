@@ -117,6 +117,10 @@ type recordingManagedBackend struct {
 	cancelled []string
 	cancelErr error
 	getErr    error
+	// noState makes GetInteraction answer no state and no error.
+	noState bool
+	// cancelCtxErr records the ctx error each cancel saw.
+	cancelCtxErr []error
 }
 
 func (b *recordingManagedBackend) CreateInteraction(context.Context, managedagent.InteractionRequest) (*managedagent.InteractionHandle, error) {
@@ -133,13 +137,17 @@ func (b *recordingManagedBackend) GetInteraction(_ context.Context, id string) (
 	if b.getErr != nil {
 		return nil, b.getErr
 	}
+	if b.noState {
+		return nil, nil
+	}
 	return &managedagent.InteractionState{InteractionID: id, Status: managedagent.StatusInProgress}, nil
 }
 
-func (b *recordingManagedBackend) CancelInteraction(_ context.Context, id string) error {
+func (b *recordingManagedBackend) CancelInteraction(ctx context.Context, id string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.cancelled = append(b.cancelled, id)
+	b.cancelCtxErr = append(b.cancelCtxErr, ctx.Err())
 	return b.cancelErr
 }
 
@@ -353,4 +361,36 @@ func TestManagedCreate_DeleteWon_AfterWrite_EngineStopsOnce(t *testing.T) {
 	assert.Empty(t, requireDeletedDuringCreate(t, rec, agentID), "the delete owns the stop")
 	require.Eventually(t, func() bool { return agentGone(t, s, agentID) }, 10*time.Second, 10*time.Millisecond, "the delete finished")
 	assert.Equal(t, []string{"interaction-1"}, backend.cancels(), "the engine stops the interaction, once")
+}
+
+// A read that returns no state (and no error) leaves the state unknown: it
+// is reported as a failure, not as stopped.
+func TestCompensateManagedCreate_NoState_Fails(t *testing.T) {
+	srv, s := testServer(t)
+	backend := &recordingManagedBackend{s: s, noState: true}
+	useManagedBackend(t, backend)
+	withID := &store.Agent{ID: "a1", Annotations: map[string]string{annotationInteractionID: "i-1"}}
+
+	warnings := srv.compensateManagedCreate(context.Background(), withID, false)
+	require.Len(t, warnings, 1)
+	assert.True(t, strings.HasPrefix(warnings[0], managedCreateCompensateFailedWarning), "got %q", warnings[0])
+	assert.Contains(t, warnings[0], "no state")
+	assert.Empty(t, backend.cancels())
+}
+
+// The stop runs detached from the request: a request context that is
+// already cancelled (the client went away) still stops the interaction.
+func TestCompensateManagedCreate_DetachedFromRequest(t *testing.T) {
+	srv, s := testServer(t)
+	backend := &recordingManagedBackend{s: s}
+	useManagedBackend(t, backend)
+	withID := &store.Agent{ID: "a1", Annotations: map[string]string{annotationInteractionID: "i-1"}}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	assert.Equal(t, []string{managedCreateCompensatedWarning}, srv.compensateManagedCreate(ctx, withID, false))
+	require.Equal(t, []string{"i-1"}, backend.cancels())
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	assert.NoError(t, backend.cancelCtxErr[0], "the cancel ran on a live context")
 }

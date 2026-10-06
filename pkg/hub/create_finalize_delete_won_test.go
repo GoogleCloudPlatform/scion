@@ -17,13 +17,18 @@
 package hub
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/storage"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -137,4 +142,41 @@ func TestWorkspaceFinalize_Live_ReturnsDispatchWarnings(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.True(t, resp.Applied)
 	assert.Contains(t, resp.Warnings, "could not check whether the agent was deleted while it was starting: database is unavailable")
+}
+
+// The empty-per-agent finalize 200 carries the dispatch warnings after the
+// files-ignored warning.
+func TestWorkspaceFinalize_EmptyPerAgent_ReturnsBothWarnings(t *testing.T) {
+	srv, s, stor, _ := testBootstrapServer(t)
+	f := newAsyncLaunchFixtureOn(t, s, &store.BrokerCapabilities{EmptyPerAgentWorkspace: true})
+	ctx := context.Background()
+	project, err := s.GetProject(ctx, tid("al-project"))
+	require.NoError(t, err)
+	project.Labels = map[string]string{store.LabelWorkspaceMode: string(store.SharingModeEmptyPerAgent)}
+	require.NoError(t, s.UpdateProject(ctx, project))
+	require.True(t, project.IsEmptyPerAgent())
+
+	c := &landingClient{mockRuntimeBrokerClient: &mockRuntimeBrokerClient{}, reportRunID: true}
+	fs := &failingGetStore{Store: s}
+	d := NewHTTPAgentDispatcherWithClient(fs, c, false, slog.Default())
+	d.SetAsyncLaunchSettingsProvider(func() AsyncLaunchSettings { return AsyncLaunchSettings{} })
+	srv.SetDispatcher(d)
+	agent := f.agent(t, "fin-epa", string(state.PhaseProvisioning), false)
+	c.onLand = func() { fs.fail = true }
+
+	file := transfer.FileInfo{Path: "main.go", Size: 3, Hash: "sha256:abc"}
+	_, err = stor.Upload(ctx, storage.WorkspaceStoragePath(srv.HubID(), agent.ProjectID, agent.ID)+"/files/"+file.Path,
+		strings.NewReader("abc"), storage.UploadOptions{})
+	require.NoError(t, err)
+
+	rec := doBootstrapRequest(t, srv, http.MethodPost,
+		fmt.Sprintf("/api/v1/agents/%s/workspace/sync-to/finalize", agent.ID),
+		SyncToFinalizeRequest{Manifest: &transfer.Manifest{Version: "1.0", Files: []transfer.FileInfo{file}}})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp SyncToFinalizeResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, []string{
+		api.WarningEmptyPerAgentWorkspaceFilesIgnored,
+		"could not check whether the agent was deleted while it was starting: database is unavailable",
+	}, resp.Warnings)
 }

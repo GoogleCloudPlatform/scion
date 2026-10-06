@@ -32,6 +32,13 @@ const (
 	DeletionStateFailed   = "failed"
 )
 
+// DeletionStageFinalizing is the DeletionInfo.Stage value for a row whose
+// teardown has run and that is finalizing. It mirrors
+// store.DeletionStageFinalizing. Such a row stays held (it blocks start
+// until a retry or force) even after its lease expires, when its State
+// reads failed.
+const DeletionStageFinalizing = "finalizing"
+
 // DeletionInfo is the hub's view of an active or failed agent delete
 // (design ptone/scion#2483 §2.2). It mirrors store.DeletionInfo field for
 // field; the JSON is the contract.

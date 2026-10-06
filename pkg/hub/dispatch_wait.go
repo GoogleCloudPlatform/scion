@@ -153,6 +153,16 @@ func waitForLifecycleOutcome(
 		_, err := readRow()
 		return err
 	}
+	// rowEnd is rowFailure for the waits that otherwise give up (a closed
+	// event channel, the rolling window): done with the row's failure, or
+	// done with nil when the row is done and reports DeleteWon (see
+	// rowOutcome); else not done.
+	rowEnd := func() (done bool, err error) {
+		if _, err := readRow(); err != nil {
+			return true, err
+		}
+		return deleteWon, nil
+	}
 
 	timer := time.NewTimer(lifecycleRollingTimeout)
 	defer timer.Stop()
@@ -187,7 +197,7 @@ func waitForLifecycleOutcome(
 		select {
 		case ev, ok := <-events:
 			if !ok {
-				if err := rowFailure(); err != nil {
+				if done, err := rowEnd(); done {
 					return err
 				}
 				return ErrDispatchFailed
@@ -242,7 +252,7 @@ func waitForLifecycleOutcome(
 			}
 
 		case <-timer.C:
-			if err := rowFailure(); err != nil {
+			if done, err := rowEnd(); done {
 				return err
 			}
 			if grace != nil {

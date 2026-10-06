@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -180,17 +181,14 @@ func (s *Server) managedAgentMessage(ctx context.Context, agent *store.Agent, me
 
 // managedAgentStop stops a managed agent by cancelling the active interaction.
 func (s *Server) managedAgentStop(ctx context.Context, agent *store.Agent) error {
-	backend, err := getManagedBackend()
-	if err != nil {
+	if _, err := getManagedBackend(); err != nil {
 		return fmt.Errorf("managed agent backend: %w", err)
 	}
 
+	// Best-effort: a failed read or cancel is logged, not returned.
 	if interactionID := agent.Annotations[annotationInteractionID]; interactionID != "" {
-		interactionState, getErr := backend.GetInteraction(ctx, interactionID)
-		if getErr == nil && interactionState.Status == managedagent.StatusInProgress {
-			if cancelErr := backend.CancelInteraction(ctx, interactionID); cancelErr != nil {
-				slog.Warn("failed to cancel interaction on stop", "agent_id", agent.ID, "err", cancelErr)
-			}
+		if err := stopManagedInteraction(ctx, interactionID); err != nil {
+			slog.Warn("failed to stop interaction on stop", "agent_id", agent.ID, "err", err)
 		}
 	}
 
@@ -256,8 +254,9 @@ func (s *Server) compensateManagedCreate(ctx context.Context, agent *store.Agent
 // stopManagedInteraction cancels interactionID if it is still in progress,
 // and returns any backend error, including a failed read of the
 // interaction (its state is then unknown). An interaction that has already
-// ended needs no cancel. managedAgentStop is the best-effort variant other
-// callers use; it logs and swallows these errors.
+// ended needs no cancel. A read that returns no state is an error too: the
+// state is unknown. managedAgentStop calls it best-effort, logging and
+// swallowing these errors.
 func stopManagedInteraction(ctx context.Context, interactionID string) error {
 	backend, err := getManagedBackend()
 	if err != nil {
@@ -267,7 +266,10 @@ func stopManagedInteraction(ctx context.Context, interactionID string) error {
 	if err != nil {
 		return fmt.Errorf("reading interaction: %w", err)
 	}
-	if st == nil || st.Status != managedagent.StatusInProgress {
+	if st == nil {
+		return errors.New("reading interaction: no state returned")
+	}
+	if st.Status != managedagent.StatusInProgress {
 		return nil
 	}
 	if err := backend.CancelInteraction(ctx, interactionID); err != nil {

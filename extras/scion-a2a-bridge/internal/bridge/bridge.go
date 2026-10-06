@@ -1666,14 +1666,20 @@ func isDeleteInProgress(err error) bool {
 }
 
 // agentBeingDeleted reports whether a listed agent is going away: it is
-// soft-deleted, or a delete holds it (its deletion view reads deleting,
-// which includes the hub's finalizing step). A failed delete leaves the
-// agent live, so it is not being deleted.
+// soft-deleted, or a delete holds it. A delete holds it while its view
+// reads deleting (the hub's finalizing step included), and also when it
+// failed while finalizing (stage finalizing, typically a lapsed lease):
+// teardown has run and the hub refuses to start it until a retry or force.
+// Any other failed delete leaves the agent live, so it is not being
+// deleted.
 func agentBeingDeleted(a *hubclient.Agent) bool {
 	if !a.DeletedAt.IsZero() {
 		return true
 	}
-	return a.Deletion != nil && a.Deletion.State == hubclient.DeletionStateDeleting
+	if a.Deletion == nil {
+		return false
+	}
+	return a.Deletion.State == hubclient.DeletionStateDeleting || a.Deletion.Stage == hubclient.DeletionStageFinalizing
 }
 
 // findAdoptableAgent returns the first listed agent whose name or slug is
