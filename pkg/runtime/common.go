@@ -27,6 +27,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -1126,29 +1127,85 @@ func prepareContainerSecretEnv(config *RunConfig) error {
 	return nil
 }
 
+// envSizeLimit is the largest environment entry a runtime accepts.
+// maxBytes 0 means no check. When includeKey is set the limit covers the
+// whole "KEY=VALUE" string (plus its NUL terminator), as for an argv
+// string; otherwise it covers the value alone.
+type envSizeLimit struct {
+	maxBytes   int
+	includeKey bool
+}
+
+// size returns the bytes an entry counts against the limit.
+func (l envSizeLimit) size(key, value string) int {
+	if l.includeKey {
+		return len(key) + 1 + len(value) + 1
+	}
+	return len(value)
+}
+
+// exceeds reports whether key=value does not fit.
+func (l envSizeLimit) exceeds(key, value string) bool {
+	return l.maxBytes > 0 && l.size(key, value) > l.maxBytes
+}
+
+// unit names what the limit measures, for error messages.
+func (l envSizeLimit) unit() string {
+	if l.includeKey {
+		return "environment entry (KEY=VALUE)"
+	}
+	return "environment variable value"
+}
+
 // applyResolvedSecretsToEnv folds config.ResolvedSecrets into config.Env for
 // runtimes that hand the container a flat environment list (Cloud Run
 // instances and cloudrun-sandbox) rather than building it through
 // buildCommonRunArgs.
 //
-// Environment-type secrets become KEY=VALUE entries. As in the Docker and k8s
-// runtimes, a key already present in config.Env wins and the secret is
-// skipped; among secrets sharing a target the later one wins. File and
-// variable secrets go into the SCION_STAGED_SECRETS blob via
-// prepareContainerSecretEnv, which sciontool init writes out in the container.
+// Environment-type secrets become KEY=VALUE entries. As in Docker, a key
+// already present in config.Env wins and the secret is skipped; among
+// secrets sharing a target the later one wins (Docker keeps the last -e
+// flag). Keys this function adds itself (SCION_STAGED_SECRETS,
+// SCION_OTEL_GCP_CREDENTIALS) and any reservedKeys the runtime sets after
+// config.Env are treated the same way, so no env name is emitted twice.
+// File and variable secrets go into the SCION_STAGED_SECRETS blob via
+// prepareContainerSecretEnv, which sciontool init writes out in the
+// container.
 //
-// maxValueBytes is the largest single variable value the runtime accepts
-// (0 means no check). A secret that does not fit fails the call with an
-// error naming it, so no secret is ever dropped silently. Values are never
-// included in the error.
-func applyResolvedSecretsToEnv(config *RunConfig, maxValueBytes int) error {
+// A secret that does not fit limit fails the call with an error naming it,
+// so no secret is ever dropped silently. Values are never included in the
+// error.
+//
+// It returns the env-type secret keys it added, in order. config.Env is
+// clipped before appending, so a caller's backing array is never written.
+func applyResolvedSecretsToEnv(config *RunConfig, limit envSizeLimit, reservedKeys ...string) ([]string, error) {
 	if len(config.ResolvedSecrets) == 0 {
-		return nil
+		return nil, nil
 	}
 
-	envKeys := make(map[string]struct{}, len(config.Env))
+	staged := *config
+	staged.Env = nil
+	if err := prepareContainerSecretEnv(&staged); err != nil {
+		return nil, err
+	}
+	for _, e := range staged.Env {
+		key, val, _ := strings.Cut(e, "=")
+		if key == stagedsecrets.EnvVar && limit.exceeds(key, val) {
+			return nil, fmt.Errorf("file/variable secrets do not fit: %s is %d bytes, over the %d-byte limit for one %s on this runtime (largest secret: %q)",
+				stagedsecrets.EnvVar, limit.size(key, val), limit.maxBytes, limit.unit(), largestStagedSecretName(config.ResolvedSecrets))
+		}
+	}
+
+	envKeys := make(map[string]struct{}, len(config.Env)+len(reservedKeys)+2)
 	for _, e := range config.Env {
 		key, _, _ := strings.Cut(e, "=")
+		envKeys[key] = struct{}{}
+	}
+	// The staged keys are reserved even when this call does not set them:
+	// sciontool init reads them, so a secret must not supply them.
+	envKeys[stagedsecrets.EnvVar] = struct{}{}
+	envKeys[telemetryGCPCredentialsEnvVar] = struct{}{}
+	for _, key := range reservedKeys {
 		envKeys[key] = struct{}{}
 	}
 
@@ -1169,30 +1226,18 @@ func applyResolvedSecretsToEnv(config *RunConfig, maxValueBytes int) error {
 	}
 	for _, target := range order {
 		s := values[target]
-		if maxValueBytes > 0 && len(s.Value) > maxValueBytes {
-			return fmt.Errorf("secret %q (env %s) is %d bytes, over the %d-byte limit for one environment variable on this runtime",
-				s.Name, s.Target, len(s.Value), maxValueBytes)
+		if limit.exceeds(target, s.Value) {
+			return nil, fmt.Errorf("secret %q (env %s) is %d bytes, over the %d-byte limit for one %s on this runtime",
+				s.Name, s.Target, limit.size(target, s.Value), limit.maxBytes, limit.unit())
 		}
 	}
 
-	staged := *config
-	staged.Env = nil
-	if err := prepareContainerSecretEnv(&staged); err != nil {
-		return err
-	}
-	for _, e := range staged.Env {
-		key, val, _ := strings.Cut(e, "=")
-		if key == stagedsecrets.EnvVar && maxValueBytes > 0 && len(val) > maxValueBytes {
-			return fmt.Errorf("file/variable secrets do not fit: %s is %d bytes, over the %d-byte limit for one environment variable on this runtime (largest secret: %q)",
-				stagedsecrets.EnvVar, len(val), maxValueBytes, largestStagedSecretName(config.ResolvedSecrets))
-		}
-	}
-
+	config.Env = slices.Clip(config.Env)
 	for _, target := range order {
 		config.Env = append(config.Env, target+"="+values[target].Value)
 	}
 	config.Env = append(config.Env, staged.Env...)
-	return nil
+	return order, nil
 }
 
 // largestStagedSecretName returns the name of the largest file or variable

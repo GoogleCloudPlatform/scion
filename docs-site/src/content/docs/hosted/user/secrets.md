@@ -144,6 +144,8 @@ Secrets can be projected into the agent container in three ways:
 2.  **File**: Written to a specific path on the agent's filesystem.
 3.  **Variable**: Added to a JSON file at `~/.scion/secrets.json` for programmatic access by the harness.
 
+On the Cloud Run Instances runtime, file and variable secrets are sent together in one 32 KiB environment value, so after base64 encoding they get about 18 KiB in total; a larger set fails agent start with an error naming the largest secret.
+
 ### Updating Secret Metadata
 
 You can update a secret's configuration metadata (like its `type`, `target` path, or injection mode) without needing to re-enter its sensitive value or create a new version in the backend. This is supported via the Web UI "Edit Settings" dialog and the CLI:
