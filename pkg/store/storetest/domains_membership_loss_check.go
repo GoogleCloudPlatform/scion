@@ -77,6 +77,22 @@ func MembershipLossCheckConformance(t *testing.T, factory Factory) {
 			assert.Equal(t, project.String(), claimed[0].ProjectID)
 		})
 
+		t.Run("a failed enqueue leaves the check unchanged", func(t *testing.T) {
+			s := factory(t)
+			id := uuid.New()
+			first := newMembershipLossCheck(uuid.NewString(), "")
+			first.ID = id.String()
+			require.NoError(t, s.EnqueueMembershipLossCheck(ctx, first))
+
+			// Same ID in a non-canonical form, so the insert itself fails.
+			dup := newMembershipLossCheck(strings.ToUpper(uuid.NewString()), strings.ToUpper(uuid.NewString()))
+			dup.ID = strings.ToUpper(id.String())
+			before := *dup
+			require.Error(t, s.EnqueueMembershipLossCheck(ctx, dup))
+			assert.Equal(t, before, *dup, "a call that returns an error leaves the check unchanged")
+			assert.True(t, dup.CreatedAt.IsZero(), "CreatedAt stays zero after a failed enqueue")
+		})
+
 		t.Run("claim leases oldest rows and skips leased ones", func(t *testing.T) {
 			s := factory(t)
 			base := time.Now().Add(-time.Hour)

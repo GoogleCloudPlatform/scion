@@ -81,7 +81,8 @@ func entMembershipLossCheckToStore(c *ent.MembershipLossCheck) *store.Membership
 	return out
 }
 
-// EnqueueMembershipLossCheck inserts check.
+// EnqueueMembershipLossCheck inserts check. The filled-in fields are written
+// back to check only after the insert succeeds.
 func (s *MembershipLossCheckStore) EnqueueMembershipLossCheck(ctx context.Context, check *store.MembershipLossCheck) error {
 	if check == nil || check.UserID == "" {
 		return fmt.Errorf("%w: membership loss check requires a user", store.ErrInvalidInput)
@@ -108,8 +109,9 @@ func (s *MembershipLossCheckStore) EnqueueMembershipLossCheck(ctx context.Contex
 			return err
 		}
 	}
-	if check.CreatedAt.IsZero() {
-		check.CreatedAt = time.Now()
+	createdAt := check.CreatedAt
+	if createdAt.IsZero() {
+		createdAt = time.Now()
 	}
 	_, err = s.client.MembershipLossCheck.Create().
 		SetID(id).
@@ -119,13 +121,14 @@ func (s *MembershipLossCheckStore) EnqueueMembershipLossCheck(ctx context.Contex
 		SetActorKind(check.ActorKind).
 		SetActorID(check.ActorID).
 		SetCorrelationID(check.CorrelationID).
-		SetCreatedAt(check.CreatedAt).
+		SetCreatedAt(createdAt).
 		Save(ctx)
 	if err != nil {
 		return mapError(err)
 	}
 	check.ID = id.String()
 	check.UserID = userID.String()
+	check.CreatedAt = createdAt
 	if projectID != nil {
 		check.ProjectID = *projectID
 	}
