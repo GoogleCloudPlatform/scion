@@ -582,6 +582,8 @@ func TestSchedUnrecordedCeilingRemedyFires(t *testing.T) {
 		require.NoError(t, json.NewDecoder(rec.Body).Decode(&created))
 		stored, err := f.store.GetScheduledEvent(ctx, created.ID)
 		require.NoError(t, err)
+		assert.Equal(t, store.EffectCeiling{Kind: store.EffectCeilingPrincipal}, stored.AuthorityCeiling)
+		assert.Equal(t, ownerUser.ID, stored.InitiatorPrincipalID)
 		require.NoError(t, f.fire(t, *stored))
 		f.child(t, "sched-remedy-e")
 	})

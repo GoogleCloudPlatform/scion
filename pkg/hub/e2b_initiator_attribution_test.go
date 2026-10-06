@@ -1323,6 +1323,48 @@ func TestDispatchAgentFire_SuccessAuditCarriesExecutorAndPairedCredential(t *tes
 
 		_, err := f.store.GetAgentBySlug(ctx, f.proj.ID, "r4-devlocal-wrongid-agent")
 		assert.ErrorIs(t, err, store.ErrNotFound)
+		// The fire fails on the resolver's dev_local principal check, not
+		// for an unrelated reason.
+		got, err := f.store.GetScheduledEvent(ctx, evt.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.ScheduledEventFailed, got.Status)
+		assert.Contains(t, got.Error, errScheduledAuthorityDenied.Error())
+		assert.Contains(t, got.Error, errSourceNotAllowed.Error())
+		assert.Contains(t, got.Error, reasonPrincipalInactive)
+	})
+
+	// An agent revision fires as that agent: the recorded agent credential
+	// is paired on the success audit as agent_jwt with the recorded JTI.
+	t.Run("agent revision: the agent credential is paired as agent_jwt", func(t *testing.T) {
+		markEdgeBackfillComplete(t, f.store)
+		sf := &schedFire{uatCreateFixture: &uatCreateFixture{
+			bypassAgentsFixture: f,
+			creator:             f.owner,
+			path:                "/api/v1/projects/" + f.proj.ID + "/agents",
+		}}
+		parent := sf.sessionAgent(t, "r4-agent-parent")
+		evt := withAgentRevision(t, f.srv, store.ScheduledEvent{
+			ID:        tid("e2b-r4-agent-evt"),
+			ProjectID: f.proj.ID,
+			EventType: "dispatch_agent",
+			FireAt:    time.Now(),
+			Payload:   `{"agentName":"r4-agent-child"}`,
+			CreatedBy: f.owner.ID,
+		}, parent.ID)
+		require.NotEmpty(t, evt.InitiatorCredentialID)
+		require.NoError(t, f.store.CreateScheduledEvent(ctx, &evt))
+		f.srv.scheduler.fireEvent(ctx, evt, false)
+
+		agent, err := f.store.GetAgentBySlug(ctx, f.proj.ID, "r4-agent-child")
+		require.NoError(t, err)
+
+		rec := waitForAudit(t, agent.ID)
+		assert.Equal(t, store.DelegationPrincipalAgent, rec.ActorPrincipalKind)
+		assert.Equal(t, parent.ID, rec.ActorPrincipalID)
+		assert.Equal(t, string(CredentialKindAgentJWT), rec.ActorCredentialType)
+		assert.Equal(t, evt.InitiatorCredentialID, rec.ActorCredentialID)
+		assert.Equal(t, "scheduler", rec.ExecutorKind)
+		assert.Equal(t, "scheduled_event:"+evt.ID, rec.ExecutorID)
 	})
 }
 
