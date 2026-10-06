@@ -507,6 +507,34 @@ func TestAgentListReadRule_ScopedTokenRacedRowStaysListed(t *testing.T) {
 	assert.Equal(t, len(f.readable), resp.TotalCount)
 }
 
+// TestAgentListReadRule_ScopedTokenRacedRowLeavesReads covers the race
+// path of the sorted project list for a token holding agent:list but not
+// agent:read, when the race moves a row out of the holder's reads: the
+// row gets a new owner between the member read and the full-row read.
+// The list read on the full row fails, so the row is dropped, and the
+// complete response's totalCount follows the dropped row.
+func TestAgentListReadRule_ScopedTokenRacedRowLeavesReads(t *testing.T) {
+	f := readRuleSetup(t, 6, func(i int) bool { return i%2 == 0 })
+	key := mintScopedUAT(t, f.srv, f.caller.ID, f.project.ID, []string{"agent:list"})
+	require.NotEmpty(t, f.readable)
+	moved := f.readable[0]
+	f.srv.store = &ownerChangingAfterMembersStore{Store: f.store, agentID: moved, newOwnerID: f.owner.ID}
+
+	rec := doRequestWithUAT(t, f.srv, key, http.MethodGet, f.listPath("sort=updated&fit=500"), nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	resp := mustDecodeListAgentsResponse(t, rec.Body)
+	require.Empty(t, resp.NextCursor, "the response is complete")
+
+	ids := make([]string, 0, len(resp.Agents))
+	for _, a := range resp.Agents {
+		ids = append(ids, a.ID)
+	}
+	want := append([]string{}, f.readable[1:]...)
+	assert.NotContains(t, ids, moved, "a row moved out of the holder's reads is dropped")
+	assert.Equal(t, want, sortedCopy(ids), "every other readable row stays listed")
+	assert.Equal(t, len(want), resp.TotalCount, "totalCount follows the dropped row")
+}
+
 // TestAgentListReadRule_ListRowReadReasonMarked pins the audit Reason of
 // an agent-list row read: a read allowed only through the list-row rule
 // carries listRowReadReasonMarker, and a read allowed by the ceiling

@@ -511,11 +511,13 @@ func (s *Server) listProjectAgentsSorted(w http.ResponseWriter, r *http.Request,
 				// every grant path applies it), so read is not re-decided:
 				// only the remaining actions are, plus the list read that
 				// keeps the row. A raced row costs 1+7+1 = 9 decisions.
-				restCaps := s.authzService.ComputeCapabilitiesForActions(ctx, identity, []Resource{fullRes}, remainingActions)[0]
+				// The list read runs first, so a row it drops is not
+				// charged for the remaining actions.
 				relisted, err := s.authzService.AuthorizeListReadBatch(ctx, identity, []Resource{fullRes})
 				if err != nil || !relisted[0] {
 					continue // no longer listed
 				}
+				restCaps := s.authzService.ComputeCapabilitiesForActions(ctx, identity, []Resource{fullRes}, remainingActions)[0]
 				finalCap = mergeCapabilities(allAgentActions, &Capabilities{Actions: []string{}}, restCaps)
 			} else {
 				redecided := s.authzService.ComputeCapabilitiesForActions(ctx, identity, []Resource{fullRes}, allAgentActions)[0]
