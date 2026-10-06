@@ -15,13 +15,11 @@
 package runtimebroker
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -408,13 +406,6 @@ func TestRecordHubProjectIdentity_SymlinkedProjectDirSkips(t *testing.T) {
 	id, err := config.ReadProjectID(filepath.Join(real, config.DotScion))
 	require.NoError(t, err)
 	assert.Equal(t, brokerTestLocalID, id)
-}
-
-// captureLifecycleLog points srv's agent lifecycle log at a buffer.
-func captureLifecycleLog(srv *Server) *bytes.Buffer {
-	var buf bytes.Buffer
-	srv.agentLifecycleLog = slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	return &buf
 }
 
 func TestIdentityErrorAttrs_DescribeErrorWithoutPath(t *testing.T) {
