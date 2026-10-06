@@ -558,6 +558,7 @@ func TestDeleteAgentsViaHub_NoForceOmitsForceQuery(t *testing.T) {
 // --stopped would be a bulk, permanent delete, so it must be rejected and no
 // delete request may reach the hub.
 func TestDeleteCmd_ForceWithStoppedRejected(t *testing.T) {
+	restoreAllSilenceUsage(t)
 	orig := saveDeleteTestState()
 	defer orig.restore()
 

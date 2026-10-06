@@ -965,6 +965,16 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 		// and a reincarnating secondary ignore it. It only affects
 		// agent-routed sends; human-to-human sends ignore it.
 		Interrupt bool `json:"interrupt,omitempty"`
+		// Wake resumes a suspended primary recipient before delivery, so
+		// the message becomes its first input. It requires the lifecycle
+		// permission the agent start route requires. See
+		// chatSendOptions.Wake.
+		Wake bool `json:"wake,omitempty"`
+		// OfferWake asks the hub to answer 409 agent_not_running (details
+		// canWake=true) instead of persisting a failed row when the
+		// primary is suspended and the caller may wake it, so the client
+		// can ask the user first. See chatSendOptions.OfferWake.
+		OfferWake bool `json:"offer_wake,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		BadRequest(w, "invalid request body")
@@ -1011,23 +1021,54 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 	// --- Idempotency check (#1055) ---
 	// If the client supplied an idempotency key, check whether a message with
 	// that key from this sender was already created recently. If so, return
-	// the existing message ID (200 OK) instead of creating a duplicate.
+	// the existing message ID (200 OK) instead of creating a duplicate. A
+	// send with the key that is still running (a wake can take minutes)
+	// answers 409 send_in_progress, so a client retrying after a dropped
+	// connection waits for the outcome instead of sending twice.
+	idempotencyRecorded := false
 	if body.IdempotencyKey != "" {
-		if existingID, ok := s.chatIdempotency.Check(user.ID(), body.IdempotencyKey); ok {
-			// Idempotency hit: return the existing message ID.
-			// We return the minimal response (ID + current content) rather than
-			// re-fetching the stored message, because the client already received
-			// the full 201 response on the original send. This response only
-			// signals "your message was already accepted."
+		existingID, begin := s.chatIdempotency.Begin(user.ID(), body.IdempotencyKey)
+		if begin == IdempotencyInFlight {
+			writeError(w, http.StatusConflict, ErrCodeSendInProgress,
+				"A send with this idempotency key is still in progress", nil)
+			return
+		}
+		if begin == IdempotencyNew {
+			// End the key if this send did not Record its outcome (an
+			// error, or a panic during dispatch): a persisted message makes
+			// it done, otherwise it is released so a retry may send.
+			defer func() {
+				if !idempotencyRecorded {
+					s.chatIdempotency.Finish(user.ID(), body.IdempotencyKey)
+				}
+			}()
+		}
+		if begin == IdempotencyDone {
+			// Idempotency hit: return the existing message ID with the
+			// stored row's dispatch outcome. Not replayed: mentionResults
+			// and attachment refs of the original response (the client
+			// picks those up from history). The client may never have seen
+			// the original 201 (a retry after a dropped connection), so it
+			// must learn whether the message was delivered or failed. The
+			// lookup is best-effort: without the row the response stays
+			// minimal, signalling only "your message was already accepted."
 			senderRef := "user:" + user.ID()
 			if email := user.Email(); email != "" {
 				senderRef = "user:" + email
 			}
-			writeJSON(w, http.StatusOK, chatMessageResponse{
+			resp := chatMessageResponse{
 				ID:      existingID,
 				Content: content,
 				Sender:  senderRef,
-			})
+			}
+			if stored, err := s.store.GetMessage(ctx, existingID); err == nil && stored != nil {
+				resp.DispatchState = stored.DispatchState
+				if stored.DispatchFailureReason != nil {
+					resp.DispatchFailureReason = *stored.DispatchFailureReason
+					resp.DispatchFailureCode = dispatchFailureCodeFromReason(*stored.DispatchFailureReason)
+				}
+			}
+			writeJSON(w, http.StatusOK, resp)
 			return
 		}
 	}
@@ -1158,15 +1199,22 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 	recordIdempotency := func(messageID string) {
 		if body.IdempotencyKey != "" {
 			s.chatIdempotency.Record(user.ID(), body.IdempotencyKey, messageID)
+			idempotencyRecorded = true
 		}
 	}
 
 	// --- Agent routing ---
 	if len(plan.Agents) > 0 {
-		msgID := s.sendAgentRouted(w, r, key, projectID, user, content, senderLabel, plan.Agents, plan.MentionNames, plan.MentionResults, attachmentRefs, now, body.ReplyToID, body.Metadata, body.Interrupt)
+		msgID := s.sendAgentRouted(w, r, key, projectID, user, content, senderLabel, plan.Agents, plan.MentionNames, plan.MentionResults, attachmentRefs, now, body.ReplyToID, body.Metadata,
+			chatSendOptions{Interrupt: body.Interrupt, Wake: body.Wake, OfferWake: body.OfferWake,
+				OnPersisted: func(messageID string) {
+					s.chatIdempotency.MarkPersisted(user.ID(), body.IdempotencyKey, messageID)
+				}})
 		if msgID == "" {
 			return // error response already written by sendAgentRouted
 		}
+		// Dispatch has ended and the row holds its final state: replays
+		// may now answer with it.
 		recordIdempotency(msgID)
 		// DM registration now happens inside sendAgentRouted, before its
 		// watermark update — see the comment there.
@@ -1353,11 +1401,91 @@ func isAgentUnreachable(agent *store.Agent) (bool, string) {
 	return false, ""
 }
 
+// chatSendInterruptedReason is the failure reason recorded on a chat v2 row
+// whose send panicked before its primary dispatch settled.
+const chatSendInterruptedReason = "Send interrupted before delivery was confirmed"
+
+// chatSendOptions carries the per-send flags of a chat v2 agent-routed send.
+type chatSendOptions struct {
+	// Interrupt interrupts each running agent recipient before delivery.
+	Interrupt bool
+	// Wake resumes a suspended primary before delivery through the shared
+	// wake helper (wakeAgentForDM), which waits for the agent to be ready,
+	// so the message is its first input. It applies only to a suspended
+	// primary: other phases keep the ordinary phase gate. It is refused
+	// with 403 when the caller lacks the lifecycle permission the start
+	// route requires, and a failed wake persists nothing.
+	Wake bool
+	// OfferWake makes a suspended primary that the caller may wake answer
+	// 409 agent_not_running with details canWake=true, persisting nothing,
+	// instead of a failed "Agent unreachable (suspended)" row. The client
+	// then asks the user and resends with Wake. Without the permission the
+	// failed row is kept, so the user sees the ordinary non-wake error.
+	OfferWake bool
+	// OnPersisted, when set, is called with the message ID right after the
+	// row is stored and before any dispatch. The caller notes the message
+	// against its idempotency key while keeping the key in flight (the
+	// row's dispatch state is not final yet), so a panic or dropped
+	// request mid-dispatch cannot release the key and let a retry send a
+	// duplicate.
+	OnPersisted func(messageID string)
+}
+
+const (
+	// chatWakeResumeBudget bounds a chat v2 wake (resume dispatch plus the
+	// up-to-30s readiness wait in wakeAgentForDM).
+	chatWakeResumeBudget = 90 * time.Second
+	// chatWakeDeliveryBudget is the per-recipient dispatch bound in
+	// sendAgentRouted: the primary and each @mention secondary get their
+	// own 30s dispatch timeout, one after another.
+	chatWakeDeliveryBudget = 30 * time.Second
+	// chatWakeWriteSlack covers persistence and the response write.
+	chatWakeWriteSlack = 30 * time.Second
+)
+
+// chatWakeWriteBudget is the write deadline a wake request routed to
+// recipients agents (primary plus mentions) gets: it ends only after the
+// resume budget and every recipient's delivery budget have run out.
+func chatWakeWriteBudget(recipients int) time.Duration {
+	if recipients < 1 {
+		recipients = 1
+	}
+	return chatWakeResumeBudget + time.Duration(recipients)*chatWakeDeliveryBudget + chatWakeWriteSlack
+}
+
+// extendWriteDeadlineForWake moves the connection's write deadline past
+// the server-wide WriteTimeout to chatWakeWriteBudget(recipients) from
+// now. A ResponseWriter without deadline support is logged and ignored.
+func extendWriteDeadlineForWake(w http.ResponseWriter, recipients int) {
+	deadline := time.Now().Add(chatWakeWriteBudget(recipients))
+	if err := http.NewResponseController(w).SetWriteDeadline(deadline); err != nil {
+		slog.Debug("chat wake: SetWriteDeadline not applied", "error", err)
+	}
+}
+
+// suspendedPrimaryWakeable reports whether a chat v2 send may wake agent:
+// it is suspended, not deleted, not mid-reincarnation, runs on a runtime
+// with suspend/resume and has a broker, and the caller holds the lifecycle
+// permission the start route requires.
+func (s *Server) suspendedPrimaryWakeable(ctx context.Context, user UserIdentity, agent *store.Agent) bool {
+	if agent == nil || !agent.DeletedAt.IsZero() || reincarnationInFlight(agent) {
+		return false
+	}
+	if state.Phase(agent.Phase) != state.PhaseSuspended {
+		return false
+	}
+	if isManagedAgentRuntime(agent.Runtime) || agent.RuntimeBrokerID == "" {
+		return false
+	}
+	return s.agentLifecycleAllowed(ctx, user, agent)
+}
+
 // sendAgentRouted sends a message through the existing agent dispatch path.
 // Returns the persisted message ID (empty on error).
 func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, projectID string, user UserIdentity,
 	content, senderLabel string, agents []*store.Agent, mentionNames []string, mentionResults []messages.MentionResult,
-	attachmentRefs []AttachmentRef, now time.Time, replyToID string, clientMetadata map[string]string, interrupt bool) string {
+	attachmentRefs []AttachmentRef, now time.Time, replyToID string, clientMetadata map[string]string, opts chatSendOptions) string {
+	interrupt := opts.Interrupt
 
 	ctx := r.Context()
 
@@ -1531,6 +1659,36 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 		return ""
 	}
 
+	// Wake admission (suspended primary): after authorization and
+	// validation, so a denied or invalid send can neither be offered a
+	// wake nor resume an agent. The wake itself runs later, right before
+	// persistence (see wakePrimary below).
+	wakePrimary := false
+	if !primaryReincarnating && state.Phase(primaryAgent.Phase) == state.PhaseSuspended &&
+		primaryAgent.DeletedAt.IsZero() && (opts.Wake || opts.OfferWake) {
+		switch {
+		case opts.Wake && !s.agentLifecycleAllowed(ctx, user, primaryAgent):
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"You do not have permission to wake this agent", map[string]interface{}{
+					"agentId":   primaryAgent.ID,
+					"agentSlug": primaryAgent.Slug,
+					"phase":     primaryAgent.Phase,
+				})
+			return ""
+		case opts.Wake:
+			wakePrimary = true
+		case s.suspendedPrimaryWakeable(ctx, user, primaryAgent):
+			writeError(w, http.StatusConflict, ErrCodeAgentNotRunning,
+				fmt.Sprintf("Agent %q is suspended", primaryAgent.Slug), map[string]interface{}{
+					"agentId":   primaryAgent.ID,
+					"agentSlug": primaryAgent.Slug,
+					"phase":     primaryAgent.Phase,
+					"canWake":   true,
+				})
+			return ""
+		}
+	}
+
 	// Persist the message.
 	storeMsg := &store.Message{
 		ID:            api.NewUUID(),
@@ -1611,11 +1769,71 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 		}
 		chatV2ConvResult = convResult
 	}
+	// Wake: after conversation resolution, so a resolution failure cannot
+	// leave the agent awake with no message, and before persistence, so a
+	// failed wake leaves no row behind and the client keeps the draft.
+	if wakePrimary {
+		// A wake request outlives the server-wide WriteTimeout: give it
+		// one bounded budget covering the resume, readiness and delivery,
+		// so the client always receives the outcome instead of a dropped
+		// connection after the message was in fact delivered.
+		extendWriteDeadlineForWake(w, len(agents))
+		// Detach from client cancellation: a dropped connection must not
+		// abort a wake in progress, nor the persist and dispatch after it.
+		// The send then runs to its end with its idempotency key in flight
+		// (a retry is told send_in_progress), so the client's retry finds
+		// the finished outcome. Only some steps carry a deadline: the wake
+		// (chatWakeResumeBudget), each dispatch (30s) and markFailed (its
+		// finalization timeout). The store and event calls after the wake
+		// have none, as on the request context, which had no deadline
+		// either.
+		ctx = context.WithoutCancel(ctx)
+		wakeCtx, cancelWake := context.WithTimeout(ctx, chatWakeResumeBudget)
+		// wakeAgentForDM reports managed runtimes, a missing broker, the
+		// start gate and readiness failures as typed errors.
+		_, wakeErr := s.wakeAgentForDM(wakeCtx, primaryAgent)
+		cancelWake()
+		if wakeErr != nil {
+			WriteAgentDMError(w, wakeErr)
+			return ""
+		}
+		// wakeAgentForDM moved the agent to running in place: the row is
+		// no longer born failed.
+		primaryUnreachable, _ = isAgentUnreachable(primaryAgent)
+		if !primaryUnreachable {
+			storeMsg.DispatchState = store.MessageDispatchDispatched
+			storeMsg.DispatchFailureReason = nil
+			dispatchFailureCode = ""
+		}
+		// The wake took a while: date the message (and everything sent
+		// after it, mentions included) at delivery, not at request time.
+		now = time.Now().UTC()
+		storeMsg.CreatedAt = now
+		msg.Timestamp = now.UTC().Format(time.RFC3339)
+	}
 	if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 		s.messageLog.Error("Failed to persist agent-routed message", "error", err)
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to persist message", nil)
 		return ""
 	}
+	if opts.OnPersisted != nil {
+		opts.OnPersisted(storeMsg.ID)
+	}
+
+	// The row was stored with the optimistic "dispatched" state, which the
+	// primary dispatch below confirms or replaces. If the function exits
+	// before that settles (a panic or an early return), mark the row
+	// failed, since the message may not have been delivered: otherwise the
+	// row, and an idempotent replay of it, would claim a delivery that may
+	// never have happened. This runs before the caller's deferred Finish
+	// makes the idempotency key done. A row the gates already settled
+	// (failed or deferred) keeps its state.
+	primarySettled := false
+	defer func() {
+		if !primarySettled && storeMsg.DispatchState == store.MessageDispatchDispatched {
+			_ = s.markFailed(ctx, storeMsg.ID, chatSendInterruptedReason)
+		}
+	}()
 
 	// Phase-3: Store reply-to reference if provided.
 	if replyToID != "" {
@@ -1658,9 +1876,8 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 	s.autoAdvanceSenderReadState(ctx, user.ID(), key, storeMsg.ID)
 
 	// Record "web" reply-channel affinity so untagged agent replies
-	// (e.g. `scion message user:...` or sciontool Stop-hook assistant-reply
-	// mirror) route back to web chat rather than a stale external bridge
-	// channel (Discord/Telegram). See #2448.
+	// (e.g. `scion message user:...`) route back to web chat rather than a
+	// stale external bridge channel (Discord/Telegram). See #2448.
 	s.mu.RLock()
 	affinityWcs := s.webChatStore
 	s.mu.RUnlock()
@@ -1733,6 +1950,8 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 			primaryDispatchOK = false
 		}
 	}
+	// The row now holds the primary's real outcome.
+	primarySettled = true
 	if primaryDispatchOK {
 		dispatchedAgents = append(dispatchedAgents, primaryAgent)
 	}
@@ -2671,6 +2890,12 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 		var err error
 		result, err = s.store.ListMessages(ctx, filter, opts)
 		if err != nil {
+			// Caller error such as a malformed ?cursor (store.ErrInvalidInput)
+			// is a 400, not a server failure (ptone/scion#1957).
+			if errors.Is(err, store.ErrInvalidInput) {
+				writeErrorFromErr(w, err, "")
+				return
+			}
 			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to fetch messages", nil)
 			return
 		}

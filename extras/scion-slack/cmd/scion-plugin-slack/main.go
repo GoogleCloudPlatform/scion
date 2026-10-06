@@ -38,7 +38,6 @@ func main() {
 	fmt.Println("  hmac_key         Base64-encoded HMAC key for hub authentication")
 	fmt.Println("  broker_id        Broker ID for HMAC signing")
 	fmt.Println("  db_path          Path to SQLite database (default: slack.db)")
-	fmt.Println("  agent_cache_ttl  TTL for cached agent list (default: 5m)")
 	os.Exit(0)
 }
 

@@ -2170,6 +2170,15 @@ export class ScionChatMessage extends LitElement {
             Sending
           </div>
         `;
+      case 'waking':
+        // Client-only state (chat-wake.ts): the user chose "Wake and send"
+        // and the hub is resuming the suspended agent before delivery.
+        return html`
+          <div class="delivery-state pending waking">
+            <sl-icon name="hourglass-split"></sl-icon>
+            Waking agent…
+          </div>
+        `;
       case 'dispatched':
         return this.seen
           ? html`

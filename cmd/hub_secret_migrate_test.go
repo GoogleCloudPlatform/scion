@@ -56,8 +56,8 @@ func TestHubSecretMigrateCmd_OldProjectFlagHint(t *testing.T) {
 	err := hubSecretMigrateCmd.ParseFlags([]string{"--project", "my-gcp-project"})
 	require.NoError(t, err)
 
-	require.NotNil(t, hubSecretMigrateCmd.PreRunE, "migrate command must wire the hint check as PreRunE for it to actually run")
-	err = hubSecretMigrateCmd.PreRunE(hubSecretMigrateCmd, nil)
+	require.NotNil(t, hubSecretMigrateCmd.Args, "migrate command must wire the hint check into Args for it to run before the required-flag check")
+	err = hubSecretMigrateCmd.Args(hubSecretMigrateCmd, nil)
 	require.Error(t, err)
 	assert.Equal(t, gcpProjectFlagHint, err.Error())
 }
@@ -73,8 +73,8 @@ func TestHubSecretMigrateCmd_NoHintWhenGCPProjectSet(t *testing.T) {
 	err := hubSecretMigrateCmd.ParseFlags([]string{"-g", "my-scion-project", "--gcp-project", "my-gcp-project"})
 	require.NoError(t, err)
 
-	require.NotNil(t, hubSecretMigrateCmd.PreRunE)
-	require.NoError(t, hubSecretMigrateCmd.PreRunE(hubSecretMigrateCmd, nil))
+	require.NotNil(t, hubSecretMigrateCmd.Args)
+	require.NoError(t, hubSecretMigrateCmd.Args(hubSecretMigrateCmd, nil))
 }
 
 // TestHubSecretMigrateCmd_NoHintWhenNoProjectFlags ensures a bare
@@ -89,6 +89,6 @@ func TestHubSecretMigrateCmd_NoHintWhenNoProjectFlags(t *testing.T) {
 	err := hubSecretMigrateCmd.ParseFlags([]string{})
 	require.NoError(t, err)
 
-	require.NotNil(t, hubSecretMigrateCmd.PreRunE)
-	require.NoError(t, hubSecretMigrateCmd.PreRunE(hubSecretMigrateCmd, nil))
+	require.NotNil(t, hubSecretMigrateCmd.Args)
+	require.NoError(t, hubSecretMigrateCmd.Args(hubSecretMigrateCmd, nil))
 }

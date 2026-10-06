@@ -1,0 +1,100 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Cloud Build configuration for the scion-hub-gke image: the non-root
+# (uid 1000) `hub-gke` stage of the repo-root Dockerfile, which the
+# deploy/helm/scion-hub chart expects. It is self-contained (it builds the web
+# UI and the scion binary from source) and does not depend on scion-base.
+#
+# Usage, from the repo root:
+#
+#   gcloud builds submit \
+#     --config=image-build/cloudbuild-hub-gke.yaml \
+#     --ignore-file=image-build/gcloudignore-hub-gke \
+#     --substitutions=_REGISTRY=<registry>,_SHORT_SHA=$(git rev-parse --short HEAD) \
+#     .
+#
+# WHY --ignore-file: the default .gcloudignore drops the web source
+# (web/src/, web/*.json, ...), and the root Dockerfile's frontend stage runs
+# `npm ci && npm run build`. gcloudignore-hub-gke keeps the web source, like
+# gcloudignore-omni, and also anchors its root-file patterns (/agents.md,
+# /.gemini/, ...) so the embedded template files under pkg/config/embeds/ and
+# resources/ are uploaded; the unanchored patterns in gcloudignore-omni and
+# .gcloudignore drop them silently. See that file's header.
+#
+# TAGS: only the per-commit $_SHORT_SHA tag is pushed. There is deliberately no
+# moving tag and no substitution that defaults to one: repointing a moving tag
+# changes what every consumer of it runs and needs an explicit ACK, and the
+# chart prefers pinning the hub image by digest (image.digest in its
+# values.yaml), so the SHA tag is only a handle for finding that digest.
+#
+# PLATFORM: linux/amd64 only. The root Dockerfile's frontend and builder stages
+# are not pinned to $BUILDPLATFORM and do not cross-compile, so an arm64 build
+# would run `npm ci`, the Vite build and the whole Go build under QEMU
+# emulation. Making it build arm64 efficiently means changing those stages,
+# which this file does not do.
+steps:
+  # Fail early, with a clear message, if _SHORT_SHA was not supplied.
+  - name: 'gcr.io/cloud-builders/gcloud'
+    id: 'require-short-sha'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - 'test -n "$_SHORT_SHA" || { echo "ERROR: pass --substitutions=_SHORT_SHA=<git short sha>" >&2; exit 1; }'
+
+  # Pre-flight: verify push access to catch permission errors early
+  - name: 'gcr.io/cloud-builders/gcloud'
+    id: 'verify-registry'
+    entrypoint: 'bash'
+    args: ['image-build/scripts/verify-registry.sh', '$_REGISTRY']
+
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'setup-buildx'
+    args: ['buildx', 'create', '--name', 'mybuilder', '--use']
+    env:
+      - 'DOCKER_CLI_EXPERIMENTAL=enabled'
+
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'bootstrap-buildx'
+    args: ['buildx', 'inspect', '--bootstrap']
+    env:
+      - 'DOCKER_CLI_EXPERIMENTAL=enabled'
+
+  # Build the hub-gke stage of the repo-root Dockerfile and push it by SHA.
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'build-scion-hub-gke'
+    args:
+      - 'buildx'
+      - 'build'
+      - '--platform'
+      - 'linux/amd64'
+      - '--target'
+      - 'hub-gke'
+      - '-t'
+      - '$_REGISTRY/scion-hub-gke:$_SHORT_SHA'
+      - '-f'
+      - 'Dockerfile'
+      - '--pull'
+      - '--push'
+      - '.'
+    env:
+      - 'DOCKER_CLI_EXPERIMENTAL=enabled'
+
+substitutions:
+  _REGISTRY: 'us-central1-docker.pkg.dev/${PROJECT_ID}/public-docker'
+  _SHORT_SHA: ''
+options:
+  dynamicSubstitutions: true
+  machineType: 'E2_HIGHCPU_8'
+timeout: 2400s # 40 minutes - builds the web UI and the Go binary from source
