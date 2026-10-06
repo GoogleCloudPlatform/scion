@@ -342,7 +342,7 @@ func TestAuthMiddleware_PublicEndpoints(t *testing.T) {
 		"/healthz",
 		"/readyz",
 		"/projects/test/agents/agent/.well-known/agent-card.json",
-		"/projects/test/agents/agent/.well-known/agent-card.json",
+		"/projects/test/agents/agent/.well-known/agent.json",
 	}
 
 	for _, path := range paths {
@@ -353,6 +353,27 @@ func TestAuthMiddleware_PublicEndpoints(t *testing.T) {
 			mw.ServeHTTP(w, req)
 			if w.Code != http.StatusOK {
 				t.Errorf("public endpoint %s: status = %d, want 200", path, w.Code)
+			}
+		})
+	}
+
+	// Paths that look like a per-agent card but must NOT bypass auth. The
+	// legacy /groves/ agent-card route was removed (see
+	// docs-site/src/content/docs/reference/grove-removal.md); this guards
+	// against the public-endpoint matcher silently re-admitting it.
+	notPublic := []string{
+		"/groves/test/agents/agent/.well-known/agent-card.json",
+		"/projects/test/agents/agent/.well-known/other.json",
+		"/projects/test/agents/agent/extra/.well-known/agent-card.json",
+	}
+
+	for _, path := range notPublic {
+		t.Run("not public "+path, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, path, nil)
+			w := httptest.NewRecorder()
+			mw.ServeHTTP(w, req)
+			if w.Code != http.StatusUnauthorized {
+				t.Errorf("non-public path %s: status = %d, want 401", path, w.Code)
 			}
 		})
 	}

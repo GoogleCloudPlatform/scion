@@ -46,6 +46,24 @@ func NewClient(t *testing.T) *ent.Client {
 	return newClient(t)
 }
 
+// SQLiteOnlyMarker prefixes the skip message SkipOnPostgres writes. The
+// Postgres CI job (make test-launch-store-postgres) fails on any skipped test
+// unless the test's own skip message carries this marker with its name, so
+// a test that is SQLite-only by design is allowed without a name list in the
+// Makefile, and any other skip still fails the job.
+const SQLiteOnlyMarker = "enttest-sqlite-only:"
+
+// SkipOnPostgres skips t when the Postgres backend is active. Use it, and
+// only it, for tests that are SQLite-only by design (raw SQLite SQL such as
+// typeof()/quote(), or assertions on SQLite's TEXT timestamp storage). It is
+// a no-op on SQLite. The skip message is "<SQLiteOnlyMarker> <t.Name()> <reason>".
+func SkipOnPostgres(t testing.TB, reason string) {
+	t.Helper()
+	if Active() {
+		t.Skipf("%s %s %s", SQLiteOnlyMarker, t.Name(), reason)
+	}
+}
+
 // MainSetup prepares package-level backend resources. Call from TestMain before
 // m.Run(). No-op for the SQLite backend.
 func MainSetup() { setup() }

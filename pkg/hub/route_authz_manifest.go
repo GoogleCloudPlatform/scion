@@ -143,7 +143,7 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/users/me/templates/":       "authenticated", // User-scoped template by ID
 
 	// ── User-scoped terminal workspace ─────────────────────────────────
-	"/api/v1/users/me/terminal-workspace": "authenticated", // GET/PUT: caller's own list; session/dev credential only (requireSessionCredential)
+	"/api/v1/users/me/terminal-workspace": "authenticated", // GET/PUT: caller's own list; session/dev credential only (requireSessionCredentialFor)
 
 	// ── Hub-scoped injected skills ─────────────────────────────────────
 	"/api/v1/hub/settings/injected-skills": "authenticated", // GET: authenticated (any user), PUT: admin (role check in handler)

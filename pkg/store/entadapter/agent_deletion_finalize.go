@@ -93,6 +93,13 @@ func (c *CompositeStore) finalizeAgentDeletionOnce(ctx context.Context, uid uuid
 		}
 		hookAgent = entAgentToStore(post)
 	case store.DeletionFinalizeHard:
+		// Group memberships go before the agent row: agent_id is ON DELETE
+		// SET NULL, so after the delete they could no longer be matched by
+		// agent ID (ptone/scion#2769). A CAS miss below rolls this back with
+		// the rest of the attempt.
+		if _, err := txStore.DeleteGroupMembershipsForAgents(ctx, []string{uid.String()}); err != nil {
+			return 0, false, mapError(err)
+		}
 		n, err := tx.Agent.Delete().
 			Where(agent.IDEQ(uid), agent.StateVersionEQ(row.StateVersion)).
 			Exec(ctx)

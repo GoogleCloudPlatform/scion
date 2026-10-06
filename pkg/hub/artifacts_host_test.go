@@ -254,9 +254,11 @@ func TestArtifactRoutes404WhileExperimentOff(t *testing.T) {
 	serveArtifactRequests(t, srv.mux, nil)
 }
 
-// TestArtifactRoutes404WhileExperimentOn: P0 has no behaviour, so the
-// mounted handler answers 404 behind the gate too.
-func TestArtifactRoutes404WhileExperimentOn(t *testing.T) {
+// TestArtifactRoutesServedWhileExperimentOn: with hub.artifacts on (via
+// operational settings) the requests reach the service, which answers for
+// itself: routes it does not serve stay 404, a wrong method is 405, and the
+// unconfigured service (no store or storage) is 503.
+func TestArtifactRoutesServedWhileExperimentOn(t *testing.T) {
 	fakeStore := newFakeHubSettingStore()
 	fakeStore.seed("experiments", json.RawMessage(`{"overrides":{"hub.artifacts":true}}`))
 	ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
@@ -267,6 +269,37 @@ func TestArtifactRoutes404WhileExperimentOn(t *testing.T) {
 	srv.registerRoutes()
 	require.True(t, srv.experimentEnabled("hub.artifacts"))
 
+	user := NewAuthenticatedUser("u1", "u1@example.com", "U1", "member", "web")
+	for _, tc := range []struct {
+		method, path string
+		status       int
+	}{
+		{http.MethodGet, "/api/v1/artifacts/shared/some-token", http.StatusNotFound},
+		{http.MethodGet, "/api/v1/artifacts/art-1/unknown", http.StatusNotFound},
+		{http.MethodGet, "/api/v1/artifacts", http.StatusMethodNotAllowed},
+		{http.MethodDelete, "/api/v1/artifacts/00000000-0000-4000-8000-000000000001", http.StatusMethodNotAllowed},
+		{http.MethodGet, "/api/v1/artifacts/00000000-0000-4000-8000-000000000001", http.StatusServiceUnavailable},
+	} {
+		req := httptest.NewRequest(tc.method, tc.path, nil)
+		req = req.WithContext(contextWithIdentity(req.Context(), user))
+		rec := httptest.NewRecorder()
+		srv.mux.ServeHTTP(rec, req)
+		assert.Equal(t, tc.status, rec.Code, "%s %s: %s", tc.method, tc.path, rec.Body.String())
+	}
+}
+
+// TestArtifactsSettingsDisabledAnswers404: the artifacts settings section's
+// enabled switch closes every route like the experiment does.
+func TestArtifactsSettingsDisabledAnswers404(t *testing.T) {
+	fakeStore := newFakeHubSettingStore()
+	fakeStore.seed("experiments", json.RawMessage(`{"overrides":{"hub.artifacts":true}}`))
+	fakeStore.seed("artifacts", json.RawMessage(`{"enabled":false}`))
+	ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
+	_, err := ops.Refresh(context.Background())
+	require.NoError(t, err)
+	srv := &Server{config: DefaultServerConfig(), mux: http.NewServeMux()}
+	srv.SetOperationalSettings(ops)
+	srv.registerRoutes()
 	serveArtifactRequests(t, srv.mux, NewAuthenticatedUser("u1", "u1@example.com", "U1", "member", "web"))
 }
 

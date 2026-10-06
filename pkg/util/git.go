@@ -682,15 +682,36 @@ func NormalizeGitRemote(remote string) string {
 	remote = strings.TrimPrefix(remote, "ssh://")
 	remote = strings.TrimPrefix(remote, "git://")
 
-	// Handle SSH shorthand format (git@host:path → host/path)
+	// Handle SSH shorthand format (git@host:path → host/path). A bracketed
+	// IPv6 host (git@[::1]:path) is split after its closing ']'; one followed
+	// by '/' or the end (from ssh://git@[::1]/path) is left as is. A bracketed
+	// host that is not an IPv6 literal, or is followed by anything else
+	// (git@[x@y]:path, git@[::1]x@y:path), is left without the userinfo strip
+	// below, so any '@' in it remains (callers that persist the result refuse
+	// a normalized remote with '@').
+	malformedBracket := false
 	if strings.HasPrefix(remote, "git@") {
 		remote = strings.TrimPrefix(remote, "git@")
-		remote = strings.Replace(remote, ":", "/", 1)
+		if strings.HasPrefix(remote, "[") {
+			end := strings.Index(remote, "]")
+			switch {
+			case end < 0 || !isBracketedIPv6(remote[:end+1]):
+				malformedBracket = true
+			case strings.HasPrefix(remote[end+1:], ":"):
+				remote = remote[:end+1] + "/" + remote[end+2:]
+			case end+1 == len(remote) || remote[end+1] == '/':
+				// ssh://git@[::1]/path: nothing to split.
+			default:
+				malformedBracket = true
+			}
+		} else {
+			remote = strings.Replace(remote, ":", "/", 1)
+		}
 	}
 
 	// Strip user info (user@, user:pass@) for scheme-based URLs.
 	// This handles token-authenticated HTTPS URLs like x-access-token:TOKEN@github.com/...
-	if atIdx := strings.Index(remote, "@"); atIdx >= 0 {
+	if atIdx := strings.Index(remote, "@"); atIdx >= 0 && !malformedBracket {
 		slashIdx := strings.Index(remote, "/")
 		if slashIdx < 0 || atIdx < slashIdx {
 			remote = remote[atIdx+1:]

@@ -671,9 +671,10 @@ func TestC1_ScheduledMessageDenialReturnsError(t *testing.T) {
 	if err == nil {
 		t.Fatal("handler must return error on authorization denial")
 	}
-	// Error must contain the denial reason for the scheduler to record.
-	if !strings.Contains(err.Error(), "cross_project_scheduled_disabled") {
-		t.Errorf("error should contain denial code, got: %v", err)
+	// The recorded error is the constant public refusal; the specific
+	// cause is logged, not stored.
+	if err.Error() != errScheduledMessageRefused.Error() {
+		t.Errorf("error should be the constant refusal, got: %v", err)
 	}
 
 	// Load-bearing: zero dispatch calls.
@@ -716,8 +717,8 @@ func TestC1_ScheduledMessageTargetDeletedReturnsError(t *testing.T) {
 	if err == nil {
 		t.Fatal("handler must return error when target agent is deleted")
 	}
-	if !strings.Contains(err.Error(), "target agent deleted") {
-		t.Errorf("error should reference target agent deletion, got: %v", err)
+	if err.Error() != errScheduledMessageRefused.Error() {
+		t.Errorf("error should be the constant refusal, got: %v", err)
 	}
 
 	if len(spy.getCalls()) != 0 {
@@ -778,8 +779,8 @@ func TestC1_FireEvent_DenialRecordsErrorOnEvent(t *testing.T) {
 	require.NotNil(t, e, "event must exist after fireEvent")
 	assert.Equal(t, store.ScheduledEventFailed, e.Status,
 		"fireEvent must set status to 'failed' when the handler returns an error")
-	assert.Contains(t, e.Error, "cross_project_scheduled_disabled",
-		"event error field must contain the denial reason")
+	assert.Equal(t, errScheduledMessageRefused.Error(), e.Error,
+		"event error field must hold the constant refusal")
 
 	// Zero dispatch calls.
 	assert.Empty(t, spy.getCalls(), "denial must produce zero dispatch calls through fireEvent")
@@ -881,8 +882,8 @@ func TestC1_FireEvent_TargetDeletedRecordsError(t *testing.T) {
 	require.NotNil(t, e, "event must exist after fireEvent")
 	assert.Equal(t, store.ScheduledEventFailed, e.Status,
 		"target-deleted event must be 'failed'")
-	assert.Contains(t, e.Error, "target agent deleted",
-		"error must reference target agent deletion")
+	assert.Equal(t, errScheduledMessageRefused.Error(), e.Error,
+		"a deleted target records the same constant refusal")
 	assert.Empty(t, spy.getCalls(), "deleted target must produce zero dispatch calls")
 }
 
@@ -1044,8 +1045,8 @@ func TestC1_ExecuteSchedule_DenialRecordsErrorOnEvent(t *testing.T) {
 	latestEvt := result.Items[len(result.Items)-1]
 	assert.Equal(t, store.ScheduledEventFailed, latestEvt.Status,
 		"recurring event with handler error must be 'failed'")
-	assert.Contains(t, latestEvt.Error, "cross_project",
-		"event error field must contain the denial reason")
+	assert.Equal(t, errScheduledMessageRefused.Error(), latestEvt.Error,
+		"event error field must hold the constant refusal")
 }
 
 // =============================================================================
