@@ -69,6 +69,9 @@ func testServerWithStore(t *testing.T, s store.Store) (*Server, store.Store) {
 
 	cfg := DefaultServerConfig()
 	cfg.DevAuthToken = testDevToken // Enable dev auth for testing
+	// Never build real Cloud Logging clients from an ambient GCP project
+	// env var (ptone/scion#3188).
+	cfg.DisableCloudLogQuery = true
 	cfg.DevUserConfig = DevUserConfig{
 		Username:    "dev",
 		DisplayName: "Development User",

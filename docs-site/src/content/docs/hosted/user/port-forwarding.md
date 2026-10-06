@@ -23,6 +23,10 @@ Port forwarding in Scion relies on a **reverse tunnel architecture**:
 4. **Local Forwarding**: The Hub sends this message over the WebSocket tunnel to the agent's in-container tunnel manager. The manager unwraps the request and makes a standard HTTP request to the local loopback address (`127.0.0.1` or `localhost`) on the specified port.
 5. **Response Delivery**: The local service's response is streamed back over the WebSocket tunnel, reconstructed by the Hub, and returned to the caller.
 
+:::note[Conduit transport (experimental)]
+When the `hub.conduit` [experiment](/scion/reference/experiments/) is on and the Hub runs the conduit relay (see [Conduit settings](/scion/reference/server-config/#conduit-serverhubconduit)), `sciontool` also connects to the relay at `GET /api/v1/conduit`, reconnecting with backoff. The Hub then proxies requests for loopback ports over the agent's conduit session, and admits only a session from the agent's current run. An agent without a conduit session, such as one running an older `sciontool`, still uses the tunnel described above. If the agent has neither, the request fails with `503` and error code `agent_offline`. With the experiment off, nothing changes.
+:::
+
 :::note[Proxied responses are sandboxed]
 Agent port responses are served from the Hub's own origin, so the Hub treats them as untrusted content. Every proxied response carries the Hub's sandbox `Content-Security-Policy` (`sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox allow-downloads`) and `X-Content-Type-Options: nosniff`, which the agent's service cannot override. The Hub never relays the service's `Set-Cookie`, `Content-Security-Policy`, `X-Content-Type-Options`, `Clear-Site-Data`, or CORS response headers. A forwarded web app therefore runs in an opaque origin: it cannot set cookies or use storage on the Hub origin, and apps that rely on cookies, `localStorage`, or same-origin requests may not work through the proxy.
 :::

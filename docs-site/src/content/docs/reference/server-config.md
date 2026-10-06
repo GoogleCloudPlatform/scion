@@ -377,17 +377,20 @@ With the `nfs` backend, the Hub and brokers also apply the following:
 
 Different kinds of agents can write to the same NFS shared directory (leaf): Docker or rootful Podman agents on brokers, and Kubernetes pods. They usually run with different uids, so each one can modify the others' files only through the leaf's group. For that to work:
 
-- **The export must support POSIX ACLs.** The leaf's default ACL makes new files group-writable whatever the writer's umask. Without ACL support, files follow each writer's umask (usually `022`) and other writers cannot modify them. Scion logs a warning once when it cannot set the ACL. ACL-capable storage is required for shared directories with mixed writers.
+- **New files must be group-writable.** Where the export supports POSIX ACLs, the leaf's default ACL makes new files group-writable whatever the writer's umask. Where it does not (for example NFSv4.1 exports, where Linux clients cannot use POSIX ACLs), Scion logs a warning once, and new files follow the writer's umask. Agents that were given NFS shared-directory groups (below) run with the group bits of their umask cleared (`022` becomes `002`; a stricter `077` becomes `007`), so files they create are group-writable without an ACL. Other writers, and agents on images without this support, use their own umask (usually `022`), and their files cannot be modified by the other kinds of agents.
 - **Every writer must be in the leaf's group.** At each agent start, the broker reads the group of every NFS shared directory the agent mounts, from the leaf itself, and adds it to the agent:
-  - Kubernetes: added to the pod's `supplementalGroups`. `fsGroup` is not changed, and a group equal to `fsGroup` is not repeated.
-  - Docker and rootful Podman: added with `--group-add`. The agent image's `sciontool` must keep these groups when it switches from root to the agent user (for the harness, services, lifecycle hooks and `/exec` commands); older images drop them and keep the previous behaviour.
+  - Kubernetes: added to the pod's `supplementalGroups`. `fsGroup` is not changed, and a group equal to `fsGroup` is not repeated (the pod already holds it).
+  - Docker and rootful Podman: added with `--group-add`. The agent image's `sciontool` must keep these groups when it switches from root to the agent user (for the harness, services, lifecycle hooks and commands run through the substrate exec endpoint); older images drop them and keep the previous behaviour.
   - Rootless Podman and Apple containers: not supported; the broker logs a warning and starts the agent without the group. Docker with `userns-remap` or a rootless `dockerd` also gets no effect from the group, because the leaf gid is not mapped into the container's user namespace; the broker does not detect this case.
 
   For safety, the broker skips a group (with a warning) when it is below `1000`, when it is an overflow id (`65534` or `4294967294`, which NFSv4 id mapping reports for unmapped groups), or when `nfs.gid` is set and does not match. If the group cannot be read, the agent starts without it. Agents without an NFS shared directory are unchanged. On an `all_squash` export the server maps every client to one identity, so the added group has no effect there.
 
+With umask `002`, other files the agent creates later (for example in its home directory) are group-writable for its primary group too. OpenSSH refuses a group-writable ssh config or key file (such as `~/.ssh/config`). Under umask `002`, a file created without an explicit mode is group-writable; secrets and ssh tools create such files with mode `0600`.
+
 Some files are not upgraded:
 
-- Files created by a writer that passes an explicit restrictive mode (for example `open(..., 0644)`) stay non-group-writable; an ACL cannot add permissions the creator did not request.
+- Files created by a writer that passes an explicit restrictive mode (for example `open(..., 0644)`) stay non-group-writable; neither an ACL nor the umask can add permissions the creator did not request.
+- Files copied or moved in with their modes preserved (for example `cp -p`, `rsync -a`, `tar -x` as the owner, or `mv` within the export) keep those modes.
 - Leaves created outside Scion, or before Scion added the leaf ACL, keep their existing mode and ACL. Scion only sets modes and ACLs on leaves it creates. Fix them by hand (see the hybrid tier guide).
 
 The `local` backend (or an unset `shared_dir_storage`) behaves as before.
