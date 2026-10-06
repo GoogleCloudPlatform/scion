@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"errors"
+	"net/http"
 	"sync"
 	"testing"
 	"time"
@@ -369,4 +370,81 @@ func TestDMWake_CallerDeadlineEarlierWins(t *testing.T) {
 		assert.True(t, got.Equal(want), "dispatch deadline %v, want the caller's %v", got, want)
 		assert.ErrorIs(t, ctxErr, context.DeadlineExceeded)
 	})
+}
+
+// gateHookStore runs hook once, after the first HasOutstandingBrokerDispatch
+// call returns: the start gate's delete check, the wake's last step on the
+// request before the resume.
+type gateHookStore struct {
+	store.Store
+	once sync.Once
+	hook func()
+}
+
+func (g *gateHookStore) HasOutstandingBrokerDispatch(ctx context.Context, agentID, op string) (bool, error) {
+	blocked, err := g.Store.HasOutstandingBrokerDispatch(ctx, agentID, op)
+	g.once.Do(g.hook)
+	return blocked, err
+}
+
+// A sender that already left (request cancelled, or deadline passed) before
+// the resume gets no wake: nothing is claimed, dispatched or written, the
+// agent stays suspended and holds no slot. Leaving during the start gate
+// reaches the wake's own check; leaving before the call is refused earlier
+// on the request.
+func TestDMWake_SenderGoneBeforeResume_NoWake(t *testing.T) {
+	cases := []struct {
+		name string
+		// duringGate: the sender leaves while the start gate runs, so the
+		// gate itself passes and the wake's check must stop the resume.
+		duringGate bool
+		setup      func(g *gateHookStore) (context.Context, context.CancelFunc)
+	}{
+		{"cancelled before the call", false, func(_ *gateHookStore) (context.Context, context.CancelFunc) {
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			return ctx, cancel
+		}},
+		{"deadline passed before the call", false, func(_ *gateHookStore) (context.Context, context.CancelFunc) {
+			return context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+		}},
+		{"cancelled during the start gate", true, func(g *gateHookStore) (context.Context, context.CancelFunc) {
+			ctx, cancel := context.WithCancel(context.Background())
+			g.hook = cancel
+			return ctx, cancel
+		}},
+		{"deadline passed during the start gate", true, func(g *gateHookStore) (context.Context, context.CancelFunc) {
+			ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+			g.hook = func() { <-ctx.Done() }
+			return ctx, cancel
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dmWakeClaimModes(t, func(t *testing.T, suffix string, claims bool) {
+				srv, s, broker, a, disp := newDMWakeProbe(t, "dmwake-gone-"+suffix, claims)
+				g := &gateHookStore{Store: s, hook: func() {}}
+				reqCtx, cancel := tc.setup(g)
+				defer cancel()
+				srv.store = g
+
+				res, dmErr := srv.wakeAgentForDM(reqCtx, a)
+
+				require.Error(t, reqCtx.Err())
+				assert.Nil(t, res)
+				require.NotNil(t, dmErr, "the wake does not start for a gone sender")
+				if tc.duringGate {
+					assert.Equal(t, ErrCodeRuntimeError, dmErr.Code)
+					assert.Equal(t, http.StatusServiceUnavailable, dmErr.HTTPStatus)
+				}
+				assert.EqualValues(t, 0, disp.startCount.Load(), "nothing was dispatched")
+				got, err := s.GetAgent(context.Background(), a.ID)
+				require.NoError(t, err)
+				assert.Equal(t, string(state.PhaseSuspended), got.Phase)
+				assert.Empty(t, got.StartClaimID, "no claim was taken")
+				assert.NotEqual(t, store.RunIntentRunning, got.RunIntent, "no run intent was recorded")
+				assert.EqualValues(t, 0, brokerReservationCount(t, s, broker.ID), "no slot is held")
+			})
+		})
+	}
 }

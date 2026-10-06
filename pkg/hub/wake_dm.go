@@ -155,6 +155,21 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 		// deadline also shortens the readiness wait below. This path is
 		// shared by the user and agent direct messages and the chat wake;
 		// only the chat wake carries a deadline today (its resume budget).
+		//
+		// A sender that already left (its request cancelled, or its
+		// deadline passed) during the admission checks or the start gate
+		// gets no wake: the message is persisted on the request after the
+		// wake, so nobody would receive it, and the resume would be
+		// spurious. Nothing is claimed, dispatched or written.
+		if err := ctx.Err(); err != nil {
+			s.messageLog.Info("wake: skipped, the request ended before the resume",
+				"agent_id", agent.ID, "error", err)
+			return nil, &AgentDMError{
+				Code:       ErrCodeRuntimeError,
+				Message:    "Wake not started: the request was cancelled or its deadline passed",
+				HTTPStatus: http.StatusServiceUnavailable,
+			}
+		}
 		launchCtx, cancelLaunch := detachLaunchKeepDeadline(ctx)
 		defer cancelLaunch()
 		callerDeadline, hasCallerDeadline := launchCtx.Deadline()
