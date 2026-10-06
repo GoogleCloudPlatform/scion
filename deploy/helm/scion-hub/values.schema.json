@@ -73,7 +73,7 @@
         "repository": {
           "type": "string",
           "minLength": 1,
-          "description": "REQUIRED, with no default. A hub image built from the root Dockerfile with --target hub-gke - a stage the accompanying image-build change adds and which is not in the root Dockerfile yet. It is not published anywhere, so any default the chart could ship would point at an empty path or at another artifact. The published artifact named scion-hub is not this image: it runs as root, and it is built with -tags no_embed_web so it has no embedded web UI."
+          "description": "REQUIRED, with no default. A hub image built from the root Dockerfile with --target hub-gke (image-build/cloudbuild-hub-gke.yaml builds and pushes it as scion-hub-gke). The chart has no canonical registry to point at, so any default the chart could ship would point at an empty path or at another artifact. The published artifact named scion-hub is not this image: it runs as root, and it is built with -tags no_embed_web so it has no embedded web UI."
         },
         "tag": {
           "type": "string",
