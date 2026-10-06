@@ -308,6 +308,12 @@ export class ScionPageAgentDetail extends LitElement {
       min-width: 0;
       overflow-wrap: anywhere;
     }
+    /* The icon keeps its size when a long name wraps beside it. */
+    .template-badge sl-icon,
+    .project-link sl-icon,
+    .broker-link sl-icon {
+      flex-shrink: 0;
+    }
     .project-link:hover,
     .broker-link:hover {
       color: var(--scion-primary, #3b82f6);

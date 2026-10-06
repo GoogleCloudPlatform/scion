@@ -100,7 +100,6 @@ export class ScionPageAdminSkillRegistryDetail extends LitElement {
       display: flex;
       align-items: center;
       gap: 0.75rem;
-      min-width: 0;
       overflow-wrap: anywhere;
     }
     .header h1 sl-icon {

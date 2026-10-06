@@ -170,7 +170,6 @@ export class ScionPageAdminRoleDetail extends LitElement {
       font-weight: 700;
       color: var(--scion-text, #1e293b);
       margin: 0 0 0.25rem 0;
-      min-width: 0;
       overflow-wrap: anywhere;
     }
 

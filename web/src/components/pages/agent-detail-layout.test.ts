@@ -58,6 +58,8 @@ describe('agent detail layout', () => {
       const rule = rules.get(sel) ?? '';
       expect(rule, sel).toMatch(/(^|;)\s*min-width:\s*0/);
       expect(rule, sel).toMatch(/overflow-wrap:\s*anywhere/);
+      // The icon keeps its size when the name beside it wraps.
+      expect(rules.get(`${sel} sl-icon`) ?? '', sel).toMatch(/flex-shrink:\s*0/);
     }
   });
 

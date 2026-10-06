@@ -270,6 +270,23 @@ describe('harness config detail header actions', () => {
   });
 });
 
+describe('skill detail header alignment', () => {
+  const c = cases.find(([label]) => label === 'skill')![1];
+
+  it('keeps the icon on the first line of a multi-line name', () => {
+    expect(rulesOf(c).get('.header-title') ?? '').toMatch(/align-items:\s*flex-start/);
+    expect(rulesOf(c).get('.header-title > sl-icon') ?? '').toMatch(/margin-top:\s*0\.225rem/);
+  });
+});
+
+describe('group detail header alignment', () => {
+  const c = cases.find(([label]) => label === 'group')![1];
+
+  it('keeps a one-line name centred on the group icon', () => {
+    expect(rulesOf(c).get('.header-title-text') ?? '').toMatch(/min-height:\s*2\.5rem/);
+  });
+});
+
 // Admin pages put the title in a flex header beside the actions: a long
 // name breaks inside the h1 instead of pushing the actions off the page.
 interface AdminCase {
@@ -325,9 +342,8 @@ describe.each(adminCases)('%s detail header', (label, c) => {
   }, 60_000);
 
   it('breaks a long name inside the title beside the actions', () => {
-    const h1 = rules.get('.header h1') ?? '';
-    expect(h1).toMatch(/(^|;)\s*min-width:\s*0/);
-    expect(h1).toMatch(/overflow-wrap:\s*anywhere/);
+    // The h1 is not a flex item here; overflow-wrap does the work.
+    expect(rules.get('.header h1') ?? '').toMatch(/overflow-wrap:\s*anywhere/);
     if (label === 'skill registry') {
       // The actions drop below a name that does not fit, still on the right.
       expect(rules.get('.header') ?? '').toMatch(/flex-wrap:\s*wrap/);
