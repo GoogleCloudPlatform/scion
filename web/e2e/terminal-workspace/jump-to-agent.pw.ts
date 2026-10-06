@@ -28,6 +28,7 @@
 
 import { test, expect, type Locator, type Page } from '@playwright/test';
 import { DENSE_PALETTE_FONT_SIZES, paletteFontSizes } from '../palette-typography.js';
+import { paletteInputHasFocus, slowPaletteModule } from '../palette-focus.js';
 
 const agentA = '11111111-1111-4111-8111-111111111111';
 const agentB = '22222222-2222-4222-8222-222222222222';
@@ -431,6 +432,76 @@ test('Meta+K opens the palette even with a terminal pane focused', async ({ page
   await page.keyboard.press('Meta+k');
 
   await expect(paletteDialog(page)).toBeVisible();
+});
+
+/**
+ * After `open`, types `bob` without waiting for the palette and checks it all
+ * became the query: the input has focus right after the open, the results
+ * are filtered, and nothing reached the focused pane's PTY.
+ */
+async function expectTypingRightAfterOpenFilters(
+  page: Page,
+  open: () => Promise<void>,
+  ptyInput: () => string
+): Promise<void> {
+  await open();
+  await page.keyboard.type('bob');
+
+  await expect(paletteDialog(page)).toBeVisible();
+  expect(await paletteInputHasFocus(page)).toBe(true);
+  await expect(page.locator('scion-quick-palette #palette-query-input')).toHaveValue('bob');
+  await expect(page.locator('scion-quick-palette .palette-option')).toHaveText([/Bob-bot/]);
+  expect(ptyInput()).toBe('');
+}
+
+const typingAgents = {
+  [agentA]: fixture(agentA, 'Alice-bot'),
+  [agentB]: fixture(agentB, 'Bob-bot'),
+};
+
+for (const slow of [false, true]) {
+  test(`typing straight after Meta+K in a pane becomes the query, not PTY input${slow ? ', while the palette module loads' : ''}`, async ({
+    page,
+  }) => {
+    if (slow) await slowPaletteModule(page);
+    const { attaches, ptyInput } = await setup(page, typingAgents);
+    await page.goto(`/terminals/${agentA}`);
+    await expect.poll(() => attaches()).toBeGreaterThan(0);
+    await focusPaneTextarea(page.locator('.xterm-helper-textarea').first());
+
+    await expectTypingRightAfterOpenFilters(page, () => page.keyboard.press('Meta+k'), ptyInput);
+  });
+}
+
+test('typing straight after the rail footer button becomes the query, while the palette module loads', async ({
+  page,
+}) => {
+  await slowPaletteModule(page);
+  const { attaches, ptyInput } = await setup(page, typingAgents);
+  await page.goto(`/terminals/${agentA}`);
+  await expect.poll(() => attaches()).toBeGreaterThan(0);
+
+  await expectTypingRightAfterOpenFilters(
+    page,
+    () => page.locator('#terminal-workspace .terminal-jump-btn').click(),
+    ptyInput
+  );
+});
+
+test('typing straight after a reopen from a pane becomes the new query', async ({ page }) => {
+  const { attaches, ptyInput } = await setup(page, typingAgents);
+  await page.goto(`/terminals/${agentA}`);
+  await expect.poll(() => attaches()).toBeGreaterThan(0);
+  const helperTextarea = page.locator('.xterm-helper-textarea').first();
+  await focusPaneTextarea(helperTextarea);
+  await page.keyboard.press('Meta+k');
+  await page.keyboard.type('ali');
+  await expect(page.locator('scion-quick-palette #palette-query-input')).toHaveValue('ali');
+  await page.keyboard.press('Escape');
+  await expect(paletteDialog(page)).toBeHidden();
+  await focusPaneTextarea(helperTextarea);
+
+  await expectTypingRightAfterOpenFilters(page, () => page.keyboard.press('Meta+k'), ptyInput);
 });
 
 test("Meta+K does not open the palette over a terminal pane's own open dialog", async ({

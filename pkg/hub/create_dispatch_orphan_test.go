@@ -121,6 +121,7 @@ func TestCreateDispatch_BrokerCreateLandsAfterDelete_NoOrphan(t *testing.T) {
 	})
 	require.NotNil(t, sent, "dispatch ran: %d %s", rec.Code, rec.Body.String())
 	require.True(t, agentGone(t, s, sent.ID), "the delete removed the row")
+	requireDeletedDuringCreate(t, rec, sent.ID) // ptone/scion#3099
 
 	assert.Zero(t, broker.live(),
 		"a container started for a deleted agent is left running with nothing tracking it (broker deletes: %v)", broker.deletes)

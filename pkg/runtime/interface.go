@@ -16,6 +16,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"io"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -297,6 +298,12 @@ type SharedDirRealization struct {
 	// SubPaths maps each shared dir name to its subPath within PVClaimName,
 	// e.g. "projects/<pid>/shared-dirs/<name>".
 	SubPaths map[string]string
+	// SupplementalGroups are the owning group ids of the shared-dir leaves,
+	// read from each leaf at every start (pkg/agent.sharedDirLeafGroups)
+	// and filtered by its guard. Kubernetes adds them to the pod's
+	// supplementalGroups; Docker and rootful Podman pass them as
+	// --group-add. Empty means no extra group (ptone/scion#3155).
+	SupplementalGroups []int64
 }
 
 // RunRef identifies the runtime entry a Delete targets. ID is the backend
@@ -312,6 +319,20 @@ type RunRef struct {
 	ID    string
 	RunID string
 }
+
+// ErrRunMismatch is returned (wrapped) by a Delete whose RunRef names a run
+// when the entry holding ref.ID belongs to a different run: nothing was
+// deleted, and the run the caller meant is already gone. Callers treat it
+// like the broker's own run mismatch (ptone/scion#2550): not found, touch
+// nothing.
+var ErrRunMismatch = errors.New("runtime entry belongs to a different run")
+
+// ErrRunConflict is returned (wrapped) by Run when an object it must
+// replace belongs to another run that is still live (a Kubernetes pod of
+// another run that is Pending or Running, or a per-agent Secret created by
+// a concurrent start). Run deletes nothing of that run and fails; the
+// start can be retried once the other run is gone.
+var ErrRunConflict = errors.New("agent name is held by another live run")
 
 type Runtime interface {
 	Name() string
