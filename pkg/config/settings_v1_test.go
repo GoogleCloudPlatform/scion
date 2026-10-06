@@ -990,6 +990,89 @@ harnesses:
 	})
 }
 
+// TestLoadSettings_BareScionHubEnvDoesNotBreakDecode is the regression
+// test for https://github.com/ptone/scion/issues/2724. A bare SCION_HUB
+// variable used to map to the top-level key "hub" as a string, which
+// collides with the struct-typed hub settings and made koanf's Unmarshal
+// fail with "'hub' expected a map or struct, got string" for any project
+// whose settings.yaml has a hub: map. Nothing in scion reads a bare
+// SCION_HUB, so the env key mappers drop it.
+func TestLoadSettings_BareScionHubEnvDoesNotBreakDecode(t *testing.T) {
+	unsetTestEnv(t, "SCION_HUB_ENDPOINT", "SCION_AUTO_EXPOSE_PORTS", "SCION_HUB")
+
+	writeProject := func(t *testing.T, settingsYAML string) string {
+		t.Helper()
+		tmpDir := t.TempDir()
+		t.Setenv("HOME", tmpDir)
+		projectDir := filepath.Join(tmpDir, "my-project", ".scion")
+		require.NoError(t, os.MkdirAll(projectDir, 0755))
+		require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(settingsYAML), 0644))
+		return projectDir
+	}
+	newProject := func(t *testing.T) string {
+		t.Helper()
+		return writeProject(t, `schema_version: "1"
+hub:
+  endpoint: https://file.example.com
+`)
+	}
+	// newLegacyProject writes an unversioned settings.yaml (no
+	// schema_version), which LoadEffectiveSettings routes through
+	// LoadSettingsKoanf and its legacy env key mapper. The legacy
+	// Settings.Hub field is struct-typed too, so it collides the same way.
+	newLegacyProject := func(t *testing.T) string {
+		t.Helper()
+		return writeProject(t, `hub:
+  endpoint: https://file.example.com
+`)
+	}
+
+	t.Run("SCION_HUB unset: file hub map loads", func(t *testing.T) {
+		projectDir := newProject(t)
+		vs, err := LoadVersionedSettings(projectDir)
+		require.NoError(t, err)
+		require.NotNil(t, vs.Hub)
+		assert.Equal(t, "https://file.example.com", vs.Hub.Endpoint)
+	})
+
+	t.Run("SCION_HUB set: versioned load ignores it", func(t *testing.T) {
+		projectDir := newProject(t)
+		t.Setenv("SCION_HUB", "https://env.example.com")
+		vs, err := LoadVersionedSettings(projectDir)
+		require.NoError(t, err, "a bare SCION_HUB must never break LoadVersionedSettings decoding")
+		require.NotNil(t, vs.Hub)
+		assert.Equal(t, "https://file.example.com", vs.Hub.Endpoint)
+	})
+
+	t.Run("SCION_HUB set: effective load of legacy file ignores it", func(t *testing.T) {
+		projectDir := newLegacyProject(t)
+		t.Setenv("SCION_HUB", "https://env.example.com")
+		vs, _, err := LoadEffectiveSettings(projectDir)
+		require.NoError(t, err, "a bare SCION_HUB must never break LoadEffectiveSettings decoding")
+		require.NotNil(t, vs.Hub)
+		assert.Equal(t, "https://file.example.com", vs.Hub.Endpoint)
+	})
+
+	t.Run("SCION_HUB set: legacy koanf load ignores it", func(t *testing.T) {
+		projectDir := newLegacyProject(t)
+		t.Setenv("SCION_HUB", "https://env.example.com")
+		s, err := LoadSettingsKoanf(projectDir)
+		require.NoError(t, err, "a bare SCION_HUB must never break LoadSettingsKoanf decoding")
+		require.NotNil(t, s.Hub)
+		assert.Equal(t, "https://file.example.com", s.Hub.Endpoint)
+	})
+
+	t.Run("SCION_HUB set: SCION_HUB_ENDPOINT still applies", func(t *testing.T) {
+		projectDir := newProject(t)
+		t.Setenv("SCION_HUB", "https://env.example.com")
+		t.Setenv("SCION_HUB_ENDPOINT", "https://endpoint.example.com")
+		vs, err := LoadVersionedSettings(projectDir)
+		require.NoError(t, err)
+		require.NotNil(t, vs.Hub)
+		assert.Equal(t, "https://endpoint.example.com", vs.Hub.Endpoint)
+	})
+}
+
 // --- Default settings compatibility tests ---
 
 func TestGetDefaultSettingsData_ProducesSameEffectiveDefaults(t *testing.T) {
@@ -1146,6 +1229,7 @@ func TestVersionedEnvKeyMapper(t *testing.T) {
 		{"SCION_SERVER_LOG_LEVEL", "server.log_level"},
 		{"SCION_AUTO_EXPOSE_PORTS", ""},
 		{"SCION_AUTO_EXPOSE_PORTS_LIST", ""},
+		{"SCION_HUB", ""},
 	}
 
 	for _, tt := range tests {

@@ -29,9 +29,11 @@ import (
 //
 // Shared by every timezone-name validator in this package: the hub-wide
 // agent_defaults.default_timezone validator (admin_settings.go/
-// admin_settings_db.go) and the per-user display-timezone preference
-// validator (handlers_users_core.go) both use this one list, so they
-// cannot drift apart from each other.
+// admin_settings_db.go), the per-user display-timezone preference
+// validator (handlers_users_core.go) and the metrics dashboard's tz
+// parameter resolver (resolveDashboardTimeZone, metrics_dashboard.go) all
+// use this one list, through validateIANATimezone, so they cannot drift
+// apart from each other.
 var nonPortableTimezoneNames = map[string]bool{
 	"Local":      true,
 	"localtime":  true,
