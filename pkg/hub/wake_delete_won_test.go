@@ -71,8 +71,9 @@ func claimWakeRow(t *testing.T, s store.Store, id, st string, lease time.Duratio
 	}
 	n, err := s.UpdateAgentDeletion(context.Background(), id,
 		store.DeletionPredicate{States: []string{""}, DeletedAtNull: true}, fields)
-	require.NoError(t, err)
-	require.Equal(t, 1, n)
+	// assert, not require: it also runs on helper goroutines.
+	assert.NoError(t, err)
+	assert.Equal(t, 1, n)
 }
 
 func requireWakeDeleteWon(t *testing.T, res *WakeResult, dmErr *AgentDMError, agentID string) {

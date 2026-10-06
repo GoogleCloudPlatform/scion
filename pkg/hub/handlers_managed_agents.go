@@ -188,7 +188,7 @@ func (s *Server) managedAgentStop(ctx context.Context, agent *store.Agent) error
 	// Best-effort: a failed read or cancel is logged, not returned.
 	if interactionID := agent.Annotations[annotationInteractionID]; interactionID != "" {
 		if err := stopManagedInteraction(ctx, interactionID); err != nil {
-			slog.Warn("failed to stop interaction on stop", "agent_id", agent.ID, "err", err)
+			slog.Warn("managed agent stop: failed to stop interaction", "agent_id", agent.ID, "err", err)
 		}
 	}
 

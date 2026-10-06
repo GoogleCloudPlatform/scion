@@ -153,8 +153,8 @@ func waitForLifecycleOutcome(
 		_, err := readRow()
 		return err
 	}
-	// rowEnd is rowFailure for the waits that otherwise give up (a closed
-	// event channel, the rolling window): done with the row's failure, or
+	// rowEnd is rowFailure for a closed event channel: done with the row's
+	// failure, or
 	// done with nil when the row is done and reports DeleteWon (see
 	// rowOutcome); else not done.
 	rowEnd := func() (done bool, err error) {
@@ -252,7 +252,10 @@ func waitForLifecycleOutcome(
 			}
 
 		case <-timer.C:
-			if done, err := rowEnd(); done {
+			// rowOutcome, as the poll does: an error phase waiting out its
+			// grace keeps the error-phase answer, else a done row
+			// reporting DeleteWon ends with nil.
+			if done, err := rowOutcome(); done {
 				return err
 			}
 			if grace != nil {
