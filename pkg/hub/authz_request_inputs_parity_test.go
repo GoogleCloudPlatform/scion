@@ -2780,10 +2780,10 @@ func TestParity_C1_ConstraintDenyOnProject(t *testing.T) {
 	}
 }
 
-// TestParity_R1_OwnerOnlyNoBinding is row R1: a user with no role
-// binding at all, granted only through the resource-owner relationship.
-// Deep-equal.
-func TestParity_R1_OwnerOnlyNoBinding(t *testing.T) {
+// TestParity_R1_OwnerAccessOnlyBinding is row R1: a user whose only role
+// binding is an access-only project binding (no permissions), granted only
+// through the resource-owner relationship. Deep-equal.
+func TestParity_R1_OwnerAccessOnlyBinding(t *testing.T) {
 	_, s := authzTestSetup(t)
 	ctx := context.Background()
 	ownerID := tid("r1-owner")
@@ -2792,9 +2792,9 @@ func TestParity_R1_OwnerOnlyNoBinding(t *testing.T) {
 	require.NoError(t, s.CreateProject(ctx, &store.Project{ID: projectID, Slug: "r1-proj", Name: "r1"}))
 	require.NoError(t, s.CreateUser(ctx, &store.User{ID: ownerID, Email: "r1@test.com", DisplayName: "r1", Role: "member", Status: "active"}))
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{ID: agentID, Slug: "r1-agent", Name: "r1-agent", ProjectID: projectID, Phase: "running", OwnerID: ownerID}))
-	// No permission-granting binding: an access-only project binding gives
-	// the owner relationship the active project access it requires
-	// (ptone/scion#2141) without granting any permission itself.
+	// The access-only project binding gives the owner relationship the
+	// active project access it requires (ptone/scion#2141) without granting
+	// any permission itself.
 	grantProjectAccessOnly(t, s, ownerID, projectID)
 	owner := NewAuthenticatedUser(ownerID, "r1@test.com", "r1", "member", "api")
 	res := Resource{Type: "agent", ID: agentID, ParentType: "project", ParentID: projectID, OwnerID: ownerID}

@@ -198,8 +198,8 @@ func TestProjectMembersGroup_CurrentOwnerKeepsLegitimateAccess(t *testing.T) {
 // TestBackfillClearProjectMembersGroupOwners pins the startup backfill:
 // OwnerID is cleared on project members groups identified by either marker
 // key (ptone/scion#2556 tracks the key mismatch), other groups are left
-// untouched, a removed creator loses group.* once the backfill runs, and a
-// second run is a no-op.
+// untouched, a creator whose only remaining authority is the legacy
+// OwnerID loses group.* once the backfill runs, and a second run is a no-op.
 func TestBackfillClearProjectMembersGroupOwners(t *testing.T) {
 	f := setupStaleOwnerFixture(t)
 	ctx := context.Background()
@@ -213,12 +213,13 @@ func TestBackfillClearProjectMembersGroupOwners(t *testing.T) {
 	require.NoError(t, s.UpdateGroup(ctx, hubKeyGroup))
 
 	ident := NewAuthenticatedUser(f.creator.ID, f.creator.Email, f.creator.DisplayName, "member", "api")
-	// The removed creator holds no project access, so the legacy OwnerID on
-	// this project-scoped group grants no group.addMember even before the
-	// backfill: the owner relationship requires active project access
-	// (ptone/scion#2141).
-	require.False(t, f.srv.authzService.CheckAccess(ctx, ident, groupResource(hubKeyGroup), ActionAddMember).Allowed,
-		"the removed creator has no group.addMember without project access")
+	// The owner relationship on this project-scoped group requires active
+	// project access (ptone/scion#2141). An access-only binding (no
+	// permissions) supplies it, so the legacy OwnerID is the creator's only
+	// source of group.addMember before the backfill.
+	grantProjectAccessOnly(t, s, f.creator.ID, f.project.ID)
+	require.True(t, f.srv.authzService.CheckAccess(ctx, ident, groupResource(hubKeyGroup), ActionAddMember).Allowed,
+		"precondition: the legacy OwnerID gives the creator group.addMember")
 
 	// A second project whose members group carries only the entadapter key.
 	legacyProject := &store.Project{
@@ -267,7 +268,7 @@ func TestBackfillClearProjectMembersGroupOwners(t *testing.T) {
 	assert.Equal(t, f.coOwner.ID, get(falseMarker.ID).OwnerID, "marker not \"true\" untouched")
 
 	assert.False(t, f.srv.authzService.CheckAccess(ctx, ident, groupResource(get(hubKeyGroup.ID)), ActionAddMember).Allowed,
-		"after the backfill the removed creator has no group.addMember")
+		"after the backfill the creator has no group.addMember")
 
 	// Second run: nothing changes.
 	before := map[string]*store.Group{}

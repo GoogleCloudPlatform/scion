@@ -3892,6 +3892,11 @@ type MessageEventPayload struct {
 	Plain     bool   `json:"plain,omitempty"`
 }
 
+// errScheduledMessageRefused is the one public refusal a scheduled message
+// records when its target cannot be resolved or fire-time authorization
+// refuses it. The specific cause is logged, never stored on the event.
+var errScheduledMessageRefused = errors.New("scheduled_message_denied: message delivery refused")
+
 // messageEventHandler returns an EventHandler that dispatches scheduled messages
 // to agents via the AgentDispatcher.
 //
@@ -3899,11 +3904,6 @@ type MessageEventPayload struct {
 // authorizeScheduledMessageFire before any dispatch. Scheduled messages are
 // request-derived (not system-plane) and must pass the production
 // authorizeAgentMessage choke point with isSystemPlane=false.
-// errScheduledMessageRefused is the one public refusal a scheduled message
-// records when its target cannot be resolved or fire-time authorization
-// refuses it. The specific cause is logged, never stored on the event.
-var errScheduledMessageRefused = errors.New("scheduled_message_denied: message delivery refused")
-
 func (s *Server) messageEventHandler() EventHandler {
 	return func(ctx context.Context, evt store.ScheduledEvent) error {
 		var payload MessageEventPayload

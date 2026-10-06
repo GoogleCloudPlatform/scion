@@ -1025,3 +1025,42 @@ func TestRelationshipProjectAccess_RefusalSurfaces(t *testing.T) {
 		})
 	}
 }
+
+// rpaAgentFaultStore fails GetAgent for one agent ID with a store error
+// that is not store.ErrNotFound.
+type rpaAgentFaultStore struct {
+	store.Store
+	failID string
+}
+
+func (s *rpaAgentFaultStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
+	if id == s.failID {
+		return nil, errors.New("injected: agent lookup failure")
+	}
+	return s.Store.GetAgent(ctx, id)
+}
+
+// TestRelationshipProjectAccess_ScheduledTargetLookupFault pins that a
+// scheduled message whose target lookup fails with a store error (not
+// ErrNotFound) records the constant public refusal, and that the cause is
+// logged instead.
+func TestRelationshipProjectAccess_ScheduledTargetLookupFault(t *testing.T) {
+	f := newRPAFixture(t, "schedfault")
+	ctx := context.Background()
+	agent := f.messageAgent(t, "schedfault", store.MessageModeLineage, f.ownerID)
+
+	orig := f.srv.store
+	f.srv.store = &rpaAgentFaultStore{Store: orig, failID: agent.ID}
+	t.Cleanup(func() { f.srv.store = orig })
+	logs := installSentinelLogCapture(t)
+
+	err := f.srv.messageEventHandler()(ctx, store.ScheduledEvent{
+		ID: tid("rpa-schedfault-evt"), ProjectID: f.projectID, EventType: "message",
+		Payload: `{"agentId":"` + agent.ID + `","message":"hello"}`, CreatedBy: f.ownerID,
+	})
+	require.Error(t, err)
+	assert.Equal(t, errScheduledMessageRefused.Error(), err.Error())
+	assert.NotContains(t, err.Error(), "injected")
+	assert.Contains(t, logs.String(), "target agent lookup failed")
+	assert.Contains(t, logs.String(), "injected: agent lookup failure")
+}
