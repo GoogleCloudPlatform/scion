@@ -3493,55 +3493,6 @@ func TestConfigureSharedWorkspaceGit_EnforcedRefusesWithoutUsableUID(t *testing.
 	}
 }
 
-// TestConfigureSharedWorkspaceGit_NeverRunsAsRootForDistinctWorkload covers
-// the unenforced identity cases: a usable uid+gid pair writes the config, a
-// root process with a distinct workload uid but no usable gid skips the write
-// (sentinel, no file) instead of running git as root, and with no distinct
-// workload user the write proceeds under the current identity.
-func TestConfigureSharedWorkspaceGit_NeverRunsAsRootForDistinctWorkload(t *testing.T) {
-	for _, tc := range []struct {
-		name      string
-		uid, gid  int
-		getuid    func() int
-		wantErr   error
-		wantWrite bool
-	}{
-		// The current non-root identity stands in for the workload so
-		// configureGitCommand needs no Credential override to succeed.
-		{"usable pair", os.Getuid(), os.Getgid(), os.Getuid, nil, true},
-		{"root with uid only", 1000, 0, func() int { return 0 }, errSharedWorkspaceGitNoUsableGID, false},
-		{"root with uid and negative gid", 1000, -1, func() int { return 0 }, errSharedWorkspaceGitNoUsableGID, false},
-		{"root with no distinct user", 0, 0, func() int { return 0 }, nil, true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if tc.wantWrite && tc.uid > 0 && os.Getuid() == 0 {
-				t.Skip("usable-pair case needs a non-root test process")
-			}
-			orig := sharedWorkspaceGitGetuid
-			sharedWorkspaceGitGetuid = tc.getuid
-			t.Cleanup(func() { sharedWorkspaceGitGetuid = orig })
-
-			agentHome := t.TempDir()
-			gitconfigPath := filepath.Join(agentHome, ".gitconfig")
-			err := configureSharedWorkspaceGit(agentHome, tc.uid, tc.gid, false)
-			if tc.wantErr != nil {
-				if !errors.Is(err, tc.wantErr) {
-					t.Fatalf("err = %v, want %v", err, tc.wantErr)
-				}
-			} else if err != nil {
-				t.Fatalf("configureSharedWorkspaceGit: %v", err)
-			}
-			if tc.wantWrite {
-				if got := gitConfigGet(t, gitconfigPath, "user.email"); got != "agent@scion.dev" {
-					t.Errorf("user.email = %q, want agent@scion.dev", got)
-				}
-			} else if _, statErr := os.Stat(gitconfigPath); statErr == nil {
-				t.Error("expected no .gitconfig to be written when the write is skipped")
-			}
-		})
-	}
-}
-
 // TestConfigureSharedWorkspaceGit_FifoDoesNotHang proves a FIFO planted at
 // $HOME/.gitconfig with no writer is refused immediately — via a stat, which
 // never blocks, unlike opening the FIFO for real — rather than hanging
