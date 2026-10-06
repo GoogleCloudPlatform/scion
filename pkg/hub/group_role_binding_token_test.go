@@ -50,7 +50,10 @@ func TestGroupChange_TokenRefusedWhenClosureCarriesRoleBinding(t *testing.T) {
 		return id
 	}
 	newGroup := func(name string) *store.Group {
-		g := &store.Group{ID: tid("grb-" + name), Slug: "grb-" + name, Name: name, ProjectID: projectID}
+		// The token holder owns each group, which clears the group role
+		// hierarchy check of member changes; the rule under test runs
+		// after it.
+		g := &store.Group{ID: tid("grb-" + name), Slug: "grb-" + name, Name: name, ProjectID: projectID, OwnerID: adminID}
 		require.NoError(t, s.CreateGroup(ctx, g))
 		return g
 	}

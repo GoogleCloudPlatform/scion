@@ -92,7 +92,6 @@ func TestSessionOnlyGate_ReasonIsReported(t *testing.T) {
 		{"token create", http.MethodPost, "/api/v1/auth/tokens", map[string]interface{}{"name": "x", "boundary": map[string]string{"kind": "hub"}, "scopes": []string{"agent:read"}}, authzop.ReasonCredentialManagement},
 		{"token revoke", http.MethodPost, "/api/v1/auth/tokens/" + f.uatRevokePost + "/revoke", map[string]interface{}{}, authzop.ReasonCredentialManagement},
 		{"token delete", http.MethodDelete, "/api/v1/auth/tokens/" + f.uatRevokeDelete, nil, authzop.ReasonCredentialManagement},
-		{"project delete", http.MethodDelete, "/api/v1/projects/" + f.projectDel, nil, authzop.ReasonIrreversibleCascade},
 		{"project member add", http.MethodPost, "/api/v1/projects/" + f.project + "/members", map[string]interface{}{
 			"roleDefinitionId": f.projectMemberRoleID, "principalType": "user", "principalId": f.user,
 		}, authzop.ReasonGovernancePending},
@@ -105,10 +104,11 @@ func TestSessionOnlyGate_ReasonIsReported(t *testing.T) {
 		requireSessionOnlyRefusal(t, rec, tc.want, tc.name)
 	}
 
-	// Sites the route layer refuses for a token before the handler runs
-	// (scheduled_event and role_binding permissions carry no selector) are
-	// called directly, with the same minted token authenticated as the
-	// middleware does.
+	// Sites a token cannot reach through the route layer, because the
+	// scheduled_event and role_binding permissions carry no selector, are
+	// called directly with the same minted token, authenticated as the
+	// middleware does. Project delete is pinned at the service by
+	// TestRS3_ProjectDeleteScopedUATDenied.
 	ctx := realTokenContext(t, m.srv, key)
 
 	rec := httptest.NewRecorder()

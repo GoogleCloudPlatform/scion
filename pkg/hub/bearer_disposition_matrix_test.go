@@ -49,7 +49,16 @@ type bearerMatrixExclusion struct {
 // carries a specific reason and the name of the test that pins it.
 // TestBearerMatrixExclusions_NotStaleAndPinned keeps every key live and
 // every Pin declared.
-var bearerMatrixExclusions = map[liveInventoryKey]bearerMatrixExclusion{}
+var bearerMatrixExclusions = map[liveInventoryKey]bearerMatrixExclusion{
+	{OperationID: "project.lifecycle.delete", Method: "DELETE", Pattern: "/api/v1/projects/{id}"}: {
+		Reason: "project.delete has no token selector, so a token is refused by the deletion service's base permission check (403 project_delete_forbidden) before its session-only credential step is reached; the session-only step and its IRREVERSIBLE_CASCADE reason are pinned at the service",
+		Pin:    "TestRS3_ProjectDeleteScopedUATDenied",
+	},
+	{OperationID: "harnessconfig.read", Method: "GET", Pattern: "/api/v1/harness-configs"}: {
+		Reason: "the collection list filters each row by harness_config.read instead of refusing the request, so a token without the selector gets 200 with no rows rather than 403; the list gets its own harness_config.list disposition in a later batch",
+		Pin:    "TestScopedAdminListEndpointsFilterCrossProjectRowsAndCountAuthorizedMatches",
+	},
+}
 
 // bearerMatrixEntry is one catalog entry point with a request surface.
 type bearerMatrixEntry struct {
@@ -148,15 +157,37 @@ func (m *bearerMatrixFixture) mint(t *testing.T, boundary TokenBoundary, scopes 
 }
 
 // tryMint is mint for a selector set that may not be mintable; it returns
-// "" when minting fails.
+// "" when minting fails. Results are cached like mint's.
 func (m *bearerMatrixFixture) tryMint(boundary TokenBoundary, scopes []string) string {
+	cacheKey := "try|" + string(boundary.Kind) + "|" + boundary.ProjectID + "|" + strings.Join(scopes, ",")
+	if key, ok := m.tokens[cacheKey]; ok {
+		return key
+	}
 	key, _, err := m.srv.uatService.CreateTokenWithParams(rs4MintContext(m.adminID), CreateTokenParams{
 		UserID: m.adminID, Name: "bdm-" + tid("try"), Boundary: boundary, Scopes: scopes,
 	})
 	if err != nil {
-		return ""
+		key = ""
 	}
+	m.tokens[cacheKey] = key
 	return key
+}
+
+// canMint reports whether the super-admin can mint a token for the
+// boundary and selectors. The trial token is deleted, so probing does not
+// count against the per-user token limit.
+func (m *bearerMatrixFixture) canMint(t *testing.T, boundary TokenBoundary, scopes []string) bool {
+	t.Helper()
+	ctx := rs4MintContext(m.adminID)
+	_, tok, err := m.srv.uatService.CreateTokenWithParams(ctx, CreateTokenParams{
+		UserID: m.adminID, Name: "bdm-" + tid("probe"), Boundary: boundary, Scopes: scopes,
+	})
+	if err != nil {
+		require.NotErrorIs(t, err, ErrUATLimitExceeded, "probing must not exhaust the token limit")
+		return false
+	}
+	require.NoError(t, m.srv.uatService.DeleteToken(ctx, m.adminID, tok.ID))
+	return true
 }
 
 // everySelectorHubToken mints a hub token for the super-admin that carries
@@ -170,7 +201,7 @@ func (m *bearerMatrixFixture) everySelectorHubToken(t *testing.T) (string, []str
 			continue
 		}
 		seen[p.UATScope] = true
-		if m.tryMint(hubBoundary(), []string{p.UATScope}) != "" {
+		if m.canMint(t, hubBoundary(), []string{p.UATScope}) {
 			selectors = append(selectors, p.UATScope)
 		}
 	}
@@ -227,6 +258,7 @@ func bearerMatrixBodyOverrides(f idFixtures) map[overrideKey]map[string]interfac
 			"roleDefinitionId": f.projectMemberRoleID, "principalType": "user", "principalId": f.user,
 		},
 		{"project.membership.transfer", "/api/v1/projects/{id}/transfer-ownership"}: {"newOwnerId": f.member},
+		{"agent.lifecycle.create", "/api/v1/agents"}:                                {"name": "bdm-created", "projectId": f.project},
 	}
 }
 
