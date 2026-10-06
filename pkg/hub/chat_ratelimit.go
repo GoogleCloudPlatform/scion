@@ -320,7 +320,7 @@ func (s *Server) allowChatSend(w http.ResponseWriter, senderID string, class cha
 	// The delay goes in the body as well as the header: no current client
 	// reads Retry-After, so the message text is what a sending agent sees.
 	writeError(w, http.StatusTooManyRequests, ErrCodeRateLimited,
-		fmt.Sprintf("send rate limit exceeded (%d %s per minute); retry in %ds",
-			int(decision.Limit), "messages", seconds), nil)
+		fmt.Sprintf("send rate limit exceeded (%d messages per minute); retry in %ds",
+			int(decision.Limit), seconds), nil)
 	return false
 }

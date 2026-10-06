@@ -256,8 +256,8 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 		seconds := int(math.Ceil(rateLimitDecision.RetryAfter.Seconds()))
 		dmErr := &AgentDMError{
 			Code: ErrCodeRateLimited,
-			Message: fmt.Sprintf("send rate limit exceeded (%d %s per minute); retry in %ds",
-				int(rateLimitDecision.Limit), "messages", seconds),
+			Message: fmt.Sprintf("send rate limit exceeded (%d messages per minute); retry in %ds",
+				int(rateLimitDecision.Limit), seconds),
 			HTTPStatus: http.StatusTooManyRequests,
 			RetryAfter: rateLimitDecision.RetryAfter,
 		}

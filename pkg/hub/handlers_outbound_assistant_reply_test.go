@@ -75,10 +75,17 @@ func (r *recordingSpoke) has(body string) bool {
 	return false
 }
 
-// webAffinityCountingStore counts RecordChannel(..., "web", ...) calls.
+// webAffinityCountingStore counts RecordChannel(..., "web", ...) calls and
+// GetLastChannel (affinity lookup) calls.
 type webAffinityCountingStore struct {
 	WebChatStore
-	webRecords atomic.Int32
+	webRecords      atomic.Int32
+	affinityLookups atomic.Int32
+}
+
+func (c *webAffinityCountingStore) GetLastChannel(ctx context.Context, userID, projectID, agentID string) (string, error) {
+	c.affinityLookups.Add(1)
+	return c.WebChatStore.GetLastChannel(ctx, userID, projectID, agentID)
 }
 
 func (c *webAffinityCountingStore) RecordChannel(ctx context.Context, userID, projectID, agentID, channel string, at time.Time) error {
@@ -291,12 +298,15 @@ func TestOutboundAssistantReply_WebAffinity_Dropped(t *testing.T) {
 }
 
 // TestOutboundAssistantReply_DroppedBeforeAnySideEffect checks the drop in
-// isolation: with no deliberate message sent, there are no DM registry rows
-// and no web affinity writes at all.
+// isolation: with no deliberate message sent, routing never ran — no
+// affinity lookup, no conversation row for the DM key, no DM registry rows,
+// no affinity writes and no events.
 func TestOutboundAssistantReply_DroppedBeforeAnySideEffect(t *testing.T) {
 	f := newAssistantReplyFixture(t, true)
 	f.send(t, messages.TypeAssistantReply, "end-of-turn mirror text")
 
+	assert.Zero(t, f.wcs.affinityLookups.Load(), "assistant-reply must be dropped before the affinity lookup")
+	assertNoDMConversation(t, f)
 	dms, err := f.wcs.ListDMs(context.Background(), f.user.ID)
 	require.NoError(t, err)
 	assert.Empty(t, dms, "assistant-reply must not register webchat_dm rows")
@@ -308,12 +318,31 @@ func TestOutboundAssistantReply_DroppedBeforeAnySideEffect(t *testing.T) {
 	}
 }
 
+// assertNoDMConversation fails if a conversation row exists for the
+// agent-user DM key. The deliberate test below is the positive control that
+// this lookup finds the row routing creates.
+func assertNoDMConversation(t *testing.T, f *assistantReplyFixture) {
+	t.Helper()
+	conv, err := f.s.GetConversationByExternalRef(context.Background(), "native", f.dmKey)
+	if err != nil {
+		require.ErrorIs(t, err, store.ErrNotFound)
+		return
+	}
+	assert.Nil(t, conv, "assistant-reply must not create a conversation for the DM key")
+}
+
 func TestOutboundDeliberate_WebAffinity_LandsInWebDM(t *testing.T) {
 	f := newAssistantReplyFixture(t, true)
 	const body = "deliberate agent message"
 
 	f.send(t, messages.TypeInputNeeded, body)
 	stored := f.waitStored(t, body)
+
+	conv, err := f.s.GetConversationByExternalRef(context.Background(), "native", f.dmKey)
+	require.NoError(t, err, "positive control: routing creates the DM conversation")
+	require.NotNil(t, conv)
+	assert.Equal(t, stored.ConversationID, conv.ID)
+	assert.NotZero(t, f.wcs.affinityLookups.Load(), "positive control: routing looks up affinity")
 
 	assert.Equal(t, "web", stored.Channel, "deliberate message must follow web affinity")
 	assert.Equal(t, f.dmKey, stored.ThreadID)
@@ -344,4 +373,48 @@ func TestOutboundDeliberate_DirectPath_StillBackfillsWebDM(t *testing.T) {
 	assert.NotEmpty(t, dms)
 	seen := f.waitSubjects(t, "user."+f.user.ID+".chat.dm")
 	assert.True(t, seen["user."+f.user.ID+".chat.dm"])
+}
+
+// handleAgentMessage drops a caller-supplied assistant-reply the same way the
+// outbound handler does: 200 {status: dropped}, nothing persisted or
+// dispatched. A deliberate message through the same path is the control.
+func TestAgentMessage_AssistantReplyIsDropped(t *testing.T) {
+	srv, s, _, sender, target, _, _, dispatcher := mentionFanoutSetup(t)
+
+	post := func(msgType, body string) *httptest.ResponseRecorder {
+		t.Helper()
+		sm := &messages.StructuredMessage{
+			Version:     messages.Version,
+			Timestamp:   time.Now().UTC().Format(time.RFC3339),
+			Type:        msgType,
+			Sender:      "agent:" + sender.Slug,
+			SenderID:    sender.ID,
+			Recipient:   "agent:" + target.Slug,
+			RecipientID: target.ID,
+			Msg:         body,
+		}
+		raw, _ := json.Marshal(MessageRequest{StructuredMessage: sm})
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+target.ID+"/message", bytes.NewReader(raw))
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(agentCtx(req.Context(), sender))
+		rr := httptest.NewRecorder()
+		srv.handleAgentMessage(rr, req, target.ID)
+		return rr
+	}
+
+	rr := post(messages.TypeAssistantReply, "mirrored turn text")
+	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+	var resp map[string]interface{}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	assert.Equal(t, "dropped", resp["status"])
+	assert.Empty(t, dispatchesTo(dispatcher, target.ID), "assistant-reply must not be dispatched")
+	res, err := s.ListMessages(context.Background(), store.MessageFilter{AgentID: target.ID}, store.ListOptions{Limit: 50})
+	require.NoError(t, err)
+	for _, m := range res.Items {
+		assert.NotEqual(t, messages.TypeAssistantReply, m.Type, "assistant-reply must not be persisted")
+	}
+
+	rr = post(messages.TypeInstruction, "deliberate instruction")
+	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+	assert.NotEmpty(t, dispatchesTo(dispatcher, target.ID), "positive control: a deliberate message is dispatched")
 }
