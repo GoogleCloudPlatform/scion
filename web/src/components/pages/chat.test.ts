@@ -1927,8 +1927,10 @@ describe('chat page — startup after the page is removed', () => {
     const el = page as { initV2: () => Promise<void> };
     const startups: Promise<void>[] = [];
     const initV2 = el.initV2;
-    // Deliberately shadows the private initV2 on this instance only; if the
-    // method is renamed, initV2 is undefined here and the call fails loudly.
+    if (typeof initV2 !== 'function') {
+      throw new Error('initV2 is not a function on the chat page. Was it renamed or removed?');
+    }
+    // Deliberately shadows the private initV2 on this instance only.
     el.initV2 = function (this: unknown): Promise<void> {
       const startup = initV2.call(this);
       startups.push(startup);
