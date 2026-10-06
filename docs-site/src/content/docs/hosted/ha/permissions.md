@@ -146,6 +146,18 @@ The cache is automatically invalidated for a target service account when that se
 
 For Policy Troubleshooter to evaluate a caller's IAM permission across the organization, the Scion Hub's own GCP service account must be granted the **IAM Security Reviewer** role (`roles/iam.securityReviewer`) at either the Google Cloud project or organization level.
 
+### Start-Time Admissibility Check
+
+An assignment that was valid when it was made can stop being usable later. Before the Hub starts, restarts or resumes an agent with an assigned service account (from the Web Dashboard, the API, or `scion start` / `scion resume`), it checks that the account:
+
+- still exists and is still reachable from the agent's project;
+- is still verified, under the same email the agent was assigned;
+- for a hub-scoped account, is still allowed by `gcp_iam_check_mode: enforce`.
+
+If any check fails, the start is refused with `400` and a message that says what to fix (for example, re-verify the service account or assign another one), instead of the agent starting and failing later when it asks for a token. If the Hub cannot complete the check, the start fails with `500`. Stop and suspend are not checked. Every token request repeats the same check, so passing it at start does not exempt an agent later.
+
+If the Hub cannot save the result of a service account verification (on registration, minting or an explicit verify), the request fails with `500` instead of reporting success. On registration the account record already exists, so re-run verification on it (`scion project service-accounts verify <id>`, or `POST .../gcp-service-accounts/<id>/verify`) rather than registering it again.
+
 ### Hub-Scoped Service Accounts
 
 Hub-scoped service accounts are defined globally at the Hub level rather than being restricted to a single project. This allows Platform Ops to make shared service accounts available for selection across multiple project-level workspaces.
@@ -203,7 +215,7 @@ The hub default does not bypass the existing gates:
 ### Passthrough Mode Security & PATCH Parity
 
 In **Passthrough Mode**, an agent bypasses explicit service account binding and directly assumes the GCP identity of its GKE/GCE broker host. To prevent unauthorized access to host-level authority:
-1. **Broker-Owner Restriction**: The caller must have permission to use that specific broker in passthrough mode.
+1. **Broker-Owner Restriction**: The caller must own that specific Runtime Broker or be a Hub admin. On single-node deployments the Hub's embedded Runtime Broker has no recorded owner, so a Hub admin signed in directly (not through a scoped token or a federated identity) counts as its owner. Every other Runtime Broker still requires ownership or admin rights.
 2. **Host SA check**: The caller's GCP principal is checked via Policy Troubleshooter to confirm they hold `iam.serviceAccounts.actAs` permission on the broker's underlying host service account.
 
 To enforce this boundary reliably, Scion implements strict **PATCH Parity** across its API:
