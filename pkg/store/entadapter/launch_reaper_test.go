@@ -976,7 +976,12 @@ func TestReaper_H2_TwoReplicas_NotAcquiredDoesNotAdvanceLossClock(t *testing.T) 
 	// Simulate replica A stuck holding the tick's lock for far longer than a
 	// real 60s: back-date ok_at so the eventual recovery tick disarms, then
 	// grab the real advisory lock on a separate connection and hold it open.
-	setLaunchReaperOkAt(t, ctx, s, readStoreNow(t, ctx, s).Add(-time.Hour))
+	// The cluster had been armed long before A got stuck (armed_since 2h
+	// back), so only the recovery re-disarm keeps the recovery tick from
+	// reaping the hour-silent agent at once.
+	stuckSince := readStoreNow(t, ctx, s)
+	setLaunchReaperArmedSince(t, ctx, s, stuckSince.Add(-2*time.Hour))
+	setLaunchReaperOkAt(t, ctx, s, stuckSince.Add(-time.Hour))
 
 	db := s.sqlDB()
 	require.NotNil(t, db)
