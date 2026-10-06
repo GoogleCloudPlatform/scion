@@ -351,3 +351,85 @@ func symlinkInto(t *testing.T, target, link string) {
 		t.Fatal(err)
 	}
 }
+
+// removeProjectConfigsSubtree refuses any target that is not strictly inside
+// project-configs, including one reached through a symlinked entry, and
+// removes a real subtree inside it.
+func TestRemoveProjectConfigsSubtree(t *testing.T) {
+	home := t.TempDir()
+	globalDir := filepath.Join(home, ".scion")
+	configs := filepath.Join(globalDir, config.ProjectConfigsDir)
+	outside := t.TempDir()
+	victim := filepath.Join(outside, "victim")
+	if err := os.MkdirAll(victim, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(configs, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(configs, "link__"+shortA())); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, path := range []string{
+		configs,
+		filepath.Join(configs, ".."),
+		outside,
+		victim,
+		filepath.Join(configs, "..", "..", filepath.Base(home)),
+		filepath.Join(configs, "link__"+shortA(), "victim"),
+	} {
+		if err := removeProjectConfigsSubtree(globalDir, path); err == nil {
+			t.Errorf("%s: expected an error", path)
+		}
+	}
+	for _, p := range []string{configs, victim} {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("%s was removed: %v", p, err)
+		}
+	}
+
+	inside := filepath.Join(configs, "proj-a__"+shortA(), config.SharedDirsSubdir)
+	if err := os.MkdirAll(filepath.Join(inside, "data"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeProjectConfigsSubtree(globalDir, inside); err != nil {
+		t.Fatalf("remove %s: %v", inside, err)
+	}
+	if _, err := os.Lstat(inside); !os.IsNotExist(err) {
+		t.Errorf("%s still exists (err %v)", inside, err)
+	}
+}
+
+// When the shared-dir storage location cannot be read, the delete answers
+// 500 and keeps the project's .scion entry rather than leaving the storage
+// behind; a retry once it is readable removes both.
+func TestDeleteProject_SharedDirStorageUnreadable_KeepsMarker(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("permission bits do not stop root")
+	}
+	mgr := &filteringMockManager{}
+	srv, home := newScopeTestServer(t, mgr)
+	extA, _ := makeHubMarkerProject(t, home, "proj-a", scopeProjA, "dev")
+	baseA := seedSharedDir(t, extA, "scratch")
+	locked := filepath.Dir(baseA)
+	if err := os.Chmod(locked, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+
+	rec := doDeleteProject(t, srv, "proj-a", scopeProjA)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d: %s", rec.Code, rec.Body.String())
+	}
+	assertPresent(t, filepath.Join(home, ".scion", "projects", "proj-a", ".scion"))
+
+	if err := os.Chmod(locked, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if rec := doDeleteProject(t, srv, "proj-a", scopeProjA); rec.Code != http.StatusNoContent {
+		t.Fatalf("retry: expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+	assertGone(t, baseA)
+	assertGone(t, filepath.Join(home, ".scion", "projects", "proj-a"))
+}

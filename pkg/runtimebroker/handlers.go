@@ -29,6 +29,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
@@ -5041,14 +5042,21 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug stri
 	}
 
 	// Remove the project's shared-dir storage first: it can live outside
-	// the project directory, and only the project directory's .scion entry
-	// locates it, so a failure here must leave that entry in place for a
-	// retry to find (ptone/scion#2878). The location is derived from the
-	// slug and the project ID on the request, so a request without a
-	// project ID leaves the storage alone.
+	// the project directory (ptone/scion#2878). Its location is computed
+	// from the request's slug and project ID, but the project's .scion
+	// entry must still be present to corroborate it, so a failure here must
+	// leave that entry in place for a retry. A request without a project ID
+	// leaves the storage alone. When the entry disagrees with the request,
+	// the storage is left alone and the project directory is still removed;
+	// when the storage location cannot be read, the delete fails so it can
+	// be retried.
 	if requestedID := r.URL.Query().Get("project_id"); requestedID == "" {
 		s.agentLifecycleLog.Warn("project delete without project_id: shared-dir storage not removed", "slug", slug)
-	} else if sharedDirsBase, err := hubManagedProjectSharedDirsBase(globalDir, absProject, slug, requestedID); err != nil {
+	} else if sharedDirsBase, err := hubManagedProjectSharedDirsBase(globalDir, absProject, slug, requestedID); errors.Is(err, errSharedDirStorageUnreadable) {
+		s.agentLifecycleLog.Warn("project shared-dir storage could not be checked", "slug", slug, "project_id", requestedID, "error", err)
+		RuntimeError(w, "Failed to check project shared-dir storage: "+err.Error())
+		return
+	} else if err != nil {
 		s.agentLifecycleLog.Warn("project shared-dir storage not removed", "slug", slug, "project_id", requestedID, "reason", err)
 	} else if sharedDirsBase != "" {
 		if err := removeProjectConfigsSubtree(globalDir, sharedDirsBase); err != nil {
@@ -5084,6 +5092,10 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug stri
 // storage location other than the computed one) or the computed directory
 // is not a real directory inside project-configs
 // (projectConfigPathContained); the caller then leaves the storage alone.
+// It returns an error wrapping errSharedDirStorageUnreadable when the
+// computed location cannot be read (for example a permission or I/O
+// error), so the caller can fail the delete and keep the .scion entry for a
+// retry instead of leaving the storage behind.
 //
 // This assumes <slug>__<short ID> under project-configs belongs to the
 // project being deleted. A linked (non hub-managed) copy of the same
@@ -5138,12 +5150,21 @@ func hubManagedProjectSharedDirsBase(globalDir, projectPath, slug, requestedProj
 	}
 	if _, err := os.Lstat(want); os.IsNotExist(err) {
 		return "", nil
+	} else if err != nil && !errors.Is(err, syscall.ENOTDIR) && !errors.Is(err, syscall.ELOOP) {
+		// ENOTDIR and ELOOP mean the layout is wrong, not unreadable;
+		// the containment check below rejects it.
+		return "", fmt.Errorf("%w: %v", errSharedDirStorageUnreadable, err)
 	}
 	if !projectConfigPathContained(globalDir, want) {
 		return "", fmt.Errorf("shared-dir storage is not a real directory inside project-configs")
 	}
 	return want, nil
 }
+
+// errSharedDirStorageUnreadable means a hub-managed project's shared-dir
+// storage location could not be read, so whether there is storage to remove
+// is not known.
+var errSharedDirStorageUnreadable = errors.New("shared-dir storage location could not be read")
 
 // removeProjectConfigsSubtree removes path, which must lie inside
 // <globalDir>/project-configs, through an os.Root opened at project-configs,
