@@ -29,9 +29,9 @@ import (
 
 // TestUnreadMentionKeys_Postgres covers the Postgres-only parts of the
 // unread-mention query: the text-to-uuid cast of message_id, and the
-// UUID-shape guard that turns an empty or malformed watermark into "no
-// watermark" instead of a cast error. It also covers the orphan sweep,
-// including a non-UUID message_id.
+// UUID-shape guards that turn an empty or malformed watermark into "no
+// watermark" and make a non-UUID mention message_id inert instead of a
+// cast error. It also covers the orphan sweep, including that row.
 //
 // It runs in a throwaway schema with a minimal messages table, so it never
 // touches an existing messages table in the target database.
@@ -90,12 +90,20 @@ func TestUnreadMentionKeys_Postgres(t *testing.T) {
 		}
 	}
 
+	// A non-UUID message_id is ignored rather than failing the cast, and
+	// the caller's other threads are still reported.
+	require.NoError(t, wcs.RecordMentions(ctx, "legacy", "not-a-uuid", []string{user}))
+	keys = append(keys, "legacy")
+
 	got, err := wcs.UnreadMentionKeys(ctx, user, keys)
 	require.NoError(t, err)
 	for key, tc := range cases {
 		if got[key] != tc.want {
 			t.Errorf("%s: unread mention = %v; want %v", key, got[key], tc.want)
 		}
+	}
+	if got["legacy"] {
+		t.Error("legacy: non-UUID mention reported as unread")
 	}
 
 	// Another user's rows never surface.
@@ -104,10 +112,9 @@ func TestUnreadMentionKeys_Postgres(t *testing.T) {
 	require.Empty(t, other)
 
 	// The orphan sweep drops a row whose message is gone and keeps the rest.
-	// A non-UUID message_id must not fail the sweep on the uuid cast; it
-	// can never match a message, so it is swept as an orphan too.
+	// The non-UUID "legacy" row must not fail the sweep on the uuid cast;
+	// it can never match a message, so it is swept as an orphan too.
 	require.NoError(t, wcs.RecordMentions(ctx, "orphan", api.NewUUID(), []string{user}))
-	require.NoError(t, wcs.RecordMentions(ctx, "legacy", "not-a-uuid", []string{user}))
 	n, err := wcs.PurgeOrphanMentions(ctx)
 	require.NoError(t, err)
 	require.Equal(t, 2, n)

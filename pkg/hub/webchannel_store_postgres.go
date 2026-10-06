@@ -2089,11 +2089,13 @@ ON CONFLICT (message_id, user_id) DO NOTHING
 // UnreadMentionKeys returns the conversations in conversationKeys where
 // userID has a recorded mention after its own read watermark, in one query.
 //
-// messages.id is a UUID column while the webchat tables hold text. The
-// mention's message_id is always a hub-minted UUID, so it is cast directly
-// and the join can use the messages primary key. The watermark is only cast
-// when it has the UUID shape: mark-unread may leave it empty, and an empty
-// or malformed watermark must read as "no watermark", not fail the query.
+// messages.id is a UUID column while the webchat tables hold text. Both
+// casts sit inside a CASE on the UUID shape (Postgres does not promise OR
+// evaluation order), and the join can still use the messages primary key.
+// A non-UUID mention message_id maps to NULL and joins nothing, so the row
+// is ignored instead of failing the caller's thread list. Mark-unread may
+// leave the watermark empty, and an empty or malformed watermark must read
+// as "no watermark", not fail the query.
 func (s *pgWebChatStore) UnreadMentionKeys(ctx context.Context, userID string, conversationKeys []string) (map[string]bool, error) {
 	out := make(map[string]bool)
 	if userID == "" || len(conversationKeys) == 0 {
@@ -2109,7 +2111,9 @@ func (s *pgWebChatStore) UnreadMentionKeys(ctx context.Context, userID string, c
 	query := fmt.Sprintf(`
 SELECT DISTINCT wm.conversation_key
   FROM webchat_mention wm
-  JOIN messages m ON m.id = wm.message_id::uuid
+  JOIN messages m ON m.id = (CASE
+        WHEN wm.message_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+        THEN wm.message_id::uuid END)
   LEFT JOIN webchat_read_state rs
          ON rs.user_id = wm.user_id AND rs.conversation_key = wm.conversation_key
   LEFT JOIN messages lr ON lr.id = (CASE
