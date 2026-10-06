@@ -307,7 +307,6 @@ func (d *HTTPAgentDispatcher) SetHubName(name string) {
 	d.hubName = name
 }
 
-// SetSecretBackend sets the secret backend for resolving secrets.
 // envHubExperiments lists, comma-separated, the dispatch experiments the
 // agent itself acts on (agentExperimentNames). sciontool reads it; its
 // absence (an older hub, or none on) keeps every such feature off.
@@ -339,6 +338,7 @@ func applyAgentExperiments(env map[string]string, cls *map[string]api.EnvKind, d
 	classifyEnv(cls, envHubExperiments, api.EnvKindPlain)
 }
 
+// SetSecretBackend sets the secret backend for resolving secrets.
 func (d *HTTPAgentDispatcher) SetSecretBackend(b secret.SecretBackend) {
 	d.secretBackend = b
 }

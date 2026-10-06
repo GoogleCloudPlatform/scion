@@ -42,7 +42,9 @@ func TestDispatchConduitCapabilityEnv(t *testing.T) {
 			_, err := d.DispatchAgentCreate(ctx, a)
 			return err
 		}, func(m *mockRuntimeBrokerClient) map[string]string { return m.lastCreateReq.ResolvedEnv },
-			func(m *mockRuntimeBrokerClient) *RemoteHubAgentDefaults { return m.lastCreateReq.Config.HubAgentDefaults }},
+			func(m *mockRuntimeBrokerClient) *RemoteHubAgentDefaults {
+				return m.lastCreateReq.Config.HubAgentDefaults
+			}},
 		{"start", func(ctx context.Context, d *HTTPAgentDispatcher, a *store.Agent) error {
 			return d.DispatchAgentStart(ctx, a, "", false)
 		}, func(m *mockRuntimeBrokerClient) map[string]string { return m.lastResolvedEnv },
