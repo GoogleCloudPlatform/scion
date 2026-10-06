@@ -126,6 +126,10 @@ describe('Tab/Shift+Tab: group cycling in reading order', () => {
       threads: ready([threadCandidate('t1', 'Thread One')]),
       people: ready([personCandidate('p1', 'Person One')]),
     });
+    // Nothing is active on an empty query until the first Tab picks Agents.
+    expect(activeText(el)).toBeUndefined();
+    press(el, 'Tab');
+    await el.updateComplete;
     expect(activeText(el)).toContain('Agent One');
 
     press(el, 'Tab');
@@ -147,7 +151,8 @@ describe('Tab/Shift+Tab: group cycling in reading order', () => {
       threads: ready([threadCandidate('t1', 'Thread One')]),
       people: ready([personCandidate('p1', 'Person One')]),
     });
-    expect(activeText(el)).toContain('Agent One');
+    // With nothing active, the first Shift+Tab picks the last group.
+    expect(activeText(el)).toBeUndefined();
 
     press(el, 'Tab', { shiftKey: true });
     await el.updateComplete;
@@ -160,6 +165,11 @@ describe('Tab/Shift+Tab: group cycling in reading order', () => {
     press(el, 'Tab', { shiftKey: true });
     await el.updateComplete;
     expect(activeText(el)).toContain('Agent One');
+
+    // Wraps backward from the first group to the last.
+    press(el, 'Tab', { shiftKey: true });
+    await el.updateComplete;
+    expect(activeText(el)).toContain('Person One');
   });
 
   it('Tab skips an empty group (no ranked matches) rather than landing on it', async () => {
@@ -168,6 +178,9 @@ describe('Tab/Shift+Tab: group cycling in reading order', () => {
       threads: ready([]), // no candidates at all -> empty group
       people: ready([personCandidate('p1', 'Person One')]),
     });
+    press(el, 'Tab');
+    await el.updateComplete;
+    expect(activeText(el)).toContain('Agent One');
     press(el, 'Tab');
     await el.updateComplete;
     // Threads has no matches, so Tab from Agents must land on People, not Threads.
@@ -257,6 +270,8 @@ describe('Up/Down: wraps within the active group only', () => {
       ]),
       people: ready([personCandidate('p1', 'Person One')]),
     });
+    press(el, 'ArrowDown');
+    await el.updateComplete;
     expect(activeText(el)).toContain('Agent Alpha');
 
     press(el, 'ArrowDown');
@@ -277,6 +292,8 @@ describe('Up/Down: wraps within the active group only', () => {
       ]),
       people: ready([personCandidate('p1', 'Person One')]),
     });
+    press(el, 'ArrowDown');
+    await el.updateComplete;
     expect(activeText(el)).toContain('Thread Alpha');
     press(el, 'ArrowUp');
     await el.updateComplete;
@@ -284,15 +301,12 @@ describe('Up/Down: wraps within the active group only', () => {
   });
 
   it('with no active selection, ArrowDown chooses the *first* row of the first nonempty group in reading order', async () => {
-    // reconcileActiveId always resolves `activeId` to some real candidate
-    // whenever `ranked` is nonempty (either the preserved manual selection or
-    // the new global best), so "ranked is nonempty but activeId matches
-    // nothing in it" has no reachable sequence of public calls in the current
-    // architecture — set it directly, the same technique
-    // quick-palette.test.ts's Enter-key test uses for the analogous
-    // commitActivePaletteCandidate guard. Two rows in the group (not one) so
-    // this discriminates "first row" from "last row" — the ArrowUp test
-    // below covers the mirror case.
+    // No active row is the default on an empty query until the user picks
+    // one. Setting `activeId` to an id that matches no candidate takes the
+    // same branch, so this also covers a selection that no longer matches
+    // anything. Two rows in the group (not one) so this discriminates
+    // "first row" from "last row" — the ArrowUp test below covers the
+    // mirror case.
     const el = await mountPalette({
       threads: ready([
         threadCandidate('t1', 'Thread Alpha', 2),
@@ -325,12 +339,11 @@ describe('Up/Down: wraps within the active group only', () => {
   });
 });
 
-describe('Tab/Shift+Tab with no active selection (defensive branch, direct-field discrimination)', () => {
-  // Same reachability note as the Up/Down tests above: reconcileActiveId
-  // keeps `activeId` synced to a real candidate whenever any exist, so this
-  // state has no reachable sequence of public calls today. The branch is
-  // still real code (moveActiveGroup's own currentGroupIndex===-1 handling)
-  // and is kept as a defensive fallback consistent with moveActive's.
+describe('Tab/Shift+Tab with no active selection', () => {
+  // No active row is the default on an empty query until the user picks
+  // one; as in the Up/Down tests above, an `activeId` that matches no
+  // candidate takes the same branch (moveActiveGroup's
+  // currentGroupIndex===-1 handling).
   it('Tab (forward) with no active selection lands on the first nonempty group', async () => {
     const el = await mountPalette({
       threads: ready([threadCandidate('t1', 'Thread Alpha')]),
@@ -374,9 +387,9 @@ describe('Show more: 10-row visible cap per group', () => {
 
   it('Arrow navigation past the 10th row expands the group so the active option stays mounted', async () => {
     const el = await mountPalette({ threads: ready(manyThreads(15)) });
-    // The 15 threads have descending activityMs (15..1), so the best (index
-    // 0, "Thread 00") starts active; press ArrowUp once to wrap to the last
-    // (index 14, "Thread 14") — beyond the initial 10-row cap.
+    // The 15 threads have descending activityMs (15..1). With no row
+    // active, ArrowUp picks the last one (index 14, "Thread 14") — beyond
+    // the initial 10-row cap.
     press(el, 'ArrowUp');
     await el.updateComplete;
     expect(el.shadowRoot?.querySelectorAll('.palette-option').length).toBe(15);
@@ -389,7 +402,7 @@ describe('Show more: 10-row visible cap per group', () => {
     // the boundary; the 15-row test above only ever lands on index 14, which
     // both operators already agree needs expanding.
     const el = await mountPalette({ threads: ready(manyThreads(11)) });
-    press(el, 'ArrowUp'); // wraps from index 0 to the last row, index 10
+    press(el, 'ArrowUp'); // with no row active, picks the last row, index 10
     await el.updateComplete;
     expect(el.shadowRoot?.querySelectorAll('.palette-option').length).toBe(11);
     expect(activeText(el)).toContain('Thread 10');

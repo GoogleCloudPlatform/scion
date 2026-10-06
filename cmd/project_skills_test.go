@@ -16,6 +16,7 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -974,4 +975,14 @@ func TestRunProjectSkillsFromDirectory_TotalFailure(t *testing.T) {
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "all 2 skill(s) failed to add")
 	assert.Equal(t, int32(2), addCalls.Load())
+}
+
+// TestResolveInjectedSkillEntryID_InvalidIDIsUsageError pins that a
+// positional that is neither a skill URI nor a UUID is reported as a usage
+// error (ptone/scion#2859). The check is local, so no service is needed.
+func TestResolveInjectedSkillEntryID_InvalidIDIsUsageError(t *testing.T) {
+	_, err := resolveInjectedSkillEntryID(context.Background(), nil, "not-a-uuid")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `invalid skill entry ID: "not-a-uuid"`)
+	assert.True(t, isUsageError(err))
 }
