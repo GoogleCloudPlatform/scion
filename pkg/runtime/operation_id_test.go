@@ -125,7 +125,7 @@ func TestKubernetesDelete_OperationIDUsesPodNamespace(t *testing.T) {
 	}
 
 	id := AgentOperationID(agents[0])
-	if err := r.Stop(ctx, id); err != nil {
+	if err := r.Stop(ctx, RunRef{ID: id}); err != nil {
 		t.Fatalf("Stop(%q): %v", id, err)
 	}
 	if err := r.Delete(ctx, RunRef{ID: id}); err != nil {

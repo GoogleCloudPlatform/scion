@@ -44,10 +44,13 @@ ARG GO_VERSION=1.26.1
 # CVE disclosure, which removes a multi-minute `make` from every core-base
 # build.
 #
-# Worth stating plainly: Debian trixie's own apt git is 2.47.3, which already
-# clears scion's 2.47.0 floor. core-base does not *need* the vendored git —
-# the thick chain does (Ubuntu noble caps at 2.43.0). Vendoring here is an
-# anti-drift choice, so both chains get byte-identical git, not a necessity.
+# Worth stating plainly: Debian trixie's own apt git is 2.47.3, which is
+# BELOW scion's 2.48.0 floor (git worktree add --relative-paths, first
+# shipped in 2.48.0). core-base now *needs* the vendored git, same as the
+# thick chain (Ubuntu noble caps at 2.43.0) — do not drop this vendoring
+# without re-verifying apt's git against pkg/util/git.go's CheckGitVersion
+# floor first, or worktree-per-agent mode will silently regress on this
+# chain again.
 #
 # NOTE: `:latest` is a floating tag. CI should override this with a digest
 # (`--build-arg GIT_IMAGE=chainguard/git@sha256:...`) so builds are

@@ -15,7 +15,9 @@
 package util
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"net/url"
 	"os"
 	"os/exec"
@@ -58,20 +60,23 @@ func GetGitVersion() (string, string, error) {
 	if err != nil {
 		return "", gitPath, err
 	}
-	// Output is usually "git version 2.47.0"
+	// Output is usually "git version 2.48.0"
 	version := strings.TrimPrefix(strings.TrimSpace(string(output)), "git version ")
 	return version, gitPath, nil
 }
 
-// CheckGitVersion returns an error if the git version is less than 2.47.0.
+// CheckGitVersion returns an error if the git version is less than 2.48.0.
+//
+// 2.48 is required: `git worktree add --relative-paths` first shipped in
+// git 2.48; 2.47.x rejects the flag.
 func CheckGitVersion() error {
 	version, gitPath, err := GetGitVersion()
 	if err != nil {
 		return fmt.Errorf("failed to get git version: %w", err)
 	}
 
-	if err := CompareGitVersion(version, 2, 47); err != nil {
-		return fmt.Errorf("git version 2.47.0 or newer is required; scion requires worktree support with relative paths (found %s at %s)", version, gitPath)
+	if err := CompareGitVersion(version, 2, 48); err != nil {
+		return fmt.Errorf("git version 2.48.0 or newer is required; scion requires worktree support with relative paths (found %s at %s)", version, gitPath)
 	}
 
 	return nil
@@ -208,7 +213,57 @@ func CreateWorktree(path, branch string) error {
 	return nil
 }
 
+// ErrPathNotContained is returned by RemoveWorktree when path's resolved
+// (symlink-free) location does not lie under base's resolved location.
+//
+// Callers MUST NOT fall back to a raw recursive removal of path when they see
+// this error — the whole point of the check is that path's real, on-disk
+// location may not be what its lexical form suggests (an intermediate path
+// component, e.g. a worktrees directory or the leaf itself, may be a symlink
+// pointing outside base). Falling back to removing path anyway would defeat
+// the check entirely.
+var ErrPathNotContained = errors.New("path resolves outside the expected base directory")
+
+// pathResolvedUnderBase reports whether candidate, after resolving all
+// symlinks, is a strict descendant of base, also resolved. It fails closed
+// (returns false) on any resolution error, on base==candidate (removing the
+// base itself is never intended), and on non-existent paths — existence must
+// be checked by the caller first.
+// pathResolvedUnderBase also returns the resolved candidate path so a caller
+// that proceeds after a true result can act on that same resolved location
+// (see RemoveWorktree) rather than re-resolving it later — closing the
+// window between "checked" and "used" during which the lexical path could
+// start pointing somewhere else.
+func pathResolvedUnderBase(base, candidate string) (ok bool, resolvedCandidate string, err error) {
+	resolvedBase, err := filepath.EvalSymlinks(base)
+	if err != nil {
+		return false, "", fmt.Errorf("resolve base %q: %w", base, err)
+	}
+	resolvedCandidate, err = filepath.EvalSymlinks(candidate)
+	if err != nil {
+		return false, "", fmt.Errorf("resolve candidate %q: %w", candidate, err)
+	}
+	rel, err := filepath.Rel(resolvedBase, resolvedCandidate)
+	if err != nil {
+		return false, "", nil
+	}
+	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return false, "", nil
+	}
+	return true, resolvedCandidate, nil
+}
+
 // RemoveWorktree removes a git worktree at the specified path.
+//
+// base is the expected repo/worktree-parent root that path must resolve
+// under; both must be non-empty absolute paths. Before touching anything on
+// disk, RemoveWorktree resolves symlinks on both base and path and refuses
+// (returning ErrPathNotContained) unless path's real location is a strict
+// descendant of base's real location. This guards against a path that is
+// lexically inside base but, through a symlinked intermediate directory or a
+// symlinked leaf, actually resolves outside it — a caller holding such a
+// path (e.g. one sourced from stored/discovered state rather than freshly
+// created here) must not have it silently honored.
 //
 // Instead of using "git worktree remove" (which does its own directory
 // deletion and can trigger macOS autofs timeouts on symlinks pointing to
@@ -217,7 +272,37 @@ func CreateWorktree(path, branch string) error {
 //  2. Removes the worktree directory using RemoveAllSafe (which uses unlinkat
 //     to avoid autofs triggers).
 //  3. Runs "git worktree prune" to clean up the now-stale worktree record.
-func RemoveWorktree(path string, deleteBranch bool) (bool, error) {
+func RemoveWorktree(base, path string, deleteBranch bool) (bool, error) {
+	// Every failure from here through the containment check is a pre-removal
+	// validation failure, not a removal-mechanics failure — none of them have
+	// proven path safe to act on, so all of them wrap ErrPathNotContained
+	// (not just the explicit "not contained" case below). A caller that only
+	// treats the explicit case as no-fallback-eligible would otherwise fall
+	// back to a raw RemoveAllSafe(path) on, for example, an unresolvable
+	// symlink loop — exactly the unvalidated recursive removal this whole
+	// check exists to prevent.
+	if base == "" || path == "" {
+		return false, fmt.Errorf("RemoveWorktree: base and path must both be non-empty: %w", ErrPathNotContained)
+	}
+	if !filepath.IsAbs(base) || !filepath.IsAbs(path) {
+		return false, fmt.Errorf("RemoveWorktree: base and path must both be absolute paths: %w", ErrPathNotContained)
+	}
+
+	if _, statErr := os.Lstat(path); statErr != nil {
+		if errors.Is(statErr, fs.ErrNotExist) {
+			return false, nil // nothing to remove
+		}
+		return false, fmt.Errorf("RemoveWorktree: lstat %q: %w: %w", path, statErr, ErrPathNotContained)
+	}
+
+	contained, resolvedPath, err := pathResolvedUnderBase(base, path)
+	if err != nil {
+		return false, fmt.Errorf("RemoveWorktree: %w: %w", err, ErrPathNotContained)
+	}
+	if !contained {
+		return false, fmt.Errorf("RemoveWorktree: %q does not resolve under %q: %w", path, base, ErrPathNotContained)
+	}
+
 	var branchName string
 	var repoRoot string
 	branchDeleted := false
@@ -247,9 +332,14 @@ func RemoveWorktree(path string, deleteBranch bool) (bool, error) {
 	// Remove the worktree directory ourselves using RemoveAllSafe, which
 	// uses unlinkat for symlinks to avoid triggering macOS autofs timeouts.
 	// This replaces "git worktree remove" which uses its own (slow) deletion.
-	Debugf("RemoveWorktree: removing worktree directory %s via RemoveAllSafe", path)
+	// Act on resolvedPath (computed above), not the lexical path: using the
+	// lexical form here would re-open the check-then-use window the
+	// containment check just closed — path's containment was proven for its
+	// resolved location, not for whatever the lexical string might resolve to
+	// if something changed between the check and this call.
+	Debugf("RemoveWorktree: removing worktree directory %s via RemoveAllSafe", resolvedPath)
 	removeStart := time.Now()
-	if err := RemoveAllSafe(path); err != nil {
+	if err := RemoveAllSafe(resolvedPath); err != nil {
 		Debugf("RemoveWorktree: RemoveAllSafe failed in %v: %v", time.Since(removeStart), err)
 		return false, err
 	}
