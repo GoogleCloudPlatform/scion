@@ -119,6 +119,11 @@ func confinedProjectConfigRoot(slug, projectID string) (root string, ok bool) {
 func alignWorkspaceProjectIdentity(workspacePath, slug, projectID string, inUse func() (bool, error)) (identityAlignment, error) {
 	current, err := config.ReadWorkspaceIdentity(workspacePath)
 	if err != nil {
+		// A recorded project ID outside the project ID format is an identity
+		// outside the expected form.
+		if errors.Is(err, config.ErrInvalidProjectID) {
+			return identityAlignment{Outcome: alignSkippedUnexpectedIdentity}, nil
+		}
 		return identityAlignment{}, alignFailed("read workspace identity", err)
 	}
 	if current == nil {

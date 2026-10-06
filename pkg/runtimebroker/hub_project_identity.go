@@ -135,6 +135,11 @@ func recordHubProjectIdentity(projectPath, slug, projectID string, inUse func() 
 	}
 	current, err := config.ReadWorkspaceIdentity(projectPath)
 	if err != nil {
+		// A recorded project ID outside the project ID format is an identity
+		// outside the expected form.
+		if errors.Is(err, config.ErrInvalidProjectID) {
+			return hubIdentityUnexpectedForm, nil
+		}
 		return "", err
 	}
 	if current == nil {
