@@ -96,7 +96,9 @@ func (s *Server) stopForStoppedIntent(ctx context.Context, a store.Agent) {
 		return // a newer intent, or a claim taken meanwhile: nothing to do
 	}
 	defer func() {
-		if _, err := s.store.ReleaseAgentStart(context.WithoutCancel(ctx), a.ID, claim.ID, s.instanceID); err != nil {
+		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), claimReleaseTimeout)
+		defer cancel()
+		if _, err := s.store.ReleaseAgentStart(rctx, a.ID, claim.ID, s.instanceID); err != nil {
 			slog.Warn("Backstop stop: releasing its claim failed; the reaper will settle it", "agent_id", a.ID, "error", err)
 		}
 	}()
