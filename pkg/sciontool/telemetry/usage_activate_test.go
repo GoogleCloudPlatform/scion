@@ -171,6 +171,31 @@ func TestPipelineActivateUsageSourceNoOps(t *testing.T) {
 			t.Fatal("ActivateUsageSource must not store a deriver on a pipeline that is not running")
 		}
 	})
+	// After Stop the receiver is closed but loopbackConfig is still set, so
+	// the running check is the only thing that refuses activation. Without
+	// it, a deriver would be stored whose meter provider is never shut down.
+	t.Run("stopped", func(t *testing.T) {
+		t.Setenv("SCION_HARNESS", "claude")
+		unsetUsageSource(t)
+		p := NewWithConfig(&Config{Enabled: true, GRPCPort: availableTCPPort(t)})
+		if err := p.Start(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if err := p.Stop(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if p.loopbackConfig.Load() == nil {
+			t.Fatal("precondition: Stop is expected to leave loopbackConfig set, so only the running check refuses activation")
+		}
+		outcome, err := p.ActivateUsageSource(context.Background(), UsageSourceNative)
+		if err != nil || outcome != UsageActivationNotRunning {
+			t.Fatalf("got %q, %v; want %q, nil after Stop", outcome, err, UsageActivationNotRunning)
+		}
+		if d := p.usageDeriver.Load(); d != nil {
+			_ = d.Shutdown(context.Background())
+			t.Fatal("ActivateUsageSource must not store a deriver on a stopped pipeline")
+		}
+	})
 	t.Run("nil_pipeline", func(t *testing.T) {
 		unsetUsageSource(t)
 		var p *Pipeline
