@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -944,4 +945,95 @@ func TestSchedChildDeletedDuringDispatchFailsFire(t *testing.T) {
 	recs, _, lerr := f.store.ListMutationAudits(context.Background(), store.MutationAuditFilter{TargetType: "agent", MutationType: mutationTypeAgentCreateDispatchFailed})
 	require.NoError(t, lerr)
 	assert.Empty(t, recs, "the delete owns the record; no compensation")
+}
+
+// --- start-claim outcomes on the scheduled create ------------------------------
+
+// createHookDispatcher passes the scheduled create's dispatch result
+// through after.
+type createHookDispatcher struct {
+	AgentDispatcher
+	after func(res *CreateDispatchResult, err error) (*CreateDispatchResult, error)
+}
+
+func (d *createHookDispatcher) DispatchAgentCreate(ctx context.Context, agent *store.Agent) (*CreateDispatchResult, error) {
+	res, err := d.AgentDispatcher.DispatchAgentCreate(ctx, agent)
+	return d.after(res, err)
+}
+
+// The scheduled create classifies its start-claim outcomes as the HTTP
+// create does: a claim a delete refuses is rolled back as a failed run-intent
+// write; a claim refused as not eligible, a claim lost to a stop, or a launch
+// a stop or delete reached first keeps the record and fails the fire; a claim
+// held by another start skips the event and keeps the record.
+func TestSchedStartClaimOutcomes(t *testing.T) {
+	held := &store.ClaimHeldError{ClaimID: "c", Kind: store.StartClaimUser, State: store.StartClaimLive, Since: time.Now()}
+	cases := []struct {
+		name string
+		// claimErr, when set, refuses every start claim with it.
+		claimErr error
+		// after, when set, wraps the broker dispatch result.
+		after func(f *schedFire, run **startClaimRun) func(*CreateDispatchResult, error) (*CreateDispatchResult, error)
+		// wantErr is the error the fire returns; nil means the fire succeeds.
+		wantErr error
+		// wantStage is the compensation stage; empty means the record is kept
+		// and nothing is rolled back.
+		wantStage string
+	}{
+		{name: "refused by a delete", claimErr: store.ErrDeleteInProgress, wantErr: errStartClaimWrite, wantStage: createStageRunIntent},
+		{name: "not eligible", claimErr: store.ErrClaimPredicate, wantErr: store.ErrClaimPredicate},
+		{name: "held by another start", claimErr: held},
+		{name: "lost to a stop", wantErr: errStartClaimLost, after: func(f *schedFire, run **startClaimRun) func(*CreateDispatchResult, error) (*CreateDispatchResult, error) {
+			return func(res *CreateDispatchResult, err error) (*CreateDispatchResult, error) {
+				(*run).markLost("superseded")
+				return res, err
+			}
+		}},
+		{name: "launch phase invalid", wantErr: ErrLaunchInvalidPhase, after: func(f *schedFire, run **startClaimRun) func(*CreateDispatchResult, error) (*CreateDispatchResult, error) {
+			return func(*CreateDispatchResult, error) (*CreateDispatchResult, error) {
+				return nil, fmt.Errorf("launch: %w", ErrLaunchInvalidPhase)
+			}
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			name := "sched-claim-" + tidSlugSafe(tc.name)
+			f := newSchedFire(t, name)
+			client := f.withDispatcher(t)
+			var run *startClaimRun
+			f.srv.startClaimTestHook = func(r *startClaimRun) { run = r }
+			if tc.after != nil {
+				f.srv.SetDispatcher(&createHookDispatcher{AgentDispatcher: f.srv.GetDispatcher(), after: tc.after(f, &run)})
+			}
+			if tc.claimErr != nil {
+				f.srv.store = claimRefusingStore{Store: f.srv.store, err: tc.claimErr}
+			}
+			slug := name + "-c"
+
+			err := f.fire(t, withSessionRevision(f.event(slug), f.creator.ID))
+			if tc.wantErr == nil {
+				require.NoError(t, err)
+			} else {
+				require.ErrorIs(t, err, tc.wantErr)
+			}
+			if tc.claimErr != nil {
+				assert.Nil(t, client.lastCreateReq, "nothing is dispatched when the claim is refused")
+			}
+
+			failed, _, lerr := f.store.ListMutationAudits(context.Background(), store.MutationAuditFilter{TargetType: "agent", MutationType: mutationTypeAgentCreateDispatchFailed})
+			require.NoError(t, lerr)
+			if tc.wantStage == "" {
+				assert.Empty(t, failed, "no compensation: the record is left to the operation that owns it")
+				assert.False(t, client.deleteCalled, "no broker delete")
+				_, gerr := f.store.GetAgentBySlug(context.Background(), f.proj.ID, slug)
+				require.NoError(t, gerr, "the record is kept")
+				return
+			}
+			f.assertNoChild(t, slug)
+			require.Len(t, failed, 1, "the refused create is rolled back once")
+			assert.False(t, client.deleteCalled, "nothing was dispatched, so no broker delete")
+			sum := assertCompensated(t, f.store, failed[0].TargetID)
+			assert.Equal(t, tc.wantStage, sum.Stage)
+		})
+	}
 }
