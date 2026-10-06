@@ -348,6 +348,28 @@ func deleteAgentsViaHub(hubCtx *HubContext, agentNames []string) error {
 	return nil
 }
 
+// cleanupAfterHubDelete runs the local cleanup for an agent whose delete
+// the Hub has confirmed: it removes the agent's local files (worktree,
+// agent directory; the git branch too if removeBranch), removes its
+// synced-agent entry and advances the sync watermark. Used by scion delete
+// and scion stop --rm. The error is from removing the files; the sync state
+// is updated either way, since the Hub record is gone. An agent with no
+// local files is not an error. Calls must not overlap: they run git
+// worktree operations.
+func cleanupAfterHubDelete(hubCtx *HubContext, agentName string, removeBranch bool) (branchDeleted bool, err error) {
+	// The Hub dispatches container cleanup to the runtime broker, but local
+	// filesystem artifacts must be removed by the CLI to avoid orphaned agents.
+	branchDeleted, err = agent.DeleteAgentFiles(agentName, projectPath, removeBranch)
+
+	// Keep sync watermark current after a successful Hub delete. If hub server
+	// time is unavailable in this flow, UpdateLastSyncedAt falls back to local UTC.
+	if hubCtx != nil && hubCtx.ProjectPath != "" {
+		hubsync.UpdateLastSyncedAt(hubCtx.ProjectPath, time.Time{})
+		hubsync.RemoveSyncedAgent(hubCtx.ProjectPath, agentName)
+	}
+	return branchDeleted, err
+}
+
 // dedupeNames returns names without repeats, keeping the first occurrence
 // of each and the original order.
 func dedupeNames(names []string) []string {
@@ -410,18 +432,11 @@ func finishHubDelete(hubCtx *HubContext, job *hubDeleteJob) {
 	// Also clean up local agent files (worktree, agent directory).
 	// The Hub dispatches container cleanup to the runtime broker, but local
 	// filesystem artifacts must be removed by the CLI to avoid orphaned agents.
-	branchDeleted, err := agent.DeleteAgentFiles(agentName, projectPath, !preserveBranch)
+	branchDeleted, err := cleanupAfterHubDelete(hubCtx, agentName, !preserveBranch)
 	if err != nil {
 		job.lines = append(job.lines,
 			fmt.Sprintf("Warning: Hub record deleted but local cleanup failed for '%s': %v", agentName, err),
 			fmt.Sprintf("Run 'scion --no-hub delete %s' to retry targeted cleanup, or 'scion clean' to reset the project.", agentName))
-	}
-
-	// Keep sync watermark current after a successful Hub delete. If hub server
-	// time is unavailable in this flow, UpdateLastSyncedAt falls back to local UTC.
-	if hubCtx != nil && hubCtx.ProjectPath != "" {
-		hubsync.UpdateLastSyncedAt(hubCtx.ProjectPath, time.Time{})
-		hubsync.RemoveSyncedAgent(hubCtx.ProjectPath, agentName)
 	}
 	if err == nil {
 		// Progress, printed now rather than in input order, so that after

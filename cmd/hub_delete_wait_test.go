@@ -284,6 +284,10 @@ func TestStopAgentViaHub_RmWaitsOn202(t *testing.T) {
 		assert.Equal(t, 1, env.hub.stops)
 		assert.Equal(t, 2, env.hub.polls)
 		assert.False(t, env.stillSynced(t), "confirmed removal updates the sync state")
+		for i, existed := range env.hub.dirAtPoll {
+			assert.True(t, existed, "local files kept at poll %d, before the removal is confirmed", i)
+		}
+		assert.False(t, env.dirExists(), "confirmed removal cleans up local files, like delete (ptone/scion#2896)")
 	})
 	t.Run("failed", func(t *testing.T) {
 		env := setupAsyncDelete(t, "stop-agent", getReply{body: replyRuntime})
@@ -293,6 +297,7 @@ func TestStopAgentViaHub_RmWaitsOn202(t *testing.T) {
 		assert.Contains(t, err.Error(), "agent stopped but failed to delete via Hub")
 		assert.Contains(t, err.Error(), "(runtime_error)")
 		assert.True(t, env.stillSynced(t))
+		assert.True(t, env.dirExists(), "failed removal keeps local files")
 	})
 	t.Run("not taken", func(t *testing.T) {
 		env := setupAsyncDelete(t, "stop-agent", getReply{body: replyLive})
@@ -300,6 +305,7 @@ func TestStopAgentViaHub_RmWaitsOn202(t *testing.T) {
 		err := stopAgentViaHub(env.hubCtx, "stop-agent")
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "delete did not take effect")
+		assert.True(t, env.dirExists())
 	})
 	for _, tc := range []struct {
 		name    string
@@ -313,6 +319,7 @@ func TestStopAgentViaHub_RmWaitsOn202(t *testing.T) {
 			setStopRm(t)
 			require.NoError(t, stopAgentViaHub(env.hubCtx, "stop-agent"))
 			assert.True(t, env.stillSynced(t), "sync state left alone until removal is confirmed")
+			assert.True(t, env.dirExists(), "local files kept until removal is confirmed")
 		})
 	}
 }
@@ -367,6 +374,9 @@ func TestStopAllAgentsViaHub_RmWaitsOn202(t *testing.T) {
 				require.NoError(t, err)
 			}
 			assert.Equal(t, tc.wantSynced, env.stillSynced(t))
+			// Local files go exactly when the sync entry goes: on a
+			// confirmed removal (ptone/scion#2896).
+			assert.Equal(t, tc.wantSynced, env.dirExists(), "local files removed only on a confirmed removal")
 		})
 	}
 }

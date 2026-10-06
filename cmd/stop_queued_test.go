@@ -15,8 +15,10 @@
 package cmd
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -54,9 +56,12 @@ func stopTestHub(t *testing.T, stopStatus int, stopBody string) (*HubContext, *a
 
 func withStopRm(t *testing.T, rm bool) {
 	t.Helper()
-	old, oldFormat, oldConfirm := stopRm, outputFormat, autoConfirm
+	old, oldFormat, oldConfirm, oldPath := stopRm, outputFormat, autoConfirm, projectPath
 	stopRm, outputFormat, autoConfirm = rm, "", true
-	t.Cleanup(func() { stopRm, outputFormat, autoConfirm = old, oldFormat, oldConfirm })
+	// A confirmed stop --rm runs local cleanup; keep it inside temp dirs.
+	t.Setenv("HOME", t.TempDir())
+	projectPath = filepath.Join(t.TempDir(), ".scion")
+	t.Cleanup(func() { stopRm, outputFormat, autoConfirm, projectPath = old, oldFormat, oldConfirm, oldPath })
 }
 
 const queuedStopBody = `{"id":"a1","name":"alpha","phase":"stopped","warnings":["Stop queued: broker offline; it will be applied when the broker reconnects."]}`
@@ -64,11 +69,13 @@ const queuedStopBody = `{"id":"a1","name":"alpha","phase":"stopped","warnings":[
 func TestStopViaHub_QueuedStopWithRmSkipsDelete(t *testing.T) {
 	withStopRm(t, true)
 	hubCtx, deletes := stopTestHub(t, http.StatusAccepted, queuedStopBody)
+	agentDir := createAgentDir(t, projectPath, "alpha")
 
 	var runErr error
 	stderr := captureStderr(t, func() { runErr = stopAgentViaHub(hubCtx, "alpha") })
 	require.NoError(t, runErr)
 	assert.Zero(t, deletes.Load(), "a queued stop must not delete the agent")
+	assert.DirExists(t, agentDir, "a queued stop keeps local files")
 	assert.Contains(t, stderr, "Warning: Stop queued: broker offline")
 	assert.Contains(t, stderr, stopQueuedNotRemovedMessage)
 }
@@ -76,11 +83,35 @@ func TestStopViaHub_QueuedStopWithRmSkipsDelete(t *testing.T) {
 func TestStopViaHub_StopWithRmDeletesWhenApplied(t *testing.T) {
 	withStopRm(t, true)
 	hubCtx, deletes := stopTestHub(t, http.StatusOK, `{"id":"a1","name":"alpha","phase":"stopped"}`)
+	agentDir := createAgentDir(t, projectPath, "alpha")
 
 	var runErr error
 	_ = captureStderr(t, func() { runErr = stopAgentViaHub(hubCtx, "alpha") })
 	require.NoError(t, runErr)
 	assert.EqualValues(t, 1, deletes.Load())
+	assert.NoDirExists(t, agentDir, "a confirmed (204) removal cleans up local files (ptone/scion#2896)")
+}
+
+// ptone/scion#2896: stop --all --rm cleans up local files for a confirmed
+// (204) removal, and reports it in JSON without warnings.
+func TestStopAllViaHub_StopWithRmCleansUpLocalFiles(t *testing.T) {
+	withStopRm(t, true)
+	hubCtx, deletes := stopTestHub(t, http.StatusOK, `{"id":"a1","name":"alpha","phase":"stopped"}`)
+	agentDir := createAgentDir(t, projectPath, "alpha")
+	outputFormat = "json"
+
+	var runErr error
+	stdout := captureStdout(t, func() { runErr = stopAllAgentsViaHub(hubCtx) })
+	require.NoError(t, runErr)
+	assert.EqualValues(t, 1, deletes.Load())
+	assert.NoDirExists(t, agentDir)
+	assert.Contains(t, stdout, `"removed": true`)
+	assert.NotContains(t, stdout, "local cleanup failed")
+}
+
+func TestStopRmCleanupWarning(t *testing.T) {
+	w := stopRmCleanupWarning("alpha", errors.New("boom"))
+	assert.Equal(t, "removed via Hub but local cleanup failed: boom; run 'scion --no-hub delete alpha' to retry", w)
 }
 
 func TestStopAllViaHub_QueuedStopWithRmSkipsDelete(t *testing.T) {
