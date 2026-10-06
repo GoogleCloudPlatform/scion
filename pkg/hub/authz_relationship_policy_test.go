@@ -76,7 +76,9 @@ var relationshipOwnerExcluded = map[relationshipAllowKey][]string{
 	{"owner", "user", "template"}:       {},
 	{"owner", "user", "harness_config"}: {},
 	{"owner", "user", "group"}:          {},
-	{"owner", "user", "broker"}:         {},
+	// broker.auto_provide offers a broker to every project; it is held by
+	// super-admins only, so owning a broker does not grant it.
+	{"owner", "user", "broker"}: {"broker.auto_provide"},
 	// gcp_service_account.use (ptone/scion#2129) is meant for an agent's own
 	// token-mint request. It has no AgentScopes: the GCP token scope is per
 	// service account and cannot be matched statically, so no credential
