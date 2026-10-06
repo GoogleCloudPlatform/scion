@@ -1468,7 +1468,8 @@ func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRe
 
 	if req.ProjectSlug != "" {
 		if recErr := recordBrokerWorkspaceCopy(req.ProjectSlug, req.ProjectID, !req.workspaceAbsentAtAdmission); recErr != nil {
-			s.agentLifecycleLog.Warn("Failed to write broker workspace record", "agent_id", req.ID, "project_id", req.ProjectID)
+			s.agentLifecycleLog.Warn("Failed to write broker workspace record",
+				append([]any{"agent_id", req.ID, "project_id", req.ProjectID}, identityErrorAttrs(recErr)...)...)
 		}
 	}
 

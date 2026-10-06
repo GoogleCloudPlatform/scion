@@ -15,14 +15,19 @@
 package runtimebroker
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io/fs"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -403,4 +408,66 @@ func TestRecordHubProjectIdentity_SymlinkedProjectDirSkips(t *testing.T) {
 	id, err := config.ReadProjectID(filepath.Join(real, config.DotScion))
 	require.NoError(t, err)
 	assert.Equal(t, brokerTestLocalID, id)
+}
+
+// captureLifecycleLog points srv's agent lifecycle log at a buffer.
+func captureLifecycleLog(srv *Server) *bytes.Buffer {
+	var buf bytes.Buffer
+	srv.agentLifecycleLog = slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	return &buf
+}
+
+func TestIdentityErrorAttrs_DescribeErrorWithoutPath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "named", "entry")
+	for _, tc := range []struct {
+		err  error
+		want []any
+	}{
+		{&fs.PathError{Op: "open", Path: path, Err: syscall.ENOENT}, []any{"op", "open", "error", syscall.ENOENT.Error()}},
+		{&os.LinkError{Op: "rename", Old: path, New: path + "2", Err: syscall.EXDEV}, []any{"op", "rename", "error", syscall.EXDEV.Error()}},
+		{fmt.Errorf("invalid project marker at %s: bad", path), []any{"error", "not a filesystem error"}},
+	} {
+		got := identityErrorAttrs(tc.err)
+		assert.Equal(t, tc.want, got)
+		assert.NotContains(t, fmt.Sprint(got...), path)
+	}
+}
+
+func TestAlignHubManagedProjectIdentity_FailureLogDescribesErrorWithoutPath(t *testing.T) {
+	workspace, _ := seedBrokerWorkspace(t, brokerTestLocalID, false)
+	writeBrokerRecord(t, brokerTestHubID)
+	// The project-id entry cannot be read as a file.
+	scionPath := filepath.Join(workspace, config.DotScion)
+	require.NoError(t, os.Remove(filepath.Join(scionPath, "project-id")))
+	require.NoError(t, os.MkdirAll(filepath.Join(scionPath, "project-id", "x"), 0o755))
+
+	srv := New(DefaultServerConfig(), &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
+	logs := captureLifecycleLog(srv)
+	srv.alignHubManagedProjectIdentity(context.Background(), "agent-1", workspace, brokerTestSlug, brokerTestHubID)
+
+	out := logs.String()
+	assert.Contains(t, out, "Failed to record hub project ID for hub-managed project")
+	assert.Contains(t, out, "op=read")
+	assert.Contains(t, out, syscall.EISDIR.Error())
+	assert.NotContains(t, out, workspace)
+}
+
+func TestCreateAgent_BrokerRecordFailureLogDescribesErrorWithoutPath(t *testing.T) {
+	srv := newTestServer(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	// The broker record directory cannot be created.
+	globalDir := filepath.Join(home, config.GlobalDir)
+	require.NoError(t, os.MkdirAll(globalDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(globalDir, config.BrokerWorkspacesDir), []byte("x"), 0o644))
+	logs := captureLifecycleLog(srv)
+
+	w := createWithWorkspaceDownload(t, srv, downloadOK)
+	require.Less(t, w.Code, 300, w.Body.String())
+
+	out := logs.String()
+	assert.Contains(t, out, "Failed to write broker workspace record")
+	assert.Contains(t, out, "op=mkdir")
+	assert.Contains(t, out, syscall.ENOTDIR.Error())
+	assert.NotContains(t, out, home)
 }

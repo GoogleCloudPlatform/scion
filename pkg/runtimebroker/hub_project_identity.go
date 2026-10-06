@@ -16,6 +16,8 @@ package runtimebroker
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -211,7 +213,7 @@ func (s *Server) alignHubManagedProjectIdentity(ctx context.Context, agentID, pr
 	switch {
 	case err != nil:
 		s.agentLifecycleLog.Warn("Failed to record hub project ID for hub-managed project",
-			"agent_id", agentID, "project_id", projectID)
+			append([]any{"agent_id", agentID, "project_id", projectID}, identityErrorAttrs(err)...)...)
 	case outcome == hubIdentityRecorded:
 		s.agentLifecycleLog.Info("Recorded hub project ID for hub-managed project",
 			"agent_id", agentID, "project_id", projectID)
@@ -260,4 +262,20 @@ func hubWorkspaceRecordExists(slug string) bool {
 	}
 	_, err = os.Lstat(hubRecord)
 	return !os.IsNotExist(err)
+}
+
+// identityErrorAttrs returns log attributes describing err without any
+// filesystem path: for a filesystem error, its operation and the underlying
+// system error; for any other error, a fixed classification.
+func identityErrorAttrs(err error) []any {
+	var pathErr *fs.PathError
+	var linkErr *os.LinkError
+	switch {
+	case errors.As(err, &pathErr):
+		return []any{"op", pathErr.Op, "error", fmt.Sprint(pathErr.Err)}
+	case errors.As(err, &linkErr):
+		return []any{"op", linkErr.Op, "error", fmt.Sprint(linkErr.Err)}
+	default:
+		return []any{"error", "not a filesystem error"}
+	}
 }
