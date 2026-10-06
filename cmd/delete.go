@@ -211,6 +211,10 @@ already removes the container.`,
 	},
 }
 
+// hubDeletePollConcurrency caps how many accepted (202) deletes
+// deleteAgentsViaHub polls at once. Tests override it.
+var hubDeletePollConcurrency = 4
+
 func deleteAgentsViaHub(hubCtx *HubContext, agentNames []string) error {
 	PrintUsingHub(hubCtx.Endpoint)
 
@@ -220,20 +224,55 @@ func deleteAgentsViaHub(hubCtx *HubContext, agentNames []string) error {
 		Force:        deleteForce,
 	}
 
-	var errs []string
-	var results []map[string]interface{}
-	for _, agentName := range agentNames {
+	// Send the DELETEs one at a time, in order. Each 202 starts a poll in
+	// the background (at most hubDeletePollConcurrency at once), so a slow
+	// broker costs one poll budget for the whole run, not one per agent.
+	// Results are then handled in input order, which keeps the output and
+	// the local cleanup (git worktree removal) sequential and deterministic.
+	agentSvc := hubCtx.Client.ProjectAgents(hubCtx.ProjectID)
+	type hubDeleteJob struct {
+		outcome hubDeleteOutcome
+		err     error
+		done    chan struct{}
+	}
+	jobs := make([]*hubDeleteJob, len(agentNames))
+	sem := make(chan struct{}, max(hubDeletePollConcurrency, 1))
+	for i, agentName := range agentNames {
 		statusf("Deleting agent '%s'...\n", agentName)
+		job := &hubDeleteJob{done: make(chan struct{})}
+		jobs[i] = job
 
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-
 		// Use project-scoped client which supports agent lookup by name/slug.
-		// On 202 the hub is still deleting; deleteViaHubAndWait polls until
-		// the outcome is known (design ptone/scion#2483 R4).
-		outcome, err := deleteViaHubAndWait(ctx, hubCtx.Client.ProjectAgents(hubCtx.ProjectID), agentName, opts, func() {
-			statusf("Agent '%s': the Hub is still deleting it; waiting for the delete to finish...\n", agentName)
-		})
+		// On 202 the hub is still deleting; the job polls until the outcome
+		// is known (design ptone/scion#2483 R4).
+		sent, err := sendHubDelete(ctx, agentSvc, agentName, opts)
 		cancel()
+		if err != nil || !sent.NeedsPoll() {
+			job.err = err
+			if err == nil {
+				job.outcome = sent.Wait(context.Background()) // known already; no poll
+			}
+			close(job.done)
+			continue
+		}
+		statusf("Agent '%s': the Hub is still deleting it; waiting for the delete to finish...\n", agentName)
+		go func() {
+			defer close(job.done)
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			// The poll has its own budget (hubDeletionWaitOptions); it does
+			// not inherit the DELETE request's timeout.
+			job.outcome = sent.Wait(context.Background())
+		}()
+	}
+
+	var errs []string
+	var results []map[string]interface{}
+	for i, agentName := range agentNames {
+		job := jobs[i]
+		<-job.done
+		outcome, err := job.outcome, job.err
 		if err != nil {
 			err = wrapHubError(err)
 		} else {
