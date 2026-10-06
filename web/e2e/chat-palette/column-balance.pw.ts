@@ -84,6 +84,7 @@ async function openPaletteWithLongDocument(page: Page): Promise<void> {
 }
 
 interface Layout {
+  panelWidth: number;
   results: { left: number; right: number; scrollWidth: number; clientWidth: number };
   cells: Record<string, { left: number; width: number }>;
   overflowingRows: string[];
@@ -102,6 +103,9 @@ async function measure(page: Page): Promise<Layout> {
     };
     const root = findPalette(document)!.shadowRoot!;
     const results = root.querySelector<HTMLElement>('.palette-results')!;
+    const panel = root
+      .querySelector('sl-dialog')!
+      .shadowRoot!.querySelector<HTMLElement>('[part~="panel"]')!;
     const r = results.getBoundingClientRect();
     const cells: Record<string, { left: number; width: number }> = {};
     for (const cell of root.querySelectorAll<HTMLElement>('.palette-group-cell')) {
@@ -116,6 +120,7 @@ async function measure(page: Page): Promise<Layout> {
       }
     }
     return {
+      panelWidth: panel.getBoundingClientRect().width,
       results: {
         left: r.left,
         right: r.right,
@@ -143,6 +148,12 @@ test('a long unbreakable document path keeps both columns the same width', async
   expect(layout.results.scrollWidth).toBeLessThanOrEqual(layout.results.clientWidth + 1);
 });
 
+test('the two-column palette uses the wider desktop panel', async ({ page }) => {
+  // The suite's 1200px viewport: min(720px, 92vw) resolves to 720px.
+  await openPaletteWithLongDocument(page);
+  expect((await measure(page)).panelWidth).toBeCloseTo(720, 0);
+});
+
 test('the full path stays visible, wrapped within its row', async ({ page }) => {
   await openPaletteWithLongDocument(page);
   const docRow = page
@@ -160,6 +171,8 @@ test('the single-column narrow layout keeps every row inside the panel', async (
   // Stacked: every group starts at the same left edge.
   expect(Math.abs(agents.left - documents.left)).toBeLessThanOrEqual(TOLERANCE_PX);
   expect(Math.abs(agents.width - documents.width)).toBeLessThanOrEqual(TOLERANCE_PX);
+  // The narrow layout's own near-full-width panel: 100vw - 1rem.
+  expect(layout.panelWidth).toBeCloseTo(390 - 16, 0);
 
   expect(layout.overflowingRows).toEqual([]);
   expect(layout.results.scrollWidth).toBeLessThanOrEqual(layout.results.clientWidth + 1);
