@@ -713,7 +713,7 @@ export class ScionPageOnboarding extends LitElement {
                       <span class="pill warn">warn</span>
                       <span class="name">Git version</span>
                       <span class="message">
-                        Git 2.47+ is required for agent worktrees. Detected: ${this.gitVersion}. Run
+                        Git 2.48+ is required for agent worktrees. Detected: ${this.gitVersion}. Run
                         <code>brew install git</code> to upgrade.
                       </span>
                     </div>

@@ -185,20 +185,23 @@ func (r *launchRegistry) CancelLocal(key launchKey) {
 // stale delete for an earlier run cannot cancel the start of the agent
 // recreated under the same name. A launch or a delete without a run ID
 // matches as before.
-func (r *launchRegistry) CancelLocalForRun(key launchKey, runID string) {
+//
+// It reports whether it woke a launch.
+func (r *launchRegistry) CancelLocalForRun(key launchKey, runID string) bool {
 	if r == nil {
-		return
+		return false
 	}
 	r.mu.Lock()
 	rec := r.records[key]
 	r.mu.Unlock()
 	if rec == nil {
-		return
+		return false
 	}
 	if runID != "" && rec.RunID != "" && rec.RunID != runID {
-		return
+		return false
 	}
 	rec.CancelLocal()
+	return true
 }
 
 // OtherRunInFlight reports whether a launch of a run other than runID is
@@ -208,13 +211,35 @@ func (r *launchRegistry) CancelLocalForRun(key launchKey, runID string) {
 // on disk. False without a run ID on either side, matching
 // CancelLocalForRun.
 func (r *launchRegistry) OtherRunInFlight(key launchKey, runID string) bool {
+	_, ok := r.otherRunInFlightID(key, runID)
+	return ok
+}
+
+// otherRunInFlightID is OtherRunInFlight that also returns the other run ID, for
+// a run-scoped stop to report which run holds the name (ptone/scion#2550).
+func (r *launchRegistry) otherRunInFlightID(key launchKey, runID string) (string, bool) {
+	if r == nil || runID == "" {
+		return "", false
+	}
+	r.mu.Lock()
+	rec := r.records[key]
+	r.mu.Unlock()
+	if rec != nil && rec.RunID != "" && rec.RunID != runID {
+		return rec.RunID, true
+	}
+	return "", false
+}
+
+// runInFlight reports whether the launch registered under key is of run
+// runID exactly. False for an empty runID or a launch with no run ID.
+func (r *launchRegistry) runInFlight(key launchKey, runID string) bool {
 	if r == nil || runID == "" {
 		return false
 	}
 	r.mu.Lock()
 	rec := r.records[key]
 	r.mu.Unlock()
-	return rec != nil && rec.RunID != "" && rec.RunID != runID
+	return rec != nil && rec.RunID == runID
 }
 
 // Finish closes rec's done channel and removes it from the registry if it is

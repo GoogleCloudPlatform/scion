@@ -778,9 +778,9 @@ func TestFindAgentInHubManagedProjects_MarkerProjects(t *testing.T) {
 	if got, err := findAgentInHubManagedProjects("other", scopeProjA); err != nil || got != "" {
 		t.Errorf("absent agent: got %q, %v; want empty", got, err)
 	}
-	// Without a project ID, a marker's identity cannot be checked against
-	// anything trusted, so marker projects are not considered at all.
-	if got, err := findAgentInHubManagedProjects("dev", ""); err != nil || got != "" {
-		t.Errorf("unscoped lookup: got %q, %v; want marker projects skipped", got, err)
+	// Without a project ID, each marker is checked against its own project
+	// ID; both projects hold the agent, so the lookup is ambiguous.
+	if got, err := findAgentInHubManagedProjects("dev", ""); err == nil || !strings.Contains(err.Error(), "found in 2 hub-managed projects") {
+		t.Errorf("unscoped lookup: got %q, %v; want the ambiguity error", got, err)
 	}
 }

@@ -167,6 +167,7 @@ func entAgentToStore(a *ent.Agent) *store.Agent {
 		t := *a.RunIntentAt
 		sa.RunIntentAt = &t
 	}
+	sa.RunIntentMarkedAt = copyTimePtr(a.RunIntentMarkedAt)
 	if a.StartClaimID != nil {
 		sa.StartClaimID = *a.StartClaimID
 	}
@@ -1395,6 +1396,9 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 	if su.IfPhase != "" && current.Phase != su.IfPhase {
 		return store.ErrPhaseMismatch
 	}
+	if su.IfRunID != "" && current.RunID != su.IfRunID {
+		return store.ErrRunChanged
+	}
 
 	now := time.Now()
 
@@ -1543,8 +1547,10 @@ func (s *AgentStore) SetAgentWorkspacePlacement(ctx context.Context, agentID, pl
 	if err != nil {
 		return err
 	}
+	// A soft-deleted row is not written (ErrNotFound, which callers
+	// tolerate): a late start report must not resurrect state on it.
 	affected, err := s.client.Agent.Update().
-		Where(agent.IDEQ(uid)).
+		Where(agent.IDEQ(uid), agent.DeletedAtIsNil()).
 		SetWorkspacePlacement(placement).
 		Save(ctx)
 	if err != nil {

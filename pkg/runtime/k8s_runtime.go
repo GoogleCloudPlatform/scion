@@ -1690,18 +1690,28 @@ func (r *KubernetesRuntime) createSharedDirPVCs(ctx context.Context, namespace s
 	// server.shared_dir_storage backend=nfs: shared dirs use subPaths on the
 	// dedicated shared NFS PVC, no separate PVCs needed (design
 	// deploy-config-explore §3.2.4). Takes precedence over the
-	// workspace_storage:nfs branch below.
+	// workspace_storage:nfs branch below. With per-dir backends only the
+	// dirs the realization serves are skipped; the rest are handled below.
+	sharedDirs := config.SharedDirs
 	if config.SharedDirStorage != nil && config.SharedDirStorage.Backend == "nfs" {
-		runtimeLog.Info("shared_dir_storage nfs: shared dirs served via NFS subPath, skipping PVC creation",
-			"shared_dir_count", len(config.SharedDirs))
-		return nil
+		sharedDirs = make([]api.SharedDir, 0, len(config.SharedDirs))
+		for _, sd := range config.SharedDirs {
+			if !config.SharedDirStorage.Serves(sd.Name) {
+				sharedDirs = append(sharedDirs, sd)
+			}
+		}
+		if len(sharedDirs) == 0 {
+			runtimeLog.Info("shared_dir_storage nfs: shared dirs served via NFS subPath, skipping PVC creation",
+				"shared_dir_count", len(config.SharedDirs))
+			return nil
+		}
 	}
 
 	// NFS backend: shared dirs use subPaths on the workspace NFS PVC,
 	// no separate PVCs needed (design §5.3).
 	if config.WorkspaceBackendName == "nfs" && config.NFSPVClaimName != "" {
 		runtimeLog.Info("NFS backend: shared dirs served via NFS subPath, skipping PVC creation",
-			"shared_dir_count", len(config.SharedDirs))
+			"shared_dir_count", len(sharedDirs))
 		return nil
 	}
 
@@ -1728,7 +1738,7 @@ func (r *KubernetesRuntime) createSharedDirPVCs(ctx context.Context, namespace s
 		return err
 	}
 
-	for _, sd := range config.SharedDirs {
+	for _, sd := range sharedDirs {
 		if err := r.ensureProjectRWXClaim(ctx, namespace, projectName, projectID, sd.Name, storageClass, storageQuantity); err != nil {
 			return err
 		}
@@ -2111,11 +2121,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	//     writable by the broker user.
 	fsGroupGID := int64(os.Getgid()) // default: host GID (local backend)
 	if config.WorkspaceBackendName == "nfs" {
-		nfsGID := config.NFSGID
-		if nfsGID == 0 {
-			nfsGID = 1000 // design default
-		}
-		fsGroupGID = int64(nfsGID)
+		fsGroupGID = int64(provision.DefaultOwnerID(config.NFSGID))
 	}
 	runAsNonRoot := true
 	allowPrivilegeEscalation := false
@@ -2129,6 +2135,14 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		},
 		SupplementalGroups: sharedDirSupplementalGroups(config, fsGroupGID),
 	}
+	// SCION_SUPPLEMENTAL_GIDS is broker-owned: drop any template, user env
+	// or secret value, and set it to the nfs leaf gids the pod holds (its
+	// supplementalGroups plus a leaf gid skipped there because it equals
+	// fsGroup, which the pod holds through fsGroup), so sciontool clears the
+	// umask group bits for nfs shared-dir writers (ptone/scion#3155). Pods start
+	// as the agent user via runAsUser, so sciontool does no privilege drop
+	// here; the variable only drives the umask.
+	envVars = withSupplementalGIDsEnv(envVars, sharedDirGroups(config))
 
 	// Determine image pull policy
 	pullPolicy := corev1.PullIfNotPresent
@@ -2347,9 +2361,9 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		// filesystem access to them. Mirror the same volumes/targets the main
 		// container gets (by index, so the names match what the loop below
 		// creates) so `sciontool provision` can mkdir+chown them too. Out of
-		// scope here: server.shared_dir_storage's own NFS mechanism
-		// (sharedDirStorageNFS below) — a separate subsystem, not implicated
-		// in F-111.
+		// scope here: dirs served by server.shared_dir_storage's own NFS
+		// mechanism (SharedDirStorage.Serves below) — a separate subsystem,
+		// not implicated in F-111.
 		initVolumeMounts := []corev1.VolumeMount{initWorkspaceMount}
 		// #2670: the sentinel and the provisioning lock live in the
 		// project's provisioning state directory, mounted next to the
@@ -2503,87 +2517,18 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		pod.Spec.Containers[0].VolumeMounts = append(pod.Spec.Containers[0].VolumeMounts, extraVolumeMounts...)
 	}
 
-	// Apply resource requests/limits from the common resource spec with safe parsing.
-	// When no resources are specified, apply defaults so that GKE Autopilot
-	// (and other environments) get predictable scheduling behavior.
-	if config.Resources == nil {
-		config.Resources = &api.ResourceSpec{
-			Requests: api.ResourceList{CPU: "250m", Memory: "512Mi"},
-			Limits:   api.ResourceList{CPU: "2", Memory: "4Gi"},
-			Disk:     "10Gi",
-		}
+	// Apply resource requests/limits from the resolved spec and
+	// kubernetes.resources. Default requests fill only resources with neither a
+	// request nor a limit (see buildK8sResourceRequirements).
+	var k8sResources *api.K8sResources
+	if config.Kubernetes != nil {
+		k8sResources = config.Kubernetes.Resources
 	}
-	if config.Resources != nil {
-		reqs := corev1.ResourceList{}
-		limits := corev1.ResourceList{}
-		if config.Resources.Requests.CPU != "" {
-			q, err := parseResourceSafe(config.Resources.Requests.CPU, "requests.cpu")
-			if err != nil {
-				return nil, err
-			}
-			reqs[corev1.ResourceCPU] = q
-		}
-		if config.Resources.Requests.Memory != "" {
-			q, err := parseResourceSafe(config.Resources.Requests.Memory, "requests.memory")
-			if err != nil {
-				return nil, err
-			}
-			reqs[corev1.ResourceMemory] = q
-		}
-		if config.Resources.Limits.CPU != "" {
-			q, err := parseResourceSafe(config.Resources.Limits.CPU, "limits.cpu")
-			if err != nil {
-				return nil, err
-			}
-			limits[corev1.ResourceCPU] = q
-		}
-		if config.Resources.Limits.Memory != "" {
-			q, err := parseResourceSafe(config.Resources.Limits.Memory, "limits.memory")
-			if err != nil {
-				return nil, err
-			}
-			limits[corev1.ResourceMemory] = q
-		}
-		if config.Resources.Disk != "" {
-			q, err := parseResourceSafe(config.Resources.Disk, "disk (ephemeral-storage)")
-			if err != nil {
-				return nil, err
-			}
-			reqs[corev1.ResourceEphemeralStorage] = q
-			limits[corev1.ResourceEphemeralStorage] = q
-		}
-		if len(reqs) > 0 || len(limits) > 0 {
-			pod.Spec.Containers[0].Resources = corev1.ResourceRequirements{
-				Requests: reqs,
-				Limits:   limits,
-			}
-		}
+	containerResources, err := buildK8sResourceRequirements(config.Resources, k8sResources)
+	if err != nil {
+		return nil, err
 	}
-
-	// Merge Kubernetes-specific resources on top (supports extended resources like GPUs).
-	if config.Kubernetes != nil && config.Kubernetes.Resources != nil {
-		res := &pod.Spec.Containers[0].Resources
-		if res.Requests == nil {
-			res.Requests = corev1.ResourceList{}
-		}
-		if res.Limits == nil {
-			res.Limits = corev1.ResourceList{}
-		}
-		for k, v := range config.Kubernetes.Resources.Requests {
-			q, err := parseResourceSafe(v, fmt.Sprintf("kubernetes.resources.requests.%s", k))
-			if err != nil {
-				return nil, err
-			}
-			res.Requests[corev1.ResourceName(k)] = q
-		}
-		for k, v := range config.Kubernetes.Resources.Limits {
-			q, err := parseResourceSafe(v, fmt.Sprintf("kubernetes.resources.limits.%s", k))
-			if err != nil {
-				return nil, err
-			}
-			res.Limits[corev1.ResourceName(k)] = q
-		}
-	}
+	pod.Spec.Containers[0].Resources = containerResources
 
 	// Process shared directories — mount shared-dir volumes.
 	// Build a set of shared dir targets so we can skip them in the regular volume loop.
@@ -2600,9 +2545,9 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	sharedDirTargets := make(map[string]bool, len(config.SharedDirs))
 	// server.shared_dir_storage backend=nfs takes precedence over the
 	// existing workspace_storage:nfs shared-dir branch when both are set
-	// (design deploy-config-explore §3.2.4).
-	sharedDirStorageNFS := config.SharedDirStorage != nil && config.SharedDirStorage.Backend == "nfs"
-	nfsSharedDirs := !sharedDirStorageNFS && config.WorkspaceBackendName == "nfs" && config.NFSPVClaimName != ""
+	// (design deploy-config-explore §3.2.4). It applies per shared dir:
+	// with per-dir backends the realization serves only the dirs on nfs.
+	nfsSharedDirs := config.WorkspaceBackendName == "nfs" && config.NFSPVClaimName != ""
 	for i, sd := range config.SharedDirs {
 		target := fmt.Sprintf("/scion-volumes/%s", sd.Name)
 		if sd.InWorkspace {
@@ -2610,7 +2555,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		}
 		sharedDirTargets[target] = true
 
-		if sharedDirStorageNFS {
+		if config.SharedDirStorage.Serves(sd.Name) {
 			// shared_dir_storage nfs: mount the dedicated shared PVC by
 			// subPath. Fail closed (design G5) rather than falling back to
 			// an unclaimed/EmptyDir volume when the claim name is missing.
@@ -3295,8 +3240,10 @@ func (r *KubernetesRuntime) syncFromPod(ctx context.Context, namespace, podName,
 	return nil
 }
 
-func (r *KubernetesRuntime) Stop(ctx context.Context, id string) error {
-	return r.Delete(ctx, RunRef{ID: id})
+// Stop is Delete on Kubernetes: ref.RunID is enforced by Delete (a pod of
+// another run is left untouched and ErrRunMismatch is returned).
+func (r *KubernetesRuntime) Stop(ctx context.Context, ref RunRef) error {
+	return r.Delete(ctx, ref)
 }
 
 // Delete removes the pod ref.ID and its secrets. ref.ID is the pod name, or
@@ -4223,8 +4170,7 @@ type nfsSharedDirMount struct {
 // (server.shared_dir_storage's own NFS backend, or the local per-dir-PVC
 // backend) — those are separate subsystems, not implicated in F-111.
 func nfsSharedDirInitMounts(config RunConfig) ([]nfsSharedDirMount, error) {
-	sharedDirStorageNFS := config.SharedDirStorage != nil && config.SharedDirStorage.Backend == "nfs"
-	nfsSharedDirs := !sharedDirStorageNFS && config.WorkspaceBackendName == "nfs" && config.NFSPVClaimName != ""
+	nfsSharedDirs := config.WorkspaceBackendName == "nfs" && config.NFSPVClaimName != ""
 	if !nfsSharedDirs || len(config.SharedDirs) == 0 {
 		return nil, nil
 	}
@@ -4234,8 +4180,13 @@ func nfsSharedDirInitMounts(config RunConfig) ([]nfsSharedDirMount, error) {
 		k8sContainerWorkspace = "/workspace"
 	}
 
-	mounts := make([]nfsSharedDirMount, 0, len(config.SharedDirs))
+	var mounts []nfsSharedDirMount
 	for i, sd := range config.SharedDirs {
+		// A dir served by server.shared_dir_storage nfs is not on the
+		// workspace claim. The index stays the pod volume index.
+		if config.SharedDirStorage.Serves(sd.Name) {
+			continue
+		}
 		target := fmt.Sprintf("/scion-volumes/%s", sd.Name)
 		if sd.InWorkspace {
 			target = fmt.Sprintf("%s/.scion-volumes/%s", k8sContainerWorkspace, sd.Name)
@@ -4364,4 +4315,26 @@ func sharedDirSupplementalGroups(config RunConfig, fsGroup int64) []int64 {
 		out = append(out, gid)
 	}
 	return out
+}
+
+// withSupplementalGIDsEnv removes every SupplementalGIDsEnvVar entry from
+// env and, when groups is non-empty, appends the broker's own value listing
+// exactly those gids (ptone/scion#3155).
+func withSupplementalGIDsEnv(env []corev1.EnvVar, groups []int64) []corev1.EnvVar {
+	// A new backing array (room for the broker's own entry), so the
+	// caller's slice is never modified.
+	out := make([]corev1.EnvVar, 0, len(env)+1)
+	for _, ev := range env {
+		if ev.Name != SupplementalGIDsEnvVar {
+			out = append(out, ev)
+		}
+	}
+	if len(groups) == 0 {
+		return out
+	}
+	ids := make([]string, 0, len(groups))
+	for _, gid := range groups {
+		ids = append(ids, strconv.FormatInt(gid, 10))
+	}
+	return append(out, corev1.EnvVar{Name: SupplementalGIDsEnvVar, Value: strings.Join(ids, ",")})
 }

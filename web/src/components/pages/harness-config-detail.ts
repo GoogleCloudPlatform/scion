@@ -187,16 +187,45 @@ export class ScionPageHarnessConfigDetail extends LitElement {
     .resource-header {
       margin-bottom: 1.5rem;
     }
+    /* The actions share this row; a name too long to fit beside them pushes
+       them onto the next line. */
     .resource-title {
       display: flex;
+      flex-wrap: wrap;
       align-items: center;
       gap: 0.75rem;
       margin: 0 0 0.5rem;
+    }
+    .resource-title-main {
+      display: flex;
+      align-items: flex-start;
+      gap: 0.75rem;
+      min-width: 0;
+    }
+    .resource-title-main > sl-icon {
+      flex-shrink: 0;
+      color: var(--sl-color-neutral-500);
+      font-size: 1.25rem;
+      /* Centre the icon on the first line of the name: (1.95rem h1 line box
+         - 1.25rem icon) / 2. */
+      margin-top: 0.35rem;
+    }
+    /* A long name wraps on its own line; the badges then follow on the next
+       line instead of floating beside a multi-line name. */
+    .header-title-text {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.5rem 0.75rem;
+      min-width: 0;
     }
     .resource-title h1 {
       margin: 0;
       font-size: 1.5rem;
       font-weight: 600;
+      line-height: 1.3;
+      min-width: 0;
+      overflow-wrap: anywhere;
     }
     .harness-badge {
       display: inline-block;
@@ -651,12 +680,13 @@ export class ScionPageHarnessConfigDetail extends LitElement {
     return html`
       <div class="resource-header">
         <div class="resource-title">
-          <sl-icon
-            name="sliders"
-            style="font-size: 1.25rem; color: var(--sl-color-neutral-500);"
-          ></sl-icon>
-          <h1>${hc.displayName || hc.name}</h1>
-          ${hc.harness ? html`<span class="harness-badge">${hc.harness}</span>` : ''}
+          <div class="resource-title-main">
+            <sl-icon name="sliders"></sl-icon>
+            <div class="header-title-text">
+              <h1>${hc.displayName || hc.name}</h1>
+              ${hc.harness ? html`<span class="harness-badge">${hc.harness}</span>` : ''}
+            </div>
+          </div>
           <div class="header-actions">
             ${hc.sourceUrl
               ? html`

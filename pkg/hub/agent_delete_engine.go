@@ -61,6 +61,11 @@ var (
 	deleteShortStep      = 5 * time.Second  // ports, finalizing CAS, classification
 	deleteStepTimeout    = 10 * time.Second // revoke attempt, events, notifications, finish, topic
 	deleteRevokeAttempts = 3
+
+	// deleteClock is the engine's clock for the claim's lease, its renewals
+	// and the dispatch deadline (notAfter, ptone/scion#2906). A seam so
+	// tests can use a fake clock.
+	deleteClock = time.Now
 )
 
 var (
@@ -158,7 +163,7 @@ func deleteClaimStopping(a *store.Agent) bool {
 // It returns the plan when this request now holds the claim, or nil when the
 // claim affected no row (the caller re-reads to decide).
 func (s *Server) claimAgentDeletion(ctx context.Context, agentID string, p agentDeleteParams) (*agentDeletionPlan, error) {
-	now := time.Now()
+	now := deleteClock()
 	lease := now.Add(deleteLease)
 	deleting := store.DeletionStateDeleting
 	empty := ""
@@ -258,6 +263,9 @@ func (s *Server) runAgentDeletion(reqCtx context.Context, plan *agentDeletionPla
 	base := context.WithoutCancel(reqCtx)
 	engineCtx, cancel := context.WithCancelCause(base)
 	e := &deletionEngine{s: s, plan: plan, base: base, ctx: engineCtx, cancel: cancel}
+	if plan.snapshot.DeletionLeaseAt != nil {
+		e.leaseUntil = *plan.snapshot.DeletionLeaseAt
+	}
 	go func() {
 		var out deletionOutcome
 		defer func() {
@@ -300,6 +308,30 @@ type deletionEngine struct {
 	// finished is set once finish() has committed the soft or hard delete.
 	// Only the engine goroutine touches it.
 	finished bool
+
+	// The run intent dispatch recorded (stopped, at intentAt) and the
+	// intent it replaced, so a rollback can restore the prior intent.
+	intentRecorded bool
+	priorIntent    store.RunIntent
+	intentAt       time.Time
+
+	// leaseUntil is the lease expiry this engine last wrote (at the claim,
+	// then on each renewal that took). It bounds the dispatch deadline.
+	leaseMu    sync.Mutex
+	leaseUntil time.Time
+}
+
+// currentLease returns the lease expiry this engine last wrote.
+func (e *deletionEngine) currentLease() time.Time {
+	e.leaseMu.Lock()
+	defer e.leaseMu.Unlock()
+	return e.leaseUntil
+}
+
+func (e *deletionEngine) setLease(t time.Time) {
+	e.leaseMu.Lock()
+	defer e.leaseMu.Unlock()
+	e.leaseUntil = t
 }
 
 // tailStep runs one best-effort step after the delete committed, recovering
@@ -370,7 +402,7 @@ func (e *deletionEngine) startRenewal() {
 				return
 			case <-ticker.C:
 			}
-			lease := time.Now().Add(deleteLease)
+			lease := deleteClock().Add(deleteLease)
 			ctx, cancel := context.WithTimeout(e.base, deleteRenewTimeout)
 			pred := e.claimPred(store.DeletionStateDeleting, store.DeletionStateFinalizing)
 			pred.DeletedAtNull = true
@@ -392,6 +424,7 @@ func (e *deletionEngine) startRenewal() {
 				return
 			default:
 				misses = 0
+				e.setLease(lease)
 				e.publishStatus(ctx)
 			}
 			cancel()
@@ -428,7 +461,7 @@ func (e *deletionEngine) publishStatus(ctx context.Context) {
 func (e *deletionEngine) abandon() {
 	ctx, cancel := context.WithTimeout(e.base, deleteShortStep)
 	defer cancel()
-	now := time.Now()
+	now := deleteClock()
 	n, err := e.s.store.UpdateAgentDeletion(ctx, e.agentID(),
 		e.claimPred(store.DeletionStateDeleting, store.DeletionStateFinalizing),
 		store.DeletionFields{LeaseAt: &now})
@@ -444,10 +477,19 @@ func (e *deletionEngine) abandon() {
 // terminal write (finalizing, rollback, in_doubt) errors, so the row does not
 // keep blocking start until the lease lapses.
 func (e *deletionEngine) abandonOutcome() deletionOutcome {
+	return e.abandonWith("the delete engine stopped unexpectedly; retry the delete")
+}
+
+// staleDispatchMessage is the abandoned outcome's message when the broker
+// (or the executing hub node) refused the dispatch as stale.
+const staleDispatchMessage = "the broker received the delete after its deadline and did nothing; retry the delete"
+
+// abandonWith abandons the claim (see abandon) and returns failed{abandoned}
+// with msg.
+func (e *deletionEngine) abandonWith(msg string) deletionOutcome {
 	e.stopRenewal()
 	e.abandon()
-	return deletionOutcome{kind: deletionOutcomeFailed, code: store.DeletionCodeAbandoned,
-		message: "the delete engine stopped unexpectedly; retry the delete"}
+	return deletionOutcome{kind: deletionOutcomeFailed, code: store.DeletionCodeAbandoned, message: msg}
 }
 
 // run executes the engine steps (design §2.3 table).
@@ -563,12 +605,21 @@ func (e *deletionEngine) dispatch() (out deletionOutcome, ok bool) {
 
 	// A delete is a stop: record it before anything is dispatched. The
 	// claim already holds the row, so a failed write is logged rather than
-	// failing the delete. A rollback leaves this intent in place (see
-	// rollback).
-	if _, err := s.recordRunIntent(ctx, agent, store.RunIntentStopped); err != nil {
+	// failing the delete. A rollback restores the intent this replaced (see
+	// rollback). The start claim held when the stop was recorded is
+	// released once the dispatch succeeds: the delete superseded it.
+	supersededClaim := agent.StartClaimID
+	if prior, at, err := s.swapRunIntent(ctx, agent, store.RunIntentStopped); err != nil {
 		s.agentLifecycleLog.Warn("Failed to record run intent for agent delete",
 			"agent_id", agent.ID, "error", err)
+	} else {
+		e.intentRecorded, e.priorIntent, e.intentAt = true, prior, at
 	}
+	defer func() {
+		if ok && e.intentRecorded {
+			s.releaseSupersededClaim(e.base, agent.ID, supersededClaim, e.intentAt)
+		}
+	}()
 
 	// Managed agent: clean up cloud resources directly, skip the broker.
 	// Errors are logged, as before (follow-up 4).
@@ -605,12 +656,31 @@ func (e *deletionEngine) dispatch() (out deletionOutcome, ok bool) {
 	if agent.DeletionStartedAt != nil {
 		startedAt = *agent.DeletionStartedAt
 	}
+	// Fence the dispatch (ptone/scion#2906): the broker refuses it once
+	// past notAfter, after which this claim may have lapsed and the user
+	// started the agent again. A cross-node dispatch carries the claim
+	// instead and gets its deadline where it is sent. The one deadline
+	// covers the previous-run deletes too (see deletePreviousRuns).
+	now := deleteClock()
+	notAfter := deleteNotAfter(now, e.currentLease())
+	ctx = withDeleteDispatchFence(ctx, deleteDispatchFence{claim: e.plan.claim, notAfter: notAfter})
+	s.agentLifecycleLog.Debug("delete engine: dispatching fenced delete",
+		"agent_id", agent.ID, "claim", e.plan.claim, "not_after", notAfter.UTC().Format(time.RFC3339))
 	err := dispatcher.DispatchAgentDelete(ctx, agent, req.DeleteFiles, req.RemoveBranch, req.Soft, startedAt)
 	if err == nil {
 		return deletionOutcome{}, true
 	}
 	if e.isLost() {
 		return e.lost(), false
+	}
+	if isStaleDeleteDispatch(err) {
+		// The broker (or the executing node) did nothing: the dispatch was
+		// past its deadline. Never finalize from it, even with force or a
+		// best-effort dispatch; abandon the claim so the row reads
+		// failed/abandoned and a retry re-claims it, as when an engine dies.
+		s.agentLifecycleLog.Warn("delete engine: dispatch refused as stale; abandoning the claim",
+			"agent_id", agent.ID, "claim", e.plan.claim, "not_after", notAfter.UTC().Format(time.RFC3339), "error", err)
+		return e.abandonWith(staleDispatchMessage), false
 	}
 	switch {
 	case bestEffort:
@@ -698,7 +768,7 @@ func (e *deletionEngine) rollback(code, msg string) deletionOutcome {
 	e.stopRenewal()
 	ctx, cancel := context.WithTimeout(e.base, deleteStepTimeout)
 	defer cancel()
-	now := time.Now()
+	now := deleteClock()
 	failed := store.DeletionStateFailed
 	prior := e.plan.prior
 	set := store.DeletionFields{
@@ -737,11 +807,11 @@ func (e *deletionEngine) rollback(code, msg string) deletionOutcome {
 			}
 		},
 	}
-	// The run intent stays stopped, as dispatch recorded it, even when the
-	// prior phase restored here is a live one (including a broker that was
-	// unavailable): a failed delete is treated like a stop whose dispatch
-	// failed. Nothing acts on a live agent with intent stopped yet, so this
-	// only records what the user last asked for.
+	// The run intent dispatch recorded (stopped) is put back to what it
+	// replaced, with a compare-and-set on the time dispatch wrote, so an
+	// agent restored to a live phase keeps a matching intent (the hub stops
+	// an agent that runs with intent stopped) and a newer start or stop
+	// recorded meanwhile wins.
 	n, err := e.s.store.UpdateAgentDeletion(ctx, e.agentID(), e.claimPred(store.DeletionStateDeleting), set)
 	if err != nil {
 		e.s.agentLifecycleLog.Error("delete engine: rollback write failed",
@@ -750,6 +820,12 @@ func (e *deletionEngine) rollback(code, msg string) deletionOutcome {
 	}
 	if n == 0 {
 		return e.lost()
+	}
+	if e.intentRecorded && e.priorIntent.Valid() && e.priorIntent != store.RunIntentStopped {
+		if _, err := e.s.store.RevertRunIntent(ctx, e.agentID(), store.RunIntentStopped, e.intentAt, e.priorIntent); err != nil {
+			e.s.agentLifecycleLog.Warn("delete engine: restoring the run intent failed",
+				"agent_id", e.agentID(), "error", err)
+		}
 	}
 	e.publishStatus(ctx)
 	return deletionOutcome{kind: deletionOutcomeFailed, code: code, message: msg}
@@ -788,7 +864,7 @@ func (e *deletionEngine) failInDoubt() deletionOutcome {
 	e.stopRenewal()
 	ctx, cancel := context.WithTimeout(e.base, deleteStepTimeout)
 	defer cancel()
-	now := time.Now()
+	now := deleteClock()
 	failed := store.DeletionStateFailed
 	code := store.DeletionCodeInDoubt
 	msg := deleteInDoubtMessage
@@ -813,7 +889,7 @@ func (e *deletionEngine) failFinalizing(code, msg string) deletionOutcome {
 	e.stopRenewal()
 	ctx, cancel := context.WithTimeout(e.base, deleteStepTimeout)
 	defer cancel()
-	now := time.Now()
+	now := deleteClock()
 	n, err := e.s.store.UpdateAgentDeletion(ctx, e.agentID(), e.claimPred(store.DeletionStateFinalizing),
 		store.DeletionFields{LeaseAt: &now, FailedAt: &now, Code: &code, Error: &msg})
 	if err != nil {

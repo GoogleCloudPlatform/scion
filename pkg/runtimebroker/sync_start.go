@@ -176,9 +176,9 @@ func (s *Server) cancelLocalLaunch(key launchKey) {
 
 // cancelLocalLaunchForRun is cancelLocalLaunch for a delete naming run
 // runID; see launchRegistry.CancelLocalForRun.
-func (s *Server) cancelLocalLaunchForRun(key launchKey, runID string) {
+func (s *Server) cancelLocalLaunchForRun(key launchKey, runID string) bool {
 	if s.launchRegistry == nil {
-		return
+		return false
 	}
-	s.launchRegistry.CancelLocalForRun(key, runID)
+	return s.launchRegistry.CancelLocalForRun(key, runID)
 }

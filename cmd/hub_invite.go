@@ -120,12 +120,12 @@ func getInviteClient() (hubclient.Client, error) {
 
 func runInviteCreate(cmd *cobra.Command, args []string) error {
 	if inviteExpires == "" {
-		return fmt.Errorf("--expires is required")
+		return newUsageError("--expires is required")
 	}
 
 	// Validate the duration
 	if _, err := time.ParseDuration(inviteExpires); err != nil {
-		return fmt.Errorf("invalid --expires duration: %w", err)
+		return newUsageError("invalid --expires duration: %w", err)
 	}
 
 	client, err := getInviteClient()
