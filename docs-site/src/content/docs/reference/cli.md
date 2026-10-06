@@ -554,23 +554,62 @@ as stop, start, and restart); an agent can always reincarnate itself.
     - `--handoff-file <path>`: File whose content becomes the new generation's first task. Required for self-migration.
     - `--handoff-template`: Print the handoff template and exit. Ignores other flags and arguments, and does not contact the Hub.
     - `--dry-run`: Print the resolved plan (old → new template, image, harness config, model, env key names, and branch) without migrating anything.
-    - `--broker <name|id>`: Target another Runtime Broker for the new generation. Both Runtime Brokers must mount the same NFS export, so the workspace would move without being copied. Requires `--dry-run`: without it the CLI fails before contacting the Hub, because a real move is not supported yet.
+    - `--broker <name|id>`: Move the agent to another Runtime Broker (see [Moving to another Runtime Broker](#moving-to-another-runtime-broker) below). Both Runtime Brokers must mount the same NFS export, so the workspace moves without being copied. The CLI dry-runs the move first and stops if it is refused; add `--dry-run` to only check it.
+    - `--service-account <id>`: Patch the GCP service account of the new generation. Gets the same access checks as `scion create`.
+    - `--role <role>`: Patch the agent role of the new generation: `none`, `readonly`, `baseline`, or `full`. Gets the same access checks as `scion create`; an agent reincarnating itself can lower its own role but not raise it.
+    - `--model <model>`: Patch the model of the new generation. Model aliases are accepted, as with `scion start`.
+    - `--harness-auth <method>`: Patch the harness auth method of the new generation: `api-key`, `oauth-token`, `auth-file`, or `vertex-ai`.
+    - `--image <image>`, `-i`: Patch the container image of the new generation.
     - `--thinking-level <value>`: Patch the thinking level of the new generation. Accepts the same values as `scion start`: an integer from 0 to 100, or a case-insensitive shorthand: `low` (25), `medium` (50), `high` (75), `max` (100). The Hub receives the integer. Without the flag, the thinking level is not patched. An invalid value fails before contacting the Hub.
 
-**Checking a move to another Runtime Broker.** `scion reincarnate <agent> --broker <name|id> --dry-run`
-reports whether the agent could move, and changes nothing. The Hub runs nine checks in this order:
-workspace mode, workspace storage reported by both Runtime Brokers, same NFS export, workspace on the
-export, target profile, target health, access, agent-move capability, and capacity. The first failing
-check decides the answer; the CLI prints every check as passed, failed, or not evaluated. No Runtime
-Broker advertises the agent-move capability yet, so the capability check fails even when every
-earlier check passes. A target that is the agent's current Runtime Broker is a plain reincarnation
-dry run. A target you cannot see is reported as not found. If the CLI says the Hub does not support
-`--broker`, upgrade the Hub.
+**Patch flags.** `--service-account`, `--role`, `--model`, `--thinking-level`, `--harness-auth`, and
+`--image` change that setting on the new generation, and later reincarnations keep the new value.
+`--dry-run` shows the old and new value of each patched setting. For a user, patch flags need
+permission to update the agent (`agent.update`) as well as `agent.lifecycle`, so a user access token
+cannot use them; sign in with `scion hub auth login` instead. An agent caller, including an agent
+patching itself, needs the agent lifecycle permission. Before a real patched reincarnation the CLI dry-runs
+the same request, and stops if the Hub does not apply the patch (upgrade the Hub). Patch flags combine
+with `--broker`: the move's checks judge the patched configuration, for example the patched service
+account.
 
-:::note[Phase 1]
-This release supports only `--handoff-file`, `--handoff-template`, `--dry-run`, and `--broker` together with `--dry-run`. Overrides such as a different image,
-model, or harness config are not yet available.
-:::
+Reincarnating another principal's agent makes you its recorded delegator, so you must be able to
+delegate the agent's role. A caller who cannot, for example a non-admin reincarnating an agent with a
+privileged role, gets `403` from this authority check. It runs before the workspace and capability
+checks (`400`, `412`), so expect the `403` first.
+
+#### Moving to another Runtime Broker
+
+`scion reincarnate <agent> --broker <name|id>` moves the agent to another Runtime Broker that mounts
+the same NFS export, keeping its ID, slug, generation chain, and workspace. The full requirements,
+permissions, and operator notes are in
+[Moving an agent to another Runtime Broker](/scion/hosted/ha/multi-broker/#moving-an-agent-to-another-runtime-broker).
+
+The CLI first sends the same request as a dry run. The Hub runs nine checks in this order: workspace
+mode, workspace storage reported by both Runtime Brokers, same NFS export, workspace on the export,
+target profile, target health, access, agent-move capability (on both Runtime Brokers, with the source
+online), and capacity. The first failing check decides the answer, with `400`, `403`, `409`, `412`,
+`429`, or `503`, and the CLI prints every check as passed, failed, or not evaluated. A refused move
+stops there, before anything changes. With `--dry-run` the CLI only prints the verdict and plan.
+
+When the checks pass, the Hub accepts the move with `202 Accepted` and runs it in the background. It
+stops the agent on the source, moves its quota to the target, provisions it on the target (which first
+confirms through its own mount that the workspace is there), starts the new generation with the
+preamble and handoff, and then removes the agent's local state from the source. A failure in these
+steps does not come back to the CLI, which already has its `202`: the agent goes to the `error`
+phase, and its status message gives the reason. A failure after the agent is assigned to the target
+and before the new generation is running rolls the move back: the agent is left stopped on the
+source, in the `error` phase, with its previous configuration and workspace, and you can start it
+again or retry. If the target's start fails in a way that may have left a container, the agent stays
+on the target in the `error` phase instead.
+
+A target you cannot see is reported as not found (`404 runtime_broker_not_found`), and a name that
+matches more than one Runtime Broker returns `409 runtime_broker_ambiguous` (use the ID). A target that
+is the agent's current Runtime Broker is a plain reincarnation. If the CLI says the Hub does not
+support `--broker`, upgrade the Hub.
+
+A self-migration with `--broker` follows the same contract as any self-migration: the CLI prints that
+the container will be stopped shortly, and does not set a status such as `blocked`. An agent can move itself
+only to a Runtime Broker that already serves its project.
 
 ## Configuration & Workspace
 

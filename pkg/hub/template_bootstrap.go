@@ -78,6 +78,7 @@ func (s *Server) BootstrapTemplatesFromDir(ctx context.Context, templatesDir str
 			imported++
 		} else {
 			// Existing template — check if local files have changed
+			oldHash := existing.ContentHash
 			changed, err := s.syncExistingTemplate(ctx, existing, templatePath, false)
 			if err != nil {
 				s.templateLog.Warn("template bootstrap: failed to sync template, skipping",
@@ -86,6 +87,8 @@ func (s *Server) BootstrapTemplatesFromDir(ctx context.Context, templatesDir str
 			}
 			if changed {
 				updated++
+				warnBootstrapOverwrite(s.templateLog, "template", name, existing.ID, templatePath, oldHash,
+					s.currentTemplateHash(ctx, existing.ID))
 			}
 		}
 	}

@@ -714,7 +714,7 @@ export class ScionPageProjectDetail extends LitElement {
        flex item's min-width:auto holds the header open at the full name. */
     .agent-header > div {
       /* Full-width basis so the badge always wraps to its own row. A wide
-         status label like "Waiting_for_input" would otherwise crush the name
+         status label like "waiting on parent" would otherwise crush the name
          to a few characters, the same failure the agents grid had — it is the
          badge's width that matters, not how many there are. */
       flex: 1 1 100%;
