@@ -19,6 +19,7 @@ package entadapter
 import (
 	"strconv"
 	"strings"
+	"time"
 
 	"entgo.io/ent/dialect"
 )
@@ -44,4 +45,16 @@ func rebindForDialect(dialectName, query string) string {
 		b.WriteRune(r)
 	}
 	return b.String()
+}
+
+// sameInstantAtStoredPrecision reports whether got, a time read back from the
+// store, is the instant want that was written. SQLite keeps nanoseconds, so
+// that is exact equality there. Postgres keeps microseconds; whether the
+// sub-microsecond part is truncated (pgx binary encoding) or rounded (a
+// text-format bind) depends on the driver path, so exactly those two values
+// are accepted as well, and nothing else.
+func sameInstantAtStoredPrecision(want, got time.Time) bool {
+	return got.Equal(want) ||
+		got.Equal(want.Truncate(time.Microsecond)) ||
+		got.Equal(want.Round(time.Microsecond))
 }

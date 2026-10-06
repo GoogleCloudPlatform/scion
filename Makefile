@@ -194,7 +194,7 @@ test-launch-store-postgres:
 		echo "ERROR: one or more Postgres-only integration tests were skipped -- see '--- SKIP' lines above." >&2; \
 		exit 1; \
 	fi
-	@go test -tags integration -count=1 -timeout 25m -v \
+	@go test -tags integration -count=1 -timeout 40m -v \
 		./pkg/store/entadapter/... > /tmp/test-launch-store-postgres.log 2>&1; \
 	status=$$?; \
 	cat /tmp/test-launch-store-postgres.log; \

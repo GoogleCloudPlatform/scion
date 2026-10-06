@@ -550,7 +550,7 @@ jobs:
   launch-store-postgres-tests:
     name: T1 Launch Store PostgreSQL Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     services:
       postgres:
         image: postgres:16

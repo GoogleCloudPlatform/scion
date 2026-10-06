@@ -594,15 +594,9 @@ func TestUpsertConversationByExternalRef_FieldClassification(t *testing.T) {
 	t.Run("B_immutable", func(t *testing.T) {
 		assert.Equal(t, initialID, r2.ID, "ID must not change")
 		// r1.CreatedAt is the in-memory value (nanosecond precision) while
-		// r2.CreatedAt was read back from the database. Postgres keeps
-		// microseconds, so compare exactly at microsecond precision. Whether
-		// the sub-microsecond part is truncated (pgx binary encoding) or
-		// rounded (a text-format bind) depends on the driver path, so accept
-		// exactly those two values and nothing else.
-		storedCreatedAt := r2.CreatedAt.Truncate(time.Microsecond)
-		assert.True(t,
-			storedCreatedAt.Equal(initialCreatedAt.Truncate(time.Microsecond)) ||
-				storedCreatedAt.Equal(initialCreatedAt.Round(time.Microsecond)),
+		// r2.CreatedAt was read back from the database (microseconds on
+		// Postgres): compare exactly at the stored precision.
+		assert.True(t, sameInstantAtStoredPrecision(initialCreatedAt, r2.CreatedAt),
 			"CreatedAt must not change (got %v vs %v)", initialCreatedAt, r2.CreatedAt)
 		// Kind: the upsert passed the same Kind ("group"). Upserting with a different
 		// Kind is silently ignored — the update path does not call SetKind. This is

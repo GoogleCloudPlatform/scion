@@ -407,5 +407,5 @@ func TestCreateScheduledEvent_FireInUnderNonUTCLocalRoundTrips(t *testing.T) {
 
 	got, err := s.GetScheduledEvent(ctx, evt.ID)
 	require.NoError(t, err)
-	assert.True(t, fireAt.Equal(got.FireAt), "fireAt instant must round-trip: want %v got %v", fireAt, got.FireAt)
+	assert.True(t, sameInstantAtStoredPrecision(fireAt, got.FireAt), "fireAt instant must round-trip: want %v got %v", fireAt, got.FireAt)
 }
