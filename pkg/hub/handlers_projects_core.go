@@ -3273,7 +3273,7 @@ func (s *Server) removeHubManagedProjectDir(projectID, slug string) {
 	}
 	projectPath, err := s.hubManagedProjectPath(slug)
 	if err != nil {
-		s.projectsLogger().Warn("hub-managed project directory not removed: the directory could not be resolved",
+		s.projectsLogger().Warn("could not resolve hub-managed project directory; skipping removal, the directory may be left behind",
 			"project_id", projectID)
 		return
 	}
