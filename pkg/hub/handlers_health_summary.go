@@ -28,8 +28,8 @@ import (
 
 // healthSummaryBrokerLimit caps the runtime broker rows returned by the
 // health summary. The total is still reported so the dashboard can show
-// that the list was truncated.
-const healthSummaryBrokerLimit = 100
+// that the list was truncated. A variable so tests can lower it.
+var healthSummaryBrokerLimit = 100
 
 // healthSummaryBrokerPageSize is the store page size used while counting
 // runtime broker records for the health summary.
@@ -279,9 +279,11 @@ func (s *Server) handleHealthSummary(w http.ResponseWriter, r *http.Request) {
 }
 
 // healthSummaryBrokers lists runtime brokers for the health summary,
-// excluding plugin records. It returns at most healthSummaryBrokerLimit rows
-// in store order, with the full runtime broker count in Total. On a store
-// error it returns an empty, non-nil list together with the error.
+// excluding plugin records. Problem rows (see healthSummaryBrokerHasProblem)
+// are stably sorted ahead of the rest, so capping at
+// healthSummaryBrokerLimit never hides a problem broker behind healthy ones;
+// within each group store order is kept. Total is the full runtime broker
+// count. On a store error it returns an empty, non-nil list with the error.
 func (s *Server) healthSummaryBrokers(ctx context.Context, agentAgg *store.AgentHealthAggregate) (HealthSummaryBrokers, error) {
 	list := HealthSummaryBrokers{Items: []HealthSummaryBroker{}}
 	opts := store.ListOptions{Limit: healthSummaryBrokerPageSize}
@@ -295,18 +297,32 @@ func (s *Server) healthSummaryBrokers(ctx context.Context, agentAgg *store.Agent
 			if isPluginBroker(b) {
 				continue
 			}
-			list.Total++
-			if len(list.Items) < healthSummaryBrokerLimit {
-				list.Items = append(list.Items, healthSummaryBroker(b, agentAgg))
-			}
+			list.Items = append(list.Items, healthSummaryBroker(b, agentAgg))
 		}
 		if page.NextCursor == "" || page.NextCursor == opts.Cursor {
 			break
 		}
 		opts.Cursor = page.NextCursor
 	}
-	list.Truncated = list.Total > len(list.Items)
+	sort.SliceStable(list.Items, func(i, j int) bool {
+		return healthSummaryBrokerHasProblem(list.Items[i]) && !healthSummaryBrokerHasProblem(list.Items[j])
+	})
+	list.Total = len(list.Items)
+	if list.Total > healthSummaryBrokerLimit {
+		list.Items = list.Items[:healthSummaryBrokerLimit]
+		list.Truncated = true
+	}
 	return list, nil
+}
+
+// healthSummaryBrokerHasProblem reports whether a runtime broker row needs
+// attention: it is not online, or its NFS workspace share is unhealthy.
+func healthSummaryBrokerHasProblem(b HealthSummaryBroker) bool {
+	if b.Status != store.BrokerStatusOnline {
+		return true
+	}
+	ws := b.WorkspaceStorage
+	return ws != nil && ws.NFSHealthy != nil && !*ws.NFSHealthy
 }
 
 // healthSummaryBroker builds one runtime broker row of the health summary.

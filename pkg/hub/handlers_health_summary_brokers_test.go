@@ -225,3 +225,40 @@ func TestHealthSummaryBrokers_EmptyListShape(t *testing.T) {
 	assert.False(t, hasOld, "the old brokers key is replaced by runtime_brokers")
 	assert.JSONEq(t, `{"items":[],"total":0,"truncated":false}`, string(raw["runtime_brokers"]))
 }
+
+func TestHealthSummaryBrokers_ProblemRowsKeptWhenCapped(t *testing.T) {
+	prev := healthSummaryBrokerLimit
+	healthSummaryBrokerLimit = 2
+	t.Cleanup(func() { healthSummaryBrokerLimit = prev })
+
+	srv, s := testServer(t)
+	// Store order is newest first, so the problem brokers are created first
+	// (strictly older, hence the short pauses) and would fall past the cap
+	// without problem-first ordering.
+	pause := func() { time.Sleep(2 * time.Millisecond) }
+	createSummaryBroker(t, s, &store.RuntimeBroker{
+		ID: tid("hs-cap-offline"), Name: "hs-cap-offline", Status: store.BrokerStatusOffline,
+	})
+	pause()
+	createSummaryBroker(t, s, &store.RuntimeBroker{
+		ID: tid("hs-cap-nfs-bad"), Name: "hs-cap-nfs-bad", LastHeartbeat: time.Now(),
+		WorkspaceStorage: &api.BrokerWorkspaceStorage{
+			Backend: api.WorkspaceStorageBackendNFS,
+			NFS:     &api.BrokerNFSWorkspaceStorage{Server: "nfs.example", Export: "/export", Healthy: false},
+		},
+	})
+	for i := 0; i < 3; i++ {
+		pause()
+		name := fmt.Sprintf("hs-cap-ok-%d", i)
+		createSummaryBroker(t, s, &store.RuntimeBroker{
+			ID: tid(name), Name: name, LastHeartbeat: time.Now(),
+		})
+	}
+
+	list, _ := getHealthSummaryBrokers(t, srv)
+	require.Len(t, list.Items, 2)
+	ids := []string{list.Items[0].ID, list.Items[1].ID}
+	assert.ElementsMatch(t, []string{tid("hs-cap-offline"), tid("hs-cap-nfs-bad")}, ids)
+	assert.Equal(t, 5, list.Total)
+	assert.True(t, list.Truncated)
+}
