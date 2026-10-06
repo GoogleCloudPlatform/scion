@@ -226,7 +226,7 @@ Request body (optional, migration-specific parameters):
 }
 ```
 
-`dryRun` reports what the migration would do without changing anything; every built-in migration supports it. The documented form is `params.dryRun` as a boolean. A top-level `"dryRun"` field, the `?dryRun=` query parameter and string values (`"true"`/`"false"`) are accepted too, and any of them set to true makes the run a dry run. A body that is not valid JSON, a `params` that is not an object, or a `dryRun` value that is not a boolean returns `400 Bad Request` and starts nothing. (Before ptone/scion#1976 these forms were ignored and a real run started.)
+`dryRun` reports what the migration would do without changing anything; every built-in migration supports it. The documented form is `params.dryRun` as a boolean. A top-level `"dryRun"` field, the `?dryRun=` query parameter and string values (`"true"`/`"false"`) are accepted too, and any of them set to true makes the run a dry run. A body that is not valid JSON, a `params` that is not an object, or a `dryRun` value that is not a boolean returns `400 Bad Request` and starts nothing. That includes a bare `?dryRun` or `?dryRun=` with no value: write `?dryRun=true`. (Before ptone/scion#1976 these forms were ignored and a real run started.)
 
 Response:
 ```json
