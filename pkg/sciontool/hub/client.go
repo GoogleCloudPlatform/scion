@@ -2005,9 +2005,8 @@ type selfMessageRequest struct {
 	StructuredMessage *messages.StructuredMessage `json:"structured_message"`
 }
 
-// SendSelfMessage delivers a structured message to the current agent via the
-// hub's inbound message endpoint. This delivers a message into the agent's
-// own harness input.
+// SendSelfMessage delivers a structured message into the current agent's own
+// harness input via the hub's inbound message endpoint.
 // No retries — this is a best-effort fire-and-forget call.
 func (c *Client) SendSelfMessage(ctx context.Context, msg *messages.StructuredMessage) error {
 	if !c.IsConfigured() {
