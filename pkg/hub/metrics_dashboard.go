@@ -131,9 +131,9 @@ func dayKey(t time.Time, loc *time.Location) string {
 // the intended day.
 func startOfLocalDay(y int, m time.Month, d int, loc *time.Location) time.Time {
 	noon := time.Date(y, m, d, 12, 0, 0, 0, loc)
-	want := noon.Format(dayKeyLayout)
+	want := dayKey(noon, loc)
 	start := time.Date(noon.Year(), noon.Month(), noon.Day(), 0, 0, 0, 0, loc)
-	for i := 0; i < 3 && start.Format(dayKeyLayout) != want; i++ {
+	for i := 0; i < 3 && dayKey(start, loc) != want; i++ {
 		start = start.Add(time.Hour)
 	}
 	return start
