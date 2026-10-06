@@ -290,6 +290,13 @@ export class ScionQuickPalette extends LitElement {
         cursor: pointer;
         gap: 0.125rem;
         border-left: 3px solid transparent;
+        /* Break long unbreakable text (file paths, slugs) anywhere. A grid
+           track sized 1fr cannot shrink below its content's min-content
+           width, so without this one long document path would widen its
+           column, squeeze the other one and overflow the panel. "anywhere"
+           (unlike "break-word") also lowers that min-content width, which
+           is what keeps the two columns equal. */
+        overflow-wrap: anywhere;
       }
 
       .palette-option.active {
