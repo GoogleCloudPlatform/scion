@@ -227,14 +227,15 @@ const VISIBILITY_ACTIONS = new Set(['read', 'list']);
  * Whether a listing row shows the agent present with no delete running: its
  * deletion view is an explicit null (no delete active or failed) or a failed
  * delete. Such a row read on a later feed means the agent was restored since
- * an earlier feed saw it deleted. A row still deleting, or one without the
- * deletion key, says nothing about a restore.
+ * an earlier feed saw it deleted. A row still deleting, one with a state this
+ * client does not know, or one without the deletion key says nothing about a
+ * restore.
  */
 export function listedWithoutActiveDelete(row: Agent): boolean {
   const deletion = row.deletion;
   if (deletion === null) return true;
   if (deletion === undefined) return false;
-  return deletion.state !== 'deleting';
+  return deletion.state === 'failed';
 }
 
 function defaultFetch(path: string, options: ApiFetchOptions): Promise<Response> {
@@ -903,9 +904,11 @@ export class AgentStore {
    * Forget the tombstones that earlier feeds carried for agents these listing
    * rows show restored (see {@link listedWithoutActiveDelete}). The restore
    * event went out while no feed was open. Every walk on the current feed
-   * starts after those tombstones were carried, so its rows are newer than
-   * the deletes. The current feed's own tombstones are left alone: a page
-   * read before a delete on this feed can still list the agent.
+   * starts after those tombstones were carried, so its rows were read after
+   * the deletes were seen. A hard delete is published before its row is
+   * removed, so a row still deleting keeps the tombstone. The current feed's
+   * own tombstones are left alone: a page read before a delete on this feed
+   * can still list the agent.
    */
   private releaseRestored(rows: readonly Agent[]): void {
     if (this.carriedTombstones.size === 0) return;

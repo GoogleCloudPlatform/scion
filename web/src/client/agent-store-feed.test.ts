@@ -1177,7 +1177,7 @@ describe('AgentStore tombstones and restored agents', () => {
 describe('listedWithoutActiveDelete', () => {
   const base = { soft: false, claim: 1, startedAt: '2026-01-01T00:00:00Z' };
 
-  it('reads an explicit null or a failed delete as present, and a running delete or a missing key as not', () => {
+  it('reads an explicit null or a failed delete as present, and a running delete, an unknown state or a missing key as not', () => {
     expect(listedWithoutActiveDelete(agent('a', { deletion: null }))).toBe(true);
     expect(listedWithoutActiveDelete(agent('a', { deletion: { ...base, state: 'failed' } }))).toBe(
       true
@@ -1191,5 +1191,8 @@ describe('listedWithoutActiveDelete', () => {
       )
     ).toBe(false);
     expect(listedWithoutActiveDelete(agent('a'))).toBe(false);
+    // A state this client does not know yet keeps the tombstone.
+    const unknown = { ...base, state: 'purging' } as unknown as NonNullable<Agent['deletion']>;
+    expect(listedWithoutActiveDelete(agent('a', { deletion: unknown }))).toBe(false);
   });
 });
