@@ -2232,6 +2232,7 @@ func (s *Server) createAgentInProject(
 					// 500 with its correlation ID instead (writeCreateFailure).
 					s.agentLifecycleLog.Warn("Workspace storage did not respond; failing agent create",
 						"agent_id", agent.ID, "project_id", project.ID, "error", workspaceErr)
+					ucancel()
 					corrID := cleanup(createRollback{Stage: createStageWorkspaceStorage, Cause: workspaceErr})
 					writeCreateFailure(w, corrID, func() { writeWorkspaceStorageUnavailable(w, workspaceErr) })
 					return
