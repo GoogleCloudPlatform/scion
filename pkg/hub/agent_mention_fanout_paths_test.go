@@ -1042,9 +1042,8 @@ func TestMentionFanout_OutboundDM_RateLimitedMentionDoesNotFailPrimary(t *testin
 	// finds the bucket empty.
 	fakeNow := time.Now()
 	srv.chatSendLimiter = newChatSendLimiterWithRates(map[chatSenderClass]float64{
-		chatSenderHuman:       chatSendHumanRatePerMinute,
-		chatSenderAgent:       2,
-		chatSenderAgentMirror: chatSendAgentMirrorRatePerMinute,
+		chatSenderHuman: chatSendHumanRatePerMinute,
+		chatSenderAgent: 2,
 	}, func() time.Time { return fakeNow })
 
 	rr := sendViaOutbound(t, srv, sender, dmConvID, "thanks @"+bystander.Slug+" and @"+second.Slug)
@@ -1081,9 +1080,8 @@ func TestMentionFanout_MessageFork_RateLimitedMentionDoesNotFailPrimary(t *testi
 
 	fakeNow := time.Now()
 	srv.chatSendLimiter = newChatSendLimiterWithRates(map[chatSenderClass]float64{
-		chatSenderHuman:       chatSendHumanRatePerMinute,
-		chatSenderAgent:       2,
-		chatSenderAgentMirror: chatSendAgentMirrorRatePerMinute,
+		chatSenderHuman: chatSendHumanRatePerMinute,
+		chatSenderAgent: 2,
 	}, func() time.Time { return fakeNow })
 
 	rr := sendViaStructured(t, srv, sender, target, "thanks @"+bystander.Slug+" and @"+second.Slug)

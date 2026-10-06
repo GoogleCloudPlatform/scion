@@ -219,21 +219,112 @@ func (s *DelegationEdgeStore) GetDelegationEdgesForDelegator(ctx context.Context
 	return result, nil
 }
 
-// DeactivateDelegationEdge marks an edge as inactive.
-func (s *DelegationEdgeStore) DeactivateDelegationEdge(ctx context.Context, edgeID string) error {
-	uid, err := parseGetID(edgeID)
-	if err != nil {
-		return err
+// validateEdgeDeactivation checks a deactivation record before it is
+// written to delegation edges.
+func validateEdgeDeactivation(cause store.EdgeDeactivationCause, opID string) error {
+	if !store.ValidEdgeDeactivationCause(cause) {
+		return fmt.Errorf("%w: unknown edge deactivation cause %q", store.ErrInvalidInput, cause)
+	}
+	if opID == "" {
+		return fmt.Errorf("%w: edge deactivation requires an operation ID", store.ErrInvalidInput)
+	}
+	return nil
+}
+
+// deactivateEdges deactivates the active edges matching where and records d.
+func (s *DelegationEdgeStore) deactivateEdges(ctx context.Context, d store.Deactivation, where ...predicate.DelegationEdge) (int, error) {
+	if err := validateEdgeDeactivation(d.Cause, d.OpID); err != nil {
+		return 0, err
 	}
 	now := time.Now()
-	_, err = s.client.DelegationEdge.UpdateOneID(uid).
+	at := now
+	if d.At != nil && !d.At.IsZero() {
+		at = *d.At
+	}
+	n, err := s.client.DelegationEdge.Update().
+		Where(append(where, delegationedge.ActiveEQ(true))...).
 		SetActive(false).
+		SetDeactivationCause(string(d.Cause)).
+		SetDeactivatedAt(at).
+		SetDeactivationOpID(d.OpID).
 		SetUpdated(now).
 		Save(ctx)
 	if err != nil {
-		return mapError(err)
+		return 0, mapError(err)
 	}
-	return nil
+	return n, nil
+}
+
+// DeactivateDelegationEdgesForDelegate deactivates every active edge of the
+// delegate and records d on each.
+func (s *DelegationEdgeStore) DeactivateDelegationEdgesForDelegate(ctx context.Context, delegateType, delegateID string, d store.Deactivation) (int, error) {
+	return s.deactivateEdges(ctx, d,
+		delegationedge.DelegateTypeEQ(delegationedge.DelegateType(delegateType)),
+		delegationedge.DelegateIDEQ(delegateID),
+	)
+}
+
+// DeactivateDelegationEdgesForDelegator deactivates every active edge of the
+// delegator and records d on each.
+func (s *DelegationEdgeStore) DeactivateDelegationEdgesForDelegator(ctx context.Context, delegatorType, delegatorID string, d store.Deactivation) (int, error) {
+	return s.deactivateEdges(ctx, d,
+		delegationedge.DelegatorTypeEQ(delegationedge.DelegatorType(delegatorType)),
+		delegationedge.DelegatorIDEQ(delegatorID),
+	)
+}
+
+// deactivatedEdgesOf selects the inactive edges of the delegate deactivated
+// with cause under opID.
+func deactivatedEdgesOf(delegateType, delegateID string, cause store.EdgeDeactivationCause, opID string) []predicate.DelegationEdge {
+	return []predicate.DelegationEdge{
+		delegationedge.DelegateTypeEQ(delegationedge.DelegateType(delegateType)),
+		delegationedge.DelegateIDEQ(delegateID),
+		delegationedge.ActiveEQ(false),
+		delegationedge.DeactivationCauseEQ(string(cause)),
+		delegationedge.DeactivationOpIDEQ(opID),
+	}
+}
+
+// GetDeactivatedDelegationEdgesForDelegate returns the inactive edges of the
+// delegate deactivated with cause under opID, oldest first.
+func (s *DelegationEdgeStore) GetDeactivatedDelegationEdgesForDelegate(ctx context.Context, delegateType, delegateID string, cause store.EdgeDeactivationCause, opID string) ([]*store.DelegationEdge, error) {
+	if err := validateEdgeDeactivation(cause, opID); err != nil {
+		return nil, err
+	}
+	edges, err := s.client.DelegationEdge.Query().
+		Where(deactivatedEdgesOf(delegateType, delegateID, cause, opID)...).
+		Order(ent.Asc(delegationedge.FieldCreated)).
+		All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	result := make([]*store.DelegationEdge, len(edges))
+	for i, e := range edges {
+		result[i] = entDelegationEdgeToStore(e)
+	}
+	return result, nil
+}
+
+// ReactivateDelegationEdgesForDelegate reactivates exactly the inactive edges
+// of the delegate deactivated with cause under opID, and clears their
+// deactivation record. A conflict with an active edge in the same scope
+// surfaces as store.ErrAlreadyExists from the partial unique index.
+func (s *DelegationEdgeStore) ReactivateDelegationEdgesForDelegate(ctx context.Context, delegateType, delegateID string, cause store.EdgeDeactivationCause, opID string) (int, error) {
+	if err := validateEdgeDeactivation(cause, opID); err != nil {
+		return 0, err
+	}
+	n, err := s.client.DelegationEdge.Update().
+		Where(deactivatedEdgesOf(delegateType, delegateID, cause, opID)...).
+		SetActive(true).
+		SetDeactivationCause("").
+		ClearDeactivatedAt().
+		SetDeactivationOpID("").
+		SetUpdated(time.Now()).
+		Save(ctx)
+	if err != nil {
+		return 0, mapError(err)
+	}
+	return n, nil
 }
 
 // GetDelegationEdge returns one edge by ID, active or not.

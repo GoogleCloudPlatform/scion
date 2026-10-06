@@ -71,7 +71,8 @@ no `parentID` at all and is unaffected by this filter; only task-tool
 children are. Child-session model usage (`step-finish` parts) is still
 counted normally — only the session-lifecycle signals are filtered.
 
-**`session.error` is unmapped: the bridge emits nothing for it.** A
+**`session.error` emits nothing by itself; its error rides on the turn's
+`agent-end`.** A
 session's turn ends exactly once, on `session.idle` — routing
 `session.error` to any lifecycle event as well (even a non-terminal one)
 would count that same turn a second time, since `session.idle` follows a
@@ -80,7 +81,15 @@ abort path (the one known path without an idle, context-overflow
 auto-compaction, continues the turn rather than ending it). That matters
 because every agent-end increments a turn counter (`max_turns`), so
 double-counting could shut a working agent down on a single recoverable error
-or user abort. See `dialect.yaml`'s comment for the full reasoning.
+or user abort. Instead, the bridge remembers the error name and HTTP status
+only (for example `APIError (status 429)`; never the message, response body,
+headers or URL; see `sessionErrorText`) for the armed session and attaches
+it as `error` to that turn's one gated `session.idle` emission, then clears
+it, so the failed turn's `agent.turn.end` span and log carry error status.
+A user abort (`MessageAbortedError`) is not recorded, an error on a session
+that is not mid-turn or is a task-tool child is ignored, and a run that goes
+busy again after the error (auto-compaction) clears it. See `dialect.yaml`'s
+comment for the full reasoning.
 
 **`agent-end` is gated on a prior `session.status` busy (or retry), not on
 message/part activity.** OpenCode's own `session.idle` is not 1:1 with a real

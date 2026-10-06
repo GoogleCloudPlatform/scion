@@ -105,6 +105,16 @@ func (w *adoptionWorld) migrate() {
 	require.NoError(w.t, w.cs.Migrate(w.ctx))
 }
 
+// deactivateUnrecorded deactivates edgeID with no deactivation record, as
+// on a row deactivated before causes were recorded.
+func (w *adoptionWorld) deactivateUnrecorded(edgeID string) {
+	w.t.Helper()
+	uid, err := uuid.Parse(edgeID)
+	require.NoError(w.t, err)
+	_, err = w.cs.client.DelegationEdge.UpdateOneID(uid).SetActive(false).SetUpdated(time.Now()).Save(w.ctx)
+	require.NoError(w.t, err)
+}
+
 func (w *adoptionWorld) activeEdge(agentID string) *store.DelegationEdge {
 	w.t.Helper()
 	edges, err := w.cs.GetDelegationEdgesForDelegate(w.ctx, store.DelegationPrincipalAgent, agentID)
@@ -329,14 +339,14 @@ func TestProvenanceAdoptionMixedVersionCohort(t *testing.T) {
 	recordedA.ID = ""
 	recordedA.AuthorityProvenance = store.AuthorityProvenance{ProvenanceVersion: 1, SourcePrincipalKind: "user", SourcePrincipalID: u, SourceCredentialKind: store.SourceCredentialSession}
 	recordedA.EffectCeiling = store.EffectCeiling{Kind: store.EffectCeilingPrincipal}
-	require.NoError(t, w.cs.DeactivateDelegationEdge(w.ctx, ea.ID))
+	w.deactivateUnrecorded(ea.ID)
 	require.NoError(t, w.cs.CreateDelegationEdge(w.ctx, &recordedA))
 
 	// b: adopted by an earlier operational repair, with a narrower ceiling.
 	eb := w.activeEdge(b.ID)
 	narrow := []string{"agent.create", "gcp_service_account.assign", "project.read"}
 	repaired := delegationadoption.AdoptedEdge(eb, narrow, delegationadoption.Actor{PrincipalKind: "user", PrincipalID: u, CredentialKind: "session"})
-	require.NoError(t, w.cs.DeactivateDelegationEdge(w.ctx, eb.ID))
+	w.deactivateUnrecorded(eb.ID)
 	require.NoError(t, w.cs.CreateDelegationEdge(w.ctx, repaired))
 
 	ec := w.activeEdge(c.ID)
@@ -362,7 +372,7 @@ func TestProvenanceAdoptionPreservesRepairAdoptedEdges(t *testing.T) {
 	ea := w.activeEdge(a.ID)
 	ids := []string{"agent.create", "gcp_service_account.assign", "gcp_service_account.use", "project.read"}
 	repaired := delegationadoption.AdoptedEdge(ea, ids, delegationadoption.Actor{PrincipalKind: "user", PrincipalID: u, CredentialKind: "session"})
-	require.NoError(t, w.cs.DeactivateDelegationEdge(w.ctx, ea.ID))
+	w.deactivateUnrecorded(ea.ID)
 	require.NoError(t, w.cs.CreateDelegationEdge(w.ctx, repaired))
 	w.backfillMarker()
 	w.migrate()
@@ -383,7 +393,9 @@ func TestProvenanceAdoptionConcurrentDeactivationSkipsHop(t *testing.T) {
 	w.cs.adoptionHopHook = func(_ int, rec *store.DelegationAdoption) error {
 		// Another replica deactivates the edge (agent deleted) between the
 		// snapshot and the hop write.
-		return w.cs.DeactivateDelegationEdge(w.ctx, rec.OriginalEdgeID)
+		_, err := w.cs.DeactivateDelegationEdgesForDelegate(w.ctx, store.DelegationPrincipalAgent, rec.DelegateID,
+			store.Deactivation{Cause: store.EdgeDeactivationAgentSoftDelete, OpID: "concurrent-delete"})
+		return err
 	}
 	w.migrate()
 	r := w.record(a.ID)
@@ -536,7 +548,7 @@ func TestDelegationEdgeGuardedDeactivateAndReactivate(t *testing.T) {
 	other.ID = ""
 	require.NoError(t, w.cs.CreateDelegationEdge(w.ctx, &other))
 	assert.ErrorIs(t, w.cs.ReactivateDelegationEdge(w.ctx, e.ID, store.EdgeDeactivationProvenanceAdopted), store.ErrRevisionConflict, "another active edge")
-	require.NoError(t, w.cs.DeactivateDelegationEdge(w.ctx, other.ID))
+	w.deactivateUnrecorded(other.ID)
 	require.NoError(t, w.cs.ReactivateDelegationEdge(w.ctx, e.ID, store.EdgeDeactivationProvenanceAdopted))
 	got, err = w.cs.GetDelegationEdge(w.ctx, e.ID)
 	require.NoError(t, err)

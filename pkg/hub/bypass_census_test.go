@@ -89,6 +89,9 @@ func TestBypassCensus(t *testing.T) {
 		{file: "handlers_auth.go", lineSubstr: "IsUnscopedLocalPlatformAdmin", description: "admin reconciliation helper"},
 		{file: "authz_candelegate.go", lineSubstr: "requireAdmin", description: "comment reference in CanDelegate"},
 
+		// ─── Passthrough gate ───────────────────────────────────────────
+		{file: "passthrough_gate.go", lineSubstr: "IsUnscopedLocalPlatformAdmin(userIdent)", description: "the embedded broker counts as owned by an unscoped local platform administrator"},
+
 		// ─── Session revocation (admin-only endpoint) ────────────────────
 		{file: "handlers_users_core.go", lineSubstr: "requireAdmin(w, r)", description: "revokeUserSessions: admin-only endpoint for session invalidation"},
 	}

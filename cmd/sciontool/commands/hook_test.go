@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -40,11 +39,9 @@ func scrubScionEnv(t *testing.T) {
 func TestProcessHookData_Claude(t *testing.T) {
 	// Set up temp home directory for status/log files
 	tmpDir := t.TempDir()
-	oldHome := os.Getenv("HOME")
-	_ = os.Setenv("HOME", tmpDir)
-	defer func() { _ = os.Setenv("HOME", oldHome) }()
+	t.Setenv("HOME", tmpDir)
 	scrubScionEnv(t)
-	log.SetLogPath(filepath.Join(tmpDir, "agent.log"))
+	setTestLogPath(t, filepath.Join(tmpDir, "agent.log"))
 
 	hookDialect = "claude"
 
@@ -78,11 +75,9 @@ func TestProcessHookData_Claude(t *testing.T) {
 
 func TestProcessHookData_Gemini(t *testing.T) {
 	tmpDir := t.TempDir()
-	oldHome := os.Getenv("HOME")
-	_ = os.Setenv("HOME", tmpDir)
-	defer func() { _ = os.Setenv("HOME", oldHome) }()
+	t.Setenv("HOME", tmpDir)
 	scrubScionEnv(t)
-	log.SetLogPath(filepath.Join(tmpDir, "agent.log"))
+	setTestLogPath(t, filepath.Join(tmpDir, "agent.log"))
 
 	hookDialect = "gemini"
 
@@ -109,11 +104,9 @@ func TestProcessHookData_Gemini(t *testing.T) {
 
 func TestProcessHookData_SessionEvents(t *testing.T) {
 	tmpDir := t.TempDir()
-	oldHome := os.Getenv("HOME")
-	_ = os.Setenv("HOME", tmpDir)
-	defer func() { _ = os.Setenv("HOME", oldHome) }()
+	t.Setenv("HOME", tmpDir)
 	scrubScionEnv(t)
-	log.SetLogPath(filepath.Join(tmpDir, "agent.log"))
+	setTestLogPath(t, filepath.Join(tmpDir, "agent.log"))
 
 	hookDialect = "claude"
 
@@ -152,11 +145,9 @@ func TestProcessHookData_SessionEvents(t *testing.T) {
 
 func TestProcessHookData_CodexCompletion(t *testing.T) {
 	tmpDir := t.TempDir()
-	oldHome := os.Getenv("HOME")
-	_ = os.Setenv("HOME", tmpDir)
-	defer func() { _ = os.Setenv("HOME", oldHome) }()
+	t.Setenv("HOME", tmpDir)
 	scrubScionEnv(t)
-	log.SetLogPath(filepath.Join(tmpDir, "agent.log"))
+	setTestLogPath(t, filepath.Join(tmpDir, "agent.log"))
 
 	hookDialect = "codex"
 
@@ -181,11 +172,9 @@ func TestProcessHookData_CodexCompletion(t *testing.T) {
 
 func TestProcessHookData_HarnessBundledDialectOverridesBuiltin(t *testing.T) {
 	tmpDir := t.TempDir()
-	oldHome := os.Getenv("HOME")
-	_ = os.Setenv("HOME", tmpDir)
-	defer func() { _ = os.Setenv("HOME", oldHome) }()
+	t.Setenv("HOME", tmpDir)
 	scrubScionEnv(t)
-	log.SetLogPath(filepath.Join(tmpDir, "agent.log"))
+	setTestLogPath(t, filepath.Join(tmpDir, "agent.log"))
 
 	oldDialect := hookDialect
 	hookDialect = "codex"

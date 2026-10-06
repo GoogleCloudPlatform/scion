@@ -827,6 +827,118 @@ describe('W2: tombstoned IDs are dropped outright, never buffered as unknown', (
     expect(detail.deleted).toContain('a1');
     expect(detail.unknown.has('a1')).toBe(false);
   });
+
+  it('a restore created (restoredAt) after a delete clears the tombstone and re-adds the agent (ptone/scion#2951)', () => {
+    const sm = new StateManager();
+    sm.setScope({ type: 'dashboard' });
+    emit(sm, 'agent.a1.created', { phase: 'running', name: 'A1' });
+    vi.advanceTimersByTime(100);
+    emit(sm, 'agent.a1.deleted', {});
+    vi.advanceTimersByTime(100);
+    expect(sm.getAgent('a1')).toBeUndefined();
+
+    const changedSpy = vi.fn<(e: Event) => void>();
+    sm.addEventListener('agents-changed', changedSpy as EventListener);
+    const createdSpy = vi.fn<(e: Event) => void>();
+    sm.addEventListener('agent-created', createdSpy as EventListener);
+
+    emit(sm, 'agent.a1.created', {
+      phase: 'stopped',
+      name: 'A1',
+      restoredAt: '2026-10-05T01:00:00Z',
+    });
+    vi.advanceTimersByTime(100);
+
+    expect(sm.getAgent('a1')?.phase).toBe('stopped');
+    expect(sm.getAgent('a1')).not.toHaveProperty('restoredAt');
+    expect(sm.getDeletedAgentIds().has('a1')).toBe(false);
+    const detail = (changedSpy.mock.calls[0]?.[0] as CustomEvent<{ data: AgentsChangedDetail }>)
+      .detail.data;
+    expect(detail.upserted).toContain('a1');
+    expect(detail.deleted).not.toContain('a1');
+    expect(createdSpy).toHaveBeenCalledTimes(1);
+
+    // Live again: a later status delta applies.
+    emit(sm, 'agent.a1.status', { phase: 'running' });
+    vi.advanceTimersByTime(100);
+    expect(sm.getAgent('a1')?.phase).toBe('running');
+  });
+
+  it('marks the agent-created of a restore, including one this feed holds no tombstone for', () => {
+    const sm = new StateManager();
+    sm.setScope({ type: 'dashboard' });
+    const created: unknown[] = [];
+    sm.addEventListener('agent-created', ((e: CustomEvent<{ data: unknown }>) =>
+      created.push(e.detail.data)) as EventListener);
+
+    emit(sm, 'agent.a1.created', { phase: 'running', name: 'A1' });
+    emit(sm, 'agent.a2.created', {
+      phase: 'stopped',
+      name: 'A2',
+      restoredAt: '2026-10-05T01:00:00Z',
+    });
+    emit(sm, 'agent.a3.created', { phase: 'running', name: 'A3', restoredAt: '' });
+    vi.advanceTimersByTime(100);
+    expect(created).toEqual([
+      { agentId: 'a1' },
+      { agentId: 'a2', restored: true },
+      { agentId: 'a3' },
+    ]);
+
+    // The mark lasts one flush: a later plain `created` is not a restore.
+    emit(sm, 'agent.a2.created', { phase: 'running', name: 'A2' });
+    vi.advanceTimersByTime(100);
+    expect(created.slice(3)).toEqual([{ agentId: 'a2' }]);
+
+    // A delete after the restore in the same flush leaves no agent-created.
+    emit(sm, 'agent.a4.created', {
+      phase: 'stopped',
+      name: 'A4',
+      restoredAt: '2026-10-05T01:00:00Z',
+    });
+    emit(sm, 'agent.a4.deleted', {});
+    emit(sm, 'agent.a5.created', { phase: 'running', name: 'A5' });
+    vi.advanceTimersByTime(100);
+    expect(created.slice(4)).toEqual([{ agentId: 'a5' }]);
+  });
+
+  it('a delete then a restore created in the same flush leaves the agent present (ptone/scion#2951)', () => {
+    const sm = new StateManager();
+    sm.setScope({ type: 'dashboard' });
+    emit(sm, 'agent.a1.created', { phase: 'running', name: 'A1' });
+    vi.advanceTimersByTime(100);
+
+    const changedSpy = vi.fn<(e: Event) => void>();
+    sm.addEventListener('agents-changed', changedSpy as EventListener);
+    emit(sm, 'agent.a1.deleted', {});
+    emit(sm, 'agent.a1.created', {
+      phase: 'stopped',
+      name: 'A1',
+      restoredAt: '2026-10-05T01:00:00Z',
+    });
+    vi.advanceTimersByTime(100);
+
+    expect(sm.getAgent('a1')?.phase).toBe('stopped');
+    const detail = (changedSpy.mock.calls[0]?.[0] as CustomEvent<{ data: AgentsChangedDetail }>)
+      .detail.data;
+    expect(detail.upserted).toContain('a1');
+    expect(detail.deleted).not.toContain('a1');
+  });
+
+  it('a replayed unmarked created after a delete stays hidden; only the marked one restores (ptone/scion#2951)', () => {
+    const sm = new StateManager();
+    sm.setScope({ type: 'dashboard' });
+    emit(sm, 'agent.a1.created', { phase: 'running', name: 'A1' });
+    vi.advanceTimersByTime(100);
+    emit(sm, 'agent.a1.deleted', {});
+    vi.advanceTimersByTime(100);
+
+    emit(sm, 'agent.a1.created', { phase: 'running', name: 'A1' }); // stale replay
+    emit(sm, 'agent.a1.created', { phase: 'running', name: 'A1', restoredAt: '' }); // empty marker
+    vi.advanceTimersByTime(100);
+    expect(sm.getAgent('a1')).toBeUndefined();
+    expect(sm.getDeletedAgentIds().has('a1')).toBe(true);
+  });
 });
 
 describe('W2 unknown-buffer expiry (§7: 30s TTL)', () => {

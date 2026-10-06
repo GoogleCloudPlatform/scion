@@ -19,7 +19,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
@@ -144,8 +143,10 @@ func (claudeUsageRule) MatchLog(scopeName, eventName string, record *logspb.LogR
 }
 
 // codexUsageEventName and codexUsageEventKind identify the codex.* events
-// this rule derives from: SSE frames of a model response, one of which is a
-// completed response carrying the turn's token usage (design §5).
+// this rule derives successful calls and tokens from: SSE frames of a model
+// response, one of which is a completed response carrying the turn's token
+// usage (design §5). codexAPIRequestEventName is the per-HTTP-attempt event
+// the rule derives pre-stream failures from (ptone/scion#2246).
 //
 // This rule does not gate on instrumentation scope. A local capture (see
 // loadCodexUsageFixture) shows codex's real log-export scope name is
@@ -162,20 +163,29 @@ func (claudeUsageRule) MatchLog(scopeName, eventName string, record *logspb.LogR
 // name changes again (design §5's codex row states no scope requirement,
 // unlike Claude's, which does name one).
 const (
-	codexUsageEventName = "codex.sse_event"
-	codexUsageEventKind = "response.completed"
+	codexUsageEventName      = "codex.sse_event"
+	codexUsageEventKind      = "response.completed"
+	codexAPIRequestEventName = "codex.api_request"
+	// codexResponsesEndpoint is the api_request endpoint attribute of a
+	// model-response request (core/src/client.rs
+	// RequestRouteTelemetry::for_endpoint("/responses")). Other endpoints
+	// that share the event (for example /memories/trace_summarize, a unary
+	// call whose success is never reported through sse_event_completed) are
+	// not counted, so the error rate is not skewed by failures of a request
+	// type whose successes are invisible to this rule.
+	codexResponsesEndpoint = "/responses"
 )
 
 // codexUsageRule implements the codex row of design §5: one completed
 // response is one call with tokens, or one call with no tokens and
 // Status=error for a failed request whose source reports it (design §3.2).
-// Verified against codex-rs/otel/src/events/session_telemetry.rs and
-// core/src/client.rs at tag rust-v0.158.0 (commit
-// 54e1bd264b4122fe9471ee7d54c4d021a76bb8ff of github.com/openai/codex,
-// which is what @openai/codex resolves to on npm as of this writing --
-// harnesses/codex/Dockerfile does not pin a version). See
-// loadCodexUsageFixture in usage_codex_test.go for the fixture's capture
-// provenance.
+// Originally verified against codex-rs at tag rust-v0.158.0 (commit
+// 54e1bd264b4122fe9471ee7d54c4d021a76bb8ff of github.com/openai/codex), and
+// re-verified against rust-v0.160.0 (the api_request arm and cache_write
+// mapping were added then, ptone/scion#2245 and #2246) -- harnesses/codex's
+// Dockerfile installs @openai/codex@latest, unpinned. See
+// loadCodexUsageFixture and loadCodex160UsageFixture in usage_codex_test.go
+// for the fixtures' capture provenance.
 //
 // Three distinct emitters share event.name=codex.sse_event and
 // event.kind=response.completed, and this rule must tell them apart
@@ -205,22 +215,89 @@ const (
 // distinguishes a failed response from a successful, token-bearing one,
 // mirroring the Claude rule's api_request/api_error split.
 //
+// codex.api_request (record_api_request, emitted once per HTTP attempt by
+// codex-api's run_with_request_telemetry) is the fourth emitter. It counts
+// only a *failed* attempt: Status=error when error.message is set or
+// http.response.status_code is present and not 2xx. That never
+// double-counts the see_event_completed_failed arm for the same attempt,
+// because the two are disjoint by construction: the HTTP transport's
+// stream() returns Err for any non-2xx response before an SSE stream
+// exists (http-client/src/transport.rs), so a failed api_request never has
+// a stream that could also fail; and a stream that fails after a 2xx
+// response was preceded by an api_request with status 200 and no
+// error.message, which this rule ignores. A successful api_request is
+// ignored for the same reason: its call is the sse_event_completed that
+// follows. Each retried attempt is its own provider request, so a retry
+// loop (including codex's "waiting for network" reconnect loop) counts one
+// error call per failed attempt -- the same accounting codex's own
+// codex.api_request.count metric uses (success=false per attempt). The
+// codex-0.160.0 capture pins all three shapes: an HTTP 500 retried to
+// success, a 2xx stream cut before response.completed, and a transport
+// error with no status code.
+//
 // Token mapping (design §5, §3.2), for the success case only: input =
-// input_token_count − cached_token_count (Codex reports input_token_count
-// inclusive of cache hits, unlike Claude's exclusive counts); output =
-// output_token_count; cache_read = cached_token_count; reasoning =
-// reasoning_token_count, informational only. cache_write_token_count exists
-// in the source but has no mapping in design §5's codex row, so this rule
-// neither reads it nor emits it as a token_type; tool_token_count (the turn
-// total) is likewise not part of the canonical contract and is ignored.
+// input_token_count − cached_token_count − cache_write_token_count; output
+// = output_token_count; cache_read = cached_token_count; cache_write =
+// cache_write_token_count; reasoning = reasoning_token_count, informational
+// only. input_token_count is the Responses API's usage.input_tokens, and
+// both cached_token_count and cache_write_token_count come from
+// usage.input_tokens_details (codex-api/src/sse/responses.rs's
+// From<ResponseCompletedUsage> for TokenUsage), i.e. they are subsets of
+// input_token_count, not additions to it: codex's own
+// parses_cache_write_token_usage test pins input_tokens=100 with
+// cached_tokens=40 and cache_write_tokens=60, total_tokens=110 =
+// input+output. Subtracting both keeps the §3.2 invariant (total input =
+// input + cache_read + cache_write = input_token_count). codex's own
+// non_cached_input() (protocol.rs) subtracts only cached tokens, so its
+// "tokens used" display equals this rule's input + cache_write + output
+// (the capture's "tokens used 580" = 200 + 300 + 80). tool_token_count
+// (the turn total) is not part of the canonical contract and is ignored.
 type codexUsageRule struct{}
 
 func (codexUsageRule) Harness() string { return "codex" }
 
-func (codexUsageRule) MatchLog(_, eventName string, record *logspb.LogRecord) (usageIncrement, bool, error) {
-	if record == nil || eventName != codexUsageEventName {
+func (r codexUsageRule) MatchLog(_, eventName string, record *logspb.LogRecord) (usageIncrement, bool, error) {
+	if record == nil {
 		return usageIncrement{}, false, nil
 	}
+	switch eventName {
+	case codexUsageEventName:
+		return r.matchSSEEvent(record)
+	case codexAPIRequestEventName:
+		return r.matchAPIRequest(record)
+	default:
+		return usageIncrement{}, false, nil
+	}
+}
+
+// matchAPIRequest counts a failed codex.api_request attempt as one error
+// call (see codexUsageRule's doc comment for why this never double-counts
+// the sse failure arm). A successful attempt, or one for an endpoint other
+// than /responses, does not match.
+func (codexUsageRule) matchAPIRequest(record *logspb.LogRecord) (usageIncrement, bool, error) {
+	if logAttrPresent(record.Attributes, "endpoint") && logAttrString(record.Attributes, "endpoint") != codexResponsesEndpoint {
+		return usageIncrement{}, false, nil
+	}
+	failed := logAttrPresent(record.Attributes, "error.message")
+	if !failed && logAttrPresent(record.Attributes, "http.response.status_code") {
+		// A status that is present but not an integer is treated as not
+		// reported: only error.message or a parsed non-2xx status marks a
+		// failure, so a malformed status alone never invents an error call.
+		if status, err := logAttrInt(record.Attributes, "http.response.status_code"); err == nil {
+			failed = status < 200 || status > 299
+		}
+	}
+	if !failed {
+		return usageIncrement{}, false, nil
+	}
+	return usageIncrement{
+		Model:  logAttrString(record.Attributes, "model"),
+		Status: telemetrycontract.StatusError,
+		Calls:  1,
+	}, true, nil
+}
+
+func (codexUsageRule) matchSSEEvent(record *logspb.LogRecord) (usageIncrement, bool, error) {
 	if logAttrString(record.Attributes, "event.kind") != codexUsageEventKind {
 		return usageIncrement{}, false, nil
 	}
@@ -246,16 +323,19 @@ func (codexUsageRule) MatchLog(_, eventName string, record *logspb.LogRecord) (u
 	input, inputErr := logAttrInt(record.Attributes, "input_token_count")
 	output, outputErr := logAttrInt(record.Attributes, "output_token_count")
 	cached, cachedErr := logAttrInt(record.Attributes, "cached_token_count")
+	cacheWrite, cacheWriteErr := logAttrInt(record.Attributes, "cache_write_token_count")
 	reasoning, reasoningErr := logAttrInt(record.Attributes, "reasoning_token_count")
 
 	var malformed error
-	for _, err := range []error{inputErr, outputErr, cachedErr, reasoningErr} {
+	for _, err := range []error{inputErr, outputErr, cachedErr, cacheWriteErr, reasoningErr} {
 		if err != nil && malformed == nil {
 			malformed = fmt.Errorf("codex sse_event response.completed: %w", err)
 		}
 	}
-	if malformed == nil && cached > input {
-		malformed = fmt.Errorf("codex sse_event response.completed: cached_token_count %d exceeds input_token_count %d", cached, input)
+	// Written as cacheWrite > input-cached (after cached <= input holds)
+	// rather than cached+cacheWrite > input, so the check cannot overflow.
+	if malformed == nil && (cached > input || cacheWrite > input-cached) {
+		malformed = fmt.Errorf("codex sse_event response.completed: cached_token_count %d + cache_write_token_count %d exceeds input_token_count %d", cached, cacheWrite, input)
 	}
 
 	increment := usageIncrement{
@@ -264,8 +344,8 @@ func (codexUsageRule) MatchLog(_, eventName string, record *logspb.LogRecord) (u
 		Calls:  1,
 	}
 	if malformed == nil {
-		tokens := make(map[string]int64, 3)
-		if remaining := input - cached; remaining > 0 {
+		tokens := make(map[string]int64, 5)
+		if remaining := input - cached - cacheWrite; remaining > 0 {
 			tokens[telemetrycontract.TokenTypeInput] = remaining
 		}
 		if output > 0 {
@@ -274,8 +354,129 @@ func (codexUsageRule) MatchLog(_, eventName string, record *logspb.LogRecord) (u
 		if cached > 0 {
 			tokens[telemetrycontract.TokenTypeCacheRead] = cached
 		}
+		if cacheWrite > 0 {
+			tokens[telemetrycontract.TokenTypeCacheWrite] = cacheWrite
+		}
 		if reasoning > 0 {
 			tokens[telemetrycontract.TokenTypeReasoning] = reasoning
+		}
+		increment.Tokens = tokens
+	}
+	return increment, true, malformed
+}
+
+// geminiCLIAPIResponseEvent and geminiCLIAPIErrorEvent are gemini-cli's
+// per-model-call log events (packages/core/src/telemetry/types.ts
+// EVENT_API_RESPONSE/EVENT_API_ERROR), emitted by LoggingContentGenerator
+// once per attempt: api_response when a (streamed or unary) generateContent
+// call completes, api_error when it throws -- either before the stream
+// opens or mid-stream, never both for one attempt (loggingStreamWrapper
+// logs api_response only after the stream finishes without error).
+// Retries (retryWithBackoff in geminiChat) wrap the content generator, so
+// every retried attempt emits its own event: the captured fixture shows
+// exactly that, one api_error for an HTTP 503 followed by one api_response
+// for the retried attempt.
+const (
+	geminiCLIAPIResponseEvent = "gemini_cli.api_response"
+	geminiCLIAPIErrorEvent    = "gemini_cli.api_error"
+)
+
+// geminiCLIUsageRule implements the gemini-cli row of design §5
+// (ptone/scion#2234). Verified against google-gemini/gemini-cli at tag
+// v0.62.0 and a capture from @google/gemini-cli@0.62.0 (see
+// loadGeminiCLIUsageFixture in usage_gemini_test.go).
+//
+// Like codex, it does not gate on instrumentation scope (gemini-cli's is
+// its SERVICE_NAME, "gemini-cli", per logs.getLogger(SERVICE_NAME) in
+// loggers.ts): the rule is filtered to the gemini-cli harness and both
+// event names are namespaced. gemini-cli also emits a
+// gen_ai.client.inference.operation.details record alongside every
+// api_response/api_error, carrying gen_ai.usage.input_tokens/
+// output_tokens; that record is deliberately not matched, or every call
+// would be counted twice.
+//
+// Token mapping. gemini-cli copies the Gemini API's usageMetadata verbatim
+// (ApiResponseEvent's constructor): input_token_count=promptTokenCount,
+// output_token_count=candidatesTokenCount,
+// cached_content_token_count=cachedContentTokenCount,
+// thoughts_token_count=thoughtsTokenCount,
+// tool_token_count=toolUsePromptTokenCount, and
+// total_token_count=totalTokenCount. In the Gemini API, promptTokenCount
+// already includes the cached content (so cached is subtracted, exactly as
+// the CLI's own /stats "input" does in uiTelemetry.ts), while
+// candidatesTokenCount, thoughtsTokenCount and toolUsePromptTokenCount are
+// each separate: totalTokenCount = prompt + candidates + thoughts +
+// tool-use prompt. The §3.2 contract defines output as *including*
+// reasoning and input as all non-cached prompt tokens, so:
+//
+//   - input = input_token_count − cached_content_token_count +
+//     tool_token_count (tool-use prompt tokens are model input the prompt
+//     count excludes; 0 unless a server-side tool such as grounding ran)
+//   - output = output_token_count + thoughts_token_count
+//   - cache_read = cached_content_token_count
+//   - reasoning = thoughts_token_count (informational subset of output)
+//
+// so input + cache_read + output = total_token_count. The design's original
+// §5 sketch (output = output_token_count, no tool term) predates this
+// check and was revised with it. Gemini has no cache-write count (explicit
+// caches are created out of band), so cache_write is never emitted.
+type geminiCLIUsageRule struct{}
+
+func (geminiCLIUsageRule) Harness() string { return "gemini-cli" }
+
+func (geminiCLIUsageRule) MatchLog(_, eventName string, record *logspb.LogRecord) (usageIncrement, bool, error) {
+	if record == nil {
+		return usageIncrement{}, false, nil
+	}
+	switch eventName {
+	case geminiCLIAPIErrorEvent:
+		return usageIncrement{
+			Model:  logAttrString(record.Attributes, "model"),
+			Status: telemetrycontract.StatusError,
+			Calls:  1,
+		}, true, nil
+	case geminiCLIAPIResponseEvent:
+	default:
+		return usageIncrement{}, false, nil
+	}
+
+	prompt, promptErr := logAttrInt(record.Attributes, "input_token_count")
+	candidates, candidatesErr := logAttrInt(record.Attributes, "output_token_count")
+	cached, cachedErr := logAttrInt(record.Attributes, "cached_content_token_count")
+	thoughts, thoughtsErr := logAttrInt(record.Attributes, "thoughts_token_count")
+	toolPrompt, toolPromptErr := logAttrInt(record.Attributes, "tool_token_count")
+
+	var malformed error
+	for _, err := range []error{promptErr, candidatesErr, cachedErr, thoughtsErr, toolPromptErr} {
+		if err != nil && malformed == nil {
+			malformed = fmt.Errorf("gemini_cli.api_response: %w", err)
+		}
+	}
+	if malformed == nil && cached > prompt {
+		malformed = fmt.Errorf("gemini_cli.api_response: cached_content_token_count %d exceeds input_token_count %d", cached, prompt)
+	}
+	if malformed == nil && (toolPrompt > math.MaxInt64-(prompt-cached) || thoughts > math.MaxInt64-candidates) {
+		malformed = errors.New("gemini_cli.api_response: token count overflows int64")
+	}
+
+	increment := usageIncrement{
+		Model:  logAttrString(record.Attributes, "model"),
+		Status: telemetrycontract.StatusSuccess,
+		Calls:  1,
+	}
+	if malformed == nil {
+		tokens := make(map[string]int64, 4)
+		if input := prompt - cached + toolPrompt; input > 0 {
+			tokens[telemetrycontract.TokenTypeInput] = input
+		}
+		if output := candidates + thoughts; output > 0 {
+			tokens[telemetrycontract.TokenTypeOutput] = output
+		}
+		if cached > 0 {
+			tokens[telemetrycontract.TokenTypeCacheRead] = cached
+		}
+		if thoughts > 0 {
+			tokens[telemetrycontract.TokenTypeReasoning] = thoughts
 		}
 		increment.Tokens = tokens
 	}
@@ -373,6 +574,7 @@ func copilotPointModel(pointAttrs, resourceAttrs []*commonpb.KeyValue) string {
 var usageRuleFactories = []func() usageRule{
 	func() usageRule { return claudeUsageRule{} },
 	func() usageRule { return codexUsageRule{} },
+	func() usageRule { return geminiCLIUsageRule{} },
 	func() usageRule { return newCopilotUsageRule() },
 }
 
@@ -717,14 +919,7 @@ func (d *UsageDeriver) fingerprint(scopeName, eventName string, record *logspb.L
 // harness, model, status (matching the existing hook descriptor);
 // scion.usage.tokens gets harness, model, token_type only.
 func (d *UsageDeriver) record(ctx context.Context, increment usageIncrement) {
-	model := increment.Model
-	if model == "" {
-		model = os.Getenv("SCION_MODEL")
-	}
-	if model == "" {
-		model = "unknown"
-	}
-	model = truncateUTF8(model, 128)
+	model := telemetrycontract.ResolveModelLabel(increment.Model, os.Getenv("SCION_MODEL"))
 	harness := os.Getenv("SCION_HARNESS")
 
 	if increment.Calls != 0 && d.calls != nil {
@@ -801,20 +996,6 @@ func (d *UsageDeriver) Shutdown(ctx context.Context) error {
 		return nil
 	}
 	return d.providers.Shutdown(ctx)
-}
-
-// truncateUTF8 truncates s to at most maxBytes bytes without splitting a
-// multi-byte rune: it walks back from maxBytes to the nearest rune boundary
-// rather than cutting mid-rune, which would produce an invalid UTF-8 label
-// value.
-func truncateUTF8(s string, maxBytes int) string {
-	if len(s) <= maxBytes {
-		return s
-	}
-	for maxBytes > 0 && !utf8.RuneStart(s[maxBytes]) {
-		maxBytes--
-	}
-	return s[:maxBytes]
 }
 
 func logAttrString(attrs []*commonpb.KeyValue, key string) string {

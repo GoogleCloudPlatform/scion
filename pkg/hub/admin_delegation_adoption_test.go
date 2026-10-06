@@ -31,6 +31,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/go-jose/go-jose/v4/jwt"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -58,6 +59,17 @@ func (f *legacyFixture) adoptionPreview(t *testing.T, admin *store.User, body ma
 	var resp delegationAdoptionPreviewResponse
 	decodeJSONBody(t, rec, &resp)
 	return resp
+}
+
+// deactivateAsAdopted deactivates the active edge edgeID with the
+// provenance_adopted cause, as an earlier adoption leaves its original row.
+func deactivateAsAdopted(t *testing.T, s store.Store, edgeID string) {
+	t.Helper()
+	ok, err := s.DeactivateDelegationEdgeGuarded(context.Background(), edgeID,
+		store.DelegationEdgeDeactivateGuard{Unrecorded: true},
+		store.EdgeDeactivationProvenanceAdopted, "test-adopt-"+uuid.NewString())
+	require.NoError(t, err)
+	require.True(t, ok, "an active unrecorded edge to deactivate")
 }
 
 func withFingerprint(body map[string]interface{}, p delegationAdoptionPreviewResponse) map[string]interface{} {
@@ -91,15 +103,15 @@ func (f *legacyFixture) adoptionAudits(t *testing.T, mutationType string) []*sto
 	return recs
 }
 
-// The ceiling_unrecorded denial keeps its message byte-for-byte and adds
-// the adoption details; no edge or ancestor ID is returned.
+// The ceiling_unrecorded denial keeps the SA gate's unrecorded-provenance
+// message and adds the adoption details; no edge or ancestor ID is returned.
 func TestUnrecordedDenialCarriesAdoptionDetails(t *testing.T) {
 	f := newLegacyFixture(t, "adopt-details")
 	token := f.agentToken(t, f.legacy.ID)
 	rec := f.createAsParent(t, token, f.assignBody("adopt-details-c"))
-	assertSAGateDenied(t, rec)
+	assertSAGateUnrecordedDenied(t, rec)
 	apiErr := decodeTargetAPIError(t, rec)
-	assert.Equal(t, saAssignGenericForbiddenMsg, apiErr.Message)
+	assert.Equal(t, scaUnrecordedDenyMsg, apiErr.Message)
 	assert.Equal(t, "ceiling_unrecorded", apiErr.Details["deny_cause"])
 	assert.Equal(t, "delegation_provenance_adoption", apiErr.Details["remediation"])
 	assert.Equal(t, "/api/v1/admin/delegation-adoption", apiErr.Details["remediation_path"])
@@ -177,7 +189,7 @@ func TestDelegationAdoptionCommitAdoptsPostSnapshotRowOnlyWhenPreviewed(t *testi
 	assert.Equal(t, 1, status.NotInCohortCount)
 	require.Len(t, status.NotInCohort, 1)
 	assert.Equal(t, f.legacy.ID, status.NotInCohort[0].DelegateID)
-	assertSAGateDenied(t, f.createAsParent(t, token, CreateAgentRequest{Name: "adopt-post-pre"}))
+	assertSAGateUnrecordedDenied(t, f.createAsParent(t, token, CreateAgentRequest{Name: "adopt-post-pre"}))
 
 	body := adoptBody(f.legacy.ID)
 	p := f.adoptionPreview(t, admin, body)
@@ -364,7 +376,7 @@ func TestRevertedAdoptionRestoresUnrecordedDenial(t *testing.T) {
 	p := f.adoptionPreview(t, admin, body)
 	require.Equal(t, http.StatusOK, f.adoptionCommit(t, admin, withFingerprint(body, p)).Code)
 
-	assertSAGateDenied(t, f.createAsParent(t, token, f.assignBody("adopt-revert-deny-2")))
+	assertSAGateUnrecordedDenied(t, f.createAsParent(t, token, f.assignBody("adopt-revert-deny-2")))
 	f.assertGateUnrecorded(t, token, SurfaceAgentCreate)
 }
 
@@ -372,12 +384,12 @@ func TestDelegationAdoptionRevertRefusesAmbiguousOriginal(t *testing.T) {
 	f := newLegacyFixture(t, "adopt-ambig")
 	admin := adoptionAdmin(t, f.store, "adopt-ambig-admin")
 	ctx := context.Background()
-	// An operational repair replaced the edge, and an older duplicate
-	// inactive row matches as well: the original is ambiguous.
+	// A replacement edge exists with no adoption record, and two inactive
+	// rows match it as its original: the original is ambiguous.
 	orig := activeEdgesFor(t, f.store, f.legacy.ID)[0]
-	require.NoError(t, f.store.DeactivateDelegationEdge(ctx, orig.ID))
+	deactivateAsAdopted(t, f.store, orig.ID)
 	dup := addProjectEdge(t, f.store, store.DelegationPrincipalUser, f.owner.ID, f.legacy.ID, f.proj.ID)
-	require.NoError(t, f.store.DeactivateDelegationEdge(ctx, dup))
+	deactivateAsAdopted(t, f.store, dup)
 	repaired := delegationadoption.AdoptedEdge(orig, compatIDs(t, AgentRoleFull, false), delegationadoption.Actor{})
 	require.NoError(t, f.store.CreateDelegationEdge(ctx, repaired))
 	runBootAdoption(t, f.store)
@@ -581,7 +593,7 @@ func TestUnknownProvenanceVersionDenialCarriesNoAdoptionDetails(t *testing.T) {
 	f := newLegacyFixture(t, "adopt-v2")
 	ctx := context.Background()
 	orig := activeEdgesFor(t, f.store, f.legacy.ID)[0]
-	require.NoError(t, f.store.DeactivateDelegationEdge(ctx, orig.ID))
+	revokeDelegateEdges(t, f.store, f.legacy.ID)
 	v2 := *orig
 	v2.ID = ""
 	v2.Active = true
@@ -596,9 +608,9 @@ func TestUnknownProvenanceVersionDenialCarriesNoAdoptionDetails(t *testing.T) {
 
 	token := f.agentToken(t, f.legacy.ID)
 	rec := f.createAsParent(t, token, f.assignBody("adopt-v2-c"))
-	assertSAGateDenied(t, rec)
+	assertSAGateUnrecordedDenied(t, rec)
 	apiErr := decodeTargetAPIError(t, rec)
-	assert.Equal(t, saAssignGenericForbiddenMsg, apiErr.Message)
+	assert.Equal(t, scaUnrecordedDenyMsg, apiErr.Message)
 	assert.NotContains(t, apiErr.Details, "deny_cause")
 	assert.NotContains(t, apiErr.Details, "remediation")
 	assert.NotContains(t, apiErr.Details, "remediation_path")
@@ -663,9 +675,9 @@ func TestDelegationAdoptionRevertFingerprintBindsConfirmedOriginal(t *testing.T)
 	admin := adoptionAdmin(t, f.store, "adopt-bind-admin")
 	ctx := context.Background()
 	orig := activeEdgesFor(t, f.store, f.legacy.ID)[0]
-	require.NoError(t, f.store.DeactivateDelegationEdge(ctx, orig.ID))
+	deactivateAsAdopted(t, f.store, orig.ID)
 	dup := addProjectEdge(t, f.store, store.DelegationPrincipalUser, f.owner.ID, f.legacy.ID, f.proj.ID)
-	require.NoError(t, f.store.DeactivateDelegationEdge(ctx, dup))
+	deactivateAsAdopted(t, f.store, dup)
 	repaired := delegationadoption.AdoptedEdge(orig, compatIDs(t, AgentRoleFull, false), delegationadoption.Actor{})
 	require.NoError(t, f.store.CreateDelegationEdge(ctx, repaired))
 	runBootAdoption(t, f.store)

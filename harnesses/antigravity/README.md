@@ -96,14 +96,21 @@ event, and antigravity publishes calls only; a tokens follow-up would need
 mechanism.
 
 **Model label.** The `model` label on `gen_ai.api.calls` comes from the
-agent's configured `SCION_MODEL` environment variable (set by the hub only
-when the agent config specifies a model), not from the hook payload's
-per-invocation `modelName` — `dialect.yaml` does not map it, and the hook
-handler doesn't read it. When no model is configured, the point carries no
-`model` label at all. `modelName` is a display alias in any case: this
+hook payload's per-invocation `modelName` (`dialect.yaml` maps it on
+`PreInvocation`/`PostInvocation`), following design §3.2's precedence: the
+payload's own value, then the agent's configured `SCION_MODEL`, then
+`unknown`, truncated to 128 bytes. `SCION_MODEL` is only set when the
+agent's config names a model, so without the payload value many antigravity
+calls would carry no model at all. Note that `modelName` is `agy`'s display alias
+for the configured model, not necessarily the concrete API model: this
 project's own capture sent `gemini-3.1-pro-low` to `agy` and saw it call the
-API as `gemini-3.1-pro-preview`, so mapping it directly would not have been
-exact either.
+API as `gemini-3.1-pro-preview`. The alias is still the closest per-call
+value the hook offers.
+
+**Tool name.** `PostToolUse` repeats the `toolCall` object (`{name, args}`)
+from `PreToolUse` in `agy` 1.2.12, so `dialect.yaml` maps `tool_name` from
+`.toolCall.name` on both, and `agent.tool.calls` is labelled with the real
+tool name.
 
 ## Implementation notes
 

@@ -149,7 +149,7 @@ func TestAdoptedLegacyAgentCreatesWithDefaultSAUsingExistingToken(t *testing.T) 
 	f.defaultAssignSA(t)
 	f.withAssignedSA(t, f.legacy)
 	token := f.agentToken(t, f.legacy.ID)
-	assertSAGateDenied(t, f.createAsParent(t, token, CreateAgentRequest{Name: "adopt-dsa-pre"}))
+	assertSAGateUnrecordedDenied(t, f.createAsParent(t, token, CreateAgentRequest{Name: "adopt-dsa-pre"}))
 
 	// The edge backfill marker of an upgraded hub is present.
 	markEdgeBackfillComplete(t, f.store)
@@ -194,7 +194,7 @@ func TestFullyAdoptedChainAllowsAssign(t *testing.T) {
 	c := f.seedLegacyAgent(t, "adopt-full-c", f.legacy, AgentRoleFull)
 	f.withAssignedSA(t, c)
 	token := f.agentToken(t, c.ID)
-	assertSAGateDenied(t, f.createAsParent(t, token, f.assignBody("adopt-full-pre")))
+	assertSAGateUnrecordedDenied(t, f.createAsParent(t, token, f.assignBody("adopt-full-pre")))
 
 	runBootAdoption(t, f.store)
 	rec := f.createAsParent(t, token, f.assignBody("adopt-full-gc"))
@@ -209,7 +209,7 @@ func TestPartiallyAdoptedChainDeniesAssign(t *testing.T) {
 	c := f.seedLegacyAgent(t, "adopt-part-a-c", f.legacy, AgentRoleFull)
 	f.withAssignedSA(t, c)
 	adoptOnly(t, f.store, f.legacy.ID)
-	assertSAGateDenied(t, f.createAsParent(t, f.agentToken(t, c.ID), f.assignBody("adopt-part-a-gc")))
+	assertSAGateUnrecordedDenied(t, f.createAsParent(t, f.agentToken(t, c.ID), f.assignBody("adopt-part-a-gc")))
 	f.assertGateUnrecorded(t, f.agentToken(t, c.ID), SurfaceAgentCreate)
 
 	// Only the lower hop adopted: the walk denies at the unrecorded upper hop.
@@ -217,7 +217,7 @@ func TestPartiallyAdoptedChainDeniesAssign(t *testing.T) {
 	d := g.seedLegacyAgent(t, "adopt-part-b-c", g.legacy, AgentRoleFull)
 	g.withAssignedSA(t, d)
 	adoptOnly(t, g.store, d.ID)
-	assertSAGateDenied(t, g.createAsParent(t, g.agentToken(t, d.ID), g.assignBody("adopt-part-b-gc")))
+	assertSAGateUnrecordedDenied(t, g.createAsParent(t, g.agentToken(t, d.ID), g.assignBody("adopt-part-b-gc")))
 	g.assertGateUnrecorded(t, g.agentToken(t, d.ID), SurfaceAgentCreate)
 }
 
@@ -335,10 +335,10 @@ func TestRevokedAdoptedAncestorDeniesDescendant(t *testing.T) {
 	first := f.createAsParent(t, token, f.assignBody("adopt-revoke-1"))
 	requireCreated(t, first.Code, first.Body.String())
 
-	ctx := context.Background()
-	lEdge := activeEdgesFor(t, f.store, f.legacy.ID)[0]
-	require.NoError(t, f.store.DeactivateDelegationEdge(ctx, lEdge.ID))
+	revokeDelegateEdges(t, f.store, f.legacy.ID)
 	assert.Equal(t, http.StatusForbidden, f.createAsParent(t, token, f.assignBody("adopt-revoke-2")).Code)
+
+	ctx := context.Background()
 
 	// Deleting the ancestor denies the same way.
 	g := newLegacyFixture(t, "adopt-revoke-del")

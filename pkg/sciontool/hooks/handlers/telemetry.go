@@ -8,6 +8,7 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -350,6 +351,9 @@ func (h *TelemetryHandler) emitLogRecord(ctx context.Context, event *hooks.Event
 	if event.Data.Message != "" {
 		attrs = append(attrs, slog.String("message", event.Data.Message))
 	}
+	if model := payloadModel(event); model != "" {
+		attrs = append(attrs, slog.String(telemetrycontract.ModelLabel, model))
+	}
 	if event.Data.Success {
 		attrs = append(attrs, slog.Bool("success", true))
 	}
@@ -421,6 +425,10 @@ func (h *TelemetryHandler) eventToAttributes(event *hooks.Event) []attribute.Key
 
 	if event.Data.Message != "" {
 		attrs = append(attrs, attribute.String("message", event.Data.Message))
+	}
+
+	if model := payloadModel(event); model != "" {
+		attrs = append(attrs, attribute.String(telemetrycontract.ModelLabel, model))
 	}
 
 	return attrs
@@ -503,6 +511,26 @@ func usageHookRecordingEnabled() bool {
 	return false
 }
 
+// hookModelLabel resolves the model label for a hook-sourced usage point
+// (design §3.2): the event payload's own model when the dialect mapped one,
+// then SCION_MODEL, then "unknown", truncated to 128 bytes. The native
+// UsageDeriver resolves through the same telemetrycontract helper.
+func hookModelLabel(event *hooks.Event) string {
+	return telemetrycontract.ResolveModelLabel(event.Data.Model, os.Getenv("SCION_MODEL"))
+}
+
+// payloadModel returns the event payload's own model (bounded like the
+// metric label), or "" when the payload carried none. Hook spans and logs
+// carry a model attribute only in that case: unlike the usage metrics, they
+// describe the event itself, so they never fall back to SCION_MODEL or
+// "unknown".
+func payloadModel(event *hooks.Event) string {
+	if strings.TrimSpace(event.Data.Model) == "" {
+		return ""
+	}
+	return telemetrycontract.ResolveModelLabel(event.Data.Model, "")
+}
+
 // recordEndMetrics records metrics when a paired end event completes.
 func (h *TelemetryHandler) recordEndMetrics(event *hooks.Event, startEventType string, inProgress *inProgressSpan) {
 	ctx := context.Background()
@@ -536,18 +564,12 @@ func (h *TelemetryHandler) recordEndMetrics(event *hooks.Event, startEventType s
 			if event.Data.Error != "" {
 				status = telemetrycontract.StatusError
 			}
-			attrs := baseAttrs
-			if model := os.Getenv("SCION_MODEL"); model != "" {
-				attrs = append(attrs, attribute.String(telemetrycontract.ModelLabel, model))
-			}
+			attrs := append(baseAttrs, attribute.String(telemetrycontract.ModelLabel, hookModelLabel(event)))
 			attrs = append(attrs, attribute.String(telemetrycontract.StatusLabel, status))
 			h.apiCalls.Add(ctx, 1, metric.WithAttributes(attrs...))
 		}
 		if h.apiDuration != nil {
-			attrs := baseAttrs
-			if model := os.Getenv("SCION_MODEL"); model != "" {
-				attrs = append(attrs, attribute.String(telemetrycontract.ModelLabel, model))
-			}
+			attrs := append(baseAttrs, attribute.String(telemetrycontract.ModelLabel, hookModelLabel(event)))
 			h.apiDuration.Record(ctx, durationMs, metric.WithAttributes(attrs...))
 		}
 
@@ -588,10 +610,7 @@ func (h *TelemetryHandler) recordUnpairedEndMetrics(event *hooks.Event, startEve
 			if event.Data.Error != "" {
 				status = telemetrycontract.StatusError
 			}
-			attrs := baseAttrs
-			if model := os.Getenv("SCION_MODEL"); model != "" {
-				attrs = append(attrs, attribute.String(telemetrycontract.ModelLabel, model))
-			}
+			attrs := append(baseAttrs, attribute.String(telemetrycontract.ModelLabel, hookModelLabel(event)))
 			attrs = append(attrs, attribute.String(telemetrycontract.StatusLabel, status))
 			h.apiCalls.Add(ctx, 1, metric.WithAttributes(attrs...))
 		}
@@ -631,7 +650,7 @@ func (h *TelemetryHandler) recordTokenMetrics(ctx context.Context, event *hooks.
 		return
 	}
 
-	attrs := toOTelAttrs(telemetrycontract.UsageTokenPointAttrs(os.Getenv("SCION_HARNESS"), os.Getenv("SCION_MODEL")))
+	attrs := toOTelAttrs(telemetrycontract.UsageTokenPointAttrs(os.Getenv("SCION_HARNESS"), hookModelLabel(event)))
 
 	recorded := false
 	record := func(tokenType string, n int64) {

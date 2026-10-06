@@ -218,7 +218,7 @@ By default this does not activate container-script provisioning. Use
 		activateScript, _ := cmd.Flags().GetBool("activate-script")
 		force, _ := cmd.Flags().GetBool("force")
 		if activateScript && len(args) == 0 {
-			return fmt.Errorf("--activate-script requires a harness-config name")
+			return newUsageError("--activate-script requires a harness-config name")
 		}
 
 		globalDir, err := config.GetGlobalDir()
@@ -292,7 +292,8 @@ By default the config is synced to the current project's scope on the Hub.
 Use --global to sync it to the global scope (requires hub admin rights).
 --global also reads the config from the global directory
 (~/.scion/harness-configs), so to publish a config globally it must live there.
-An existing config with the same name in the target scope is updated.`,
+An existing config with the same name in the target scope is updated to mirror
+the local directory: files deleted locally are removed from the Hub.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		name := args[0]
@@ -617,11 +618,17 @@ func syncHarnessConfigToHub(hubCtx *HubContext, name, localPath, scope, scopeID,
 
 	// Collect local files
 	fmt.Printf("Scanning harness-config files in %s...\n", localPath)
-	files, err := hubclient.CollectFiles(localPath, nil)
+	// Backups and atomic-write temp files are local-only and never uploaded.
+	files, err := hubclient.CollectFiles(localPath, config.HarnessConfigTransientPatterns)
 	if err != nil {
 		return fmt.Errorf("failed to scan harness-config files: %w", err)
 	}
 	fmt.Printf("Found %d files\n", len(files))
+	// Sync mirrors the local directory, so an empty one would mean deleting
+	// every file from the Hub record, which the Hub rejects. Refuse up front.
+	if len(files) == 0 {
+		return fmt.Errorf("no files to sync in %s (backup and temp files are excluded); a harness-config needs at least one file", localPath)
+	}
 
 	fileReqs := make([]hubclient.FileUploadRequest, len(files))
 	for i, f := range files {
@@ -679,7 +686,19 @@ func syncHarnessConfigToHub(hubCtx *HubContext, name, localPath, scope, scopeID,
 				}
 			}
 
-			if len(filesToUpload) == 0 {
+			// Sync mirrors the local directory: any remote path that is not
+			// in the local manifest (a file deleted locally, or a backup/temp
+			// file uploaded before those were excluded) is dropped from the
+			// Hub record by finalizing with the local manifest.
+			var removed []string
+			for remotePath := range remoteHashes {
+				if _, local := localFileMap[remotePath]; !local {
+					removed = append(removed, remotePath)
+				}
+			}
+			sort.Strings(removed)
+
+			if len(filesToUpload) == 0 && len(removed) == 0 {
 				fmt.Printf("Harness-config '%s' is already up to date.\n", name)
 				fmt.Printf("  Scope: %s\n", harnessConfigScopeLabel(scope, scopeID))
 				fmt.Printf("  ID: %s\n", hcID)
@@ -687,7 +706,15 @@ func syncHarnessConfigToHub(hubCtx *HubContext, name, localPath, scope, scopeID,
 				return nil
 			}
 
-			fmt.Printf("Found %d changed file(s), updating...\n", len(filesToUpload))
+			if len(removed) > 0 {
+				fmt.Printf("Removing %d file(s) no longer present locally from the Hub:\n", len(removed))
+				for _, p := range removed {
+					fmt.Printf("  - %s\n", p)
+				}
+			}
+			if len(filesToUpload) > 0 {
+				fmt.Printf("Found %d changed file(s), updating...\n", len(filesToUpload))
+			}
 		}
 	} else {
 		fmt.Printf("Creating harness-config '%s' in Hub scope %s...\n", name, harnessConfigScopeLabel(scope, scopeID))
@@ -708,17 +735,20 @@ func syncHarnessConfigToHub(hubCtx *HubContext, name, localPath, scope, scopeID,
 		filesToUpload = fileReqs
 	}
 
-	// Request upload URLs
-	fmt.Printf("Requesting upload URLs for %d file(s)...\n", len(filesToUpload))
-	uploadResp, err := hubCtx.Client.HarnessConfigs().RequestUploadURLs(ctx, hcID, filesToUpload)
-	if err != nil {
-		return fmt.Errorf("failed to get upload URLs: %w", err)
-	}
+	// Request upload URLs and upload. Skipped when files are only being
+	// dropped from the manifest: every file it lists is already stored, so
+	// Finalize alone replaces the manifest.
+	if len(filesToUpload) > 0 {
+		fmt.Printf("Requesting upload URLs for %d file(s)...\n", len(filesToUpload))
+		uploadResp, err := hubCtx.Client.HarnessConfigs().RequestUploadURLs(ctx, hcID, filesToUpload)
+		if err != nil {
+			return fmt.Errorf("failed to get upload URLs: %w", err)
+		}
 
-	// Upload files
-	fmt.Printf("Uploading %d file(s)...\n", len(uploadResp.UploadURLs))
-	if err := uploadHarnessConfigFiles(ctx, hubCtx.Client.HarnessConfigs(), hcID, localFileMap, filesToUpload, uploadResp.UploadURLs); err != nil {
-		return err
+		fmt.Printf("Uploading %d file(s)...\n", len(uploadResp.UploadURLs))
+		if err := uploadHarnessConfigFiles(ctx, hubCtx.Client.HarnessConfigs(), hcID, localFileMap, filesToUpload, uploadResp.UploadURLs); err != nil {
+			return err
+		}
 	}
 
 	// Build manifest
@@ -851,14 +881,16 @@ func pullHarnessConfigFromHub(hubCtx *HubContext, hc *hubclient.HarnessConfig, t
 	fmt.Printf("Downloading %d files to %s...\n", len(downloadResp.Files), destPath)
 	useHubFileRead := hasLocalDownloadURLs(downloadResp.Files)
 	type pendingFile struct {
-		path    string
 		content []byte
 		relPath string
 	}
+	// Every entry must be a canonical relative path before anything is fetched
+	// or written.
+	if err := validateDownloadEntries(downloadResp.Files); err != nil {
+		return err
+	}
 	pending := make([]pendingFile, 0, len(downloadResp.Files))
 	for _, fileInfo := range downloadResp.Files {
-		filePath := filepath.Join(destPath, filepath.FromSlash(fileInfo.Path))
-
 		content, err := downloadHarnessConfigContent(ctx, hubCtx.Client.HarnessConfigs(), hc.ID, fileInfo, useHubFileRead)
 		if err != nil {
 			return err
@@ -866,13 +898,17 @@ func pullHarnessConfigFromHub(hubCtx *HubContext, hc *hubclient.HarnessConfig, t
 		if err := verifyHarnessConfigArtifactHash(fileInfo, content); err != nil {
 			return fmt.Errorf("harness-config %q: %w", name, err)
 		}
-		pending = append(pending, pendingFile{path: filePath, content: content, relPath: fileInfo.Path})
+		pending = append(pending, pendingFile{content: content, relPath: fileInfo.Path})
 	}
+
+	// Files are written through an os.Root so they stay inside destPath.
+	root, err := os.OpenRoot(destPath)
+	if err != nil {
+		return fmt.Errorf("failed to open destination directory: %w", err)
+	}
+	defer func() { _ = root.Close() }()
 	for _, f := range pending {
-		if err := ensureParentDir(f.path); err != nil {
-			return err
-		}
-		if err := writeHarnessConfigFile(f.path, f.content); err != nil {
+		if err := writeHarnessConfigFile(root, f.relPath, f.content); err != nil {
 			return err
 		}
 		fmt.Printf("  Downloaded: %s\n", f.relPath)
