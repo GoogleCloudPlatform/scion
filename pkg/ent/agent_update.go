@@ -1357,6 +1357,26 @@ func (_u *AgentUpdate) ClearRunIntentAt() *AgentUpdate {
 	return _u
 }
 
+// SetRunIntentMarkedAt sets the "run_intent_marked_at" field.
+func (_u *AgentUpdate) SetRunIntentMarkedAt(v time.Time) *AgentUpdate {
+	_u.mutation.SetRunIntentMarkedAt(v)
+	return _u
+}
+
+// SetNillableRunIntentMarkedAt sets the "run_intent_marked_at" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableRunIntentMarkedAt(v *time.Time) *AgentUpdate {
+	if v != nil {
+		_u.SetRunIntentMarkedAt(*v)
+	}
+	return _u
+}
+
+// ClearRunIntentMarkedAt clears the value of the "run_intent_marked_at" field.
+func (_u *AgentUpdate) ClearRunIntentMarkedAt() *AgentUpdate {
+	_u.mutation.ClearRunIntentMarkedAt()
+	return _u
+}
+
 // SetStartClaimID sets the "start_claim_id" field.
 func (_u *AgentUpdate) SetStartClaimID(v string) *AgentUpdate {
 	_u.mutation.SetStartClaimID(v)
@@ -2145,6 +2165,12 @@ func (_u *AgentUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if _u.mutation.RunIntentAtCleared() {
 		_spec.ClearField(agent.FieldRunIntentAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.RunIntentMarkedAt(); ok {
+		_spec.SetField(agent.FieldRunIntentMarkedAt, field.TypeTime, value)
+	}
+	if _u.mutation.RunIntentMarkedAtCleared() {
+		_spec.ClearField(agent.FieldRunIntentMarkedAt, field.TypeTime)
 	}
 	if value, ok := _u.mutation.StartClaimID(); ok {
 		_spec.SetField(agent.FieldStartClaimID, field.TypeString, value)
@@ -3674,6 +3700,26 @@ func (_u *AgentUpdateOne) ClearRunIntentAt() *AgentUpdateOne {
 	return _u
 }
 
+// SetRunIntentMarkedAt sets the "run_intent_marked_at" field.
+func (_u *AgentUpdateOne) SetRunIntentMarkedAt(v time.Time) *AgentUpdateOne {
+	_u.mutation.SetRunIntentMarkedAt(v)
+	return _u
+}
+
+// SetNillableRunIntentMarkedAt sets the "run_intent_marked_at" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableRunIntentMarkedAt(v *time.Time) *AgentUpdateOne {
+	if v != nil {
+		_u.SetRunIntentMarkedAt(*v)
+	}
+	return _u
+}
+
+// ClearRunIntentMarkedAt clears the value of the "run_intent_marked_at" field.
+func (_u *AgentUpdateOne) ClearRunIntentMarkedAt() *AgentUpdateOne {
+	_u.mutation.ClearRunIntentMarkedAt()
+	return _u
+}
+
 // SetStartClaimID sets the "start_claim_id" field.
 func (_u *AgentUpdateOne) SetStartClaimID(v string) *AgentUpdateOne {
 	_u.mutation.SetStartClaimID(v)
@@ -4492,6 +4538,12 @@ func (_u *AgentUpdateOne) sqlSave(ctx context.Context) (_node *Agent, err error)
 	}
 	if _u.mutation.RunIntentAtCleared() {
 		_spec.ClearField(agent.FieldRunIntentAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.RunIntentMarkedAt(); ok {
+		_spec.SetField(agent.FieldRunIntentMarkedAt, field.TypeTime, value)
+	}
+	if _u.mutation.RunIntentMarkedAtCleared() {
+		_spec.ClearField(agent.FieldRunIntentMarkedAt, field.TypeTime)
 	}
 	if value, ok := _u.mutation.StartClaimID(); ok {
 		_spec.SetField(agent.FieldStartClaimID, field.TypeString, value)

@@ -185,7 +185,7 @@ var compiled = []Experiment{
 	{
 		Name:        Artifacts,
 		Title:       "Artifacts",
-		Description: "Lets agents and users publish files and bundles with stable, versioned references, and view them in the web UI. Gates both the web surfaces (LayerWeb) and the hub's /api/v1/artifacts routes (LayerServer), which answer 404 while it is off. In development: the routes have no behaviour yet.",
+		Description: "Lets agents and users publish files and bundles with stable, versioned references, and view them in the web UI. Gates the artifact page and other web surfaces (LayerWeb) and the hub's /api/v1/artifacts routes (LayerServer), which answer 404 while it is off.",
 		Default:     false,
 		Layers:      []Layer{LayerWeb, LayerServer},
 		Stage:       StageAlpha,

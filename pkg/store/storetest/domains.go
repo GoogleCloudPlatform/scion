@@ -61,6 +61,10 @@ func RunStoreSuite(t *testing.T, factory Factory) {
 	// Agent optimistic locking is not expressible through the generic CRUD
 	// categories, so it gets a dedicated backend-agnostic check.
 	t.Run("agent/OptimisticLock", func(t *testing.T) { runAgentOptimisticLock(t, factory) })
+
+	// Group-membership cleanup (ptone/scion#2769) is likewise not a CRUD
+	// category; see GroupMembershipCleanupConformance.
+	t.Run("group/MembershipCleanup", func(t *testing.T) { GroupMembershipCleanupConformance(t, factory) })
 }
 
 func listFrom[T any](items []T, err error) (*store.ListResult[T], error) {

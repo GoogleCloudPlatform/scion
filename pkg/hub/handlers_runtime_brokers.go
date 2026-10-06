@@ -1377,6 +1377,10 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 	// per-agent loop and in a single store transaction.
 	s.recordRecoveryObservations(ctx, id, prevBroker, &heartbeat, report)
 
+	// Stop agents that run although their run intent is stopped (a start
+	// that reached the broker after a stop).
+	s.stopAgentsRunningWithIntentStopped(ctx, id, prevBroker, &heartbeat, report)
+
 	w.WriteHeader(http.StatusOK)
 }
 

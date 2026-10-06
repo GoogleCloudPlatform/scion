@@ -23,6 +23,7 @@ Access is granted through explicit role assignments:
 ### Delegation and Revocation
 - **CanDelegate Admission Gate**: Prevents lateral privilege escalation by ensuring a principal can only grant roles or permissions they themselves possess.
 - **Delegation Ceiling**: An agent acts with authority delegated by whoever created it, and that authority can never exceed its delegators'. For lifecycle actions and agent creation, every link in the agent's delegation chain must name a live delegator that holds the permission on the target resource: an active user, or an agent that exists and is not deleted (a stopped agent still counts). A deleted or deactivated delegator supplies no authority. The chain walk is limited to 10 links, and a cycle, a chain that is too deep, or a failed lookup denies the request. Delegation edges are project-scoped, so a resource in another project is denied.
+- **Delegation Edges Follow the Agent**: Creating an agent records the agent, its delegation edge, provenance and audit record together; if dispatch to the Runtime Broker fails, they are all rolled back. Deleting an agent deactivates its edges, and restoring it reactivates them. A restore fails with `409` if a delegator is no longer active or a reactivated edge conflicts with an active one (and `503` if the Hub cannot check the delegators), leaving the state unchanged. Reincarnating another principal's agent makes you its recorded delegator, so you must be able to delegate the agent's role in the target project.
 - **Credential Revocation**: Agent credentials and User Access Tokens can be instantly revoked, terminating access system-wide.
 
 ### Observability
@@ -60,14 +61,15 @@ Scion enforces strict role-binding-based authorization for all agent operations:
 ### Membership-Based Project Access (Visibility Eradication)
 
 The legacy, non-functional project `Visibility` field (e.g., `private`, `team`, or `public`) has been completely eradicated. Instead, access control is governed entirely by membership-based policies. The same applies to agents, templates, harness configs, and skills: their `visibility` field has been removed from the API (including the agent SSE payload), and access depends only on scope and grants. Skill create and update requests that still include `visibility` are rejected with `400 validation_error`. User- and project-scoped templates, harness configs, and skills are readable only by their owner, project members, and Hub admins; Hub-wide member and viewer grants cover only hub- and global-scoped records (see [Security](/scion/reference/security/#34-fail-closed-api-authorization-and-resource-isolation)).
-- **Project Scope Governance**: Access to a project and its associated resources is restricted to principals belonging to the project's member group (i.e. `project:<slug>:members`). This group is bound to per-project read and access roles using Project-scoped RoleBindings (such as `project:<slug>:member-read-project` and `project:<slug>:member-read-agent` mappings).
+- **Project Scope Governance**: Access to a project and its associated resources is restricted to its members. A principal is a member when it holds any active project-scoped role binding, built-in (`project-owner`, `project-admin`, `project-member`) or custom, directly or through a group. Expired, not-yet-active and revoked bindings do not count, and a group never confers `project-owner`.
+- **System-Managed Members Group**: Each project has a members group (`project:<slug>:members`) that Scion manages. It cannot be the principal of a role binding on any scope, and it cannot be added as a child of another group: such requests fail with `400 principal_ineligible` (`details.reason: project_members_group`). Grant roles to the members individually or to a dedicated group instead. Deleting an existing binding or child-group edge is still allowed.
 - **Fail-Closed Retrieval (404 Gate)**: Project read access is verified via a `CheckAccess` gate on retrieval. If a caller is not authorized to read the project, the API responds with a standard `404 Not Found` (rather than a `403 Forbidden`) to prevent callers from probing the existence of private projects.
 
 ### Scheduler Authorization & Owner-Based Access Control
 
 Scheduled events and recurring schedules are strictly protected using an **Owner-Based Access Control** model, combined with dedicated permissions and dynamic RoleBindings:
 - **Owner-Based Protection**: Only the creator (the owner) of a schedule/event, or a system-wide administrator, has the authority to view, update, delete, or otherwise manage a scheduled event or recurring schedule. This is enforced via creator/owner ID validation at the API handlers layer.
-- **Project Member Bindings**: During project creation or template synchronization, Scion backfills/seeds project-scoped scheduled event RoleBindings bound to the project's members group. This grants members the capability to schedule events within their project space.
+- **Project Member Permissions**: The built-in `project-member` role carries `scheduled_event.create`, `scheduled_event.list` and `scheduled_event.read`, so members can schedule events within their project; `project-admin` also carries `scheduled_event.update`.
 - **Scheduler Permissions**: A set of 7 dedicated permissions are enforced across scheduler endpoints:
   - `scheduled_event.read`: Permission to read a scheduled event or recurring schedule.
   - `scheduled_event.list`: Permission to list scheduled events and recurring schedules.
@@ -146,6 +148,18 @@ The cache is automatically invalidated for a target service account when that se
 
 For Policy Troubleshooter to evaluate a caller's IAM permission across the organization, the Scion Hub's own GCP service account must be granted the **IAM Security Reviewer** role (`roles/iam.securityReviewer`) at either the Google Cloud project or organization level.
 
+### Start-Time Admissibility Check
+
+An assignment that was valid when it was made can stop being usable later. Before the Hub starts, restarts or resumes an agent with an assigned service account (from the Web Dashboard, the API, or `scion start` / `scion resume`), it checks that the account:
+
+- still exists and is still reachable from the agent's project;
+- is still verified, under the same email the agent was assigned;
+- for a hub-scoped account, is still allowed by `gcp_iam_check_mode: enforce`.
+
+If any check fails, the start is refused with `400` and a message that says what to fix (for example, re-verify the service account or assign another one), instead of the agent starting and failing later when it asks for a token. If the Hub cannot complete the check, the start fails with `500`. Stop and suspend are not checked. Every token request repeats the same check, so passing it at start does not exempt an agent later.
+
+If the Hub cannot save the result of a service account verification (on registration, minting or an explicit verify), the request fails with `500` instead of reporting success. On registration the account record already exists, so re-run verification on it (`scion project service-accounts verify <id>`, or `POST .../gcp-service-accounts/<id>/verify`) rather than registering it again.
+
 ### Hub-Scoped Service Accounts
 
 Hub-scoped service accounts are defined globally at the Hub level rather than being restricted to a single project. This allows Platform Ops to make shared service accounts available for selection across multiple project-level workspaces.
@@ -215,7 +229,7 @@ The hub default does not bypass the existing gates:
 ### Passthrough Mode Security & PATCH Parity
 
 In **Passthrough Mode**, an agent bypasses explicit service account binding and directly assumes the GCP identity of its GKE/GCE broker host. To prevent unauthorized access to host-level authority:
-1. **Broker-Owner Restriction**: The caller must have permission to use that specific broker in passthrough mode.
+1. **Broker-Owner Restriction**: The caller must own that specific Runtime Broker or be a Hub admin. On single-node deployments the Hub's embedded Runtime Broker has no recorded owner, so a Hub admin signed in directly (not through a scoped token or a federated identity) counts as its owner. Every other Runtime Broker still requires ownership or admin rights.
 2. **Host SA check**: The caller's GCP principal is checked via Policy Troubleshooter to confirm they hold `iam.serviceAccounts.actAs` permission on the broker's underlying host service account.
 
 To enforce this boundary reliably, Scion implements strict **PATCH Parity** across its API:

@@ -19,10 +19,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -71,17 +73,29 @@ func startOutcomeOf(err error) startOutcome {
 	}
 	var incomplete *AgentCreateIncompleteError
 	var tokenErr *agentTokenIssueError
+	// errStartClaimLost is listed as released, but a lost claim is never
+	// settled by its holder (finish writes nothing once lost), so the
+	// classification only reaches callers, which treat the start as possibly
+	// running.
+	var stillMissing *ErrEnvStillMissing
+	var quotaErr *startQuotaError
+	if errors.Is(err, errStartedStatusWrite) {
+		return startReleased // the start succeeded
+	}
 	switch {
-	case errors.Is(err, ErrLaunchInFlight), errors.As(err, &incomplete),
+	case errors.As(err, &quotaErr):
+		return startReleased
+	case errors.Is(err, ErrLaunchInFlight), errors.As(err, &incomplete), errors.As(err, &stillMissing),
+		errors.Is(err, ErrLaunchInvalidPhase),
 		errors.As(err, &tokenErr), errors.Is(err, errBrokerLacksEmptyPerAgent),
-		isBrokerRuntimeUnavailable(err), errors.Is(err, errStartClaimLost):
+		isBrokerRuntimeUnavailable(err), errors.Is(err, errStartClaimLost), errors.Is(err, store.ErrDeleteInProgress):
 		return startReleased
 	}
 	return startUnconfirmed
 }
 
-// startClaimsEnabled reports whether starts take start claims. Off until
-// every start trigger runs under one.
+// startClaimsEnabled reports whether starts take start claims: always, for a
+// server built by New. A Server constructed directly (tests) has them off.
 func (s *Server) startClaimsEnabled() bool { return s.startClaimsOn }
 
 // expectedClaimTarget is the runtime target a start of a is expected to
@@ -148,7 +162,13 @@ func (s *Server) acquireStartClaim(ctx context.Context, agent *store.Agent, kind
 		}
 	}
 	if err != nil {
-		return nil, err
+		var held *store.ClaimHeldError
+		if errors.As(err, &held) || errors.Is(err, store.ErrClaimPredicate) || ctx.Err() != nil {
+			return nil, err
+		}
+		// The claim (the start's run-intent write) failed, or was refused
+		// because a delete holds the row, as the running-intent write is.
+		return nil, fmt.Errorf("%w: %w", errStartClaimWrite, err)
 	}
 	agent.RunIntent = store.RunIntentRunning
 	at := claim.RunIntentAt
@@ -171,7 +191,11 @@ func (s *Server) runStartClaim(parent context.Context, agentID string, claim sto
 	if s.startClaimTestHook != nil {
 		s.startClaimTestHook(r)
 	}
-	r.ctx, r.cancel = context.WithTimeout(parent, r.cfg.MaxDuration)
+	// A start runs to its outcome even when the request that triggered it
+	// ends (a client disconnect would otherwise cancel a dispatch that may
+	// already have reached the broker, and leave an unconfirmed claim);
+	// start_max_duration bounds it.
+	r.ctx, r.cancel = context.WithTimeout(context.WithoutCancel(parent), r.cfg.MaxDuration)
 	go r.renewLoop()
 	return r
 }
@@ -240,8 +264,9 @@ func (r *startClaimRun) renewLoop() {
 			return
 		}
 		if r.ctx.Err() != nil {
-			// The start deadline passed (or the claim was cancelled): stop
-			// renewing. A dispatch that ignores its context keeps running,
+			// The start deadline passed: the run context is detached from
+			// the triggering request, so only the deadline, a loss
+			// (markLost) or finish cancels it. Stop renewing. A dispatch that ignores its context keeps running,
 			// but the lease lapses and the reaper makes the claim
 			// unconfirmed.
 			r.markLost("start deadline passed")
@@ -294,9 +319,11 @@ func (r *startClaimRun) finish(outcome startOutcome) bool {
 	return held
 }
 
-// claimedDispatch runs a start under its claim's context. handoff reports an
-// async launch that accepted the start (its end settles the claim).
-type claimedDispatch func(ctx context.Context) (handoff bool, err error)
+// claimedDispatch runs a start under its claim's context. fence reports
+// errStartClaimLost once the claim is lost or its fence deadline passed; the
+// dispatch calls it immediately before dispatching. handoff reports an async
+// launch that accepted the start (its end settles the claim).
+type claimedDispatch func(ctx context.Context, fence func() error) (handoff bool, err error)
 
 // withStartClaim runs dispatch under a start claim of kind for agent: claim
 // (or the caller's existing claim), lease renewal, the start deadline, the
@@ -308,7 +335,7 @@ func (s *Server) withStartClaim(ctx context.Context, agent *store.Agent, kind st
 		if _, err := s.recordRunIntent(ctx, agent, store.RunIntentRunning); err != nil {
 			return err
 		}
-		_, err := dispatch(ctx)
+		_, err := dispatch(ctx, func() error { return nil })
 		return err
 	}
 	run := existing
@@ -318,17 +345,15 @@ func (s *Server) withStartClaim(ctx context.Context, agent *store.Agent, kind st
 			return err
 		}
 	}
-	if err := run.check(); err != nil {
-		run.finish(startReleased)
-		return err
-	}
-	handoff, err := dispatch(run.Context())
+	// The dispatch checks the fence immediately before dispatching (after
+	// any capacity reservation, which it rolls back if the fence fails).
+	handoff, err := dispatch(run.Context(), run.check)
 	outcome := startOutcomeOf(err)
 	if handoff && err == nil {
 		outcome = startHandedOff
 	}
 	run.finish(outcome)
-	if err == nil {
+	if err == nil || errors.Is(err, errStartedStatusWrite) {
 		s.compensatingStop(ctx, agent, run.claim)
 	}
 	if run.isLost() {
@@ -342,22 +367,215 @@ func (s *Server) withStartClaim(ctx context.Context, agent *store.Agent, kind st
 	return err
 }
 
+// StartOpts are the inputs of startAgentCore.
+type StartOpts struct {
+	// Kind is the claim kind the start takes.
+	Kind store.StartClaimKind
+	// Existing is a claim the caller already holds (a restart's, taken
+	// before its stop leg); the start runs under it instead of a new one.
+	Existing *startClaimRun
+	// Task and Resume are passed to DispatchAgentStart.
+	Task   string
+	Resume bool
+	// Dispatch is a broker-capacity hold the caller already took with
+	// reserveStartCapacity (a restart, before its stop leg); the start uses
+	// it instead of taking one. startAgentCore settles it on success and
+	// rolls it back on any failure.
+	Dispatch *startDispatch
+	// KeepCallerDeadline bounds the DispatchAgentStart call by the caller's
+	// context deadline too, when it has one and it is earlier than the
+	// claim run's. The claim run's context is detached from the caller: it
+	// drops the caller's cancellation and its deadline, and is bounded by
+	// start_max_duration instead; this option puts the deadline back for
+	// the dispatch only (not for the post-start writes). The shared
+	// direct-message wake path sets it; only the chat wake carries a
+	// deadline today. With start claims off (a Server not built by New, as
+	// in some tests), the dispatch runs on the caller's context itself, so
+	// its cancellation and deadline both reach it.
+	KeepCallerDeadline bool
+	// SyncDispatchBound bounds the DispatchAgentStart call by
+	// syncDispatchTimeout (syncDispatch), as a synchronous launch that no
+	// longer follows its client is bounded (ptone/scion#1961). Set only by
+	// the HTTP handler sites (lifecycle start and restart, and the starts of
+	// create-on-existing); scheduled, reconcile and wake starts are not
+	// bounded by it. It composes with KeepCallerDeadline: the earlier
+	// deadline wins.
+	SyncDispatchBound bool
+	// NewGeneration clears the previous run's message, stalled marker and
+	// exit fields in the post-start write even when the agent was already
+	// in a counted phase (a restart). A start from a resting phase always
+	// clears them.
+	NewGeneration bool
+	// AfterStart, when set, runs after a successful dispatch while the claim
+	// is still held, in place of the default status write (phase from the
+	// broker response, or running; its container status; exit fields
+	// cleared). It writes the caller's post-start state, so a newer start's
+	// status is never overwritten by this one's.
+	AfterStart func(ctx context.Context, st startedState) error
+}
+
+// startedState is what AfterStart gets from startAgentCore.
+type startedState struct {
+	// ClearRemnants reports whether the post-start write must clear the
+	// previous run's message, stalled marker and exit fields
+	// (AgentStatusUpdate.ClearTerminalRemnants).
+	ClearRemnants bool
+	// EndOp ends the lifecycle op early (idempotent), for a caller that
+	// waits after its dispatch leg and must see heartbeat-reported exits.
+	EndOp func()
+}
+
 // startAgentCore dispatches a start of agent under a start claim. It is the
-// single start path for start triggers; credential handling is
-// DispatchAgentStart's own.
-func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, kind store.StartClaimKind, existing *startClaimRun, task string, resume bool) error {
+// single start path for start triggers, in this order: claim (or the
+// caller's existing claim), lease and self-fence; the lifecycle op that
+// keeps the heartbeat's missing-container reconcile and uncounted-phase
+// reports away from the agent; broker capacity and the starting phase
+// (reserveStartCapacity, or the caller's hold); fence check; then
+// DispatchAgentStart, whose credential handling is unchanged; then the
+// post-start status write and the outcome, before the claim is released;
+// then the compensating stop. When the start fails, the capacity hold is
+// rolled back (the starting phase restored, a reservation it created
+// released).
+func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, opts StartOpts) error {
 	dispatcher := s.GetDispatcher()
 	if dispatcher == nil {
+		opts.Dispatch.rollback(ctx) // nil-safe: a no-op without a caller's hold
 		return errors.New("no dispatcher")
 	}
-	// Flat placement pre-check, before the start claim.
+	// Flat placement pre-check, before the start claim, the capacity
+	// hold, the run intent and any credential or run-ID write. A
+	// caller's hold is undone (nil-safe).
 	if err := s.checkPinnedPlacement(agent); err != nil {
+		opts.Dispatch.rollback(ctx)
 		return err
 	}
-	return s.withStartClaim(ctx, agent, kind, existing, func(ctx context.Context) (bool, error) {
-		return false, dispatcher.DispatchAgentStart(ctx, agent, task, resume)
+	sd := opts.Dispatch
+	callerDeadline, hasCallerDeadline := ctx.Deadline()
+	err := s.withStartClaim(ctx, agent, opts.Kind, opts.Existing, func(ctx context.Context, fence func() error) (bool, error) {
+		endOp := s.beginLifecycleOp(agent.ID)
+		defer endOp()
+		if sd == nil {
+			var err error
+			if sd, err = s.reserveStartCapacity(ctx, agent); err != nil {
+				return false, err
+			}
+		}
+		if err := fence(); err != nil {
+			sd.rollback(ctx)
+			return false, err
+		}
+		dctx := ctx
+		if opts.KeepCallerDeadline && hasCallerDeadline {
+			var cancel context.CancelFunc
+			dctx, cancel = context.WithDeadline(ctx, callerDeadline)
+			defer cancel()
+		}
+		dispatch := func(c context.Context) error {
+			return dispatcher.DispatchAgentStart(c, agent, opts.Task, opts.Resume)
+		}
+		var err error
+		if opts.SyncDispatchBound {
+			err = syncDispatch(dctx, dispatch)
+		} else {
+			err = dispatch(dctx)
+		}
+		if err != nil {
+			sd.rollback(ctx)
+			return false, err
+		}
+		// The container is up: the reservation is kept whatever the
+		// status write below does.
+		sd.settle()
+		st := startedState{ClearRemnants: opts.NewGeneration || sd.wroteStarting(), EndOp: endOp}
+		if opts.AfterStart != nil {
+			return false, opts.AfterStart(ctx, st)
+		}
+		return false, s.writeStartedStatus(ctx, agent, st.ClearRemnants)
 	})
+	if err != nil && !errors.Is(err, errStartedStatusWrite) {
+		// A start refused before its dispatch ran (a held or lost claim, a
+		// refused intent) leaves a caller's hold to undo; a no-op once the
+		// hold was settled or rolled back, and when there is no hold (sd is
+		// nil: rollback is nil-safe).
+		sd.rollback(ctx)
+	}
+	return err
 }
+
+// writeStartedStatus is startAgentCore's default post-start write: the
+// phase the broker reported (running when it reported none or a resting
+// phase), its container status, and the previous run's exit fields cleared
+// (including a disruption reason recorded while the old pod still ran).
+// clearRemnants also clears the previous run's message and stalled marker,
+// which the store's stopped/error to running clear no longer does once the
+// row reads starting.
+func (s *Server) writeStartedStatus(ctx context.Context, agent *store.Agent, clearRemnants bool) error {
+	phase := agent.Phase
+	switch state.Phase(phase) {
+	case "", state.PhaseCreated, state.PhaseProvisioning, state.PhaseStopped, state.PhaseSuspended, state.PhaseError, state.PhaseStarting:
+		phase = string(state.PhaseRunning)
+	}
+	upd := store.AgentStatusUpdate{Phase: phase, ClearExit: true, ClearTerminalRemnants: clearRemnants}
+	if agent.ContainerStatus != "" {
+		upd.ContainerStatus = agent.ContainerStatus
+	}
+	if err := s.store.UpdateAgentStatus(ctx, agent.ID, upd); err != nil {
+		return fmt.Errorf("%w: %v", errStartedStatusWrite, err)
+	}
+	agent.Phase = phase
+	return nil
+}
+
+// errStartClaimWrite marks a start claim the store did not record: the
+// write failed, or a delete holds the row (store.ErrDeleteInProgress stays
+// in the chain). For a claimed start, its run-intent write failed or was
+// refused, and nothing was dispatched.
+var errStartClaimWrite = errors.New("record the start claim")
+
+// errStartedStatusWrite marks a start that succeeded but whose status write
+// failed: the agent is starting, so for the claim the start succeeded.
+var errStartedStatusWrite = errors.New("agent started but its status could not be recorded")
+
+// startQuotaError is a start refused because the broker is at capacity (or
+// the capacity check failed); nothing was dispatched.
+type startQuotaError struct{ err error }
+
+func (e *startQuotaError) Error() string { return "start refused by broker capacity: " + e.err.Error() }
+func (e *startQuotaError) Unwrap() error { return e.err }
+
+// reserveStartCapacity takes the broker capacity hold a start needs: it
+// reserves max_agents_per_broker (idempotent for an agent that already
+// holds it) and marks an agent in an uncounted phase starting for the
+// dispatch (beginStartDispatch). The caller must hold a lifecycle op. A
+// capacity refusal is a startQuotaError; a failed starting write wraps
+// errStartingWrite (and store.ErrDeleteInProgress when a delete now holds
+// the row). It is the one place the start path takes capacity.
+func (s *Server) reserveStartCapacity(ctx context.Context, agent *store.Agent) (*startDispatch, error) {
+	sd, err := s.beginStartDispatch(ctx, agent)
+	if err != nil {
+		if errors.Is(err, errStartingWrite) {
+			return nil, err
+		}
+		return nil, &startQuotaError{err: err}
+	}
+	return sd, nil
+}
+
+// writeStartQuotaError writes the answer for a start refused by broker
+// capacity, as the create path's quota check does, and reports whether it
+// did.
+func writeStartQuotaError(w http.ResponseWriter, err error) bool {
+	var qe *startQuotaError
+	if !errors.As(err, &qe) {
+		return false
+	}
+	writeQuotaReserveError(w, store.LimitMaxAgentsPerBroker, err)
+	return true
+}
+
+// claimReleaseTimeout bounds a claim release or settlement that runs on a
+// context detached from its caller.
+const claimReleaseTimeout = 10 * time.Second
 
 // compensatingStoreTimeout bounds each store call of a compensating stop,
 // which runs detached from the triggering request.
@@ -385,7 +603,14 @@ func (s *Server) compensatingStop(ctx context.Context, agent *store.Agent, claim
 	defer cancel()
 	stop, err := s.store.ClaimAgentStop(stopCtx, agent.ID, s.instanceID, *cur.RunIntentAt, s.startClaimSettings().LeaseTTL)
 	if err != nil {
-		return // a newer start or stop since: nothing to compensate
+		var held *store.ClaimHeldError
+		if !errors.Is(err, store.ErrClaimPredicate) && !errors.As(err, &held) {
+			// The claim could not be read or written. The agent is left to
+			// the hub's backstop, which stops an agent the broker reports
+			// running with run intent stopped and no claim.
+			slog.Warn("Compensating stop skipped: its claim could not be taken; the backstop stop applies", "agent_id", agent.ID, "error", err)
+		}
+		return // otherwise a newer start or stop since: nothing to compensate
 	}
 	defer func() {
 		releaseCtx, cancelRelease := context.WithTimeout(bg, compensatingStoreTimeout)
@@ -397,5 +622,128 @@ func (s *Server) compensatingStop(ctx context.Context, agent *store.Agent, claim
 	slog.Info("Stopping an agent whose start completed after a stop was accepted", "agent_id", agent.ID)
 	if err := dispatcher.DispatchAgentStop(stopCtx, cur); err != nil {
 		slog.Warn("Compensating stop failed", "agent_id", agent.ID, "error", err)
+	}
+}
+
+// ErrCodeStartInProgress is the 409 code for a start, restart or resume
+// refused because another start of the agent holds its start claim.
+const ErrCodeStartInProgress = "start_in_progress"
+
+// startClaimHolderNames are the user-facing names of claim kinds.
+var startClaimHolderNames = map[store.StartClaimKind]string{
+	store.StartClaimUser:        "a user start",
+	store.StartClaimRestart:     "a restart",
+	store.StartClaimWake:        "a start for a direct message",
+	store.StartClaimCreate:      "agent creation",
+	store.StartClaimRecovery:    "automatic recovery",
+	store.StartClaimReincarnate: "a reincarnation",
+	store.StartClaimStop:        "a stop",
+}
+
+// expectedClaimRelease estimates when a held claim ends: the end of the
+// hold for an unconfirmed claim, or the start deadline for a live one.
+func (s *Server) expectedClaimRelease(held *store.ClaimHeldError) time.Time {
+	cfg := s.startClaimSettings()
+	a := &store.Agent{
+		StartClaimID: held.ClaimID, StartClaimKind: held.Kind, StartClaimState: held.State,
+		StartClaimUnconfirmedAt: held.UnconfirmedAt, StartClaimHoldUntil: held.HoldUntil,
+	}
+	if exp, ok := cfg.Holds().HoldExpiry(a); ok {
+		return exp
+	}
+	return held.Since.Add(cfg.MaxDuration)
+}
+
+// writeStartInProgress writes the 409 start_in_progress answer when err is
+// a held start claim, and reports whether it did.
+func (s *Server) writeStartInProgress(w http.ResponseWriter, err error) bool {
+	var held *store.ClaimHeldError
+	if !errors.As(err, &held) {
+		return false
+	}
+	release := s.expectedClaimRelease(held)
+	holder := startClaimHolderNames[held.Kind]
+	if holder == "" {
+		holder = string(held.Kind)
+	}
+	msg := fmt.Sprintf("A start is already in progress for this agent (%s, since %s). It will finish or be released by %s; run scion stop to cancel it.",
+		holder, held.Since.UTC().Format("15:04"), release.UTC().Format("15:04"))
+	if held.Kind == store.StartClaimStop {
+		// A queued stop being applied, or the reaper stopping a container an
+		// unconfirmed start left running: released once the broker reports
+		// the agent stopped (kept while the broker is offline).
+		msg = fmt.Sprintf("A stop is in progress for this agent (since %s). It is released when the broker reports the agent stopped; start it again then.",
+			held.Since.UTC().Format("15:04"))
+	}
+	writeError(w, http.StatusConflict, ErrCodeStartInProgress, msg, map[string]interface{}{
+		"holderKind":      string(held.Kind),
+		"state":           string(held.State),
+		"since":           held.Since.UTC(),
+		"expectedRelease": release.UTC(),
+	})
+	return true
+}
+
+// writeStartClaimError writes the answer for a start refused by its claim
+// or before its dispatch: delete_in_progress when a delete holds the row (as
+// for a refused running intent), the starting write's error (409 when the
+// stored phase moved on), 409 start_in_progress for a held claim, 409
+// conflict when the agent is not eligible (being deleted, or a reincarnation
+// in flight), 409 conflict when the claim was lost to a stop. It reports
+// whether it wrote.
+func (s *Server) writeStartClaimError(w http.ResponseWriter, err error, agentID string) bool {
+	if ref := deleteClaimedDuringDispatch(err, agentID); ref != nil {
+		ref.write(w)
+		return true
+	}
+	switch {
+	case errors.Is(err, errStartingWrite):
+		// The starting write before dispatch failed (409 when the stored
+		// phase moved on), as beginStartDispatchHTTP answers.
+		writeErrorFromErr(w, err, "")
+		return true
+	case s.writeStartInProgress(w, err):
+		return true
+	case errors.Is(err, store.ErrClaimPredicate):
+		Conflict(w, "the agent cannot be started now: it is being deleted or reincarnated")
+		return true
+	case errors.Is(err, errStartClaimLost):
+		Conflict(w, "the start was abandoned: a stop or another start superseded it")
+		return true
+	}
+	return false
+}
+
+// createUnderClaim runs a create-and-start dispatch under a start claim of
+// kind create. An accepted async launch takes the claim over: the launch's
+// end settles it.
+func (s *Server) createUnderClaim(ctx context.Context, agent *store.Agent, dispatch func(ctx context.Context) (*CreateDispatchResult, error)) (*CreateDispatchResult, error) {
+	var created *CreateDispatchResult
+	err := s.withStartClaim(ctx, agent, store.StartClaimCreate, nil, func(ctx context.Context, fence func() error) (bool, error) {
+		if err := fence(); err != nil {
+			return false, err
+		}
+		var err error
+		created, err = dispatch(ctx)
+		return err == nil && created.AcceptedLaunch() != nil, err
+	})
+	return created, err
+}
+
+// releaseSupersededClaim releases claimID, the start claim an agent held
+// when a stop was recorded at stopIntentAt, once that stop's dispatch
+// succeeded. A claim taken after the stop wrote a newer intent and is kept;
+// a queued stop's own stop-kind claim is kept. A holder still renewing
+// finds the claim gone and abandons its start.
+func (s *Server) releaseSupersededClaim(ctx context.Context, agentID, claimID string, stopIntentAt time.Time) {
+	if claimID == "" || stopIntentAt.IsZero() {
+		return
+	}
+	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	if released, err := s.store.ReleaseSupersededStart(rctx, agentID, claimID, stopIntentAt); err != nil {
+		slog.Warn("Releasing a start claim superseded by a stop failed; the reaper will settle it", "agent_id", agentID, "error", err)
+	} else if released {
+		slog.Info("Released a start claim superseded by a stop", "agent_id", agentID, "claim_id", claimID)
 	}
 }
