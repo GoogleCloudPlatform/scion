@@ -1,0 +1,531 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package authzop
+
+// hubOperations lists the catalog operations for hub administration, configuration and quotas.
+var hubOperations = []OperationSpec{
+	// =====================================================================
+	// Domain: hub — hub administration (HIGH-RISK)
+	// =====================================================================
+	{
+		ID:          "hub.authreset",
+		Domain:      "hub",
+		Description: "Reset all agent authentication credentials (emergency action)",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/agents/reset-auth-all", Method: "POST"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "hub-scoped",
+		BasePermission:   "hub.auth_reset.execute",
+		Effects:          []SecurityEffect{EffectRevokeAuthority},
+		DelegationKind:   DelegationNone,
+		Governance: &GovernancePolicy{
+			Kind:        GovernancePeerSuperior,
+			Description: "Mass auth reset is a drastic authority revocation requiring hub admin governance",
+		},
+		AuthorityEval: AuthorityEvalNone,
+		AuditObligation: &AuditObligation{
+			EventType:     "hub.authreset",
+			ContextFields: []string{"actor_id"},
+			BeforeFields:  []string{"agent_count"},
+			Atomic:        true,
+		},
+		DenialCodes: []DenialCode{DenialForbidden},
+		TestRefs:    []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+	},
+
+	// =====================================================================
+	// Domain: hub — hub admin reads and configuration
+	// =====================================================================
+	{
+		ID:          "hub.config.read",
+		Domain:      "hub",
+		Description: "Read server configuration and schema",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/server-config", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/server-config/schema", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "hub-scoped",
+		BasePermission:   "hub.config.read",
+		Effects:          []SecurityEffect{EffectReadOne},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+	},
+	{
+		ID:          "hub.config.update",
+		Domain:      "hub",
+		Description: "Update server configuration sections",
+		EntryPoints: []EntryPoint{
+			// handleAdminServerConfig (admin_settings.go) accepts PUT,
+			// PATCH, and POST on the bare server-config resource.
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/server-config", Method: "PUT"},
+			// handleAdminServerConfigSectionReset (admin_settings.go) is a
+			// second, DELETE-only entry point on the same permission
+			// (route_metadata.go: admin.serverConfig.sections.byId) that
+			// resets one managed section to its bootstrap material.
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/server-config/sections/{id}", Method: "DELETE"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "hub-scoped",
+		BasePermission:   "hub.config.update",
+		Effects:          []SecurityEffect{EffectUpdateResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+	},
+	{
+		ID:          "hub.messaging.update",
+		Domain:      "hub",
+		Description: "Read and update messaging configuration switches",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/messaging", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/messaging", Method: "PUT"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "hub-scoped",
+		BasePermission:   "hub.messaging.update",
+		Effects:          []SecurityEffect{EffectUpdateResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+	},
+	{
+		ID:          "hub.experiments.update",
+		Domain:      "hub",
+		Description: "Read and update hub-wide experiment overrides",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/experiments", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/experiments", Method: "PUT"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/experiments", Method: "DELETE"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "hub-scoped",
+		BasePermission:   "hub.experiments.update",
+		Effects:          []SecurityEffect{EffectUpdateResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+	},
+	{
+		ID:          "hub.maintenance.execute",
+		Domain:      "hub",
+		Description: "Execute maintenance operations including migrations and restarts",
+		EntryPoints: []EntryPoint{
+			// handleAdminMaintenanceOps (admin_maintenance.go): bare
+			// "/operations" and "/operations/{id}" are GET-only (list and
+			// get); execution is "/operations/{id}/run", POST-only.
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/maintenance/operations", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/maintenance/operations/{id}", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/maintenance/operations/{id}/run", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/maintenance/restart", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/maintenance/check-updates", Method: "POST"},
+			// handleAdminMaintenanceMigrations (admin_maintenance.go) only
+			// accepts "/migrations/{id}/run", not a bare "/migrations/{id}".
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/maintenance/migrations/{id}/run", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/maintenance/update-available", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/maintenance/update-available", Method: "DELETE"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "hub-scoped",
+		BasePermission:   "hub.maintenance.execute",
+		Effects:          []SecurityEffect{EffectUpdateResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+	},
+	{
+		ID:          "hub.adminmode.update",
+		Domain:      "hub",
+		Description: "Toggle admin/maintenance mode",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/maintenance", Method: "PUT"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "hub-scoped",
+		BasePermission:   "hub.admin_mode.update",
+		Effects:          []SecurityEffect{EffectUpdateResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+	},
+	{
+		ID:          "hub.allowlist.update",
+		Domain:      "hub",
+		Description: "Manage the platform email allow list",
+		EntryPoints: []EntryPoint{
+			// handleAdminAllowList (admin_allow_list.go) accepts GET and
+			// POST (add), not PUT. handleAdminAllowListByEmail is
+			// DELETE-only; there is no PUT on the by-email route.
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/allow-list", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/allow-list", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/allow-list/{email}", Method: "DELETE"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "hub-scoped",
+		BasePermission:   "hub.allow_list.update",
+		Effects:          []SecurityEffect{EffectUpdateResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		// conflict: email already on the list, user not in invited status,
+		// or (DELETE) the user's role bindings changed concurrently.
+		// last_owner: the DELETE entry point applies the same
+		// last-project-owner guard and binding cascade as user.admin.delete.
+		DenialCodes: []DenialCode{DenialForbidden, DenialLastOwner, DenialConflict},
+		TestRefs:    []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+	},
+	{
+		ID:          "hub.health.read",
+		Domain:      "hub",
+		Description: "Read platform health summary and GCP quota status",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/health/summary", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/gcp-quota", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "hub-scoped",
+		BasePermission:   "hub.health.read",
+		Effects:          []SecurityEffect{EffectReadOne},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+	},
+	{
+		ID:          "hub.diagnostics.read",
+		Domain:      "hub",
+		Description: "Read diagnostic logs and messaging divergence data",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/diagnostics/logs", Method: "GET"},
+			// The live handler (handleDiagnosticsLogsStream,
+			// pkg/hub/handlers_diagnostics.go) sets
+			// "Content-Type: text/event-stream" and streams incrementally;
+			// it is an SSE entry point, not a plain HTTP route. Pinned by
+			// TestDiagnosticsLogsStreamCatalogMatchesRoute
+			// (authzop/drift_test.go).
+			{Kind: EntryPointSSE, Pattern: "/api/v1/admin/diagnostics/logs/stream", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/messaging/divergence", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "hub-scoped",
+		BasePermission:   "hub.diagnostics.read",
+		Effects:          []SecurityEffect{EffectReadOne},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+	},
+	{
+		ID:          "hub.scheduler.read",
+		Domain:      "hub",
+		Description: "Read scheduler status and configuration",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/scheduler", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "hub-scoped",
+		BasePermission:   "hub.scheduler.read",
+		Effects:          []SecurityEffect{EffectReadOne},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+	},
+	{
+		ID:          "hub.projectdefaults.read",
+		Domain:      "hub",
+		Description: "Read project default settings",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/project-defaults", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "hub-scoped",
+		BasePermission:   "hub.project_defaults.read",
+		Effects:          []SecurityEffect{EffectReadOne},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+	},
+	{
+		ID:          "hub.lifecyclehooks.read",
+		Domain:      "hub",
+		Description: "Read lifecycle hook definitions",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/lifecycle-hooks", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/lifecycle-hooks/{id}", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "hub-scoped",
+		BasePermission:   "hub.lifecycle_hooks.read",
+		Effects:          []SecurityEffect{EffectReadOne},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+	},
+	{
+		ID:          "hub.validate.execute",
+		Domain:      "hub",
+		Description: "Validate resource definitions against schema",
+		EntryPoints: []EntryPoint{
+			// handleAdminValidateResources (admin_validate.go) is GET-only.
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/validate-resources", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "hub-scoped",
+		BasePermission:   "hub.validate.execute",
+		Effects:          []SecurityEffect{EffectReadOne},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+	},
+	{
+		ID:          "hub.integrations.read",
+		Domain:      "hub",
+		Description: "Read integration configurations",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/integrations", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/integrations/{name}", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "hub-scoped",
+		BasePermission:   "hub.integrations.read",
+		Effects:          []SecurityEffect{EffectReadOne},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+	},
+	{
+		ID:          "hub.teamsmanifest.read",
+		Domain:      "hub",
+		Description: "Read Teams integration manifest",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/integrations/teams/manifest", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "hub-scoped",
+		BasePermission:   "hub.teams_manifest.read",
+		Effects:          []SecurityEffect{EffectReadOne},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+	},
+	{
+		ID:          "hub.metrics.read",
+		Domain:      "hub",
+		Description: "Read metrics dashboard data",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/metrics/{name}", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/metrics-dashboard", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "hub-scoped",
+		BasePermission:   "hub.metrics.read",
+		Effects:          []SecurityEffect{EffectReadOne},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+	},
+
+	// =====================================================================
+	// Domain: hub — GitHub App integration (D4 route guard conversion)
+	// =====================================================================
+	{
+		ID:          "hub.githubapp.read",
+		Domain:      "hub",
+		Description: "Read GitHub App configuration and installations",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/github-app", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/github-app/installations", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/github-app/installations/{id}", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "hub-scoped",
+		BasePermission:   "hub.github_app.read",
+		Effects:          []SecurityEffect{EffectReadOne},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+	},
+	{
+		ID:          "hub.githubapp.update",
+		Domain:      "hub",
+		Description: "Update GitHub App configuration, manage installations, discover and sync",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/github-app", Method: "PUT"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/github-app/installations", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/github-app/installations/{id}", Method: "PUT"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/github-app/installations/{id}", Method: "DELETE"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/github-app/installations/discover", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/github-app/sync-permissions", Method: "POST"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "hub-scoped",
+		BasePermission:   "hub.github_app.update",
+		Effects:          []SecurityEffect{EffectUpdateResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+	},
+
+	// =====================================================================
+	// Domain: quota — quota/limits management
+	// =====================================================================
+	{
+		ID:          "quota.read",
+		Domain:      "quota",
+		Description: "Read limit definitions, entitlements, and usage",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/limits", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/limits/{id}", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/entitlements/{id}", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/usage", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/usage/{limit}", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "hub-scoped",
+		BasePermission:   "quota.read",
+		Effects:          []SecurityEffect{EffectReadOne, EffectListScoped},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+	},
+	{
+		ID:          "quota.create",
+		Domain:      "quota",
+		Description: "Create limit definitions and entitlement bindings",
+		EntryPoints: []EntryPoint{
+			// handleAdminEntitlementByID (handlers_quota.go) is GET/PUT/
+			// DELETE only; creation is nested under its parent limit
+			// (handleLimitEntitlements), not the flat entitlements route.
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/limits", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/limits/{id}/entitlements", Method: "POST"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "hub-scoped",
+		BasePermission:   "quota.create",
+		Effects:          []SecurityEffect{EffectCreateResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+	},
+	{
+		ID:          "quota.update",
+		Domain:      "quota",
+		Description: "Update limit definitions and entitlement bindings",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/limits/{id}", Method: "PUT"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/entitlements/{id}", Method: "PUT"},
+			// ptone/scion#2061 P2, ptone/scion#2177: writing a per-broker
+			// setting (design.md §5.3/§5.4) requires the key's declared
+			// permission; maxAgents (pkg/hub/brokersettings) declares
+			// quota.update, same as every other quota admin write.
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/runtime-brokers/{id}/settings", Method: "PUT"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "hub-scoped",
+		BasePermission:   "quota.update",
+		Effects:          []SecurityEffect{EffectUpdateResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+	},
+	{
+		ID:          "quota.delete",
+		Domain:      "quota",
+		Description: "Delete limit definitions and entitlement bindings",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/limits/{id}", Method: "DELETE"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/entitlements/{id}", Method: "DELETE"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "hub-scoped",
+		BasePermission:   "quota.delete",
+		Effects:          []SecurityEffect{EffectDeleteResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		AuditObligation: &AuditObligation{
+			EventType:     "quota.delete",
+			ContextFields: []string{"actor_id"},
+			BeforeFields:  []string{"limit_id", "limit_name"},
+			Atomic:        true,
+		},
+		DenialCodes: []DenialCode{DenialForbidden},
+		TestRefs:    []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+	},
+	{
+		ID:          "hub.policies.removed",
+		Domain:      "hub",
+		Description: "Removed policy API; every method and sub-path answers 410 Gone and points callers to role bindings",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/policies", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/policies/{id}", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "none",
+		Effects:          []SecurityEffect{EffectReadOne},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestBearerDisposition_EveryRoutePatternCovered"}},
+		Exemptions: []Exemption{{
+			Kind:   ExemptionAuthenticationOnly,
+			Reason: "The handler answers 410 Gone for every caller and reads or changes nothing; no resource permission applies",
+			Scope:  "removed policy API",
+			Waives: []WaivedObligation{WaiveBasePermission, WaiveDenialCodes},
+		}},
+		Bearer: NonUser(),
+	},
+}
