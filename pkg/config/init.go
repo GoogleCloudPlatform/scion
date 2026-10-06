@@ -259,6 +259,19 @@ type InitProjectOpts struct {
 	// SkipRuntimeCheck skips local container runtime detection.
 	// Use this when initializing on a hub server where agents run on remote brokers.
 	SkipRuntimeCheck bool
+
+	// ProjectID, when set, is the identity recorded for a newly initialized
+	// project instead of a generated one. An identity already present in
+	// the project is kept.
+	ProjectID string
+}
+
+// newProjectID returns the identity for a newly initialized project.
+func (o InitProjectOpts) newProjectID() string {
+	if o.ProjectID != "" {
+		return o.ProjectID
+	}
+	return GenerateProjectID()
 }
 
 func InitProject(targetDir string, harnesses []api.Harness, opts ...InitProjectOpts) error {
@@ -331,8 +344,8 @@ func initExternalProject(projectDir string, opt InitProjectOpts) error {
 		return ensureProjectDirs(resolved, opt)
 	}
 
-	// Generate new project identity
-	projectID := GenerateProjectID()
+	// New project identity
+	projectID := opt.newProjectID()
 	projectName := filepath.Base(projectRoot)
 	projectSlug := api.Slugify(projectName)
 
@@ -389,7 +402,7 @@ func initInRepoProject(projectDir string, opt InitProjectOpts) error {
 	// Ensure project-id file exists for split storage
 	if _, err := ReadProjectID(projectDir); err != nil {
 		if os.IsNotExist(err) {
-			projectID := GenerateProjectID()
+			projectID := opt.newProjectID()
 			if err := WriteProjectID(projectDir, projectID); err != nil {
 				return fmt.Errorf("failed to write project-id: %w", err)
 			}

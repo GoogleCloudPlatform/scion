@@ -1024,10 +1024,17 @@ func (s *Server) cloneSharedWorkspaceProject(ctx context.Context, project *store
 		return fmt.Errorf("shared workspace clone failed: %w", err)
 	}
 
-	// Seed the .scion project on top of the cloned workspace
+	// Seed the .scion project on top of the cloned workspace, with the hub
+	// project ID as the workspace project identity.
 	scionDir := filepath.Join(workspacePath, ".scion")
-	if err := config.InitProject(scionDir, nil, config.InitProjectOpts{SkipRuntimeCheck: true}); err != nil {
+	if err := config.InitProject(scionDir, nil, config.InitProjectOpts{SkipRuntimeCheck: true, ProjectID: project.ID}); err != nil {
 		s.projectsLogger().Warn("failed to initialize .scion in cloned workspace",
+			"project_id", project.ID, "error", err.Error())
+	}
+	// A cloned repository may carry its own recorded identity; replace it
+	// with the hub project ID.
+	if _, err := alignWorkspaceProjectIdentity(workspacePath, project.Slug, project.ID); err != nil {
+		s.projectsLogger().Warn("failed to set workspace project identity in cloned workspace",
 			"project_id", project.ID, "error", err.Error())
 	}
 
