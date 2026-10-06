@@ -45,6 +45,9 @@ func TestParseThinkingLevel(t *testing.T) {
 		if !strings.Contains(err.Error(), "--thinking-level") {
 			t.Errorf("parseThinkingLevel(%q): error %q does not name the flag", in, err)
 		}
+		if !isUsageError(err) {
+			t.Errorf("parseThinkingLevel(%q): error %q is not a usage error", in, err)
+		}
 	}
 }
 
@@ -103,5 +106,8 @@ func TestRunAgentRejectsExplicitEmptyThinkingLevel(t *testing.T) {
 	err := RunAgent(startCmd, []string{"agent-x"}, false)
 	if err == nil || !strings.Contains(err.Error(), "--thinking-level") {
 		t.Fatalf("RunAgent with --thinking-level \"\": got %v, want a --thinking-level error", err)
+	}
+	if !isUsageError(err) {
+		t.Errorf("RunAgent with --thinking-level \"\": error %q is not a usage error", err)
 	}
 }

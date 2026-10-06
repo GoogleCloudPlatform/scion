@@ -704,7 +704,7 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 	if thinkingLevelFlag != "" || (cmd != nil && cmd.Flags().Changed("thinking-level")) {
 		val, err := parseThinkingLevel(thinkingLevelFlag)
 		if err != nil {
-			return asUsageError(err)
+			return err
 		}
 		if inlineCfg == nil {
 			inlineCfg = &api.ScionConfig{}

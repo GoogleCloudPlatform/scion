@@ -15,7 +15,6 @@
 package cmd
 
 import (
-	"fmt"
 	"strconv"
 	"strings"
 )
@@ -34,7 +33,8 @@ var thinkingLevelNames = map[string]int{
 const thinkingLevelFlagUsage = "Thinking level to inject into agent config: an integer 0-100, or low (25), medium (50), high (75), max (100)"
 
 // parseThinkingLevel parses a --thinking-level value: an integer from 0 to
-// 100, or a case-insensitive shorthand from thinkingLevelNames.
+// 100, or a case-insensitive shorthand from thinkingLevelNames. Invalid
+// values are usage errors.
 func parseThinkingLevel(value string) (int, error) {
 	v := strings.TrimSpace(value)
 	if level, ok := thinkingLevelNames[strings.ToLower(v)]; ok {
@@ -42,10 +42,10 @@ func parseThinkingLevel(value string) (int, error) {
 	}
 	level, err := strconv.Atoi(v)
 	if err != nil {
-		return 0, fmt.Errorf("invalid --thinking-level value %q: must be an integer from 0 to 100 or one of low, medium, high, max", value)
+		return 0, newUsageError("invalid --thinking-level value %q: must be an integer from 0 to 100 or one of low, medium, high, max", value)
 	}
 	if level < 0 || level > 100 {
-		return 0, fmt.Errorf("invalid --thinking-level value %d: must be between 0 and 100 (or one of low, medium, high, max)", level)
+		return 0, newUsageError("invalid --thinking-level value %d: must be between 0 and 100 (or one of low, medium, high, max)", level)
 	}
 	return level, nil
 }
