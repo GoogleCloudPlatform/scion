@@ -138,8 +138,10 @@ func TestInitOverlayUsageSourceActivatesNativeUsage(t *testing.T) {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 					t.Fatalf("loadHarnessEnvOverlay error = %v, want %q", err, tc.wantErr)
 				}
-				if got := pipeline.UsageDiagnostics().Derived; got != 0 {
-					t.Fatalf("an invalid overlay must not activate usage, derived = %d", got)
+				// A fresh activation succeeding proves loadHarnessEnvOverlay
+				// activated nothing before rejecting the overlay.
+				if outcome, err := pipeline.ActivateUsageSource(ctx, telemetry.UsageSourceNative); err != nil || outcome != telemetry.UsageActivated {
+					t.Fatalf("an invalid overlay must not activate usage, later ActivateUsageSource = %q, %v; want %q", outcome, err, telemetry.UsageActivated)
 				}
 				return
 			}

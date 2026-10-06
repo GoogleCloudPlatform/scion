@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -233,30 +234,59 @@ func claudeAPIRequestLogs(requestID string) []*logspb.ResourceLogs {
 // fail a request: events handled before the swap hit the no-op deriver and
 // derive nothing, and once the swap is done every further event is derived
 // exactly once.
+//
+// Overlap is enforced, not left to scheduling: activation waits until every
+// worker has finished at least one event and is looping, and each worker
+// keeps sending until it has handled at least one event that started after
+// activation returned.
 func TestPipelineActivateUsageSourceWhileEventsFlow(t *testing.T) {
 	t.Setenv("SCION_AGENT_ID", "activate-flow-agent")
 	t.Setenv("SCION_PROJECT_ID", "activate-flow-project")
 	p := startPipelineWithoutUsageSource(t, "claude")
 	ctx := context.Background()
 
-	const workers, perWorker = 4, 25
-	start := make(chan struct{})
-	var wg sync.WaitGroup
-	errs := make(chan error, workers*perWorker)
+	const workers = 4
+	var (
+		wg        sync.WaitGroup
+		flowing   sync.WaitGroup // released once every worker has handled an event
+		activated = make(chan struct{})
+		sent      atomic.Int64
+		errs      = make(chan error, workers)
+	)
+	flowing.Add(workers)
 	for w := 0; w < workers; w++ {
 		wg.Add(1)
 		go func(w int) {
 			defer wg.Done()
-			<-start
-			for i := 0; i < perWorker; i++ {
-				if err := p.handleLogs(ctx, claudeAPIRequestLogs(fmt.Sprintf("concurrent-%d-%d", w, i))); err != nil {
+			signalled := false
+			for i := 0; ; i++ {
+				// Read before the call: if activation had already
+				// returned, this event must be derived.
+				afterSwap := false
+				select {
+				case <-activated:
+					afterSwap = true
+				default:
+				}
+				err := p.handleLogs(ctx, claudeAPIRequestLogs(fmt.Sprintf("concurrent-%d-%d", w, i)))
+				sent.Add(1)
+				if !signalled {
+					signalled = true
+					flowing.Done()
+				}
+				if err != nil {
 					errs <- err
+					return
+				}
+				if afterSwap {
+					return
 				}
 			}
 		}(w)
 	}
-	close(start)
+	flowing.Wait()
 	outcome, err := p.ActivateUsageSource(ctx, UsageSourceNative)
+	close(activated)
 	wg.Wait()
 	close(errs)
 	for err := range errs {
@@ -267,14 +297,16 @@ func TestPipelineActivateUsageSourceWhileEventsFlow(t *testing.T) {
 	}
 
 	during := p.UsageDiagnostics()
-	// Sanity bound only: the replaced deriver is a no-op, so no event can be
-	// derived twice across the swap and this cannot realistically fail. The
-	// test's value is the no-panic/no-error run under concurrency (with
-	// -race, the absence of a data race) and the exact post-swap count below.
-	// Emitted points are not compared to Derived here: concurrent delta
-	// flushes may aggregate same-attribute points, so the counts differ.
-	if during.Derived > workers*perWorker {
-		t.Fatalf("derived %d usage events from %d sent: an event was counted twice", during.Derived, workers*perWorker)
+	total := sent.Load()
+	// Each worker's first event completed before activation began, so it hit
+	// the no-op deriver; each worker's last event started after activation
+	// returned, so it was derived. Anything in between may land either side
+	// of the swap but never on both. Emitted points are not compared to
+	// Derived here: concurrent delta flushes may aggregate same-attribute
+	// points, so the counts differ.
+	if during.Derived < workers || during.Derived > total-workers {
+		t.Fatalf("derived %d usage events from %d sent by %d workers, want within [%d, %d]",
+			during.Derived, total, workers, workers, total-workers)
 	}
 	if during.Duplicate != 0 {
 		t.Fatalf("duplicate = %d, want 0 for distinct events", during.Duplicate)
