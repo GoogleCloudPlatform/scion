@@ -422,3 +422,22 @@ func intersectEffectCeilings(a, b store.EffectCeiling) store.EffectCeiling {
 	out.BoundaryProjectID = b.BoundaryProjectID
 	return out
 }
+
+// errScheduledChildDeletedDuringCreate fails a fire whose scheduled child was
+// deleted, or is held by a delete, by the time its synchronous dispatch
+// returned.
+var errScheduledChildDeletedDuringCreate = errors.New("agent was deleted while it was being created")
+
+// scheduledChildLive reports whether the scheduled child is live after its
+// synchronous dispatch, by the rule the created publish uses: a missing row
+// or one deletedOrDeleteHeld is not live; a failed re-read counts as live.
+func (s *Server) scheduledChildLive(ctx context.Context, agent *store.Agent) bool {
+	fresh, err := s.store.GetAgent(ctx, agent.ID)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		return false
+	case err != nil:
+		return true
+	}
+	return !deletedOrDeleteHeld(fresh)
+}

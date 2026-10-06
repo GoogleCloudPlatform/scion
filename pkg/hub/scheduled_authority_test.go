@@ -773,3 +773,45 @@ func TestSchedFireNeverCallsSourceEffectCeiling(t *testing.T) {
 		}
 	}
 }
+
+// softDeletingScheduledDispatcher soft-deletes the child while its
+// synchronous dispatch is in flight.
+type softDeletingScheduledDispatcher struct {
+	AgentDispatcher
+	srv *Server
+	err error
+}
+
+func (d *softDeletingScheduledDispatcher) DispatchAgentCreate(ctx context.Context, agent *store.Agent) (*CreateDispatchResult, error) {
+	res, err := d.AgentDispatcher.DispatchAgentCreate(ctx, agent)
+	d.err = d.srv.store.WithTx(context.Background(), func(tx store.Store) error {
+		row, gerr := tx.GetAgent(context.Background(), agent.ID)
+		if gerr != nil {
+			return gerr
+		}
+		row.DeletedAt = time.Now()
+		if uerr := tx.UpdateAgent(context.Background(), row); uerr != nil {
+			return uerr
+		}
+		return d.srv.softDeleteAgentTx(context.Background(), tx, row, AuditActor{})
+	})
+	return res, err
+}
+
+// A scheduled child deleted while its synchronous dispatch was in flight
+// fails the fire (the synchronous create's 409 delete_in_progress contract)
+// and is left to the delete: no compensation record is written.
+func TestSchedChildDeletedDuringDispatchFailsFire(t *testing.T) {
+	f := newSchedFire(t, "sched-delrace")
+	f.withDispatcher(t)
+	disp := &softDeletingScheduledDispatcher{AgentDispatcher: f.srv.GetDispatcher(), srv: f.srv}
+	f.srv.SetDispatcher(disp)
+
+	err := f.fire(t, withSessionRevision(f.event("sched-delrace-c"), f.creator.ID))
+	require.NoError(t, disp.err, "the soft delete during dispatch")
+	require.ErrorIs(t, err, errScheduledChildDeletedDuringCreate)
+
+	recs, _, lerr := f.store.ListMutationAudits(context.Background(), store.MutationAuditFilter{TargetType: "agent", MutationType: mutationTypeAgentCreateDispatchFailed})
+	require.NoError(t, lerr)
+	assert.Empty(t, recs, "the delete owns the record; no compensation")
+}

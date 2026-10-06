@@ -4665,6 +4665,12 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 				slog.Warn("Scheduler: failed to persist agent after accepted launch",
 					"eventID", evt.ID, "agent_id", agent.ID, "error", err)
 			}
+		} else if !s.scheduledChildLive(ctx, agent) {
+			// A delete that won the race: the synchronous create did not
+			// create the agent, so the fire fails, as a synchronous HTTP
+			// create answers 409 delete_in_progress. The record is left to
+			// that delete.
+			return fmt.Errorf("scheduled dispatch of agent %q: %w", slug, errScheduledChildDeletedDuringCreate)
 		}
 
 		slog.Info("Scheduler: agent dispatched successfully",
