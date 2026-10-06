@@ -425,4 +425,56 @@ var projectOperations = []OperationSpec{
 		DenialCodes: []DenialCode{DenialForbidden},
 		TestRefs:    []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
 	},
+
+	// =====================================================================
+	// Domain: artifact — artifact service (pkg/artifacts, hub.artifacts
+	// experiment). The service authorizes through the hub's artifacts.Host
+	// adapter (artifacts_host.go) against the artifact's home project, plus
+	// its own artifact_grant rows for reads.
+	// =====================================================================
+	{
+		ID:          "artifact.read",
+		Domain:      "artifact",
+		Description: "Read an artifact's metadata or file bytes (owner, home-project readers via the scope grant, or principal grants); unreadable artifacts answer 404",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/{id}", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/{id}/files/{path}", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/{id}/versions/{seq}/files/{path}", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
+		ResourceResolver: "artifact-home-project",
+		BasePermission:   "artifact.read",
+		Effects:          []SecurityEffect{EffectReadOne},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialResourceNotFound},
+		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestArtifactsTwoAgentsSameProject"}},
+		// A token reads only when its boundary covers the artifact's home
+		// project and its selectors carry artifact.read; ownership and
+		// grants apply only after that check.
+		Bearer: BearerDisposition{Kind: BearerAdmit, Target: BearerTargetArtifactRecord,
+			Boundaries: []BearerBoundary{BearerBoundaryProject, BearerBoundaryHub}, Pin: "TestArtifactsUserAccessTokensAreBounded"},
+	},
+	{
+		ID:          "artifact.create",
+		Domain:      "artifact",
+		Description: "Publish a single file as a new artifact homed in a project (the caller's own, or ?scope=)",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts", Method: "POST"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
+		ResourceResolver: "project-from-query",
+		BasePermission:   "artifact.create",
+		Effects:          []SecurityEffect{EffectCreateResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestArtifactsTwoAgentsSameProject"}},
+		// A token publishes only into a project its boundary covers, with
+		// artifact.create among its selectors.
+		Bearer: BearerDisposition{Kind: BearerAdmit, Target: BearerTargetProjectQuery,
+			Boundaries: []BearerBoundary{BearerBoundaryProject, BearerBoundaryHub}, Pin: "TestArtifactsUserAccessTokensAreBounded"},
+	},
 }

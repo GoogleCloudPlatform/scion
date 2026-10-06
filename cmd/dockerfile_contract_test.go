@@ -15,9 +15,7 @@
 package cmd
 
 import (
-	"io/fs"
 	"os"
-	"path"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -268,7 +266,7 @@ type cloudBuildFile struct {
 
 const (
 	hubGKEImageTag   = "$_REGISTRY/scion-hub-gke:$_SHORT_SHA"
-	hubGKEIgnoreFile = "image-build/gcloudignore-hub-gke"
+	hubGKEIgnoreFile = "image-build/gcloudignore-omni"
 )
 
 // checkHubGKECloudBuildContract returns violations for the hub-gke Cloud Build
@@ -369,111 +367,7 @@ func checkHubGKECloudBuildContract(content string) []string {
 	if !strings.Contains(content, "--ignore-file="+hubGKEIgnoreFile) {
 		errs = append(errs, "cloudbuild-hub-gke.yaml usage must pass --ignore-file="+hubGKEIgnoreFile)
 	}
-	if strings.Contains(content, "--ignore-file=image-build/gcloudignore-omni") {
-		errs = append(errs, "cloudbuild-hub-gke.yaml must not point at gcloudignore-omni as its ignore file")
-	}
 	return errs
-}
-
-// embedRoots are the //go:embed all: roots compiled into the scion binary
-// (pkg/config/init.go, resources/embed.go).
-var embedRoots = []string{
-	"pkg/config/embeds",
-	"resources/templates",
-	"resources/platform_skills",
-	"resources/mandatory_boilerplate",
-}
-
-// gcloudignoreMatches reports whether a single gcloudignore (gitignore
-// semantics) exclude pattern matches the slash-separated relative path p or
-// one of its parent directories. Supported: anchored patterns (leading or
-// inner slash), unanchored patterns (match any path component), trailing "/"
-// (directories only) and path.Match globs. "**" is not supported; the caller
-// rejects it.
-func gcloudignoreMatches(pattern, p string) bool {
-	dirOnly := strings.HasSuffix(pattern, "/")
-	pat := strings.TrimSuffix(pattern, "/")
-	anchored := strings.Contains(pat, "/")
-	pat = strings.TrimPrefix(pat, "/")
-	comps := strings.Split(p, "/")
-	for i := range comps {
-		isDir := i < len(comps)-1
-		if dirOnly && !isDir {
-			continue
-		}
-		subject := comps[i]
-		if anchored {
-			subject = strings.Join(comps[:i+1], "/")
-		}
-		if ok, _ := path.Match(pat, subject); ok {
-			return true
-		}
-	}
-	return false
-}
-
-// checkHubGKEIgnoreFileContract returns violations for gcloudignore-hub-gke:
-// no exclude pattern may drop a file under an embed root, and the agents.md
-// and .gemini/ patterns must be anchored to the repo root. Lines pulled in by
-// `#!include:.gitignore` are not evaluated (gcloud reads them; this checker
-// does not); `gcloud meta list-files-for-upload` covers them.
-func checkHubGKEIgnoreFileContract(content string, embedFiles []string) []string {
-	var errs []string
-	var patterns []string
-	for _, line := range strings.Split(content, "\n") {
-		l := strings.TrimSpace(line)
-		if l == "" || strings.HasPrefix(l, "#") {
-			continue
-		}
-		if strings.HasPrefix(l, "!") || strings.Contains(l, "**") {
-			errs = append(errs, "gcloudignore-hub-gke: pattern "+l+" is not supported by this checker; extend gcloudignoreMatches")
-			continue
-		}
-		patterns = append(patterns, l)
-	}
-	for _, want := range []string{"/agents.md", "/.gemini/"} {
-		found := false
-		for _, p := range patterns {
-			if p == want {
-				found = true
-			}
-		}
-		if !found {
-			errs = append(errs, "gcloudignore-hub-gke must contain the root-anchored pattern "+want)
-		}
-	}
-	for _, f := range embedFiles {
-		for _, p := range patterns {
-			if gcloudignoreMatches(p, f) {
-				errs = append(errs, "gcloudignore-hub-gke pattern "+p+" drops embedded file "+f)
-			}
-		}
-	}
-	return errs
-}
-
-func listEmbedFiles(t *testing.T) []string {
-	t.Helper()
-	var files []string
-	for _, root := range embedRoots {
-		err := filepath.WalkDir(filepath.Join("..", root), func(p string, d fs.DirEntry, err error) error {
-			if err != nil {
-				return err
-			}
-			if !d.IsDir() {
-				rel, _ := filepath.Rel("..", p)
-				files = append(files, filepath.ToSlash(rel))
-			}
-			return nil
-		})
-		if err != nil {
-			t.Fatalf("walk %s: %v", root, err)
-		}
-	}
-	if len(files) == 0 {
-		t.Fatal("no embedded files found")
-	}
-	return files
 }
 
 func readRepoFile(t *testing.T, rel string) string {
@@ -497,10 +391,11 @@ func TestDockerfileContractHubGKECloudBuild(t *testing.T) {
 	}
 }
 
+// TestDockerfileContractHubGKEIgnoreFile checks the hub-gke ignore file exists
+// and the README points at it. That no ignore file drops embedded files is
+// checked by TestGcloudIgnoreKeepsEmbeddedFiles (gcloudignore_contract_test.go).
 func TestDockerfileContractHubGKEIgnoreFile(t *testing.T) {
-	for _, e := range checkHubGKEIgnoreFileContract(readRepoFile(t, hubGKEIgnoreFile), listEmbedFiles(t)) {
-		t.Error(e)
-	}
+	_ = readRepoFile(t, hubGKEIgnoreFile)
 	readme := readRepoFile(t, "image-build/README.md")
 	if !strings.Contains(readme, "--ignore-file="+hubGKEIgnoreFile) {
 		t.Error("image-build/README.md must pass --ignore-file=" + hubGKEIgnoreFile + " for the hub-gke build")
@@ -585,7 +480,7 @@ func TestDockerfileContractCheckerDetectsViolations(t *testing.T) {
 		{"--push dropped", mustReplace(t, cb, "      - '--push'\n", ""), "must pass --push"},
 		{"-f swapped", mustReplace(t, cb, "      - 'Dockerfile'\n", "      - 'image-build/hub/Dockerfile'\n"), "-f Dockerfile"},
 		{"require-short-sha neutered", mustReplace(t, cb, `'test -n "$_SHORT_SHA" || { echo "ERROR: pass --substitutions=_SHORT_SHA=<git short sha>" >&2; exit 1; }'`, "'true'"), "require-short-sha step"},
-		{"ignore file reverted to omni", strings.ReplaceAll(cb, "gcloudignore-hub-gke", "gcloudignore-omni"), "--ignore-file=" + hubGKEIgnoreFile},
+		{"ignore file reverted to default", mustReplace(t, cb, "--ignore-file="+hubGKEIgnoreFile, "--ignore-file=.gcloudignore"), "--ignore-file=" + hubGKEIgnoreFile},
 	}
 	for _, m := range cbMutations {
 		expectViolation(t, m.name, checkHubGKECloudBuildContract(m.src), m.want)
@@ -593,18 +488,4 @@ func TestDockerfileContractCheckerDetectsViolations(t *testing.T) {
 	if errs := checkHubGKECloudBuildContract("# never latest\n" + cb); len(errs) != 0 {
 		t.Errorf("latest in a comment: valid file reported violations: %q", errs)
 	}
-
-	ign := readRepoFile(t, hubGKEIgnoreFile)
-	embedFiles := listEmbedFiles(t)
-	ignMutations := []struct{ name, src, want string }{
-		{"agents.md unanchored", mustReplace(t, ign, "\n/agents.md\n", "\nagents.md\n"), "drops embedded file pkg/config/embeds/templates/default/agents.md"},
-		{".gemini/ unanchored", mustReplace(t, ign, "\n/.gemini/\n", "\n.gemini/\n"), "drops embedded file resources/templates/default/home/.gemini/.geminiignore"},
-		{"agents.md pattern removed", mustReplace(t, ign, "\n/agents.md\n", "\n"), "root-anchored pattern /agents.md"},
-		{"unanchored directory pattern", ign + "\ntemplates/\n", "pattern templates/ drops embedded file"},
-	}
-	for _, m := range ignMutations {
-		expectViolation(t, m.name, checkHubGKEIgnoreFileContract(m.src, embedFiles), m.want)
-	}
-	// The same check against gcloudignore-omni reproduces the review's finding.
-	expectViolation(t, "gcloudignore-omni", checkHubGKEIgnoreFileContract(readRepoFile(t, "image-build/gcloudignore-omni"), embedFiles), "pattern agents.md drops embedded file")
 }

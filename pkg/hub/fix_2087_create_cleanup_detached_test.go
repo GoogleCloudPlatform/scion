@@ -142,7 +142,11 @@ type cancelingCreateDispatcher struct {
 
 	heldBeforeCleanup reservationsHeld
 	dispatchCtxErr    error
-	delete            ctxObservation
+	// reqCtx is the request's context; requestDoneAtCleanup records whether
+	// it was done when the failure cleanup ran.
+	reqCtx               context.Context
+	requestDoneAtCleanup bool
+	delete               ctxObservation
 	// credJTI is a credential the mock records for the agent, standing in
 	// for the one a real dispatcher mints, so the test can observe whether
 	// the cleanup revoked it.
@@ -173,6 +177,9 @@ func (d *cancelingCreateDispatcher) DispatchAgentCreateWithGather(ctx context.Co
 
 func (d *cancelingCreateDispatcher) DispatchAgentDelete(ctx context.Context, _ *store.Agent, _, _, _ bool, _ time.Time) error {
 	d.delete = observeCtx(ctx)
+	if d.reqCtx != nil {
+		d.requestDoneAtCleanup = d.reqCtx.Err() != nil
+	}
 	return nil
 }
 
@@ -180,15 +187,22 @@ func (d *cancelingCreateDispatcher) DispatchAgentDelete(ctx context.Context, _ *
 // cancel func cancels; serve runs it through the handler. Tests hand cancel
 // to a mock that fires it mid-handler, before the failure cleanup runs.
 func newCancelableCreate(t *testing.T, srv *Server, body CreateAgentRequest) (cancel context.CancelFunc, serve func()) {
+	cancel, serve, _ = newCancelableCreateCtx(t, srv, body)
+	return cancel, serve
+}
+
+// newCancelableCreateCtx is newCancelableCreate that also returns the
+// request's context.
+func newCancelableCreateCtx(t *testing.T, srv *Server, body CreateAgentRequest) (cancel context.CancelFunc, serve func(), reqCtx context.Context) {
 	t.Helper()
 	bodyBytes, err := json.Marshal(body)
 	require.NoError(t, err)
-	reqCtx, cancel := context.WithCancel(context.Background())
+	reqCtx, cancel = context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", bytes.NewReader(bodyBytes)).WithContext(reqCtx)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+testDevToken)
-	return cancel, func() { srv.Handler().ServeHTTP(httptest.NewRecorder(), req) }
+	return cancel, func() { srv.Handler().ServeHTTP(httptest.NewRecorder(), req) }, reqCtx
 }
 
 func TestCreateAgent_CanceledRequest_FailureCleanupStillRuns(t *testing.T) {
@@ -215,17 +229,21 @@ func TestCreateAgent_CanceledRequest_FailureCleanupStillRuns(t *testing.T) {
 			disp.s = s
 			setAgentQuotaLimits(t, s)
 
-			cancel, serve := newCancelableCreate(t, srv, CreateAgentRequest{
+			cancel, serve, reqCtx := newCancelableCreateCtx(t, srv, CreateAgentRequest{
 				Name:      "canceled-create-agent",
 				ProjectID: project.ID,
 				Task:      "do something",
 				GatherEnv: tc.gatherEnv,
 			})
 			disp.cancelRequest = cancel
+			disp.reqCtx = reqCtx
 			serve()
 
 			require.NotNil(t, disp.capturedAgent, "dispatcher must have observed the create-time agent")
 			require.NoError(t, disp.dispatchCtxErr, "the dispatch ctx must not follow the canceled request (ptone/scion#1961)")
+			if tc.createErr != nil {
+				require.True(t, disp.requestDoneAtCleanup, "the request ctx is done when the failure cleanup runs")
+			}
 			agentID := disp.capturedAgent.ID
 			assertReservationsHeldBeforeCleanup(t, disp.heldBeforeCleanup)
 

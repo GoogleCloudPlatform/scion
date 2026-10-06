@@ -171,6 +171,9 @@ type Agent struct {
 	// writers are SetRunIntent, RevertRunIntent and BackfillRunIntent.
 	RunIntent   RunIntent  `json:"-"`
 	RunIntentAt *time.Time `json:"-"`
+	// RunIntentMarkedAt equals RunIntentAt when the intent was last written
+	// by code that maintains start claims (see RunIntentWrittenWithClaims).
+	RunIntentMarkedAt *time.Time `json:"-"`
 
 	// Start claim (see start_claim.go). StartClaimID is "" when no claim is
 	// held. Internal bookkeeping, untagged like the launch columns.
@@ -352,6 +355,10 @@ type AgentAppliedConfig struct {
 	// WorkspaceStoragePath is the GCS storage path for bootstrapped workspaces.
 	// Set during workspace bootstrap for non-git projects.
 	WorkspaceStoragePath string `json:"workspaceStoragePath,omitempty"`
+	// WorkspaceStorageBucket is the GCS bucket the hub uploaded
+	// WorkspaceStoragePath to. It is sent to the broker with the create so
+	// a broker without its own bucket setting can download the workspace.
+	WorkspaceStorageBucket string `json:"workspaceStorageBucket,omitempty"`
 
 	// InlineConfig holds the full ScionConfig provided via the --config flag
 	// or Hub API config field. When set, the dispatcher threads it through to the
@@ -992,6 +999,13 @@ type BrokerCapabilities struct {
 	// --broker`). The hub refuses a move unless both the source and the
 	// target broker report it (412).
 	AgentMove bool `json:"agentMove"`
+	// ReprovisionEmptyPerAgent indicates the broker's reprovision reuses an
+	// empty-per-agent agent's private workspace in place (same-broker
+	// `scion reincarnate`, miller79/scion#167). The hub refuses same-broker
+	// empty-per-agent reincarnation without it (412), before the agent is
+	// stopped. It says what the broker build can do; runtime suitability is
+	// a separate hub check.
+	ReprovisionEmptyPerAgent bool `json:"reprovisionEmptyPerAgent,omitempty"`
 	// StartsInFlight indicates the broker reports the agent starts still
 	// running on it in every heartbeat (BrokerHeartbeat.StartsInFlight). Only
 	// then does the hub read a start's absence from that list as "no start

@@ -1806,11 +1806,33 @@ func runHubProjectCreateHubManaged() error {
 	return nil
 }
 
+// defaultBranchProbeTimeout bounds the default-branch probe so an
+// unreachable remote falls back to the default instead of hanging. It is a
+// variable only so tests can shorten it.
+var defaultBranchProbeTimeout = 10 * time.Second
+
+// defaultBranchProbeWaitDelay bounds how long the probe waits for its output
+// pipes to close after the context kills git. Without it, a stalled
+// git-remote-https child that inherited stderr keeps the pipe open and
+// Output() blocks until that child exits, defeating the timeout.
+const defaultBranchProbeWaitDelay = 1 * time.Second
+
+// defaultBranchProbeCmd builds the `git ls-remote --symref` command used by
+// detectDefaultBranch. GIT_TERMINAL_PROMPT=0 stops git from blocking on an
+// interactive credential prompt when no credential helper can answer.
+func defaultBranchProbeCmd(ctx context.Context, cloneURL string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "git", "ls-remote", "--symref", cloneURL, "HEAD")
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	cmd.WaitDelay = defaultBranchProbeWaitDelay
+	return cmd
+}
+
 // detectDefaultBranch probes a git remote to detect its default branch.
 // Returns the branch name or empty string on failure.
 func detectDefaultBranch(cloneURL string) string {
-	cmd := exec.Command("git", "ls-remote", "--symref", cloneURL, "HEAD")
-	output, err := cmd.Output()
+	ctx, cancel := context.WithTimeout(context.Background(), defaultBranchProbeTimeout)
+	defer cancel()
+	output, err := defaultBranchProbeCmd(ctx, cloneURL).Output()
 	if err != nil {
 		return ""
 	}
@@ -2643,19 +2665,7 @@ func offerTemplateSyncOnLink(projectPath, endpoint, projectID string, isGlobal b
 
 	if !util.IsTerminal() {
 		fmt.Printf("\nSkipping template sync (non-interactive mode).\n")
-		fmt.Println("Run 'scion templates sync --all' to upload project templates.")
-		return
-	}
-
-	// Show discovered templates
-	fmt.Printf("\nFound %d project template(s) not yet synced to Hub:\n", len(projectTemplates))
-	for _, t := range projectTemplates {
-		fmt.Printf("  - %s\n", t.Name)
-	}
-
-	if !hubsync.ConfirmAction("Sync these templates to the Hub?", true, autoConfirm) {
-		fmt.Println("Skipping template sync.")
-		fmt.Println("Run 'scion templates sync --all' to upload project templates later.")
+		fmt.Println("Run 'scion templates sync <name>' to upload project templates.")
 		return
 	}
 
@@ -2665,24 +2675,9 @@ func offerTemplateSyncOnLink(projectPath, endpoint, projectID string, isGlobal b
 		return
 	}
 
-	fmt.Println("\nSyncing project templates to Hub...")
-	var synced int
-	for _, tpl := range projectTemplates {
-		harnessType, err := detectHarnessType(tpl)
-		if err != nil {
-			fmt.Printf("  %s: skipped (failed to detect harness: %v)\n", tpl.Name, err)
-			continue
-		}
-
-		// Use force=false — don't overwrite existing Hub templates
-		err = syncTemplateToHub(hubCtx, tpl.Name, tpl.Path, "project", harnessType)
-		if err != nil {
-			fmt.Printf("  %s: failed: %v\n", tpl.Name, err)
-			continue
-		}
-		synced++
-	}
-	fmt.Printf("%d template(s) synced to project scope.\n", synced)
+	syncNewTemplatesOnLink(hubCtx, projectTemplates, func(prompt string) bool {
+		return hubsync.ConfirmAction(prompt, true, autoConfirm)
+	})
 }
 
 // registerProjectOnHub registers a new project on the Hub.

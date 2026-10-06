@@ -41,6 +41,22 @@ const harnessConfigsDirName = "harness-configs"
 // instead of folding it into a generic 5xx (ptone/scion#1316 fault 3).
 var ErrHarnessConfigNotFound = errors.New("harness-config not found")
 
+// HarnessConfigNotFoundError is the typed form of ErrHarnessConfigNotFound
+// (errors.Is(err, ErrHarnessConfigNotFound) still matches). Error() keeps
+// the full diagnostic text, including every directory searched; Name is the
+// requested harness-config name, safe for client-facing messages
+// (ptone/scion#3113).
+type HarnessConfigNotFoundError struct {
+	Name     string
+	Searched []string
+}
+
+func (e *HarnessConfigNotFoundError) Error() string {
+	return fmt.Sprintf("harness-config %q not found (searched: %s): %s", e.Name, strings.Join(e.Searched, ", "), ErrHarnessConfigNotFound.Error())
+}
+
+func (e *HarnessConfigNotFoundError) Unwrap() error { return ErrHarnessConfigNotFound }
+
 // HarnessConfigDir represents a harness-config directory on disk.
 // Located at ~/.scion/harness-configs/<name>/ or .scion/harness-configs/<name>/
 type HarnessConfigDir struct {
@@ -167,7 +183,7 @@ func FindHarnessConfigDir(name string, projectPath string, templatePaths ...stri
 		}, nil
 	}
 
-	return nil, fmt.Errorf("harness-config %q not found (searched: %s): %w", name, strings.Join(searched, ", "), ErrHarnessConfigNotFound)
+	return nil, &HarnessConfigNotFoundError{Name: name, Searched: searched}
 }
 
 // ListHarnessConfigDirs lists all available harness-configs.
@@ -343,9 +359,9 @@ func mapEmbedFileToHomePath(homeDir, configDir, fileName string) string {
 		return filepath.Join(homeDir, ".codex", "config.toml")
 	case "scion_notify.sh":
 		return filepath.Join(homeDir, ".codex", "scion_notify.sh")
-	case ".opencode.json":
+	case "opencode.json":
 		if configDir != "" {
-			return filepath.Join(homeDir, configDir, ".opencode.json")
+			return filepath.Join(homeDir, configDir, "opencode.json")
 		}
 		return ""
 	default:

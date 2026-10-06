@@ -1235,34 +1235,55 @@ func (s *Server) handleExistingAgent(
 			existingAgent.AppliedConfig.Attach = req.Attach
 		}
 
-		// A suspended agent's reservation was released when it was suspended;
-		// re-reserve (with the cap check) before dispatch, same as create
-		// (ptone/scion#1963). Idempotent, and rejects with the same
-		// quota-exceeded response create uses if the broker is at capacity.
-		// The agent is marked starting for the dispatch so the quota
-		// reconcile keeps the slot (ptone/scion#2014); beginStartDispatch
-		// requires the lifecycle op.
-		// From the reservation on, the resume no longer follows the client
-		// (ptone/scion#1961); the dispatch is bounded by syncDispatch.
+		// From here the start no longer follows the client
+		// (ptone/scion#1961); its dispatch is bounded by syncDispatch
+		// (SyncDispatchBound).
 		ctx = detachLaunchFromClient(ctx)
-		defer s.beginLifecycleOp(existingAgent.ID)()
-		sd, ok := s.beginStartDispatchHTTP(ctx, w, existingAgent)
-		if !ok {
-			return existingAgentErrored
-		}
-
 		// This branch only runs for suspended agents, so resume the harness
 		// session (Claude --continue) rather than starting fresh.
 		resume := existingAgent.Phase == string(state.PhaseSuspended)
-		if _, err := s.recordRunIntent(ctx, existingAgent, store.RunIntentRunning); err != nil {
-			sd.rollback(ctx)
-			writeRunIntentError(w, err, existingAgent.ID)
-			return existingAgentErrored
+		// The post-start write runs inside the start claim, before it is
+		// released, so it never overwrites a newer start's status.
+		var afterErr error // a post-start write error, answered after the start
+		var answered bool  // the post-start step answered a delete that won
+		afterStart := func(ctx context.Context, _ startedState) error {
+			// A delete that won while the broker call was in flight: answer it
+			// before writing anything to the row.
+			if s.existingAgentDeleteWon(ctx, w, existingAgent.ID) {
+				answered = true
+				return nil
+			}
+			if existingAgent.Phase == string(state.PhaseSuspended) {
+				existingAgent.Phase = string(state.PhaseRunning)
+			}
+			// Clear any exit reason/code left from the prior generation —
+			// including a disruption reason recorded while the agent was still
+			// running (state.ExitReasonPreempted/ExitReasonEvicted) ahead of its
+			// pod actually stopping, which describes the old pod, not this one.
+			existingAgent.ExitReason = ""
+			existingAgent.ExitCode = nil
+			// The row read starting during the dispatch (beginStartDispatch),
+			// so clear the rest of the prior generation's remnants here, as
+			// ClearTerminalRemnants does for a status write.
+			existingAgent.Message = ""
+			existingAgent.StalledFromActivity = ""
+			if err := s.store.UpdateAgent(ctx, existingAgent); err != nil {
+				afterErr = err
+				s.agentLifecycleLog.Warn("Failed to update agent status after resume", "agent_id", existingAgent.ID, "error", err)
+			}
+			return nil
 		}
-		if err := syncDispatch(ctx, func(dctx context.Context) error {
-			return dispatcher.DispatchAgentStart(dctx, existingAgent, req.Task, resume)
-		}); err != nil {
-			sd.rollback(ctx)
+		// The start runs under a start claim, which records run intent running,
+		// reserves the broker capacity and marks the agent starting for the
+		// dispatch (ptone/scion#1963, ptone/scion#2014; rolled back if the
+		// start fails) and runs afterStart while the claim is held.
+		if err := s.startAgentCore(ctx, existingAgent, StartOpts{Kind: store.StartClaimUser, Task: req.Task, Resume: resume, AfterStart: afterStart, SyncDispatchBound: true}); answered || err != nil {
+			if answered {
+				return existingAgentErrored
+			}
+			if s.writeStartClaimError(ctx, w, err, existingAgent.ID) || writeStartQuotaError(w, err) {
+				return existingAgentErrored
+			}
 			if res, ok := s.writeExistingAgentGuardError(ctx, w, existingAgent, project, req, err); ok {
 				return res
 			}
@@ -1282,31 +1303,10 @@ func (s *Server) handleExistingAgent(
 			}
 			return existingAgentErrored
 		}
-		if s.existingAgentDeleteWon(ctx, w, sd, existingAgent.ID) {
+
+		if afterErr != nil && s.existingAgentGoneAfterLanding(ctx, w, existingAgent.ID, afterErr) {
 			return existingAgentErrored
 		}
-
-		if existingAgent.Phase == string(state.PhaseSuspended) {
-			existingAgent.Phase = string(state.PhaseRunning)
-		}
-		// Clear any exit reason/code left from the prior generation —
-		// including a disruption reason recorded while the agent was still
-		// running (state.ExitReasonPreempted/ExitReasonEvicted) ahead of its
-		// pod actually stopping, which describes the old pod, not this one.
-		existingAgent.ExitReason = ""
-		existingAgent.ExitCode = nil
-		// The row read starting during the dispatch (beginStartDispatch),
-		// so clear the rest of the prior generation's remnants here, as
-		// ClearTerminalRemnants does for a status write.
-		existingAgent.Message = ""
-		existingAgent.StalledFromActivity = ""
-		if err := s.store.UpdateAgent(ctx, existingAgent); err != nil {
-			if s.existingAgentGoneAfterLanding(ctx, w, sd, existingAgent.ID, err) {
-				return existingAgentErrored
-			}
-			s.agentLifecycleLog.Warn("Failed to update agent status after resume", "agent_id", existingAgent.ID, "error", err)
-		}
-		sd.settle()
 
 		if req.Notify {
 			s.createNotifySubscription(ctx, existingAgent.ID, existingAgent.ProjectID, notifySubscriberType, notifySubscriberID, createdBy)
@@ -1364,30 +1364,52 @@ func (s *Server) handleExistingAgent(
 					"agent_id", existingAgent.ID, "agent", existingAgent.Name,
 					"container_status", existingAgent.ContainerStatus)
 			}
-			// A stopped or errored agent's reservation was released when it
-			// stopped/crashed; re-reserve (with the cap check) before
-			// dispatch, same as create (ptone/scion#1963), and mark it
-			// starting for the dispatch so the quota reconcile keeps the
-			// slot (ptone/scion#2014); beginStartDispatch requires the
-			// lifecycle op.
-			// From the reservation on, the restart no longer follows the
-			// client (ptone/scion#1961); the dispatch is bounded by
-			// syncDispatch.
+			// From here the start no longer follows the client
+			// (ptone/scion#1961); its dispatch is bounded by syncDispatch
+			// (SyncDispatchBound).
 			ctx = detachLaunchFromClient(ctx)
-			defer s.beginLifecycleOp(existingAgent.ID)()
-			sd, ok := s.beginStartDispatchHTTP(ctx, w, existingAgent)
-			if !ok {
-				return existingAgentErrored
+			// The post-start write runs inside the start claim, before it is
+			// released, so it never overwrites a newer start's status.
+			var afterErr error // a post-start write error, answered after the start
+			var answered bool  // the post-start step answered a delete that won
+			afterStart := func(ctx context.Context, _ startedState) error {
+				// A delete that won while the broker call was in flight: answer it
+				// before writing anything to the row.
+				if s.existingAgentDeleteWon(ctx, w, existingAgent.ID) {
+					answered = true
+					return nil
+				}
+				existingAgent.Phase = string(state.PhaseRunning)
+				// Clear any exit reason/code left from the prior generation —
+				// including a disruption reason recorded while the agent was
+				// still running (state.ExitReasonPreempted/ExitReasonEvicted)
+				// ahead of its pod actually stopping, which describes the old
+				// pod, not this one.
+				existingAgent.ExitReason = ""
+				existingAgent.ExitCode = nil
+				// The row read starting during the dispatch
+				// (beginStartDispatch), so clear the rest of the prior
+				// generation's remnants here, as ClearTerminalRemnants does
+				// for a status write.
+				existingAgent.Message = ""
+				existingAgent.StalledFromActivity = ""
+				if err := s.updateAgentAfterDispatch(ctx, existingAgent); err != nil {
+					afterErr = err
+					s.agentLifecycleLog.Warn("Failed to update agent status after resume", "agent_id", existingAgent.ID, "error", err)
+				}
+				return nil
 			}
-			if _, err := s.recordRunIntent(ctx, existingAgent, store.RunIntentRunning); err != nil {
-				sd.rollback(ctx)
-				writeRunIntentError(w, err, existingAgent.ID)
-				return existingAgentErrored
-			}
-			if err := syncDispatch(ctx, func(dctx context.Context) error {
-				return dispatcher.DispatchAgentStart(dctx, existingAgent, req.Task, forcedRecovery)
-			}); err != nil {
-				sd.rollback(ctx)
+			// The start runs under a start claim, which records run intent running,
+			// reserves the broker capacity and marks the agent starting for the
+			// dispatch (ptone/scion#1963, ptone/scion#2014; rolled back if the
+			// start fails) and runs afterStart while the claim is held.
+			if err := s.startAgentCore(ctx, existingAgent, StartOpts{Kind: store.StartClaimUser, Task: req.Task, Resume: forcedRecovery, AfterStart: afterStart, SyncDispatchBound: true}); answered || err != nil {
+				if answered {
+					return existingAgentErrored
+				}
+				if s.writeStartClaimError(ctx, w, err, existingAgent.ID) || writeStartQuotaError(w, err) {
+					return existingAgentErrored
+				}
 				if res, ok := s.writeExistingAgentGuardError(ctx, w, existingAgent, project, req, err); ok {
 					return res
 				}
@@ -1407,30 +1429,10 @@ func (s *Server) handleExistingAgent(
 				}
 				return existingAgentErrored
 			}
-			if s.existingAgentDeleteWon(ctx, w, sd, existingAgent.ID) {
+
+			if afterErr != nil && s.existingAgentGoneAfterLanding(ctx, w, existingAgent.ID, afterErr) {
 				return existingAgentErrored
 			}
-
-			existingAgent.Phase = string(state.PhaseRunning)
-			// Clear any exit reason/code left from the prior generation —
-			// including a disruption reason recorded while the agent was
-			// still running (state.ExitReasonPreempted/ExitReasonEvicted)
-			// ahead of its pod actually stopping, which describes the old
-			// pod, not this one.
-			existingAgent.ExitReason = ""
-			existingAgent.ExitCode = nil
-			// The row read starting during the dispatch (beginStartDispatch),
-			// so clear the rest of the prior generation's remnants here, as
-			// ClearTerminalRemnants does for a status write.
-			existingAgent.Message = ""
-			existingAgent.StalledFromActivity = ""
-			if err := s.updateAgentAfterDispatch(ctx, existingAgent); err != nil {
-				if s.existingAgentGoneAfterLanding(ctx, w, sd, existingAgent.ID, err) {
-					return existingAgentErrored
-				}
-				s.agentLifecycleLog.Warn("Failed to update agent status after resume", "agent_id", existingAgent.ID, "error", err)
-			}
-			sd.settle()
 
 			if req.Notify {
 				s.createNotifySubscription(ctx, existingAgent.ID, existingAgent.ProjectID, notifySubscriberType, notifySubscriberID, createdBy)
@@ -1539,15 +1541,46 @@ func (s *Server) handleExistingAgent(
 		// response (status, container info) onto existingAgent in-place.
 		// A created/provisioning agent has no prior session to resume.
 		// From here the start no longer follows the client
-		// (ptone/scion#1961); the dispatch is bounded by syncDispatch.
+		// (ptone/scion#1961); its dispatch is bounded by syncDispatch
+		// (SyncDispatchBound).
 		ctx = detachLaunchFromClient(ctx)
-		if _, err := s.recordRunIntent(ctx, existingAgent, store.RunIntentRunning); err != nil {
-			writeRunIntentError(w, err, existingAgent.ID)
-			return existingAgentErrored
+		// The post-start write runs inside the start claim, before it is
+		// released, so it never overwrites a newer start's status.
+		var afterErr error // a post-start write error, answered after the start
+		var answered bool  // the post-start step answered a delete that won
+		afterStart := func(ctx context.Context, _ startedState) error {
+			// A delete that won while the broker call was in flight: answer it
+			// before writing anything to the row.
+			if s.existingAgentDeleteWon(ctx, w, existingAgent.ID) {
+				answered = true
+				return nil
+			}
+			// If the broker didn't set a running phase, default to running.
+			if existingAgent.Phase == string(state.PhaseCreated) ||
+				existingAgent.Phase == string(state.PhaseProvisioning) {
+				existingAgent.Phase = string(state.PhaseRunning)
+			}
+			// Clear any exit reason/code left from the prior generation — see
+			// the equivalent clear in the resume branches above.
+			existingAgent.ExitReason = ""
+			existingAgent.ExitCode = nil
+			if err := s.store.UpdateAgent(ctx, existingAgent); err != nil {
+				// Log but continue — agent was started.
+				afterErr = err
+				s.agentLifecycleLog.Warn("Failed to update agent status after start", "agent_id", existingAgent.ID, "error", err)
+			}
+			return nil
 		}
-		if err := syncDispatch(ctx, func(dctx context.Context) error {
-			return dispatcher.DispatchAgentStart(dctx, existingAgent, req.Task, false)
-		}); err != nil {
+		// The start runs under a start claim, which records run intent running,
+		// reserves the broker capacity (rolled back if the start fails) and
+		// runs afterStart while the claim is held.
+		if err := s.startAgentCore(ctx, existingAgent, StartOpts{Kind: store.StartClaimUser, Task: req.Task, Resume: false, AfterStart: afterStart, SyncDispatchBound: true}); answered || err != nil {
+			if answered {
+				return existingAgentErrored
+			}
+			if s.writeStartClaimError(ctx, w, err, existingAgent.ID) || writeStartQuotaError(w, err) {
+				return existingAgentErrored
+			}
 			if res, ok := s.writeExistingAgentGuardError(ctx, w, existingAgent, project, req, err); ok {
 				return res
 			}
@@ -1567,25 +1600,9 @@ func (s *Server) handleExistingAgent(
 			}
 			return existingAgentErrored
 		}
-		if s.existingAgentDeleteWon(ctx, w, nil, existingAgent.ID) {
-			return existingAgentErrored
-		}
 
-		// If the broker didn't set a running phase, default to running.
-		if existingAgent.Phase == string(state.PhaseCreated) ||
-			existingAgent.Phase == string(state.PhaseProvisioning) {
-			existingAgent.Phase = string(state.PhaseRunning)
-		}
-		// Clear any exit reason/code left from the prior generation — see
-		// the equivalent clear in the resume branches above.
-		existingAgent.ExitReason = ""
-		existingAgent.ExitCode = nil
-		if err := s.store.UpdateAgent(ctx, existingAgent); err != nil {
-			if s.existingAgentGoneAfterLanding(ctx, w, nil, existingAgent.ID, err) {
-				return existingAgentErrored
-			}
-			// Log but continue — agent was started.
-			s.agentLifecycleLog.Warn("Failed to update agent status after start", "agent_id", existingAgent.ID, "error", err)
+		if afterErr != nil && s.existingAgentGoneAfterLanding(ctx, w, existingAgent.ID, afterErr) {
+			return existingAgentErrored
 		}
 
 		// Create notification subscription if requested.
@@ -2317,13 +2334,13 @@ func (s *Server) hasAnyKey(ctx context.Context, agent *store.Agent, keys []strin
 // flight (deleteWonAfterLanding), as the lifecycle start does
 // (ptone/scion#3255). The dispatch has already tried to remove the landed run
 // (compensateLandedRun); its outcome is in the dispatch warnings. The delete
-// engine owns the row and its reservation, so sd is settled, not rolled
-// back, and nothing is written. It reports whether it answered.
-func (s *Server) existingAgentDeleteWon(ctx context.Context, w http.ResponseWriter, sd *startDispatch, agentID string) bool {
+// engine owns the row and its reservation. Called from the post-start step,
+// before the full-row write, so nothing is written for a delete that won.
+// It reports whether it answered.
+func (s *Server) existingAgentDeleteWon(ctx context.Context, w http.ResponseWriter, agentID string) bool {
 	if !s.deleteWonAfterLanding(ctx, agentID) {
 		return false
 	}
-	sd.settle()
 	writeDeleteWon(w, agentID, deletedWhileStartingMessage, dispatchWarningsFromContext(ctx))
 	return true
 }
@@ -2331,11 +2348,10 @@ func (s *Server) existingAgentDeleteWon(ctx context.Context, w http.ResponseWrit
 // existingAgentGoneAfterLanding is the same answer when the post-start write
 // finds the row gone (hard-deleted after the re-read). It reports whether it
 // answered.
-func (s *Server) existingAgentGoneAfterLanding(ctx context.Context, w http.ResponseWriter, sd *startDispatch, agentID string, err error) bool {
+func (s *Server) existingAgentGoneAfterLanding(ctx context.Context, w http.ResponseWriter, agentID string, err error) bool {
 	if !errors.Is(err, store.ErrNotFound) {
 		return false
 	}
-	sd.settle()
 	writeDeleteWon(w, agentID, deletedWhileStartingMessage, dispatchWarningsFromContext(ctx))
 	return true
 }

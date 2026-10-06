@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	slashpath "path"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -400,7 +401,7 @@ func init() {
 	brokerProvideCmd.Flags().StringVar(&brokerBrokerID, "broker", "", "Broker name or ID to use (for remote broker operations)")
 	brokerProvideCmd.Flags().BoolVar(&brokerMakeDefault, "make-default", false, "Set this broker as the default for the project")
 	brokerProvideCmd.Flags().StringVar(&brokerHubFlag, "hub", "", "Hub connection name (from 'scion runtime-broker hubs')")
-	brokerProvideCmd.Flags().StringVar(&brokerProvidePath, "path", "", "Local project path to register for this broker (default with --project: none sent; an existing provider path is kept unless it is the global directory, otherwise the broker uses its hub-managed project directory)")
+	brokerProvideCmd.Flags().StringVar(&brokerProvidePath, "path", "", "Project path to register for this broker, resolved on this host (default with --project: none sent; an existing provider path is kept unless it is the global directory, otherwise the broker uses its hub-managed project directory). With --broker naming another host's broker, give the absolute path to the project root (the directory containing .scion) on that host; it is sent as given")
 
 	brokerWithdrawCmd.Flags().StringVar(&brokerProjectID, "project", "", "Project name or ID to remove as provider from")
 
@@ -1199,7 +1200,8 @@ func runBrokerProvide(cmd *cobra.Command, args []string) error {
 	// and no --path, no path is sent: the current directory need not belong
 	// to the named project.
 	if brokerProvidePath != "" {
-		explicitPath, err := resolveProvidePath(brokerProvidePath, projectName, projectSlug)
+		remote := isRemoteBroker && brokerID != getLocalBrokerID()
+		explicitPath, err := resolveProvidePath(brokerProvidePath, projectName, projectSlug, remote)
 		if err != nil {
 			return err
 		}
@@ -1227,7 +1229,7 @@ func runBrokerProvide(cmd *cobra.Command, args []string) error {
 	fmt.Println()
 	fmt.Printf("Broker '%s' added as provider for project '%s'\n", brokerName, resp.Project.Name)
 	if localProjectPath != "" {
-		fmt.Printf("Local project path: %s\n", localProjectPath)
+		fmt.Println(providePathSummary(localProjectPath, brokerName, isRemoteBroker && brokerID != getLocalBrokerID()))
 	} else {
 		fmt.Println("No local path sent; an existing provider path for this broker is kept (a stored global-directory path is cleared), otherwise the broker uses its hub-managed project directory.")
 	}
@@ -1280,7 +1282,27 @@ func runBrokerProvide(cmd *cobra.Command, args []string) error {
 // the target project is the global project (hub slug "global"): registering
 // that directory for any other project makes the broker treat its global
 // directory as that project.
-func resolveProvidePath(path, projectName, projectSlug string) (string, error) {
+//
+// For a remote broker (one that is not this host's broker) the path is the
+// absolute project root (the directory containing .scion) on the broker's
+// host, so it is not resolved or checked against this host's filesystem: it
+// is sent as given, cleaned with slash-only path rules (separators are not
+// translated). A path naming the .scion directory itself is
+// refused with a hint to pass its parent (ptone/scion#3157).
+func resolveProvidePath(path, projectName, projectSlug string, remote bool) (string, error) {
+	if remote {
+		// The path is in the remote broker's form, so it is checked and
+		// cleaned with the slash-only path package, never this host's
+		// filepath rules, and its separators are not translated.
+		if !slashpath.IsAbs(path) {
+			return "", fmt.Errorf("--path %q must be an absolute path on the broker's host when --broker names a remote broker", path)
+		}
+		cleaned := slashpath.Clean(path)
+		if slashpath.Base(cleaned) == config.DotScion {
+			return "", fmt.Errorf("--path %q names a .scion directory; for a remote broker pass the project root that contains it: %s", path, slashpath.Dir(cleaned))
+		}
+		return cleaned, nil
+	}
 	resolved, isGlobal, err := config.ResolveProjectPath(path)
 	if err != nil {
 		return "", fmt.Errorf("failed to resolve --path %q: %w", path, err)
@@ -2027,8 +2049,12 @@ func getLocalBrokerID() string {
 // runtime that actually opts out reports it once the broker itself runs
 // and registers/heartbeats with a live instance in hand (see
 // buildStoreBrokerProfiles and HeartbeatService.buildHeartbeat).
+// "agentMove" is a property of this broker binary (localOnly delete and the
+// moved-workspace check), like "reprovision". So is
+// "reprovisionEmptyPerAgent" (in-place empty-per-agent reprovision,
+// miller79/scion#167); the hub checks runtime suitability separately.
 func brokerRegistrationCapabilities() []string {
-	return []string{"sync", "attach", "reprovision", "emptyPerAgentWorkspace"}
+	return []string{"sync", "attach", "reprovision", "emptyPerAgentWorkspace", "agentMove", "reprovisionEmptyPerAgent"}
 }
 
 // buildBrokerProfiles builds BrokerProfile objects from settings.Profiles.
