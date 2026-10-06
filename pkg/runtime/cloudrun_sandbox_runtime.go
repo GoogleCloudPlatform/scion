@@ -829,10 +829,17 @@ const sandboxMaxEnvArgBytes = 128 * 1024
 // sandboxEnvLimit applies sandboxMaxEnvArgBytes to the full argv string.
 var sandboxEnvLimit = envSizeLimit{maxBytes: sandboxMaxEnvArgBytes, includeKey: true}
 
-// sandboxRuntimeEnvKeys are fixed by envFor to sandboxUID/sandboxGID, which
-// the sandbox user setup depends on, so an env-type secret must not supply
-// them. The Cloud Run instance runtime reserves the same keys.
-var sandboxRuntimeEnvKeys = []string{"SCION_HOST_UID", "SCION_HOST_GID"}
+// sandboxRuntimeEnvKeys are fixed by envFor, so an env-type secret must not
+// supply them. SCION_HOST_UID/SCION_HOST_GID drive the sandbox user setup
+// (the Cloud Run instance runtime reserves the same two keys).
+// SCION_WORKSPACE_PATH, HOME, USER and LOGNAME describe the sandbox mount
+// layout and let tmux find the pane-exited hook in the agent home; the
+// user cannot change those paths, so a secret must not override them.
+// PATH stays overridable, as in Docker.
+var sandboxRuntimeEnvKeys = []string{
+	"SCION_HOST_UID", "SCION_HOST_GID",
+	"SCION_WORKSPACE_PATH", "HOME", "USER", "LOGNAME",
+}
 
 // applySecretEnvOverrides sets each env-type secret key in env to its value
 // from cfgEnv, after harness, auth and synthesised env have been applied.
@@ -961,7 +968,8 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 	}
 
 	// Env-type secrets win over harness, auth and synthesised env, as in
-	// Docker. Keys from the caller's cfg.Env still win over secrets.
+	// Docker, except sandboxRuntimeEnvKeys. Keys from the caller's cfg.Env
+	// still win over secrets.
 	applySecretEnvOverrides(env, cfg.Env, secretKeys)
 
 	// Build entrypoint command.

@@ -254,10 +254,11 @@ func TestCloudRunSandboxRun_DeliversResolvedSecrets(t *testing.T) {
 }
 
 // As in Docker, an env-type secret wins over harness, auth and synthesised
-// env, except the UID/GID keys the sandbox fixes; cfg.Env still wins over
-// the secret.
+// env, except the keys the sandbox fixes (UID/GID and its mount-layout
+// keys); cfg.Env still wins over the secret.
 func TestCloudRunSandboxRun_SecretPrecedence(t *testing.T) {
 	h := newSandboxSecretsHarness(t)
+	h.cfg.Project = "from-config"
 	h.cfg.Env = []string{"PRESET_KEY=from-env"}
 	h.cfg.Harness = &mockHarness{command: []string{"gemini"}, env: map[string]string{
 		"HARNESS_KEY": "from-harness",
@@ -267,21 +268,30 @@ func TestCloudRunSandboxRun_SecretPrecedence(t *testing.T) {
 	h.cfg.ResolvedSecrets = []api.ResolvedSecret{
 		{Name: "h", Type: "environment", Target: "HARNESS_KEY", Value: "from-secret"},
 		{Name: "a", Type: "environment", Target: "AUTH_KEY", Value: "from-secret"},
-		{Name: "w", Type: "environment", Target: "SCION_WORKSPACE_PATH", Value: "from-secret"},
-		{Name: "u", Type: "environment", Target: "SCION_HOST_UID", Value: "from-secret"},
+		{Name: "s", Type: "environment", Target: "SCION_PROJECT", Value: "from-secret"},
 		{Name: "p", Type: "environment", Target: "PRESET_KEY", Value: "from-secret"},
+	}
+	reserved := []string{
+		"SCION_HOST_UID", "SCION_HOST_GID",
+		"SCION_WORKSPACE_PATH", "HOME", "USER", "LOGNAME",
+	}
+	for _, key := range reserved {
+		h.cfg.ResolvedSecrets = append(h.cfg.ResolvedSecrets,
+			api.ResolvedSecret{Name: "r-" + key, Type: "environment", Target: key, Value: "from-secret"})
 	}
 	if _, err := h.rt.Run(context.Background(), h.cfg); err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
 	env := h.runEnv(t)
-	for _, key := range []string{"HARNESS_KEY", "AUTH_KEY", "SCION_WORKSPACE_PATH"} {
+	for _, key := range []string{"HARNESS_KEY", "AUTH_KEY", "SCION_PROJECT"} {
 		if env[key] != "from-secret" {
 			t.Errorf("%s = %q, want the secret to win", key, env[key])
 		}
 	}
-	if env["SCION_HOST_UID"] == "from-secret" {
-		t.Error("SCION_HOST_UID taken from a secret; the sandbox value must win")
+	for _, key := range reserved {
+		if env[key] == "from-secret" || env[key] == "" {
+			t.Errorf("%s = %q, want the sandbox value (secret must not supply it)", key, env[key])
+		}
 	}
 	// Pre-existing sandbox behaviour: harness env overrides cfg.Env. The
 	// secret must not change that, since cfg.Env already beat it.
@@ -414,49 +424,80 @@ func TestCloudRunRun_OversizedSecretFailsWithName(t *testing.T) {
 	}
 }
 
+// Cloud Run caps the value only, so a long key with a value of exactly
+// cloudRunMaxEnvValueBytes must still be delivered.
+func TestCloudRunRun_ValueAtLimitWithLongKeyPasses(t *testing.T) {
+	key := "LONG_SECRET_TARGET_" + strings.Repeat("K", 200)
+	value := strings.Repeat("x", cloudRunMaxEnvValueBytes)
+	fake := &fakeInstancesClient{getErr: notFoundErr()}
+	rt := newFakeCloudRunRuntime(t, fake)
+	cfg := runConfigForTest()
+	cfg.UnixUsername = "scion"
+	cfg.ResolvedSecrets = []api.ResolvedSecret{{Name: "long", Type: "environment", Target: key, Value: value}}
+	if _, err := rt.Run(context.Background(), cfg); err != nil {
+		t.Fatalf("value at the limit was rejected (error length %d)", len(err.Error()))
+	}
+	if got := crInstanceEnv(t, fake)[key]; got != value {
+		t.Errorf("instance env %s has length %d, want %d", key, len(got), len(value))
+	}
+}
+
+// The resolved env value must be redacted from the echoed argv whether or
+// not the harness also sets the same key.
 func TestCloudRunSandboxRun_ErrorRedactsResolvedSecretValue(t *testing.T) {
-	tmpDir := t.TempDir()
-	mockBin := writeFakeSandbox(t, tmpDir, true) // echoes argv to stderr, exits 1
-	homeDir := filepath.Join(tmpDir, "agent-home")
-	if err := os.MkdirAll(homeDir, 0755); err != nil {
-		t.Fatal(err)
+	cases := []struct {
+		name       string
+		harnessEnv map[string]string
+	}{
+		{"no key collision", nil},
+		{"harness sets the same key", map[string]string{"EXAMPLE_API_KEY": "harness-default-value"}},
 	}
-	rt := &CloudRunSandboxRuntime{
-		bin:          mockBin,
-		state:        newSandboxStateStore(filepath.Join(tmpDir, "state.json")),
-		rootDir:      filepath.Join(tmpDir, "scion"),
-		watchCancels: make(map[string]context.CancelFunc),
-	}
-	cfg := RunConfig{
-		Name:         "redact-probe",
-		HomeDir:      homeDir,
-		Workspace:    filepath.Join(tmpDir, "workspace"),
-		Image:        "omni-image",
-		UnixUsername: "scion",
-		Harness:      &mockHarness{command: []string{"/bin/true"}},
-		ResolvedSecrets: []api.ResolvedSecret{
-			{Name: "api-key", Type: "environment", Target: "EXAMPLE_API_KEY", Value: crTestEnvSecretValue},
-			{Name: "creds", Type: "file", Target: crTestFileTarget, Value: crTestFileSecretValue},
-		},
-	}
-	if err := os.MkdirAll(cfg.Workspace, 0755); err != nil {
-		t.Fatal(err)
-	}
-	_, err := rt.Run(context.Background(), cfg)
-	if err == nil {
-		t.Fatal("Run() returned nil error, but the fake sandbox binary exits 1")
-	}
-	msg := err.Error()
-	if !strings.Contains(msg, "--allow-egress") {
-		t.Fatalf("error does not carry the echoed sandbox argv, so the check is vacuous (error length %d)", len(msg))
-	}
-	if strings.Contains(msg, crTestEnvSecretValue) {
-		t.Error("error output contains the env-type secret value")
-	}
-	if !strings.Contains(msg, "EXAMPLE_API_KEY") {
-		t.Error("error output should still name the redacted key EXAMPLE_API_KEY")
-	}
-	if strings.Contains(msg, stagedsecrets.EnvVar+"=ey") {
-		t.Error("error output contains the staged secrets blob")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			mockBin := writeFakeSandbox(t, tmpDir, true) // echoes argv to stderr, exits 1
+			homeDir := filepath.Join(tmpDir, "agent-home")
+			if err := os.MkdirAll(homeDir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			rt := &CloudRunSandboxRuntime{
+				bin:          mockBin,
+				state:        newSandboxStateStore(filepath.Join(tmpDir, "state.json")),
+				rootDir:      filepath.Join(tmpDir, "scion"),
+				watchCancels: make(map[string]context.CancelFunc),
+			}
+			cfg := RunConfig{
+				Name:         "redact-probe",
+				HomeDir:      homeDir,
+				Workspace:    filepath.Join(tmpDir, "workspace"),
+				Image:        "omni-image",
+				UnixUsername: "scion",
+				Harness:      &mockHarness{command: []string{"/bin/true"}, env: tc.harnessEnv},
+				ResolvedSecrets: []api.ResolvedSecret{
+					{Name: "api-key", Type: "environment", Target: "EXAMPLE_API_KEY", Value: crTestEnvSecretValue},
+					{Name: "creds", Type: "file", Target: crTestFileTarget, Value: crTestFileSecretValue},
+				},
+			}
+			if err := os.MkdirAll(cfg.Workspace, 0755); err != nil {
+				t.Fatal(err)
+			}
+			_, err := rt.Run(context.Background(), cfg)
+			if err == nil {
+				t.Fatal("Run() returned nil error, but the fake sandbox binary exits 1")
+			}
+			msg := err.Error()
+			if !strings.Contains(msg, "--allow-egress") {
+				t.Fatalf("error does not carry the echoed sandbox argv, so the check is vacuous (error length %d)", len(msg))
+			}
+			if strings.Contains(msg, crTestEnvSecretValue) {
+				t.Error("error output contains the env-type secret value")
+			}
+			if !strings.Contains(msg, "EXAMPLE_API_KEY") {
+				t.Error("error output should still name the redacted key EXAMPLE_API_KEY")
+			}
+			if strings.Contains(msg, stagedsecrets.EnvVar+"=ey") {
+				t.Error("error output contains the staged secrets blob")
+			}
+		})
 	}
 }
