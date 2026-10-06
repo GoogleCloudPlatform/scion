@@ -1909,3 +1909,26 @@ func TestUpdateAgentStatus_ClearTerminalRemnants(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "fresh", got.Message)
 }
+
+// SetAgentWorkspacePlacement writes a live row, and leaves a soft-deleted
+// row untouched with ErrNotFound.
+func TestAgentStore_SetAgentWorkspacePlacementSkipsSoftDeleted(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+
+	a := makeAgent(projectID, "placement-soft-deleted")
+	require.NoError(t, s.CreateAgent(ctx, a))
+	require.NoError(t, s.SetAgentWorkspacePlacement(ctx, a.ID, "export"))
+
+	a.DeletedAt = time.Now()
+	require.NoError(t, s.UpdateAgent(ctx, a))
+
+	err := s.SetAgentWorkspacePlacement(ctx, a.ID, "local")
+	assert.ErrorIs(t, err, store.ErrNotFound)
+	row, err := s.client.Agent.Get(ctx, uuid.MustParse(a.ID))
+	require.NoError(t, err)
+	assert.Equal(t, "export", row.WorkspacePlacement, "a soft-deleted row is left unchanged")
+	assert.NotNil(t, row.DeletedAt)
+
+	assert.ErrorIs(t, s.SetAgentWorkspacePlacement(ctx, uuid.NewString(), "export"), store.ErrNotFound)
+}

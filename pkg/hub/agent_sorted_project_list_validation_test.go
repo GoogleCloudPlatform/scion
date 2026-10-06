@@ -121,11 +121,10 @@ func TestListProjectAgentsSorted_TamperedCursorRejected(t *testing.T) {
 // decision -- the store and authz spies record nothing beyond (in this
 // case, not even) the agent.list gate.
 func TestListProjectAgentsSorted_MalformedCursor_NoSQLBeforeRejection(t *testing.T) {
-	f := sortedListSetup(t)
+	f, counting, fault := sortedListSetupWithFault(t, newCountingAgentStore)
 	f.createAgent(t, "malformed-precheck", string(state.PhaseStopped), nil)
 
-	counting := &countingAgentStore{Store: f.store}
-	f.srv.store = counting
+	fault.Arm()
 
 	emitter := &recordingDecisionAuditEmitter{}
 	f.srv.authzService.SetDecisionAuditEmitter(emitter)
