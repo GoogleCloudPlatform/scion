@@ -39,6 +39,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/google/uuid"
 )
@@ -186,7 +187,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 					return nil, err
 				}
 			}
-			if err := m.Runtime.Delete(ctx, runtime.RunRef{ID: a.ContainerID, RunID: a.RunID}); err != nil {
+			if err := m.Runtime.Delete(ctx, runtime.RunRef{ID: runtime.AgentOperationID(a), RunID: a.RunID}); err != nil {
 				return nil, fmt.Errorf("failed to cleanup existing container: %w", err)
 			}
 		}
@@ -231,6 +232,9 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	}
 	if opts.HarnessConfigPath != "" {
 		ctx = api.ContextWithHarnessConfigPath(ctx, opts.HarnessConfigPath)
+	}
+	if opts.TemplateName != "" {
+		ctx = api.ContextWithTemplateName(ctx, opts.TemplateName)
 	}
 
 	// Build inline config for GetAgent by merging the dispatch InlineConfig
@@ -338,20 +342,13 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// in finalScionCfg.Info.Template (e.g. "web-dev") may not resolve in the
 	// project, but the original opts.Template path points to the actual
 	// template directory containing harness-configs/.
-	templateName := ""
-	if opts.Template != "" && filepath.IsAbs(opts.Template) {
-		templateName = opts.Template
-	}
-	if templateName == "" {
-		if finalScionCfg != nil && finalScionCfg.Info != nil {
-			templateName = finalScionCfg.Info.Template
-		}
-	}
-	if templateName == "" {
-		templateName = opts.Template
-	}
-	var templateChain []*config.Template
-	var templatePaths []string
+	//
+	// A template recorded as loaded from a content-addressed cache
+	// (Info.TemplateHash) is not available by name here: Info.Template is
+	// then a display name only, so it is never looked up, and the template
+	// counts as unresolvable, as it did when the stored name was the cache
+	// directory's hash.
+	infoHydrated := infoTemplateHydrated(finalScionCfg)
 	// templateUnresolvable is true only when a named template could not be
 	// found at all (renamed or deleted since the agent was created) — not
 	// when there is simply no template name to resolve. It gates the
@@ -359,6 +356,24 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// whose template disappeared doesn't silently drop to Hub settings or
 	// the file default the way an empty templateChain otherwise would.
 	templateUnresolvable := false
+	templateName := ""
+	if opts.Template != "" && filepath.IsAbs(opts.Template) {
+		templateName = opts.Template
+	}
+	if templateName == "" && infoHydrated {
+		templateUnresolvable = true
+		util.Debugf("image resolution: template was loaded from a content-addressed cache (%s), not resolved by name", finalScionCfg.Info.TemplateHash)
+	}
+	if templateName == "" && !infoHydrated {
+		if finalScionCfg != nil && finalScionCfg.Info != nil {
+			templateName = finalScionCfg.Info.Template
+		}
+	}
+	if templateName == "" && !infoHydrated {
+		templateName = opts.Template
+	}
+	var templateChain []*config.Template
+	var templatePaths []string
 	if templateName != "" {
 		if chain, err := config.GetTemplateChainInProject(templateName, opts.ProjectPath); err == nil {
 			templateChain = chain
@@ -619,7 +634,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	var noAuthConfig *config.HarnessNoAuthConfig
 	if harnessConfigName != "" {
 		var resolveTemplatePaths []string
-		if opts.Template != "" {
+		if opts.Template != "" && (filepath.IsAbs(opts.Template) || !infoHydrated) {
 			tplName := opts.Template
 			if !filepath.IsAbs(tplName) && finalScionCfg != nil && finalScionCfg.Info != nil && finalScionCfg.Info.Template != "" {
 				tplName = finalScionCfg.Info.Template
@@ -871,14 +886,7 @@ authDone:
 		}
 	}
 
-	template := ""
-	if finalScionCfg != nil && finalScionCfg.Info != nil {
-		template = finalScionCfg.Info.Template
-	}
-	// Prefer human-friendly template slug over cache path or UUID
-	if opts.TemplateName != "" {
-		template = opts.TemplateName
-	}
+	template := agentTemplateDisplayName(opts.TemplateName, finalScionCfg)
 
 	if opts.Env == nil {
 		opts.Env = make(map[string]string)
@@ -1668,6 +1676,10 @@ authDone:
 
 	// The run ID was fixed (minted if absent) at the top of Start.
 	runID := opts.RunID
+	// SCION_LAUNCH_ID carries the same value as the run label, so the
+	// container's env and label cannot disagree. Any value from the
+	// request or template env is replaced.
+	agentEnv = withLaunchIDEnv(agentEnv, runID)
 
 	runCfg := runtime.RunConfig{
 		Name:                 containerName(projectName, opts.Name),
@@ -1714,7 +1726,9 @@ authDone:
 		// package already sets from the same opts.GitClone for other
 		// purposes; previously nothing set GitCloneForInit at all, so the
 		// k8s init container never ran for ANY project, git or not.
-		GitCloneForInit:  opts.GitClone,
+		// A shared-plain git project has no GitClone; its workspace clone
+		// settings are used instead (nfsInitGitClone).
+		GitCloneForInit:  nfsInitGitClone(opts),
 		TelemetryEnabled: telemetryEnabled,
 		Task: func() string {
 			// When task_flag is set, task is delivered via CommandArgs instead
@@ -2353,6 +2367,22 @@ func buildAgentEnv(scionCfg *api.ScionConfig, extraEnv map[string]string, defaul
 	return agentEnv, warnings, missingKeys, dropped
 }
 
+// envLaunchID is the container env variable carrying the run ID, which
+// sciontool presents to the hub's conduit endpoint as its launch id.
+const envLaunchID = "SCION_LAUNCH_ID"
+
+// withLaunchIDEnv returns env with every SCION_LAUNCH_ID entry replaced by
+// a single one set to runID.
+func withLaunchIDEnv(env []string, runID string) []string {
+	out := make([]string, 0, len(env)+1)
+	for _, kv := range env {
+		if !strings.HasPrefix(kv, envLaunchID+"=") {
+			out = append(out, kv)
+		}
+	}
+	return append(out, envLaunchID+"="+runID)
+}
+
 // resolveAuthEnvOverlay injects settings-declared env vars into opts.Env and
 // returns the auth overlay that GatherAuthWithEnv consumes. It is the exact
 // sequence Start runs at the point auth resolution begins, extracted so it can
@@ -2722,4 +2752,24 @@ func reResolveModelAlias(envModel string, cfg *api.ScionConfig, harnessName stri
 func isEmptyPerAgentStart(opts api.StartOptions) bool {
 	return opts.EmptyPerAgentWorkspace ||
 		store.ResolveWorkspaceSharingMode(opts.Env["SCION_WORKSPACE_MODE"]) == store.SharingModeEmptyPerAgent
+}
+
+// infoTemplateHydrated reports whether cfg's agent info records a template
+// loaded from a content-addressed cache (see api.AgentInfo.TemplateHash).
+func infoTemplateHydrated(cfg *api.ScionConfig) bool {
+	return cfg != nil && cfg.Info != nil && cfg.Info.TemplateHash != ""
+}
+
+// agentTemplateDisplayName returns the template name used for the
+// scion.template label and SCION_TEMPLATE_NAME: the dispatch's template slug
+// when set, else the name recorded in agent info. A content hash is never
+// returned; such a value yields "".
+func agentTemplateDisplayName(slug string, cfg *api.ScionConfig) string {
+	if slug != "" && !transfer.IsContentHash(slug) {
+		return slug
+	}
+	if cfg != nil && cfg.Info != nil && !transfer.IsContentHash(cfg.Info.Template) {
+		return cfg.Info.Template
+	}
+	return ""
 }

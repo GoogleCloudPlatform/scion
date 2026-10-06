@@ -107,6 +107,17 @@ var (
 	aclUnsupportedWarnOnce sync.Once
 )
 
+// ACLUnsupportedWarning is logged once per process when a new shared-dir
+// leaf cannot get its default ACL (ENOTSUP/EOPNOTSUPP). It names the
+// consequence for mixed writers (ptone/scion#3155).
+const ACLUnsupportedWarning = "server.shared_dir_storage: the export does not support POSIX ACLs; " +
+	"new shared dirs are plain setgid 2775 without a default ACL, so files created inside them follow each " +
+	"writer's umask (usually 022) and are not group-writable: agents with a different uid (for example " +
+	"Docker agents and Kubernetes pods) cannot modify each other's files. Use ACL-capable storage for " +
+	"shared dirs with mixed writers"
+
+const aclUnsupportedConsequence = "files_not_group_writable"
+
 // SetLeafDefaultACL sets a minimal access+default POSIX ACL on the
 // already-open leaf directory fd: u::rwx, g::rwx, o::r-x as the access ACL
 // (mirroring the leaf's own 0o2775 mode, set by the caller just before this
@@ -139,9 +150,10 @@ func SetLeafDefaultACL(fd int) error {
 func handleACLSetError(which string, err error) error {
 	if errors.Is(err, unix.ENOTSUP) || errors.Is(err, unix.EOPNOTSUPP) {
 		aclUnsupportedWarnOnce.Do(func() {
-			slog.Warn("server.shared_dir_storage: filesystem/export does not support POSIX ACLs; "+
-				"shared dirs will use setgid-only Phase 1 behavior (modes/ACL hardening degraded, ptone/scion#1794)",
-				"acl_type", which, "error", err)
+			slog.Warn(ACLUnsupportedWarning,
+				"acl_type", which,
+				"consequence", aclUnsupportedConsequence,
+				"error", err)
 		})
 		return nil
 	}

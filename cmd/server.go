@@ -277,6 +277,7 @@ func init() {
 	serverStartCmd.Flags().StringVar(&webBaseURL, "base-url", "", "Public base URL for OAuth redirects (e.g., https://scion.example.com)")
 
 	// Admin bootstrap flags
+	registerConduitServerFlags(serverStartCmd.Flags())
 	serverStartCmd.Flags().StringArrayVar(&adminEmails, "admin-emails", nil, "Email address to auto-promote to admin role (repeatable; also accepts a comma-separated list)")
 
 	// Stop flags

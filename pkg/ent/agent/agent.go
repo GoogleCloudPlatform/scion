@@ -110,6 +110,8 @@ const (
 	FieldLaunchID = "launch_id"
 	// FieldRunID holds the string denoting the run_id field in the database.
 	FieldRunID = "run_id"
+	// FieldPreviousRunIds holds the string denoting the previous_run_ids field in the database.
+	FieldPreviousRunIds = "previous_run_ids"
 	// FieldLaunchState holds the string denoting the launch_state field in the database.
 	FieldLaunchState = "launch_state"
 	// FieldLaunchEndReason holds the string denoting the launch_end_reason field in the database.
@@ -170,6 +172,8 @@ const (
 	FieldStartClaimHoldUntil = "start_claim_hold_until"
 	// FieldStartClaimLaunchID holds the string denoting the start_claim_launch_id field in the database.
 	FieldStartClaimLaunchID = "start_claim_launch_id"
+	// FieldSoftDeleteOpID holds the string denoting the soft_delete_op_id field in the database.
+	FieldSoftDeleteOpID = "soft_delete_op_id"
 	// EdgeProject holds the string denoting the project edge name in mutations.
 	EdgeProject = "project"
 	// EdgeMemberships holds the string denoting the memberships edge name in mutations.
@@ -251,6 +255,7 @@ var Columns = []string{
 	FieldLaunchAsyncOptIn,
 	FieldLaunchID,
 	FieldRunID,
+	FieldPreviousRunIds,
 	FieldLaunchState,
 	FieldLaunchEndReason,
 	FieldLaunchKind,
@@ -281,6 +286,7 @@ var Columns = []string{
 	FieldStartClaimUnconfirmedAt,
 	FieldStartClaimHoldUntil,
 	FieldStartClaimLaunchID,
+	FieldSoftDeleteOpID,
 }
 
 // ValidColumn reports if the column name is valid (part of the table columns).
@@ -801,6 +807,11 @@ func ByStartClaimHoldUntil(opts ...sql.OrderTermOption) OrderOption {
 // ByStartClaimLaunchID orders the results by the start_claim_launch_id field.
 func ByStartClaimLaunchID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldStartClaimLaunchID, opts...).ToFunc()
+}
+
+// BySoftDeleteOpID orders the results by the soft_delete_op_id field.
+func BySoftDeleteOpID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldSoftDeleteOpID, opts...).ToFunc()
 }
 
 // ByProjectField orders the results by project field.

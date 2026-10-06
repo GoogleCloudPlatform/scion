@@ -586,6 +586,7 @@ type AgentInfo struct {
 	RunID         string `json:"runId,omitempty"`       // Per-run identity from the LabelRunID label; empty for pre-run-ID entries (ptone/scion#2550). In agent-info.json: the run that owns the agent's files (ptone/scion#2675); List never fills RunID from agent-info.json, so on the wire it is always the label
 	Name          string `json:"name"`                  // Human-friendly display name
 	Template      string `json:"template"`
+	TemplateHash  string `json:"templateHash,omitempty"`  // Content hash of a template loaded from a content-addressed cache dir; when set, Template is a display name only and is never looked up by name
 	HarnessConfig string `json:"harnessConfig,omitempty"` // Resolved harness-config name
 	// HarnessConfigRevision records the harness-config bundle revision (e.g.
 	// the Hub artifact's ContentHash) that this agent was provisioned from.
@@ -993,6 +994,22 @@ func HarnessConfigPathFromContext(ctx context.Context) string {
 	return v
 }
 
+type templateNameContextKey struct{}
+
+// ContextWithTemplateName records the human-friendly template slug for the
+// agent being provisioned. It is used for naming only (agent-info.json and
+// labels) and never to locate or load a template.
+func ContextWithTemplateName(ctx context.Context, name string) context.Context {
+	return context.WithValue(ctx, templateNameContextKey{}, name)
+}
+
+// TemplateNameFromContext returns the template slug recorded by
+// ContextWithTemplateName, or "" if none was set.
+func TemplateNameFromContext(ctx context.Context) string {
+	v, _ := ctx.Value(templateNameContextKey{}).(string)
+	return v
+}
+
 // HubAgentDefaults carries the Hub's operational agent_defaults limit/resource
 // fields to a runtime broker, for application at the broker's LOW-precedence
 // defaults tier.
@@ -1119,6 +1136,13 @@ type StartOptions struct {
 	Workspace          string
 	GitClone           *GitCloneConfig // When set, skip workspace creation; sciontool clones inside container
 	SharedWorkspace    bool            // When true, workspace is a shared git clone (git-workspace hybrid); skip worktree, configure credential helper
+	// SharedWorkspaceClone holds the clone settings of a shared-plain git
+	// project's workspace. Set only with SharedWorkspace and without
+	// GitClone. It does not change how the workspace is mounted or created:
+	// only the Kubernetes runtime uses it, through RunConfig.GitCloneForInit,
+	// so the workspace-provision init container clones into an NFS-backed
+	// shared workspace that has not been cloned yet.
+	SharedWorkspaceClone *GitCloneConfig
 	// FreshProvision marks this dispatch as a create, not a start or restart:
 	// GetAgent wipes and re-clones an existing populated workspace only when
 	// this is set, so a same-named leftover agent directory is not confused

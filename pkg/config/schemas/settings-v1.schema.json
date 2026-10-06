@@ -1227,6 +1227,71 @@
           "description": "How long a running agent must be absent from its runtime broker's complete heartbeat inventory before the Hub marks it phase 'error' with exit reason 'container_missing' (an existing preempted or evicted exit reason is kept) (e.g. '3m'; default '3m', minimum '1m').",
           "x-env-var": "SCION_SERVER_HUB_MISSINGAGENTGRACE",
           "x-since": "1"
+        },
+        "conduit": {
+          "type": "object",
+          "description": "Conduit relay and stream grant settings (hub.conduit experiment). Read at startup; restart required to change. Invalid values are a startup error.",
+          "additionalProperties": false,
+          "properties": {
+            "grant_key_activation": {
+              "type": "string",
+              "description": "Publish-before-sign delay of a new grant signing key (e.g. '15m'; default '15m', minimum '1m'). Targets must refresh their keys at least this often.",
+              "x-env-var": "SCION_SERVER_HUB_CONDUIT_GRANTKEYACTIVATION",
+              "x-since": "1"
+            },
+            "tcp_allowed_ports": {
+              "type": "array",
+              "items": { "type": "integer", "minimum": 1, "maximum": 65535 },
+              "description": "Additional agent-local ports a TCP stream grant may target besides the agent's exposed ports. The reserved ports (9810, 18380) are always refused. Empty (the default) means exposed ports only; this setting never narrows access to exposed ports. The env var takes a comma-separated list.",
+              "x-env-var": "SCION_SERVER_HUB_CONDUIT_TCPALLOWEDPORTS",
+              "x-since": "1"
+            },
+            "internal_listen": {
+              "type": "string",
+              "description": "host:port of the internal relay API listener (multi-node deployments). It serves only the internal relay API and must be reachable only inside the cluster/VPC, never publicly. TLS on the internal hop is recommended (e.g. a service mesh or TLS-terminating proxy, advertised as https://); plain http:// is accepted.",
+              "x-env-var": "SCION_SERVER_HUB_CONDUIT_INTERNALLISTEN",
+              "x-since": "1"
+            },
+            "internal_advertise": {
+              "type": "string",
+              "description": "Base URL (http(s)://host:port) other hub nodes use to reach this node's internal listener. Default: POD_IP with the listen port, else the listen host if it is not a wildcard. Prefer https:// (TLS on the internal hop); http:// is accepted.",
+              "x-env-var": "SCION_SERVER_HUB_CONDUIT_INTERNALADVERTISE",
+              "x-since": "1"
+            },
+            "peer_auth": {
+              "type": "string",
+              "enum": ["auto", "oidc", "hmac"],
+              "description": "Relay-peer authentication. Requests are always signed with HMAC using a key derived from the hub signing secret (required in every mode). 'oidc' also requires a Google OIDC ID token; 'auto' (default) adds the ID token on GCP; 'hmac' uses the signature alone.",
+              "x-env-var": "SCION_SERVER_HUB_CONDUIT_PEERAUTH",
+              "x-since": "1"
+            },
+            "peer_service_accounts": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "OIDC peer auth: service-account emails allowed to call the internal relay API. Default: this node's own service account. The env var takes a comma-separated list.",
+              "x-env-var": "SCION_SERVER_HUB_CONDUIT_PEERSERVICEACCOUNTS",
+              "x-since": "1"
+            },
+            "peer_audience": {
+              "type": "string",
+              "description": "OIDC peer auth: ID token audience; must be identical on every hub node (default 'scion-conduit-relay-peer').",
+              "x-env-var": "SCION_SERVER_HUB_CONDUIT_PEERAUDIENCE",
+              "x-since": "1"
+            },
+            "reconnect_window": {
+              "type": "string",
+              "description": "Jitter window sent with a planned close (GoAway.reconnect_after_ms): targets redial after a uniformly random delay in [0, window] (e.g. '5s'; default '5s', between '0s' and '5m').",
+              "x-env-var": "SCION_SERVER_HUB_CONDUIT_RECONNECTWINDOW",
+              "x-since": "1"
+            },
+            "instance_id": {
+              "type": "string",
+              "maxLength": 128,
+              "description": "This node's relay instance id; must be unique among live hub processes. Default: POD_NAME when set, else the host name plus a random per-process suffix.",
+              "x-env-var": "SCION_SERVER_HUB_CONDUIT_INSTANCEID",
+              "x-since": "1"
+            }
+          }
         }
       }
     },

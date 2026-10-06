@@ -1264,6 +1264,49 @@ type V1ServerHubConfig struct {
 	// It is sent to the broker with each asynchronous create and sets the
 	// reaper's staleness window (8x this value).
 	LaunchKeepaliveSeconds *int `json:"launch_keepalive_seconds,omitempty" yaml:"launch_keepalive_seconds,omitempty" koanf:"launch_keepalive_seconds"`
+	// Conduit holds the conduit relay and grant settings (hub.conduit
+	// experiment). Read at startup; changes need a restart.
+	Conduit *V1ServerHubConduitConfig `json:"conduit,omitempty" yaml:"conduit,omitempty" koanf:"conduit"`
+}
+
+// V1ServerHubConduitConfig holds the conduit settings of the hub server
+// (design v2.4 §3.9, §3.10). All values are validated at startup
+// (HubConduitConfig.Validate); an invalid value is a startup error.
+type V1ServerHubConduitConfig struct {
+	// GrantKeyActivation is the publish-before-sign delay of a new grant
+	// key (e.g. "15m"; minimum "1m").
+	GrantKeyActivation string `json:"grant_key_activation,omitempty" yaml:"grant_key_activation,omitempty" koanf:"grant_key_activation"`
+	// TCPAllowedPorts lists additional agent-local ports a TCP stream
+	// grant may target besides the agent's exposed ports. The reserved
+	// ports (9810, 18380) are always refused. Empty: exposed ports only.
+	TCPAllowedPorts []int `json:"tcp_allowed_ports,omitempty" yaml:"tcp_allowed_ports,omitempty" koanf:"tcp_allowed_ports"`
+	// InternalListen is the host:port of the internal relay API listener.
+	// It must be reachable only inside the cluster/VPC. TLS on the
+	// internal hop is recommended (a service mesh or TLS-terminating proxy,
+	// advertised as https://); plain http:// is accepted.
+	InternalListen string `json:"internal_listen,omitempty" yaml:"internal_listen,omitempty" koanf:"internal_listen"`
+	// InternalAdvertise is the base URL other hub nodes use to reach this
+	// node's internal listener (default: derived from POD_IP or the listen
+	// host).
+	InternalAdvertise string `json:"internal_advertise,omitempty" yaml:"internal_advertise,omitempty" koanf:"internal_advertise"`
+	// PeerAuth selects relay-peer authentication. Requests are always
+	// HMAC-signed with a key derived from the hub signing secret; "oidc"
+	// also requires an OIDC ID token, "auto" (default) adds it on GCP, and
+	// "hmac" uses the signature alone.
+	PeerAuth string `json:"peer_auth,omitempty" yaml:"peer_auth,omitempty" koanf:"peer_auth"`
+	// PeerServiceAccounts is the OIDC allow-list of caller service-account
+	// emails (default: this node's own service account).
+	PeerServiceAccounts []string `json:"peer_service_accounts,omitempty" yaml:"peer_service_accounts,omitempty" koanf:"peer_service_accounts"`
+	// PeerAudience is the OIDC ID token audience (default
+	// "scion-conduit-relay-peer"); it must be identical on every node.
+	PeerAudience string `json:"peer_audience,omitempty" yaml:"peer_audience,omitempty" koanf:"peer_audience"`
+	// ReconnectWindow is the jitter window a planned close (GoAway) gives
+	// targets to redial in (e.g. "5s"; default "5s", 0s-5m).
+	ReconnectWindow string `json:"reconnect_window,omitempty" yaml:"reconnect_window,omitempty" koanf:"reconnect_window"`
+	// InstanceID is this node's relay instance id; it must be unique among
+	// live hub processes (default: POD_NAME, else the host name plus a
+	// random per-process suffix).
+	InstanceID string `json:"instance_id,omitempty" yaml:"instance_id,omitempty" koanf:"instance_id"`
 }
 
 // V1BrokerConfig holds Runtime Broker configuration.
@@ -1657,9 +1700,11 @@ func (ws *V1WorkspaceStorageConfig) ValidateSelectedSubPathRoot() error {
 // C1/T1/S-F2). A project's settings must not be able to redirect Docker
 // bind-mount sources to an operator-unapproved host path.
 //
-// The workspace-storage-only fields on V1NFSConfig (UID, GID, MountOptions,
-// StorageClass) are not used by shared_dir_storage. Warning about them being
-// set-but-ignored is phase 2 (design §3.2.1), not implemented here.
+// The workspace-storage-only fields on V1NFSConfig (UID, MountOptions,
+// StorageClass, AutoMount) are not used by shared_dir_storage; see
+// IgnoredNFSFields. GID is used: when non-zero it is the only leaf group id
+// an agent may be given as a supplemental group (ptone/scion#3155, see
+// pkg/agent.sharedDirLeafGroups).
 type V1SharedDirStorageConfig struct {
 	Backend string       `json:"backend,omitempty" yaml:"backend,omitempty" koanf:"backend"` // "" | "local" | "nfs"
 	NFS     *V1NFSConfig `json:"nfs,omitempty" yaml:"nfs,omitempty" koanf:"nfs"`
@@ -1769,14 +1814,13 @@ var sharedDirStorageIgnoredNFSFields = []struct {
 	set  func(nfs *V1NFSConfig) bool
 }{
 	{"uid", func(nfs *V1NFSConfig) bool { return nfs.UID != 0 }},
-	{"gid", func(nfs *V1NFSConfig) bool { return nfs.GID != 0 }},
 	{"mount_options", func(nfs *V1NFSConfig) bool { return nfs.MountOptions != "" }},
 	{"storage_class", func(nfs *V1NFSConfig) bool { return nfs.StorageClass != "" }},
 	{"auto_mount", func(nfs *V1NFSConfig) bool { return nfs.AutoMount }},
 }
 
 // IgnoredNFSFields returns the names of the workspace-storage-only NFS
-// fields (uid, gid, mount_options, storage_class, auto_mount) that are set on s but
+// fields (uid, mount_options, storage_class, auto_mount) that are set on s but
 // never used by shared_dir_storage, for a one-time startup warning (Phase 2
 // item 5, design §7 Phase 2: "startup validation warns about ignored
 // fields"). Returns nil if s is nil, s.NFS is nil, or backend isn't "nfs" —
@@ -2443,6 +2487,7 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 		}
 		return versionedEnvKeyMapper(key), value
 	}), nil)
+	splitKoanfListKeys(k, conduitV1EnvListKeys)
 	// SCION_OTEL_INSECURE is a plaintext switch. Its value is the inverse of
 	// telemetry.cloud.tls.enabled, so a key-only mapper cannot apply it.
 	if raw, present := os.LookupEnv("SCION_OTEL_INSECURE"); present && raw != "" {
@@ -2564,6 +2609,13 @@ func versionedEnvKeyMapper(s string) string {
 	return key
 }
 
+// conduitV1EnvListKeys are the v1 keys of the conduit list settings whose
+// env vars hold comma-separated lists.
+var conduitV1EnvListKeys = []string{
+	"server.hub.conduit.peer_service_accounts",
+	"server.hub.conduit.tcp_allowed_ports",
+}
+
 // knownCompoundFields lists multi-word snake_case field names used in server config.
 // These must be recognized as single fields rather than split into nested keys.
 // IMPORTANT: Sorted longest-first so that "dev_token_file" matches before "dev_token".
@@ -2574,9 +2626,18 @@ var knownCompoundFields = []string{
 	"start_unconfirmed_hold",
 	"start_claim_lease_ttl",
 	"soft_delete_retention",
+	"peer_service_accounts",
+	"grant_key_activation",
 	"missing_agent_grace",
+	"internal_advertise",
 	"start_max_duration",
+	"tcp_allowed_ports",
 	"stalled_threshold",
+	"reconnect_window",
+	"internal_listen",
+	"peer_audience",
+	"instance_id",
+	"peer_auth",
 	"authorized_domains",
 	"platform_auth_sa",
 	"interval_seconds",
@@ -2907,6 +2968,19 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		if v1.Hub.DisableLegacyStorageFallback != nil {
 			gc.Hub.DisableLegacyStorageFallback = *v1.Hub.DisableLegacyStorageFallback
 		}
+		if c := v1.Hub.Conduit; c != nil {
+			gc.Hub.Conduit = HubConduitConfig{
+				GrantKeyActivation:  c.GrantKeyActivation,
+				TCPAllowedPorts:     append([]int(nil), c.TCPAllowedPorts...),
+				InternalListen:      c.InternalListen,
+				InternalAdvertise:   c.InternalAdvertise,
+				PeerAuth:            c.PeerAuth,
+				PeerServiceAccounts: append([]string(nil), c.PeerServiceAccounts...),
+				PeerAudience:        c.PeerAudience,
+				ReconnectWindow:     c.ReconnectWindow,
+				InstanceID:          c.InstanceID,
+			}
+		}
 	}
 
 	// Broker config
@@ -3228,6 +3302,19 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	}
 	if gc.Hub.MissingAgentGrace > 0 {
 		v1Hub.MissingAgentGrace = gc.Hub.MissingAgentGrace.String()
+	}
+	if c := gc.Hub.Conduit; !c.IsZero() {
+		v1Hub.Conduit = &V1ServerHubConduitConfig{
+			GrantKeyActivation:  c.GrantKeyActivation,
+			TCPAllowedPorts:     append([]int(nil), c.TCPAllowedPorts...),
+			InternalListen:      c.InternalListen,
+			InternalAdvertise:   c.InternalAdvertise,
+			PeerAuth:            c.PeerAuth,
+			PeerServiceAccounts: append([]string(nil), c.PeerServiceAccounts...),
+			PeerAudience:        c.PeerAudience,
+			ReconnectWindow:     c.ReconnectWindow,
+			InstanceID:          c.InstanceID,
+		}
 	}
 	if gc.Hub.StartClaimLeaseTTL > 0 {
 		v1Hub.StartClaimLeaseTTL = gc.Hub.StartClaimLeaseTTL.String()

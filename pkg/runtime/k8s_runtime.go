@@ -49,7 +49,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/apimachinery/pkg/types"
 	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/remotecommand"
@@ -459,6 +458,36 @@ func chownRecursiveArgs(owner, path string) (args []string, ok bool) {
 	return []string{"chown", "-R", fmt.Sprintf("%s:%s", owner, owner), path}, true
 }
 
+// descriptiveLabels are display-only labels: nothing selects or identifies
+// objects by them. Their values come from names (template, harness-config,
+// auth method) that are not guaranteed to be valid Kubernetes label values.
+var descriptiveLabels = map[string]bool{
+	"scion.template":       true,
+	"scion.harness_config": true,
+	"scion.harness_auth":   true,
+}
+
+// filterDescriptiveLabels returns a copy of labels without any descriptive
+// label (see descriptiveLabels) whose value is not a valid Kubernetes label
+// value; each dropped label is logged as a warning. All other labels,
+// including identity labels such as scion.name, the run ID, the start ID,
+// agent_id and the project labels, are copied unchanged, so an invalid
+// identity value still fails object creation.
+func filterDescriptiveLabels(agentName string, labels map[string]string) map[string]string {
+	out := make(map[string]string, len(labels)+1)
+	for k, v := range labels {
+		if descriptiveLabels[k] {
+			if errs := k8svalidation.IsValidLabelValue(v); len(errs) > 0 {
+				runtimeLog.Warn("Dropping descriptive label with a value that is not a valid Kubernetes label value",
+					"agent", agentName, "label", k, "value", v, "reason", strings.Join(errs, "; "))
+				continue
+			}
+		}
+		out[k] = v
+	}
+	return out
+}
+
 func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName string, err error) {
 	fmt.Printf("Starting agent '%s' on Kubernetes...\n", config.Name)
 	namespace := r.DefaultNamespace
@@ -478,11 +507,12 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 	// only this start's own objects and never those of a newer agent that has
 	// since been created with the same name. The label map is copied so the
 	// caller's map is not modified.
+	//
+	// The copy also drops descriptive labels whose value is not a valid
+	// Kubernetes label value (see filterDescriptiveLabels), so that a display
+	// value cannot fail creation of these objects.
 	startID := uuid.NewString()
-	labels := make(map[string]string, len(config.Labels)+1)
-	for k, v := range config.Labels {
-		labels[k] = v
-	}
+	labels := filterDescriptiveLabels(config.Name, config.Labels)
 	labels[labelStartID] = startID
 	config.Labels = labels
 
@@ -597,6 +627,10 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 	// deletes are by name, so an async launch checkpoints once before them:
 	// a launch the hub has already ended must not remove a newer launch's
 	// same-named objects.
+	//
+	// A start carrying a run ID removes only what no live run of another ID
+	// still holds, and fails with ErrRunConflict rather than delete a live
+	// pod of another run (see preCleanForRun).
 	if err := hooks.checkpoint(ctx, CheckpointStepPreClean); err != nil {
 		return "", err
 	}
@@ -617,17 +651,25 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 	}
 	defer func() { releaseHomeLock() }()
 
-	// An NFS-home start removes the previous pod first and its secrets only
-	// once the pod is confirmed stopped, so a pod still shutting down keeps
-	// the secrets it mounted.
-	if !nfsHomeStart {
-		r.cleanupAgentSecrets(ctx, namespace, config.Name)
-	}
-	if err := r.cleanupStalePod(ctx, namespace, config.Name, config.HomeStorage); err != nil {
-		return "", err
-	}
-	if nfsHomeStart {
-		r.cleanupAgentSecrets(ctx, namespace, config.Name)
+	if runID := config.Labels[api.LabelRunID]; runID != "" {
+		// Run-scoped pre-clean (ptone/scion#2550), with the same NFS-home
+		// ordering and termination wait as the name-based path below.
+		if err := r.preCleanForRun(ctx, namespace, config.Name, runID, nfsHomeStart, config.HomeStorage); err != nil {
+			return "", err
+		}
+	} else {
+		// An NFS-home start removes the previous pod first and its secrets
+		// only once the pod is confirmed stopped, so a pod still shutting
+		// down keeps the secrets it mounted.
+		if !nfsHomeStart {
+			r.cleanupAgentSecrets(ctx, namespace, config.Name)
+		}
+		if err := r.cleanupStalePod(ctx, namespace, config.Name, nfsHomeStart, config.HomeStorage); err != nil {
+			return "", err
+		}
+		if nfsHomeStart {
+			r.cleanupAgentSecrets(ctx, namespace, config.Name)
+		}
 	}
 	cleanupArmed = true
 
@@ -1054,8 +1096,11 @@ func (r *KubernetesRuntime) createAgentSecretWithHooks(ctx context.Context, name
 	}
 	created, err := r.Client.Clientset.CoreV1().Secrets(namespace).Create(ctx, secret, metav1.CreateOptions{})
 	if k8serrors.IsAlreadyExists(err) {
-		// Delete the stale secret and retry
-		_ = r.Client.Clientset.CoreV1().Secrets(namespace).Delete(ctx, secretName, metav1.DeleteOptions{})
+		// Delete the stale secret and retry. With a run ID, never one of
+		// another run (see replaceExistingAgentObject).
+		if rerr := r.replaceExistingAgentObject(ctx, api.ResourceKindSecret, namespace, secretName, labels[api.LabelRunID]); rerr != nil {
+			return "", fmt.Errorf("failed to create agent secret: %w", rerr)
+		}
 		created, err = r.Client.Clientset.CoreV1().Secrets(namespace).Create(ctx, secret, metav1.CreateOptions{})
 	}
 	if err != nil {
@@ -1262,7 +1307,9 @@ func (r *KubernetesRuntime) createSecretProviderClassWithHooks(ctx context.Conte
 	}
 	createdSPC, err := r.Client.Dynamic().Resource(k8s.SecretProviderClassGVR).Namespace(namespace).Create(ctx, spc, metav1.CreateOptions{})
 	if k8serrors.IsAlreadyExists(err) {
-		_ = r.Client.Dynamic().Resource(k8s.SecretProviderClassGVR).Namespace(namespace).Delete(ctx, spcName, metav1.DeleteOptions{})
+		if rerr := r.replaceExistingAgentObject(ctx, api.ResourceKindSecretProviderClass, namespace, spcName, labels[api.LabelRunID]); rerr != nil {
+			return "", fmt.Errorf("failed to create SecretProviderClass: %w", rerr)
+		}
 		createdSPC, err = r.Client.Dynamic().Resource(k8s.SecretProviderClassGVR).Namespace(namespace).Create(ctx, spc, metav1.CreateOptions{})
 	}
 	if err != nil {
@@ -1385,14 +1432,12 @@ func toStringInterfaceMap(m map[string]string) map[string]interface{} {
 // object is not reachable via Run today anyway (see envSecretName's own
 // comment), so it is simply left alone.
 //
-// Known limitation: deletion here, like the Pod deletion in Delete and
-// cleanupStalePod, is unconditional on the deterministic name alone, with no
-// check of which run/incarnation of "this agent name" currently owns it. A
-// delete that overlaps in time with a fast recreate of the same agent name
-// can therefore remove the new incarnation's object instead of the old one's.
-// Closing that fully needs an incarnation identifier threaded through the
-// Runtime interface's Delete/Stop methods (shared across every runtime
-// backend), which is out of scope here.
+// Deletion here, like the Pod deletion in Delete and cleanupStalePod, is by
+// the deterministic name alone, so it is used only when no run ID is known
+// (a legacy caller or a start without one). A delete that overlaps a fast
+// recreate of the same agent name can then remove the new run's object. A
+// Delete or start that carries a run ID uses the run-scoped paths in
+// k8s_run_scope.go instead (ptone/scion#2550).
 func (r *KubernetesRuntime) cleanupAgentSecrets(ctx context.Context, namespace, agentName string) {
 	secretNames := []string{
 		fmt.Sprintf("scion-agent-%s", agentName), // env/variable/file secrets (createAgentSecret)
@@ -1592,7 +1637,9 @@ func (r *KubernetesRuntime) createAuthFileSecretWithHooks(ctx context.Context, n
 	}
 	created, err := r.Client.Clientset.CoreV1().Secrets(namespace).Create(ctx, secret, metav1.CreateOptions{})
 	if k8serrors.IsAlreadyExists(err) {
-		_ = r.Client.Clientset.CoreV1().Secrets(namespace).Delete(ctx, secretName, metav1.DeleteOptions{})
+		if rerr := r.replaceExistingAgentObject(ctx, api.ResourceKindSecret, namespace, secretName, labels[api.LabelRunID]); rerr != nil {
+			return fmt.Errorf("failed to create auth secret: %w", rerr)
+		}
 		created, err = r.Client.Clientset.CoreV1().Secrets(namespace).Create(ctx, secret, metav1.CreateOptions{})
 	}
 	if err != nil {
@@ -2080,6 +2127,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		SeccompProfile: &corev1.SeccompProfile{
 			Type: corev1.SeccompProfileTypeRuntimeDefault,
 		},
+		SupplementalGroups: sharedDirSupplementalGroups(config, fsGroupGID),
 	}
 
 	// Determine image pull policy
@@ -3251,9 +3299,14 @@ func (r *KubernetesRuntime) Stop(ctx context.Context, id string) error {
 	return r.Delete(ctx, RunRef{ID: id})
 }
 
-// Delete removes the pod ref.ID and its secrets.
-// P2/P4: enforce ref.RunID (ptone/scion#2550). Today the pod name is reused
-// across runs, so this still targets whatever pod holds the name.
+// Delete removes the pod ref.ID and its secrets. ref.ID is the pod name, or
+// namespace/pod.
+//
+// When ref.RunID is set, only that run's pod and objects are removed, each
+// with a UID precondition (see deleteRun and k8s_run_scope.go): a pod of
+// another run is left untouched and ErrRunMismatch is returned. Without a
+// run ID the pod and per-agent objects are removed by name, as before run
+// IDs existed.
 func (r *KubernetesRuntime) Delete(ctx context.Context, ref RunRef) error {
 	id := ref.ID
 	var namespace string
@@ -3265,6 +3318,10 @@ func (r *KubernetesRuntime) Delete(ctx context.Context, ref RunRef) error {
 		id = parts[1]
 	} else {
 		namespace = r.resolveNamespace(ctx, id)
+	}
+
+	if ref.RunID != "" {
+		return r.deleteRun(ctx, namespace, id, ref.RunID)
 	}
 
 	// Clean up agent secrets and SecretProviderClasses before deleting the
@@ -3316,18 +3373,13 @@ const startCleanupTimeout = 30 * time.Second
 // needs. Shared-dir PVCs are project-scoped and are never deleted here.
 func (r *KubernetesRuntime) cleanupStartResources(ctx context.Context, namespace, agentName, startID string, includePod bool) {
 	selector := metav1.ListOptions{LabelSelector: labelStartID + "=" + startID}
-	secretNames := map[string]bool{
-		fmt.Sprintf("scion-agent-%s", agentName): true,
-		fmt.Sprintf("scion-auth-%s", agentName):  true,
-	}
-	spcName := fmt.Sprintf("scion-agent-%s", agentName)
-	removed := 0
 	warn := func(kind, name string, err error) {
 		if err != nil && !k8serrors.IsNotFound(err) && !k8serrors.IsConflict(err) {
 			runtimeLog.Warn("Failed to delete object of an incomplete start",
 				"kind", kind, "name", name, "agent", agentName, "namespace", namespace, "error", err)
 		}
 	}
+	removed := r.deleteAgentSecretsBySelector(ctx, namespace, agentName, selector.LabelSelector, warn)
 	// deleted records the outcome of one delete call.
 	deleted := func(kind, name string, err error) {
 		if err == nil {
@@ -3336,39 +3388,7 @@ func (r *KubernetesRuntime) cleanupStartResources(ctx context.Context, namespace
 		}
 		warn(kind, name, err)
 	}
-	uidPrecondition := func(uid types.UID) *metav1.Preconditions {
-		return &metav1.Preconditions{UID: &uid}
-	}
-
-	secrets := r.Client.Clientset.CoreV1().Secrets(namespace)
-	if list, err := secrets.List(ctx, selector); err != nil {
-		warn("Secret", "", err)
-	} else {
-		for _, s := range list.Items {
-			if !secretNames[s.Name] {
-				continue
-			}
-			deleted("Secret", s.Name, secrets.Delete(ctx, s.Name, metav1.DeleteOptions{
-				Preconditions: uidPrecondition(s.UID),
-			}))
-		}
-	}
-
-	if r.GKEMode {
-		spcs := r.Client.Dynamic().Resource(k8s.SecretProviderClassGVR).Namespace(namespace)
-		if list, err := spcs.List(ctx, selector); err != nil {
-			warn("SecretProviderClass", spcName, err)
-		} else {
-			for _, spc := range list.Items {
-				if spc.GetName() != spcName {
-					continue
-				}
-				deleted("SecretProviderClass", spcName, spcs.Delete(ctx, spcName, metav1.DeleteOptions{
-					Preconditions: uidPrecondition(spc.GetUID()),
-				}))
-			}
-		}
-	}
+	uidPrecondition := k8sUIDPrecondition
 
 	if includePod {
 		pods := r.Client.Clientset.CoreV1().Pods(namespace)
@@ -3403,15 +3423,18 @@ func (r *KubernetesRuntime) cleanupStartResources(ctx context.Context, namespace
 // pod never writes to the home while the old one still does; a pod that
 // cannot be confirmed stopped fails the start with a retryable error.
 //
-// hs supplies the configured termination wait (nil uses the default); the
-// grace period is the previous pod's own.
-func (r *KubernetesRuntime) cleanupStalePod(ctx context.Context, namespace, podName string, hs *HomeStorageRealization) error {
+// nfsHome reports whether this start uses an NFS home (its home storage
+// backend). A start with an NFS home, or with home storage set, never
+// force-deletes a previous pod it could not read. hs supplies the
+// configured termination wait (nil uses the default); the grace period is
+// the previous pod's own.
+func (r *KubernetesRuntime) cleanupStalePod(ctx context.Context, namespace, podName string, nfsHome bool, hs *HomeStorageRealization) error {
 	pods := r.Client.Clientset.CoreV1().Pods(namespace)
 	pod, err := pods.Get(ctx, podName, metav1.GetOptions{})
 	if k8serrors.IsNotFound(err) {
 		return nil
 	}
-	if err != nil && hs != nil {
+	if err != nil && (nfsHome || hs != nil) {
 		// An NFS-home start never force-deletes a pod it could not read:
 		// it may be a previous pod of this agent still writing to the home.
 		return fmt.Errorf("%w: cannot read the previous pod %s: %v", errPreviousPodUnconfirmed, podName, err)
@@ -3420,15 +3443,7 @@ func (r *KubernetesRuntime) cleanupStalePod(ctx context.Context, namespace, podN
 		if derr := pods.Delete(ctx, podName, podDeleteOptions(pod)); derr != nil && !k8serrors.IsNotFound(derr) {
 			return fmt.Errorf("%w: failed to delete the previous pod %s: %v", errPreviousPodUnconfirmed, podName, derr)
 		}
-		wait := defaultHomeTerminationWaitSeconds
-		if hs != nil && hs.TerminationWaitSeconds > 0 {
-			wait = hs.TerminationWaitSeconds
-		}
-		grace := defaultHomeStopGraceSeconds
-		if g := pod.Spec.TerminationGracePeriodSeconds; g != nil && *g > 0 {
-			grace = int(*g)
-		}
-		bound := time.Duration(grace+wait) * time.Second
+		bound := nfsHomeTerminationBound(pod, hs)
 		runtimeLog.Info("Waiting for the previous pod to stop", "pod", podName, "namespace", namespace, "bound", bound.String(), "phase", "home-wait")
 		return r.waitForPodTermination(ctx, namespace, podName, pod.UID, bound)
 	}
@@ -4329,4 +4344,24 @@ func nfsProvisionEnv(gc *api.GitCloneConfig) []corev1.EnvVar {
 		envs = append(envs, corev1.EnvVar{Name: "SCION_CLONE_BRANCH", Value: gc.Branch})
 	}
 	return envs
+}
+
+// sharedDirSupplementalGroups returns the nfs shared-dir leaf groups
+// (RunConfig.SharedDirStorage.SupplementalGroups, already guarded by
+// pkg/agent) to add as pod supplementalGroups, so the agent can write files
+// other agent kinds create in the leaf's group (ptone/scion#3155). A gid
+// equal to fsGroup is skipped, since Kubernetes already adds fsGroup. Nil
+// when the agent mounts no nfs shared dir, leaving the pod spec unchanged.
+func sharedDirSupplementalGroups(config RunConfig, fsGroup int64) []int64 {
+	if config.SharedDirStorage == nil || config.SharedDirStorage.Backend != "nfs" || len(config.SharedDirs) == 0 {
+		return nil
+	}
+	var out []int64
+	for _, gid := range config.SharedDirStorage.SupplementalGroups {
+		if gid <= 0 || gid == fsGroup {
+			continue
+		}
+		out = append(out, gid)
+	}
+	return out
 }

@@ -29,6 +29,7 @@ import (
 )
 
 func TestVersionFeatures(t *testing.T) {
+	resetRootCmdState(t)
 	buf := new(bytes.Buffer)
 	rootCmd.SetOut(buf)
 	rootCmd.SetErr(buf)
@@ -41,6 +42,7 @@ func TestVersionFeatures(t *testing.T) {
 
 func runHome(t *testing.T, args ...string) (string, error) {
 	t.Helper()
+	resetRootCmdState(t)
 	buf := new(bytes.Buffer)
 	rootCmd.SetOut(buf)
 	rootCmd.SetErr(buf)

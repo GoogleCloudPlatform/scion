@@ -71,6 +71,7 @@ Controls the central Hub API server.
 | `start_unconfirmed_hold` | duration | `"13m"` | Longest time a start whose outcome is unknown (for example a dispatch timeout) keeps other starts of the agent waiting, until the runtime shows whether it created anything. Minimum `12m40s` (the broker's whole start budget plus a minute). Hot-reloaded. Env: `SCION_SERVER_HUB_STARTUNCONFIRMEDHOLD`. |
 | `start_create_unconfirmed_hold` | duration | `"5m"` | `start_unconfirmed_hold` for a new agent's create-and-start. Allowed `3m` up to `start_unconfirmed_hold`. Hot-reloaded. Env: `SCION_SERVER_HUB_STARTCREATEUNCONFIRMEDHOLD`. |
 | `cors` | object | | CORS configuration (see below). |
+| `conduit` | object | | Conduit relay settings (see [Conduit](#conduit-serverhubconduit)). |
 
 #### CORS (`server.hub.cors`)
 
@@ -78,6 +79,33 @@ Controls the central Hub API server.
 | :--- | :--- | :--- | :--- |
 | `enabled` | bool | `true` | Enable CORS. |
 | `allowed_origins` | list | `["*"]` | Allowed origins. |
+
+#### Conduit (`server.hub.conduit`)
+
+Settings for the in-process conduit relay and its stream grants. They take effect only when the `hub.conduit` [experiment](/scion/reference/experiments/) is on. All of them are read at startup, so a change needs a restart. An invalid value is a startup error, not silently ignored.
+
+| Field | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `grant_key_activation` | duration | `"15m"` | Delay between publishing a new grant signing key and signing with it. Minimum `"1m"`. Targets must refresh their keys at least this often. Flag: `--conduit-grant-key-activation`. Env: `SCION_SERVER_HUB_CONDUIT_GRANTKEYACTIVATION`. |
+| `tcp_allowed_ports` | list of int | `[]` | Additional agent-local ports a TCP stream grant may target, on every agent, besides that agent's exposed ports. The reserved ports (9810, 18380) are always refused. Empty means exposed ports only; this setting never narrows access to exposed ports. Flag: `--conduit-tcp-allowed-ports`. Env: `SCION_SERVER_HUB_CONDUIT_TCPALLOWEDPORTS` (comma-separated). |
+| `internal_listen` | string | | `host:port` of the internal relay API listener, used by multi-node deployments. It serves only the internal relay API and must be reachable only inside the cluster or VPC, never publicly. Flag: `--internal-listen`. Env: `SCION_SERVER_HUB_CONDUIT_INTERNALLISTEN`. |
+| `internal_advertise` | string | | Base URL (`http(s)://host:port`) other hub nodes use to reach this node's internal listener. Default: `POD_IP` with the listen port, else the listen host if it is not a wildcard. Flag: `--internal-advertise`. Env: `SCION_SERVER_HUB_CONDUIT_INTERNALADVERTISE`. |
+| `peer_auth` | string | `"auto"` | Relay-peer authentication: `auto`, `oidc` or `hmac`. Requests between relays are always signed with a key derived from the hub's signing secret, which is required in every mode. `oidc` also requires a Google OIDC ID token, `auto` adds the ID token on GCP, and `hmac` uses the signature alone. Env: `SCION_SERVER_HUB_CONDUIT_PEERAUTH`. |
+| `peer_service_accounts` | list | own service account | With OIDC peer auth, the service-account emails allowed to call the internal relay API. The hub logs a warning at startup when the default resolves to a Compute Engine default service account. Env: `SCION_SERVER_HUB_CONDUIT_PEERSERVICEACCOUNTS` (comma-separated). |
+| `peer_audience` | string | `"scion-conduit-relay-peer"` | With OIDC peer auth, the ID token audience. It must be identical on every hub node. Env: `SCION_SERVER_HUB_CONDUIT_PEERAUDIENCE`. |
+| `reconnect_window` | duration | `"5s"` | Jitter window sent with a planned close: targets redial after a random delay within it. Between `"0s"` and `"5m"`. Flag: `--conduit-reconnect-window`. Env: `SCION_SERVER_HUB_CONDUIT_RECONNECTWINDOW`. |
+| `instance_id` | string | see description | This node's relay instance id. It must be unique among live hub processes: a relay that starts with an id already in use takes it over from the other process. Up to 128 printable ASCII characters, no spaces. Default: `POD_NAME` when set, else the host name plus a random per-process suffix. Env: `SCION_SERVER_HUB_CONDUIT_INSTANCEID`. |
+
+**TLS on the internal hop.** Use TLS for the internal relay endpoint (for example a service mesh or a TLS-terminating proxy) and advertise it as `https://`. Plain `http://` is accepted.
+
+**Hosted HA.** In an HA deployment each hub node runs a relay that other nodes must reach directly, so the hub refuses to start when:
+
+- the grant key ring is not stored with the shared at-rest key;
+- it runs on Cloud Run (`K_SERVICE` is set), whose instances are not individually addressable;
+- `internal_advertise` uses the public hub host or a `*.run.app` host;
+- the relay is not addressable at its internal endpoint, or answers its self-check as another instance.
+
+Outside HA, a relay that cannot start is logged and the hub serves without it.
 
 #### Asynchronous agent create
 
@@ -310,6 +338,8 @@ In both modes, NFS problems are logged and reported per share in the `nfs_mounts
 
 With the `nfs` backend and a bound PV claim (`nfs.shares[].pv_name`), each Kubernetes agent pod gets a `workspace-provision` init container. It runs for both git and non-git agents. It creates the per-project subPath (or, if another pod is already provisioning it, waits for that pod to finish) and chowns it to the agent runtime uid (`1000`) and `nfs.gid` so the agent can write `/workspace`; `nfs.uid` is not yet applied on Kubernetes (ptone/scion#2608). For git agents, it also clones the repository. The init container runs as root with only the `CHOWN`, `FOWNER`, and `DAC_OVERRIDE` capabilities and does not follow symlinks. If the chown fails, the agent start fails and the error names the failed init container, so the agent never runs with an unwritable workspace.
 
+Pods get `fsGroup` from `nfs.gid` (default `1000`). With `server.shared_dir_storage.backend: nfs`, Scion also adds each shared directory's own group to the pod's supplementary groups (see [Agent groups](#agent-groups-on-nfs-shared-directories)), so `nfs.gid` does not need to match it. Shared directories served from the workspace export (`workspace_storage` set to `nfs` without `shared_dir_storage`) do not get that group: there, set `nfs.gid` to the shared-directory leaf group, otherwise pods lose group access to the leaf.
+
 #### Ephemeral Storage & 503 Safety Gate
 
 To protect deployments from silent data loss, the Hub implements a strict **503 Safety Gate**:
@@ -329,18 +359,36 @@ This setting is **global-only**: each broker process reads it from its own globa
 | `nfs.mount_root` | string | | **Required for `nfs`.** Host directory under which the share is mounted, at `<mount_root>/<shares[0].id>`. Docker, Podman, and Apple runtimes bind-mount from here. |
 | `nfs.shares` | list of objects | `[]` | **Required for `nfs`.** Only the first entry is used. `id` is required. `pv_name` names the static PersistentVolumeClaim that Kubernetes pods mount by `subPath`, and is required for Kubernetes brokers. |
 | `nfs.subpath_root` | string | `"projects"` | Directory within the share that holds per-project trees. Must be a relative path. |
+| `nfs.gid` | integer | | Optional. The only shared-directory group that agents may be given as a supplementary group. When set, a leaf owned by any other group is skipped with a warning. See [Agent groups](#agent-groups-on-nfs-shared-directories). |
 
 Shared directories resolve to `<mount_root>/<share id>/<subpath_root>/<project id>/shared-dirs/<name>`. On Kubernetes, pods mount the `pv_name` claim with the matching `subPath` instead of creating a per-directory PVC.
 
-The `nfs` backend fails closed. Agent start is refused when the block is incomplete, the host base directory does not exist, the runtime is not a local-container or Kubernetes runtime (for example, Cloud Run), or a shared-directory path resolves through a symlink. The NFS export itself must be provisioned and mounted before agents start. The `uid`, `gid`, `mount_options`, `storage_class`, and `auto_mount` fields of the `nfs` block are ignored here.
+The `nfs` backend fails closed. Agent start is refused when the block is incomplete, the host base directory does not exist, the runtime is not a local-container or Kubernetes runtime (for example, Cloud Run), or a shared-directory path resolves through a symlink. The NFS export itself must be provisioned and mounted before agents start. The `uid`, `mount_options`, `storage_class`, and `auto_mount` fields of the `nfs` block are ignored here.
 
 With the `nfs` backend, the Hub and brokers also apply the following:
 
 - **Symlink-safe access**: Every Hub operation on an NFS shared directory goes through the same confined resolver. This covers the web file browser, archive downloads, attachment staging, and shared-dir deletion. The resolver walks each path component with `O_NOFOLLOW`, anchored on the inode of the project's tree, and refuses any symlink in the path. A missing or incomplete `nfs` block, or an unusable host base directory, fails closed on the Hub as well as on agent start.
-- **Leaf modes and ACLs**: A newly created shared directory gets mode `2775` (setgid, group-writable) and a minimal default POSIX ACL, so files agents create inside it inherit group write access regardless of umask. If the export does not support POSIX ACLs, a warning is logged once and the directory stays plain `2775` with no ACL. Directories that already existed are never modified. See the [hybrid tier guide](https://github.com/GoogleCloudPlatform/scion/blob/main/docs/deploy/hybrid-tier.md) for the manual fix-up recipe.
-- **Ownership on an export that does not squash ids**: the broker creates the project chain as its own user and never changes ownership. Upper directories get `2755` and the leaf `2775`, and each inherits the group of a setgid parent. Pods create nothing on this export; they mount the existing leaf by `subPath`. When agents with different uids share a directory, for example Docker agents and Kubernetes pods, give the share directory (`<mount_root>/<share id>`) a shared group with the setgid bit (for example `chgrp <gid>` and `chmod 2775`), make the broker user a member of that group, and set the pods' `fsGroup` to it; Kubernetes adds `fsGroup` as a supplementary group and does not change ownership on NFS volumes. If the export does not support POSIX ACLs, files created inside a leaf follow each writer's umask, so use umask `002` for every agent that writes there.
+- **Leaf modes and ACLs**: A newly created shared directory gets mode `2775` (setgid, group-writable) and a minimal default POSIX ACL, so files agents create inside it inherit group write access regardless of umask. If the export does not support POSIX ACLs, a warning is logged once and the directory stays plain `2775` with no ACL. Files created inside such a directory follow each writer's umask (usually `022`), so they are not group-writable. Directories that already existed are never modified. See the [hybrid tier guide](https://github.com/GoogleCloudPlatform/scion/blob/main/docs/deploy/hybrid-tier.md) for the manual fix-up recipe.
+- **Ownership on an export that does not squash ids**: the broker creates the project chain as its own user and never changes ownership. Upper directories get `2755` and the leaf `2775`, and each inherits the group of a setgid parent. Pods create nothing on this export; they mount the existing leaf by `subPath`. When agents with different uids share a directory, for example Docker agents and Kubernetes pods, give the share directory (`<mount_root>/<share id>`) a shared group with the setgid bit (for example `chgrp <gid>` and `chmod 2775`) so every leaf inherits it. Scion then adds that group to each agent that mounts the leaf; see [Agent groups](#agent-groups-on-nfs-shared-directories).
 - **Cleanup on delete**: Deleting a project removes its `<subpath_root>/<project id>/shared-dirs` tree from the export. Removing a single shared directory removes that directory's contents. Both are best-effort: failures are logged and never block or roll back the database change.
 - **Startup summary**: At startup the server logs one `server.shared_dir_storage resolved layout: …` line, plus a warning if any ignored `nfs` fields are set.
+
+#### Agent groups on NFS shared directories
+
+Different kinds of agents can write to the same NFS shared directory (leaf): Docker or rootful Podman agents on brokers, and Kubernetes pods. They usually run with different uids, so each one can modify the others' files only through the leaf's group. For that to work:
+
+- **The export must support POSIX ACLs.** The leaf's default ACL makes new files group-writable whatever the writer's umask. Without ACL support, files follow each writer's umask (usually `022`) and other writers cannot modify them. Scion logs a warning once when it cannot set the ACL. ACL-capable storage is required for shared directories with mixed writers.
+- **Every writer must be in the leaf's group.** At each agent start, the broker reads the group of every NFS shared directory the agent mounts, from the leaf itself, and adds it to the agent:
+  - Kubernetes: added to the pod's `supplementalGroups`. `fsGroup` is not changed, and a group equal to `fsGroup` is not repeated.
+  - Docker and rootful Podman: added with `--group-add`. The agent image's `sciontool` must keep these groups when it switches from root to the agent user (for the harness, services, lifecycle hooks and `/exec` commands); older images drop them and keep the previous behaviour.
+  - Rootless Podman and Apple containers: not supported; the broker logs a warning and starts the agent without the group. Docker with `userns-remap` or a rootless `dockerd` also gets no effect from the group, because the leaf gid is not mapped into the container's user namespace; the broker does not detect this case.
+
+  For safety, the broker skips a group (with a warning) when it is below `1000`, when it is an overflow id (`65534` or `4294967294`, which NFSv4 id mapping reports for unmapped groups), or when `nfs.gid` is set and does not match. If the group cannot be read, the agent starts without it. Agents without an NFS shared directory are unchanged. On an `all_squash` export the server maps every client to one identity, so the added group has no effect there.
+
+Some files are not upgraded:
+
+- Files created by a writer that passes an explicit restrictive mode (for example `open(..., 0644)`) stay non-group-writable; an ACL cannot add permissions the creator did not request.
+- Leaves created outside Scion, or before Scion added the leaf ACL, keep their existing mode and ACL. Scion only sets modes and ACLs on leaves it creates. Fix them by hand (see the hybrid tier guide).
 
 The `local` backend (or an unset `shared_dir_storage`) behaves as before.
 
@@ -830,6 +878,7 @@ Settings required before the database connection exists, or that are restart-bou
 | Messaging/plugins | `message_broker.*`, `plugins.*` |
 | Async agent create | `hub.async_agent_launch`, `hub.launch_timeout`, `hub.launch_keepalive_seconds` |
 | Heartbeat reconcile | `hub.missing_agent_grace` |
+| Conduit relay | `hub.conduit.*` |
 
 ### Layer 1 — Operational (Postgres `hub_settings` table)
 
