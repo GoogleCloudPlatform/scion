@@ -1127,6 +1127,30 @@ describe('AgentStore compact rows clear the compact keys they omit', () => {
     expect(h.feeds[0]?.getAgent('a2')?.deletion).toEqual(deleting);
   });
 
+  it("replaces a held deletion with a compact row's explicit null", async () => {
+    const deleting = {
+      state: 'deleting',
+      soft: false,
+      claim: 1,
+      startedAt: '2026-01-01T00:00:00Z',
+    } as const;
+    const h = createHarness([agent('a1')]);
+    h.store.retain(HUB, () => {});
+    const first = h.store.ensure(HUB);
+    await h.connect();
+    await first;
+    await h.emitAgent('status', { agentId: 'a1', deletion: deleting });
+    expect(h.feeds[0]?.getAgent('a1')?.deletion).toEqual(deleting);
+
+    h.server.agents = [agent('a1', { deletion: null })];
+    h.store.invalidate('manual');
+    await settle();
+
+    expect(h.server.walks()).toBe(2);
+    expect(h.feeds[0]?.getAgent('a1')?.deletion).toBeNull();
+    expect(find(h.store.peek(HUB), 'a1')?.deletion).toBeNull();
+  });
+
   it('an activity delta during a walk survives a row that omits activity', async () => {
     const h = createHarness([agent('a1', { activity: 'offline' })]);
     h.store.retain(HUB, () => {});
