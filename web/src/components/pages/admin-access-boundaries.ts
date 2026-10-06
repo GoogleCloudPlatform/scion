@@ -29,7 +29,6 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { setDocumentTitle } from '../../client/page-title.js';
-import { navigateTo } from '../../client/main.js';
 import {
   list,
   resetAllSequences,
@@ -51,6 +50,7 @@ import type {
 import { canAccessBoundary } from '../../shared/access-boundaries.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 import { formatInstant, formatRelative, zoneLabel } from '../../utils/time.js';
+import { navigateTo, replaceSearch } from '../../client/navigation.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -861,9 +861,7 @@ export class ScionPageAdminAccessBoundaries extends LitElement {
     if (this.filterRisk) params.set('risk', this.filterRisk);
     if (this.currentPageToken) params.set('pageToken', this.currentPageToken);
 
-    const qs = params.toString();
-    const newUrl = `${window.location.pathname}${qs ? `?${qs}` : ''}`;
-    window.history.replaceState({}, '', newUrl);
+    replaceSearch(params);
   }
 
   // ---------------------------------------------------------------------------

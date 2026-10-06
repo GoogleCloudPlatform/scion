@@ -34,9 +34,13 @@ import (
 // --- resourceEqual must be a true whole-Resource compare -------------
 
 // TestResourceEqual_MutationCoversEveryField is the required proof:
-// reflection-fill a Resource, mutate each exported field one at a
-// time, and assert resourceEqual returns false every time. A future
-// Resource field is then covered automatically, because this test iterates
+// reflection-fill a Resource, mutate each field one at a time, and
+// assert resourceEqual returns false every time. Exported fields are
+// mutated through reflection by kind. Reflection cannot set unexported
+// fields, so each one is assigned directly by name (launchedTarget gets
+// a pointer to a store.Agent with ID x), and any other unexported field
+// fails the test until it is added here. A future exported Resource
+// field is then covered automatically, because this test iterates
 // reflect.TypeOf(Resource{}).NumField() rather than naming fields by hand --
 // exactly the property the old hand-written field list lacked (it already
 // silently omitted ScopeUserID).
@@ -61,19 +65,30 @@ func TestResourceEqual_MutationCoversEveryField(t *testing.T) {
 		field := typ.Field(i)
 		t.Run(field.Name, func(t *testing.T) {
 			mutated := base
-			v := reflect.ValueOf(&mutated).Elem().Field(i)
-			switch v.Kind() {
-			case reflect.String:
-				v.SetString(v.String() + "-mutated")
-			case reflect.Map:
-				m := reflect.MakeMap(v.Type())
-				m.SetMapIndex(reflect.ValueOf("different-key"), reflect.ValueOf("different-value"))
-				v.Set(m)
-			case reflect.Slice:
-				v.Set(reflect.AppendSlice(reflect.MakeSlice(v.Type(), 0, 0), v))
-				v.Set(reflect.Append(v, reflect.ValueOf("different-element")))
-			default:
-				t.Fatalf("unhandled Resource field kind %s for field %s; extend this test", v.Kind(), field.Name)
+			if !field.IsExported() {
+				// Reflection cannot set an unexported field, so assign it
+				// directly by name.
+				switch field.Name {
+				case "launchedTarget":
+					mutated.launchedTarget = &store.Agent{ID: "x"}
+				default:
+					t.Fatalf("unhandled unexported Resource field %s; extend this test", field.Name)
+				}
+			} else {
+				v := reflect.ValueOf(&mutated).Elem().Field(i)
+				switch v.Kind() {
+				case reflect.String:
+					v.SetString(v.String() + "-mutated")
+				case reflect.Map:
+					m := reflect.MakeMap(v.Type())
+					m.SetMapIndex(reflect.ValueOf("different-key"), reflect.ValueOf("different-value"))
+					v.Set(m)
+				case reflect.Slice:
+					v.Set(reflect.AppendSlice(reflect.MakeSlice(v.Type(), 0, 0), v))
+					v.Set(reflect.Append(v, reflect.ValueOf("different-element")))
+				default:
+					t.Fatalf("unhandled Resource field kind %s for field %s; extend this test", v.Kind(), field.Name)
+				}
 			}
 			require.NotEqual(t, base, mutated, "mutation must actually change the struct (test bug if not)")
 			require.False(t, resourceEqual(base, mutated),
@@ -134,6 +149,8 @@ func TestResourceEqual_NilVsEmptyStillNormalizes(t *testing.T) {
 //     UpdateAgentDeletion, never by CreateAgent/UpdateAgent, and json:"-".
 //     Deletion is their computed view (ComputeAgentDeletion), set only on
 //     response copies.
+//   - SoftDeleteOpID: written only through SetAgentSoftDeleteOpID, and only
+//     meaningful on a soft-deleted row (see DeletedAt above).
 //
 // Every other exported field, including Slug (which a mutation of
 // agentResource to read ScopeUserID would depend on), is filled and
@@ -164,21 +181,37 @@ var reflectFillStoreAgentSkipFields = map[string]bool{
 	"DeletionStartedAt": true, "DeletionFailedAt": true, "DeletionCode": true,
 	"DeletionError": true, "DeletionPrior": true, "DeletionRequest": true,
 	"Deletion": true,
-	// run_id is written only through SetAgentRunID and
-	// CompareAndSwapAgentRunID (ptone/scion#2550): CreateAgent and
-	// UpdateAgent never write it, so it cannot round-trip here. It is not an
-	// authz input, and no list reader uses it (only the delete dispatch, from
-	// a single-row read).
+	// run_id is written only through SetAgentRunID and the run-ID swaps
+	// (ptone/scion#2550): CreateAgent and UpdateAgent never write it, so it
+	// cannot round-trip here; that is the only reason it is skipped. List
+	// reads do carry it (ListAgents maps full rows), and project deletion
+	// dispatches deletes from one. It is not an authz input.
 	"RunID": true,
+	// previous_run_ids: the same writers and the same reasons
+	// (ptone/scion#3097).
+	"PreviousRunIDs": true,
+	// workspace_placement is written only through SetAgentWorkspacePlacement
+	// (ptone/scion#2727): CreateAgent and UpdateAgent never write it, so it
+	// cannot round-trip here. It is not an authz input.
+	"WorkspacePlacement": true,
 	// Run intent columns are written only through SetRunIntent and
 	// RevertRunIntent (never by CreateAgent/UpdateAgent).
-	"RunIntent": true, "RunIntentAt": true,
+	"RunIntent": true, "RunIntentAt": true, "RunIntentMarkedAt": true,
+	// ProvisionedOnly is computed by the hub at response time from Phase,
+	// RunIntent and the launch/deletion columns (ptone/scion#2929); it is
+	// not stored.
+	"ProvisionedOnly": true,
 	// Start claim columns are written only through the start-claim store
 	// methods (never by CreateAgent/UpdateAgent).
 	"StartClaimID": true, "StartClaimKind": true, "StartClaimState": true,
 	"StartClaimOwner": true, "StartClaimTarget": true, "StartClaimAt": true,
 	"StartClaimLeaseUntil": true, "StartClaimUnconfirmedAt": true,
 	"StartClaimHoldUntil": true, "StartClaimLaunchID": true,
+	// soft_delete_op_id is written only through SetAgentSoftDeleteOpID
+	// (never by CreateAgent/UpdateAgent) and is set only alongside
+	// DeletedAt, which GetAgentsByIDs filters out. It is json:"-" and not
+	// an authz input.
+	"SoftDeleteOpID": true,
 }
 
 func reflectFillStoreAgent(t *testing.T, projectID string) *store.Agent {

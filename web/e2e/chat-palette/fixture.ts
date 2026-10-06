@@ -16,7 +16,7 @@ import type { ScionChatShell } from '../../src/components/chat/chat-shell.js';
 import '../../src/components/terminal/terminal-pane.js';
 import { TerminalSessionRegistry } from '../../src/client/terminal-sessions.js';
 import { chatRecentFiles } from '../../src/client/chat-recent-files.js';
-import { chatUnread } from '../../src/client/chat-unread.js';
+import { chatUnread, startChatUnreadIfEligible } from '../../src/client/chat-unread.js';
 import type { RecentFile } from '../../src/client/chat-recent-files.js';
 import { attachmentIdentityKey, pathIdentityKey } from '../../src/utils/chat-file-links.js';
 import type { PathLinkTarget } from '../../src/utils/chat-file-links.js';
@@ -92,9 +92,12 @@ const params = new URLSearchParams(location.search);
 window.history.replaceState({}, '', params.get('route') || '/chat');
 
 // `?unread=1` starts the tab-title unread counter before the page mounts,
-// as main.ts does for a signed-in user before the router renders /chat, so
-// a startup spec sees the same concurrent spaces/DMs loads the real app does.
-if (params.get('unread') === '1') chatUnread.start();
+// as main.ts does for a signed-in user with chat enabled whose first route is
+// a chat route (every route this fixture serves is one): through
+// startChatUnreadIfEligible with the chat-route flag set, so the counter
+// sends its spaces/DMs pair at once and the page and rail share it, as in
+// the real app.
+if (params.get('unread') === '1') startChatUnreadIfEligible(chatUnread, true, true, true);
 
 const TEST_USER_ID = 'self-user';
 // Kept in sync by eye with mock-api.ts's TERMINAL_AGENT_ID — that file is

@@ -23,6 +23,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -388,7 +389,7 @@ func TestBrokerOnBehalfOf_TokenIssuanceAndAdminRoutesStayDenied(t *testing.T) {
 				ctx := r.Context()
 				tokenErr = requireSessionCredential(ctx)
 				rec := httptest.NewRecorder()
-				_, adminOK = srv.requireSessionCredential(rec, ctx)
+				_, adminOK = srv.requireSessionCredentialFor(rec, ctx, authzop.ReasonCredentialManagement)
 				if !adminOK {
 					adminErr = fmt.Errorf("denied: %s", rec.Body.String())
 				}

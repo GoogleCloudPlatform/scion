@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"strings"
 	"time"
 
@@ -96,14 +97,29 @@ func (s *GCSStorage) GenerateSignedURL(ctx context.Context, objectPath string, o
 		signOpts.ContentType = opts.ContentType
 	}
 
+	// Response header overrides (GET only), carried as signed query
+	// parameters so the object store applies them to its response.
+	if opts.Method == "GET" || opts.Method == "" {
+		q := url.Values{}
+		if opts.ResponseContentType != "" {
+			q.Set("response-content-type", opts.ResponseContentType)
+		}
+		if opts.ResponseContentDisposition != "" {
+			q.Set("response-content-disposition", opts.ResponseContentDisposition)
+		}
+		if len(q) > 0 {
+			signOpts.QueryParameters = q
+		}
+	}
+
 	// Generate the signed URL
-	url, err := s.bucket.SignedURL(objectPath, signOpts)
+	signed, err := s.bucket.SignedURL(objectPath, signOpts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate signed URL: %w", err)
 	}
 
 	result := &SignedURL{
-		URL:     url,
+		URL:     signed,
 		Method:  opts.Method,
 		Expires: signOpts.Expires,
 	}

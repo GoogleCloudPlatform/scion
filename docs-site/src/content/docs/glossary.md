@@ -63,7 +63,7 @@ The helper utility injected into every agent container for status reporting, met
 A feature that allows exposing local HTTP ports running inside an agent container through the Hub as authenticated, reverse-proxied URLs. Built on an outbound WebSocket reverse tunnel.
 
 ### Runtime
-The container technology that executes an agent's container: Docker, Podman, Apple Container, Kubernetes, or Cloud Run Instances.
+The container technology that executes an agent's container: Docker, Podman, Apple Container, Kubernetes, Cloud Run Instances, or Substrate (Agent Substrate actors on GKE).
 
 ### Workspace
 The working directory mounted into a single agent's container at `/workspace`. How it is provisioned across a project's agents is set by the project's **workspace sharing mode**.
@@ -75,7 +75,7 @@ How a project's workspace is provisioned across its agents. There are four canon
 A workspace sharing mode where one workspace directory is mounted into every agent with no per-agent isolation — the model used for plain (non-git) projects.
 
 ### Worktree-per-agent
-A workspace sharing mode where each agent gets its own git worktree over a shared checkout, isolating working trees while sharing one clone's history. Supported in local mode and on Hub-managed git projects; on Kubernetes it requires NFS workspace storage.
+A workspace sharing mode where each agent gets its own git worktree over a shared checkout, isolating working trees while sharing one clone's history. Supported in local mode and on Hub-managed git projects; requires git 2.48 or later on the broker, and on Kubernetes it requires NFS workspace storage.
 
 ### Clone-per-agent
 A workspace sharing mode where each agent gets its own full git clone of the repository.
@@ -231,7 +231,7 @@ A project's unique identifier — always a randomly generated UUID. A git remote
 The tracked `root → parent → child` relationship between agents that governs transitive access control.
 
 ### Phase
-The infrastructure lifecycle stage of an agent container: `created`, `provisioning`, `cloning`, `starting`, `running`, `stopping`, `stopped`, `suspended`, or `error`.
+The infrastructure lifecycle stage of an agent container: `created`, `provisioning`, `cloning`, `starting`, `running`, `stopping`, `stopped`, `suspended`, or `error`. In Hub mode, an agent provisioned with `scion create` and not yet started is shown as `created (not started)`.
 
 ### Activity
 What a running agent is currently doing within the `running` phase, such as `thinking`, `executing`, `waiting_for_input`, `blocked`, `completed`, `limits_exceeded`, `stalled`, or `offline`. Distinct from phase.

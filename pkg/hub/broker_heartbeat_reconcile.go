@@ -340,10 +340,26 @@ type heartbeatReport struct {
 	// these slugs is treated as present, which errs on the side of leaving
 	// it alone.
 	unresolvedSlugs map[string]bool
+	// observed holds, for each matched agent, the target that listed it and
+	// whether it was running or terminal (recovery_observations.go).
+	observed map[string]observedAgent
+
+	// The broker's agents, listed at most once per heartbeat (brokerAgents).
+	agentsLoaded bool
+	agents       []store.Agent
+	agentsErr    error
+
+	// Agents with a queued create, start or restart dispatch, read at most
+	// once per heartbeat (pendingStarts).
+	startsLoaded bool
+	starts       map[string]bool
+	startsErr    error
+	// Agents with a queued stop dispatch, read with the starts.
+	stops map[string]bool
 }
 
 func newHeartbeatReport() *heartbeatReport {
-	return &heartbeatReport{present: map[string]bool{}, unresolvedSlugs: map[string]bool{}}
+	return &heartbeatReport{present: map[string]bool{}, unresolvedSlugs: map[string]bool{}, observed: map[string]observedAgent{}}
 }
 
 // inventoryAllowsReconcile reports whether this heartbeat may be used to
@@ -364,25 +380,60 @@ func inventoryAllowsReconcile(prev *store.RuntimeBroker, hb *brokerHeartbeatRequ
 	return now.Sub(prev.LastHeartbeat) < grace
 }
 
-// listRunningBrokerAgents returns every non-deleted agent assigned to
-// brokerID in phase running, following pagination.
-func (s *Server) listRunningBrokerAgents(ctx context.Context, brokerID string) ([]store.Agent, error) {
-	var out []store.Agent
-	opts := store.ListOptions{SkipTotalCount: true}
-	for {
-		res, err := s.store.ListAgents(ctx, store.AgentFilter{
-			RuntimeBrokerID: brokerID,
-			Phase:           string(state.PhaseRunning),
-		}, opts)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, res.Items...)
-		if res.NextCursor == "" {
-			return out, nil
-		}
-		opts.Cursor = res.NextCursor
+// brokerAgents returns every non-deleted agent assigned to brokerID,
+// listed once per heartbeat and shared by the missing-container reconcile
+// and the runtime observations. The list is read before the reconcile
+// writes, so an agent the reconcile marks missing on this heartbeat is
+// observed in its new state on the next one.
+func (r *heartbeatReport) brokerAgents(ctx context.Context, s *Server, brokerID string) ([]store.Agent, error) {
+	if r.agentsLoaded {
+		return r.agents, r.agentsErr
 	}
+	r.agentsLoaded = true
+	r.agents, r.agentsErr = s.listBrokerAgents(ctx, brokerID)
+	return r.agents, r.agentsErr
+}
+
+// pendingStarts returns the IDs of agents with a queued create, start or
+// restart dispatch for brokerID, read at most once per heartbeat. Such a
+// dispatch may create a container at any moment, so it counts as a start
+// in flight. A queued stop or delete does not. A row the owning node has
+// already claimed (in_progress) is not listed; that window is covered by
+// the start-claim reaper's time rule (an inventory must follow the claim
+// becoming unconfirmed by a heartbeat interval).
+func (r *heartbeatReport) pendingStarts(ctx context.Context, s *Server, brokerID string) (map[string]bool, error) {
+	if r.startsLoaded {
+		return r.starts, r.startsErr
+	}
+	r.startsLoaded = true
+	rows, err := s.store.ListPendingDispatch(ctx, brokerID)
+	if err != nil {
+		r.startsErr = err
+		return nil, err
+	}
+	r.starts = make(map[string]bool, len(rows))
+	r.stops = map[string]bool{}
+	for _, d := range rows {
+		if d.AgentID == "" {
+			continue
+		}
+		switch d.Op {
+		case "create", "start", "restart":
+			r.starts[d.AgentID] = true
+		case "stop":
+			r.stops[d.AgentID] = true
+		}
+	}
+	return r.starts, nil
+}
+
+// pendingStops returns the agents with a queued stop dispatch for brokerID,
+// from the same read as pendingStarts.
+func (r *heartbeatReport) pendingStops(ctx context.Context, s *Server, brokerID string) (map[string]bool, error) {
+	if _, err := r.pendingStarts(ctx, s, brokerID); err != nil {
+		return nil, err
+	}
+	return r.stops, nil
 }
 
 // pendingLifecycleAgents returns the IDs of agents with a queued lifecycle
@@ -418,7 +469,7 @@ func (s *Server) reconcileMissingAgents(ctx context.Context, brokerID string, pr
 	}
 
 	complete := hb.completeTargets()
-	agents, err := s.listRunningBrokerAgents(ctx, brokerID)
+	agents, err := report.brokerAgents(ctx, s, brokerID)
 	if err != nil {
 		s.agentLifecycleLog.Warn("heartbeat reconcile: failed to list broker agents",
 			"broker_id", brokerID, "error", err)
@@ -428,6 +479,9 @@ func (s *Server) reconcileMissingAgents(ctx context.Context, brokerID string, pr
 	var missing []store.Agent
 	for i := range agents {
 		a := &agents[i]
+		if a.Phase != string(state.PhaseRunning) {
+			continue
+		}
 		if report.present[a.ID] || report.unresolvedSlugs[a.Slug] {
 			continue
 		}

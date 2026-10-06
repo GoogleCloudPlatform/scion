@@ -90,6 +90,10 @@ async function stubMainClientModule(page: Page): Promise<void> {
           history.replaceState(history.state, '', path + location.search + location.hash);
           return Promise.resolve();
         }
+        export function pushRoute(path) {
+          history.pushState({}, '', path);
+          return Promise.resolve();
+        }
       `,
     })
   );

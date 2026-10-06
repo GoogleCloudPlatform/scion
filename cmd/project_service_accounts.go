@@ -58,9 +58,8 @@ roles/iam.serviceAccountTokenCreator on the target SA.
 Examples:
   scion project service-accounts add agent-worker@my-project.iam.gserviceaccount.com --gcp-project my-project
   scion project service-accounts add agent-worker@my-project.iam.gserviceaccount.com --gcp-project my-project --name "Worker SA"`,
-	Args:    cobra.ExactArgs(1),
-	PreRunE: checkGCPProjectFlag,
-	RunE:    runSAAdd,
+	Args: gcpProjectArgs(cobra.ExactArgs(1)),
+	RunE: runSAAdd,
 }
 
 var saListCmd = &cobra.Command{
@@ -146,8 +145,13 @@ func init() {
 	saListCmd.Flags().BoolVar(&saOutputJSON, "json", false, "Output in JSON format")
 }
 
-// resolveProjectForSA resolves the project ID and creates a hub client for SA operations.
-func resolveProjectForSA() (hubclient.Client, string, error) {
+// resolveProjectForSA is a variable so tests can point the service-account
+// commands at a fake Hub.
+var resolveProjectForSA = resolveLinkedProjectForSA
+
+// resolveLinkedProjectForSA resolves the project ID and creates a hub client
+// for SA operations.
+func resolveLinkedProjectForSA() (hubclient.Client, string, error) {
 	settings, client, err := loadHubClient()
 	if err != nil {
 		return nil, "", err
@@ -187,6 +191,7 @@ func runSAAdd(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to register service account: %w", err)
 	}
+	printSAWarnings(sa.Warnings)
 
 	if isJSONOutput() {
 		enc := json.NewEncoder(os.Stdout)
@@ -222,10 +227,11 @@ func runSAList(cmd *cobra.Command, args []string) error {
 	// there would silently hide accounts the user may assign. This command is
 	// not that, and the root-level `scion service-accounts list --global`
 	// command is where hub-scoped accounts are listed.
-	sas, err := client.GCPServiceAccounts().List(ctx, hubclient.ListForProject(projectID))
+	sas, warnings, err := client.GCPServiceAccounts().ListWithWarnings(ctx, hubclient.ListForProject(projectID))
 	if err != nil {
 		return fmt.Errorf("failed to list service accounts: %w", err)
 	}
+	printSAWarnings(warnings)
 
 	if saOutputJSON {
 		enc := json.NewEncoder(os.Stdout)
@@ -302,6 +308,7 @@ func runSAMint(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to mint service account: %w", err)
 	}
+	printSAWarnings(sa.Warnings)
 
 	if isJSONOutput() {
 		enc := json.NewEncoder(os.Stdout)
@@ -336,6 +343,7 @@ func runSAVerify(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("verification failed: %w", err)
 	}
+	printSAWarnings(sa.Warnings)
 
 	if isJSONOutput() {
 		enc := json.NewEncoder(os.Stdout)
@@ -350,4 +358,13 @@ func runSAVerify(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  Verified At: %s\n", clitime.Format(sa.VerifiedAt, clitime.Full))
 
 	return nil
+}
+
+// printSAWarnings prints the Hub's advisory service account warnings (for
+// example a GSA no Kubernetes broker profile maps) to stderr, so they never
+// mix with --json output on stdout.
+func printSAWarnings(warnings []string) {
+	for _, w := range warnings {
+		fmt.Fprintf(os.Stderr, "Warning: %s\n", w)
+	}
 }

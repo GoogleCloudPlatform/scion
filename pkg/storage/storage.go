@@ -100,6 +100,14 @@ type SignedURLOptions struct {
 	ContentType string
 	// ContentMD5 is the expected MD5 hash (for PUT).
 	ContentMD5 string
+	// ResponseContentType, when set on a GET URL, overrides the
+	// Content-Type the object store answers with. Providers that cannot
+	// override response headers ignore it.
+	ResponseContentType string
+	// ResponseContentDisposition, when set on a GET URL, overrides the
+	// Content-Disposition the object store answers with. Providers that
+	// cannot override response headers ignore it.
+	ResponseContentDisposition string
 }
 
 // SignedURL contains a signed URL for object access.
@@ -226,6 +234,20 @@ func resourcePrefix(kind ResourceKind) string {
 	default:
 		return "templates"
 	}
+}
+
+// DirPrefix returns the DeletePrefix/List prefix that matches exactly the
+// objects under the directory-like storage path dir: dir with one trailing
+// "/". Object stores such as GCS match prefixes as plain strings, so passing
+// "a/foo" would also match the sibling "a/foo-bar/...". An empty (or
+// all-slash) dir yields "", which DeletePrefix rejects with ErrInvalidPath,
+// rather than "/", which would match every object in the bucket.
+func DirPrefix(dir string) string {
+	dir = strings.TrimRight(dir, "/")
+	if dir == "" {
+		return ""
+	}
+	return dir + "/"
 }
 
 // ResourceStoragePath returns the storage path for a file-based resource of the

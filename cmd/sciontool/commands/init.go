@@ -39,11 +39,11 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/metadata"
-	scionportforward "github.com/GoogleCloudPlatform/scion/pkg/sciontool/portforward"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/procreap"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/rootexec"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/services"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/supervisor"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/suppgroups"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/telemetry"
 	"github.com/GoogleCloudPlatform/scion/pkg/stagedsecrets"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
@@ -126,6 +126,11 @@ type InitRunOptions struct {
 	// command) always leaves this false — that behaviour is unchanged. A
 	// caller whose network path can't route that traffic sets this to true.
 	DisablePortForwarding bool
+
+	// DisableConduit keeps the legacy port-forward tunnel even when the hub
+	// advertises conduit (SCION_HUB_CONDUIT=true). The zero value dials the
+	// conduit endpoint when, and only when, the hub advertises it.
+	DisableConduit bool
 
 	// DisableReExec skips RunInit's environ-purge re-exec (see
 	// reExecWithCleanEnv). That re-exec exists only to purge
@@ -455,6 +460,19 @@ func RunInit(args []string, opts InitRunOptions) int {
 		log.Info("Operating mode: hub-connected (endpoint: %s)", os.Getenv(hub.EnvHubEndpoint))
 	case hub.ModeHosted:
 		log.Info("Operating mode: hosted (endpoint: %s)", os.Getenv(hub.EnvHubEndpoint))
+	}
+
+	// nfs shared-dir writers: clear the umask's group bits (022 -> 002) when
+	// the runtime granted shared-dir groups (SCION_SUPPLEMENTAL_GIDS checked
+	// against this process's own groups), so new files stay group-writable
+	// where the export cannot hold the leaf's default ACL (ptone/scion#3155).
+	// Every child started below inherits it: harness, services, lifecycle
+	// hooks, the provision wrapper and the substrate exec endpoint. This
+	// must run BEFORE setupHostUser: its rootless keep-id early drop calls
+	// setgroups([scion]), after which the granted groups (and so this
+	// decision) are no longer visible.
+	if applied, previous, current := suppgroups.ApplySharedDirUmask(); applied {
+		log.Info("nfs shared-dir groups granted: umask %04o (was %04o)", current, previous)
 	}
 
 	// Set up scion user UID/GID to match host user
@@ -1101,8 +1119,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 			if opts.DisablePortForwarding {
 				log.Info("port forwarding disabled: skipping port-forward tunnel manager and auto-expose")
 			} else {
-				go scionportforward.NewManager(hubClient).Run(ctx)
-				log.Info("Started port-forward tunnel manager")
+				go newPortForwarding(hubClient, opts.DisableConduit, os.Getenv).run(ctx)
 
 				// Auto-expose: detect and register listening ports
 				if autoExposeCfg := autoexpose.ConfigFromEnv(); autoExposeCfg.Enabled && hubClient != nil {
@@ -1175,7 +1192,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 		}
 
 		// Warn if user-provided GITHUB_TOKEN overlaps with GitHub App
-		if os.Getenv(hub.EnvUserGitHubToken) == "true" {
+		if util.ParseBoolEnv(hub.EnvUserGitHubToken, false) {
 			log.Info("User-provided GITHUB_TOKEN detected alongside GitHub App installation")
 			log.Info("The user's GITHUB_TOKEN will be used for gh CLI; GitHub App tokens will be used for git credential helper")
 		}
@@ -2736,7 +2753,7 @@ func gitCloneWorkspace(uid, gid int, agentHome string, requirePrivilegeDrop bool
 	gitconfigPath := filepath.Join(agentHome, ".gitconfig")
 
 	var credentialHelper string
-	if os.Getenv("SCION_GITHUB_APP_ENABLED") == "true" {
+	if hub.IsGitHubAppEnabled() {
 		credentialHelper = "!sciontool credential-helper"
 	} else {
 		credentialHelper = `!f() { echo "password=${GITHUB_TOKEN}"; echo "username=oauth2"; }; f`
@@ -2960,10 +2977,10 @@ func resolveIsSharedGitWorkspace() bool {
 	if workspaceMode := os.Getenv("SCION_WORKSPACE_MODE"); workspaceMode != "" {
 		// New path: broker emits canonical workspace mode vars.
 		// A shared-plain workspace is git-backed when SCION_WORKSPACE_GIT=true.
-		return workspaceMode == "shared-plain" && os.Getenv("SCION_WORKSPACE_GIT") == "true"
+		return workspaceMode == "shared-plain" && util.ParseBoolEnv("SCION_WORKSPACE_GIT", false)
 	}
 	// Fallback: older broker that only emits SCION_SHARED_WORKSPACE.
-	return os.Getenv("SCION_SHARED_WORKSPACE") == "true"
+	return util.ParseBoolEnv("SCION_SHARED_WORKSPACE", false)
 }
 
 // errSharedWorkspaceGitPrivilegeDropRequired is returned when
@@ -3049,7 +3066,7 @@ func configureSharedWorkspaceGit(agentHome string, uid, gid int, requirePrivileg
 	// Configure credential helper using sciontool's credential-helper command,
 	// which handles both GITHUB_TOKEN env var and GitHub App token refresh.
 	var credentialHelper string
-	if os.Getenv("SCION_GITHUB_APP_ENABLED") == "true" {
+	if hub.IsGitHubAppEnabled() {
 		// Use sciontool credential-helper for GitHub App token refresh
 		credentialHelper = "!sciontool credential-helper"
 	} else {
