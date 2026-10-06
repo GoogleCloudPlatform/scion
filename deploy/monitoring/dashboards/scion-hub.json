@@ -20,7 +20,7 @@
         "widget": {
           "title": "Database connection pool",
           "sectionHeader": {
-            "subtitle": "Hub database connection pool, per hub instance.",
+            "subtitle": "Hub database connection pool, per hub replica.",
             "dividerBelow": true
           }
         }
@@ -43,7 +43,7 @@
                       "perSeriesAligner": "ALIGN_MAX",
                       "crossSeriesReducer": "REDUCE_MAX",
                       "groupByFields": [
-                        "metric.label.\"scion_hub_id\""
+                        "metric.label.\"service_instance_id\""
                       ]
                     }
                   }
@@ -51,7 +51,7 @@
                 "plotType": "LINE",
                 "targetAxis": "Y1",
                 "minAlignmentPeriod": "60s",
-                "legendTemplate": "${metric.labels.scion_hub_id}"
+                "legendTemplate": "${metric.labels.service_instance_id}"
               }
             ],
             "timeshiftDuration": "0s",
@@ -80,7 +80,7 @@
                       "perSeriesAligner": "ALIGN_MAX",
                       "crossSeriesReducer": "REDUCE_MAX",
                       "groupByFields": [
-                        "metric.label.\"scion_hub_id\""
+                        "metric.label.\"service_instance_id\""
                       ]
                     }
                   }
@@ -88,7 +88,7 @@
                 "plotType": "LINE",
                 "targetAxis": "Y1",
                 "minAlignmentPeriod": "60s",
-                "legendTemplate": "${metric.labels.scion_hub_id}"
+                "legendTemplate": "${metric.labels.service_instance_id}"
               }
             ],
             "timeshiftDuration": "0s",
@@ -117,7 +117,7 @@
                       "perSeriesAligner": "ALIGN_MAX",
                       "crossSeriesReducer": "REDUCE_MAX",
                       "groupByFields": [
-                        "metric.label.\"scion_hub_id\""
+                        "metric.label.\"service_instance_id\""
                       ]
                     }
                   }
@@ -125,7 +125,7 @@
                 "plotType": "LINE",
                 "targetAxis": "Y1",
                 "minAlignmentPeriod": "60s",
-                "legendTemplate": "${metric.labels.scion_hub_id}"
+                "legendTemplate": "${metric.labels.service_instance_id}"
               }
             ],
             "timeshiftDuration": "0s",
@@ -154,7 +154,7 @@
                       "perSeriesAligner": "ALIGN_MAX",
                       "crossSeriesReducer": "REDUCE_MAX",
                       "groupByFields": [
-                        "metric.label.\"scion_hub_id\""
+                        "metric.label.\"service_instance_id\""
                       ]
                     }
                   }
@@ -162,7 +162,7 @@
                 "plotType": "LINE",
                 "targetAxis": "Y1",
                 "minAlignmentPeriod": "60s",
-                "legendTemplate": "${metric.labels.scion_hub_id}"
+                "legendTemplate": "${metric.labels.service_instance_id}"
               }
             ],
             "timeshiftDuration": "0s",
@@ -181,7 +181,7 @@
         "widget": {
           "title": "Broker dispatch",
           "sectionHeader": {
-            "subtitle": "Durable broker dispatch rows, per hub instance.",
+            "subtitle": "Durable broker dispatch rows, per hub replica.",
             "dividerBelow": true
           }
         }
@@ -204,7 +204,7 @@
                       "perSeriesAligner": "ALIGN_RATE",
                       "crossSeriesReducer": "REDUCE_SUM",
                       "groupByFields": [
-                        "metric.label.\"scion_hub_id\""
+                        "metric.label.\"service_instance_id\""
                       ]
                     }
                   }
@@ -212,7 +212,7 @@
                 "plotType": "LINE",
                 "targetAxis": "Y1",
                 "minAlignmentPeriod": "60s",
-                "legendTemplate": "${metric.labels.scion_hub_id}"
+                "legendTemplate": "${metric.labels.service_instance_id}"
               }
             ],
             "timeshiftDuration": "0s",
@@ -241,7 +241,7 @@
                       "perSeriesAligner": "ALIGN_RATE",
                       "crossSeriesReducer": "REDUCE_SUM",
                       "groupByFields": [
-                        "metric.label.\"scion_hub_id\""
+                        "metric.label.\"service_instance_id\""
                       ]
                     }
                   }
@@ -249,7 +249,7 @@
                 "plotType": "LINE",
                 "targetAxis": "Y1",
                 "minAlignmentPeriod": "60s",
-                "legendTemplate": "${metric.labels.scion_hub_id}"
+                "legendTemplate": "${metric.labels.service_instance_id}"
               }
             ],
             "timeshiftDuration": "0s",
@@ -278,7 +278,7 @@
                       "perSeriesAligner": "ALIGN_RATE",
                       "crossSeriesReducer": "REDUCE_SUM",
                       "groupByFields": [
-                        "metric.label.\"scion_hub_id\""
+                        "metric.label.\"service_instance_id\""
                       ]
                     }
                   }
@@ -286,7 +286,7 @@
                 "plotType": "LINE",
                 "targetAxis": "Y1",
                 "minAlignmentPeriod": "60s",
-                "legendTemplate": "${metric.labels.scion_hub_id}"
+                "legendTemplate": "${metric.labels.service_instance_id}"
               }
             ],
             "timeshiftDuration": "0s",
@@ -315,7 +315,7 @@
                       "perSeriesAligner": "ALIGN_MAX",
                       "crossSeriesReducer": "REDUCE_MAX",
                       "groupByFields": [
-                        "metric.label.\"scion_hub_id\""
+                        "metric.label.\"service_instance_id\""
                       ]
                     }
                   }
@@ -323,7 +323,7 @@
                 "plotType": "LINE",
                 "targetAxis": "Y1",
                 "minAlignmentPeriod": "60s",
-                "legendTemplate": "${metric.labels.scion_hub_id}"
+                "legendTemplate": "${metric.labels.service_instance_id}"
               }
             ],
             "timeshiftDuration": "0s",
@@ -352,7 +352,7 @@
                       "perSeriesAligner": "ALIGN_DELTA",
                       "crossSeriesReducer": "REDUCE_PERCENTILE_50",
                       "groupByFields": [
-                        "metric.label.\"scion_hub_id\""
+                        "metric.label.\"service_instance_id\""
                       ]
                     }
                   }
@@ -360,7 +360,7 @@
                 "plotType": "LINE",
                 "targetAxis": "Y1",
                 "minAlignmentPeriod": "60s",
-                "legendTemplate": "p50 ${metric.labels.scion_hub_id}"
+                "legendTemplate": "p50 ${metric.labels.service_instance_id}"
               },
               {
                 "timeSeriesQuery": {
@@ -371,7 +371,7 @@
                       "perSeriesAligner": "ALIGN_DELTA",
                       "crossSeriesReducer": "REDUCE_PERCENTILE_95",
                       "groupByFields": [
-                        "metric.label.\"scion_hub_id\""
+                        "metric.label.\"service_instance_id\""
                       ]
                     }
                   }
@@ -379,7 +379,7 @@
                 "plotType": "LINE",
                 "targetAxis": "Y1",
                 "minAlignmentPeriod": "60s",
-                "legendTemplate": "p95 ${metric.labels.scion_hub_id}"
+                "legendTemplate": "p95 ${metric.labels.service_instance_id}"
               },
               {
                 "timeSeriesQuery": {
@@ -390,7 +390,7 @@
                       "perSeriesAligner": "ALIGN_DELTA",
                       "crossSeriesReducer": "REDUCE_PERCENTILE_99",
                       "groupByFields": [
-                        "metric.label.\"scion_hub_id\""
+                        "metric.label.\"service_instance_id\""
                       ]
                     }
                   }
@@ -398,7 +398,7 @@
                 "plotType": "LINE",
                 "targetAxis": "Y1",
                 "minAlignmentPeriod": "60s",
-                "legendTemplate": "p99 ${metric.labels.scion_hub_id}"
+                "legendTemplate": "p99 ${metric.labels.service_instance_id}"
               }
             ],
             "timeshiftDuration": "0s",
@@ -417,7 +417,7 @@
         "widget": {
           "title": "Event notifications (Postgres LISTEN/NOTIFY)",
           "sectionHeader": {
-            "subtitle": "Notification delivery lag and drops, per hub instance.",
+            "subtitle": "Notification delivery lag and drops, per hub replica.",
             "dividerBelow": true
           }
         }
@@ -440,7 +440,7 @@
                       "perSeriesAligner": "ALIGN_DELTA",
                       "crossSeriesReducer": "REDUCE_PERCENTILE_50",
                       "groupByFields": [
-                        "metric.label.\"scion_hub_id\""
+                        "metric.label.\"service_instance_id\""
                       ]
                     }
                   }
@@ -448,7 +448,7 @@
                 "plotType": "LINE",
                 "targetAxis": "Y1",
                 "minAlignmentPeriod": "60s",
-                "legendTemplate": "p50 ${metric.labels.scion_hub_id}"
+                "legendTemplate": "p50 ${metric.labels.service_instance_id}"
               },
               {
                 "timeSeriesQuery": {
@@ -459,7 +459,7 @@
                       "perSeriesAligner": "ALIGN_DELTA",
                       "crossSeriesReducer": "REDUCE_PERCENTILE_95",
                       "groupByFields": [
-                        "metric.label.\"scion_hub_id\""
+                        "metric.label.\"service_instance_id\""
                       ]
                     }
                   }
@@ -467,7 +467,7 @@
                 "plotType": "LINE",
                 "targetAxis": "Y1",
                 "minAlignmentPeriod": "60s",
-                "legendTemplate": "p95 ${metric.labels.scion_hub_id}"
+                "legendTemplate": "p95 ${metric.labels.service_instance_id}"
               },
               {
                 "timeSeriesQuery": {
@@ -478,7 +478,7 @@
                       "perSeriesAligner": "ALIGN_DELTA",
                       "crossSeriesReducer": "REDUCE_PERCENTILE_99",
                       "groupByFields": [
-                        "metric.label.\"scion_hub_id\""
+                        "metric.label.\"service_instance_id\""
                       ]
                     }
                   }
@@ -486,7 +486,7 @@
                 "plotType": "LINE",
                 "targetAxis": "Y1",
                 "minAlignmentPeriod": "60s",
-                "legendTemplate": "p99 ${metric.labels.scion_hub_id}"
+                "legendTemplate": "p99 ${metric.labels.service_instance_id}"
               }
             ],
             "timeshiftDuration": "0s",
@@ -515,7 +515,7 @@
                       "perSeriesAligner": "ALIGN_RATE",
                       "crossSeriesReducer": "REDUCE_SUM",
                       "groupByFields": [
-                        "metric.label.\"scion_hub_id\"",
+                        "metric.label.\"service_instance_id\"",
                         "metric.label.\"reason\""
                       ]
                     }
@@ -524,7 +524,7 @@
                 "plotType": "LINE",
                 "targetAxis": "Y1",
                 "minAlignmentPeriod": "60s",
-                "legendTemplate": "${metric.labels.scion_hub_id} reason=${metric.labels.reason}"
+                "legendTemplate": "${metric.labels.service_instance_id} reason=${metric.labels.reason}"
               }
             ],
             "timeshiftDuration": "0s",
@@ -543,7 +543,7 @@
         "widget": {
           "title": "Launch reaper",
           "sectionHeader": {
-            "subtitle": "Async-create launch reaper ticks and errors, per hub instance.",
+            "subtitle": "Async-create launch reaper ticks and errors, per hub replica.",
             "dividerBelow": true
           }
         }
@@ -566,7 +566,7 @@
                       "perSeriesAligner": "ALIGN_RATE",
                       "crossSeriesReducer": "REDUCE_SUM",
                       "groupByFields": [
-                        "metric.label.\"scion_hub_id\"",
+                        "metric.label.\"service_instance_id\"",
                         "metric.label.\"outcome\""
                       ]
                     }
@@ -575,7 +575,7 @@
                 "plotType": "LINE",
                 "targetAxis": "Y1",
                 "minAlignmentPeriod": "60s",
-                "legendTemplate": "${metric.labels.scion_hub_id} outcome=${metric.labels.outcome}"
+                "legendTemplate": "${metric.labels.service_instance_id} outcome=${metric.labels.outcome}"
               }
             ],
             "timeshiftDuration": "0s",
@@ -604,7 +604,7 @@
                       "perSeriesAligner": "ALIGN_RATE",
                       "crossSeriesReducer": "REDUCE_SUM",
                       "groupByFields": [
-                        "metric.label.\"scion_hub_id\""
+                        "metric.label.\"service_instance_id\""
                       ]
                     }
                   }
@@ -612,7 +612,7 @@
                 "plotType": "LINE",
                 "targetAxis": "Y1",
                 "minAlignmentPeriod": "60s",
-                "legendTemplate": "${metric.labels.scion_hub_id}"
+                "legendTemplate": "${metric.labels.service_instance_id}"
               }
             ],
             "timeshiftDuration": "0s",
@@ -641,7 +641,7 @@
                       "perSeriesAligner": "ALIGN_MAX",
                       "crossSeriesReducer": "REDUCE_MAX",
                       "groupByFields": [
-                        "metric.label.\"scion_hub_id\""
+                        "metric.label.\"service_instance_id\""
                       ]
                     }
                   }
@@ -649,7 +649,7 @@
                 "plotType": "LINE",
                 "targetAxis": "Y1",
                 "minAlignmentPeriod": "60s",
-                "legendTemplate": "${metric.labels.scion_hub_id}"
+                "legendTemplate": "${metric.labels.service_instance_id}"
               }
             ],
             "timeshiftDuration": "0s",

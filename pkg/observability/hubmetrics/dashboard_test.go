@@ -36,13 +36,11 @@ import (
 var hubDashboardPath = filepath.Join("..", "..", "..", "deploy", "monitoring", "dashboards", "scion-hub.json")
 
 // pointAttributeLabels are the per-point attribute keys a dashboard chart may
-// filter or group by in addition to HubIDLabel. The test cannot discover
-// them from the recorders because callers pass them at record time:
-// "outcome" on scion.launch_reaper.ticks (pkg/hub/launch_reaper_handler.go)
-// and "reason" on scion.db.notify.dropped (pkg/hub/events_postgres.go).
+// filter or group by in addition to the resource-derived labels. Callers set
+// them at record time, so they come from the constants the call sites use.
 var pointAttributeLabels = map[string]map[string]bool{
-	"scion.launch_reaper.ticks": {"outcome": true},
-	"scion.db.notify.dropped":   {"reason": true},
+	reapermetrics.MetricLaunchReaperTicks: {reapermetrics.AttrTickOutcome: true},
+	dbmetrics.MetricNotificationsDropped:  {dbmetrics.AttrDropReason: true},
 }
 
 // --- instrument discovery --------------------------------------------------
@@ -210,22 +208,32 @@ func (f *fakeMetricService) CreateTimeSeries(_ context.Context, req *monitoringp
 	return &emptypb.Empty{}, nil
 }
 
-// exportedMetric is what Cloud Monitoring receives for one hub metric.
+// exportedMetric is what Cloud Monitoring receives for one hub metric from
+// one replica.
 type exportedMetric struct {
-	otelName  string
-	kind      metricpb.MetricDescriptor_MetricKind
-	valueType metricpb.MetricDescriptor_ValueType
-	labels    map[string]string
+	otelName     string
+	kind         metricpb.MetricDescriptor_MetricKind
+	valueType    metricpb.MetricDescriptor_ValueType
+	labels       map[string]string
+	resourceType string
+	resource     map[string]string
 }
 
-// exportThroughFakeAPI records one point on every hub instrument using the
-// production NewMeterProvider (exporter, resource attributes and label
-// filter included), exports it to an in-process fake Cloud Monitoring API,
-// and returns what arrived keyed by Cloud Monitoring metric type.
-func exportThroughFakeAPI(t *testing.T, hubID string) map[string]exportedMetric {
+// hermeticMetricsEnv clears the environment variables NewMeterProvider reads,
+// so a value leaked from the caller's shell (for example
+// SCION_METRICS_DISPATCH=false) cannot drop instruments or change the hub ID.
+func hermeticMetricsEnv(t *testing.T) {
 	t.Helper()
-	instruments := hubRecorderInstruments(t)
+	t.Setenv("SCION_HUB_ID", "")
+	for _, g := range metricGroups {
+		t.Setenv(g.EnvVar, "")
+	}
+}
 
+// startFakeMonitoringAPI serves an in-process fake Cloud Monitoring metric
+// API on a loopback port and returns it with its address.
+func startFakeMonitoringAPI(t *testing.T) (*fakeMetricService, string) {
+	t.Helper()
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -235,13 +243,22 @@ func exportThroughFakeAPI(t *testing.T, hubID string) map[string]exportedMetric 
 	monitoringpb.RegisterMetricServiceServer(srv, fake)
 	go func() { _ = srv.Serve(lis) }()
 	t.Cleanup(srv.Stop)
+	return fake, lis.Addr().String()
+}
 
+// exportReplica records one point on every hub instrument through the
+// production NewMeterProvider (exporter, resource attributes and label filter
+// included) for a hub replica with the given hub ID and instance ID, and
+// flushes it to the fake API at addr.
+func exportReplica(t *testing.T, addr, hubID, instanceID string, instruments map[string]instrumentKind) {
+	t.Helper()
 	ctx := context.Background()
 	mp, err := NewMeterProvider(ctx, "dashboard-test",
 		WithHubID(hubID),
 		WithHubName("dashboard test hub"),
+		WithInstanceID(instanceID),
 		withExporterOptions(mexporter.WithMonitoringClientOptions(
-			option.WithEndpoint(lis.Addr().String()),
+			option.WithEndpoint(addr),
 			option.WithoutAuthentication(),
 			option.WithGRPCDialOption(grpc.WithTransportCredentials(insecure.NewCredentials())),
 		)),
@@ -304,10 +321,15 @@ func exportThroughFakeAPI(t *testing.T, hubID string) map[string]exportedMetric 
 	if err := mp.ForceFlush(ctx); err != nil {
 		t.Fatalf("ForceFlush: %v", err)
 	}
+}
 
+// collectExported returns every time series the fake API received, with its
+// metric descriptor, in arrival order.
+func collectExported(t *testing.T, fake *fakeMetricService, instruments map[string]instrumentKind) []exportedMetric {
+	t.Helper()
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
-	out := map[string]exportedMetric{}
+	var out []exportedMetric
 	for _, ts := range fake.series {
 		typ := ts.GetMetric().GetType()
 		d, ok := fake.descriptors[typ]
@@ -316,16 +338,35 @@ func exportThroughFakeAPI(t *testing.T, hubID string) map[string]exportedMetric 
 		}
 		var otelName string
 		for name := range instruments {
-			if strings.HasSuffix(typ, "/"+name) {
+			if typ == "workload.googleapis.com/"+name {
 				otelName = name
 			}
 		}
-		out[typ] = exportedMetric{
-			otelName:  otelName,
-			kind:      d.GetMetricKind(),
-			valueType: d.GetValueType(),
-			labels:    ts.GetMetric().GetLabels(),
+		if otelName == "" {
+			t.Fatalf("exported metric type %q does not match any hub instrument", typ)
 		}
+		out = append(out, exportedMetric{
+			otelName:     otelName,
+			kind:         d.GetMetricKind(),
+			valueType:    d.GetValueType(),
+			labels:       ts.GetMetric().GetLabels(),
+			resourceType: ts.GetResource().GetType(),
+			resource:     ts.GetResource().GetLabels(),
+		})
+	}
+	return out
+}
+
+// exportThroughFakeAPI exports every hub instrument for one replica and
+// returns what arrived keyed by Cloud Monitoring metric type.
+func exportThroughFakeAPI(t *testing.T, hubID, instanceID string) map[string]exportedMetric {
+	t.Helper()
+	instruments := hubRecorderInstruments(t)
+	fake, addr := startFakeMonitoringAPI(t)
+	exportReplica(t, addr, hubID, instanceID, instruments)
+	out := map[string]exportedMetric{}
+	for _, m := range collectExported(t, fake, instruments) {
+		out["workload.googleapis.com/"+m.otelName] = m
 	}
 	if len(out) != len(instruments) {
 		t.Fatalf("exported %d metric types, want one per instrument (%d)", len(out), len(instruments))
@@ -334,14 +375,17 @@ func exportThroughFakeAPI(t *testing.T, hubID string) map[string]exportedMetric 
 }
 
 // TestHubMetricsCloudMonitoringMapping pins how hub metrics appear in Cloud
-// Monitoring (ptone/scion#3598): metric type prefix, kinds, and the hub
-// instance label.
+// Monitoring (ptone/scion#3598): metric type prefix, kinds, the replica and
+// deployment labels, and the monitored resource.
 func TestHubMetricsCloudMonitoringMapping(t *testing.T) {
-	t.Setenv("SCION_HUB_ID", "")
-	exported := exportThroughFakeAPI(t, "hub-a")
+	hermeticMetricsEnv(t)
+	exported := exportThroughFakeAPI(t, "hub-a", "replica-1")
 	for typ, m := range exported {
 		if want := "workload.googleapis.com/" + m.otelName; typ != want {
 			t.Errorf("metric type = %q, want %q", typ, want)
+		}
+		if got := m.labels[InstanceIDLabel]; got != "replica-1" {
+			t.Errorf("%s: label %s = %q, want %q (labels %v)", typ, InstanceIDLabel, got, "replica-1", m.labels)
 		}
 		if got := m.labels[HubIDLabel]; got != "hub-a" {
 			t.Errorf("%s: label %s = %q, want %q (labels %v)", typ, HubIDLabel, got, "hub-a", m.labels)
@@ -351,6 +395,9 @@ func TestHubMetricsCloudMonitoringMapping(t *testing.T) {
 		}
 		if m.labels["dashboard_test"] != "1" {
 			t.Errorf("%s: point attribute not exported as label: %v", typ, m.labels)
+		}
+		if m.resourceType != "generic_task" || m.resource["task_id"] != "replica-1" {
+			t.Errorf("%s: monitored resource = %s %v, want generic_task with task_id replica-1", typ, m.resourceType, m.resource)
 		}
 	}
 	// Spot-check the kind mapping for each instrument type the hub uses.
@@ -367,6 +414,49 @@ func TestHubMetricsCloudMonitoringMapping(t *testing.T) {
 	}
 	if vt := exported["workload.googleapis.com/"+dispatchmetrics.MetricDispatchLatency].valueType; vt != metricpb.MetricDescriptor_DISTRIBUTION {
 		t.Errorf("histogram value type = %v, want DISTRIBUTION", vt)
+	}
+}
+
+// TestHubReplicasWriteDistinctSeries covers the HA case: every replica shares
+// one hub ID (server.hub.hub_id), so only the per-process instance ID can
+// keep their series apart. Two replicas exporting the same metrics to the same
+// project must differ in the service_instance_id label and in the monitored
+// resource, and agree on scion_hub_id.
+func TestHubReplicasWriteDistinctSeries(t *testing.T) {
+	hermeticMetricsEnv(t)
+	instruments := hubRecorderInstruments(t)
+	fake, addr := startFakeMonitoringAPI(t)
+	exportReplica(t, addr, "shared-hub", "replica-1", instruments)
+	exportReplica(t, addr, "shared-hub", "replica-2", instruments)
+
+	type seriesKey struct{ metric, instance, resource string }
+	seen := map[seriesKey]bool{}
+	perMetric := map[string]map[string]bool{}
+	for _, m := range collectExported(t, fake, instruments) {
+		if got := m.labels[HubIDLabel]; got != "shared-hub" {
+			t.Errorf("%s: label %s = %q, want shared-hub", m.otelName, HubIDLabel, got)
+		}
+		inst := m.labels[InstanceIDLabel]
+		if inst != "replica-1" && inst != "replica-2" {
+			t.Errorf("%s: label %s = %q, want replica-1 or replica-2", m.otelName, InstanceIDLabel, inst)
+		}
+		if m.resource["task_id"] != inst {
+			t.Errorf("%s: monitored resource task_id = %q, want %q", m.otelName, m.resource["task_id"], inst)
+		}
+		k := seriesKey{m.otelName, inst, m.resourceType + "/" + m.resource["task_id"]}
+		if seen[k] {
+			t.Errorf("%s: replica %s wrote the same series twice", m.otelName, inst)
+		}
+		seen[k] = true
+		if perMetric[m.otelName] == nil {
+			perMetric[m.otelName] = map[string]bool{}
+		}
+		perMetric[m.otelName][k.resource] = true
+	}
+	for name := range instruments {
+		if n := len(perMetric[name]); n != 2 {
+			t.Errorf("%s: %d distinct monitored resources across two replicas, want 2", name, n)
+		}
 	}
 }
 
@@ -459,9 +549,9 @@ func validAligner(kind metricpb.MetricDescriptor_MetricKind, vt metricpb.MetricD
 // TestHubDashboardJSON checks the importable hub dashboard
 // (deploy/monitoring/dashboards/scion-hub.json, ptone/scion#3599): every
 // chart queries a metric the hub exports, with an aligner that fits the
-// metric kind, grouped by hub instance, and the file names no project.
+// metric kind, grouped by hub replica, and the file names no project.
 func TestHubDashboardJSON(t *testing.T) {
-	t.Setenv("SCION_HUB_ID", "")
+	hermeticMetricsEnv(t)
 	raw, err := os.ReadFile(hubDashboardPath)
 	if err != nil {
 		t.Fatalf("reading dashboard: %v", err)
@@ -492,8 +582,8 @@ func TestHubDashboardJSON(t *testing.T) {
 		t.Errorf("dashboard should offer a %s METRIC_LABEL filter", HubIDLabel)
 	}
 
-	exported := exportThroughFakeAPI(t, "hub-a")
-	hubGroup := `metric.label."` + HubIDLabel + `"`
+	exported := exportThroughFakeAPI(t, "hub-a", "replica-1")
+	replicaGroup := `metric.label."` + InstanceIDLabel + `"`
 	charted := map[string]bool{}
 	charts := 0
 	if d.MosaicLayout.Columns <= 0 {
@@ -541,13 +631,13 @@ func TestHubDashboardJSON(t *testing.T) {
 			if agg.AlignmentPeriod == "" {
 				t.Errorf("chart %q: alignmentPeriod must be set", w.Title)
 			}
-			if len(agg.GroupByFields) == 0 || agg.GroupByFields[0] != hubGroup {
-				t.Errorf("chart %q: first groupByField must be %s, got %v", w.Title, hubGroup, agg.GroupByFields)
+			if len(agg.GroupByFields) == 0 || agg.GroupByFields[0] != replicaGroup {
+				t.Errorf("chart %q: first groupByField must be %s, got %v", w.Title, replicaGroup, agg.GroupByFields)
 			}
 
-			// Every label referenced must reach Cloud Monitoring: the hub
-			// instance label (checked against the export above) or a known
-			// per-point attribute of this metric.
+			// Every label referenced must reach Cloud Monitoring: a
+			// resource-derived label (checked against the export above) or
+			// a known per-point attribute of this metric.
 			exprs := append([]string{tsf.Filter, ds.LegendTemplate}, agg.GroupByFields...)
 			for _, e := range exprs {
 				for _, lm := range labelInExpr.FindAllStringSubmatch(e, -1) {

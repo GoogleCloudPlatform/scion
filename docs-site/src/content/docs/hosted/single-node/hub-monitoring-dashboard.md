@@ -3,7 +3,7 @@ title: Hub Monitoring Dashboard
 description: Import the Cloud Monitoring dashboard for Hub database, dispatch, notification and launch reaper metrics.
 ---
 
-The Hub exports operational metrics to Google Cloud Monitoring through OpenTelemetry. Scion includes a ready-made Cloud Monitoring dashboard for these metrics at [`deploy/monitoring/dashboards/scion-hub.json`](https://github.com/GoogleCloudPlatform/scion/blob/main/deploy/monitoring/dashboards/scion-hub.json). The dashboard shows each Hub instance as its own line, which makes it most useful in [HA hosted](/scion/hosted/ha/overview/) deployments with several replicas. It works the same way for a single-node Hub.
+The Hub exports operational metrics to Google Cloud Monitoring through OpenTelemetry. Scion includes a ready-made Cloud Monitoring dashboard for these metrics at [`deploy/monitoring/dashboards/scion-hub.json`](https://github.com/GoogleCloudPlatform/scion/blob/main/deploy/monitoring/dashboards/scion-hub.json). The dashboard shows each Hub replica as its own line, which makes it most useful in [HA hosted](/scion/hosted/ha/overview/) deployments with several replicas. It works the same way for a single-node Hub.
 
 Use the dashboard for rates and per-instance history. The Hub's admin Health page shows only the current state of the instance that served the request.
 
@@ -16,14 +16,13 @@ Use the dashboard for rates and per-instance history. The Hub's admin Health pag
 | Event notifications | Publish-to-deliver lag (p50, p95, p99); drops per second by reason | `scion.db.notify.*` |
 | Launch reaper | Ticks per second by outcome; row errors per second; time disarmed | `scion.launch_reaper.*` |
 
-Every chart is grouped by the `scion_hub_id` label. The dashboard also has a `scion_hub_id` filter at the top, so you can focus on one instance.
+Every chart is grouped by the `service_instance_id` label, so each Hub replica gets its own line. The dashboard also has a `scion_hub_id` filter at the top. All replicas of one Hub share a Hub ID, so this filter selects one Hub deployment when several Hubs export to the same project.
 
 ## Prerequisites
 
 1. **Hub metrics export is on.** The Hub exports metrics when `server.hub.gcp_project_id` (`SCION_SERVER_HUB_GCPPROJECTID`) is set. The startup log then contains `Hub OTel metrics export enabled`. The metric groups can be turned off one by one with `SCION_METRICS_DB_POOL`, `SCION_METRICS_DB_NOTIFY` and `SCION_METRICS_DISPATCH`. A disabled group shows as empty charts.
 2. **The Hub can write metrics.** The Hub's service account needs `roles/monitoring.metricWriter` on that project.
-3. **Each instance has its own Hub ID.** The `scion_hub_id` label comes from the Hub ID (`server.hub.hub_id`, or the `SCION_HUB_ID` environment variable). By default it is derived from the host name. If you pin the same Hub ID on several replicas, their metrics are written to the same time series and the charts cannot tell them apart.
-4. **You can create dashboards.** Importing needs `roles/monitoring.dashboardEditor` (or an equivalent role) on the project.
+3. **You can create dashboards.** Importing needs `roles/monitoring.dashboardEditor` (or an equivalent role) on the project.
 
 The notification charts need the Postgres database driver. A Hub on SQLite does not record the `scion.db.notify.*` metrics.
 
@@ -53,8 +52,10 @@ To pick up a newer version of the file, delete the old dashboard (`gcloud monito
 The Hub uses the Google Cloud OpenTelemetry metric exporter. If you build your own charts or alert policies, use these mappings:
 
 - **Metric type:** `workload.googleapis.com/` followed by the OpenTelemetry name, dots included. For example, `scion.dispatch.claimed` becomes `workload.googleapis.com/scion.dispatch.claimed`.
-- **Hub instance label:** the `scion.hub.id` resource attribute becomes the metric label `scion_hub_id`. The `scion.hub.name` resource attribute becomes `scion_hub_name`. The exporter replaces every character that is not a letter or digit with `_`. Point attributes such as `outcome` (reaper ticks) and `reason` (notification drops) are metric labels too.
-- **Monitored resource:** `generic_node`.
+- **Replica label:** each Hub process sets the `service.instance.id` resource attribute to its own instance ID, a random ID created at startup (prefixed with the pod name when `POD_NAME` is set, as on Kubernetes). It becomes the metric label `service_instance_id`. You don't configure it. It changes every time a replica restarts, so each restart or rollout starts a new set of series and the old ones stop receiving points.
+- **Deployment labels:** the `scion.hub.id` resource attribute becomes the metric label `scion_hub_id`. It comes from the Hub ID (`server.hub.hub_id`, environment variable `SCION_SERVER_HUB_HUBID`), which every replica of an HA Hub shares. Use it to filter by deployment, not to tell replicas apart. The `scion.hub.name` resource attribute becomes `scion_hub_name`. Don't group by it: when no name is configured it falls back to the host name, which is not a stable replica identity.
+- **Label names:** the exporter replaces every character that is not a letter or digit with `_`. Point attributes such as `outcome` (reaper ticks) and `reason` (notification drops) are metric labels too.
+- **Monitored resource:** `generic_task`, with `job` set to `scion-hub` and `task_id` set to the replica's instance ID.
 - **Kinds:**
 
   | OpenTelemetry instrument | Metric kind | Value type | Typical aligner |
@@ -71,13 +72,7 @@ The Hub uses the Google Cloud OpenTelemetry metric exporter. If you build your o
 
 ## Link from the Health page
 
-:::note[Planned]
-A monitoring-dashboard link on the Hub's admin Health page is planned but not available yet. The details below may change.
-:::
-
-The planned design adds an optional `monitoring_dashboard_url` Hub setting, edited on the Server Config admin page. When it is set, the Health page header shows an **Open monitoring dashboard** link that opens the URL in a new tab. The link is hidden when the setting is empty. Only absolute `http` or `https` URLs are accepted.
-
-To point the link at this dashboard, import the dashboard, open it in the Google Cloud console, and copy the URL from the browser's address bar into that setting. The URL includes the project and the dashboard ID, so the JSON file itself never needs a project ID.
+A link to this dashboard from the Hub's admin Health page is planned.
 
 ## Related guides
 
