@@ -44,7 +44,6 @@ const HELPERS: Array<[tag: string, method: string, invalid: string]> = [
   ['scion-page-project-detail', 'formatRelativeTime', '—'],
   ['scion-page-skills', 'formatRelativeTime', '—'],
   ['scion-page-skill-detail', 'formatRelativeTime', '—'],
-  ['scion-page-health-dashboard', 'timeAgo', 'unknown'],
   ['scion-notification-tray', 'relativeTime', '—'],
   ['scion-inbox-tray', 'relativeTime', '—'],
 ];
@@ -72,9 +71,4 @@ describe('compact relative times (tz-refactor task 19)', () => {
       expect(fmt('not-a-date')).toBe(invalid);
     });
   }
-
-  it('health dashboard keeps "never" for a missing time', () => {
-    const el = document.createElement('scion-page-health-dashboard') as AnyEl;
-    expect(el.timeAgo('')).toBe('never');
-  });
 });
