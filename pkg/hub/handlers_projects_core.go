@@ -3126,7 +3126,12 @@ func (s *Server) removeEmbeddedBrokerProjectDir(projectID, slug, removedPath str
 	}
 	projectsRoot := filepath.Join(globalDir, "projects")
 	localPath := filepath.Join(projectsRoot, slug)
-	if filepath.Dir(localPath) != projectsRoot || localPath == filepath.Clean(removedPath) {
+	if filepath.Dir(localPath) != projectsRoot {
+		return
+	}
+	// An empty removedPath means no hub-managed path was removed, so the
+	// local directory is still to be removed.
+	if removedPath != "" && localPath == filepath.Clean(removedPath) {
 		return
 	}
 	if err := util.RemoveAllSafe(localPath); err != nil {

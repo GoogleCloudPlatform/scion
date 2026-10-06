@@ -280,3 +280,37 @@ func TestDeleteProject_BackendConfiguredCombinedServer_RemovesOnlyDirectChildOfP
 	_, err := os.Stat(siblingFile)
 	assert.NoError(t, err, "sibling project directory on the embedded broker's local disk must be kept")
 }
+
+// TestRemoveEmbeddedBrokerProjectDir_RemovedPathCases verifies how the
+// helper treats the hub-managed path already removed: an equal path leaves
+// the local directory to that removal, and an empty or different path
+// removes the local directory.
+func TestRemoveEmbeddedBrokerProjectDir_RemovedPathCases(t *testing.T) {
+	tests := []struct {
+		name        string
+		removedPath func(localPath, home string) string
+		wantRemoved bool
+	}{
+		{"equal path", func(localPath, _ string) string { return localPath }, false},
+		{"equal path uncleaned", func(localPath, _ string) string { return localPath + string(filepath.Separator) }, false},
+		{"empty path", func(string, string) string { return "" }, true},
+		{"backend path", func(_, home string) string {
+			return filepath.Join(home, "nfs", "share1", "hub-projects", "removed-path")
+		}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newEmbeddedCleanupFixture(t, "removed-path", nil, true)
+			writeTree(t, f.localPath, "README.md")
+
+			f.srv.removeEmbeddedBrokerProjectDir(f.project.ID, f.project.Slug, tt.removedPath(f.localPath, f.home))
+
+			_, err := os.Stat(f.localPath)
+			if tt.wantRemoved {
+				assert.True(t, os.IsNotExist(err), "local project directory should be removed (stat err: %v)", err)
+			} else {
+				assert.NoError(t, err, "local project directory should be left to the hub-managed removal")
+			}
+		})
+	}
+}
