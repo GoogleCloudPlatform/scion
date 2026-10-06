@@ -5823,6 +5823,21 @@ func (s *Server) handleProjectBySlug(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// deleteProject ops (writeRuntimeOpError): a failed step answers with the
+// fixed "Failed to <op>" text only; the cause, which names broker paths,
+// stays in the broker log (ptone/scion#3496).
+const (
+	opResolveProjectPath     = "resolve project path"
+	opResolveProjectsBase    = "resolve base path"
+	opCheckSharedDirStorage  = "check project shared-dir storage"
+	opRemoveSharedDirStorage = "remove project shared-dir storage"
+	opRemoveProjectDir       = "remove project directory"
+)
+
+// deleteProjectAbs is deleteProject's filepath.Abs; a variable so tests
+// can make it fail, which it cannot for the absolute paths it is given.
+var deleteProjectAbs = filepath.Abs
+
 // deleteProject removes the local hub-managed project directory for the given
 // slug, together with its shared-dir storage when that lives under
 // ~/.scion/project-configs (see hubManagedProjectSharedDirsBase).
@@ -5839,14 +5854,14 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug stri
 	// Path traversal protection: ensure the resolved path stays inside the
 	// projects base directory.
 	projectsBase := filepath.Join(globalDir, "projects")
-	absProject, err := filepath.Abs(projectPath)
+	absProject, err := deleteProjectAbs(projectPath)
 	if err != nil {
-		RuntimeError(w, "Failed to resolve project path: "+err.Error())
+		s.writeRuntimeOpError(w, r.Context(), opResolveProjectPath, err, "project_slug", slug)
 		return
 	}
-	absProjectsBase, err := filepath.Abs(projectsBase)
+	absProjectsBase, err := deleteProjectAbs(projectsBase)
 	if err != nil {
-		RuntimeError(w, "Failed to resolve base path: "+err.Error())
+		s.writeRuntimeOpError(w, r.Context(), opResolveProjectsBase, err, "project_slug", slug)
 		return
 	}
 	if !strings.HasPrefix(absProject, absProjectsBase+string(filepath.Separator)) {
@@ -5874,23 +5889,21 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug stri
 	if requestedID := r.URL.Query().Get("project_id"); requestedID == "" {
 		s.agentLifecycleLog.Warn("project delete without project_id: shared-dir storage not removed", "slug", slug)
 	} else if sharedDirsBase, err := hubManagedProjectSharedDirsBase(globalDir, absProject, slug, requestedID); errors.Is(err, errSharedDirStorageUnreadable) {
-		s.agentLifecycleLog.Warn("project shared-dir storage could not be checked", "slug", slug, "project_id", requestedID, "error", err)
-		RuntimeError(w, "Failed to check project shared-dir storage: "+err.Error())
+		s.writeRuntimeOpError(w, r.Context(), opCheckSharedDirStorage, err, "project_slug", slug, "project_id", requestedID)
 		return
 	} else if err != nil {
 		s.agentLifecycleLog.Warn("project shared-dir storage not removed", "slug", slug, "project_id", requestedID, "reason", err)
 	} else if sharedDirsBase != "" {
 		if err := removeProjectConfigsSubtree(globalDir, sharedDirsBase); err != nil {
-			s.agentLifecycleLog.Warn("failed to remove project shared-dir storage", "slug", slug, "path", sharedDirsBase, "error", err)
-			RuntimeError(w, "Failed to remove project shared-dir storage: "+err.Error())
+			s.writeRuntimeOpError(w, r.Context(), opRemoveSharedDirStorage, err,
+				"project_slug", slug, "project_id", requestedID, "path", sharedDirsBase)
 			return
 		}
 		s.agentLifecycleLog.Info("Removed hub-managed project shared-dir storage", "slug", slug, "path", sharedDirsBase)
 	}
 
 	if err := os.RemoveAll(projectPath); err != nil {
-		s.agentLifecycleLog.Warn("failed to remove project directory", "slug", slug, "path", projectPath, "error", err)
-		RuntimeError(w, "Failed to remove project directory: "+err.Error())
+		s.writeRuntimeOpError(w, r.Context(), opRemoveProjectDir, err, "project_slug", slug, "path", projectPath)
 		return
 	}
 

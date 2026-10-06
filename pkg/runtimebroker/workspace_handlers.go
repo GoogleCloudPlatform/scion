@@ -100,10 +100,14 @@ const (
 
 // syncWorkspaceToGCS and uploadWorkspaceManifest perform a workspace
 // upload's GCS writes; variables so tests can substitute fakes for real
-// GCS (as syncWorkspaceFromGCS does for downloads).
+// GCS (as syncWorkspaceFromGCS does for downloads). statProjectWorkspace
+// is the project upload's existence check, a variable so tests can produce
+// a stat error other than not-exist, which path validation otherwise
+// refuses first.
 var (
 	syncWorkspaceToGCS      = gcp.SyncToGCS
 	uploadWorkspaceManifest = uploadManifest
+	statProjectWorkspace    = os.Stat
 )
 
 // handleWorkspaceUpload handles POST /api/v1/workspace/upload
@@ -579,7 +583,7 @@ func (s *Server) handleProjectWorkspaceUpload(w http.ResponseWriter, r *http.Req
 	req.WorkspacePath = resolvedWorkspacePath
 
 	// Verify the resolved workspace path exists.
-	if _, err := os.Stat(req.WorkspacePath); err != nil {
+	if _, err := statProjectWorkspace(req.WorkspacePath); err != nil {
 		if os.IsNotExist(err) {
 			NotFound(w, "Project workspace path")
 			return

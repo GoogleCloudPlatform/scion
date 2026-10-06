@@ -279,8 +279,7 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 		// too: admission (beginAsyncLaunch) normally answers those with the
 		// sync 400/422, and one only found here reports the same text,
 		// under runtime_error.
-		msg := dlMessage
-		s.failLaunch(ctx, sender, rec, lc, alreadyCompleted, currentStep, "runtime_error", msg)
+		s.failLaunch(ctx, sender, rec, lc, alreadyCompleted, currentStep, "runtime_error", dlMessage)
 		return
 	}
 	lc.opts = opts

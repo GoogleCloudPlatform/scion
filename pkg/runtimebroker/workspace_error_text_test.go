@@ -274,8 +274,8 @@ func TestGCSBootstrapError_GlobalDirFixedText(t *testing.T) {
 	if rec == nil {
 		t.Fatalf("no bootstrap failure record; logs: %s", logs.String())
 	}
-	if got, _ := rec["error"].(string); got == "" || !strings.Contains(err.Error(), got) {
-		t.Errorf("log record error = %q, want the cause (%q)", got, err.Error())
+	if got, _ := rec["error"].(string); !strings.Contains(got, homeUnsetDetail) {
+		t.Errorf("log record error = %q, want it to carry %q", got, homeUnsetDetail)
 	}
 }
 
@@ -511,6 +511,22 @@ func TestWorkspaceHandlerErrors_FixedText(t *testing.T) {
 				logs := captureLifecycleJSONLog(srv)
 				installWorkspaceTransfers(t, fakeWorkspaceTransfers{fromErr: gcsErr})
 				return apply(srv), logs, bootstrapDetail
+			},
+		},
+		{
+			name: "project-upload/access", op: opAccessWorkspacePath, wantText: "Failed to access workspace path",
+			logKey: "project_id", logValue: bootstrapProjectID,
+			run: func(t *testing.T) (*httptest.ResponseRecorder, *syncBuffer, string) {
+				srv, _ := agentServer(t, nil)
+				logs := captureLifecycleJSONLog(srv)
+				installFailingWorkspaceTransfers(t)
+				const statDetail = "stat /srv/broker-7/projects/secret: permission denied"
+				prev := statProjectWorkspace
+				statProjectWorkspace = func(string) (os.FileInfo, error) { return nil, errors.New(statDetail) }
+				t.Cleanup(func() { statProjectWorkspace = prev })
+				return doProjectUploadRequest(t, srv, ProjectWorkspaceUploadRequest{
+					ProjectID: bootstrapProjectID, StoragePath: "workspaces/p/w", WorkspacePath: t.TempDir(),
+				}), logs, statDetail
 			},
 		},
 		{
