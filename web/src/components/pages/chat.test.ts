@@ -1914,6 +1914,25 @@ describe('chat page — startup after the page is removed', () => {
     return el;
   }
 
+  /**
+   * Record every initV2 the page starts, so a test can await all of them
+   * settling — the superseded ones included. A fixed flush() is not enough:
+   * initV2 resumes only once the test runner has answered its imports,
+   * which may take any number of macrotask turns under load.
+   */
+  function trackStartups(el: any): () => Promise<void> {
+    const startups: Promise<void>[] = [];
+    const initV2 = el.initV2 as () => Promise<void>;
+    el.initV2 = function (this: unknown): Promise<void> {
+      const startup = initV2.call(this);
+      startups.push(startup);
+      return startup;
+    };
+    return async () => {
+      await Promise.all(startups);
+    };
+  }
+
   function dmListLoads(): number {
     return vi.mocked(apiFetch).mock.calls.filter(([path]) => path === '/api/v1/chat/dms').length;
   }
@@ -1943,12 +1962,13 @@ describe('chat page — startup after the page is removed', () => {
     const intervals = trackIntervals();
     await loadLazyModules();
     const el = createUnrenderedPage();
+    const startupsSettled = trackStartups(el);
     window.history.replaceState({}, '', '/chat');
     document.body.appendChild(el);
     // The router replaces the page before initV2's imports come back.
     el.remove();
 
-    await flush();
+    await startupsSettled();
 
     expect(dmListLoads()).toBe(0);
     expect(el._fallbackPollInterval).toBeNull();
@@ -1961,13 +1981,16 @@ describe('chat page — startup after the page is removed', () => {
     const intervals = trackIntervals();
     await loadLazyModules();
     const el = createUnrenderedPage();
+    const startupsSettled = trackStartups(el);
     window.history.replaceState({}, '', '/chat');
     try {
       document.body.appendChild(el);
       el.remove();
       document.body.appendChild(el);
 
-      await flush();
+      // Both startups: the superseded one must have given up, not just
+      // not yet arrived.
+      await startupsSettled();
 
       expect(el.v2SpaceRailLoaded).toBe(true);
       expect(dmListLoads()).toBe(1);
