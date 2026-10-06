@@ -32,15 +32,16 @@ import (
 )
 
 // realTokenContext authenticates a minted token key the way the auth
-// middleware does and returns a request context carrying its identity and
-// credential.
+// middleware does and returns a request context carrying its identity,
+// credential and auth type.
 func realTokenContext(t *testing.T, srv *Server, key string) context.Context {
 	t.Helper()
 	scoped, err := srv.uatService.ValidateToken(context.Background(), key)
 	require.NoError(t, err)
 	ctx := context.WithValue(context.Background(), userContextKey{}, scoped)
 	ctx = contextWithIdentity(ctx, scoped)
-	return contextWithCredentialContext(ctx, credentialContextForIdentity(scoped))
+	ctx = contextWithCredentialContext(ctx, credentialContextForIdentity(scoped))
+	return contextWithAuthType(ctx, AuthTypeUAT)
 }
 
 // requestWithContext builds a request for a direct handler call.
