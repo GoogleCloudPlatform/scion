@@ -2190,6 +2190,7 @@ func (s *Server) createAgentInProject(
 						"agent_id", agent.ID, "project_id", project.ID, "error", workspaceErr)
 					corrID := cleanup(createRollback{Stage: createStageWorkspaceStorage, Cause: workspaceErr})
 					writeCreateFailure(w, corrID, func() { writeWorkspaceStorageUnavailable(w, workspaceErr) })
+					ucancel()
 					return
 				} else if workspaceErr != nil {
 					s.agentLifecycleLog.Warn("Skipping GCS upload of invalid hub-managed project workspace",
