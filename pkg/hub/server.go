@@ -4427,6 +4427,23 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 			runtimeBrokerID = providers[0].BrokerID
 		}
 
+		// Flat Runtime Broker new-create rules, as on the interactive path
+		// (flatCreatePlacement), before any default profile is consulted and
+		// before any write. A missing providers[0] row is treated as legacy.
+		// A scheduled request carries no explicit profile.
+		var scheduledBroker *store.RuntimeBroker
+		if runtimeBrokerID != "" {
+			if b, err := s.store.GetRuntimeBroker(ctx, runtimeBrokerID); err == nil {
+				scheduledBroker = b
+			} else if !errors.Is(err, store.ErrNotFound) {
+				return fmt.Errorf("failed to resolve runtime broker %q: %w", runtimeBrokerID, err)
+			}
+		}
+		placement, err := s.flatCreatePlacement(ctx, scheduledBroker, "", "")
+		if err != nil {
+			return err
+		}
+
 		// Check if an agent with this name already exists
 		existingAgent, err := s.store.GetAgentBySlug(ctx, evt.ProjectID, slug)
 		if err == nil && existingAgent != nil {
@@ -4449,6 +4466,14 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 			Phase:           "created",
 			Detached:        true,
 			CreatedBy:       evt.CreatedBy,
+		}
+		// The pin is written in the CreateAgent transaction.
+		applyPinnedPlacement(agent, placement)
+		if agent.IsPinned() {
+			if p := projectSettingsFromAnnotations(project).ActiveProfile; p != nil && *p != "" {
+				slog.Warn("Scheduler: default Runtime Broker Profile not applied to a flat Runtime Broker agent",
+					"eventID", evt.ID, "agent_id", agent.ID, "profile", *p, "runtime_broker_id", agent.PinnedRuntimeBrokerID)
+			}
 		}
 
 		// Build applied config with task

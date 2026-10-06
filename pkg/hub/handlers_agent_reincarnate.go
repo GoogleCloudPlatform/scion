@@ -333,6 +333,15 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 			"agent has no runtime broker assigned", nil)
 		return
 	}
+	// Flat placement pre-check for an in-place reincarnation, before the
+	// reincarnation record and the worker: a refusal stops nothing,
+	// reprovisions nothing and mints no credential.
+	if err := s.checkPinnedPlacement(agent); err != nil {
+		if !writeRuntimeTargetRefusal(w, err) {
+			writeErrorFromErr(w, err, "")
+		}
+		return
+	}
 	if !s.checkBrokerAvailability(w, r, agent) {
 		return
 	}

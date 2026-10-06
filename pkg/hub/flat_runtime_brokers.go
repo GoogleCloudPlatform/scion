@@ -634,3 +634,28 @@ func runtimeTargetDMError(err error) *AgentDMError {
 	}
 	return &AgentDMError{Code: ErrCodeInternalError, Message: "Failed to wake agent: " + err.Error(), HTTPStatus: http.StatusInternalServerError}
 }
+
+// settleRuntimeTargetRefusal records a flat Runtime Broker refusal returned
+// by a start as a definite start failure: the agent's message is set to the
+// refusal message. Nothing retries a refusal. Any other error is ignored.
+func (s *Server) settleRuntimeTargetRefusal(ctx context.Context, agent *store.Agent, err error) {
+	msg := ""
+	var refusal *RuntimeTargetRefusal
+	var se *brokerStatusError
+	switch {
+	case errors.As(err, &refusal):
+		msg = refusal.Message
+	case errors.As(err, &se):
+		if _, ok := runtimeTargetRelayDetailKeys[se.brokerErrorCode()]; ok {
+			msg = se.brokerErrorMessage()
+		}
+	}
+	if msg == "" || agent == nil {
+		return
+	}
+	if uerr := s.store.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{Message: msg}); uerr != nil {
+		slog.Warn("failed to record a flat Runtime Broker start refusal on the agent", "agent_id", agent.ID, "error", uerr)
+		return
+	}
+	agent.Message = msg
+}

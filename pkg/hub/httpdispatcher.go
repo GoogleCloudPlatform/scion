@@ -1367,7 +1367,9 @@ func applyBrokerAgentConfig(agent *store.Agent, info *RemoteAgentInfo) {
 		if info.Image != "" {
 			agent.AppliedConfig.Image = info.Image
 		}
-		if info.Profile != "" {
+		// No Runtime Broker-reported profile is written onto a pinned (flat)
+		// agent.
+		if info.Profile != "" && !agent.IsPinned() {
 			agent.AppliedConfig.Profile = info.Profile
 		}
 	}

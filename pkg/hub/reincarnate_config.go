@@ -190,6 +190,11 @@ func (s *Server) buildFreshAppliedConfig(ctx context.Context, agent *store.Agent
 		OwnerID:       agent.OwnerID,
 		Ancestry:      agent.Ancestry,
 		AppliedConfig: fresh,
+		// The pin is kept across generations; a pinned (flat) agent does
+		// not re-derive a default Runtime Broker Profile.
+		PinnedRuntimeBrokerID:   agent.PinnedRuntimeBrokerID,
+		PinnedRuntimeTargetID:   agent.PinnedRuntimeTargetID,
+		PinnedRuntimeTargetType: agent.PinnedRuntimeTargetType,
 	}
 	// deriveAgentConfig — not resolveDerivedConfig directly — replays the
 	// FULL create pipeline (applyProjectDefaults, then applyHubAgentDefaults,
