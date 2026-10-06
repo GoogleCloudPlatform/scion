@@ -634,6 +634,12 @@ const ROUTES: RouteConfig[] = [
     load: () => import('../components/pages/harness-config-detail.js'),
   },
   {
+    // Artifact page (experiment hub.artifacts; the page renders 404 when off).
+    pattern: /^\/projects\/[^/]+\/artifacts\/[^/]+$/,
+    tag: 'scion-page-artifact-detail',
+    load: () => import('../components/pages/artifact-detail.js'),
+  },
+  {
     pattern: /^\/projects\/[^/]+\/schedules$/,
     tag: 'scion-page-project-schedules',
     load: () => import('../components/pages/project-schedules.js'),
