@@ -28,12 +28,16 @@ func TestMetricsQueryWindowFor(t *testing.T) {
 
 	window := metricsQueryWindowFor(now, 7, &queryConfig{ProjectID: "project-1"})
 
+	// No zone means UTC: the window covers seven UTC calendar days ending
+	// today (14 September, since 08:30+02:00 is 06:30Z), so it starts at
+	// UTC midnight on 8 September.
 	assert.Equal(t, now.UTC(), window.end)
-	assert.Equal(t, now.UTC().AddDate(0, 0, -7), window.start)
+	assert.Equal(t, time.Date(2026, time.September, 8, 0, 0, 0, 0, time.UTC), window.start)
 	assert.Equal(t, []string{`metric.labels.scion_project_id = "project-1"`}, window.extraFilter)
 
 	global := metricsQueryWindowFor(now, 1, &queryConfig{})
 	assert.Nil(t, global.extraFilter)
+	assert.Equal(t, time.Date(2026, time.September, 14, 0, 0, 0, 0, time.UTC), global.start, "a one-day period is today only")
 }
 
 func TestQueryGroupedTimeSeriesSetPreservesPartialResults(t *testing.T) {
@@ -73,7 +77,7 @@ func TestQueryGroupedTimeSeriesSetSuccess(t *testing.T) {
 func TestQueryGroupedMetricsViewUsesConcreteCachedView(t *testing.T) {
 	service := &MetricsDashboardService{cache: make(map[string]*cacheEntry)}
 	want := &ModelCallsView{PeriodDays: 7}
-	service.setCache("model-calls:7:project-1", want)
+	service.setCache("model-calls:7:tz=UTC:project-1", want)
 
 	got, err := queryGroupedMetricsView(
 		service,

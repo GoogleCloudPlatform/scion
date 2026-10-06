@@ -520,8 +520,15 @@ the agent's status message reads "migrating to generation N".
 Reincarnation works for agents in clone-per-agent, shared-workspace (shared-plain), and
 Hub-managed workspaces. For a shared-workspace agent, the agent record, identity, and shared
 checkout are preserved, and sibling agents sharing the checkout are not restarted. Agents in
-worktree-per-agent projects and agents in empty-per-agent projects are not yet supported; the Hub
-rejects the request with `400 Bad Request`. Reincarnating another agent requires the `agent.lifecycle` permission (the same
+worktree-per-agent projects are not yet supported; the Hub rejects the request with
+`400 Bad Request`. An agent in an empty-per-agent project can be reincarnated on its current
+Runtime Broker when it runs on a local-disk runtime (Docker, Podman, or Apple `container`): the new
+generation reuses the agent's private workspace directory in place, with its content. Reincarnation
+never creates or recreates that directory; if it is missing, or is not a real directory, the
+Runtime Broker refuses the reprovision, the reincarnation fails, and the agent stays stopped. On Kubernetes or any other runtime the Hub rejects the
+request with `400 Bad Request`, and a Runtime Broker too old to reuse the workspace gets
+`412 Precondition Failed`; in both cases the agent is not stopped, and `--dry-run` reports the same
+answer. Reincarnating another agent requires the `agent.lifecycle` permission (the same
 as stop, start, and restart); an agent can always reincarnate itself.
 
 **Usage:** `scion reincarnate [agent-name] [flags]`

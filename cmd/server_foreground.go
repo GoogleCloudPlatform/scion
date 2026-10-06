@@ -2969,15 +2969,15 @@ func colocatedBrokerRegisters(cfg *config.GlobalConfig, s store.Store) bool {
 // substrate runtime whose construct-time dependencies failed (building the
 // Kubernetes client, or substrate.Dial's trust-bundle/CA load and API dial,
 // e.g. on an API-server blip at boot) — refusing on those would turn a
-// transient outage into a boot crash loop. The broker starts degraded
-// instead, but that degraded state is not self-healing: the default runtime
-// is resolved once here and is not rebuilt until the broker process
-// restarts, and /healthz still reports healthy (the "error" runtime counts
-// as an available runtime in the health check), so nothing restarts the
-// broker automatically. Operators must alert on the logged degraded "error"
-// runtime line and restart the broker to rebuild the runtime. It also
-// includes, for example, a Kubernetes client that fails Verify at startup,
-// or a missing container CLI.
+// transient outage into a boot crash loop. It also includes, for example, a
+// Kubernetes client that fails Verify at startup, or a missing container
+// CLI. The broker starts degraded instead, but that degraded state is not
+// self-healing: the default runtime is resolved once here and is not
+// rebuilt until the broker process restarts. /healthz reports status
+// "degraded" with checks["runtime"] = "unavailable" but still answers 200,
+// so a liveness probe does not restart the broker; /readyz returns 503, and
+// the Broker /healthz and /readyz uptime checks alert. Operators restart the
+// broker to rebuild the runtime once the cause is fixed.
 //
 // Named profiles other than the default are unaffected: those are resolved
 // lazily, per request, and this check only ever sees the one runtime
