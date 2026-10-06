@@ -215,8 +215,8 @@ func TestBearerGate_UnknownTargetDeniesWithoutEvidence(t *testing.T) {
 	}
 }
 
-// legacyCeiling returns a frozen ceiling for a token minted before
-// ceilings carried a version, normalized from its stored scopes.
+// legacyCeiling returns a frozen ceiling with no version, normalized from
+// its stored scopes.
 func legacyCeiling(scopes ...string) permissions.FrozenPermissionCeiling {
 	return permissions.FrozenPermissionCeiling{Version: permissions.CeilingVersionUnspecified, PermissionIDs: permissions.NormalizeLegacyUATScopes(scopes)}
 }

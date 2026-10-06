@@ -117,8 +117,7 @@ func bearerGateInputsFor(principal PrincipalContext, credential CredentialContex
 //     3b. The permission is eligible for the token's boundary kind: its
 //     allowed boundary kinds (permissions.SelectorAllowedBoundaries)
 //     exist and contain the boundary kind. This applies the boundary rule
-//     mint enforces to every ceiling, including a frozen legacy ceiling
-//     whose permissions were never checked against a boundary at mint.
+//     mint enforces to every ceiling, whatever its version.
 //  4. For a project target, the principal currently has access to that
 //     project for this permission and target (ProjectTargetAdmission). This
 //     stage applies to every boundary kind, hub included: a hub boundary
