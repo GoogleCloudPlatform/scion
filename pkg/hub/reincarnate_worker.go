@@ -533,7 +533,9 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 	// genuine failure — broker unreachable, a real runtime error, or a stop
 	// that timed out — and continuing past it would re-render config and
 	// dispatch a fresh session under a container that is still running the
-	// old generation.
+	// old generation. A run-scoped stop's 404 (ErrStopRunNotFound,
+	// ptone/scion#2550) fails here too: the entry holding the name belongs
+	// to another run, which the broker left running.
 	if err := dispatcher.DispatchAgentStop(ctx, agent); err != nil {
 		s.failReincarnation(ctx, agentID, reincarnationID, store.AgentReincarnationStateStopping, "stop failed: "+err.Error(), previous)
 		return
