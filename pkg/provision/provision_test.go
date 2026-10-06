@@ -2838,13 +2838,13 @@ func TestTryCreateFileLock_OwnerWriteFailure_RemovesLockDir(t *testing.T) {
 	assert.Empty(t, entries, "a failed owner-marker write must leave no staging directory (or anything else) behind")
 }
 
-// TestGitCloneViaTempDir_MoveFailure_LeavesNoPartialClone is a regression
-// test for gitCloneViaTempDir's own handling of
+// TestGitCloneWorkspace_MoveFailure_LeavesNoPartialClone is a regression
+// test for gitCloneWorkspace's own handling of
 // a moveDirContentsUp failure (as opposed to moveDirContentsUp's rollback in
 // isolation, already covered by TestMoveDirContentsUp_RollsBackOnPartialFailure):
 // with moveRenameFile made replaceable, a move failure can be forced mid-clone,
 // proving the caller returns an error and leaves no scratch dir behind.
-func TestGitCloneViaTempDir_MoveFailure_LeavesNoPartialClone(t *testing.T) {
+func TestGitCloneWorkspace_MoveFailure_LeavesNoPartialClone(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
 	bareRepo := initBareGitRepo(t)
 	hostPath := t.TempDir()
@@ -2877,7 +2877,7 @@ func TestGitCloneViaTempDir_MoveFailure_LeavesNoPartialClone(t *testing.T) {
 
 // TestProvisionShared_MoveFailure_WritesNoSentinel end-to-ends the same
 // simulated failure through ProvisionShared:
-// confirms no sentinel is written either, not just that gitCloneViaTempDir
+// confirms no sentinel is written either, not just that gitCloneWorkspace
 // itself returns an error.
 func TestProvisionShared_MoveFailure_WritesNoSentinel(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
@@ -2946,17 +2946,17 @@ func TestProvisionShared_LostOwnershipDuringChown_WritesNoSentinel(t *testing.T)
 		"sentinel must not be written after losing the lock during chown")
 }
 
-// TestGitCloneViaTempDir_LostOwnershipBeforeMove_AbortsWithoutMoving is the
+// TestGitCloneWorkspace_LostOwnershipBeforeMove_AbortsWithoutMoving is the
 // regression test for the "clone move" ownership
 // re-check: a stillOwned callback reporting loss must abort before
 // moveDirContentsUp ever runs, leaving dest untouched and no scratch dir
 // behind.
-func TestGitCloneViaTempDir_LostOwnershipBeforeMove_AbortsWithoutMoving(t *testing.T) {
+func TestGitCloneWorkspace_LostOwnershipBeforeMove_AbortsWithoutMoving(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
 	bareRepo := initBareGitRepo(t)
 	hostPath := t.TempDir()
 
-	err := gitCloneViaTempDir(context.Background(), ProvisionInput{
+	err := gitCloneWorkspace(context.Background(), ProvisionInput{
 		Resolved:    ResolvedWorkspace{HostPath: hostPath, Backend: "nfs"},
 		ProjectID:   "proj-lost-ownership",
 		SentinelDir: hostPath,
@@ -3029,7 +3029,7 @@ func TestProvisionShared_NoLocker_ConcurrentSameProject_NoCorruption(t *testing.
 // sets SentinelDir: workspace, because only the workspace dir is mounted —
 // its parent isn't visible in that container's filesystem view at all). The
 // fallback lock marker therefore lives INSIDE the exact directory `git
-// clone` targets, which is what gitCloneViaTempDir exists to handle. This
+// clone` targets, which is what gitCloneWorkspace exists to handle. This
 // test would fail without it: a naive lock-dir-inside-the-clone-target
 // would make every single `git clone` invocation hit git's "already exists
 // and is not an empty directory" refusal, and self-healing that by deleting
@@ -3073,7 +3073,7 @@ func TestProvisionShared_NoLocker_ConcurrentSameProject_SentinelInWorkspace(t *t
 	assert.FileExists(t, filepath.Join(hostPath, ProvisionSentinelFile))
 	assert.NoDirExists(t, filepath.Join(hostPath, provisionFileLockName))
 
-	// No leftover scratch clone directories from gitCloneViaTempDir.
+	// No leftover scratch clone directories from gitCloneWorkspace.
 	entries, err := os.ReadDir(hostPath)
 	require.NoError(t, err)
 	for _, e := range entries {
@@ -3225,13 +3225,10 @@ func TestProvisionShared_NoLocker_WorktreePerAgent_SentinelPresent_CrashedLock_S
 	assert.DirExists(t, WorktreePath(hostPath, "agent-1"))
 }
 
-// TestGitCloneViaTempDir_RefusesWhenWorktreesNonEmpty covers the stray-
-// content-clearing refusal path:
-// gitCloneViaTempDir must never clear a non-empty "worktrees" dir
-// out from under other agents' checkouts, even though the lock marker's own
-// presence would otherwise make dest look "not empty" and eligible for the
-// stray-content clear.
-func TestGitCloneViaTempDir_RefusesWhenWorktreesNonEmpty(t *testing.T) {
+// TestGitCloneWorkspace_RefusesWhenWorktreesNonEmpty: gitCloneWorkspace
+// must refuse a workspace whose "worktrees" dir holds other agents'
+// checkouts, and leave it untouched.
+func TestGitCloneWorkspace_RefusesWhenWorktreesNonEmpty(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
 	bareRepo := initBareGitRepo(t)
 
@@ -3254,13 +3251,13 @@ func TestGitCloneViaTempDir_RefusesWhenWorktreesNonEmpty(t *testing.T) {
 	assert.FileExists(t, filepath.Join(worktreesDir, "sentinel-file"))
 }
 
-// TestGitCloneViaTempDir_PreClearSurvivesConcurrentStagingDir proves
-// the pre-clone stray-content clear must never remove a concurrent caller's
+// TestGitCloneWorkspace_PreClearSurvivesConcurrentStagingDir proves
+// the pre-clone workspace check must accept a concurrent caller's
 // in-progress staging directory. This builds its staging directory using
 // provisionLockStagingPattern — the SAME constant tryCreateFileLock itself
 // uses — rather than a separately-maintained literal copy of the pattern, so
 // a drift between the two is exactly what this test would catch.
-func TestGitCloneViaTempDir_PreClearSurvivesConcurrentStagingDir(t *testing.T) {
+func TestGitCloneWorkspace_PreClearSurvivesConcurrentStagingDir(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
 	bareRepo := initBareGitRepo(t)
 	hostPath := t.TempDir()
@@ -3280,7 +3277,7 @@ func TestGitCloneViaTempDir_PreClearSurvivesConcurrentStagingDir(t *testing.T) {
 	}, func() bool { return true })
 
 	require.NoError(t, err)
-	assert.DirExists(t, stagingDir, "the pre-clone clear must not remove a concurrent caller's staging directory")
+	assert.DirExists(t, stagingDir, "the pre-clone check must not remove a concurrent caller's staging directory")
 	current, readErr := os.ReadFile(filepath.Join(stagingDir, provisionLockOwnerFile))
 	require.NoError(t, readErr)
 	assert.Equal(t, "concurrent-owner", string(current))

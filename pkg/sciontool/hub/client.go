@@ -169,6 +169,9 @@ type Client struct {
 	retryMaxDelay  time.Duration
 	oidcSource     transportauth.TokenSource // transport-layer OIDC token source (nil = disabled)
 	oidcMode       transportauth.HeaderMode  // header carrying the transport token
+	// oidcLate is true when oidcSource is the file-backed source installed
+	// in proxy mode for an agent that started without a transport token.
+	oidcLate bool
 	// tokenChownUID and tokenChownGID are the ownership StartTokenRefresh
 	// applies (via WriteTokenFile) to the token file after every refresh.
 	// Guarded by tokenMu alongside token itself. Set once, before the
@@ -260,6 +263,16 @@ func (c *Client) HubURL() string {
 		return ""
 	}
 	return c.hubURL
+}
+
+// HTTPClient returns the client's HTTP client, which carries the hub
+// transport settings (timeout and transport credential), so other hub
+// callers share them.
+func (c *Client) HTTPClient() *http.Client {
+	if c == nil {
+		return nil
+	}
+	return c.client
 }
 
 func (c *Client) AgentID() string {
@@ -1615,6 +1628,13 @@ func TransportTokenFilePath() string {
 	return filepath.Join(tokenHomeResolver(), ".scion", transportauth.TransportTokenFileName)
 }
 
+// NewTransportTokenFileSource returns a file-backed transport source on
+// TransportTokenFilePath() that reads with the same guarded, no-follow
+// reader as the agent token file. It has no bootstrap value.
+func NewTransportTokenFileSource() *transportauth.FileSource {
+	return transportauth.NewFileSource(TransportTokenFilePath(), ReadTransportTokenFileGuarded)
+}
+
 // WriteTransportTokenFile persists the hub-provided transport token to the
 // transport token file, mode 0600, through the same fchown-then-rename
 // path WriteTokenFile uses. uid <= 0 skips the chown.
@@ -1643,7 +1663,7 @@ func WriteTransportTokenFile(token string, uid, gid int) error {
 // the bootstrap value is older than the last refresh). Returns the path.
 func SeedTransportTokenFile(token string, uid, gid int) (string, error) {
 	path := TransportTokenFilePath()
-	if existing, err := readTransportTokenFile(path); err == nil {
+	if existing, err := ReadTransportTokenFileGuarded(path); err == nil {
 		existing = strings.TrimSpace(existing)
 		if existing != "" {
 			fileExp, ferr := transportauth.ParseTokenExpiry(existing)
@@ -1668,7 +1688,7 @@ func (c *Client) AdoptTransportTokenFile(uid, gid int) (bool, error) {
 	if !c.hasHubProvidedTransport() {
 		return false, nil
 	}
-	tok, err := readTransportTokenFile(TransportTokenFilePath())
+	tok, err := ReadTransportTokenFileGuarded(TransportTokenFilePath())
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return false, nil
@@ -1716,13 +1736,21 @@ const transportResetUnparseableMessage = "reset-auth delivered a transport token
 // restoreTransportTokenFile rewrites the transport token file with the
 // credential this client currently uses, when that credential parses. The
 // source gives an unparseable file value zero expiry, so a valid in-memory
-// or bootstrap value is what Token returns here.
+// or bootstrap value is what Token returns here. A client in proxy mode
+// that started without a transport token may have no valid credential to
+// restore; the unparseable file is then removed, so other processes do not
+// pick it up.
 func (c *Client) restoreTransportTokenFile(uid, gid int) {
 	cur, err := c.oidcSource.Token()
 	if err != nil || cur == "" {
 		return
 	}
 	if _, err := transportauth.ParseTokenExpiry(cur); err != nil {
+		if c.oidcLate {
+			if _, rerr := removeFileNoFollow(TransportTokenFilePath()); rerr != nil {
+				log.Error("Failed to remove unusable transport token file: %v", rerr)
+			}
+		}
 		return
 	}
 	if err := WriteTransportTokenFile(cur, uid, gid); err != nil {
@@ -1834,14 +1862,16 @@ func ReadTransportRefreshStatus() (TransportRefreshStatus, bool) {
 	return st, true
 }
 
-// readTransportTokenFile reads the transport token file through the same
-// symlink-safe, single-link-regular-file guard ReadTokenFile uses, since
-// sciontool init (root) reads it from a directory the workload owns.
+// ReadTransportTokenFileGuarded reads the transport token file through the
+// same symlink-safe, single-link-regular-file guard ReadTokenFile uses,
+// since sciontool init (root) reads it from a directory the workload owns.
+// It is a transportauth.FileReadFunc; pass it to
+// transportauth.FromEnvWithReader from processes that may run as root.
 //
 // Under go test without SetTokenHome it refuses to read the default path,
 // because the token home resolves to the real agent user's home (not
 // $HOME) and tests must never pick up a live transport token.
-func readTransportTokenFile(path string) (string, error) {
+func ReadTransportTokenFileGuarded(path string) (string, error) {
 	if testing.Testing() && !tokenHomeOverridden && path == TransportTokenFilePath() {
 		return "", fmt.Errorf("scion/hub: refusing to read %s during a test without SetTokenHome()", path)
 	}

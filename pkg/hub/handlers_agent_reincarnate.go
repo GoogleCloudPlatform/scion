@@ -37,6 +37,12 @@ const maxHandoffBytes = 256 * 1024
 type ReincarnateAgentRequest struct {
 	Handoff string `json:"handoff,omitempty"`
 	DryRun  bool   `json:"dryRun,omitempty"`
+	// TargetBroker (a broker ID, name or slug) asks to move the agent to
+	// that broker; it must mount the same NFS export as the current one.
+	// Empty, or the agent's current broker, is a plain reincarnation. Only
+	// a dry run is carried out for a different broker; a real move returns
+	// 501.
+	TargetBroker string `json:"targetBroker,omitempty"`
 
 	// Phase 3 overrides — not yet supported; any non-zero value here is a 400.
 	Image          string            `json:"image,omitempty"`
@@ -63,6 +69,12 @@ type ReincarnateAgentResponse struct {
 	Generation int               `json:"generation"` // target generation
 	State      string            `json:"state"`      // pending|planned (Phase 1)
 	Plan       ReincarnationPlan `json:"plan"`
+	// SourceBrokerID and TargetBrokerID are set when the request named a
+	// target broker. They are equal for a plain reincarnation.
+	SourceBrokerID string `json:"sourceBrokerId,omitempty"`
+	TargetBrokerID string `json:"targetBrokerId,omitempty"`
+	// MoveVerdict is the move eligibility verdict of a dry-run move.
+	MoveVerdict *MoveVerdict `json:"moveVerdict,omitempty"`
 }
 
 // FieldChange describes an old→new change to a single scalar field on the
@@ -155,6 +167,17 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	// its marker.
 	admittedDeletionClaim := agent.DeletionClaim
 
+	// Authority re-record: a requester other than the agent itself becomes
+	// the agent's recorded delegator, so it must pass CanDelegate and its
+	// ceiling must cover the stored role. Checked right after the start
+	// gate, before the request body, the broker and the agent state are
+	// examined and before anything is written, so a refused request claims
+	// nothing and a dry run reports the same refusal.
+	auth, ok := s.reincarnateAuthorityFor(w, r, agent)
+	if !ok {
+		return
+	}
+
 	var req ReincarnateAgentRequest
 	if err := readJSON(r, &req); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
@@ -173,6 +196,41 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	project, err := s.store.GetProject(ctx, agent.ProjectID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// A target broker other than the agent's current one is a move. The
+	// target is resolved without writing anything (no provider link).
+	var moveTarget *store.RuntimeBroker
+	targetBrokerID := ""
+	if req.TargetBroker != "" {
+		// A move needs a source broker; refuse before resolving the target.
+		if agent.RuntimeBrokerID == "" {
+			writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+				"cannot move an agent that is not currently assigned to a broker", nil)
+			return
+		}
+		dst, ambiguous, err := s.resolveMoveTargetBroker(ctx, req.TargetBroker, agent.RuntimeBrokerID, project.ID)
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		if len(ambiguous) > 0 {
+			writeMoveTargetAmbiguous(w, req.TargetBroker, ambiguous)
+			return
+		}
+		if dst == nil {
+			s.writeMoveTargetNotFound(ctx, w, req.TargetBroker, project)
+			return
+		}
+		targetBrokerID = dst.ID
+		if dst.ID != agent.RuntimeBrokerID {
+			moveTarget = dst
+		}
+	}
+	if moveTarget != nil && !req.DryRun {
+		writeError(w, http.StatusNotImplemented, ErrCodeNotImplemented,
+			"moving an agent to another broker is not yet implemented; use --dry-run to check eligibility", nil)
 		return
 	}
 
@@ -225,10 +283,9 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	// Empty-per-agent workspaces are broker-local, unsynced state: the only
 	// possible reincarnation would be a fresh empty directory, silently
 	// discarding work. Refused explicitly in v1 (design #2703 D4).
+	workspaceModeErr := ""
 	if project.IsEmptyPerAgent() {
-		writeError(w, http.StatusBadRequest, ErrCodeValidationError,
-			`reincarnate does not yet support "Empty directory per agent" (empty-per-agent) workspaces`, nil)
-		return
+		workspaceModeErr = `reincarnate does not yet support "Empty directory per agent" (empty-per-agent) workspaces`
 	}
 
 	hasGitClone := agent.AppliedConfig != nil && agent.AppliedConfig.GitClone != nil
@@ -240,17 +297,28 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	}
 	switchedToCloneOnly := !hasGitClone && project.GitRemote != "" && !project.IsSharedWorkspace() &&
 		linkedProjectPath == "" && effectiveWorkspace != ""
-	if agent.AppliedConfig == nil || project.IsWorktreePerAgent() ||
+	if workspaceModeErr == "" && (agent.AppliedConfig == nil || project.IsWorktreePerAgent() ||
 		(hasGitClone && project.IsSharedWorkspace()) ||
 		switchedToCloneOnly ||
-		!api.ReincarnateEligible(hasGitClone, effectiveWorkspace) {
+		!api.ReincarnateEligible(hasGitClone, effectiveWorkspace)) {
 		// FYI-6 (review p1b-r1): the generic message now covers every
 		// eligible mode, not just clone-per-agent.
-		msg := "reincarnate requires a clone-per-agent, shared-workspace or hub-managed workspace"
+		workspaceModeErr = "reincarnate requires a clone-per-agent, shared-workspace or hub-managed workspace"
 		if project.IsWorktreePerAgent() {
-			msg = "reincarnate does not yet support worktree-per-agent workspaces"
+			workspaceModeErr = "reincarnate does not yet support worktree-per-agent workspaces"
 		}
-		writeError(w, http.StatusBadRequest, ErrCodeValidationError, msg, nil)
+	}
+	// A linked project's workspace is a broker-local path, never on a
+	// shared export, so it cannot move.
+	if moveTarget != nil && workspaceModeErr == "" && linkedProjectPath != "" {
+		workspaceModeErr = "reincarnate --broker does not support linked projects; the workspace is local to the current broker"
+	}
+	if moveTarget != nil {
+		s.planReincarnateMove(w, r, agent, project, moveTarget, workspaceModeErr, hasGitClone)
+		return
+	}
+	if workspaceModeErr != "" {
+		writeError(w, http.StatusBadRequest, ErrCodeValidationError, workspaceModeErr, nil)
 		return
 	}
 
@@ -316,44 +384,28 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 			Generation: targetGeneration,
 			State:      "planned",
 			Plan:       plan,
+			// A named target here is the agent's current broker.
+			SourceBrokerID: brokerIDIfSet(targetBrokerID, agent.RuntimeBrokerID),
+			TargetBrokerID: targetBrokerID,
 		})
 		return
 	}
 
-	// AC-8 / design §3.4 Amendment A3: claim the agent BEFORE creating the
-	// reincarnation record, guarded by the agent row's own optimistic lock
-	// (state_version).
-	// The previous order — create the record, then a guarded UpdateAgent —
-	// was check-then-act: a version conflict (or any error) on that second
-	// write left the just-created record stuck in "pending" forever, with no
-	// worker running for it and no API to clear it, wedging every later
-	// request behind a permanent 409. Claiming first means a conflict here
-	// happens before anything else is written, so there is nothing to leave
-	// behind: the request simply fails, unclaimed.
+	// The claim is guarded by the agent row's own optimistic lock
+	// (state_version), and the claim and the reincarnation record commit
+	// together, so a version conflict or any other failure leaves no record
+	// stuck in "pending".
 	//
-	// The already-pending/already-starting check itself now lives above,
-	// before the plan is computed, so it also gates --dry-run (design §3.4
-	// Amendment A11 item 3); a concurrent real request could still slip in
-	// between that check and this claim, but UpdateAgent's own state_version
-	// CAS below catches that race exactly as it always has.
-	previousReincarnationState := agent.ReincarnationState
-	previousReincarnationUpdatedAt := agent.ReincarnationUpdatedAt
+	// The already-pending/already-starting check itself lives above, before
+	// the plan is computed, so it also gates --dry-run; a concurrent real
+	// request could slip in between that check and this claim, and the
+	// claim's state_version CAS catches that race.
 	agent.ReincarnationState = store.ReincarnationStatePending
 	// Design §3.4 Amendment A6.6: ReincarnationUpdatedAt (not Updated) is
 	// what the replica-safe sweep's agent-state backstop keys its staleness
-	// check on, because Updated is also bumped by every broker heartbeat —
-	// which would keep a claim that never got a worker (see the revert
-	// below) looking fresh forever.
+	// check on, because Updated is also bumped by every broker heartbeat.
 	claimedAt := time.Now()
 	agent.ReincarnationUpdatedAt = &claimedAt
-	if err := s.store.UpdateAgent(ctx, agent); err != nil {
-		if errors.Is(err, store.ErrVersionConflict) {
-			Conflict(w, "agent was concurrently modified; retry")
-			return
-		}
-		writeErrorFromErr(w, err, "")
-		return
-	}
 
 	requestedBy := ""
 	requesterIdentity := GetIdentityFromContext(ctx)
@@ -370,17 +422,31 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 		PreviousAppliedConfig: agent.AppliedConfig,
 		Handoff:               req.Handoff,
 	}
-	if err := s.store.CreateAgentReincarnation(ctx, rec); err != nil {
-		// The claim above already landed. Revert it so this failure does not
-		// wedge the agent behind a permanent 409 with no record to show for
-		// it. Best effort: if the revert itself fails, log loudly — an
-		// operator can clear agents.reincarnation_state by hand, which is a
-		// far smaller recovery than an unrecoverable stuck claim.
-		agent.ReincarnationState = previousReincarnationState
-		agent.ReincarnationUpdatedAt = previousReincarnationUpdatedAt
-		if revertErr := s.store.UpdateAgent(ctx, agent); revertErr != nil {
-			s.agentLifecycleLog.Error("handleReincarnateAgent: failed to revert claimed reincarnation_state after record creation failure",
-				"agent_id", agent.ID, "revert_error", revertErr, "original_error", err)
+	// The claim, the reincarnation record, the authority re-record, the
+	// reincarnate-claim hooks and the audit record commit in one
+	// transaction (reincarnateClaimTx), so a failure at any step leaves the
+	// agent unclaimed with no record behind it.
+	// The claim also requires that no start claim is held, live or
+	// unconfirmed: a start whose outcome is unknown may still create a
+	// container this reincarnation would then compete with.
+	if err := s.reincarnateClaimTx(ctx, agent, rec, auth, auditActorFromContext(ctx)); err != nil {
+		var held *store.ClaimHeldError
+		if errors.Is(err, store.ErrVersionConflict) {
+			Conflict(w, "agent was concurrently modified; retry")
+			return
+		}
+		if errors.As(err, &held) {
+			Conflict(w, "a start is in progress for this agent; retry once it completes")
+			return
+		}
+		if errors.Is(err, store.ErrClaimPredicate) {
+			Conflict(w, "a reincarnation is already pending for this agent")
+			return
+		}
+		if errors.Is(err, errAgentCreateWriteInvalid) {
+			s.agentLifecycleLog.Error("handleReincarnateAgent: incomplete authority re-record", "agent_id", agent.ID, "error", err)
+			InternalError(w)
+			return
 		}
 		writeErrorFromErr(w, err, "")
 		return
@@ -415,6 +481,91 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 		Generation: targetGeneration,
 		State:      store.AgentReincarnationStatePending,
 		Plan:       plan,
+		// A named target here is the agent's current broker.
+		SourceBrokerID: brokerIDIfSet(targetBrokerID, agent.RuntimeBrokerID),
+		TargetBrokerID: targetBrokerID,
+	})
+}
+
+// isSelfRequest reports whether the caller is the agent itself.
+func isSelfRequest(ctx context.Context, agent *store.Agent) bool {
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil || identity.Type() != "agent" {
+		return false
+	}
+	agentIdent, ok := identity.(AgentIdentity)
+	return ok && agentIdent.ID() == agent.ID
+}
+
+// brokerIDIfSet returns id when target is non-empty, else "".
+func brokerIDIfSet(target, id string) string {
+	if target == "" {
+		return ""
+	}
+	return id
+}
+
+// planReincarnateMove answers a dry-run move of agent to dst: it runs the
+// move eligibility checks and returns the first refusal, or 200 with the
+// reincarnation plan and the verdict. It writes no agent, broker, project or
+// quota state; the passthrough re-check may record its authorization
+// decision in the audit log and call IAM, like every passthrough gate.
+func (s *Server) planReincarnateMove(w http.ResponseWriter, r *http.Request, agent *store.Agent, project *store.Project, dst *store.RuntimeBroker, workspaceModeErr string, cloneMode bool) {
+	ctx := r.Context()
+	src, err := s.store.GetRuntimeBroker(ctx, agent.RuntimeBrokerID)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+	in := moveEligibilityInput{
+		Agent:              agent,
+		Src:                src,
+		Dst:                dst,
+		WorkspaceModeError: workspaceModeErr,
+		CloneMode:          cloneMode,
+		SelfMove:           isSelfRequest(ctx, agent),
+		Probes:             s.moveProbesFor(r, project, agent.AppliedConfig),
+	}
+	if workspaceModeErr != "" {
+		v, ref := evaluateMoveEligibility(in)
+		writeMoveRefusal(w, ref, v)
+		return
+	}
+
+	dispatcher := s.GetDispatcher()
+	if dispatcher == nil {
+		writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+			"agent reincarnation requires hub mode with a runtime broker dispatcher", nil)
+		return
+	}
+	if agent.ReincarnationState != store.ReincarnationStateNone && agent.ReincarnationState != store.ReincarnationStateFailed {
+		Conflict(w, "a reincarnation is already pending for this agent")
+		return
+	}
+
+	// buildFreshAppliedConfig only reads; the plan and the profile the
+	// agent would run under come from the same call the real path uses.
+	imageRegistry := dispatchImageRegistry(dispatcher)
+	fresh, warnings, err := s.buildFreshAppliedConfig(ctx, agent, project, imageRegistry)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+			"failed to resolve new configuration: "+err.Error(), nil)
+		return
+	}
+	in.Profile = effectiveRuntimeProfileName(fresh.Profile, project)
+	v, ref := evaluateMoveEligibility(in)
+	if ref != nil {
+		writeMoveRefusal(w, ref, v)
+		return
+	}
+	writeJSON(w, http.StatusOK, ReincarnateAgentResponse{
+		AgentID:        agent.ID,
+		Generation:     agent.Generation + 1,
+		State:          "planned",
+		Plan:           computeReincarnationPlan(agent.AppliedConfig, fresh, warnings, imageRegistry),
+		SourceBrokerID: src.ID,
+		TargetBrokerID: dst.ID,
+		MoveVerdict:    &v,
 	})
 }
 
@@ -496,4 +647,84 @@ func (s *Server) ensureReincarnateRequesterSubscribed(ctx context.Context, agent
 	}
 
 	s.createNotifySubscription(ctx, agent.ID, agent.ProjectID, subscriberType, subscriberID, requestedBy)
+}
+
+// reincarnateAuthorityFor decides what authority a reincarnation of agent
+// re-records. A self-reincarnation re-records nothing: it
+// returns nil, and the existing edge with its frozen provenance and ceiling
+// stays in force. Any other requester becomes the recorded delegator, so it
+// must pass CanDelegate for the stored role, and its source ceiling must
+// cover that role (childRoleWithinCeiling, role explicit). On a refusal the
+// response is written (403, 503 for a ceiling lookup fault, or 500 for a
+// nil agent) and ok is false; nothing has been written to the store.
+func (s *Server) reincarnateAuthorityFor(w http.ResponseWriter, r *http.Request, agent *store.Agent) (auth *reincarnateAuthority, ok bool) {
+	if agent == nil {
+		s.agentLifecycleLog.Error("reincarnate: nil agent in reincarnateAuthorityFor")
+		InternalError(w)
+		return nil, false
+	}
+	ctx := r.Context()
+	identity := GetIdentityFromContext(ctx)
+	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil && agentIdent.ID() == agent.ID {
+		return nil, true
+	}
+	resource := Resource{Type: "agent", ID: agent.ID, ParentType: "project", ParentID: agent.ProjectID}
+	if identity == nil {
+		writeForbidden(w, "Reincarnation requires an authenticated requester")
+		return nil, false
+	}
+	if s.authzService == nil {
+		s.agentLifecycleLog.Error("handleReincarnateAgent: no authorization service to re-record authority", "agent_id", agent.ID)
+		InternalError(w)
+		return nil, false
+	}
+
+	role, _ := agentRoleAndScopes(agent)
+	decision := s.authzService.CanDelegate(ctx, identity, GrantDescriptor{
+		Type:      GrantTypeAgentDelegation,
+		AgentRole: string(role),
+		ProjectID: agent.ProjectID,
+		ScopeType: store.RoleScopeProject,
+		ScopeID:   agent.ProjectID,
+	})
+	if !decision.Allowed {
+		logAuthzDenial(r, identity, resource, ActionLifecycle, "CanDelegate denied: "+decision.Reason)
+		writeForbidden(w, "Cannot delegate agent authority you do not hold: "+decision.Reason)
+		return nil, false
+	}
+
+	ceiling, prov, err := s.authzService.sourceEffectCeiling(ctx, identity)
+	if err != nil {
+		cause, structural := ceilingDenyCauseForError(err)
+		if !structural {
+			s.agentLifecycleLog.Error("handleReincarnateAgent: effect ceiling lookup failed",
+				"agent_id", agent.ID, "error", err)
+			writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
+				"Unable to evaluate the credential's delegation ceiling; retry later", nil)
+			return nil, false
+		}
+		logAuthzDenial(r, identity, resource, ActionLifecycle,
+			"effect ceiling denied: "+string(cause)+": "+err.Error())
+		writeForbiddenDenial(w, ceilingSourceDenialMessage(cause), DeniedByDelegationCeiling)
+		return nil, false
+	}
+	if _, cause, allowed := childRoleWithinCeiling(ceiling, role, true); !allowed {
+		msg := fmt.Sprintf("the credential's scopes do not cover the agent's role %q", role)
+		logAuthzDenial(r, identity, resource, ActionLifecycle,
+			"effect ceiling denied: "+string(cause)+": "+msg)
+		writeForbiddenDenial(w, msg, DeniedByDelegationCeiling)
+		return nil, false
+	}
+
+	delegatorType := store.DelegationPrincipalUser
+	if GetAgentIdentityFromContext(ctx) != nil {
+		delegatorType = store.DelegationPrincipalAgent
+	}
+	return &reincarnateAuthority{
+		DelegatorType: delegatorType,
+		DelegatorID:   identity.ID(),
+		Role:          string(role),
+		Ceiling:       ceiling,
+		Provenance:    prov,
+	}, true
 }

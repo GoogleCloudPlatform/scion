@@ -258,7 +258,7 @@ func TestRemoveMountedWorktree_RemovesOnlyThatWorktree(t *testing.T) {
 	dirty := filepath.Join(WorktreePath(workspace, "agent-1"), "uncommitted.txt")
 	require.NoError(t, os.WriteFile(dirty, []byte("x\n"), 0o644))
 
-	require.NoError(t, RemoveMountedWorktree(t.Context(), workspace, "agent-1", testLockWait))
+	require.NoError(t, RemoveMountedWorktree(t.Context(), workspace, "", "agent-1", testLockWait))
 
 	assert.NoDirExists(t, WorktreePath(workspace, "agent-1"))
 	assert.NoDirExists(t, filepath.Join(workspace, ".git", "worktrees", "agent-1"))
@@ -282,15 +282,15 @@ func TestRemoveMountedWorktree_RemovesOnlyThatWorktree(t *testing.T) {
 	assert.Contains(t, out, "agent-one", "the branch is kept")
 
 	// Removing again, or an agent that never had a worktree, is a no-op.
-	require.NoError(t, RemoveMountedWorktree(t.Context(), workspace, "agent-1", testLockWait))
-	require.NoError(t, RemoveMountedWorktree(t.Context(), workspace, "agent-9", testLockWait))
+	require.NoError(t, RemoveMountedWorktree(t.Context(), workspace, "", "agent-1", testLockWait))
+	require.NoError(t, RemoveMountedWorktree(t.Context(), workspace, "", "agent-9", testLockWait))
 }
 
 // Names that are not agent slugs are refused before any path is built.
 func TestRemoveMountedWorktree_RejectsNonSlugNames(t *testing.T) {
 	workspace := provisionTwoMountedWorktrees(t)
 	for _, name := range []string{"", ".", "..", "../agent-1", "a/b", `a\b`, "Agent-1", "agent-1/.", "a.b"} {
-		err := RemoveMountedWorktree(t.Context(), workspace, name, testLockWait)
+		err := RemoveMountedWorktree(t.Context(), workspace, "", name, testLockWait)
 		assert.Error(t, err, "name %q", name)
 	}
 	assert.True(t, IsRealWorktreeDir(WorktreePath(workspace, "agent-1"), workspace))
@@ -309,7 +309,7 @@ func TestRemoveMountedWorktree_LeavesOtherEntries(t *testing.T) {
 	keep := filepath.Join(outside, "keep.txt")
 	require.NoError(t, os.WriteFile(keep, []byte("x"), 0o644))
 	require.NoError(t, os.Symlink(outside, filepath.Join(wtDir, "linked")))
-	err := RemoveMountedWorktree(t.Context(), workspace, "linked", testLockWait)
+	err := RemoveMountedWorktree(t.Context(), workspace, "", "linked", testLockWait)
 	assert.ErrorContains(t, err, "left in place")
 	assert.FileExists(t, keep)
 	fi, lerr := os.Lstat(filepath.Join(wtDir, "linked"))
@@ -318,28 +318,28 @@ func TestRemoveMountedWorktree_LeavesOtherEntries(t *testing.T) {
 
 	// A symlink to another agent's worktree is not that worktree.
 	require.NoError(t, os.Symlink(WorktreePath(workspace, "agent-2"), filepath.Join(wtDir, "alias")))
-	assert.ErrorContains(t, RemoveMountedWorktree(t.Context(), workspace, "alias", testLockWait), "left in place")
+	assert.ErrorContains(t, RemoveMountedWorktree(t.Context(), workspace, "", "alias", testLockWait), "left in place")
 	assert.True(t, IsRealWorktreeDir(WorktreePath(workspace, "agent-2"), workspace))
 
 	require.NoError(t, os.WriteFile(filepath.Join(wtDir, "file"), []byte("x"), 0o644))
-	assert.ErrorContains(t, RemoveMountedWorktree(t.Context(), workspace, "file", testLockWait), "left in place")
+	assert.ErrorContains(t, RemoveMountedWorktree(t.Context(), workspace, "", "file", testLockWait), "left in place")
 	assert.FileExists(t, filepath.Join(wtDir, "file"))
 
 	clone := filepath.Join(wtDir, "cloned")
 	require.NoError(t, os.MkdirAll(filepath.Join(clone, ".git"), 0o755))
-	err = RemoveMountedWorktree(t.Context(), workspace, "cloned", testLockWait)
+	err = RemoveMountedWorktree(t.Context(), workspace, "", "cloned", testLockWait)
 	assert.ErrorIs(t, err, ErrSeparateCheckout)
 	assert.DirExists(t, filepath.Join(clone, ".git"))
 
 	plain := filepath.Join(wtDir, "plain")
 	require.NoError(t, os.MkdirAll(plain, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(plain, "f"), []byte("x"), 0o644))
-	assert.ErrorContains(t, RemoveMountedWorktree(t.Context(), workspace, "plain", testLockWait), "left in place")
+	assert.ErrorContains(t, RemoveMountedWorktree(t.Context(), workspace, "", "plain", testLockWait), "left in place")
 	assert.FileExists(t, filepath.Join(plain, "f"))
 
 	empty := filepath.Join(wtDir, "empty")
 	require.NoError(t, os.MkdirAll(empty, 0o770))
-	require.NoError(t, RemoveMountedWorktree(t.Context(), workspace, "empty", testLockWait))
+	require.NoError(t, RemoveMountedWorktree(t.Context(), workspace, "", "empty", testLockWait))
 	assert.NoDirExists(t, empty)
 
 	assert.True(t, IsRealWorktreeDir(WorktreePath(workspace, "agent-1"), workspace))
@@ -356,7 +356,7 @@ func TestRemoveMountedWorktree_WaitsForProvisioningLock(t *testing.T) {
 	defer func() { _ = held.release() }()
 
 	start := time.Now()
-	err = RemoveMountedWorktree(t.Context(), workspace, "agent-1", 1500*time.Millisecond)
+	err = RemoveMountedWorktree(t.Context(), workspace, "", "agent-1", 1500*time.Millisecond)
 	require.Error(t, err)
 	assert.Less(t, time.Since(start), 20*time.Second)
 	assert.True(t, IsRealWorktreeDir(WorktreePath(workspace, "agent-1"), workspace))
@@ -413,7 +413,7 @@ func TestRemoveMountedWorktree_RefusesSymlinkedWorktreesDir(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Dir(keep), 0o755))
 	require.NoError(t, os.WriteFile(keep, []byte("x"), 0o644))
 
-	err := RemoveMountedWorktree(t.Context(), workspace, "agent-1", testLockWait)
+	err := RemoveMountedWorktree(t.Context(), workspace, "", "agent-1", testLockWait)
 	assert.ErrorContains(t, err, "is not a plain directory")
 	assert.DirExists(t, filepath.Join(elsewhere, "agent-1"))
 	assert.NoError(t, PurgeRemovedWorktrees(workspace))
@@ -436,7 +436,7 @@ func TestMountedWorktree_AdminEntryPointsElsewhere(t *testing.T) {
 	assert.Contains(t, err.Error(), "worktrees/agent-1 of the shared checkout of project proj-1")
 	assert.NotContains(t, err.Error(), workspace)
 
-	err = RemoveMountedWorktree(t.Context(), workspace, "agent-1", testLockWait)
+	err = RemoveMountedWorktree(t.Context(), workspace, "", "agent-1", testLockWait)
 	assert.ErrorContains(t, err, "left in place")
 	assert.True(t, IsRealWorktreeDir(WorktreePath(workspace, "agent-1"), workspace))
 }
@@ -703,7 +703,7 @@ func TestRemoveMountedWorktree_DropsAgentFromEveryBranch(t *testing.T) {
 	require.NoError(t, RegisterSharer(workspace, "", "old-branch", WorktreePath(workspace, "agent-1"), "agent-1"))
 	require.NoError(t, RegisterSharer(workspace, "", "old-branch", WorktreePath(workspace, "agent-2"), "agent-2"))
 
-	require.NoError(t, RemoveMountedWorktree(t.Context(), workspace, "agent-1", testLockWait))
+	require.NoError(t, RemoveMountedWorktree(t.Context(), workspace, "", "agent-1", testLockWait))
 	for _, branch := range []string{"agent-one", "old-branch"} {
 		sharers, _, err := ListSharers(workspace, "", branch)
 		require.NoError(t, err)
@@ -720,7 +720,7 @@ func TestRemoveMountedWorktree_IgnoresCallerCancellation(t *testing.T) {
 	workspace := provisionTwoMountedWorktrees(t)
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	require.NoError(t, RemoveMountedWorktree(ctx, workspace, "agent-1", testLockWait))
+	require.NoError(t, RemoveMountedWorktree(ctx, workspace, "", "agent-1", testLockWait))
 	assert.NoDirExists(t, WorktreePath(workspace, "agent-1"))
 	assert.NotContains(t, worktreeGit(t, workspace, "worktree", "list"), "agent-1")
 }

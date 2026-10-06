@@ -33,9 +33,11 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	"gopkg.in/yaml.v3"
 )
 
 // startContext holds all the resolved state needed to start an agent.
@@ -98,6 +100,11 @@ type startContextInputs struct {
 	// only: the hub-managed marker block and host-side worktree provisioning,
 	// which treat ProjectPath as a project root, skip it.
 	ProjectPathFromContainer bool
+	// HubGlobalProject is set when the hub marked this dispatch as its
+	// global project by sending the global slug alongside ProjectPath (see
+	// splitHubGlobalSlug). ProjectSlug is then left empty, so the path
+	// alone resolves the project, as for any dispatch with a path.
+	HubGlobalProject bool
 
 	// Config from CreateAgentConfig (nil for startAgent/restartAgent)
 	Config *CreateAgentConfig
@@ -132,6 +139,15 @@ type startContextInputs struct {
 	// runLaunch), so it is threaded here only so the workspace-source
 	// checks see it as the explicit source it is.
 	WorkspaceStoragePath string
+	// RunID is the hub-minted per-run identity for this dispatch
+	// (ptone/scion#2550), passed to StartOptions.RunID. Empty from an older
+	// hub; pkg/agent then mints one itself.
+	RunID string
+	// TemplateName is the agent's template slug as sent on start and
+	// restart. It is used for naming only (StartOptions.TemplateName) and
+	// never to locate or load a template; a create's Config.Template slug
+	// takes precedence. A content hash is ignored.
+	TemplateName string
 
 	// HTTP request (for hub connection resolution)
 	HTTPRequest *http.Request
@@ -184,6 +200,17 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		}
 	}
 
+	// The broker's global directory belongs to the global project. A
+	// dispatch that names another project with that path must fail before
+	// the marker block below, which would otherwise rewrite the global
+	// marker and create project-configs entries for that project.
+	if in.ProjectPath != "" && !in.ProjectPathFromContainer {
+		if msg := globalDirProjectConflict(in.ProjectPath, in.ProjectID, in.HubGlobalProject); msg != "" {
+			span.SetStatus(codes.Error, msg)
+			return nil, &startContextError{Status: http.StatusConflict, Message: msg}
+		}
+	}
+
 	// Ensure hub-managed projects have a .scion marker with project-id for
 	// external split storage. When the hub dispatches to a broker without a
 	// LocalPath (e.g. auto-provided embedded broker for a linked project), the
@@ -211,7 +238,9 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 				// Detect stale marker: hub's project ID differs and the old
 				// external config dir was cleaned up (project was deleted and
 				// recreated with the same name — miller79/scion#28).
-				if in.ProjectID != "" && marker.ProjectID != in.ProjectID {
+				// The global marker is only rewritten for the global project
+				// itself (see globalDirProjectConflict above).
+				if in.ProjectID != "" && marker.ProjectID != in.ProjectID && canRewriteProjectMarker(in.ProjectPath, in.ProjectID, in.HubGlobalProject) {
 					extPath, _ := marker.ExternalProjectPath()
 					if isStaleExternalDir(extPath) {
 						slug := marker.ProjectSlug
@@ -561,6 +590,11 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		env["SCION_AGENT_ID"] = in.AgentID
 		classifyBrokerEnv("SCION_AGENT_ID", api.EnvKindPlain)
 	}
+	// SCION_LAUNCH_ID is broker-owned: Manager.Start sets it from the run
+	// ID it labels the container with, so a resolved-env value is never
+	// passed through.
+	delete(env, "SCION_LAUNCH_ID")
+	delete(envCls, "SCION_LAUNCH_ID")
 	if in.ProjectID != "" {
 		env["SCION_PROJECT_ID"] = in.ProjectID
 		classifyBrokerEnv("SCION_PROJECT_ID", api.EnvKindPlain)
@@ -721,6 +755,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		// and re-clones an existing populated workspace only in that case,
 		// never on start or restart (GoogleCloudPlatform/scion#1931).
 		FreshProvision: in.Operation == opCreate,
+		RunID:          in.RunID,
 	}
 
 	if in.Attach {
@@ -816,6 +851,9 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		}
 	}
 
+	if templateSlug == "" && !transfer.IsContentHash(in.TemplateName) {
+		templateSlug = in.TemplateName
+	}
 	if templateSlug != "" {
 		opts.TemplateName = templateSlug
 	}
@@ -829,6 +867,15 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		classifyBrokerEnv("SCION_SHARED_WORKSPACE", api.EnvKindPlain)
 		if s.config.Debug {
 			s.agentLifecycleLog.Debug("Shared workspace mode enabled", "agent_id", in.AgentID)
+		}
+		// The shared workspace's clone settings only reach the runtime as
+		// the Kubernetes init container's clone settings (GitCloneForInit).
+		// They never set GitClone, so the workspace is still mounted, not
+		// cloned per agent. Ignored when GitClone is set: that request asks
+		// for a per-agent clone instead.
+		if gc := in.Config.SharedWorkspaceClone; gc != nil && gc.URL != "" && in.Config.GitClone == nil {
+			gcCopy := *gc
+			opts.SharedWorkspaceClone = &gcCopy
 		}
 	}
 
@@ -1177,7 +1224,11 @@ func effectiveGCPMetadataMode(isKubernetesDispatch bool, cfg *CreateAgentConfig,
 		//
 		// The current hub always writes SCION_METADATA_MODE_SOURCE=hub
 		// alongside its own authoritative mode (DispatchAgentStart,
-		// DispatchAgentRestart, buildCreateRequest). A hub old enough to
+		// DispatchAgentRestart, buildCreateRequest), and leaves the mode
+		// itself absent when the agent has no GCP identity configured, so
+		// that case reaches the runtime default below rather than this
+		// branch. A hub that predates that still sends "block" here, which
+		// Kubernetes refuses; it needs a hub upgrade. A hub old enough to
 		// predate that write won't send the marker at all, and on such a hub
 		// this value could be whatever a stray stored env var or secret
 		// happened to contain rather than a real dispatch decision. Downgrade
@@ -1368,15 +1419,14 @@ func validateMountedWorktree(workspacePath, base string) error {
 // provision.ProvisionShared makes internally (its "sentinel exists" step). A
 // caller that already knows a worktree it must not touch exists uses this to
 // decide not to call ProvisionShared at all when either is missing —
-// ProvisionShared's own self-heal (gitCloneWorkspace's removeDirContents)
-// assumes no worktree can exist yet whenever the sentinel is missing, and
-// would otherwise wipe every worktree under the shared base.
+// ProvisionShared clones whenever the sentinel is missing, which assumes no
+// worktree can exist yet under the shared base.
+//
+// The sentinel is looked for in exactly the directories ProvisionShared
+// checks (in.SentinelDirs: the sentinel directory, the base's parent by
+// default, and LegacyDir when set), so the two never disagree.
 func worktreeBaseIsProvisioned(in provision.ProvisionInput) bool {
-	sentinelDir := in.SentinelDir
-	if sentinelDir == "" {
-		sentinelDir = filepath.Dir(in.Resolved.HostPath)
-	}
-	if _, err := os.Stat(filepath.Join(sentinelDir, provision.ProvisionSentinelFile)); err != nil {
+	if !provision.SentinelPresent(in.SentinelDirs()...) {
 		return false
 	}
 	if _, err := os.Stat(filepath.Join(in.Resolved.HostPath, ".git")); err != nil {
@@ -1511,10 +1561,9 @@ func (s *Server) tryProvisionWorktree(ctx context.Context, in startContextInputs
 	}
 
 	// When a worktree that must not be touched already exists, ProvisionShared
-	// must never be allowed to reach its own self-heal path: gitCloneWorkspace's
-	// removeDirContents can fire once the provisioning sentinel is missing, and
-	// wipes every worktree under the shared base — including this one — while
-	// ProvisionShared still returns success. Fail closed instead whenever
+	// must never be allowed to re-run its clone step, which runs once the
+	// provisioning sentinel is missing and assumes no worktree exists under
+	// the shared base yet. Fail closed instead whenever
 	// either the sentinel or the shared base's .git is missing, which is a
 	// superset of that trigger condition.
 	if preExisted && !worktreeBaseIsProvisioned(result.ProvisionInput) {
@@ -1809,6 +1858,98 @@ func resolveWorktreeProvision(in worktreeProvisionInput) worktreeProvisionResult
 		WorktreePath: worktreePath,
 		ProjectRoot:  resolved.HostPath,
 	}
+}
+
+// globalProjectSlug is the hub slug of the global project.
+const globalProjectSlug = "global"
+
+// splitHubGlobalSlug separates the hub's global-project mark from the slug.
+// The hub sends the global slug together with a project path only for its
+// global project; the path still resolves the project, so the slug is
+// dropped (returned empty) and reported as the mark instead. Any other
+// slug is returned unchanged.
+func splitHubGlobalSlug(projectPath, projectSlug string) (slug string, hubGlobal bool) {
+	if projectPath != "" && projectSlug == globalProjectSlug {
+		return "", true
+	}
+	return projectSlug, false
+}
+
+// globalDirProjectConflict returns a non-empty error message when
+// projectPath is the broker's global scion directory (or a project root whose
+// .scion entry is that directory) and the dispatch is not for the global
+// project. The global project is the one the hub marks as global
+// (hubGlobal), the "global" id, an empty id, or the hub id this broker has
+// recorded for its global project (see isGlobalDirProjectID).
+func globalDirProjectConflict(projectPath, projectID string, hubGlobal bool) string {
+	globalDir, err := config.GetGlobalDir()
+	if err != nil {
+		return ""
+	}
+	if !config.IsGlobalProjectDir(projectPath) && !config.IsGlobalProjectDir(filepath.Join(projectPath, config.DotScion)) {
+		return ""
+	}
+	if hubGlobal || projectID == "" || projectID == "global" || isGlobalDirProjectID(globalDir, projectID) {
+		return ""
+	}
+	return fmt.Sprintf("project path %q is this broker's global scion directory, which cannot hold project %s. "+
+		"Re-register this broker as a provider without a local path (scion runtime-broker provide --project <project>) "+
+		"or with the project's own directory (--path)", projectPath, projectID)
+}
+
+// canRewriteProjectMarker reports whether the stale-marker branch may rewrite
+// the .scion marker under projectPath for projectID. Any project directory
+// other than the global directory may be rewritten. The global marker may
+// only be rewritten for the global project: the one the hub marks as global,
+// or the id the global settings record.
+func canRewriteProjectMarker(projectPath, projectID string, hubGlobal bool) bool {
+	if !config.IsGlobalProjectDir(projectPath) {
+		return true
+	}
+	if hubGlobal {
+		return true
+	}
+	globalDir, err := config.GetGlobalDir()
+	if err != nil {
+		return false
+	}
+	id := globalSettingsProjectID(globalDir)
+	return id != "" && id == projectID
+}
+
+// isGlobalDirProjectID reports whether projectID is the hub id this broker
+// has recorded for its global project. The global settings decide when they
+// record an id; a global .scion marker that disagrees with them is ignored.
+// Without a settings id, the marker's project-id is used.
+func isGlobalDirProjectID(globalDir, projectID string) bool {
+	if id := globalSettingsProjectID(globalDir); id != "" {
+		return id == projectID
+	}
+	// The global marker may carry an empty slug, which ReadProjectMarker
+	// rejects, so only its project-id is read here.
+	markerPath := filepath.Join(globalDir, config.DotScion)
+	if !config.IsProjectMarkerFile(markerPath) {
+		return false
+	}
+	data, err := os.ReadFile(markerPath)
+	if err != nil {
+		return false
+	}
+	var marker config.ProjectMarker
+	return yaml.Unmarshal(data, &marker) == nil && marker.ProjectID != "" && marker.ProjectID == projectID
+}
+
+// globalSettingsProjectID returns the hub project id recorded in the global
+// settings, or "" when none is recorded.
+func globalSettingsProjectID(globalDir string) string {
+	settings, err := config.LoadSettings(globalDir)
+	if err != nil {
+		return ""
+	}
+	if id := settings.GetHubProjectID(); id != "" {
+		return id
+	}
+	return settings.ProjectID
 }
 
 // isStaleExternalDir returns true if the external project config directory

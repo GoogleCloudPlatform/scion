@@ -6,10 +6,10 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-if ! command -v rg >/dev/null 2>&1; then
-  echo "Warning: ripgrep (rg) not found — skipping compat-literals check" >&2
-  exit 0
-fi
+# Dependency check: a missing rg exits 3 (nothing was analysed), never 0.
+# shellcheck source=SCRIPTDIR/lib/require-tool.sh
+source hack/lib/require-tool.sh
+require_tool rg compat-literals "ripgrep (rg)"
 
 tmp="$(mktemp)"
 trap 'rm -f "$tmp"' EXIT

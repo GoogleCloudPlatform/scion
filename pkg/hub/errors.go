@@ -57,6 +57,16 @@ const (
 	ErrCodeUnavailable          = "unavailable"
 	ErrCodeNoRuntimeBroker      = "no_runtime_broker"
 	ErrCodeRuntimeBrokerUnavail = "runtime_broker_unavailable"
+	// ErrCodeRuntimeBrokerNotFound reports an explicitly requested runtime
+	// broker (by ID, name or slug) that does not exist at all, as opposed to
+	// one that exists but is offline/unreachable (runtime_broker_unavailable).
+	ErrCodeRuntimeBrokerNotFound = "runtime_broker_not_found"
+	// ErrCodeRuntimeBrokerAmbiguous is returned when a runtime broker name
+	// or slug matches more than one broker; the caller must use the ID.
+	ErrCodeRuntimeBrokerAmbiguous = "runtime_broker_ambiguous"
+	// ErrCodeNotImplemented is returned for a request the API accepts but
+	// the hub does not carry out yet. Status 501.
+	ErrCodeNotImplemented = "not_implemented"
 
 	ErrCodeMissingEnvVars = "missing_env_vars"
 	ErrCodeCloneFailed    = "clone_failed"
@@ -73,6 +83,9 @@ const (
 	ErrCodeDeliveryFailed  = "delivery_failed"
 	ErrCodeAgentNotRunning = "agent_not_running"
 	ErrCodeBrokerTimeout   = "broker_timeout"
+	// ErrCodeSendInProgress is returned (409) for a chat send whose
+	// idempotency key belongs to a send that is still running.
+	ErrCodeSendInProgress = "send_in_progress"
 
 	// Broker authentication error codes
 	ErrCodeInvalidJoinToken = "invalid_join_token"
@@ -81,6 +94,11 @@ const (
 	ErrCodeInvalidSignature = "invalid_signature"
 	ErrCodeClockSkew        = "clock_skew"
 	ErrCodeReplayDetected   = "replay_detected"
+
+	// ErrCodeUserNotFound is returned (401) when a hub-issued user token
+	// names a subject that has no user record, for example after the
+	// account was deleted. Such tokens stop working immediately.
+	ErrCodeUserNotFound = "user_not_found"
 
 	// Quota enforcement error codes
 	ErrCodeQuotaExceeded = "quota_exceeded"
@@ -309,10 +327,21 @@ func writeErrorFromErr(w http.ResponseWriter, err error, requestID string) {
 		statusCode = http.StatusConflict
 		code = ErrCodeConflict
 		message = "Resource already exists"
+	case errors.Is(err, store.ErrDeleteInProgress):
+		// A start-side write (run ID or running intent) refused because a
+		// delete holds the row (ptone/scion#2550).
+		statusCode = http.StatusConflict
+		code = ErrCodeDeleteInProgress
+		message = deleteInProgressRefusal("").Message
 	case errors.Is(err, store.ErrVersionConflict):
 		statusCode = http.StatusConflict
 		code = ErrCodeVersionConflict
 		message = "Version conflict - resource was modified"
+	case errors.Is(err, store.ErrProjectMembersGroupPrincipal):
+		// Must precede ErrInvalidInput, which it wraps.
+		statusCode = http.StatusBadRequest
+		code = ErrCodeInvalidRequest
+		message = storeMembersGroupPrincipalMessage
 	case errors.Is(err, store.ErrInvalidInput):
 		statusCode = http.StatusBadRequest
 		code = ErrCodeValidationError
@@ -450,12 +479,12 @@ func InternalError(w http.ResponseWriter) {
 		"Internal server error", nil)
 }
 
-// MethodNotAllowed writes a 405 Method Not Allowed response.
-// If allowedMethods are provided, an Allow header is set per RFC 9110 §15.5.6.
-func MethodNotAllowed(w http.ResponseWriter, allowedMethods ...string) {
-	if len(allowedMethods) > 0 {
-		w.Header().Set("Allow", strings.Join(allowedMethods, ", "))
-	}
+// MethodNotAllowed writes a 405 Method Not Allowed response with the Allow
+// header RFC 9110 §15.5.6 requires. The signature requires at least one
+// method, so a bare call does not compile.
+func MethodNotAllowed(w http.ResponseWriter, allowedMethod string, otherMethods ...string) {
+	methods := append([]string{allowedMethod}, otherMethods...)
+	w.Header().Set("Allow", strings.Join(methods, ", "))
 	writeError(w, http.StatusMethodNotAllowed, "method_not_allowed",
 		"Method not allowed", nil)
 }
@@ -495,6 +524,29 @@ func RuntimeBrokerUnavailable(w http.ResponseWriter, brokerID string, availableB
 	}
 	writeError(w, http.StatusServiceUnavailable, ErrCodeRuntimeBrokerUnavail,
 		"Specified runtime broker is unavailable", details)
+}
+
+// RuntimeBrokerNotFound writes a 404 Not Found response when the explicitly
+// requested runtime broker does not exist. The message names the requested
+// broker and the brokers the caller may use, because CLI clients print only
+// the message (not Details).
+func RuntimeBrokerNotFound(w http.ResponseWriter, requested string, usableBrokers []RuntimeBrokerSummary) {
+	names := make([]string, 0, len(usableBrokers))
+	for _, b := range usableBrokers {
+		names = append(names, fmt.Sprintf("%q", b.Name))
+	}
+	var message string
+	if len(names) > 0 {
+		message = fmt.Sprintf("Runtime broker %q not found. Brokers you can use for this project: %s",
+			requested, strings.Join(names, ", "))
+	} else {
+		message = fmt.Sprintf("Runtime broker %q not found, and no runtime brokers are currently available to you for this project", requested)
+	}
+	details := map[string]interface{}{
+		"requestedBrokerId": requested,
+		"availableBrokers":  usableBrokers,
+	}
+	writeError(w, http.StatusNotFound, ErrCodeRuntimeBrokerNotFound, message, details)
 }
 
 // MissingEnvVars writes a 422 Unprocessable Entity response when required

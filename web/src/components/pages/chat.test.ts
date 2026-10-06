@@ -29,14 +29,34 @@
 
 // @vitest-environment happy-dom
 
-import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
-import { render, type TemplateResult } from 'lit';
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
+import { html, nothing, render, type TemplateResult } from 'lit';
 import { apiFetch } from '../../client/api.js';
+import { navigateTo, pushRoute, replaceRoute } from '../../client/main.js';
+import {
+  rememberChatScrollAnchor,
+  takeChatScrollAnchor,
+} from '../shared/chat/chat-scroll-anchor.js';
+import { PAGE_TITLE_EVENT } from '../../client/page-title.js';
+import { chatDMsLoad, chatSpacesLoad } from '../../client/chat-list-cache.js';
+import { FakeEventSource } from '../../client/__fixtures__/agent-store-harness.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 vi.mock('../../client/main.js', () => ({
   navigateTo: vi.fn(),
+  pushRoute: vi.fn((path: string) => {
+    window.history.pushState({}, '', path);
+    return Promise.resolve();
+  }),
+  replaceRoute: vi.fn((path: string) => {
+    window.history.replaceState(
+      window.history.state,
+      '',
+      path + window.location.search + window.location.hash
+    );
+    return Promise.resolve();
+  }),
   stateManager: new EventTarget(),
 }));
 
@@ -49,6 +69,15 @@ vi.mock('../../client/api.js', async (importOriginal) => {
 });
 
 let ScionPageChat: any;
+
+// A connected page retains the agent store's hub list, which opens the
+// store's feed; it never connects here.
+beforeEach(() => {
+  vi.stubGlobal('EventSource', FakeEventSource);
+  // Page-wide shared list loads: one test's DM list must not answer the next.
+  chatDMsLoad.invalidate();
+  chatSpacesLoad.invalidate();
+});
 
 describe('chat mention roster stability', () => {
   it('reuses agent props until the member roster or project changes', () => {
@@ -116,17 +145,97 @@ function clickMention(el: any, slug: string): void {
   el.handleMentionClick(new CustomEvent('mention-click', { detail: { slug } }));
 }
 
-/** Drive one touch gesture through the page's swipe handlers. */
-function swipe(el: any, opts: { dx: number; dy?: number; durationMs?: number }): void {
+/**
+ * Drive one touch gesture through the page's swipe handlers. `path` is the
+ * touch's composed path (what sits under the finger); the return value says
+ * whether the page cancelled the move.
+ */
+function swipe(
+  el: any,
+  opts: { dx: number; dy?: number; durationMs?: number; path?: EventTarget[] }
+): { moveCancelled: boolean } {
   const dy = opts.dy ?? 0;
   const start = 200;
   const now = Date.now();
   vi.setSystemTime(now);
+  let moveCancelled = false;
 
-  el.handleTouchStart({ touches: [{ clientX: start, clientY: 100 }] });
-  el.handleTouchMove({ touches: [{ clientX: start + opts.dx, clientY: 100 + dy }] });
+  el.handleTouchStart({
+    touches: [{ clientX: start, clientY: 100 }],
+    composedPath: () => opts.path ?? [],
+  });
+  el.handleTouchMove({
+    touches: [{ clientX: start + opts.dx, clientY: 100 + dy }],
+    cancelable: true,
+    preventDefault: () => {
+      moveCancelled = true;
+    },
+  });
   vi.setSystemTime(now + (opts.durationMs ?? 100));
   el.handleTouchEnd({ changedTouches: [{ clientX: start + opts.dx, clientY: 100 + dy }] });
+  return { moveCancelled };
+}
+
+/**
+ * Drive a two-finger pinch through the page's swipe handlers. The first
+ * finger lands alone (on `path`), the second lands `secondAfterMove` moves
+ * later (0 = both land together), both move sideways by `dx`, then the
+ * second lifts and the first keeps moving before it lifts too. Returns
+ * whether any move from the second finger landing on was cancelled (before
+ * that, it is still a one-finger drag).
+ */
+function pinch(
+  el: any,
+  opts: { dx: number; path?: EventTarget[]; secondAfterMove?: number }
+): { moveCancelled: boolean } {
+  const now = Date.now();
+  vi.setSystemTime(now);
+  let moveCancelled = false;
+  let pinching = false;
+  const path = () => opts.path ?? [];
+  const finger = (x: number) => ({ clientX: x, clientY: 100 });
+  const move = (touches: unknown[]) =>
+    el.handleTouchMove({
+      touches,
+      cancelable: true,
+      preventDefault: () => {
+        if (pinching) moveCancelled = true;
+      },
+    });
+  const together = (opts.secondAfterMove ?? 1) === 0;
+
+  pinching = together;
+  el.handleTouchStart({
+    touches: together ? [finger(200), finger(260)] : [finger(200)],
+    composedPath: path,
+  });
+  if (!together) {
+    for (let i = 1; i <= (opts.secondAfterMove ?? 1); i++) {
+      move([finger(200 + (opts.dx / 8) * i)]);
+    }
+    pinching = true;
+    el.handleTouchStart({ touches: [finger(200), finger(260)], composedPath: path });
+  }
+  for (let i = 1; i <= 8; i++) {
+    move([finger(200 + opts.dx * (i / 8)), finger(260 - opts.dx * (i / 8))]);
+  }
+  vi.setSystemTime(now + 100);
+  // The second finger lifts; the first is still down and keeps moving.
+  el.handleTouchEnd({ touches: [finger(200 + opts.dx)], changedTouches: [finger(260 - opts.dx)] });
+  move([finger(200 + opts.dx * 2)]);
+  el.handleTouchEnd({ touches: [], changedTouches: [finger(200 + opts.dx * 2)] });
+  return { moveCancelled };
+}
+
+/** A sideways scroller 500px wider than its box, scrolled to `scrollLeft`. */
+function wideScroller(scrollLeft: number): HTMLElement {
+  const el = document.createElement('pre');
+  el.style.overflowX = 'auto';
+  Object.defineProperty(el, 'scrollWidth', { value: 800 });
+  Object.defineProperty(el, 'clientWidth', { value: 300 });
+  Object.defineProperty(el, 'scrollLeft', { value: scrollLeft });
+  document.body.appendChild(el);
+  return el;
 }
 
 beforeAll(async () => {
@@ -209,6 +318,107 @@ describe('chat page — mobile panel default and header navigation', () => {
     el.parseV2Route();
 
     expect(el.mobilePanel).toBe('center');
+  });
+
+  it('opens a DM linked by peer ID on the conversation panel', () => {
+    const el = createPage();
+    window.history.replaceState({}, '', '/chat/dm/agent-1');
+
+    el.parseV2Route();
+
+    expect(el.v2Conversation).toMatchObject({
+      conversationKey: 'dm:agent:agent-1:user:user-me',
+      peerId: 'agent-1',
+    });
+    expect(el.mobilePanel).toBe('center');
+  });
+
+  it('leaves the panel alone when a peer-ID DM route is re-parsed while that DM is open', () => {
+    const el = createPage();
+    window.history.replaceState({}, '', '/chat/dm/agent-1');
+    el.parseV2Route();
+    const opened = el.v2Conversation;
+    // The user swipes back to the rail; the URL stays on the DM.
+    el.mobilePanel = 'left';
+
+    el.parseV2Route();
+
+    expect(el.mobilePanel).toBe('left');
+    expect(el.v2Conversation).toBe(opened);
+  });
+
+  it('corrects a peer-ID DM opened before the agents loaded, without moving the panel', () => {
+    const el = createPage();
+    el.v2AgentMembers = [];
+    window.history.replaceState({}, '', '/chat/dm/agent-1');
+    el.parseV2Route();
+    // With no agents known yet, the peer is taken for a user.
+    expect(el.v2Conversation.conversationKey).toBe('dm:user:agent-1:user:user-me');
+    el.mobilePanel = 'left';
+
+    // The agents arrive and the rail reload re-parses the same route.
+    el.v2AgentMembers = [{ id: 'agent-1', kind: 'agent', displayName: 'Coder One' }];
+    el.parseV2Route();
+
+    expect(el.v2Conversation).toMatchObject({
+      conversationKey: 'dm:agent:agent-1:user:user-me',
+      peerId: 'agent-1',
+      peerKind: 'agent',
+    });
+    expect(el.mobilePanel).toBe('left');
+  });
+
+  it('leaves the panel alone when a full-key DM route is re-parsed while that DM is open', () => {
+    const el = createPage();
+    window.history.replaceState({}, '', '/chat/dm/dm:agent:agent-1:user:user-me');
+    el.parseV2Route();
+    el.mobilePanel = 'left';
+
+    el.parseV2Route();
+
+    expect(el.mobilePanel).toBe('left');
+  });
+
+  it('rewrites a legacy thread URL in place without reopening the open thread', () => {
+    const el = createPage();
+    window.history.replaceState({}, '', '/chat/space/p1/thread/topic-1#msg-m1');
+    el.parseV2Route();
+    expect(el.mobilePanel).toBe('center');
+    const opened = el.v2Conversation;
+    el.mobilePanel = 'left';
+    const historyLength = window.history.length;
+
+    // The rail's first load makes the slug known and re-parses the route.
+    el._slugToProjectId.set('alpha', 'p1');
+    el._projectIdToSlug.set('p1', 'alpha');
+    el.parseV2Route();
+
+    expect(replaceRoute).toHaveBeenCalledWith('/chat/alpha/topic-1');
+    expect(window.location.pathname).toBe('/chat/alpha/topic-1');
+    expect(window.location.hash).toBe('#msg-m1');
+    expect(window.history.length).toBe(historyLength);
+    // Same thread, now carrying the slug the URL names.
+    expect(el.v2Conversation).toEqual({ ...opened, projectSlug: 'alpha' });
+    expect(el.mobilePanel).toBe('left');
+  });
+
+  it('re-titles the thread once the router has caught up with the rewrite', async () => {
+    const el = createPage();
+    window.history.replaceState({}, '', '/chat/space/p1/thread/topic-1');
+    el.parseV2Route();
+    el.v2Conversation = { ...el.v2Conversation, threadName: 'general' };
+    const titles: string[][] = [];
+    el.addEventListener(PAGE_TITLE_EVENT, (e: Event) =>
+      titles.push((e as CustomEvent).detail.segments)
+    );
+
+    el._slugToProjectId.set('alpha', 'p1');
+    el._projectIdToSlug.set('p1', 'alpha');
+    el.parseV2Route();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(titles.at(-1)).toEqual(['#general', 'Chat']);
   });
 
   it('renders a back button that returns to the rail', () => {
@@ -311,6 +521,11 @@ describe('chat page — deep-linked thread header', () => {
 });
 
 describe('chat page — mobile swipe navigation', () => {
+  afterEach(() => {
+    // The scroller helpers attach their elements to measure them.
+    document.body.replaceChildren();
+  });
+
   // The element is never connected (see the file doc comment), so the
   // connectedCallback matchMedia listener that drives `isMobileLayout` in
   // real usage never runs — set it directly here, the same way `mobilePanel`
@@ -373,6 +588,83 @@ describe('chat page — mobile swipe navigation', () => {
 
     swipe(el, { dx: 120, dy: 200 });
 
+    expect(el.mobilePanel).toBe('center');
+  });
+
+  it('leaves a drag to a sideways scroller that can still scroll that way', () => {
+    vi.useFakeTimers();
+    const el = createPageOnConversation();
+    el.isMobileLayout = true;
+
+    // At its start: a leftward drag scrolls it, and is not a swipe.
+    const left = swipe(el, { dx: -120, path: [wideScroller(0)] });
+    expect(el.mobilePanel).toBe('center');
+    expect(left.moveCancelled, 'the scroller keeps the pan').toBe(false);
+
+    // Part-way along: the same holds for a rightward drag.
+    const right = swipe(el, { dx: 120, path: [wideScroller(200)] });
+    expect(el.mobilePanel).toBe('center');
+    expect(right.moveCancelled).toBe(false);
+  });
+
+  it('swipes panels from a sideways scroller already at its end, and keeps the pan from the browser', () => {
+    vi.useFakeTimers();
+    const el = createPageOnConversation();
+    el.isMobileLayout = true;
+
+    // At its start a rightward drag has nothing to scroll: it is a panel
+    // swipe, and the move is cancelled so the browser cannot claim the pan
+    // as a history swipe.
+    const atStart = swipe(el, { dx: 120, path: [wideScroller(0)] });
+    expect(el.mobilePanel).toBe('left');
+    expect(atStart.moveCancelled).toBe(true);
+
+    el.mobilePanel = 'center';
+    const atEnd = swipe(el, { dx: -120, path: [wideScroller(500)] });
+    expect(el.mobilePanel).toBe('right');
+    expect(atEnd.moveCancelled).toBe(true);
+  });
+
+  it('never cancels a move with no sideways scroller under the touch', () => {
+    vi.useFakeTimers();
+    const el = createPageOnConversation();
+    el.isMobileLayout = true;
+    expect(swipe(el, { dx: 120 }).moveCancelled).toBe(false);
+    expect(swipe(el, { dx: -120 }).moveCancelled).toBe(false);
+  });
+
+  it('leaves a pinch to the browser, even one starting on a scroller at its end', () => {
+    vi.useFakeTimers();
+    const el = createPageOnConversation();
+    el.isMobileLayout = true;
+
+    // The first finger lands alone on a code block at its start and moves
+    // right (a move that would be cancelled for one finger), then a second
+    // finger lands: the pinch must never be cancelled, nor swipe panels.
+    expect(pinch(el, { dx: 120, path: [wideScroller(0)] }).moveCancelled).toBe(false);
+    expect(el.mobilePanel).toBe('center');
+
+    // Both fingers landing together, on a scroller at its end.
+    expect(
+      pinch(el, { dx: -120, path: [wideScroller(500)], secondAfterMove: 0 }).moveCancelled
+    ).toBe(false);
+    expect(el.mobilePanel).toBe('center');
+
+    // Away from any scroller.
+    expect(pinch(el, { dx: 120 }).moveCancelled).toBe(false);
+    expect(el.mobilePanel).toBe('center');
+
+    // The next one-finger gesture swipes again.
+    expect(swipe(el, { dx: 120, path: [wideScroller(0)] }).moveCancelled).toBe(true);
+    expect(el.mobilePanel).toBe('left');
+  });
+
+  it('never cancels a move on desktop viewports, even on a scroller at its end', () => {
+    vi.useFakeTimers();
+    const el = createPageOnConversation();
+    el.isMobileLayout = false;
+    expect(swipe(el, { dx: 120, path: [wideScroller(0)] }).moveCancelled).toBe(false);
+    expect(swipe(el, { dx: -120, path: [wideScroller(500)] }).moveCancelled).toBe(false);
     expect(el.mobilePanel).toBe('center');
   });
 
@@ -477,34 +769,55 @@ describe('chat page — muted DMs raise no unread dot', () => {
     el.v2UnreadFromIds = ['agent-1', 'agent-2'];
     let resolveOld!: (response: Response) => void;
     vi.mocked(apiFetch)
-      .mockImplementationOnce(() => new Promise<Response>((resolve) => { resolveOld = resolve; }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({
-        dms: [{ peerId: 'agent-1', hasUnread: false }, { peerId: 'agent-2', hasUnread: true }],
-      })));
+      .mockImplementationOnce(
+        () =>
+          new Promise<Response>((resolve) => {
+            resolveOld = resolve;
+          })
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            dms: [
+              { peerId: 'agent-1', hasUnread: false },
+              { peerId: 'agent-2', hasUnread: true },
+            ],
+          })
+        )
+      );
     const oldRequest = el.loadUnreadDMPeers();
     await el.loadUnreadDMPeers();
     expect(el.v2UnreadFromIds).toEqual(['agent-2']);
-    resolveOld(new Response(JSON.stringify({
-      dms: [{ peerId: 'agent-1', hasUnread: true }, { peerId: 'agent-2', hasUnread: true }],
-    })));
+    resolveOld(
+      new Response(
+        JSON.stringify({
+          dms: [
+            { peerId: 'agent-1', hasUnread: true },
+            { peerId: 'agent-2', hasUnread: true },
+          ],
+        })
+      )
+    );
     await oldRequest;
     expect(el.v2UnreadFromIds).toEqual(['agent-2']);
   });
 
-  it.each([
-    'dm:agent:agent-1:user:user-me',
-    'dm:user:user-me:agent:agent-1',
-  ])('clears the acknowledged peer, not the selected conversation (%s)', (key) => {
-    const el = createPage();
-    el.v2UnreadFromIds = ['agent-1', 'agent-2'];
-    el.v2Conversation = { peerId: 'agent-2' };
-    const refresh = vi.spyOn(el, 'loadUnreadDMPeers').mockResolvedValue(undefined);
-    el._handleReadStateUpdated(new CustomEvent('read-state-updated', {
-      detail: { conversationKey: key },
-    }));
-    expect(el.v2UnreadFromIds).toEqual(['agent-2']);
-    expect(refresh).toHaveBeenCalledOnce();
-  });
+  it.each(['dm:agent:agent-1:user:user-me', 'dm:user:user-me:agent:agent-1'])(
+    'clears the acknowledged peer, not the selected conversation (%s)',
+    (key) => {
+      const el = createPage();
+      el.v2UnreadFromIds = ['agent-1', 'agent-2'];
+      el.v2Conversation = { peerId: 'agent-2' };
+      const refresh = vi.spyOn(el, 'loadUnreadDMPeers').mockResolvedValue(undefined);
+      el._handleReadStateUpdated(
+        new CustomEvent('read-state-updated', {
+          detail: { conversationKey: key },
+        })
+      );
+      expect(el.v2UnreadFromIds).toEqual(['agent-2']);
+      expect(refresh).toHaveBeenCalledOnce();
+    }
+  );
 
   /** Answer GET /api/v1/chat/dms with the given entries. */
   function serveDMs(dms: Array<Record<string, unknown>>): void {
@@ -873,5 +1186,1084 @@ describe('chat page — promote DM dialog', () => {
       'Agent is still responding. Try again in a few seconds.',
       'warning'
     );
+  });
+});
+
+describe('chat page — late route lookups', () => {
+  /** Let pending promise callbacks (the lookup's awaits) run. */
+  async function flush(): Promise<void> {
+    for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
+  }
+
+  /**
+   * Hold the project-by-slug lookup until `release` is called; every other
+   * request gets an empty object.
+   */
+  function holdSlugLookup(): () => void {
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.mocked(apiFetch).mockImplementation(async (path: string) => {
+      if (path.startsWith('/api/v1/projects?slug=')) {
+        await held;
+        return new Response(JSON.stringify({ items: [{ id: 'p1', slug: 'alpha', name: 'A' }] }), {
+          status: 200,
+        });
+      }
+      return new Response('{}', { status: 200 });
+    });
+    return release;
+  }
+
+  /** A page that reports itself mounted, as one the router shows does. */
+  function mountedPage(): any {
+    const el = createPage();
+    Object.defineProperty(el, 'isConnected', { get: () => true, configurable: true });
+    return el;
+  }
+
+  /**
+   * A rail reload landing, as one does after each inbound message: the rail
+   * knows no slug for the route yet, so every re-parse starts its own lookup.
+   */
+  function railReloaded(el: any): void {
+    el.handleRailLoaded(new CustomEvent('rail-loaded', { detail: { spaceIds: [], spaces: [] } }));
+  }
+
+  it('a late slug lookup leaves the panel alone once the rail has opened the thread', async () => {
+    const release = holdSlugLookup();
+    const el = mountedPage();
+    window.history.replaceState({}, '', '/chat/alpha/topic-1');
+    el.parseV2Route();
+    // The rail loads first and opens the thread through the known slug.
+    el._slugToProjectId.set('alpha', 'p1');
+    el._projectIdToSlug.set('p1', 'alpha');
+    el.parseV2Route();
+    expect(el.mobilePanel).toBe('center');
+    el.mobilePanel = 'left';
+
+    release();
+    await flush();
+
+    expect(el.mobilePanel).toBe('left');
+    expect(el.v2Conversation).toMatchObject({ conversationKey: 'topic-1', projectSlug: 'alpha' });
+  });
+
+  it('a late slug lookup does not pull the user back from a thread they opened since', async () => {
+    const release = holdSlugLookup();
+    const el = mountedPage();
+    window.history.replaceState({}, '', '/chat/alpha/topic-1');
+    el.parseV2Route();
+    el.navigateToThread({
+      conversationKey: 'topic-2',
+      projectId: 'p1',
+      projectSlug: 'alpha',
+      threadName: 'two',
+    });
+
+    release();
+    await flush();
+
+    expect(el.v2Conversation.conversationKey).toBe('topic-2');
+    expect(window.location.pathname).toBe('/chat/alpha/topic-2');
+  });
+
+  it('a slug lookup still opens a cold-loaded thread', async () => {
+    const release = holdSlugLookup();
+    const el = mountedPage();
+    window.history.replaceState({}, '', '/chat/alpha/topic-1');
+    el.parseV2Route();
+
+    release();
+    await flush();
+
+    expect(el.v2Conversation).toMatchObject({ conversationKey: 'topic-1', projectId: 'p1' });
+    expect(el.mobilePanel).toBe('center');
+  });
+
+  it('a burst of rail reloads does not pull the user back to the thread the URL named before', async () => {
+    const release = holdSlugLookup();
+    const el = mountedPage();
+    window.history.replaceState({}, '', '/chat/alpha/topic-1');
+    el.parseV2Route();
+    railReloaded(el);
+    railReloaded(el);
+    // The user opens another thread and starts typing in it.
+    el.navigateToThread({
+      conversationKey: 'topic-2',
+      projectId: 'p1',
+      projectSlug: 'alpha',
+      threadName: 'two',
+    });
+
+    release();
+    await flush();
+
+    expect(el.v2Conversation.conversationKey).toBe('topic-2');
+    expect(window.location.pathname).toBe('/chat/alpha/topic-2');
+    expect(pushRoute).toHaveBeenLastCalledWith('/chat/alpha/topic-2');
+  });
+
+  it('a burst of rail reloads still opens the thread the URL names', async () => {
+    const release = holdSlugLookup();
+    const el = mountedPage();
+    window.history.replaceState({}, '', '/chat/alpha/topic-1');
+    el.parseV2Route();
+    railReloaded(el);
+    railReloaded(el);
+
+    release();
+    await flush();
+
+    expect(el.v2Conversation).toMatchObject({ conversationKey: 'topic-1', projectSlug: 'alpha' });
+    expect(window.location.pathname).toBe('/chat/alpha/topic-1');
+  });
+
+  it('a late slug lookup on a page that is no longer mounted does nothing', async () => {
+    const release = holdSlugLookup();
+    const el = mountedPage();
+    window.history.replaceState({}, '', '/chat/alpha/topic-1');
+    el.parseV2Route();
+    // The router replaced this page with a new one for the same URL.
+    Object.defineProperty(el, 'isConnected', { get: () => false });
+
+    release();
+    await flush();
+
+    expect(el.v2Conversation).toBeNull();
+  });
+});
+
+describe('chat page — late space lookups', () => {
+  async function flush(): Promise<void> {
+    for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
+  }
+
+  /**
+   * Hold the project-by-slug lookup and the space's thread list until their
+   * releases are called; every other request gets an empty object.
+   */
+  function holdSpaceLookups(): { slug: () => void; threads: () => void } {
+    const releases = { slug: () => {}, threads: () => {} };
+    const slugHeld = new Promise<void>((resolve) => {
+      releases.slug = resolve;
+    });
+    const threadsHeld = new Promise<void>((resolve) => {
+      releases.threads = resolve;
+    });
+    vi.mocked(apiFetch).mockImplementation(async (path: string) => {
+      if (path.startsWith('/api/v1/projects?slug=')) {
+        await slugHeld;
+        return new Response(JSON.stringify({ items: [{ id: 'p1', slug: 'alpha', name: 'A' }] }), {
+          status: 200,
+        });
+      }
+      if (path === '/api/v1/chat/spaces/p1/threads') {
+        await threadsHeld;
+        return new Response(
+          JSON.stringify({ threads: [{ id: 'general-1', name: 'general', isGeneral: true }] }),
+          { status: 200 }
+        );
+      }
+      return new Response('{}', { status: 200 });
+    });
+    return releases;
+  }
+
+  /** A mounted-looking page with a stub rail, on the mobile or desktop layout. */
+  function createSpacePage(mobile: boolean): any {
+    const el = createPage();
+    el.isMobileLayout = mobile;
+    const rail = {
+      expandSpace: vi.fn(),
+      // The real rail loads the list over the same endpoint; going through
+      // the mocked apiFetch keeps the held thread request in control.
+      threadsFor: vi.fn(async (projectId: string) => {
+        const res = await apiFetch(`/api/v1/chat/spaces/${projectId}/threads`);
+        return ((await res.json()) as { threads?: unknown[] }).threads ?? [];
+      }),
+    };
+    Object.defineProperty(el, 'isConnected', { get: () => true, configurable: true });
+    Object.defineProperty(el, 'shadowRoot', {
+      get: () => ({
+        querySelector: (sel: string) => (sel === 'scion-chat-space-rail' ? rail : null),
+      }),
+    });
+    el.rail = rail;
+    vi.mocked(navigateTo).mockClear();
+    return el;
+  }
+
+  function openThreadFromRail(el: any): void {
+    el.navigateToThread({
+      conversationKey: 'topic-2',
+      projectId: 'p1',
+      projectSlug: 'alpha',
+      threadName: 'two',
+    });
+  }
+
+  it('on mobile, a late slug lookup leaves a thread opened since on screen', async () => {
+    const releases = holdSpaceLookups();
+    const el = createSpacePage(true);
+    window.history.replaceState({}, '', '/chat/alpha');
+    el.parseV2Route();
+    openThreadFromRail(el);
+    expect(el.mobilePanel).toBe('center');
+
+    releases.slug();
+    await flush();
+
+    expect(el.mobilePanel).toBe('center');
+    expect(el.rail.expandSpace).not.toHaveBeenCalled();
+  });
+
+  it('on desktop, a late slug lookup does not move the user off a thread opened since', async () => {
+    const releases = holdSpaceLookups();
+    releases.threads();
+    const el = createSpacePage(false);
+    window.history.replaceState({}, '', '/chat/alpha');
+    el.parseV2Route();
+    openThreadFromRail(el);
+
+    releases.slug();
+    await flush();
+
+    expect(navigateTo).not.toHaveBeenCalled();
+    expect(el.v2Conversation.conversationKey).toBe('topic-2');
+  });
+
+  it('on desktop, a late thread list does not move the user off a thread opened since', async () => {
+    const releases = holdSpaceLookups();
+    const el = createSpacePage(false);
+    el._slugToProjectId.set('alpha', 'p1');
+    el._projectIdToSlug.set('p1', 'alpha');
+    window.history.replaceState({}, '', '/chat/alpha');
+    el.parseV2Route();
+    openThreadFromRail(el);
+
+    releases.threads();
+    await flush();
+
+    expect(navigateTo).not.toHaveBeenCalled();
+    expect(el.v2Conversation.conversationKey).toBe('topic-2');
+  });
+
+  it('a late lookup on a page that is no longer mounted does nothing', async () => {
+    const releases = holdSpaceLookups();
+    releases.threads();
+    const el = createSpacePage(false);
+    window.history.replaceState({}, '', '/chat/alpha');
+    el.parseV2Route();
+    Object.defineProperty(el, 'isConnected', { get: () => false });
+
+    releases.slug();
+    await flush();
+
+    expect(navigateTo).not.toHaveBeenCalled();
+    expect(el.v2Conversation).toBeNull();
+  });
+
+  /** A rail reload that knows the space, as after each inbound message. */
+  function railReloadedWithSpace(el: any): void {
+    el.handleRailLoaded(
+      new CustomEvent('rail-loaded', {
+        detail: {
+          spaceIds: [],
+          spaces: [{ projectId: 'p1', projectSlug: 'alpha', projectName: 'A' }],
+        },
+      })
+    );
+  }
+
+  it('on desktop, a burst of rail reloads does not move the user off a thread opened since', async () => {
+    const releases = holdSpaceLookups();
+    const el = createSpacePage(false);
+    window.history.replaceState({}, '', '/chat/alpha');
+    railReloadedWithSpace(el);
+    railReloadedWithSpace(el);
+    railReloadedWithSpace(el);
+    expect(el.rail.threadsFor).toHaveBeenCalledTimes(3);
+    openThreadFromRail(el);
+
+    releases.threads();
+    await flush();
+
+    expect(navigateTo).not.toHaveBeenCalled();
+    expect(el.v2Conversation.conversationKey).toBe('topic-2');
+    expect(window.location.pathname).toBe('/chat/alpha/topic-2');
+  });
+
+  it('on desktop, a burst of rail reloads on a space opens its #general once', async () => {
+    const releases = holdSpaceLookups();
+    const el = createSpacePage(false);
+    vi.mocked(navigateTo).mockImplementationOnce((path: string) => {
+      window.history.pushState({}, '', path);
+    });
+    window.history.replaceState({}, '', '/chat/alpha');
+    railReloadedWithSpace(el);
+    railReloadedWithSpace(el);
+    railReloadedWithSpace(el);
+
+    releases.threads();
+    await flush();
+
+    expect(navigateTo).toHaveBeenCalledTimes(1);
+    expect(navigateTo).toHaveBeenCalledWith('/chat/alpha/general-1');
+    expect(el.v2Conversation).toMatchObject({ conversationKey: 'general-1', projectSlug: 'alpha' });
+  });
+
+  it('a slug lookup still opens a cold-loaded space', async () => {
+    const releases = holdSpaceLookups();
+    releases.threads();
+    const el = createSpacePage(false);
+    window.history.replaceState({}, '', '/chat/alpha');
+    el.parseV2Route();
+
+    releases.slug();
+    await flush();
+
+    expect(navigateTo).toHaveBeenCalledWith('/chat/alpha/general-1');
+    expect(el.v2Conversation).toMatchObject({ conversationKey: 'general-1', projectSlug: 'alpha' });
+  });
+});
+
+describe('chat page — rail reload after a message', () => {
+  it('asks the rail for spaces requested after the newest message of the burst', async () => {
+    vi.useFakeTimers();
+    try {
+      const el = createPage();
+      const rail = { reload: vi.fn(() => Promise.resolve()) };
+      Object.defineProperty(el, 'shadowRoot', {
+        get: () => ({
+          querySelector: (sel: string) => (sel === 'scion-chat-space-rail' ? rail : null),
+        }),
+      });
+      const first = new CustomEvent('chat-message-received', { detail: {} });
+      vi.advanceTimersByTime(5);
+      const second = new CustomEvent('chat-message-received', { detail: {} });
+      el.handleChatMessage(first);
+      el.handleChatMessage(second);
+
+      await vi.advanceTimersByTimeAsync(2000);
+
+      expect(rail.reload).toHaveBeenCalledTimes(1);
+      expect(rail.reload).toHaveBeenCalledWith({ startedAfter: second.timeStamp });
+      expect(second.timeStamp).toBeGreaterThan(first.timeStamp);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('chat page — late DM peer lookups', () => {
+  async function flush(): Promise<void> {
+    for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
+  }
+
+  /**
+   * Hold each DM-list request until its own release is called, in order;
+   * every other request gets an empty object.
+   */
+  function holdDMLists(): Array<() => void> {
+    const releases: Array<() => void> = [];
+    vi.mocked(apiFetch).mockImplementation(async (path: string) => {
+      if (path === '/api/v1/chat/dms') {
+        await new Promise<void>((resolve) => releases.push(resolve));
+        return new Response(
+          JSON.stringify({
+            dms: [
+              {
+                conversationKey: 'dm:agent:agent-1:user:user-me',
+                peerId: 'agent-1',
+                peerKind: 'agent',
+                peerName: 'Coder One',
+              },
+              {
+                conversationKey: 'dm:agent:agent-2:user:user-me',
+                peerId: 'agent-2',
+                peerKind: 'agent',
+                peerName: 'Review Bot',
+              },
+            ],
+          }),
+          { status: 200 }
+        );
+      }
+      return new Response('{}', { status: 200 });
+    });
+    return releases;
+  }
+
+  /**
+   * A mounted page whose user ID is unknown, so a peer-ID DM route is
+   * resolved over the API.
+   */
+  function createPageWithoutUserId(): any {
+    const el = createPage();
+    el.pageData = {};
+    Object.defineProperty(el, 'isConnected', { get: () => true, configurable: true });
+    return el;
+  }
+
+  it('a second lookup for a DM that is already open leaves the panel alone', async () => {
+    const releases = holdDMLists();
+    const el = createPageWithoutUserId();
+    window.history.replaceState({}, '', '/chat/dm/agent-1');
+    // The first parse and the rail-loaded re-parse each start a lookup.
+    // Back to back they would share one DM-list request; forget it in
+    // between so the second answers on its own, as it does once the shared
+    // list has aged out.
+    el.parseV2Route();
+    chatDMsLoad.invalidate();
+    el.parseV2Route();
+    await flush();
+    expect(releases).toHaveLength(2);
+
+    releases[0]();
+    await flush();
+    expect(el.v2Conversation.conversationKey).toBe('dm:agent:agent-1:user:user-me');
+    expect(el.mobilePanel).toBe('center');
+    el.mobilePanel = 'left';
+
+    releases[1]();
+    await flush();
+
+    expect(el.mobilePanel).toBe('left');
+  });
+
+  it('the first parse and the rail-loaded re-parse share one DM-list request and open the DM once', async () => {
+    const releases = holdDMLists();
+    const el = createPageWithoutUserId();
+    window.history.replaceState({}, '', '/chat/dm/agent-1');
+    const titles: string[] = [];
+    el.addEventListener(PAGE_TITLE_EVENT, (e: Event) =>
+      titles.push(((e as CustomEvent).detail.segments as string[])[0])
+    );
+    el.parseV2Route();
+    el.parseV2Route();
+    await flush();
+    expect(releases).toHaveLength(1);
+
+    releases[0]();
+    await flush();
+
+    expect(el.v2Conversation.conversationKey).toBe('dm:agent:agent-1:user:user-me');
+    expect(el.mobilePanel).toBe('center');
+    // Opened by one lookup; the other found it already open and left it.
+    expect(titles.filter((t) => t === 'Coder One')).toHaveLength(1);
+  });
+
+  it('a lookup that returns after the route moved on opens nothing', async () => {
+    const releases = holdDMLists();
+    const el = createPageWithoutUserId();
+    window.history.replaceState({}, '', '/chat/dm/agent-1');
+    el.parseV2Route();
+    await flush();
+    window.history.replaceState({}, '', '/chat');
+    el.parseV2Route();
+
+    releases[0]();
+    await flush();
+
+    expect(el.v2Conversation).toBeNull();
+    expect(el.mobilePanel).toBe('left');
+  });
+
+  it('a DM opened from the members list without a user ID gets its own URL', async () => {
+    const releases = holdDMLists();
+    const el = createPageWithoutUserId();
+    window.history.replaceState({}, '', '/chat');
+    el.parseV2Route();
+    el.openDM('agent-1', 'agent', 'Coder One');
+    await flush();
+
+    releases[0]();
+    await flush();
+
+    expect(window.location.pathname).toBe(
+      `/chat/dm/${encodeURIComponent('dm:agent:agent-1:user:user-me')}`
+    );
+    // The rail's next reload re-parses the route; the DM must stay open.
+    el.parseV2Route();
+    expect(el.v2Conversation).toMatchObject({ conversationKey: 'dm:agent:agent-1:user:user-me' });
+    expect(el.mobilePanel).toBe('center');
+  });
+
+  it('a DM opened without a user ID is dropped if the user moves on first', async () => {
+    const releases = holdDMLists();
+    const el = createPageWithoutUserId();
+    window.history.replaceState({}, '', '/chat');
+    el.parseV2Route();
+    el.openDM('agent-1', 'agent', 'Coder One');
+    await flush();
+    el.navigateToThread({
+      conversationKey: 'topic-2',
+      projectId: 'p1',
+      projectSlug: 'alpha',
+      threadName: 'two',
+    });
+
+    releases[0]();
+    await flush();
+
+    expect(el.v2Conversation.conversationKey).toBe('topic-2');
+    expect(window.location.pathname).toBe('/chat/alpha/topic-2');
+  });
+
+  it('of two DMs opened quickly without a user ID, the last one opened wins', async () => {
+    const releases = holdDMLists();
+    const el = createPageWithoutUserId();
+    window.history.replaceState({}, '', '/chat');
+    el.parseV2Route();
+    el.openDM('agent-1', 'agent', 'Coder One');
+    el.openDM('agent-2', 'agent', 'Review Bot');
+    await flush();
+    expect(releases).toHaveLength(2);
+
+    releases[0]();
+    await flush();
+    releases[1]();
+    await flush();
+
+    expect(el.v2Conversation).toMatchObject({ conversationKey: 'dm:agent:agent-2:user:user-me' });
+    expect(window.location.pathname).toBe(
+      `/chat/dm/${encodeURIComponent('dm:agent:agent-2:user:user-me')}`
+    );
+  });
+
+  it('of two DMs opened quickly, the last one opened wins even if its answer comes first', async () => {
+    const releases = holdDMLists();
+    const el = createPageWithoutUserId();
+    window.history.replaceState({}, '', '/chat');
+    el.parseV2Route();
+    const historyBefore = window.history.length;
+    el.openDM('agent-1', 'agent', 'Coder One');
+    el.openDM('agent-2', 'agent', 'Review Bot');
+    await flush();
+    expect(releases).toHaveLength(2);
+
+    releases[1]();
+    await flush();
+    releases[0]();
+    await flush();
+
+    expect(el.v2Conversation).toMatchObject({ conversationKey: 'dm:agent:agent-2:user:user-me' });
+    expect(window.location.pathname).toBe(
+      `/chat/dm/${encodeURIComponent('dm:agent:agent-2:user:user-me')}`
+    );
+    expect(window.history.length).toBe(historyBefore + 1);
+  });
+
+  it('a DM opened without a user ID is dropped if the router replaces the page first', async () => {
+    const releases = holdDMLists();
+    const el = createPageWithoutUserId();
+    window.history.replaceState({}, '', '/chat');
+    document.body.appendChild(el);
+    // Connecting fires a DM-list request of its own (the unread dots), but
+    // only once the lazy rail and members imports resolve, which can take
+    // longer than one flush on a slow runner. Those imports resolving is
+    // what issues it, so wait for that before taking the baseline.
+    await vi.waitFor(() => expect(el.v2SpaceRailLoaded).toBe(true), { timeout: 5000 });
+    await flush();
+    const pending = releases.length;
+    el.openDM('agent-1', 'agent', 'Coder One');
+    await flush();
+    expect(releases).toHaveLength(pending + 1);
+    // The router navigates elsewhere and removes this page.
+    window.history.pushState({}, '', '/chat/alpha/topic-2');
+    el.remove();
+    const historyBefore = window.history.length;
+
+    releases.forEach((release) => release());
+    await flush();
+
+    expect(window.location.pathname).toBe('/chat/alpha/topic-2');
+    expect(window.history.length).toBe(historyBefore);
+  });
+
+  it('a DM opened without a user ID is dropped if the user promotes a thread first', async () => {
+    const releases = holdDMLists();
+    const el = createPageWithoutUserId();
+    el._projectIdToSlug.set('p1', 'alpha');
+    window.history.replaceState({}, '', '/chat');
+    el.parseV2Route();
+    el.openDM('agent-1', 'agent', 'Coder One');
+    await flush();
+    el.navigateToPromotedThread({ id: 'topic-9', projectId: 'p1', name: 'promoted' });
+
+    releases[0]();
+    await flush();
+
+    expect(el.v2Conversation).toMatchObject({ conversationKey: 'topic-9', isDM: false });
+    expect(window.location.pathname).toBe('/chat/alpha/topic-9');
+  });
+
+  it('a DM opened without a user ID is dropped if the user resets the view first', async () => {
+    const releases = holdDMLists();
+    const el = createPageWithoutUserId();
+    window.history.replaceState({}, '', '/chat');
+    el.parseV2Route();
+    el.openDM('agent-1', 'agent', 'Coder One');
+    await flush();
+    el.handleResetView();
+
+    releases[0]();
+    await flush();
+
+    expect(el.v2Conversation).toBeNull();
+    expect(window.location.pathname).toBe('/chat');
+  });
+
+  it('a lookup still opens a cold-loaded DM', async () => {
+    const releases = holdDMLists();
+    const el = createPageWithoutUserId();
+    window.history.replaceState({}, '', '/chat/dm/agent-1');
+    el.parseV2Route();
+    await flush();
+
+    releases[0]();
+    await flush();
+
+    expect(el.v2Conversation).toMatchObject({
+      conversationKey: 'dm:agent:agent-1:user:user-me',
+      peerName: 'Coder One',
+    });
+    expect(el.mobilePanel).toBe('center');
+  });
+
+  it('a lookup on a page that is no longer mounted opens nothing', async () => {
+    const releases = holdDMLists();
+    const el = createPageWithoutUserId();
+    window.history.replaceState({}, '', '/chat/dm/agent-1');
+    el.parseV2Route();
+    await flush();
+    // The router replaced this page with a new one for the same URL.
+    Object.defineProperty(el, 'isConnected', { get: () => false });
+
+    releases[0]();
+    await flush();
+
+    expect(el.v2Conversation).toBeNull();
+  });
+
+  it('a lookup overtaken during the user refresh builds no key and logs no error', async () => {
+    // The DM list has no match, so the lookup falls back to fetching the
+    // user, and that request is held until released.
+    let releaseMe: () => void = () => {};
+    vi.mocked(apiFetch).mockImplementation(async (path: string) => {
+      if (path === '/api/v1/chat/dms') {
+        return new Response(JSON.stringify({ dms: [] }), { status: 200 });
+      }
+      if (path === '/api/v1/auth/me') {
+        await new Promise<void>((resolve) => (releaseMe = resolve));
+        // No ID, so a key could not be built had the lookup gone on.
+        return new Response('{}', { status: 200 });
+      }
+      return new Response('{}', { status: 200 });
+    });
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const el = createPageWithoutUserId();
+    const buildKey = vi.spyOn(el, 'buildDMKey');
+    window.history.replaceState({}, '', '/chat');
+    el.parseV2Route();
+    el.openDM('agent-1', 'agent', 'Coder One');
+    // openDM tries the key once itself before it starts the lookup.
+    buildKey.mockClear();
+    await flush();
+    el.navigateToThread({
+      conversationKey: 'topic-2',
+      projectId: 'p1',
+      projectSlug: 'alpha',
+      threadName: 'two',
+    });
+
+    releaseMe();
+    await flush();
+
+    expect(buildKey).not.toHaveBeenCalled();
+    expect(errorSpy).not.toHaveBeenCalled();
+    expect(el.v2Conversation.conversationKey).toBe('topic-2');
+    errorSpy.mockRestore();
+  });
+});
+
+describe('conversation header More menu', () => {
+  it('folds the actions only when the full row would squeeze the title', async () => {
+    const { isCompactHeaderWidth, HEADER_ACTION_PX, HEADER_TITLE_MIN_PX } =
+      await import('./chat.js');
+    const fits = 9 * HEADER_ACTION_PX + HEADER_TITLE_MIN_PX;
+    expect(isCompactHeaderWidth(fits, 9, true)).toBe(false);
+    expect(isCompactHeaderWidth(fits - 1, 9, false)).toBe(true);
+    // Fewer actions fit in the same width.
+    expect(isCompactHeaderWidth(fits - 1, 5, false)).toBe(false);
+    // Before the header is measured, the layout decides.
+    expect(isCompactHeaderWidth(null, 9, true)).toBe(true);
+    expect(isCompactHeaderWidth(null, 9, false)).toBe(false);
+  });
+
+  it('offers every folded action of an agent DM, and runs the chosen one', () => {
+    const page = createPage();
+    page.isMobileLayout = true;
+    page.projectChimeOn = true;
+    const conv = {
+      conversationKey: 'dm:agent:a:user:u',
+      projectId: 'p1',
+      isDM: true,
+      peerKind: 'agent',
+      peerId: 'a',
+      peerName: 'Coder',
+      muted: false,
+    };
+    page.v2Conversation = conv;
+    const actions = page.headerMoreActions(conv);
+    expect(actions.map((a: { id: string }) => a.id)).toEqual([
+      'terminal',
+      'graph',
+      'promote',
+      'mute',
+      'chime',
+      'export-md',
+      'export-print',
+      'export-clipboard',
+    ]);
+    // The mobile row trades the density toggle for the back button.
+    expect(page.fullHeaderActionCount(conv)).toBe(9);
+    // Density does nothing in the mobile layout; the desktop menu offers it.
+    page.isMobileLayout = false;
+    expect(page.headerMoreActions(conv).map((a: { id: string }) => a.id)).toContain('density');
+    expect(page.fullHeaderActionCount(conv)).toBe(9);
+
+    const exportMarkdown = vi.spyOn(page, 'exportMarkdown').mockImplementation(() => {});
+    page.headerSheetOpen = true;
+    page.runHeaderMoreAction('export-md');
+    expect(exportMarkdown).toHaveBeenCalledOnce();
+    expect(page.headerSheetOpen).toBe(false);
+  });
+
+  it('stops watching the header width once the page is removed', async () => {
+    const instances: { targets: Element[]; disconnects: number }[] = [];
+    const original = globalThis.ResizeObserver;
+    globalThis.ResizeObserver = class {
+      private readonly record = { targets: [] as Element[], disconnects: 0 };
+      constructor() {
+        instances.push(this.record);
+      }
+      observe(target: Element): void {
+        this.record.targets.push(target);
+      }
+      unobserve(): void {}
+      disconnect(): void {
+        this.record.disconnects++;
+      }
+    } as unknown as typeof ResizeObserver;
+    try {
+      const page = createPage();
+      // Only the header watch is under test: skip the lazy imports and the
+      // full render a mount would start.
+      page.initV2 = vi.fn(() => Promise.resolve());
+      page.render = () => html`<div class="v2-thread-header"></div>`;
+      document.body.appendChild(page);
+      await page.updateComplete;
+      const watch = instances.find((r) =>
+        r.targets.some((t) => t.classList.contains('v2-thread-header'))
+      );
+      expect(watch, 'the header is watched while mounted').toBeDefined();
+      const before = watch!.disconnects;
+
+      page.remove();
+
+      expect(watch!.disconnects).toBe(before + 1);
+      expect(page._headerResizeObserver).toBeNull();
+      expect(page._observedHeader).toBeNull();
+    } finally {
+      globalThis.ResizeObserver = original;
+      document.body.innerHTML = '';
+    }
+  });
+});
+
+describe('chat page — thread and scroll position across mode switches', () => {
+  const THREAD_ANCHOR = {
+    conversationKey: 'topic-1',
+    pinnedToBottom: false,
+    messageId: 'm4',
+    offset: -20,
+  };
+  const AGENT_ID = '11111111-1111-4111-8111-111111111111';
+  const USER_ID = '99999999-9999-4999-8999-999999999999';
+  const AGENT_DM_KEY = `dm:agent:${AGENT_ID}:user:${USER_ID}`;
+
+  afterEach(() => {
+    // Detaching a page hands its position over, so clear the memory after.
+    document.body.innerHTML = '';
+    takeChatScrollAnchor();
+    window.history.replaceState({}, '', '/');
+  });
+
+  it('a mounting page takes the handed-over position, once', () => {
+    rememberChatScrollAnchor(THREAD_ANCHOR);
+    const el = createPage();
+    // Only the connect/disconnect hand-over is under test: skip the lazy
+    // rail/members imports, route parse and full render a mount would start
+    // (this file's module mocks cannot support the rendered children).
+    el.initV2 = vi.fn(() => Promise.resolve());
+    el.render = () => nothing;
+    window.history.replaceState({}, '', '/chat/alpha/topic-1');
+    document.body.appendChild(el);
+    expect(el._pendingScrollRestore).toEqual(THREAD_ANCHOR);
+    expect(takeChatScrollAnchor()).toBeNull();
+  });
+
+  it('offers the position to the thread only for the conversation it belongs to', () => {
+    const el = createPage();
+    el._pendingScrollRestore = THREAD_ANCHOR;
+    expect(el.scrollRestoreFor('topic-1')).toBe(THREAD_ANCHOR);
+    expect(el.scrollRestoreFor(AGENT_DM_KEY)).toBeNull();
+  });
+
+  it('drops the position when the route opens another conversation (terminal chat button)', () => {
+    const el = createPage();
+    el.pageData = { user: { id: USER_ID } };
+    el._pendingScrollRestore = THREAD_ANCHOR;
+    window.history.replaceState({}, '', `/chat/dm/${encodeURIComponent(AGENT_DM_KEY)}`);
+    el.parseV2Route();
+    expect(el.v2Conversation).toMatchObject({ conversationKey: AGENT_DM_KEY, isDM: true });
+    el.willUpdate(new Map([['v2Conversation', null]]));
+    expect(el._pendingScrollRestore).toBeNull();
+    expect(el.scrollRestoreFor('topic-1')).toBeNull();
+  });
+
+  it('keeps the position while the same conversation is shown', () => {
+    const el = createPage();
+    el._pendingScrollRestore = THREAD_ANCHOR;
+    el.v2Conversation = { conversationKey: 'topic-1', projectId: 'p1' };
+    el.willUpdate(new Map([['v2Conversation', null]]));
+    expect(el._pendingScrollRestore).toBe(THREAD_ANCHOR);
+  });
+
+  it('stops offering the position once a thread has taken it (search close re-mounts the thread)', () => {
+    const el = createPage();
+    el._pendingScrollRestore = THREAD_ANCHOR;
+    // Some other anchor object being reported leaves this one alone.
+    el.handleScrollRestoreConsumed(
+      new CustomEvent('scroll-restore-consumed', { detail: { ...THREAD_ANCHOR } })
+    );
+    expect(el._pendingScrollRestore).toBe(THREAD_ANCHOR);
+    el.handleScrollRestoreConsumed(
+      new CustomEvent('scroll-restore-consumed', { detail: THREAD_ANCHOR })
+    );
+    expect(el._pendingScrollRestore).toBeNull();
+    // The thread element built when search closes is offered nothing.
+    expect(el.scrollRestoreFor('topic-1')).toBeNull();
+  });
+
+  it('the rendered thread reporting it took the position clears it on the page', () => {
+    const el = createPage();
+    el.v2Conversation = {
+      conversationKey: 'topic-1',
+      projectId: 'p1',
+      projectSlug: 'alpha',
+      threadName: 'one',
+      defaultAgent: '',
+      isDM: false,
+      peerName: '',
+      peerId: '',
+      peerKind: 'user',
+    };
+    el._pendingScrollRestore = THREAD_ANCHOR;
+    const thread = renderToFragment(el.renderV2Conversation()).querySelector(
+      'scion-chat-thread'
+    ) as HTMLElement & { restoreScrollAnchor: unknown };
+    expect(thread.restoreScrollAnchor).toBe(THREAD_ANCHOR);
+    thread.dispatchEvent(new CustomEvent('scroll-restore-consumed', { detail: THREAD_ANCHOR }));
+    expect(el.scrollRestoreFor('topic-1')).toBeNull();
+  });
+
+  it("hands the open thread's live position to the next page", () => {
+    const el = createPage();
+    const live = { ...THREAD_ANCHOR, messageId: 'm7', offset: 3 };
+    Object.defineProperty(el, 'shadowRoot', {
+      value: { querySelector: () => ({ scrollAnchor: live }) },
+    });
+    el._pendingScrollRestore = THREAD_ANCHOR;
+    el.handOverScrollPosition();
+    expect(takeChatScrollAnchor()).toEqual(live);
+    expect(el._pendingScrollRestore).toBeNull();
+  });
+
+  it('passes on a handed-over position it never got to apply', () => {
+    const el = createPage();
+    el._pendingScrollRestore = THREAD_ANCHOR;
+    el.handOverScrollPosition();
+    expect(takeChatScrollAnchor()).toEqual(THREAD_ANCHOR);
+  });
+
+  it('records an in-place thread switch with the router, keeping the page title', async () => {
+    // Detached on purpose: a full mount renders the thread and its children,
+    // which this file's module mocks cannot support. The title re-apply
+    // only checks `isConnected`, so report connected and wire the listener
+    // connectedCallback would add.
+    const el = createPage();
+    Object.defineProperty(el, 'isConnected', { value: true });
+    el.addEventListener(PAGE_TITLE_EVENT, el._onOwnPageTitle);
+    window.history.replaceState({}, '', '/chat');
+    const titles: string[][] = [];
+    el.addEventListener(PAGE_TITLE_EVENT, (e: Event) =>
+      titles.push((e as CustomEvent<{ segments: string[] }>).detail.segments)
+    );
+    el.navigateToThread({
+      conversationKey: 'topic-2',
+      projectId: 'p1',
+      projectSlug: 'alpha',
+      threadName: 'design',
+    });
+    expect(pushRoute).toHaveBeenLastCalledWith('/chat/alpha/topic-2');
+    await vi.waitFor(() => expect(titles.length).toBeGreaterThanOrEqual(2));
+    expect(titles[titles.length - 1]).toEqual(['#design', 'Chat']);
+  });
+});
+
+describe('chat page — late conversation switches while composing', () => {
+  const DM_KEY = 'dm:agent:agent-1:user:user-me';
+  const NEW_TOPIC = { id: 'topic-9', projectId: 'p1', name: 'promoted <b>name</b>' };
+
+  async function flush(): Promise<void> {
+    for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
+  }
+
+  /** A page showing the agent DM, whose thread reports `composing`. */
+  function pageOnDM(composing: boolean): any {
+    const el = createPage();
+    el._projectIdToSlug.set('p1', 'alpha');
+    el.v2Conversation = { conversationKey: DM_KEY, isDM: true, peerId: 'agent-1', projectId: '' };
+    Object.defineProperty(el, 'shadowRoot', {
+      value: {
+        querySelector: (sel: string) =>
+          sel === 'scion-chat-thread' ? { isComposing: composing } : null,
+      },
+    });
+    return el;
+  }
+
+  function promoted(oldConversationKey = DM_KEY): CustomEvent {
+    return new CustomEvent('chat-dm-promoted', {
+      detail: { data: { oldConversationKey, newTopic: NEW_TOPIC } },
+    });
+  }
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+    window.history.replaceState({}, '', '/');
+  });
+
+  it('a promotion pushed while typing in the DM leaves the user there, with a link', () => {
+    const el = pageOnDM(true);
+    window.history.replaceState({}, '', `/chat/dm/${encodeURIComponent(DM_KEY)}`);
+    el.handleDMPromoted(promoted());
+
+    expect(el.v2Conversation.conversationKey).toBe(DM_KEY);
+    expect(window.location.pathname).toBe(`/chat/dm/${encodeURIComponent(DM_KEY)}`);
+    const link = document.querySelector('.dm-promoted-toast a') as HTMLAnchorElement;
+    expect(link.getAttribute('href')).toBe('/chat/alpha/topic-9');
+    // The thread name is user content: rendered as text, never as markup.
+    expect(link.textContent).toBe('Open #promoted <b>name</b>');
+    expect(document.querySelector('.dm-promoted-toast b')).toBeNull();
+    // It stays until dismissed: the user was busy typing.
+    expect((document.querySelector('.dm-promoted-toast') as any).duration).toBe(Infinity);
+  });
+
+  it('a newer promotion replaces the link toast rather than stacking', () => {
+    const el = pageOnDM(true);
+    el.handleDMPromoted(promoted());
+    el.handleDMPromoted(promoted());
+    expect(document.querySelectorAll('.dm-promoted-toast')).toHaveLength(1);
+  });
+
+  it('the link toast goes away once the user moves to another conversation', () => {
+    const el = pageOnDM(true);
+    el.handleDMPromoted(promoted());
+    expect(document.querySelector('.dm-promoted-toast')).not.toBeNull();
+    const previous = el.v2Conversation;
+    el.v2Conversation = { conversationKey: 'topic-3', projectId: 'p1' };
+    el.willUpdate(new Map([['v2Conversation', previous]]));
+    expect(document.querySelector('.dm-promoted-toast')).toBeNull();
+  });
+
+  it('the link toast survives a same-conversation update such as a mute toggle', () => {
+    const el = pageOnDM(true);
+    el.handleDMPromoted(promoted());
+    const previous = el.v2Conversation;
+    el.v2Conversation = { ...previous, muted: true };
+    el.willUpdate(new Map([['v2Conversation', previous]]));
+    expect(document.querySelector('.dm-promoted-toast')).not.toBeNull();
+  });
+
+  it('the link toast goes away with the page', () => {
+    const el = pageOnDM(true);
+    el.handleDMPromoted(promoted());
+    el.disconnectedCallback();
+    expect(document.querySelector('.dm-promoted-toast')).toBeNull();
+  });
+
+  it("this page's own promotion still moves the user even with a draft", () => {
+    const el = pageOnDM(true);
+    el.promoteLoading = true; // the promote POST has not resolved yet
+    const toast = vi.spyOn(el, 'showPromoteToast').mockImplementation(() => {});
+    el.handleDMPromoted(promoted());
+    expect(el.v2Conversation.conversationKey).toBe('topic-9');
+    expect(document.querySelector('.dm-promoted-toast')).toBeNull();
+    expect(toast).toHaveBeenCalledTimes(1);
+  });
+
+  it('a promotion of the DM on screen moves an idle user to the new thread', () => {
+    const el = pageOnDM(false);
+    const toast = vi.spyOn(el, 'showPromoteToast').mockImplementation(() => {});
+    el.handleDMPromoted(promoted());
+    expect(el.v2Conversation.conversationKey).toBe('topic-9');
+    expect(toast).toHaveBeenCalledWith('Conversation promoted to #promoted <b>name</b>', 'success');
+    expect(pushRoute).toHaveBeenLastCalledWith('/chat/alpha/topic-9');
+    expect(document.querySelector('.dm-promoted-toast')).toBeNull();
+  });
+
+  it('a promotion of some other DM changes nothing', () => {
+    const el = pageOnDM(false);
+    el.handleDMPromoted(promoted('dm:agent:agent-2:user:user-me'));
+    expect(el.v2Conversation.conversationKey).toBe(DM_KEY);
+  });
+
+  it('a peer-ID DM route still resolving does not pull the user out of a thread they opened', async () => {
+    // The DM list has no match and the user ID is not cached, so the lookup
+    // waits on /auth/me — the slow path that used to land late.
+    let releaseMe: () => void = () => {};
+    vi.mocked(apiFetch).mockImplementation(async (path: string) => {
+      if (path === '/api/v1/chat/dms') {
+        return new Response(JSON.stringify({ dms: [] }), { status: 200 });
+      }
+      if (path === '/api/v1/auth/me') {
+        await new Promise<void>((resolve) => (releaseMe = resolve));
+        return new Response(JSON.stringify({ id: 'user-me' }), { status: 200 });
+      }
+      return new Response('{}', { status: 200 });
+    });
+    const el = createPage();
+    el.pageData = {};
+    window.history.replaceState({}, '', '/chat/dm/agent-1');
+    el.parseV2Route();
+    await flush();
+    // The user picks a thread from the rail and starts typing in it.
+    el.navigateToThread({
+      conversationKey: 'topic-2',
+      projectId: 'p1',
+      projectSlug: 'alpha',
+      threadName: 'two',
+    });
+
+    releaseMe();
+    await flush();
+
+    expect(el.v2Conversation.conversationKey).toBe('topic-2');
+    expect(window.location.pathname).toBe('/chat/alpha/topic-2');
   });
 });

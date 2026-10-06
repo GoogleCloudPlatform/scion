@@ -285,7 +285,7 @@ func Execute() {
 	cmd, err := rootCmd.ExecuteC()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "\n%s%s%sError: %v%s\n\n", util.BgRed, util.White, util.Bold, err, util.Reset)
-		if shouldShowUsageOnError(cmd, autoHelp) {
+		if showUsageForError(cmd, err, autoHelp) {
 			_ = cmd.Usage()
 		}
 		os.Exit(exitCodeFor(err))
@@ -324,6 +324,18 @@ func shouldShowUsageOnError(cmd *cobra.Command, autoHelp bool) bool {
 	return !cmd.HasParent() || !cmd.SilenceUsage
 }
 
+// showUsageForError combines shouldShowUsageOnError with an error-based
+// filter: hub failures (a wrapped *apiclient.APIError, or anything that went
+// through wrapHubError, including connectivity failures) are runtime errors
+// about the hub's answer, not about how the command was invoked, so the Usage
+// block is suppressed for them. Other errors keep the existing behaviour.
+func showUsageForError(cmd *cobra.Command, err error, autoHelp bool) bool {
+	if isHubFailure(err) {
+		return false
+	}
+	return shouldShowUsageOnError(cmd, autoHelp)
+}
+
 func commandInSubtree(cmd *cobra.Command, name string) bool {
 	for current := cmd; current != nil; current = current.Parent() {
 		if current.Name() == name {
@@ -355,7 +367,7 @@ func init() {
 	rootCmd.MarkFlagsMutuallyExclusive("tz", "utc")
 
 	// Debug mode flag
-	rootCmd.PersistentFlags().BoolVar(&debugMode, "debug", false, "Enable debug output (equivalent to SCION_DEBUG=1)")
+	rootCmd.PersistentFlags().BoolVar(&debugMode, "debug", false, "Enable debug output; agents started by this command also get SCION_DEBUG=1. 'scion server start' has its own --debug (see its help).")
 
 	// Hide flags leaked from rclone via transitive import.
 	// These are registered on pflag.CommandLine (the global flag set), which

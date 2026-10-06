@@ -26,6 +26,7 @@ import (
 	"sync"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"gopkg.in/yaml.v3"
 )
@@ -218,7 +219,7 @@ func FindTemplateWithContext(ctx context.Context, name string) (*Template, error
 	// 1. Check if name is an absolute path
 	if filepath.IsAbs(name) {
 		if info, err := os.Stat(name); err == nil && info.IsDir() {
-			return &Template{Name: filepath.Base(name), Path: name}, nil
+			return &Template{Name: templateNameFromDir(name), Path: name}, nil
 		}
 		return nil, fmt.Errorf("template path %s not found or not a directory", name)
 	}
@@ -276,9 +277,21 @@ func FindTemplateInScope(name, scope string) *Template {
 	return nil
 }
 
+// templateNameFromDir derives a template name from a template directory path.
+// A content-addressed cache directory is named after the template's content
+// hash, which is not a template name, so it yields "".
+func templateNameFromDir(dir string) string {
+	base := filepath.Base(dir)
+	if transfer.IsContentHash(base) {
+		return ""
+	}
+	return base
+}
+
 // FriendlyTemplateName converts a raw template reference (cache path, URI, or
 // simple name) to a human-friendly short name suitable for display.
-// Simple names pass through unchanged; absolute paths return filepath.Base;
+// Simple names pass through unchanged; absolute paths return filepath.Base,
+// except that a content-hash cache directory or a bare content hash yields "";
 // remote URIs are handled by DeriveTemplateName.
 func FriendlyTemplateName(ref string) string {
 	if ref == "" {
@@ -288,7 +301,10 @@ func FriendlyTemplateName(ref string) string {
 		return DeriveTemplateName(ref)
 	}
 	if filepath.IsAbs(ref) {
-		return filepath.Base(ref)
+		return templateNameFromDir(ref)
+	}
+	if transfer.IsContentHash(ref) {
+		return ""
 	}
 	return ref
 }
@@ -377,7 +393,7 @@ func FindTemplateInProjectPath(name, projectPath string) (*Template, error) {
 	}
 	if filepath.IsAbs(name) {
 		if info, err := os.Stat(name); err == nil && info.IsDir() {
-			return &Template{Name: filepath.Base(name), Path: name}, nil
+			return &Template{Name: templateNameFromDir(name), Path: name}, nil
 		}
 		return nil, fmt.Errorf("template path %s not found or not a directory: %w", name, ErrTemplateNotFound)
 	}

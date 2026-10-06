@@ -17,6 +17,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -41,7 +42,10 @@ The agent will be created from a template.
 
 The agent-name is required as the first argument. All subsequent arguments
 form the task prompt, which will be written to prompt.md. If no task
-arguments are provided, an empty prompt.md is created for later editing.`,
+arguments are provided, an empty prompt.md is created for later editing.
+
+The agent is provisioned but not started, even when a task is given. Run
+'scion start <agent-name>' to start it.`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		agentName := api.Slugify(args[0])
@@ -135,47 +139,14 @@ arguments are provided, an empty prompt.md is created for later editing.`,
 		// Attempt Hub connection for skill resolution in local mode.
 		// If Hub is not configured, this returns nil and provisioning
 		// proceeds without a resolver (S1 fail-closed for required skills).
-		hctx, hubErr := hubsync.EnsureHubReady(projectPath, hubsync.EnsureHubReadyOptions{
-			NoHub:       noHub,
-			AutoConfirm: true,
-			SkipSync:    true,
-		})
+		hctx, hubErr := hubsync.EnsureHubReady(projectPath, skillResolverHubOptions(projectPath))
 		if hubErr == nil && hctx != nil && hctx.Client != nil {
-			hubResolver := agent.NewHubSkillResolver(hctx.Client.Skills())
-			resolver := agent.NewRoutingSkillResolver(hubResolver)
-			ghToken := os.Getenv("GITHUB_TOKEN")
-			ghResolver := agent.NewGitHubSkillResolverWithCredentials(ghToken, nil, nil)
-			resolver.Register("gh", ghResolver)
+			var flushResolutions func()
+			ctx, flushResolutions = withLocalSkillResolution(ctx, hctx.Client.Skills(), hctx.Client.SkillRegistries(),
+				hctx.ProjectID, os.Getenv("GITHUB_TOKEN"), nil)
 			// Write resolutions to the disk cache before this process exits,
 			// rather than relying on the cache's delayed write.
-			defer ghResolver.FlushCache()
-
-			registrySvc := hctx.Client.SkillRegistries()
-			gcpLookup := func(ctx context.Context, name string) (*agent.RegistryLookupResult, error) {
-				reg, err := registrySvc.Get(ctx, name)
-				if err != nil {
-					return nil, err
-				}
-				if reg == nil {
-					return nil, fmt.Errorf("registry %q not found", name)
-				}
-				return &agent.RegistryLookupResult{
-					Name:     reg.Name,
-					Endpoint: reg.Endpoint,
-					Type:     reg.Type,
-					Status:   reg.Status,
-				}, nil
-			}
-			resolver.Register("gcp-skill", agent.NewGCPSkillResolver(gcpLookup))
-
-			ctx = agent.ContextWithSkillResolver(ctx, resolver)
-			// Credentials for install-phase downloads of gh:// skills: the
-			// default for skills the Hub resolved, and the GitHub resolver's
-			// own lookup for skills it served from its disk cache.
-			ctx = ghResolver.WithInstallCredentials(ctx, ghToken)
-			if hctx.ProjectID != "" {
-				ctx = agent.ContextWithResolveProjectID(ctx, hctx.ProjectID)
-			}
+			defer flushResolutions()
 		}
 
 		_, err = mgr.Provision(ctx, opts)
@@ -184,16 +155,185 @@ arguments are provided, an empty prompt.md is created for later editing.`,
 		}
 
 		if isJSONOutput() {
-			return outputJSON(ActionResult{
-				Status:  "success",
-				Command: "create",
-				Agent:   agentName,
-				Message: fmt.Sprintf("Agent '%s' created successfully.", agentName),
-			})
+			return outputJSON(localCreateResult(agentName))
 		}
-		fmt.Printf("Agent '%s' created successfully.\n", agentName)
+		writeLocalCreateResult(os.Stdout, agentName)
 		return nil
 	},
+}
+
+// withLocalSkillResolution returns ctx set up to resolve skills for a local
+// create: a routing resolver that sends skill:// refs and bare names to the
+// Hub, gh:// refs to a GitHub resolver using ghToken, and gcp-skill:// refs
+// to a resolver that looks registries up through the Hub; the credentials
+// the install step needs for gh:// downloads; and projectID as the resolve
+// project, when set. cache is the GitHub resolution cache to use, or nil for
+// the default one. The returned func writes pending resolution cache entries
+// to disk and must be called before the process exits.
+func withLocalSkillResolution(
+	ctx context.Context,
+	skills hubclient.SkillService,
+	registries hubclient.SkillRegistryService,
+	projectID, ghToken string,
+	cache *agent.GitHubResolutionCache,
+) (context.Context, func()) {
+	resolver := agent.NewRoutingSkillResolver(agent.NewHubSkillResolver(skills))
+	ghResolver := agent.NewGitHubSkillResolverWithCredentials(ghToken, nil, cache)
+	resolver.Register("gh", ghResolver)
+
+	gcpLookup := func(ctx context.Context, name string) (*agent.RegistryLookupResult, error) {
+		reg, err := registries.Get(ctx, name)
+		if err != nil {
+			return nil, err
+		}
+		if reg == nil {
+			return nil, fmt.Errorf("registry %q not found", name)
+		}
+		return &agent.RegistryLookupResult{
+			Name:     reg.Name,
+			Endpoint: reg.Endpoint,
+			Type:     reg.Type,
+			Status:   reg.Status,
+		}, nil
+	}
+	resolver.Register("gcp-skill", agent.NewGCPSkillResolver(gcpLookup))
+
+	ctx = agent.ContextWithSkillResolver(ctx, resolver)
+	// Credentials for install-phase downloads of gh:// skills: the default
+	// for skills the Hub resolved, and the GitHub resolver's own lookup for
+	// skills it served from its disk cache.
+	ctx = ghResolver.WithInstallCredentials(ctx, ghToken)
+	if projectID != "" {
+		ctx = agent.ContextWithResolveProjectID(ctx, projectID)
+	}
+	return ctx, ghResolver.FlushCache
+}
+
+// scion create provisions an agent and never starts it; scion start launches
+// it. The helpers below make every create output say so and name the
+// follow-up command.
+
+// createStartCommand returns the command that launches an agent made by
+// scion create.
+func createStartCommand(agentName string) string {
+	return "scion start " + agentName
+}
+
+// createNotStartedHint is the line that tells the user the agent was
+// provisioned but not started, and how to start it.
+func createNotStartedHint(agentName string) string {
+	return fmt.Sprintf("Agent '%s' is provisioned but not started. Run '%s' to start it.", agentName, createStartCommand(agentName))
+}
+
+// createNotProvisionedHint is the line printed instead of
+// createNotStartedHint when the Hub kept the agent record but the runtime
+// broker could not provision it.
+func createNotProvisionedHint(agentName string) string {
+	return fmt.Sprintf("Agent '%s' was not fully provisioned (see the warning). Run '%s' to retry provisioning and start it.", agentName, createStartCommand(agentName))
+}
+
+// createHint returns the closing line of a scion create output.
+func createHint(agentName string, provisioned bool) string {
+	if provisioned {
+		return createNotStartedHint(agentName)
+	}
+	return createNotProvisionedHint(agentName)
+}
+
+// hubCreateProvisioned reports whether a Hub create provisioned the agent,
+// that is, whether none of the warnings says provisioning failed.
+func hubCreateProvisioned(warnings []string) bool {
+	for _, w := range warnings {
+		if strings.HasPrefix(w, api.ProvisionFailedWarningPrefix) {
+			return false
+		}
+	}
+	return true
+}
+
+// addCreateNotStartedDetails records in JSON output details that the agent
+// was not started, whether it was provisioned, and the command that starts
+// it.
+func addCreateNotStartedDetails(details map[string]interface{}, agentName string, provisioned bool) {
+	details["started"] = false
+	details["provisioned"] = provisioned
+	details["startCommand"] = createStartCommand(agentName)
+}
+
+// localCreateResult is the JSON result of a local scion create.
+func localCreateResult(agentName string) ActionResult {
+	details := map[string]interface{}{}
+	addCreateNotStartedDetails(details, agentName, true)
+	return ActionResult{
+		Status:  "success",
+		Command: "create",
+		Agent:   agentName,
+		Message: fmt.Sprintf("Agent '%s' created successfully. ", agentName) + createNotStartedHint(agentName),
+		Details: details,
+	}
+}
+
+// writeLocalCreateResult prints the text result of a local scion create.
+func writeLocalCreateResult(w io.Writer, agentName string) {
+	_, _ = fmt.Fprintf(w, "Agent '%s' created successfully.\n%s\n", agentName, createNotStartedHint(agentName))
+}
+
+// hubCreateResult is the JSON result of a scion create through a Hub.
+func hubCreateResult(agentName string, resp *hubclient.CreateAgentResponse) ActionResult {
+	provisioned := hubCreateProvisioned(resp.Warnings)
+	result := ActionResult{
+		Status:   "success",
+		Command:  "create",
+		Agent:    agentName,
+		Message:  fmt.Sprintf("Agent '%s' created via Hub. ", agentName) + createHint(agentName, provisioned),
+		Warnings: resp.Warnings,
+		Details:  map[string]interface{}{},
+	}
+	addCreateNotStartedDetails(result.Details, agentName, provisioned)
+	if resp.Agent != nil {
+		result.Details["slug"] = resp.Agent.Slug
+		phase, activity := hubAgentPhaseActivity(resp.Agent.Phase, resp.Agent.Activity, resp.Agent.Status)
+		result.Details["phase"] = phase
+		if activity != "" {
+			result.Details["activity"] = activity
+		}
+		if resp.Agent.RuntimeBrokerID != "" {
+			result.Details["runtimeBrokerId"] = resp.Agent.RuntimeBrokerID
+		}
+		if resp.Agent.RuntimeBrokerName != "" {
+			result.Details["runtimeBrokerName"] = resp.Agent.RuntimeBrokerName
+		}
+	}
+	return result
+}
+
+// writeHubCreateText prints the text result of a scion create through a
+// Hub: the agent summary, any warnings, then the closing hint. agentDir is
+// printed when not empty.
+func writeHubCreateText(w io.Writer, agentName string, resp *hubclient.CreateAgentResponse, agentDir string) {
+	var b strings.Builder
+	if resp.Agent != nil {
+		brokerInfo := ""
+		if resp.Agent.RuntimeBrokerName != "" {
+			brokerInfo = fmt.Sprintf(" on broker %s", resp.Agent.RuntimeBrokerName)
+		} else if resp.Agent.RuntimeBrokerID != "" {
+			brokerInfo = fmt.Sprintf(" on broker %s", resp.Agent.RuntimeBrokerID)
+		}
+		fmt.Fprintf(&b, "Agent '%s' created via Hub%s.\n", agentName, brokerInfo)
+		fmt.Fprintf(&b, "Agent Slug: %s\n", resp.Agent.Slug)
+		phase, _ := hubAgentPhaseActivity(resp.Agent.Phase, resp.Agent.Activity, resp.Agent.Status)
+		fmt.Fprintf(&b, "Phase: %s\n", provisionedPhaseLabel(phase, resp.Agent.ProvisionedOnly))
+		if agentDir != "" {
+			fmt.Fprintf(&b, "Agent directory: %s\n", agentDir)
+		}
+	} else {
+		fmt.Fprintf(&b, "Agent '%s' created via Hub.\n", agentName)
+	}
+	for _, warning := range resp.Warnings {
+		fmt.Fprintf(&b, "Warning: %s\n", warning)
+	}
+	fmt.Fprintf(&b, "%s\n", createHint(agentName, hubCreateProvisioned(resp.Warnings)))
+	_, _ = io.WriteString(w, b.String())
 }
 
 func createAgentViaHub(hubCtx *HubContext, agentName string, task string) error {
@@ -288,54 +428,16 @@ func createAgentViaHub(hubCtx *HubContext, agentName string, task string) error 
 	printAutoResolvedBroker(ctx, hubCtx, runtimeBrokerID, req.RuntimeBrokerID, resp)
 
 	if isJSONOutput() {
-		result := ActionResult{
-			Status:   "success",
-			Command:  "create",
-			Agent:    agentName,
-			Message:  fmt.Sprintf("Agent '%s' created via Hub.", agentName),
-			Warnings: resp.Warnings,
-			Details:  map[string]interface{}{},
-		}
-		if resp.Agent != nil {
-			result.Details["slug"] = resp.Agent.Slug
-			phase, activity := hubAgentPhaseActivity(resp.Agent.Phase, resp.Agent.Activity, resp.Agent.Status)
-			result.Details["phase"] = phase
-			if activity != "" {
-				result.Details["activity"] = activity
-			}
-			if resp.Agent.RuntimeBrokerID != "" {
-				result.Details["runtimeBrokerId"] = resp.Agent.RuntimeBrokerID
-			}
-			if resp.Agent.RuntimeBrokerName != "" {
-				result.Details["runtimeBrokerName"] = resp.Agent.RuntimeBrokerName
-			}
-		}
-		return outputJSON(result)
+		return outputJSON(hubCreateResult(agentName, resp))
 	}
 
-	if resp.Agent != nil {
-		brokerInfo := ""
-		if resp.Agent.RuntimeBrokerName != "" {
-			brokerInfo = fmt.Sprintf(" on broker %s", resp.Agent.RuntimeBrokerName)
-		} else if resp.Agent.RuntimeBrokerID != "" {
-			brokerInfo = fmt.Sprintf(" on broker %s", resp.Agent.RuntimeBrokerID)
-		}
-		statusf("Agent '%s' created via Hub%s.\n", agentName, brokerInfo)
-		statusf("Agent Slug: %s\n", resp.Agent.Slug)
-		phase, _ := hubAgentPhaseActivity(resp.Agent.Phase, resp.Agent.Activity, resp.Agent.Status)
-		statusf("Phase: %s\n", phase)
-
-		// For local broker, print the agent directory path so the user can inspect/tweak files
-		if hubCtx.BrokerID != "" && hubCtx.ProjectPath != "" {
-			agentDir := filepath.Join(hubCtx.ProjectPath, "agents", agentName)
-			statusf("Agent directory: %s\n", agentDir)
-		}
-	} else {
-		statusf("Agent '%s' created via Hub.\n", agentName)
+	// For a local broker, print the agent directory path so the user can
+	// inspect or tweak its files.
+	agentDir := ""
+	if resp.Agent != nil && hubCtx.BrokerID != "" && hubCtx.ProjectPath != "" {
+		agentDir = filepath.Join(hubCtx.ProjectPath, "agents", agentName)
 	}
-	for _, w := range resp.Warnings {
-		fmt.Fprintf(os.Stderr, "Warning: %s\n", w)
-	}
+	writeHubCreateText(os.Stderr, agentName, resp, agentDir)
 
 	return nil
 }
@@ -346,7 +448,7 @@ func init() {
 	createCmd.Flags().StringVarP(&agentImage, "image", "i", "", "Container image to use (overrides template)")
 	createCmd.Flags().StringVarP(&branch, "branch", "b", "", "Git branch to use for the agent workspace")
 	createCmd.Flags().StringVarP(&workspace, "workspace", "w", "", "Host path or project-relative subdirectory to mount as /workspace")
-	createCmd.Flags().StringVar(&runtimeBrokerID, "broker", "", "Preferred runtime broker ID or name")
+	createCmd.Flags().StringVar(&runtimeBrokerID, "broker", "", "Preferred runtime broker ID, name, or slug")
 	createCmd.Flags().StringVar(&harnessConfigFlag, "harness-config", "", "Named harness configuration to use")
 	createCmd.Flags().StringVar(&harnessConfigFlag, "harness", "", "Named harness configuration to use (alias for --harness-config)")
 
@@ -373,4 +475,16 @@ func init() {
 
 	// GCP service account assignment flag
 	createCmd.Flags().StringVar(&serviceAccountFlag, "service-account", "", "GCP service account ID to assign to this agent (requires Hub mode)")
+}
+
+// skillResolverHubOptions returns the EnsureHubReady options for the hub
+// context that create uses for skill resolution. A project named with a
+// flag keeps its own ID over SCION_PROJECT_ID (ptone/scion#3123).
+func skillResolverHubOptions(projectPath string) hubsync.EnsureHubReadyOptions {
+	return hubsync.EnsureHubReadyOptions{
+		NoHub:           noHub,
+		AutoConfirm:     true,
+		SkipSync:        true,
+		ExplicitProject: explicitProjectTargetFor(projectPath),
+	}
 }

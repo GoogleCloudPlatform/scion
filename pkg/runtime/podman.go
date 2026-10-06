@@ -228,8 +228,10 @@ func (r *PodmanRuntime) Stop(ctx context.Context, id string) error {
 	return err
 }
 
-func (r *PodmanRuntime) Delete(ctx context.Context, id string) error {
-	_, err := runSimpleCommand(ctx, r.Command, "rm", "-f", id)
+// Delete removes the container ref.ID. The engine container ID is already
+// unique per run, so ref.RunID needs no further check here.
+func (r *PodmanRuntime) Delete(ctx context.Context, ref RunRef) error {
+	_, err := runSimpleCommand(ctx, r.Command, "rm", "-f", ref.ID)
 	return err
 }
 
@@ -304,6 +306,7 @@ func (r *PodmanRuntime) List(ctx context.Context, labelFilter map[string]string)
 
 			info := api.AgentInfo{
 				ContainerID:     c.Id,
+				RunID:           labels[api.LabelRunID],
 				Name:            name,
 				ContainerStatus: c.Status,
 				Phase:           phaseFromContainerStatus(c.Status),
@@ -359,7 +362,8 @@ func (r *PodmanRuntime) Attach(ctx context.Context, id string) error {
 	_, _ = runSimpleCommand(ctx, r.Command, "exec", "--user", r.ExecUser(),
 		agent.ContainerID, "tmux", "set-option", "-g", "window-size", "latest")
 
-	return runInteractiveCommand(r.Command, "exec", "-it", "--user", r.ExecUser(), agent.ContainerID, "tmux", "attach", "-t", "scion")
+	args := append([]string{"exec", "-it"}, ExecDetachKeysArgs(r.Command)...)
+	return runInteractiveCommand(r.Command, append(args, "--user", r.ExecUser(), agent.ContainerID, "tmux", "attach", "-t", "scion")...)
 }
 
 func (r *PodmanRuntime) ImageExists(ctx context.Context, image string) (bool, error) {

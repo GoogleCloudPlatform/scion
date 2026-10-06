@@ -236,7 +236,7 @@ func TestDelete_PodPresent_StillRemovesSecretsAndPod(t *testing.T) {
 	seedAgentSecret(t, rt, "default", "scion-auth-proj1--agent", "agent", "p1")
 	seedAgentSPC(t, rt, "default", "scion-agent-proj1--agent", "agent", "p1")
 
-	if err := rt.Delete(context.Background(), "proj1--agent"); err != nil {
+	if err := rt.Delete(context.Background(), RunRef{ID: "proj1--agent"}); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
 	if _, err := rt.Client.Clientset.CoreV1().Pods("default").Get(context.Background(), "proj1--agent", metav1.GetOptions{}); !k8serrors.IsNotFound(err) {

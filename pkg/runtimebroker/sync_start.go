@@ -92,6 +92,7 @@ func (s *Server) beginSyncStart(ctx context.Context, req CreateAgentRequest, opt
 		registry:        s.launchRegistry,
 	}
 	ss.rec = newLaunchRecord(ss.owner, req.ID, store.LaunchKindCreate, "", time.Time{}, cancel)
+	ss.rec.RunID = opts.RunID
 
 	var supersededDone <-chan struct{}
 	if ss.registry != nil {
@@ -139,11 +140,18 @@ func (ss *syncStart) ownsName() bool {
 	return launchMarkerMatches(ss.projectPath, ss.sharedWorkspace, ss.key.Slug, ss.owner)
 }
 
+// testHookSyncStartFinish, when set (tests only), runs at the start of
+// syncStart.finish.
+var testHookSyncStartFinish func(key launchKey)
+
 // finish removes this start's marker (only if it still holds this start's
 // owner value), then releases the registry record, which lets a newer start
 // waiting in beginSyncStart proceed. The marker goes first so its
 // check-and-remove cannot remove a marker the newer start writes.
 func (ss *syncStart) finish() {
+	if testHookSyncStartFinish != nil {
+		testHookSyncStartFinish(ss.key)
+	}
 	if ss.projectPath != "" {
 		removeLaunchMarkerIfMatches(ss.projectPath, ss.sharedWorkspace, ss.key.Slug, ss.owner)
 	}
@@ -164,4 +172,13 @@ func (s *Server) cancelLocalLaunch(key launchKey) {
 		return
 	}
 	s.launchRegistry.CancelLocal(key)
+}
+
+// cancelLocalLaunchForRun is cancelLocalLaunch for a delete naming run
+// runID; see launchRegistry.CancelLocalForRun.
+func (s *Server) cancelLocalLaunchForRun(key launchKey, runID string) {
+	if s.launchRegistry == nil {
+		return
+	}
+	s.launchRegistry.CancelLocalForRun(key, runID)
 }

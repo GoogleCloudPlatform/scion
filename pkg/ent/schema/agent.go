@@ -114,6 +114,15 @@ func (Agent) Fields() []ent.Field {
 			Optional(),
 		field.String("runtime_broker_id").
 			Optional(),
+		// workspace_placement is where the agent's last start placed its
+		// workspace, as reported by its broker: "export" (the broker's
+		// shared NFS workspace export) or "local". "" means unknown (not
+		// reported since the field existed). Validated as a string rather
+		// than an ent enum so future placements need no migration; readers
+		// treat an unrecognised value as not on the export.
+		field.String("workspace_placement").
+			Optional().
+			Default(""),
 		field.Bool("web_pty_enabled").
 			Default(false),
 		field.JSON("exposed_ports", []store.ExposedPort{}).
@@ -236,6 +245,24 @@ func (Agent) Fields() []ent.Field {
 		field.String("launch_id").
 			Optional().
 			Default(""),
+		// run_id is the identity of the agent's current or most recent run
+		// (ptone/scion#2550): minted by the Hub for every create, start and
+		// restart dispatch, persisted before the broker call, and carried
+		// on the runtime entry as the scion.run_id label. A delete sends it
+		// so the broker never removes a different run of the same name. ""
+		// for rows that have not been dispatched since run IDs existed.
+		field.String("run_id").
+			Optional().
+			Default(""),
+		// previous_run_ids are the runs this agent's runtime entries may
+		// still carry besides run_id (ptone/scion#3097), oldest first: each
+		// run-ID write appends the run it replaced, and a write that settles
+		// the run (the broker reported or replaced the entry, or the dispatch
+		// reverted) clears them. A delete names each of them as well as
+		// run_id, so a start that never landed does not leave the previous
+		// entry behind. Empty for a settled run.
+		field.Strings("previous_run_ids").
+			Optional(),
 		// launch_state is "active" while a launch is in flight, "ended" once
 		// it has reached a terminal outcome, or "" for an agent that has
 		// never had a launch (pre-T1 rows, or rows created before P1b-3 turns
@@ -352,6 +379,67 @@ func (Agent) Fields() []ent.Field {
 		field.Time("run_intent_at").
 			Optional().
 			Nillable(),
+
+		// --- Start claim ---
+		// An owned, leased claim taken before any start is dispatched, so at
+		// most one start (or queued-stop drain) acts on an agent at a time.
+		// The start_claim_* columns are written only by the AgentStore
+		// start-claim methods (start_claim.go), never by UpdateAgent or
+		// CreateAgent, and writing them never bumps state_version.
+		//
+		// start_claim_id is NULL when no claim is held.
+		field.String("start_claim_id").
+			Optional().
+			Nillable(),
+		// start_claim_kind: user, restart, wake, create, recovery,
+		// reincarnate or stop.
+		field.String("start_claim_kind").
+			Optional().
+			Default(""),
+		// start_claim_state: live (the holder renews its lease) or
+		// unconfirmed (the outcome is unknown; held until the runtime shows
+		// what happened).
+		field.String("start_claim_state").
+			Optional().
+			Default(""),
+		// start_claim_owner is the hub instance that holds a live claim.
+		field.String("start_claim_owner").
+			Optional().
+			Default(""),
+		// start_claim_target is the runtime target the start is expected to
+		// use, for agents that have no recorded target yet.
+		field.String("start_claim_target").
+			Optional().
+			Default(""),
+		// Store-clock times: when the claim was taken, when its lease ends,
+		// when it became unconfirmed, and the end of the unconfirmed hold.
+		field.Time("start_claim_at").
+			Optional().
+			Nillable(),
+		field.Time("start_claim_lease_until").
+			Optional().
+			Nillable(),
+		field.Time("start_claim_unconfirmed_at").
+			Optional().
+			Nillable(),
+		field.Time("start_claim_hold_until").
+			Optional().
+			Nillable(),
+		// start_claim_launch_id is the launch a create claim was linked to
+		// when that launch began, so only that launch's end settles it.
+		field.String("start_claim_launch_id").
+			Optional().
+			Default(""),
+
+		// soft_delete_op_id is the operation ID of the soft delete that
+		// produced the current DeletedAt. The soft delete deactivates the
+		// agent's delegation edges under this ID, and restore reactivates
+		// exactly those edges, then clears it. NULL on a live agent and on
+		// an agent soft-deleted before the column existed. Lifecycle
+		// bookkeeping only: no authorization decision reads it.
+		field.String("soft_delete_op_id").
+			Optional().
+			Nillable(),
 	}
 }
 
@@ -387,6 +475,11 @@ func (Agent) Indexes() []ent.Index {
 		index.Fields("launch_id"),
 		// Lookup of agents on a broker by run intent.
 		index.Fields("runtime_broker_id", "run_intent"),
+		// The start-claim reaper's scan: only rows holding a claim.
+		index.Fields("start_claim_state", "start_claim_lease_until").
+			Annotations(
+				entsql.IndexWhere("start_claim_id IS NOT NULL"),
+			),
 		// Partial index backing CompositeStore.ReconcileHarnessConfigColumn's
 		// every-boot scan (GoogleCloudPlatform/scion#2153), which queries
 		// exactly Where(HarnessConfigIsNil(), AppliedConfigNotNil()) ordered

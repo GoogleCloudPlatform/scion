@@ -31,8 +31,12 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 import { apiFetch } from '../../../client/api.js';
-import { formatInstant, formatInstantWithZone } from '../../../utils/time.js';
+import { formatInstant, formatInstantWithZone, formatRelative } from '../../../utils/time.js';
 import { DisplayZoneController } from '../../../utils/display-zone-controller.js';
+import { focusElement } from '../focus-moved.js';
+
+/** Ages under this are shown relative; older ones as an absolute date. */
+const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 
 /** Shape of a search result from GET /api/v1/chat/search */
 interface SearchResult {
@@ -179,6 +183,8 @@ export class ScionChatSearch extends LitElement {
       flex: 1;
       overflow-y: auto;
       overscroll-behavior: contain;
+      /* Set by the chat page's mobile panels; see chat.ts. */
+      touch-action: var(--chat-touch-action, auto);
       padding: 0.25rem 0;
     }
 
@@ -268,6 +274,19 @@ export class ScionChatSearch extends LitElement {
     .load-more button:hover {
       background: var(--scion-bg-subtle, #f1f5f9);
     }
+
+    /* Clear a landscape phone's notch and rounded corners (the page uses
+       viewport-fit=cover) on whichever sides this column meets the screen
+       edge. Each inset is a transparent border, so the row's background still
+       paints to the screen edge and only its content moves in. The chat page
+       sets --chat-inset-left and --chat-inset-right for the edges the
+       conversation touches; both are 0 everywhere else. */
+    .search-header,
+    .scope-toggle,
+    .results-list {
+      border-left: var(--chat-inset-left, 0px) solid transparent;
+      border-right: var(--chat-inset-right, 0px) solid transparent;
+    }
   `;
 
   override disconnectedCallback(): void {
@@ -295,7 +314,7 @@ export class ScionChatSearch extends LitElement {
     // Focus the input after render.
     requestAnimationFrame(() => {
       const input = this.shadowRoot?.querySelector('.search-input') as HTMLInputElement;
-      input?.focus();
+      focusElement(input);
     });
   }
 
@@ -398,16 +417,11 @@ export class ScionChatSearch extends LitElement {
   private formatTime(iso: string): string {
     const d = new Date(iso);
     if (isNaN(d.getTime())) return '';
-    const now = Date.now();
-    const diffMs = now - d.getTime();
-    const diffMin = Math.floor(diffMs / 60000);
-
-    if (diffMin < 1) return 'now';
-    if (diffMin < 60) return `${diffMin}m ago`;
-    const diffHrs = Math.floor(diffMin / 60);
-    if (diffHrs < 24) return `${diffHrs}h ago`;
-    const diffDays = Math.floor(diffHrs / 24);
-    if (diffDays < 7) return `${diffDays}d ago`;
+    const ageMs = Date.now() - d.getTime();
+    // A future instant is clock skew between hub and browser.
+    if (ageMs < 0) return 'now';
+    // Under a week: a compact relative age.
+    if (ageMs < WEEK_MS) return formatRelative(iso, { style: 'narrow' });
 
     // Older than a week: a compact absolute date in the display zone; the
     // zone is named in the element's title (the slot does not shrink).

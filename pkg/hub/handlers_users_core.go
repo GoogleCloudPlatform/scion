@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sort"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -1173,6 +1174,16 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
 			return err
 		}
 
+		// Last-project-owner guard plus role-binding cascade
+		// (ptone/scion#2598). Runs before the user row is deleted, in the
+		// same transaction; a concurrent grant or role change to the
+		// user's bindings that commits before the cascade aborts the
+		// delete with 409 conflict (a concurrent revoke does not; residual
+		// race: ptone/scion#2769).
+		if err := guardAndCascadeUserRoleBindingsTx(ctx, tx, user.ID, s.membershipNow()); err != nil {
+			return err
+		}
+
 		// Clean up user-scoped skill injections.
 		if _, err := tx.DeleteSkillInjectionsByScope(ctx, store.SkillInjectionScopeUser, id); err != nil {
 			return fmt.Errorf("delete skill injections: %w", err)
@@ -1200,9 +1211,14 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
 	})
 
 	if err != nil {
+		var lastOwnerErr *lastProjectOwnerDeleteError
 		if errors.Is(err, errLastSuperAdmin) {
 			writeError(w, http.StatusConflict, ErrCodeConflict,
 				"cannot delete the last super-admin; promote another user first", nil)
+		} else if errors.As(err, &lastOwnerErr) {
+			writeLastProjectOwnerDeleteError(w, lastOwnerErr)
+		} else if errors.Is(err, errUserRoleBindingsChanged) {
+			writeUserRoleBindingsChangedError(w)
 		} else {
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 				"user deletion failed: "+err.Error(), nil)
@@ -1211,4 +1227,267 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// lastOwnerProjectRef identifies a project that deleting a user would leave
+// without an owner.
+type lastOwnerProjectRef struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// lastProjectOwnerDeleteError is returned by
+// guardAndCascadeUserRoleBindingsTx when the user is the last owner of one
+// or more projects. The surrounding transaction rolls back, so neither the
+// user nor any binding is changed.
+type lastProjectOwnerDeleteError struct {
+	projects []lastOwnerProjectRef
+}
+
+func (e *lastProjectOwnerDeleteError) Error() string {
+	return lastProjectOwnerDeleteMessage
+}
+
+const lastProjectOwnerDeleteMessage = "cannot delete the last owner of a project — transfer ownership or add another usable (active, existing) owner first"
+
+// writeLastProjectOwnerDeleteError writes the 409 last_owner response for a
+// denied user deletion. The code and status match the members API last-owner
+// denial; details.projects lists the projects that would be left ownerless.
+func writeLastProjectOwnerDeleteError(w http.ResponseWriter, e *lastProjectOwnerDeleteError) {
+	writeError(w, http.StatusConflict, ErrCodeLastOwner, lastProjectOwnerDeleteMessage,
+		map[string]interface{}{"projects": e.projects})
+}
+
+// guardAndCascadeUserRoleBindingsTx enforces the last-project-owner rule for
+// a user that is about to be deleted, then deletes every role binding held by
+// that user (system, hub and project scope). It must run inside WithTx before
+// the user row is deleted (ptone/scion#2598).
+//
+// For each project where userID holds a project-owner binding — including an
+// expired or not-yet-active one, since deleting it could otherwise take the
+// project to zero owner bindings and let the startup backfill re-grant the
+// creator — the deletion is denied when it would remove the project's last
+// usable (active, existing) owner, or its last owner binding of any kind
+// (userDeleteOrphansProjectTx, ptone/scion#2769). Each such project is
+// locked with LockProjectForMembership (in ID order) before the check, which
+// serializes against concurrent members-API mutations on those projects.
+//
+// The binding list is read before any lock, so a binding granted to userID
+// concurrently (for example a new owner binding on a project that was never
+// locked or checked, or the owner half of a TransferOwnership-style swap) is
+// not seen by the guard. The cascade therefore checks the set, not a count:
+// it first deletes each listed binding by ID (a listed binding that is
+// already gone was revoked concurrently; that is harmless, because every
+// project the user owns is locked, so it is ignored), then runs a predicate
+// delete by principal, which must remove nothing. If it removes any row, a
+// binding the guard did not check was committed in the meantime; the
+// function returns errUserRoleBindingsChanged and the caller rolls back the
+// whole transaction (409 conflict, retry).
+//
+// The by-ID pass relies on role bindings being immutable: a change to a
+// binding's role, principal or scope is always a delete plus a create with a
+// new ID (replaceBindingTx, SetMemberRoles and TransferOwnership all work this
+// way, and the store has no UpdateRoleBinding). The only in-place UPDATE of
+// role_bindings today is the startup membership_kind backfill in
+// runMembershipMigration, which runs before the server serves requests and
+// changes neither role, principal nor scope, so it is harmless. As hardening,
+// each listed binding is re-read in the transaction just before its by-ID
+// delete; if its role definition, principal or scope no longer matches the
+// listed one (an in-place change under the same ID), the function returns
+// errUserRoleBindingsChanged instead of deleting a binding the guard never
+// checked. The validity window (NotBefore/ExpiresAt) is not compared, although
+// it does feed the guard: whether the target's own owner binding is usable
+// (removedUsable in userDeleteOrphansProjectTx) depends on its window, read
+// from the pre-lock list. That is safe only because bindings are immutable: a
+// window change is a delete plus a create with a new ID, which the by-ID
+// re-read catches (the listed ID is gone, and the predicate delete below then
+// finds the new ID and aborts with errUserRoleBindingsChanged). On
+// PostgreSQL an in-place change that commits between that re-read and the
+// delete is still not detected, so the immutability invariant remains the
+// primary guarantee.
+//
+// The by-ID pass deletes in binding ID order. On PostgreSQL a concurrent
+// change that deletes several of the user's bindings (for example
+// replaceBindingTx on a multi-role member) can still deadlock with this pass;
+// the database aborts one side, so either the delete returns 500 or the
+// other change fails, and no data is corrupted.
+//
+// What is guaranteed: a concurrent grant or role change to the user's
+// bindings that commits before the predicate delete aborts the delete with
+// 409 (a concurrent revoke is ignored and the delete proceeds). A grant
+// that commits after that statement but before the delete transaction
+// commits is not detected and can leave a stale binding on the deleted user;
+// that residual race is tracked in ptone/scion#2769.
+//
+// On denial it returns *lastProjectOwnerDeleteError listing every affected
+// project. role_bindings.principal_id has no foreign key, so without the
+// cascade the bindings would dangle after the user is deleted.
+func guardAndCascadeUserRoleBindingsTx(ctx context.Context, tx store.Store, userID string, now time.Time) error {
+	bindings, err := tx.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
+	if err != nil {
+		return fmt.Errorf("list role bindings: %w", err)
+	}
+
+	var ownerProjectIDs []string
+	var ownerRD *store.RoleDefinition
+	if len(bindings) > 0 {
+		ownerRD, err = tx.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
+		if err != nil {
+			return fmt.Errorf("resolve project-owner role definition: %w", err)
+		}
+		if ownerRD == nil {
+			return fmt.Errorf("resolve project-owner role definition: not found")
+		}
+		seen := make(map[string]bool)
+		for _, b := range bindings {
+			if b.ScopeType != store.RoleScopeProject || b.RoleDefinitionID != ownerRD.ID || seen[b.ScopeID] {
+				continue
+			}
+			seen[b.ScopeID] = true
+			ownerProjectIDs = append(ownerProjectIDs, b.ScopeID)
+		}
+		sort.Strings(ownerProjectIDs)
+	}
+
+	var orphaned []lastOwnerProjectRef
+	for _, projectID := range ownerProjectIDs {
+		if err := tx.LockProjectForMembership(ctx, projectID); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				// Binding on a project that no longer exists: nothing to
+				// orphan, the cascade below removes the stale binding.
+				continue
+			}
+			return fmt.Errorf("lock project %s: %w", projectID, err)
+		}
+		denied, err := userDeleteOrphansProjectTx(ctx, tx, projectID, ownerRD.ID, bindings, userID, now)
+		if err != nil {
+			return err
+		}
+		if !denied {
+			continue
+		}
+		ref := lastOwnerProjectRef{ID: projectID}
+		if p, err := tx.GetProject(ctx, projectID); err == nil && p != nil {
+			ref.Name = p.Name
+		} else if err != nil {
+			slog.Debug("last-owner delete guard: project name lookup failed",
+				"project_id", projectID, "error", err)
+		}
+		orphaned = append(orphaned, ref)
+	}
+	if len(orphaned) > 0 {
+		return &lastProjectOwnerDeleteError{projects: orphaned}
+	}
+
+	// Delete the listed bindings by ID, then require the predicate delete to
+	// find nothing: any row it removes is a binding the guard never saw.
+	// Always run the predicate delete, even when the list was empty, so a
+	// binding granted concurrently after the list is detected.
+	// Deterministic lock order for the by-ID pass (see the doc comment).
+	sort.Slice(bindings, func(i, j int) bool { return bindings[i].ID < bindings[j].ID })
+	for _, b := range bindings {
+		// Re-read the binding so an in-place change under the same ID is
+		// not deleted unchecked (see the immutability note above).
+		cur, err := tx.GetRoleBinding(ctx, b.ID)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				// Revoked concurrently; see below.
+				continue
+			}
+			return fmt.Errorf("re-read role binding %s: %w", b.ID, err)
+		}
+		if cur.RoleDefinitionID != b.RoleDefinitionID || cur.ScopeType != b.ScopeType ||
+			cur.ScopeID != b.ScopeID || cur.PrincipalType != b.PrincipalType || cur.PrincipalID != b.PrincipalID {
+			return fmt.Errorf("%w: binding %s changed in place", errUserRoleBindingsChanged, b.ID)
+		}
+		if err := tx.DeleteRoleBinding(ctx, b.ID); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				// Revoked concurrently; it can only be on a project the
+				// user does not own (owned projects are locked above).
+				continue
+			}
+			return fmt.Errorf("delete role binding %s: %w", b.ID, err)
+		}
+	}
+	n, err := tx.DeleteRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
+	if err != nil {
+		return fmt.Errorf("delete role bindings: %w", err)
+	}
+	if n != 0 {
+		return fmt.Errorf("%w: %d unlisted binding(s) found", errUserRoleBindingsChanged, n)
+	}
+	return nil
+}
+
+// userDeleteOrphansProjectTx applies the last-owner rule of
+// ptone/scion#2769 to the deletion of userID, for one project it owns,
+// inside the delete transaction and after LockProjectForMembership on that
+// project. userBindings are userID's role bindings; ownerRDID is the
+// project-owner role definition. The deletion orphans the project, and is
+// denied, when:
+//
+//   - one of userID's owner bindings on the project is usable (active window,
+//     user exists and is active) and no other usable owner remains (I1), or
+//   - no other owner binding of any kind remains (I2, the ptone/scion#2554
+//     floor: zero owner bindings re-arms the startup creator backfill).
+//
+// So deleting a suspended co-owner is allowed while another owner binding
+// remains, even when the project has no usable owner left. Lookup errors
+// are returned (500, nothing changed).
+func userDeleteOrphansProjectTx(ctx context.Context, tx store.Store, projectID, ownerRDID string, userBindings []*store.RoleBinding, userID string, now time.Time) (bool, error) {
+	var own []*store.RoleBinding
+	for _, b := range userBindings {
+		if b.ScopeType == store.RoleScopeProject && b.ScopeID == projectID && b.RoleDefinitionID == ownerRDID {
+			own = append(own, b)
+		}
+	}
+	// ownerRDID is passed through, so the role definition is not resolved
+	// again for every owned project.
+	removedUsable := false
+	for _, b := range own {
+		ok, err := bindingIsUsableOwner(ctx, tx, b, ownerRDID, now)
+		if err != nil {
+			return false, fmt.Errorf("check owner bindings of project %s: %w", projectID, err)
+		}
+		if ok {
+			removedUsable = true
+			break
+		}
+	}
+	if removedUsable {
+		ok, err := projectHasUsableOwner(ctx, tx, projectID, now, userID)
+		if err != nil {
+			return false, fmt.Errorf("check usable owners of project %s: %w", projectID, err)
+		}
+		// A usable other owner is itself another owner binding, so I2
+		// holds too and the binding count is not needed.
+		return !ok, nil
+	}
+	others, err := projectOwnerBindingCount(ctx, tx, projectID, userID)
+	if err != nil {
+		return false, fmt.Errorf("count owner bindings of project %s: %w", projectID, err)
+	}
+	return others == 0, nil
+}
+
+// errUserRoleBindingsChanged is returned by guardAndCascadeUserRoleBindingsTx
+// when the cascade finds a binding the guard did not list, meaning the
+// user's bindings changed concurrently. Callers map it to
+// 409 conflict; the transaction rolls back so nothing is deleted.
+var errUserRoleBindingsChanged = errors.New("the user's role bindings changed concurrently; retry")
+
+// writeUserRoleBindingsChangedError writes the 409 conflict response for
+// errUserRoleBindingsChanged.
+func writeUserRoleBindingsChangedError(w http.ResponseWriter) {
+	writeError(w, http.StatusConflict, ErrCodeConflict, errUserRoleBindingsChanged.Error(), nil)
+}
+
+// membershipNow returns the membership service clock, so the delete guard
+// and the members API agree on which bindings are active, including under an
+// injected clock. It falls back to the wall clock if the service is unset.
+func (s *Server) membershipNow() time.Time {
+	if s.membershipService != nil && s.membershipService.nowFunc != nil {
+		return s.membershipService.nowFunc()
+	}
+	return time.Now()
 }

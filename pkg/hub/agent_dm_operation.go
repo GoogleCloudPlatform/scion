@@ -22,6 +22,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
@@ -70,11 +71,6 @@ type AgentDMInput struct {
 
 	// Msg is the plain text message body.
 	Msg string
-
-	// Raw requests that the target agent's runtime receive the message body
-	// verbatim via keystroke injection (no envelope, no automatic Enter).
-	// Deprecated client flag (`scion message --raw`), still functional.
-	Raw bool
 
 	// Plain requests that the target agent's runtime receive the message
 	// body verbatim, submitted normally (Enter), with no envelope.
@@ -141,7 +137,7 @@ type AgentDMInput struct {
 	// is false — set it only from the agent mention fan-out path
 	// (agent_mention_fanout.go), never from a primary send. Every other
 	// admission check (rate budget, message length, authorization, foreign
-	// attachment/raw rejection, dispatch availability) and every side
+	// attachment rejection, dispatch availability) and every side
 	// effect (persistence, SSE, audit, dispatch) is unaffected: a mention to
 	// a non-running agent — stopped, suspended, errored, or any other
 	// not-yet-running phase (created, provisioning, starting, etc.) — still
@@ -342,36 +338,9 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 		}
 	}
 
-	// 4b. (Removed by task 2.3, ptone/scion#2197.) The cross-project raw
-	// keystroke-injection rejection that used to live here is superseded by
-	// the message-raw bridge (agent_keys_message_bridge.go), which
-	// intercepts every raw request upstream of this function, before
-	// authorizeAgentMessage ever runs, and reports this same case as the
-	// unified agentkeys.OutcomeCrossProjectKeysUnsupported (AK-21d, contract
-	// §8). The dispatch-layer backstop (httpdispatcher.go's
-	// ErrRawDispatchRefused) remains the fail-closed guarantee for a
-	// Raw==true call that somehow still reaches this function directly
-	// (AK-55) -- see TestExecuteAgentDM_CrossProjectRaw_RefusedByDispatchBackstop
-	// and TestExecuteAgentDM_SameProjectRaw_RefusedByDispatchBackstop.
-
-	// 4c. Managed-backend raw rejection (ptone/scion#2192).
-	//
-	// managedAgentMessage only accepts a plain-text body. Raw to a
-	// managed-runtime target is rejected here, so raw never reaches
-	// CreateInteraction and callers are not misled into believing raw
-	// semantics were applied.
-	if input.Raw && isManagedAgentRuntime(input.TargetAgent.Runtime) {
-		LogDMAdmission(DMAuditEntryForDenial(input, string(MessageDenialRawManagedUnsupported),
-			"raw delivery not supported for managed-runtime agents"))
-		return nil, &AgentDMError{
-			Code:       ErrCodeUnsupportedCapability,
-			Message:    "raw delivery is not supported for managed-runtime agents",
-			HTTPStatus: http.StatusUnprocessableEntity,
-			Details: map[string]interface{}{
-				"reason": string(MessageDenialRawManagedUnsupported),
-			},
-		}
-	}
+	// 4b. Raw keystroke delivery through messages has been removed. Message
+	// ingresses reject a request carrying the retired raw field before this
+	// function is reached (raw_tombstone.go); keystrokes use the keys route.
 
 	// 5. Dispatch availability pre-check (#1689).
 	// Verify dispatch infrastructure before persistence so that missing
@@ -399,6 +368,10 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 	// dispatched (AC-4).
 	if !deferred {
 		if input.Wake {
+			if denial := s.wakeResumeDenial(ctx, input.SenderIdentity, input.TargetAgent); denial != nil {
+				LogDMAdmission(DMAuditEntryForDenial(input, denial.Code, denial.Message))
+				return nil, denial
+			}
 			_, wakeErr := s.wakeAgentForDM(ctx, input.TargetAgent)
 			if wakeErr != nil {
 				return nil, wakeErr
@@ -467,7 +440,6 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 		Msg:                  storeMsg.Msg,
 		Type:                 storeMsg.Type,
 		Plain:                input.Plain,
-		Raw:                  input.Raw,
 		Urgent:               storeMsg.Urgent,
 		Attachments:          input.Attachments,
 		Channel:              input.Channel,
@@ -565,7 +537,7 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 	// dispatch (mention fan-out, observers, responses).
 	dispatchMsg := structuredMsg
 	pol := s.offloadPolicy()
-	if messaging.Qualifies(storeMsg.Msg, structuredMsg.Raw, structuredMsg.Plain, pol) {
+	if messaging.Qualifies(storeMsg.Msg, structuredMsg.Plain, pol) {
 		// No caller has to remember to hold a *store.Conversation: this is
 		// the one place ExecuteAgentDM looks it up, and only on the
 		// over-threshold path — a small DM pays nothing extra (design §4.3).
@@ -689,24 +661,16 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 	// preserve the pre-refactor observer envelope shape.
 	// Cross-project DMs strip body and attachment metadata from the
 	// observer message (#1687).
-	//
-	// Phase 0.2 (ptone/scion#2192): do not mirror terminal input to message
-	// observers. Raw carries literal keystrokes, not a message body —
-	// plugin observers (Telegram, broker-log) and chat relays are message
-	// consumers, not a keystroke sink, so this publication is skipped
-	// entirely for raw DMs.
-	if !structuredMsg.Raw {
-		if bp := s.GetMessageBrokerProxy(); bp != nil {
-			observerMsg := *structuredMsg
-			observerMsg.ObserverOnly = true
-			observerMsg.ConversationAsserted = false
-			if input.SenderAgent.ProjectID != input.TargetAgent.ProjectID {
-				sanitizeCrossProjectObserver(&observerMsg)
-			}
-			if err := bp.PublishMessage(ctx, input.TargetAgent.ProjectID, &observerMsg); err != nil {
-				s.messageLog.Error("agent DM: observer publish failed",
-					"target_agent_id", input.TargetAgent.ID, "error", err)
-			}
+	if bp := s.GetMessageBrokerProxy(); bp != nil {
+		observerMsg := *structuredMsg
+		observerMsg.ObserverOnly = true
+		observerMsg.ConversationAsserted = false
+		if input.SenderAgent.ProjectID != input.TargetAgent.ProjectID {
+			sanitizeCrossProjectObserver(&observerMsg)
+		}
+		if err := bp.PublishMessage(ctx, input.TargetAgent.ProjectID, &observerMsg); err != nil {
+			s.messageLog.Error("agent DM: observer publish failed",
+				"target_agent_id", input.TargetAgent.ID, "error", err)
 		}
 	}
 
@@ -729,6 +693,25 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 		Recipient:   storeMsg.Recipient,
 		RecipientID: storeMsg.RecipientID,
 	}, nil
+}
+
+// wakeResumeDenial applies the rule that resuming a suspended agent to
+// deliver a message requires the lifecycle permission that starting the
+// agent requires (agentLifecycleAllowed). It returns a 403 error when target
+// is suspended and identity lacks that permission, and nil otherwise. A
+// target in any other phase needs no resume, so the rule does not apply.
+func (s *Server) wakeResumeDenial(ctx context.Context, identity Identity, target *store.Agent) *AgentDMError {
+	if state.Phase(target.Phase) != state.PhaseSuspended {
+		return nil
+	}
+	if s.agentLifecycleAllowed(ctx, identity, target) {
+		return nil
+	}
+	return &AgentDMError{
+		Code:       ErrCodeForbidden,
+		Message:    fmt.Sprintf("not permitted to resume agent %s", target.Slug),
+		HTTPStatus: http.StatusForbidden,
+	}
 }
 
 // WriteAgentDMError writes an AgentDMError as an HTTP response. Adapters

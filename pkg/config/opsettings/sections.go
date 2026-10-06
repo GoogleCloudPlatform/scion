@@ -20,6 +20,7 @@ package opsettings
 
 import (
 	"encoding/json"
+	"fmt"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -35,10 +36,14 @@ type AccessSettings struct {
 
 // LifecycleSettings holds Layer-1 agent lifecycle settings.
 type LifecycleSettings struct {
-	AutoSuspendStalled    *bool  `json:"auto_suspend_stalled,omitempty"`
-	StalledThreshold      string `json:"stalled_threshold,omitempty"`
-	SoftDeleteRetention   string `json:"soft_delete_retention,omitempty"`
-	SoftDeleteRetainFiles *bool  `json:"soft_delete_retain_files,omitempty"`
+	AutoSuspendStalled         *bool  `json:"auto_suspend_stalled,omitempty"`
+	StalledThreshold           string `json:"stalled_threshold,omitempty"`
+	SoftDeleteRetention        string `json:"soft_delete_retention,omitempty"`
+	SoftDeleteRetainFiles      *bool  `json:"soft_delete_retain_files,omitempty"`
+	StartClaimLeaseTTL         string `json:"start_claim_lease_ttl,omitempty"`
+	StartMaxDuration           string `json:"start_max_duration,omitempty"`
+	StartUnconfirmedHold       string `json:"start_unconfirmed_hold,omitempty"`
+	StartCreateUnconfirmedHold string `json:"start_create_unconfirmed_hold,omitempty"`
 }
 
 // MaintenanceSettings holds Layer-1 maintenance/admin-mode settings.
@@ -115,6 +120,153 @@ type FederationSettings struct {
 	Algorithms       []string                       `json:"algorithms,omitempty"`
 	RefreshInterval  string                         `json:"refresh_interval,omitempty"`
 	DebounceInterval string                         `json:"debounce_interval,omitempty"`
+}
+
+// ArtifactsSettings holds the Layer-1 settings of the artifact service
+// (pkg/artifacts). DB-only (runtime state), no settings.yaml
+// representation. Every field is optional; an omitted field takes its
+// compiled default (see the ArtifactsDefault* constants). Read it through
+// Resolve, never field by field, so every reader gets the same validation.
+type ArtifactsSettings struct {
+	// Enabled is the hub's switch for the artifact service, on top of the
+	// hub.artifacts experiment. Default true, so enabling the experiment is
+	// enough.
+	Enabled *bool `json:"enabled,omitempty"`
+	// MaxFileBytes caps the size of one file in an artifact version.
+	MaxFileBytes *int64 `json:"max_file_bytes,omitempty"`
+	// MaxBundleBytes caps the total size of the files in one version.
+	MaxBundleBytes *int64 `json:"max_bundle_bytes,omitempty"`
+	// MaxFiles caps the number of files in one version.
+	MaxFiles *int `json:"max_files,omitempty"`
+	// DefaultRetentionDays is how long an artifact is kept when it has no
+	// retention of its own. 0 means forever.
+	DefaultRetentionDays *int `json:"default_retention_days,omitempty"`
+	// LinkDefaultTTLHours is the lifetime of a share link created without
+	// an explicit expiry.
+	LinkDefaultTTLHours *int `json:"link_default_ttl_hours,omitempty"`
+	// LinkMaxTTLHours is the longest lifetime a share link may be given.
+	// Share links always expire.
+	LinkMaxTTLHours *int `json:"link_max_ttl_hours,omitempty"`
+}
+
+// Compiled defaults for ArtifactsSettings.
+const (
+	ArtifactsDefaultEnabled               = true
+	ArtifactsDefaultMaxFileBytes    int64 = 32 << 20  // 32 MiB
+	ArtifactsDefaultMaxBundleBytes  int64 = 256 << 20 // 256 MiB
+	ArtifactsDefaultMaxFiles              = 200
+	ArtifactsDefaultRetentionDays         = 0   // never expire
+	ArtifactsDefaultLinkTTLHours          = 168 // 7 days
+	ArtifactsDefaultLinkMaxTTLHours       = 720 // 30 days
+)
+
+// ArtifactsConfig is the resolved artifact service configuration: every
+// field holds its effective value.
+type ArtifactsConfig struct {
+	Enabled              bool
+	MaxFileBytes         int64
+	MaxBundleBytes       int64
+	MaxFiles             int
+	DefaultRetentionDays int
+	LinkDefaultTTLHours  int
+	LinkMaxTTLHours      int
+	// Malformed is true when the stored document could not be used. The
+	// service is then disabled and the limits are the compiled defaults.
+	Malformed bool
+}
+
+// DefaultArtifactsConfig returns the configuration used when the artifacts
+// section is absent.
+func DefaultArtifactsConfig() ArtifactsConfig {
+	return ArtifactsConfig{
+		Enabled:              ArtifactsDefaultEnabled,
+		MaxFileBytes:         ArtifactsDefaultMaxFileBytes,
+		MaxBundleBytes:       ArtifactsDefaultMaxBundleBytes,
+		MaxFiles:             ArtifactsDefaultMaxFiles,
+		DefaultRetentionDays: ArtifactsDefaultRetentionDays,
+		LinkDefaultTTLHours:  ArtifactsDefaultLinkTTLHours,
+		LinkMaxTTLHours:      ArtifactsDefaultLinkMaxTTLHours,
+	}
+}
+
+// MalformedArtifactsConfig returns the fail-closed configuration: the
+// service disabled, the limits at their compiled defaults.
+func MalformedArtifactsConfig() ArtifactsConfig {
+	c := DefaultArtifactsConfig()
+	c.Enabled = false
+	c.Malformed = true
+	return c
+}
+
+// Resolve applies compiled defaults to omitted fields and validates the
+// result. An invalid value anywhere makes the whole section unusable: it
+// returns MalformedArtifactsConfig and an error naming the problem, so the
+// service fails closed rather than running with a limit nobody set.
+//
+// Valid means: every size and count limit and both link TTLs are at least
+// 1, retention is at least 0, a file limit does not exceed the bundle
+// limit, and the default link TTL does not exceed the maximum.
+func (a ArtifactsSettings) Resolve() (ArtifactsConfig, error) {
+	c := DefaultArtifactsConfig()
+	if a.Enabled != nil {
+		c.Enabled = *a.Enabled
+	}
+	if a.MaxFileBytes != nil {
+		c.MaxFileBytes = *a.MaxFileBytes
+	}
+	if a.MaxBundleBytes != nil {
+		c.MaxBundleBytes = *a.MaxBundleBytes
+	}
+	if a.MaxFiles != nil {
+		c.MaxFiles = *a.MaxFiles
+	}
+	if a.DefaultRetentionDays != nil {
+		c.DefaultRetentionDays = *a.DefaultRetentionDays
+	}
+	if a.LinkDefaultTTLHours != nil {
+		c.LinkDefaultTTLHours = *a.LinkDefaultTTLHours
+	}
+	if a.LinkMaxTTLHours != nil {
+		c.LinkMaxTTLHours = *a.LinkMaxTTLHours
+	}
+
+	var err error
+	switch {
+	case c.MaxFileBytes < 1:
+		err = fmt.Errorf("max_file_bytes must be at least 1, got %d", c.MaxFileBytes)
+	case c.MaxBundleBytes < 1:
+		err = fmt.Errorf("max_bundle_bytes must be at least 1, got %d", c.MaxBundleBytes)
+	case c.MaxFiles < 1:
+		err = fmt.Errorf("max_files must be at least 1, got %d", c.MaxFiles)
+	case c.DefaultRetentionDays < 0:
+		err = fmt.Errorf("default_retention_days must be at least 0, got %d", c.DefaultRetentionDays)
+	case c.LinkDefaultTTLHours < 1:
+		err = fmt.Errorf("link_default_ttl_hours must be at least 1, got %d", c.LinkDefaultTTLHours)
+	case c.LinkMaxTTLHours < 1:
+		err = fmt.Errorf("link_max_ttl_hours must be at least 1, got %d", c.LinkMaxTTLHours)
+	case c.MaxFileBytes > c.MaxBundleBytes:
+		err = fmt.Errorf("max_file_bytes (%d) exceeds max_bundle_bytes (%d)", c.MaxFileBytes, c.MaxBundleBytes)
+	case c.LinkDefaultTTLHours > c.LinkMaxTTLHours:
+		err = fmt.Errorf("link_default_ttl_hours (%d) exceeds link_max_ttl_hours (%d)", c.LinkDefaultTTLHours, c.LinkMaxTTLHours)
+	}
+	if err != nil {
+		return MalformedArtifactsConfig(), fmt.Errorf("artifacts settings: %w", err)
+	}
+	return c, nil
+}
+
+// ParseArtifactsDoc parses and resolves a stored artifacts document. Bytes
+// that are not valid JSON, do not unmarshal into ArtifactsSettings, or fail
+// Resolve yield MalformedArtifactsConfig and an error.
+func ParseArtifactsDoc(raw json.RawMessage) (ArtifactsConfig, error) {
+	if !json.Valid(raw) {
+		return MalformedArtifactsConfig(), fmt.Errorf("artifacts settings: invalid JSON")
+	}
+	var doc ArtifactsSettings
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return MalformedArtifactsConfig(), fmt.Errorf("artifacts settings: %w", err)
+	}
+	return doc.Resolve()
 }
 
 // ProjectDefaultsSettings holds Layer-1 project creation defaults.

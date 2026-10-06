@@ -340,9 +340,9 @@ func TestLogAttrs(t *testing.T) {
 
 	attrs := m.LogAttrs()
 
-	// Should contain 10 key-value pairs (20 elements) when IDs are set
-	if len(attrs) != 20 {
-		t.Fatalf("LogAttrs() returned %d elements, want 20", len(attrs))
+	// Should contain 9 key-value pairs (18 elements) when IDs are set
+	if len(attrs) != 18 {
+		t.Fatalf("LogAttrs() returned %d elements, want 18", len(attrs))
 	}
 
 	// Verify key-value pairs
@@ -356,7 +356,6 @@ func TestLogAttrs(t *testing.T) {
 		"urgent":          true,
 		"broadcasted":     false,
 		"plain":           true,
-		"raw":             false,
 	}
 	for i := 0; i < len(attrs); i += 2 {
 		key, ok := attrs[i].(string)
@@ -375,64 +374,20 @@ func TestLogAttrs(t *testing.T) {
 	}
 }
 
-// TestLogAttrs_RedactsRawMessageContent is a regression guard for
-// ptone/scion#2192: raw keystroke payloads are literal terminal input and
-// must never appear in Hub/broker message logs (normal or debug) while
-// legacy raw delivery remains reachable. LogAttrs is the single choke point
-// both handlers_broker_inbound.go's dedicated audit log and
-// runtimebroker/handlers.go's sendMessage log use, so redacting here covers
-// both call sites.
-func TestLogAttrs_RedactsRawMessageContent(t *testing.T) {
-	const secret = "TOP-SECRET-KEYSTROKE-PAYLOAD-4F9C2A"
+// TestLogAttrs_NoRawAttribute pins that the retired raw flag is no longer
+// part of message log output now that raw delivery has been removed.
+func TestLogAttrs_NoRawAttribute(t *testing.T) {
 	m := &StructuredMessage{
 		Version:   Version,
 		Sender:    "user:alice",
 		Recipient: "agent:dev",
-		Msg:       secret,
+		Msg:       "hello",
 		Type:      TypeInstruction,
-		Raw:       true,
 	}
-
 	attrs := m.LogAttrs()
-
-	found := false
 	for i := 0; i < len(attrs); i += 2 {
-		key, ok := attrs[i].(string)
-		if !ok {
-			continue
-		}
-		if key != "message_content" {
-			continue
-		}
-		found = true
-		content, _ := attrs[i+1].(string)
-		if content == secret {
-			t.Fatalf("LogAttrs() exposed raw message content: %q", content)
-		}
-		if content != redactedRawContent {
-			t.Errorf("LogAttrs()[\"message_content\"] = %q, want redaction placeholder %q", content, redactedRawContent)
-		}
-	}
-	if !found {
-		t.Fatal("LogAttrs() did not include a message_content key")
-	}
-
-	// raw:false must be unaffected — this is Plain/normal-message regression
-	// coverage living in TestLogAttrs above; assert it here too so the two
-	// invariants (redact raw, preserve non-raw) are pinned side by side.
-	nonRaw := &StructuredMessage{
-		Version:   Version,
-		Sender:    "user:alice",
-		Recipient: "agent:dev",
-		Msg:       secret,
-		Type:      TypeInstruction,
-	}
-	nonRawAttrs := nonRaw.LogAttrs()
-	for i := 0; i < len(nonRawAttrs); i += 2 {
-		if key, ok := nonRawAttrs[i].(string); ok && key == "message_content" {
-			if nonRawAttrs[i+1] != secret {
-				t.Errorf("non-raw LogAttrs() must not redact message_content, got %v", nonRawAttrs[i+1])
-			}
+		if key, ok := attrs[i].(string); ok && key == "raw" {
+			t.Fatalf("LogAttrs() must not include a raw attribute")
 		}
 	}
 }
@@ -448,9 +403,9 @@ func TestLogAttrsWithoutIDs(t *testing.T) {
 
 	attrs := m.LogAttrs()
 
-	// Without IDs, should contain 8 key-value pairs (16 elements)
-	if len(attrs) != 16 {
-		t.Fatalf("LogAttrs() returned %d elements, want 16", len(attrs))
+	// Without IDs, should contain 7 key-value pairs (14 elements)
+	if len(attrs) != 14 {
+		t.Fatalf("LogAttrs() returned %d elements, want 14", len(attrs))
 	}
 
 	// Verify sender_id and recipient_id are not present

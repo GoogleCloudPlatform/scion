@@ -405,7 +405,7 @@ func TestProjectMembersGroup_AllowsExistingSystemGroupForSameProject(t *testing.
 		GroupType: store.GroupTypeExplicit,
 		ProjectID: project.ID,
 		Annotations: map[string]string{
-			systemProjectMembersGroupAnnotation: "true",
+			store.AnnotationProjectMembersGroup: "true",
 		},
 	}
 	require.NoError(t, s.CreateGroup(ctx, membersGroup))

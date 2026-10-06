@@ -452,13 +452,13 @@ func reapRow(ctx context.Context, txClient *ent.Client, isPG bool, id uuid.UUID,
 		if row.LaunchDeadline == nil || !row.LaunchDeadline.Before(now) || !isInFlightPhase(row.Phase) {
 			return nil, nil
 		}
-		updated, err := txClient.Agent.UpdateOneID(id).
+		upd := txClient.Agent.UpdateOneID(id).
 			SetPhase(string(state.PhaseError)).
 			SetLaunchError(store.LaunchErrorLaunchTimeout).
 			SetLaunchState(store.LaunchStateEnded).
 			SetLaunchEndReason(store.LaunchEndReasonTimedOut).
-			SetStateVersion(row.StateVersion + 1).
-			Save(ctx)
+			SetStateVersion(row.StateVersion + 1)
+		updated, err := withLaunchEndSettlement(upd, row, store.LaunchEndReasonTimedOut, now).Save(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -471,13 +471,13 @@ func reapRow(ctx context.Context, txClient *ent.Client, isPG bool, id uuid.UUID,
 		if row.LaunchLastReportAt == nil || !row.LaunchLastReportAt.Before(now.Add(-8*p.KeepaliveInterval)) || !isInFlightPhase(row.Phase) {
 			return nil, nil
 		}
-		updated, err := txClient.Agent.UpdateOneID(id).
+		upd := txClient.Agent.UpdateOneID(id).
 			SetPhase(string(state.PhaseError)).
 			SetLaunchError(store.LaunchErrorBrokerLost).
 			SetLaunchState(store.LaunchStateEnded).
 			SetLaunchEndReason(store.LaunchEndReasonLost).
-			SetStateVersion(row.StateVersion + 1).
-			Save(ctx)
+			SetStateVersion(row.StateVersion + 1)
+		updated, err := withLaunchEndSettlement(upd, row, store.LaunchEndReasonLost, now).Save(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -499,12 +499,12 @@ func reapRow(ctx context.Context, txClient *ent.Client, isPG bool, id uuid.UUID,
 				newErr = store.LaunchErrorBrokerLost
 			}
 		}
-		updated, err := txClient.Agent.UpdateOneID(id).
+		upd := txClient.Agent.UpdateOneID(id).
 			SetLaunchState(store.LaunchStateEnded).
 			SetLaunchEndReason(store.LaunchEndReasonLost).
 			SetLaunchError(newErr).
-			SetStateVersion(row.StateVersion + 1).
-			Save(ctx)
+			SetStateVersion(row.StateVersion + 1)
+		updated, err := withLaunchEndSettlement(upd, row, store.LaunchEndReasonLost, now).Save(ctx)
 		if err != nil {
 			return nil, err
 		}
