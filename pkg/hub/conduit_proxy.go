@@ -232,7 +232,8 @@ func wrapWebSocketUpstream(resp *http.Response) {
 // local failure) to what the client receives, so the client sees why the
 // connection ended instead of a bare TCP close (1006). The frame is only
 // added at a frame boundary: an upstream lost mid-frame is cut as is.
-// Writes and Close pass through; nothing else writes to the client.
+// Writes, Close and CloseWrite pass through; nothing else writes to the
+// client.
 type wsUpstreamBody struct {
 	io.ReadWriteCloser
 	frames wsFrameTracker
@@ -262,6 +263,17 @@ func (b *wsUpstreamBody) Read(p []byte) (int, error) {
 		return n, nil
 	}
 	return 0, b.end
+}
+
+// CloseWrite passes a client half-close through to the upstream when it
+// supports one. ReverseProxy's client-to-upstream copy looks for this
+// method on the backend: without it, a client half-close would tear down
+// both directions and drop upstream data still in flight to the client.
+func (b *wsUpstreamBody) CloseWrite() error {
+	if hc, ok := b.ReadWriteCloser.(interface{ CloseWrite() error }); ok {
+		return hc.CloseWrite()
+	}
+	return nil
 }
 
 // wsCloseCodeFor maps the error that ended the upstream to the close code

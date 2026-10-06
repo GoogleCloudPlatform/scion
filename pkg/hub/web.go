@@ -2928,13 +2928,16 @@ func (ws *WebServer) loggingMiddleware(next http.Handler) http.Handler {
 		aborted := logging.ServeCatchingAbort(next, wrapped, r)
 
 		if ws.config.Debug || wrapped.statusCode >= 400 || aborted {
-			ws.logger().Info("Web request",
+			attrs := []slog.Attr{
 				slog.String("method", r.Method),
 				slog.String("path", r.URL.Path),
 				slog.Int("status", wrapped.statusCode),
 				slog.Duration("duration", time.Since(start)),
-				slog.Bool(logging.AttrAborted, aborted),
-			)
+			}
+			if aborted {
+				attrs = append(attrs, slog.Bool(logging.AttrAborted, true))
+			}
+			ws.logger().LogAttrs(r.Context(), slog.LevelInfo, "Web request", attrs...)
 		}
 		if aborted {
 			panic(http.ErrAbortHandler)

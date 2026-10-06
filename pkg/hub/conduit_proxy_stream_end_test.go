@@ -125,10 +125,84 @@ func TestConduitProxyUpstreamLost(t *testing.T) {
 	})
 }
 
+// TestConduitProxyWebSocketHalfClose: a client that half-closes a proxied
+// WebSocket still receives what the app sends afterwards, ending with the
+// app's own close frame.
+func TestConduitProxyWebSocketHalfClose(t *testing.T) {
+	up := websocket.Upgrader{}
+	f := newConduitProxyFixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := up.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer func() { _ = c.Close() }()
+		// Read until the client's half-close arrives, then answer.
+		for {
+			if _, _, err := c.ReadMessage(); err != nil {
+				break
+			}
+		}
+		for _, m := range []string{"after-1", "after-2"} {
+			if err := c.WriteMessage(websocket.TextMessage, []byte(m)); err != nil {
+				return
+			}
+		}
+		_ = c.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "done"))
+	}))
+	f.startAgent(t)
+	wsURL := "ws" + strings.TrimPrefix(f.base, "http") +
+		"/api/v1/agents/" + f.launched.ID + "/ports/" + strconv.Itoa(f.app.port) + "/proxy/ws"
+	c, _, err := websocket.DefaultDialer.Dial(wsURL, http.Header{"Authorization": {"Bearer " + f.userToken}})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = c.Close() })
+	require.NoError(t, c.SetReadDeadline(time.Now().Add(10*time.Second)))
+	hc, ok := c.UnderlyingConn().(interface{ CloseWrite() error })
+	require.True(t, ok, "client connection cannot half-close")
+	require.NoError(t, hc.CloseWrite())
+
+	for _, want := range []string{"after-1", "after-2"} {
+		_, got, err := c.ReadMessage()
+		require.NoError(t, err)
+		require.Equal(t, want, string(got))
+	}
+	_, _, err = c.ReadMessage()
+	var ce *websocket.CloseError
+	require.ErrorAs(t, err, &ce)
+	assert.Equal(t, websocket.CloseNormalClosure, ce.Code)
+	assert.Equal(t, "done", ce.Text)
+}
+
+// halfCloser records CloseWrite calls.
+type halfCloser struct {
+	chunkedReader
+	closedWrite bool
+}
+
+func (h *halfCloser) CloseWrite() error { h.closedWrite = true; return nil }
+
+// TestWSUpstreamBodyCloseWrite: CloseWrite reaches an upstream that can
+// half-close and is a no-op otherwise.
+func TestWSUpstreamBodyCloseWrite(t *testing.T) {
+	hc := &halfCloser{}
+	require.NoError(t, (&wsUpstreamBody{ReadWriteCloser: hc}).CloseWrite())
+	assert.True(t, hc.closedWrite)
+	require.NoError(t, (&wsUpstreamBody{ReadWriteCloser: &chunkedReader{}}).CloseWrite())
+}
+
 // wsTestFrame is a final frame of the given opcode carrying n payload
 // bytes, with a masking key when masked.
 func wsTestFrame(opcode byte, n int, masked bool) []byte {
-	f := []byte{0x80 | opcode}
+	return wsTestFragment(true, opcode, n, masked)
+}
+
+// wsTestFragment is wsTestFrame with the FIN bit given: a message split
+// into fragments is a FIN=0 frame of the message opcode, any FIN=0
+// continuation frames (opcode 0), and a FIN=1 continuation frame.
+func wsTestFragment(fin bool, opcode byte, n int, masked bool) []byte {
+	f := []byte{opcode}
+	if fin {
+		f[0] |= 0x80
+	}
 	m := byte(0)
 	if masked {
 		m = 0x80
@@ -148,10 +222,13 @@ func wsTestFrame(opcode byte, n int, masked bool) []byte {
 }
 
 // chunkedReader returns data in reads of at most size bytes, then err.
+// With errWithData, err comes with the read that returns the last bytes
+// (n > 0 and an error from a single Read).
 type chunkedReader struct {
-	data []byte
-	size int
-	err  error
+	data        []byte
+	size        int
+	err         error
+	errWithData bool
 }
 
 func (r *chunkedReader) Read(p []byte) (int, error) {
@@ -161,6 +238,9 @@ func (r *chunkedReader) Read(p []byte) (int, error) {
 	n := min(min(len(p), r.size), len(r.data))
 	copy(p, r.data[:n])
 	r.data = r.data[n:]
+	if r.errWithData && len(r.data) == 0 {
+		return n, r.err
+	}
 	return n, nil
 }
 
@@ -178,6 +258,10 @@ func TestWSUpstreamBody(t *testing.T) {
 	lost := closeFrame(wsCloseUpstreamUnreachable, "upstream_unreachable")
 	text := wsTestFrame(0x1, 5, false)
 	cat := func(parts ...[]byte) []byte { return bytes.Join(parts, nil) }
+	first := wsTestFragment(false, 0x1, 4, false)  // FIN=0, text
+	middle := wsTestFragment(false, 0x0, 3, false) // FIN=0, continuation
+	last := wsTestFragment(true, 0x0, 2, false)    // FIN=1, continuation
+	ping := wsTestFrame(0x9, 2, false)
 	for _, tc := range []struct {
 		name     string
 		upstream []byte
@@ -200,23 +284,42 @@ func TestWSUpstreamBody(t *testing.T) {
 			want: cat(text, closeFrame(1000, ""))},
 		{name: "local limit", upstream: text, end: conduit.ErrBufferBudget,
 			want: cat(text, closeFrame(wsCloseInternalError, "internal_error"))},
+		// A control frame may come between the fragments of a message,
+		// so the close frame is added after any whole fragment.
+		{name: "fragmented message complete", upstream: cat(first, middle, last), end: io.EOF,
+			want: cat(first, middle, last, lost)},
+		{name: "lost between fragments", upstream: cat(first, middle), end: conduit.ErrSessionClosed,
+			want: cat(first, middle, lost)},
+		{name: "lost mid-fragment", upstream: cat(first, middle[:3]), end: io.EOF,
+			want: cat(first, middle[:3])},
+		{name: "ping between fragments", upstream: cat(first, ping, last), end: io.EOF,
+			want: cat(first, ping, last, lost)},
+		{name: "lost after a ping between fragments", upstream: cat(first, ping), end: io.EOF,
+			want: cat(first, ping, lost)},
+		{name: "close between fragments", upstream: cat(first, closeFrame(1001, "")), end: io.EOF,
+			want: cat(first, closeFrame(1001, ""))},
 	} {
 		for _, chunk := range []int{1, 7, 1 << 20} {
 			for _, oneByte := range []bool{false, true} {
-				t.Run(tc.name+"/chunk="+strconv.Itoa(chunk)+"/onebyte="+strconv.FormatBool(oneByte), func(t *testing.T) {
-					b := &wsUpstreamBody{ReadWriteCloser: &chunkedReader{data: tc.upstream, size: chunk, err: tc.end}}
-					var r io.Reader = b
-					if oneByte {
-						r = iotest.OneByteReader(b)
-					}
-					got, err := io.ReadAll(r)
-					if errors.Is(tc.end, io.EOF) {
-						require.NoError(t, err)
-					} else {
-						require.ErrorIs(t, err, tc.end)
-					}
-					assert.Equal(t, tc.want, got)
-				})
+				for _, errWithData := range []bool{false, true} {
+					name := tc.name + "/chunk=" + strconv.Itoa(chunk) + "/onebyte=" + strconv.FormatBool(oneByte) +
+						"/errwithdata=" + strconv.FormatBool(errWithData)
+					t.Run(name, func(t *testing.T) {
+						b := &wsUpstreamBody{ReadWriteCloser: &chunkedReader{
+							data: tc.upstream, size: chunk, err: tc.end, errWithData: errWithData}}
+						var r io.Reader = b
+						if oneByte {
+							r = iotest.OneByteReader(b)
+						}
+						got, err := io.ReadAll(r)
+						if errors.Is(tc.end, io.EOF) {
+							require.NoError(t, err)
+						} else {
+							require.ErrorIs(t, err, tc.end)
+						}
+						assert.Equal(t, tc.want, got)
+					})
+				}
 			}
 		}
 	}

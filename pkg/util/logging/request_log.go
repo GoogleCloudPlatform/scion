@@ -472,7 +472,7 @@ func ServeCatchingAbort(next http.Handler, w http.ResponseWriter, r *http.Reques
 			return
 		}
 		switch p := recover(); p {
-		case nil: // runtime.Goexit: there is no panic to recover
+		case nil: // runtime.Goexit: nothing to recover; unwinding continues and the caller never resumes
 		case http.ErrAbortHandler: // compared by identity, as net/http does
 		default:
 			panic(p)
