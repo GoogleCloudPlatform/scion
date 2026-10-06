@@ -61,6 +61,26 @@ func TestPreArtifactCeilingKeepsProjectRead(t *testing.T) {
 	issued := filterScopes(ScopesForRole(AgentRoleBaseline), c, ScopeCeilings{})
 	assert.Contains(t, issued, ScopeProjectRead)
 	assert.NotContains(t, issued, ScopeProjectArtifactRead, "the mint filter drops the ceiling-optional scope")
+	assert.NotContains(t, issued, ScopeProjectArtifactWrite, "the mint filter drops the write scope too")
+	issuedFull := filterScopes(ScopesForRole(AgentRoleFull), c, ScopeCeilings{})
+	assert.NotContains(t, issuedFull, ScopeProjectArtifactRead)
+	assert.NotContains(t, issuedFull, ScopeProjectArtifactWrite)
+}
+
+// TestReadOnlyArtifactCeilingIssuesReadNotWrite: a ceiling holding the
+// pre-artifact set plus artifact.read (but not artifact.create) issues the
+// read scope and withholds the write scope.
+func TestReadOnlyArtifactCeilingIssuesReadNotWrite(t *testing.T) {
+	c := boundedCeiling(
+		"harness_config.list", "harness_config.read", "project.read",
+		"skill.list", "skill.read", "template.list", "template.read",
+		"agent.create", "artifact.read",
+	)
+	for _, role := range []AgentRole{AgentRoleBaseline, AgentRoleFull} {
+		issued := filterScopes(ScopesForRole(role), c, ScopeCeilings{})
+		assert.Contains(t, issued, ScopeProjectArtifactRead, role)
+		assert.NotContains(t, issued, ScopeProjectArtifactWrite, role)
+	}
 }
 
 // TestPreArtifactCeilingChildCannotReadArtifacts follows the token a child
@@ -77,6 +97,8 @@ func TestPreArtifactCeilingChildCannotReadArtifacts(t *testing.T) {
 	_, _, _, ok := host.Principal(ctx)
 	assert.False(t, ok, "the artifact service must not serve the child")
 	assert.False(t, host.Authorize(ctx, agent.ProjectID, artifacts.PermissionRead))
+	assert.False(t, host.Authorize(ctx, agent.ProjectID, artifacts.PermissionCreate))
+	assert.False(t, host.Permits(ctx, agent.ProjectID, artifacts.PermissionCreate))
 }
 
 // TestCeilingOptionalScopesDoNotDecideDelegation: an agent without the

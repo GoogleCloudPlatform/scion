@@ -317,18 +317,6 @@ func TestReincarnateMove_DryRun_DoesNotLinkTargetAsProvider(t *testing.T) {
 	f.assertNoMoveSideEffects(t, count)
 }
 
-func TestReincarnateMove_NonDryRun_Returns501AndAgentUntouched(t *testing.T) {
-	f := setupMoveFixture(t, true, nil)
-	count := f.agentCount(t)
-
-	rec := f.reincarnate(t, ReincarnateAgentRequest{Handoff: "h", TargetBroker: f.dst.ID})
-	require.Equal(t, http.StatusNotImplemented, rec.Code, rec.Body.String())
-	var body ErrorResponse
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
-	assert.Equal(t, ErrCodeNotImplemented, body.Error.Code)
-	f.assertNoMoveSideEffects(t, count)
-}
-
 // An agent not assigned to any broker cannot be moved: --broker is refused
 // with a 400 before the target is resolved, with or without dry run.
 func TestReincarnateMove_UnassignedAgent_Returns400(t *testing.T) {

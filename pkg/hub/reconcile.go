@@ -44,6 +44,12 @@ func (s *Server) ReconcileBroker(ctx context.Context, brokerID string) {
 // runs on the accepting node; the command bus filters by ownsLocally), since the
 // op executors deliver over the local tunnel.
 func (s *Server) reconcileBroker(ctx context.Context, brokerID string) {
+	s.drainBrokerDispatch(ctx, brokerID, nil)
+}
+
+// drainBrokerDispatch is reconcileBroker's dispatch drain, limited to the
+// ops only accepts when only is non-nil.
+func (s *Server) drainBrokerDispatch(ctx context.Context, brokerID string, only func(op string) bool) {
 	if s == nil || s.store == nil || brokerID == "" {
 		return
 	}
@@ -61,6 +67,9 @@ func (s *Server) reconcileBroker(ctx context.Context, brokerID string) {
 	}
 	for i := range dispatches {
 		d := dispatches[i]
+		if only != nil && !only(d.Op) {
+			continue
+		}
 		claimed, err := s.store.ClaimBrokerDispatch(ctx, d.ID, s.instanceID)
 		if err != nil {
 			s.agentLifecycleLog.Error("reconcile: claim dispatch failed", "id", d.ID, "error", err)
@@ -193,6 +202,37 @@ func (s *Server) execDispatchStart(ctx context.Context, d store.BrokerDispatch) 
 // not applied because a newer start or stop superseded it.
 const stopSupersededResult = `{"superseded":true}`
 
+// claimQueuedStop takes the stop-kind claim a queued stop recorded at
+// intentAt is applied under. superseded reports a stop that must not be
+// applied: the intent changed, or a start holds the agent's claim. A claim
+// the stop itself superseded (supersedes, recorded when it was queued) does
+// not block it: the stop is applied without a claim and then releases that
+// claim. release releases the stop claim.
+func (s *Server) claimQueuedStop(ctx context.Context, agent *store.Agent, intentAt time.Time, supersedes string) (release func(), superseded bool) {
+	noop := func() {}
+	claim, err := s.store.ClaimAgentStop(ctx, agent.ID, s.instanceID, intentAt, s.startClaimSettings().LeaseTTL)
+	var held *store.ClaimHeldError
+	switch {
+	case err == nil:
+		return func() {
+			rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), claimReleaseTimeout)
+			defer cancel()
+			if _, err := s.store.ReleaseAgentStart(rctx, agent.ID, claim.ID, s.instanceID); err != nil {
+				s.agentLifecycleLog.Warn("reconcile: releasing the queued stop's claim failed; the reaper will settle it", "agent_id", agent.ID, "error", err)
+			}
+		}, false
+	case errors.As(err, &held) && supersedes != "" && held.ClaimID == supersedes && agent.RunIntentMatches(store.RunIntentStopped, intentAt):
+		return noop, false
+	case errors.Is(err, store.ErrClaimPredicate), errors.As(err, &held):
+		return noop, true
+	default:
+		// The claim could not be read or written: fall back to the intent
+		// check alone.
+		s.agentLifecycleLog.Warn("reconcile: queued stop claim failed; applying on the intent check", "agent_id", agent.ID, "error", err)
+		return noop, !agent.RunIntentMatches(store.RunIntentStopped, intentAt)
+	}
+}
+
 func (s *Server) execDispatchStop(ctx context.Context, d store.BrokerDispatch) (string, error) {
 	agent, err := s.resolveDispatchAgent(ctx, d)
 	if err != nil {
@@ -216,17 +256,19 @@ func (s *Server) execDispatchStop(ctx context.Context, d store.BrokerDispatch) (
 	}
 	// A stop queued while the broker was offline applies only while the
 	// stop intent it was queued for is still the current one; a start or
-	// stop recorded since then supersedes it.
-	//
-	// This is a check, not a lock: a start recorded after this check but
-	// before the broker applies the stop below can still be overtaken by
-	// the stop, which leaves the agent stopped with intent running. The
-	// check only narrows that window to the stop dispatch itself; nothing
-	// in this change acts on a running intent whose agent is stopped.
-	if intentAt != nil && !agent.RunIntentMatches(store.RunIntentStopped, *intentAt) {
-		s.agentLifecycleLog.Info("reconcile: queued stop superseded by a newer run intent; not applied",
-			"id", d.ID, "agent_id", agent.ID, "run_intent", agent.RunIntent)
-		return stopSupersededResult, nil
+	// stop recorded since then supersedes it. The check and the stop
+	// dispatch run under a stop-kind start claim pinned to that intent: a
+	// start cannot claim the agent until the stop is applied, and a start
+	// claimed first wrote a newer intent, so the claim is refused and the
+	// stop is not applied.
+	if intentAt != nil {
+		release, superseded := s.claimQueuedStop(ctx, agent, *intentAt, supersedes)
+		if superseded {
+			s.agentLifecycleLog.Info("reconcile: queued stop superseded by a newer run intent or start; not applied",
+				"id", d.ID, "agent_id", agent.ID, "run_intent", agent.RunIntent)
+			return stopSupersededResult, nil
+		}
+		defer release()
 	}
 	defer s.beginLifecycleOp(agent.ID)()
 	dispatcher := s.GetDispatcher()

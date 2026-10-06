@@ -143,21 +143,21 @@ func BuiltInRoles() []BuiltInRole {
 			Name:        store.ProjectRoleOwner,
 			Description: "Project owner with full project permissions",
 			ScopeType:   store.RoleScopeProject,
-			Revision:    5, // R5: agent.port_access for owners and admins; R4: add gcp_service_account.assign (ptone/scion#2147)
+			Revision:    6, // R6: artifact.read, artifact.create; R5: agent.port_access for owners and admins; R4: add gcp_service_account.assign (ptone/scion#2147)
 			Permissions: projectOwnerPermissionIDs(),
 		},
 		{
 			Name:        store.ProjectRoleAdmin,
 			Description: "Project admin with most project permissions (no delete, no set_message_mode)",
 			ScopeType:   store.RoleScopeProject,
-			Revision:    5, // R5: agent.port_access for owners and admins; R4: add gcp_service_account.assign (ptone/scion#2147)
+			Revision:    6, // R6: artifact.read, artifact.create; R5: agent.port_access for owners and admins; R4: add gcp_service_account.assign (ptone/scion#2147)
 			Permissions: projectAdminPermissionIDs(),
 		},
 		{
 			Name:        store.ProjectRoleMember,
 			Description: "Project member with basic project permissions",
 			ScopeType:   store.RoleScopeProject,
-			Revision:    4, // R4: add gcp_service_account.assign (ptone/scion#2147)
+			Revision:    5, // R5: artifact.read, artifact.create; R4: add gcp_service_account.assign (ptone/scion#2147)
 			Permissions: projectMemberCuratedPermissionIDs(),
 		},
 
@@ -181,14 +181,14 @@ func BuiltInRoles() []BuiltInRole {
 			Name:        store.AgentRoleDefBaseline,
 			Description: "Baseline agent permissions",
 			ScopeType:   store.RoleScopeSystem,
-			Revision:    1,
+			Revision:    2, // R2: artifact.create, artifact.update via project:artifact:write
 			Permissions: agentRolePermissionIDs(AgentRoleBaseline),
 		},
 		{
 			Name:        store.AgentRoleDefFull,
 			Description: "Full agent permissions",
 			ScopeType:   store.RoleScopeSystem,
-			Revision:    1,
+			Revision:    2, // R2: artifact.create, artifact.update via project:artifact:write
 			Permissions: agentRolePermissionIDs(AgentRoleFull),
 		},
 	}
@@ -279,6 +279,12 @@ func hubViewerPermissionIDs() []string {
 // bumped.
 func projectOwnerPermissionIDs() []string {
 	return []string{
+		// Artifacts (pkg/artifacts): read the project's artifacts and
+		// publish new ones homed in the project. Writing to, deleting or
+		// managing grants on an existing artifact belongs to its owner or
+		// an explicit grant, not to project roles (design D7).
+		"artifact.create",
+		"artifact.read",
 		// Agent lifecycle and operations — human control-plane permissions.
 		// Agent-self credential permissions (status_update, log_append,
 		// token_refresh, identity_token, port_forward, notify) are excluded:
@@ -367,6 +373,12 @@ func projectOwnerPermissionIDs() []string {
 // added here and the role revision bumped.
 func projectAdminPermissionIDs() []string {
 	return []string{
+		// Artifacts (pkg/artifacts): read the project's artifacts and
+		// publish new ones homed in the project. Writing to, deleting or
+		// managing grants on an existing artifact belongs to its owner or
+		// an explicit grant, not to project roles (design D7).
+		"artifact.create",
+		"artifact.read",
 		// Agent lifecycle and operations (no delete, no set_message_mode,
 		// no agent-self credential permissions, no attach — see
 		// projectOwnerPermissionIDs for the rationale)
@@ -430,6 +442,12 @@ func projectAdminPermissionIDs() []string {
 // added here and the role revision bumped.
 func projectMemberCuratedPermissionIDs() []string {
 	return []string{
+		// Artifacts (pkg/artifacts): read the project's artifacts and
+		// publish new ones homed in the project. Writing to, deleting or
+		// managing grants on an existing artifact belongs to its owner or
+		// an explicit grant, not to project roles (design D7).
+		"artifact.create",
+		"artifact.read",
 		// Agent operations (create, read, list)
 		"agent.create",
 		"agent.list",
@@ -851,7 +869,9 @@ func agentRolePermissionIDs(role AgentRole) []string {
 //   - project-owner role bindings from Project.CreatedBy (only when the
 //     User.Role step succeeded, preserving the original ordering);
 //   - clearing the legacy Group.OwnerID on project members groups
-//     (ptone/scion#2599), which always runs regardless of earlier failures.
+//     (ptone/scion#2599), which always runs regardless of earlier failures;
+//   - removing role bindings and child-group edges that name a project
+//     members group, which also always runs.
 //
 // Every step is idempotent. Steps do not stop at the first failure: their
 // errors are combined with errors.Join and returned together, and the
@@ -871,79 +891,339 @@ func BackfillRoleBindings(ctx context.Context, s store.Store) error {
 		errs = append(errs, fmt.Errorf("backfill project owner role bindings: %w", err))
 	}
 
+	// The two project members group steps below share one listing of the
+	// members groups. They are independent of the steps above, so they run
+	// even when those fail, and a listing error is joined with theirs
+	// rather than hiding them. If the listing fails part way through, the
+	// groups already listed are still processed and the listing error is
+	// returned afterwards.
+	membersGroups, listErr := listProjectMembersGroups(ctx, s)
+
 	// Clear the legacy Group.OwnerID copied from Project.OwnerID onto
-	// project members groups (ptone/scion#2599). This is security-relevant
-	// (it removes a stale group.* grant) and independent of the steps above,
-	// so it runs even when they fail, and its error is joined with theirs
-	// rather than hiding them.
-	if err := backfillClearProjectMembersGroupOwners(ctx, s); err != nil {
-		errs = append(errs, fmt.Errorf("clear project members group owners: %w", err))
+	// project members groups (ptone/scion#2599); it removes a stale group.*
+	// grant.
+	clearProjectMembersGroupOwners(ctx, s, membersGroups)
+
+	// Remove role bindings and child-group edges that name a project members
+	// group. Each removal is handled independently of the owner clear above.
+	removeProjectMembersGroupReferences(ctx, s, membersGroups)
+
+	if listErr != nil {
+		errs = append(errs, fmt.Errorf("list project members groups: %w", listErr))
 	}
 
 	return errors.Join(errs...)
 }
 
-// projectMembersGroupOwnerBackfillPageSize is the ListGroups page size for
-// backfillClearProjectMembersGroupOwners. It is a package variable, not a
-// const, so tests can shrink it to exercise the pagination loop.
+// projectMembersGroupOwnerBackfillPageSize is the page size used by the
+// project members group startup steps (ListGroups in
+// listProjectMembersGroups and the access constraint scan). It is a package
+// variable, not a const, so tests can shrink it to exercise the pagination
+// loops.
 var projectMembersGroupOwnerBackfillPageSize = 200
 
-// backfillClearProjectMembersGroupOwners clears Group.OwnerID on every
-// project members group (ptone/scion#2599). createProjectMembersGroup used to
-// copy Project.OwnerID into Group.OwnerID, and the owner/user/group
-// relationship row grants group.* to Group.OwnerID, so a creator removed
-// from the project without an ownership transfer kept managing the members
-// group. Project.OwnerID confers no authority (ptone/scion#2586), and the
-// members group is now created without an owner.
+// listProjectMembersGroups pages through all groups and returns the project
+// members groups. Groups are identified by the project-members-group marker
+// annotation (either key, see store.IsProjectMembersGroup), never by slug,
+// so a user-created group with a look-alike slug is never returned.
 //
-// Groups are identified by the project-members-group marker annotation
-// (either key, see store.LegacyAnnotationProjectMembersGroup), never by
-// slug, so a user-created group with a look-alike slug is left untouched.
-// The pass runs on every startup and is idempotent: a group whose OwnerID is
-// already empty is skipped, so a second run changes nothing. Per-group update
-// errors are logged and skipped.
-func backfillClearProjectMembersGroupOwners(ctx context.Context, s store.Store) error {
-	// All groups are scanned rather than filtering by GroupType: the scan is
-	// paginated and cheap, and a type filter could miss legacy group shapes.
+// All groups are scanned rather than filtering by GroupType: the scan is
+// paginated and cheap, and a type filter could miss legacy group shapes.
+//
+// On a listing error it returns the members groups found on the pages
+// already read together with the error, so callers can still process them.
+func listProjectMembersGroups(ctx context.Context, s store.Store) ([]store.Group, error) {
+	var groups []store.Group
 	var cursor string
-	var cleared int
 	for {
-		groups, err := s.ListGroups(ctx, store.GroupFilter{}, store.ListOptions{
+		page, err := s.ListGroups(ctx, store.GroupFilter{}, store.ListOptions{
 			Limit:          projectMembersGroupOwnerBackfillPageSize,
 			Cursor:         cursor,
 			SkipTotalCount: true,
 		})
 		if err != nil {
-			return fmt.Errorf("list groups for members group owner backfill: %w", err)
+			return groups, fmt.Errorf("list groups: %w", err)
 		}
-
-		for i := range groups.Items {
-			g := &groups.Items[i]
-			if g.OwnerID == "" || !hasProjectMembersGroupMarker(g) {
-				continue
+		for i := range page.Items {
+			if hasProjectMembersGroupMarker(&page.Items[i]) {
+				groups = append(groups, page.Items[i])
 			}
-			prevOwner := g.OwnerID
-			g.OwnerID = ""
-			if err := s.UpdateGroup(ctx, g); err != nil {
-				slog.Warn("failed to clear project members group owner during backfill",
-					"group_id", g.ID, "project_id", g.ProjectID, "error", err)
-				continue
-			}
-			slog.Info("cleared project members group owner",
-				"group_id", g.ID, "project_id", g.ProjectID, "previous_owner_id", prevOwner)
-			cleared++
 		}
+		if page.NextCursor == "" {
+			return groups, nil
+		}
+		cursor = page.NextCursor
+	}
+}
 
-		if groups.NextCursor == "" {
-			break
+// clearProjectMembersGroupOwners clears Group.OwnerID on every given project
+// members group (ptone/scion#2599). createProjectMembersGroup used to copy
+// Project.OwnerID into Group.OwnerID, and the owner/user/group relationship
+// row grants group.* to Group.OwnerID, so a creator removed from the project
+// without an ownership transfer kept managing the members group.
+// Project.OwnerID confers no authority (ptone/scion#2586), and the members
+// group is now created without an owner.
+//
+// The pass runs on every startup and is idempotent: a group whose OwnerID is
+// already empty is skipped, so a second run changes nothing. Each group with
+// an owner in the listing is read again with GetGroup just before the update,
+// so the update writes back current values for the other fields rather than
+// the listing snapshot. Per-group read and update errors are logged and
+// skipped.
+func clearProjectMembersGroupOwners(ctx context.Context, s store.Store, groups []store.Group) {
+	var cleared int
+	for i := range groups {
+		if groups[i].OwnerID == "" {
+			continue
 		}
-		cursor = groups.NextCursor
+		g, err := s.GetGroup(ctx, groups[i].ID)
+		if errors.Is(err, store.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			slog.Warn("failed to read project members group during owner backfill",
+				"group_id", groups[i].ID, "project_id", groups[i].ProjectID, "error", err)
+			continue
+		}
+		if g.OwnerID == "" || !hasProjectMembersGroupMarker(g) {
+			continue
+		}
+		prevOwner := g.OwnerID
+		g.OwnerID = ""
+		if err := s.UpdateGroup(ctx, g); err != nil {
+			slog.Warn("failed to clear project members group owner during backfill",
+				"group_id", g.ID, "project_id", g.ProjectID, "error", err)
+			continue
+		}
+		slog.Info("cleared project members group owner",
+			"group_id", g.ID, "project_id", g.ProjectID, "previous_owner_id", prevOwner)
+		cleared++
 	}
 
 	if cleared > 0 {
 		slog.Info("cleared project members group owners", "cleared", cleared)
 	}
-	return nil
+}
+
+// membersGroupReferenceRemovedOp is the mutation audit MutationType written by
+// removeProjectMembersGroupReferences for each removed role binding or
+// child-group edge.
+const membersGroupReferenceRemovedOp = "members_group_principal_removed"
+
+// removeProjectMembersGroupReferences removes existing role bindings and
+// child-group edges that name one of the given project members groups.
+//
+// Project members groups are system-managed: they are not valid role-binding
+// principals or child groups, and the store already refuses new writes of
+// either kind (store.ErrProjectMembersGroupPrincipal). Rows written before
+// that rule, or by an older replica during a rolling upgrade, are removed
+// here. For each project members group:
+//   - every role binding with that group as principal, at any scope, is
+//     deleted;
+//   - every edge that makes it a direct child of a group (including itself)
+//     is removed;
+//   - access constraints (group_closure subject, or the legacy principal
+//     subject of type group) and entitlement bindings (group subject) that
+//     name it are counted and logged only; they are left in place.
+//
+// Each removal writes a mutation audit record (actor
+// store.SystemReconcileCreatedBy, op membersGroupReferenceRemovedOp) in the
+// same transaction and is logged at WARN. A row that is already gone when its
+// transaction runs (removed concurrently by another replica) is skipped
+// without an audit record. Other per-item errors are logged and skipped. The
+// pass runs on every startup (no one-shot marker) and is idempotent: a
+// second run finds nothing to remove.
+func removeProjectMembersGroupReferences(ctx context.Context, s store.Store, groups []store.Group) {
+	if len(groups) == 0 {
+		return
+	}
+	constraintCounts := countAccessConstraintsByGroup(ctx, s)
+
+	var removedBindings, removedEdges int
+	for i := range groups {
+		groupID := groups[i].ID
+		removedBindings += removeProjectMembersGroupRoleBindings(ctx, s, groupID)
+		removedEdges += removeProjectMembersGroupParentEdges(ctx, s, groupID)
+		warnProjectMembersGroupConstraintReferences(ctx, s, groupID, constraintCounts)
+	}
+
+	if removedBindings > 0 || removedEdges > 0 {
+		slog.Warn("removed project members group references",
+			"role_bindings_removed", removedBindings, "child_group_edges_removed", removedEdges)
+	}
+}
+
+// membersGroupReferenceAudit builds the mutation audit record for a removed
+// members group reference.
+func membersGroupReferenceAudit(targetType, targetID string, before map[string]string) *store.MutationAuditRecord {
+	summary, _ := json.Marshal(before)
+	return &store.MutationAuditRecord{
+		Timestamp:          time.Now().UTC(),
+		MutationType:       membersGroupReferenceRemovedOp,
+		ActorPrincipalKind: "system",
+		ActorPrincipalID:   store.SystemReconcileCreatedBy,
+		TargetType:         targetType,
+		TargetID:           targetID,
+		BeforeSummary:      string(summary),
+		AfterSummary:       "removed",
+	}
+}
+
+// removeProjectMembersGroupRoleBindings deletes every role binding whose
+// principal is the given members group, at any scope, and returns how many
+// were removed.
+func removeProjectMembersGroupRoleBindings(ctx context.Context, s store.Store, groupID string) int {
+	bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalGroup, groupID)
+	if err != nil {
+		slog.Warn("failed to list role bindings for project members group",
+			"group_id", groupID, "error", err)
+		return 0
+	}
+
+	removed := 0
+	for _, rb := range bindings {
+		if rb == nil {
+			continue
+		}
+		role := rb.RoleDefinitionID
+		if rd, err := s.GetRoleDefinition(ctx, rb.RoleDefinitionID); err == nil {
+			role = rd.Name
+		}
+		fields := map[string]string{
+			"group_id":           groupID,
+			"binding_id":         rb.ID,
+			"role":               role,
+			"role_definition_id": rb.RoleDefinitionID,
+			"scope_type":         rb.ScopeType,
+			"scope_id":           rb.ScopeID,
+			"created_by":         rb.CreatedBy,
+		}
+		err := s.WithTx(ctx, func(tx store.Store) error {
+			if err := tx.DeleteRoleBinding(ctx, rb.ID); err != nil {
+				return err
+			}
+			return tx.CreateMutationAudit(ctx, membersGroupReferenceAudit("role_binding", rb.ID, fields))
+		})
+		if errors.Is(err, store.ErrNotFound) {
+			slog.Debug("role binding that names a project members group was already removed",
+				"group_id", groupID, "binding_id", rb.ID)
+			continue
+		}
+		if err != nil {
+			slog.Warn("failed to remove role binding that names a project members group",
+				"group_id", groupID, "binding_id", rb.ID, "error", err)
+			continue
+		}
+		slog.Warn("removed role binding that names a project members group",
+			"group_id", groupID, "binding_id", rb.ID, "role", role,
+			"role_definition_id", rb.RoleDefinitionID, "scope_type", rb.ScopeType,
+			"scope_id", rb.ScopeID, "created_by", rb.CreatedBy)
+		removed++
+	}
+	return removed
+}
+
+// removeProjectMembersGroupParentEdges removes every edge that makes the given
+// members group a direct child of a group (a self-edge included) and returns
+// how many were removed. The audit record follows the group_member_remove
+// convention: target type group_membership, target ID the parent group.
+func removeProjectMembersGroupParentEdges(ctx context.Context, s store.Store, groupID string) int {
+	parents, err := s.GetDirectParentGroupIDs(ctx, groupID)
+	if err != nil {
+		slog.Warn("failed to list parent groups for project members group",
+			"group_id", groupID, "error", err)
+		return 0
+	}
+
+	removed := 0
+	for _, parentID := range parents {
+		fields := map[string]string{
+			"groupId":    parentID,
+			"memberType": store.GroupMemberTypeGroup,
+			"memberId":   groupID,
+		}
+		err := s.WithTx(ctx, func(tx store.Store) error {
+			// RemoveChildGroupEdge returns ErrNotFound when it deletes no
+			// row, so an edge removed by another replica after it was
+			// listed rolls back with no audit record.
+			if err := tx.RemoveChildGroupEdge(ctx, parentID, groupID); err != nil {
+				return err
+			}
+			return tx.CreateMutationAudit(ctx, membersGroupReferenceAudit("group_membership", parentID, fields))
+		})
+		if errors.Is(err, store.ErrNotFound) {
+			slog.Debug("child group edge that names a project members group was already removed",
+				"group_id", groupID, "parent_group_id", parentID)
+			continue
+		}
+		if err != nil {
+			slog.Warn("failed to remove child group edge that names a project members group",
+				"group_id", groupID, "parent_group_id", parentID, "error", err)
+			continue
+		}
+		slog.Warn("removed child group edge that names a project members group",
+			"group_id", groupID, "parent_group_id", parentID)
+		removed++
+	}
+	return removed
+}
+
+// countAccessConstraintsByGroup pages once through all access constraints and
+// returns, per group ID, how many name that group as their subject: either a
+// group_closure subject or a legacy principal subject of type group. On a
+// listing error it logs and returns the counts gathered so far.
+func countAccessConstraintsByGroup(ctx context.Context, s store.Store) map[string]int {
+	counts := map[string]int{}
+	var token string
+	for {
+		page, next, _, err := s.ListAccessConstraintsFiltered(ctx, store.AccessConstraintListOptions{
+			PageSize:  projectMembersGroupOwnerBackfillPageSize,
+			PageToken: token,
+		})
+		if err != nil {
+			slog.Warn("failed to list access constraints for project members groups", "error", err)
+			return counts
+		}
+		for _, c := range page {
+			if c == nil {
+				continue
+			}
+			switch c.SubjectKind {
+			case store.ConstraintSubjectGroupClosure:
+				if c.SubjectGroupID != nil {
+					counts[*c.SubjectGroupID]++
+				}
+			case store.ConstraintSubjectPrincipal:
+				//nolint:staticcheck // SA1019: the deprecated constant is kept for reading legacy rows, as here.
+				if c.SubjectPrincipalType != nil && *c.SubjectPrincipalType == store.ConstraintPrincipalTypeGroup &&
+					c.SubjectPrincipalID != nil {
+					counts[*c.SubjectPrincipalID]++
+				}
+			}
+		}
+		if next == "" || len(page) == 0 {
+			return counts
+		}
+		token = next
+	}
+}
+
+// warnProjectMembersGroupConstraintReferences logs, without changing them,
+// the access constraints (counted in constraintCounts) and the entitlement
+// bindings with a group subject that name the given members group.
+func warnProjectMembersGroupConstraintReferences(ctx context.Context, s store.Store, groupID string, constraintCounts map[string]int) {
+	constraints := constraintCounts[groupID]
+
+	entitlements, err := s.ListEntitlementBindingsForSubject(ctx, store.EntitlementSubjectGroup, groupID)
+	if err != nil {
+		slog.Warn("failed to list entitlement bindings for project members group",
+			"group_id", groupID, "error", err)
+	}
+
+	if constraints > 0 || len(entitlements) > 0 {
+		slog.Warn("access constraints or entitlement bindings name a project members group; left unchanged",
+			"group_id", groupID, "access_constraints", constraints, "entitlement_bindings", len(entitlements))
+	}
 }
 
 // backfillUserRoleBindings brings hub-level grants in line with User.Role for
