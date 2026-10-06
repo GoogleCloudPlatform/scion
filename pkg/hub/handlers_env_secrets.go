@@ -1457,7 +1457,9 @@ func (s *Server) agentGetSecret(w http.ResponseWriter, r *http.Request, agentID,
 //
 // Applies the whole-request checks 1-6 precheck, then filters metadata: it
 // reads no value and has no check-9 step. It lists only keys the agent could
-// read.
+// read: a GitHub credential key is left out for an agent without the
+// allowance (gitCredentialKeyDenied), exactly as if it did not exist, the
+// same answer the fetch and get endpoints give for it.
 func (s *Server) agentListSecrets(w http.ResponseWriter, r *http.Request, agentID string) {
 	ctx := r.Context()
 
@@ -1540,6 +1542,13 @@ func (s *Server) agentListSecrets(w http.ResponseWriter, r *http.Request, agentI
 				if m.SecretType == store.SecretTypeInternal {
 					continue
 				}
+				if gitCredentialKeyDenied(facts, m.Name) {
+					items = append(items, materialSelectionItem(ItemResult{
+						Candidate: Candidate{Kind: MaterialKindSecret, Key: m.Name, Scope: store.ScopeProject, ScopeID: facts.ProjectID, Grant: GrantProjectSecretRead},
+						Reason:    ReasonGitCredentialNotAllowed,
+					}, "project.secret_read", ""))
+					continue
+				}
 				secrets = append(secrets, AgentSecretMeta{Key: m.Name, Type: m.SecretType, Target: m.Target})
 				items = append(items, materialSelectionItem(ItemResult{
 					Candidate: Candidate{Kind: MaterialKindSecret, Key: m.Name, Scope: store.ScopeProject, ScopeID: facts.ProjectID, Grant: GrantProjectSecretRead, Meta: m},
@@ -1579,6 +1588,13 @@ func (s *Server) agentListSecrets(w http.ResponseWriter, r *http.Request, agentI
 				continue
 			}
 			if !m.AllowProgeny || !eligible[m.ID] {
+				continue
+			}
+			if gitCredentialKeyDenied(facts, m.Name) {
+				items = append(items, materialSelectionItem(ItemResult{
+					Candidate: Candidate{Kind: MaterialKindSecret, Key: m.Name, Scope: store.ScopeUser, ScopeID: facts.Root.ID, Grant: GrantProgeny},
+					Reason:    ReasonGitCredentialNotAllowed,
+				}, "", ""))
 				continue
 			}
 			live, kind, _, lerr := s.progenySourceLive(ctx, m)

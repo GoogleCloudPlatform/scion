@@ -209,11 +209,10 @@ func TestAgentSecretRead_GitCredentialKeys_RefusedBeforeBackendRead(t *testing.T
 	}
 }
 
-// TestAgentListSecrets_NamesOnly pins that the agent secret list endpoint,
-// which is not value-gated, carries no secret value for any key, including
-// a GitHub credential key, for an agent without the allowance.
+// TestAgentListSecrets_NamesOnly pins that the agent secret list endpoint
+// carries no secret value for any key.
 func TestAgentListSecrets_NamesOnly(t *testing.T) {
-	f := gitCredentialSecretFixture(t, "git-cred-list", &store.AgentAppliedConfig{})
+	f := gitCredentialSecretFixture(t, "git-cred-list", &store.AgentAppliedConfig{AllowGitCredentials: true})
 	seedSecret(t, f.Server.secretBackend, "GITHUB_TOKEN", "fake-token-value", "", "", f.ProjectID)
 
 	rec := doRequestWithAgentToken(t, f.Server, http.MethodGet, "/api/v1/agents/"+f.AgentID+"/secrets", nil, f.Token)
@@ -223,8 +222,72 @@ func TestAgentListSecrets_NamesOnly(t *testing.T) {
 		Secrets []map[string]any `json:"secrets"`
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &raw))
+	require.NotEmpty(t, raw.Secrets)
 	for _, item := range raw.Secrets {
 		require.NotContains(t, item, "value", "list item %v", item)
+	}
+}
+
+// TestAgentListSecrets_GitCredentialKeys_RequireAllowance pins that the list
+// leaves out GitHub credential keys (any case, project and user scope) for an
+// agent without the allowance, so its response is byte-identical whether or
+// not such keys exist, and that an allowed agent still sees them.
+func TestAgentListSecrets_GitCredentialKeys_RequireAllowance(t *testing.T) {
+	seedCreds := func(t *testing.T, f *materialFixture) {
+		t.Helper()
+		seedSecret(t, f.Server.secretBackend, "GITHUB_TOKEN", "fake-token", "", "", f.ProjectID)
+		seedSecret(t, f.Server.secretBackend, "gh_org", "fake-org", "", "", f.ProjectID)
+		_, _, err := f.Server.secretBackend.Set(context.Background(), &secret.SetSecretInput{
+			Name: "GH_USER_CRED", Value: "fake-user-cred", SecretType: store.SecretTypeEnvironment, Target: "GH_USER_CRED",
+			Scope: store.ScopeUser, ScopeID: f.UserID, AllowProgeny: true, CreatedBy: f.UserID, UpdatedBy: f.UserID,
+		})
+		require.NoError(t, err)
+	}
+	seedPlain := func(t *testing.T, f *materialFixture) {
+		t.Helper()
+		seedSecret(t, f.Server.secretBackend, "OTHER_SETTING", "fake-other", "", "", f.ProjectID)
+		_, _, err := f.Server.secretBackend.Set(context.Background(), &secret.SetSecretInput{
+			Name: "USER_SETTING", Value: "fake-user-setting", SecretType: store.SecretTypeEnvironment, Target: "USER_SETTING",
+			Scope: store.ScopeUser, ScopeID: f.UserID, AllowProgeny: true, CreatedBy: f.UserID, UpdatedBy: f.UserID,
+		})
+		require.NoError(t, err)
+	}
+	list := func(t *testing.T, f *materialFixture, scope string) string {
+		t.Helper()
+		path := "/api/v1/agents/" + f.AgentID + "/secrets"
+		if scope != "" {
+			path += "?scope=" + scope
+		}
+		rec := doRequestWithAgentToken(t, f.Server, http.MethodGet, path, nil, f.Token)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		return rec.Body.String()
+	}
+
+	// List items carry only key, type and target, so two fixtures seeded
+	// with the same keys give byte-identical bodies.
+	for _, applied := range map[string]*store.AgentAppliedConfig{"unset": {}, "nil-applied-config": nil} {
+		without := gitCredentialSecretFixture(t, "git-cred-list-hide", applied)
+		seedPlain(t, without)
+		with := gitCredentialSecretFixture(t, "git-cred-list-hide", applied)
+		seedPlain(t, with)
+		seedCreds(t, with)
+		for _, scope := range []string{"", "project", "user"} {
+			got := list(t, with, scope)
+			require.Equal(t, list(t, without, scope), got, "scope=%q: list must not change when refused keys exist", scope)
+			for _, k := range []string{"GITHUB_TOKEN", "gh_org", "GH_USER_CRED"} {
+				require.NotContains(t, got, k, "scope=%q", scope)
+			}
+		}
+		require.Contains(t, list(t, with, ""), "OTHER_SETTING")
+		require.Contains(t, list(t, with, ""), "USER_SETTING")
+	}
+
+	allowed := gitCredentialSecretFixture(t, "git-cred-list-allowed", &store.AgentAppliedConfig{AllowGitCredentials: true})
+	seedPlain(t, allowed)
+	seedCreds(t, allowed)
+	got := list(t, allowed, "")
+	for _, k := range []string{"GITHUB_TOKEN", "gh_org", "GH_USER_CRED", "OTHER_SETTING", "USER_SETTING"} {
+		require.Contains(t, got, k)
 	}
 }
 
