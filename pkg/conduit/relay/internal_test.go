@@ -545,7 +545,7 @@ func TestBridgeCloseWaitAfterDrainDeadline(t *testing.T) {
 	if f := readHopFrame(t, c); f.GetStreamAccept() == nil {
 		t.Fatalf("first frame %v, want stream_accept", f)
 	}
-	if err := p.a.Relay.GoAway(p.rec.SessionID, conduit.GoAwayOptions{Reason: "test", DrainDeadline: drain}); err != nil {
+	if err := p.a.Relay.GoAway(context.Background(), p.rec.SessionID, conduit.GoAwayOptions{Reason: "test", DrainDeadline: drain}); err != nil {
 		t.Fatal(err)
 	}
 	p.a.Clock.Advance(drain)
