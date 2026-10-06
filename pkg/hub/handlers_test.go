@@ -67,17 +67,7 @@ func testServerWithStore(t *testing.T, s store.Store) (*Server, store.Store) {
 	// post-backfill behavior re-create the marker explicitly.
 	_ = s.DeleteHubSetting(context.Background(), "migration_delegation_edge_backfill_v1")
 
-	cfg := DefaultServerConfig()
-	cfg.DevAuthToken = testDevToken // Enable dev auth for testing
-	// Never build real Cloud Logging clients from an ambient GCP project
-	// env var (ptone/scion#3188).
-	cfg.DisableCloudLogQuery = true
-	cfg.DevUserConfig = DevUserConfig{
-		Username:    "dev",
-		DisplayName: "Development User",
-		Email:       "dev@localhost",
-	}
-	srv, err := New(cfg, s)
+	srv, err := New(testServerConfig(), s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
@@ -89,7 +79,35 @@ func testServerWithStore(t *testing.T, s store.Store) (*Server, store.Store) {
 		_ = srv.Shutdown(context.Background())
 		_ = s.Close() // Release in-memory SQLite database to avoid OOM across many tests.
 	})
+	waitUserScopedDataSweep(t, srv)
 	return srv, s
+}
+
+// testServerConfig is the server config testServerWithStore passes to New().
+func testServerConfig() ServerConfig {
+	cfg := DefaultServerConfig()
+	cfg.DevAuthToken = testDevToken // Enable dev auth for testing
+	// Never build real Cloud Logging clients from an ambient GCP project
+	// env var (ptone/scion#3188).
+	cfg.DisableCloudLogQuery = true
+	cfg.DevUserConfig = DevUserConfig{
+		Username:    "dev",
+		DisplayName: "Development User",
+		Email:       "dev@localhost",
+	}
+	return cfg
+}
+
+// waitUserScopedDataSweep waits for the startup sweep New() starts in the
+// background to end. The sweep reads srv.store, so a test helper calls this
+// before returning a server whose srv.store a test may replace.
+func waitUserScopedDataSweep(t testing.TB, srv *Server) {
+	t.Helper()
+	select {
+	case <-srv.userScopedDataSweepDone:
+	case <-time.After(time.Minute):
+		t.Fatal("startup sweep of user-scope data did not finish")
+	}
 }
 
 // doRequest performs an HTTP request against the test server.

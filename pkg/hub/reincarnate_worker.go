@@ -174,7 +174,8 @@ func (s *Server) updateReincarnationStep(ctx context.Context, agentID string, up
 
 // copyBrokerEcho copies the fields a broker answer writes onto the
 // dispatched agent's AppliedConfig from src to dst: HarnessConfig,
-// HarnessAuth, Profile and, when includeImage is set, Image.
+// HarnessAuth, HarnessConfigSource, Profile and, when includeImage is set,
+// Image.
 // applyBrokerAgentConfig (httpdispatcher.go) is the source of truth for that
 // field list; TestCopyBrokerEcho_MirrorsApplyBrokerAgentConfig fails if it
 // starts writing an AppliedConfig field this helper does not copy.
@@ -190,6 +191,9 @@ func copyBrokerEcho(dst, src *store.AgentAppliedConfig, includeImage bool) {
 	}
 	if src.HarnessAuth != "" {
 		dst.HarnessAuth = src.HarnessAuth
+	}
+	if src.HarnessConfigSource != "" {
+		dst.HarnessConfigSource = src.HarnessConfigSource
 	}
 	if src.Profile != "" {
 		dst.Profile = src.Profile
@@ -676,8 +680,9 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 		return
 	}
 
-	// Take the reprovision echo (HarnessConfig, HarnessAuth, Profile) into
-	// fresh, so the starting step's write below persists it, the same as
+	// Take the reprovision echo (HarnessConfig, HarnessAuth,
+	// HarnessConfigSource, Profile) into fresh, so the starting step's
+	// write below persists it, the same as
 	// create. The echoed image is deliberately NOT taken: the broker's
 	// provision-only response reports the rendered config's image
 	// (runtimebroker handlers.go, agentResp.Image = cfg.Image), before the

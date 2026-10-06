@@ -113,6 +113,7 @@ func bypassAgentsServer(t *testing.T) (*Server, store.Store) {
 	require.NoError(t, err)
 	srv.SetHubID("test-hub-id")
 	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
+	waitUserScopedDataSweep(t, srv)
 	return srv, s
 }
 
