@@ -430,7 +430,9 @@ export class AgentStore {
   private feedHoldsHubSet = false;
   /**
    * Agents deleted on earlier feeds: a later feed's walks and probes must
-   * not bring them back. A restore the feed reports clears one.
+   * not bring them back. A restore the feed reports clears one; a restore
+   * while no feed is open goes unseen, and the agent stays hidden until a
+   * reload.
    */
   private readonly carriedTombstones = new Set<string>();
   /** Agent ids whose single-agent read is in flight on the current feed. */
@@ -1247,7 +1249,8 @@ export class AgentStore {
     }) as EventListener;
     // Agent ids are not reused: a restore is the one way a deleted agent
     // comes back, and it is never inferred from a listing, which can still
-    // show an agent while its delete completes.
+    // show an agent while its delete completes. The restore mark is subject
+    // to the replay limit documented in state.ts.
     const onCreated = ((event: CustomEvent<{ data: { agentId: string; restored?: boolean } }>) => {
       if (this.feed === feed && event.detail.data.restored) {
         this.carriedTombstones.delete(event.detail.data.agentId);
