@@ -443,10 +443,16 @@ func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, opts St
 		return errors.New("no dispatcher")
 	}
 	// Flat placement pre-check, before the start claim, the capacity
-	// hold, the run intent and any credential or run-ID write. A
-	// caller's hold is undone (nil-safe).
+	// hold, the run intent and any credential or run-ID write. What the
+	// caller already holds is undone: its capacity hold (nil-safe) and its
+	// start claim (a restart's, taken before its stop leg), which nothing
+	// else will finish. It is released, whatever the error: no start of
+	// this leg was dispatched, so none can be running.
 	if err := s.checkPinnedPlacement(agent); err != nil {
 		opts.Dispatch.rollback(ctx)
+		if opts.Existing != nil {
+			opts.Existing.finish(startReleased)
+		}
 		return err
 	}
 	provisioned := agent.Phase == string(state.PhaseCreated) || agent.Phase == string(state.PhaseProvisioning)

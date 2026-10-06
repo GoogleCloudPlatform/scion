@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -27,6 +28,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 func brokerMismatchErr(status int, brokerID string) *brokerStatusError {
@@ -118,4 +120,49 @@ func TestFlatLifecycle_RefusalSettlesMessage(t *testing.T) {
 			assert.Equal(t, "refused by the Runtime Broker", got.Message)
 		})
 	}
+}
+
+// stopLegFaultStore fails the Runtime Broker read for brokerID once the
+// mock client has seen a stop: the restart's start-leg placement check
+// then fails after the stop leg ran, with the restart's claim held.
+type stopLegFaultStore struct {
+	store.Store
+	client   *mockRuntimeBrokerClient
+	brokerID string
+}
+
+func (s *stopLegFaultStore) GetRuntimeBroker(ctx context.Context, id string) (*store.RuntimeBroker, error) {
+	if id == s.brokerID && s.client.stopCalled {
+		return nil, errors.New("injected broker read failure")
+	}
+	return s.Store.GetRuntimeBroker(ctx, id)
+}
+
+// TestFlatRestart_StartLegPlacementRefusalReleasesClaim: when the start
+// leg's placement check (startAgentCore) fails after the stop leg, the
+// restart's start claim is settled, not left renewing: the row holds no
+// claim and a following start is not refused with start_in_progress.
+func TestFlatRestart_StartLegPlacementRefusalReleasesClaim(t *testing.T) {
+	ctx := context.Background()
+	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
+	require.True(t, f.srv.startClaimsEnabled())
+	a := f.pinnedAgent(t, "restart-claim", string(state.PhaseRunning))
+	real := f.srv.store
+	f.srv.store = &stopLegFaultStore{Store: real, client: f.client, brokerID: f.flat.ID}
+
+	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/restart", nil)
+	require.True(t, f.client.stopCalled, "the stop leg ran")
+	assert.False(t, f.client.startCalled, "the start leg was refused before dispatch")
+	assert.GreaterOrEqual(t, rec.Code, 400, rec.Body.String())
+
+	f.srv.store = real
+	got, err := real.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Empty(t, got.StartClaimID, "the restart's claim is released")
+	assert.Empty(t, string(got.StartClaimState))
+
+	f.client.stopCalled = false
+	rec = doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/start", nil)
+	assert.NotContains(t, rec.Body.String(), "start_in_progress", "a following start is not held off by a leaked claim")
+	assert.Less(t, rec.Code, 300, rec.Body.String())
 }
