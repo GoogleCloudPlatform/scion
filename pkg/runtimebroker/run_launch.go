@@ -265,14 +265,25 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 	if lc.downloadWorkspaceFromGCS != nil {
 		download = lc.downloadWorkspaceFromGCS
 	}
-	opts, _, _, dlErr := download(ctx, lc.req, lc.opts)
+	opts, _, dlMessage, dlErr := download(ctx, lc.req, lc.opts)
 	if dlErr != nil {
 		if locallyCancelled(ctx) {
 			// Same rule as Start's local-cancel case below: keyed on ctx',
 			// not on the error the download returned.
 			return
 		}
-		s.failLaunch(ctx, sender, rec, lc, alreadyCompleted, currentStep, "runtime_error", dlErr.Error())
+		// A runtime failure reports the synchronous path's fixed client
+		// text (dlMessage), never dlErr's own text, which names the
+		// workspace path or GCS detail; the download step has logged the
+		// cause (ptone/scion#3496). The invalid-directory and
+		// unconfigured-bucket refusals are normally answered at admission
+		// (beginAsyncLaunch); if one is only found here, it still reports
+		// dlErr's text, as before.
+		msg := dlMessage
+		if errors.Is(dlErr, errInvalidWorkspaceDir) || errors.Is(dlErr, errWorkspaceStorageUnconfigured) {
+			msg = dlErr.Error()
+		}
+		s.failLaunch(ctx, sender, rec, lc, alreadyCompleted, currentStep, "runtime_error", msg)
 		return
 	}
 	lc.opts = opts
