@@ -3514,12 +3514,16 @@ func TestConfigureSharedWorkspaceGit_EnforcedRefusesWithoutUsableUID(t *testing.
 // both write into a 0700 t.TempDir owned by the test process. A dropped
 // child therefore never produces its file: as non-root, the Credential exec
 // itself fails with EPERM; as root, the dropped child cannot write into the
-// directory. An undropped child always can. "drop" is only inferred from
-// that expected failure (EPERM at start, or a nonzero exit as root); any
-// other outcome fails the test rather than being read as a drop. getuid is
-// stubbed to 0 for
+// directory. An undropped child always can. getuid is stubbed to 0 for
 // configureGitCommand so a non-root test process takes the same root-init
 // path production does.
+//
+// On the supervisor side, "drop" is only inferred from that expected failure
+// (EPERM at start, or a nonzero exit as root); any other outcome fails the
+// test. On the git side, init only logs git failures, so "drop" is inferred
+// from a missing .gitconfig. That cannot tell a dropped write from a skipped
+// one; TestConfigureSharedWorkspaceGit_UsablePairWritesConfig and
+// TestConfigureGitCommand_RootInitSetsWorkloadCredential cover that half.
 func TestConfigureSharedWorkspaceGit_FollowsSupervisorDropDecision(t *testing.T) {
 	if os.Getuid() == 4242 {
 		t.Skip("test process uid collides with the workload uid used here")
@@ -3599,6 +3603,34 @@ func TestConfigureSharedWorkspaceGit_FollowsSupervisorDropDecision(t *testing.T)
 				if got := gitConfigGet(t, filepath.Join(agentHome, ".gitconfig"), "user.email"); got != "agent@scion.dev" {
 					t.Errorf("user.email = %q, want agent@scion.dev", got)
 				}
+			}
+		})
+	}
+}
+
+// TestConfigureSharedWorkspaceGit_UsablePairWritesConfig pins that a usable
+// uid/gid pair actually writes the shared .gitconfig, rather than skipping
+// it. The pair is the test process's own identity, so configureGitCommand
+// sets no Credential and git runs unprivileged as this process; a skipped
+// write would leave no file. Skipped when the test process uid or gid is 0,
+// because that is not a usable pair.
+func TestConfigureSharedWorkspaceGit_UsablePairWritesConfig(t *testing.T) {
+	uid, gid := os.Getuid(), os.Getgid()
+	if uid <= 0 || gid <= 0 {
+		t.Skipf("test process uid/gid %d/%d is not a usable pair", uid, gid)
+	}
+	for _, enforced := range []bool{false, true} {
+		t.Run(fmt.Sprintf("enforced=%v", enforced), func(t *testing.T) {
+			agentHome := t.TempDir()
+			if err := configureSharedWorkspaceGit(agentHome, uid, gid, enforced); err != nil {
+				t.Fatalf("configureSharedWorkspaceGit: %v", err)
+			}
+			gitconfig := filepath.Join(agentHome, ".gitconfig")
+			if got := gitConfigGet(t, gitconfig, "user.email"); got != "agent@scion.dev" {
+				t.Errorf("user.email = %q, want agent@scion.dev", got)
+			}
+			if got := gitConfigGet(t, gitconfig, "credential.helper"); got == "" {
+				t.Error("credential.helper not written")
 			}
 		})
 	}
