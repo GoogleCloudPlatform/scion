@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 
@@ -410,6 +411,11 @@ func TestListRowReadCeiling(t *testing.T) {
 	notRow.ListRow = false
 	project := row
 	project.Resource = Resource{Type: "project", ID: "p1"}
+	updateRow := row
+	updateRow.Action = ActionUpdate
+	noParent := row
+	noParent.Resource = Resource{Type: "agent"}
+	emptyBound := &TokenBoundary{Kind: BoundaryKindProject}
 
 	for _, c := range []struct {
 		name     string
@@ -428,8 +434,120 @@ func TestListRowReadCeiling(t *testing.T) {
 		{"other permission", row, "agent.update", hub, ceil("agent.list"), false},
 		{"other resource", project, "agent.read", hub, ceil("agent.list"), false},
 		{"unknown ceiling version", row, "agent.read", hub, permissions.FrozenPermissionCeiling{Version: 99, PermissionIDs: []string{"agent.list"}}, false},
+		{"action not read", updateRow, "agent.read", hub, ceil("agent.list"), false},
+		{"agent.list with no boundary", row, "agent.read", nil, ceil("agent.list"), true},
+		{"project.read with no boundary", row, "agent.read", nil, ceil("project.read"), false},
+		{"project.read, empty boundary project, no parent", noParent, "agent.read", emptyBound, ceil("project.read"), false},
+		{"ceiling already holds agent.read", row, "agent.read", hub, ceil("agent.read"), true},
 	} {
 		got := listRowReadCeiling(c.request, c.perm, c.boundary, c.ceiling).Allows("agent.read")
 		assert.Equal(t, c.want, got, c.name)
 	}
+
+	// A ceiling that already allows agent.read comes back unchanged.
+	held := ceil("agent.read", "agent.list")
+	assert.Equal(t, held, listRowReadCeiling(row, "agent.read", hub, held))
+
+	// Widening never writes into the caller's PermissionIDs backing array,
+	// even when it has spare capacity.
+	backing := make([]string, 4)
+	backing[0], backing[1] = "agent.list", "sentinel"
+	input := ceil()
+	input.PermissionIDs = backing[:1]
+	widened := listRowReadCeiling(row, "agent.read", hub, input)
+	assert.True(t, widened.Allows("agent.read"))
+	assert.Equal(t, []string{"agent.list"}, input.PermissionIDs, "input slice unchanged")
+	assert.Equal(t, "sentinel", backing[1], "input backing array unchanged")
+}
+
+// TestListRowReadCeiling_ActionAndBoundaryProjectChecks fails if either
+// the Action check or the boundary.ProjectID check is dropped from
+// listRowReadCeiling: every other condition holds in each case, so only
+// that one check keeps agent.read out.
+func TestListRowReadCeiling_ActionAndBoundaryProjectChecks(t *testing.T) {
+	ceiling := permissions.FrozenPermissionCeiling{Version: permissions.CeilingVersionV1, PermissionIDs: []string{"agent.list", "project.read"}}
+
+	// Action: the permission is agent.read and the request is a list row
+	// of an agent, but the action is not read.
+	update := AuthzRequest{ListRow: true, Action: ActionUpdate, Resource: Resource{Type: "agent", ParentType: "project", ParentID: "p1"}}
+	assert.False(t, listRowReadCeiling(update, "agent.read", &TokenBoundary{Kind: BoundaryKindHub}, ceiling).Allows("agent.read"),
+		"a non-read action never gains agent.read")
+
+	// boundary.ProjectID: a project boundary with no project and an agent
+	// with no parent would match on ProjectID == ParentID alone.
+	projectOnly := permissions.FrozenPermissionCeiling{Version: permissions.CeilingVersionV1, PermissionIDs: []string{"project.read"}}
+	noParent := AuthzRequest{ListRow: true, Action: ActionRead, Resource: Resource{Type: "agent"}}
+	assert.False(t, listRowReadCeiling(noParent, "agent.read", &TokenBoundary{Kind: BoundaryKindProject}, projectOnly).Allows("agent.read"),
+		"an empty boundary project never matches an empty parent")
+}
+
+// TestAgentListReadRule_ScopedTokenRacedRowStaysListed covers the race
+// path of the sorted project list for a token holding agent:list but not
+// agent:read: every page row changes between the member read and the
+// full-row read, so its decisions are redone on the full row. The plain
+// read fails (no agent:read) and the list read passes, so the row stays,
+// with no read capability.
+func TestAgentListReadRule_ScopedTokenRacedRowStaysListed(t *testing.T) {
+	f := readRuleSetup(t, 6, func(i int) bool { return i%2 == 0 })
+	key := mintScopedUAT(t, f.srv, f.caller.ID, f.project.ID, []string{"agent:list"})
+	f.srv.store = &racingAllMembersStore{Store: f.store}
+
+	rec := doRequestWithUAT(t, f.srv, key, http.MethodGet, f.listPath("sort=updated&limit=500"), nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	resp := mustDecodeListAgentsResponse(t, rec.Body)
+
+	ids := make([]string, 0, len(resp.Agents))
+	for _, a := range resp.Agents {
+		ids = append(ids, a.ID)
+		assert.Equal(t, "true", a.Labels["raced"], "%s: the row changed after the member read", a.ID)
+		require.NotNil(t, a.Cap)
+		assert.NotContains(t, a.Cap.Actions, string(ActionRead), "%s: no read capability without agent:read", a.ID)
+	}
+	assert.Equal(t, f.readable, sortedCopy(ids), "every raced row the holder can read stays listed")
+	assert.Equal(t, len(f.readable), resp.TotalCount)
+}
+
+// TestAgentListReadRule_ListRowReadReasonMarked pins the audit Reason of
+// an agent-list row read: a read allowed only through the list-row rule
+// carries listRowReadReasonMarker, and a read allowed by the ceiling
+// itself does not.
+func TestAgentListReadRule_ListRowReadReasonMarked(t *testing.T) {
+	f := readRuleSetup(t, 4, func(i int) bool { return i%2 == 0 })
+
+	readReasons := func(key string) (marked, unmarked int) {
+		t.Helper()
+		emitter := &recordingDecisionAuditEmitter{}
+		f.srv.authzService.SetDecisionAuditEmitter(emitter)
+		rec := doRequestWithUAT(t, f.srv, key, http.MethodGet, f.listPath("limit=500"), nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		for _, r := range emitter.records {
+			if r.ResourceType != "agent" || r.Result != "allow" || r.PermissionID != "agent.read" {
+				continue
+			}
+			if strings.Contains(r.Reason, listRowReadReasonMarker) {
+				marked++
+			} else {
+				unmarked++
+			}
+		}
+		return marked, unmarked
+	}
+
+	listKey := mintScopedUAT(t, f.srv, f.caller.ID, f.project.ID, []string{"agent:list"})
+	marked, unmarked := readReasons(listKey)
+	assert.Equal(t, len(f.readable), marked, "each listed row's read is marked")
+	assert.Zero(t, unmarked)
+
+	readKey := mintScopedUAT(t, f.srv, f.caller.ID, f.project.ID, []string{"agent:list", "agent:read"})
+	marked, unmarked = readReasons(readKey)
+	assert.Zero(t, marked, "a ceiling holding agent.read is not widened")
+	assert.Equal(t, len(f.readable), unmarked)
+}
+
+// TestGlobalAgentStatsCapCoversCandidateBound pins the assumption
+// buildGlobalAgentStats relies on to always send stats.agents when the
+// member read is not truncated: the readable count never exceeds
+// authorizedListMaxCandidates, which must not exceed globalAgentStatsCap.
+func TestGlobalAgentStatsCapCoversCandidateBound(t *testing.T) {
+	assert.LessOrEqual(t, authorizedListMaxCandidates, globalAgentStatsCap)
 }
