@@ -18,6 +18,33 @@ These flags are available on all commands:
 - `--non-interactive`: Full non-interactive mode (implies `--yes`, errors on ambiguous prompts).
 - `--debug`: Enable verbose debug output.
 
+**Project resolution order.** The CLI picks the project in this order:
+
+1. The `-g` / `--project` or `--global` flag.
+2. Inside a Hub-connected agent container only: the agent's own project (`SCION_PROJECT_ID`).
+3. The project `.scion` directory found from the current directory.
+4. The global project (`~/.scion`).
+
+A context is Hub-connected when `SCION_HUB_ENDPOINT`, `SCION_HUB_URL` or `SCION_PROJECT_ID` is set
+in the environment, as in an agent container. Enabling the Hub in a workstation's settings does not
+make it a Hub-connected context: there, `--global` uses the local global directory.
+
+An explicit flag wins over `SCION_PROJECT_ID`. This applies to commands that go through the Hub
+pre-flight check, and to the `conversation`, `notifications` and `messages` commands.
+`SCION_PROJECT` does not select a project; it is used only to detect a send within the same
+project.
+
+In a Hub-connected context, `--global` (or `-g global`) targets the Hub's Global project (slug
+`global`) when the local global directory is not linked to a Hub project. If the Hub has no Global
+project, or you do not have access to it, the command fails with an error that names
+`--project <slug|id>` as the alternative.
+
+:::note[Agents creating agents in other projects]
+Inside an agent container, `-g` / `--project` changes which project the CLI addresses, but the Hub
+refuses an agent-created agent outside the calling agent's own project. This is intended: an
+agent can only start agents in its own project.
+:::
+
 The legacy hidden `--grove` flag has been removed from every command; passing it fails with
 `unknown flag: --grove`. Use `--project`.
 
@@ -193,7 +220,13 @@ If the agent is stopped, the attach ends immediately rather than waiting and ret
 **Usage:** `scion attach <agent-name>`
 
 - **Key Bindings:**
-    - `Ctrl+P, Ctrl+Q`: Detach from the session without stopping the agent.
+    - `Ctrl-b`, then `d`: Detach from the session without stopping the agent (the tmux detach key; see [Interactive Sessions with Tmux](/scion/local/tmux/)). The container runtime's default `Ctrl-p Ctrl-q` detach sequence is not used, so `Ctrl-p` reaches the agent. Podman's detach keys are off. Docker's are moved to `Ctrl-\` then `Ctrl-^`: a single `Ctrl-\` is delayed until the next key, and the full sequence ends the attach while the agent keeps running (see [Interactive Sessions with Tmux](/scion/local/tmux/#basic-operations)).
+- **Requires a terminal:** `scion attach`, `scion start --attach` and `scion resume --attach` need an interactive terminal on both stdin and stdout. Without one (for example from a script or a coding harness) they fail at once with `attach requires an interactive terminal` and a non-zero exit, before starting anything. Use `scion look` to view a session and `scion message` to send input instead.
+- **Not running:** if the Hub reports the agent as not running, `scion attach` names the next step for the agent's phase: `scion resume <agent> --attach` for a stopped or suspended agent, waiting and then resuming for a stopping agent, `scion logs <agent>` and then resuming for an agent in the `error` phase, and `scion start <agent> --attach` for anything else. An agent whose runtime doesn't support attach gets that error first, whatever its phase.
+- **No reconnect:** in Hub mode `scion attach` does not reconnect. When the session ends for any reason other than a detach, the command exits non-zero with a message that says what happened and what to run next, based on the [PTY close code](/scion/reference/api/#pty-close-codes). For example, a dropped runtime broker (`4503`) suggests running `scion attach` again, and an ended session (`4410`) suggests `scion resume`. `scion start --attach` and `scion resume --attach` use the same attach flow and print the same messages.
+- **Hub URL with a path prefix:** a Hub served under a path (for example `https://example.com/scion`) works for attach as it does for other commands.
+
+See [Attaching to a remote agent](/scion/hosted/user/hosted-user/#attaching-to-a-remote-agent) for Hub-mode details such as who can attach.
 
 ### `scion message` (or `msg`)
 
@@ -661,7 +694,7 @@ See [Templates & Roles](/scion/local/templates/) for the full guide.
 Manages skills in the Hub skill bank — reusable, versioned instruction snippets referenced by URI (`scion skill`, singular, is an alias). See [Skills — Authoring & Publishing](/scion/local/skills/) for the full guide. All subcommands except `create` require a Hub connection.
 
 - `list`: List available skills.
-    - Flags: `--scope <core|global|project|user>`, `--search <text>`, `--tags <a,b>` (comma-separated, AND semantics).
+    - Flags: `--scope <core|global|project|user>`, `--search <text>`, `--tags <a,b>` (repeatable or comma-separated, AND semantics).
 - `show <name-or-id>`: Show a skill's details and versions.
 - `create <name>`: Scaffold a new local skill directory with a starter `SKILL.md` (local-only; does not publish).
 - `publish <path>`: Publish a local skill directory to the Hub. Limits: 50 files, 10 MB/file, 50 MB total.

@@ -386,6 +386,14 @@ func agentIdentityFor(agentID, projectID string, scopes ...AgentTokenScope) Agen
 	}}
 }
 
+// delegatingRequesterFor returns an agent identity for requesterID that may
+// reincarnate a baseline agent in projectID: the lifecycle scope plus every
+// scope of the baseline role, which re-recording the target's authority
+// under the requester requires (CanDelegate).
+func delegatingRequesterFor(requesterID, projectID string) AgentIdentity {
+	return agentIdentityFor(requesterID, projectID, append(ScopesForRole(AgentRoleBaseline), ScopeAgentLifecycle)...)
+}
+
 func reincarnateRequest(t *testing.T, agentID string, identity Identity, body interface{}) *http.Request {
 	t.Helper()
 	var bodyBytes []byte
@@ -455,8 +463,13 @@ func TestReincarnateAgent_Authz_OtherAgentRequiresLifecycleScope(t *testing.T) {
 		assert.Equal(t, http.StatusForbidden, rec.Code)
 	})
 
-	t.Run("same project with the scope is allowed", func(t *testing.T) {
-		other := agentIdentityFor(tid("coordinator"), project.ID, ScopeAgentLifecycle)
+	t.Run("same project with the scope and delegation authority is allowed", func(t *testing.T) {
+		coordinator := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+			a.ID = tid("coordinator")
+			a.Slug = "coordinator-" + tidSlugSafe(t.Name())
+			a.Name = "Coordinator"
+		})
+		other := delegatingRequesterFor(coordinator.ID, project.ID)
 		req := reincarnateRequest(t, agent.ID, other, ReincarnateAgentRequest{DryRun: true})
 		rec := httptest.NewRecorder()
 		srv.handleReincarnateAgent(rec, req, agent.ID)
@@ -2343,7 +2356,7 @@ func TestReincarnateAgent_DryRunConflictsWhenAlreadyStarting(t *testing.T) {
 
 // TestReincarnateAgent_AC8_OrphanCannotWedgeAfterConflict is the design §3.4
 // Amendment A3 regression test: a version conflict on the claim write (the guarded
-// UpdateAgent that sets reincarnation_state=pending) must leave nothing
+// ClaimAgentReincarnation that sets reincarnation_state=pending) must leave nothing
 // behind — no orphaned agent_reincarnations row, and no stuck claim — so a
 // retry succeeds. Before the fix, the record was created FIRST, so any
 // failure on the following UpdateAgent left a permanent pending row with no
@@ -2354,15 +2367,40 @@ type failOnceUpdateStore struct {
 	failed bool
 }
 
-func (f *failOnceUpdateStore) UpdateAgent(ctx context.Context, a *store.Agent) error {
+func (f *failOnceUpdateStore) takeFailure() bool {
 	f.mu.Lock()
-	if !f.failed {
-		f.failed = true
-		f.mu.Unlock()
-		return store.ErrVersionConflict
+	defer f.mu.Unlock()
+	if f.failed {
+		return false
 	}
-	f.mu.Unlock()
-	return f.Store.UpdateAgent(ctx, a)
+	f.failed = true
+	return true
+}
+
+func (f *failOnceUpdateStore) ClaimAgentReincarnation(ctx context.Context, agentID string, expectedVersion int64, at time.Time) (int64, error) {
+	if f.takeFailure() {
+		return 0, store.ErrVersionConflict
+	}
+	return f.Store.ClaimAgentReincarnation(ctx, agentID, expectedVersion, at)
+}
+
+// WithTx injects the same one-shot conflict into the claim transaction.
+func (f *failOnceUpdateStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	return f.Store.WithTx(ctx, func(tx store.Store) error {
+		return fn(&failOnceUpdateTx{Store: tx, parent: f})
+	})
+}
+
+type failOnceUpdateTx struct {
+	store.Store
+	parent *failOnceUpdateStore
+}
+
+func (t *failOnceUpdateTx) ClaimAgentReincarnation(ctx context.Context, agentID string, expectedVersion int64, at time.Time) (int64, error) {
+	if t.parent.takeFailure() {
+		return 0, store.ErrVersionConflict
+	}
+	return t.Store.ClaimAgentReincarnation(ctx, agentID, expectedVersion, at)
 }
 
 func TestReincarnateAgent_AC8_OrphanCannotWedgeAfterConflict(t *testing.T) {
@@ -3693,7 +3731,7 @@ func TestReincarnateAgent_AC6_NonCreatorRequesterGetsNotifiedOnFailure(t *testin
 		a.Slug = "coordinator-" + tidSlugSafe(t.Name())
 		a.Name = "Coordinator"
 	})
-	requester := agentIdentityFor(coordinator.ID, project.ID, ScopeAgentLifecycle)
+	requester := delegatingRequesterFor(coordinator.ID, project.ID)
 
 	req := reincarnateRequest(t, agent.ID, requester, ReincarnateAgentRequest{Handoff: "h"})
 	rec := httptest.NewRecorder()
@@ -4028,7 +4066,7 @@ func TestReincarnateAgent_AC6_NotifiesWithRealisticActivity(t *testing.T) {
 		a.ID = tid("coord-" + t.Name())
 		a.Slug = "coord-" + tidSlugSafe(t.Name())
 	})
-	requester := agentIdentityFor(coordinator.ID, project.ID, ScopeAgentLifecycle)
+	requester := delegatingRequesterFor(coordinator.ID, project.ID)
 
 	rec := httptest.NewRecorder()
 	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, requester, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
@@ -4467,7 +4505,7 @@ func newNotificationRace(t *testing.T, disp AgentDispatcher) *notificationRace {
 
 func (r *notificationRace) reincarnate(t *testing.T) {
 	t.Helper()
-	requester := agentIdentityFor(r.coordinator.ID, r.project.ID, ScopeAgentLifecycle)
+	requester := delegatingRequesterFor(r.coordinator.ID, r.project.ID)
 	rec := httptest.NewRecorder()
 	r.srv.handleReincarnateAgent(rec, reincarnateRequest(t, r.agent.ID, requester, ReincarnateAgentRequest{Handoff: "h"}), r.agent.ID)
 	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())

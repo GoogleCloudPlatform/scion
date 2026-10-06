@@ -505,6 +505,7 @@ BASE_ES=(
 BASE=(
   "${BASE_ES[@]}"
   --set auth.proxy.iap.audience=/projects/123456789012/locations/us-central1/services/probe-neg
+  --set agents.imageRegistry=example.test/agents
 )
 
 # --------------------------------------------------------------------------
@@ -2018,6 +2019,12 @@ declare -A PROBE_MUTATION=(
   [auth.oauth.web.google.clientSecret]='--set-string|auth.oauth.web.google.clientSecret=probe-oauth-mutated-secret'
   [auth.oauth.web.github.clientId]='--set-string|auth.oauth.web.github.clientId=probe-gh-id|--set-string|auth.oauth.web.github.clientSecret=probe-gh-secret'
   [auth.oauth.web.github.clientSecret]='--set-string|auth.oauth.web.github.clientId=probe-gh-id|--set-string|auth.oauth.web.github.clientSecret=probe-gh-secret2'
+  [hub.adminEmails]='--set|hub.adminEmails={probe-admin@example.com}'
+  # gcpsm needs its project to render at all, and the project is refused under
+  # local, so the three secrets leaves each carry the backend and project.
+  [secrets.backend]='--set-string|secrets.gcpsm.projectId=probe-project|--set-string|secrets.backend=gcpsm'
+  [secrets.gcpsm.projectId]='--set-string|secrets.backend=gcpsm|--set-string|secrets.gcpsm.projectId=probe-project'
+  [secrets.gcpsm.replicationLocations]='--set-string|secrets.backend=gcpsm|--set-string|secrets.gcpsm.projectId=probe-project|--set|secrets.gcpsm.replicationLocations={us-central1}'
   [database.connMaxIdleTime]='--set-string|database.connMaxIdleTime=9m'
   [database.connMaxLifetime]='--set-string|database.connMaxLifetime=9m'
   # THE CLOUD SQL LEAVES ALL CARRY THE SAME PREAMBLE, and it is not boilerplate:
@@ -2101,6 +2108,10 @@ PROBE_CREDS=(
   --set-string auth.transport.mode=iap
   --set-string auth.transport.oidcAudience=probe-base-oauth-client.apps.googleusercontent.com
   --set-string auth.transport.platformAuthSa=probe-base@probe-project.iam.gserviceaccount.com
+  # The broker's required registry. In the baseline rather than in BASE_ES,
+  # because it is refused under config.existingSecret; agents.imageRegistry's
+  # own mutation still moves it, from this value to another.
+  --set-string agents.imageRegistry=probe.example/agents
 )
 probe_render() {
   "$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
@@ -3073,8 +3084,8 @@ done
 step "the \$ownedByConfig split, measured against the render"
 # --------------------------------------------------------------------------
 # _helpers.tpl reserves five flags on the grounds that each has a delivery
-# channel other than argv. Two of the five are delivered by this chart and three
-# are not, and the file says which in prose.
+# channel other than argv. Four of the five are delivered by this chart and one
+# is not, and the file says which in prose.
 #
 # THIS EXISTS BECAUSE THAT PROSE WENT STALE WITHOUT THE FILE BEING EDITED. At
 # phase 0 it read "this chart delivers none of them yet", which was true while
@@ -3095,7 +3106,7 @@ declare -A DELIVERED=(
   [storage-bucket]=1  # server.storage.bucket in the rendered settings.yaml
   [db]=1              # server.database.url - LANDED by the Cloud SQL phase; was 0 until then
   [storage-dir]=0     # server.storage.local_path - the workspace share
-  [admin-emails]=0    # server.hub.admin_emails - no phase claims it
+  [admin-emails]=1    # server.hub.admin_emails - LANDED with hub.adminEmails; was 0 until then
 )
 # The probe per flag. Each reads the channel the reservation names, not a proxy
 # for it: a probe for "is there a Secret" would answer yes for a chart that
@@ -4055,7 +4066,8 @@ expect_render_failure \
   --set hub.hubId=neg \
   --set hub.baseUrl=http://neg.example.com \
   --set auth.sessionSecret=neg-session-secret \
-  --set auth.proxy.iap.audience=/projects/123456789012/locations/us-central1/services/probe-neg
+  --set auth.proxy.iap.audience=/projects/123456789012/locations/us-central1/services/probe-neg \
+  --set agents.imageRegistry=example.test/agents
 
 expect_render_failure \
   "the TEMPLATE rejects oauth mode without a web client credential" \
@@ -4249,6 +4261,8 @@ hub:
       value: |
         Scheduled maintenance on Sunday.
         Sessions will be interrupted.
+agents:
+  imageRegistry: example.test/agents
 auth:
   sessionSecret: neg-session-secret
   proxy:

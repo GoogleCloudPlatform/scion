@@ -17,7 +17,7 @@ Before you start, you need a working Scion install and a container runtime. See 
 
 - Scion installed with its web assets. Use **Homebrew** (`brew tap homebrew-scion/scion && brew install homebrew-scion/scion/scion`) for a ready-to-run install; a bare `go install` does **not** embed the web UI, so the wizard would load blank. See the [Installation guide](/scion/getting-started/install/#install-with-homebrew-recommended) for details.
 - A container runtime — Docker, Podman, or Apple Container.
-- Git 2.47 or later (the wizard flags older versions).
+- Git 2.48 or later (the wizard flags older versions).
 
 You do **not** need to run `scion init --machine` first — the wizard handles machine initialization for you.
 
@@ -51,7 +51,7 @@ Enter a **display name** and **email**. This identity is attached to the agents 
 
 ### 2. System check
 
-The wizard runs diagnostics against your environment and shows each result as **pass**, **warn**, or **fail**. Use **Re-check** after fixing anything. A common warning is an out-of-date Git — Scion needs **Git 2.47+** for agent worktrees; upgrade (for example `brew install git`) and re-check. You can only advance once the checks report ready.
+The wizard runs diagnostics against your environment and shows each result as **pass**, **warn**, or **fail**. Use **Re-check** after fixing anything. A common warning is an out-of-date Git — Scion needs **Git 2.48+** for agent worktrees; upgrade (for example `brew install git`) and re-check. You can only advance once the checks report ready.
 
 ### 3. Container runtime
 

@@ -825,7 +825,7 @@ func TestAgentStore_AppliedConfigValidatedOnRead(t *testing.T) {
 		require.NoError(t, err, "one bad field must not make the agent unreadable")
 		require.NotNil(t, got.AppliedConfig)
 		assert.Nil(t, got.AppliedConfig.GCPIdentity,
-			"an unusable metadata mode must not reach callers; the agent falls back to the secure default")
+			"an unusable metadata mode must not reach callers; the agent falls back to the runtime default")
 		assert.Equal(t, "img:1", got.AppliedConfig.Image)
 	})
 

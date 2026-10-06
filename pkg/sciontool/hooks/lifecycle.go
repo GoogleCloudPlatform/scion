@@ -16,6 +16,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/procreap"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/rootexec"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/suppgroups"
 )
 
 // harnessProvisionHookFilename must stay equal to
@@ -499,10 +500,9 @@ func (m *LifecycleManager) buildEnforcedCmd(scriptFile *os.File, path, eventName
 		return nil, fmt.Errorf("hooks: enforced mode requires a valid workload uid/gid (uid=%d gid=%d); refusing to run %s", m.WorkloadUID, m.WorkloadGID, path)
 	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Credential: &syscall.Credential{
-			Uid: uint32(m.WorkloadUID),
-			Gid: uint32(m.WorkloadGID),
-		},
+		// Keeps the runtime-granted nfs shared-dir groups (ptone/scion#3155),
+		// so a hook writing into a shared dir behaves like the harness.
+		Credential: suppgroups.Credential(uint32(m.WorkloadUID), uint32(m.WorkloadGID)),
 	}
 	cmd.Env = m.droppedHookEnv()
 	cmd.Env = setEnvVar(cmd.Env, "SCION_HOOK_PATH", path)
@@ -522,11 +522,10 @@ func (m *LifecycleManager) buildEnforcedCmd(scriptFile *os.File, path, eventName
 // package's dropped branch does — m.WorkloadUID/WorkloadGID, the same
 // setupHostUser-resolved target identity RunInit threads into every other
 // dropped hook and into the harness child process itself — rather than
-// re-deriving or looking up a uid/gid here. Supplementary groups are
-// cleared explicitly (Groups set to an empty, non-nil slice) rather than
-// left to Go's own default handling of a nil Groups field, so the intent
-// reads directly off the Credential literal instead of depending on
-// documented-but-unstated zero-value behavior.
+// re-deriving or looking up a uid/gid here. Supplementary groups are set
+// explicitly by suppgroups.Credential: only the runtime-granted nfs
+// shared-dir groups, otherwise an empty, non-nil slice, rather than left to
+// Go's own default handling of a nil Groups field.
 //
 // Fails closed — refusing to run the script at all, never falling back to
 // running it as root — when no valid (>0) workload uid is available. In
@@ -545,11 +544,9 @@ func (m *LifecycleManager) buildDroppedProvisionCmd(cmd *exec.Cmd, path string) 
 			path, m.WorkloadUID, m.WorkloadGID)
 	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Credential: &syscall.Credential{
-			Uid:    uint32(m.WorkloadUID),
-			Gid:    uint32(m.WorkloadGID),
-			Groups: []uint32{},
-		},
+		// Groups is the runtime-granted nfs shared-dir groups
+		// (ptone/scion#3155), or an empty, non-nil slice when there are none.
+		Credential: suppgroups.Credential(uint32(m.WorkloadUID), uint32(m.WorkloadGID)),
 	}
 	cmd.Env = setEnvVar(m.droppedHookEnv(), "PYTHONNOUSERSITE", "1")
 	cmd.Env = setEnvVar(cmd.Env, "SCION_HOOK_PATH", path)

@@ -423,10 +423,8 @@ func mapNewTypeToLegacy(msg *Message) string {
 		case IntentQuestion:
 			return messages.TypeInputNeeded
 		case IntentInform:
-			// Check if sender is an agent — old format distinguished assistant-reply.
-			if msg.From.PrincipalKind() == "agent" {
-				return messages.TypeAssistantReply
-			}
+			// Never assistant-reply: that type is retired and only appears
+			// on historical rows, whatever the sender.
 			return messages.TypeChat
 		default:
 			return messages.TypeChat

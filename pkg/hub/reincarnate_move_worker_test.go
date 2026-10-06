@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -836,4 +837,103 @@ func TestReincarnateMove_RollbackAssignmentRestoreFailureKeepsTargetRun(t *testi
 	assert.Equal(t, f.dst.ID, a.RuntimeBrokerID, "the assignment could not be restored")
 	assert.NotEqual(t, "run-src", a.RunID, "the target's run stays with the target")
 	assert.NotEmpty(t, a.RunID)
+}
+
+// moveBySessionUser runs a real (non-self) move of the fixture agent by a
+// session user holding agent.lifecycle and agent delegation in the project,
+// and returns that user and the settled record. The agent starts with an
+// edge delegated by someone else (returned as old).
+func moveBySessionUser(t *testing.T, f *moveFixture) (*store.User, *store.DelegationEdge, *store.AgentReincarnation) {
+	t.Helper()
+	old := seedAgentEdge(t, f.s, tid("delegator"), f.agent)
+	user := newReincarnateAuthzUser(t, f.s, tidSlugSafe(t.Name()))
+	grantAgentLifecycleAtProject(t, f.s, user.ID, f.project.ID)
+	grantAgentDelegationAtProject(t, f.s, user.ID, f.project.ID)
+	id := NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "web")
+
+	rec := httptest.NewRecorder()
+	f.srv.handleReincarnateAgent(rec, reincarnateRequest(t, f.agent.ID, id, ReincarnateAgentRequest{Handoff: "h", TargetBroker: f.dst.ID}), f.agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	r := waitForReincarnationSettled(t, f.s, f.agent.ID)
+	return user, old, r
+}
+
+// assertEdgeReRecordedTo asserts the agent's single active delegation edge
+// was re-recorded (replacing old) with user as delegator.
+func assertEdgeReRecordedTo(t *testing.T, f *moveFixture, user *store.User, old *store.DelegationEdge) {
+	t.Helper()
+	edges, err := f.s.GetDelegationEdgesForDelegate(context.Background(), store.DelegationPrincipalAgent, f.agent.ID)
+	require.NoError(t, err)
+	require.Len(t, edges, 1)
+	assert.NotEqual(t, old.ID, edges[0].ID, "the edge is re-recorded")
+	assert.Equal(t, store.DelegationPrincipalUser, edges[0].DelegatorType)
+	assert.Equal(t, user.ID, edges[0].DelegatorID)
+	assertReincarnateReplacedEdge(t, f.s, f.agent.ID, old.ID)
+}
+
+// A move by a session user re-records the agent's authority to that user,
+// in the same claim transaction as a plain reincarnation.
+func TestReincarnateMove_SessionUserReRecordsEdge(t *testing.T) {
+	f := setupMoveFixture(t, true, func(dst *store.RuntimeBroker) { dst.AutoProvide = true })
+	prepareMoveWorkerFixture(t, f)
+
+	user, old, r := moveBySessionUser(t, f)
+	require.Equal(t, store.AgentReincarnationStateCompleted, r.State, r.Error)
+	a, err := f.s.GetAgent(context.Background(), f.agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, f.dst.ID, a.RuntimeBrokerID)
+	assertEdgeReRecordedTo(t, f, user, old)
+}
+
+// A rolled-back move keeps the authority re-recorded at the claim: the
+// edge stays the requesting user's (the re-record is not part of the
+// rollback).
+func TestReincarnateMove_SessionUserRollbackKeepsUserEdge(t *testing.T) {
+	f := setupMoveFixture(t, true, func(dst *store.RuntimeBroker) { dst.AutoProvide = true })
+	prepareMoveWorkerFixture(t, f)
+	f.disp.moveProvisionErr = errors.New("broker returned 409")
+
+	user, old, r := moveBySessionUser(t, f)
+	a, err := f.s.GetAgent(context.Background(), f.agent.ID)
+	require.NoError(t, err)
+	assertRolledBackToSource(t, f, r, a)
+	assertEdgeReRecordedTo(t, f, user, old)
+}
+
+// Merge-review Nit-1: rollback reverts to the source run without settling
+// it: the runs listed before the move keep their entries in PreviousRunIDs
+// (a settling CAS would clear them), so a later delete still names them.
+func TestReincarnateMove_RollbackKeepsPreviousRunIDs(t *testing.T) {
+	f := setupMoveFixture(t, true, nil)
+	prepareMoveWorkerFixture(t, f)
+	f.disp.startErr = fmt.Errorf("start refused by broker: %w", errStartRequestNotSent)
+
+	r, a := startMove(t, f)
+	assertRolledBackToSource(t, f, r, a)
+	a, err := f.s.GetAgent(context.Background(), f.agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "run-src", a.RunID)
+	assert.Contains(t, a.PreviousRunIDs, "run-src", "the revert leaves the listed runs in place")
+}
+
+// Merge-review Nit-2: the authority check runs before the move target is
+// resolved, so a requester who cannot delegate gets 403 for an unknown or
+// ambiguous target alike, never the target's 404 or 409.
+func TestReincarnateMove_AuthorityRefusedBeforeTargetResolution(t *testing.T) {
+	f := setupMoveFixture(t, true, nil)
+	f.addMoveBroker(t, tid("amb-1-"+t.Name()), "amb-twin", "amb-twin-1-"+tidSlugSafe(t.Name()), true)
+	f.addMoveBroker(t, tid("amb-2-"+t.Name()), "amb-twin", "amb-twin-2-"+tidSlugSafe(t.Name()), true)
+	user := newReincarnateAuthzUser(t, f.s, tidSlugSafe(t.Name()))
+	grantAgentLifecycleAtProject(t, f.s, user.ID, f.project.ID) // lifecycle, but no delegation
+	id := NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "web")
+	count := f.agentCount(t)
+
+	for _, target := range []string{"no-such-broker", "amb-twin"} {
+		for _, dryRun := range []bool{true, false} {
+			rec := httptest.NewRecorder()
+			f.srv.handleReincarnateAgent(rec, reincarnateRequest(t, f.agent.ID, id, ReincarnateAgentRequest{Handoff: "h", DryRun: dryRun, TargetBroker: target}), f.agent.ID)
+			assert.Equal(t, http.StatusForbidden, rec.Code, "target %q dryRun=%t: %s", target, dryRun, rec.Body.String())
+		}
+	}
+	f.assertNoMoveSideEffects(t, count)
 }
