@@ -675,52 +675,25 @@ func TestStartClaimWiring_WakeEndsLifecycleOpBeforeReadinessWait(t *testing.T) {
 	assert.True(t, claimDuringWait.Load(), "the wake's claim is held through the readiness wait")
 }
 
-// deleteHoldsClaimStore refuses every start claim: a delete holds the row.
-type deleteHoldsClaimStore struct{ store.Store }
+// claimRefusingStore refuses every start claim with err.
+type claimRefusingStore struct {
+	store.Store
+	err error
+}
 
-func (deleteHoldsClaimStore) ClaimAgentStart(context.Context, string, string, store.StartClaimKind, string, time.Duration) (store.StartClaim, error) {
-	return store.StartClaim{}, store.ErrDeleteInProgress
+func (s claimRefusingStore) ClaimAgentStart(context.Context, string, string, store.StartClaimKind, string, time.Duration) (store.StartClaim, error) {
+	return store.StartClaim{}, s.err
 }
 
 // A create-and-start whose claim a delete refuses answers delete_in_progress
-// and is rolled back as a refused run-intent write, as before claims.
+// and is rolled back as a refused run-intent write, as before claims, with
+// and without env gather.
 func TestStartClaimWiring_CreateClaimRefusedByDeleteRollsBack(t *testing.T) {
-	disp := &createAgentDispatcher{}
-	srv, s, project := setupCreateAgentServer(t, disp)
-	srv.store = deleteHoldsClaimStore{srv.store}
-	req := CreateAgentRequest{Name: "claim-refused-by-delete", ProjectID: project.ID, Task: "do something"}
-
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", req)
-	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
-	var resp ErrorResponse
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	assert.Equal(t, ErrCodeDeleteInProgress, resp.Error.Code)
-	failed, _, err := s.ListMutationAudits(context.Background(), store.MutationAuditFilter{TargetType: "agent", MutationType: mutationTypeAgentCreateDispatchFailed})
-	require.NoError(t, err)
-	require.Len(t, failed, 1, "the refused create is rolled back once")
-	var sum compensationSummary
-	require.NoError(t, json.Unmarshal([]byte(failed[0].AfterSummary), &sum))
-	assert.Equal(t, createStageRunIntent, sum.Stage)
-}
-
-// A delete that claims the row while a create's dispatch runs is a dispatch
-// failure, with and without env gather: the create is rolled back with that
-// dispatch's stage (it is not kept as a claim refusal) and answers
-// delete_in_progress.
-func TestStartClaimWiring_CreateDispatchDeleteInProgressRollsBack(t *testing.T) {
-	cases := []struct {
-		name   string
-		gather bool
-		stage  string
-	}{
-		{"dispatch", false, createStageDispatch},
-		{"dispatch with env gather", true, createStageDispatchEnvGather},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			disp := &failingCreateDispatcher{createErr: fmt.Errorf("persist run id: %w", store.ErrDeleteInProgress)}
-			srv, s, project := setupCreateAgentServer(t, disp)
-			req := CreateAgentRequest{Name: "dispatch-delete-" + tidSlugSafe(tc.name), ProjectID: project.ID, Task: "do something", GatherEnv: tc.gather}
+	for _, gather := range []bool{false, true} {
+		t.Run(fmt.Sprintf("gather=%v", gather), func(t *testing.T) {
+			srv, s, project := setupCreateAgentServer(t, &createAgentDispatcher{})
+			srv.store = claimRefusingStore{Store: srv.store, err: store.ErrDeleteInProgress}
+			req := CreateAgentRequest{Name: fmt.Sprintf("claim-refused-by-delete-%v", gather), ProjectID: project.ID, Task: "do something", GatherEnv: gather}
 
 			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", req)
 			require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
@@ -729,10 +702,41 @@ func TestStartClaimWiring_CreateDispatchDeleteInProgressRollsBack(t *testing.T) 
 			assert.Equal(t, ErrCodeDeleteInProgress, resp.Error.Code)
 			failed, _, err := s.ListMutationAudits(context.Background(), store.MutationAuditFilter{TargetType: "agent", MutationType: mutationTypeAgentCreateDispatchFailed})
 			require.NoError(t, err)
-			require.Len(t, failed, 1, "the create is rolled back once")
+			require.Len(t, failed, 1, "the refused create is rolled back once")
 			var sum compensationSummary
 			require.NoError(t, json.Unmarshal([]byte(failed[0].AfterSummary), &sum))
-			assert.Equal(t, tc.stage, sum.Stage)
+			assert.Equal(t, createStageRunIntent, sum.Stage)
+		})
+	}
+}
+
+// A create-and-start refused by another start's claim, or because the agent
+// cannot take one (a reincarnation in flight), answers 409 and keeps the
+// record: the earlier claimant owns it, so nothing is rolled back.
+func TestStartClaimWiring_CreateClaimRefusalKeepsTheRecord(t *testing.T) {
+	cases := []struct {
+		name     string
+		err      error
+		wantCode string
+	}{
+		{"held", &store.ClaimHeldError{ClaimID: "c", Kind: store.StartClaimUser, State: store.StartClaimLive, Since: time.Now()}, ErrCodeStartInProgress},
+		{"not eligible", store.ErrClaimPredicate, ErrCodeConflict},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			disp := &createAgentDispatcher{}
+			srv, s, project := setupCreateAgentServer(t, disp)
+			srv.store = claimRefusingStore{Store: srv.store, err: tc.err}
+			req := CreateAgentRequest{Name: "claim-refused-" + tidSlugSafe(tc.name), ProjectID: project.ID, Task: "do something"}
+
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", req)
+			require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+			var resp ErrorResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+			assert.Equal(t, tc.wantCode, resp.Error.Code)
+			failed, _, err := s.ListMutationAudits(context.Background(), store.MutationAuditFilter{TargetType: "agent", MutationType: mutationTypeAgentCreateDispatchFailed})
+			require.NoError(t, err)
+			assert.Empty(t, failed, "a claim refusal is not rolled back as a failed create")
 		})
 	}
 }

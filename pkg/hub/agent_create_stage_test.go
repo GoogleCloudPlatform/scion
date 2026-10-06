@@ -119,6 +119,15 @@ func createRollbackSites() []createRollbackSite {
 			wantStage: createStageRunIntent,
 		},
 		{
+			name: "run intent with env gather",
+			disp: &createAgentDispatcher{},
+			setup: func(t *testing.T, srv *Server) {
+				srv.store = runIntentErrStore{srv.store}
+			},
+			req:       CreateAgentRequest{GatherEnv: true},
+			wantStage: createStageRunIntent,
+		},
+		{
 			name:      "dispatch with env gather",
 			disp:      &failingCreateDispatcher{createErr: errors.New("broker unavailable")},
 			req:       CreateAgentRequest{GatherEnv: true},
@@ -275,6 +284,7 @@ func TestCreateDispatchDeleteInProgressAnswer(t *testing.T) {
 
 			_, err = s.GetAgent(ctx, agentID)
 			assert.ErrorIs(t, err, store.ErrNotFound, "the agent row is rolled back")
+			assert.True(t, disp.deleteCalled, "the broker-side delete runs for the rolled-back create")
 		})
 	}
 }
