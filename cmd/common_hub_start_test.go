@@ -74,9 +74,19 @@ func newHubStartStub(t *testing.T, projectID, agentName, existingPhase string) *
 			})
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/projects/"+projectID+"/agents":
 			stub.createCalls++
+			// Never FailNow in the handler goroutine: it would exit without a
+			// response and leave the client hanging. Report and answer 500.
 			raw, err := io.ReadAll(r.Body)
-			require.NoError(t, err)
-			require.NoError(t, json.Unmarshal(raw, &stub.createBody))
+			if err != nil {
+				t.Errorf("hub stub: reading create body: %v", err)
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if err := json.Unmarshal(raw, &stub.createBody); err != nil {
+				t.Errorf("hub stub: decoding create body: %v", err)
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
 			if stub.createStatus != 0 {
 				code, msg := stub.createErrCode, stub.createErrMsg
 				if code == "" {
