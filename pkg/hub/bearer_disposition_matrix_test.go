@@ -395,11 +395,13 @@ func TestBearerDispositionMatrix_CatalogEntryPoints(t *testing.T) {
 			}
 			// A 404 counts as a refusal only when the admitting token
 			// proves the same target exists: a 2xx, or for a WebSocket
-			// entry point the 400 that answers a request without an
-			// upgrade once the target was found.
+			// entry point (which cannot answer 2xx to a plain request) any
+			// status other than 404, since its handler answers 404 only
+			// when the target is missing and any later status (no upgrade,
+			// no runtime broker) follows the lookup.
 			if refusedWith404 {
 				found := rec.Code >= 200 && rec.Code < 300 ||
-					(ep.Kind == authzop.EntryPointWebSocket && rec.Code == http.StatusBadRequest)
+					(ep.Kind == authzop.EntryPointWebSocket && rec.Code != http.StatusNotFound)
 				if !found {
 					t.Errorf("%s: refused with 404, but the admitting token got %d, so the target is not shown to exist: %s", label, rec.Code, rec.Body.String())
 				} else {
