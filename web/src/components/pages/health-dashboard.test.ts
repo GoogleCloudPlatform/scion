@@ -205,12 +205,16 @@ describe('formatHeartbeatAge', () => {
   it('shows never for the Go zero time', () => {
     expect(formatHeartbeatAge('0001-01-01T00:00:00Z')).toBe('never');
     expect(formatHeartbeatAge('1970-01-01T00:00:00Z')).toBe('never');
+    expect(formatHeartbeatAge('1969-12-31T23:59:59Z')).toBe('never');
   });
 
   it('still formats a recent heartbeat as a relative age', () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-10-06T12:00:00Z'));
+    expect(formatHeartbeatAge('2026-10-06T11:59:30Z')).toBe('30s ago');
     expect(formatHeartbeatAge('2026-10-06T11:55:00Z')).toBe('5m ago');
+    expect(formatHeartbeatAge('2026-10-06T09:00:00Z')).toBe('3h ago');
+    expect(formatHeartbeatAge('2026-10-05T12:00:00Z')).toBe('yesterday');
     expect(formatHeartbeatAge('2026-10-04T12:00:00Z')).toBe('2d ago');
   });
 

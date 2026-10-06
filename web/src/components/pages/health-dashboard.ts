@@ -64,7 +64,7 @@ interface HealthSummary {
     runtime_available: boolean;
     agent_count: number;
     agent_healthy: number;
-    /** Go zero time (`0001-01-01T00:00:00Z`) when never reported. */
+    /** Null or the Go zero time (`0001-01-01T00:00:00Z`) when never reported. */
     last_heartbeat: string | null;
   }>;
   agents: {
@@ -922,10 +922,11 @@ export class ScionPageHealthDashboard extends LitElement {
 }
 
 /**
- * Formats a broker heartbeat as a relative age. A missing value (null,
- * undefined, empty) or the Go zero time (`0001-01-01T00:00:00Z`, or any
- * instant at or before the Unix epoch) means the heartbeat was never
- * reported and renders as "never".
+ * Formats a broker heartbeat as a relative age. A null, undefined or
+ * empty value, the Go zero time (`0001-01-01T00:00:00Z`), or any other
+ * non-positive instant (the Unix epoch itself or any earlier time) means
+ * the heartbeat was never reported and renders as "never". An unparsable
+ * value renders as "unknown" and a future instant as "just now".
  */
 export function formatHeartbeatAge(isoDate: string | null | undefined): string {
   if (!isoDate) return 'never';
