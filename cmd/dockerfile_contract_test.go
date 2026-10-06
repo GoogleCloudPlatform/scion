@@ -266,7 +266,7 @@ type cloudBuildFile struct {
 
 const (
 	hubGKEImageTag   = "$_REGISTRY/scion-hub-gke:$_SHORT_SHA"
-	hubGKEIgnoreFile = "image-build/gcloudignore-hub-gke"
+	hubGKEIgnoreFile = "image-build/gcloudignore-omni"
 )
 
 // checkHubGKECloudBuildContract returns violations for the hub-gke Cloud Build
@@ -367,9 +367,6 @@ func checkHubGKECloudBuildContract(content string) []string {
 	if !strings.Contains(content, "--ignore-file="+hubGKEIgnoreFile) {
 		errs = append(errs, "cloudbuild-hub-gke.yaml usage must pass --ignore-file="+hubGKEIgnoreFile)
 	}
-	if strings.Contains(content, "--ignore-file=image-build/gcloudignore-omni") {
-		errs = append(errs, "cloudbuild-hub-gke.yaml must not point at gcloudignore-omni as its ignore file")
-	}
 	return errs
 }
 
@@ -394,10 +391,11 @@ func TestDockerfileContractHubGKECloudBuild(t *testing.T) {
 	}
 }
 
-// TestDockerfileContractHubGKEIgnoreFile checks the README points at the
-// hub-gke ignore file. That no ignore file drops embedded files is checked by
-// TestGcloudIgnoreKeepsEmbeddedFiles (gcloudignore_contract_test.go).
+// TestDockerfileContractHubGKEIgnoreFile checks the hub-gke ignore file exists
+// and the README points at it. That no ignore file drops embedded files is
+// checked by TestGcloudIgnoreKeepsEmbeddedFiles (gcloudignore_contract_test.go).
 func TestDockerfileContractHubGKEIgnoreFile(t *testing.T) {
+	_ = readRepoFile(t, hubGKEIgnoreFile)
 	readme := readRepoFile(t, "image-build/README.md")
 	if !strings.Contains(readme, "--ignore-file="+hubGKEIgnoreFile) {
 		t.Error("image-build/README.md must pass --ignore-file=" + hubGKEIgnoreFile + " for the hub-gke build")
@@ -482,7 +480,7 @@ func TestDockerfileContractCheckerDetectsViolations(t *testing.T) {
 		{"--push dropped", mustReplace(t, cb, "      - '--push'\n", ""), "must pass --push"},
 		{"-f swapped", mustReplace(t, cb, "      - 'Dockerfile'\n", "      - 'image-build/hub/Dockerfile'\n"), "-f Dockerfile"},
 		{"require-short-sha neutered", mustReplace(t, cb, `'test -n "$_SHORT_SHA" || { echo "ERROR: pass --substitutions=_SHORT_SHA=<git short sha>" >&2; exit 1; }'`, "'true'"), "require-short-sha step"},
-		{"ignore file reverted to omni", strings.ReplaceAll(cb, "gcloudignore-hub-gke", "gcloudignore-omni"), "--ignore-file=" + hubGKEIgnoreFile},
+		{"ignore file reverted to default", mustReplace(t, cb, "--ignore-file="+hubGKEIgnoreFile, "--ignore-file=.gcloudignore"), "--ignore-file=" + hubGKEIgnoreFile},
 	}
 	for _, m := range cbMutations {
 		expectViolation(t, m.name, checkHubGKECloudBuildContract(m.src), m.want)

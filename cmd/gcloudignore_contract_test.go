@@ -62,7 +62,8 @@ import (
 // upload with each ignore file. The scion-base build that uses the default
 // .gcloudignore compiles with -tags no_embed_web, so web/embed.go (and its
 // //go:embed all:dist/client) is not compiled there; the omni and hub-gke
-// builds compile without that tag and build web/dist/client in the image.
+// builds (both upload with image-build/gcloudignore-omni) compile without that
+// tag and build web/dist/client in the image.
 // Ignore files not listed here are checked with no extra tags (the strictest
 // choice).
 var gcloudIgnoreBuildTags = map[string][]string{
@@ -83,9 +84,15 @@ func repoTrackedFiles(t *testing.T) []string {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not found; the gcloudignore contract needs git ls-files and git check-ignore")
 	}
-	out, err := exec.Command("git", "-C", "..", "ls-files", "-z").Output()
+	cmd := exec.Command("git", "-C", "..", "ls-files", "-z")
+	// Without GIT_* (e.g. GIT_DIR or GIT_INDEX_FILE leaked from a hook or a
+	// worktree wrapper), git finds the repository from the directory alone.
+	cmd.Env = envWithoutGit()
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
 	if err != nil {
-		t.Fatalf("git ls-files: %v", err)
+		t.Fatalf("git ls-files: %v: %s", err, stderr.String())
 	}
 	var files []string
 	for _, f := range strings.Split(string(out), "\x00") {
@@ -97,6 +104,19 @@ func repoTrackedFiles(t *testing.T) []string {
 		t.Fatal("git ls-files returned no files")
 	}
 	return files
+}
+
+// envWithoutGit returns the process environment minus every GIT_* variable,
+// so a git subprocess sees neither a caller-chosen repository, index or work
+// tree nor config overrides passed through the environment.
+func envWithoutGit() []string {
+	var env []string
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, "GIT_") {
+			env = append(env, kv)
+		}
+	}
+	return env
 }
 
 // goFileBuildConstraint returns the //go:build expression of a Go source
@@ -338,12 +358,7 @@ func gitIgnoredBy(t *testing.T, lines []ignoreLine, paths []string) map[string]i
 		cmd.Dir = repo
 		cmd.Stdin = strings.NewReader(stdin)
 		// Isolate from the caller's git config and repository.
-		for _, kv := range os.Environ() {
-			if !strings.HasPrefix(kv, "GIT_") {
-				cmd.Env = append(cmd.Env, kv)
-			}
-		}
-		cmd.Env = append(cmd.Env, "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1", "GIT_CEILING_DIRECTORIES="+dir)
+		cmd.Env = append(envWithoutGit(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1", "GIT_CEILING_DIRECTORIES="+dir)
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		out, err := cmd.Output()
@@ -405,6 +420,14 @@ func checkGcloudIgnoreAgainstEmbeds(t *testing.T, name, content string, embedded
 		// (harnesses/embed.go: `all:*`) but are Go test sources, never read
 		// through the embedded FS; every ignore file drops *_test.go on
 		// purpose because Cloud Build does not run tests.
+		//
+		// The exemption is deliberately limited to the directive's own
+		// directory. go:embed does embed *_test.go files at any depth, and
+		// deeper files can be read: resources/catalog.go ships each
+		// harnesses/<name>/ subtree whole (fs.Sub) as a harness-config
+		// bundle, so a harnesses/<name>/foo_test.go would be part of that
+		// bundle, and dropping it from the upload would make the Cloud Build
+		// binary differ from a local build. Such a file should fail here.
 		if strings.HasSuffix(e.path, "_test.go") && path.Dir(e.path) == path.Dir(strings.SplitN(e.directive, ":", 2)[0]) {
 			continue
 		}
@@ -541,6 +564,13 @@ func TestGcloudIgnoreContractCheckerDetectsViolations(t *testing.T) {
 		}
 	}
 
+	// The *_test.go exemption covers only the directive's own directory: a
+	// test file deeper under an embed root is shipped with its subtree.
+	nested := []embeddedFile{{path: "pkg/a/sub/y_test.go", directive: "pkg/a/x.go:1: //go:embed all:*"}}
+	expectViolation(t, "nested *_test.go under an embed root",
+		checkGcloudIgnoreAgainstEmbeds(t, "image-build/gcloudignore-mut", "*_test.go\n", nested),
+		"drops embedded file pkg/a/sub/y_test.go")
+
 	// #!include: expansion follows gcloud: relative to the ignore file's
 	// directory, one level deep, no "/" in the name.
 	files := map[string]string{
@@ -581,9 +611,8 @@ func TestGcloudIgnoreContractCheckerDetectsViolations(t *testing.T) {
 	expectViolation(t, "omni .claude/ unanchored",
 		checkGcloudIgnoreAgainstEmbeds(t, "image-build/gcloudignore-omni", mustReplace(t, omni, "\n/.claude/\n", "\n.claude/\n"), omniEmb),
 		"drops embedded file harnesses/claude/home/.claude/settings.json")
-	gke := readRepoFile(t, "image-build/gcloudignore-hub-gke")
-	expectViolation(t, "hub-gke .gemini/ unanchored",
-		checkGcloudIgnoreAgainstEmbeds(t, "image-build/gcloudignore-hub-gke", mustReplace(t, gke, "\n/.gemini/\n", "\n.gemini/\n"), omniEmb),
+	expectViolation(t, "omni .gemini/ unanchored",
+		checkGcloudIgnoreAgainstEmbeds(t, "image-build/gcloudignore-omni", mustReplace(t, omni, "\n/.gemini/\n", "\n.gemini/\n"), omniEmb),
 		"drops embedded file resources/templates/default/home/.gemini/.geminiignore")
 	def := readRepoFile(t, ".gcloudignore")
 	defEmb := listGoEmbeddedFiles(t, tracked, gcloudIgnoreBuildTags[".gcloudignore"])

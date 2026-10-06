@@ -239,14 +239,14 @@ targets; submit it directly from the repo root:
 ```bash
 gcloud builds submit \
   --config=image-build/cloudbuild-hub-gke.yaml \
-  --ignore-file=image-build/gcloudignore-hub-gke \
+  --ignore-file=image-build/gcloudignore-omni \
   --substitutions=_REGISTRY=<registry>,_SHORT_SHA=$(git rev-parse --short HEAD) \
   .
 ```
 
 `--ignore-file` is required because the default `.gcloudignore` drops the web
-source the Dockerfile builds. `gcloudignore-hub-gke` keeps it; its exclusions
-are currently the same as `gcloudignore-omni`'s.
+source the Dockerfile builds. hub-gke uses the omni ignore file,
+`gcloudignore-omni`, which keeps it.
 
 All Cloud Build ignore files (`.gcloudignore` and `image-build/gcloudignore-*`)
 anchor every pattern that names a repo-root path with a leading `/`, as the

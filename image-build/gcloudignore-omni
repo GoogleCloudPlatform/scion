@@ -1,4 +1,6 @@
-# Cloud Build source upload filter for the omni target.
+# Cloud Build source upload filter for the builds that compile the web
+# frontend into the scion binary: the omni target (cloudbuild-omni.yaml) and
+# the hub-gke stage of the repo-root Dockerfile (cloudbuild-hub-gke.yaml).
 #
 # The default .gcloudignore excludes web source files (web/*.json,
 # web/src/, etc.) because existing Cloud Build configs only compile Go
@@ -6,9 +8,11 @@
 # that tag, running `npm install && npm run build` to embed the web
 # frontend. Without this file, the omni build fails at step 8 with
 # "ENOENT: no such file or directory, open '/src/web/package.json'".
+# The root Dockerfile's frontend stage (used by hub-gke) likewise runs
+# `npm ci && npm run build`.
 #
 # Usage: pass --ignore-file=image-build/gcloudignore-omni to
-# gcloud builds submit when building the omni target.
+# gcloud builds submit when building the omni or hub-gke target.
 #
 # Gitignore semantics: a pattern without a slash matches at any depth, which
 # would also drop files under //go:embed roots (e.g. pkg/config/embeds/,
@@ -24,7 +28,7 @@
 # root .gitignore.)
 
 # ---------------------------------------------------------------------------
-# Directories not needed by omni builds
+# Directories not needed by omni or hub-gke builds
 # ---------------------------------------------------------------------------
 /changelog/
 /docs/
@@ -41,7 +45,7 @@
 /skills/
 
 # ---------------------------------------------------------------------------
-# Web frontend — INCLUDE source for omni (unlike .gcloudignore).
+# Web frontend — INCLUDE source for omni and hub-gke (unlike .gcloudignore).
 # Only exclude build artifacts and tooling detritus.
 # ---------------------------------------------------------------------------
 web/node_modules/
