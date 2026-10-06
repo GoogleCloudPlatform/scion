@@ -85,8 +85,18 @@ func TestLegacyRegistration_NameCollidingWithFlatRowRefused_Embedded(t *testing.
 	}
 	assertFlatRowUntouched(t, s, flat)
 
+	// A slug-only collision is refused too (R4: name or slug): "test broker"
+	// differs from the flat row's name but slugifies to its slug.
+	require.Equal(t, flat.Slug, api.Slugify("test broker"))
+	_, err := registerGlobalProjectAndBroker(ctx, s, tid("legacy-new-slug"), "test broker", "http://localhost:9800", nil, true, settings, nil)
+	require.Error(t, err, "slug collides with a flat row")
+	assert.Contains(t, err.Error(), "runtime_broker_name_conflict")
+	_, getErr := s.GetRuntimeBroker(ctx, tid("legacy-new-slug"))
+	assert.ErrorIs(t, getErr, store.ErrNotFound, "no legacy row may be created")
+	assertFlatRowUntouched(t, s, flat)
+
 	// An ID match on the flat row is also a startup error (R4).
-	_, err := registerGlobalProjectAndBroker(ctx, s, flat.ID, "test-broker", "http://localhost:9800", nil, true, settings, nil)
+	_, err = registerGlobalProjectAndBroker(ctx, s, flat.ID, "test-broker", "http://localhost:9800", nil, true, settings, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "runtime_target_changed")
 	assertFlatRowUntouched(t, s, flat)

@@ -143,6 +143,49 @@ func TestServerConfigPut_FileModePreservesRuntimeBrokerInstances(t *testing.T) {
 			t.Fatalf("explicit [] must remove: %+v", got)
 		}
 	})
+	t.Run("null server.broker keeps the stored entry", func(t *testing.T) {
+		flatSettingsHome(t, flatInstanceSettingsYAML)
+		rr := putFileModeServerConfig(t, `{"server":{"broker":null}}`)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("PUT: %d %s", rr.Code, rr.Body.String())
+		}
+		if got := storedInstances(t); !reflect.DeepEqual(got, wantFlatInstance) {
+			t.Fatalf("a null server.broker must keep instances: %+v", got)
+		}
+	})
+	t.Run("null server keeps the stored entry", func(t *testing.T) {
+		flatSettingsHome(t, flatInstanceSettingsYAML)
+		rr := putFileModeServerConfig(t, `{"server":null}`)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("PUT: %d %s", rr.Code, rr.Body.String())
+		}
+		if got := storedInstances(t); !reflect.DeepEqual(got, wantFlatInstance) {
+			t.Fatalf("a null server must keep instances: %+v", got)
+		}
+	})
+	t.Run("explicit null instances removes", func(t *testing.T) {
+		flatSettingsHome(t, flatInstanceSettingsYAML)
+		rr := putFileModeServerConfig(t, `{"server":{"broker":{"enabled":true,"instances":null}}}`)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("PUT: %d %s", rr.Code, rr.Body.String())
+		}
+		if got := storedInstances(t); len(got) != 0 {
+			t.Fatalf("an explicit null must remove: %+v", got)
+		}
+	})
+	t.Run("unrelated non-broker key keeps the stored entry", func(t *testing.T) {
+		path := flatSettingsHome(t, flatInstanceSettingsYAML)
+		rr := putFileModeServerConfig(t, `{"default_template":"other-template"}`)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("PUT: %d %s", rr.Code, rr.Body.String())
+		}
+		if got := storedInstances(t); !reflect.DeepEqual(got, wantFlatInstance) {
+			t.Fatalf("an unrelated edit changed instances: %+v", got)
+		}
+		if after := readFileString(t, path); !strings.Contains(after, "other-template") {
+			t.Fatalf("the unrelated key was not written:\n%s", after)
+		}
+	})
 	t.Run("invalid explicit list is rejected before writing", func(t *testing.T) {
 		path := flatSettingsHome(t, flatInstanceSettingsYAML)
 		before, _ := os.ReadFile(path)

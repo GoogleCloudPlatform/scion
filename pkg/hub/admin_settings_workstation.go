@@ -644,7 +644,11 @@ func validateServerConfigFileKeys(req *ServerConfigUpdateRequest, fileKeys []str
 		// Flat Runtime Broker instances: validated before anything is
 		// written; a null leaf removes them.
 		if errs := config.ValidateRuntimeBrokerInstances(req.Server.Broker.Instances); len(errs) > 0 {
-			return &serverConfigFileValidationError{errs[0].Error()}
+			all := make([]error, 0, len(errs))
+			for _, e := range errs {
+				all = append(all, e)
+			}
+			return &serverConfigFileValidationError{errors.Join(all...).Error()}
 		}
 	}
 	if under("server.shared_dir_storage") && req.Server != nil {

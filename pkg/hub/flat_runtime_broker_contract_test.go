@@ -34,6 +34,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -53,7 +54,6 @@ const pendingFlatDispatch = "pending ptone/scion#3268: flat dispatch not wired y
 type flatHubOpts struct {
 	experimentOn bool
 	linkFlat     bool // flat row is a provider of the project
-	flatDefault  bool // flat row is the project default (implies linkFlat)
 }
 
 type flatHubFixture struct {
@@ -108,11 +108,8 @@ func newFlatHubFixture(t *testing.T, opts flatHubOpts) *flatHubFixture {
 
 	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{ProjectID: project.ID, BrokerID: legacy.ID, BrokerName: legacy.Name, Status: store.BrokerStatusOnline}))
 	project.DefaultRuntimeBrokerID = legacy.ID
-	if opts.linkFlat || opts.flatDefault {
+	if opts.linkFlat {
 		require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{ProjectID: project.ID, BrokerID: flat.ID, BrokerName: flat.Name, Status: store.BrokerStatusOnline}))
-	}
-	if opts.flatDefault {
-		project.DefaultRuntimeBrokerID = flat.ID
 	}
 	require.NoError(t, s.UpdateProject(ctx, project))
 
@@ -165,6 +162,28 @@ func (f *flatHubFixture) projectDefault(t *testing.T, projectID string) string {
 // pinnedAgent stores an agent pinned to the flat Runtime Broker.
 func (f *flatHubFixture) pinnedAgent(t *testing.T, slug, phase string) *store.Agent {
 	t.Helper()
+	return f.pinnedAgentWith(t, slug, phase, nil)
+}
+
+// reincarnationEligible gives an agent a clone-per-agent workspace (a git
+// clone), which handleReincarnateAgent requires before its in-place
+// placement check.
+func reincarnationEligible(a *store.Agent) {
+	if a.AppliedConfig == nil {
+		a.AppliedConfig = &store.AgentAppliedConfig{}
+	}
+	a.AppliedConfig.Workspace = "/tmp/flat-reincarnate-workspace"
+	a.AppliedConfig.GitClone = &api.GitCloneConfig{URL: "https://example.com/flat-reincarnate.git"}
+	if a.AppliedConfig.CreateInputs == nil {
+		a.AppliedConfig.CreateInputs = &store.AgentCreateInputs{}
+	}
+	a.AppliedConfig.CreateInputs.Workspace = "/tmp/flat-reincarnate-workspace"
+}
+
+// pinnedAgentWith is pinnedAgent with a mutation applied before the store
+// write.
+func (f *flatHubFixture) pinnedAgentWith(t *testing.T, slug, phase string, mutate func(*store.Agent)) *store.Agent {
+	t.Helper()
 	a := &store.Agent{
 		ID:                      tid("flat-agent-" + slug + "-" + t.Name()),
 		Slug:                    slug,
@@ -177,6 +196,9 @@ func (f *flatHubFixture) pinnedAgent(t *testing.T, slug, phase string) *store.Ag
 		PinnedRuntimeTargetType: f.flat.RuntimeTarget.Type,
 		AppliedConfig:           &store.AgentAppliedConfig{CreateInputs: &store.AgentCreateInputs{}},
 	}
+	if mutate != nil {
+		mutate(a)
+	}
 	require.NoError(t, f.s.CreateAgent(context.Background(), a))
 	got, err := f.s.GetAgent(context.Background(), a.ID)
 	require.NoError(t, err)
@@ -188,7 +210,14 @@ func (f *flatHubFixture) pinnedAgent(t *testing.T, slug, phase string) *store.Ag
 // would do).
 func (f *flatHubFixture) stalePinnedAgent(t *testing.T, slug, phase string) *store.Agent {
 	t.Helper()
-	a := f.pinnedAgent(t, slug, phase)
+	return f.stalePinnedAgentWith(t, slug, phase, nil)
+}
+
+// stalePinnedAgentWith is stalePinnedAgent with a mutation applied before
+// the first store write.
+func (f *flatHubFixture) stalePinnedAgentWith(t *testing.T, slug, phase string, mutate func(*store.Agent)) *store.Agent {
+	t.Helper()
+	a := f.pinnedAgentWith(t, slug, phase, mutate)
 	a.RuntimeBrokerID = f.legacy.ID
 	require.NoError(t, f.s.UpdateAgent(context.Background(), a))
 	got, err := f.s.GetAgent(context.Background(), a.ID)
@@ -201,6 +230,11 @@ func (f *flatHubFixture) stalePinnedAgent(t *testing.T, slug, phase string) *sto
 // unpinnedAgentOn stores an agent on brokerID with no pin.
 func (f *flatHubFixture) unpinnedAgentOn(t *testing.T, slug, brokerID, phase string) *store.Agent {
 	t.Helper()
+	return f.unpinnedAgentOnWith(t, slug, brokerID, phase, nil)
+}
+
+func (f *flatHubFixture) unpinnedAgentOnWith(t *testing.T, slug, brokerID, phase string, mutate func(*store.Agent)) *store.Agent {
+	t.Helper()
 	a := &store.Agent{
 		ID:              tid("flat-agent-" + slug + "-" + t.Name()),
 		Slug:            slug,
@@ -209,6 +243,9 @@ func (f *flatHubFixture) unpinnedAgentOn(t *testing.T, slug, brokerID, phase str
 		RuntimeBrokerID: brokerID,
 		Phase:           phase,
 		AppliedConfig:   &store.AgentAppliedConfig{CreateInputs: &store.AgentCreateInputs{}},
+	}
+	if mutate != nil {
+		mutate(a)
 	}
 	require.NoError(t, f.s.CreateAgent(context.Background(), a))
 	got, err := f.s.GetAgent(context.Background(), a.ID)
@@ -253,6 +290,87 @@ func jsonField(t *testing.T, v interface{}, key string) string {
 	return s
 }
 
+// startExtrasWireKey returns the value applyStartExtras writes under the
+// frozen wire key for extras ("" if absent). Both transports build start and
+// restart payloads with applyStartExtras, so this is the key the Runtime
+// Broker receives.
+func startExtrasWireKey(extras StartExtras, key string) string {
+	payload := map[string]interface{}{}
+	applyStartExtras(payload, extras)
+	v, _ := payload[key].(string)
+	return v
+}
+
+// countingTokenGen counts agent credential mints.
+type countingTokenGen struct {
+	inner AgentTokenGenerator
+	mints int
+}
+
+func (c *countingTokenGen) GenerateAgentToken(agentID, projectID string, ancestry []string, role AgentRole, scopes []AgentTokenScope) (string, error) {
+	c.mints++
+	return c.inner.GenerateAgentToken(agentID, projectID, ancestry, role, scopes)
+}
+
+func (c *countingTokenGen) GenerateAgentTokenForAgent(ctx context.Context, agent *store.Agent) (string, error) {
+	c.mints++
+	return c.inner.GenerateAgentTokenForAgent(ctx, agent)
+}
+
+// racingPinStore lands a competing first placement just before the handler's
+// own SetAgentPinnedRuntimeTarget, so the handler loses the compare-and-set.
+type racingPinStore struct {
+	store.Store
+	competing store.PinnedPlacement
+	raced     bool
+}
+
+func (r *racingPinStore) SetAgentPinnedRuntimeTarget(ctx context.Context, agentID string, expected, next store.PinnedPlacement) (*store.Agent, error) {
+	if !r.raced {
+		r.raced = true
+		if _, err := r.Store.SetAgentPinnedRuntimeTarget(ctx, agentID, expected, r.competing); err != nil {
+			return nil, err
+		}
+	}
+	return r.Store.SetAgentPinnedRuntimeTarget(ctx, agentID, expected, next)
+}
+
+// slogRecords captures records written through slog's default logger for the
+// rest of the test.
+type slogRecords struct {
+	mu   sync.Mutex
+	recs []slog.Record
+}
+
+func (h *slogRecords) Enabled(context.Context, slog.Level) bool { return true }
+func (h *slogRecords) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.recs = append(h.recs, r.Clone())
+	return nil
+}
+func (h *slogRecords) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *slogRecords) WithGroup(string) slog.Handler      { return h }
+
+func (h *slogRecords) messages() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := make([]string, 0, len(h.recs))
+	for _, r := range h.recs {
+		out = append(out, r.Message)
+	}
+	return out
+}
+
+func captureFlatSlog(t *testing.T) *slogRecords {
+	t.Helper()
+	h := &slogRecords{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(h))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return h
+}
+
 // noAgentWritten asserts the create left no trace: no agent row, no run
 // intent and no dispatch.
 func (f *flatHubFixture) noAgentWritten(t *testing.T, slug string) {
@@ -260,6 +378,17 @@ func (f *flatHubFixture) noAgentWritten(t *testing.T, slug string) {
 	assert.Nil(t, f.agentBySlug(t, slug), "no agent row may be written")
 	assert.False(t, f.client.createCalled, "nothing may be dispatched")
 	assert.False(t, f.client.startCalled, "nothing may be dispatched")
+}
+
+// flatOwnerUser is a project owner (holds project update and agent create)
+// who did not create the fixture Runtime Brokers and so is not admitted to
+// dispatch to the non-auto-provide flat row by canDispatchToBroker.
+func flatOwnerUser(t *testing.T, s store.Store, projectID, name string) *store.User {
+	t.Helper()
+	u := &store.User{ID: tid(name), Email: name + "@example.com", DisplayName: name, Role: store.UserRoleMember, Status: "active", Created: time.Now()}
+	require.NoError(t, s.CreateUser(context.Background(), u))
+	createTestUserWithProjectRole(t, s, u.ID, u.Email, projectID, store.ProjectRoleOwner)
+	return u
 }
 
 func flatMemberUser(t *testing.T, s store.Store, projectID, name string) *store.User {
@@ -287,6 +416,7 @@ func TestFlatCreate_ExpectedTargetMismatchRejectedBeforeSideEffects(t *testing.T
 	f.noAgentWritten(t, "mismatch")
 	require.NoError(t, f.s.AddProjectProvider(context.Background(), &store.ProjectProvider{ProjectID: f.project.ID, BrokerID: f.flat.ID, BrokerName: f.flat.Name, Status: store.BrokerStatusOnline}))
 	before := f.providerIDs(t, f.project.ID)
+	reservationsBefore := brokerReservationCount(t, f.s, f.flat.ID)
 	rec = f.create(t, map[string]interface{}{
 		"name": "mismatch", "runtimeBrokerId": f.flat.ID, "task": "t",
 		"expectedRuntimeTargetId": "some-other-target",
@@ -299,6 +429,7 @@ func TestFlatCreate_ExpectedTargetMismatchRejectedBeforeSideEffects(t *testing.T
 	f.noAgentWritten(t, "mismatch")
 	assert.ElementsMatch(t, before, f.providerIDs(t, f.project.ID), "no provider link may be written")
 	assert.Equal(t, f.legacy.ID, f.projectDefault(t, f.project.ID), "the project default must not change")
+	assert.Equal(t, reservationsBefore, brokerReservationCount(t, f.s, f.flat.ID), "no quota reservation")
 }
 
 func TestFlatCreate_ExpectedTargetTowardLegacyBrokerRejected(t *testing.T) {
@@ -332,6 +463,13 @@ func TestFlatCreate_CheckPrecedence(t *testing.T) {
 		rec := f.create(t, map[string]interface{}{"name": "p1", "runtimeBrokerId": f.flat.ID, "task": "t",
 			"profile": "local", "expectedRuntimeTargetId": "other"})
 		requireAPIError(t, rec, http.StatusPreconditionFailed, ErrCodeUnsupportedCapability)
+		// With the capability present, the flat refusal is experiment_disabled.
+		f.flat.Capabilities.EmptyPerAgentWorkspace = true
+		require.NoError(t, f.s.UpdateRuntimeBroker(ctx, f.flat))
+		rec = f.create(t, map[string]interface{}{"name": "p1", "runtimeBrokerId": f.flat.ID, "task": "t",
+			"profile": "local", "expectedRuntimeTargetId": "other"})
+		requireAPIError(t, rec, http.StatusPreconditionFailed, ErrCodeExperimentDisabled)
+		f.noAgentWritten(t, "p1")
 	})
 	t.Run("new create: experiment, then target, then profile", func(t *testing.T) {
 		f := newFlatHubFixture(t, flatHubOpts{experimentOn: false, linkFlat: true})
@@ -346,12 +484,14 @@ func TestFlatCreate_CheckPrecedence(t *testing.T) {
 	})
 	t.Run("lifecycle branch: stale pin, then client target, then profile", func(t *testing.T) {
 		f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
+		// "resume": true resumes a stopped agent in place (the lifecycle
+		// branch of section 9 step 4).
 		f.stalePinnedAgent(t, "stale-p", string(state.PhaseStopped))
-		body := map[string]interface{}{"name": "stale-p", "task": "t", "profile": "local", "expectedRuntimeTargetId": "other"}
+		body := map[string]interface{}{"name": "stale-p", "task": "t", "resume": true, "profile": "local", "expectedRuntimeTargetId": "other"}
 		requireAPIError(t, f.create(t, body), http.StatusConflict, ErrCodeRuntimeTargetPinStale)
 
 		f.pinnedAgent(t, "pinned-p", string(state.PhaseStopped))
-		body = map[string]interface{}{"name": "pinned-p", "task": "t", "profile": "local", "expectedRuntimeTargetId": "other"}
+		body = map[string]interface{}{"name": "pinned-p", "task": "t", "resume": true, "profile": "local", "expectedRuntimeTargetId": "other"}
 		requireAPIError(t, f.create(t, body), http.StatusConflict, ErrCodeRuntimeTargetMismatch)
 		delete(body, "expectedRuntimeTargetId")
 		requireAPIError(t, f.create(t, body), http.StatusUnprocessableEntity, ErrCodeRuntimeProfileUnsupported)
@@ -404,6 +544,15 @@ func TestFlatCreate_PassthroughGateUsesTargetType(t *testing.T) {
 	allowed, pinnedProfile := f.srv.hubDefaultPassthroughAllowed(context.Background(), f.flat.ID, f.project.ID, "agent", "")
 	assert.True(t, allowed, "a docker flat target is a local container runtime: the gate evaluates RuntimeTarget.Type")
 	assert.Empty(t, pinnedProfile, "no profile is pinned for a flat target")
+
+	// A non-local target type is denied by the same gate.
+	k8s := &store.RuntimeBroker{ID: tid("flat-k8s-" + t.Name()), Name: "flat-k8s", Slug: "flat-k8s", Status: store.BrokerStatusOnline,
+		Endpoint: "http://k8s.invalid", RuntimeTarget: &api.RuntimeTargetDescriptor{ID: tid("flat-k8s-target-" + t.Name()), Type: "kubernetes"}}
+	require.NoError(t, f.s.CreateRuntimeBroker(context.Background(), k8s))
+	f.srv.SetEmbeddedBrokerID(k8s.ID)
+	allowed, pinnedProfile = f.srv.hubDefaultPassthroughAllowed(context.Background(), k8s.ID, f.project.ID, "agent", "")
+	assert.False(t, allowed, "a kubernetes target is not a local container runtime")
+	assert.Empty(t, pinnedProfile)
 }
 
 func TestFlatCreate_PinsPlacementAndSendsExpectedTarget(t *testing.T) {
@@ -436,12 +585,13 @@ func TestFlatCreate_ExperimentOffExistingPinnedAgentLifecycleWorks(t *testing.T)
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: false, linkFlat: true})
 	a := f.pinnedAgent(t, "resume-me", string(state.PhaseStopped))
 	// No runtimeBrokerId: the resolved default (legacy) differs from the
-	// agent's Runtime Broker; create-on-existing resumes it in place.
-	rec := f.create(t, map[string]interface{}{"name": "resume-me", "task": "t"})
+	// agent's Runtime Broker; create-on-existing with resume resumes it in
+	// place on its own Runtime Broker.
+	rec := f.create(t, map[string]interface{}{"name": "resume-me", "task": "t", "resume": true})
 	require.Truef(t, rec.Code == http.StatusOK || rec.Code == http.StatusCreated, "resume must work with the experiment off: %d %s", rec.Code, rec.Body.String())
 	require.True(t, f.client.startCalled)
 	assert.Equal(t, f.flat.ID, f.client.lastBrokerID, "dispatched to the agent's own Runtime Broker")
-	assert.Equal(t, f.flat.RuntimeTarget.ID, jsonField(t, f.client.lastStartExtras, "ExpectedRuntimeTargetID"),
+	assert.Equal(t, f.flat.RuntimeTarget.ID, startExtrasWireKey(f.client.lastStartExtras, "expectedRuntimeTargetId"),
 		"the expected target is sent whatever the experiment state")
 
 	// Stop it again and resume with a matching client-supplied target.
@@ -450,53 +600,84 @@ func TestFlatCreate_ExperimentOffExistingPinnedAgentLifecycleWorks(t *testing.T)
 	got.Phase = string(state.PhaseStopped)
 	require.NoError(t, f.s.UpdateAgent(context.Background(), got))
 	f.client.startCalled = false
-	rec = f.create(t, map[string]interface{}{"name": "resume-me", "task": "t", "expectedRuntimeTargetId": f.flat.RuntimeTarget.ID})
+	rec = f.create(t, map[string]interface{}{"name": "resume-me", "task": "t", "resume": true, "expectedRuntimeTargetId": f.flat.RuntimeTarget.ID})
 	require.Truef(t, rec.Code == http.StatusOK || rec.Code == http.StatusCreated, "matching target accepted with the experiment off: %d %s", rec.Code, rec.Body.String())
 	assert.True(t, f.client.startCalled)
+	assert.Equal(t, f.flat.RuntimeTarget.ID, startExtrasWireKey(f.client.lastStartExtras, "expectedRuntimeTargetId"))
 }
 
 func TestFlatCreate_ExistingAgentChecksUseAgentBrokerNotResolved(t *testing.T) {
 	t.Skip(pendingFlatDispatch)
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
 	f.pinnedAgent(t, "existing", string(state.PhaseStopped))
-	// The resolved Runtime Broker (explicit legacy) is not the one checked:
-	// the agent's pin is. A matching expected target passes, a mismatching
-	// one is compared with the pin and refused.
-	rec := f.create(t, map[string]interface{}{"name": "existing", "runtimeBrokerId": f.legacy.ID, "task": "t",
+	// The request names the legacy row explicitly, but a resumed existing
+	// agent is checked against its own Runtime Broker and pin: a mismatching
+	// expected target is refused with the pin as the actual target (not the
+	// resolved legacy row's empty one), before anything is dispatched.
+	rec := f.create(t, map[string]interface{}{"name": "existing", "runtimeBrokerId": f.legacy.ID, "task": "t", "resume": true,
+		"expectedRuntimeTargetId": "other"})
+	d := requireAPIError(t, rec, http.StatusConflict, ErrCodeRuntimeTargetMismatch)
+	assert.Equal(t, f.flat.ID, d["runtimeBrokerId"])
+	assert.Equal(t, f.flat.RuntimeTarget.ID, d["actualRuntimeTargetId"])
+	assert.False(t, f.client.startCalled)
+
+	// A matching expected target passes; the start goes to the agent's own
+	// Runtime Broker with the pinned target.
+	rec = f.create(t, map[string]interface{}{"name": "existing", "runtimeBrokerId": f.legacy.ID, "task": "t", "resume": true,
 		"expectedRuntimeTargetId": f.flat.RuntimeTarget.ID})
 	require.Truef(t, rec.Code == http.StatusOK || rec.Code == http.StatusCreated, "%d %s", rec.Code, rec.Body.String())
 	assert.Equal(t, f.flat.ID, f.client.lastBrokerID)
+	assert.Equal(t, f.flat.RuntimeTarget.ID, startExtrasWireKey(f.client.lastStartExtras, "expectedRuntimeTargetId"))
 }
 
 func TestFlatCreate_DeleteAndRecreateChecksBeforeDelete(t *testing.T) {
 	t.Skip(pendingFlatDispatch)
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: false, linkFlat: true})
-	// A legacy agent in a terminal phase; recreating it on the flat row is a
-	// new create, refused (experiment off) before the delete.
-	old := f.unpinnedAgentOn(t, "recreate-me", f.legacy.ID, string(state.PhaseError))
-	rec := f.create(t, map[string]interface{}{"name": "recreate-me", "runtimeBrokerId": f.flat.ID, "task": "t"})
+	// A legacy agent still provisioning, re-created with gatherEnv: the
+	// env-gather re-provisioning branch deletes and re-creates it. Re-creating
+	// it on the flat row is a new create, refused (experiment off) before the
+	// delete.
+	old := f.unpinnedAgentOn(t, "recreate-me", f.legacy.ID, string(state.PhaseProvisioning))
+	rec := f.create(t, map[string]interface{}{"name": "recreate-me", "runtimeBrokerId": f.flat.ID, "task": "t", "gatherEnv": true})
 	requireAPIError(t, rec, http.StatusPreconditionFailed, ErrCodeExperimentDisabled)
 	still, err := f.s.GetAgent(context.Background(), old.ID)
-	require.NoError(t, err, "the existing agent must not be deleted")
+	require.NoError(t, err, "the existing agent row must not be deleted")
 	assert.Equal(t, f.legacy.ID, still.RuntimeBrokerID)
-	assert.False(t, f.client.deleteCalled)
+	assert.Equal(t, string(state.PhaseProvisioning), still.Phase)
+	assert.False(t, f.client.deleteCalled, "no delete is dispatched")
+	assert.False(t, f.client.createCalled)
 }
 
 func TestFlatCreate_ExistingAgentWithoutBrokerTreatedAsNewCreate(t *testing.T) {
 	t.Skip(pendingFlatDispatch)
 	ctx := context.Background()
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
+
+	// The new-create checks run: with the experiment off the first placement
+	// is refused and nothing is pinned or dispatched.
+	off := f.unpinnedAgentOn(t, "no-broker-off", "", string(state.PhaseCreated))
+	setFlatExperiment(t, f.srv, false)
+	rec := f.create(t, map[string]interface{}{"name": "no-broker-off", "runtimeBrokerId": f.flat.ID, "task": "t"})
+	requireAPIError(t, rec, http.StatusPreconditionFailed, ErrCodeExperimentDisabled)
+	gotOff, err := f.s.GetAgent(ctx, off.ID)
+	require.NoError(t, err)
+	assert.False(t, gotOff.IsPinned())
+	assert.Equal(t, "", gotOff.RuntimeBrokerID)
+	assert.False(t, f.client.startCalled)
+	setFlatExperiment(t, f.srv, true)
+
+	// Success: pinned with runtime_broker_id in one state_version-bumping
+	// write before the start dispatch, which carries the expected target.
 	a := f.unpinnedAgentOn(t, "no-broker", "", string(state.PhaseCreated))
 	before := a.StateVersion
-
-	rec := f.create(t, map[string]interface{}{"name": "no-broker", "runtimeBrokerId": f.flat.ID, "task": "t"})
+	rec = f.create(t, map[string]interface{}{"name": "no-broker", "runtimeBrokerId": f.flat.ID, "task": "t"})
 	require.Truef(t, rec.Code == http.StatusOK || rec.Code == http.StatusCreated, "%d %s", rec.Code, rec.Body.String())
 	got, err := f.s.GetAgent(ctx, a.ID)
 	require.NoError(t, err)
 	assert.Equal(t, f.flat.ID, got.RuntimeBrokerID)
 	assert.True(t, got.PinValid(), "pinned together with runtime_broker_id")
 	assert.Greater(t, got.StateVersion, before)
-	assert.Equal(t, f.flat.RuntimeTarget.ID, jsonField(t, f.client.lastStartExtras, "ExpectedRuntimeTargetID"))
+	assert.Equal(t, f.flat.RuntimeTarget.ID, startExtrasWireKey(f.client.lastStartExtras, "expectedRuntimeTargetId"))
 	assert.NotEqual(t, string(state.PhaseCreated), got.Phase, "the post-dispatch update landed without a version conflict")
 
 	// A failed start leaves the first placement persisted.
@@ -506,34 +687,35 @@ func TestFlatCreate_ExistingAgentWithoutBrokerTreatedAsNewCreate(t *testing.T) {
 	gotB, err := f.s.GetAgent(ctx, b.ID)
 	require.NoError(t, err)
 	assert.True(t, gotB.PinValid(), "the first placement stays persisted when the start fails")
-
-	// A concurrent placement gets 409 conflict.
-	c := f.unpinnedAgentOn(t, "no-broker-race", "", string(state.PhaseCreated))
-	_, err = f.s.SetAgentPinnedRuntimeTarget(ctx, c.ID, store.PinnedPlacement{},
-		store.PinnedPlacement{RuntimeBrokerID: f.flat.ID, RuntimeTargetID: f.flat.RuntimeTarget.ID, RuntimeTargetType: "docker"})
-	require.NoError(t, err)
 	f.client.returnErr = nil
-	cur, err := f.s.GetAgent(ctx, c.ID)
+
+	// A concurrent placement lands between the handler's read and its
+	// compare-and-set: the handler answers 409 conflict before any dispatch.
+	other := &store.RuntimeBroker{ID: tid("racing-flat-" + t.Name()), Name: "racing-flat", Slug: "racing-flat", Status: store.BrokerStatusOnline,
+		Endpoint: "http://racing.invalid", RuntimeTarget: &api.RuntimeTargetDescriptor{ID: tid("racing-target-" + t.Name()), Type: "docker"}}
+	require.NoError(t, f.s.CreateRuntimeBroker(ctx, other))
+	c := f.unpinnedAgentOn(t, "no-broker-race", "", string(state.PhaseCreated))
+	f.srv.store = &racingPinStore{Store: f.s, competing: store.PinnedPlacement{RuntimeBrokerID: other.ID, RuntimeTargetID: other.RuntimeTarget.ID, RuntimeTargetType: "docker"}}
+	f.client.startCalled = false
+	rec = f.create(t, map[string]interface{}{"name": "no-broker-race", "runtimeBrokerId": f.flat.ID, "task": "t"})
+	requireAPIError(t, rec, http.StatusConflict, ErrCodeConflict)
+	assert.False(t, f.client.startCalled, "nothing is dispatched after a lost placement")
+	gotC, err := f.s.GetAgent(ctx, c.ID)
 	require.NoError(t, err)
-	_ = cur
-	// (the concurrent writer already placed it: a second first-placement
-	// attempt from a stale read must answer 409 conflict)
-	_, err = f.s.SetAgentPinnedRuntimeTarget(ctx, c.ID, store.PinnedPlacement{},
-		store.PinnedPlacement{RuntimeBrokerID: f.flat.ID, RuntimeTargetID: f.flat.RuntimeTarget.ID, RuntimeTargetType: "docker"})
-	require.ErrorIs(t, err, store.ErrPinnedPlacementChanged)
+	assert.Equal(t, other.ID, gotC.RuntimeBrokerID, "the concurrent placement stands")
 }
 
 func TestFlatCreate_LifecycleClientExpectedTargetComparedWithPin(t *testing.T) {
 	t.Skip(pendingFlatDispatch)
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
 	f.pinnedAgent(t, "pinned-life", string(state.PhaseStopped))
-	rec := f.create(t, map[string]interface{}{"name": "pinned-life", "task": "t", "expectedRuntimeTargetId": "other"})
+	rec := f.create(t, map[string]interface{}{"name": "pinned-life", "task": "t", "resume": true, "expectedRuntimeTargetId": "other"})
 	d := requireAPIError(t, rec, http.StatusConflict, ErrCodeRuntimeTargetMismatch)
 	assert.Equal(t, f.flat.RuntimeTarget.ID, d["actualRuntimeTargetId"])
 
 	// An unpinned agent on a legacy row mismatches with an empty actual.
 	f.unpinnedAgentOn(t, "legacy-life", f.legacy.ID, string(state.PhaseStopped))
-	rec = f.create(t, map[string]interface{}{"name": "legacy-life", "task": "t", "expectedRuntimeTargetId": "other"})
+	rec = f.create(t, map[string]interface{}{"name": "legacy-life", "task": "t", "resume": true, "expectedRuntimeTargetId": "other"})
 	d = requireAPIError(t, rec, http.StatusConflict, ErrCodeRuntimeTargetMismatch)
 	assert.Equal(t, "", d["actualRuntimeTargetId"])
 	assert.False(t, f.client.startCalled)
@@ -542,20 +724,34 @@ func TestFlatCreate_LifecycleClientExpectedTargetComparedWithPin(t *testing.T) {
 func TestFlatCreate_RuntimeBrokerRejectionRelayed(t *testing.T) {
 	t.Skip(pendingFlatDispatch)
 	cases := []struct {
-		status int
-		code   string
+		status  int
+		code    string
+		details string
+		keys    []string
 	}{
-		{http.StatusConflict, ErrCodeRuntimeTargetMismatch},
-		{http.StatusUnprocessableEntity, ErrCodeRuntimeProfileUnsupported},
-		{http.StatusPreconditionFailed, ErrCodeRuntimeTargetRequired},
+		{http.StatusConflict, ErrCodeRuntimeTargetMismatch, `"expectedRuntimeTargetId":"x","actualRuntimeTargetId":"y"`,
+			[]string{"runtimeBrokerId", "expectedRuntimeTargetId", "actualRuntimeTargetId"}},
+		{http.StatusUnprocessableEntity, ErrCodeRuntimeProfileUnsupported, `"profile":"local"`,
+			[]string{"runtimeBrokerId", "profile"}},
+		{http.StatusPreconditionFailed, ErrCodeRuntimeTargetRequired, ``,
+			[]string{"runtimeBrokerId"}},
 	}
 	for _, c := range cases {
 		t.Run(c.code, func(t *testing.T) {
 			f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
+			extra := ""
+			if c.details != "" {
+				extra = "," + c.details
+			}
+			// The Runtime Broker envelope carries start markers, which the
+			// Hub public envelope strips.
 			f.client.returnErr = &brokerStatusError{StatusCode: c.status, Body: fmt.Sprintf(
-				`{"error":{"code":%q,"message":"refused","details":{"runtimeBrokerId":%q,"startAttempted":false}}}`, c.code, f.flat.ID)}
+				`{"error":{"code":%q,"message":"refused","details":{"runtimeBrokerId":%q%s,"startAttempted":true,"runId":"run-1"}}}`, c.code, f.flat.ID, extra)}
 			rec := f.create(t, map[string]interface{}{"name": "relayed", "runtimeBrokerId": f.flat.ID, "task": "t"})
 			d := requireAPIError(t, rec, c.status, c.code)
+			for _, k := range c.keys {
+				assert.Contains(t, d, k, "frozen details key %q", k)
+			}
 			assert.Equal(t, f.flat.ID, d["runtimeBrokerId"])
 			requireNoStartMarkers(t, d)
 			assert.Nil(t, f.agentBySlug(t, "relayed"), "the create is rolled back")
@@ -566,17 +762,18 @@ func TestFlatCreate_RuntimeBrokerRejectionRelayed(t *testing.T) {
 func TestFlatCreate_AccessCheckBeforeLink(t *testing.T) {
 	t.Skip(pendingFlatDispatch)
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true})
-	// A legacy, unlinked, non-auto-provide row: a project member without
-	// broker dispatch permission is denied before any link is written.
-	unlinked := &store.RuntimeBroker{ID: tid("unlinked-legacy-" + t.Name()), Name: "unlinked-legacy", Slug: "unlinked-legacy",
-		Status: store.BrokerStatusOnline, Endpoint: "http://unlinked.invalid"}
-	require.NoError(t, f.s.CreateRuntimeBroker(context.Background(), unlinked))
-	member := flatMemberUser(t, f.s, f.project.ID, "flat-access-member")
+	// The caller is a project owner holding project update and agent create
+	// but not Runtime Broker dispatch on the non-auto-provide flat row
+	// (dispatch is authorized only by canDispatchToBroker). Dispatch
+	// authorization runs before any link: today's authorization response,
+	// and no provider row.
+	owner := flatOwnerUser(t, f.s, f.project.ID, "flat-access-owner")
 	before := f.providerIDs(t, f.project.ID)
-	rec := doRequestAsUser(t, f.srv, member, http.MethodPost, "/api/v1/projects/"+f.project.ID+"/agents",
-		map[string]interface{}{"name": "access", "runtimeBrokerId": unlinked.ID, "task": "t"})
+	rec := doRequestAsUser(t, f.srv, owner, http.MethodPost, "/api/v1/projects/"+f.project.ID+"/agents",
+		map[string]interface{}{"name": "access", "runtimeBrokerId": f.flat.ID, "task": "t"})
 	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
-	assert.ElementsMatch(t, before, f.providerIDs(t, f.project.ID))
+	assert.ElementsMatch(t, before, f.providerIDs(t, f.project.ID), "no provider row is written before dispatch authorization")
+	assert.Equal(t, f.legacy.ID, f.projectDefault(t, f.project.ID))
 	f.noAgentWritten(t, "access")
 }
 
@@ -610,32 +807,50 @@ func TestFlatCreate_ExplicitLinkThenCreateWithBrokerIDOnly(t *testing.T) {
 func TestFlatCreate_UnlinkedFlatRowAuthorizationWins(t *testing.T) {
 	t.Skip(pendingFlatDispatch)
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true})
-	member := flatMemberUser(t, f.s, f.project.ID, "flat-unlinked-member")
-	rec := doRequestAsUser(t, f.srv, member, http.MethodPost, "/api/v1/projects/"+f.project.ID+"/agents",
+	owner := flatOwnerUser(t, f.s, f.project.ID, "flat-unlinked-owner")
+	rec := doRequestAsUser(t, f.srv, owner, http.MethodPost, "/api/v1/projects/"+f.project.ID+"/agents",
 		map[string]interface{}{"name": "authz-wins", "runtimeBrokerId": f.flat.ID, "task": "t"})
 	assert.Equal(t, http.StatusForbidden, rec.Code, "authorization wins over runtime_broker_not_linked: %s", rec.Body.String())
 	assert.NotEqual(t, ErrCodeRuntimeBrokerNotLinked, decodeFlatAPIError(t, rec).Code)
+	assert.NotContains(t, f.providerIDs(t, f.project.ID), f.flat.ID, "no provider row")
 	f.noAgentWritten(t, "authz-wins")
+
+	// Positive control: an admitted caller gets runtime_broker_not_linked.
+	rec = f.create(t, map[string]interface{}{"name": "authz-wins", "runtimeBrokerId": f.flat.ID, "task": "t"})
+	requireAPIError(t, rec, http.StatusUnprocessableEntity, ErrCodeRuntimeBrokerNotLinked)
+	assert.NotContains(t, f.providerIDs(t, f.project.ID), f.flat.ID)
 }
 
 func TestFlatCreate_UnlinkedFlatRowNotReachedThroughDefaults(t *testing.T) {
 	t.Skip(pendingFlatDispatch)
 	ctx := context.Background()
-	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true})
-	// Point the project default at the unlinked flat row (as a stale default
-	// could): selection only considers linked providers, so the create falls
-	// through to the linked legacy row exactly as today.
-	f.project.DefaultRuntimeBrokerID = f.flat.ID
-	require.NoError(t, f.s.UpdateProject(ctx, f.project))
-	rec := f.create(t, map[string]interface{}{"name": "defaults", "task": "t"})
-	require.NotEqual(t, http.StatusUnprocessableEntity, rec.Code, "the default fall-through never yields runtime_broker_not_linked: %s", rec.Body.String())
-	if rec.Code == http.StatusCreated {
-		a := f.agentBySlug(t, "defaults")
+	t.Run("project default pointing at an unlinked flat row", func(t *testing.T) {
+		f := newFlatHubFixture(t, flatHubOpts{experimentOn: true})
+		// Defaults select only among the project's linked providers, so an
+		// unlinked flat project default answers today's 422
+		// no_runtime_broker; it never becomes runtime_broker_not_linked.
+		f.project.DefaultRuntimeBrokerID = f.flat.ID
+		require.NoError(t, f.s.UpdateProject(ctx, f.project))
+		rec := f.create(t, map[string]interface{}{"name": "defaults", "task": "t"})
+		requireAPIError(t, rec, http.StatusUnprocessableEntity, ErrCodeNoRuntimeBroker)
+		assert.NotContains(t, f.providerIDs(t, f.project.ID), f.flat.ID, "no link is written")
+		f.noAgentWritten(t, "defaults")
+	})
+	t.Run("hub default pointing at an unlinked flat row falls through", func(t *testing.T) {
+		f := newFlatHubFixture(t, flatHubOpts{experimentOn: true})
+		f.project.DefaultRuntimeBrokerID = ""
+		require.NoError(t, f.s.UpdateProject(ctx, f.project))
+		f.srv.mu.Lock()
+		f.srv.config.AgentDefaults.DefaultRuntimeBroker = f.flat.ID
+		f.srv.mu.Unlock()
+		rec := f.create(t, map[string]interface{}{"name": "hub-default", "task": "t"})
+		require.Equal(t, http.StatusCreated, rec.Code, "the hub default falls through to the single linked provider: %s", rec.Body.String())
+		a := f.agentBySlug(t, "hub-default")
 		require.NotNil(t, a)
 		assert.Equal(t, f.legacy.ID, a.RuntimeBrokerID)
 		assert.False(t, a.IsPinned())
-	}
-	assert.NotContains(t, f.providerIDs(t, f.project.ID), f.flat.ID)
+		assert.NotContains(t, f.providerIDs(t, f.project.ID), f.flat.ID, "no link is written")
+	})
 }
 
 func TestFlatCreate_AuthorizationBeforeFlatChecks(t *testing.T) {
@@ -643,15 +858,20 @@ func TestFlatCreate_AuthorizationBeforeFlatChecks(t *testing.T) {
 	// Fixture: a linked flat row, experiment off, with a profile and a
 	// mismatching expected target: every flat check would fail.
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: false, linkFlat: true})
+	body := map[string]interface{}{"name": "authz-first", "runtimeBrokerId": f.flat.ID, "task": "t",
+		"profile": "local", "expectedRuntimeTargetId": "other"}
 	member := flatMemberUser(t, f.s, f.project.ID, "flat-authz-member")
-	rec := doRequestAsUser(t, f.srv, member, http.MethodPost, "/api/v1/projects/"+f.project.ID+"/agents",
-		map[string]interface{}{"name": "authz-first", "runtimeBrokerId": f.flat.ID, "task": "t",
-			"profile": "local", "expectedRuntimeTargetId": "other"})
+	rec := doRequestAsUser(t, f.srv, member, http.MethodPost, "/api/v1/projects/"+f.project.ID+"/agents", body)
 	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
 	code := decodeFlatAPIError(t, rec).Code
 	for _, flatCode := range []string{ErrCodeExperimentDisabled, ErrCodeRuntimeTargetMismatch, ErrCodeRuntimeProfileUnsupported} {
 		assert.NotEqual(t, flatCode, code, "no flat code is reported when authorization fails")
 	}
+	f.noAgentWritten(t, "authz-first")
+
+	// Positive control: the same request from an admitted caller gets the
+	// first flat code.
+	requireAPIError(t, f.create(t, body), http.StatusPreconditionFailed, ErrCodeExperimentDisabled)
 	f.noAgentWritten(t, "authz-first")
 }
 
@@ -660,11 +880,20 @@ func TestFlatCreate_FlatChecksDoNotGrantDispatch(t *testing.T) {
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
 	member := flatMemberUser(t, f.s, f.project.ID, "flat-nogrant-member")
 	// Passes every flat check (experiment on, matching target, no profile).
-	rec := doRequestAsUser(t, f.srv, member, http.MethodPost, "/api/v1/projects/"+f.project.ID+"/agents",
-		map[string]interface{}{"name": "no-grant", "runtimeBrokerId": f.flat.ID, "task": "t",
-			"expectedRuntimeTargetId": f.flat.RuntimeTarget.ID})
+	body := map[string]interface{}{"name": "no-grant", "runtimeBrokerId": f.flat.ID, "task": "t",
+		"expectedRuntimeTargetId": f.flat.RuntimeTarget.ID}
+	rec := doRequestAsUser(t, f.srv, member, http.MethodPost, "/api/v1/projects/"+f.project.ID+"/agents", body)
 	assert.Equal(t, http.StatusForbidden, rec.Code, "canDispatchToBroker still decides: %s", rec.Body.String())
 	f.noAgentWritten(t, "no-grant")
+
+	// Positive control: an admitted caller's identical request is created
+	// and pinned.
+	rec = f.create(t, body)
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+	a := f.agentBySlug(t, "no-grant")
+	require.NotNil(t, a)
+	assert.True(t, a.PinValid())
+	assert.Equal(t, f.flat.RuntimeTarget.ID, a.PinnedRuntimeTargetID)
 }
 
 func TestLegacyCreate_AgentCallerCreateTimeLinkUnchanged(t *testing.T) {
@@ -675,12 +904,17 @@ func TestLegacyCreate_AgentCallerCreateTimeLinkUnchanged(t *testing.T) {
 	setFlatExperiment(t, f.srv, true)
 
 	// An agent caller with agent-create scope names an explicit, unlinked
-	// legacy row: the in-resolver link still happens, then
-	// checkBrokerDispatchAccess passes through brokerServesProject, as today.
+	// legacy row: the resolver's project-update CheckAccess denies it, so it
+	// gets today's 403 and no provider link is written (unchanged).
 	rec := f.asAgent(t, http.MethodPost, "/api/v1/projects/"+f.proj.ID+"/agents",
 		CreateAgentRequest{Name: "agent-linked", RuntimeBrokerID: f.unlinked.ID}, ScopeAgentCreate)
-	assert.NotEqual(t, http.StatusUnprocessableEntity, rec.Code, "legacy rows are linked as today: %s", rec.Body.String())
+	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
 	assert.NotEqual(t, ErrCodeRuntimeBrokerNotLinked, decodeAPIErrorIfAny(rec))
+	providers, err := f.store.GetProjectProviders(context.Background(), f.proj.ID)
+	require.NoError(t, err)
+	for _, p := range providers {
+		assert.NotEqual(t, f.unlinked.ID, p.BrokerID, "no provider link may be written for the agent caller")
+	}
 
 	// A caller denied by canDispatchToBroker who sends an
 	// expectedRuntimeTargetId toward an unlinked legacy row gets today's 403.
@@ -749,16 +983,24 @@ func TestFlatStart_StalePinRefused_Reconcile(t *testing.T) {
 	a := f.stalePinnedAgent(t, "stale-reconcile", string(state.PhaseStopped))
 	args, err := MarshalDispatchArgs(&StartDispatchArgs{Task: "t"})
 	require.NoError(t, err)
-	result, execErr := f.srv.executeDispatch(context.Background(), store.BrokerDispatch{
-		ID: tid("dispatch-" + t.Name()), BrokerID: a.RuntimeBrokerID, AgentID: a.ID, Op: "start", Args: args,
-	})
+	d := store.BrokerDispatch{ID: tid("dispatch-" + t.Name()), BrokerID: a.RuntimeBrokerID, AgentID: a.ID, Op: "start", Args: args}
+	_, execErr := f.srv.executeDispatch(context.Background(), d)
 	require.Error(t, execErr, "the dispatcher backstop refuses")
+	assert.False(t, f.client.startCalled)
+
+	// The executing node carries the typed refusal in the dispatch failure
+	// envelope (what reconcileBroker records with FailBrokerDispatch), and
+	// the requesting node rebuilds it from that envelope.
+	envelope := dispatchFailureResult(execErr)
+	require.NotEmpty(t, envelope, "the refusal travels in the dispatch failure envelope")
+	rebuilt := dispatchFailureError(&store.BrokerDispatch{Op: "start", Result: envelope, Error: execErr.Error()})
 	var refusal *RuntimeTargetRefusal
-	require.True(t, errors.As(execErr, &refusal), "a typed refusal, got %v", execErr)
+	require.True(t, errors.As(rebuilt, &refusal), "a typed refusal rebuilt from the envelope, got %v", rebuilt)
 	assert.Equal(t, ErrCodeRuntimeTargetPinStale, refusal.Code)
 	assert.Equal(t, http.StatusConflict, refusal.Status)
-	assert.Contains(t, result, ErrCodeRuntimeTargetPinStale, "the refusal travels in the dispatch result envelope")
-	assert.False(t, f.client.startCalled)
+	assert.Equal(t, a.ID, refusal.Details["agentId"])
+	assert.Equal(t, f.flat.ID, refusal.Details["pinnedRuntimeBrokerId"])
+	assert.Equal(t, f.legacy.ID, refusal.Details["runtimeBrokerId"])
 }
 
 func TestFlatStart_StalePinRefused_WakeDM(t *testing.T) {
@@ -769,6 +1011,7 @@ func TestFlatStart_StalePinRefused_WakeDM(t *testing.T) {
 	require.NotNil(t, dmErr)
 	assert.Equal(t, http.StatusConflict, dmErr.HTTPStatus)
 	assert.Equal(t, ErrCodeRuntimeTargetPinStale, dmErr.Code)
+	requireStalePinDetails(t, dmErr.Details, a, f)
 	assert.False(t, f.client.startCalled)
 }
 
@@ -795,10 +1038,18 @@ func TestFlatStart_StalePinRefusalIsConfirmedNotActedOn(t *testing.T) {
 
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
 	a := f.stalePinnedAgent(t, "stale-classify", string(state.PhaseStopped))
-	err := f.srv.GetDispatcher().DispatchAgentStart(context.Background(), a, "t", false)
+	// A dispatcher that mints agent credentials through the Hub, counted.
+	minter := &countingTokenGen{inner: f.srv}
+	disp := NewHTTPAgentDispatcherWithClient(f.s, f.client, false, slog.Default())
+	disp.SetTokenGenerator(minter)
+	err := disp.DispatchAgentStart(context.Background(), a, "t", false)
 	require.Error(t, err)
 	assert.True(t, isConfirmedStartNotActedOnError(err))
-	assert.False(t, f.client.startCalled, "no credential is minted and nothing is sent")
+	var typed *RuntimeTargetRefusal
+	require.True(t, errors.As(err, &typed))
+	assert.Equal(t, ErrCodeRuntimeTargetPinStale, typed.Code)
+	assert.Equal(t, 0, minter.mints, "no agent credential is minted")
+	assert.False(t, f.client.startCalled, "nothing is sent")
 	assert.False(t, f.client.stopCalled, "no compensating stop")
 }
 
@@ -827,22 +1078,43 @@ func TestFlatStart_RuntimeBrokerMismatchOnStartRelayed(t *testing.T) {
 
 func TestFlatStart_RefusalIsTerminalForIntent(t *testing.T) {
 	t.Skip(pendingFlatDispatch)
+	ctx := context.Background()
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
 	a := f.stalePinnedAgent(t, "terminal", string(state.PhaseStopped))
-	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/start", nil)
-	requireAPIError(t, rec, http.StatusConflict, ErrCodeRuntimeTargetPinStale)
-	got, err := f.s.GetAgent(context.Background(), a.ID)
+	// The requesting node recorded a running intent and queued the start;
+	// the executing node reaches the refusal only in the dispatcher backstop.
+	_, err := f.s.SetRunIntent(ctx, a.ID, store.RunIntentRunning)
 	require.NoError(t, err)
-	assert.Contains(t, got.Message, ErrCodeRuntimeTargetPinStale, "the agent message carries the refusal")
-
-	// Executing the same start again (as a cross-node executor would) does
-	// not dispatch: no hot retry loop.
 	args, err := MarshalDispatchArgs(&StartDispatchArgs{Task: "t"})
 	require.NoError(t, err)
-	_, _ = f.srv.executeDispatch(context.Background(), store.BrokerDispatch{
-		ID: tid("dispatch-terminal-" + t.Name()), BrokerID: got.RuntimeBrokerID, AgentID: got.ID, Op: "start", Args: args,
-	})
-	assert.False(t, f.client.startCalled, "the same intent is never re-dispatched")
+	row := &store.BrokerDispatch{ID: tid("dispatch-terminal-" + t.Name()), BrokerID: a.RuntimeBrokerID, AgentID: a.ID, Op: "start", Args: args}
+	require.NoError(t, f.s.InsertBrokerDispatch(ctx, row))
+
+	f.srv.ReconcileBroker(ctx, a.RuntimeBrokerID)
+	failed, err := f.s.GetBrokerDispatch(ctx, row.ID)
+	require.NoError(t, err)
+	require.Equal(t, store.DispatchStateFailed, failed.State, "the refused start is recorded as failed")
+	var refusal *RuntimeTargetRefusal
+	require.True(t, errors.As(dispatchFailureError(failed), &refusal), "the failure envelope carries the typed refusal")
+	assert.Equal(t, ErrCodeRuntimeTargetPinStale, refusal.Code)
+	require.NotEmpty(t, refusal.Message)
+	assert.False(t, f.client.startCalled)
+
+	// The recorded intent is settled as a definite start failure: the agent
+	// message is the refusal message.
+	got, err := f.s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, refusal.Message, got.Message)
+
+	// No hot retry: draining the queue again does not re-execute the failed
+	// row.
+	attempts := failed.Attempts
+	f.srv.ReconcileBroker(ctx, a.RuntimeBrokerID)
+	again, err := f.s.GetBrokerDispatch(ctx, row.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.DispatchStateFailed, again.State)
+	assert.Equal(t, attempts, again.Attempts, "the same intent is never re-dispatched")
+	assert.False(t, f.client.startCalled)
 }
 
 func TestFlatStart_CrossNodeRefusalRebuiltFromEnvelope(t *testing.T) {
@@ -851,11 +1123,18 @@ func TestFlatStart_CrossNodeRefusalRebuiltFromEnvelope(t *testing.T) {
 		Code: ErrCodeRuntimeTargetPinStale, Status: http.StatusConflict, Message: "stale",
 		Details: map[string]interface{}{"agentId": "a", "pinnedRuntimeBrokerId": "p", "runtimeBrokerId": "r"},
 	}
-	result := dispatchFailureResult(refusal)
-	require.NotEmpty(t, result)
-	assert.Contains(t, result, ErrCodeRuntimeTargetPinStale, "the executing node carries the typed refusal in the envelope")
-	assert.Contains(t, result, `"pinnedRuntimeBrokerId"`)
-	assert.Contains(t, result, "409")
+	// Encode on the executing node.
+	result := dispatchFailureResult(fmt.Errorf("start: %w", refusal))
+	require.NotEmpty(t, result, "the executing node carries the typed refusal in the envelope")
+	// Decode on the requesting node.
+	rebuilt := dispatchFailureError(&store.BrokerDispatch{Op: "start", Result: result, Error: "start: " + refusal.Error()})
+	var got *RuntimeTargetRefusal
+	require.True(t, errors.As(rebuilt, &got), "rebuilt as the typed refusal, got %v", rebuilt)
+	assert.Equal(t, refusal.Code, got.Code)
+	assert.Equal(t, refusal.Status, got.Status)
+	assert.Equal(t, refusal.Message, got.Message)
+	assert.Equal(t, refusal.Details, got.Details)
+	assert.True(t, isConfirmedStartNotActedOnError(rebuilt), "the rebuilt refusal is confirmed not-acted-on")
 }
 
 // --- reincarnate / finalize-env ----------------------------------------------
@@ -863,7 +1142,7 @@ func TestFlatStart_CrossNodeRefusalRebuiltFromEnvelope(t *testing.T) {
 func TestFlatReincarnate_StalePinRefusedBeforeStop(t *testing.T) {
 	t.Skip(pendingFlatDispatch)
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
-	a := f.stalePinnedAgent(t, "stale-reinc", string(state.PhaseRunning))
+	a := f.stalePinnedAgentWith(t, "stale-reinc", string(state.PhaseRunning), reincarnationEligible)
 	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/reincarnate", ReincarnateAgentRequest{})
 	d := requireAPIError(t, rec, http.StatusConflict, ErrCodeRuntimeTargetPinStale)
 	requireStalePinDetails(t, d, a, f)
@@ -905,7 +1184,7 @@ func TestFlatReincarnate_MoveStillNotImplemented(t *testing.T) {
 func TestFlatReincarnate_MoveDryRunReportsPinnedIneligible(t *testing.T) {
 	t.Skip(pendingFlatDispatch)
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
-	a := f.pinnedAgent(t, "move-dry", string(state.PhaseRunning))
+	a := f.pinnedAgentWith(t, "move-dry", string(state.PhaseRunning), reincarnationEligible)
 	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/reincarnate", ReincarnateAgentRequest{DryRun: true, TargetBroker: f.legacy.ID})
 	d := requireAPIError(t, rec, http.StatusConflict, ErrCodeRuntimeTargetMoveUnsupported)
 	verdictJSON, err := json.Marshal(d["verdict"])
@@ -914,13 +1193,13 @@ func TestFlatReincarnate_MoveDryRunReportsPinnedIneligible(t *testing.T) {
 	require.NoError(t, json.Unmarshal(verdictJSON, &verdict))
 	require.NotEmpty(t, verdict.Checks)
 	assert.Equal(t, "runtime_target", verdict.Checks[0].Name, "runtime_target is the first check")
-	assert.NotEqual(t, MoveCheckNotEvaluated, verdict.Checks[0].Result)
+	assert.Equal(t, MoveCheckFailed, verdict.Checks[0].Result)
 	for _, c := range verdict.Checks[1:] {
 		assert.Equal(t, MoveCheckNotEvaluated, c.Result, "check %s", c.Name)
 	}
 
 	// Moving a legacy agent onto a flat Runtime Broker is ineligible too.
-	l := f.unpinnedAgentOn(t, "move-onto-flat", f.legacy.ID, string(state.PhaseRunning))
+	l := f.unpinnedAgentOnWith(t, "move-onto-flat", f.legacy.ID, string(state.PhaseRunning), reincarnationEligible)
 	rec = doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+l.ID+"/reincarnate", ReincarnateAgentRequest{DryRun: true, TargetBroker: f.flat.ID})
 	requireAPIError(t, rec, http.StatusConflict, ErrCodeRuntimeTargetMoveUnsupported)
 }
@@ -928,7 +1207,7 @@ func TestFlatReincarnate_MoveDryRunReportsPinnedIneligible(t *testing.T) {
 func TestFlatReincarnate_DryRunMoveOfStalePinGetsPlanAnswer(t *testing.T) {
 	t.Skip(pendingFlatDispatch)
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
-	a := f.stalePinnedAgent(t, "stale-move-dry", string(state.PhaseRunning))
+	a := f.stalePinnedAgentWith(t, "stale-move-dry", string(state.PhaseRunning), reincarnationEligible)
 	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/reincarnate", ReincarnateAgentRequest{DryRun: true, TargetBroker: f.flat.ID})
 	requireAPIError(t, rec, http.StatusConflict, ErrCodeRuntimeTargetMoveUnsupported)
 	assert.NotEqual(t, ErrCodeRuntimeTargetPinStale, decodeFlatAPIError(t, rec).Code)
@@ -936,12 +1215,50 @@ func TestFlatReincarnate_DryRunMoveOfStalePinGetsPlanAnswer(t *testing.T) {
 
 func TestFlatReincarnate_ProfileNotRederived(t *testing.T) {
 	t.Skip(pendingFlatDispatch)
+	ctx := context.Background()
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
 	setProjectAnnotations(t, f.s, f.project, map[string]string{projectSettingActiveProfile: "local"})
-	a := f.pinnedAgent(t, "reinc-profile", string(state.PhaseStopped))
-	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/reincarnate", ReincarnateAgentRequest{DryRun: true})
-	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
-	assert.NotContains(t, rec.Body.String(), `"profile":"local"`, "the project active profile is not re-derived for a pinned agent")
+
+	// reincarnateInPlace runs a real in-place reincarnation and waits for
+	// the worker to finish; it returns the stored agent and the reprovision
+	// request.
+	reincarnateInPlace := func(t *testing.T, a *store.Agent) (*store.Agent, *RemoteCreateAgentRequest) {
+		t.Helper()
+		f.client.createCalled = false
+		f.client.lastCreateReq = nil
+		rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/reincarnate", ReincarnateAgentRequest{})
+		require.Truef(t, rec.Code == http.StatusOK || rec.Code == http.StatusAccepted, "reincarnate: %d %s", rec.Code, rec.Body.String())
+		var got *store.Agent
+		require.Eventually(t, func() bool {
+			cur, err := f.s.GetAgent(ctx, a.ID)
+			if err != nil {
+				return false
+			}
+			got = cur
+			return cur.Generation > a.Generation && cur.ReincarnationState == store.ReincarnationStateNone
+		}, 10*time.Second, 20*time.Millisecond, "the reincarnation completes")
+		require.True(t, f.client.createCalled, "the worker reprovisions")
+		return got, f.client.lastCreateReq
+	}
+
+	// Positive control: a legacy agent re-derives the project active profile.
+	legacy := f.unpinnedAgentOnWith(t, "reinc-legacy", f.legacy.ID, string(state.PhaseStopped), reincarnationEligible)
+	gotLegacy, reqLegacy := reincarnateInPlace(t, legacy)
+	require.NotNil(t, gotLegacy.AppliedConfig)
+	assert.Equal(t, "local", gotLegacy.AppliedConfig.Profile, "control: a legacy agent re-derives the project active profile")
+	require.NotNil(t, reqLegacy)
+	require.NotNil(t, reqLegacy.Config)
+	assert.Equal(t, "local", reqLegacy.Config.Profile)
+
+	// A pinned agent does not.
+	a := f.pinnedAgentWith(t, "reinc-profile", string(state.PhaseStopped), reincarnationEligible)
+	got, req := reincarnateInPlace(t, a)
+	require.NotNil(t, got.AppliedConfig)
+	assert.Empty(t, got.AppliedConfig.Profile, "the project active profile is not re-derived for a pinned agent")
+	require.NotNil(t, req)
+	require.NotNil(t, req.Config)
+	assert.Empty(t, req.Config.Profile, "the reprovision request carries no profile")
+	assert.True(t, got.PinValid(), "the pin is kept")
 }
 
 // --- scheduler -------------------------------------------------------------
@@ -984,6 +1301,9 @@ func TestFlatScheduledCreate_PinsPlacement(t *testing.T) {
 	assert.Equal(t, f.flat.RuntimeTarget.ID, a.PinnedRuntimeTargetID)
 	require.NotNil(t, a.AppliedConfig)
 	assert.Empty(t, a.AppliedConfig.Profile, "neither the passthrough nor the project active profile is applied")
+	if a.AppliedConfig.CreateInputs != nil {
+		assert.Empty(t, a.AppliedConfig.CreateInputs.Profile, "no profile recorded in the create inputs")
+	}
 	require.True(t, f.client.createCalled)
 	assert.Equal(t, f.flat.RuntimeTarget.ID, jsonField(t, f.client.lastCreateReq, "expectedRuntimeTargetId"))
 	require.NotNil(t, f.client.lastCreateReq.Config)
@@ -1009,24 +1329,34 @@ func TestFlatScheduledCreate_ExperimentOffRefused(t *testing.T) {
 
 func TestFlatAutoProvide_NoAutomaticProjectLink(t *testing.T) {
 	t.Skip(pendingFlatDispatch)
+	createProject := func(t *testing.T, f *flatHubFixture, name string) string {
+		t.Helper()
+		rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/projects", map[string]interface{}{"name": name})
+		require.Truef(t, rec.Code == http.StatusOK || rec.Code == http.StatusCreated, "%d %s", rec.Code, rec.Body.String())
+		var created struct {
+			ID      string         `json:"id"`
+			Project *store.Project `json:"project"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &created))
+		pid := created.ID
+		if created.Project != nil {
+			pid = created.Project.ID
+		}
+		require.NotEmpty(t, pid)
+		return pid
+	}
 	for _, on := range []bool{true, false} {
 		t.Run(fmt.Sprintf("experiment=%v", on), func(t *testing.T) {
 			f := newFlatHubFixture(t, flatHubOpts{experimentOn: on})
+			// Positive control: an auto-provide legacy row is linked to a new
+			// project, as today.
+			f.legacy.AutoProvide = true
+			require.NoError(t, f.s.UpdateRuntimeBroker(context.Background(), f.legacy))
 			f.flat.AutoProvide = true
 			require.NoError(t, f.s.UpdateRuntimeBroker(context.Background(), f.flat))
 			f.srv.SetEmbeddedBrokerID(f.flat.ID) // the embedded flat instance gets no link either
-			rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/projects", map[string]interface{}{"name": "auto-provide-target"})
-			require.Truef(t, rec.Code == http.StatusOK || rec.Code == http.StatusCreated, "%d %s", rec.Code, rec.Body.String())
-			var created struct {
-				ID      string         `json:"id"`
-				Project *store.Project `json:"project"`
-			}
-			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &created))
-			pid := created.ID
-			if created.Project != nil {
-				pid = created.Project.ID
-			}
-			require.NotEmpty(t, pid)
+			pid := createProject(t, f, "auto-provide-target")
+			assert.Contains(t, f.providerIDs(t, pid), f.legacy.ID, "control: auto-provide still links a legacy row")
 			assert.NotContains(t, f.providerIDs(t, pid), f.flat.ID, "no automatic link to a flat row")
 			assert.NotEqual(t, f.flat.ID, f.projectDefault(t, pid), "no default set to a flat row")
 		})
@@ -1046,6 +1376,10 @@ func TestRegisterProjectBrokerID_FlatRowRefused(t *testing.T) {
 	// A legacy row is linked as today.
 	rec = doRequest(t, f.srv, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{Name: "linked-legacy", BrokerID: f.legacy.ID})
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	var resp RegisterProjectResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.NotNil(t, resp.Project)
+	assert.Contains(t, f.providerIDs(t, resp.Project.ID), f.legacy.ID, "the legacy link row exists")
 }
 
 func TestDeprecatedRegisterProject_DoesNotAdoptFlatRow(t *testing.T) {
@@ -1089,6 +1423,7 @@ func TestHeartbeat_DropsProfilesForFlatRow(t *testing.T) {
 	t.Skip(pendingFlatDispatch)
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
 	grantDevUserRuntimeBrokerAccess(t, f.s)
+	logs := captureFlatSlog(t)
 	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/runtime-brokers/"+f.flat.ID+"/heartbeat", map[string]interface{}{
 		"status":         "online",
 		"defaultProfile": "local",
@@ -1103,6 +1438,11 @@ func TestHeartbeat_DropsProfilesForFlatRow(t *testing.T) {
 	require.NotNil(t, got.Capabilities)
 	assert.True(t, got.Capabilities.Attach, "capabilities refresh as today")
 	assert.NotNil(t, got.RuntimeTarget)
+	// The heartbeat handler drops DefaultProfile/ProfileAttach for a flat
+	// row before writing (section 6), so the store's own last-resort strip
+	// never has a profile to drop.
+	assert.NotContains(t, logs.messages(), "dropping Runtime Broker Profiles written to a flat Runtime Broker",
+		"the heartbeat handler drops the profile before the store write")
 }
 
 // --- registration ------------------------------------------------------------
@@ -1273,6 +1613,11 @@ func TestFlatRegistration_ReRegistrationNotBlockedByLaterNameCollision(t *testin
 		ID: tid("later-legacy"), Name: "flat-later", Slug: "flat-later-2", Status: store.BrokerStatusOffline}))
 	rec := f.register(t, f.operator, CreateBrokerRegistrationRequest{BrokerID: id, Name: "flat-later", RuntimeTarget: f.target})
 	require.Equal(t, http.StatusCreated, rec.Code, "re-registration by ID is never blocked by a later collision: %s", rec.Body.String())
+	var resp CreateBrokerRegistrationResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, id, resp.BrokerID, "matched by ID, never by name")
+	require.NotNil(t, resp.RuntimeTarget, "the stored binding is acknowledged")
+	assert.Equal(t, f.target.ID, resp.RuntimeTarget.ID)
 }
 
 func TestFlatRegistration_NameChangeInConfigNotApplied(t *testing.T) {
@@ -1281,10 +1626,18 @@ func TestFlatRegistration_NameChangeInConfigNotApplied(t *testing.T) {
 	id := f.registerFlat(t, tid("flat-reg-rename"), "flat-original")
 	rec := f.register(t, f.operator, CreateBrokerRegistrationRequest{BrokerID: id, Name: "flat-renamed", RuntimeTarget: f.target})
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+	var resp CreateBrokerRegistrationResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, id, resp.BrokerID)
+	require.NotNil(t, resp.RuntimeTarget, "the stored binding is acknowledged")
+	assert.Equal(t, f.target.ID, resp.RuntimeTarget.ID)
 	got, err := f.s.GetRuntimeBroker(context.Background(), id)
 	require.NoError(t, err)
 	assert.Equal(t, "flat-original", got.Name, "name is set only at creation")
 }
+
+// TestFlatRegistration_EmbeddedPathUsesSharedRules is F-arrange: its act
+// step goes through registerEmbeddedFlatForTest, whose body P1.2 replaces.
 
 func TestFlatRegistration_ReRegistrationRequiresOwner(t *testing.T) {
 	t.Skip(pendingFlatDispatch)
@@ -1292,6 +1645,16 @@ func TestFlatRegistration_ReRegistrationRequiresOwner(t *testing.T) {
 	id := f.registerFlat(t, tid("flat-reg-owner"), "flat-owner")
 	rec := f.register(t, f.other, CreateBrokerRegistrationRequest{BrokerID: id, Name: "flat-owner", RuntimeTarget: f.target})
 	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+
+	// Positive control: the owner's identical flat re-registration passes
+	// the same gate and is acknowledged with the stored binding.
+	rec = f.register(t, f.operator, CreateBrokerRegistrationRequest{BrokerID: id, Name: "flat-owner", RuntimeTarget: f.target})
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+	var resp CreateBrokerRegistrationResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, id, resp.BrokerID)
+	require.NotNil(t, resp.RuntimeTarget, "the stored binding is acknowledged")
+	assert.Equal(t, f.target.ID, resp.RuntimeTarget.ID)
 }
 
 func TestFlatRegistration_ExperimentOffRejectsNewAllowsExisting(t *testing.T) {
@@ -1333,8 +1696,9 @@ func registerEmbeddedFlatForTest(t *testing.T, srv *Server, brokerID, name strin
 	return nil, nil
 }
 
-// embeddedRegError extracts a Hub error code from an embedded registration
-// error (an APIError-style refusal or a binding-conflict ack error).
+// embeddedRegCode extracts a Hub error code from an embedded registration
+// error (a *RuntimeTargetRefusal, or an error whose message carries the code,
+// such as a binding-conflict acknowledgement error).
 func embeddedRegCode(err error) string {
 	var refusal *RuntimeTargetRefusal
 	if errors.As(err, &refusal) {
@@ -1368,6 +1732,11 @@ func TestFlatRegistration_EmbeddedPathUsesSharedRules(t *testing.T) {
 	assert.Empty(t, row.Profiles)
 }
 
+// TestFlatRegistration_EmbeddedSideDuties is F-arrange: its act step goes
+// through registerEmbeddedFlatForTest, whose body P1.2 replaces. Reporting a
+// refusal through EmbeddedBrokerRegistrationFailed is the cmd startup's duty
+// and is asserted in cmd/flat_runtime_broker_contract_test.go.
+
 func TestFlatRegistration_EmbeddedSideDuties(t *testing.T) {
 	t.Skip(pendingFlatDispatch)
 	ctx := context.Background()
@@ -1384,11 +1753,23 @@ func TestFlatRegistration_EmbeddedSideDuties(t *testing.T) {
 	}
 	assert.NotEqual(t, row.ID, global.DefaultRuntimeBrokerID, "no default for the flat row")
 
-	// A refusal is reported without a legacy fallback.
-	_, err = registerEmbeddedFlatForTest(t, f.srv, row.ID, "embedded-duties", &api.RuntimeTargetDescriptor{ID: tid("other"), Type: "docker"})
+	// No legacy fallback: a fresh server that refuses on first boot
+	// (experiment off) is not embedded and creates no legacy row.
+	fresh := newFlatRegFixture(t, false)
+	freshID := tid("embedded-refused-first-boot")
+	_, err = registerEmbeddedFlatForTest(t, fresh.srv, freshID, "embedded-refused", fresh.target)
 	require.Error(t, err)
-	assert.True(t, f.srv.isEmbeddedBroker(row.ID), "no fallback to a legacy identity")
+	assert.Equal(t, ErrCodeExperimentDisabled, embeddedRegCode(err))
+	assert.False(t, fresh.srv.isEmbeddedBroker(freshID), "not embedded after a refusal")
+	requireEmbeddedRegistrationFailedReported(t, fresh.srv, ErrCodeExperimentDisabled)
+	_, err = fresh.s.GetLegacyRuntimeBrokerByName(ctx, "embedded-refused")
+	assert.ErrorIs(t, err, store.ErrNotFound, "no legacy row as a fallback")
+	_, err = fresh.s.GetRuntimeBroker(ctx, freshID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "no row for the refused identity")
 }
+
+// TestFlatRegistration_EmbeddedBoundResultRequired is F-arrange: its act
+// step goes through registerEmbeddedFlatForTest, whose body P1.2 replaces.
 
 func TestFlatRegistration_EmbeddedBoundResultRequired(t *testing.T) {
 	t.Skip(pendingFlatDispatch)
@@ -1400,7 +1781,12 @@ func TestFlatRegistration_EmbeddedBoundResultRequired(t *testing.T) {
 	require.NotNil(t, row.RuntimeTarget)
 	assert.Equal(t, f.target.ID, row.RuntimeTarget.ID)
 	assert.Equal(t, f.target.Type, row.RuntimeTarget.Type)
+	assert.True(t, f.srv.isEmbeddedBroker(id), "activated only on a bound result")
 }
+
+// TestFlatRegistration_EmbeddedConflictingRowNotActivated is F-arrange: its
+// act step goes through registerEmbeddedFlatForTest, whose body P1.2
+// replaces.
 
 func TestFlatRegistration_EmbeddedConflictingRowNotActivated(t *testing.T) {
 	t.Skip(pendingFlatDispatch)
@@ -1415,7 +1801,14 @@ func TestFlatRegistration_EmbeddedConflictingRowNotActivated(t *testing.T) {
 	code := embeddedRegCode(err)
 	assert.Contains(t, []string{ErrCodeRuntimeTargetChanged, api.ErrCodeRuntimeTargetBindingConflict}, code)
 	assert.False(t, f.srv.isEmbeddedBroker(id), "not activated")
+	requireEmbeddedRegistrationFailedReported(t, f.srv, code)
+	got, getErr := f.s.GetRuntimeBroker(context.Background(), id)
+	require.NoError(t, getErr)
+	assert.Equal(t, tid("stored-other"), got.RuntimeTarget.ID, "the stored target is unchanged")
 }
+
+// TestFlatRegistration_EmbeddedLegacyRowNotActivated is F-arrange: its act
+// step goes through registerEmbeddedFlatForTest, whose body P1.2 replaces.
 
 func TestFlatRegistration_EmbeddedLegacyRowNotActivated(t *testing.T) {
 	t.Skip(pendingFlatDispatch)
@@ -1426,19 +1819,42 @@ func TestFlatRegistration_EmbeddedLegacyRowNotActivated(t *testing.T) {
 	_, err := registerEmbeddedFlatForTest(t, f.srv, id, "embedded-legacy", f.target)
 	assert.Equal(t, ErrCodeRuntimeBrokerNotFlat, embeddedRegCode(err))
 	assert.False(t, f.srv.isEmbeddedBroker(id))
+	requireEmbeddedRegistrationFailedReported(t, f.srv, ErrCodeRuntimeBrokerNotFlat)
 	got, getErr := f.s.GetRuntimeBroker(context.Background(), id)
 	require.NoError(t, getErr, "no automatic cleanup")
 	assert.Nil(t, got.RuntimeTarget)
 }
+
+// TestFlatRegistration_EmbeddedNameCollisionNotAdopted is F-arrange: its act
+// step goes through registerEmbeddedFlatForTest, whose body P1.2 replaces.
 
 func TestFlatRegistration_EmbeddedNameCollisionNotAdopted(t *testing.T) {
 	t.Skip(pendingFlatDispatch)
 	f := newFlatRegFixture(t, true)
 	existing := &store.RuntimeBroker{ID: tid("embedded-taken"), Name: "embedded-taken", Slug: "embedded-taken", Status: store.BrokerStatusOffline}
 	require.NoError(t, f.s.CreateRuntimeBroker(context.Background(), existing))
-	_, err := registerEmbeddedFlatForTest(t, f.srv, tid("embedded-new-id"), "embedded-taken", f.target)
+	newID := tid("embedded-new-id")
+	_, err := registerEmbeddedFlatForTest(t, f.srv, newID, "embedded-taken", f.target)
 	assert.Equal(t, ErrCodeRuntimeBrokerNameConflict, embeddedRegCode(err))
 	got, getErr := f.s.GetRuntimeBroker(context.Background(), existing.ID)
 	require.NoError(t, getErr)
 	assert.Nil(t, got.RuntimeTarget, "the existing row is not adopted")
+	_, getErr = f.s.GetRuntimeBroker(context.Background(), newID)
+	assert.ErrorIs(t, getErr, store.ErrNotFound, "no row with the new ID")
+	assert.False(t, f.srv.isEmbeddedBroker(newID), "not activated")
+	assert.False(t, f.srv.isEmbeddedBroker(existing.ID))
+	requireEmbeddedRegistrationFailedReported(t, f.srv, ErrCodeRuntimeBrokerNameConflict)
+}
+
+// requireEmbeddedRegistrationFailedReported asserts the refusal was reported
+// through EmbeddedBrokerRegistrationFailed (appendix R7/R10: the embedded flat
+// path reports every refusal there, never falling back to the legacy
+// identity).
+func requireEmbeddedRegistrationFailedReported(t *testing.T, srv *Server, code string) {
+	t.Helper()
+	srv.mu.Lock()
+	regErr := srv.embeddedBrokerRegErr
+	srv.mu.Unlock()
+	require.NotEmpty(t, regErr, "the refusal must be reported through EmbeddedBrokerRegistrationFailed")
+	assert.Contains(t, regErr, code)
 }
