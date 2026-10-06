@@ -142,8 +142,14 @@ func TestDeleteProject_StoredSlugNotDirectChild_RemovesNoDirectory(t *testing.T)
 				assert.Equal(t, http.StatusOK, rec.Code)
 				assert.Contains(t, rec.Body.String(), id, "the stored record stays listed")
 
+				logs := captureProjectsLog(t, srv)
 				rec = doRequest(t, srv, http.MethodDelete, "/api/v1/projects/"+id, nil)
 				require.Equal(t, http.StatusNoContent, rec.Code, "body: %s", rec.Body.String())
+
+				logged := logs.String()
+				assert.Contains(t, logged, "hub-managed project directory not removed: it is not a direct child of a projects root", "the skipped removal is logged")
+				assert.Contains(t, logged, "project_id="+id, "the log line names the project")
+				assert.NotContains(t, logged, tmpHome, "the log carries no filesystem path")
 
 				_, err := s.GetProject(context.Background(), id)
 				assert.ErrorIs(t, err, store.ErrNotFound, "the record is deleted")

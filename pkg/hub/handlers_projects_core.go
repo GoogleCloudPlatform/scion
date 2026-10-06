@@ -3100,10 +3100,19 @@ func (s *Server) executePostDeletionEffects(ctx context.Context, projectID strin
 }
 
 // removeHubManagedProjectDir removes the hub-managed workspace directory of a
-// deleted project, subject to removeProjectDirUnderProjectsRoot.
+// deleted project, subject to removeProjectDirUnderProjectsRoot. When the slug
+// does not name a direct child of a projects root, or the directory cannot be
+// resolved, nothing is removed and a warning is logged.
 func (s *Server) removeHubManagedProjectDir(projectID, slug string) {
+	if err := validateProjectSlug(slug); err != nil {
+		s.projectsLogger().Warn("hub-managed project directory not removed: it is not a direct child of a projects root",
+			"project_id", projectID, "error", err)
+		return
+	}
 	projectPath, err := s.hubManagedProjectPath(slug)
 	if err != nil {
+		s.projectsLogger().Warn("hub-managed project directory not removed: the directory could not be resolved",
+			"project_id", projectID)
 		return
 	}
 	s.removeProjectDirUnderProjectsRoot(projectID, projectPath)
