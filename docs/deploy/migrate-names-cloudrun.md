@@ -548,10 +548,11 @@ gcloud logging read '
 `succeededCount: 1` means the command exited 0. `failedCount: 1` means it exited
 non-zero: either the summary shows `failed > 0` (look for `ERROR` / `CONFLICT`
 lines), or look for the `Error: <message>` line near the end (wrapped in terminal
-colour codes in the log, so a literal search for a line starting `Error:` misses it)
-— it is followed by the command's usage text, which `cmd/root.go` prints on every
-failed invocation (this command has no opt-out) and does *not* mean the arguments were
-wrong. `gcloud run jobs execute --wait` also exits non-zero in that case.
+colour codes in the log, so a literal search for a line starting `Error:` misses it).
+The command's usage text follows that line only for an argument or flag error (for
+example a missing `--gcp-project`); a runtime failure prints just the error
+(`cmd/root.go`, ptone/scion#2859). `gcloud run jobs execute --wait` also exits non-zero
+in that case.
 
 The output vocabulary, taken from `cmd/hub_secret_migrate_names.go`:
 

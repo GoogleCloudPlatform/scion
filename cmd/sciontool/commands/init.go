@@ -39,7 +39,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/metadata"
-	scionportforward "github.com/GoogleCloudPlatform/scion/pkg/sciontool/portforward"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/procreap"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/rootexec"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/services"
@@ -126,6 +125,11 @@ type InitRunOptions struct {
 	// command) always leaves this false — that behaviour is unchanged. A
 	// caller whose network path can't route that traffic sets this to true.
 	DisablePortForwarding bool
+
+	// DisableConduit keeps the legacy port-forward tunnel even when the hub
+	// advertises conduit (SCION_HUB_CONDUIT=true). The zero value dials the
+	// conduit endpoint when, and only when, the hub advertises it.
+	DisableConduit bool
 
 	// DisableReExec skips RunInit's environ-purge re-exec (see
 	// reExecWithCleanEnv). That re-exec exists only to purge
@@ -1101,8 +1105,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 			if opts.DisablePortForwarding {
 				log.Info("port forwarding disabled: skipping port-forward tunnel manager and auto-expose")
 			} else {
-				go scionportforward.NewManager(hubClient).Run(ctx)
-				log.Info("Started port-forward tunnel manager")
+				go newPortForwarding(hubClient, opts.DisableConduit, os.Getenv).run(ctx)
 
 				// Auto-expose: detect and register listening ports
 				if autoExposeCfg := autoexpose.ConfigFromEnv(); autoExposeCfg.Enabled && hubClient != nil {

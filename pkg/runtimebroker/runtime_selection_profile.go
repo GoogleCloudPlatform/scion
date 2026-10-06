@@ -44,18 +44,22 @@ import (
 //
 // (ptone/scion#1799.) With no project path there is nothing to read, so the
 // legacy profile applies.
-func runtimeClassificationProfile(projectPath, agentName string, sharedWorkspace bool, hubProjectID string, mustExist bool, legacyProfile func() string) (string, error) {
+//
+// provisioned reports whether the profile came from image provenance; the
+// handlers then resolve it without the agent-info.json recorded-runtime
+// fallback (profileStrictProvisioned).
+func runtimeClassificationProfile(projectPath, agentName string, sharedWorkspace bool, hubProjectID string, mustExist bool, legacyProfile func() string) (profile string, provisioned bool, err error) {
 	if projectPath == "" {
-		return legacyProfile(), nil
+		return legacyProfile(), false, nil
 	}
 	profile, ok, err := agent.ProvisionedProfile(projectPath, agentName, sharedWorkspace, hubProjectID, mustExist)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	if !ok {
-		return legacyProfile(), nil
+		return legacyProfile(), false, nil
 	}
-	return profile, nil
+	return profile, true, nil
 }
 
 // runtimeSelectionOpts returns the options the start/restart runtime
@@ -65,14 +69,15 @@ func runtimeClassificationProfile(projectPath, agentName string, sharedWorkspace
 // agentName is the agent's real name (the dir Start reads), which on
 // restart can differ from the URL id. Only the runtime selection changes:
 // opts itself, and every other use of opts.Profile, is left as it was.
-func runtimeSelectionOpts(opts api.StartOptions, agentName string, mustExist bool) (api.StartOptions, error) {
+// The bool reports whether the profile came from image provenance.
+func runtimeSelectionOpts(opts api.StartOptions, agentName string, mustExist bool) (api.StartOptions, bool, error) {
 	saved := opts.Profile
-	profile, err := runtimeClassificationProfile(opts.ProjectPath, agentName, opts.SharedWorkspace, opts.HubProjectID, mustExist, func() string { return saved })
+	profile, provisioned, err := runtimeClassificationProfile(opts.ProjectPath, agentName, opts.SharedWorkspace, opts.HubProjectID, mustExist, func() string { return saved })
 	if err != nil {
-		return opts, err
+		return opts, false, err
 	}
 	opts.Profile = profile
-	return opts, nil
+	return opts, provisioned, nil
 }
 
 // writeImageProvenanceError reports a runtimeSelectionOpts failure. An
@@ -99,7 +104,7 @@ func (s *Server) writeImageProvenanceError(w http.ResponseWriter, err error, op,
 // classificationProfile is runtimeClassificationProfile for
 // buildStartContext's preliminary classification on start/restart; the
 // legacy profile is the saved one, read under in.Name as before.
-func classificationProfile(in startContextInputs) (string, error) {
+func classificationProfile(in startContextInputs) (string, bool, error) {
 	sharedWorkspace := in.SharedWorkspace || (in.Config != nil && in.Config.SharedWorkspace)
 	return runtimeClassificationProfile(in.ProjectPath, in.Name, sharedWorkspace, in.ProjectID, in.Operation == opHTTPRestart, func() string {
 		return agent.GetSavedProfile(in.Name, in.ProjectPath)

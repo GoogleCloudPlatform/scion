@@ -91,7 +91,7 @@ func TestRuntimeSelectionOpts_ProvenanceProfileSelectsRuntime(t *testing.T) {
 		t.Fatalf("precondition: saved profile = %q, want saved", saved)
 	}
 	opts := api.StartOptions{Name: id, ProjectPath: projectDir, Profile: saved}
-	runtimeOpts, err := runtimeSelectionOpts(opts, id, false)
+	runtimeOpts, _, err := runtimeSelectionOpts(opts, id, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,7 +112,7 @@ func TestRuntimeSelectionOpts_ProvenanceProfileSelectsRuntime(t *testing.T) {
 func TestRuntimeSelectionOpts_LegacyAgentKeepsSavedProfile(t *testing.T) {
 	srv, projectDir, id := runtimeProfileFixture(t, "")
 	opts := api.StartOptions{Name: id, ProjectPath: projectDir, Profile: agent.GetSavedProfile(id, projectDir)}
-	runtimeOpts, err := runtimeSelectionOpts(opts, id, false)
+	runtimeOpts, _, err := runtimeSelectionOpts(opts, id, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,7 +130,7 @@ func TestRuntimeSelectionOpts_LegacyAgentKeepsSavedProfile(t *testing.T) {
 func TestRuntimeSelectionOpts_UnusableProvenanceFailsClosed(t *testing.T) {
 	for _, body := range []string{"{not json", `{"profile": "prov"}`} {
 		_, projectDir, id := runtimeProfileFixture(t, body)
-		_, err := runtimeSelectionOpts(api.StartOptions{Name: id, ProjectPath: projectDir, Profile: "saved"}, id, false)
+		_, _, err := runtimeSelectionOpts(api.StartOptions{Name: id, ProjectPath: projectDir, Profile: "saved"}, id, false)
 		if err == nil || !strings.Contains(err.Error(), "re-provision the agent") {
 			t.Fatalf("body %q: expected an actionable provenance error, got %v", body, err)
 		}
@@ -559,7 +559,7 @@ func TestRuntimeSelectionOpts_ExternalStateWithoutSharedFlag(t *testing.T) {
 		t.Fatal(err)
 	}
 	opts := api.StartOptions{Name: name, ProjectPath: dotScion, Profile: "saved", HubProjectID: sharedHubProjectID}
-	runtimeOpts, err := runtimeSelectionOpts(opts, name, true)
+	runtimeOpts, _, err := runtimeSelectionOpts(opts, name, true)
 	if err != nil {
 		t.Fatal(err)
 	}

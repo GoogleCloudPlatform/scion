@@ -81,6 +81,12 @@ type imageProvenance struct {
 	// when the start request carries no absolute template path, so editing
 	// agent-info.json cannot move the agent onto another template's image.
 	Template string `json:"template,omitempty"`
+	// TemplateHash is set when the template was loaded from a
+	// content-addressed cache (the same value recorded, for display, as
+	// agent-info.json's templateHash). Template is then a display name
+	// only: Start does not look it up by name and treats the template as
+	// unresolvable, so the recorded template-tier values apply.
+	TemplateHash string `json:"templateHash,omitempty"`
 }
 
 func writeImageProvenance(agentDir string, p imageProvenance) error {

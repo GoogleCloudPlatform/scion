@@ -188,6 +188,8 @@ func (r *PodmanRuntime) Run(ctx context.Context, config RunConfig) (string, erro
 		return "", err
 	}
 
+	newArgs = appendSharedDirGroupArgs(newArgs, config, podmanRuntimeName(r.Rootless), !r.Rootless)
+
 	newArgs = append(newArgs, args[1:]...)
 
 	WriteRuntimeDebugFile(config, r.Command, newArgs)
@@ -362,7 +364,8 @@ func (r *PodmanRuntime) Attach(ctx context.Context, id string) error {
 	_, _ = runSimpleCommand(ctx, r.Command, "exec", "--user", r.ExecUser(),
 		agent.ContainerID, "tmux", "set-option", "-g", "window-size", "latest")
 
-	return runInteractiveCommand(r.Command, "exec", "-it", "--user", r.ExecUser(), agent.ContainerID, "tmux", "attach", "-t", "scion")
+	args := append([]string{"exec", "-it"}, ExecDetachKeysArgs(r.Command)...)
+	return runInteractiveCommand(r.Command, append(args, "--user", r.ExecUser(), agent.ContainerID, "tmux", "attach", "-t", "scion")...)
 }
 
 func (r *PodmanRuntime) ImageExists(ctx context.Context, image string) (bool, error) {
@@ -475,4 +478,12 @@ func (r *PodmanRuntime) GetWorkspacePath(ctx context.Context, id string) (string
 	}
 
 	return "", fmt.Errorf("no /workspace mount found for container %s", id)
+}
+
+// podmanRuntimeName names the Podman mode in shared-dir group warnings.
+func podmanRuntimeName(rootless bool) string {
+	if rootless {
+		return "podman (rootless)"
+	}
+	return "podman"
 }

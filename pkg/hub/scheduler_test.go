@@ -2013,6 +2013,45 @@ func TestSchedulerMaxConcurrencyAcrossTicks(t *testing.T) {
 	}
 }
 
+// TestSchedulerTickCountConcurrentStatus is the race-detector regression for
+// ptone/scion#2042: the ticker goroutine advances tickCount while Status()
+// and the dispatched handlers read it. It needs no store, so it also runs in
+// the -tags no_sqlite race job; it reports a race only under -race, and here
+// just checks that ticks advance and Status() stays usable throughout.
+func TestSchedulerTickCountConcurrentStatus(t *testing.T) {
+	s := NewScheduler(nil, slog.Default(), WithMaxConcurrency(0))
+	s.tickInterval = time.Millisecond
+	s.MaxJitter = 0
+
+	var runs atomic.Int64
+	s.RegisterRecurring("tick-reader", 1, func(_ context.Context) { runs.Add(1) })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s.Start(ctx)
+
+	deadline := time.Now().Add(50 * time.Millisecond)
+	var last uint64
+	for time.Now().Before(deadline) {
+		st := s.Status()
+		if st.TickCount < last {
+			t.Fatalf("tickCount went backwards: %d after %d", st.TickCount, last)
+		}
+		last = st.TickCount
+		// Yield so the loop cannot spin-starve the ticker goroutine on a
+		// loaded CI runner.
+		time.Sleep(time.Millisecond)
+	}
+	s.Stop()
+
+	if last == 0 {
+		t.Error("tickCount never advanced; the ticker did not run concurrently with Status()")
+	}
+	if runs.Load() == 0 {
+		t.Error("recurring handler never ran")
+	}
+}
+
 func TestSchedulerUnlimitedConcurrency(t *testing.T) {
 	// With MaxConcurrency=0 (unlimited), all handlers should run concurrently.
 	s := NewScheduler(nil, slog.Default(), WithMaxConcurrency(0))

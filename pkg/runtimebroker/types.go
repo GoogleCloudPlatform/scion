@@ -103,6 +103,11 @@ type BrokerCapabilities struct {
 	// reincarnate --broker`). The hub refuses a move unless both brokers
 	// report it (412).
 	AgentMove bool `json:"agentMove"`
+	// StartsInFlight indicates the broker reports the agent starts still
+	// running on it in every heartbeat (BrokerHeartbeat.StartsInFlight). Only
+	// then does the hub read a start's absence from that list as "no start
+	// in flight".
+	StartsInFlight bool `json:"startsInFlight,omitempty"`
 }
 
 // ProjectInfo is a summary of a project registered on this broker.
@@ -183,6 +188,10 @@ type AgentResponse struct {
 	// found the agent already running reports the existing run's ID, so
 	// the hub can record the run that actually exists (ptone/scion#2550).
 	RunID string `json:"runId,omitempty"`
+	// WorkspacePlacement is where the start this response answers placed
+	// the agent's workspace (api.WorkspacePlacementExport or
+	// WorkspacePlacementLocal). Empty when no start resolved it.
+	WorkspacePlacement string `json:"workspacePlacement,omitempty"`
 }
 
 // AgentConfig contains agent configuration details.
@@ -387,6 +396,13 @@ type CreateAgentConfig struct {
 	// workspace (git-workspace hybrid mode). When true, the broker skips
 	// worktree/clone creation and configures per-agent git credentials.
 	SharedWorkspace bool `json:"sharedWorkspace,omitempty"`
+
+	// SharedWorkspaceClone is a shared-plain git project's workspace clone
+	// settings, sent by the Hub alongside SharedWorkspace. It never turns on
+	// the per-agent clone mode GitClone does; it reaches the runtime only as
+	// the clone settings of the Kubernetes workspace-provision init container
+	// (api.StartOptions.SharedWorkspaceClone).
+	SharedWorkspaceClone *api.GitCloneConfig `json:"sharedWorkspaceClone,omitempty"`
 
 	// SharedDirs contains project-level shared directory declarations.
 	SharedDirs []api.SharedDir `json:"sharedDirs,omitempty"`
@@ -632,6 +648,7 @@ func AgentInfoToResponse(info api.AgentInfo) AgentResponse {
 		Labels:                info.Labels,
 		CreatedAt:             info.Created,
 		Ready:                 phase == string(state.PhaseRunning),
+		WorkspacePlacement:    info.WorkspacePlacement,
 	}
 	if len(info.HubOnlyEnvWarnings) > 0 {
 		resp.Warnings = append([]string(nil), info.HubOnlyEnvWarnings...)

@@ -538,11 +538,7 @@ func TestMintUsesChainCeiling(t *testing.T) {
 	assert.Contains(t, before, GCPTokenScopeForSA(saID))
 
 	// Replace the parent's edge with the readonly coverage ceiling.
-	parentEdges, err := f.store.GetDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, parent.ID)
-	require.NoError(t, err)
-	for _, e := range parentEdges {
-		require.NoError(t, f.store.DeactivateDelegationEdge(ctx, e.ID))
-	}
+	revokeDelegateEdges(t, f.store, parent.ID)
 	narrow := readonlyCoverageCeiling()
 	f.edge(t, store.DelegationPrincipalUser, f.userID, parent.ID, narrow, provSession)
 

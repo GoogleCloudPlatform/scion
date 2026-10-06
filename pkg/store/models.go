@@ -71,6 +71,14 @@ type Agent struct {
 	TaskSummary     string        `json:"taskSummary,omitempty"`
 	Message         string        `json:"message,omitempty"`
 
+	// WorkspacePlacement is where the agent's last start placed its
+	// workspace, as its broker reported it: api.WorkspacePlacementExport
+	// (the broker's shared NFS export) or api.WorkspacePlacementLocal. ""
+	// means unknown. CreateAgent and UpdateAgent never write it; the only
+	// writer is SetAgentWorkspacePlacement, so a whole-row write holding an
+	// older copy cannot clobber a newer report.
+	WorkspacePlacement string `json:"workspacePlacement,omitempty"`
+
 	// Enriched fields (populated by Hub when returning data, not persisted)
 	Project           string `json:"project,omitempty"`           // Project name (resolved from ProjectID)
 	RuntimeBrokerName string `json:"runtimeBrokerName,omitempty"` // Broker name (resolved from RuntimeBrokerID)
@@ -147,6 +155,15 @@ type Agent struct {
 	// so a concurrent whole-row CAS write cannot clobber it.
 	RunID string `json:"-"`
 
+	// PreviousRunIDs are the runs, oldest first, whose runtime entries may
+	// still exist besides RunID's (ptone/scion#3097): SetAgentRunID appends
+	// the run it replaced (see AppendPreviousRunID),
+	// CompareAndSwapAgentRunID, which settles the run, clears them, and
+	// RevertAgentRunID leaves them (so the list may also hold RunID). A
+	// delete names each of them other than RunID. Like RunID, UpdateAgent
+	// never writes it.
+	PreviousRunIDs []string `json:"-"`
+
 	// RunIntent is whether the agent should be running ("running" or
 	// "stopped"); "" means unknown (NULL). RunIntentAt is the store-clock
 	// time of the last intent write. Internal bookkeeping, untagged like the
@@ -180,6 +197,14 @@ type Agent struct {
 	// present at the moment it was computed, not at load time.
 	Launch *AgentLaunch `json:"launch,omitempty"`
 
+	// ProvisionedOnly is a computed, read-only view (ptone/scion#2929):
+	// true when the agent was provisioned but never asked to run (see
+	// ComputeAgentProvisionedOnly). Like Launch, only the hub populates it,
+	// at response time. No omitempty (as on the SSE status event): this
+	// struct is the REST agent shape, and an explicit false lets the web's
+	// partial seed merge clear a previously merged true.
+	ProvisionedOnly bool `json:"provisionedOnly"`
+
 	// --- Backend-driven agent delete (design ptone/scion#2483 §2.1) ---
 	// The persisted deletion_* columns: a leased, sticky delete marker.
 	// Internal bookkeeping, untagged (json:"-") like the launch_* columns.
@@ -195,6 +220,13 @@ type Agent struct {
 	DeletionError     string     `json:"-"`
 	DeletionPrior     string     `json:"-"` // JSON DeletionPriorState
 	DeletionRequest   string     `json:"-"` // JSON DeletionRequestInfo
+
+	// SoftDeleteOpID is the operation ID of the soft delete that set
+	// DeletedAt ("" when the agent is live or was soft-deleted before the
+	// column existed). Restore reactivates only the delegation edges
+	// deactivated under this ID. Only Store.SetAgentSoftDeleteOpID writes
+	// it; UpdateAgent ignores this field. No authorization decision reads it.
+	SoftDeleteOpID string `json:"-"`
 
 	// Deletion is the computed, client-facing view of the deletion_* columns
 	// (design §2.2; see ComputeAgentDeletion). Like Launch it is populated
@@ -663,6 +695,21 @@ const (
 // legitimate pre-upgrade groups.
 const AnnotationProjectAgentsGroup = "scion.io/project-agents-group"
 
+// IsProjectMembersGroup reports whether g is a system project members group:
+// it belongs to a project and carries either members-group marker key with
+// the value "true".
+//
+// Project members groups are system-managed. They cannot be the principal of
+// a role binding or be nested as a child of another group; the store
+// refuses both with ErrProjectMembersGroupPrincipal.
+func IsProjectMembersGroup(g *Group) bool {
+	if g == nil || g.ProjectID == "" || g.Annotations == nil {
+		return false
+	}
+	return g.Annotations[AnnotationProjectMembersGroup] == "true" ||
+		g.Annotations[LegacyAnnotationProjectMembersGroup] == "true"
+}
+
 // Git source labels for git-anchored projects. LabelCloneURL is the URL agents
 // and shared-workspace init actually clone from (it takes precedence over
 // Project.GitRemote), LabelSourceURL records the remote as the user entered it,
@@ -954,6 +1001,11 @@ type BrokerCapabilities struct {
 	// --broker`). The hub refuses a move unless both the source and the
 	// target broker report it (412).
 	AgentMove bool `json:"agentMove"`
+	// StartsInFlight indicates the broker reports the agent starts still
+	// running on it in every heartbeat (BrokerHeartbeat.StartsInFlight). Only
+	// then does the hub read a start's absence from that list as "no start
+	// in flight".
+	StartsInFlight bool `json:"startsInFlight,omitempty"`
 }
 
 // BrokerProfile describes a runtime profile available on a broker.
@@ -1446,6 +1498,11 @@ const (
 	// (dispatch was attempted and rejected) and "pending" (dispatch is
 	// still outstanding) — deferred means dispatch was never attempted.
 	MessageDispatchDeferred = "deferred"
+	// MessageDispatchNoRecipient marks a group-thread message that resolved
+	// no agent recipient (no default agent, no reply-to agent, no agent
+	// @mention). It is saved to the thread but no agent was given it, so it
+	// must not read as "dispatched". Terminal: nothing retries it.
+	MessageDispatchNoRecipient = "no_recipient"
 )
 
 // MessageExpiredStuckPendingReason is the exact DispatchFailureReason the
@@ -2283,6 +2340,15 @@ type MessageFilter struct {
 	ConversationID string    // Filter by conversation_id (S4 conversation model)
 	Before         time.Time // Upper bound for created_at (exclusive)
 	After          time.Time // Lower bound for created_at (exclusive)
+}
+
+// LatestMessageOptions narrows the per-key latest-message lookups
+// (LatestMessagesByThreadIDs, LatestMessagesByConversationIDs). Each field
+// has the meaning of the MessageFilter field of the same name; empty fields
+// do not filter.
+type LatestMessageOptions struct {
+	Channel     string // Only messages on this channel
+	ExcludeType string // Ignore messages of this type
 }
 
 // =============================================================================
@@ -3180,6 +3246,20 @@ const (
 	EdgeDeactivationCreateCompensation  EdgeDeactivationCause = "create_compensation"
 	EdgeDeactivationReincarnateReplaced EdgeDeactivationCause = "reincarnate_replaced"
 )
+
+// ValidEdgeDeactivationCause reports whether c is a cause that may be
+// recorded on a delegation edge.
+func ValidEdgeDeactivationCause(c EdgeDeactivationCause) bool {
+	switch c {
+	case EdgeDeactivationAgentSoftDelete,
+		EdgeDeactivationAgentHardDelete,
+		EdgeDeactivationDelegatorDeleted,
+		EdgeDeactivationCreateCompensation,
+		EdgeDeactivationReincarnateReplaced:
+		return true
+	}
+	return false
+}
 
 // Deactivation is the deactivation record of an edge or assignment.
 type Deactivation struct {

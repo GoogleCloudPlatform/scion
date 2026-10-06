@@ -5361,7 +5361,8 @@ func TestSharedDirStorageConfig_IgnoredNFSFields(t *testing.T) {
 				AutoMount:    true,
 			},
 		}
-		assert.ElementsMatch(t, []string{"uid", "gid", "mount_options", "storage_class", "auto_mount"}, s.IgnoredNFSFields())
+		// gid is not ignored: it is the leaf-group allowlist (ptone/scion#3155).
+		assert.ElementsMatch(t, []string{"uid", "mount_options", "storage_class", "auto_mount"}, s.IgnoredNFSFields())
 	})
 
 	t.Run("nfs backend with only one ignored field set", func(t *testing.T) {
@@ -5370,10 +5371,22 @@ func TestSharedDirStorageConfig_IgnoredNFSFields(t *testing.T) {
 			NFS: &V1NFSConfig{
 				MountRoot: "/srv",
 				Shares:    []V1NFSShare{{ID: "scion-shared"}},
+				UID:       1003,
+			},
+		}
+		assert.Equal(t, []string{"uid"}, s.IgnoredNFSFields())
+	})
+
+	t.Run("nfs backend with gid set is not warned about", func(t *testing.T) {
+		s := &V1SharedDirStorageConfig{
+			Backend: "nfs",
+			NFS: &V1NFSConfig{
+				MountRoot: "/srv",
+				Shares:    []V1NFSShare{{ID: "scion-shared"}},
 				GID:       1003,
 			},
 		}
-		assert.Equal(t, []string{"gid"}, s.IgnoredNFSFields())
+		assert.Nil(t, s.IgnoredNFSFields())
 	})
 }
 

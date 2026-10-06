@@ -29,9 +29,12 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -511,7 +514,7 @@ func ProvisionShared(in ProvisionInput) error {
 	// — ensureWorktree must run under it even when the base clone is already
 	// done — so only SharedPlain can skip locking entirely here.
 	if in.Mode != store.SharingModeWorktreePerAgent {
-		if dir, ok := findSentinel(in.SentinelDirs()...); ok {
+		if dir, ok := findSentinel(in.SentinelDirs()...); ok && !markedWorkspaceNeedsClone(in) {
 			slog.Debug("ProvisionShared: workspace already provisioned (sentinel exists, pre-lock)",
 				"project_id", in.ProjectID, "sentinel_dir", dir)
 			excludeLegacySentinel(in)
@@ -544,6 +547,9 @@ func ProvisionShared(in ProvisionInput) error {
 		slog.Debug("ProvisionShared: workspace already provisioned (sentinel exists)",
 			"project_id", in.ProjectID, "sentinel_dir", dir)
 		excludeLegacySentinel(in)
+		if markedWorkspaceNeedsClone(in) {
+			return cloneIntoMarkedWorkspace(ctx, in, held.stillOwned, sentinelDir)
+		}
 		if in.MountedWorktree && in.Mode == store.SharingModeWorktreePerAgent {
 			// The shared checkout may have been provisioned in another mode:
 			// add what worktrees need, leaving its contents and HEAD alone.
@@ -1093,14 +1099,17 @@ const provisionLockEvictedAtFile = "evicted-at"
 // used throughout the lock machinery below, so tests can simulate a failure
 // at exactly the owner-marker-write point — a real disk-full/read-only-mount
 // fault isn't something a hermetic unit test can portably trigger otherwise.
-// moveRenameFile is the same idea for gitCloneViaTempDir's clone-move step
+// moveRenameFile is the same idea for gitCloneWorkspace's clone-move step
 // specifically, kept as its own variable so a test simulating a move
 // failure can't also perturb the lock's own rename calls running around it.
 // Production code never reassigns any of these.
 var (
 	writeLockFile  = os.WriteFile
 	renameFile     = os.Rename
-	moveRenameFile = os.Rename
+	moveRenameFile = renameNoReplace
+	// moveBackFile moves an entry back into the scratch directory when a
+	// clone move fails.
+	moveBackFile = renameNoReplace
 )
 
 // lchownFile is an indirection over os.Lchown, used by chownProjectTree, so
@@ -1275,7 +1284,7 @@ var timeNow = time.Now
 // specifically that it no longer holds the lock) until one of those
 // actually happens. stillOwned()
 // is checked before the sentinel write and before the clone-move step in
-// gitCloneViaTempDir; a direct gitCloneDirect clone and ensureWorktree's
+// gitCloneWorkspace; the clone itself and ensureWorktree's
 // git calls run under the lock-derived ctx (cancelled once the heartbeat
 // notices) but do not re-verify ownership synchronously mid-operation. A
 // holder partition longer than its bound, healing after one of those steps
@@ -1558,12 +1567,11 @@ func garbageCollectLockLitter(dir string) {
 // once old enough.
 //
 // The staging directory's name deliberately starts with provisionFileLockName
-// (not some unrelated prefix): gitCloneViaTempDir's pre-clone stray-content
-// clear (removeDirContentsExceptPrefix) exempts anything under that prefix
-// because the live lock and its evicted/staging siblings need to survive it — a staging
-// directory with a different prefix would NOT be exempt, and one caller's
-// in-progress create here could be deleted out from under it by a
-// DIFFERENT, concurrently-running caller's clone-prep clear. Sharing the
+// (not some unrelated prefix): gitCloneWorkspace's pre-clone workspace
+// check (unexpectedWorkspaceEntries) accepts anything under that prefix
+// because the live lock and its evicted/staging siblings sit next to the
+// clone — a staging directory with a different prefix would make a
+// concurrently-running caller's clone refuse the workspace. Sharing the
 // prefix closes that gap for free. provisionLockStagingPattern is the single
 // source of truth for that prefix, shared with tests that need to construct
 // or recognize a staging directory the same way this function does.
@@ -2206,163 +2214,789 @@ func lockLooksAbandoned(dir, path string) bool {
 	return now.Sub(last) > provisionLockStaleAfter
 }
 
-// gitCloneWorkspace performs the git clone into the workspace directory.
-// It clones directly into in.Resolved.HostPath (gitCloneDirect) unless the
-// filesystem-fallback lock's own on-disk marker would sit inside that exact
-// directory — which only happens when there is no store.AdvisoryLocker AND
-// the sentinel directory equals the workspace directory itself (the k8s init
-// container's configuration: SentinelDir is set to the workspace dir because
-// only it is mounted, not its parent — see ProvisionInput.SentinelDir's
-// doc). In that one case, `git clone` would refuse the target outright
-// (it must be completely empty, lock marker included), so
-// gitCloneViaTempDir routes around it by cloning into a guaranteed-empty
-// scratch subdirectory and moving the result up.
+// ErrCommondirPresent is returned by SafeGitCommand when the target
+// base's .git/commondir file exists. A hub-native shared base is always the
+// main working copy of its own repository (never itself a linked worktree),
+// so it never legitimately has one; its presence means git's common-
+// directory resolution for this gitdir would be redirected somewhere other
+// than the mounted, host-managed .git. Rather than operate against an
+// unknown/unverified location, the broker refuses.
+var ErrCommondirPresent = errors.New("refusing git operation: base .git/commondir is present")
+
+// SafeGitCommand builds an *exec.Cmd for a broker-side git invocation
+// against a project's shared hub-native worktree-per-agent base repo, with
+// the invocation-level protections for the broker-git worktree containment
+// change applied. It ensures the broker's own git operations honor only the
+// host-managed config/hooks/refs for the base — never a redirected or
+// otherwise unexpected location — and returns an error instead of running if
+// it cannot establish that.
 //
-// This is deliberately narrower than "no Locker" alone: the broker's own
-// host-side worktree-per-agent flow and Cloud Run's provisioning also run
-// with in.Locker == nil today, but both use a
-// sentinel directory that is the workspace's PARENT, so their lock marker
-// (once the fallback lock applies to them too) never lands inside the clone
-// target — they clone exactly as before this change.
-// stillOwned reports whether the caller still holds the provisioning lock;
-// nil means "not applicable" (e.g. the store.AdvisoryLocker path never
-// reaches gitCloneViaTempDir at all, since its lock never lives inside the
-// clone target — see gitCloneWorkspace's doc).
-func gitCloneWorkspace(ctx context.Context, in ProvisionInput, stillOwned func() bool) error {
-	dest := in.Resolved.HostPath
-	sentinelDir := resolveSentinelDir(in)
-	lockInsideDest := in.Locker == nil && (sentinelDir == dest || legacyDir(in, sentinelDir) == dest)
-	if !lockInsideDest {
-		return gitCloneDirect(ctx, in)
+// Two mechanisms enforce this:
+//   - GIT_COMMON_DIR is pinned to <dir>/.git on every invocation. Git
+//     resolves config/hooks/refs through whatever "common directory" applies
+//     to the gitdir it operates on; without pinning it, a top-level
+//     <dir>/.git/commondir file (which git honors for the base's own gitdir,
+//     not only for linked worktrees) can redirect that resolution elsewhere.
+//     Pinning makes the common directory explicit and authoritative for
+//     every call through this wrapper, independent of what any commondir
+//     file says.
+//   - As an additional check (and for detection), the wrapper first checks whether
+//     <dir>/.git/commondir exists at all and refuses (ErrCommondirPresent)
+//     if so, since a hub-native base never legitimately has one.
+//
+// It deliberately does NOT disable hooks (core.hooksPath), filters, aliases,
+// or the global/system gitconfig — once the above holds, any hook/filter
+// still configured for the base is host-managed and must keep running (most
+// notably git-lfs: a post-checkout hook + filter.lfs.* smudge/clean driver).
+// Specifically:
+//   - GIT_CONFIG_NOSYSTEM=1 / GIT_CONFIG_GLOBAL=/dev/null were considered and
+//     REJECTED: `git lfs install` writes filter.lfs.* to the global or system
+//     gitconfig (not repo-local), so this would silently break LFS. It would
+//     also strip broker-host config the broker legitimately relies on
+//     (safe.directory, credential.helper, url.insteadOf, http.*,
+//     core.sshCommand for its own auth) for no corresponding benefit.
+//   - core.sshCommand is left alone for the same reason: this wrapper also
+//     covers the base clone/pull paths, which may legitimately depend on the
+//     broker's configured SSH transport.
+//   - Alias neutralization is unnecessary: every caller here invokes an
+//     explicit, hardcoded subcommand, never a user-suppliable one.
+//
+// What it does additionally clear:
+//   - core.fsmonitor (both boolean and hook-path forms): not used by git-lfs
+//     or any other broker operation, so clearing it costs nothing.
+//   - core.pager=cat: purely cosmetic — a pager must never block
+//     non-interactive broker output.
+//
+// dir is the working directory (cmd.Dir) and the base whose common directory
+// is pinned; it must be non-empty. args are the git subcommand and its
+// arguments, e.g. "worktree", "add", "--relative-paths", ... The returned
+// cmd.Env starts as a copy of the broker process's environment plus
+// GIT_COMMON_DIR; callers that need to layer additional env (e.g. the
+// GIT_CONFIG_COUNT/KEY_0/VALUE_0 credential-helper technique) must append to
+// cmd.Env rather than replace it, or the pin is lost.
+func SafeGitCommand(ctx context.Context, dir string, args ...string) (*exec.Cmd, error) {
+	if dir == "" {
+		return nil, fmt.Errorf("SafeGitCommand: dir is required")
 	}
-	return gitCloneViaTempDir(ctx, in, stillOwned)
+	commondirFile := filepath.Join(dir, ".git", "commondir")
+	if _, err := os.Stat(commondirFile); err == nil {
+		slog.Error("SafeGitCommand: refusing to operate, base .git/commondir is present",
+			"dir", dir, "commondir_file", commondirFile)
+		return nil, fmt.Errorf("%w: %s", ErrCommondirPresent, commondirFile)
+	}
+
+	safeArgs := []string{
+		"-c", "core.fsmonitor=false",
+		"-c", "core.fsmonitor=",
+		"-c", "core.pager=cat",
+	}
+	fullArgs := append(safeArgs, args...)
+	cmd := exec.CommandContext(ctx, "git", fullArgs...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "GIT_COMMON_DIR="+filepath.Join(dir, ".git"))
+	return cmd, nil
 }
 
-// gitCloneViaTempDir clones into a freshly created, uniquely-named scratch
-// subdirectory of in.Resolved.HostPath (always empty, regardless of what
-// else — e.g. the filesystem-fallback lock marker — already lives in the
-// real target) and moves the result up into the real target afterward.
-func gitCloneViaTempDir(ctx context.Context, in ProvisionInput, stillOwned func() bool) error {
+// markedWorkspaceNeedsClone reports whether a shared-plain git workspace that
+// already has its provisioning marker still needs its clone:
+//   - it holds nothing but entries that may sit next to a clone
+//     (ignorableWorkspaceEntry); a workspace provisioned before the
+//     Kubernetes init container received the project's clone settings has
+//     the marker and no repository; or
+//   - an earlier clone into it finished but was interrupted while its
+//     entries were being moved into place (a scratch directory holding a
+//     clone manifest, and no .git in the workspace). gitCloneWorkspace then
+//     finishes the move, or refuses with the entries named.
+//
+// A workspace with a .git is left as it is, apart from removing a scratch
+// directory left by a clone stopped just after its move; one with any other
+// content is left as it is.
+//
+// This relies on every start taking the provisioning file lock before it
+// looks at the workspace (no store.AdvisoryLocker; see acquireProvisionLock).
+// A start that only waited for the marker would not wait for this clone.
+func markedWorkspaceNeedsClone(in ProvisionInput) bool {
+	if in.Mode != store.SharingModeSharedPlain || in.GitClone == nil || in.GitClone.URL == "" {
+		return false
+	}
+	dest := in.Resolved.HostPath
+	if _, err := os.ReadDir(dest); err != nil {
+		return false
+	}
+	if _, err := os.Lstat(filepath.Join(dest, ".git")); err == nil {
+		// Cloned. A scratch directory left by a clone stopped just after
+		// its move still needs removing (gitCloneWorkspace does that).
+		return hasFinishedCloneScratch(dest)
+	}
+	if scratch, err := completedCloneScratch(dest); err != nil || scratch != "" {
+		// An interrupted move (or more than one finished clone, which
+		// gitCloneWorkspace reports): never treat it as provisioned.
+		return true
+	}
+	other, err := nonIgnorableWorkspaceEntries(in, dest)
+	return err == nil && len(other) == 0
+}
+
+// cloneIntoMarkedWorkspace clones into a marked shared-plain workspace that
+// still needs its clone (markedWorkspaceNeedsClone) and chowns the result.
+// The caller holds the provisioning lock and has re-checked the marker under
+// it. The marker is already present, so nothing is written for it; a failed
+// clone leaves the workspace as it was, and the next start tries again.
+func cloneIntoMarkedWorkspace(ctx context.Context, in ProvisionInput, stillOwned func() bool, sentinelDir string) error {
+	slog.Info("ProvisionShared: workspace has a provisioning marker but no clone, cloning",
+		"project_id", in.ProjectID, "host_path", in.Resolved.HostPath)
+	if err := gitCloneWorkspace(ctx, in, stillOwned); err != nil {
+		return fmt.Errorf("ProvisionShared: git clone: %w", err)
+	}
+	// The marker may be the legacy one in the workspace root; now that
+	// there is a .git, keep it out of git status.
+	excludeLegacySentinel(in)
+	uid, gid := resolveUID(in), resolveGID(in)
+	if err := chownProjectTreeExcluding(ctx, in.Resolved.HostPath, []string{sentinelDir, legacyDir(in, sentinelDir)}, uid, gid); err != nil {
+		if in.RequireChownSuccess {
+			return fmt.Errorf("ProvisionShared: chown %s to %d:%d: %w", in.Resolved.HostPath, uid, gid, err)
+		}
+		slog.Warn("ProvisionShared: chown failed (non-fatal, may lack privileges)",
+			"project_id", in.ProjectID, "path", in.Resolved.HostPath, "uid", uid, "gid", gid, "error", err)
+	}
+	return nil
+}
+
+// cloneTempDirPrefix names the scratch directory a clone attempt creates
+// under the workspace. Nothing else creates entries with this prefix.
+const cloneTempDirPrefix = ".scion-clone-"
+
+// cloneManifestFile is written into a clone's scratch directory once the
+// clone has succeeded, before any entry is moved into the workspace. It
+// lists the clone's top-level entries, one per line. A scratch directory
+// with a manifest holds a finished clone whose move may have been
+// interrupted; one without a manifest is the remains of a clone that never
+// finished, and is removed.
+const cloneManifestFile = ".scion-clone-entries"
+
+// sharedVolumesDirName is where in-workspace shared dirs are mounted
+// (<workspace>/.scion-volumes/<name>).
+const sharedVolumesDirName = ".scion-volumes"
+
+// ignorableWorkspaceEntry reports whether e, an entry directly in the
+// workspace dir, may sit next to a clone. These are Scion's own entries:
+//   - the provisioning marker file (ProvisionSentinelFile);
+//   - the provisioning file lock directory (provisionFileLockName) and its
+//     siblings "<lock>.stage-*", "<lock>.evict-*" and "<lock>.clock-probe";
+//   - clone scratch directories (cloneTempDirPrefix);
+//   - .scion-volumes, when it is a directory whose children are all
+//     directories that are either empty (mount points created for
+//     in-workspace shared dirs) or the mount of one of in's shared dirs;
+//   - an empty worktrees directory.
+//
+// Anything else is workspace content. Symlinks are never ignorable.
+func ignorableWorkspaceEntry(in ProvisionInput, dir string, e os.DirEntry) (bool, error) {
+	name := e.Name()
+	isDir := e.IsDir()
+	switch {
+	case name == ProvisionSentinelFile:
+		return e.Type().IsRegular(), nil
+	case name == provisionFileLockName || strings.HasPrefix(name, provisionFileLockName+"."):
+		return true, nil
+	case strings.HasPrefix(name, cloneTempDirPrefix):
+		return isDir, nil
+	case name == sharedVolumesDirName && isDir:
+		return onlySharedDirMounts(in, filepath.Join(dir, name))
+	case name == "worktrees" && isDir:
+		nonEmpty, err := dirHasEntries(filepath.Join(dir, name))
+		if err != nil {
+			return false, fmt.Errorf("check %s: %w", filepath.Join(dir, name), err)
+		}
+		return !nonEmpty, nil
+	default:
+		return false, nil
+	}
+}
+
+// onlySharedDirMounts reports whether every entry of volumesDir is a
+// directory that is empty or is the mount of one of in's shared dirs.
+func onlySharedDirMounts(in ProvisionInput, volumesDir string) (bool, error) {
+	entries, err := os.ReadDir(volumesDir)
+	if err != nil {
+		return false, fmt.Errorf("read dir %s: %w", volumesDir, err)
+	}
+	mounts := map[string]bool{}
+	for _, sd := range in.Resolved.SharedDirs {
+		if sd.HostPath != "" {
+			mounts[filepath.Clean(sd.HostPath)] = true
+		}
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			return false, nil
+		}
+		p := filepath.Join(volumesDir, e.Name())
+		if mounts[filepath.Clean(p)] {
+			continue
+		}
+		nonEmpty, err := dirHasEntries(p)
+		if err != nil {
+			return false, fmt.Errorf("check %s: %w", p, err)
+		}
+		if nonEmpty {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+// nonIgnorableWorkspaceEntries returns the sorted names of the entries in
+// dir that are workspace content (not ignorableWorkspaceEntry).
+func nonIgnorableWorkspaceEntries(in ProvisionInput, dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("read dir %s: %w", dir, err)
+	}
+	var other []string
+	for _, e := range entries {
+		ok, err := ignorableWorkspaceEntry(in, dir, e)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			other = append(other, e.Name())
+		}
+	}
+	return other, nil
+}
+
+// gitCloneWorkspace clones in.GitClone into in.Resolved.HostPath. The caller
+// holds the provisioning lock and has already checked the provisioning
+// marker.
+//
+// The workspace is often a mount point (a k8s PVC subPath), so it cannot be
+// swapped out as a whole. The clone runs in a fresh scratch directory under
+// the workspace. Once it succeeds, a manifest of its entries is written into
+// the scratch directory, and the entries are renamed into place with .git
+// last, never replacing an existing entry (moveDirContentsUp). The
+// workspace's own content is never cleared or overwritten:
+//   - a .git already in the workspace means an earlier clone finished (.git
+//     is always renamed last), so it is reused;
+//   - a scratch directory with a manifest is an earlier clone whose move was
+//     interrupted: its remaining entries are moved, provided every other
+//     entry in the workspace came from it (resumeCloneMove);
+//   - other scratch directories are left over from clones that never
+//     finished, and are removed;
+//   - any workspace content (nonIgnorableWorkspaceEntries) makes the clone
+//     fail with those entries named, both before the clone and again just
+//     before the move, since something may write to the workspace while a
+//     long clone runs.
+//
+// stillOwned reports whether the caller still holds the provisioning lock;
+// nil means not applicable (the store.AdvisoryLocker path).
+func gitCloneWorkspace(ctx context.Context, in ProvisionInput, stillOwned func() bool) error {
 	dest := in.Resolved.HostPath
 
-	// A prior attempt may have completed the clone directly into dest
-	// before this mechanism existed, or partially completed a later step
-	// (e.g. chown) after a fully successful clone — either way, a .git dir
-	// already there means there is a usable prior clone to reuse, exactly
-	// gitCloneDirect's own self-heal rule for the Locker-present path.
 	if _, statErr := os.Stat(filepath.Join(dest, ".git")); statErr == nil {
 		slog.Warn("ProvisionShared: workspace already has a .git dir, reusing prior clone",
 			"project_id", in.ProjectID, "path", dest)
+		removed, err := removeFinishedCloneScratch(dest)
+		if err != nil {
+			return err
+		}
+		if removed {
+			excludeProvisioningFiles(in)
+		}
 		return nil
 	}
 
-	// dest may hold stray content from an older, incomplete attempt (not
-	// just the lock marker and its stage/evict siblings) — mirror
-	// gitCloneDirect's own protection: refuse to touch a non-empty
-	// "worktrees" dir (WorktreePerAgent mode keeps every agent's checkout
-	// there, unrelated to this clone), and otherwise clear stray entries so
-	// provisioning self-heals — but never remove anything under the lock's
-	// own name, which is still legitimately in use for the duration of this
-	// call: the live lock itself, a concurrent caller's in-progress
-	// "<lock>.stage-*" staging directory, or an "<lock>.evict-<id>" entry
-	// awaiting garbage collection.
-	if nonEmpty, checkErr := dirHasEntries(filepath.Join(dest, "worktrees")); checkErr != nil || nonEmpty {
-		return fmt.Errorf("refusing to clear %s before clone: checking worktrees failed or found it non-empty (err=%v, nonEmpty=%v)",
-			dest, checkErr, nonEmpty)
+	scratch, err := completedCloneScratch(dest)
+	if err != nil {
+		return err
 	}
-	if err := removeDirContentsExceptPrefix(dest, provisionFileLockName); err != nil {
-		return fmt.Errorf("clear stray contents of %s before clone: %w", dest, err)
+	if scratch != "" {
+		if err := resumeCloneMove(in, scratch); err != nil {
+			return err
+		}
+		excludeProvisioningFiles(in)
+		return finishCloneScratch(scratch)
 	}
 
-	tmpDir, err := os.MkdirTemp(dest, ".scion-clone-*")
+	if err := removeCloneTempDirs(dest); err != nil {
+		return err
+	}
+	if other, err := nonIgnorableWorkspaceEntries(in, dest); err != nil {
+		return err
+	} else if len(other) > 0 {
+		return fmt.Errorf("workspace %s is not empty but has no provisioning marker and no .git (found %s); "+
+			"refusing to clone into it or clear it: move those entries out of the workspace and start the agent again",
+			dest, strings.Join(other, ", "))
+	}
+
+	tmpDir, err := os.MkdirTemp(dest, cloneTempDirPrefix+"*")
 	if err != nil {
 		return fmt.Errorf("create temp clone dir under %s: %w", dest, err)
 	}
 	tmpIn := in
 	tmpIn.Resolved.HostPath = tmpDir
-	if cloneErr := gitCloneDirect(ctx, tmpIn); cloneErr != nil {
+	if cloneErr := runGitClone(ctx, tmpIn); cloneErr != nil {
 		_ = os.RemoveAll(tmpDir)
 		return cloneErr
+	}
+	if err := writeCloneManifest(tmpDir, in.GitClone); err != nil {
+		_ = os.RemoveAll(tmpDir)
+		return err
 	}
 
 	// Re-verify ownership immediately before the irreversible move into
 	// dest: the clone above can take a long time, long enough for this
-	// holder to have silently lost the lock to
-	// a reclaimer since the heartbeat's last check. Moving cloned content
-	// into dest while a second provisioner also believes it owns the lock
-	// would let both finish and contend over the sentinel write — a
-	// synchronous check right here closes that gap.
+	// holder to have silently lost the lock to a reclaimer since the
+	// heartbeat's last check.
 	if stillOwned != nil && !stillOwned() {
 		_ = os.RemoveAll(tmpDir)
-		return fmt.Errorf("gitCloneViaTempDir: lost the provisioning lock during clone; refusing to move cloned content into %s", dest)
+		return fmt.Errorf("gitCloneWorkspace: lost the provisioning lock during clone; refusing to move cloned content into %s", dest)
+	}
+
+	// Check the workspace again: an agent already running in it (one
+	// started before it was provisioned) may have written to it during the
+	// clone.
+	if other, err := nonIgnorableWorkspaceEntries(in, dest); err != nil {
+		_ = os.RemoveAll(tmpDir)
+		return err
+	} else if len(other) > 0 {
+		_ = os.RemoveAll(tmpDir)
+		return fmt.Errorf("workspace %s changed during the clone (found %s); "+
+			"leaving it as it is and discarding the clone", dest, strings.Join(other, ", "))
 	}
 
 	if err := moveDirContentsUp(tmpDir, dest); err != nil {
-		// Roll back completely rather than leave a partial clone: dest must
-		// never end up with a .git dir but missing working-tree files, which
-		// this function's own ".git present -> reuse" self-heal check above
-		// would otherwise mistake for a valid completed clone on retry.
+		if errors.Is(err, errMoveBackIncomplete) {
+			// Some of the clone's entries are still in the workspace:
+			// keep the scratch directory and its manifest so the next
+			// start can finish the move.
+			return fmt.Errorf("move cloned contents from %s to %s: %w", tmpDir, dest, err)
+		}
+		// Everything was moved back; drop the clone.
 		_ = os.RemoveAll(tmpDir)
 		return fmt.Errorf("move cloned contents from %s to %s: %w", tmpDir, dest, err)
 	}
-
-	// Once dest has a real .git, exclude the lock's own on-disk footprint
-	// (the live lock, its clock-probe file, and any stage/evict leftovers)
-	// from git's view: every subsequent agent start for a WorktreePerAgent
-	// project still takes this same lock for ensureWorktree even after the
-	// base clone is done, and without this, each one would transiently show
-	// up in `git status` / get swept up by `git add -A` inside the shared
-	// checkout every agent works in. One-time,
-	// since .git/info/exclude persists for the life of the clone.
-	//
-	// Anchored to the repo root with a leading "/" — the lock only ever
-	// lives directly in the sentinel dir, never nested (see
-	// chownProjectTree's doc on the identical constraint) — so an untracked
-	// file elsewhere in the repo that merely happens to share the lock's
-	// name prefix is never hidden from `git status` or swept into `git add
-	// -A`. (.git/info/exclude has no effect on already-tracked files
-	// either way.)
-	if err := appendGitExclude(dest, "/"+provisionFileLockName); err != nil {
-		slog.Warn("gitCloneViaTempDir: failed to exclude lock marker from git status (non-fatal)",
-			"project_id", in.ProjectID, "path", dest, "error", err)
-	} else if err := appendGitExclude(dest, "/"+provisionFileLockName+".*"); err != nil {
-		slog.Warn("gitCloneViaTempDir: failed to exclude lock marker variants from git status (non-fatal)",
-			"project_id", in.ProjectID, "path", dest, "error", err)
-	}
-	// An init container without the state-directory mount writes the
-	// sentinel into the workspace too: keep it out of git's view as well.
-	if resolveSentinelDir(in) == dest {
-		if err := appendGitExclude(dest, "/"+ProvisionSentinelFile); err != nil {
-			slog.Warn("gitCloneViaTempDir: failed to exclude the sentinel from git status (non-fatal)",
-				"project_id", in.ProjectID, "path", dest, "error", err)
-		}
-	}
-
-	return os.Remove(tmpDir)
+	excludeProvisioningFiles(in)
+	return finishCloneScratch(tmpDir)
 }
 
-// moveDirContentsUp moves every entry from src into dest via os.Rename,
-// leaving src empty for the caller to remove. src must be a subdirectory of
-// dest (it is always created under it via os.MkdirTemp) so every move stays
-// on the same filesystem and is a plain, atomic rename.
+// excludeProvisioningFiles keeps Scion's provisioning files in a freshly
+// cloned workspace out of git's view: leftover clone scratch directories,
+// and, when the provisioning file lock (or the legacy one) lives in the
+// workspace itself (the k8s init container), the lock's on-disk footprint
+// and the marker. Patterns are anchored with a leading "/", so an untracked
+// file elsewhere that shares a prefix stays visible. Best effort.
+func excludeProvisioningFiles(in ProvisionInput) {
+	dest := in.Resolved.HostPath
+	patterns := []string{"/" + cloneTempDirPrefix + "*"}
+	sentinelDir := resolveSentinelDir(in)
+	if in.Locker == nil && (sentinelDir == dest || legacyDir(in, sentinelDir) == dest) {
+		patterns = append(patterns, "/"+provisionFileLockName, "/"+provisionFileLockName+".*")
+	}
+	if sentinelDir == dest {
+		patterns = append(patterns, "/"+ProvisionSentinelFile)
+	}
+	for _, p := range patterns {
+		if err := appendGitExclude(dest, p); err != nil {
+			slog.Warn("gitCloneWorkspace: failed to add a git exclude for provisioning files (non-fatal)",
+				"project_id", in.ProjectID, "path", dest, "pattern", p, "error", err)
+			return
+		}
+	}
+}
+
+// writeCloneManifest writes cloneManifestFile into scratch: a header naming
+// the repository (without credentials) and branch the clone came from, a
+// blank line, then the clone's entries, one per line. A repository whose
+// top level has an entry with that name cannot be provisioned this way.
+func writeCloneManifest(scratch string, gc *api.GitCloneConfig) error {
+	entries, err := os.ReadDir(scratch)
+	if err != nil {
+		return fmt.Errorf("read dir %s: %w", scratch, err)
+	}
+	var b strings.Builder
+	b.WriteString(cloneManifestHeader + "\n")
+	b.WriteString("url=" + manifestURL(gc) + "\n")
+	b.WriteString("branch=" + manifestBranch(gc) + "\n\n")
+	for _, e := range entries {
+		if e.Name() == cloneManifestFile {
+			return fmt.Errorf("the repository has a top-level entry named %s, which workspace provisioning uses itself", cloneManifestFile)
+		}
+		b.WriteString(e.Name())
+		b.WriteByte('\n')
+	}
+	return writeFileAtomic(filepath.Join(scratch, cloneManifestFile), []byte(b.String()), 0o644)
+}
+
+// cloneManifestHeader is the first line of a clone manifest.
+const cloneManifestHeader = "scion-clone-manifest 1"
+
+// cloneManifest is a parsed clone manifest.
+type cloneManifest struct {
+	url, branch string
+	entries     map[string]bool
+}
+
+func manifestURL(gc *api.GitCloneConfig) string {
+	if gc == nil {
+		return ""
+	}
+	return redactCloneURL(gc.URL)
+}
+
+func manifestBranch(gc *api.GitCloneConfig) string {
+	if gc == nil {
+		return ""
+	}
+	return gc.Branch
+}
+
+// readCloneManifest parses scratch's manifest.
+func readCloneManifest(scratch string) (cloneManifest, error) {
+	data, err := os.ReadFile(filepath.Join(scratch, cloneManifestFile))
+	if err != nil {
+		return cloneManifest{}, err
+	}
+	header, body, ok := strings.Cut(string(data), "\n\n")
+	lines := strings.Split(header, "\n")
+	if !ok || len(lines) == 0 || lines[0] != cloneManifestHeader {
+		return cloneManifest{}, fmt.Errorf("%s is not a clone manifest", filepath.Join(scratch, cloneManifestFile))
+	}
+	m := cloneManifest{entries: map[string]bool{}}
+	for _, line := range lines[1:] {
+		if v, ok := strings.CutPrefix(line, "url="); ok {
+			m.url = v
+		} else if v, ok := strings.CutPrefix(line, "branch="); ok {
+			m.branch = v
+		}
+	}
+	for _, line := range strings.Split(body, "\n") {
+		if line != "" {
+			m.entries[line] = true
+		}
+	}
+	return m, nil
+}
+
+// finishCloneScratch removes a scratch directory whose entries have all been
+// moved: its manifest, then the directory itself.
+func finishCloneScratch(scratch string) error {
+	if err := os.Remove(filepath.Join(scratch, cloneManifestFile)); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove %s: %w", filepath.Join(scratch, cloneManifestFile), err)
+	}
+	return os.Remove(scratch)
+}
+
+// finishedCloneScratch reports whether p is a scratch directory left by a
+// clone whose move completed: it holds nothing but its manifest (a process
+// stopped after .git was moved, before the scratch directory was removed).
+func finishedCloneScratch(p string) bool {
+	entries, err := os.ReadDir(p)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if e.Name() != cloneManifestFile {
+			return false
+		}
+	}
+	return true
+}
+
+// removeFinishedCloneScratch removes the finishedCloneScratch directories in
+// dir, and reports whether it removed any.
+func removeFinishedCloneScratch(dir string) (bool, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false, fmt.Errorf("read dir %s: %w", dir, err)
+	}
+	removed := false
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Name(), cloneTempDirPrefix) || !e.IsDir() {
+			continue
+		}
+		p := filepath.Join(dir, e.Name())
+		if !finishedCloneScratch(p) {
+			continue
+		}
+		if err := finishCloneScratch(p); err != nil {
+			return removed, err
+		}
+		removed = true
+	}
+	return removed, nil
+}
+
+// hasFinishedCloneScratch reports whether dir holds a finishedCloneScratch
+// directory.
+func hasFinishedCloneScratch(dir string) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), cloneTempDirPrefix) && e.IsDir() &&
+			finishedCloneScratch(filepath.Join(dir, e.Name())) {
+			return true
+		}
+	}
+	return false
+}
+
+// completedCloneScratch returns the scratch directory in dir that holds a
+// clone manifest, or "" if there is none. More than one is an error: the
+// lock lets only one clone run at a time, and an earlier one is always
+// finished (or refused) before a new one starts.
+func completedCloneScratch(dir string) (string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "", fmt.Errorf("read dir %s: %w", dir, err)
+	}
+	var found []string
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Name(), cloneTempDirPrefix) || !e.IsDir() {
+			continue
+		}
+		p := filepath.Join(dir, e.Name())
+		if fi, err := os.Lstat(filepath.Join(p, cloneManifestFile)); err == nil && fi.Mode().IsRegular() {
+			found = append(found, p)
+		}
+	}
+	switch len(found) {
+	case 0:
+		return "", nil
+	case 1:
+		return found[0], nil
+	default:
+		return "", fmt.Errorf("workspace %s holds more than one interrupted clone (%s); refusing to pick one: remove them and start the agent again",
+			dir, strings.Join(found, ", "))
+	}
+}
+
+// resumeCloneMove finishes moving the entries of an interrupted clone in
+// scratch into the workspace. Every workspace content entry must be one the
+// clone listed in its manifest and no longer holds, i.e. one this clone
+// moved; anything else makes it fail with those entries named, leaving the
+// workspace and the scratch directory as they are. Nothing is replaced.
+func resumeCloneMove(in ProvisionInput, scratch string) error {
+	dest := in.Resolved.HostPath
+	m, err := readCloneManifest(scratch)
+	if err != nil {
+		return fmt.Errorf("read clone manifest in %s: %w", scratch, err)
+	}
+	if wantURL, wantBranch := manifestURL(in.GitClone), manifestBranch(in.GitClone); m.url != wantURL || m.branch != wantBranch {
+		return fmt.Errorf("workspace %s holds an interrupted clone (%s) of %s branch %q, but the project clones %s branch %q; "+
+			"refusing to finish it: remove the clone's entries from the workspace and %s, then start the agent again",
+			dest, scratch, m.url, m.branch, wantURL, wantBranch, scratch)
+	}
+	manifest := m.entries
+	remaining := map[string]bool{}
+	scratchEntries, err := os.ReadDir(scratch)
+	if err != nil {
+		return fmt.Errorf("read dir %s: %w", scratch, err)
+	}
+	for _, e := range scratchEntries {
+		if e.Name() != cloneManifestFile {
+			remaining[e.Name()] = true
+		}
+	}
+	other, err := nonIgnorableWorkspaceEntries(in, dest)
+	if err != nil {
+		return err
+	}
+	var foreign []string
+	moved := map[string]bool{}
+	for _, name := range other {
+		if manifest[name] && !remaining[name] {
+			moved[name] = true
+			continue
+		}
+		foreign = append(foreign, name)
+	}
+	if len(foreign) > 0 {
+		return fmt.Errorf("workspace %s holds an interrupted clone (%s) and entries that did not come from it (%s); "+
+			"refusing to finish the clone: move those entries out of the workspace and start the agent again",
+			dest, scratch, strings.Join(foreign, ", "))
+	}
+	var missing []string
+	for name := range manifest {
+		if !moved[name] && !remaining[name] {
+			missing = append(missing, name)
+		}
+	}
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		return fmt.Errorf("workspace %s holds an interrupted clone (%s) that is missing %s; "+
+			"refusing to finish it: remove the clone's entries from the workspace and %s, then start the agent again",
+			dest, scratch, strings.Join(missing, ", "), scratch)
+	}
+	slog.Warn("ProvisionShared: finishing an interrupted clone",
+		"project_id", in.ProjectID, "path", dest, "scratch", scratch, "remaining", len(remaining))
+	if err := moveDirContentsUp(scratch, dest); err != nil {
+		return fmt.Errorf("finish moving cloned contents from %s to %s: %w", scratch, dest, err)
+	}
+	return nil
+}
+
+// removeCloneTempDirs removes the scratch directories (cloneTempDirPrefix)
+// that clones which never finished left in dir: those without a clone
+// manifest. Only directories are removed; a regular file or symlink with
+// that name is left in place and is then reported as workspace content.
+func removeCloneTempDirs(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return fmt.Errorf("read dir %s: %w", dir, err)
+	}
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Name(), cloneTempDirPrefix) || !e.IsDir() {
+			continue
+		}
+		p := filepath.Join(dir, e.Name())
+		if _, err := os.Lstat(filepath.Join(p, cloneManifestFile)); err == nil {
+			continue
+		}
+		slog.Warn("ProvisionShared: removing scratch directory left by an unfinished clone", "path", p)
+		if err := os.RemoveAll(p); err != nil {
+			return fmt.Errorf("remove leftover clone dir %s: %w", p, err)
+		}
+	}
+	return nil
+}
+
+// runGitClone runs git clone into in.Resolved.HostPath, which must be empty
+// or absent. The clone runs under ctx via exec.CommandContext so that a
+// cancelled or timed-out context stops the git process. Interactive prompts
+// are disabled. The returned error names the repository without credentials,
+// query string or fragment, and says when the failure is a missing or
+// rejected credential.
+func runGitClone(ctx context.Context, in ProvisionInput) error {
+	gc := in.GitClone
+	args := []string{"clone"}
+
+	// Depth: nil/omitted = shallow depth 1, 0 = full clone (no --depth), >0 = that depth.
+	depth := 1
+	if gc.Depth != nil {
+		depth = *gc.Depth
+	}
+	if depth > 0 {
+		args = append(args, "--depth", fmt.Sprintf("%d", depth))
+	}
+	if gc.Branch != "" {
+		args = append(args, "--branch", gc.Branch)
+	}
+	args = append(args, gc.URL, in.Resolved.HostPath)
+
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		return nil
+	}
+	return cloneError(gc.URL, string(output), err)
+}
+
+// cloneError builds the error for a failed clone of rawURL. git's output is
+// stripped of the URL's credentials before it is included.
+func cloneError(rawURL, output string, runErr error) error {
+	safeURL := redactCloneURL(rawURL)
+	detail := strings.TrimSpace(sanitizeCloneOutput(output, rawURL))
+	if detail == "" && runErr != nil {
+		detail = runErr.Error()
+	}
+	switch util.ClassifyGitError(detail).Kind {
+	case util.GitErrAuth:
+		return fmt.Errorf("git clone %s: the repository needs credentials, and workspace provisioning has none "+
+			"(it clones without a git token, so a private repository cannot be cloned here): %s", safeURL, detail)
+	case util.GitErrNotFound:
+		return fmt.Errorf("git clone %s: repository or branch not found "+
+			"(a private repository also reports this when no credentials are given): %s", safeURL, detail)
+	default:
+		return fmt.Errorf("git clone %s: %s", safeURL, detail)
+	}
+}
+
+// redactCloneURL returns rawURL without userinfo, query string or fragment,
+// any of which can carry a token. For an scp-style URL ("user@host:path")
+// the user is dropped and host and path are kept. An unparseable URL is
+// never echoed.
+func redactCloneURL(rawURL string) string {
+	if !strings.Contains(rawURL, "://") {
+		// scp-style "user@host:path", or a local path: keep host and path,
+		// drop the user.
+		if at := scpUserEnd(rawURL); at >= 0 {
+			return rawURL[at+1:]
+		}
+		if !strings.Contains(rawURL, "@") {
+			return rawURL
+		}
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "<unparseable clone URL>"
+	}
+	u.User = nil
+	u.RawQuery = ""
+	u.Fragment = ""
+	return u.String()
+}
+
+// scpHostPath matches the "host:path" part of an scp-style URL.
+var scpHostPath = regexp.MustCompile(`^[^@:/]+:`)
+
+// scpUserEnd returns the index of the "@" that ends the user part of an
+// scp-style URL ("user@host:path"): the last "@" followed by "host:". The
+// user part may itself contain "@" or ":". It returns -1 when there is none.
+func scpUserEnd(rawURL string) int {
+	end := -1
+	for i := 0; i < len(rawURL); i++ {
+		if rawURL[i] == '@' && scpHostPath.MatchString(rawURL[i+1:]) {
+			end = i
+		}
+	}
+	return end
+}
+
+// sanitizeCloneOutput removes rawURL's credentials, query string and
+// fragment from text (git's own output can echo the URL).
+func sanitizeCloneOutput(text, rawURL string) string {
+	if rawURL == "" || text == "" {
+		return text
+	}
+	out := strings.ReplaceAll(text, rawURL, redactCloneURL(rawURL))
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return out
+	}
+	if u.User != nil && u.User.String() != "" {
+		out = strings.ReplaceAll(out, u.User.String()+"@", "")
+	}
+	if u.RawQuery != "" {
+		out = strings.ReplaceAll(out, "?"+u.RawQuery, "")
+	}
+	if u.Fragment != "" {
+		out = strings.ReplaceAll(out, "#"+u.Fragment, "")
+	}
+	return out
+}
+
+// moveDirContentsUp moves every entry from src into dest, leaving src with
+// only its clone manifest (cloneManifestFile, which is never moved) for the
+// caller to remove. src must be a subdirectory of dest (it is always
+// created under it via os.MkdirTemp), so every move stays on the same
+// filesystem and is a plain rename.
+//
+// No entry in dest is ever replaced: each move goes through moveRenameFile
+// (renameNoReplace by default), and a name that already exists in dest makes
+// the move fail.
 //
 // Any ".git" entry is moved LAST, after every other entry has already
-// landed in dest successfully. If a move fails partway through, dest is left
-// with working-tree files but no .git — never the reverse — so a caller
-// that rolls back by deleting only what os.ReadDir originally reported as
-// moved can never mistake the result for a valid clone: a partial move that
-// put .git down early, then failed on a later file, would otherwise leave
-// dest looking like a complete-but-corrupt clone to the ".git present"
-// self-heal check.
-//
-// A repository whose own tracked content includes a top-level entry
-// literally named like the lock (provisionFileLockName or a
-// provisionFileLockName-prefixed name) would collide with the still-live
-// lock directory sitting in dest and fail this move (os.Rename onto an
-// existing non-empty directory errors) — a safe, loud failure rather than
-// silent corruption, just not one self-healed by retrying without operator
-// intervention. Considered acceptable: no real project is expected to track
-// a file named ".scion-provision.lock".
+// landed in dest. If a move fails partway through, the entries this call
+// already moved are moved back into src, so dest is left as it was and src
+// still holds the whole clone (if moving an entry back fails, the error
+// wraps errMoveBackIncomplete). A process killed partway through leaves
+// working-tree files but no .git in dest, never the reverse, so the
+// ".git present" reuse check can never mistake it for a finished clone; the
+// manifest left in src lets the next start finish the move
+// (resumeCloneMove).
 func moveDirContentsUp(src, dest string) error {
 	entries, err := os.ReadDir(src)
 	if err != nil {
@@ -2370,16 +3004,20 @@ func moveDirContentsUp(src, dest string) error {
 	}
 
 	var moved []string
-	// rollback undoes every move already applied to dest, so a caller that
-	// hits an error mid-move gets dest back to exactly how it looked before
-	// this call started (modulo whatever gitCloneViaTempDir's own stray-
-	// content clear already removed) — belt-and-suspenders on top of the
-	// .git-last ordering below, which is what actually guarantees dest can
-	// never look like a valid-but-corrupt clone.
-	rollback := func() {
-		for _, name := range moved {
-			_ = os.RemoveAll(filepath.Join(dest, name))
+	rollback := func(cause error) error {
+		complete := true
+		for i := len(moved) - 1; i >= 0; i-- {
+			name := moved[i]
+			if err := moveBackFile(filepath.Join(dest, name), filepath.Join(src, name)); err != nil {
+				complete = false
+				slog.Warn("moveDirContentsUp: could not move an entry back after a failed move",
+					"src", src, "dest", dest, "name", name, "error", err)
+			}
 		}
+		if !complete {
+			return fmt.Errorf("%w (%w: some moved entries are still in %s)", cause, errMoveBackIncomplete, dest)
+		}
+		return cause
 	}
 
 	move := func(name string) error {
@@ -2392,148 +3030,41 @@ func moveDirContentsUp(src, dest string) error {
 
 	var gitEntryName string
 	for _, e := range entries {
-		if e.Name() == ".git" {
+		switch e.Name() {
+		case cloneManifestFile:
+			continue
+		case ".git":
 			gitEntryName = e.Name()
 			continue
 		}
 		if err := move(e.Name()); err != nil {
-			rollback()
-			return fmt.Errorf("move %s to %s: %w", e.Name(), dest, err)
+			return rollback(fmt.Errorf("move %s to %s: %w", e.Name(), dest, err))
 		}
 	}
 	if gitEntryName != "" {
 		if err := move(gitEntryName); err != nil {
-			rollback()
-			return fmt.Errorf("move %s to %s: %w", gitEntryName, dest, err)
+			return rollback(fmt.Errorf("move %s to %s: %w", gitEntryName, dest, err))
 		}
 	}
 	return nil
 }
 
-// gitCloneDirect performs the git clone directly into in.Resolved.HostPath.
-// The clone runs under ctx via exec.CommandContext so that a cancelled/
-// timed-out context kills the git process instead of leaving it orphaned.
-// Callers must ensure in.Resolved.HostPath is empty (or absent) before
-// calling — that's git clone's own requirement, and gitCloneWorkspace's two
-// paths (gitCloneDirect / gitCloneViaTempDir) each guarantee it a different
-// way.
-func gitCloneDirect(ctx context.Context, in ProvisionInput) error {
-	gc := in.GitClone
+// errMoveBackIncomplete marks a moveDirContentsUp failure after which some
+// entries could not be moved back into src. src then still has its clone
+// manifest and must be kept, so the next start can finish the move
+// (resumeCloneMove).
+var errMoveBackIncomplete = errors.New("moving entries back into the scratch directory did not complete")
 
-	runClone := func() ([]byte, error) {
-		args := []string{"clone"}
-
-		// Set depth: nil/omitted = shallow depth 1, 0 = full clone (no --depth), >0 = that depth.
-		depth := 1 // default: shallow
-		if gc.Depth != nil {
-			depth = *gc.Depth
-		}
-		if depth > 0 {
-			args = append(args, "--depth", fmt.Sprintf("%d", depth))
-		}
-		// depth == 0 means full clone: no --depth flag
-
-		// Set branch if specified.
-		if gc.Branch != "" {
-			args = append(args, "--branch", gc.Branch)
-		}
-
-		// Clone into the workspace directory.
-		args = append(args, gc.URL, in.Resolved.HostPath)
-
-		cmd := exec.CommandContext(ctx, "git", args...)
-		cmd.Env = append(os.Environ(),
-			// Disable interactive prompts during provisioning.
-			"GIT_TERMINAL_PROMPT=0",
-		)
-		return cmd.CombinedOutput()
+// renameNoReplaceFallback renames oldpath to newpath unless newpath exists.
+// The existence check and the rename are two steps, so it is used only where
+// the kernel's atomic no-replace rename is unavailable (for example on NFS).
+func renameNoReplaceFallback(oldpath, newpath string) error {
+	if _, err := os.Lstat(newpath); err == nil {
+		return &os.LinkError{Op: "rename", Old: oldpath, New: newpath, Err: fs.ErrExist}
+	} else if !os.IsNotExist(err) {
+		return err
 	}
-
-	output, err := runClone()
-	if err == nil {
-		return nil
-	}
-
-	// If the workspace is not empty, the clone fails with "already exists and
-	// is not an empty directory". This happens after a partially-failed prior
-	// attempt (the sentinel was never written, else we'd have skipped cloning).
-	if strings.Contains(string(output), "already exists and is not an empty directory") {
-		// If .git is present a prior clone completed — reuse it as-is.
-		if _, statErr := os.Stat(filepath.Join(in.Resolved.HostPath, ".git")); statErr == nil {
-			slog.Warn("ProvisionShared: workspace not empty but .git present, reusing prior clone",
-				"project_id", in.ProjectID, "path", in.Resolved.HostPath)
-			return nil
-		}
-
-		// No .git — the prior attempt died mid-clone, leaving partial contents
-		// behind. Clear the directory so provisioning self-heals on retry
-		// without manual intervention, then clone once more. Refuse when a
-		// "worktrees" subdirectory already holds anything: for
-		// worktree-per-agent, that directory holds every agent's checkout,
-		// and clearing the base out from under them would destroy work that
-		// has nothing to do with this clone's own failure.
-		if nonEmpty, checkErr := dirHasEntries(filepath.Join(in.Resolved.HostPath, "worktrees")); checkErr != nil || nonEmpty {
-			return fmt.Errorf("git clone failed (dir not empty) and checking %s/worktrees before clearing the shared base failed or found it non-empty (err=%v, nonEmpty=%v); refusing to clear it",
-				in.Resolved.HostPath, checkErr, nonEmpty)
-		}
-		slog.Warn("ProvisionShared: workspace not empty and no .git (incomplete prior clone), cleaning and retrying",
-			"project_id", in.ProjectID, "path", in.Resolved.HostPath)
-		if cleanErr := removeDirContents(in.Resolved.HostPath); cleanErr != nil {
-			return fmt.Errorf("git clone failed (dir not empty) and cleanup of %s failed: %w",
-				in.Resolved.HostPath, cleanErr)
-		}
-		if output, err = runClone(); err == nil {
-			return nil
-		}
-		return fmt.Errorf("git clone %s (after cleanup retry): %s", gc.URL, strings.TrimSpace(string(output)))
-	}
-
-	return fmt.Errorf("git clone %s: %s", gc.URL, strings.TrimSpace(string(output)))
-}
-
-// removeDirContents removes every entry inside dir while leaving dir itself
-// in place. The workspace directory is frequently a mount point (e.g. a k8s
-// PVC subPath), so it cannot be removed outright — only its contents can be
-// cleared. gitCloneViaTempDir uses removeDirContentsExceptPrefix instead,
-// which additionally exempts the fallback lock's own on-disk footprint.
-func removeDirContents(dir string) error {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return fmt.Errorf("read dir %s: %w", dir, err)
-	}
-	for _, e := range entries {
-		p := filepath.Join(dir, e.Name())
-		if err := os.RemoveAll(p); err != nil {
-			return fmt.Errorf("remove %s: %w", p, err)
-		}
-	}
-	return nil
-}
-
-// removeDirContentsExceptPrefix removes every entry in dir whose name does
-// not start with prefix, leaving dir itself in place. Used to clear stray
-// content around the fallback file lock (gitCloneViaTempDir): the live lock
-// directory is always named exactly prefix, but a concurrent caller's
-// in-progress "<prefix>.stage-*" staging directory, an "<prefix>.evict-<id>"
-// entry awaiting garbage collection, or the "<prefix>.clock-probe" file are
-// all also either legitimately in use or harmless litter under that same
-// prefix — never something a clone retry should delete out from under
-// whichever caller is using it.
-func removeDirContentsExceptPrefix(dir, prefix string) error {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return fmt.Errorf("read dir %s: %w", dir, err)
-	}
-	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), prefix) {
-			continue
-		}
-		p := filepath.Join(dir, e.Name())
-		if err := os.RemoveAll(p); err != nil {
-			return fmt.Errorf("remove %s: %w", p, err)
-		}
-	}
-	return nil
+	return os.Rename(oldpath, newpath)
 }
 
 // dirHasEntries reports whether dir exists and contains at least one entry.
@@ -2551,9 +3082,69 @@ func dirHasEntries(dir string) (bool, error) {
 }
 
 // WorktreePath returns the canonical worktree path for a given agent within
-// a shared base checkout: <hostPath>/worktrees/<agentID>.
+// a shared base checkout: <hostPath>/<WorktreesSubdir>/<agentID>.
 func WorktreePath(hostPath, agentID string) string {
-	return filepath.Join(hostPath, "worktrees", agentID)
+	return filepath.Join(hostPath, WorktreesSubdir, agentID)
+}
+
+// IsValidJoinWorktree is the single check every ensureWorktree JOIN or reuse
+// site uses to decide whether a candidate worktree path is genuine and safe
+// to act on against base. It layers two checks:
+//
+//  1. A cheap, explicit rejection of a symlinked .git at candidate, checked
+//     first via Lstat. This is the most common mismatch shape, fails fast
+//     and unambiguously, and narrows the window between this check and the
+//     deeper resolved-path work ValidateWorktreeForBase does below.
+//  2. ValidateWorktreeForBase's full lexical-and-resolved relationship
+//     proof, including the admin-directory back-link reverse-check: it is
+//     not enough for a gitdir pointer to resolve into a real-looking admin
+//     directory under base/.git/worktrees, because that admin directory
+//     could belong to a different, unrelated worktree. The back-link (the
+//     admin directory's own "gitdir" file) must resolve back to candidate's
+//     own .git, which only a real `git worktree add` relationship produces.
+//
+// Returns nil when candidate is a genuine worktree of base at the canonical
+// base/worktrees/<name> layout. Returns a descriptive error otherwise.
+//
+// candidate must already be in its exact, Clean-ed form (filepath.Clean(p)
+// == p); a non-canonical spelling (redundant separators, "." or ".."
+// segments, a trailing slash) is refused outright rather than silently
+// normalized. ValidateWorktreeForBase cleans both of its arguments
+// internally before computing the worktree relationship, but this function
+// is the shared JOIN/reuse gate every caller relies on to decide what is
+// actually safe to trust — it must not pass a candidate as valid when the
+// value callers go on to store, compare, or mount is not the identical
+// string that was just checked.
+func IsValidJoinWorktree(base, candidate string) error {
+	if filepath.Clean(candidate) != candidate {
+		return fmt.Errorf("worktree relationship: %q is not in canonical form", candidate)
+	}
+	gitPath := filepath.Join(candidate, ".git")
+	if fi, err := os.Lstat(gitPath); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("worktree relationship: %s is a symlink, not a regular gitfile", gitPath)
+	}
+	return ValidateWorktreeForBase(base, candidate)
+}
+
+// validateJoinCandidate reports whether path is a genuine, in-tree worktree
+// of base (IsValidJoinWorktree) and is therefore safe for ensureWorktree to
+// attach a joining agent to. source is a short label identifying which JOIN
+// discovery path produced the candidate, for the warning log.
+//
+// A candidate that fails this check is not joined. At the git worktree
+// list site, ensureWorktree goes on to the create step, where git itself
+// rejects a branch that is still checked out elsewhere, and its add-failure
+// fallbacks return an error when their own candidate also fails this
+// check. The sharer-registry JOIN check in ensureWorktree does not route
+// through this function: it refuses a registry entry that is not a valid
+// worktree outright.
+func validateJoinCandidate(base, path, agentID, branchName, source string) bool {
+	if err := IsValidJoinWorktree(base, path); err != nil {
+		slog.Warn("ProvisionShared: join candidate failed worktree relationship validation, refusing to join",
+			"agent_id", agentID, "branch", branchName, "path", path, "source", source, "error", err)
+		return false
+	}
+	return true
 }
 
 // IsRealWorktreeDir reports whether path is a git worktree that belongs to
@@ -2562,8 +3153,15 @@ func WorktreePath(hostPath, agentID string) string {
 // "gitdir: " target resolves inside base's own .git/worktrees admin
 // directory. Any other entry at path — a plain file, a directory without a
 // matching worktree admin entry, or a symlink at any point in the chain —
-// is not a worktree this checkout owns, and must never be reused, mounted,
-// or removed as if it were one.
+// is not a worktree this checkout owns.
+//
+// This is a forward-only check: it does not confirm that the admin
+// directory's own back-link resolves to path in turn (linkedWorktreeState
+// does that separately). It is used only for a mounted worktree's own
+// reuse-or-recreate decision and for its removal, where the admin-link
+// states have their own, more specific handling; a path named by another
+// agent's sharer registration or by git's own worktree list is instead
+// proven with IsValidJoinWorktree, which does include the back-link check.
 func IsRealWorktreeDir(path, base string) bool {
 	fi, err := os.Lstat(path)
 	if err != nil || fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() {
@@ -2600,31 +3198,6 @@ func IsRealWorktreeDir(path, base string) bool {
 		return false
 	}
 	return true
-}
-
-// isDirectChildOfWorktreesDir reports whether path, once symlinks are
-// resolved, is a direct child of base's own "worktrees" directory — not the
-// worktrees directory itself, and not anything nested deeper. Only direct
-// entries of worktrees/ are ever mounted read-write into a container, so a
-// path that is a real worktree by IsRealWorktreeDir's check but sits any
-// deeper (or is the worktrees directory itself) must still be refused.
-func isDirectChildOfWorktreesDir(base, path string) bool {
-	worktreesDir := filepath.Join(base, "worktrees")
-	// The exact string is what is stored and mounted, and downstream
-	// consumers clean it lexically rather than resolving symlinks, so it
-	// must already be the canonical worktrees/<name> form.
-	if filepath.Clean(path) != path || filepath.Dir(path) != worktreesDir {
-		return false
-	}
-	resolvedWorktreesDir, err := filepath.EvalSymlinks(worktreesDir)
-	if err != nil {
-		return false
-	}
-	resolvedPath, err := filepath.EvalSymlinks(path)
-	if err != nil {
-		return false
-	}
-	return resolvedPath != resolvedWorktreesDir && filepath.Dir(resolvedPath) == resolvedWorktreesDir
 }
 
 // worktreeOutcome reports what ensureWorktree did.
@@ -2693,7 +3266,7 @@ func ensureWorktree(ctx context.Context, in ProvisionInput) (worktreeOutcome, er
 				return o, fmt.Errorf("ProvisionShared: update the sharer registry: %w", err)
 			}
 		}
-		return o, RegisterSharer(base, branchName, path, in.AgentID)
+		return o, RegisterSharer(base, "", branchName, path, in.AgentID)
 	}
 
 	// If this agent's own worktree directory already exists, reuse it only
@@ -2701,8 +3274,20 @@ func ensureWorktree(ctx context.Context, in ProvisionInput) (worktreeOutcome, er
 	// directory, or a symlink, none of which this checkout created and none
 	// of which are safe to mount or to remove.
 	if _, err := os.Lstat(worktreePath); err == nil {
+		if !in.MountedWorktree {
+			// The local/Docker path proves the full worktree relationship
+			// (including the admin-directory back-link), not just the
+			// gitfile's own forward-pointing shape.
+			if joinErr := IsValidJoinWorktree(base, worktreePath); joinErr != nil {
+				return worktreeOutcome{}, fmt.Errorf("ProvisionShared: %s exists but is not a git worktree of this checkout; refusing to reuse or remove it: %w", worktreePath, joinErr)
+			}
+			slog.Debug("ProvisionShared: worktree already exists",
+				"agent_id", in.AgentID, "path", worktreePath)
+			return registered(worktreePath)
+		}
+
 		reuse := IsRealWorktreeDir(worktreePath, base)
-		if reuse && in.MountedWorktree {
+		if reuse {
 			// The directory must also be known to git: its admin entry
 			// must exist and point back to it.
 			switch linkedWorktreeState(base, worktreePath) {
@@ -2722,24 +3307,24 @@ func ensureWorktree(ctx context.Context, in ProvisionInput) (worktreeOutcome, er
 					mountedDisplayPath(in, worktreePath), mountedDisplayPath(in, worktreePath))
 			}
 		}
-		if reuse {
-			slog.Debug("ProvisionShared: worktree already exists",
-				"agent_id", in.AgentID, "path", worktreePath)
-			return registered(worktreePath)
-		}
-	}
-	if _, err := os.Lstat(worktreePath); err == nil {
-		state := mountedDirState(worktreePath)
-		switch {
-		case in.MountedWorktree && state == mountedDirStandalone:
-			slog.Info("ProvisionShared: the agent's directory already holds its own checkout; keeping it",
-				"agent_id", in.AgentID, "path", worktreePath)
-			return worktreeOutcome{}, nil
-		case in.MountedWorktree && state == mountedDirEmpty:
-			// Created empty by the broker so the pod can mount it: add the
-			// worktree into it below.
-		default:
-			return worktreeOutcome{}, fmt.Errorf("ProvisionShared: %s exists but is not a git worktree of this checkout; refusing to reuse or remove it", mountedDisplayPath(in, worktreePath))
+		// Re-check: moveWorktreeAside (linkedWorktreeNoAdmin, above) already
+		// relocated the agent's directory out of worktreePath, so a !reuse
+		// reached that way finds nothing here and falls through to CREATE
+		// below, the same as a worktree that never existed.
+		if !reuse {
+			if _, err := os.Lstat(worktreePath); err == nil {
+				switch mountedDirState(worktreePath) {
+				case mountedDirStandalone:
+					slog.Info("ProvisionShared: the agent's directory already holds its own checkout; keeping it",
+						"agent_id", in.AgentID, "path", worktreePath)
+					return worktreeOutcome{}, nil
+				case mountedDirEmpty:
+					// Created empty by the broker so the pod can mount it: add the
+					// worktree into it below.
+				default:
+					return worktreeOutcome{}, fmt.Errorf("ProvisionShared: %s exists but is not a git worktree of this checkout; refusing to reuse or remove it", mountedDisplayPath(in, worktreePath))
+				}
+			}
 		}
 	}
 
@@ -2769,15 +3354,24 @@ func ensureWorktree(ctx context.Context, in ProvisionInput) (worktreeOutcome, er
 	// worktree-mode agent's own container (it lives under the shared,
 	// read-write-mounted .git); only join the path it names when that path
 	// is both a real worktree of this same base and a direct child of its
-	// "worktrees" directory.
-	sharers, existingWtPath, err := ListSharers(base, branchName)
+	// "worktrees" directory. ensureWorktree always operates in the
+	// base/worktrees/<name> shape, so ListSharersForJoin reads the marker
+	// with no projectDir (the ProvisionAgent-layout shape never applies
+	// here), and reports a recorded path that matches no scion-created
+	// worktree shape as-is rather than as "".
+	//
+	// A registered path that exists on disk but is not a valid worktree of
+	// this base (IsValidJoinWorktree) refuses the dispatch, for the local and
+	// MountedWorktree paths alike: the agent neither joins it nor creates a
+	// fresh worktree in its place.
+	sharers, existingWtPath, err := ListSharersForJoin(base, branchName)
 	if err != nil {
 		return worktreeOutcome{}, fmt.Errorf("ProvisionShared: list sharers for branch %q: %w", branchName, err)
 	}
 	if len(sharers) > 0 && existingWtPath != "" {
 		if _, statErr := os.Lstat(existingWtPath); statErr == nil {
-			if !IsRealWorktreeDir(existingWtPath, base) || !isDirectChildOfWorktreesDir(base, existingWtPath) {
-				return worktreeOutcome{}, fmt.Errorf("ProvisionShared: the sharer registry for branch %q names %s, which is not a direct worktree of this checkout; refusing to join it", branchName, existingWtPath)
+			if valErr := IsValidJoinWorktree(base, existingWtPath); valErr != nil {
+				return worktreeOutcome{}, fmt.Errorf("ProvisionShared: the sharer registry for branch %q names %s, which is not a direct worktree of this checkout; refusing to join it: %w", branchName, existingWtPath, valErr)
 			}
 			switch {
 			case in.MountedWorktree && currentBranch(ctx, existingWtPath) != branchName:
@@ -2794,19 +3388,27 @@ func ensureWorktree(ctx context.Context, in ProvisionInput) (worktreeOutcome, er
 				return registered(existingWtPath)
 			}
 		} else {
+			// A registry entry naming a path that does not exist at all is
+			// ordinary stale state (for example, this agent's own worktree
+			// was just moved aside by the admin-link self-heal above) for
+			// both the local and MountedWorktree paths alike — not evidence
+			// of an unexpected shape, so this falls through to create a
+			// fresh worktree either way rather than refusing.
 			slog.Warn("ProvisionShared: registry points to missing path, will create new worktree",
 				"agent_id", in.AgentID, "branch", branchName, "stale_path", existingWtPath)
 		}
 	}
 
 	// 2. Check git worktree list for a prior-run worktree without a registry entry.
-	if existingPath, findErr := findWorktreeForBranch(ctx, base, branchName); findErr == nil && existingPath != "" && IsRealWorktreeDir(existingPath, base) && isDirectChildOfWorktreesDir(base, existingPath) {
-		if in.MountedWorktree {
-			return worktreeOutcome{}, branchInOtherWorktreeError(in, branchName, existingPath)
+	if existingPath, findErr := findWorktreeForBranch(ctx, base, branchName); findErr == nil && existingPath != "" {
+		if validateJoinCandidate(base, existingPath, in.AgentID, branchName, "git-worktree-list") {
+			if in.MountedWorktree {
+				return worktreeOutcome{}, branchInOtherWorktreeError(in, branchName, existingPath)
+			}
+			slog.Info("ProvisionShared: joining pre-existing worktree (git)",
+				"agent_id", in.AgentID, "branch", branchName, "path", existingPath)
+			return registered(existingPath)
 		}
-		slog.Info("ProvisionShared: joining pre-existing worktree (git)",
-			"agent_id", in.AgentID, "branch", branchName, "path", existingPath)
-		return registered(existingPath)
 	}
 
 	// --- CREATE: no existing worktree for this branch ---
@@ -2846,8 +3448,10 @@ func ensureWorktree(ctx context.Context, in ProvisionInput) (worktreeOutcome, er
 
 	// git worktree add --relative-paths -b <branch> <path>
 	// --relative-paths is mandatory for container path-identity (design §6).
-	cmd := exec.CommandContext(ctx, "git", "worktree", "add", "--relative-paths", "-b", branchName, worktreePath)
-	cmd.Dir = base
+	cmd, err := SafeGitCommand(ctx, base, "worktree", "add", "--relative-paths", "-b", branchName, worktreePath)
+	if err != nil {
+		return worktreeOutcome{}, fmt.Errorf("ProvisionShared: %w", err)
+	}
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		outputStr := strings.TrimSpace(string(output))
@@ -2859,11 +3463,8 @@ func ensureWorktree(ctx context.Context, in ProvisionInput) (worktreeOutcome, er
 		// proactive JOIN checks above — it is not guaranteed safe just because
 		// git reported it.
 		if strings.Contains(outputStr, "already checked out") || strings.Contains(outputStr, "already used by worktree") {
-			if attachPath, findErr := findWorktreeForBranch(ctx, base, branchName); findErr == nil && attachPath != "" {
-				if !IsRealWorktreeDir(attachPath, base) || !isDirectChildOfWorktreesDir(base, attachPath) {
-					return worktreeOutcome{}, fmt.Errorf("git worktree add: branch %q already checked out, but %s is not a direct worktree of this checkout; refusing to join it",
-						branchName, attachPath)
-				}
+			if attachPath, findErr := findWorktreeForBranch(ctx, base, branchName); findErr == nil && attachPath != "" &&
+				validateJoinCandidate(base, attachPath, in.AgentID, branchName, "git-fallback") {
 				if in.MountedWorktree {
 					return worktreeOutcome{}, branchInOtherWorktreeError(in, branchName, attachPath)
 				}
@@ -2877,17 +3478,16 @@ func ensureWorktree(ctx context.Context, in ProvisionInput) (worktreeOutcome, er
 
 		// If branch already exists (but not checked out), try without -b.
 		if strings.Contains(outputStr, "already exists") {
-			cmd = exec.CommandContext(ctx, "git", "worktree", "add", "--relative-paths", worktreePath, branchName)
-			cmd.Dir = base
+			cmd, err = SafeGitCommand(ctx, base, "worktree", "add", "--relative-paths", worktreePath, branchName)
+			if err != nil {
+				return worktreeOutcome{}, fmt.Errorf("ProvisionShared: %w", err)
+			}
 			output, err = cmd.CombinedOutput()
 			if err != nil {
 				reuse := strings.TrimSpace(string(output))
 				if strings.Contains(reuse, "already checked out") || strings.Contains(reuse, "already used by worktree") {
-					if attachPath, findErr := findWorktreeForBranch(ctx, base, branchName); findErr == nil && attachPath != "" {
-						if !IsRealWorktreeDir(attachPath, base) || !isDirectChildOfWorktreesDir(base, attachPath) {
-							return worktreeOutcome{}, fmt.Errorf("git worktree add: branch %q already checked out, but %s is not a direct worktree of this checkout; refusing to join it",
-								branchName, attachPath)
-						}
+					if attachPath, findErr := findWorktreeForBranch(ctx, base, branchName); findErr == nil && attachPath != "" &&
+						validateJoinCandidate(base, attachPath, in.AgentID, branchName, "reuse-fallback") {
 						if in.MountedWorktree {
 							return worktreeOutcome{}, branchInOtherWorktreeError(in, branchName, attachPath)
 						}
@@ -3080,7 +3680,7 @@ func reuseMountedWorktree(ctx context.Context, in ProvisionInput, path, branch s
 		if err != nil {
 			return o, fmt.Errorf("ProvisionShared: update the sharer registry: %w", err)
 		}
-		return o, RegisterSharer(base, branch, path, in.AgentID)
+		return o, RegisterSharer(base, "", branch, path, in.AgentID)
 	}
 	if startBranch(base, path) == branch {
 		slog.Info("ProvisionShared: reusing the agent's worktree, which is now on another branch",
@@ -3195,8 +3795,13 @@ var gitSupportsRelativeWorktrees = func() bool {
 func findWorktreeForBranch(ctx context.Context, repoDir, branch string) (string, error) {
 	// Prune first so a worktree dir removed on disk (but not unregistered in git)
 	// isn't returned as a stale join target pointing at a non-existent path.
-	_ = exec.CommandContext(ctx, "git", "-C", repoDir, "worktree", "prune").Run()
-	cmd := exec.CommandContext(ctx, "git", "-C", repoDir, "worktree", "list", "--porcelain")
+	if pruneCmd, err := SafeGitCommand(ctx, repoDir, "worktree", "prune"); err == nil {
+		_ = pruneCmd.Run()
+	}
+	cmd, err := SafeGitCommand(ctx, repoDir, "worktree", "list", "--porcelain")
+	if err != nil {
+		return "", fmt.Errorf("git worktree list: %w", err)
+	}
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("git worktree list: %w", err)
@@ -3218,19 +3823,49 @@ func findWorktreeForBranch(ctx context.Context, repoDir, branch string) (string,
 
 // prepareBaseForWorktrees configures a freshly cloned base checkout for
 // worktree-per-agent use: detaches HEAD (so no branch is "owned" by the base),
-// disables auto-gc, and excludes worktrees/ from untracked file lists.
+// disables auto-gc, sets branch.autoSetupMerge=false, and excludes worktrees/
+// from untracked file lists.
+//
+// branch.autoSetupMerge=false is a mitigation for hub-native worktree mode,
+// where .git/config is mounted read-only into the agent container (see
+// pkg/runtime/common.go's narrowGitAdminMounts): with config unwritable,
+// commands that need to record a new tracking relationship (e.g. `checkout
+// -b <local> <remote>/<branch>`, DWIM `switch <remote-branch>`) would
+// otherwise fail outright because git cannot write the upstream it just
+// computed. Disabling automatic upstream setup means those commands create a
+// plain untracked local branch instead of failing. It does not help
+// operations that write config for other reasons (`push -u`, `branch -m`,
+// `branch --set-upstream-to`) — those still fail or partially apply with
+// config read-only; that is a documented limitation of hub-native worktree
+// mode, not a regression this setting is meant to cover.
 func prepareBaseForWorktrees(ctx context.Context, hostPath string) error {
 	if err := gitDetach(ctx, hostPath); err != nil {
 		return err
 	}
 
-	cmd := exec.CommandContext(ctx, "git", "-C", hostPath, "config", "gc.auto", "0")
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("git config gc.auto 0: %s", strings.TrimSpace(string(output)))
+	if err := runSafeGitConfig(ctx, hostPath, "gc.auto", "0"); err != nil {
+		return err
+	}
+	if err := runSafeGitConfig(ctx, hostPath, "branch.autoSetupMerge", "false"); err != nil {
+		return err
 	}
 
 	return appendGitExclude(hostPath, "worktrees/")
+}
+
+// runSafeGitConfig is a small helper for the legitimate broker-side
+// `git config <key> <value>` writes in prepareBaseForWorktrees and
+// prepareExistingBaseForWorktrees.
+func runSafeGitConfig(ctx context.Context, hostPath, key, value string) error {
+	cmd, err := SafeGitCommand(ctx, hostPath, "config", key, value)
+	if err != nil {
+		return err
+	}
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git config %s %s: %s", key, value, strings.TrimSpace(string(output)))
+	}
+	return nil
 }
 
 // prepareExistingBaseForWorktrees adds what worktrees need to a shared
@@ -3243,9 +3878,8 @@ func prepareExistingBaseForWorktrees(ctx context.Context, hostPath string) error
 		// No checkout: ensureWorktree reports this.
 		return nil
 	}
-	cmd := exec.CommandContext(ctx, "git", "-C", hostPath, "config", "gc.auto", "0")
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("git config gc.auto 0: %s", strings.TrimSpace(string(output)))
+	if err := runSafeGitConfig(ctx, hostPath, "gc.auto", "0"); err != nil {
+		return err
 	}
 	return appendGitExclude(hostPath, "worktrees/")
 }
@@ -3254,11 +3888,17 @@ func prepareExistingBaseForWorktrees(ctx context.Context, hostPath string) error
 // no branch. Tries 'git switch --detach' first, falls back to 'git checkout
 // --detach' for older git versions.
 func gitDetach(ctx context.Context, hostPath string) error {
-	cmd := exec.CommandContext(ctx, "git", "-C", hostPath, "switch", "--detach")
+	cmd, err := SafeGitCommand(ctx, hostPath, "switch", "--detach")
+	if err != nil {
+		return err
+	}
 	if _, err := cmd.CombinedOutput(); err == nil {
 		return nil
 	}
-	cmd = exec.CommandContext(ctx, "git", "-C", hostPath, "checkout", "--detach")
+	cmd, err = SafeGitCommand(ctx, hostPath, "checkout", "--detach")
+	if err != nil {
+		return err
+	}
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("git detach: %s", strings.TrimSpace(string(output)))

@@ -27,6 +27,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -72,6 +73,32 @@ type reincarnateTestDispatcher struct {
 	// imageRegistry is the registry the fake reports through ImageRegistry(),
 	// as the HTTP dispatcher reports the registry it rewrites images to.
 	imageRegistry string
+
+	// reprovisionEcho and startEcho, when set, run on a successful dispatch
+	// against the dispatched agent's AppliedConfig, simulating the broker
+	// echo applyBrokerAgentConfig writes in place (HarnessConfig,
+	// HarnessAuth, Image, Profile).
+	reprovisionEcho func(cfg *store.AgentAppliedConfig)
+	startEcho       func(cfg *store.AgentAppliedConfig)
+
+	// rerenderErr is returned by every reprovision call after the first:
+	// the worker's best-effort re-render of the previous config
+	// (ptone/scion#1935). reprovisionErr applies to the first call only.
+	rerenderErr error
+	// rerenderEcho, when set, runs on a successful re-render against the
+	// dispatched AppliedConfig, simulating the broker's echo.
+	rerenderEcho func(cfg *store.AgentAppliedConfig)
+	// reprovisionConfigs snapshots the AppliedConfig of every reprovision
+	// dispatch, in call order, as the worker sent it.
+	reprovisionConfigs []store.AgentAppliedConfig
+}
+
+// reprovisionSnapshot returns the reprovision call count and a copy of the
+// dispatched configs.
+func (d *reincarnateTestDispatcher) reprovisionSnapshot() (int, []store.AgentAppliedConfig) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.reprovisionCalls, append([]store.AgentAppliedConfig(nil), d.reprovisionConfigs...)
 }
 
 func (d *reincarnateTestDispatcher) ImageRegistry() string {
@@ -93,11 +120,21 @@ func (d *reincarnateTestDispatcher) DispatchAgentProvision(context.Context, *sto
 func (d *reincarnateTestDispatcher) DispatchAgentReprovision(_ context.Context, agent *store.Agent) error {
 	d.mu.Lock()
 	d.reprovisionCalls++
+	if agent.AppliedConfig != nil {
+		d.reprovisionConfigs = append(d.reprovisionConfigs, *agent.AppliedConfig)
+	}
 	err := d.reprovisionErr
 	image := d.reprovisionImage
+	echo := d.reprovisionEcho
+	if d.reprovisionCalls > 1 {
+		err, image, echo = d.rerenderErr, "", d.rerenderEcho
+	}
 	d.mu.Unlock()
 	if err == nil && image != "" && agent.AppliedConfig != nil {
 		agent.AppliedConfig.Image = image
+	}
+	if err == nil && echo != nil && agent.AppliedConfig != nil {
+		echo(agent.AppliedConfig)
 	}
 	return err
 }
@@ -108,9 +145,13 @@ func (d *reincarnateTestDispatcher) DispatchAgentStart(_ context.Context, agent 
 	d.lastStartResume = &resume
 	err := d.startErr
 	image := d.startImage
+	echo := d.startEcho
 	d.mu.Unlock()
 	if err == nil && image != "" && agent.AppliedConfig != nil {
 		agent.AppliedConfig.Image = image
+	}
+	if err == nil && echo != nil && agent.AppliedConfig != nil {
+		echo(agent.AppliedConfig)
 	}
 	return err
 }
@@ -300,6 +341,14 @@ func agentIdentityFor(agentID, projectID string, scopes ...AgentTokenScope) Agen
 	}}
 }
 
+// delegatingRequesterFor returns an agent identity for requesterID that may
+// reincarnate a baseline agent in projectID: the lifecycle scope plus every
+// scope of the baseline role, which re-recording the target's authority
+// under the requester requires (CanDelegate).
+func delegatingRequesterFor(requesterID, projectID string) AgentIdentity {
+	return agentIdentityFor(requesterID, projectID, append(ScopesForRole(AgentRoleBaseline), ScopeAgentLifecycle)...)
+}
+
 func reincarnateRequest(t *testing.T, agentID string, identity Identity, body interface{}) *http.Request {
 	t.Helper()
 	var bodyBytes []byte
@@ -369,8 +418,13 @@ func TestReincarnateAgent_Authz_OtherAgentRequiresLifecycleScope(t *testing.T) {
 		assert.Equal(t, http.StatusForbidden, rec.Code)
 	})
 
-	t.Run("same project with the scope is allowed", func(t *testing.T) {
-		other := agentIdentityFor(tid("coordinator"), project.ID, ScopeAgentLifecycle)
+	t.Run("same project with the scope and delegation authority is allowed", func(t *testing.T) {
+		coordinator := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+			a.ID = tid("coordinator")
+			a.Slug = "coordinator-" + tidSlugSafe(t.Name())
+			a.Name = "Coordinator"
+		})
+		other := delegatingRequesterFor(coordinator.ID, project.ID)
 		req := reincarnateRequest(t, agent.ID, other, ReincarnateAgentRequest{DryRun: true})
 		rec := httptest.NewRecorder()
 		srv.handleReincarnateAgent(rec, req, agent.ID)
@@ -1241,16 +1295,17 @@ func TestReincarnateAgent_PlanUsesSettingsImageOverHarnessConfig(t *testing.T) {
 }
 
 // TestReincarnateAgent_WorkerPersistsBrokerEchoedImage is the worker-side
-// half of design §3.4 Amendment A11 item 1: when the broker's reprovision
-// response echoes back a resolved image different from what the hub planned
-// (e.g. the broker's own search path resolved something the hub could not
-// predict), the worker must persist that image on the agent's live
-// AppliedConfig rather than losing it once the "starting" step re-derives the
-// agent's phase. This is a regression test for the pointer-aliasing bug where
-// a step write omitting appliedConfig silently discarded the broker's echo.
+// half of design §3.4 Amendment A11 item 1: when the broker echoes back a
+// resolved image different from what the hub planned (e.g. the broker's own
+// search path resolved something the hub could not predict), the worker must
+// persist that image on the agent's live AppliedConfig. Since
+// ptone/scion#1907 the persisted image is the START echo (the runtime-
+// resolved image); the reprovision echo's image is the rendered,
+// not-yet-qualified value and is not taken.
 func TestReincarnateAgent_WorkerPersistsBrokerEchoedImage(t *testing.T) {
 	disp := newReincarnateTestDispatcher()
-	disp.reprovisionImage = "broker-resolved-image:v9"
+	disp.reprovisionImage = "broker-reprovision-echo:v9"
+	disp.startImage = "broker-resolved-image:v9"
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
 
 	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
@@ -1269,7 +1324,7 @@ func TestReincarnateAgent_WorkerPersistsBrokerEchoedImage(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, final.AppliedConfig)
 	assert.Equal(t, "broker-resolved-image:v9", final.AppliedConfig.Image,
-		"the broker-echoed image must survive the starting step's write, not be lost to a stale re-read")
+		"the start-echoed image must be persisted at completion")
 }
 
 // createImageHarnessConfig stores a global harness config whose only
@@ -1347,10 +1402,12 @@ func TestReincarnateAgent_InlineImageBeatsHarnessConfig(t *testing.T) {
 
 // TestReincarnateAgent_RecordCarriesBrokerEchoedImage proves the reincarnation
 // record's NewAppliedConfig carries the image the broker echoed back from
-// reprovision, the same image the agent row ends up with.
+// start (ptone/scion#1907: not the reprovision echo's unqualified image), the
+// same image the agent row ends up with.
 func TestReincarnateAgent_RecordCarriesBrokerEchoedImage(t *testing.T) {
 	disp := newReincarnateTestDispatcher()
-	disp.reprovisionImage = "broker-resolved-image:v9"
+	disp.reprovisionImage = "broker-reprovision-echo:v9"
+	disp.startImage = "broker-resolved-image:v9"
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
 	agent := newReincarnateTestAgent(t, s, project, broker, nil)
 	self := agentIdentityFor(agent.ID, project.ID)
@@ -1578,6 +1635,178 @@ func TestReincarnateAgent_RowImageMatchesRecordAfterStartEcho(t *testing.T) {
 	require.NotNil(t, final.AppliedConfig)
 	assert.Equal(t, "ghcr.io/test-org/start-echo:v2", r.NewAppliedConfig.Image)
 	assert.Equal(t, r.NewAppliedConfig.Image, final.AppliedConfig.Image, "the row must end with the image the record holds")
+}
+
+// TestUpdateReincarnationStep_StoresCopyOfAppliedConfig covers
+// ptone/scion#1907: the step write stores a copy of the caller's applied
+// config, so neither side can change the other through a shared pointer:
+// not the caller mutating its struct after the write, and not the
+// dispatcher writing the broker echo onto the returned agent.
+func TestUpdateReincarnationStep_StoresCopyOfAppliedConfig(t *testing.T) {
+	ctx := context.Background()
+	disp := newReincarnateTestDispatcher()
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+
+	cfg := &store.AgentAppliedConfig{Image: "ghcr.io/test-org/fresh:v2", HarnessAuth: "api-key", Profile: "fresh-profile"}
+	written, err := srv.updateReincarnationStep(ctx, agent.ID, reincarnationStepUpdate{
+		reincarnationState: store.ReincarnationStateProvisioning,
+		appliedConfig:      cfg,
+	}, reincarnationStepMaxAttempts)
+	require.NoError(t, err)
+	require.NotNil(t, written.AppliedConfig)
+	assert.NotSame(t, cfg, written.AppliedConfig, "the step must not store the caller's pointer")
+
+	cfg.Image = "mutated-by-caller:v1"
+	cfg.Profile = "mutated-by-caller"
+	assert.Equal(t, "ghcr.io/test-org/fresh:v2", written.AppliedConfig.Image, "the in-memory agent must not see the caller's later mutation")
+	assert.Equal(t, "fresh-profile", written.AppliedConfig.Profile)
+	stored, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "ghcr.io/test-org/fresh:v2", stored.AppliedConfig.Image, "the stored row must not see the caller's later mutation")
+
+	written.AppliedConfig.HarnessAuth = "echoed-by-broker"
+	assert.Equal(t, "api-key", cfg.HarnessAuth, "an echo written onto the returned agent must not leak into the caller's struct")
+}
+
+// TestCopyBrokerEcho covers the helper the worker takes broker echoes with:
+// non-empty fields win, empty fields leave dst alone, and the image is only
+// taken when asked.
+func TestCopyBrokerEcho(t *testing.T) {
+	dst := &store.AgentAppliedConfig{Image: "qualified:v1", HarnessConfig: "hc", HarnessAuth: "auth", Profile: "p", Model: "m"}
+	copyBrokerEcho(dst, &store.AgentAppliedConfig{Image: "bare:v1", HarnessAuth: "echoed-auth", Model: "ignored"}, false)
+	assert.Equal(t, store.AgentAppliedConfig{Image: "qualified:v1", HarnessConfig: "hc", HarnessAuth: "echoed-auth", Profile: "p", Model: "m"}, *dst)
+
+	copyBrokerEcho(dst, &store.AgentAppliedConfig{Image: "resolved:v2", HarnessConfig: "echoed-hc", Profile: "echoed-p"}, true)
+	assert.Equal(t, store.AgentAppliedConfig{Image: "resolved:v2", HarnessConfig: "echoed-hc", HarnessAuth: "echoed-auth", Profile: "echoed-p", Model: "m"}, *dst)
+
+	snapshot := *dst
+	copyBrokerEcho(nil, dst, true) // must not panic
+	copyBrokerEcho(dst, nil, true)
+	assert.Equal(t, snapshot, *dst, "a nil src must leave dst unchanged")
+}
+
+// TestCopyBrokerEcho_MirrorsApplyBrokerAgentConfig is the drift guard for
+// copyBrokerEcho: applyBrokerAgentConfig (the source of truth) is run with a
+// RemoteAgentInfo whose every string field is set, onto a copy of a config;
+// copyBrokerEcho must then bring dst to exactly that copy. An AppliedConfig
+// field applyBrokerAgentConfig starts writing that copyBrokerEcho does not
+// copy fails here instead of being silently dropped on reincarnate.
+func TestCopyBrokerEcho_MirrorsApplyBrokerAgentConfig(t *testing.T) {
+	info := &RemoteAgentInfo{}
+	v := reflect.ValueOf(info).Elem()
+	for i := 0; i < v.NumField(); i++ {
+		if f := v.Field(i); f.Kind() == reflect.String {
+			f.SetString("echo-" + v.Type().Field(i).Name)
+		}
+	}
+	base := store.AgentAppliedConfig{
+		Image: "ghcr.io/test-org/base:v1", HarnessConfig: "base-hc", HarnessAuth: "base-auth",
+		Profile: "base-profile", Model: "base-model", Task: "base-task",
+	}
+	echoed := base
+	applyBrokerAgentConfig(&store.Agent{AppliedConfig: &echoed}, info)
+	require.NotEqual(t, base, echoed, "the populated broker answer must change the config")
+
+	dst := base
+	copyBrokerEcho(&dst, &echoed, true)
+	assert.Equal(t, echoed, dst, "copyBrokerEcho must copy every AppliedConfig field applyBrokerAgentConfig writes")
+}
+
+// TestReincarnateAgent_StartWithoutImageEchoKeepsQualifiedImage covers
+// ptone/scion#1907's fallback: the reprovision echoes an unqualified image
+// and the start succeeds without echoing any image. The row and the record
+// keep the registry-qualified image buildFreshAppliedConfig resolved.
+func TestReincarnateAgent_StartWithoutImageEchoKeepsQualifiedImage(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	disp.imageRegistry = "ghcr.io/test-org"
+	disp.reprovisionImage = "explicit-image:v1"
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.AppliedConfig.Image = "ghcr.io/test-org/explicit-image:v1"
+		a.AppliedConfig.CreateInputs.InlineConfig = &api.ScionConfig{Image: "explicit-image:v1"}
+	})
+	self := agentIdentityFor(agent.ID, project.ID)
+
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+
+	r := waitForReincarnationSettled(t, s, agent.ID)
+	require.Equal(t, store.AgentReincarnationStateCompleted, r.State, r.Error)
+	require.NotNil(t, r.NewAppliedConfig)
+	final, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	require.NotNil(t, final.AppliedConfig)
+	assert.Equal(t, "ghcr.io/test-org/explicit-image:v1", r.NewAppliedConfig.Image, "the record must keep the qualified image")
+	assert.Equal(t, "ghcr.io/test-org/explicit-image:v1", final.AppliedConfig.Image, "the row must keep the qualified image")
+}
+
+// TestReincarnateAgent_StartFailureKeepsQualifiedImage covers
+// ptone/scion#1907: the reprovision echo carries the rendered config's
+// unqualified image. When the start then fails, the row keeps the
+// registry-qualified image buildFreshAppliedConfig resolved, while the
+// reprovision's other echoed fields are still persisted.
+func TestReincarnateAgent_StartFailureKeepsQualifiedImage(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	disp.imageRegistry = "ghcr.io/test-org"
+	disp.reprovisionImage = "explicit-image:v1"
+	disp.reprovisionEcho = func(cfg *store.AgentAppliedConfig) { cfg.HarnessAuth = "reprovision-echoed-auth" }
+	disp.startErr = fmt.Errorf("broker refused start")
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.AppliedConfig.Image = "ghcr.io/test-org/explicit-image:v1"
+		a.AppliedConfig.CreateInputs.InlineConfig = &api.ScionConfig{Image: "explicit-image:v1"}
+	})
+	self := agentIdentityFor(agent.ID, project.ID)
+
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+
+	r := waitForReincarnationSettled(t, s, agent.ID)
+	require.Equal(t, store.AgentReincarnationStateFailed, r.State)
+	final, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	require.NotNil(t, final.AppliedConfig)
+	assert.Equal(t, "ghcr.io/test-org/explicit-image:v1", final.AppliedConfig.Image,
+		"a failed start must leave the qualified image, not the reprovision echo's unqualified one")
+	assert.Equal(t, "reprovision-echoed-auth", final.AppliedConfig.HarnessAuth,
+		"the reprovision echo's other fields are persisted by the starting step")
+}
+
+// TestReincarnateAgent_StartEchoPersistedAtCompletion covers
+// ptone/scion#1907: every field the start response echoes is persisted on
+// the row and the record at completion. The worker takes the echo
+// explicitly, so this fails if that copy is removed (there is no pointer
+// aliasing left to carry it).
+func TestReincarnateAgent_StartEchoPersistedAtCompletion(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	disp.startEcho = func(cfg *store.AgentAppliedConfig) {
+		cfg.Image = "ghcr.io/test-org/start-echo:v3"
+		cfg.HarnessConfig = "start-echo-hc"
+		cfg.HarnessAuth = "start-echo-auth"
+		cfg.Profile = "start-echo-profile"
+	}
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	self := agentIdentityFor(agent.ID, project.ID)
+
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+
+	r := waitForReincarnationSettled(t, s, agent.ID)
+	require.Equal(t, store.AgentReincarnationStateCompleted, r.State, r.Error)
+	final, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	for name, cfg := range map[string]*store.AgentAppliedConfig{"row": final.AppliedConfig, "record": r.NewAppliedConfig} {
+		require.NotNil(t, cfg, name)
+		assert.Equal(t, "ghcr.io/test-org/start-echo:v3", cfg.Image, name)
+		assert.Equal(t, "start-echo-hc", cfg.HarnessConfig, name)
+		assert.Equal(t, "start-echo-auth", cfg.HarnessAuth, name)
+		assert.Equal(t, "start-echo-profile", cfg.Profile, name)
+	}
 }
 
 // TestDispatchImageRegistry_ReadsTheHTTPDispatcher proves the reincarnate
@@ -1839,7 +2068,7 @@ func TestReincarnateAgent_DryRunConflictsWhenAlreadyStarting(t *testing.T) {
 
 // TestReincarnateAgent_AC8_OrphanCannotWedgeAfterConflict is the design §3.4
 // Amendment A3 regression test: a version conflict on the claim write (the guarded
-// UpdateAgent that sets reincarnation_state=pending) must leave nothing
+// ClaimAgentReincarnation that sets reincarnation_state=pending) must leave nothing
 // behind — no orphaned agent_reincarnations row, and no stuck claim — so a
 // retry succeeds. Before the fix, the record was created FIRST, so any
 // failure on the following UpdateAgent left a permanent pending row with no
@@ -1850,15 +2079,40 @@ type failOnceUpdateStore struct {
 	failed bool
 }
 
-func (f *failOnceUpdateStore) UpdateAgent(ctx context.Context, a *store.Agent) error {
+func (f *failOnceUpdateStore) takeFailure() bool {
 	f.mu.Lock()
-	if !f.failed {
-		f.failed = true
-		f.mu.Unlock()
-		return store.ErrVersionConflict
+	defer f.mu.Unlock()
+	if f.failed {
+		return false
 	}
-	f.mu.Unlock()
-	return f.Store.UpdateAgent(ctx, a)
+	f.failed = true
+	return true
+}
+
+func (f *failOnceUpdateStore) ClaimAgentReincarnation(ctx context.Context, agentID string, expectedVersion int64, at time.Time) (int64, error) {
+	if f.takeFailure() {
+		return 0, store.ErrVersionConflict
+	}
+	return f.Store.ClaimAgentReincarnation(ctx, agentID, expectedVersion, at)
+}
+
+// WithTx injects the same one-shot conflict into the claim transaction.
+func (f *failOnceUpdateStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	return f.Store.WithTx(ctx, func(tx store.Store) error {
+		return fn(&failOnceUpdateTx{Store: tx, parent: f})
+	})
+}
+
+type failOnceUpdateTx struct {
+	store.Store
+	parent *failOnceUpdateStore
+}
+
+func (t *failOnceUpdateTx) ClaimAgentReincarnation(ctx context.Context, agentID string, expectedVersion int64, at time.Time) (int64, error) {
+	if t.parent.takeFailure() {
+		return 0, store.ErrVersionConflict
+	}
+	return t.Store.ClaimAgentReincarnation(ctx, agentID, expectedVersion, at)
 }
 
 func TestReincarnateAgent_AC8_OrphanCannotWedgeAfterConflict(t *testing.T) {
@@ -2691,6 +2945,10 @@ func TestBuildReincarnationRequesterContext_A2614_TimeoutBound(t *testing.T) {
 func TestReincarnateAgent_AC6_StartFailureMarksFailed(t *testing.T) {
 	disp := newReincarnateTestDispatcher()
 	disp.startErr = fmt.Errorf("no such image: nonexistent:latest")
+	// This start error is ambiguous (not a confirmed broker refusal), so no
+	// re-render of `previous` runs (ptone/scion#1935) and the row keeps the
+	// fresh config. TestReincarnateAgent_StartFailure_RerendersPreviousConfig
+	// covers a definitive start failure.
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
 	agent := newReincarnateTestAgent(t, s, project, broker, nil)
 	self := agentIdentityFor(agent.ID, project.ID)
@@ -2760,7 +3018,7 @@ func TestReincarnateAgent_ReprovisionDispatchFailure_RestoresAppliedConfig(t *te
 	assert.NotContains(t, final.AppliedConfig.Task, "[SCION REINCARNATION]",
 		"a pre-reprovision-success failure must restore `previous`, not keep the fresh, never-rendered config")
 
-	assert.Equal(t, 1, disp.reprovisionCalls)
+	assert.Equal(t, 2, disp.reprovisionCalls, "the failed reprovision plus the best-effort re-render of `previous` (ptone/scion#1935)")
 	assert.Zero(t, disp.startCalls, "start must not run when reprovision dispatch fails")
 
 	list, err := s.ListAgentReincarnations(context.Background(), agent.ID)
@@ -2768,6 +3026,389 @@ func TestReincarnateAgent_ReprovisionDispatchFailure_RestoresAppliedConfig(t *te
 	require.Len(t, list, 1)
 	assert.Equal(t, store.AgentReincarnationStateFailed, list[0].State)
 	assert.Contains(t, list[0].Error, "reprovision refused")
+}
+
+// TestReincarnateAgent_ReprovisionFailure_RerendersPreviousConfig covers
+// ptone/scion#1935 option (c): a failed reprovision dispatch is followed by
+// one best-effort reprovision with the previous applied config, and the row
+// is rolled back to previous.
+func TestReincarnateAgent_ReprovisionFailure_RerendersPreviousConfig(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	disp.reprovisionErr = fmt.Errorf("request timeout after 2m0s")
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	self := agentIdentityFor(agent.ID, project.ID)
+
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	r := waitForReincarnationSettled(t, s, agent.ID)
+	require.Equal(t, store.AgentReincarnationStateFailed, r.State)
+	assert.Contains(t, r.Error, "reprovision failed: request timeout")
+
+	calls, cfgs := disp.reprovisionSnapshot()
+	require.Equal(t, 2, calls, "one reprovision with the fresh config, one re-render with the previous config")
+	require.Len(t, cfgs, 2)
+	assert.Contains(t, cfgs[0].Task, "[SCION REINCARNATION]", "the first dispatch carries the fresh config")
+	require.NotNil(t, r.PreviousAppliedConfig)
+	assert.Equal(t, *r.PreviousAppliedConfig, cfgs[1], "the re-render dispatches exactly the previous config")
+	assert.Zero(t, disp.startCalls)
+
+	final, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.ReincarnationStateFailed, final.ReincarnationState)
+	assert.Equal(t, "old-image:v1", final.AppliedConfig.Image, "the row is rolled back to previous")
+	assert.NotContains(t, final.AppliedConfig.Task, "[SCION REINCARNATION]")
+}
+
+// TestReincarnateAgent_StartFailure_RerendersPreviousConfig covers
+// ptone/scion#1935 option (c) after a successful reprovision: the start
+// fails, the previous config is re-rendered, and since the re-render
+// succeeded (the disk is back at gen N) the row is restored to previous too.
+func TestReincarnateAgent_StartFailure_RerendersPreviousConfig(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	disp.startErr = definitiveStartErr()
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	self := agentIdentityFor(agent.ID, project.ID)
+
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	r := waitForReincarnationSettled(t, s, agent.ID)
+	require.Equal(t, store.AgentReincarnationStateFailed, r.State)
+	assert.Contains(t, r.Error, "start failed: runtime broker returned error 409")
+
+	calls, cfgs := disp.reprovisionSnapshot()
+	require.Equal(t, 2, calls)
+	require.NotNil(t, r.PreviousAppliedConfig)
+	assert.Equal(t, *r.PreviousAppliedConfig, cfgs[1], "the re-render dispatches exactly the previous config")
+
+	final, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 1, final.Generation)
+	assert.Equal(t, "old-image:v1", final.AppliedConfig.Image, "a successful re-render restores previous on the row")
+	assert.NotContains(t, final.AppliedConfig.Task, "[SCION REINCARNATION]")
+}
+
+// TestReincarnateAgent_RerenderFailure_KeepsOriginalError covers
+// ptone/scion#1935 option (c) when the re-render itself fails: no panic, one
+// re-render attempt only (no retry loop), the reincarnation still fails with
+// the ORIGINAL error, and the row keeps the gen N+1 config the disk holds.
+func TestReincarnateAgent_RerenderFailure_KeepsOriginalError(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	disp.startErr = definitiveStartErr()
+	disp.rerenderErr = fmt.Errorf("reprovision refused: container is still running")
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	self := agentIdentityFor(agent.ID, project.ID)
+
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	r := waitForReincarnationSettled(t, s, agent.ID)
+	require.Equal(t, store.AgentReincarnationStateFailed, r.State)
+	assert.Contains(t, r.Error, "start failed: runtime broker returned error 409")
+	assert.NotContains(t, r.Error, "container is still running", "the re-render failure must not mask the original error")
+	assert.NotContains(t, r.Error, "worker panic")
+
+	calls, _ := disp.reprovisionSnapshot()
+	assert.Equal(t, 2, calls, "exactly one re-render attempt")
+
+	final, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "error", final.Phase)
+	assert.Equal(t, store.ReincarnationStateFailed, final.ReincarnationState)
+	assert.Contains(t, final.Message, "runtime broker returned error 409")
+	assert.Contains(t, final.AppliedConfig.Task, "[SCION REINCARNATION]", "a failed re-render leaves the row at gen N+1, matching the disk")
+}
+
+// definitiveStartErr is a start failure the broker itself answered with its
+// error envelope and no start-attempted marker: the start was refused before
+// any container was created (reincarnationStartLeftNoContainer).
+func definitiveStartErr() error {
+	return &brokerStatusError{StatusCode: http.StatusConflict, Body: `{"error":{"code":"start_refused","message":"start refused"}}`}
+}
+
+// TestReincarnationStartLeftNoContainer pins the classification the
+// start-failure re-render uses (ptone/scion#1935).
+func TestReincarnationStartLeftNoContainer(t *testing.T) {
+	assert.True(t, reincarnationStartLeftNoContainer(definitiveStartErr()), "a broker refusal is definitive")
+	assert.True(t, reincarnationStartLeftNoContainer(fmt.Errorf("wrap: %w", errStartBrokerNotConnected)), "a request that never reached the broker is definitive")
+	assert.False(t, reincarnationStartLeftNoContainer(fmt.Errorf("request timeout after 2m0s")), "a timeout is ambiguous")
+	assert.False(t, reincarnationStartLeftNoContainer(&brokerStatusError{StatusCode: http.StatusGatewayTimeout, Body: "gateway timeout"}), "a proxy error is ambiguous")
+	assert.False(t, reincarnationStartLeftNoContainer(brokerEnvelope(t, http.StatusInternalServerError, "runtime_error", startAttempted("run-1"))),
+		"a failure from inside Manager.Start may have created a container")
+	assert.False(t, reincarnationStartLeftNoContainer(nil))
+}
+
+// TestReincarnateAgent_AmbiguousStartFailure_NoRerender covers
+// ptone/scion#1935: a start failure whose outcome is ambiguous
+// (here a transport timeout: a gen N+1 container may be running) makes no
+// re-render dispatch, so the credential that container would use is not
+// revoked, and the row stays at gen N+1. The re-render would have been
+// refused (and revoked) had it run.
+func TestReincarnateAgent_AmbiguousStartFailure_NoRerender(t *testing.T) {
+	srv, s, agent, mock, gen, calls := setupReincarnateCredentialTest(t, fmt.Errorf("request timeout after 2m0s"))
+	self := agentIdentityFor(agent.ID, agent.ProjectID)
+
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	r := waitForReincarnationSettled(t, s, agent.ID)
+	require.Equal(t, store.AgentReincarnationStateFailed, r.State)
+	assert.Contains(t, r.Error, "start failed: request timeout")
+
+	assert.Equal(t, int32(1), calls.Load(), "no re-render dispatch after an ambiguous start failure")
+	require.True(t, mock.lastCreateReq.Reprovision)
+	require.Len(t, gen.jtis, 1, "only the reprovision minted a credential")
+	assert.Nil(t, getTestAgentCredential(t, s, gen.jtis[0]).RevokedAt, "a credential a possibly running container uses must not be revoked")
+
+	final, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Contains(t, final.AppliedConfig.Task, "[SCION REINCARNATION]", "the row stays at gen N+1, matching the disk and any container")
+}
+
+// TestReincarnateAgent_DefinitiveStartFailure_RerenderRefusedRevokes covers
+// ptone/scion#1935: after a definitive start failure (the broker
+// refused it; no container exists) the re-render is dispatched. When that
+// re-render fails, dispatchProvision's create-failed revoke revokes the
+// agent's credentials by agent: every credential, including the one the
+// successful reprovision minted. That is the accepted outcome: no container
+// is using them, and the agent is failed and must be started again (which
+// mints afresh). The row stays at gen N+1.
+func TestReincarnateAgent_DefinitiveStartFailure_RerenderRefusedRevokes(t *testing.T) {
+	srv, s, agent, _, gen, calls := setupReincarnateCredentialTest(t, definitiveStartErr())
+	self := agentIdentityFor(agent.ID, agent.ProjectID)
+
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	r := waitForReincarnationSettled(t, s, agent.ID)
+	require.Equal(t, store.AgentReincarnationStateFailed, r.State)
+	assert.Contains(t, r.Error, "start failed: runtime broker returned error 409")
+	assert.NotContains(t, r.Error, "reprovision_refused", "the re-render failure must not mask the original error")
+
+	assert.Equal(t, int32(2), calls.Load(), "the re-render is dispatched after a definitive start failure")
+	require.Len(t, gen.jtis, 2, "the reprovision and the re-render each minted a credential")
+	for _, jti := range gen.jtis {
+		cred := getTestAgentCredential(t, s, jti)
+		require.NotNil(t, cred.RevokedAt, "a refused re-render revokes the agent's credentials by agent")
+		require.NotNil(t, cred.RevokeReason)
+		assert.Equal(t, agentCredentialRevokeReasonCreateFailed, *cred.RevokeReason)
+	}
+
+	final, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Contains(t, final.AppliedConfig.Task, "[SCION REINCARNATION]", "a failed re-render leaves the row at gen N+1")
+}
+
+// setupReincarnateCredentialTest wires reprovision through the real
+// HTTPAgentDispatcher with a minting token generator, against a mock broker
+// whose first reprovision succeeds and every later one (the re-render) is
+// refused. The start is the fake's and fails with startErr. calls counts
+// reprovision round trips.
+func setupReincarnateCredentialTest(t *testing.T, startErr error) (*Server, store.Store, *store.Agent, *mockRuntimeBrokerClient, *fakeMintingTokenGenerator, *atomic.Int32) {
+	t.Helper()
+	ctx := context.Background()
+	fake := newReincarnateTestDispatcher()
+	fake.startErr = startErr
+	disp := &httpReprovisionDispatcher{reincarnateTestDispatcher: fake}
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	broker.Endpoint = "http://localhost:9800"
+	require.NoError(t, s.UpdateRuntimeBroker(ctx, broker))
+
+	calls := &atomic.Int32{}
+	mock := &mockRuntimeBrokerClient{}
+	mock.createWithGatherFunc = func(_ context.Context, _, _ string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+		if calls.Add(1) > 1 {
+			return nil, nil, &brokerStatusError{StatusCode: http.StatusConflict, Body: `{"error":{"code":"reprovision_refused","message":"container is still running"}}`}
+		}
+		return &RemoteAgentResponse{
+			Agent:         &RemoteAgentInfo{ID: req.ID, Slug: req.Slug, Name: req.Name, Phase: "created"},
+			Created:       true,
+			Reprovisioned: req.Reprovision,
+		}, nil, nil
+	}
+	disp.http = NewHTTPAgentDispatcherWithClient(s, mock, false, slog.Default())
+	gen := &fakeMintingTokenGenerator{store: s}
+	disp.http.SetTokenGenerator(gen)
+
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	return srv, s, agent, mock, gen, calls
+}
+
+// TestReincarnateAgent_RerenderEchoDoesNotLeak covers ptone/scion#1935: the
+// re-render dispatches a copy of previous, so the broker's echo on that
+// dispatch reaches neither the record's PreviousAppliedConfig nor the
+// restored row.
+func TestReincarnateAgent_RerenderEchoDoesNotLeak(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	disp.startErr = definitiveStartErr()
+	disp.rerenderEcho = func(cfg *store.AgentAppliedConfig) {
+		cfg.Image = "rerender-echo:v9"
+		cfg.HarnessConfig = "rerender-echo-hc"
+		cfg.Profile = "rerender-echo-profile"
+	}
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	self := agentIdentityFor(agent.ID, project.ID)
+
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	r := waitForReincarnationSettled(t, s, agent.ID)
+	require.Equal(t, store.AgentReincarnationStateFailed, r.State)
+
+	calls, _ := disp.reprovisionSnapshot()
+	require.Equal(t, 2, calls)
+	final, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	require.NotNil(t, r.PreviousAppliedConfig)
+	for name, cfg := range map[string]*store.AgentAppliedConfig{"record previous": r.PreviousAppliedConfig, "restored row": final.AppliedConfig} {
+		assert.Equal(t, "old-image:v1", cfg.Image, name)
+		assert.Empty(t, cfg.HarnessConfig, name)
+		assert.Empty(t, cfg.Profile, name)
+	}
+}
+
+// failAdvanceToStartingStore fails every provisioning -> starting record
+// CAS with an error.
+type failAdvanceToStartingStore struct {
+	store.Store
+}
+
+func (f *failAdvanceToStartingStore) TryAdvanceAgentReincarnation(ctx context.Context, rec *store.AgentReincarnation, fromState string, cutoff time.Time) (bool, error) {
+	if fromState == store.AgentReincarnationStateProvisioning && rec.State == store.AgentReincarnationStateStarting {
+		return false, fmt.Errorf("injected advance failure")
+	}
+	return f.Store.TryAdvanceAgentReincarnation(ctx, rec, fromState, cutoff)
+}
+
+// TestReincarnateAgent_AdvanceToStartingFailure_RerendersPreviousConfig
+// covers ptone/scion#1935: a record CAS error after a
+// successful reprovision (no start dispatched, so no container) re-renders
+// previous and, since that succeeded, restores the row.
+func TestReincarnateAgent_AdvanceToStartingFailure_RerendersPreviousConfig(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	self := agentIdentityFor(agent.ID, project.ID)
+
+	orig := srv.store
+	srv.store = &failAdvanceToStartingStore{Store: orig}
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	r := waitForReincarnationSettled(t, s, agent.ID)
+	srv.store = orig
+	require.Equal(t, store.AgentReincarnationStateFailed, r.State)
+	assert.Contains(t, r.Error, "failed to advance record to starting")
+
+	calls, cfgs := disp.reprovisionSnapshot()
+	require.Equal(t, 2, calls, "the reprovision plus one re-render")
+	require.NotNil(t, r.PreviousAppliedConfig)
+	assert.Equal(t, *r.PreviousAppliedConfig, cfgs[1])
+	assert.Zero(t, disp.startCalls)
+
+	final, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "old-image:v1", final.AppliedConfig.Image, "a successful re-render restores previous on the row")
+	assert.NotContains(t, final.AppliedConfig.Task, "[SCION REINCARNATION]")
+}
+
+// failStartingWriteStore fails every agent row write that records the
+// reincarnation's starting step.
+type failStartingWriteStore struct {
+	store.Store
+}
+
+func (f *failStartingWriteStore) UpdateAgent(ctx context.Context, a *store.Agent) error {
+	if a.ReincarnationState == store.ReincarnationStateStarting {
+		return fmt.Errorf("injected starting-step write failure")
+	}
+	return f.Store.UpdateAgent(ctx, a)
+}
+
+// TestReincarnateAgent_StartingWriteFailure_RerendersPreviousConfig covers
+// ptone/scion#1935: the starting-step row write fails after
+// a successful reprovision (no start dispatched, so no container), so
+// previous is re-rendered and, since that succeeded, the row is restored.
+func TestReincarnateAgent_StartingWriteFailure_RerendersPreviousConfig(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	self := agentIdentityFor(agent.ID, project.ID)
+
+	orig := srv.store
+	srv.store = &failStartingWriteStore{Store: orig}
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	r := waitForReincarnationSettled(t, s, agent.ID)
+	srv.store = orig
+	require.Equal(t, store.AgentReincarnationStateFailed, r.State)
+	assert.Contains(t, r.Error, "failed to record starting state")
+
+	calls, cfgs := disp.reprovisionSnapshot()
+	require.Equal(t, 2, calls, "the reprovision plus one re-render")
+	require.NotNil(t, r.PreviousAppliedConfig)
+	assert.Equal(t, *r.PreviousAppliedConfig, cfgs[1])
+	assert.Zero(t, disp.startCalls, "no start is dispatched when the starting step cannot be recorded")
+
+	final, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.ReincarnationStateFailed, final.ReincarnationState)
+	assert.Equal(t, "old-image:v1", final.AppliedConfig.Image, "a successful re-render restores previous on the row")
+	assert.NotContains(t, final.AppliedConfig.Task, "[SCION REINCARNATION]")
+}
+
+// TestReincarnateAgent_ReprovisionAndRerenderFailure_StillRestoresRow covers
+// ptone/scion#1935: after a failed reprovision the row is
+// restored to previous whatever the re-render's outcome, including when the
+// re-render fails too.
+func TestReincarnateAgent_ReprovisionAndRerenderFailure_StillRestoresRow(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	disp.reprovisionErr = fmt.Errorf("request timeout after 2m0s")
+	disp.rerenderErr = fmt.Errorf("broker unreachable")
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	self := agentIdentityFor(agent.ID, project.ID)
+
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	r := waitForReincarnationSettled(t, s, agent.ID)
+	require.Equal(t, store.AgentReincarnationStateFailed, r.State)
+	assert.Contains(t, r.Error, "reprovision failed: request timeout")
+	assert.NotContains(t, r.Error, "broker unreachable")
+
+	calls, _ := disp.reprovisionSnapshot()
+	assert.Equal(t, 2, calls)
+	final, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "old-image:v1", final.AppliedConfig.Image, "the row is restored to previous even when the re-render fails")
+	assert.NotContains(t, final.AppliedConfig.Task, "[SCION REINCARNATION]")
+}
+
+// TestReincarnateAgent_FailureBeforeReprovision_NoRerender covers
+// ptone/scion#1935 option (c)'s precondition: a failure before any
+// reprovision dispatch (here, the stop) makes no re-render dispatch.
+func TestReincarnateAgent_FailureBeforeReprovision_NoRerender(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	disp.stopErr = fmt.Errorf("broker unreachable")
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	self := agentIdentityFor(agent.ID, project.ID)
+
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	r := waitForReincarnationSettled(t, s, agent.ID)
+	require.Equal(t, store.AgentReincarnationStateFailed, r.State)
+
+	calls, _ := disp.reprovisionSnapshot()
+	assert.Zero(t, calls, "no reprovision, and so no re-render, before the reprovision step")
 }
 
 // TestReincarnateAgent_AC6_NonCreatorRequesterGetsNotifiedOnFailure is the
@@ -2802,7 +3443,7 @@ func TestReincarnateAgent_AC6_NonCreatorRequesterGetsNotifiedOnFailure(t *testin
 		a.Slug = "coordinator-" + tidSlugSafe(t.Name())
 		a.Name = "Coordinator"
 	})
-	requester := agentIdentityFor(coordinator.ID, project.ID, ScopeAgentLifecycle)
+	requester := delegatingRequesterFor(coordinator.ID, project.ID)
 
 	req := reincarnateRequest(t, agent.ID, requester, ReincarnateAgentRequest{Handoff: "h"})
 	rec := httptest.NewRecorder()
@@ -3019,30 +3660,35 @@ func TestReincarnateAgent_MigratingMessageOwnership(t *testing.T) {
 // design Amendment A26.8 test for the conditional clear: the completion
 // write must clear Message only if it still holds the exact migrating text
 // it set at the stopping step — never a message something else wrote in the
-// meantime. A message-only status update (no Phase, no Activity) bypasses
-// Guard 0b entirely, because updateAgentStatus only invokes
-// guardAgentPhaseTransition when Phase or Activity is present
-// (handlers_agent_lifecycle.go) — this is the one real path by which
-// something can set Message while reincarnation_state is still non-terminal.
-// This test drives that real path (the actual HTTP handler, not a direct
-// store write) while the worker is paused just before DispatchAgentStart,
-// then confirms the completion write leaves the new value alone.
+// meantime.
+//
+// It also pins the status endpoint's side (ptone/scion#2267): a
+// message-only status POST while the migration is in flight is a guarded
+// no-op (200 {"applied":false,"reason":"reincarnation_in_flight"}) and
+// leaves the worker's migrating message in place. Before #2267 that POST
+// bypassed Guard 0b and was the path this test used to set a foreign
+// message; with it closed, the foreign writer is simulated by a direct
+// store write (UpdateAgentStatus, which does not apply Guard 0b) while the
+// worker is paused just before DispatchAgentStart.
 func TestReincarnateAgent_MigratingMessagePreservedIfNewGenAlreadySetOne(t *testing.T) {
 	disp := newGatedDispatcher("start", nil)
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
 	agent := newReincarnateTestAgent(t, s, project, broker, nil)
 	self := agentIdentityFor(agent.ID, project.ID)
+	ctx := context.Background()
 
 	rec := httptest.NewRecorder()
 	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
 	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
 	<-disp.entered // worker is about to call DispatchAgentStart; reincarnation_state is "starting"
 
-	inFlight, err := s.GetAgent(context.Background(), agent.ID)
+	inFlight, err := s.GetAgent(ctx, agent.ID)
 	require.NoError(t, err)
 	require.Equal(t, store.ReincarnationStateStarting, inFlight.ReincarnationState,
-		"the message-only bypass this test exercises only matters while a migration is genuinely in flight")
+		"this test is only meaningful while a migration is genuinely in flight")
+	require.Equal(t, "migrating to generation 2", inFlight.Message)
 
+	// The status endpoint: a message-only POST is dropped by Guard 0b.
 	statusBody, err := json.Marshal(store.AgentStatusUpdate{Message: "gen 2 says hi"})
 	require.NoError(t, err)
 	statusReq := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/status", bytes.NewReader(statusBody))
@@ -3050,21 +3696,28 @@ func TestReincarnateAgent_MigratingMessagePreservedIfNewGenAlreadySetOne(t *test
 	statusRec := httptest.NewRecorder()
 	srv.updateAgentStatus(statusRec, statusReq, agent.ID)
 	require.Equal(t, http.StatusOK, statusRec.Code, statusRec.Body.String())
+	var statusResp map[string]any
+	require.NoError(t, json.Unmarshal(statusRec.Body.Bytes(), &statusResp), statusRec.Body.String())
+	assert.Equal(t, false, statusResp["applied"])
+	assert.Equal(t, "reincarnation_in_flight", statusResp["reason"])
 
-	// Confirm the message-only update actually bypassed Guard 0b (a
-	// precondition for this test to mean anything — if this assertion ever
-	// fails, Guard 0b's gate widened to cover message-only updates too, and
-	// this test's premise needs revisiting).
-	midFlight, err := s.GetAgent(context.Background(), agent.ID)
+	afterPost, err := s.GetAgent(ctx, agent.ID)
 	require.NoError(t, err)
-	require.Equal(t, "gen 2 says hi", midFlight.Message,
-		"a message-only status update is not gated by guardAgentPhaseTransition, which only runs when Phase or Activity is set")
+	require.Equal(t, "migrating to generation 2", afterPost.Message,
+		"a message-only status POST must not replace the worker's migrating message while the migration is in flight")
+
+	// A foreign writer sets Message directly in the store mid-flight.
+	require.NoError(t, s.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{Message: "gen 2 says hi"}))
+	midFlight, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	require.Equal(t, "gen 2 says hi", midFlight.Message)
 
 	close(disp.release)
 	waitForReincarnationSettled(t, s, agent.ID)
 
-	final, err := s.GetAgent(context.Background(), agent.ID)
+	final, err := s.GetAgent(ctx, agent.ID)
 	require.NoError(t, err)
+	assert.Equal(t, store.ReincarnationStateNone, final.ReincarnationState)
 	assert.Equal(t, "gen 2 says hi", final.Message,
 		"the completion write must not clobber a message that is no longer the migrating text")
 }
@@ -3125,7 +3778,7 @@ func TestReincarnateAgent_AC6_NotifiesWithRealisticActivity(t *testing.T) {
 		a.ID = tid("coord-" + t.Name())
 		a.Slug = "coord-" + tidSlugSafe(t.Name())
 	})
-	requester := agentIdentityFor(coordinator.ID, project.ID, ScopeAgentLifecycle)
+	requester := delegatingRequesterFor(coordinator.ID, project.ID)
 
 	rec := httptest.NewRecorder()
 	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, requester, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
@@ -3564,7 +4217,7 @@ func newNotificationRace(t *testing.T, disp AgentDispatcher) *notificationRace {
 
 func (r *notificationRace) reincarnate(t *testing.T) {
 	t.Helper()
-	requester := agentIdentityFor(r.coordinator.ID, r.project.ID, ScopeAgentLifecycle)
+	requester := delegatingRequesterFor(r.coordinator.ID, r.project.ID)
 	rec := httptest.NewRecorder()
 	r.srv.handleReincarnateAgent(rec, reincarnateRequest(t, r.agent.ID, requester, ReincarnateAgentRequest{Handoff: "h"}), r.agent.ID)
 	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
