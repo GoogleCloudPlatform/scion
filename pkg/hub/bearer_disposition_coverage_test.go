@@ -281,7 +281,20 @@ func livePendingPath(method, pattern string) bool {
 // declared in a non-test Go file of this package.
 func hubFunctionDeclared(t *testing.T, name string) bool {
 	t.Helper()
-	re := regexp.MustCompile(`(?m)^func (\([^)]*\) )?` + regexp.QuoteMeta(name) + `\(`)
+	return hubDeclarationMatches(t, regexp.MustCompile(`(?m)^func (\([^)]*\) )?`+regexp.QuoteMeta(name)+`\(`))
+}
+
+// hubMethodDeclared reports whether a method named name with receiver type
+// recv (value or pointer) is declared in a non-test Go file of this package.
+func hubMethodDeclared(t *testing.T, recv, name string) bool {
+	t.Helper()
+	return hubDeclarationMatches(t, regexp.MustCompile(`(?m)^func \(\w+ \*?`+regexp.QuoteMeta(recv)+`\) `+regexp.QuoteMeta(name)+`\(`))
+}
+
+// hubDeclarationMatches reports whether re matches a non-test Go file of
+// this package.
+func hubDeclarationMatches(t *testing.T, re *regexp.Regexp) bool {
+	t.Helper()
 	files, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatalf("listing package files: %v", err)
@@ -489,13 +502,26 @@ func TestProjectSubRoutes_EveryRecordedPathReachesItsBranch(t *testing.T) {
 	}
 }
 
+// nonHTTPDetailReceivers maps a "<function>:<detail>" detail to the
+// receiver type that must declare the function.
+var nonHTTPDetailReceivers = map[string]string{
+	"controlchannel": "ControlChannelManager",
+}
+
 // catalogNonHTTPEntryProblem returns why a non-HTTP catalog entry point
 // does not name a live entry point, or "" when it does. The pattern is
-// either "<function>:<detail>", naming a function declared in pkg/hub, or
-// a route metadata RouteID.
+// either "<function>:<detail>", naming a function declared in pkg/hub (a
+// method of the receiver type nonHTTPDetailReceivers gives for the detail,
+// when it gives one), or a route metadata RouteID.
 func catalogNonHTTPEntryProblem(t *testing.T, ep authzop.EntryPoint) string {
 	t.Helper()
-	if fn, _, ok := strings.Cut(ep.Pattern, ":"); ok {
+	if fn, detail, ok := strings.Cut(ep.Pattern, ":"); ok {
+		if recv, scoped := nonHTTPDetailReceivers[detail]; scoped {
+			if hubMethodDeclared(t, recv, fn) {
+				return ""
+			}
+			return fmt.Sprintf("%s %s: no method %s.%s declared in pkg/hub", ep.Kind, ep.Pattern, recv, fn)
+		}
 		if hubFunctionDeclared(t, fn) {
 			return ""
 		}
@@ -532,6 +558,7 @@ func TestBearerDisposition_CatalogNonHTTPEntriesAreLive(t *testing.T) {
 
 	for _, ep := range []authzop.EntryPoint{
 		{Kind: authzop.EntryPointBrokerCall, Pattern: "noSuchHubFunction:controlchannel"},
+		{Kind: authzop.EntryPointBrokerCall, Pattern: "ConstraintsToRestrictions:controlchannel"},
 		{Kind: authzop.EntryPointBrokerCall, Pattern: "controlchannel.NoSuchCall"},
 	} {
 		if catalogNonHTTPEntryProblem(t, ep) == "" {
