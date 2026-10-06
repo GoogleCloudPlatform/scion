@@ -851,7 +851,10 @@ func (s *Settings) IsHubLocalOnly() bool {
 }
 
 // DeleteHubConnection removes a hub connection entry from settings at the specified scope.
-// It loads the existing settings file, removes the named connection, and saves.
+// It edits the existing settings file in place, so every other key survives:
+// v1-only keys such as server and image_registry in an unversioned file, and
+// the whole content of a versioned file (ptone/scion#3497). A JSON file is
+// converted to settings.yaml, as before. A missing file is left missing.
 func DeleteHubConnection(projectPath string, name string, global bool) error {
 	var dir string
 	if global {
@@ -870,51 +873,5 @@ func DeleteHubConnection(projectPath string, name string, global bool) error {
 		dir = GetProjectConfigDir(projectPath)
 	}
 
-	existingPath := GetSettingsPath(dir)
-	targetPath := filepath.Join(dir, "settings.yaml")
-
-	var current Settings
-	if existingPath != "" {
-		data, err := os.ReadFile(existingPath)
-		if err != nil && !os.IsNotExist(err) {
-			return err
-		}
-		if err == nil {
-			if filepath.Ext(existingPath) == ".json" {
-				if err := util.UnmarshalJSONC(data, &current); err != nil {
-					return fmt.Errorf("failed to parse existing settings at %s: %w", existingPath, err)
-				}
-			} else {
-				if err := yaml.Unmarshal(data, &current); err != nil {
-					return fmt.Errorf("failed to parse existing settings at %s: %w", existingPath, err)
-				}
-			}
-		}
-	}
-
-	if current.HubConnections != nil {
-		delete(current.HubConnections, name)
-		// Clean up empty map
-		if len(current.HubConnections) == 0 {
-			current.HubConnections = nil
-		}
-	}
-
-	if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
-		return err
-	}
-	newData, err := yaml.Marshal(current)
-	if err != nil {
-		return err
-	}
-	if err := os.WriteFile(targetPath, newData, 0644); err != nil {
-		return err
-	}
-
-	// If we migrated from JSON, remove the old JSON file
-	if existingPath != "" && existingPath != targetPath && filepath.Ext(existingPath) == ".json" {
-		_ = os.Remove(existingPath)
-	}
-
-	return nil
+	return deleteHubConnectionFromFile(dir, name)
 }
