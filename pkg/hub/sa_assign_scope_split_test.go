@@ -216,6 +216,7 @@ func TestAgentScopeSplit_GoldenPermissionSets(t *testing.T) {
 			"template.read", "template.list",
 			"harness_config.read", "harness_config.list",
 			"agent.status_update", "agent.token_refresh", "agent.notify", "agent.port_forward",
+			"artifact.create", "artifact.update",
 		},
 		AgentRoleFull: {
 			"project.read", "artifact.read", "skill.read", "skill.list",
@@ -227,6 +228,7 @@ func TestAgentScopeSplit_GoldenPermissionSets(t *testing.T) {
 			"project.secret_read", "secret.use",
 			"template.create", "template.update",
 			"agent.set_message_mode",
+			"artifact.create", "artifact.update",
 		},
 	}
 
@@ -250,9 +252,12 @@ func TestAgentScopeSplit_GoldenPermissionSets(t *testing.T) {
 				legacyScopeSchema: true,
 			}}
 			got := agentScopesToPermissionIDs(effectiveAgentScopes(legacyIdentity))
-			// Legacy tokens predate project:artifact:read, so they lack
-			// exactly artifact.read.
-			wantLegacy := slices.DeleteFunc(slices.Clone(want), func(p string) bool { return p == "artifact.read" })
+			// Legacy tokens predate project:artifact:read and
+			// project:artifact:write, so they lack exactly the artifact
+			// permissions.
+			wantLegacy := slices.DeleteFunc(slices.Clone(want), func(p string) bool {
+				return p == "artifact.read" || p == "artifact.create" || p == "artifact.update"
+			})
 			assert.ElementsMatch(t, wantLegacy, got,
 				"a legacy pre-split token for role %s must authorize what a current token does, except for scopes added after it was minted", role)
 			assert.NotContains(t, got, "gcp_service_account.use")
