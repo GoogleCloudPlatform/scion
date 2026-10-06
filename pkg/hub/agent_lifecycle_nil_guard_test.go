@@ -88,7 +88,7 @@ func TestLifecycleNilAgentGuards(t *testing.T) {
 		auditsBefore := audits()
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/x/reincarnate", nil)
-		auth, ok := srv.reincarnateAuthorityFor(rec, req, nil)
+		auth, ok := srv.reincarnateAuthorityFor(rec, req, nil, "", false)
 		assert.False(t, ok)
 		assert.Nil(t, auth)
 		assert.Equal(t, http.StatusInternalServerError, rec.Code)
