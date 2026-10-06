@@ -95,6 +95,7 @@ ptone/scion#1855.
     - `-d, --detached`: Run in detached mode (default true).
     - `--config <path>`: Path to inline agent config file (YAML/JSON) for Just-In-Time (JIT) overrides, or `-` for stdin.
     - `--harness-config <string>`: Named harness configuration to use.
+    - `--thinking-level <value>`: Thinking level to inject into the agent config: an integer from 0 to 100, or a case-insensitive shorthand: `low` (25), `medium` (50), `high` (75), `max` (100). The level is stored as an integer; each harness maps it to its own tiers (see [Thinking Level Map](/scion/reference/harness-settings/#thinking-level-map-thinking)).
     - `--harness-auth <string>`: Override auth method for the harness. Universal types: `api-key`, `oauth-token`, `vertex-ai`, `auth-file` (each harness accepts a subset — see [Harness Authentication](/scion/local/agent-credentials/)).
     - `--broker <string>`: Preferred runtime broker ID, name, or slug for execution. In Hub mode, a broker that does not exist fails with `runtime_broker_not_found` (404), and the message lists the brokers you can use.
     - `--message-mode <mode>`: Set the agent's initial message mode (`project`, `branch`, `lineage`, `none`, or `hub`). Defaults to `project`. See [Message Authorization & Modes](/scion/hosted/user/messaging/#message-authorization--modes).
