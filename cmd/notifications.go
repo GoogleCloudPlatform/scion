@@ -196,7 +196,7 @@ func requireHubClient() (*config.Settings, hubclient.Client, error) {
 		return nil, nil, fmt.Errorf("failed to resolve project path: %w", err)
 	}
 
-	settings, err := config.LoadSettings(resolvedPath)
+	settings, err := loadSettingsForTarget(resolvedPath)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to load settings: %w", err)
 	}

@@ -29,6 +29,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/router"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/target"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/transport/ws"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -95,6 +96,7 @@ type ConduitRelayOptions struct {
 type conduitRuntime struct {
 	relay    *relay.Relay
 	registry *registry.Registry
+	router   *router.Router
 	store    registry.Store
 	now      func() time.Time
 }
@@ -104,6 +106,17 @@ type conduitRuntime struct {
 // listener and start the relay.
 func (s *Server) ConduitEnabled() bool {
 	return s.experimentEnabled(conduitExperiment)
+}
+
+// envHubConduit tells sciontool that this hub serves conduit sessions. Its
+// absence (an older hub, or hub.conduit off) keeps sciontool on the legacy
+// port-forward tunnel without ever calling /api/v1/conduit.
+const envHubConduit = "SCION_HUB_CONDUIT"
+
+// conduitServing reports whether agents should dial the conduit endpoint:
+// hub.conduit is on and this node runs the relay.
+func (s *Server) conduitServing() bool {
+	return s.experimentEnabled(conduitExperiment) && s.conduit.Load() != nil
 }
 
 // ConduitGrantRingShared reports whether the grant key ring is persisted
@@ -178,7 +191,17 @@ func (s *Server) StartConduitRelay(ctx context.Context, opts ConduitRelayOptions
 	if err != nil {
 		return fmt.Errorf("conduit relay: %w", err)
 	}
-	rt := &conduitRuntime{relay: r, registry: reg, store: st, now: now}
+	rtr, err := router.New(router.Config{
+		Relay:    r,
+		Registry: reg,
+		Store:    st,
+		Peers:    &relay.PeerClient{HTTP: opts.HTTPClient, Auth: opts.PeerAuth},
+		Now:      now,
+	})
+	if err != nil {
+		return fmt.Errorf("conduit router: %w", err)
+	}
+	rt := &conduitRuntime{relay: r, registry: reg, router: rtr, store: st, now: now}
 	// Published before Start: the internal listener is already serving and
 	// the self-check probe must reach this relay's internal handler.
 	if !s.conduit.CompareAndSwap(nil, rt) {
