@@ -92,8 +92,8 @@ func parseGoDir(t *testing.T, fset *token.FileSet, dir string) map[string]*ast.F
 }
 
 // logOnlyResourceFuncs are functions that take a Resource only to label a
-// log record and never evaluate it. Literals passed directly to them are not
-// scanned.
+// log record and never evaluate it. Literals, or pointers to literals,
+// passed directly to them are not scanned.
 var logOnlyResourceFuncs = map[string]bool{"logAuthzDenial": true}
 
 // isResourceType reports whether e is the type Resource or *Resource.
@@ -148,10 +148,12 @@ func declaredAsResource(x *ast.Ident) bool {
 // permissions.<Const> selector. It scans Resource{Type: X} and
 // &Resource{Type: X} literals, literals whose Resource element type is
 // elided inside a Resource slice, array or map literal, and assignments
-// x.Type = X where x is declared in the same file as a Resource. Values it
-// cannot resolve statically (a variable, a call, a concatenation, or an
-// identifier that shadows a package constant) are returned in unresolved
-// as "file: expr". Literals passed directly to a logOnlyResourceFuncs
+// x.Type = X where x is declared in the same file as a Resource. In a
+// multi-value assignment such as x.Type, err = f(), the single right-hand
+// expression is recorded. Values it cannot resolve statically (a
+// variable, a call, a concatenation, or an identifier that shadows a
+// package constant) are returned in unresolved as "file: expr". Literals,
+// or pointers to literals, passed directly to a logOnlyResourceFuncs
 // function are skipped. Not scanned: unkeyed (positional) Resource
 // literals, and Type values set through any other path, such as a
 // Resource returned by a call, a field of another struct, an index
@@ -211,6 +213,9 @@ func collectResourceTypeLiterals(fset *token.FileSet, files map[string]*ast.File
 			}
 			if fn, ok := call.Fun.(*ast.Ident); ok && logOnlyResourceFuncs[fn.Name] {
 				for _, arg := range call.Args {
+					if u, ok := arg.(*ast.UnaryExpr); ok && u.Op == token.AND {
+						arg = u.X
+					}
 					if lit, ok := arg.(*ast.CompositeLit); ok {
 						logOnly[lit] = true
 					}
@@ -222,11 +227,19 @@ func collectResourceTypeLiterals(fset *token.FileSet, files map[string]*ast.File
 			if as, ok := n.(*ast.AssignStmt); ok {
 				for i, lhs := range as.Lhs {
 					sel, ok := lhs.(*ast.SelectorExpr)
-					if !ok || sel.Sel.Name != "Type" || len(as.Rhs) != len(as.Lhs) {
+					if !ok || sel.Sel.Name != "Type" {
 						continue
 					}
-					if x, ok := sel.X.(*ast.Ident); ok && declaredAsResource(x) {
+					x, ok := sel.X.(*ast.Ident)
+					if !ok || !declaredAsResource(x) {
+						continue
+					}
+					switch {
+					case len(as.Rhs) == len(as.Lhs):
 						record(as.Rhs[i])
+					case len(as.Rhs) == 1:
+						// Multi-value assignment, such as x.Type, err = f().
+						record(as.Rhs[0])
 					}
 				}
 				return true
@@ -426,6 +439,32 @@ func g() {
 		`sample.go:12: "elided_map_type"`,
 		`sample.go:14: "assigned_type"`,
 	}, unknownResourceTypeLiterals(found, knownResourceTypes()))
+}
+
+// TestResourceTypeLiterals_PointerLiteralsAndMultiValueAssignments covers
+// two forms: a pointer literal passed to a logOnlyResourceFuncs function is
+// skipped like a value literal, and a Type set by a multi-value assignment
+// is reported as unresolved.
+func TestResourceTypeLiterals_PointerLiteralsAndMultiValueAssignments(t *testing.T) {
+	const src = `package hub
+
+func f() {
+	logAuthzDenial(nil, nil, &Resource{Type: "pointer_log_label_only"}, "read", "r")
+	var r Resource
+	var err error
+	r.Type, err = pick()
+	_ = err
+}
+`
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "sample.go", src, 0)
+	require.NoError(t, err)
+	files := map[string]*ast.File{"sample.go": f}
+
+	found, unresolved := collectResourceTypeLiterals(fset, files, stringConsts(f), nil)
+	assert.Empty(t, found, "a pointer literal passed to a log-only function must be skipped")
+	assert.Equal(t, []string{"sample.go: pick()"}, unresolved,
+		"a Type set by a multi-value assignment must be reported as unresolved")
 }
 
 // TestUnregisteredResourcePermissions_ExactSet pins the reviewed unregistered
