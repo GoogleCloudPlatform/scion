@@ -39,8 +39,15 @@ type RestartDispatchArgs struct{}
 // except for a stop queued while the broker was offline: IntentAt is then the
 // run_intent_at of the stop intent the row was queued for, and the drain
 // applies the row only if that intent is still the current one.
+//
+// RunID is the run the stop was dispatched for (ptone/scion#2550). The
+// executing node sends it to the broker in place of the row's current run
+// ID, so a queued stop never stops a run started after it was queued. Empty
+// (a row queued by an older hub, or an agent with no run ID) stops with the
+// row's run ID as before.
 type StopDispatchArgs struct {
 	IntentAt *time.Time `json:"intentAt,omitempty"`
+	RunID    string     `json:"runId,omitempty"`
 }
 
 // DeleteDispatchArgs carries the parameters for a cross-node agent delete.
