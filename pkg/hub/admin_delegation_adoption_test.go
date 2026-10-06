@@ -654,7 +654,10 @@ func TestUnknownProvenanceVersionDenialCarriesNoAdoptionDetails(t *testing.T) {
 // The adoption details name adoption only for a denial an adopted ceiling
 // would address: an unrecorded row denied a permission some compatibility
 // policy V1 ceiling carries. A permission withheld from every unrecorded
-// chain and absent from V1 (the artifact permissions) is not.
+// chain and absent from V1 (the artifact permissions) is not, and neither is
+// agent.identity_token, which no V1 row carries. The expected outcome for
+// every permission that requires recorded provenance is a literal, so a
+// change to the coverage set fails here.
 func TestUnrecordedHopAdoptableOnlyForAdoptedCeilingPermissions(t *testing.T) {
 	a := &AuthzService{}
 	unrecorded := &store.DelegationEdge{EffectCeiling: store.EffectCeiling{Kind: store.EffectCeilingUnrecorded}}
@@ -669,6 +672,28 @@ func TestUnrecordedHopAdoptableOnlyForAdoptedCeilingPermissions(t *testing.T) {
 	}
 	assert.True(t, note(unrecorded, "gcp_service_account.assign"))
 	assert.False(t, note(v2, "gcp_service_account.assign"), "unsupported provenance version")
+
+	wantAdoptable := map[string]bool{
+		"gcp_service_account.use":    true,
+		"gcp_service_account.assign": true,
+		"project.secret_read":        true,
+		"secret.use":                 true,
+		"secret.deliver":             true,
+		"env_var.deliver":            true,
+		"skill_injection.deliver":    true,
+		"agent.identity_token":       false,
+	}
+	wantIDs := make([]string, 0, len(wantAdoptable))
+	for id := range wantAdoptable {
+		wantIDs = append(wantIDs, id)
+	}
+	require.ElementsMatch(t, recordedProvenanceRequiredIDs, wantIDs,
+		"every permission that requires recorded provenance has a literal expected outcome")
+	for id, want := range wantAdoptable {
+		assert.Equal(t, want, adoptionCeilingCovers(id), id)
+		assert.Equal(t, want, note(unrecorded, id), id)
+		assert.False(t, note(v2, id), "%s: unsupported provenance version", id)
+	}
 	require.NotEmpty(t, legacyChainExcludedPermissions)
 	for id := range legacyChainExcludedPermissions {
 		assert.False(t, adoptionCeilingCovers(id), id)
