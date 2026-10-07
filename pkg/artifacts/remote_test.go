@@ -484,3 +484,48 @@ func TestFinalizeFetchesRemoteImages(t *testing.T) {
 		t.Errorf("HTML entry fetched %v", ff.calls)
 	}
 }
+
+// TestConcurrentFinalizeFetchesOnce: of several concurrent finalize
+// requests for one version, one completes it and the others answer 409
+// without fetching; each remote image is fetched exactly once.
+func TestConcurrentFinalizeFetchesOnce(t *testing.T) {
+	f := newFixture(t, false)
+	a, b := "https://img.example/a.png", "https://img.example/b.png"
+	ff := &fakeFetcher{bodies: map[string][]byte{a: testPNG, b: testPNG}, delay: 200 * time.Millisecond}
+	f.useFetcher(ff)
+	files := bundle{"doc.md": []byte("![a](" + a + ") ![b](" + b + ")")}
+	pend := f.createPending(agentA, "/api/v1/artifacts", files.manifest("doc.md"))
+	if rec := f.put(agentA, pend.Artifact.ID, 1, "doc.md", files["doc.md"]); rec.Code != http.StatusNoContent {
+		t.Fatalf("PUT: %d", rec.Code)
+	}
+	const n = 4
+	codes := make([]int, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			codes[i] = f.finalize(agentA, pend.Artifact.ID, 1).Code
+		}(i)
+	}
+	wg.Wait()
+	ok, conflict := 0, 0
+	for _, c := range codes {
+		switch c {
+		case http.StatusOK:
+			ok++
+		case http.StatusConflict:
+			conflict++
+		}
+	}
+	if ok != 1 || conflict != n-1 {
+		t.Errorf("finalize codes %v, want one 200 and %d 409", codes, n-1)
+	}
+	seen := map[string]int{}
+	for _, u := range ff.calls {
+		seen[u]++
+	}
+	if len(ff.calls) != 2 || seen[a] != 1 || seen[b] != 1 {
+		t.Errorf("fetch calls %v, want each image once", ff.calls)
+	}
+}

@@ -487,3 +487,38 @@ func TestTwoStepWriteGateBindings(t *testing.T) {
 		t.Errorf("read grantee: %d, want 403", rec.Code)
 	}
 }
+
+// TestPendingVersionBelongsToItsPublisher: a principal who may write the
+// artifact still cannot upload to or finalize a pending version another
+// principal started.
+func TestPendingVersionBelongsToItsPublisher(t *testing.T) {
+	f := newFixture(t, false)
+	files := bundle{"a.txt": []byte("a")}
+	pub := f.publishBundle(agentA, "/api/v1/artifacts", files.manifest("a.txt"), files)
+	id := pub.Artifact.ID
+	if _, err := f.db.Exec("INSERT INTO artifact_grant (id, artifact_id, subject_kind, subject_ref, permission, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+		"g-b", id, SubjectPrincipal, PrincipalRef(agentB.kind, agentB.ref), GrantWrite, time.Now().UTC().Format(sqliteTimeLayout)); err != nil {
+		t.Fatal(err)
+	}
+	next := bundle{"a.txt": []byte("b")}
+	byA := f.createPending(agentA, "/api/v1/artifacts/"+id+"/versions", next.manifest("a.txt"))
+	byB := f.createPending(agentB, "/api/v1/artifacts/"+id+"/versions", next.manifest("a.txt"))
+	for _, tc := range []struct {
+		name string
+		p    principal
+		seq  int
+	}{{"B on A's version", agentB, byA.Version.Seq}, {"A on B's version", agentA, byB.Version.Seq}} {
+		if rec := f.put(tc.p, id, tc.seq, "a.txt", next["a.txt"]); rec.Code != http.StatusForbidden {
+			t.Errorf("%s: PUT %d, want 403", tc.name, rec.Code)
+		}
+		if rec := f.finalize(tc.p, id, tc.seq); rec.Code != http.StatusForbidden {
+			t.Errorf("%s: finalize %d, want 403", tc.name, rec.Code)
+		}
+	}
+	if rec := f.put(agentB, id, byB.Version.Seq, "a.txt", next["a.txt"]); rec.Code != http.StatusNoContent {
+		t.Errorf("B on its own version: PUT %d", rec.Code)
+	}
+	if rec := f.finalize(agentB, id, byB.Version.Seq); rec.Code != http.StatusOK {
+		t.Errorf("B on its own version: finalize %d", rec.Code)
+	}
+}

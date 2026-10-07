@@ -613,8 +613,28 @@ func (s *Service) handleFinalize(w http.ResponseWriter, r *http.Request, id stri
 		}})
 		return
 	}
+	// Claim the version before any remote fetch, so that one finalize
+	// request completes it and concurrent ones answer 409 at once.
+	switch err := b.store.ClaimFinalize(ctx, a.ID, seq); {
+	case errors.Is(err, ErrConflict):
+		writeError(w, http.StatusConflict, "conflict", "the version is not pending or not complete")
+		return
+	case errors.Is(err, ErrNotFound):
+		writeNotFound(w)
+		return
+	case err != nil:
+		slog.ErrorContext(ctx, "artifacts: claim finalize failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal", "could not finalize the version")
+		return
+	}
 	extra, warnings := s.finalizeExtras(w, r, b, v, files)
 	updated, err := b.store.FinalizeVersion(ctx, a.ID, seq, extra)
+	if err != nil && !errors.Is(err, ErrConflict) && !errors.Is(err, ErrNotFound) {
+		// Let the publisher try again.
+		if rerr := b.store.ReleaseFinalize(context.WithoutCancel(ctx), a.ID, seq); rerr != nil {
+			slog.ErrorContext(ctx, "artifacts: release finalize failed", "error", rerr)
+		}
+	}
 	switch {
 	case errors.Is(err, ErrConflict):
 		writeError(w, http.StatusConflict, "conflict", "the version is not pending or not complete")

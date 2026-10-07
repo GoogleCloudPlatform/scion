@@ -70,8 +70,11 @@ func TestStoreTwoStepVersion(t *testing.T) {
 		if err := st.MarkReceived(ctx, v.ID, "index.html", "text/html"); err != nil {
 			t.Fatalf("MarkReceived: %v", err)
 		}
+		if err := st.ClaimFinalize(ctx, a.ID, 1); !errors.Is(err, ErrConflict) {
+			t.Fatalf("claim with a missing file: %v, want ErrConflict", err)
+		}
 		if _, err := st.FinalizeVersion(ctx, a.ID, 1, nil); !errors.Is(err, ErrConflict) {
-			t.Fatalf("finalize with a missing file: %v, want ErrConflict", err)
+			t.Fatalf("finalize without a claim: %v, want ErrConflict", err)
 		}
 		if err := st.MarkReceived(ctx, v.ID, "nope.txt", "text/plain"); !errors.Is(err, ErrNotFound) {
 			t.Errorf("MarkReceived(unknown path) = %v, want ErrNotFound", err)
@@ -81,6 +84,24 @@ func TestStoreTwoStepVersion(t *testing.T) {
 		}
 		extra := []File{{VersionID: v.ID, Path: "_remote/" + strings.Repeat("cd", 32), Size: 7, SHA256: strings.Repeat("ef", 32),
 			MediaType: "image/png", Origin: FileOriginRemote, SourceURL: "https://example.com/x.png", FetchStatus: FetchStatusOK}}
+		if err := st.ClaimFinalize(ctx, a.ID, 1); err != nil {
+			t.Fatalf("ClaimFinalize: %v", err)
+		}
+		if err := st.ClaimFinalize(ctx, a.ID, 1); !errors.Is(err, ErrConflict) {
+			t.Fatalf("second claim: %v, want ErrConflict", err)
+		}
+		if err := st.MarkReceived(ctx, v.ID, "index.html", "text/html"); !errors.Is(err, ErrConflict) {
+			t.Errorf("upload to a finalizing version = %v, want ErrConflict", err)
+		}
+		if err := st.ReleaseFinalize(ctx, a.ID, 1); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.ClaimFinalize(ctx, a.ID, 1); err != nil {
+			t.Fatalf("claim after release: %v", err)
+		}
+		if err := st.ClaimFinalize(ctx, a.ID, 9); !errors.Is(err, ErrNotFound) {
+			t.Errorf("claim of a missing version = %v, want ErrNotFound", err)
+		}
 		got, err = st.FinalizeVersion(ctx, a.ID, 1, extra)
 		if err != nil || got.CurrentSeq != 1 {
 			t.Fatalf("FinalizeVersion = %+v, %v", got, err)
@@ -116,6 +137,11 @@ func TestStoreTwoStepVersion(t *testing.T) {
 		v4 := &Version{ID: uuid.NewString(), ArtifactID: a.ID, Kind: VersionKindPublish, EntryPath: "x", CreatedAt: time.Now(), State: VersionStatePending}
 		if err := st.CreateVersion(ctx, v4, nil, 2); !errors.Is(err, ErrTooManyPending) {
 			t.Errorf("third pending version = %v, want ErrTooManyPending", err)
+		}
+		for _, seq := range []int{2, 3} {
+			if err := st.ClaimFinalize(ctx, a.ID, seq); err != nil {
+				t.Fatalf("claim v%d: %v", seq, err)
+			}
 		}
 		if got, err := st.FinalizeVersion(ctx, a.ID, 3, nil); err != nil || got.CurrentSeq != 3 {
 			t.Fatalf("finalize v3 = %+v, %v", got, err)
@@ -203,12 +229,23 @@ func TestStoreReapPending(t *testing.T) {
 		if err := st.MarkReceived(ctx, kv.ID, "a.txt", "text/plain"); err != nil {
 			t.Fatal(err)
 		}
+		if err := st.ClaimFinalize(ctx, kept.ID, 1); err != nil {
+			t.Fatal(err)
+		}
 		if _, err := st.FinalizeVersion(ctx, kept.ID, 1, nil); err != nil {
 			t.Fatal(err)
 		}
 		stale := &Version{ID: uuid.NewString(), ArtifactID: kept.ID, Kind: VersionKindPublish, EntryPath: "a.txt",
 			CreatedAt: time.Now(), State: VersionStatePending}
 		if err := st.CreateVersion(ctx, stale, []File{{VersionID: stale.ID, Path: "a.txt", Size: 1, SHA256: strings.Repeat("ab", 32), MediaType: "text/plain", Pending: true}}, 4); err != nil {
+			t.Fatal(err)
+		}
+		// The abandoned artifact's version was claimed by a finalize that
+		// never completed: it is reaped like a pending one.
+		if err := st.MarkReceived(ctx, av.ID, "a.txt", "text/plain"); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.ClaimFinalize(ctx, abandoned.ID, 1); err != nil {
 			t.Fatal(err)
 		}
 		// A fresh pending version is not reaped.

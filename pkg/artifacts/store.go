@@ -40,12 +40,14 @@ const (
 )
 
 // Version states. A version is pending while its files upload (two-step
-// publish) and ready once every file is stored. The single-file fast path
-// writes ready directly.
+// publish), finalizing while one finalize request completes it, and ready
+// once every file is stored. The single-file fast path writes ready
+// directly.
 const (
-	VersionStatePending = "pending"
-	VersionStateReady   = "ready"
-	VersionStateFailed  = "failed"
+	VersionStatePending    = "pending"
+	VersionStateFinalizing = "finalizing"
+	VersionStateReady      = "ready"
+	VersionStateFailed     = "failed"
 )
 
 // Grant subject kinds.
@@ -194,19 +196,28 @@ type Store interface {
 	// the version is no longer pending.
 	MarkReceived(ctx context.Context, versionID, path, mediaType string) error
 
-	// FinalizeVersion flips the pending version seq of an artifact to
-	// ready, adds the extra manifest rows (files the hub produced, such as
+	// ClaimFinalize moves the pending version seq of an artifact to
+	// finalizing, so that exactly one finalize request completes it. It
+	// returns ErrConflict when the version is not pending or a file of its
+	// manifest is still pending, and ErrNotFound when it does not exist.
+	ClaimFinalize(ctx context.Context, artifactID string, seq int) error
+
+	// ReleaseFinalize returns a finalizing version to pending, for a
+	// finalize request that could not complete it.
+	ReleaseFinalize(ctx context.Context, artifactID string, seq int) error
+
+	// FinalizeVersion flips the claimed (finalizing) version seq of an
+	// artifact to ready, adds the extra manifest rows (files the hub produced, such as
 	// fetched remote images) and advances the artifact's current version to
 	// seq unless a later one is already current. It returns ErrConflict when
-	// the version is not pending or a file of its manifest is still
-	// pending, and the updated artifact otherwise.
+	// the version is not finalizing, and the updated artifact otherwise.
 	FinalizeVersion(ctx context.Context, artifactID string, seq int, extra []File) (*Artifact, error)
 
 	// ListVersions returns the ready versions of an artifact, newest first.
 	ListVersions(ctx context.Context, artifactID string) ([]Version, error)
 
-	// ReapPending marks every version still pending that was created
-	// before cutoff as failed and drops its manifest, so its blobs are no
+	// ReapPending marks every version still pending or finalizing that was
+	// created before cutoff as failed and drops its manifest, so its blobs are no
 	// longer referenced. An artifact left with neither a ready nor a
 	// pending version is soft-deleted, which frees its key. It handles at
 	// most limit versions per call and returns how many it reaped.

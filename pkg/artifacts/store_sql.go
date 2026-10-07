@@ -336,8 +336,8 @@ func (s *sqlStore) CreateVersion(ctx context.Context, v *Version, files []File, 
 	}
 	var maxSeq, pending int
 	if err := tx.QueryRowContext(ctx, s.rebind(`SELECT COALESCE(MAX(seq), 0),
-		COALESCE(SUM(CASE WHEN state = ? THEN 1 ELSE 0 END), 0)
-		FROM artifact_version WHERE artifact_id = ?`), VersionStatePending, v.ArtifactID).Scan(&maxSeq, &pending); err != nil {
+		COALESCE(SUM(CASE WHEN state IN (?, ?) THEN 1 ELSE 0 END), 0)
+		FROM artifact_version WHERE artifact_id = ?`), VersionStatePending, VersionStateFinalizing, v.ArtifactID).Scan(&maxSeq, &pending); err != nil {
 		return fmt.Errorf("artifacts: next seq: %w", err)
 	}
 	if pending >= maxPending {
@@ -409,15 +409,7 @@ func (s *sqlStore) FinalizeVersion(ctx context.Context, artifactID string, seq i
 	if err != nil {
 		return nil, fmt.Errorf("artifacts: finalize version: %w", err)
 	}
-	if state != VersionStatePending {
-		return nil, ErrConflict
-	}
-	var missing int
-	if err := tx.QueryRowContext(ctx, s.rebind(`SELECT COUNT(*) FROM artifact_file WHERE version_id = ? AND received = ?`),
-		versionID, false).Scan(&missing); err != nil {
-		return nil, fmt.Errorf("artifacts: finalize version: %w", err)
-	}
-	if missing > 0 {
+	if state != VersionStateFinalizing {
 		return nil, ErrConflict
 	}
 	if err := s.insertFiles(ctx, tx, versionID, extra); err != nil {
@@ -440,6 +432,37 @@ func (s *sqlStore) FinalizeVersion(ctx context.Context, artifactID string, seq i
 		return nil, fmt.Errorf("artifacts: commit finalize: %w", err)
 	}
 	return s.GetArtifact(ctx, artifactID)
+}
+
+// ClaimFinalize implements Store. One conditional update claims the
+// version, so of two concurrent finalize requests exactly one succeeds.
+func (s *sqlStore) ClaimFinalize(ctx context.Context, artifactID string, seq int) error {
+	res, err := s.db.ExecContext(ctx, s.rebind(`UPDATE artifact_version SET state = ?
+		WHERE artifact_id = ? AND seq = ? AND state = ?
+		AND NOT EXISTS (SELECT 1 FROM artifact_file WHERE version_id = artifact_version.id AND received = ?)`),
+		VersionStateFinalizing, artifactID, seq, VersionStatePending, false)
+	if err != nil {
+		return fmt.Errorf("artifacts: claim finalize: %w", err)
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return fmt.Errorf("artifacts: claim finalize: %w", err)
+	} else if n == 1 {
+		return nil
+	}
+	if _, err := s.GetVersion(ctx, artifactID, seq); err != nil {
+		return err
+	}
+	return ErrConflict
+}
+
+// ReleaseFinalize implements Store.
+func (s *sqlStore) ReleaseFinalize(ctx context.Context, artifactID string, seq int) error {
+	if _, err := s.db.ExecContext(ctx, s.rebind(`UPDATE artifact_version SET state = ?
+		WHERE artifact_id = ? AND seq = ? AND state = ?`),
+		VersionStatePending, artifactID, seq, VersionStateFinalizing); err != nil {
+		return fmt.Errorf("artifacts: release finalize: %w", err)
+	}
+	return nil
 }
 
 // ListVersions implements Store.
@@ -470,8 +493,8 @@ func (s *sqlStore) ReapPending(ctx context.Context, cutoff time.Time, limit int)
 		return 0, nil
 	}
 	rows, err := s.db.QueryContext(ctx, s.rebind(`SELECT id, artifact_id FROM artifact_version
-		WHERE state = ? AND created_at < ? ORDER BY created_at LIMIT `+strconv.Itoa(limit)),
-		VersionStatePending, s.timeArg(cutoff))
+		WHERE state IN (?, ?) AND created_at < ? ORDER BY created_at LIMIT `+strconv.Itoa(limit)),
+		VersionStatePending, VersionStateFinalizing, s.timeArg(cutoff))
 	if err != nil {
 		return 0, fmt.Errorf("artifacts: find pending versions: %w", err)
 	}
@@ -515,8 +538,8 @@ func (s *sqlStore) reapVersion(ctx context.Context, versionID, artifactID string
 	if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE artifact SET updated_at = ? WHERE id = ?`), now, artifactID); err != nil {
 		return false, fmt.Errorf("artifacts: lock artifact: %w", err)
 	}
-	res, err := tx.ExecContext(ctx, s.rebind(`UPDATE artifact_version SET state = ? WHERE id = ? AND state = ?`),
-		VersionStateFailed, versionID, VersionStatePending)
+	res, err := tx.ExecContext(ctx, s.rebind(`UPDATE artifact_version SET state = ? WHERE id = ? AND state IN (?, ?)`),
+		VersionStateFailed, versionID, VersionStatePending, VersionStateFinalizing)
 	if err != nil {
 		return false, fmt.Errorf("artifacts: fail version: %w", err)
 	}
@@ -528,8 +551,8 @@ func (s *sqlStore) reapVersion(ctx context.Context, versionID, artifactID string
 	}
 	if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE artifact SET deleted_at = ?
 		WHERE id = ? AND deleted_at IS NULL AND current_seq IS NULL
-		AND NOT EXISTS (SELECT 1 FROM artifact_version WHERE artifact_id = ? AND state = ?)`),
-		now, artifactID, artifactID, VersionStatePending); err != nil {
+		AND NOT EXISTS (SELECT 1 FROM artifact_version WHERE artifact_id = ? AND state IN (?, ?))`),
+		now, artifactID, artifactID, VersionStatePending, VersionStateFinalizing); err != nil {
 		return false, fmt.Errorf("artifacts: retire empty artifact: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
