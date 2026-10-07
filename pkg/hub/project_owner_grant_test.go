@@ -18,6 +18,9 @@ package hub
 
 import (
 	"context"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -110,6 +113,12 @@ func (f ownerGrantFixture) ownerAudits(t *testing.T, except string) []*store.Mut
 	return out
 }
 
+// The HTTP subtests below check the end-to-end result for a hub-boundary
+// UAT without owner coverage: 403 and no rows. That 403 comes from the
+// project.create authorization, which such a token does not pass, so these
+// subtests do not isolate the owner-coverage check. TestOwnerGrantCoverageCheck
+// tests the check itself, and TestOwnerGrantCheckPrecedesOwnerWrite pins its
+// call sites.
 func TestOwnerBindingRequiresCanDelegate(t *testing.T) {
 	t.Run("create denied without owner coverage", func(t *testing.T) {
 		f := newOwnerGrantFixture(t, "deny")
@@ -149,8 +158,7 @@ func TestOwnerBindingRequiresCanDelegate(t *testing.T) {
 }
 
 // The owner-grant check itself: a ceiling credential must keep every owner
-// permission; every other identity is unchanged. Create, register and clone
-// all call authorizeProjectOwnerGrant before writing.
+// permission; every other identity is unchanged.
 func TestOwnerGrantCoverageCheck(t *testing.T) {
 	f := newOwnerGrantFixture(t, "check")
 	check := func(identity Identity) (bool, int, string) {
@@ -177,6 +185,125 @@ func TestOwnerGrantCoverageCheck(t *testing.T) {
 	assert.True(t, ok, "session unchanged")
 	ok, _, _ = check(dcAgentIdentity(tid("og-check-agent"), tid("og-check-proj"), AgentRoleFull))
 	assert.True(t, ok, "non-user identities are gated by project create authorization, not here")
+}
+
+// No credential that passes project.create authorization over HTTP lacks
+// owner coverage: a hub-boundary UAT is refused project.create ("token not
+// scoped for this project"), and a session or agent identity is not subject
+// to the check. So the call sites are pinned structurally. In each of
+// createProject, handleProjectRegister and handleProjectClone, a statement
+// "if !s.authorizeProjectOwnerGrant(w, ctx) { return }" must come before every
+// createProjectWithOwner call, in a block that encloses that call.
+func TestOwnerGrantCheckPrecedesOwnerWrite(t *testing.T) {
+	_, files := parseHubProduction(t)
+	for _, fn := range []string{"Server.createProject", "Server.handleProjectRegister", "Server.handleProjectClone"} {
+		decl := findHubFuncDecl(files, fn)
+		require.NotNil(t, decl, fn)
+		guards, writes := ownerGrantGuardsAndWrites(decl)
+		require.NotEmpty(t, writes, "%s calls createProjectWithOwner", fn)
+		for _, w := range writes {
+			assert.True(t, ownerGrantGuarded(guards, w), "%s: createProjectWithOwner at offset %d is not preceded by an enclosing authorizeProjectOwnerGrant guard", fn, w)
+		}
+	}
+}
+
+// The structural matcher rejects a guard that cannot return and a guard in
+// a block that does not enclose the write.
+func TestOwnerGrantGuardMatcher(t *testing.T) {
+	cases := map[string]bool{
+		"if !s.authorizeProjectOwnerGrant(w, ctx) { return }\n_ = s.createProjectWithOwner(ctx, p, id)":          true,
+		"if false && !s.authorizeProjectOwnerGrant(w, ctx) { return }\n_ = s.createProjectWithOwner(ctx, p, id)": false,
+		"if !s.authorizeProjectOwnerGrant(w, ctx) { log() }\n_ = s.createProjectWithOwner(ctx, p, id)":           false,
+		"_ = s.authorizeProjectOwnerGrant(w, ctx)\n_ = s.createProjectWithOwner(ctx, p, id)":                     false,
+		"if c { if !s.authorizeProjectOwnerGrant(w, ctx) { return } }\n_ = s.createProjectWithOwner(ctx, p, id)": false,
+		"_ = s.createProjectWithOwner(ctx, p, id)\nif !s.authorizeProjectOwnerGrant(w, ctx) { return }":          false,
+		"if !s.authorizeProjectOwnerGrant(w, ctx) { return }\nif c { _ = s.createProjectWithOwner(ctx, p, id) }": true,
+	}
+	for body, want := range cases {
+		f, err := parser.ParseFile(token.NewFileSet(), "x.go", "package x\nfunc (s *S) h() {\n"+body+"\n}\n", 0)
+		require.NoError(t, err, body)
+		decl := f.Decls[0].(*ast.FuncDecl)
+		guards, writes := ownerGrantGuardsAndWrites(decl)
+		require.Len(t, writes, 1, body)
+		assert.Equal(t, want, ownerGrantGuarded(guards, writes[0]), body)
+	}
+}
+
+// findHubFuncDecl returns the function declaration named name ("Recv.Name"
+// or "Name") in files.
+func findHubFuncDecl(files []*ast.File, name string) *ast.FuncDecl {
+	for _, f := range files {
+		for _, d := range f.Decls {
+			if fn, ok := d.(*ast.FuncDecl); ok && fn.Body != nil && declReceiverName(fn) == name {
+				return fn
+			}
+		}
+	}
+	return nil
+}
+
+// ownerGrantGuard is an "if !….authorizeProjectOwnerGrant(…) { …; return }"
+// statement: its end, and the end of the block that holds it.
+type ownerGrantGuard struct {
+	end, blockEnd token.Pos
+}
+
+// ownerGrantGuardsAndWrites returns the owner-grant guards in decl and the
+// positions of its createProjectWithOwner calls.
+func ownerGrantGuardsAndWrites(decl *ast.FuncDecl) ([]ownerGrantGuard, []token.Pos) {
+	var guards []ownerGrantGuard
+	var writes []token.Pos
+	ast.Inspect(decl.Body, func(n ast.Node) bool {
+		switch n := n.(type) {
+		case *ast.BlockStmt:
+			for _, st := range n.List {
+				if isOwnerGrantGuard(st) {
+					guards = append(guards, ownerGrantGuard{end: st.End(), blockEnd: n.End()})
+				}
+			}
+		case *ast.CallExpr:
+			if sel, ok := n.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "createProjectWithOwner" {
+				writes = append(writes, n.Pos())
+			}
+		}
+		return true
+	})
+	return guards, writes
+}
+
+// isOwnerGrantGuard reports whether st is exactly
+// "if !X.authorizeProjectOwnerGrant(…) { …; return }" with no init statement
+// and no else branch.
+func isOwnerGrantGuard(st ast.Stmt) bool {
+	ifs, ok := st.(*ast.IfStmt)
+	if !ok || ifs.Init != nil || ifs.Else != nil || len(ifs.Body.List) == 0 {
+		return false
+	}
+	not, ok := ifs.Cond.(*ast.UnaryExpr)
+	if !ok || not.Op != token.NOT {
+		return false
+	}
+	call, ok := not.X.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != "authorizeProjectOwnerGrant" {
+		return false
+	}
+	_, ok = ifs.Body.List[len(ifs.Body.List)-1].(*ast.ReturnStmt)
+	return ok
+}
+
+// ownerGrantGuarded reports whether a guard ends before write in a block
+// that encloses write.
+func ownerGrantGuarded(guards []ownerGrantGuard, write token.Pos) bool {
+	for _, g := range guards {
+		if g.end <= write && write < g.blockEnd {
+			return true
+		}
+	}
+	return false
 }
 
 // An injected failure of the owner binding's audit write rolls back the
