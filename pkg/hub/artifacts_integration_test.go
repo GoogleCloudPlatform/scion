@@ -894,6 +894,13 @@ func TestArtifactsHTMLViewOnRoutes(t *testing.T) {
 	assert.Equal(t, string(page), anon.Body.String())
 	assert.Contains(t, anon.Header().Get("Content-Security-Policy"), "sandbox allow-scripts;")
 	assert.NotContains(t, anon.Header().Get("Content-Security-Policy"), "allow-same-origin")
+	assert.Contains(t, anon.Header().Get("Content-Security-Policy"), "img-src example.com"+strings.TrimSuffix(view.URL, "index.html")+" data:")
+
+	badCred := httptest.NewRequest(http.MethodGet, view.URL, nil)
+	badCred.Header.Set("Authorization", "Bearer not-a-valid-token")
+	rejected := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rejected, badCred)
+	assert.Equal(t, http.StatusUnauthorized, rejected.Code, "an invalid credential is rejected before the view pass")
 
 	tampered := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(tampered, httptest.NewRequest(http.MethodGet, strings.Replace(view.URL, ".1.", ".2.", 1), nil))
@@ -907,4 +914,19 @@ func TestArtifactsHTMLViewOnRoutes(t *testing.T) {
 	post := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(post, httptest.NewRequest(http.MethodPost, view.URL, nil))
 	assert.Equal(t, http.StatusUnauthorized, post.Code, "only reads pass without credentials")
+
+	// The view route answers 404 when the artifacts settings section is
+	// disabled, and when the experiment is off.
+	srv.SetOperationalSettings(artifactsOps(t, `{"enabled":false}`))
+	off := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(off, httptest.NewRequest(http.MethodGet, view.URL, nil))
+	assert.Equal(t, http.StatusNotFound, off.Code, "settings off")
+	srv.SetOperationalSettings(artifactsOps(t, ""))
+	reg, err := experiments.NewRegistry(experiments.Default().All(), nil)
+	require.NoError(t, err)
+	srv.experiments = reg
+	require.False(t, srv.experimentEnabled(experiments.Artifacts))
+	off = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(off, httptest.NewRequest(http.MethodGet, view.URL, nil))
+	assert.Equal(t, http.StatusNotFound, off.Code, "experiment off")
 }

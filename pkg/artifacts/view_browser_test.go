@@ -92,7 +92,10 @@ func onePixelPNG(t *testing.T) []byte {
 const probePage = `<!doctype html><html><head><meta charset="utf-8">
 <script>
 const r = { inlineScript: 'ran', origin: String(self.origin), violations: [] };
-document.addEventListener('securitypolicyviolation', (e) => r.violations.push(e.effectiveDirective));
+document.addEventListener('securitypolicyviolation', (e) => {
+  r.violations.push(e.effectiveDirective);
+  if (String(e.blockedURI).endsWith('/cookie-check.png')) r.outsideViolation = e.effectiveDirective;
+});
 </script>
 <link rel="stylesheet" href="css/s.css">
 <script src="https://remote.invalid/x.js"></script>
@@ -100,6 +103,7 @@ document.addEventListener('securitypolicyviolation', (e) => r.violations.push(e.
 <img id="local" src="img/a.png">
 <img id="remote" src="https://remote.invalid/x.png">
 <img id="hubimg" src="/cookie-check.png">
+<script src="js/app.js"></script>
 <iframe id="nested" src="docs/page.htm"></iframe>
 <object id="obj" data="docs/page.htm"></object>
 <form id="form" action="/submit" method="post"><input name="a" value="b"></form>
@@ -114,6 +118,7 @@ fetch('../../../ARTIFACT_PATH').then(() => { r.fetch = 'allowed'; }, () => { r.f
 setTimeout(() => {
   r.local = document.getElementById('local').naturalWidth > 0 ? 'loaded' : 'failed';
   r.remote = document.getElementById('remote').naturalWidth > 0 ? 'loaded' : 'blocked';
+  r.outsideView = document.getElementById('hubimg').naturalWidth > 0 ? 'loaded' : 'blocked';
   r.css = getComputedStyle(document.body).backgroundColor;
   r.violations = Array.from(new Set(r.violations)).sort();
   const s = JSON.stringify(r);
@@ -150,6 +155,9 @@ type probeResult struct {
 	Fetch        string   `json:"fetch"`
 	Local        string   `json:"local"`
 	Remote       string   `json:"remote"`
+	OutsideView  string   `json:"outsideView"`
+	OutsideViol  string   `json:"outsideViolation"`
+	BundleScript string   `json:"bundleScript"`
 	CSS          string   `json:"css"`
 	Violations   []string `json:"violations"`
 }
@@ -163,6 +171,7 @@ func TestViewSandboxBrowserProbe(t *testing.T) {
 		"index.html":    []byte(probePage),
 		"img/a.png":     pngBytes,
 		"css/s.css":     []byte("body { background-color: rgb(1, 2, 3); }"),
+		"js/app.js":     []byte("r.bundleScript = 'ran';"),
 		"docs/page.htm": []byte("<p>nested</p>"),
 	}
 	pub := f.publishBundle(agentA, "/api/v1/artifacts", site.manifest("index.html"), site)
@@ -214,13 +223,16 @@ func TestViewSandboxBrowserProbe(t *testing.T) {
 			t.Errorf("origin = %q, want an opaque origin", r.Origin)
 		}
 		want := map[string][2]string{
-			"cookie":  {r.Cookie, "blocked"},
-			"storage": {r.Storage, "blocked"},
-			"popup":   {r.Popup, "blocked"},
-			"fetch":   {r.Fetch, "blocked"},
-			"local":   {r.Local, "loaded"},
-			"remote":  {r.Remote, "blocked"},
-			"css":     {r.CSS, "rgb(1, 2, 3)"},
+			"cookie":            {r.Cookie, "blocked"},
+			"storage":           {r.Storage, "blocked"},
+			"popup":             {r.Popup, "blocked"},
+			"fetch":             {r.Fetch, "blocked"},
+			"local":             {r.Local, "loaded"},
+			"remote":            {r.Remote, "blocked"},
+			"outside":           {r.OutsideView, "blocked"},
+			"outside violation": {r.OutsideViol, "img-src"},
+			"script":            {r.BundleScript, "ran"},
+			"css":               {r.CSS, "rgb(1, 2, 3)"},
 		}
 		if framed {
 			want["parentDOM"] = [2]string{r.ParentDOM, "blocked"}

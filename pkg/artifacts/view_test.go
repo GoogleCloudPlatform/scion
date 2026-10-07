@@ -61,6 +61,11 @@ func TestViewServesTheBundle(t *testing.T) {
 		t.Errorf("expires in %v", d)
 	}
 	base := strings.TrimSuffix(view.URL, "index.html")
+	src := "example.com" + base
+	wantCSP := "sandbox allow-scripts; default-src 'none'; script-src " + src + " 'unsafe-inline'; " +
+		"style-src " + src + " 'unsafe-inline'; img-src " + src + " data:; font-src " + src + " data:; media-src " + src + "; " +
+		"connect-src 'none'; frame-src 'none'; worker-src 'none'; object-src 'none'; form-action 'none'; " +
+		"base-uri 'none'; frame-ancestors 'self'"
 	// No principal: the capability alone serves every file of the version,
 	// including through relative paths.
 	for p, body := range htmlSite {
@@ -70,7 +75,7 @@ func TestViewServesTheBundle(t *testing.T) {
 		}
 		h := rec.Header()
 		for k, want := range map[string]string{
-			"Content-Security-Policy": viewCSP,
+			"Content-Security-Policy": wantCSP,
 			"X-Content-Type-Options":  "nosniff",
 			"Referrer-Policy":         "no-referrer",
 			"Cache-Control":           "private, no-store",
@@ -229,6 +234,29 @@ func TestHTMLHasRemoteImages(t *testing.T) {
 		htmlHasRemoteImages(doc)
 		if d := time.Since(start); d > 2*time.Second && !raceEnabled {
 			t.Errorf("took %v", d)
+		}
+	}
+}
+
+// TestViewCSPHost: the view source is built only from a plain host[:port];
+// anything else leaves no source, which blocks every load.
+func TestViewCSPHost(t *testing.T) {
+	for host, want := range map[string]string{
+		"hub.example.com":      "hub.example.com/api/v1/artifacts/view/cap/",
+		"127.0.0.1:8080":       "127.0.0.1:8080/api/v1/artifacts/view/cap/",
+		"[::1]:8080":           "'none'",
+		"hub.example.com:":     "'none'",
+		"hub.example.com:http": "'none'",
+		"evil.com; script-src": "'none'",
+		"a b":                  "'none'",
+		"":                     "'none'",
+	} {
+		csp := viewCSP(host, "cap")
+		if !strings.Contains(csp, "img-src "+want+" data:") || !strings.Contains(csp, "script-src "+want+" 'unsafe-inline'") {
+			t.Errorf("viewCSP(%q) = %q, want source %q", host, csp, want)
+		}
+		if strings.Contains(csp, "allow-same-origin") || strings.Count(csp, ";") != 13 {
+			t.Errorf("viewCSP(%q) = %q", host, csp)
 		}
 	}
 }

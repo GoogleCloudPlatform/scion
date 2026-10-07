@@ -42,9 +42,10 @@ import (
 // view route accepts the capability alone and serves only files of that
 // version; it never uses or grants anything based on a session.
 //
-// Every view response carries viewCSP, whose sandbox directive puts the
-// document in an opaque origin even when the URL is opened directly, and
-// whose source lists let it load only files from the hub.
+// Every view response carries the policy viewCSP builds, whose sandbox
+// directive puts the document in an opaque origin even when the URL is
+// opened directly, and whose source lists let it load only files under its
+// own view path.
 
 const (
 	// ViewTTL is how long a view capability is valid.
@@ -59,15 +60,53 @@ const (
 	viewSigDomain = "artifact-view"
 )
 
-// viewCSP is the Content-Security-Policy of every view response. Scripts
-// and styles of the bundle run, in an opaque origin (sandbox without
-// allow-same-origin); images, fonts and media load only from the hub; the
+// viewCSP returns the Content-Security-Policy of a view response served
+// for host under capability. Scripts and styles of the bundle run, in an
+// opaque origin (sandbox without allow-same-origin); scripts, styles,
+// images, fonts and media load only from this view's own path on the hub
+// (inline scripts and styles and data: images and fonts are allowed); the
 // document cannot connect, frame, embed, submit forms, open popups or
 // navigate the page that frames it, and only the hub may frame it.
-const viewCSP = "sandbox allow-scripts; default-src 'none'; script-src 'self' 'unsafe-inline'; " +
-	"style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; media-src 'self'; " +
-	"connect-src 'none'; frame-src 'none'; worker-src 'none'; object-src 'none'; form-action 'none'; " +
-	"base-uri 'none'; frame-ancestors 'self'"
+//
+// The source is a host-source with a path: no scheme, so it takes the
+// response's own, and a trailing '/', so it matches every file under the
+// view. A host that is not a plain host[:port] yields no source at all,
+// which blocks every load.
+func viewCSP(host, capability string) string {
+	src := "'none'"
+	if validCSPHost(host) {
+		src = host + RouteView + capability + "/"
+	}
+	return "sandbox allow-scripts; default-src 'none'; script-src " + src + " 'unsafe-inline'; " +
+		"style-src " + src + " 'unsafe-inline'; img-src " + src + " data:; font-src " + src + " data:; media-src " + src + "; " +
+		"connect-src 'none'; frame-src 'none'; worker-src 'none'; object-src 'none'; form-action 'none'; " +
+		"base-uri 'none'; frame-ancestors 'self'"
+}
+
+// validCSPHost accepts host[:port] made of letters, digits, '.' and '-',
+// with a numeric port.
+func validCSPHost(h string) bool {
+	host, port, hasPort := strings.Cut(h, ":")
+	if host == "" || len(h) > 260 {
+		return false
+	}
+	for i := 0; i < len(host); i++ {
+		if c := host[i]; !isASCIIAlnum(c) && c != '.' && c != '-' {
+			return false
+		}
+	}
+	if hasPort {
+		if port == "" || len(port) > 5 {
+			return false
+		}
+		for i := 0; i < len(port); i++ {
+			if port[i] < '0' || port[i] > '9' {
+				return false
+			}
+		}
+	}
+	return true
+}
 
 // WarnHTMLRemoteImages is the publish warning, and the viewer notice, for
 // an HTML entry that references absolute http(s) images.
@@ -207,7 +246,7 @@ func (s *Service) handleView(w http.ResponseWriter, r *http.Request, segs []stri
 	h := w.Header()
 	h.Set("Content-Type", responseContentType(f.MediaType))
 	h.Set("Content-Length", strconv.FormatInt(f.Size, 10))
-	h.Set("Content-Security-Policy", viewCSP)
+	h.Set("Content-Security-Policy", viewCSP(r.Host, segs[0]))
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("Referrer-Policy", "no-referrer")
 	h.Set("Cache-Control", "private, no-store")
