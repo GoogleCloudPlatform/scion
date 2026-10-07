@@ -2795,6 +2795,12 @@ type BrokerHealthResponse struct {
 // checkLocalBrokerServer checks if the local broker server is running and healthy.
 // Returns the health response if healthy, or an error if not accessible.
 func checkLocalBrokerServer(port int) (*BrokerHealthResponse, error) {
+	return checkLocalBrokerServerTimeout(port, 5*time.Second)
+}
+
+// checkLocalBrokerServerTimeout is checkLocalBrokerServer with the given
+// HTTP timeout.
+func checkLocalBrokerServerTimeout(port int, timeout time.Duration) (*BrokerHealthResponse, error) {
 	if port <= 0 {
 		port = DefaultBrokerPort
 	}
@@ -2802,7 +2808,7 @@ func checkLocalBrokerServer(port int) (*BrokerHealthResponse, error) {
 	url := fmt.Sprintf("http://localhost:%d/healthz", port)
 
 	client := &http.Client{
-		Timeout: 5 * time.Second,
+		Timeout: timeout,
 	}
 
 	resp, err := client.Get(url)
