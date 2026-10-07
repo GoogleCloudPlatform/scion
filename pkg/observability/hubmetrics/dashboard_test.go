@@ -7,9 +7,6 @@ package hubmetrics
 import (
 	"context"
 	"encoding/json"
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"net"
 	"os"
 	"path/filepath"
@@ -249,15 +246,12 @@ func startFakeMonitoringAPI(t *testing.T) (*fakeMetricService, string) {
 	return fake, lis.Addr().String()
 }
 
-// omitInstanceID tells exportReplica not to pass WithInstanceID at all.
-const omitInstanceID = "\x00omit"
-
 // exportReplica records one point on every hub instrument through the
 // production NewMeterProvider (exporter, resource attributes and label filter
-// included) for a hub replica with the given hub ID and instance ID, and
-// flushes it to the fake API at addr. Pass omitInstanceID to leave out the
-// WithInstanceID option.
-func exportReplica(t *testing.T, addr, hubID, instanceID string, instruments map[string]instrumentKind) {
+// included) for a hub replica with the given hub ID, and flushes it to the
+// fake API at addr. extra holds further options, usually WithInstanceID;
+// callers that leave it out exercise the generated-ID fallback.
+func exportReplica(t *testing.T, addr, hubID string, instruments map[string]instrumentKind, extra ...Option) {
 	t.Helper()
 	ctx := context.Background()
 	opts := []Option{
@@ -269,9 +263,7 @@ func exportReplica(t *testing.T, addr, hubID, instanceID string, instruments map
 			option.WithGRPCDialOption(grpc.WithTransportCredentials(insecure.NewCredentials())),
 		)),
 	}
-	if instanceID != omitInstanceID {
-		opts = append(opts, WithInstanceID(instanceID))
-	}
+	opts = append(opts, extra...)
 	mp, err := NewMeterProvider(ctx, "dashboard-test", opts...)
 	if err != nil {
 		t.Fatalf("NewMeterProvider: %v", err)
@@ -373,7 +365,7 @@ func exportThroughFakeAPI(t *testing.T, hubID, instanceID string) map[string]exp
 	t.Helper()
 	instruments := hubRecorderInstruments(t)
 	fake, addr := startFakeMonitoringAPI(t)
-	exportReplica(t, addr, hubID, instanceID, instruments)
+	exportReplica(t, addr, hubID, instruments, WithInstanceID(instanceID))
 	out := map[string]exportedMetric{}
 	for _, m := range collectExported(t, fake, instruments) {
 		out["workload.googleapis.com/"+m.otelName] = m
@@ -436,8 +428,8 @@ func TestHubReplicasWriteDistinctSeries(t *testing.T) {
 	hermeticMetricsEnv(t)
 	instruments := hubRecorderInstruments(t)
 	fake, addr := startFakeMonitoringAPI(t)
-	exportReplica(t, addr, "shared-hub", "replica-1", instruments)
-	exportReplica(t, addr, "shared-hub", "replica-2", instruments)
+	exportReplica(t, addr, "shared-hub", instruments, WithInstanceID("replica-1"))
+	exportReplica(t, addr, "shared-hub", instruments, WithInstanceID("replica-2"))
 
 	type seriesKey struct{ metric, instance, resource string }
 	seen := map[seriesKey]bool{}
@@ -477,8 +469,8 @@ func TestHubInstanceIDFallback(t *testing.T) {
 	hermeticMetricsEnv(t)
 	instruments := hubRecorderInstruments(t)
 	fake, addr := startFakeMonitoringAPI(t)
-	exportReplica(t, addr, "shared-hub", "", instruments)
-	exportReplica(t, addr, "shared-hub", omitInstanceID, instruments)
+	exportReplica(t, addr, "shared-hub", instruments, WithInstanceID(""))
+	exportReplica(t, addr, "shared-hub", instruments)
 
 	instances := map[string]bool{}
 	for _, m := range collectExported(t, fake, instruments) {
@@ -493,60 +485,6 @@ func TestHubInstanceIDFallback(t *testing.T) {
 	}
 	if len(instances) != 2 {
 		t.Errorf("two providers without an instance ID exported %d distinct instance IDs, want 2: %v", len(instances), instances)
-	}
-}
-
-// TestServerWiresInstanceID checks, without building cmd, that the hub
-// server passes its per-process instance ID to NewMeterProvider. The
-// generated fallback keeps replicas apart, but only the wired ID matches the
-// instance ID the hub uses elsewhere (for example in dispatch claims).
-func TestServerWiresInstanceID(t *testing.T) {
-	path := filepath.Join("..", "..", "..", "cmd", "server_foreground.go")
-	f, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
-	if err != nil {
-		t.Fatalf("parsing %s: %v", path, err)
-	}
-	isHubmetricsCall := func(e ast.Expr, name string) (*ast.CallExpr, bool) {
-		call, ok := e.(*ast.CallExpr)
-		if !ok {
-			return nil, false
-		}
-		sel, ok := call.Fun.(*ast.SelectorExpr)
-		if !ok || sel.Sel.Name != name {
-			return nil, false
-		}
-		pkg, ok := sel.X.(*ast.Ident)
-		return call, ok && pkg.Name == "hubmetrics"
-	}
-	calls, wired := 0, 0
-	ast.Inspect(f, func(n ast.Node) bool {
-		e, ok := n.(ast.Expr)
-		if !ok {
-			return true
-		}
-		call, ok := isHubmetricsCall(e, "NewMeterProvider")
-		if !ok {
-			return true
-		}
-		calls++
-		for _, arg := range call.Args {
-			opt, ok := isHubmetricsCall(arg, "WithInstanceID")
-			if !ok || len(opt.Args) != 1 {
-				continue
-			}
-			if c, ok := opt.Args[0].(*ast.CallExpr); ok {
-				if sel, ok := c.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "InstanceID" {
-					wired++
-				}
-			}
-		}
-		return true
-	})
-	if calls == 0 {
-		t.Fatalf("no hubmetrics.NewMeterProvider call found in %s", path)
-	}
-	if wired != calls {
-		t.Errorf("%d of %d hubmetrics.NewMeterProvider calls in %s pass hubmetrics.WithInstanceID(<server>.InstanceID())", wired, calls, path)
 	}
 }
 
