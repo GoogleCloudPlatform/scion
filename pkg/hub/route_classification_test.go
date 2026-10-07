@@ -396,24 +396,31 @@ func TestRouteGuardsDenyUnauthorized(t *testing.T) {
 			identity:       nil,
 			wantStatus:     http.StatusUnauthorized,
 		},
-		// RouteHubAdmin: non-admin user → 403
-		// Uses a route without Permission (requireAdmin fallback) so this test
-		// works without an authzService. Permission-based routes are tested in
-		// TestRouteGuardOpsPermissions with a full server.
+		// RouteHubAdmin: every hub-admin route declares a Permission, and this
+		// server has no authorization service, so the guard refuses with 500
+		// for every caller. Non-admin (403) and unauthenticated (401) denials
+		// through Decide are tested with a full server in
+		// TestRouteGuardPermissionBasedPath and TestRouteGuardOpsPermissions.
 		{
-			name:           "hub-admin route denies non-admin",
+			name:           "hub-admin route refuses non-admin without authz service",
 			route:          "/api/v1/admin/allow-list",
 			classification: RouteHubAdmin,
 			identity:       NewAuthenticatedUser("user-1", "user@example.com", "User", "member", "api"),
-			wantStatus:     http.StatusForbidden,
+			wantStatus:     http.StatusInternalServerError,
 		},
-		// RouteHubAdmin: no identity → 401
 		{
-			name:           "hub-admin route denies unauthenticated",
+			name:           "hub-admin route refuses admin without authz service",
+			route:          "/api/v1/admin/allow-list",
+			classification: RouteHubAdmin,
+			identity:       NewAuthenticatedUser("admin-1", "admin@example.com", "Admin", "admin", "api"),
+			wantStatus:     http.StatusInternalServerError,
+		},
+		{
+			name:           "hub-admin route refuses unauthenticated without authz service",
 			route:          "/api/v1/admin/allow-list",
 			classification: RouteHubAdmin,
 			identity:       nil,
-			wantStatus:     http.StatusUnauthorized,
+			wantStatus:     http.StatusInternalServerError,
 		},
 		// RouteAgentToken: no identity → 401
 		{

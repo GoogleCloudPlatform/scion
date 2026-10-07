@@ -528,12 +528,17 @@ func doRawAgentRequest(t *testing.T, srv *Server, method, path string, body []by
 }
 
 // TestArtifactServiceReachableOnlyThroughHTTPAuth pins that the artifact
-// service has no in-process callers: the hub builds it in exactly one place
-// (artifactsHandler), mounts it only on its own mux (server.go, pinned by
-// TestArtifactRoutesMatchService), and that mux is served only behind
-// applyMiddleware, whose UnifiedAuthMiddleware derives the identity from the
-// request's credentials. User identities the hub constructs in process for
-// its own decisions therefore never reach artifacts.Host.
+// service sees only request-derived identities: the hub builds it only in
+// artifacts_store.go, for its routes (artifactsHandler, mounted only on its
+// own mux in server.go, pinned by TestArtifactRoutesMatchService, which is
+// served only behind applyMiddleware, whose UnifiedAuthMiddleware derives
+// the identity from the request's credentials) and for message references
+// (artifactRefResolver, reachable only through resolveArtifactRefs, which
+// requires the middleware's credential context to bind the current
+// identity; pinned by
+// TestArtifactRefResolverReachableOnlyFromRequestContexts). User identities
+// the hub constructs in process for its own decisions therefore never reach
+// artifacts.Host.
 func TestArtifactServiceReachableOnlyThroughHTTPAuth(t *testing.T) {
 	files, err := filepath.Glob("*.go")
 	require.NoError(t, err)

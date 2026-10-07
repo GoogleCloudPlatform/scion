@@ -260,6 +260,17 @@ type Store interface {
 	// query only: it decides nothing about access, and every row must
 	// still pass the service's read check before it is shown.
 	ListCandidates(ctx context.Context, q CandidateQuery) ([]Candidate, error)
+
+	// AddMessageRefs records that message messageID references refs, in the
+	// artifact_message_ref link table. A reference already recorded for the
+	// message and artifact is left as it is. The caller has already checked
+	// that every referenced artifact exists.
+	AddMessageRefs(ctx context.Context, messageID string, refs []MessageRef) error
+
+	// ListMessageRefs returns the references recorded for each of
+	// messageIDs, keyed by message id and ordered by artifact id. Messages
+	// without references are absent from the map.
+	ListMessageRefs(ctx context.Context, messageIDs []string) (map[string][]MessageRef, error)
 }
 
 // CandidateQuery selects rows for ListCandidates.

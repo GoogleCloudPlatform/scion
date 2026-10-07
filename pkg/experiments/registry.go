@@ -132,10 +132,25 @@ const Artifacts = "hub.artifacts"
 // the delivery sweeper, which holds pending messages while it is off.
 const ChatScheduledSend = "web.chat_scheduled_send"
 
+// AuthorizationDecisionAuditV2 identifies the default-off decision-audit slice.
+// Registration alone never grants production admission.
+const AuthorizationDecisionAuditV2 = "hub.authorization_decision_audit_v2"
+
 // compiled is the production experiment list. It is reachable only through
 // Default(); there is no package-level Lookup/All, so hub code cannot bypass
 // the Registry instance it was given (ptone/scion#2217).
 var compiled = []Experiment{
+	{
+		Name:        AuthorizationDecisionAuditV2,
+		Title:       "Authorization decision audit v2",
+		Description: "Routes admitted authorization decisions to the typed structured log sink; defaults to the retained legacy writer when admission, freshness or logging health fails.",
+		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#2379",
+		Owner:       "audit-update",
+		ReviewBy:    "2026-11-30",
+	},
 	{
 		Name:        "web.terminal_workspace",
 		Title:       "Persistent terminal workspace",
