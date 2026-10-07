@@ -39,6 +39,11 @@ func normalizeImageURL(raw string, kind int) (string, bool) {
 // *steps. Each step reads its input once, so the count is a fixed multiple
 // of len(raw) at most.
 func normalizeCounted(raw string, kind int, steps *int) (string, bool) {
+	// This check is the single bound on the work and memory of normalizing
+	// one candidate: a reference definition's destination is read without
+	// a cap of its own. It is defended by TestExtractImageURLsNormalizationWork
+	// and TestExtractImageURLsAllocBound, which fail without it. A second,
+	// redundant cap elsewhere would leave those tests unable to fail.
 	if len(raw) > maxImageURLBytes {
 		return "", false
 	}
