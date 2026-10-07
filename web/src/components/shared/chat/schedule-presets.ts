@@ -67,9 +67,27 @@ export function schedulePresets(now: Date, zone: string): SchedulePreset[] {
 export const MIN_SCHEDULE_LEAD_MS = 75_000;
 
 /**
+ * Latest time the dialog accepts. The hub accepts up to 90 days ahead; a
+ * minute less leaves room for request latency.
+ */
+export const MAX_SCHEDULE_HORIZON_MS = 90 * 86_400_000 - 60_000;
+
+/**
+ * The `datetime-local` min and max for the picker in `zone` (minute
+ * precision; resolveScheduleTime does the exact check).
+ */
+export function scheduleInputBounds(now: Date, zone: string): { min: string; max: string } {
+  return {
+    min: toWallClockInput(new Date(now.getTime() + MIN_SCHEDULE_LEAD_MS).toISOString(), zone),
+    max: toWallClockInput(new Date(now.getTime() + MAX_SCHEDULE_HORIZON_MS).toISOString(), zone),
+  };
+}
+
+/**
  * Converts a `datetime-local` value in `zone` to a UTC ISO instant and
- * checks it is at least MIN_SCHEDULE_LEAD_MS after `now`. Returns the
- * instant, or an error message.
+ * checks it is at least MIN_SCHEDULE_LEAD_MS and at most
+ * MAX_SCHEDULE_HORIZON_MS after `now`. Returns the instant, or an error
+ * message.
  */
 export function resolveScheduleTime(
   value: string,
@@ -78,8 +96,12 @@ export function resolveScheduleTime(
 ): { fireAt: string } | { error: string } {
   const fireAt = parseWallClock(value, zone);
   if (!fireAt) return { error: 'Enter a valid date and time' };
-  if (new Date(fireAt).getTime() - now.getTime() < MIN_SCHEDULE_LEAD_MS) {
+  const leadMs = new Date(fireAt).getTime() - now.getTime();
+  if (leadMs < MIN_SCHEDULE_LEAD_MS) {
     return { error: 'Choose a time at least a minute from now' };
+  }
+  if (leadMs > MAX_SCHEDULE_HORIZON_MS) {
+    return { error: 'Choose a time within 90 days' };
   }
   return { fireAt };
 }

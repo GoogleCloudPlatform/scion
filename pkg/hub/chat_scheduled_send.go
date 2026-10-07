@@ -26,6 +26,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
@@ -53,11 +54,12 @@ const (
 	// scheduledSendClientType is the client type of the identity a
 	// scheduled message is sent with, and the executor recorded for it.
 	scheduledSendClientType = "scheduled-send"
-	// scheduledFireBudget bounds the delivery of one claimed message: the
-	// fire-time checks, the send (whose dispatches have their own 30 s
-	// bounds) and the final state write. It runs detached from server
-	// shutdown, so a claimed row is not stranded in sending.
-	scheduledFireBudget = 2 * time.Minute
+	// scheduledClaimTimeout bounds the claim of one row, and
+	// scheduledFinalizeTimeout each final state write (release, sent,
+	// failed). Both run on fresh contexts detached from shutdown and from
+	// the delivery bound, so a claimed row is always released or finalized.
+	scheduledClaimTimeout    = 10 * time.Second
+	scheduledFinalizeTimeout = 10 * time.Second
 	// scheduledMaxActivePerSender caps a sender's pending and sending
 	// messages across all conversations. Delivery at fire time is not
 	// rate limited; this cap is what bounds it.
@@ -69,6 +71,21 @@ const (
 	scheduledMaxReplyToIDLen      = 128
 	scheduledMaxIdempotencyKeyLen = 255
 )
+
+// scheduledDeliveryBudget bounds the fire-time checks and the send of one
+// claimed message. A send dispatches to the primary agent and each
+// @mentioned agent one after another, each bounded by chatWakeDeliveryBudget
+// (as on the live path, where the request context has no deadline), so the
+// budget covers that worst case plus a margin for the checks and
+// persistence: a scheduled send is never cut shorter than a live one. It
+// is a variable so tests can shorten it.
+var scheduledDeliveryBudget = time.Duration(1+messages.MaxMentionRecipients)*chatWakeDeliveryBudget + 30*time.Second
+
+// scheduledSweeperStopWait is the longest the sweeper can take to finish a
+// message it has started: the claim, the delivery and the final write.
+func scheduledSweeperStopWait() time.Duration {
+	return scheduledClaimTimeout + scheduledDeliveryBudget + scheduledFinalizeTimeout
+}
 
 // ErrCodeScheduledLimit is returned when a sender already has the maximum
 // number of pending scheduled messages.
@@ -473,10 +490,11 @@ func (s *Server) startScheduledSendSweeper(ctx context.Context) {
 	}()
 }
 
-// stopScheduledSendSweeper stops the sweeper and waits up to
-// scheduledFireBudget for a message it is delivering, so that message ends
-// sent, failed or pending before the stores close.
-func (s *Server) stopScheduledSendSweeper() {
+// stopScheduledSendSweeper stops the sweeper and waits for a message it is
+// delivering, so that message ends sent, failed or pending before the stores
+// close. It waits at most scheduledSweeperStopWait, and never past ctx (the
+// caller's shutdown deadline).
+func (s *Server) stopScheduledSendSweeper(ctx context.Context) {
 	s.mu.Lock()
 	stop, done := s.scheduledSendStop, s.scheduledSendDone
 	s.scheduledSendStop, s.scheduledSendDone = nil, nil
@@ -485,9 +503,13 @@ func (s *Server) stopScheduledSendSweeper() {
 		return
 	}
 	stop()
+	timer := time.NewTimer(scheduledSweeperStopWait())
+	defer timer.Stop()
 	select {
 	case <-done:
-	case <-time.After(scheduledFireBudget):
+	case <-ctx.Done():
+		scheduledSendLog().Warn("scheduled send: shutdown deadline reached before the sweeper stopped")
+	case <-timer.C:
 		scheduledSendLog().Warn("scheduled send: sweeper did not stop in time")
 	}
 }
@@ -516,7 +538,7 @@ func (s *Server) sweepScheduledMessages(ctx context.Context, now time.Time) int 
 		row := due[i]
 		// The claim, once started, is not cut short by shutdown either: a
 		// claim that commits must be followed by delivery or release.
-		claimCtx, cancelClaim := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		claimCtx, cancelClaim := context.WithTimeout(context.WithoutCancel(ctx), scheduledClaimTimeout)
 		ok, err := sms.ClaimScheduledMessage(claimCtx, row.ID, time.Now().UTC())
 		cancelClaim()
 		if err != nil {
@@ -607,40 +629,48 @@ func (s *Server) checkScheduledFire(ctx context.Context, m *ScheduledChatMessage
 	return scheduledFireCheck{user: user, replyToID: replyToID}
 }
 
-// scheduledFailureFromSendError maps a sendChatMessage error to a failure
-// reason.
+// scheduledFailureFromSendError maps a sendChatMessage error at fire time
+// to a failure reason. A 404 is a delivery error, not conversation_gone:
+// checkScheduledFire has just shown that the topic and its project exist,
+// and sendChatMessage also answers 404 for a store error while reading
+// them.
 func scheduledFailureFromSendError(serr *chatSendError) string {
-	switch serr.Status {
-	case http.StatusForbidden:
+	if serr.Status == http.StatusForbidden {
 		return ScheduledFailureNoAccess
-	case http.StatusNotFound:
-		return ScheduledFailureConversationGone
-	default:
-		return ScheduledFailureDeliveryError
 	}
+	return ScheduledFailureDeliveryError
+}
+
+// finalizeContext returns a fresh context for one final state write,
+// detached from both shutdown and the delivery bound.
+func finalizeContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), scheduledFinalizeTimeout)
 }
 
 // fireScheduledMessage delivers a row this replica has claimed. Once
 // sendChatMessage has been called the row never returns to pending: it
 // ends sent or failed, so a message is sent at most once.
 //
-// It runs on a context detached from ctx's cancellation (server shutdown)
-// with its own bound, so a claimed row is always released or finalized:
-// a shutdown must not leave it in sending with nothing sent.
+// The checks and the send run on a context detached from ctx's
+// cancellation (server shutdown) and bounded by scheduledDeliveryBudget;
+// each final state write gets its own fresh context (finalizeContext), so
+// neither a shutdown nor a slow send leaves the row in sending.
 func (s *Server) fireScheduledMessage(ctx context.Context, sms ScheduledMessageStore, m *ScheduledChatMessage) {
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), scheduledFireBudget)
+	base := ContextWithExecutor(context.WithoutCancel(ctx), ExecutorContext{Kind: scheduledSendClientType, ID: "scheduled_message:" + m.ID})
+	ctx, cancel := context.WithTimeout(base, scheduledDeliveryBudget)
 	defer cancel()
-	ctx = ContextWithExecutor(ctx, ExecutorContext{Kind: scheduledSendClientType, ID: "scheduled_message:" + m.ID})
 
 	check := s.checkScheduledFire(ctx, m)
 	if check.transient {
-		if err := sms.ReleaseScheduledMessage(ctx, m.ID, time.Now().UTC()); err != nil {
+		fctx, fcancel := finalizeContext(base)
+		defer fcancel()
+		if err := sms.ReleaseScheduledMessage(fctx, m.ID, time.Now().UTC()); err != nil {
 			scheduledSendLog().Warn("scheduled send: release failed", "id", m.ID, "error", err)
 		}
 		return
 	}
 	if check.reason != "" {
-		s.failScheduledMessage(ctx, sms, m, check.reason)
+		s.failScheduledMessage(base, sms, m, check.reason)
 		return
 	}
 
@@ -665,22 +695,28 @@ func (s *Server) fireScheduledMessage(ctx context.Context, sms ScheduledMessageS
 	}()
 	if serr != nil {
 		scheduledSendLog().Info("scheduled send: delivery refused", "id", m.ID, "status", serr.Status, "code", serr.Code)
-		s.failScheduledMessage(ctx, sms, m, scheduledFailureFromSendError(serr))
+		s.failScheduledMessage(base, sms, m, scheduledFailureFromSendError(serr))
 		return
 	}
 
 	now := time.Now().UTC()
-	if err := sms.MarkScheduledMessageSent(ctx, m.ID, resp.ID, now); err != nil {
+	fctx, fcancel := finalizeContext(base)
+	defer fcancel()
+	if err := sms.MarkScheduledMessageSent(fctx, m.ID, resp.ID, now); err != nil {
 		scheduledSendLog().Error("scheduled send: recording sent state failed", "id", m.ID, "message_id", resp.ID, "error", err)
 	}
 	m.Status = ScheduledMessageSent
 	m.MessageID = resp.ID
 	m.UpdatedAt = now
-	auditScheduledMessage(ctx, "fire", m)
-	s.publishScheduledMessage(ctx, "sent", m)
+	auditScheduledMessage(base, "fire", m)
+	s.publishScheduledMessage(base, "sent", m)
 }
 
-func (s *Server) failScheduledMessage(ctx context.Context, sms ScheduledMessageStore, m *ScheduledChatMessage, reason string) {
+// failScheduledMessage records a claimed row as failed, on a fresh context
+// derived from base (see finalizeContext).
+func (s *Server) failScheduledMessage(base context.Context, sms ScheduledMessageStore, m *ScheduledChatMessage, reason string) {
+	ctx, cancel := finalizeContext(base)
+	defer cancel()
 	now := time.Now().UTC()
 	if err := sms.MarkScheduledMessageFailed(ctx, m.ID, reason, now); err != nil {
 		scheduledSendLog().Error("scheduled send: recording failed state failed", "id", m.ID, "error", err)

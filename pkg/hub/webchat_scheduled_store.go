@@ -135,18 +135,25 @@ const scheduledMessageTableMigration = "scheduled_message_table"
 // (UTC RFC 3339 with trimmed fractional seconds), like the other webchat_*
 // tables.
 //
-// Fire times are stored truncated to whole seconds (see
-// scheduledFireTime), and the due query compares them against "now"
-// truncated the same way, so both sides have no fractional part and compare
-// correctly as strings. A message can therefore fire up to one second, at
-// most one sweep tick, later than its exact fire time.
+// Fire times are stored rounded up to the whole second (see
+// scheduledFireTime), and the SQLite due query compares them against "now"
+// rounded down to the whole second, so both sides have no fractional part
+// and compare correctly as strings. A message is never due before its
+// fire time; it can be due up to one second after it (then picked up by the
+// next sweep tick).
 func sqliteScheduledTime(t time.Time) string {
 	return t.UTC().Format(time.RFC3339Nano)
 }
 
-// scheduledFireTime is the stored form of a fire time: UTC, whole seconds.
+// scheduledFireTime is the stored form of a fire time: UTC, rounded up to
+// the whole second.
 func scheduledFireTime(t time.Time) time.Time {
-	return t.UTC().Truncate(time.Second)
+	t = t.UTC()
+	whole := t.Truncate(time.Second)
+	if whole.Before(t) {
+		whole = whole.Add(time.Second)
+	}
+	return whole
 }
 
 const sqliteScheduledMessageDDL = `
@@ -331,7 +338,7 @@ func (s *sqliteWebChatStore) ListDueScheduledMessages(ctx context.Context, now t
 		`SELECT `+sqliteScheduledColumns+` FROM webchat_scheduled_message
 		  WHERE status = ? AND fire_at <= ?
 		  ORDER BY fire_at, id LIMIT ?`,
-		ScheduledMessagePending, sqliteScheduledTime(scheduledFireTime(now)), limit)
+		ScheduledMessagePending, sqliteScheduledTime(now.UTC().Truncate(time.Second)), limit)
 	if err != nil {
 		return nil, fmt.Errorf("webchat store: list due scheduled messages: %w", err)
 	}

@@ -100,7 +100,7 @@ func TestScheduledSend_TwoHubReplicasPostgres_OneDelivery(t *testing.T) {
 		for _, srv := range []*Server{srvA, srvB} {
 			go func(srv *Server) {
 				<-start
-				results <- srv.sweepScheduledMessages(ctx, fireAt)
+				results <- srv.sweepScheduledMessages(ctx, fireAt.Add(time.Second))
 			}(srv)
 		}
 		close(start)

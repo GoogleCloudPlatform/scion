@@ -198,7 +198,7 @@ func (s *pgWebChatStore) ListDueScheduledMessages(ctx context.Context, now time.
 		`SELECT `+pgScheduledColumns+` FROM webchat_scheduled_message
 		  WHERE status = $1 AND fire_at <= $2
 		  ORDER BY fire_at, id LIMIT $3`,
-		ScheduledMessagePending, scheduledFireTime(now), limit)
+		ScheduledMessagePending, now.UTC(), limit)
 	if err != nil {
 		return nil, fmt.Errorf("webchat store: list due scheduled messages: %w", err)
 	}

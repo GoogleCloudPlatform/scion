@@ -477,7 +477,7 @@ func TestScheduledSend_ConcurrentSweeps_OneDelivery(t *testing.T) {
 
 	results := make(chan int, 2)
 	for i := 0; i < 2; i++ {
-		go func() { results <- f.srv.sweepScheduledMessages(ctx, fireAt) }()
+		go func() { results <- f.srv.sweepScheduledMessages(ctx, fireAt.Add(time.Second)) }()
 	}
 	total := <-results + <-results
 	assert.Equal(t, 1, total)
@@ -504,7 +504,7 @@ func TestScheduledSend_SenderLosesProjectRead_FailsNoAccess(t *testing.T) {
 	rec := doRequestAsUser(t, f.srv, f.bob, http.MethodGet, f.scheduledPath(), nil)
 	require.Equal(t, http.StatusForbidden, rec.Code, "bob has lost read access")
 
-	assert.Equal(t, 1, f.srv.sweepScheduledMessages(ctx, fireAt))
+	assert.Equal(t, 1, f.srv.sweepScheduledMessages(ctx, fireAt.Add(time.Second)))
 	row := f.row(t, f.bob, sm.ID)
 	assert.Equal(t, ScheduledMessageFailed, row.Status)
 	assert.Equal(t, ScheduledFailureNoAccess, row.FailureReason)
@@ -523,7 +523,7 @@ func TestScheduledSend_SenderSuspended_FailsSenderInactive(t *testing.T) {
 	u.Status = store.UserStatusSuspended
 	require.NoError(t, f.store.UpdateUser(ctx, u))
 
-	assert.Equal(t, 1, f.srv.sweepScheduledMessages(ctx, fireAt))
+	assert.Equal(t, 1, f.srv.sweepScheduledMessages(ctx, fireAt.Add(time.Second)))
 	row := f.row(t, f.bob, sm.ID)
 	assert.Equal(t, ScheduledMessageFailed, row.Status)
 	assert.Equal(t, ScheduledFailureSenderInactive, row.FailureReason)
@@ -540,7 +540,7 @@ func TestScheduledSend_TopicDeleted_FailsConversationGone(t *testing.T) {
 		time.Now().UTC().Format(time.RFC3339Nano), f.topicID)
 	require.NoError(t, err)
 
-	assert.Equal(t, 1, f.srv.sweepScheduledMessages(ctx, fireAt))
+	assert.Equal(t, 1, f.srv.sweepScheduledMessages(ctx, fireAt.Add(time.Second)))
 	row := f.row(t, f.bob, sm.ID)
 	assert.Equal(t, ScheduledMessageFailed, row.Status)
 	assert.Equal(t, ScheduledFailureConversationGone, row.FailureReason)
@@ -564,7 +564,7 @@ func TestScheduledSend_AgentMessageDenied_FailsNoAccess(t *testing.T) {
 	_, err := f.db.ExecContext(ctx, `UPDATE webchat_topic SET default_agent = ? WHERE id = ?`, other.Slug, f.topicID)
 	require.NoError(t, err)
 
-	assert.Equal(t, 1, f.srv.sweepScheduledMessages(ctx, fireAt))
+	assert.Equal(t, 1, f.srv.sweepScheduledMessages(ctx, fireAt.Add(time.Second)))
 	row := f.row(t, f.bob, sm.ID)
 	assert.Equal(t, ScheduledMessageFailed, row.Status)
 	assert.Equal(t, ScheduledFailureNoAccess, row.FailureReason)
@@ -585,7 +585,7 @@ func TestScheduledSend_ReplyToOutsideConversationDropped(t *testing.T) {
 	})
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 
-	assert.Equal(t, 1, f.srv.sweepScheduledMessages(ctx, fireAt))
+	assert.Equal(t, 1, f.srv.sweepScheduledMessages(ctx, fireAt.Add(time.Second)))
 	msgs := f.topicMessages(t)
 	require.Len(t, msgs, 1)
 	assert.Equal(t, "reply later", msgs[0].Msg)
@@ -755,8 +755,8 @@ func testScheduledStoreTransitions(t *testing.T, sms ScheduledMessageStore) {
 	assert.False(t, ok, "another sender cannot cancel it")
 
 	// Due ordering: only rows at or before now, oldest first. Fire times
-	// are stored in whole seconds; a fractional fire time is truncated, so
-	// it is due within that second.
+	// are stored rounded up to the whole second, so a fractional fire time
+	// is never due early.
 	early := newTestScheduledRow("t2", "user-a", base.Add(-2*time.Second))
 	late := newTestScheduledRow("t3", "user-a", base.Add(-time.Second).Add(500*time.Millisecond))
 	notYet := newTestScheduledRow("t4", "user-a", base.Add(time.Second))
@@ -769,7 +769,15 @@ func testScheduledStoreTransitions(t *testing.T, sms ScheduledMessageStore) {
 	require.Len(t, due, 2)
 	assert.Equal(t, early.ID, due[0].ID)
 	assert.Equal(t, late.ID, due[1].ID)
-	assert.True(t, due[1].FireAt.Equal(base.Add(-time.Second)), "stored in whole seconds")
+	assert.True(t, due[1].FireAt.Equal(base), "rounded up to the whole second")
+	early2 := newTestScheduledRow("t5", "user-c", base.Add(1500*time.Millisecond))
+	_, _, err = sms.CreateScheduledMessage(ctx, early2)
+	require.NoError(t, err)
+	due, err = sms.ListDueScheduledMessages(ctx, base.Add(1900*time.Millisecond), 10)
+	require.NoError(t, err)
+	for _, d := range due {
+		assert.NotEqual(t, early2.ID, d.ID, "not due before its (rounded-up) fire time")
+	}
 	n, err := sms.CountActiveScheduledMessages(ctx, "user-a")
 	require.NoError(t, err)
 	assert.Equal(t, 4, n)
@@ -951,7 +959,7 @@ func TestScheduledSend_SweepAfterShutdown_ClaimsNothing(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	assert.Equal(t, 0, f.srv.sweepScheduledMessages(ctx, fireAt))
+	assert.Equal(t, 0, f.srv.sweepScheduledMessages(ctx, fireAt.Add(time.Second)))
 	assert.Equal(t, ScheduledMessagePending, f.row(t, f.bob, sm.ID).Status)
 	assert.Empty(t, f.topicMessages(t))
 }
@@ -962,7 +970,7 @@ func TestScheduledSend_StopSweeper(t *testing.T) {
 	f.srv.startScheduledSendSweeper(context.Background())
 	stopped := make(chan struct{})
 	go func() {
-		f.srv.stopScheduledSendSweeper()
+		f.srv.stopScheduledSendSweeper(context.Background())
 		close(stopped)
 	}()
 	select {
@@ -970,7 +978,7 @@ func TestScheduledSend_StopSweeper(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("stopScheduledSendSweeper did not return")
 	}
-	f.srv.stopScheduledSendSweeper() // idempotent
+	f.srv.stopScheduledSendSweeper(context.Background()) // idempotent
 }
 
 // flakyTopicWebChatStore fails GetTopic a set number of times with a store
@@ -1000,13 +1008,13 @@ func TestScheduledSend_TransientCheckError_ReleasedThenSent(t *testing.T) {
 	flaky.failures.Store(1)
 	f.srv.SetWebChatStore(flaky)
 
-	assert.Equal(t, 1, f.srv.sweepScheduledMessages(ctx, fireAt))
+	assert.Equal(t, 1, f.srv.sweepScheduledMessages(ctx, fireAt.Add(time.Second)))
 	got := f.row(t, f.bob, sm.ID)
 	assert.Equal(t, ScheduledMessagePending, got.Status)
 	assert.Nil(t, got.ClaimedAt)
 	assert.Empty(t, f.topicMessages(t))
 
-	assert.Equal(t, 1, f.srv.sweepScheduledMessages(ctx, fireAt))
+	assert.Equal(t, 1, f.srv.sweepScheduledMessages(ctx, fireAt.Add(time.Second)))
 	assert.Equal(t, ScheduledMessageSent, f.row(t, f.bob, sm.ID).Status)
 	assert.Len(t, f.topicMessages(t), 1)
 }
@@ -1027,7 +1035,7 @@ func TestScheduledSend_PanicDuringDelivery_Failed(t *testing.T) {
 	sm := f.schedule(t, f.bob, "panic", fireAt)
 	f.srv.SetDispatcher(&panickingDispatcher{})
 
-	assert.Equal(t, 1, f.srv.sweepScheduledMessages(ctx, fireAt))
+	assert.Equal(t, 1, f.srv.sweepScheduledMessages(ctx, fireAt.Add(time.Second)))
 	got := f.row(t, f.bob, sm.ID)
 	assert.Equal(t, ScheduledMessageFailed, got.Status)
 	assert.Equal(t, ScheduledFailureDeliveryError, got.FailureReason)
@@ -1128,6 +1136,69 @@ func TestScheduledStore_SQLite_CanonicalTimeText(t *testing.T) {
 	defer func() { _ = db.Close() }()
 	var fire, created string
 	require.NoError(t, db.QueryRow(`SELECT fire_at, created_at FROM webchat_scheduled_message WHERE id = ?`, m.ID).Scan(&fire, &created))
-	assert.Equal(t, "2026-10-08T07:00:00Z", fire)
+	assert.Equal(t, "2026-10-08T07:00:01Z", fire, "rounded up, never early")
 	assert.Equal(t, "2026-10-07T10:00:00.12Z", created)
+}
+
+// blockingDispatcher blocks every agent dispatch until its context ends,
+// like a broker that keeps answering "not reachable yet".
+type blockingDispatcher struct{ brokerMockDispatcher }
+
+func (d *blockingDispatcher) DispatchAgentMessage(ctx context.Context, _ *store.Agent, _ string, _ bool, _ *messages.StructuredMessage) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+// When the delivery bound runs out during the send, the row is still
+// finalized (its final write has its own context): sent or failed, never
+// sending.
+func TestScheduledSend_DeliveryBudgetExpires_RowFinalized(t *testing.T) {
+	f := newScheduledSendFixture(t)
+	ctx := context.Background()
+	fireAt := time.Now().Add(2 * time.Minute)
+	sm := f.schedule(t, f.bob, "slow broker", fireAt)
+	f.srv.SetDispatcher(&blockingDispatcher{})
+
+	saved := scheduledDeliveryBudget
+	scheduledDeliveryBudget = 300 * time.Millisecond
+	t.Cleanup(func() { scheduledDeliveryBudget = saved })
+
+	assert.Equal(t, 1, f.srv.sweepScheduledMessages(ctx, fireAt.Add(time.Second)))
+	got := f.row(t, f.bob, sm.ID)
+	assert.Contains(t, []string{ScheduledMessageSent, ScheduledMessageFailed}, got.Status, "never left in sending")
+	assert.Equal(t, 0, f.srv.sweepScheduledMessages(ctx, fireAt.Add(time.Minute)), "not sent again")
+}
+
+// The delivery bound is never shorter than a live send's worst case.
+func TestScheduledSend_DeliveryBudgetCoversLiveWorstCase(t *testing.T) {
+	worst := time.Duration(1+messages.MaxMentionRecipients) * chatWakeDeliveryBudget
+	assert.Greater(t, scheduledDeliveryBudget, worst)
+	assert.Equal(t, scheduledClaimTimeout+scheduledDeliveryBudget+scheduledFinalizeTimeout, scheduledSweeperStopWait())
+}
+
+// Stopping the sweeper honours the caller's shutdown deadline even when a
+// delivery has not finished.
+func TestScheduledSend_StopSweeperHonoursShutdownDeadline(t *testing.T) {
+	f := newScheduledSendFixture(t)
+	stopped := false
+	f.srv.mu.Lock()
+	f.srv.scheduledSendStop = func() { stopped = true }
+	f.srv.scheduledSendDone = make(chan struct{}) // a delivery that never ends
+	f.srv.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	f.srv.stopScheduledSendSweeper(ctx)
+	assert.True(t, stopped)
+	assert.Less(t, time.Since(start), 5*time.Second)
+}
+
+// A 404 from sendChatMessage at fire time is a delivery error: the checks
+// just before it proved the conversation exists.
+func TestScheduledSend_FailureMapping(t *testing.T) {
+	assert.Equal(t, ScheduledFailureNoAccess, scheduledFailureFromSendError(chatSendForbidden()))
+	assert.Equal(t, ScheduledFailureDeliveryError, scheduledFailureFromSendError(chatSendNotFound("Thread")))
+	assert.Equal(t, ScheduledFailureDeliveryError, scheduledFailureFromSendError(
+		newChatSendError(http.StatusInternalServerError, "INTERNAL", "x", nil)))
 }

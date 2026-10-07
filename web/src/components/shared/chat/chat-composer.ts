@@ -125,6 +125,16 @@ export interface ChatScheduleDetail {
   onError?: (errorMsg: string) => void;
 }
 
+/** Composer draft state saved before an optimistic clear. */
+interface ComposerSnapshot {
+  text: string;
+  runeCount: number;
+  acceptedMentions: Set<string>;
+  mentionRanges: MentionRange[];
+  pendingFiles: UploadedAttachment[];
+  replyTo: { messageId: string; senderName: string; content: string } | null;
+}
+
 /** Event detail for the chat-edit custom event (Phase 3). */
 export interface ChatEditDetail {
   messageId: string;
@@ -1931,12 +1941,7 @@ export class ScionChatComposer extends LitElement {
     const attachmentIds = this.pendingFiles.map((f) => f.id);
 
     // Save state for error recovery before clearing.
-    const savedText = this.text;
-    const savedRuneCount = this.runeCount;
-    const savedMentions = new Set(this.acceptedMentions);
-    const savedMentionRanges = [...this.mentionRanges];
-    const savedPendingFiles = [...this.pendingFiles];
-    const savedReplyTo = this.replyTo;
+    const saved = this.snapshotComposer();
 
     // Phase-3: Build detail with optional replyToId.
     const detail: ChatSendDetail = {
@@ -1950,17 +1955,7 @@ export class ScionChatComposer extends LitElement {
       },
       onError: () => {
         // Restore composer state so the user can retry.
-        this.text = savedText;
-        this.runeCount = savedRuneCount;
-        this.acceptedMentions = savedMentions;
-        this.mentionRanges = savedMentionRanges;
-        this.pendingFiles = savedPendingFiles;
-        if (savedReplyTo) {
-          this.replyTo = savedReplyTo;
-        }
-        // A failed send must not pop the keyboard back up on touch; the
-        // user taps to retry or edit instead.
-        this.settleFocusAfterSend();
+        this.restoreComposer(saved);
       },
     };
     if (this.replyTo) {
@@ -1990,6 +1985,36 @@ export class ScionChatComposer extends LitElement {
         composed: true,
       })
     );
+  }
+
+  /**
+   * The draft state a send or schedule clears optimistically, so a failure
+   * can put it back (restoreComposer).
+   */
+  private snapshotComposer(): ComposerSnapshot {
+    return {
+      text: this.text,
+      runeCount: this.runeCount,
+      acceptedMentions: new Set(this.acceptedMentions),
+      mentionRanges: [...this.mentionRanges],
+      pendingFiles: [...this.pendingFiles],
+      replyTo: this.replyTo,
+    };
+  }
+
+  /** Restore a snapshot after a failed send or schedule. */
+  private restoreComposer(saved: ComposerSnapshot): void {
+    this.text = saved.text;
+    this.runeCount = saved.runeCount;
+    this.acceptedMentions = saved.acceptedMentions;
+    this.mentionRanges = saved.mentionRanges;
+    this.pendingFiles = saved.pendingFiles;
+    if (saved.replyTo) {
+      this.replyTo = saved.replyTo;
+    }
+    // A failed send must not pop the keyboard back up on touch; the user
+    // taps to retry or edit instead.
+    this.settleFocusAfterSend();
   }
 
   /**
@@ -2215,11 +2240,7 @@ export class ScionChatComposer extends LitElement {
     const trimmed = this.text.trim();
     if (!trimmed) return;
 
-    const savedText = this.text;
-    const savedRuneCount = this.runeCount;
-    const savedMentions = new Set(this.acceptedMentions);
-    const savedMentionRanges = [...this.mentionRanges];
-    const savedReplyTo = this.replyTo;
+    const saved = this.snapshotComposer();
 
     const detail: ChatScheduleDetail = {
       text: trimmed,
@@ -2228,14 +2249,7 @@ export class ScionChatComposer extends LitElement {
         // Input already cleared — nothing to do.
       },
       onError: () => {
-        this.text = savedText;
-        this.runeCount = savedRuneCount;
-        this.acceptedMentions = savedMentions;
-        this.mentionRanges = savedMentionRanges;
-        if (savedReplyTo) {
-          this.replyTo = savedReplyTo;
-        }
-        this.settleFocusAfterSend();
+        this.restoreComposer(saved);
       },
     };
     if (this.replyTo) {

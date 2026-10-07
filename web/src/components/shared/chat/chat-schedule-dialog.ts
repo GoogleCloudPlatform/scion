@@ -29,7 +29,7 @@ import type { PropertyValues } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { effectiveTimeZone } from '../../../utils/time.js';
 import { DisplayZoneController } from '../../../utils/display-zone-controller.js';
-import { resolveScheduleTime, schedulePresets } from './schedule-presets.js';
+import { resolveScheduleTime, scheduleInputBounds, schedulePresets } from './schedule-presets.js';
 
 export interface ScheduleConfirmDetail {
   fireAt: string;
@@ -70,7 +70,9 @@ export class ScionChatScheduleDialog extends LitElement {
 
   override render() {
     const zone = effectiveTimeZone();
-    const presets = schedulePresets(new Date(), zone);
+    const now = new Date();
+    const presets = schedulePresets(now, zone);
+    const bounds = scheduleInputBounds(now, zone);
     return html`
       <sl-dialog label="Schedule send" ?open=${this.open} @sl-request-close=${this.handleCancel}>
         <div class="presets">
@@ -93,6 +95,8 @@ export class ScionChatScheduleDialog extends LitElement {
           label="Date & time"
           type="datetime-local"
           help-text="Times in: ${zone}"
+          min=${bounds.min}
+          max=${bounds.max}
           .value=${this.value}
           @sl-input=${(e: Event) => {
             this.value = (e.target as HTMLInputElement).value;

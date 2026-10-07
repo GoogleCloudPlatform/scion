@@ -15,7 +15,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { resolveScheduleTime, schedulePresets } from './schedule-presets.js';
+import { resolveScheduleTime, scheduleInputBounds, schedulePresets } from './schedule-presets.js';
 
 describe('schedulePresets', () => {
   it('computes wall-clock presets in the given zone, not the browser zone', () => {
@@ -60,5 +60,19 @@ describe('resolveScheduleTime', () => {
       error: 'Choose a time at least a minute from now',
     });
     expect('fireAt' in resolveScheduleTime('2026-10-07T10:02', 'UTC', now)).toBe(true);
+  });
+
+  it('rejects a time beyond 90 days', () => {
+    expect(resolveScheduleTime('2027-01-05T10:00', 'UTC', now)).toEqual({
+      error: 'Choose a time within 90 days',
+    });
+    expect('fireAt' in resolveScheduleTime('2027-01-05T09:00', 'UTC', now)).toBe(true);
+  });
+
+  it('gives the picker min and max in the zone', () => {
+    expect(scheduleInputBounds(now, 'Europe/Berlin')).toEqual({
+      min: '2026-10-07T12:01',
+      max: '2027-01-05T10:59',
+    });
   });
 });

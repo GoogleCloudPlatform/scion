@@ -5625,7 +5625,7 @@ func (s *Server) CleanupResources(ctx context.Context) error {
 
 		// Let a scheduled chat message being delivered finish (bounded)
 		// while the stores and event publisher are still open.
-		s.stopScheduledSendSweeper()
+		s.stopScheduledSendSweeper(ctx)
 
 		// Wait for in-flight audit goroutines.
 		if cc != nil {
