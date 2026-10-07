@@ -198,8 +198,7 @@ describe('loadAdminStatus', () => {
     f.pending[0].resolve(json(ADMIN));
     let nValue: unknown = 'pending';
     void n.then((v) => (nValue = v));
-    await Promise.resolve();
-    await Promise.resolve();
+    await new Promise((r) => setTimeout(r, 0));
     expect(nValue).toBe('pending'); // not null, not its own stale answer
     f.pending[1].resolve(json({ isAdmin: true, isSuperAdmin: true, permissions: [] }));
     const fValue = await fresh;

@@ -21,6 +21,23 @@
  */
 
 import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest';
+import type { MockInstance } from 'vitest';
+
+// The admin pages the routes lazy-load are replaced by bare elements: this
+// test is about the route guard and startup wiring, not the pages, and
+// loading the real modules is what made booting main.ts slow.
+vi.mock('../components/pages/admin-users.js', () => {
+  if (!customElements.get('scion-page-admin-users')) {
+    customElements.define('scion-page-admin-users', class extends HTMLElement {});
+  }
+  return {};
+});
+vi.mock('../components/pages/admin-groups.js', () => {
+  if (!customElements.get('scion-page-admin-groups')) {
+    customElements.define('scion-page-admin-groups', class extends HTMLElement {});
+  }
+  return {};
+});
 
 const calls: Array<{ userId: unknown; fresh: boolean }> = [];
 
@@ -53,9 +70,11 @@ function json(body: unknown, status = 200): Response {
 }
 
 let adminStatusRequests = 0;
+let infoSpy: MockInstance<typeof console.info>;
 
 describe('main.ts admin-status wiring', () => {
   beforeAll(() => {
+    infoSpy = vi.spyOn(console, 'info');
     vi.stubGlobal('EventSource', FakeEventSource);
     vi.stubGlobal(
       'fetch',
@@ -86,24 +105,26 @@ describe('main.ts admin-status wiring', () => {
   });
 
   afterAll(() => {
+    infoSpy.mockRestore();
     vi.unstubAllGlobals();
   });
 
   it('startup asks once, an admin route asks fresh even when warm, and teardown drops the value', async () => {
-    const infoSpy = vi.spyOn(console, 'info');
     const main = await import('./main.js');
     const status = await import('./admin-status.js');
 
     // Startup's shared request, then the guard's fresh one for /admin/users.
-    await vi.waitFor(() => expect(calls.some((c) => c.fresh)).toBe(true), { timeout: 20_000 });
-    expect(calls[0]).toEqual({ userId: 'u1', fresh: false });
+    await vi.waitFor(() => expect(calls.some((c) => c.fresh)).toBe(true));
+    // Exactly one startup (non-fresh) request before the guard's fresh one.
+    const firstFresh = calls.findIndex((c) => c.fresh);
+    expect(calls.slice(0, firstFresh)).toEqual([{ userId: 'u1', fresh: false }]);
     await vi.waitFor(() => expect(adminStatusRequests).toBeGreaterThanOrEqual(2));
 
     // The shared value is warm now; entering another admin route still sends
     // a request of its own.
     const before = adminStatusRequests;
     main.navigateTo('/admin/groups');
-    await vi.waitFor(() => expect(adminStatusRequests).toBe(before + 1), { timeout: 20_000 });
+    await vi.waitFor(() => expect(adminStatusRequests).toBe(before + 1));
     expect(calls.at(-1)).toEqual({ userId: 'u1', fresh: true });
 
     // A warm, non-fresh read is served without a request ...
@@ -114,12 +135,10 @@ describe('main.ts admin-status wiring', () => {
     // ... until account teardown drops it: the next read fetches again.
     // (main.ts registers its teardown listener once the first page has
     // rendered.)
-    await vi.waitFor(
-      () =>
-        expect(
-          infoSpy.mock.calls.some((c) => String(c[0]).includes('initialization complete'))
-        ).toBe(true),
-      { timeout: 45_000 }
+    await vi.waitFor(() =>
+      expect(infoSpy.mock.calls.some((c) => String(c[0]).includes('initialization complete'))).toBe(
+        true
+      )
     );
     window.dispatchEvent(
       new CustomEvent('scion:account-teardown', { detail: { reason: 'logout' } })
@@ -127,5 +146,5 @@ describe('main.ts admin-status wiring', () => {
     expect(status.clearAdminStatus).toHaveBeenCalled();
     await status.loadAdminStatus('u1');
     expect(adminStatusRequests).toBe(warm + 1);
-  }, 90_000);
+  });
 });
