@@ -339,7 +339,6 @@ describe('Open terminals bulk actions', () => {
     answer(true);
     const removed = await pending;
     expect(removed).toBe(3);
-    expect(removed).toBeLessThanOrEqual(3);
     await flush();
     expect(railAgentIds().sort()).toEqual([CONNECTED, IDLE].sort());
   });

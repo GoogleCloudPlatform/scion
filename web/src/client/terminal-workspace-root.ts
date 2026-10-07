@@ -1334,9 +1334,9 @@ export class TerminalWorkspaceRoot {
   /**
    * "Remove all inactive": asks for confirmation, then runs the row Close
    * action on the entries that were inactive when the dialog opened.
-   * Eligibility is checked again after the dialog, so an entry that
-   * reconnected while it was open is kept, and an entry that dropped while
-   * it was open is not removed because the dialog did not count it.
+   * After the dialog, only those entries that are still inactive are
+   * removed: one that reconnected is kept, and one that dropped is not
+   * removed because the dialog did not count it.
    * Resolves to the number of entries removed.
    */
   async removeAllInactive(): Promise<number> {
