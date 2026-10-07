@@ -193,6 +193,10 @@ hub:
   # ends in a credential word - SESSION_SECRET, ADMIN_TOKEN, DB_PASSWORD. The
   # rule is on the trailing word, so TOKEN_TTL_SECONDS and MAX_TOKENS are fine.
   # Use valueFrom.secretKeyRef, which neither check touches.
+  #
+  # POD_NAME is set by the chart from the pod's own name. An entry named
+  # POD_NAME here replaces the chart's instead of being refused, so releases
+  # that already set it this way keep upgrading.
   extraEnv: []
 
   # Extra arguments appended to the hub command. The chart always renders
