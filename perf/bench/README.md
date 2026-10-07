@@ -424,7 +424,10 @@ pass `--hub-perf-log <hub log file>` (redirect the hub's output to a file):
 after the run, apibench joins each attempt to the hub's `perf_trace` log
 line by request ID and stores the same fields, plus the `serialize` phase,
 with `perfTraceSource: "hub-log"`. See `pkg/hub/perftrace.go` for the phase
-definitions. On a baseline run against
+definitions, and the developer guide on the docs site
+(`docs-site/src/content/docs/contributing/perf-tracing.md`) for the log
+line format, joining by request ID, and using the counts as regression
+budgets. On a baseline run against
 unmodified `main`, or if the flag was passed but no trace headers actually
 came back, the report's `perfTraceAvailable` field is `false` for that
 scenario, not silently omitted or wrongly true.
