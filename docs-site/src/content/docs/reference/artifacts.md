@@ -105,7 +105,7 @@ All routes are under `/api/v1/artifacts` and use the hub's usual authentication 
 | Method and path | Purpose |
 | :--- | :--- |
 | `POST /api/v1/artifacts?name=<file>[&title=<title>][&scope=<project-id>]` | Publish the raw request body as a new single-file artifact. `scope` defaults to the caller's project (agents); users must set it. Optional header `X-Content-SHA256` (hex) is verified. Returns `201` with the artifact, its first version and any publish `warnings`. |
-| `GET /api/v1/artifacts?mine=1[&q=<text>][&review_pending=1][&owner=me][&limit=<n>][&cursor=<c>]` | The artifacts the caller can read among those it owns, those shared with it directly, and those homed in projects it is a member of, newest first. See [Listing](#listing). |
+| `GET /api/v1/artifacts?mine=1[&q=<text>][&review_pending=1][&owner=me][&scope=<project-id>][&limit=<n>][&cursor=<c>]` | The artifacts the caller can read among those it owns, those shared with it directly, and those homed in projects it is a member of, newest first. See [Listing](#listing). |
 | `GET /api/v1/artifacts/{id}` | The artifact and its current version, including the file manifest (`path`, `size`, `sha256`, `mediaType`, and for remote images `origin`, `sourceUrl` and `fetchStatus`; see [Images in Markdown artifacts](#images-in-markdown-artifacts)). |
 | `GET /api/v1/artifacts/{id}/files/{path}` | A file of the current version. |
 | `GET /api/v1/artifacts/{id}/versions/{seq}/files/{path}` | A file of version `seq`. |
@@ -139,10 +139,11 @@ Every listed artifact passes the same check as `GET /api/v1/artifacts/{id}` for 
 | `q` | Keep artifacts whose title or key contains this text (at most 200 characters). Case is ignored for ASCII letters. For other letters, whether case is ignored depends on the database, so search for them in their exact case. |
 | `review_pending=1` | Keep artifacts whose current version is a review awaiting the owner. |
 | `owner=me` | Keep only artifacts the caller owns. |
+| `scope` | Keep only artifacts homed in this project (a project ID). It narrows the list and never adds an artifact the list would not show without it. The project's Artifacts view in the web UI uses it. |
 | `limit` | Page size, 1-100 (default 50). |
 | `cursor` | The `nextCursor` of the previous page. |
 
-The response is `{"artifacts": [...], "nextCursor": "..."}`. Each entry has the same fields as `artifact` in the single-artifact response, plus `reviewPending`. `nextCursor` is absent on the last page. Cursors are opaque and only work for the same caller and the same `q`, `review_pending` and `owner` values. A page may hold fewer than `limit` entries and still have a `nextCursor`, because one request examines a bounded number of rows. Keep following the cursor until it is absent. Artifacts created or updated while you page move to the front of the order: they appear on a fresh listing, not later in the current walk.
+The response is `{"artifacts": [...], "nextCursor": "..."}`. Each entry has the same fields as `artifact` in the single-artifact response, plus `reviewPending`. `nextCursor` is absent on the last page. Cursors are opaque and only work for the same caller and the same `q`, `review_pending`, `owner` and `scope` values. A page may hold fewer than `limit` entries and still have a `nextCursor`, because one request examines a bounded number of rows. Keep following the cursor until it is absent. Artifacts created or updated while you page move to the front of the order: they appear on a fresh listing, not later in the current walk.
 
 **File delivery.** On a hub with local storage the hub streams the bytes. On a hub with object storage (GCS) it answers `302` to a short-lived signed URL; add `?stream=1` to have the hub serve the bytes itself (the web page does this for text). Either way the response carries `Content-Disposition` (`inline` only for plain text, Markdown, CSV, TSV, JSON, YAML, TOML and raster images; `attachment` otherwise) and `X-Content-Type-Options: nosniff`; streamed responses also carry a sandboxing `Content-Security-Policy` and an `ETag`.
 
