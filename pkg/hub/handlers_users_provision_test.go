@@ -890,7 +890,7 @@ func (s *provisionRaceStore) WithTx(ctx context.Context, fn func(tx store.Store)
 	winner := s.winner
 	s.winner = nil
 	if winner != nil {
-		if err := s.Store.CreateUser(ctx, winner); err != nil {
+		if err := s.CreateUser(ctx, winner); err != nil {
 			return err
 		}
 	}
