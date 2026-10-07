@@ -67,8 +67,8 @@ func mergeServerSettings(raw map[string]interface{}, incoming *config.V1ServerCo
 		}
 		rawServer = b
 	}
-	var sent map[string]json.RawMessage
-	if err := json.Unmarshal(rawServer, &sent); err != nil || sent == nil {
+	sent, ok := sentStructFields(reflect.TypeOf(config.V1ServerConfig{}), rawServer)
+	if !ok {
 		return
 	}
 	typed, _ := marshalToMap(incoming).(map[string]interface{})
@@ -80,18 +80,60 @@ func mergeServerSettings(raw map[string]interface{}, incoming *config.V1ServerCo
 	raw["server"] = existing
 }
 
-// mergeSettingsStruct merges the fields of struct type t that sent names
-// into existing (a YAML-decoded map keyed by yaml names). typed holds the
-// YAML form of the decoded request at the same level; a sent field missing
-// from it was a zero value dropped by omitempty, and is deleted.
-func mergeSettingsStruct(existing map[string]interface{}, t reflect.Type, sent map[string]json.RawMessage, typed map[string]interface{}) {
-	for key, val := range sent {
-		f, ok := structFieldByJSONName(t, key)
-		if !ok {
-			// Unknown keys were rejected before the merge; anything left
-			// (a read-only echo) is not persisted.
+// sentField is a field of a struct type named by a JSON object key, with
+// the value sent for it.
+type sentField struct {
+	field reflect.StructField
+	val   json.RawMessage
+}
+
+// sentStructFields resolves the keys of the JSON object raw to the fields
+// of struct type t, with the structFieldByJSONName rule (exact match,
+// otherwise case-insensitive). Keys that match no field are dropped. When
+// several keys resolve to the same field, the last one in the object
+// wins, as in encoding/json. ok is false when raw is not a JSON object.
+//
+// The merge and validateMergedServerSections both use this, so the
+// sections the validator checks are exactly the ones the merge writes.
+func sentStructFields(t reflect.Type, raw json.RawMessage) (fields []sentField, ok bool) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
+		return nil, false
+	}
+	index := make(map[int]int)
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return nil, false
+		}
+		key, _ := tok.(string)
+		var val json.RawMessage
+		if err := dec.Decode(&val); err != nil {
+			return nil, false
+		}
+		f, found := structFieldByJSONName(t, key)
+		if !found {
 			continue
 		}
+		if i, dup := index[f.Index[0]]; dup {
+			fields[i].val = val
+			continue
+		}
+		index[f.Index[0]] = len(fields)
+		fields = append(fields, sentField{field: f, val: val})
+	}
+	return fields, true
+}
+
+// mergeSettingsStruct merges the sent fields of struct type t into
+// existing (a YAML-decoded map keyed by yaml names). typed holds the YAML
+// form of the decoded request at the same level; a sent field missing
+// from it was a zero value dropped by omitempty, and is deleted.
+// Unknown keys were rejected before the merge; anything left (a read-only
+// echo) was dropped by sentStructFields and is not persisted.
+func mergeSettingsStruct(existing map[string]interface{}, t reflect.Type, sent []sentField, typed map[string]interface{}) {
+	for _, sf := range sent {
+		f, val := sf.field, sf.val
 		yk := yamlFieldName(f)
 		val = bytes.TrimSpace(val)
 		if bytes.Equal(val, []byte("null")) {
@@ -103,8 +145,7 @@ func mergeSettingsStruct(existing map[string]interface{}, t reflect.Type, sent m
 			ft = ft.Elem()
 		}
 		if ft.Kind() == reflect.Struct && len(val) > 0 && val[0] == '{' {
-			var sub map[string]json.RawMessage
-			if err := json.Unmarshal(val, &sub); err == nil {
+			if sub, ok := sentStructFields(ft, val); ok {
 				subExisting, _ := existing[yk].(map[string]interface{})
 				if subExisting == nil {
 					subExisting = make(map[string]interface{})
@@ -180,12 +221,19 @@ func yamlFieldName(f reflect.StructField) string {
 // the result that will be written. Only sections the request sent are
 // checked, so a save is not blocked by an unrelated stored value.
 func validateMergedServerSections(raw map[string]interface{}, rawServer json.RawMessage) error {
-	var sent map[string]json.RawMessage
-	if err := json.Unmarshal(rawServer, &sent); err != nil {
+	sent, ok := sentStructFields(reflect.TypeOf(config.V1ServerConfig{}), rawServer)
+	if !ok {
 		return nil
 	}
-	_, sentHome := sent["home_storage"]
-	_, sentShared := sent["shared_dir_storage"]
+	var sentHome, sentShared bool
+	for _, sf := range sent {
+		switch sf.field.Name {
+		case "HomeStorage":
+			sentHome = true
+		case "SharedDirStorage":
+			sentShared = true
+		}
+	}
 	if !sentHome && !sentShared {
 		return nil
 	}

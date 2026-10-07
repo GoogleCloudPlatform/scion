@@ -16,6 +16,8 @@ package hub
 
 import (
 	"bytes"
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -23,6 +25,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	yamlv3 "gopkg.in/yaml.v3"
 )
 
@@ -418,5 +421,95 @@ func TestHandlePutServerConfig_MergedValidationRejectsWithoutWriting(t *testing.
 	}
 	if string(data) != stored {
 		t.Errorf("settings.yaml changed by a rejected PUT:\n%s", data)
+	}
+}
+
+// validateMergedServerSections selects the sent sections with the same
+// key matching as the merge, so a section sent under a miscased key is
+// validated on the merged result.
+func TestHandlePutServerConfig_MiscasedHomeStorageValidatedAsMerged(t *testing.T) {
+	stored := storedServerSettings + `  home_storage:
+    backend: local
+    leaf: bogus
+`
+	rr, settingsPath := putFileModeServerConfig(t, stored, `{"server":{"Home_Storage":{"backend":"local"}}}`)
+	if rr.Code == http.StatusOK {
+		t.Fatalf("PUT: status 200, want an error: %s", rr.Body.String())
+	}
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != stored {
+		t.Errorf("settings.yaml changed by a rejected PUT:\n%s", data)
+	}
+}
+
+// The sent nfs block is complete on its own; the merge keeps the stored
+// subpath_root, which is invalid, so only the merged result fails.
+func TestHandlePutServerConfig_MiscasedSharedDirStorageValidatedAsMerged(t *testing.T) {
+	stored := storedServerSettings + `  shared_dir_storage:
+    backend: nfs
+    nfs:
+      mount_root: /mnt/shared
+      subpath_root: /abs
+      shares:
+        - id: s1
+runtimes:
+  docker:
+    type: docker
+    shared_dir_storage_backend: nfs
+`
+	body := `{"server":{"Shared_Dir_Storage":{"backend":"nfs","nfs":{"mount_root":"/mnt/other","shares":[{"id":"s2"}]}}}}`
+	rr, settingsPath := putFileModeServerConfig(t, stored, body)
+	if rr.Code == http.StatusOK {
+		t.Fatalf("PUT: status 200, want an error: %s", rr.Body.String())
+	}
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != stored {
+		t.Errorf("settings.yaml changed by a rejected PUT:\n%s", data)
+	}
+}
+
+// When two sent keys fold to the same field, the last one in the body
+// wins, as in encoding/json, on every run.
+func TestMergeServerSettings_DuplicateFoldedKeysLastWins(t *testing.T) {
+	cases := []struct {
+		body     string
+		wantKept bool
+	}{
+		{`{"github_app":null,"GitHub_App":{"app_id":99}}`, true},
+		{`{"GitHub_App":{"app_id":99},"github_app":null}`, false},
+	}
+	for _, tc := range cases {
+		for i := 0; i < 50; i++ {
+			var incoming config.V1ServerConfig
+			if err := json.Unmarshal([]byte(tc.body), &incoming); err != nil {
+				t.Fatal(err)
+			}
+			raw := map[string]interface{}{
+				"server": map[string]interface{}{
+					"github_app": map[string]interface{}{"app_id": 1, "private_key": "test-private-key"},
+				},
+			}
+			mergeServerSettings(raw, &incoming, json.RawMessage(tc.body))
+			srv := raw["server"].(map[string]interface{})
+			gh, ok := srv["github_app"].(map[string]interface{})
+			if ok != tc.wantKept {
+				t.Fatalf("%s (run %d): github_app present = %v, want %v", tc.body, i, ok, tc.wantKept)
+			}
+			if !tc.wantKept {
+				continue
+			}
+			if fmt.Sprint(gh["app_id"]) != "99" {
+				t.Fatalf("%s (run %d): app_id = %v, want 99", tc.body, i, gh["app_id"])
+			}
+			if gh["private_key"] != "test-private-key" {
+				t.Fatalf("%s (run %d): private_key = %v, want kept", tc.body, i, gh["private_key"])
+			}
+		}
 	}
 }
