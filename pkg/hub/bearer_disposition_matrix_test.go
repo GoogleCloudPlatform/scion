@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -135,6 +136,10 @@ type bearerMatrixFixture struct {
 	adminID      string
 	otherProject string
 	tokens       map[string]string
+	// tokenIDs records the stored token ID of each cached token, and
+	// pinned the cache keys that releaseTokens must keep.
+	tokenIDs map[string]string
+	pinned   map[string]bool
 }
 
 func newBearerMatrixFixture(t *testing.T) *bearerMatrixFixture {
@@ -161,7 +166,7 @@ func newBearerMatrixFixture(t *testing.T) *bearerMatrixFixture {
 	// bound to it.
 	createTestUserWithProjectRole(t, s, adminID, adminID+"@test.com", other, store.ProjectRoleOwner)
 
-	return &bearerMatrixFixture{srv: srv, store: s, ids: ids, adminID: adminID, otherProject: other, tokens: map[string]string{}}
+	return &bearerMatrixFixture{srv: srv, store: s, ids: ids, adminID: adminID, otherProject: other, tokens: map[string]string{}, tokenIDs: map[string]string{}, pinned: map[string]bool{}}
 }
 
 // mint returns a real token for the super-admin, minted through
@@ -173,12 +178,48 @@ func (m *bearerMatrixFixture) mint(t *testing.T, boundary TokenBoundary, scopes 
 	if key, ok := m.tokens[cacheKey]; ok {
 		return key
 	}
-	key, _, err := m.srv.uatService.CreateTokenWithParams(rs4MintContext(m.adminID), CreateTokenParams{
-		UserID: m.adminID, Name: "bdm-" + tid("tok"), Boundary: boundary, Scopes: scopes,
-	})
+	key, id, err := m.create(boundary, scopes, "tok")
 	require.NoError(t, err, "mint %s token with %v", boundary.Kind, scopes)
 	m.tokens[cacheKey] = key
+	m.tokenIDs[cacheKey] = id
 	return key
+}
+
+// create mints a token for the super-admin. When the per-user token limit
+// is reached, it deletes every cached token that is not pinned and tries
+// once more. Every caller uses a token right after minting it, so a
+// released token is minted again when it is next needed.
+func (m *bearerMatrixFixture) create(boundary TokenBoundary, scopes []string, name string) (string, string, error) {
+	params := CreateTokenParams{UserID: m.adminID, Name: "bdm-" + tid(name), Boundary: boundary, Scopes: scopes}
+	key, tok, err := m.srv.uatService.CreateTokenWithParams(rs4MintContext(m.adminID), params)
+	if errors.Is(err, ErrUATLimitExceeded) {
+		if releaseErr := m.releaseTokens(); releaseErr != nil {
+			return "", "", releaseErr
+		}
+		params.Name = "bdm-" + tid(name+"-retry")
+		key, tok, err = m.srv.uatService.CreateTokenWithParams(rs4MintContext(m.adminID), params)
+	}
+	if err != nil {
+		return "", "", err
+	}
+	return key, tok.ID, nil
+}
+
+// releaseTokens deletes every cached token that is not pinned and drops it
+// from the cache.
+func (m *bearerMatrixFixture) releaseTokens() error {
+	ctx := rs4MintContext(m.adminID)
+	for cacheKey, id := range m.tokenIDs {
+		if m.pinned[cacheKey] {
+			continue
+		}
+		if err := m.srv.uatService.DeleteToken(ctx, m.adminID, id); err != nil {
+			return err
+		}
+		delete(m.tokenIDs, cacheKey)
+		delete(m.tokens, cacheKey)
+	}
+	return nil
 }
 
 // tryMint is mint for a selector set that may not be mintable; it returns
@@ -188,11 +229,11 @@ func (m *bearerMatrixFixture) tryMint(boundary TokenBoundary, scopes []string) s
 	if key, ok := m.tokens[cacheKey]; ok {
 		return key
 	}
-	key, _, err := m.srv.uatService.CreateTokenWithParams(rs4MintContext(m.adminID), CreateTokenParams{
-		UserID: m.adminID, Name: "bdm-" + tid("try"), Boundary: boundary, Scopes: scopes,
-	})
+	key, id, err := m.create(boundary, scopes, "try")
 	if err != nil {
 		key = ""
+	} else {
+		m.tokenIDs[cacheKey] = id
 	}
 	m.tokens[cacheKey] = key
 	return key
@@ -232,6 +273,7 @@ func (m *bearerMatrixFixture) everySelectorHubToken(t *testing.T) (string, []str
 	}
 	sort.Strings(selectors)
 	require.NotEmpty(t, selectors, "the super-admin can mint at least one hub selector")
+	m.pinned[string(BoundaryKindHub)+"||"+strings.Join(selectors, ",")] = true
 	return m.mint(t, hubBoundary(), selectors), selectors
 }
 
