@@ -180,7 +180,7 @@ func TestAdoptedChildRetainsAssignedSAAndMintsGCPToken(t *testing.T) {
 
 	ctx := context.Background()
 	f.srv.SetGCPTokenGenerator(&mockGCPTokenGenerator{email: "hub@test.example"})
-	childToken, err := f.srv.GenerateAgentTokenForAgent(ctx, child)
+	childToken, err := f.srv.issueAgentTokenForTest(ctx, child)
 	require.NoError(t, err)
 	claims, err := f.srv.agentTokenService.ValidateAgentToken(childToken)
 	require.NoError(t, err)
@@ -447,12 +447,12 @@ func TestAdoptedAgentRuntimeSecretFetch(t *testing.T) {
 		store.RoleScopeProject, mf.ProjectID, string(AgentRoleFull))
 	a, err := mf.Store.GetAgent(ctx, id)
 	require.NoError(t, err)
-	tok, err := mf.Server.GenerateAgentTokenForAgent(ctx, a)
+	tok, err := mf.Server.issueAgentTokenForTest(ctx, a)
 	require.NoError(t, err)
 	assertProjectDenied(t, mf, id, tok, "ADOPT_KEY")
 
 	runBootAdoption(t, mf.Store)
-	tok, err = mf.Server.GenerateAgentTokenForAgent(ctx, a)
+	tok, err = mf.Server.issueAgentTokenForTest(ctx, a)
 	require.NoError(t, err)
 	rec := doRequestWithAgentToken(t, mf.Server, http.MethodPost, "/api/v1/agent/secrets",
 		secretFetchRequest{Keys: []string{"ADOPT_KEY"}}, tok)

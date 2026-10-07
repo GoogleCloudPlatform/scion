@@ -174,7 +174,7 @@ func (d *reincarnateTestDispatcher) DispatchAgentStart(ctx context.Context, agen
 	d.mu.Lock()
 	if d.runStore != nil {
 		runID := fmt.Sprintf("run-%s-%d", agent.RuntimeBrokerID, len(d.startBrokers)+1)
-		if _, err := d.runStore.SetAgentRunID(ctx, agent.ID, runID); err == nil {
+		if _, err := d.runStore.SetAgentRunID(ctx, agent.ID, runID, nil); err == nil {
 			agent.RunID = runID
 		}
 		if d.startPlacement != "" {

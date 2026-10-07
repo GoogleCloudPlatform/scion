@@ -135,11 +135,11 @@ func TestPublishRejects(t *testing.T) {
 		{"long title", &agentA, "/api/v1/artifacts?name=a.txt&title=" + strings.Repeat("t", 513), []byte("x"), nil, 400},
 		{"bad digest header", &agentA, "/api/v1/artifacts?name=a.txt", []byte("x"), map[string]string{HeaderContentSHA256: "abc"}, 400},
 		{"digest mismatch", &agentA, "/api/v1/artifacts?name=a.txt", []byte("x"), map[string]string{HeaderContentSHA256: sha([]byte("y"))}, 400},
-		{"GET collection", &agentA, "/api/v1/artifacts", nil, nil, 405},
+		{"PUT collection", &agentA, "/api/v1/artifacts", nil, nil, 405},
 	} {
 		method := http.MethodPost
-		if strings.HasPrefix(tc.name, "GET") {
-			method = http.MethodGet
+		if strings.HasPrefix(tc.name, "PUT") {
+			method = http.MethodPut
 		}
 		rec := f.do(tc.p, method, tc.target, tc.body, tc.hdr)
 		if rec.Code != tc.status {
@@ -152,8 +152,8 @@ func TestPublishRejects(t *testing.T) {
 		t.Errorf("matching digest: %d %s", rec.Code, rec.Body.String())
 	}
 	// 405 names what is allowed.
-	rec = f.do(&agentA, http.MethodGet, "/api/v1/artifacts", nil, nil)
-	if rec.Header().Get("Allow") != http.MethodPost {
+	rec = f.do(&agentA, http.MethodPut, "/api/v1/artifacts", nil, nil)
+	if rec.Header().Get("Allow") != "GET, HEAD, POST" {
 		t.Errorf("Allow = %q", rec.Header().Get("Allow"))
 	}
 }
