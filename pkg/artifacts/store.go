@@ -174,6 +174,17 @@ type Store interface {
 	// ListGrants returns every grant on an artifact, expired ones included,
 	// ordered by creation.
 	ListGrants(ctx context.Context, artifactID string) ([]Grant, error)
+
+	// AddMessageRefs records that message messageID references refs, in the
+	// artifact_message_ref link table. A reference already recorded for the
+	// message and artifact is left as it is. The caller has already checked
+	// that every referenced artifact exists.
+	AddMessageRefs(ctx context.Context, messageID string, refs []MessageRef) error
+
+	// ListMessageRefs returns the references recorded for each of
+	// messageIDs, keyed by message id and ordered by artifact id. Messages
+	// without references are absent from the map.
+	ListMessageRefs(ctx context.Context, messageIDs []string) (map[string][]MessageRef, error)
 }
 
 // NewStore returns the Store for db. driverName selects the SQL dialect:
