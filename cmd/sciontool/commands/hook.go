@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/dialects"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/handlers"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/telemetry"
 	"go.opentelemetry.io/otel"
@@ -303,10 +305,7 @@ func runHookTelemetry(event *hooks.Event) {
 	}
 
 	telemetryHandler := handlers.NewTelemetryHandler(tp, lp, redactor, mp)
-	// Note: OnSessionEnd is not wired here. In per-invocation mode
-	// (hook.go), the hub client is not available and the process is
-	// short-lived. Metrics reporting to the Hub requires daemon mode
-	// (init.go), where the long-lived hub client wires the callback.
+	wireSessionMetrics(telemetryHandler, hub.NewClient(), hookHomeDir())
 	if err := telemetryHandler.Handle(event); err != nil {
 		log.Debug("Hook telemetry handler: %v", err)
 	}
@@ -364,4 +363,39 @@ func runTaskCompleted(message string) {
 	}
 
 	fmt.Fprintf(os.Stderr, "[sciontool] Agent completed: %s\n", message)
+}
+
+// sessionMetricsReportTimeout bounds the session summary report a hook
+// process sends to the Hub on session-end.
+const sessionMetricsReportTimeout = 5 * time.Second
+
+// wireSessionMetrics connects a hook process's telemetry handler to Hub
+// session-metrics reporting. Each hook event runs in a new process, so the
+// session's counts are kept in a state file under home between events (see
+// handlers.FileSessionState), and the process that handles session-end
+// reports the summary. Nothing is wired when the Hub client is not
+// configured or no home directory is known.
+func wireSessionMetrics(h *handlers.TelemetryHandler, client *hub.Client, home string) {
+	if h == nil || client == nil || !client.IsConfigured() || home == "" {
+		return
+	}
+	h.SessionState = handlers.NewFileSessionState(home)
+	h.OnSessionEnd = func(summary telemetry.SessionSummary) {
+		ctx, cancel := context.WithTimeout(context.Background(), sessionMetricsReportTimeout)
+		defer cancel()
+		if err := client.ReportMetrics(ctx, hub.SummaryToMetricsPayload(summary)); err != nil {
+			log.Error("Failed to report session metrics to hub: %v", err)
+			return
+		}
+		log.Info("Session metrics reported to hub for session %s", summary.SessionID)
+	}
+}
+
+// hookHomeDir returns the agent's home directory for hook state files.
+func hookHomeDir() string {
+	if home := os.Getenv("HOME"); home != "" {
+		return home
+	}
+	home, _ := os.UserHomeDir()
+	return home
 }
