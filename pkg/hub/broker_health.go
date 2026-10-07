@@ -41,8 +41,10 @@ func (n brokerHealthNormalization) any() bool {
 }
 
 // countBrokerHealthNormalization compares a report as the broker sent it
-// (in) with its normalised form (out). A value the broker sent as
-// "unknown" itself is not counted.
+// (in) with its normalised form (out). A value the broker sent as exactly
+// "unknown" (ignoring case and surrounding space) is not counted; one with
+// a cause, such as "unknown: probe timed out", is stored as unknown and
+// counted as unrecognised.
 func countBrokerHealthNormalization(in, out *api.BrokerHealthReport) brokerHealthNormalization {
 	var n brokerHealthNormalization
 	if in == nil || out == nil {
