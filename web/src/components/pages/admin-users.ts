@@ -35,7 +35,7 @@ import '../shared/effective-role-provenance.js';
 import '../shared/effective-access-boundary-notice.js';
 import '../shared/security-review-dialog.js';
 import { formatRelative } from '../../utils/time.js';
-import { apiFetch, extractApiError } from '../../client/api.js';
+import { apiFetch, extractApiError, parseApiError } from '../../client/api.js';
 
 type SortField = 'name' | 'created';
 type SortDir = 'asc' | 'desc';
@@ -110,17 +110,6 @@ interface ProvisionUserResponse {
   user: { id?: string; email: string; status: string };
   created: boolean;
   warnings?: string[];
-}
-
-/** Reads details.reason from a POST /api/v1/users error response. */
-async function provisionErrorReason(response: Response): Promise<string | undefined> {
-  try {
-    const data = (await response.json()) as { error?: { details?: { reason?: unknown } } };
-    const reason = data?.error?.details?.reason;
-    return typeof reason === 'string' ? reason : undefined;
-  } catch {
-    return undefined;
-  }
 }
 
 /** Describes an advisory warning of POST /api/v1/users. */
@@ -1319,7 +1308,8 @@ export class ScionPageAdminUsers extends LitElement {
       body: JSON.stringify(body),
     });
     if (response.status === 409) {
-      const reason = await provisionErrorReason(response);
+      const { details } = await parseApiError(response, '');
+      const reason = typeof details?.reason === 'string' ? details.reason : undefined;
       if (reason === 'pending_user_exists') {
         this.showFeedback(
           'danger',
@@ -1335,16 +1325,21 @@ export class ScionPageAdminUsers extends LitElement {
     if (!response.ok) {
       throw new Error(await extractApiError(response, `HTTP ${response.status}`));
     }
-    const result = (await response.json()) as ProvisionUserResponse;
-    if (!result.created) {
-      this.showFeedback('primary', `${email} is already pre-registered with these details.`);
-      return true;
+    let result: ProvisionUserResponse | null = null;
+    try {
+      result = (await response.json()) as ProvisionUserResponse;
+    } catch {
+      // A success response without a readable body: report the success.
     }
-    const warnings = (result.warnings ?? []).map(provisionWarningText);
+    const warnings = (result?.warnings ?? []).map(provisionWarningText);
+    const message =
+      result && !result.created
+        ? `${email} is already pre-registered with these details.`
+        : `Invited ${email}.`;
     if (warnings.length > 0) {
-      this.showFeedback('warning', `Invited ${email}. ${warnings.join(' ')}`);
+      this.showFeedback('warning', `${message} ${warnings.join(' ')}`);
     } else {
-      this.showFeedback('success', `Invited ${email}.`);
+      this.showFeedback(result && !result.created ? 'primary' : 'success', message);
     }
     return true;
   }
@@ -2020,6 +2015,7 @@ export class ScionPageAdminUsers extends LitElement {
           <sl-input
             label="Display name (optional)"
             placeholder="e.g., Alice Smith"
+            help-text="Replaced at first sign-in by the name from the sign-in provider, if it supplies one."
             maxlength="128"
             .value=${this.inviteUserDisplayName}
             @sl-input=${(e: Event): void => {

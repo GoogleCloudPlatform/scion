@@ -786,6 +786,161 @@ describe('scion-page-admin-users — invite dialog display name and submit routi
     });
   });
 
+  it('forwards a non-empty note on the provisioning path', async () => {
+    element = (await createComponent([makeUser()])) as PageEl;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        withSubmitResponses(
+          () => jsonResponse({}, 500),
+          () =>
+            jsonResponse(
+              { user: { id: 'u1', email: 'a@example.com', status: 'invited' }, created: true },
+              201
+            )
+        )
+      )
+    );
+    await openDialogAndSubmit(element, { email: 'a@example.com', displayName: 'A', note: 'n' });
+    const posts = postCalls();
+    expect(posts).toHaveLength(1);
+    expect(posts[0].body).toEqual({ email: 'a@example.com', displayName: 'A', note: 'n' });
+  });
+
+  it('keeps advisory warnings on a 200 created:false replay', async () => {
+    element = (await createComponent([makeUser()])) as PageEl;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        withSubmitResponses(
+          () => jsonResponse({}, 500),
+          () =>
+            jsonResponse({
+              user: { email: 'a@other.example', status: 'invited' },
+              created: false,
+              warnings: ['domain_not_authorized'],
+            })
+        )
+      )
+    );
+    await openDialogAndSubmit(element, { email: 'a@other.example', displayName: 'A' });
+    const fb = feedback(element);
+    expect(fb.variant).toBe('warning');
+    expect(fb.text).toContain('a@other.example is already pre-registered with these details.');
+    expect(fb.text).toContain("outside the hub's authorized domains");
+  });
+
+  it('after success, reloads the user list and resets the form', async () => {
+    element = (await createComponent([makeUser()])) as PageEl;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        withSubmitResponses(
+          () => jsonResponse({}, 500),
+          () =>
+            jsonResponse(
+              { user: { id: 'u1', email: 'a@example.com', status: 'invited' }, created: true },
+              201
+            )
+        )
+      )
+    );
+    await openDialogAndSubmit(element, { email: 'a@example.com', displayName: 'A', note: 'n' });
+    const listCalls = vi
+      .mocked(fetch)
+      .mock.calls.filter(
+        ([url, init]) =>
+          String(url).includes('/api/v1/users') &&
+          ((init as RequestInit | undefined)?.method ?? 'GET') === 'GET'
+      );
+    expect(listCalls.length).toBeGreaterThan(0);
+
+    const inviteBtn = Array.from(element.shadowRoot!.querySelectorAll('sl-button')).find(
+      (b) => b.textContent?.trim() === 'Invite User'
+    ) as HTMLElement;
+    inviteBtn.click();
+    await element.updateComplete;
+    const dialog = element.shadowRoot!.querySelector('sl-dialog[label="Invite User"]')!;
+    for (const label of ['Email address', 'Display name (optional)', 'Note (optional)']) {
+      const input = dialog.querySelector(`sl-input[label="${label}"]`) as HTMLInputElement;
+      expect(input.value, label).toBe('');
+    }
+  });
+
+  it('shows a 400 validation error and keeps the dialog open', async () => {
+    element = (await createComponent([makeUser()])) as PageEl;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        withSubmitResponses(
+          () => jsonResponse({}, 500),
+          () =>
+            jsonResponse(
+              {
+                error: {
+                  code: 'validation_error',
+                  message: 'displayName must not contain control characters',
+                  details: { field: 'displayName' },
+                },
+              },
+              400
+            )
+        )
+      )
+    );
+    await openDialogAndSubmit(element, { email: 'a@example.com', displayName: 'A' });
+    expect(feedback(element)).toEqual({
+      variant: 'danger',
+      text: 'displayName must not contain control characters',
+    });
+    expect(element.shadowRoot!.querySelector('sl-dialog[label="Invite User"]')).not.toBeNull();
+  });
+
+  it('shows a network failure and keeps the dialog open', async () => {
+    element = (await createComponent([makeUser()])) as PageEl;
+    const base = createFetchHandler([makeUser()]);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string | URL | Request, init?: RequestInit) => {
+        if (init?.method === 'POST') return Promise.reject(new Error('network down'));
+        return base(url, init);
+      })
+    );
+    await openDialogAndSubmit(element, { email: 'a@example.com', displayName: 'A' });
+    expect(feedback(element)).toEqual({ variant: 'danger', text: 'network down' });
+    expect(element.shadowRoot!.querySelector('sl-dialog[label="Invite User"]')).not.toBeNull();
+  });
+
+  it('reports success when a 2xx body is not JSON', async () => {
+    element = (await createComponent([makeUser()])) as PageEl;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        withSubmitResponses(
+          () => jsonResponse({}, 500),
+          () => new Response('not json', { status: 201 })
+        )
+      )
+    );
+    await openDialogAndSubmit(element, { email: 'a@example.com', displayName: 'A' });
+    expect(feedback(element)).toEqual({ variant: 'success', text: 'Invited a@example.com.' });
+  });
+
+  it('explains display-name precedence in the field help text', async () => {
+    element = (await createComponent([makeUser()])) as PageEl;
+    const inviteBtn = Array.from(element.shadowRoot!.querySelectorAll('sl-button')).find(
+      (b) => b.textContent?.trim() === 'Invite User'
+    ) as HTMLElement;
+    inviteBtn.click();
+    await element.updateComplete;
+    const input = element.shadowRoot!.querySelector(
+      'sl-dialog[label="Invite User"] sl-input[label="Display name (optional)"]'
+    );
+    expect(input!.getAttribute('help-text')).toBe(
+      'Replaced at first sign-in by the name from the sign-in provider, if it supplies one.'
+    );
+  });
+
   it('maps every documented warning to readable text', () => {
     expect(mod.provisionWarningText('reserved_identity')).toContain('reserved platform identity');
     expect(mod.provisionWarningText('domain_not_authorized')).toContain('authorized domains');

@@ -1,6 +1,6 @@
 # Administrative User Provisioning API
 
-**Status:** H.1 design approved ([ptone/scion#2133](https://github.com/ptone/scion/issues/2133), merged as GoogleCloudPlatform/scion#2064). H.2 ([ptone/scion#2134](https://github.com/ptone/scion/issues/2134)) is in implementation; its start gates are satisfied (§16.1): the D.2 shared admission mechanics it uses have merged, and the sign-in item [GoogleCloudPlatform/scion#2071](https://github.com/GoogleCloudPlatform/scion/pull/2071) ("require provider-verified email and unify sign-in policy across auth paths") has landed. OD-1 (stored initial role) was **decided by ptone on 2026-09-28**: no stored role (§6, §19). OD-2 to OD-10 were **decided by ptone on 2026-10-04: option (a) for each** (§19, §20.2). H.2 PR-1 binds the A/D concepts to the merged code (§16.2, "Phase 0 binding").
+**Status:** H.1 design approved ([ptone/scion#2133](https://github.com/ptone/scion/issues/2133), merged as GoogleCloudPlatform/scion#2064). H.2 ([ptone/scion#2134](https://github.com/ptone/scion/issues/2134)) is in implementation; its start gates are satisfied (§16.1): the D.2 shared admission mechanics it uses have merged (Phase 2, hub-token admission, is further gated on D.2 G5), and the sign-in item [GoogleCloudPlatform/scion#2071](https://github.com/GoogleCloudPlatform/scion/pull/2071) ("require provider-verified email and unify sign-in policy across auth paths") has landed. OD-1 (stored initial role) was **decided by ptone on 2026-09-28**: no stored role (§6, §19). OD-2 to OD-10 were **decided by ptone on 2026-10-04: option (a) for each** (§19, §20.2). H.2 PR-1 binds the A/D concepts to the merged code (§16.2, "Phase 0 binding").
 **Tracker:** H, [ptone/scion#2116](https://github.com/ptone/scion/issues/2116) (ptone approved continuing it on 2026-09-28 as a separate followup; it is not a core prerequisite and does not gate core UAT delivery)
 **Date:** 2026-09-28
 **Anchored at:** `origin/main` @ `acc5a4b`
@@ -798,7 +798,7 @@ Labels are never treated as actor identity.
     survive the inviter's demotion today). Token expiry or revocation prevents new operations with the
     token; it does not undo the completed invitation. Creation must still have authorized the whole
     invitation effect for the scoped caller (§7.3 item 6). Durable provenance as defined by the
-    D.2/B.3 invitation-effect contract (§7.3 item 6), with at minimum the mutation audit's credential
+    D.2/B.3 invitation-effect contract (§7.3 item 6; B.3 defines none, §16.1), with at minimum the mutation audit's credential
     attribution, plus audit and explicit withdrawal (above), are required.
   - Under OD-10(b), the record is tied to B.3 provenance, and activation re-checks the source (owner
     active and still holding `user.invite`, token not revoked or expired) before the record admits
@@ -948,22 +948,21 @@ single-invite form (`renderInviteUserDialog`, `:1919`-`:1972`; submit handler `i
 
 H.2 was blocked by H.1, D.2 and the sign-in item. These gates are **satisfied**: this design is
 approved (GoogleCloudPlatform/scion#2064); the D.2 shared admission mechanics H.2 uses have merged
-(GoogleCloudPlatform/scion#2579, #2639, #2647), and the D.2 owner confirmed that H.2 does not depend
-on the remaining D.2 admission batches; the sign-in item [GoogleCloudPlatform/scion#2071](https://github.com/GoogleCloudPlatform/scion/pull/2071) ("require provider-verified email and unify sign-in policy across auth paths") has landed.
+(GoogleCloudPlatform/scion#2579, #2639, #2647), and the D.2 owner confirmed that Phases 0-1 and 3 do
+not depend on the remaining D.2 admission batches; the sign-in item [GoogleCloudPlatform/scion#2071](https://github.com/GoogleCloudPlatform/scion/pull/2071) ("require provider-verified email and unify sign-in policy across auth paths") has landed. Phase 2 (hub-token admission) has one further gate, D.2 G5 (§16.1).
 
 ### 16.1 Dependencies
 
 | Contract | Needed for | Binding |
 | --- | --- | --- |
-| D.2 [ptone/scion#2124](https://github.com/ptone/scion/issues/2124): per-operation replacement for `requireSessionCredential`; bearer admission for user administration | Admission in every phase | Hard gate for H.2: **satisfied** (shared mechanics merged; the remaining D.2 batches are not needed by H.2) |
+| D.2 [ptone/scion#2124](https://github.com/ptone/scion/issues/2124): per-operation replacement for `requireSessionCredential`; bearer admission for user administration | Admission in every phase | Hard gate for H.2: **satisfied for Phases 0-1 and 3** (shared mechanics merged). Phase 2 is gated on D.2 G5 (row below). |
 | A.1 [ptone/scion#2117](https://github.com/ptone/scion/issues/2117): target-scope resolution including creation scopes, credential boundary check, explicit fail-closed selector-to-permission mapping, mint eligibility, route/catalog drift inventory | UAT boundary and exact-selector checks; catalog and registry | Concepts only; contract under review; bound in Phase 0 |
 | A.2 [ptone/scion#2118](https://github.com/ptone/scion/issues/2118): normalized frozen permission ceiling with interpretation version, used by runtime decisions and `CanDelegate` | Ceiling on `user.invite` | Concepts only; bound in Phase 0 |
 | E.1/E.2 [ptone/scion#2126](https://github.com/ptone/scion/issues/2126)/[ptone/scion#2127](https://github.com/ptone/scion/issues/2127) | Credential decoration in audit | Soft; use `buildAuditActorFromContext` until they land |
-| B.3 [ptone/scion#2121](https://github.com/ptone/scion/issues/2121): durable ceilings and provenance | (1) The invitation-effect contract for Phase 2, coordinated with D.2 (§7.3 item 6). (2) Activation re-checks, if ptone chooses OD-10(b). | For Phase 2: coordinate the invitation-effect contract with D.2/B.3 in Phase 0. B.3 is not assumed irrelevant just because no role is stored. |
+| B.3 [ptone/scion#2121](https://github.com/ptone/scion/issues/2121): durable ceilings and provenance | (1) The invitation-effect contract for Phase 2 (§7.3 item 6). (2) Activation re-checks, if ptone chooses OD-10(b). | (1) **Resolved: nothing to bind.** B.3 defines no provenance type, ceiling or effect regression for user or invitation records (B.3 owner, 2026-10-07). The durable provenance of §7.3 item 6 and OD-10(a) is the `user_provision` mutation audit's credential attribution, written in the same transaction as the record (§9, §11). The governance side is D.2 G5 (row below). B.3's effects apply only if a future change writes a role binding or group membership at provisioning. (2) Not applicable: OD-10 is decided (a). |
 | Sign-in item [GoogleCloudPlatform/scion#2071](https://github.com/GoogleCloudPlatform/scion/pull/2071) ("require provider-verified email and unify sign-in policy across auth paths") | H.2 start (§16) | **Satisfied**: landed. H does not change sign-in. |
 | OD-10: lifetime of records created through a hub UAT | Phase 2 | **Satisfied**: decided (a) by ptone on 2026-10-04. |
 | D.2 G5 ([ptone/scion#2124](https://github.com/ptone/scion/issues/2124)): token admission for invitations and the allow-list | Phase 2 | **Hard gate for Phase 2.** `POST /api/v1/users` creates the same invited record as the invite routes, so its token admission follows the same rule as G5: it lands with or after G5, never before, and the operation stays `SessionOnly(ReasonGovernancePending)` until then (D.2 owner, 2026-10-07). Phase 2 reuses G5's selector handling and effect regression tests rather than a parallel version. |
-| B.3 ([ptone/scion#2121](https://github.com/ptone/scion/issues/2121)) for the invitation effect | Phase 2 | **Resolved: nothing to bind.** B.3 defines no provenance type, ceiling or effect regression for user or invitation records (B.3 owner, 2026-10-07). The durable provenance of §7.3 item 6 and OD-10(a) is the `user_provision` mutation audit's credential attribution, written in the same transaction as the record (§9, §11). B.3's effects apply only if a future change writes a role binding or group membership at provisioning. |
 
 ### 16.2 Phases
 
@@ -1221,10 +1220,11 @@ Run:
   creation-scope rule, and the convention for classifying shared call sites (Phase 0).
 - The shape of D.2's per-operation admission mechanism, and the credential restrictions it declares
   for user administration.
-- The B.3 provenance record shape and the lapsed-source-token rule. These are needed for OD-10(b)
-  if ptone chooses it.
-- The governance and `CanDelegate` contract that D.2 and B.3 define for invitation-type effects
-  (§7.3 item 6). H.2 needs it before Phase 2.
+- The B.3 provenance record shape and the lapsed-source-token rule: not needed, because ptone decided
+  OD-10 (a).
+- The governance and `CanDelegate` contract for invitation-type effects (§7.3 item 6): resolved. D.2
+  G5 ([ptone/scion#2124](https://github.com/ptone/scion/issues/2124)) provides the governance and token
+  admission, and Phase 2 lands with or after it; B.3 defines nothing for this effect (§16.1).
 - The sign-in item: resolved. [GoogleCloudPlatform/scion#2071](https://github.com/GoogleCloudPlatform/scion/pull/2071) ("require provider-verified email and unify sign-in policy across auth paths") has landed (§16.1).
 - A.1's final route-metadata convention for method-agnostic entries such as `/api/v1/users`
   (§16.3).
@@ -1335,7 +1335,7 @@ expires, the token owner is suspended, or the owner loses `user.invite` (§12).
   later admission under `invite_only`, and that is a durable effect. Under (a), creation must still
   authorize the whole invitation effect for the scoped caller under the applicable governance and
   `CanDelegate` contract (§7.3 item 6). Durable provenance as defined by the D.2/B.3
-  invitation-effect contract (§7.3 item 6), with at minimum the mutation audit's credential
+  invitation-effect contract (§7.3 item 6; B.3 defines none, §16.1), with at minimum the mutation audit's credential
   attribution, plus audit and explicit withdrawal (§12), are required. Token expiry or revocation prevents new
   operations; it does not undo a completed invitation.
 - (b) Tie the record to B.3 provenance, and have activation re-check the source (owner active and
