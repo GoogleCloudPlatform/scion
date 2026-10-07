@@ -207,3 +207,30 @@ func TestStoreMessageRefs(t *testing.T) {
 		}
 	})
 }
+
+// TestResolveRefsChecksEachArtifactOnce: several references to one artifact
+// (different versions) cost one lookup and one read check.
+func TestResolveRefsChecksEachArtifactOnce(t *testing.T) {
+	f := newFixture(t, false)
+	id := f.publish(agentA, "design.md", []byte("# v1"), "title=Design").Artifact.ID
+	f.host.mu.Lock()
+	f.host.calls = nil
+	f.host.mu.Unlock()
+
+	ctx := context.WithValue(context.Background(), principalKey{}, agentB)
+	views := f.svc.ResolveRefs(ctx, []MessageRef{{ArtifactID: id}, {ArtifactID: id, Seq: 1}, {ArtifactID: id, Seq: 4}})
+	if !views[0].Available || !views[1].Available || views[2].Available {
+		t.Fatalf("views = %+v", views)
+	}
+	f.host.mu.Lock()
+	defer f.host.mu.Unlock()
+	permits := 0
+	for _, c := range f.host.calls {
+		if strings.HasPrefix(c, "permits ") {
+			permits++
+		}
+	}
+	if permits != 1 {
+		t.Errorf("read check ran %d times for one artifact; calls %v", permits, f.host.calls)
+	}
+}

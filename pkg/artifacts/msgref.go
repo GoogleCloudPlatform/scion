@@ -107,7 +107,7 @@ func EncodeMessageRefs(refs []MessageRef) string {
 
 // RefView is a reference as one reader sees it. When Available is false
 // the reader may not read the artifact, or it (or the named version) does
-// not exist or is not ready; the two cases look the same and every field
+// not exist or is not ready; both give the same view, in which every field
 // past Seq is empty.
 type RefView struct {
 	// Ref is the canonical reference string.
@@ -130,33 +130,53 @@ type RefView struct {
 
 // ResolveRefs resolves references for the caller of ctx, with the same
 // read check as GET /api/v1/artifacts/{id}. It returns one view per
-// reference, in order. When the service has no store yet every view is
-// unavailable.
+// reference, in order. Each artifact is looked up and read-checked once per
+// call, however many references (versions) name it. When the service has no
+// store yet every view is unavailable.
 func (s *Service) ResolveRefs(ctx context.Context, refs []MessageRef) []RefView {
 	out := make([]RefView, len(refs))
 	b, ok := s.backend()
+	readable := make(map[string]*Artifact, len(refs)) // nil value: not readable
 	for i, r := range refs {
 		out[i] = RefView{Ref: r.String(), ID: r.ArtifactID, Seq: r.Seq}
 		if !ok || b.store == nil {
 			continue
 		}
-		s.resolveRef(ctx, b, r, &out[i])
+		a, seen := readable[r.ArtifactID]
+		if !seen {
+			a = s.readableForRef(ctx, b, r.ArtifactID)
+			readable[r.ArtifactID] = a
+		}
+		if a != nil {
+			resolveVersion(ctx, b, a, r, &out[i])
+		}
 	}
 	return out
 }
 
-func (s *Service) resolveRef(ctx context.Context, b backend, r MessageRef, v *RefView) {
-	if !canonicalID(r.ArtifactID) || r.Seq < 0 {
-		return
+// readableForRef returns artifact id when it exists and the caller may read
+// it, otherwise nil. Absent and unreadable are not told apart.
+func (s *Service) readableForRef(ctx context.Context, b backend, id string) *Artifact {
+	if !canonicalID(id) {
+		return nil
 	}
-	a, err := b.store.GetArtifact(ctx, r.ArtifactID)
+	a, err := b.store.GetArtifact(ctx, id)
 	if err != nil {
 		if !errors.Is(err, ErrNotFound) {
 			slog.ErrorContext(ctx, "artifacts: resolve ref: get artifact failed", "error", err)
 		}
-		return
+		return nil
 	}
 	if !s.canRead(ctx, b, a) {
+		return nil
+	}
+	return a
+}
+
+// resolveVersion fills v for a readable artifact: the pinned version must
+// exist and be ready, an unpinned reference needs a current version.
+func resolveVersion(ctx context.Context, b backend, a *Artifact, r MessageRef, v *RefView) {
+	if r.Seq < 0 {
 		return
 	}
 	seq := r.Seq
