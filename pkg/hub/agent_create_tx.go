@@ -137,10 +137,13 @@ func (s *Server) commitAgentCreate(ctx context.Context, w agentCreateWrite) erro
 // audit record, so readers can tell a failure before dispatch from a
 // dispatch failure.
 const (
-	createStageStorage           = "storage"
-	createStageUploadURL         = "upload_url"
-	createStageWorkspaceStorage  = "workspace_storage"
-	createStageManaged           = "managed"
+	createStageStorage          = "storage"
+	createStageUploadURL        = "upload_url"
+	createStageWorkspaceStorage = "workspace_storage"
+	createStageManaged          = "managed"
+	// createStageManagedRecord: the managed create's post-create write
+	// (managed Runtime, interaction ID) failed (ptone/scion#3557).
+	createStageManagedRecord     = "managed_record"
 	createStageRunIntent         = "run_intent"
 	createStageDispatchEnvGather = "dispatch_env_gather"
 	createStageDispatch          = "dispatch"
@@ -165,6 +168,31 @@ type createCompensation struct {
 	Stage string
 	// Cause is the failure that triggered the rollback; may be nil.
 	Cause error
+	// IfNotDeleteHeld makes the row delete conditional (ptone/scion#3557):
+	// the row is removed only when no delete holds it
+	// (createRowCompensable), re-checked inside the compensation's own
+	// transaction. When a delete holds it, or the row is already gone,
+	// nothing is written and errCreateRowDeleteHeld is returned: the row,
+	// its edge and its quotas are left to the delete.
+	IfNotDeleteHeld bool
+}
+
+// errCreateRowDeleteHeld is returned by a conditional compensation
+// (createCompensation.IfNotDeleteHeld) and deleteFailedCreateRow when a
+// delete holds the agent row, or the row is gone: the delete owns it.
+var errCreateRowDeleteHeld = errors.New("agent row is held by a delete")
+
+// createRowCompensable is the condition a conditional create compensation
+// re-checks on the row in its transaction: no delete marker, or a delete
+// that failed (the agent is live again), and not soft-deleted. A row a
+// delete holds (deleting or finalizing) does not match. Unlike
+// deletedOrDeleteHeld it also refuses a deleting row whose lease expired;
+// that row is then left to a delete retry, which is the safe side.
+func createRowCompensable() store.DeletionPredicate {
+	return store.DeletionPredicate{
+		States:        []string{store.DeletionStateNone, store.DeletionStateFailed},
+		DeletedAtNull: true,
+	}
 }
 
 // compensateAgentCreate rolls back a committed create after a later step
@@ -212,14 +240,9 @@ func (s *Server) compensateAgentCreate(ctx context.Context, c createCompensation
 	auditActorFromContext(ctx).ApplyActor(record)
 	applyHubActorFallback(record)
 
-	return s.store.WithTx(ctx, func(tx store.Store) error {
-		rowDeleted := true
-		if err := tx.DeleteAgent(ctx, agentID); err != nil {
-			if !errors.Is(err, store.ErrNotFound) {
-				return fmt.Errorf("delete agent: %w", err)
-			}
-			rowDeleted = false
-		}
+	// edgesAndAudit runs in the compensation's transaction, after the row
+	// delete.
+	edgesAndAudit := func(tx store.Store, rowDeleted bool) error {
 		deactivated, err := tx.DeactivateDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, agentID, store.Deactivation{
 			Cause: store.EdgeDeactivationCreateCompensation,
 			At:    &now,
@@ -236,6 +259,35 @@ func (s *Server) compensateAgentCreate(ctx context.Context, c createCompensation
 			return fmt.Errorf("compensation audit: %w", err)
 		}
 		return nil
+	}
+
+	if c.IfNotDeleteHeld {
+		// One transaction that re-reads the row, checks it, removes it and
+		// runs edgesAndAudit; a delete claim that lands after the read
+		// bumps state_version, so the delete misses and is retried from a
+		// fresh read, which then refuses.
+		n, err := s.store.FinalizeAgentDeletion(ctx, agentID, createRowCompensable(), store.DeletionFinalizeHard, store.DeletionFields{},
+			func(_ context.Context, tx store.Store, _ *store.Agent, _ store.DeletionFinalizeMode) error {
+				return edgesAndAudit(tx, true)
+			})
+		if err != nil {
+			return fmt.Errorf("delete agent: %w", err)
+		}
+		if n == 0 {
+			return errCreateRowDeleteHeld
+		}
+		return nil
+	}
+
+	return s.store.WithTx(ctx, func(tx store.Store) error {
+		rowDeleted := true
+		if err := tx.DeleteAgent(ctx, agentID); err != nil {
+			if !errors.Is(err, store.ErrNotFound) {
+				return fmt.Errorf("delete agent: %w", err)
+			}
+			rowDeleted = false
+		}
+		return edgesAndAudit(tx, rowDeleted)
 	})
 }
 
