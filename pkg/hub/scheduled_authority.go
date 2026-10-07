@@ -333,13 +333,16 @@ func (s *Server) resolveScheduledUser(ctx context.Context, auth *ScheduledAuthor
 		return nil, fmt.Errorf("%w: access token not found", errScheduledAuthorityDenied)
 	case tok.Revoked:
 		return nil, fmt.Errorf("%w: access token revoked", errScheduledAuthorityDenied)
-	case tok.ExpiresAt == nil || !time.Now().Before(*tok.ExpiresAt):
+	case tok.ExpiresAt == nil || time.Now().After(*tok.ExpiresAt):
+		// The expiry comparison matches ValidateToken. A nil expiry is
+		// refused: CreateToken always sets one, so a row without it was not
+		// minted by the hub and is not treated as non-expiring here.
 		return nil, fmt.Errorf("%w: access token expired", errScheduledAuthorityDenied)
 	case tok.UserID != user.ID:
 		return nil, fmt.Errorf("%w: access token owner does not match the principal", errScheduledAuthorityDenied)
 	}
 	boundary := TokenBoundary{Kind: BoundaryKind(tok.BoundaryKind), ProjectID: tok.ProjectID}
-	return NewScopedUserIdentityWithBoundaryAndDecoration(userIdentity, boundary, tok.Scopes, tok.ID, tok.NormalizedCeiling(), nil), nil
+	return NewScopedUserIdentityWithBoundary(userIdentity, boundary, tok.Scopes, tok.ID, tok.NormalizedCeiling()), nil
 }
 
 // resolveScheduledAgent applies rule 4 of resolveScheduledAuthority.
@@ -427,13 +430,20 @@ func (s *Server) scheduledEffectCeiling(ctx context.Context, auth ScheduledAutho
 // intersectEffectCeilings returns the ceiling that allows exactly what both
 // a and b allow. Principal is the identity element. Two bounded ceilings
 // intersect over the registry (each under its own version) into bounded V1,
-// keeping b's boundary. Any other kind (unrecorded or unknown) is an error,
-// so the intersection never widens past a ceiling it cannot read.
+// keeping b's boundary. Any non-principal ceiling that Frozen cannot read
+// (unrecorded or unknown kind) is an error, so the intersection never
+// widens past a ceiling it cannot read.
 func intersectEffectCeilings(a, b store.EffectCeiling) (store.EffectCeiling, error) {
+	frozen := make([]permissions.FrozenPermissionCeiling, 0, 2)
 	for _, c := range []store.EffectCeiling{a, b} {
-		if c.Kind != store.EffectCeilingPrincipal && c.Kind != store.EffectCeilingBounded {
+		if c.Kind == store.EffectCeilingPrincipal {
+			continue
+		}
+		f, ok := c.Frozen()
+		if !ok {
 			return store.EffectCeiling{}, fmt.Errorf("cannot intersect a %q ceiling", c.Kind)
 		}
+		frozen = append(frozen, f)
 	}
 	if a.Kind == store.EffectCeilingPrincipal {
 		return b, nil
@@ -441,9 +451,7 @@ func intersectEffectCeilings(a, b store.EffectCeiling) (store.EffectCeiling, err
 	if b.Kind == store.EffectCeilingPrincipal {
 		return a, nil
 	}
-	fa, _ := a.Frozen() // both bounded: Frozen is ok
-	fb, _ := b.Frozen()
-	out := foldCeilings([]permissions.FrozenPermissionCeiling{fa, fb}, 0)
+	out := foldCeilings(frozen, 0)
 	out.BoundaryKind = b.BoundaryKind
 	out.BoundaryProjectID = b.BoundaryProjectID
 	return out, nil

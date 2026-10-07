@@ -61,8 +61,9 @@ func TestIntersectEffectCeilings(t *testing.T) {
 	} {
 		t.Run(tc.name+" refused", func(t *testing.T) {
 			for _, pair := range [][2]store.EffectCeiling{{tc.c, ab}, {ab, tc.c}, {tc.c, principal}, {principal, tc.c}} {
-				_, err := intersectEffectCeilings(pair[0], pair[1])
+				got, err := intersectEffectCeilings(pair[0], pair[1])
 				assert.Error(t, err)
+				assert.Equal(t, store.EffectCeiling{}, got, "a refused intersection returns no ceiling")
 			}
 		})
 	}

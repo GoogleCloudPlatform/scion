@@ -367,6 +367,19 @@ func TestSchedUATRevokedOrExpiredDeniesFire(t *testing.T) {
 		{"expired", func(f *schedFire) *store.UserAccessToken {
 			return f.storedUATExpiring(t, time.Now().Add(-time.Minute), minimalSelectors(t)...)
 		}},
+		{"no-expiry", func(f *schedFire) *store.UserAccessToken {
+			// CreateToken always sets an expiry; a row without one is
+			// refused at fire time rather than treated as non-expiring.
+			sel := minimalSelectors(t)
+			tok := &store.UserAccessToken{
+				ID: api.NewUUID(), UserID: f.creator.ID, Name: "sched-uat", Prefix: "scion_pat_x", KeyHash: api.NewUUID(),
+				BoundaryKind: string(permissions.BoundaryKindProject), ProjectID: f.proj.ID, Scopes: sel,
+				CeilingVersion: permissions.CeilingVersionV1, CeilingPermissionIDs: uatCeilingFromSelectors(t, sel...).PermissionIDs,
+				Created: time.Now(),
+			}
+			require.NoError(t, f.store.CreateUserAccessToken(ctx, tok))
+			return tok
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newSchedFire(t, "sched-uat-"+tc.name)
@@ -375,7 +388,11 @@ func TestSchedUATRevokedOrExpiredDeniesFire(t *testing.T) {
 
 			err := f.fire(t, evt)
 			require.ErrorIs(t, err, errScheduledAuthorityDenied)
-			assert.Contains(t, err.Error(), tc.name)
+			want := tc.name
+			if want == "no-expiry" {
+				want = "expired"
+			}
+			assert.Contains(t, err.Error(), want)
 			f.assertNoChild(t, "sched-uat-"+tc.name+"-c")
 
 			// Through the recurring path the event records failed.
