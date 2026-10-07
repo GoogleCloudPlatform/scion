@@ -1051,11 +1051,11 @@ type ReincarnateAgentRequest struct {
 	// that broker, which must mount the same NFS export as its current one.
 	TargetBroker string `json:"targetBroker,omitempty"`
 	// SharedDirBackends changes the recorded shared-dir storage backend of
-	// the named shared dirs (dir name to "nfs"). Only the agent's record
-	// changes; the data is copied by the operator.
+	// the named shared dirs (dir name to "nfs" or "local"). Only the
+	// agent's record changes; the data is copied by the operator.
 	SharedDirBackends map[string]string `json:"sharedDirBackends,omitempty"`
-	// AllowEmptySharedDir skips the start check that refuses an empty nfs
-	// directory while the previous local directory is not empty.
+	// AllowEmptySharedDir skips the start check that refuses an empty
+	// directory on the new backend while the previous one is not empty.
 	AllowEmptySharedDir bool `json:"allowEmptySharedDir,omitempty"`
 
 	// Patch fields: each changes the next generation's setting, and later
