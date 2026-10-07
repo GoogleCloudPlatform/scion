@@ -614,6 +614,11 @@ var (
 				Unique:  false,
 				Columns: []*schema.Column{BrokerDispatchColumns[2], BrokerDispatchColumns[5], BrokerDispatchColumns[7]},
 			},
+			{
+				Name:    "brokerdispatch_state_updated_at",
+				Unique:  false,
+				Columns: []*schema.Column{BrokerDispatchColumns[7], BrokerDispatchColumns[13]},
+			},
 		},
 	}
 	// BrokerJoinTokensColumns holds the columns for the "broker_join_tokens" table.
