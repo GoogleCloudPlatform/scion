@@ -1,6 +1,6 @@
 # Artifact system
 
-Status: design accepted (decisions D1–D20); implementation in phases tracked by ptone/scion#3202. Phase P0 (scaffolding) is ptone/scion#3203, phase P1 (vertical slice) is ptone/scion#3208. This document carries the proposed design, data model, API and UX of the artifact system so the design travels with the code. Prior art: ptone/scion#874 ("Praxis"), ptone/scion#518.
+Status: design accepted (decisions D1–D21); implementation in phases tracked by ptone/scion#3202. Phase P0 (scaffolding) is ptone/scion#3203, phase P1 (vertical slice) is ptone/scion#3208. This document carries the proposed design, data model, API and UX of the artifact system so the design travels with the code. Prior art: ptone/scion#874 ("Praxis"), ptone/scion#518.
 
 The feature is behind the `hub.artifacts` experiment (default off).
 
@@ -28,6 +28,7 @@ The feature is behind the `hub.artifacts` experiment (default off).
 | D18 | `current_seq` is the latest version of any kind. |
 | D19 | Default limits: 32 MiB/file, 256 MiB/bundle, 200 files/bundle, share-link TTL 7 days (max 30). |
 | D20 | A review version that changes text outside CriticMarkup is rejected at finalize (`422 unmarked_changes`). |
+| D21 | A hub-level *Artifacts* item in the management sidebar, beside *Skills*, ships as phase P1c and lists the artifacts the user owns or holds grants on; the project *Artifacts* tab stays in P2. Artifacts are principal-owned (D7), so the primary list is per user. |
 
 ## 5. Proposed design
 

@@ -355,6 +355,8 @@ type countingStore struct {
 	candidates int
 	grantsFor  int
 	grants     int
+	// failGrantsFor makes ListGrantsFor fail.
+	failGrantsFor bool
 }
 
 func (c *countingStore) ListCandidates(ctx context.Context, q CandidateQuery) ([]Candidate, error) {
@@ -367,7 +369,11 @@ func (c *countingStore) ListCandidates(ctx context.Context, q CandidateQuery) ([
 func (c *countingStore) ListGrantsFor(ctx context.Context, ids []string) (map[string][]Grant, error) {
 	c.mu.Lock()
 	c.grantsFor++
+	fail := c.failGrantsFor
 	c.mu.Unlock()
+	if fail {
+		return nil, errors.New("grants unavailable")
+	}
 	return c.Store.ListGrantsFor(ctx, ids)
 }
 
@@ -429,10 +435,107 @@ func TestListStoreQueriesBounded(t *testing.T) {
 	}
 }
 
-// TestListScanBudgetFitsGrantBatch: the grants of a whole scan budget fit
-// in one ListGrantsFor call.
-func TestListScanBudgetFitsGrantBatch(t *testing.T) {
-	if maxListScan > MaxGrantsForIDs {
-		t.Fatalf("maxListScan %d exceeds MaxGrantsForIDs %d", maxListScan, MaxGrantsForIDs)
+// TestListGrantWindowFitsGrantBatch: the largest grants window fits in one
+// ListGrantsFor call.
+func TestListGrantWindowFitsGrantBatch(t *testing.T) {
+	if w := max(2*(MaxListLimit+1), grantWindowMin); w > MaxGrantsForIDs {
+		t.Fatalf("grants window %d exceeds MaxGrantsForIDs %d", w, MaxGrantsForIDs)
+	}
+}
+
+// insertScopeGrant adds a scope read grant on artifact id for scope.
+func (f *fixture) insertScopeGrant(id, scope string) {
+	f.t.Helper()
+	if _, err := f.db.Exec(`INSERT INTO artifact_grant (id, artifact_id, subject_kind, subject_ref, permission, created_at)
+		VALUES (?, ?, 'scope', ?, 'read', ?)`, "gs-"+id+"-"+scope, id, scope, time.Now().UTC().Format(sqliteTimeLayout)); err != nil {
+		f.t.Fatal(err)
+	}
+}
+
+// TestListGrantsAttributedPerRow: each row is judged on its own grants
+// only. x is a candidate (scope grant to a project the caller belongs to)
+// but unreadable (the caller's role there lacks read); y is readable by a
+// principal grant. Both reach the grant step in the same batch; giving x
+// any of y's grants would list it.
+func TestListGrantsAttributedPerRow(t *testing.T) {
+	f := newFixture(t, false)
+	f.host.allow(userU, "project-5", PermissionCreate) // member of project-5, no read there
+	x := f.publish(agentX, "x.md", []byte("x"), "").Artifact.ID
+	y := f.publish(agentX, "y.md", []byte("y"), "").Artifact.ID
+	f.insertScopeGrant(x, "project-5")
+	f.grantPrincipal(y, userU)
+	if got := listIDs(f.list(&userU, listPath)); !slices.Equal(got, []string{y}) {
+		t.Errorf("list = %v, want only %s (x must not borrow y's grant)", got, y)
+	}
+	if rec := f.do(&userU, http.MethodGet, "/api/v1/artifacts/"+x, nil, nil); rec.Code != http.StatusNotFound {
+		t.Errorf("GET x: %d, want 404", rec.Code)
+	}
+}
+
+// TestListGrantsLoadFailure: a failed grants read answers 500, never a page
+// that silently leaves out the rows it could not judge. GET is unaffected
+// (it reads one artifact's grants).
+func TestListGrantsLoadFailure(t *testing.T) {
+	f := newFixture(t, false)
+	id := f.publish(agentX, "g.md", []byte("g"), "").Artifact.ID
+	f.grantPrincipal(id, outside)
+	cs := f.countStore()
+	cs.failGrantsFor = true
+	rec := f.do(&outside, http.MethodGet, listPath, nil, nil)
+	if rec.Code != http.StatusInternalServerError || errCode(t, rec) != "internal" {
+		t.Errorf("list with failing grants: %d %s, want 500 internal", rec.Code, rec.Body.String())
+	}
+	if cs.grantsFor != 1 {
+		t.Errorf("grants queries after a failure: %d, want 1 (stop at the first)", cs.grantsFor)
+	}
+	// Requests that never reach the grant step still succeed: owned rows,
+	// and rows the caller may read in their home project.
+	if got := f.list(&agentX, listPath+"&owner=me"); len(got.Artifacts) != 1 {
+		t.Errorf("owned list: %d, want 1", len(got.Artifacts))
+	}
+	if got := f.list(&agentX, listPath); len(got.Artifacts) != 1 {
+		t.Errorf("owner's full list: %d, want 1", len(got.Artifacts))
+	}
+	home := f.publish(agentA, "home.md", []byte("h"), "").Artifact.ID
+	if got := listIDs(f.list(&userU, listPath)); !slices.Equal(got, []string{home}) {
+		t.Errorf("home-project member: %v, want [%s]", got, home)
+	}
+	if cs.grantsFor != 1 {
+		t.Errorf("grants queries: %d, want still 1 (owner and home rows never load grants)", cs.grantsFor)
+	}
+	if rec := f.do(&outside, http.MethodGet, "/api/v1/artifacts/"+id, nil, nil); rec.Code != http.StatusOK {
+		t.Errorf("GET with failing ListGrantsFor: %d, want 200", rec.Code)
+	}
+}
+
+// TestListGrantsWindowed: grants are read a window at a time for the rows
+// the walk reaches, so the number of grants queries is bounded by
+// ceil(scan budget / window), and each row still sees only its own grants.
+func TestListGrantsWindowed(t *testing.T) {
+	oldScan, oldWin := maxListScan, grantWindowMin
+	maxListScan, grantWindowMin = 10, 1
+	t.Cleanup(func() { maxListScan, grantWindowMin = oldScan, oldWin })
+
+	f := newFixture(t, false)
+	f.host.allow(userU, "project-5", PermissionCreate) // member, no read
+	var readable string
+	for i := range 10 {
+		id := f.publish(agentX, "w"+strconv.Itoa(i)+".md", []byte{byte(i)}, "").Artifact.ID
+		if i == 0 {
+			// Oldest row, last in the walk: the only readable one.
+			readable = id
+			f.grantPrincipal(id, userU)
+			continue
+		}
+		f.insertScopeGrant(id, "project-5")
+	}
+	cs := f.countStore()
+	got := f.list(&userU, listPath+"&limit=1")
+	if !slices.Equal(listIDs(got), []string{readable}) {
+		t.Errorf("list = %v, want [%s]", listIDs(got), readable)
+	}
+	// limit=1 gives a window of max(2*(1+1), 1) = 4 rows; 10 rows need 3.
+	if cs.candidates != 1 || cs.grantsFor != 3 {
+		t.Errorf("queries: candidates=%d grantsFor=%d, want 1 and 3", cs.candidates, cs.grantsFor)
 	}
 }

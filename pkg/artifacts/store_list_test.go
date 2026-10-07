@@ -19,6 +19,7 @@ package artifacts
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"slices"
 	"testing"
 	"time"
@@ -271,6 +272,13 @@ func TestStoreListGrantsFor(t *testing.T) {
 		if len(got[a]) != 2 || len(got[b]) != 1 || len(got) != 2 {
 			t.Fatalf("grants = %v", got)
 		}
+		for key, gs := range got {
+			for _, g := range gs {
+				if g.ArtifactID != key {
+					t.Errorf("grant %s of artifact %s returned under %s", g.ID, g.ArtifactID, key)
+				}
+			}
+		}
 		single, err := st.ListGrants(ctx, a)
 		if err != nil {
 			t.Fatal(err)
@@ -283,6 +291,77 @@ func TestStoreListGrantsFor(t *testing.T) {
 		}
 		if _, err := st.ListGrantsFor(ctx, make([]string, MaxGrantsForIDs+1)); err == nil {
 			t.Error("too many ids: want error")
+		}
+	})
+}
+
+// TestStoreListCandidatesPagingAcrossArms walks candidates that come from
+// every arm (owned, principal grant, scope grants to two scopes, and rows
+// matching several arms at once), with timestamp ties, at several page
+// sizes: no row is skipped or repeated and the order is strict.
+func TestStoreListCandidatesPagingAcrossArms(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, db *sql.DB, st Store, _ func() *sql.DB) {
+		base := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+		alice := PrincipalRef(PrincipalKindUser, "alice")
+		var want []string
+		for i := range 24 {
+			s := listSeed{title: fmt.Sprint("r", i), ownerRef: "bob", scope: "p-none",
+				updated: base.Add(time.Duration(i/4) * time.Minute)} // four rows per timestamp
+			switch i % 4 {
+			case 0:
+				s.ownerRef = "alice"
+			case 1:
+				s.grants = []Grant{{SubjectKind: SubjectPrincipal, SubjectRef: alice, Permission: GrantWrite}}
+			case 2:
+				s.grants = []Grant{{SubjectKind: SubjectScope, SubjectRef: "p1", Permission: GrantRead},
+					{SubjectKind: SubjectScope, SubjectRef: "p2", Permission: GrantAdmin}}
+			case 3:
+				s.ownerRef = "alice"
+				s.grants = []Grant{{SubjectKind: SubjectPrincipal, SubjectRef: alice, Permission: GrantRead},
+					{SubjectKind: SubjectScope, SubjectRef: "p1", Permission: GrantRead}}
+			}
+			want = append(want, seedList(t, db, st, s))
+		}
+		seedList(t, db, st, listSeed{title: "unrelated", ownerRef: "bob", scope: "p-none", updated: base})
+		all, err := st.ListCandidates(context.Background(), CandidateQuery{PrincipalKind: PrincipalKindUser, PrincipalRef: "alice",
+			ScopeRefs: []string{"p1", "p2"}, Limit: 100, Now: time.Now()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(all) != len(want) {
+			t.Fatalf("one page holds %d rows, want %d", len(all), len(want))
+		}
+		for i := 1; i < len(all); i++ {
+			p, c := all[i-1], all[i]
+			if c.UpdatedAt.After(p.UpdatedAt) || (c.UpdatedAt.Equal(p.UpdatedAt) && c.ID >= p.ID) {
+				t.Fatalf("rows %d and %d out of order", i-1, i)
+			}
+		}
+		for limit := 1; limit <= 7; limit++ {
+			q := CandidateQuery{PrincipalKind: PrincipalKindUser, PrincipalRef: "alice", ScopeRefs: []string{"p1", "p2"},
+				Limit: limit, Now: time.Now()}
+			var walked []string
+			for range 30 {
+				rows, err := st.ListCandidates(context.Background(), q)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, r := range rows {
+					walked = append(walked, r.ID)
+				}
+				if len(rows) < limit {
+					break
+				}
+				q.After = &Position{UpdatedAt: rows[len(rows)-1].UpdatedAt, ID: rows[len(rows)-1].ID}
+			}
+			if len(walked) != len(all) {
+				t.Fatalf("limit %d: walked %d rows, want %d", limit, len(walked), len(all))
+			}
+			for i := range walked {
+				if walked[i] != all[i].ID {
+					t.Fatalf("limit %d: row %d is %s, want %s", limit, i, walked[i], all[i].ID)
+				}
+			}
 		}
 	})
 }

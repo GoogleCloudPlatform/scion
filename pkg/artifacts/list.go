@@ -187,6 +187,11 @@ func (s *Service) handleList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// grantWindowMin is the fewest candidates one grants query covers. With
+// maxListScan it bounds the grants queries of one request at
+// ceil(maxListScan/grantWindowMin). A variable so tests can lower it.
+var grantWindowMin = 100
+
 // collect fetches up to maxListScan candidates in store order with one
 // store query, and keeps those canReadWith allows until it has a full page.
 // next is where the following page starts: after the last returned row when
@@ -197,7 +202,10 @@ func (s *Service) handleList(w http.ResponseWriter, r *http.Request) {
 // The whole budget is fetched at once because the rows that fill the page
 // may come after any number of rows the caller cannot read; fetching only
 // the page remainder would cost one store query per unreadable row or two.
-// Rows fetched past a full page are dropped.
+// Rows fetched past a full page are dropped. Grants are read only for rows
+// that reach the grant step, a window of rows at a time (grantsWindow), so a
+// page that fills early reads few grants and a long walk reads a few
+// windows. A failed grants read fails the request instead of hiding rows.
 func (s *Service) collect(ctx context.Context, host Host, b backend, q CandidateQuery, limit int) ([]ArtifactListItem, *Position, error) {
 	q.Limit = maxListScan
 	q.Now = time.Now()
@@ -205,13 +213,17 @@ func (s *Service) collect(ctx context.Context, host Host, b backend, q Candidate
 	if err != nil {
 		return nil, nil, err
 	}
-	grants := batchGrants(ctx, b.store, rows)
+	grants := newGrantsWindow(ctx, b.store, rows, max(2*(limit+1), grantWindowMin))
 	items := []ArtifactListItem{}
 	var last *Position
 	for i := range rows {
 		c := &rows[i]
 		last = &Position{UpdatedAt: c.UpdatedAt, ID: c.ID}
-		if !canReadWith(ctx, host, &c.Artifact, func() ([]Grant, error) { return grants(c.ID) }) {
+		readable := canReadWith(ctx, host, &c.Artifact, func() ([]Grant, error) { return grants.forRow(i) })
+		if grants.err != nil {
+			return nil, nil, grants.err
+		}
+		if !readable {
 			continue
 		}
 		items = append(items, ArtifactListItem{
@@ -230,27 +242,43 @@ func (s *Service) collect(ctx context.Context, host Host, b backend, q Candidate
 	return items, last, nil
 }
 
-// batchGrants returns a loader for the grants of one candidate. The first
-// call reads the grants of every candidate in rows with one store query;
-// later calls are answered from that result. If no row needs its grants
-// (every row owned, or authorized in its home scope) nothing is read.
-func batchGrants(ctx context.Context, st Store, rows []Candidate) func(id string) ([]Grant, error) {
-	var (
-		loaded bool
-		byID   map[string][]Grant
-		err    error
-	)
-	return func(id string) ([]Grant, error) {
-		if !loaded {
-			loaded = true
-			ids := make([]string, len(rows))
-			for i := range rows {
-				ids[i] = rows[i].ID
-			}
-			byID, err = st.ListGrantsFor(ctx, ids)
-		}
-		return byID[id], err
+// grantsWindow loads the grants of candidates on demand. The first row that
+// needs its grants loads the grants of that row and the next size-1 rows
+// with one query; a later row past that window loads the next window. A row
+// is only ever given the grants whose artifact id is its own.
+type grantsWindow struct {
+	ctx      context.Context
+	st       Store
+	rows     []Candidate
+	size     int
+	from, to int // rows[from:to] are loaded
+	byID     map[string][]Grant
+	// err is the first load failure. Once set, every call returns it.
+	err error
+}
+
+func newGrantsWindow(ctx context.Context, st Store, rows []Candidate, size int) *grantsWindow {
+	return &grantsWindow{ctx: ctx, st: st, rows: rows, size: max(size, 1)}
+}
+
+// forRow returns the grants of rows[i].
+func (w *grantsWindow) forRow(i int) ([]Grant, error) {
+	if w.err != nil {
+		return nil, w.err
 	}
+	if i < w.from || i >= w.to {
+		w.from, w.to = i, min(len(w.rows), i+w.size)
+		ids := make([]string, 0, w.to-w.from)
+		for _, r := range w.rows[w.from:w.to] {
+			ids = append(ids, r.ID)
+		}
+		w.byID, w.err = w.st.ListGrantsFor(w.ctx, ids)
+		if w.err != nil {
+			w.from, w.to, w.byID = 0, 0, nil
+			return nil, w.err
+		}
+	}
+	return w.byID[w.rows[i].ID], nil
 }
 
 // truncatedScopesOnce limits the truncation warning to one per process, so
