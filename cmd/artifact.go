@@ -38,6 +38,9 @@ import (
 
 var (
 	artifactPublishTitle string
+	artifactPublishKey   string
+	artifactPublishNote  string
+	artifactPublishEntry string
 	artifactGetOut       string
 )
 
@@ -46,29 +49,43 @@ var artifactCmd = &cobra.Command{
 	Use:     "artifact",
 	Aliases: []string{"artifacts"},
 	Short:   "Publish and fetch artifacts",
-	Long: `Publish files as artifacts and fetch them by reference.
+	Long: `Publish files and folders as artifacts and fetch them by reference.
 
-An artifact is a published file with a stable reference,
-scion://artifact/<id>, that works from any broker and in the web UI.
+An artifact is a published file or folder with a stable reference,
+scion://artifact/<id>, that works from any broker and in the web UI. Each
+publish under the same --key adds a version; scion://artifact/<id>@<seq>
+names one version.
 Artifacts require Hub mode and the hub.artifacts experiment.
 
 Commands:
-  scion artifact publish <file> [--title <title>]   Publish a file
-  scion artifact get <ref> [--out <path>]           Fetch an artifact's file`,
+  scion artifact publish <file|dir> [--title] [--key] [--note] [--entry]
+  scion artifact get <ref> [--out <path>]      Fetch an artifact
+  scion artifact versions <ref>                List an artifact's versions`,
 }
 
 var artifactPublishCmd = &cobra.Command{
-	Use:   "publish <file>",
-	Short: "Publish a file as an artifact",
-	Long: `Publish a file as a new artifact and print its reference.
+	Use:   "publish <file|dir>",
+	Short: "Publish a file or folder as an artifact",
+	Long: `Publish a file or a folder as an artifact and print its reference.
 
 The artifact is owned by you (or by this agent) and is readable by the
 members of the current project. The hub stores the bytes, so readers do not
 need access to your filesystem.
 
+A folder is published as a bundle of its regular files (hidden files and
+folders, whose names start with ".", are left out; symbolic links are
+refused). Its entry file, the one the web UI opens, is --entry, or else
+index.html, index.md or README.md at the top of the folder.
+
+With --key, publishing again under the same key adds a new version to the
+same artifact instead of creating another one. Files unchanged since the
+current version are not uploaded again. --note describes the version.
+
 Examples:
   scion artifact publish design.md
-  scion artifact publish report.md --title "Q3 report"`,
+  scion artifact publish report.md --title "Q3 report"
+  scion artifact publish design.md --key design --note "round 2"
+  scion artifact publish ./site --entry index.html --title "Q3 site"`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		settings, client, err := requireArtifactHubClient()
@@ -104,24 +121,41 @@ func publishArtifactCmd(cmd *cobra.Command, settings *config.Settings, client hu
 	}
 	ctx, cancel := context.WithTimeout(cmd.Context(), 10*time.Minute)
 	defer cancel()
-	return publishArtifact(ctx, client.Artifacts(), cmd.OutOrStdout(), GetHubEndpoint(settings), file, artifactPublishTitle, artifactPublishScope(settings))
+	opts := bundlePublishOptions{
+		Title: artifactPublishTitle, Key: artifactPublishKey, Note: artifactPublishNote,
+		Entry: artifactPublishEntry, Scope: artifactPublishScope(settings),
+	}
+	info, err := os.Stat(file)
+	if err != nil {
+		return err
+	}
+	if info.Mode().IsRegular() && opts.Key == "" && opts.Note == "" && opts.Entry == "" {
+		return publishArtifact(ctx, client.Artifacts(), cmd.OutOrStdout(), GetHubEndpoint(settings), file, opts.Title, opts.Scope)
+	}
+	return publishBundle(ctx, client.Artifacts(), cmd.OutOrStdout(), cmd.ErrOrStderr(), GetHubEndpoint(settings), file, opts)
 }
 
 var artifactGetCmd = &cobra.Command{
 	Use:   "get <ref>",
-	Short: "Fetch an artifact's file",
-	Long: `Fetch the entry file of an artifact.
+	Short: "Fetch an artifact",
+	Long: `Fetch an artifact: its entry file, or with --out a whole bundle.
 
 <ref> is scion://artifact/<id>, scion://artifact/<id>@<seq> for a specific
-version, or a bare <id>. The file is written to stdout, or to --out (a file
-path, or an existing directory to write the file into under its own name).
-When fetching the current version, the bytes are checked against the
-sha256 recorded at publish time before anything is written; a mismatch
-writes nothing and fails.
+version, or a bare <id>.
+
+For a single-file artifact the file is written to stdout, or to --out (a
+file path, or an existing directory to write the file into under its own
+name). For a bundle, the entry file is written to stdout, or with --out
+every file of the version is written under the --out directory (created
+if needed), keeping its relative path.
+
+Every file is checked against the sha256 recorded at publish time before
+it is written; a mismatch writes nothing for that file and fails.
 
 Examples:
   scion artifact get scion://artifact/5f1c2d3e-...
-  scion artifact get scion://artifact/5f1c2d3e-...@1 --out ./design.md`,
+  scion artifact get scion://artifact/5f1c2d3e-...@1 --out ./design.md
+  scion artifact get scion://artifact/5f1c2d3e-...@2 --out ./v2/`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		_, client, err := requireArtifactHubClient()
@@ -134,10 +168,36 @@ Examples:
 	},
 }
 
+var artifactVersionsCmd = &cobra.Command{
+	Use:   "versions <ref>",
+	Short: "List an artifact's versions",
+	Long: `List the versions of an artifact, newest first.
+
+Each line shows the version's reference, its kind, when and by whom it
+was published, its file count and size, and its note. The current
+version is marked with *.
+
+Example:
+  scion artifact versions scion://artifact/5f1c2d3e-...`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		_, client, err := requireArtifactHubClient()
+		if err != nil {
+			return err
+		}
+		ctx, cancel := context.WithTimeout(cmd.Context(), time.Minute)
+		defer cancel()
+		return listArtifactVersions(ctx, client.Artifacts(), cmd.OutOrStdout(), args[0])
+	},
+}
+
 func init() {
-	artifactPublishCmd.Flags().StringVar(&artifactPublishTitle, "title", "", "Artifact title (default: the file name)")
+	artifactPublishCmd.Flags().StringVar(&artifactPublishTitle, "title", "", "Artifact title (default: the entry file name)")
+	artifactPublishCmd.Flags().StringVar(&artifactPublishKey, "key", "", "Stable key: publishing again under it adds a version")
+	artifactPublishCmd.Flags().StringVar(&artifactPublishNote, "note", "", "Note describing this version")
+	artifactPublishCmd.Flags().StringVar(&artifactPublishEntry, "entry", "", "Entry file of a folder, relative to it")
 	artifactGetCmd.Flags().StringVarP(&artifactGetOut, "out", "o", "", "Write to this file or directory instead of stdout")
-	artifactCmd.AddCommand(artifactPublishCmd, artifactGetCmd)
+	artifactCmd.AddCommand(artifactPublishCmd, artifactGetCmd, artifactVersionsCmd)
 	rootCmd.AddCommand(artifactCmd)
 }
 
@@ -215,29 +275,38 @@ func artifactPageURL(hubEndpoint, projectID, id string) string {
 	return strings.TrimRight(hubEndpoint, "/") + "/projects/" + url.PathEscape(projectID) + "/artifacts/" + url.PathEscape(id)
 }
 
-// getArtifact fetches the entry file of the artifact named by ref and
-// writes it to outPath, or to stdout when outPath is empty.
+// getArtifact fetches the artifact named by ref. A single file, or a
+// bundle's entry file when outPath is empty, goes to outPath or stdout; a
+// bundle with outPath is written under that directory.
 func getArtifact(ctx context.Context, svc hubclient.ArtifactService, stdout, stderr io.Writer, ref, outPath string) error {
 	id, seq, err := artifacts.ParseRef(ref)
 	if err != nil {
 		return err
 	}
-	meta, err := svc.Get(ctx, id)
+	var meta *hubclient.ArtifactResponse
+	if seq > 0 {
+		meta, err = svc.GetVersion(ctx, id, seq)
+	} else {
+		meta, err = svc.Get(ctx, id)
+	}
 	if err != nil {
 		return fmt.Errorf("get artifact: %w%s", err, artifactErrorHint(err, false))
 	}
 	if meta.Version == nil {
 		return fmt.Errorf("artifact %s has no published version", id)
 	}
-	// Single-file artifacts keep one entry path; the current version's
-	// manifest names it. Its digest is known only for the current version.
+	// Pin every read to the version whose manifest was just read, so the
+	// digests match even if a new version lands meanwhile.
+	seq = meta.Version.Seq
+	files := bundleFiles(meta.Version.Files)
+	if len(files) > 1 && outPath != "" {
+		return writeBundle(ctx, svc, stderr, id, seq, files, outPath)
+	}
 	entry := meta.Version.EntryPath
 	wantDigest := ""
-	if seq == 0 || seq == meta.Version.Seq {
-		for _, f := range meta.Version.Files {
-			if f.Path == entry {
-				wantDigest = f.SHA256
-			}
+	for _, f := range files {
+		if f.Path == entry {
+			wantDigest = f.SHA256
 		}
 	}
 	rc, err := svc.OpenFile(ctx, id, seq, entry)
@@ -267,12 +336,23 @@ func getArtifact(ctx context.Context, svc hubclient.ArtifactService, stdout, std
 	if st, err := os.Stat(outPath); err == nil && st.IsDir() {
 		target = filepath.Join(outPath, path.Base(entry))
 	}
+	if err := writeVerifiedFile(target, rc, wantDigest); err != nil {
+		return err
+	}
+	_, _ = fmt.Fprintf(stderr, "Wrote %s\n", target)
+	return nil
+}
+
+// writeVerifiedFile writes src to target through a temporary file in the
+// same directory, renaming it into place only when the bytes match
+// wantDigest.
+func writeVerifiedFile(target string, src io.Reader, wantDigest string) error {
 	tmp, err := os.CreateTemp(filepath.Dir(target), ".artifact-*")
 	if err != nil {
 		return err
 	}
 	defer func() { _ = os.Remove(tmp.Name()) }()
-	if err := copyVerified(tmp, rc, wantDigest); err != nil {
+	if err := copyVerified(tmp, src, wantDigest); err != nil {
 		_ = tmp.Close()
 		return err
 	}
@@ -285,11 +365,7 @@ func getArtifact(ctx context.Context, svc hubclient.ArtifactService, stdout, std
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(tmp.Name(), target); err != nil {
-		return err
-	}
-	_, _ = fmt.Fprintf(stderr, "Wrote %s\n", target)
-	return nil
+	return os.Rename(tmp.Name(), target)
 }
 
 // artifactErrorHint explains the hub's deliberately uniform answers. A read

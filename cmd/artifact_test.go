@@ -57,7 +57,7 @@ func fakeArtifactHub(t *testing.T, body []byte, digest string) (*httptest.Server
 				Artifact: hubclient.Artifact{ID: testArtifactID, ScopeRef: "proj-1", CurrentSeq: 1, Title: r.URL.Query().Get("title")},
 				Version:  &hubclient.ArtifactVersion{Seq: 1, EntryPath: r.URL.Query().Get("name")},
 			})
-		case r.URL.Path == "/api/v1/artifacts/"+testArtifactID:
+		case r.URL.Path == "/api/v1/artifacts/"+testArtifactID, r.URL.Path == "/api/v1/artifacts/"+testArtifactID+"/versions/1":
 			_ = json.NewEncoder(w).Encode(hubclient.ArtifactResponse{
 				Artifact: hubclient.Artifact{ID: testArtifactID, CurrentSeq: 1},
 				Version: &hubclient.ArtifactVersion{Seq: 1, EntryPath: "design.md",
@@ -193,7 +193,7 @@ func TestAgentModeArtifactVerbs(t *testing.T) {
 	root.AddCommand(cloneCommandShape(real))
 	applyModeRestrictions(root)
 	names := collectCommandNames(root)
-	assert.Equal(t, []string{"artifact", "artifact.get", "artifact.publish"}, names)
+	assert.Equal(t, []string{"artifact", "artifact.get", "artifact.publish", "artifact.versions"}, names)
 	assert.False(t, strings.Contains(strings.Join(names, ","), "share"))
 }
 
