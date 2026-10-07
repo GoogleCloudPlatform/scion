@@ -77,10 +77,17 @@ type ServerConfig struct {
 	ContainerHubEndpoint string
 	// ColocatedPublicHubEndpoint is the co-located hub's public URL when this
 	// host does not serve it, so containers cannot reach it (e.g. a Cloud Run
-	// URL derived from the IAP audience on a single-node VM). An agent hub
-	// endpoint equal to it is replaced by ContainerHubEndpoint, except on
-	// Kubernetes runtimes. Empty disables the rewrite.
+	// URL derived from the IAP audience on a single-node VM). On the docker
+	// and podman runtimes, an agent hub endpoint equal to it is replaced by
+	// that runtime's ColocatedRuntimeHubEndpoints entry. Empty disables the
+	// rewrite.
 	ColocatedPublicHubEndpoint string
+	// ColocatedRuntimeHubEndpoints maps a dispatch runtime ("docker",
+	// "podman") to the URL that replaces ColocatedPublicHubEndpoint for its
+	// agents. It is independent of the broker's default runtime, so a
+	// kubernetes-default broker still rewrites agents dispatched through a
+	// docker profile. A runtime without an entry keeps the public URL.
+	ColocatedRuntimeHubEndpoints map[string]string
 	// HubListenPort is the port the co-located hub HTTP server is listening
 	// on (e.g. 8080 for the combined web+API server). Used by cloudrun-sandbox
 	// to construct the link-local hub endpoint for sandboxes. Zero means the

@@ -29,7 +29,7 @@ import (
 // TestScheduledDispatch_WritesSlugIdentityKey mirrors
 // TestCreateAgentInProject_WritesSlugIdentityKey for the scheduler's
 // dispatch_agent create path: it must go through the same
-// createAgentWithIdentityKey helper as the HTTP create path, so a
+// commitAgentCreate transaction as the HTTP create path, so a
 // successful dispatch also writes an identity-key row for the new agent's
 // Slug.
 func TestScheduledDispatch_WritesSlugIdentityKey(t *testing.T) {

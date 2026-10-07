@@ -103,5 +103,15 @@ func (d *HTTPAgentDispatcher) DispatchAgentDeleteLocalOnly(ctx context.Context, 
 	if errors.Is(err, ErrLifecycleDeferred) {
 		return fmt.Errorf("localOnly delete not supported for a cross-node broker: %w", err)
 	}
+	if errors.Is(err, ErrDeleteRunMismatch) {
+		// The run this cleanup names has no entry on the broker; another
+		// run holds the name there (for example the moved agent's new run,
+		// seen through a runtime namespace shared with the target). That
+		// run is left alone, and no row is finalized by this cleanup, so
+		// it succeeds as for any delete 404 (ptone/scion#3080).
+		d.log.Info("Dispatcher: localOnly delete found another run holding the name; nothing to remove",
+			"agent_id", agent.ID, "agent", agent.Slug, "broker_id", agent.RuntimeBrokerID, "error", err)
+		return nil
+	}
 	return err
 }

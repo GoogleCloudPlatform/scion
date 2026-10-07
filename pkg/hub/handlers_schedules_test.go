@@ -51,6 +51,7 @@ func initScheduleTest(t *testing.T, srv *Server, s store.Store) (*Server, store.
 		Slug: "schedule-test-project",
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
+	seedScheduleAuthorAgent(t, s, project.ID)
 
 	return srv, s, project.ID
 }
@@ -165,8 +166,8 @@ func setupScopedDispatchAgentOwner(t *testing.T, srv *Server, s store.Store, pro
 // scheduled_event.<action> on projectID at bearer gate stage 3b. No
 // scheduled_event permission is eligible for a project boundary, so a
 // project-scoped UAT is refused before any schedule handler logic runs.
-// TestAuthorizeScheduledDispatchAgentAuthoring_HubScopedUATDenied checks the
-// dispatch_agent authoring gate itself for every scoped UAT shape.
+// TestAuthorizeScheduledDispatchAgentAuthoring_Precondition checks the
+// dispatch_agent authoring precondition itself for every credential shape.
 func assertScheduledEventBoundaryIneligible(t *testing.T, srv *Server, identity Identity, projectID string, action Action) {
 	t.Helper()
 	decision := srv.authzService.Decide(context.Background(), AuthzRequest{
@@ -209,9 +210,7 @@ func TestSchedule_CreateDispatchAgentScopedUATDenied(t *testing.T) {
 	})
 
 	t.Run("hub-scoped UAT for the same user denied", func(t *testing.T) {
-		// A hub-scoped UAT is refused by the project-scoped access check;
-		// TestAuthorizeScheduledDispatchAgentAuthoring_HubScopedUATDenied
-		// covers the authoring gate itself for this credential shape.
+		// A hub-scoped UAT is refused by the project-scoped access check.
 		scoped := NewScopedUserIdentity(ownerUser, "", []string{"scheduled_event:create", "agent:create"})
 		rec := doScheduleAgentRequest(t, srv, scoped, projectID, "", http.MethodPost, req)
 		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
