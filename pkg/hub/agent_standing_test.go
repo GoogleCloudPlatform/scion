@@ -367,7 +367,7 @@ func TestStandingGates_RemovedRootDenied(t *testing.T) {
 			Error struct{ Message string } `json:"error"`
 		}
 		_ = json.Unmarshal(rec.Body.Bytes(), &body)
-		assert.NotContains(t, body.Error.Message, "service account", "refused before the assignment lookup")
+		assert.Equal(t, "Insufficient permissions", body.Error.Message, "refused by the standing check, before the assignment lookup")
 	})
 }
 
@@ -376,6 +376,8 @@ func TestStandingGates_HeldAgent(t *testing.T) {
 	f := newMSFixture(t, "gates-held")
 	ctx := context.Background()
 	tokA := f.agentToken(f.agentA)
+	f.agentA.AppliedConfig = &store.AgentAppliedConfig{AgentRole: string(AgentRoleFull)}
+	require.NoError(t, f.s.UpdateAgent(ctx, f.agentA))
 	f.hold(f.agentA.ID, f.userID)
 
 	t.Run("agentTokenAuth", func(t *testing.T) {
@@ -415,13 +417,37 @@ func TestStandingGates_HeldAgent(t *testing.T) {
 		assert.Equal(t, http.StatusForbidden, status)
 		assert.Equal(t, ReasonDeniedByPolicy, reason)
 	})
+	t.Run("scheduledMessageToHeldTarget", func(t *testing.T) {
+		err := f.srv.messageEventHandler()(ctx, store.ScheduledEvent{
+			ID: tid("ms-held-msg-evt"), ProjectID: f.projectID, EventType: "message",
+			Payload: `{"agentId":"` + f.agentA.ID + `","message":"hello"}`, CreatedBy: f.ownerID,
+		})
+		require.Error(t, err)
+		assert.Equal(t, errScheduledMessageRefused.Error(), err.Error())
+	})
+	t.Run("scheduledDispatchByHeldAuthor", func(t *testing.T) {
+		evt := withAgentRevision(t, f.srv, store.ScheduledEvent{
+			ID: tid("ms-held-dispatch-evt"), ProjectID: f.projectID, EventType: "dispatch_agent",
+			Payload: `{"agentName":"ms-held-sched-child","task":"t"}`, CreatedBy: f.agentA.ID,
+		}, f.agentA.ID)
+		err := f.srv.dispatchAgentEventHandler()(ctx, evt)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "scheduled dispatch refused")
+		_, getErr := f.s.GetAgentBySlug(ctx, f.projectID, "ms-held-sched-child")
+		assert.ErrorIs(t, getErr, store.ErrNotFound)
+	})
+	t.Run("agentCreateHeldCreator", func(t *testing.T) {
+		// The creating agent's chain admits the create; the hold refuses it.
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", nil)
+		req = req.WithContext(contextWithIdentity(req.Context(), f.agentIdentity(f.agentA)))
+		assert.False(t, f.srv.authorizeAgentCreate(rec, req, f.projectID))
+		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	})
 	t.Run("reconcileDelivery", func(t *testing.T) {
 		err := f.srv.deliverMessage(ctx, &store.Message{AgentID: f.agentA.ID, Msg: "hi"})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "suspended")
-	})
-	t.Run("dmToHeldTarget", func(t *testing.T) {
-		assert.NotNil(t, heldTargetDMError(f.agentA))
 	})
 	t.Run("suspendedPrimaryWakeable", func(t *testing.T) {
 		a := *f.agentA
