@@ -17,8 +17,6 @@ package artifacts
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"hash/maphash"
-	"sort"
 	"strings"
 )
 
@@ -28,14 +26,25 @@ import (
 // _remote/<sha256(url)>. The renderer then loads that copy from the hub
 // instead of the remote server.
 //
-// Finding the URLs is a scan of the entry's first imageScanWindow bytes.
-// The scan treats every candidate URL as an opaque substring of the window:
-// it accepts one only if a cheap byte-level check passes, keeps it as a
-// substring (no copy) until it is known to be new, and stops once it holds
-// limit distinct candidates. Only the kept candidates are copied and
-// normalized, and only the URLs the fetcher fetches are ever parsed. Every
-// pass moves forward through the window, and no position is examined more
-// than a fixed number of times, so the work is linear in the window.
+// Finding the URLs is one forward scan of the entry's first imageScanWindow
+// bytes for inline images (![alt](url)) and <img> tags. Reference-style
+// images are not fetched. The scan treats every candidate URL as an opaque
+// substring of the window: it accepts one only if a cheap byte-level check
+// passes, keeps it as a substring (no copy) until it is known to be new, and
+// stops once it holds limit distinct candidates. Only the kept candidates
+// are copied and normalized, and only the URLs the fetcher fetches are ever
+// parsed.
+//
+// No byte of the window is examined more than seven times. A byte outside
+// any candidate is read once, by the main loop. A byte of an inline image's
+// destination is read by the inline destination scan (the main loop resumes
+// after it), and a byte of an <img> tag by the tag scan and by attrValue
+// (the main loop resumes after the tag): at most two reads, and these
+// regions never overlap. A byte of a candidate URL is then read once more by
+// the duplicate check, and, if the candidate is kept, three times by
+// normalization (decoding once, the canonical form twice) and once by the
+// duplicate check of the normalized URL: at most seven reads in all. The
+// work is therefore linear in the window, and the tests count it.
 
 // RemotePrefix is the reserved path prefix of the files the hub fetched at
 // publish time. Uploads may not use it.
@@ -64,9 +73,6 @@ const (
 	// maxImageURLBytes caps a candidate URL, before and after decoding.
 	maxImageURLBytes = 2048
 
-	// maxLabelBytes caps a reference label (the CommonMark limit).
-	maxLabelBytes = 999
-
 	// maxTagBytes caps an <img> tag.
 	maxTagBytes = 4096
 
@@ -76,27 +82,15 @@ const (
 
 // candidate kinds: how a raw candidate is decoded.
 const (
-	fromMarkdown  = iota // a markdown destination (inline or definition)
+	fromMarkdown  = iota // an inline markdown destination
 	fromAttribute        // an HTML attribute value (<img src>)
 )
 
 // imageHit is one candidate URL, as an undecoded substring of the window,
-// and where it is first used.
+// in order of first use.
 type imageHit struct {
-	pos  int
 	raw  string
 	kind int
-}
-
-// labelUse is a reference image (![alt][label], ![label][], ![label])
-// waiting for its definition.
-type labelUse struct {
-	pos   int
-	label string
-	hash  uint64
-	// def is the definition's destination once found.
-	def     string
-	defined bool
 }
 
 // imageExtract is the result of scanning a markdown entry.
@@ -105,8 +99,7 @@ type imageExtract struct {
 	// at most the scan's limit.
 	urls []string
 	// full is true when the scan stopped because it had found limit
-	// distinct candidates, or left out a reference label because it held
-	// limit of them.
+	// distinct candidates.
 	full bool
 	// steps counts the bytes the scan examined, for the linearity tests.
 	steps int
@@ -116,105 +109,62 @@ type imageExtract struct {
 }
 
 // imageScan is the state of one scan. It only ever holds substrings of doc
-// and at most limit candidates and limit reference uses.
+// and at most limit candidates.
 type imageScan struct {
 	doc   string
 	limit int
 	steps int
 
-	seen   map[string]struct{}
-	hits   []imageHit
-	uses   []labelUse
-	byHash map[uint64][]int
-	seed   maphash.Seed
-	full   bool
-	// usesFull is set when a reference label was not recorded because the
-	// scan already held limit labels.
-	usesFull bool
+	seen map[string]struct{}
+	hits []imageHit
+	full bool
 }
 
 // extractImageURLs returns the absolute http(s) image URLs doc (already cut
-// to the scan window) references through markdown images, reference images
-// and <img> tags, at most limit of them.
+// to the scan window) references through inline markdown images and <img>
+// tags, at most limit of them.
 func extractImageURLs(doc string, limit int) imageExtract {
 	if limit <= 0 {
 		return imageExtract{}
 	}
-	s := &imageScan{doc: doc, limit: limit, seen: make(map[string]struct{}, min(limit, 64)), seed: maphash.MakeSeed()}
-	s.scanInline()
-	if len(s.uses) > 0 {
-		s.scanDefinitions()
-	}
+	s := &imageScan{doc: doc, limit: limit, seen: make(map[string]struct{}, min(limit, 64))}
+	s.scan()
 	return s.result()
 }
 
 // addHit records a candidate unless it is a duplicate or the scan is full.
-func (s *imageScan) addHit(pos int, raw string, kind int) {
+func (s *imageScan) addHit(raw string, kind int) {
 	if s.full {
 		return
 	}
 	key := raw
+	s.steps += len(raw) // the duplicate check hashes the candidate once
 	if _, dup := s.seen[key]; dup {
 		return
 	}
 	s.seen[key] = struct{}{}
-	s.hits = append(s.hits, imageHit{pos: pos, raw: raw, kind: kind})
+	s.hits = append(s.hits, imageHit{raw: raw, kind: kind})
 	if len(s.seen) >= s.limit {
 		s.full = true
 	}
 }
 
-// addUse records a reference image's label.
-//
-// A label is recorded once, at its first use: later uses of the same label
-// name the same image. When the scan already holds limit labels, a new one
-// is not recorded and the result reports that the scan filled up.
-func (s *imageScan) addUse(pos int, label string) {
-	if s.full || s.usesFull || label == "" || len(label) > maxLabelBytes {
-		return
-	}
-	h, ok := s.labelHash(label)
-	if !ok {
-		return
-	}
-	for _, k := range s.byHash[h] {
-		s.steps += len(label) + len(s.uses[k].label)
-		if sameLabel(s.uses[k].label, label) {
-			return
-		}
-	}
-	if len(s.uses) >= s.limit {
-		s.usesFull = true
-		return
-	}
-	if s.byHash == nil {
-		s.byHash = make(map[uint64][]int)
-	}
-	s.byHash[h] = append(s.byHash[h], len(s.uses))
-	s.uses = append(s.uses, labelUse{pos: pos, label: label, hash: h})
-}
-
 // bracket is an open '[' the inline scan remembers.
 type bracket struct {
-	start int // first byte after '['
-	image bool
-	// nested is set when another '[' opened inside this one. Its text then
-	// cannot be a reference label (labels hold no unescaped brackets), so
-	// alt texts used as labels never overlap and each byte is hashed by
-	// at most one use.
-	nested bool
+	image bool // opened by "!["
 }
 
-// scanInline is the first pass: inline images, reference image uses and
-// <img> tags, in one forward pass.
+// scan reads the window once, forward, for inline images and <img> tags.
 //
-// Inner scans (a destination, a label, a tag) only read bytes that cannot
-// start another construct of the same kind before the point where they
-// stop, so the regions they read do not overlap and the pass is linear.
-func (s *imageScan) scanInline() {
+// Its inner scans (an inline destination, an <img> tag) only read bytes
+// that cannot start another construct of the same kind before the point
+// where they stop: a destination holds no '(' , '[' or ']', and a tag scan
+// stops at the next '<' or '>'. So the regions they read do not overlap.
+func (s *imageScan) scan() {
 	doc := s.doc
 	// The open brackets, a ring of the most recent bracketDepth: an older
-	// one is forgotten when a newer one needs its slot.
+	// one is forgotten when a newer one needs its slot. Only whether a
+	// bracket opened an image matters.
 	var stack [bracketDepth]bracket
 	top, depth := 0, 0
 	bang := -2 // index of the last unescaped '!'
@@ -226,11 +176,8 @@ func (s *imageScan) scanInline() {
 		case '!':
 			bang = i
 		case '[':
-			if depth > 0 {
-				stack[top].nested = true
-			}
 			top = (top + 1) % bracketDepth
-			stack[top] = bracket{start: i + 1, image: bang == i-1}
+			stack[top] = bracket{image: bang == i-1}
 			depth = min(depth+1, bracketDepth)
 		case ']':
 			if depth == 0 {
@@ -239,10 +186,14 @@ func (s *imageScan) scanInline() {
 			b := stack[top]
 			top = (top + bracketDepth - 1) % bracketDepth
 			depth--
-			if !b.image {
-				continue
+			// An inline image: "![alt](url)". Anything else after an
+			// image's ']' (a reference) is not fetched.
+			if b.image && i+1 < len(doc) && doc[i+1] == '(' {
+				if raw, next, ok := s.inlineDestination(i + 2); ok {
+					s.addHit(raw, fromMarkdown)
+					i = next - 1 // resume at the byte that ended it
+				}
 			}
-			s.imageAfterAlt(b.start, i, b.nested)
 		case '<':
 			if end, ok := s.imgTag(i); ok {
 				i = end
@@ -251,63 +202,15 @@ func (s *imageScan) scanInline() {
 	}
 }
 
-// imageAfterAlt handles what follows the ']' at close of an image whose alt
-// text starts at altStart.
-//
-// nested reports that the alt text holds another bracket, so it is not
-// used as a label (collapsed and shortcut references).
-func (s *imageScan) imageAfterAlt(altStart, close int, nested bool) {
-	doc := s.doc
-	next := close + 1
-	switch {
-	case next < len(doc) && doc[next] == '(':
-		if raw, ok := s.inlineDestination(next + 1); ok {
-			s.addHit(close, raw, fromMarkdown)
-		}
-	case next < len(doc) && doc[next] == '[':
-		label, ok := s.label(next + 1)
-		if !ok {
-			return
-		}
-		if label == "" {
-			if nested {
-				return
-			}
-			label = doc[altStart:close]
-		}
-		s.addUse(close, label)
-	default:
-		if !nested {
-			s.addUse(close, doc[altStart:close])
-		}
-	}
-}
-
-// label reads a reference label starting at i (just after '[') up to its
-// ']'. It stops at the first '[' or ']', so the bytes it reads hold no
-// bracket the outer scan would act on. The label's length is checked where
-// a use is recorded (addUse).
-func (s *imageScan) label(i int) (string, bool) {
-	doc := s.doc
-	for j := i; j < len(doc); j++ {
-		s.steps++
-		switch doc[j] {
-		case '\\':
-			j++
-		case '[':
-			return "", false
-		case ']':
-			return doc[i:j], true
-		}
-	}
-	return "", false
-}
-
 // inlineDestination reads the destination of an inline image starting at
 // i (just after '('). It accepts <url> or a bare url that starts with an
 // http(s) scheme and holds only bytes a kept URL may hold, ending at ')'
 // or at whitespace before a title. The bytes it reads hold no '[' or ']'.
-func (s *imageScan) inlineDestination(i int) (string, bool) {
+//
+// It also returns the index of the byte that ended the destination, where
+// the main loop resumes, so the main loop does not read the destination
+// again.
+func (s *imageScan) inlineDestination(i int) (string, int, bool) {
 	doc := s.doc
 	for i < len(doc) && (doc[i] == ' ' || doc[i] == '\t') {
 		s.steps++
@@ -318,7 +221,7 @@ func (s *imageScan) inlineDestination(i int) (string, bool) {
 		i++
 	}
 	if !hasHTTPScheme(doc[i:]) {
-		return "", false
+		return "", 0, false
 	}
 	j := i
 	for j < len(doc) && j-i < maxImageURLBytes && markdownURLByte(doc[j]) {
@@ -326,17 +229,17 @@ func (s *imageScan) inlineDestination(i int) (string, bool) {
 		j++
 	}
 	if j >= len(doc) || j-i >= maxImageURLBytes {
-		return "", false
+		return "", 0, false
 	}
 	end := doc[j]
 	if angle {
 		if end != '>' {
-			return "", false
+			return "", 0, false
 		}
 	} else if end != ')' && end != ' ' && end != '\t' && end != '\n' {
-		return "", false
+		return "", 0, false
 	}
-	return doc[i:j], true
+	return doc[i:j], j, true
 }
 
 // imgTag reads an <img ...> tag at i and records its src. It reports the
@@ -368,7 +271,7 @@ func (s *imageScan) imgTag(i int) (int, bool) {
 	if src, ok := attrValue(doc[i+4:j], "src"); ok {
 		v := trimURLSpace(src)
 		if hasHTTPSchemeLoose(v) && len(v) <= maxImageURLBytes {
-			s.addHit(i, v, fromAttribute)
+			s.addHit(v, fromAttribute)
 		}
 	}
 	return j, true
@@ -452,137 +355,14 @@ func trimURLSpace(v string) string {
 	return v
 }
 
-// scanDefinitions is the second pass: reference definitions
-// ([label]: url) for the labels the first pass saw. Each line is read once
-// from its start; the first definition of a label wins.
-func (s *imageScan) scanDefinitions() {
-	doc := s.doc
-	pending := len(s.uses)
-	for i := 0; i < len(doc) && pending > 0; {
-		lineEnd := i
-		// Up to three spaces of indentation, then '['.
-		j := i
-		for j < len(doc) && j-i < 3 && doc[j] == ' ' {
-			s.steps++
-			j++
-		}
-		if j < len(doc) && doc[j] == '[' {
-			if label, ok := s.label(j + 1); ok && label != "" {
-				k := j + 1 + len(label) + 1
-				if k < len(doc) && doc[k] == ':' {
-					pending -= s.definition(label, k+1)
-				}
-			}
-		}
-		// Move to the next line from where this line's scan stopped.
-		if lineEnd < j {
-			lineEnd = j
-		}
-		nl := strings.IndexByte(doc[lineEnd:], '\n')
-		if nl < 0 {
-			s.steps += len(doc) - lineEnd
-			break
-		}
-		s.steps += nl + 1
-		i = lineEnd + nl + 1
-	}
-}
-
-// definition resolves the uses of label to the destination starting at i
-// (just after "]:"), unless an earlier definition did. It returns how many
-// uses it resolved.
-func (s *imageScan) definition(label string, i int) int {
-	h, ok := s.labelHash(label)
-	if !ok {
-		return 0
-	}
-	idx := s.byHash[h]
-	if len(idx) == 0 {
-		return 0
-	}
-	doc := s.doc
-	// Whitespace, including at most one line break.
-	nl := 0
-	for i < len(doc) && (doc[i] == ' ' || doc[i] == '\t' || (doc[i] == '\n' && nl == 0)) {
-		if doc[i] == '\n' {
-			nl++
-		}
-		s.steps++
-		i++
-	}
-	angle := i < len(doc) && doc[i] == '<'
-	if angle {
-		i++
-	}
-	if !hasHTTPScheme(doc[i:]) {
-		return s.markDefined(h, idx, label, "")
-	}
-	// An over-long destination is kept here and refused by normalization,
-	// which checks the length first.
-	j := i
-	for j < len(doc) && markdownURLByte(doc[j]) {
-		s.steps++
-		j++
-	}
-	raw := doc[i:j]
-	switch {
-	case angle:
-		if j >= len(doc) || doc[j] != '>' {
-			raw = ""
-		}
-	case j < len(doc) && doc[j] != ' ' && doc[j] != '\t' && doc[j] != '\n':
-		raw = ""
-	}
-	return s.markDefined(h, idx, label, raw)
-}
-
-// markDefined gives every not yet defined use whose label matches label
-// the destination raw ("" for one that cannot be used), and forgets the
-// uses it resolved, so a later definition of the same label costs only
-// its hash lookup.
-func (s *imageScan) markDefined(h uint64, idx []int, label, raw string) int {
-	n := 0
-	rest := idx[:0]
-	for _, k := range idx {
-		u := &s.uses[k]
-		s.steps += len(u.label) + len(label)
-		if !u.defined && sameLabel(u.label, label) {
-			u.defined, u.def = true, raw
-			n++
-			continue
-		}
-		if !u.defined {
-			rest = append(rest, k)
-		}
-	}
-	if len(rest) == 0 {
-		delete(s.byHash, h)
-	} else {
-		s.byHash[h] = rest
-	}
-	return n
-}
-
-// result merges the inline candidates and the resolved reference uses in
-// order of first use, then copies, decodes and normalizes each one, keeping
-// at most limit distinct URLs.
+// result copies, decodes and normalizes the candidates in order of first
+// use, keeping at most limit distinct URLs.
 func (s *imageScan) result() imageExtract {
-	hits := s.hits
-	for _, u := range s.uses {
-		if u.defined && u.def != "" {
-			hits = append(hits, imageHit{pos: u.pos, raw: u.def, kind: fromMarkdown})
-		}
-	}
-	sort.SliceStable(hits, func(a, b int) bool { return hits[a].pos < hits[b].pos })
-	out := imageExtract{full: s.full || s.usesFull, steps: s.steps}
-	// hits holds at most limit inline candidates and limit reference uses;
-	// the loop below keeps at most limit URLs.
-	kept := make(map[string]struct{}, len(hits))
-	for _, h := range hits {
-		if len(out.urls) >= s.limit {
-			out.full = true
-			break
-		}
+	out := imageExtract{full: s.full, steps: s.steps}
+	kept := make(map[string]struct{}, len(s.hits))
+	// s.hits holds at most limit candidates, so at most limit URLs are
+	// kept.
+	for _, h := range s.hits {
 		before := out.steps
 		out.normalized++
 		u, ok := normalizeCounted(h.raw, h.kind, &out.steps)
@@ -590,6 +370,7 @@ func (s *imageScan) result() imageExtract {
 		if !ok {
 			continue
 		}
+		out.steps += len(u) // the duplicate check hashes the URL once
 		if _, dup := kept[u]; dup {
 			continue
 		}
@@ -638,66 +419,4 @@ func markdownURLByte(c byte) bool {
 		return false
 	}
 	return true
-}
-
-// labelHash hashes a label in its matching form (see nextLabelByte) with
-// the scan's random seed. Labels with no visible text are refused.
-func (s *imageScan) labelHash(label string) (uint64, bool) {
-	s.steps += len(label)
-	var h maphash.Hash
-	h.SetSeed(s.seed)
-	k, started, n := 0, false, 0
-	for {
-		c, ok := nextLabelByte(label, &k, &started)
-		if !ok {
-			break
-		}
-		_ = h.WriteByte(c)
-		n++
-	}
-	return h.Sum64(), n > 0
-}
-
-// nextLabelByte returns the next byte of label's matching form: ASCII
-// letters folded to lower case, each run of whitespace inside the label as
-// one space, leading and trailing whitespace dropped. (Labels that differ
-// only in the case of non-ASCII letters do not match; such an image shows
-// its placeholder.)
-func nextLabelByte(s string, k *int, started *bool) (byte, bool) {
-	sawSpace := false
-	for *k < len(s) {
-		c := s[*k]
-		if c == ' ' || c == '\t' || c == '\n' || c == '\r' {
-			sawSpace = true
-			*k++
-			continue
-		}
-		if sawSpace && *started {
-			return ' ', true
-		}
-		*k++
-		*started = true
-		if c >= 'A' && c <= 'Z' {
-			c += 'a' - 'A'
-		}
-		return c, true
-	}
-	return 0, false
-}
-
-// sameLabel compares two labels in their matching form without building
-// it.
-func sameLabel(a, b string) bool {
-	i, j := 0, 0
-	sa, sb := false, false
-	for {
-		ca, okA := nextLabelByte(a, &i, &sa)
-		cb, okB := nextLabelByte(b, &j, &sb)
-		if okA != okB || ca != cb {
-			return false
-		}
-		if !okA {
-			return true
-		}
-	}
 }

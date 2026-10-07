@@ -62,7 +62,7 @@ func remoteExtractLimit(l RemoteImageLimits) int { return 4 * l.MaxCount }
 // per-image warnings.
 const (
 	warnBeyondWindow      = "remote images beyond the first 2 MiB of the entry were not fetched"
-	warnTooManyReferences = "the entry has more image references than the hub reads; later remote images were not fetched"
+	warnTooManyReferences = "the entry has more images than the hub reads; later remote images were not fetched"
 )
 
 // publishDeadlineMargin is the time a publish keeps for storing the fetched

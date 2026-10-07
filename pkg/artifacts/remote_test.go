@@ -706,3 +706,28 @@ func TestFinalizeWorkRunsUnderTheWorkLimit(t *testing.T) {
 		}
 	}
 }
+
+// TestReferenceStyleImagesAreNotFetched: reference-style images (full,
+// collapsed and shortcut, with their definitions) get no manifest row and
+// cause no fetch, so the preview shows them as not fetched; inline images
+// in the same entry are fetched.
+func TestReferenceStyleImagesAreNotFetched(t *testing.T) {
+	f := newFixture(t, false)
+	inline := "https://img.example/inline.png"
+	ff := &fakeFetcher{bodies: map[string][]byte{inline: testPNG}}
+	f.useFetcher(ff)
+	md := "![full][a] ![b][] ![c]\n![i](" + inline + ")\n\n" +
+		"[a]: https://img.example/a.png\n[b]: https://img.example/b.png\n[c]: <https://img.example/c.png>\n"
+	resp := f.publish(agentA, "doc.md", []byte(md), "")
+	if strings.Join(ff.calls, " ") != inline {
+		t.Errorf("fetches %v, want only the inline image", ff.calls)
+	}
+	for _, fi := range resp.Version.Files {
+		if fi.Origin == FileOriginRemote && fi.SourceURL != inline {
+			t.Errorf("remote row for a reference-style image: %+v", fi)
+		}
+	}
+	if resp.Version.FileCount != 2 || len(resp.Warnings) != 0 {
+		t.Errorf("files %d, warnings %q", resp.Version.FileCount, resp.Warnings)
+	}
+}

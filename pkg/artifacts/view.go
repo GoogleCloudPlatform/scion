@@ -19,7 +19,6 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
-	"hash/maphash"
 	"io"
 	"log/slog"
 	"net/http"
@@ -313,9 +312,8 @@ func (s *Service) entryWindow(r *http.Request, b backend, entry *File) (string, 
 // only <img> tags, each up to its first '>' and never past the next '<', so
 // it is linear in the window.
 func htmlHasRemoteImages(doc string) bool {
-	// limit 1: the scan stops at the first remote image. Labels are never
-	// hashed on this path; the seed is set anyway.
-	s := &imageScan{doc: doc, limit: 1, seen: map[string]struct{}{}, seed: maphash.MakeSeed()}
+	// limit 1: the scan stops at the first remote image.
+	s := &imageScan{doc: doc, limit: 1, seen: map[string]struct{}{}}
 	for i := 0; i < len(doc) && !s.full; {
 		k := strings.IndexByte(doc[i:], '<')
 		if k < 0 {
