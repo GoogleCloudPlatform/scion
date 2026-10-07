@@ -264,7 +264,7 @@ func TestTwoStepUploadChecks(t *testing.T) {
 		"long body":            {agentA, "a.txt", []byte("hello!"), nil, http.StatusBadRequest},
 		"header digest":        {agentA, "a.txt", []byte("hello"), map[string]string{HeaderContentSHA256: sha([]byte("x"))}, http.StatusBadRequest},
 		"not in manifest":      {agentA, "b.txt", []byte("hello"), nil, http.StatusNotFound},
-		"other member":         {agentB, "a.txt", []byte("hello"), nil, http.StatusForbidden},
+		"other member":         {agentB, "a.txt", []byte("hello"), nil, http.StatusNotFound}, // not shown before its first finalize
 		"outside the project":  {agentX, "a.txt", []byte("hello"), nil, http.StatusNotFound},
 		"unauthenticated":      {principal{}, "a.txt", []byte("hello"), nil, http.StatusNotFound},
 		"traversal":            {agentA, "..%2Fa.txt", []byte("hello"), nil, http.StatusNotFound},
@@ -279,8 +279,8 @@ func TestTwoStepUploadChecks(t *testing.T) {
 			t.Errorf("%s: %d, want %d (%s)", name, rec.Code, tc.status, rec.Body.String())
 		}
 	}
-	if rec := f.finalize(agentB, id, 1); rec.Code != http.StatusForbidden {
-		t.Errorf("finalize by another member: %d, want 403", rec.Code)
+	if rec := f.finalize(agentB, id, 1); rec.Code != http.StatusNotFound {
+		t.Errorf("finalize by another member: %d, want 404", rec.Code)
 	}
 	if rec := f.finalize(agentX, id, 1); rec.Code != http.StatusNotFound {
 		t.Errorf("finalize from outside: %d, want 404", rec.Code)
@@ -567,22 +567,62 @@ func TestFinalizeAppliesCurrentLimits(t *testing.T) {
 }
 
 // TestPendingArtifactVisibleOnlyToItsOwner: before its first version is
-// finalized, an artifact is shown only to its owner.
+// finalized, an artifact is shown only to its owner, on every route; a
+// project member and a principal holding a write grant both get 404.
 func TestPendingArtifactVisibleOnlyToItsOwner(t *testing.T) {
 	f := newFixture(t, false)
-	files := bundle{"a.txt": []byte("a")}
-	pend := f.createPending(agentA, "/api/v1/artifacts", files.manifest("a.txt"))
-	target := "/api/v1/artifacts/" + pend.Artifact.ID
-	if rec := f.do(&agentB, http.MethodGet, target, nil, nil); rec.Code != http.StatusNotFound {
-		t.Errorf("project member before finalize: %d, want 404", rec.Code)
+	files := bundle{"index.html": []byte("<p>x</p>")}
+	f.svc.SetViewKey(testViewKey)
+	pend := f.createPending(agentA, "/api/v1/artifacts", files.manifest("index.html"))
+	id := pend.Artifact.ID
+	if _, err := f.db.Exec("INSERT INTO artifact_grant (id, artifact_id, subject_kind, subject_ref, permission, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+		"g-b", id, SubjectPrincipal, PrincipalRef(agentB.kind, agentB.ref), GrantWrite, time.Now().UTC().Format(sqliteTimeLayout)); err != nil {
+		t.Fatal(err)
 	}
-	if rec := f.do(&agentA, http.MethodGet, target, nil, nil); rec.Code != http.StatusOK {
-		t.Errorf("owner before finalize: %d, want 200", rec.Code)
+	member := principal{PrincipalKindUser, "member-u", ""}
+	f.host.allow(member, "project-1", PermissionRead, PermissionCreate)
+	manifest, _ := json.Marshal(files.manifest("index.html"))
+	routes := []struct {
+		method, target string
+		body           []byte
+	}{
+		{http.MethodGet, "/api/v1/artifacts/" + id, nil},
+		{http.MethodGet, "/api/v1/artifacts/" + id + "/versions", nil},
+		{http.MethodGet, "/api/v1/artifacts/" + id + "/versions/1", nil},
+		{http.MethodGet, "/api/v1/artifacts/" + id + "/files/index.html", nil},
+		{http.MethodPut, "/api/v1/artifacts/" + id + "/versions/1/files/index.html", files["index.html"]},
+		{http.MethodPost, "/api/v1/artifacts/" + id + "/versions/1/finalize", nil},
+		{http.MethodPost, "/api/v1/artifacts/" + id + "/versions", manifest},
+		{http.MethodPost, "/api/v1/artifacts/" + id + "/versions/1/view", nil},
 	}
-	f.put(agentA, pend.Artifact.ID, 1, "a.txt", files["a.txt"])
-	f.finalize(agentA, pend.Artifact.ID, 1)
-	if rec := f.do(&agentB, http.MethodGet, target, nil, nil); rec.Code != http.StatusOK {
-		t.Errorf("project member after finalize: %d, want 200", rec.Code)
+	for _, p := range []principal{member, agentB} {
+		for _, rt := range routes {
+			if rec := f.do(&p, rt.method, rt.target, rt.body, nil); rec.Code != http.StatusNotFound {
+				t.Errorf("%s %s %s before finalize: %d, want 404", p.ref, rt.method, rt.target, rec.Code)
+			}
+		}
+	}
+	// The list route answers 404, not an empty list.
+	if rec := f.do(&member, http.MethodGet, "/api/v1/artifacts/"+id+"/versions", nil, nil); strings.Contains(rec.Body.String(), "versions") {
+		t.Errorf("member list before finalize: %d %s", rec.Code, rec.Body.String())
+	}
+	// The owner sees and completes it.
+	if rec := f.do(&agentA, http.MethodGet, "/api/v1/artifacts/"+id, nil, nil); rec.Code != http.StatusOK {
+		t.Errorf("owner GET before finalize: %d", rec.Code)
+	}
+	if rec := f.do(&agentA, http.MethodGet, "/api/v1/artifacts/"+id+"/versions", nil, nil); rec.Code != http.StatusOK {
+		t.Errorf("owner list before finalize: %d", rec.Code)
+	}
+	if rec := f.put(agentA, id, 1, "index.html", files["index.html"]); rec.Code != http.StatusNoContent {
+		t.Fatalf("owner PUT: %d", rec.Code)
+	}
+	if rec := f.finalize(agentA, id, 1); rec.Code != http.StatusOK {
+		t.Fatalf("owner finalize: %d", rec.Code)
+	}
+	for _, p := range []principal{member, agentB} {
+		if rec := f.do(&p, http.MethodGet, "/api/v1/artifacts/"+id, nil, nil); rec.Code != http.StatusOK {
+			t.Errorf("%s after finalize: %d, want 200", p.ref, rec.Code)
+		}
 	}
 }
 
