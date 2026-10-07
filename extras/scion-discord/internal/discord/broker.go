@@ -29,7 +29,6 @@ import (
 	"github.com/bwmarrin/discordgo"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
-	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
@@ -1716,6 +1715,9 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 		if err != nil {
 			b.log.Error("Failed to download Discord attachment",
 				"filename", att.Filename, "error", err)
+			if isSharedDirStorageUnavailable(err) {
+				s.ChannelMessageSend(channelID, sharedDirUnavailableText(att.Filename))
+			}
 			continue
 		}
 		attachmentPaths = append(attachmentPaths, agentPath)
@@ -1924,6 +1926,9 @@ func (b *DiscordBroker) handleRoutedInbound(
 		if err != nil {
 			b.log.Error("Failed to download Discord attachment",
 				"filename", att.Filename, "error", err)
+			if isSharedDirStorageUnavailable(err) {
+				s.ChannelMessageSend(channelID, sharedDirUnavailableText(att.Filename))
+			}
 			continue
 		}
 		attachmentPaths = append(attachmentPaths, agentPath)
@@ -2751,7 +2756,12 @@ func (b *DiscordBroker) resolveSharedDirAttachmentPath(ctx context.Context, atta
 		return ""
 	}
 
-	sharedDirBase := config.SharedDirHostPath(home, slug, projectID, sharedDirName)
+	sharedDirBase, err := resolveSharedDirHostPath(home, slug, projectID, sharedDirName)
+	if err != nil {
+		b.log.Error("Cannot resolve shared dir attachment path",
+			"attach_path", attachPath, "project_id", projectID, "shared_dir", sharedDirName, "error", err)
+		return ""
+	}
 	var hostPath string
 	if relPath == "" || relPath == "." {
 		hostPath = sharedDirBase
@@ -2793,8 +2803,9 @@ const maxDiscordAttachmentSize = 25 * 1024 * 1024 // 25 MB
 //
 // The function uses a three-tier fallback for the destination directory:
 //  1. downloadsPath config (highest priority, supports {project_slug} placeholder)
-//  2. Shared dir infrastructure via config.SharedDirHostPath — writes to the host
-//     and exposes the file at /scion-volumes/scratchpad/.attachments/_discord/
+//  2. The scratchpad shared dir, resolved through its storage backend (local
+//     or nfs) — exposes the file at /scion-volumes/scratchpad/.attachments/_discord/.
+//     An unavailable nfs mount is an error, never a local fallback.
 //  3. Legacy /home/scion/.scion/projects/<slug>/downloads/ (last resort)
 func (b *DiscordBroker) downloadDiscordAttachment(ctx context.Context, att *discordgo.MessageAttachment, projectSlug, projectID string) (agentPath, placeholder string, err error) {
 	if projectSlug == "" {
@@ -2837,12 +2848,16 @@ func (b *DiscordBroker) downloadDiscordAttachment(ctx context.Context, att *disc
 	} else if projectID != "" {
 		home, homeErr := os.UserHomeDir()
 		if homeErr == nil {
-			// NOTE: SharedDirHostPath is a pure path computation; it does not verify that
-			// "scratchpad" is actually configured on the project. If it is not configured,
-			// the file will be written to the host but won't be visible inside the agent
-			// container. Projects using container-based agents should always have
-			// scratchpad configured.
-			sharedDirBase := config.SharedDirHostPath(home, projectSlug, projectID, "scratchpad")
+			// The scratchpad dir resolves through its storage backend (local
+			// or nfs). It is not checked against the project's declared
+			// shared dirs: if scratchpad is not configured, the file is
+			// written on the host but no agent container sees it.
+			sharedDirBase, resolveErr := resolveSharedDirHostPath(home, projectSlug, projectID, "scratchpad")
+			if resolveErr != nil {
+				// Never fall back to a local directory for an nfs-backed
+				// scratchpad: no agent mounts it.
+				return "", "", fmt.Errorf("resolve scratchpad shared dir for %q: %w", att.Filename, resolveErr)
+			}
 			hostDir = filepath.Join(sharedDirBase, ".attachments", "_discord")
 			useSharedDir = true
 		}
