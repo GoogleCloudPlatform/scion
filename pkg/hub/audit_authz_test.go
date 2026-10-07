@@ -815,3 +815,85 @@ func newRequestWithIdentity(t *testing.T, method, path string, body []byte, iden
 	ctx := contextWithIdentity(req.Context(), identity)
 	return req.WithContext(ctx)
 }
+
+func TestDecisionAuditRouter_ProductionOverrideCannotAdmit(t *testing.T) {
+	srv, _ := testServer(t)
+	router := srv.decisionAuditRouter
+	require.NotNil(t, router, "real server must install one stable router")
+	require.Nil(t, router.admission, "production must have no positive admission")
+	require.Nil(t, router.contract.handler, "production must have no positive handler")
+	require.Nil(t, router.contract.clock, "production must have no trusted clock")
+	st := newFakeHubSettingStore()
+	st.seed("experiments", json.RawMessage(`{"overrides":{"hub.authorization_decision_audit_v2":true}}`))
+	ops := NewOperationalSettings(st, emptyKoanf(), emptyKoanf())
+	srv.SetOperationalSettings(ops)
+	_, err := ops.Refresh(context.Background())
+	require.NoError(t, err)
+	assert.Same(t, router, srv.decisionAuditRouter, "true refresh cannot replace router")
+	assert.Nil(t, router.admission)
+	assert.False(t, router.inspect().observation.successful, "unproved production read cannot issue lease")
+	// Observe the existing legacy call, not asynchronous persistence. Replacing
+	// this reference is restricted to this test before emission.
+	legacy := &auditFixtureLegacy{}
+	router.legacy = legacy
+	identity := NewAuthenticatedUser(DevUserID, "dev@localhost", "Development User", "admin", "api")
+	decision := srv.authzService.CheckAccess(context.Background(), identity, Resource{Type: "project", ID: "finite-fixture"}, ActionRead)
+	assert.True(t, decision.Allowed)
+	require.Len(t, legacy.records, 1)
+	assert.Equal(t, "allow", legacy.records[0].Result)
+	assert.Nil(t, router.admission)
+}
+
+func TestDecisionAuditRouter_PreservesSamplingAndResult(t *testing.T) {
+	for _, route := range []string{"legacy", "finite-new"} {
+		t.Run(route, func(t *testing.T) {
+			f := newAuditFixture(t, auditFixtureAccept)
+			var caller context.Context = context.Background()
+			if route == "finite-new" {
+				caller = f.caller
+				f.requireAdmission(t)
+				f.observe(1, 1, true)
+			}
+			service := &AuthzService{DecisionAuditSampleRate: 0}
+			service.SetDecisionAuditEmitter(f.router)
+			request := AuthzRequest{Resource: Resource{Type: "project", ID: "finite-fixture"}, Action: ActionRead}
+			allow := Decision{Allowed: true, Reason: "finite allow", PrincipalID: "fixture-principal", PrincipalKind: PrincipalKindUser, principalDecorated: true}
+			before := allow
+			service.emitDecisionAudit(caller, request, allow)
+			assert.Equal(t, 0, f.handler.calls+len(f.legacy.records), "unsampled allow remains skipped")
+			deny := allow
+			deny.Allowed = false
+			deny.Reason = "finite deny"
+			service.emitDecisionAudit(caller, request, deny)
+			request.AlwaysAudit = true
+			service.emitDecisionAudit(caller, request, allow)
+			request.AlwaysAudit = false
+			allow.AlwaysAudit = true
+			service.emitDecisionAudit(caller, request, allow)
+			assert.Equal(t, 3, f.handler.calls+len(f.legacy.records))
+			assert.Equal(t, before.Reason, allow.Reason)
+			assert.True(t, allow.Allowed)
+			assert.False(t, deny.Allowed)
+			if route == "legacy" {
+				require.Len(t, f.legacy.records, 3)
+				assert.Equal(t, []string{"deny", "allow", "allow"}, []string{f.legacy.records[0].Result, f.legacy.records[1].Result, f.legacy.records[2].Result})
+				for _, record := range f.legacy.records {
+					assert.True(t, record.Sampled)
+					assert.Equal(t, "fixture-principal", record.PrincipalID)
+					assert.Equal(t, "project", record.ResourceType)
+					assert.Equal(t, "read", record.Permission)
+				}
+			} else {
+				assert.Empty(t, f.legacy.records, "NEW must not duplicate sampled records to legacy")
+				require.Len(t, f.handler.records, 3)
+				assert.Equal(t, []string{"deny", "allow", "allow"}, []string{f.handler.records[0].Result, f.handler.records[1].Result, f.handler.records[2].Result})
+				for _, record := range f.handler.records {
+					assert.True(t, record.Sampled)
+					assert.Equal(t, "fixture-principal", record.PrincipalID)
+					assert.Equal(t, "project", record.ResourceType)
+					assert.Equal(t, "read", record.Permission)
+				}
+			}
+		})
+	}
+}
