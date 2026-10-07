@@ -3479,7 +3479,7 @@ func (r *KubernetesRuntime) cleanupStartResources(ctx context.Context, namespace
 				"kind", kind, "name", name, "agent", agentName, "namespace", namespace, "error", err)
 		}
 	}
-	removed := r.deleteAgentSecretsBySelector(ctx, namespace, agentName, selector.LabelSelector, nil, warn)
+	removed := r.deleteAgentSecretsBySelector(ctx, namespace, agentName, selector.LabelSelector, nil, warn, nil)
 	// deleted records the outcome of one delete call.
 	deleted := func(kind, name string, err error) {
 		if err == nil {

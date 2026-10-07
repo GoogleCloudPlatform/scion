@@ -329,21 +329,21 @@ func podBelongsToAgent(podName, agentSlug string) bool {
 
 // deletePodRunObjects removes, with UID preconditions, the per-agent
 // objects of pod podName labelled with run podRun (its per-run objects and
-// any fixed-name objects of that run), logging each per-run removal with
-// reason. Nothing is done for an empty or invalid run.
+// any fixed-name objects of that run), logging each removal, fixed or
+// per-run, with reason. Nothing is done for an empty or invalid run.
 func (r *KubernetesRuntime) deletePodRunObjects(ctx context.Context, namespace, podName, podRun, reason string) {
 	if podRun == "" || ValidateRunID(podRun) != nil {
 		return
 	}
 	r.deleteAgentSecretsBySelector(ctx, namespace, podName, api.LabelRunID+"="+podRun,
-		func(kind string, obj metav1.Object) bool {
-			runtimeLog.Info(reason, "kind", kind, "name", obj.GetName(), "namespace", namespace,
-				"agent", podName, "object_run_id", podRun)
-			return true
-		},
+		func(string, metav1.Object) bool { return true },
 		func(kind, name string, err error) {
 			runtimeLog.Warn("Failed to delete per-run object",
 				"kind", kind, "name", name, "agent", podName, "namespace", namespace, "run_id", podRun, "error", err)
+		},
+		func(kind, name string) {
+			runtimeLog.Info(reason, "kind", kind, "name", name, "namespace", namespace,
+				"agent", podName, "object_run_id", podRun)
 		})
 }
 
