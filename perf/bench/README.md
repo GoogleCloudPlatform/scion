@@ -187,9 +187,8 @@ against the real instance metadata service.
 
 1. Check the hub's own log for the storage-backend line -- it should say
    `/tmp/scion-bench/home/.scion/storage`, not your real home directory.
-2. Confirm neither of these appears anywhere in the hub's log: the real
-   service-account email (`scion-my-grove@...` or similar), or the real GCP
-   project ID (your GCP project ID). The GCP-subsystem log lines
+2. Confirm neither of these appears anywhere in the hub's log: your real
+   service-account email or your real GCP project ID. The GCP-subsystem log lines
    themselves (`GCP token generator configured`, `Policy Troubleshooter: no
    GCP project ID available`, ...) still appear with
    `GCE_METADATA_HOST`/`GCE_METADATA_IP` set -- that is expected, since the
