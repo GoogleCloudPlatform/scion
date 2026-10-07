@@ -44,10 +44,16 @@ export function principalName(kind: string, ref: string): Promise<string> {
           `/api/v1/${kind === 'agent' ? 'agents' : 'users'}/${encodeURIComponent(ref)}`,
           { suppressAccessDeniedToast: true }
         );
-        if (!res.ok) return '';
-        const body = (await res.json()) as { displayName?: string; name?: string; slug?: string };
-        return body.displayName || body.name || body.slug || '';
+        if (res.ok) {
+          const body = (await res.json()) as { displayName?: string; name?: string; slug?: string };
+          return body.displayName || body.name || body.slug || '';
+        }
+        // A refusal or an absent principal will not change; anything else
+        // (a server error) may, so it is looked up again next time.
+        if (res.status !== 403 && res.status !== 404) cache.delete(key);
+        return '';
       } catch {
+        cache.delete(key);
         return '';
       }
     })();

@@ -343,6 +343,82 @@ describe('publishFiles after a failure', () => {
     expect((err as PublishError).pending).toMatchObject({ seq: 2, required: ['a.md'] });
   });
 
+  it('falls back to every file asked for at create when finalize lists only some missing', async () => {
+    let finalizeCalls = 0;
+    let failB = true;
+    recordFetch((c) => {
+      if (c.method === 'POST' && c.url === '/api/v1/artifacts') {
+        return json(
+          { artifact: { id: 'n' }, version: { seq: 1 }, upload: { required: ['a.md', 'b.png'] } },
+          201
+        );
+      }
+      if (c.method === 'PUT') {
+        return c.url.endsWith('/b.png') && failB
+          ? json({ error: { code: 'internal', message: 'boom' } }, 500)
+          : new Response(null, { status: 204 });
+      }
+      finalizeCalls++;
+      return json(
+        {
+          error: {
+            code: 'incomplete',
+            message: '2 file(s) of the manifest have not been uploaded',
+            details: { missing: ['a.md'], missingCount: 2 },
+          },
+        },
+        409
+      );
+    });
+    const two = (): { path: string; data: Blob }[] => [
+      { path: 'a.md', data: new Blob(['abc']) },
+      { path: 'b.png', data: new Blob(['png']) },
+    ];
+    const first = await publishFiles({ scope: 'p', title: 'T', entry: 'a.md', files: two() }).catch(
+      (e: unknown) => e
+    );
+    expect((first as PublishError).pending).toMatchObject({
+      required: ['b.png'],
+      all: ['a.md', 'b.png'],
+    });
+    failB = false;
+    const second = await publishFiles({
+      scope: 'p',
+      title: 'T',
+      entry: 'a.md',
+      files: two(),
+      resume: (first as PublishError).pending,
+    }).catch((e: unknown) => e);
+    expect(finalizeCalls).toBe(1);
+    expect((second as PublishError).pending).toMatchObject({ required: ['a.md', 'b.png'] });
+  });
+
+  it('leaves out missing files it has no bytes for', async () => {
+    recordFetch((c) => {
+      if (c.url.endsWith('/finalize')) {
+        return json(
+          {
+            error: {
+              code: 'incomplete',
+              message: 'missing',
+              details: { missing: ['ghost.md', 'a.md'], missingCount: 2 },
+            },
+          },
+          409
+        );
+      }
+      if (c.method === 'PUT') return new Response(null, { status: 204 });
+      return json(
+        { artifact: { id: 'a' }, version: { seq: 2 }, upload: { required: ['a.md'] } },
+        201
+      );
+    });
+    const err = await publishFiles({ artifactId: 'a', entry: 'a.md', files: files() }).catch(
+      (e: unknown) => e
+    );
+    expect((err as PublishError).pending).toMatchObject({ required: ['a.md'] });
+  });
+
   for (const status of [403, 404]) {
     it(`does not offer to resume after a ${status}`, async () => {
       recordFetch((c) => {
@@ -370,7 +446,7 @@ describe('publishFiles after a failure', () => {
       artifactId: 'a',
       entry: 'a.md',
       files: [{ path: 'a.md', data: new Blob(['changed']) }],
-      resume: { artifactId: 'a', seq: 2, required: ['a.md'], fingerprint: 'old' },
+      resume: { artifactId: 'a', seq: 2, required: ['a.md'], all: ['a.md'], fingerprint: 'old' },
     });
     expect(calls[0].url).toBe('/api/v1/artifacts/a/versions');
     expect(calls[1].url).toBe('/api/v1/artifacts/a/versions/3/finalize');

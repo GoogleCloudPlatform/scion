@@ -210,6 +210,7 @@ export class ScionArtifactList extends LitElement {
           cursor,
           signal: abort.signal,
         });
+        if (abort.signal.aborted) return;
         items = [...items, ...page.artifacts];
         cursor = page.nextCursor ?? '';
         if (page.artifacts.length > 0 || !cursor) break;

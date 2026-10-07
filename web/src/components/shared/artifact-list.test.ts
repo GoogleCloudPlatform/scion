@@ -316,6 +316,50 @@ describe('artifact list paging', () => {
     expect(el.shadowRoot!.querySelectorAll('tbody tr')).toHaveLength(1);
   });
 
+  it('drops a Load more still in flight when the search text changes', async () => {
+    const urls: string[] = [];
+    let releaseMore: (() => void) | null = null;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        urls.push(url);
+        if (url.includes('cursor=c1')) {
+          // Answers only when released, like a slow page; the abort does not reject it.
+          return new Promise<Response>((resolve) => {
+            releaseMore = (): void =>
+              resolve(new Response(JSON.stringify({ artifacts: [item('old')], nextCursor: 'c2' })));
+            void init;
+          });
+        }
+        return Promise.resolve(
+          new Response(JSON.stringify({ artifacts: [item('a')], nextCursor: 'c1' }), {
+            status: 200,
+          })
+        );
+      })
+    );
+    const el = document.createElement('scion-artifact-list') as ListElement;
+    el.projectId = 'p-1';
+    document.body.appendChild(el);
+    for (let i = 0; i < 10; i++) {
+      await new Promise((r) => setTimeout(r, 0));
+      await el.updateComplete;
+    }
+    (el.shadowRoot!.querySelector('.more sl-button') as HTMLElement).click();
+    await el.updateComplete;
+    const input = el.shadowRoot!.querySelector('sl-input') as HTMLElement & { value: string };
+    input.value = 'x';
+    input.dispatchEvent(new CustomEvent('sl-input'));
+    releaseMore!();
+    for (let i = 0; i < 10; i++) {
+      await new Promise((r) => setTimeout(r, 0));
+      await el.updateComplete;
+    }
+    expect(el.shadowRoot!.textContent).not.toContain('Title old');
+    expect(el.shadowRoot!.querySelector('.more sl-button')).toBeNull();
+  });
+
   it('drops Load more as soon as the search text changes', async () => {
     const { el } = await mountList({ 'mine=1': { artifacts: [item('a')], nextCursor: 'c1' } });
     expect(el.shadowRoot!.querySelector('.more sl-button')).not.toBeNull();

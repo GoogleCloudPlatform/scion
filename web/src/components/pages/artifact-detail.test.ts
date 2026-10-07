@@ -593,4 +593,20 @@ describe('artifact page', () => {
     const history = el.shadowRoot!.querySelector('sl-tab-panel[name="history"] tbody tr')!;
     expect(history.textContent).toContain('Jane Doe');
   });
+
+  it('forgets the HTML view timer when the page reloads', async () => {
+    const soon = new Date(Date.now() + 60_000).toISOString();
+    mockFetch(artifact('page.html', 'text/html'), '', { viewExpiresAt: soon });
+    const el = await mount(true);
+    const priv = el as unknown as {
+      viewTimer: ReturnType<typeof setTimeout> | null;
+      viewExpired: boolean;
+      load(): Promise<void>;
+    };
+    expect(priv.viewTimer).not.toBeNull();
+    mockFetch(artifact('design.md', 'text/markdown'));
+    await priv.load();
+    expect(priv.viewTimer).toBeNull();
+    expect(priv.viewExpired).toBe(false);
+  });
 });

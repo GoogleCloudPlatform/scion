@@ -319,7 +319,10 @@ export interface PublishRequest {
 export interface PendingPublish {
   artifactId: string;
   seq: number;
+  /** Files still to upload. */
   required: string[];
+  /** Every file the hub asked for when the version was created. */
+  all: string[];
   /** Identifies what was being published (manifest and metadata). */
   fingerprint: string;
 }
@@ -379,10 +382,12 @@ export async function publishFiles(req: PublishRequest): Promise<ArtifactRespons
         body: JSON.stringify(body),
       })
     );
+    const asked = created.upload.required ?? [];
     pending = {
       artifactId: created.artifact.id,
       seq: created.version.seq,
-      required: created.upload.required ?? [],
+      required: asked,
+      all: asked,
       fingerprint,
     };
   }
@@ -414,14 +419,13 @@ export async function publishFiles(req: PublishRequest): Promise<ArtifactRespons
       const all =
         Array.isArray(missing) && missing.length === body.error?.details?.missingCount
           ? (missing as unknown[]).filter((p): p is string => typeof p === 'string')
-          : required;
+          : pending.all;
       remaining = all.filter((p) => byPath.has(p));
     }
     throw new PublishError(message, left());
   };
-  let done = required.length - remaining.length;
+  let done = 0;
   for (const path of required) {
-    if (!remaining.includes(path)) continue;
     const data = byPath.get(path);
     if (!data) {
       throw new PublishError(`The hub asked for ${path}, which is not being uploaded.`, null);
