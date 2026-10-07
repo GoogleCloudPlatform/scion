@@ -314,6 +314,7 @@ func (s *Server) handleChatConversationRoutes(w http.ResponseWriter, r *http.Req
 	//        /api/v1/chat/conversations/{key}/read
 	//        /api/v1/chat/conversations/{key}/unread
 	//        /api/v1/chat/conversations/{key}/typing
+	//        /api/v1/chat/conversations/{key}/scheduled[/{id}]
 	path := strings.TrimPrefix(r.URL.Path, "/api/v1/chat/conversations/")
 	parts := strings.SplitN(path, "/", 2)
 
@@ -329,6 +330,11 @@ func (s *Server) handleChatConversationRoutes(w http.ResponseWriter, r *http.Req
 	}
 
 	action := parts[1]
+	// Scheduled messages (scheduled, scheduled/{id}); experiment-gated.
+	if rest, ok := strings.CutPrefix(action, "scheduled"); ok && (rest == "" || strings.HasPrefix(rest, "/")) {
+		s.handleConversationScheduledRoutes(w, r, key, rest)
+		return
+	}
 	// Check for sub-resource under messages (e.g., messages/{id}).
 	if strings.HasPrefix(action, "messages/") {
 		messageID := strings.TrimPrefix(action, "messages/")

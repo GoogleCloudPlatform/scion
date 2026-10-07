@@ -5465,6 +5465,9 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 		s.oidcKeyManager.StartCleanupLoop(ctx)
 	}
 
+	// Start the scheduled chat message sweeper (exits when ctx is cancelled).
+	s.startScheduledSendSweeper(ctx)
+
 	// Start notification dispatcher (uses the current event publisher).
 	// The dispatcher is resolved lazily so it works even if SetDispatcher
 	// is called after Start().
