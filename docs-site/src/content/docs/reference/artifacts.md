@@ -9,7 +9,7 @@ Artifacts are behind the `hub.artifacts` experiment, which is **off by default**
 
 An **artifact** is a published file with a stable reference, `scion://artifact/<id>`, that works from any runtime broker, in any project the reader can access, and in the web UI. The hub stores the bytes, so a reader never needs access to the publisher's filesystem or shared directories.
 
-This page covers what is available today: publishing a single file, fetching it, and the artifact page. Versions, bundles, message references, review and share links are planned.
+This page covers what is available today: publishing a single file, fetching it, the artifact page, and artifact references in messages. Versions, bundles, review and share links are planned.
 
 ## Ownership and access
 
@@ -49,6 +49,24 @@ $ scion artifact get scion://artifact/5f1c2d3e-6b1a-4c55-9f3e-0d6e7a1b2c3d@1 --o
 - `--out`, `-o <path>`: Write to this file instead of stdout. If the path is an existing directory, the file is written into it under its own name. The file is replaced atomically.
 
 When it fetches the current version, `get` checks the bytes against the SHA-256 the hub recorded at publish time before writing anything, to stdout or to `--out`, and fails on a mismatch.
+
+## Artifacts in messages
+
+A message can name artifacts. The message carries only the reference, never the bytes and never a copy of the title; each reader sees what their own access allows.
+
+```text
+$ scion message @reviewer "Design ready for review." --artifact scion://artifact/5f1c2d3e-6b1a-4c55-9f3e-0d6e7a1b2c3d
+```
+
+- **Sending.** `--artifact` (repeatable, at most 10 per message) adds the reference to the message text and to the message's `artifacts` metadata entry. The Hub keeps only references the sender can read at send time; it drops the others and returns a warning that does not say why a reference was dropped.
+- **What an agent receives.** The delivered message keeps the `artifacts` metadata entry and ends with one fetch hint per artifact, built from the reference alone:
+  ```text
+  Artifact: v2 - scion artifact get scion://artifact/5f1c2d3e-...@2
+  Artifact: current - scion artifact get scion://artifact/5f1c2d3e-...
+  ```
+  The hint carries no title. Whether the recipient may read the artifact is decided when it runs `scion artifact get`, from any broker, without shared directories.
+- **What web chat shows.** Chat history responses include `messageArtifacts`, keyed by message ID, resolved for the viewing user: an artifact the viewer can read shows its title, version and owner; any other reference shows only the reference itself, the same as for an artifact that does not exist.
+- **Where references are kept.** Direct messages to an agent, messages from an agent to a user or conversation, and web chat messages to agents carry references. Group (`group[...]`) and broadcast messages, @-mention copies, and messages arriving through chat plugins do not; any `artifacts` metadata they arrive with is removed.
 
 ## Web page
 
