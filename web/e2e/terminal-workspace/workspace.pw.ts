@@ -419,6 +419,16 @@ test('close removes only that retained client and leaves peers connected', async
     `/terminals/${agentB}`
   );
   await expect.poll(() => socket.attaches).toBe(2);
+  // The detach keystroke is only sent on a connected session, and a session
+  // connects on its first inbound data frame (tmux's redraw on attach).
+  const redraw = JSON.stringify({ type: 'data', data: '' });
+  socket.sendToSocket(0, redraw);
+  socket.sendToSocket(1, redraw);
+  await expect(
+    page.locator('#terminal-workspace scion-terminal-pane .status-indicator', {
+      hasText: /^\s*Connected\s*$/,
+    })
+  ).toHaveCount(2);
   await page.getByRole('button', { name: 'Close alpha' }).click();
   await expect(page.getByRole('button', { name: 'Terminals (1)' })).toBeVisible();
   await expect(page.getByRole('button', { name: /beta in same-project/ })).toBeVisible();
@@ -3037,12 +3047,12 @@ test.describe('production icon and title verification', () => {
     // The header must show the "Terminals" mode button with session count
     await expect(page.getByRole('button', { name: 'Terminals (1)' })).toBeVisible();
 
-    // The header icon-button should use the "terminal" icon name
+    // The header mode button should use the "terminal" icon name
     const iconName = await page.evaluate(() => {
-      const btn = document
+      const icon = document
         .querySelector('scion-header')
-        ?.shadowRoot?.querySelector('sl-icon-button[label*="Terminals"]');
-      return btn?.getAttribute('name');
+        ?.shadowRoot?.querySelector('.mode-switch button[aria-label^="Terminals"] sl-icon');
+      return icon?.getAttribute('name');
     });
     expect(iconName).toBe('terminal');
   });

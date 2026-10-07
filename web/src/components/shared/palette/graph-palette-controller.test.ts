@@ -201,6 +201,31 @@ describe('GraphPaletteController', () => {
     await waitForOpenPalette();
   });
 
+  it('on a Mac, leaves Ctrl+K typed in a text field to the field', async () => {
+    vi.spyOn(navigator, 'platform', 'get').mockReturnValue('MacIntel');
+    const input = document.createElement('input');
+    page.renderRoot.append(input);
+    const pressIn = (init: KeyboardEventInit): KeyboardEvent => {
+      const e = new KeyboardEvent('keydown', {
+        key: 'k',
+        bubbles: true,
+        composed: true,
+        cancelable: true,
+        ...init,
+      });
+      input.dispatchEvent(e);
+      return e;
+    };
+
+    expect(pressIn({ ctrlKey: true }).defaultPrevented).toBe(false);
+    await nextTask();
+    expect(page.palette.isOpen).toBe(false);
+    expect(paletteEl()).toBeNull();
+
+    expect(pressIn({ metaKey: true }).defaultPrevented).toBe(true);
+    await waitForOpenPalette();
+  });
+
   it('reads the agents again on every open', async () => {
     page.palette.open();
     let palette = await waitForOpenPalette();
