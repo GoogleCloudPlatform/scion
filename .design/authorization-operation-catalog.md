@@ -2297,9 +2297,9 @@
 
 | Kind | Method | Pattern |
 |------|--------|---------|
-| http_route | GET | `/api/v1/projects/{id}/dav` |
-| http_route | HEAD | `/api/v1/projects/{id}/dav` |
-| http_route | OPTIONS | `/api/v1/projects/{id}/dav` |
+| http_route | GET | `/api/v1/projects/{id}/dav/{path}` |
+| http_route | HEAD | `/api/v1/projects/{id}/dav/{path}` |
+| http_route | OPTIONS | `/api/v1/projects/{id}/dav/{path}` |
 | http_route | GET | `/api/v1/projects/{id}/sync/status` |
 | http_route | GET | `/api/v1/projects/{id}/workspace/archive` |
 | http_route | GET | `/api/v1/projects/{id}/workspace/cache/status` |
@@ -2336,16 +2336,16 @@
 
 | Kind | Method | Pattern |
 |------|--------|---------|
-| http_route | COPY | `/api/v1/projects/{id}/dav` |
-| http_route | DELETE | `/api/v1/projects/{id}/dav` |
-| http_route | LOCK | `/api/v1/projects/{id}/dav` |
-| http_route | MKCOL | `/api/v1/projects/{id}/dav` |
-| http_route | MOVE | `/api/v1/projects/{id}/dav` |
-| http_route | POST | `/api/v1/projects/{id}/dav` |
-| http_route | PROPFIND | `/api/v1/projects/{id}/dav` |
-| http_route | PROPPATCH | `/api/v1/projects/{id}/dav` |
-| http_route | PUT | `/api/v1/projects/{id}/dav` |
-| http_route | UNLOCK | `/api/v1/projects/{id}/dav` |
+| http_route | PUT | `/api/v1/projects/{id}/dav/{path}` |
+| http_route | PROPPATCH | `/api/v1/projects/{id}/dav/{path}` |
+| http_route | LOCK | `/api/v1/projects/{id}/dav/{path}` |
+| http_route | UNLOCK | `/api/v1/projects/{id}/dav/{path}` |
+| http_route | COPY | `/api/v1/projects/{id}/dav/{path}` |
+| http_route | MOVE | `/api/v1/projects/{id}/dav/{path}` |
+| http_route | POST | `/api/v1/projects/{id}/dav/{path}` |
+| http_route | PROPFIND | `/api/v1/projects/{id}/dav/{path}` |
+| http_route | DELETE | `/api/v1/projects/{id}/dav/{path}` |
+| http_route | MKCOL | `/api/v1/projects/{id}/dav/{path}` |
 | http_route | POST | `/api/v1/projects/{id}/workspace/cache/notify` |
 | http_route | POST | `/api/v1/projects/{id}/workspace/cache/refresh` |
 | http_route | POST | `/api/v1/projects/{id}/workspace/files` |
