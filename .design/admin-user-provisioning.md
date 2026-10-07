@@ -324,7 +324,7 @@ Decoding is strict, following the PATCH pattern:
 | --- | --- | --- |
 | `email` | Required. Must pass `NormalizeInviteEmail` (the shared invite rule). | `400 invalid_request`, "valid email is required", `details.field: "email"` (same code and message as invite) |
 | `displayName` | Trimmed (`strings.TrimSpace`). At most 128 Unicode code points after trim. No control characters (`unicode.IsControl`). Empty after trim counts as absent (stored `""`). No Unicode normalization: bytes are stored and compared as sent, after trim. | `400 validation_error`, `details.field: "displayName"` |
-| `note` | **Not trimmed**, matching invite. `""` counts as absent and is stored as NULL, matching invite (`admin_user_invite.go:95`-`:98`). At most 500 code points. No control characters except `\n`. No Unicode normalization. | `400 validation_error`, `details.field: "note"` |
+| `note` | **Not trimmed**, matching invite. `""` counts as absent and is stored as NULL, matching invite (`admin_user_invite.go:95`-`:98`). At most 500 code points. No control characters except line breaks (`\n` and `\r`, so CRLF text is accepted). No Unicode normalization. | `400 validation_error`, `details.field: "note"` |
 | `role` | Any non-null value, of any JSON type, is rejected with 422 (OD-1 decided, §6); the JSON string `"admin"` gets a distinct reason. No type check applies to `role` (§8 row 9 excludes it). | `422 unprocessable` with reason `privileged_role_not_provisionable` (the string `"admin"`) or `role_selection_not_supported` (any other non-null value, including non-strings) |
 
 **Advisory warnings.** These conditions do not fail the request, because invite accepts such emails

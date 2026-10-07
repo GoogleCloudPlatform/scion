@@ -544,6 +544,8 @@ func TestHandleProvisionUser(t *testing.T) {
 			{map[string]interface{}{"email": "a@example.com", "displayName": "Bo\nb"}, "displayName"},
 			{map[string]interface{}{"email": "a@example.com", "note": strings.Repeat("n", 501)}, "note"},
 			{map[string]interface{}{"email": "a@example.com", "note": "tab\there"}, "note"},
+			{map[string]interface{}{"email": "a@example.com", "note": "nul\x00here"}, "note"},
+			{map[string]interface{}{"email": "a@example.com", "displayName": "Bo\rb"}, "displayName"},
 		}
 		for _, tc := range bad {
 			rec := provisionAs(t, f.srv, f.hubAdmin, tc.body)
@@ -555,12 +557,16 @@ func TestHandleProvisionUser(t *testing.T) {
 		good := []map[string]interface{}{
 			{"email": "b@example.com", "displayName": strings.Repeat("é", 128), "note": strings.Repeat("n", 500)},
 			{"email": "c@example.com", "displayName": "   ", "note": "line1\nline2"},
+			{"email": "d@example.com", "note": "line1\r\nline2\r\n"},
 		}
 		for _, body := range good {
 			rec := provisionAs(t, f.srv, f.hubAdmin, body)
 			require.Equal(t, http.StatusCreated, rec.Code, "%v: %s", body, rec.Body.String())
 		}
 		assert.Equal(t, "", userByEmail(t, f.s, "c@example.com").DisplayName, "blank displayName is stored empty")
+		crlf := userByEmail(t, f.s, "d@example.com").InviteNote
+		require.NotNil(t, crlf)
+		assert.Equal(t, "line1\r\nline2\r\n", *crlf, "CRLF line breaks are accepted and stored untrimmed")
 	})
 
 	t.Run("row12_any_role_is_refused_for_authorized_callers", func(t *testing.T) {
@@ -756,6 +762,23 @@ func TestHandleProvisionUser(t *testing.T) {
 		require.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
 		_, err := s.GetUserByEmail(ctx, "noaudit@example.com")
 		assert.ErrorIs(t, err, store.ErrNotFound, "no user row without its audit")
+	})
+
+	t.Run("row21_post_commit_runs_after_client_cancel", func(t *testing.T) {
+		f := newProvisionFixture(t)
+		logger := &ctxRecordingInviteAuditLogger{}
+		f.srv.auditLogger = logger
+		// A request whose context is already cancelled when the
+		// post-commit side effects run (the client disconnected after the
+		// commit): the side effects still see a live context.
+		ctx, cancel := context.WithCancel(context.Background())
+		req := httptest.NewRequest(http.MethodPost, provisionPath, nil).WithContext(ctx)
+		cancel()
+		u := &store.User{ID: tid("pc-user"), Email: "pc@example.com"}
+		actor := NewAuthenticatedUser(f.hubAdmin.ID, f.hubAdmin.Email, "Hub Admin", store.UserRoleMember, string(ClientTypeWeb))
+		f.srv.provisionPostCommit(req, actor, u)
+		require.Len(t, logger.ctxErrs, 1)
+		assert.NoError(t, logger.ctxErrs[0], "the invite audit event runs on a context the client cannot cancel")
 	})
 
 	t.Run("row21_post_commit_failure_keeps_201", func(t *testing.T) {
@@ -1028,6 +1051,18 @@ type failingInviteAuditLogger struct {
 func (l *failingInviteAuditLogger) LogInviteAuditEvent(_ context.Context, event *InviteAuditEvent) error {
 	l.attempts = append(l.attempts, event)
 	return errors.New("injected invite audit failure")
+}
+
+// ctxRecordingInviteAuditLogger records the context error seen by each
+// invite audit event.
+type ctxRecordingInviteAuditLogger struct {
+	recordingAuditLogger
+	ctxErrs []error
+}
+
+func (l *ctxRecordingInviteAuditLogger) LogInviteAuditEvent(ctx context.Context, _ *InviteAuditEvent) error {
+	l.ctxErrs = append(l.ctxErrs, ctx.Err())
+	return nil
 }
 
 // provisionEventSpy records allow-list change events.

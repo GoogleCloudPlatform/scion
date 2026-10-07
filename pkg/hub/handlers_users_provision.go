@@ -16,6 +16,7 @@ package hub
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -176,10 +177,11 @@ func decodeStrictJSONObject(body []byte) (map[string]json.RawMessage, error) {
 }
 
 // hasControlChar reports whether s contains a control character other
-// than the allowed ones.
+// than the allowed ones. With allowNewline, line breaks are allowed: '\n'
+// and '\r' (so CRLF text is accepted).
 func hasControlChar(s string, allowNewline bool) bool {
 	for _, r := range s {
-		if allowNewline && r == '\n' {
+		if allowNewline && (r == '\n' || r == '\r') {
 			continue
 		}
 		if unicode.IsControl(r) {
@@ -270,7 +272,7 @@ func decodeProvisionRequest(r *http.Request) (PendingUserSpec, *provisionRequest
 		}
 		if hasControlChar(note, true) {
 			return PendingUserSpec{}, provisionFieldError(http.StatusBadRequest, ErrCodeValidationError, "note",
-				"note must not contain control characters other than newline")
+				"note must not contain control characters other than line breaks")
 		}
 		notePtr = &note
 	}
@@ -504,7 +506,11 @@ func writeProvisionUserExists(w http.ResponseWriter) {
 // allow-list change event. A failure is logged and does not change the
 // response; the mutation audit is already committed.
 func (s *Server) provisionPostCommit(r *http.Request, actor UserIdentity, u *store.User) {
-	ctx := r.Context()
+	// The record and its mutation audit are already committed. The
+	// best-effort side effects below must not be cut short when the client
+	// disconnects, so they run on a context that keeps the request's values
+	// but not its cancellation.
+	ctx := context.WithoutCancel(r.Context())
 	slog.InfoContext(ctx, "user provisioned", "email", u.Email, "invited_by", actor.Email(), "user_id", u.ID)
 	if logger := s.auditLogger; logger != nil {
 		event := &InviteAuditEvent{
