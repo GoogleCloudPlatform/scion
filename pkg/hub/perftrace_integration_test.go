@@ -81,14 +81,13 @@ func newPerfPair(t *testing.T, agentCount int) *perfPair {
 // an independent counting store wrapped around the real one.
 func newPerfPairWith(t *testing.T, agentCount int, independent bool) *perfPair {
 	t.Helper()
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:") // closes the store at test end
 	if err != nil {
 		if strings.Contains(err.Error(), "sqlite driver not registered") {
 			t.Skip("sqlite driver not registered")
 		}
 		t.Fatalf("test store: %v", err)
 	}
-	t.Cleanup(func() { _ = s.Close() })
 	ctx := context.Background()
 	require.NoError(t, s.Migrate(ctx))
 	_ = s.DeleteHubSetting(ctx, "migration_delegation_edge_backfill_v1")
