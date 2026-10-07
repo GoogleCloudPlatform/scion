@@ -62,6 +62,10 @@ interface MockOptions {
   agentStatus?: number;
   /** Versions listed by GET .../versions (default: meta's version). */
   versions?: ArtifactVersion[];
+  /** expiresAt of a minted view (default: far in the future). */
+  viewExpiresAt?: string;
+  /** Answers POST/PUT requests other than the view mint. */
+  write?: (method: string, url: string) => Response;
 }
 
 const VIEW_URL = `/api/v1/artifacts/view/${ID}.1.9999999999.c2lnbmF0dXJl/`;
@@ -75,9 +79,15 @@ function mockFetch(
   const urls: string[] = [];
   vi.stubGlobal(
     'fetch',
-    vi.fn((input: RequestInfo | URL) => {
+    vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      urls.push(url);
+      const method = init?.method ?? 'GET';
+      urls.push(method === 'GET' ? url : `${method} ${url}`);
+      if (method !== 'GET' && !url.endsWith('/view')) {
+        return Promise.resolve(
+          opts.write ? opts.write(method, url) : new Response(null, { status: 500 })
+        );
+      }
       if (url.startsWith('/api/v1/agents/')) {
         const status = opts.agentStatus ?? 404;
         return Promise.resolve(
@@ -86,9 +96,15 @@ function mockFetch(
       }
       if (url.endsWith('/view')) {
         return Promise.resolve(
-          new Response(JSON.stringify({ url: VIEW_URL, expiresAt: '2026-10-05T12:30:00Z' }), {
-            status: 200,
-          })
+          new Response(
+            JSON.stringify({
+              url: VIEW_URL,
+              expiresAt: opts.viewExpiresAt ?? '2999-01-01T00:00:00Z',
+            }),
+            {
+              status: 200,
+            }
+          )
         );
       }
       if (/\/versions(\?|$)/.test(url)) {
@@ -196,7 +212,7 @@ describe('artifact page', () => {
     expect(frame.getAttribute('src')).toBe(VIEW_URL);
     expect(frame.getAttribute('referrerpolicy')).toBe('no-referrer');
     expect(el.shadowRoot!.querySelector('.untrusted-bar')!.textContent).toContain('runs sandboxed');
-    expect(urls).toContain(`/api/v1/artifacts/${ID}/versions/1/view`);
+    expect(urls).toContain(`POST /api/v1/artifacts/${ID}/versions/1/view`);
     expect(urls.some((u) => u.includes('/files/'))).toBe(false);
     const open = Array.from(el.shadowRoot!.querySelectorAll('.entry-bar sl-button')).find((b) =>
       b.textContent!.includes('Open in new tab')
@@ -390,5 +406,149 @@ describe('artifact page', () => {
     expect(single.textContent).toContain('Only one version so far.');
     expect(single.textContent).toContain('Upload new version');
     expect(single.textContent).not.toContain('scion artifact');
+  });
+
+  it('shows the new version in place after publishing an edit from the current URL', async () => {
+    window.history.replaceState({}, '', `/projects/p-1/artifacts/${ID}`);
+    const meta = artifact('design.md', 'text/markdown');
+    const urls = mockFetch(meta, '# Old', {
+      write: (method, url) => {
+        if (url.endsWith('/finalize')) {
+          meta.artifact.currentSeq = 2;
+          meta.version = { ...meta.version!, seq: 2, ref: `scion://artifact/${ID}@2` };
+          return new Response(JSON.stringify(meta), { status: 200 });
+        }
+        if (method === 'PUT') return new Response(null, { status: 204 });
+        return new Response(
+          JSON.stringify({
+            artifact: meta.artifact,
+            version: { seq: 2 },
+            upload: { required: ['design.md'] },
+          }),
+          { status: 201 }
+        );
+      },
+    });
+    const el = await mount(true);
+    const editBtn = Array.from(el.shadowRoot!.querySelectorAll('.actions sl-button')).find((b) =>
+      b.textContent!.includes('Edit')
+    ) as HTMLElement;
+    editBtn.click();
+    await el.updateComplete;
+    el.shadowRoot!.querySelector('scion-code-editor')!.dispatchEvent(
+      new CustomEvent('content-changed', { detail: { content: '# New' } })
+    );
+    await el.updateComplete;
+    const publish = Array.from(el.shadowRoot!.querySelectorAll('.edit-footer sl-button')).find(
+      (b) => b.textContent!.includes('Publish new version')
+    ) as HTMLElement;
+    publish.click();
+    for (let i = 0; i < 30; i++) {
+      await new Promise((r) => setTimeout(r, 0));
+      await el.updateComplete;
+    }
+    expect(urls.filter((u) => u === `/api/v1/artifacts/${ID}`)).toHaveLength(2);
+    expect(
+      el.shadowRoot!.querySelector('scion-code-editor[readonly]') ??
+        el.shadowRoot!.querySelector('scion-artifact-markdown-frame')
+    ).not.toBeNull();
+    const labels = Array.from(el.shadowRoot!.querySelectorAll('.actions sl-button')).map((b) =>
+      b.textContent!.trim()
+    );
+    expect(labels.some((l) => l.includes('Version v2 (current)'))).toBe(true);
+  });
+
+  it('resumes the pending version when an edit is published again after a failed upload', async () => {
+    window.history.replaceState({}, '', `/projects/p-1/artifacts/${ID}`);
+    const meta = artifact('design.md', 'text/markdown');
+    let putStatus = 500;
+    const urls = mockFetch(meta, '# Old', {
+      write: (method, url) => {
+        if (url.endsWith('/finalize')) return new Response(JSON.stringify(meta), { status: 200 });
+        if (method === 'PUT') {
+          return putStatus === 204
+            ? new Response(null, { status: 204 })
+            : new Response('{"error":{"code":"internal","message":"boom"}}', { status: putStatus });
+        }
+        return new Response(
+          JSON.stringify({
+            artifact: meta.artifact,
+            version: { seq: 2 },
+            upload: { required: ['design.md'] },
+          }),
+          { status: 201 }
+        );
+      },
+    });
+    const el = await mount(true);
+    (
+      Array.from(el.shadowRoot!.querySelectorAll('.actions sl-button')).find((b) =>
+        b.textContent!.includes('Edit')
+      ) as HTMLElement
+    ).click();
+    await el.updateComplete;
+    el.shadowRoot!.querySelector('scion-code-editor')!.dispatchEvent(
+      new CustomEvent('content-changed', { detail: { content: '# New' } })
+    );
+    await el.updateComplete;
+    const clickPublish = async (): Promise<void> => {
+      (
+        Array.from(el.shadowRoot!.querySelectorAll('.edit-footer sl-button')).find((b) =>
+          b.textContent!.includes('Publish new version')
+        ) as HTMLElement
+      ).click();
+      for (let i = 0; i < 30; i++) {
+        await new Promise((r) => setTimeout(r, 0));
+        await el.updateComplete;
+      }
+    };
+    await clickPublish();
+    expect(el.shadowRoot!.querySelector('sl-alert[variant="danger"]')!.textContent).toContain(
+      'Publish again to retry'
+    );
+    putStatus = 204;
+    await clickPublish();
+    expect(urls.filter((u) => u === `POST /api/v1/artifacts/${ID}/versions`)).toHaveLength(1);
+    expect(urls.filter((u) => u.startsWith('PUT '))).toHaveLength(2);
+    expect(urls).toContain(`POST /api/v1/artifacts/${ID}/versions/2/finalize`);
+  });
+
+  it('says when the HTML view has expired and mints a new one on Reload view', async () => {
+    const urls = mockFetch(artifact('page.html', 'text/html'), '', {
+      viewExpiresAt: '2000-01-01T00:00:00Z',
+    });
+    const el = await mount(true);
+    const alert = el.shadowRoot!.querySelector('sl-alert.expired')!;
+    expect(alert.textContent).toContain('This view has expired.');
+    expect(
+      Array.from(el.shadowRoot!.querySelectorAll('.entry-bar sl-button')).some((b) =>
+        b.textContent!.includes('Open in new tab')
+      )
+    ).toBe(false);
+    (alert.querySelector('sl-button') as HTMLElement).click();
+    for (let i = 0; i < 10; i++) {
+      await new Promise((r) => setTimeout(r, 0));
+      await el.updateComplete;
+    }
+    expect(urls.filter((u) => u === `POST /api/v1/artifacts/${ID}/versions/1/view`)).toHaveLength(
+      2
+    );
+  });
+
+  it('gives the markdown frame no referrer and single-file versions a download in History', async () => {
+    mockFetch(artifact('design.md', 'text/markdown'));
+    const el = await mount(true);
+    const frameEl = el.shadowRoot!.querySelector('scion-artifact-markdown-frame') as HTMLElement & {
+      updateComplete: Promise<unknown>;
+    };
+    await frameEl.updateComplete;
+    expect(frameEl.shadowRoot!.querySelector('iframe')!.getAttribute('referrerpolicy')).toBe(
+      'no-referrer'
+    );
+    const dl = el.shadowRoot!.querySelector(
+      'sl-tab-panel[name="history"] sl-icon-button[name="download"]'
+    )!;
+    expect(dl.getAttribute('href')).toBe(`/api/v1/artifacts/${ID}/versions/1/files/design.md`);
+    expect(dl.getAttribute('download')).toBe('design.md');
   });
 });

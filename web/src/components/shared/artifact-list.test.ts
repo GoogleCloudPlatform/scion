@@ -161,6 +161,38 @@ describe('artifact list', () => {
   });
 });
 
+describe('artifact list paging', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+    vi.unstubAllGlobals();
+  });
+
+  it('follows the cursor past empty pages instead of showing the empty state', async () => {
+    const { el, urls } = await mountList({
+      'cursor=c2': { artifacts: [item('z')] },
+      'cursor=c1': { artifacts: [], nextCursor: 'c2' },
+      'mine=1': { artifacts: [], nextCursor: 'c1' },
+    });
+    expect(urls).toEqual([
+      '/api/v1/artifacts?mine=1&scope=p-1',
+      '/api/v1/artifacts?mine=1&scope=p-1&cursor=c1',
+      '/api/v1/artifacts?mine=1&scope=p-1&cursor=c2',
+    ]);
+    expect(el.shadowRoot!.querySelector('.empty')).toBeNull();
+    expect(el.shadowRoot!.querySelectorAll('tbody tr')).toHaveLength(1);
+  });
+
+  it('drops Load more as soon as the search text changes', async () => {
+    const { el } = await mountList({ 'mine=1': { artifacts: [item('a')], nextCursor: 'c1' } });
+    expect(el.shadowRoot!.querySelector('.more sl-button')).not.toBeNull();
+    const input = el.shadowRoot!.querySelector('sl-input') as HTMLElement & { value: string };
+    input.value = 'x';
+    input.dispatchEvent(new CustomEvent('sl-input'));
+    await el.updateComplete;
+    expect(el.shadowRoot!.querySelector('.more sl-button')).toBeNull();
+  });
+});
+
 describe('publish dialog helpers', () => {
   function f(rel: string): File {
     const file = new File(['x'], rel.split('/').pop()!);

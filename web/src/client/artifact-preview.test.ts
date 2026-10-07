@@ -160,7 +160,7 @@ describe('rewriteImages', () => {
     );
     expect(links[1].hasAttribute('href')).toBe(false);
     expect(links[2].getAttribute('href')).toBe('https://x.example/');
-    expect(links[3].getAttribute('href')).toBe('#s');
+    expect(links[3].hasAttribute('href')).toBe(false);
   });
 });
 

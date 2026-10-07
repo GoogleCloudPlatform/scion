@@ -3048,8 +3048,6 @@ export class ScionPageProjectDetail extends LitElement {
   }
 
   private renderFilesSection() {
-    const tabs = this.segmentFileTabs();
-    const isEditable = can(this.project?._capabilities, 'update');
     const isEditorOpen = this.editingFilePath !== null;
 
     return html`
@@ -3061,63 +3059,70 @@ export class ScionPageProjectDetail extends LitElement {
           </div>
         </div>
 
-        ${this.artifactsOn() && this.filesSegment === 'artifacts' && !isEditorOpen
-          ? html`<scion-artifact-list .projectId=${this.projectId}></scion-artifact-list>`
-          : isEditorOpen
-            ? html`
-                <div class="editor-back-row">
-                  <sl-button size="small" variant="text" @click=${this.handleEditorClosed}>
-                    <sl-icon slot="prefix" name="arrow-left"></sl-icon>
-                    Back to files
-                  </sl-button>
-                </div>
-                <scion-file-editor
-                  .filePath=${this.editingFilePath || ''}
-                  .dataSource=${this.getEditorDataSource(this.activeFileTab)}
-                  ?readonly=${!isEditable}
-                  ?initialPreview=${this.editorInitialPreview}
-                  @file-saved=${this.handleFileSaved}
-                  @editor-closed=${this.handleEditorClosed}
-                ></scion-file-editor>
-              `
-            : html`
-                <div class="files-tab-header">
-                  <sl-tab-group class="files-tab-group" @sl-tab-show=${this.onFileTabChange}>
-                    ${tabs.map(
-                      (tab) => html`
-                        <sl-tab
-                          slot="nav"
-                          panel=${tab.key}
-                          ?active=${tab.key === this.activeFileTab}
-                        >
-                          <span class="tab-label-truncated" title=${tab.label}
-                            >${this.truncateTabLabel(tab.label)}</span
-                          >
-                        </sl-tab>
-                      `
-                    )}
-                    ${tabs.map(
-                      (tab) => html`
-                        <sl-tab-panel name=${tab.key}>
-                          ${this.visitedFileTabs.has(tab.key)
-                            ? html`
-                                <scion-file-browser
-                                  data-tab=${tab.key}
-                                  .dataSource=${this.getTabDataSource(tab.key)}
-                                  ?editable=${isEditable}
-                                  ?showArchive=${true}
-                                  @file-edit-requested=${this.handleFileEditRequested}
-                                  @file-preview-requested=${this.handleFilePreviewRequested}
-                                  @file-create-requested=${this.handleFileCreateRequested}
-                                ></scion-file-browser>
-                              `
-                            : nothing}
-                        </sl-tab-panel>
-                      `
-                    )}
-                  </sl-tab-group>
-                </div>
-              `}
+        ${this.renderFilesBody()}
+      </div>
+    `;
+  }
+
+  /** The Files area below its header: artifacts, the file editor, or the file tabs. */
+  private renderFilesBody(): TemplateResult {
+    const tabs = this.segmentFileTabs();
+    const isEditable = can(this.project?._capabilities, 'update');
+    const isEditorOpen = this.editingFilePath !== null;
+
+    if (isEditorOpen) {
+      return html`
+        <div class="editor-back-row">
+          <sl-button size="small" variant="text" @click=${this.handleEditorClosed}>
+            <sl-icon slot="prefix" name="arrow-left"></sl-icon>
+            Back to files
+          </sl-button>
+        </div>
+        <scion-file-editor
+          .filePath=${this.editingFilePath || ''}
+          .dataSource=${this.getEditorDataSource(this.activeFileTab)}
+          ?readonly=${!isEditable}
+          ?initialPreview=${this.editorInitialPreview}
+          @file-saved=${this.handleFileSaved}
+          @editor-closed=${this.handleEditorClosed}
+        ></scion-file-editor>
+      `;
+    }
+    if (this.artifactsOn() && this.filesSegment === 'artifacts') {
+      return html`<scion-artifact-list .projectId=${this.projectId}></scion-artifact-list>`;
+    }
+    return html`
+      <div class="files-tab-header">
+        <sl-tab-group class="files-tab-group" @sl-tab-show=${this.onFileTabChange}>
+          ${tabs.map(
+            (tab) => html`
+              <sl-tab slot="nav" panel=${tab.key} ?active=${tab.key === this.activeFileTab}>
+                <span class="tab-label-truncated" title=${tab.label}
+                  >${this.truncateTabLabel(tab.label)}</span
+                >
+              </sl-tab>
+            `
+          )}
+          ${tabs.map(
+            (tab) => html`
+              <sl-tab-panel name=${tab.key}>
+                ${this.visitedFileTabs.has(tab.key)
+                  ? html`
+                      <scion-file-browser
+                        data-tab=${tab.key}
+                        .dataSource=${this.getTabDataSource(tab.key)}
+                        ?editable=${isEditable}
+                        ?showArchive=${true}
+                        @file-edit-requested=${this.handleFileEditRequested}
+                        @file-preview-requested=${this.handleFilePreviewRequested}
+                        @file-create-requested=${this.handleFileCreateRequested}
+                      ></scion-file-browser>
+                    `
+                  : nothing}
+              </sl-tab-panel>
+            `
+          )}
+        </sl-tab-group>
       </div>
     `;
   }

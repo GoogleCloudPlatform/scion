@@ -191,11 +191,16 @@ export function rendererFor(mediaType: string): ArtifactRenderer {
  * asks the hub to serve the bytes itself instead of redirecting to object
  * storage, which fetch() needs because the redirect is cross-origin.
  */
-export function artifactFileUrl(id: string, seq: number, path: string, stream = false): string {
-  const encodedPath = path
+/** Percent-encodes each segment of a slash-separated file path. */
+function encodePath(path: string): string {
+  return path
     .split('/')
     .map((seg) => encodeURIComponent(seg))
     .join('/');
+}
+
+export function artifactFileUrl(id: string, seq: number, path: string, stream = false): string {
+  const encodedPath = encodePath(path);
   const version = seq > 0 ? `/versions/${seq}` : '';
   const query = stream ? '?stream=1' : '';
   return `/api/v1/artifacts/${encodeURIComponent(id)}${version}/files/${encodedPath}${query}`;
@@ -257,13 +262,6 @@ function artifactPath(id: string): string {
   return `/api/v1/artifacts/${encodeURIComponent(id)}`;
 }
 
-function encodePath(path: string): string {
-  return path
-    .split('/')
-    .map((seg) => encodeURIComponent(seg))
-    .join('/');
-}
-
 /** One page of the artifacts homed in a project that the caller can read. */
 export async function listProjectArtifacts(
   projectId: string,
@@ -309,7 +307,40 @@ export interface PublishRequest {
   files: PublishFile[];
   /** Called after each upload with the number of files uploaded so far. */
   onProgress?: ((done: number, total: number, path: string) => void) | undefined;
+  /**
+   * A version a failed attempt left pending. It is resumed when this
+   * request publishes exactly the same thing; otherwise a new version is
+   * created.
+   */
+  resume?: PendingPublish | null | undefined;
 }
+
+/** A pending version that a failed publish left behind. */
+export interface PendingPublish {
+  artifactId: string;
+  seq: number;
+  required: string[];
+  /** Identifies what was being published (manifest and metadata). */
+  fingerprint: string;
+}
+
+/**
+ * A publish that failed after its version was created. pending names that
+ * version, so the next attempt with the same content resumes it instead
+ * of leaving another pending version behind.
+ */
+export class PublishError extends Error {
+  constructor(
+    message: string,
+    readonly pending: PendingPublish | null
+  ) {
+    super(message);
+    this.name = 'PublishError';
+  }
+}
+
+/** How long the hub keeps a version that was never finalized. */
+export const PENDING_VERSION_LIFETIME = '24 hours';
 
 /**
  * Publishes files as a new artifact or a new version of one, through the
@@ -332,34 +363,84 @@ export async function publishFiles(req: PublishRequest): Promise<ArtifactRespons
   if (req.key) body.key = req.key;
   if (req.note) body.note = req.note;
   if (!req.artifactId && req.scope) body.scope = req.scope;
-  const createPath = req.artifactId
-    ? `${artifactPath(req.artifactId)}/versions`
-    : '/api/v1/artifacts';
-  const pending = await okJSON<PendingVersionResponse>(
-    await apiFetch(createPath, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    })
-  );
-  const id = pending.artifact.id;
-  const seq = pending.version.seq;
-  const required = pending.upload.required ?? [];
+  const fingerprint = JSON.stringify([req.artifactId ?? '', body]);
+
+  let pending: PendingPublish;
+  if (req.resume && req.resume.fingerprint === fingerprint) {
+    pending = req.resume;
+  } else {
+    const createPath = req.artifactId
+      ? `${artifactPath(req.artifactId)}/versions`
+      : '/api/v1/artifacts';
+    const created = await okJSON<PendingVersionResponse>(
+      await apiFetch(createPath, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+    );
+    pending = {
+      artifactId: created.artifact.id,
+      seq: created.version.seq,
+      required: created.upload.required ?? [],
+      fingerprint,
+    };
+  }
+  const { artifactId: id, seq, required } = pending;
+  const fail = async (res: Response, prefix: string): Promise<never> => {
+    let code = '';
+    try {
+      const b = (await res.clone().json()) as { error?: { code?: string } };
+      code = b.error?.code ?? '';
+    } catch {
+      // Not JSON; the status decides.
+    }
+    const message = prefix + (await extractApiError(res, `HTTP ${res.status}`));
+    // The version is gone (404), no longer pending (409 conflict), or not
+    // the caller's (403): another attempt must start a new version.
+    const gone =
+      res.status === 404 || res.status === 403 || (res.status === 409 && code === 'conflict');
+    throw new PublishError(message, gone ? null : pending);
+  };
   let done = 0;
   for (const path of required) {
     const data = byPath.get(path);
-    if (!data) throw new Error(`The hub asked for ${path}, which is not being uploaded.`);
-    const m = manifest.find((x) => x.path === path)!;
-    const res = await apiFetch(`${artifactPath(id)}/versions/${seq}/files/${encodePath(path)}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/octet-stream', 'X-Content-SHA256': m.sha256 },
-      body: data,
-    });
-    if (!res.ok) {
-      throw new Error(`${path}: ${await extractApiError(res, `HTTP ${res.status}`)}`);
+    if (!data) {
+      throw new PublishError(`The hub asked for ${path}, which is not being uploaded.`, null);
     }
+    const m = manifest.find((x) => x.path === path)!;
+    let res: Response;
+    try {
+      res = await apiFetch(`${artifactPath(id)}/versions/${seq}/files/${encodePath(path)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/octet-stream', 'X-Content-SHA256': m.sha256 },
+        body: data,
+      });
+    } catch (err) {
+      throw new PublishError(
+        `${path}: ${err instanceof Error ? err.message : 'upload failed'}`,
+        pending
+      );
+    }
+    if (!res.ok) await fail(res, `${path}: `);
     done++;
     req.onProgress?.(done, required.length, path);
   }
-  return okJSON(await apiFetch(`${artifactPath(id)}/versions/${seq}/finalize`, { method: 'POST' }));
+  let res: Response;
+  try {
+    res = await apiFetch(`${artifactPath(id)}/versions/${seq}/finalize`, { method: 'POST' });
+  } catch (err) {
+    throw new PublishError(err instanceof Error ? err.message : 'finalize failed', pending);
+  }
+  if (!res.ok) await fail(res, '');
+  return (await res.json()) as ArtifactResponse;
+}
+
+/** The message to show for a failed publish. */
+export function publishErrorMessage(err: unknown): string {
+  const message = (err instanceof Error ? err.message : 'Publishing failed').replace(/\.+$/, '');
+  if (err instanceof PublishError && err.pending) {
+    return `${message}. Publish again to retry; the upload continues where it stopped. If you do not, the unfinished version is removed after ${PENDING_VERSION_LIFETIME}.`;
+  }
+  return message;
 }

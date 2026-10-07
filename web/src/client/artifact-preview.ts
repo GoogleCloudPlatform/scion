@@ -144,13 +144,13 @@ export function rewriteImages(
     img.replaceWith(span);
   }
   // A relative link to a file of the version opens that file; any other
-  // relative link would resolve against the app's own URL, so it is made
-  // plain text. Absolute links are left as the sanitizer kept them.
+  // relative link, including a #fragment (links open in a new tab), would
+  // resolve against the app's own URL, so it is made plain text. Absolute
+  // links are left as the sanitizer kept them.
   for (const a of Array.from(tpl.content.querySelectorAll('a[href]'))) {
     const href = a.getAttribute('href') ?? '';
-    if (/^[a-z][a-z0-9+.-]*:/i.test(href) || href.startsWith('//') || href.startsWith('#'))
-      continue;
-    const path = resolveBundlePath(ctx.entryPath, href);
+    if (/^[a-z][a-z0-9+.-]*:/i.test(href) || href.startsWith('//')) continue;
+    const path = href.startsWith('#') ? null : resolveBundlePath(ctx.entryPath, href);
     const file =
       path === null ? undefined : ctx.files.find((f) => !isRemoteFile(f) && f.path === path);
     if (file) {

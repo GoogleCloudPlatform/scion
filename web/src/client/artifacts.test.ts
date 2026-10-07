@@ -22,8 +22,10 @@ import {
   baseName,
   formatBytes,
   isInlineType,
+  PublishError,
   listProjectArtifacts,
   parseArtifactPagePath,
+  publishErrorMessage,
   publishFiles,
   rendererFor,
   sha256Hex,
@@ -259,6 +261,96 @@ describe('publishFiles', () => {
         files: [{ path: 'a.md', data: new Blob(['x']) }],
       })
     ).rejects.toThrow(/a\.md: .*too big/);
+  });
+});
+
+describe('publishFiles after a failure', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  const files = (): { path: string; data: Blob }[] => [{ path: 'a.md', data: new Blob(['abc']) }];
+
+  it('reports the pending version and resumes it on the next attempt', async () => {
+    let putStatus = 500;
+    const calls = recordFetch((c) => {
+      if (c.method === 'POST' && c.url === '/api/v1/artifacts') {
+        return json(
+          { artifact: { id: 'n-1' }, version: { seq: 1 }, upload: { required: ['a.md'] } },
+          201
+        );
+      }
+      if (c.method === 'PUT') {
+        return putStatus === 204
+          ? new Response(null, { status: 204 })
+          : json({ error: { code: 'internal', message: 'boom' } }, putStatus);
+      }
+      if (c.url.endsWith('/finalize'))
+        return json({ artifact: { id: 'n-1' }, version: { seq: 1 } });
+      return json({}, 500);
+    });
+    const req = { scope: 'p-1', title: 'T', entry: 'a.md', files: files() };
+    let failure: unknown;
+    try {
+      await publishFiles(req);
+    } catch (err) {
+      failure = err;
+    }
+    expect(failure).toBeInstanceOf(PublishError);
+    const pending = (failure as PublishError).pending!;
+    expect(pending).toMatchObject({ artifactId: 'n-1', seq: 1, required: ['a.md'] });
+    expect(publishErrorMessage(failure)).toContain('removed after 24 hours');
+
+    putStatus = 204;
+    await publishFiles({ ...req, files: files(), resume: pending });
+    expect(calls.map((c) => `${c.method} ${c.url}`)).toEqual([
+      'POST /api/v1/artifacts',
+      'PUT /api/v1/artifacts/n-1/versions/1/files/a.md',
+      'PUT /api/v1/artifacts/n-1/versions/1/files/a.md',
+      'POST /api/v1/artifacts/n-1/versions/1/finalize',
+    ]);
+  });
+
+  it('starts a new version when the content changed since the failure', async () => {
+    const calls = recordFetch((c) => {
+      if (c.method === 'POST' && !c.url.endsWith('/finalize')) {
+        return json({ artifact: { id: 'a' }, version: { seq: 3 }, upload: { required: [] } }, 201);
+      }
+      return json({ artifact: { id: 'a' }, version: { seq: 3 } });
+    });
+    await publishFiles({
+      artifactId: 'a',
+      entry: 'a.md',
+      files: [{ path: 'a.md', data: new Blob(['changed']) }],
+      resume: { artifactId: 'a', seq: 2, required: ['a.md'], fingerprint: 'old' },
+    });
+    expect(calls[0].url).toBe('/api/v1/artifacts/a/versions');
+    expect(calls[1].url).toBe('/api/v1/artifacts/a/versions/3/finalize');
+  });
+
+  it('does not offer to resume a version that is no longer pending', async () => {
+    recordFetch((c) => {
+      if (c.url.endsWith('/finalize')) {
+        return json({ error: { code: 'conflict', message: 'the version is not pending' } }, 409);
+      }
+      return json({ artifact: { id: 'a' }, version: { seq: 2 }, upload: { required: [] } }, 201);
+    });
+    const err = await publishFiles({ artifactId: 'a', entry: 'a.md', files: files() }).catch(
+      (e: unknown) => e
+    );
+    expect((err as PublishError).pending).toBeNull();
+    expect(publishErrorMessage(err)).not.toContain('24 hours');
+  });
+
+  it('keeps the version resumable when finalize finds files missing', async () => {
+    recordFetch((c) => {
+      if (c.url.endsWith('/finalize')) {
+        return json({ error: { code: 'incomplete', message: '1 file(s) missing' } }, 409);
+      }
+      return json({ artifact: { id: 'a' }, version: { seq: 2 }, upload: { required: [] } }, 201);
+    });
+    const err = await publishFiles({ artifactId: 'a', entry: 'a.md', files: files() }).catch(
+      (e: unknown) => e
+    );
+    expect((err as PublishError).pending).toMatchObject({ artifactId: 'a', seq: 2 });
   });
 });
 

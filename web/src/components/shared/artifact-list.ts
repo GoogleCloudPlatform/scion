@@ -33,6 +33,9 @@ import './artifact-publish-dialog.js';
 /** Delay before a search runs, so typing does not send a request per key. */
 const SEARCH_DELAY_MS = 300;
 
+/** Most pages one load follows past empty pages before showing what it has. */
+const MAX_EMPTY_FOLLOWS = 10;
+
 @customElement('scion-artifact-list')
 export class ScionArtifactList extends LitElement {
   @property({ type: String }) projectId = '';
@@ -179,6 +182,8 @@ export class ScionArtifactList extends LitElement {
 
   private async load(more = false): Promise<void> {
     if (!this.projectId) return;
+    if (this.searchTimer) clearTimeout(this.searchTimer);
+    this.searchTimer = null;
     this.abort?.abort();
     const abort = new AbortController();
     this.abort = abort;
@@ -189,13 +194,23 @@ export class ScionArtifactList extends LitElement {
     }
     this.error = null;
     try {
-      const page = await listProjectArtifacts(this.projectId, {
-        q: this.query.trim(),
-        cursor: more ? this.cursor : '',
-        signal: abort.signal,
-      });
-      this.items = more ? [...this.items, ...page.artifacts] : page.artifacts;
-      this.cursor = page.nextCursor ?? '';
+      let items = more ? this.items : [];
+      let cursor = more ? this.cursor : '';
+      // A page may be short, even empty, and still have a cursor (the hub
+      // examines a bounded number of rows per request), so keep following
+      // it until there is a row to show or the walk ends.
+      for (let follow = 0; follow < MAX_EMPTY_FOLLOWS; follow++) {
+        const page = await listProjectArtifacts(this.projectId, {
+          q: this.query.trim(),
+          cursor,
+          signal: abort.signal,
+        });
+        items = [...items, ...page.artifacts];
+        cursor = page.nextCursor ?? '';
+        if (page.artifacts.length > 0 || !cursor) break;
+      }
+      this.items = items;
+      this.cursor = cursor;
     } catch (err) {
       if (abort.signal.aborted) return;
       this.error = err instanceof Error ? err.message : 'Could not load artifacts';
@@ -209,6 +224,8 @@ export class ScionArtifactList extends LitElement {
 
   private onSearch = (e: Event): void => {
     this.query = (e.target as HTMLInputElement).value;
+    // The cursor belongs to the previous query; Load more waits for the search.
+    this.cursor = '';
     if (this.searchTimer) clearTimeout(this.searchTimer);
     this.searchTimer = setTimeout(() => void this.load(), SEARCH_DELAY_MS);
   };
@@ -335,7 +352,7 @@ export class ScionArtifactList extends LitElement {
         <p>${this.error}</p>
         <sl-button size="small" @click=${(): void => void this.load()}>Retry</sl-button>
       </div>`;
-    } else if (this.items.length === 0) {
+    } else if (this.items.length === 0 && !this.cursor) {
       body = this.renderEmpty();
     } else {
       body = this.renderTable();

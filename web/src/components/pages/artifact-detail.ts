@@ -35,7 +35,7 @@ import { customElement, property, query, state } from 'lit/decorators.js';
 import type { PageData } from '../../shared/types.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
-import { navigateTo } from '../../client/navigation.js';
+import { navigateTo, stripBasePath } from '../../client/navigation.js';
 import { isFeatureEnabled } from '../../utils/feature-flags.js';
 import { formatInstant } from '../../utils/time.js';
 import {
@@ -50,6 +50,8 @@ import {
   listVersions,
   mintView,
   parseArtifactPagePath,
+  PublishError,
+  publishErrorMessage,
   publishFiles,
   rendererFor,
 } from '../../client/artifacts.js';
@@ -58,6 +60,7 @@ import type {
   ArtifactResponse,
   ArtifactRenderer,
   ArtifactVersion,
+  PendingPublish,
   PublishFile,
   ViewResponse,
 } from '../../client/artifacts.js';
@@ -68,6 +71,9 @@ import '../shared/code-editor.js';
 import './not-found.js';
 
 type Tab = 'preview' | 'files' | 'history';
+
+/** Longest delay setTimeout honours. */
+const MAX_TIMER_MS = 2 ** 31 - 1;
 
 @customElement('scion-page-artifact-detail')
 export class ScionPageArtifactDetail extends LitElement {
@@ -92,12 +98,16 @@ export class ScionPageArtifactDetail extends LitElement {
   @state() private versionsError: string | null = null;
   @state() private view: ViewResponse | null = null;
   @state() private viewError: string | null = null;
+  @state() private viewExpired = false;
+  private viewTimer: ReturnType<typeof setTimeout> | null = null;
   @state() private editing = false;
   @state() private editText = '';
   @state() private editNote = '';
   @state() private editBusy = false;
   @state() private editError: string | null = null;
   @state() private publishOpen = false;
+  /** The version a failed Edit publish left pending; the next attempt resumes it. */
+  private editPending: PendingPublish | null = null;
 
   @query('.untrusted') private untrustedFrame?: HTMLElement;
 
@@ -392,12 +402,35 @@ export class ScionPageArtifactDetail extends LitElement {
   }
 
   private async loadView(seq: number): Promise<void> {
+    if (this.viewTimer) clearTimeout(this.viewTimer);
+    this.viewTimer = null;
     try {
-      this.view = await mintView(this.artifactId, seq);
+      const view = await mintView(this.artifactId, seq);
+      this.view = view;
+      this.viewExpired = false;
       this.viewError = null;
+      // The view URL stops working when it expires: say so then, and mint a
+      // new one only when the reader asks, so a page in use is not reloaded.
+      const left = Date.parse(view.expiresAt) - Date.now();
+      // setTimeout fires at once for delays over 2^31-1 ms; views last far
+      // less than that, so a longer delay is simply not scheduled.
+      if (Number.isFinite(left) && left <= MAX_TIMER_MS) {
+        this.viewTimer = setTimeout(
+          () => {
+            this.viewExpired = true;
+          },
+          Math.max(0, left)
+        );
+      }
     } catch (err) {
       this.viewError = err instanceof Error ? err.message : 'Could not open the view';
     }
+  }
+
+  override disconnectedCallback(): void {
+    super.disconnectedCallback();
+    if (this.viewTimer) clearTimeout(this.viewTimer);
+    this.viewTimer = null;
   }
 
   private async loadVersions(before = 0): Promise<void> {
@@ -489,11 +522,13 @@ export class ScionPageArtifactDetail extends LitElement {
         entry: v.entryPath,
         note: this.editNote.trim() || undefined,
         files,
+        resume: this.editPending,
       });
-      this.editing = false;
-      navigateTo(artifactPagePath(this.homeProject, this.artifactId));
+      this.editPending = null;
+      this.showCurrentVersion();
     } catch (err) {
-      this.editError = err instanceof Error ? err.message : 'Publishing failed';
+      this.editError = publishErrorMessage(err);
+      if (err instanceof PublishError) this.editPending = err.pending;
     } finally {
       this.editBusy = false;
     }
@@ -501,8 +536,27 @@ export class ScionPageArtifactDetail extends LitElement {
 
   private onPublished = (): void => {
     this.publishOpen = false;
-    navigateTo(artifactPagePath(this.homeProject, this.artifactId));
+    this.showCurrentVersion();
   };
+
+  /**
+   * Shows the artifact's current version after a publish. The router does
+   * nothing when the target is the page already shown, so in that case the
+   * page reloads itself.
+   */
+  private showCurrentVersion(): void {
+    const target = artifactPagePath(this.homeProject, this.artifactId);
+    this.editing = false;
+    if (stripBasePath(window.location.pathname) !== target) {
+      navigateTo(target);
+      return;
+    }
+    this.seq = 0;
+    this.tab = 'preview';
+    this.versions = [];
+    this.versionsNext = 0;
+    void this.load();
+  }
 
   override render(): TemplateResult | typeof nothing {
     if (this.loading) {
@@ -728,18 +782,34 @@ export class ScionPageArtifactDetail extends LitElement {
             Remote images are not loaded in HTML artifacts; include them in the bundle.
           </sl-alert>`
         : nothing}
+      ${this.viewExpired
+        ? html`<sl-alert class="notice expired" variant="neutral" open>
+            <sl-icon slot="icon" name="clock-history"></sl-icon>
+            This view has expired.
+            <sl-button size="small" @click=${(): void => void this.loadView(v.seq)}
+              >Reload view</sl-button
+            >
+          </sl-alert>`
+        : nothing}
       <div class="entry-bar">
         <span>${f.path} · ${count === 1 ? '1 file' : `bundle of ${count} files`}</span>
-        <span class="buttons">
-          <sl-button size="small" @click=${this.fullScreen}>
-            <sl-icon slot="prefix" name="arrows-fullscreen"></sl-icon>
-            Full screen
-          </sl-button>
-          <sl-button size="small" href=${this.view.url} target="_blank" rel="noopener noreferrer">
-            <sl-icon slot="prefix" name="box-arrow-up-right"></sl-icon>
-            Open in new tab
-          </sl-button>
-        </span>
+        ${this.viewExpired
+          ? nothing
+          : html`<span class="buttons">
+              <sl-button size="small" @click=${this.fullScreen}>
+                <sl-icon slot="prefix" name="arrows-fullscreen"></sl-icon>
+                Full screen
+              </sl-button>
+              <sl-button
+                size="small"
+                href=${this.view.url}
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                <sl-icon slot="prefix" name="box-arrow-up-right"></sl-icon>
+                Open in new tab
+              </sl-button>
+            </span>`}
       </div>
       <div class="untrusted">
         <div class="untrusted-bar">
@@ -880,6 +950,14 @@ export class ScionPageArtifactDetail extends LitElement {
                         label=${`View v${x.seq}`}
                         @click=${(): void => this.goToVersion(x.seq)}
                       ></sl-icon-button>`}
+                  ${x.fileCount === 1 && x.entryPath
+                    ? html`<sl-icon-button
+                        name="download"
+                        label=${`Download v${x.seq}`}
+                        href=${artifactFileUrl(this.artifactId, x.seq, x.entryPath)}
+                        download=${baseName(x.entryPath)}
+                      ></sl-icon-button>`
+                    : nothing}
                 </td>
               </tr>
             `
@@ -973,7 +1051,7 @@ export class ScionPageArtifactDetail extends LitElement {
           ?loading=${this.editBusy}
           ?disabled=${this.editText === this.text}
           @click=${(): void => void this.publishEdit()}
-          >Publish as v${this.data!.artifact.currentSeq + 1}</sl-button
+          >Publish new version</sl-button
         >
       </div>
     `;

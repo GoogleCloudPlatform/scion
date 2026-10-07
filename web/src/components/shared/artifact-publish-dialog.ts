@@ -27,8 +27,13 @@ import { LitElement, html, css, nothing } from 'lit';
 import type { TemplateResult } from 'lit';
 import { customElement, property, query, state } from 'lit/decorators.js';
 
-import { formatBytes, publishFiles } from '../../client/artifacts.js';
-import type { ArtifactResponse, PublishFile } from '../../client/artifacts.js';
+import {
+  PublishError,
+  formatBytes,
+  publishErrorMessage,
+  publishFiles,
+} from '../../client/artifacts.js';
+import type { ArtifactResponse, PendingPublish, PublishFile } from '../../client/artifacts.js';
 
 /** A file picked for upload, with its path inside the bundle. */
 export interface PickedFile {
@@ -88,6 +93,8 @@ export class ScionArtifactPublishDialog extends LitElement {
   @state() private progress = '';
   @state() private error: string | null = null;
   @state() private dragOver = false;
+  /** The version a failed attempt left pending; the next attempt resumes it. */
+  private pending: PendingPublish | null = null;
 
   @query('#file-input') private fileInput?: HTMLInputElement;
   @query('#folder-input') private folderInput?: HTMLInputElement;
@@ -154,6 +161,10 @@ export class ScionArtifactPublishDialog extends LitElement {
     this.busy = false;
     this.progress = '';
     this.error = null;
+    this.pending = null;
+    // Clear the pickers so choosing the same file again fires change.
+    if (this.fileInput) this.fileInput.value = '';
+    if (this.folderInput) this.folderInput.value = '';
   }
 
   override updated(changed: Map<string, unknown>): void {
@@ -237,7 +248,9 @@ export class ScionArtifactPublishDialog extends LitElement {
         onProgress: (done, total, path) => {
           this.progress = `Uploaded ${done} of ${total}: ${path}`;
         },
+        resume: this.pending,
       });
+      this.pending = null;
       this.progress = '';
       this.close();
       this.dispatchEvent(
@@ -248,7 +261,8 @@ export class ScionArtifactPublishDialog extends LitElement {
         })
       );
     } catch (err) {
-      this.error = err instanceof Error ? err.message : 'Publishing failed';
+      this.error = publishErrorMessage(err);
+      if (err instanceof PublishError) this.pending = err.pending;
       this.progress = '';
     } finally {
       this.busy = false;
