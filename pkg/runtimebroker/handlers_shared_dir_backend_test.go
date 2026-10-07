@@ -53,6 +53,23 @@ func TestCreateAgentReprovision_SharedDirBackendChange(t *testing.T) {
 	assert.True(t, resp.SharedDirBackendsChanged)
 }
 
+// A change back to local takes the same path.
+func TestCreateAgentReprovision_SharedDirBackendChangeToLocal(t *testing.T) {
+	srv, mgr := newTestServerWithProvisionCapture()
+	w := postSharedDirCreate(t, srv, `{
+		"name": "reprovisioned-agent", "id": "agent-uuid-reprov", "slug": "reprovisioned-agent",
+		"provisionOnly": true, "reprovision": true, "config": {"template": "claude"},
+		"sharedDirBackendChanges": {"notes": "local", "cache": "nfs"}
+	}`)
+	require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
+	require.True(t, mgr.reprovisionCalled)
+	assert.Equal(t, map[string]string{"notes": "local", "cache": "nfs"}, mgr.lastOpts.SharedDirBackendChanges)
+	assert.False(t, mgr.lastOpts.AllowEmptySharedDir)
+	var resp CreateAgentResponse
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	assert.True(t, resp.SharedDirBackendsChanged)
+}
+
 // A reprovision without a change does not claim one.
 func TestCreateAgentReprovision_NoSharedDirBackendChangeNoEcho(t *testing.T) {
 	srv, mgr := newTestServerWithProvisionCapture()
@@ -71,8 +88,9 @@ func TestCreateAgentReprovision_NoSharedDirBackendChangeNoEcho(t *testing.T) {
 // refused before anything is provisioned.
 func TestCreateAgent_SharedDirBackendChangeWithoutReprovisionRefused(t *testing.T) {
 	for name, extra := range map[string]string{
-		"change":      `"sharedDirBackendChanges": {"notes": "nfs"}`,
-		"allow empty": `"allowEmptySharedDir": true`,
+		"change":          `"sharedDirBackendChanges": {"notes": "nfs"}`,
+		"change to local": `"sharedDirBackendChanges": {"notes": "local"}`,
+		"allow empty":     `"allowEmptySharedDir": true`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			srv, mgr := newTestServerWithProvisionCapture()

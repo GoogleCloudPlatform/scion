@@ -37,12 +37,17 @@ import (
 // pkg/config's git ls-remote runner with a hermetic one so remote-import
 // tests never exec a real `git ls-remote` against github.com
 // (installHermeticGitLsRemote, ptone/scion#3670).
+//
+// After the tests, the leak guard (leak_guard_helpers_test.go) fails the
+// package if unclosed test stores or never-shut-down servers are still
+// running (ptone/scion#3641).
 func TestMain(m *testing.M) {
 	stopMemGuard := startMemGuard()
 	teardown := testutil.IsolateHome("scion-hub-test-home-*")
 	clearAmbientGCPProjectEnv()
 	restoreLsRemote := installHermeticGitLsRemote()
 	code := m.Run()
+	code = runLeakGuard(code)
 	restoreLsRemote()
 	teardown()
 	stopMemGuard()

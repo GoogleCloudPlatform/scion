@@ -366,6 +366,9 @@ export class ScionApp extends LitElement {
     ) {
       return 'Artifact';
     }
+    if (this.currentPath === '/artifacts' && isFeatureEnabled(ARTIFACTS_FLAG)) {
+      return 'Artifacts';
+    }
     if (this.currentPath.match(/^\/projects\/[^/]+\/templates\/[^/]+$/)) {
       return 'Template';
     }

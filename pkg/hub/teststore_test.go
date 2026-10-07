@@ -77,3 +77,28 @@ func newTestStoreAt(t testing.TB, dsn string) (store.Store, error) {
 	t.Cleanup(func() { _ = s.Close() })
 	return s, nil
 }
+
+// newTestHubServer builds a Server with New and registers srv.Shutdown in
+// t.Cleanup, so the background goroutines New starts (decision audit
+// worker, link-service and preview cleanup loops, broker-auth nonce cache,
+// OIDC key loops, ...) stop when the test ends instead of keeping the whole
+// server graph reachable for the rest of the package run (ptone/scion#3641;
+// the package-exit leak guard in leak_guard_helpers_test.go enforces it).
+// Use it instead of calling New directly in tests.
+//
+// Ordering: t.Cleanup runs last-registered first, so the server shuts down
+// before any store whose cleanup was registered earlier (newTestStore
+// registers the store's Close when the store is created). A caller that
+// registers its own store Close must do so before calling this helper.
+// Shutdown is idempotent, so a test that shuts the server down itself (for
+// example to simulate a restart) keeps working. On error nothing is
+// registered: New tears down whatever it started before failing.
+func newTestHubServer(t testing.TB, cfg ServerConfig, s store.Store) (*Server, error) {
+	t.Helper()
+	srv, err := New(cfg, s)
+	if err != nil {
+		return nil, err
+	}
+	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
+	return srv, nil
+}
