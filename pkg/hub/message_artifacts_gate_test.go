@@ -185,3 +185,31 @@ func TestResolveArtifactRefs_ThroughHubMiddleware(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.Nil(t, resp["artifact_warning"], "the agent's own artifact must be admitted through the real middleware")
 }
+
+// valueIdentity is a comparable value-typed identity. No authentication arm
+// creates one; it stands for any future identity type that is not a
+// pointer.
+type valueIdentity struct{ id string }
+
+func (v valueIdentity) ID() string   { return v.id }
+func (v valueIdentity) Type() string { return "user" }
+
+// TestRequestCredentialBindsIdentity_PointerIdentitiesOnly: the binding is
+// by pointer. A value-typed identity never binds, neither the recorded value
+// itself nor an identical reconstructed copy, and pointer identities bind
+// only to the same address.
+func TestRequestCredentialBindsIdentity_PointerIdentitiesOnly(t *testing.T) {
+	recorded := valueIdentity{id: tid("value-user")}
+	ctx := middlewareCtx(recorded)
+	assert.False(t, requestCredentialBindsIdentity(ctx), "a value-typed identity must not bind")
+	assert.False(t, requestCredentialBindsIdentity(contextWithIdentity(ctx, valueIdentity{id: recorded.id})),
+		"an identical reconstructed value must not bind")
+
+	u := NewAuthenticatedUser(tid("ptr-user"), "p@test.example", "P", "member", "web")
+	copied := *u
+	assert.True(t, requestCredentialBindsIdentity(middlewareCtx(u)))
+	assert.False(t, requestCredentialBindsIdentity(contextWithIdentity(middlewareCtx(u), &copied)),
+		"a field-identical copy at another address must not bind")
+	assert.False(t, sameIdentityObject(nil, u))
+	assert.False(t, sameIdentityObject((*AuthenticatedUser)(nil), (*AuthenticatedUser)(nil)))
+}

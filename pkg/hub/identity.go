@@ -18,6 +18,7 @@ package hub
 import (
 	"context"
 	"log/slog"
+	"reflect"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
@@ -550,7 +551,8 @@ func contextWithCredentialContext(ctx context.Context, credential CredentialCont
 // requestCredentialBindsIdentity reports whether ctx's current identity is
 // the very identity the authentication middleware derived from the request's
 // credentials: a credential context is present, and the identity recorded
-// with it is the same object as the identity ctx holds now. A context that
+// with it is the same object (the same pointer) as the identity ctx holds
+// now. A context that
 // holds only an identity, or whose identity was replaced after
 // authentication (contextWithIdentity on a request context), does not bind,
 // even when the replacement names the same principal.
@@ -569,16 +571,17 @@ func requestCredentialBindsIdentity(ctx context.Context) bool {
 	return sameIdentityObject(subject, current)
 }
 
-// sameIdentityObject compares two identities by interface equality (the
-// same pointer for every pointer identity type), failing closed for a value
-// type that cannot be compared.
-func sameIdentityObject(a, b Identity) (same bool) {
-	defer func() {
-		if recover() != nil {
-			same = false
-		}
-	}()
-	return a == b
+// sameIdentityObject reports whether a and b are the same identity object:
+// both non-nil pointers of the same type to the same address. Every identity
+// the authentication middleware creates is a pointer type. A value-typed
+// identity never matches, even an identical copy of itself, because two
+// equal values cannot be told apart from an in-process reconstruction.
+func sameIdentityObject(a, b Identity) bool {
+	va, vb := reflect.ValueOf(a), reflect.ValueOf(b)
+	if va.Kind() != reflect.Pointer || vb.Kind() != reflect.Pointer || va.IsNil() || vb.IsNil() {
+		return false
+	}
+	return va.Type() == vb.Type() && va.Pointer() == vb.Pointer()
 }
 
 // BrokerOnBehalfOf is the hub-set marker proving that a broker-authenticated
