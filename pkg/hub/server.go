@@ -1924,9 +1924,6 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 		slog.Warn("Failed to initialize agent token service", "error", err)
 	} else {
 		srv.agentTokenService = tokenService
-		// Wire credential recorder so issued tokens are persisted for revocation.
-		credAdapter := &storeCredentialRecorder{store: s}
-		tokenService.SetCredentialRecorder(credAdapter)
 		fp := sha256.Sum256(tokenService.config.SigningKey)
 		slog.Info("Agent token service initialized", "key_fingerprint", hex.EncodeToString(fp[:8]))
 	}
@@ -3978,15 +3975,6 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	dispatcher.SetImageRegistry(s.resolveImageRegistry())
 
 	return dispatcher
-}
-
-// storeCredentialRecorder adapts store.AgentCredentialStore to CredentialRecorder.
-type storeCredentialRecorder struct {
-	store store.AgentCredentialStore
-}
-
-func (r *storeCredentialRecorder) RecordAgentCredential(ctx context.Context, cred *store.AgentCredential) error {
-	return r.store.CreateAgentCredential(ctx, cred)
 }
 
 // agentHeartbeatTimeoutHandler returns a recurring handler function that marks

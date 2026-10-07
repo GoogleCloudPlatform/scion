@@ -35,10 +35,9 @@ import (
 )
 
 // insertTestAgentCredential records an active credential for agentID under
-// jti, the same way production's storeCredentialRecorder does on a real
-// mint. Tests use it to seed a credential outside the dispatch path under
-// test (e.g. a sibling agent's credential that must survive the test's
-// revoke call).
+// jti, the way a production mint records it. Tests use it to seed a
+// credential outside the dispatch path under test (e.g. a sibling agent's
+// credential that must survive the test's revoke call).
 func insertTestAgentCredential(t *testing.T, s store.AgentCredentialStore, agentID, projectID, jti string) {
 	t.Helper()
 	now := time.Now()

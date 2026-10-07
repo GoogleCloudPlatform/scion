@@ -170,23 +170,10 @@ type AgentTokenConfig struct {
 	TokenDuration time.Duration
 }
 
-// CredentialRecorder persists agent credentials after token generation.
-// Implementations should be safe to call concurrently.
-type CredentialRecorder interface {
-	RecordAgentCredential(ctx context.Context, cred *store.AgentCredential) error
-}
-
 // AgentTokenService handles agent token generation and validation.
 type AgentTokenService struct {
-	config             AgentTokenConfig
-	signer             jose.Signer
-	credentialRecorder CredentialRecorder
-}
-
-// SetCredentialRecorder sets the credential recorder for persisting issued tokens.
-// This is nil-safe: if not set, token generation works without persistence.
-func (s *AgentTokenService) SetCredentialRecorder(cr CredentialRecorder) {
-	s.credentialRecorder = cr
+	config AgentTokenConfig
+	signer jose.Signer
 }
 
 // hashJTI returns the SHA-256 hex hash of a JWT ID (JTI).
