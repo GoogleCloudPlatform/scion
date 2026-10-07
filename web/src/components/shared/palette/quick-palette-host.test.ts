@@ -1290,19 +1290,31 @@ describe('QuickPaletteHost: opening again during the close animation', () => {
     const onSelect = vi.fn();
     const onSelectionSettled = vi.fn();
     const h = createHost({ onSelect, onSelectionSettled });
-    const palette = await openThenStartClosing(h, button());
-    h.open();
+    button().focus();
+    const palette = await openReady(h);
+    // A row picked while open stays active through the dismiss.
+    const input = await fireInitialFocus(palette);
+    typeAt(input, 'ArrowDown');
+    await palette.updateComplete;
+    palette.dispatchEvent(new CustomEvent('palette-dismiss', { detail: { reason: 'escape' } }));
+    fireFromDialog(palette, 'sl-hide');
 
-    const input = palette.shadowRoot!.querySelector('input')!;
-    input.dispatchEvent(
-      new KeyboardEvent('keydown', {
-        key: 'Enter',
-        bubbles: true,
-        composed: true,
-        cancelable: true,
-      })
-    );
+    // The reopen captures keys until its time limit; after that, Enter
+    // reaches the closing dialog, which commits its active row.
+    vi.useFakeTimers();
+    try {
+      h.open();
+      vi.advanceTimersByTime(PALETTE_TYPEAHEAD_MAX_MS);
+    } finally {
+      vi.useRealTimers();
+    }
+    await vi.waitFor(() => expect(palette.groups.agents?.status).toBe('ready'));
+    await palette.updateComplete;
+    const picks: Event[] = [];
+    palette.addEventListener('palette-select', (e) => picks.push(e));
+    typeAt(input, 'Enter');
 
+    expect(picks).toHaveLength(1);
     expect(onSelect).not.toHaveBeenCalled();
     expect(h.isOpen).toBe(true);
     fireFromDialog(palette, 'sl-after-hide');
@@ -1512,5 +1524,91 @@ describe('isQuickPaletteShortcut', () => {
     const handled = key({ key: 'k', metaKey: true, cancelable: true });
     handled.preventDefault();
     expect(isQuickPaletteShortcut(handled)).toBe(false);
+  });
+
+  /**
+   * Whether a K keydown typed in `el`, which is put in the document, is the
+   * shortcut, as a document listener sees it during dispatch (an event's
+   * path is cleared once dispatch ends).
+   */
+  const shortcutTypedIn = (el: HTMLElement, init: KeyboardEventInit): boolean => {
+    document.body.append(el);
+    let result: boolean | undefined;
+    document.addEventListener('keydown', (e) => (result = isQuickPaletteShortcut(e)), {
+      once: true,
+    });
+    el.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', bubbles: true, ...init }));
+    expect(result).toBeDefined();
+    return result!;
+  };
+  const inputOf = (
+    type: string,
+    attrs: { readOnly?: boolean; disabled?: boolean } = {}
+  ): HTMLInputElement => {
+    const input = document.createElement('input');
+    input.type = type;
+    input.readOnly = attrs.readOnly ?? false;
+    input.disabled = attrs.disabled ?? false;
+    return input;
+  };
+  const editable = (): HTMLElement => {
+    const el = document.createElement('div');
+    el.contentEditable = 'true';
+    return el;
+  };
+
+  it('on a Mac, leaves Ctrl+K typed in an editable text field to the field', () => {
+    vi.spyOn(navigator, 'platform', 'get').mockReturnValue('MacIntel');
+    for (const type of ['text', 'search', 'email', 'url', 'tel', 'password', 'number']) {
+      expect(shortcutTypedIn(inputOf(type), { ctrlKey: true })).toBe(false);
+    }
+    const textarea = document.createElement('textarea');
+    expect(shortcutTypedIn(textarea, { ctrlKey: true })).toBe(false);
+    expect(shortcutTypedIn(editable(), { ctrlKey: true })).toBe(false);
+  });
+
+  it('on a Mac, a field inside a shadow root counts by its own element', () => {
+    vi.spyOn(navigator, 'platform', 'get').mockReturnValue('MacIntel');
+    const host = document.createElement('div');
+    document.body.append(host);
+    const input = inputOf('text');
+    host.attachShadow({ mode: 'open' }).append(input);
+    let result: boolean | undefined;
+    document.addEventListener('keydown', (e) => (result = isQuickPaletteShortcut(e)), {
+      once: true,
+    });
+    input.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true, composed: true })
+    );
+    expect(result).toBe(false);
+  });
+
+  it('on a Mac, Ctrl+K on a non-text, read-only or disabled field is the shortcut', () => {
+    vi.spyOn(navigator, 'platform', 'get').mockReturnValue('MacIntel');
+    const fields: HTMLElement[] = [
+      inputOf('checkbox'),
+      inputOf('button'),
+      inputOf('text', { readOnly: true }),
+      inputOf('text', { disabled: true }),
+      Object.assign(document.createElement('textarea'), { readOnly: true }),
+      Object.assign(document.createElement('textarea'), { disabled: true }),
+      document.createElement('button'),
+    ];
+    for (const el of fields) {
+      expect(shortcutTypedIn(el, { ctrlKey: true })).toBe(true);
+    }
+  });
+
+  it('on a Mac, Cmd+K typed in a text field is the shortcut', () => {
+    vi.spyOn(navigator, 'platform', 'get').mockReturnValue('MacIntel');
+    expect(shortcutTypedIn(inputOf('text'), { metaKey: true })).toBe(true);
+    expect(shortcutTypedIn(editable(), { metaKey: true })).toBe(true);
+  });
+
+  it('off a Mac, Ctrl+K typed in a text field is the shortcut', () => {
+    vi.spyOn(navigator, 'platform', 'get').mockReturnValue('Linux x86_64');
+    expect(shortcutTypedIn(inputOf('text'), { ctrlKey: true })).toBe(true);
+    const textarea = document.createElement('textarea');
+    expect(shortcutTypedIn(textarea, { ctrlKey: true })).toBe(true);
   });
 });
