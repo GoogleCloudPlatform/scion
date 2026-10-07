@@ -1497,14 +1497,27 @@ func podNameForAgentObject(objectName string) (string, bool) {
 //
 // NotFound when deleting an object counts as success.
 //
+// With a runID (ptone/scion#2550), an object labelled with another run is
+// never removed, whatever its pod: only runID's objects and legacy objects
+// with no run label are candidates (k8sRunMatches), as deleteRun's pod-gone
+// branch keeps another run's objects. The per-agent object names are fixed
+// per agent, so without this a delete naming an older run would remove the
+// Secrets a newer run's start created before its pod. An empty runID
+// selects by name and project only, as before.
+//
 // Objects are looked up in the default namespace, or in every namespace
 // when ListAllNamespaces is set, the same scope List uses to find pods. An
 // agent started in another namespace (the scion.namespace label) with
 // ListAllNamespaces off is therefore not found, and its objects are left
 // in place rather than searched for.
-func (r *KubernetesRuntime) CleanupAgentResources(ctx context.Context, agentName, projectID string) error {
+func (r *KubernetesRuntime) CleanupAgentResources(ctx context.Context, agentName, projectID, runID string) error {
 	if agentName == "" || projectID == "" {
 		return nil
+	}
+	if runID != "" {
+		if err := validateRunIDLabel(runID); err != nil {
+			return err
+		}
 	}
 	selector, err := labels.ValidatedSelectorFromSet(map[string]string{
 		"scion.name":               agentName,
@@ -1521,7 +1534,10 @@ func (r *KubernetesRuntime) CleanupAgentResources(ctx context.Context, agentName
 	// removable reports whether an object may be removed (see the rules
 	// above). A non-nil error means the pod lookup failed and the object
 	// must be kept.
-	removable := func(ns, objectName string) (bool, error) {
+	removable := func(ns, objectName string, objLabels map[string]string) (bool, error) {
+		if runID != "" && !k8sRunMatches(objLabels[api.LabelRunID], runID) {
+			return false, nil
+		}
 		podName, ok := podNameForAgentObject(objectName)
 		if !ok {
 			return false, nil
@@ -1542,7 +1558,7 @@ func (r *KubernetesRuntime) CleanupAgentResources(ctx context.Context, agentName
 		errs = append(errs, fmt.Errorf("failed to list agent Secrets: %w", err))
 	} else {
 		for _, s := range secrets.Items {
-			ok, err := removable(s.Namespace, s.Name)
+			ok, err := removable(s.Namespace, s.Name, s.Labels)
 			if err != nil {
 				errs = append(errs, fmt.Errorf("failed to check pod for Secret %s/%s: %w", s.Namespace, s.Name, err))
 				continue
@@ -1568,7 +1584,7 @@ func (r *KubernetesRuntime) CleanupAgentResources(ctx context.Context, agentName
 		} else {
 			for _, spc := range spcs.Items {
 				ns, name := spc.GetNamespace(), spc.GetName()
-				ok, err := removable(ns, name)
+				ok, err := removable(ns, name, spc.GetLabels())
 				if err != nil {
 					errs = append(errs, fmt.Errorf("failed to check pod for SecretProviderClass %s/%s: %w", ns, name, err))
 					continue
