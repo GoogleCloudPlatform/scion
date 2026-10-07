@@ -185,8 +185,9 @@ export class ScionPageProjects extends LitElement {
     // Reuse the projects already in the store, avoiding the initial fetch,
     // when the scope stayed dashboard (a client-side navigation from home);
     // after a scope change the maps were just cleared above. Skip it when a
-    // scope filter is active. Also require scope capabilities — without them the "New Project" button
-    // won't render, so we must fetch from the API to get them.
+    // scope filter is active. Also require scope capabilities — without them
+    // the "New Project" button won't render, so we must fetch from the API to
+    // get them.
     const hydratedProjects = stateManager.getProjects();
     const hydratedCaps = stateManager.getScopeCapabilities('project');
     if (hydratedProjects.length > 0 && hydratedCaps && this.projectScope === 'all') {

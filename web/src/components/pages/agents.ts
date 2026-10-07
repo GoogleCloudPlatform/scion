@@ -641,9 +641,10 @@ export class ScionPageAgents extends LitElement {
     stateManager.setScope({ type: 'dashboard' });
 
     // Reuse the agents already in the store, avoiding the initial fetch, when
-    // the scope stayed dashboard (a client-side navigation from home or back
-    // to this page); after a scope change the maps were just cleared above.
-    // Skip it when a scope filter is active. Also require scope capabilities — without them the "New Agent" button
+    // this page loaded the complete set earlier in the same dashboard scope
+    // (returning from home, projects or the graph); after a scope change the
+    // maps were just cleared above. Skip it when a scope filter is active.
+    // Also require scope capabilities — without them the "New Agent" button
     // won't render, so we must fetch from the API to get them. And require
     // the state store to hold the complete dashboard set with full objects:
     // otherwise state may hold only a label, mine or shared subset, a

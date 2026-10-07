@@ -407,7 +407,7 @@ export interface AppState {
   connected: boolean;
   scope: ViewScope | null;
   /**
-   * Scope-level capabilities from the SSR-prefetched list response, keyed by
+   * Scope-level capabilities from the list page's REST response, keyed by
    * the resource they were computed for.
    *
    * Keyed rather than a single slot because agent-scope and project-scope
