@@ -19,6 +19,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -54,6 +55,8 @@ type migration struct {
 var migrations = []migration{
 	{name: migrationInitial, sqlite: sqliteSchema, postgres: postgresSchema},
 	{name: migrationRemoteFiles, sqlite: sqliteRemoteFiles, postgres: postgresRemoteFiles},
+	{name: migrationVersionUploads, sqlite: sqliteVersionUploads, postgres: postgresVersionUploads},
+	{name: migrationFinalizeClaims, sqlite: sqliteFinalizeClaims, postgres: postgresFinalizeClaims},
 }
 
 const ledgerSQLite = `CREATE TABLE IF NOT EXISTS artifact_migrations (
@@ -212,8 +215,35 @@ func (s *sqlStore) Init(ctx context.Context) error {
 
 // CreatePublished implements Store.
 func (s *sqlStore) CreatePublished(ctx context.Context, a *Artifact, v *Version, files []File, grants []Grant) error {
+	if v != nil && v.State != VersionStateReady {
+		return errors.New("artifacts: CreatePublished needs a ready version")
+	}
+	return s.createArtifact(ctx, a, v, files, grants)
+}
+
+// CreatePending implements Store.
+func (s *sqlStore) CreatePending(ctx context.Context, a *Artifact, v *Version, files []File, grants []Grant) error {
+	if v != nil && v.State != VersionStatePending {
+		return errors.New("artifacts: CreatePending needs a pending version")
+	}
+	err := s.createArtifact(ctx, a, v, files, grants)
+	if err != nil && a.Key != "" {
+		// A concurrent publish may have taken the key first; the unique
+		// index refused this one. Report it as a conflict so the caller
+		// can append to that artifact instead.
+		if _, lookErr := s.GetArtifactByKey(ctx, a.ScopeKind, a.ScopeRef, a.OwnerKind, a.OwnerRef, a.Key); lookErr == nil {
+			return ErrConflict
+		}
+	}
+	return err
+}
+
+// createArtifact writes an artifact, its first version, the version's
+// files and the grants in one transaction. The artifact's current version
+// is the version when it is ready, and none otherwise.
+func (s *sqlStore) createArtifact(ctx context.Context, a *Artifact, v *Version, files []File, grants []Grant) error {
 	if a == nil || v == nil {
-		return errors.New("artifacts: CreatePublished needs an artifact and a version")
+		return errors.New("artifacts: creating an artifact needs an artifact and a version")
 	}
 	if v.ArtifactID != a.ID {
 		return errors.New("artifacts: version does not belong to the artifact")
@@ -224,31 +254,19 @@ func (s *sqlStore) CreatePublished(ctx context.Context, a *Artifact, v *Version,
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	current := 0
+	if v.State == VersionStateReady {
+		current = v.Seq
+	}
 	if _, err := tx.ExecContext(ctx, s.rebind(`INSERT INTO artifact
 		(id, scope_kind, scope_ref, owner_kind, owner_ref, "key", title, current_seq, expires_at, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
-		a.ID, a.ScopeKind, a.ScopeRef, a.OwnerKind, a.OwnerRef, nullString(a.Key), a.Title, nullInt(v.Seq),
+		a.ID, a.ScopeKind, a.ScopeRef, a.OwnerKind, a.OwnerRef, nullString(a.Key), a.Title, nullInt(current),
 		s.nullTimeArg(a.ExpiresAt), s.timeArg(a.CreatedAt), s.timeArg(a.UpdatedAt)); err != nil {
 		return fmt.Errorf("artifacts: insert artifact: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, s.rebind(`INSERT INTO artifact_version
-		(id, artifact_id, seq, kind, entry_path, note, total_bytes, file_count, created_by_kind, created_by_ref, created_at, state)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
-		v.ID, v.ArtifactID, v.Seq, v.Kind, v.EntryPath, nullString(v.Note), v.TotalBytes, v.FileCount,
-		nullString(v.CreatedByKind), nullString(v.CreatedByRef), s.timeArg(v.CreatedAt), v.State); err != nil {
-		return fmt.Errorf("artifacts: insert version: %w", err)
-	}
-	for _, f := range files {
-		if f.VersionID != v.ID {
-			return errors.New("artifacts: file does not belong to the version")
-		}
-		if _, err := tx.ExecContext(ctx, s.rebind(`INSERT INTO artifact_file
-			(version_id, path, size, sha256, media_type, origin, source_url, fetch_status, fetch_error)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`),
-			f.VersionID, f.Path, f.Size, nullString(f.SHA256), f.MediaType, fileOrigin(f.Origin),
-			nullString(f.SourceURL), nullString(f.FetchStatus), nullString(f.FetchError)); err != nil {
-			return fmt.Errorf("artifacts: insert file: %w", err)
-		}
+	if err := s.insertVersion(ctx, tx, v, files); err != nil {
+		return err
 	}
 	for _, g := range grants {
 		if g.ArtifactID != a.ID {
@@ -265,11 +283,309 @@ func (s *sqlStore) CreatePublished(ctx context.Context, a *Artifact, v *Version,
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("artifacts: commit publish: %w", err)
 	}
+	a.CurrentSeq = current
 	return nil
+}
+
+// insertVersion writes a version row and its manifest inside tx.
+func (s *sqlStore) insertVersion(ctx context.Context, tx *sql.Tx, v *Version, files []File) error {
+	if _, err := tx.ExecContext(ctx, s.rebind(`INSERT INTO artifact_version
+		(id, artifact_id, seq, kind, entry_path, note, total_bytes, file_count, created_by_kind, created_by_ref, created_at, state)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+		v.ID, v.ArtifactID, v.Seq, v.Kind, v.EntryPath, nullString(v.Note), v.TotalBytes, v.FileCount,
+		nullString(v.CreatedByKind), nullString(v.CreatedByRef), s.timeArg(v.CreatedAt), v.State); err != nil {
+		return fmt.Errorf("artifacts: insert version: %w", err)
+	}
+	return s.insertFiles(ctx, tx, v.ID, files)
+}
+
+func (s *sqlStore) insertFiles(ctx context.Context, tx *sql.Tx, versionID string, files []File) error {
+	for _, f := range files {
+		if f.VersionID != versionID {
+			return errors.New("artifacts: file does not belong to the version")
+		}
+		if _, err := tx.ExecContext(ctx, s.rebind(`INSERT INTO artifact_file
+			(version_id, path, size, sha256, media_type, origin, source_url, fetch_status, fetch_error, received)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+			f.VersionID, f.Path, f.Size, nullString(f.SHA256), f.MediaType, fileOrigin(f.Origin),
+			nullString(f.SourceURL), nullString(f.FetchStatus), nullString(f.FetchError), !f.Pending); err != nil {
+			return fmt.Errorf("artifacts: insert file: %w", err)
+		}
+	}
+	return nil
+}
+
+// CreateVersion implements Store.
+func (s *sqlStore) CreateVersion(ctx context.Context, v *Version, files []File, maxPending int) error {
+	if v == nil || v.State != VersionStatePending {
+		return errors.New("artifacts: CreateVersion needs a pending version")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("artifacts: begin version: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Writing the artifact row first takes its row lock (Postgres) or the
+	// write lock (SQLite), so concurrent appends assign seqs one at a time.
+	res, err := tx.ExecContext(ctx, s.rebind(`UPDATE artifact SET updated_at = ? WHERE id = ? AND deleted_at IS NULL`),
+		s.timeArg(v.CreatedAt), v.ArtifactID)
+	if err != nil {
+		return fmt.Errorf("artifacts: lock artifact: %w", err)
+	}
+	if n, err := res.RowsAffected(); err != nil || n != 1 {
+		return ErrNotFound
+	}
+	var maxSeq, pending int
+	if err := tx.QueryRowContext(ctx, s.rebind(`SELECT COALESCE(MAX(seq), 0),
+		COALESCE(SUM(CASE WHEN state IN (?, ?) THEN 1 ELSE 0 END), 0)
+		FROM artifact_version WHERE artifact_id = ?`), VersionStatePending, VersionStateFinalizing, v.ArtifactID).Scan(&maxSeq, &pending); err != nil {
+		return fmt.Errorf("artifacts: next seq: %w", err)
+	}
+	if pending >= maxPending {
+		return ErrTooManyPending
+	}
+	v.Seq = maxSeq + 1
+	if err := s.insertVersion(ctx, tx, v, files); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("artifacts: commit version: %w", err)
+	}
+	return nil
+}
+
+// GetArtifactByKey implements Store.
+func (s *sqlStore) GetArtifactByKey(ctx context.Context, scopeKind, scopeRef, ownerKind, ownerRef, key string) (*Artifact, error) {
+	if key == "" {
+		return nil, ErrNotFound
+	}
+	return s.getArtifact(ctx, `scope_kind = ? AND scope_ref = ? AND owner_kind = ? AND owner_ref = ? AND "key" = ?`,
+		scopeKind, scopeRef, ownerKind, ownerRef, key)
+}
+
+// MarkReceived implements Store.
+func (s *sqlStore) MarkReceived(ctx context.Context, versionID, path, mediaType string) error {
+	res, err := s.db.ExecContext(ctx, s.rebind(`UPDATE artifact_file SET received = ?, media_type = ?
+		WHERE version_id = ? AND path = ? AND origin = ?
+		AND EXISTS (SELECT 1 FROM artifact_version WHERE id = ? AND state = ?)`),
+		true, mediaType, versionID, path, FileOriginUpload, versionID, VersionStatePending)
+	if err != nil {
+		return fmt.Errorf("artifacts: mark received: %w", err)
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return fmt.Errorf("artifacts: mark received: %w", err)
+	} else if n == 1 {
+		return nil
+	}
+	if _, err := s.GetFile(ctx, versionID, path); err != nil {
+		return err
+	}
+	return ErrConflict
+}
+
+// FinalizeVersion implements Store.
+func (s *sqlStore) FinalizeVersion(ctx context.Context, artifactID string, seq int, claim time.Time, extra []File) (*Artifact, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("artifacts: begin finalize: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	now := time.Now()
+	// Lock the artifact row first, as CreateVersion does.
+	res, err := tx.ExecContext(ctx, s.rebind(`UPDATE artifact SET updated_at = ? WHERE id = ? AND deleted_at IS NULL`),
+		s.timeArg(now), artifactID)
+	if err != nil {
+		return nil, fmt.Errorf("artifacts: lock artifact: %w", err)
+	}
+	if n, err := res.RowsAffected(); err != nil || n != 1 {
+		return nil, ErrNotFound
+	}
+	var versionID, state string
+	var claimedAt dbTime
+	err = tx.QueryRowContext(ctx, s.rebind(`SELECT id, state, claimed_at FROM artifact_version WHERE artifact_id = ? AND seq = ?`),
+		artifactID, seq).Scan(&versionID, &state, &claimedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("artifacts: finalize version: %w", err)
+	}
+	if state != VersionStateFinalizing || !claimedAt.Valid || !claimedAt.Time.Equal(claimToken(claim)) {
+		return nil, ErrConflict
+	}
+	if err := s.insertFiles(ctx, tx, versionID, extra); err != nil {
+		return nil, err
+	}
+	var addBytes int64
+	for _, f := range extra {
+		addBytes += f.Size
+	}
+	if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE artifact_version
+		SET state = ?, total_bytes = total_bytes + ?, file_count = file_count + ? WHERE id = ?`),
+		VersionStateReady, addBytes, len(extra), versionID); err != nil {
+		return nil, fmt.Errorf("artifacts: finalize version: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE artifact SET current_seq = ?
+		WHERE id = ? AND (current_seq IS NULL OR current_seq < ?)`), seq, artifactID, seq); err != nil {
+		return nil, fmt.Errorf("artifacts: advance current version: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("artifacts: commit finalize: %w", err)
+	}
+	return s.GetArtifact(ctx, artifactID)
+}
+
+// ClaimFinalize implements Store. One conditional update claims the
+// version, so of two concurrent finalize requests exactly one succeeds.
+func (s *sqlStore) ClaimFinalize(ctx context.Context, artifactID string, seq int, staleBefore time.Time) (time.Time, error) {
+	claim := claimToken(time.Now())
+	res, err := s.db.ExecContext(ctx, s.rebind(`UPDATE artifact_version SET state = ?, claimed_at = ?
+		WHERE artifact_id = ? AND seq = ?
+		AND (state = ? OR (state = ? AND claimed_at IS NOT NULL AND claimed_at < ?))
+		AND NOT EXISTS (SELECT 1 FROM artifact_file WHERE version_id = artifact_version.id AND received = ?)`),
+		VersionStateFinalizing, s.timeArg(claim), artifactID, seq,
+		VersionStatePending, VersionStateFinalizing, s.timeArg(staleBefore), false)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("artifacts: claim finalize: %w", err)
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return time.Time{}, fmt.Errorf("artifacts: claim finalize: %w", err)
+	} else if n == 1 {
+		return claim, nil
+	}
+	if _, err := s.GetVersion(ctx, artifactID, seq); err != nil {
+		return time.Time{}, err
+	}
+	return time.Time{}, ErrConflict
+}
+
+// claimToken is a claim time in the form both dialects store (UTC,
+// microseconds), so the value read back compares equal.
+func claimToken(t time.Time) time.Time { return t.UTC().Truncate(time.Microsecond) }
+
+// ReleaseFinalize implements Store. It changes the version only while it
+// still holds this claim, so it never undoes a later claim.
+func (s *sqlStore) ReleaseFinalize(ctx context.Context, artifactID string, seq int, claim time.Time) error {
+	if _, err := s.db.ExecContext(ctx, s.rebind(`UPDATE artifact_version SET state = ?, claimed_at = NULL
+		WHERE artifact_id = ? AND seq = ? AND state = ? AND claimed_at = ?`),
+		VersionStatePending, artifactID, seq, VersionStateFinalizing, s.timeArg(claimToken(claim))); err != nil {
+		return fmt.Errorf("artifacts: release finalize: %w", err)
+	}
+	return nil
+}
+
+// ListVersions implements Store.
+func (s *sqlStore) ListVersions(ctx context.Context, artifactID string, before, limit int) ([]Version, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	if before <= 0 {
+		before = math.MaxInt32
+	}
+	rows, err := s.db.QueryContext(ctx, s.rebind(`SELECT `+versionColumns+`
+		FROM artifact_version WHERE artifact_id = ? AND state = ? AND seq < ? ORDER BY seq DESC LIMIT `+strconv.Itoa(limit)),
+		artifactID, VersionStateReady, before)
+	if err != nil {
+		return nil, fmt.Errorf("artifacts: list versions: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []Version
+	for rows.Next() {
+		v, err := scanVersion(rows)
+		if err != nil {
+			return nil, fmt.Errorf("artifacts: scan version: %w", err)
+		}
+		out = append(out, v)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("artifacts: list versions: %w", err)
+	}
+	return out, nil
+}
+
+// ReapPending implements Store.
+func (s *sqlStore) ReapPending(ctx context.Context, cutoff time.Time, limit int) (int, error) {
+	if limit <= 0 {
+		return 0, nil
+	}
+	rows, err := s.db.QueryContext(ctx, s.rebind(`SELECT id, artifact_id FROM artifact_version
+		WHERE state IN (?, ?) AND created_at < ? ORDER BY created_at LIMIT `+strconv.Itoa(limit)),
+		VersionStatePending, VersionStateFinalizing, s.timeArg(cutoff))
+	if err != nil {
+		return 0, fmt.Errorf("artifacts: find pending versions: %w", err)
+	}
+	type stale struct{ id, artifactID string }
+	var found []stale
+	for rows.Next() {
+		var v stale
+		if err := rows.Scan(&v.id, &v.artifactID); err != nil {
+			_ = rows.Close()
+			return 0, fmt.Errorf("artifacts: scan pending version: %w", err)
+		}
+		found = append(found, v)
+	}
+	_ = rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("artifacts: find pending versions: %w", err)
+	}
+	reaped := 0
+	for _, v := range found {
+		ok, err := s.reapVersion(ctx, v.id, v.artifactID)
+		if err != nil {
+			return reaped, err
+		}
+		if ok {
+			reaped++
+		}
+	}
+	return reaped, nil
+}
+
+// reapVersion fails one pending version and drops its manifest in a
+// transaction, soft-deleting its artifact if nothing else is left. It
+// reports false when the version was finalized in the meantime.
+func (s *sqlStore) reapVersion(ctx context.Context, versionID, artifactID string) (bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("artifacts: begin reap: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	now := s.timeArg(time.Now())
+	if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE artifact SET updated_at = ? WHERE id = ?`), now, artifactID); err != nil {
+		return false, fmt.Errorf("artifacts: lock artifact: %w", err)
+	}
+	res, err := tx.ExecContext(ctx, s.rebind(`UPDATE artifact_version SET state = ? WHERE id = ? AND state IN (?, ?)`),
+		VersionStateFailed, versionID, VersionStatePending, VersionStateFinalizing)
+	if err != nil {
+		return false, fmt.Errorf("artifacts: fail version: %w", err)
+	}
+	if n, err := res.RowsAffected(); err != nil || n != 1 {
+		return false, err
+	}
+	if _, err := tx.ExecContext(ctx, s.rebind(`DELETE FROM artifact_file WHERE version_id = ?`), versionID); err != nil {
+		return false, fmt.Errorf("artifacts: drop manifest: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE artifact SET deleted_at = ?
+		WHERE id = ? AND deleted_at IS NULL AND current_seq IS NULL
+		AND NOT EXISTS (SELECT 1 FROM artifact_version WHERE artifact_id = ? AND state IN (?, ?))`),
+		now, artifactID, artifactID, VersionStatePending, VersionStateFinalizing); err != nil {
+		return false, fmt.Errorf("artifacts: retire empty artifact: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("artifacts: commit reap: %w", err)
+	}
+	return true, nil
 }
 
 // GetArtifact implements Store.
 func (s *sqlStore) GetArtifact(ctx context.Context, id string) (*Artifact, error) {
+	return s.getArtifact(ctx, "id = ?", id)
+}
+
+// getArtifact returns the live artifact matching where.
+func (s *sqlStore) getArtifact(ctx context.Context, where string, args ...any) (*Artifact, error) {
 	var (
 		a                    Artifact
 		key                  sql.NullString
@@ -279,7 +595,7 @@ func (s *sqlStore) GetArtifact(ctx context.Context, id string) (*Artifact, error
 	)
 	err := s.db.QueryRowContext(ctx, s.rebind(`SELECT
 		id, scope_kind, scope_ref, owner_kind, owner_ref, "key", title, current_seq, expires_at, created_at, updated_at, deleted_at
-		FROM artifact WHERE id = ? AND deleted_at IS NULL`), id).Scan(
+		FROM artifact WHERE `+where+` AND deleted_at IS NULL`), args...).Scan(
 		&a.ID, &a.ScopeKind, &a.ScopeRef, &a.OwnerKind, &a.OwnerRef, &key, &a.Title, &seq,
 		&expires, &created, &updated, &deletedTime)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -297,28 +613,34 @@ func (s *sqlStore) GetArtifact(ctx context.Context, id string) (*Artifact, error
 	return &a, nil
 }
 
-// GetVersion implements Store.
-func (s *sqlStore) GetVersion(ctx context.Context, artifactID string, seq int) (*Version, error) {
+// versionColumns is the artifact_version column list scanVersion reads.
+const versionColumns = "id, artifact_id, seq, kind, entry_path, note, total_bytes, file_count, created_by_kind, created_by_ref, created_at, state"
+
+func scanVersion(r rowScanner) (Version, error) {
 	var (
 		v                   Version
 		note, byKind, byRef sql.NullString
 		created             dbTime
 	)
-	err := s.db.QueryRowContext(ctx, s.rebind(`SELECT
-		id, artifact_id, seq, kind, entry_path, note, total_bytes, file_count, created_by_kind, created_by_ref, created_at, state
-		FROM artifact_version WHERE artifact_id = ? AND seq = ?`), artifactID, seq).Scan(
-		&v.ID, &v.ArtifactID, &v.Seq, &v.Kind, &v.EntryPath, &note, &v.TotalBytes, &v.FileCount,
+	err := r.Scan(&v.ID, &v.ArtifactID, &v.Seq, &v.Kind, &v.EntryPath, &note, &v.TotalBytes, &v.FileCount,
 		&byKind, &byRef, &created, &v.State)
+	v.Note = note.String
+	v.CreatedByKind = byKind.String
+	v.CreatedByRef = byRef.String
+	v.CreatedAt = created.Time
+	return v, err
+}
+
+// GetVersion implements Store.
+func (s *sqlStore) GetVersion(ctx context.Context, artifactID string, seq int) (*Version, error) {
+	v, err := scanVersion(s.db.QueryRowContext(ctx, s.rebind(`SELECT `+versionColumns+`
+		FROM artifact_version WHERE artifact_id = ? AND seq = ?`), artifactID, seq))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("artifacts: get version: %w", err)
 	}
-	v.Note = note.String
-	v.CreatedByKind = byKind.String
-	v.CreatedByRef = byRef.String
-	v.CreatedAt = created.Time
 	return &v, nil
 }
 
@@ -358,7 +680,7 @@ func (s *sqlStore) GetFile(ctx context.Context, versionID, path string) (*File, 
 }
 
 // fileColumns is the artifact_file column list scanFile reads.
-const fileColumns = "version_id, path, size, sha256, media_type, origin, source_url, fetch_status, fetch_error"
+const fileColumns = "version_id, path, size, sha256, media_type, origin, source_url, fetch_status, fetch_error, received"
 
 type rowScanner interface{ Scan(dest ...any) error }
 
@@ -367,8 +689,10 @@ func scanFile(r rowScanner) (File, error) {
 		f                                File
 		digest, src, status, fetchErrMsg sql.NullString
 	)
-	err := r.Scan(&f.VersionID, &f.Path, &f.Size, &digest, &f.MediaType, &f.Origin, &src, &status, &fetchErrMsg)
+	var received bool
+	err := r.Scan(&f.VersionID, &f.Path, &f.Size, &digest, &f.MediaType, &f.Origin, &src, &status, &fetchErrMsg, &received)
 	f.SHA256, f.SourceURL, f.FetchStatus, f.FetchError = digest.String, src.String, status.String, fetchErrMsg.String
+	f.Pending = !received
 	return f, err
 }
 

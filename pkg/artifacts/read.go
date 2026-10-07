@@ -38,6 +38,14 @@ const paramStream = "stream"
 // redirects to. It only has to outlive the redirect.
 const signedURLTTL = 5 * time.Minute
 
+// HeaderRemoteStatus marks the 404 of a remote image whose fetch failed.
+const HeaderRemoteStatus = "X-Artifact-Remote-Status"
+
+// remoteCacheControl is the caching of a streamed remote image requested
+// by an explicit version: its path is fixed to its source URL within one
+// immutable version, so it never changes.
+const remoteCacheControl = "private, max-age=31536000, immutable"
+
 // fileCSP is the Content-Security-Policy of every streamed file response.
 // A file opened directly in the browser gets an opaque origin and no
 // script, so nothing served from the hub's origin can act on it.
@@ -54,7 +62,9 @@ const fileCSP = "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inl
 //  3. An unexpired artifact_grant row: a principal grant matching the
 //     caller, or a scope grant for a scope the host authorizes.
 //
-// An expired artifact is unreadable to everyone.
+// An expired artifact is unreadable to everyone. An artifact whose first
+// version is not finalized yet (CurrentSeq 0) is readable only by its
+// owner, on every route and in the list, because both use this check.
 func (s *Service) canRead(ctx context.Context, b backend, a *Artifact) bool {
 	return canReadWith(ctx, s.host, a, func() ([]Grant, error) { return b.store.ListGrants(ctx, a.ID) })
 }
@@ -77,9 +87,14 @@ func canReadWith(ctx context.Context, host Host, a *Artifact, grants func() ([]G
 	if !host.Permits(ctx, a.ScopeRef, PermissionRead) {
 		return false
 	}
-	// 2. Owner, or host policy in the home scope.
-	if kind == a.OwnerKind && ref == a.OwnerRef {
+	// 2. Owner, or host policy in the home scope. Before its first version
+	// is finalized, an artifact is shown only to its owner.
+	owner := kind == a.OwnerKind && ref == a.OwnerRef
+	if owner {
 		return true
+	}
+	if a.CurrentSeq == 0 {
+		return false
 	}
 	if host.Authorize(ctx, a.ScopeRef, PermissionRead) {
 		return true
@@ -209,13 +224,21 @@ func (s *Service) handleGetFile(w http.ResponseWriter, r *http.Request, id strin
 		writeError(w, http.StatusInternalServerError, "internal", "could not read the file")
 		return
 	}
-	if f.SHA256 == "" {
-		// A manifest entry with no content (a remote fetch that failed)
-		// has no bytes to serve.
+	if f.Origin == FileOriginRemote && (f.FetchStatus != FetchStatusOK || f.SHA256 == "") {
+		// A remote image whose fetch failed has no bytes. The header lets
+		// the renderer show its placeholder; it carries no reason.
+		w.Header().Set(HeaderRemoteStatus, FetchStatusFailed)
 		writeNotFound(w)
 		return
 	}
-	serveFile(w, r, b, f, deliveryFor(r, b))
+	if f.SHA256 == "" || f.Pending {
+		// A manifest entry with no content has no bytes to serve.
+		writeNotFound(w)
+		return
+	}
+	// A remote image is cached as immutable only on a versioned URL; the
+	// current-version URL can point at another version later.
+	serveFile(w, r, b, f, deliveryFor(r, b), seq > 0 && f.Origin == FileOriginRemote)
 }
 
 // delivery is how file bytes reach the client.
@@ -248,7 +271,7 @@ func deliveryFor(r *http.Request, b backend) delivery {
 // happened. The headers that make a file safe to serve (disposition,
 // nosniff, private caching) are set here for every delivery, so all read
 // routes, now and in later phases, share one code path.
-func serveFile(w http.ResponseWriter, r *http.Request, b backend, f *File, how delivery) {
+func serveFile(w http.ResponseWriter, r *http.Request, b backend, f *File, how delivery, immutable bool) {
 	ctx := r.Context()
 	disposition := contentDisposition(f.MediaType, f.Path)
 	ctype := responseContentType(f.MediaType)
@@ -276,7 +299,11 @@ func serveFile(w http.ResponseWriter, r *http.Request, b backend, f *File, how d
 
 	etag := `"sha256:` + f.SHA256 + `"`
 	h.Set("ETag", etag)
-	h.Set("Cache-Control", "private, no-cache")
+	if immutable {
+		h.Set("Cache-Control", remoteCacheControl)
+	} else {
+		h.Set("Cache-Control", "private, no-cache")
+	}
 	h.Set("Content-Security-Policy", fileCSP)
 	if match := r.Header.Get("If-None-Match"); match != "" && match == etag {
 		w.WriteHeader(http.StatusNotModified)

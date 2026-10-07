@@ -539,3 +539,51 @@ func TestListGrantsWindowed(t *testing.T) {
 		t.Errorf("queries: candidates=%d grantsFor=%d, want 1 and 3", cs.candidates, cs.grantsFor)
 	}
 }
+
+// TestListHidesPendingArtifactFromNonOwners: until its first version is
+// finalized, an artifact is shown only to its owner, in the list exactly as
+// on GET (both use the same read check). A project member who could read
+// the finished artifact sees neither its title nor its key.
+func TestListHidesPendingArtifactFromNonOwners(t *testing.T) {
+	f := newFixture(t, false)
+	content := []byte("# draft")
+	pend := f.createPending(agentA, "/api/v1/artifacts", CreateVersionRequest{
+		Title: "Secret draft title", Key: "secret-draft-key", Entry: "d.md",
+		Files: []ManifestFile{{Path: "d.md", Size: int64(len(content)), SHA256: sha(content)}},
+	})
+	id := pend.Artifact.ID
+
+	// (a) A member of the home project with read access: not listed, 404.
+	rec := f.do(&userU, http.MethodGet, listPath, nil, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("member list: %d", rec.Code)
+	}
+	if body := rec.Body.String(); strings.Contains(body, id) || strings.Contains(body, "Secret draft title") || strings.Contains(body, "secret-draft-key") {
+		t.Errorf("member list reveals the pending artifact: %s", body)
+	}
+	if rec := f.do(&userU, http.MethodGet, listPath+"&q=secret", nil, nil); strings.Contains(rec.Body.String(), id) {
+		t.Errorf("member search reveals the pending artifact: %s", rec.Body.String())
+	}
+	if rec := f.do(&userU, http.MethodGet, "/api/v1/artifacts/"+id, nil, nil); rec.Code != http.StatusNotFound {
+		t.Errorf("member GET pending: %d, want 404", rec.Code)
+	}
+
+	// (b) The owner lists and reads it.
+	if got := listIDs(f.list(&agentA, listPath)); !slices.Equal(got, []string{id}) {
+		t.Errorf("owner list: %v, want [%s]", got, id)
+	}
+	if rec := f.do(&agentA, http.MethodGet, "/api/v1/artifacts/"+id, nil, nil); rec.Code != http.StatusOK {
+		t.Errorf("owner GET pending: %d, want 200 (%s)", rec.Code, rec.Body.String())
+	}
+
+	// (c) Once finalized, the member sees it.
+	if rec := f.put(agentA, id, pend.Version.Seq, "d.md", content); rec.Code != http.StatusNoContent {
+		t.Fatalf("put: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := f.finalize(agentA, id, pend.Version.Seq); rec.Code != http.StatusOK {
+		t.Fatalf("finalize: %d %s", rec.Code, rec.Body.String())
+	}
+	if got := listIDs(f.list(&userU, listPath)); !slices.Equal(got, []string{id}) {
+		t.Errorf("member list after finalize: %v, want [%s]", got, id)
+	}
+}

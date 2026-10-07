@@ -147,6 +147,20 @@ type ArtifactsSettings struct {
 	// LinkMaxTTLHours is the longest lifetime a share link may be given.
 	// Share links always expire.
 	LinkMaxTTLHours *int `json:"link_max_ttl_hours,omitempty"`
+	// RemoteImagesEnabled turns on fetching the remote images a markdown
+	// artifact references at publish time.
+	RemoteImagesEnabled *bool `json:"remote_images_enabled,omitempty"`
+	// RemoteImageMaxCount caps the remote images fetched for one version.
+	RemoteImageMaxCount *int `json:"remote_image_max_count,omitempty"`
+	// RemoteImageMaxBytes caps the size of one fetched image.
+	RemoteImageMaxBytes *int64 `json:"remote_image_max_bytes,omitempty"`
+	// RemoteImageFetchTimeoutS is the timeout of one image fetch, in
+	// seconds.
+	RemoteImageFetchTimeoutS *int `json:"remote_image_fetch_timeout_s,omitempty"`
+	// RemoteImageTotalBudgetS bounds the time spent fetching all images of
+	// one version, in seconds. At least RemoteImageFetchTimeoutS and at most
+	// ArtifactsMaxRemoteImageTotalBudgetS.
+	RemoteImageTotalBudgetS *int `json:"remote_image_total_budget_s,omitempty"`
 }
 
 // Compiled defaults for ArtifactsSettings.
@@ -158,6 +172,19 @@ const (
 	ArtifactsDefaultRetentionDays         = 0   // never expire
 	ArtifactsDefaultLinkTTLHours          = 168 // 7 days
 	ArtifactsDefaultLinkMaxTTLHours       = 720 // 30 days
+
+	ArtifactsDefaultRemoteImagesEnabled            = true
+	ArtifactsDefaultRemoteImageMaxCount            = 32
+	ArtifactsDefaultRemoteImageMaxBytes      int64 = 5 << 20 // 5 MiB
+	ArtifactsDefaultRemoteImageFetchTimeoutS       = 10
+	ArtifactsDefaultRemoteImageTotalBudgetS        = 30
+
+	// ArtifactsMaxRemoteImageTotalBudgetS caps remote_image_total_budget_s.
+	// Remote images are fetched inside the publish request; the publish
+	// handler extends its own write deadline by the budget plus a margin, so
+	// the hub's server-wide write timeout does not cut the response. The cap
+	// bounds how long one publish can hold its request open.
+	ArtifactsMaxRemoteImageTotalBudgetS = 60
 )
 
 // ArtifactsConfig is the resolved artifact service configuration: every
@@ -170,6 +197,15 @@ type ArtifactsConfig struct {
 	DefaultRetentionDays int
 	LinkDefaultTTLHours  int
 	LinkMaxTTLHours      int
+
+	RemoteImagesEnabled      bool
+	RemoteImageMaxCount      int
+	RemoteImageMaxBytes      int64
+	RemoteImageFetchTimeoutS int
+	RemoteImageTotalBudgetS  int
+	// RemoteImagesInvalid names the problem when a remote image value is
+	// invalid; remote images are then off and the rest of the service runs.
+	RemoteImagesInvalid string
 	// Malformed is true when the stored document could not be used. The
 	// service is then disabled and the limits are the compiled defaults.
 	Malformed bool
@@ -186,6 +222,12 @@ func DefaultArtifactsConfig() ArtifactsConfig {
 		DefaultRetentionDays: ArtifactsDefaultRetentionDays,
 		LinkDefaultTTLHours:  ArtifactsDefaultLinkTTLHours,
 		LinkMaxTTLHours:      ArtifactsDefaultLinkMaxTTLHours,
+
+		RemoteImagesEnabled:      ArtifactsDefaultRemoteImagesEnabled,
+		RemoteImageMaxCount:      ArtifactsDefaultRemoteImageMaxCount,
+		RemoteImageMaxBytes:      ArtifactsDefaultRemoteImageMaxBytes,
+		RemoteImageFetchTimeoutS: ArtifactsDefaultRemoteImageFetchTimeoutS,
+		RemoteImageTotalBudgetS:  ArtifactsDefaultRemoteImageTotalBudgetS,
 	}
 }
 
@@ -194,18 +236,28 @@ func DefaultArtifactsConfig() ArtifactsConfig {
 func MalformedArtifactsConfig() ArtifactsConfig {
 	c := DefaultArtifactsConfig()
 	c.Enabled = false
+	c.RemoteImagesEnabled = false
 	c.Malformed = true
 	return c
 }
 
 // Resolve applies compiled defaults to omitted fields and validates the
-// result. An invalid value anywhere makes the whole section unusable: it
+// result. An invalid service value makes the whole section unusable: it
 // returns MalformedArtifactsConfig and an error naming the problem, so the
-// service fails closed rather than running with a limit nobody set.
+// service fails closed rather than running with a limit nobody set. An
+// invalid remote image value only turns remote images off
+// (RemoteImagesEnabled false, RemoteImagesInvalid set).
 //
-// Valid means: every size and count limit and both link TTLs are at least
-// 1, retention is at least 0, a file limit does not exceed the bundle
-// limit, and the default link TTL does not exceed the maximum.
+// Omitted remote image caps default to the smaller of their compiled
+// default and the file limits.
+//
+// Valid service values: every size and count limit and both link TTLs are
+// at least 1, retention is at least 0, a file limit does not exceed the
+// bundle limit, and the default link TTL does not exceed the maximum.
+// Valid remote image values: count, size and both timeouts are at least 1,
+// a remote image is no larger than a file, there are no more remote images
+// than files, and the budget is at least one fetch timeout and at most
+// ArtifactsMaxRemoteImageTotalBudgetS.
 func (a ArtifactsSettings) Resolve() (ArtifactsConfig, error) {
 	c := DefaultArtifactsConfig()
 	if a.Enabled != nil {
@@ -229,6 +281,27 @@ func (a ArtifactsSettings) Resolve() (ArtifactsConfig, error) {
 	if a.LinkMaxTTLHours != nil {
 		c.LinkMaxTTLHours = *a.LinkMaxTTLHours
 	}
+	if a.RemoteImagesEnabled != nil {
+		c.RemoteImagesEnabled = *a.RemoteImagesEnabled
+	}
+	// An absent remote image cap follows a lower file limit, so a document
+	// that only lowers max_file_bytes or max_files stays valid.
+	if a.RemoteImageMaxCount != nil {
+		c.RemoteImageMaxCount = *a.RemoteImageMaxCount
+	} else {
+		c.RemoteImageMaxCount = min(c.RemoteImageMaxCount, c.MaxFiles)
+	}
+	if a.RemoteImageMaxBytes != nil {
+		c.RemoteImageMaxBytes = *a.RemoteImageMaxBytes
+	} else {
+		c.RemoteImageMaxBytes = min(c.RemoteImageMaxBytes, c.MaxFileBytes)
+	}
+	if a.RemoteImageFetchTimeoutS != nil {
+		c.RemoteImageFetchTimeoutS = *a.RemoteImageFetchTimeoutS
+	}
+	if a.RemoteImageTotalBudgetS != nil {
+		c.RemoteImageTotalBudgetS = *a.RemoteImageTotalBudgetS
+	}
 
 	var err error
 	switch {
@@ -251,6 +324,32 @@ func (a ArtifactsSettings) Resolve() (ArtifactsConfig, error) {
 	}
 	if err != nil {
 		return MalformedArtifactsConfig(), fmt.Errorf("artifacts settings: %w", err)
+	}
+
+	// An invalid remote image value turns remote images off and leaves the
+	// rest of the service running.
+	var remoteErr error
+	switch {
+	case c.RemoteImageMaxCount < 1:
+		remoteErr = fmt.Errorf("remote_image_max_count must be at least 1, got %d", c.RemoteImageMaxCount)
+	case c.RemoteImageMaxBytes < 1:
+		remoteErr = fmt.Errorf("remote_image_max_bytes must be at least 1, got %d", c.RemoteImageMaxBytes)
+	case c.RemoteImageFetchTimeoutS < 1:
+		remoteErr = fmt.Errorf("remote_image_fetch_timeout_s must be at least 1, got %d", c.RemoteImageFetchTimeoutS)
+	case c.RemoteImageTotalBudgetS < 1:
+		remoteErr = fmt.Errorf("remote_image_total_budget_s must be at least 1, got %d", c.RemoteImageTotalBudgetS)
+	case c.RemoteImageMaxBytes > c.MaxFileBytes:
+		remoteErr = fmt.Errorf("remote_image_max_bytes (%d) exceeds max_file_bytes (%d)", c.RemoteImageMaxBytes, c.MaxFileBytes)
+	case c.RemoteImageMaxCount > c.MaxFiles:
+		remoteErr = fmt.Errorf("remote_image_max_count (%d) exceeds max_files (%d)", c.RemoteImageMaxCount, c.MaxFiles)
+	case c.RemoteImageTotalBudgetS < c.RemoteImageFetchTimeoutS:
+		remoteErr = fmt.Errorf("remote_image_total_budget_s (%d) is below remote_image_fetch_timeout_s (%d)", c.RemoteImageTotalBudgetS, c.RemoteImageFetchTimeoutS)
+	case c.RemoteImageTotalBudgetS > ArtifactsMaxRemoteImageTotalBudgetS:
+		remoteErr = fmt.Errorf("remote_image_total_budget_s must be at most %d, got %d", ArtifactsMaxRemoteImageTotalBudgetS, c.RemoteImageTotalBudgetS)
+	}
+	if remoteErr != nil {
+		c.RemoteImagesEnabled = false
+		c.RemoteImagesInvalid = remoteErr.Error()
 	}
 	return c, nil
 }
