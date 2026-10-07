@@ -203,6 +203,17 @@ server:
 		if err != nil || gs != nil {
 			t.Fatalf("got settings %+v, err %v; want nil, nil", gs, err)
 		}
+		// Callers pass these nil settings straight to the resolver, which
+		// must give the local layout rather than panic.
+		home := t.TempDir()
+		got, err := ResolveSharedDirHostPath(gs, home, "proj", testSharedDirProjectID, "scratchpad")
+		if err != nil {
+			t.Fatalf("resolve: %v", err)
+		}
+		want := config.SharedDirHostPath(home, "proj", testSharedDirProjectID, "scratchpad")
+		if got.Backend != "local" || got.Path != want {
+			t.Fatalf("got %+v, want local %q", got, want)
+		}
 	})
 
 	t.Run("v1 file mentioning the key only in a comment resolves to local", func(t *testing.T) {
