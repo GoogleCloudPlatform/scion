@@ -68,6 +68,8 @@ type execRaceCase struct {
 	listed   string // list output showing execRaceID
 	notFound string // the CLI's not-found line for execRaceID
 	cliCode  int    // the CLI's exit code for that failure
+	// classifier is the runtime's exec not-found classifier.
+	classifier containerExecNotFound
 	// alsoNotFound are other not-found lines of this CLI for execRaceID
 	// (each must classify like notFound).
 	alsoNotFound []string
@@ -76,31 +78,34 @@ type execRaceCase struct {
 func execRaceCases() []execRaceCase {
 	return []execRaceCase{
 		{
-			name:     "docker",
-			new:      func(cli string) Runtime { return &DockerRuntime{Command: cli} },
-			empty:    "",
-			listed:   `{"ID":"` + execRaceID + `","Names":"proj--worker","Status":"Up 1 minute","Image":"img","Labels":"scion.name=worker"}` + "\n",
-			notFound: "Error response from daemon: No such container: " + execRaceID + "\n",
-			cliCode:  1,
+			name:       "docker",
+			new:        func(cli string) Runtime { return &DockerRuntime{Command: cli} },
+			empty:      "",
+			listed:     `{"ID":"` + execRaceID + `","Names":"proj--worker","Status":"Up 1 minute","Image":"img","Labels":"scion.name=worker"}` + "\n",
+			notFound:   "Error response from daemon: No such container: " + execRaceID + "\n",
+			cliCode:    1,
+			classifier: dockerExecNotFound,
 		},
 		{
-			name:     "podman",
-			new:      func(cli string) Runtime { return &PodmanRuntime{Command: cli} },
-			empty:    "[]",
-			listed:   `[{"Id":"` + execRaceID + `","Names":["proj--worker"],"Status":"running","Image":"img","Labels":{"scion.name":"worker"}}]`,
-			notFound: `Error: no container with name or ID "` + execRaceID + `" found: no such container` + "\n",
-			cliCode:  125,
+			name:       "podman",
+			new:        func(cli string) Runtime { return &PodmanRuntime{Command: cli} },
+			empty:      "[]",
+			listed:     `[{"Id":"` + execRaceID + `","Names":["proj--worker"],"Status":"running","Image":"img","Labels":{"scion.name":"worker"}}]`,
+			notFound:   `Error: no container with name or ID "` + execRaceID + `" found: no such container` + "\n",
+			cliCode:    125,
+			classifier: podmanExecNotFound,
 			alsoNotFound: []string{
 				`Error: no container with ID ` + execRaceID + ` found in database: no such container` + "\n",
 			},
 		},
 		{
-			name:     "apple",
-			new:      func(cli string) Runtime { return &AppleContainerRuntime{Command: cli} },
-			empty:    "[]",
-			listed:   `[{"status":"running","configuration":{"id":"` + execRaceID + `","labels":{"scion.name":"worker"},"image":{"reference":"img"}}}]`,
-			notFound: `Error: notFound: "get failed: container ` + execRaceID + ` not found"` + "\n",
-			cliCode:  1,
+			name:       "apple",
+			new:        func(cli string) Runtime { return &AppleContainerRuntime{Command: cli} },
+			empty:      "[]",
+			listed:     `[{"status":"running","configuration":{"id":"` + execRaceID + `","labels":{"scion.name":"worker"},"image":{"reference":"img"}}}]`,
+			notFound:   `Error: notFound: "get failed: container ` + execRaceID + ` not found"` + "\n",
+			cliCode:    1,
+			classifier: appleExecNotFound,
 			alsoNotFound: []string{
 				`Error: notFound: "container with ID ` + execRaceID + ` not found"` + "\n",
 			},
@@ -177,13 +182,17 @@ func TestContainerExec_CommandExitIsNotContainerNotFound(t *testing.T) {
 func TestClassifyExecErr_CancelledContextKeepsExitError(t *testing.T) {
 	for _, tc := range execRaceCases() {
 		t.Run(tc.name, func(t *testing.T) {
+			// Without this, a missing or mismatched classifier would return
+			// at the exit-code check and never reach the ctx guard.
+			if tc.classifier.exitCode != tc.cliCode || tc.classifier.line == nil {
+				t.Fatalf("setup: case %q has classifier exit code %d, want its cliCode %d", tc.name, tc.classifier.exitCode, tc.cliCode)
+			}
 			// A real *exec.ExitError with the CLI's code.
 			runErr := exec.Command("sh", "-c", fmt.Sprintf("exit %d", tc.cliCode)).Run()
 			var exitErr *exec.ExitError
 			if !errors.As(runErr, &exitErr) || exitErr.ExitCode() != tc.cliCode {
 				t.Fatalf("setup: got %v, want exit %d", runErr, tc.cliCode)
 			}
-			n := map[string]containerExecNotFound{"docker": dockerExecNotFound, "podman": podmanExecNotFound, "apple": appleExecNotFound}[tc.name]
 			ctx, cancel := context.WithCancel(context.Background())
 			cancel()
 			listed := false
@@ -191,7 +200,7 @@ func TestClassifyExecErr_CancelledContextKeepsExitError(t *testing.T) {
 				listed = true
 				return nil, nil // "gone": only the ctx guard can keep the ExitError
 			}
-			err := n.classifyExecErr(ctx, runErr, tc.notFound, execRaceID, list)
+			err := tc.classifier.classifyExecErr(ctx, runErr, tc.notFound, execRaceID, list)
 			if errors.Is(err, ErrContainerNotFound) || err != runErr {
 				t.Errorf("classifyExecErr = %v, want the original ExitError %v", err, runErr)
 			}
