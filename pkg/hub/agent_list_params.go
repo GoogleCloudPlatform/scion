@@ -20,9 +20,9 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/agentsort"
 )
 
@@ -58,10 +58,10 @@ const maxAgentListIDs = 100
 // parseAgentListIDs validates the ids= parameter: a comma-separated list
 // of canonical agent UUIDs, at most min(limit, 100) entries, duplicates
 // included (duplicates are then dropped), never together with cursor or
-// fit. It only checks
-// the format of the request, before any store or authorization call, and
-// its error messages never name an id, so a 400 says nothing about whether
-// any id exists or is readable. An absent or empty ids= returns nil.
+// fit. It only checks the format of the request, before any store or
+// authorization call, and its error messages never name an id, so a 400
+// says nothing about whether any id exists or is readable. An absent or
+// empty ids= returns nil.
 //
 // The web client uses it to page a frozen walk order: page 0 returns the
 // readable population in sort order (stats=1), and later pages ask for the

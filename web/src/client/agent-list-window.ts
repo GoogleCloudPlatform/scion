@@ -918,7 +918,12 @@ export class AgentListWindow extends EventTarget {
         // the next page still starts after every id asked for here.
         const byId = new Map(fetched.agents.map((a) => [a.id, a]));
         const agents = frozenIds.map((id) => byId.get(id)).filter((a): a is Agent => !!a);
-        for (const id of frozenIds) if (!byId.has(id)) this.frozenDead.add(id);
+        // An id that comes back (it re-entered the phase filter, or became
+        // readable again) counts towards the total again.
+        for (const id of frozenIds) {
+          if (byId.has(id)) this.frozenDead.delete(id);
+          else this.frozenDead.add(id);
+        }
         const nextStart = frozenStart + frozenIds.length;
         const total = frozen.length - this.frozenDead.size;
         if (agents.length === 0) {

@@ -295,4 +295,27 @@ describe('AgentListWindow — frozen walk order', () => {
     expect(server.requests.at(-1)?.ids).toEqual(['a3', 'a4', 'a5']);
     expect(win.pageIndex).toBe(1);
   });
+
+  it('an agent that leaves the phase filter and re-enters counts in the total again', async () => {
+    const server = new FakeServer(ten());
+    const win = setup(server, { phaseFilter: 'running' });
+    win.setPaged(
+      server.page({ limit: 3, wantStats: true, signal: new AbortController().signal }, 'running'),
+      ''
+    );
+    const setPhase = (id: string, phase: string) => {
+      server.agents = server.agents.map((a) => (a.id === id ? { ...a, phase } : a));
+    };
+    setPhase('a4', 'stopped');
+    await win.next();
+    expect(win.items.map((a) => a.id)).toEqual(['a3', 'a5']);
+    expect(win.total).toBe(9);
+    setPhase('a4', 'running');
+    await win.next(); // page 2, still under the same frozen order
+    expect(win.pageIndex).toBe(2);
+    await win.prev(); // back to page 1, fetched by ids again
+    expect(win.pageIndex).toBe(1);
+    expect(win.items.map((a) => a.id)).toEqual(['a3', 'a4', 'a5']);
+    expect(win.total).toBe(10);
+  });
 });
