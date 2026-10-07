@@ -89,8 +89,10 @@ func TestSchedSessionReauthoringRecordsCeiling(t *testing.T) {
 	owner := setupScopedDispatchAgentOwner(t, srv, s, projectID, tid("sched-session-reauth-owner"))
 
 	t.Run("convert message schedule to dispatch_agent", func(t *testing.T) {
-		id := createOwnerSchedule(t, srv, owner, projectID, "session-convert", "message")
+		author := authzHelperAgent(projectID, ScopeProjectRead, ScopeAgentCreate)
+		id := createOwnerSchedule(t, srv, author, projectID, "session-convert", "message")
 		before := loadScheduleRevision(t, s, id)
+		require.Equal(t, store.EffectCeilingBounded, before.Ceiling.Kind)
 
 		rec := doAuthoredScheduleRequest(t, srv, owner, projectID, id, http.MethodPatch,
 			UpdateScheduleRequest{EventType: "dispatch_agent", Payload: `{"agentName":"worker-c"}`})
