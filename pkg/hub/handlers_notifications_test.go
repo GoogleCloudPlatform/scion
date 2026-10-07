@@ -206,8 +206,9 @@ func TestHandleNotifications_FilterByAgent(t *testing.T) {
 	ctx := context.Background()
 
 	// The setup already created tid("agent-watched") with user notifications for DevUserID.
-	// Create a second agent that watches tid("agent-watched"), so tid("agent-watched") is the
-	// subscriber (simulating notifications sent TO the watched agent).
+	// Create a second agent, and a subscription in which the watched agent,
+	// keyed by its slug "watched-agent", is the subscriber (simulating
+	// notifications sent TO the watched agent).
 	agent2 := &store.Agent{
 		ID:        tid("agent-other"),
 		Slug:      tid("other-agent"),
