@@ -413,10 +413,14 @@ the per-size timeout values in effect if they were raised above the
 defaults shown in `EffectiveSettings`. A blank `notes` field in a raw
 report is a gap for whoever reads it later, not a neutral default.
 
-When run against a hub built from the `perf/2392-agent-list-instrumentation`
-branch (not yet merged) with `SCION_HUB_PERF_TRACE=1` set in the hub's
-environment, add `--want-perf-trace` to additionally capture phase-timing/
-store-call-count data from the response headers. On a baseline run against
+When the hub runs with request performance tracing on (add
+`SCION_SERVER_HUB_PERFTRACE=true` to the isolated launch's `env -i` list, or
+set `server.hub.perf_trace: true`), add `--want-perf-trace` to additionally
+capture the `X-Scion-Perf-*` response headers per attempt: endpoint class,
+phase times (microseconds) and counts, authorization store calls and times,
+decision-audit counts, and DB pool waits. The hub also logs one
+`perf_trace` line per request, which adds the `serialize` phase the headers
+cannot include. See `pkg/hub/perftrace.go` for the phase definitions. On a baseline run against
 unmodified `main`, or if the flag was passed but no trace headers actually
 came back, the report's `perfTraceAvailable` field is `false` for that
 scenario, not silently omitted or wrongly true.

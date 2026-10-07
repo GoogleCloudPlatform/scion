@@ -136,11 +136,11 @@ type Attempt struct {
 	Bytes   int64   `json:"bytes,omitempty"`
 	TTFBMs  float64 `json:"ttfbMs,omitempty"`
 	TotalMs float64 `json:"totalMs"`
-	// PerfTrace is set only when the hub was started with the #2392
-	// instrumentation build and SCION_HUB_PERF_TRACE=1, the request carried
+	// PerfTrace is set only when the hub was started with request
+	// performance tracing on (server.hub.perf_trace), the request carried
 	// the opt-in X-Scion-Perf-Trace header, AND the response actually
 	// included trace headers -- not merely because --want-perf-trace was
-	// passed.
+	// passed. Keys are the X-Scion-Perf-* header names.
 	PerfTrace map[string]string `json:"perfTrace,omitempty"`
 }
 
