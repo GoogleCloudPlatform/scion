@@ -876,7 +876,7 @@ func (s *Server) handleHarnessConfigCheckImage(w http.ResponseWriter, r *http.Re
 				var mu sync.Mutex
 				for i := range brokerResult.Items {
 					b := &brokerResult.Items[i]
-					if _, isPlugin := b.Labels["scion.io/plugin"]; isPlugin {
+					if isPluginBroker(b) {
 						continue
 					}
 					if !s.canDispatchToBroker(ctx, b) {
@@ -1341,7 +1341,7 @@ func (s *Server) handleHarnessConfigImageStatus(w http.ResponseWriter, r *http.R
 	var proxyEntries []ProxyBrokerEntry
 	for i := range brokerResult.Items {
 		b := &brokerResult.Items[i]
-		if _, isPlugin := b.Labels["scion.io/plugin"]; isPlugin {
+		if isPluginBroker(b) {
 			continue
 		}
 		if !s.canDispatchToBroker(ctx, b) {
