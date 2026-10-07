@@ -2915,10 +2915,8 @@ var webContentSecurityPolicy = strings.Join([]string{
 
 // securityHeadersMiddleware adds security headers to all responses.
 func (ws *WebServer) securityHeadersMiddleware(next http.Handler) http.Handler {
-	csp := webContentSecurityPolicy
-
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Security-Policy", csp)
+		w.Header().Set("Content-Security-Policy", webContentSecurityPolicy)
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-XSS-Protection", "1; mode=block")
