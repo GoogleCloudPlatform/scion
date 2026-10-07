@@ -32,9 +32,13 @@ Once the endpoint is configured, authenticate your CLI:
 
 ```bash
 scion hub auth login
+# or, before any endpoint is configured:
+scion hub auth login --hub-url https://scion.yourcompany.com
 ```
 
-This will open your browser to complete the OAuth flow.
+This will open your browser to complete the OAuth flow. The hub URL comes from `--hub-url`, then the root `--hub` flag, then `SCION_HUB_ENDPOINT`, then `hub.endpoint` in settings. If no `hub.endpoint` is configured yet, a successful login saves the URL to your global settings (or to the project's settings, when that project already has hub settings) so `scion hub status` and other Hub commands use it. If Hub mode is off, an interactive login offers to enable it; otherwise run `scion hub enable`.
+
+Commands that take a Hub project reference, such as `scion start -g <hub-project>`, need Hub mode. When you are logged in, an interactive run offers to enable it; otherwise the error tells you to run `scion hub enable`.
 
 ## Project Linking (Projects)
 
