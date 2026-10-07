@@ -99,6 +99,9 @@ func requiredBodyCases() []requiredBodyCase {
 		{"HarnessConfigs.Get", func(ctx context.Context, c Client) error { return expectNoResult(c.HarnessConfigs().Get(ctx, "h")) }},
 		{"Workspace.GetStatus", func(ctx context.Context, c Client) error { return expectNoResult(c.Workspace().GetStatus(ctx, "a")) }},
 		{"Users.Get", func(ctx context.Context, c Client) error { return expectNoResult(c.Users().Get(ctx, "u")) }},
+		{"Users.Provision", func(ctx context.Context, c Client) error {
+			return expectNoResult(c.Users().Provision(ctx, &ProvisionUserRequest{Email: "a@example.com"}))
+		}},
 		{"Auth.Me", func(ctx context.Context, c Client) error { return expectNoResult(c.Auth().Me(ctx)) }},
 		{"Tokens.List", func(ctx context.Context, c Client) error { return expectNoResult(c.Tokens().List(ctx)) }},
 		{"Subscriptions.Create", func(ctx context.Context, c Client) error {

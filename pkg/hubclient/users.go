@@ -179,7 +179,7 @@ func (s *userService) Provision(ctx context.Context, req *ProvisionUserRequest) 
 	if err != nil {
 		return nil, err
 	}
-	out, err := apiclient.DecodeResponse[ProvisionUserResponse](resp)
+	out, err := apiclient.DecodeRequired[ProvisionUserResponse](resp)
 	if err != nil {
 		var apiErr *apiclient.APIError
 		if errors.As(err, &apiErr) && (apiErr.StatusCode == http.StatusConflict || apiErr.StatusCode == http.StatusUnprocessableEntity) {
