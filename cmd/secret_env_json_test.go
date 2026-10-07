@@ -370,12 +370,7 @@ func TestRunEnvGet_JSONEmptyValue(t *testing.T) {
 // A get that succeeds with no body must return an error, not panic, in both
 // the JSON and the text form.
 func TestRunEnvGet_NoContent(t *testing.T) {
-	modes := append([]struct {
-		name     string
-		format   string
-		jsonFlag bool
-	}{{name: "text"}}, jsonModes...)
-	for _, mode := range modes {
+	for _, mode := range noContentModes() {
 		t.Run(mode.name, func(t *testing.T) {
 			setupJSONCmdTest(t, map[string]interface{}{
 				"/api/v1/env/GONE": noContentBody{},
@@ -388,7 +383,73 @@ func TestRunEnvGet_NoContent(t *testing.T) {
 				runErr = runEnvGet(hubEnvGetCmd, []string{"GONE"})
 			})
 			require.Error(t, runErr)
-			assert.Contains(t, runErr.Error(), "no content")
+			assert.Equal(t,
+				`failed to get environment variable: hub returned no content for "GONE"`,
+				runErr.Error())
+			assert.NotContains(t, out, "null")
+			assert.Empty(t, out)
+		})
+	}
+}
+
+// noContentModes is the text form plus both JSON forms.
+func noContentModes() []struct {
+	name     string
+	format   string
+	jsonFlag bool
+} {
+	return append([]struct {
+		name     string
+		format   string
+		jsonFlag bool
+	}{{name: "text"}}, jsonModes...)
+}
+
+// A hub secret get that succeeds with no body must return an error, not
+// panic or print null, in both the JSON and the text form.
+func TestRunSecretGet_NoContent(t *testing.T) {
+	for _, mode := range noContentModes() {
+		t.Run(mode.name, func(t *testing.T) {
+			setupJSONCmdTest(t, map[string]interface{}{
+				"/api/v1/secrets/GONE": noContentBody{},
+			})
+			outputFormat = mode.format
+			secretOutputJSON = mode.jsonFlag
+
+			var runErr error
+			out := captureStdout(t, func() {
+				runErr = runSecretGet(hubSecretGetCmd, []string{"GONE"})
+			})
+			require.Error(t, runErr)
+			assert.Contains(t, runErr.Error(), `no content for "GONE"`)
+			assert.NotContains(t, out, "null")
+			assert.Empty(t, out)
+		})
+	}
+}
+
+// The agent secret get command has no JSON flag; only --format json.
+func TestRunAgentSecretGet_NoContent(t *testing.T) {
+	for _, mode := range []struct {
+		name   string
+		format string
+	}{{name: "text"}, {name: "format json", format: "json"}} {
+		t.Run(mode.name, func(t *testing.T) {
+			setupJSONCmdTest(t, map[string]interface{}{
+				"/api/v1/secrets/GONE": noContentBody{},
+			})
+			origCtx := agentSecretGetCmd.Context()
+			t.Cleanup(func() { agentSecretGetCmd.SetContext(origCtx) })
+			agentSecretGetCmd.SetContext(context.Background())
+			outputFormat = mode.format
+
+			var runErr error
+			out := captureStdout(t, func() {
+				runErr = runAgentSecretGet(agentSecretGetCmd, []string{"GONE"})
+			})
+			require.Error(t, runErr)
+			assert.Contains(t, runErr.Error(), `no content for "GONE"`)
+			assert.NotContains(t, out, "null")
 			assert.Empty(t, out)
 		})
 	}
