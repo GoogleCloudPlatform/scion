@@ -1210,6 +1210,13 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	// already refuses worktree-per-agent before dispatching (A2/A4); this is
 	// the broker's own independent defense, and it also keeps
 	// tryProvisionWorktree off the reprovision path entirely.
+	// A shared dir backend change is part of a reincarnation only.
+	if !req.Reprovision && (len(req.SharedDirBackendChanges) > 0 || req.AllowEmptySharedDir) {
+		markAttemptFailed(http.StatusBadRequest, "shared dir backend change without reprovision")
+		BadRequest(w, "a shared dir backend change is only supported on a reprovision request")
+		return
+	}
+
 	if req.Reprovision && req.WorkspaceMode == store.WorkspaceModeWorktreePerAgent {
 		const msg = "reprovision refused: worktree-per-agent workspaces are not supported by reincarnate"
 		// O-a (review p1b-r2): use the same dispatch-attempt message as the
@@ -1290,6 +1297,8 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	// buildStartContext computed for opCreate.
 	if req.Reprovision {
 		opts.FreshProvision = false
+		opts.SharedDirBackendChanges = req.SharedDirBackendChanges
+		opts.AllowEmptySharedDir = req.AllowEmptySharedDir
 	}
 	s.agentLifecycleLog.Info("Agent dispatch: buildStartContext complete",
 		"agent_id", req.ID, "name", req.Name, "elapsed", time.Since(buildCtxStart).String())
@@ -1532,6 +1541,8 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			// asked for it — the hub's dispatch fails closed when it asked
 			// for a reprovision and did not get this echo back.
 			Reprovisioned: req.Reprovision,
+			// Reprovision returned without error, so it recorded the change.
+			SharedDirBackendsChanged: req.Reprovision && len(req.SharedDirBackendChanges) > 0,
 		}
 		if attempt != nil {
 			s.dispatchAttemptsMu.Lock()

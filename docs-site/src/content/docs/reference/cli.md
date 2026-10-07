@@ -561,6 +561,8 @@ as stop, start, and restart); an agent can always reincarnate itself.
     - `--harness-auth <method>`: Patch the harness auth method of the new generation: `api-key`, `oauth-token`, `auth-file`, or `vertex-ai`.
     - `--image <image>`, `-i`: Patch the container image of the new generation.
     - `--thinking-level <value>`: Patch the thinking level of the new generation. Accepts the same values as `scion start`: an integer from 0 to 100, or a case-insensitive shorthand: `low` (25), `medium` (50), `high` (75), `max` (100). The Hub receives the integer. Without the flag, the thinking level is not patched. An invalid value fails before contacting the Hub.
+    - `--shared-dir-backend <name>=nfs`: Change the recorded [storage backend](/scion/reference/server-config/#changing-an-agents-shared-directory-to-nfs) of the agent's shared directory `<name>` from `local` to `nfs`. Repeatable. Only the agent's record changes; copy the data first. An agent cannot use this on itself, and it cannot be combined with a move to another Runtime Broker. Before a real reincarnation the CLI asks the Hub for the plan and stops if the Hub does not echo the change; if it says the Hub does not support `--shared-dir-backend`, upgrade the Hub.
+    - `--allow-empty-shared-dir`: With `--shared-dir-backend`, let the agent start even if the new `nfs` directory is empty while the previous local directory is not.
 
 **Patch flags.** `--service-account`, `--role`, `--model`, `--thinking-level`, `--harness-auth`, and
 `--image` change that setting on the new generation, and later reincarnations keep the new value.
