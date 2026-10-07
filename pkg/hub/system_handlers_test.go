@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -194,15 +195,38 @@ func TestSystemInit_EmptyHarnesses(t *testing.T) {
 }
 
 func TestSystemInit_SelectiveHarnessConfig(t *testing.T) {
-	srv, _ := testWorkstationServer(t)
+	srv, s := testWorkstationServer(t)
+	srv.SetStorage(newMockStorage("test-bucket"))
+	ctx := context.Background()
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
+	globalDir := filepath.Join(tmpHome, ".scion")
 
 	restore := config.OverrideRuntimeDetection(
 		func(string) (string, error) { return "/usr/bin/docker", nil },
 		func(string, []string) error { return nil },
 	)
 	defer restore()
+
+	// workstationStart mirrors a workstation hub start: every bundled
+	// resource is re-materialized on disk (UpdateDefaultTemplates(true)),
+	// then imported by the *FromDir bootstrap.
+	workstationStart := func() {
+		t.Helper()
+		if err := config.MaterializeBundledResources(globalDir, config.MaterializeOptions{Force: true}); err != nil {
+			t.Fatalf("materialize: %v", err)
+		}
+		if err := srv.BootstrapTemplatesFromDir(ctx, filepath.Join(globalDir, "templates")); err != nil {
+			t.Fatalf("template bootstrap: %v", err)
+		}
+		if err := srv.BootstrapHarnessConfigsFromDir(ctx, filepath.Join(globalDir, "harness-configs")); err != nil {
+			t.Fatalf("harness config bootstrap: %v", err)
+		}
+	}
+	workstationStart()
+	if _, err := s.GetHarnessConfigBySlug(ctx, "claude", store.HarnessConfigScopeGlobal, ""); err != nil {
+		t.Fatalf("claude not seeded by startup bootstrap: %v", err)
+	}
 
 	rec := doWorkstationRequest(t, srv, http.MethodPost, "/api/v1/system/init", map[string]interface{}{
 		"harnesses": []string{"codex"},
@@ -227,6 +251,34 @@ func TestSystemInit_SelectiveHarnessConfig(t *testing.T) {
 	templateFile := filepath.Join(tmpHome, ".scion", "templates", "default", "scion-agent.yaml")
 	if _, err := os.Stat(templateFile); err != nil {
 		t.Errorf("expected default template scion-agent.yaml to be created: %v", err)
+	}
+
+	// ptone/scion#3544 (D3): unselected built-ins count as deleted. They are
+	// removed from the hub by init and stay absent across restarts, even
+	// though each restart re-materializes them on disk.
+	assertSelection := func(when string) {
+		t.Helper()
+		configs, err := s.ListHarnessConfigs(ctx, store.HarnessConfigFilter{
+			Scope: store.HarnessConfigScopeGlobal,
+		}, store.ListOptions{Limit: 200})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var names []string
+		for _, hc := range configs.Items {
+			names = append(names, hc.Name)
+		}
+		if len(names) != 1 || names[0] != "codex" {
+			t.Errorf("%s: global harness configs = %v, want [codex]", when, names)
+		}
+		if _, err := s.GetTemplateBySlug(ctx, "default", string(store.TemplateScopeGlobal), ""); err != nil {
+			t.Errorf("%s: default template missing: %v", when, err)
+		}
+	}
+	assertSelection("after init")
+	for i := range 2 {
+		workstationStart()
+		assertSelection(fmt.Sprintf("after restart %d", i))
 	}
 }
 

@@ -155,6 +155,40 @@ func TestBuildStartContext_ColocatedExtraHostsFollowDispatchRuntime(t *testing.T
 	}
 }
 
+// TestBuildStartContext_ColocatedIAPHubEndpointFollowsDispatchRuntime: on a
+// single-node VM the hub's public URL is a Cloud Run IAP front end the host
+// does not serve (ptone/scion#3609). An agent dispatched to a container
+// runtime gets the local hub alias instead, mapped to host-gateway, and stays
+// on bridge networking. An agent dispatched to kubernetes (hybrid GKE) keeps
+// the IAP URL and gets no extra hosts.
+func TestBuildStartContext_ColocatedIAPHubEndpointFollowsDispatchRuntime(t *testing.T) {
+	clearSCIONEnv(t)
+	const (
+		iapEndpoint   = "https://scion-hub-123456.us-central1.run.app"
+		aliasEndpoint = "http://scion-hub.internal:8080"
+	)
+	for _, tc := range dispatchRuntimeCases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, _ := newDispatchRuntimeServer(t, tc, aliasEndpoint)
+			srv.config.ColocatedPublicHubEndpoint = iapEndpoint
+			sc := buildDispatchRuntimeStartContext(t, srv, tc, iapEndpoint)
+
+			wantEndpoint := iapEndpoint
+			var wantHosts []string
+			if tc.wantContainerRouting {
+				wantEndpoint = aliasEndpoint
+				wantHosts = []string{"scion-hub.internal:host-gateway"}
+			}
+			if got := sc.Opts.Env["SCION_HUB_ENDPOINT"]; got != wantEndpoint {
+				t.Errorf("SCION_HUB_ENDPOINT = %q, want %q", got, wantEndpoint)
+			}
+			if !slices.Equal(sc.Opts.ExtraHosts, wantHosts) {
+				t.Errorf("ExtraHosts = %v, want %v", sc.Opts.ExtraHosts, wantHosts)
+			}
+		})
+	}
+}
+
 // TestBuildStartContext_WorktreeProvisionFollowsDispatchRuntime: host-side
 // worktree-per-agent provisioning runs only for an agent dispatched to a
 // container runtime. An agent dispatched to kubernetes falls back to the

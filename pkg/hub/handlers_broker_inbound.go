@@ -558,6 +558,22 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		s.events.PublishUserMessage(r.Context(), storeMsg, nil)
+
+		// Group conversations: list the dispatched agent and the posting
+		// user as participants, mirroring the native group path (listing
+		// index only, best-effort, never fails this response). While the
+		// agent is reincarnating the message is deferred rather than
+		// delivered, so only the user is listed then — a participant agent
+		// is one that was actually woken. Direct conversations are
+		// handled separately above and are unchanged.
+		if effectiveConv != nil && effectiveConv.Kind == "group" {
+			if !agentReincarnating {
+				s.ensureGroupParticipants(r.Context(), effectiveConv.ConversationID, []*store.Agent{agent})
+			}
+			if strings.HasPrefix(req.Message.Sender, "user:") {
+				s.ensureGroupUserParticipant(r.Context(), effectiveConv.ConversationID, senderUserID)
+			}
+		}
 	}
 
 	// Record reply-affinity context so that the agent's next untagged reply

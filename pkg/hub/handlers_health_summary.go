@@ -34,7 +34,6 @@ type HealthSummaryResponse struct {
 	Brokers  []HealthSummaryBrkr    `json:"brokers"`
 	Agents   HealthSummaryAgents    `json:"agents"`
 	Dispatch *HealthSummaryDispatch `json:"dispatch"` // nil when dispatch metrics are unavailable
-	Stall    HealthSummaryStall     `json:"stall_config"`
 }
 
 // HealthSummaryHub contains hub-level health information.
@@ -99,12 +98,6 @@ type HealthSummaryAgents struct {
 type HealthSummaryDispatch struct {
 	StuckMessages int `json:"stuck_messages"`
 	Failed1h      int `json:"failed_1h"`
-}
-
-// HealthSummaryStall contains stall detection configuration.
-type HealthSummaryStall struct {
-	ThresholdSeconds int  `json:"threshold_seconds"`
-	AutoSuspend      bool `json:"auto_suspend"`
 }
 
 // handleHealthSummary handles GET /api/v1/admin/health/summary.
@@ -240,12 +233,6 @@ func (s *Server) handleHealthSummary(w http.ResponseWriter, r *http.Request) {
 	// method to dispatchmetrics.Recorder to populate this section.
 	var dispatchSummary *HealthSummaryDispatch // nil = unavailable
 
-	// Build stall config section
-	stallConfig := HealthSummaryStall{
-		ThresholdSeconds: int(s.config.StalledThreshold.Seconds()),
-		AutoSuspend:      s.config.AutoSuspendStalled,
-	}
-
 	// Propagate unhealthy agent/broker signals into overall status.
 	if len(agentsSummary.Stalled) > 0 || len(agentsSummary.Crashed) > 0 || len(agentsSummary.Errored) > 0 {
 		degrade()
@@ -264,7 +251,6 @@ func (s *Server) handleHealthSummary(w http.ResponseWriter, r *http.Request) {
 		Brokers:  brokerSummaries,
 		Agents:   agentsSummary,
 		Dispatch: dispatchSummary,
-		Stall:    stallConfig,
 	}
 
 	writeJSON(w, http.StatusOK, resp)
