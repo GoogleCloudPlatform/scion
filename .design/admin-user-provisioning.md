@@ -1031,7 +1031,11 @@ grants. Phases 2-3 are conditional on this.
 **Phase 2 — hub UAT admission (conditional on the Phase 1 slice and on ptone's OD-10 decision).**
 Enable UATs through D.2's mechanism with the full §7.3 checks: exact selector, boundary, live
 authority, restrictions and invitation-effect governance. Implement the chosen OD-10 lifetime
-behaviour. Add the UAT credential kind to the catalog, then the P2 tests.
+behaviour. Add the UAT credential kind to the catalog, then the P2 tests. Under UAT admission,
+confirm that the `user.read` detail-authority decision (§5.4; PR-1 evaluates it on
+`hubScopedResource("user", "hub")` with no target evidence) resolves to the same hub target as the
+`user.invite` decision, or switch it to `hubCollectionEvidence("user.read")`. Then re-add
+`DenialCredentialInsufficient` to the catalog entry for rows 6-7.
 
 **Phase 3 — web UI.** The display-name field and submit routing in `admin-users.ts`, plus web tests.
 
