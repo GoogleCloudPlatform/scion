@@ -226,7 +226,7 @@ func (d *mockDispatcher) DispatchFinalizeEnv(_ context.Context, _ *store.Agent, 
 // testBootstrapServer creates a test server with storage and dispatcher configured.
 func testBootstrapServer(t *testing.T) (*Server, store.Store, *mockStorage, *mockDispatcher) {
 	t.Helper()
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
@@ -452,7 +452,7 @@ func TestCreateAgentWithWorkspaceBootstrap_ExistingFiles(t *testing.T) {
 
 func TestCreateAgentWithWorkspaceBootstrap_NoStorage(t *testing.T) {
 	// Create server without storage
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
@@ -963,7 +963,7 @@ func TestSyncToFinalize_RejectsStoppedAgent(t *testing.T) {
 
 func TestSyncToFinalize_BootstrapMode_NoDispatcher(t *testing.T) {
 	// Create server without dispatcher
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
