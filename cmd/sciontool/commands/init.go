@@ -1311,6 +1311,7 @@ waitLoop:
 			if err := sup.Signal(syscall.SIGTERM); err != nil {
 				log.Error("Failed to send SIGTERM to child: %v", err)
 			}
+			reportHookLimitsExceeded(handlers.NewHubHandler(), handlers.LimitsTriggerFile)
 			result = <-exitChan
 			break waitLoop
 		case <-usr2Chan:
@@ -1324,6 +1325,7 @@ waitLoop:
 			if err := sup.Signal(syscall.SIGTERM); err != nil {
 				log.Error("Failed to send SIGTERM to child: %v", err)
 			}
+			reportHookLimitsExceeded(handlers.NewHubHandler(), handlers.LimitsTriggerFile)
 			result = <-exitChan
 			break waitLoop
 		}
@@ -1706,6 +1708,22 @@ func handleLimitsExceeded(sup *supervisor.Supervisor, limitType, message string)
 	// 4. Send SIGTERM to child process
 	if err := sup.Signal(syscall.SIGTERM); err != nil {
 		log.Error("Failed to send SIGTERM to child: %v", err)
+	}
+}
+
+// reportHookLimitsExceeded reports to the Hub a limit that a hook process
+// detected and signalled (trigger file or SIGUSR1). The hook no longer makes
+// this call itself: it runs under the harness's hook timeout, while init is
+// long-lived. The message is the one the hook wrote to triggerPath. The
+// caller sends SIGTERM to the child first, so a slow Hub does not delay
+// shutdown. hubHandler may be nil (Hub not configured).
+func reportHookLimitsExceeded(hubHandler *handlers.HubHandler, triggerPath string) {
+	if hubHandler == nil {
+		return
+	}
+	message := handlers.ReadLimitsTriggerMessage(triggerPath)
+	if err := hubHandler.ReportLimitsExceeded(message); err != nil {
+		log.Error("Failed to report limits_exceeded to Hub: %v", err)
 	}
 }
 

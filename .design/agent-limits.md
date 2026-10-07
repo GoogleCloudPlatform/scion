@@ -131,10 +131,12 @@ Turn and model call counting is implemented as a new handler registered in the h
 
 When a count-incrementing event is received and the count meets or exceeds the corresponding limit:
 
-1. Write a clear log entry to `agent.log`.
-2. Set agent status to `LIMITS_EXCEEDED` in `agent-info.json`.
-3. Report `limits_exceeded` to the Hub (if configured).
-4. Send `SIGTERM` to the harness process by signaling PID 1 (sciontool init).
+1. Set agent status to `LIMITS_EXCEEDED` in `agent-info.json`.
+2. Write a clear log entry to `agent.log`.
+3. Signal PID 1 (sciontool init): write the trigger file `/tmp/scion-limits-exceeded` holding the limit message, then send `SIGUSR1` as a fallback.
+4. Report the updated counts to the Hub (if configured).
+
+The hook does not report `limits_exceeded` to the Hub itself. Init does that when it sees the trigger file or `SIGUSR1`, using the message from the trigger file (ptone/scion#3610). The hook runs under the harness's hook timeout (antigravity 10s, opencode and grok-build 5s), so its Hub calls share one per-process budget (`hookHubBudget`, 3s), and the local actions above come before any Hub call so an unreachable Hub never delays shutdown.
 
 #### Signaling the Init Process
 
@@ -150,8 +152,8 @@ The reason for using a signal rather than having the hook process directly kill 
 │  Detects limit    │                  │  Receives signal   │
 │  Sets status      │                  │  Logs reason       │
 │  Logs event       │                  │  SIGTERM → child   │
-│  Reports to Hub   │                  │  Waits grace       │
-│  Sends SIGUSR1    │                  │  Exits             │
+│  Trigger file +   │                  │  Reports to Hub    │
+│  SIGUSR1          │                  │  Waits grace, exits│
 └──────────────────┘                  └──────────────────┘
 ```
 
@@ -239,7 +241,7 @@ The `LIMITS_EXCEEDED` state has specific interactions with the status system:
    - Maintains turn count and model call count in `~/agent-limits.json`.
    - Increments turn count on `agent-end` events.
    - Increments model call count on `model-end` events.
-   - When either limit is reached: updates status, logs, reports to Hub, sends `SIGUSR1` to PID 1.
+   - When either limit is reached: updates status, logs, writes the trigger file and sends `SIGUSR1` to PID 1. Init reports `limits_exceeded` to the Hub (see §3.4).
 2. Register `LimitsHandler` in the hook event pipeline in `cmd/sciontool/commands/hook.go`.
 3. Initialize `agent-limits.json` during `post-start` in `init.go` (counters reset on each start/resume).
 

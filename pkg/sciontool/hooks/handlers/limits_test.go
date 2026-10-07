@@ -471,7 +471,7 @@ func TestSignalLimitsExceeded_CreatesTriggerFile(t *testing.T) {
 		triggerFilePath: triggerPath,
 	}
 
-	err := h.signalLimitsExceeded()
+	err := h.signalLimitsExceeded("max_turns of 1 exceeded (completed 1)")
 	assert.NoError(t, err)
 
 	// Verify the trigger file was created
