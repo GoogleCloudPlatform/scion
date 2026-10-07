@@ -723,7 +723,8 @@ func TestSAAssign2147_MemberAgentCreatesAgent_Enforce_EvaluatesCreatingSA(t *tes
 
 // TestSAAssign2147_MemberScheduledDispatch_Enforce_EvaluatesScheduleCreator
 // covers a dispatch_agent scheduled event created by a plain project member.
-// The actAs principal is the schedule's creator.
+// The actAs principal is the principal of the event's latest revision, here
+// the member who created it.
 func TestSAAssign2147_MemberScheduledDispatch_Enforce_EvaluatesScheduleCreator(t *testing.T) {
 	for _, tc := range []struct {
 		name  string

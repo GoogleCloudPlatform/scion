@@ -1552,11 +1552,10 @@ func TestInitiatorMatchesExecutor(t *testing.T) {
 // newScopedUATInitiatorContext builds a live-request context carrying a
 // scoped UAT identity/credential (kind=uat), for tests that exercise
 // InitiatorAttribution capture directly rather than through the
-// scheduled-event/schedule HTTP authoring path — which denies every scoped
-// UAT today (B's interim dispatch_agent authoring gate; plan correction
-// (a): "Supported-UAT scheduled execution is a B.3 integration fixture, not
-// an E-only admission"). B.3's tests can reuse this fixture and the
-// assertions in TestCaptureInitiatorAttribution_ScopedUATFixture below.
+// scheduled-event/schedule HTTP authoring path, which refuses a
+// project-scoped UAT at the token boundary check: no scheduled_event
+// permission is eligible for a project boundary. Its only user is
+// TestCaptureInitiatorAttribution_ScopedUATFixture below.
 func newScopedUATInitiatorContext(userID, tokenID, projectID string, scopes []string) context.Context {
 	user := NewAuthenticatedUser(userID, userID+"@example.com", "Test User", "member", "api")
 	scoped := NewScopedUserIdentityWithCredentialID(user, projectID, scopes, tokenID)

@@ -4478,8 +4478,9 @@ func (s *Server) scheduledCreatorIdentity(ctx context.Context, evt store.Schedul
 //
 // Authorization principal: the scheduled dispatch has no interactive caller,
 // so both the project-default and hub-default assign rungs authorize against
-// the schedule's immediate creator — resolved by scheduledCreatorIdentity and
-// placed on ctx by the caller (dispatchAgentEventHandler) before this runs.
+// the principal of the schedule's latest revision as the immediate agent
+// creator — resolved by scheduledCreatorIdentity and placed on ctx by the
+// caller (dispatchAgentEventHandler) before this runs.
 // The hub-default rung mirrors the project-default rung's existing choice
 // here; it does not introduce a new principal.
 //
@@ -4799,7 +4800,7 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 			tmpl, tmplErr = s.resolveTemplate(ctx, payload.Template, evt.ProjectID)
 			// SECURITY-GATE (ptone/scion#1916): same gate as the agent-create
 			// HTTP path in handlers_agents_core.go — a resolved candidate is
-			// not yet known to be one the schedule's creator may read.
+			// not known to be one the revision principal may read.
 			// tmplErr is set to store.ErrNotFound on denial so the
 			// degradation rule below (which keys off tmplErr, not tmpl)
 			// treats a denial exactly like a definitive not-found, rather
@@ -4863,7 +4864,7 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 			}
 		}
 
-		// Project-default GCP identity, gated against the schedule creator as
+		// Project-default GCP identity, gated against the revision principal as
 		// the immediate agent creator — twin of the create path (#1797). It
 		// must run before deriveAgentConfig: populateAgentConfig reads
 		// AppliedConfig.GCPIdentity when checking auth credentials.

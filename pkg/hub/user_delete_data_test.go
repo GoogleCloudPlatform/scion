@@ -1045,7 +1045,8 @@ func TestUserRowLocks_DeleteExclusiveCreateRestoreShared(t *testing.T) {
 	})
 	t.Run("scheduled create", func(t *testing.T) {
 		// The scheduler's agent has no owner or ancestry and records the
-		// schedule's creator only as CreatedBy; the lock goes to that user.
+		// principal of the schedule's latest revision only as CreatedBy; the
+		// lock goes to that user.
 		srv, s, _, _, project := setupDemoPolicyTest(t)
 		dave := newActiveMember(t, s, "user-dave", "dave@test.com")
 		r := newUserLockRecordingStore(s)

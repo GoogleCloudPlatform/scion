@@ -388,7 +388,7 @@ func (d *preResolvingDispatcher) DispatchAgentCreate(ctx context.Context, agent 
 // End to end through the scheduler: a dispatch_agent event created by a
 // regular member, naming a Hub template whose scion-agent.yaml requires a
 // private skill, stamps the template ID (#1795) and pre-resolves that skill as
-// the event's creator.
+// the principal of the event's latest revision.
 func TestSchedulerDispatch_PreResolvesTemplatePrivateSkill(t *testing.T) {
 	const skillURI = "skill://scion/global/sched-private@latest"
 	srv, s, alice, _, project := setupSkillAuthzTest(t)
