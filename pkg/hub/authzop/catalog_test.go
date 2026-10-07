@@ -303,6 +303,12 @@ func TestRegisteredPermissionsConsumed(t *testing.T) {
 		"skill_injection.deliver": "Material delivery grant evaluation, NonRouteUse only (ptone/scion#2129)",
 		"secret.use":              "Agent runtime secret retrieval, enforced in material_runtime.go, not route-enforced",
 		"gcp_service_account.use": "Agent GCP token-mint request, NonRouteUse only (ptone/scion#2129)",
+
+		// Self-scoped permissions — checked by Server.authorizeSelfScoped;
+		// their operations are catalogued by the batches that admit them.
+		"inbox.read":                  "Self-scoped, checked by authorizeSelfScoped; no route uses it yet",
+		"inbox.write":                 "Self-scoped, checked by authorizeSelfScoped; no route uses it yet",
+		"user_skill_injection.update": "Self-scoped, checked by authorizeSelfScoped; no route uses it yet",
 	}
 
 	var unconsumed []string

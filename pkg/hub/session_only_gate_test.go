@@ -114,7 +114,9 @@ func TestSessionOnlyGate_ReasonIsReported(t *testing.T) {
 
 	// Scheduled dispatch authoring is not session-only: the revision records
 	// the token's ceiling, and each fire requires the token to be live
-	// (authorizeScheduledDispatchAgentAuthoring).
+	// (authorizeScheduledDispatchAgentAuthoring). This checks the function
+	// alone: the schedule routes refuse a project-scoped token earlier, at
+	// the bearer gate's boundary eligibility stage.
 	rec := httptest.NewRecorder()
 	ok := m.srv.authorizeScheduledDispatchAgentAuthoring(rec, requestWithContext(ctx, http.MethodPost, "/api/v1/projects/"+f.project+"/scheduled-events", nil))
 	assert.True(t, ok, "scheduled dispatch authoring admits a scoped token: %s", rec.Body.String())

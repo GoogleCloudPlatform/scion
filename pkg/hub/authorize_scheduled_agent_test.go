@@ -26,7 +26,9 @@ import (
 // TestAuthorizeScheduledDispatchAgentAuthoring_Precondition checks the
 // dispatch_agent authoring precondition directly: it requires an identity and
 // admits every credential shape, scoped UATs included, since a revision
-// records the token's ceiling and every fire applies it.
+// records the token's ceiling and every fire applies it. The schedule routes
+// refuse a project-scoped UAT before this check, at the bearer gate's boundary
+// eligibility stage (assertScheduledEventBoundaryIneligible).
 func TestAuthorizeScheduledDispatchAgentAuthoring_Precondition(t *testing.T) {
 	srv := &Server{}
 	user := NewAuthenticatedUser("gate-user", "gate-user@test.com", "Gate User", "member", "api")

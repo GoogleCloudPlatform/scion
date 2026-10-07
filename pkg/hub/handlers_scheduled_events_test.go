@@ -110,11 +110,12 @@ func TestScheduledEvent_CreateDispatchAgentRequiresAgentCreateScope(t *testing.T
 	assert.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 }
 
-// TestScheduledEvent_CreateDispatchAgentScopedUAT covers dispatch_agent event
-// authoring by a scoped UAT: the event records the token's frozen ceiling,
-// which the fire applies, so a project-scoped UAT covering agent creation may
-// author it. A hub-scoped UAT is refused by the project-scoped access check.
-func TestScheduledEvent_CreateDispatchAgentScopedUAT(t *testing.T) {
+// TestScheduledEvent_CreateDispatchAgentScopedUATDenied covers dispatch_agent
+// event create: a scoped UAT is denied even when the underlying user holds
+// full project-owner authority, and the same unscoped user is allowed. The
+// project-scoped UAT is refused at boundary eligibility
+// (assertScheduledEventBoundaryIneligible).
+func TestScheduledEvent_CreateDispatchAgentScopedUATDenied(t *testing.T) {
 	srv, s, projectID := setupScheduledEventTest(t)
 	ctx := context.Background()
 
@@ -144,15 +145,11 @@ func TestScheduledEvent_CreateDispatchAgentScopedUAT(t *testing.T) {
 		assert.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 	})
 
-	t.Run("scoped UAT for the same user allowed with its ceiling recorded", func(t *testing.T) {
+	t.Run("project-scoped UAT for the same user denied at boundary eligibility", func(t *testing.T) {
 		scoped := NewScopedUserIdentity(ownerUser, projectID, []string{"scheduled_event:create", "agent:create"})
 		rec := doScheduledEventUserRequest(t, srv, scoped, http.MethodPost, projectID, "", req)
-		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
-		var created store.ScheduledEvent
-		require.NoError(t, json.NewDecoder(rec.Body).Decode(&created))
-		stored, err := s.GetScheduledEvent(context.Background(), created.ID)
-		require.NoError(t, err)
-		assert.Equal(t, store.EffectCeilingBounded, stored.AuthorityCeiling.Kind)
+		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		assertScheduledEventBoundaryIneligible(t, srv, scoped, projectID, ActionCreate)
 	})
 
 	t.Run("hub-scoped UAT for the same user denied", func(t *testing.T) {

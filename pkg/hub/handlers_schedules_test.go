@@ -162,12 +162,31 @@ func setupScopedDispatchAgentOwner(t *testing.T, srv *Server, s store.Store, pro
 	return ownerUser
 }
 
-// TestSchedule_CreateDispatchAgentScopedUAT covers recurring-schedule create
-// of a dispatch_agent schedule from a scoped UAT: the revision records the
-// token's frozen ceiling, which every fire applies, so a project-scoped UAT
-// covering agent creation may author it. A hub-scoped UAT is refused by the
-// project-scoped access check.
-func TestSchedule_CreateDispatchAgentScopedUAT(t *testing.T) {
+// assertScheduledEventBoundaryIneligible checks that identity is refused
+// scheduled_event.<action> on projectID at bearer gate stage 3b. No
+// scheduled_event permission is eligible for a project boundary, so a
+// project-scoped UAT is refused before any schedule handler logic runs.
+// TestAuthorizeScheduledDispatchAgentAuthoring_Precondition checks the
+// dispatch_agent authoring precondition itself for every credential shape.
+func assertScheduledEventBoundaryIneligible(t *testing.T, srv *Server, identity Identity, projectID string, action Action) {
+	t.Helper()
+	decision := srv.authzService.Decide(context.Background(), AuthzRequest{
+		Principal:  principalContextForIdentity(identity),
+		Credential: credentialContextForIdentity(identity),
+		Resource:   Resource{Type: "scheduled_event", ParentType: "project", ParentID: projectID},
+		Action:     action,
+		Permission: "scheduled_event." + string(action),
+	})
+	assert.False(t, decision.Allowed)
+	assert.Equal(t, bearerReasonBoundaryIneligible, decision.Reason)
+}
+
+// TestSchedule_CreateDispatchAgentScopedUATDenied covers recurring-schedule
+// create of a dispatch_agent schedule: a scoped UAT is denied even when the
+// underlying user holds full project-owner authority, and the same unscoped
+// user is allowed. The project-scoped UAT is refused at boundary eligibility
+// (assertScheduledEventBoundaryIneligible).
+func TestSchedule_CreateDispatchAgentScopedUATDenied(t *testing.T) {
 	srv, s, projectID := setupScheduleTest(t)
 	ownerUser := setupScopedDispatchAgentOwner(t, srv, s, projectID, tid("sched-create-dispatch-owner"))
 
@@ -183,18 +202,11 @@ func TestSchedule_CreateDispatchAgentScopedUAT(t *testing.T) {
 		assert.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 	})
 
-	t.Run("scoped UAT for the same user allowed with its ceiling recorded", func(t *testing.T) {
+	t.Run("project-scoped UAT for the same user denied at boundary eligibility", func(t *testing.T) {
 		scoped := NewScopedUserIdentity(ownerUser, projectID, []string{"scheduled_event:create", "agent:create"})
-		req := req
-		req.Name = "scoped-dispatch-sched-uat"
 		rec := doScheduleAgentRequest(t, srv, scoped, projectID, "", http.MethodPost, req)
-		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
-		var created store.Schedule
-		require.NoError(t, json.NewDecoder(rec.Body).Decode(&created))
-		stored, err := s.GetSchedule(context.Background(), created.ID)
-		require.NoError(t, err)
-		assert.Equal(t, store.EffectCeilingBounded, stored.AuthorityCeiling.Kind)
-		assert.Contains(t, stored.AuthorityCeiling.PermissionIDs, "agent.create")
+		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		assertScheduledEventBoundaryIneligible(t, srv, scoped, projectID, ActionCreate)
 	})
 
 	t.Run("hub-scoped UAT for the same user denied", func(t *testing.T) {
@@ -205,18 +217,19 @@ func TestSchedule_CreateDispatchAgentScopedUAT(t *testing.T) {
 	})
 }
 
-// TestSchedule_UpdateDispatchAgentScopedUAT covers every alternate mutation
-// of an existing schedule that changes what a future dispatch_agent dispatch
-// does or who it runs as: converting a message schedule to dispatch_agent,
-// and re-targeting (editing the payload of) an existing dispatch_agent
-// schedule. A scoped UAT covering agent creation may make both; the revision
-// records its ceiling. The same unscoped user keeps working.
-func TestSchedule_UpdateDispatchAgentScopedUAT(t *testing.T) {
+// TestSchedule_UpdateDispatchAgentScopedUATDenied covers every alternate
+// mutation of an existing schedule that changes what a future dispatch_agent
+// dispatch does or who it runs as: converting a message schedule to
+// dispatch_agent, and re-targeting (editing the payload of) an existing
+// dispatch_agent schedule. Both deny a project-scoped UAT at boundary
+// eligibility (assertScheduledEventBoundaryIneligible) and allow the same
+// unscoped user.
+func TestSchedule_UpdateDispatchAgentScopedUATDenied(t *testing.T) {
 	srv, s, projectID := setupScheduleTest(t)
 	ownerUser := setupScopedDispatchAgentOwner(t, srv, s, projectID, tid("sched-update-dispatch-owner"))
 	scoped := NewScopedUserIdentity(ownerUser, projectID, []string{"scheduled_event:update", "agent:create"})
 
-	t.Run("convert message schedule to dispatch_agent by a scoped UAT", func(t *testing.T) {
+	t.Run("convert message schedule to dispatch_agent denied", func(t *testing.T) {
 		createRec := doScheduleAgentRequest(t, srv, ownerUser, projectID, "", http.MethodPost,
 			CreateScheduleRequest{
 				Name: "message-first-scoped", CronExpr: "0 * * * *",
@@ -228,18 +241,16 @@ func TestSchedule_UpdateDispatchAgentScopedUAT(t *testing.T) {
 
 		rec := doScheduleAgentRequest(t, srv, scoped, projectID, sched.ID, http.MethodPatch,
 			UpdateScheduleRequest{EventType: "dispatch_agent", Payload: `{"agentName":"worker-c"}`})
-		assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-		stored, err := s.GetSchedule(context.Background(), sched.ID)
-		require.NoError(t, err)
-		assert.Equal(t, store.EffectCeilingBounded, stored.AuthorityCeiling.Kind)
+		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		assertScheduledEventBoundaryIneligible(t, srv, scoped, projectID, ActionUpdate)
 
-		// The same unscoped user keeps working.
+		// The same unscoped user is allowed.
 		rec = doScheduleAgentRequest(t, srv, ownerUser, projectID, sched.ID, http.MethodPatch,
 			UpdateScheduleRequest{EventType: "dispatch_agent", Payload: `{"agentName":"worker-c"}`})
 		assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	})
 
-	t.Run("re-target existing dispatch_agent schedule by a scoped UAT", func(t *testing.T) {
+	t.Run("re-target existing dispatch_agent schedule denied", func(t *testing.T) {
 		createRec := doScheduleAgentRequest(t, srv, ownerUser, projectID, "", http.MethodPost,
 			CreateScheduleRequest{
 				Name: "existing-dispatch-scoped", CronExpr: "0 * * * *",
@@ -251,23 +262,22 @@ func TestSchedule_UpdateDispatchAgentScopedUAT(t *testing.T) {
 
 		rec := doScheduleAgentRequest(t, srv, scoped, projectID, sched.ID, http.MethodPatch,
 			UpdateScheduleRequest{Payload: `{"agentName":"worker-b"}`})
-		assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-		stored, err := s.GetSchedule(context.Background(), sched.ID)
-		require.NoError(t, err)
-		assert.Equal(t, store.EffectCeilingBounded, stored.AuthorityCeiling.Kind)
+		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		assertScheduledEventBoundaryIneligible(t, srv, scoped, projectID, ActionUpdate)
 
-		// The same unscoped user keeps working.
+		// The same unscoped user is allowed.
 		rec = doScheduleAgentRequest(t, srv, ownerUser, projectID, sched.ID, http.MethodPatch,
 			UpdateScheduleRequest{Payload: `{"agentName":"worker-b"}`})
 		assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	})
 }
 
-// TestSchedule_ResumeDispatchAgentScopedUAT covers resume: resuming a paused
-// dispatch_agent schedule re-arms future dispatches and records the resumer's
-// credential ceiling, so a scoped UAT covering agent creation may resume it.
-// A paused "message" schedule is held to the scheduled-message authoring rule.
-func TestSchedule_ResumeDispatchAgentScopedUAT(t *testing.T) {
+// TestSchedule_ResumeDispatchAgentScopedUATDenied covers resume: resuming a
+// paused schedule re-arms future runs. A project-scoped UAT is denied at
+// boundary eligibility (assertScheduledEventBoundaryIneligible) for a
+// dispatch_agent and a message schedule alike, and the unscoped project
+// owner is allowed.
+func TestSchedule_ResumeDispatchAgentScopedUATDenied(t *testing.T) {
 	srv, s, projectID := setupScheduleTest(t)
 	ownerUser := setupScopedDispatchAgentOwner(t, srv, s, projectID, tid("sched-resume-dispatch-owner"))
 	scoped := NewScopedUserIdentity(ownerUser, projectID, []string{"scheduled_event:update", "agent:create"})
@@ -284,27 +294,18 @@ func TestSchedule_ResumeDispatchAgentScopedUAT(t *testing.T) {
 	pauseRec := doScheduleAgentRequest(t, srv, ownerUser, projectID, sched.ID+"/pause", http.MethodPost, nil)
 	require.Equal(t, http.StatusOK, pauseRec.Code, pauseRec.Body.String())
 
-	t.Run("scoped UAT resumes a paused dispatch_agent schedule with its ceiling recorded", func(t *testing.T) {
+	t.Run("scoped UAT cannot resume a paused dispatch_agent schedule", func(t *testing.T) {
 		rec := doScheduleAgentRequest(t, srv, scoped, projectID, sched.ID+"/resume", http.MethodPost, nil)
-		assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-		stored, err := s.GetSchedule(context.Background(), sched.ID)
-		require.NoError(t, err)
-		assert.Equal(t, store.EffectCeilingBounded, stored.AuthorityCeiling.Kind)
+		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		assertScheduledEventBoundaryIneligible(t, srv, scoped, projectID, ActionUpdate)
 	})
 
 	t.Run("unscoped project owner can resume it", func(t *testing.T) {
-		pauseRec := doScheduleAgentRequest(t, srv, ownerUser, projectID, sched.ID+"/pause", http.MethodPost, nil)
-		require.Equal(t, http.StatusOK, pauseRec.Code, pauseRec.Body.String())
 		rec := doScheduleAgentRequest(t, srv, ownerUser, projectID, sched.ID+"/resume", http.MethodPost, nil)
 		assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	})
 
-	// Resume re-authorizes the resumer for every schedule type, so a paused
-	// "message" schedule is held to the scheduled-message authoring rule.
-	// That rule allows a target that does not resolve at authoring (the fire-time
-	// check is definitive), as here; TestResumeScopedUATDenied_Message
-	// covers a resolvable target.
-	t.Run("scoped UAT resume of a message schedule follows the message rule", func(t *testing.T) {
+	t.Run("scoped UAT cannot resume a paused message schedule", func(t *testing.T) {
 		msgCreateRec := doScheduleAgentRequest(t, srv, ownerUser, projectID, "", http.MethodPost,
 			CreateScheduleRequest{
 				Name: "resume-message-scoped", CronExpr: "0 * * * *",
@@ -318,7 +319,8 @@ func TestSchedule_ResumeDispatchAgentScopedUAT(t *testing.T) {
 		require.Equal(t, http.StatusOK, msgPauseRec.Code, msgPauseRec.Body.String())
 
 		rec := doScheduleAgentRequest(t, srv, scoped, projectID, msgSched.ID+"/resume", http.MethodPost, nil)
-		assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		assertScheduledEventBoundaryIneligible(t, srv, scoped, projectID, ActionUpdate)
 	})
 }
 
