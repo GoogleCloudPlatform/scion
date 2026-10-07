@@ -31,6 +31,10 @@ import (
 // outDir writes files under one directory through an os.Root, which never
 // resolves a path outside the directory, and refuses any symbolic link
 // below it.
+//
+// Unlike the unix version, the checks for links and for an existing file
+// are made before the write rather than as part of it, so a link or a file
+// created in between by another process is not detected.
 type outDir struct {
 	root *os.Root
 }

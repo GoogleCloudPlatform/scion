@@ -348,8 +348,11 @@ func getArtifact(ctx context.Context, svc hubclient.ArtifactService, stdout, std
 	}
 	// Into an existing directory, under the entry's own name (checked like
 	// a bundle path); otherwise to the file the user named.
+	// A path ending in a separator names a directory even if it does not
+	// exist yet.
 	dir, name := filepath.Dir(outPath), filepath.Base(outPath)
-	if st, err := os.Stat(outPath); err == nil && st.IsDir() {
+	asDir := strings.HasSuffix(outPath, "/") || strings.HasSuffix(outPath, string(os.PathSeparator))
+	if st, err := os.Stat(outPath); asDir || (err == nil && st.IsDir()) {
 		dir, name = outPath, path.Base(entry)
 		if err := checkBundleName(name); err != nil {
 			return err

@@ -62,7 +62,7 @@ $ scion artifact get scion://artifact/7a2b...@2 --out ./report-v2/
 - `--out`, `-o <path>`: For a single file, write to this file instead of stdout; if the path is an existing directory, the file is written into it under its own name. For a bundle (several files, or one file inside a folder), the directory to write every file into (created if needed), keeping relative paths.
 - `--force`: Replace files that already exist under `--out`. Without it, `get` refuses to replace an existing file.
 
-Every file is checked against the size and SHA-256 the hub recorded at publish time before it is written, to stdout or to disk, and moved into place atomically; a mismatch fails without writing that file. With `--out`, `get` writes only plain relative names (none starting with `.`), refuses to write through a symbolic link below the `--out` directory, and replaces an existing file only with `--force`.
+Every file is checked against the size and SHA-256 the hub recorded at publish time before it is written, to stdout or to disk, and moved into place atomically; a mismatch fails without writing that file. With `--out`, `get` writes only plain relative names (none starting with `.`), refuses to write through a symbolic link below the `--out` directory, and replaces an existing file only with `--force`. A path ending in `/` names a directory. On Linux and macOS these checks are part of each write. On Windows they are made just before each write, and so is the existing-file check on a file system without hard links.
 
 ### `scion artifact versions <ref>`
 

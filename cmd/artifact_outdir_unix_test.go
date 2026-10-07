@@ -24,6 +24,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/unix"
 )
 
 // TestOutDirDoesNotReplaceAFileThatAppears: a file created at the target
@@ -46,4 +47,21 @@ func TestOutDirDoesNotReplaceAFileThatAppears(t *testing.T) {
 	assert.Equal(t, "theirs", string(got))
 	entries, _ := os.ReadDir(dir)
 	assert.Len(t, entries, 1, "no temporary file left behind")
+}
+
+// TestOutDirWithoutHardLinks: on a file system without hard links, a new
+// file is still written, and an existing one is still not replaced.
+func TestOutDirWithoutHardLinks(t *testing.T) {
+	prev := linkat
+	linkat = func(int, string, int, string, int) error { return unix.EPERM }
+	t.Cleanup(func() { linkat = prev })
+	dir := t.TempDir()
+	d, err := openOutDir(dir)
+	require.NoError(t, err)
+	defer func() { _ = d.Close() }()
+	write := func(w io.Writer) error { _, err := w.Write([]byte("new")); return err }
+	require.NoError(t, d.WriteFile("a.md", false, write))
+	got, _ := os.ReadFile(filepath.Join(dir, "a.md"))
+	assert.Equal(t, "new", string(got))
+	assert.ErrorContains(t, d.WriteFile("a.md", false, write), "already exists")
 }

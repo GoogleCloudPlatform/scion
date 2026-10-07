@@ -366,6 +366,14 @@ func TestGetArtifactOutRules(t *testing.T) {
 	got, _ = os.ReadFile(filepath.Join(dir, "index.md"))
 	assert.Equal(t, "# i", string(got))
 
+	// A single file written to a path that ends in a separator goes into
+	// that directory, created if needed.
+	slashDir := filepath.Join(t.TempDir(), "newdir") + string(os.PathSeparator)
+	require.NoError(t, getArtifact(ctx, filesService{files: map[string]string{"a.md": "x"}, entry: "a.md"}, &stdout, &stderr, testArtifactID, slashDir, false))
+	got, err := os.ReadFile(filepath.Join(slashDir, "a.md"))
+	require.NoError(t, err)
+	assert.Equal(t, "x", string(got))
+
 	// The same holds for a single file written to a named path.
 	one := filesService{files: map[string]string{"a.md": "new"}, entry: "a.md"}
 	target := filepath.Join(t.TempDir(), "copy.md")

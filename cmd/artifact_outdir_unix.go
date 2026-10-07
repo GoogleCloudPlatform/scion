@@ -28,6 +28,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// linkat is unix.Linkat; tests replace it to act as a file system without
+// hard links.
+var linkat = unix.Linkat
+
 // outDir writes files under one directory without following a symbolic
 // link at any level below it. Each folder is opened relative to its parent
 // with O_NOFOLLOW, and each file is written to a temporary name and then
@@ -131,11 +135,25 @@ func (d *outDir) WriteFile(rel string, replace bool, write func(io.Writer) error
 	}
 	// A hard link fails if the name exists, so a file that appeared since
 	// the check above is not replaced either.
-	if err := unix.Linkat(fd, tmpName, fd, base, 0); err != nil {
-		if errors.Is(err, unix.EEXIST) {
+	err = linkat(fd, tmpName, fd, base, 0)
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, unix.EEXIST):
+		return fmt.Errorf("%s already exists; use --force to replace it", rel)
+	case errors.Is(err, unix.EPERM), errors.Is(err, unix.ENOTSUP), errors.Is(err, unix.EOPNOTSUPP), errors.Is(err, unix.EXDEV):
+		// The file system has no hard links (FAT, exFAT, some network
+		// and FUSE mounts). Check the name again and rename: a file
+		// created in between could be replaced, on these file systems
+		// only.
+		if err := unix.Fstatat(fd, base, &st, unix.AT_SYMLINK_NOFOLLOW); err == nil {
 			return fmt.Errorf("%s already exists; use --force to replace it", rel)
 		}
+		if err := unix.Renameat(fd, tmpName, fd, base); err != nil {
+			return fmt.Errorf("write %s: %w", rel, err)
+		}
+		return nil
+	default:
 		return fmt.Errorf("write %s: %w", rel, err)
 	}
-	return nil
 }
