@@ -2266,6 +2266,9 @@ authDone:
 	slog.Info("agent start: pre-runtime provisioning complete", "agent", opts.Name,
 		"elapsed_ms", time.Since(startEntry).Milliseconds())
 	if len(deferredSharedDirs) > 0 {
+		// A refusal here comes after the home storage and nfs workspace
+		// directories above are prepared; those steps are idempotent and
+		// are redone when the start is retried.
 		passed, err := checkSharedDirClaims(ctx, sdCheck, deferredSharedDirs, runCfg)
 		if err != nil {
 			return nil, err

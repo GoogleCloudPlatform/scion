@@ -536,6 +536,7 @@ func TestSharedDirBackendChange_ToLocalKubernetes(t *testing.T) {
 		assert.Equal(t, 0, refused.ran)
 		assert.Equal(t, []string{"notes"}, claims.calls)
 		assert.NotEmpty(t, projectkeys.ProjectNameFromLabels(claims.cfg.Labels))
+		assert.Equal(t, map[string]string{"notes": "nfs"}, perDirRecord(t, f, "agent").Previous, "a refused start keeps the check")
 
 		reprov.AllowEmptySharedDir = true
 		_, err = NewManager(newSDSMockRuntime("kubernetes", &sdsCapture{})).Reprovision(context.Background(), reprov)
@@ -549,10 +550,11 @@ func TestSharedDirBackendChange_ToLocalKubernetes(t *testing.T) {
 	})
 
 	t.Run("lookup error refuses, flag overrides", func(t *testing.T) {
-		_, opts, reprov := setup(t)
+		f, opts, reprov := setup(t)
 		_, err := NewManager(claimRuntime{newSDSMockRuntime("kubernetes", &sdsCapture{}), &fakeClaims{err: errors.New("forbidden")}}).Start(context.Background(), opts)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "forbidden")
+		assert.Equal(t, map[string]string{"notes": "nfs"}, perDirRecord(t, f, "agent").Previous, "a refused start keeps the check")
 
 		reprov.AllowEmptySharedDir = true
 		_, err = NewManager(newSDSMockRuntime("kubernetes", &sdsCapture{})).Reprovision(context.Background(), reprov)
