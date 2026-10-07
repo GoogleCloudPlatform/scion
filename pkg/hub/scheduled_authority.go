@@ -51,9 +51,10 @@ const (
 //     details.denied_by="delegation_ceiling", for a dispatch_agent revision.
 //
 // A message revision whose credential cannot be recorded as an authority
-// source records the unrecorded ceiling instead: scheduled-message authority
-// is decided by the scheduled-message rule, which does not read this
-// ceiling, and an unrecorded ceiling never reads as principal.
+// source records the unrecorded ceiling instead. resolveScheduledAuthority
+// denies every fire of a revision with an unrecorded ceiling, so such a
+// message schedule does not fire until a credential whose ceiling can be
+// recorded resumes it or recreates the event.
 func (s *Server) revisionAuthorityCeiling(w http.ResponseWriter, r *http.Request, projectID, eventType string, action Action) (store.EffectCeiling, bool) {
 	ctx := r.Context()
 	identity := GetIdentityFromContext(ctx)
@@ -140,6 +141,7 @@ var (
 // no entry is denied.
 var scheduledEventPermissions = map[string]string{
 	"dispatch_agent": "agent.create",
+	"message":        scheduledMessagePermission,
 }
 
 // ScheduledAuthority is the authority a fired scheduled event runs under:
