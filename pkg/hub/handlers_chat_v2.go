@@ -1613,19 +1613,6 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 		}
 	}
 
-	// #2257 P2 (design auto-offload-large-dm §4.2 item 1): strip hub-reserved
-	// offload metadata keys before render/dispatch. Defence in depth —
-	// allowedClientMetadataKeys above already excludes body_* — so this
-	// covers any future site that copies richer client metadata through.
-	//
-	// admitMessageArtifacts performs that strip, then re-adds only the
-	// artifact references the user can read under their own request
-	// credential (ptone/scion#3222).
-	var artifactRefs []artifacts.MessageRef
-	var artifactRefsDropped int
-	msg.Metadata, artifactRefs, artifactRefsDropped = s.admitMessageArtifacts(ctx, msg.Metadata)
-	msg.ArtifactRefsAdmitted = len(artifactRefs) > 0
-
 	// Phase 3 msg-authz: Check message authorization on the primary agent.
 	// Replaces the ActionAttach check — chat v2 is purely messaging, not PTY/attach.
 	// Authorization runs BEFORE validation (B-2): authorizeAgentMessage depends
@@ -1646,6 +1633,20 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 		})
 		return ""
 	}
+
+	// #2257 P2 (design auto-offload-large-dm §4.2 item 1): strip hub-reserved
+	// offload metadata keys before validation, render and dispatch. Defence in depth —
+	// allowedClientMetadataKeys above already excludes body_* — so this
+	// covers any future site that copies richer client metadata through.
+	//
+	// admitMessageArtifacts performs that strip, then re-adds only the
+	// artifact references the user can read under their own request
+	// credential (ptone/scion#3222). It runs after authorization, so a
+	// denied send does no artifact lookups.
+	var artifactRefs []artifacts.MessageRef
+	var artifactWarning string
+	msg.Metadata, artifactRefs, artifactWarning = s.admitMessageArtifacts(ctx, msg.Metadata)
+	msg.ArtifactRefsAdmitted = len(artifactRefs) > 0
 
 	// Phase gate (nc-delivery-unreachable): a primary that is soft-deleted or
 	// in a lifecycle phase where the container cannot accept a buffered
@@ -2201,10 +2202,10 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 		Attachments:         attachmentRefs,
 		DispatchState:       storeMsg.DispatchState,
 		DispatchFailureCode: dispatchFailureCode,
-		ArtifactWarning:     artifactRefsWarning(artifactRefsDropped),
+		ArtifactWarning:     artifactWarning,
 	}
 	if len(artifactRefs) > 0 {
-		resp.Artifacts = s.chatArtifactViews(ctx, artifactRefs, map[string]string{})
+		resp.Artifacts = s.chatArtifactViews(ctx, artifactRefs)
 	}
 	if storeMsg.DispatchFailureReason != nil {
 		resp.DispatchFailureReason = *storeMsg.DispatchFailureReason
@@ -5252,7 +5253,7 @@ type chatMessageResponse struct {
 
 	// Artifacts are the message's artifact references as the sender sees
 	// them; ArtifactWarning is set when some were not attached
-	// (ptone/scion#3222, #3224).
+	// (ptone/scion#3222, ptone/scion#3224).
 	Artifacts       []chatArtifactRef `json:"artifacts,omitempty"`
 	ArtifactWarning string            `json:"artifactWarning,omitempty"`
 

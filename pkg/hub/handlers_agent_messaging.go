@@ -1323,8 +1323,8 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	// Artifact references (ptone/scion#3222): keep only those the sending
 	// agent can read under its own request credential. The flag lets
 	// deliverToUser record them on the broker path.
-	outboundArtifactRefs, outboundArtifactRefsDropped := []artifacts.MessageRef(nil), 0
-	structuredMsg.Metadata, outboundArtifactRefs, outboundArtifactRefsDropped = s.admitMessageArtifacts(ctx, structuredMsg.Metadata)
+	outboundArtifactRefs, outboundArtifactWarning := []artifacts.MessageRef(nil), ""
+	structuredMsg.Metadata, outboundArtifactRefs, outboundArtifactWarning = s.admitMessageArtifacts(ctx, structuredMsg.Metadata)
 	structuredMsg.ArtifactRefsAdmitted = len(outboundArtifactRefs) > 0
 
 	// Process attachments.
@@ -1489,8 +1489,8 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	if len(mentionResults) > 0 {
 		respBody["mention_results"] = mentionResults
 	}
-	if warning := artifactRefsWarning(outboundArtifactRefsDropped); warning != "" {
-		respBody["artifact_warning"] = warning
+	if outboundArtifactWarning != "" {
+		respBody["artifact_warning"] = outboundArtifactWarning
 	}
 	writeJSON(w, http.StatusOK, respBody)
 }
@@ -2121,9 +2121,9 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	// Persist to message store before delivery attempt. Set dispatch_state
 	// to "dispatched" (no new pending rows per delivery policy).
 	var persistedMsgID string
-	// artifactRefsDropped counts artifact references not attached on the
+	// artifactWarning reports artifact references not attached on the
 	// non-agent-sender path below (admitMessageArtifacts).
-	var artifactRefsDropped int
+	var artifactWarning string
 	// dispatchMsg (#2257, design auto-offload-large-dm §4.4) is the object
 	// actually rendered a second time and dispatched below; it defaults to
 	// today's structuredMsg (possibly nil) and is only replaced with an
@@ -2562,7 +2562,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				AgentPhase:      agent.Phase,
 				MentionResults:  mentionResults,
 				Deferred:        deferredNote,
-				ArtifactWarning: artifactRefsWarning(dmResult.ArtifactRefsDropped),
+				ArtifactWarning: dmResult.ArtifactWarning,
 			})
 			return
 		}
@@ -2574,7 +2574,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		// artifact references the sender can read under its own request
 		// credential (ptone/scion#3222).
 		var artifactRefs []artifacts.MessageRef
-		structuredMsg.Metadata, artifactRefs, artifactRefsDropped = s.admitMessageArtifacts(ctx, structuredMsg.Metadata)
+		structuredMsg.Metadata, artifactRefs, artifactWarning = s.admitMessageArtifacts(ctx, structuredMsg.Metadata)
 		structuredMsg.ArtifactRefsAdmitted = len(artifactRefs) > 0
 
 		if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
@@ -2830,7 +2830,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			AgentPhase:      agent.Phase,
 			MentionResults:  mentionResults,
 			Deferred:        deferredReason(agent),
-			ArtifactWarning: artifactRefsWarning(artifactRefsDropped),
+			ArtifactWarning: artifactWarning,
 		})
 		return
 	}
@@ -2843,7 +2843,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		Agent:           agent.Slug,
 		AgentPhase:      agent.Phase,
 		MentionResults:  mentionResults,
-		ArtifactWarning: artifactRefsWarning(artifactRefsDropped),
+		ArtifactWarning: artifactWarning,
 	})
 }
 

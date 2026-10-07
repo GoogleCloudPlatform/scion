@@ -67,6 +67,13 @@ func tokenBackedSender(t *testing.T, s store.Store, a *store.Agent) *agentIdenti
 	return id
 }
 
+// requestAuthCtx is ctx as the authentication middleware leaves it for a
+// request authenticated as identity: the identity plus its credential
+// context.
+func requestAuthCtx(ctx context.Context, identity Identity) context.Context {
+	return contextWithCredentialContext(contextWithIdentity(ctx, identity), credentialContextForIdentity(identity))
+}
+
 func refsValue(refs ...artifacts.MessageRef) string { return artifacts.EncodeMessageRefs(refs) }
 
 // TestAdmitMessageArtifacts pins the admission step: only well-formed
@@ -77,7 +84,7 @@ func TestAdmitMessageArtifacts(t *testing.T) {
 	srv, s, project, sender, _, _, _, _ := paritySetup(t)
 	st, _ := enableArtifactsForTest(t, srv)
 	ident := tokenBackedSender(t, s, sender)
-	ctx := contextWithIdentity(context.Background(), ident)
+	ctx := requestAuthCtx(context.Background(), ident)
 
 	own := seedMessageArtifact(t, st, project.ID, artifacts.PrincipalKindAgent, sender.ID, "Mine")
 	elsewhere := seedMessageArtifact(t, st, tid("msgart-other-project"), artifacts.PrincipalKindUser, tid("msgart-stranger"), "Not yours")
@@ -93,40 +100,51 @@ func TestAdmitMessageArtifacts(t *testing.T) {
 		before[k] = v
 	}
 
-	out, admitted, dropped := srv.admitMessageArtifacts(ctx, md)
+	out, admitted, warning := srv.admitMessageArtifacts(ctx, md)
 	assert.Equal(t, before, md, "input metadata must not be mutated")
 	assert.Equal(t, []artifacts.MessageRef{{ArtifactID: own, Seq: 1}}, admitted)
-	assert.Equal(t, 3, dropped, "unreadable, missing and malformed refs are all dropped")
+	assert.Equal(t, artifactRefsWarning(3), warning, "unreadable, missing and malformed refs are all dropped")
 	assert.Equal(t, refsValue(artifacts.MessageRef{ArtifactID: own, Seq: 1}), out[artifacts.MessageMetadataKey])
 	assert.Equal(t, "me", out["keep"])
 	assert.NotContains(t, out, messaging.MetaBodyOffloaded)
 
-	// The warning is the same text whatever the reason.
-	assert.Equal(t, artifactRefsWarning(1), artifactRefsWarning(1))
-	assert.NotContains(t, artifactRefsWarning(3), elsewhere)
+	// The warning names no reference and no reason.
+	assert.NotContains(t, warning, elsewhere)
+	assert.NotContains(t, warning, missing)
 	assert.Empty(t, artifactRefsWarning(0))
 
 	// Nothing admitted: the key is absent, not empty.
-	out, admitted, dropped = srv.admitMessageArtifacts(ctx, map[string]string{artifacts.MessageMetadataKey: refsValue(artifacts.MessageRef{ArtifactID: elsewhere})})
+	out, admitted, warning = srv.admitMessageArtifacts(ctx, map[string]string{artifacts.MessageMetadataKey: refsValue(artifacts.MessageRef{ArtifactID: elsewhere})})
 	assert.Empty(t, admitted)
-	assert.Equal(t, 1, dropped)
+	assert.Equal(t, artifactRefsWarning(1), warning)
 	assert.NotContains(t, out, artifacts.MessageMetadataKey)
 
 	// A sender identity the artifact service does not serve (no token id,
 	// as for in-process identities) admits nothing, even for its own artifact.
-	inProc := contextWithIdentity(context.Background(), agentCtxIdentity(sender))
-	_, admitted, dropped = srv.admitMessageArtifacts(inProc, map[string]string{artifacts.MessageMetadataKey: refsValue(artifacts.MessageRef{ArtifactID: own})})
+	inProc := requestAuthCtx(context.Background(), agentCtxIdentity(sender))
+	_, admitted, warning = srv.admitMessageArtifacts(inProc, map[string]string{artifacts.MessageMetadataKey: refsValue(artifacts.MessageRef{ArtifactID: own})})
 	assert.Empty(t, admitted)
-	assert.Equal(t, 1, dropped)
+	assert.Equal(t, artifactRefsWarning(1), warning)
 
-	// Feature off: nothing admitted.
+	// A context the hub built in process (identity only, no credential
+	// context from the authentication middleware) resolves nothing, even
+	// for a token-backed identity that owns the artifact.
+	identityOnly := contextWithIdentity(context.Background(), ident)
+	_, admitted, warning = srv.admitMessageArtifacts(identityOnly, map[string]string{artifacts.MessageMetadataKey: refsValue(artifacts.MessageRef{ArtifactID: own})})
+	assert.Empty(t, admitted)
+	assert.Equal(t, artifactRefsWarning(1), warning)
+	views := srv.resolveArtifactRefs(identityOnly, []artifacts.MessageRef{{ArtifactID: own}})
+	assert.Equal(t, []artifacts.RefView{{Ref: artifacts.FormatRef(own, 0), ID: own}}, views)
+
+	// Feature off: nothing admitted, and the warning says the feature is off.
 	reg, err := experiments.NewRegistry(experiments.Default().All(), nil)
 	require.NoError(t, err)
 	srv.experiments = reg
 	require.False(t, srv.experimentEnabled(experiments.Artifacts))
-	out, admitted, dropped = srv.admitMessageArtifacts(ctx, map[string]string{artifacts.MessageMetadataKey: refsValue(artifacts.MessageRef{ArtifactID: own})})
+	out, admitted, warning = srv.admitMessageArtifacts(ctx, map[string]string{artifacts.MessageMetadataKey: refsValue(artifacts.MessageRef{ArtifactID: own})})
 	assert.Empty(t, admitted)
-	assert.Equal(t, 1, dropped)
+	assert.Equal(t, artifactRefsDisabled(1), warning)
+	assert.Contains(t, warning, "not enabled on this hub")
 	assert.NotContains(t, out, artifacts.MessageMetadataKey)
 }
 
@@ -166,7 +184,7 @@ func TestMessageArtifacts_AgentDMDeliveryAndRecord(t *testing.T) {
 	require.NoError(t, err)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/projects/"+target.ProjectID+"/agents/"+target.ID+"/message", bytes.NewReader(reqBody))
 	req.Header.Set("Content-Type", "application/json")
-	req = req.WithContext(contextWithIdentity(req.Context(), ident))
+	req = req.WithContext(requestAuthCtx(req.Context(), ident))
 	rr := httptest.NewRecorder()
 	srv.handleAgentMessage(rr, req, target.ID)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
@@ -218,8 +236,8 @@ func TestMessageArtifacts_ViewsAreReadCheckedPerViewer(t *testing.T) {
 	require.NoError(t, st.AddMessageRefs(ctx, "msg-1", []artifacts.MessageRef{{ArtifactID: id, Seq: 1}, {ArtifactID: missing}}))
 	require.NoError(t, st.AddMessageRefs(ctx, "msg-2", []artifacts.MessageRef{{ArtifactID: id}}))
 
-	ownerCtx := contextWithIdentity(ctx, NewAuthenticatedUser(owner.ID, owner.Email, owner.DisplayName, "member", "web"))
-	strangerCtx := contextWithIdentity(ctx, NewAuthenticatedUser(tid("msgart-stranger"), "s@test.example", "S", "member", "web"))
+	ownerCtx := requestAuthCtx(ctx, NewAuthenticatedUser(owner.ID, owner.Email, owner.DisplayName, "member", "web"))
+	strangerCtx := requestAuthCtx(ctx, NewAuthenticatedUser(tid("msgart-stranger"), "s@test.example", "S", "member", "web"))
 
 	views := srv.messageArtifactViews(ownerCtx, []string{"msg-1", "msg-2", "msg-none"})
 	require.Len(t, views, 2)
@@ -248,6 +266,16 @@ func TestMessageArtifacts_ViewsAreReadCheckedPerViewer(t *testing.T) {
 		}
 	}
 
+	// An in-process user identity (no credential context) sees no titles,
+	// even as the owner.
+	inProcOwner := contextWithIdentity(ctx, NewAuthenticatedUser(owner.ID, owner.Email, owner.DisplayName, "member", "dispatch"))
+	for _, list := range srv.messageArtifactViews(inProcOwner, []string{"msg-1", "msg-2"}) {
+		for _, v := range list {
+			assert.False(t, v.Available, "%+v", v)
+			assert.Empty(t, v.Title)
+		}
+	}
+
 	// Feature off: no views at all.
 	reg, err := experiments.NewRegistry(experiments.Default().All(), nil)
 	require.NoError(t, err)
@@ -263,7 +291,7 @@ func TestMessageArtifacts_UnreadableIsByteIdenticalToMissing(t *testing.T) {
 	srv, s, _, sender, _, _, _, _ := paritySetup(t)
 	st, _ := enableArtifactsForTest(t, srv)
 	ident := tokenBackedSender(t, s, sender)
-	senderCtx := contextWithIdentity(context.Background(), ident)
+	senderCtx := requestAuthCtx(context.Background(), ident)
 
 	unreadable := seedMessageArtifact(t, st, tid("msgart-other-project"), artifacts.PrincipalKindUser, tid("msgart-stranger"), "Secret title")
 	missing := uuid.NewString()
@@ -284,13 +312,13 @@ func TestMessageArtifacts_UnreadableIsByteIdenticalToMissing(t *testing.T) {
 		assert.NotContains(t, string(u), "Secret title")
 	}
 
-	// Send-time admission: same metadata, same dropped count, same warning.
-	outU, admU, dropU := srv.admitMessageArtifacts(senderCtx, map[string]string{"k": "v", artifacts.MessageMetadataKey: refsValue(artifacts.MessageRef{ArtifactID: unreadable})})
-	outM, admM, dropM := srv.admitMessageArtifacts(senderCtx, map[string]string{"k": "v", artifacts.MessageMetadataKey: refsValue(artifacts.MessageRef{ArtifactID: missing})})
+	// Send-time admission: same metadata, same admitted refs, same warning.
+	outU, admU, warnU := srv.admitMessageArtifacts(senderCtx, map[string]string{"k": "v", artifacts.MessageMetadataKey: refsValue(artifacts.MessageRef{ArtifactID: unreadable})})
+	outM, admM, warnM := srv.admitMessageArtifacts(senderCtx, map[string]string{"k": "v", artifacts.MessageMetadataKey: refsValue(artifacts.MessageRef{ArtifactID: missing})})
 	assert.Equal(t, outM, outU)
 	assert.Equal(t, admM, admU)
-	assert.Equal(t, dropM, dropU)
-	assert.Equal(t, artifactRefsWarning(dropM), artifactRefsWarning(dropU))
+	assert.Equal(t, warnM, warnU)
+	assert.NotEmpty(t, warnU)
 }
 
 // TestSanitizeCrossProjectObserver_DropsArtifactRefs: a cross-project

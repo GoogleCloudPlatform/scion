@@ -260,3 +260,74 @@ func TestArtifactRefsRecordedOnlyFromAdmittedRefs(t *testing.T) {
 		}
 	}
 }
+
+// TestArtifactRefsAdmittedAfterAuthzInChatV2: sendAgentRouted admits
+// references only after its message authorization, so a denied send does
+// no artifact lookups.
+func TestArtifactRefsAdmittedAfterAuthzInChatV2(t *testing.T) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, filepath.Join(findHubDir(t), "handlers_chat_v2.go"), nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var authz, admit []token.Pos
+	for _, decl := range f.Decls {
+		fd, ok := decl.(*ast.FuncDecl)
+		if !ok || fd.Name.Name != "sendAgentRouted" || fd.Body == nil {
+			continue
+		}
+		ast.Inspect(fd.Body, func(n ast.Node) bool {
+			if call, ok := n.(*ast.CallExpr); ok {
+				switch extractCallSymbol(call) {
+				case "authorizeAgentMessage":
+					authz = append(authz, call.Pos())
+				case "admitMessageArtifacts":
+					admit = append(admit, call.Pos())
+				}
+			}
+			return true
+		})
+	}
+	if len(authz) == 0 || len(admit) != 1 {
+		t.Fatalf("sendAgentRouted: found %d authorizeAgentMessage and %d admitMessageArtifacts calls; want >=1 and exactly 1", len(authz), len(admit))
+	}
+	if admit[0] < authz[0] {
+		t.Errorf("sendAgentRouted admits artifact references (line %d) before authorizing the send (line %d)",
+			fset.Position(admit[0]).Line, fset.Position(authz[0]).Line)
+	}
+}
+
+// TestArtifactRefResolverReachableOnlyFromRequestContexts pins the
+// in-process path to the artifact service that message references add:
+// artifactRefResolver is called only by resolveArtifactRefs, which resolves
+// only when the authentication middleware's credential context binds ctx's
+// current identity; and that credential context is recorded only by the
+// authentication middleware files, so in-process code cannot satisfy the
+// check.
+func TestArtifactRefResolverReachableOnlyFromRequestContexts(t *testing.T) {
+	got := hubCallSites(t, "artifactRefResolver", "contextWithCredentialContext")
+
+	wantResolver := map[stripSiteKey]bool{{"message_artifacts.go", "resolveArtifactRefs"}: true}
+	if len(got["artifactRefResolver"]) == 0 {
+		t.Fatal("found no artifactRefResolver call sites: scanner broken")
+	}
+	for key := range got["artifactRefResolver"] {
+		if !wantResolver[key] {
+			t.Errorf("artifactRefResolver called from %s:%s; only resolveArtifactRefs may build the in-process artifact service", key.file, key.function)
+		}
+	}
+
+	authFiles := map[string]bool{"auth.go": true, "auth_external_bearer.go": true, "brokerauth.go": true}
+	if len(got["contextWithCredentialContext"]) == 0 {
+		t.Fatal("found no contextWithCredentialContext call sites: scanner broken")
+	}
+	for key := range got["contextWithCredentialContext"] {
+		if !authFiles[key.file] {
+			t.Errorf("contextWithCredentialContext called from %s:%s; only authentication middleware may record a request credential context (resolveArtifactRefs relies on it)", key.file, key.function)
+		}
+	}
+
+	if calls, ok := funcCalls(t, stripSiteKey{"message_artifacts.go", "resolveArtifactRefs"}, "requestCredentialBindsIdentity"); !ok || !calls {
+		t.Error("resolveArtifactRefs must check that the request credential binds the current identity before resolving")
+	}
+}

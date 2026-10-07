@@ -816,13 +816,13 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 	delete(msg.Metadata, attachmentsMetadataKey) // strip internal transport key
 
 	// Artifact references are recorded only when the hub's admission step
-	// set them on this in-process message; any other value is removed.
-	if msg.ArtifactRefsAdmitted {
-		if refs, _ := artifacts.ParseMessageRefs(msg.Metadata[artifacts.MessageMetadataKey]); len(refs) > 0 && p.recordArtifactRefs != nil {
+	// set them on this in-process message. Any other value is ignored: it
+	// is never recorded, and nothing below reads it. msg is shared with the
+	// bus's other subscribers, so it is not modified here.
+	if msg.ArtifactRefsAdmitted && p.recordArtifactRefs != nil {
+		if refs, _ := artifacts.ParseMessageRefs(msg.Metadata[artifacts.MessageMetadataKey]); len(refs) > 0 {
 			p.recordArtifactRefs(ctx, storeMsg.ID, refs)
 		}
-	} else if _, ok := msg.Metadata[artifacts.MessageMetadataKey]; ok {
-		msg.Metadata = messaging.StripReservedMetadata(msg.Metadata)
 	}
 
 	// Stamp the DM watermark with the store-assigned message ID. The web

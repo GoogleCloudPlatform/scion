@@ -533,9 +533,52 @@ func GetCredentialContextFromContext(ctx context.Context) CredentialContext {
 	return credential
 }
 
+// credentialSubjectContextKey records the identity that was current in the
+// context when its credential context was recorded.
+type credentialSubjectContextKey struct{}
+
 // contextWithCredentialContext records credential caveats for request-based authorization.
+// It also records the identity the context holds at that moment (the
+// authentication middleware sets the identity first), so
+// requestCredentialBindsIdentity can tell whether the identity was later
+// replaced.
 func contextWithCredentialContext(ctx context.Context, credential CredentialContext) context.Context {
-	return context.WithValue(ctx, credentialContextKey{}, credential)
+	ctx = context.WithValue(ctx, credentialContextKey{}, credential)
+	return context.WithValue(ctx, credentialSubjectContextKey{}, ctx.Value(identityContextKey{}))
+}
+
+// requestCredentialBindsIdentity reports whether ctx's current identity is
+// the very identity the authentication middleware derived from the request's
+// credentials: a credential context is present, and the identity recorded
+// with it is the same object as the identity ctx holds now. A context that
+// holds only an identity, or whose identity was replaced after
+// authentication (contextWithIdentity on a request context), does not bind,
+// even when the replacement names the same principal.
+func requestCredentialBindsIdentity(ctx context.Context) bool {
+	if GetCredentialContextFromContext(ctx).Kind == "" {
+		return false
+	}
+	subject, ok := ctx.Value(credentialSubjectContextKey{}).(Identity)
+	if !ok || isNilIdentity(subject) {
+		return false
+	}
+	current, ok := ctx.Value(identityContextKey{}).(Identity)
+	if !ok || isNilIdentity(current) {
+		return false
+	}
+	return sameIdentityObject(subject, current)
+}
+
+// sameIdentityObject compares two identities by interface equality (the
+// same pointer for every pointer identity type), failing closed for a value
+// type that cannot be compared.
+func sameIdentityObject(a, b Identity) (same bool) {
+	defer func() {
+		if recover() != nil {
+			same = false
+		}
+	}()
+	return a == b
 }
 
 // BrokerOnBehalfOf is the hub-set marker proving that a broker-authenticated

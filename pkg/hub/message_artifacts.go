@@ -36,8 +36,14 @@ import (
 // resolveArtifactRefs under that reader's own credential.
 
 // artifactRefsDroppedWarning is the warning a sender gets when references
-// were not attached. It says the same thing whatever the reason.
+// were not attached on a hub where references are enabled. It says the same
+// thing whatever the reason, so a reference to an artifact the sender cannot
+// read gets the same warning as one to an artifact that does not exist.
 const artifactRefsDroppedWarning = "%d artifact reference(s) not attached: each must be a scion://artifact/<id>[@<seq>] reference you can read, at most %d per message"
+
+// artifactRefsDisabledWarning is the warning when references are not
+// enabled on the hub at all. It depends on no reference.
+const artifactRefsDisabledWarning = "artifact references are not enabled on this hub: %d reference(s) not attached"
 
 // artifactRefsWarning returns the warning for dropped references, or "".
 func artifactRefsWarning(dropped int) string {
@@ -47,6 +53,15 @@ func artifactRefsWarning(dropped int) string {
 	return fmt.Sprintf(artifactRefsDroppedWarning, dropped, artifacts.MaxMessageRefs)
 }
 
+// artifactRefsDisabled returns the warning for references sent while the
+// feature is off, or "".
+func artifactRefsDisabled(dropped int) string {
+	if dropped <= 0 {
+		return ""
+	}
+	return fmt.Sprintf(artifactRefsDisabledWarning, dropped)
+}
+
 // artifactRefsActive reports whether messages may carry artifact references
 // on this hub: the hub.artifacts experiment is on, the artifacts settings
 // section is enabled and an artifact store is installed.
@@ -54,24 +69,24 @@ func (s *Server) artifactRefsActive() bool {
 	return s.experimentEnabled(experiments.Artifacts) && s.artifactsConfig().Enabled && s.ArtifactStore() != nil
 }
 
-// artifactRefResolver returns the artifact service over this server's host
-// and backend, for resolving references outside the artifact routes.
-func (s *Server) artifactRefResolver() *artifacts.Service {
-	svc := artifacts.NewService(newArtifactHost(s))
-	svc.SetBackendProvider(s.artifactBackend)
-	return svc
-}
-
 // resolveArtifactRefs resolves refs for the caller of ctx with the artifact
 // service's own read check (the one GET /api/v1/artifacts/{id} applies).
 // It is the only place a reference's title, version or owner is looked up,
-// for send-time admission and for every web view. With references inactive
-// every view is unavailable.
+// for send-time admission and for every web view.
+//
+// It resolves only for a request-authenticated caller
+// (requestCredentialBindsIdentity): ctx's identity must be the one the
+// authentication middleware derived from the request's credentials and
+// recorded its credential context for. A context the hub built in process,
+// holding only an identity, or a request context whose identity was
+// replaced, resolves nothing, so artifacts.Host keeps seeing only
+// request-derived identities. With references inactive every view is
+// unavailable too.
 func (s *Server) resolveArtifactRefs(ctx context.Context, refs []artifacts.MessageRef) []artifacts.RefView {
 	if len(refs) == 0 {
 		return nil
 	}
-	if !s.artifactRefsActive() {
+	if !s.artifactRefsActive() || !requestCredentialBindsIdentity(ctx) {
 		out := make([]artifacts.RefView, len(refs))
 		for i, r := range refs {
 			out[i] = artifacts.RefView{Ref: r.String(), ID: r.ArtifactID, Seq: r.Seq}
@@ -88,17 +103,18 @@ func (s *Server) resolveArtifactRefs(ctx context.Context, refs []artifacts.Messa
 // within artifacts.MaxMessageRefs, and readable by the caller of ctx, which
 // must be the sender's own request context. Admitted references are
 // re-encoded canonically under the key; the key is absent when none are
-// admitted. dropped counts the references that were not admitted, for
-// artifactRefsWarning. md is never mutated.
-func (s *Server) admitMessageArtifacts(ctx context.Context, md map[string]string) (out map[string]string, admitted []artifacts.MessageRef, dropped int) {
+// admitted. warning is "" when every reference was admitted, otherwise the
+// sender-facing warning (artifactRefsWarning, or artifactRefsDisabled when
+// references are off on this hub). md is never mutated.
+func (s *Server) admitMessageArtifacts(ctx context.Context, md map[string]string) (out map[string]string, admitted []artifacts.MessageRef, warning string) {
 	raw := md[artifacts.MessageMetadataKey]
 	out = messaging.StripReservedMetadata(md)
 	if raw == "" {
-		return out, nil, 0
+		return out, nil, ""
 	}
 	refs, dropped := artifacts.ParseMessageRefs(raw)
 	if !s.artifactRefsActive() {
-		return out, nil, dropped + len(refs)
+		return out, nil, artifactRefsDisabled(dropped + len(refs))
 	}
 	for i, v := range s.resolveArtifactRefs(ctx, refs) {
 		if v.Available {
@@ -118,7 +134,7 @@ func (s *Server) admitMessageArtifacts(ctx context.Context, md map[string]string
 	if dropped > 0 {
 		slog.InfoContext(ctx, "message artifact references not attached", "dropped", dropped, "admitted", len(admitted))
 	}
-	return out, admitted, dropped
+	return out, admitted, artifactRefsWarning(dropped)
 }
 
 // recordMessageArtifacts persists admitted references for a stored
@@ -147,8 +163,9 @@ type chatArtifactRef struct {
 
 // chatArtifactViews resolves refs for the caller of ctx and names the owner
 // of every available artifact.
-func (s *Server) chatArtifactViews(ctx context.Context, refs []artifacts.MessageRef, owners map[string]string) []chatArtifactRef {
+func (s *Server) chatArtifactViews(ctx context.Context, refs []artifacts.MessageRef) []chatArtifactRef {
 	views := s.resolveArtifactRefs(ctx, refs)
+	owners := map[string]string{}
 	out := make([]chatArtifactRef, len(views))
 	for i, v := range views {
 		out[i] = chatArtifactRef{RefView: v}
@@ -179,7 +196,8 @@ func (s *Server) messageArtifactViews(ctx context.Context, messageIDs []string) 
 	if len(recorded) == 0 {
 		return nil
 	}
-	// Resolve each distinct reference once, however many messages carry it.
+	// Resolve each distinct reference once, however many messages carry it;
+	// ResolveRefs then reads and checks each artifact once across versions.
 	var unique []artifacts.MessageRef
 	index := make(map[artifacts.MessageRef]int)
 	for _, refs := range recorded {
@@ -190,7 +208,7 @@ func (s *Server) messageArtifactViews(ctx context.Context, messageIDs []string) 
 			}
 		}
 	}
-	views := s.chatArtifactViews(ctx, unique, map[string]string{})
+	views := s.chatArtifactViews(ctx, unique)
 	out := make(map[string][]chatArtifactRef, len(recorded))
 	for msgID, refs := range recorded {
 		list := make([]chatArtifactRef, len(refs))
