@@ -1513,9 +1513,18 @@ func TestScheduledSend_HeavySendersDoNotStarveOthers(t *testing.T) {
 	now := time.Now()
 	first := make(chan int, 1)
 	go func() { first <- f.srv.sweepScheduledMessages(ctx, now) }()
+	// Sent, and carol's worker has finished (it is out of inFlight), so the
+	// next sweep can give her a slot.
 	require.Eventually(t, func() bool {
-		return f.row(t, carol, c1.ID).Status == ScheduledMessageSent
-	}, 5*time.Second, 20*time.Millisecond, "carol's message is listed and sent despite 52 older ones")
+		if f.row(t, carol, c1.ID).Status != ScheduledMessageSent {
+			return false
+		}
+		rt := f.srv.scheduledRuntime()
+		rt.mu.Lock()
+		defer rt.mu.Unlock()
+		_, busy := rt.inFlight[carol.ID]
+		return !busy
+	}, 5*time.Second, 5*time.Millisecond, "carol's message is listed and sent despite 52 older ones")
 
 	// A later sweep, while bob and alice are still blocked. carol-2 falls
 	// due after the first sweep's "now", so only the later sweep sees it.
@@ -1524,8 +1533,9 @@ func TestScheduledSend_HeavySendersDoNotStarveOthers(t *testing.T) {
 	assert.Equal(t, ScheduledMessageSent, f.row(t, carol, c2.ID).Status)
 
 	close(disp.release)
-	// The first sweep's workers yield after scheduledSendYieldAfter each.
-	assert.Equal(t, 2*scheduledSendYieldAfter+1, <-first)
+	// No sender waited for a worker, so bob's and alice's workers did not
+	// yield: the first sweep delivers all 52 plus carol's first.
+	assert.Equal(t, 53, <-first)
 	f.srv.waitScheduledDeliveries()
 	for i := 0; i < 20; i++ {
 		if f.srv.sweepScheduledMessages(ctx, now.Add(2*time.Second)) == 0 {
@@ -1848,4 +1858,123 @@ func testOneSenderTwoReplicas(t *testing.T, a, b ScheduledMessageStore, sender s
 func TestScheduledSend_TwoReplicas_OneSenderManyRows(t *testing.T) {
 	sms, _ := openScheduledStorePair(t)
 	testOneSenderTwoReplicas(t, sms[0], sms[1], "one-sender", 30)
+}
+
+// ---------------------------------------------------------------------------
+// Review round 6
+// ---------------------------------------------------------------------------
+
+// With free workers and no other sender waiting, a worker does not yield:
+// one sender's 12 due messages all go out in one sweep.
+func TestScheduledSend_NoYieldWithoutContention(t *testing.T) {
+	f := newScheduledSendFixture(t)
+	ctx := context.Background()
+	base := time.Now().Add(-time.Hour)
+	for i := 0; i < 12; i++ {
+		m := newTestScheduledRow(fmt.Sprintf("burst-%d", i), f.bob.ID, base.Add(time.Duration(i)*time.Second))
+		m.ConversationKey = f.topicID
+		_, _, err := f.sms.CreateScheduledMessage(ctx, m)
+		require.NoError(t, err)
+	}
+	assert.Equal(t, 12, f.srv.sweepScheduledMessages(ctx, time.Now()))
+	n, err := f.sms.CountActiveScheduledMessages(ctx, f.bob.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 0, n)
+	assert.Len(t, f.topicMessages(t), 12)
+}
+
+// A yielded mark is dropped once the sender has nothing due (the due list
+// is complete), and kept while the list may have been cut off at the batch
+// limit.
+func TestScheduledSend_YieldedMarkPruned(t *testing.T) {
+	rt := &scheduledSendRuntime{inFlight: map[string]struct{}{}, yielded: map[string]struct{}{}}
+	rt.yielded["gone"] = struct{}{}
+	rt.yielded["still-due"] = struct{}{}
+	due := []ScheduledChatMessage{{ID: "1", SenderUserID: "still-due"}, {ID: "2", SenderUserID: "other"}}
+
+	out := rt.yieldedLast(due)
+	assert.Equal(t, []string{"2", "1"}, []string{out[0].ID, out[1].ID}, "yielded sender listed last")
+	assert.NotContains(t, rt.yielded, "gone")
+	assert.Contains(t, rt.yielded, "still-due")
+
+	rt.yielded["gone"] = struct{}{}
+	full := make([]ScheduledChatMessage, scheduledSendBatch)
+	for i := range full {
+		full[i] = ScheduledChatMessage{ID: fmt.Sprint(i), SenderUserID: fmt.Sprintf("s%d", i)}
+	}
+	rt.yieldedLast(full)
+	assert.Contains(t, rt.yielded, "gone", "kept when the list may be cut off")
+}
+
+// Two hub servers sharing one SQLite database run the real sweeper on one
+// sender's due messages at the same time: every message is delivered
+// exactly once.
+func TestScheduledSend_TwoServersOneSQLiteFile_OneSenderManyRows(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	webchatDSN := "file:" + dir + "/webchat.db?_busy_timeout=10000&_journal_mode=WAL"
+
+	type replica struct {
+		srv  *Server
+		st   store.Store
+		wcs  WebChatStore
+		db   *sql.DB
+		disp *brokerMockDispatcher
+	}
+	newReplica := func() replica {
+		st, err := newTestStore(t, dir+"/hub.db")
+		require.NoError(t, err)
+		srv, st := testServerWithStore(t, st)
+		db, err := sql.Open("sqlite3", webchatDSN)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = db.Close() })
+		wcs := NewWebChatStore(db, "sqlite3")
+		require.NoError(t, wcs.Init())
+		srv.SetWebChatStore(wcs)
+		d := &brokerMockDispatcher{}
+		srv.SetDispatcher(d)
+		setScheduledSendExperiment(t, srv, true)
+		return replica{srv: srv, st: st, wcs: wcs, db: db, disp: d}
+	}
+	a, b := newReplica(), newReplica()
+
+	_, bob, project := setupDemoPolicyOn(t, a.srv, a.st)
+	addProjectMemberWithRole(t, a.st, project, bob.ID, store.GroupMemberRoleMember)
+	agent := &store.Agent{ID: tid("two-srv-agent"), ProjectID: project.ID, Name: "two-srv-agent", Slug: "two-srv-agent",
+		Phase: "running", OwnerID: bob.ID, CreatedBy: bob.ID}
+	require.NoError(t, a.st.CreateAgent(ctx, agent))
+	topicID := tid("two-srv-topic")
+	require.NoError(t, a.wcs.CreateTopic(ctx, WebChatTopic{ID: topicID, ProjectID: project.ID, Name: "two-srv",
+		CreatedBy: bob.ID, CreatedAt: time.Now().UTC(), DefaultAgent: agent.Slug}))
+	setTopicConversationID(t, a.db, a.st, topicID, project.ID)
+
+	const n = 20
+	sms := scheduledMessageStoreFrom(a.wcs)
+	base := time.Now().Add(-time.Hour)
+	for i := 0; i < n; i++ {
+		m := newTestScheduledRow(fmt.Sprintf("two-srv-%d", i), bob.ID, base.Add(time.Duration(i)*time.Second))
+		m.ConversationKey = topicID
+		_, _, err := sms.CreateScheduledMessage(ctx, m)
+		require.NoError(t, err)
+	}
+
+	now := time.Now()
+	results := make(chan int, 2)
+	start := make(chan struct{})
+	for _, r := range []replica{a, b} {
+		go func(srv *Server) {
+			<-start
+			results <- srv.sweepScheduledMessages(ctx, now)
+		}(r.srv)
+	}
+	close(start)
+	assert.Equal(t, n, <-results+<-results, "each message claimed by exactly one server")
+
+	msgs, err := a.st.ListMessages(ctx, store.MessageFilter{ThreadID: topicID}, store.ListOptions{Limit: 100})
+	require.NoError(t, err)
+	assert.Len(t, msgs.Items, n, "one delivered message per scheduled message")
+	assert.Equal(t, n, len(a.disp.getMessages())+len(b.disp.getMessages()), "one dispatch per scheduled message")
+	active, err := sms.CountActiveScheduledMessages(ctx, bob.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 0, active)
 }

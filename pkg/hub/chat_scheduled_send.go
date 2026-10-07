@@ -482,10 +482,11 @@ func (s *Server) handleScheduledCancel(w http.ResponseWriter, r *http.Request, k
 const scheduledSendWorkers = 4
 
 // scheduledSendYieldAfter is how many messages a worker delivers for one
-// sender before it gives up its slot when that sender has more due. A
-// sender that yielded is listed after the others on the next sweep, so
-// more senders with long batches than there are workers take turns, and a
-// sender with one message gets a slot within a sweep or two.
+// sender before it gives up its slot when that sender has more due and
+// another sender is waiting for a worker. A sender that yielded is listed
+// after the others on the next sweep, so more senders with long batches
+// than there are workers take turns, and a sender with one message gets a
+// slot within a sweep or two. Without contention a worker keeps going.
 const scheduledSendYieldAfter = 5
 
 // scheduledStopGrace is how long stopping the sweeper lets deliveries in
@@ -506,8 +507,13 @@ type scheduledSendRuntime struct {
 	inFlight map[string]struct{}
 	// yielded holds the senders whose worker gave up its slot with
 	// messages still due (scheduledSendYieldAfter); they are listed last
-	// until they get a slot again.
+	// until they get a slot again or have nothing due.
 	yielded map[string]struct{}
+	// waiting is set when a sweep skipped a sender because all workers
+	// were busy, and reset at the start of each sweep. Workers yield only
+	// while it is set, so a sender with many due messages and no one
+	// waiting keeps its worker.
+	waiting bool
 	// workers is a semaphore of scheduledSendWorkers slots.
 	workers chan struct{}
 	// running tracks the ticker loop and every sweep and delivery.
@@ -654,6 +660,9 @@ func (s *Server) sweepScheduledMessages(ctx context.Context, now time.Time) int 
 
 	rt := s.scheduledRuntime()
 	due = rt.yieldedLast(due)
+	rt.mu.Lock()
+	rt.waiting = false
+	rt.mu.Unlock()
 	var claimed atomic.Int64
 	var batch sync.WaitGroup
 	for i := range due {
@@ -677,6 +686,7 @@ func (s *Server) sweepScheduledMessages(ctx context.Context, now time.Time) int 
 				rt.running.Add(1)
 			default:
 				busy = true // all workers busy: try again next tick
+				rt.waiting = true
 			}
 		}
 		rt.mu.Unlock()
@@ -700,12 +710,25 @@ func (s *Server) sweepScheduledMessages(ctx context.Context, now time.Time) int 
 }
 
 // yieldedLast returns due with the senders that recently yielded their
-// worker moved after the others, keeping the order within each group.
+// worker moved after the others, keeping the order within each group. When
+// due is the complete list (shorter than scheduledSendBatch), senders not
+// in it have nothing due and their yielded mark is dropped.
 func (rt *scheduledSendRuntime) yieldedLast(due []ScheduledChatMessage) []ScheduledChatMessage {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	if len(rt.yielded) == 0 {
 		return due
+	}
+	if len(due) < scheduledSendBatch {
+		present := make(map[string]bool, len(due))
+		for _, row := range due {
+			present[row.SenderUserID] = true
+		}
+		for sender := range rt.yielded {
+			if !present[sender] {
+				delete(rt.yielded, sender)
+			}
+		}
 	}
 	out := make([]ScheduledChatMessage, 0, len(due))
 	var later []ScheduledChatMessage
@@ -747,9 +770,14 @@ func (s *Server) deliverSenderDue(ctx context.Context, rt *scheduledSendRuntime,
 		}
 		if next != nil && claimed >= scheduledSendYieldAfter {
 			rt.mu.Lock()
-			rt.yielded[next.SenderUserID] = struct{}{}
+			yield := rt.waiting // only when another sender is waiting for a worker
+			if yield {
+				rt.yielded[next.SenderUserID] = struct{}{}
+			}
 			rt.mu.Unlock()
-			return claimed
+			if yield {
+				return claimed
+			}
 		}
 		row = next
 	}
