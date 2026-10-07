@@ -128,23 +128,52 @@ func k8sUIDPrecondition(uid types.UID) *metav1.Preconditions {
 	return &metav1.Preconditions{UID: &uid}
 }
 
-// deleteAgentSecretsBySelector deletes the per-agent Secrets
-// (scion-agent-<name>, scion-auth-<name>) and, in GKE mode, the
-// SecretProviderClass (scion-agent-<name>) that a list with selector
-// returns, each with a UID precondition from the list. Objects with other
-// names are ignored. A delete that fails with NotFound (already gone) or
-// Conflict (recreated since the list) leaves the object alone. Other
-// failures are passed to warn. Returns how many objects were deleted.
+// perRunFilter decides whether a per-run object (k8s_run_names.go) that a
+// selector returned may be deleted. kind is "Secret" or
+// "SecretProviderClass".
+type perRunFilter func(kind string, obj metav1.Object) bool
+
+// deleteAgentSecretsBySelector deletes the per-agent Secrets and, in GKE
+// mode, the SecretProviderClass of pod agentName that a list with selector
+// returns, each with a UID precondition from the list:
+//   - the fixed names (scion-agent-<name>, scion-auth-<name>, and the SPC
+//     scion-agent-<name>), whatever their labels; and
+//   - the per-run names of the run each object is labelled with
+//     (k8sAgentObjectNames), when perRun is nil or accepts the object. A
+//     per-run object with no run label, or whose name is not its own
+//     run's name for this pod, is ignored.
+//
+// Objects with other names are ignored. A delete that fails with NotFound
+// (already gone) or Conflict (recreated since the list) leaves the object
+// alone. Other failures are passed to warn. Returns how many objects were
+// deleted.
 //
 // Listing rather than reading by name keeps this within the
 // create/list/delete permissions the runtime already needs.
-func (r *KubernetesRuntime) deleteAgentSecretsBySelector(ctx context.Context, namespace, agentName, selector string, warn func(kind, name string, err error)) int {
+func (r *KubernetesRuntime) deleteAgentSecretsBySelector(ctx context.Context, namespace, agentName, selector string, perRun perRunFilter, warn func(kind, name string, err error)) int {
 	opts := metav1.ListOptions{LabelSelector: selector}
-	secretNames := map[string]bool{
-		agentSecretPrefix + agentName:     true,
-		agentAuthSecretPrefix + agentName: true,
+	fixed := k8sAgentObjectNames(agentName, "")
+	selected := func(kind string, obj metav1.Object) bool {
+		name := obj.GetName()
+		if kind == "Secret" && (name == fixed.Secret || name == fixed.Auth) {
+			return true
+		}
+		if kind == "SecretProviderClass" && name == fixed.SPC {
+			return true
+		}
+		objRun := obj.GetLabels()[api.LabelRunID]
+		if objRun == "" || !isPerRunObjectName(name) {
+			return false
+		}
+		own := k8sAgentObjectNames(agentName, objRun)
+		if kind == "Secret" && name != own.Secret && name != own.Auth {
+			return false
+		}
+		if kind == "SecretProviderClass" && name != own.SPC {
+			return false
+		}
+		return perRun == nil || perRun(kind, obj)
 	}
-	spcName := agentSecretPrefix + agentName
 	removed := 0
 	deleted := func(kind, name string, err error) {
 		switch {
@@ -160,8 +189,9 @@ func (r *KubernetesRuntime) deleteAgentSecretsBySelector(ctx context.Context, na
 	if list, err := secrets.List(ctx, opts); err != nil {
 		warn("Secret", "", err)
 	} else {
-		for _, s := range list.Items {
-			if !secretNames[s.Name] {
+		for i := range list.Items {
+			s := &list.Items[i]
+			if !selected("Secret", s) {
 				continue
 			}
 			deleted("Secret", s.Name, secrets.Delete(ctx, s.Name, metav1.DeleteOptions{
@@ -173,19 +203,39 @@ func (r *KubernetesRuntime) deleteAgentSecretsBySelector(ctx context.Context, na
 	if r.GKEMode {
 		spcs := r.Client.Dynamic().Resource(k8s.SecretProviderClassGVR).Namespace(namespace)
 		if list, err := spcs.List(ctx, opts); err != nil {
-			warn("SecretProviderClass", spcName, err)
+			warn("SecretProviderClass", "", err)
 		} else {
-			for _, spc := range list.Items {
-				if spc.GetName() != spcName {
+			for i := range list.Items {
+				spc := &list.Items[i]
+				if !selected("SecretProviderClass", spc) {
 					continue
 				}
-				deleted("SecretProviderClass", spcName, spcs.Delete(ctx, spcName, metav1.DeleteOptions{
+				deleted("SecretProviderClass", spc.GetName(), spcs.Delete(ctx, spc.GetName(), metav1.DeleteOptions{
 					Preconditions: k8sUIDPrecondition(spc.GetUID()),
 				}))
 			}
 		}
 	}
 	return removed
+}
+
+// staleOtherRunFilter returns the perRunFilter of a sweep on behalf of run
+// currentRun: it accepts a per-run object of another run only when it is
+// stale (staleRunObject), and logs each one it accepts. Never one of
+// currentRun.
+func (r *KubernetesRuntime) staleOtherRunFilter(currentRun string) perRunFilter {
+	return func(kind string, obj metav1.Object) bool {
+		objRun := obj.GetLabels()[api.LabelRunID]
+		if objRun == "" || objRun == currentRun || !r.staleRunObject(obj) {
+			return false
+		}
+		runtimeLog.Info("Removing a stale per-run object of another run",
+			"kind", kind, "name", obj.GetName(), "namespace", obj.GetNamespace(),
+			"object_run_id", objRun, "run_id", currentRun,
+			"created", obj.GetCreationTimestamp().UTC().Format(time.RFC3339),
+			"deadline_offset", obj.GetAnnotations()[annotationStartDeadlineOffset])
+		return true
+	}
 }
 
 // deleteRun is Delete for a ref that names a run. See the comment at the
@@ -216,7 +266,7 @@ func (r *KubernetesRuntime) deleteRun(ctx context.Context, namespace, podName, r
 	pods := r.Client.Clientset.CoreV1().Pods(namespace)
 	pod, err := pods.Get(ctx, podName, metav1.GetOptions{})
 	if k8serrors.IsNotFound(err) {
-		r.deleteAgentSecretsBySelector(ctx, namespace, podName, api.LabelRunID+"="+runID, warn)
+		r.deleteAgentSecretsBySelector(ctx, namespace, podName, api.LabelRunID+"="+runID, nil, warn)
 		return nil
 	}
 	if err != nil {
@@ -236,7 +286,7 @@ func (r *KubernetesRuntime) deleteRun(ctx context.Context, namespace, podName, r
 	if podRun == "" {
 		selector = legacyAgentObjectSelector(pod)
 	}
-	r.deleteAgentSecretsBySelector(ctx, namespace, podName, selector, warn)
+	r.deleteAgentSecretsBySelector(ctx, namespace, podName, selector, nil, warn)
 
 	// Immediate deletion, except an NFS-home pod, which is deleted with its
 	// grace period (podDeleteOptions), as on the name-based path.
@@ -335,8 +385,28 @@ func (r *KubernetesRuntime) preCleanForRun(ctx context.Context, namespace, podNa
 	}
 	// Every per-agent object Run creates carries scion.agent (see
 	// createAgentSecret); "!=" also selects objects with no run label.
+	//
+	// Fixed-name objects of another run (or of none) are deleted, as
+	// before: they share the names this start would otherwise use. A
+	// per-run object of another run is deleted only when it belongs to the
+	// previous pod's run (that pod is not live, or Run would have stopped
+	// above, and is removed below), or when it is stale (the sweep,
+	// staleOtherRunFilter). A per-run object of another run with no pod may
+	// belong to a start of that run still before its pod, and is left
+	// (ptone/scion#3101).
+	prevPodRun := ""
+	if pod != nil {
+		prevPodRun = pod.Labels[api.LabelRunID]
+	}
+	stale := r.staleOtherRunFilter(runID)
+	previousOrStale := func(kind string, obj metav1.Object) bool {
+		if objRun := obj.GetLabels()[api.LabelRunID]; prevPodRun != "" && objRun == prevPodRun {
+			return true
+		}
+		return stale(kind, obj)
+	}
 	deleteSecrets := func() {
-		r.deleteAgentSecretsBySelector(ctx, namespace, podName, "scion.agent,"+api.LabelRunID+"!="+runID, warn)
+		r.deleteAgentSecretsBySelector(ctx, namespace, podName, "scion.agent,"+api.LabelRunID+"!="+runID, previousOrStale, warn)
 	}
 
 	// An NFS-home start deletes the Secrets/SPC only after the previous pod
