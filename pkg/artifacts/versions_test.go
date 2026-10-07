@@ -681,3 +681,26 @@ func TestCreateWithKeyRace(t *testing.T) {
 		t.Errorf("raced create = %s v%d, want %s v2", got.Artifact.ID, got.Version.Seq, winner)
 	}
 }
+
+// TestKeyedAppendAsksPermitsOnce: a keyed publish that appends a version
+// asks the credential check once.
+func TestKeyedAppendAsksPermitsOnce(t *testing.T) {
+	f := newFixture(t, false)
+	files := bundle{"a.txt": []byte("a")}
+	req := files.manifest("a.txt")
+	req.Key = "k"
+	f.createPending(agentA, "/api/v1/artifacts", req)
+	f.host.calls = nil
+	if got := f.createPending(agentA, "/api/v1/artifacts", req); got.Version.Seq != 2 {
+		t.Fatalf("append made v%d", got.Version.Seq)
+	}
+	n := 0
+	for _, c := range f.host.calls {
+		if strings.HasPrefix(c, "permits ") {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("Permits asked %d times: %v", n, f.host.calls)
+	}
+}

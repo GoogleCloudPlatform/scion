@@ -119,7 +119,7 @@ func (s *Service) handleCreate(w http.ResponseWriter, r *http.Request) {
 	if key != "" {
 		existing, err := b.store.GetArtifactByKey(ctx, ScopeKindProject, scope, kind, ref, key)
 		if err == nil {
-			s.appendVersion(w, r, b, existing, req)
+			s.appendVersion(w, r, b, existing, req, &permitted)
 			return
 		}
 		if !errors.Is(err, ErrNotFound) {
@@ -145,7 +145,7 @@ func (s *Service) handleCreate(w http.ResponseWriter, r *http.Request) {
 		// Another publish took the key first: append to its artifact.
 		existing, lookErr := b.store.GetArtifactByKey(ctx, ScopeKindProject, scope, kind, ref, key)
 		if lookErr == nil {
-			s.appendVersion(w, r, b, existing, req)
+			s.appendVersion(w, r, b, existing, req, &permitted)
 			return
 		}
 		err = lookErr
@@ -175,16 +175,25 @@ func (s *Service) handleCreateVersion(w http.ResponseWriter, r *http.Request, id
 	if !validateManifest(w, req, b.currentLimits(r.Context())) {
 		return
 	}
-	s.appendVersion(w, r, b, a, req)
+	s.appendVersion(w, r, b, a, req, nil)
 }
 
 // appendVersion adds a pending version to a, which the caller may write.
 // Files identical (same path and digest) to the current version's need no
 // upload.
-func (s *Service) appendVersion(w http.ResponseWriter, r *http.Request, b backend, a *Artifact, req *CreateVersionRequest) {
+//
+// permitted, when not nil, is the caller's Host.Permits answer for
+// artifact.create in a's home scope, already asked.
+func (s *Service) appendVersion(w http.ResponseWriter, r *http.Request, b backend, a *Artifact, req *CreateVersionRequest, permitted *bool) {
 	ctx := r.Context()
 	kind, ref, _, _ := s.host.Principal(ctx)
-	if !s.canWrite(ctx, b, a) {
+	writable := false
+	if permitted != nil {
+		writable = s.canWritePermitted(ctx, b, a, *permitted)
+	} else {
+		writable = s.canWrite(ctx, b, a)
+	}
+	if !writable {
 		writeError(w, http.StatusForbidden, "forbidden", "not allowed to publish versions of this artifact")
 		return
 	}
@@ -432,6 +441,13 @@ func truncate(s string, n int) string {
 // confers write. Publishing a version is publishing; ownership and grants
 // decide which artifacts.
 func (s *Service) canWrite(ctx context.Context, b backend, a *Artifact) bool {
+	return s.canWritePermitted(ctx, b, a, s.host.Permits(ctx, a.ScopeRef, PermissionCreate))
+}
+
+// canWritePermitted is canWrite with the answer of Host.Permits for
+// artifact.create in a's home scope already known, for a caller that has
+// just asked it for that scope.
+func (s *Service) canWritePermitted(ctx context.Context, b backend, a *Artifact, permitted bool) bool {
 	kind, ref, _, ok := s.host.Principal(ctx)
 	if !ok {
 		return false
@@ -440,7 +456,7 @@ func (s *Service) canWrite(ctx context.Context, b backend, a *Artifact) bool {
 	if a.ExpiresAt != nil && !now.Before(*a.ExpiresAt) {
 		return false
 	}
-	if !s.host.Permits(ctx, a.ScopeRef, PermissionCreate) {
+	if !permitted {
 		return false
 	}
 	if kind == a.OwnerKind && ref == a.OwnerRef {
