@@ -44,7 +44,7 @@ $ scion artifact publish ./report --entry index.html --title "Q3 report"
 - `--note <text>`: A note describing the version.
 - `--entry <path>`: The entry file of a folder, relative to it. Default: `index.html`, `index.md` or `README.md` at the top of the folder, or the only file.
 
-A folder is published as all the regular files under it, keeping their relative paths. Files and folders whose names start with `.` are left out, and symbolic links are refused. The CLI sends each file's SHA-256, and the hub rejects bytes that do not match. Limits (hub settings): 32 MiB per file (`artifacts.max_file_bytes`), 256 MiB per version (`artifacts.max_bundle_bytes`) and 200 files per version (`artifacts.max_files`).
+A folder is published as all the regular files under it, keeping their relative paths. Files and folders whose names start with `.` are left out, and symbolic links inside the folder are refused (the file or folder you name may itself be a link). The CLI sends each file's SHA-256, and the hub rejects bytes that do not match. Limits (hub settings): 32 MiB per file (`artifacts.max_file_bytes`), 256 MiB per version (`artifacts.max_bundle_bytes`) and 200 files per version (`artifacts.max_files`).
 
 If the entry file is Markdown, the hub fetches the remote images it references while publishing (see [Images in Markdown artifacts](#images-in-markdown-artifacts)). An image that could not be fetched does not fail the publish; the CLI prints a warning for it on stderr.
 
@@ -59,7 +59,7 @@ $ scion artifact get scion://artifact/7a2b...@2 --out ./report-v2/
 ```
 
 - `<ref>`: `scion://artifact/<id>`, `scion://artifact/<id>@<seq>` for a specific version, or a bare `<id>`.
-- `--out`, `-o <path>`: For a single file, write to this file instead of stdout; if the path is an existing directory, the file is written into it under its own name. For a bundle, the directory to write every file into (created if needed), keeping relative paths.
+- `--out`, `-o <path>`: For a single file, write to this file instead of stdout; if the path is an existing directory, the file is written into it under its own name. For a bundle (several files, or one file inside a folder), the directory to write every file into (created if needed), keeping relative paths.
 
 Every file is checked against the SHA-256 the hub recorded at publish time before it is written, to stdout or to disk, and replaced atomically; a mismatch fails without writing that file.
 

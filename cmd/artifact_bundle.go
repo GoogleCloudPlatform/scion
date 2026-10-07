@@ -54,9 +54,16 @@ var defaultEntries = []string{"index.html", "index.md", "README.md"}
 // a regular file, or the regular files under it (hidden names skipped,
 // symbolic links refused).
 func collectBundle(root string) ([]localFile, error) {
-	info, err := os.Lstat(root)
+	// The root itself may be a symbolic link, as for a single-file publish;
+	// links inside a folder are refused.
+	info, err := os.Stat(root)
 	if err != nil {
 		return nil, err
+	}
+	if info.IsDir() {
+		if root, err = filepath.EvalSymlinks(root); err != nil {
+			return nil, err
+		}
 	}
 	if info.Mode().IsRegular() {
 		return []localFile{{rel: filepath.Base(root), abs: root, size: info.Size()}}, nil

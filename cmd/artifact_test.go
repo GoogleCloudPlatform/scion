@@ -218,7 +218,8 @@ func TestArtifactErrorHints(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "a.md")
 	require.NoError(t, os.WriteFile(file, []byte("a"), 0o644))
 	err = publishArtifact(context.Background(), c.Artifacts(), &stdout, &stdout, "", file, "", "")
-	assert.ErrorContains(t, err, "project:artifact:write")
+	assert.ErrorContains(t, err, "You may not publish artifacts in this project")
+	assert.NotContains(t, err.Error(), "scope", "a plain 403 is a policy refusal; a missing scope has its own answer")
 
 	unauthorized := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

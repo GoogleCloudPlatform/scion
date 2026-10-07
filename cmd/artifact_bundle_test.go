@@ -159,7 +159,7 @@ func TestArtifactBundleEntryAndRefusals(t *testing.T) {
 	assert.Equal(t, "README.md", e)
 
 	linked := writeTree(t, map[string]string{"index.md": "i"})
-	require.NoError(t, os.Symlink("/etc/hostname", filepath.Join(linked, "leak")))
+	require.NoError(t, os.Symlink("/etc/hostname", filepath.Join(linked, "linked")))
 	assert.ErrorContains(t, publishBundle(ctx, svc, &out, &errOut, "", linked, bundlePublishOptions{}), "symbolic link")
 
 	assert.ErrorContains(t, publishBundle(ctx, svc, &out, &errOut, "", t.TempDir(), bundlePublishOptions{}), "no files")
@@ -179,4 +179,48 @@ func TestWriteBundleRefusesFoldedCollisions(t *testing.T) {
 	files := []hubclient.ArtifactFile{{Path: "a.md", SHA256: "x"}, {Path: "A.md", SHA256: "y"}}
 	err := writeBundle(context.Background(), nil, &bytes.Buffer{}, "id", 1, files, t.TempDir())
 	assert.ErrorContains(t, err, "same file")
+}
+
+func TestArtifactBundleEdgeCases(t *testing.T) {
+	svc := realArtifactHub(t)
+	ctx := context.Background()
+	var out, errOut, stdout, stderr bytes.Buffer
+
+	// A one-file bundle whose file sits in a folder keeps its path.
+	root := writeTree(t, map[string]string{"docs/a.md": "# a"})
+	require.NoError(t, publishBundle(ctx, svc, &out, &errOut, "", root, bundlePublishOptions{}))
+	ref := refLine.FindStringSubmatch(out.String())[1]
+	dir := filepath.Join(t.TempDir(), "new", "dir")
+	require.NoError(t, getArtifact(ctx, svc, &stdout, &stderr, ref, dir))
+	got, err := os.ReadFile(filepath.Join(dir, "docs", "a.md"))
+	require.NoError(t, err)
+	assert.Equal(t, "# a", string(got))
+
+	// A symbolic link to a file publishes with flags too.
+	target := filepath.Join(t.TempDir(), "real.md")
+	require.NoError(t, os.WriteFile(target, []byte("# real"), 0o644))
+	link := filepath.Join(t.TempDir(), "notes.md")
+	require.NoError(t, os.Symlink(target, link))
+	out.Reset()
+	require.NoError(t, publishBundle(ctx, svc, &out, &errOut, "", link, bundlePublishOptions{Key: "notes"}))
+	// And a symbolic link to a folder publishes the folder.
+	linkDir := filepath.Join(t.TempDir(), "site")
+	require.NoError(t, os.Symlink(root, linkDir))
+	out.Reset()
+	require.NoError(t, publishBundle(ctx, svc, &out, &errOut, "", linkDir, bundlePublishOptions{Entry: "docs/a.md"}))
+}
+
+// noDigestService serves a version whose manifest does not list its entry.
+type noDigestService struct{ hubclient.ArtifactService }
+
+func (noDigestService) Get(context.Context, string) (*hubclient.ArtifactResponse, error) {
+	return &hubclient.ArtifactResponse{Version: &hubclient.ArtifactVersion{Seq: 1, EntryPath: "a.md",
+		Files: []hubclient.ArtifactFile{{Path: "other.md", SHA256: "x"}}}}, nil
+}
+
+func TestGetArtifactRefusesAnEntryWithoutDigest(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	err := getArtifact(context.Background(), noDigestService{}, &stdout, &stderr, "5f1c2d3e-0000-4000-8000-000000000001", "")
+	assert.ErrorContains(t, err, "no digest")
+	assert.Empty(t, stdout.String())
 }

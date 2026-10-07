@@ -73,8 +73,8 @@ members of the current project. The hub stores the bytes, so readers do not
 need access to your filesystem.
 
 A folder is published as a bundle of its regular files (hidden files and
-folders, whose names start with ".", are left out; symbolic links are
-refused). Its entry file, the one the web UI opens, is --entry, or else
+folders, whose names start with ".", are left out; symbolic links inside
+the folder are refused). Its entry file, the one the web UI opens, is --entry, or else
 index.html, index.md or README.md at the top of the folder.
 
 With --key, publishing again under the same key adds a new version to the
@@ -145,9 +145,10 @@ version, or a bare <id>.
 
 For a single-file artifact the file is written to stdout, or to --out (a
 file path, or an existing directory to write the file into under its own
-name). For a bundle, the entry file is written to stdout, or with --out
-every file of the version is written under the --out directory (created
-if needed), keeping its relative path.
+name). For a bundle (several files, or one file inside a folder), the
+entry file is written to stdout, or with --out every file of the version
+is written under the --out directory (created if needed), keeping its
+relative path.
 
 Every file is checked against the sha256 recorded at publish time before
 it is written; a mismatch writes nothing for that file and fails.
@@ -302,15 +303,20 @@ func getArtifact(ctx context.Context, svc hubclient.ArtifactService, stdout, std
 	// digests match even if a new version lands meanwhile.
 	seq = meta.Version.Seq
 	files := bundleFiles(meta.Version.Files)
-	if len(files) > 1 && outPath != "" {
+	entry := meta.Version.EntryPath
+	// A bundle (several files, or one file inside a folder) is written as
+	// a tree under --out, keeping relative paths.
+	if outPath != "" && (len(files) > 1 || strings.Contains(entry, "/")) {
 		return writeBundle(ctx, svc, stderr, id, seq, files, outPath)
 	}
-	entry := meta.Version.EntryPath
 	wantDigest := ""
 	for _, f := range files {
 		if f.Path == entry {
 			wantDigest = f.SHA256
 		}
+	}
+	if wantDigest == "" {
+		return errors.New("the hub recorded no digest for " + entry)
 	}
 	rc, err := svc.OpenFile(ctx, id, seq, entry)
 	if err != nil {
@@ -395,7 +401,7 @@ func artifactErrorHint(err error, publishing bool) string {
 	case apiErr.StatusCode == http.StatusNotFound:
 		return "\nThe hub has no artifact service: the hub.artifacts experiment may be off."
 	case apiErr.StatusCode == http.StatusForbidden && publishing:
-		return "\nYou may not publish artifacts in this project; for an agent, the token may lack the project:artifact:write scope."
+		return "\nYou may not publish artifacts in this project, or may not add versions to this artifact."
 	}
 	return ""
 }
