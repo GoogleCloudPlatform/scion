@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -2212,9 +2213,12 @@ func readRawBody(w http.ResponseWriter, r *http.Request) ([]byte, error) {
 // repeatedJSONMember reports the first object member name that rawBody
 // repeats within one object, at any depth. Names compare under the same
 // case folding encoding/json uses to match struct fields, so "server" and
-// "Server" in one object are a repeat. A body that is not valid JSON
-// reports no repeat; the typed decode rejects it.
-func repeatedJSONMember(rawBody []byte) (string, bool) {
+// "Server" in one object are a repeat; the comparison applies to every
+// object, including the keys of map-valued objects such as profiles, so
+// "Foo" and "foo" there are a repeat too. A body that is not exactly one
+// JSON value (empty, malformed, or followed by anything other than
+// whitespace) returns an error: it is never reported as having no repeat.
+func repeatedJSONMember(rawBody []byte) (string, bool, error) {
 	type frame struct {
 		object    bool
 		expectKey bool
@@ -2230,7 +2234,7 @@ func repeatedJSONMember(rawBody []byte) (string, bool) {
 	for {
 		tok, err := dec.Token()
 		if err != nil {
-			return "", false
+			return "", false, fmt.Errorf("request body is not one JSON value: %w", err)
 		}
 		if n := len(stack); n > 0 && stack[n-1].object && stack[n-1].expectKey {
 			top := stack[n-1]
@@ -2240,7 +2244,7 @@ func repeatedJSONMember(rawBody []byte) (string, bool) {
 			} else if key, ok := tok.(string); ok {
 				folded := foldJSONMemberName(key)
 				if top.names[folded] {
-					return key, true
+					return key, true, nil
 				}
 				top.names[folded] = true
 				top.expectKey = false
@@ -2258,8 +2262,13 @@ func repeatedJSONMember(rawBody []byte) (string, bool) {
 				valueDone()
 			}
 		}
-		if len(stack) == 0 && !dec.More() {
-			return "", false
+		if len(stack) == 0 {
+			// The first top-level value is complete; only whitespace may
+			// follow it.
+			if _, err := dec.Token(); err != io.EOF {
+				return "", false, errors.New("request body has data after the first JSON value")
+			}
+			return "", false, nil
 		}
 	}
 }
@@ -2291,12 +2300,16 @@ func foldJSONMemberName(name string) string {
 }
 
 // rejectRepeatedJSONMembers answers 400 and returns true when a hub
-// configuration write body repeats an object member name at any depth. The
-// key classification and the typed write decode must read the same
-// members, so a body they could read differently is refused for every
-// credential before either runs.
+// configuration write body is not exactly one JSON value, or repeats an
+// object member name at any depth. The key classification and the typed
+// write decode must read the same members, so a body they could read
+// differently is refused for every credential before either runs.
 func rejectRepeatedJSONMembers(w http.ResponseWriter, rawBody []byte) bool {
-	name, repeated := repeatedJSONMember(rawBody)
+	name, repeated, err := repeatedJSONMember(rawBody)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "Invalid request body: "+err.Error(), nil)
+		return true
+	}
 	if !repeated {
 		return false
 	}
@@ -2482,6 +2495,11 @@ func serverConfigBodyKoanfKey(path []string) string {
 	return key
 }
 
+// unparsedBodyKey is the refused key a classifier reports for a body it
+// cannot parse as one JSON object: an unparsed body is refused, never read
+// as carrying no refused key.
+const unparsedBodyKey = "<body>"
+
 // tokenRefusedServerConfigKeys returns, sorted, the body keys of a
 // server-config write that a user access token may not write. Every
 // present leaf counts, null and empty values included. expected_revisions
@@ -2489,7 +2507,7 @@ func serverConfigBodyKoanfKey(path []string) string {
 func tokenRefusedServerConfigKeys(rawBody []byte) []string {
 	var top map[string]json.RawMessage
 	if err := json.Unmarshal(rawBody, &top); err != nil {
-		return nil
+		return []string{unparsedBodyKey}
 	}
 	refused := map[string]bool{}
 	for _, l := range presentBodyLeaves(top, reflect.TypeOf(ServerConfigUpdateDBRequest{}), nil, nil) {
@@ -2510,7 +2528,7 @@ func tokenRefusedServerConfigKeys(rawBody []byte) []string {
 func tokenRefusedProjectDefaultsKeys(rawBody []byte) []string {
 	var top map[string]json.RawMessage
 	if err := json.Unmarshal(rawBody, &top); err != nil {
-		return nil
+		return []string{unparsedBodyKey}
 	}
 	refused := map[string]bool{}
 	for key := range top {

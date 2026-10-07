@@ -21,6 +21,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
@@ -448,25 +450,42 @@ func TestHubConfigWrite_RepeatedMemberNamesRejected(t *testing.T) {
 }
 
 // TestRepeatedJSONMember_FindsRepeatsInOneObjectOnly requires a repeat to
-// be reported only for two members of the same object, at any depth.
+// be reported only for two members of the same object, at any depth, and a
+// body that is not exactly one JSON value to be an error, never "no
+// repeat".
 func TestRepeatedJSONMember_FindsRepeatsInOneObjectOnly(t *testing.T) {
 	cases := []struct {
-		body string
-		want string
+		body    string
+		want    string
+		invalid bool
 	}{
-		{`{"a":1,"b":2}`, ""},
-		{`{"a":{"x":1},"b":{"x":2}}`, ""},
-		{`[{"a":1},{"a":2}]`, ""},
-		{`{"a":[{"x":1},{"x":2}],"b":[1,2,{"y":{}}]}`, ""},
-		{`{"a":1,"a":2}`, "a"},
-		{`{"a":1,"A":2}`, "A"},
-		{`{"k":1,"\u212a":2}`, "\u212a"},
-		{`{"a":{"b":{"c":1,"c":2}}}`, "c"},
-		{`{"a":[{"x":1,"x":2}]}`, "x"},
-		{`not json`, ""},
+		{body: `{"a":1,"b":2}`},
+		{body: "{\"a\":1}  \n"},
+		{body: `{"a":{"x":1},"b":{"x":2}}`},
+		{body: `[{"a":1},{"a":2}]`},
+		{body: `{"a":[{"x":1},{"x":2}],"b":[1,2,{"y":{}}]}`},
+		{body: `{"a":1,"a":2}`, want: "a"},
+		{body: `{"a":1,"A":2}`, want: "A"},
+		{body: `{"k":1,"\u212a":2}`, want: "\u212a"},
+		{body: `{"a":{"b":{"c":1,"c":2}}}`, want: "c"},
+		{body: `{"a":[{"x":1,"x":2}]}`, want: "x"},
+		{body: `{"profiles":{"Foo":{},"foo":{}}}`, want: "foo"},
+		{body: `not json`, invalid: true},
+		{body: ``, invalid: true},
+		{body: `{"a":1`, invalid: true},
+		{body: `{"a":1}x`, invalid: true},
+		{body: `{"a":1}]`, invalid: true},
+		{body: `{"a":1} {}`, invalid: true},
+		{body: `{"a":1} {"a":2}`, invalid: true},
 	}
 	for _, tc := range cases {
-		got, repeated := repeatedJSONMember([]byte(tc.body))
+		got, repeated, err := repeatedJSONMember([]byte(tc.body))
+		if tc.invalid {
+			assert.Error(t, err, "%q must be refused as not one JSON value", tc.body)
+			assert.False(t, repeated, tc.body)
+			continue
+		}
+		require.NoError(t, err, tc.body)
 		if tc.want == "" {
 			assert.False(t, repeated, "%s reported %q", tc.body, got)
 			continue
@@ -474,6 +493,88 @@ func TestRepeatedJSONMember_FindsRepeatsInOneObjectOnly(t *testing.T) {
 		assert.True(t, repeated, tc.body)
 		assert.Equal(t, tc.want, got, tc.body)
 	}
+}
+
+// TestHubConfigKeyClassifiers_UnparsedBodyIsRefused requires each settings
+// key classifier to refuse a body it cannot parse instead of reporting no
+// refused key.
+func TestHubConfigKeyClassifiers_UnparsedBodyIsRefused(t *testing.T) {
+	for _, body := range []string{`not json`, `{"server":{}}x`, `{"server":{}} {}`, `[]`, ``} {
+		assert.Equal(t, []string{unparsedBodyKey}, tokenRefusedServerConfigKeys([]byte(body)), "server-config %q", body)
+		assert.Equal(t, []string{unparsedBodyKey}, tokenRefusedProjectDefaultsKeys([]byte(body)), "project-defaults %q", body)
+	}
+}
+
+// rawHubConfigRequest sends body verbatim with the given bearer key.
+func rawHubConfigRequest(srv *Server, key, method, path, body string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+key)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	return rec
+}
+
+// TestHubConfigWrite_BodyMustBeOneJSONValue requires a hub configuration
+// write whose body is followed by trailing data or a second JSON value, or
+// does not parse, to be rejected with 400 for a token and a session on the
+// file-backed and the DB-backed hub, with nothing written.
+func TestHubConfigWrite_BodyMustBeOneJSONValue(t *testing.T) {
+	bodies := []string{
+		`{"server":{"hub":{"public_url":"https://zz.example.com"}}} {}`,
+		`{"server":{"hub":{"admin_emails":["zz@example.com"]}}}x`,
+		`{"agent_secrets":{"user_scope_only":false}}]`,
+		`{"server":{"hub":{"hub_name":"zz"}}} {"server":{"hub":{"admin_emails":["zz@example.com"]}}}`,
+		`{"server":{"hub":{"admin_emails":["zz@example.com"]}}`,
+	}
+
+	t.Run("file-backed hub", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		settingsPath := filepath.Join(home, ".scion", "settings.yaml")
+		srv, s := testServer(t)
+		admin := hubConfigTokenUser(t, s, "hct-trail-file", store.SystemRoleSuperAdmin)
+		key := mintHubConfigToken(t, srv, admin, hubBoundary(), "hub_config:read", "hub_config:update")
+		for _, body := range bodies {
+			for _, bearer := range []string{key, testDevToken} {
+				rec := rawHubConfigRequest(srv, bearer, http.MethodPut, "/api/v1/admin/server-config", body)
+				require.Equal(t, http.StatusBadRequest, rec.Code, "%s: %s", body, rec.Body.String())
+			}
+			_, err := os.Stat(settingsPath)
+			require.True(t, os.IsNotExist(err), "settings.yaml must not be written for %s", body)
+		}
+		// Control: the same hub writes settings.yaml for a valid body.
+		rec := rawHubConfigRequest(srv, key, http.MethodPut, "/api/v1/admin/server-config", `{"server":{"hub":{"hub_name":"zz"}}}`)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		_, err := os.Stat(settingsPath)
+		require.NoError(t, err, "a valid body writes settings.yaml")
+	})
+
+	t.Run("DB-backed hub", func(t *testing.T) {
+		srv, s := testServerWithOps(t, nil)
+		admin := hubConfigTokenUser(t, s, "hct-trail-db", store.SystemRoleSuperAdmin)
+		key := mintHubConfigToken(t, srv, admin, hubBoundary(), "hub_config:read", "hub_config:update")
+		for _, body := range bodies {
+			for _, method := range []string{http.MethodPut, http.MethodPatch, http.MethodPost} {
+				rec := rawHubConfigRequest(srv, key, method, "/api/v1/admin/server-config", body)
+				require.Equal(t, http.StatusBadRequest, rec.Code, "%s %s: %s", method, body, rec.Body.String())
+			}
+			rec := rawHubConfigRequest(srv, testDevToken, http.MethodPut, "/api/v1/admin/server-config", body)
+			require.Equal(t, http.StatusBadRequest, rec.Code, "session %s: %s", body, rec.Body.String())
+		}
+		for _, section := range []string{"endpoints", "access", "agent_secrets"} {
+			_, err := s.GetHubSetting(context.Background(), section)
+			require.ErrorIs(t, err, store.ErrNotFound, "section %s must not be written", section)
+		}
+
+		pdKey := mintHubConfigToken(t, srv, admin, hubBoundary(), "hub_project_defaults:read", "hub_project_defaults:update")
+		for _, body := range []string{`{"default_scratchpad":false} {}`, `{"default_scratchpad":false}x`, `{"default_scratchpad":`} {
+			rec := rawHubConfigRequest(srv, pdKey, http.MethodPut, "/api/v1/admin/project-defaults", body)
+			require.Equal(t, http.StatusBadRequest, rec.Code, "%s: %s", body, rec.Body.String())
+		}
+		_, err := s.GetHubSetting(context.Background(), "project_defaults")
+		require.ErrorIs(t, err, store.ErrNotFound, "project defaults must not be written")
+	})
 }
 
 // TestLifecycleHookWrite_ExecutionIdentityRequiresSession requires a token
@@ -518,4 +619,24 @@ func TestLifecycleHookWrite_ExecutionIdentityRequiresSession(t *testing.T) {
 	require.NoError(t, err)
 	requireTokenRefusedKeys(t, update(*stored, "seeded", ""), "executionIdentity")
 	requireTokenRefusedKeys(t, update(*stored, "seeded", "hct-other-sa"), "executionIdentity")
+
+	// A hook whose execution identity resolves and that the holder may act
+	// as: a token update that keeps the identity and renames the hook is
+	// admitted, and the identity stays as stored.
+	sa := wiringSA(t, s, store.ScopeHub, "test-hub-id", "hct-keep@p.iam.gserviceaccount.com")
+	enforceHookIdentity(srv, store.NewFakeCallerPermissionChecker().AllowTarget(sa.Email))
+	resolvable := &store.LifecycleHook{
+		ID: uuid.New().String(), Name: "resolvable", ScopeType: store.LifecycleHookScopeHub,
+		Trigger: store.LifecycleHookTriggerRunning, Action: validWebhookAction(),
+		ExecutionIdentity: sa.ID, Enabled: true, CreatedBy: admin + "@test.com",
+	}
+	require.NoError(t, s.CreateLifecycleHook(context.Background(), resolvable))
+	stored, err = s.GetLifecycleHook(context.Background(), resolvable.ID)
+	require.NoError(t, err)
+	rec = update(*stored, "resolvable-renamed", sa.ID)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	after, err := s.GetLifecycleHook(context.Background(), resolvable.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "resolvable-renamed", after.Name)
+	assert.Equal(t, sa.ID, after.ExecutionIdentity)
 }
