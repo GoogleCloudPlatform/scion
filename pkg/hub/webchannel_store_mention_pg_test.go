@@ -55,9 +55,17 @@ func TestUnreadMentionKeys_Postgres(t *testing.T) {
 	_, err = db.ExecContext(ctx, "CREATE SCHEMA "+schema)
 	require.NoError(t, err)
 	t.Cleanup(func() { _, _ = db.Exec("DROP SCHEMA " + schema + " CASCADE") })
+	// Besides id and created, carry the columns the thread_id backfill
+	// migration in Init reads, so Init runs as it does on a real hub.
 	_, err = db.ExecContext(ctx, `CREATE TABLE messages (
-    id      uuid PRIMARY KEY,
-    created timestamptz NOT NULL
+    id           uuid PRIMARY KEY,
+    created      timestamptz NOT NULL,
+    channel      text,
+    thread_id    text,
+    sender       text,
+    sender_id    text,
+    recipient    text,
+    recipient_id text
 )`)
 	require.NoError(t, err)
 
