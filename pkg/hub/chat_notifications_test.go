@@ -18,7 +18,6 @@ package hub
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"log/slog"
 	"strings"
@@ -54,9 +53,7 @@ func setupChatNotifTest(t *testing.T) *chatNotifTestEnv {
 	require.NoError(t, err)
 	require.NoError(t, s.Migrate(context.Background()))
 
-	db, err := sql.Open("sqlite3", ":memory:")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = db.Close() })
+	db := openTestMemorySQLite(t, "sqlite3")
 
 	wcs := NewWebChatStore(db, "sqlite3")
 	require.NoError(t, wcs.Init())
@@ -538,9 +535,7 @@ func TestAgentMentions_DoNotCreateUserNotifications(t *testing.T) {
 	ctx := context.Background()
 
 	// Set up WebChatStore + ChatNotifier on the server.
-	db, err := sql.Open("sqlite3", ":memory:")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = db.Close() })
+	db := openTestMemorySQLite(t, "sqlite3")
 	wcs := NewWebChatStore(db, "sqlite3")
 	require.NoError(t, wcs.Init())
 	srv.SetWebChatStore(wcs)
@@ -664,9 +659,7 @@ func TestAgentMentions_DoNotCreateUserNotifications(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestIsConversationMuted_SQLite(t *testing.T) {
-	db, err := sql.Open("sqlite3", ":memory:")
-	require.NoError(t, err)
-	defer func() { _ = db.Close() }()
+	db := openTestMemorySQLite(t, "sqlite3")
 
 	wcs := NewWebChatStore(db, "sqlite3")
 	require.NoError(t, wcs.Init())
@@ -742,9 +735,7 @@ func TestServer_ChatNotifier_UsesServerPresence(t *testing.T) {
 	srv, st := testServer(t)
 	ctx := context.Background()
 
-	db, err := sql.Open("sqlite3", ":memory:")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = db.Close() })
+	db := openTestMemorySQLite(t, "sqlite3")
 	wcs := NewWebChatStore(db, "sqlite3")
 	require.NoError(t, wcs.Init())
 
