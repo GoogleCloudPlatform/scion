@@ -493,7 +493,7 @@ func TestListCursorKey_SharedSigningSecretDerivesConsistentKeyNameSeparatedFromD
 	const sharedSecret = "list-cursor-shared-signing-secret-test"
 
 	newSrv := func(hubID string) *Server {
-		s, err := newTestStore(":memory:")
+		s, err := newTestStore(t, ":memory:")
 		if err != nil {
 			if strings.Contains(err.Error(), "sqlite driver not registered") {
 				t.Skip("Skipping test because sqlite driver is not registered (build with -tags sqlite to enable)")
@@ -501,7 +501,6 @@ func TestListCursorKey_SharedSigningSecretDerivesConsistentKeyNameSeparatedFromD
 			t.Fatalf("failed to create test store: %v", err)
 		}
 		require.NoError(t, s.Migrate(context.Background()))
-		t.Cleanup(func() { _ = s.Close() })
 
 		cfg := DefaultServerConfig()
 		cfg.HubID = hubID
@@ -581,7 +580,7 @@ func TestListCursorKey_PersistsAcrossSealerInstances(t *testing.T) {
 // end to end: the same store, same hub ID, and a second server picks up the
 // identical key on "restart" (a second New() against the same store).
 func TestListCursorKey_PersistsAcrossServerRestart(t *testing.T) {
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		if strings.Contains(err.Error(), "sqlite driver not registered") {
 			t.Skip("Skipping test because sqlite driver is not registered (build with -tags sqlite to enable)")
@@ -589,7 +588,6 @@ func TestListCursorKey_PersistsAcrossServerRestart(t *testing.T) {
 		t.Fatalf("failed to create test store: %v", err)
 	}
 	require.NoError(t, s.Migrate(context.Background()))
-	t.Cleanup(func() { _ = s.Close() })
 
 	const hubID = "list-cursor-persist-hub"
 	newSrv := func() *Server {

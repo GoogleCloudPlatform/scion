@@ -192,10 +192,24 @@ func (s *Server) execDispatchStart(ctx context.Context, d store.BrokerDispatch) 
 		task = args.Task
 		resume = args.Resume
 	}
+	ctx, warns := withDispatchWarnings(ctx)
 	if err := dispatcher.DispatchAgentStart(ctx, agent, task, resume); err != nil {
 		return "", fmt.Errorf("dispatch start: %w", err)
 	}
-	return "", nil
+	return s.lifecycleDispatchResult(ctx, agent.ID, warns), nil
+}
+
+// lifecycleDispatchResult is the result a completed start or restart row
+// carries back to the requesting node (ptone/scion#3456): the dispatch
+// warnings collected on this node, which a requester's response would
+// otherwise never see, and whether a delete won after the broker start
+// landed. The requester answers 409 delete_in_progress from its own re-read;
+// DeleteWon only ends its wait for a success phase that will not come.
+func (s *Server) lifecycleDispatchResult(ctx context.Context, agentID string, warns *dispatchWarnings) string {
+	return marshalLifecycleResult(LifecycleDispatchResult{
+		Warnings:  warns.Warnings(),
+		DeleteWon: s.deleteWonAfterLanding(ctx, agentID),
+	})
 }
 
 // stopSupersededResult is the result recorded on a queued stop row that was
@@ -322,10 +336,11 @@ func (s *Server) execDispatchRestart(ctx context.Context, d store.BrokerDispatch
 	if dispatcher == nil {
 		return "", fmt.Errorf("no dispatcher available")
 	}
+	ctx, warns := withDispatchWarnings(ctx)
 	if err := dispatcher.DispatchAgentRestart(ctx, agent); err != nil {
 		return "", fmt.Errorf("dispatch restart: %w", err)
 	}
-	return "", nil
+	return s.lifecycleDispatchResult(ctx, agent.ID, warns), nil
 }
 
 func (s *Server) execDispatchDelete(ctx context.Context, d store.BrokerDispatch) (string, error) {
@@ -425,11 +440,12 @@ func (s *Server) execDispatchFinalizeEnv(ctx context.Context, d store.BrokerDisp
 		}
 		env = args.Env
 	}
+	ctx, warns := withDispatchWarnings(ctx)
 	finalized, err := dispatcher.DispatchFinalizeEnv(ctx, agent, env)
 	if err != nil {
 		return "", fmt.Errorf("dispatch finalize_env: %w", err)
 	}
-	result, err := json.Marshal(FinalizeEnvResult{Success: true, Launch: finalized.AcceptedLaunch()})
+	result, err := json.Marshal(FinalizeEnvResult{Success: true, Launch: finalized.AcceptedLaunch(), Warnings: warns.Warnings()})
 	if err != nil {
 		return "", fmt.Errorf("marshal finalize_env result: %w", err)
 	}
@@ -445,11 +461,12 @@ func (s *Server) execDispatchCreate(ctx context.Context, d store.BrokerDispatch)
 	if dispatcher == nil {
 		return "", fmt.Errorf("no dispatcher available")
 	}
+	ctx, warns := withDispatchWarnings(ctx)
 	created, err := dispatcher.DispatchAgentCreateWithGather(ctx, agent)
 	if err != nil {
 		return "", fmt.Errorf("dispatch create: %w", err)
 	}
-	cr := CreateWithGatherResult{EnvRequirements: created.EnvRequirements(), Launch: created.AcceptedLaunch()}
+	cr := CreateWithGatherResult{EnvRequirements: created.EnvRequirements(), Launch: created.AcceptedLaunch(), Warnings: warns.Warnings()}
 	result, err := json.Marshal(cr)
 	if err != nil {
 		return "", fmt.Errorf("marshal create result: %w", err)

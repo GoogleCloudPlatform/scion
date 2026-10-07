@@ -48,11 +48,10 @@ import (
 // self-applies, as StartPropagation arranges in production.
 func newSQLiteOpsServer(t *testing.T, bootstrap *koanf.Koanf, seed map[string]string) (*Server, store.Store, *OperationalSettings) {
 	t.Helper()
-	st, err := newTestStore(":memory:")
+	st, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create sqlite store: %v", err)
 	}
-	t.Cleanup(func() { _ = st.Close() })
 
 	ctx := context.Background()
 	for section, doc := range seed {

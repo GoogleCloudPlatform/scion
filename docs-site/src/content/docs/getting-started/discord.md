@@ -156,6 +156,12 @@ In Discord, messages are routed using `@mention` triggers. If a default agent is
 | `@all run safety audit` | Broadcasts the message to **all agents** running within the linked project. |
 | *Reply to an agent's message* | Replying to a webhook message or bot response automatically continues the discussion thread with that specific agent. |
 
+### Answering Agent Questions
+When an agent asks for input, the bot posts the question with answer buttons: one per choice, or **Reply** (which opens a text box) and **Dismiss**. Clicking a button delivers your answer to the agent that asked. A question stays answerable for 24 hours; if delivery fails, you see a private error and can try again. Long choice labels are shortened to fit Discord's limits, but the agent receives the full text.
+
+### Direct Messages
+A Scion direct message to a user is sent to that user's stored Discord channel, or else to the DM channel of their linked Discord account. It is never broadcast to a server channel.
+
 ---
 
 ## Multi-Server Operational Details

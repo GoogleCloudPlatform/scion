@@ -29,7 +29,7 @@ import (
 func newShutdownTestServer(t *testing.T) *Server {
 	t.Helper()
 
-	st, err := newTestStore(":memory:")
+	st, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}

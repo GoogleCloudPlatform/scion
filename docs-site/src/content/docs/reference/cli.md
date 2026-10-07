@@ -111,20 +111,34 @@ In Hub mode, `start` waits for the agent to reach `running` when the Hub
 launches it asynchronously, after a workspace upload, or with `--attach`.
 Otherwise (for example when the Hub does not launch asynchronously) it returns
 as soon as the Hub answers, as before, possibly while the agent is still
-provisioning. While waiting, each launch step is printed to stderr (nothing
+provisioning. A synchronous launch runs on the Hub independently of the CLI
+request: if the CLI gives up or you press Ctrl-C mid-dispatch, the Hub keeps
+going instead of rolling the agent back. Each dispatch attempt is bounded at
+120 seconds, so a slow cold start (for example on Kubernetes) can still fail on
+a synchronous launch; enable [asynchronous agent create](/scion/reference/server-config/#asynchronous-agent-create) for those. While waiting, each launch step is printed to stderr (nothing
 extra under `--format json`). If the wait times out, or you press Ctrl-C, only
 the wait stops: the launch continues on the Hub, and re-running
 `scion start <agent-name>` resumes waiting. Ctrl-C exits with status 130 and
 SIGTERM with 143; a failed launch or a timeout exits 1. Network errors and
 Hub answers of 5xx, 408 or 429 are retried while waiting; any other 4xx (for
 example 401 or 403) stops the wait at once with the Hub's error, and the launch
-continues on the Hub. If the agent's create did not
-complete (for example the image could not be pulled), the error shows the
-stored template and task. Delete the agent and create it again
-(`scion delete <agent-name>`, then `scion start` with the same template and
-task). If soft-delete retention is enabled on the Hub, the name stays reserved
-until the agent is deleted with force=true or purged; until then, use a new
-name. With `--format json`, `--attach` after a workspace upload attaches
+continues on the Hub. One exception: until the agent's status has been read
+once, a 403 or 404 is retried for up to 5 seconds while the Hub is still
+launching the agent (an asynchronous launch, or a start after a workspace
+upload). If an agent launcher still cannot read the new agent's status after
+that, the wait reports that the launch was accepted and its status is not
+readable with this credential's scope, and exits 1; the launch continues on the
+Hub. When the Hub has already finished the start and you wait with `--attach`,
+there is no retry: an agent launcher's 404 gives the same not-readable report
+at once. The agent is reported as deleted only on a 404 after its status was
+read, or, for a user's login, on a 404 before that: after the 5-second retry
+while the Hub is still launching the agent, and at once otherwise. If the
+agent's create did not complete (for example the image could not be pulled),
+the error shows the stored template and task. Delete the agent and create it
+again (`scion delete <agent-name>`, then `scion start` with the same template
+and task). If soft-delete retention is enabled on the Hub, the name stays
+reserved until the agent is deleted with force=true or purged; until then, use
+a new name. With `--format json`, `--attach` after a workspace upload attaches
 without printing the JSON result.
 
 ### `scion create`
@@ -281,7 +295,7 @@ Sends a message to a running agent or user.
     - `--at <time>`: *(Deprecated — use `scion schedule create --at` instead.)* Schedule message delivery at an absolute time.
 
 - **Group sends and exit codes:**
-  A `group[...]` send reports each recipient's outcome: `delivered`, `deferred` (saved while the agent reincarnates), `failed` (with the reason), or `unknown` (no definite answer, for example a timeout, a gateway error, or the Hub reporting delivery as `ambiguous`, so the message may have been delivered). When not every recipient was reached, the output lists the delivered and failed recipients and a recipient argument naming only the failed ones: the bare recipient (for example `agent:b`) when one failed, or `group[...]` when several did, since `group[...]` needs at least two recipients. With `--format json` the output is an object:
+  A `group[...]` send delivers to at most six recipients at a time, and reports each recipient's outcome: `delivered`, `deferred` (saved while the agent reincarnates), `failed` (with the reason), or `unknown` (no definite answer, for example a timeout, a gateway error, or the Hub reporting delivery as `ambiguous`, so the message may have been delivered). When not every recipient was reached, the output lists the delivered and failed recipients and a recipient argument naming only the failed ones: the bare recipient (for example `agent:b`) when one failed, or `group[...]` when several did, since `group[...]` needs at least two recipients. With `--format json` the output is an object:
   ```json
   {
     "group_id": "…",
@@ -346,6 +360,8 @@ Sends a message to all running agents in the current project (or across all proj
 **Usage:** `scion broadcast <message> [flags]`
 
 This command replaces the removed `--broadcast` / `--all` flags on `scion message`.
+
+Like a group send, a broadcast (including `--all`) sends to at most six agents at a time.
 
 ### `scion keys`
 
@@ -561,6 +577,8 @@ as stop, start, and restart); an agent can always reincarnate itself.
     - `--harness-auth <method>`: Patch the harness auth method of the new generation: `api-key`, `oauth-token`, `auth-file`, or `vertex-ai`.
     - `--image <image>`, `-i`: Patch the container image of the new generation.
     - `--thinking-level <value>`: Patch the thinking level of the new generation. Accepts the same values as `scion start`: an integer from 0 to 100, or a case-insensitive shorthand: `low` (25), `medium` (50), `high` (75), `max` (100). The Hub receives the integer. Without the flag, the thinking level is not patched. An invalid value fails before contacting the Hub.
+    - `--shared-dir-backend <name>=nfs`: Change the recorded [storage backend](/scion/reference/server-config/#changing-an-agents-shared-directory-to-nfs) of the agent's shared directory `<name>` from `local` to `nfs`. Repeatable. Only the agent's record changes; copy the data first. An agent cannot use this on itself, and it cannot be combined with a move to another Runtime Broker. Before a real reincarnation the CLI asks the Hub for the plan and stops if the Hub does not echo the change; if it says the Hub does not support `--shared-dir-backend`, upgrade the Hub.
+    - `--allow-empty-shared-dir`: With `--shared-dir-backend`, let the agent start even if the new `nfs` directory is empty while the previous local directory is not.
 
 **Patch flags.** `--service-account`, `--role`, `--model`, `--thinking-level`, `--harness-auth`, and
 `--image` change that setting on the new generation, and later reincarnations keep the new value.
@@ -890,10 +908,11 @@ Manages connection to and interaction with a Scion Hub. Authentication lives und
 
 Publishes files as artifacts and fetches them by reference (`scion://artifact/<id>[@<seq>]`). Requires Hub mode and the `hub.artifacts` experiment (off by default). Available in agent mode. See [Artifacts](/scion/reference/artifacts/) for access rules and the API.
 
-- `scion artifact publish <file>`: Publish one file as a new artifact in the current project; prints its reference and web page URL.
-    - Flags: `--title <title>` (default: the file name).
-- `scion artifact get <ref>`: Write an artifact's entry file to stdout.
-    - Flags: `--out`, `-o <path>` (write to a file, or into an existing directory under the file's name).
+- `scion artifact publish <file|folder>`: Publish a file or folder in the current project; prints its reference, version and web page URL.
+    - Flags: `--title <title>` (set when the artifact is created; default: the entry file's name), `--key <key>` (publishing again under the key adds a version), `--note <text>`, `--entry <path>` (a folder's entry file).
+- `scion artifact get <ref>`: Write an artifact's entry file to stdout, or with `--out` the file or the whole bundle.
+    - Flags: `--out`, `-o <path>` (a file, an existing directory for a single file, or the directory a bundle is written into), `--force` (replace files that already exist under `--out`).
+- `scion artifact versions <ref>`: List an artifact's versions, newest first; the current one is marked `*`.
 
 ## Notification Management
 

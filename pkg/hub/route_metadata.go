@@ -438,6 +438,13 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/artifacts/shared/", RouteID: "artifacts.shared",
 		Classification: RoutePublic,
 	},
+	// The view route serves one version's files to a sandboxed frame and
+	// authenticates by the view capability in its path only (the service
+	// verifies it on every request).
+	"/api/v1/artifacts/view/": {
+		Pattern: "/api/v1/artifacts/view/", RouteID: "artifacts.view",
+		Classification: RoutePublic,
+	},
 
 	// -------------------------------------------------------------------------
 	// Policy: Skills
@@ -761,6 +768,21 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/admin/agents/reset-auth-all", RouteID: "admin.agents.resetAuthAll",
 		Classification: RouteHubAdmin,
 		Permission:     "hub.auth_reset.execute", Resource: "hub", Action: "execute",
+	},
+	// Delegation-provenance adoption recovery: hub system admin on a session
+	// or local development credential only (checked again in the handler).
+	// Deliberately no registered permission, so it cannot be delegated.
+	"/api/v1/admin/delegation-adoption": {
+		Pattern: "/api/v1/admin/delegation-adoption", RouteID: "admin.delegationAdoption",
+		Classification: RouteHubAdmin,
+	},
+	"/api/v1/admin/delegation-adoption/previews": {
+		Pattern: "/api/v1/admin/delegation-adoption/previews", RouteID: "admin.delegationAdoption.previews",
+		Classification: RouteHubAdmin,
+	},
+	"/api/v1/admin/delegation-adoption/commits": {
+		Pattern: "/api/v1/admin/delegation-adoption/commits", RouteID: "admin.delegationAdoption.commits",
+		Classification: RouteHubAdmin,
 	},
 	"/api/v1/admin/gcp-quota": {
 		Pattern: "/api/v1/admin/gcp-quota", RouteID: "admin.gcpQuota",

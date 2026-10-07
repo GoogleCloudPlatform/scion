@@ -98,11 +98,17 @@ func TestUnconfiguredServiceRoutes(t *testing.T) {
 // takes a context plus strings and returns strings and bools only, so it can
 // be served remotely.
 func TestHostIsStringOnly(t *testing.T) {
-	ctxType := reflect.TypeOf((*context.Context)(nil)).Elem()
 	host := reflect.TypeOf((*Host)(nil)).Elem()
 	if host.NumMethod() != 3 {
 		t.Fatalf("Host has %d methods, want 3 (Principal, Authorize, Permits)", host.NumMethod())
 	}
+	assertStringOnly(t, host)
+	assertStringOnly(t, reflect.TypeOf((*ScopeExplainer)(nil)).Elem())
+}
+
+func assertStringOnly(t *testing.T, host reflect.Type) {
+	t.Helper()
+	ctxType := reflect.TypeOf((*context.Context)(nil)).Elem()
 	for i := 0; i < host.NumMethod(); i++ {
 		m := host.Method(i)
 		if m.Type.NumIn() == 0 || m.Type.In(0) != ctxType {

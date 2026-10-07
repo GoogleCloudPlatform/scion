@@ -1592,6 +1592,14 @@ func setupSendTest(t *testing.T) (*Server, store.Store, WebChatStore, *store.Pro
 		t.Fatalf("open sqlite: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
+	// Each pooled connection to ":memory:" is a separate, empty database.
+	// Handlers start background work (mention and DM notifications) that
+	// reads the webchat store while the request, or the next one, is still
+	// using it; a second connection opened for that overlap has none of the
+	// tables Init() created, so a later lookup can fail with "no such
+	// table" and surface as a 404. Pin the pool to one connection so every
+	// caller shares the same in-memory database.
+	db.SetMaxOpenConns(1)
 	wcs := NewWebChatStore(db, "sqlite3")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
@@ -1599,6 +1607,50 @@ func setupSendTest(t *testing.T) (*Server, store.Store, WebChatStore, *store.Pro
 	srv.SetWebChatStore(wcs)
 
 	return srv, s, wcs, proj, db
+}
+
+// The send-test webchat database must stay one database under concurrent
+// use: a caller that arrives while the only connection is busy waits for it
+// instead of opening a second, empty in-memory database.
+func TestSetupSendTest_WebChatDBSharedUnderConcurrency(t *testing.T) {
+	_, _, wcs, proj, db := setupSendTest(t)
+	ctx := t.Context()
+	topicID := tid("send-db-shared")
+	if err := wcs.CreateTopic(ctx, WebChatTopic{ID: topicID, ProjectID: proj.ID, Name: "shared",
+		CreatedBy: "dev", CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+
+	// Hold the connection, as an in-flight request would.
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("BeginTx: %v", err)
+	}
+	type result struct {
+		topic *WebChatTopic
+		err   error
+	}
+	done := make(chan result, 1)
+	go func() {
+		topic, err := wcs.GetTopic(ctx, topicID)
+		done <- result{topic, err}
+	}()
+	select {
+	case r := <-done:
+		_ = tx.Rollback()
+		t.Fatalf("GetTopic did not wait for the busy connection: topic=%+v err=%v", r.topic, r.err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("Rollback: %v", err)
+	}
+	r := <-done
+	if r.err != nil || r.topic == nil || r.topic.ID != topicID {
+		t.Fatalf("GetTopic after release: topic=%+v err=%v", r.topic, r.err)
+	}
+	if n := db.Stats().OpenConnections; n != 1 {
+		t.Fatalf("expected one open connection, got %d", n)
+	}
 }
 
 // setTopicConversationID creates a conversation for a topic and updates the topic's conversation_id.
