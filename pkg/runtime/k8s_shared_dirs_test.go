@@ -17,6 +17,7 @@ package runtime
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"strings"
 	"testing"
@@ -27,6 +28,8 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8sruntime "k8s.io/apimachinery/pkg/runtime"
+	k8stesting "k8s.io/client-go/testing"
 )
 
 func TestSharedDirPVCName(t *testing.T) {
@@ -418,4 +421,59 @@ func TestCreateSharedDirPVCs_ReuseWarnsOnStorageClassMismatch(t *testing.T) {
 			}
 		})
 	}
+}
+
+// SharedDirClaimExists looks up the PVC createSharedDirPVCs creates or
+// reuses, by name, in the namespace Run would use; it never creates one.
+func TestSharedDirClaimExists(t *testing.T) {
+	ctx := context.Background()
+	labels := map[string]string{"scion.project": "myproject", "scion.project_id": "proj-1"}
+
+	t.Run("missing then created", func(t *testing.T) {
+		rt, clientset, _ := newTestK8sRuntime()
+		rt.DefaultNamespace = "default"
+		exists, err := rt.SharedDirClaimExists(ctx, labels, "notes")
+		require.NoError(t, err)
+		assert.False(t, exists)
+		pvcs, err := clientset.CoreV1().PersistentVolumeClaims("default").List(ctx, metav1.ListOptions{})
+		require.NoError(t, err)
+		assert.Empty(t, pvcs.Items, "the lookup creates nothing")
+
+		require.NoError(t, rt.createSharedDirPVCs(ctx, "default", RunConfig{Labels: labels, SharedDirs: []api.SharedDir{{Name: "notes"}}}))
+		exists, err = rt.SharedDirClaimExists(ctx, labels, "notes")
+		require.NoError(t, err)
+		assert.True(t, exists)
+		exists, err = rt.SharedDirClaimExists(ctx, labels, "other")
+		require.NoError(t, err)
+		assert.False(t, exists)
+	})
+
+	t.Run("namespace label", func(t *testing.T) {
+		rt, _, _ := newTestK8sRuntime()
+		rt.DefaultNamespace = "default"
+		require.NoError(t, rt.createSharedDirPVCs(ctx, "team-a", RunConfig{Labels: labels, SharedDirs: []api.SharedDir{{Name: "notes"}}}))
+		exists, err := rt.SharedDirClaimExists(ctx, labels, "notes")
+		require.NoError(t, err)
+		assert.False(t, exists, "the claim is in another namespace")
+		withNS := map[string]string{"scion.project": "myproject", "scion.namespace": "team-a"}
+		exists, err = rt.SharedDirClaimExists(ctx, withNS, "notes")
+		require.NoError(t, err)
+		assert.True(t, exists)
+	})
+
+	t.Run("get error", func(t *testing.T) {
+		rt, clientset, _ := newTestK8sRuntime()
+		clientset.PrependReactor("get", "persistentvolumeclaims", func(k8stesting.Action) (bool, k8sruntime.Object, error) {
+			return true, nil, errors.New("forbidden")
+		})
+		_, err := rt.SharedDirClaimExists(ctx, labels, "notes")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "scion-shared-myproject-notes")
+	})
+
+	t.Run("no project label", func(t *testing.T) {
+		rt, _, _ := newTestK8sRuntime()
+		_, err := rt.SharedDirClaimExists(ctx, map[string]string{}, "notes")
+		require.Error(t, err)
+	})
 }

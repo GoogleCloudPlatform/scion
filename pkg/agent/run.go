@@ -1699,10 +1699,25 @@ authDone:
 	if err != nil {
 		return nil, err
 	}
-	// After an explicit backend change to nfs, refuse an empty nfs
-	// directory while the previous local directory is not empty. Dirs that
-	// pass are not checked again.
-	if passed, err := checkChangedSharedDirs(sharedDirRecord, effectiveSharedDirs, sharedDirStorage, sharedDirVolumesByName, projectDir, m.Runtime.Name()); err != nil {
+	// After an explicit backend change, refuse an empty directory on the
+	// new backend while the directory on the previous backend is not
+	// empty. Dirs that pass are not checked again.
+	sdCheck := sharedDirCheckInput{
+		rec:                 sharedDirRecord,
+		dirs:                effectiveSharedDirs,
+		realization:         sharedDirStorage,
+		volumes:             sharedDirVolumesByName,
+		projectDir:          projectDir,
+		runtimeName:         m.Runtime.Name(),
+		gs:                  startGlobalSettings,
+		projectID:           hubDispatchedProjectID,
+		nfsWorkspaceBackend: nfsWorkspaceBackend,
+		claimLabels:         projectkeys.ProjectNameLabels(projectName),
+	}
+	if checker, ok := m.Runtime.(runtime.SharedDirClaimChecker); ok {
+		sdCheck.claims = checker
+	}
+	if passed, err := checkChangedSharedDirs(ctx, sdCheck); err != nil {
 		return nil, err
 	} else if len(passed) > 0 {
 		updated := *sharedDirRecord
