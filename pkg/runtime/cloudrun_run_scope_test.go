@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"cloud.google.com/go/run/apiv2/runpb"
@@ -453,5 +454,52 @@ func TestCloudRunRun_StopThenStartNewRun(t *testing.T) {
 	}
 	if run, ok := s.runOf(crAgentName); !ok || run != "run-b" {
 		t.Errorf("instance after restart: present=%v run=%q, want run-b", ok, run)
+	}
+}
+
+// GetInstance answering (nil, nil) is not read as an unlabelled legacy
+// instance with no etag: a run-scoped stop or delete fails with no write
+// call.
+func TestCloudRunRunScoped_NilInstanceRefused(t *testing.T) {
+	for _, op := range []struct {
+		name string
+		call func(rt *CloudRunRuntime) error
+	}{
+		{"Stop", func(rt *CloudRunRuntime) error {
+			return rt.Stop(context.Background(), RunRef{ID: crInstanceID, RunID: "run-a"})
+		}},
+		{"Delete", func(rt *CloudRunRuntime) error {
+			return rt.Delete(context.Background(), RunRef{ID: crInstanceID, RunID: "run-a"})
+		}},
+	} {
+		t.Run(op.name, func(t *testing.T) {
+			fake := &fakeInstancesClient{} // GetInstance returns (nil, nil)
+			rt := newFakeCloudRunRuntime(t, fake)
+
+			err := op.call(rt)
+			want := "failed to " + strings.ToLower(op.name) + " instance: GetInstance returned no instance"
+			if err == nil || err.Error() != want {
+				t.Fatalf("%s = %v, want %q", op.name, err, want)
+			}
+			if n := len(fake.stopReqs) + len(fake.deleteReqs) + len(fake.startReqs); n != 0 {
+				t.Errorf("write calls = %d, want 0", n)
+			}
+		})
+	}
+}
+
+// Run: GetInstance answering (nil, nil) is not reused as a legacy instance:
+// Run fails with no start or create.
+func TestCloudRunRun_NilExistingInstanceRefused(t *testing.T) {
+	fake := &fakeInstancesClient{} // GetInstance returns (nil, nil)
+	rt := newFakeCloudRunRuntime(t, fake)
+
+	_, err := rt.Run(context.Background(), runCfgForRun("run-b"))
+	want := "failed to get instance " + cloudRunInstanceID("agent-1") + ": GetInstance returned no instance"
+	if err == nil || err.Error() != want {
+		t.Fatalf("Run = %v, want %q", err, want)
+	}
+	if n := len(fake.startReqs) + len(fake.createReqs) + len(fake.stopReqs) + len(fake.deleteReqs); n != 0 {
+		t.Errorf("write calls = %d, want 0", n)
 	}
 }

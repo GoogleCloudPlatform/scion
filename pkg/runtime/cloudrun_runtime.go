@@ -268,6 +268,11 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 	}
 	existing, err := c.GetInstance(ctx, getReq, defaultCallOpts...)
 	if err == nil {
+		if existing == nil {
+			// Not an unlabelled legacy instance with no etag: refuse
+			// rather than reuse it unchecked.
+			return "", fmt.Errorf("failed to get instance %s: GetInstance returned no instance", instanceID)
+		}
 		// Instance exists. The instance ID is deterministic per agent, so
 		// it may belong to another run (Start's pre-clean normally deletes
 		// it first; this is reached after a failed listing or a race). The
@@ -793,6 +798,11 @@ func (r *CloudRunRuntime) instanceOp(ctx context.Context, ref RunRef, verb strin
 		inst, err := c.GetInstance(ctx, &runpb.GetInstanceRequest{Name: name}, defaultCallOpts...)
 		if err != nil {
 			return fmt.Errorf("failed to %s instance: %w", verb, err)
+		}
+		if inst == nil {
+			// Not an unlabelled legacy instance with no etag: refuse
+			// rather than call without the run check and precondition.
+			return fmt.Errorf("failed to %s instance: GetInstance returned no instance", verb)
 		}
 		if lastErr != nil && inst.GetEtag() == sentEtag {
 			// The refusal was not a change: the instance still has the
