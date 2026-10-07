@@ -3999,7 +3999,10 @@ func (d *HTTPAgentDispatcher) deferredRestart(ctx context.Context, agent *store.
 }
 
 // deferredDelete handles a cross-node agent delete: subscribe → write intent →
-// signal → wait for the dispatch row to reach terminal state. Delete is
+// signal → wait for the dispatch row to reach terminal state. The intent
+// pins agent's run and previous runs as they are now (DeleteDispatchArgs),
+// so the owning node deletes those even if the row's run moves on before
+// it drains the intent (ptone/scion#2550). Delete is
 // idempotent: 404 from the owner is treated as success. The exception is
 // the broker's refusal because another run holds the name
 // (ErrDeleteRunMismatch, ptone/scion#3080): the executing node fails the
@@ -4011,6 +4014,7 @@ func (d *HTTPAgentDispatcher) deferredDelete(ctx context.Context, agent *store.A
 		RemoveBranch:   removeBranch,
 		SoftDelete:     softDelete,
 		DeletedAt:      deletedAt,
+		RunID:          agent.RunID,
 		PreviousRunIDs: agent.PreviousRunIDs,
 	}
 	// An engine delete records its claim, not its notAfter: the executing
@@ -4026,8 +4030,10 @@ func (d *HTTPAgentDispatcher) deferredDelete(ctx context.Context, agent *store.A
 // (*DeleteRunMismatchError) from the failed dispatch row's broker error:
 // the executing node fails the row only for the refusal, not for a plain
 // 404 (deleteAgentError). The requested run is the one the broker names
-// (api.BrokerErrorDetailRunID): the executing node sends the run of the row
-// it re-read, which may differ from this node's copy. Any other error,
+// (api.BrokerErrorDetailRunID): the executing node sends the intent's run
+// (DeleteDispatchArgs.RunID, ptone/scion#2550), or, for a legacy intent
+// with no run, the run of the row it re-read, which may differ from this
+// node's copy. Any other error,
 // including a run-mismatch 404 that does not refuse, is returned unchanged.
 func deferredDeleteError(err error) error {
 	if err == nil || errors.Is(err, ErrDeleteRunMismatch) {

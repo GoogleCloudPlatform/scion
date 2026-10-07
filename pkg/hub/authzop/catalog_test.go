@@ -256,17 +256,14 @@ func TestRegisteredPermissionsConsumed(t *testing.T) {
 		"broker.dispatch": "Broker-HMAC dispatch, not user-facing",
 
 		// Hub admin permissions — NonRouteUse only (no route declaration)
-		"hub.settings.read":           "NonRouteUse only, no route declaration",
-		"hub.settings.update":         "NonRouteUse only, no route declaration",
-		"hub.admin_mode.read":         "NonRouteUse only, no route declaration",
-		"hub.integrations.update":     "NonRouteUse only, no route declaration",
-		"hub.lifecycle_hooks.update":  "NonRouteUse only, no route declaration",
-		"hub.allow_list.read":         "NonRouteUse only, no route declaration",
-		"hub.project_defaults.update": "NonRouteUse only, no route declaration",
-		"hub.scheduler.update":        "NonRouteUse only, no route declaration",
-		"hub.federation.read":         "NonRouteUse only, no route declaration",
-		"hub.federation.update":       "NonRouteUse only, no route declaration",
-		"hub.teams_manifest.update":   "NonRouteUse only, no route declaration",
+		"hub.settings.read":         "NonRouteUse only, no route declaration",
+		"hub.admin_mode.read":       "NonRouteUse only, no route declaration",
+		"hub.integrations.update":   "NonRouteUse only, no route declaration",
+		"hub.allow_list.read":       "NonRouteUse only, no route declaration",
+		"hub.scheduler.update":      "NonRouteUse only, no route declaration",
+		"hub.federation.read":       "NonRouteUse only, no route declaration",
+		"hub.federation.update":     "NonRouteUse only, no route declaration",
+		"hub.teams_manifest.update": "NonRouteUse only, no route declaration",
 		// hub.github_app.read and hub.github_app.update: now route-enforced via route_metadata.go
 		"hub.audit.read": "Super-admin audit explain, NonRouteUse only",
 
