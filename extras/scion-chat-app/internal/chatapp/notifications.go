@@ -596,7 +596,12 @@ func (n *NotificationRelay) sendOversizeErrorCards(ctx context.Context, attachPa
 		if agentPath == "" {
 			continue
 		}
-		hostPath := resolveAgentPath(agentPath, projectSlug, projectID)
+		hostPath, err := resolveAgentPath(agentPath, projectSlug, projectID)
+		if err != nil {
+			n.log.Warn("cannot resolve attachment path for size check",
+				"agent_path", agentPath, "error", err)
+			continue
+		}
 		if hostPath == "" {
 			continue
 		}

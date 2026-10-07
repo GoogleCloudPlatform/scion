@@ -178,6 +178,8 @@ var suffixCheckExclusions = map[liveInventoryKey]string{
 	{OperationID: "project.metrics.read", Method: "GET", Pattern: "/api/v1/projects/{id}/metrics/summary"}:                       "a suffix on metrics/summary falls through to the metrics dashboard branch, which accepts any metrics/... path and answers 503 because testServer configures no telemetry project",
 	{OperationID: "project.metrics.read", Method: "GET", Pattern: "/api/v1/projects/{id}/metrics"}:                               "handleProjectMetricsDashboard accepts any metrics/... path and answers 503 because testServer configures no telemetry project, before path structure is examined",
 	{OperationID: "user.admin.invite", Method: "DELETE", Pattern: "/api/v1/admin/invites/{id}"}:                                  "same as the GET invites/{id} suffix entry above — and because the suffix is silently ignored, a DELETE with a bogus suffix would delete the real fixture, so this exclusion also protects the positive check that runs after it",
+	{OperationID: "hub.lifecyclehooks.update", Method: "PUT", Pattern: "/api/v1/admin/lifecycle-hooks/{id}"}:                     "handleAdminLifecycleHookByID truncates the suffix with extractID the same way as the GET entry above, so the update runs on the real ID; its result (409 for the empty body's version check) is the same as on the bare path",
+	{OperationID: "hub.lifecyclehooks.update", Method: "DELETE", Pattern: "/api/v1/admin/lifecycle-hooks/{id}"}:                  "handleAdminLifecycleHookByID truncates the suffix with extractID the same way as the GET entry above, so a suffixed DELETE would delete the real hook (204) exactly as the bare path does, and leave the positive check nothing to delete",
 }
 
 // idFixtures holds the real, store-seeded entity IDs this test substitutes
@@ -229,6 +231,7 @@ type idFixtures struct {
 	maintenanceMigrationKey string
 	integrationName         string
 	lifecycleHook           string
+	hubPreStartHook         string
 	chatTopic               string
 	agentLifecycle          string
 	agentRestore            string
@@ -533,6 +536,12 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	require.NoError(t, err)
 	require.NoError(t, os.MkdirAll(sdPath, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(sdPath, "li.txt"), []byte("li\n"), 0o644))
+	hubHook, err := s.CreateHubPreStartHook(ctx, &store.ProjectPreStartHook{
+		Scope: store.PreStartHookScopeHub, Name: "li-hub-pre-start-hook", Slug: "li-hub-pre-start-hook",
+		Script: "#!/bin/sh\necho li\n", CreatedBy: "li@test.com", UpdatedBy: "li@test.com",
+	})
+	require.NoError(t, err)
+	f.hubPreStartHook = hubHook.ID
 
 	// Artifact service: on (experiment, store, blob storage) with one
 	// single-file artifact owned by the dev user, homed in f.project.
@@ -807,6 +816,10 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 
 		// --- lifecycle hooks family ---
 		"/api/v1/admin/lifecycle-hooks/{id}": {"id": f.lifecycleHook},
+
+		// --- hub pre-start hooks family ---
+		"/api/v1/pre-start-hooks/{id}":          {"id": f.hubPreStartHook},
+		"/api/v1/pre-start-hooks/{id}/activate": {"id": f.hubPreStartHook},
 	}
 }
 
