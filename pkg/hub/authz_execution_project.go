@@ -46,74 +46,31 @@ type ExecutionSourceResolver interface {
 // authoritative local source user.
 var errNoAuthoritativeSource = errors.New("no single authoritative source user")
 
-// edgeChainSourceResolver resolves the source user from the stored agent row
-// and typed delegation edges in the agent's project: exactly one active edge
-// at each link, agent links that exist and are not deleted, and a terminal
-// user delegator that exists. The backfill sentinel, a missing or duplicate
-// edge, a cycle, or an over-long chain is not a source.
-type edgeChainSourceResolver struct {
-	store store.Store
+// provenanceRootSourceResolver resolves the source user as the terminal
+// user of the agent's recorded provenance chain (resolveProvenanceChain):
+// exactly one active edge in the agent's project at each link, a typed
+// delegator, agent links that exist and are not deleted, and a terminal user
+// delegator that exists. The backfill sentinel, a missing or duplicate edge,
+// a recorded type that does not match, a cycle, or an over-long chain is not
+// a source. Unrecorded hops are accepted: this resolver only selects the
+// user whose admission executionProjectAdmission checks, and grants nothing.
+// It is the only production caller that accepts unrecorded hops.
+type provenanceRootSourceResolver struct {
+	a *AuthzService
 }
 
-func (r edgeChainSourceResolver) ResolveExecutionSource(ctx context.Context, agent *store.Agent) (*store.User, error) {
-	if agent == nil || agent.ProjectID == "" {
+func (r provenanceRootSourceResolver) ResolveExecutionSource(ctx context.Context, agent *store.Agent) (*store.User, error) {
+	if r.a == nil || agent == nil || agent.ProjectID == "" {
 		return nil, errNoAuthoritativeSource
 	}
-	visited := map[string]bool{}
-	delegateID := agent.ID
-	for depth := 0; depth <= maxDelegationDepth; depth++ {
-		if visited[delegateID] {
-			return nil, fmt.Errorf("%w: delegation cycle", errNoAuthoritativeSource)
-		}
-		visited[delegateID] = true
-
-		edges, err := r.store.GetDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, delegateID)
-		if err != nil {
-			return nil, err
-		}
-		var active []*store.DelegationEdge
-		for _, e := range filterEdgesByScope(edges, store.RoleScopeProject, agent.ProjectID) {
-			if e.Active {
-				active = append(active, e)
-			}
-		}
-		if len(active) != 1 {
-			return nil, fmt.Errorf("%w: %d active edges for agent %s", errNoAuthoritativeSource, len(active), delegateID)
-		}
-		edge := active[0]
-		if isMigrationSentinel(edge) {
-			return nil, fmt.Errorf("%w: migration-provenance edge", errNoAuthoritativeSource)
-		}
-		switch edge.DelegatorType {
-		case store.DelegationPrincipalUser:
-			user, err := r.store.GetUser(ctx, edge.DelegatorID)
-			if err != nil {
-				if errors.Is(err, store.ErrNotFound) {
-					return nil, fmt.Errorf("%w: source user does not exist", errNoAuthoritativeSource)
-				}
-				return nil, err
-			}
-			if user == nil {
-				return nil, fmt.Errorf("%w: source user does not exist", errNoAuthoritativeSource)
-			}
-			return user, nil
-		case store.DelegationPrincipalAgent:
-			parent, err := r.store.GetAgent(ctx, edge.DelegatorID)
-			if err != nil {
-				if errors.Is(err, store.ErrNotFound) {
-					return nil, fmt.Errorf("%w: intermediate agent does not exist", errNoAuthoritativeSource)
-				}
-				return nil, err
-			}
-			if parent == nil || !parent.DeletedAt.IsZero() {
-				return nil, fmt.Errorf("%w: intermediate agent is deleted", errNoAuthoritativeSource)
-			}
-			delegateID = parent.ID
-		default:
-			return nil, fmt.Errorf("%w: unsupported delegator type %q", errNoAuthoritativeSource, edge.DelegatorType)
-		}
+	root, err := r.a.resolveProvenanceChain(ctx, agent, true)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", errNoAuthoritativeSource, err)
 	}
-	return nil, fmt.Errorf("%w: chain exceeds maximum depth", errNoAuthoritativeSource)
+	if root.RootUser == nil {
+		return nil, fmt.Errorf("%w: source user does not exist", errNoAuthoritativeSource)
+	}
+	return root.RootUser, nil
 }
 
 // executionSourceResolver returns the resolver used by the execution-project
@@ -122,7 +79,7 @@ func (a *AuthzService) executionSourceResolver() ExecutionSourceResolver {
 	if a.sourceResolver != nil {
 		return a.sourceResolver
 	}
-	return edgeChainSourceResolver{store: a.store}
+	return provenanceRootSourceResolver{a: a}
 }
 
 // executionProjectClass returns the project-scoped class used for
