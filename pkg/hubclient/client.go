@@ -441,6 +441,8 @@ func (c *client) Health(ctx context.Context) (*HealthResponse, error) {
 			return nil, err
 		}
 	}
+	// Health is a reachability probe; several callers ignore the body, so a
+	// 204 still counts as reachable.
 	return apiclient.DecodeResponse[HealthResponse](resp)
 }
 

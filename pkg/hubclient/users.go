@@ -80,7 +80,7 @@ func (s *userService) List(ctx context.Context, opts *ListUsersOptions) (*ListUs
 		TotalCount int    `json:"totalCount,omitempty"`
 	}
 
-	result, err := apiclient.DecodeResponse[listResponse](resp)
+	result, err := apiclient.DecodeRequired[listResponse](resp)
 	if err != nil {
 		return nil, err
 	}
@@ -100,7 +100,7 @@ func (s *userService) Get(ctx context.Context, userID string) (*User, error) {
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[User](resp)
+	return apiclient.DecodeRequired[User](resp)
 }
 
 // Update updates a user.
@@ -109,5 +109,5 @@ func (s *userService) Update(ctx context.Context, userID string, req *UpdateUser
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[User](resp)
+	return apiclient.DecodeRequired[User](resp)
 }

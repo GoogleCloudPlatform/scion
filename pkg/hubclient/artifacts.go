@@ -198,7 +198,7 @@ func (s *artifactService) Publish(ctx context.Context, req *PublishArtifactReque
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[ArtifactResponse](resp)
+	return apiclient.DecodeRequired[ArtifactResponse](resp)
 }
 
 // Get implements ArtifactService.
@@ -207,7 +207,7 @@ func (s *artifactService) Get(ctx context.Context, id string) (*ArtifactResponse
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[ArtifactResponse](resp)
+	return apiclient.DecodeRequired[ArtifactResponse](resp)
 }
 
 // OpenFile implements ArtifactService. The hub either streams the bytes or
@@ -295,7 +295,7 @@ func (s *artifactService) CreateVersion(ctx context.Context, id string, req *Cre
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[PendingVersionResponse](resp)
+	return apiclient.DecodeRequired[PendingVersionResponse](resp)
 }
 
 // UploadFile implements ArtifactService.
@@ -323,7 +323,7 @@ func (s *artifactService) FinalizeVersion(ctx context.Context, id string, seq in
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[ArtifactResponse](resp)
+	return apiclient.DecodeRequired[ArtifactResponse](resp)
 }
 
 // ListVersions implements ArtifactService.
@@ -339,7 +339,7 @@ func (s *artifactService) ListVersions(ctx context.Context, id string) ([]Artifa
 		if err != nil {
 			return nil, err
 		}
-		page, err := apiclient.DecodeResponse[struct {
+		page, err := apiclient.DecodeRequired[struct {
 			Versions   []ArtifactVersion `json:"versions"`
 			NextBefore int               `json:"nextBefore"`
 		}](resp)
@@ -360,5 +360,5 @@ func (s *artifactService) GetVersion(ctx context.Context, id string, seq int) (*
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[ArtifactResponse](resp)
+	return apiclient.DecodeRequired[ArtifactResponse](resp)
 }
