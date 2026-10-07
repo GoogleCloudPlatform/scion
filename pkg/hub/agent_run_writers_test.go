@@ -74,12 +74,22 @@ func funcKey(fn *ast.FuncDecl) string {
 // in names (a call or a method value).
 func referencesOutsideStore(t *testing.T, names map[string]bool) []string {
 	t.Helper()
+	return moduleReferences(t, names, filepath.Join("pkg", "store"), filepath.Join("pkg", "ent"))
+}
+
+// moduleReferences returns "file Func" for every non-test function in the
+// module, outside skip (module-relative directories), that references a
+// selector named in names.
+func moduleReferences(t *testing.T, names map[string]bool, skip ...string) []string {
+	t.Helper()
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	require.NoError(t, err)
 	skipDirs := map[string]bool{
 		".git": true, "node_modules": true, "web": true, "docs-site": true,
 		"extras": true, "vendor": true, ".scion": true,
-		filepath.Join("pkg", "store"): true, filepath.Join("pkg", "ent"): true,
+	}
+	for _, dir := range skip {
+		skipDirs[dir] = true
 	}
 	var refs []string
 	fset := token.NewFileSet()
@@ -122,6 +132,33 @@ func referencesOutsideStore(t *testing.T, names map[string]bool) []string {
 	require.NoError(t, err)
 	sort.Strings(refs)
 	return refs
+}
+
+// entRunIDSetters are the generated ent builder methods that write a
+// run_id column.
+var entRunIDSetters = map[string]bool{
+	"SetRunID":         true,
+	"SetNillableRunID": true,
+	"ClearRunID":       true,
+}
+
+// wantEntRunIDSetterCallers is every function outside the generated ent
+// code that calls an ent run_id setter: the two agent run writes behind
+// the store's run methods, and the agent credential insert (its own
+// run_id column).
+var wantEntRunIDSetterCallers = []string{
+	"pkg/store/entadapter/agent_store.go AgentStore.setAgentRunIDOnce",
+	"pkg/store/entadapter/agent_store.go AgentStore.swapAgentRunID",
+	"pkg/store/entadapter/credential_store.go createAgentCredential",
+}
+
+// TestAgentRunIDStoreWritersAreAClosedSet: below the store interface, the
+// agent's run_id column is written only by the functions behind
+// SetAgentRunID, CompareAndSwapAgentRunID and RevertAgentRunID, so a new
+// store method (or direct ent use anywhere in the module) that writes it
+// fails here.
+func TestAgentRunIDStoreWritersAreAClosedSet(t *testing.T) {
+	assert.Equal(t, wantEntRunIDSetterCallers, moduleReferences(t, entRunIDSetters, filepath.Join("pkg", "ent")))
 }
 
 // TestAgentRunIDWritersAreAClosedSet: the functions that change an agent's
