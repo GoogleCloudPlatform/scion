@@ -1327,6 +1327,15 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		structuredMsg.Metadata[attachmentsMetadataKey] = encoded
 	}
 
+	// W6-mention: human members @mentioned in an agent → group (thread)
+	// message, matched against the member list resolved above.
+	var mentionedHumans []string
+	if req.ThreadID != "" && !strings.HasPrefix(req.ThreadID, "dm:") && !strings.HasPrefix(req.ThreadID, "agent:") {
+		if names := messages.ExtractMentions(req.Msg); len(names) > 0 {
+			mentionedHumans = mentionedHumanIDs(humanMembers, names, "")
+		}
+	}
+
 	// Dispatch based on delivery path.
 	switch result.DeliveryPath {
 	case deliveryUserBroker:
@@ -1384,6 +1393,11 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 				"Failed to persist message", nil)
 			return
 		}
+		// Record mention rows before publish: clients refetch the thread
+		// list and its mention dots on the SSE event. Only this path
+		// persists storeMsg under this ID; the broker path stores its own
+		// row.
+		s.recordHumanMentions(ctx, req.ThreadID, storeMsg.ID, mentionedHumans)
 		// W7: Link before publishing so a client that refetches on the SSE
 		// event already sees the attachments.
 		s.mu.RLock()
@@ -1424,16 +1438,13 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 
 	// Fire notifications (both broker and non-broker paths).
 	// W6-mention: mention notifications for agent → group messages.
-	if req.ThreadID != "" && !strings.HasPrefix(req.ThreadID, "dm:") && !strings.HasPrefix(req.ThreadID, "agent:") {
-		names := messages.ExtractMentions(req.Msg)
-		if len(names) > 0 {
-			senderName := agent.Name
-			if senderName == "" {
-				senderName = agent.Slug
-			}
-			go s.fireHumanMentionNotifications(context.Background(), names, agent.ProjectID,
-				req.ThreadID, "", senderName, req.Msg)
+	if len(mentionedHumans) > 0 && s.getChatNotifier() != nil {
+		senderName := agent.Name
+		if senderName == "" {
+			senderName = agent.Slug
 		}
+		go s.notifyHumanMentions(context.Background(), mentionedHumans, agent.ProjectID,
+			req.ThreadID, "", senderName, req.Msg)
 	}
 
 	// W6: DM notification for agent → human replies (non-broker path only).
@@ -1615,9 +1626,10 @@ func (s *Server) restoreAgent(w http.ResponseWriter, r *http.Request, id string)
 	// delete deactivated is live (otherwise a 409, or a 503 when the lookup
 	// fails), reactivates those edges (a conflicting active edge is a 409)
 	// and writes the agent_restore audit record. It also refuses an agent
-	// whose guard user (its owner, ancestry root or schedule creator) no
-	// longer exists, normally a deleted user but possibly a purged legacy
-	// root agent (ptone/scion#2769; errAgentOwnerUserMissing, see
+	// whose guard user (its owner, ancestry root or, for a scheduled agent,
+	// the principal of its schedule's latest revision) does not exist,
+	// normally a deleted user but possibly a purged legacy root agent
+	// (ptone/scion#2769; errAgentOwnerUserMissing, see
 	// lockAgentGuardUserTx).
 	if err := s.restoreAgentTx(ctx, agent, auditActorFromContext(ctx)); err != nil {
 		if errors.Is(err, errAgentNotSoftDeleted) {

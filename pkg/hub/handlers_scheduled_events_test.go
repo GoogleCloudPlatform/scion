@@ -46,6 +46,7 @@ func setupScheduledEventTest(t *testing.T) (*Server, store.Store, string) {
 		Slug: "sched-test-project",
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
+	seedScheduleAuthorAgent(t, s, project.ID)
 
 	return srv, s, project.ID
 }
@@ -152,9 +153,7 @@ func TestScheduledEvent_CreateDispatchAgentScopedUATDenied(t *testing.T) {
 	})
 
 	t.Run("hub-scoped UAT for the same user denied", func(t *testing.T) {
-		// A hub-scoped UAT is refused by the project-scoped access check;
-		// TestAuthorizeScheduledDispatchAgentAuthoring_HubScopedUATDenied
-		// covers the authoring gate itself for this credential shape.
+		// A hub-scoped UAT is refused by the project-scoped access check.
 		scoped := NewScopedUserIdentity(ownerUser, "", []string{"scheduled_event:create", "agent:create"})
 		rec := doScheduledEventUserRequest(t, srv, scoped, http.MethodPost, projectID, "", req)
 		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())

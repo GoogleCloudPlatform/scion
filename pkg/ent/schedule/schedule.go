@@ -28,6 +28,18 @@ const (
 	FieldAttributionVersion = "attribution_version"
 	// FieldAuthorizationRevision holds the string denoting the authorization_revision field in the database.
 	FieldAuthorizationRevision = "authorization_revision"
+	// FieldAuthorityCeilingKind holds the string denoting the authority_ceiling_kind field in the database.
+	FieldAuthorityCeilingKind = "authority_ceiling_kind"
+	// FieldAuthorityCeilingVersion holds the string denoting the authority_ceiling_version field in the database.
+	FieldAuthorityCeilingVersion = "authority_ceiling_version"
+	// FieldAuthorityCeilingPermissionIds holds the string denoting the authority_ceiling_permission_ids field in the database.
+	FieldAuthorityCeilingPermissionIds = "authority_ceiling_permission_ids"
+	// FieldAuthorityCeilingBoundaryKind holds the string denoting the authority_ceiling_boundary_kind field in the database.
+	FieldAuthorityCeilingBoundaryKind = "authority_ceiling_boundary_kind"
+	// FieldAuthorityCeilingBoundaryProjectID holds the string denoting the authority_ceiling_boundary_project_id field in the database.
+	FieldAuthorityCeilingBoundaryProjectID = "authority_ceiling_boundary_project_id"
+	// FieldAuthorityCeilingSourceExpiresAt holds the string denoting the authority_ceiling_source_expires_at field in the database.
+	FieldAuthorityCeilingSourceExpiresAt = "authority_ceiling_source_expires_at"
 	// FieldProjectID holds the string denoting the project_id field in the database.
 	FieldProjectID = "project_id"
 	// FieldName holds the string denoting the name field in the database.
@@ -72,6 +84,12 @@ var Columns = []string{
 	FieldInitiatorCredentialSnapshot,
 	FieldAttributionVersion,
 	FieldAuthorizationRevision,
+	FieldAuthorityCeilingKind,
+	FieldAuthorityCeilingVersion,
+	FieldAuthorityCeilingPermissionIds,
+	FieldAuthorityCeilingBoundaryKind,
+	FieldAuthorityCeilingBoundaryProjectID,
+	FieldAuthorityCeilingSourceExpiresAt,
 	FieldProjectID,
 	FieldName,
 	FieldCronExpr,
@@ -100,6 +118,14 @@ func ValidColumn(column string) bool {
 }
 
 var (
+	// DefaultAuthorityCeilingKind holds the default value on creation for the "authority_ceiling_kind" field.
+	DefaultAuthorityCeilingKind string
+	// DefaultAuthorityCeilingVersion holds the default value on creation for the "authority_ceiling_version" field.
+	DefaultAuthorityCeilingVersion int32
+	// DefaultAuthorityCeilingBoundaryKind holds the default value on creation for the "authority_ceiling_boundary_kind" field.
+	DefaultAuthorityCeilingBoundaryKind string
+	// DefaultAuthorityCeilingBoundaryProjectID holds the default value on creation for the "authority_ceiling_boundary_project_id" field.
+	DefaultAuthorityCeilingBoundaryProjectID string
 	// NameValidator is a validator for the "name" field. It is called by the builders before save.
 	NameValidator func(string) error
 	// CronExprValidator is a validator for the "cron_expr" field. It is called by the builders before save.
@@ -165,6 +191,36 @@ func ByAttributionVersion(opts ...sql.OrderTermOption) OrderOption {
 // ByAuthorizationRevision orders the results by the authorization_revision field.
 func ByAuthorizationRevision(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldAuthorizationRevision, opts...).ToFunc()
+}
+
+// ByAuthorityCeilingKind orders the results by the authority_ceiling_kind field.
+func ByAuthorityCeilingKind(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldAuthorityCeilingKind, opts...).ToFunc()
+}
+
+// ByAuthorityCeilingVersion orders the results by the authority_ceiling_version field.
+func ByAuthorityCeilingVersion(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldAuthorityCeilingVersion, opts...).ToFunc()
+}
+
+// ByAuthorityCeilingPermissionIds orders the results by the authority_ceiling_permission_ids field.
+func ByAuthorityCeilingPermissionIds(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldAuthorityCeilingPermissionIds, opts...).ToFunc()
+}
+
+// ByAuthorityCeilingBoundaryKind orders the results by the authority_ceiling_boundary_kind field.
+func ByAuthorityCeilingBoundaryKind(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldAuthorityCeilingBoundaryKind, opts...).ToFunc()
+}
+
+// ByAuthorityCeilingBoundaryProjectID orders the results by the authority_ceiling_boundary_project_id field.
+func ByAuthorityCeilingBoundaryProjectID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldAuthorityCeilingBoundaryProjectID, opts...).ToFunc()
+}
+
+// ByAuthorityCeilingSourceExpiresAt orders the results by the authority_ceiling_source_expires_at field.
+func ByAuthorityCeilingSourceExpiresAt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldAuthorityCeilingSourceExpiresAt, opts...).ToFunc()
 }
 
 // ByProjectID orders the results by the project_id field.

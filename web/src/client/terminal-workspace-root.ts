@@ -29,6 +29,7 @@ import type { PaletteCandidate } from './chat-palette-types.js';
 import {
   QuickPaletteHost,
   isQuickPaletteShortcut,
+  type QuickPaletteLoadContext,
 } from '../components/shared/palette/quick-palette-host.js';
 import '../components/shared/header.js';
 import { isMacPlatform } from '../utils/platform.js';
@@ -161,8 +162,13 @@ export class TerminalWorkspaceRoot {
     label: 'Jump to agent',
     placeholder: 'Search agents…',
     load: async (context): Promise<PaletteCandidate[]> => {
-      const { loadTerminalPaletteAgents } = await import('./terminal-palette-data.js');
-      return loadTerminalPaletteAgents(context);
+      this.paletteLoad = context;
+      try {
+        const { loadTerminalPaletteAgents } = await import('./terminal-palette-data.js');
+        return await loadTerminalPaletteAgents(context);
+      } finally {
+        if (this.paletteLoad === context) this.paletteLoad = null;
+      }
     },
     onSelect: (target): void => {
       this.paletteFocusAgentId = target.agentId;
@@ -182,6 +188,15 @@ export class TerminalWorkspaceRoot {
    * that session closes ({@link syncSessions}).
    */
   private lastFocusedPaneSessionKey: string | null = null;
+  /** The palette's Agents load in flight, if any; its result supersedes a live update. */
+  private paletteLoad: QuickPaletteLoadContext | null = null;
+  /**
+   * Releases the agent store's hub entry, which the workspace retains while
+   * it is shown, so the palette opens from memory and stays current. Set
+   * as soon as the retain is requested: the store module loads on first
+   * show, outside the main bundle.
+   */
+  private paletteAgentsRelease: (() => void) | null = null;
   /**
    * The agent picked from the palette, whose pane takes focus once it is
    * visible and the palette's close has settled — see
@@ -634,8 +649,56 @@ export class TerminalWorkspaceRoot {
   dispose(): void {
     document.removeEventListener('keydown', this.handleGlobalKeydown);
     document.removeEventListener('focusin', this.handleGlobalFocusIn);
+    this.releasePaletteAgents();
     this.touchQuery?.removeEventListener?.('change', this.handleTouchQueryChange);
     this.paletteHost.dispose();
+  }
+
+  /**
+   * Retains the agent store's hub entry while the workspace is shown. The
+   * store module is imported here, so it stays out of the main bundle; a
+   * release before the import settles retains nothing.
+   */
+  private retainPaletteAgents(): void {
+    if (this.paletteAgentsRelease) return;
+    let release: (() => void) | null = null;
+    let released = false;
+    const handle = (): void => {
+      released = true;
+      release?.();
+      release = null;
+    };
+    this.paletteAgentsRelease = handle;
+    import('./terminal-palette-data.js')
+      .then(({ retainTerminalPaletteAgents }) => {
+        if (released) return;
+        release = retainTerminalPaletteAgents((candidates) =>
+          this.handlePaletteAgentsChange(candidates)
+        );
+      })
+      .catch((err: unknown) => {
+        if (this.paletteAgentsRelease === handle) this.paletteAgentsRelease = null;
+        console.error('[Terminal] agent list unavailable for the palette:', err);
+      });
+  }
+
+  private releasePaletteAgents(): void {
+    const release = this.paletteAgentsRelease;
+    this.paletteAgentsRelease = null;
+    release?.();
+  }
+
+  /**
+   * Keeps the open palette's Agents group current with the store, with no
+   * request. Nothing is published while the palette is closed (the next
+   * open reads the store) or while a load is in flight: its result
+   * supersedes this one, and `setCandidates` would abort it. A load is
+   * tracked from its start until it settles (a superseded load's settling
+   * leaves the newer one tracked), so this needs no check of its own.
+   */
+  private handlePaletteAgentsChange(candidates: PaletteCandidate[]): void {
+    if (!this.paletteHost.isOpen || this.paletteLoad) return;
+    this.paletteHost.setCandidates(candidates);
   }
 
   /**
@@ -792,20 +855,25 @@ export class TerminalWorkspaceRoot {
   }
 
   // ── Keyboard shortcut: Cmd+K everywhere, Ctrl+K outside a pane ──────────
+  // (and, on macOS, outside any editable text field)
 
   /**
    * Cmd+K (Meta+K) opens the palette everywhere, including with a terminal
    * pane focused: xterm never cancels or stops-propagating a plain Meta+K
    * (it has no C0/C1 mapping for it), so this plain bubble-phase listener
    * already sees it from inside a pane with no capture-phase trick needed.
-   * Ctrl+K opens the palette only when focus is outside a pane: xterm DOES
+   * Ctrl+K opens the palette only when focus is outside a pane and, on
+   * macOS, outside any editable text field (see isQuickPaletteShortcut);
+   * xterm's input textarea is one, so the two rules agree. xterm DOES
    * send Ctrl+K to the PTY (kill-line, `\x0b`) and then stops its own
    * propagation, so a pane-focused Ctrl+K never reaches here at all — the
    * explicit `eventFromTerminalPane` check below is belt-and-suspenders, not
    * what does the work. Only `ctrlKey` skips that check; `metaKey` must still
    * open the palette from inside a pane, so it is deliberately exempted.
    *
-   * While the palette is open, the same shortcut closes it, as in chat.
+   * While the palette is open, the same shortcut closes it, as in chat. On
+   * macOS, Ctrl+K in the palette's own search field edits the query, so
+   * Cmd+K is what closes it from there.
    */
   private readonly handleGlobalKeydown = (e: KeyboardEvent): void => {
     if (this.element.hidden) return;
@@ -844,9 +912,12 @@ export class TerminalWorkspaceRoot {
   }
 
   show(visible: boolean): void {
-    if (!visible) {
+    if (visible) {
+      this.retainPaletteAgents();
+    } else {
       this.paletteHost.hide();
       this.railFocusAgentId = null;
+      this.releasePaletteAgents();
     }
     this.element.hidden = !visible;
     this.element.style.display = visible ? 'flex' : 'none';
@@ -1388,7 +1459,9 @@ export class TerminalWorkspaceRoot {
     const metadata = entry.metadata;
     const agent = metadata.agent ?? entry.state.agent;
     const agentName = agent?.name || entry.state.agentId;
-    const projectId = agent?.projectId || 'Unknown project';
+    // Prefer the hub-resolved project name; fall back to the project id
+    // when the name is not known yet, and omit the line when neither is.
+    const projectLabel = agent?.project || agent?.projectId || '';
     const item = document.createElement('div');
     item.className = 'terminal-rail-item';
     item.setAttribute('role', 'listitem');
@@ -1399,32 +1472,49 @@ export class TerminalWorkspaceRoot {
     item.dataset.availability = metadata.availability;
     if (entry.state.disconnectReason) item.dataset.disconnectReason = entry.state.disconnectReason;
 
+    // One list of status parts feeds both forms: the visible titles join them
+    // with a middle dot, the accessible label with a comma so screen readers
+    // pause between them instead of announcing or skipping the dot.
+    const statusParts = [
+      disconnectLabel(entry.state.connection, entry.state.disconnectReason),
+      availabilityLabel(metadata.availability),
+    ];
+    const statusLabel = statusParts.join(' · ');
+    const spokenStatus = statusParts.join(', ');
+
     const select = document.createElement('button');
     select.type = 'button';
     select.className = 'terminal-rail-select';
-    select.setAttribute('aria-label', `Show terminal for ${agentName} in ${projectId}`);
+    // The status dot is small and aria-hidden, so surface its status text on
+    // the whole row: as the hover title and in the accessible label.
+    select.title = statusLabel;
+    select.setAttribute(
+      'aria-label',
+      projectLabel
+        ? `Show terminal for ${agentName} in ${projectLabel}, ${spokenStatus}`
+        : `Show terminal for ${agentName}, ${spokenStatus}`
+    );
     if (visibleSlots.includes(entry.state.key)) select.setAttribute('aria-current', 'page');
     select.dataset.railFocusId = `${entry.state.key}:select`;
     select.addEventListener('click', () => this.openSessionRoute(entry));
 
     const connection = document.createElement('span');
     connection.className = 'terminal-connection-dot';
-    connection.title = connectionLabel(entry.state.connection);
+    connection.title = statusLabel;
     connection.setAttribute('aria-hidden', 'true');
     const text = document.createElement('span');
     text.className = 'terminal-rail-text';
     const name = document.createElement('span');
     name.className = 'terminal-agent-name';
     name.textContent = agentName;
-    const project = document.createElement('span');
-    project.className = 'terminal-project-name';
-    project.textContent = projectId;
-    const details = document.createElement('span');
-    details.className = 'terminal-state-label';
-    details.textContent = `${disconnectLabel(entry.state.connection, entry.state.disconnectReason)} · ${availabilityLabel(
-      metadata.availability
-    )}`;
-    text.append(name, project, details);
+    text.append(name);
+    if (projectLabel) {
+      const project = document.createElement('span');
+      project.className = 'terminal-project-name';
+      project.textContent = projectLabel;
+      project.title = projectLabel;
+      text.append(project);
+    }
     select.append(connection, text);
 
     const actions = document.createElement('span');
@@ -1984,8 +2074,7 @@ export class TerminalWorkspaceRoot {
         gap: 0.125rem;
       }
       .terminal-agent-name,
-      .terminal-project-name,
-      .terminal-state-label {
+      .terminal-project-name {
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
@@ -1994,8 +2083,7 @@ export class TerminalWorkspaceRoot {
         font-size: 0.875rem;
         font-weight: 600;
       }
-      .terminal-project-name,
-      .terminal-state-label {
+      .terminal-project-name {
         font-size: 0.75rem;
         color: var(--scion-text-muted, #64748b);
       }

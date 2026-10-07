@@ -119,6 +119,10 @@ func deviceID(fi os.FileInfo) (uint64, bool) {
 	return uint64(st.Dev), true
 }
 
+// ephemeralPathReasonVolumeEmpty is the fixed reason token logged by
+// warnEphemeralProjectPath.
+const ephemeralPathReasonVolumeEmpty = "volume_empty"
+
 // warnEphemeralProjectPath reports, once per slug, that a hub-managed project
 // is being served from the pod's local disk because the shared volume has no
 // content for it yet.
@@ -127,7 +131,11 @@ func deviceID(fi os.FileInfo) (uint64, bool) {
 // WebDAV, clone and cache request paths, so a deployment sitting in this state
 // would otherwise emit a line per request for as long as it runs. The
 // condition is a property of the deployment, not of the request.
-func (s *Server) warnEphemeralProjectPath(slug, localPath, volumePath string) {
+//
+// The log line carries the backend and a fixed reason token. No project ID is
+// in scope (callers resolve by slug), and the slug and both paths are left
+// out of the log; the slug is used only as the suppression key.
+func (s *Server) warnEphemeralProjectPath(slug string) {
 	if _, alreadyWarned := s.warnedEphemeralProjects.LoadOrStore(slug, struct{}{}); alreadyWarned {
 		return
 	}
@@ -136,7 +144,7 @@ func (s *Server) warnEphemeralProjectPath(slug, localPath, volumePath string) {
 		backend = wsCfg.Backend
 	}
 	s.projectsLogger().Warn("hub-managed project served from ephemeral local path; workspace volume mount has no content yet",
-		"slug", slug, "backend", backend, "local_path", localPath, "volume_path", volumePath)
+		"backend", backend, "reason", ephemeralPathReasonVolumeEmpty)
 }
 
 // volumeBackedProjectPath resolves the hub-managed project path for the
