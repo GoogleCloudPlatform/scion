@@ -218,14 +218,11 @@ func (s *Server) handleHealthSummary(w http.ResponseWriter, r *http.Request) {
 	} else {
 		agentsSummary.Total = agentAgg.Total
 		agentsSummary.ByPhase = agentAgg.ByPhase
-		if len(agentAgg.StalledNames) > 0 {
-			agentsSummary.Stalled = agentAgg.StalledNames
+		for _, r := range agentAgg.Crashed.Refs {
+			agentsSummary.Crashed = append(agentsSummary.Crashed, r.Name)
 		}
-		if len(agentAgg.CrashedNames) > 0 {
-			agentsSummary.Crashed = agentAgg.CrashedNames
-		}
-		if len(agentAgg.ErroredNames) > 0 {
-			agentsSummary.Errored = agentAgg.ErroredNames
+		for _, r := range agentAgg.ErrorPhase.Refs {
+			agentsSummary.Errored = append(agentsSummary.Errored, r.Name)
 		}
 	}
 
@@ -338,7 +335,7 @@ func healthSummaryBroker(b *store.RuntimeBroker, agentAgg *store.AgentHealthAggr
 	}
 	if agentAgg != nil {
 		if bucket, ok := agentAgg.ByBroker[b.ID]; ok {
-			row.Agents.Total = bucket.Count
+			row.Agents.Total = bucket.Running + bucket.Attention
 		}
 	}
 	return row
