@@ -106,6 +106,9 @@ var validSessionOnlyReasons = map[SessionOnlyReason]bool{
 	ReasonGovernancePending:    true,
 }
 
+// Valid reports whether r is a catalog session-only reason.
+func (r SessionOnlyReason) Valid() bool { return validSessionOnlyReasons[r] }
+
 // BearerBoundary is a token boundary kind an admitted operation accepts.
 // Values match the credential boundary kinds.
 type BearerBoundary string
