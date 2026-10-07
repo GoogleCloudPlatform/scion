@@ -61,8 +61,8 @@ func remoteExtractLimit(l RemoteImageLimits) int { return 4 * l.MaxCount }
 // Publish warnings about the scan for remote images. They sit next to the
 // per-image warnings.
 const (
-	warnBeyondWindow      = "remote images beyond the first 2 MiB of the entry were not fetched"
-	warnTooManyReferences = "the entry has more images than the hub reads; later remote images were not fetched"
+	warnBeyondWindow  = "remote images beyond the first 2 MiB of the entry were not fetched"
+	warnTooManyImages = "the entry has more images than the hub reads; later remote images were not fetched"
 )
 
 // publishDeadlineMargin is the time a publish keeps for storing the fetched
@@ -103,7 +103,7 @@ func (s *Service) remoteImages(ctx context.Context, w http.ResponseWriter, b bac
 	if ex.full && len(ex.urls) <= lim.MaxCount {
 		// The scan stopped at its candidate limit, so later images in the
 		// entry were not read.
-		warnings = append(warnings, warnTooManyReferences)
+		warnings = append(warnings, warnTooManyImages)
 	}
 	if len(ex.urls) == 0 {
 		return nil, warnings

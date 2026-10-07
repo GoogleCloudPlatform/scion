@@ -35,9 +35,8 @@ func normalizeImageURL(raw string, kind int) (string, bool) {
 	return normalizeCounted(raw, kind, &steps)
 }
 
-// normalizeCounted is normalizeImageURL that adds the bytes it examines to
-// *steps. Each step reads its input once, so the count is a fixed multiple
-// of len(raw) at most.
+// normalizeCounted is normalizeImageURL that adds a charge for its work to
+// *steps, for the work tests. Its work is linear in len(raw).
 //
 // Its input is at most maxImageURLBytes long: the scan keeps no longer
 // candidate (see inlineDestination and imgTag), and those caps are what

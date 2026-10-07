@@ -289,25 +289,28 @@ func costShapes() map[string]string {
 		same.WriteString("![x][same]")
 	}
 	return map[string]string{
-		"open brackets":                         fill("[", w),
-		"image opens":                           fill("![", w),
-		"closes":                                fill("]", w),
-		"empty images":                          fill("![](", w),
-		"image then paren":                      fill("![a](h", w),
-		"unclosed destinations":                 fill("![a](https://img.example/"+strings.Repeat("b", 100), w),
-		"long destination":                      fill("![a]("+longURL, w),
-		"destination at the cap":                fill("![a]("+longURL+strings.Repeat("c", 40)+" ", w),
-		"duplicate images":                      fill("![a](https://img.example/a.png)", w),
-		"distinct invalid":                      distinct("![a](https://u@h/%d.png)", w),
+		"open brackets":          fill("[", w),
+		"image opens":            fill("![", w),
+		"closes":                 fill("]", w),
+		"empty images":           fill("![](", w),
+		"image then paren":       fill("![a](h", w),
+		"unclosed destinations":  fill("![a](https://img.example/"+strings.Repeat("b", 100), w),
+		"long destination":       fill("![a]("+longURL, w),
+		"destination at the cap": fill("![a]("+longURL+strings.Repeat("c", 40)+" ", w),
+		"duplicate images":       fill("![a](https://img.example/a.png)", w),
+		"distinct invalid":       distinct("![a](https://u@h/%d.png)", w),
+		"img starts":             fill("<img", w),
+		"img unclosed":           fill("<img src=\"https://img.example/a.png\" "+strings.Repeat("x", 200), w),
+		"img lt":                 fill("<img src=x <", w),
+		"img tags":               fill(`<img src="https://img.example/a.png">`, w),
+		"img tags distinct":      distinct(`<img src="https://img.example/%d.png?&copy;">`, w),
+		"escapes":                fill(`\`, w),
+		"newlines":               fill("\n", w),
+		// Reference-style syntax, which the scan reads as plain text (kept for
+		// ptone/scion#3678).
 		"references":                            fill("![a][b]", w),
 		"reference labels":                      fill("![a]["+strings.Repeat("l", 999-1), w),
 		"shortcut references":                   fill("![abc]", w),
-		"img starts":                            fill("<img", w),
-		"img unclosed":                          fill("<img src=\"https://img.example/a.png\" "+strings.Repeat("x", 200), w),
-		"img lt":                                fill("<img src=x <", w),
-		"img tags":                              fill(`<img src="https://img.example/a.png">`, w),
-		"img tags distinct":                     distinct(`<img src="https://img.example/%d.png?&copy;">`, w),
-		"escapes":                               fill(`\`, w),
 		"definitions":                           uses.String() + "\n" + fill("[label1]: https://img.example/x.png\n", w-uses.Len()-1),
 		"definitions unmatched":                 uses.String() + "\n" + fill("[other]: https://img.example/x.png\n", w-uses.Len()-1),
 		"definitions long labels":               uses.String() + "\n" + fill("["+strings.Repeat("q", 999)+"]: https://img.example/x.png\n", w-uses.Len()-1),
@@ -315,7 +318,6 @@ func costShapes() map[string]string {
 		"definitions one label":                 same.String() + "\n" + fill("[same]: https://img.example/x.png\n", w-same.Len()-1),
 		"definitions one label, one pending":    "![never][nope]" + same.String() + "\n" + fill("[same]: https://img.example/x.png\n", w-same.Len()-15),
 		"definitions one label, unusable":       same.String() + "\n" + fill("[same]: ftp://img.example/x.png\n", w-same.Len()-1),
-		"newlines":                              fill("\n", w),
 		"distinct shortcut references":          distinct("![label%d] ", w),
 		"nested collapsed references":           fill(strings.Repeat("![", 32)+strings.Repeat("c", 500)+strings.Repeat("][]", 32), w),
 		"nested distinct collapsed references":  distinct("![x%d"+strings.Repeat("![", 30)+"y"+strings.Repeat("][]", 31), w),
@@ -340,9 +342,8 @@ func distinct(format string, size int) string {
 	return b.String()[:size]
 }
 
-// maxStepsPerByte is the per-byte bound the scan's header derives: at most
-// two reads by the main loop or an inner scan, one by the duplicate check,
-// three by normalization and one by the normalized duplicate check.
+// maxStepsPerByte is the test's limit on charged steps per byte, for the
+// charges the scan's header describes.
 const maxStepsPerByte = 7
 
 // maxPolicyLimit is the scan limit at the largest image cap the default
@@ -502,9 +503,9 @@ func TestExtractImageURLsRandomCompositions(t *testing.T) {
 }
 
 // TestExtractImageURLsKeptDestinationsWork: when kept inline destinations
-// fill the document, each of their bytes is read six times (the
-// destination scan, the duplicate check, three normalization reads, the
-// normalized duplicate check) and the main loop does not read them again.
+// fill the document, the charged steps per byte stay within the charges
+// for the destination scan, the duplicate checks and normalization, which
+// shows the main loop does not read the destinations again.
 func TestExtractImageURLsKeptDestinationsWork(t *testing.T) {
 	var b strings.Builder
 	for i := 0; i < maxPolicyLimit; i++ {

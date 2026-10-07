@@ -614,7 +614,7 @@ func TestRemoteImagesWarnWhenTheScanFills(t *testing.T) {
 	if len(ff.calls) != 0 || resp.Version.FileCount != 1 {
 		t.Errorf("fetches %v, files %d", ff.calls, resp.Version.FileCount)
 	}
-	if strings.Join(resp.Warnings, "|") != warnTooManyReferences {
+	if strings.Join(resp.Warnings, "|") != warnTooManyImages {
 		t.Errorf("warnings %q", resp.Warnings)
 	}
 }

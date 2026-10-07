@@ -35,16 +35,18 @@ import (
 // are copied and normalized, and only the URLs the fetcher fetches are ever
 // parsed.
 //
-// No byte of the window is examined more than seven times. A byte outside
-// any candidate is read once, by the main loop. A byte of an inline image's
-// destination is read by the inline destination scan (the main loop resumes
-// after it), and a byte of an <img> tag by the tag scan and by attrValue
-// (the main loop resumes after the tag): at most two reads, and these
-// regions never overlap. A byte of a candidate URL is then read once more by
-// the duplicate check, and, if the candidate is kept, three times by
-// normalization (decoding once, the canonical form twice) and once by the
-// duplicate check of the normalized URL: at most seven reads in all. The
-// work is therefore linear in the window, and the tests count it.
+// Each byte of the window is examined a fixed, small number of times, so
+// the work is linear in the window. The main loop reads each byte once,
+// except that it resumes after an inline destination or an <img> tag that
+// an inner scan read in full. An inner scan that fails leaves its bytes to
+// the main loop, which may read them again; a destination scan never starts
+// inside a region another destination scan read, because a destination
+// holds no brackets or parentheses. The bytes of a candidate URL are then
+// read by the duplicate check and, if the candidate is kept, by
+// normalization (at most maxImageURLBytes bytes per candidate) and the
+// duplicate check of the normalized URL. The tests charge each of these
+// passes as described here and check at most maxStepsPerByte charged steps
+// per byte.
 
 // RemotePrefix is the reserved path prefix of the files the hub fetched at
 // publish time. Uploads may not use it.
@@ -159,7 +161,9 @@ type bracket struct {
 // Its inner scans (an inline destination, an <img> tag) only read bytes
 // that cannot start another construct of the same kind before the point
 // where they stop: a destination holds no '(' , '[' or ']', and a tag scan
-// stops at the next '<' or '>'. So the regions they read do not overlap.
+// stops at the next '<' or '>'. So two successful scans of one kind never
+// read the same bytes, and a failed scan's bytes are read again only by the
+// main loop.
 func (s *imageScan) scan() {
 	doc := s.doc
 	// The open brackets, a ring of the most recent bracketDepth: an older
