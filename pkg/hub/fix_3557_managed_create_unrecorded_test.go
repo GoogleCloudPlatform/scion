@@ -126,8 +126,10 @@ type managedRecordFaultStore struct {
 	failures       int
 	beforeFail     func(agentID string)
 	beforeFinalize func(agentID string)
-	// finalizeErr, when set, is returned by every FinalizeAgentDeletion.
-	finalizeErr error
+	// finalizeErr, when set, is returned by FinalizeAgentDeletion from
+	// call finalizeErrFrom on (every call when finalizeErrFrom is 0).
+	finalizeErr     error
+	finalizeErrFrom int
 	// finalizeCalls counts FinalizeAgentDeletion calls.
 	finalizeCalls int
 }
@@ -154,11 +156,12 @@ func (s *managedRecordFaultStore) FinalizeAgentDeletion(ctx context.Context, id 
 	before := s.beforeFinalize
 	s.beforeFinalize = nil
 	s.finalizeCalls++
+	failNow := s.finalizeErr != nil && s.finalizeCalls >= s.finalizeErrFrom
 	s.mu.Unlock()
 	if before != nil {
 		before(id)
 	}
-	if s.finalizeErr != nil {
+	if failNow {
 		return 0, s.finalizeErr
 	}
 	return s.Store.FinalizeAgentDeletion(ctx, id, pred, mode, set, hook)
@@ -368,8 +371,8 @@ func TestManagedCreate_Unrecorded_DeleteHoldsRow_Answers409(t *testing.T) {
 	}
 }
 
-// A delete that already removed or soft-deleted the row also wins: 409, and
-// nothing of the delete's outcome is undone.
+// A delete that holds the row (claimed, finalizing) or removed it (hard or
+// soft delete) wins: 409, and nothing of the delete's outcome is undone.
 func TestManagedCreate_Unrecorded_DeleteHoldsOrRemovedRow_Answers409(t *testing.T) {
 	for i, del := range landingDeletes {
 		if !del.compensate {
@@ -542,10 +545,11 @@ func TestManagedCreate_Unrecorded_CompensationFails_ReportsCorrelationID(t *test
 	assert.True(t, agentGone(t, s, agentID), "the fallback removed the row")
 }
 
-// The conditional row delete gives up because the row kept changing
-// (ErrVersionConflict): the rollback does not fall into the unconditional
-// fallback. The row is kept, its phase is not marked error, its quotas are
-// held for whatever is writing it, and the 500 reports the correlation ID.
+// Every conditional row delete gives up because the row kept changing
+// (ErrVersionConflict): the compensation fails, the fallback's conditional
+// deletes (3 attempts) fail the same way, and the rollback then leaves the
+// row to whatever is writing it. The row is kept, its phase is not marked
+// error, its quotas are held, and the 500 reports the correlation ID.
 func TestManagedCreate_Unrecorded_RowContended_LeavesRow(t *testing.T) {
 	srv, s, project := setupCreateAgentServer(t, &createRaceDispatcher{})
 	backend := newInteractionLedgerBackend()
@@ -555,7 +559,8 @@ func TestManagedCreate_Unrecorded_RowContended_LeavesRow(t *testing.T) {
 	srv.store = fs
 
 	agentID, warnings := requireManagedCreateRollbackIncomplete(t, managedCreate(t, srv, project.ID, "mgd-unrec-contended"))
-	assert.Len(t, warnings, 1)
+	require.Len(t, warnings, 1)
+	assert.Equal(t, managedCreateUnrecordedStoppedWarning+" (agent "+agentID+", interaction interaction-1)", warnings[0])
 	assert.Equal(t, []string{"interaction-1"}, backend.cancels())
 
 	row, err := s.GetAgent(context.Background(), agentID)
@@ -566,5 +571,37 @@ func TestManagedCreate_Unrecorded_RowContended_LeavesRow(t *testing.T) {
 	assert.EqualValues(t, 1, brokerReservationCount(t, s, project.DefaultRuntimeBrokerID), "no quota release")
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
-	assert.Equal(t, 1, fs.finalizeCalls, "no fallback row delete after the conflict")
+	assert.Equal(t, 1+createCleanupDeleteAttempts, fs.finalizeCalls,
+		"the compensation, then the fallback's conditional deletes")
+}
+
+// The compensation fails for another reason (its audit insert), and the
+// fallback's conditional row deletes then give up with ErrVersionConflict:
+// the same guard leaves the row to whatever is writing it. 500 with the
+// correlation ID, row kept, phase not error, quotas held.
+func TestManagedCreate_Unrecorded_CompensationFails_ThenContended_LeavesRow(t *testing.T) {
+	srv, s, project := setupCreateAgentServer(t, &createRaceDispatcher{})
+	backend := newInteractionLedgerBackend()
+	useManagedBackend(t, backend)
+	fs := &managedRecordFaultStore{
+		Store:           &createTxFaultStore{Store: s, auditErrFor: mutationTypeAgentCreateDispatchFailed},
+		failures:        1,
+		finalizeErr:     fmt.Errorf("finalize agent deletion: %w", store.ErrVersionConflict),
+		finalizeErrFrom: 2,
+	}
+	srv.store = fs
+
+	agentID, warnings := requireManagedCreateRollbackIncomplete(t, managedCreate(t, srv, project.ID, "mgd-unrec-compfail-contended"))
+	require.Len(t, warnings, 1)
+	assert.Equal(t, managedCreateUnrecordedStoppedWarning+" (agent "+agentID+", interaction interaction-1)", warnings[0])
+
+	row, err := s.GetAgent(context.Background(), agentID)
+	require.NoError(t, err, "the row is kept")
+	assert.NotEqual(t, string(state.PhaseError), row.Phase, "no phase-error write")
+	assert.NotEqual(t, createRowRemoveFailedMessage, row.Message)
+	assert.EqualValues(t, 1, brokerReservationCount(t, s, project.DefaultRuntimeBrokerID), "no quota release")
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	assert.Equal(t, 1+createCleanupDeleteAttempts, fs.finalizeCalls,
+		"the failed compensation, then the fallback's conditional deletes")
 }
