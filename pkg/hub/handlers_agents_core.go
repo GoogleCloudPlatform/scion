@@ -1182,9 +1182,9 @@ func createCleanupRefusedMessage(refused *DeleteRunMismatchError) string {
 // its own detached context. A row already gone counts as removed.
 //
 // When conditional is set (createRollback.DeleteWon, ptone/scion#3557), the
-// row is removed only if no delete holds it (createRowCompensable,
-// re-checked in the delete's transaction); a row a delete holds, or one
-// already gone, returns errCreateRowDeleteHeld.
+// row is removed only if no delete holds it (createRowHeldCheck, checked in
+// the delete's transaction); a row a delete holds, or one already gone or
+// soft-deleted, returns errCreateRowDeleteHeld.
 func (s *Server) deleteFailedCreateRow(ctx context.Context, agentID string, conditional bool) error {
 	var err error
 	for attempt := 0; attempt < createCleanupDeleteAttempts; attempt++ {
@@ -1199,7 +1199,7 @@ func (s *Server) deleteFailedCreateRow(ctx context.Context, agentID string, cond
 				return
 			}
 			var n int
-			n, err = s.store.FinalizeAgentDeletion(sctx, agentID, createRowCompensable(), store.DeletionFinalizeHard, store.DeletionFields{}, nil)
+			n, err = s.store.FinalizeAgentDeletion(sctx, agentID, createRowCompensable(), store.DeletionFinalizeHard, store.DeletionFields{}, createRowHeldCheck(nil))
 			if err == nil && n == 0 {
 				err = errCreateRowDeleteHeld
 			}
@@ -2441,6 +2441,9 @@ func (s *Server) createAgentInProject(
 		} else {
 			agent.Activity = "working"
 		}
+		// A failed write returns below, so the write is recorded when the
+		// 409 further down is reached.
+		recorded := true
 		if err := s.store.UpdateAgent(ctx, agent); err != nil {
 			s.agentLifecycleLog.Warn("Failed to update managed agent after create", "agent_id", agent.ID, "error", err)
 			// Without this write the row has neither the managed Runtime
@@ -2468,14 +2471,11 @@ func (s *Server) createAgentInProject(
 
 		// A delete that won the race answers 409 with no agent body, as
 		// the synchronous broker create does (ptone/scion#3099,
-		// ptone/scion#3454). The post-create write landed, so it landed
-		// before the delete's claim (a claim bumps state_version), and the
-		// delete's row carries the managed Runtime and the interaction ID:
-		// the delete stops the interaction, so the create does not.
+		// ptone/scion#3454).
 		if !s.publishAgentCreatedIfLive(ctx, agent) {
 			s.agentLifecycleLog.Info("Hub: managed agent was deleted while it was being created; answering 409",
 				"agent_id", agent.ID, "agent", agent.Name)
-			writeDeletedDuringCreate(w, agent.ID, nil)
+			writeDeletedDuringCreate(w, agent.ID, s.compensateManagedCreate(ctx, agent, recorded))
 			return
 		}
 		s.enrichAgent(ctx, agent, project, nil)

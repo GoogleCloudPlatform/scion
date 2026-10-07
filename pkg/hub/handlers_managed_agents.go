@@ -243,6 +243,37 @@ var (
 	}
 )
 
+// compensateManagedCreate cleans up the cloud side of a managed (hub-direct)
+// create whose delete won the race (ptone/scion#3454), and returns the
+// warnings for the 409.
+//
+// The delete engine already calls managedAgentDelete, but only when the row
+// it read right after its claim has the managed Runtime, and it can only
+// stop an interaction that row names. managedAgentCreate sets both in
+// memory, and only the create's post-create write persists them. So
+// whether the engine stops this create's interaction depends on whether
+// that write landed first:
+//
+//   - recorded (the write succeeded): it landed before the claim, since a
+//     claim bumps state_version and a later write would have conflicted. The
+//     engine's row carries the managed Runtime and the interaction ID, and
+//     the engine stops it, so nothing is done here; this avoids a second
+//     stop.
+//   - not recorded: the claim may have come first, so the engine's row has
+//     neither the managed Runtime nor the interaction ID, and the engine
+//     cannot stop it. This create holds the only copy of the ID, so it stops
+//     the interaction itself.
+//
+// A create with no task started no interaction: nothing to clean up.
+//
+// The stop runs detached from the request with its own budget, as
+// compensateLandedRun's delete does: a client that goes away must not leave
+// an interaction running that nothing else can stop. Unlike
+// managedAgentDelete, a failure is reported (stopManagedInteraction).
+func (s *Server) compensateManagedCreate(ctx context.Context, agent *store.Agent, recorded bool) []string {
+	return s.stopManagedCreateInteraction(ctx, agent, recorded).warnings(managedCreateDeleteWon)
+}
+
 // managedCreateStop is the outcome of stopManagedCreateInteraction.
 type managedCreateStop struct {
 	// interactionID is the interaction a stop was tried for; "" when none
@@ -268,33 +299,11 @@ func (stop managedCreateStop) warnings(why managedCreateCompensation) []string {
 	return []string{why.stoppedWarning + ids}
 }
 
-// stopManagedCreateInteraction cleans up the cloud side of a managed
-// (hub-direct) create that failed after managedAgentCreate started its
-// interaction, and returns the outcome; the caller words it
-// (managedCreateStop.warnings), because whether a delete won is only known
-// after the rollback ran (ptone/scion#3454, ptone/scion#3557).
-//
-// The delete engine calls managedAgentDelete only when the row it read right
-// after its claim has the managed Runtime, and it can only stop an
-// interaction that row names. managedAgentCreate sets both in memory, and
-// only the create's post-create write persists them:
-//
-//   - recorded (the write succeeded): it landed before any claim, since a
-//     claim bumps state_version and a later write would have conflicted. The
-//     engine's row carries the managed Runtime and the interaction ID, and
-//     the engine stops it, so nothing is done here; this avoids a second
-//     stop.
-//   - not recorded: no row carries the interaction ID, so neither a delete
-//     that won the race nor a later delete can stop it. This create holds
-//     the only copy of the ID, so it stops the interaction itself.
-//
-// A create with no task started no interaction: nothing to clean up.
-//
-// The stop runs detached from the request with its own budget, as
-// compensateLandedRun's delete does: a client that goes away must not leave
-// an interaction running that nothing else can stop. Unlike
-// managedAgentDelete, a failure is reported (stopManagedInteraction) and
-// logged here.
+// stopManagedCreateInteraction applies compensateManagedCreate's rule and
+// stop (detached, with its own budget), logs a failure, and returns the
+// outcome unworded. A create whose post-create write failed
+// (ptone/scion#3557) only learns whether a delete won after its rollback
+// ran, so it words the outcome afterwards (managedCreateStop.warnings).
 func (s *Server) stopManagedCreateInteraction(ctx context.Context, agent *store.Agent, recorded bool) managedCreateStop {
 	interactionID := agent.Annotations[annotationInteractionID]
 	if recorded || interactionID == "" {
