@@ -283,13 +283,13 @@ type CreateAgentRequest struct {
 	Reprovision bool `json:"reprovision,omitempty"`
 	// SharedDirBackendChanges asks a Reprovision to change the recorded
 	// shared-dir storage backend of the named shared dirs (dir name to
-	// "nfs"; `scion reincarnate --shared-dir-backend`). Only the agent's
+	// "nfs" or "local"; `scion reincarnate --shared-dir-backend`). Only the agent's
 	// record changes; no data is copied, moved or deleted. Refused on a
 	// request that is not a Reprovision.
 	SharedDirBackendChanges map[string]string `json:"sharedDirBackendChanges,omitempty"`
 	// AllowEmptySharedDir, with SharedDirBackendChanges, skips the start
-	// check that refuses an empty nfs directory while the dir's previous
-	// local directory is not empty.
+	// check that refuses an empty directory on the new backend while the
+	// dir's directory on its previous backend is not empty.
 	AllowEmptySharedDir bool `json:"allowEmptySharedDir,omitempty"`
 	// ExpectExistingNFSWorkspace, on a ProvisionOnly request, says the agent
 	// is being moved here from another broker on the same NFS export: before

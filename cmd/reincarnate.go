@@ -176,22 +176,27 @@ already serves its project. Patch flags combine with --broker. See "Moving
 an Agent to Another Runtime Broker" in the multi-broker docs.
 
 Use --shared-dir-backend NAME=nfs to move a shared dir's recorded storage
-backend from local to nfs. Only this agent's record changes, while the
-directory belongs to the project: stop every agent that uses it, copy the
-local directory's contents into the nfs directory keeping ownership, modes,
-the setgid bit and ACLs (for example rsync -aAX LOCAL/ NFS/, then check the
-nfs directory with getfacl), then reincarnate each of those agents with the
-flag. The local directory is never moved or deleted. The start
-refuses an empty nfs directory while the previous local directory is not
-empty (on Kubernetes, whenever the nfs directory is empty); add
---allow-empty-shared-dir to start anyway. The shared dir flags cannot be
-combined with a move to another broker.
+backend from local to nfs, and --shared-dir-backend NAME=local to move it
+back. Only this agent's record changes, while the directory belongs to the
+project: stop every agent that uses it, copy the directory's contents to
+the new backend keeping ownership, modes, the setgid bit and ACLs (for
+example rsync -aAX LOCAL/ NFS/, or NFS/ LOCAL/ to go back, then check the
+copy with getfacl), then reincarnate each of those agents with the flag.
+Neither directory is ever moved or deleted. The start refuses an empty
+directory on the new backend while the previous one is not empty. On
+Kubernetes a change to nfs is refused whenever the nfs directory is empty,
+and a change back to local whose nfs directory is not empty is refused
+when the shared dir's own volume claim does not exist (an existing claim's
+content is not checked). To start anyway, reincarnate with
+--allow-empty-shared-dir. Otherwise, after a refused start, copy the data
+and run scion start again rather than reincarnating again. The shared dir
+flags cannot be combined with a move to another broker.
 
 The broker checks the change (the dir is one of the agent's shared dirs,
-the nfs settings are complete, the broker supports it) after the hub has
-stopped the agent. If the broker refuses, the reincarnation fails and the
-agent stays stopped with its record unchanged. --dry-run does not run these
-broker checks.`,
+for nfs the nfs settings are complete, the broker supports it) after the
+hub has stopped the agent. If the broker refuses, the reincarnation fails
+and the agent stays stopped with its record unchanged. --dry-run does not
+run these broker checks.`,
 	Args: func(cmd *cobra.Command, args []string) error {
 		if len(args) > 1 {
 			return fmt.Errorf("accepts at most 1 argument (agent name)")
@@ -403,13 +408,13 @@ func reincarnateAgentViaHub(hubCtx *HubContext, agentName, handoff string, isSel
 	return nil
 }
 
-// parseSharedDirBackendFlags parses repeated --shared-dir-backend NAME=nfs
-// values into a map. nfs is the only supported backend, a name may appear
-// once, and --allow-empty-shared-dir needs at least one value.
+// parseSharedDirBackendFlags parses repeated --shared-dir-backend
+// NAME=BACKEND values into a map. The backend is nfs or local, a name may
+// appear once, and --allow-empty-shared-dir needs at least one value.
 func parseSharedDirBackendFlags(values []string, allowEmpty bool) (map[string]string, error) {
 	if len(values) == 0 {
 		if allowEmpty {
-			return nil, fmt.Errorf("--allow-empty-shared-dir needs --shared-dir-backend NAME=nfs")
+			return nil, fmt.Errorf("--allow-empty-shared-dir needs --shared-dir-backend NAME=nfs or NAME=local")
 		}
 		return nil, nil
 	}
@@ -417,13 +422,13 @@ func parseSharedDirBackendFlags(values []string, allowEmpty bool) (map[string]st
 	for _, v := range values {
 		name, backend, ok := strings.Cut(v, "=")
 		if !ok || name == "" {
-			return nil, fmt.Errorf("--shared-dir-backend %q: want NAME=nfs", v)
+			return nil, fmt.Errorf("--shared-dir-backend %q: want NAME=nfs or NAME=local", v)
 		}
 		if err := api.ValidateSharedDirs([]api.SharedDir{{Name: name}}); err != nil {
 			return nil, fmt.Errorf("--shared-dir-backend %q: invalid shared dir name %q", v, name)
 		}
-		if backend != "nfs" {
-			return nil, fmt.Errorf("--shared-dir-backend %q: only nfs is supported", v)
+		if backend != "nfs" && backend != "local" {
+			return nil, fmt.Errorf("--shared-dir-backend %q: the backend must be nfs or local", v)
 		}
 		if _, dup := out[name]; dup {
 			return nil, fmt.Errorf("--shared-dir-backend: shared dir %q given more than once", name)
@@ -662,7 +667,7 @@ func printReincarnationPlan(plan hubclient.ReincarnationPlan) {
 		for _, name := range names {
 			line := fmt.Sprintf("  Shared dir:    %s -> %s (record only; copy the data yourself)", name, plan.SharedDirBackends[name])
 			if plan.AllowEmptySharedDir {
-				line += ", empty nfs directory allowed"
+				line += fmt.Sprintf(", empty %s directory allowed", plan.SharedDirBackends[name])
 			}
 			fmt.Println(line)
 		}
@@ -699,8 +704,8 @@ func init() {
 	reincarnateCmd.Flags().BoolVar(&reincarnateDryRun, "dry-run", false, "Print the resolved reincarnation plan without migrating anything")
 	reincarnateCmd.Flags().StringVar(&reincarnateBroker, "broker", "", "Move the agent to this runtime broker (name or ID); both brokers must mount the same NFS export. The move is dry-run first and refused if not eligible")
 	reincarnateCmd.Flags().BoolVar(&reincarnateHandoffTemplate, "handoff-template", false, "Print the handoff template and exit")
-	reincarnateCmd.Flags().StringArrayVar(&reincarnateSharedDirs, "shared-dir-backend", nil, "Change a shared dir's recorded storage backend, as NAME=nfs (repeatable). Only the record changes; copy the data to the nfs directory first")
-	reincarnateCmd.Flags().BoolVar(&reincarnateAllowEmptySD, "allow-empty-shared-dir", false, "With --shared-dir-backend, start even if the nfs directory is empty while the previous local directory is not")
+	reincarnateCmd.Flags().StringArrayVar(&reincarnateSharedDirs, "shared-dir-backend", nil, "Change a shared dir's recorded storage backend, as NAME=nfs or NAME=local (repeatable). Only the record changes; copy the data to the new backend first")
+	reincarnateCmd.Flags().BoolVar(&reincarnateAllowEmptySD, "allow-empty-shared-dir", false, "With --shared-dir-backend, start even if the directory on the new backend is empty while the previous one is not")
 	reincarnateCmd.Flags().StringVar(&reincarnateServiceAccount, "service-account", "", "GCP service account ID for the new generation (same access checks as create)")
 	reincarnateCmd.Flags().StringVar(&reincarnateRole, "role", "", "Agent role for the new generation: none, readonly, baseline, full (same access checks as create)")
 	reincarnateCmd.Flags().StringVar(&reincarnateModel, "model", "", "Model for the new generation (aliases accepted)")

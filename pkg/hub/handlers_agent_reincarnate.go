@@ -49,13 +49,13 @@ type ReincarnateAgentRequest struct {
 	TargetBroker string `json:"targetBroker,omitempty"`
 
 	// SharedDirBackends changes the recorded shared-dir storage backend of
-	// the named shared dirs (dir name to "nfs", the only supported value).
-	// Only the agent's record on its broker changes; no data is copied,
-	// moved or deleted. Not accepted for a self-reincarnation.
+	// the named shared dirs (dir name to "nfs" or "local"). Only the
+	// agent's record on its broker changes; no data is copied, moved or
+	// deleted. Not accepted for a self-reincarnation.
 	SharedDirBackends map[string]string `json:"sharedDirBackends,omitempty"`
 	// AllowEmptySharedDir, with SharedDirBackends, skips the start check
-	// that refuses an empty nfs directory while the dir's previous local
-	// directory is not empty.
+	// that refuses an empty directory on the new backend while the dir's
+	// directory on its previous backend is not empty.
 	AllowEmptySharedDir bool `json:"allowEmptySharedDir,omitempty"`
 
 	// Patch fields (ptone/scion#3302): each changes the next generation's
@@ -144,9 +144,10 @@ type ReincarnationPlan struct {
 }
 
 // validateSharedDirBackendRequest checks a reincarnate request's explicit
-// shared dir backend change. Whether each dir is one of the agent's shared
-// dirs, and whether the broker has a complete nfs block, is checked by the
-// broker, which holds the project settings and the agent's record.
+// shared dir backend change: each target must be "nfs" or "local". Whether
+// each dir is one of the agent's shared dirs, and whether the broker has a
+// complete nfs block, is checked by the broker, which holds the project
+// settings and the agent's record.
 func validateSharedDirBackendRequest(req ReincarnateAgentRequest) error {
 	if len(req.SharedDirBackends) == 0 {
 		if req.AllowEmptySharedDir {
@@ -163,8 +164,8 @@ func validateSharedDirBackendRequest(req ReincarnateAgentRequest) error {
 		if err := api.ValidateSharedDirs([]api.SharedDir{{Name: name}}); err != nil {
 			return fmt.Errorf("sharedDirBackends: invalid shared dir name %q", name)
 		}
-		if backend := req.SharedDirBackends[name]; backend != "nfs" {
-			return fmt.Errorf("sharedDirBackends: shared dir %q: only a change to the nfs backend is supported (got %q)", name, backend)
+		if backend := req.SharedDirBackends[name]; backend != "nfs" && backend != "local" {
+			return fmt.Errorf("sharedDirBackends: shared dir %q: only a change to the nfs or local backend is supported (got %q)", name, backend)
 		}
 	}
 	return nil
