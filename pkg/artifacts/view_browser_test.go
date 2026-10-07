@@ -35,6 +35,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/chromedp/chromedp"
 )
 
 // The browser probe tests run a real headless Chromium against the view
@@ -55,25 +57,39 @@ func chromiumPath(t *testing.T) string {
 	return ""
 }
 
-// dumpDOM loads url in headless Chromium and returns the DOM after scripts
-// ran. Site isolation is turned off only so that virtual time also runs the
-// timers of the out-of-process frame; the sandbox and CSP checks are made
-// by the browser either way.
-func dumpDOM(t *testing.T, chromium, url string) string {
+// dumpDOM loads url in headless Chromium, waits (in real time) until the
+// JavaScript expression ready is true, and returns the page's DOM. Site
+// isolation is turned off only to match the earlier probe setup; the
+// sandbox and CSP checks are made by the browser either way.
+func dumpDOM(t *testing.T, chromium, url, ready string) string {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	opts := append(chromedp.DefaultExecAllocatorOptions[:],
+		chromedp.ExecPath(chromium),
+		chromedp.Flag("headless", true),
+		chromedp.Flag("no-sandbox", true),
+		chromedp.Flag("disable-gpu", true),
+		chromedp.Flag("disable-dev-shm-usage", true),
+		chromedp.Flag("disable-site-isolation-trials", true),
+		chromedp.Flag("disable-features", "IsolateOrigins,site-per-process"),
+		// CI runners can be slow to start a browser.
+		chromedp.WSURLReadTimeout(60*time.Second),
+	)
+	allocCtx, allocCancel := chromedp.NewExecAllocator(context.Background(), opts...)
+	defer allocCancel()
+	ctx, cancel := chromedp.NewContext(allocCtx)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, chromium, "--headless", "--no-sandbox", "--disable-gpu",
-		"--no-first-run", "--disable-site-isolation-trials", "--disable-features=IsolateOrigins,site-per-process", "--user-data-dir="+t.TempDir(), "--virtual-time-budget=15000", "--enable-logging=stderr", "--v=0", "--dump-dom", url)
-	var out, errOut bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &out, &errOut
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("chromium: %v\n%s", err, errOut.String())
+	ctx, cancel = context.WithTimeout(ctx, 90*time.Second)
+	defer cancel()
+	var dom string
+	err := chromedp.Run(ctx,
+		chromedp.Navigate(url),
+		chromedp.Poll(ready, nil, chromedp.WithPollingInterval(100*time.Millisecond)),
+		chromedp.OuterHTML("html", &dom, chromedp.ByQuery),
+	)
+	if err != nil {
+		t.Fatalf("chromium: %v (DOM so far:\n%s)", err, dom)
 	}
-	if os.Getenv("SCION_TEST_CHROMIUM_LOG") != "" {
-		t.Logf("chromium log:\n%s", errOut.String())
-	}
-	return out.String()
+	return dom
 }
 
 func onePixelPNG(t *testing.T) []byte {
@@ -257,7 +273,8 @@ func TestViewSandboxBrowserProbe(t *testing.T) {
 
 	framed := func(t *testing.T, sandbox string) {
 		t.Helper()
-		dom := dumpDOM(t, chromium, srv.URL+"/host?sandbox="+url.QueryEscape(sandbox))
+		dom := dumpDOM(t, chromium, srv.URL+"/host?sandbox="+url.QueryEscape(sandbox),
+			`document.getElementById("result").textContent !== "pending"`)
 		m := regexp.MustCompile(`<pre id="result"[^>]*>([^<]*)</pre>`).FindStringSubmatch(dom)
 		if m == nil || m[1] == "pending" {
 			t.Fatalf("no probe result in the host page:\n%s", dom)
@@ -294,7 +311,7 @@ func TestViewSandboxBrowserProbe(t *testing.T) {
 	// even if a frame were given allow-same-origin.
 	t.Run("framed with allow-same-origin", func(t *testing.T) { framed(t, "allow-scripts allow-same-origin") })
 	t.Run("opened directly", func(t *testing.T) {
-		dom := dumpDOM(t, chromium, srv.URL+view.URL)
+		dom := dumpDOM(t, chromium, srv.URL+view.URL, `document.documentElement.hasAttribute("data-probe")`)
 		m := regexp.MustCompile(`data-probe="([^"]*)"`).FindStringSubmatch(dom)
 		if m == nil {
 			t.Fatalf("no probe result:\n%s", dom)

@@ -28,8 +28,10 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
+	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/stretchr/testify/assert"
@@ -407,4 +409,25 @@ func TestPublishBundleReplyWithoutVersion(t *testing.T) {
 	err := publishBundle(context.Background(), noVersionService{}, &out, &errOut, "", root, bundlePublishOptions{})
 	assert.ErrorContains(t, err, "has no version")
 	assert.Empty(t, out.String())
+}
+
+// oneVersionService serves an artifact with one version.
+type oneVersionService struct{ hubclient.ArtifactService }
+
+func (oneVersionService) Get(context.Context, string) (*hubclient.ArtifactResponse, error) {
+	return &hubclient.ArtifactResponse{Artifact: hubclient.Artifact{CurrentSeq: 1}}, nil
+}
+
+func (oneVersionService) ListVersions(context.Context, string) ([]hubclient.ArtifactVersion, error) {
+	at := time.Date(2026, 10, 6, 18, 20, 0, 0, time.UTC)
+	return []hubclient.ArtifactVersion{{Seq: 1, Kind: "publish", CreatedAt: at, CreatedByKind: "agent", FileCount: 1}}, nil
+}
+
+// TestArtifactVersionsShowsZone: the PUBLISHED column carries a zone.
+func TestArtifactVersionsShowsZone(t *testing.T) {
+	clitime.SetZone(time.UTC)
+	t.Cleanup(func() { clitime.SetZone(nil) })
+	var out bytes.Buffer
+	require.NoError(t, listArtifactVersions(context.Background(), oneVersionService{}, &out, "5f1c2d3e-0000-4000-8000-000000000001"))
+	assert.Contains(t, out.String(), "2026-10-06 18:20 UTC")
 }
