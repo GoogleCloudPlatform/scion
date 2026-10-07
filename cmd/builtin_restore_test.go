@@ -175,3 +175,19 @@ func TestRunBuiltinRestore_ReportsHubError(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not a built-in harness-config: nope")
 }
+
+// TestRunBuiltinRestore_EmptyResponseIsError covers a 2xx with no body
+// (apiclient.DecodeResponse returns nil, nil for 204): an error, not a panic.
+func TestRunBuiltinRestore_EmptyResponseIsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	client, err := hubclient.New(srv.URL)
+	require.NoError(t, err)
+
+	err = runBuiltinRestore(context.Background(), &bytes.Buffer{}, "harness-config",
+		client.HarnessConfigs().Restore, []string{"claude"}, false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "empty response")
+}

@@ -141,6 +141,11 @@ func runBuiltinRestore(ctx context.Context, out io.Writer, noun string, restore 
 	if err != nil {
 		return fmt.Errorf("failed to restore built-in %ss: %w", noun, err)
 	}
+	if resp == nil {
+		// apiclient.DecodeResponse returns (nil, nil) for a 204; the restore
+		// routes never send one, but do not dereference a nil response.
+		return fmt.Errorf("failed to restore built-in %ss: hub returned an empty response", noun)
+	}
 
 	msg := builtinRestoreSummary(noun, resp)
 	if isJSONOutput() {
