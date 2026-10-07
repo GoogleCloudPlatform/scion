@@ -95,7 +95,7 @@ func failCreate(err error) (func(context.Context, *hubclient.CreateAgentRequest)
 }
 
 func deleteInProgressErr() error {
-	return &apiclient.APIError{StatusCode: http.StatusConflict, Code: errCodeDeleteInProgress, Message: "agent was deleted while it was being created"}
+	return &apiclient.APIError{StatusCode: http.StatusConflict, Code: apiclient.ErrCodeDeleteInProgress, Message: "agent was deleted while it was being created"}
 }
 
 // A create answered delete_in_progress is not followed by adopt-by-name,

@@ -1653,16 +1653,11 @@ func (b *Bridge) GetProjectConfig(projectSlug string) *ProjectConfig {
 	return nil
 }
 
-// errCodeDeleteInProgress is the hub's error code for an operation that lost
-// to an agent delete. A local copy until the shared apiclient constant
-// (ptone/scion#3492) lands; swap it for that then.
-const errCodeDeleteInProgress = "delete_in_progress"
-
 // isDeleteInProgress reports whether err is the hub's delete_in_progress
 // answer.
 func isDeleteInProgress(err error) bool {
 	var apiErr *apiclient.APIError
-	return errors.As(err, &apiErr) && apiErr.Code == errCodeDeleteInProgress
+	return errors.As(err, &apiErr) && apiErr.Code == apiclient.ErrCodeDeleteInProgress
 }
 
 // agentBeingDeleted reports whether a listed agent is going away: it is
