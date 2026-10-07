@@ -962,6 +962,8 @@ on the remaining D.2 admission batches; the sign-in item [GoogleCloudPlatform/sc
 | B.3 [ptone/scion#2121](https://github.com/ptone/scion/issues/2121): durable ceilings and provenance | (1) The invitation-effect contract for Phase 2, coordinated with D.2 (§7.3 item 6). (2) Activation re-checks, if ptone chooses OD-10(b). | For Phase 2: coordinate the invitation-effect contract with D.2/B.3 in Phase 0. B.3 is not assumed irrelevant just because no role is stored. |
 | Sign-in item [GoogleCloudPlatform/scion#2071](https://github.com/GoogleCloudPlatform/scion/pull/2071) ("require provider-verified email and unify sign-in policy across auth paths") | H.2 start (§16) | **Satisfied**: landed. H does not change sign-in. |
 | OD-10: lifetime of records created through a hub UAT | Phase 2 | **Satisfied**: decided (a) by ptone on 2026-10-04. |
+| D.2 G5 ([ptone/scion#2124](https://github.com/ptone/scion/issues/2124)): token admission for invitations and the allow-list | Phase 2 | **Hard gate for Phase 2.** `POST /api/v1/users` creates the same invited record as the invite routes, so its token admission follows the same rule as G5: it lands with or after G5, never before, and the operation stays `SessionOnly(ReasonGovernancePending)` until then (D.2 owner, 2026-10-07). Phase 2 reuses G5's selector handling and effect regression tests rather than a parallel version. |
+| B.3 ([ptone/scion#2121](https://github.com/ptone/scion/issues/2121)) for the invitation effect | Phase 2 | **Resolved: nothing to bind.** B.3 defines no provenance type, ceiling or effect regression for user or invitation records (B.3 owner, 2026-10-07). The durable provenance of §7.3 item 6 and OD-10(a) is the `user_provision` mutation audit's credential attribution, written in the same transaction as the record (§9, §11). B.3's effects apply only if a future change writes a role binding or group membership at provisioning. |
 
 ### 16.2 Phases
 
@@ -1028,7 +1030,9 @@ session and dev credentials only, through D.2's mechanism.
 OAuth/proxy harness under `invite_only`, and confirm the user is `active` with the default role and
 grants. Phases 2-3 are conditional on this.
 
-**Phase 2 — hub UAT admission (conditional on the Phase 1 slice and on ptone's OD-10 decision).**
+**Phase 2 — hub UAT admission (conditional on the Phase 1 slice, ptone's OD-10 decision and D.2 G5,
+§16.1).** Delivery: H.2 PR-3, built on G5. The H.2 PRs are PR-1 (Phases 0-1), PR-2 (Phase 3) and
+PR-3 (Phase 2).
 Enable UATs through D.2's mechanism with the full §7.3 checks: exact selector, boundary, live
 authority, restrictions and invitation-effect governance. Implement the chosen OD-10 lifetime
 behaviour. Add the UAT credential kind to the catalog, then the P2 tests. Under UAT admission,
@@ -1038,6 +1042,7 @@ confirm that the `user.read` detail-authority decision (§5.4; PR-1 evaluates it
 `DenialCredentialInsufficient` to the catalog entry for rows 6-7.
 
 **Phase 3 — web UI.** The display-name field and submit routing in `admin-users.ts`, plus web tests.
+Delivery: H.2 PR-2. It does not depend on Phase 2: the web form uses a session.
 
 **Phase 0 binding (H.2 PR-1, against main).** Each §7.3 concept is bound to merged code:
 
@@ -1050,7 +1055,7 @@ confirm that the `user.read` detail-authority decision (§5.4; PR-1 evaluates it
 | exact selector-to-permission mapping for `user:invite` (A.1) | `Registry` `UATScope: "user:invite"`, from which `SelectorRegistry` derives | Unchanged; used in Phase 2. |
 | frozen ceiling (A.2) | the token ceiling evaluated by `AuthzService.Decide` for UAT credentials | Phase 2. |
 | system authority for the exact permission on the actual target (A.1) | `AuthzService.Decide` with `Permission: "user.invite"` and the collection evidence above; detail authority uses `Permission: "user.read"` on `hubScopedResource("user", "hub")` | Seeded hub-member grants do not include `user.invite`, so hub members are refused (tested). |
-| governance and `CanDelegate` for the invitation effect (D.2 with B.3) | not used in PR-1 (session and dev only); bound in Phase 2 | Phase 2. |
+| governance and `CanDelegate` for the invitation effect (D.2 with B.3) | D.2 G5 (governance and token admission for invitation effects); B.3 defines nothing for this effect, so provenance is the transactional mutation audit (§16.1) | not used in PR-1 (session and dev only); Phase 2 binds to G5. |
 | per-method route metadata for `/api/v1/users` (A.1) | none: the method-agnostic `RoutePolicy` entry stays, and POST is handler-enforced (§16.3 default) | No `route_metadata.go` change. |
 | shared call-site classification (A.1) | `MutationClassifications` row `createPendingUserTx`/`CreateUser` with `ExemptionInternalOnly`, naming both callers (main's convention for shared helpers such as `replaceBindingTx`) | Replaces the `handleAdminUserInvite`/`CreateUser` row; the bulk row stays. |
 | registry row obligations (A.1) | `user.invite` gains `Enforcement: pkg/hub/handlers_users_provision.go:handleProvisionUser`; `UATScope`, `ProjectTargetApplicability` (false) and `PermissionAllowedBoundaries` ({Hub}) unchanged | Drift tests stay green. |

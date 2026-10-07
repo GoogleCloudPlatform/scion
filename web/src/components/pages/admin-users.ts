@@ -102,6 +102,41 @@ export const HUB_ROLE_DESCRIPTIONS: Record<UserRole, string> = {
     'The same as Member, but cannot create projects (including cloning). Viewers can still be added to projects and work there according to their project role.',
 };
 
+/** Variants of the page's action feedback alert. */
+type FeedbackVariant = 'success' | 'danger' | 'warning' | 'primary';
+
+/** Response body of POST /api/v1/users. */
+interface ProvisionUserResponse {
+  user: { id?: string; email: string; status: string };
+  created: boolean;
+  warnings?: string[];
+}
+
+/** Reads details.reason from a POST /api/v1/users error response. */
+async function provisionErrorReason(response: Response): Promise<string | undefined> {
+  try {
+    const data = (await response.json()) as { error?: { details?: { reason?: unknown } } };
+    const reason = data?.error?.details?.reason;
+    return typeof reason === 'string' ? reason : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Describes an advisory warning of POST /api/v1/users. */
+export function provisionWarningText(warning: string): string {
+  switch (warning) {
+    case 'reserved_identity':
+      return 'This email is a reserved platform identity; sign-in will be refused.';
+    case 'domain_not_authorized':
+      return "This email is outside the hub's authorized domains; sign-in will be refused.";
+    case 'sign_in_currently_blocked_by_access_mode':
+      return "The hub's access mode currently blocks all sign-ins.";
+    default:
+      return `Warning: ${warning}.`;
+  }
+}
+
 @customElement('scion-page-admin-users')
 export class ScionPageAdminUsers extends LitElement {
   @state()
@@ -141,7 +176,7 @@ export class ScionPageAdminUsers extends LitElement {
   private actionInProgress = false;
 
   @state()
-  private actionFeedback: { message: string; variant: 'success' | 'danger' } | null = null;
+  private actionFeedback: { message: string; variant: FeedbackVariant } | null = null;
 
   @state()
   private activeTab: AdminTab = 'users';
@@ -165,6 +200,14 @@ export class ScionPageAdminUsers extends LitElement {
 
   @state()
   private inviteUserNote = '';
+
+  /**
+   * Optional display name. When set, the invite dialog pre-registers the
+   * user through POST /api/v1/users, which stores the name; otherwise it
+   * uses the invite endpoint as before.
+   */
+  @state()
+  private inviteUserDisplayName = '';
 
   @state()
   private inviteUserInProgress = false;
@@ -1094,7 +1137,7 @@ export class ScionPageAdminUsers extends LitElement {
     }
   }
 
-  private showFeedback(variant: 'success' | 'danger', message: string): void {
+  private showFeedback(variant: FeedbackVariant, message: string): void {
     this.actionFeedback = { variant, message };
     setTimeout(() => {
       this.actionFeedback = null;
@@ -1225,22 +1268,15 @@ export class ScionPageAdminUsers extends LitElement {
 
     this.inviteUserInProgress = true;
     try {
-      const response = await apiFetch('/api/v1/admin/users/invite', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, note: this.inviteUserNote }),
-      });
-      if (response.status === 409) {
-        this.showFeedback('danger', 'User already exists.');
-        return;
-      }
-      if (!response.ok) {
-        throw new Error(await extractApiError(response, `HTTP ${response.status}`));
-      }
-      this.showFeedback('success', `Invited ${email}.`);
+      const displayName = this.inviteUserDisplayName.trim();
+      const done = displayName
+        ? await this.provisionUser(email, displayName)
+        : await this.inviteUserByEmail(email);
+      if (!done) return;
       this.showInviteUserDialog = false;
       this.inviteUserEmail = '';
       this.inviteUserNote = '';
+      this.inviteUserDisplayName = '';
       void this.loadUsers(
         this.currentPage > 1 ? this.cursorHistory[this.cursorHistory.length - 1] : undefined
       );
@@ -1249,6 +1285,68 @@ export class ScionPageAdminUsers extends LitElement {
     } finally {
       this.inviteUserInProgress = false;
     }
+  }
+
+  /** Invites through the invite endpoint. Returns true on success. */
+  private async inviteUserByEmail(email: string): Promise<boolean> {
+    const response = await apiFetch('/api/v1/admin/users/invite', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, note: this.inviteUserNote }),
+    });
+    if (response.status === 409) {
+      this.showFeedback('danger', 'User already exists.');
+      return false;
+    }
+    if (!response.ok) {
+      throw new Error(await extractApiError(response, `HTTP ${response.status}`));
+    }
+    this.showFeedback('success', `Invited ${email}.`);
+    return true;
+  }
+
+  /**
+   * Pre-registers the user with a display name through POST /api/v1/users.
+   * Returns true when the user is (or already was) pre-registered with
+   * these details.
+   */
+  private async provisionUser(email: string, displayName: string): Promise<boolean> {
+    const body: { email: string; displayName: string; note?: string } = { email, displayName };
+    if (this.inviteUserNote) body.note = this.inviteUserNote;
+    const response = await apiFetch('/api/v1/users', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (response.status === 409) {
+      const reason = await provisionErrorReason(response);
+      if (reason === 'pending_user_exists') {
+        this.showFeedback(
+          'danger',
+          'A pending record for this email exists with different details.'
+        );
+      } else if (reason === 'user_suspended_exists') {
+        this.showFeedback('danger', 'This email belongs to a suspended user.');
+      } else {
+        this.showFeedback('danger', 'User already exists.');
+      }
+      return false;
+    }
+    if (!response.ok) {
+      throw new Error(await extractApiError(response, `HTTP ${response.status}`));
+    }
+    const result = (await response.json()) as ProvisionUserResponse;
+    if (!result.created) {
+      this.showFeedback('primary', `${email} is already pre-registered with these details.`);
+      return true;
+    }
+    const warnings = (result.warnings ?? []).map(provisionWarningText);
+    if (warnings.length > 0) {
+      this.showFeedback('warning', `Invited ${email}. ${warnings.join(' ')}`);
+    } else {
+      this.showFeedback('success', `Invited ${email}.`);
+    }
+    return true;
   }
 
   // ==================== Bulk Import ====================
@@ -1424,7 +1522,9 @@ export class ScionPageAdminUsers extends LitElement {
                 slot="icon"
                 name=${this.actionFeedback.variant === 'success'
                   ? 'check-circle'
-                  : 'exclamation-triangle'}
+                  : this.actionFeedback.variant === 'primary'
+                    ? 'info-circle'
+                    : 'exclamation-triangle'}
               ></sl-icon>
               ${this.actionFeedback.message}
             </sl-alert>
@@ -1916,6 +2016,15 @@ export class ScionPageAdminUsers extends LitElement {
               this.inviteUserEmail = (e.target as HTMLInputElement).value;
             }}
             required
+          ></sl-input>
+          <sl-input
+            label="Display name (optional)"
+            placeholder="e.g., Alice Smith"
+            maxlength="128"
+            .value=${this.inviteUserDisplayName}
+            @sl-input=${(e: Event): void => {
+              this.inviteUserDisplayName = (e.target as HTMLInputElement).value;
+            }}
           ></sl-input>
           <sl-input
             label="Note (optional)"
