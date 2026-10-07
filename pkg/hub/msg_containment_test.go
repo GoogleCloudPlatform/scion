@@ -17,16 +17,19 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
@@ -1144,9 +1147,106 @@ func TestC1_AuthorizeScheduledMessageAuthoring_CrossProjectByAgentID(t *testing.
 	}
 }
 
-// Scoped access token authoring of scheduled messages is covered by
-// TestScheduledMessageAuthoringAdmitsScopedToken and the fire-time token
-// checks in TestScheduledMessageAuthority.
+func TestC1_ScheduledMessageCreate_ScopedUATDeniedAtRoute(t *testing.T) {
+	// T-B1-07: a project-scoped UAT cannot create a scheduled message event
+	// through handleScheduledEvents. The refusal comes from the
+	// scheduled_event.create check (the permission has no token scope, so the
+	// bearer boundary is not eligible), not from scheduled-message authoring.
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{
+		ID: tid("uat-proj"), Name: "UAT Project", Slug: "uat-proj",
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+	srv.seedProjectCreatorMembership(ctx, project)
+
+	user := &store.User{
+		ID: tid("uat-user"), Email: "uat@test.com", DisplayName: "UAT User",
+		Status: store.UserStatusActive, Role: "member",
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+	ensureHubMembership(ctx, s, user.ID)
+
+	agent := &store.Agent{
+		ID: tid("uat-target"), Name: "uat-target", Slug: "uat-target",
+		ProjectID: project.ID, MessageMode: store.MessageModeProject,
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	// Create a scoped user identity (UAT).
+	baseUser := NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "token")
+	scopedIdent := NewScopedUserIdentity(baseUser, project.ID, []string{"scheduled_event:create", "agent:message"})
+
+	// Make the request with the scoped identity.
+	reqBody := CreateScheduledEventRequest{
+		EventType: "message",
+		FireIn:    "30m",
+		AgentID:   agent.ID,
+		Message:   "hello",
+	}
+	bodyBytes, _ := json.Marshal(reqBody)
+	req := httptest.NewRequest("POST", "/api/v1/projects/"+project.ID+"/scheduled-events", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(contextWithIdentity(req.Context(), scopedIdent))
+
+	rec := httptest.NewRecorder()
+	srv.handleScheduledEvents(rec, req, project.ID, "")
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("expected 403 for UAT-scoped authoring, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// A hub-scoped UAT is refused by the same scheduled_event.create check: the
+// project-scoped access check does not admit a hub-wide token boundary.
+func TestC1_ScheduledMessageCreate_HubScopedUATDeniedAtRoute(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{
+		ID: tid("uat-hub-proj"), Name: "UAT Hub Project", Slug: "uat-hub-proj",
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+	srv.seedProjectCreatorMembership(ctx, project)
+
+	user := &store.User{
+		ID: tid("uat-hub-user"), Email: "uathub@test.com", DisplayName: "UAT Hub User",
+		Status: store.UserStatusActive, Role: "member",
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+	ensureHubMembership(ctx, s, user.ID)
+	require.NoError(t, srv.createProjectOwnerRoleBinding(ctx, project.ID, user.ID))
+
+	agent := &store.Agent{
+		ID: tid("uat-hub-target"), Name: "uat-hub-target", Slug: "uat-hub-target",
+		ProjectID: project.ID, MessageMode: store.MessageModeProject,
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	baseUser := NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "token")
+	scopedIdent := NewScopedUserIdentityWithBoundary(baseUser, TokenBoundary{Kind: BoundaryKindHub},
+		[]string{"scheduled_event:create", "agent:message"}, "", permissions.FrozenPermissionCeiling{})
+
+	reqBody := CreateScheduledEventRequest{
+		EventType: "message",
+		FireIn:    "30m",
+		AgentID:   agent.ID,
+		Message:   "hello",
+	}
+	bodyBytes, _ := json.Marshal(reqBody)
+	req := httptest.NewRequest("POST", "/api/v1/projects/"+project.ID+"/scheduled-events", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(contextWithIdentity(req.Context(), scopedIdent))
+
+	rec := httptest.NewRecorder()
+	srv.handleScheduledEvents(rec, req, project.ID, "")
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("expected 403 for hub-scoped UAT authoring, got %d: %s", rec.Code, rec.Body.String())
+	}
+	res, err := s.ListScheduledEvents(ctx, store.ScheduledEventFilter{ProjectID: project.ID}, store.ListOptions{})
+	require.NoError(t, err)
+	assert.Empty(t, res.Items, "nothing is written")
+}
 
 func TestC1_AuthorizeScheduledMessageAuthoring_ConflictingTarget(t *testing.T) {
 	// O1: When both rawPayload and convenience fields specify targets that

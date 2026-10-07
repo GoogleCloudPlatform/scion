@@ -41,21 +41,16 @@ const (
 )
 
 // revisionAuthorityCeiling returns the frozen effect ceiling to record on a
-// schedule revision of eventType authored by the request's identity: the
-// ceiling sourceEffectCeiling computes for that credential. action is the
-// authoring action (create, or update for an edit or resume), recorded on a
-// denial. On an error it
-// writes the response and returns ok=false, before anything is written:
+// schedule revision authored by the request's identity: the ceiling
+// sourceEffectCeiling computes for that credential. It applies to every
+// event type (dispatch_agent and message alike). action is the authoring
+// action (create, or update for an edit or resume), recorded on a denial.
+// On an error it writes the response and returns ok=false, before anything
+// is written:
 //   - a lookup fault → 500;
 //   - a credential that cannot be recorded as an authority source → 403 with
-//     details.denied_by="delegation_ceiling", for a dispatch_agent revision.
-//
-// A message revision whose credential cannot be recorded as an authority
-// source records the unrecorded ceiling instead. resolveScheduledAuthority
-// denies every fire of a revision with an unrecorded ceiling, so such a
-// message schedule does not fire until a credential whose ceiling can be
-// recorded resumes it or recreates the event.
-func (s *Server) revisionAuthorityCeiling(w http.ResponseWriter, r *http.Request, projectID, eventType string, action Action) (store.EffectCeiling, bool) {
+//     details.denied_by="delegation_ceiling".
+func (s *Server) revisionAuthorityCeiling(w http.ResponseWriter, r *http.Request, projectID string, action Action) (store.EffectCeiling, bool) {
 	ctx := r.Context()
 	identity := GetIdentityFromContext(ctx)
 	if s.authzService == nil {
@@ -72,9 +67,6 @@ func (s *Server) revisionAuthorityCeiling(w http.ResponseWriter, r *http.Request
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 				"Unable to evaluate the credential's delegation ceiling; retry later", nil)
 			return store.EffectCeiling{}, false
-		}
-		if eventType == "message" {
-			return store.EffectCeiling{}, true
 		}
 		logAuthzDenial(r, identity, Resource{Type: "schedule", ParentType: "project", ParentID: projectID}, action,
 			"effect ceiling denied: "+string(cause)+": "+err.Error())

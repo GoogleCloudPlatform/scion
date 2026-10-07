@@ -422,33 +422,59 @@ func TestScheduledMessageAuthority(t *testing.T) {
 		assert.Contains(t, out, evt.ID)
 	})
 
-	t.Run("R11 federated-user revision is denied as unrecorded", func(t *testing.T) {
+	t.Run("R11 federated-user revision is denied", func(t *testing.T) {
 		f := newSchedMsg(t, "smsg-r11")
 		fedUser := hubMemberUser(t, f.store, "smsg-r11-fed")
 		grantFixtureRole(t, f.bypassAgentsFixture, fedUser.ID, store.ProjectRoleOwner)
 		fed := &federatedTestIdentity{id: fedUser.ID, email: fedUser.Email, displayName: fedUser.DisplayName, role: "member"}
 		f.srv.scheduler = NewScheduler(f.store, slog.Default())
 
-		// Author through the handler, as a federated user's request records it.
+		// Authored through the handler, a federated user's write is refused:
+		// its ceiling cannot be recorded, so nothing is stored.
 		rec := doAuthoredEventRequest(t, f.srv, fed, f.proj.ID,
 			CreateScheduledEventRequest{EventType: "message", FireIn: "30m", AgentID: f.target.ID, Message: "hi"})
-		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
-		var created store.ScheduledEvent
-		require.NoError(t, json.NewDecoder(rec.Body).Decode(&created))
-		stored, err := f.store.GetScheduledEvent(ctx, created.ID)
+		require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), string(DeniedByDelegationCeiling))
+		res, err := f.store.ListScheduledEvents(ctx, store.ScheduledEventFilter{ProjectID: f.proj.ID}, store.ListOptions{})
 		require.NoError(t, err)
-		assert.Equal(t, store.EffectCeiling{}, stored.AuthorityCeiling, "a federated revision records the unrecorded ceiling")
+		assert.Empty(t, res.Items, "no event is stored")
 
-		err = f.fireMsg(t, *stored)
+		// A federated user cannot change an existing schedule's revision
+		// either: a resume is refused and the stored revision is unchanged.
+		ownerUser := hubMemberUser(t, f.store, "smsg-r11-owner")
+		grantFixtureRole(t, f.bypassAgentsFixture, ownerUser.ID, store.ProjectRoleOwner)
+		owner := authUser(ownerUser)
+		rec = doAuthoredScheduleRequest(t, f.srv, owner, f.proj.ID, "", http.MethodPost,
+			CreateScheduleRequest{Name: "smsg-r11", CronExpr: "0 * * * *", EventType: "message", AgentName: f.target.Slug, Message: "hi"})
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+		var sc store.Schedule
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&sc))
+		rec = doAuthoredScheduleRequest(t, f.srv, owner, f.proj.ID, sc.ID+"/pause", http.MethodPost, nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		before := loadScheduleRevision(t, f.store, sc.ID)
+		rec = doAuthoredScheduleRequest(t, f.srv, fed, f.proj.ID, sc.ID+"/resume", http.MethodPost, nil)
+		require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), string(DeniedByDelegationCeiling))
+		assert.Equal(t, before, loadScheduleRevision(t, f.store, sc.ID))
+
+		// A row that already carries a federated revision with the
+		// unrecorded ceiling is denied at fire with the remedy text.
+		evt := f.msgEvent()
+		evt.InitiatorAttribution = store.InitiatorAttribution{
+			AttributionVersion:      1,
+			InitiatorPrincipalKind:  string(PrincipalKindFederatedUser),
+			InitiatorPrincipalID:    fedUser.ID,
+			InitiatorCredentialKind: store.InitiatorCredentialKindLegacyUnknown,
+			AuthorizationRevision:   1,
+		}
+		err = f.fireMsg(t, evt)
 		require.Error(t, err)
 		assert.Equal(t, errScheduledAuthorityUnrecorded.Error(), err.Error())
 		f.assertDelivered(t, 0)
 
 		// With a recorded ceiling, a federated principal kind is not a user
 		// principal the resolver admits either.
-		evt := *stored
 		evt.AuthorityCeiling = store.EffectCeiling{Kind: store.EffectCeilingPrincipal}
-		evt.InitiatorPrincipalKind = string(PrincipalKindFederatedUser)
 		evt.InitiatorCredentialKind = store.InitiatorCredentialKindSession
 		err = authorizeScheduledMessageFireFor(f.srv, evt, f.target)
 		require.Error(t, err)
@@ -472,7 +498,7 @@ func TestScheduledMessageAuthoringAdmitsScopedToken(t *testing.T) {
 	assert.True(t, ok, w.Body.String())
 	assert.False(t, strings.Contains(w.Body.String(), "scoped access tokens"), w.Body.String())
 
-	ceiling, ok, rec := fireRevisionCeiling(f.srv, scoped, f.proj.ID, "message")
+	ceiling, ok, rec := fireRevisionCeiling(f.srv, scoped, f.proj.ID)
 	require.True(t, ok, rec.Body.String())
 	assert.Equal(t, store.EffectCeilingBounded, ceiling.Kind)
 	assert.Contains(t, ceiling.PermissionIDs, scheduledMessagePermission)
