@@ -159,6 +159,18 @@ function reincarnateCalls(): unknown[][] {
   return apiFetch.mock.calls.filter(([url]) => String(url).endsWith('/reincarnate'));
 }
 
+/**
+ * Lets the ended attempt settle, then clicks again: a second confirm proves
+ * the in-flight guard was released and the action can be started again.
+ */
+async function expectCanStartAgain(el: ScionPageAgentDetail): Promise<void> {
+  await new Promise((r) => setTimeout(r, 0));
+  await el.updateComplete;
+  expect(showConfirm).toHaveBeenCalledTimes(1);
+  reincarnateButton(el).click();
+  await vi.waitFor(() => expect(showConfirm).toHaveBeenCalledTimes(2));
+}
+
 describe('agent detail Reincarnate action (ptone/scion#3707)', () => {
   beforeEach(() => {
     fakeStateManager.reset();
@@ -250,6 +262,25 @@ describe('agent detail Reincarnate action (ptone/scion#3707)', () => {
     await el.updateComplete;
     expect(reincarnateCalls()).toHaveLength(0);
     expect(reincarnateButton(el).hasAttribute('disabled')).toBe(false);
+
+    await expectCanStartAgain(el);
+    expect(reincarnateCalls()).toHaveLength(0);
+  });
+
+  it('can be started again after the confirm dialog rejects', async () => {
+    vi.mocked(showConfirm).mockRejectedValueOnce(new Error('dialog failed'));
+    const el = await mount(makeAgent());
+    reincarnateButton(el).click();
+
+    await vi.waitFor(() => {
+      const alert = reincarnateCard(el)?.querySelector('sl-alert');
+      expect(alert?.textContent).toContain('dialog failed');
+    });
+    expect(reincarnateCalls()).toHaveLength(0);
+    expect(reincarnateButton(el).hasAttribute('disabled')).toBe(false);
+
+    await expectCanStartAgain(el);
+    await vi.waitFor(() => expect(reincarnateCalls()).toHaveLength(1));
   });
 
   it.each([
@@ -268,6 +299,9 @@ describe('agent detail Reincarnate action (ptone/scion#3707)', () => {
     });
     // The button is usable again after the failure.
     expect(reincarnateButton(el).hasAttribute('disabled')).toBe(false);
+
+    await expectCanStartAgain(el);
+    await vi.waitFor(() => expect(reincarnateCalls()).toHaveLength(2));
   });
 
   it('shows progress and ignores further clicks while the request runs', async () => {
@@ -295,6 +329,10 @@ describe('agent detail Reincarnate action (ptone/scion#3707)', () => {
 
     resolve(jsonResponse(202, {}));
     await vi.waitFor(() => expect(reincarnateButton(el).hasAttribute('loading')).toBe(false));
+
+    // After the 202 the action can be started again.
+    await expectCanStartAgain(el);
+    await vi.waitFor(() => expect(reincarnateCalls()).toHaveLength(2));
   });
 
   it('ignores a second click while the confirm dialog is open', async () => {
