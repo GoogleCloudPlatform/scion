@@ -98,7 +98,7 @@ func (s *envService) List(ctx context.Context, opts *ListEnvOptions) (*ListEnvRe
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[ListEnvResponse](resp)
+	return apiclient.DecodeRequired[ListEnvResponse](resp)
 }
 
 // Get returns a specific environment variable by key.
@@ -134,7 +134,7 @@ func (s *envService) Set(ctx context.Context, key string, req *SetEnvRequest) (*
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[SetEnvResponse](resp)
+	return apiclient.DecodeRequired[SetEnvResponse](resp)
 }
 
 // Delete removes an environment variable.

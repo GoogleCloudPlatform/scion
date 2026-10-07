@@ -256,6 +256,11 @@ type BrokerHeartbeat struct {
 	// on every heartbeat. Nil (an older broker) keeps the stored value; a
 	// non-nil empty string reports that the broker has no active profile.
 	DefaultProfile *string `json:"defaultProfile,omitempty"`
+	// Health is the broker's report of its own health (default runtime,
+	// NFS mounts), refreshed on every heartbeat. It never changes the
+	// broker's online/offline status. An older broker omits it and the
+	// hub keeps the stored value; an older hub ignores it.
+	Health *api.BrokerHealthReport `json:"health,omitempty"`
 }
 
 // StartInFlight identifies one agent start running on a broker.
@@ -375,7 +380,7 @@ func (s *runtimeBrokerService) Create(ctx context.Context, req *CreateBrokerRequ
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[CreateBrokerResponse](resp)
+	return apiclient.DecodeRequired[CreateBrokerResponse](resp)
 }
 
 // Join completes broker registration using a join token.
@@ -384,7 +389,7 @@ func (s *runtimeBrokerService) Join(ctx context.Context, req *JoinBrokerRequest)
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[JoinBrokerResponse](resp)
+	return apiclient.DecodeRequired[JoinBrokerResponse](resp)
 }
 
 // List returns runtime brokers matching the filter criteria.
@@ -414,7 +419,7 @@ func (s *runtimeBrokerService) List(ctx context.Context, opts *ListBrokersOption
 		TotalCount int             `json:"totalCount,omitempty"`
 	}
 
-	result, err := apiclient.DecodeResponse[listResponse](resp)
+	result, err := apiclient.DecodeRequired[listResponse](resp)
 	if err != nil {
 		return nil, err
 	}
@@ -434,7 +439,7 @@ func (s *runtimeBrokerService) Get(ctx context.Context, brokerID string) (*Runti
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[RuntimeBroker](resp)
+	return apiclient.DecodeRequired[RuntimeBroker](resp)
 }
 
 // Update updates broker metadata.
@@ -443,7 +448,7 @@ func (s *runtimeBrokerService) Update(ctx context.Context, brokerID string, req 
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[RuntimeBroker](resp)
+	return apiclient.DecodeRequired[RuntimeBroker](resp)
 }
 
 // Delete removes a broker from all projects.
@@ -461,7 +466,7 @@ func (s *runtimeBrokerService) ListProjects(ctx context.Context, brokerID string
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[ListBrokerProjectsResponse](resp)
+	return apiclient.DecodeRequired[ListBrokerProjectsResponse](resp)
 }
 
 // Heartbeat sends a heartbeat for a broker.

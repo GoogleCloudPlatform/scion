@@ -27,6 +27,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
@@ -38,14 +39,15 @@ import (
 // sanitizeCrossProjectObserver strips body and attachment content from an
 // observer StructuredMessage so that cross-project broker publications do not
 // leak payload to unrelated project members. Metadata keys unrelated to
-// attachments are preserved.
+// attachments and artifact references are preserved.
 func sanitizeCrossProjectObserver(msg *messages.StructuredMessage) {
 	msg.Msg = ""
 	msg.Attachments = nil
+	msg.ArtifactRefsAdmitted = false
 	if msg.Metadata != nil {
 		sanitized := make(map[string]string, len(msg.Metadata))
 		for k, v := range msg.Metadata {
-			if k != attachmentsMetadataKey {
+			if k != attachmentsMetadataKey && k != artifacts.MessageMetadataKey {
 				sanitized[k] = v
 			}
 		}
@@ -1318,6 +1320,13 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		}
 	}
 
+	// Artifact references (ptone/scion#3222): keep only those the sending
+	// agent can read under its own request credential. The flag lets
+	// deliverToUser record them on the broker path.
+	outboundArtifactRefs, outboundArtifactWarning := []artifacts.MessageRef(nil), ""
+	structuredMsg.Metadata, outboundArtifactRefs, outboundArtifactWarning = s.admitMessageArtifacts(ctx, structuredMsg.Metadata)
+	structuredMsg.ArtifactRefsAdmitted = len(outboundArtifactRefs) > 0
+
 	// Process attachments.
 	attachmentRefs, attachmentWarnings := s.ingestAgentAttachments(ctx, agent.ProjectID, agent.ID, req.Attachments)
 	if encoded, ok := attachmentRefsMetadata(attachmentRefs); ok {
@@ -1406,6 +1415,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		s.mu.RUnlock()
 		linkAttachmentRefs(ctx, wcs, storeMsg.ID, attachmentRefs, s.messageLog)
 		delete(structuredMsg.Metadata, attachmentsMetadataKey) // strip internal transport key
+		s.recordMessageArtifacts(ctx, storeMsg.ID, outboundArtifactRefs)
 		s.events.PublishUserMessage(ctx, storeMsg, attachmentRefs)
 		if cr != nil && cr.Len() > 0 {
 			cr.Dispatch(ctx, structuredMsg)
@@ -1494,6 +1504,9 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	// message was still sent, and the status is unchanged.
 	if len(attachmentWarnings) > 0 {
 		respBody["attachment_warnings"] = attachmentWarnings
+	}
+	if outboundArtifactWarning != "" {
+		respBody["artifact_warning"] = outboundArtifactWarning
 	}
 	writeJSON(w, http.StatusOK, respBody)
 }
@@ -2131,6 +2144,9 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	// Persist to message store before delivery attempt. Set dispatch_state
 	// to "dispatched" (no new pending rows per delivery policy).
 	var persistedMsgID string
+	// artifactWarning reports artifact references not attached on the
+	// non-agent-sender path below (admitMessageArtifacts).
+	var artifactWarning string
 	// dispatchMsg (#2257, design auto-offload-large-dm §4.4) is the object
 	// actually rendered a second time and dispatched below; it defaults to
 	// today's structuredMsg (possibly nil) and is only replaced with an
@@ -2571,6 +2587,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				Deferred:       deferredNote,
 				// ptone/scion#3667: attachments the hub could not record.
 				AttachmentWarnings: dmResult.AttachmentWarnings,
+				ArtifactWarning:    dmResult.ArtifactWarning,
 			})
 			return
 		}
@@ -2578,12 +2595,18 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		// #2257 P1 (design auto-offload-large-dm §4.2 item 1): strip
 		// hub-reserved offload metadata keys before persist/render/dispatch,
 		// so a client cannot spoof body_offloaded/body_chars/body_sha256.
-		structuredMsg.Metadata = messaging.StripReservedMetadata(structuredMsg.Metadata)
+		// admitMessageArtifacts performs that strip, then re-adds only the
+		// artifact references the sender can read under its own request
+		// credential (ptone/scion#3222).
+		var artifactRefs []artifacts.MessageRef
+		structuredMsg.Metadata, artifactRefs, artifactWarning = s.admitMessageArtifacts(ctx, structuredMsg.Metadata)
+		structuredMsg.ArtifactRefsAdmitted = len(artifactRefs) > 0
 
 		if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 			s.messageLog.Error("Failed to persist message", "error", err)
 		} else {
 			persistedMsgID = storeMsg.ID
+			s.recordMessageArtifacts(ctx, storeMsg.ID, artifactRefs)
 		}
 		messaging.RecordStep(ctx, "message_persisted")
 		// B11/B13: only publish when persistence succeeded — publishing an
@@ -2826,12 +2849,13 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusAccepted)
 		_ = json.NewEncoder(w).Encode(MessageDeliveryResponse{
-			MessageID:      persistedMsgID,
-			Status:         "deferred",
-			Agent:          agent.Slug,
-			AgentPhase:     agent.Phase,
-			MentionResults: mentionResults,
-			Deferred:       deferredReason(agent),
+			MessageID:       persistedMsgID,
+			Status:          "deferred",
+			Agent:           agent.Slug,
+			AgentPhase:      agent.Phase,
+			MentionResults:  mentionResults,
+			Deferred:        deferredReason(agent),
+			ArtifactWarning: artifactWarning,
 		})
 		return
 	}
@@ -2839,11 +2863,12 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(MessageDeliveryResponse{
-		MessageID:      persistedMsgID,
-		Status:         deliveryStatus,
-		Agent:          agent.Slug,
-		AgentPhase:     agent.Phase,
-		MentionResults: mentionResults,
+		MessageID:       persistedMsgID,
+		Status:          deliveryStatus,
+		Agent:           agent.Slug,
+		AgentPhase:      agent.Phase,
+		MentionResults:  mentionResults,
+		ArtifactWarning: artifactWarning,
 	})
 }
 
@@ -2863,6 +2888,9 @@ type MessageDeliveryResponse struct {
 	// message (ptone/scion#3667). The message was still delivered without
 	// them. Omitted when every attachment was recorded.
 	AttachmentWarnings []AttachmentWarning `json:"attachment_warnings,omitempty"`
+	// ArtifactWarning is set when artifact references the request named
+	// were not attached (ptone/scion#3222).
+	ArtifactWarning string `json:"artifact_warning,omitempty"`
 }
 
 // GroupMessageRecipientResult represents the delivery status for one recipient in a group[] delivery.

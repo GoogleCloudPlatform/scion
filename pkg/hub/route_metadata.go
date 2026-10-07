@@ -1199,7 +1199,15 @@ func (s *Server) routeGuard(meta RouteMetadata, next http.HandlerFunc) http.Hand
 			}
 			next(w, r)
 		case RouteHubAdmin:
-			if meta.Permission != "" && s.authzService != nil {
+			if meta.Permission != "" {
+				// A route that declares a Permission is only ever
+				// evaluated through the authorization service; without
+				// one it is refused rather than served via requireAdmin.
+				if s.authzService == nil {
+					writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError,
+						"authorization unavailable", nil)
+					return
+				}
 				// Validate route metadata completeness
 				if meta.Resource == "" || meta.Action == "" {
 					writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError,
@@ -1251,9 +1259,9 @@ func (s *Server) routeGuard(meta RouteMetadata, next http.HandlerFunc) http.Hand
 				}
 				next(w, r)
 			} else {
-				// Fallback: unconverted route still uses requireAdmin.
-				// This makes incremental D4 conversion safe — routes
-				// without a declared Permission behave exactly as before.
+				// Fallback: a route without a declared Permission still
+				// uses requireAdmin. This makes incremental D4 conversion
+				// safe — such routes behave exactly as before.
 				if _, ok := s.requireAdmin(w, r); !ok {
 					return
 				}

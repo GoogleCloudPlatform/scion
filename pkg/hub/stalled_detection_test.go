@@ -414,7 +414,7 @@ func TestNew_DefaultsStalledThresholdWhenZero(t *testing.T) {
 	}
 
 	// Create server with zero StalledThreshold (simulates cmd/server.go omission)
-	srv, err := New(ServerConfig{}, s)
+	srv, err := newTestHubServer(t, ServerConfig{}, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
@@ -434,7 +434,7 @@ func TestNew_ClampsStalledThresholdBelowMinimum(t *testing.T) {
 	}
 
 	// Create server with StalledThreshold below the 2-minute minimum.
-	srv, err := New(ServerConfig{StalledThreshold: 30 * time.Second}, s)
+	srv, err := newTestHubServer(t, ServerConfig{StalledThreshold: 30 * time.Second}, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
@@ -455,7 +455,7 @@ func TestNew_PreservesValidStalledThreshold(t *testing.T) {
 	}
 
 	// Create server with a valid StalledThreshold (>= 2 minutes).
-	srv, err := New(ServerConfig{StalledThreshold: 10 * time.Minute}, s)
+	srv, err := newTestHubServer(t, ServerConfig{StalledThreshold: 10 * time.Minute}, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}

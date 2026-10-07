@@ -369,9 +369,8 @@ func TestTemplateHubAccessScopes_StoredButIgnoredForToken(t *testing.T) {
 	}
 	// Deliberately NOT setting DevAuthToken so role-based scopes are enforced.
 
-	srv, err := New(cfg, s)
+	srv, err := newTestHubServer(t, cfg, s)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 
 	ctx := context.Background()
 

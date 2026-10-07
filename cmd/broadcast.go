@@ -121,9 +121,6 @@ func broadcastViaHub(hubCtx *HubContext, message string) error {
 	if err != nil {
 		return wrapHubError(fmt.Errorf("failed to list agents via Hub: %w", err))
 	}
-	if resp == nil {
-		return fmt.Errorf("failed to list agents via Hub: server returned empty response")
-	}
 
 	if len(resp.Agents) == 0 {
 		fmt.Println("No running agents found to broadcast to.")

@@ -67,6 +67,9 @@ const (
 	ActionClone          Action = "clone"
 	ActionExecute        Action = "execute"
 	ActionSetMessageMode Action = "set_message_mode"
+	// ActionSetMessagingPolicy covers changing a project's cross-project
+	// inbound messaging policy (project.set_messaging_policy).
+	ActionSetMessagingPolicy Action = "set_messaging_policy"
 
 	// Global-catalog write actions — see design doc §3.1.
 	// These distinguish hub-catalog mutation from project-scoped CRUD,

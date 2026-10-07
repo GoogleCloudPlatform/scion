@@ -63,7 +63,7 @@ func TestNew_WiresPlatformAuthSAToBothGuards(t *testing.T) {
 
 	cfg := DefaultServerConfig()
 	cfg.PlatformAuthSA = testPlatformAuthSA
-	srv, err := New(cfg, s)
+	srv, err := newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}

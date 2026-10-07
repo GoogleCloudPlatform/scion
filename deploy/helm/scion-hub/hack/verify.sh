@@ -225,7 +225,19 @@ NO_RENDERED_SETTINGS=(existing-secret)
 #        rendered settings.yaml; no rendered-settings claims)
 #    -1  the NOT_YET needle for "the session secret", removed from the notes
 # 362 - 2 + 2 - 1 = 361.
-EXPECTED_TOTAL=361
+#
+# 361 -> 362 for POD_NAME on the hub container (ptone/scion#3650):
+#    +1  the hub.extraEnv shadow check for POD_NAME, a new container env entry
+#        the extraction reads back out of the rendered manifest
+# 361 + 1 = 362.
+#
+# 362 -> 363 when hub.extraEnv may set POD_NAME again (ptone/scion#3650):
+#    -1  the POD_NAME shadow check, gone: the chart now defers to an operator
+#        POD_NAME instead of refusing it
+#    +2  pod-name-default: the default render sets it once from metadata.name,
+#        and an extraEnv POD_NAME is accepted and replaces it
+# 362 - 1 + 2 = 363.
+EXPECTED_TOTAL=363
 
 failures=0
 assertions=0
@@ -850,12 +862,16 @@ mapfile -t shadow_names < <(
          inCM && /^data:$/{inData=1; next}
          inData && /^  [A-Z_]+:/{sub(":.*","",$1); print $1}' "$shadow_src"
     grep -Eo '^ +- name: [A-Z][A-Z0-9_]*$' "$shadow_src" | awk '{print $3}'
-  } | sort -u
+  } | sort -u | grep -vxF POD_NAME
 )
+# POD_NAME is taken out above on purpose: the chart emits it only when
+# hub.extraEnv does not, so an operator entry replaces it rather than shadowing
+# it. The pod-name-default step below pins both halves of that.
+#
 # Vacuity guard, and the number is deliberate: HOME, KUBECONFIG,
 # SCION_SERVER_BASE_URL, SCION_REQUIRE_STABLE_SIGNING_KEY,
-# SCION_SERVER_ADMIN_MODE, SCION_SERVER_MAINTENANCE_MESSAGE, POD_NAMESPACE. An
-# extraction that silently returned two names would leave this whole step
+# SCION_SERVER_ADMIN_MODE, SCION_SERVER_MAINTENANCE_MESSAGE, POD_NAMESPACE.
+# An extraction that silently returned two names would leave this whole step
 # reporting success on nothing.
 if [[ ${#shadow_names[@]} -lt 7 ]]; then
   fail "only ${#shadow_names[@]} environment variable names were extracted from the rendered chart (${shadow_names[*]:-none}) - the shadow checks below would be testing almost nothing"
@@ -895,6 +911,39 @@ if "$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
   pass "hub.extraEnv accepts SCION_SERVER_ADMIN_MODE when the chart emits no such variable"
 else
   fail "hub.extraEnv rejected SCION_SERVER_ADMIN_MODE with hub.adminMode unset - the guard is matching a remembered name rather than what the chart actually emits"
+fi
+
+# --------------------------------------------------------------------------
+step "pod-name-default: POD_NAME comes from the pod unless hub.extraEnv sets it"
+# --------------------------------------------------------------------------
+# The hub prefixes its instance ID with POD_NAME. The chart sets it from
+# metadata.name, but before it did, hub.extraEnv was the documented way to
+# provide it - so an extraEnv POD_NAME must keep rendering (an upgrade must not
+# fail) and must be the only POD_NAME in the container env list (a duplicate
+# entry would silently pick one of the two).
+pod_name_entries() {
+  grep -A3 -E '^ +- name: POD_NAME$' "$1"
+}
+pod_default="$WORK/pod-name-default.yaml"
+if "$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
+    "${BASE[@]}" >"$pod_default" 2>>"$_tcerr" \
+    && [[ $(grep -cE '^ +- name: POD_NAME$' "$pod_default") -eq 1 ]] \
+    && pod_name_entries "$pod_default" | grep -qE '^ +fieldPath: metadata\.name$'; then
+  pass "POD_NAME defaults to the pod's metadata.name, once"
+else
+  fail "the default render does not set POD_NAME exactly once from metadata.name"
+fi
+pod_user="$WORK/pod-name-user.yaml"
+if "$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
+    "${BASE[@]}" \
+    --set 'hub.extraEnv[0].name=POD_NAME' \
+    --set-string 'hub.extraEnv[0].value=operator-pod' >"$pod_user" 2>>"$_tcerr" \
+    && [[ $(grep -cE '^ +- name: POD_NAME$' "$pod_user") -eq 1 ]] \
+    && pod_name_entries "$pod_user" | grep -qE '^ +value: operator-pod$' \
+    && ! pod_name_entries "$pod_user" | grep -q 'fieldPath: metadata.name'; then
+  pass "hub.extraEnv POD_NAME is accepted and replaces the chart's default"
+else
+  fail "hub.extraEnv POD_NAME was refused, duplicated or ignored - existing releases that set it there would fail or change on upgrade"
 fi
 
 # --------------------------------------------------------------------------

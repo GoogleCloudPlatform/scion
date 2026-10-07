@@ -41,11 +41,10 @@ func TestNew_StoresServerConfigExperimentsRegistry(t *testing.T) {
 	reg := testRegistry(t)
 	cfg := DefaultServerConfig()
 	cfg.Experiments = reg
-	srv, err := New(cfg, st)
+	srv, err := newTestHubServer(t, cfg, st)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 
 	if srv.experimentRegistry() != reg {
 		t.Fatal("New() did not carry cfg.Experiments into s.experiments; experimentRegistry() returned a different registry")
@@ -55,11 +54,10 @@ func TestNew_StoresServerConfigExperimentsRegistry(t *testing.T) {
 	}
 
 	// A server built without cfg.Experiments falls back to experiments.Default().
-	srv2, err := New(DefaultServerConfig(), st)
+	srv2, err := newTestHubServer(t, DefaultServerConfig(), st)
 	if err != nil {
 		t.Fatalf("New (no Experiments): %v", err)
 	}
-	t.Cleanup(func() { _ = srv2.Shutdown(context.Background()) })
 	if srv2.experimentRegistry() != experiments.Default() {
 		t.Error("New() without cfg.Experiments should fall back to experiments.Default()")
 	}

@@ -61,9 +61,11 @@ for details.
 
 1. Notification channels must be created before alert policies that reference
    them. See `notification-channels.yaml`.
-2. Custom metrics (prefixed `custom.googleapis.com/scion.*`) must be emitted by
-   the application before alert policies can evaluate. Metrics are emitted via
-   the OTLP pipeline described in `.design/hosted/metrics-system.md`.
+2. The metrics must be exported before alert policies can evaluate. The Hub
+   exports them through the Google Cloud metric exporter as
+   `workload.googleapis.com/scion.*` (see above);
+   `pkg/observability/hubmetrics/alert_policies_test.go` checks every policy
+   metric type against the metrics the Hub defines.
 3. The GCP project must have the Cloud Monitoring API enabled.
 
 ## File inventory
