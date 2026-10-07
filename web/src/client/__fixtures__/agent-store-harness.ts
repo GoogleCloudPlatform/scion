@@ -196,6 +196,9 @@ export const COMPACT_KEYS = [
   'lastActivityEvent',
   '_capabilities',
   '_messageability',
+  // Always sent by the hub (null when no delete is active or failed); rows
+  // here that leave it out stand for a listing without the deletion view.
+  'deletion',
 ] as const;
 
 /** The compact keys the hub always emits; it omits the others when empty. */
@@ -208,11 +211,15 @@ const ALWAYS_EMITTED: ReadonlySet<string> = new Set([
   'created',
   'updated',
   'lastActivityEvent',
+  'deletion',
 ]);
 
-/** Whether Go's `omitempty` drops `value`: null, an empty string, list or map. */
+/**
+ * Whether `value` is empty as the store reads it (absent, null, or an empty
+ * string, list or map), the values Go's `omitempty` drops.
+ */
 function isEmpty(value: unknown): boolean {
-  if (value === null || value === '') return true;
+  if (value === undefined || value === null || value === '') return true;
   if (Array.isArray(value)) return value.length === 0;
   return typeof value === 'object' && Object.keys(value).length === 0;
 }

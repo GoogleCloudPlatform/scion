@@ -16,10 +16,14 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
+	"strconv"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
@@ -145,6 +149,26 @@ func (s *Server) authorizeWithMessage(w http.ResponseWriter, r *http.Request, re
 	if !decision.Allowed {
 		logAuthzDenial(r, identity, resource, action, decision.Reason)
 		writeForbiddenStructuredDenial(w, msg, resource.Type, action, decision.DeniedBy)
+		return false
+	}
+	return true
+}
+
+// authorizeWithEvidence is authorize with server-built target evidence for
+// a collection-level request (CheckAccessWithEvidence). evidence must come
+// from hubCollectionEvidence or projectCollectionEvidence in the handler
+// that knows which operation it runs, never from a request field.
+func (s *Server) authorizeWithEvidence(w http.ResponseWriter, r *http.Request, resource Resource, action Action, evidence TargetScopeEvidence) bool {
+	ctx := r.Context()
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		Unauthorized(w)
+		return false
+	}
+	decision := s.authzService.CheckAccessWithEvidence(ctx, identity, resource, action, evidence)
+	if !decision.Allowed {
+		logAuthzDenial(r, identity, resource, action, decision.Reason)
+		writeForbiddenStructuredDenial(w, "", resource.Type, action, decision.DeniedBy)
 		return false
 	}
 	return true
@@ -538,6 +562,14 @@ func agentActionPermission(action string) Action {
 // "Authentication required"), but the distinction is worth keeping honest:
 // this helper gates the hub's admin endpoints.
 func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) (UserIdentity, bool) {
+	return s.requireAdminFor(w, r, "")
+}
+
+// requireAdminFor is requireAdmin for a session-only admin operation. A
+// scoped user access token is refused with the same 403 as requireAdmin,
+// plus the session-only reason details (session_only_gate.go). An empty
+// reason writes the plain 403.
+func (s *Server) requireAdminFor(w http.ResponseWriter, r *http.Request, reason authzop.SessionOnlyReason) (UserIdentity, bool) {
 	// Synthetic resource: requireAdmin is a role check on the hub itself
 	// rather than a policy check on an addressable resource.
 	resource := Resource{Type: "hub", ID: r.URL.Path}
@@ -559,15 +591,165 @@ func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) (UserIdent
 		return nil, false
 	}
 	if !IsUnscopedLocalPlatformAdmin(user) {
-		reason := "not an admin"
-		if IsScopedUserIdentity(user) {
-			reason = "scoped user access token"
+		denial := "not an admin"
+		scoped := IsScopedUserIdentity(user)
+		if scoped {
+			denial = "scoped user access token"
 		} else if _, federated := user.(FederatedIdentity); federated {
-			reason = "federated identity is not a local platform admin"
+			denial = "federated identity is not a local platform admin"
 		}
-		logAuthzDenial(r, identity, resource, ActionManage, reason)
-		Forbidden(w)
+		logAuthzDenial(r, identity, resource, ActionManage, denial)
+		if scoped && reason != "" {
+			writeSessionOnlyDenial(w, ErrCodeForbidden, "Insufficient permissions", reason)
+		} else {
+			Forbidden(w)
+		}
 		return nil, false
 	}
 	return user, true
+}
+
+// Self-scoped authorization.
+//
+// A self permission (permissions.IsSelfPermission) acts only on the
+// holder's own records: inbox items, direct messages, user-scope skill
+// injections. Those records have no project or hub target that a role
+// binding could authorize, so these checks replace Decide for them. The
+// caller has already confirmed that the record belongs to the holder.
+
+// Self-scope deny reasons.
+const (
+	selfScopeReasonNotSelfPermission = "permission is not a self-scoped permission"
+	selfScopeReasonCredential        = "credential cannot act on self-scoped records"
+	selfScopeReasonCeiling           = "token does not have scope for this self-scoped permission"
+	selfScopeReasonBoundary          = bearerReasonBoundaryIneligible
+	selfScopeReasonOutsideProject    = bearerReasonOutsideProject
+)
+
+// selfScopedDecision applies the self-scope rule for one record:
+//
+//   - permissionID must be a self permission;
+//   - an interactive session or a dev credential passes;
+//   - a user access token passes only if its ceiling allows permissionID,
+//     permissionID is eligible for the token's boundary kind, and, for a
+//     project boundary, rowProjectID equals the boundary project. A record
+//     with no project (rowProjectID empty) needs a hub boundary;
+//   - every other credential is denied.
+//
+// ok is false with a stable reason on denial.
+func selfScopedDecision(identity Identity, permissionID, rowProjectID string) (ok bool, reason string) {
+	if !permissions.IsSelfPermission(permissionID) {
+		return false, selfScopeReasonNotSelfPermission
+	}
+	switch v := identity.(type) {
+	case *AuthenticatedUser:
+		if v == nil {
+			return false, selfScopeReasonCredential
+		}
+		return true, ""
+	case *DevUser:
+		if v == nil {
+			return false, selfScopeReasonCredential
+		}
+		return true, ""
+	case *ScopedUserIdentity:
+		if v == nil {
+			return false, selfScopeReasonCredential
+		}
+		if !v.Ceiling().Allows(permissionID) {
+			return false, selfScopeReasonCeiling
+		}
+		boundary := v.Boundary()
+		if !boundary.Valid() {
+			return false, bearerReasonBoundaryInvalid
+		}
+		if !permissionEligibleForBoundary(permissionID, boundary.Kind) {
+			return false, selfScopeReasonBoundary
+		}
+		if boundary.Kind == BoundaryKindProject && (rowProjectID == "" || rowProjectID != boundary.ProjectID) {
+			return false, selfScopeReasonOutsideProject
+		}
+		return true, ""
+	default:
+		return false, selfScopeReasonCredential
+	}
+}
+
+// authorizeSelfScoped authorizes the caller to apply permissionID to one of
+// its own records whose project is rowProjectID (empty for a record with no
+// project, such as a direct message between two users). It writes 401 when
+// no identity is present and 403 on denial; see selfScopedDecision for the
+// rule.
+func (s *Server) authorizeSelfScoped(w http.ResponseWriter, r *http.Request, permissionID string, rowProjectID string) bool {
+	identity := GetIdentityFromContext(r.Context())
+	if identity == nil {
+		Unauthorized(w)
+		return false
+	}
+	ok, reason := selfScopedDecision(identity, permissionID, rowProjectID)
+	if ok {
+		return true
+	}
+	resourceType, action := selfPermissionResourceAction(permissionID)
+	logAuthzDenial(r, identity, Resource{Type: resourceType}, action, reason)
+	writeForbiddenStructured(w, "", resourceType, action)
+	return false
+}
+
+// selfPermissionResourceAction returns the registry resource type and
+// action of permissionID, or empty values for an unknown ID.
+func selfPermissionResourceAction(permissionID string) (string, Action) {
+	for _, p := range permissions.Registry {
+		if p.ID == permissionID {
+			return p.Resource, Action(p.Action)
+		}
+	}
+	return "", ""
+}
+
+// filterSelfScopedRows keeps the rows of the caller's own records that the
+// caller may see with permissionID: projectOf returns a row's project (empty
+// for a row with no project), and each row is checked with the
+// authorizeSelfScoped rule. A caller that may not use permissionID at all
+// gets no rows. List handlers filter the full result first and compute
+// totals and cursors from the filtered rows (pageSelfScopedRows), so neither
+// counts a row the caller cannot see.
+func filterSelfScopedRows[T any](identity Identity, permissionID string, rows []T, projectOf func(T) string) []T {
+	out := make([]T, 0, len(rows))
+	for _, row := range rows {
+		if ok, _ := selfScopedDecision(identity, permissionID, projectOf(row)); ok {
+			out = append(out, row)
+		}
+	}
+	return out
+}
+
+// errInvalidSelfScopedCursor reports a cursor pageSelfScopedRows did not
+// issue.
+var errInvalidSelfScopedCursor = errors.New("invalid cursor")
+
+// pageSelfScopedRows filters rows with filterSelfScopedRows and then pages
+// the filtered rows: totalCount is the number of visible rows, and cursor
+// and nextCursor are offsets into the visible rows. An empty cursor starts
+// at the first row; nextCursor is empty on the last page. limit must be
+// positive.
+func pageSelfScopedRows[T any](identity Identity, permissionID string, rows []T, projectOf func(T) string, cursor string, limit int) (items []T, totalCount int, nextCursor string, err error) {
+	if limit <= 0 {
+		return nil, 0, "", errors.New("limit must be positive")
+	}
+	visible := filterSelfScopedRows(identity, permissionID, rows, projectOf)
+	start := 0
+	if cursor != "" {
+		start, err = strconv.Atoi(cursor)
+		if err != nil || start < 0 || start > len(visible) {
+			return nil, 0, "", errInvalidSelfScopedCursor
+		}
+	}
+	end := start + limit
+	if end >= len(visible) {
+		end = len(visible)
+	} else {
+		nextCursor = strconv.Itoa(end)
+	}
+	return visible[start:end], len(visible), nextCursor, nil
 }

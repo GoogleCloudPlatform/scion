@@ -93,10 +93,29 @@ func (s *Server) handleProjectSharedDirRoutes(w http.ResponseWriter, r *http.Req
 	}
 }
 
-// handleProjectSharedDirs handles GET/POST on /api/v1/projects/{projectId}/shared-dirs.
-// The project has already been loaded and authorized by
-// handleProjectSharedDirRoutes; the checks below are additional to that gate,
-// not a replacement for it.
+// handleProjectSharedDirs handles GET (list) and POST (create) on
+// /api/v1/projects/{projectId}/shared-dirs. The project has already been
+// loaded and authorized by handleProjectSharedDirRoutes; the checks below
+// are additional to that gate, not a replacement for it.
+//
+// Backing-directory contract (ptone/scion#2879): POST records the
+// declaration only and does not create a directory on any host. The
+// backing directory is created on first use: by each Runtime Broker when an
+// agent of the project starts there (pkg/agent resolveSharedDirs, local
+// layout or NFS export), or by the hub on the first file write/upload
+// through the shared-dir file routes (openSharedDirRoot with
+// createIfMissing). Reads never create it: listing a declared but not yet
+// created shared dir answers 200 with an empty list, and reading a file in
+// it answers 404.
+//
+// A hub write only reaches storage the hub itself can resolve
+// (resolveSharedDirPath): the NFS export, a hub-managed project's local
+// layout on the hub host, or a co-located broker's path for a git project.
+// It never creates a remote broker's local copy, which exists only once an
+// agent starts on that broker; for a git project with no co-located
+// provider and no NFS export a hub write is rejected and creates nothing.
+// Creation at agent start is the only path that reaches remote brokers,
+// which is why first use, not POST, is the contract on every deployment.
 func (s *Server) handleProjectSharedDirs(w http.ResponseWriter, r *http.Request, project *store.Project) {
 	ctx := r.Context()
 

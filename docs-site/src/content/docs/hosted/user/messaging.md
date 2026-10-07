@@ -108,7 +108,8 @@ The web composer features a security-hardened, developer-friendly file upload sy
 - **16K Input Character Limit**: A robust 16,000-character limit is enforced in the composer, protecting token context limits.
 - **SSE Direct Append & Real-Time Attachments**: Chat messages stream via Server-Sent Events (SSE) using direct-append logic, providing lag-free typing rendering. Additionally, attachment previews render immediately on incoming SSE messages, ensuring the user interface instantly displays attachment references without waiting for subsequent user-triggered renders.
 - **Idempotency Keys**: Client-side idempotency keys eliminate duplicate messages during transient connection drops or retry states.
-- **Honest Delivery Status**: A message to an agent that is not running is marked **Agent unreachable** instead of **Delivered**. If the Runtime Broker fails to deliver a message to the agent's terminal, it makes up to 3 attempts in total, but never retries once part of the text has already reached the terminal (so the agent does not see it twice), and a user sender sees the failure live in the chat. Messages to an agent that has been deleted fail right away instead of waiting in the queue. Failed messages are purged after 7 days.
+- **Honest Delivery Status**: A message to an agent that is not running is marked **Agent unreachable** instead of **Delivered**. A thread message that mentions no agent is saved to the thread but marked **Not delivered to any agent**; mention an agent to deliver the message to it. If the Runtime Broker fails to deliver a message to the agent's terminal, it makes up to 3 attempts in total, but never retries once part of the text has already reached the terminal (so the agent does not see it twice), and a user sender sees the failure live in the chat. Messages to an agent that has been deleted fail right away instead of waiting in the queue. Failed messages are purged after 7 days.
+- **Wake and Send**: If you send to a suspended agent and you are allowed to start it (the `agent.lifecycle` permission), the chat asks whether to wake it instead of marking the message **Agent unreachable**. Choose **Wake and send**: the Hub resumes the agent, waits up to 30 seconds for it to be ready, and delivers your message as its first input. The bubble shows **Waking agent…** in the meantime. A retry after a dropped connection does not send the message twice. Without the permission, or when the agent is stopped, in error or deleted, you see the ordinary **Agent unreachable** status.
 - **Cursor-Based Scrollback Pagination**: Solved previous scroll-jump issues and cursor-mismatches. Scrollback pagination and scroll-to-bottom locks operate smoothly as history loads.
 
 ### Interactive @-Mentions & Autocomplete
@@ -282,13 +283,19 @@ When an agent uses the `ask_user` tool (or similar mechanism depending on the ha
 
 Messages are delivered in real-time to the Web Dashboard via Server-Sent Events (SSE). The **Messages Tab** on the individual agent detail page provides a real-time stream of all communication with that specific agent.
 
+When an agent finishes a turn, its Stop hook mirrors the agent's reply to the user who created it, so it reaches you as a message from that agent. Only agents created directly by a user are mirrored; sub-agents (agents created by other agents) are not. Each user notification is stored exactly once.
+
+Messages record the sender's and recipient's projects. Human callers see these as `senderProjectId` and `recipientProjectId` on conversation messages; agent callers see them only on direct messages where both parties are named in the conversation.
+
 ### Delivery failures
 
 Messages are not silently dropped in these cases:
 
-- **Non-running recipients.** A message is rejected if the recipient agent is not running (suspended, stopped, in error, or still starting). For direct messages, human or agent, the send fails immediately with a `409` error. Pass `--wake` to resume a suspended agent and then deliver. Broadcast, group, and message-broker deliveries are rejected per recipient. A sending agent gets a `DELIVERY_FAILED` system notice ("Message delivery to `<agent>` failed: …") for each rejected recipient.
+- **Non-running recipients.** A message is rejected if the recipient agent is not running (suspended, stopped, in error, or still starting). For direct messages, human or agent, the send fails immediately with a `409` error. Pass `--wake` to resume a suspended agent and then deliver. Waking requires the same lifecycle permission as starting the agent (`agent.lifecycle`), for user and agent senders alike; without it the send fails with `403` and the agent is not resumed. Broadcast, group, and message-broker deliveries are rejected per recipient. A sending agent gets a `DELIVERY_FAILED` system notice ("Message delivery to `<agent>` failed: …") for each rejected recipient.
 - **Reincarnating recipients.** While an agent is being migrated with [`scion reincarnate`](/scion/reference/cli/#scion-reincarnate), messages to it are saved to its conversation history instead of being dispatched or dropped. DMs, group messages and @mentions return `202` with status `deferred`, and a sending agent gets a `DELIVERY_DEFERRED` system notice rather than a failure. The new generation is told to read what it missed with `scion conversation catch-up`. Scheduled messages that fire during a reincarnation fail loudly instead of being deferred.
 - **Late broker failures.** A Runtime Broker may accept a message into its short delivery buffer and then fail to deliver it, for example because the container has gone away. The broker reports this to the Hub. The Hub marks the message `failed` rather than leaving it `dispatched`, and notifies the sending agent.
+- **Group messages to non-running members.** Group messages do not wake agents. A member that is not running is not dispatched to; its copy of the message is stored as `failed` with a reason (suspended members get a group-specific one), and the sender gets a per-member failure result.
+- **Runtime Broker timeouts and cancelled requests.** The failure is still recorded: the message is marked `failed` and the sending agent still gets its `DELIVERY_FAILED` notice even if the original request was cancelled or the Runtime Broker timed out. Failure reasons from the Runtime Broker are sanitized before they are stored or shown in a notice.
 - **Agent messages to humans.** If the Hub's delivery queue for a project is saturated, the agent's send fails with `503` (`unavailable`); retry later. A retry may duplicate the message on an external chat channel such as Discord.
 
 ## Message Authorization & Modes
@@ -399,7 +406,11 @@ Scion maintains different limits depending on the recipient type:
 * **Agent-to-Agent Messages**: **No enforced length cap in code**. You can send larger payloads safely between agents.
 * **Large-DM offload (opt-in)**: A Hub administrator can set `offload_threshold_runes` in the Hub messaging settings (`PUT /api/v1/admin/messaging`). When an agent-recipient DM body is longer than the threshold, the agent's terminal receives a short stub instead: the body size, a preview, and one command to fetch the full body (for example, `scion conversation get-message conv:<conversation-id> <message-id> --body`). The stored message, the Web Dashboard, and other observers always keep the full body. Plain messages are never offloaded. The default threshold is `0` (disabled); leave it there until your agent images include a `scion` CLI with that fetch command.
 
-### 2. Inbound Message Type Discrimination
+### 2. Reply Explicitly
+
+Scion does not forward an agent's end-of-turn text to anyone. A user, an agent or an [A2A](/scion/hosted/user/a2a-bridge/) caller sees only what the agent sends on purpose with `scion message`. Instruct agents that answer people or other agents to reply with `scion message`.
+
+### 3. Inbound Message Type Discrimination
 
 When an agent receives an inbound message, it arrives wrapped in standard delimiters and includes metadata:
 
@@ -449,7 +460,7 @@ When an agent signals `WAITING_FOR_INPUT` (by calling `sciontool status ask_user
 When using slug-based query paths or addressing agents via `agent:<name>` (e.g., `scion message agent:<name>`), Scion strictly scopes all message queries and deliveries by the active `ProjectID`. This ensures that even if different projects contain agents with identical names or slugs, messages are completely isolated within each project and never leak across project boundaries.
 :::
 
-### 3. Subscription Management and Agent Self-Service
+### 4. Subscription Management and Agent Self-Service
 
 * **Automatic Subscription**: The `--notify` flag on `scion start` is **deprecated**. When you start a sub-agent, Scion automatically registers your subscription via creation ancestry.
 * **Explicit Messaging Subscription**: Use the `--notify` flag on `scion message` only when you need to subscribe to notifications from a peer agent that you did *not* create.
@@ -459,7 +470,7 @@ When using slug-based query paths or addressing agents via `agent:<name>` (e.g.,
   - **Granular Scopes**: Authorization gates require the agent token to hold the `project:read` scope for reading subscriptions and the `project:agent:notify` scope for writing (creating, updating, or deleting) subscriptions.
   - **Ownership Constraints**: Acknowledging notifications or modifying/deleting existing subscriptions strictly requires ownership validation, meaning an agent can only modify or acknowledge subscriptions that target or belong to itself.
 
-### 4. Security Controls for Direct Messages & Broadcasts
+### 5. Security Controls for Direct Messages & Broadcasts
 
 Scion employs strict, ingress-level security controls and invariants for Direct Messages (DMs) and Broadcasts to prevent spoofing, cross-project injection, and message divergence:
 - **Server-Side Sender Identity & Derivation**: Sender identity is forced server-side based on the authenticated request context, completely ignoring any sender claims in the payload. Furthermore, DM conversation keys are derived dynamically from the authenticated caller rather than trusting the payload, closing spoofed-sender conversation-selection vectors.
@@ -468,7 +479,7 @@ Scion employs strict, ingress-level security controls and invariants for Direct 
 - **Broadcast Authorization**: Project membership is strictly required and enforced for all broadcast calls.
 - **Publish Gating & Stamping**: Message publishing to real-time streams (SSE) is securely gated on successful database persistence (dual-write conversation stamping). This ensures that a message is never broadcasted to clients without being safely committed to history.
 
-### 5. Sleep Anti-Pattern & Polling
+### 6. Sleep Anti-Pattern & Polling
 
 :::danger[Avoid Sleep]
 **Never use the shell `sleep` command to wait for external processes.** Running a blocking `sleep` loop keeps your agent alive but inactive, triggering the Hub's stall detector and leading to an automatic suspend.
@@ -483,7 +494,7 @@ sciontool status blocked "Waiting for build job 103"
 ```
 The scheduled message delivers the wake-up poke; `status blocked` tells the platform that your silence is intentional, keeping you from being suspended.
 
-### 6. @mention Parsing & Conversation Addressing
+### 7. @mention Parsing & Conversation Addressing
 
 `@<agent-name>` is now the **preferred addressing form** for sending messages to agents via the CLI (e.g., `scion message @tech-lead "..."`). This form addresses the agent's conversation directly.
 
@@ -497,6 +508,7 @@ To send to multiple recipients at once, use the `group[...]` addressing form:
 ```bash
 scion message "group[tech-lead, dev-agent, qa-agent]" "Let's review the deployment strategy"
 ```
+A group send reports each recipient's outcome and exits `3` when only some recipients received the message; see [Group sends and exit codes](/scion/reference/cli/#scion-message-or-msg).
 
 :::caution[Deprecated Flag]
 The `--cc` flag on `scion message` is deprecated and will be removed in a future release. It still works but triggers a deprecation warning. Use `group[...]` addressing or body `@mentions` for multi-recipient delivery instead.

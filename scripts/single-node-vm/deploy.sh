@@ -21,7 +21,8 @@
 # enables IAP, configures the hub for proxy auth, and prints the access URL.
 #
 # The VM has no public IP; authenticated access is via the Cloud Run IAP proxy.
-# Agents running on the VM connect via localhost (no IAP needed).
+# Agents running on the VM reach the hub directly on the VM's port 8080 over
+# the Docker bridge (hostname scion-hub.internal), bypassing IAP.
 #
 # The script is idempotent: re-running converges without duplication.
 #
@@ -125,6 +126,68 @@ info()    { echo -e "${BOLD}${GREEN}==>${RESET} ${BOLD}$*${RESET}"; }
 warn()    { echo -e "${YELLOW}WARNING:${RESET} $*" >&2; }
 err()     { echo -e "${RED}ERROR:${RESET} $*" >&2; }
 section() { echo ""; echo -e "${BOLD}--- $* ---${RESET}"; }
+
+# hub_health_status BODY -- prints the top-level status of a hub /healthz
+# body: healthy, degraded, unhealthy, or unknown (no answer / not a scion
+# body). The hub always encodes "status" first on a single line, so matching
+# the start of the body reads the top-level status only, never a nested
+# "hub"/"broker" status.
+hub_health_status() {
+  case "$1" in
+    '{"status":"healthy"'*) echo healthy ;;
+    '{"status":"degraded"'*) echo degraded ;;
+    '{"status":"unhealthy"'*) echo unhealthy ;;
+    *) echo unknown ;;
+  esac
+}
+
+# wait_for_hub_health LABEL -- polls the hub's /healthz on the VM until it
+# reports healthy, up to HEALTH_CHECK_MAX_ATTEMPTS times. /healthz always
+# returns HTTP 200, so the body's status decides (ptone/scion#1094):
+#   - healthy: pass.
+#   - degraded at the last attempt: the hub is up but a non-critical check
+#     (e.g. colocated_broker) is failing -- pass with a visible warning and
+#     the response, so the failing checks are named.
+#   - unhealthy (a critical check such as the database failed), or no
+#     answer: fail (returns 1).
+# Keeps polling for healthy while degraded, since the co-located broker
+# registers just after startup.
+wait_for_hub_health() {
+  local label="$1" body="" status="unknown" i
+  for i in $(seq 1 "$HEALTH_CHECK_MAX_ATTEMPTS"); do
+    body="$(gcloud compute ssh "${INSTANCE_NAME}" \
+      --zone="${ZONE}" --project="${PROJECT_ID}" \
+      --command="curl -s http://localhost:8080/healthz" \
+      2>/dev/null || true)"
+    status="$(hub_health_status "$body")"
+    if [[ "$status" == "healthy" ]]; then
+      echo ""
+      echo -e "${GREEN}  ${label} passed.${RESET}"
+      return 0
+    fi
+    if [[ "$i" -lt "$HEALTH_CHECK_MAX_ATTEMPTS" ]]; then
+      echo "  Attempt ${i}/${HEALTH_CHECK_MAX_ATTEMPTS} (status: ${status}) - waiting ${HEALTH_CHECK_RETRY_SECS}s..."
+      sleep "$HEALTH_CHECK_RETRY_SECS"
+    fi
+  done
+  if [[ "$status" == "degraded" ]]; then
+    echo ""
+    warn "${label}: the hub is up but DEGRADED (a non-critical check is failing). Response:"
+    echo "  ${body}" >&2
+    echo "  Check the service logs:" >&2
+    echo "  gcloud compute ssh ${INSTANCE_NAME} --zone=${ZONE} --project=${PROJECT_ID} \\" >&2
+    echo "    --command='sudo journalctl -u scion-hub.service --no-pager -n 50'" >&2
+    return 0
+  fi
+  err "${label} did not pass within $((HEALTH_CHECK_MAX_ATTEMPTS * HEALTH_CHECK_RETRY_SECS))s (last status: ${status})."
+  if [[ -n "$body" ]]; then
+    echo "  Last /healthz response: ${body}" >&2
+  fi
+  echo "  Check the service logs:" >&2
+  echo "  gcloud compute ssh ${INSTANCE_NAME} --zone=${ZONE} --project=${PROJECT_ID} \\" >&2
+  echo "    --command='sudo journalctl -u scion-hub.service --no-pager -n 50'" >&2
+  return 1
+}
 
 # print_gcloud_error TEXT -- prints TEXT (gcloud's captured stderr) to
 # stderr, each line indented by two spaces. Prints nothing when TEXT is
@@ -2455,29 +2518,7 @@ SERVICEEOF
 
 # --- Health check ---
 info "Running health check..."
-HEALTH_OK=false
-for i in $(seq 1 "$HEALTH_CHECK_MAX_ATTEMPTS"); do
-  if gcloud compute ssh "${INSTANCE_NAME}" \
-      --zone="${ZONE}" --project="${PROJECT_ID}" \
-      --command="curl -sf http://localhost:8080/healthz" \
-      2>/dev/null; then
-    HEALTH_OK=true
-    break
-  fi
-  echo "  Attempt ${i}/${HEALTH_CHECK_MAX_ATTEMPTS} - waiting ${HEALTH_CHECK_RETRY_SECS}s..."
-  sleep "$HEALTH_CHECK_RETRY_SECS"
-done
-
-if [[ "$HEALTH_OK" == "true" ]]; then
-  echo ""
-  echo -e "${GREEN}  Health check passed.${RESET}"
-else
-  err "Health check did not pass within $((HEALTH_CHECK_MAX_ATTEMPTS * HEALTH_CHECK_RETRY_SECS))s. The hub is not running."
-  echo "  Check the service logs:"
-  echo "  gcloud compute ssh ${INSTANCE_NAME} --zone=${ZONE} --project=${PROJECT_ID} \\"
-  echo "    --command='sudo journalctl -u scion-hub.service --no-pager -n 50'"
-  exit 1
-fi
+wait_for_hub_health "Health check" || exit 1
 
 # --- Hub-scoped agent env vars (GOOGLE_CLOUD_PROJECT / GOOGLE_CLOUD_LOCATION) ---
 # Agents need these for Vertex AI inference. They go in the hub DB as
@@ -3074,29 +3115,7 @@ gcloud compute ssh "${INSTANCE_NAME}" \
 
 # --- Post-restart health check ---
 info "Running post-restart health check..."
-HEALTH_OK=false
-for i in $(seq 1 "$HEALTH_CHECK_MAX_ATTEMPTS"); do
-  if gcloud compute ssh "${INSTANCE_NAME}" \
-      --zone="${ZONE}" --project="${PROJECT_ID}" \
-      --command="curl -sf http://localhost:8080/healthz" \
-      2>/dev/null; then
-    HEALTH_OK=true
-    break
-  fi
-  echo "  Attempt ${i}/${HEALTH_CHECK_MAX_ATTEMPTS} - waiting ${HEALTH_CHECK_RETRY_SECS}s..."
-  sleep "$HEALTH_CHECK_RETRY_SECS"
-done
-
-if [[ "$HEALTH_OK" == "true" ]]; then
-  echo ""
-  echo -e "${GREEN}  Health check passed.${RESET}"
-else
-  err "Post-restart health check did not pass within $((HEALTH_CHECK_MAX_ATTEMPTS * HEALTH_CHECK_RETRY_SECS))s. The hub is not running."
-  echo "  Check the service logs:"
-  echo "  gcloud compute ssh ${INSTANCE_NAME} --zone=${ZONE} --project=${PROJECT_ID} \\"
-  echo "    --command='sudo journalctl -u scion-hub.service --no-pager -n 50'"
-  exit 1
-fi
+wait_for_hub_health "Post-restart health check" || exit 1
 
 # ===================================================================
 # Done
@@ -3118,7 +3137,7 @@ echo "  ${PROXY_URL}"
 echo ""
 echo "You will be prompted to authenticate via Google IAP."
 echo ""
-echo "Agents running on the VM connect via localhost:8080 (no IAP needed)."
+echo "Agents running on the VM reach the hub at http://scion-hub.internal:8080 over the Docker bridge (no IAP needed)."
 echo ""
 echo "To view service logs:"
 echo ""

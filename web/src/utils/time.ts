@@ -255,6 +255,23 @@ export function zoneLabel(): string {
   return effectiveTimeZone();
 }
 
+/**
+ * Names the zone a server-side calendar-day bucket belongs to, for chart
+ * headings and axis titles (the metrics dashboard, ptone/scion#3370). Pass
+ * the zone the hub *reports* it bucketed by (the response's `timeZone`), not
+ * the zone the page asked for: the hub falls back to UTC for a zone it
+ * rejects. A missing or empty value means the hub predates the field and
+ * bucketed by UTC.
+ */
+export function dayBucketZoneLabel(reportedZone: string | null | undefined): string {
+  return reportedZone ? reportedZone : 'UTC';
+}
+
+/** The x-axis title for a chart of calendar-day buckets, e.g. `Day (America/Chicago)`. */
+export function dayBucketAxisTitle(reportedZone: string | null | undefined): string {
+  return `Day (${dayBucketZoneLabel(reportedZone)})`;
+}
+
 // ---------------------------------------------------------------------------
 // Absolute-time formatting
 // ---------------------------------------------------------------------------

@@ -3911,7 +3911,7 @@ func TestPutServerConfigDB_SharedDirStorageBackend_RoundTrip(t *testing.T) {
 	put(string(body))
 
 	// Write a different section.
-	put(`{"server": {"hub": {"admin_mode": false}}}`)
+	put(`{"server": {"hub": {"auto_suspend_stalled": false}}}`)
 
 	profiles = sdsGetProfilesDB(t, srv, ops)
 	if got := profiles["gke"].SharedDirStorageBackend; got != "nfs" {
@@ -4005,7 +4005,7 @@ func TestPutServerConfigDB_HomeStorage_RoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	put(string(body))
-	put(`{"server": {"hub": {"admin_mode": false}}}`)
+	put(`{"server": {"hub": {"auto_suspend_stalled": false}}}`)
 
 	profiles = sdsGetProfilesDB(t, srv, ops)
 	if got := profiles["gke"]; got.HomeStorageBackend != "nfs" || got.HomeStorageLeaf != "pod" || got.DefaultTemplate != "edited-template" {

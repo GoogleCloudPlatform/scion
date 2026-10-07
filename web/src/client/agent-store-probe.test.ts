@@ -1311,6 +1311,52 @@ describe('AgentStore delta probe', () => {
       expect(ids(h.store.peek(HUB))).toEqual(['a2']);
     });
 
+    it('shows an agent restored while no feed saw it once a probe lists it with no delete', async () => {
+      const h = await loaded([row('a1', 1, { deletion: null }), row('a2', 2, { deletion: null })]);
+      await h.emitAgent('deleted', { agentId: 'a1' });
+      h.server.agents.shift();
+      h.events.dispatchEvent(new Event('scion:membership-changed'));
+      await h.connect();
+      expect(ids(h.store.peek(HUB))).toEqual(['a2']);
+
+      // Restored on the server with no event this store saw.
+      h.server.agents.push(row('a1', 20, { deletion: null }));
+      const walks = h.server.walks();
+      await tick();
+      expect(h.server.probes()).toBe(1);
+      // The probe itself shows it: no walk ran.
+      expect(h.server.walks()).toBe(walks);
+      expect(ids(h.store.peek(HUB)).sort()).toEqual(['a1', 'a2']);
+      await walkAgain(h);
+      expect(ids(h.store.peek(HUB)).sort()).toEqual(['a1', 'a2']);
+    });
+
+    it('keeps hiding an agent deleted on an earlier feed that a probe lists with its delete running', async () => {
+      const deleting = {
+        state: 'deleting',
+        soft: false,
+        claim: 1,
+        startedAt: t(5),
+        leaseExpiresAt: t(25),
+      } as const;
+      const h = await loaded([row('a1', 1, { deletion: null }), row('a2', 2, { deletion: null })]);
+      // The hard delete: `deleted` is published while the record is still
+      // listed, deleting.
+      h.server.agents[0] = row('a1', 5, { deletion: { ...deleting } });
+      await h.emitAgent('deleted', { agentId: 'a1' });
+      h.events.dispatchEvent(new Event('scion:membership-changed'));
+      await h.connect();
+      expect(ids(h.store.peek(HUB))).toEqual(['a2']);
+
+      h.server.agents[0] = row('a1', 10, { deletion: { ...deleting } });
+      await tick();
+      expect(h.server.probes()).toBe(1);
+      expect(ids(h.store.peek(HUB))).toEqual(['a2']);
+      expect(h.feeds[1].getAgent('a1')).toBeUndefined();
+      await walkAgain(h);
+      expect(ids(h.store.peek(HUB))).toEqual(['a2']);
+    });
+
     it('carries no tombstone for an agent restored before a feed swap', async () => {
       const h = await loaded([row('a1', 1), row('a2', 2)]);
       await h.emitAgent('deleted', { agentId: 'a1' });
