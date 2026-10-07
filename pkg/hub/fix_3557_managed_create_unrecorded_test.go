@@ -410,3 +410,64 @@ func TestManagedCreate_Unrecorded_NoTask_RollsBackWithoutWarning(t *testing.T) {
 	assert.Empty(t, backend.cancels())
 	assertManagedCreateRolledBack(t, s, project, agentID)
 }
+
+// hookFailingManagedBackend fails CreateInteraction after running hook with
+// the create's row ID: a delete that lands while the interaction is being
+// created, before managedAgentCreate's failure rolls the create back.
+type hookFailingManagedBackend struct {
+	failingManagedAgentBackend
+	s         store.Store
+	projectID string
+	hook      func(agentID string)
+}
+
+func (b *hookFailingManagedBackend) CreateInteraction(ctx context.Context, req managedagent.InteractionRequest) (*managedagent.InteractionHandle, error) {
+	result, err := b.s.ListAgents(context.Background(), store.AgentFilter{ProjectID: b.projectID}, store.ListOptions{})
+	if err == nil && len(result.Items) == 1 {
+		b.hook(result.Items[0].ID)
+	}
+	return b.failingManagedAgentBackend.CreateInteraction(ctx, req)
+}
+
+// The managedAgentCreate-failure rollback opts into the same conditional
+// row removal: a delete that holds the row wins (409, row and quotas left
+// to it); a delete that gave up does not, and the create is rolled back
+// with its usual 502.
+func TestManagedCreate_CreateFails_DeleteHoldsRow(t *testing.T) {
+	cases := []struct {
+		name     string
+		state    string
+		lease    time.Duration
+		deleteOK bool
+	}{
+		{"delete-claimed", store.DeletionStateDeleting, time.Minute, true},
+		{"delete-failed", store.DeletionStateFailed, time.Minute, false},
+		{"delete-lapsed", store.DeletionStateDeleting, -time.Minute, false},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, s, project := setupCreateAgentServer(t, &createRaceDispatcher{})
+			var agentID string
+			useManagedBackend(t, &hookFailingManagedBackend{s: s, projectID: project.ID, hook: func(id string) {
+				agentID = id
+				claimForTest(t, s, id, tc.state, tc.lease)
+			}})
+
+			rec := managedCreate(t, srv, project.ID, fmt.Sprintf("mgd-createfail-%d", i))
+			require.NotEmpty(t, agentID, "the claim ran: %d %s", rec.Code, rec.Body.String())
+			if tc.deleteOK {
+				assert.Empty(t, requireDeletedDuringCreate(t, rec, agentID))
+				row, err := s.GetAgent(context.Background(), agentID)
+				require.NoError(t, err, "the delete's row is kept")
+				assert.Equal(t, tc.state, row.DeletionState)
+				assert.Empty(t, agentAudits(t, s, mutationTypeAgentCreateDispatchFailed, agentID), "no compensation was written")
+				assert.EqualValues(t, 1, brokerReservationCount(t, s, project.DefaultRuntimeBrokerID), "the quotas are left to the delete")
+				return
+			}
+			require.Equal(t, http.StatusBadGateway, rec.Code, rec.Body.String())
+			sum := assertCompensated(t, s, agentID)
+			assert.Equal(t, createStageManaged, sum.Stage)
+			assert.EqualValues(t, 0, brokerReservationCount(t, s, project.DefaultRuntimeBrokerID))
+		})
+	}
+}

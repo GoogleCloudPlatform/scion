@@ -2428,9 +2428,18 @@ func (s *Server) createAgentInProject(
 		}
 		if err := s.managedAgentCreate(ctx, agent, task); err != nil {
 			// managedAgentCreate mints no agent credential: nothing to revoke.
-			corrID := cleanup(createRollback{Stage: createStageManaged, Cause: err, DeleteRuntime: func(cctx context.Context) error {
+			// The row is removed only if no delete holds it (DeleteWon); a
+			// delete that holds it or removed it wins, and the create
+			// answers 409 as a delete that won does (ptone/scion#3454). No
+			// interaction ID was recorded, so there is nothing to report.
+			deleteWon := false
+			corrID := cleanup(createRollback{Stage: createStageManaged, Cause: err, DeleteWon: &deleteWon, DeleteRuntime: func(cctx context.Context) error {
 				return s.managedAgentDelete(cctx, agent)
 			}})
+			if deleteWon {
+				writeDeletedDuringCreate(w, agent.ID, nil)
+				return
+			}
 			writeCreateFailure(w, corrID, func() { RuntimeError(w, "Failed to create managed agent: "+err.Error()) })
 			return
 		}
