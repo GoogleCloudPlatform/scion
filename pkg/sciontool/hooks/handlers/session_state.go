@@ -71,7 +71,7 @@ type sessionStateFile struct {
 type FileSessionState struct {
 	Path string
 
-	// lockTimeout overrides sessionStateLockTimeout when non-zero. It is a
+	// lockTimeout overrides sessionStateLockTimeout when positive. It is a
 	// test seam: production code always uses the default.
 	lockTimeout time.Duration
 }

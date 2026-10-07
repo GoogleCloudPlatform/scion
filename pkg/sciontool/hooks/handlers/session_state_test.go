@@ -53,6 +53,13 @@ const testLockTimeoutGenerous = 30 * time.Second
 // lock elsewhere and expect Update to time out.
 const testLockTimeoutShort = 50 * time.Millisecond
 
+// testLockElapsedMax bounds how long a short-timeout lock attempt may take,
+// with generous slack for loaded CI runners. It is test-owned so the check
+// does not depend on the production default; TestFileSessionState_LockWaitDefault
+// asserts it stays below sessionStateLockTimeout so the bound still proves the
+// override applied.
+const testLockElapsedMax = 1500 * time.Millisecond
+
 func toolEvent(sessionID, tool string) *hooks.Event {
 	ev := sessionEvent(hooks.EventToolEnd, sessionID)
 	ev.Data.ToolName = tool
@@ -262,12 +269,15 @@ func TestFileSessionState_LockUnavailableOnSessionEndSkipsReport(t *testing.T) {
 	if _, err := os.Stat(store.Path); err != nil {
 		t.Errorf("state file should be left in place: %v", err)
 	}
-	if elapsed := time.Since(start); elapsed >= sessionStateLockTimeout {
-		t.Errorf("session-end waited %s, want the %s test lock timeout to apply", elapsed, testLockTimeoutShort)
+	if elapsed := time.Since(start); elapsed >= testLockElapsedMax {
+		t.Errorf("session-end waited %s (bound %s), want the %s test lock timeout to apply", elapsed, testLockElapsedMax, testLockTimeoutShort)
 	}
 }
 
 func TestFileSessionState_LockWaitDefault(t *testing.T) {
+	if testLockElapsedMax >= sessionStateLockTimeout {
+		t.Fatalf("testLockElapsedMax %s must stay below the default lock timeout %s", testLockElapsedMax, sessionStateLockTimeout)
+	}
 	if got := NewFileSessionState(t.TempDir()).lockWait(); got != sessionStateLockTimeout {
 		t.Errorf("default lockWait = %s, want %s", got, sessionStateLockTimeout)
 	}
