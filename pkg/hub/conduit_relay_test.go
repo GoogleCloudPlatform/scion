@@ -26,6 +26,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -253,14 +254,17 @@ func TestStartConduitRelay_StartupChecks(t *testing.T) {
 			if tc.wantErr != nil {
 				require.ErrorIs(t, err, tc.wantErr)
 				assert.Nil(t, srv.conduit.Load(), "a failed start leaves no relay")
+				assert.NotContains(t, srv.dispatchExperiments(), conduitExperiment, "hub.conduit dispatched without a relay")
 				return
 			}
 			require.NoError(t, err)
 			assert.Equal(t, tc.running, srv.conduit.Load() != nil)
-			assert.Equal(t, tc.running, srv.conduitServing(), "SCION_HUB_CONDUIT capability")
+			assert.Equal(t, tc.running, srv.conduitServing(), "conduit capability")
+			assert.Equal(t, tc.running, slices.Contains(srv.dispatchExperiments(), conduitExperiment), "hub.conduit in the dispatch set")
 			if tc.running {
 				setConduitExperiment(t, srv, false)
 				assert.False(t, srv.conduitServing(), "capability withdrawn when hub.conduit turns off")
+				assert.NotContains(t, srv.dispatchExperiments(), conduitExperiment, "hub.conduit dispatched after it turned off")
 			}
 		})
 	}

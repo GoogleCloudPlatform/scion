@@ -3151,11 +3151,16 @@ func (s *Server) enrichAgents(ctx context.Context, agents []store.Agent) {
 
 	// Enrich agents
 	now := time.Now()
+	// Evaluated once for the whole list: the deletion detail fields are
+	// for platform admins only (ptone/scion#3122). Every list builder and
+	// the compact view read the items built here, so the redaction is
+	// upstream of toCompact.
+	seesDeletionDetail := callerSeesDeletionDetail(ctx)
 	for i := range agents {
 		// The client-facing `launch` view (design §3.2), computed fresh per response.
 		agents[i].Launch = store.ComputeAgentLaunch(&agents[i], now)
 		// The client-facing `deletion` view (design ptone/scion#2483 §2.2).
-		agents[i].Deletion = store.ComputeAgentDeletion(&agents[i], now)
+		agents[i].Deletion = deletionViewForCaller(&agents[i], now, seesDeletionDetail)
 		agents[i].ProvisionedOnly = store.ComputeAgentProvisionedOnly(&agents[i])
 		// Populate harness config from applied config
 		if agents[i].HarnessConfig == "" && agents[i].AppliedConfig != nil && agents[i].AppliedConfig.HarnessConfig != "" {
@@ -3195,8 +3200,9 @@ func (s *Server) enrichAgent(ctx context.Context, agent *store.Agent, project *s
 	// was last written.
 	now := time.Now()
 	agent.Launch = store.ComputeAgentLaunch(agent, now)
-	// The client-facing `deletion` view (design ptone/scion#2483 §2.2).
-	agent.Deletion = store.ComputeAgentDeletion(agent, now)
+	// The client-facing `deletion` view (design ptone/scion#2483 §2.2),
+	// with its detail fields for platform admins only (ptone/scion#3122).
+	agent.Deletion = deletionViewForCaller(agent, now, callerSeesDeletionDetail(ctx))
 	agent.ProvisionedOnly = store.ComputeAgentProvisionedOnly(agent)
 
 	// Populate harness config and auth from applied config
@@ -4024,6 +4030,10 @@ func (s *Server) performAgentDelete(w http.ResponseWriter, r *http.Request, agen
 		writeAgentTargetDenial(w, r, identity, agent, ActionDelete, denial)
 		return
 	}
+	// Whether the response may carry the deletion detail (failure code,
+	// error text, claim): platform admins only (ptone/scion#3122).
+	// Evaluated once here and passed to every writer below.
+	isAdmin := callerSeesDeletionDetail(ctx)
 
 	query := r.URL.Query()
 	// Default deleteFiles and removeBranch to true for full cleanup.
@@ -4043,7 +4053,7 @@ func (s *Server) performAgentDelete(w http.ResponseWriter, r *http.Request, agen
 		}
 		// A live delete: join it rather than starting a second one.
 		if deletionActive(agent) {
-			s.joinAgentDeletion(w, r, agent.ID, agent.DeletionClaim, deadline)
+			s.joinAgentDeletion(w, r, agent.ID, agent.DeletionClaim, deadline, isAdmin)
 			return
 		}
 
@@ -4064,7 +4074,7 @@ func (s *Server) performAgentDelete(w http.ResponseWriter, r *http.Request, agen
 		if plan != nil {
 			s.events.PublishAgentStatus(ctx, plan.snapshot)
 			done := s.runAgentDeletion(ctx, plan)
-			s.awaitAgentDeletion(w, r, plan, done, deadline)
+			s.awaitAgentDeletion(w, r, plan, done, deadline, isAdmin)
 			return
 		}
 
@@ -4086,7 +4096,7 @@ func (s *Server) performAgentDelete(w http.ResponseWriter, r *http.Request, agen
 			// read here, so an older failed or cleared marker is not taken
 			// as this delete's outcome; with no later claim the join answers
 			// 202 at the deadline.
-			s.joinAgentDeletion(w, r, agent.ID, agent.DeletionClaim+1, deadline)
+			s.joinAgentDeletion(w, r, agent.ID, agent.DeletionClaim+1, deadline, isAdmin)
 			return
 		}
 	}
@@ -4094,7 +4104,8 @@ func (s *Server) performAgentDelete(w http.ResponseWriter, r *http.Request, agen
 
 // awaitAgentDeletion waits for this request's engine up to deadline and
 // writes the outcome; on a lost claim it joins whichever delete holds the row.
-func (s *Server) awaitAgentDeletion(w http.ResponseWriter, r *http.Request, plan *agentDeletionPlan, done <-chan deletionOutcome, deadline time.Time) {
+// isAdmin is callerSeesDeletionDetail for the request (see writeDeletionFailure).
+func (s *Server) awaitAgentDeletion(w http.ResponseWriter, r *http.Request, plan *agentDeletionPlan, done <-chan deletionOutcome, deadline time.Time, isAdmin bool) {
 	timer := time.NewTimer(time.Until(deadline))
 	defer timer.Stop()
 	select {
@@ -4103,12 +4114,12 @@ func (s *Server) awaitAgentDeletion(w http.ResponseWriter, r *http.Request, plan
 		case deletionOutcomeDeleted:
 			w.WriteHeader(http.StatusNoContent)
 		case deletionOutcomeFailed:
-			writeDeletionFailure(w, plan.snapshot.ID, out.code, out.message, out.retryAfter)
+			writeDeletionFailure(w, plan.snapshot.ID, out.code, out.message, out.retryAfter, isAdmin)
 		default: // lost: someone else holds the row now
-			s.joinAgentDeletion(w, r, plan.snapshot.ID, plan.claim, deadline)
+			s.joinAgentDeletion(w, r, plan.snapshot.ID, plan.claim, deadline, isAdmin)
 		}
 	case <-timer.C:
-		s.writeDeleteAccepted(w, plan.snapshot.ID)
+		s.writeDeleteAccepted(w, plan.snapshot.ID, isAdmin)
 	case <-r.Context().Done():
 		// The client went away; the engine keeps running detached.
 	}

@@ -3894,8 +3894,6 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 		dispatcher.SetHubName(s.config.HubName)
 	}
 
-	dispatcher.SetConduitCapability(s.conduitServing)
-
 	// Pass hub ID and secret backend to dispatcher if configured
 	dispatcher.SetHubID(s.hubID)
 	if s.secretBackend != nil {
@@ -5212,6 +5210,9 @@ func (s *Server) registerSchedulerHandlers() {
 	s.scheduler.RegisterRecurringSingleton("schedule-evaluator", 1, store.LockScheduleEvaluator, s.evaluateSchedulesHandler())
 	s.scheduler.RegisterRecurringSingleton("broker-heartbeat-timeout", 5, store.LockBrokerHeartbeatTimeout, s.brokerHeartbeatTimeoutHandler())
 	s.scheduler.RegisterRecurringSingleton("broker-affinity-reap", 5, store.LockBrokerAffinityReap, s.brokerAffinityReapHandler())
+	// Hourly: an expired token is already refused at join, so this only
+	// keeps the table from collecting rows.
+	s.scheduler.RegisterRecurringSingleton("broker-join-token-cleanup", 60, store.LockBrokerJoinTokenCleanup, s.brokerJoinTokenCleanupHandler())
 	// Not a singleton: this instance can only self-heal the providers of
 	// brokers it personally holds a live local control-channel socket for
 	// (see brokerProviderSelfHealHandler), so every instance must run it.
@@ -6656,6 +6657,23 @@ func (s *Server) nonceCacheEvictionHandler() func(ctx context.Context) {
 		if purged > 0 {
 			slog.Info("Scheduler: nonce cache eviction completed", "purged", purged)
 		}
+	}
+}
+
+// brokerJoinTokenCleanupHandler returns a recurring handler, run hourly,
+// that removes expired broker join tokens. Without it they would stay in
+// the table until someone tried to use them or the broker was deleted.
+func (s *Server) brokerJoinTokenCleanupHandler() func(ctx context.Context) {
+	return func(ctx context.Context) {
+		ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+
+		removed, err := s.store.CleanExpiredJoinTokens(ctx)
+		if err != nil {
+			slog.Error("Scheduler: broker join token cleanup failed", "error", err)
+			return
+		}
+		slog.Debug("Scheduler: broker join token cleanup completed", "removed", removed)
 	}
 }
 
