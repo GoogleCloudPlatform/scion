@@ -35,7 +35,6 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
-	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
@@ -832,8 +831,15 @@ func (b *TelegramBrokerV2) Publish(ctx context.Context, topic string, msg *messa
 		if attachPath != "" {
 			// Translate /workspace/<file> → /home/scion/.scion/projects/<projectSlug>/<file>
 			// Agent containers mount the hub's project directory as /workspace.
-			attachPath = b.resolveAttachmentPath(ctx, store, attachPath, projectID)
-			return b.publishAttachment(ctx, api, chatIDs, msg, agentSlug, attachPath, threadOpts...)
+			resolved, err := b.resolveAttachmentPath(ctx, store, attachPath, projectID)
+			if err != nil {
+				// Never open the unresolved path on this host; deliver the
+				// message text without the attachment.
+				b.log.Error("Skipping attachment that could not be resolved",
+					"attach_path", attachPath, "project_id", projectID, "error", err)
+			} else {
+				return b.publishAttachment(ctx, api, chatIDs, msg, agentSlug, resolved, threadOpts...)
+			}
 		}
 	}
 
@@ -1343,8 +1349,12 @@ func (b *TelegramBrokerV2) publishInputNeededDM(ctx context.Context, api *Telegr
 //   - /workspace/.scion-volumes/<name>/<file> → same as /scion-volumes/<name>/<file>
 //
 // Also accepts bare relative paths and "workspace/" without leading slash.
-// Falls back to the original path if translation is not possible.
-func (b *TelegramBrokerV2) resolveAttachmentPath(ctx context.Context, store Store, attachPath, projectID string) string {
+// Any path that cannot be translated (one that climbs out of the
+// workspace, another absolute path, a project with no known slug, or a
+// result outside the project directory) returns an error and no path, as
+// does a shared dir path that cannot be resolved: the container path must
+// never be opened on this host.
+func (b *TelegramBrokerV2) resolveAttachmentPath(ctx context.Context, store Store, attachPath, projectID string) (string, error) {
 	originalPath := attachPath
 
 	// Handle /scion-volumes/<name>/... container-internal shared dir paths.
@@ -1365,14 +1375,12 @@ func (b *TelegramBrokerV2) resolveAttachmentPath(ctx context.Context, store Stor
 	case !strings.HasPrefix(attachPath, "/"):
 		relPath = attachPath
 	default:
-		return attachPath
+		return "", fmt.Errorf("attachment path %q is not a workspace or shared dir path", attachPath)
 	}
 
 	relPath = filepath.Clean(relPath)
 	if strings.HasPrefix(relPath, "..") || (filepath.IsAbs(relPath) && relPath != ".") {
-		b.log.Warn("Attachment path escapes workspace, ignoring translation",
-			"attach_path", attachPath, "rel_path", relPath)
-		return attachPath
+		return "", fmt.Errorf("attachment path %q is outside the workspace", attachPath)
 	}
 
 	// In-workspace shared dirs are mounted at /workspace/.scion-volumes/<name>
@@ -1382,14 +1390,12 @@ func (b *TelegramBrokerV2) resolveAttachmentPath(ctx context.Context, store Stor
 		return b.resolveSharedDirAttachmentPath(ctx, store, containerPath, projectID)
 	}
 	if relPath == ".scion-volumes" {
-		return attachPath
+		return "", fmt.Errorf("attachment path %q names the shared dirs root, not a shared dir", attachPath)
 	}
 
 	slug := b.resolveProjectSlug(ctx, store, projectID)
 	if slug == "" {
-		b.log.Debug("Attachment path unchanged, no project slug found",
-			"original", originalPath, "project_id", projectID)
-		return attachPath
+		return "", fmt.Errorf("attachment path %q: no project slug found for project %q", attachPath, projectID)
 	}
 
 	projectDir := filepath.Join("/home/scion/.scion/projects", slug)
@@ -1399,72 +1405,67 @@ func (b *TelegramBrokerV2) resolveAttachmentPath(ctx context.Context, store Stor
 	} else {
 		hostPath = filepath.Join(projectDir, relPath)
 		if !strings.HasPrefix(hostPath, projectDir+"/") {
-			b.log.Warn("Resolved attachment path escapes project directory",
-				"host_path", hostPath, "expected_prefix", projectDir+"/")
-			return attachPath
+			return "", fmt.Errorf("attachment path %q resolves outside the project directory", attachPath)
 		}
 	}
 
 	b.log.Debug("Resolved attachment path", "original", originalPath, "resolved", hostPath)
-	return hostPath
+	return hostPath, nil
 }
 
 // resolveSharedDirAttachmentPath translates a container-internal shared dir
 // path (/scion-volumes/<name>/...) to the host-side path under
-// ~/.scion/project-configs/<slug>__<shortUUID>/shared-dirs/<name>/.
-func (b *TelegramBrokerV2) resolveSharedDirAttachmentPath(ctx context.Context, store Store, attachPath, projectID string) string {
+// ~/.scion/project-configs/<slug>__<shortUUID>/shared-dirs/<name>/ (or the
+// nfs-backed directory, per the shared dir's storage backend). It returns
+// an error, and no path, whenever the path is unsafe or cannot be
+// resolved; the caller must skip the attachment rather than open the
+// container path on this host.
+func (b *TelegramBrokerV2) resolveSharedDirAttachmentPath(ctx context.Context, store Store, attachPath, projectID string) (string, error) {
 	trimmed := strings.TrimPrefix(attachPath, "/scion-volumes/")
 	if trimmed == "" || trimmed == attachPath {
-		b.log.Warn("Invalid shared dir attachment path", "attach_path", attachPath)
-		return attachPath
+		return "", fmt.Errorf("invalid shared dir attachment path %q", attachPath)
 	}
 
 	parts := strings.SplitN(trimmed, "/", 2)
 	sharedDirName := parts[0]
 	if sharedDirName == "" || sharedDirName == "." || sharedDirName == ".." {
-		b.log.Warn("Invalid shared dir name in attachment path",
-			"attach_path", attachPath, "shared_dir_name", sharedDirName)
-		return attachPath
+		return "", fmt.Errorf("invalid shared dir name %q in attachment path %q", sharedDirName, attachPath)
 	}
 	relPath := ""
 	if len(parts) > 1 {
 		relPath = filepath.Clean(parts[1])
 		if strings.HasPrefix(relPath, "..") || filepath.IsAbs(relPath) {
-			b.log.Warn("Shared dir attachment path escapes directory",
-				"attach_path", attachPath, "rel_path", relPath)
-			return attachPath
+			return "", fmt.Errorf("shared dir attachment path %q leaves its shared dir", attachPath)
 		}
 	}
 
 	slug := b.resolveProjectSlug(ctx, store, projectID)
 	if slug == "" || projectID == "" {
-		b.log.Debug("Shared dir path unchanged, no project slug or ID",
-			"original", attachPath, "project_id", projectID)
-		return attachPath
+		return "", fmt.Errorf("no project slug or ID for shared dir attachment path %q", attachPath)
 	}
 
 	home, err := os.UserHomeDir()
 	if err != nil {
-		b.log.Warn("Failed to resolve home dir for shared dir path", "error", err)
-		return attachPath
+		return "", fmt.Errorf("resolve home dir for shared dir path: %w", err)
 	}
 
-	sharedDirBase := config.SharedDirHostPath(home, slug, projectID, sharedDirName)
+	sharedDirBase, err := resolveSharedDirHostPath(home, slug, projectID, sharedDirName)
+	if err != nil {
+		return "", fmt.Errorf("resolve shared dir %q: %w", sharedDirName, err)
+	}
 	var hostPath string
 	if relPath == "" || relPath == "." {
 		hostPath = sharedDirBase
 	} else {
 		hostPath = filepath.Join(sharedDirBase, relPath)
 		if !strings.HasPrefix(hostPath, sharedDirBase+string(filepath.Separator)) {
-			b.log.Warn("Resolved shared dir path escapes directory",
-				"host_path", hostPath, "expected_prefix", sharedDirBase+string(filepath.Separator))
-			return attachPath
+			return "", fmt.Errorf("shared dir attachment path %q leaves its shared dir", attachPath)
 		}
 	}
 
 	b.log.Debug("Resolved shared dir attachment path",
 		"original", attachPath, "resolved", hostPath)
-	return hostPath
+	return hostPath, nil
 }
 
 // resolveProjectSlug looks up the project slug from the store (group links)
@@ -1494,7 +1495,7 @@ func (b *TelegramBrokerV2) resolveProjectSlug(ctx context.Context, store Store, 
 // volumes. A future telegram_attachment_url metadata key should support
 // fetching the file from a URL (e.g. GCS signed URL) instead.
 func (b *TelegramBrokerV2) publishAttachment(ctx context.Context, api *TelegramAPIClient, chatIDs []int64, msg *messages.StructuredMessage, agentSlug, attachPath string, opts ...SendOption) error {
-	f, err := os.Open(attachPath)
+	f, err := openAttachmentFile(attachPath)
 	if err != nil {
 		b.log.Error("Failed to open attachment file",
 			"path", attachPath, "error", err)
@@ -2185,7 +2186,9 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 		attachmentPath, placeholder, err = b.downloadTelegramFile(ctx, tgMsg, link.ProjectSlug, link.ProjectID)
 		if err != nil {
 			b.log.Error("Failed to download telegram file", "error", err)
-			b.api.SendMessage(ctx, chatID, "Failed to process attachment: "+err.Error(), "")
+			// The error can name host paths; the sender only gets fixed
+			// text, and the full error stays in the plugin log.
+			b.api.SendMessage(ctx, chatID, attachmentFailureText(telegramAttachmentName(tgMsg), err), "")
 		}
 	}
 
@@ -2375,8 +2378,9 @@ const maxTelegramFileSize = 20 * 1024 * 1024 // 20 MB
 //
 // The function uses a three-tier fallback for the destination directory:
 //  1. downloadsPath config (highest priority)
-//  2. Shared dir infrastructure via config.SharedDirHostPath — writes to the host
-//     and exposes the file at /scion-volumes/scratchpad/.attachments/_telegram/
+//  2. The scratchpad shared dir, resolved through its storage backend (local
+//     or nfs) — makes the file available at /scion-volumes/scratchpad/.attachments/_telegram/.
+//     An unavailable nfs mount is an error, never a local fallback.
 //  3. Legacy /home/scion/.scion/projects/<slug>/downloads/ (last resort)
 func (b *TelegramBrokerV2) downloadTelegramFile(ctx context.Context, tgMsg *TGMessage, projectSlug, projectID string) (agentPath, placeholder string, err error) {
 	var fileID, fileName, fileType string
@@ -2458,12 +2462,16 @@ func (b *TelegramBrokerV2) downloadTelegramFile(ctx context.Context, tgMsg *TGMe
 	} else if projectID != "" {
 		home, homeErr := os.UserHomeDir()
 		if homeErr == nil {
-			// NOTE: SharedDirHostPath is a pure path computation; it does not verify that
-			// "scratchpad" is actually configured on the project. If it is not configured,
-			// the file will be written to the host but won't be visible inside the agent
-			// container. Projects using container-based agents should always have
-			// scratchpad configured.
-			sharedDirBase := config.SharedDirHostPath(home, projectSlug, projectID, "scratchpad")
+			// The scratchpad dir resolves through its storage backend (local
+			// or nfs). It is not checked against the project's declared
+			// shared dirs: if scratchpad is not configured, the file is
+			// written on the host but no agent container sees it.
+			sharedDirBase, resolveErr := resolveSharedDirHostPath(home, projectSlug, projectID, "scratchpad")
+			if resolveErr != nil {
+				// Never fall back to a local directory for an nfs-backed
+				// scratchpad: no agent mounts it.
+				return "", "", fmt.Errorf("resolve scratchpad shared dir for %q: %w", fileName, resolveErr)
+			}
 			hostDir = filepath.Join(sharedDirBase, ".attachments", "_telegram")
 			useSharedDir = true
 		}

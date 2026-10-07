@@ -861,7 +861,7 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 					// failed start leg may keep the run it minted (or the
 					// broker's), and the dispatcher keeps agent.RunID in
 					// step with it. A run from another caller still misses.
-					if s.recordRestartStopped(ctx, agent.ID, agent.RunID) {
+					if restartStoppedRecordable(agent.RunID) && s.recordRestartStopped(ctx, agent.ID, agent.RunID) {
 						s.releaseBrokerQuota(ctx, agent)
 					}
 				}
@@ -872,6 +872,9 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 	// If dispatch failed, return error. A required-skill resolution failure
 	// keeps the broker's status and code; anything else is a 502.
 	if dispatchErr != nil {
+		if writeAgentTokenRecordError(w, dispatchErr) {
+			return
+		}
 		if s.writeStartClaimError(ctx, w, dispatchErr, agent.ID) || writeStartQuotaError(w, dispatchErr) {
 			return
 		}
@@ -1146,6 +1149,21 @@ type stopAllResult struct {
 // (ptone/scion#2550); it reports
 // whether it was recorded, and the caller releases the reservation only
 // then.
+// restartStoppedRecordable reports whether a restart whose start leg failed
+// records the stopped state, given the run the failed start left on the row
+// (agent.RunID). An empty run is not recorded (ptone/scion#2550, review N-a
+// of GoogleCloudPlatform/scion#2506): with no run to guard on, the write
+// would be unconditional, and the failed start may have swapped the row to
+// "" (the broker reported no single current run) just before another caller
+// minted a run, which the write would then record stopped. The status write,
+// the quota release and the publish are all skipped; the agent's next
+// heartbeat settles its state. This includes a row with no run ID at all
+// (one not dispatched since run IDs existed), which today's code recorded
+// unguarded.
+func restartStoppedRecordable(runID string) bool {
+	return runID != ""
+}
+
 func (s *Server) recordRestartStopped(ctx context.Context, id, runID string) bool {
 	zero := 0
 	recorded, err := s.recordStopStatus(ctx, id, runID, "restart", store.AgentStatusUpdate{

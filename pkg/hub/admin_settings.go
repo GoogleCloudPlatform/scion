@@ -15,7 +15,6 @@
 package hub
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -259,6 +258,12 @@ func (s *Server) handleAdminServerConfigSectionReset(w http.ResponseWriter, r *h
 		return
 	}
 
+	// A user access token resets only a section with no refused key.
+	if !serverConfigSectionTokenResettable(sectionName) &&
+		writeTokenRefusedSettingsKeys(w, r.Context(), []string{sectionName}) {
+		return
+	}
+
 	// The "experiments" section has its own compare-and-set reset with a
 	// per-name audit log (DELETE /api/v1/admin/experiments), gated on
 	// hub.experiments.update. This generic route has no compare-and-set and
@@ -427,14 +432,21 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "Invalid request body", nil)
 		return
 	}
+	if rejectRepeatedJSONMembers(w, rawBody) {
+		return
+	}
 	var req ServerConfigUpdateRequest
-	if err := json.NewDecoder(bytes.NewReader(rawBody)).Decode(&req); err != nil {
+	if err := json.Unmarshal(rawBody, &req); err != nil {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "Invalid request body", nil)
 		return
 	}
 	// The typed decode above silently drops a removed profiles.<name>.timezone
 	// key, so check the raw body before settings.yaml is touched.
 	if rejectRemovedProfileTimezone(w, rawBody) {
+		return
+	}
+	// A user access token writes configuration keys only.
+	if writeTokenRefusedSettingsKeys(w, r.Context(), tokenRefusedServerConfigKeys(rawBody)) {
 		return
 	}
 	// Any other key the typed decode drops (unknown, misspelt, or a flat

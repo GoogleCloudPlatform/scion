@@ -248,7 +248,7 @@ func TestArtifactHostServesGenuinelyMintedAgentToken(t *testing.T) {
 		t.Helper()
 		rec := f.create(t, f.uat(t, selectors...), CreateAgentRequest{Name: name})
 		agent, _ := f.createdAgent(t, rec, name)
-		tok, err := f.srv.GenerateAgentTokenForAgent(ctx, agent)
+		tok, err := f.srv.issueAgentTokenForTest(ctx, agent)
 		require.NoError(t, err)
 		claims, err := f.srv.agentTokenService.ValidateAgentToken(tok)
 		require.NoError(t, err)

@@ -438,6 +438,13 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/artifacts/shared/", RouteID: "artifacts.shared",
 		Classification: RoutePublic,
 	},
+	// The view route serves one version's files to a sandboxed frame and
+	// authenticates by the view capability in its path only (the service
+	// verifies it on every request).
+	"/api/v1/artifacts/view/": {
+		Pattern: "/api/v1/artifacts/view/", RouteID: "artifacts.view",
+		Classification: RoutePublic,
+	},
 
 	// -------------------------------------------------------------------------
 	// Policy: Skills

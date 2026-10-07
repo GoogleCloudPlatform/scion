@@ -125,7 +125,7 @@ func TestHealthSummaryBrokers_RuntimeFromDefaultProfile(t *testing.T) {
 			_, ok := row[dropped]
 			assert.False(t, ok, "%s must not be returned (%s)", dropped, id)
 		}
-		assert.JSONEq(t, `{"total":0}`, string(row["agents"]), id)
+		assert.JSONEq(t, `{"running":0,"attention":0}`, string(row["agents"]), id)
 	}
 }
 

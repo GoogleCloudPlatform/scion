@@ -34,6 +34,10 @@ var (
 	// ErrDeleteInProgress is returned by SetAgentRunID when a delete holds
 	// the agent's row (see AgentStore.SetAgentRunID).
 	ErrDeleteInProgress = errors.New("agent delete in progress")
+	// ErrCredentialNotRecorded is returned by SetAgentRunID when the
+	// agent credential it was given could not be recorded; nothing was
+	// written.
+	ErrCredentialNotRecorded = errors.New("agent credential not recorded")
 
 	// ErrPhaseMismatch is returned by UpdateAgentStatus when
 	// AgentStatusUpdate.IfPhase is set and the stored phase differs. It wraps
@@ -417,7 +421,11 @@ type AgentStore interface {
 	// The same write appends the replaced run to the row's PreviousRunIDs
 	// (AppendPreviousRunID, ptone/scion#3097), so a delete still names it
 	// until the new run settles.
-	SetAgentRunID(ctx context.Context, agentID, runID string) (previous string, err error)
+	//
+	// When cred is non-nil it is created in the same transaction as the
+	// run-ID write, with RunID set to runID: either both are recorded or
+	// neither is.
+	SetAgentRunID(ctx context.Context, agentID, runID string, cred *AgentCredential) (previous string, err error)
 
 	// CompareAndSwapAgentRunID sets the agent's run_id to newRunID only if
 	// it currently equals expectedRunID, and reports whether it did. A
@@ -947,25 +955,60 @@ type IDPhase struct {
 	Phase string
 }
 
-// AgentHealthAggregate holds pre-computed counts and short lists used by the
-// health-summary endpoint. It avoids loading full agent records.
+// AgentHealthRefCap caps the agent references returned per problem group by
+// AggregateAgentHealth. The group's Count is always the true count.
+const AgentHealthRefCap = 20
+
+// AgentHealthAggregate holds pre-computed counts and short reference lists
+// used by the health-summary endpoint. It avoids loading full agent records.
+//
+// Stalled agents are deliberately absent: stalls are routine and are not a
+// health signal, so nothing here reads activity "stalled".
 type AgentHealthAggregate struct {
 	Total   int            // Total number of non-deleted agents
 	ByPhase map[string]int // Count per lifecycle phase
 
-	// Per-broker counts: map[brokerID] → {count, healthy}
-	ByBroker map[string]AgentBrokerCounts
+	// Errored is the number of agents in phase error or with activity
+	// crashed, each agent counted once. Stopped agents are excluded (a
+	// crash survives the move to stopped), so Errored never exceeds
+	// Considered.
+	Errored int
+	// Considered is the number of non-deleted agents not in phase stopped.
+	Considered int
 
-	// Names of agents in unhealthy states (capped at 100 per list).
-	StalledNames []string
-	CrashedNames []string
-	ErroredNames []string
+	// Problem groups. Each has a true count and at most AgentHealthRefCap
+	// references, most recently updated first. Groups may overlap: an agent
+	// in phase error with activity offline is in both ErrorPhase and Offline.
+	ErrorPhase AgentProblemGroup // phase error
+	Crashed    AgentProblemGroup // activity crashed, phase not stopped
+	Offline    AgentProblemGroup // activity offline (heartbeat timed out), phase not stopped
+
+	// Per-broker counts, keyed by runtime broker ID.
+	ByBroker map[string]AgentBrokerCounts
 }
 
-// AgentBrokerCounts holds per-broker agent tallies.
+// AgentProblemGroup is one kind of agent problem: a true count plus capped
+// references.
+type AgentProblemGroup struct {
+	Count int
+	Refs  []AgentHealthRef
+}
+
+// AgentHealthRef identifies one agent in a problem group.
+type AgentHealthRef struct {
+	ID        string
+	Name      string
+	ProjectID string
+	BrokerID  string
+}
+
+// AgentBrokerCounts holds per-broker agent tallies over non-deleted agents.
 type AgentBrokerCounts struct {
-	Count   int
-	Healthy int
+	// Running is the number of agents in phase running.
+	Running int
+	// Attention is the number of agents needing attention: phase error, or
+	// activity crashed or offline outside phase stopped. Each agent once.
+	Attention int
 }
 
 // ContainerMissingPrecondition is the agent state a caller observed before

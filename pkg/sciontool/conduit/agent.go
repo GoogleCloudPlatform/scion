@@ -267,11 +267,18 @@ func (a *Agent) hello() *conduitv1.Hello {
 	}
 }
 
+// runIDHeader carries the agent's run id on agent-token requests (the
+// sciontool hub client's RunIDHeader).
+const runIDHeader = "X-Scion-Run-Id"
+
 // header returns the upgrade request's credentials, read afresh for every
 // attempt so a refreshed token is used.
 func (a *Agent) header(context.Context) (http.Header, error) {
 	h := http.Header{}
 	h.Set("X-Scion-Agent-Token", a.opts.Token())
+	if a.opts.LaunchID != "" {
+		h.Set(runIDHeader, a.opts.LaunchID)
+	}
 	if a.opts.ApplyTransportHeaders != nil {
 		if err := a.opts.ApplyTransportHeaders(h); err != nil {
 			log.Debug("Conduit: no transport credential available: %v", err)

@@ -142,6 +142,11 @@ server:
     # launch_keepalive_seconds: 15     # Layer 0 (restart required). Broker keepalive
     #                                   # interval; the reaper's staleness window is
     #                                   # 8x this value.
+    # perf_trace: false                # Layer 0 (restart required). Per-request
+    #                                   # performance tracing for diagnosis: logs a
+    #                                   # perf_trace line per request (phase times,
+    #                                   # authz store calls, decision audits, DB
+    #                                   # pool waits). Observe only. Off by default.
 
   # -------------------------------------------------------------------------
   # Layer 0 — Broker (restart required)

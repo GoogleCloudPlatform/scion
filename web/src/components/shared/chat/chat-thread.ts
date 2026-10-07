@@ -45,6 +45,7 @@ import { apiFetch, extractApiError } from '../../../client/api.js';
 import type { Agent, Message } from '../../../shared/types.js';
 import type { ChatSendDetail } from './chat-composer.js';
 import { navigateTo, stateManager } from '../../../client/main.js';
+import { agentIndexOf, agentStore } from '../../../client/agent-store.js';
 import { openTerminal, agentGraphHref } from '../../../client/open-terminal.js';
 import { showToast } from '../../../utils/toast.js';
 import { playChimeThrottled } from '../../../utils/audio.js';
@@ -799,6 +800,13 @@ export class ScionChatThread extends LitElement {
 
   /** Last time we sent a typing event (for client-side throttle). */
   private _lastTypingSent = 0;
+
+  /**
+   * This conversation's single-agent read of the DM peer, in flight or done
+   * (see {@link resolvePeerAgentProject}). Kept for one conversation: a read
+   * for another conversation key is not used.
+   */
+  private _peerAgentProject: { conversationKey: string; projectId: string } | null = null;
 
   /** Current user ID, cached from the stateManager scope once it exists. */
   private _currentUserId = '';
@@ -1798,6 +1806,7 @@ export class ScionChatThread extends LitElement {
       // Fetch inter-agent exchanges for agent DMs (non-blocking).
       if (this.isAgentDM) {
         void this.fetchInteragentExchanges();
+        void this.resolvePeerAgentProject();
       }
       // Human DMs show a read receipt — seed it so "Seen" survives a reload
       // instead of waiting for the peer's next watermark advance.
@@ -4452,10 +4461,9 @@ export class ScionChatThread extends LitElement {
    *      sets `senderProjectId`; also the hub's user-to-agent send path
    *      stamps this from the peer agent's project, so a persisted or
    *      SSE-delivered message in an agent DM always carries it).
-   *   2. The DM peer agent's project, read from the shared agent cache
-   *      (`stateManager`, for the current view scope — cleared on every
-   *      `setScope()` and re-seeded by the chat page's member list — no
-   *      extra fetch). This only fills a narrow, real gap: the client's
+   *   2. The DM peer agent's project (see {@link peerAgentProjectId}: the
+   *      global agent map, the agent store's hub list, or one read of the
+   *      peer per conversation). This only fills a narrow, real gap: the client's
    *      own optimistic message (`optimisticMsg.projectId = ''` above) has
    *      no project yet because it hasn't round-tripped the server. The
    *      peer agent is not an unrelated project — it is who the DM is with.
@@ -4540,15 +4548,63 @@ export class ScionChatThread extends LitElement {
     }
   }
 
+  /** The DM peer agent's id; empty when this isn't an agent DM. */
+  private peerAgentId(): string {
+    if (!this.isAgentDM) return '';
+    return this.conversationKey.split(':')[2] || '';
+  }
+
   /**
-   * The DM peer agent's project id, from the shared in-memory agent cache
-   * (no network call). Empty when this isn't an agent DM or the peer agent
-   * isn't in the cache.
+   * The DM peer agent's project id, with no network call. Looked up, in
+   * order, in the global agent map (the current view's own full rows, such
+   * as the agent detail page's seed of its agent), in the agent store's hub
+   * list, and in this conversation's single-agent read (see
+   * {@link resolvePeerAgentProject}). Empty when this isn't an agent DM or
+   * none of them has the peer.
    */
   private peerAgentProjectId(): string {
-    if (!this.isAgentDM) return '';
-    const peerAgentId = this.conversationKey.split(':')[2] || '';
-    return (peerAgentId && stateManager.getAgent(peerAgentId)?.projectId) || '';
+    const peerAgentId = this.peerAgentId();
+    if (!peerAgentId) return '';
+    const known = this.knownPeerAgentProjectId(peerAgentId);
+    if (known) return known;
+    const read = this._peerAgentProject;
+    return read?.conversationKey === this.conversationKey ? read.projectId : '';
+  }
+
+  /** The peer's project from the global agent map, then the store's hub list. */
+  private knownPeerAgentProjectId(peerAgentId: string): string {
+    const fromView = stateManager.getAgent(peerAgentId)?.projectId;
+    if (fromView) return fromView;
+    const hub = agentStore.peek({ scope: 'hub' });
+    return (hub && agentIndexOf(hub).get(peerAgentId)?.projectId) || '';
+  }
+
+  /**
+   * Read the DM peer agent once per conversation (`GET /api/v1/agents/{id}`)
+   * when neither the global agent map nor the store's hub list has it — the
+   * thread opened directly, say, with no hub list loaded. The hub list is
+   * not loaded for this: on a large hub that would walk every agent for one
+   * id. A failed read is not cached, so the next open of the conversation
+   * reads again.
+   */
+  private async resolvePeerAgentProject(): Promise<void> {
+    const conversationKey = this.conversationKey;
+    const peerAgentId = this.peerAgentId();
+    if (!peerAgentId || this.knownPeerAgentProjectId(peerAgentId)) return;
+    if (this._peerAgentProject?.conversationKey === conversationKey) return;
+    const read = { conversationKey, projectId: '' };
+    this._peerAgentProject = read;
+    try {
+      const res = await apiFetch(`/api/v1/agents/${encodeURIComponent(peerAgentId)}`, {
+        suppressAccessDeniedToast: true,
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const agent = (await res.json()) as Partial<Agent>;
+      read.projectId = agent.projectId || '';
+    } catch {
+      // Non-critical: path links in this DM fall back to the message's own project.
+      if (this._peerAgentProject === read) this._peerAgentProject = null;
+    }
   }
 
   /**

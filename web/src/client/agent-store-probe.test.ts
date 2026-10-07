@@ -1438,6 +1438,24 @@ describe('AgentStore delta probe', () => {
     expect(find(h.store.peek(HUB), 'a1')?.labels).toBeUndefined();
   });
 
+  it("clears a status event's detail message a newer probe row omits, nested copy included", async () => {
+    const h = await loaded([row('a1', 1, { message: 'Cloning repository' })]);
+    await h.emitAgent('status', {
+      agentId: 'a1',
+      detail: { message: 'Installing tools', toolName: 'bash' },
+    });
+    expect(find(h.store.peek(HUB), 'a1')?.detail?.message).toBe('Installing tools');
+
+    h.server.agents[0] = row('a1', 10);
+    await tick();
+
+    expect(h.server.probes()).toBe(1);
+    expect(h.server.walks()).toBe(1);
+    const a1 = find(h.store.peek(HUB), 'a1');
+    expect(a1?.message).toBeUndefined();
+    expect(a1?.detail).toEqual({ toolName: 'bash' });
+  });
+
   it('keeps the messageability a project probe row does not carry', async () => {
     const h = await loaded([
       row('a1', 1, {

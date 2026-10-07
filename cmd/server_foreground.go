@@ -1251,7 +1251,21 @@ func validateServerPreflight(cfg *config.GlobalConfig) error {
 	if err := cfg.Hub.Conduit.Validate(); err != nil {
 		return err
 	}
+	if _, err := hub.ParseAgentRunScope(cfg.Auth.AgentRunScope, cfg.Auth.AgentRunScopeLegacyUntil); err != nil {
+		return err
+	}
 	return nil
+}
+
+// agentRunScopeSetting returns the parsed agent run-scope setting.
+// validateServerPreflight has already rejected an invalid value, so an
+// error here falls back to the default (off).
+func agentRunScopeSetting(cfg *config.GlobalConfig) hub.AgentRunScope {
+	s, err := hub.ParseAgentRunScope(cfg.Auth.AgentRunScope, cfg.Auth.AgentRunScopeLegacyUntil)
+	if err != nil {
+		return hub.AgentRunScope{}
+	}
+	return s
 }
 
 // isSupportedIAPAudience returns true when audience is a recognised IAP
@@ -1922,10 +1936,12 @@ func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken st
 		SoftDeleteRetention:          cfg.Hub.SoftDeleteRetention,
 		SoftDeleteRetainFiles:        cfg.Hub.SoftDeleteRetainFiles,
 		AsyncAgentLaunch:             cfg.Hub.AsyncAgentLaunch,
+		PerfTrace:                    cfg.Hub.PerfTrace,
 		LaunchTimeout:                cfg.Hub.LaunchTimeout,
 		LaunchKeepaliveSeconds:       cfg.Hub.LaunchKeepaliveSeconds,
 		ConduitTCPAllowedPorts:       append([]int(nil), cfg.Hub.Conduit.TCPAllowedPorts...),
 		ConduitGrantKeyActivation:    conduitGrantKeyActivationSetting(cfg),
+		AgentRunScope:                agentRunScopeSetting(cfg),
 		AdminMode:                    adminMode,
 		MaintenanceMessage:           maintenanceMessage,
 		SchedulerIntervalSeconds:     cfg.Scheduler.IntervalSeconds,
@@ -2066,6 +2082,13 @@ func wireHubCoreMetrics(hubSrv *hub.Server, mp metric.MeterProvider) dbmetrics.R
 		log.Printf("WARNING: hub decision audit metrics disabled: %v", auditErr)
 	} else {
 		hubSrv.SetDecisionAuditMetrics(auditRec)
+	}
+
+	runScopeRec, runScopeErr := hub.NewOTelAgentRunScopeMetrics(mp)
+	if runScopeErr != nil {
+		log.Printf("WARNING: hub agent run-scope metrics disabled: %v", runScopeErr)
+	} else {
+		hubSrv.SetAgentRunScopeMetrics(runScopeRec)
 	}
 
 	return hubDBRec
@@ -2776,6 +2799,7 @@ func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 		ProxyAuthenticator:   webProxyAuth,
 		PlatformAuthSA:       webPlatformAuthSA,
 		SlowRequestThreshold: cfg.SlowRequestThreshold,
+		PerfTrace:            cfg.Hub.PerfTrace,
 	}
 	if enableTestLogin {
 		slog.Warn("Test login endpoint is enabled (--enable-test-login). This allows bypass of authentication and MUST NOT be used in production!")
