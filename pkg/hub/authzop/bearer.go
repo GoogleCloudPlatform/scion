@@ -175,12 +175,10 @@ type BearerOwner string
 
 const (
 	BearerOwnerBrokerRegistration BearerOwner = "broker-registration"
-	BearerOwnerUserProvisioning   BearerOwner = "user-provisioning"
 )
 
 var validBearerOwners = map[BearerOwner]bool{
 	BearerOwnerBrokerRegistration: true,
-	BearerOwnerUserProvisioning:   true,
 }
 
 // BearerDisposition records how an operation treats a user access token.

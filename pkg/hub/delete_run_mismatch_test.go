@@ -171,10 +171,10 @@ func newRunMismatchFixture(t *testing.T, suffix string, phase state.Phase, prev 
 	agent := setupBrokerAgentInPhase(t, s, suffix, phase)
 	ctx := context.Background()
 	for _, p := range prev {
-		_, err := s.SetAgentRunID(ctx, agent.ID, p)
+		_, err := s.SetAgentRunID(ctx, agent.ID, p, nil)
 		require.NoError(t, err)
 	}
-	_, err := s.SetAgentRunID(ctx, agent.ID, "run-a")
+	_, err := s.SetAgentRunID(ctx, agent.ID, "run-a", nil)
 	require.NoError(t, err)
 	got := mustGetAgent(t, s, agent.ID)
 	require.Equal(t, "run-a", got.RunID)
@@ -295,7 +295,7 @@ func TestAgentDelete_PreviousRunMismatch_Finalizes(t *testing.T) {
 func TestAgentDelete_DeferredRunMismatch_NotFinalized(t *testing.T) {
 	setDeleteWaitTimeout(t, func(context.Context) time.Duration { return 10 * time.Second })
 	f := newDeferredDeleteFixture(t, "rm-deferred", nil)
-	_, err := f.store.SetAgentRunID(context.Background(), f.agent.ID, "run-a")
+	_, err := f.store.SetAgentRunID(context.Background(), f.agent.ID, "run-a", nil)
 	require.NoError(t, err)
 
 	// What the executing node records when its DispatchAgentDelete is

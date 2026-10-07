@@ -301,7 +301,7 @@ func TestStandingGates_RemovedRootDenied(t *testing.T) {
 		require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
 	})
 	t.Run("tokenMint", func(t *testing.T) {
-		_, err := f.srv.GenerateAgentTokenForAgent(ctx, f.agentA)
+		_, err := f.srv.AuthorizeAgentToken(ctx, f.agentA)
 		require.ErrorIs(t, err, errAgentNotInStanding)
 	})
 	t.Run("selfMessage", func(t *testing.T) {
@@ -483,7 +483,7 @@ func TestHeldAgent_RefusedWithoutDispatcherHook(t *testing.T) {
 	tokA := f.agentToken(f.agentA)
 	f.hold(f.agentA.ID, f.userID)
 
-	_, err := f.srv.GenerateAgentTokenForAgent(ctx, f.agentA)
+	_, err := f.srv.AuthorizeAgentToken(ctx, f.agentA)
 	require.ErrorIs(t, err, errAgentNotInStanding)
 	rec := doRequestWithAgentToken(t, f.srv, http.MethodGet, "/api/v1/agents/"+f.agentA.ID, nil, tokA)
 	require.Equal(t, http.StatusUnauthorized, rec.Code)

@@ -704,16 +704,42 @@ func fileOrigin(o string) string {
 	return o
 }
 
+// MaxGrantsForIDs bounds the ids one ListGrantsFor call binds, below every
+// driver's placeholder limit.
+const MaxGrantsForIDs = 1000
+
+// grantColumns is the artifact_grant column list scanGrant reads.
+const grantColumns = "id, artifact_id, subject_kind, subject_ref, permission, expires_at, created_by_ref, created_at"
+
 // ListGrants implements Store.
 func (s *sqlStore) ListGrants(ctx context.Context, artifactID string) ([]Grant, error) {
-	rows, err := s.db.QueryContext(ctx, s.rebind(`SELECT
-		id, artifact_id, subject_kind, subject_ref, permission, expires_at, created_by_ref, created_at
-		FROM artifact_grant WHERE artifact_id = ? ORDER BY created_at, id`), artifactID)
+	byID, err := s.queryGrants(ctx, "artifact_id = ?", artifactID)
+	return byID[artifactID], err
+}
+
+// ListGrantsFor implements Store.
+func (s *sqlStore) ListGrantsFor(ctx context.Context, artifactIDs []string) (map[string][]Grant, error) {
+	if len(artifactIDs) == 0 {
+		return map[string][]Grant{}, nil
+	}
+	if len(artifactIDs) > MaxGrantsForIDs {
+		return nil, fmt.Errorf("artifacts: ListGrantsFor accepts at most %d ids", MaxGrantsForIDs)
+	}
+	args := make([]any, len(artifactIDs))
+	for i, id := range artifactIDs {
+		args[i] = id
+	}
+	return s.queryGrants(ctx, "artifact_id IN ("+strings.TrimSuffix(strings.Repeat("?, ", len(args)), ", ")+")", args...)
+}
+
+func (s *sqlStore) queryGrants(ctx context.Context, where string, args ...any) (map[string][]Grant, error) {
+	rows, err := s.db.QueryContext(ctx, s.rebind("SELECT "+grantColumns+" FROM artifact_grant WHERE "+where+
+		" ORDER BY artifact_id, created_at, id"), args...)
 	if err != nil {
 		return nil, fmt.Errorf("artifacts: list grants: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
-	var out []Grant
+	out := map[string][]Grant{}
 	for rows.Next() {
 		var (
 			g                Grant
@@ -727,10 +753,153 @@ func (s *sqlStore) ListGrants(ctx context.Context, artifactID string) ([]Grant, 
 		g.ExpiresAt = expires.ptr()
 		g.CreatedByRef = by.String
 		g.CreatedAt = created.Time
-		out = append(out, g)
+		out[g.ArtifactID] = append(out[g.ArtifactID], g)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("artifacts: list grants: %w", err)
 	}
 	return out, nil
+}
+
+// maxCandidateScopes bounds the scope refs one ListCandidates query binds,
+// well below every driver's placeholder limit.
+const maxCandidateScopes = 500
+
+// ListCandidates implements Store.
+func (s *sqlStore) ListCandidates(ctx context.Context, q CandidateQuery) ([]Candidate, error) {
+	if q.PrincipalKind == "" || q.PrincipalRef == "" {
+		return nil, errors.New("artifacts: ListCandidates needs a principal")
+	}
+	if q.Limit <= 0 {
+		return nil, errors.New("artifacts: ListCandidates needs a positive limit")
+	}
+	if len(q.ScopeRefs) > maxCandidateScopes {
+		return nil, fmt.Errorf("artifacts: ListCandidates accepts at most %d scopes", maxCandidateScopes)
+	}
+	query, args := s.candidateQuery(q)
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("artifacts: list candidates: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []Candidate
+	for rows.Next() {
+		var (
+			c                         Candidate
+			key, kind                 sql.NullString
+			seq                       sql.NullInt64
+			expires, created, updated dbTime
+		)
+		if err := rows.Scan(&c.ID, &c.ScopeKind, &c.ScopeRef, &c.OwnerKind, &c.OwnerRef, &key, &c.Title,
+			&seq, &expires, &created, &updated, &kind); err != nil {
+			return nil, fmt.Errorf("artifacts: scan candidate: %w", err)
+		}
+		c.Key = key.String
+		c.CurrentSeq = int(seq.Int64)
+		c.ExpiresAt = expires.ptr()
+		c.CreatedAt = created.Time
+		c.UpdatedAt = updated.Time
+		c.CurrentKind = kind.String
+		out = append(out, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("artifacts: list candidates: %w", err)
+	}
+	return out, nil
+}
+
+// candidateQuery builds ListCandidates' SQL, rebound for the dialect, and
+// its arguments.
+func (s *sqlStore) candidateQuery(q CandidateQuery) (string, []any) {
+	// The candidates are the union of up to three arms, each served by an
+	// index and cut to the page in its own order: artifacts the principal
+	// owns (idx_artifact_owner), artifacts with a principal grant to it, and
+	// artifacts with a scope grant to one of the scopes (both through
+	// idx_artifact_grant_subject). A single OR over the whole table would
+	// read every artifact on every page; this way the work follows the
+	// caller's own rows. Each arm returns at most Limit distinct rows, so
+	// fewer than Limit rows overall means every arm is exhausted.
+	var (
+		b     strings.Builder
+		args  []any
+		nArms int
+	)
+	arm := func(from, where string, whereArgs ...any) {
+		nArms++
+		if nArms > 1 {
+			b.WriteString("\nUNION\n")
+		}
+		b.WriteString("SELECT * FROM (SELECT DISTINCT " + candidateColumns + " FROM " + from +
+			"\n\t\tLEFT JOIN artifact_version v ON v.artifact_id = a.id AND v.seq = a.current_seq\n\t\tWHERE " + where)
+		args = append(args, whereArgs...)
+		s.writeCandidateFilters(&b, &args, q)
+		b.WriteString(" ORDER BY a.updated_at DESC, a.id DESC LIMIT ?) arm" + strconv.Itoa(nArms))
+		args = append(args, q.Limit)
+	}
+	arm("artifact a", "a.owner_kind = ? AND a.owner_ref = ?", q.PrincipalKind, q.PrincipalRef)
+	if !q.OwnedOnly {
+		now := s.timeArg(q.Now)
+		grantWhere := " AND (g.expires_at IS NULL OR g.expires_at > ?) AND g.permission IN (?, ?, ?)"
+		grantArgs := []any{now, GrantRead, GrantWrite, GrantAdmin}
+		arm("artifact_grant g JOIN artifact a ON a.id = g.artifact_id",
+			"g.subject_kind = ? AND g.subject_ref = ?"+grantWhere,
+			append([]any{SubjectPrincipal, PrincipalRef(q.PrincipalKind, q.PrincipalRef)}, grantArgs...)...)
+		if len(q.ScopeRefs) > 0 {
+			in := strings.TrimSuffix(strings.Repeat("?, ", len(q.ScopeRefs)), ", ")
+			scopeArgs := []any{SubjectScope}
+			for _, ref := range q.ScopeRefs {
+				scopeArgs = append(scopeArgs, ref)
+			}
+			arm("artifact_grant g JOIN artifact a ON a.id = g.artifact_id",
+				"g.subject_kind = ? AND g.subject_ref IN ("+in+")"+grantWhere, append(scopeArgs, grantArgs...)...)
+		}
+	}
+	b.WriteString("\nORDER BY updated_at DESC, id DESC LIMIT ?")
+	args = append(args, q.Limit)
+
+	return s.rebind(b.String()), args
+}
+
+// candidateColumns is the column list every arm of the candidate query
+// selects; the union and its outer ORDER BY rely on the names.
+const candidateColumns = `a.id, a.scope_kind, a.scope_ref, a.owner_kind, a.owner_ref, a."key", a.title,
+		a.current_seq, a.expires_at, a.created_at, a.updated_at, v.kind AS current_kind`
+
+// writeCandidateFilters appends the conditions every candidate arm shares:
+// live, not expired, the search, the review filter and the keyset position.
+//
+// Search folds case the way the database folds it, so a pattern and a
+// column are always compared under the same rules: SQLite's LIKE ignores
+// case for ASCII letters only and compares other characters exactly;
+// Postgres lowercases both sides with LOWER, under the database's own
+// collation rules.
+func (s *sqlStore) writeCandidateFilters(b *strings.Builder, args *[]any, q CandidateQuery) {
+	now := s.timeArg(q.Now)
+	b.WriteString(" AND a.deleted_at IS NULL AND (a.expires_at IS NULL OR a.expires_at > ?)")
+	*args = append(*args, now)
+	if q.Search != "" {
+		pattern := "%" + escapeLike(q.Search) + "%"
+		if s.dialect == dialectPostgres {
+			b.WriteString(` AND (LOWER(a.title) LIKE LOWER(?) ESCAPE '\' OR LOWER(COALESCE(a."key", '')) LIKE LOWER(?) ESCAPE '\')`)
+		} else {
+			b.WriteString(` AND (a.title LIKE ? ESCAPE '\' OR COALESCE(a."key", '') LIKE ? ESCAPE '\')`)
+		}
+		*args = append(*args, pattern, pattern)
+	}
+	if q.ReviewPending {
+		b.WriteString(" AND v.kind = ?")
+		*args = append(*args, VersionKindReview)
+	}
+	if q.After != nil {
+		at := s.timeArg(q.After.UpdatedAt)
+		b.WriteString(" AND (a.updated_at < ? OR (a.updated_at = ? AND a.id < ?))")
+		*args = append(*args, at, at, q.After.ID)
+	}
+}
+
+// escapeLike escapes the LIKE wildcards and the escape character itself,
+// so a search matches literally under ESCAPE '\'.
+func escapeLike(v string) string {
+	r := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	return r.Replace(v)
 }

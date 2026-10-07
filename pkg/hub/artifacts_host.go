@@ -16,10 +16,12 @@ package hub
 
 import (
 	"context"
+	"encoding/base64"
 	"net/http"
 	"path"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
@@ -162,6 +164,93 @@ func (h *artifactHost) Authorize(ctx context.Context, scopeRef, permission strin
 		ParentID:   scopeRef,
 	}, Action(perm.Action))
 	return decision.Allowed
+}
+
+// MemberScopes returns the projects the caller belongs to: for a user (a
+// session, a scoped user access token or the dev user), every project it
+// holds an active project-scoped role binding in, directly or through a
+// group; for a token-backed agent, its own project. It reads live bindings
+// on every call, so a user who has left a project stops matching that
+// project's scope grants at once. The artifact service uses the result only
+// to bound list candidates; every candidate is re-checked like a GET, so a
+// token's boundary or ceiling still applies through Permits.
+func (h *artifactHost) MemberScopes(ctx context.Context) ([]string, error) {
+	identity := GetIdentityFromContext(ctx)
+	if isNilIdentity(identity) {
+		return nil, nil
+	}
+	switch id := identity.(type) {
+	case *agentIdentityWrapper:
+		if p := id.ProjectID(); p != "" {
+			return []string{p}, nil
+		}
+		return nil, nil
+	case *AuthenticatedUser, *ScopedUserIdentity, *DevUser:
+	default:
+		return nil, nil
+	}
+	if h.server == nil || h.server.authzService == nil {
+		return nil, nil
+	}
+	in := h.server.authzService.inputsFor(ctx, identity)
+	if _, err := in.Principals(); err != nil {
+		return nil, err
+	}
+	bindings, err := in.Bindings()
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now()
+	seen := map[string]bool{}
+	var out []string
+	for _, rb := range bindings {
+		if rb == nil || rb.ScopeType != store.RoleScopeProject || rb.ScopeID == "" || seen[rb.ScopeID] {
+			continue
+		}
+		if (rb.NotBefore != nil && now.Before(*rb.NotBefore)) || (rb.ExpiresAt != nil && !now.Before(*rb.ExpiresAt)) {
+			continue
+		}
+		seen[rb.ScopeID] = true
+		out = append(out, rb.ScopeID)
+	}
+	return out, nil
+}
+
+// artifactListEndpoint names the artifact list in cursor bindings.
+const artifactListEndpoint = "artifacts.list"
+
+// SealCursor seals a list position with the hub's list-cursor key, bound
+// to the caller's credential and to binding, in the same format the hub's
+// other authorized lists use, so the cursor reveals nothing about the row
+// it points after.
+func (h *artifactHost) SealCursor(ctx context.Context, position, binding string) (string, error) {
+	if h.server == nil {
+		return "", errListCursorSealerUnavailable
+	}
+	b := scopedCursorBinding(artifactListEndpoint, binding, GetIdentityFromContext(ctx))
+	inner := base64.URLEncoding.EncodeToString([]byte(position + "," + b))
+	return h.server.listCursorSealer.Seal(inner, b)
+}
+
+// OpenCursor reverses SealCursor. Any failure is errInvalidCursor.
+func (h *artifactHost) OpenCursor(ctx context.Context, cursor, binding string) (string, error) {
+	if h.server == nil {
+		return "", errInvalidCursor
+	}
+	b := scopedCursorBinding(artifactListEndpoint, binding, GetIdentityFromContext(ctx))
+	inner, err := openAndValidateListCursor(h.server.listCursorSealer, cursor, b)
+	if err != nil {
+		return "", errInvalidCursor
+	}
+	raw, err := base64.URLEncoding.DecodeString(inner)
+	if err != nil {
+		return "", errInvalidCursor
+	}
+	position, ok := strings.CutSuffix(string(raw), ","+b)
+	if !ok {
+		return "", errInvalidCursor
+	}
+	return position, nil
 }
 
 var _ artifacts.ScopeExplainer = (*artifactHost)(nil)
