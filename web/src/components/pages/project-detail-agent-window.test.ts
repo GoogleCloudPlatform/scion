@@ -438,6 +438,22 @@ function createRealisticFetchHandler(opts: {
         // complete response is always the whole unphased set.
         const phased = phase ? sorted.filter((a) => a.phase === phase) : sorted;
 
+        // ids= (a page of the window's frozen walk order): exactly the named
+        // agents that still match, with the other filters applied.
+        const idsParam = u.searchParams.get('ids');
+        if (idsParam !== null) {
+          const wanted = new Set(idsParam.split(','));
+          const page = phased.filter((a) => wanted.has(a.id));
+          return Promise.resolve(
+            jsonResponse({
+              agents: page,
+              totalCount: page.length,
+              complete: false,
+              stats: u.searchParams.get('stats') ? statsOf(page) : undefined,
+            })
+          );
+        }
+
         if (cursor !== null) {
           const startIdx = Number(cursor);
           const page = phased.slice(startIdx, startIdx + limit);
@@ -741,7 +757,9 @@ describe('project-detail — agent list window', () => {
       let n = requests.length;
       await internals(el).agentWindow.next();
       expect(requests.length - n).toBe(1);
-      expect(requests[requests.length - 1].url).toContain('cursor=');
+      // Next asks for the next slice of the walk order frozen from page 0.
+      expect(requests[requests.length - 1].url).toContain('ids=');
+      expect(requests[requests.length - 1].url).not.toContain('cursor=');
 
       n = requests.length;
       await internals(el).agentWindow.prev();
@@ -4112,7 +4130,8 @@ describe('project-detail — agent list window', () => {
       h.hold();
       void win.next();
       await vi.waitFor(() => expect(h.sent).toHaveLength(2));
-      expect(new URL(h.sent[1].url, 'http://x').searchParams.has('cursor')).toBe(true);
+      // Next asks for the next slice of the walk order frozen from page 0.
+      expect(new URL(h.sent[1].url, 'http://x').searchParams.has('ids')).toBe(true);
       internals(el).toggleSort('updated'); // desc to asc: a new sorted request
       await vi.waitFor(() => expect(h.sent).toHaveLength(3));
       expect(h.sent[1].signal?.aborted).toBe(true);

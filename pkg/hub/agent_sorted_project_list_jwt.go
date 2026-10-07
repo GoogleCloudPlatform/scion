@@ -40,6 +40,10 @@ import (
 // that still passes gets its capabilities from the full row, with no extra
 // decisions.
 func (s *Server) listProjectAgentsSortedAgentJWT(w http.ResponseWriter, r *http.Request, projectID string, filter store.AgentFilter, p agentListParams) {
+	// ids= narrows the candidate read as one more ANDed filter.
+	if p.ids != nil {
+		filter.IDs = p.ids
+	}
 	ctx := r.Context()
 	identity := GetIdentityFromContext(ctx)
 
