@@ -107,13 +107,13 @@ func TestMembershipLossProcessor_vs_ProjectDelete_Postgres(t *testing.T) {
 		func() {
 			_, decision = svc.Delete(setTestIdentity(ctx, owner), ProjectDeleteRequest{ProjectID: f.projectID, Actor: owner})
 		})
-	if decision != nil {
-		assert.NotContains(t, decision.Reason, "40P01")
-	}
+	// The owner's delete is not refused: it ran and took its locks.
+	require.Nil(t, decision, "the project delete must succeed (a 40P01 or refusal here means it did not race)")
 	_, err := f.s.GetProject(ctx, f.projectID)
-	if err == nil {
-		assert.True(t, f.held(f.agentA.ID), "project kept: the agents are held")
-	}
+	assert.ErrorIs(t, err, store.ErrNotFound, "the project is gone")
+	holds, err := f.s.ListActiveAgentHolds(ctx, f.agentA.ID)
+	require.NoError(t, err)
+	assert.Empty(t, holds, "holds went with the deleted agents")
 }
 
 func TestMembershipLossProcessor_vs_AgentHardDelete_Postgres(t *testing.T) {
@@ -155,29 +155,62 @@ func TestMembershipLossProcessor_vs_ReAdd_Postgres(t *testing.T) {
 		runConcurrently(t,
 			func() { f.srv.drainMembershipLossChecks(ctx) },
 			func() { f.addMember(f.userID, store.ProjectRoleMember) })
-		// Either order is consistent: no hold (re-add first) or a hold that
-		// stays until an owner acts.
-		_ = f.held(f.agentA.ID)
+		// Either order is consistent with the summary audit: a hold only
+		// when the processor saw the user not admitted.
+		recs, _, err := f.s.ListMutationAudits(ctx, store.MutationAuditFilter{
+			MutationType: mutationTypeMembershipLossProcessed, TargetID: f.userID, Limit: 10})
+		require.NoError(t, err)
+		require.NotEmpty(t, recs)
+		if f.held(f.agentA.ID) {
+			assert.Contains(t, recs[0].AfterSummary, `"admitted":false`)
+		} else {
+			assert.Contains(t, recs[0].AfterSummary, `"admitted":true`)
+		}
 	})
 }
 
 func TestMembershipLossProcessor_vs_CredentialMint_Postgres(t *testing.T) {
 	f := newMSPostgresFixture(t, "mint")
 	ctx := context.Background()
+	// The grant is authorized while U is still a member (a mint whose
+	// authorization finished just before the removal); its credential rows
+	// are signed and recorded through the production path concurrently with
+	// the processor's agent-row lock and revoke.
+	grant, err := f.srv.AuthorizeAgentToken(ctx, f.agentA)
+	require.NoError(t, err)
 	f.prepareRemoval()
-	var tok string
+	var mu sync.Mutex
+	var tokens []string
 	runConcurrently(t,
 		func() { f.srv.drainMembershipLossChecks(ctx) },
 		func() {
-			t2, err := f.srv.agentTokenService.GenerateAgentToken(f.agentA.ID, f.projectID, ScopesForRole(AgentRoleFull), f.agentA.Ancestry)
-			if err == nil {
-				tok = t2
+			for i := 0; i < 5; i++ {
+				tok, err := signAndRecordAgentToken(ctx, f.srv, f.s, grant, "")
+				if err == nil {
+					mu.Lock()
+					tokens = append(tokens, tok)
+					mu.Unlock()
+				}
 			}
 		})
 	require.True(t, f.held(f.agentA.ID))
-	if tok != "" {
+	require.NotEmpty(t, tokens)
+	for _, tok := range tokens {
+		claims, err := f.srv.agentTokenService.ValidateAgentToken(tok)
+		require.NoError(t, err)
+		cred, err := f.s.GetAgentCredentialByJTIHash(ctx, hashJTI(claims.ID))
+		require.NoError(t, err)
+		if cred.RevokedAt != nil {
+			// Revoked by the processor: refused on credential status alone,
+			// with no hold check involved.
+			_, _, statusErr := evaluateAgentCredentialStatus(ctx, f.s, claims.ID)
+			assert.ErrorIs(t, statusErr, errAgentCredentialRevoked)
+			continue
+		}
+		// Recorded after the processor committed (its insert waited on the
+		// agent-row lock): never valid, because the hold refuses it.
 		rec := doRequestWithAgentToken(t, f.srv, http.MethodGet, "/api/v1/agents/"+f.agentA.ID, nil, tok)
-		assert.Equal(t, http.StatusUnauthorized, rec.Code, "a credential minted concurrently is never valid")
+		assert.Equal(t, http.StatusUnauthorized, rec.Code, "a credential recorded after the hold is never valid")
 	}
 }
 
@@ -218,10 +251,19 @@ func TestMembershipLossProcessor_vs_UserDelete_Postgres(t *testing.T) {
 	ctx := context.Background()
 	f.prepareRemoval()
 	var code int
+	var body string
 	runConcurrently(t,
 		func() { f.srv.drainMembershipLossChecks(ctx) },
-		func() { code = doRequest(t, f.srv, http.MethodDelete, "/api/v1/users/"+f.userID, nil).Code })
-	assert.NotEqual(t, http.StatusInternalServerError, code, "no deadlock between the processor and user delete")
+		func() {
+			rec := doRequest(t, f.srv, http.MethodDelete, "/api/v1/users/"+f.userID, nil)
+			code, body = rec.Code, rec.Body.String()
+		})
+	// The user still roots agents, so the delete is refused for that stated
+	// reason (it takes the user-row lock first, then checks); it is never a
+	// fault.
+	assert.Equal(t, http.StatusConflict, code, body)
+	assert.Contains(t, strings.ToLower(body), "agent", body)
+	assert.True(t, f.held(f.agentA.ID), "the processor completed")
 }
 
 // On PostgreSQL the reconciler's lock keys are distinct advisory locks: all
