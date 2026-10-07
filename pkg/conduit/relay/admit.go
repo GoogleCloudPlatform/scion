@@ -70,6 +70,9 @@ func (a *admitter) Admit(ctx context.Context, hello *conduitv1.Hello) (*conduitv
 		return nil, reject(conduit.CloseForbidden, ReasonForbidden, "hello principal does not match the authenticated principal")
 	}
 	caps := hello.GetCapabilities()
+	if err := checkTokenRun(p, caps.GetEndpointIncarnation()); err != nil {
+		return nil, err
+	}
 	inc, err := admitIncarnation(p, caps.GetEndpointIncarnation())
 	if err != nil {
 		if IsSupersededIncarnation(err) {
@@ -265,4 +268,21 @@ func capabilitiesFromProto(c *conduitv1.Capabilities, inc Incarnation, execScope
 			IdleTimeoutS: int64(c.GetTransportLimits().GetIdleTimeoutS()),
 		},
 	}
+}
+
+// checkTokenRun applies p.TokenRun: an agent Hello whose endpoint
+// incarnation differs from the credential's run is reported, and refused
+// with 4401 when the binding is enforced.
+func checkTokenRun(p Principal, presented string) error {
+	b := p.TokenRun
+	if b == nil || p.Kind != registry.PrincipalAgent || presented == b.RunID {
+		return nil
+	}
+	if b.OnMismatch != nil {
+		b.OnMismatch()
+	}
+	if !b.Enforce {
+		return nil
+	}
+	return reject(conduit.CloseUnauthenticated, ReasonUnauthenticated, "")
 }

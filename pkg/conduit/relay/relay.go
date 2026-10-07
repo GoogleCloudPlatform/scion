@@ -96,6 +96,21 @@ type Principal struct {
 	// Incarnation is a broker's authoritative incarnation, if the hub
 	// knows one; "" accepts the broker's presented process start id.
 	Incarnation string
+	// TokenRun, when set (agents only), is the run the session's
+	// credential was issued for. See TokenRunBinding.
+	TokenRun *TokenRunBinding
+}
+
+// TokenRunBinding compares the run an agent's credential was issued for
+// with the Hello's endpoint incarnation (the container's launch id).
+type TokenRunBinding struct {
+	// RunID is the credential's run ("" for a credential without one).
+	RunID string
+	// Enforce refuses a Hello that does not match RunID with 4401.
+	// Without it a mismatch is only reported to OnMismatch.
+	Enforce bool
+	// OnMismatch, if set, is called once for a Hello that does not match.
+	OnMismatch func()
 }
 
 // GrantKeySource returns the grant verification keys to publish in
