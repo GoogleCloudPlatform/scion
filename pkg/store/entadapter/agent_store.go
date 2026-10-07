@@ -15,6 +15,7 @@
 package entadapter
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -61,6 +62,7 @@ const (
 //     listings via an Ent predicate.
 type AgentStore struct {
 	client *ent.Client
+	inTx   bool // true when client wraps an ambient WithTx transaction
 
 	// dialect is detected lazily on first use of a lock-taking path and
 	// memoized. SELECT ... FOR UPDATE is only emitted on Postgres; the SQLite
@@ -855,6 +857,63 @@ func (s *AgentStore) DeleteAgent(ctx context.Context, id string) error {
 		return mapError(err)
 	}
 	return nil
+}
+
+// lockAgentRowsBatch bounds the IDs locked by one statement. Batches are
+// taken in ascending ID order, so batching keeps the global lock order.
+const lockAgentRowsBatch = 1000
+
+// LockAgentRows locks the existing rows among ids, in ascending ID order,
+// with SELECT id FROM agents WHERE id IN (...) ORDER BY id FOR UPDATE on
+// PostgreSQL. PostgreSQL locks rows in the order the sorted scan returns
+// them, so every caller acquires shared rows in the same order. On SQLite the
+// same SELECT runs without the locking clause.
+func (s *AgentStore) LockAgentRows(ctx context.Context, ids []string) error {
+	if !s.inTx {
+		return fmt.Errorf("%w: LockAgentRows must be called inside WithTx", store.ErrInvalidInput)
+	}
+	uids, err := sortedUniqueUUIDs(ids)
+	if err != nil {
+		return err
+	}
+	if len(uids) == 0 {
+		return nil
+	}
+	pg := s.client.Driver().Dialect() == dialect.Postgres
+	for start := 0; start < len(uids); start += lockAgentRowsBatch {
+		end := min(start+lockAgentRowsBatch, len(uids))
+		q := s.client.Agent.Query().
+			Where(agent.IDIn(uids[start:end]...)).
+			Order(ent.Asc(agent.FieldID))
+		if pg {
+			q = q.ForUpdate()
+		}
+		if _, err := q.IDs(ctx); err != nil {
+			return fmt.Errorf("lock agent rows: %w", mapError(err))
+		}
+	}
+	return nil
+}
+
+// sortedUniqueUUIDs parses ids (ErrInvalidInput for a malformed one) and
+// returns them de-duplicated in ascending byte order, which is PostgreSQL's
+// uuid ordering.
+func sortedUniqueUUIDs(ids []string) ([]uuid.UUID, error) {
+	seen := make(map[uuid.UUID]struct{}, len(ids))
+	out := make([]uuid.UUID, 0, len(ids))
+	for _, id := range ids {
+		uid, err := parseUUID(id)
+		if err != nil {
+			return nil, err
+		}
+		if _, dup := seen[uid]; dup {
+			continue
+		}
+		seen[uid] = struct{}{}
+		out = append(out, uid)
+	}
+	sort.Slice(out, func(i, j int) bool { return bytes.Compare(out[i][:], out[j][:]) < 0 })
+	return out, nil
 }
 
 // ListAgents returns agents matching the filter criteria. See the
@@ -1700,6 +1759,28 @@ var containerMissingKeptExitReasons = []string{"preempted", "evicted"}
 // first changed nothing, matches every other row and records
 // container_missing.
 func (s *AgentStore) MarkAgentContainerMissing(ctx context.Context, id, brokerID string, cutoff time.Time, message string) (*store.Agent, error) {
+	return s.markAgentContainerMissing(ctx, id, brokerID, cutoff, message)
+}
+
+// MarkAgentContainerMissingIfUnchanged implements store.AgentStore: it is
+// MarkAgentContainerMissing with the state_version, run_id and start claim
+// checks added to the same conditional UPDATEs.
+func (s *AgentStore) MarkAgentContainerMissingIfUnchanged(ctx context.Context, id, brokerID string, cutoff time.Time, pre store.ContainerMissingPrecondition, message string) (*store.Agent, error) {
+	runID := agent.RunIDEQ(pre.RunID)
+	if pre.RunID == "" {
+		runID = agent.Or(agent.RunIDIsNil(), agent.RunIDEQ(""))
+	}
+	return s.markAgentContainerMissing(ctx, id, brokerID, cutoff, message,
+		agent.StateVersionEQ(pre.StateVersion),
+		runID,
+		agent.StartClaimIDIsNil(),
+	)
+}
+
+// markAgentContainerMissing is the shared body of MarkAgentContainerMissing
+// and MarkAgentContainerMissingIfUnchanged; extra predicates are added to
+// both conditional UPDATEs.
+func (s *AgentStore) markAgentContainerMissing(ctx context.Context, id, brokerID string, cutoff time.Time, message string, extra ...predicate.Agent) (*store.Agent, error) {
 	uid, err := parseUUID(id)
 	if err != nil {
 		return nil, err
@@ -1733,6 +1814,7 @@ func (s *AgentStore) MarkAgentContainerMissing(ctx context.Context, id, brokerID
 				),
 				reason,
 			).
+			Where(extra...).
 			SetPhase("error").
 			SetActivity("").
 			SetStalledFromActivity("").

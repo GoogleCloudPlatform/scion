@@ -11,6 +11,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/accesspolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentcredential"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agenthold"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentidentitykey"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentrecovery"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentreincarnation"
@@ -47,6 +48,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/limitdefinition"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/maintenanceoperation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/maintenanceoperationrun"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/membershiplosscheck"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/message"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/messageaddressee"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/mutationaudit"
@@ -337,6 +339,48 @@ func init() {
 	agentcredentialDescID := agentcredentialFields[0].Descriptor()
 	// agentcredential.DefaultID holds the default value on creation for the id field.
 	agentcredential.DefaultID = agentcredentialDescID.Default.(func() uuid.UUID)
+	agentholdFields := schema.AgentHold{}.Fields()
+	_ = agentholdFields
+	// agentholdDescRootPrincipalType is the schema descriptor for root_principal_type field.
+	agentholdDescRootPrincipalType := agentholdFields[4].Descriptor()
+	// agenthold.RootPrincipalTypeValidator is a validator for the "root_principal_type" field. It is called by the builders before save.
+	agenthold.RootPrincipalTypeValidator = agentholdDescRootPrincipalType.Validators[0].(func(string) error)
+	// agentholdDescRootPrincipalID is the schema descriptor for root_principal_id field.
+	agentholdDescRootPrincipalID := agentholdFields[5].Descriptor()
+	// agenthold.RootPrincipalIDValidator is a validator for the "root_principal_id" field. It is called by the builders before save.
+	agenthold.RootPrincipalIDValidator = agentholdDescRootPrincipalID.Validators[0].(func(string) error)
+	// agentholdDescActorKind is the schema descriptor for actor_kind field.
+	agentholdDescActorKind := agentholdFields[8].Descriptor()
+	// agenthold.DefaultActorKind holds the default value on creation for the actor_kind field.
+	agenthold.DefaultActorKind = agentholdDescActorKind.Default.(string)
+	// agentholdDescActorID is the schema descriptor for actor_id field.
+	agentholdDescActorID := agentholdFields[9].Descriptor()
+	// agenthold.DefaultActorID holds the default value on creation for the actor_id field.
+	agenthold.DefaultActorID = agentholdDescActorID.Default.(string)
+	// agentholdDescCorrelationID is the schema descriptor for correlation_id field.
+	agentholdDescCorrelationID := agentholdFields[10].Descriptor()
+	// agenthold.DefaultCorrelationID holds the default value on creation for the correlation_id field.
+	agenthold.DefaultCorrelationID = agentholdDescCorrelationID.Default.(string)
+	// agentholdDescCreatedAt is the schema descriptor for created_at field.
+	agentholdDescCreatedAt := agentholdFields[11].Descriptor()
+	// agenthold.DefaultCreatedAt holds the default value on creation for the created_at field.
+	agenthold.DefaultCreatedAt = agentholdDescCreatedAt.Default.(func() time.Time)
+	// agentholdDescClearedByKind is the schema descriptor for cleared_by_kind field.
+	agentholdDescClearedByKind := agentholdFields[13].Descriptor()
+	// agenthold.DefaultClearedByKind holds the default value on creation for the cleared_by_kind field.
+	agenthold.DefaultClearedByKind = agentholdDescClearedByKind.Default.(string)
+	// agentholdDescClearedByID is the schema descriptor for cleared_by_id field.
+	agentholdDescClearedByID := agentholdFields[14].Descriptor()
+	// agenthold.DefaultClearedByID holds the default value on creation for the cleared_by_id field.
+	agenthold.DefaultClearedByID = agentholdDescClearedByID.Default.(string)
+	// agentholdDescClearReason is the schema descriptor for clear_reason field.
+	agentholdDescClearReason := agentholdFields[15].Descriptor()
+	// agenthold.DefaultClearReason holds the default value on creation for the clear_reason field.
+	agenthold.DefaultClearReason = agentholdDescClearReason.Default.(string)
+	// agentholdDescID is the schema descriptor for id field.
+	agentholdDescID := agentholdFields[0].Descriptor()
+	// agenthold.DefaultID holds the default value on creation for the id field.
+	agenthold.DefaultID = agentholdDescID.Default.(func() uuid.UUID)
 	agentidentitykeyFields := schema.AgentIdentityKey{}.Fields()
 	_ = agentidentitykeyFields
 	// agentidentitykeyDescKey is the schema descriptor for key field.
@@ -1344,6 +1388,40 @@ func init() {
 	maintenanceoperationrunDescID := maintenanceoperationrunFields[0].Descriptor()
 	// maintenanceoperationrun.DefaultID holds the default value on creation for the id field.
 	maintenanceoperationrun.DefaultID = maintenanceoperationrunDescID.Default.(func() uuid.UUID)
+	membershiplosscheckFields := schema.MembershipLossCheck{}.Fields()
+	_ = membershiplosscheckFields
+	// membershiplosscheckDescUserID is the schema descriptor for user_id field.
+	membershiplosscheckDescUserID := membershiplosscheckFields[1].Descriptor()
+	// membershiplosscheck.UserIDValidator is a validator for the "user_id" field. It is called by the builders before save.
+	membershiplosscheck.UserIDValidator = membershiplosscheckDescUserID.Validators[0].(func(string) error)
+	// membershiplosscheckDescActorKind is the schema descriptor for actor_kind field.
+	membershiplosscheckDescActorKind := membershiplosscheckFields[4].Descriptor()
+	// membershiplosscheck.DefaultActorKind holds the default value on creation for the actor_kind field.
+	membershiplosscheck.DefaultActorKind = membershiplosscheckDescActorKind.Default.(string)
+	// membershiplosscheckDescActorID is the schema descriptor for actor_id field.
+	membershiplosscheckDescActorID := membershiplosscheckFields[5].Descriptor()
+	// membershiplosscheck.DefaultActorID holds the default value on creation for the actor_id field.
+	membershiplosscheck.DefaultActorID = membershiplosscheckDescActorID.Default.(string)
+	// membershiplosscheckDescCorrelationID is the schema descriptor for correlation_id field.
+	membershiplosscheckDescCorrelationID := membershiplosscheckFields[6].Descriptor()
+	// membershiplosscheck.DefaultCorrelationID holds the default value on creation for the correlation_id field.
+	membershiplosscheck.DefaultCorrelationID = membershiplosscheckDescCorrelationID.Default.(string)
+	// membershiplosscheckDescCreatedAt is the schema descriptor for created_at field.
+	membershiplosscheckDescCreatedAt := membershiplosscheckFields[7].Descriptor()
+	// membershiplosscheck.DefaultCreatedAt holds the default value on creation for the created_at field.
+	membershiplosscheck.DefaultCreatedAt = membershiplosscheckDescCreatedAt.Default.(func() time.Time)
+	// membershiplosscheckDescAttempts is the schema descriptor for attempts field.
+	membershiplosscheckDescAttempts := membershiplosscheckFields[8].Descriptor()
+	// membershiplosscheck.DefaultAttempts holds the default value on creation for the attempts field.
+	membershiplosscheck.DefaultAttempts = membershiplosscheckDescAttempts.Default.(int)
+	// membershiplosscheckDescLastError is the schema descriptor for last_error field.
+	membershiplosscheckDescLastError := membershiplosscheckFields[9].Descriptor()
+	// membershiplosscheck.DefaultLastError holds the default value on creation for the last_error field.
+	membershiplosscheck.DefaultLastError = membershiplosscheckDescLastError.Default.(string)
+	// membershiplosscheckDescID is the schema descriptor for id field.
+	membershiplosscheckDescID := membershiplosscheckFields[0].Descriptor()
+	// membershiplosscheck.DefaultID holds the default value on creation for the id field.
+	membershiplosscheck.DefaultID = membershiplosscheckDescID.Default.(func() uuid.UUID)
 	messageFields := schema.Message{}.Fields()
 	_ = messageFields
 	// messageDescSender is the schema descriptor for sender field.
