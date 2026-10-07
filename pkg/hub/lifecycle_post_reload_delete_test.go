@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"runtime"
 	"strings"
@@ -69,8 +70,10 @@ func (w startWriteWindow) String() string {
 		return "before-started-write"
 	case windowAfterReRead:
 		return "after-re-read"
-	default:
+	case windowInHandlerFinalWrite:
 		return "in-handler-final-write"
+	default:
+		return fmt.Sprintf("startWriteWindow(%d)", int(w))
 	}
 }
 
@@ -105,9 +108,7 @@ func (p *startWriteDeleteStore) UpdateAgentStatus(ctx context.Context, id string
 	switch p.window {
 	case windowBeforeStartedWrite:
 		if n == 1 {
-			p.mu.Lock()
 			p.applyOnce()
-			p.mu.Unlock()
 		}
 	case windowAfterReRead:
 		err := p.Store.UpdateAgentStatus(ctx, id, u)
@@ -121,9 +122,7 @@ func (p *startWriteDeleteStore) UpdateAgentStatus(ctx context.Context, id string
 		if n == 1 {
 			return errors.New("db unavailable")
 		}
-		p.mu.Lock()
 		p.applyOnce()
-		p.mu.Unlock()
 	}
 	return p.Store.UpdateAgentStatus(ctx, id, u)
 }
