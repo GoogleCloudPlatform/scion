@@ -98,6 +98,19 @@ test-fixture-coverage:
 	@echo "Running fixture coverage gate (SQLite-enabled)..."
 	@go test -count=1 ./internal/fixturegen/...
 
+# MEMBERSHIP_LOSS_POSTGRES_TESTS are the pkg/hub membership loss
+# concurrency tests (ptone/scion#3433) run by test-launch-store-postgres.
+MEMBERSHIP_LOSS_POSTGRES_TESTS := TestMembershipLossProcessor_vs_ProjectDelete_Postgres \
+	TestMembershipLossProcessor_vs_AgentHardDelete_Postgres \
+	TestMembershipLossProcessor_vs_ReAdd_Postgres \
+	TestMembershipLossProcessor_vs_CredentialMint_Postgres \
+	TestMembershipLossProcessor_vs_ChildCreate_Postgres \
+	TestMembershipLossProcessor_TwoInstances_Postgres \
+	TestMembershipLossProcessor_vs_UserDelete_Postgres \
+	TestMembershipReconciler_LocksCoexist_Postgres
+empty :=
+space := $(empty) $(empty)
+
 ## test-launch-store-postgres: Run the T1 async-create launch store/reaper
 # suite against a real Postgres server (design t1-async-create-v11.md §6,
 # "Postgres in CI"). Requires -tags integration and SCION_TEST_POSTGRES_URL;
@@ -208,18 +221,6 @@ test-fixture-coverage:
 # "enttest-sqlite-only: <test name> <reason>". A skipped test is allowed only
 # if its own skip message carries that marker, so there is no name list here
 # and any other skip still fails the target.
-# MEMBERSHIP_LOSS_POSTGRES_TESTS are the pkg/hub membership loss
-# concurrency tests (ptone/scion#3433) run by test-launch-store-postgres.
-MEMBERSHIP_LOSS_POSTGRES_TESTS := TestMembershipLossProcessor_vs_ProjectDelete_Postgres \
-	TestMembershipLossProcessor_vs_AgentHardDelete_Postgres \
-	TestMembershipLossProcessor_vs_ReAdd_Postgres \
-	TestMembershipLossProcessor_vs_CredentialMint_Postgres \
-	TestMembershipLossProcessor_vs_ChildCreate_Postgres \
-	TestMembershipLossProcessor_TwoInstances_Postgres \
-	TestMembershipLossProcessor_vs_UserDelete_Postgres
-empty :=
-space := $(empty) $(empty)
-
 test-launch-store-postgres:
 	@echo "Running launch store tests against Postgres..."
 	@if [ -z "$$SCION_TEST_POSTGRES_URL" ]; then \

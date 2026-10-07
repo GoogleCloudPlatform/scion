@@ -263,6 +263,11 @@ func writeAgentTokenIssueError(w http.ResponseWriter, err error) bool {
 		return false
 	}
 	switch {
+	case e.Standing && e.Site == mintSiteRefresh:
+		// The agent refreshing its own token gets the generic refusal,
+		// the same answer an agent with no access gets.
+		Forbidden(w)
+		return true
 	case e.Standing:
 		writeError(w, http.StatusConflict, ErrCodeConflict, agentSuspendedConflictMessage, nil)
 		return true

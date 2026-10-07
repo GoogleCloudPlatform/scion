@@ -53,8 +53,8 @@ func TestStanding_RemovedRootDenied_NoHold(t *testing.T) {
 	ctx := context.Background()
 	f.dropBindings(f.userID)
 	require.False(t, f.held(f.agentA.ID))
-	requireStandingReason(t, f.srv.agentStanding(ctx, f.agentA.ID), standingReasonRootNotAdmited)
-	requireStandingReason(t, f.srv.agentStanding(ctx, f.childC.ID), standingReasonRootNotAdmited)
+	requireStandingReason(t, f.srv.agentStanding(ctx, f.agentA.ID), standingReasonRootNotAdmitted)
+	requireStandingReason(t, f.srv.agentStanding(ctx, f.childC.ID), standingReasonRootNotAdmitted)
 }
 
 func TestStanding_HeldAndChainHeld(t *testing.T) {
@@ -93,8 +93,8 @@ func TestStanding_LegacyOwnerFallback(t *testing.T) {
 	sched := f.newAgentRow("sched", "", legacy.ID, nil)
 	require.NoError(t, f.srv.agentStanding(ctx, sched.ID))
 	f.dropBindings(f.userID)
-	requireStandingReason(t, f.srv.agentStanding(ctx, legacy.ID), standingReasonRootNotAdmited)
-	requireStandingReason(t, f.srv.agentStanding(ctx, sched.ID), standingReasonRootNotAdmited)
+	requireStandingReason(t, f.srv.agentStanding(ctx, legacy.ID), standingReasonRootNotAdmitted)
+	requireStandingReason(t, f.srv.agentStanding(ctx, sched.ID), standingReasonRootNotAdmitted)
 }
 
 // An agent reached through an edge must carry its own edge: a missing edge
@@ -228,9 +228,9 @@ func TestStanding_NoCrossRequestCache(t *testing.T) {
 	require.NoError(t, f.srv.agentStanding(req1, f.agentA.ID))
 	f.dropBindings(f.userID)
 	req2 := withStandingMemo(context.Background())
-	requireStandingReason(t, f.srv.agentStanding(req2, f.agentA.ID), standingReasonRootNotAdmited)
+	requireStandingReason(t, f.srv.agentStanding(req2, f.agentA.ID), standingReasonRootNotAdmitted)
 	// Without a memo every call reads live state.
-	requireStandingReason(t, f.srv.agentStanding(context.Background(), f.agentA.ID), standingReasonRootNotAdmited)
+	requireStandingReason(t, f.srv.agentStanding(context.Background(), f.agentA.ID), standingReasonRootNotAdmitted)
 }
 
 // The check reads no setting.
@@ -239,7 +239,7 @@ func TestFallback_IgnoresAutoSuspendSetting(t *testing.T) {
 	f.dropBindings(f.userID)
 	for _, on := range []bool{false, true} {
 		f.srv.config.AutoSuspendStalled = on
-		requireStandingReason(t, f.srv.agentStanding(context.Background(), f.childC.ID), standingReasonRootNotAdmited)
+		requireStandingReason(t, f.srv.agentStanding(context.Background(), f.childC.ID), standingReasonRootNotAdmitted)
 	}
 }
 
@@ -526,10 +526,26 @@ func TestRemovedVsNeverMember_Indistinguishable(t *testing.T) {
 		assert.Equal(t, n.Code, a.Code, path)
 		assert.Equal(t, n.Body.String(), a.Body.String(), path)
 	}
+	// Token refresh is the agent's own call: the generic refusal, not the
+	// suspended text meant for members.
+	ar := doRequestWithAgentToken(t, f.srv, http.MethodPost, "/api/v1/agents/"+f.agentA.ID+"/token/refresh", nil, tokA)
+	nr := doRequestWithAgentToken(t, f.srv, http.MethodPost, "/api/v1/agents/"+neverAgent.ID+"/token/refresh", nil, tokN)
+	assert.Equal(t, http.StatusForbidden, ar.Code, ar.Body.String())
+	assert.NotContains(t, ar.Body.String(), agentSuspendedConflictMessage)
+	assert.Equal(t, nr.Code, ar.Code, "refresh")
+	assert.Equal(t, nr.Body.String(), ar.Body.String(), "refresh")
 	ra := f.srv.startGate(context.Background(), f.agentA, startEntryStart)
 	rn := f.srv.startGate(context.Background(), neverAgent, startEntryStart)
 	require.NotNil(t, ra)
 	require.NotNil(t, rn)
 	assert.Equal(t, rn.Message, ra.Message)
 	assert.Equal(t, rn.HTTPStatus, ra.HTTPStatus)
+}
+
+// An owner that names neither a user nor an agent in the project leaves no
+// resolvable root, even with an ancestry root user present.
+func TestStanding_DanglingOwnerHasNoRoot(t *testing.T) {
+	f := newMSFixture(t, "dangling")
+	a := f.newAgentRow("dangling-owner", tid("ms-dangling-nobody"), "", []string{f.userID})
+	requireStandingReason(t, f.srv.agentStanding(context.Background(), a.ID), standingReasonNoRoot)
 }

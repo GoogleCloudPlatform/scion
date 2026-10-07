@@ -247,7 +247,8 @@ type Agent struct {
 
 // AgentSuspension is the client-facing view of an agent's active holds: the
 // agent is held (it does not run, send messages, fire schedules or create
-// agents until a project owner resumes it) since the oldest active hold.
+// agents until it is resumed; in this release a hub admin lifts the hold)
+// since the oldest active hold.
 type AgentSuspension struct {
 	Held  bool      `json:"held"`
 	Since time.Time `json:"since"`

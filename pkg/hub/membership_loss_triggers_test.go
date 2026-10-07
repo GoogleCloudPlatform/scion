@@ -84,7 +84,7 @@ func TestMembershipLossTrigger_RemoveMember(t *testing.T) {
 		Op: MembershipOpRemove, ProjectID: f.projectID, Actor: f.ownerIdentity(), BindingID: f.userBinding(f.userID).ID,
 	})
 	require.Nil(t, d)
-	requireStandingReason(t, f.srv.agentStanding(context.Background(), f.agentA.ID), standingReasonRootNotAdmited)
+	requireStandingReason(t, f.srv.agentStanding(context.Background(), f.agentA.ID), standingReasonRootNotAdmitted)
 	requireCheck(t, f.s, f.userID, store.MembershipLossTriggerMemberRemove)
 	f.requireTreeHeldAndRefused()
 }
@@ -141,7 +141,7 @@ func TestMembershipLossTrigger_SetMemberRolesRemoveAll(t *testing.T) {
 		Actor: f.ownerIdentity(), RemoveAll: true,
 	})
 	require.Nil(t, d)
-	requireStandingReason(t, f.srv.agentStanding(context.Background(), f.agentA.ID), standingReasonRootNotAdmited)
+	requireStandingReason(t, f.srv.agentStanding(context.Background(), f.agentA.ID), standingReasonRootNotAdmitted)
 	requireCheck(t, f.s, f.userID, store.MembershipLossTriggerMemberPrincipalDelete)
 	f.requireTreeHeldAndRefused()
 }
@@ -164,7 +164,7 @@ func TestMembershipLossTrigger_AdminBindingDelete(t *testing.T) {
 	f := newMSFixture(t, "trig-adminrb")
 	rec := doRequest(t, f.srv, http.MethodDelete, "/api/v1/admin/role-bindings/"+f.userBinding(f.userID).ID, nil)
 	require.Less(t, rec.Code, 300, rec.Body.String())
-	requireStandingReason(t, f.srv.agentStanding(context.Background(), f.agentA.ID), standingReasonRootNotAdmited)
+	requireStandingReason(t, f.srv.agentStanding(context.Background(), f.agentA.ID), standingReasonRootNotAdmitted)
 	requireCheck(t, f.s, f.userID, store.MembershipLossTriggerAdminBindingDelete)
 	f.requireTreeHeldAndRefused()
 }
@@ -207,7 +207,7 @@ func TestMembershipLossTrigger_GroupMemberRemove(t *testing.T) {
 	f.srv.membershipService.onMembershipLoss = nil
 	rec := doRequest(t, f.srv, http.MethodDelete, "/api/v1/groups/"+groupID+"/members/user/"+f.userID, nil)
 	require.Less(t, rec.Code, 300, rec.Body.String())
-	requireStandingReason(t, f.srv.agentStanding(context.Background(), f.agentA.ID), standingReasonRootNotAdmited)
+	requireStandingReason(t, f.srv.agentStanding(context.Background(), f.agentA.ID), standingReasonRootNotAdmitted)
 	f.requireTreeHeldAndRefused()
 }
 
@@ -217,7 +217,7 @@ func TestMembershipLossTrigger_GroupDelete(t *testing.T) {
 	groupID := groupFixture(t, f)
 	rec := doRequest(t, f.srv, http.MethodDelete, "/api/v1/groups/"+groupID, nil)
 	require.Less(t, rec.Code, 300, rec.Body.String())
-	requireStandingReason(t, f.srv.agentStanding(context.Background(), f.agentA.ID), standingReasonRootNotAdmited)
+	requireStandingReason(t, f.srv.agentStanding(context.Background(), f.agentA.ID), standingReasonRootNotAdmitted)
 	f.requireTreeHeldAndRefused()
 }
 

@@ -44,18 +44,18 @@ var errAgentNotInStanding = errors.New("agent is not in good standing")
 // Standing reason codes. They appear in logs and audit records only, never
 // in a response body.
 const (
-	standingReasonAgentMissing   = "agent_missing"
-	standingReasonAgentDeleted   = "agent_deleted"
-	standingReasonAgentHeld      = "agent_held"
-	standingReasonChainHeld      = "chain_agent_held"
-	standingReasonChainDeleted   = "chain_agent_deleted"
-	standingReasonChainBroken    = "chain_broken"
-	standingReasonChainTooDeep   = "chain_too_deep"
-	standingReasonNoRoot         = "no_resolvable_root"
-	standingReasonRootMissing    = "root_user_missing"
-	standingReasonRootInactive   = "root_user_inactive"
-	standingReasonRootNotAdmited = "root_user_not_admitted"
-	standingReasonNoProject      = "agent_has_no_project"
+	standingReasonAgentMissing    = "agent_missing"
+	standingReasonAgentDeleted    = "agent_deleted"
+	standingReasonAgentHeld       = "agent_held"
+	standingReasonChainHeld       = "chain_agent_held"
+	standingReasonChainDeleted    = "chain_agent_deleted"
+	standingReasonChainBroken     = "chain_broken"
+	standingReasonChainTooDeep    = "chain_too_deep"
+	standingReasonNoRoot          = "no_resolvable_root"
+	standingReasonRootMissing     = "root_user_missing"
+	standingReasonRootInactive    = "root_user_inactive"
+	standingReasonRootNotAdmitted = "root_user_not_admitted"
+	standingReasonNoProject       = "agent_has_no_project"
 )
 
 // standingDenial is the error agentStanding returns for a policy refusal.
@@ -294,7 +294,7 @@ func (s *Server) rootUserAdmitted(ctx context.Context, rootID, projectID, agentI
 		return fmt.Errorf("agent standing: root user admission: %w", err)
 	}
 	if !admitted {
-		return denyStanding(standingReasonRootNotAdmited, agentID, rootID)
+		return denyStanding(standingReasonRootNotAdmitted, agentID, rootID)
 	}
 	return nil
 }
@@ -450,7 +450,8 @@ func (s *Server) standingChainAgent(ctx context.Context, st store.Store, id, pro
 
 // storedLinkCandidate resolves the next step of a chain from an agent's
 // stored links, in order: its owner (a user ends the chain; an agent in the
-// project continues it), else its ancestry root when that is a user, else,
+// project continues it; an owner that names neither leaves no root), else
+// its ancestry root when that is a user, else,
 // when it has no owner, its creator (user or agent). It returns either the
 // next agent or the root user ID; with neither the agent has no resolvable
 // root.
@@ -496,6 +497,10 @@ func (s *Server) storedLinkCandidate(ctx context.Context, st store.Store, a *sto
 		} else if next != nil {
 			return next, "", nil
 		}
+		// An owner that names neither a user nor an agent in the project
+		// leaves no resolvable root; resolution does not move on to another
+		// link.
+		return nil, "", denyStanding(standingReasonNoRoot, origAgentID, "")
 	}
 	if len(a.Ancestry) > 0 {
 		if ok, err := tryUser(a.Ancestry[0]); err != nil {

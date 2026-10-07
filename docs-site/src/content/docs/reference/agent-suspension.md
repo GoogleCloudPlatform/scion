@@ -6,7 +6,9 @@ description: What the Hub does with a user's agents when that user's access to a
 When a user's access to a project ends, the Hub suspends the agents that user
 started in the project, together with every agent those agents created. A
 suspended agent keeps its workspace and state. It does not run, send
-messages, fire schedules or create agents until a project owner resumes it.
+messages, fire schedules or create agents until it is resumed. In this
+release a hub admin resumes it by lifting its hold (see
+[Resuming](#resuming)); resume by a project owner is planned.
 
 ## When it applies
 
@@ -36,9 +38,10 @@ not affected.
    project, including agents created by those agents, agents started by
    their schedules, and soft-deleted agents (a later restore brings them back
    suspended). In the same transaction the agents' Hub credentials are
-   revoked and their run intent is set to stopped. Each hold is recorded in
-   the audit log with the actor who removed the member, the trigger and the
-   correlation ID.
+   revoked. Their run intent is set to stopped right after the transaction
+   commits; the hold already refuses every start in the meantime. Each hold
+   is recorded in the audit log with the actor who removed the member, the
+   trigger and the correlation ID.
 3. **Stop.** The Hub then stops each running container. The agent's phase
    moves to `suspended` (or `stopped` when its harness cannot resume) only
    once the runtime broker confirms the stop.
@@ -75,12 +78,14 @@ the audit log (`agent_hold_set` records).
 
 Starting, restarting, waking or reincarnating a held agent returns
 `409 conflict` with "This agent is suspended. A project owner can resume it."
+In this release the hold is lifted by a hub admin (below).
 
 ## Resuming
 
 Re-adding the user to the project does not resume their agents on its own.
 
-A hub admin can lift the holds of an agent with
+In this release a hub admin lifts the hold; resume by a project owner is
+planned. A hub admin can lift the holds of an agent with
 `POST /api/v1/agents/{id}/hold/lift` (session credential). The lift is
 accepted only when every user the agent's holds name is active and admitted
 to the project again; otherwise it returns `409 conflict`. The lift clears
@@ -91,8 +96,11 @@ hold.
 ## Background processing and upgrade
 
 Each membership change writes a durable work item in the same transaction.
-The Hub processes it right after the change commits, and a background
-reconciler (every minute) retries anything that did not finish. Every five
+For project membership and group changes the Hub processes it right after
+the change commits; for hub-level role changes it is picked up by the
+background reconciler within a minute. The reconciler (every minute) also
+retries anything that did not finish, and retries pending container stops
+from one Hub replica at a time. Every five
 minutes it also looks for project role bindings that expired, and every hour
 (and once at startup) it runs a full sweep over all agents. None of this can
 be turned off by a setting.
@@ -106,13 +114,19 @@ upgrade. Before it writes any hold, every sweep logs one line,
 | `agents_to_hold` | Agents rooted at a user who is no longer admitted, not yet held. |
 | `not_admitted_pairs` | (user, project) pairs whose user is no longer admitted. |
 | `walks_incomplete` | Pairs whose count is a lower bound because the tree is larger than one pass. |
-| `agents_without_resolvable_root` | Live agents with no user they can be traced to. They cannot be held and are refused live everywhere. |
+| `agents_unresolved` | Live agents whose chain does not resolve to a user (no user they can be traced to, or a broken, deleted or too-deep link). They cannot be held and are refused live everywhere. |
+| `lookups_failed` | Agents or pairs skipped because a lookup failed. They are retried on the next sweep; the other pairs are processed normally. |
 | `first_sweep_since_start` | `true` for the first sweep after the Hub process started. |
 
 Agents are traced to their root user through delegation records, and, for
 agents created before those records existed, through their owner, ancestry
 or creator. Agents more than ten delegation steps below their root user are
 refused live and held by the sweep.
+
+The full sweep reads every agent and the links above it once an hour, so
+its cost grows with the number of agents (and the depth of their chains);
+the pending-stop retry reads each agent that has an active hold once a
+minute. On large hubs, expect these reads in the database load.
 
 A very deep agent tree (more than 32 levels) is held down to that depth; the
 remainder is refused live, and the work item is logged at error level and

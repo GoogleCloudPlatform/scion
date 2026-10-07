@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -304,7 +305,7 @@ func TestMembershipSweep_MeasuresThenHolds(t *testing.T) {
 	res, err := f.srv.membershipFullSweep(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, 2, res.WouldHold, "A and C")
-	assert.Equal(t, 1, res.NoResolvableRoot)
+	assert.Equal(t, 1, res.Unresolved)
 	assert.Equal(t, 1, res.NotAdmittedPairs)
 	assert.Equal(t, 1, res.Enqueued)
 	assert.True(t, f.held(f.agentA.ID))
@@ -531,4 +532,111 @@ func agentCeilingRequest(a *store.Agent) AuthzRequest {
 		Action:     ActionRead,
 		Permission: "agent.read",
 	}
+}
+
+// lockTrackingStore is an AdvisoryLocker that really holds keys: a key held
+// by one task cannot be taken by another until released.
+type lockTrackingStore struct {
+	store.Store
+	mu       sync.Mutex
+	held     map[store.AdvisoryLockKey]bool
+	acquired []store.AdvisoryLockKey
+}
+
+func (l *lockTrackingStore) TryAdvisoryLock(_ context.Context, key store.AdvisoryLockKey) (bool, func() error, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.held[key] {
+		return false, nil, nil
+	}
+	l.held[key] = true
+	l.acquired = append(l.acquired, key)
+	return true, func() error {
+		l.mu.Lock()
+		defer l.mu.Unlock()
+		delete(l.held, key)
+		return nil
+	}, nil
+}
+
+func (l *lockTrackingStore) TryAdvisoryLockObject(_ context.Context, _ store.AdvisoryLockKey, _ int32) (bool, func() error, error) {
+	return true, func() error { return nil }, nil
+}
+
+func (l *lockTrackingStore) took(key store.AdvisoryLockKey) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, k := range l.acquired {
+		if k == key {
+			return true
+		}
+	}
+	return false
+}
+
+// The expiry scan, the full sweep and the stop retry each hold their own
+// lock: either can run while another holds its lock (they can fire on the
+// same tick).
+func TestMembershipReconciler_TasksHoldDistinctLocks(t *testing.T) {
+	f := newMSFixture(t, "locks")
+	lts := &lockTrackingStore{Store: f.s, held: map[store.AdvisoryLockKey]bool{}}
+	f.srv.scheduler = NewScheduler(lts, slog.Default())
+	f.srv.registerMembershipStandingReconciler()
+	handlers := map[string]RecurringHandler{}
+	for _, h := range f.srv.scheduler.recurring {
+		handlers[h.Name] = h
+	}
+	expiry, sweep, stops := handlers["membership-expiry-scan"], handlers["membership-standing-sweep"], handlers["membership-hold-stop-retry"]
+	require.NotNil(t, expiry.Fn)
+	require.NotNil(t, sweep.Fn)
+	require.NotNil(t, stops.Fn)
+	assert.True(t, expiry.Singleton && sweep.Singleton && stops.Singleton)
+	ctx := context.Background()
+
+	// The sweep holds its lock; the expiry scan and the stop retry still run.
+	lts.held[store.LockMembershipStandingSweep] = true
+	expiry.Fn(ctx)
+	stops.Fn(ctx)
+	assert.True(t, lts.took(store.LockMembershipExpiryScan), "the expiry scan ran while the sweep held its lock")
+	assert.True(t, lts.took(store.LockMembershipStopRetry), "the stop retry ran while the sweep held its lock")
+
+	// The expiry scan holds its lock; the sweep still runs.
+	delete(lts.held, store.LockMembershipStandingSweep)
+	lts.held[store.LockMembershipExpiryScan] = true
+	sweep.Fn(ctx)
+	assert.True(t, lts.took(store.LockMembershipStandingSweep), "the sweep ran while the expiry scan held its lock")
+}
+
+// userFaultStore fails GetUser for one user ID.
+type userFaultStore struct {
+	store.Store
+	failID string
+}
+
+func (u *userFaultStore) GetUser(ctx context.Context, id string) (*store.User, error) {
+	if id == u.failID {
+		return nil, errors.New("injected user lookup fault")
+	}
+	return u.Store.GetUser(ctx, id)
+}
+
+// One pair whose lookups fail does not stop the sweep for the others: the
+// other user's agents are still held, the failure is counted and returned.
+func TestMembershipSweep_PairFaultDoesNotStopOthers(t *testing.T) {
+	f := newMSFixture(t, "sweepfault")
+	ctx := context.Background()
+	other := tid("ms-sweepfault-other")
+	f.addUser(other)
+	f.addMember(other, store.ProjectRoleMember)
+	b := f.userAgent("sweepfault-b", other)
+	f.dropBindings(f.userID)
+	f.dropBindings(other)
+
+	orig := f.srv.store
+	f.srv.store = &userFaultStore{Store: orig, failID: f.userID}
+	res, err := f.srv.membershipFullSweep(ctx)
+	f.srv.store = orig
+	require.Error(t, err, "the failed pair is reported")
+	assert.GreaterOrEqual(t, res.Failed, 1)
+	assert.True(t, f.held(b.ID), "the other user's agent is still held")
 }

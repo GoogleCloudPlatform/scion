@@ -796,10 +796,13 @@ func (s *Server) registerMembershipStandingReconciler() {
 	// instance holds.
 	s.scheduler.RegisterRecurring("membership-loss-drain", membershipLossDrainInterval, func(ctx context.Context) {
 		s.drainMembershipLossChecks(ctx)
-		s.retryHeldAgentStops(ctx)
 	})
+	// Each singleton task has its own lock key, so tasks that fire on the
+	// same tick never skip each other.
+	s.scheduler.RegisterRecurringSingleton("membership-hold-stop-retry", membershipLossDrainInterval,
+		store.LockMembershipStopRetry, s.retryHeldAgentStops)
 	s.scheduler.RegisterRecurringSingleton("membership-expiry-scan", membershipExpiryScanInterval,
-		store.LockMembershipStandingSweep, func(ctx context.Context) {
+		store.LockMembershipExpiryScan, func(ctx context.Context) {
 			if err := s.membershipExpiryScan(ctx, time.Now()); err != nil {
 				slog.Error("membership standing: expiry scan failed", "error", err)
 			}
@@ -867,10 +870,14 @@ type membershipSweepResult struct {
 	// WalkIncomplete is the number of pairs whose count is a lower bound
 	// because the walk reached a bound.
 	WalkIncomplete int
-	// NoResolvableRoot is the number of live agents with no resolvable
-	// root user. They cannot be held (a hold names its root) and are
-	// refused live at every standing site.
-	NoResolvableRoot int
+	// Unresolved is the number of live agents whose chain does not resolve
+	// to a user (no resolvable root, a broken or too-deep chain, a deleted
+	// link). They cannot be held (a hold names its root) and are refused
+	// live at every standing site.
+	Unresolved int
+	// Failed is the number of agents or pairs skipped because a lookup
+	// failed; they are retried on the next sweep.
+	Failed int
 	// Enqueued is the number of checks enqueued.
 	Enqueued int
 }
@@ -884,6 +891,7 @@ var membershipSweepFirst sync.Once
 // non-admitted pair with agents still to hold and drains the outbox.
 func (s *Server) membershipFullSweep(ctx context.Context) (membershipSweepResult, error) {
 	var res membershipSweepResult
+	var faults []error
 	pairs := map[[2]string]bool{}
 	err := s.forEachAgent(ctx, store.AgentFilter{IncludeDeleted: true}, func(a *store.Agent) error {
 		if a.ProjectID == "" {
@@ -893,11 +901,14 @@ func (s *Server) membershipFullSweep(ctx context.Context) (membershipSweepResult
 		if err != nil {
 			if errors.Is(err, errAgentNotInStanding) {
 				if a.DeletedAt.IsZero() {
-					res.NoResolvableRoot++
+					res.Unresolved++
 				}
 				return nil
 			}
-			return err
+			// One bad row must not stop the sweep for every other agent.
+			res.Failed++
+			faults = append(faults, fmt.Errorf("agent %s: %w", a.ID, err))
+			return nil
 		}
 		pairs[[2]string{root, a.ProjectID}] = true
 		// The owner and creator of an agent that is reached by an edge
@@ -931,7 +942,9 @@ func (s *Server) membershipFullSweep(ctx context.Context) (membershipSweepResult
 		res.Pairs++
 		admitted, err := s.userAdmittedByID(ctx, k[0], k[1])
 		if err != nil {
-			return res, fmt.Errorf("admission check for user %s in project %s: %w", k[0], k[1], err)
+			res.Failed++
+			faults = append(faults, fmt.Errorf("admission check for user %s in project %s: %w", k[0], k[1], err))
+			continue
 		}
 		if admitted {
 			continue
@@ -948,7 +961,11 @@ func (s *Server) membershipFullSweep(ctx context.Context) (membershipSweepResult
 			MaxNodes:           descendantQueryBounds.MaxNodes,
 		})
 		if werr != nil && !errors.Is(werr, store.ErrDescendantLimit) {
-			return res, fmt.Errorf("descendant walk for user %s in project %s: %w", k[0], k[1], werr)
+			// Enqueue anyway: the processor walks again and retries.
+			res.Failed++
+			faults = append(faults, fmt.Errorf("descendant walk for user %s in project %s: %w", k[0], k[1], werr))
+			toEnqueue = append(toEnqueue, k)
+			continue
 		}
 		res.WouldHold += len(walk.Agents)
 		if werr != nil {
@@ -966,10 +983,11 @@ func (s *Server) membershipFullSweep(ctx context.Context) (membershipSweepResult
 		"not_admitted_pairs", res.NotAdmittedPairs,
 		"agents_to_hold", res.WouldHold,
 		"walks_incomplete", res.WalkIncomplete,
-		"agents_without_resolvable_root", res.NoResolvableRoot,
+		"agents_unresolved", res.Unresolved,
+		"lookups_failed", res.Failed,
 		"first_sweep_since_start", first,
 	}
-	if first || res.WouldHold > 0 || res.NoResolvableRoot > 0 {
+	if first || res.WouldHold > 0 || res.Unresolved > 0 || res.Failed > 0 {
 		slog.Info("membership standing sweep: measured before holding", logArgs...)
 	} else {
 		slog.Debug("membership standing sweep: measured before holding", logArgs...)
@@ -986,12 +1004,12 @@ func (s *Server) membershipFullSweep(ctx context.Context) (membershipSweepResult
 			return nil
 		})
 		if err != nil {
-			return res, err
+			return res, errors.Join(append(faults, err)...)
 		}
 		res.Enqueued = len(toEnqueue)
 	}
 	s.drainMembershipLossChecks(ctx)
-	return res, nil
+	return res, errors.Join(faults...)
 }
 
 // ----------------------------------------------------------------------------

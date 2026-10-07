@@ -223,3 +223,24 @@ func TestMembershipLossProcessor_vs_UserDelete_Postgres(t *testing.T) {
 		func() { code = doRequest(t, f.srv, http.MethodDelete, "/api/v1/users/"+f.userID, nil).Code })
 	assert.NotEqual(t, http.StatusInternalServerError, code, "no deadlock between the processor and user delete")
 }
+
+// On PostgreSQL the reconciler's lock keys are distinct advisory locks: all
+// three can be held at once.
+func TestMembershipReconciler_LocksCoexist_Postgres(t *testing.T) {
+	f := newMSPostgresFixture(t, "locks")
+	ctx := context.Background()
+	locker, ok := f.s.(store.AdvisoryLocker)
+	require.True(t, ok, "the PostgreSQL store takes advisory locks")
+	var releases []func() error
+	defer func() {
+		for _, r := range releases {
+			_ = r()
+		}
+	}()
+	for _, key := range []store.AdvisoryLockKey{store.LockMembershipStandingSweep, store.LockMembershipExpiryScan, store.LockMembershipStopRetry} {
+		acquired, release, err := locker.TryAdvisoryLock(ctx, key)
+		require.NoError(t, err)
+		require.True(t, acquired, "lock %x is free while the others are held", key)
+		releases = append(releases, release)
+	}
+}
