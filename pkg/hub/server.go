@@ -2357,6 +2357,7 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 		ProxyAuthenticator: cfg.ProxyAuth,
 		FederationAuth:     &srv.federationAuth,
 		CredentialStore:    s,
+		HoldStore:          s,
 		UserStore:          s,
 		AuthMode:           cfg.AuthMode,
 		Debug:              cfg.Debug,
@@ -2911,7 +2912,14 @@ func signingKeySecretID(keyName, hubID string) string {
 }
 
 // SetDispatcher sets the agent dispatcher for co-located runtime broker operations.
+//
+// An HTTPAgentDispatcher attached here always gets the hub's required
+// standing check (ptone/scion#3433), so no attached dispatcher can start or
+// restart an agent that is held or not in good standing.
 func (s *Server) SetDispatcher(d AgentDispatcher) {
+	if hd, ok := d.(*HTTPAgentDispatcher); ok && hd != nil {
+		hd.SetRequiredStandingCheck(s.dispatchStandingCheck)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.dispatcher = d
@@ -3949,6 +3957,11 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	// (ptone/scion#1994).
 	dispatcher.SetCreatorSkillPreResolver(s.preResolveAgentSkillsAsCreator)
 
+	// Refuse a start or restart of an agent that is held or not in good
+	// standing before any broker call (ptone/scion#3433). SetDispatcher
+	// installs it too, for every dispatcher attached to the server.
+	dispatcher.SetRequiredStandingCheck(s.dispatchStandingCheck)
+
 	// Wire the hub's operational agent_defaults so dispatch can carry the
 	// limit/resource ones to the broker's low-precedence tier. The accessor
 	// takes s.mu; it returns the zero value in file mode, where the wire field
@@ -4318,6 +4331,9 @@ func (s *Server) messageEventHandler() EventHandler {
 				"creator", evt.CreatedBy,
 				"error", authErr)
 			return errScheduledMessageRefused
+		}
+		if err := s.scheduledFireStanding(ctx, evt, agent); err != nil {
+			return err
 		}
 
 		// Migration gate (design agent-reincarnate §3.7, R3 p2a-r1 review).
@@ -4726,6 +4742,9 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 		}
 
 		if _, err := s.authorizeScheduledAgentCreate(ctx, evt); err != nil {
+			return err
+		}
+		if err := s.scheduledFireStanding(ctx, evt, nil); err != nil {
 			return err
 		}
 

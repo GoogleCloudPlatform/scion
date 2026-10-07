@@ -224,6 +224,11 @@ func (s *Server) CheckEffectiveMembership(ctx context.Context, userID, projectID
 //
 // See docs/messaging-authorization.md for the full decision table and
 // piercing rules.
+// messageReasonSenderNotPermitted is the message denial reason for an agent
+// sender that is held or not in good standing. It is the same reason
+// whatever the cause.
+const messageReasonSenderNotPermitted = "sender agent is not permitted to send messages"
+
 func (s *Server) authorizeAgentMessage(
 	ctx context.Context,
 	senderIdentity Identity,
@@ -240,6 +245,14 @@ func (s *Server) authorizeAgentMessage(
 	// ---- D8: system-plane messages bypass all mode checks ----
 	if isSystemPlane {
 		return true, "system plane bypass", nil
+	}
+
+	// An agent sender must be in good standing (ptone/scion#3433), on every
+	// path below, including the self-message exemption. Lookup faults deny.
+	if agentIdent, ok := senderIdentity.(AgentIdentity); ok {
+		if err := s.agentStanding(ctx, agentIdent.ID()); err != nil {
+			return false, messageReasonSenderNotPermitted, nil
+		}
 	}
 
 	// Agent self-message: allow an agent to deliver to itself regardless of mode.
@@ -406,6 +419,11 @@ func (s *Server) EvaluateAgentMessage(
 	}
 	if senderAgent == nil {
 		return MessageDecision{Reason: "sender agent record is nil"}
+	}
+	// The sender must be in good standing (ptone/scion#3433); this covers
+	// the same-project and cross-project paths alike. Lookup faults deny.
+	if err := s.agentStanding(ctx, senderAgent.ID); err != nil {
+		return MessageDecision{Reason: messageReasonSenderNotPermitted}
 	}
 
 	// Either side mode == none → DENY

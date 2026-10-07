@@ -1247,6 +1247,11 @@ func (s *Server) handleAgentGCPToken(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "agent not found", nil)
 		return
 	}
+	// No external token for an agent that is not in good standing
+	// (ptone/scion#3433); a lookup fault refuses.
+	if s.agentStandingForbidden(r.Context(), w, agentRecord.ID) {
+		return
+	}
 
 	// Recheck the agent record and assignment mode from the store, then the
 	// JWT scope, before paying for the service-account row lookup below -- a
@@ -1336,6 +1341,11 @@ func (s *Server) handleAgentGCPIdentityToken(w http.ResponseWriter, r *http.Requ
 	agentRecord, err := s.store.GetAgent(r.Context(), agent.Subject)
 	if err != nil {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "agent not found", nil)
+		return
+	}
+	// No external token for an agent that is not in good standing
+	// (ptone/scion#3433); a lookup fault refuses.
+	if s.agentStandingForbidden(r.Context(), w, agentRecord.ID) {
 		return
 	}
 

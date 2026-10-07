@@ -111,6 +111,9 @@ func (s *Server) resolveEnvSecretAccess(w http.ResponseWriter, r *http.Request, 
 				Forbidden(w)
 				return "", false
 			}
+			if s.agentStandingForbidden(ctx, w, agentIdent.ID()) {
+				return "", false
+			}
 			return clientScopeID, true
 		}
 		if userIdent, ok := identity.(UserIdentity); ok {
@@ -182,9 +185,12 @@ func (s *Server) resolveEnvSecretAccess(w http.ResponseWriter, r *http.Request, 
 			Unauthorized(w)
 			return "", false
 		}
-		if _, ok := identity.(AgentIdentity); ok {
+		if agentIdent, ok := identity.(AgentIdentity); ok {
 			if isWrite {
 				Forbidden(w)
+				return "", false
+			}
+			if s.agentStandingForbidden(ctx, w, agentIdent.ID()) {
 				return "", false
 			}
 			return s.hubID, true
@@ -1360,6 +1366,11 @@ func (s *Server) validateAgentSecretAccess(w http.ResponseWriter, r *http.Reques
 		return "", false
 	}
 
+	// The agent must be in good standing (ptone/scion#3433).
+	if s.agentStandingForbidden(ctx, w, agentIdent.ID()) {
+		return "", false
+	}
+
 	return projectID, true
 }
 
@@ -1648,6 +1659,9 @@ func (s *Server) handleProjectEnvVars(w http.ResponseWriter, r *http.Request, pr
 			Forbidden(w)
 			return
 		}
+		if s.agentStandingForbidden(ctx, w, agentIdent.ID()) {
+			return
+		}
 		// Agents only get read access
 	} else if userIdent, ok := identity.(UserIdentity); ok {
 		decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
@@ -1859,6 +1873,9 @@ func (s *Server) handleProjectEnvVarByKey(w http.ResponseWriter, r *http.Request
 			Forbidden(w)
 			return
 		}
+		if s.agentStandingForbidden(ctx, w, agentIdent.ID()) {
+			return
+		}
 	} else if userIdent, ok := identity.(UserIdentity); ok {
 		action := ActionRead
 		if isWrite {
@@ -1904,6 +1921,9 @@ func (s *Server) handleProjectSecrets(w http.ResponseWriter, r *http.Request, pr
 	if agentIdent, ok := identity.(AgentIdentity); ok {
 		if agentIdent.ProjectID() != projectID {
 			Forbidden(w)
+			return
+		}
+		if s.agentStandingForbidden(ctx, w, agentIdent.ID()) {
 			return
 		}
 		// Agents only get read access
@@ -2090,6 +2110,9 @@ func (s *Server) handleProjectSecretByKey(w http.ResponseWriter, r *http.Request
 			Forbidden(w)
 			return
 		}
+		if s.agentStandingForbidden(ctx, w, agentIdent.ID()) {
+			return
+		}
 	} else if userIdent, ok := identity.(UserIdentity); ok {
 		action := ActionRead
 		if isWrite {
@@ -2175,6 +2198,9 @@ func (s *Server) handleProjectProviders(w http.ResponseWriter, r *http.Request, 
 	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
 		if project.ID != agentIdent.ProjectID() {
 			NotFound(w, "Project")
+			return
+		}
+		if s.agentStandingForbidden(ctx, w, agentIdent.ID()) {
 			return
 		}
 	}

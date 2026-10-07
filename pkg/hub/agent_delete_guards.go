@@ -157,6 +157,10 @@ func (r *startRefusal) dmError() *AgentDMError {
 //  1. deleteBlocksStart → 409 delete_in_progress (this design);
 //     1b. soft-deleted, on start, restart and wake → 409 "agent is
 //     deleted; restore it first";
+//     1c. not in good standing (agentStanding: held, held or deleted
+//     chain agent, root user inactive or not admitted to the project),
+//     on every entry but restore → 409 "This agent is suspended. A
+//     project owner can resume it."; a lookup fault → 500;
 //  2. IsIncompleteCreate → 409 agent_create_incomplete (T1 P1b-3);
 //  3. IsInFlight, before the launch deadline → 409 agent_launching with
 //     InFlight set (T1 P1b-3). Start, restart and create-existing answer
@@ -199,6 +203,25 @@ func (s *Server) startGate(ctx context.Context, a *store.Agent, entry startEntry
 	// step 1 because a restore is refused while a delete holds the row.
 	if !a.DeletedAt.IsZero() && (entry == startEntryStart || entry == startEntryRestart || entry == startEntryWake) {
 		return agentDeletedRefusal(a.ID)
+	}
+
+	// Step 1c: the agent must be in good standing (ptone/scion#3433): not
+	// held, its upward chain live and not held, and its root user active
+	// and admitted to the project. Restore is a soft-delete reversal and
+	// is not refused here; a start that follows it is. Lookup faults
+	// refuse.
+	if entry != startEntryRestore {
+		allowDeleted := entry == startEntryReincarnate || entry == startEntryCreateExisting
+		if err := s.evaluateAgentRowStanding(ctx, a, allowDeleted); err != nil {
+			if !errors.Is(err, errAgentNotInStanding) {
+				s.agentLifecycleLog.Error("start gate: standing check failed",
+					"agent_id", a.ID, "entry", string(entry), "error", err)
+			} else {
+				s.agentLifecycleLog.Info("start gate: agent not in good standing",
+					"agent_id", a.ID, "entry", string(entry), "reason", standingReason(err))
+			}
+			return standingStartRefusal(a.ID, err)
+		}
 	}
 
 	// Steps 2-3: incomplete create, then in flight.

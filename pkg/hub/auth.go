@@ -101,6 +101,10 @@ type AuthConfig struct {
 	// CredentialStore handles agent credential validation (Phase 1H).
 	// When non-nil, agent tokens are validated against persistent credential state.
 	CredentialStore store.AgentCredentialStore
+	// HoldStore enables the per-request agent hold check (ptone/scion#3433):
+	// a token whose agent has an active hold is refused exactly like a
+	// revoked credential, whether or not the token has a credential row.
+	HoldStore store.AgentHoldStore
 	// UserStore enables per-request user-status checks (e.g. suspension
 	// enforcement) for self-contained credentials like JWTs that do not
 	// themselves hit the database.
@@ -299,7 +303,28 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 							}
 						}
 
+						// Step 1b: a held agent's token is refused on every
+						// request, including tokens on the legacy path above
+						// (ptone/scion#3433). Same response as a revoked
+						// credential; a lookup fault is the same 503.
+						if cfg.HoldStore != nil {
+							held, holdErr := cfg.HoldStore.HasActiveAgentHold(ctx, claims.Subject)
+							if holdErr != nil {
+								log.Error("Agent hold lookup failed",
+									"agent_id", claims.Subject, "error", holdErr)
+								writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
+									"unable to verify credential status", nil)
+								return
+							}
+							if held {
+								writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
+									"token has been revoked", nil)
+								return
+							}
+						}
+
 						ctx = context.WithValue(ctx, agentContextKey{}, claims)
+						ctx = withStandingMemo(ctx)
 						identity := &agentIdentityWrapper{claims}
 						ctx = contextWithIdentity(ctx, identity)
 						ctx = contextWithCredentialContext(ctx, credentialContextForIdentity(identity))

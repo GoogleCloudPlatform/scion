@@ -196,6 +196,14 @@ type HTTPAgentDispatcher struct {
 	// resolution (start/restart carry no PreResolvedSkills, same as before).
 	creatorSkillPreResolver func(ctx context.Context, agent *store.Agent) *ResolveSkillsResponse
 
+	// requiredStandingCheck refuses a start or restart of an agent that is
+	// not in good standing (ptone/scion#3433). It is required in
+	// production: Server.SetDispatcher installs it whenever a dispatcher is
+	// attached to the hub server, and any error it returns refuses the
+	// dispatch. A nil check exists only for store-only unit tests that
+	// drive a dispatcher without a hub server.
+	requiredStandingCheck func(ctx context.Context, agent *store.Agent) error
+
 	// hubAgentDefaultsProvider returns the hub's operational agent_defaults at
 	// dispatch time. A callback rather than a snapshot because the settings
 	// propagation goroutine rewrites them while the hub runs; the Server's
@@ -464,6 +472,25 @@ func (d *HTTPAgentDispatcher) SetSkillPreResolver(fn func(ctx context.Context, a
 // creator would get, regardless of who starts/restarts the agent.
 func (d *HTTPAgentDispatcher) SetCreatorSkillPreResolver(fn func(ctx context.Context, agent *store.Agent) *ResolveSkillsResponse) {
 	d.creatorSkillPreResolver = fn
+}
+
+// SetRequiredStandingCheck registers the check DispatchAgentStart and
+// DispatchAgentRestart run before any broker call: a non-nil error refuses
+// the dispatch (ptone/scion#3433). Required in production; Server.SetDispatcher
+// installs it. A dispatcher without it exists only in store-only unit tests.
+func (d *HTTPAgentDispatcher) SetRequiredStandingCheck(fn func(ctx context.Context, agent *store.Agent) error) {
+	d.requiredStandingCheck = fn
+}
+
+// dispatchStandingError runs the installed standing check.
+func (d *HTTPAgentDispatcher) dispatchStandingError(ctx context.Context, agent *store.Agent) error {
+	if d.requiredStandingCheck == nil {
+		return nil
+	}
+	if err := d.requiredStandingCheck(ctx, agent); err != nil {
+		return fmt.Errorf("%w: %v", ErrAgentNotInStanding, err)
+	}
+	return nil
 }
 
 // isHashMismatchError reports whether err is a broker hash-mismatch error
@@ -3215,6 +3242,14 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		attribute.String("scion.broker.id", agent.RuntimeBrokerID),
 	)
 
+	// Standing guard (ptone/scion#3433): no broker call for an agent that
+	// is held or not in good standing. Fails closed, separately from the
+	// launch guard below.
+	if err := d.dispatchStandingError(ctx, agent); err != nil {
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+
 	// Start guard: no broker call
 	// while a create launch is in flight, or after one did not complete.
 	if err := d.launchGuardError(ctx, agent, "DispatchAgentStart"); err != nil {
@@ -3466,7 +3501,10 @@ func (d *HTTPAgentDispatcher) DispatchAgentStop(ctx context.Context, agent *stor
 // It generates a fresh auth token so the restarted container has valid
 // Hub credentials, preventing auth loss across container restarts.
 func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *store.Agent) error {
-	// Start guard.
+	// Standing guard (ptone/scion#3433), then the start guard.
+	if err := d.dispatchStandingError(ctx, agent); err != nil {
+		return err
+	}
 	if err := d.launchGuardError(ctx, agent, "DispatchAgentRestart"); err != nil {
 		return err
 	}

@@ -53,6 +53,7 @@ const (
 // Error classes recorded for a mint error that carries no DenyCause.
 const (
 	mintErrorClassLookup       = "lookup_error"
+	mintErrorClassStanding     = "not_in_standing"
 	mintErrorClassTokenService = "token_service_error"
 )
 
@@ -64,7 +65,10 @@ type agentTokenIssueError struct {
 	Cause DenyCause
 	// Lookup is set for a store or lookup fault (503).
 	Lookup bool
-	Err    error
+	// Standing is set when the agent is held or not in good standing
+	// (ptone/scion#3433): 409 with the suspended message.
+	Standing bool
+	Err      error
 }
 
 func (e *agentTokenIssueError) Error() string {
@@ -77,6 +81,8 @@ func (e *agentTokenIssueError) Unwrap() error { return e.Err }
 // the lookup or token-service error class.
 func (e *agentTokenIssueError) errorClass() string {
 	switch {
+	case e.Standing:
+		return mintErrorClassStanding
 	case e.Cause != "":
 		return string(e.Cause)
 	case e.Lookup:
@@ -110,6 +116,15 @@ func (s *Server) GenerateAgentTokenForAgent(ctx context.Context, agent *store.Ag
 		return "", fmt.Errorf("%w: authorization service not initialized", errMintLookup)
 	}
 
+	// No token for an agent that is held or not in good standing
+	// (ptone/scion#3433). A lookup fault issues no token either.
+	if err := s.agentStanding(ctx, agent.ID); err != nil {
+		if errors.Is(err, errAgentNotInStanding) {
+			return "", err
+		}
+		return "", fmt.Errorf("%w: %w", errMintLookup, err)
+	}
+
 	candidates := s.authzService.mintCandidateScopes(agent)
 	scopes, err := s.authzService.ceilingFilteredAgentScopes(ctx, agent, candidates)
 	if err != nil {
@@ -130,7 +145,9 @@ func mintAgentTokenAt(ctx context.Context, gen AgentTokenGenerator, st store.Sto
 		return token, nil
 	}
 	issueErr := &agentTokenIssueError{Site: site, Err: err}
-	if cause, structural := ceilingDenyCauseForError(err); structural {
+	if errors.Is(err, errAgentNotInStanding) {
+		issueErr.Standing = true
+	} else if cause, structural := ceilingDenyCauseForError(err); structural {
 		issueErr.Cause = cause
 	} else if errors.Is(err, errMintLookup) {
 		issueErr.Lookup = true
@@ -184,6 +201,9 @@ func writeAgentTokenIssueError(w http.ResponseWriter, err error) bool {
 		return false
 	}
 	switch {
+	case e.Standing:
+		writeError(w, http.StatusConflict, ErrCodeConflict, agentSuspendedConflictMessage, nil)
+		return true
 	case e.Cause != "":
 		writeForbiddenDenial(w, agentTokenDenialMessage(e.Cause), DeniedByDelegationCeiling)
 		return true
