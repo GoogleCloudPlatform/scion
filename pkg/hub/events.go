@@ -172,7 +172,8 @@ type AgentStatusEvent struct {
 	// Deletion is the delete view (design ptone/scion#2483 §2.2), a
 	// snapshot taken at publish time. Always present on the wire: an
 	// explicit null when no delete is active or failed, so the web's delta
-	// merge clears it.
+	// merge clears it. It is always the generic view, without code, error
+	// or claim (ptone/scion#3122; see PublishAgentStatus).
 	Deletion *store.DeletionInfo `json:"deletion"`
 	// ProvisionedOnly is the computed provisionedOnly view (ptone/scion#2929).
 	// No omitempty: false must reach the web to clear a merged true.
@@ -511,7 +512,12 @@ func (p *eventBuilder) PublishAgentStatus(_ context.Context, agent *store.Agent)
 		Activity:        agent.Activity,
 		ContainerStatus: agent.ContainerStatus,
 		Launch:          store.ComputeAgentLaunch(agent, now),
-		Deletion:        store.ComputeAgentDeletion(agent, now),
+		// The generic view for every subscriber (ptone/scion#3122): the
+		// payload is marshaled once here and fanned out as bytes, and the
+		// SSE stream has no user identity on its request context, so it
+		// cannot be redacted per subscriber. Admins read the detail fields
+		// from the REST agent.
+		Deletion:        deletionViewForCaller(agent, now, false),
 		ProvisionedOnly: store.ComputeAgentProvisionedOnly(agent),
 	}
 	if !agent.LastActivityEvent.IsZero() {

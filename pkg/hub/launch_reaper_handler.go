@@ -21,6 +21,7 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/observability/reapermetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -107,7 +108,7 @@ func (s *Server) launchReaperTickHandler() func(ctx context.Context) {
 		}
 
 		if rec := s.reaperMetrics; rec != nil {
-			rec.IncTicks(ctx, 1, attribute.String("outcome", string(result.Outcome)))
+			rec.IncTicks(ctx, 1, attribute.String(reapermetrics.AttrTickOutcome, string(result.Outcome)))
 		}
 
 		if result.Outcome != store.ReaperTickCompleted {
