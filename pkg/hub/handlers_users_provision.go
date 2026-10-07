@@ -264,9 +264,11 @@ func (s *Server) provisionWarnings(email string) []string {
 	if isReservedPlatformIdentity(email, s.platformAuthSA) {
 		warnings = append(warnings, provisionWarningReservedIdentity)
 	}
+	// The admin-email and domain checks mirror checkUserAuthorized, so a
+	// warning predicts what that check will do.
 	isAdminEmail := false
 	for _, admin := range s.AdminEmails() {
-		if strings.EqualFold(strings.TrimSpace(admin), email) {
+		if strings.ToLower(admin) == email {
 			isAdminEmail = true
 			break
 		}
@@ -327,16 +329,14 @@ func (s *Server) handleProvisionUser(w http.ResponseWriter, r *http.Request) {
 	target := Resource{Type: "user"}
 
 	// Rows 1, 4, 5: admission through the D.2 session-only gate. A user
-	// access token is refused here until token admission is enabled.
-	if identity := GetIdentityFromContext(ctx); identity != nil {
-		if _, isUser := identity.(UserIdentity); !isUser {
-			logAuthzDenial(r, identity, target, ActionInvite, provisionOperationID+": non-user identity")
-		} else if !sessionCredentialAllowed(ctx) {
-			logAuthzDenial(r, identity, target, ActionInvite, provisionOperationID+": session-only operation")
-		}
-	}
+	// access token is refused here until token admission is enabled. The
+	// gate writes the response; a refused identity is logged here so the
+	// log follows the gate's own decision.
 	actor, ok := s.requireSessionCredentialFor(w, ctx, authzop.ReasonGovernancePending)
 	if !ok {
+		if identity := GetIdentityFromContext(ctx); identity != nil {
+			logAuthzDenial(r, identity, target, ActionInvite, provisionOperationID+": refused by the session-only gate")
+		}
 		return
 	}
 

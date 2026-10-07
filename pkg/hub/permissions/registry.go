@@ -214,7 +214,7 @@ var Registry = []Permission{
 	{ID: "group.addMember", Resource: ResourceGroup, Action: ActionAddMember, CapabilityKind: CapabilityResource, UATScope: "group:addMember", Description: "Add group members", Enforcement: []string{"pkg/hub/handlers_groups.go"}},
 	{ID: "group.removeMember", Resource: ResourceGroup, Action: ActionRemoveMember, CapabilityKind: CapabilityResource, UATScope: "group:removeMember", Description: "Remove group members", Enforcement: []string{"pkg/hub/handlers_groups.go"}},
 
-	{ID: "user.read", Resource: ResourceUser, Action: ActionRead, CapabilityKind: CapabilityResource, UATScope: "user:read", Description: "Read users", Enforcement: []string{"pkg/hub/handlers_users_core.go"}},
+	{ID: "user.read", Resource: ResourceUser, Action: ActionRead, CapabilityKind: CapabilityResource, UATScope: "user:read", Description: "Read users", Enforcement: []string{"pkg/hub/handlers_users_core.go", "pkg/hub/handlers_users_provision.go:handleProvisionUser"}},
 	{ID: "user.update", Resource: ResourceUser, Action: ActionUpdate, CapabilityKind: CapabilityResource, Description: "Update users", Enforcement: []string{"pkg/hub/handlers_users_core.go"}},
 
 	{ID: "policy.create", Resource: ResourcePolicy, Action: ActionCreate, CapabilityKind: CapabilityScope, Description: "Create policies", Enforcement: []string{"pkg/hub/handlers_policies.go", "pkg/hub/route_metadata.go:requireAdmin"}},

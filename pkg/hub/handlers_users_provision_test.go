@@ -604,6 +604,14 @@ func TestHandleProvisionUser(t *testing.T) {
 		rec = provisionAs(t, f.srv, f.hubAdmin, map[string]interface{}{"email": "Transport@corp.example"})
 		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 		assert.Equal(t, []string{provisionWarningReservedIdentity}, decodeProvisionResponse(t, rec).Warnings)
+		// The warning predicts the sign-in outcome: the API login decision
+		// point refuses the reserved identity, and the record stays invited.
+		_, err := f.srv.provisionUser(ctx, &ExternalUserInfo{Email: "transport@corp.example"})
+		assert.Error(t, err, "sign-in of a reserved identity is refused")
+		assert.Equal(t, store.UserStatusInvited, userByEmail(t, f.s, "transport@corp.example").Status)
+		// Likewise for the out-of-domain record.
+		_, err = f.srv.provisionUser(ctx, &ExternalUserInfo{Email: "outsider@other.example"})
+		assert.ErrorIs(t, err, ErrAccessDenied, "sign-in outside authorized_domains is refused")
 
 		f.srv.mu.Lock()
 		f.srv.config.AuthorizedDomains = nil
@@ -640,20 +648,69 @@ func TestHandleProvisionUser(t *testing.T) {
 	})
 
 	t.Run("row18_lost_race_is_reclassified", func(t *testing.T) {
-		srv, s := testServer(t)
-		race := &provisionRaceStore{Store: s}
-		installStoreFault(t, srv, func(inner store.Store, _ *storeFaultSwitch) *provisionRaceStore {
-			race.Store = inner
-			return race
-		})
-		f := newProvisionFixtureOn(t, srv, s)
-		winnerBy := f.hubAdmin.ID
-		race.winner = &store.User{ID: tid("race-winner"), Email: "racer@example.com", DisplayName: "Winner",
-			Status: store.UserStatusInvited, Role: store.UserRoleMember, InvitedBy: &winnerBy}
-		rec := provisionAs(t, f.srv, f.hubAdmin, map[string]interface{}{"email": "racer@example.com", "displayName": "Winner"})
-		require.Equal(t, http.StatusOK, rec.Code, "the concurrent identical insert is a replay: %s", rec.Body.String())
-		assert.False(t, decodeProvisionResponse(t, rec).Created)
-		assert.Empty(t, provisionAudits(t, s, ""), "the losing request writes no audit")
+		// The winner of the unique-index race is committed first; the
+		// losing request re-reads and classifies it as row 14, 15, 16 or
+		// 17, including the detail-authority variant.
+		cases := []struct {
+			name        string
+			status      string
+			displayName string
+			detail      bool // caller is the hub-admin (detail authority) or the inviter
+			wantCode    int
+			wantReason  string
+			wantUserID  bool
+		}{
+			{"identical pending, hub-admin", store.UserStatusInvited, "Winner", true, http.StatusOK, "", false},
+			{"identical pending, inviter", store.UserStatusInvited, "Winner", false, http.StatusOK, "", false},
+			{"different pending, hub-admin", store.UserStatusInvited, "Other", true, http.StatusConflict, provisionReasonPendingUserExists, true},
+			{"different pending, inviter", store.UserStatusInvited, "Other", false, http.StatusConflict, provisionReasonUserExists, false},
+			{"active, hub-admin", store.UserStatusActive, "Winner", true, http.StatusConflict, provisionReasonUserExists, false},
+			{"active, inviter", store.UserStatusActive, "Winner", false, http.StatusConflict, provisionReasonUserExists, false},
+			{"suspended, hub-admin", store.UserStatusSuspended, "Winner", true, http.StatusConflict, provisionReasonSuspendedUserExists, false},
+			{"suspended, inviter", store.UserStatusSuspended, "Winner", false, http.StatusConflict, provisionReasonUserExists, false},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				srv, s := testServer(t)
+				race := &provisionRaceStore{Store: s}
+				installStoreFault(t, srv, func(inner store.Store, _ *storeFaultSwitch) *provisionRaceStore {
+					race.Store = inner
+					return race
+				})
+				f := newProvisionFixtureOn(t, srv, s)
+				caller := f.inviter
+				if tc.detail {
+					caller = f.hubAdmin
+				}
+				winnerBy := f.hubAdmin.ID
+				winnerID := tid("race-winner-" + tc.name)
+				race.winner = &store.User{ID: winnerID, Email: "racer@example.com", DisplayName: tc.displayName,
+					Status: tc.status, Role: store.UserRoleMember, InvitedBy: &winnerBy}
+
+				rec := provisionAs(t, f.srv, caller, map[string]interface{}{"email": "racer@example.com", "displayName": "Winner"})
+				require.Equal(t, tc.wantCode, rec.Code, rec.Body.String())
+				if tc.wantCode == http.StatusOK {
+					assert.False(t, decodeProvisionResponse(t, rec).Created)
+					if !tc.detail {
+						assert.Equal(t, []string{"email", "status"}, provisionUserKeys(t, rec))
+					}
+				} else {
+					_, details := provisionErr(t, rec)
+					assert.Equal(t, tc.wantReason, details["reason"])
+					if tc.wantUserID {
+						assert.Equal(t, winnerID, details["userId"])
+					} else {
+						assert.NotContains(t, details, "userId")
+						assert.NotContains(t, rec.Body.String(), winnerID)
+					}
+				}
+				assert.Empty(t, provisionAudits(t, s, ""), "the losing request writes no audit")
+				got := userByEmail(t, s, "racer@example.com")
+				assert.Equal(t, winnerID, got.ID)
+				assert.Equal(t, tc.status, got.Status, "the winner's record is never modified")
+				assert.Equal(t, tc.displayName, got.DisplayName)
+			})
+		}
 	})
 
 	t.Run("row19_create_failure_rolls_back", func(t *testing.T) {
@@ -788,6 +845,35 @@ func TestAdminUserInvite_CharacterizationOnSharedCore(t *testing.T) {
 	}
 	// The mutation audit table is not written by invite.
 	assert.Empty(t, provisionAudits(t, s, ""))
+
+	// Bulk invite (only its email rule moved to NormalizeInviteEmail):
+	// response shape, counts, the user_invited_bulk event and the
+	// bulk_invited publication are unchanged. Invalid emails are skipped
+	// silently, as before.
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/admin/users/invite/bulk", map[string]interface{}{"emails": []map[string]string{
+		{"email": " Bob@Example.com "}, {"email": "alice@example.com"}, {"email": "not-an-email"}, {"email": "carol@example.com", "note": "n"},
+	}})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	raw = map[string]interface{}{}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &raw))
+	keys = keys[:0]
+	for k := range raw {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	assert.Equal(t, []string{"errors", "invited", "skipped", "total"}, keys, "bulk response shape unchanged")
+	assert.Equal(t, float64(2), raw["invited"])
+	assert.Equal(t, float64(1), raw["skipped"])
+	assert.Equal(t, float64(3), raw["total"])
+	assert.Equal(t, store.UserStatusInvited, userByEmail(t, s, "bob@example.com").Status)
+	logger.mu.Lock()
+	require.Len(t, logger.invite, 2)
+	bulkEv := logger.invite[1]
+	logger.mu.Unlock()
+	assert.Equal(t, InviteAuditUserInvitedBulk, bulkEv.EventType)
+	assert.Equal(t, 2, bulkEv.Count)
+	assert.Equal(t, map[string]string{"skipped": "1"}, bulkEv.Details)
+	assert.Equal(t, []string{"invited:alice@example.com", "bulk_invited:"}, spy.actions())
 }
 
 // TestCreatePendingUserTx_Classification pins the shared core's outcome

@@ -94,11 +94,8 @@ criterion is met (§18).
 | Break-glass | `scion admin promote`, `cmd/admin.go:47` | None (promotes an existing user; direct DB) | Operator DB access |
 | `POST /api/v1/users` | `createUser`, `pkg/hub/handlers_users_core.go:99`-`:104` | None. Always `403 forbidden`: "user creation is managed through sign-in flows and cannot be performed via the API" | n/a |
 
-**Sign-in policy since [GoogleCloudPlatform/scion#2071](https://github.com/GoogleCloudPlatform/scion/pull/2071) ("require provider-verified email and unify sign-in policy across auth paths").** Activation of an `invited` record, whether it was created by invite or
-by provisioning, is subject to the existing sign-in policy that this change established: the
-signing-in email must be provider-verified, and every auth path applies the same live sign-in
-policy. A record whose email is never provider-verified therefore never activates. Provisioning does
-not change this policy.
+**Sign-in policy since [GoogleCloudPlatform/scion#2071](https://github.com/GoogleCloudPlatform/scion/pull/2071) ("require provider-verified email and unify sign-in policy across auth paths").** Activation of an `invited` record, whether created by invite or by
+provisioning, follows that sign-in policy. Provisioning does not change it.
 
 Invite codes (`/api/v1/admin/invites`, `invite_service.go`, redemption at `handlers_auth.go:1681`) are
 a separate flow. Redemption requires an already-authenticated user. Invite codes do not create user
@@ -420,12 +417,10 @@ email, status and note. H.2 proves this with characterization tests on each path
    `syncHubRoleGrants`.
 4. **Google external bearer and GE exchange.** H leaves these paths unchanged, and a provisioned
    record is treated on them exactly as an invite-created record.
-5. **Provider-verified email.** Activation of a provisioned record is subject to the existing
-   provider-verified-email sign-in policy ([GoogleCloudPlatform/scion#2071](https://github.com/GoogleCloudPlatform/scion/pull/2071) ("require provider-verified email and unify sign-in policy across auth paths")), exactly as for an invite-created record. An
-   address that a configured provider never verifies never activates. Provisioning cannot tell at
-   creation time whether a provider will verify an address (that is a property of the person's
-   provider account at sign-in), so H.2 adds no verification warning; OD-9(a) keeps invite and
-   provision at parity.
+5. **Sign-in policy.** Activation of a provisioned record follows the existing sign-in policy
+   (GoogleCloudPlatform/scion#2071, title as in §3.1), exactly as for an invite-created record.
+   Provisioning cannot tell at creation time how a provider will report an address, so H.2 adds no
+   verification warning; OD-9(a) keeps invite and provision at parity.
 
 ## 6. Option R — stored initial role (not adopted; OD-1 decided)
 
@@ -471,7 +466,8 @@ future change that stores authority-conferring state on a pending record must re
 model. OD-1 decided against storing a role (§6).
 
 No new permission ID is introduced (§13.3). `user.invite` gains an `Enforcement` entry for
-`pkg/hub/handlers_users_core.go`.
+`pkg/hub/handlers_users_provision.go:handleProvisionUser`, the new file that holds the handler (§5.1).
+`user.read` records the same site, for the detail-authority check (§5.4).
 
 **`admin_emails` is independent.** Rejecting `role: admin` does not stop an email listed in
 `admin_emails` from becoming admin at sign-in. That is independent authority configured by the Hub
@@ -649,7 +645,7 @@ the owner's status (`:366`), so a revoked token whose owner is suspended gets 40
 | 2 | UAT revoked/expired/unknown | 401 | `unauthorized` (existing UAT validation, `useraccesstoken.go:345`-`:351`) | none | none |
 | 3 | JWT or UAT path, caller or token owner suspended | 403 | `user_suspended` (existing middleware: `auth.go:495` for JWTs; `useraccesstoken.go:366`, `auth.go:411`-`:415` for UATs; D.2 may refine) | none | none |
 | 4 | Non-user principal (agent, broker, federation) | 403 | `forbidden` | none | denial log |
-| 5 | UAT before D.2 admission is enabled | 403 | `forbidden` / `credential_insufficient` | none | denial log |
+| 5 | UAT before D.2 admission is enabled | 403 | `forbidden` / `credential_insufficient` (PR-1: the session-only refusal, `details.reason: "GOV_PENDING"`, `details.credential: "session_required"`; see the Phase 0 binding in §16.2) | none | denial log |
 | 6 | UAT whose boundary does not admit the hub target | 403 | `forbidden` / `credential_insufficient` | none | denial log |
 | 7 | UAT whose frozen ceiling lacks the exact `user.invite` mapping | 403 | `forbidden` / `credential_insufficient` | none | denial log |
 | 8 | Caller lacks live `user.invite` (§7.3 "What counts as authority"), or invitation-effect governance denies (§7.3 item 6) | 403 | `forbidden` (structured: resource `user`, action `invite`) | none | decision log |
@@ -1126,7 +1122,7 @@ Negative:
 - P1: session caller suspended after the session was issued → 403 `user_suspended` (row 3, JWT
   path).
 - P1: agent JWT, broker HMAC and federation credentials → 403.
-- P1: before Phase 2, any UAT → 403 `credential_insufficient`.
+- P1: before Phase 2, any UAT → 403 `credential_insufficient` (PR-1: the session-only refusal `GOV_PENDING` / `session_required`; see the Phase 0 binding in §16.2).
 - P2: project-bounded UAT holding `user:invite` (constructed directly in the store if it cannot be
   minted) → 403.
 - P2: hub UAT without the exact selector (`{user:read}`, `{hub.settings:read}`, or a manage alias) →
@@ -1181,7 +1177,7 @@ No regression:
 | 2 | revoked or expired hub UAT → 401; revoked hub UAT with suspended owner → 401 |
 | 3 | session caller suspended (JWT); hub UAT owner suspended (UAT) |
 | 4 | agent JWT, broker HMAC, federation → 403 |
-| 5 | before Phase 2, any UAT → 403 |
+| 5 | before Phase 2, any UAT → 403 (session-only refusal in PR-1) |
 | 6 | project-bounded UAT → 403 |
 | 7 | hub UAT without the exact selector; empty/malformed/unknown-version ceiling |
 | 8 | member/viewer without `user.invite`; seeded catalog grants only; lost `user.invite` (session and UAT); ordering test |
@@ -1380,7 +1376,6 @@ This choice is OD-10 (§19), decided (a) by ptone on 2026-10-04.
 | --- | --- | --- |
 | 2026-09-28 | **OD-1 decided:** the role at activation follows the current configured policy. There is no member/viewer selection before sign-in and no pending-role column (§6). | `agent:pat-refactor` |
 | 2026-09-28 | Continuing [ptone/scion#2116](https://github.com/ptone/scion/issues/2116) is approved as a separate followup. It is not a core prerequisite and does not gate core UAT delivery. | `agent:pat-refactor` |
-
 | 2026-10-04 | **OD-2 to OD-10 decided: option (a) for each** ("go with recommendation, a"). Admin is not provisionable (422 for any non-null role); no new edit/withdraw capability for pending records; no initial groups; no expiry; the provider name applies at activation; natural-key idempotency only; the CLI is available in human and assistant modes and absent in agent mode; warn-only email policy at invite parity; records created through a hub UAT persist (creation authorizes the whole invitation effect; mutation-audit credential attribution; audit and explicit withdrawal). | `agent:pat-h-lead` |
 
 No other decision has been made.

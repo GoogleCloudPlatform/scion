@@ -48,6 +48,7 @@ type signInOutcome struct {
 	HubMember   bool
 	BindingCnt  int
 	ExternalIDs int
+	DisplayName string
 }
 
 // signInPaths drives one sign-in per call on each path, against srv and
@@ -92,7 +93,7 @@ func (p *signInPaths) outcome(email string, admitted bool, errText string) signI
 		return o
 	}
 	require.NoError(p.t, err)
-	o.Status, o.Role = u.Status, u.Role
+	o.Status, o.Role, o.DisplayName = u.Status, u.Role, u.DisplayName
 	group, err := p.s.GetGroupBySlug(ctx, "hub-members")
 	require.NoError(p.t, err)
 	_, err = p.s.GetGroupMembership(ctx, group.ID, store.GroupMemberTypeUser, u.ID)
@@ -262,7 +263,9 @@ func TestHandleProvisionUser_SignInEquivalence(t *testing.T) {
 				// Records are created under invite_only with no domain
 				// restriction, then the configuration under test applies.
 				setAccessConfig(f.srv, "invite_only", nil)
-				rec := provisionAs(t, f.srv, f.hubAdmin, map[string]interface{}{"email": prov, "note": "n"})
+				// The provisioned record also carries a display name, the one
+				// stored field provision adds over invite.
+				rec := provisionAs(t, f.srv, f.hubAdmin, map[string]interface{}{"email": prov, "note": "n", "displayName": "Admin Name"})
 				require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 				rec = doRequest(t, f.srv, http.MethodPost, "/api/v1/admin/users/invite", UserInviteRequest{Email: inv, Note: "n"})
 				require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
@@ -273,6 +276,16 @@ func TestHandleProvisionUser_SignInEquivalence(t *testing.T) {
 				// Error texts name the email on some paths; compare the
 				// outcome class instead.
 				p.ErrText, i.ErrText = "", ""
+				if p.Admitted {
+					// Activation applies the provider name (OD-6 a), so the
+					// two records end with the same display name.
+					assert.NotEqual(t, "Admin Name", p.DisplayName, "%s: the provider name applies at activation", pathName)
+				} else {
+					// A refused sign-in leaves both records as created.
+					assert.Equal(t, "Admin Name", p.DisplayName, pathName)
+					assert.Equal(t, "", i.DisplayName, pathName)
+					p.DisplayName, i.DisplayName = "", ""
+				}
 				assert.Equal(t, i, p, "%s: provisioned and invited records must behave identically", pathName)
 				if cfg.mode == "invite_only" && cfg.domains == nil {
 					assert.True(t, p.Admitted, "%s admits the provisioned record under invite_only", pathName)
