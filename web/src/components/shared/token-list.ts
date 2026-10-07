@@ -447,6 +447,13 @@ const FALLBACK_SCOPES: ScopeOption[] = [
     isAlias: false,
   },
   {
+    value: 'project:set_messaging_policy',
+    label: 'project:set_messaging_policy',
+    description: 'Set project cross-project messaging policy (owner/admin only)',
+    resource: 'project',
+    isAlias: false,
+  },
+  {
     value: 'skill:create',
     label: 'skill:create',
     description: 'Create skills',

@@ -33,6 +33,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/require"
 )
@@ -58,6 +59,14 @@ var bearerMatrixExclusions = map[liveInventoryKey]bearerMatrixExclusion{
 	{OperationID: "harnessconfig.read", Method: "GET", Pattern: "/api/v1/harness-configs"}: {
 		Reason: "the collection list filters each row by harness_config.read instead of refusing the request, so a token without the selector gets 200 with no rows rather than 403; the list gets its own harness_config.list disposition in a later batch",
 		Pin:    "TestScopedAdminListEndpointsFilterCrossProjectRowsAndCountAuthorizedMatches",
+	},
+	{OperationID: "project.messagingpolicy.update", Method: "PUT", Pattern: "/api/v1/projects/{id}/messaging-policy"}: {
+		Reason: "the owner rule admits only an active direct project owner, and the matrix's super-admin is not one on the fixture project, so the admitting token is refused by the owner rule after the selector check",
+		Pin:    "TestProjectMessagingPolicyPut_RequiresSetMessagingPolicySelector",
+	},
+	{OperationID: "project.template.set", Method: "POST", Pattern: "/api/v1/projects/{id}/set-template"}: {
+		Reason: "the operation needs project:update and project:clone, and a token passes project.clone on a project only when its holder is a member of it; the matrix's super-admin token carries one selector and is not a member of the fixture project",
+		Pin:    "TestSetTemplate_RequiresUpdateAndCloneOnTheProject",
 	},
 }
 
@@ -129,6 +138,14 @@ func newBearerMatrixFixture(t *testing.T) *bearerMatrixFixture {
 	srv, s := testServer(t)
 	ctx := context.Background()
 	ids := seedLiveInventoryFixtures(t, ctx, srv, s)
+	// Project secret routes read and write through the secret backend.
+	backend := secret.NewLocalBackend(s, "bdm-hub-id", "bdm-secret")
+	srv.SetSecretBackend(backend)
+	_, _, err := backend.Set(ctx, &secret.SetSecretInput{
+		Name: ids.projectSecretKey, Value: "1", SecretType: secret.TypeEnvironment,
+		Scope: secret.ScopeProject, ScopeID: ids.project,
+	})
+	require.NoError(t, err)
 
 	adminID := tid("bdm-super-admin")
 	createTestUserWithRole(t, s, adminID, adminID+"@test.com", "admin", store.SystemRoleSuperAdmin)

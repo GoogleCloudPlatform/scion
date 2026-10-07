@@ -205,7 +205,7 @@ var PermissionAllowedBoundaries = map[string][]BoundaryKind{
 	"agent.attach": {BoundaryKindProject, BoundaryKindHub}, "agent.lifecycle": {BoundaryKindProject, BoundaryKindHub},
 	"agent.port_access": {BoundaryKindProject, BoundaryKindHub}, "agent.message": {BoundaryKindProject, BoundaryKindHub},
 	"project.read": {BoundaryKindProject, BoundaryKindHub}, "project.update": {BoundaryKindProject, BoundaryKindHub},
-	"project.manage": {BoundaryKindProject, BoundaryKindHub}, "project.clone": {BoundaryKindProject, BoundaryKindHub},
+	"project.manage": {BoundaryKindProject, BoundaryKindHub}, "project.clone": {BoundaryKindProject, BoundaryKindHub}, "project.set_messaging_policy": {BoundaryKindProject, BoundaryKindHub},
 	"skill.create": {BoundaryKindProject, BoundaryKindHub}, "skill.read": {BoundaryKindProject, BoundaryKindHub},
 	"skill.update": {BoundaryKindProject, BoundaryKindHub}, "skill.delete": {BoundaryKindProject, BoundaryKindHub},
 	"skill.list": {BoundaryKindProject, BoundaryKindHub}, "skill.register": {BoundaryKindHub},
@@ -318,11 +318,11 @@ var SupportedTargetClasses = map[string][]TargetClassKind{
 	"agent.attach": {TargetClassKindProjectScoped}, "agent.lifecycle": {TargetClassKindProjectScoped},
 	"agent.port_access": {TargetClassKindProjectScoped}, "agent.message": {TargetClassKindProjectScoped},
 
-	// project.* — read/update/manage target an existing project; clone is a
-	// hub-level collection action (reviewed false in ProjectTargetApplicability)
-	// even though it is mintable.
+	// project.* — read/update/manage/set_messaging_policy target an existing
+	// project; clone is a hub-level collection action (reviewed false in
+	// ProjectTargetApplicability) even though it is mintable.
 	"project.read": {TargetClassKindProjectScoped}, "project.update": {TargetClassKindProjectScoped},
-	"project.manage": {TargetClassKindProjectScoped}, "project.clone": {TargetClassKindHubResource},
+	"project.manage": {TargetClassKindProjectScoped}, "project.clone": {TargetClassKindHubResource}, "project.set_messaging_policy": {TargetClassKindProjectScoped},
 
 	// artifact.* — project-homed, no scope-kind split and no global catalog.
 	"artifact.read": {TargetClassKindProjectScoped}, "artifact.create": {TargetClassKindProjectScoped},

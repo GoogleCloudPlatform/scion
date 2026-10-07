@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
@@ -192,6 +193,11 @@ type idFixtures struct {
 	agentRestoreProject     string
 	agentProvisioning       string
 	artifact                string
+	projectEnvKey           string
+	projectSecretKey        string
+	projectSharedDir        string
+	projectSkillInjection   string
+	projectPreStartHook     string
 }
 
 // seedLiveInventoryFixtures creates one real store row per resource family
@@ -252,7 +258,9 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 		agentProvisioning:    tid("li-agent-provisioning"),
 	}
 
-	require.NoError(t, s.CreateProject(ctx, &store.Project{ID: f.project, Name: "LI Project", Slug: "li-project"}))
+	f.projectSharedDir = "li-shared"
+	require.NoError(t, s.CreateProject(ctx, &store.Project{ID: f.project, Name: "LI Project", Slug: "li-project",
+		SharedDirs: []api.SharedDir{{Name: f.projectSharedDir}}}))
 	require.NoError(t, s.CreateProject(ctx, &store.Project{ID: f.projectDel, Name: "LI Project Del", Slug: "li-project-del"}))
 
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{ID: f.agent, Slug: "li-agent", Name: "LI Agent", ProjectID: f.project, Phase: string(state.PhaseRunning)}))
@@ -451,6 +459,20 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 		Updated: now,
 	}))
 
+	// Project-route material and settings records on f.project.
+	f.projectEnvKey = "LI_PROJECT_ENV"
+	require.NoError(t, s.CreateEnvVar(ctx, &store.EnvVar{ID: tid("li-project-envvar"), Key: f.projectEnvKey, Value: "1", Scope: store.ScopeProject, ScopeID: f.project, Created: now, Updated: now}))
+	f.projectSecretKey = "LI_PROJECT_SECRET"
+	injection := &store.SkillInjection{Scope: store.SkillInjectionScopeProject, ScopeID: f.project, SkillURI: "skill://li-injected", CreatedAt: now}
+	require.NoError(t, s.AddSkillInjection(ctx, injection))
+	f.projectSkillInjection = injection.ID
+	hook, err := s.CreateProjectPreStartHook(ctx, &store.ProjectPreStartHook{
+		Scope: store.PreStartHookScopeProject, ProjectID: f.project, Name: "li-project-pre-start-hook", Slug: "li-project-pre-start-hook",
+		Script: "#!/bin/sh\necho li\n", CreatedBy: "li@test.com", UpdatedBy: "li@test.com",
+	})
+	require.NoError(t, err)
+	f.projectPreStartHook = hook.ID
+
 	// Artifact service: on (experiment, store, blob storage) with one
 	// single-file artifact owned by the dev user, homed in f.project.
 	artStore, artBlobs := enableArtifactsForTest(t, srv)
@@ -588,6 +610,51 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/projects/{id}/members":            {"id": f.project},
 		"/api/v1/projects/{id}/members/{memberId}": {"id": f.project, "memberId": f.projectMembership},
 		"/api/v1/projects/{id}/transfer-ownership": {"id": f.project},
+
+		// --- project-route operations family ---
+		"/api/v1/projects/{id}/env":                               {"id": f.project},
+		"/api/v1/projects/{id}/env/{key}":                         {"id": f.project, "key": f.projectEnvKey},
+		"/api/v1/projects/{id}/secrets":                           {"id": f.project},
+		"/api/v1/projects/{id}/secrets/{key}":                     {"id": f.project, "key": f.projectSecretKey},
+		"/api/v1/projects/{id}/providers":                         {"id": f.project},
+		"/api/v1/projects/{id}/shared-dirs":                       {"id": f.project},
+		"/api/v1/projects/{id}/shared-dirs/{name}":                {"id": f.project, "name": f.projectSharedDir},
+		"/api/v1/projects/{id}/shared-dirs/{name}/archive":        {"id": f.project, "name": f.projectSharedDir},
+		"/api/v1/projects/{id}/shared-dirs/{name}/files":          {"id": f.project, "name": f.projectSharedDir},
+		"/api/v1/projects/{id}/shared-dirs/{name}/files/{path}":   {"id": f.project, "name": f.projectSharedDir, "path": "li.txt"},
+		"/api/v1/projects/{id}/injected-skills":                   {"id": f.project},
+		"/api/v1/projects/{id}/injected-skills/{entryId}":         {"id": f.project, "entryId": f.projectSkillInjection},
+		"/api/v1/projects/{id}/gcp-service-accounts":              {"id": f.project},
+		"/api/v1/projects/{id}/message-logs":                      {"id": f.project},
+		"/api/v1/projects/{id}/broadcast":                         {"id": f.project},
+		"/api/v1/projects/{id}/metrics-summary":                   {"id": f.project},
+		"/api/v1/projects/{id}/metrics/summary":                   {"id": f.project},
+		"/api/v1/projects/{id}/metrics":                           {"id": f.project},
+		"/api/v1/projects/{id}/pre-start-hooks":                   {"id": f.project},
+		"/api/v1/projects/{id}/pre-start-hooks/{hookId}":          {"id": f.project, "hookId": f.projectPreStartHook},
+		"/api/v1/projects/{id}/pre-start-hooks/{hookId}/activate": {"id": f.project, "hookId": f.projectPreStartHook},
+		"/api/v1/projects/{id}/settings":                          {"id": f.project},
+		"/api/v1/projects/{id}/settings/resolved":                 {"id": f.project},
+		"/api/v1/projects/{id}/messaging-policy":                  {"id": f.project},
+		"/api/v1/projects/{id}/set-template":                      {"id": f.project},
+		"/api/v1/projects/{id}/discover-templates":                {"id": f.project},
+		"/api/v1/projects/{id}/import-templates":                  {"id": f.project},
+		"/api/v1/projects/{id}/discover-harness-configs":          {"id": f.project},
+		"/api/v1/projects/{id}/import-harness-configs":            {"id": f.project},
+		"/api/v1/projects/{id}/dav":                               {"id": f.project},
+		"/api/v1/projects/{id}/sync/status":                       {"id": f.project},
+		"/api/v1/projects/{id}/workspace/archive":                 {"id": f.project},
+		"/api/v1/projects/{id}/workspace/cache/notify":            {"id": f.project},
+		"/api/v1/projects/{id}/workspace/cache/refresh":           {"id": f.project},
+		"/api/v1/projects/{id}/workspace/cache/status":            {"id": f.project},
+		"/api/v1/projects/{id}/workspace/files":                   {"id": f.project},
+		"/api/v1/projects/{id}/workspace/files/{path}":            {"id": f.project, "path": "li.txt"},
+		"/api/v1/projects/{id}/workspace/pull":                    {"id": f.project},
+		"/api/v1/projects/{id}/github-installation":               {"id": f.project},
+		"/api/v1/projects/{id}/github-status":                     {"id": f.project},
+		"/api/v1/projects/{id}/github-permissions":                {"id": f.project},
+		"/api/v1/projects/{id}/git-identity":                      {"id": f.project},
+		"/api/v1/projects/{id}/members/assignable-roles":          {"id": f.project},
 
 		// --- group family ---
 		"/api/v1/groups/{id}":                                 {"id": f.group},

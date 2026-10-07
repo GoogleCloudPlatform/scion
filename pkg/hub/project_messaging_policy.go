@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -62,7 +63,8 @@ type ProjectMessagingPolicyUpdateRequest struct {
 // handleProjectMessagingPolicy handles GET/PUT /api/v1/projects/{id}/messaging-policy.
 //
 // GET: Returns current policy under existing project-read authorization.
-// PUT: Requires active direct project owner or local unscoped Hub admin.
+// PUT: Requires project.set_messaging_policy on the project, and the caller
+// must be an active direct project owner or a local unscoped Hub admin.
 func (s *Server) handleProjectMessagingPolicy(w http.ResponseWriter, r *http.Request, projectID string) {
 	switch r.Method {
 	case http.MethodGet:
@@ -95,7 +97,8 @@ func (s *Server) handleGetProjectMessagingPolicy(w http.ResponseWriter, r *http.
 }
 
 // handlePutProjectMessagingPolicy updates the cross-project inbound policy.
-// Only active direct project owners or local unscoped Hub admins may change it.
+// It requires project.set_messaging_policy on the project, and only active
+// direct project owners or local unscoped Hub admins may change it.
 func (s *Server) handlePutProjectMessagingPolicy(w http.ResponseWriter, r *http.Request, projectID string) {
 	ctx := r.Context()
 
@@ -106,34 +109,21 @@ func (s *Server) handlePutProjectMessagingPolicy(w http.ResponseWriter, r *http.
 		return
 	}
 
-	// 2. Authorization: active direct owner or local unscoped Hub admin only.
+	// 2. Authorization. The caller needs project.set_messaging_policy on
+	// the project (for a token: the project:set_messaging_policy selector
+	// and a boundary covering the project). The owner rule then applies to
+	// every credential: only an active direct project owner or a local
+	// unscoped Hub admin may change the policy.
 	identity := GetIdentityFromContext(ctx)
 	if identity == nil {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Authentication required", nil)
 		return
 	}
-
-	allowed := false
-	switch identity.Type() {
-	case "user", "dev", "federated_user":
-		userIdent, ok := identity.(UserIdentity)
-		if !ok {
-			break
-		}
-		// Local unscoped Hub admin
-		if IsUnscopedLocalPlatformAdmin(userIdent) {
-			allowed = true
-			break
-		}
-		// Active direct project owner
-		if s.isProjectOwner(ctx, userIdent.ID(), project.ID) {
-			allowed = true
-		}
+	if !s.authorizeMsg(w, r, projectResource(project), ActionSetMessagingPolicy, messagingPolicyOwnerRuleMessage) {
+		return
 	}
-
-	if !allowed {
-		writeError(w, http.StatusForbidden, ErrCodeForbidden,
-			"Only active direct project owners or Hub administrators can change the messaging policy", nil)
+	if !s.messagingPolicyOwnerRule(ctx, identity, project.ID) {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, messagingPolicyOwnerRuleMessage, nil)
 		return
 	}
 
@@ -181,6 +171,30 @@ func (s *Server) handlePutProjectMessagingPolicy(w http.ResponseWriter, r *http.
 	// 7. Response.
 	resp := s.buildMessagingPolicyResponse(updated)
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// messagingPolicyOwnerRuleMessage is the denial text for a messaging-policy
+// change by a caller outside the owner rule.
+const messagingPolicyOwnerRuleMessage = "Only active direct project owners or Hub administrators can change the messaging policy"
+
+// messagingPolicyOwnerRule reports whether identity may change a project's
+// messaging policy under the owner rule: an active direct owner of the
+// project, or a local unscoped Hub admin. Every other identity kind, and a
+// user identity of an unexpected shape, is refused.
+func (s *Server) messagingPolicyOwnerRule(ctx context.Context, identity Identity, projectID string) bool {
+	switch identity.Type() {
+	case "user", "dev", "federated_user":
+	default:
+		return false
+	}
+	userIdent, ok := identity.(UserIdentity)
+	if !ok {
+		return false
+	}
+	if IsUnscopedLocalPlatformAdmin(userIdent) {
+		return true
+	}
+	return s.isProjectOwner(ctx, userIdent.ID(), projectID)
 }
 
 // buildMessagingPolicyResponse constructs the policy response from a project.

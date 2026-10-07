@@ -97,6 +97,9 @@ var expectedSelectorRegistry = map[string][]string{
 	"user:list":                   {"user.list"},
 	"user:read":                   {"user.read"},
 	"user_skill_injection:update": {"user_skill_injection.update"},
+
+	// Project messaging policy (owner rule applies on top of the selector).
+	"project:set_messaging_policy": {"project.set_messaging_policy"},
 }
 
 func TestValidateSelectorRegistry_PinnedSnapshot(t *testing.T) {

@@ -1054,7 +1054,7 @@ func TestProjectRoleReconciliationConverges(t *testing.T) {
 		revision    int
 		permissions func() []string
 	}{
-		{store.ProjectRoleOwner, 6, projectOwnerPermissionIDs},
+		{store.ProjectRoleOwner, 7, projectOwnerPermissionIDs},
 		{store.ProjectRoleAdmin, 6, projectAdminPermissionIDs},
 		{store.ProjectRoleMember, 5, projectMemberCuratedPermissionIDs},
 	}
