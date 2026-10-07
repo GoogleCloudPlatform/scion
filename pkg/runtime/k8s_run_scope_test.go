@@ -552,9 +552,10 @@ func rsCreateSites() []rsCreateSite {
 	}
 }
 
-// An existing object of another run (created by a concurrent start after
-// this start's pre-clean) is never deleted: the create fails with
-// ErrRunConflict.
+// An existing object of another run under the name this start's create
+// uses (with per-run names, a run-token collision, ptone/scion#3101; for a
+// fixed name, a concurrent start after this start's pre-clean) is never
+// deleted: the create fails with ErrRunConflict.
 func TestK8sCreate_AlreadyExistsOtherRun_Conflicts(t *testing.T) {
 	for _, site := range rsCreateSites() {
 		t.Run(site.name, func(t *testing.T) {
