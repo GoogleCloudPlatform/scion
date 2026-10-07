@@ -67,7 +67,7 @@ The Hub uses the Google Cloud OpenTelemetry metric exporter. If you build your o
 :::caution[Known limits of the current metrics]
 - `scion.db.pool.connections.waiting` holds a cumulative count of waits since the pool opened, not the number of requests waiting now. The chart shows that running total.
 - Two pools report `scion.db.pool.*`: the main database pool and the Postgres event pool. They write the same series, so the pool charts can switch between the two pools' values.
-- `scion.db.notify.subscriber.lag` is defined but not recorded yet. The dashboard shows notification lag as publish-to-deliver latency instead.
+- `scion.db.notify.subscriber.lag` counts notifications, not time: each delivery records how many notifications the most-behind subscriber has queued and not yet consumed. The dashboard shows notification lag as publish-to-deliver latency.
 :::
 
 ## Link from the Health page

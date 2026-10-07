@@ -103,6 +103,7 @@ type countingRecorder struct {
 	delivered      int64
 	dropped        int64
 	reconnects     int64
+	lags           []int64
 	payloadSizes   []int64
 	latencies      []float64
 	poolObserved   int
@@ -129,7 +130,10 @@ func (r *countingRecorder) IncDropped(_ context.Context, n int64, _ ...attribute
 	defer r.mu.Unlock()
 	r.dropped += n
 }
-func (r *countingRecorder) ObserveSubscriberLag(_ context.Context, _ int64, _ ...attribute.KeyValue) {
+func (r *countingRecorder) ObserveSubscriberLag(_ context.Context, lag int64, _ ...attribute.KeyValue) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.lags = append(r.lags, lag)
 }
 func (r *countingRecorder) IncListenerReconnects(_ context.Context, n int64, _ ...attribute.KeyValue) {
 	r.mu.Lock()
@@ -514,6 +518,36 @@ func TestHandleNotification_FullBufferDropsAndCounts(t *testing.T) {
 	_, del, drop, _ := rec.snapshot()
 	if del != 1 || drop != 1 {
 		t.Fatalf("delivered=%d dropped=%d, want 1 and 1", del, drop)
+	}
+}
+
+// TestFanout_RecordsSubscriberLag checks fanout records the most-behind
+// matching subscriber's queued notifications (ptone/scion#3617), and records
+// nothing when no subscriber matches.
+func TestFanout_RecordsSubscriberLag(t *testing.T) {
+	rec := &countingRecorder{}
+	p := newTestPostgresPublisher(rec)
+	slow := &pgSubscription{ch: make(chan Event, 2)}
+	fast := &pgSubscription{ch: make(chan Event, 8)}
+	p.subs[pgGlobalChannel] = map[*pgSubscription][]string{slow: {"agent.>"}, fast: {"agent.>"}}
+
+	evt := Event{Subject: "agent.A1.status", Data: []byte(`{}`)}
+	p.fanout(pgGlobalChannel, evt)
+	<-fast.ch // the fast subscriber keeps up
+	p.fanout(pgGlobalChannel, evt)
+	p.fanout(pgGlobalChannel, evt)                                  // slow is full: dropped, lag = capacity
+	p.fanout(pgGlobalChannel, Event{Subject: "project.G1.created"}) // no match
+
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	want := []int64{1, 2, 2}
+	if len(rec.lags) != len(want) {
+		t.Fatalf("lags = %v, want %v", rec.lags, want)
+	}
+	for i := range want {
+		if rec.lags[i] != want[i] {
+			t.Fatalf("lags = %v, want %v", rec.lags, want)
+		}
 	}
 }
 

@@ -573,20 +573,33 @@ func (p *PostgresEventPublisher) refetchPayload(ref string) ([]byte, error) {
 // fanout delivers evt to every subscriber of channel whose patterns (scoped to
 // that channel) match the event subject. Sends are non-blocking; a full
 // subscriber buffer drops the event (backpressure).
+//
+// It also records the subscriber lag: the number of notifications queued in
+// the most-behind matching subscriber's buffer and not yet consumed (a full
+// buffer, which drops the event, counts as its capacity).
 func (p *PostgresEventPublisher) fanout(channel string, evt Event) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
+	matched := false
+	var maxLag int64
 	for sub, patterns := range p.subs[channel] {
 		if !anyPatternMatches(patterns, evt.Subject) {
 			continue
 		}
+		matched = true
 		select {
 		case sub.ch <- evt:
 			p.metrics.IncDelivered(p.ctx, 1, attribute.String("scope", channelScope(evt.Subject)))
 		default:
 			p.metrics.IncDropped(p.ctx, 1, attribute.String(dbmetrics.AttrDropReason, "full_buffer"))
 		}
+		if lag := int64(len(sub.ch)); lag > maxLag {
+			maxLag = lag
+		}
+	}
+	if matched {
+		p.metrics.ObserveSubscriberLag(p.ctx, maxLag, attribute.String("scope", channelScope(evt.Subject)))
 	}
 }
 
