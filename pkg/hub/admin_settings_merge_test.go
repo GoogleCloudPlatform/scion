@@ -22,6 +22,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -613,5 +615,180 @@ func TestHandlePutServerConfig_DuplicateFoldedObjectsMergedInBodyOrder(t *testin
 				t.Errorf("server.github_app.private_key = %v, want kept", gh["private_key"])
 			}
 		})
+	}
+}
+
+// refCombineJSONValues is the pairwise combine sentStructFields used
+// before the single-pass combineJSONValues, kept as the reference the
+// differential test compares against.
+func refCombineJSONValues(prev, next json.RawMessage) json.RawMessage {
+	if !isJSONObject(prev) || !isJSONObject(next) {
+		return next
+	}
+	a := bytes.TrimSpace(prev)
+	b := bytes.TrimSpace(next)
+	ai := bytes.TrimSpace(a[1 : len(a)-1])
+	bi := bytes.TrimSpace(b[1 : len(b)-1])
+	switch {
+	case len(ai) == 0:
+		return next
+	case len(bi) == 0:
+		return prev
+	}
+	out := make([]byte, 0, len(ai)+len(bi)+3)
+	out = append(out, '{')
+	out = append(out, ai...)
+	out = append(out, ',')
+	out = append(out, bi...)
+	out = append(out, '}')
+	return out
+}
+
+func refCombineAll(vals []json.RawMessage) json.RawMessage {
+	acc := vals[0]
+	for _, v := range vals[1:] {
+		acc = refCombineJSONValues(acc, v)
+	}
+	return acc
+}
+
+// combineJSONValues returns byte-identical output to folding the
+// reference pairwise combine over the same values, for every sequence of
+// up to four values drawn from nested, mixed and empty cases.
+func TestCombineJSONValues_MatchesPairwiseReference(t *testing.T) {
+	atoms := []string{
+		`{}`,
+		`{ }`,
+		`{"app_id":1}`,
+		`{ "installation_url" : "x" }`,
+		" {\"app_id\":2}\n",
+		`{"proxy":{"provider":"iap","iap":{"audience":"a"}}}`,
+		`{"proxy":{}}`,
+		`{"a":1,"b":{"c":[1,2]}}`,
+		`null`,
+		`0`,
+		`"s"`,
+		`true`,
+		`[]`,
+		`[{"a":1}]`,
+	}
+	var walk func(seq []json.RawMessage)
+	checked := 0
+	walk = func(seq []json.RawMessage) {
+		if len(seq) > 0 {
+			got := combineJSONValues(seq)
+			want := refCombineAll(seq)
+			if !bytes.Equal(got, want) {
+				t.Fatalf("combine %q:\n got %s\nwant %s", seq, got, want)
+			}
+			checked++
+		}
+		if len(seq) == 4 {
+			return
+		}
+		for _, a := range atoms {
+			walk(append(append([]json.RawMessage(nil), seq...), json.RawMessage(a)))
+		}
+	}
+	walk(nil)
+	if checked == 0 {
+		t.Fatal("no sequences checked")
+	}
+}
+
+// sentStructFields gives each field the same value as folding the
+// reference pairwise combine over its values in body order, at every
+// depth the merge reads.
+func TestSentStructFields_DuplicatesMatchPairwiseReference(t *testing.T) {
+	bodies := []string{
+		`{"github_app":{"app_id":5},"GitHub_App":{"installation_url":"x"}}`,
+		`{"github_app":{"app_id":5},"GITHUB_APP":{},"GitHub_App":{"installation_url":"x"},"github_app":{"private_key":"k"}}`,
+		`{"github_app":{"app_id":5},"GitHub_App":null,"github_app":{"installation_url":"x"}}`,
+		`{"github_app":{"app_id":5},"GitHub_App":{"installation_url":"x"},"github_app":7}`,
+		`{"auth":{"proxy":{"provider":"iap"}},"Auth":{"Proxy":{"iap":{"audience":"a"}}},"log_level":"x","Log_Level":"y"}`,
+		`{"github_app":{},"GitHub_App":{ }}`,
+		`{"log_level":"debug"}`,
+		`{}`,
+	}
+	typ := reflect.TypeOf(config.V1ServerConfig{})
+	for _, body := range bodies {
+		got, ok := sentStructFields(typ, json.RawMessage(body))
+		if !ok {
+			t.Fatalf("%s: not ok", body)
+		}
+		// Reference: group the values per field in body order.
+		dec := json.NewDecoder(strings.NewReader(body))
+		if _, err := dec.Token(); err != nil {
+			t.Fatal(err)
+		}
+		want := map[string][]json.RawMessage{}
+		for dec.More() {
+			tok, _ := dec.Token()
+			var v json.RawMessage
+			if err := dec.Decode(&v); err != nil {
+				t.Fatal(err)
+			}
+			f, found := structFieldByJSONName(typ, tok.(string))
+			if found {
+				want[f.Name] = append(want[f.Name], v)
+			}
+		}
+		if len(got) != len(want) {
+			t.Fatalf("%s: %d fields, want %d", body, len(got), len(want))
+		}
+		for _, sf := range got {
+			if w := refCombineAll(want[sf.field.Name]); !bytes.Equal(sf.val, w) {
+				t.Errorf("%s: field %s = %s, want %s", body, sf.field.Name, sf.val, w)
+			}
+		}
+	}
+}
+
+// dupGitHubAppBody returns a server object with n keys that all fold to
+// github_app, each an object with one member.
+func dupGitHubAppBody(n int) []byte {
+	var b bytes.Buffer
+	b.WriteByte('{')
+	for i := 0; i < n; i++ {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		fmt.Fprintf(&b, `"github_app":{"app_id":%d}`, i)
+	}
+	b.WriteByte('}')
+	return b.Bytes()
+}
+
+// Combining duplicate keys costs memory linear in the body size: four
+// times the duplicates allocate about four times the bytes (the former
+// pairwise combine allocated about sixteen times). Bytes allocated are
+// deterministic, so this does not depend on timing.
+func TestSentStructFields_DuplicateCombineIsLinear(t *testing.T) {
+	typ := reflect.TypeOf(config.V1ServerConfig{})
+	allocated := func(body []byte) uint64 {
+		runtime.GC()
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		fields, ok := sentStructFields(typ, body)
+		runtime.ReadMemStats(&after)
+		if !ok || len(fields) != 1 {
+			t.Fatalf("sentStructFields: ok=%v, %d fields", ok, len(fields))
+		}
+		return after.TotalAlloc - before.TotalAlloc
+	}
+	small := allocated(dupGitHubAppBody(5000))
+	large := allocated(dupGitHubAppBody(20000))
+	if ratio := float64(large) / float64(small); ratio > 6 {
+		t.Errorf("4x duplicates allocated %.1fx the bytes (%d vs %d), want about 4x", ratio, large, small)
+	}
+}
+
+func BenchmarkSentStructFields_20kDuplicates(b *testing.B) {
+	typ := reflect.TypeOf(config.V1ServerConfig{})
+	body := dupGitHubAppBody(20000)
+	b.SetBytes(int64(len(body)))
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		sentStructFields(typ, body)
 	}
 }

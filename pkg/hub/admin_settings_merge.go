@@ -117,6 +117,10 @@ func sentStructFields(t reflect.Type, raw json.RawMessage) (fields []sentField, 
 		return nil, false
 	}
 	index := make(map[int]int)
+	// dups holds, per entry of fields, the values sent for it in body
+	// order when the field was sent more than once; they are combined
+	// once at the end so a body with many duplicates stays linear.
+	var dups map[int][]json.RawMessage
 	for dec.More() {
 		tok, err := dec.Token()
 		if err != nil {
@@ -132,37 +136,73 @@ func sentStructFields(t reflect.Type, raw json.RawMessage) (fields []sentField, 
 			continue
 		}
 		if i, dup := index[f.Index[0]]; dup {
-			fields[i].val = combineJSONValues(fields[i].val, val)
+			if dups == nil {
+				dups = make(map[int][]json.RawMessage)
+			}
+			if len(dups[i]) == 0 {
+				dups[i] = append(dups[i], fields[i].val)
+			}
+			dups[i] = append(dups[i], val)
 			continue
 		}
 		index[f.Index[0]] = len(fields)
 		fields = append(fields, sentField{field: f, val: val})
 	}
+	for i, vals := range dups {
+		fields[i].val = combineJSONValues(vals)
+	}
 	return fields, true
 }
 
 // combineJSONValues returns the value encoding/json leaves in a struct
-// field after decoding prev and then next into it: the members of both
-// objects in order when both are JSON objects, otherwise next.
-func combineJSONValues(prev, next json.RawMessage) json.RawMessage {
-	if !isJSONObject(prev) || !isJSONObject(next) {
-		return next
+// field after decoding vals into it in order. A scalar, an array or null
+// replaces what came before it. A run of JSON objects is combined into
+// one object holding their members in order; an empty object adds no
+// members. When at most one object in the run has members, the result is
+// that object as sent (or the last object when none has members). The
+// result is built in one pass, so the cost is linear in the input size.
+func combineJSONValues(vals []json.RawMessage) json.RawMessage {
+	if len(vals) == 0 {
+		return nil
 	}
-	a := bytes.TrimSpace(prev)
-	b := bytes.TrimSpace(next)
-	ai := bytes.TrimSpace(a[1 : len(a)-1])
-	bi := bytes.TrimSpace(b[1 : len(b)-1])
-	switch {
-	case len(ai) == 0:
-		return next
-	case len(bi) == 0:
-		return prev
+	last := vals[len(vals)-1]
+	if !isJSONObject(last) {
+		return last
 	}
-	out := make([]byte, 0, len(ai)+len(bi)+3)
+	// Only the objects after the last non-object value count.
+	start := len(vals) - 1
+	for start > 0 && isJSONObject(vals[start-1]) {
+		start--
+	}
+	var first json.RawMessage
+	var inners [][]byte
+	size := 2
+	for _, v := range vals[start:] {
+		t := bytes.TrimSpace(v)
+		inner := bytes.TrimSpace(t[1 : len(t)-1])
+		if len(inner) == 0 {
+			continue
+		}
+		if first == nil {
+			first = v
+		}
+		inners = append(inners, inner)
+		size += len(inner) + 1
+	}
+	switch len(inners) {
+	case 0:
+		return last
+	case 1:
+		return first
+	}
+	out := make([]byte, 0, size)
 	out = append(out, '{')
-	out = append(out, ai...)
-	out = append(out, ',')
-	out = append(out, bi...)
+	for i, inner := range inners {
+		if i > 0 {
+			out = append(out, ',')
+		}
+		out = append(out, inner...)
+	}
 	out = append(out, '}')
 	return out
 }
