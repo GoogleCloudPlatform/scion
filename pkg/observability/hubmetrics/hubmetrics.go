@@ -16,6 +16,7 @@ import (
 	"time"
 
 	mexporter "github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/metric"
+	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/sdk/instrumentation"
 	"go.opentelemetry.io/otel/sdk/metric"
@@ -25,6 +26,29 @@ import (
 )
 
 const defaultExportInterval = 60 * time.Second
+
+// Resource attributes and Cloud Monitoring labels that identify where a hub
+// metric came from. The exporter turns a resource attribute into a metric
+// label by replacing each character that is not a letter or digit with "_".
+const (
+	// HubIDAttribute identifies the hub deployment. Every replica of an HA
+	// hub shares one hub ID (server.hub.hub_id), so it does not tell
+	// replicas apart. In Cloud Monitoring it becomes the label HubIDLabel.
+	HubIDAttribute = "scion.hub.id"
+	// HubNameAttribute carries the hub's display name. In Cloud Monitoring it
+	// becomes the label "scion_hub_name". It is not a reliable replica
+	// identity; do not group by it.
+	HubNameAttribute = "scion.hub.name"
+	// HubIDLabel is the Cloud Monitoring metric label for HubIDAttribute.
+	// Dashboards filter by it to select one hub deployment.
+	HubIDLabel = "scion_hub_id"
+	// InstanceIDLabel is the Cloud Monitoring metric label for the
+	// service.instance.id resource attribute, set from the hub's
+	// per-process instance ID (WithInstanceID). It is distinct for each
+	// replica and changes on every restart. Dashboards group by it to show
+	// each replica separately.
+	InstanceIDLabel = "service_instance_id"
+)
 
 // MetricGroup identifies a logical group of hub metrics that can be
 // independently enabled or disabled.
@@ -53,6 +77,10 @@ type options struct {
 	exportInterval time.Duration
 	hubID          string
 	hubName        string
+	instanceID     string
+	// exporterOpts are extra Cloud Monitoring exporter options. Tests use
+	// them to point the exporter at an in-process fake API server.
+	exporterOpts []mexporter.Option
 }
 
 // WithExportInterval sets the periodic reader interval. Defaults to 60s.
@@ -68,6 +96,21 @@ func WithHubID(id string) Option {
 // WithHubName sets the scion.hub.name resource attribute.
 func WithHubName(name string) Option {
 	return func(o *options) { o.hubName = name }
+}
+
+// WithInstanceID sets the service.instance.id resource attribute to the hub
+// replica's per-process instance ID. The exporter writes it as the metric
+// label InstanceIDLabel and maps the resource to a generic_task monitored
+// resource whose task_id is this ID, so each replica writes its own series.
+// If the ID is empty (or the option is omitted), NewMeterProvider generates a
+// random one, so replicas never share a series.
+func WithInstanceID(id string) Option {
+	return func(o *options) { o.instanceID = id }
+}
+
+// withExporterOptions appends Cloud Monitoring exporter options. Test only.
+func withExporterOptions(opts ...mexporter.Option) Option {
+	return func(o *options) { o.exporterOpts = append(o.exporterOpts, opts...) }
 }
 
 // NewMeterProvider creates an OTel SDK MeterProvider that exports to GCP Cloud
@@ -86,7 +129,11 @@ func NewMeterProvider(ctx context.Context, gcpProjectID string, opts ...Option) 
 		fn(o)
 	}
 
-	baseExporter, err := mexporter.New(mexporter.WithProjectID(gcpProjectID))
+	exporterOpts := append([]mexporter.Option{
+		mexporter.WithProjectID(gcpProjectID),
+		mexporter.WithFilteredResourceAttributes(ResourceAttributeLabelFilter),
+	}, o.exporterOpts...)
+	baseExporter, err := mexporter.New(exporterOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("creating GCP metric exporter: %w", err)
 	}
@@ -96,14 +143,23 @@ func NewMeterProvider(ctx context.Context, gcpProjectID string, opts ...Option) 
 		semconv.ServiceName("scion-hub"),
 	}
 	if o.hubID != "" {
-		resAttrs = append(resAttrs, attribute.String("scion.hub.id", o.hubID))
+		resAttrs = append(resAttrs, attribute.String(HubIDAttribute, o.hubID))
 	}
 	if envHubID := os.Getenv("SCION_HUB_ID"); envHubID != "" && o.hubID == "" {
-		resAttrs = append(resAttrs, attribute.String("scion.hub.id", envHubID))
+		resAttrs = append(resAttrs, attribute.String(HubIDAttribute, envHubID))
 	}
 	if o.hubName != "" {
-		resAttrs = append(resAttrs, attribute.String("scion.hub.name", o.hubName))
+		resAttrs = append(resAttrs, attribute.String(HubNameAttribute, o.hubName))
 	}
+	instanceID := o.instanceID
+	if instanceID == "" {
+		// Without service.instance.id every replica of a hub would write the
+		// same series, so never export without one.
+		instanceID = uuid.NewString()
+		slog.Warn("hub metrics: no hub instance ID supplied; using a generated one",
+			"service_instance_id", instanceID)
+	}
+	resAttrs = append(resAttrs, semconv.ServiceInstanceID(instanceID))
 
 	res, err := resource.New(ctx,
 		resource.WithAttributes(resAttrs...),
@@ -122,6 +178,25 @@ func NewMeterProvider(ctx context.Context, gcpProjectID string, opts ...Option) 
 	mpOpts = append(mpOpts, groupDropViews()...)
 
 	return metric.NewMeterProvider(mpOpts...), nil
+}
+
+// ResourceAttributeLabelFilter selects the resource attributes the Cloud
+// Monitoring exporter copies onto every exported point as metric labels. By
+// default the exporter copies only service.name, service.namespace and
+// service.instance.id and drops every other resource attribute, so without
+// this filter scion.hub.id and scion.hub.name would never reach Cloud
+// Monitoring. This filter keeps the default set (service.instance.id carries
+// the per-replica identity) and adds the hub deployment attributes, so
+// several hubs exporting to one project can be told apart.
+func ResourceAttributeLabelFilter(kv attribute.KeyValue) bool {
+	if mexporter.DefaultResourceAttributesFilter(kv) {
+		return true
+	}
+	switch string(kv.Key) {
+	case HubIDAttribute, HubNameAttribute:
+		return kv.Value.AsString() != ""
+	}
+	return false
 }
 
 // groupDropViews returns OTel View options that drop instruments belonging to

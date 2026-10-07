@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -46,6 +47,16 @@ type ReincarnateAgentRequest struct {
 	// that broker; it must mount the same NFS export as the current one.
 	// Empty, or the agent's current broker, is a plain reincarnation.
 	TargetBroker string `json:"targetBroker,omitempty"`
+
+	// SharedDirBackends changes the recorded shared-dir storage backend of
+	// the named shared dirs (dir name to "nfs", the only supported value).
+	// Only the agent's record on its broker changes; no data is copied,
+	// moved or deleted. Not accepted for a self-reincarnation.
+	SharedDirBackends map[string]string `json:"sharedDirBackends,omitempty"`
+	// AllowEmptySharedDir, with SharedDirBackends, skips the start check
+	// that refuses an empty nfs directory while the dir's previous local
+	// directory is not empty.
+	AllowEmptySharedDir bool `json:"allowEmptySharedDir,omitempty"`
 
 	// Patch fields (ptone/scion#3302): each changes the next generation's
 	// setting and is kept by later reincarnations. Empty (nil for
@@ -126,6 +137,37 @@ type ReincarnationPlan struct {
 	ServiceAccount *FieldChange `json:"serviceAccount,omitempty"`
 	ThinkingLevel  *FieldChange `json:"thinkingLevel,omitempty"`
 	HarnessAuth    *FieldChange `json:"harnessAuth,omitempty"`
+	// SharedDirBackends and AllowEmptySharedDir echo the request's explicit
+	// shared dir backend change.
+	SharedDirBackends   map[string]string `json:"sharedDirBackends,omitempty"`
+	AllowEmptySharedDir bool              `json:"allowEmptySharedDir,omitempty"`
+}
+
+// validateSharedDirBackendRequest checks a reincarnate request's explicit
+// shared dir backend change. Whether each dir is one of the agent's shared
+// dirs, and whether the broker has a complete nfs block, is checked by the
+// broker, which holds the project settings and the agent's record.
+func validateSharedDirBackendRequest(req ReincarnateAgentRequest) error {
+	if len(req.SharedDirBackends) == 0 {
+		if req.AllowEmptySharedDir {
+			return fmt.Errorf("allowEmptySharedDir needs a shared dir backend change")
+		}
+		return nil
+	}
+	names := make([]string, 0, len(req.SharedDirBackends))
+	for name := range req.SharedDirBackends {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if err := api.ValidateSharedDirs([]api.SharedDir{{Name: name}}); err != nil {
+			return fmt.Errorf("sharedDirBackends: invalid shared dir name %q", name)
+		}
+		if backend := req.SharedDirBackends[name]; backend != "nfs" {
+			return fmt.Errorf("sharedDirBackends: shared dir %q: only a change to the nfs backend is supported (got %q)", name, backend)
+		}
+	}
+	return nil
 }
 
 // authorizeAgentReincarnate gates POST .../reincarnate for every caller kind
@@ -203,6 +245,17 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	if req.hasUnsupportedOverrides() {
 		writeError(w, http.StatusBadRequest, ErrCodeValidationError,
 			"config overrides are not yet supported for scion reincarnate", nil)
+		return
+	}
+	if err := validateSharedDirBackendRequest(req); err != nil {
+		writeError(w, http.StatusBadRequest, ErrCodeValidationError, err.Error(), nil)
+		return
+	}
+	// A shared dir backend change is an operator action: the self
+	// exemption in authorizeAgentReincarnate does not cover it.
+	if (len(req.SharedDirBackends) > 0 || req.AllowEmptySharedDir) && isSelfRequest(ctx, agent) {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden,
+			"an agent cannot change its own shared dir backend; ask a user or another agent with lifecycle access", nil)
 		return
 	}
 	if !validateReincarnatePatchRequest(w, req) {
@@ -285,6 +338,11 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 		if dst.ID != agent.RuntimeBrokerID {
 			moveTarget = dst
 		}
+	}
+	if moveTarget != nil && (len(req.SharedDirBackends) > 0 || req.AllowEmptySharedDir) {
+		writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+			"a shared dir backend change cannot be combined with a move to another broker", nil)
+		return
 	}
 	// Design §3.4 Amendments A2/A4/A23/A23.1/A23.2: eligible workspaces are
 	// clone-per-agent (a real GitClone, on a project that is neither
@@ -456,6 +514,10 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 			"failed to resolve new configuration: "+err.Error(), nil)
 		return
+	}
+	if len(req.SharedDirBackends) > 0 {
+		fresh.SharedDirBackendChanges = req.SharedDirBackends
+		fresh.AllowEmptySharedDir = req.AllowEmptySharedDir
 	}
 	// Fail fast, as start and restart do, when the GCP identity the fresh
 	// config will run with is no longer allowed for this agent. Checked

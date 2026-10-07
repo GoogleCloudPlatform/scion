@@ -44,7 +44,7 @@ import (
 // tests" convention, regardless of how many layers wrap it afterward.
 func newBareTestStore(t *testing.T) store.Store {
 	t.Helper()
-	base, err := newTestStore(":memory:")
+	base, err := newTestStore(t, ":memory:")
 	if err != nil {
 		if strings.Contains(err.Error(), "sqlite driver not registered") {
 			t.Skip("Skipping test because sqlite driver is not registered (build with -tags sqlite to enable)")
@@ -55,7 +55,6 @@ func newBareTestStore(t *testing.T) store.Store {
 		t.Fatalf("Migrate: %v", err)
 	}
 	_ = base.DeleteHubSetting(context.Background(), "migration_delegation_edge_backfill_v1")
-	t.Cleanup(func() { _ = base.Close() })
 	return base
 }
 
