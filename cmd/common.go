@@ -328,6 +328,14 @@ func CheckHubAvailabilityForAgents(projectPath string, excludedAgents []string, 
 		ExplicitProject:  explicitProjectTargetFor(projectPath),
 	}
 
+	// A hub project reference needs hub mode: offer to enable it (when
+	// logged in, interactively) or name 'scion hub enable' (#3533).
+	if !noHub && projectPath != "" && hubsync.IsHubProjectRef(projectPath) {
+		if err := ensureHubModeForHubProjectRefForInvocation(projectPath); err != nil {
+			return nil, err
+		}
+	}
+
 	hubCtx, err := hubsync.EnsureHubReady(projectPath, opts)
 	if err != nil {
 		return nil, err
