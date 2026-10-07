@@ -5000,7 +5000,7 @@ func TestHandleAgentExec_BrokerAgentNotFound_ConcurrentChange(t *testing.T) {
 		{
 			name: "new run dispatched",
 			change: func(t *testing.T, s store.Store, agentID string) {
-				_, err := s.SetAgentRunID(context.Background(), agentID, "run-2")
+				_, err := s.SetAgentRunID(context.Background(), agentID, "run-2", nil)
 				require.NoError(t, err)
 			},
 		},
@@ -5051,7 +5051,7 @@ func TestHandleAgentExec_BrokerAgentNotFound_ConcurrentChange(t *testing.T) {
 				LastSeen: time.Now().Add(-time.Hour),
 			}
 			require.NoError(t, s.CreateAgent(ctx, agent))
-			_, err := s.SetAgentRunID(ctx, agentID, "run-1")
+			_, err := s.SetAgentRunID(ctx, agentID, "run-1", nil)
 			require.NoError(t, err)
 
 			srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(s, NewHTTPRuntimeBrokerClient(), false, slog.Default()))

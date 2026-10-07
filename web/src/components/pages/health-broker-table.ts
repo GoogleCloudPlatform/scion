@@ -52,8 +52,8 @@ export interface HealthSummaryBroker {
    * (an older broker). As fresh as last_heartbeat.
    */
   health?: HealthBrokerSelf | null;
-  /** Per-broker agent count. */
-  agents?: { total?: number };
+  /** Per-broker agent counts: running, and needing attention. */
+  agents?: { running?: number; attention?: number };
 }
 
 /** A broker's self-reported health. */
@@ -91,6 +91,22 @@ export function formatHeartbeatAge(isoDate: string | null | undefined): string {
   // A future instant is clock skew between hub and browser.
   if (ms > Date.now()) return 'just now';
   return formatRelative(isoDate, { style: 'narrow' });
+}
+
+/**
+ * Agents cell: "running / needing attention", or null when the broker row
+ * carries no agent counts.
+ */
+export function agentsCell(
+  b: HealthSummaryBroker
+): { running: number; attention: number; title: string } | null {
+  const a = b.agents;
+  if (!a || typeof a.running !== 'number' || typeof a.attention !== 'number') return null;
+  return {
+    running: a.running,
+    attention: a.attention,
+    title: `${a.running} running, ${a.attention} needing attention`,
+  };
 }
 
 /** True when a broker reports itself degraded or unhealthy. */
@@ -295,6 +311,19 @@ export class ScionHealthBrokerTable extends LitElement {
       color: var(--scion-text-muted);
     }
 
+    /* Read by screen readers, not shown: the Agents cell's "4 / 1" spelled out. */
+    .visually-hidden {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
     .pill {
       display: inline-block;
       padding: 0.0625rem 0.5rem;
@@ -347,7 +376,7 @@ export class ScionHealthBrokerTable extends LitElement {
                 <th scope="col">Runtime</th>
                 <th scope="col">Health</th>
                 <th scope="col">Workspace storage</th>
-                <th scope="col">Agents</th>
+                <th scope="col" title="Running / needing attention">Agents</th>
                 <th scope="col">Version</th>
                 <th scope="col">Last heartbeat</th>
               </tr>
@@ -369,8 +398,7 @@ export class ScionHealthBrokerTable extends LitElement {
     const health = healthCell(b);
     const runtime = b.runtime?.type;
     const profile = b.runtime?.profile;
-    const agents = b.agents ?? {};
-    const total = agents.total;
+    const agents = agentsCell(b);
     return html`
       <tr data-broker-id=${b.id}>
         <td class="name"><a href="/brokers/${encodeURIComponent(b.id)}">${b.name || b.id}</a></td>
@@ -393,8 +421,15 @@ export class ScionHealthBrokerTable extends LitElement {
             ? storage.text
             : html`<span class="pill tone-${storage.tone}">${storage.text}</span>`}
         </td>
-        <td class="agents num">
-          ${typeof total === 'number' ? total : html`<span class="muted">—</span>`}
+        <td class="agents num" title=${ifDefined(agents?.title)}>
+          ${agents
+            ? html`<span class="counts" aria-hidden="true"
+                  >${agents.running} /
+                  <span class=${agents.attention > 0 ? 'pill tone-warn attention' : 'attention'}
+                    >${agents.attention}</span
+                  ></span
+                ><span class="visually-hidden">${agents.title}</span>`
+            : html`<span class="muted">—</span>`}
         </td>
         <td class="version">${b.version || html`<span class="muted">—</span>`}</td>
         <td class="heartbeat" title=${ifDefined(b.last_heartbeat || undefined)}>

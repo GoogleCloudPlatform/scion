@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 119
+**Operations:** 120
 
 ## Table of Contents
 
@@ -41,6 +41,7 @@
 - [schedule.event.update](#scheduleeventupdate) — Update a recurring schedule
 - [schedule.event.delete](#scheduleeventdelete) — Cancel a scheduled event or delete a recurring schedule
 - [artifact.read](#artifactread) — Read an artifact's metadata or file bytes (owner, home-project readers via the scope grant, or principal grants); unreadable artifacts answer 404
+- [artifact.list](#artifactlist) — List the artifacts the caller owns, holds a grant on, or that are shared to a project it is a member of (?mine=1); each row passes the artifact.read check, so an artifact the caller cannot read is omitted, never denied
 - [artifact.create](#artifactcreate) — Publish a single file as a new artifact homed in a project (the caller's own, or ?scope=)
 - [agent.message.send](#agentmessagesend) — Send a message to an agent
 - [chat.access](#chataccess) — Access chat threads, spaces, topics, and messages within a project
@@ -1463,6 +1464,38 @@
 ### Tests
 
 - `pkg/hub:TestArtifactsTwoAgentsSameProject`
+
+---
+
+## artifact.list
+
+**Domain:** artifact
+
+**Description:** List the artifacts the caller owns, holds a grant on, or that are shared to a project it is a member of (?mine=1); each row passes the artifact.read check, so an artifact the caller cannot read is omitted, never denied
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/artifacts` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `artifact_record`; boundaries `project`, `hub`; pinned by `TestArtifactsListUserAccessTokensAreBounded`)
+
+**Base Permission:** `artifact.read`
+
+**Resource Resolver:** artifact-home-project
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `not_found`
+
+### Tests
+
+- `pkg/hub:TestArtifactsListMine`
 
 ---
 

@@ -24,6 +24,7 @@ import { resolve } from 'node:path';
 
 import {
   ScionHealthBrokerTable,
+  agentsCell,
   brokerHasProblem,
   healthCauses,
   healthCell,
@@ -43,7 +44,7 @@ function broker(over: Partial<HealthSummaryBroker> = {}): HealthSummaryBroker {
     last_heartbeat: null,
     runtime: { type: 'docker', profile: 'docker' },
     workspace_storage: { backend: 'local' },
-    agents: { total: 2 },
+    agents: { running: 2, attention: 0 },
     ...over,
   };
 }
@@ -137,10 +138,18 @@ describe('scion-health-broker-table cells', () => {
     });
   });
 
-  it('shows the agent total, version and status', async () => {
-    const root = await mount(list([broker({ agents: { total: 4 }, version: '' })]));
+  it('shows running / needing attention, version and status', async () => {
+    const root = await mount(list([broker({ agents: { running: 4, attention: 1 }, version: '' })]));
     const r = rows(root)[0]!;
-    expect(cell(r, 'agents')).toBe('4');
+    expect(cell(r, 'agents .counts')).toBe('4 / 1');
+    const td = r.querySelector('td.agents')!;
+    // Screen readers get the counts spelled out; the visual "4 / 1" is hidden from them.
+    expect(td.querySelector('.counts')?.getAttribute('aria-hidden')).toBe('true');
+    expect(td.querySelector('.visually-hidden')?.textContent?.trim()).toBe(
+      '4 running, 1 needing attention'
+    );
+    expect(td.getAttribute('title')).toBe('4 running, 1 needing attention');
+    expect(td.querySelector('.attention')?.classList.contains('tone-warn')).toBe(true);
     expect(cell(r, 'version')).toBe('—');
     expect(cell(r, 'status')).toBe('online');
   });
@@ -155,6 +164,22 @@ describe('scion-health-broker-table neutral values', () => {
   it('keeps the dash when agents is an empty object', async () => {
     const root = await mount(list([broker({ agents: {} })]));
     expect(cell(rows(root)[0]!, 'agents')).toBe('—');
+  });
+
+  it('shows zero attention without a warning tone', async () => {
+    const root = await mount(list([broker({ agents: { running: 0, attention: 0 } })]));
+    const r = rows(root)[0]!;
+    expect(cell(r, 'agents .counts')).toBe('0 / 0');
+    expect(r.querySelector('td.agents .attention')?.classList.contains('tone-warn')).toBe(false);
+  });
+
+  it('agentsCell needs both counts', () => {
+    expect(agentsCell(broker({ agents: { running: 3 } }))).toBeNull();
+    expect(agentsCell(broker({ agents: { running: 3, attention: 2 } }))).toEqual({
+      running: 3,
+      attention: 2,
+      title: '3 running, 2 needing attention',
+    });
   });
 
   it('shows a degraded broker as a problem with a warning status', async () => {

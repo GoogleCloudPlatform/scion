@@ -20,6 +20,8 @@ const (
 	FieldProjectID = "project_id"
 	// FieldTokenJtiHash holds the string denoting the token_jti_hash field in the database.
 	FieldTokenJtiHash = "token_jti_hash"
+	// FieldRunID holds the string denoting the run_id field in the database.
+	FieldRunID = "run_id"
 	// FieldIssuedAt holds the string denoting the issued_at field in the database.
 	FieldIssuedAt = "issued_at"
 	// FieldExpiresAt holds the string denoting the expires_at field in the database.
@@ -42,6 +44,7 @@ var Columns = []string{
 	FieldAgentID,
 	FieldProjectID,
 	FieldTokenJtiHash,
+	FieldRunID,
 	FieldIssuedAt,
 	FieldExpiresAt,
 	FieldRevokedAt,
@@ -67,6 +70,8 @@ var (
 	ProjectIDValidator func(string) error
 	// TokenJtiHashValidator is a validator for the "token_jti_hash" field. It is called by the builders before save.
 	TokenJtiHashValidator func(string) error
+	// DefaultRunID holds the default value on creation for the "run_id" field.
+	DefaultRunID string
 	// DefaultIssuedAt holds the default value on creation for the "issued_at" field.
 	DefaultIssuedAt func() time.Time
 	// DefaultID holds the default value on creation for the "id" field.
@@ -94,6 +99,11 @@ func ByProjectID(opts ...sql.OrderTermOption) OrderOption {
 // ByTokenJtiHash orders the results by the token_jti_hash field.
 func ByTokenJtiHash(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldTokenJtiHash, opts...).ToFunc()
+}
+
+// ByRunID orders the results by the run_id field.
+func ByRunID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldRunID, opts...).ToFunc()
 }
 
 // ByIssuedAt orders the results by the issued_at field.

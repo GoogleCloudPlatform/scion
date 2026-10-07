@@ -318,8 +318,10 @@ type AgentAppliedConfig struct {
 	// SharedDirBackendChanges and AllowEmptySharedDir are a reincarnation's
 	// explicit shared dir backend change (`scion reincarnate
 	// --shared-dir-backend`), set on that generation's config only and sent
-	// to the broker on its reprovision. A later reincarnation does not
-	// carry them forward.
+	// to the broker on its reprovision. They are one-shot: the hub drops
+	// them once the broker confirms the change (a stored config can still
+	// hold them after some failures), and neither a later reincarnation nor
+	// a re-render of this config sends them again.
 	SharedDirBackendChanges map[string]string `json:"sharedDirBackendChanges,omitempty"`
 	AllowEmptySharedDir     bool              `json:"allowEmptySharedDir,omitempty"`
 
@@ -3652,10 +3654,13 @@ type MembershipLossCheck struct {
 
 // AgentCredential represents a tracked agent JWT token credential.
 type AgentCredential struct {
-	ID           string     `json:"id"`
-	AgentID      string     `json:"agent_id"`
-	ProjectID    string     `json:"project_id"`
-	TokenJTIHash string     `json:"token_jti_hash"`
+	ID           string `json:"id"`
+	AgentID      string `json:"agent_id"`
+	ProjectID    string `json:"project_id"`
+	TokenJTIHash string `json:"token_jti_hash"`
+	// RunID is the agent run the token was issued for; empty for a token
+	// issued without one.
+	RunID        string     `json:"-"`
 	IssuedAt     time.Time  `json:"issued_at"`
 	ExpiresAt    time.Time  `json:"expires_at"`
 	RevokedAt    *time.Time `json:"revoked_at,omitempty"`
