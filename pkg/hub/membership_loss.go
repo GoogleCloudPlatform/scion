@@ -45,9 +45,11 @@ import (
 // expired role bindings and runs a periodic full sweep. None of it is gated
 // by a setting.
 
+// membershipLossLease is how long a claimed check stays with its claimer
+// (a variable so tests can shorten it).
+var membershipLossLease = 2 * time.Minute
+
 const (
-	// membershipLossLease is how long a claimed check stays with its claimer.
-	membershipLossLease = 2 * time.Minute
 	// membershipLossBatch is the number of checks claimed per drain round.
 	membershipLossBatch = 20
 	// membershipLossMaxDrainRounds bounds one drain call.
@@ -385,6 +387,7 @@ func (s *Server) processMembershipLossPair(ctx context.Context, c *store.Members
 		// Post-commit: stop every newly held agent's container. Failures
 		// are retried by the reconciler (the hold is already durable).
 		for _, id := range allStop {
+			s.recordHeldRunIntent(ctx, id)
 			_ = s.stopHeldAgent(ctx, id, 1)
 		}
 	}()
@@ -433,9 +436,9 @@ func (s *Server) membershipLossRound(ctx context.Context, c *store.MembershipLos
 			}
 			return fmt.Errorf("lock project: %w", err)
 		}
-		// Committed state, read after the lock: no membership write on the
-		// project is in flight.
-		admitted, err := s.userAdmittedByID(ctx, userID, projectID)
+		// Read after the lock, through the transaction: no membership
+		// write on the project is in flight.
+		admitted, err := s.userAdmittedByIDOn(ctx, tx, userID, projectID)
 		if err != nil {
 			return fmt.Errorf("admission check: %w", err)
 		}
@@ -484,7 +487,15 @@ func (s *Server) membershipLossRound(ctx context.Context, c *store.MembershipLos
 // userAdmittedByID reports whether userID names an existing user admitted to
 // projectID. A missing user is not admitted.
 func (s *Server) userAdmittedByID(ctx context.Context, userID, projectID string) (bool, error) {
-	user, err := s.store.GetUser(ctx, userID)
+	return s.userAdmittedByIDOn(ctx, s.store, userID, projectID)
+}
+
+// userAdmittedByIDOn is userAdmittedByID reading through st. Inside a
+// transaction st is the transaction store: on PostgreSQL (READ COMMITTED)
+// each read sees the state committed before it, and on SQLite the
+// transaction's own connection is the only one.
+func (s *Server) userAdmittedByIDOn(ctx context.Context, st store.Store, userID, projectID string) (bool, error) {
+	user, err := st.GetUser(ctx, userID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return false, nil
@@ -494,7 +505,7 @@ func (s *Server) userAdmittedByID(ctx context.Context, userID, projectID string)
 	if user == nil {
 		return false, nil
 	}
-	return s.userAdmittedToProject(ctx, user, projectID, nil)
+	return s.userAdmittedToProjectOn(ctx, st, user, projectID, nil)
 }
 
 // holdAgentsTx holds refs for root userID inside tx: agent rows locked in
@@ -552,10 +563,10 @@ func (s *Server) holdAgentsTx(ctx context.Context, tx store.Store, c *store.Memb
 			return nil, nil, fmt.Errorf("revoke agent credentials: %w", err)
 		}
 		if !softDeleted {
-			if _, _, err := tx.SwapRunIntent(ctx, id, store.RunIntentStopped); err != nil &&
-				!errors.Is(err, store.ErrDeleteInProgress) && !errors.Is(err, store.ErrNotFound) {
-				return nil, nil, fmt.Errorf("record run intent: %w", err)
-			}
+			// The run intent is recorded right after commit (the run-intent
+			// writer runs on the store's own connection, not inside a
+			// transaction); until then the hold already refuses every
+			// start.
 			stop = append(stop, id)
 		}
 		s.writeMembershipLossAudit(ctx, tx, c, mutationTypeAgentHoldSet, "agent", id, map[string]interface{}{
@@ -593,6 +604,17 @@ func (s *Server) writeMembershipLossAudit(ctx context.Context, st store.Store, c
 	applyHubActorFallback(record)
 	if err := st.CreateMutationAudit(ctx, record); err != nil {
 		slog.Error("membership loss: audit write failed", "mutation_type", mutationType, "target_id", targetID, "error", err)
+	}
+}
+
+// recordHeldRunIntent sets a newly held agent's run intent to stopped, so
+// nothing tries to bring it back up. A failure is logged; the hold refuses
+// every start regardless, and the stop retry records the intent again.
+func (s *Server) recordHeldRunIntent(ctx context.Context, agentID string) {
+	if _, _, err := s.store.SwapRunIntent(ctx, agentID, store.RunIntentStopped); err != nil &&
+		!errors.Is(err, store.ErrDeleteInProgress) && !errors.Is(err, store.ErrNotFound) {
+		slog.Warn("membership loss: recording the stopped run intent of a held agent failed",
+			"agent_id", agentID, "error", err)
 	}
 }
 
@@ -853,7 +875,7 @@ type membershipSweepResult struct {
 	Enqueued int
 }
 
-// membershipSweepOnce makes the first sweep of a process the measured one.
+// membershipSweepFirst makes the first sweep of a process the measured one.
 var membershipSweepFirst sync.Once
 
 // membershipFullSweep finds every (root user, project) pair from the agents'
@@ -867,7 +889,7 @@ func (s *Server) membershipFullSweep(ctx context.Context) (membershipSweepResult
 		if a.ProjectID == "" {
 			return nil
 		}
-		root, err := s.resolveChainRoot(ctx, a, false)
+		root, err := s.resolveChainRoot(ctx, s.store, a, false)
 		if err != nil {
 			if errors.Is(err, errAgentNotInStanding) {
 				if a.DeletedAt.IsZero() {
@@ -1002,14 +1024,14 @@ func (s *Server) membershipRestoreHook(ctx context.Context, tx store.Store, agen
 	if held {
 		return nil
 	}
-	root, err := s.resolveChainRoot(ctx, agent, false)
+	root, err := s.resolveChainRoot(ctx, tx, agent, false)
 	if err != nil {
 		if errors.Is(err, errAgentNotInStanding) {
 			return nil
 		}
 		return fmt.Errorf("restore standing check: root lookup: %w", err)
 	}
-	admitted, err := s.userAdmittedByID(ctx, root, agent.ProjectID)
+	admitted, err := s.userAdmittedByIDOn(ctx, tx, root, agent.ProjectID)
 	if err != nil {
 		return fmt.Errorf("restore standing check: admission: %w", err)
 	}

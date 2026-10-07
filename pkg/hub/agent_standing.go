@@ -215,7 +215,7 @@ func (s *Server) evaluateAgentRowStanding(ctx context.Context, agent *store.Agen
 		return denyStanding(standingReasonAgentHeld, agent.ID, "")
 	}
 
-	root, err := s.resolveStandingRoot(ctx, agent)
+	root, err := s.resolveChainRoot(ctx, s.store, agent, true)
 	if err != nil {
 		return err
 	}
@@ -252,7 +252,23 @@ func (s *Server) rootUserAdmitted(ctx context.Context, rootID, projectID, agentI
 // projectID: project membership evidence, or system authority that applies
 // to agents in the project. memo may be nil.
 func (s *Server) userAdmittedToProject(ctx context.Context, user *store.User, projectID string, memo *ProjectAdmissionCache) (bool, error) {
-	if s.authzService == nil {
+	return s.userAdmittedToProjectOn(ctx, s.store, user, projectID, memo)
+}
+
+// authzFor returns the authorization service reading through st: the
+// server's own for its store, otherwise one bound to st (a transaction, so
+// the reads run on the transaction's connection).
+func (s *Server) authzFor(st store.Store) *AuthzService {
+	if st == s.store || s.authzService == nil {
+		return s.authzService
+	}
+	return NewAuthzService(st, s.authzService.logger)
+}
+
+// userAdmittedToProjectOn is userAdmittedToProject reading through st.
+func (s *Server) userAdmittedToProjectOn(ctx context.Context, st store.Store, user *store.User, projectID string, memo *ProjectAdmissionCache) (bool, error) {
+	authz := s.authzFor(st)
+	if authz == nil {
 		return false, errors.New("project admission: authz service not available")
 	}
 	pc := PrincipalContext{
@@ -261,16 +277,16 @@ func (s *Server) userAdmittedToProject(ctx context.Context, user *store.User, pr
 		Identity: NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, ""),
 	}
 	class := ProjectTargetClass{ResourceType: permissions.ResourceAgent}
-	res, err := s.authzService.ProjectAdmissionForClass(maskAuthzInputs(ctx), pc, projectID, standingPermission, class, memo)
+	res, err := authz.ProjectAdmissionForClass(maskAuthzInputs(ctx), pc, projectID, standingPermission, class, memo)
 	if err != nil {
 		return false, err
 	}
 	return res.Admitted, nil
 }
 
-// resolveStandingRoot returns the ID of the user at the root of the agent's
-// upward chain in its project, after checking that every agent on that
-// chain is live and not held.
+// resolveChainRoot returns the ID of the user at the root of the agent's
+// upward chain in its project; with checkChain it first checks that every
+// agent on that chain is live and not held.
 //
 // The chain is followed through delegation edges in the agent's project:
 // exactly one active edge per link, as edgeChainSourceResolver requires.
@@ -281,14 +297,11 @@ func (s *Server) userAdmittedToProject(ctx context.Context, user *store.User, pr
 // An agent named by those links is followed the same way. A broken chain
 // (duplicate edges, a missing edge above the first link, a deleted link, a
 // cycle, or a chain deeper than standingMaxChainDepth) refuses.
-func (s *Server) resolveStandingRoot(ctx context.Context, agent *store.Agent) (string, error) {
-	return s.resolveChainRoot(ctx, agent, true)
-}
-
-// resolveChainRoot is resolveStandingRoot; with checkChain false it does not
-// refuse a held or deleted agent on the chain (the membership sweep uses it
-// to find the user an agent is rooted at).
-func (s *Server) resolveChainRoot(ctx context.Context, agent *store.Agent, checkChain bool) (string, error) {
+// resolveChainRoot reads through st (a transaction store inside one). With
+// checkChain false it does not refuse a held or deleted agent on the chain
+// (the membership sweep and the restore hook use it to find the user an
+// agent is rooted at).
+func (s *Server) resolveChainRoot(ctx context.Context, st store.Store, agent *store.Agent, checkChain bool) (string, error) {
 	visited := map[string]bool{}
 	projectID := agent.ProjectID
 	current := agent
@@ -308,7 +321,7 @@ func (s *Server) resolveChainRoot(ctx context.Context, agent *store.Agent, check
 			if !current.DeletedAt.IsZero() {
 				return "", denyStanding(standingReasonChainDeleted, agent.ID, "")
 			}
-			held, err := s.agentHeld(ctx, current.ID)
+			held, err := st.HasActiveAgentHold(ctx, current.ID)
 			if err != nil {
 				return "", fmt.Errorf("agent standing: chain hold lookup: %w", err)
 			}
@@ -317,7 +330,7 @@ func (s *Server) resolveChainRoot(ctx context.Context, agent *store.Agent, check
 			}
 		}
 
-		edges, err := s.store.GetDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, current.ID)
+		edges, err := st.GetDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, current.ID)
 		if err != nil {
 			return "", fmt.Errorf("agent standing: delegation edge lookup: %w", err)
 		}
@@ -347,7 +360,7 @@ func (s *Server) resolveChainRoot(ctx context.Context, agent *store.Agent, check
 			case store.DelegationPrincipalUser:
 				return edge.DelegatorID, nil
 			case store.DelegationPrincipalAgent:
-				parent, err := s.standingChainAgent(ctx, edge.DelegatorID, projectID, agent.ID)
+				parent, err := s.standingChainAgent(ctx, st, edge.DelegatorID, projectID, agent.ID)
 				if err != nil {
 					return "", err
 				}
@@ -358,7 +371,7 @@ func (s *Server) resolveChainRoot(ctx context.Context, agent *store.Agent, check
 			}
 		}
 
-		next, rootUser, err := s.storedLinkCandidate(ctx, current, projectID, agent.ID)
+		next, rootUser, err := s.storedLinkCandidate(ctx, st, current, projectID, agent.ID)
 		if err != nil {
 			return "", err
 		}
@@ -371,8 +384,8 @@ func (s *Server) resolveChainRoot(ctx context.Context, agent *store.Agent, check
 
 // standingChainAgent loads an agent named on the chain of origAgentID. A
 // missing agent, or one outside the project, breaks the chain.
-func (s *Server) standingChainAgent(ctx context.Context, id, projectID, origAgentID string) (*store.Agent, error) {
-	a, err := s.store.GetAgent(ctx, id)
+func (s *Server) standingChainAgent(ctx context.Context, st store.Store, id, projectID, origAgentID string) (*store.Agent, error) {
+	a, err := st.GetAgent(ctx, id)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return nil, denyStanding(standingReasonChainBroken, origAgentID, "")
@@ -391,12 +404,12 @@ func (s *Server) standingChainAgent(ctx context.Context, id, projectID, origAgen
 // when it has no owner, its creator (user or agent). It returns either the
 // next agent or the root user ID; with neither the agent has no resolvable
 // root.
-func (s *Server) storedLinkCandidate(ctx context.Context, a *store.Agent, projectID, origAgentID string) (*store.Agent, string, error) {
+func (s *Server) storedLinkCandidate(ctx context.Context, st store.Store, a *store.Agent, projectID, origAgentID string) (*store.Agent, string, error) {
 	tryUser := func(id string) (bool, error) {
 		if id == "" {
 			return false, nil
 		}
-		u, err := s.store.GetUser(ctx, id)
+		u, err := st.GetUser(ctx, id)
 		if err != nil {
 			if errors.Is(err, store.ErrNotFound) {
 				return false, nil
@@ -409,7 +422,7 @@ func (s *Server) storedLinkCandidate(ctx context.Context, a *store.Agent, projec
 		if id == "" || id == a.ID {
 			return nil, nil
 		}
-		next, err := s.store.GetAgent(ctx, id)
+		next, err := st.GetAgent(ctx, id)
 		if err != nil {
 			if errors.Is(err, store.ErrNotFound) {
 				return nil, nil

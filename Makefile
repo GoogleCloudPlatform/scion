@@ -208,6 +208,18 @@ test-fixture-coverage:
 # "enttest-sqlite-only: <test name> <reason>". A skipped test is allowed only
 # if its own skip message carries that marker, so there is no name list here
 # and any other skip still fails the target.
+# MEMBERSHIP_LOSS_POSTGRES_TESTS are the pkg/hub membership loss
+# concurrency tests (ptone/scion#3433) run by test-launch-store-postgres.
+MEMBERSHIP_LOSS_POSTGRES_TESTS := TestMembershipLossProcessor_vs_ProjectDelete_Postgres \
+	TestMembershipLossProcessor_vs_AgentHardDelete_Postgres \
+	TestMembershipLossProcessor_vs_ReAdd_Postgres \
+	TestMembershipLossProcessor_vs_CredentialMint_Postgres \
+	TestMembershipLossProcessor_vs_ChildCreate_Postgres \
+	TestMembershipLossProcessor_TwoInstances_Postgres \
+	TestMembershipLossProcessor_vs_UserDelete_Postgres
+empty :=
+space := $(empty) $(empty)
+
 test-launch-store-postgres:
 	@echo "Running launch store tests against Postgres..."
 	@if [ -z "$$SCION_TEST_POSTGRES_URL" ]; then \
@@ -254,13 +266,23 @@ test-launch-store-postgres:
 		exit 1; \
 	fi
 	@go test -tags integration -count=1 -timeout 20m -v \
-		-run '^TestProjectDeletionService_LockOrderNoDeadlock$$' \
+		-run '^(TestProjectDeletionService_LockOrderNoDeadlock|$(subst $(space),|,$(strip $(MEMBERSHIP_LOSS_POSTGRES_TESTS))))$$' \
 		./pkg/hub/ > /tmp/test-launch-store-postgres-hub.log 2>&1; \
 	status=$$?; \
 	cat /tmp/test-launch-store-postgres-hub.log; \
 	if [ $$status -ne 0 ]; then exit $$status; fi; \
 	if ! grep -qE '^[[:space:]]*--- PASS: TestProjectDeletionService_LockOrderNoDeadlock' /tmp/test-launch-store-postgres-hub.log; then \
 		echo "ERROR: the pkg/hub project-delete lock-order test did not run." >&2; \
+		exit 1; \
+	fi; \
+	for t in $(MEMBERSHIP_LOSS_POSTGRES_TESTS); do \
+		if ! grep -qE "^[[:space:]]*--- PASS: $$t\b" /tmp/test-launch-store-postgres-hub.log; then \
+			echo "ERROR: the pkg/hub membership loss Postgres test $$t did not pass." >&2; \
+			exit 1; \
+		fi; \
+	done; \
+	if grep -qE '^[[:space:]]*--- SKIP' /tmp/test-launch-store-postgres-hub.log; then \
+		echo "ERROR: one or more pkg/hub Postgres tests were skipped -- see '--- SKIP' lines above." >&2; \
 		exit 1; \
 	fi
 
