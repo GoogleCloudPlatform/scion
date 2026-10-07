@@ -1067,7 +1067,7 @@ func probeWorkspaceContent(dir string) (bool, error) {
 func (s *Server) resolveDurableOrLegacyPath(slug, durablePath string, warnEphemeral bool) (string, error) {
 	has, err := probeWorkspaceContent(durablePath)
 	if err != nil {
-		return "", s.workspaceProbeError(slug, durablePath, err)
+		return "", s.workspaceProbeError(slug, err)
 	}
 	if has {
 		return durablePath, nil
@@ -1076,11 +1076,11 @@ func (s *Server) resolveDurableOrLegacyPath(slug, durablePath string, warnEpheme
 	if localPath, lerr := localProjectPath(slug); lerr == nil {
 		has, err := probeWorkspaceContent(localPath)
 		if err != nil {
-			return "", s.workspaceProbeError(slug, localPath, err)
+			return "", s.workspaceProbeError(slug, err)
 		}
 		if has {
 			if warnEphemeral {
-				s.warnEphemeralProjectPath(slug, localPath, durablePath)
+				s.warnEphemeralProjectPath(slug)
 			}
 			return localPath, nil
 		}
@@ -1089,13 +1089,17 @@ func (s *Server) resolveDurableOrLegacyPath(slug, durablePath string, warnEpheme
 	return durablePath, nil
 }
 
-// workspaceProbeError logs a timed-out workspace probe (with the path) and
-// wraps err with the project slug only. The error text can reach stored,
-// API-visible fields (e.g. a scheduled event's error), so it must not carry
-// the filesystem path. It still matches errWorkspaceContentTimeout.
-func (s *Server) workspaceProbeError(slug, path string, err error) error {
+// workspaceProbeError logs a timed-out workspace probe and wraps err with the
+// project slug only. The error text can reach stored, API-visible fields
+// (e.g. a scheduled event's error), so it must not carry the filesystem path.
+// It still matches errWorkspaceContentTimeout.
+//
+// The log line carries the probe timeout and a fixed error class only: no
+// project ID is in scope here (callers resolve by slug), and the slug, path
+// and error text are left out of the log.
+func (s *Server) workspaceProbeError(slug string, err error) error {
 	s.projectsLogger().Warn("Workspace storage did not respond; not resolving project path",
-		"slug", slug, "path", path, "timeout", workspaceContentTimeout, "error", err)
+		"error_class", fsErrorClass(err), "timeout", workspaceContentTimeout)
 	return fmt.Errorf("workspace content check for project %q: %w", slug, err)
 }
 
@@ -3275,7 +3279,7 @@ func (s *Server) executePostDeletionEffects(ctx context.Context, projectID strin
 			projectConfigDir := filepath.Dir(configPath)
 			if err := config.RemoveProjectConfig(projectConfigDir); err != nil && !os.IsNotExist(err) {
 				s.projectsLogger().Warn("failed to remove project config directory",
-					"project_id", projectID, "slug", project.Slug, "path", projectConfigDir, "error", err)
+					"project_id", projectID, "error_class", fsErrorClass(err))
 			}
 		}
 	}
@@ -3319,7 +3323,7 @@ func (s *Server) removeProjectDirUnderProjectsRoot(projectID, projectPath string
 	}
 	if err := util.RemoveAllSafe(projectPath); err != nil {
 		s.projectsLogger().Warn("failed to remove hub-managed project directory",
-			"project_id", projectID, "path", projectPath, "error", err)
+			"project_id", projectID, "error_class", fsErrorClass(err))
 	}
 }
 
