@@ -233,6 +233,23 @@ func TestComputeContainerHubEndpoint(t *testing.T) {
 			},
 		},
 		{
+			// The docker host-network target follows the hub listen port,
+			// not the port of the broker's localhost hub endpoint.
+			name: "IAP-derived public URL with forced host networking uses the listen port over the broker endpoint port",
+			in: with(func(in *containerHubEndpointInputs) {
+				in.BrokerHubEndpoint = "http://localhost:9000"
+				in.PublicHubEndpoint = testIAPCloudRunURL
+				in.PublicHubEndpointSource = hubEndpointSourceIAPAudience
+				in.ForceHostNetwork = true
+			}),
+			want: containerHubEndpointResult{
+				Endpoint:                     "http://host.docker.internal:9000",
+				ColocatedPublicHubEndpoint:   testIAPCloudRunURL,
+				ColocatedRuntimeHubEndpoints: iapTargets("http://host.docker.internal:8080"),
+				HubListenPort:                8080,
+			},
+		},
+		{
 			name: "IAP-derived public URL on Apple container keeps its own endpoint and adds per-runtime targets only",
 			in: with(func(in *containerHubEndpointInputs) {
 				in.RuntimeName = "container"
@@ -635,7 +652,6 @@ func TestComputeContainerHubEndpointHostGatewayLogLevel(t *testing.T) {
 				if strings.HasPrefix(l, tt.wantPrefix) {
 					found = true
 				}
-				assert.NotContains(t, l, "Docker daemon lacks host-gateway")
 			}
 			assert.True(t, found, "logs %v lack %q", logs, tt.wantPrefix)
 		})

@@ -218,8 +218,8 @@ func computeContainerHubEndpoint(in containerHubEndpointInputs, logf func(format
 //     networking (colocatedExtraHosts maps the alias to host-gateway), or
 //     host.docker.internal (host networking) when host networking is forced.
 //   - podman: host.containers.internal, which Podman maps to the host
-//     itself, so it needs no --add-host flag and works on every Podman
-//     version (host-gateway in --add-host arrived in Podman 4.7).
+//     itself, so it needs no --add-host flag on any Podman version
+//     (host-gateway in --add-host arrived in Podman 4.7).
 //
 // Both use the hub listen port, so a non-localhost
 // runtime_broker.hub_endpoint does not drop them. Only when the listen port
