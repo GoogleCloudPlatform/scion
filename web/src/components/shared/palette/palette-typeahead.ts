@@ -197,9 +197,9 @@ export class PaletteTypeahead {
 
   /**
    * Stops capturing and returns the captured text, clearing it. Drops the
-   * hidden text field: text the field took itself (keys the capture let
-   * through, such as IME input, or typed after its time limit) is kept
-   * after the text captured so far.
+   * hidden text field, whose text (typed since the last captured key: IME
+   * input, dictation, or keys after the capture's time limit) ends the
+   * returned text.
    */
   take(): string {
     this.release();
@@ -234,8 +234,6 @@ export class PaletteTypeahead {
     if (!document.body) return;
     const active = deepActiveElement();
     const proxy = createKeyboardProxy();
-    proxy.addEventListener('input', this.handleProxyInput);
-    proxy.addEventListener('compositionend', this.flushProxy);
     document.body.append(proxy);
     this.proxy = proxy;
     this.proxyReturnFocus = active instanceof HTMLElement ? active : null;
@@ -243,27 +241,27 @@ export class PaletteTypeahead {
   }
 
   /**
-   * Text the hidden field took itself (IME composition, dictation, a
-   * predictive suggestion, or keys after the capture's time limit) joins the
-   * captured text as soon as it is committed, so it keeps its place among
-   * keys captured before and after it. Text still being composed stays in
-   * the field until its composition ends.
+   * Moves the hidden field's text to the end of the captured text. Run just
+   * before the capture takes a key, so the field only ever holds text typed
+   * since the last captured key, and the text the field took itself (an IME
+   * composition, dictation, a predictive suggestion) keeps its place among
+   * captured keys. Nothing else moves it: no input or composition event,
+   * whose order differs between engines (WebKit fires compositionend before
+   * inserting the confirmed text), and nothing after the capture's time
+   * limit, so the field's own editing, Backspace included, applies to what
+   * it holds.
    */
-  private readonly handleProxyInput = (e: Event): void => {
-    if ((e as InputEvent).isComposing) return;
-    this.flushProxy();
-  };
-
-  private readonly flushProxy = (): void => {
+  private flushProxy(): void {
     const proxy = this.proxy;
     if (!proxy || !proxy.value) return;
     this.text += proxy.value;
     proxy.value = '';
-  };
+  }
 
   /**
-   * Removes the hidden text field, keeping its text after the text captured
-   * so far. A field that still has focus gives it back to what had it
+   * Removes the hidden text field, adding its text to the end of the
+   * captured text: it holds only text typed since the last captured key
+   * (see {@link flushProxy}). A field that still has focus gives it back to what had it
    * before, unless `restoreFocus` is false.
    */
   private dropKeyboardProxy(restoreFocus = true): void {
@@ -301,6 +299,7 @@ export class PaletteTypeahead {
   private readonly handleKeydown = (e: KeyboardEvent): void => {
     if (e.isComposing) return;
     if (e.key === 'Backspace' || e.key === 'Delete') {
+      this.flushProxyBefore(e);
       if (e.key === 'Backspace') this.text = deleteBackward(this.text, e, this.mac);
       e.preventDefault();
       e.stopImmediatePropagation();
@@ -311,14 +310,22 @@ export class PaletteTypeahead {
     const altGraph = printable && e.getModifierState('AltGraph');
     const optionText = printable && this.mac && e.altKey && !e.ctrlKey;
     if (!altGraph && !optionText && (e.ctrlKey || e.altKey)) return;
-    if (printable) {
-      this.text += e.key;
-    } else if (!SWALLOWED_KEYS.has(e.key)) {
-      return;
-    }
+    if (!printable && !SWALLOWED_KEYS.has(e.key)) return;
+    this.flushProxyBefore(e);
+    if (printable) this.text += e.key;
     e.preventDefault();
     e.stopImmediatePropagation();
   };
+
+  /**
+   * {@link flushProxy} before the capture takes `e`, unless an IME
+   * processed it (keyCode 229): such a key can arrive between WebKit's
+   * compositionend and its insertion of the confirmed text, when the field
+   * still holds the text being replaced.
+   */
+  private flushProxyBefore(e: KeyboardEvent): void {
+    if (e.keyCode !== 229) this.flushProxy();
+  }
 }
 
 /**

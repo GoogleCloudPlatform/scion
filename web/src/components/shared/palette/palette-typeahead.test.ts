@@ -627,7 +627,10 @@ describe('PaletteTypeahead: holding the on-screen keyboard', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  /** Commits `text` into the field as the platform would: composed, or inserted directly. */
+  /**
+   * Commits `text` into the field as Chromium would: composed (input events
+   * while composing, then compositionend), or inserted directly.
+   */
   function commitAtField(proxy: HTMLInputElement, text: string, composed: boolean): void {
     if (composed) {
       proxy.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
@@ -639,6 +642,67 @@ describe('PaletteTypeahead: holding the on-screen keyboard', () => {
       proxy.dispatchEvent(new InputEvent('input', { bubbles: true, isComposing: false }));
     }
   }
+
+  /**
+   * Composes `marked` and confirms it as `confirmed` in WebKit's order:
+   * compositionend while the field still holds the marked text, then the
+   * confirmed text replaces it with an input event outside the composition.
+   * `between` runs after compositionend, before the insertion.
+   */
+  function composeAtFieldWebKit(
+    proxy: HTMLInputElement,
+    marked: string,
+    confirmed: string,
+    between: () => void = () => {}
+  ): void {
+    const start = proxy.value;
+    proxy.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+    proxy.value = start + marked;
+    proxy.dispatchEvent(new InputEvent('input', { bubbles: true, isComposing: true }));
+    proxy.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true, data: confirmed }));
+    between();
+    proxy.value = proxy.value.endsWith(marked)
+      ? proxy.value.slice(0, -marked.length) + confirmed
+      : proxy.value + confirmed;
+    proxy.dispatchEvent(new InputEvent('input', { bubbles: true, isComposing: false }));
+  }
+
+  it('text composed in WebKit order joins once, in its place among captured keys', () => {
+    typeahead = touchTypeahead();
+    typeahead.start();
+    const proxy = typeahead.keyboardProxy!;
+    press('a');
+    composeAtFieldWebKit(proxy, 'にほん', '日本');
+    press('b');
+    expect(typeahead.take()).toBe('a日本b');
+  });
+
+  it('an IME-processed key between WebKit compositionend and the insertion does not split the text', () => {
+    typeahead = touchTypeahead();
+    typeahead.start();
+    const proxy = typeahead.keyboardProxy!;
+    press('a');
+    composeAtFieldWebKit(proxy, 'にほん', '日本', () => {
+      press('Enter', { keyCode: 229 } as KeyboardEventInit);
+    });
+    expect(typeahead.take()).toBe('a日本');
+  });
+
+  it('after the capture time limit, Backspace in the field edits the text it holds', () => {
+    vi.useFakeTimers();
+    typeahead = touchTypeahead();
+    typeahead.start();
+    const proxy = typeahead.keyboardProxy!;
+    press('x');
+    vi.advanceTimersByTime(PALETTE_TYPEAHEAD_MAX_MS);
+    commitAtField(proxy, 'y', false);
+    // The field's own Backspace.
+    proxy.value = proxy.value.slice(0, -1);
+    proxy.dispatchEvent(
+      new InputEvent('input', { bubbles: true, inputType: 'deleteContentBackward' })
+    );
+    expect(typeahead.take()).toBe('x');
+  });
 
   it('text composed in the field keeps its place among captured keys', () => {
     typeahead = touchTypeahead();
