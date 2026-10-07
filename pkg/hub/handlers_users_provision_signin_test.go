@@ -177,7 +177,13 @@ func TestHandleProvisionUser_EndToEndSignIn(t *testing.T) {
 	setAccessConfig(srv, "invite_only", nil)
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
-	client, err := hubclient.New(ts.URL, hubclient.WithDevToken(testDevToken))
+	// Provision as an interactive super-admin session; dev auth is refused
+	// by provisioning.
+	adminID := tid("e2e-super")
+	createTestUserWithRole(t, s, adminID, "e2e-super@example.com", store.UserRoleAdmin, store.SystemRoleSuperAdmin)
+	token, _, _, err := srv.userTokenService.GenerateTokenPair(adminID, "e2e-super@example.com", "E2E Super", store.UserRoleAdmin, ClientTypeWeb)
+	require.NoError(t, err)
+	client, err := hubclient.New(ts.URL, hubclient.WithBearerToken(token))
 	require.NoError(t, err)
 	paths := newSignInPaths(t, srv, s)
 

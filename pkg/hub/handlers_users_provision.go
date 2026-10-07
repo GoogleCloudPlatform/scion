@@ -68,6 +68,8 @@ const (
 	provisionReasonUserExists          = "user_exists"
 	provisionReasonPendingUserExists   = "pending_user_exists"
 	provisionReasonSuspendedUserExists = "user_suspended_exists"
+	// provisionReasonDevAuthNotSupported refuses a dev-auth caller (row 4a).
+	provisionReasonDevAuthNotSupported = "dev_auth_not_supported"
 )
 
 // Advisory warnings (design §5.3). They never fail the request.
@@ -367,15 +369,26 @@ func (s *Server) handleProvisionUser(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	target := Resource{Type: "user"}
 
-	// Rows 1, 4, 5: admission through the D.2 session-only gate. A user
-	// access token is refused here until token admission is enabled. The
-	// gate writes the response; a refused identity is logged here so the
-	// log follows the gate's own decision.
+	// Rows 1, 4, 4a, 5: admission. The D.2 session-only gate admits an
+	// interactive session or a dev credential and refuses a user access
+	// token until token admission is enabled; the dev credential is then
+	// refused below. The gate writes its own response; a refused identity
+	// is logged here so the log follows the gate's decision.
 	actor, ok := s.requireSessionCredentialFor(w, ctx, authzop.ReasonGovernancePending)
 	if !ok {
 		if identity := GetIdentityFromContext(ctx); identity != nil {
 			logAuthzDenial(r, identity, target, ActionInvite, provisionOperationID+": refused by the session-only gate")
 		}
+		return
+	}
+	// Dev auth is single-user local mode and does not mix with
+	// multi-user administration, so provisioning refuses a dev
+	// credential: only an interactive sign-in session is admitted.
+	if GetCredentialContextFromContext(ctx).Kind == CredentialKindDev {
+		logAuthzDenial(r, actor, target, ActionInvite, provisionOperationID+": dev auth is not supported")
+		writeError(w, http.StatusForbidden, ErrCodeForbidden,
+			"user provisioning is not available with dev authentication; dev auth is single-user local mode",
+			map[string]interface{}{"reason": provisionReasonDevAuthNotSupported})
 		return
 	}
 

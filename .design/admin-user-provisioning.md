@@ -185,11 +185,11 @@ out-of-scope bearer disposition. H.2 renames it to `user.admin.provision`, which
 `user.admin.*` operations; §13.3 rejects a *permission* named `user.provision`, not this operation.)
 
 ```text
-caller (session | dev | hub UAT after D.2)
+caller (session | hub UAT after D.2; dev auth refused)
    │  POST /api/v1/users {email, displayName?, note?}
    ▼
 admission ── D.2 per-operation admission for user.admin.provision:
-   │         credential kind ∈ {interactive, dev, uat}; for UATs: exact user.invite selector in the
+   │         credential kind ∈ {interactive, uat}; dev auth refused; for UATs: exact user.invite selector in the
    │         frozen permission ceiling (A.1/A.2), credential boundary reaches the hub target (A.1),
    │         owner active, D.2 credential restrictions
    ▼
@@ -551,7 +551,7 @@ list the new entry point.
 | Credential | Admitted | Why |
 | --- | --- | --- |
 | Interactive session | Yes | Primary administrative path |
-| Dev | Yes | Parity with PATCH/DELETE (`handlers_users_core.go:182`-`:185`) |
+| Dev | No: `403 forbidden` / `dev_auth_not_supported` | Dev auth is single-user local mode and does not mix with other user authentication setups (ptone, 2026-10-07, on GoogleCloudPlatform/scion#2735). Other endpoints' dev-auth behaviour is unchanged. |
 | Hub UAT | Yes, **after D.2** | Agreed product decision: a hub UAT carries user identity, reduced by the token |
 | Project UAT | No: `403 forbidden` / `credential_insufficient` | The target is the hub scope, which a project boundary does not reach |
 | Agent JWT, broker, federation, external bearer without user identity | No: `403 forbidden` | Not user principals |
@@ -650,6 +650,7 @@ the owner's status (`:366`), so a revoked token whose owner is suspended gets 40
 | 2 | UAT revoked/expired/unknown | 401 | `unauthorized` (existing UAT validation, `useraccesstoken.go:345`-`:351`) | none | none |
 | 3 | JWT or UAT path, caller or token owner suspended | 403 | `user_suspended` (existing middleware: `auth.go:495` for JWTs; `useraccesstoken.go:366`, `auth.go:411`-`:415` for UATs; D.2 may refine) | none | none |
 | 4 | Non-user principal (agent, broker, federation) | 403 | `forbidden` | none | denial log |
+| 4a | Dev-auth caller (dev credential) | 403 | `forbidden` / `dev_auth_not_supported` | none | denial log |
 | 5 | UAT before D.2 admission is enabled | 403 | `forbidden` / `credential_insufficient` (PR-1: the session-only refusal, `details.reason: "GOV_PENDING"`, `details.credential: "session_required"`; see the Phase 0 binding in §16.2) | none | denial log |
 | 6 | UAT whose boundary does not admit the hub target | 403 | `forbidden` / `credential_insufficient` | none | denial log |
 | 7 | UAT whose frozen ceiling lacks the exact `user.invite` mapping | 403 | `forbidden` / `credential_insufficient` | none | denial log |
@@ -999,7 +1000,7 @@ hub-only. Concretely:
   hub-only. No change.
 
 **Phase 1 — vertical slice.** One handler, one client method and one CLI command. Admission covers
-session and dev credentials only, through D.2's mechanism.
+interactive session credentials only, through D.2's mechanism; dev auth is refused (row 4a).
 
 1. `pkg/hub/admin_user_invite.go`:
    - extract `NormalizeInviteEmail` and `createPendingUserTx`;
@@ -1043,14 +1044,14 @@ confirm that the `user.read` detail-authority decision (§5.4; PR-1 evaluates it
 
 | Concept | Bound to | PR-1 use |
 | --- | --- | --- |
-| per-operation admission and credential restrictions (D.2) | `requireSessionCredentialFor(w, ctx, authzop.ReasonGovernancePending)` (`session_only_gate.go`, D.2 M3) and the catalog `Bearer: SessionOnly(ReasonGovernancePending)` disposition | Interactive session and dev credentials only. Every other credential kind gets the session-only refusal. |
+| per-operation admission and credential restrictions (D.2) | `requireSessionCredentialFor(w, ctx, authzop.ReasonGovernancePending)` (`session_only_gate.go`, D.2 M3) and the catalog `Bearer: SessionOnly(ReasonGovernancePending)` disposition | Interactive session credentials only. A dev credential passes the gate and is then refused by the handler (row 4a, `dev_auth_not_supported`). Every other credential kind gets the session-only refusal. |
 | §8 row 5 (UAT before token admission) | the session-only refusal: `403 forbidden` with `details.reason: "GOV_PENDING"` and `details.credential: "session_required"` | Replaces the design's provisional `credential_insufficient` detail. Pinned by the bearer disposition matrix and `TestHandleProvisionUser`. |
 | target-scope resolution for user creation (A.1) | `ResolveTargetScope` with `hubCollectionEvidence("user.invite")` on `Resource{Type: "user"}` (`authz_hub_target.go`); `permissions.CollectionTargetClasses["user.invite"] = {hub_resource}` | Hub-scope collection target, the same creation-scope rule as project creation. |
 | credential boundary (A.1) | `PermissionAllowedBoundaries["user.invite"] = {Hub}`; the bearer gate in `AuthzService.Decide` | Unchanged; used in Phase 2. |
 | exact selector-to-permission mapping for `user:invite` (A.1) | `Registry` `UATScope: "user:invite"`, from which `SelectorRegistry` derives | Unchanged; used in Phase 2. |
 | frozen ceiling (A.2) | the token ceiling evaluated by `AuthzService.Decide` for UAT credentials | Phase 2. |
 | system authority for the exact permission on the actual target (A.1) | `AuthzService.Decide` with `Permission: "user.invite"` and the collection evidence above; detail authority uses `Permission: "user.read"` on `hubScopedResource("user", "hub")` | Seeded hub-member grants do not include `user.invite`, so hub members are refused (tested). |
-| governance and `CanDelegate` for the invitation effect (D.2 with B.3) | not used in PR-1 (session and dev only); bound in Phase 2 | Phase 2. |
+| governance and `CanDelegate` for the invitation effect (D.2 with B.3) | not used in PR-1 (interactive sessions only); bound in Phase 2 | Phase 2. |
 | per-method route metadata for `/api/v1/users` (A.1) | none: the method-agnostic `RoutePolicy` entry stays, and POST is handler-enforced (§16.3 default) | No `route_metadata.go` change. |
 | shared call-site classification (A.1) | `MutationClassifications` row `createPendingUserTx`/`CreateUser` with `ExemptionInternalOnly`, naming both callers (main's convention for shared helpers such as `replaceBindingTx`) | Replaces the `handleAdminUserInvite`/`CreateUser` row; the bulk row stays. |
 | registry row obligations (A.1) | `user.invite` gains `Enforcement: pkg/hub/handlers_users_provision.go:handleProvisionUser`; `UATScope`, `ProjectTargetApplicability` (false) and `PermissionAllowedBoundaries` ({Hub}) unchanged | Drift tests stay green. |
@@ -1186,6 +1187,7 @@ No regression:
 | 2 | revoked or expired hub UAT → 401; revoked hub UAT with suspended owner → 401 |
 | 3 | session caller suspended (JWT); hub UAT owner suspended (UAT) |
 | 4 | agent JWT, broker HMAC, federation → 403 |
+| 4a | dev-auth caller → 403 `dev_auth_not_supported` (valid, role-carrying and malformed bodies) |
 | 5 | before Phase 2, any UAT → 403 (session-only refusal in PR-1) |
 | 6 | project-bounded UAT → 403 |
 | 7 | hub UAT without the exact selector; empty/malformed/unknown-version ceiling |
@@ -1386,5 +1388,6 @@ This choice is OD-10 (§19), decided (a) by ptone on 2026-10-04.
 | 2026-09-28 | **OD-1 decided:** the role at activation follows the current configured policy. There is no member/viewer selection before sign-in and no pending-role column (§6). | `agent:pat-refactor` |
 | 2026-09-28 | Continuing [ptone/scion#2116](https://github.com/ptone/scion/issues/2116) is approved as a separate followup. It is not a core prerequisite and does not gate core UAT delivery. | `agent:pat-refactor` |
 | 2026-10-04 | **OD-2 to OD-10 decided: option (a) for each** ("go with recommendation, a"). Admin is not provisionable (422 for any non-null role); no new edit/withdraw capability for pending records; no initial groups; no expiry; the provider name applies at activation; natural-key idempotency only; the CLI is available in human and assistant modes and absent in agent mode; warn-only email policy at invite parity; records created through a hub UAT persist (creation authorizes the whole invitation effect; mutation-audit credential attribution; audit and explicit withdrawal). | `agent:pat-h-lead` |
+| 2026-10-07 | **Dev auth is not supported for provisioning:** "remove devauth support. de auth is single user local mode and should not mix with other user auth setups" (on GoogleCloudPlatform/scion#2735). `POST /api/v1/users` refuses a dev credential with `403 dev_auth_not_supported` (§7.3, §8 row 4a); other endpoints are unchanged. | `agent:pat-h-lead` |
 
 No other decision has been made.

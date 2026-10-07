@@ -2457,13 +2457,16 @@ func TestUserList(t *testing.T) {
 }
 
 // TestUserCreate_RoleRefusedAndNonAdminForbidden pins POST /api/v1/users
-// (user.admin.provision) for the two callers this test used to cover with a
-// single 403: an authorized caller (the dev super-admin) that names the
-// admin role gets 422 privileged_role_not_provisionable (design §8 row 12),
-// and a caller without user.invite gets 403 before any body check (row 8).
-// The full outcome table is in handlers_users_provision_test.go.
+// (user.admin.provision) for its main refusals: an authorized session
+// caller (a super-admin) that names the admin role gets 422
+// privileged_role_not_provisionable (design §8 row 12); a caller without
+// user.invite gets 403 before any body check (row 8); and the dev-auth
+// caller gets 403 dev_auth_not_supported, because dev auth is single-user
+// local mode (row 4a). The full outcome table is in
+// handlers_users_provision_test.go.
 func TestUserCreate_RoleRefusedAndNonAdminForbidden(t *testing.T) {
 	srv, s := testServer(t)
+	ctx := context.Background()
 
 	body := map[string]interface{}{
 		"email":       "newuser@example.com",
@@ -2471,7 +2474,13 @@ func TestUserCreate_RoleRefusedAndNonAdminForbidden(t *testing.T) {
 		"role":        "admin",
 	}
 
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/users", body)
+	adminID := tid("usercreate-super")
+	createTestUserWithRole(t, s, adminID, "usercreate-super@example.com", store.UserRoleAdmin, store.SystemRoleSuperAdmin)
+	admin, err := s.GetUser(ctx, adminID)
+	if err != nil {
+		t.Fatalf("get super-admin: %v", err)
+	}
+	rec := doRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/users", body)
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("authorized caller with role admin: expected status 422, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -2480,14 +2489,20 @@ func TestUserCreate_RoleRefusedAndNonAdminForbidden(t *testing.T) {
 	}
 
 	member := &store.User{ID: tid("usercreate-member"), Email: "usercreate-member@example.com", DisplayName: "Member", Role: store.UserRoleMember, Status: store.UserStatusActive}
-	if err := s.CreateUser(context.Background(), member); err != nil {
+	if err := s.CreateUser(ctx, member); err != nil {
 		t.Fatalf("create member: %v", err)
 	}
 	rec = doRequestAsUser(t, srv, member, http.MethodPost, "/api/v1/users", body)
 	if rec.Code != http.StatusForbidden {
 		t.Errorf("caller without user.invite: expected status 403, got %d: %s", rec.Code, rec.Body.String())
 	}
-	if _, err := s.GetUserByEmail(context.Background(), "newuser@example.com"); !errors.Is(err, store.ErrNotFound) {
+
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/users", body)
+	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "dev_auth_not_supported") {
+		t.Errorf("dev-auth caller: expected 403 dev_auth_not_supported, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	if _, err := s.GetUserByEmail(ctx, "newuser@example.com"); !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("no user record may be created, got err=%v", err)
 	}
 }

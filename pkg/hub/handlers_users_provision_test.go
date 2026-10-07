@@ -226,17 +226,14 @@ func TestHandleProvisionUser(t *testing.T) {
 		assert.JSONEq(t, `{"email":"new.person@example.com","status":"invited","displayName":"New Person"}`, a.AfterSummary)
 	})
 
-	t.Run("row13_hub_admin_session_and_dev_credential", func(t *testing.T) {
+	t.Run("row13_hub_admin_session", func(t *testing.T) {
 		f := newProvisionFixture(t)
 		rec := provisionAs(t, f.srv, f.hubAdmin, map[string]interface{}{"email": "by-hubadmin@example.com"})
 		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
-
-		rec = doRequest(t, f.srv, http.MethodPost, provisionPath, map[string]interface{}{"email": "by-dev@example.com"})
-		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
-		u := userByEmail(t, f.s, "by-dev@example.com")
+		u := userByEmail(t, f.s, "by-hubadmin@example.com")
 		audits := provisionAudits(t, f.s, u.ID)
 		require.Len(t, audits, 1)
-		assert.Equal(t, string(CredentialKindDev), audits[0].ActorCredentialType)
+		assert.Equal(t, string(CredentialKindInteractive), audits[0].ActorCredentialType)
 
 		// The inviter holds only user.invite (no user.read) and can still
 		// provision a new email: user.read selects the view, it never
@@ -418,6 +415,27 @@ func TestHandleProvisionUser(t *testing.T) {
 		assert.ErrorIs(t, err, store.ErrNotFound)
 	})
 
+	t.Run("row04a_dev_auth_refused", func(t *testing.T) {
+		// Dev auth is single-user local mode: provisioning refuses the
+		// dev credential (the dev user is a super-admin), before any body
+		// check, for valid and invalid bodies alike.
+		f := newProvisionFixture(t)
+		for _, body := range []string{
+			`{"email":"by-dev@example.com"}`,
+			`{"email":"by-dev@example.com","role":"admin"}`,
+			`{not json`,
+		} {
+			rec := doRequestRaw(t, f.srv, http.MethodPost, provisionPath, []byte(body), "application/json")
+			require.Equal(t, http.StatusForbidden, rec.Code, "%s: %s", body, rec.Body.String())
+			code, details := provisionErr(t, rec)
+			assert.Equal(t, ErrCodeForbidden, code)
+			assert.Equal(t, provisionReasonDevAuthNotSupported, details["reason"])
+		}
+		_, err := f.s.GetUserByEmail(ctx, "by-dev@example.com")
+		assert.ErrorIs(t, err, store.ErrNotFound)
+		assert.Empty(t, provisionAudits(t, f.s, ""))
+	})
+
 	t.Run("row05_real_hub_token_with_user_invite_refused", func(t *testing.T) {
 		m := newBearerMatrixFixture(t)
 		key := m.mint(t, hubBoundary(), []string{"user:invite"})
@@ -583,9 +601,6 @@ func TestHandleProvisionUser(t *testing.T) {
 		send := map[string]func(body string) *httptest.ResponseRecorder{
 			"session super-admin": func(b string) *httptest.ResponseRecorder { return provisionRaw(t, f.srv, f.superAdmin, b) },
 			"session inviter":     func(b string) *httptest.ResponseRecorder { return provisionRaw(t, f.srv, f.inviter, b) },
-			"dev": func(b string) *httptest.ResponseRecorder {
-				return doRequestRaw(t, f.srv, http.MethodPost, provisionPath, []byte(b), "application/json")
-			},
 		}
 		for caller, fn := range send {
 			for role, reason := range roles {
