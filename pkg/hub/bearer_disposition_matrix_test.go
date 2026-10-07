@@ -542,12 +542,6 @@ var bearerMatrixPositiveServerErrors = map[liveInventoryKey]bearerMatrixPositive
 		http.StatusNotImplemented, "the test server configures no log query service"},
 	{"project.metrics.read", http.MethodGet, "/api/v1/projects/{id}/metrics"}: {
 		http.StatusServiceUnavailable, "the test server configures no telemetry project for the metrics dashboard"},
-	{"hub.config.update", http.MethodPut, "/api/v1/admin/server-config"}: {
-		http.StatusInternalServerError, "the test server has no writable settings file"},
-	{"hub.config.update", http.MethodPatch, "/api/v1/admin/server-config"}: {
-		http.StatusInternalServerError, "the test server has no writable settings file"},
-	{"hub.config.update", http.MethodPost, "/api/v1/admin/server-config"}: {
-		http.StatusInternalServerError, "the test server has no writable settings file"},
 	{"hub.messaging.update", http.MethodPut, "/api/v1/admin/messaging"}: {
 		http.StatusNotImplemented, "the test server configures no operational settings"},
 	{"hub.experiments.update", http.MethodGet, "/api/v1/admin/experiments"}: {
