@@ -89,7 +89,7 @@ Settings (in the `artifacts` section): `remote_images_enabled` (default `true`),
 An artifact whose entry file is HTML (a single page or a small site published as a folder) is shown in a sandboxed frame. The page's scripts run, but in an isolated origin with no access to the hub page around it, to your session or to the hub's API.
 
 - The frame loads the version through a **view URL**, `/api/v1/artifacts/view/<capability>/<entry>`, issued to a reader of the artifact and valid for 30 minutes. Relative links in the bundle (`img/chart.png`, `css/site.css`) resolve under it, so the page loads its own files. The view URL names one version of one artifact and gives access to nothing else; it is not a share link.
-- Every view response carries a `Content-Security-Policy` with a `sandbox` directive, so the page stays isolated even when the URL is opened directly. The page may load scripts, styles, images, fonts and media only from the hub; it cannot make network requests from script, embed other frames or plugins, submit forms, open windows or navigate the page around it.
+- Every view response carries a `Content-Security-Policy` with a `sandbox` directive, so the page stays isolated even when the URL is opened directly. The page may load scripts, styles, images, fonts and media only from its own files under the view URL; it cannot make network requests from script, embed other frames or plugins, submit forms, open windows or navigate the page around it.
 - **Remote images are not loaded in HTML artifacts; include them in the bundle.** When an HTML entry references images by absolute `http(s)` URL, the publish response and the CLI print that warning, and the viewer shows it above the frame.
 
 ## Web page
