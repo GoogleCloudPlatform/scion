@@ -36,7 +36,11 @@ func TestResolveGitHubRef_UsesLsRemoteSeam(t *testing.T) {
 	var gotURLs []string
 	restore := SetGitLsRemoteForTest(func(_ context.Context, repoURL string) ([]byte, error) {
 		gotURLs = append(gotURLs, repoURL)
-		return []byte("aaaa\trefs/heads/main\nbbbb\trefs/heads/feature\ncccc\trefs/heads/feature/x\r\n"), nil
+		// A remote that can exist in real git: "feature-x" shares a prefix
+		// with "feature/x" as a string but is not a path prefix of
+		// "feature/x/templates/one", so only "feature/x" may match. (Real git
+		// cannot hold both "feature" and "feature/x".)
+		return []byte("aaaa\trefs/heads/main\nbbbb\trefs/heads/feature-x\ncccc\trefs/heads/feature/x\r\n"), nil
 	})
 	t.Cleanup(restore)
 
@@ -78,8 +82,10 @@ func TestResolveGitHubRef_LsRemoteErrorKeepsNaiveParse(t *testing.T) {
 
 func TestSetGitLsRemoteForTest_Restores(t *testing.T) {
 	before := gitLsRemote
-	restore := SetGitLsRemoteForTest(func(context.Context, string) ([]byte, error) { return nil, nil })
-	require.NotNil(t, gitLsRemote)
+	stub := GitLsRemoteFunc(func(context.Context, string) ([]byte, error) { return nil, nil })
+	restore := SetGitLsRemoteForTest(stub)
+	// The stub must be the runner actually installed.
+	assert.Equal(t, reflect.ValueOf(stub).Pointer(), reflect.ValueOf(gitLsRemote).Pointer())
 	restore()
 	// The production runner must be back in place.
 	assert.Equal(t, reflect.ValueOf(before).Pointer(), reflect.ValueOf(gitLsRemote).Pointer())

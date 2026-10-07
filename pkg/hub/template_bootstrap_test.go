@@ -1188,9 +1188,10 @@ func TestImportTemplatesFromRemote_WithProjectGithubToken(t *testing.T) {
 	}
 
 	// Stub git ls-remote so branch disambiguation never execs real git against
-	// github.com (ptone/scion#3670). The canned refs include a decoy
-	// "main/other" branch so the real longest-prefix matching path runs and
-	// must still resolve "main" + "templates".
+	// github.com (ptone/scion#3670). The stub pins that resolution goes through
+	// the seam with the project token URL; the resolved ref ("main" +
+	// "templates") is the same as the naive parse. Matcher coverage lives in
+	// pkg/config's TestResolveGitHubRef_UsesLsRemoteSeam.
 	lsRemote := stubGitLsRemote(t, testLsRemoteHeads)
 
 	// Hijack the HTTP client's Transport to mock the tarball fetch.
@@ -1383,11 +1384,11 @@ func TestImportHarnessConfigsFromRemote_WithProjectGithubToken(t *testing.T) {
 }
 
 // testLsRemoteHeads is canned `git ls-remote --heads` output for
-// chiefkarlin/scion-experiments. "main/other" is a decoy that shares the
-// "main/" prefix but is not a prefix of "main/templates" or
-// "main/harness-configs", so resolution must still pick "main".
+// chiefkarlin/scion-experiments. It models a remote that can exist in real
+// git (no ref is both a branch and a directory of branches); only "main" is a
+// prefix of "main/templates" and "main/harness-configs".
 const testLsRemoteHeads = "1111111111111111111111111111111111111111\trefs/heads/main\n" +
-	"2222222222222222222222222222222222222222\trefs/heads/main/other\n" +
+	"2222222222222222222222222222222222222222\trefs/heads/release/1.0\n" +
 	"3333333333333333333333333333333333333333\trefs/heads/feature/x\n"
 
 // assertLsRemoteCalledWithToken checks that branch resolution went through the
