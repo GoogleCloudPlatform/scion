@@ -30,16 +30,22 @@ import (
 
 // hubAuthURLPrecedence documents the hub URL order 'scion hub auth login'
 // (and logout, without --hub-url) uses; resolveHubAuthURL implements it.
+// After --hub-url it is the order every other hub command uses
+// (GetHubEndpoint): flag, then settings, then the environment.
 const hubAuthURLPrecedence = `The hub URL is taken from, in order:
   1. --hub-url
   2. the root --hub flag
-  3. the SCION_HUB_ENDPOINT environment variable
-  4. hub.endpoint in settings (the current project's, else global)`
+  3. hub.endpoint in settings (the current project's, else global)
+  4. the SCION_HUB_ENDPOINT environment variable
+  5. the SCION_HUB_URL environment variable
+This is the order the other hub commands use, plus --hub-url first.`
 
 // resolveHubAuthURL resolves the hub URL for hub auth login and logout:
-// --hub-url, then the root --hub flag, then SCION_HUB_ENDPOINT, then the
-// settings endpoint (ptone/scion#3537). It returns the URL and its source
-// ("--hub-url", "--hub", "env", "settings" or "" when none is set).
+// --hub-url, then the root --hub flag, then the settings endpoint, then
+// SCION_HUB_ENDPOINT, then SCION_HUB_URL. Apart from --hub-url this mirrors
+// GetHubEndpoint in root.go exactly (ptone/scion#3627); keep the two in
+// step. It returns the URL and its source ("--hub-url", "--hub",
+// "settings", "env" or "" when none is set).
 func resolveHubAuthURL(hubURLFlag, rootHubFlag string, getenv func(string) string, settingsEndpoint func() string) (string, string) {
 	if hubURLFlag != "" {
 		return hubURLFlag, "--hub-url"
@@ -47,11 +53,14 @@ func resolveHubAuthURL(hubURLFlag, rootHubFlag string, getenv func(string) strin
 	if rootHubFlag != "" {
 		return rootHubFlag, "--hub"
 	}
+	if ep := settingsEndpoint(); ep != "" {
+		return ep, "settings"
+	}
 	if env := getenv("SCION_HUB_ENDPOINT"); env != "" {
 		return env, "env"
 	}
-	if ep := settingsEndpoint(); ep != "" {
-		return ep, "settings"
+	if env := getenv("SCION_HUB_URL"); env != "" {
+		return env, "env"
 	}
 	return "", ""
 }

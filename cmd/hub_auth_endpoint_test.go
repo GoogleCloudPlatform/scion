@@ -26,45 +26,125 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestResolveHubAuthURL_Precedence pins the hub URL order of hub auth login
-// (ptone/scion#3537): --hub-url > --hub > SCION_HUB_ENDPOINT > settings.
-func TestResolveHubAuthURL_Precedence(t *testing.T) {
-	env := func(v string) func(string) string {
-		return func(k string) string {
-			if k == "SCION_HUB_ENDPOINT" {
+// hubURLSources is one combination of the inputs hub auth login reads.
+type hubURLSources struct {
+	hubURL, rootHub, settings, envEndpoint, envURL string
+}
+
+func (c hubURLSources) getenv(k string) string {
+	switch k {
+	case "SCION_HUB_ENDPOINT":
+		return c.envEndpoint
+	case "SCION_HUB_URL":
+		return c.envURL
+	}
+	return ""
+}
+
+func (c hubURLSources) settingsEndpoint() string { return c.settings }
+
+// allHubURLSources returns every combination of set/unset for the five
+// inputs, each set input carrying a distinct URL.
+func allHubURLSources() []hubURLSources {
+	var out []hubURLSources
+	for mask := 0; mask < 32; mask++ {
+		pick := func(bit int, v string) string {
+			if mask&(1<<bit) != 0 {
 				return v
 			}
 			return ""
 		}
+		out = append(out, hubURLSources{
+			hubURL:      pick(0, "https://hub-url"),
+			rootHub:     pick(1, "https://root-hub"),
+			settings:    pick(2, "https://settings"),
+			envEndpoint: pick(3, "https://env-endpoint"),
+			envURL:      pick(4, "https://env-url"),
+		})
 	}
-	settings := func(v string) func() string { return func() string { return v } }
+	return out
+}
 
+// TestResolveHubAuthURL_Precedence pins the hub URL order of hub auth login
+// (ptone/scion#3627): --hub-url > --hub > settings > SCION_HUB_ENDPOINT >
+// SCION_HUB_URL.
+func TestResolveHubAuthURL_Precedence(t *testing.T) {
 	tests := []struct {
-		name                    string
-		hubURL, rootHub, envVal string
-		settingsVal             string
-		wantURL, wantSource     string
+		name                string
+		in                  hubURLSources
+		wantURL, wantSource string
 	}{
-		{"hub-url wins", "https://a", "https://b", "https://c", "https://d", "https://a", "--hub-url"},
-		{"root --hub next", "", "https://b", "https://c", "https://d", "https://b", "--hub"},
-		{"env next", "", "", "https://c", "https://d", "https://c", "env"},
-		{"settings last", "", "", "", "https://d", "https://d", "settings"},
-		{"none", "", "", "", "", "", ""},
+		{"hub-url wins", hubURLSources{"https://a", "https://b", "https://c", "https://d", "https://e"}, "https://a", "--hub-url"},
+		{"root --hub next", hubURLSources{"", "https://b", "https://c", "https://d", "https://e"}, "https://b", "--hub"},
+		{"settings beat env", hubURLSources{"", "", "https://c", "https://d", "https://e"}, "https://c", "settings"},
+		{"SCION_HUB_ENDPOINT next", hubURLSources{"", "", "", "https://d", "https://e"}, "https://d", "env"},
+		{"SCION_HUB_URL last", hubURLSources{"", "", "", "", "https://e"}, "https://e", "env"},
+		{"none", hubURLSources{}, "", ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			url, src := resolveHubAuthURL(tt.hubURL, tt.rootHub, env(tt.envVal), settings(tt.settingsVal))
+			url, src := resolveHubAuthURL(tt.in.hubURL, tt.in.rootHub, tt.in.getenv, tt.in.settingsEndpoint)
 			assert.Equal(t, tt.wantURL, url)
 			assert.Equal(t, tt.wantSource, src)
 		})
 	}
 }
 
+// TestResolveHubAuthURL_AllCombinations checks every combination of flags,
+// settings and environment: the first set input in precedence order wins.
+func TestResolveHubAuthURL_AllCombinations(t *testing.T) {
+	for _, c := range allHubURLSources() {
+		want, wantSource := "", ""
+		for _, cand := range []struct{ v, src string }{
+			{c.hubURL, "--hub-url"},
+			{c.rootHub, "--hub"},
+			{c.settings, "settings"},
+			{c.envEndpoint, "env"},
+			{c.envURL, "env"},
+		} {
+			if cand.v != "" {
+				want, wantSource = cand.v, cand.src
+				break
+			}
+		}
+		url, src := resolveHubAuthURL(c.hubURL, c.rootHub, c.getenv, c.settingsEndpoint)
+		assert.Equal(t, want, url, "inputs %+v", c)
+		assert.Equal(t, wantSource, src, "inputs %+v", c)
+	}
+}
+
+type fakeHubSettings string
+
+func (f fakeHubSettings) GetHubEndpoint() string { return string(f) }
+
+// TestResolveHubAuthURL_AgreesWithGetHubEndpoint guards against drift: with
+// no --hub-url, hub auth login must pick the same hub as every other hub
+// command (GetHubEndpoint) for the same flag, settings and environment.
+func TestResolveHubAuthURL_AgreesWithGetHubEndpoint(t *testing.T) {
+	origHub, origNoHub := hubEndpoint, noHub
+	t.Cleanup(func() { hubEndpoint, noHub = origHub, origNoHub })
+	noHub = false
+
+	for _, c := range allHubURLSources() {
+		if c.hubURL != "" {
+			continue
+		}
+		hubEndpoint = c.rootHub
+		t.Setenv("SCION_HUB_ENDPOINT", c.envEndpoint)
+		t.Setenv("SCION_HUB_URL", c.envURL)
+
+		want := GetHubEndpoint(fakeHubSettings(c.settings))
+		got, _ := resolveHubAuthURL("", hubEndpoint, os.Getenv, c.settingsEndpoint)
+		assert.Equal(t, want, got, "inputs %+v", c)
+	}
+}
+
 func TestHubAuthLoginHelpDocumentsPrecedence(t *testing.T) {
 	assert.Contains(t, hubAuthLoginCmd.Long, "1. --hub-url")
 	assert.Contains(t, hubAuthLoginCmd.Long, "2. the root --hub flag")
-	assert.Contains(t, hubAuthLoginCmd.Long, "3. the SCION_HUB_ENDPOINT")
-	assert.Contains(t, hubAuthLoginCmd.Long, "4. hub.endpoint in settings")
+	assert.Contains(t, hubAuthLoginCmd.Long, "3. hub.endpoint in settings")
+	assert.Contains(t, hubAuthLoginCmd.Long, "4. the SCION_HUB_ENDPOINT")
+	assert.Contains(t, hubAuthLoginCmd.Long, "5. the SCION_HUB_URL")
 }
 
 // loginEndpointHome sets up an isolated HOME with a global settings file and
