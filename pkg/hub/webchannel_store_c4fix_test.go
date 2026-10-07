@@ -198,9 +198,7 @@ func sqliteMigrationRecorded(db *sql.DB, name string) bool {
 // TestC4Fix_SQLite_FreshDB verifies that on a brand-new database, Init
 // succeeds and the conversation_id column and unique index both exist.
 func TestC4Fix_SQLite_FreshDB(t *testing.T) {
-	db, err := sql.Open("sqlite3", ":memory:")
-	require.NoError(t, err)
-	defer func() { _ = db.Close() }()
+	db := openTestMemorySQLite(t, "sqlite3")
 
 	store := NewWebChatStore(db, "sqlite3")
 	require.NoError(t, store.Init(), "Init on fresh DB must succeed")
@@ -219,12 +217,10 @@ func TestC4Fix_SQLite_FreshDB(t *testing.T) {
 // three prior migrations recorded). Init must succeed, add the column, create
 // the index, and record the migration.
 func TestC4Fix_SQLite_PreExistingDB(t *testing.T) {
-	db, err := sql.Open("sqlite3", ":memory:")
-	require.NoError(t, err)
-	defer func() { _ = db.Close() }()
+	db := openTestMemorySQLite(t, "sqlite3")
 
 	// Seed the DB with the pre-existing schema (no conversation_id column).
-	_, err = db.Exec(preExistingSQLiteSchemaSQL)
+	_, err := db.Exec(preExistingSQLiteSchemaSQL)
 	require.NoError(t, err, "seeding pre-existing schema must succeed")
 
 	// Verify the column does NOT exist before Init.
@@ -246,9 +242,7 @@ func TestC4Fix_SQLite_PreExistingDB(t *testing.T) {
 
 // TestC4Fix_SQLite_Idempotent verifies Init can be called twice without error.
 func TestC4Fix_SQLite_Idempotent(t *testing.T) {
-	db, err := sql.Open("sqlite3", ":memory:")
-	require.NoError(t, err)
-	defer func() { _ = db.Close() }()
+	db := openTestMemorySQLite(t, "sqlite3")
 
 	store := NewWebChatStore(db, "sqlite3")
 	require.NoError(t, store.Init(), "first Init must succeed")
@@ -263,11 +257,9 @@ func TestC4Fix_SQLite_Idempotent(t *testing.T) {
 // TestC4Fix_SQLite_PreExistingDB_Idempotent verifies that Init on a
 // pre-existing DB is idempotent: the second call succeeds cleanly.
 func TestC4Fix_SQLite_PreExistingDB_Idempotent(t *testing.T) {
-	db, err := sql.Open("sqlite3", ":memory:")
-	require.NoError(t, err)
-	defer func() { _ = db.Close() }()
+	db := openTestMemorySQLite(t, "sqlite3")
 
-	_, err = db.Exec(preExistingSQLiteSchemaSQL)
+	_, err := db.Exec(preExistingSQLiteSchemaSQL)
 	require.NoError(t, err)
 
 	store := NewWebChatStore(db, "sqlite3")

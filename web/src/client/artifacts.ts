@@ -147,3 +147,45 @@ export function formatBytes(n: number): string {
 
 /** Largest text file the page renders inline. */
 export const MAX_INLINE_TEXT_BYTES = 4 * 1024 * 1024;
+
+/** One row of GET /api/v1/artifacts?mine=1 (pkg/artifacts/list.go). */
+export interface ArtifactListItem extends Artifact {
+  /** The current version is a review awaiting the owner. */
+  reviewPending: boolean;
+}
+
+/** Body of GET /api/v1/artifacts?mine=1. */
+export interface ArtifactListResponse {
+  artifacts: ArtifactListItem[];
+  /** Opaque cursor of the next page; absent on the last page. */
+  nextCursor?: string;
+}
+
+/** Filters of the artifact list. */
+export interface ArtifactListFilters {
+  /** Title or key contains this text. */
+  q?: string;
+  /** Only artifacts whose current version is a review. */
+  reviewPending?: boolean;
+  /** Only artifacts the caller owns. */
+  ownedOnly?: boolean;
+}
+
+/**
+ * URL of one page of the caller's artifact list. Empty filters are left
+ * out, so a cursor (bound by the hub to the exact filters) stays valid.
+ */
+export function artifactListUrl(filters: ArtifactListFilters, cursor?: string): string {
+  const params = new URLSearchParams({ mine: '1' });
+  const q = filters.q?.trim();
+  if (q) params.set('q', q);
+  if (filters.reviewPending) params.set('review_pending', '1');
+  if (filters.ownedOnly) params.set('owner', 'me');
+  if (cursor) params.set('cursor', cursor);
+  return `/api/v1/artifacts?${params.toString()}`;
+}
+
+/** Path of an artifact's page in the web UI. */
+export function artifactPagePath(a: Pick<Artifact, 'id' | 'scopeRef'>): string {
+  return `/projects/${encodeURIComponent(a.scopeRef)}/artifacts/${encodeURIComponent(a.id)}`;
+}

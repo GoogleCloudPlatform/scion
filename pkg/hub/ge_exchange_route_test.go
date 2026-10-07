@@ -82,11 +82,10 @@ func newGERouteTestServer(t *testing.T, validator GoogleCredentialValidator) *Se
 		TokenTTL:         DefaultGETokenTTL,
 	}
 
-	srv, err := New(cfg, s)
+	srv, err := newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
-	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 
 	// Replace the production Google validator with the test double.
 	srv.geExchangeService.validator = validator
@@ -107,11 +106,10 @@ func newGERouteTestServerDisabled(t *testing.T) *Server {
 	cfg.DevAuthToken = "test-dev-token-route"
 	// GEGoogleExchange is zero-value (not enabled).
 
-	srv, err := New(cfg, s)
+	srv, err := newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
-	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 
 	return srv
 }
@@ -377,11 +375,10 @@ func TestGEExchange_Route_SharesValidatorAndResolverWithExternalBearer(t *testin
 		TokenTTL:         DefaultGETokenTTL,
 	}
 
-	srv, err := New(cfg, s)
+	srv, err := newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
-	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 
 	if srv.geExchangeService == nil {
 		t.Fatal("expected GE exchange service to be configured")
@@ -433,11 +430,10 @@ func TestGEExchange_Route_GoogleStackBuiltWithoutExchangeOrTrust(t *testing.T) {
 	// Deliberately no GEGoogleExchange, no Federation config: neither Google
 	// trust nor the exchange is configured.
 
-	srv, err := New(cfg, s)
+	srv, err := newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
-	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 
 	if srv.geExchangeService != nil {
 		t.Fatal("expected no GE exchange service when GEGoogleExchange is not configured")
@@ -465,11 +461,10 @@ func TestGEExchange_Route_ProductionResolverHonoursAdminEmails(t *testing.T) {
 	cfg := DefaultServerConfig()
 	cfg.AdminEmails = []string{"admin@gmail.com"}
 
-	srv, err := New(cfg, s)
+	srv, err := newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
-	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 
 	if srv.authConfig.GoogleResolver == nil {
 		t.Fatal("expected authConfig.GoogleResolver to be set")
@@ -538,11 +533,10 @@ func TestServer_MetricsSettersReachRunningHandler(t *testing.T) {
 	// no network access — this test is about whether the setter wiring
 	// reaches the request path, not about a specific outcome.
 
-	srv, err := New(cfg, s)
+	srv, err := newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
-	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 	srv.geExchangeService.validator = &fakeGoogleValidator{idTokenResult: validGmailIdentity()}
 
 	handler := srv.Handler()
@@ -620,11 +614,10 @@ func TestServer_DefaultMetricsWiring_RecordsWithoutSetters(t *testing.T) {
 	// Deliberately no Federation config: the /api/v1/auth/me request below
 	// exercises not_applicable, which needs no Google trust and no network.
 
-	srv, err := New(cfg, s)
+	srv, err := newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
-	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 	srv.geExchangeService.validator = &fakeGoogleValidator{idTokenResult: validGmailIdentity()}
 
 	handler := srv.Handler()
@@ -718,11 +711,10 @@ func TestServer_DefaultMetricsWiring_OTelSetterStillMovesSnapshot(t *testing.T) 
 		TokenTTL:         DefaultGETokenTTL,
 	}
 
-	srv, err := New(cfg, s)
+	srv, err := newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
-	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 	srv.geExchangeService.validator = &fakeGoogleValidator{idTokenResult: validGmailIdentity()}
 
 	reader := metric.NewManualReader()

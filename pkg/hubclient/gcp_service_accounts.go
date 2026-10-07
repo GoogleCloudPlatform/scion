@@ -437,7 +437,7 @@ func (s *gcpServiceAccountService) Get(ctx context.Context, ref GCPServiceAccoun
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[GCPServiceAccount](resp)
+	return apiclient.DecodeRequired[GCPServiceAccount](resp)
 }
 
 func (s *gcpServiceAccountService) Create(ctx context.Context, req *CreateGCPServiceAccountRequest) (*GCPServiceAccount, error) {
@@ -454,7 +454,7 @@ func (s *gcpServiceAccountService) Create(ctx context.Context, req *CreateGCPSer
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[GCPServiceAccount](resp)
+	return apiclient.DecodeRequired[GCPServiceAccount](resp)
 }
 
 func (s *gcpServiceAccountService) Delete(ctx context.Context, ref GCPServiceAccountRef) error {
@@ -473,7 +473,7 @@ func (s *gcpServiceAccountService) Verify(ctx context.Context, ref GCPServiceAcc
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[GCPServiceAccount](resp)
+	return apiclient.DecodeRequired[GCPServiceAccount](resp)
 }
 
 func (s *gcpServiceAccountService) Mint(ctx context.Context, projectID string, req *MintGCPServiceAccountRequest) (*GCPServiceAccount, error) {
@@ -485,5 +485,5 @@ func (s *gcpServiceAccountService) Mint(ctx context.Context, projectID string, r
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[GCPServiceAccount](resp)
+	return apiclient.DecodeRequired[GCPServiceAccount](resp)
 }

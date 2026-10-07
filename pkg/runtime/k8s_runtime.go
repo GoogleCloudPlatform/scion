@@ -490,12 +490,7 @@ func filterDescriptiveLabels(agentName string, labels map[string]string) map[str
 
 func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName string, err error) {
 	fmt.Printf("Starting agent '%s' on Kubernetes...\n", config.Name)
-	namespace := r.DefaultNamespace
-	if ns, ok := config.Labels["scion.namespace"]; ok {
-		namespace = ns
-	} else if ns, ok := config.Labels["namespace"]; ok {
-		namespace = ns
-	}
+	namespace := r.runNamespace(config.Labels)
 
 	if config.Name == "" {
 		config.Name = fmt.Sprintf("scion-%d", time.Now().UnixNano())
@@ -1711,6 +1706,62 @@ func sharedDirPVCName(projectName, dirName string) string {
 	return projectRWXClaimName(projectName, "shared", dirName)
 }
 
+// runNamespace returns the namespace Run places an agent with labels in:
+// the scion.namespace label, else the namespace label, else
+// DefaultNamespace.
+func (r *KubernetesRuntime) runNamespace(labels map[string]string) string {
+	if ns, ok := labels["scion.namespace"]; ok {
+		return ns
+	}
+	if ns, ok := labels["namespace"]; ok {
+		return ns
+	}
+	return r.DefaultNamespace
+}
+
+// sharedDirsHaveOwnClaims reports whether the local shared dirs of config
+// get a claim of their own (createSharedDirPVCs creates or reuses one per
+// dir). They do not when the workspace is on nfs with a bound claim: they
+// are then served by subPath from the workspace claim.
+func sharedDirsHaveOwnClaims(config RunConfig) bool {
+	return config.WorkspaceBackendName != "nfs" || config.NFSPVClaimName == ""
+}
+
+// SharedDirUsesClaim implements SharedDirClaimChecker with the same rules
+// as createSharedDirPVCs: a dir served from the shared_dir_storage nfs
+// export has no claim of its own, and neither has any dir when
+// sharedDirsHaveOwnClaims is false.
+func (r *KubernetesRuntime) SharedDirUsesClaim(config RunConfig, dirName string) bool {
+	if config.SharedDirStorage.Serves(dirName) {
+		return false
+	}
+	return sharedDirsHaveOwnClaims(config)
+}
+
+// SharedDirClaimExists implements SharedDirClaimChecker: it looks up, by
+// name, the shared-dir PVC that createSharedDirPVCs would create or reuse
+// for dirName, in the namespace Run would use for config. Any error other
+// than NotFound is returned.
+func (r *KubernetesRuntime) SharedDirClaimExists(ctx context.Context, config RunConfig, dirName string) (bool, error) {
+	projectName := projectkeys.ProjectNameFromLabels(config.Labels)
+	if projectName == "" {
+		return false, fmt.Errorf("cannot look up the shared dir PVC: missing scion.project label")
+	}
+	if r.Client == nil || r.Client.Clientset == nil {
+		return false, fmt.Errorf("cannot look up the shared dir PVC: no Kubernetes client")
+	}
+	namespace := r.runNamespace(config.Labels)
+	pvcName := sharedDirPVCName(projectName, dirName)
+	_, err := r.Client.Clientset.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, pvcName, metav1.GetOptions{})
+	if err == nil {
+		return true, nil
+	}
+	if k8serrors.IsNotFound(err) {
+		return false, nil
+	}
+	return false, fmt.Errorf("looking up shared dir PVC %s/%s: %w", namespace, pvcName, err)
+}
+
 // defaultSharedDirSize is the default PVC size when not specified in settings.
 const defaultSharedDirSize = "10Gi"
 
@@ -1747,7 +1798,7 @@ func (r *KubernetesRuntime) createSharedDirPVCs(ctx context.Context, namespace s
 
 	// NFS backend: shared dirs use subPaths on the workspace NFS PVC,
 	// no separate PVCs needed (design §5.3).
-	if config.WorkspaceBackendName == "nfs" && config.NFSPVClaimName != "" {
+	if !sharedDirsHaveOwnClaims(config) {
 		runtimeLog.Info("NFS backend: shared dirs served via NFS subPath, skipping PVC creation",
 			"shared_dir_count", len(sharedDirs))
 		return nil

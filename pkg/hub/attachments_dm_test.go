@@ -19,7 +19,6 @@ package hub
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"mime/multipart"
 	"net/http"
@@ -41,16 +40,7 @@ func attachmentTestServer(t *testing.T) (*Server, store.Store) {
 
 	srv, s := testServer(t)
 
-	db, err := sql.Open("sqlite3", ":memory:")
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	// Each pooled connection to ":memory:" is a separate, empty database, so
-	// a second connection opened under concurrent load sees none of the
-	// tables Init() created on the first. Pin the pool to one connection to
-	// keep every caller on the same in-memory database.
-	db.SetMaxOpenConns(1)
+	db := openTestMemorySQLite(t, "sqlite3")
 
 	wcs := NewWebChatStore(db, "sqlite3")
 	if err := wcs.Init(); err != nil {
