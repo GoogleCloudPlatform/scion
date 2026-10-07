@@ -213,6 +213,18 @@ func TestManagedCreate_DeleteWon_BeforeWrite_Answers409AndStopsInteraction(t *te
 			})
 			require.NotEmpty(t, agentID, "the hook ran: %d %s", rec.Code, rec.Body.String())
 
+			if !del.compensate && del.name != "none" {
+				// A delete that gave up (failed, or its lease lapsed)
+				// still bumped state_version, so the post-create write
+				// conflicted while the agent stays live: the create is
+				// rolled back and answers 500 (ptone/scion#3557).
+				bodyID, warnings := requireManagedCreateUnrecorded(t, rec)
+				assert.Equal(t, agentID, bodyID)
+				assert.Len(t, warnings, 1)
+				assert.Equal(t, []string{"interaction-1"}, backend.cancels(), "the create stops the interaction")
+				assert.Zero(t, pub.count("created"), "no created: %v", pub.kinds())
+				return
+			}
 			if !del.compensate {
 				require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 				var resp CreateAgentResponse
