@@ -3316,6 +3316,212 @@ const (
 )
 
 // =============================================================================
+// Delegation Descendants (read-only walk over delegation edges)
+// =============================================================================
+
+// Bounds of ListDelegationDescendants used when the query leaves them zero.
+const (
+	DefaultDescendantMaxDepth = 32
+	DefaultDescendantMaxNodes = 5000
+)
+
+// ErrDescendantLimit is returned by ListDelegationDescendants, together with
+// the descendants found so far, when the walk reaches DescendantQuery.MaxDepth
+// or DescendantQuery.MaxNodes with descendants still unvisited. The returned
+// set is then incomplete: callers must refuse to treat it as the full set of
+// descendants.
+var ErrDescendantLimit = errors.New("delegation descendant limit reached")
+
+// DescendantLink is how a descendant was reached from its walk parent.
+type DescendantLink string
+
+const (
+	// DescendantLinkEdge: a delegation edge from the parent to the agent.
+	DescendantLinkEdge DescendantLink = "edge"
+	// DescendantLinkOwner: the agent's owner_id is the parent.
+	DescendantLinkOwner DescendantLink = "owner"
+	// DescendantLinkCreatedBy: the agent has no owner_id and its
+	// created_by is the parent.
+	DescendantLinkCreatedBy DescendantLink = "created_by"
+	// DescendantLinkAncestry: the agent has no owner_id and its ancestry
+	// contains the root principal (direct children of the root only).
+	DescendantLinkAncestry DescendantLink = "ancestry"
+)
+
+// DescendantQuery selects the agents reachable from a root principal inside
+// one project.
+type DescendantQuery struct {
+	// RootType and RootID name the root principal (DelegationPrincipalUser
+	// or DelegationPrincipalAgent). RootID must be a UUID.
+	RootType string
+	RootID   string
+	// ProjectID restricts the walk to edges with scope (project, ProjectID)
+	// and, for legacy links, to agents whose project_id is ProjectID.
+	ProjectID string
+	// IncludeSoftDeleted also returns soft-deleted agents. The walk expands
+	// soft-deleted agents (and agents without a row) either way.
+	IncludeSoftDeleted bool
+	// LegacyLinks adds the owner_id / created_by / ancestry links to the
+	// delegation edges (see DescendantLink).
+	LegacyLinks bool
+	// SkipHeldForRoot leaves out agents that already have an active
+	// AgentHold whose root principal ID is RootID: they are still expanded
+	// (their descendants are still reached) but are not returned and do not
+	// count toward MaxNodes. A caller that holds the returned agents and
+	// calls again therefore continues further into the tree. Hold roots
+	// are users, so SkipHeldForRoot requires RootType
+	// DelegationPrincipalUser; with an agent root the query returns
+	// ErrInvalidInput.
+	SkipHeldForRoot bool
+	// MaxDepth bounds the walk depth (DefaultDescendantMaxDepth when zero).
+	MaxDepth int
+	// MaxNodes bounds the number of returned agents
+	// (DefaultDescendantMaxNodes when zero).
+	MaxNodes int
+}
+
+// DescendantRef is one agent reached by ListDelegationDescendants.
+type DescendantRef struct {
+	AgentID string
+	// ViaID is the walk parent agent; empty when the agent was reached
+	// directly from the root principal.
+	ViaID string
+	// Depth is 1 for a direct child of the root principal.
+	Depth int
+	Link  DescendantLink
+	// EdgeActive and EdgeDeactivationCause describe the delegation edge
+	// when Link is DescendantLinkEdge; both are zero for legacy links.
+	EdgeActive            bool
+	EdgeDeactivationCause EdgeDeactivationCause
+}
+
+// DescendantResult is the result of ListDelegationDescendants, in walk order
+// (breadth-first; within a level, edge links before legacy links).
+type DescendantResult struct {
+	Agents []DescendantRef
+}
+
+// =============================================================================
+// Agent Holds
+// =============================================================================
+
+// AgentHoldCause is why an agent is held.
+type AgentHoldCause string
+
+const (
+	// AgentHoldCauseOwnerAccessEnded: the root principal's access to the
+	// agent's project ended.
+	AgentHoldCauseOwnerAccessEnded AgentHoldCause = "owner_access_ended"
+)
+
+// ValidAgentHoldCause reports whether c is a recognised hold cause.
+func ValidAgentHoldCause(c AgentHoldCause) bool {
+	return c == AgentHoldCauseOwnerAccessEnded
+}
+
+// MembershipLossTrigger is the event that asked for a membership
+// re-evaluation; it is recorded on MembershipLossCheck rows and on the holds
+// they produce.
+type MembershipLossTrigger string
+
+const (
+	MembershipLossTriggerMemberRemove          MembershipLossTrigger = "member_remove"
+	MembershipLossTriggerMemberRoleChange      MembershipLossTrigger = "member_role_change"
+	MembershipLossTriggerMemberPrincipalDelete MembershipLossTrigger = "member_principal_delete"
+	MembershipLossTriggerAdminBindingDelete    MembershipLossTrigger = "admin_binding_delete"
+	MembershipLossTriggerOwnershipTransfer     MembershipLossTrigger = "ownership_transfer"
+	MembershipLossTriggerGroupChange           MembershipLossTrigger = "group_change"
+	MembershipLossTriggerBindingExpiry         MembershipLossTrigger = "binding_expiry"
+	MembershipLossTriggerSystemScopeChange     MembershipLossTrigger = "system_scope_change"
+	MembershipLossTriggerRestoreCheck          MembershipLossTrigger = "restore_check"
+	MembershipLossTriggerReconcile             MembershipLossTrigger = "reconcile"
+)
+
+// ValidMembershipLossTrigger reports whether t is a recognised trigger.
+func ValidMembershipLossTrigger(t MembershipLossTrigger) bool {
+	switch t {
+	case MembershipLossTriggerMemberRemove,
+		MembershipLossTriggerMemberRoleChange,
+		MembershipLossTriggerMemberPrincipalDelete,
+		MembershipLossTriggerAdminBindingDelete,
+		MembershipLossTriggerOwnershipTransfer,
+		MembershipLossTriggerGroupChange,
+		MembershipLossTriggerBindingExpiry,
+		MembershipLossTriggerSystemScopeChange,
+		MembershipLossTriggerRestoreCheck,
+		MembershipLossTriggerReconcile:
+		return true
+	}
+	return false
+}
+
+// AgentHold records that an agent is held because its root principal's
+// access to the agent's project ended. An agent is held while it has at
+// least one active hold (ClearedAt nil). There is at most one active hold
+// per (AgentID, RootPrincipalID).
+type AgentHold struct {
+	ID                string                `json:"id"`
+	AgentID           string                `json:"agentId"`
+	ProjectID         string                `json:"projectId"`
+	Cause             AgentHoldCause        `json:"cause"`
+	RootPrincipalType string                `json:"rootPrincipalType"`
+	RootPrincipalID   string                `json:"rootPrincipalId"`
+	ViaAgentID        string                `json:"viaAgentId,omitempty"`
+	Trigger           MembershipLossTrigger `json:"trigger"`
+	ActorKind         string                `json:"actorKind"`
+	ActorID           string                `json:"actorId"`
+	CorrelationID     string                `json:"correlationId"`
+	CreatedAt         time.Time             `json:"createdAt"`
+	ClearedAt         *time.Time            `json:"clearedAt,omitempty"`
+	ClearedByKind     string                `json:"clearedByKind,omitempty"`
+	ClearedByID       string                `json:"clearedById,omitempty"`
+	ClearReason       string                `json:"clearReason,omitempty"`
+}
+
+// AgentHoldRootUser is the only AgentHold.RootPrincipalType accepted.
+const AgentHoldRootUser = "user"
+
+// ClearActorUser is the only ClearActor kind ClearAgentHolds accepts.
+const ClearActorUser = "user"
+
+// ClearActor is the principal clearing agent holds.
+type ClearActor struct {
+	Kind string
+	ID   string
+}
+
+// ErrInvalidActor is returned by ClearAgentHolds when the actor is not a
+// user principal. It wraps ErrInvalidInput.
+var ErrInvalidActor = fmt.Errorf("%w: agent holds can only be cleared by a user principal", ErrInvalidInput)
+
+// =============================================================================
+// Membership Loss Checks (durable re-evaluation work items)
+// =============================================================================
+
+// ErrClaimLost is returned by CompleteMembershipLossCheck and
+// FailMembershipLossCheck when the check is no longer held by the caller's
+// claim: it was claimed again after the lease expired, or it no longer
+// exists.
+var ErrClaimLost = errors.New("membership loss check claim lost")
+
+// MembershipLossCheck asks the hub to re-evaluate UserID's access to
+// ProjectID (every project where the user roots agents when ProjectID is
+// empty) and the agents rooted at the user.
+type MembershipLossCheck struct {
+	ID            string                `json:"id"`
+	UserID        string                `json:"userId"`
+	ProjectID     string                `json:"projectId,omitempty"`
+	Trigger       MembershipLossTrigger `json:"trigger"`
+	ActorKind     string                `json:"actorKind"`
+	ActorID       string                `json:"actorId"`
+	CorrelationID string                `json:"correlationId"`
+	CreatedAt     time.Time             `json:"createdAt"`
+	Attempts      int                   `json:"attempts"`
+	LastError     string                `json:"lastError,omitempty"`
+	LeaseUntil    *time.Time            `json:"leaseUntil,omitempty"`
+}
+
+// =============================================================================
 // Agent Credentials (Permissions Foundation Phase 1H)
 // =============================================================================
 
