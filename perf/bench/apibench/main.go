@@ -49,7 +49,9 @@
 // pkg/hub/perftrace.go), passing --want-perf-trace additionally sets the
 // opt-in X-Scion-Perf-Trace request header and records the X-Scion-Perf-*
 // response headers (endpoint class, phase times and counts, authorization
-// store calls and times, decision-audit counts, DB pool waits). Durations in
+// store calls and times, decision-audit counts, DB pool waits). The hub
+// sends those headers only to an unscoped local platform admin; for any
+// other caller, --hub-perf-log joins the hub's perf_trace log lines instead. Durations in
 // those headers are microseconds; counts are host-independent and suit a
 // CI budget. On a plain baseline run against unmodified main there is no such
 // data, and the report's perfTraceAvailable field is false rather than
@@ -200,7 +202,7 @@ func main() {
 	runs := flag.Int("runs", 5, "number of timed trials per scenario (median/spread reported over these)")
 	warmup := flag.Int("warmup", 1, "number of untimed warmup requests per scenario before the timed runs (warmup results are discarded, not recorded in the report, and a warmup failure is not fatal)")
 	outPath := flag.String("out", "", "path to write the JSON report (required)")
-	wantPerfTrace := flag.Bool("want-perf-trace", false, "set the opt-in X-Scion-Perf-Trace header and record any perf-trace response data (only meaningful when the hub runs with server.hub.perf_trace on)")
+	wantPerfTrace := flag.Bool("want-perf-trace", false, "set the opt-in X-Scion-Perf-Trace header and record any perf-trace response data (headers come back only for an unscoped local platform admin on a hub with server.hub.perf_trace on; see --hub-perf-log)")
 	notes := flag.String("notes", "", "free-form note about machine/CPU conditions for this run, copied into the report")
 	hubPerfLog := flag.String("hub-perf-log", "", "path to the hub's JSON log; after the run, its perf_trace lines are joined to attempts by request ID (for callers that do not receive the admin-only perf headers)")
 	timeoutSeconds := flag.Int("timeout-seconds", 60, "per-request client timeout; the unmodified-main baseline at 500 agents can exceed the 60s default, per ptone/scion#2367's superlinear-scaling diagnosis")

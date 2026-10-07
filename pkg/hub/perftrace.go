@@ -390,7 +390,7 @@ func (t *PerfTrace) Snapshot() PerfTraceSnapshot {
 }
 
 // Response header names, defined only here. The request opts in with
-// HeaderPerfTraceRequest: 1; the server must have server.hub.perf_trace on,
+// headerPerfTraceRequest: 1; the server must have server.hub.perf_trace on,
 // and the caller must be an unscoped local platform admin
 // (perfHeadersAllowed). perfResponseWriter is the only writer of these
 // headers. Values are
@@ -398,14 +398,14 @@ func (t *PerfTrace) Snapshot() PerfTraceSnapshot {
 // microseconds. The headers are taken when the response status is written,
 // so they never include the serialize phase (the log line does).
 const (
-	HeaderPerfTraceRequest     = "X-Scion-Perf-Trace"
-	HeaderPerfTraceEndpoint    = "X-Scion-Perf-Endpoint"
-	HeaderPerfTracePhases      = "X-Scion-Perf-Phases"
-	HeaderPerfTracePhaseCounts = "X-Scion-Perf-Phase-Counts"
-	HeaderPerfTraceStoreCalls  = "X-Scion-Perf-Store-Calls"
-	HeaderPerfTraceStoreTime   = "X-Scion-Perf-Store-Us"
-	HeaderPerfTraceDecisions   = "X-Scion-Perf-Decisions"
-	HeaderPerfTraceDB          = "X-Scion-Perf-DB"
+	headerPerfTraceRequest     = "X-Scion-Perf-Trace"
+	headerPerfTraceEndpoint    = "X-Scion-Perf-Endpoint"
+	headerPerfTracePhases      = "X-Scion-Perf-Phases"
+	headerPerfTracePhaseCounts = "X-Scion-Perf-Phase-Counts"
+	headerPerfTraceStoreCalls  = "X-Scion-Perf-Store-Calls"
+	headerPerfTraceStoreTime   = "X-Scion-Perf-Store-Us"
+	headerPerfTraceDecisions   = "X-Scion-Perf-Decisions"
+	headerPerfTraceDB          = "X-Scion-Perf-DB"
 )
 
 func microseconds(d time.Duration) int64 { return d.Microseconds() }
@@ -453,25 +453,25 @@ func kv(parts ...any) string {
 // header name. Empty values are omitted.
 func (s PerfTraceSnapshot) HeaderValues() map[string]string {
 	out := map[string]string{
-		HeaderPerfTraceEndpoint: s.Endpoint,
-		HeaderPerfTraceDecisions: kv(
+		headerPerfTraceEndpoint: s.Endpoint,
+		headerPerfTraceDecisions: kv(
 			"count", s.AuditRecords, "allow", s.AuditAllow, "deny", s.AuditDeny,
 			"other", s.AuditOther, "audit_us", microseconds(s.AuditEmitTime)),
 	}
 	if v := joinPerfCounts(s.Phases, func(c PerfCount) int64 { return microseconds(c.Duration) }); v != "" {
-		out[HeaderPerfTracePhases] = v
+		out[headerPerfTracePhases] = v
 	}
 	if v := joinPerfCounts(s.Phases, func(c PerfCount) int64 { return c.Count }); v != "" {
-		out[HeaderPerfTracePhaseCounts] = v
+		out[headerPerfTracePhaseCounts] = v
 	}
 	if v := joinPerfCounts(s.StoreCalls, func(c PerfCount) int64 { return c.Count }); v != "" {
-		out[HeaderPerfTraceStoreCalls] = v
+		out[headerPerfTraceStoreCalls] = v
 	}
 	if v := joinPerfCounts(s.StoreCalls, func(c PerfCount) int64 { return microseconds(c.Duration) }); v != "" {
-		out[HeaderPerfTraceStoreTime] = v
+		out[headerPerfTraceStoreTime] = v
 	}
 	if s.DBAvailable {
-		out[HeaderPerfTraceDB] = kv("wait_count", s.DBWaitCount, "wait_us", microseconds(s.DBWaitDuration),
+		out[headerPerfTraceDB] = kv("wait_count", s.DBWaitCount, "wait_us", microseconds(s.DBWaitDuration),
 			"in_use", s.DBInUse, "open", s.DBOpen)
 	}
 	return out

@@ -29,8 +29,9 @@ import (
 
 // perfTraceMiddleware installs a fresh PerfTrace into each request context,
 // times the serialize phase (first response write to handler return), adds
-// the X-Scion-Perf-* response headers when the request opted in with
-// X-Scion-Perf-Trace: 1, and writes one "perf_trace" log line per request.
+// the X-Scion-Perf-* response headers when an unscoped local platform admin
+// opted in with X-Scion-Perf-Trace: 1 (perfHeadersAllowed), and writes one
+// "perf_trace" log line per request.
 //
 // applyMiddleware installs it only when server.hub.perf_trace is on, as the
 // innermost middleware, so the trace reaches the route handler, the
@@ -54,7 +55,7 @@ func (s *Server) perfTraceMiddleware(next http.Handler) http.Handler {
 		pw := &perfResponseWriter{
 			ResponseWriter: w,
 			trace:          trace,
-			emitHeaders:    r.Header.Get(HeaderPerfTraceRequest) == "1" && perfHeadersAllowed(r),
+			emitHeaders:    r.Header.Get(headerPerfTraceRequest) == "1" && perfHeadersAllowed(r),
 		}
 		defer func() {
 			if pw.wroteHeader {

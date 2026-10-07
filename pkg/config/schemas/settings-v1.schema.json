@@ -1225,7 +1225,7 @@
         "perf_trace": {
           "type": "boolean",
           "default": false,
-          "description": "Turns on per-request performance tracing, off by default. Each Hub API request and SSE connection then logs one perf_trace line with phase timings, authorization store-call and decision-audit counts and DB pool waits; a request that sends X-Scion-Perf-Trace: 1 also gets them in X-Scion-Perf-* response headers. Observe only: decisions, audit records and response bodies are unchanged. For diagnosis; not for routine production use. Restart required to change.",
+          "description": "Turns on per-request performance tracing, off by default. Each Hub API request and SSE connection then logs one perf_trace line with phase timings, authorization store-call and decision-audit counts and DB pool waits; an unscoped local platform admin who sends X-Scion-Perf-Trace: 1 also gets them in X-Scion-Perf-* response headers; no other caller does. Observe only: decisions, audit records and response bodies are unchanged. For diagnosis; not for routine production use. Restart required to change.",
           "x-env-var": "SCION_SERVER_HUB_PERFTRACE",
           "x-since": "1"
         },
