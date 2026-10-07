@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -83,11 +84,9 @@ func TestHandleHealthSummary_ResponseShape(t *testing.T) {
 	// Verify brokers is an array (even if empty)
 	assert.NotNil(t, resp.Brokers.Items)
 
-	// Verify agents section has initialized maps/slices
+	// Verify agents section has initialized slices
 	assert.NotNil(t, resp.Agents.ByPhase)
-	assert.NotNil(t, resp.Agents.Stalled)
-	assert.NotNil(t, resp.Agents.Crashed)
-	assert.NotNil(t, resp.Agents.Errored)
+	assert.NotNil(t, resp.Agents.Problems)
 
 	// Verify dispatch is nil (no dispatch metrics available yet)
 	assert.Nil(t, resp.Dispatch)
@@ -159,21 +158,214 @@ func TestHandleHealthSummary_AgentAggregation(t *testing.T) {
 	var resp HealthSummaryResponse
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
 
-	// Should be degraded because we have stalled/crashed/errored agents
+	// Degraded because of the crashed and errored agents (not the stalled one).
 	assert.Equal(t, "degraded", resp.Status)
 
-	// Verify agent counts
 	assert.Equal(t, 5, resp.Agents.Total)
-	assert.Contains(t, resp.Agents.Stalled, "Stalled Agent")
-	assert.Contains(t, resp.Agents.Crashed, "Crashed Agent")
-	assert.Contains(t, resp.Agents.Errored, "Errored Agent")
-	assert.Len(t, resp.Agents.Stalled, 1)
-	assert.Len(t, resp.Agents.Crashed, 1)
-	assert.Len(t, resp.Agents.Errored, 1)
+	assert.Equal(t, 4, resp.Agents.Active)
+	assert.Equal(t, 2, resp.Agents.Errored)
+	assert.Equal(t, 5, resp.Agents.Considered)
+	assert.Equal(t, []HealthPhaseCount{
+		{Phase: string(state.PhaseRunning), Count: 4},
+		{Phase: string(state.PhaseError), Count: 1},
+	}, resp.Agents.ByPhase)
 
-	// Verify phase counts
-	assert.Equal(t, 4, resp.Agents.ByPhase[string(state.PhaseRunning)])
-	assert.Equal(t, 1, resp.Agents.ByPhase[string(state.PhaseError)])
+	require.Len(t, resp.Agents.Problems, 2, "offline group is empty and omitted")
+	assert.Equal(t, HealthAgentGroup{Kind: HealthAgentGroupErrored, Count: 1, Items: []HealthAgentRef{{
+		ID: tid("agent-errored"), Name: "Errored Agent", ProjectID: project.ID, ProjectSlug: "health-test",
+	}}}, resp.Agents.Problems[0])
+	assert.Equal(t, HealthAgentGroup{Kind: HealthAgentGroupCrashed, Count: 1, Items: []HealthAgentRef{{
+		ID: tid("agent-crashed"), Name: "Crashed Agent", ProjectID: project.ID, ProjectSlug: "health-test",
+		BrokerID: tid("broker-1"),
+	}}}, resp.Agents.Problems[1])
+
+	require.Len(t, resp.Brokers.Items, 1)
+	assert.Equal(t, HealthBrokerAgents{Running: 4, Attention: 1}, resp.Brokers.Items[0].Agents)
+
+	assertNoStallData(t, rr.Body.Bytes())
+}
+
+// assertNoStallData fails if the summary body mentions stalled or suspended
+// agents anywhere: stalls are not a health signal.
+func assertNoStallData(t *testing.T, body []byte) {
+	t.Helper()
+	text := string(body)
+	assert.NotContains(t, text, "stall")
+	assert.NotContains(t, text, "Stall")
+	var raw struct {
+		Agents map[string]json.RawMessage `json:"agents"`
+	}
+	require.NoError(t, json.Unmarshal(body, &raw))
+	for _, k := range []string{"stalled", "suspended", "crashed"} {
+		assert.NotContains(t, raw.Agents, k, "agents.%s must not be returned", k)
+	}
+	var problems struct {
+		Agents struct {
+			Problems []HealthAgentGroup `json:"problems"`
+		} `json:"agents"`
+	}
+	require.NoError(t, json.Unmarshal(body, &problems))
+	for _, g := range problems.Agents.Problems {
+		assert.Contains(t, []string{HealthAgentGroupErrored, HealthAgentGroupCrashed, HealthAgentGroupOffline}, g.Kind)
+	}
+}
+
+// TestHandleHealthSummary_SameNamedAgentsDistinguishable: two agents with the
+// same name in different projects come back with distinct IDs and project
+// slugs, so the dashboard can label and link each one correctly.
+func TestHandleHealthSummary_SameNamedAgentsDistinguishable(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	for _, p := range []string{"alpha", "beta"} {
+		require.NoError(t, s.CreateProject(ctx, &store.Project{ID: tid("proj-" + p), Name: p, Slug: p}))
+		require.NoError(t, s.CreateAgent(ctx, &store.Agent{
+			ID: tid("dup-" + p), Name: "worker", Slug: "worker", ProjectID: tid("proj-" + p),
+			Phase: string(state.PhaseError),
+		}))
+	}
+
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/admin/health/summary", nil)
+	require.Equal(t, http.StatusOK, rr.Code)
+	var resp HealthSummaryResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+
+	require.Len(t, resp.Agents.Problems, 1)
+	g := resp.Agents.Problems[0]
+	assert.Equal(t, HealthAgentGroupErrored, g.Kind)
+	assert.Equal(t, 2, g.Count)
+	got := map[string]string{}
+	for _, it := range g.Items {
+		assert.Equal(t, "worker", it.Name)
+		got[it.ID] = it.ProjectSlug
+	}
+	assert.Equal(t, map[string]string{tid("dup-alpha"): "alpha", tid("dup-beta"): "beta"}, got)
+}
+
+// projectListCountingStore counts project list calls so a test can confirm
+// slugs are resolved with one batched lookup.
+type projectListCountingStore struct {
+	store.Store
+	summaryCalls, listCalls, getCalls int
+	failSummaries                     bool
+}
+
+func (p *projectListCountingStore) ListProjectSummaries(ctx context.Context, f store.ProjectFilter, o store.ListOptions) (*store.ListResult[store.Project], error) {
+	p.summaryCalls++
+	if p.failSummaries {
+		return nil, errors.New("boom")
+	}
+	return p.Store.ListProjectSummaries(ctx, f, o)
+}
+
+func (p *projectListCountingStore) ListProjects(ctx context.Context, f store.ProjectFilter, o store.ListOptions) (*store.ListResult[store.Project], error) {
+	p.listCalls++
+	return p.Store.ListProjects(ctx, f, o)
+}
+
+func (p *projectListCountingStore) GetProject(ctx context.Context, id string) (*store.Project, error) {
+	p.getCalls++
+	return p.Store.GetProject(ctx, id)
+}
+
+// TestHandleHealthSummary_ProjectSlugsOneLookup: refs across all groups and
+// several projects resolve with a single batched project lookup, counts stay
+// true above the reference cap, and a failed lookup keeps the section.
+func TestHandleHealthSummary_ProjectSlugsOneLookup(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	n := 0
+	add := func(project, phase, activity string) {
+		n++
+		require.NoError(t, s.CreateAgent(ctx, &store.Agent{
+			ID: tid(fmt.Sprintf("slug-agent-%d", n)), Name: fmt.Sprintf("a%d", n), Slug: fmt.Sprintf("a%d", n),
+			ProjectID: tid(project), Phase: phase, Activity: activity,
+		}))
+	}
+	for _, p := range []string{"p1", "p2", "p3"} {
+		require.NoError(t, s.CreateProject(ctx, &store.Project{ID: tid(p), Name: p, Slug: "slug-" + p}))
+	}
+	for i := 0; i < store.AgentHealthRefCap+3; i++ {
+		add("p1", string(state.PhaseError), "")
+	}
+	add("p2", string(state.PhaseRunning), string(state.ActivityCrashed))
+	add("p3", string(state.PhaseRunning), string(state.ActivityOffline))
+
+	counting := &projectListCountingStore{Store: srv.store}
+	srv.store = counting
+
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/admin/health/summary", nil)
+	require.Equal(t, http.StatusOK, rr.Code)
+	var resp HealthSummaryResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+
+	assert.Equal(t, 1, counting.summaryCalls, "one batched project lookup")
+	assert.Zero(t, counting.getCalls, "no per-agent project lookup")
+
+	require.Len(t, resp.Agents.Problems, 3)
+	kinds := []string{}
+	for _, g := range resp.Agents.Problems {
+		kinds = append(kinds, g.Kind)
+		for _, it := range g.Items {
+			assert.NotEmpty(t, it.ProjectSlug, it.ID)
+		}
+	}
+	assert.Equal(t, []string{HealthAgentGroupErrored, HealthAgentGroupCrashed, HealthAgentGroupOffline}, kinds)
+	assert.Equal(t, store.AgentHealthRefCap+3, resp.Agents.Problems[0].Count)
+	assert.Len(t, resp.Agents.Problems[0].Items, store.AgentHealthRefCap)
+	assert.Equal(t, "slug-p2", resp.Agents.Problems[1].Items[0].ProjectSlug)
+	assert.Equal(t, "slug-p3", resp.Agents.Problems[2].Items[0].ProjectSlug)
+
+	// A failed slug lookup keeps the section, with empty slugs.
+	counting.failSummaries = true
+	rr = doRequest(t, srv, http.MethodGet, "/api/v1/admin/health/summary", nil)
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	require.Len(t, resp.Agents.Problems, 3)
+	assert.Empty(t, resp.Agents.Problems[1].Items[0].ProjectSlug)
+	assert.Equal(t, tid("p2"), resp.Agents.Problems[1].Items[0].ProjectID)
+}
+
+// TestHandleHealthSummary_StalledOnlyStaysHealthy: a stalled or suspended
+// agent is not a health signal and appears nowhere in the response.
+func TestHandleHealthSummary_StalledOnlyStaysHealthy(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	require.NoError(t, s.CreateProject(ctx, &store.Project{ID: tid("stall-proj"), Name: "stall", Slug: "stall"}))
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
+		ID: tid("stalled-1"), Name: "stalled-one", Slug: "stalled-one", ProjectID: tid("stall-proj"),
+		Phase: string(state.PhaseRunning), Activity: string(state.ActivityStalled),
+	}))
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
+		ID: tid("suspended-1"), Name: "suspended-one", Slug: "suspended-one", ProjectID: tid("stall-proj"),
+		Phase: string(state.PhaseSuspended), Activity: string(state.ActivityStalled),
+	}))
+
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/admin/health/summary", nil)
+	require.Equal(t, http.StatusOK, rr.Code)
+	var resp HealthSummaryResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	assert.Equal(t, "healthy", resp.Status)
+	assert.Empty(t, resp.Agents.Problems)
+	assert.Equal(t, 0, resp.Agents.Errored)
+	assert.Equal(t, 2, resp.Agents.Considered)
+	assert.NotContains(t, rr.Body.String(), "stalled-one")
+	assert.NotContains(t, rr.Body.String(), "suspended-one")
+	assertNoStallData(t, rr.Body.Bytes())
+}
+
+func TestOrderedPhaseCounts(t *testing.T) {
+	in := map[string]int{"error": 1, "running": 3, "zzz-legacy": 2, "created": 1, "stopped": 0, "aaa-legacy": 1}
+	want := []HealthPhaseCount{
+		{Phase: "created", Count: 1},
+		{Phase: "running", Count: 3},
+		{Phase: "error", Count: 1},
+		{Phase: "aaa-legacy", Count: 1},
+		{Phase: "zzz-legacy", Count: 2},
+	}
+	for i := 0; i < 20; i++ { // map iteration order must not leak into the result
+		assert.Equal(t, want, orderedPhaseCounts(in))
+	}
+	assert.Equal(t, []HealthPhaseCount{}, orderedPhaseCounts(nil))
 }
 
 func TestHandleHealthSummary_BrokerMixedStatus(t *testing.T) {
@@ -255,11 +447,11 @@ func TestHandleHealthSummary_BrokerMixedStatus(t *testing.T) {
 	require.NotNil(t, onlineBroker, "should have an online broker")
 	require.NotNil(t, offlineBroker, "should have an offline broker")
 
-	assert.Equal(t, 3, onlineBroker.Agents.Total)
+	assert.Equal(t, HealthBrokerAgents{Running: 3}, onlineBroker.Agents)
 	require.NotNil(t, onlineBroker.Runtime)
 	assert.Equal(t, "docker", onlineBroker.Runtime.Type)
 
-	assert.Equal(t, 0, offlineBroker.Agents.Total)
+	assert.Equal(t, HealthBrokerAgents{}, offlineBroker.Agents)
 	require.NotNil(t, offlineBroker.Runtime)
 	assert.Equal(t, "kubernetes", offlineBroker.Runtime.Type)
 }
