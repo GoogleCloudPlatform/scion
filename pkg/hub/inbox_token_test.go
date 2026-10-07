@@ -133,8 +133,8 @@ func (f *inboxFixture) message(t *testing.T, recipient, projectID string) string
 
 func (f *inboxFixture) group(t *testing.T, projectID string, participants ...string) *store.Conversation {
 	t.Helper()
-	now := time.Now().UTC()
-	conv := &store.Conversation{ID: uuid.NewString(), Kind: "group", Surface: "native", DisplayName: "g-" + uuid.NewString()[:8], DriftState: "active", LastActivityAt: now, CreatedAt: now}
+	at := time.Now().UTC()
+	conv := &store.Conversation{ID: uuid.NewString(), Kind: "group", Surface: "native", DisplayName: "g-" + uuid.NewString()[:8], DriftState: "active", LastActivityAt: at, CreatedAt: at}
 	if projectID != "" {
 		conv.ProjectID = &projectID
 	}
@@ -149,8 +149,8 @@ func (f *inboxFixture) direct(t *testing.T, userID, peerKind, peerID string) *st
 	t.Helper()
 	extRef, err := messages.DMConversationKey("user", userID, peerKind, peerID)
 	require.NoError(t, err)
-	now := time.Now().UTC()
-	conv := &store.Conversation{ID: uuid.NewString(), Kind: "direct", Surface: "native", ExternalRef: extRef, DriftState: "active", LastActivityAt: now, CreatedAt: now}
+	at := time.Now().UTC()
+	conv := &store.Conversation{ID: uuid.NewString(), Kind: "direct", Surface: "native", ExternalRef: extRef, DriftState: "active", LastActivityAt: at, CreatedAt: at}
 	require.NoError(t, f.s.CreateConversation(context.Background(), conv))
 	addConvParticipant(t, f.s, conv.ID, "user", userID)
 	addConvParticipant(t, f.s, conv.ID, peerKind, peerID)
@@ -820,7 +820,10 @@ func TestNotificationTemplates_ListedOnlyForReadableProjects(t *testing.T) {
 
 	projTok := f.mint(t, f.admin, projectBoundary(f.projA), "inbox:read", "project:read")
 	assert.Empty(t, names(f.call(t, projTok, http.MethodGet, listB, nil)), "a project token sees neither project-less nor other-project templates")
-	hubTok := f.mint(t, f.admin, hubBoundary(), "inbox:read")
+	hubInboxOnly := f.mint(t, f.admin, hubBoundary(), "inbox:read")
+	assert.Equal(t, []string{global}, names(f.call(t, hubInboxOnly, http.MethodGet, listB, nil)),
+		"a token needs project:read to see a project's templates")
+	hubTok := f.mint(t, f.admin, hubBoundary(), "inbox:read", "project:read")
 	assert.Equal(t, sorted(global, inB), names(f.call(t, hubTok, http.MethodGet, listB, nil)))
 	unrelated := f.mint(t, f.admin, hubBoundary(), "project:read")
 	assert.Equal(t, http.StatusForbidden, f.call(t, unrelated, http.MethodGet, listB, nil).Code)

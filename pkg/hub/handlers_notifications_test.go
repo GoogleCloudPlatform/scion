@@ -885,7 +885,9 @@ func TestHandleSubscriptionTemplates_RejectsAgents(t *testing.T) {
 // store.SubscriptionScope*, and rejects anything else — including the
 // removed legacy "grove" scope — with 400, echoing the rejected value.
 func TestCreateNotificationSubscriptionTemplate_ScopeValidation(t *testing.T) {
-	srv, _ := testServer(t)
+	srv, s := testServer(t)
+	// A template filed under a project needs read access to it.
+	require.NoError(t, s.CreateProject(context.Background(), &store.Project{ID: tid("project-notif-handler"), Name: "Notif Handler", Slug: "notif-handler"}))
 
 	valid := []struct {
 		name  string

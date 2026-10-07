@@ -179,7 +179,7 @@ func (s *Server) handleMessageRoutes(w http.ResponseWriter, r *http.Request) {
 	id, action := extractAction(r, "/api/v1/messages")
 
 	// POST /api/v1/messages/read-all
-	if id == "read-all" && r.Method == http.MethodPost {
+	if id == "read-all" && action == "" && r.Method == http.MethodPost {
 		if cls == inboxCredentialToken {
 			if !s.authorizeInboxToken(w, r, token, permInboxWrite) {
 				return

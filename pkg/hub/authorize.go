@@ -726,7 +726,7 @@ func selfScopedDecision(identity Identity, permissionID, rowProjectID string) (o
 }
 
 // selfScopeReasonProjectAccess is the deny reason when a project-boundary
-// token's holder is no longer a member of the record's project.
+// token's holder is not a current member of the record's project.
 const selfScopeReasonProjectAccess = bearerReasonProjectAccessDenied
 
 // selfScopeCheck applies the self-scope rule to the records of one request.

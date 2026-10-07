@@ -240,7 +240,7 @@ func (s *Server) tokenRowCheck(ctx context.Context, caller *notificationSubscrib
 }
 
 // scopeNotificationsForToken keeps the notifications a token caller may
-// see; other callers get rows unchanged.
+// see; other callers get every row.
 func scopeNotificationsForToken(check *selfScopeCheck, notifs []store.Notification) []store.Notification {
 	if check == nil {
 		return notifs
@@ -249,7 +249,7 @@ func scopeNotificationsForToken(check *selfScopeCheck, notifs []store.Notificati
 }
 
 // scopeSubscriptionsForToken keeps the subscriptions a token caller may
-// see; other callers get rows unchanged.
+// see; other callers get every row.
 func scopeSubscriptionsForToken(check *selfScopeCheck, subs []store.NotificationSubscription) []store.NotificationSubscription {
 	if check == nil {
 		return subs
@@ -466,7 +466,7 @@ func (s *Server) handleNotificationRoutes(w http.ResponseWriter, r *http.Request
 	id, action := extractAction(r, "/api/v1/notifications")
 
 	// POST /api/v1/notifications/ack-all
-	if id == "ack-all" && r.Method == http.MethodPost {
+	if id == "ack-all" && action == "" && r.Method == http.MethodPost {
 		// AcknowledgeAllNotifications keys on the subscriber ID alone, which
 		// for an agent would span every project that reuses its slug. There is
 		// no project-scoped variant, so agents ack individually instead.

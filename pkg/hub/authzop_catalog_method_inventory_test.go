@@ -137,6 +137,8 @@ var suffixCheckExclusions = map[liveInventoryKey]string{
 	{OperationID: "hub.policies.removed", Method: "GET", Pattern: "/api/v1/policies"}:                                      "the by-ID route \"/api/v1/policies/\" registers as a prefix, so a suffix on this bare collection route reaches handlePolicyRoutes, which answers 410 Gone for every sub-path by design",
 	{OperationID: "hub.policies.removed", Method: "GET", Pattern: "/api/v1/policies/{id}"}:                                 "handlePolicyRoutes (handlers_policies.go) answers 410 Gone for every sub-path by design, so a suffixed path gets the same 410 as the bare one",
 	{OperationID: "user.admin.invite", Method: "GET", Pattern: "/api/v1/admin/invites/{id}"}:                               "handleAdminInviteByID (admin_invites.go:65-96) special-cases only a second segment of \"revoke\"; any other suffix, including this check's bogus one, falls through to the same GET handling as the bare ID",
+	{OperationID: "conversation.create", Method: "POST", Pattern: "/api/v1/conversations/"}:                                "the pattern ends in a slash, so the suffixed path has an empty segment (\"//\"), which the server mux answers with a 307 redirect to the cleaned path before any handler runs",
+	{OperationID: "conversation.direct.read", Method: "GET", Pattern: "/api/v1/conversations/{id}/messages"}:               "a suffix on the messages collection is the messages/{messageId} route; handleGetConversationMessage checks the direct conversation's key before it looks the message up, and the dev caller is not named in the key, so it answers 403 on any message ID",
 	{OperationID: "user.admin.invite", Method: "DELETE", Pattern: "/api/v1/admin/invites/{id}"}:                            "same as the GET invites/{id} suffix entry above — and because the suffix is silently ignored, a DELETE with a bogus suffix would delete the real fixture, so this exclusion also protects the positive check that runs after it",
 }
 
@@ -224,13 +226,13 @@ type inboxRecords struct {
 // is the peer of the direct conversation and the watched agent.
 func seedInboxRecords(t *testing.T, ctx context.Context, s store.Store, userID, projectID, agentID string) inboxRecords {
 	t.Helper()
-	now := time.Now().UTC()
+	at := time.Now().UTC()
 	r := inboxRecords{createConversations: "inbox-" + uuid.NewString()[:8]}
 
 	r.message = uuid.NewString()
 	require.NoError(t, s.CreateMessage(ctx, &store.Message{
 		ID: r.message, ProjectID: projectID, Sender: "agent:li", Recipient: "user:" + userID, RecipientID: userID,
-		Msg: "inbox record", Type: "instruction", CreatedAt: now,
+		Msg: "inbox record", Type: "instruction", CreatedAt: at,
 	}))
 
 	r.subscription = uuid.NewString()
@@ -255,10 +257,10 @@ func seedInboxRecords(t *testing.T, ctx context.Context, s store.Store, userID, 
 		pid := projectID
 		require.NoError(t, s.CreateConversation(ctx, &store.Conversation{
 			ID: id, ProjectID: &pid, Kind: "group", Surface: "native", DisplayName: name,
-			DriftState: "active", LastActivityAt: now, CreatedAt: now,
+			DriftState: "active", LastActivityAt: at, CreatedAt: at,
 		}))
 		require.NoError(t, s.AddParticipant(ctx, &store.ConversationParticipant{
-			ID: uuid.NewString(), ConversationID: id, PrincipalKind: "user", PrincipalID: userID, Role: "member", JoinedAt: now,
+			ID: uuid.NewString(), ConversationID: id, PrincipalKind: "user", PrincipalID: userID, Role: "member", JoinedAt: at,
 		}))
 		return id
 	}
@@ -270,11 +272,11 @@ func seedInboxRecords(t *testing.T, ctx context.Context, s store.Store, userID, 
 	r.directConversation = uuid.NewString()
 	require.NoError(t, s.CreateConversation(ctx, &store.Conversation{
 		ID: r.directConversation, Kind: "direct", Surface: "native", ExternalRef: extRef,
-		DriftState: "active", LastActivityAt: now, CreatedAt: now,
+		DriftState: "active", LastActivityAt: at, CreatedAt: at,
 	}))
 	for _, p := range []struct{ kind, id string }{{"user", userID}, {"agent", agentID}} {
 		require.NoError(t, s.AddParticipant(ctx, &store.ConversationParticipant{
-			ID: uuid.NewString(), ConversationID: r.directConversation, PrincipalKind: p.kind, PrincipalID: p.id, Role: "member", JoinedAt: now,
+			ID: uuid.NewString(), ConversationID: r.directConversation, PrincipalKind: p.kind, PrincipalID: p.id, Role: "member", JoinedAt: at,
 		}))
 	}
 
@@ -282,7 +284,7 @@ func seedInboxRecords(t *testing.T, ctx context.Context, s store.Store, userID, 
 		id := uuid.NewString()
 		require.NoError(t, s.CreateMessage(ctx, &store.Message{
 			ID: id, ProjectID: projectID, Sender: "user:" + userID, SenderID: userID, Recipient: "agent:li", RecipientID: agentID,
-			Msg: "inbox conversation record", Type: "instruction", ConversationID: convID, CreatedAt: now,
+			Msg: "inbox conversation record", Type: "instruction", ConversationID: convID, CreatedAt: at,
 		}))
 		return id
 	}

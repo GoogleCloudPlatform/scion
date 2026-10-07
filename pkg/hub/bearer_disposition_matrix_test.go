@@ -59,6 +59,46 @@ var bearerMatrixExclusions = map[liveInventoryKey]bearerMatrixExclusion{
 		Reason: "the collection list filters each row by harness_config.read instead of refusing the request, so a token without the selector gets 200 with no rows rather than 403; the list gets its own harness_config.list disposition in a later batch",
 		Pin:    "TestScopedAdminListEndpointsFilterCrossProjectRowsAndCountAuthorizedMatches",
 	},
+	{OperationID: "inbox.message.read", Method: "GET", Pattern: "/api/v1/messages"}: {
+		Reason: "the message list filters rows to the token boundary instead of refusing the request, so a project token for another project gets 200 with no rows",
+		Pin:    "TestInboxToken_ProjectBoundaryFiltersMessages",
+	},
+	{OperationID: "inbox.message.write", Method: "POST", Pattern: "/api/v1/messages/read-all"}: {
+		Reason: "mark-all-read touches only rows inside the token boundary instead of refusing the request, so a project token for another project gets 200 and marks nothing of the fixture project",
+		Pin:    "TestInboxToken_MarkAllReadTouchesOnlyVisibleRows",
+	},
+	{OperationID: "conversation.list", Method: "GET", Pattern: "/api/v1/conversations"}: {
+		Reason: "the conversation list filters rows to the token boundary instead of refusing the request, so a project token for another project gets 200 with no rows",
+		Pin:    "TestConversationListToken_FilteredToBoundary",
+	},
+	{OperationID: "messaging.target.resolve", Method: "GET", Pattern: "/api/v1/messaging/targets/resolve"}: {
+		Reason: "target resolution answers 404 for every caller while cross-project messaging is off, which it is in the matrix server; the pin enables it",
+		Pin:    "TestMessagingTargetsResolve_TokenNeedsAgentMessage",
+	},
+	{OperationID: "notification.read", Method: "GET", Pattern: "/api/v1/notifications"}: {
+		Reason: "the notification list filters rows to the token boundary instead of refusing the request, so a project token for another project gets 200 with no rows",
+		Pin:    "TestNotificationToken_RowsFilteredToBoundary",
+	},
+	{OperationID: "notification.ack", Method: "POST", Pattern: "/api/v1/notifications/ack-all"}: {
+		Reason: "ack-all touches only rows inside the token boundary instead of refusing the request, so a project token for another project gets 200",
+		Pin:    "TestNotificationToken_RowsFilteredToBoundary",
+	},
+	{OperationID: "notification.subscription.create", Method: "POST", Pattern: "/api/v1/notifications/subscriptions/bulk"}: {
+		Reason: "bulk create takes a JSON array, which the matrix body overrides cannot express; with an object body every token gets 400 after the selector check",
+		Pin:    "TestNotificationSubscription_RequiresProjectAndAgentRead",
+	},
+	{OperationID: "notification.subscription.read", Method: "GET", Pattern: "/api/v1/notifications/subscriptions"}: {
+		Reason: "the subscription list filters rows to the token boundary instead of refusing the request, so a project token for another project gets 200 with no rows",
+		Pin:    "TestNotificationToken_RowsFilteredToBoundary",
+	},
+	{OperationID: "notification.subscription.write", Method: "POST", Pattern: "/api/v1/notifications/subscriptions/bulk-delete"}: {
+		Reason: "bulk delete skips rows outside the token boundary instead of refusing the request, so a project token for another project gets 200 with nothing deleted",
+		Pin:    "TestNotificationToken_RowsFilteredToBoundary",
+	},
+	{OperationID: "notification.template.read", Method: "GET", Pattern: "/api/v1/notifications/templates"}: {
+		Reason: "the template list filters rows to readable projects inside the token boundary instead of refusing the request, so a project token for another project gets 200 with no rows",
+		Pin:    "TestNotificationTemplates_ListedOnlyForReadableProjects",
+	},
 	{OperationID: "artifact.list", Method: "GET", Pattern: "/api/v1/artifacts"}: {
 		Reason: "the artifact list filters each row by the artifact.read check instead of refusing the request, so a token without the selector, or bounded to another project, gets 200 with no rows rather than 403 or 404 (no existence oracle)",
 		Pin:    "TestArtifactsListUserAccessTokensAreBounded",
@@ -143,6 +183,9 @@ func newBearerMatrixFixture(t *testing.T) *bearerMatrixFixture {
 	// Membership in the other project lets the super-admin mint tokens
 	// bound to it.
 	createTestUserWithProjectRole(t, s, adminID, adminID+"@test.com", other, store.ProjectRoleOwner)
+	// The inbox routes act on the caller's own records, so the matrix
+	// addresses the super-admin's records in the fixture project.
+	ids.inbox = seedInboxRecords(t, ctx, s, adminID, ids.project, ids.agent)
 
 	return &bearerMatrixFixture{srv: srv, store: s, ids: ids, adminID: adminID, otherProject: other, tokens: map[string]string{}}
 }
@@ -290,6 +333,19 @@ func bearerMatrixGuardSelector(ep authzop.EntryPoint) string {
 	return bearerMatrixSelector(guard.Permission)
 }
 
+// bearerMatrixCompanionSelectors lists, per operation, the selectors an
+// admitting token carries besides the operation's own: the operation also
+// checks project:read or agent:read on a target the record names.
+var bearerMatrixCompanionSelectors = map[authzop.OperationID][]string{
+	"conversation.create":              {"project:read"},
+	"conversation.direct.read":         {"agent:read"},
+	"conversation.defaultagent.set":    {"project:read"},
+	"conversation.participant.add":     {"project:read"},
+	"conversation.resolve":             {"project:read"},
+	"notification.subscription.create": {"project:read"},
+	"notification.template.create":     {"project:read"},
+}
+
 // bearerMatrixBodyOverrides holds request bodies the matrix sends in place
 // of the live-inventory bodies, for handlers that validate the body before
 // they reach the credential check the matrix observes.
@@ -303,6 +359,18 @@ func bearerMatrixBodyOverrides(f idFixtures) map[overrideKey]map[string]interfac
 		// a token carrying only agent:create covers no usable role, so the
 		// probe asks for agentRole "none", which every creator may grant.
 		{"agent.lifecycle.create", "/api/v1/agents"}: {"name": "bdm-created", "projectId": f.project, "agentRole": "none"},
+		// Inbox writes name the fixture project and agent.
+		{"conversation.create", "/api/v1/conversations"}:                              {"displayName": f.inbox.createConversations + "-a", "projectId": f.project},
+		{"conversation.create", "/api/v1/conversations/"}:                             {"displayName": f.inbox.createConversations + "-b", "projectId": f.project},
+		{"conversation.defaultagent.set", "/api/v1/conversations/{id}/default-agent"}: {"agentId": f.agent},
+		{"conversation.participant.add", "/api/v1/conversations/{id}/participants"}:   {"principalKind": "agent", "principalId": f.agent},
+		{"notification.subscription.create", "/api/v1/notifications/subscriptions"}: {
+			"projectId": f.project, "scope": "project", "triggerActivities": []string{"COMPLETED"},
+		},
+		{"notification.subscription.write", "/api/v1/notifications/subscriptions/{id}"}: {"triggerActivities": []string{"FAILED"}},
+		{"notification.template.create", "/api/v1/notifications/templates"}: {
+			"name": f.inbox.createConversations + "-template", "triggerActivities": []string{"COMPLETED"}, "projectId": f.project,
+		},
 	}
 }
 
@@ -322,8 +390,8 @@ func sessionOnlyDetailsOf(rec *httptest.ResponseRecorder) (reason, credential st
 // every catalogued HTTP, SSE and WebSocket entry point and checks the
 // result against the operation's recorded bearer disposition:
 //   - admit: a hub token with the selector (plus the route guard's
-//     selector when the hub-admin guard checks a different permission) and
-//     live authority is not refused and reaches the seeded target (no 401, 403 or 404; a 5xx
+//     selector when the hub-admin guard checks a different permission, and
+//     the operation's bearerMatrixCompanionSelectors) and live authority is not refused and reaches the seeded target (no 401, 403 or 404; a 5xx
 //     only on a row listed in bearerMatrixPositiveServerErrors); a token
 //     of the same user with an unrelated selector, and a project token for
 //     another project, are refused (403, or 404 on a GET, where read
@@ -429,8 +497,9 @@ func TestBearerDispositionMatrix_CatalogEntryPoints(t *testing.T) {
 			positive := []string{sel}
 			if guardSel := bearerMatrixGuardSelector(ep); guardSel != "" && guardSel != sel {
 				positive = append(positive, guardSel)
-				sort.Strings(positive)
 			}
+			positive = append(positive, bearerMatrixCompanionSelectors[e.Spec.ID]...)
+			sort.Strings(positive)
 			rec := m.request(t, e, m.mint(t, boundary, positive))
 			t.Logf("admit row %s: ceiling=%d boundary=%s positive=%d with %v", label, ceilingRec.Code, boundaryStatus, rec.Code, positive)
 			if rec.Code == http.StatusUnauthorized || rec.Code == http.StatusForbidden {

@@ -45,6 +45,13 @@ func selfRowIDs(rows []selfRow) []string {
 	return ids
 }
 
+// Store-backed IDs for the self-scope tests that check live membership.
+var (
+	selfUserID   = tid("self-user")
+	selfProjectA = tid("self-proj-a")
+	selfProjectB = tid("self-proj-b")
+)
+
 // seedSelfScopeMember creates projectID and makes userID an active member
 // of it, so the live membership check for project tokens passes.
 func seedSelfScopeMember(t *testing.T, s store.Store, userID, projectID string) {
@@ -81,9 +88,9 @@ func callAuthorizeSelfScoped(srv *Server, identity Identity, permissionID, rowPr
 // and a session see every row.
 func TestSelfScopedPermission_ProjectTokenSeesOnlyItsProject(t *testing.T) {
 	srv, s := testServer(t)
-	projectA, projectB := "proj-a", "proj-b"
-	seedSelfScopeMember(t, s, "self-user", projectA)
-	token := selfToken(t, "self-user", projectBoundary(projectA), "inbox:read")
+	projectA, projectB := selfProjectA, selfProjectB
+	seedSelfScopeMember(t, s, selfUserID, projectA)
+	token := selfToken(t, selfUserID, projectBoundary(projectA), "inbox:read")
 
 	ok, code := callAuthorizeSelfScoped(srv, token, "inbox.read", projectA)
 	assert.True(t, ok)
@@ -108,13 +115,13 @@ func TestSelfScopedPermission_ProjectTokenSeesOnlyItsProject(t *testing.T) {
 	_, _, _, err = pageSelfScopedRows(srv.newSelfScopeCheck(context.Background(), token, "inbox.read"), rows, selfRowProject, "9", 2)
 	assert.ErrorIs(t, err, errInvalidSelfScopedCursor)
 
-	hub := selfToken(t, "self-user", hubBoundary(), "inbox:read")
+	hub := selfToken(t, selfUserID, hubBoundary(), "inbox:read")
 	assert.Len(t, filterSelfScopedRows(srv.newSelfScopeCheck(context.Background(), hub, "inbox.read"), rows, selfRowProject), len(rows))
 	_, total, _, err = pageSelfScopedRows(srv.newSelfScopeCheck(context.Background(), hub, "inbox.read"), rows, selfRowProject, "", 10)
 	require.NoError(t, err)
 	assert.Equal(t, len(rows), total)
 
-	session := bearerUser("self-user")
+	session := bearerUser(selfUserID)
 	assert.Len(t, filterSelfScopedRows(srv.newSelfScopeCheck(context.Background(), session, "inbox.read"), rows, selfRowProject), len(rows))
 	dev := &DevUser{id: "dev-user"}
 	assert.Len(t, filterSelfScopedRows(srv.newSelfScopeCheck(context.Background(), dev, "inbox.read"), rows, selfRowProject), len(rows))
@@ -125,9 +132,9 @@ func TestSelfScopedPermission_ProjectTokenSeesOnlyItsProject(t *testing.T) {
 // reachable only with a hub token.
 func TestSelfScopedPermission_ProjectlessRowsRequireHubBoundary(t *testing.T) {
 	srv, s := testServer(t)
-	seedSelfScopeMember(t, s, "self-user", "proj-a")
-	project := selfToken(t, "self-user", projectBoundary("proj-a"), "inbox:read", "inbox:write")
-	hub := selfToken(t, "self-user", hubBoundary(), "inbox:read", "inbox:write")
+	seedSelfScopeMember(t, s, selfUserID, selfProjectA)
+	project := selfToken(t, selfUserID, projectBoundary(selfProjectA), "inbox:read", "inbox:write")
+	hub := selfToken(t, selfUserID, hubBoundary(), "inbox:read", "inbox:write")
 
 	for _, permissionID := range []string{"inbox.read", "inbox.write"} {
 		ok, code := callAuthorizeSelfScoped(srv, project, permissionID, "")

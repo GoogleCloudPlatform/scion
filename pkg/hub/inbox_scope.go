@@ -152,7 +152,7 @@ func (s *Server) conversationProject(ctx context.Context, conv *store.Conversati
 // to conv as one of the holder's own records: the conversation's project
 // (conversationProject) must pass check, and for a direct conversation with
 // an agent the token must also pass agent:read on that agent. A direct
-// conversation whose peer agent no longer exists has no project, so it
+// conversation whose peer agent does not exist has no project, so it
 // needs a hub boundary.
 func (s *Server) tokenMayUseConversation(ctx context.Context, token *ScopedUserIdentity, check *selfScopeCheck, conv *store.Conversation) (bool, error) {
 	projectID, peer, err := s.conversationProject(ctx, conv, token.Type(), token.ID())
