@@ -326,3 +326,20 @@ func TestAgentListIDs_Validation(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	assert.Len(t, mustDecodeListAgentsResponse(t, rec.Body).Agents, len(f.readable))
 }
+
+// TestNarrowFilterByIDs pins the helper's edge cases: a nil filter is a
+// no-op, no ids leave the filter alone, and an existing set is intersected.
+func TestNarrowFilterByIDs(t *testing.T) {
+	assert.NotPanics(t, func() { narrowFilterByIDs(nil, []string{"a"}) })
+
+	f := store.AgentFilter{}
+	narrowFilterByIDs(&f, nil)
+	assert.Nil(t, f.IDs)
+	narrowFilterByIDs(&f, []string{"a", "b"})
+	assert.Equal(t, []string{"a", "b"}, f.IDs)
+	narrowFilterByIDs(&f, []string{"b", "c"})
+	assert.Equal(t, []string{"b"}, f.IDs)
+	narrowFilterByIDs(&f, []string{"c"})
+	assert.NotNil(t, f.IDs)
+	assert.Empty(t, f.IDs, "no overlap matches nothing")
+}

@@ -111,7 +111,7 @@ func parseAgentListIDs(query url.Values, limit int) ([]string, string) {
 // slice that matches nothing; otherwise it is ids itself. ids never widens
 // the filter.
 func narrowFilterByIDs(filter *store.AgentFilter, ids []string) {
-	if ids == nil {
+	if filter == nil || ids == nil {
 		return
 	}
 	if filter.IDs == nil {
