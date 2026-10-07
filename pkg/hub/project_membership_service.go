@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -532,6 +533,10 @@ func isSystemCaller(ctx context.Context) bool {
 //
 // System callers (marked via WithSystemCaller) bypass the credential
 // check but are logged.
+//
+// Membership mutations are session-only with the GOV_PENDING reason: a
+// credential-kind refusal carries the session-only details
+// (session_only_gate.go) in MembershipDecision.Details.
 func (svc *ProjectMembershipService) checkMembershipCredential(ctx context.Context, actorID string) *MembershipDecision {
 	// Trusted internal callers bypass the credential gate.
 	if isSystemCaller(ctx) {
@@ -547,6 +552,7 @@ func (svc *ProjectMembershipService) checkMembershipCredential(ctx context.Conte
 			DenialCode: ErrCodeMembershipCredentialInsufficient,
 			Reason:     "membership mutations require an interactive session credential",
 			HTTPStatus: 403,
+			Details:    sessionOnlyDenialDetails(authzop.ReasonGovernancePending),
 		}
 	}
 
@@ -557,6 +563,7 @@ func (svc *ProjectMembershipService) checkMembershipCredential(ctx context.Conte
 			DenialCode: ErrCodeMembershipCredentialInsufficient,
 			Reason:     fmt.Sprintf("membership mutations require an interactive session; credential kind %q is not allowed", cred.Kind),
 			HTTPStatus: 403,
+			Details:    sessionOnlyDenialDetails(authzop.ReasonGovernancePending),
 		}
 	}
 

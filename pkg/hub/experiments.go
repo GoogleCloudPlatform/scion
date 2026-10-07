@@ -103,12 +103,15 @@ func (s *Server) requireExperiment(name string, next http.HandlerFunc) http.Hand
 }
 
 // dispatchExperimentNames are the server-layer experiments whose state the
-// hub sends to brokers with each agent dispatch, because they change what
-// the broker does.
+// hub sends with each agent dispatch, because they change what the broker
+// does. hub.conduit is added separately (see dispatchExperiments).
 var dispatchExperimentNames = []string{experiments.K8sNFSHome}
 
 // dispatchExperiments returns the dispatch experiments that are enabled
-// now, resolved from one snapshot, or nil when none is.
+// now, resolved from one snapshot, or nil when none is. hub.conduit is a
+// derived entry: it is included only while this node serves conduit (the
+// experiment is on in the same snapshot and the relay is running), so an
+// agent dials conduit only where a relay can admit it.
 func (s *Server) dispatchExperiments() []string {
 	snap := s.experimentsSnapshot()
 	var out []string
@@ -116,6 +119,9 @@ func (s *Server) dispatchExperiments() []string {
 		if s.experimentEnabledIn(snap, name) {
 			out = append(out, name)
 		}
+	}
+	if s.conduitServingIn(snap) {
+		out = append(out, conduitExperiment)
 	}
 	return out
 }

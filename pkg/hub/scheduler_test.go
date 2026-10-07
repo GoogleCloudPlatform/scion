@@ -1284,8 +1284,8 @@ func TestMessageEventHandler_AgentNotFound(t *testing.T) {
 	if err == nil {
 		t.Fatal("handler should return error for deleted agents")
 	}
-	if !strings.Contains(err.Error(), "target agent deleted") {
-		t.Errorf("error should reference target agent deletion, got: %v", err)
+	if err.Error() != errScheduledMessageRefused.Error() {
+		t.Errorf("error should be the constant refusal, got: %v", err)
 	}
 	// Handler no longer owns status recording — production-wrapper tests
 	// (TestC1_FireEvent_*) verify the final persisted status.
@@ -1311,8 +1311,8 @@ func TestMessageEventHandler_AgentNotFoundByID(t *testing.T) {
 	if err == nil {
 		t.Fatal("handler should return error for deleted agents")
 	}
-	if !strings.Contains(err.Error(), "target agent deleted") {
-		t.Errorf("error should reference target agent deletion, got: %v", err)
+	if err.Error() != errScheduledMessageRefused.Error() {
+		t.Errorf("error should be the constant refusal, got: %v", err)
 	}
 	// Handler no longer owns status recording — production-wrapper tests
 	// (TestC1_FireEvent_*) verify the final persisted status.
@@ -1659,12 +1659,18 @@ type resolvingTemplateStore struct {
 
 func (r *resolvingTemplateStore) GetTemplateBySlug(_ context.Context, slug, _, _ string) (*store.Template, error) {
 	return &store.Template{
-		ID:          "tmpl-resolvable",
-		Slug:        slug,
-		Name:        slug,
-		Harness:     "claude",
-		ContentHash: "d00dfeed",
-		Status:      "active",
+		ID:      "tmpl-resolvable",
+		Slug:    slug,
+		Name:    slug,
+		Harness: "claude",
+		// A declared harness config, not just a harness type: since
+		// ptone/scion#601 item 2 only DefaultHarnessConfig feeds the
+		// harness-config slot, and the panic trap below needs the slot
+		// filled so populateAgentConfig reaches GetHarnessConfigBySlug.
+		// Distinct from Harness so assertions prove which field supplied it.
+		DefaultHarnessConfig: "claude-declared",
+		ContentHash:          "d00dfeed",
+		Status:               "active",
 		// Scope: global — these tests exercise the scheduler dispatch
 		// mechanics (which rung wins, applied-config precedence), not store
 		// scope filtering, so this stub always resolves regardless of the
@@ -1735,10 +1741,10 @@ func TestDispatchAgentEventHandler_ResolvableTemplateDoesNotPanic(t *testing.T) 
 	if created.Template != "my-tmpl" {
 		t.Errorf("expected template %q, got %q", "my-tmpl", created.Template)
 	}
-	// The template's Harness field is the template-tier harness config, and
-	// no project annotation overrides it here.
-	if created.AppliedConfig == nil || created.AppliedConfig.HarnessConfig != "claude" {
-		t.Errorf("expected harness config %q, got %+v", "claude", created.AppliedConfig)
+	// The template's declared default_harness_config is the template-tier
+	// harness config, and no project annotation overrides it here.
+	if created.AppliedConfig == nil || created.AppliedConfig.HarnessConfig != "claude-declared" {
+		t.Errorf("expected harness config %q, got %+v", "claude-declared", created.AppliedConfig)
 	}
 }
 

@@ -79,7 +79,7 @@ var (
 	inlineConfigPath      string
 	labelFlags            []string
 	modelFlag             string
-	thinkingLevelFlag     int = -1
+	thinkingLevelFlag     string
 	agentRoleFlag         string
 	messageModeFlag       string
 	serviceAccountFlag    string
@@ -118,14 +118,6 @@ func validateHarnessAuthFlag(v string) error {
 	default:
 		return fmt.Errorf("invalid --harness-auth value %q: must be one of api-key, oauth-token, auth-file, vertex-ai", v)
 	}
-}
-
-// validateThinkingLevelFlag checks a --thinking-level value; -1 means unset.
-func validateThinkingLevelFlag(v int) error {
-	if v != -1 && (v < 0 || v > 100) {
-		return fmt.Errorf("invalid --thinking-level value %d: must be between 0 and 100", v)
-	}
-	return nil
 }
 
 func parseLabels(raw []string) (map[string]string, error) {
@@ -336,6 +328,14 @@ func CheckHubAvailabilityForAgents(projectPath string, excludedAgents []string, 
 		ExplicitProject:  explicitProjectTargetFor(projectPath),
 	}
 
+	// A hub project reference needs hub mode: offer to enable it (when
+	// logged in, interactively) or name 'scion hub enable' (#3533).
+	if !noHub && projectPath != "" && hubsync.IsHubProjectRef(projectPath) {
+		if err := ensureHubModeForHubProjectRefForInvocation(projectPath); err != nil {
+			return nil, err
+		}
+	}
+
 	hubCtx, err := hubsync.EnsureHubReady(projectPath, opts)
 	if err != nil {
 		return nil, err
@@ -501,6 +501,31 @@ func wrapHubError(err error) error {
 		return &hubError{msg: err.Error(), err: err}
 	}
 	return &hubError{msg: err.Error() + localOnlyHint, err: err}
+}
+
+// printDeleteInProgressWarnings writes each string in details.warnings of a
+// 409 delete_in_progress hub error to w as a "Warning: ..." line. A 409
+// delete_in_progress may carry details.warnings (set today on a synchronous
+// create that lost to a delete; ptone/scion#3255 adds it to the start,
+// restart and existing-agent answers) reporting the outcome of removing a
+// container the broker had already started, so a failed removal must reach
+// the user. The helper runs on every hub create and start error path, so
+// it needs no change as the hub adds warnings to more answers. Any other
+// error, a missing or malformed warnings list, and non-string entries print
+// nothing. The error itself is left to the caller. Warnings go to w even in JSON output mode:
+// a failed command prints no JSON result, and its error line also goes to
+// stderr, so stdout stays clean.
+func printDeleteInProgressWarnings(w io.Writer, err error) {
+	var apiErr *apiclient.APIError
+	if !errors.As(err, &apiErr) || apiErr.Code != apiclient.ErrCodeDeleteInProgress {
+		return
+	}
+	warnings, _ := apiErr.Details["warnings"].([]interface{})
+	for _, raw := range warnings {
+		if msg, ok := raw.(string); ok {
+			_, _ = fmt.Fprintf(w, "Warning: %s\n", msg)
+		}
+	}
 }
 
 // shouldSuggestLocalOnly reports whether the local-only hint is relevant for
@@ -699,14 +724,16 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 		}
 		inlineCfg.Model = normalizedModel
 	}
-	if thinkingLevelFlag != -1 {
-		if err := validateThinkingLevelFlag(thinkingLevelFlag); err != nil {
-			return asUsageError(err)
+	// An explicitly set --thinking-level is always parsed, so an empty
+	// value fails instead of being treated as unset.
+	if thinkingLevelFlag != "" || (cmd != nil && cmd.Flags().Changed("thinking-level")) {
+		val, err := parseThinkingLevel(thinkingLevelFlag)
+		if err != nil {
+			return err
 		}
 		if inlineCfg == nil {
 			inlineCfg = &api.ScionConfig{}
 		}
-		val := thinkingLevelFlag
 		inlineCfg.ThinkingLevel = &val
 	}
 
@@ -1337,6 +1364,7 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 		if apiErr, ok := asIncompleteCreate(err); ok {
 			return incompleteCreateError(agentName, apiErr)
 		}
+		printDeleteInProgressWarnings(os.Stderr, err)
 		return wrapHubError(fmt.Errorf("failed to start agent via Hub: %w", err))
 	}
 	if reusesExisting {

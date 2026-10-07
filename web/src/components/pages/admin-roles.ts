@@ -26,7 +26,7 @@ import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { formatRelative } from '../../utils/time.js';
-import { navigateTo } from '../../client/main.js';
+import { navigateTo } from '../../client/navigation.js';
 
 // ---------------------------------------------------------------------------
 // Types

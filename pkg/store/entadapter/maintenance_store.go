@@ -61,7 +61,7 @@ var defaultSeedOperations = []store.MaintenanceOperation{
 	{
 		Key:         "applied-config-env-cleanup",
 		Title:       "Applied Config Env Cleanup",
-		Description: `Removes entries from agent.appliedConfig.env that a since-fixed merge-back could have written for agents created before the fix: GITHUB_TOKEN unconditionally, plus any other key that matches a secret-flagged entry in the agent's reachable env-var or secret scopes. Safe to re-run; agents with nothing to remove are left untouched.`,
+		Description: `Removes env entries that a since-fixed merge-back could have saved into agents' applied config. From agent.appliedConfig.env it removes GITHUB_TOKEN, any key named like a secret or secret-flagged env var in the agent's user, project, runtime broker or hub scope, and any other key whose saved value no longer matches a live plain source (the template's default env, the agent's explicit config, or a plain env var in one of those scopes). From the agent's explicit config env (inline config and the saved create inputs) it removes only GITHUB_TOKEN and secret-named keys. The same rules apply to the config snapshots of finished reincarnation records; records still in progress are skipped until a later run. Values are never logged. Supports a dry run. Safe to re-run; agents with nothing to remove are left untouched.`,
 		Category:    store.MaintenanceCategoryMigration,
 	},
 	{

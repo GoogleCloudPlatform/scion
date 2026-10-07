@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
 // TestResolveHarnessConfigDir_PrefersContextPath verifies that a Hub-hydrated
@@ -50,6 +51,9 @@ func TestResolveHarnessConfigDir_PrefersContextPath(t *testing.T) {
 	}
 	if hcDir.Config.Image != "scion-claude:latest" {
 		t.Errorf("expected image 'scion-claude:latest', got %q", hcDir.Config.Image)
+	}
+	if hcDir.Source != config.HarnessConfigSourceHubHydrated {
+		t.Errorf("expected Source %q, got %q", config.HarnessConfigSourceHubHydrated, hcDir.Source)
 	}
 }
 
