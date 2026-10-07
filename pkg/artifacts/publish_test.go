@@ -19,7 +19,6 @@ package artifacts
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -307,9 +306,14 @@ func TestPublishMissingScope(t *testing.T) {
 	if rec.Code != http.StatusForbidden || errCode(t, rec) != CodeMissingScope {
 		t.Fatalf("unserved caller: %d %s", rec.Code, rec.Body.String())
 	}
-	var e errorResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &e); err != nil || e.Error.Details["scope"] != "project:artifact:read" {
-		t.Errorf("details = %+v (%v)", e.Error.Details, err)
+	const wantBody = `{"error":{"code":"missing_scope","message":"the credential does not carry the project:artifact:read scope needed to publish artifacts","details":{"scope":"project:artifact:read"}}}` + "\n"
+	if rec.Body.String() != wantBody {
+		t.Errorf("body:\n got %q\nwant %q", rec.Body.String(), wantBody)
+	}
+	// The JSON manifest create answers the same way.
+	rec = f.do(nil, http.MethodPost, "/api/v1/artifacts", []byte(`{"entry":"a","files":[{"path":"a","size":1,"sha256":"`+sha([]byte("a"))+`"}]}`), nil)
+	if rec.Code != http.StatusForbidden || rec.Body.String() != wantBody {
+		t.Errorf("JSON create, unserved caller: %d %q", rec.Code, rec.Body.String())
 	}
 
 	// A served caller whose credential does not permit publishing gets the

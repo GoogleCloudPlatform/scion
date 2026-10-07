@@ -428,3 +428,61 @@ func TestServiceReapPending(t *testing.T) {
 		t.Errorf("reaped empty artifact: %d, want 404", rec.Code)
 	}
 }
+
+// TestTwoStepWriteGateBindings: ownership compares kind and ref exactly, a
+// grant counts only on the artifact it was written for, and a scope grant
+// counts only for a caller the host authorizes to publish in the grant's
+// own scope.
+func TestTwoStepWriteGateBindings(t *testing.T) {
+	f := newFixture(t, false)
+	files := bundle{"a.txt": []byte("a")}
+	owned := f.publishBundle(userU, "/api/v1/artifacts", CreateVersionRequest{Scope: "project-1", Entry: "a.txt",
+		Files: []ManifestFile{{Path: "a.txt", Size: 1, SHA256: sha([]byte("a"))}}}, files)
+	other := f.publishBundle(agentA, "/api/v1/artifacts", files.manifest("a.txt"), files)
+
+	// An agent whose ref equals the owning user's id is not the owner.
+	lookalike := principal{PrincipalKindAgent, userU.ref, "project-1"}
+	f.host.allow(lookalike, "project-1", PermissionRead, PermissionCreate)
+	if rec := f.postJSON(&lookalike, "/api/v1/artifacts/"+owned.Artifact.ID+"/versions", files.manifest("a.txt")); rec.Code != http.StatusForbidden {
+		t.Errorf("agent with the owner's user id: %d, want 403", rec.Code)
+	}
+
+	insertGrant := func(id, artifactID, kind, ref, perm string) {
+		t.Helper()
+		if _, err := f.db.Exec("INSERT INTO artifact_grant (id, artifact_id, subject_kind, subject_ref, permission, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+			id, artifactID, kind, ref, perm, time.Now().UTC().Format(sqliteTimeLayout)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A write grant on one artifact does not reach another.
+	insertGrant("g-other", other.Artifact.ID, SubjectPrincipal, PrincipalRef(agentB.kind, agentB.ref), GrantWrite)
+	if rec := f.postJSON(&agentB, "/api/v1/artifacts/"+owned.Artifact.ID+"/versions", files.manifest("a.txt")); rec.Code != http.StatusForbidden {
+		t.Errorf("grant on another artifact: %d, want 403", rec.Code)
+	}
+	if rec := f.postJSON(&agentB, "/api/v1/artifacts/"+other.Artifact.ID+"/versions", files.manifest("a.txt")); rec.Code != http.StatusCreated {
+		t.Errorf("grant on this artifact: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// A scope write grant for project-3 counts only for callers the host
+	// authorizes to publish in project-3.
+	insertGrant("g-scope", owned.Artifact.ID, SubjectScope, "project-3", GrantWrite)
+	member3 := principal{PrincipalKindUser, "user-3", ""}
+	f.host.allow(member3, "project-1", PermissionRead)
+	f.host.allow(member3, "project-2", PermissionCreate)
+	if rec := f.postJSON(&member3, "/api/v1/artifacts/"+owned.Artifact.ID+"/versions", files.manifest("a.txt")); rec.Code != http.StatusForbidden {
+		t.Errorf("publisher in an unrelated scope: %d, want 403", rec.Code)
+	}
+	f.host.allow(member3, "project-3", PermissionRead)
+	if rec := f.postJSON(&member3, "/api/v1/artifacts/"+owned.Artifact.ID+"/versions", files.manifest("a.txt")); rec.Code != http.StatusForbidden {
+		t.Errorf("reader (not publisher) in the grant's scope: %d, want 403", rec.Code)
+	}
+	f.host.allow(member3, "project-3", PermissionCreate)
+	if rec := f.postJSON(&member3, "/api/v1/artifacts/"+owned.Artifact.ID+"/versions", files.manifest("a.txt")); rec.Code != http.StatusCreated {
+		t.Errorf("publisher in the grant's scope: %d %s", rec.Code, rec.Body.String())
+	}
+	// A read grant never confers write.
+	insertGrant("g-read", owned.Artifact.ID, SubjectPrincipal, PrincipalRef(agentX.kind, agentX.ref), GrantRead)
+	if rec := f.postJSON(&agentX, "/api/v1/artifacts/"+owned.Artifact.ID+"/versions", files.manifest("a.txt")); rec.Code != http.StatusForbidden {
+		t.Errorf("read grantee: %d, want 403", rec.Code)
+	}
+}
