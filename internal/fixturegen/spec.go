@@ -477,6 +477,38 @@ func Spec() []TableFixture {
 			},
 		}},
 
+		// ---- Agent holds ----
+		{Table: "agent_holds", Rows: []row{
+			{ // active hold
+				"id": "ad000000-0000-0000-0000-000000000001", "agent_id": agentID,
+				"project_id": projectID, "cause": "owner_access_ended",
+				"root_principal_type": "user", "root_principal_id": userID,
+				"trigger": "member_remove", "actor_kind": "user", "actor_id": userID,
+				"correlation_id": "fixture-agent-hold-active", "created_at": baseTime,
+			},
+			{ // cleared hold kept as history
+				"id": "ad000000-0000-0000-0000-000000000002", "agent_id": agentID,
+				"project_id": projectID, "cause": "owner_access_ended",
+				"root_principal_type": "user", "root_principal_id": userID,
+				"trigger": "member_role_change", "actor_kind": "user", "actor_id": userID,
+				"correlation_id": "fixture-agent-hold-cleared",
+				"created_at":     baseTime.Add(-time.Hour), "cleared_at": baseTime.Add(-time.Minute),
+				"cleared_by_kind": "user", "cleared_by_id": userID,
+				"clear_reason": "access restored",
+			},
+		}},
+
+		// ---- Membership loss checks ----
+		{Table: "membership_loss_checks", Rows: []row{
+			{
+				"id": "ae000000-0000-0000-0000-000000000001", "user_id": userID,
+				"project_id": projectID, "trigger": "member_remove",
+				"actor_kind": "user", "actor_id": userID,
+				"correlation_id": "fixture-membership-loss-check",
+				"created_at":     baseTime, "attempts": 0, "last_error": "",
+			},
+		}},
+
 		// ---- Agent reincarnations ----
 		{Table: "agent_reincarnations", Rows: []row{
 			{ // completed record with both config snapshots

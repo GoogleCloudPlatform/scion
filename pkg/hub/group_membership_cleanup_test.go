@@ -103,7 +103,7 @@ func TestDeprecatedAllowListDelete_RemovesGroupMemberships(t *testing.T) {
 // this fix (user deleted, membership row left with both IDs NULL) are
 // removed when the server starts; real rows stay.
 func TestStartupSweep_RemovesOrphanedGroupMemberships(t *testing.T) {
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	require.NoError(t, err)
 	ctx := context.Background()
 	require.NoError(t, s.Migrate(ctx))
@@ -150,7 +150,7 @@ func (s *sweepFailingStore) DeleteOrphanedGroupMemberships(context.Context) (int
 // TestStartupSweep_ErrorIsNonFatal: a failing startup sweep is logged at Warn
 // and server construction still succeeds.
 func TestStartupSweep_ErrorIsNonFatal(t *testing.T) {
-	inner, err := newTestStore(":memory:")
+	inner, err := newTestStore(t, ":memory:")
 	require.NoError(t, err)
 	wrapped := &sweepFailingStore{Store: inner}
 	logs := captureSlog(t)

@@ -29,12 +29,17 @@ const (
 	MetricLaunchReaperDisarmedFor = "scion.launch_reaper.disarmed_for"
 )
 
+// AttrTickOutcome is the attribute key callers set on MetricLaunchReaperTicks
+// to record the tick outcome (not_acquired | unavailable | completed |
+// failed). Dashboards group ticks by it.
+const AttrTickOutcome = "outcome"
+
 // Recorder is the interface callers use to record launch-reaper metrics. All
 // methods are safe to call concurrently and are cheap no-ops when metrics
 // are disabled.
 type Recorder interface {
 	// IncTicks records n completed reaper ticks, typically n=1 per call with
-	// an "outcome" attribute (not_acquired | unavailable | completed | failed).
+	// an AttrTickOutcome attribute (not_acquired | unavailable | completed | failed).
 	IncTicks(ctx context.Context, n int64, attrs ...attribute.KeyValue)
 
 	// IncRowErrors records n per-row savepoint failures from a single tick
