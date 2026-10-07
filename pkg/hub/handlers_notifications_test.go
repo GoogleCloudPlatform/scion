@@ -264,7 +264,7 @@ func TestHandleNotifications_FilterByAgent(t *testing.T) {
 
 	// Agent notifications: notifications sent TO agent-watched
 	require.Len(t, resp.AgentNotifications, 1)
-	assert.Equal(t, tid("agent-watched"), resp.AgentNotifications[0].SubscriberID)
+	assert.Equal(t, "watched-agent", resp.AgentNotifications[0].SubscriberID)
 }
 
 func TestHandleNotifications_FilterByAgent_NoResults(t *testing.T) {
