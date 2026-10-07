@@ -53,12 +53,31 @@ const (
 	// scheduledSendClientType is the client type of the identity a
 	// scheduled message is sent with, and the executor recorded for it.
 	scheduledSendClientType = "scheduled-send"
+	// scheduledFireBudget bounds the delivery of one claimed message: the
+	// fire-time checks, the send (whose dispatches have their own 30 s
+	// bounds) and the final state write. It runs detached from server
+	// shutdown, so a claimed row is not stranded in sending.
+	scheduledFireBudget = 2 * time.Minute
+	// scheduledMaxActivePerSender caps a sender's pending and sending
+	// messages across all conversations. Delivery at fire time is not
+	// rate limited; this cap is what bounds it.
+	scheduledMaxActivePerSender = 50
+	// scheduledMinLead and scheduledMaxHorizon bound fire_at at create.
+	scheduledMinLead    = 60 * time.Second
+	scheduledMaxHorizon = 90 * 24 * time.Hour
+	// Length limits for client-supplied identifiers.
+	scheduledMaxReplyToIDLen      = 128
+	scheduledMaxIdempotencyKeyLen = 255
 )
+
+// ErrCodeScheduledLimit is returned when a sender already has the maximum
+// number of pending scheduled messages.
+const ErrCodeScheduledLimit = "scheduled_limit_reached"
 
 // ChatScheduledEvent is published to the sender on
 // user.<id>.chat.scheduled when one of their scheduled messages changes.
 type ChatScheduledEvent struct {
-	// Action is created, cancelled, sent or failed.
+	// Action is created, cancelled, sending, sent or failed.
 	Action           string                   `json:"action"`
 	ScheduledMessage scheduledMessageResponse `json:"scheduledMessage"`
 }
@@ -99,7 +118,9 @@ func scheduledSendLog() *slog.Logger {
 
 // auditScheduledMessage records a create, cancel or fire of a scheduled
 // message, with the sender as principal and scheduled-send as executor.
-func auditScheduledMessage(ctx context.Context, action string, m *ScheduledChatMessage, outcome string) {
+// The outcome is the row's resulting status, with the failure reason in its
+// own field.
+func auditScheduledMessage(ctx context.Context, action string, m *ScheduledChatMessage) {
 	scheduledSendLog().Info("scheduled chat message",
 		"audit_action", "chat.scheduled."+action,
 		"principal_type", "user",
@@ -107,7 +128,9 @@ func auditScheduledMessage(ctx context.Context, action string, m *ScheduledChatM
 		"executor", scheduledSendClientType,
 		"scheduled_message_id", m.ID,
 		"conversation_key", m.ConversationKey,
-		"outcome", outcome,
+		"status", m.Status,
+		"failure_reason", m.FailureReason,
+		"message_id", m.MessageID,
 		"request_id", logging.RequestIDFromContext(ctx),
 	)
 }
@@ -234,6 +257,14 @@ func (s *Server) handleScheduledCreate(w http.ResponseWriter, r *http.Request, k
 		ValidationError(w, "attachments cannot be scheduled", nil)
 		return
 	}
+	if len(body.ReplyToID) > scheduledMaxReplyToIDLen {
+		ValidationError(w, fmt.Sprintf("reply_to_id exceeds %d characters", scheduledMaxReplyToIDLen), nil)
+		return
+	}
+	if len(body.IdempotencyKey) > scheduledMaxIdempotencyKeyLen {
+		ValidationError(w, fmt.Sprintf("idempotency_key exceeds %d characters", scheduledMaxIdempotencyKeyLen), nil)
+		return
+	}
 	content, _, serr := s.validateChatSendInput(ctx, target, chatSendInput{Content: body.Content})
 	if serr != nil {
 		serr.write(w)
@@ -246,13 +277,42 @@ func (s *Server) handleScheduledCreate(w http.ResponseWriter, r *http.Request, k
 	}
 	now := time.Now().UTC()
 	fireAt = fireAt.UTC()
-	if !fireAt.After(now) {
-		ValidationError(w, "fire_at must be in the future", nil)
-		return
-	}
 	idemKey := body.IdempotencyKey
 	if idemKey == "" {
 		idemKey = api.NewUUID()
+	} else {
+		// A retry of a create that already succeeded answers with that row,
+		// before the time and count checks, which it passed then.
+		existing, err := sms.GetScheduledMessageByIdempotencyKey(ctx, user.ID(), idemKey)
+		if err != nil {
+			slog.Error("scheduled send: idempotency lookup failed", "error", err)
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to schedule message", nil)
+			return
+		}
+		if existing != nil {
+			s.writeScheduledReplay(w, existing, key)
+			return
+		}
+	}
+	if fireAt.Before(now.Add(scheduledMinLead)) {
+		ValidationError(w, "fire_at must be at least 60 seconds in the future", nil)
+		return
+	}
+	if fireAt.After(now.Add(scheduledMaxHorizon)) {
+		ValidationError(w, "fire_at must be within 90 days", nil)
+		return
+	}
+	active, err := sms.CountActiveScheduledMessages(ctx, user.ID())
+	if err != nil {
+		slog.Error("scheduled send: count failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to schedule message", nil)
+		return
+	}
+	if active >= scheduledMaxActivePerSender {
+		writeError(w, http.StatusConflict, ErrCodeScheduledLimit,
+			fmt.Sprintf("you already have %d scheduled messages; cancel one or wait for it to be sent", scheduledMaxActivePerSender),
+			map[string]interface{}{"limit": scheduledMaxActivePerSender})
+		return
 	}
 
 	row, existed, err := sms.CreateScheduledMessage(ctx, &ScheduledChatMessage{
@@ -274,13 +334,25 @@ func (s *Server) handleScheduledCreate(w http.ResponseWriter, r *http.Request, k
 		return
 	}
 	if existed {
-		// A retry of a create that already succeeded.
-		writeJSON(w, http.StatusOK, newScheduledMessageResponse(row))
+		// A concurrent retry with the same idempotency key won the insert.
+		s.writeScheduledReplay(w, row, key)
 		return
 	}
-	auditScheduledMessage(ctx, "create", row, "ok")
+	auditScheduledMessage(ctx, "create", row)
 	s.publishScheduledMessage(ctx, "created", row)
 	writeJSON(w, http.StatusCreated, newScheduledMessageResponse(row))
+}
+
+// writeScheduledReplay answers a create whose idempotency key the sender
+// already used: 200 with that row, or 409 if it belongs to a different
+// conversation.
+func (s *Server) writeScheduledReplay(w http.ResponseWriter, row *ScheduledChatMessage, key string) {
+	if row.ConversationKey != key {
+		writeError(w, http.StatusConflict, ErrCodeConflict,
+			"idempotency_key was already used for a message in another conversation", nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, newScheduledMessageResponse(row))
 }
 
 // handleScheduledList implements GET …/{key}/scheduled: the caller's own
@@ -363,7 +435,7 @@ func (s *Server) handleScheduledCancel(w http.ResponseWriter, r *http.Request, k
 	}
 	row.Status = ScheduledMessageCancelled
 	row.UpdatedAt = now
-	auditScheduledMessage(ctx, "cancel", row, "ok")
+	auditScheduledMessage(ctx, "cancel", row)
 	s.publishScheduledMessage(ctx, "cancelled", row)
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -373,24 +445,51 @@ func (s *Server) handleScheduledCancel(w http.ResponseWriter, r *http.Request, k
 // ---------------------------------------------------------------------------
 
 // startScheduledSendSweeper starts the scheduled-message sweeper. Every
-// replica runs one; the claim in the store makes delivery exactly-once
-// across them. It stops when ctx is cancelled.
+// replica runs one; the claim in the store makes each message delivered by
+// one replica only. It stops when ctx is cancelled or CleanupResources
+// runs; CleanupResources waits (bounded) for a message being delivered.
 func (s *Server) startScheduledSendSweeper(ctx context.Context) {
 	if !s.nativeChatEnabled() {
 		return
 	}
+	loopCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	s.mu.Lock()
+	s.scheduledSendStop = cancel
+	s.scheduledSendDone = done
+	s.mu.Unlock()
 	go func() {
+		defer close(done)
 		ticker := time.NewTicker(scheduledSendTick)
 		defer ticker.Stop()
 		for {
 			select {
-			case <-ctx.Done():
+			case <-loopCtx.Done():
 				return
 			case <-ticker.C:
-				s.sweepScheduledMessages(ctx, time.Now().UTC())
+				s.sweepScheduledMessages(loopCtx, time.Now().UTC())
 			}
 		}
 	}()
+}
+
+// stopScheduledSendSweeper stops the sweeper and waits up to
+// scheduledFireBudget for a message it is delivering, so that message ends
+// sent, failed or pending before the stores close.
+func (s *Server) stopScheduledSendSweeper() {
+	s.mu.Lock()
+	stop, done := s.scheduledSendStop, s.scheduledSendDone
+	s.scheduledSendStop, s.scheduledSendDone = nil, nil
+	s.mu.Unlock()
+	if stop == nil {
+		return
+	}
+	stop()
+	select {
+	case <-done:
+	case <-time.After(scheduledFireBudget):
+		scheduledSendLog().Warn("scheduled send: sweeper did not stop in time")
+	}
 }
 
 // sweepScheduledMessages sends the messages due at now that this replica
@@ -415,7 +514,11 @@ func (s *Server) sweepScheduledMessages(ctx context.Context, now time.Time) int 
 			break
 		}
 		row := due[i]
-		ok, err := sms.ClaimScheduledMessage(ctx, row.ID, time.Now().UTC())
+		// The claim, once started, is not cut short by shutdown either: a
+		// claim that commits must be followed by delivery or release.
+		claimCtx, cancelClaim := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		ok, err := sms.ClaimScheduledMessage(claimCtx, row.ID, time.Now().UTC())
+		cancelClaim()
 		if err != nil {
 			scheduledSendLog().Warn("scheduled send: claim failed", "id", row.ID, "error", err)
 			continue
@@ -425,6 +528,7 @@ func (s *Server) sweepScheduledMessages(ctx context.Context, now time.Time) int 
 		}
 		claimed++
 		row.Status = ScheduledMessageSending
+		s.publishScheduledMessage(ctx, "sending", &row)
 		s.fireScheduledMessage(ctx, sms, &row)
 	}
 	return claimed
@@ -519,7 +623,13 @@ func scheduledFailureFromSendError(serr *chatSendError) string {
 // fireScheduledMessage delivers a row this replica has claimed. Once
 // sendChatMessage has been called the row never returns to pending: it
 // ends sent or failed, so a message is sent at most once.
+//
+// It runs on a context detached from ctx's cancellation (server shutdown)
+// with its own bound, so a claimed row is always released or finalized:
+// a shutdown must not leave it in sending with nothing sent.
 func (s *Server) fireScheduledMessage(ctx context.Context, sms ScheduledMessageStore, m *ScheduledChatMessage) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), scheduledFireBudget)
+	defer cancel()
 	ctx = ContextWithExecutor(ctx, ExecutorContext{Kind: scheduledSendClientType, ID: "scheduled_message:" + m.ID})
 
 	check := s.checkScheduledFire(ctx, m)
@@ -566,7 +676,7 @@ func (s *Server) fireScheduledMessage(ctx context.Context, sms ScheduledMessageS
 	m.Status = ScheduledMessageSent
 	m.MessageID = resp.ID
 	m.UpdatedAt = now
-	auditScheduledMessage(ctx, "fire", m, "sent")
+	auditScheduledMessage(ctx, "fire", m)
 	s.publishScheduledMessage(ctx, "sent", m)
 }
 
@@ -578,6 +688,6 @@ func (s *Server) failScheduledMessage(ctx context.Context, sms ScheduledMessageS
 	m.Status = ScheduledMessageFailed
 	m.FailureReason = reason
 	m.UpdatedAt = now
-	auditScheduledMessage(ctx, "fire", m, "failed:"+reason)
+	auditScheduledMessage(ctx, "fire", m)
 	s.publishScheduledMessage(ctx, "failed", m)
 }

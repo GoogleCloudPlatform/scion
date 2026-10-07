@@ -86,7 +86,7 @@ func TestScheduledSend_TwoHubReplicasPostgres_OneDelivery(t *testing.T) {
 
 	const rounds = 5
 	for i := 0; i < rounds; i++ {
-		fireAt := time.Now().Add(2 * time.Second)
+		fireAt := time.Now().Add(2 * time.Minute)
 		rec := doRequestAsUser(t, srvA, bob, http.MethodPost, "/api/v1/chat/conversations/"+topicID+"/scheduled",
 			map[string]interface{}{
 				"content":         "ha round " + string(rune('a'+i)),

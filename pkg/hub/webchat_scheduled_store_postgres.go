@@ -49,6 +49,9 @@ CREATE INDEX IF NOT EXISTS idx_webchat_scheduled_message_status_fire
 CREATE INDEX IF NOT EXISTS idx_webchat_scheduled_message_sender_conversation
     ON webchat_scheduled_message (sender_user_id, conversation_key);
 
+CREATE INDEX IF NOT EXISTS idx_webchat_scheduled_message_sender_status
+    ON webchat_scheduled_message (sender_user_id, status);
+
 CREATE UNIQUE INDEX IF NOT EXISTS idx_webchat_scheduled_message_idempotency
     ON webchat_scheduled_message (sender_user_id, idempotency_key);
 `
@@ -114,7 +117,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 ON CONFLICT (sender_user_id, idempotency_key) DO NOTHING
 `
 	res, err := s.db.ExecContext(ctx, query, m.ID, m.SenderUserID, m.ConversationKey, nullableString(m.ProjectID),
-		m.Content, nullableString(m.ReplyToID), m.IdempotencyKey, m.FireAt.UTC(), m.Status,
+		m.Content, nullableString(m.ReplyToID), m.IdempotencyKey, scheduledFireTime(m.FireAt), m.Status,
 		m.CreatedAt.UTC(), m.UpdatedAt.UTC())
 	if err != nil {
 		return nil, false, fmt.Errorf("webchat store: create scheduled message: %w", err)
@@ -146,7 +149,32 @@ func (s *pgWebChatStore) GetScheduledMessage(ctx context.Context, senderUserID, 
 	return row, nil
 }
 
+func (s *pgWebChatStore) GetScheduledMessageByIdempotencyKey(ctx context.Context, senderUserID, idempotencyKey string) (*ScheduledChatMessage, error) {
+	row, err := scanPGScheduled(s.db.QueryRowContext(ctx,
+		`SELECT `+pgScheduledColumns+` FROM webchat_scheduled_message WHERE sender_user_id = $1 AND idempotency_key = $2`,
+		senderUserID, idempotencyKey))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("webchat store: get scheduled message by idempotency key: %w", err)
+	}
+	return row, nil
+}
+
+func (s *pgWebChatStore) CountActiveScheduledMessages(ctx context.Context, senderUserID string) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM webchat_scheduled_message WHERE sender_user_id = $1 AND status IN ($2, $3)`,
+		senderUserID, ScheduledMessagePending, ScheduledMessageSending).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("webchat store: count scheduled messages: %w", err)
+	}
+	return n, nil
+}
+
 func (s *pgWebChatStore) ListScheduledMessages(ctx context.Context, senderUserID, conversationKey string) ([]ScheduledChatMessage, error) {
+	// Phase 2: purge (see the SQLite twin).
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT `+pgScheduledColumns+` FROM webchat_scheduled_message
 		  WHERE sender_user_id = $1 AND conversation_key = $2 AND status IN ($3, $4, $5)
@@ -170,7 +198,7 @@ func (s *pgWebChatStore) ListDueScheduledMessages(ctx context.Context, now time.
 		`SELECT `+pgScheduledColumns+` FROM webchat_scheduled_message
 		  WHERE status = $1 AND fire_at <= $2
 		  ORDER BY fire_at, id LIMIT $3`,
-		ScheduledMessagePending, now.UTC(), limit)
+		ScheduledMessagePending, scheduledFireTime(now), limit)
 	if err != nil {
 		return nil, fmt.Errorf("webchat store: list due scheduled messages: %w", err)
 	}

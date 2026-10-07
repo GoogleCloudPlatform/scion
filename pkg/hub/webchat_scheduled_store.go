@@ -84,6 +84,12 @@ type ScheduledMessageStore interface {
 	// GetScheduledMessage returns the sender's row with the given ID, or
 	// nil when there is none.
 	GetScheduledMessage(ctx context.Context, senderUserID, id string) (*ScheduledChatMessage, error)
+	// GetScheduledMessageByIdempotencyKey returns the sender's row created
+	// with the given idempotency key, or nil when there is none.
+	GetScheduledMessageByIdempotencyKey(ctx context.Context, senderUserID, idempotencyKey string) (*ScheduledChatMessage, error)
+	// CountActiveScheduledMessages returns how many of the sender's rows are
+	// pending or sending, across all conversations.
+	CountActiveScheduledMessages(ctx context.Context, senderUserID string) (int, error)
 	// ListScheduledMessages returns the sender's pending, sending and
 	// failed rows in the conversation, ordered by fire time.
 	ListScheduledMessages(ctx context.Context, senderUserID, conversationKey string) ([]ScheduledChatMessage, error)
@@ -125,13 +131,22 @@ const scheduledMessageTableMigration = "scheduled_message_table"
 // SQLite implementation
 // ---------------------------------------------------------------------------
 
-// sqliteScheduledTimeLayout is a fixed-width UTC layout, so that fire times
-// stored as TEXT compare correctly as strings (RFC3339Nano trims trailing
-// zeros and would not).
-const sqliteScheduledTimeLayout = "2006-01-02T15:04:05.000000000Z"
-
+// sqliteScheduledTime formats a time in the canonical webchat TEXT form
+// (UTC RFC 3339 with trimmed fractional seconds), like the other webchat_*
+// tables.
+//
+// Fire times are stored truncated to whole seconds (see
+// scheduledFireTime), and the due query compares them against "now"
+// truncated the same way, so both sides have no fractional part and compare
+// correctly as strings. A message can therefore fire up to one second, at
+// most one sweep tick, later than its exact fire time.
 func sqliteScheduledTime(t time.Time) string {
-	return t.UTC().Format(sqliteScheduledTimeLayout)
+	return t.UTC().Format(time.RFC3339Nano)
+}
+
+// scheduledFireTime is the stored form of a fire time: UTC, whole seconds.
+func scheduledFireTime(t time.Time) time.Time {
+	return t.UTC().Truncate(time.Second)
 }
 
 const sqliteScheduledMessageDDL = `
@@ -157,6 +172,9 @@ CREATE INDEX IF NOT EXISTS idx_webchat_scheduled_message_status_fire
 
 CREATE INDEX IF NOT EXISTS idx_webchat_scheduled_message_sender_conversation
     ON webchat_scheduled_message (sender_user_id, conversation_key);
+
+CREATE INDEX IF NOT EXISTS idx_webchat_scheduled_message_sender_status
+    ON webchat_scheduled_message (sender_user_id, status);
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_webchat_scheduled_message_idempotency
     ON webchat_scheduled_message (sender_user_id, idempotency_key);
@@ -214,7 +232,7 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (sender_user_id, idempotency_key) DO NOTHING
 `
 	res, err := s.db.ExecContext(ctx, query, m.ID, m.SenderUserID, m.ConversationKey, nullableString(m.ProjectID),
-		m.Content, nullableString(m.ReplyToID), m.IdempotencyKey, sqliteScheduledTime(m.FireAt), m.Status,
+		m.Content, nullableString(m.ReplyToID), m.IdempotencyKey, sqliteScheduledTime(scheduledFireTime(m.FireAt)), m.Status,
 		sqliteScheduledTime(m.CreatedAt), sqliteScheduledTime(m.UpdatedAt))
 	if err != nil {
 		return nil, false, fmt.Errorf("webchat store: create scheduled message: %w", err)
@@ -246,7 +264,34 @@ func (s *sqliteWebChatStore) GetScheduledMessage(ctx context.Context, senderUser
 	return row, nil
 }
 
+func (s *sqliteWebChatStore) GetScheduledMessageByIdempotencyKey(ctx context.Context, senderUserID, idempotencyKey string) (*ScheduledChatMessage, error) {
+	row, err := scanSQLiteScheduled(s.db.QueryRowContext(ctx,
+		`SELECT `+sqliteScheduledColumns+` FROM webchat_scheduled_message WHERE sender_user_id = ? AND idempotency_key = ?`,
+		senderUserID, idempotencyKey))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("webchat store: get scheduled message by idempotency key: %w", err)
+	}
+	return row, nil
+}
+
+func (s *sqliteWebChatStore) CountActiveScheduledMessages(ctx context.Context, senderUserID string) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM webchat_scheduled_message WHERE sender_user_id = ? AND status IN (?, ?)`,
+		senderUserID, ScheduledMessagePending, ScheduledMessageSending).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("webchat store: count scheduled messages: %w", err)
+	}
+	return n, nil
+}
+
 func (s *sqliteWebChatStore) ListScheduledMessages(ctx context.Context, senderUserID, conversationKey string) ([]ScheduledChatMessage, error) {
+	// Sent and cancelled rows are not listed; failed rows stay until the
+	// user dismisses them. Phase 2: purge sent/cancelled after 7 days and
+	// failed after 30, and on topic, DM and user delete.
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT `+sqliteScheduledColumns+` FROM webchat_scheduled_message
 		  WHERE sender_user_id = ? AND conversation_key = ? AND status IN (?, ?, ?)
@@ -286,7 +331,7 @@ func (s *sqliteWebChatStore) ListDueScheduledMessages(ctx context.Context, now t
 		`SELECT `+sqliteScheduledColumns+` FROM webchat_scheduled_message
 		  WHERE status = ? AND fire_at <= ?
 		  ORDER BY fire_at, id LIMIT ?`,
-		ScheduledMessagePending, sqliteScheduledTime(now), limit)
+		ScheduledMessagePending, sqliteScheduledTime(scheduledFireTime(now)), limit)
 	if err != nil {
 		return nil, fmt.Errorf("webchat store: list due scheduled messages: %w", err)
 	}
