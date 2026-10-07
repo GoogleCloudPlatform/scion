@@ -1088,3 +1088,255 @@ func TestK8sCreate_PerRunAnnotations(t *testing.T) {
 		t.Errorf("no-run Secret = %s %v, want the fixed name and no annotations", legacy, ls.Annotations)
 	}
 }
+
+// --- round 2: the reference guard and the per-run-only guard ---
+
+// TestPodReferencesObject: one positive row per reference kind (and per
+// container kind for env references), plus negatives for the wrong kind
+// and the wrong name.
+func TestPodReferencesObject(t *testing.T) {
+	const name = "obj"
+	envRef := []corev1.EnvVar{{Name: "E", ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+		LocalObjectReference: corev1.LocalObjectReference{Name: name}, Key: "k"}}}}
+	envFrom := []corev1.EnvFromSource{{SecretRef: &corev1.SecretEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: name}}}}
+	vol := func(src corev1.VolumeSource) *corev1.Pod {
+		return &corev1.Pod{Spec: corev1.PodSpec{Volumes: []corev1.Volume{{Name: "v", VolumeSource: src}}}}
+	}
+	secretVol := vol(corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: name}})
+	projected := vol(corev1.VolumeSource{Projected: &corev1.ProjectedVolumeSource{Sources: []corev1.VolumeProjection{
+		{Secret: &corev1.SecretProjection{LocalObjectReference: corev1.LocalObjectReference{Name: name}}}}}})
+	csi := vol(corev1.VolumeSource{CSI: &corev1.CSIVolumeSource{Driver: "d", VolumeAttributes: map[string]string{"secretProviderClass": name}}})
+	inContainer := func(where string, env []corev1.EnvVar, from []corev1.EnvFromSource) *corev1.Pod {
+		p := &corev1.Pod{}
+		switch where {
+		case "init":
+			p.Spec.InitContainers = []corev1.Container{{Name: "c", Env: env, EnvFrom: from}}
+		case "regular":
+			p.Spec.Containers = []corev1.Container{{Name: "c", Env: env, EnvFrom: from}}
+		case "ephemeral":
+			p.Spec.EphemeralContainers = []corev1.EphemeralContainer{{EphemeralContainerCommon: corev1.EphemeralContainerCommon{Name: "c", Env: env, EnvFrom: from}}}
+		}
+		return p
+	}
+	type row struct {
+		name string
+		pod  *corev1.Pod
+		kind string
+		obj  string
+		want bool
+	}
+	rows := []row{
+		{"secret volume", secretVol, "Secret", name, true},
+		{"projected secret", projected, "Secret", name, true},
+		{"csi secretProviderClass", csi, "SecretProviderClass", name, true},
+		{"secret volume asked as SPC", secretVol, "SecretProviderClass", name, false},
+		{"projected asked as SPC", projected, "SecretProviderClass", name, false},
+		{"csi asked as Secret", csi, "Secret", name, false},
+		{"secret volume, other name", secretVol, "Secret", "other", false},
+		{"projected, other name", projected, "Secret", "other", false},
+		{"csi, other name", csi, "SecretProviderClass", "other", false},
+		{"empty pod", &corev1.Pod{}, "Secret", name, false},
+	}
+	for _, where := range []string{"init", "regular", "ephemeral"} {
+		rows = append(rows,
+			row{where + " env secretKeyRef", inContainer(where, envRef, nil), "Secret", name, true},
+			row{where + " envFrom secretRef", inContainer(where, nil, envFrom), "Secret", name, true},
+			row{where + " env asked as SPC", inContainer(where, envRef, envFrom), "SecretProviderClass", name, false},
+			row{where + " env, other name", inContainer(where, envRef, envFrom), "Secret", "other", false},
+		)
+	}
+	for _, r := range rows {
+		if got := podReferencesObject(r.pod, r.kind, r.obj); got != r.want {
+			t.Errorf("%s: podReferencesObject(%s, %q) = %v, want %v", r.name, r.kind, r.obj, got, r.want)
+		}
+	}
+}
+
+// Every per-run object a buildPod pod uses is reported as referenced by
+// podReferencesObject, in each secrets mode, so the guard covers whatever
+// buildPod references.
+func TestPodReferencesObject_CoversBuildPod(t *testing.T) {
+	auth := &api.ResolvedAuth{Files: []api.FileMapping{{SourcePath: "/dev/null", ContainerPath: "/home/scion/.auth"}}}
+	type obj struct{ kind, name string }
+	for _, tc := range []struct {
+		name    string
+		gke     bool
+		cfg     func() RunConfig
+		objects func(n k8sObjectNames) []obj
+	}{
+		{"fallback, env only", false, func() RunConfig {
+			cfg := rsRunConfig(rsRunB)
+			cfg.ResolvedSecrets = []api.ResolvedSecret{{Name: "TOKEN", Type: "environment", Target: "TOKEN", Value: "v"}}
+			cfg.ResolvedAuth = auth
+			return cfg
+		}, func(n k8sObjectNames) []obj { return []obj{{"Secret", n.Secret}, {"Secret", n.Auth}} }},
+		{"fallback, env and file", false, func() RunConfig {
+			cfg := rsRunConfig(rsRunB)
+			cfg.ResolvedSecrets = []api.ResolvedSecret{
+				{Name: "TOKEN", Type: "environment", Target: "TOKEN", Value: "v"},
+				{Name: "cfg", Type: "file", Target: "/home/scion/cfg", Value: "dg=="},
+			}
+			cfg.ResolvedAuth = auth
+			return cfg
+		}, func(n k8sObjectNames) []obj { return []obj{{"Secret", n.Secret}, {"Secret", n.Auth}} }},
+		{"gke", true, func() RunConfig {
+			cfg := rsRunConfig(rsRunB)
+			cfg.ResolvedSecrets = []api.ResolvedSecret{
+				{Name: "TOKEN", Type: "environment", Target: "TOKEN", Value: "v", Ref: "projects/p/secrets/t"},
+				{Name: "cfg", Type: "file", Target: "/home/scion/cfg", Value: "dg==", Ref: "projects/p/secrets/c"},
+			}
+			cfg.ResolvedAuth = auth
+			return cfg
+		}, func(n k8sObjectNames) []obj {
+			return []obj{{"Secret", n.Secret}, {"SecretProviderClass", n.SPC}, {"Secret", n.Auth}}
+		}},
+		{"nfs-home", false, func() RunConfig {
+			cfg := withRunID(nfsHomeTestConfig(true), rsRunB)
+			cfg.ResolvedAuth = auth
+			return cfg
+		}, func(n k8sObjectNames) []obj { return []obj{{"Secret", n.Secret}, {"Secret", n.Auth}} }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rt, _, _ := newGKECleanupTestRuntime(t)
+			rt.GKEMode = tc.gke
+			cfg := tc.cfg()
+			pod, err := rt.buildPod(rt.DefaultNamespace, cfg)
+			if err != nil {
+				t.Fatalf("buildPod: %v", err)
+			}
+			for _, o := range tc.objects(k8sAgentObjectNames(cfg.Name, rsRunB)) {
+				if !podReferencesObject(pod, o.kind, o.name) {
+					t.Errorf("podReferencesObject(%s %s) = false for a pod that uses it", o.kind, o.name)
+				}
+			}
+		})
+	}
+}
+
+// O1 never applies to fixed-name objects: a named run's fixed-name object
+// under another run's pod is kept.
+func TestCleanupAgentResources_NamedRun_FixedNameUnderOtherRunsPodKept(t *testing.T) {
+	rt, _, _, _ := newRunScopeRuntime(t)
+	prClock(rt, prNow)
+	b := k8sAgentObjectNames(rsAgent, rsRunB)
+	prSeedPodRefs(t, rt, rsRunB, corev1.PodRunning, b.Secret)
+	prSeed(t, rt, "Secret", rsAgentSecret, "sec-fixed-a", rsLabels(rsRunA, ""), nil, prNow.Add(-48*time.Hour))
+	prSeed(t, rt, "SPC", rsSPC, "spc-fixed-a", rsLabels(rsRunA, ""), nil, prNow.Add(-48*time.Hour))
+	if err := rt.CleanupAgentResources(context.Background(), "agent", "proj1", rsRunA); err != nil {
+		t.Fatal(err)
+	}
+	if !secretExists(t, rt, rt.DefaultNamespace, rsAgentSecret) || !spcExists(t, rt, rt.DefaultNamespace, rsSPC) {
+		t.Error("a fixed-name object of the named run under another run's pod was removed")
+	}
+}
+
+// Under a pod with no run label (a no-run or older pod, which uses fixed
+// names), the named run's unreferenced per-run objects are removed.
+func TestCleanupAgentResources_NamedRun_UnderNoRunPodRemoved(t *testing.T) {
+	rt, _, _, enf := newRunScopeRuntime(t)
+	prClock(rt, prNow)
+	rsSeedPod(t, rt, "pod-legacy", rsLabels("", "start-legacy"), corev1.PodRunning)
+	a := prSeedRunObjects(t, rt, rsRunA, "300", prNow)
+	if err := rt.CleanupAgentResources(context.Background(), "agent", "proj1", rsRunA); err != nil {
+		t.Fatal(err)
+	}
+	if got := prPresent(t, rt, a); got != prNone {
+		t.Errorf("named run's per-run objects under a no-run pod = %v, want none", got)
+	}
+	if rsPod(t, rt) == nil {
+		t.Error("the no-run pod was removed")
+	}
+	enf.assertAllConditional(t)
+}
+
+// --- NIT2: O2 ordering for an NFS-home start ---
+
+// prSeedNFSRunObjects seeds run's per-run Secrets for NFS-home pod "a".
+func prSeedNFSRunObjects(t *testing.T, rt *KubernetesRuntime, run string) k8sObjectNames {
+	t.Helper()
+	n := k8sAgentObjectNames("a", run)
+	labels := map[string]string{"scion.agent": "true", api.LabelRunID: run}
+	for _, name := range []string{n.Secret, n.Auth} {
+		if _, err := rt.Client.Clientset.CoreV1().Secrets("default").Create(context.Background(), &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+			Name: name, Namespace: "default", UID: types.UID("u-" + name[:14]), Labels: labels,
+			Annotations: map[string]string{annotationPodName: "a", annotationStartDeadlineOffset: "300"}}}, metav1.CreateOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return n
+}
+
+// An NFS-home start without a run ID over a previous (not live) run-ID pod
+// that never confirms its stop: the previous run's per-run objects are not
+// touched, because the start fails before removing them.
+func TestK8sRun_NoRunID_NFSHome_PreviousRunObjectsKeptUntilPodStops(t *testing.T) {
+	rt, cs, _ := newTestK8sRuntime()
+	seedNFSPod(t, rt, rsRunA, corev1.PodSucceeded, nil) // container still running
+	x := prSeedNFSRunObjects(t, rt, rsRunA)
+	keepPodsOnDelete(cs)
+	rt.execReadyClock = (&fakeTerminationClock{now: time.Unix(1000, 0)}).clock()
+	cfg := nfsHomeTestConfig(true)
+	cfg.Name = "a"
+	if _, err := rt.Run(context.Background(), cfg); !errors.Is(err, errPreviousPodUnconfirmed) {
+		t.Fatalf("err = %v, want previous_pod_unconfirmed", err)
+	}
+	for _, name := range []string{x.Secret, x.Auth} {
+		if !secretExists(t, rt, "default", name) {
+			t.Errorf("previous run's per-run Secret %s removed before its pod was confirmed stopped", name)
+		}
+	}
+	for _, a := range cs.Actions() {
+		if a.GetResource().Resource == "secrets" && a.GetVerb() == "delete" {
+			t.Errorf("Secret deleted (%s) before the previous pod was confirmed stopped", a.(k8stesting.DeleteAction).GetName())
+		}
+	}
+}
+
+// The same start, with the previous pod confirming its stop: the previous
+// run's per-run objects are still there when the pod is deleted, and are
+// removed after it stops.
+func TestK8sRun_NoRunID_NFSHome_RemovesPreviousRunObjectsAfterStop(t *testing.T) {
+	rt, cs, _ := newTestK8sRuntime()
+	seedNFSPod(t, rt, rsRunA, corev1.PodSucceeded, nil)
+	x := prSeedNFSRunObjects(t, rt, rsRunA)
+	keepPodsOnDelete(cs)
+	presentAtPodDelete := -1
+	cs.PrependReactor("delete", "pods", func(k8stesting.Action) (bool, k8sruntime.Object, error) {
+		if presentAtPodDelete < 0 {
+			list, _ := cs.Tracker().List(schema.GroupVersionResource{Version: "v1", Resource: "secrets"},
+				schema.GroupVersionKind{Version: "v1", Kind: "Secret"}, "default")
+			presentAtPodDelete = len(list.(*corev1.SecretList).Items)
+		}
+		return false, nil, nil
+	})
+	start := time.Unix(1000, 0)
+	fc := &fakeTerminationClock{now: start}
+	fc.onTick = func(now time.Time) {
+		if now.Sub(start) < 30*time.Second {
+			return
+		}
+		p, _ := cs.CoreV1().Pods("default").Get(context.Background(), "a", metav1.GetOptions{})
+		if p != nil && p.Status.ContainerStatuses[0].State.Terminated == nil {
+			p.Status.ContainerStatuses[0].State = stTerminated
+			_, _ = cs.CoreV1().Pods("default").UpdateStatus(context.Background(), p, metav1.UpdateOptions{})
+		}
+	}
+	rt.execReadyClock = fc.clock()
+	cfg := nfsHomeTestConfig(true)
+	cfg.Name = "a"
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cs.PrependReactor("create", "pods", func(k8stesting.Action) (bool, k8sruntime.Object, error) {
+		cancel() // stop Run once it reaches the pod create
+		return true, nil, errors.New("stop at pod create")
+	})
+	_, _ = rt.Run(ctx, cfg)
+	if presentAtPodDelete != 2 {
+		t.Errorf("per-run Secrets present at the previous pod's delete = %d, want 2", presentAtPodDelete)
+	}
+	for _, name := range []string{x.Secret, x.Auth} {
+		if secretExists(t, rt, "default", name) {
+			t.Errorf("previous run's per-run Secret %s not removed after its pod stopped", name)
+		}
+	}
+}
