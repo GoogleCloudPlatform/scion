@@ -66,10 +66,10 @@ func TestProductionCreatePathsWriteResolvableRoot(t *testing.T) {
 		requireRoot(t, "root-child-create")
 	})
 	t.Run("scheduled_create", func(t *testing.T) {
-		err := f.srv.dispatchAgentEventHandler()(ctx, store.ScheduledEvent{
+		err := f.srv.dispatchAgentEventHandler()(ctx, withAgentRevision(t, f.srv, store.ScheduledEvent{
 			ID: "evt-root", ProjectID: f.proj.ID, EventType: "dispatch_agent",
 			Payload: `{"agentName":"root-sched-create","task":"t"}`, CreatedBy: f.caller.ID,
-		})
+		}, f.caller.ID))
 		require.NoError(t, err)
 		requireRoot(t, "root-sched-create")
 	})
