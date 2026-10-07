@@ -2896,17 +2896,26 @@ func sessionString(session *sessions.Session, key string) string {
 	return ""
 }
 
+// webContentSecurityPolicy is the CSP sent with every web response.
+//
+// img-src allows blob: because the chat file preview fetches image bytes
+// with credentials and renders them through URL.createObjectURL (gs://
+// links, attachments, workspace files). A blob: URL matches neither 'self'
+// nor https:, so without it the browser blocks the load and the preview
+// shows a broken image. blob: is allowed for images only, never for
+// scripts or frames.
+var webContentSecurityPolicy = strings.Join([]string{
+	"default-src 'self'",
+	"script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdn.webawesome.com",
+	"style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdn.webawesome.com https://fonts.googleapis.com",
+	"font-src 'self' https://fonts.gstatic.com https://cdn.jsdelivr.net https://cdn.webawesome.com",
+	"img-src 'self' data: blob: https:",
+	"connect-src 'self' data: ws: wss: http://localhost:* http://127.0.0.1:* https://storage.googleapis.com",
+}, "; ")
+
 // securityHeadersMiddleware adds security headers to all responses.
 func (ws *WebServer) securityHeadersMiddleware(next http.Handler) http.Handler {
-	// Build CSP matching the Koa server's policy (web/src/server/config.ts:154-162)
-	csp := strings.Join([]string{
-		"default-src 'self'",
-		"script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdn.webawesome.com",
-		"style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdn.webawesome.com https://fonts.googleapis.com",
-		"font-src 'self' https://fonts.gstatic.com https://cdn.jsdelivr.net https://cdn.webawesome.com",
-		"img-src 'self' data: https:",
-		"connect-src 'self' data: ws: wss: http://localhost:* http://127.0.0.1:* https://storage.googleapis.com",
-	}, "; ")
+	csp := webContentSecurityPolicy
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Security-Policy", csp)
