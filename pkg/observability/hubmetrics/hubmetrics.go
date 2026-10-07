@@ -139,6 +139,36 @@ func NewMeterProvider(ctx context.Context, gcpProjectID string, opts ...Option) 
 	}
 	exporter := &loggingExporter{delegate: baseExporter}
 
+	res, err := newResource(ctx, o)
+	if err != nil {
+		return nil, err
+	}
+
+	mpOpts := []metric.Option{
+		metric.WithResource(res),
+		metric.WithReader(metric.NewPeriodicReader(exporter,
+			metric.WithInterval(o.exportInterval),
+		)),
+	}
+
+	mpOpts = append(mpOpts, groupDropViews()...)
+
+	return metric.NewMeterProvider(mpOpts...), nil
+}
+
+// NewResource builds the OTel resource NewMeterProvider attaches to every
+// hub metric from opts, without creating an exporter. Callers use it to check
+// the identity a set of options produces.
+func NewResource(ctx context.Context, opts ...Option) (*resource.Resource, error) {
+	o := &options{exportInterval: defaultExportInterval}
+	for _, fn := range opts {
+		fn(o)
+	}
+	return newResource(ctx, o)
+}
+
+// newResource builds the OTel resource attached to every hub metric.
+func newResource(ctx context.Context, o *options) (*resource.Resource, error) {
 	resAttrs := []attribute.KeyValue{
 		semconv.ServiceName("scion-hub"),
 	}
@@ -167,17 +197,7 @@ func NewMeterProvider(ctx context.Context, gcpProjectID string, opts ...Option) 
 	if err != nil {
 		return nil, fmt.Errorf("creating OTel resource: %w", err)
 	}
-
-	mpOpts := []metric.Option{
-		metric.WithResource(res),
-		metric.WithReader(metric.NewPeriodicReader(exporter,
-			metric.WithInterval(o.exportInterval),
-		)),
-	}
-
-	mpOpts = append(mpOpts, groupDropViews()...)
-
-	return metric.NewMeterProvider(mpOpts...), nil
+	return res, nil
 }
 
 // ResourceAttributeLabelFilter selects the resource attributes the Cloud

@@ -99,12 +99,11 @@ func testOIDCServerWithRoutes(t *testing.T) *Server {
 		IssuerURL: testOIDCIssuerURL,
 	}
 
-	srv, err := New(cfg, s)
+	srv, err := newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() with OIDC failed: %v", err)
 	}
 	srv.SetHubID("test-hub-id")
-	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 	return srv
 }
 
@@ -131,11 +130,10 @@ func TestNewServer_AgentEndpointDoesNotAffectOIDCIssuerDefault(t *testing.T) {
 	cfg.AgentEndpoint = "http://192.0.2.10:8080"
 	cfg.OIDCConfig = config.OIDCProviderConfig{Enabled: true} // IssuerURL left empty on purpose
 
-	srv, err := New(cfg, s)
+	srv, err := newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() with OIDC failed: %v", err)
 	}
-	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 
 	if srv.oidcIssuerURL != testOIDCIssuerURL {
 		t.Errorf("oidcIssuerURL = %q, want it to default to HubEndpoint (%q), not AgentEndpoint", srv.oidcIssuerURL, testOIDCIssuerURL)

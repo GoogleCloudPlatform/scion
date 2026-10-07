@@ -1483,7 +1483,7 @@ func TestRS1_D4_IndexInstallationFailClosed(t *testing.T) {
 		DisplayName: "Development User",
 		Email:       "dev@localhost",
 	}
-	_, err = New(cfg, noDBStore)
+	_, err = newTestHubServer(t, cfg, noDBStore)
 	require.Error(t, err, "RS1 R4-1: NewServer must fail if D4 index cannot be installed")
 	assert.Contains(t, err.Error(), "D4 membership index",
 		"RS1 R4-1: error must mention D4 membership index")
@@ -1518,7 +1518,7 @@ func TestRS1_D4_DDLFailurePath(t *testing.T) {
 		DisplayName: "Development User",
 		Email:       "dev@localhost",
 	}
-	_, err = New(cfg, ddlFail)
+	_, err = newTestHubServer(t, cfg, ddlFail)
 	require.Error(t, err, "RS1 R5-2: NewServer must fail when DDL ExecContext returns an error")
 	assert.Contains(t, err.Error(), "D4 membership index",
 		"RS1 R5-2: error must mention D4 DDL failure, not just missing DB (got: %s)", err.Error())
@@ -1596,7 +1596,7 @@ func TestRS1_D4_CreateIndexFailure_Rollback(t *testing.T) {
 		DisplayName: "Development User",
 		Email:       "dev@localhost",
 	}
-	_, err = New(cfg, s)
+	_, err = newTestHubServer(t, cfg, s)
 	require.Error(t, err, "NewServer must fail when CREATE INDEX fails due to conflicting data")
 	assert.Contains(t, err.Error(), "D4 membership index",
 		"error must mention D4 failure (got: %s)", err.Error())
