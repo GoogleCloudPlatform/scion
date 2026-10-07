@@ -186,6 +186,7 @@ func setYAMLPath(root *yaml.Node, path []string, value *yaml.Node) (bool, error)
 		return false, err
 	}
 	m := root
+	var parentKey *yaml.Node
 	for i, k := range path {
 		if isYAMLNull(m) {
 			m.Kind, m.Tag, m.Value, m.Style = yaml.MappingNode, "!!map", "", 0
@@ -193,9 +194,10 @@ func setYAMLPath(root *yaml.Node, path []string, value *yaml.Node) (bool, error)
 		if m.Kind != yaml.MappingNode {
 			return false, fmt.Errorf("cannot set %s: %s is not a mapping", yamlPathString(path), yamlPathString(path[:i]))
 		}
-		_, v := findMapKey(m, k)
+		kn, v := findMapKey(m, k)
 		last := i == len(path)-1
 		if v == nil {
+			unflowEmptyYAMLMapping(m, parentKey)
 			if last {
 				m.Content = append(m.Content, newYAMLStringScalar(k), value)
 				return true, nil
@@ -208,9 +210,28 @@ func setYAMLPath(root *yaml.Node, path []string, value *yaml.Node) (bool, error)
 		if last {
 			return replaceYAMLMapValue(m, k, v, value), nil
 		}
+		parentKey = kn
 		m = v
 	}
 	return false, nil // unreachable: the loop returns on the last element
+}
+
+// unflowEmptyYAMLMapping turns the empty flow mapping m (`parent: {}`) back
+// into a block mapping before setYAMLPath adds a key to it, so the result is
+// `parent:\n  key: value` rather than `parent: {key: value}`. deleteYAMLPath
+// leaves such a `{}` when it removes a mapping's last key (for example
+// deregister clearing server.broker.broker_id), and the next set would
+// otherwise reformat the user's file in flow style (ptone/scion#3535). The
+// line comment deleteYAMLPath moved onto the `{}` goes back to parentKey.
+// A non-empty flow mapping is the user's own style and is left alone.
+func unflowEmptyYAMLMapping(m, parentKey *yaml.Node) {
+	if m.Kind != yaml.MappingNode || m.Style&yaml.FlowStyle == 0 || len(m.Content) != 0 {
+		return
+	}
+	m.Style &^= yaml.FlowStyle
+	if m.LineComment != "" && parentKey != nil && parentKey.LineComment == "" {
+		parentKey.LineComment, m.LineComment = m.LineComment, ""
+	}
 }
 
 // replaceYAMLMapValue replaces old (the value of key k in mapping m) with
