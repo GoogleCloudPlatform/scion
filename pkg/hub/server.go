@@ -5428,7 +5428,7 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	// under multi-replica Postgres (see CONNECTION-BUDGET.md).
 	if rec := s.dbMetrics; rec != nil {
 		if dbp, ok := s.store.(interface{ DB() *sql.DB }); ok {
-			stop := dbmetrics.StartPoolSampler(ctx, rec, dbp.DB(), 0)
+			stop := dbmetrics.StartPoolSampler(ctx, rec, dbmetrics.PoolStore, dbp.DB(), 0)
 			s.mu.Lock()
 			s.stopPoolSampler = stop
 			s.mu.Unlock()

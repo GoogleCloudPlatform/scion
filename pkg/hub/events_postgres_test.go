@@ -29,6 +29,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/otel/attribute"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dbmetrics"
@@ -107,6 +108,7 @@ type countingRecorder struct {
 	payloadSizes   []int64
 	latencies      []float64
 	poolObserved   int
+	pools          []string
 	enabledReturns bool
 }
 
@@ -145,10 +147,11 @@ func (r *countingRecorder) RecordPayloadSize(_ context.Context, bytes int64, _ .
 	defer r.mu.Unlock()
 	r.payloadSizes = append(r.payloadSizes, bytes)
 }
-func (r *countingRecorder) ObservePoolStats(_ context.Context, _ dbmetrics.PoolStats, _ ...attribute.KeyValue) {
+func (r *countingRecorder) ObservePoolStats(_ context.Context, pool string, _ dbmetrics.PoolStats, _ ...attribute.KeyValue) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.poolObserved++
+	r.pools = append(r.pools, pool)
 }
 func (r *countingRecorder) Enabled() bool { return r.enabledReturns }
 
@@ -548,6 +551,28 @@ func TestFanout_RecordsSubscriberLag(t *testing.T) {
 		if rec.lags[i] != want[i] {
 			t.Fatalf("lags = %v, want %v", rec.lags, want)
 		}
+	}
+}
+
+// TestObservePoolStats_NamesEventsPool checks the event publisher reports its
+// pgx pool under its own pool name, apart from the store pool
+// (ptone/scion#3618). The pool is created lazily and never connects.
+func TestObservePoolStats_NamesEventsPool(t *testing.T) {
+	pool, err := pgxpool.New(context.Background(), "postgres://test@127.0.0.1:1/test")
+	if err != nil {
+		t.Fatalf("pgxpool.New: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	rec := &countingRecorder{enabledReturns: true}
+	p := newTestPostgresPublisher(rec)
+	p.pool = pool
+
+	p.observePoolStats()
+
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if len(rec.pools) != 1 || rec.pools[0] != dbmetrics.PoolEvents {
+		t.Fatalf("pools = %v, want [%s]", rec.pools, dbmetrics.PoolEvents)
 	}
 }
 

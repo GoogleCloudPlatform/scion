@@ -11,7 +11,7 @@ Use the dashboard for rates and per-instance history. The Hub's admin Health pag
 
 | Section | Charts | Metrics |
 | :--- | :--- | :--- |
-| Database connection pool | Active, idle, waiting and max connections | `scion.db.pool.connections.*` |
+| Database connection pool | Active, idle and max connections and waits per second, per pool (`store`, `events`) | `scion.db.pool.connections.*` |
 | Broker dispatch | Claimed, done and failed per second; stuck pending messages; intent-to-done latency (p50, p95, p99) | `scion.dispatch.*` |
 | Event notifications | Publish-to-deliver lag (p50, p95, p99); drops per second by reason | `scion.db.notify.*` |
 | Launch reaper | Ticks per second by outcome; row errors per second; time disarmed | `scion.launch_reaper.*` |
@@ -54,7 +54,8 @@ The Hub uses the Google Cloud OpenTelemetry metric exporter. If you build your o
 - **Metric type:** `workload.googleapis.com/` followed by the OpenTelemetry name, dots included. For example, `scion.dispatch.claimed` becomes `workload.googleapis.com/scion.dispatch.claimed`.
 - **Replica label:** each Hub process sets the `service.instance.id` resource attribute to its own instance ID, a random UUID created at startup. It is prefixed with the pod name only when the `POD_NAME` environment variable is set. The Helm chart does not set it by default, so chart legends show bare UUIDs. The instance ID becomes the metric label `service_instance_id`. You don't configure it. It changes every time a replica restarts, so each restart or rollout starts a new set of series and the old ones stop receiving points.
 - **Deployment labels:** the `scion.hub.id` resource attribute becomes the metric label `scion_hub_id`. It comes from the Hub ID (`server.hub.hub_id`, environment variable `SCION_SERVER_HUB_HUBID`), which every replica of an HA Hub shares. Use it to filter by deployment, not to tell replicas apart. The `scion.hub.name` resource attribute becomes `scion_hub_name`. Don't group by it: when no name is configured it falls back to the host name, which is not a stable replica identity.
-- **Label names:** the exporter replaces every character that is not a letter or digit with `_`. Point attributes such as `outcome` (reaper ticks) and `reason` (notification drops) are metric labels too.
+- **Label names:** the exporter replaces every character that is not a letter or digit with `_`. Point attributes such as `outcome` (reaper ticks), `reason` (notification drops) and `pool` (connection pools) are metric labels too.
+- **Pool label:** the Hub has two connection pools, and every `scion.db.pool.*` point carries a `pool` label naming one: `store` (the main database pool) or `events` (the Postgres event pool). Group or filter pool charts by it so the two pools are not summed.
 - **Monitored resource:** `generic_task`, with `job` set to `scion-hub` and `task_id` set to the replica's instance ID. `location` is `global` and `namespace` is empty.
 - **Kinds:**
 
@@ -65,8 +66,7 @@ The Hub uses the Google Cloud OpenTelemetry metric exporter. If you build your o
   | Histogram (for example `scion.dispatch.intent_to_done.duration`, in ms) | `CUMULATIVE` | `DISTRIBUTION` | `ALIGN_DELTA` with a percentile reducer |
 
 :::caution[Known limits of the current metrics]
-- `scion.db.pool.connections.waiting` holds a cumulative count of waits since the pool opened, not the number of requests waiting now. The chart shows that running total.
-- Two pools report `scion.db.pool.*`: the main database pool and the Postgres event pool. They write the same series, so the pool charts can switch between the two pools' values.
+- `scion.db.pool.connections.wait_count` is a counter of the times a caller had to wait for a connection; neither database driver reports how many callers are waiting right now. The chart shows it as a rate. It replaces the `scion.db.pool.connections.waiting` gauge, which held the same running total as a gauge and is no longer exported.
 - `scion.db.notify.subscriber.lag` counts notifications, not time: each delivery records how many notifications the most-behind subscriber has queued and not yet consumed. The dashboard shows notification lag as publish-to-deliver latency.
 :::
 

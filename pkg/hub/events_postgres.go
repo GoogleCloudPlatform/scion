@@ -637,17 +637,20 @@ func (p *PostgresEventPublisher) runMaintenance() {
 	}
 }
 
-// observePoolStats records a snapshot of the pgx pool gauges.
+// observePoolStats records a snapshot of the pgx event pool.
 func (p *PostgresEventPublisher) observePoolStats() {
 	if !p.metrics.Enabled() {
 		return
 	}
 	s := p.pool.Stat()
-	p.metrics.ObservePoolStats(p.ctx, dbmetrics.PoolStats{
-		Active:  int64(s.AcquiredConns()),
-		Idle:    int64(s.IdleConns()),
-		Waiting: int64(s.EmptyAcquireCount()),
-		Max:     int64(s.MaxConns()),
+	// EmptyAcquireCount, the cumulative number of acquires that had to wait
+	// because the pool had no idle connection, is the pgx equivalent of
+	// database/sql's WaitCount.
+	p.metrics.ObservePoolStats(p.ctx, dbmetrics.PoolEvents, dbmetrics.PoolStats{
+		Active:    int64(s.AcquiredConns()),
+		Idle:      int64(s.IdleConns()),
+		WaitCount: s.EmptyAcquireCount(),
+		Max:       int64(s.MaxConns()),
 	})
 }
 

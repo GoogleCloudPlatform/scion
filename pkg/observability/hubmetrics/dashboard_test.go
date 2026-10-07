@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -41,6 +42,10 @@ var hubDashboardPath = filepath.Join("..", "..", "..", "deploy", "monitoring", "
 var pointAttributeLabels = map[string]map[string]bool{
 	reapermetrics.MetricLaunchReaperTicks: {reapermetrics.AttrTickOutcome: true},
 	dbmetrics.MetricNotificationsDropped:  {dbmetrics.AttrDropReason: true},
+	dbmetrics.MetricPoolConnectionsActive: {dbmetrics.AttrPool: true},
+	dbmetrics.MetricPoolConnectionsIdle:   {dbmetrics.AttrPool: true},
+	dbmetrics.MetricPoolConnectionsWaits:  {dbmetrics.AttrPool: true},
+	dbmetrics.MetricPoolConnectionsMax:    {dbmetrics.AttrPool: true},
 }
 
 // --- instrument discovery --------------------------------------------------
@@ -662,6 +667,12 @@ func TestHubDashboardJSON(t *testing.T) {
 			if len(agg.GroupByFields) == 0 || agg.GroupByFields[0] != replicaGroup {
 				t.Errorf("chart %q: first groupByField must be %s, got %v", w.Title, replicaGroup, agg.GroupByFields)
 			}
+			// Two pools write scion.db.pool.*: a chart that does not group by
+			// pool sums or mixes them per replica (ptone/scion#3618).
+			if pointAttributeLabels[em.otelName][dbmetrics.AttrPool] &&
+				!slices.Contains(agg.GroupByFields, `metric.label."`+dbmetrics.AttrPool+`"`) {
+				t.Errorf("chart %q: must group by metric.label.%q, got %v", w.Title, dbmetrics.AttrPool, agg.GroupByFields)
+			}
 
 			// Every label referenced must reach Cloud Monitoring: a
 			// resource-derived label (checked against the export above) or
@@ -688,7 +699,7 @@ func TestHubDashboardJSON(t *testing.T) {
 	for _, name := range []string{
 		dbmetrics.MetricPoolConnectionsActive,
 		dbmetrics.MetricPoolConnectionsIdle,
-		dbmetrics.MetricPoolConnectionsWaiting,
+		dbmetrics.MetricPoolConnectionsWaits,
 		dbmetrics.MetricPoolConnectionsMax,
 		dispatchmetrics.MetricDispatchClaimed,
 		dispatchmetrics.MetricDispatchDone,
