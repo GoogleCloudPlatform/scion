@@ -67,7 +67,7 @@ The Hub uses the Google Cloud OpenTelemetry metric exporter. If you build your o
 
 :::caution[Known limits of the current metrics]
 - `scion.db.pool.connections.wait_count` is a counter of the times a caller had to wait for a connection; neither database driver reports how many callers are waiting right now. The chart shows it as a rate. It replaces the `scion.db.pool.connections.waiting` gauge, which held the same running total as a gauge and is no longer exported.
-- `scion.db.notify.subscriber.lag` counts notifications, not time: each delivery records how many notifications the most-behind subscriber has queued and not yet consumed. The dashboard shows notification lag as publish-to-deliver latency.
+- `scion.db.notify.subscriber.lag` counts notifications, not time: each delivery records how many notifications the event queues behind in the most-behind matching subscriber (0 when subscribers keep up, the buffer capacity when the event is dropped), and the hub samples the current depth per `scope` about every 30 seconds so the value returns to 0 when traffic stops. The dashboard shows notification lag as publish-to-deliver latency.
 :::
 
 ## Link from the Health page

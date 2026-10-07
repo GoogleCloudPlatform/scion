@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -105,6 +106,7 @@ type countingRecorder struct {
 	dropped        int64
 	reconnects     int64
 	lags           []int64
+	lagScopes      []string
 	payloadSizes   []int64
 	latencies      []float64
 	poolObserved   int
@@ -132,10 +134,17 @@ func (r *countingRecorder) IncDropped(_ context.Context, n int64, _ ...attribute
 	defer r.mu.Unlock()
 	r.dropped += n
 }
-func (r *countingRecorder) ObserveSubscriberLag(_ context.Context, lag int64, _ ...attribute.KeyValue) {
+func (r *countingRecorder) ObserveSubscriberLag(_ context.Context, lag int64, attrs ...attribute.KeyValue) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.lags = append(r.lags, lag)
+	scope := ""
+	for _, kv := range attrs {
+		if kv.Key == "scope" {
+			scope = kv.Value.AsString()
+		}
+	}
+	r.lagScopes = append(r.lagScopes, scope)
 }
 func (r *countingRecorder) IncListenerReconnects(_ context.Context, n int64, _ ...attribute.KeyValue) {
 	r.mu.Lock()
@@ -524,32 +533,81 @@ func TestHandleNotification_FullBufferDropsAndCounts(t *testing.T) {
 	}
 }
 
-// TestFanout_RecordsSubscriberLag checks fanout records the most-behind
-// matching subscriber's queued notifications (ptone/scion#3617), and records
-// nothing when no subscriber matches.
+// TestFanout_RecordsSubscriberLag checks the lag is the depth an event queues
+// behind, read before the send: a subscriber that keeps up reports 0, and a
+// full buffer reports its capacity (ptone/scion#3617). It also checks the
+// scope attribute matches the subject.
 func TestFanout_RecordsSubscriberLag(t *testing.T) {
 	rec := &countingRecorder{}
 	p := newTestPostgresPublisher(rec)
 	slow := &pgSubscription{ch: make(chan Event, 2)}
 	fast := &pgSubscription{ch: make(chan Event, 8)}
+	proj := &pgSubscription{ch: make(chan Event, 8)}
 	p.subs[pgGlobalChannel] = map[*pgSubscription][]string{slow: {"agent.>"}, fast: {"agent.>"}}
+	p.subs[projectChannel("G1")] = map[*pgSubscription][]string{proj: {"project.G1.>"}}
 
 	evt := Event{Subject: "agent.A1.status", Data: []byte(`{}`)}
-	p.fanout(pgGlobalChannel, evt)
-	<-fast.ch // the fast subscriber keeps up
-	p.fanout(pgGlobalChannel, evt)
-	p.fanout(pgGlobalChannel, evt)                                  // slow is full: dropped, lag = capacity
-	p.fanout(pgGlobalChannel, Event{Subject: "project.G1.created"}) // no match
+	p.fanout(pgGlobalChannel, evt)                                       // both buffers empty: lag 0
+	<-fast.ch                                                            // the fast subscriber keeps up
+	p.fanout(pgGlobalChannel, evt)                                       // slow holds 1
+	p.fanout(pgGlobalChannel, evt)                                       // slow is full: dropped, lag = capacity
+	p.fanout(pgGlobalChannel, Event{Subject: "project.G1.created"})      // no match on the global channel
+	p.fanout(projectChannel("G1"), Event{Subject: "project.G1.created"}) // project scope, empty buffer
 
 	rec.mu.Lock()
 	defer rec.mu.Unlock()
-	want := []int64{1, 2, 2}
-	if len(rec.lags) != len(want) {
+	want := []int64{0, 1, 2, 0}
+	wantScopes := []string{"global", "global", "global", "project"}
+	if !slices.Equal(rec.lags, want) {
 		t.Fatalf("lags = %v, want %v", rec.lags, want)
 	}
-	for i := range want {
-		if rec.lags[i] != want[i] {
-			t.Fatalf("lags = %v, want %v", rec.lags, want)
+	if !slices.Equal(rec.lagScopes, wantScopes) {
+		t.Fatalf("lag scopes = %v, want %v", rec.lagScopes, wantScopes)
+	}
+}
+
+// TestObserveSubscriberLag_DecaysWhenIdle checks the maintenance sample
+// reports the current buffer depth per scope, so the gauge returns to 0 once
+// subscribers drain instead of holding the last burst (ptone/scion#3617).
+func TestObserveSubscriberLag_DecaysWhenIdle(t *testing.T) {
+	rec := &countingRecorder{enabledReturns: true}
+	p := newTestPostgresPublisher(rec)
+	global := &pgSubscription{ch: make(chan Event, 4)}
+	wild := &pgSubscription{ch: make(chan Event, 4)}
+	p.subs[pgGlobalChannel] = map[*pgSubscription][]string{global: {"agent.>"}, wild: {"project.*.agent.>"}}
+
+	global.ch <- Event{}
+	global.ch <- Event{}
+	wild.ch <- Event{}
+	p.observeSubscriberLag() // backlog: global 2, project 1
+	<-global.ch
+	<-global.ch
+	<-wild.ch
+	p.observeSubscriberLag() // drained: both 0
+
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	want := []int64{2, 1, 0, 0}
+	wantScopes := []string{"global", "project", "global", "project"}
+	if !slices.Equal(rec.lags, want) || !slices.Equal(rec.lagScopes, wantScopes) {
+		t.Fatalf("lags = %v scopes = %v, want %v %v", rec.lags, rec.lagScopes, want, wantScopes)
+	}
+}
+
+func TestPatternScopes(t *testing.T) {
+	for _, tc := range []struct {
+		pattern         string
+		global, project bool
+	}{
+		{"agent.>", true, false},
+		{"project.G1.>", false, true},
+		{"project.*.agent.>", false, true},
+		{">", true, true},
+		{"*.x", true, true},
+	} {
+		g, pr := patternScopes(tc.pattern)
+		if g != tc.global || pr != tc.project {
+			t.Errorf("patternScopes(%q) = %v, %v; want %v, %v", tc.pattern, g, pr, tc.global, tc.project)
 		}
 	}
 }
