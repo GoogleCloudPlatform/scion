@@ -151,6 +151,14 @@ type StructuredMessage struct {
 	// ConversationID != "" — non-emptiness only means "already resolved upstream".
 	ConversationAsserted bool `json:"-"`
 
+	// ArtifactRefsAdmitted records that the hub's admission step set the
+	// "artifacts" metadata value (ptone/scion#3222): the references were
+	// checked against the sender's own credential. Hub-internal like
+	// ConversationAsserted: never rendered, never accepted from request
+	// JSON. A consumer that persists references must require it and drop
+	// the value otherwise.
+	ArtifactRefsAdmitted bool `json:"-"`
+
 	// DeliveryText is the fully rendered agent-facing envelope, produced by
 	// the hub. When set, the broker delivers it verbatim and performs no
 	// formatting. Phase 13 deletes this field along with the rest of

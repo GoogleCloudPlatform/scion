@@ -630,6 +630,10 @@ type MessageResponse struct {
 	// one entry per resolved mention name. Empty when the message had no
 	// mentions, or on hubs that predate this field.
 	MentionResults []messages.MentionResult `json:"mention_results,omitempty"`
+	// ArtifactWarning is set when artifact references the message named
+	// were not attached. Empty on hubs that predate this field.
+	ArtifactWarning string `json:"artifact_warning,omitempty"`
+
 	// AttachmentWarnings lists attachments the hub could not record on the
 	// message, which was still sent without them. Empty when every
 	// attachment was recorded, or on hubs that predate this field.
@@ -795,6 +799,10 @@ type OutboundMessageResult struct {
 	// one entry per resolved mention name. Empty when the message had no
 	// mentions, or on hubs that predate this field.
 	MentionResults []messages.MentionResult `json:"mention_results,omitempty"`
+	// ArtifactWarning is set when artifact references the message named
+	// were not attached. Empty on hubs that predate this field.
+	ArtifactWarning string `json:"artifact_warning,omitempty"`
+
 	// AttachmentWarnings lists attachments the hub could not record on the
 	// message, which was still sent without them. Empty when every
 	// attachment was recorded, or on hubs that predate this field.
