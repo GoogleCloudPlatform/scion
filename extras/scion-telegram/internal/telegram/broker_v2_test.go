@@ -3599,12 +3599,6 @@ func TestV2_ResolveAttachmentPath_WorkspacePaths(t *testing.T) {
 			projectID: "proj-1",
 			want:      "/home/scion/.scion/projects/my-project/file.txt",
 		},
-		{
-			name:      "no project slug returns original",
-			path:      "/workspace/file.txt",
-			projectID: "unknown-proj",
-			want:      "/workspace/file.txt",
-		},
 	}
 
 	for _, tt := range tests {
@@ -3612,6 +3606,75 @@ func TestV2_ResolveAttachmentPath_WorkspacePaths(t *testing.T) {
 			got, err := b.resolveAttachmentPath(ctx, nil, tt.path, tt.projectID)
 			require.NoError(t, err)
 			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+// TestV2_ResolveAttachmentPath_UntranslatableIsError covers each workspace
+// path that cannot be translated: each returns an error and no path, and
+// the outbound path skips the attachment without opening any file.
+func TestV2_ResolveAttachmentPath_UntranslatableIsError(t *testing.T) {
+	tests := []struct {
+		name      string
+		path      string
+		projectID string
+		slugs     map[string]string
+	}{
+		{
+			name:      "dot-dot climbs out of the workspace",
+			path:      "/workspace/../etc/hosts",
+			projectID: "proj-1",
+			slugs:     map[string]string{"proj-1": "my-project"},
+		},
+		{
+			name:      "other absolute path",
+			path:      "/etc/hosts",
+			projectID: "proj-1",
+			slugs:     map[string]string{"proj-1": "my-project"},
+		},
+		{
+			name:      "no project slug",
+			path:      "/workspace/file.txt",
+			projectID: "unknown-proj",
+			slugs:     map[string]string{"proj-1": "my-project"},
+		},
+		{
+			// A slug that cleans the project directory to the root puts
+			// the joined path outside it.
+			name:      "outside the project directory",
+			path:      "/workspace/file.txt",
+			projectID: "proj-1",
+			slugs:     map[string]string{"proj-1": "../../../../.."},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tgSrv := newFakeTGServerV2(t)
+			b := newTestBrokerV2(t, tgSrv)
+			b.projectSlugMap = tt.slugs
+
+			got, err := b.resolveAttachmentPath(context.Background(), nil, tt.path, tt.projectID)
+			require.Error(t, err)
+			assert.Empty(t, got)
+
+			var opened []string
+			orig := openAttachmentFile
+			t.Cleanup(func() { openAttachmentFile = orig })
+			openAttachmentFile = func(name string) (*os.File, error) {
+				opened = append(opened, name)
+				return nil, os.ErrNotExist
+			}
+
+			msg := messages.NewInstruction("agent:coder", "user:alice", "report attached")
+			msg.Attachments = []string{tt.path}
+			msg.Metadata = map[string]string{"telegram_chat_id": "-300"}
+			require.NoError(t, b.Publish(context.Background(), "scion.project."+tt.projectID+".agent.coder.messages", msg))
+
+			assert.Empty(t, opened, "no attachment path may be opened")
+			sent := tgSrv.getSentMessages()
+			require.Len(t, sent, 1, "the message text is delivered without the attachment")
+			assert.Contains(t, sent[0].Text, "report attached")
 		})
 	}
 }

@@ -1349,9 +1349,11 @@ func (b *TelegramBrokerV2) publishInputNeededDM(ctx context.Context, api *Telegr
 //   - /workspace/.scion-volumes/<name>/<file> → same as /scion-volumes/<name>/<file>
 //
 // Also accepts bare relative paths and "workspace/" without leading slash.
-// A workspace path that cannot be translated falls back to the original
-// path. A shared dir path that cannot be resolved returns an error and no
-// path: the container path must never be opened on this host.
+// Any path that cannot be translated (one that climbs out of the
+// workspace, another absolute path, a project with no known slug, or a
+// result outside the project directory) returns an error and no path, as
+// does a shared dir path that cannot be resolved: the container path must
+// never be opened on this host.
 func (b *TelegramBrokerV2) resolveAttachmentPath(ctx context.Context, store Store, attachPath, projectID string) (string, error) {
 	originalPath := attachPath
 
@@ -1373,14 +1375,12 @@ func (b *TelegramBrokerV2) resolveAttachmentPath(ctx context.Context, store Stor
 	case !strings.HasPrefix(attachPath, "/"):
 		relPath = attachPath
 	default:
-		return attachPath, nil
+		return "", fmt.Errorf("attachment path %q is not a workspace or shared dir path", attachPath)
 	}
 
 	relPath = filepath.Clean(relPath)
 	if strings.HasPrefix(relPath, "..") || (filepath.IsAbs(relPath) && relPath != ".") {
-		b.log.Warn("Attachment path escapes workspace, ignoring translation",
-			"attach_path", attachPath, "rel_path", relPath)
-		return attachPath, nil
+		return "", fmt.Errorf("attachment path %q is outside the workspace", attachPath)
 	}
 
 	// In-workspace shared dirs are mounted at /workspace/.scion-volumes/<name>
@@ -1395,9 +1395,7 @@ func (b *TelegramBrokerV2) resolveAttachmentPath(ctx context.Context, store Stor
 
 	slug := b.resolveProjectSlug(ctx, store, projectID)
 	if slug == "" {
-		b.log.Debug("Attachment path unchanged, no project slug found",
-			"original", originalPath, "project_id", projectID)
-		return attachPath, nil
+		return "", fmt.Errorf("attachment path %q: no project slug found for project %q", attachPath, projectID)
 	}
 
 	projectDir := filepath.Join("/home/scion/.scion/projects", slug)
@@ -1407,9 +1405,7 @@ func (b *TelegramBrokerV2) resolveAttachmentPath(ctx context.Context, store Stor
 	} else {
 		hostPath = filepath.Join(projectDir, relPath)
 		if !strings.HasPrefix(hostPath, projectDir+"/") {
-			b.log.Warn("Resolved attachment path escapes project directory",
-				"host_path", hostPath, "expected_prefix", projectDir+"/")
-			return attachPath, nil
+			return "", fmt.Errorf("attachment path %q resolves outside the project directory", attachPath)
 		}
 	}
 
