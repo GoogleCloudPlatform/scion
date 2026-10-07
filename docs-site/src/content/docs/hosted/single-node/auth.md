@@ -56,6 +56,8 @@ server:
     default_user_role: viewer   # member (default) | viewer
 ```
 
+To pre-register a person before their first sign-in (for example, under `invite_only`), use **Invite User** on **Admin > Users**, `scion hub users provision <email>`, or `POST /api/v1/users`. All three create an `invited` record and require the `user.invite` permission, which hub admins hold. The CLI and API, and the dialog when a display name is given, require an interactive sign-in and are not available while the Hub runs with dev auth (see [Development Authentication](#development-authentication-dev-auth)). An optional display name is stored with the record; at first sign-in, a name supplied by the sign-in provider replaces it. The role is assigned at first sign-in as described above. See the [API reference](/scion/reference/api/) and the [CLI reference](/scion/reference/cli/).
+
 You can also set it from **Admin > Server Config**, or seed it with `SCION_SEED_SERVER_AUTH_DEFAULTUSERROLE=viewer`. Changing it does not affect existing users; change an individual user's role on **Admin > Users**. See [Hub roles](/scion/hosted/ha/permissions/#hub-roles) for what each role allows and how demotion from `admin_emails` works, and the [server configuration reference](/scion/reference/server-config/#authentication-serverauth) for the setting.
 
 `server.auth.default_user_role` is a different setting from the federation `default_role` described under [OIDC-Based Federation](#oidc-based-federation) below, which only applies to users who authenticate with federated OIDC tokens.
