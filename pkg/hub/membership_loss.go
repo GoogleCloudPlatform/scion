@@ -254,6 +254,9 @@ func onlyDepthLimitErrors(err error) bool {
 		}
 		return true
 	}
+	// errors.Is runs before unwrapping a single-%w chain: the callers only
+	// join per-project errors (errors.Join), so a joined error never sits
+	// under a single wrap.
 	if errors.Is(err, errMembershipLossDepthLimit) {
 		return true
 	}

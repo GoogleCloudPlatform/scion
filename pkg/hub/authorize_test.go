@@ -583,6 +583,26 @@ func TestAuthorizeAgentCreate_IdentityKinds(t *testing.T) {
 			}
 		})
 	}
+
+	// The allow case for an agent identity: a stored agent whose root user
+	// is a member of its project (good standing, ptone/scion#3433), with
+	// create scope in its own project.
+	t.Run("agent with a stored row and standing, create scope in its own project", func(t *testing.T) {
+		f := newMSFixture(t, "authz-create-allow")
+		identity := &agentIdentityWrapper{&AgentTokenClaims{
+			Claims:    jwt.Claims{Subject: f.agentA.ID},
+			ProjectID: f.projectID,
+			Scopes:    []AgentTokenScope{ScopeAgentCreate},
+			Ancestry:  f.agentA.Ancestry,
+		}}
+		rec := httptest.NewRecorder()
+		if !f.srv.authorizeAgentCreate(rec, authzHelperRequest(identity), f.projectID) {
+			t.Fatalf("authorizeAgentCreate() = false, want true (body: %s)", rec.Body.String())
+		}
+		if rec.Body.Len() != 0 {
+			t.Errorf("expected no response body on allow, got %q", rec.Body.String())
+		}
+	})
 }
 
 func TestAuthorizeAgentCreate_DenialIsLogged(t *testing.T) {

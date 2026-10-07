@@ -1212,27 +1212,23 @@ func TestCreateAgent_ProjectDefaultFull_NotOverriddenByHubBaseline(t *testing.T)
 }
 
 // ---------------------------------------------------------------------------
-// R2 — GetAgent failure for parent agent defaults ceiling to baseline
+// R2 — a creating agent with no stored row is refused before the role ceiling
 // ---------------------------------------------------------------------------
 
-func TestCreateSubAgent_ParentLookupFails_CeilingIsBaseline(t *testing.T) {
+func TestCreateSubAgent_ParentMissing_RefusedBeforeRoleCeiling(t *testing.T) {
 	srv, _, project := setupFullMaxProject(t)
 
-	// Use a non-existent parent agent ID so GetAgent returns an error.
-	// The ceiling should fall back to baseline (fail-closed).
+	// The calling agent has no stored row.
 	nonExistentParentID := tid("parent-does-not-exist")
 
-	// Request a full sub-agent; the baseline ceiling should cap it to baseline.
 	rec := doAgentCallerRequest(t, srv, nonExistentParentID, project.ID, CreateAgentRequest{
 		Name:      "child-parent-missing",
 		ProjectID: project.ID,
 		AgentRole: "full",
 	})
 
-	// Requesting full when the ceiling is baseline should trigger the
-	// no-escalation check and return 403.
 	assert.Equal(t, http.StatusForbidden, rec.Code,
-		"requesting full with a missing parent should be forbidden (baseline ceiling); got: %s",
+		"a create by an agent with no stored row is forbidden; got: %s",
 		rec.Body.String())
 	// A creating agent with no stored row has no good standing
 	// (ptone/scion#3433), so the create is refused before the role ceiling

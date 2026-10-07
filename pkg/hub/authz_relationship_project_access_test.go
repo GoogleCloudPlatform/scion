@@ -517,7 +517,7 @@ func TestRelationshipProjectAccess_Invariants(t *testing.T) {
 		assert.True(t, r.Accepted)
 	})
 
-	// The delegation-ceiling walk now applies the stage to a user
+	// The delegation-ceiling walk applies the stage to a user
 	// delegator too (ptone/scion#3433): a delegator with no project access
 	// gets no relationship authority there (see
 	// authz_ceiling_project_access_test.go for the member case).

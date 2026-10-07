@@ -419,7 +419,7 @@ func TestStandingGates_HeldAgent(t *testing.T) {
 			require.Equal(t, http.StatusUnauthorized, rec.Code, path+": "+rec.Body.String())
 		}
 	})
-	t.Run("standingRefusesHeldBeforeAuth", func(t *testing.T) {
+	t.Run("standingForbiddenHelperRefusesHeld", func(t *testing.T) {
 		rec := httptest.NewRecorder()
 		assert.True(t, f.srv.agentStandingForbidden(ctx, rec, f.agentA.ID))
 		assert.Equal(t, http.StatusForbidden, rec.Code)

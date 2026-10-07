@@ -160,6 +160,29 @@ func TestMembershipLoss_WalkProgressSmallMaxNodes(t *testing.T) {
 	assert.Empty(t, pendingChecks(t, f.s))
 }
 
+// A walk that is still incomplete after membershipLossMaxWalkRounds
+// node-bound rounds gives up with an error (the check is retried later):
+// with one node per round and more descendants than rounds, the pair stops
+// after exactly that many holds.
+func TestMembershipLoss_WalkGivesUpAfterMaxRounds(t *testing.T) {
+	f := newMSFixture(t, "maxrounds")
+	ctx := context.Background()
+	for i := 0; i < membershipLossMaxWalkRounds+5; i++ {
+		f.childAgent(fmt.Sprintf("rounds-%d", i), f.agentA)
+	}
+	orig := descendantQueryBounds
+	descendantQueryBounds.MaxNodes = 1
+	t.Cleanup(func() { descendantQueryBounds = orig })
+	f.dropBindings(f.userID)
+
+	c := &store.MembershipLossCheck{ID: tid("ms-maxrounds-check"), UserID: f.userID, ProjectID: f.projectID, Trigger: store.MembershipLossTriggerMemberRemove}
+	err := f.srv.processMembershipLossPair(ctx, c, f.userID, f.projectID)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), fmt.Sprintf("descendant walk still incomplete after %d rounds", membershipLossMaxWalkRounds))
+	assert.NotErrorIs(t, err, errMembershipLossDepthLimit, "a give-up is not parked")
+	assert.Equal(t, membershipLossMaxWalkRounds, countAudits(t, f.s, mutationTypeAgentHoldSet, ""), "one hold per round, then the walk stops")
+}
+
 // A walk that reaches the depth bound fails the check (it is not
 // completed) after holding what it found; after repeated claims the check is
 // parked visibly and completed. The live check refuses the deeper agents.
@@ -496,18 +519,30 @@ func TestAgentCreate_CreatorStandingEnforced(t *testing.T) {
 	// create gate itself refuses it (the creator's chain admits the create;
 	// the hold refuses it).
 	f := newMSFixture(t, "create")
-	f.childC.AppliedConfig = &store.AgentAppliedConfig{AgentRole: string(AgentRoleFull)}
-	require.NoError(t, f.s.UpdateAgent(context.Background(), f.childC))
+	// Both agents hold the full role, so C's chain admits the create.
+	for _, a := range []*store.Agent{f.agentA, f.childC} {
+		a.AppliedConfig = &store.AgentAppliedConfig{AgentRole: string(AgentRoleFull)}
+		require.NoError(t, f.s.UpdateAgent(context.Background(), a))
+	}
 	tok := f.agentToken(f.childC)
+	createReq := func() *http.Request {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", nil)
+		return req.WithContext(contextWithIdentity(req.Context(), f.agentIdentity(f.childC)))
+	}
+	// Positive control: before the hold the create gate admits the creator.
+	before := httptest.NewRecorder()
+	require.True(t, f.srv.authorizeAgentCreate(before, createReq(), f.projectID), before.Body.String())
+
 	f.hold(f.childC.ID, f.userID)
 	rec := doRequestWithAgentToken(t, f.srv, http.MethodPost, "/api/v1/agents",
 		map[string]interface{}{"name": "create-child", "projectId": f.projectID}, tok)
 	assert.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
+	logs := authzHelperCaptureLogs(t)
 	direct := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", nil)
-	req = req.WithContext(contextWithIdentity(req.Context(), f.agentIdentity(f.childC)))
-	assert.False(t, f.srv.authorizeAgentCreate(direct, req, f.projectID))
+	assert.False(t, f.srv.authorizeAgentCreate(direct, createReq(), f.projectID))
 	assert.Equal(t, http.StatusForbidden, direct.Code, direct.Body.String())
+	// The refusal is the creator's standing (its hold), not another check.
+	assert.Contains(t, logs.String(), "creating agent not in good standing: "+standingReasonAgentHeld)
 
 	// A creator whose root is no longer a member is refused at create.
 	g := newMSFixture(t, "create-removed")
@@ -569,6 +604,9 @@ func (h *holdFaultStore) HasActiveAgentHold(ctx context.Context, id string) (boo
 func TestCeilingAgentHop_HoldLookupFaultIsCeilingError(t *testing.T) {
 	f := newMSFixture(t, "holdfault")
 	ctx := context.Background()
+	// A holds the full role, so the ceiling walk over A admits C's read.
+	f.agentA.AppliedConfig = &store.AgentAppliedConfig{AgentRole: string(AgentRoleFull)}
+	require.NoError(t, f.s.UpdateAgent(ctx, f.agentA))
 	hs := &holdFaultStore{Store: f.s, fail: true}
 	orig := f.srv.authzService.store
 	f.srv.authzService.store = hs
@@ -580,8 +618,23 @@ func TestCeilingAgentHop_HoldLookupFaultIsCeilingError(t *testing.T) {
 	allowed, _, cerr := f.srv.authzService.checkDelegationCeiling(ctx, agentCeilingRequest(f.childC), "agent.read", f.childC.ID, nil, nil)
 	require.ErrorIs(t, cerr, errCeilingHoldLookup)
 	assert.False(t, allowed)
-	// Decide tags every error the ceiling returns as DenyCauseCeilingError
-	// (authz.go, step 10).
+
+	// Through the decision, the error is tagged DenyCauseCeilingError and is
+	// indeterminate. A project read is allowed by the agent's token scopes,
+	// so the request reaches the ceiling, whose walk passes A.
+	decideRead := func() Decision {
+		return decidePerm(f.srv.authzService, f.agentIdentity(f.childC), Resource{Type: "project", ID: f.projectID}, ActionRead, "project.read", false)
+	}
+	setFail := func(v bool) { hs.mu.Lock(); hs.fail = v; hs.mu.Unlock() }
+	setFail(false)
+	ctl := decideRead()
+	require.True(t, ctl.Allowed, "positive control: allowed with a working hold lookup: %s %s %s", ctl.Reason, ctl.DeniedBy, ctl.DenyCause)
+	setFail(true)
+	decision := decideRead()
+	assert.False(t, decision.Allowed)
+	assert.Equal(t, DeniedByDelegationCeiling, decision.DeniedBy, decision.Reason)
+	assert.Equal(t, DenyCauseCeilingError, decision.DenyCause, decision.Reason)
+	assert.True(t, decision.IsIndeterminate())
 }
 
 func TestCeilingAgentHop_HeldDelegatorNotLive(t *testing.T) {

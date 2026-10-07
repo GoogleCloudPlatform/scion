@@ -896,7 +896,8 @@ func (a *AuthzService) checkAgentHoldsPermission(
 		return false, fmt.Sprintf("agent %s is deleted", agentID), store.ErrNotFound
 	}
 	// A held agent (ptone/scion#3433) is not live, like a deleted one. A
-	// hold lookup error is returned and denies with the resolution cause.
+	// hold lookup error is returned wrapped in errCeilingHoldLookup, and
+	// Decide denies it with the ceiling-error cause.
 	held, err := a.store.HasActiveAgentHold(ctx, agentID)
 	if err != nil {
 		return false, fmt.Sprintf("agent %s hold lookup failed: %v", agentID, err), fmt.Errorf("%w: %w", errCeilingHoldLookup, err)
