@@ -21,6 +21,7 @@
  * - Hub status and version
  * - Database pool health
  * - Runtime brokers (compact table, see health-broker-table.ts)
+ * - Integrations (chat plugins, see health-integrations.ts)
  * - Agents (phase counts and problem groups, see health-agents-card.ts)
  * - Dispatch pipeline status
  *
@@ -35,6 +36,8 @@ import type { HealthSummaryBrokerList } from './health-broker-table.js';
 import './health-broker-table.js';
 import type { HealthSummaryAgents } from './health-agents-card.js';
 import './health-agents-card.js';
+import type { HealthSummaryIntegration } from './health-integrations.js';
+import './health-integrations.js';
 
 export { formatHeartbeatAge } from './health-broker-table.js';
 
@@ -60,6 +63,8 @@ interface HealthSummary {
     pool_idle: number;
   };
   runtime_brokers: HealthSummaryBrokerList;
+  /** Chat and messaging plugins; empty when none are configured. */
+  integrations?: HealthSummaryIntegration[];
   /** Null when the hub could not aggregate agents (not reported). */
   agents: HealthSummaryAgents | null;
   dispatch: {
@@ -376,6 +381,9 @@ export class ScionPageHealthDashboard extends LitElement {
       <!-- Brokers -->
       ${this.renderBrokersCard(d)}
 
+      <!-- Integrations (hidden when there are no plugins) -->
+      ${this.renderIntegrationsCard(d)}
+
       <!-- Agents -->
       ${this.renderAgentsCard(d)}
 
@@ -448,6 +456,16 @@ export class ScionPageHealthDashboard extends LitElement {
     return html`
       <div class="grid-full">
         <scion-health-broker-table .brokers=${d.runtime_brokers}></scion-health-broker-table>
+      </div>
+    `;
+  }
+
+  private renderIntegrationsCard(d: HealthSummary) {
+    const items = d.integrations ?? [];
+    if (items.length === 0) return nothing;
+    return html`
+      <div class="grid-full">
+        <scion-health-integrations .integrations=${items}></scion-health-integrations>
       </div>
     `;
   }
