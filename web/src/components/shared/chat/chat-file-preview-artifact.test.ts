@@ -175,6 +175,49 @@ describe('scion-chat-file-preview artifact target', () => {
     expect(buttons(el)).toContain('Open in artifact viewer');
   });
 
+  it('revokes the previous image URL when the target changes and on disconnect', async () => {
+    const created: string[] = [];
+    const revoked: string[] = [];
+    const origCreate = URL.createObjectURL;
+    const origRevoke = URL.revokeObjectURL;
+    URL.createObjectURL = () => {
+      const url = `blob:img-${created.length + 1}`;
+      created.push(url);
+      return url;
+    };
+    URL.revokeObjectURL = (url: string) => {
+      revoked.push(url);
+    };
+    try {
+      apiFetchMock.mockImplementation((path: string) =>
+        Promise.resolve(
+          path.includes('/files/')
+            ? { ok: true, status: 200, blob: () => Promise.resolve(new Blob(['x'])) }
+            : json(meta(3, 'image/png'))
+        )
+      );
+      const el = await open();
+      expect(created).toEqual(['blob:img-1']);
+      expect(q<HTMLImageElement>(el, 'img')?.getAttribute('src')).toBe('blob:img-1');
+
+      // A new target replaces the image: the previous URL is revoked first.
+      el.target = { kind: 'artifact', id: ID, seq: 2, name: 'Artifact' };
+      for (let i = 0; i < 8; i++) {
+        await Promise.resolve();
+        await el.updateComplete;
+      }
+      expect(revoked).toEqual(['blob:img-1']);
+      expect(created).toEqual(['blob:img-1', 'blob:img-2']);
+
+      // Disconnecting revokes the current one.
+      el.remove();
+      expect(revoked).toEqual(['blob:img-1', 'blob:img-2']);
+    } finally {
+      URL.createObjectURL = origCreate;
+      URL.revokeObjectURL = origRevoke;
+    }
+  });
+
   it('copies the reference', async () => {
     apiFetchMock.mockResolvedValue(json({}, 404));
     const writeText = vi.fn().mockResolvedValue(undefined);

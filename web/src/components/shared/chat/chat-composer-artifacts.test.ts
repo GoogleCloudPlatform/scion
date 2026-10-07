@@ -290,6 +290,33 @@ describe('scion-artifact-picker', () => {
     expect(titles(el)).toEqual(['Here']);
   });
 
+  it('keeps every owner and project name when lookups finish out of order', async () => {
+    const agents = ['a1', 'a2', 'a3'];
+    const rows = agents.map((a, i) => ({
+      ...item([A, B, A.replace('aa', 'cc')][i], `T${i}`, `p${i}`),
+      ownerKind: 'agent',
+      ownerRef: a,
+    }));
+    const pending: { url: string; resolve: (r: Response) => void }[] = [];
+    apiFetch.mockImplementation((url: string) =>
+      url.startsWith('/api/v1/artifacts')
+        ? Promise.resolve(listResponse(rows))
+        : new Promise<Response>((resolve) => pending.push({ url, resolve }))
+    );
+    const el = await openPicker();
+    expect(pending).toHaveLength(6);
+    // Answer the lookups in reverse order, letting each settle in between.
+    for (const p of [...pending].reverse()) {
+      const name = p.url.split('/').pop()!;
+      p.resolve(new Response(JSON.stringify({ name: `name-${name}` }), { status: 200 }));
+      await settle(el);
+    }
+    const names: Map<string, string> = el.names;
+    expect([...names.keys()].sort()).toEqual(
+      ['agent:a1', 'agent:a2', 'agent:a3', 'project:p0', 'project:p1', 'project:p2'].sort()
+    );
+  });
+
   it('shows an empty state with no command to run', async () => {
     apiFetch.mockImplementation(() => Promise.resolve(listResponse([])));
     const el = await openPicker();
