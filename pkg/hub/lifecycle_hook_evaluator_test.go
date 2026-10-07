@@ -157,7 +157,7 @@ func (e *panicExecutor) Execute(_ context.Context, _ *store.LifecycleHook, _ *st
 // testEvaluatorStore creates a fresh in-memory store for evaluator tests.
 func testEvaluatorStore(t *testing.T) store.Store {
 	t.Helper()
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	require.NoError(t, err, "failed to create test store")
 	return s
 }

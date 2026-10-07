@@ -33,6 +33,7 @@ import {
 import '../components/shared/header.js';
 import { isMacPlatform } from '../utils/platform.js';
 import { TOUCH_PRIMARY_QUERY } from '../utils/input-modality.js';
+import { showConfirm } from '../components/shared/confirm-dialog.js';
 import '../components/terminal/terminal-pane.js';
 
 interface RailEntry {
@@ -43,6 +44,48 @@ interface RailEntry {
   unsubscribeMetadata: () => void;
   /** Monotonic insertion index for stable chronological sorting. */
   addedAt: number;
+}
+
+/** The parts of a rail entry the bulk-action eligibility rules read. */
+type RailEntryStatus = Pick<RailEntry, 'state' | 'metadata'>;
+
+/**
+ * Whether the per-row Reconnect action applies: the session has dropped
+ * (disconnected or unavailable) and was not ended by an agent deletion.
+ * Pending, connecting, connected, closed and idle entries are excluded;
+ * idle entries connect through selection instead.
+ */
+export function canReconnectEntry(entry: RailEntryStatus): boolean {
+  const { connection, disconnectReason } = entry.state;
+  return (
+    (connection === 'disconnected' || connection === 'unavailable') &&
+    disconnectReason !== 'agent-deleted'
+  );
+}
+
+/**
+ * Whether "Reconnect all" acts on an entry: the per-row Reconnect applies
+ * and the agent still exists.
+ */
+export function isBulkReconnectEligible(entry: RailEntryStatus): boolean {
+  return canReconnectEntry(entry) && entry.metadata.availability !== 'deleted';
+}
+
+/**
+ * Whether "Remove all inactive" removes an entry: its agent was deleted,
+ * or its session has dropped (disconnected or unavailable). Connected
+ * entries stay, as do entries still connecting and idle entries restored
+ * from a saved list, which have not tried to connect yet.
+ */
+export function isInactiveEntry(entry: RailEntryStatus): boolean {
+  const { connection, disconnectReason } = entry.state;
+  if (connection === 'closed') return false;
+  return (
+    entry.metadata.availability === 'deleted' ||
+    disconnectReason === 'agent-deleted' ||
+    connection === 'disconnected' ||
+    connection === 'unavailable'
+  );
 }
 
 // TERMINAL_DRAG_MIME imported from ./terminal-workspace-events.js
@@ -97,6 +140,9 @@ export class TerminalWorkspaceRoot {
   private readonly railList = document.createElement('div');
   private readonly railFooter = document.createElement('div');
   private readonly count = document.createElement('span');
+  private readonly railBulk = document.createElement('div');
+  private readonly bulkReconnect = document.createElement('button');
+  private readonly bulkRemove = document.createElement('button');
   private readonly empty = document.createElement('div');
   private readonly layoutBar = document.createElement('div');
   private readonly paneHost = document.createElement('section');
@@ -240,7 +286,8 @@ export class TerminalWorkspaceRoot {
     this.empty.className = 'terminal-empty';
     this.empty.textContent = 'No terminals are open.';
     this.buildRailFooter();
-    this.rail.append(railHeader, this.railList, this.railFooter);
+    this.buildRailBulkActions();
+    this.rail.append(railHeader, this.railBulk, this.railList, this.railFooter);
 
     // Layout toolbar
     this.layoutBar.className = 'terminal-layout-bar';
@@ -745,20 +792,25 @@ export class TerminalWorkspaceRoot {
   }
 
   // ── Keyboard shortcut: Cmd+K everywhere, Ctrl+K outside a pane ──────────
+  // (and, on macOS, outside any editable text field)
 
   /**
    * Cmd+K (Meta+K) opens the palette everywhere, including with a terminal
    * pane focused: xterm never cancels or stops-propagating a plain Meta+K
    * (it has no C0/C1 mapping for it), so this plain bubble-phase listener
    * already sees it from inside a pane with no capture-phase trick needed.
-   * Ctrl+K opens the palette only when focus is outside a pane: xterm DOES
+   * Ctrl+K opens the palette only when focus is outside a pane and, on
+   * macOS, outside any editable text field (see isQuickPaletteShortcut);
+   * xterm's input textarea is one, so the two rules agree. xterm DOES
    * send Ctrl+K to the PTY (kill-line, `\x0b`) and then stops its own
    * propagation, so a pane-focused Ctrl+K never reaches here at all — the
    * explicit `eventFromTerminalPane` check below is belt-and-suspenders, not
    * what does the work. Only `ctrlKey` skips that check; `metaKey` must still
    * open the palette from inside a pane, so it is deliberately exempted.
    *
-   * While the palette is open, the same shortcut closes it, as in chat.
+   * While the palette is open, the same shortcut closes it, as in chat. On
+   * macOS, Ctrl+K in the palette's own search field edits the query, so
+   * Cmd+K is what closes it from there.
    */
   private readonly handleGlobalKeydown = (e: KeyboardEvent): void => {
     if (this.element.hidden) return;
@@ -987,6 +1039,7 @@ export class TerminalWorkspaceRoot {
         ? document.activeElement.dataset.railFocusId
         : null;
     this.count.textContent = String(total);
+    this.updateRailBulkActions(entries, total);
 
     const layoutState = this.layoutManager.getState();
     const visibleSlots = this.layoutManager.getVisibleSlots();
@@ -1214,11 +1267,135 @@ export class TerminalWorkspaceRoot {
       ?.focus();
   }
 
+  /** The rail's Reconnect action, shared by the row button and "Reconnect all". */
+  private reconnectEntry(entry: RailEntry): void {
+    void this.registry?.metadata.refresh(entry.state.agentId);
+    void entry.session.connect();
+  }
+
+  /** The rail's Close action, shared by the row button and "Remove all inactive". */
+  private removeEntry(entry: RailEntry): void {
+    entry.session.close();
+  }
+
+  /**
+   * Builds the bulk-action bar between the rail header and the list. Each
+   * button sits above the row column it acts on (Reconnect, then Close).
+   */
+  private buildRailBulkActions(): void {
+    this.railBulk.className = 'terminal-rail-bulk';
+    this.railBulk.setAttribute('role', 'toolbar');
+    this.railBulk.setAttribute('aria-label', 'Bulk terminal actions');
+    const label = document.createElement('span');
+    label.className = 'terminal-rail-bulk-label';
+    label.textContent = 'All terminals';
+    label.setAttribute('aria-hidden', 'true');
+
+    this.bulkReconnect.type = 'button';
+    this.bulkReconnect.className = 'terminal-bulk-action terminal-bulk-reconnect';
+    this.bulkReconnect.innerHTML = '<sl-icon name="arrow-repeat"></sl-icon>';
+    this.bulkReconnect.addEventListener('click', () => this.reconnectAll());
+
+    this.bulkRemove.type = 'button';
+    this.bulkRemove.className = 'terminal-bulk-action terminal-bulk-remove';
+    this.bulkRemove.innerHTML = '<sl-icon name="trash"></sl-icon>';
+    this.bulkRemove.addEventListener('click', () => void this.removeAllInactive());
+
+    this.railBulk.append(label, this.bulkReconnect, this.bulkRemove);
+  }
+
+  /** Syncs the bulk buttons' enabled state and hover help with the entries. */
+  private updateRailBulkActions(entries: readonly RailEntry[], total: number): void {
+    this.railBulk.hidden = total === 0;
+    const reconnectable = entries.filter(isBulkReconnectEligible).length;
+    const inactive = entries.filter(isInactiveEntry).length;
+
+    this.bulkReconnect.disabled = reconnectable === 0;
+    this.bulkReconnect.title =
+      reconnectable === 0
+        ? 'Reconnect all: no disconnected terminals for existing agents'
+        : `Reconnect all: reconnect ${countLabel(reconnectable)} that ${
+            reconnectable === 1 ? 'is' : 'are'
+          } disconnected and whose agent still exists. Connected terminals and terminals for deleted agents are left alone.`;
+    this.bulkReconnect.setAttribute('aria-label', `Reconnect all (${reconnectable} eligible)`);
+
+    this.bulkRemove.disabled = inactive === 0;
+    this.bulkRemove.title =
+      inactive === 0
+        ? 'Remove all inactive: no deleted or disconnected terminals'
+        : `Remove all inactive: remove ${countLabel(inactive)} whose agent was deleted or that ${
+            inactive === 1 ? 'is' : 'are'
+          } disconnected. Connected terminals stay open.`;
+    this.bulkRemove.setAttribute('aria-label', `Remove all inactive (${inactive} eligible)`);
+  }
+
+  /** "Reconnect all": runs the row Reconnect action on every eligible entry. */
+  reconnectAll(): void {
+    for (const entry of [...this.entries.values()].filter(isBulkReconnectEligible)) {
+      this.reconnectEntry(entry);
+    }
+  }
+
+  /**
+   * "Remove all inactive": asks for confirmation, then runs the row Close
+   * action on the entries that were inactive when the dialog opened.
+   * After the dialog, only those entries that are still inactive are
+   * removed: one that reconnected is kept, and one that dropped is not
+   * removed because the dialog did not count it.
+   * Resolves to the number of entries removed.
+   */
+  async removeAllInactive(): Promise<number> {
+    const confirmedKeys = new Set(
+      [...this.entries.values()].filter(isInactiveEntry).map((entry) => entry.state.key)
+    );
+    const count = confirmedKeys.size;
+    if (count === 0) return 0;
+    const confirmed = await showConfirm(
+      `Remove ${countLabel(count)} from the list? This removes terminals whose agent was deleted and terminals that are disconnected. Connected terminals stay open.`,
+      { title: 'Remove inactive terminals', confirmText: `Remove ${count}` }
+    );
+    if (!confirmed) return 0;
+    const targets = [...this.entries.values()].filter(
+      (entry) => confirmedKeys.has(entry.state.key) && isInactiveEntry(entry)
+    );
+    for (const entry of targets) this.removeEntry(entry);
+    if (targets.length > 0) {
+      // Render now so the focus target reflects the remaining rows.
+      this.refresh();
+      this.focusAfterBulkRemove();
+    }
+    return targets.length;
+  }
+
+  /**
+   * The dialog returns focus to "Remove all inactive", which is now
+   * disabled, so focus would drop to the page. Move it to "Reconnect all"
+   * when that is still enabled, else the first remaining row, else the
+   * rail itself. Focus the user moved elsewhere is left alone.
+   */
+  private focusAfterBulkRemove(): void {
+    const active = document.activeElement;
+    if (active && active !== document.body && active !== this.bulkRemove) return;
+    if (!this.railBulk.hidden && !this.bulkReconnect.disabled) {
+      this.bulkReconnect.focus();
+      return;
+    }
+    const firstRow = this.railList.querySelector<HTMLElement>('.terminal-rail-select');
+    if (firstRow) {
+      firstRow.focus();
+      return;
+    }
+    this.rail.tabIndex = -1;
+    this.rail.focus();
+  }
+
   private renderRailEntry(entry: RailEntry): HTMLElement {
     const metadata = entry.metadata;
     const agent = metadata.agent ?? entry.state.agent;
     const agentName = agent?.name || entry.state.agentId;
-    const projectId = agent?.projectId || 'Unknown project';
+    // Prefer the hub-resolved project name; fall back to the project id
+    // when the name is not known yet, and omit the line when neither is.
+    const projectLabel = agent?.project || agent?.projectId || '';
     const item = document.createElement('div');
     item.className = 'terminal-rail-item';
     item.setAttribute('role', 'listitem');
@@ -1229,32 +1406,49 @@ export class TerminalWorkspaceRoot {
     item.dataset.availability = metadata.availability;
     if (entry.state.disconnectReason) item.dataset.disconnectReason = entry.state.disconnectReason;
 
+    // One list of status parts feeds both forms: the visible titles join them
+    // with a middle dot, the accessible label with a comma so screen readers
+    // pause between them instead of announcing or skipping the dot.
+    const statusParts = [
+      disconnectLabel(entry.state.connection, entry.state.disconnectReason),
+      availabilityLabel(metadata.availability),
+    ];
+    const statusLabel = statusParts.join(' · ');
+    const spokenStatus = statusParts.join(', ');
+
     const select = document.createElement('button');
     select.type = 'button';
     select.className = 'terminal-rail-select';
-    select.setAttribute('aria-label', `Show terminal for ${agentName} in ${projectId}`);
+    // The status dot is small and aria-hidden, so surface its status text on
+    // the whole row: as the hover title and in the accessible label.
+    select.title = statusLabel;
+    select.setAttribute(
+      'aria-label',
+      projectLabel
+        ? `Show terminal for ${agentName} in ${projectLabel}, ${spokenStatus}`
+        : `Show terminal for ${agentName}, ${spokenStatus}`
+    );
     if (visibleSlots.includes(entry.state.key)) select.setAttribute('aria-current', 'page');
     select.dataset.railFocusId = `${entry.state.key}:select`;
     select.addEventListener('click', () => this.openSessionRoute(entry));
 
     const connection = document.createElement('span');
     connection.className = 'terminal-connection-dot';
-    connection.title = connectionLabel(entry.state.connection);
+    connection.title = statusLabel;
     connection.setAttribute('aria-hidden', 'true');
     const text = document.createElement('span');
     text.className = 'terminal-rail-text';
     const name = document.createElement('span');
     name.className = 'terminal-agent-name';
     name.textContent = agentName;
-    const project = document.createElement('span');
-    project.className = 'terminal-project-name';
-    project.textContent = projectId;
-    const details = document.createElement('span');
-    details.className = 'terminal-state-label';
-    details.textContent = `${disconnectLabel(entry.state.connection, entry.state.disconnectReason)} · ${availabilityLabel(
-      metadata.availability
-    )}`;
-    text.append(name, project, details);
+    text.append(name);
+    if (projectLabel) {
+      const project = document.createElement('span');
+      project.className = 'terminal-project-name';
+      project.textContent = projectLabel;
+      project.title = projectLabel;
+      text.append(project);
+    }
     select.append(connection, text);
 
     const actions = document.createElement('span');
@@ -1266,19 +1460,10 @@ export class TerminalWorkspaceRoot {
     reconnect.dataset.railFocusId = `${entry.state.key}:reconnect`;
     reconnect.title = 'Reconnect';
     reconnect.innerHTML = '<sl-icon name="arrow-clockwise"></sl-icon>';
-    reconnect.disabled =
-      entry.state.connection === 'loading' ||
-      entry.state.connection === 'connecting' ||
-      entry.state.connection === 'connected' ||
-      entry.state.connection === 'closed' ||
-      // Idle entries connect via selection (setFrontmost), not the rail's
-      // manual Reconnect action.
-      entry.state.connection === 'idle' ||
-      entry.state.disconnectReason === 'agent-deleted';
+    reconnect.disabled = !canReconnectEntry(entry);
     reconnect.addEventListener('click', (event) => {
       event.stopPropagation();
-      void this.registry?.metadata.refresh(entry.state.agentId);
-      void entry.session.connect();
+      this.reconnectEntry(entry);
     });
     const close = document.createElement('button');
     close.type = 'button';
@@ -1289,7 +1474,7 @@ export class TerminalWorkspaceRoot {
     close.innerHTML = '<sl-icon name="x-circle"></sl-icon>';
     close.addEventListener('click', (event) => {
       event.stopPropagation();
-      entry.session.close();
+      this.removeEntry(entry);
     });
     // Drag handle
     const dragHandle = document.createElement('span');
@@ -1641,6 +1826,50 @@ export class TerminalWorkspaceRoot {
       .terminal-sort-btn:hover {
         color: var(--scion-text, #1e293b);
       }
+      /* Inset to line each button up with its row column (see .terminal-rail-actions). */
+      .terminal-rail-bulk {
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 0.125rem;
+        padding: 0.375rem 0.75rem 0 0.75rem;
+      }
+      .terminal-rail-bulk[hidden] {
+        display: none;
+      }
+      .terminal-rail-bulk-label {
+        margin-right: auto;
+        font-size: 0.6875rem;
+        font-weight: 600;
+        letter-spacing: 0.02em;
+        text-transform: uppercase;
+        color: var(--scion-text-muted, #64748b);
+      }
+      .terminal-bulk-action {
+        width: 1.875rem;
+        height: 1.625rem;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        border: 1px solid var(--scion-border, #e2e8f0);
+        background: var(--scion-bg-subtle, #f1f5f9);
+        color: var(--scion-primary, #3b82f6);
+        border-radius: 999px;
+        cursor: pointer;
+      }
+      .terminal-bulk-remove {
+        color: var(--scion-status-danger, #ef4444);
+      }
+      .terminal-bulk-action:hover:not(:disabled),
+      .terminal-bulk-action:focus-visible {
+        border-color: currentColor;
+        outline: none;
+      }
+      .terminal-bulk-action:disabled {
+        cursor: default;
+        color: var(--scion-text-muted, #64748b);
+        opacity: 0.45;
+      }
       .terminal-rail-list {
         flex: 1;
         min-height: 0;
@@ -1779,8 +2008,7 @@ export class TerminalWorkspaceRoot {
         gap: 0.125rem;
       }
       .terminal-agent-name,
-      .terminal-project-name,
-      .terminal-state-label {
+      .terminal-project-name {
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
@@ -1789,8 +2017,7 @@ export class TerminalWorkspaceRoot {
         font-size: 0.875rem;
         font-weight: 600;
       }
-      .terminal-project-name,
-      .terminal-state-label {
+      .terminal-project-name {
         font-size: 0.75rem;
         color: var(--scion-text-muted, #64748b);
       }
@@ -1996,6 +2223,10 @@ export class TerminalWorkspaceRoot {
     `;
     this.element.appendChild(style);
   }
+}
+
+function countLabel(count: number): string {
+  return `${count} ${count === 1 ? 'terminal' : 'terminals'}`;
 }
 
 function connectionLabel(state: TerminalConnectionState): string {

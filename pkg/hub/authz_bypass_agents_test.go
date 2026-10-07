@@ -93,7 +93,7 @@ type bypassAgentsFixture struct {
 // reach a handler.
 func bypassAgentsServer(t *testing.T) (*Server, store.Store) {
 	t.Helper()
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Skipf("skipping: test store unavailable (%v)", err)
 	}

@@ -27,6 +27,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime/debug"
 	"slices"
 	"sort"
@@ -53,6 +54,8 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	k8sexecutil "k8s.io/client-go/util/exec"
 )
 
 var tracer = otel.Tracer("scion-broker")
@@ -1210,6 +1213,13 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	// already refuses worktree-per-agent before dispatching (A2/A4); this is
 	// the broker's own independent defense, and it also keeps
 	// tryProvisionWorktree off the reprovision path entirely.
+	// A shared dir backend change is part of a reincarnation only.
+	if !req.Reprovision && (len(req.SharedDirBackendChanges) > 0 || req.AllowEmptySharedDir) {
+		markAttemptFailed(http.StatusBadRequest, "shared dir backend change without reprovision")
+		BadRequest(w, "a shared dir backend change is only supported on a reprovision request")
+		return
+	}
+
 	if req.Reprovision && req.WorkspaceMode == store.WorkspaceModeWorktreePerAgent {
 		const msg = "reprovision refused: worktree-per-agent workspaces are not supported by reincarnate"
 		// O-a (review p1b-r2): use the same dispatch-attempt message as the
@@ -1290,6 +1300,8 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	// buildStartContext computed for opCreate.
 	if req.Reprovision {
 		opts.FreshProvision = false
+		opts.SharedDirBackendChanges = req.SharedDirBackendChanges
+		opts.AllowEmptySharedDir = req.AllowEmptySharedDir
 	}
 	s.agentLifecycleLog.Info("Agent dispatch: buildStartContext complete",
 		"agent_id", req.ID, "name", req.Name, "elapsed", time.Since(buildCtxStart).String())
@@ -1532,6 +1544,8 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			// asked for it — the hub's dispatch fails closed when it asked
 			// for a reprovision and did not get this echo back.
 			Reprovisioned: req.Reprovision,
+			// Reprovision returned without error, so it recorded the change.
+			SharedDirBackendsChanged: req.Reprovision && len(req.SharedDirBackendChanges) > 0,
 		}
 		if attempt != nil {
 			s.dispatchAttemptsMu.Lock()
@@ -4402,16 +4416,21 @@ func (s *Server) execCommand(w http.ResponseWriter, r *http.Request, id, project
 
 	output, err := rt.Exec(ctx, target, req.Command)
 	if err != nil {
-		if strings.Contains(err.Error(), "not found") {
-			NotFound(w, "Agent")
-			return
-		}
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
+		// A command that ran and exited non-zero is a command result, not a
+		// missing agent, whatever its output says. Check this first: on k8s
+		// the command's stderr is part of the error text, so a command in a
+		// live pod printing "sh: foo: not found" must never be reported as
+		// agent_not_found (the hub treats that as the container being gone;
+		// ptone/scion#3470).
+		if code, ok := execCommandExitCode(err); ok {
 			writeJSON(w, http.StatusOK, ExecResponse{
 				Output:   output,
-				ExitCode: exitErr.ExitCode(),
+				ExitCode: code,
 			})
+			return
+		}
+		if ctx.Err() == nil && isExecTargetNotFound(err) {
+			NotFound(w, "Agent")
 			return
 		}
 		s.writeRuntimeOpError(w, ctx, "execute command on agent", err, "agent_id", id, "project_id", projectID)
@@ -4422,6 +4441,67 @@ func (s *Server) execCommand(w http.ResponseWriter, r *http.Request, id, project
 		Output:   output,
 		ExitCode: 0,
 	})
+}
+
+// execCommandExitCode reports the exit code when err means the command ran
+// inside the container and exited non-zero: an os/exec.ExitError (docker,
+// podman, apple and cloudrun-sandbox exec run a CLI) or the k8s client-go
+// util/exec.ExitError returned by remotecommand, or a runtime.CommandExitError
+// (substrate, whose exec is an HTTP call to the actor). Mirrors
+// classifyProbeErr.
+func execCommandExitCode(err error) (int, bool) {
+	var cmdExitErr *scionrt.CommandExitError
+	if errors.As(err, &cmdExitErr) {
+		return cmdExitErr.ExitStatus(), true
+	}
+	var stdExitErr *exec.ExitError
+	if errors.As(err, &stdExitErr) {
+		return stdExitErr.ExitCode(), true
+	}
+	var k8sExitErr k8sexecutil.ExitError
+	if errors.As(err, &k8sExitErr) {
+		return k8sExitErr.ExitStatus(), true
+	}
+	return 0, false
+}
+
+// execStderrMarker is where the k8s runtime appends the command's stderr to
+// an exec stream error (wrapExecStreamError in pkg/runtime). Text after it
+// is command output and must not drive classification.
+const execStderrMarker = " (stderr: "
+
+// execContainerNotFoundRe matches the runtimes' own wording for a missing
+// agent container, never a bare "not found" (a missing config file, user or
+// binary must not read as the container being gone; the hub would mark a
+// healthy agent container_missing):
+//   - "container not found" / "pod not found": the runtimes' agent lookups
+//     (docker.go, podman.go, apple_container.go, k8s_runtime.go).
+//   - `pods "<name>" not found`: a Kubernetes NotFound status in text form.
+//   - `sandbox "<name>" not found`: cloudrun_sandbox_runtime.go.
+//   - "no such container" (docker, podman) and "no container with name or
+//     ID ... found" (podman): the container CLIs' daemon wording.
+var execContainerNotFoundRe = regexp.MustCompile(`(?i)\b(?:containers?|pods?|sandbox(?:es)?)(?: "[^"]*"| '[^']*')? not found\b|\bno such container\b|\bno container with name or id\b`)
+
+// isExecTargetNotFound reports whether an rt.Exec error (that is not a
+// command exit, see execCommandExitCode) means the agent's container is
+// gone. Structured signals come first: a Kubernetes NotFound status (the pod
+// no longer exists) is; a missing runtime binary (os/exec.ErrNotFound,
+// "executable file not found") is a broker problem, not a missing agent.
+// Otherwise the fallback is container-specific wording
+// (execContainerNotFoundRe), matched only on the part of the message that
+// cannot carry command output.
+func isExecTargetNotFound(err error) bool {
+	if k8serrors.IsNotFound(err) {
+		return true
+	}
+	if errors.Is(err, exec.ErrNotFound) {
+		return false
+	}
+	msg := err.Error()
+	if i := strings.Index(msg, execStderrMarker); i >= 0 {
+		msg = msg[:i]
+	}
+	return execContainerNotFoundRe.MatchString(msg)
 }
 
 // scionTokenDirScript sets TOKEN_DIR to the scion user's ~/.scion inside

@@ -32,7 +32,7 @@ import (
 
 func newTestServerWithStore(t *testing.T) (*Server, store.Store) {
 	t.Helper()
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create sqlite store: %v", err)
 	}

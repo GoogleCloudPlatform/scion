@@ -93,7 +93,7 @@ func TestAdminInvitesCreate_AuditLogExpiresAtIsUTC(t *testing.T) {
 		t.Fatalf("expected TZ=Asia/Tokyo (+09:00) in the child process, got time.Local=%q offset=%ds", time.Local, off)
 	}
 
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		if strings.Contains(err.Error(), "sqlite driver not registered") {
 			t.Skip("Skipping test because sqlite driver is not registered (build with -tags sqlite to enable)")

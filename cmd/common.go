@@ -328,6 +328,14 @@ func CheckHubAvailabilityForAgents(projectPath string, excludedAgents []string, 
 		ExplicitProject:  explicitProjectTargetFor(projectPath),
 	}
 
+	// A hub project reference needs hub mode: offer to enable it (when
+	// logged in, interactively) or name 'scion hub enable' (#3533).
+	if !noHub && projectPath != "" && hubsync.IsHubProjectRef(projectPath) {
+		if err := ensureHubModeForHubProjectRefForInvocation(projectPath); err != nil {
+			return nil, err
+		}
+	}
+
 	hubCtx, err := hubsync.EnsureHubReady(projectPath, opts)
 	if err != nil {
 		return nil, err
@@ -1532,11 +1540,21 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume, res
 		if workspaceFinalized {
 			budgetFrom = nil
 		}
+		// The start was accepted when the create answer shows an active
+		// launch or a finalize dispatched it. Only the former names the
+		// launch: the create answer predates a finalize's start, and an
+		// ended launch is an earlier one.
+		launchID := ""
+		if launchActive(resp.Agent) && !workspaceFinalized {
+			launchID = resp.Agent.Launch.ID
+		}
 		// Ctrl-C (or SIGTERM) stops waiting only; the launch continues on
 		// the Hub.
 		waited, err := waitForAgentLaunchWithSignals(launchWaitOptions{
 			AgentName:  agentName,
 			BudgetFrom: budgetFrom,
+			Accepted:   launchActive(resp.Agent) || workspaceFinalized,
+			LaunchID:   launchID,
 			Get: func(ctx context.Context) (*hubclient.Agent, error) {
 				return hubCtx.Client.ProjectAgents(projectID).Get(ctx, agentName)
 			},

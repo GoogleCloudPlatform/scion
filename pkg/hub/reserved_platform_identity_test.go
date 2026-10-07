@@ -50,7 +50,7 @@ const testPlatformAuthSA = "transport-sa@example.iam.gserviceaccount.com"
 func TestNew_WiresPlatformAuthSAToBothGuards(t *testing.T) {
 	ctx := context.Background()
 
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		if strings.Contains(err.Error(), "sqlite driver not registered") {
 			t.Skip("Skipping test because sqlite driver is not registered")
