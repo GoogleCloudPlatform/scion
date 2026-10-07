@@ -1674,4 +1674,17 @@ func init() {
 	importAlias.Flags().Bool("dry-run", false, "Preview import without writing files")
 	importAlias.Flags().Bool("all", false, "Import all discovered agents")
 	templateCmd.AddCommand(importAlias)
+
+	// Restore of the deleted built-in template (ptone/scion#3544); shares
+	// Args and RunE with 'scion templates restore' (builtin_restore.go).
+	restoreAlias := &cobra.Command{
+		Use:     templatesRestoreCmd.Use,
+		Short:   templatesRestoreCmd.Short,
+		Long:    templatesRestoreCmd.Long,
+		Example: strings.ReplaceAll(templatesRestoreCmd.Example, "scion templates", "scion template"),
+		Args:    templatesRestoreCmd.Args,
+		RunE:    templatesRestoreCmd.RunE,
+	}
+	restoreAlias.Flags().Bool("all", false, "Restore every built-in template that is missing")
+	templateCmd.AddCommand(restoreAlias)
 }

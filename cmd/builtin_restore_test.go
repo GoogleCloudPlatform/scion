@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -34,7 +35,7 @@ import (
 // restore are available in human and assistant mode and removed in agent
 // mode.
 func TestBuiltinRestoreCommands_ModeAvailability(t *testing.T) {
-	paths := []string{"harness-config.restore", "templates.restore"}
+	paths := []string{"harness-config.restore", "templates.restore", "template.restore"}
 	for _, p := range paths {
 		require.NotNil(t, resolveCommandPath(rootCmd, p), "%s must exist in the real command tree", p)
 		assert.False(t, agentAllowed[p], "agentAllowed must not contain %s (D6: agent mode denied)", p)
@@ -43,7 +44,7 @@ func TestBuiltinRestoreCommands_ModeAvailability(t *testing.T) {
 
 	build := func() *cobra.Command {
 		root := &cobra.Command{Use: "scion"}
-		for _, parent := range []string{"harness-config", "templates"} {
+		for _, parent := range []string{"harness-config", "templates", "template"} {
 			real := resolveCommandPath(rootCmd, parent)
 			require.NotNil(t, real)
 			root.AddCommand(cloneCommandShape(real))
@@ -72,6 +73,17 @@ func TestBuiltinRestoreCommands_ModeAvailability(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestTemplateRestoreAliasSharesImplementation checks that the singular
+// 'scion template restore' alias runs the same Args and RunE as
+// 'scion templates restore'.
+func TestTemplateRestoreAliasSharesImplementation(t *testing.T) {
+	alias := resolveCommandPath(rootCmd, "template.restore")
+	require.NotNil(t, alias)
+	assert.Equal(t, reflect.ValueOf(templatesRestoreCmd.RunE).Pointer(), reflect.ValueOf(alias.RunE).Pointer())
+	assert.Equal(t, reflect.ValueOf(templatesRestoreCmd.Args).Pointer(), reflect.ValueOf(alias.Args).Pointer())
+	assert.NotNil(t, alias.Flags().Lookup("all"))
 }
 
 func TestBuiltinRestoreArgs(t *testing.T) {

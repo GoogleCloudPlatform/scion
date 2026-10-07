@@ -41,8 +41,9 @@ embedded defaults. A deleted built-in is not re-created by a Hub restart or
 upgrade; this command is how you get it back.
 
 Built-ins that still exist are left unchanged and reported as already
-present. To reset the content of an existing harness config, use reimport or
-reset instead.`,
+present. To refresh an existing Hub harness config from its source, use
+'scion harness-config update' (re-import); 'scion harness-config reset' resets
+the local copy to the embedded defaults.`,
 	Example: `  scion harness-config restore claude
   scion harness-config restore claude codex
   scion harness-config restore --all`,
@@ -177,4 +178,6 @@ func init() {
 
 	templatesRestoreCmd.Flags().Bool("all", false, "Restore every built-in template that is missing")
 	templatesCmd.AddCommand(templatesRestoreCmd)
+	// The singular 'scion template restore' alias is registered with the
+	// rest of the alias tree in templates.go.
 }
