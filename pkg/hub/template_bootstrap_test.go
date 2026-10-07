@@ -1187,6 +1187,12 @@ func TestImportTemplatesFromRemote_WithProjectGithubToken(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Stub git ls-remote so branch disambiguation never execs real git against
+	// github.com (ptone/scion#3670). The canned refs include a decoy
+	// "main/other" branch so the real longest-prefix matching path runs and
+	// must still resolve "main" + "templates".
+	lsRemote := stubGitLsRemote(t, testLsRemoteHeads)
+
 	// Hijack the HTTP client's Transport to mock the tarball fetch.
 	// NOTE: This test mutates http.DefaultClient.Transport globally and MUST NOT be run in parallel (t.Parallel()).
 	oldTransport := http.DefaultClient.Transport
@@ -1258,6 +1264,7 @@ system_prompt: system-prompt.md
 	if capturedAuthHeader != "Bearer my-secret-token-12345" {
 		t.Errorf("expected Authorization header 'Bearer my-secret-token-12345', got %q", capturedAuthHeader)
 	}
+	assertLsRemoteCalledWithToken(t, lsRemote)
 
 	// Verify template was saved to store
 	result, err := s.ListTemplates(ctx, store.TemplateFilter{ProjectID: projectID}, store.ListOptions{Limit: 10})
@@ -1309,6 +1316,9 @@ func TestImportHarnessConfigsFromRemote_WithProjectGithubToken(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Stub git ls-remote (see TestImportTemplatesFromRemote_WithProjectGithubToken).
+	lsRemote := stubGitLsRemote(t, testLsRemoteHeads)
+
 	// Hijack the HTTP client's Transport to mock the tarball fetch.
 	// NOTE: mutates http.DefaultClient.Transport globally; MUST NOT run in parallel.
 	oldTransport := http.DefaultClient.Transport
@@ -1358,6 +1368,7 @@ func TestImportHarnessConfigsFromRemote_WithProjectGithubToken(t *testing.T) {
 	if capturedAuthHeader != "Bearer my-secret-token-12345" {
 		t.Errorf("expected Authorization header 'Bearer my-secret-token-12345', got %q", capturedAuthHeader)
 	}
+	assertLsRemoteCalledWithToken(t, lsRemote)
 
 	existing, err := s.GetHarnessConfigBySlug(ctx, "my-config", store.HarnessConfigScopeProject, projectID)
 	if err != nil {
@@ -1368,6 +1379,25 @@ func TestImportHarnessConfigsFromRemote_WithProjectGithubToken(t *testing.T) {
 	}
 	if len(stor.objects) != 2 {
 		t.Errorf("expected 2 files uploaded to storage, got %d", len(stor.objects))
+	}
+}
+
+// testLsRemoteHeads is canned `git ls-remote --heads` output for
+// chiefkarlin/scion-experiments. "main/other" is a decoy that shares the
+// "main/" prefix but is not a prefix of "main/templates" or
+// "main/harness-configs", so resolution must still pick "main".
+const testLsRemoteHeads = "1111111111111111111111111111111111111111\trefs/heads/main\n" +
+	"2222222222222222222222222222222222222222\trefs/heads/main/other\n" +
+	"3333333333333333333333333333333333333333\trefs/heads/feature/x\n"
+
+// assertLsRemoteCalledWithToken checks that branch resolution went through the
+// stubbed ls-remote seam exactly once, authenticated with the project token.
+// If a regression bypassed the seam, real git would run and this fails.
+func assertLsRemoteCalledWithToken(t *testing.T, stub *gitLsRemoteStub) {
+	t.Helper()
+	want := "https://x-access-token:my-secret-token-12345@github.com/chiefkarlin/scion-experiments.git"
+	if got := stub.URLs(); len(got) != 1 || got[0] != want {
+		t.Errorf("expected exactly one stubbed ls-remote call for %q, got %q", want, got)
 	}
 }
 
