@@ -29,6 +29,7 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
 import './agent-tree-view.js';
 import type { ScionAgentTreeView } from './agent-tree-view.js';
+import { JUMP_LABEL_PX, jumpScaleFor } from './agent-tree-view.js';
 import type { Agent } from '../../shared/types.js';
 import { PROVISIONED_ONLY_LABEL } from '../../shared/agent-state-display.js';
 import {
@@ -1082,6 +1083,24 @@ describe('hover/relatedIds highlighting', () => {
   });
 });
 
+describe('jumpScaleFor', () => {
+  it('scales the default 0.95rem name to a 16pt (21.33px) effective size', () => {
+    expect(JUMP_LABEL_PX).toBeCloseTo(21.333, 3);
+    expect(jumpScaleFor(15.2)).toBeCloseTo(21.333 / 15.2, 3);
+    expect(jumpScaleFor(15.2) * 15.2).toBeCloseTo(JUMP_LABEL_PX);
+  });
+
+  it('falls back to the default name size when the size cannot be read', () => {
+    expect(jumpScaleFor(NaN)).toBe(jumpScaleFor(15.2));
+    expect(jumpScaleFor(0)).toBe(jumpScaleFor(15.2));
+  });
+
+  it('clamps to the zoom limits', () => {
+    expect(jumpScaleFor(1)).toBe(2.5);
+    expect(jumpScaleFor(200)).toBe(0.25);
+  });
+});
+
 describe('scion-agent-tree-view revealAgent and focusAgentNode', () => {
   let el: ScionAgentTreeView;
 
@@ -1184,14 +1203,28 @@ describe('scion-agent-tree-view revealAgent and focusAgentNode', () => {
     expect(el.shadowRoot!.querySelector('.jump-highlight')).toBeNull();
   });
 
-  it('centers on the node at the current zoom instead of resetting it', async () => {
-    internals().scale = 1.5;
+  it('zooms in from far out and centers on the node', async () => {
+    internals().scale = 0.25;
     await el.updateComplete;
 
     expect(el.revealAgent('k2')).toBe(true);
     await settle();
 
-    expectCenteredOn('k2', 1.5);
+    const target = jumpScaleFor(NaN);
+    expect(target).toBeGreaterThan(0.25);
+    expectCenteredOn('k2', target);
+  });
+
+  it('zooms out from far in and centers on the node', async () => {
+    internals().scale = 2.5;
+    await el.updateComplete;
+
+    expect(el.revealAgent('k2')).toBe(true);
+    await settle();
+
+    const target = jumpScaleFor(NaN);
+    expect(target).toBeLessThan(2.5);
+    expectCenteredOn('k2', target);
   });
 
   it('expands collapsed ancestors so the node is laid out, leaving other collapses alone', async () => {
@@ -1377,13 +1410,14 @@ describe('scion-agent-tree-view revealAgent and focusAgentNode', () => {
     el.revealAgent('k2');
     await settle();
     expect(internals().pendingRevealId).toBe('k2');
+    expect(internals().scale).toBe(1.25);
 
     canvasSize = { width: CANVAS_W, height: CANVAS_H };
     el.requestUpdate();
     await settle();
 
     expect(internals().pendingRevealId).toBeNull();
-    expectCenteredOn('k2', 1.25);
+    expectCenteredOn('k2', jumpScaleFor(NaN));
   });
 
   it('starts the highlight once the node is centered, not when the reveal is asked for', async () => {

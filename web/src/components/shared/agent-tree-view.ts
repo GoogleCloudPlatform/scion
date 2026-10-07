@@ -113,6 +113,24 @@ const VARIANT_COLOR: Record<StatusVariant, string> = {
 
 const MIN_SCALE = 0.25;
 const MAX_SCALE = 2.5;
+/**
+ * Effective size, in CSS px, a palette jump zooms a node's name to: 16pt,
+ * at the CSS 96px-per-inch ratio of 4/3 px per pt. "Effective" means the
+ * name's own font size (`.node .name`, in stage px) times the stage scale.
+ */
+export const JUMP_LABEL_PX = (16 * 4) / 3;
+/** `.node .name` font size (0.95rem) at the default 16px root, in px. */
+const DEFAULT_NAME_FONT_PX = 0.95 * 16;
+
+/**
+ * The stage scale at which a node name set at `nameFontPx` renders at
+ * {@link JUMP_LABEL_PX}, clamped to the graph's zoom limits. Independent of
+ * the current zoom, so a jump zooms in or out as needed.
+ */
+export function jumpScaleFor(nameFontPx: number): number {
+  const font = Number.isFinite(nameFontPx) && nameFontPx > 0 ? nameFontPx : DEFAULT_NAME_FONT_PX;
+  return Math.min(MAX_SCALE, Math.max(MIN_SCALE, JUMP_LABEL_PX / font));
+}
 /** How long {@link ScionAgentTreeView.revealAgent} highlights the node it brought into view. */
 const HIGHLIGHT_MS = 2000;
 /**
@@ -739,8 +757,9 @@ export class ScionAgentTreeView extends LitElement {
 
   /**
    * Brings one agent into view: expands any collapsed ancestors so its node
-   * is laid out, centers the viewport on it at the current zoom and
-   * highlights it briefly. Keyboard focus is left alone (see
+   * is laid out, centers the viewport on it, zoomed so its name renders at
+   * {@link JUMP_LABEL_PX} (see {@link jumpScaleFor}), and highlights it
+   * briefly. Keyboard focus is left alone (see
    * {@link focusAgentNode}).
    *
    * The centering waits for the canvas to have a size, for a short while
@@ -795,13 +814,24 @@ export class ScionAgentTreeView extends LitElement {
     }
     // Keep the request pending while the canvas has no size (hidden or
     // mid-transition); the next render retries it.
-    if (!this.centerOn(node, this.scale)) return;
+    if (!this.centerOn(node, jumpScaleFor(this.nameFontPx(id)))) return;
     this.dropPendingReveal();
     this.highlightId = id;
     clearTimeout(this.highlightTimer);
     this.highlightTimer = setTimeout(() => {
       this.highlightId = null;
     }, HIGHLIGHT_MS);
+  }
+
+  /**
+   * The rendered (unscaled) font size of one node's name, in px, or NaN
+   * if it cannot be read; {@link jumpScaleFor} then uses the default.
+   */
+  private nameFontPx(agentId: string): number {
+    const name = this.renderRoot.querySelector<HTMLElement>(
+      `.node-wrapper a.node[data-agent-id="${CSS.escape(agentId)}"] .name`
+    );
+    return name ? parseFloat(getComputedStyle(name).fontSize) : NaN;
   }
 
   private dropPendingReveal(): void {
