@@ -143,3 +143,31 @@ func TestGroupMemberAuditFailureRollsBack(t *testing.T) {
 	assert.Contains(t, audits[0].AfterSummary, userID)
 	assert.NotEmpty(t, audits[0].ActorPrincipalID)
 }
+
+// The role-binding audit summary is valid JSON for any field value,
+// including control characters and invalid UTF-8, and round-trips valid
+// UTF-8 values unchanged.
+func TestRoleBindingSummaryIsJSON(t *testing.T) {
+	b := &store.RoleBinding{
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      "user\x01\"quoted\"\\",
+		RoleDefinitionID: "role\nname\x7f\tend",
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          "scope- -id",
+	}
+	summary := roleBindingSummary(b)
+	require.True(t, json.Valid([]byte(summary)), summary)
+	var got map[string]string
+	require.NoError(t, json.Unmarshal([]byte(summary), &got))
+	assert.Equal(t, map[string]string{
+		"principal_type":     b.PrincipalType,
+		"principal_id":       b.PrincipalID,
+		"role_definition_id": b.RoleDefinitionID,
+		"scope_type":         b.ScopeType,
+		"scope_id":           b.ScopeID,
+	}, got)
+
+	b.RoleDefinitionID = "role\xff\xfe"
+	summary = roleBindingSummary(b)
+	assert.True(t, json.Valid([]byte(summary)), summary)
+}

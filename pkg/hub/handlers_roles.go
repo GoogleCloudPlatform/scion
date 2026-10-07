@@ -1602,11 +1602,20 @@ func (s *Server) deleteRoleBinding(w http.ResponseWriter, r *http.Request, id st
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// roleBindingSummary is the audit summary of b: its principal, role
-// definition and scope.
+// roleBindingSummary is the audit summary of b, a JSON object with its
+// principal, role definition and scope.
 func roleBindingSummary(b *store.RoleBinding) string {
-	return fmt.Sprintf(`{"principal_type":%q,"principal_id":%q,"role_definition_id":%q,"scope_type":%q,"scope_id":%q}`,
-		b.PrincipalType, b.PrincipalID, b.RoleDefinitionID, b.ScopeType, b.ScopeID)
+	out, err := json.Marshal(struct {
+		PrincipalType    string `json:"principal_type"`
+		PrincipalID      string `json:"principal_id"`
+		RoleDefinitionID string `json:"role_definition_id"`
+		ScopeType        string `json:"scope_type"`
+		ScopeID          string `json:"scope_id"`
+	}{b.PrincipalType, b.PrincipalID, b.RoleDefinitionID, b.ScopeType, b.ScopeID})
+	if err != nil {
+		return "{}"
+	}
+	return string(out)
 }
 
 // writeRoleBindingAuditTx stamps record, attributes it to the request actor
