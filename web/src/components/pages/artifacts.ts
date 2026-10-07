@@ -147,12 +147,12 @@ export class ScionPageArtifacts extends LitElement {
     this.error = null;
     try {
       const page = await this.fetchPage();
-      if (gen !== this.generation) return;
+      if (gen !== this.generation || !this.isConnected) return;
       this.items = page.artifacts ?? [];
       this.nextCursor = page.nextCursor ?? '';
       this.resolveNames(this.items);
     } catch (err) {
-      if (gen !== this.generation) return;
+      if (gen !== this.generation || !this.isConnected) return;
       this.items = [];
       this.error = err instanceof Error ? err.message : 'Failed to load artifacts';
     } finally {
@@ -168,13 +168,13 @@ export class ScionPageArtifacts extends LitElement {
     this.error = null;
     try {
       const page = await this.fetchPage(this.nextCursor);
-      if (gen !== this.generation) return;
+      if (gen !== this.generation || !this.isConnected) return;
       const more = page.artifacts ?? [];
       this.items = [...this.items, ...more];
       this.nextCursor = page.nextCursor ?? '';
       this.resolveNames(more);
     } catch (err) {
-      if (gen !== this.generation) return;
+      if (gen !== this.generation || !this.isConnected) return;
       this.error = err instanceof Error ? err.message : 'Failed to load more artifacts';
     } finally {
       if (gen === this.generation) this.loadingMore = false;
@@ -212,7 +212,8 @@ export class ScionPageArtifacts extends LitElement {
   }
 
   private lookup(key: string, collection: 'agents' | 'users' | 'projects', id: string): void {
-    if (this.requested.has(key)) return;
+    // An empty id would address the collection itself.
+    if (!id || this.requested.has(key)) return;
     this.requested.add(key);
     void (async (): Promise<void> => {
       try {
@@ -226,7 +227,7 @@ export class ScionPageArtifacts extends LitElement {
           displayName?: string;
         };
         const name = body.displayName || body.name || body.slug || '';
-        if (name) {
+        if (name && this.isConnected) {
           const next = new Map(this.names);
           next.set(key, name);
           this.names = next;

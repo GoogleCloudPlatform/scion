@@ -414,9 +414,45 @@ describe('artifacts list page', () => {
   });
 });
 
+describe('artifacts list page lifecycle', () => {
+  beforeAll(async () => {
+    await import('./artifacts.js');
+  }, 30_000);
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+    vi.unstubAllGlobals();
+    delete window.__SCION_FEATURES__;
+  });
+
+  it('ignores a list response that arrives after the page was removed', async () => {
+    const list = scriptedListFetch();
+    const el = await mountNoSettle();
+    el.remove();
+    list.respond(0, { artifacts: [item(1)] });
+    await settle(el);
+    // No rows were rendered, so no name lookups went out.
+    expect(rows(el)).toHaveLength(0);
+    expect(list.lookups).toHaveLength(0);
+  });
+
+  it('never looks up an empty owner or project id', async () => {
+    const m = mockFetch({
+      '': { artifacts: [item(1, { ownerKind: 'user', ownerRef: '', scopeRef: '' })] },
+    });
+    const el = await mount(true);
+    expect(rows(el)).toHaveLength(1);
+    const lookups = m.urls.filter((u) => !u.startsWith('/api/v1/artifacts?'));
+    expect(lookups.filter((u) => /\/api\/v1\/(users|agents|projects)\/$/.test(u))).toEqual([]);
+    expect(lookups).toEqual([]);
+  });
+});
+
 interface ScriptedList {
   /** Query parameters of each list request, in order. */
   urls: URLSearchParams[];
+  /** URLs of every other request (name lookups). */
+  lookups: string[];
   respond(n: number, body: ArtifactListResponse): void;
   fail(n: number, status: number): void;
 }
@@ -427,6 +463,7 @@ function scriptedListFetch(): ScriptedList {
   const answered: Response[] = [];
   const s: ScriptedList = {
     urls: [],
+    lookups: [],
     respond(n, body) {
       settleRequest(n, new Response(JSON.stringify(body), { status: 200 }));
     },
@@ -443,6 +480,7 @@ function scriptedListFetch(): ScriptedList {
     vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
       if (!url.startsWith('/api/v1/artifacts?')) {
+        s.lookups.push(url);
         return Promise.resolve(new Response('{}', { status: 404 }));
       }
       const n = s.urls.length;
