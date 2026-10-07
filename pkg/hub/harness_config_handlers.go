@@ -355,6 +355,14 @@ func (s *Server) handleHarnessConfigByID(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// POST /api/v1/harness-configs/restore re-creates deleted built-ins
+	// (ptone/scion#3544). Harness config IDs are UUIDs, so the literal
+	// segment cannot shadow a real config.
+	if path == "restore" {
+		s.handleBuiltinRestore(w, r, storage.ResourceKindHarnessConfig)
+		return
+	}
+
 	parts := strings.SplitN(path, "/", 2)
 	hcID := parts[0]
 	action := ""

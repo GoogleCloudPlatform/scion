@@ -61,6 +61,10 @@ type TemplateService interface {
 
 	// Validate checks storage consistency for a template.
 	Validate(ctx context.Context, templateID string) (*ValidationReport, error)
+
+	// Restore re-creates the deleted built-in template from the hub's
+	// embedded catalog (POST /api/v1/templates/restore).
+	Restore(ctx context.Context, req *RestoreBuiltinsRequest) (*RestoreBuiltinsResponse, error)
 }
 
 // templateService is the implementation of TemplateService.
@@ -272,6 +276,17 @@ func (s *templateService) Clone(ctx context.Context, templateID string, req *Clo
 		return nil, err
 	}
 	return apiclient.DecodeResponse[Template](resp)
+}
+
+// Restore re-creates the deleted built-in template from the hub's embedded
+// catalog. A template that already has a global row is reported in
+// AlreadyPresent and left unchanged.
+func (s *templateService) Restore(ctx context.Context, req *RestoreBuiltinsRequest) (*RestoreBuiltinsResponse, error) {
+	resp, err := s.c.post(ctx, "/api/v1/templates/restore", req, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeResponse[RestoreBuiltinsResponse](resp)
 }
 
 // RequestUploadURLs requests signed URLs for uploading template files.

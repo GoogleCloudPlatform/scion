@@ -62,6 +62,10 @@ func (m *mockHarnessConfigService) Reimport(ctx context.Context, id string, sour
 	return nil, nil
 }
 
+func (m *mockHarnessConfigService) Restore(ctx context.Context, req *hubclient.RestoreBuiltinsRequest) (*hubclient.RestoreBuiltinsResponse, error) {
+	return nil, nil
+}
+
 func (m *mockHarnessConfigService) RequestUploadURLs(ctx context.Context, id string, files []hubclient.FileUploadRequest) (*hubclient.UploadResponse, error) {
 	return nil, nil
 }

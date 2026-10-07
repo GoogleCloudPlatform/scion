@@ -3762,6 +3762,7 @@
 |------|--------|---------|
 | http_route | POST | `/api/v1/templates` |
 | http_route | POST | `/api/v1/resources/import` |
+| http_route | POST | `/api/v1/templates/restore` |
 
 **Principals:** `user`
 
@@ -3894,6 +3895,7 @@
 | Kind | Method | Pattern |
 |------|--------|---------|
 | http_route | POST | `/api/v1/harness-configs` |
+| http_route | POST | `/api/v1/harness-configs/restore` |
 
 **Principals:** `user`
 

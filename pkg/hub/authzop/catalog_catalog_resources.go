@@ -161,6 +161,9 @@ var catalogResourceOperations = []OperationSpec{
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/templates", Method: "POST"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/resources/import", Method: "POST"},
+			// Restore of the deleted built-in template (ptone/scion#3544):
+			// same global template.create check.
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/templates/restore", Method: "POST"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
@@ -242,6 +245,9 @@ var catalogResourceOperations = []OperationSpec{
 		Description: "Create a new harness configuration",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/harness-configs", Method: "POST"},
+			// Restore of deleted built-in harness configs (ptone/scion#3544):
+			// same global harness_config.create check.
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/harness-configs/restore", Method: "POST"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},

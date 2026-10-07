@@ -35,6 +35,10 @@ var assistantDenied = map[string]bool{
 // agentAllowed lists commands available in agent mode.
 // Every entry — including parent commands — must be listed explicitly;
 // parents are NOT implicitly allowed when a child is listed.
+//
+// "harness-config.restore" and "templates.restore" (ptone/scion#3544) are
+// deliberately absent: restoring global built-ins is an admin action,
+// available in human and assistant mode only (D6).
 var agentAllowed = map[string]bool{
 	"create":                      true,
 	"delete":                      true,

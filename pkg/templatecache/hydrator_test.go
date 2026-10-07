@@ -62,6 +62,10 @@ func (m *mockTemplateService) Clone(ctx context.Context, templateID string, req 
 	return nil, nil
 }
 
+func (m *mockTemplateService) Restore(ctx context.Context, req *hubclient.RestoreBuiltinsRequest) (*hubclient.RestoreBuiltinsResponse, error) {
+	return nil, nil
+}
+
 func (m *mockTemplateService) RequestUploadURLs(ctx context.Context, templateID string, files []hubclient.FileUploadRequest) (*hubclient.UploadResponse, error) {
 	return nil, nil
 }

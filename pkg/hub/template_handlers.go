@@ -417,6 +417,14 @@ func (s *Server) handleTemplateByIDV2(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// POST /api/v1/templates/restore re-creates the deleted built-in
+	// template (ptone/scion#3544). Template IDs are UUIDs, so the literal
+	// segment cannot shadow a real template.
+	if path == "restore" {
+		s.handleBuiltinRestore(w, r, storage.ResourceKindTemplate)
+		return
+	}
+
 	parts := strings.SplitN(path, "/", 2)
 	templateID := parts[0]
 	action := ""

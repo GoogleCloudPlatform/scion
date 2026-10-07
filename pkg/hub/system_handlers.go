@@ -30,6 +30,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
@@ -517,6 +518,11 @@ func (s *Server) handleSystemInit(w http.ResponseWriter, r *http.Request) {
 	// from the Hub DB so a previous init's choices don't linger.
 	s.cleanupUnselectedHarnessConfigs(r.Context(), selected)
 
+	// Selected built-ins with no global row (unselected by an earlier init,
+	// or deleted) are restored now rather than never: startup bootstrap no
+	// longer re-seeds them (ptone/scion#3544, design 3.8).
+	s.restoreSelectedBuiltinHarnessConfigs(r.Context(), catalogNames)
+
 	writeJSON(w, http.StatusOK, systemInitResponse{OK: true, Initialized: true})
 }
 
@@ -563,6 +569,29 @@ func (s *Server) cleanupUnselectedHarnessConfigs(ctx context.Context, selected [
 					slog.Warn("cleanupUnselectedHarnessConfigs: failed to delete config", "name", hc.Name, "id", hc.ID, "error", err)
 				}
 			}
+		}
+	}
+}
+
+// restoreSelectedBuiltinHarnessConfigs restores each selected built-in
+// harness config that has no global row, through RestoreBuiltin. A name that
+// is not a built-in is skipped; a failure is logged and does not fail init,
+// matching cleanupUnselectedHarnessConfigs.
+func (s *Server) restoreSelectedBuiltinHarnessConfigs(ctx context.Context, selected []string) {
+	if s.store == nil || s.GetStorage() == nil {
+		return
+	}
+	for _, name := range selected {
+		if !isBuiltinName(storage.ResourceKindHarnessConfig, name) {
+			continue
+		}
+		created, err := s.RestoreBuiltin(ctx, storage.ResourceKindHarnessConfig, name)
+		if err != nil {
+			slog.Warn("system init: failed to restore selected built-in harness config", "name", name, "error", err)
+			continue
+		}
+		if created {
+			slog.Info("system init: restored selected built-in harness config", "name", name)
 		}
 	}
 }

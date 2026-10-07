@@ -1654,6 +1654,11 @@ type Server struct {
 	ghRefreshFailMu      sync.Mutex
 	ghLastRefreshFailure map[string]time.Time
 
+	// builtinRestoreMu serializes RestoreBuiltin within this process. The
+	// bundled-resources advisory lock covers replicas, but it is a no-op on
+	// SQLite (ptone/scion#3544).
+	builtinRestoreMu sync.Mutex
+
 	// ghFailures remembers, per cache key, that GitHub recently reported a
 	// gh:// ref as not found (see rememberGHNotFound and resolveGitHubSkill).
 	// It is in memory only, per hub process, and never written to the store.

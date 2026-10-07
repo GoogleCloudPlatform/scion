@@ -68,6 +68,9 @@ type builtinSeedLedger struct {
 	// name then reports as Seen, so no missing built-in is (re)created, and
 	// save is skipped so the unreadable row is never overwritten.
 	failClosed bool
+	// updatedBy is the updated_by value save writes; empty means
+	// builtinSeedLedgerUpdatedBy ("bootstrap").
+	updatedBy string
 }
 
 func newBuiltinSeedLedger() *builtinSeedLedger {
@@ -215,8 +218,12 @@ func (s *Server) saveBuiltinSeedLedger(ctx context.Context, l *builtinSeedLedger
 		}
 		// rev == 0 means no row was loaded: create-only, which conflicts if
 		// another writer created it in the meantime.
+		updatedBy := l.updatedBy
+		if updatedBy == "" {
+			updatedBy = builtinSeedLedgerUpdatedBy
+		}
 		row, err := s.store.UpsertHubSetting(ctx, builtinSeedLedgerSection, value,
-			builtinSeedLedgerUpdatedBy, rev, "seeded")
+			updatedBy, rev, "seeded")
 		if errors.Is(err, store.ErrRevisionConflict) {
 			continue
 		}

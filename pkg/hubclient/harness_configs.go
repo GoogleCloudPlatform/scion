@@ -73,6 +73,10 @@ type HarnessConfigService interface {
 
 	// Validate checks storage consistency for a harness config.
 	Validate(ctx context.Context, id string) (*ValidationReport, error)
+
+	// Restore re-creates deleted built-in harness configs from the hub's
+	// embedded catalog (POST /api/v1/harness-configs/restore).
+	Restore(ctx context.Context, req *RestoreBuiltinsRequest) (*RestoreBuiltinsResponse, error)
 }
 
 // harnessConfigService is the implementation of HarnessConfigService.
@@ -338,6 +342,31 @@ func (s *harnessConfigService) Reimport(ctx context.Context, id string, sourceUR
 		return nil, err
 	}
 	return apiclient.DecodeResponse[ReimportHarnessConfigResponse](resp)
+}
+
+// Restore re-creates deleted built-in harness configs from the hub's embedded
+// catalog. Names that already have a global row are reported in
+// AlreadyPresent and left unchanged.
+func (s *harnessConfigService) Restore(ctx context.Context, req *RestoreBuiltinsRequest) (*RestoreBuiltinsResponse, error) {
+	resp, err := s.c.post(ctx, "/api/v1/harness-configs/restore", req, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeResponse[RestoreBuiltinsResponse](resp)
+}
+
+// RestoreBuiltinsRequest is the body of the built-in restore endpoints.
+// Set exactly one of Names or All.
+type RestoreBuiltinsRequest struct {
+	Names []string `json:"names,omitempty"`
+	All   bool     `json:"all,omitempty"`
+}
+
+// RestoreBuiltinsResponse reports which built-ins were re-created and which
+// already existed.
+type RestoreBuiltinsResponse struct {
+	Restored       []string `json:"restored"`
+	AlreadyPresent []string `json:"alreadyPresent"`
 }
 
 // Validate checks storage consistency for a harness config.

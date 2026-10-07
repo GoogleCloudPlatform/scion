@@ -25,6 +25,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
 
@@ -279,6 +281,97 @@ func TestSystemInit_SelectiveHarnessConfig(t *testing.T) {
 	for i := range 2 {
 		workstationStart()
 		assertSelection(fmt.Sprintf("after restart %d", i))
+	}
+}
+
+// TestSystemInit_ReselectRestoresBuiltin covers wizard reselect
+// (ptone/scion#3544, design 3.8): init with a subset removes the unselected
+// built-ins; re-running init and selecting a previously unselected harness
+// brings it back at once, and it then survives restarts.
+func TestSystemInit_ReselectRestoresBuiltin(t *testing.T) {
+	srv, s := testWorkstationServer(t)
+	srv.SetStorage(newMockStorage("test-bucket"))
+	ctx := context.Background()
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	globalDir := filepath.Join(tmpHome, ".scion")
+
+	restore := config.OverrideRuntimeDetection(
+		func(string) (string, error) { return "/usr/bin/docker", nil },
+		func(string, []string) error { return nil },
+	)
+	defer restore()
+
+	workstationStart := func() {
+		t.Helper()
+		if err := config.MaterializeBundledResources(globalDir, config.MaterializeOptions{Force: true}); err != nil {
+			t.Fatalf("materialize: %v", err)
+		}
+		if err := srv.BootstrapTemplatesFromDir(ctx, filepath.Join(globalDir, "templates")); err != nil {
+			t.Fatalf("template bootstrap: %v", err)
+		}
+		if err := srv.BootstrapHarnessConfigsFromDir(ctx, filepath.Join(globalDir, "harness-configs")); err != nil {
+			t.Fatalf("harness config bootstrap: %v", err)
+		}
+	}
+	globalNames := func() []string {
+		t.Helper()
+		configs, err := s.ListHarnessConfigs(ctx, store.HarnessConfigFilter{
+			Scope: store.HarnessConfigScopeGlobal,
+		}, store.ListOptions{Limit: 200})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var names []string
+		for _, hc := range configs.Items {
+			names = append(names, hc.Name)
+		}
+		sort.Strings(names)
+		return names
+	}
+	initWith := func(harnesses ...string) {
+		t.Helper()
+		rec := doWorkstationRequest(t, srv, http.MethodPost, "/api/v1/system/init", map[string]interface{}{
+			"harnesses": harnesses,
+		})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("init %v: expected 200, got %d: %s", harnesses, rec.Code, rec.Body.String())
+		}
+	}
+
+	workstationStart()
+	initWith("codex")
+	if got := globalNames(); !reflect.DeepEqual(got, []string{"codex"}) {
+		t.Fatalf("after first init: global harness configs = %v, want [codex]", got)
+	}
+	workstationStart()
+	if got := globalNames(); !reflect.DeepEqual(got, []string{"codex"}) {
+		t.Fatalf("after restart: global harness configs = %v, want [codex]", got)
+	}
+
+	// Reselect claude: restored immediately, without a restart.
+	initWith("codex", "claude")
+	if got := globalNames(); !reflect.DeepEqual(got, []string{"claude", "codex"}) {
+		t.Fatalf("after reselect: global harness configs = %v, want [claude codex]", got)
+	}
+	hc, err := s.GetHarnessConfigBySlug(ctx, "claude", store.HarnessConfigScopeGlobal, "")
+	if err != nil {
+		t.Fatalf("claude missing after reselect: %v", err)
+	}
+	if !IsBuiltinManaged(hc.SourceURL) {
+		t.Errorf("restored claude SourceURL %q is not built-in-managed", hc.SourceURL)
+	}
+
+	// The restored row survives restarts (disk copy equals the embed).
+	for i := range 2 {
+		workstationStart()
+		if got := globalNames(); !reflect.DeepEqual(got, []string{"claude", "codex"}) {
+			t.Errorf("after restart %d: global harness configs = %v, want [claude codex]", i, got)
+		}
+		after, err := s.GetHarnessConfigBySlug(ctx, "claude", store.HarnessConfigScopeGlobal, "")
+		if err != nil || after.ID != hc.ID {
+			t.Errorf("after restart %d: claude row changed or missing (err=%v)", i, err)
+		}
 	}
 }
 
