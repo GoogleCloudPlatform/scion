@@ -1168,12 +1168,15 @@ export function parseArtifactRef(ref: string): ArtifactRefTarget | null {
 /**
  * Build the `<a class="entity-link artifact-link">` markup for a matched
  * artifact reference. The text stays exactly as written; the data
- * attributes carry the parsed id and seq the click handler opens.
+ * attributes carry the parsed id and seq the click handler opens. The
+ * markup is constant apart from the escaped text and the id and seq the
+ * pattern validated, and carries no script-bearing attribute: href is "#"
+ * and the click handler opens the preview.
  */
 export function buildArtifactLinkHtml(text: string, target: ArtifactRefTarget): string {
   // `@` is written as an entity so the later @mention pass, which scans the
   // whole HTML string, never restyles a version suffix (`@2`) as a mention.
   const escaped = escAttr(text).replace(/@/g, '&#64;');
   const seqAttr = target.seq > 0 ? ` data-artifact-seq="${target.seq}"` : '';
-  return `<a class="entity-link artifact-link" data-artifact-id="${escAttr(target.id)}"${seqAttr} href="javascript:void(0)" title="Open artifact">${escaped}</a>`;
+  return `<a class="entity-link artifact-link" data-artifact-id="${escAttr(target.id)}"${seqAttr} href="#" title="Open artifact">${escaped}</a>`;
 }

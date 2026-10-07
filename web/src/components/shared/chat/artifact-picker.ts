@@ -32,7 +32,7 @@ import {
   type ArtifactListItem,
   type ArtifactListResponse,
 } from '../../../client/artifacts.js';
-import { formatInstant } from '../../../utils/time.js';
+import { formatInstant, formatRelative } from '../../../utils/time.js';
 
 /** An artifact picked in the composer, waiting to be sent. */
 export interface PendingArtifact {
@@ -55,6 +55,9 @@ const SEARCH_DEBOUNCE_MS = 250;
 
 /** Rows fetched per page. */
 const PAGE_SIZE = 25;
+
+/** Name lookups run at most this many at a time. */
+const NAME_LOOKUP_CONCURRENCY = 6;
 
 @customElement('scion-artifact-picker')
 export class ScionArtifactPicker extends LitElement {
@@ -138,22 +141,26 @@ export class ScionArtifactPicker extends LitElement {
       if (a.ownerKind === 'agent') wanted.add(`agent:${a.ownerRef}`);
       if (a.scopeRef) wanted.add(`project:${a.scopeRef}`);
     }
-    for (const key of wanted) {
-      if (this.names.has(key)) continue;
-      const [kind, id] = [key.slice(0, key.indexOf(':')), key.slice(key.indexOf(':') + 1)];
+    const keys = [...wanted].filter((k) => !this.names.has(k));
+    const lookup = async (key: string): Promise<void> => {
+      const kind = key.slice(0, key.indexOf(':'));
+      const id = key.slice(key.indexOf(':') + 1);
       const url =
         kind === 'agent'
           ? `/api/v1/agents/${encodeURIComponent(id)}`
           : `/api/v1/projects/${encodeURIComponent(id)}`;
       try {
         const res = await apiFetch(url, { suppressAccessDeniedToast: true });
-        if (!res.ok) continue;
+        if (!res.ok) return;
         const body = (await res.json()) as { name?: string; slug?: string };
         const name = body.name || body.slug;
         if (name) this.names = new Map(this.names).set(key, name);
       } catch {
         // The row shows a generic label instead.
       }
+    };
+    for (let i = 0; i < keys.length; i += NAME_LOOKUP_CONCURRENCY) {
+      await Promise.all(keys.slice(i, i + NAME_LOOKUP_CONCURRENCY).map(lookup));
     }
   }
 
@@ -231,6 +238,12 @@ export class ScionArtifactPicker extends LitElement {
     if (this.error) {
       return html`<div class="placeholder error">${this.error}</div>`;
     }
+    if (rows.length === 0 && this.nextCursor) {
+      // "This project" filters the pages loaded so far (the list has no
+      // scope parameter), so more pages may still hold matches.
+      return html`<div class="placeholder">No matches in the loaded artifacts.</div>
+        ${this.renderLoadMore()}`;
+    }
     if (rows.length === 0) {
       return this.query.trim() || this.filter !== 'all'
         ? html`<div class="placeholder">No artifacts match.</div>`
@@ -278,20 +291,25 @@ export class ScionArtifactPicker extends LitElement {
                 <td>${this.ownerLabel(a)}</td>
                 <td>${this.projectLabel(a)}</td>
                 <td>v${a.currentSeq}</td>
-                <td class="muted">${formatInstant(a.updatedAt, 'datetime')}</td>
+                <td class="muted" title=${formatInstant(a.updatedAt, 'datetime')}>
+                  ${formatRelative(a.updatedAt)}
+                </td>
               </tr>
             `;
           })}
         </tbody>
       </table>
-      ${this.nextCursor
-        ? html`<div class="more">
-            <sl-button size="small" ?loading=${this.loading} @click=${() => this.load(true)}>
-              Load more
-            </sl-button>
-          </div>`
-        : nothing}
+      ${this.renderLoadMore()}
     `;
+  }
+
+  private renderLoadMore() {
+    if (!this.nextCursor) return nothing;
+    return html`<div class="more">
+      <sl-button size="small" ?loading=${this.loading} @click=${() => this.load(true)}>
+        Load more
+      </sl-button>
+    </div>`;
   }
 
   override render() {

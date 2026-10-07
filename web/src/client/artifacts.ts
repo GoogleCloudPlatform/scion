@@ -191,11 +191,12 @@ export function formatArtifactRef(id: string, seq?: number): string {
 }
 
 /**
- * Orders a message's artifact references the way the sender sent them.
- * The hub returns history references by artifact id; the message body
- * carries the reference URLs in send order, so a reference sorts by where
- * its artifact first appears in the body. References whose artifact the
- * body does not name keep their relative order after the others.
+ * Orders a message's artifact references by where each artifact first
+ * appears in the message text (the CLI adds the reference URLs to the text
+ * in send order). References whose artifact the text does not name, such
+ * as those attached in the web composer, keep their relative order after
+ * the others: send order right after sending, artifact id order in
+ * history, which is the order the hub returns them in.
  */
 export function orderArtifactRefs(
   refs: readonly MessageArtifactRef[],

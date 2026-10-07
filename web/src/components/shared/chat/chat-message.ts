@@ -2643,11 +2643,11 @@ export class ScionChatMessage extends LitElement {
   }
 
   /**
-   * Artifact chips, in the order the sender attached them (by where each
-   * artifact first appears in the body; the hub returns history refs by
-   * artifact id). A readable artifact shows title · vN · owner; any other
-   * shows only "Artifact unavailable", and still opens the preview, which
-   * explains it.
+   * Artifact chips, in the order their references appear in the message
+   * text; references attached without appearing in the text follow, in the
+   * order the hub returned them (artifact id order for history). A readable
+   * artifact shows title · vN · owner; any other shows only "Artifact
+   * unavailable", and still opens the preview, which explains it.
    */
   private renderArtifactChips() {
     if (!this.artifactRefs || this.artifactRefs.length === 0) return nothing;

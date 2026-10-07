@@ -2167,7 +2167,10 @@ export class ScionChatThread extends LitElement {
       // Artifact refs are resolved per viewer, so they never ride the
       // broadcast event: fetch them with the latest page when the body
       // names one.
-      if (isFeatureEnabled(ARTIFACTS_FLAG) && (msg.msg ?? '').includes('scion://artifact/')) {
+      if (
+        isFeatureEnabled(ARTIFACTS_FLAG) &&
+        (msg.msg ?? '').toLowerCase().includes('scion://artifact/')
+      ) {
         void this.backfillV2();
       }
 

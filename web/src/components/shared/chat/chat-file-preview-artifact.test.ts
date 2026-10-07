@@ -117,6 +117,7 @@ describe('scion-chat-file-preview artifact target', () => {
     expect(q(el, 'scion-code-editor')).toBeTruthy();
     expect(q(el, '.artifact-source-note')?.textContent).toContain('Open in artifact viewer');
     expect(q(el, '.footer .path')?.textContent).toBe('design.md · v3');
+    expect(q(el, '.version-badge')?.textContent?.trim()).toBe('v3 · current');
     expect(buttons(el)).toEqual(['Copy link', 'Open in artifact viewer']);
     const viewer = el.shadowRoot?.querySelectorAll('.footer sl-button')[1];
     expect(viewer?.getAttribute('href')).toBe(`/projects/proj-1/artifacts/${ID}`);
@@ -145,10 +146,23 @@ describe('scion-chat-file-preview artifact target', () => {
       expect(q(el, '.file-preview-placeholder.error')?.textContent).toContain(
         ARTIFACT_UNAVAILABLE_MESSAGE
       );
-      expect(buttons(el)).toEqual(['Copy link']);
+      expect(buttons(el)).toEqual(['Copy link', 'Close']);
+      expect(q(el, '.footer .path')?.textContent).toBe('');
+      expect(q(el, '.version-badge')).toBeNull();
       expect(apiFetchMock).toHaveBeenCalledTimes(1);
     }
   );
+
+  it('shows the same unavailable state when the entry file is refused after the metadata loaded', async () => {
+    apiFetchMock.mockImplementation((path: string) =>
+      Promise.resolve(path.includes('/files/') ? json({}, 404) : json(meta(3, 'text/plain')))
+    );
+    const el = await open();
+    expect(q(el, 'sl-dialog')?.getAttribute('label')).toBe('Artifact unavailable');
+    expect(q(el, '.footer .path')?.textContent).toBe('');
+    expect(q(el, '.version-badge')).toBeNull();
+    expect(buttons(el)).toEqual(['Copy link', 'Close']);
+  });
 
   it('does not fetch an entry it would not render, and points to the viewer', async () => {
     apiFetchMock.mockResolvedValue(json(meta(3, 'application/pdf')));

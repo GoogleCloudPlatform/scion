@@ -267,6 +267,29 @@ describe('scion-artifact-picker', () => {
     expect(boxes[1].hasAttribute('disabled')).toBe(true);
   });
 
+  it('keeps Load more reachable when This project matches nothing on the loaded page', async () => {
+    apiFetch.mockImplementation((url: string) =>
+      Promise.resolve(
+        url.includes('cursor=c1')
+          ? listResponse([item(A, 'Here', 'proj-1')])
+          : listResponse([item(B, 'Elsewhere', 'other')], 'c1')
+      )
+    );
+    const el = await openPicker();
+    el.setFilter('project');
+    await settle(el);
+    expect(titles(el)).toEqual([]);
+    expect(el.shadowRoot.querySelector('.placeholder')?.textContent).toContain(
+      'No matches in the loaded artifacts'
+    );
+    const more = el.shadowRoot.querySelector('.more sl-button') as HTMLElement;
+    expect(more).toBeTruthy();
+    more.click();
+    await settle(el);
+    expect(lastListCall()).toBe('/api/v1/artifacts?mine=1&cursor=c1&limit=25');
+    expect(titles(el)).toEqual(['Here']);
+  });
+
   it('shows an empty state with no command to run', async () => {
     apiFetch.mockImplementation(() => Promise.resolve(listResponse([])));
     const el = await openPicker();

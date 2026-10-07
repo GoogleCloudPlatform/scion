@@ -128,6 +128,8 @@ interface ArtifactInfo {
   version: number;
   entry: string;
   pageUrl: string;
+  /** Whether version is the artifact's current version. */
+  current: boolean;
   /**
    * A Markdown entry shown as source text. Rendered artifact Markdown is
    * only ever shown in the artifact viewer's sandboxed frame, which keeps
@@ -658,6 +660,7 @@ export class ScionChatFilePreview extends LitElement {
         version: version.seq,
         entry: version.entryPath,
         pageUrl: artifactPageUrl(data.artifact.scopeRef, data.artifact.id),
+        current: version.seq === data.artifact.currentSeq,
       };
       const renderer = rendererFor(entry.mediaType);
       if (
@@ -677,16 +680,19 @@ export class ScionChatFilePreview extends LitElement {
       const fileRes = await apiFetch(fileUrl, { signal: controller.signal });
       if (gen !== this.generation) return;
       if (!fileRes.ok) {
-        this.loadState = {
-          ...base,
-          status: 'error',
-          error:
-            fileRes.status === 403 || fileRes.status === 404
-              ? ARTIFACT_UNAVAILABLE_MESSAGE
-              : await extractApiError(fileRes, `Failed to load artifact (HTTP ${fileRes.status})`),
-          unavailable: fileRes.status === 403 || fileRes.status === 404,
-          artifact,
-        };
+        // Unavailable looks the same on every path: no title, version or entry.
+        const unavailable = fileRes.status === 403 || fileRes.status === 404;
+        this.loadState = unavailable
+          ? { ...base, status: 'error', error: ARTIFACT_UNAVAILABLE_MESSAGE, unavailable: true }
+          : {
+              ...base,
+              status: 'error',
+              error: await extractApiError(
+                fileRes,
+                `Failed to load artifact (HTTP ${fileRes.status})`
+              ),
+              artifact,
+            };
         return;
       }
       if (renderer === 'image') {
@@ -948,6 +954,14 @@ export class ScionChatFilePreview extends LitElement {
           if (e.target === e.currentTarget) this.close();
         }}
       >
+        <span slot="label" class="artifact-label">
+          ${label}
+          ${info && !state.unavailable
+            ? html`<span class="version-badge"
+                >v${info.version}${info.current ? ' · current' : ''}</span
+              >`
+            : nothing}
+        </span>
         ${this.renderBody()}
         <div slot="footer" class="footer">
           <span class="path" title=${secondary}>${secondary}</span>
@@ -955,13 +969,8 @@ export class ScionChatFilePreview extends LitElement {
             <sl-icon slot="prefix" name=${this.copied ? 'check2' : 'clipboard'}></sl-icon>
             ${this.copied ? 'Copied!' : 'Copy link'}
           </sl-button>
-          ${state.status === 'ready' && state.isMarkdown
-            ? html`
-                <sl-button size="small" @click=${() => this.toggleSource()}>
-                  <sl-icon slot="prefix" name=${this.showSource ? 'eye' : 'code'}></sl-icon>
-                  ${this.showSource ? 'Preview' : 'Source'}
-                </sl-button>
-              `
+          ${state.unavailable
+            ? html`<sl-button size="small" @click=${() => this.close()}>Close</sl-button>`
             : nothing}
           ${info && !state.unavailable
             ? html`
@@ -1015,6 +1024,20 @@ export class ScionChatFilePreview extends LitElement {
       max-width: 100%;
       max-height: calc(var(--scion-app-height, 100dvh) * 0.75);
       object-fit: contain;
+    }
+    .artifact-label {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    .version-badge {
+      font-size: 0.6875rem;
+      font-weight: 500;
+      padding: 0.0625rem 0.5rem;
+      border: 1px solid var(--scion-border, #e2e8f0);
+      border-radius: 999px;
+      background: var(--scion-bg-subtle, #f1f5f9);
+      color: var(--scion-text-muted, #475569);
     }
     .artifact-source-note {
       padding: 0.5rem 1rem;

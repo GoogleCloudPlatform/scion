@@ -161,6 +161,55 @@ describe('scion-chat-message artifact references', () => {
     expect(el.shadowRoot?.querySelectorAll('a.artifact-link')).toHaveLength(0);
   });
 
+  // Bodies below stand for the sanitised HTML the markdown renderer hands
+  // the linkify pass (the mock renderer passes HTML through unchanged).
+  it('does not link a reference inside a tag attribute', async () => {
+    const el = await mount(
+      `<a href="https://e.com" title="scion://artifact/${A}">x</a> <img alt="scion://artifact/${A}" src="https://e.com/i.png">`
+    );
+    expect(el.shadowRoot?.querySelectorAll('a.artifact-link')).toHaveLength(0);
+    const md = el.shadowRoot?.querySelector('.md-content');
+    expect(md?.querySelector('a[href="https://e.com"]')?.getAttribute('title')).toBe(
+      `scion://artifact/${A}`
+    );
+    expect(md?.querySelector('img')?.getAttribute('alt')).toBe(`scion://artifact/${A}`);
+  });
+
+  it('does not nest a link inside an existing link', async () => {
+    const el = await mount(`<a href="https://e.com">scion://artifact/${A}</a>`);
+    expect(el.shadowRoot?.querySelectorAll('a.artifact-link')).toHaveLength(0);
+    expect(el.shadowRoot?.querySelector('.md-content a')?.textContent).toBe(
+      `scion://artifact/${A}`
+    );
+  });
+
+  it('keeps links out of attribute values that contain ">"', async () => {
+    // Attribute values that contain ">" must not produce links or
+    // script-bearing markup.
+    const el = await mount(
+      `<span title="x> scion://artifact/${A}">t</span> <span data-x='y> scion://artifact/${B}@2'>u</span>`
+    );
+    const md = el.shadowRoot?.querySelector('.md-content') as HTMLElement;
+    expect(md.querySelectorAll('script')).toHaveLength(0);
+    for (const node of [md, ...Array.from(md.querySelectorAll('*'))]) {
+      for (const attr of Array.from(node.attributes)) {
+        expect(attr.name.toLowerCase().startsWith('on'), `${node.tagName} ${attr.name}`).toBe(
+          false
+        );
+        expect(
+          /javascript:/i.test(attr.value),
+          `${node.tagName} ${attr.name}="${attr.value}"`
+        ).toBe(false);
+      }
+    }
+    for (const a of Array.from(md.querySelectorAll('a'))) {
+      expect(a.className).toBe('entity-link artifact-link');
+      expect(a.getAttribute('data-artifact-id')).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+      );
+    }
+  });
+
   it('shows no chips and no links while the experiment is off', async () => {
     window.__SCION_FEATURES__ = { 'hub.artifacts': false };
     const el = await mount(`scion://artifact/${A}`, [readable(A, 'Alpha', 1, 'o')]);

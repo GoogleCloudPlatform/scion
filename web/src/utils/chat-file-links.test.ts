@@ -2020,10 +2020,10 @@ describe('artifact references', () => {
   it('builds escaped link markup carrying id and seq', async () => {
     const { buildArtifactLinkHtml } = await import('./chat-file-links.js');
     expect(buildArtifactLinkHtml(`scion://artifact/${ID}@2`, { id: ID, seq: 2 })).toBe(
-      `<a class="entity-link artifact-link" data-artifact-id="${ID}" data-artifact-seq="2" href="javascript:void(0)" title="Open artifact">scion://artifact/${ID}&#64;2</a>`
+      `<a class="entity-link artifact-link" data-artifact-id="${ID}" data-artifact-seq="2" href="#" title="Open artifact">scion://artifact/${ID}&#64;2</a>`
     );
     expect(buildArtifactLinkHtml('<x>', { id: '"', seq: 0 })).toBe(
-      '<a class="entity-link artifact-link" data-artifact-id="&quot;" href="javascript:void(0)" title="Open artifact">&lt;x&gt;</a>'
+      '<a class="entity-link artifact-link" data-artifact-id="&quot;" href="#" title="Open artifact">&lt;x&gt;</a>'
     );
   });
 });
