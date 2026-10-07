@@ -15,6 +15,7 @@ import {
 } from 'vitest';
 import type { TerminalWorkspaceRoot } from './terminal-workspace-root.js';
 import { TerminalSessionRegistry } from './terminal-sessions.js';
+import type { Agent } from '../shared/types.js';
 import { _appFrameRefCountForTests } from '../components/shared/app-frame.js';
 import {
   TERMINAL_PALETTE_NEW_AGENT_EVENT,
@@ -866,8 +867,9 @@ describe('idle entries', () => {
 
     const item = railItem();
     expect(item.dataset.connection).toBe('idle');
-    const stateLabel = item.querySelector('.terminal-state-label');
-    expect(stateLabel?.textContent).toContain('Not connected');
+    expect(item.querySelector('.terminal-state-label')).toBeNull();
+    const dot = item.querySelector<HTMLElement>('.terminal-connection-dot');
+    expect(dot?.title).toContain('Not connected');
     const reconnectBtn = item.querySelector<HTMLButtonElement>(
       '[aria-label^="Reconnect"].terminal-icon-action'
     );
@@ -881,6 +883,81 @@ describe('idle entries', () => {
     expect(idleOverlay?.textContent).toContain('Select this terminal to connect');
     const errorBanner = pane.shadowRoot?.querySelector('.error-banner');
     expect(errorBanner).toBeNull();
+  });
+
+  it('rail row shows the project name with the full name in its title', async () => {
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'p1',
+    });
+    root.withAutoSelectSuspended(() => root.create(registry, agentId, { deferConnect: true }));
+    registry.metadata.seed(agentId, {
+      id: agentId,
+      name: 'test',
+      projectId: 'project-id-1',
+      project: 'A rather long project name',
+      phase: 'running',
+    } as Agent);
+    await flush();
+
+    const item = railItem();
+    const text = item.querySelector('.terminal-rail-text')!;
+    expect(text.children).toHaveLength(2);
+    const project = item.querySelector<HTMLElement>('.terminal-project-name');
+    expect(project?.textContent).toBe('A rather long project name');
+    expect(project?.title).toBe('A rather long project name');
+    expect(item.querySelector('.terminal-state-label')).toBeNull();
+    expect(item.querySelector('.terminal-connection-dot')).not.toBeNull();
+    const select = item.querySelector<HTMLButtonElement>('.terminal-rail-select')!;
+    expect(select.title).toBe('Not connected · metadata pending');
+    expect(select.getAttribute('aria-label')).toBe(
+      'Show terminal for test in A rather long project name, Not connected, metadata pending'
+    );
+    expect(item.querySelector<HTMLElement>('.terminal-connection-dot')?.title).toBe(select.title);
+  });
+
+  it('rail row falls back to the project id when the project name is unknown', async () => {
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'p2',
+    });
+    root.withAutoSelectSuspended(() => root.create(registry, agentId, { deferConnect: true }));
+    registry.metadata.seed(agentId, {
+      id: agentId,
+      name: 'test',
+      projectId: 'project-id-2',
+      phase: 'running',
+    } as Agent);
+    await flush();
+
+    const project = railItem().querySelector<HTMLElement>('.terminal-project-name');
+    expect(project?.textContent).toBe('project-id-2');
+    expect(project?.title).toBe('project-id-2');
+    const select = railItem().querySelector<HTMLButtonElement>('.terminal-rail-select')!;
+    expect(select.title).toBe('Not connected · metadata pending');
+    expect(select.getAttribute('aria-label')).toBe(
+      'Show terminal for test in project-id-2, Not connected, metadata pending'
+    );
+  });
+
+  it('rail row omits the project line when no agent metadata is loaded', async () => {
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'p3',
+    });
+    root.withAutoSelectSuspended(() => root.create(registry, agentId, { deferConnect: true }));
+    await flush();
+
+    const item = railItem();
+    expect(item.querySelector('.terminal-project-name')).toBeNull();
+    expect(item.querySelector('.terminal-rail-text')?.children).toHaveLength(1);
+    const select = item.querySelector<HTMLButtonElement>('.terminal-rail-select')!;
+    const status = item.querySelector<HTMLElement>('.terminal-connection-dot')!.title;
+    expect(status).toBe('Not connected · metadata pending');
+    expect(select.title).toBe(status);
+    expect(select.getAttribute('aria-label')).toBe(
+      `Show terminal for ${agentId}, Not connected, metadata pending`
+    );
   });
 
   it('selecting an idle entry connects it', async () => {
@@ -2273,6 +2350,27 @@ describe('"Jump to agent" palette: keyboard shortcut', () => {
     await expectNotOpened();
   });
 
+  it('on a Mac, leaves Ctrl+K typed in a text field to the field', async () => {
+    vi.spyOn(navigator, 'platform', 'get').mockReturnValue('MacIntel');
+    const input = document.createElement('input');
+    root.element.append(input);
+
+    expect(press({ key: 'k', ctrlKey: true }, input)).toBe(true);
+    await expectNotOpened();
+
+    expect(press({ key: 'k', metaKey: true }, input)).toBe(false);
+    await expectOpened();
+  });
+
+  it('off a Mac, Ctrl+K typed in a text field opens the palette', async () => {
+    vi.spyOn(navigator, 'platform', 'get').mockReturnValue('Linux x86_64');
+    const input = document.createElement('input');
+    root.element.append(input);
+
+    expect(press({ key: 'k', ctrlKey: true }, input)).toBe(false);
+    await expectOpened();
+  });
+
   it('neither Ctrl+K nor Meta+K fire with both modifiers, Alt, or Shift held', async () => {
     expect(press({ key: 'k', ctrlKey: true, metaKey: true })).toBe(true);
     expect(press({ key: 'k', ctrlKey: true, altKey: true })).toBe(true);
@@ -2425,6 +2523,19 @@ describe('"Jump to agent" palette: keyboard shortcut', () => {
     expect(
       fetchMock.mock.calls.filter(([url]) => String(url).startsWith('/api/v1/agents?')).length
     ).toBe(agentLoads);
+  });
+
+  it('on a Mac, Ctrl+K in the open palette search field edits the query, and Cmd+K closes it', async () => {
+    vi.spyOn(navigator, 'platform', 'get').mockReturnValue('MacIntel');
+    press({ key: 'k', metaKey: true });
+    const palette = await expectOpened();
+    const input = palette.shadowRoot!.querySelector<HTMLInputElement>('#palette-query-input')!;
+
+    expect(press({ key: 'k', ctrlKey: true, composed: true }, input)).toBe(true);
+    expect(palette.open).toBe(true);
+
+    expect(press({ key: 'k', metaKey: true, composed: true }, input)).toBe(false);
+    expect(palette.open).toBe(false);
   });
 
   it('a second press while the palette is still loading cancels the open', async () => {

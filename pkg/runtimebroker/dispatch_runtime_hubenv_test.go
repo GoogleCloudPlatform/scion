@@ -157,33 +157,51 @@ func TestBuildStartContext_ColocatedExtraHostsFollowDispatchRuntime(t *testing.T
 
 // TestBuildStartContext_ColocatedIAPHubEndpointFollowsDispatchRuntime: on a
 // single-node VM the hub's public URL is a Cloud Run IAP front end the host
-// does not serve (ptone/scion#3609). An agent dispatched to a container
-// runtime gets the local hub alias instead, mapped to host-gateway, and stays
-// on bridge networking. An agent dispatched to kubernetes (hybrid GKE) keeps
-// the IAP URL and gets no extra hosts.
+// does not serve (ptone/scion#3609, ptone/scion#3635). An agent dispatched to
+// docker gets the local hub alias, mapped to host-gateway, and stays on
+// bridge networking. An agent dispatched to podman gets Podman's native
+// host.containers.internal with no extra hosts. Both hold whatever the
+// broker's default runtime is. An agent dispatched to kubernetes (hybrid GKE)
+// keeps the IAP URL and gets no extra hosts.
 func TestBuildStartContext_ColocatedIAPHubEndpointFollowsDispatchRuntime(t *testing.T) {
 	clearSCIONEnv(t)
 	const (
-		iapEndpoint   = "https://scion-hub-123456.us-central1.run.app"
-		aliasEndpoint = "http://scion-hub.internal:8080"
+		iapEndpoint    = "https://scion-hub-123456.us-central1.run.app"
+		aliasEndpoint  = "http://scion-hub.internal:8080"
+		podmanEndpoint = "http://host.containers.internal:8080"
 	)
-	for _, tc := range dispatchRuntimeCases {
+	// Each case's container hub endpoint is what cmd computes for the
+	// default runtime; the per-runtime targets do not depend on it.
+	cases := []struct {
+		dispatchRuntimeCase
+		containerHubEndpoint string
+		wantEndpoint         string
+		wantHosts            []string
+	}{
+		{dispatchRuntimeCase{name: "docker default, docker agent", defaultRuntime: "docker", profileRuntime: "kubernetes"}, aliasEndpoint, aliasEndpoint, []string{"scion-hub.internal:host-gateway"}},
+		{dispatchRuntimeCase{name: "docker default, kubernetes agent", defaultRuntime: "docker", profileRuntime: "kubernetes", useProfile: true}, aliasEndpoint, iapEndpoint, nil},
+		{dispatchRuntimeCase{name: "docker default, podman agent", defaultRuntime: "docker", profileRuntime: "podman", useProfile: true}, aliasEndpoint, podmanEndpoint, nil},
+		{dispatchRuntimeCase{name: "kubernetes default, kubernetes agent", defaultRuntime: "kubernetes", profileRuntime: "docker"}, "", iapEndpoint, nil},
+		{dispatchRuntimeCase{name: "kubernetes default, docker agent", defaultRuntime: "kubernetes", profileRuntime: "docker", useProfile: true}, "", aliasEndpoint, []string{"scion-hub.internal:host-gateway"}},
+		{dispatchRuntimeCase{name: "kubernetes default, podman agent", defaultRuntime: "kubernetes", profileRuntime: "podman", useProfile: true}, "", podmanEndpoint, nil},
+		{dispatchRuntimeCase{name: "podman default, podman agent", defaultRuntime: "podman", profileRuntime: "docker"}, podmanEndpoint, podmanEndpoint, nil},
+		{dispatchRuntimeCase{name: "podman default, docker agent", defaultRuntime: "podman", profileRuntime: "docker", useProfile: true}, podmanEndpoint, aliasEndpoint, []string{"scion-hub.internal:host-gateway"}},
+	}
+	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			srv, _ := newDispatchRuntimeServer(t, tc, aliasEndpoint)
+			srv, _ := newDispatchRuntimeServer(t, tc.dispatchRuntimeCase, tc.containerHubEndpoint)
 			srv.config.ColocatedPublicHubEndpoint = iapEndpoint
-			sc := buildDispatchRuntimeStartContext(t, srv, tc, iapEndpoint)
+			srv.config.ColocatedRuntimeHubEndpoints = map[string]string{
+				"docker": aliasEndpoint,
+				"podman": podmanEndpoint,
+			}
+			sc := buildDispatchRuntimeStartContext(t, srv, tc.dispatchRuntimeCase, iapEndpoint)
 
-			wantEndpoint := iapEndpoint
-			var wantHosts []string
-			if tc.wantContainerRouting {
-				wantEndpoint = aliasEndpoint
-				wantHosts = []string{"scion-hub.internal:host-gateway"}
+			if got := sc.Opts.Env["SCION_HUB_ENDPOINT"]; got != tc.wantEndpoint {
+				t.Errorf("SCION_HUB_ENDPOINT = %q, want %q", got, tc.wantEndpoint)
 			}
-			if got := sc.Opts.Env["SCION_HUB_ENDPOINT"]; got != wantEndpoint {
-				t.Errorf("SCION_HUB_ENDPOINT = %q, want %q", got, wantEndpoint)
-			}
-			if !slices.Equal(sc.Opts.ExtraHosts, wantHosts) {
-				t.Errorf("ExtraHosts = %v, want %v", sc.Opts.ExtraHosts, wantHosts)
+			if !slices.Equal(sc.Opts.ExtraHosts, tc.wantHosts) {
+				t.Errorf("ExtraHosts = %v, want %v", sc.Opts.ExtraHosts, tc.wantHosts)
 			}
 		})
 	}

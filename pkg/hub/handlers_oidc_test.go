@@ -81,7 +81,7 @@ func testOIDCServer(t *testing.T) *Server {
 // that routes are registered during New(). Use for mux-routing tests.
 func testOIDCServerWithRoutes(t *testing.T) *Server {
 	t.Helper()
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		if strings.Contains(err.Error(), "sqlite driver not registered") {
 			t.Skip("Skipping test because sqlite driver is not registered (build with -tags sqlite to enable)")
@@ -114,7 +114,7 @@ func testOIDCServerWithRoutes(t *testing.T) *Server {
 // must keep falling back to the Hub's regular endpoint when oidc.issuer_url
 // is not set explicitly.
 func TestNewServer_AgentEndpointDoesNotAffectOIDCIssuerDefault(t *testing.T) {
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		if strings.Contains(err.Error(), "sqlite driver not registered") {
 			t.Skip("Skipping test because sqlite driver is not registered (build with -tags sqlite to enable)")
