@@ -507,6 +507,10 @@ var bearerMatrixPositiveServerErrors = map[liveInventoryKey]bearerMatrixPositive
 		http.StatusInternalServerError, "the empty update body fails at the store write"},
 	{"harnessconfig.update", http.MethodPut, "/api/v1/harness-configs/{id}"}: {
 		http.StatusInternalServerError, "the empty update body fails at the store write"},
+	{"project.messagelogs.read", http.MethodGet, "/api/v1/projects/{id}/message-logs"}: {
+		http.StatusNotImplemented, "the test server configures no log query service"},
+	{"project.metrics.read", http.MethodGet, "/api/v1/projects/{id}/metrics"}: {
+		http.StatusServiceUnavailable, "the test server configures no telemetry project for the metrics dashboard"},
 }
 
 // bearerMatrixAuthzErrorCodes are error codes that report an authorization

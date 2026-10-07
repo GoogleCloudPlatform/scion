@@ -304,11 +304,20 @@ func TestTemplateImport_RequiresTemplateCreate(t *testing.T) {
 			for _, boundary := range []TokenBoundary{projectBoundary(project), hubBoundary()} {
 				key := projectOpsMint(t, srv, member, boundary, tc.selector)
 				rec := doRequestWithToken(t, srv, key, http.MethodPost, path, map[string]interface{}{})
-				require.Equal(t, http.StatusBadRequest, rec.Code,
-					"a %s token with %s passes authorization and reaches body validation: %s", boundary.Kind, tc.selector, rec.Body.String())
+				requirePassedImportAuthorization(t, rec, "%s token with %s", boundary.Kind, tc.selector)
 			}
 			rec := projectOpsSession(t, srv, member, http.MethodPost, path, map[string]interface{}{})
-			require.Equal(t, http.StatusBadRequest, rec.Code, "member session: %s", rec.Body.String())
+			requirePassedImportAuthorization(t, rec, "member session")
 		})
 	}
+}
+
+// requirePassedImportAuthorization asserts that a discover or import request
+// with an empty body passed authorization: discover answers 400 for the
+// missing source, and import answers 503 because the test server configures
+// no resource storage. A 401 or 403 fails.
+func requirePassedImportAuthorization(t *testing.T, rec *httptest.ResponseRecorder, msg string, args ...interface{}) {
+	t.Helper()
+	require.Contains(t, []int{http.StatusBadRequest, http.StatusServiceUnavailable}, rec.Code,
+		append([]interface{}{msg + ": %s"}, append(args, rec.Body.String())...)...)
 }
