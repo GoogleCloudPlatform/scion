@@ -496,6 +496,65 @@ func TestAgentHoldLift(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, rec.Code)
 }
 
+// rootLookupStore answers GetUser for one user ID with a fixed result,
+// inside transactions too.
+type rootLookupStore struct {
+	store.Store
+	userID string
+	user   *store.User
+	err    error
+}
+
+func (r *rootLookupStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	return r.Store.WithTx(ctx, func(tx store.Store) error {
+		return fn(&rootLookupStore{Store: tx, userID: r.userID, user: r.user, err: r.err})
+	})
+}
+
+func (r *rootLookupStore) GetUser(ctx context.Context, id string) (*store.User, error) {
+	if id == r.userID {
+		return r.user, r.err
+	}
+	return r.Store.GetUser(ctx, id)
+}
+
+// A hold whose root user is not found (deleted) or comes back nil is not
+// admitted: the lift is refused with 409 and the hold stays. Any other root
+// lookup error refuses the lift as a fault.
+func TestAgentHoldLift_RootUserMissingNotAdmitted(t *testing.T) {
+	cases := []struct {
+		name     string
+		user     *store.User
+		err      error
+		wantCode int
+	}{
+		{name: "not_found", err: store.ErrNotFound, wantCode: http.StatusConflict},
+		{name: "wrapped_not_found", err: fmt.Errorf("get user: %w", store.ErrNotFound), wantCode: http.StatusConflict},
+		{name: "nil_user", wantCode: http.StatusConflict},
+		{name: "lookup_fault", err: errors.New("injected user lookup fault"), wantCode: http.StatusInternalServerError},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newMSFixture(t, "lift-root-"+tc.name)
+			f.hold(f.agentA.ID, f.userID)
+			orig := f.srv.store
+			f.srv.store = &rootLookupStore{Store: orig, userID: f.userID, user: tc.user, err: tc.err}
+			rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+f.agentA.ID+"/hold/lift", nil)
+			f.srv.store = orig
+			assert.Equal(t, tc.wantCode, rec.Code, rec.Body.String())
+			assert.True(t, f.held(f.agentA.ID), "the hold stays")
+			assert.Zero(t, countAudits(t, f.s, mutationTypeAgentHoldCleared, f.agentA.ID))
+		})
+	}
+	// Positive control: with the real root user (an active member) the lift
+	// succeeds.
+	f := newMSFixture(t, "lift-root-control")
+	f.hold(f.agentA.ID, f.userID)
+	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+f.agentA.ID+"/hold/lift", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.False(t, f.held(f.agentA.ID))
+}
+
 // The API shows a suspension view while the agent is held.
 func TestAgentSuspensionField(t *testing.T) {
 	f := newMSFixture(t, "field")

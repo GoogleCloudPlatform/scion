@@ -84,18 +84,23 @@ func (s *Server) handleAgentHoldLift(w http.ResponseWriter, r *http.Request, age
 			return nil
 		}
 		for _, h := range holds {
-			admitted, err := s.userAdmittedByIDOn(ctx, tx, h.RootPrincipalID, agent.ProjectID)
+			// A root user that is not found (deleted) or not active is not
+			// admitted; any other lookup error refuses the lift.
+			u, err := tx.GetUser(ctx, h.RootPrincipalID)
+			if err != nil {
+				if errors.Is(err, store.ErrNotFound) {
+					return errHoldLiftRootNotAdmitted
+				}
+				return fmt.Errorf("root user lookup: %w", err)
+			}
+			if u == nil || u.Status != store.UserStatusActive {
+				return errHoldLiftRootNotAdmitted
+			}
+			admitted, err := s.userAdmittedToProjectOn(ctx, tx, u, agent.ProjectID, nil)
 			if err != nil {
 				return fmt.Errorf("admission check: %w", err)
 			}
 			if !admitted {
-				return errHoldLiftRootNotAdmitted
-			}
-			u, err := tx.GetUser(ctx, h.RootPrincipalID)
-			if err != nil {
-				return fmt.Errorf("root user lookup: %w", err)
-			}
-			if u.Status != store.UserStatusActive {
 				return errHoldLiftRootNotAdmitted
 			}
 			before = append(before, map[string]string{
