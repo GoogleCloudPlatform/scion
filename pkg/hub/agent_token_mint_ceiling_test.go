@@ -180,8 +180,8 @@ func readonlyCoverageCeiling() store.EffectCeiling {
 	return boundedCeiling(sortedUniqueIDs(agentScopeCoverage(ScopesForRole(AgentRoleReadOnly)))...)
 }
 
-// Every mint site issues the same ceiled scope set, and no production caller
-// of the role-only GenerateAgentToken remains.
+// Every mint site issues the same ceiled scope set, and the role-only
+// GenerateAgentToken exists only in test files.
 func TestAllMintSitesUseCeiledHelper(t *testing.T) {
 	f := newMintFixture(t, "allsites")
 	ctx := context.Background()
@@ -208,13 +208,9 @@ func TestAllMintSitesUseCeiledHelper(t *testing.T) {
 	tok := refreshedToken(t, f.refresh(t, a, a.Ancestry))
 	assert.ElementsMatch(t, want, f.tokenClaims(t, tok).Scopes, "refresh")
 
-	// Grep pin: outside test files, GenerateAgentToken( appears only as the
-	// two declarations, the interface method, and the token-service calls
-	// inside the old helper and GenerateAgentTokenForAgent.
-	allowed := map[string]bool{
-		"agent_token_mint.go:return tokenService.GenerateAgentToken(agent.ID, agent.ProjectID, scopes, agent.Ancestry)": true,
-		"server.go:return tokenService.GenerateAgentToken(agentID, projectID, scopes, ancestry)":                        true,
-	}
+	// Pin: GenerateAgentToken (no ceiling, best-effort record) is defined
+	// only in a _test.go file, so production code cannot call it; no
+	// non-test file names it.
 	call := regexp.MustCompile(`\bGenerateAgentToken\(`)
 	files, err := filepath.Glob("*.go")
 	require.NoError(t, err)
@@ -226,19 +222,12 @@ func TestAllMintSitesUseCeiledHelper(t *testing.T) {
 		data, err := os.ReadFile(file)
 		require.NoError(t, err)
 		for i, line := range strings.Split(string(data), "\n") {
-			trimmed := strings.TrimSpace(line)
-			if !call.MatchString(trimmed) || strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "func ") {
-				continue
-			}
-			if strings.HasPrefix(trimmed, "GenerateAgentToken(agentID, projectID string") && file == "httpdispatcher.go" {
-				continue // the interface method
-			}
-			if !allowed[file+":"+trimmed] {
-				unexpected = append(unexpected, file+":"+itoa(i+1)+": "+trimmed)
+			if call.MatchString(line) {
+				unexpected = append(unexpected, file+":"+itoa(i+1)+": "+strings.TrimSpace(line))
 			}
 		}
 	}
-	assert.Empty(t, unexpected, "production GenerateAgentToken callers outside GenerateAgentTokenForAgent")
+	assert.Empty(t, unexpected, "GenerateAgentToken named outside test files")
 }
 
 // Start of an agent with no edge after the backfill: 403 at the delegation
@@ -484,7 +473,7 @@ func TestDevAuthOverrideDoesNotExceedCeiling(t *testing.T) {
 	ceiling := readonlyCoverageCeiling()
 	f.edge(t, store.DelegationPrincipalUser, f.userID, a.ID, ceiling, provSession)
 
-	token, err := f.srv.GenerateAgentTokenForAgent(context.Background(), a)
+	token, err := f.srv.issueAgentTokenForTest(context.Background(), a)
 	require.NoError(t, err)
 	assert.ElementsMatch(t, filterScopes(ScopesForRole(AgentRoleFull), ceiling, ScopeCeilings{}), f.tokenClaims(t, token).Scopes)
 	assert.NotContains(t, f.tokenClaims(t, token).Scopes, ScopeAgentCreate)
@@ -501,14 +490,14 @@ func TestRoleNoneMintIssuesRoleDerivedScopes(t *testing.T) {
 	f.edge(t, store.DelegationPrincipalUser, f.userID, a.ID, ceiling, provSession)
 
 	f.srv.authzService.mintDevAuthOverride = false
-	token, err := f.srv.GenerateAgentTokenForAgent(ctx, a)
+	token, err := f.srv.issueAgentTokenForTest(ctx, a)
 	require.NoError(t, err)
 	// No role scopes; the token service issues its default status scope for
 	// an empty set.
 	assert.Equal(t, []AgentTokenScope{ScopeAgentStatusUpdate}, f.tokenClaims(t, token).Scopes, "without dev auth")
 
 	f.srv.authzService.mintDevAuthOverride = true
-	token, err = f.srv.GenerateAgentTokenForAgent(ctx, a)
+	token, err = f.srv.issueAgentTokenForTest(ctx, a)
 	require.NoError(t, err)
 	assert.ElementsMatch(t, filterScopes(ScopesForRole(AgentRoleFull), ceiling, ScopeCeilings{}), f.tokenClaims(t, token).Scopes)
 }
@@ -531,7 +520,7 @@ func TestMintUsesChainCeiling(t *testing.T) {
 	f.edge(t, store.DelegationPrincipalUser, f.userID, parent.ID, broad, provSession)
 	f.edge(t, store.DelegationPrincipalAgent, parent.ID, child.ID, broad, provAgent)
 
-	token, err := f.srv.GenerateAgentTokenForAgent(ctx, child)
+	token, err := f.srv.issueAgentTokenForTest(ctx, child)
 	require.NoError(t, err)
 	before := f.tokenClaims(t, token).Scopes
 	assert.Contains(t, before, ScopeAgentCreate)
@@ -542,7 +531,7 @@ func TestMintUsesChainCeiling(t *testing.T) {
 	narrow := readonlyCoverageCeiling()
 	f.edge(t, store.DelegationPrincipalUser, f.userID, parent.ID, narrow, provSession)
 
-	token, err = f.srv.GenerateAgentTokenForAgent(ctx, child)
+	token, err = f.srv.issueAgentTokenForTest(ctx, child)
 	require.NoError(t, err)
 	after := f.tokenClaims(t, token).Scopes
 	for _, sc := range after {
@@ -577,7 +566,7 @@ func TestMixedChainMintKeepsScopeWalkDeniesAtUse(t *testing.T) {
 	require.Equal(t, store.EffectCeilingBounded, chain.Ceiling.Kind)
 	require.Equal(t, 1, chain.UnrecordedHops)
 
-	token, err := f.srv.GenerateAgentTokenForAgent(ctx, child)
+	token, err := f.srv.issueAgentTokenForTest(ctx, child)
 	require.NoError(t, err)
 	claims := f.tokenClaims(t, token)
 	assert.Contains(t, claims.Scopes, ScopeAgentSAAssign, "the mint does not strip the scope")
@@ -585,7 +574,7 @@ func TestMixedChainMintKeepsScopeWalkDeniesAtUse(t *testing.T) {
 	// The mixed chain issues no more than the all-unrecorded chain above it:
 	// every child scope is in the parent's minted set (same role and config)
 	// and inside the child's bounded edge ceiling.
-	parentToken, err := f.srv.GenerateAgentTokenForAgent(ctx, parent)
+	parentToken, err := f.srv.issueAgentTokenForTest(ctx, parent)
 	require.NoError(t, err)
 	parentScopes := f.tokenClaims(t, parentToken).Scopes
 	for _, sc := range claims.Scopes {
@@ -692,7 +681,7 @@ func TestDevLocalEdgeDeniedWhenDevUserInactive(t *testing.T) {
 		f := newMintFixture(t, "devu-susp")
 		a := f.agent(t, "devu-susp-agent", AgentRoleFull, state.PhaseStopped)
 		f.edge(t, store.DelegationPrincipalUser, DevUserID, a.ID, ceilPrincip, provDevLocal)
-		_, err := f.srv.GenerateAgentTokenForAgent(ctx, a)
+		_, err := f.srv.issueAgentTokenForTest(ctx, a)
 		require.NoError(t, err, "control: active dev user")
 
 		u, err := f.store.GetUser(ctx, DevUserID)

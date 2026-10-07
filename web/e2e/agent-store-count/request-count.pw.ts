@@ -18,16 +18,17 @@
  * Agent-list requests per user action, on the full app over a mocked hub.
  *
  * Every surface that shows "the agents of the hub" reads the agent store's
- * one hub entry: the chat quick switcher and the terminal workspace's
- * "Jump to agent" palette share a single walk, a reopen answers from
- * memory, and moving between pages that share the entry walks nothing
- * new. The graph views' palette reads the graph it is opened on and
+ * one hub entry: the chat members sidebar's hub view, the chat quick
+ * switcher and the terminal workspace's "Jump to agent" palette share a
+ * single walk, a reopen answers from memory, the chat fallback poll walks
+ * no agent list, and moving between pages that share the entry walks
+ * nothing new. The graph views' palette reads the graph it is opened on and
  * requests nothing. Each scenario runs with immediate and with delayed
  * agent-list responses, since how the loads overlap depends on timing.
  *
  * A walk is a list request without a cursor (a probe, `sort=updated`, is
- * counted apart). Store walks are told apart from the chat sidebar's own
- * hub walk, which is not on the store, by the store's compact view. The
+ * counted apart). Store walks are told apart from any other walk by the
+ * store's compact view; no surface here walks outside the store. The
  * hub holds enough agents for a store walk to read several pages, and each
  * walk must read each of them once.
  */
@@ -104,6 +105,16 @@ async function navigate(page: Page, path: string): Promise<void> {
   await expect.poll(() => new URL(page.url()).pathname).toBe(path);
 }
 
+/** Agents in the chat members sidebar's list. */
+function sidebarAgentCount(page: Page): Promise<number> {
+  return page.evaluate(() => {
+    const chat = document.querySelector('scion-page-chat') as unknown as {
+      v2AgentMembers?: unknown[];
+    } | null;
+    return chat?.v2AgentMembers?.length ?? 0;
+  });
+}
+
 /** Lets any request a page started on load or navigation go out. */
 async function settle(page: Page): Promise<void> {
   await page.waitForLoadState('networkidle');
@@ -137,7 +148,6 @@ for (const latencyMs of [0, 800]) {
     }) => {
       await openChat(page);
       await settle(page);
-      const sidebarWalks = hub.otherWalks();
       await openChatPalette(page);
       await closePalette(page, CHAT_PALETTE);
       await openChatPalette(page);
@@ -145,7 +155,24 @@ for (const latencyMs of [0, 800]) {
       await settle(page);
 
       expectOneStoreWalk(hub);
-      expect(hub.otherWalks()).toBe(sidebarWalks);
+      expect(hub.otherWalks()).toBe(0);
+    });
+
+    test('/chat with no conversation: the members sidebar shows the store walk, and the quick switcher shares it', async ({
+      page,
+    }) => {
+      await openChat(page);
+      await expect.poll(() => sidebarAgentCount(page), { timeout: 15_000 }).toBe(AGENT_COUNT);
+      await settle(page);
+      expectOneStoreWalk(hub);
+      expect(hub.otherWalks()).toBe(0);
+
+      await openChatPalette(page);
+      await closePalette(page, CHAT_PALETTE);
+      await settle(page);
+
+      expectOneStoreWalk(hub);
+      expect(hub.otherWalks()).toBe(0);
     });
 
     test('/terminals/:id mounts with no agent-list request', async ({ page }) => {
@@ -175,7 +202,6 @@ for (const latencyMs of [0, 800]) {
     }) => {
       await openChat(page);
       await settle(page);
-      const sidebarWalks = hub.otherWalks();
 
       await navigate(page, `/terminals/${agentId(1)}`);
       await expect(page.locator('scion-terminal-pane')).toBeAttached();
@@ -190,22 +216,27 @@ for (const latencyMs of [0, 800]) {
       await settle(page);
 
       expectOneStoreWalk(hub);
-      // The palettes add no walk of their own beyond the store's.
-      expect(hub.otherWalks()).toBe(sidebarWalks);
+      expect(hub.otherWalks()).toBe(0);
     });
 
-    test('the quick switcher opened while the Jump to agent walk is in flight joins it', async ({
+    test('Jump to agent and the quick switcher, opened while the sidebar walk is in flight, join it', async ({
       page,
     }) => {
+      // The walk the chat sidebar starts on mount stays on its first page
+      // until both palettes have opened. The chat page, still mounted,
+      // retains the entry, so leaving it for /terminals keeps the walk going.
+      const release = hub.holdNextStoreWalk();
       await openChat(page);
+      await expect.poll(() => hub.storeWalks()).toBe(1);
       await navigate(page, `/terminals/${agentId(1)}`);
       await expect(page.locator('scion-terminal-pane')).toBeAttached();
-      // The walk Jump to agent starts stays on its first page until the quick
-      // switcher has opened. The chat page, still mounted, retains the entry,
-      // so closing Jump to agent and leaving /terminals keep the walk going.
-      const release = hub.holdNextStoreWalk();
       await page.keyboard.press('Meta+k');
-      await expect.poll(() => hub.storeWalks()).toBe(1);
+      await expect
+        .poll(async () => {
+          const state = await paletteState(page, TERMINAL_PALETTE);
+          return state ? `${state.open}:${state.status}` : 'absent';
+        })
+        .toBe('true:loading');
       await page.keyboard.press('Escape');
       await page.goBack();
       await expect.poll(() => new URL(page.url()).pathname).toBe('/chat');
@@ -222,9 +253,11 @@ for (const latencyMs of [0, 800]) {
       release();
       await expectPaletteReady(page, CHAT_PALETTE, AGENT_COUNT);
       await closePalette(page, CHAT_PALETTE);
+      await expect.poll(() => sidebarAgentCount(page)).toBe(AGENT_COUNT);
       await settle(page);
 
       expectOneStoreWalk(hub);
+      expect(hub.otherWalks()).toBe(0);
     });
 
     test('hub events reach both open palettes with no agent-list request', async ({ page }) => {
@@ -263,6 +296,29 @@ for (const latencyMs of [0, 800]) {
     });
   });
 }
+
+test('/chat with no conversation: the 60s fallback poll walks the users and no agent list', async ({
+  page,
+}) => {
+  const hub = await setupHub(page);
+  await page.clock.install();
+  await openChat(page);
+  await expect.poll(() => sidebarAgentCount(page), { timeout: 15_000 }).toBe(AGENT_COUNT);
+  await settle(page);
+  expectOneStoreWalk(hub);
+  const usersBefore = hub.usersRequests();
+  const listBefore = hub.requests.filter((r) => !r.probe).length;
+
+  await page.clock.runFor(61_000);
+  await expect.poll(() => hub.usersRequests()).toBeGreaterThan(usersBefore);
+  await settle(page);
+
+  // Only the store's own delta probes (sort=updated) touched the agent list.
+  expect(hub.requests.filter((r) => !r.probe).length).toBe(listBefore);
+  expect(hub.storeWalks()).toBe(1);
+  expect(hub.otherWalks()).toBe(0);
+  expect(await sidebarAgentCount(page)).toBe(AGENT_COUNT);
+});
 
 /** The graph views' "Jump to agent": each host's palette reads the graph it shows. */
 const graphHosts = [

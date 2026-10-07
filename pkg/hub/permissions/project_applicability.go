@@ -236,6 +236,14 @@ var PermissionAllowedBoundaries = map[string][]BoundaryKind{
 	// skills reach agents in every project.
 	"inbox.read": {BoundaryKindProject, BoundaryKindHub}, "inbox.write": {BoundaryKindProject, BoundaryKindHub},
 	"user_skill_injection.update": {BoundaryKindHub},
+
+	// hub.* configuration permissions act on the hub itself, so their
+	// selectors are hub-only.
+	"hub.config.read": {BoundaryKindHub}, "hub.config.update": {BoundaryKindHub},
+	"hub.project_defaults.read": {BoundaryKindHub}, "hub.project_defaults.update": {BoundaryKindHub},
+	"hub.messaging.update": {BoundaryKindHub}, "hub.experiments.update": {BoundaryKindHub},
+	"hub.lifecycle_hooks.read": {BoundaryKindHub}, "hub.lifecycle_hooks.update": {BoundaryKindHub},
+	"hub.settings.update": {BoundaryKindHub},
 }
 
 // SelectorAllowedBoundaries returns the reviewed boundary kinds for a single
@@ -394,6 +402,13 @@ var SupportedTargetClasses = map[string][]TargetClassKind{
 	// Self-scoped permissions.
 	"inbox.read": {TargetClassKindSelf}, "inbox.write": {TargetClassKindSelf},
 	"user_skill_injection.update": {TargetClassKindSelf},
+
+	// hub.* configuration permissions target the hub instance.
+	"hub.config.read": {TargetClassKindHubResource}, "hub.config.update": {TargetClassKindHubResource},
+	"hub.project_defaults.read": {TargetClassKindHubResource}, "hub.project_defaults.update": {TargetClassKindHubResource},
+	"hub.messaging.update": {TargetClassKindHubResource}, "hub.experiments.update": {TargetClassKindHubResource},
+	"hub.lifecycle_hooks.read": {TargetClassKindHubResource}, "hub.lifecycle_hooks.update": {TargetClassKindHubResource},
+	"hub.settings.update": {TargetClassKindHubResource},
 }
 
 // SupportedTargetClassesFor returns the reviewed classes for permissionID.

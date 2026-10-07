@@ -153,6 +153,9 @@ type ServerConfig struct {
 	// DefaultUserRole is the role assigned to new users who are not in the
 	// admin_emails list. Values: "member" (default), "viewer".
 	DefaultUserRole string
+	// AgentRunScope is server.auth.agent_run_scope (ParseAgentRunScope);
+	// the zero value is off.
+	AgentRunScope AgentRunScope
 	// BrokerAuthConfig holds configuration for Runtime Broker HMAC authentication.
 	BrokerAuthConfig BrokerAuthConfig
 	// HubEndpoint is the public endpoint URL for this Hub (used in broker join responses).
@@ -193,6 +196,12 @@ type ServerConfig struct {
 	// default; a launch is non-blocking only when this is on AND the request
 	// opts in.
 	AsyncAgentLaunch bool
+	// PerfTrace turns on per-request performance tracing
+	// (server.hub.perf_trace): phase timings, authorization store-call and
+	// decision-audit counts, and DB pool waits, logged per request and
+	// returned in X-Scion-Perf-* headers to admin requests that opt in. Off by
+	// default; observe only. See perftrace.go.
+	PerfTrace bool
 	// LaunchTimeout is the whole-launch budget for an opted-in launch
 	// (design §3.10). Default 5 minutes. Below minLaunchTimeout the broker's
 	// fixed 20s abort margin (§3.10) would leave no time for a launch to
@@ -1067,6 +1076,10 @@ type RemoteCreateAgentRequest struct {
 	ResolvedSecrets []ResolvedSecret `json:"resolvedSecrets,omitempty"`
 	HubEndpoint     string           `json:"hubEndpoint,omitempty"`
 	AgentToken      string           `json:"agentToken,omitempty"`
+	// tokenGrant is the authorized, not yet signed, agent token for this
+	// request (hub-side only, never sent). The dispatch signs it for the
+	// request's run and records its credential before setting AgentToken.
+	tokenGrant *AgentTokenGrant
 	// CreatorName is the human-readable identity of who created this agent.
 	// Injected as the SCION_CREATOR environment variable in the agent container.
 	CreatorName string `json:"creatorName,omitempty"`
@@ -1385,6 +1398,7 @@ type Server struct {
 	agentTokenService  *AgentTokenService   // Agent JWT token service
 	userTokenService   *UserTokenService    // User JWT token service
 	downloadSigningKey []byte               // HMAC key for skill file capability URLs (#1792)
+	artifactViewKey    []byte               // HMAC key for artifact view capabilities (pkg/artifacts RouteView)
 
 	// chatSpacesBatch sets the GET /chat/spaces rollup batch sizes; the
 	// zero value uses the defaults (handlers_chat_v2.go).
@@ -1695,6 +1709,9 @@ type Server struct {
 	templateLog       *slog.Logger
 	workspaceLog      *slog.Logger
 	agentMetricsLog   *slog.Logger
+	// perfTraceLog receives the per-request perf_trace lines. Set only when
+	// server.hub.perf_trace is on; nil otherwise.
+	perfTraceLog *slog.Logger
 
 	// Cached rate limit info from the most recent GitHub App API call
 	githubAppRateLimit *githubapp.RateLimitInfo
@@ -2014,9 +2031,6 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 		slog.Warn("Failed to initialize agent token service", "error", err)
 	} else {
 		srv.agentTokenService = tokenService
-		// Wire credential recorder so issued tokens are persisted for revocation.
-		credAdapter := &storeCredentialRecorder{store: s}
-		tokenService.SetCredentialRecorder(credAdapter)
 		fp := sha256.Sum256(tokenService.config.SigningKey)
 		slog.Info("Agent token service initialized", "key_fingerprint", hex.EncodeToString(fp[:8]))
 	}
@@ -2042,6 +2056,11 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 
 	// Initialize the dedicated download-URL signing key (#1792).
 	if err := srv.initDownloadSigningKey(ctx); err != nil {
+		return nil, err
+	}
+
+	// Initialize the artifact view capability key (pkg/artifacts RouteView).
+	if err := srv.initArtifactViewKey(ctx); err != nil {
 		return nil, err
 	}
 
@@ -2188,7 +2207,11 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	slog.Info("Control channel manager initialized")
 
 	// Initialize authorization service
-	srv.authzService = NewAuthzService(s, logging.Subsystem("hub.auth"))
+	//
+	// With server.hub.perf_trace on, the authorization service gets a store
+	// decorator that counts and times its input reads (perftrace_store.go).
+	// With it off, wrapAuthzStoreForPerfTrace returns s itself.
+	srv.authzService = NewAuthzService(wrapAuthzStoreForPerfTrace(s, cfg.PerfTrace), logging.Subsystem("hub.auth"))
 	// ptone/scion#2342 (B.3 R6): the same condition that enables dev-token
 	// acceptance and DevUserID seeding below (cfg.DevAuthToken != "") also
 	// gates whether this server currently admits dev_local authority at
@@ -2199,7 +2222,13 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	// Wire decision audit emitter
 	auditEmitter := NewStoreDecisionAuditEmitter(s, logging.Subsystem("hub.decision-audit"))
 	srv.decisionAuditWriter = auditEmitter
-	srv.authzService.SetDecisionAuditEmitter(auditEmitter)
+	// With server.hub.perf_trace on, records pass through a counting
+	// decorator on their way to the same emitter (perftrace_audit.go).
+	srv.authzService.SetDecisionAuditEmitter(wrapAuditEmitterForPerfTrace(auditEmitter, cfg.PerfTrace))
+	if cfg.PerfTrace {
+		srv.perfTraceLog = perfTraceLogger()
+		slog.Warn("Request performance tracing is on (server.hub.perf_trace); per-request perf_trace lines are logged")
+	}
 
 	// Initialize B3-B6 boundary services (preview, governance, capabilities).
 	srv.initBoundaryServices()
@@ -2451,6 +2480,14 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 		// not cfg.PlatformAuthSA directly, so this and Server.platformAuthSA
 		// can never diverge.
 		PlatformAuthSA: srv.platformAuthSA,
+		AgentRunScope:  newAgentRunScopeChecker(cfg.AgentRunScope, s, srv.authLog),
+	}
+	if rs := srv.authConfig.AgentRunScope; rs != nil {
+		rs.route = func(r *http.Request) string {
+			_, pattern := srv.mux.Handler(r)
+			return pattern
+		}
+		slog.Info("Agent token run scope enabled", "mode", cfg.AgentRunScope.String())
 	}
 	// Wire the proxy user provisioner (wraps provisionUser with 60s cache)
 	if cfg.ProxyAuth != nil {
@@ -3606,6 +3643,15 @@ func (s *Server) CloseDecisionAudit(ctx context.Context) {
 	}
 }
 
+// SetAgentRunScopeMetrics wires the agent token run-scope counter. It does
+// nothing when server.auth.agent_run_scope is off.
+func (s *Server) SetAgentRunScopeMetrics(m *OTelAgentRunScopeMetrics) {
+	if c := s.authConfig.AgentRunScope; c != nil && m != nil {
+		var r agentRunScopeMetrics = m
+		c.metrics.Store(&r)
+	}
+}
+
 // SetExternalBearerMetrics wires the external-bearer authentication outcome
 // counter. Unlike SetMetrics/SetDBMetrics/SetDispatchMetrics/
 // SetGCPTokenMetrics above, this recorder is read from AuthConfig by the
@@ -4051,58 +4097,6 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	dispatcher.SetImageRegistry(s.resolveImageRegistry())
 
 	return dispatcher
-}
-
-// GenerateAgentToken generates a JWT for an agent.
-// This is a convenience method that delegates to the token service.
-// Base scopes are determined by the passed role.
-// Dev-auth mode overrides to full if the role would be more restrictive,
-// preserving dev-mode behavior where all agents get full access.
-// Additional scopes are merged with the role-based defaults, deduplicated.
-//
-// It applies no delegation ceiling and has no production caller: every mint
-// and refresh site calls GenerateAgentTokenForAgent. It serves test helpers
-// (TestAllMintSitesUseCeiledHelper pins this).
-func (s *Server) GenerateAgentToken(agentID, projectID string, ancestry []string, role AgentRole, additionalScopes []AgentTokenScope) (string, error) {
-	s.mu.RLock()
-	tokenService := s.agentTokenService
-	s.mu.RUnlock()
-
-	if tokenService == nil {
-		return "", fmt.Errorf("agent token service not initialized")
-	}
-
-	// Use the specified role for base scopes.
-	// Dev-auth mode overrides to full if the role would be more restrictive,
-	// preserving dev-mode behavior where all agents get full access.
-	effectiveRole := role
-	if s.config.DevAuthToken != "" && CompareRoles(role, AgentRoleFull) < 0 {
-		effectiveRole = AgentRoleFull
-	}
-	scopes := ScopesForRole(effectiveRole)
-
-	// Merge additional scopes, deduplicating
-	seen := make(map[AgentTokenScope]bool, len(scopes))
-	for _, sc := range scopes {
-		seen[sc] = true
-	}
-	for _, scope := range additionalScopes {
-		if !seen[scope] {
-			scopes = append(scopes, scope)
-			seen[scope] = true
-		}
-	}
-
-	return tokenService.GenerateAgentToken(agentID, projectID, scopes, ancestry)
-}
-
-// storeCredentialRecorder adapts store.AgentCredentialStore to CredentialRecorder.
-type storeCredentialRecorder struct {
-	store store.AgentCredentialStore
-}
-
-func (r *storeCredentialRecorder) RecordAgentCredential(ctx context.Context, cred *store.AgentCredential) error {
-	return r.store.CreateAgentCredential(ctx, cred)
 }
 
 // agentHeartbeatTimeoutHandler returns a recurring handler function that marks
@@ -5116,7 +5110,7 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 				"executor_id", dispatchExecutor.ID)
 			// No revoke here: DispatchAgentCreate revokes any credential it
 			// minted on its error return.
-			return rollback(createRollback{Stage: createStageDispatch, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(dispatcher, agent)})
+			return rollback(createRollback{Stage: createStageDispatch, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)})
 		}
 		if created.AcceptedLaunch() != nil {
 			// The row is already provisioning; persist the non-status
@@ -5442,6 +5436,9 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 			s.mu.Unlock()
 		}
 	}
+
+	// Reap abandoned pending artifact versions (exits when ctx is cancelled).
+	s.startArtifactReaper(ctx)
 
 	// Start rate limiter cleanup goroutines (exit when ctx is cancelled).
 	if s.gcpTokenRateLimiter != nil {
@@ -5848,6 +5845,7 @@ func (s *Server) registerRoutes() {
 	s.mux.Handle("/api/v1/artifacts", s.artifactsGuard("/api/v1/artifacts", artifactsHandler))
 	s.mux.Handle("/api/v1/artifacts/", s.artifactsGuard("/api/v1/artifacts/", artifactsHandler))
 	s.mux.Handle("/api/v1/artifacts/shared/", s.artifactsGuard("/api/v1/artifacts/shared/", artifactsHandler))
+	s.mux.Handle("/api/v1/artifacts/view/", s.artifactsGuard("/api/v1/artifacts/view/", artifactsHandler))
 
 	s.mux.HandleFunc("/api/v1/skills", s.guarded("/api/v1/skills", s.handleSkills))
 	s.mux.HandleFunc("/api/v1/skills/", s.guarded("/api/v1/skills/", s.handleSkillByID))
@@ -6112,6 +6110,13 @@ func (s *Server) registerRoutes() {
 // applyMiddleware wraps the handler with middleware.
 func (s *Server) applyMiddleware(h http.Handler) http.Handler {
 	// Apply middleware in reverse order (last applied runs first)
+
+	// Innermost: the per-request performance trace, only when
+	// server.hub.perf_trace is on (perftrace_middleware.go).
+	if s.config.PerfTrace {
+		h = s.perfTraceMiddleware(h)
+	}
+
 	h = s.recoveryMiddleware(h)
 
 	// Apply broker auth middleware (checks X-Scion-Broker-ID header for HMAC auth)

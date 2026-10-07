@@ -303,7 +303,7 @@ export class ScionNotificationTray extends LitElement {
       case 'COMPLETED':
         return 'Agent Completed';
       case 'WAITING_FOR_INPUT':
-        return 'Agent Needs Input';
+        return 'Agent Waiting on Parent';
       case 'LIMITS_EXCEEDED':
         return 'Agent Limits Exceeded';
       default:

@@ -442,20 +442,29 @@ func compileSchemas() {
 			"additionalProperties": false,
 		},
 		// artifacts schema is hand-written -- it is runtime/API-owned state
-		// with no $defs in settings-v1.schema.json. The per-field minimums
+		// with no $defs in settings-v1.schema.json. The per-field bounds
 		// match ArtifactsSettings.Resolve; the cross-field rules (file limit
-		// <= bundle limit, default TTL <= max TTL) are not expressible here
-		// and are enforced by Resolve, which fails closed.
+		// <= bundle limit, default TTL <= max TTL, remote image limits
+		// against the file limits, budget >= fetch timeout) are not
+		// expressible here: writes are refused by validateCrossField, and a
+		// stored document that breaks them is handled by Resolve (an invalid
+		// remote image value turns remote images off; any other invalid
+		// value disables the service).
 		"artifacts": {
 			"type": "object",
 			"properties": map[string]interface{}{
-				"enabled":                map[string]interface{}{"type": "boolean"},
-				"max_file_bytes":         map[string]interface{}{"type": "integer", "minimum": 1},
-				"max_bundle_bytes":       map[string]interface{}{"type": "integer", "minimum": 1},
-				"max_files":              map[string]interface{}{"type": "integer", "minimum": 1},
-				"default_retention_days": map[string]interface{}{"type": "integer", "minimum": 0},
-				"link_default_ttl_hours": map[string]interface{}{"type": "integer", "minimum": 1},
-				"link_max_ttl_hours":     map[string]interface{}{"type": "integer", "minimum": 1},
+				"enabled":                      map[string]interface{}{"type": "boolean"},
+				"max_file_bytes":               map[string]interface{}{"type": "integer", "minimum": 1},
+				"max_bundle_bytes":             map[string]interface{}{"type": "integer", "minimum": 1},
+				"max_files":                    map[string]interface{}{"type": "integer", "minimum": 1},
+				"default_retention_days":       map[string]interface{}{"type": "integer", "minimum": 0},
+				"link_default_ttl_hours":       map[string]interface{}{"type": "integer", "minimum": 1},
+				"link_max_ttl_hours":           map[string]interface{}{"type": "integer", "minimum": 1},
+				"remote_images_enabled":        map[string]interface{}{"type": "boolean"},
+				"remote_image_max_count":       map[string]interface{}{"type": "integer", "minimum": 1},
+				"remote_image_max_bytes":       map[string]interface{}{"type": "integer", "minimum": 1},
+				"remote_image_fetch_timeout_s": map[string]interface{}{"type": "integer", "minimum": 1, "maximum": ArtifactsMaxRemoteImageTotalBudgetS},
+				"remote_image_total_budget_s":  map[string]interface{}{"type": "integer", "minimum": 1, "maximum": ArtifactsMaxRemoteImageTotalBudgetS},
 			},
 			"additionalProperties": false,
 		},
@@ -875,11 +884,26 @@ func Validate(section string, doc json.RawMessage) []config.ValidationError {
 	}
 
 	err := sec.Schema.Validate(parsed)
-	if err == nil {
+	if err != nil {
+		return extractValidationErrors(err)
+	}
+	return validateCrossField(section, doc)
+}
+
+// validateCrossField applies the rules a JSON schema cannot express, so a
+// write that would leave a section unusable is refused instead of stored.
+func validateCrossField(section string, doc json.RawMessage) []config.ValidationError {
+	if section != "artifacts" {
 		return nil
 	}
-
-	return extractValidationErrors(err)
+	cfg, err := ParseArtifactsDoc(doc)
+	if err != nil {
+		return []config.ValidationError{{Message: err.Error()}}
+	}
+	if cfg.RemoteImagesInvalid != "" {
+		return []config.ValidationError{{Message: "artifacts settings: " + cfg.RemoteImagesInvalid}}
+	}
+	return nil
 }
 
 func extractValidationErrors(err error) []config.ValidationError {
