@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 119
+**Operations:** 123
 
 ## Table of Contents
 
@@ -41,6 +41,7 @@
 - [schedule.event.update](#scheduleeventupdate) — Update a recurring schedule
 - [schedule.event.delete](#scheduleeventdelete) — Cancel a scheduled event or delete a recurring schedule
 - [artifact.read](#artifactread) — Read an artifact's metadata or file bytes (owner, home-project readers via the scope grant, or principal grants); unreadable artifacts answer 404
+- [artifact.list](#artifactlist) — List the artifacts the caller owns, holds a grant on, or that are shared to a project it is a member of (?mine=1); each row passes the artifact.read check, so an artifact the caller cannot read is omitted, never denied
 - [artifact.create](#artifactcreate) — Publish a single file as a new artifact homed in a project (the caller's own, or ?scope=)
 - [agent.message.send](#agentmessagesend) — Send a message to an agent
 - [chat.access](#chataccess) — Access chat threads, spaces, topics, and messages within a project
@@ -60,6 +61,7 @@
 - [credential.token.revoke](#credentialtokenrevoke) — Revoke or delete a user access token
 - [user.admin.suspend](#useradminsuspend) — Suspend or reactivate a user account (dispatched from PATCH /api/v1/users/{id} when status field is present)
 - [user.admin.invite](#useradmininvite) — Invite a user to the platform
+- [user.admin.provision](#useradminprovision) — Pre-register a user (status invited) through POST /api/v1/users; invitation-equivalent, shares the invite creation core; no role, no grants
 - [user.admin.promote](#useradminpromote) — Promote or demote a user's administrative level (dispatched from PATCH /api/v1/users/{id} when role field is present)
 - [user.admin.delete](#useradmindelete) — Delete a user account
 - [group.read](#groupread) — Read group details or list groups
@@ -70,13 +72,12 @@
 - [role.read](#roleread) — Read role definitions and permission registry
 - [role.binding.read](#rolebindingread) — Read role binding assignments
 - [access.constraint.read](#accessconstraintread) — Read access constraint definitions
-- [user.provision](#userprovision) — Create a user directly through the API; refused for every caller, because sign-in flows create users
 - [user.session.logout](#usersessionlogout) — Sign-in flow logout step; the hub holds no server-side session state for it to change
 - [user.session.revoke](#usersessionrevoke) — Revoke every cookie session of a user (platform admin only)
 - [user.terminalworkspace](#userterminalworkspace) — Read or replace the caller's own terminal workspace
 - [hub.authreset](#hubauthreset) — Reset all agent authentication credentials (emergency action)
 - [hub.config.read](#hubconfigread) — Read server configuration and schema
-- [hub.config.update](#hubconfigupdate) — Update server configuration sections
+- [hub.config.update](#hubconfigupdate) — Update server configuration sections. The route guard checks hub.config.read, so a token needs hub_config:read and hub_config:update, and writes configuration keys only
 - [hub.messaging.update](#hubmessagingupdate) — Read and update messaging configuration switches
 - [hub.experiments.update](#hubexperimentsupdate) — Read and update hub-wide experiment overrides
 - [hub.conduitgrantkeys.rotate](#hubconduitgrantkeysrotate) — Rotate the conduit grant signing key (kids and timestamps only in the response)
@@ -88,6 +89,9 @@
 - [hub.scheduler.read](#hubschedulerread) — Read scheduler status and configuration
 - [hub.projectdefaults.read](#hubprojectdefaultsread) — Read project default settings
 - [hub.lifecyclehooks.read](#hublifecyclehooksread) — Read lifecycle hook definitions
+- [hub.projectdefaults.update](#hubprojectdefaultsupdate) — Update project default settings. The route guard checks hub.project_defaults.read, so a token needs hub_project_defaults:read and hub_project_defaults:update, and writes configuration keys only
+- [hub.lifecyclehooks.update](#hublifecyclehooksupdate) — Create, update, delete and activate hub lifecycle hooks and hub pre-start hooks. The admin lifecycle-hook route guard checks hub.lifecycle_hooks.read, so a token writing there needs hub_lifecycle_hooks:read and hub_lifecycle_hooks:update
+- [hub.settings.update](#hubsettingsupdate) — Set the user-defined hub injected skills; system entries are preserved
 - [hub.validate.execute](#hubvalidateexecute) — Validate resource definitions against schema
 - [hub.integrations.read](#hubintegrationsread) — Read integration configurations
 - [hub.teamsmanifest.read](#hubteamsmanifestread) — Read Teams integration manifest
@@ -1466,6 +1470,38 @@
 
 ---
 
+## artifact.list
+
+**Domain:** artifact
+
+**Description:** List the artifacts the caller owns, holds a grant on, or that are shared to a project it is a member of (?mine=1); each row passes the artifact.read check, so an artifact the caller cannot read is omitted, never denied
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/artifacts` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `artifact_record`; boundaries `project`, `hub`; pinned by `TestArtifactsListUserAccessTokensAreBounded`)
+
+**Base Permission:** `artifact.read`
+
+**Resource Resolver:** artifact-home-project
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `not_found`
+
+### Tests
+
+- `pkg/hub:TestArtifactsListMine`
+
+---
+
 ## artifact.create
 
 **Domain:** artifact
@@ -2259,6 +2295,51 @@
 
 ---
 
+## user.admin.provision
+
+**Domain:** user.admin
+
+**Description:** Pre-register a user (status invited) through POST /api/v1/users; invitation-equivalent, shares the invite creation core; no role, no grants
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/users` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `GOV_PENDING`)
+
+**Base Permission:** `user.invite`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `create-resource`, `issue-credential`
+
+### Governance
+
+- **Kind:** issuer_credential
+- Pre-registration admits sign-in under invite_only, identical to user.admin.invite
+
+### Audit
+
+- **Event Type:** `user.admin.provision`
+- **Context Fields:** actor_id, credential_id, credential_kind
+- **After Fields:** target_user_id, email, status, display_name
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`, `user_suspended`, `conflict`, `role_assignment_forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestHandleProvisionUser`
+
+---
+
 ## user.admin.promote
 
 **Domain:** user.admin
@@ -2593,40 +2674,6 @@
 
 ---
 
-## user.provision
-
-**Domain:** user
-
-**Description:** Create a user directly through the API; refused for every caller, because sign-in flows create users
-
-### Entry Points
-
-| Kind | Method | Pattern |
-|------|--------|---------|
-| http_route | POST | `/api/v1/users` |
-
-**Principals:** `user`
-
-**Credentials:** `session_jwt`
-
-**Bearer:** `out_of_scope` (owner `user-provisioning`)
-
-**Resource Resolver:** none
-
-**Effects:** `create-resource`
-
-**Denial Codes:** `forbidden`
-
-### Tests
-
-- `pkg/hub:TestBearerDisposition_EveryRoutePatternCovered`
-
-### Exemptions
-
-- **internal_only:** Direct user creation is refused for every caller; user records come from sign-in flows (scope: direct user creation) — waives: `base_permission`
-
----
-
 ## user.session.logout
 
 **Domain:** user
@@ -2792,7 +2839,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
 
 **Base Permission:** `hub.config.read`
 
@@ -2804,7 +2853,7 @@
 
 ### Tests
 
-- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestHubConfigToken_ProjectBoundaryDenied`
 
 ---
 
@@ -2812,18 +2861,22 @@
 
 **Domain:** hub
 
-**Description:** Update server configuration sections
+**Description:** Update server configuration sections. The route guard checks hub.config.read, so a token needs hub_config:read and hub_config:update, and writes configuration keys only
 
 ### Entry Points
 
 | Kind | Method | Pattern |
 |------|--------|---------|
 | http_route | PUT | `/api/v1/admin/server-config` |
+| http_route | PATCH | `/api/v1/admin/server-config` |
+| http_route | POST | `/api/v1/admin/server-config` |
 | http_route | DELETE | `/api/v1/admin/server-config/sections/{id}` |
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
 
 **Base Permission:** `hub.config.update`
 
@@ -2835,7 +2888,7 @@
 
 ### Tests
 
-- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestServerConfigUpdate_AuthorityKeysRefuseTokens`
 
 ---
 
@@ -2854,7 +2907,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
 
 **Base Permission:** `hub.messaging.update`
 
@@ -2866,7 +2921,7 @@
 
 ### Tests
 
-- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
 
 ---
 
@@ -2886,7 +2941,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
 
 **Base Permission:** `hub.experiments.update`
 
@@ -2898,7 +2955,7 @@
 
 ### Tests
 
-- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
 
 ---
 
@@ -3140,7 +3197,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
 
 **Base Permission:** `hub.project_defaults.read`
 
@@ -3152,7 +3211,7 @@
 
 ### Tests
 
-- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
 
 ---
 
@@ -3171,7 +3230,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
 
 **Base Permission:** `hub.lifecycle_hooks.read`
 
@@ -3183,7 +3244,111 @@
 
 ### Tests
 
-- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
+## hub.projectdefaults.update
+
+**Domain:** hub
+
+**Description:** Update project default settings. The route guard checks hub.project_defaults.read, so a token needs hub_project_defaults:read and hub_project_defaults:update, and writes configuration keys only
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/admin/project-defaults` |
+| http_route | PATCH | `/api/v1/admin/project-defaults` |
+| http_route | POST | `/api/v1/admin/project-defaults` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
+
+**Base Permission:** `hub.project_defaults.update`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestProjectDefaultsUpdate_EveryKeyClassifiedForTokens`
+
+---
+
+## hub.lifecyclehooks.update
+
+**Domain:** hub
+
+**Description:** Create, update, delete and activate hub lifecycle hooks and hub pre-start hooks. The admin lifecycle-hook route guard checks hub.lifecycle_hooks.read, so a token writing there needs hub_lifecycle_hooks:read and hub_lifecycle_hooks:update
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/admin/lifecycle-hooks` |
+| http_route | PUT | `/api/v1/admin/lifecycle-hooks/{id}` |
+| http_route | DELETE | `/api/v1/admin/lifecycle-hooks/{id}` |
+| http_route | POST | `/api/v1/pre-start-hooks` |
+| http_route | PUT | `/api/v1/pre-start-hooks/{id}` |
+| http_route | POST | `/api/v1/pre-start-hooks/{id}/activate` |
+| http_route | DELETE | `/api/v1/pre-start-hooks/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
+
+**Base Permission:** `hub.lifecycle_hooks.update`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
+## hub.settings.update
+
+**Domain:** hub
+
+**Description:** Set the user-defined hub injected skills; system entries are preserved
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/hub/settings/injected-skills` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
+
+**Base Permission:** `hub.settings.update`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
 
 ---
 
