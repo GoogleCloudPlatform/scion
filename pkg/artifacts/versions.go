@@ -523,7 +523,8 @@ func (s *Service) pendingVersionOf(w http.ResponseWriter, r *http.Request, b bac
 		writeError(w, http.StatusForbidden, "forbidden", "only the publisher of a pending version may upload to it")
 		return nil, false
 	}
-	if v.State != VersionStatePending && !(finalizing && v.State == VersionStateFinalizing) {
+	accepted := v.State == VersionStatePending || (finalizing && v.State == VersionStateFinalizing)
+	if !accepted {
 		writeError(w, http.StatusConflict, "conflict", "the version is not pending")
 		return nil, false
 	}
