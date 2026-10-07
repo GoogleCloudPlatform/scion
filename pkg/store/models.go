@@ -3319,7 +3319,7 @@ type AgentCredential struct {
 	TokenJTIHash string `json:"token_jti_hash"`
 	// RunID is the agent run the token was issued for; empty for a token
 	// issued without one.
-	RunID        string     `json:"run_id,omitempty"`
+	RunID        string     `json:"-"`
 	IssuedAt     time.Time  `json:"issued_at"`
 	ExpiresAt    time.Time  `json:"expires_at"`
 	RevokedAt    *time.Time `json:"revoked_at,omitempty"`

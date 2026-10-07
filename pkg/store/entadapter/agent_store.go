@@ -2344,8 +2344,9 @@ const setAgentRunIDAttempts = 8
 // SetAgentRunID implements store.AgentStore.SetAgentRunID. It reads the
 // current value and swaps it under a compare-and-swap, retrying if another
 // writer got in between, so the returned previous value is exactly the one
-// this write replaced. That needs no transaction or row lock, and so works
-// the same on every dialect.
+// this write replaced. The compare-and-swap needs no row lock, and so works
+// the same on every dialect; a transaction is used only to create a
+// credential together with the swap.
 //
 // The same write appends the replaced run to previous_run_ids
 // (store.AppendPreviousRunID, ptone/scion#3097): until the new run settles,
@@ -2360,48 +2361,105 @@ const setAgentRunIDAttempts = 8
 // claim is itself a single-row write, so the database orders the two: a
 // claim that lands first refuses this write, and one that lands after it
 // snapshots the new run ID (ptone/scion#2550 P1 round 3).
-func (s *AgentStore) SetAgentRunID(ctx context.Context, agentID, runID string) (string, error) {
+func (s *AgentStore) SetAgentRunID(ctx context.Context, agentID, runID string, cred *store.AgentCredential) (string, error) {
 	uid, err := parseUUID(agentID)
 	if err != nil {
 		return "", err
 	}
 	for attempt := 0; attempt < setAgentRunIDAttempts; attempt++ {
-		row, err := s.client.Agent.Query().
-			Where(agent.IDEQ(uid)).
-			Select(agent.FieldRunID, agent.FieldPreviousRunIds, agent.FieldDeletedAt, agent.FieldDeletionState, agent.FieldDeletionLeaseAt).
-			Only(ctx)
+		previous, written, err := s.setAgentRunIDOnce(ctx, uid, agentID, runID, cred)
 		if err != nil {
-			return "", mapError(err)
+			return "", err
 		}
-		now := time.Now()
-		if row.DeletedAt != nil || store.DeletionHoldsRow(row.DeletionState, row.DeletionLeaseAt, now) {
-			return "", store.ErrDeleteInProgress
-		}
-		if s.afterRunIDRead != nil {
-			s.afterRunIDRead(agentID)
-		}
-		previous, dropped := store.AppendPreviousRunID(row.PreviousRunIds, row.RunID, runID)
-		upd := s.client.Agent.Update().
-			Where(agent.IDEQ(uid), agent.RunIDEQ(row.RunID), runIDWritable(now)).
-			SetRunID(runID)
-		if len(previous) > 0 {
-			upd = upd.SetPreviousRunIds(previous)
-		} else {
-			upd = upd.ClearPreviousRunIds()
-		}
-		n, err := upd.Save(ctx)
-		if err != nil {
-			return "", mapError(err)
-		}
-		if n > 0 {
-			if len(dropped) > 0 {
-				slog.Warn("agent store: too many unsettled runs; no longer tracking the oldest",
-					"agent_id", agentID, "dropped_run_ids", dropped, "cap", store.MaxPreviousRunIDs)
-			}
-			return row.RunID, nil
+		if written {
+			return previous, nil
 		}
 	}
 	return "", fmt.Errorf("agent store: run_id for agent %s kept changing; giving up after %d attempts", agentID, setAgentRunIDAttempts)
+}
+
+// setAgentRunIDOnce is one read-then-swap attempt of SetAgentRunID.
+// written is false, with nothing recorded, when run_id changed between the
+// read and the swap. The read is outside any transaction (the swap is a
+// compare-and-swap on run_id); the swap and the creation of cred (when
+// non-nil) commit together.
+func (s *AgentStore) setAgentRunIDOnce(ctx context.Context, uid uuid.UUID, agentID, runID string, cred *store.AgentCredential) (previous string, written bool, err error) {
+	row, err := s.client.Agent.Query().
+		Where(agent.IDEQ(uid)).
+		Select(agent.FieldRunID, agent.FieldPreviousRunIds, agent.FieldDeletedAt, agent.FieldDeletionState, agent.FieldDeletionLeaseAt).
+		Only(ctx)
+	if err != nil {
+		return "", false, mapError(err)
+	}
+	now := time.Now()
+	if row.DeletedAt != nil || store.DeletionHoldsRow(row.DeletionState, row.DeletionLeaseAt, now) {
+		return "", false, store.ErrDeleteInProgress
+	}
+	if s.afterRunIDRead != nil {
+		s.afterRunIDRead(agentID)
+	}
+	prevList, dropped := store.AppendPreviousRunID(row.PreviousRunIds, row.RunID, runID)
+	swap := func(c *ent.AgentClient) (int, error) {
+		upd := c.Update().
+			Where(agent.IDEQ(uid), agent.RunIDEQ(row.RunID), runIDWritable(now)).
+			SetRunID(runID)
+		if len(prevList) > 0 {
+			upd = upd.SetPreviousRunIds(prevList)
+		} else {
+			upd = upd.ClearPreviousRunIds()
+		}
+		return upd.Save(ctx)
+	}
+	var n int
+	if cred == nil {
+		n, err = swap(s.client.Agent)
+		if err != nil {
+			return "", false, mapError(err)
+		}
+	} else {
+		n, err = s.swapWithCredential(ctx, swap, runID, cred)
+		if err != nil {
+			return "", false, err
+		}
+	}
+	if n == 0 {
+		return "", false, nil
+	}
+	if len(dropped) > 0 {
+		slog.Warn("agent store: too many unsettled runs; no longer tracking the oldest",
+			"agent_id", agentID, "dropped_run_ids", dropped, "cap", store.MaxPreviousRunIDs)
+	}
+	return row.RunID, true, nil
+}
+
+// swapWithCredential runs swap and, when it updated the row, creates cred
+// (with RunID set to runID) in one transaction. On any failure, or when
+// the swap matched no row, nothing is committed and cred.ID is left empty.
+func (s *AgentStore) swapWithCredential(ctx context.Context, swap func(*ent.AgentClient) (int, error), runID string, cred *store.AgentCredential) (int, error) {
+	tx, err := s.client.Tx(ctx)
+	if err != nil {
+		return 0, mapError(err)
+	}
+	n, err := swap(tx.Agent)
+	if err != nil {
+		_ = tx.Rollback()
+		return 0, mapError(err)
+	}
+	if n == 0 {
+		_ = tx.Rollback()
+		return 0, nil
+	}
+	cred.RunID = runID
+	if err := createAgentCredential(ctx, tx.AgentCredential, cred); err != nil {
+		_ = tx.Rollback()
+		cred.ID = ""
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		cred.ID = ""
+		return 0, mapError(err)
+	}
+	return n, nil
 }
 
 // runIDWritable is store.DeletionHoldsRow negated, plus deleted_at IS NULL,

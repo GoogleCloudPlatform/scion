@@ -995,6 +995,10 @@ type RemoteCreateAgentRequest struct {
 	ResolvedSecrets []ResolvedSecret `json:"resolvedSecrets,omitempty"`
 	HubEndpoint     string           `json:"hubEndpoint,omitempty"`
 	AgentToken      string           `json:"agentToken,omitempty"`
+	// tokenGrant is the authorized, not yet signed, agent token for this
+	// request (hub-side only, never sent). The dispatch signs it for the
+	// request's run and records its credential before setting AgentToken.
+	tokenGrant *AgentTokenGrant
 	// CreatorName is the human-readable identity of who created this agent.
 	// Injected as the SCION_CREATOR environment variable in the agent container.
 	CreatorName string `json:"creatorName,omitempty"`

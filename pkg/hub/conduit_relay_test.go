@@ -71,7 +71,7 @@ func newRelayFixture(t *testing.T, mod func(*ConduitRelayOptions)) *relayFixture
 		RuntimeBrokerID: "broker-1", Phase: string(state.PhaseCreated),
 	}
 	require.NoError(t, f.store.CreateAgent(ctx, agent))
-	_, err := f.store.SetAgentRunID(ctx, agent.ID, uuid.NewString())
+	_, err := f.store.SetAgentRunID(ctx, agent.ID, uuid.NewString(), nil)
 	require.NoError(t, err)
 	f.launched, err = f.store.GetAgent(ctx, agent.ID)
 	require.NoError(t, err)

@@ -45,7 +45,7 @@ func TestSetAgentRunID(t *testing.T) {
 	stale := *got
 	v0 := got.StateVersion
 
-	prev, err := s.SetAgentRunID(ctx, a.ID, "run-1")
+	prev, err := s.SetAgentRunID(ctx, a.ID, "run-1", nil)
 	require.NoError(t, err)
 	assert.Equal(t, "", prev, "the previous value of a new row is empty")
 	got, err = s.GetAgent(ctx, a.ID)
@@ -63,14 +63,14 @@ func TestSetAgentRunID(t *testing.T) {
 	assert.Equal(t, "run-1", got.RunID, "UpdateAgent must not write run_id")
 	assert.Equal(t, "updated", got.Message)
 
-	prev, err = s.SetAgentRunID(ctx, a.ID, "run-2")
+	prev, err = s.SetAgentRunID(ctx, a.ID, "run-2", nil)
 	require.NoError(t, err)
 	assert.Equal(t, "run-1", prev, "SetAgentRunID returns the value it replaced")
 	got, err = s.GetAgent(ctx, a.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "run-2", got.RunID)
 
-	_, err = s.SetAgentRunID(ctx, uuid.NewString(), "x")
+	_, err = s.SetAgentRunID(ctx, uuid.NewString(), "x", nil)
 	assert.ErrorIs(t, err, store.ErrNotFound)
 }
 
@@ -82,7 +82,7 @@ func TestCompareAndSwapAgentRunID(t *testing.T) {
 	s, projectID := newTestAgentStore(t)
 	a := makeAgent(projectID, "run-id-cas-agent")
 	require.NoError(t, s.CreateAgent(ctx, a))
-	_, err := s.SetAgentRunID(ctx, a.ID, "minted")
+	_, err := s.SetAgentRunID(ctx, a.ID, "minted", nil)
 	require.NoError(t, err)
 	before, err := s.GetAgent(ctx, a.ID)
 	require.NoError(t, err)
@@ -96,7 +96,7 @@ func TestCompareAndSwapAgentRunID(t *testing.T) {
 	assert.Equal(t, before.StateVersion, got.StateVersion, "CAS must not bump state_version")
 
 	// A newer dispatch recorded its own run; a stale swap is a no-op.
-	_, err = s.SetAgentRunID(ctx, a.ID, "newer")
+	_, err = s.SetAgentRunID(ctx, a.ID, "newer", nil)
 	require.NoError(t, err)
 	ok, err = s.CompareAndSwapAgentRunID(ctx, a.ID, "minted", "stale")
 	require.NoError(t, err)
@@ -120,7 +120,7 @@ func TestSetAgentRunID_RetriesOnConcurrentWrite(t *testing.T) {
 	s, projectID := newTestAgentStore(t)
 	a := makeAgent(projectID, "run-id-retry-agent")
 	require.NoError(t, s.CreateAgent(ctx, a))
-	_, err := s.SetAgentRunID(ctx, a.ID, "run-0")
+	_, err := s.SetAgentRunID(ctx, a.ID, "run-0", nil)
 	require.NoError(t, err)
 
 	interfere := func(times int) *int {
@@ -138,7 +138,7 @@ func TestSetAgentRunID_RetriesOnConcurrentWrite(t *testing.T) {
 
 	t.Run("one concurrent write", func(t *testing.T) {
 		calls := interfere(1)
-		prev, err := s.SetAgentRunID(ctx, a.ID, "run-1")
+		prev, err := s.SetAgentRunID(ctx, a.ID, "run-1", nil)
 		require.NoError(t, err)
 		assert.Equal(t, "other-1", prev, "the previous value is the one the swap replaced")
 		assert.Equal(t, 2, *calls)
@@ -149,7 +149,7 @@ func TestSetAgentRunID_RetriesOnConcurrentWrite(t *testing.T) {
 
 	t.Run("a concurrent write on every attempt", func(t *testing.T) {
 		calls := interfere(setAgentRunIDAttempts)
-		_, err := s.SetAgentRunID(ctx, a.ID, "run-2")
+		_, err := s.SetAgentRunID(ctx, a.ID, "run-2", nil)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "kept changing")
 		assert.Equal(t, setAgentRunIDAttempts, *calls)
@@ -189,7 +189,7 @@ func TestSetAgentRunID_RefusedWhileDeleteHoldsRow(t *testing.T) {
 			s, projectID := newTestAgentStore(t)
 			a := makeAgent(projectID, "run-id-delete-agent")
 			require.NoError(t, s.CreateAgent(ctx, a))
-			_, err := s.SetAgentRunID(ctx, a.ID, "run-0")
+			_, err := s.SetAgentRunID(ctx, a.ID, "run-0", nil)
 			require.NoError(t, err)
 			set := store.DeletionFields{DeletedAt: tc.deletedAt}
 			if tc.state != "" {
@@ -203,7 +203,7 @@ func TestSetAgentRunID_RefusedWhileDeleteHoldsRow(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, 1, n)
 
-			prev, err := s.SetAgentRunID(ctx, a.ID, "run-1")
+			prev, err := s.SetAgentRunID(ctx, a.ID, "run-1", nil)
 			got, gerr := s.client.Agent.Get(ctx, uuid.MustParse(a.ID))
 			require.NoError(t, gerr)
 			if tc.refused {
@@ -225,7 +225,7 @@ func TestSetAgentRunID_ClaimBetweenReadAndSwapRefuses(t *testing.T) {
 	s, projectID := newTestAgentStore(t)
 	a := makeAgent(projectID, "run-id-claim-race-agent")
 	require.NoError(t, s.CreateAgent(ctx, a))
-	_, err := s.SetAgentRunID(ctx, a.ID, "run-0")
+	_, err := s.SetAgentRunID(ctx, a.ID, "run-0", nil)
 	require.NoError(t, err)
 	lease := time.Now().Add(time.Minute)
 	deleting := store.DeletionStateDeleting
@@ -234,7 +234,7 @@ func TestSetAgentRunID_ClaimBetweenReadAndSwapRefuses(t *testing.T) {
 		_, err := s.UpdateAgentDeletion(ctx, id, store.DeletionPredicate{}, store.DeletionFields{State: &deleting, LeaseAt: &lease, BumpClaim: true})
 		require.NoError(t, err)
 	}
-	_, err = s.SetAgentRunID(ctx, a.ID, "run-1")
+	_, err = s.SetAgentRunID(ctx, a.ID, "run-1", nil)
 	require.ErrorIs(t, err, store.ErrDeleteInProgress)
 	got, err := s.client.Agent.Get(ctx, uuid.MustParse(a.ID))
 	require.NoError(t, err)
@@ -283,5 +283,81 @@ func TestRunIDWritable_MatchesGoPredicate(t *testing.T) {
 				assert.Equal(t, goWritable, sqlWritable, name)
 			}
 		}
+	}
+}
+
+// TestSetAgentRunIDWithCredentialIsOneTransaction: with a credential,
+// SetAgentRunID records the run ID and the credential (bound to that run)
+// together, or neither. A credential insert that fails leaves run_id and
+// previous_run_ids as they were.
+func TestSetAgentRunIDWithCredentialIsOneTransaction(t *testing.T) {
+	tests := []struct {
+		name           string
+		duplicateJTI   bool // a credential with the same JTI hash already exists
+		missingAgent   bool
+		wantErr        bool
+		wantRunID      string
+		wantPrevious   []string
+		wantCredStored bool
+	}{
+		{name: "both recorded", wantRunID: "run-2", wantPrevious: []string{"run-1"}, wantCredStored: true},
+		{name: "credential insert fails, run id unchanged", duplicateJTI: true, wantErr: true, wantRunID: "run-1"},
+		{name: "no agent row, nothing recorded", missingAgent: true, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			s, projectID := newTestAgentStore(t)
+			creds := NewAgentCredentialStore(s.client)
+			a := makeAgent(projectID, "run-id-cred-agent")
+			agentID := a.ID
+			if tt.missingAgent {
+				agentID = uuid.NewString()
+			} else {
+				require.NoError(t, s.CreateAgent(ctx, a))
+				_, err := s.SetAgentRunID(ctx, a.ID, "run-1", nil)
+				require.NoError(t, err)
+				_, err = s.CompareAndSwapAgentRunID(ctx, a.ID, "run-1", "run-1")
+				require.NoError(t, err)
+			}
+			jtiHash := "jti-hash-" + tt.name
+			if tt.duplicateJTI {
+				require.NoError(t, creds.CreateAgentCredential(ctx, &store.AgentCredential{
+					AgentID: agentID, ProjectID: projectID, TokenJTIHash: jtiHash,
+					IssuedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour),
+				}))
+			}
+			cred := &store.AgentCredential{
+				AgentID: agentID, ProjectID: projectID, TokenJTIHash: jtiHash,
+				IssuedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour),
+			}
+
+			_, err := s.SetAgentRunID(ctx, agentID, "run-2", cred)
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Empty(t, cred.ID, "a credential that was not recorded has no ID")
+			} else {
+				require.NoError(t, err)
+				assert.NotEmpty(t, cred.ID)
+			}
+
+			if !tt.missingAgent {
+				got, err := s.GetAgent(ctx, agentID)
+				require.NoError(t, err)
+				assert.Equal(t, tt.wantRunID, got.RunID)
+				assert.Equal(t, tt.wantPrevious, got.PreviousRunIDs)
+			}
+			stored, err := creds.GetAgentCredentialByJTIHash(ctx, jtiHash)
+			switch {
+			case tt.wantCredStored:
+				require.NoError(t, err)
+				assert.Equal(t, "run-2", stored.RunID, "the credential is bound to the run recorded with it")
+			case tt.duplicateJTI:
+				require.NoError(t, err)
+				assert.Empty(t, stored.RunID, "the pre-existing credential is untouched")
+			default:
+				assert.ErrorIs(t, err, store.ErrNotFound)
+			}
+		})
 	}
 }

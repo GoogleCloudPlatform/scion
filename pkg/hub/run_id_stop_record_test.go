@@ -34,7 +34,7 @@ func TestRecordStopStatus_OnlyForTheStoppedRun(t *testing.T) {
 	ctx := context.Background()
 	srv, s := testServer(t)
 	_, _, agent := setupOnlineBrokerAgent(t, s, "record-stop")
-	if _, err := s.SetAgentRunID(ctx, agent.ID, "run-new"); err != nil {
+	if _, err := s.SetAgentRunID(ctx, agent.ID, "run-new", nil); err != nil {
 		t.Fatal(err)
 	}
 	upd := store.AgentStatusUpdate{Phase: string(state.PhaseStopped), ContainerStatus: "stopped"}
@@ -66,7 +66,7 @@ func TestStopRunStillCurrent(t *testing.T) {
 	ctx := context.Background()
 	srv, s := testServer(t)
 	_, _, agent := setupOnlineBrokerAgent(t, s, "stop-run-current")
-	if _, err := s.SetAgentRunID(ctx, agent.ID, "run-new"); err != nil {
+	if _, err := s.SetAgentRunID(ctx, agent.ID, "run-new", nil); err != nil {
 		t.Fatal(err)
 	}
 	if srv.stopRunStillCurrent(ctx, agent.ID, "run-old", "queued stop") {
@@ -91,7 +91,7 @@ type runSwapStopClient struct {
 
 func (c *runSwapStopClient) StopAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, runID string) error {
 	c.lastStopRunID = runID
-	if _, err := c.s.SetAgentRunID(ctx, c.agentID, "run-new"); err != nil {
+	if _, err := c.s.SetAgentRunID(ctx, c.agentID, "run-new", nil); err != nil {
 		return err
 	}
 	return c.s.UpdateAgentStatus(ctx, c.agentID, store.AgentStatusUpdate{Phase: string(state.PhaseRunning), ContainerStatus: "running"})
@@ -105,7 +105,7 @@ func TestStop202ForOldRunDoesNotStopNewerRun(t *testing.T) {
 			ctx := context.Background()
 			srv, s := testServer(t)
 			_, _, agent := setupOnlineBrokerAgent(t, s, "runswap-"+action)
-			if _, err := s.SetAgentRunID(ctx, agent.ID, "run-old"); err != nil {
+			if _, err := s.SetAgentRunID(ctx, agent.ID, "run-old", nil); err != nil {
 				t.Fatal(err)
 			}
 			client := &runSwapStopClient{s: s, agentID: agent.ID}
@@ -143,7 +143,7 @@ func TestExecDispatchStop_QueuedForOldRunLeavesNewerRun(t *testing.T) {
 	if err := s.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{ContainerStatus: containerStatusStopQueued}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.SetAgentRunID(ctx, agent.ID, "run-new"); err != nil {
+	if _, err := s.SetAgentRunID(ctx, agent.ID, "run-new", nil); err != nil {
 		t.Fatal(err)
 	}
 

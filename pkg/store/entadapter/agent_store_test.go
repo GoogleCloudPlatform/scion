@@ -1850,7 +1850,7 @@ func TestUpdateAgentStatus_IfRunID(t *testing.T) {
 	a := makeAgent(projectID, "if-run-id")
 	require.NoError(t, s.CreateAgent(ctx, a))
 	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: "running"}))
-	_, err := s.SetAgentRunID(ctx, a.ID, "run-new")
+	_, err := s.SetAgentRunID(ctx, a.ID, "run-new", nil)
 	require.NoError(t, err)
 
 	err = s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: "stopped", ContainerStatus: "stopped", IfRunID: "run-old"})

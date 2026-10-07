@@ -148,6 +148,9 @@ type AgentTokenClaims struct {
 	// See CurrentAgentScopeSchema. Metadata only; see legacyScopeSchema for
 	// the field that actually gates compatibility behavior.
 	ScopeSchema int `json:"scope_schema,omitempty"`
+	// RunID is the agent run the token was issued for (agents.run_id at
+	// issue). Empty for a token issued without a run.
+	RunID string `json:"run_id,omitempty"`
 	// legacyScopeSchema is set only by ValidateAgentToken, and only when the
 	// verified token's wire form carries no scope_schema claim. It is
 	// deliberately unexported (so it is never part of the wire format and
@@ -275,8 +278,40 @@ func NewAgentTokenService(config AgentTokenConfig) (*AgentTokenService, error) {
 
 // GenerateAgentToken generates a JWT for an agent with the specified scopes.
 func (s *AgentTokenService) GenerateAgentToken(agentID, projectID string, scopes []AgentTokenScope, ancestry []string) (string, error) {
+	token, cred, err := s.SignAgentToken(AgentTokenGrant{AgentID: agentID, ProjectID: projectID, Scopes: scopes, Ancestry: ancestry}, "")
+	if err != nil {
+		return "", err
+	}
+
+	// Record credential if recorder is configured (best-effort)
+	if s.credentialRecorder != nil {
+		if err := s.credentialRecorder.RecordAgentCredential(context.Background(), cred); err != nil {
+			slog.Warn("Failed to record agent credential",
+				"agent_id", agentID, "error", err)
+		}
+	}
+
+	return token, nil
+}
+
+// AgentTokenGrant is what an agent token is authorized to carry: the
+// subject, project, scopes and ancestry. It is produced before the token's
+// run is known and signed once it is (SignAgentToken).
+type AgentTokenGrant struct {
+	AgentID   string
+	ProjectID string
+	Scopes    []AgentTokenScope
+	Ancestry  []string
+}
+
+// SignAgentToken signs a token for grant, bound to runID, and returns it
+// with the credential row describing it. It has no side effects: the
+// caller records the credential, and must not hand out the token unless
+// that record succeeded.
+func (s *AgentTokenService) SignAgentToken(grant AgentTokenGrant, runID string) (string, *store.AgentCredential, error) {
 	now := time.Now()
 
+	scopes := grant.Scopes
 	// Default to status update scope if none provided
 	if len(scopes) == 0 {
 		scopes = []AgentTokenScope{ScopeAgentStatusUpdate}
@@ -287,40 +322,33 @@ func (s *AgentTokenService) GenerateAgentToken(agentID, projectID string, scopes
 	claims := AgentTokenClaims{
 		Claims: jwt.Claims{
 			Issuer:    AgentTokenIssuer,
-			Subject:   agentID,
+			Subject:   grant.AgentID,
 			Audience:  jwt.Audience{AgentTokenAudience},
 			IssuedAt:  jwt.NewNumericDate(now),
 			Expiry:    jwt.NewNumericDate(expiry),
 			NotBefore: jwt.NewNumericDate(now),
 			ID:        jti,
 		},
-		ProjectID:   projectID,
+		ProjectID:   grant.ProjectID,
 		Scopes:      scopes,
-		Ancestry:    ancestry,
+		Ancestry:    grant.Ancestry,
 		ScopeSchema: CurrentAgentScopeSchema,
+		RunID:       runID,
 	}
 
 	token, err := jwt.Signed(s.signer).Claims(claims).Serialize()
 	if err != nil {
-		return "", fmt.Errorf("failed to sign token: %w", err)
+		return "", nil, fmt.Errorf("failed to sign token: %w", err)
 	}
-
-	// Record credential if recorder is configured (best-effort)
-	if s.credentialRecorder != nil {
-		cred := &store.AgentCredential{
-			AgentID:      agentID,
-			ProjectID:    projectID,
-			TokenJTIHash: hashJTI(jti),
-			IssuedAt:     now,
-			ExpiresAt:    expiry,
-		}
-		if err := s.credentialRecorder.RecordAgentCredential(context.Background(), cred); err != nil {
-			slog.Warn("Failed to record agent credential",
-				"agent_id", agentID, "error", err)
-		}
+	cred := &store.AgentCredential{
+		AgentID:      grant.AgentID,
+		ProjectID:    grant.ProjectID,
+		TokenJTIHash: hashJTI(jti),
+		RunID:        runID,
+		IssuedAt:     now,
+		ExpiresAt:    expiry,
 	}
-
-	return token, nil
+	return token, cred, nil
 }
 
 // ValidateAgentToken validates a JWT and returns the claims if valid.
