@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"maps"
 	"net/http"
 	"reflect"
 	"sort"
@@ -350,18 +351,9 @@ func rawAtPath(top map[string]json.RawMessage, path []string) (json.RawMessage, 
 	return nil, false
 }
 
-// lookupFold finds key in m the way encoding/json matches field names:
-// exact match first, then case-insensitive.
+// lookupFold finds key in m with the matchJSONKey rule.
 func lookupFold(m map[string]json.RawMessage, key string) (json.RawMessage, bool) {
-	if v, ok := m[key]; ok {
-		return v, true
-	}
-	for k, v := range m {
-		if strings.EqualFold(k, key) {
-			return v, true
-		}
-	}
-	return nil, false
+	return matchJSONKey(maps.All(m), key)
 }
 
 var jsonUnmarshalerType = reflect.TypeOf((*json.Unmarshaler)(nil)).Elem()
@@ -389,18 +381,10 @@ func unknownJSONPaths(obj map[string]json.RawMessage, t reflect.Type, prefix []s
 	return out
 }
 
-// fieldFold finds key in fields the way encoding/json matches field names:
-// exact match first, then case-insensitive.
+// fieldFold finds key in fields (as built by jsonFields) with the
+// matchJSONKey rule.
 func fieldFold(fields map[string]reflect.Type, key string) (reflect.Type, bool) {
-	if ft, ok := fields[key]; ok {
-		return ft, true
-	}
-	for name, ft := range fields {
-		if strings.EqualFold(name, key) {
-			return ft, true
-		}
-	}
-	return nil, false
+	return matchJSONKey(maps.All(fields), key)
 }
 
 // jsonPathKnown reports whether a JSON object path (in the form
