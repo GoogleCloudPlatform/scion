@@ -200,9 +200,7 @@ func (s *Service) handleMintView(w http.ResponseWriter, r *http.Request, id stri
 		URL:       RouteView + capability + "/" + escapePath(v.EntryPath),
 		ExpiresAt: exp.UTC(),
 	}
-	if window, _, err := s.entryWindow(r, b, entry); err == nil {
-		resp.RemoteImages = htmlHasRemoteImages(window)
-	}
+	resp.RemoteImages = s.entryHasRemoteImages(r, b, entry)
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -268,6 +266,35 @@ func (s *Service) handleView(w http.ResponseWriter, r *http.Request, segs []stri
 	if _, err := io.Copy(w, rc); err != nil {
 		slog.WarnContext(ctx, "artifacts: blob stream interrupted", "error", err)
 	}
+}
+
+// htmlNoticeCacheSize caps the remembered remote-image answers for HTML
+// entries; the cache starts over when it is full.
+const htmlNoticeCacheSize = 4096
+
+// entryHasRemoteImages reports whether an HTML entry references remote
+// images. The answer depends only on the entry's bytes, so it is
+// remembered by digest, and opening the same version again does not read
+// the entry from storage again.
+func (s *Service) entryHasRemoteImages(r *http.Request, b backend, entry *File) bool {
+	s.noticeMu.Lock()
+	v, ok := s.htmlNotice[entry.SHA256]
+	s.noticeMu.Unlock()
+	if ok {
+		return v
+	}
+	window, _, err := s.entryWindow(r, b, entry)
+	if err != nil {
+		return false
+	}
+	v = htmlHasRemoteImages(window)
+	s.noticeMu.Lock()
+	if s.htmlNotice == nil || len(s.htmlNotice) >= htmlNoticeCacheSize {
+		s.htmlNotice = make(map[string]bool)
+	}
+	s.htmlNotice[entry.SHA256] = v
+	s.noticeMu.Unlock()
+	return v
 }
 
 // entryWindow reads the first imageScanWindow bytes of a version's entry.

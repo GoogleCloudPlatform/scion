@@ -164,8 +164,6 @@ func (h *artifactHost) Authorize(ctx context.Context, scopeRef, permission strin
 	return decision.Allowed
 }
 
-// artifactPermission returns the registry row for id when it is an artifact
-// permission.
 var _ artifacts.ScopeExplainer = (*artifactHost)(nil)
 
 // MissingScope implements artifacts.ScopeExplainer. Only an agent that
@@ -190,6 +188,8 @@ func (h *artifactHost) MissingScope(ctx context.Context, permission string) stri
 	return ""
 }
 
+// artifactPermission returns the registry row for id when it is an artifact
+// permission.
 func artifactPermission(id string) (permissions.Permission, bool) {
 	for _, p := range permissions.Registry {
 		if p.ID == id {

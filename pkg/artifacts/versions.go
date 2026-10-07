@@ -86,10 +86,11 @@ func (s *Service) handleCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", "scope is required")
 		return
 	}
-	if !s.host.Permits(ctx, scope, PermissionCreate) && s.writeMissingScope(w, r) {
+	permitted := s.host.Permits(ctx, scope, PermissionCreate)
+	if !permitted && s.writeMissingScope(w, r) {
 		return
 	}
-	if !s.host.Permits(ctx, scope, PermissionCreate) || !s.host.Authorize(ctx, scope, PermissionCreate) {
+	if !permitted || !s.host.Authorize(ctx, scope, PermissionCreate) {
 		writeError(w, http.StatusForbidden, "forbidden", "not allowed to publish artifacts in this scope")
 		return
 	}
@@ -572,7 +573,8 @@ func (s *Service) handlePutFile(w http.ResponseWriter, r *http.Request, id strin
 		return
 	}
 	switch err := b.store.MarkReceived(ctx, v.ID, filePath, mediaType); {
-	case errors.Is(err, ErrConflict):
+	case errors.Is(err, ErrConflict), errors.Is(err, ErrNotFound):
+		// ErrNotFound: the version was reaped since it was loaded.
 		writeError(w, http.StatusConflict, "conflict", "the version is not pending")
 		return
 	case err != nil:
@@ -621,6 +623,20 @@ func (s *Service) handleFinalize(w http.ResponseWriter, r *http.Request, id stri
 			Details: map[string]any{"missing": missing, "missingCount": count},
 		}})
 		return
+	}
+	// The limits in force now apply, even if they were lowered while the
+	// version was pending.
+	lim := b.currentLimits(ctx)
+	if v.FileCount > lim.MaxFiles || v.TotalBytes > lim.MaxBundleBytes {
+		writeError(w, http.StatusRequestEntityTooLarge, "payload_too_large", "the version exceeds the current file count or size limit")
+		return
+	}
+	for _, f := range files {
+		if f.Size > lim.MaxFileBytes {
+			writeError(w, http.StatusRequestEntityTooLarge, "payload_too_large",
+				fmt.Sprintf("file %q exceeds the current %d byte limit", f.Path, lim.MaxFileBytes))
+			return
+		}
 	}
 	// Claim the version before any remote fetch, so that one finalize
 	// request completes it and concurrent ones answer 409 at once.

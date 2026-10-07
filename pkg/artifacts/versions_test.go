@@ -529,3 +529,64 @@ func TestPendingVersionBelongsToItsPublisher(t *testing.T) {
 		t.Errorf("B on its own version: finalize %d", rec.Code)
 	}
 }
+
+// TestFinalizeAppliesCurrentLimits: limits lowered while a version is
+// pending apply when it is finalized.
+func TestFinalizeAppliesCurrentLimits(t *testing.T) {
+	f := newFixture(t, false)
+	files := bundle{"a.txt": []byte("aaaa"), "b.txt": []byte("bb")}
+	for name, lim := range map[string]Limits{
+		"file count": {MaxFiles: 1},
+		"total size": {MaxBundleBytes: 5},
+		"file size":  {MaxFileBytes: 3, MaxBundleBytes: 100},
+	} {
+		f.svc.SetLimits(nil)
+		pend := f.createPending(agentA, "/api/v1/artifacts", files.manifest("a.txt"))
+		for p, body := range files {
+			if rec := f.put(agentA, pend.Artifact.ID, 1, p, body); rec.Code != http.StatusNoContent {
+				t.Fatalf("PUT: %d", rec.Code)
+			}
+		}
+		l := lim
+		f.svc.SetLimits(func(context.Context) Limits { return l })
+		if rec := f.finalize(agentA, pend.Artifact.ID, 1); rec.Code != http.StatusRequestEntityTooLarge {
+			t.Errorf("%s: finalize %d, want 413", name, rec.Code)
+		}
+	}
+}
+
+// TestPendingArtifactVisibleOnlyToItsOwner: before its first version is
+// finalized, an artifact is shown only to its owner.
+func TestPendingArtifactVisibleOnlyToItsOwner(t *testing.T) {
+	f := newFixture(t, false)
+	files := bundle{"a.txt": []byte("a")}
+	pend := f.createPending(agentA, "/api/v1/artifacts", files.manifest("a.txt"))
+	target := "/api/v1/artifacts/" + pend.Artifact.ID
+	if rec := f.do(&agentB, http.MethodGet, target, nil, nil); rec.Code != http.StatusNotFound {
+		t.Errorf("project member before finalize: %d, want 404", rec.Code)
+	}
+	if rec := f.do(&agentA, http.MethodGet, target, nil, nil); rec.Code != http.StatusOK {
+		t.Errorf("owner before finalize: %d, want 200", rec.Code)
+	}
+	f.put(agentA, pend.Artifact.ID, 1, "a.txt", files["a.txt"])
+	f.finalize(agentA, pend.Artifact.ID, 1)
+	if rec := f.do(&agentB, http.MethodGet, target, nil, nil); rec.Code != http.StatusOK {
+		t.Errorf("project member after finalize: %d, want 200", rec.Code)
+	}
+}
+
+// reapedStore reports a version reaped between loading it and recording
+// an upload.
+type reapedStore struct{ Store }
+
+func (reapedStore) MarkReceived(context.Context, string, string, string) error { return ErrNotFound }
+
+func TestUploadToAVersionReapedMeanwhile(t *testing.T) {
+	f := newFixture(t, false)
+	files := bundle{"a.txt": []byte("a")}
+	pend := f.createPending(agentA, "/api/v1/artifacts", files.manifest("a.txt"))
+	f.svc.SetStore(reapedStore{f.store})
+	if rec := f.put(agentA, pend.Artifact.ID, 1, "a.txt", files["a.txt"]); rec.Code != http.StatusConflict {
+		t.Errorf("PUT: %d, want 409", rec.Code)
+	}
+}

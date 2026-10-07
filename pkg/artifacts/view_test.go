@@ -18,11 +18,16 @@ package artifacts
 
 import (
 	"bytes"
+	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 )
 
 var testViewKey = []byte("0123456789abcdef0123456789abcdef")
@@ -258,5 +263,34 @@ func TestViewCSPHost(t *testing.T) {
 		if strings.Contains(csp, "allow-same-origin") || strings.Count(csp, ";") != 13 {
 			t.Errorf("viewCSP(%q) = %q", host, csp)
 		}
+	}
+}
+
+// countingStorage counts blob downloads.
+type countingStorage struct {
+	*storage.LocalStorage
+	downloads atomic.Int32
+}
+
+func (c *countingStorage) Download(ctx context.Context, p string) (io.ReadCloser, *storage.Object, error) {
+	c.downloads.Add(1)
+	return c.LocalStorage.Download(ctx, p)
+}
+
+// TestViewMintRemembersTheNotice: the remote-image notice of an entry is
+// computed once per entry, not on every view.
+func TestViewMintRemembersTheNotice(t *testing.T) {
+	f := newFixture(t, false)
+	f.svc.SetViewKey(testViewKey)
+	pub := f.publishBundle(agentA, "/api/v1/artifacts", htmlSite.manifest("index.html"), htmlSite)
+	cs := &countingStorage{LocalStorage: f.local}
+	f.svc.SetBlobStorage(cs, "hub-1")
+	for i := 0; i < 3; i++ {
+		if _, code := f.mintView(&agentA, pub.Artifact.ID, 1); code != http.StatusOK {
+			t.Fatalf("mint: %d", code)
+		}
+	}
+	if n := cs.downloads.Load(); n != 1 {
+		t.Errorf("entry read %d times for 3 views, want 1", n)
 	}
 }

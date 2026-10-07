@@ -166,6 +166,15 @@ func (s *Service) handleGetArtifact(w http.ResponseWriter, r *http.Request, id s
 	if !ok {
 		return
 	}
+	if a.CurrentSeq == 0 {
+		// An artifact whose first version is still pending is shown only to
+		// its owner until that version is finalized.
+		kind, ref, _, _ := s.host.Principal(r.Context())
+		if kind != a.OwnerKind || ref != a.OwnerRef {
+			writeNotFound(w)
+			return
+		}
+	}
 	resp := ArtifactResponse{Artifact: artifactInfo(a)}
 	if a.CurrentSeq > 0 {
 		v, ok := readyVersion(w, r, b, a, 0)

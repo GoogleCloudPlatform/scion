@@ -288,6 +288,7 @@ var artifactRequestPaths = []struct{ method, path string }{
 	{http.MethodDelete, "/api/v1/artifacts/art-1"},
 	{http.MethodGet, "/api/v1/artifacts/art-1/files/index.html"},
 	{http.MethodGet, "/api/v1/artifacts/shared/some-token"},
+	{http.MethodGet, "/api/v1/artifacts/view/some-capability/index.html"},
 }
 
 func serveArtifactRequests(t *testing.T, mux http.Handler, identity Identity) {
@@ -307,7 +308,7 @@ func serveArtifactRequests(t *testing.T, mux http.Handler, identity Identity) {
 	}
 }
 
-// TestArtifactRoutes404WhileExperimentOff covers all three patterns through
+// TestArtifactRoutes404WhileExperimentOff covers every pattern through
 // the hub's real mux: with hub.artifacts off (its default), every route
 // answers 404, for an authenticated caller and an anonymous one alike.
 func TestArtifactRoutes404WhileExperimentOff(t *testing.T) {

@@ -111,10 +111,11 @@ func (s *Service) handlePublish(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", "scope is required")
 		return
 	}
-	if !s.host.Permits(ctx, scope, PermissionCreate) && s.writeMissingScope(w, r) {
+	permitted := s.host.Permits(ctx, scope, PermissionCreate)
+	if !permitted && s.writeMissingScope(w, r) {
 		return
 	}
-	if !s.host.Permits(ctx, scope, PermissionCreate) || !s.host.Authorize(ctx, scope, PermissionCreate) {
+	if !permitted || !s.host.Authorize(ctx, scope, PermissionCreate) {
 		writeError(w, http.StatusForbidden, "forbidden", "not allowed to publish artifacts in this scope")
 		return
 	}

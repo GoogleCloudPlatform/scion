@@ -77,6 +77,11 @@ type Service struct {
 	limits   func(context.Context) Limits
 	provider func() Backend
 
+	// htmlNotice remembers, by entry digest, whether an HTML entry
+	// references remote images (see entryHasRemoteImages).
+	noticeMu   sync.Mutex
+	htmlNotice map[string]bool
+
 	fetcherFactory func(RemoteImageLimits) ImageFetcher
 	// fetchFloor overrides the fetch floor in tests; zero means the
 	// fetcher's connect timeout.

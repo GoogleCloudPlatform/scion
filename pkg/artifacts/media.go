@@ -64,10 +64,6 @@ var extMediaTypes = map[string]string{
 	".pdf":      "application/pdf",
 }
 
-// detectMediaType returns the media type to store for a file named name,
-// uploaded with the Content-Type header declared, whose first bytes are
-// head. The extension wins; then a specific declared type; then sniffing.
-// The result is a bare, lowercase media type without parameters.
 // mediaTypeMarkdown is the media type whose entries are scanned for remote
 // images.
 const mediaTypeMarkdown = "text/markdown"
@@ -75,6 +71,10 @@ const mediaTypeMarkdown = "text/markdown"
 // mediaTypeHTML is the media type of HTML entries, shown through a view.
 const mediaTypeHTML = "text/html"
 
+// detectMediaType returns the media type to store for a file named name,
+// uploaded with the Content-Type header declared, whose first bytes are
+// head. The extension wins; then a specific declared type; then sniffing.
+// The result is a bare, lowercase media type without parameters.
 func detectMediaType(name, declared string, head []byte) string {
 	if mt, ok := extMediaTypes[strings.ToLower(path.Ext(name))]; ok {
 		return mt
