@@ -70,11 +70,23 @@ runtimes:
 	decide := func(srv *Server, root string) harnessPolicyDecision {
 		return srv.enforceHarnessConfigPolicy(harnessPolicyInput{Req: CreateAgentRequest{Name: "policy-agent", ProjectPath: root}})
 	}
+	// lookupName is the harness-config name the policy evaluates.
+	lookupName := func(t *testing.T, srv *Server, root string) string {
+		t.Helper()
+		name, _, _, _, err := srv.lookupHarnessConfigDirForPolicy(CreateAgentRequest{Name: "policy-agent", ProjectPath: root}, "", "")
+		if err != nil {
+			t.Fatalf("lookupHarnessConfigDirForPolicy: %v", err)
+		}
+		return name
+	}
 
 	t.Run("legacy control", func(t *testing.T) {
 		srv, root := setup(t)
 		if d := decide(srv, root); d.OK {
 			t.Fatal("control: a legacy server evaluates the active profile's default harness config (container-script) and must be refused")
+		}
+		if name := lookupName(t, srv, root); name != "scripted-hc" {
+			t.Fatalf("control: the legacy policy lookup resolves %q, want the profile default scripted-hc", name)
 		}
 	})
 	t.Run("flat", func(t *testing.T) {
@@ -82,6 +94,9 @@ runtimes:
 		makeFlat(srv)
 		if d := decide(srv, root); !d.OK {
 			t.Fatalf("a flat instance must not take the profile's default harness config; refused with %s: %s", d.Code, d.Detail)
+		}
+		if name := lookupName(t, srv, root); name != "decl-hc" {
+			t.Fatalf("the flat policy lookup resolves %q, want the settings default decl-hc (no profile tier)", name)
 		}
 	})
 }
