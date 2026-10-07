@@ -10918,6 +10918,7 @@ type AgentCredentialMutation struct {
 	agent_id       *string
 	project_id     *string
 	token_jti_hash *string
+	run_id         *string
 	issued_at      *time.Time
 	expires_at     *time.Time
 	revoked_at     *time.Time
@@ -11140,6 +11141,55 @@ func (m *AgentCredentialMutation) OldTokenJtiHash(ctx context.Context) (v string
 // ResetTokenJtiHash resets all changes to the "token_jti_hash" field.
 func (m *AgentCredentialMutation) ResetTokenJtiHash() {
 	m.token_jti_hash = nil
+}
+
+// SetRunID sets the "run_id" field.
+func (m *AgentCredentialMutation) SetRunID(s string) {
+	m.run_id = &s
+}
+
+// RunID returns the value of the "run_id" field in the mutation.
+func (m *AgentCredentialMutation) RunID() (r string, exists bool) {
+	v := m.run_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRunID returns the old "run_id" field's value of the AgentCredential entity.
+// If the AgentCredential object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentCredentialMutation) OldRunID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRunID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRunID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRunID: %w", err)
+	}
+	return oldValue.RunID, nil
+}
+
+// ClearRunID clears the value of the "run_id" field.
+func (m *AgentCredentialMutation) ClearRunID() {
+	m.run_id = nil
+	m.clearedFields[agentcredential.FieldRunID] = struct{}{}
+}
+
+// RunIDCleared returns if the "run_id" field was cleared in this mutation.
+func (m *AgentCredentialMutation) RunIDCleared() bool {
+	_, ok := m.clearedFields[agentcredential.FieldRunID]
+	return ok
+}
+
+// ResetRunID resets all changes to the "run_id" field.
+func (m *AgentCredentialMutation) ResetRunID() {
+	m.run_id = nil
+	delete(m.clearedFields, agentcredential.FieldRunID)
 }
 
 // SetIssuedAt sets the "issued_at" field.
@@ -11444,7 +11494,7 @@ func (m *AgentCredentialMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *AgentCredentialMutation) Fields() []string {
-	fields := make([]string, 0, 9)
+	fields := make([]string, 0, 10)
 	if m.agent_id != nil {
 		fields = append(fields, agentcredential.FieldAgentID)
 	}
@@ -11453,6 +11503,9 @@ func (m *AgentCredentialMutation) Fields() []string {
 	}
 	if m.token_jti_hash != nil {
 		fields = append(fields, agentcredential.FieldTokenJtiHash)
+	}
+	if m.run_id != nil {
+		fields = append(fields, agentcredential.FieldRunID)
 	}
 	if m.issued_at != nil {
 		fields = append(fields, agentcredential.FieldIssuedAt)
@@ -11486,6 +11539,8 @@ func (m *AgentCredentialMutation) Field(name string) (ent.Value, bool) {
 		return m.ProjectID()
 	case agentcredential.FieldTokenJtiHash:
 		return m.TokenJtiHash()
+	case agentcredential.FieldRunID:
+		return m.RunID()
 	case agentcredential.FieldIssuedAt:
 		return m.IssuedAt()
 	case agentcredential.FieldExpiresAt:
@@ -11513,6 +11568,8 @@ func (m *AgentCredentialMutation) OldField(ctx context.Context, name string) (en
 		return m.OldProjectID(ctx)
 	case agentcredential.FieldTokenJtiHash:
 		return m.OldTokenJtiHash(ctx)
+	case agentcredential.FieldRunID:
+		return m.OldRunID(ctx)
 	case agentcredential.FieldIssuedAt:
 		return m.OldIssuedAt(ctx)
 	case agentcredential.FieldExpiresAt:
@@ -11554,6 +11611,13 @@ func (m *AgentCredentialMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetTokenJtiHash(v)
+		return nil
+	case agentcredential.FieldRunID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRunID(v)
 		return nil
 	case agentcredential.FieldIssuedAt:
 		v, ok := value.(time.Time)
@@ -11627,6 +11691,9 @@ func (m *AgentCredentialMutation) AddField(name string, value ent.Value) error {
 // mutation.
 func (m *AgentCredentialMutation) ClearedFields() []string {
 	var fields []string
+	if m.FieldCleared(agentcredential.FieldRunID) {
+		fields = append(fields, agentcredential.FieldRunID)
+	}
 	if m.FieldCleared(agentcredential.FieldRevokedAt) {
 		fields = append(fields, agentcredential.FieldRevokedAt)
 	}
@@ -11653,6 +11720,9 @@ func (m *AgentCredentialMutation) FieldCleared(name string) bool {
 // error if the field is not defined in the schema.
 func (m *AgentCredentialMutation) ClearField(name string) error {
 	switch name {
+	case agentcredential.FieldRunID:
+		m.ClearRunID()
+		return nil
 	case agentcredential.FieldRevokedAt:
 		m.ClearRevokedAt()
 		return nil
@@ -11681,6 +11751,9 @@ func (m *AgentCredentialMutation) ResetField(name string) error {
 		return nil
 	case agentcredential.FieldTokenJtiHash:
 		m.ResetTokenJtiHash()
+		return nil
+	case agentcredential.FieldRunID:
+		m.ResetRunID()
 		return nil
 	case agentcredential.FieldIssuedAt:
 		m.ResetIssuedAt()

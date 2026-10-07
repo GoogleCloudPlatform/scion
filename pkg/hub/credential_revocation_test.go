@@ -487,15 +487,14 @@ func TestHashJTI(t *testing.T) {
 	assert.Equal(t, 64, len(hash1), "SHA-256 hex should be 64 chars")
 }
 
-// TestCredentialRecorderNilSafe verifies that token generation works without
-// a credential recorder (nil-safe backward compatibility).
-func TestCredentialRecorderNilSafe(t *testing.T) {
+// TestServiceTokenWithoutStore verifies that the service signs tokens
+// without any credential store.
+func TestServiceTokenWithoutStore(t *testing.T) {
 	service, err := NewAgentTokenService(AgentTokenConfig{
 		SigningKey:    make([]byte, 32),
 		TokenDuration: time.Hour,
 	})
 	require.NoError(t, err)
-	// Do NOT set credential recorder
 
 	token, err := service.GenerateAgentToken("agent-1", "project-1", nil, nil)
 	require.NoError(t, err)

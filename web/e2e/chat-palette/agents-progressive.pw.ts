@@ -25,8 +25,12 @@ import { routeAgentPages } from './route-agent-pages.js';
 const PAGE_ONE_AGENT = { id: 'agent-page-one', name: 'Page One Agent', slug: 'page-one' };
 const PAGE_TWO_AGENT = { id: 'agent-page-two', name: 'Page Two Agent', slug: 'page-two' };
 
+/**
+ * Opens the chat page. Agent-list routes are registered before this: the
+ * page's members sidebar starts the agent store's hub walk on mount, and the
+ * palette reads (or joins) that walk.
+ */
 async function gotoChat(page: Page): Promise<void> {
-  await setupApiMocks(page);
   await page.goto('/e2e/chat-palette/fixture.html', { waitUntil: 'domcontentloaded' });
   await page.waitForFunction(() => !!document.querySelector('scion-page-chat'));
 }
@@ -52,7 +56,7 @@ async function simulateMembershipChange(page: Page): Promise<void> {
 test('the first page is published as soon as it arrives, without waiting for a slower second page to land', async ({
   page,
 }) => {
-  await gotoChat(page);
+  await setupApiMocks(page);
   // Route added after setupApiMocks so it takes precedence over the
   // fixture's own default `/api/v1/agents` handler (last-registered wins).
   const { callCount } = routeAgentPages(
@@ -60,7 +64,10 @@ test('the first page is published as soon as it arrives, without waiting for a s
     [{ agents: [PAGE_ONE_AGENT], nextCursor: 'page-2' }, { agents: [PAGE_TWO_AGENT] }],
     { '': 0, 'page-2': 2_000 }
   );
+  await gotoChat(page);
 
+  // Opened while the walk the page started on mount is still reading its
+  // slower second page: the palette joins it.
   await page.keyboard.press('Control+k');
 
   // The first page is visible well before the second page's own 2s
@@ -83,9 +90,10 @@ test('the first page is published as soon as it arrives, without waiting for a s
 test('a refresh of an already-populated Agents group keeps showing its full list instead of shrinking to a partial first page', async ({
   page,
 }) => {
-  await gotoChat(page);
+  await setupApiMocks(page);
   const pages = [{ agents: [PAGE_ONE_AGENT], nextCursor: 'page-2' }, { agents: [PAGE_TWO_AGENT] }];
   routeAgentPages(page, pages, {});
+  await gotoChat(page);
 
   await page.keyboard.press('Control+k');
   await expect(paletteOptions(page).filter({ hasText: PAGE_ONE_AGENT.name })).toBeVisible();

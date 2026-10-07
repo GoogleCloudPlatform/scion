@@ -235,6 +235,8 @@ func (s *Service) RegisterRoutes(mux Mux, guard Guard) {
 //
 //	POST /api/v1/artifacts?name=<file>[&title=][&scope=]    single-file publish
 //	POST /api/v1/artifacts                                  create a pending version (JSON manifest)
+//	GET  /api/v1/artifacts?mine=1[&q=][&review_pending=1][&owner=me][&limit=][&cursor=]
+//	                                                        artifacts the caller owns, is granted, or shares a project with
 //	GET  /api/v1/artifacts/{id}                             metadata of the current version
 //	GET  /api/v1/artifacts/{id}/files/{path}                a file of the current version
 //	GET  /api/v1/artifacts/{id}/versions                    the ready versions
@@ -255,15 +257,16 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	rest = strings.TrimPrefix(rest, "/")
 	if rest == "" {
-		if r.Method != http.MethodPost {
-			writeMethodNotAllowed(w, http.MethodPost)
-			return
-		}
-		if r.URL.Query().Has(paramName) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Query().Has(paramName):
 			s.handlePublish(w, r)
-			return
+		case r.Method == http.MethodPost:
+			s.handleCreate(w, r)
+		case isRead(r.Method):
+			s.handleList(w, r)
+		default:
+			writeMethodNotAllowed(w, http.MethodGet, http.MethodHead, http.MethodPost)
 		}
-		s.handleCreate(w, r)
 		return
 	}
 	segs, ok := splitEscapedPath(rest)
