@@ -15,10 +15,13 @@
 package handlers
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/telemetry"
@@ -39,6 +42,16 @@ func hookRun(t *testing.T, store SessionStateStore, ev *hooks.Event) *telemetry.
 	}
 	return got
 }
+
+// testLockTimeoutGenerous is the lock wait for tests that check counts under
+// contention, not timing: on a loaded CI runner a goroutine can wait longer
+// than the 2s production default, which would make the test flaky
+// (ptone/scion#3731).
+const testLockTimeoutGenerous = 30 * time.Second
+
+// testLockTimeoutShort is the lock wait for tests that deliberately hold the
+// lock elsewhere and expect Update to time out.
+const testLockTimeoutShort = 50 * time.Millisecond
 
 func toolEvent(sessionID, tool string) *hooks.Event {
 	ev := sessionEvent(hooks.EventToolEnd, sessionID)
@@ -98,7 +111,7 @@ func TestFileSessionState_ConcurrentRunsLoseNoCounts(t *testing.T) {
 			defer wg.Done()
 			// Each goroutine gets its own store value, as separate
 			// processes would, so each opens its own lock file description.
-			hookRun(t, &FileSessionState{Path: store.Path}, toolEvent("s1", "Bash"))
+			hookRun(t, &FileSessionState{Path: store.Path, lockTimeout: testLockTimeoutGenerous}, toolEvent("s1", "Bash"))
 		}()
 	}
 	wg.Wait()
@@ -160,6 +173,7 @@ func TestFileSessionState_NewSessionStartResetsStaleState(t *testing.T) {
 // the hook does not fail.
 func TestFileSessionState_LockUnavailableStillApplies(t *testing.T) {
 	store := NewFileSessionState(t.TempDir())
+	store.lockTimeout = testLockTimeoutShort
 	if err := os.MkdirAll(filepath.Dir(store.Path), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -175,8 +189,11 @@ func TestFileSessionState_LockUnavailableStillApplies(t *testing.T) {
 	agg := telemetry.NewAggregator()
 	applied := 0
 	err = store.Update(agg, toolEvent("s1", "Bash"), func() bool { applied++; return false })
-	if err == nil {
-		t.Error("Update succeeded while the lock was held elsewhere")
+	if !errors.Is(err, ErrSessionStateUnavailable) {
+		t.Errorf("Update error = %v, want ErrSessionStateUnavailable", err)
+	}
+	if err != nil && !strings.Contains(err.Error(), "timed out after "+testLockTimeoutShort.String()) {
+		t.Errorf("Update error = %v, want a lock timeout after %s", err, testLockTimeoutShort)
 	}
 	if applied != 1 {
 		t.Errorf("apply called %d times, want 1", applied)
@@ -227,6 +244,7 @@ func TestFileSessionState_LockUnavailableOnSessionEndSkipsReport(t *testing.T) {
 	store := NewFileSessionState(t.TempDir())
 	hookRun(t, store, sessionEvent(hooks.EventSessionStart, "s1"))
 	hookRun(t, store, toolEvent("s1", "Bash"))
+	store.lockTimeout = testLockTimeoutShort
 
 	held, err := os.OpenFile(store.Path+".lock", os.O_RDWR, 0o600)
 	if err != nil {
@@ -237,11 +255,24 @@ func TestFileSessionState_LockUnavailableOnSessionEndSkipsReport(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	start := time.Now()
 	if s := hookRun(t, store, sessionEvent(hooks.EventSessionEnd, "s1")); s != nil {
 		t.Errorf("reported summary %+v while the state was unavailable", *s)
 	}
 	if _, err := os.Stat(store.Path); err != nil {
 		t.Errorf("state file should be left in place: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed >= sessionStateLockTimeout {
+		t.Errorf("session-end waited %s, want the %s test lock timeout to apply", elapsed, testLockTimeoutShort)
+	}
+}
+
+func TestFileSessionState_LockWaitDefault(t *testing.T) {
+	if got := NewFileSessionState(t.TempDir()).lockWait(); got != sessionStateLockTimeout {
+		t.Errorf("default lockWait = %s, want %s", got, sessionStateLockTimeout)
+	}
+	if got := (&FileSessionState{lockTimeout: time.Second}).lockWait(); got != time.Second {
+		t.Errorf("overridden lockWait = %s, want 1s", got)
 	}
 }
 
