@@ -333,6 +333,19 @@ func (r *SharedDirRealization) Serves(name string) bool {
 	return !r.LocalDirs[name]
 }
 
+// SharedDirClaimChecker is implemented by a runtime whose local shared-dir
+// storage can be a claim it looks up by name: on Kubernetes, the project's
+// shared-dir PersistentVolumeClaim. The start check that follows a shared
+// dir backend change back to local uses it to tell whether the local
+// storage exists. It never reads the claim's content.
+type SharedDirClaimChecker interface {
+	// SharedDirUsesClaim reports whether running cfg gives the shared dir
+	// dirName a claim of its own, created or reused by name.
+	SharedDirUsesClaim(cfg RunConfig, dirName string) bool
+	// SharedDirClaimExists reports whether that claim exists.
+	SharedDirClaimExists(ctx context.Context, cfg RunConfig, dirName string) (bool, error)
+}
+
 // RunRef identifies the runtime entry a Stop or Delete targets. ID is the
 // backend handle returned by Run or reported by List (a container ID on
 // Docker, Podman and Apple; a pod or instance name on k8s, Cloud Run and
