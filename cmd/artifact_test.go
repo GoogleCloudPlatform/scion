@@ -112,7 +112,7 @@ func TestGetArtifact(t *testing.T) {
 
 	for _, ref := range []string{"scion://artifact/" + testArtifactID, testArtifactID, "scion://artifact/" + testArtifactID + "@1"} {
 		var stdout, stderr bytes.Buffer
-		require.NoError(t, getArtifact(ctx, c.Artifacts(), &stdout, &stderr, ref, ""), ref)
+		require.NoError(t, getArtifact(ctx, c.Artifacts(), &stdout, &stderr, ref, "", false), ref)
 		assert.Equal(t, string(body), stdout.String(), ref)
 	}
 
@@ -120,16 +120,16 @@ func TestGetArtifact(t *testing.T) {
 	dir := t.TempDir()
 	var stdout, stderr bytes.Buffer
 	outFile := filepath.Join(dir, "copy.md")
-	require.NoError(t, getArtifact(ctx, c.Artifacts(), &stdout, &stderr, testArtifactID, outFile))
+	require.NoError(t, getArtifact(ctx, c.Artifacts(), &stdout, &stderr, testArtifactID, outFile, false))
 	got, _ := os.ReadFile(outFile)
 	assert.Equal(t, body, got)
 	assert.Empty(t, stdout.String())
-	require.NoError(t, getArtifact(ctx, c.Artifacts(), &stdout, &stderr, testArtifactID, dir))
+	require.NoError(t, getArtifact(ctx, c.Artifacts(), &stdout, &stderr, testArtifactID, dir, false))
 	got, _ = os.ReadFile(filepath.Join(dir, "design.md"))
 	assert.Equal(t, body, got)
 
-	assert.Error(t, getArtifact(ctx, c.Artifacts(), &stdout, &stderr, "scion://artifact/nope", ""))
-	assert.Error(t, getArtifact(ctx, c.Artifacts(), &stdout, &stderr, "5f1c2d3e-0000-4000-8000-000000000002", ""))
+	assert.Error(t, getArtifact(ctx, c.Artifacts(), &stdout, &stderr, "scion://artifact/nope", "", false))
+	assert.Error(t, getArtifact(ctx, c.Artifacts(), &stdout, &stderr, "5f1c2d3e-0000-4000-8000-000000000002", "", false))
 }
 
 func TestGetArtifactDetectsCorruptionBeforeStdout(t *testing.T) {
@@ -137,7 +137,7 @@ func TestGetArtifactDetectsCorruptionBeforeStdout(t *testing.T) {
 	c, err := hubclient.New(srv.URL)
 	require.NoError(t, err)
 	var stdout, stderr bytes.Buffer
-	err = getArtifact(context.Background(), c.Artifacts(), &stdout, &stderr, testArtifactID, "")
+	err = getArtifact(context.Background(), c.Artifacts(), &stdout, &stderr, testArtifactID, "", false)
 	assert.ErrorContains(t, err, "sha256")
 	assert.Empty(t, stdout.String(), "unverified bytes must not reach stdout")
 }
@@ -149,7 +149,7 @@ func TestGetArtifactOutMode(t *testing.T) {
 	require.NoError(t, err)
 	out := filepath.Join(t.TempDir(), "d.md")
 	var stdout, stderr bytes.Buffer
-	require.NoError(t, getArtifact(context.Background(), c.Artifacts(), &stdout, &stderr, testArtifactID, out))
+	require.NoError(t, getArtifact(context.Background(), c.Artifacts(), &stdout, &stderr, testArtifactID, out, false))
 	st, err := os.Stat(out)
 	require.NoError(t, err)
 	assert.Equal(t, os.FileMode(0o644), st.Mode().Perm())
@@ -173,7 +173,7 @@ func TestGetArtifactDetectsCorruption(t *testing.T) {
 	require.NoError(t, err)
 	out := filepath.Join(t.TempDir(), "x.md")
 	var stdout, stderr bytes.Buffer
-	err = getArtifact(context.Background(), c.Artifacts(), &stdout, &stderr, testArtifactID, out)
+	err = getArtifact(context.Background(), c.Artifacts(), &stdout, &stderr, testArtifactID, out, false)
 	assert.ErrorContains(t, err, "sha256")
 	_, statErr := os.Stat(out)
 	assert.True(t, os.IsNotExist(statErr), "a corrupt download must not be written to --out")
@@ -212,7 +212,7 @@ func TestArtifactErrorHints(t *testing.T) {
 	c, err := hubclient.New(srv.URL)
 	require.NoError(t, err)
 	var stdout, stderr bytes.Buffer
-	err = getArtifact(context.Background(), c.Artifacts(), &stdout, &stderr, testArtifactID, "")
+	err = getArtifact(context.Background(), c.Artifacts(), &stdout, &stderr, testArtifactID, "", false)
 	assert.ErrorContains(t, err, "project:artifact:read")
 
 	file := filepath.Join(t.TempDir(), "a.md")
@@ -232,7 +232,7 @@ func TestArtifactErrorHints(t *testing.T) {
 	err = publishArtifact(context.Background(), c401.Artifacts(), &stdout, &stdout, "", file, "", "")
 	assert.ErrorContains(t, err, "invalid or expired")
 	assert.NotContains(t, err.Error(), "scope", "a 401 on publish is about the credential, not a scope")
-	err = getArtifact(context.Background(), c401.Artifacts(), &stdout, &stderr, testArtifactID, "")
+	err = getArtifact(context.Background(), c401.Artifacts(), &stdout, &stderr, testArtifactID, "", false)
 	assert.ErrorContains(t, err, "invalid or expired")
 	assert.NotContains(t, err.Error(), "project:artifact:read", "a 401 on get is about the credential, not the read scope")
 

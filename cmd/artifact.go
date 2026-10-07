@@ -42,6 +42,7 @@ var (
 	artifactPublishNote  string
 	artifactPublishEntry string
 	artifactGetOut       string
+	artifactGetForce     bool
 )
 
 // artifactCmd is the command group for artifacts.
@@ -150,8 +151,11 @@ entry file is written to stdout, or with --out every file of the version
 is written under the --out directory (created if needed), keeping its
 relative path.
 
-Every file is checked against the sha256 recorded at publish time before
-it is written; a mismatch writes nothing for that file and fails.
+Every file is checked against the size and sha256 recorded at publish
+time before it is written; a mismatch writes nothing for that file and
+fails. With --out, only plain relative names are written (none starting
+with "."), never through a symbolic link below the --out directory, and a
+file that already exists is replaced only with --force.
 
 Examples:
   scion artifact get scion://artifact/5f1c2d3e-...
@@ -165,7 +169,7 @@ Examples:
 		}
 		ctx, cancel := context.WithTimeout(cmd.Context(), 10*time.Minute)
 		defer cancel()
-		return getArtifact(ctx, client.Artifacts(), cmd.OutOrStdout(), cmd.ErrOrStderr(), args[0], artifactGetOut)
+		return getArtifact(ctx, client.Artifacts(), cmd.OutOrStdout(), cmd.ErrOrStderr(), args[0], artifactGetOut, artifactGetForce)
 	},
 }
 
@@ -198,6 +202,7 @@ func init() {
 	artifactPublishCmd.Flags().StringVar(&artifactPublishNote, "note", "", "Note describing this version")
 	artifactPublishCmd.Flags().StringVar(&artifactPublishEntry, "entry", "", "Entry file of a folder, relative to it")
 	artifactGetCmd.Flags().StringVarP(&artifactGetOut, "out", "o", "", "Write to this file or directory instead of stdout")
+	artifactGetCmd.Flags().BoolVar(&artifactGetForce, "force", false, "Replace files that already exist under --out")
 	artifactCmd.AddCommand(artifactPublishCmd, artifactGetCmd, artifactVersionsCmd)
 	rootCmd.AddCommand(artifactCmd)
 }
@@ -282,7 +287,7 @@ func artifactPageURL(hubEndpoint, projectID, id string) string {
 // getArtifact fetches the artifact named by ref. A single file, or a
 // bundle's entry file when outPath is empty, goes to outPath or stdout; a
 // bundle with outPath is written under that directory.
-func getArtifact(ctx context.Context, svc hubclient.ArtifactService, stdout, stderr io.Writer, ref, outPath string) error {
+func getArtifact(ctx context.Context, svc hubclient.ArtifactService, stdout, stderr io.Writer, ref, outPath string, replace bool) error {
 	id, seq, err := artifacts.ParseRef(ref)
 	if err != nil {
 		return err
@@ -307,7 +312,7 @@ func getArtifact(ctx context.Context, svc hubclient.ArtifactService, stdout, std
 	// A bundle (several files, or one file inside a folder) is written as
 	// a tree under --out, keeping relative paths.
 	if outPath != "" && (len(files) > 1 || strings.Contains(entry, "/")) {
-		return writeBundle(ctx, svc, stderr, id, seq, files, outPath)
+		return writeBundle(ctx, svc, stderr, id, seq, files, outPath, replace)
 	}
 	var want *hubclient.ArtifactFile
 	for i := range files {
@@ -341,40 +346,25 @@ func getArtifact(ctx context.Context, svc hubclient.ArtifactService, stdout, std
 		_, err = io.Copy(stdout, spool)
 		return err
 	}
-	target := outPath
+	// Into an existing directory, under the entry's own name (checked like
+	// a bundle path); otherwise to the file the user named.
+	dir, name := filepath.Dir(outPath), filepath.Base(outPath)
 	if st, err := os.Stat(outPath); err == nil && st.IsDir() {
-		target = filepath.Join(outPath, path.Base(entry))
+		dir, name = outPath, path.Base(entry)
+		if err := checkBundleName(name); err != nil {
+			return err
+		}
 	}
-	if err := writeVerifiedFile(target, rc, want.SHA256, want.Size); err != nil {
-		return err
-	}
-	_, _ = fmt.Fprintf(stderr, "Wrote %s\n", target)
-	return nil
-}
-
-// writeVerifiedFile writes src to target through a temporary file in the
-// same directory, renaming it into place only when the bytes match
-// wantDigest and size.
-func writeVerifiedFile(target string, src io.Reader, wantDigest string, size int64) error {
-	tmp, err := os.CreateTemp(filepath.Dir(target), ".artifact-*")
+	out, err := openOutDir(dir)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = os.Remove(tmp.Name()) }()
-	if err := copyVerified(tmp, src, wantDigest, size); err != nil {
-		_ = tmp.Close()
+	defer func() { _ = out.Close() }()
+	if err := out.WriteFile(name, replace, func(w io.Writer) error { return copyVerified(w, rc, want.SHA256, want.Size) }); err != nil {
 		return err
 	}
-	// CreateTemp makes the file 0600; a fetched document gets the usual
-	// mode for a new file.
-	if err := tmp.Chmod(0o644); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmp.Name(), target)
+	_, _ = fmt.Fprintf(stderr, "Wrote %s\n", filepath.Join(dir, name))
+	return nil
 }
 
 // artifactErrorHint explains the hub's deliberately uniform answers. A read

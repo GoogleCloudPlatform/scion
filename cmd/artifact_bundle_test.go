@@ -107,7 +107,7 @@ func TestArtifactBundleRoundTrip(t *testing.T) {
 	// The whole bundle of version 1, hidden files left out.
 	dir := filepath.Join(t.TempDir(), "v1")
 	var stdout, stderr bytes.Buffer
-	require.NoError(t, getArtifact(ctx, svc, &stdout, &stderr, ref+"@1", dir))
+	require.NoError(t, getArtifact(ctx, svc, &stdout, &stderr, ref+"@1", dir, false))
 	for p, want := range map[string]string{"index.html": "<img src=img/a.png>", "img/a.png": "png", "css/s.css": "body{}"} {
 		got, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(p)))
 		require.NoError(t, err, p)
@@ -121,7 +121,7 @@ func TestArtifactBundleRoundTrip(t *testing.T) {
 
 	// Without --out, the entry file of the current version.
 	stdout.Reset()
-	require.NoError(t, getArtifact(ctx, svc, &stdout, &stderr, ref, ""))
+	require.NoError(t, getArtifact(ctx, svc, &stdout, &stderr, ref, "", false))
 	assert.Equal(t, "<p>v2</p>", stdout.String())
 
 	// versions lists both, newest first, current marked.
@@ -172,19 +172,19 @@ func TestArtifactBundleEntryAndRefusals(t *testing.T) {
 	assert.ErrorContains(t, publishBundle(ctx, svc, &out, &errOut, "", t.TempDir(), bundlePublishOptions{}), "no files")
 }
 
-func TestSafeBundlePath(t *testing.T) {
-	for _, bad := range []string{"", "../x", "a/../../x", "/etc/passwd", "a\\b", "..", "a//b", "./a"} {
-		_, err := safeBundlePath("/out", bad)
-		assert.Error(t, err, bad)
+func TestCheckBundleName(t *testing.T) {
+	for _, bad := range []string{"", "../x", "a/../../x", "/etc/passwd", "a\\b", "..", "a//b", "./a",
+		".git/config", "docs/.hidden/a", ".envrc", "a/.b", "..\\x", "c:/x", "C:x"} {
+		assert.Error(t, checkBundleName(bad), bad)
 	}
-	got, err := safeBundlePath("/out", "img/a.png")
-	require.NoError(t, err)
-	assert.Equal(t, filepath.Join("/out", "img", "a.png"), got)
+	for _, good := range []string{"img/a.png", "a.md", "docs/sub/b.txt"} {
+		assert.NoError(t, checkBundleName(good), good)
+	}
 }
 
 func TestWriteBundleRefusesFoldedCollisions(t *testing.T) {
 	files := []hubclient.ArtifactFile{{Path: "a.md", SHA256: "x"}, {Path: "A.md", SHA256: "y"}}
-	err := writeBundle(context.Background(), nil, &bytes.Buffer{}, "id", 1, files, t.TempDir())
+	err := writeBundle(context.Background(), nil, &bytes.Buffer{}, "id", 1, files, t.TempDir(), false)
 	assert.ErrorContains(t, err, "same file")
 }
 
@@ -198,7 +198,7 @@ func TestArtifactBundleEdgeCases(t *testing.T) {
 	require.NoError(t, publishBundle(ctx, svc, &out, &errOut, "", root, bundlePublishOptions{}))
 	ref := refLine.FindStringSubmatch(out.String())[1]
 	dir := filepath.Join(t.TempDir(), "new", "dir")
-	require.NoError(t, getArtifact(ctx, svc, &stdout, &stderr, ref, dir))
+	require.NoError(t, getArtifact(ctx, svc, &stdout, &stderr, ref, dir, false))
 	got, err := os.ReadFile(filepath.Join(dir, "docs", "a.md"))
 	require.NoError(t, err)
 	assert.Equal(t, "# a", string(got))
@@ -227,7 +227,7 @@ func (noDigestService) Get(context.Context, string) (*hubclient.ArtifactResponse
 
 func TestGetArtifactRefusesAnEntryWithoutDigest(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	err := getArtifact(context.Background(), noDigestService{}, &stdout, &stderr, "5f1c2d3e-0000-4000-8000-000000000001", "")
+	err := getArtifact(context.Background(), noDigestService{}, &stdout, &stderr, "5f1c2d3e-0000-4000-8000-000000000001", "", false)
 	assert.ErrorContains(t, err, "no digest")
 	assert.Empty(t, stdout.String())
 }
@@ -268,16 +268,16 @@ func TestGetArtifactSkipsRemoteRows(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	single := remoteRowsService{files: map[string]string{"design.md": "# d"}, entry: "design.md"}
 	out := filepath.Join(t.TempDir(), "copy.md")
-	require.NoError(t, getArtifact(ctx, single, &stdout, &stderr, testArtifactID, out))
+	require.NoError(t, getArtifact(ctx, single, &stdout, &stderr, testArtifactID, out, false))
 	got, err := os.ReadFile(out)
 	require.NoError(t, err)
 	assert.Equal(t, "# d", string(got))
-	require.NoError(t, getArtifact(ctx, single, &stdout, &stderr, testArtifactID, ""))
+	require.NoError(t, getArtifact(ctx, single, &stdout, &stderr, testArtifactID, "", false))
 	assert.Equal(t, "# d", stdout.String())
 
 	pair := remoteRowsService{files: map[string]string{"index.md": "# i", "b.txt": "b"}, entry: "index.md"}
 	dir := t.TempDir()
-	require.NoError(t, getArtifact(ctx, pair, &stdout, &stderr, testArtifactID, dir))
+	require.NoError(t, getArtifact(ctx, pair, &stdout, &stderr, testArtifactID, dir, false))
 	entries, err := os.ReadDir(dir)
 	require.NoError(t, err)
 	var names []string
@@ -309,4 +309,69 @@ func (c *countingReader) Read(p []byte) (int, error) {
 		p[i] = 'x'
 	}
 	return len(p), nil
+}
+
+// filesService serves a version of the given files (no remote rows).
+type filesService struct {
+	hubclient.ArtifactService
+	files map[string]string
+	entry string
+}
+
+func (s filesService) Get(context.Context, string) (*hubclient.ArtifactResponse, error) {
+	v := &hubclient.ArtifactVersion{Seq: 1, EntryPath: s.entry}
+	for p, body := range s.files {
+		v.Files = append(v.Files, hubclient.ArtifactFile{Path: p, SHA256: sha256Hex([]byte(body)), Size: int64(len(body))})
+	}
+	return &hubclient.ArtifactResponse{Version: v}, nil
+}
+
+func (s filesService) OpenFile(_ context.Context, _ string, _ int, p string) (io.ReadCloser, error) {
+	return io.NopCloser(strings.NewReader(s.files[p])), nil
+}
+
+// TestGetArtifactOutRules: get --out writes only plain relative names, never
+// through a symbolic link below the directory, and replaces an existing
+// file only with --force.
+func TestGetArtifactOutRules(t *testing.T) {
+	ctx := context.Background()
+	var stdout, stderr bytes.Buffer
+
+	// A version listing a name that starts with '.' is refused and writes
+	// nothing.
+	dir := t.TempDir()
+	dotted := filesService{files: map[string]string{"index.md": "# i", ".git/config": "x"}, entry: "index.md"}
+	assert.ErrorContains(t, getArtifact(ctx, dotted, &stdout, &stderr, testArtifactID, dir, false), "starting with '.'")
+	entries, _ := os.ReadDir(dir)
+	assert.Empty(t, entries)
+	single := filesService{files: map[string]string{".notes": "x"}, entry: ".notes"}
+	assert.ErrorContains(t, getArtifact(ctx, single, &stdout, &stderr, testArtifactID, dir, false), "starting with '.'")
+
+	// A symbolic link to a folder below --out is not written through.
+	outside := t.TempDir()
+	dir = t.TempDir()
+	require.NoError(t, os.Symlink(outside, filepath.Join(dir, "docs")))
+	bundle := filesService{files: map[string]string{"index.md": "# i", "docs/a.md": "a"}, entry: "index.md"}
+	assert.ErrorContains(t, getArtifact(ctx, bundle, &stdout, &stderr, testArtifactID, dir, true), "symbolic link")
+	entries, _ = os.ReadDir(outside)
+	assert.Empty(t, entries, "nothing written through the link")
+
+	// An existing file is replaced only with --force.
+	dir = t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "index.md"), []byte("mine"), 0o644))
+	assert.ErrorContains(t, getArtifact(ctx, bundle, &stdout, &stderr, testArtifactID, dir, false), "--force")
+	got, _ := os.ReadFile(filepath.Join(dir, "index.md"))
+	assert.Equal(t, "mine", string(got))
+	require.NoError(t, getArtifact(ctx, bundle, &stdout, &stderr, testArtifactID, dir, true))
+	got, _ = os.ReadFile(filepath.Join(dir, "index.md"))
+	assert.Equal(t, "# i", string(got))
+
+	// The same holds for a single file written to a named path.
+	one := filesService{files: map[string]string{"a.md": "new"}, entry: "a.md"}
+	target := filepath.Join(t.TempDir(), "copy.md")
+	require.NoError(t, os.WriteFile(target, []byte("old"), 0o644))
+	assert.ErrorContains(t, getArtifact(ctx, one, &stdout, &stderr, testArtifactID, target, false), "--force")
+	require.NoError(t, getArtifact(ctx, one, &stdout, &stderr, testArtifactID, target, true))
+	got, _ = os.ReadFile(target)
+	assert.Equal(t, "new", string(got))
 }

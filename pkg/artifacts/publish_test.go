@@ -130,6 +130,7 @@ func TestPublishRejects(t *testing.T) {
 		{"no name", &agentA, "/api/v1/artifacts", []byte("x"), nil, 400},
 		{"path in name", &agentA, "/api/v1/artifacts?name=dir/a.txt", []byte("x"), nil, 400},
 		{"dotdot name", &agentA, "/api/v1/artifacts?name=..", []byte("x"), nil, 400},
+		{"dot name", &agentA, "/api/v1/artifacts?name=.env", []byte("x"), nil, 400},
 		{"backslash name", &agentA, "/api/v1/artifacts?name=a%5Cb", []byte("x"), nil, 400},
 		{"long title", &agentA, "/api/v1/artifacts?name=a.txt&title=" + strings.Repeat("t", 513), []byte("x"), nil, 400},
 		{"bad digest header", &agentA, "/api/v1/artifacts?name=a.txt", []byte("x"), map[string]string{HeaderContentSHA256: "abc"}, 400},

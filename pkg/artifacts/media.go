@@ -149,10 +149,11 @@ var errBadPath = errors.New("invalid file path")
 
 // cleanFilePath validates a relative file path inside an artifact and
 // returns it unchanged. It rejects anything that is not already a clean,
-// relative, slash-separated path: empty or dot segments, a leading slash,
-// backslashes, control characters, invalid UTF-8 and overlong names. Paths
-// are never joined onto a filesystem location, but rejecting these forms
-// keeps manifest paths canonical so one file has exactly one name.
+// relative, slash-separated path: empty segments, segments whose name
+// starts with '.', a leading slash, backslashes, control and format
+// characters, invalid UTF-8 and overlong names. Every path a version holds
+// passes here, so readers that write a version to disk get only plain,
+// visible names.
 func cleanFilePath(p string) (string, error) {
 	if p == "" || len(p) > maxPathBytes || !utf8.ValidString(p) {
 		return "", errBadPath
@@ -166,7 +167,9 @@ func cleanFilePath(p string) (string, error) {
 		}
 	}
 	for _, seg := range strings.Split(p, "/") {
-		if seg == "" || seg == "." || seg == ".." || len(seg) > maxSegmentBytes {
+		// No empty segments, and no names starting with '.' (which also
+		// covers "." and ".."), in any segment.
+		if seg == "" || strings.HasPrefix(seg, ".") || len(seg) > maxSegmentBytes {
 			return "", errBadPath
 		}
 	}

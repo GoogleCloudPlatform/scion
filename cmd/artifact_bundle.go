@@ -225,26 +225,36 @@ func bundleFiles(files []hubclient.ArtifactFile) []hubclient.ArtifactFile {
 	return out
 }
 
-// safeBundlePath maps a bundle path to a path under dir, refusing anything
-// that would land outside it.
-func safeBundlePath(dir, rel string) (string, error) {
-	if rel == "" || strings.Contains(rel, "\\") || path.IsAbs(rel) || path.Clean(rel) != rel || rel == ".." || strings.HasPrefix(rel, "../") {
-		return "", fmt.Errorf("refusing unsafe bundle path %q", rel)
+// checkBundleName refuses a file path from the hub that get would not
+// write: anything that is not a clean, local, slash-separated path, and any
+// segment whose name starts with '.'. The hub refuses the same names when
+// a version is published; this is the reader's own check.
+func checkBundleName(rel string) error {
+	bad := rel == "" || strings.ContainsAny(rel, "\\:") || path.IsAbs(rel) || path.Clean(rel) != rel ||
+		!filepath.IsLocal(filepath.FromSlash(rel))
+	for _, seg := range strings.Split(rel, "/") {
+		if seg == "" || strings.HasPrefix(seg, ".") {
+			bad = true
+		}
 	}
-	return filepath.Join(dir, filepath.FromSlash(rel)), nil
+	if bad {
+		return fmt.Errorf("refusing bundle path %q: only plain relative names are written, none starting with '.'", rel)
+	}
+	return nil
 }
 
 // writeBundle writes every file of version seq under dir, each verified
 // against its recorded digest before it is moved into place.
-func writeBundle(ctx context.Context, svc hubclient.ArtifactService, stderr io.Writer, id string, seq int, files []hubclient.ArtifactFile, dir string) error {
+//
+// Files are written under dir without following a symbolic link below it,
+// and an existing file is replaced only when replace is set.
+func writeBundle(ctx context.Context, svc hubclient.ArtifactService, stderr io.Writer, id string, seq int, files []hubclient.ArtifactFile, dir string, replace bool) error {
 	if st, err := os.Stat(dir); err == nil && !st.IsDir() {
 		return fmt.Errorf("%s exists and is not a directory; a bundle is written into a directory", dir)
 	}
-	targets := make([]string, len(files))
 	seen := make(map[string]string, len(files))
-	for i, f := range files {
-		t, err := safeBundlePath(dir, f.Path)
-		if err != nil {
+	for _, f := range files {
+		if err := checkBundleName(f.Path); err != nil {
 			return err
 		}
 		// On a case-insensitive or normalizing file system these two
@@ -254,13 +264,14 @@ func writeBundle(ctx context.Context, svc hubclient.ArtifactService, stderr io.W
 			return fmt.Errorf("bundle paths %q and %q would be the same file on some file systems", other, f.Path)
 		}
 		seen[key] = f.Path
-		targets[i] = t
 	}
-	for i, f := range files {
-		if err := os.MkdirAll(filepath.Dir(targets[i]), 0o755); err != nil {
-			return err
-		}
-		if err := fetchVerified(ctx, svc, id, seq, f, targets[i]); err != nil {
+	out, err := openOutDir(dir)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = out.Close() }()
+	for _, f := range files {
+		if err := fetchVerified(ctx, svc, id, seq, f, out, f.Path, replace); err != nil {
 			return err
 		}
 	}
@@ -268,13 +279,16 @@ func writeBundle(ctx context.Context, svc hubclient.ArtifactService, stderr io.W
 	return nil
 }
 
-func fetchVerified(ctx context.Context, svc hubclient.ArtifactService, id string, seq int, f hubclient.ArtifactFile, target string) error {
+// fetchVerified fetches file f of version seq and writes it as name under
+// out, verified against its recorded size and digest before it is moved
+// into place.
+func fetchVerified(ctx context.Context, svc hubclient.ArtifactService, id string, seq int, f hubclient.ArtifactFile, out *outDir, name string, replace bool) error {
 	rc, err := svc.OpenFile(ctx, id, seq, f.Path)
 	if err != nil {
 		return fmt.Errorf("fetch %s: %w%s", f.Path, err, artifactErrorHint(err, false))
 	}
 	defer func() { _ = rc.Close() }()
-	if err := writeVerifiedFile(target, rc, f.SHA256, f.Size); err != nil {
+	if err := out.WriteFile(name, replace, func(w io.Writer) error { return copyVerified(w, rc, f.SHA256, f.Size) }); err != nil {
 		return fmt.Errorf("%s: %w", f.Path, err)
 	}
 	return nil
