@@ -504,8 +504,10 @@ func (s *Service) writableArtifact(w http.ResponseWriter, r *http.Request, id st
 }
 
 // pendingVersionOf loads pending version seq of a for its creator. Another
-// caller gets 403; a version that is not pending, 409.
-func (s *Service) pendingVersionOf(w http.ResponseWriter, r *http.Request, b backend, a *Artifact, seq int) (*Version, bool) {
+// caller gets 403; a version that is not pending, 409. With finalizing
+// set, a version another finalize request claimed is accepted too, and
+// ClaimFinalize decides whether that claim may be taken over.
+func (s *Service) pendingVersionOf(w http.ResponseWriter, r *http.Request, b backend, a *Artifact, seq int, finalizing bool) (*Version, bool) {
 	v, err := b.store.GetVersion(r.Context(), a.ID, seq)
 	if errors.Is(err, ErrNotFound) {
 		writeNotFound(w)
@@ -521,7 +523,7 @@ func (s *Service) pendingVersionOf(w http.ResponseWriter, r *http.Request, b bac
 		writeError(w, http.StatusForbidden, "forbidden", "only the publisher of a pending version may upload to it")
 		return nil, false
 	}
-	if v.State != VersionStatePending {
+	if v.State != VersionStatePending && !(finalizing && v.State == VersionStateFinalizing) {
 		writeError(w, http.StatusConflict, "conflict", "the version is not pending")
 		return nil, false
 	}
@@ -542,7 +544,7 @@ func (s *Service) handlePutFile(w http.ResponseWriter, r *http.Request, id strin
 	if !ok {
 		return
 	}
-	v, ok := s.pendingVersionOf(w, r, b, a, seq)
+	v, ok := s.pendingVersionOf(w, r, b, a, seq, false)
 	if !ok {
 		return
 	}
@@ -611,7 +613,7 @@ func (s *Service) handleFinalize(w http.ResponseWriter, r *http.Request, id stri
 	if !ok {
 		return
 	}
-	v, ok := s.pendingVersionOf(w, r, b, a, seq)
+	v, ok := s.pendingVersionOf(w, r, b, a, seq, true)
 	if !ok {
 		return
 	}
@@ -656,7 +658,8 @@ func (s *Service) handleFinalize(w http.ResponseWriter, r *http.Request, id stri
 	}
 	// Claim the version before any remote fetch, so that one finalize
 	// request completes it and concurrent ones answer 409 at once.
-	switch err := b.store.ClaimFinalize(ctx, a.ID, seq, time.Now().Add(-staleFinalizeClaim)); {
+	claim, err := b.store.ClaimFinalize(ctx, a.ID, seq, time.Now().Add(-staleFinalizeClaim))
+	switch {
 	case errors.Is(err, ErrConflict):
 		writeError(w, http.StatusConflict, "conflict", "the version is not pending or not complete")
 		return
@@ -668,11 +671,17 @@ func (s *Service) handleFinalize(w http.ResponseWriter, r *http.Request, id stri
 		writeError(w, http.StatusInternalServerError, "internal", "could not finalize the version")
 		return
 	}
-	extra, warnings := s.finalizeExtras(w, r, b, v, files)
-	updated, err := b.store.FinalizeVersion(ctx, a.ID, seq, extra)
+	// Everything after the claim runs within finalizeWorkLimit, which is
+	// shorter than staleFinalizeClaim, so this request has finished, or
+	// given up, before another one may take its claim over.
+	work, cancel := context.WithTimeout(ctx, finalizeWorkLimit)
+	defer cancel()
+	extra, warnings := s.finalizeExtras(w, r.WithContext(work), b, v, files)
+	updated, err := b.store.FinalizeVersion(work, a.ID, seq, claim, extra)
 	if err != nil && !errors.Is(err, ErrConflict) && !errors.Is(err, ErrNotFound) {
-		// Let the publisher try again.
-		if rerr := b.store.ReleaseFinalize(context.WithoutCancel(ctx), a.ID, seq); rerr != nil {
+		// Let the publisher try again, unless another request has claimed
+		// the version since.
+		if rerr := b.store.ReleaseFinalize(context.WithoutCancel(ctx), a.ID, seq, claim); rerr != nil {
 			slog.ErrorContext(ctx, "artifacts: release finalize failed", "error", rerr)
 		}
 	}
@@ -738,10 +747,15 @@ func (s *Service) finalizeExtras(w http.ResponseWriter, r *http.Request, b backe
 	return s.remoteImages(ctx, w, b, v.ID, window, entry.Size > imageScanWindow, versionUsage{files: v.FileCount, bytes: v.TotalBytes})
 }
 
+// finalizeWorkLimit bounds the work a finalize request does after it
+// claims a version: reading the entry, fetching remote images (within
+// their own budget) and recording the version.
+const finalizeWorkLimit = MaxRemoteFetchBudget + publishDeadlineMargin
+
 // staleFinalizeClaim is how old a finalize claim must be before another
-// finalize request may take it over: longer than any finalize can run (the
-// longest remote image budget plus the write margin), with room to spare.
-const staleFinalizeClaim = MaxRemoteFetchBudget + publishDeadlineMargin + time.Minute
+// finalize request may take it over. It is longer than finalizeWorkLimit,
+// so the request that made the claim has stopped by then.
+const staleFinalizeClaim = finalizeWorkLimit + time.Minute
 
 // Version list pages.
 const (

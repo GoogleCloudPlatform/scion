@@ -203,18 +203,22 @@ type Store interface {
 	// returns ErrConflict when the version cannot be claimed or a file of
 	// its manifest is still pending, and ErrNotFound when it does not
 	// exist.
-	ClaimFinalize(ctx context.Context, artifactID string, seq int, staleBefore time.Time) error
+	// On success it returns the claim, which FinalizeVersion and
+	// ReleaseFinalize take to act only while that claim still holds.
+	ClaimFinalize(ctx context.Context, artifactID string, seq int, staleBefore time.Time) (time.Time, error)
 
 	// ReleaseFinalize returns a finalizing version to pending, for a
-	// finalize request that could not complete it.
-	ReleaseFinalize(ctx context.Context, artifactID string, seq int) error
+	// finalize request that could not complete it, if the version still
+	// holds the given claim.
+	ReleaseFinalize(ctx context.Context, artifactID string, seq int, claim time.Time) error
 
 	// FinalizeVersion flips the claimed (finalizing) version seq of an
 	// artifact to ready, adds the extra manifest rows (files the hub produced, such as
 	// fetched remote images) and advances the artifact's current version to
 	// seq unless a later one is already current. It returns ErrConflict when
-	// the version is not finalizing, and the updated artifact otherwise.
-	FinalizeVersion(ctx context.Context, artifactID string, seq int, extra []File) (*Artifact, error)
+	// the version is not finalizing under the given claim, and the updated
+	// artifact otherwise.
+	FinalizeVersion(ctx context.Context, artifactID string, seq int, claim time.Time, extra []File) (*Artifact, error)
 
 	// ListVersions returns up to limit ready versions of an artifact,
 	// newest first, with a seq below before (0 = from the newest).

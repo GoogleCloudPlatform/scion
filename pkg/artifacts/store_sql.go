@@ -385,7 +385,7 @@ func (s *sqlStore) MarkReceived(ctx context.Context, versionID, path, mediaType 
 }
 
 // FinalizeVersion implements Store.
-func (s *sqlStore) FinalizeVersion(ctx context.Context, artifactID string, seq int, extra []File) (*Artifact, error) {
+func (s *sqlStore) FinalizeVersion(ctx context.Context, artifactID string, seq int, claim time.Time, extra []File) (*Artifact, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("artifacts: begin finalize: %w", err)
@@ -403,15 +403,16 @@ func (s *sqlStore) FinalizeVersion(ctx context.Context, artifactID string, seq i
 		return nil, ErrNotFound
 	}
 	var versionID, state string
-	err = tx.QueryRowContext(ctx, s.rebind(`SELECT id, state FROM artifact_version WHERE artifact_id = ? AND seq = ?`),
-		artifactID, seq).Scan(&versionID, &state)
+	var claimedAt dbTime
+	err = tx.QueryRowContext(ctx, s.rebind(`SELECT id, state, claimed_at FROM artifact_version WHERE artifact_id = ? AND seq = ?`),
+		artifactID, seq).Scan(&versionID, &state, &claimedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("artifacts: finalize version: %w", err)
 	}
-	if state != VersionStateFinalizing {
+	if state != VersionStateFinalizing || !claimedAt.Valid || !claimedAt.Time.Equal(claimToken(claim)) {
 		return nil, ErrConflict
 	}
 	if err := s.insertFiles(ctx, tx, versionID, extra); err != nil {
@@ -438,32 +439,38 @@ func (s *sqlStore) FinalizeVersion(ctx context.Context, artifactID string, seq i
 
 // ClaimFinalize implements Store. One conditional update claims the
 // version, so of two concurrent finalize requests exactly one succeeds.
-func (s *sqlStore) ClaimFinalize(ctx context.Context, artifactID string, seq int, staleBefore time.Time) error {
+func (s *sqlStore) ClaimFinalize(ctx context.Context, artifactID string, seq int, staleBefore time.Time) (time.Time, error) {
+	claim := claimToken(time.Now())
 	res, err := s.db.ExecContext(ctx, s.rebind(`UPDATE artifact_version SET state = ?, claimed_at = ?
 		WHERE artifact_id = ? AND seq = ?
 		AND (state = ? OR (state = ? AND claimed_at IS NOT NULL AND claimed_at < ?))
 		AND NOT EXISTS (SELECT 1 FROM artifact_file WHERE version_id = artifact_version.id AND received = ?)`),
-		VersionStateFinalizing, s.timeArg(time.Now()), artifactID, seq,
+		VersionStateFinalizing, s.timeArg(claim), artifactID, seq,
 		VersionStatePending, VersionStateFinalizing, s.timeArg(staleBefore), false)
 	if err != nil {
-		return fmt.Errorf("artifacts: claim finalize: %w", err)
+		return time.Time{}, fmt.Errorf("artifacts: claim finalize: %w", err)
 	}
 	if n, err := res.RowsAffected(); err != nil {
-		return fmt.Errorf("artifacts: claim finalize: %w", err)
+		return time.Time{}, fmt.Errorf("artifacts: claim finalize: %w", err)
 	} else if n == 1 {
-		return nil
+		return claim, nil
 	}
 	if _, err := s.GetVersion(ctx, artifactID, seq); err != nil {
-		return err
+		return time.Time{}, err
 	}
-	return ErrConflict
+	return time.Time{}, ErrConflict
 }
 
-// ReleaseFinalize implements Store.
-func (s *sqlStore) ReleaseFinalize(ctx context.Context, artifactID string, seq int) error {
-	if _, err := s.db.ExecContext(ctx, s.rebind(`UPDATE artifact_version SET state = ?
-		WHERE artifact_id = ? AND seq = ? AND state = ?`),
-		VersionStatePending, artifactID, seq, VersionStateFinalizing); err != nil {
+// claimToken is a claim time in the form both dialects store (UTC,
+// microseconds), so the value read back compares equal.
+func claimToken(t time.Time) time.Time { return t.UTC().Truncate(time.Microsecond) }
+
+// ReleaseFinalize implements Store. It changes the version only while it
+// still holds this claim, so it never undoes a later claim.
+func (s *sqlStore) ReleaseFinalize(ctx context.Context, artifactID string, seq int, claim time.Time) error {
+	if _, err := s.db.ExecContext(ctx, s.rebind(`UPDATE artifact_version SET state = ?, claimed_at = NULL
+		WHERE artifact_id = ? AND seq = ? AND state = ? AND claimed_at = ?`),
+		VersionStatePending, artifactID, seq, VersionStateFinalizing, s.timeArg(claimToken(claim))); err != nil {
 		return fmt.Errorf("artifacts: release finalize: %w", err)
 	}
 	return nil

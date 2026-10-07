@@ -708,3 +708,55 @@ func TestKeyedAppendAsksPermitsOnce(t *testing.T) {
 		t.Errorf("Permits asked %d times: %v", n, f.host.calls)
 	}
 }
+
+// TestFinalizeTakesOverAStaleClaim drives the takeover through the API: a
+// version left claimed by a finalize that never completed answers 409
+// while the claim is recent, and finalizes once the claim is stale.
+func TestFinalizeTakesOverAStaleClaim(t *testing.T) {
+	f := newFixture(t, false)
+	files := bundle{"a.txt": []byte("a")}
+	pend := f.createPending(agentA, "/api/v1/artifacts", files.manifest("a.txt"))
+	id := pend.Artifact.ID
+	if rec := f.put(agentA, id, 1, "a.txt", files["a.txt"]); rec.Code != http.StatusNoContent {
+		t.Fatalf("PUT: %d", rec.Code)
+	}
+	// A finalize that claimed the version and then stopped.
+	if _, err := f.store.ClaimFinalize(context.Background(), id, 1, time.Now().Add(-staleFinalizeClaim)); err != nil {
+		t.Fatal(err)
+	}
+	if rec := f.finalize(agentA, id, 1); rec.Code != http.StatusConflict {
+		t.Fatalf("finalize while the claim is recent: %d, want 409", rec.Code)
+	}
+	old := time.Now().Add(-staleFinalizeClaim - time.Minute).UTC().Format(sqliteTimeLayout)
+	if _, err := f.db.Exec("UPDATE artifact_version SET claimed_at = ? WHERE artifact_id = ? AND seq = 1", old, id); err != nil {
+		t.Fatal(err)
+	}
+	rec := f.finalize(agentA, id, 1)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("finalize of a stale claim: %d %s", rec.Code, rec.Body.String())
+	}
+	if got := decodeInto[ArtifactResponse](t, rec); got.Artifact.CurrentSeq != 1 {
+		t.Errorf("current = %d", got.Artifact.CurrentSeq)
+	}
+	// Uploads still need a pending version.
+	pend2 := f.createPending(agentA, "/api/v1/artifacts/"+id+"/versions", files.manifest("a.txt"))
+	f.put(agentA, id, pend2.Version.Seq, "a.txt", files["a.txt"])
+	if _, err := f.store.ClaimFinalize(context.Background(), id, pend2.Version.Seq, time.Now().Add(-staleFinalizeClaim)); err != nil {
+		t.Fatal(err)
+	}
+	if rec := f.put(agentA, id, pend2.Version.Seq, "a.txt", files["a.txt"]); rec.Code != http.StatusConflict {
+		t.Errorf("PUT to a finalizing version: %d, want 409", rec.Code)
+	}
+}
+
+// TestFinalizeWorkIsBoundedBelowTheTakeoverAge pins the ordering the
+// takeover relies on: a finalize request's own work is cut off before its
+// claim can be taken over.
+func TestFinalizeWorkIsBoundedBelowTheTakeoverAge(t *testing.T) {
+	if finalizeWorkLimit >= staleFinalizeClaim {
+		t.Fatalf("finalizeWorkLimit %v must be shorter than staleFinalizeClaim %v", finalizeWorkLimit, staleFinalizeClaim)
+	}
+	if MaxRemoteFetchBudget > finalizeWorkLimit {
+		t.Fatalf("the remote fetch budget %v must fit in finalizeWorkLimit %v", MaxRemoteFetchBudget, finalizeWorkLimit)
+	}
+}
