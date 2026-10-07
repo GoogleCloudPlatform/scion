@@ -91,7 +91,7 @@ func (h *HubHandler) Handle(event *hooks.Event) error {
 	case hooks.EventToolStart:
 		// Claude-specific: ExitPlanMode and AskUserQuestion mean waiting for user
 		if event.Dialect == "claude" && (event.Data.ToolName == "ExitPlanMode" || event.Data.ToolName == "AskUserQuestion") {
-			message := "Waiting for input"
+			message := "Waiting on parent"
 			if event.Data.ToolName == "ExitPlanMode" {
 				message = "Waiting for plan approval"
 			}
@@ -143,7 +143,7 @@ func (h *HubHandler) Handle(event *hooks.Event) error {
 
 	case hooks.EventNotification:
 		// Agent is waiting for input
-		message := "Waiting for input"
+		message := "Waiting on parent"
 		if event.Data.Message != "" {
 			message = truncateMessage(event.Data.Message, 100)
 		}

@@ -9,8 +9,8 @@ This harness makes **no changes to hub or web source**. It is pure tooling,
 so it captures a BASELINE against unmodified `origin/main` before any of
 #2367's other workstreams land.
 
-Do **not** point any of this at the live hub
-(`community.projects.scion-ai.dev`). Everything here runs against a hub
+Do **not** point any of this at a shared or production hub.
+Everything here runs against a hub
 subprocess you start locally against a throwaway SQLite file, in an
 environment isolated from your own agent/shell (see "Isolate the hub
 environment" below) -- the hub must not inherit your ambient cloud
@@ -187,9 +187,8 @@ against the real instance metadata service.
 
 1. Check the hub's own log for the storage-backend line -- it should say
    `/tmp/scion-bench/home/.scion/storage`, not your real home directory.
-2. Confirm neither of these appears anywhere in the hub's log: the real
-   service-account email (`scion-my-grove@...` or similar), or the real GCP
-   project ID (`deploy-demo-test` or similar). The GCP-subsystem log lines
+2. Confirm neither of these appears anywhere in the hub's log: your real
+   service-account email or your real GCP project ID. The GCP-subsystem log lines
    themselves (`GCP token generator configured`, `Policy Troubleshooter: no
    GCP project ID available`, ...) still appear with
    `GCE_METADATA_HOST`/`GCE_METADATA_IP` set -- that is expected, since the
@@ -413,10 +412,21 @@ the per-size timeout values in effect if they were raised above the
 defaults shown in `EffectiveSettings`. A blank `notes` field in a raw
 report is a gap for whoever reads it later, not a neutral default.
 
-When run against a hub built from the `perf/2392-agent-list-instrumentation`
-branch (not yet merged) with `SCION_HUB_PERF_TRACE=1` set in the hub's
-environment, add `--want-perf-trace` to additionally capture phase-timing/
-store-call-count data from the response headers. On a baseline run against
+When the hub runs with request performance tracing on (add
+`SCION_SERVER_HUB_PERFTRACE=true` to the isolated launch's `env -i` list, or
+set `server.hub.perf_trace: true`), add `--want-perf-trace` to additionally
+capture the `X-Scion-Perf-*` response headers per attempt: endpoint class,
+phase times (microseconds) and counts, authorization store calls and times,
+decision-audit counts, and DB pool waits. The hub sends those headers only
+to unscoped local platform admins, so for the seeded member caller also
+pass `--hub-perf-log <hub log file>` (redirect the hub's output to a file):
+after the run, apibench joins each attempt to the hub's `perf_trace` log
+line by request ID and stores the same fields, plus the `serialize` phase,
+with `perfTraceSource: "hub-log"`. See `pkg/hub/perftrace.go` for the phase
+definitions, and the developer guide on the docs site
+(`docs-site/src/content/docs/contributing/perf-tracing.md`) for the log
+line format, joining by request ID, and using the counts as regression
+budgets. On a baseline run against
 unmodified `main`, or if the flag was passed but no trace headers actually
 came back, the report's `perfTraceAvailable` field is `false` for that
 scenario, not silently omitted or wrongly true.
@@ -651,7 +661,7 @@ baseline section).
 ## Choosing regression budgets
 
 Not implemented by this harness, and deliberately not guessed at: this
-container (`scion-community-broker-01`) is a shared host with 16 CPUs and a
+container is a shared 16-CPU development host with a
 load average observed to swing from roughly 47 to 450 depending on what
 else is running. Repeated apibench reruns under otherwise identical
 isolated conditions varied by more than 2x run to run purely from this --
@@ -729,7 +739,7 @@ constraints.
   a harness bug -- re-run `perf/bench/seed` for a fresh, undrifted DB if you
   need the exact seeded counts to hold.
 - All measurements in this repo's `measurements.md` were taken on a shared
-  host (`scion-community-broker-01`, 16 CPUs, widely variable load -- not a
+  16-CPU development host (widely variable load -- not a
   single CPU), with (for the 100/500-agent cases) up to three hub
   subprocesses co-resident. Treat absolute numbers as this-machine,
   this-run numbers; treat the *shape* (order-of-magnitude growth from 25 to

@@ -267,7 +267,7 @@ func TestDeleteAgent_RunMismatchSkipsLeftoverCleanup(t *testing.T) {
 		if rec.Code != http.StatusNotFound {
 			t.Fatalf("expected 404, got %d: %s", rec.Code, rec.Body.String())
 		}
-		assertCleanupCalls(t, mgr.cleanupCalls(), cleanupCall{"dev", scopeProjB})
+		assertCleanupCalls(t, mgr.cleanupCalls(), cleanupCall{"dev", scopeProjB, "run-old"})
 	})
 }
 

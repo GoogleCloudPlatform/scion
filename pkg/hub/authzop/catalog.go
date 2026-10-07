@@ -236,6 +236,11 @@ var EntryPointExemptions = []EntryPointExemption{
 	// yet, the route answers 404; a catalog operation replaces this
 	// exemption when share links land (ptone/scion#3202).
 	{Pattern: "/api/v1/artifacts/shared/", Kind: ExemptionPublicEndpoint, Reason: "Artifact share links (token-only by design; still behind the auth middleware until token access ships), experiment-gated, answers 404 with no handler behaviour yet; replaced by a catalog operation when the handler lands (ptone/scion#3202)", Owner: "route_metadata.go"},
+	// Artifact views (hub.artifacts experiment): reads of one version's
+	// files under a short-lived view capability minted after the caller's
+	// read access was checked; the artifact service verifies the
+	// capability on every request and never uses a session here.
+	{Pattern: "/api/v1/artifacts/view/", Kind: ExemptionPublicEndpoint, Reason: "Artifact view capability (minted on POST /api/v1/artifacts/{id}/versions/{seq}/view after artifact.read; HMAC over artifact, version and expiry, verified by the artifact service on every GET/HEAD), experiment-gated", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/message-channels", Kind: ExemptionAuthenticationOnly, Reason: "List own message channels, self-service", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/chat/user-prefs", Kind: ExemptionAuthenticationOnly, Reason: "Chat preferences, self-service", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/chat/presence", Kind: ExemptionAuthenticationOnly, Reason: "Chat presence, self-service", Owner: "route_metadata.go"},
@@ -249,9 +254,10 @@ var EntryPointExemptions = []EntryPointExemption{
 	{Pattern: "/api/v1/teams/link/verify", Kind: ExemptionAuthenticationOnly, Reason: "Account linking verification, self-service", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/teams/link/status", Kind: ExemptionInternalOnly, Reason: "Chat account link status, broker-authenticated", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/authz/explain", Kind: ExemptionAuthenticationOnly, Reason: "Authorization explain for self, self-service diagnostic", Owner: "route_metadata.go"},
-	{Pattern: "/api/v1/hub/settings/injected-skills", Kind: ExemptionHubAdmin, Reason: "Hub injected skills; GET is open, PUT requires hub-admin (enforced in handler via requireAdmin). Admin mutation — operation contract deferred to AH1.", Owner: "route_metadata.go"},
-	{Pattern: "/api/v1/pre-start-hooks", Kind: ExemptionHubAdmin, Reason: "Pre-start hooks; GET is open, POST/PUT/DELETE require hub-admin (enforced in handler via requireAdmin). Admin mutation — operation contract deferred to AH1.", Owner: "route_metadata.go"},
-	{Pattern: "/api/v1/pre-start-hooks/", Kind: ExemptionHubAdmin, Reason: "Pre-start hooks by ID; admin enforcement in handler via requireAdmin. Admin mutation — operation contract deferred to AH1.", Owner: "route_metadata.go"},
+	{Pattern: "/api/v1/pre-start-hooks/", Kind: ExemptionHubAdmin, Reason: "Hub pre-start hooks by ID; GET is open to any user with scripts redacted for non-admins and every token; PUT, DELETE and activate are the hub.lifecyclehooks.update operation (requireHubAdmin).", Owner: "route_metadata.go"},
+	{Pattern: "/api/v1/admin/delegation-adoption", Kind: ExemptionHubAdmin, Reason: "Delegation-provenance adoption status; hub system admin on a session or local development credential only (route guard plus handler check). No registered permission, so it cannot be delegated.", Owner: "route_metadata.go"},
+	{Pattern: "/api/v1/admin/delegation-adoption/previews", Kind: ExemptionHubAdmin, Reason: "Delegation-provenance adoption preview; read-only planning, hub system admin on a session or local development credential only.", Owner: "route_metadata.go"},
+	{Pattern: "/api/v1/admin/delegation-adoption/commits", Kind: ExemptionHubAdmin, Reason: "Delegation-provenance adoption commit (adopt or revert); hub system admin on a session or local development credential only, rechecked in the commit transaction; per-hop mutation audit. Operation contract deferred, as for the other hub-admin exemptions.", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/usage/me", Kind: ExemptionAuthenticationOnly, Reason: "Own usage statistics, self-service", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/experiments", Kind: ExemptionAuthenticationOnly, Reason: "Resolved experiments map for signed-in callers, no resource-level authorization", Owner: "route_metadata.go"},
 
@@ -557,7 +563,7 @@ var MutationClassifications = []MutationClassification{
 	// -----------------------------------------------------------------------
 	// pkg/hub/admin_user_invite.go — hub admin: user invite
 	// -----------------------------------------------------------------------
-	{File: "pkg/hub/admin_user_invite.go", Function: "handleAdminUserInvite", Symbol: "CreateUser", OperationID: "user.admin.invite"},
+	{File: "pkg/hub/admin_user_invite.go", Function: "createPendingUserTx", Symbol: "CreateUser", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Shared pending-user creation core: called by handleAdminUserInvite (user.admin.invite, route guard user.invite) and handleProvisionUser (user.admin.provision, session-only gate plus live user.invite on the hub user collection, inside WithTx with the user_provision mutation audit); creates only status=invited records and never modifies an existing record", Scope: "pkg/hub/admin_user_invite.go"}},
 	{File: "pkg/hub/admin_user_invite.go", Function: "handleAdminUserInviteBulk", Symbol: "CreateUser", OperationID: "user.admin.invite"},
 
 	// -----------------------------------------------------------------------
@@ -610,7 +616,7 @@ var MutationClassifications = []MutationClassification{
 	// pkg/hub/server.go — server infrastructure
 	// -----------------------------------------------------------------------
 	{File: "pkg/hub/server.go", Function: "sweepOrphanedGroupMemberships", Symbol: "DeleteOrphanedGroupMemberships", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Server startup: delete group memberships whose user and agent are both NULL (principal deleted, ON DELETE SET NULL); such rows are always orphans and carry no principal; idempotent, every startup (ptone/scion#2769)", Scope: "pkg/hub/server.go"}},
-	{File: "pkg/hub/server.go", Function: "RecordAgentCredential", Symbol: "CreateAgentCredential", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Agent credential provisioning during agent create, server infrastructure", Scope: "pkg/hub/server.go"}},
+	{File: "pkg/hub/agent_token_mint.go", Function: "recordAgentCredential", Symbol: "CreateAgentCredential", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Agent credential record at agent token issue, server infrastructure", Scope: "pkg/hub/agent_token_mint.go"}},
 	{File: "pkg/hub/server.go", Function: "a2aBridgeSweepHandler", Symbol: "GenerateAccessToken", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Background job: A2A bridge sweep generates GCP tokens", Scope: "pkg/hub/server.go"}},
 	{File: "pkg/hub/server.go", Function: "backupSigningKeyToStore", Symbol: "UpdateSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC signing key backup, server infrastructure", Scope: "pkg/hub/server.go"}},
 	{File: "pkg/hub/server.go", Function: "backupSigningKeyToStore", Symbol: "UpsertSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC signing key backup, server infrastructure", Scope: "pkg/hub/server.go"}},

@@ -74,6 +74,9 @@ var layer0Prefixes = []string{
 	"server.hub.async_agent_launch",
 	"server.hub.launch_timeout",
 	"server.hub.launch_keepalive_seconds",
+	// Request performance tracing — the middleware and the authorization
+	// store and audit-emitter decorators are installed at startup.
+	"server.hub.perf_trace",
 	// Missing-container reconcile grace — read into ServerConfig at startup.
 	"server.hub.missing_agent_grace",
 	// Conduit relay and grant settings — the relay, its internal listener and
