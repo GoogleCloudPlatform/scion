@@ -387,7 +387,7 @@ func TestRolesAPI_CreateRoleBinding_ProjectScopeMissingScopeID(t *testing.T) {
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/admin/role-bindings", createRoleBindingRequest{
 		RoleDefinitionID: role.ID,
 		PrincipalType:    "user",
-		PrincipalID:      "u1",
+		PrincipalID:      "00000000-0000-0000-0000-0000000000a1",
 		ScopeType:        "project",
 		ScopeID:          "",
 	})
@@ -401,10 +401,11 @@ func TestRolesAPI_CreateRoleBinding_InvalidScopeType(t *testing.T) {
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/admin/role-bindings", createRoleBindingRequest{
 		RoleDefinitionID: "some-id",
 		PrincipalType:    "user",
-		PrincipalID:      "u1",
+		PrincipalID:      "00000000-0000-0000-0000-0000000000a1",
 		ScopeType:        "invalid",
 	})
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "scopeType must be")
 }
 
 func TestRolesAPI_CreateRoleBinding_SuperAdmin_Blocked(t *testing.T) {
@@ -418,7 +419,7 @@ func TestRolesAPI_CreateRoleBinding_SuperAdmin_Blocked(t *testing.T) {
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/admin/role-bindings", createRoleBindingRequest{
 		RoleDefinitionID: rd.ID,
 		PrincipalType:    "user",
-		PrincipalID:      "some-user",
+		PrincipalID:      "00000000-0000-0000-0000-0000000000a1",
 		ScopeType:        "system",
 	})
 	assert.Equal(t, http.StatusForbidden, rec.Code)
@@ -1206,7 +1207,7 @@ func TestRolesAPI_CreateRoleBinding_ProjectScope_UnknownSlug(t *testing.T) {
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/admin/role-bindings", createRoleBindingRequest{
 		RoleDefinitionID: role.ID,
 		PrincipalType:    "user",
-		PrincipalID:      "some-user",
+		PrincipalID:      "00000000-0000-0000-0000-0000000000a1",
 		ScopeType:        "project",
 		ScopeID:          "nonexistent-project-slug",
 	})
