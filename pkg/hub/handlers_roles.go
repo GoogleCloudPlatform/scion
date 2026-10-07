@@ -1498,8 +1498,8 @@ func (s *Server) deleteRoleBinding(w http.ResponseWriter, r *http.Request, id st
 			return
 		}
 		mReq := MembershipRequest{
-			Op:        MembershipOpRemove,
-			ProjectID: binding.ScopeID,
+			Op:          MembershipOpRemove,
+			ProjectID:   binding.ScopeID,
 			Actor:       user,
 			BindingID:   id,
 			LossTrigger: store.MembershipLossTriggerAdminBindingDelete,
