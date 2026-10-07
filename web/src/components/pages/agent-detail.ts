@@ -404,7 +404,7 @@ export class ScionPageAgentDetail extends LitElement {
     /* ---- Cards ---- */
     .reincarnate-help {
       margin: 0 0 1rem;
-      color: var(--sl-color-neutral-600);
+      color: var(--scion-text-secondary, #475569);
       font-size: 0.875rem;
     }
     .reincarnate-error {
