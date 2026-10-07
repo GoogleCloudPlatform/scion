@@ -1347,7 +1347,34 @@ export class TerminalWorkspaceRoot {
     if (!confirmed) return 0;
     const targets = [...this.entries.values()].filter(isInactiveEntry);
     for (const entry of targets) this.removeEntry(entry);
+    if (targets.length > 0) {
+      // Render now so the focus target reflects the remaining rows.
+      this.refresh();
+      this.focusAfterBulkRemove();
+    }
     return targets.length;
+  }
+
+  /**
+   * The dialog returns focus to "Remove all inactive", which is now
+   * disabled, so focus would drop to the page. Move it to "Reconnect all"
+   * when that is still enabled, else the first remaining row, else the
+   * rail itself. Focus the user moved elsewhere is left alone.
+   */
+  private focusAfterBulkRemove(): void {
+    const active = document.activeElement;
+    if (active && active !== document.body && active !== this.bulkRemove) return;
+    if (!this.railBulk.hidden && !this.bulkReconnect.disabled) {
+      this.bulkReconnect.focus();
+      return;
+    }
+    const firstRow = this.railList.querySelector<HTMLElement>('.terminal-rail-select');
+    if (firstRow) {
+      firstRow.focus();
+      return;
+    }
+    this.rail.tabIndex = -1;
+    this.rail.focus();
   }
 
   private renderRailEntry(entry: RailEntry): HTMLElement {

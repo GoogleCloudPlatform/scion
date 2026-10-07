@@ -325,6 +325,49 @@ describe('Open terminals bulk actions', () => {
     expect(railAgentIds().sort()).toEqual([CONNECTED, DISCONNECTED, IDLE].sort());
   });
 
+  /** Mimics the dialog returning focus to its trigger before it resolves. */
+  function confirmReturningFocusTo(trigger: HTMLElement): void {
+    confirmMock.showConfirm.mockImplementation(() => {
+      trigger.focus();
+      return Promise.resolve(true);
+    });
+  }
+
+  it('after removing, focus moves from the disabled button to the first remaining row', async () => {
+    await openMixed();
+    confirmReturningFocusTo(bulkRemove());
+    await root.removeAllInactive();
+    expect(bulkRemove().disabled).toBe(true);
+    const focused = document.activeElement as HTMLElement;
+    expect(focused).not.toBe(document.body);
+    expect(focused.classList.contains('terminal-rail-select')).toBe(true);
+    expect(focused).toBe(root.element.querySelector('.terminal-rail-select'));
+  });
+
+  it('after removing every row, focus moves to the terminal list panel', async () => {
+    await open(DISCONNECTED, DELETED);
+    setState(sessions.get(DISCONNECTED)!, {
+      connection: 'disconnected',
+      disconnectReason: 'network',
+    });
+    sessions.get(DELETED)!.markUnavailable('agent-deleted', 'Agent was deleted.');
+    await flush();
+    confirmReturningFocusTo(bulkRemove());
+    expect(await root.removeAllInactive()).toBe(2);
+    expect(railAgentIds()).toEqual([]);
+    expect(document.activeElement).toBe(root.element.querySelector('.terminal-rail'));
+  });
+
+  it('after removing, focus the user moved elsewhere is left alone', async () => {
+    await openMixed();
+    const elsewhere = document.createElement('button');
+    document.body.append(elsewhere);
+    confirmReturningFocusTo(elsewhere);
+    await root.removeAllInactive();
+    expect(document.activeElement).toBe(elsewhere);
+    elsewhere.remove();
+  });
+
   it('the row Close button still removes a single row', async () => {
     await openMixed();
     const key = sessions.get(DISCONNECTED)!.state.key;
