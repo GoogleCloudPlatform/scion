@@ -616,16 +616,17 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	}
 
 	hubEndpoint, hubEndpointTrusted, err := resolveEffectiveHubEndpoint(ctx, hubEndpointInputs{
-		Op:                         in.Operation,
-		ReqHubEndpoint:             in.HubEndpoint,
-		ConnectionHubEndpoint:      connectionHubEndpoint,
-		BrokerHubEndpoint:          s.config.HubEndpoint,
-		ResolvedEnv:                in.ResolvedEnv,
-		ProjectPath:                in.ProjectPath,
-		ContainerHubEndpoint:       s.config.ContainerHubEndpoint,
-		ColocatedPublicHubEndpoint: s.config.ColocatedPublicHubEndpoint,
-		RuntimeName:                runtimeName,
-		HubListenPort:              s.config.HubListenPort,
+		Op:                           in.Operation,
+		ReqHubEndpoint:               in.HubEndpoint,
+		ConnectionHubEndpoint:        connectionHubEndpoint,
+		BrokerHubEndpoint:            s.config.HubEndpoint,
+		ResolvedEnv:                  in.ResolvedEnv,
+		ProjectPath:                  in.ProjectPath,
+		ContainerHubEndpoint:         s.config.ContainerHubEndpoint,
+		ColocatedPublicHubEndpoint:   s.config.ColocatedPublicHubEndpoint,
+		ColocatedRuntimeHubEndpoints: s.config.ColocatedRuntimeHubEndpoints,
+		RuntimeName:                  runtimeName,
+		HubListenPort:                s.config.HubListenPort,
 	})
 	if err != nil {
 		return nil, &startContextError{

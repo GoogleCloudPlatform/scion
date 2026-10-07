@@ -69,3 +69,19 @@ type Host interface {
 	// It fails closed like Authorize.
 	Permits(ctx context.Context, scopeRef, permission string) bool
 }
+
+// ScopeExplainer is an optional extension of Host. When a credential
+// lacks a scope that publishing needs, the service asks it which one, so
+// the caller gets a 403 naming the scope instead of an answer that looks
+// like an expired credential.
+//
+// The service consults it only on the publish path, which names no
+// existing artifact. Reads keep their uniform 404 and never call it.
+type ScopeExplainer interface {
+	// MissingScope reports the name of the credential scope the caller of
+	// ctx lacks for permission (one of the Permission constants), or ""
+	// when the caller is unauthenticated, holds every scope the permission
+	// needs, or is refused for another reason. It is a pure description:
+	// a non-empty answer never grants anything.
+	MissingScope(ctx context.Context, permission string) string
+}

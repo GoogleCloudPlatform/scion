@@ -856,6 +856,21 @@ func TestDeleteUser_ScheduledAgentDenied(t *testing.T) {
 	})
 }
 
+// commitScheduledCreate writes a, a scheduler-shaped agent, through
+// commitAgentCreate as the scheduled dispatch does: its delegation edge's
+// delegator is the creator, of kind creatorKind.
+func commitScheduledCreate(ctx context.Context, srv *Server, a *store.Agent, creatorKind string) error {
+	return srv.commitAgentCreate(ctx, agentCreateWrite{
+		Provenance: store.AuthorityProvenance{ProvenanceVersion: 1},
+		Agent:      a,
+		Slug:       a.Slug,
+		Edge: &store.DelegationEdge{DelegatorType: creatorKind, DelegatorID: a.CreatedBy,
+			DelegateType: store.DelegationPrincipalAgent, ScopeType: store.RoleScopeProject,
+			ScopeID: a.ProjectID, Role: string(AgentRoleNone), Active: true},
+		Audit: &store.MutationAuditRecord{MutationType: mutationTypeAgentDelegation},
+	})
+}
+
 // TestScheduledCreate_CreatorUserMissing: a scheduler-shaped create whose
 // creator is neither a user nor an agent fails closed and writes nothing; one
 // whose creator is an existing agent (an agent's schedule) succeeds.
@@ -866,7 +881,7 @@ func TestScheduledCreate_CreatorUserMissing(t *testing.T) {
 	srv.store = r
 
 	a := scheduledAgent("gone-sched", project.ID, tid("user-gone"), "created")
-	err := srv.createAgentWithIdentityKey(ctx, a, a.Slug)
+	err := commitScheduledCreate(ctx, srv, a, store.DelegationPrincipalUser)
 	require.ErrorIs(t, err, errAgentOwnerUserMissing)
 	_, err = s.GetAgent(ctx, a.ID)
 	require.ErrorIs(t, err, store.ErrNotFound, "a refused create must write no agent")
@@ -875,7 +890,7 @@ func TestScheduledCreate_CreatorUserMissing(t *testing.T) {
 		ProjectID: project.ID, Phase: "running"}
 	require.NoError(t, s.CreateAgent(ctx, creator))
 	b := scheduledAgent("agent-sched", project.ID, creator.ID, "created")
-	require.NoError(t, srv.createAgentWithIdentityKey(ctx, b, b.Slug))
+	require.NoError(t, commitScheduledCreate(ctx, srv, b, store.DelegationPrincipalAgent))
 }
 
 // userLockRecordingStore records, in order, the user-row locks, agent
@@ -1030,13 +1045,14 @@ func TestUserRowLocks_DeleteExclusiveCreateRestoreShared(t *testing.T) {
 	})
 	t.Run("scheduled create", func(t *testing.T) {
 		// The scheduler's agent has no owner or ancestry and records the
-		// schedule's creator only as CreatedBy; the lock goes to that user.
+		// principal of the schedule's latest revision only as CreatedBy; the
+		// lock goes to that user.
 		srv, s, _, _, project := setupDemoPolicyTest(t)
 		dave := newActiveMember(t, s, "user-dave", "dave@test.com")
 		r := newUserLockRecordingStore(s)
 		srv.store = r
 		a := scheduledAgent("dave-sched", project.ID, dave.ID, "created")
-		require.NoError(t, srv.createAgentWithIdentityKey(context.Background(), a, a.Slug))
+		require.NoError(t, commitScheduledCreate(context.Background(), srv, a, store.DelegationPrincipalUser))
 		requireBefore(t, r, "lock:"+dave.ID+":false", "create:dave-sched")
 		assert.Equal(t, -1, r.index("lock:"+dave.ID+":true"), "create must not lock exclusively")
 	})

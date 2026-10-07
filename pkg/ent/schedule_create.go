@@ -122,6 +122,90 @@ func (_c *ScheduleCreate) SetNillableAuthorizationRevision(v *int) *ScheduleCrea
 	return _c
 }
 
+// SetAuthorityCeilingKind sets the "authority_ceiling_kind" field.
+func (_c *ScheduleCreate) SetAuthorityCeilingKind(v string) *ScheduleCreate {
+	_c.mutation.SetAuthorityCeilingKind(v)
+	return _c
+}
+
+// SetNillableAuthorityCeilingKind sets the "authority_ceiling_kind" field if the given value is not nil.
+func (_c *ScheduleCreate) SetNillableAuthorityCeilingKind(v *string) *ScheduleCreate {
+	if v != nil {
+		_c.SetAuthorityCeilingKind(*v)
+	}
+	return _c
+}
+
+// SetAuthorityCeilingVersion sets the "authority_ceiling_version" field.
+func (_c *ScheduleCreate) SetAuthorityCeilingVersion(v int32) *ScheduleCreate {
+	_c.mutation.SetAuthorityCeilingVersion(v)
+	return _c
+}
+
+// SetNillableAuthorityCeilingVersion sets the "authority_ceiling_version" field if the given value is not nil.
+func (_c *ScheduleCreate) SetNillableAuthorityCeilingVersion(v *int32) *ScheduleCreate {
+	if v != nil {
+		_c.SetAuthorityCeilingVersion(*v)
+	}
+	return _c
+}
+
+// SetAuthorityCeilingPermissionIds sets the "authority_ceiling_permission_ids" field.
+func (_c *ScheduleCreate) SetAuthorityCeilingPermissionIds(v string) *ScheduleCreate {
+	_c.mutation.SetAuthorityCeilingPermissionIds(v)
+	return _c
+}
+
+// SetNillableAuthorityCeilingPermissionIds sets the "authority_ceiling_permission_ids" field if the given value is not nil.
+func (_c *ScheduleCreate) SetNillableAuthorityCeilingPermissionIds(v *string) *ScheduleCreate {
+	if v != nil {
+		_c.SetAuthorityCeilingPermissionIds(*v)
+	}
+	return _c
+}
+
+// SetAuthorityCeilingBoundaryKind sets the "authority_ceiling_boundary_kind" field.
+func (_c *ScheduleCreate) SetAuthorityCeilingBoundaryKind(v string) *ScheduleCreate {
+	_c.mutation.SetAuthorityCeilingBoundaryKind(v)
+	return _c
+}
+
+// SetNillableAuthorityCeilingBoundaryKind sets the "authority_ceiling_boundary_kind" field if the given value is not nil.
+func (_c *ScheduleCreate) SetNillableAuthorityCeilingBoundaryKind(v *string) *ScheduleCreate {
+	if v != nil {
+		_c.SetAuthorityCeilingBoundaryKind(*v)
+	}
+	return _c
+}
+
+// SetAuthorityCeilingBoundaryProjectID sets the "authority_ceiling_boundary_project_id" field.
+func (_c *ScheduleCreate) SetAuthorityCeilingBoundaryProjectID(v string) *ScheduleCreate {
+	_c.mutation.SetAuthorityCeilingBoundaryProjectID(v)
+	return _c
+}
+
+// SetNillableAuthorityCeilingBoundaryProjectID sets the "authority_ceiling_boundary_project_id" field if the given value is not nil.
+func (_c *ScheduleCreate) SetNillableAuthorityCeilingBoundaryProjectID(v *string) *ScheduleCreate {
+	if v != nil {
+		_c.SetAuthorityCeilingBoundaryProjectID(*v)
+	}
+	return _c
+}
+
+// SetAuthorityCeilingSourceExpiresAt sets the "authority_ceiling_source_expires_at" field.
+func (_c *ScheduleCreate) SetAuthorityCeilingSourceExpiresAt(v time.Time) *ScheduleCreate {
+	_c.mutation.SetAuthorityCeilingSourceExpiresAt(v)
+	return _c
+}
+
+// SetNillableAuthorityCeilingSourceExpiresAt sets the "authority_ceiling_source_expires_at" field if the given value is not nil.
+func (_c *ScheduleCreate) SetNillableAuthorityCeilingSourceExpiresAt(v *time.Time) *ScheduleCreate {
+	if v != nil {
+		_c.SetAuthorityCeilingSourceExpiresAt(*v)
+	}
+	return _c
+}
+
 // SetProjectID sets the "project_id" field.
 func (_c *ScheduleCreate) SetProjectID(v uuid.UUID) *ScheduleCreate {
 	_c.mutation.SetProjectID(v)
@@ -349,6 +433,22 @@ func (_c *ScheduleCreate) ExecX(ctx context.Context) {
 
 // defaults sets the default values of the builder before save.
 func (_c *ScheduleCreate) defaults() {
+	if _, ok := _c.mutation.AuthorityCeilingKind(); !ok {
+		v := schedule.DefaultAuthorityCeilingKind
+		_c.mutation.SetAuthorityCeilingKind(v)
+	}
+	if _, ok := _c.mutation.AuthorityCeilingVersion(); !ok {
+		v := schedule.DefaultAuthorityCeilingVersion
+		_c.mutation.SetAuthorityCeilingVersion(v)
+	}
+	if _, ok := _c.mutation.AuthorityCeilingBoundaryKind(); !ok {
+		v := schedule.DefaultAuthorityCeilingBoundaryKind
+		_c.mutation.SetAuthorityCeilingBoundaryKind(v)
+	}
+	if _, ok := _c.mutation.AuthorityCeilingBoundaryProjectID(); !ok {
+		v := schedule.DefaultAuthorityCeilingBoundaryProjectID
+		_c.mutation.SetAuthorityCeilingBoundaryProjectID(v)
+	}
 	if _, ok := _c.mutation.Payload(); !ok {
 		v := schedule.DefaultPayload
 		_c.mutation.SetPayload(v)
@@ -381,6 +481,18 @@ func (_c *ScheduleCreate) defaults() {
 
 // check runs all checks and user-defined validators on the builder.
 func (_c *ScheduleCreate) check() error {
+	if _, ok := _c.mutation.AuthorityCeilingKind(); !ok {
+		return &ValidationError{Name: "authority_ceiling_kind", err: errors.New(`ent: missing required field "Schedule.authority_ceiling_kind"`)}
+	}
+	if _, ok := _c.mutation.AuthorityCeilingVersion(); !ok {
+		return &ValidationError{Name: "authority_ceiling_version", err: errors.New(`ent: missing required field "Schedule.authority_ceiling_version"`)}
+	}
+	if _, ok := _c.mutation.AuthorityCeilingBoundaryKind(); !ok {
+		return &ValidationError{Name: "authority_ceiling_boundary_kind", err: errors.New(`ent: missing required field "Schedule.authority_ceiling_boundary_kind"`)}
+	}
+	if _, ok := _c.mutation.AuthorityCeilingBoundaryProjectID(); !ok {
+		return &ValidationError{Name: "authority_ceiling_boundary_project_id", err: errors.New(`ent: missing required field "Schedule.authority_ceiling_boundary_project_id"`)}
+	}
 	if _, ok := _c.mutation.ProjectID(); !ok {
 		return &ValidationError{Name: "project_id", err: errors.New(`ent: missing required field "Schedule.project_id"`)}
 	}
@@ -489,6 +601,30 @@ func (_c *ScheduleCreate) createSpec() (*Schedule, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.AuthorizationRevision(); ok {
 		_spec.SetField(schedule.FieldAuthorizationRevision, field.TypeInt, value)
 		_node.AuthorizationRevision = &value
+	}
+	if value, ok := _c.mutation.AuthorityCeilingKind(); ok {
+		_spec.SetField(schedule.FieldAuthorityCeilingKind, field.TypeString, value)
+		_node.AuthorityCeilingKind = value
+	}
+	if value, ok := _c.mutation.AuthorityCeilingVersion(); ok {
+		_spec.SetField(schedule.FieldAuthorityCeilingVersion, field.TypeInt32, value)
+		_node.AuthorityCeilingVersion = value
+	}
+	if value, ok := _c.mutation.AuthorityCeilingPermissionIds(); ok {
+		_spec.SetField(schedule.FieldAuthorityCeilingPermissionIds, field.TypeString, value)
+		_node.AuthorityCeilingPermissionIds = &value
+	}
+	if value, ok := _c.mutation.AuthorityCeilingBoundaryKind(); ok {
+		_spec.SetField(schedule.FieldAuthorityCeilingBoundaryKind, field.TypeString, value)
+		_node.AuthorityCeilingBoundaryKind = value
+	}
+	if value, ok := _c.mutation.AuthorityCeilingBoundaryProjectID(); ok {
+		_spec.SetField(schedule.FieldAuthorityCeilingBoundaryProjectID, field.TypeString, value)
+		_node.AuthorityCeilingBoundaryProjectID = value
+	}
+	if value, ok := _c.mutation.AuthorityCeilingSourceExpiresAt(); ok {
+		_spec.SetField(schedule.FieldAuthorityCeilingSourceExpiresAt, field.TypeTime, value)
+		_node.AuthorityCeilingSourceExpiresAt = &value
 	}
 	if value, ok := _c.mutation.ProjectID(); ok {
 		_spec.SetField(schedule.FieldProjectID, field.TypeUUID, value)
@@ -737,6 +873,96 @@ func (u *ScheduleUpsert) AddAuthorizationRevision(v int) *ScheduleUpsert {
 // ClearAuthorizationRevision clears the value of the "authorization_revision" field.
 func (u *ScheduleUpsert) ClearAuthorizationRevision() *ScheduleUpsert {
 	u.SetNull(schedule.FieldAuthorizationRevision)
+	return u
+}
+
+// SetAuthorityCeilingKind sets the "authority_ceiling_kind" field.
+func (u *ScheduleUpsert) SetAuthorityCeilingKind(v string) *ScheduleUpsert {
+	u.Set(schedule.FieldAuthorityCeilingKind, v)
+	return u
+}
+
+// UpdateAuthorityCeilingKind sets the "authority_ceiling_kind" field to the value that was provided on create.
+func (u *ScheduleUpsert) UpdateAuthorityCeilingKind() *ScheduleUpsert {
+	u.SetExcluded(schedule.FieldAuthorityCeilingKind)
+	return u
+}
+
+// SetAuthorityCeilingVersion sets the "authority_ceiling_version" field.
+func (u *ScheduleUpsert) SetAuthorityCeilingVersion(v int32) *ScheduleUpsert {
+	u.Set(schedule.FieldAuthorityCeilingVersion, v)
+	return u
+}
+
+// UpdateAuthorityCeilingVersion sets the "authority_ceiling_version" field to the value that was provided on create.
+func (u *ScheduleUpsert) UpdateAuthorityCeilingVersion() *ScheduleUpsert {
+	u.SetExcluded(schedule.FieldAuthorityCeilingVersion)
+	return u
+}
+
+// AddAuthorityCeilingVersion adds v to the "authority_ceiling_version" field.
+func (u *ScheduleUpsert) AddAuthorityCeilingVersion(v int32) *ScheduleUpsert {
+	u.Add(schedule.FieldAuthorityCeilingVersion, v)
+	return u
+}
+
+// SetAuthorityCeilingPermissionIds sets the "authority_ceiling_permission_ids" field.
+func (u *ScheduleUpsert) SetAuthorityCeilingPermissionIds(v string) *ScheduleUpsert {
+	u.Set(schedule.FieldAuthorityCeilingPermissionIds, v)
+	return u
+}
+
+// UpdateAuthorityCeilingPermissionIds sets the "authority_ceiling_permission_ids" field to the value that was provided on create.
+func (u *ScheduleUpsert) UpdateAuthorityCeilingPermissionIds() *ScheduleUpsert {
+	u.SetExcluded(schedule.FieldAuthorityCeilingPermissionIds)
+	return u
+}
+
+// ClearAuthorityCeilingPermissionIds clears the value of the "authority_ceiling_permission_ids" field.
+func (u *ScheduleUpsert) ClearAuthorityCeilingPermissionIds() *ScheduleUpsert {
+	u.SetNull(schedule.FieldAuthorityCeilingPermissionIds)
+	return u
+}
+
+// SetAuthorityCeilingBoundaryKind sets the "authority_ceiling_boundary_kind" field.
+func (u *ScheduleUpsert) SetAuthorityCeilingBoundaryKind(v string) *ScheduleUpsert {
+	u.Set(schedule.FieldAuthorityCeilingBoundaryKind, v)
+	return u
+}
+
+// UpdateAuthorityCeilingBoundaryKind sets the "authority_ceiling_boundary_kind" field to the value that was provided on create.
+func (u *ScheduleUpsert) UpdateAuthorityCeilingBoundaryKind() *ScheduleUpsert {
+	u.SetExcluded(schedule.FieldAuthorityCeilingBoundaryKind)
+	return u
+}
+
+// SetAuthorityCeilingBoundaryProjectID sets the "authority_ceiling_boundary_project_id" field.
+func (u *ScheduleUpsert) SetAuthorityCeilingBoundaryProjectID(v string) *ScheduleUpsert {
+	u.Set(schedule.FieldAuthorityCeilingBoundaryProjectID, v)
+	return u
+}
+
+// UpdateAuthorityCeilingBoundaryProjectID sets the "authority_ceiling_boundary_project_id" field to the value that was provided on create.
+func (u *ScheduleUpsert) UpdateAuthorityCeilingBoundaryProjectID() *ScheduleUpsert {
+	u.SetExcluded(schedule.FieldAuthorityCeilingBoundaryProjectID)
+	return u
+}
+
+// SetAuthorityCeilingSourceExpiresAt sets the "authority_ceiling_source_expires_at" field.
+func (u *ScheduleUpsert) SetAuthorityCeilingSourceExpiresAt(v time.Time) *ScheduleUpsert {
+	u.Set(schedule.FieldAuthorityCeilingSourceExpiresAt, v)
+	return u
+}
+
+// UpdateAuthorityCeilingSourceExpiresAt sets the "authority_ceiling_source_expires_at" field to the value that was provided on create.
+func (u *ScheduleUpsert) UpdateAuthorityCeilingSourceExpiresAt() *ScheduleUpsert {
+	u.SetExcluded(schedule.FieldAuthorityCeilingSourceExpiresAt)
+	return u
+}
+
+// ClearAuthorityCeilingSourceExpiresAt clears the value of the "authority_ceiling_source_expires_at" field.
+func (u *ScheduleUpsert) ClearAuthorityCeilingSourceExpiresAt() *ScheduleUpsert {
+	u.SetNull(schedule.FieldAuthorityCeilingSourceExpiresAt)
 	return u
 }
 
@@ -1159,6 +1385,111 @@ func (u *ScheduleUpsertOne) UpdateAuthorizationRevision() *ScheduleUpsertOne {
 func (u *ScheduleUpsertOne) ClearAuthorizationRevision() *ScheduleUpsertOne {
 	return u.Update(func(s *ScheduleUpsert) {
 		s.ClearAuthorizationRevision()
+	})
+}
+
+// SetAuthorityCeilingKind sets the "authority_ceiling_kind" field.
+func (u *ScheduleUpsertOne) SetAuthorityCeilingKind(v string) *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.SetAuthorityCeilingKind(v)
+	})
+}
+
+// UpdateAuthorityCeilingKind sets the "authority_ceiling_kind" field to the value that was provided on create.
+func (u *ScheduleUpsertOne) UpdateAuthorityCeilingKind() *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.UpdateAuthorityCeilingKind()
+	})
+}
+
+// SetAuthorityCeilingVersion sets the "authority_ceiling_version" field.
+func (u *ScheduleUpsertOne) SetAuthorityCeilingVersion(v int32) *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.SetAuthorityCeilingVersion(v)
+	})
+}
+
+// AddAuthorityCeilingVersion adds v to the "authority_ceiling_version" field.
+func (u *ScheduleUpsertOne) AddAuthorityCeilingVersion(v int32) *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.AddAuthorityCeilingVersion(v)
+	})
+}
+
+// UpdateAuthorityCeilingVersion sets the "authority_ceiling_version" field to the value that was provided on create.
+func (u *ScheduleUpsertOne) UpdateAuthorityCeilingVersion() *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.UpdateAuthorityCeilingVersion()
+	})
+}
+
+// SetAuthorityCeilingPermissionIds sets the "authority_ceiling_permission_ids" field.
+func (u *ScheduleUpsertOne) SetAuthorityCeilingPermissionIds(v string) *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.SetAuthorityCeilingPermissionIds(v)
+	})
+}
+
+// UpdateAuthorityCeilingPermissionIds sets the "authority_ceiling_permission_ids" field to the value that was provided on create.
+func (u *ScheduleUpsertOne) UpdateAuthorityCeilingPermissionIds() *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.UpdateAuthorityCeilingPermissionIds()
+	})
+}
+
+// ClearAuthorityCeilingPermissionIds clears the value of the "authority_ceiling_permission_ids" field.
+func (u *ScheduleUpsertOne) ClearAuthorityCeilingPermissionIds() *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.ClearAuthorityCeilingPermissionIds()
+	})
+}
+
+// SetAuthorityCeilingBoundaryKind sets the "authority_ceiling_boundary_kind" field.
+func (u *ScheduleUpsertOne) SetAuthorityCeilingBoundaryKind(v string) *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.SetAuthorityCeilingBoundaryKind(v)
+	})
+}
+
+// UpdateAuthorityCeilingBoundaryKind sets the "authority_ceiling_boundary_kind" field to the value that was provided on create.
+func (u *ScheduleUpsertOne) UpdateAuthorityCeilingBoundaryKind() *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.UpdateAuthorityCeilingBoundaryKind()
+	})
+}
+
+// SetAuthorityCeilingBoundaryProjectID sets the "authority_ceiling_boundary_project_id" field.
+func (u *ScheduleUpsertOne) SetAuthorityCeilingBoundaryProjectID(v string) *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.SetAuthorityCeilingBoundaryProjectID(v)
+	})
+}
+
+// UpdateAuthorityCeilingBoundaryProjectID sets the "authority_ceiling_boundary_project_id" field to the value that was provided on create.
+func (u *ScheduleUpsertOne) UpdateAuthorityCeilingBoundaryProjectID() *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.UpdateAuthorityCeilingBoundaryProjectID()
+	})
+}
+
+// SetAuthorityCeilingSourceExpiresAt sets the "authority_ceiling_source_expires_at" field.
+func (u *ScheduleUpsertOne) SetAuthorityCeilingSourceExpiresAt(v time.Time) *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.SetAuthorityCeilingSourceExpiresAt(v)
+	})
+}
+
+// UpdateAuthorityCeilingSourceExpiresAt sets the "authority_ceiling_source_expires_at" field to the value that was provided on create.
+func (u *ScheduleUpsertOne) UpdateAuthorityCeilingSourceExpiresAt() *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.UpdateAuthorityCeilingSourceExpiresAt()
+	})
+}
+
+// ClearAuthorityCeilingSourceExpiresAt clears the value of the "authority_ceiling_source_expires_at" field.
+func (u *ScheduleUpsertOne) ClearAuthorityCeilingSourceExpiresAt() *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.ClearAuthorityCeilingSourceExpiresAt()
 	})
 }
 
@@ -1783,6 +2114,111 @@ func (u *ScheduleUpsertBulk) UpdateAuthorizationRevision() *ScheduleUpsertBulk {
 func (u *ScheduleUpsertBulk) ClearAuthorizationRevision() *ScheduleUpsertBulk {
 	return u.Update(func(s *ScheduleUpsert) {
 		s.ClearAuthorizationRevision()
+	})
+}
+
+// SetAuthorityCeilingKind sets the "authority_ceiling_kind" field.
+func (u *ScheduleUpsertBulk) SetAuthorityCeilingKind(v string) *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.SetAuthorityCeilingKind(v)
+	})
+}
+
+// UpdateAuthorityCeilingKind sets the "authority_ceiling_kind" field to the value that was provided on create.
+func (u *ScheduleUpsertBulk) UpdateAuthorityCeilingKind() *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.UpdateAuthorityCeilingKind()
+	})
+}
+
+// SetAuthorityCeilingVersion sets the "authority_ceiling_version" field.
+func (u *ScheduleUpsertBulk) SetAuthorityCeilingVersion(v int32) *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.SetAuthorityCeilingVersion(v)
+	})
+}
+
+// AddAuthorityCeilingVersion adds v to the "authority_ceiling_version" field.
+func (u *ScheduleUpsertBulk) AddAuthorityCeilingVersion(v int32) *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.AddAuthorityCeilingVersion(v)
+	})
+}
+
+// UpdateAuthorityCeilingVersion sets the "authority_ceiling_version" field to the value that was provided on create.
+func (u *ScheduleUpsertBulk) UpdateAuthorityCeilingVersion() *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.UpdateAuthorityCeilingVersion()
+	})
+}
+
+// SetAuthorityCeilingPermissionIds sets the "authority_ceiling_permission_ids" field.
+func (u *ScheduleUpsertBulk) SetAuthorityCeilingPermissionIds(v string) *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.SetAuthorityCeilingPermissionIds(v)
+	})
+}
+
+// UpdateAuthorityCeilingPermissionIds sets the "authority_ceiling_permission_ids" field to the value that was provided on create.
+func (u *ScheduleUpsertBulk) UpdateAuthorityCeilingPermissionIds() *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.UpdateAuthorityCeilingPermissionIds()
+	})
+}
+
+// ClearAuthorityCeilingPermissionIds clears the value of the "authority_ceiling_permission_ids" field.
+func (u *ScheduleUpsertBulk) ClearAuthorityCeilingPermissionIds() *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.ClearAuthorityCeilingPermissionIds()
+	})
+}
+
+// SetAuthorityCeilingBoundaryKind sets the "authority_ceiling_boundary_kind" field.
+func (u *ScheduleUpsertBulk) SetAuthorityCeilingBoundaryKind(v string) *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.SetAuthorityCeilingBoundaryKind(v)
+	})
+}
+
+// UpdateAuthorityCeilingBoundaryKind sets the "authority_ceiling_boundary_kind" field to the value that was provided on create.
+func (u *ScheduleUpsertBulk) UpdateAuthorityCeilingBoundaryKind() *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.UpdateAuthorityCeilingBoundaryKind()
+	})
+}
+
+// SetAuthorityCeilingBoundaryProjectID sets the "authority_ceiling_boundary_project_id" field.
+func (u *ScheduleUpsertBulk) SetAuthorityCeilingBoundaryProjectID(v string) *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.SetAuthorityCeilingBoundaryProjectID(v)
+	})
+}
+
+// UpdateAuthorityCeilingBoundaryProjectID sets the "authority_ceiling_boundary_project_id" field to the value that was provided on create.
+func (u *ScheduleUpsertBulk) UpdateAuthorityCeilingBoundaryProjectID() *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.UpdateAuthorityCeilingBoundaryProjectID()
+	})
+}
+
+// SetAuthorityCeilingSourceExpiresAt sets the "authority_ceiling_source_expires_at" field.
+func (u *ScheduleUpsertBulk) SetAuthorityCeilingSourceExpiresAt(v time.Time) *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.SetAuthorityCeilingSourceExpiresAt(v)
+	})
+}
+
+// UpdateAuthorityCeilingSourceExpiresAt sets the "authority_ceiling_source_expires_at" field to the value that was provided on create.
+func (u *ScheduleUpsertBulk) UpdateAuthorityCeilingSourceExpiresAt() *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.UpdateAuthorityCeilingSourceExpiresAt()
+	})
+}
+
+// ClearAuthorityCeilingSourceExpiresAt clears the value of the "authority_ceiling_source_expires_at" field.
+func (u *ScheduleUpsertBulk) ClearAuthorityCeilingSourceExpiresAt() *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.ClearAuthorityCeilingSourceExpiresAt()
 	})
 }
 
