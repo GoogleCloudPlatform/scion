@@ -2517,9 +2517,10 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 		//     resolveDeleteTarget;
 		//   - a container this delete may target is listed (a legacy
 		//     container with no run label, or one of the requested run)
-		//     beside another run's container: a retryable 409. This delete already did nothing, so
-		//     the hub rolls back, and its retry resolves the target afresh
-		//     and deletes it, as a fresh delete of this state would;
+		//     beside another run's container: a retryable 409. This
+		//     delete already did nothing, so the hub rolls back, and its
+		//     retry resolves the target afresh and deletes it, as a fresh
+		//     delete of this state would;
 		//   - nothing listed, only files, a listing with no other run's
 		//     container (stale: it contradicts the runtime), or a List
 		//     failure: the run-mismatch 404 with no current run, which

@@ -305,3 +305,42 @@ func TestDeleteAgent_MainAndRacePathsAgree(t *testing.T) {
 		})
 	}
 }
+
+// Review round 2: race-path listings that must keep the old 404 with no
+// current run, because no container both confirms the runtime's refusal
+// and is a target this delete may act on.
+func TestDeleteAgent_RacePathStaleOrFileOnly_NoCurrentRun(t *testing.T) {
+	fileOnly := func(scionB, runID string) api.AgentInfo {
+		return withRun(labelled("dev", "", scopeProjB, scionB), runID)
+	}
+	for _, tc := range []struct {
+		name  string
+		state func(scionB string) []api.AgentInfo
+	}{
+		{
+			// run-b is listed only as files: nothing confirms the
+			// runtime's refusal, so the listing is stale.
+			name: "legacy container beside another run's files only",
+			state: func(scionB string) []api.AgentInfo {
+				return []api.AgentInfo{labelled("dev", "cid-legacy", scopeProjB, scionB), fileOnly(scionB, "run-b")}
+			},
+		},
+		{
+			// The requested run's entry is files only: there is no
+			// container to retry the delete on.
+			name: "requested run's files only beside another run's container",
+			state: func(scionB string) []api.AgentInfo {
+				return []api.AgentInfo{fileOnly(scionB, "run-old"), withRun(labelled("dev", "cid-b", scopeProjB, scionB), "run-b")}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr := &relistingManager{}
+			srv, home := newCleanupTestServer(t, mgr)
+			scionB, _ := makeHubProject(t, home, "proj-b", scopeProjB, "dev")
+			mgr.agents = []api.AgentInfo{withRun(labelled("dev", "cid-old", scopeProjB, scionB), "run-old")}
+			mgr.after = tc.state(scionB)
+			assertDeleteRunMismatch(t, doDelete(t, srv, "dev", "projectId="+scopeProjB+"&runId=run-old"), "")
+		})
+	}
+}
