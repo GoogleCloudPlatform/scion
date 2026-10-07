@@ -22,6 +22,8 @@ type Tx struct {
 	Agent *AgentClient
 	// AgentCredential is the client for interacting with the AgentCredential builders.
 	AgentCredential *AgentCredentialClient
+	// AgentHold is the client for interacting with the AgentHold builders.
+	AgentHold *AgentHoldClient
 	// AgentIdentityKey is the client for interacting with the AgentIdentityKey builders.
 	AgentIdentityKey *AgentIdentityKeyClient
 	// AgentRecovery is the client for interacting with the AgentRecovery builders.
@@ -96,6 +98,8 @@ type Tx struct {
 	MaintenanceOperation *MaintenanceOperationClient
 	// MaintenanceOperationRun is the client for interacting with the MaintenanceOperationRun builders.
 	MaintenanceOperationRun *MaintenanceOperationRunClient
+	// MembershipLossCheck is the client for interacting with the MembershipLossCheck builders.
+	MembershipLossCheck *MembershipLossCheckClient
 	// Message is the client for interacting with the Message builders.
 	Message *MessageClient
 	// MessageAddressee is the client for interacting with the MessageAddressee builders.
@@ -288,6 +292,7 @@ func (tx *Tx) init() {
 	tx.AccessPolicy = NewAccessPolicyClient(tx.config)
 	tx.Agent = NewAgentClient(tx.config)
 	tx.AgentCredential = NewAgentCredentialClient(tx.config)
+	tx.AgentHold = NewAgentHoldClient(tx.config)
 	tx.AgentIdentityKey = NewAgentIdentityKeyClient(tx.config)
 	tx.AgentRecovery = NewAgentRecoveryClient(tx.config)
 	tx.AgentReincarnation = NewAgentReincarnationClient(tx.config)
@@ -325,6 +330,7 @@ func (tx *Tx) init() {
 	tx.LimitDefinition = NewLimitDefinitionClient(tx.config)
 	tx.MaintenanceOperation = NewMaintenanceOperationClient(tx.config)
 	tx.MaintenanceOperationRun = NewMaintenanceOperationRunClient(tx.config)
+	tx.MembershipLossCheck = NewMembershipLossCheckClient(tx.config)
 	tx.Message = NewMessageClient(tx.config)
 	tx.MessageAddressee = NewMessageAddresseeClient(tx.config)
 	tx.MutationAudit = NewMutationAuditClient(tx.config)

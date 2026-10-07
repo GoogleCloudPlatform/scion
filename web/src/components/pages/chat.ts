@@ -54,7 +54,7 @@ import { chatUnread } from '../../client/chat-unread.js';
 import { CHAT_STARTUP_REUSE_MS, chatDMsLoad, chatLoadClock } from '../../client/chat-list-cache.js';
 import type { SharedLoadOptions } from '../../client/chat-list-cache.js';
 import { TouchPrimaryController } from '../../utils/input-modality.js';
-import { isMacPlatform } from '../../utils/platform.js';
+import { isMacTextFieldCtrlKey } from '../shared/text-field-keys.js';
 import { CHAT_PALETTE_OPEN_REQUEST_EVENT } from '../../client/chat-palette-events.js';
 import { blurElement, focusElement } from '../shared/focus-moved.js';
 import type { GroupState, PaletteGroup, PaletteTarget } from '../../client/chat-palette-types.js';
@@ -343,16 +343,17 @@ interface SpaceMember {
   kind: 'user' | 'agent';
 }
 
-/** Input types that take typed text, where a line-editing key has a native meaning. */
-const TEXT_INPUT_TYPES: ReadonlySet<string> = new Set([
-  'text',
-  'search',
-  'email',
-  'url',
-  'tel',
-  'password',
-  'number',
-]);
+type PromoteToastVariant = 'success' | 'warning' | 'danger';
+
+/**
+ * Icon for each promote toast variant. Callers outside the type system
+ * fall back to 'exclamation-circle'.
+ */
+const PROMOTE_TOAST_ICONS: Readonly<Record<PromoteToastVariant, string>> = {
+  success: 'check-circle',
+  warning: 'exclamation-triangle',
+  danger: 'exclamation-circle',
+};
 
 @customElement('scion-page-chat')
 export class ScionPageChat extends LitElement {
@@ -3987,7 +3988,7 @@ export class ScionPageChat extends LitElement {
     if (this._eventFromTerminalSurface(e)) return;
     // On macOS, Ctrl+K in a text field deletes to the end of the line; the
     // palette's shortcut there is Cmd+K.
-    if (e.ctrlKey && isMacPlatform() && this._eventFromTextField(e)) return;
+    if (isMacTextFieldCtrlKey(e)) return;
     if (!this._paletteOpenGuardsHold()) return;
 
     e.preventDefault();
@@ -4030,21 +4031,6 @@ export class ScionPageChat extends LitElement {
       if (node.tagName === 'SCION-TERMINAL-PANE') return true;
       return node.classList?.contains('xterm') ?? false;
     });
-  }
-
-  /**
-   * True when the event originated in an editable text field: a text-taking
-   * input, a textarea, or contenteditable content. Read-only and disabled
-   * fields are not editable. Reads `composedPath()[0]`, since a document
-   * listener sees the composer's native textarea retargeted to its shadow host.
-   */
-  private _eventFromTextField(e: KeyboardEvent): boolean {
-    const origin = e.composedPath()[0];
-    if (origin instanceof HTMLInputElement) {
-      return TEXT_INPUT_TYPES.has(origin.type) && !origin.readOnly && !origin.disabled;
-    }
-    if (origin instanceof HTMLTextAreaElement) return !origin.readOnly && !origin.disabled;
-    return origin instanceof HTMLElement && origin.isContentEditable;
   }
 
   /** Is the current URL (relative to BASE_URL) `/chat` or a route below it? */
@@ -6135,17 +6121,18 @@ export class ScionPageChat extends LitElement {
   }
 
   /** Show a toast notification for promote results. */
-  private showPromoteToast(
-    message: string,
-    variant: 'success' | 'warning' | 'danger' = 'success'
-  ): void {
-    // Use the Shoelace alert/toast pattern if available, else console
+  private showPromoteToast(message: string, variant: PromoteToastVariant = 'success'): void {
+    // Build the content from DOM nodes and text so the message is never
+    // parsed as HTML.
     const alert = Object.assign(document.createElement('sl-alert'), {
       variant,
       closable: true,
       duration: 4000,
-      innerHTML: `<sl-icon name="${variant === 'success' ? 'check-circle' : variant === 'warning' ? 'exclamation-triangle' : 'exclamation-circle'}" slot="icon"></sl-icon>${message}`,
     });
+    const icon = document.createElement('sl-icon');
+    icon.setAttribute('name', PROMOTE_TOAST_ICONS[variant] ?? 'exclamation-circle');
+    icon.setAttribute('slot', 'icon');
+    alert.append(icon, document.createTextNode(message));
     document.body.appendChild(alert);
     void (alert as unknown as { toast(): Promise<void> }).toast();
   }

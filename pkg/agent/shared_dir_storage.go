@@ -410,9 +410,15 @@ const sharedDirStorageRecordFile = "shared-dir-storage.json"
 // dirs whose backend differs from Backend. A record written before per-dir
 // backends existed has no Dirs, so Backend applies to every dir, exactly as
 // before.
+//
+// Previous names the dirs whose backend an explicit change (see
+// changeSharedDirBackends) moved to nfs, with the backend they had
+// before. A start checks each such dir once for an empty nfs directory
+// while its previous local directory is not empty, then drops the entry.
 type sharedDirStorageRecord struct {
-	Backend string            `json:"backend"`
-	Dirs    map[string]string `json:"dirs,omitempty"`
+	Backend  string            `json:"backend"`
+	Dirs     map[string]string `json:"dirs,omitempty"`
+	Previous map[string]string `json:"previous,omitempty"`
 }
 
 // backendFor returns the recorded backend of the shared dir name.
@@ -428,8 +434,8 @@ func (r *sharedDirStorageRecord) backendFor(name string) string {
 // start, or an agent created before the backend was recorded). A record
 // that exists but cannot be read or parsed, that names no backend, or
 // whose dirs entries are not valid shared dir names mapped to "local" or
-// "nfs", is an error, so a damaged record never silently falls back to the
-// current settings.
+// "nfs" (or previous entries mapped to "local"), is an error, so a damaged
+// record never silently falls back to the current settings.
 func loadSharedDirStorageRecord(agentDir string) (*sharedDirStorageRecord, error) {
 	if agentDir == "" {
 		return nil, nil
@@ -455,6 +461,14 @@ func loadSharedDirStorageRecord(agentDir string) (*sharedDirStorageRecord, error
 		}
 		if backend != "local" && backend != "nfs" {
 			return nil, fmt.Errorf("the agent's shared-dir storage record %s records an unknown backend %q for shared dir %q", path, backend, name)
+		}
+	}
+	for name, backend := range rec.Previous {
+		if err := api.ValidateSharedDirs([]api.SharedDir{{Name: name}}); err != nil {
+			return nil, fmt.Errorf("the agent's shared-dir storage record %s names an invalid shared dir %q", path, name)
+		}
+		if backend != "local" {
+			return nil, fmt.Errorf("the agent's shared-dir storage record %s records an unknown previous backend %q for shared dir %q", path, backend, name)
 		}
 	}
 	return &rec, nil
@@ -666,7 +680,8 @@ func newSharedDirStorageRecord(defaultCfg *config.V1SharedDirStorageConfig, over
 // local set and an nfs set, resolveSharedDirs runs once per set, and the
 // volumes are returned in the order of dirs. The realization's LocalDirs
 // names the local dirs, so the Kubernetes runtime mounts only the nfs dirs
-// from the export.
+// from the export. byName maps each mounted dir's name to its volume; a dir
+// whose local volume was dropped after a path error is not in it.
 func resolveSharedDirsPerDir(
 	defaultCfg *config.V1SharedDirStorageConfig,
 	overrides map[string]*config.V1SharedDirStorageConfig,
@@ -676,14 +691,26 @@ func resolveSharedDirsPerDir(
 	dirs []api.SharedDir,
 	containerWorkspace string,
 	nfsWorkspaceBackend bool,
-) ([]api.VolumeMount, *runtime.SharedDirRealization, error) {
+) (volumes []api.VolumeMount, realization *runtime.SharedDirRealization, byName map[string]api.VolumeMount, err error) {
 	if len(overrides) == 0 {
-		return resolveSharedDirs(defaultCfg, projectDir, projectID, runtimeName, dirs, containerWorkspace, nfsWorkspaceBackend)
+		volumes, realization, err = resolveSharedDirs(defaultCfg, projectDir, projectID, runtimeName, dirs, containerWorkspace, nfsWorkspaceBackend)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		// resolveSharedDirs returns one volume per dir, in order, or none
+		// when the local layout dropped them after a path error.
+		byName = make(map[string]api.VolumeMount, len(volumes))
+		if len(volumes) == len(dirs) {
+			for i, d := range dirs {
+				byName[d.Name] = volumes[i]
+			}
+		}
+		return volumes, realization, byName, nil
 	}
 	// The default is checked even when every dir is overridden, as
 	// resolveSharedDirs checks it whenever a block is configured.
 	if err := defaultCfg.Validate(); err != nil {
-		return nil, nil, fmt.Errorf("server.shared_dir_storage: %w", err)
+		return nil, nil, nil, fmt.Errorf("server.shared_dir_storage: %w", err)
 	}
 
 	var localDirs, nfsDirs []api.SharedDir
@@ -706,15 +733,14 @@ func resolveSharedDirsPerDir(
 		}
 	}
 
-	byName := make(map[string]api.VolumeMount, len(dirs))
-	var realization *runtime.SharedDirRealization
+	byName = make(map[string]api.VolumeMount, len(dirs))
 	if len(nfsDirs) > 0 {
 		vols, res, err := resolveSharedDirs(nfsCfg, projectDir, projectID, runtimeName, nfsDirs, containerWorkspace, nfsWorkspaceBackend)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		if len(vols) != len(nfsDirs) {
-			return nil, nil, fmt.Errorf("server.shared_dir_storage: resolved %d volumes for %d nfs shared dirs", len(vols), len(nfsDirs))
+			return nil, nil, nil, fmt.Errorf("server.shared_dir_storage: resolved %d volumes for %d nfs shared dirs", len(vols), len(nfsDirs))
 		}
 		for i, d := range nfsDirs {
 			byName[d.Name] = vols[i]
@@ -724,7 +750,7 @@ func resolveSharedDirsPerDir(
 	if len(localDirs) > 0 {
 		vols, _, err := resolveSharedDirs(localCfg, projectDir, projectID, runtimeName, localDirs, containerWorkspace, nfsWorkspaceBackend)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		if realization != nil {
 			realization.LocalDirs = make(map[string]bool, len(localDirs))
@@ -742,11 +768,11 @@ func resolveSharedDirsPerDir(
 		}
 	}
 
-	volumes := make([]api.VolumeMount, 0, len(byName))
+	volumes = make([]api.VolumeMount, 0, len(byName))
 	for _, d := range dirs {
 		if v, ok := byName[d.Name]; ok {
 			volumes = append(volumes, v)
 		}
 	}
-	return volumes, realization, nil
+	return volumes, realization, byName, nil
 }

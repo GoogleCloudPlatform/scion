@@ -183,6 +183,109 @@ func (_u *ScheduledEventUpdate) ClearAuthorizationRevision() *ScheduledEventUpda
 	return _u
 }
 
+// SetAuthorityCeilingKind sets the "authority_ceiling_kind" field.
+func (_u *ScheduledEventUpdate) SetAuthorityCeilingKind(v string) *ScheduledEventUpdate {
+	_u.mutation.SetAuthorityCeilingKind(v)
+	return _u
+}
+
+// SetNillableAuthorityCeilingKind sets the "authority_ceiling_kind" field if the given value is not nil.
+func (_u *ScheduledEventUpdate) SetNillableAuthorityCeilingKind(v *string) *ScheduledEventUpdate {
+	if v != nil {
+		_u.SetAuthorityCeilingKind(*v)
+	}
+	return _u
+}
+
+// SetAuthorityCeilingVersion sets the "authority_ceiling_version" field.
+func (_u *ScheduledEventUpdate) SetAuthorityCeilingVersion(v int32) *ScheduledEventUpdate {
+	_u.mutation.ResetAuthorityCeilingVersion()
+	_u.mutation.SetAuthorityCeilingVersion(v)
+	return _u
+}
+
+// SetNillableAuthorityCeilingVersion sets the "authority_ceiling_version" field if the given value is not nil.
+func (_u *ScheduledEventUpdate) SetNillableAuthorityCeilingVersion(v *int32) *ScheduledEventUpdate {
+	if v != nil {
+		_u.SetAuthorityCeilingVersion(*v)
+	}
+	return _u
+}
+
+// AddAuthorityCeilingVersion adds value to the "authority_ceiling_version" field.
+func (_u *ScheduledEventUpdate) AddAuthorityCeilingVersion(v int32) *ScheduledEventUpdate {
+	_u.mutation.AddAuthorityCeilingVersion(v)
+	return _u
+}
+
+// SetAuthorityCeilingPermissionIds sets the "authority_ceiling_permission_ids" field.
+func (_u *ScheduledEventUpdate) SetAuthorityCeilingPermissionIds(v string) *ScheduledEventUpdate {
+	_u.mutation.SetAuthorityCeilingPermissionIds(v)
+	return _u
+}
+
+// SetNillableAuthorityCeilingPermissionIds sets the "authority_ceiling_permission_ids" field if the given value is not nil.
+func (_u *ScheduledEventUpdate) SetNillableAuthorityCeilingPermissionIds(v *string) *ScheduledEventUpdate {
+	if v != nil {
+		_u.SetAuthorityCeilingPermissionIds(*v)
+	}
+	return _u
+}
+
+// ClearAuthorityCeilingPermissionIds clears the value of the "authority_ceiling_permission_ids" field.
+func (_u *ScheduledEventUpdate) ClearAuthorityCeilingPermissionIds() *ScheduledEventUpdate {
+	_u.mutation.ClearAuthorityCeilingPermissionIds()
+	return _u
+}
+
+// SetAuthorityCeilingBoundaryKind sets the "authority_ceiling_boundary_kind" field.
+func (_u *ScheduledEventUpdate) SetAuthorityCeilingBoundaryKind(v string) *ScheduledEventUpdate {
+	_u.mutation.SetAuthorityCeilingBoundaryKind(v)
+	return _u
+}
+
+// SetNillableAuthorityCeilingBoundaryKind sets the "authority_ceiling_boundary_kind" field if the given value is not nil.
+func (_u *ScheduledEventUpdate) SetNillableAuthorityCeilingBoundaryKind(v *string) *ScheduledEventUpdate {
+	if v != nil {
+		_u.SetAuthorityCeilingBoundaryKind(*v)
+	}
+	return _u
+}
+
+// SetAuthorityCeilingBoundaryProjectID sets the "authority_ceiling_boundary_project_id" field.
+func (_u *ScheduledEventUpdate) SetAuthorityCeilingBoundaryProjectID(v string) *ScheduledEventUpdate {
+	_u.mutation.SetAuthorityCeilingBoundaryProjectID(v)
+	return _u
+}
+
+// SetNillableAuthorityCeilingBoundaryProjectID sets the "authority_ceiling_boundary_project_id" field if the given value is not nil.
+func (_u *ScheduledEventUpdate) SetNillableAuthorityCeilingBoundaryProjectID(v *string) *ScheduledEventUpdate {
+	if v != nil {
+		_u.SetAuthorityCeilingBoundaryProjectID(*v)
+	}
+	return _u
+}
+
+// SetAuthorityCeilingSourceExpiresAt sets the "authority_ceiling_source_expires_at" field.
+func (_u *ScheduledEventUpdate) SetAuthorityCeilingSourceExpiresAt(v time.Time) *ScheduledEventUpdate {
+	_u.mutation.SetAuthorityCeilingSourceExpiresAt(v)
+	return _u
+}
+
+// SetNillableAuthorityCeilingSourceExpiresAt sets the "authority_ceiling_source_expires_at" field if the given value is not nil.
+func (_u *ScheduledEventUpdate) SetNillableAuthorityCeilingSourceExpiresAt(v *time.Time) *ScheduledEventUpdate {
+	if v != nil {
+		_u.SetAuthorityCeilingSourceExpiresAt(*v)
+	}
+	return _u
+}
+
+// ClearAuthorityCeilingSourceExpiresAt clears the value of the "authority_ceiling_source_expires_at" field.
+func (_u *ScheduledEventUpdate) ClearAuthorityCeilingSourceExpiresAt() *ScheduledEventUpdate {
+	_u.mutation.ClearAuthorityCeilingSourceExpiresAt()
+	return _u
+}
+
 // SetProjectID sets the "project_id" field.
 func (_u *ScheduledEventUpdate) SetProjectID(v uuid.UUID) *ScheduledEventUpdate {
 	_u.mutation.SetProjectID(v)
@@ -440,6 +543,33 @@ func (_u *ScheduledEventUpdate) sqlSave(ctx context.Context) (_node int, err err
 	if _u.mutation.AuthorizationRevisionCleared() {
 		_spec.ClearField(scheduledevent.FieldAuthorizationRevision, field.TypeInt)
 	}
+	if value, ok := _u.mutation.AuthorityCeilingKind(); ok {
+		_spec.SetField(scheduledevent.FieldAuthorityCeilingKind, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.AuthorityCeilingVersion(); ok {
+		_spec.SetField(scheduledevent.FieldAuthorityCeilingVersion, field.TypeInt32, value)
+	}
+	if value, ok := _u.mutation.AddedAuthorityCeilingVersion(); ok {
+		_spec.AddField(scheduledevent.FieldAuthorityCeilingVersion, field.TypeInt32, value)
+	}
+	if value, ok := _u.mutation.AuthorityCeilingPermissionIds(); ok {
+		_spec.SetField(scheduledevent.FieldAuthorityCeilingPermissionIds, field.TypeString, value)
+	}
+	if _u.mutation.AuthorityCeilingPermissionIdsCleared() {
+		_spec.ClearField(scheduledevent.FieldAuthorityCeilingPermissionIds, field.TypeString)
+	}
+	if value, ok := _u.mutation.AuthorityCeilingBoundaryKind(); ok {
+		_spec.SetField(scheduledevent.FieldAuthorityCeilingBoundaryKind, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.AuthorityCeilingBoundaryProjectID(); ok {
+		_spec.SetField(scheduledevent.FieldAuthorityCeilingBoundaryProjectID, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.AuthorityCeilingSourceExpiresAt(); ok {
+		_spec.SetField(scheduledevent.FieldAuthorityCeilingSourceExpiresAt, field.TypeTime, value)
+	}
+	if _u.mutation.AuthorityCeilingSourceExpiresAtCleared() {
+		_spec.ClearField(scheduledevent.FieldAuthorityCeilingSourceExpiresAt, field.TypeTime)
+	}
 	if value, ok := _u.mutation.ProjectID(); ok {
 		_spec.SetField(scheduledevent.FieldProjectID, field.TypeUUID, value)
 	}
@@ -650,6 +780,109 @@ func (_u *ScheduledEventUpdateOne) AddAuthorizationRevision(v int) *ScheduledEve
 // ClearAuthorizationRevision clears the value of the "authorization_revision" field.
 func (_u *ScheduledEventUpdateOne) ClearAuthorizationRevision() *ScheduledEventUpdateOne {
 	_u.mutation.ClearAuthorizationRevision()
+	return _u
+}
+
+// SetAuthorityCeilingKind sets the "authority_ceiling_kind" field.
+func (_u *ScheduledEventUpdateOne) SetAuthorityCeilingKind(v string) *ScheduledEventUpdateOne {
+	_u.mutation.SetAuthorityCeilingKind(v)
+	return _u
+}
+
+// SetNillableAuthorityCeilingKind sets the "authority_ceiling_kind" field if the given value is not nil.
+func (_u *ScheduledEventUpdateOne) SetNillableAuthorityCeilingKind(v *string) *ScheduledEventUpdateOne {
+	if v != nil {
+		_u.SetAuthorityCeilingKind(*v)
+	}
+	return _u
+}
+
+// SetAuthorityCeilingVersion sets the "authority_ceiling_version" field.
+func (_u *ScheduledEventUpdateOne) SetAuthorityCeilingVersion(v int32) *ScheduledEventUpdateOne {
+	_u.mutation.ResetAuthorityCeilingVersion()
+	_u.mutation.SetAuthorityCeilingVersion(v)
+	return _u
+}
+
+// SetNillableAuthorityCeilingVersion sets the "authority_ceiling_version" field if the given value is not nil.
+func (_u *ScheduledEventUpdateOne) SetNillableAuthorityCeilingVersion(v *int32) *ScheduledEventUpdateOne {
+	if v != nil {
+		_u.SetAuthorityCeilingVersion(*v)
+	}
+	return _u
+}
+
+// AddAuthorityCeilingVersion adds value to the "authority_ceiling_version" field.
+func (_u *ScheduledEventUpdateOne) AddAuthorityCeilingVersion(v int32) *ScheduledEventUpdateOne {
+	_u.mutation.AddAuthorityCeilingVersion(v)
+	return _u
+}
+
+// SetAuthorityCeilingPermissionIds sets the "authority_ceiling_permission_ids" field.
+func (_u *ScheduledEventUpdateOne) SetAuthorityCeilingPermissionIds(v string) *ScheduledEventUpdateOne {
+	_u.mutation.SetAuthorityCeilingPermissionIds(v)
+	return _u
+}
+
+// SetNillableAuthorityCeilingPermissionIds sets the "authority_ceiling_permission_ids" field if the given value is not nil.
+func (_u *ScheduledEventUpdateOne) SetNillableAuthorityCeilingPermissionIds(v *string) *ScheduledEventUpdateOne {
+	if v != nil {
+		_u.SetAuthorityCeilingPermissionIds(*v)
+	}
+	return _u
+}
+
+// ClearAuthorityCeilingPermissionIds clears the value of the "authority_ceiling_permission_ids" field.
+func (_u *ScheduledEventUpdateOne) ClearAuthorityCeilingPermissionIds() *ScheduledEventUpdateOne {
+	_u.mutation.ClearAuthorityCeilingPermissionIds()
+	return _u
+}
+
+// SetAuthorityCeilingBoundaryKind sets the "authority_ceiling_boundary_kind" field.
+func (_u *ScheduledEventUpdateOne) SetAuthorityCeilingBoundaryKind(v string) *ScheduledEventUpdateOne {
+	_u.mutation.SetAuthorityCeilingBoundaryKind(v)
+	return _u
+}
+
+// SetNillableAuthorityCeilingBoundaryKind sets the "authority_ceiling_boundary_kind" field if the given value is not nil.
+func (_u *ScheduledEventUpdateOne) SetNillableAuthorityCeilingBoundaryKind(v *string) *ScheduledEventUpdateOne {
+	if v != nil {
+		_u.SetAuthorityCeilingBoundaryKind(*v)
+	}
+	return _u
+}
+
+// SetAuthorityCeilingBoundaryProjectID sets the "authority_ceiling_boundary_project_id" field.
+func (_u *ScheduledEventUpdateOne) SetAuthorityCeilingBoundaryProjectID(v string) *ScheduledEventUpdateOne {
+	_u.mutation.SetAuthorityCeilingBoundaryProjectID(v)
+	return _u
+}
+
+// SetNillableAuthorityCeilingBoundaryProjectID sets the "authority_ceiling_boundary_project_id" field if the given value is not nil.
+func (_u *ScheduledEventUpdateOne) SetNillableAuthorityCeilingBoundaryProjectID(v *string) *ScheduledEventUpdateOne {
+	if v != nil {
+		_u.SetAuthorityCeilingBoundaryProjectID(*v)
+	}
+	return _u
+}
+
+// SetAuthorityCeilingSourceExpiresAt sets the "authority_ceiling_source_expires_at" field.
+func (_u *ScheduledEventUpdateOne) SetAuthorityCeilingSourceExpiresAt(v time.Time) *ScheduledEventUpdateOne {
+	_u.mutation.SetAuthorityCeilingSourceExpiresAt(v)
+	return _u
+}
+
+// SetNillableAuthorityCeilingSourceExpiresAt sets the "authority_ceiling_source_expires_at" field if the given value is not nil.
+func (_u *ScheduledEventUpdateOne) SetNillableAuthorityCeilingSourceExpiresAt(v *time.Time) *ScheduledEventUpdateOne {
+	if v != nil {
+		_u.SetAuthorityCeilingSourceExpiresAt(*v)
+	}
+	return _u
+}
+
+// ClearAuthorityCeilingSourceExpiresAt clears the value of the "authority_ceiling_source_expires_at" field.
+func (_u *ScheduledEventUpdateOne) ClearAuthorityCeilingSourceExpiresAt() *ScheduledEventUpdateOne {
+	_u.mutation.ClearAuthorityCeilingSourceExpiresAt()
 	return _u
 }
 
@@ -939,6 +1172,33 @@ func (_u *ScheduledEventUpdateOne) sqlSave(ctx context.Context) (_node *Schedule
 	}
 	if _u.mutation.AuthorizationRevisionCleared() {
 		_spec.ClearField(scheduledevent.FieldAuthorizationRevision, field.TypeInt)
+	}
+	if value, ok := _u.mutation.AuthorityCeilingKind(); ok {
+		_spec.SetField(scheduledevent.FieldAuthorityCeilingKind, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.AuthorityCeilingVersion(); ok {
+		_spec.SetField(scheduledevent.FieldAuthorityCeilingVersion, field.TypeInt32, value)
+	}
+	if value, ok := _u.mutation.AddedAuthorityCeilingVersion(); ok {
+		_spec.AddField(scheduledevent.FieldAuthorityCeilingVersion, field.TypeInt32, value)
+	}
+	if value, ok := _u.mutation.AuthorityCeilingPermissionIds(); ok {
+		_spec.SetField(scheduledevent.FieldAuthorityCeilingPermissionIds, field.TypeString, value)
+	}
+	if _u.mutation.AuthorityCeilingPermissionIdsCleared() {
+		_spec.ClearField(scheduledevent.FieldAuthorityCeilingPermissionIds, field.TypeString)
+	}
+	if value, ok := _u.mutation.AuthorityCeilingBoundaryKind(); ok {
+		_spec.SetField(scheduledevent.FieldAuthorityCeilingBoundaryKind, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.AuthorityCeilingBoundaryProjectID(); ok {
+		_spec.SetField(scheduledevent.FieldAuthorityCeilingBoundaryProjectID, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.AuthorityCeilingSourceExpiresAt(); ok {
+		_spec.SetField(scheduledevent.FieldAuthorityCeilingSourceExpiresAt, field.TypeTime, value)
+	}
+	if _u.mutation.AuthorityCeilingSourceExpiresAtCleared() {
+		_spec.ClearField(scheduledevent.FieldAuthorityCeilingSourceExpiresAt, field.TypeTime)
 	}
 	if value, ok := _u.mutation.ProjectID(); ok {
 		_spec.SetField(scheduledevent.FieldProjectID, field.TypeUUID, value)
