@@ -217,6 +217,10 @@ const (
 	// PruneRelayInstances run together under this one lock, as the registry
 	// requires.
 	LockConduitRegistryReap AdvisoryLockKey = 0x5C100023
+
+	// LockBrokerJoinTokenCleanup guards the periodic removal of expired
+	// broker join tokens.
+	LockBrokerJoinTokenCleanup AdvisoryLockKey = 0x5C100025
 )
 
 // AdvisoryLocker is implemented by backends that can take a cluster-wide
