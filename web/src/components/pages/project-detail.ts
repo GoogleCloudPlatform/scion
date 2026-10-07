@@ -103,6 +103,9 @@ import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
 import { formatNumber } from '../../utils/format-number.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 import { navigateTo } from '../../client/navigation.js';
+import { isFeatureEnabled } from '../../utils/feature-flags.js';
+import { ARTIFACTS_FLAG } from '../../client/artifacts.js';
+import '../shared/artifact-list.js';
 
 /** A request/refresh trigger; every one funnels into `loadAgentsForView`, which asks the window's planner for the one request it needs. */
 type AgentsViewTrigger = AgentListTrigger;
@@ -194,6 +197,14 @@ export class ScionPageProjectDetail extends LitElement {
    */
   @state()
   private activeFileTab = 'workspace';
+
+  /**
+   * Segment of the Files area shown when artifacts are on (experiment
+   * hub.artifacts): the project's artifacts, its shared dirs, or its
+   * workspace. Artifacts is first and the default.
+   */
+  @state()
+  private filesSegment: 'artifacts' | 'shared' | 'workspace' = 'artifacts';
 
   /**
    * Per-tab file browser data sources keyed by tab name
@@ -2935,8 +2946,13 @@ export class ScionPageProjectDetail extends LitElement {
     return !this.project.gitRemote || isSharedWorkspace(this.project);
   }
 
+  private artifactsOn(): boolean {
+    return isFeatureEnabled(ARTIFACTS_FLAG);
+  }
+
   private shouldShowFilesSection(): boolean {
     if (!this.project) return false;
+    if (this.artifactsOn()) return true;
     if (this.hasProjectWorkspace()) return true;
     // Otherwise show files only when shared dirs exist
     return (this.project.sharedDirs?.length ?? 0) > 0;
@@ -2970,6 +2986,45 @@ export class ScionPageProjectDetail extends LitElement {
     this.markFileTabVisited(panel);
   }
 
+  /** The file tabs of the segment shown, or all of them when artifacts are off. */
+  private segmentFileTabs(): Array<{ key: string; label: string }> {
+    const tabs = this.getFileTabs();
+    if (!this.artifactsOn()) return tabs;
+    if (this.filesSegment === 'workspace') return tabs.filter((t) => t.key === 'workspace');
+    if (this.filesSegment === 'shared') return tabs.filter((t) => t.key !== 'workspace');
+    return [];
+  }
+
+  private onFilesSegmentChange(e: Event): void {
+    const segment = (e.target as HTMLInputElement).value as 'artifacts' | 'shared' | 'workspace';
+    this.filesSegment = segment;
+    if (segment === 'artifacts') return;
+    const tabs = this.segmentFileTabs();
+    if (tabs.length > 0 && !tabs.some((t) => t.key === this.activeFileTab)) {
+      this.activeFileTab = tabs[0].key;
+    }
+    this.markFileTabVisited(this.activeFileTab);
+  }
+
+  private renderFilesSegments(): TemplateResult | typeof nothing {
+    if (!this.artifactsOn()) return nothing;
+    const hasShared = (this.project?.sharedDirs?.length ?? 0) > 0;
+    return html`
+      <sl-radio-group
+        class="files-segments"
+        size="small"
+        value=${this.filesSegment}
+        @sl-change=${(e: Event): void => this.onFilesSegmentChange(e)}
+      >
+        <sl-radio-button value="artifacts">Artifacts</sl-radio-button>
+        ${hasShared ? html`<sl-radio-button value="shared">Shared dirs</sl-radio-button>` : nothing}
+        ${this.hasProjectWorkspace()
+          ? html`<sl-radio-button value="workspace">Workspace</sl-radio-button>`
+          : nothing}
+      </sl-radio-group>
+    `;
+  }
+
   private renderFilesSectionPlaceholder() {
     return html`
       <div class="workspace-section files-section-placeholder">
@@ -2993,7 +3048,7 @@ export class ScionPageProjectDetail extends LitElement {
   }
 
   private renderFilesSection() {
-    const tabs = this.getFileTabs();
+    const tabs = this.segmentFileTabs();
     const isEditable = can(this.project?._capabilities, 'update');
     const isEditorOpen = this.editingFilePath !== null;
 
@@ -3002,60 +3057,67 @@ export class ScionPageProjectDetail extends LitElement {
         <div class="workspace-header">
           <div class="workspace-header-left">
             <h2>Files</h2>
+            ${isEditorOpen ? nothing : this.renderFilesSegments()}
           </div>
         </div>
 
-        ${isEditorOpen
-          ? html`
-              <div class="editor-back-row">
-                <sl-button size="small" variant="text" @click=${this.handleEditorClosed}>
-                  <sl-icon slot="prefix" name="arrow-left"></sl-icon>
-                  Back to files
-                </sl-button>
-              </div>
-              <scion-file-editor
-                .filePath=${this.editingFilePath || ''}
-                .dataSource=${this.getEditorDataSource(this.activeFileTab)}
-                ?readonly=${!isEditable}
-                ?initialPreview=${this.editorInitialPreview}
-                @file-saved=${this.handleFileSaved}
-                @editor-closed=${this.handleEditorClosed}
-              ></scion-file-editor>
-            `
-          : html`
-              <div class="files-tab-header">
-                <sl-tab-group class="files-tab-group" @sl-tab-show=${this.onFileTabChange}>
-                  ${tabs.map(
-                    (tab) => html`
-                      <sl-tab slot="nav" panel=${tab.key} ?active=${tab.key === this.activeFileTab}>
-                        <span class="tab-label-truncated" title=${tab.label}
-                          >${this.truncateTabLabel(tab.label)}</span
+        ${this.artifactsOn() && this.filesSegment === 'artifacts' && !isEditorOpen
+          ? html`<scion-artifact-list .projectId=${this.projectId}></scion-artifact-list>`
+          : isEditorOpen
+            ? html`
+                <div class="editor-back-row">
+                  <sl-button size="small" variant="text" @click=${this.handleEditorClosed}>
+                    <sl-icon slot="prefix" name="arrow-left"></sl-icon>
+                    Back to files
+                  </sl-button>
+                </div>
+                <scion-file-editor
+                  .filePath=${this.editingFilePath || ''}
+                  .dataSource=${this.getEditorDataSource(this.activeFileTab)}
+                  ?readonly=${!isEditable}
+                  ?initialPreview=${this.editorInitialPreview}
+                  @file-saved=${this.handleFileSaved}
+                  @editor-closed=${this.handleEditorClosed}
+                ></scion-file-editor>
+              `
+            : html`
+                <div class="files-tab-header">
+                  <sl-tab-group class="files-tab-group" @sl-tab-show=${this.onFileTabChange}>
+                    ${tabs.map(
+                      (tab) => html`
+                        <sl-tab
+                          slot="nav"
+                          panel=${tab.key}
+                          ?active=${tab.key === this.activeFileTab}
                         >
-                      </sl-tab>
-                    `
-                  )}
-                  ${tabs.map(
-                    (tab) => html`
-                      <sl-tab-panel name=${tab.key}>
-                        ${this.visitedFileTabs.has(tab.key)
-                          ? html`
-                              <scion-file-browser
-                                data-tab=${tab.key}
-                                .dataSource=${this.getTabDataSource(tab.key)}
-                                ?editable=${isEditable}
-                                ?showArchive=${true}
-                                @file-edit-requested=${this.handleFileEditRequested}
-                                @file-preview-requested=${this.handleFilePreviewRequested}
-                                @file-create-requested=${this.handleFileCreateRequested}
-                              ></scion-file-browser>
-                            `
-                          : nothing}
-                      </sl-tab-panel>
-                    `
-                  )}
-                </sl-tab-group>
-              </div>
-            `}
+                          <span class="tab-label-truncated" title=${tab.label}
+                            >${this.truncateTabLabel(tab.label)}</span
+                          >
+                        </sl-tab>
+                      `
+                    )}
+                    ${tabs.map(
+                      (tab) => html`
+                        <sl-tab-panel name=${tab.key}>
+                          ${this.visitedFileTabs.has(tab.key)
+                            ? html`
+                                <scion-file-browser
+                                  data-tab=${tab.key}
+                                  .dataSource=${this.getTabDataSource(tab.key)}
+                                  ?editable=${isEditable}
+                                  ?showArchive=${true}
+                                  @file-edit-requested=${this.handleFileEditRequested}
+                                  @file-preview-requested=${this.handleFilePreviewRequested}
+                                  @file-create-requested=${this.handleFileCreateRequested}
+                                ></scion-file-browser>
+                              `
+                            : nothing}
+                        </sl-tab-panel>
+                      `
+                    )}
+                  </sl-tab-group>
+                </div>
+              `}
       </div>
     `;
   }

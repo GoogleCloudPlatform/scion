@@ -20,6 +20,8 @@
  * Mirrors the hub's /api/v1/artifacts responses (pkg/artifacts/api.go).
  */
 
+import { apiFetch, extractApiError } from './api.js';
+
 /** Feature flag that gates every artifact surface in the web UI. */
 export const ARTIFACTS_FLAG = 'hub.artifacts';
 
@@ -28,6 +30,12 @@ export interface ArtifactFile {
   size: number;
   sha256: string;
   mediaType: string;
+  /** "remote" for an image the hub fetched when the version was published. */
+  origin?: string;
+  /** For a remote image: the URL the entry referenced. */
+  sourceUrl?: string;
+  /** For a remote image: "ok" or "failed". */
+  fetchStatus?: string;
 }
 
 export interface ArtifactVersion {
@@ -62,10 +70,97 @@ export interface Artifact {
 export interface ArtifactResponse {
   artifact: Artifact;
   version?: ArtifactVersion;
+  warnings?: string[];
+}
+
+/** One row of GET /api/v1/artifacts?mine=1. */
+export interface ArtifactListItem extends Artifact {
+  reviewPending: boolean;
+}
+
+export interface ArtifactListResponse {
+  artifacts: ArtifactListItem[];
+  nextCursor?: string;
+}
+
+/** GET /api/v1/artifacts/{id}/versions: ready versions, newest first, without files. */
+export interface VersionListResponse {
+  versions: ArtifactVersion[];
+  nextBefore?: number;
+}
+
+/** POST /api/v1/artifacts/{id}/versions/{seq}/view. */
+export interface ViewResponse {
+  url: string;
+  expiresAt: string;
+  remoteImages?: boolean;
+}
+
+/** One file of a publish manifest. */
+export interface ManifestFile {
+  path: string;
+  size: number;
+  sha256: string;
+}
+
+/** Body of POST /api/v1/artifacts and POST /api/v1/artifacts/{id}/versions. */
+export interface CreateVersionRequest {
+  title?: string;
+  key?: string;
+  scope?: string;
+  entry: string;
+  note?: string;
+  files: ManifestFile[];
+}
+
+/** Answer to a request that created a pending version. */
+export interface PendingVersionResponse {
+  artifact: Artifact;
+  version: ArtifactVersion;
+  upload: { required: string[] };
+}
+
+/** Remote image rows the hub adds to a version; not part of what was published. */
+export function isRemoteFile(f: ArtifactFile): boolean {
+  return f.origin === 'remote';
+}
+
+/** App path of an artifact page; seq 0 means the current version. */
+export function artifactPagePath(projectId: string, id: string, seq = 0): string {
+  const base = `/projects/${encodeURIComponent(projectId)}/artifacts/${encodeURIComponent(id)}`;
+  return seq > 0 ? `${base}/v/${seq}` : base;
+}
+
+/**
+ * Parses an artifact page path: /projects/{p}/artifacts/{id}[/v/{seq}].
+ * Returns null for anything else.
+ */
+export function parseArtifactPagePath(
+  path: string
+): { projectId: string; id: string; seq: number } | null {
+  const m = path.match(
+    /^\/projects\/([^/]+)\/artifacts\/([^/?#]+)(?:\/v\/([1-9][0-9]{0,8}))?\/?(?:[?#].*)?$/
+  );
+  if (!m) return null;
+  try {
+    return {
+      projectId: decodeURIComponent(m[1]),
+      id: decodeURIComponent(m[2]),
+      seq: m[3] ? Number(m[3]) : 0,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** Hex SHA-256 of a blob, as the hub's manifest expects. */
+export async function sha256Hex(data: Blob): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', await data.arrayBuffer());
+  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, '0')).join('');
 }
 
 /** How the artifact page renders an entry file. */
-export type ArtifactRenderer = 'markdown' | 'text' | 'image' | 'download';
+export type ArtifactRenderer = 'markdown' | 'text' | 'image' | 'html' | 'download';
 
 /** Text media types that are not text/*. */
 const TEXT_APPLICATION_TYPES = new Set([
@@ -77,8 +172,7 @@ const TEXT_APPLICATION_TYPES = new Set([
 
 /**
  * Raster image types rendered with <img>. SVG is excluded: the hub serves
- * it as an attachment, and HTML-like content waits for the sandboxed
- * renderer of a later phase.
+ * it as an attachment.
  */
 const IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
 
@@ -87,7 +181,7 @@ export function rendererFor(mediaType: string): ArtifactRenderer {
   const mt = mediaType.toLowerCase();
   if (mt === 'text/markdown') return 'markdown';
   if (IMAGE_TYPES.has(mt)) return 'image';
-  if (mt === 'text/html') return 'download';
+  if (mt === 'text/html') return 'html';
   if (mt.startsWith('text/') || TEXT_APPLICATION_TYPES.has(mt)) return 'text';
   return 'download';
 }
@@ -147,3 +241,125 @@ export function formatBytes(n: number): string {
 
 /** Largest text file the page renders inline. */
 export const MAX_INLINE_TEXT_BYTES = 4 * 1024 * 1024;
+
+// ────────────────────────────────────────────────────────────
+// API calls
+// ────────────────────────────────────────────────────────────
+
+async function okJSON<T>(res: Response): Promise<T> {
+  if (!res.ok) {
+    throw new Error(await extractApiError(res, `HTTP ${res.status}`));
+  }
+  return (await res.json()) as T;
+}
+
+function artifactPath(id: string): string {
+  return `/api/v1/artifacts/${encodeURIComponent(id)}`;
+}
+
+function encodePath(path: string): string {
+  return path
+    .split('/')
+    .map((seg) => encodeURIComponent(seg))
+    .join('/');
+}
+
+/** One page of the artifacts homed in a project that the caller can read. */
+export async function listProjectArtifacts(
+  projectId: string,
+  opts: { q?: string; cursor?: string; limit?: number; signal?: AbortSignal } = {}
+): Promise<ArtifactListResponse> {
+  const params = new URLSearchParams({ mine: '1', scope: projectId });
+  if (opts.q) params.set('q', opts.q);
+  if (opts.cursor) params.set('cursor', opts.cursor);
+  if (opts.limit) params.set('limit', String(opts.limit));
+  return okJSON(
+    await apiFetch(`/api/v1/artifacts?${params.toString()}`, { signal: opts.signal ?? null })
+  );
+}
+
+/** One page of an artifact's ready versions, newest first. */
+export async function listVersions(id: string, before = 0): Promise<VersionListResponse> {
+  const query = before > 0 ? `?before=${before}` : '';
+  return okJSON(await apiFetch(`${artifactPath(id)}/versions${query}`));
+}
+
+/** Mints a short-lived view of an HTML bundle version. */
+export async function mintView(id: string, seq: number): Promise<ViewResponse> {
+  return okJSON(await apiFetch(`${artifactPath(id)}/versions/${seq}/view`, { method: 'POST' }));
+}
+
+/**
+ * A file to publish: its path in the bundle and either its bytes, or (for
+ * a file kept unchanged from the current version) its size and digest.
+ */
+export type PublishFile =
+  | { path: string; data: Blob }
+  | { path: string; size: number; sha256: string };
+
+export interface PublishRequest {
+  /** Set to add a version to this artifact; unset to create an artifact. */
+  artifactId?: string | undefined;
+  /** Home project of a new artifact. */
+  scope?: string | undefined;
+  title?: string | undefined;
+  key?: string | undefined;
+  note?: string | undefined;
+  entry: string;
+  files: PublishFile[];
+  /** Called after each upload with the number of files uploaded so far. */
+  onProgress?: ((done: number, total: number, path: string) => void) | undefined;
+}
+
+/**
+ * Publishes files as a new artifact or a new version of one, through the
+ * two-step API: create the pending version with the manifest, upload the
+ * files the hub asks for, then finalize.
+ */
+export async function publishFiles(req: PublishRequest): Promise<ArtifactResponse> {
+  const manifest: ManifestFile[] = [];
+  const byPath = new Map<string, Blob>();
+  for (const f of req.files) {
+    if ('data' in f) {
+      manifest.push({ path: f.path, size: f.data.size, sha256: await sha256Hex(f.data) });
+      byPath.set(f.path, f.data);
+    } else {
+      manifest.push({ path: f.path, size: f.size, sha256: f.sha256 });
+    }
+  }
+  const body: CreateVersionRequest = { entry: req.entry, files: manifest };
+  if (req.title) body.title = req.title;
+  if (req.key) body.key = req.key;
+  if (req.note) body.note = req.note;
+  if (!req.artifactId && req.scope) body.scope = req.scope;
+  const createPath = req.artifactId
+    ? `${artifactPath(req.artifactId)}/versions`
+    : '/api/v1/artifacts';
+  const pending = await okJSON<PendingVersionResponse>(
+    await apiFetch(createPath, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+  );
+  const id = pending.artifact.id;
+  const seq = pending.version.seq;
+  const required = pending.upload.required ?? [];
+  let done = 0;
+  for (const path of required) {
+    const data = byPath.get(path);
+    if (!data) throw new Error(`The hub asked for ${path}, which is not being uploaded.`);
+    const m = manifest.find((x) => x.path === path)!;
+    const res = await apiFetch(`${artifactPath(id)}/versions/${seq}/files/${encodePath(path)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/octet-stream', 'X-Content-SHA256': m.sha256 },
+      body: data,
+    });
+    if (!res.ok) {
+      throw new Error(`${path}: ${await extractApiError(res, `HTTP ${res.status}`)}`);
+    }
+    done++;
+    req.onProgress?.(done, required.length, path);
+  }
+  return okJSON(await apiFetch(`${artifactPath(id)}/versions/${seq}/finalize`, { method: 'POST' }));
+}

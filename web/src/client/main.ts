@@ -606,7 +606,7 @@ const ROUTES: RouteConfig[] = [
   },
   {
     // Artifact page (experiment hub.artifacts; the page renders 404 when off).
-    pattern: /^\/projects\/[^/]+\/artifacts\/[^/]+$/,
+    pattern: /^\/projects\/[^/]+\/artifacts\/[^/]+(?:\/v\/[1-9][0-9]*)?$/,
     tag: 'scion-page-artifact-detail',
     load: () => import('../components/pages/artifact-detail.js'),
   },

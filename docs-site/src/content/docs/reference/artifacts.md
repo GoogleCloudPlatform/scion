@@ -9,7 +9,7 @@ Artifacts are behind the `hub.artifacts` experiment, which is **off by default**
 
 An **artifact** is a published file or folder (a *bundle*) with a stable reference, `scion://artifact/<id>`, that works from any runtime broker, in any project the reader can access, and in the web UI. The hub stores the bytes, so a reader never needs access to the publisher's filesystem or shared directories.
 
-This page covers what is available today: publishing files and folders, versions, fetching, and the artifact page. Message references, review and share links are planned.
+This page covers what is available today: publishing files and folders, versions, fetching, and the web pages. Message references, review and share links are planned.
 
 Each artifact has numbered **versions**. A version is an immutable snapshot of the bundle: its files, one **entry** file (the one the web page opens and `get` prints), an optional note, and who published it. Publishing again under the same `--key` adds a version; the latest one is the artifact's **current** version, and `scion://artifact/<id>@<seq>` names one version for good.
 
@@ -94,9 +94,19 @@ An artifact whose entry file is HTML (a single page or a small site published as
 - Every view response carries a `Content-Security-Policy` with a `sandbox` directive, so the page stays isolated even when the URL is opened directly. The page may load scripts, styles, images, fonts and media only from its own files under the view URL; it cannot make network requests from script, embed other frames or plugins, submit forms, open windows or navigate the page around it.
 - **Remote images are not loaded in HTML artifacts; include them in the bundle.** When an HTML entry references images by absolute `http(s)` URL, the publish response and the CLI print that warning, and the viewer shows it above the frame.
 
-## Web page
+## Web pages
 
-`/projects/<project-id>/artifacts/<id>` shows the artifact's title, owner, version and reference, and renders the entry file: Markdown as formatted text, text and code (including JSON, YAML, CSV) in a read-only editor, and PNG, JPEG, GIF and WebP images inline. Other types (including HTML, SVG and PDF) are offered as a download. The Markdown preview loads no images from other hosts: they appear as their alt text. Inline (data:) images are shown.
+**Artifact page.** `/projects/<project-id>/artifacts/<id>` shows the current version and `/projects/<project-id>/artifacts/<id>/v/<seq>` an earlier one. The header shows the title, owner, key, last update and the version's reference with a copy button, a **Version** menu listing the versions, **Edit** and, for a single file, **Download**. Three tabs:
+
+- **Preview** renders the entry file: Markdown as formatted text, text and code (including JSON, YAML, CSV) in a read-only editor, PNG, JPEG, GIF and WebP images inline, and HTML in the sandboxed frame described under [HTML artifacts](#html-artifacts), with a border and a bar saying who published it, plus **Full screen** and **Open in new tab**. Other types (such as SVG and PDF) are offered as a download.
+- **Files** lists the version's files with size and type, marks the entry file, and opens or downloads each one. Copies of remote images are counted, not listed.
+- **History** lists the versions, newest first, with who published each one, when, and its note.
+
+**Markdown preview.** The preview is a frame that runs no scripts and loads images from the hub only. A relative image path loads that file from the same version, and an absolute image URL loads the copy the hub fetched when the version was published. An image without a copy shows "Image not fetched", one whose fetch failed shows "Image could not be fetched", and a relative path that is not in the version shows "Image not in this version". Inline (`data:`) images are shown. Links open in a new tab; a relative link to a file of the version opens that file.
+
+**Edit and new versions.** On the current version, when the entry file is Markdown or text, **Edit** opens it in an editor, and **Publish as v<n>** saves the change as a new version with an optional note; the other files are kept as they are. **Upload new version** (on the History tab) publishes a file or a folder as the next version. Earlier versions are never changed.
+
+**Project page.** With artifacts on, the Files area of a project page has three views: **Artifacts** (shown first), **Shared dirs** and **Workspace**. Artifacts lists the artifacts homed in the project that you can open, newest first, with search, owner, version, last update and a *Review pending* badge; a row opens the artifact page. **New artifact** uploads a file, or a folder with a chosen entry file (hidden files and folders are skipped), with a title, an optional key and an optional note. Shared dirs and Workspace show the project's files as before.
 
 ## API
 
