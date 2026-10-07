@@ -1744,9 +1744,10 @@ func (d *slowDispatcher) DispatchAgentMessage(ctx context.Context, a *store.Agen
 }
 
 // More senders with long batches than there are workers take turns: each
-// worker yields after scheduledSendYieldAfter messages, senders that
-// yielded are listed last, and a sender with one message is delivered
-// within two sweeps.
+// worker yields after scheduledSendYieldAfter messages while another
+// sender is waiting (here the fifth heavy sender and the light sender),
+// senders that yielded are listed last, and a sender with one message is
+// delivered within two sweeps.
 func TestScheduledSend_ManyHeavySendersRotate(t *testing.T) {
 	f := newScheduledSendFixture(t)
 	ctx := context.Background()
@@ -1906,23 +1907,34 @@ func TestScheduledSend_YieldedMarkPruned(t *testing.T) {
 	assert.Contains(t, rt.yielded, "gone", "kept when the list may be cut off")
 }
 
-// Two hub servers sharing one SQLite database run the real sweeper on one
-// sender's due messages at the same time: every message is delivered
-// exactly once.
-func TestScheduledSend_TwoServersOneSQLiteFile_OneSenderManyRows(t *testing.T) {
+// twoServerSQLite is two full hub servers sharing one SQLite hub database
+// and one SQLite webchat database, with one sender (bob) who may message the
+// topic's default agent and n due scheduled messages.
+type twoServerSQLite struct {
+	a, b    twoServerReplica
+	bob     *store.User
+	topicID string
+	sms     ScheduledMessageStore
+	rowIDs  []string // oldest first
+}
+
+type twoServerReplica struct {
+	srv *Server
+	st  store.Store
+	wcs WebChatStore
+	db  *sql.DB
+}
+
+func newTwoServerSQLite(t *testing.T, n int) *twoServerSQLite {
+	t.Helper()
 	ctx := context.Background()
 	dir := t.TempDir()
+	// No shared cache and a busy timeout on both files: the two servers
+	// write concurrently through separate connections.
+	hubDSN := "file:" + dir + "/hub.db?_pragma=busy_timeout(10000)"
 	webchatDSN := "file:" + dir + "/webchat.db?_busy_timeout=10000&_journal_mode=WAL"
-
-	type replica struct {
-		srv  *Server
-		st   store.Store
-		wcs  WebChatStore
-		db   *sql.DB
-		disp *brokerMockDispatcher
-	}
-	newReplica := func() replica {
-		st, err := newTestStore(t, dir+"/hub.db")
+	newReplica := func() twoServerReplica {
+		st, err := newTestStoreAt(t, hubDSN)
 		require.NoError(t, err)
 		srv, st := testServerWithStore(t, st)
 		db, err := sql.Open("sqlite3", webchatDSN)
@@ -1931,50 +1943,101 @@ func TestScheduledSend_TwoServersOneSQLiteFile_OneSenderManyRows(t *testing.T) {
 		wcs := NewWebChatStore(db, "sqlite3")
 		require.NoError(t, wcs.Init())
 		srv.SetWebChatStore(wcs)
-		d := &brokerMockDispatcher{}
-		srv.SetDispatcher(d)
+		srv.SetDispatcher(&brokerMockDispatcher{})
 		setScheduledSendExperiment(t, srv, true)
-		return replica{srv: srv, st: st, wcs: wcs, db: db, disp: d}
+		return twoServerReplica{srv: srv, st: st, wcs: wcs, db: db}
 	}
-	a, b := newReplica(), newReplica()
+	f := &twoServerSQLite{a: newReplica(), b: newReplica()}
 
-	_, bob, project := setupDemoPolicyOn(t, a.srv, a.st)
-	addProjectMemberWithRole(t, a.st, project, bob.ID, store.GroupMemberRoleMember)
+	_, bob, project := setupDemoPolicyOn(t, f.a.srv, f.a.st)
+	addProjectMemberWithRole(t, f.a.st, project, bob.ID, store.GroupMemberRoleMember)
 	agent := &store.Agent{ID: tid("two-srv-agent"), ProjectID: project.ID, Name: "two-srv-agent", Slug: "two-srv-agent",
 		Phase: "running", OwnerID: bob.ID, CreatedBy: bob.ID}
-	require.NoError(t, a.st.CreateAgent(ctx, agent))
-	topicID := tid("two-srv-topic")
-	require.NoError(t, a.wcs.CreateTopic(ctx, WebChatTopic{ID: topicID, ProjectID: project.ID, Name: "two-srv",
+	require.NoError(t, f.a.st.CreateAgent(ctx, agent))
+	f.topicID = tid("two-srv-topic")
+	require.NoError(t, f.a.wcs.CreateTopic(ctx, WebChatTopic{ID: f.topicID, ProjectID: project.ID, Name: "two-srv",
 		CreatedBy: bob.ID, CreatedAt: time.Now().UTC(), DefaultAgent: agent.Slug}))
-	setTopicConversationID(t, a.db, a.st, topicID, project.ID)
+	setTopicConversationID(t, f.a.db, f.a.st, f.topicID, project.ID)
+	f.bob = bob
 
-	const n = 20
-	sms := scheduledMessageStoreFrom(a.wcs)
+	f.sms = scheduledMessageStoreFrom(f.a.wcs)
 	base := time.Now().Add(-time.Hour)
 	for i := 0; i < n; i++ {
 		m := newTestScheduledRow(fmt.Sprintf("two-srv-%d", i), bob.ID, base.Add(time.Duration(i)*time.Second))
-		m.ConversationKey = topicID
-		_, _, err := sms.CreateScheduledMessage(ctx, m)
+		m.ConversationKey = f.topicID
+		_, _, err := f.sms.CreateScheduledMessage(ctx, m)
 		require.NoError(t, err)
+		f.rowIDs = append(f.rowIDs, m.ID)
 	}
+	return f
+}
 
-	now := time.Now()
-	results := make(chan int, 2)
-	start := make(chan struct{})
-	for _, r := range []replica{a, b} {
-		go func(srv *Server) {
-			<-start
-			results <- srv.sweepScheduledMessages(ctx, now)
-		}(r.srv)
-	}
-	close(start)
-	assert.Equal(t, n, <-results+<-results, "each message claimed by exactly one server")
-
-	msgs, err := a.st.ListMessages(ctx, store.MessageFilter{ThreadID: topicID}, store.ListOptions{Limit: 100})
+// assertAllDeliveredOnce checks n delivered messages, n dispatches across
+// both servers, and nothing left pending or sending.
+func (f *twoServerSQLite) assertAllDeliveredOnce(t *testing.T, n int, dispatches int) {
+	t.Helper()
+	ctx := context.Background()
+	msgs, err := f.a.st.ListMessages(ctx, store.MessageFilter{ThreadID: f.topicID}, store.ListOptions{Limit: 100})
 	require.NoError(t, err)
 	assert.Len(t, msgs.Items, n, "one delivered message per scheduled message")
-	assert.Equal(t, n, len(a.disp.getMessages())+len(b.disp.getMessages()), "one dispatch per scheduled message")
-	active, err := sms.CountActiveScheduledMessages(ctx, bob.ID)
+	assert.Equal(t, n, dispatches, "one dispatch per scheduled message")
+	active, err := f.sms.CountActiveScheduledMessages(ctx, f.bob.ID)
 	require.NoError(t, err)
 	assert.Equal(t, 0, active)
+}
+
+// Two hub servers sharing one SQLite database run the real sweeper on one
+// sender's due messages at the same time: every message is delivered
+// exactly once.
+func TestScheduledSend_TwoServersOneSQLiteFile_OneSenderManyRows(t *testing.T) {
+	const n = 20
+	f := newTwoServerSQLite(t, n)
+	dispA, dispB := &brokerMockDispatcher{}, &brokerMockDispatcher{}
+	f.a.srv.SetDispatcher(dispA)
+	f.b.srv.SetDispatcher(dispB)
+
+	ctx := context.Background()
+	now := time.Now()
+	var claimedA, claimedB int
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	wg.Add(2)
+	go func() { defer wg.Done(); <-start; claimedA = f.a.srv.sweepScheduledMessages(ctx, now) }()
+	go func() { defer wg.Done(); <-start; claimedB = f.b.srv.sweepScheduledMessages(ctx, now) }()
+	close(start)
+	wg.Wait()
+	t.Logf("claims per server: a=%d b=%d", claimedA, claimedB)
+	assert.Equal(t, n, claimedA+claimedB, "each message claimed by exactly one server")
+	f.assertAllDeliveredOnce(t, n, len(dispA.getMessages())+len(dispB.getMessages()))
+}
+
+// Deterministic two-server run: server a claims the sender's oldest
+// message and is held in its dispatch; server b's sweep then skips that
+// claimed message and delivers all the others; once a is released it
+// finishes its one message and claims nothing more.
+func TestScheduledSend_TwoServersOneSQLiteFile_SecondServerTakesTheRest(t *testing.T) {
+	const n = 10
+	f := newTwoServerSQLite(t, n)
+	dispA := &senderBlockingDispatcher{blocked: map[string]bool{f.bob.ID: true}, release: make(chan struct{})}
+	dispB := &brokerMockDispatcher{}
+	f.a.srv.SetDispatcher(dispA)
+	f.b.srv.SetDispatcher(dispB)
+	ctx := context.Background()
+	now := time.Now()
+
+	resultA := make(chan int, 1)
+	go func() { resultA <- f.a.srv.sweepScheduledMessages(ctx, now) }()
+	require.Eventually(t, func() bool {
+		row, err := f.sms.GetScheduledMessage(ctx, f.bob.ID, f.rowIDs[0])
+		return err == nil && row != nil && row.Status == ScheduledMessageSending
+	}, 5*time.Second, 5*time.Millisecond, "server a holds the oldest message")
+
+	assert.Equal(t, n-1, f.b.srv.sweepScheduledMessages(ctx, now), "server b delivers every other message")
+	row, err := f.sms.GetScheduledMessage(ctx, f.bob.ID, f.rowIDs[0])
+	require.NoError(t, err)
+	assert.Equal(t, ScheduledMessageSending, row.Status, "server b left a's claimed message alone")
+
+	close(dispA.release)
+	assert.Equal(t, 1, <-resultA, "server a finishes its one message and claims nothing more")
+	f.assertAllDeliveredOnce(t, n, len(dispA.getMessages())+len(dispB.getMessages()))
 }
