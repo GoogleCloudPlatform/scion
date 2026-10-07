@@ -455,20 +455,21 @@ func TestSchedulerFireEvent_RestartReplayPreservesInitiatorAttribution(t *testin
 // and that a failed resume is reported as an error rather than a false 200.
 type e2bFailingScheduleStore struct {
 	store.Store
+	fault                   *storeFaultSwitch // nil: always active
 	createScheduledEventErr error
 	createScheduleErr       error
 	updateScheduleErr       error
 }
 
 func (f *e2bFailingScheduleStore) CreateScheduledEvent(ctx context.Context, evt *store.ScheduledEvent) error {
-	if f.createScheduledEventErr != nil {
+	if f.createScheduledEventErr != nil && f.fault.Active() {
 		return f.createScheduledEventErr
 	}
 	return f.Store.CreateScheduledEvent(ctx, evt)
 }
 
 func (f *e2bFailingScheduleStore) CreateSchedule(ctx context.Context, sc *store.Schedule) error {
-	if f.createScheduleErr != nil {
+	if f.createScheduleErr != nil && f.fault.Active() {
 		return f.createScheduleErr
 	}
 	return f.Store.CreateSchedule(ctx, sc)
@@ -478,7 +479,7 @@ func (f *e2bFailingScheduleStore) UpdateSchedule(
 	ctx context.Context, sc *store.Schedule, fields store.ScheduleFieldMask,
 	prevRevision int, prevRevisionKnown bool, attribution *store.InitiatorAttribution,
 ) error {
-	if f.updateScheduleErr != nil {
+	if f.updateScheduleErr != nil && f.fault.Active() {
 		return f.updateScheduleErr
 	}
 	return f.Store.UpdateSchedule(ctx, sc, fields, prevRevision, prevRevisionKnown, attribution)
@@ -529,6 +530,11 @@ func TestCreateSchedule_StoreFailureLeavesNoPartialAttribution(t *testing.T) {
 // naming an attribution that was never persisted.
 func TestResumeSchedule_UpdateFailureReturnsErrorNotSuccess(t *testing.T) {
 	srv, s, projectID := setupScheduleTest(t)
+	// Installed before the pause below, whose mutation audit goroutine reads
+	// srv.store (ptone/scion#3184); armed for the resume.
+	_, fault := installStoreFault(t, srv, func(inner store.Store, f *storeFaultSwitch) *e2bFailingScheduleStore {
+		return &e2bFailingScheduleStore{Store: inner, fault: f, updateScheduleErr: errors.New("initiator attribution test: injected resume update failure")}
+	})
 
 	createReq := CreateScheduleRequest{Name: "n1", CronExpr: "0 9 * * *", EventType: "message", AgentName: "all", Message: "hi"}
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+projectID+"/schedules", createReq)
@@ -539,13 +545,11 @@ func TestResumeSchedule_UpdateFailureReturnsErrorNotSuccess(t *testing.T) {
 	pauseRec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+projectID+"/schedules/"+created.ID+"/pause", nil)
 	require.Equal(t, http.StatusOK, pauseRec.Code, pauseRec.Body.String())
 
-	fs := &e2bFailingScheduleStore{Store: s, updateScheduleErr: errors.New("initiator attribution test: injected resume update failure")}
-	srv.store = fs
+	fault.Arm()
 
 	resumeRec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+projectID+"/schedules/"+created.ID+"/resume", nil)
 	assert.NotEqual(t, http.StatusOK, resumeRec.Code, "a failed resume write must not report success")
 
-	srv.store = s
 	stored, err := s.GetSchedule(context.Background(), created.ID)
 	require.NoError(t, err)
 	assert.Equal(t, store.ScheduleStatusPaused, stored.Status, "a failed resume write must not leave the schedule active")

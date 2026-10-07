@@ -17,16 +17,23 @@
 package hub
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
+	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
 
@@ -63,12 +70,19 @@ var positiveCheckExclusions = map[liveInventoryKey]string{
 // dispatch shape that makes a 405 control meaningless for that entry — not
 // merely that the control happens to fail today.
 var controlCheckExclusions = map[liveInventoryKey]string{
-	{OperationID: "agent.portaccess", Method: "GET", Pattern: "/api/v1/agents/{id}/ports/{port}/proxy"}:           "proxyAgentPort forwards every HTTP method to the tunnel with no method-based routing at all (see the entry's own comment in catalog.go); there is no unsupported method to control against",
-	{OperationID: "agent.portaccess", Method: "POST", Pattern: "/api/v1/agents/{id}/ports/{port}/proxy"}:          "same as the GET .../proxy entry above: proxyAgentPort accepts every method by design",
-	{OperationID: "agent.portaccess", Method: "PUT", Pattern: "/api/v1/agents/{id}/ports/{port}/proxy"}:           "same as the GET .../proxy entry above: proxyAgentPort accepts every method by design",
-	{OperationID: "agent.portaccess", Method: "DELETE", Pattern: "/api/v1/agents/{id}/ports/{port}/proxy"}:        "same as the GET .../proxy entry above: proxyAgentPort accepts every method by design",
-	{OperationID: "agent.portaccess", Method: "GET", Pattern: "/api/v1/agents/{id}/ports/{port}/proxy/{subpath}"}: "same as the GET .../proxy entry above: proxyAgentPort accepts every method by design",
-	{OperationID: "gcp.identity.verify", Method: "POST", Pattern: "/api/v1/gcp-service-accounts/{id}/verify"}:     "handleGCPServiceAccountByID (handlers_gcp_identity_scoped.go:297-304) matches on action==\"verify\" && method==POST as a single condition; any other method on the same action falls through to the generic \"action not found\" 404, never a 405",
+	{OperationID: "agent.portaccess", Method: "GET", Pattern: "/api/v1/agents/{id}/ports/{port}/proxy"}:                      "proxyAgentPort forwards every HTTP method to the tunnel with no method-based routing at all (see the entry's own comment in catalog.go); there is no unsupported method to control against",
+	{OperationID: "agent.portaccess", Method: "POST", Pattern: "/api/v1/agents/{id}/ports/{port}/proxy"}:                     "same as the GET .../proxy entry above: proxyAgentPort accepts every method by design",
+	{OperationID: "agent.portaccess", Method: "PUT", Pattern: "/api/v1/agents/{id}/ports/{port}/proxy"}:                      "same as the GET .../proxy entry above: proxyAgentPort accepts every method by design",
+	{OperationID: "agent.portaccess", Method: "DELETE", Pattern: "/api/v1/agents/{id}/ports/{port}/proxy"}:                   "same as the GET .../proxy entry above: proxyAgentPort accepts every method by design",
+	{OperationID: "agent.portaccess", Method: "GET", Pattern: "/api/v1/agents/{id}/ports/{port}/proxy/{subpath}"}:            "same as the GET .../proxy entry above: proxyAgentPort accepts every method by design",
+	{OperationID: "agent.secrets.access", Method: "GET", Pattern: "/api/v1/agents/{id}/secrets"}:                             "handleAgentSecrets (handlers_env_secrets.go) answers 501 when no secrets backend is configured, before it looks at the method or the key; testServer configures no secrets backend, so every method gets the same 501",
+	{OperationID: "agent.secrets.access", Method: "GET", Pattern: "/api/v1/agents/{id}/secrets/{key}"}:                       "same as the GET .../secrets control entry above",
+	{OperationID: "agent.secrets.access", Method: "PUT", Pattern: "/api/v1/agents/{id}/secrets/{key}"}:                       "same as the GET .../secrets control entry above",
+	{OperationID: "hub.policies.removed", Method: "GET", Pattern: "/api/v1/policies"}:                                        "handlePolicies (handlers_policies.go) answers 410 Gone for every method by design; there is no unsupported method to control against",
+	{OperationID: "hub.policies.removed", Method: "GET", Pattern: "/api/v1/policies/{id}"}:                                   "handlePolicyRoutes (handlers_policies.go) answers 410 Gone for every method by design, the same as the GET /api/v1/policies entry above",
+	{OperationID: "user.session.logout", Method: "POST", Pattern: "/api/v1/auth/logout"}:                                     "every method on /api/v1/auth/logout gets the same route-guard answer, so there is no unsupported method to control against",
+	{OperationID: "broker.messagefailures.report", Method: "POST", Pattern: "/api/v1/runtime-brokers/{id}/message-failures"}: "handleRuntimeBrokerByIDInternal (handlers_runtime_brokers.go) matches subPath==\"message-failures\" && method==POST as a single condition; any other method falls through to the \"RuntimeBroker resource\" 404, never a 405",
+	{OperationID: "gcp.identity.verify", Method: "POST", Pattern: "/api/v1/gcp-service-accounts/{id}/verify"}:                "handleGCPServiceAccountByID (handlers_gcp_identity_scoped.go:297-304) matches on action==\"verify\" && method==POST as a single condition; any other method on the same action falls through to the generic \"action not found\" 404, never a 405",
 }
 
 // suffixCheckExclusions lists HTTP catalog entry points for which
@@ -114,6 +128,11 @@ var suffixCheckExclusions = map[liveInventoryKey]string{
 	{OperationID: "agent.portaccess", Method: "PUT", Pattern: "/api/v1/agents/{id}/ports/{port}/proxy"}:                    "same as the GET .../proxy suffix entry above",
 	{OperationID: "agent.portaccess", Method: "DELETE", Pattern: "/api/v1/agents/{id}/ports/{port}/proxy"}:                 "same as the GET .../proxy suffix entry above",
 	{OperationID: "agent.portaccess", Method: "GET", Pattern: "/api/v1/agents/{id}/ports/{port}/proxy/{subpath}"}:          "same as the GET .../proxy suffix entry above",
+	{OperationID: "agent.secrets.access", Method: "GET", Pattern: "/api/v1/agents/{id}/secrets"}:                           "handleAgentSecrets (handlers_env_secrets.go) answers 501 when no secrets backend is configured, before it looks at the key; testServer configures no secrets backend, so a suffixed path gets the same 501 as the bare one",
+	{OperationID: "agent.secrets.access", Method: "GET", Pattern: "/api/v1/agents/{id}/secrets/{key}"}:                     "same as the GET .../secrets suffix entry above",
+	{OperationID: "agent.secrets.access", Method: "PUT", Pattern: "/api/v1/agents/{id}/secrets/{key}"}:                     "same as the GET .../secrets suffix entry above",
+	{OperationID: "hub.policies.removed", Method: "GET", Pattern: "/api/v1/policies"}:                                      "the by-ID route \"/api/v1/policies/\" registers as a prefix, so a suffix on this bare collection route reaches handlePolicyRoutes, which answers 410 Gone for every sub-path by design",
+	{OperationID: "hub.policies.removed", Method: "GET", Pattern: "/api/v1/policies/{id}"}:                                 "handlePolicyRoutes (handlers_policies.go) answers 410 Gone for every sub-path by design, so a suffixed path gets the same 410 as the bare one",
 	{OperationID: "user.admin.invite", Method: "GET", Pattern: "/api/v1/admin/invites/{id}"}:                               "handleAdminInviteByID (admin_invites.go:65-96) special-cases only a second segment of \"revoke\"; any other suffix, including this check's bogus one, falls through to the same GET handling as the bare ID",
 	{OperationID: "user.admin.invite", Method: "DELETE", Pattern: "/api/v1/admin/invites/{id}"}:                            "same as the GET invites/{id} suffix entry above — and because the suffix is silently ignored, a DELETE with a bogus suffix would delete the real fixture, so this exclusion also protects the positive check that runs after it",
 }
@@ -172,6 +191,7 @@ type idFixtures struct {
 	agentRestore            string
 	agentRestoreProject     string
 	agentProvisioning       string
+	artifact                string
 }
 
 // seedLiveInventoryFixtures creates one real store row per resource family
@@ -431,7 +451,48 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 		Updated: now,
 	}))
 
+	// Artifact service: on (experiment, store, blob storage) with one
+	// single-file artifact owned by the dev user, homed in f.project.
+	artStore, artBlobs := enableArtifactsForTest(t, srv)
+	f.artifact = seedLiveInventoryArtifact(t, ctx, artStore, artBlobs, f.project)
+
+	// hub.conduit on too, so its experiment-gated routes are live: the
+	// registry above with hub.conduit also defaulting on (no operational
+	// settings, which the other entries rely on, are replaced).
+	var active []experiments.Experiment
+	for _, e := range srv.experimentRegistry().All() {
+		if e.Name == conduitExperiment {
+			e.Default = true
+		}
+		active = append(active, e)
+	}
+	reg, err := experiments.NewRegistry(active, nil)
+	require.NoError(t, err)
+	srv.experiments = reg
+	require.True(t, srv.experimentEnabled(conduitExperiment))
+	require.True(t, srv.experimentEnabled(experiments.Artifacts))
+
 	return f
+}
+
+// seedLiveInventoryArtifact publishes a one-file artifact directly through
+// the store and blob storage, the way the single-file publish endpoint
+// writes it, and returns its id.
+func seedLiveInventoryArtifact(t *testing.T, ctx context.Context, st artifacts.Store, blobs storage.Storage, projectID string) string {
+	t.Helper()
+	content := []byte("# live inventory\n")
+	sum := sha256.Sum256(content)
+	digest := hex.EncodeToString(sum[:])
+	_, err := blobs.Upload(ctx, artifacts.BlobPath("test-hub-id", digest), bytes.NewReader(content), storage.UploadOptions{ContentType: "text/markdown"})
+	require.NoError(t, err)
+	now := time.Now()
+	a := &artifacts.Artifact{ID: uuid.NewString(), ScopeKind: artifacts.ScopeKindProject, ScopeRef: projectID,
+		OwnerKind: artifacts.PrincipalKindUser, OwnerRef: DevUserID, Title: "live", CreatedAt: now, UpdatedAt: now}
+	v := &artifacts.Version{ID: uuid.NewString(), ArtifactID: a.ID, Seq: 1, Kind: artifacts.VersionKindPublish,
+		EntryPath: "live.md", TotalBytes: int64(len(content)), FileCount: 1, CreatedAt: now, State: artifacts.VersionStateReady}
+	files := []artifacts.File{{VersionID: v.ID, Path: "live.md", Size: int64(len(content)), SHA256: digest, MediaType: "text/markdown"}}
+	require.NoError(t, st.CreatePublished(ctx, a, v, files, nil))
+	return a.ID
 }
 
 // overrideKey identifies one (operation, pattern) pair for parameter
@@ -482,6 +543,11 @@ func opPatternOverrides(f idFixtures) map[overrideKey]map[string]string {
 // before the method switch.
 func patternOverrides(f idFixtures) map[string]map[string]string {
 	return map[string]map[string]string{
+		// --- artifact family ---
+		"/api/v1/artifacts/{id}":                             {"id": f.artifact},
+		"/api/v1/artifacts/{id}/files/{path}":                {"id": f.artifact, "path": "live.md"},
+		"/api/v1/artifacts/{id}/versions/{seq}/files/{path}": {"id": f.artifact, "seq": "1", "path": "live.md"},
+
 		// --- agent family ---
 		"/api/v1/agents/{id}":                                       {"id": f.agent},
 		"/api/v1/agents/{id}/ports":                                 {"id": f.agent},
@@ -489,6 +555,13 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/agents/{id}/ports/{port}/proxy/{subpath}":          {"id": f.agent, "port": f.agentPort, "subpath": "x"},
 		"/api/v1/agents/{id}/set_message_mode":                      {"id": f.agent},
 		"/api/v1/projects/{projectId}/agents/{id}/set_message_mode": {"projectId": f.project, "id": f.agent},
+
+		// --- agent self-access family (agent JWT routes) ---
+		"/api/v1/agents/{id}/token/refresh":                         {"id": f.agent},
+		"/api/v1/agents/{id}/refresh-token":                         {"id": f.agent},
+		"/api/v1/agents/{id}/outbound-message":                      {"id": f.agent},
+		"/api/v1/agents/{id}/metrics":                               {"id": f.agent},
+		"/api/v1/projects/{projectId}/agents/{id}/outbound-message": {"projectId": f.project, "id": f.agent},
 
 		// --- agent lifecycle family ---
 		"/api/v1/agents/{id}/start":                            {"id": f.agentLifecycle},
@@ -522,7 +595,8 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/groups/{id}/members/{memberType}/{memberId}": {"id": f.group, "memberType": "user", "memberId": f.member},
 
 		// --- user family ---
-		"/api/v1/users/{id}": {"id": f.user},
+		"/api/v1/users/{id}":                 {"id": f.user},
+		"/api/v1/users/{id}/revoke-sessions": {"id": f.user},
 
 		// --- skill family ---
 		"/api/v1/skills/{id}": {"id": f.skill},
@@ -570,8 +644,10 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/env/{key}": {"key": f.envVarKey},
 
 		// --- runtime broker family ---
-		"/api/v1/runtime-brokers/{id}":          {"id": f.runtimeBroker},
-		"/api/v1/runtime-brokers/{id}/settings": {"id": f.runtimeBroker},
+		"/api/v1/runtime-brokers/{id}":                         {"id": f.runtimeBroker},
+		"/api/v1/runtime-brokers/{id}/settings":                {"id": f.runtimeBroker},
+		"/api/v1/runtime-brokers/{id}/message-failures":        {"id": f.runtimeBroker},
+		"/api/v1/runtime-brokers/{id}/agents/{agentId}/launch": {"id": f.runtimeBroker, "agentId": f.agent},
 
 		// --- github app family ---
 		"/api/v1/github-app/installations/{id}": {"id": f.githubInstallationID},
@@ -614,6 +690,8 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 func queryOverrides(f idFixtures) map[string]string {
 	return map[string]string{
 		"/api/v1/chat/prefs": "agentId=" + f.agent,
+		// The single-file publish is selected by ?name= (pkg/artifacts).
+		"/api/v1/artifacts": "name=live-inventory.txt&scope=" + f.project,
 	}
 }
 

@@ -45,6 +45,15 @@ function leaseExpiryMs(d: DeletionInfo): number | null {
 }
 
 /**
+ * Whether a view carries the admin-only detail fields. The hub sends
+ * `code`, `error` and `claim` to platform admins only (ptone/scion#3122);
+ * `claim` is set on every admin view, so its absence marks the generic view.
+ */
+function hasDeletionDetail(d: DeletionInfo): boolean {
+  return typeof d.claim === 'number';
+}
+
+/**
  * The deletion view to render at `nowMs`, computed the way the hub would on
  * its next read (pkg/store/deletion_view.go):
  *
@@ -52,7 +61,8 @@ function leaseExpiryMs(d: DeletionInfo): number | null {
  *   expiring `DELETION_DISPLAY_TTL_MS` after the lease. A `finalizing`
  *   stage row keeps the generic `abandoned` code but gets no `expiresAt`:
  *   the hub never expires it, and it blocks start until a retry or force
- *   (design note D4);
+ *   (design note D4). A generic (non-admin) view flips to `failed` with no
+ *   code, which is what the hub answers such a caller on the next read;
  * - a `failed` view whose `expiresAt` has passed reads as `null`. Views
  *   with no `expiresAt` (in_doubt, finalizing) never expire.
  *
@@ -67,11 +77,10 @@ export function effectiveDeletion(
   if (deletion.state === 'deleting') {
     const lease = leaseExpiryMs(deletion);
     if (lease === null || nowMs < lease) return deletion;
-    const flipped: DeletionInfo = {
-      ...deletion,
-      state: 'failed',
-      code: deletion.code || 'abandoned',
-    };
+    const flipped: DeletionInfo = { ...deletion, state: 'failed' };
+    if (deletion.code || hasDeletionDetail(deletion)) {
+      flipped.code = deletion.code || 'abandoned';
+    }
     if (deletion.stage === 'finalizing') delete flipped.expiresAt;
     else flipped.expiresAt = new Date(lease + DELETION_DISPLAY_TTL_MS).toISOString();
     view = flipped;
@@ -102,6 +111,7 @@ const FAILURE_TEXT: Record<string, string> = {
 /**
  * Badge text for an effective deletion view: `Deleting…`, `Delete
  * interrupted` for `abandoned`, or `Delete failed: <error or code text>`.
+ * The generic view (no code or error) reads `Delete failed`.
  */
 export function deletionBadgeLabel(d: DeletionInfo): string {
   if (d.state === 'deleting') return 'Deleting…';
@@ -157,6 +167,12 @@ export function deletionBannerText(d: DeletionInfo): { title: string; detail: st
   } else if (d.code === 'abandoned') {
     detail =
       'The hub stopped working on this delete before it finished. Retry it, or force delete.';
+  } else if (!d.code) {
+    // The generic view: the failure kind is shown to admins only, so it
+    // may be one that blocks start.
+    detail =
+      'Retry the delete, or force delete to remove the agent anyway. ' +
+      'If starting this agent is refused, Force delete finishes removing it.';
   } else {
     detail = 'Retry the delete, or force delete to remove the agent anyway.';
   }
@@ -197,9 +213,18 @@ export function shouldApplyAcceptedDeletion(
   current: DeletionInfo | null | undefined,
   accepted: DeletionInfo
 ): boolean {
+  if (!current) return true;
   // Same claim: the SSE copy is at least as fresh (a renewal or the
   // failure itself), so keep it.
-  return !current || accepted.claim > current.claim;
+  if (typeof accepted.claim === 'number' && typeof current.claim === 'number') {
+    return accepted.claim > current.claim;
+  }
+  // No claim on one side (SSE deltas and non-admin bodies carry none,
+  // ptone/scion#3122): every claim restamps startedAt, so a strictly later
+  // startedAt is a newer claim.
+  const a = parseMs(accepted.startedAt);
+  const c = parseMs(current.startedAt);
+  return a !== null && c !== null && a > c;
 }
 
 /**

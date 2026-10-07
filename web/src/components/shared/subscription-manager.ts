@@ -28,6 +28,11 @@ import { apiFetch, extractApiError } from '../../client/api.js';
 import { resourceStyles } from './resource-styles.js';
 import type { Subscription, SubscriptionScope } from '../../shared/types.js';
 import { formatRelative } from '../../utils/time.js';
+import {
+  ALL_TRIGGERS,
+  DEFAULT_TRIGGERS,
+  triggerLabel,
+} from '../../shared/notification-triggers.js';
 
 interface SubscriptionTemplate {
   id: string;
@@ -37,16 +42,6 @@ interface SubscriptionTemplate {
   projectId: string;
   createdBy: string;
 }
-
-const DEFAULT_TRIGGERS = ['COMPLETED', 'WAITING_FOR_INPUT', 'LIMITS_EXCEEDED'];
-const ALL_TRIGGERS = [
-  'COMPLETED',
-  'WAITING_FOR_INPUT',
-  'LIMITS_EXCEEDED',
-  'STALLED',
-  'ERROR',
-  'DELETED',
-];
 
 @customElement('scion-subscription-manager')
 export class ScionSubscriptionManager extends LitElement {
@@ -431,7 +426,7 @@ export class ScionSubscriptionManager extends LitElement {
                             this.editTriggers = next;
                           }}
                         />
-                        <span>${this.triggerLabel(trigger)}</span>
+                        <span>${triggerLabel(trigger)}</span>
                       </label>
                     `
                   )}
@@ -562,7 +557,7 @@ export class ScionSubscriptionManager extends LitElement {
                       }}
                     />
                     <span class="checkbox-text">
-                      <span>${this.triggerLabel(trigger)}</span>
+                      <span>${triggerLabel(trigger)}</span>
                       <span class="checkbox-description">${this.triggerDescription(trigger)}</span>
                     </span>
                   </label>
@@ -583,25 +578,6 @@ export class ScionSubscriptionManager extends LitElement {
         >
       </sl-dialog>
     `;
-  }
-
-  private triggerLabel(trigger: string): string {
-    switch (trigger) {
-      case 'COMPLETED':
-        return 'Completed';
-      case 'WAITING_FOR_INPUT':
-        return 'Waiting for Input';
-      case 'LIMITS_EXCEEDED':
-        return 'Limits Exceeded';
-      case 'STALLED':
-        return 'Stalled';
-      case 'ERROR':
-        return 'Error';
-      case 'DELETED':
-        return 'Deleted';
-      default:
-        return trigger;
-    }
   }
 
   private triggerDescription(trigger: string): string {

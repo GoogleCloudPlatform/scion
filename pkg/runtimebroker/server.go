@@ -47,6 +47,7 @@ import (
 	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/templatecache"
+	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth/adcsource"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
@@ -55,6 +56,10 @@ import (
 
 // ServerConfig holds configuration for the Runtime Broker API server.
 type ServerConfig struct {
+	// DeleteClock, for tests only, replaces time.Now as the clock the delete
+	// notAfter check reads (see delete_not_after.go). nil means time.Now.
+	DeleteClock func() time.Time
+
 	// Port is the HTTP port to listen on.
 	Port int
 	// Host is the address to bind to (e.g., "0.0.0.0" or "127.0.0.1").
@@ -70,6 +75,12 @@ type ServerConfig struct {
 	// into agent containers. Used for local development where containers
 	// need a bridge address (e.g. host.containers.internal) instead of localhost.
 	ContainerHubEndpoint string
+	// ColocatedPublicHubEndpoint is the co-located hub's public URL when this
+	// host does not serve it, so containers cannot reach it (e.g. a Cloud Run
+	// URL derived from the IAP audience on a single-node VM). An agent hub
+	// endpoint equal to it is replaced by ContainerHubEndpoint, except on
+	// Kubernetes runtimes. Empty disables the rewrite.
+	ColocatedPublicHubEndpoint string
 	// HubListenPort is the port the co-located hub HTTP server is listening
 	// on (e.g. 8080 for the combined web+API server). Used by cloudrun-sandbox
 	// to construct the link-local hub endpoint for sandboxes. Zero means the
@@ -141,7 +152,8 @@ type ServerConfig struct {
 
 	// Workspace sync settings
 	// StorageBucket is the GCS bucket name for workspace storage.
-	// Used when workspace sync requests don't specify a bucket.
+	// Used when workspace sync requests, or a create request carrying a
+	// workspace upload, don't specify a bucket.
 	StorageBucket string
 	// WorktreeBase is the base directory for agent worktrees.
 	// Used as a fallback when resolving workspace paths.
@@ -220,7 +232,20 @@ type Server struct {
 	mux        *http.ServeMux
 	mu         sync.RWMutex
 	startTime  time.Time
-	version    string
+
+	// workspaceDownload replaces syncWorkspaceFromGCS for the GCS workspace
+	// bootstrap when set (see SetWorkspaceDownloader).
+	workspaceDownload func(ctx context.Context, bucket, prefix, localPath string) error
+	version           string
+
+	// Workspace transfer and project delete steps, like workspaceDownload:
+	// each replaces its real implementation when set (see the setters in
+	// workspace_handlers.go), per Server, so tests can fake one without
+	// racing parallel tests. Guarded by mu.
+	workspaceUpload      func(ctx context.Context, localPath, bucket, prefix string) error
+	manifestUpload       func(ctx context.Context, bucket, storagePath string, manifest *transfer.Manifest) error
+	projectWorkspaceStat func(path string) (os.FileInfo, error)
+	projectPathAbs       func(path string) (string, error)
 
 	// Hub connections (replaces single hubClient, heartbeat, controlChannel, etc.)
 	hubConnections map[string]*HubConnection // keyed by connection name
@@ -294,6 +319,12 @@ type Server struct {
 	// access — resolving a real Kubernetes runtime calls Verify() against
 	// the API server.
 	resolveAuxiliaryRuntime func(projectPath, agentName, profileFlag string) scionrt.Runtime
+
+	// loadSettings, when non-nil, replaces config.LoadEffectiveSettings in
+	// resolveManagerForOptsStrict (handlers.go). nil, the default, uses the
+	// real loader; tests set it per fixture to exercise each settings
+	// outcome.
+	loadSettings func(projectDir string) (*config.VersionedSettings, []string, error)
 
 	// agentOwnRuntimes memoises the runtime an existing agent's saved
 	// profile resolves to (see ensureAgentOwnRuntime), keyed by project dir
@@ -931,6 +962,25 @@ func (s *Server) validateBrokerAuthStartup() error {
 	}
 
 	return nil
+}
+
+// SetWorkspaceDownloader replaces the GCS download used to bootstrap an
+// agent workspace from a hub workspace upload. nil restores the default.
+// This is useful for testing.
+func (s *Server) SetWorkspaceDownloader(fn func(ctx context.Context, bucket, prefix, localPath string) error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.workspaceDownload = fn
+}
+
+// workspaceDownloader returns the GCS workspace bootstrap download.
+func (s *Server) workspaceDownloader() func(ctx context.Context, bucket, prefix, localPath string) error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.workspaceDownload != nil {
+		return s.workspaceDownload
+	}
+	return syncWorkspaceFromGCS
 }
 
 // SetRequestLogger sets the dedicated request logger.
@@ -1598,6 +1648,16 @@ type agentMatch struct {
 // path reads them from the same entry it acts on. Resolution order and
 // errors are exactly lookupAgentTarget's.
 func (s *Server) lookupAgentMatch(ctx context.Context, slug, projectID string) (agentMatch, error) {
+	return s.lookupAgentMatchForRun(ctx, slug, projectID, "")
+}
+
+// lookupAgentMatchForRun is lookupAgentMatch for a run-scoped operation:
+// among the entries the runtime lists for slug, those of run runID are
+// preferred (see preferRunEntries) before the match must be unique, so a
+// pod of the requested run is found even when a same-named pod of another
+// run is listed beside it (for example in another namespace). With an
+// empty runID it is exactly lookupAgentMatch.
+func (s *Server) lookupAgentMatchForRun(ctx context.Context, slug, projectID, runID string) (agentMatch, error) {
 	if s.manager == nil {
 		return agentMatch{}, fmt.Errorf("agent manager not available")
 	}
@@ -1613,7 +1673,7 @@ func (s *Server) lookupAgentMatch(ctx context.Context, slug, projectID string) (
 		if err != nil {
 			return agentMatch{}, err
 		}
-		return agentMatchFrom(slug, agents, own.mgr, own.rt)
+		return runAgentMatchFrom(slug, runID, agents, own.mgr, own.rt)
 	}
 
 	// A recorded runtime type (ptone/scion#2748) can exclude the default
@@ -1668,7 +1728,82 @@ func (s *Server) lookupAgentMatch(ctx context.Context, slug, projectID string) (
 		}
 	}
 
+	return runAgentMatchFrom(slug, runID, agents, matchManager, matchRuntime)
+}
+
+// allOtherRuns reports whether every entry is labelled with a run other
+// than runID (none is the requested run's, and none is a legacy entry).
+func allOtherRuns(agents []api.AgentInfo, runID string) bool {
+	for _, a := range agents {
+		if a.RunID == "" || a.RunID == runID {
+			return false
+		}
+	}
+	return true
+}
+
+// otherRunsHoldNameError is a run-scoped lookup's result when every entry
+// listed for the slug is labelled with a run other than the requested one
+// and more than one distinct entry is listed (for example same-named pods
+// of two other runs in two namespaces). Nothing of the requested run
+// exists, so this is a run mismatch, as for a run-scoped delete
+// (filterDeleteCandidatesByRun), not an ambiguity. currentRunID is the run
+// holding the name when all those entries share one, else empty.
+type otherRunsHoldNameError struct {
+	slug         string
+	currentRunID string
+}
+
+func (e *otherRunsHoldNameError) Error() string {
+	return fmt.Sprintf("agent '%s': every listed entry belongs to another run", e.slug)
+}
+
+// runAgentMatchFrom is agentMatchFrom for a lookup naming run runID (empty:
+// exactly agentMatchFrom): the entries are narrowed by preferRunEntries,
+// and when only distinct entries of other runs remain, the result is an
+// otherRunsHoldNameError rather than an ambiguity error.
+func runAgentMatchFrom(slug, runID string, agents []api.AgentInfo, matchManager agent.Manager, matchRuntime scionrt.Runtime) (agentMatch, error) {
+	agents = preferRunEntries(agents, runID)
+	if runID != "" && len(dedupeAgentEntries(agents)) > 1 && allOtherRuns(agents, runID) {
+		current := agents[0].RunID
+		for _, a := range agents[1:] {
+			if a.RunID != current {
+				current = ""
+				break
+			}
+		}
+		return agentMatch{}, &otherRunsHoldNameError{slug: slug, currentRunID: current}
+	}
 	return agentMatchFrom(slug, agents, matchManager, matchRuntime)
+}
+
+// preferRunEntries narrows the entries listed for a run-scoped lookup with
+// the rule a run-scoped delete applies (filterDeleteCandidatesByRun):
+// entries labelled runID win; without one, legacy entries carrying no run
+// label match by name. When neither exists, every entry is kept, so the
+// caller still sees another run holding the name (and refuses with the
+// run-mismatch 404, or fails closed when that is ambiguous). An empty runID
+// keeps agents unchanged.
+func preferRunEntries(agents []api.AgentInfo, runID string) []api.AgentInfo {
+	if runID == "" || len(agents) < 2 {
+		return agents
+	}
+	var exact, legacy []api.AgentInfo
+	for _, a := range agents {
+		switch a.RunID {
+		case runID:
+			exact = append(exact, a)
+		case "":
+			legacy = append(legacy, a)
+		}
+	}
+	if len(exact) > 0 {
+		return exact
+	}
+	if len(legacy) > 0 {
+		return legacy
+	}
+	return agents
 }
 
 // listInOwnRuntime lists agent slug in the agent's own runtime with the
@@ -2019,7 +2154,11 @@ func uniqueAgentEntry(slug string, agents []api.AgentInfo) (api.AgentInfo, error
 
 // dedupeAgentEntries collapses entries that refer to the same backing
 // container (the same container can be reported more than once, e.g. by a
-// runtime that is registered both as default and auxiliary).
+// runtime that is registered both as default and auxiliary). Entries are
+// keyed by operation ID (scionrt.AgentOperationID), so same-named
+// Kubernetes pods in two namespaces stay distinct (and a lookup matching
+// both is ambiguous) rather than collapsing to whichever was listed first;
+// for other runtimes that is the container ID.
 func dedupeAgentEntries(agents []api.AgentInfo) []api.AgentInfo {
 	if len(agents) < 2 {
 		return agents
@@ -2027,7 +2166,7 @@ func dedupeAgentEntries(agents []api.AgentInfo) []api.AgentInfo {
 	seen := make(map[string]bool, len(agents))
 	out := make([]api.AgentInfo, 0, len(agents))
 	for _, a := range agents {
-		key := a.ContainerID
+		key := scionrt.AgentOperationID(a)
 		if key == "" {
 			key = a.ID
 		}

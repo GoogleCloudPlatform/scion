@@ -16,7 +16,7 @@ GOLANGCI_LINT := $(shell command -v golangci-lint 2>/dev/null || echo $(shell go
 
 .DEFAULT_GOAL := help
 
-.PHONY: all build build-a2a-bridge test-a2a-integration install test test-fast test-hub-sqlite test-launch-store-postgres test-webchat-postgres test-fixture-coverage vet lint vet-integration vet-integration-extras compat-literals check-annotation-prefix check-authz-guards check-conversation-upsert-guard check-security-marker-gates cli-time-zones time-literals check-setenv-guard check-harness-coverage check-authorization-catalog check-route-authz-manifest check-method-not-allowed check-custom golangci-lint web web-typecheck web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check ent-check
+.PHONY: all build build-a2a-bridge test-a2a-integration install test test-fast test-hub-sqlite test-launch-store-postgres test-webchat-postgres test-artifacts-postgres test-fixture-coverage vet lint vet-integration vet-integration-extras compat-literals check-annotation-prefix check-authz-guards check-conversation-upsert-guard check-security-marker-gates cli-time-zones time-literals check-setenv-guard check-harness-coverage check-authorization-catalog check-route-authz-manifest check-method-not-allowed check-custom golangci-lint web web-typecheck web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check ent-check
 
 ## all: Build the web frontend and compile the Go binary (run 'make install' separately to install)
 all: web build
@@ -72,21 +72,22 @@ test-fast:
 	@echo "Running tests (no SQLite)..."
 	@go test -tags no_sqlite ./...
 
-## test-hub-sqlite: Run pkg/hub, perf/bench/seed, pkg/conduit and pkg/store/entadapter tests with SQLite
+## test-hub-sqlite: Run pkg/hub, perf/bench/seed, pkg/conduit, pkg/store/entadapter and pkg/artifacts tests with SQLite
 # enabled (no build tag). This is the ~67% of pkg/hub's test files that
 # "make test-fast" never compiles (see ptone/scion#1118), plus
 # perf/bench/seed's and pkg/store/entadapter's own SQLite-backed tests,
 # which carry the same `//go:build !no_sqlite` constraint for the same
 # reason (ptone/scion#2393, ptone/scion#2851), and pkg/conduit's
 # relay/router tests, which run against the SQLite-backed conduit
-# registry store.
+# registry store, and pkg/artifacts, whose store and service tests run on
+# SQLite.
 # Skips four pkg/hub tests with known pre-existing, tracked failures
 # (ptone/scion#1847) so this target can be used as a CI merge gate.
 test-hub-sqlite:
-	@echo "Running pkg/hub + perf/bench/seed + pkg/conduit + pkg/store/entadapter tests (SQLite-enabled)..."
+	@echo "Running pkg/hub + perf/bench/seed + pkg/conduit + pkg/store/entadapter + pkg/artifacts tests (SQLite-enabled)..."
 	@go test -count=1 -timeout 40m \
 		-skip '^(TestDEF164_AtAgentSlug_DeliversToAgent|TestDEF164_AtAgentSlug_DMConversationCreated|TestDEF152_AgentToAgentDM_DeliversViaOutbound|TestCreateTemplateV2_ScopeIDInjectionBlocked)$$' \
-		./pkg/hub/... ./perf/bench/seed/... ./pkg/conduit/... ./pkg/store/entadapter/...
+		./pkg/hub/... ./perf/bench/seed/... ./pkg/conduit/... ./pkg/store/entadapter/... ./pkg/artifacts/...
 
 ## test-fixture-coverage: Run the hub fixture coverage gate (TestFixtureCoverage) with SQLite
 # internal/fixturegen's tests carry `//go:build !no_sqlite`, so
@@ -152,6 +153,40 @@ test-fixture-coverage:
 # (TestProjectOwnerID_*, ptone/scion#2597): UpdateProject must not write
 # owner_id on either backend, so SetProjectOwnerID stays its only writer.
 #
+# It also includes the child-group edge removal tests
+# (TestRemoveChildGroupEdge_*, ptone/scion#2723): on Postgres a second
+# transaction deleting the same edge waits on the first one's row lock and
+# must then report ErrNotFound, so only one caller writes an audit record.
+# It also includes the orphaned group-membership tests and the composite
+# purge tests (ptone/scion#2769): PurgeDeletedAgents re-reads its batch with
+# FOR UPDATE on Postgres only, and the restore-during-purge cases exercise
+# that path. A third run covers the storetest group/MembershipCleanup
+# conformance (pkg/store/storetest), selected by name so only that subtest
+# of the CRUD-parity suite runs here. The TestCompositeDeleteAgent_ and
+# TestCompositeDeleteProject_ prefixes also select the PostgreSQL-only
+# *_LockOrderNoDeadlock tests, which check that both deletes lock agent rows
+# before deleting their memberships (the purge/finalize order).
+# TestCompositeDeleteProject_LocksAgentsInIDOrder pins the ascending order of
+# that lock, and the TestPurgeDeletedAgents_ prefix selects
+# TestPurgeDeletedAgents_CrossBatchLockOrderNoDeadlock (purge batches in ID
+# order). A fourth run covers the production project-delete path in pkg/hub
+# (TestProjectDeletionService_LockOrderNoDeadlock: ProjectDeletionService
+# locks the project's agents before its project-group cascade deletes agent
+# memberships), selected by name so only that test runs here. In the second
+# run (the full entadapter suite), the TestDeleteGroupMembershipsForUser_
+# prefix also selects
+# TestDeleteGroupMembershipsForUser_LockOrderVsProjectGroupCascade (a user
+# delete locks the groups it owns before its memberships, so it cannot
+# deadlock against a project delete's group cascade) and
+# TestDeleteGroupMembershipsForUser_OwnedGroupLockAllowsMemberInsert (that
+# lock is FOR NO KEY UPDATE, so it does not block the FK check of a
+# membership inserted into an owned group, which would deadlock).
+#
+# Since ptone/scion#2207 the job runs the FULL pkg/store/entadapter suite on
+# Postgres (no -run filter); the lists above document why particular groups
+# matter here, not what is selected. Every entadapter test now has to pass on
+# both backends.
+#
 # Fail loudly, not green, if a Postgres-only case in this job's own suite
 # skips instead of running. SCION_TEST_POSTGRES_URL is checked explicitly
 # first; on -v test output, any "--- SKIP" line (including an indented
@@ -167,6 +202,12 @@ test-fixture-coverage:
 # SCION_TEST_WORKER_DSN set (see multiprocess_test.go's package comment),
 # not Postgres-availability skips. They are excluded by name so a genuine
 # new skip in that package still fails the target.
+#
+# In the entadapter run, a test that is SQLite-only by design skips through
+# enttest.SkipOnPostgres, whose skip message is
+# "enttest-sqlite-only: <test name> <reason>". A skipped test is allowed only
+# if its own skip message carries that marker, so there is no name list here
+# and any other skip still fails the target.
 test-launch-store-postgres:
 	@echo "Running launch store tests against Postgres..."
 	@if [ -z "$$SCION_TEST_POSTGRES_URL" ]; then \
@@ -183,14 +224,43 @@ test-launch-store-postgres:
 		echo "ERROR: one or more Postgres-only integration tests were skipped -- see '--- SKIP' lines above." >&2; \
 		exit 1; \
 	fi
-	@go test -tags integration -count=1 -timeout 10m -v \
-		-run '^(TestLaunchStore_|TestReaper_|TestListSchedules_|TestListActiveZonePrefixedSchedules|TestReport_H1_|TestPutBrokerSettings|TestDeleteBrokerSettings|TestUsesRowLocks_ReflectsBackend|TestCountAgents_|TestListAgentMembers_|TestUTCTimestampNormalizeJSON_|TestConduitRegistry_|TestRunIntent_|TestUpdateSecretValueIfVersion|TestProjectOwnerID_|TestStartClaim_|TestRecoveryObs_|TestPreviousRunIDs_|TestSeedMaintenanceOperations)' \
+	@go test -tags integration -count=1 -timeout 40m -v \
 		./pkg/store/entadapter/... > /tmp/test-launch-store-postgres.log 2>&1; \
 	status=$$?; \
 	cat /tmp/test-launch-store-postgres.log; \
 	if [ $$status -ne 0 ]; then exit $$status; fi; \
-	if grep -qE '^[[:space:]]*--- SKIP' /tmp/test-launch-store-postgres.log; then \
-		echo "ERROR: one or more Postgres-only launch tests were skipped -- see '--- SKIP' lines above." >&2; \
+	sed -nE 's/^[[:space:]]*--- SKIP: ([^ ]+).*/\1/p' /tmp/test-launch-store-postgres.log | sort -u \
+		> /tmp/test-launch-store-postgres.skipped; \
+	grep -oE 'enttest-sqlite-only: [^ ]+' /tmp/test-launch-store-postgres.log | awk '{print $$2}' | sort -u \
+		> /tmp/test-launch-store-postgres.sqlite-only; \
+	unexpected=$$(grep -vxF -f /tmp/test-launch-store-postgres.sqlite-only /tmp/test-launch-store-postgres.skipped); \
+	if [ -n "$$unexpected" ]; then \
+		echo "ERROR: these entadapter tests were skipped on Postgres without enttest.SkipOnPostgres:" >&2; \
+		echo "$$unexpected" >&2; \
+		exit 1; \
+	fi
+	@go test -tags integration -count=1 -timeout 10m -v \
+		-run '^TestCompositeStore_CRUDParity$$/^group$$/^MembershipCleanup$$' \
+		./pkg/store/storetest/... > /tmp/test-launch-store-postgres-storetest.log 2>&1; \
+	status=$$?; \
+	cat /tmp/test-launch-store-postgres-storetest.log; \
+	if [ $$status -ne 0 ]; then exit $$status; fi; \
+	if ! grep -qE '^[[:space:]]*--- PASS: TestCompositeStore_CRUDParity/group/MembershipCleanup' /tmp/test-launch-store-postgres-storetest.log; then \
+		echo "ERROR: the storetest group/MembershipCleanup conformance did not run." >&2; \
+		exit 1; \
+	fi; \
+	if grep -qE '^[[:space:]]*--- SKIP' /tmp/test-launch-store-postgres-storetest.log; then \
+		echo "ERROR: one or more storetest group/MembershipCleanup cases were skipped -- see '--- SKIP' lines above." >&2; \
+		exit 1; \
+	fi
+	@go test -tags integration -count=1 -timeout 20m -v \
+		-run '^TestProjectDeletionService_LockOrderNoDeadlock$$' \
+		./pkg/hub/ > /tmp/test-launch-store-postgres-hub.log 2>&1; \
+	status=$$?; \
+	cat /tmp/test-launch-store-postgres-hub.log; \
+	if [ $$status -ne 0 ]; then exit $$status; fi; \
+	if ! grep -qE '^[[:space:]]*--- PASS: TestProjectDeletionService_LockOrderNoDeadlock' /tmp/test-launch-store-postgres-hub.log; then \
+		echo "ERROR: the pkg/hub project-delete lock-order test did not run." >&2; \
 		exit 1; \
 	fi
 
@@ -229,6 +299,34 @@ test-webchat-postgres:
 			exit 1; \
 		fi; \
 	done
+
+## test-artifacts-postgres: Run the pkg/artifacts tests: store tests on SQLite and a real Postgres (service tests on SQLite)
+# Requires SCION_TEST_POSTGRES_DSN (a pgx connection string). The artifact
+# store is not an Ent store (design D3: own tables, created by Init), so like
+# the web chat store it has its own Postgres SQL and its own Postgres tests.
+# Every store test runs once per dialect as a /sqlite and a /postgres
+# subtest; the Postgres subtests are added only when the DSN is set, so the
+# target fails if the variable is unset, if any test skips, or if no
+# /postgres subtest passed. Each test works in its own throwaway schema.
+# CI runs this in the T1 Launch Store PostgreSQL Tests job.
+test-artifacts-postgres:
+	@echo "Running pkg/artifacts tests (store tests on SQLite and Postgres)..."
+	@if [ -z "$$SCION_TEST_POSTGRES_DSN" ]; then \
+		echo "ERROR: SCION_TEST_POSTGRES_DSN is not set -- the Postgres tests would silently be left out." >&2; \
+		exit 1; \
+	fi
+	@go test -count=1 -timeout 10m -v ./pkg/artifacts/... > /tmp/test-artifacts-postgres.log 2>&1; \
+	status=$$?; \
+	cat /tmp/test-artifacts-postgres.log; \
+	if [ $$status -ne 0 ]; then exit $$status; fi; \
+	if grep -qE '^[[:space:]]*--- SKIP' /tmp/test-artifacts-postgres.log; then \
+		echo "ERROR: an artifact test was skipped -- see '--- SKIP' lines above." >&2; \
+		exit 1; \
+	fi; \
+	if ! grep -qE '^[[:space:]]*--- PASS: [^ ]+/postgres ' /tmp/test-artifacts-postgres.log; then \
+		echo "ERROR: no Postgres subtest passed." >&2; \
+		exit 1; \
+	fi
 
 ## test-tz-contract: Run the real-binary timestamp contract test (SQLite; Postgres too when SCION_TEST_POSTGRES_URL is set)
 # It builds cmd/scion, starts `scion server start --foreground` under non-UTC TZ values

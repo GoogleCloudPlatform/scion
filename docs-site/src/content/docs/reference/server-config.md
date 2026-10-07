@@ -235,7 +235,7 @@ Brokers are long-lived originators that mint their own OIDC tokens (via GKE Work
 | `SCION_TRANSPORT_MODE` | Transport mode: `iap` or `cloudrun_invoker`. |
 | `SCION_TRANSPORT_AUDIENCE` | OIDC audience — the custom OAuth 2.0 Client ID (for `iap`) or Hub URL (for `cloudrun_invoker`). |
 
-**Credentials-file fields** (per hub connection, persisted by `scion hub brokers register`):
+**Credentials-file fields** (per hub connection, in `~/.scion/hub-credentials/<name>.json`, persisted by `scion runtime-broker register` or `scion runtime-broker join`):
 
 | Field | Type | Description |
 | :--- | :--- | :--- |
@@ -289,8 +289,8 @@ Configures the backend and mount settings for storing and managing agent workspa
 | `nfs.mount_root` | string | | The host base directory under which NFS exports are mounted. |
 | `nfs.mount_options` | string | `"vers=3,hard,nconnect=4,_netdev"` | Standard mount options passed to the `mount.nfs` utility. |
 | `nfs.auto_mount` | boolean | `false` | Whether the Runtime Broker mounts the shares itself. See [NFS Mounts on the Runtime Broker](#nfs-mounts-on-the-runtime-broker). Requires the broker to run as root. |
-| `nfs.uid` | integer | `1000` | Node-independent owner UID for NFS-backed workspace trees to ensure consistent container write permissions (not yet applied on Kubernetes; ptone/scion#2608). |
-| `nfs.gid` | integer | `1000` | Node-independent owner GID for NFS-backed workspace trees. |
+| `nfs.uid` | integer | `1000` | Node-independent owner UID for NFS-backed workspace trees to ensure consistent container write permissions (not yet applied on Kubernetes; ptone/scion#2608). Must be between 0 and 4294967294; 0 or unset means `1000`. |
+| `nfs.gid` | integer | `1000` | Node-independent owner GID for NFS-backed workspace trees. Must be between 0 and 4294967294; 0 or unset means `1000`. |
 | `nfs.storage_class` | string | | The Kubernetes StorageClass name used to dynamically allocate volumes on GKE. |
 | `nfs.subpath_root` | string | `"projects"` | The base folder within the share for project workspaces. See [subpath_root](#subpath_root). |
 | `nfs.shares` | list of objects | `[]` | List of NFS share objects. Each share requires: `id` (stable ID), `server` (IP address or hostname), `export` (exported path, e.g., `/scion-workspaces`), and optional `pv_name` (for GKE). |
@@ -377,17 +377,20 @@ With the `nfs` backend, the Hub and brokers also apply the following:
 
 Different kinds of agents can write to the same NFS shared directory (leaf): Docker or rootful Podman agents on brokers, and Kubernetes pods. They usually run with different uids, so each one can modify the others' files only through the leaf's group. For that to work:
 
-- **The export must support POSIX ACLs.** The leaf's default ACL makes new files group-writable whatever the writer's umask. Without ACL support, files follow each writer's umask (usually `022`) and other writers cannot modify them. Scion logs a warning once when it cannot set the ACL. ACL-capable storage is required for shared directories with mixed writers.
+- **New files must be group-writable.** Where the export supports POSIX ACLs, the leaf's default ACL makes new files group-writable whatever the writer's umask. Where it does not (for example NFSv4.1 exports, where Linux clients cannot use POSIX ACLs), Scion logs a warning once, and new files follow the writer's umask. Agents that were given NFS shared-directory groups (below) run with the group bits of their umask cleared (`022` becomes `002`; a stricter `077` becomes `007`), so files they create are group-writable without an ACL. Other writers, and agents on images without this support, use their own umask (usually `022`), and their files cannot be modified by the other kinds of agents.
 - **Every writer must be in the leaf's group.** At each agent start, the broker reads the group of every NFS shared directory the agent mounts, from the leaf itself, and adds it to the agent:
-  - Kubernetes: added to the pod's `supplementalGroups`. `fsGroup` is not changed, and a group equal to `fsGroup` is not repeated.
-  - Docker and rootful Podman: added with `--group-add`. The agent image's `sciontool` must keep these groups when it switches from root to the agent user (for the harness, services, lifecycle hooks and `/exec` commands); older images drop them and keep the previous behaviour.
+  - Kubernetes: added to the pod's `supplementalGroups`. `fsGroup` is not changed, and a group equal to `fsGroup` is not repeated (the pod already holds it).
+  - Docker and rootful Podman: added with `--group-add`. The agent image's `sciontool` must keep these groups when it switches from root to the agent user (for the harness, services, lifecycle hooks and commands run through the substrate exec endpoint); older images drop them and keep the previous behaviour.
   - Rootless Podman and Apple containers: not supported; the broker logs a warning and starts the agent without the group. Docker with `userns-remap` or a rootless `dockerd` also gets no effect from the group, because the leaf gid is not mapped into the container's user namespace; the broker does not detect this case.
 
   For safety, the broker skips a group (with a warning) when it is below `1000`, when it is an overflow id (`65534` or `4294967294`, which NFSv4 id mapping reports for unmapped groups), or when `nfs.gid` is set and does not match. If the group cannot be read, the agent starts without it. Agents without an NFS shared directory are unchanged. On an `all_squash` export the server maps every client to one identity, so the added group has no effect there.
 
+With umask `002`, other files the agent creates later (for example in its home directory) are group-writable for its primary group too. OpenSSH refuses a group-writable ssh config or key file (such as `~/.ssh/config`). Under umask `002`, a file created without an explicit mode is group-writable; secrets and ssh tools create such files with mode `0600`.
+
 Some files are not upgraded:
 
-- Files created by a writer that passes an explicit restrictive mode (for example `open(..., 0644)`) stay non-group-writable; an ACL cannot add permissions the creator did not request.
+- Files created by a writer that passes an explicit restrictive mode (for example `open(..., 0644)`) stay non-group-writable; neither an ACL nor the umask can add permissions the creator did not request.
+- Files copied or moved in with their modes preserved (for example `cp -p`, `rsync -a`, `tar -x` as the owner, or `mv` within the export) keep those modes.
 - Leaves created outside Scion, or before Scion added the leaf ACL, keep their existing mode and ACL. Scion only sets modes and ACLs on leaves it creates. Fix them by hand (see the hybrid tier guide).
 
 The `local` backend (or an unset `shared_dir_storage`) behaves as before.
@@ -447,8 +450,77 @@ server:
   - A start that could not load the global settings records nothing, so the agent picks up its configured backend once the settings load again.
   - Agents created before the backend was recorded use the current resolution.
 - **Host mount**: a broker that starts an `nfs`-resolved agent needs the export mounted at `<mount_root>/<share id>`, as with the global `nfs` backend. A missing mount fails only agents that resolve to `nfs`. Agents on the `local` backend, server startup, and health checks are not affected. The startup log has one line per profile whose backend comes from an override.
-- **Hub file browser and attachments**: the Hub's file browser, archive downloads and attachment staging use `server.shared_dir_storage.backend` only, not the per-profile override.
+- **Hub file browser and attachments**: the Hub's file browser, archive downloads and attachment staging use `server.shared_dir_storage.backend` only, not the per-profile or [per-directory](#per-directory-backend) overrides.
 - **Cleanup on delete**: deleting a project removes its tree from the export whenever `server.shared_dir_storage.nfs` is complete, whatever the backend settings select. An agent can still be on `nfs` by its record after every setting has moved to `local`, and the Hub cannot read records kept on brokers. If the global backend is not `nfs` and the export is not mounted on the Hub's host, cleanup logs a warning and the delete still succeeds.
+
+#### Per-directory backend
+
+A runtime entry or a profile can also choose the backend for single shared directories with `shared_dir_storage_backends`, a map from shared directory name to `local` or `nfs`. For example, one project's `notes` directory can live on the NFS export, shared by Docker agents on several brokers and by Kubernetes pods, while a large `gocache` directory stays on local disk. A directory the map does not name uses the single `shared_dir_storage_backend` value, resolved as described above.
+
+For each shared directory the nearest level wins, in this order:
+
+1. `profiles.<name>.shared_dir_storage_backends.<dir>` for the agent's profile.
+2. `profiles.<name>.shared_dir_storage_backend`.
+3. `runtimes.<name>.shared_dir_storage_backends.<dir>` for that profile's runtime entry.
+4. `runtimes.<name>.shared_dir_storage_backend`.
+5. `server.shared_dir_storage.backend`.
+
+```yaml
+runtimes:
+  gke:
+    type: kubernetes
+profiles:
+  docker:
+    runtime: docker
+    shared_dir_storage_backends:
+      notes: nfs
+  gke:
+    runtime: gke
+    shared_dir_storage_backends:
+      notes: nfs
+server:
+  shared_dir_storage:
+    backend: local
+    nfs:
+      mount_root: /mnt/scion-nfs
+      shares:
+        - id: shared
+          pv_name: scion-shared-pvc
+```
+
+Because the profile is nearer than its runtime entry, a profile's single value wins over a per-directory entry on the runtime entry. In the following settings, `gocache` is on `nfs` for agents using the `fast` profile, even though the runtime entry names it `local`:
+
+```yaml
+runtimes:
+  gke:
+    type: kubernetes
+    shared_dir_storage_backends:
+      gocache: local
+profiles:
+  fast:
+    runtime: gke
+    shared_dir_storage_backend: nfs
+```
+
+To keep `gocache` on local disk for that profile, name it in the profile's own map:
+
+```yaml
+profiles:
+  fast:
+    runtime: gke
+    shared_dir_storage_backend: nfs
+    shared_dir_storage_backends:
+      gocache: local
+```
+
+- **Validation**: each key must be a valid shared directory name (lowercase letters, digits and hyphens) and each value `local` or `nfs`. An `nfs` entry needs a complete `server.shared_dir_storage.nfs` block, as for the single value. Errors name the key, for example `profiles.gke.shared_dir_storage_backends.notes`.
+- **Directories a project does not have**: settings are global and shared directories belong to each project, so an entry for a directory that a project does not have is valid and ignored for that project's agents.
+- **Recorded per agent**: the record in `shared-dir-storage.json` keeps the backend of each directory. Its `backend` field applies to every directory that its `dirs` map does not name. An agent whose directories all use one backend gets the same record as before, with no `dirs` map.
+  - A record written before per-directory backends existed has no `dirs` map, so all of that agent's directories keep its one recorded backend. Adding a per-directory entry to the settings does not move an existing agent's directories. No migration step is needed.
+  - A shared directory added to the project after the agent's first start uses the record's `backend`, not the current per-directory settings.
+- **Mounts**: Docker and Podman bind-mount each `nfs` directory from the export and each `local` directory from the broker's local layout. Kubernetes mounts each `nfs` directory from the `pv_name` claim by `subPath`, and each `local` directory as it would without `shared_dir_storage` (its own PersistentVolumeClaim, or the workspace claim when `server.workspace_storage` is `nfs`).
+- **Startup summary**: the startup log has one line per profile and shared directory whose backend comes from a `shared_dir_storage_backends` entry. An entry that a nearer setting overrides, such as a runtime entry's `gocache: local` under a profile with a single `nfs` value, produces no line.
+- **Known limit, mixed writers**: when agents with different uids write to the same `nfs` directory, for example Docker agents (the broker's uid) and Kubernetes pods (uid 1000 with `fsGroup`), subdirectories and files they create follow each writer's umask, usually `022`. Without POSIX ACLs on the export, one kind of agent cannot write into subdirectories the other created. Scion does not set a group-writable umask for agents in this version. Use the shared-group setup described above, and umask `002` for every agent that writes there.
 
 ### Agent Home Storage (`server.home_storage`)
 
@@ -684,6 +756,7 @@ When `server.hub.public_url` is not explicitly set, the Hub endpoint injected in
 3. `SCION_SERVER_BASE_URL` — the server's public base URL (also used for OAuth redirects).
 4. **IAP Audience Derivation** (in Hosted HA mode with IAP authentication):
    - For **Cloud Run** IAP audiences (`/projects/<number>/locations/<region>/services/<service>`), Scion can auto-derive the Hub's URL using the legacy Cloud Run URL format (`https://<service>-<number>.<region>.run.app`). Newer Cloud Run services use a different URL format (`https://<service>-<hash>-<region>.a.run.app`) where the hash cannot be derived from the project number — for those services, set `SCION_SERVER_BASE_URL` explicitly instead of relying on auto-derivation.
+     The derived URL is the IAP front end, which the Hub's own host does not serve. Agents on a co-located Docker broker (for example, the single-node VM deployment) therefore receive `http://scion-hub.internal:<hub listen port>` instead. That hostname is mapped to the Docker host gateway, so the agents reach the Hub directly while staying on bridge networking. Agents dispatched to Kubernetes runtime profiles still receive the derived URL.
    - For **GKE/GCLB** backend-service IAP audiences (`/projects/<number>/global/backendServices/<id>`), a URL cannot be derived from the ID. If `SCION_SERVER_BASE_URL` (or other explicit URL settings) is not set, Scion will log a warning at startup and fall back to `localhost`, which is likely unreachable from dispatched agents.
 5. Auto-computed `http://localhost:{port}` (last resort).
 

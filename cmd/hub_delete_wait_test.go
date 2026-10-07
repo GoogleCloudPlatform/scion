@@ -232,7 +232,8 @@ func TestDeleteAgentsViaHub_202FailedKeepsWorktreeAndErrors(t *testing.T) {
 		assert.Contains(t, err.Error(), "delete failed on the Hub (runtime_error): broker unreachable")
 		assert.Contains(t, err.Error(), "local worktree kept")
 		assert.Contains(t, err.Error(), "scion delete bad-agent")
-		assert.Contains(t, err.Error(), "force-delete it from the web UI")
+		assert.Contains(t, err.Error(), "or force it with 'scion delete --force bad-agent'")
+		assert.NotContains(t, err.Error(), "web UI")
 		assert.NotContains(t, err.Error(), "Starting the agent stays blocked")
 		assert.True(t, env.dirExists())
 		assert.True(t, env.stillSynced(t))
@@ -283,6 +284,10 @@ func TestStopAgentViaHub_RmWaitsOn202(t *testing.T) {
 		assert.Equal(t, 1, env.hub.stops)
 		assert.Equal(t, 2, env.hub.polls)
 		assert.False(t, env.stillSynced(t), "confirmed removal updates the sync state")
+		for i, existed := range env.hub.dirAtPoll {
+			assert.True(t, existed, "local files kept at poll %d, before the removal is confirmed", i)
+		}
+		assert.False(t, env.dirExists(), "confirmed removal cleans up local files, like delete (ptone/scion#2896)")
 	})
 	t.Run("failed", func(t *testing.T) {
 		env := setupAsyncDelete(t, "stop-agent", getReply{body: replyRuntime})
@@ -292,6 +297,7 @@ func TestStopAgentViaHub_RmWaitsOn202(t *testing.T) {
 		assert.Contains(t, err.Error(), "agent stopped but failed to delete via Hub")
 		assert.Contains(t, err.Error(), "(runtime_error)")
 		assert.True(t, env.stillSynced(t))
+		assert.True(t, env.dirExists(), "failed removal keeps local files")
 	})
 	t.Run("not taken", func(t *testing.T) {
 		env := setupAsyncDelete(t, "stop-agent", getReply{body: replyLive})
@@ -299,6 +305,7 @@ func TestStopAgentViaHub_RmWaitsOn202(t *testing.T) {
 		err := stopAgentViaHub(env.hubCtx, "stop-agent")
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "delete did not take effect")
+		assert.True(t, env.dirExists())
 	})
 	for _, tc := range []struct {
 		name    string
@@ -312,6 +319,7 @@ func TestStopAgentViaHub_RmWaitsOn202(t *testing.T) {
 			setStopRm(t)
 			require.NoError(t, stopAgentViaHub(env.hubCtx, "stop-agent"))
 			assert.True(t, env.stillSynced(t), "sync state left alone until removal is confirmed")
+			assert.True(t, env.dirExists(), "local files kept until removal is confirmed")
 		})
 	}
 }
@@ -366,6 +374,9 @@ func TestStopAllAgentsViaHub_RmWaitsOn202(t *testing.T) {
 				require.NoError(t, err)
 			}
 			assert.Equal(t, tc.wantSynced, env.stillSynced(t))
+			// Local files go exactly when the sync entry goes: on a
+			// confirmed removal (ptone/scion#2896).
+			assert.Equal(t, tc.wantSynced, env.dirExists(), "local files removed only on a confirmed removal")
 		})
 	}
 }
@@ -480,11 +491,15 @@ func TestDeleteAgentsViaHub_TwoAgentsPartial(t *testing.T) {
 	t.Run("json", func(t *testing.T) {
 		env, fastDir := setup(t)
 		setJSONOutput(t)
-		stdout, _ := captureStdIO(t, func() {
-			// JSON mode reports per-agent errors in the body and returns nil,
-			// as it did before this change.
-			require.NoError(t, deleteAgentsViaHub(env.hubCtx, []string{"fast-agent", "slow-agent"}))
+		var err error
+		stdout, stderr := captureStdIO(t, func() {
+			err = deleteAgentsViaHub(env.hubCtx, []string{"fast-agent", "slow-agent"})
 		})
+		// JSON mode reports per-agent errors in the body and exits non-zero,
+		// like text mode (ptone/scion#2894), without a second error report.
+		require.Error(t, err)
+		assert.True(t, isReportedInJSON(err), "error must be marked as already reported: %v", err)
+		assert.Empty(t, stderr)
 		var out struct {
 			Status  string                   `json:"status"`
 			Results []map[string]interface{} `json:"results"`
@@ -506,8 +521,27 @@ func TestDeleteAgentsViaHub_202AbandonedMayBlockStart(t *testing.T) {
 	err := deleteAgentsViaHub(env.hubCtx, []string{"bad-agent"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "(abandoned)")
-	assert.Contains(t, err.Error(), "Starting the agent may stay blocked until a retry succeeds or force is used.")
+	assert.Contains(t, err.Error(), "Starting the agent may stay blocked until a retry succeeds or force is used")
 	assert.True(t, env.dirExists())
+}
+
+// A caller who is not a platform admin gets the generic failed view, with
+// no code, error or claim (ptone/scion#3122): the CLI still reports a
+// failure, keeps the worktree, and says start may be blocked, without a
+// made-up code.
+func TestDeleteAgentsViaHub_202GenericFailedView(t *testing.T) {
+	env := setupAsyncDelete(t, "bad-agent",
+		getReply{body: `{"id":"uuid-1","name":"%s","phase":"stopping","deletion":{"state":"deleting","soft":false,"startedAt":"2026-10-03T10:00:00Z"}}`},
+		getReply{body: `{"id":"uuid-1","name":"%s","phase":"running","deletion":{"state":"failed","soft":false,"startedAt":"2026-10-03T10:00:00Z","expiresAt":"2026-10-03T10:15:00Z"}}`})
+	err := deleteAgentsViaHub(env.hubCtx, []string{"bad-agent"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "delete failed on the Hub; local worktree kept")
+	assert.Contains(t, err.Error(), "scion delete bad-agent")
+	assert.Contains(t, err.Error(), "Starting the agent may stay blocked until a retry succeeds or force is used")
+	assert.NotContains(t, err.Error(), "unknown")
+	assert.NotContains(t, err.Error(), "()")
+	assert.True(t, env.dirExists())
+	assert.True(t, env.stillSynced(t))
 }
 
 // N2/nit 6: stop --rm prints "removal in progress" on 202 and, when the

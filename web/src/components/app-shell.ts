@@ -35,6 +35,8 @@ import { performLogout } from '../utils/auth.js';
 import { setDocumentTitle, PAGE_TITLE_EVENT } from '../client/page-title.js';
 import type { PageTitleDetail } from '../client/page-title.js';
 import { enterAppFrame, exitAppFrame } from './shared/app-frame.js';
+import { isFeatureEnabled } from '../utils/feature-flags.js';
+import { ARTIFACTS_FLAG } from '../client/artifacts.js';
 
 /**
  * Page title configuration
@@ -357,6 +359,12 @@ export class ScionApp extends LitElement {
     }
     if (this.currentPath.match(/^\/projects\/[^/]+\/metrics$/)) {
       return 'Project Metrics';
+    }
+    if (
+      this.currentPath.match(/^\/projects\/[^/]+\/artifacts\/[^/]+$/) &&
+      isFeatureEnabled(ARTIFACTS_FLAG)
+    ) {
+      return 'Artifact';
     }
     if (this.currentPath.match(/^\/projects\/[^/]+\/templates\/[^/]+$/)) {
       return 'Template';

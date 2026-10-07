@@ -170,7 +170,7 @@
         "autohelp": {
           "type": "boolean",
           "default": true,
-          "description": "Print usage help on errors.",
+          "description": "Print the usage block after an argument or flag error.",
           "x-env-var": "SCION_CLI_AUTOHELP",
           "x-since": "1"
         },
@@ -539,6 +539,12 @@
           "type": "string",
           "enum": ["", "local", "nfs"],
           "description": "Shared-dir storage backend for agents whose profile uses this runtime entry. Overrides server.shared_dir_storage.backend; a profile value wins over this. nfs uses the server.shared_dir_storage.nfs block. Read from the global settings file only."
+        },
+        "shared_dir_storage_backends": {
+          "type": "object",
+          "propertyNames": { "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$" },
+          "additionalProperties": { "type": "string", "enum": ["local", "nfs"] },
+          "description": "Shared-dir storage backend per shared dir name, for agents whose profile uses this runtime entry. A dir not named here uses shared_dir_storage_backend. Any profile value, single or per dir, wins over this. Read from the global settings file only."
         },
         "home_storage_backend": {
           "type": "string",
@@ -1032,6 +1038,12 @@
           "enum": ["", "local", "nfs"],
           "description": "Shared-dir storage backend for agents using this profile. Wins over the runtime entry's value and server.shared_dir_storage.backend. nfs uses the server.shared_dir_storage.nfs block. Read from the global settings file only."
         },
+        "shared_dir_storage_backends": {
+          "type": "object",
+          "propertyNames": { "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$" },
+          "additionalProperties": { "type": "string", "enum": ["local", "nfs"] },
+          "description": "Shared-dir storage backend per shared dir name, for agents using this profile. A dir not named here uses shared_dir_storage_backend. Wins over the runtime entry's values. Read from the global settings file only."
+        },
         "home_storage_backend": {
           "type": "string",
           "enum": ["", "local", "nfs"],
@@ -1490,8 +1502,8 @@
         "mount_root": { "type": "string", "description": "Host directory under which each share is mounted, at <mount_root>/<share id>." },
         "mount_options": { "type": "string", "default": "vers=3,hard,nconnect=4,_netdev" },
         "auto_mount": { "type": "boolean", "default": false, "description": "When true, a Runtime Broker mounts each share itself at startup and before NFS-backed dispatches (requires root). When false, the mounts are provided externally and the broker only checks them read-only.", "x-since": "1" },
-        "uid": { "type": "integer", "default": 1000 },
-        "gid": { "type": "integer", "default": 1000 },
+        "uid": { "type": "integer", "minimum": 0, "maximum": 4294967294, "default": 1000 },
+        "gid": { "type": "integer", "minimum": 0, "maximum": 4294967294, "default": 1000 },
         "storage_class": { "type": "string" },
         "subpath_root": { "type": "string", "default": "projects" },
         "shares": {

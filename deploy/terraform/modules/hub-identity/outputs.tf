@@ -35,3 +35,8 @@ output "hub_iam_condition_expression_prefixed" {
   description = "The hub-prefixed secret-name prefix (ptone/scion#2152) used in the conditioned secretmanager.admin grant covering hub, user, and project scope alike, exposed only so hub-cloudrun's time_sleep can trigger a fresh wait if this expression ever changes (e.g. hub_name changes) — not meant for any other use."
   value       = local.hub_prefixed_secret_prefix
 }
+
+output "hub_workload_identity_member" {
+  description = "The Workload Identity member granted roles/iam.workloadIdentityUser on the hub GSA (\"serviceAccount:<project>.svc.id.goog[<ns>/<ksa>]\"), or null when hub_workload_identity_ksa is unset. A real resource attribute, so a consumer that must not start before the grant exists (hub-gke's boot_prerequisites) gets a genuine dependency edge from it."
+  value       = one(google_service_account_iam_member.hub_workload_identity_user[*].member)
+}

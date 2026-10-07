@@ -43,6 +43,15 @@ const (
 	// dedupTTL is how long a message ID is remembered for deduplication.
 	dedupTTL = 5 * time.Minute
 
+	// askUserExpiry is how long a posted question accepts button and
+	// modal answers.
+	askUserExpiry = 24 * time.Hour
+
+	// askUserCleanupInterval is the minimum time between deletions of
+	// expired ask-user entries. Answer handlers check expiry themselves,
+	// so cleanup only needs to run occasionally.
+	askUserCleanupInterval = time.Hour
+
 	// OriginMarkerKey is the config key injected into outbound messages
 	// to identify messages originating from the scion hub.
 	OriginMarkerKey = "scion_origin"
@@ -216,6 +225,15 @@ type DiscordBroker struct {
 	replyCooldown   map[string]time.Time
 	replyCooldownMu sync.Mutex
 
+	// lastAskUserCleanup is when expired ask-user entries were last
+	// deleted; askUserCleanupMu guards it.
+	lastAskUserCleanup time.Time
+	askUserCleanupMu   sync.Mutex
+
+	// now returns the current time; nil means time.Now. Tests set it to
+	// control the ask-user cleanup cadence.
+	now func() time.Time
+
 	agentCacheTTL  time.Duration
 	projectSlugMap map[string]string // injected by hub: projectID -> slug
 	downloadsPath  string            // override for file download directory; empty = default
@@ -225,6 +243,11 @@ type DiscordBroker struct {
 	hostCallbacks plugin.HostCallbacks
 
 	InboundHandler func(topic string, msg *messages.StructuredMessage)
+
+	// createDMChannel opens (or returns) the Discord DM channel with the
+	// given Discord user and returns its channel ID. Nil means use the
+	// gateway session. Tests replace it to avoid calling Discord.
+	createDMChannel func(discordUserID string) (string, error)
 }
 
 // NewBroker creates a new DiscordBroker with the given logger.
@@ -577,6 +600,9 @@ func (b *DiscordBroker) Unsubscribe(pattern string) error {
 //  1. Direct channel ID from metadata (discord_channel_id)
 //  2. ConversationContext for recipient
 //  3. Broadcast to all ChannelLinks for project
+//
+// A direct message to a user is never broadcast: with no stored channel it
+// goes to the user's Discord DM channel, or Publish returns an error.
 func (b *DiscordBroker) Publish(ctx context.Context, topic string, msg *messages.StructuredMessage) error {
 	b.mu.RLock()
 	if b.closed {
@@ -621,50 +647,6 @@ func (b *DiscordBroker) Publish(ctx context.Context, topic string, msg *messages
 	// Determine the project and agent from the topic.
 	projectID, agentSlug := parseTopicComponents(topic)
 
-	// Collect target channel IDs via dynamic routing.
-	var channelIDs []string
-
-	// Priority 0: Thread routing — ThreadID maps directly to a Discord
-	// channel or thread snowflake. This takes precedence over all other
-	// routing so replies land in the same channel/thread as the original.
-	if msg != nil && msg.ThreadID != "" {
-		channelIDs = append(channelIDs, msg.ThreadID)
-	}
-
-	// Priority 1: Direct channel ID from metadata.
-	if len(channelIDs) == 0 && msg != nil && msg.Metadata != nil {
-		if chID, ok := msg.Metadata["discord_channel_id"]; ok && chID != "" {
-			channelIDs = append(channelIDs, chID)
-		}
-	}
-
-	// Priority 2: Look up via ConversationContext for the recipient.
-	if len(channelIDs) == 0 && msg != nil && msg.Recipient != "" && store != nil {
-		ccSlug := agentSlug
-		if ccSlug == "" && msg.Sender != "" && strings.HasPrefix(msg.Sender, "agent:") {
-			ccSlug = strings.TrimPrefix(msg.Sender, "agent:")
-		}
-		channelIDs = b.resolveRecipientChannels(ctx, msg.Recipient, msg.RecipientID, projectID, ccSlug)
-	}
-
-	// Priority 3: Broadcast to all ChannelLinks for the project.
-	if len(channelIDs) == 0 && projectID != "" && store != nil {
-		links, err := store.GetChannelLinksForProject(ctx, projectID)
-		if err != nil {
-			b.log.Warn("Failed to get channel links for broadcast", "project_id", projectID, "error", err)
-		}
-		for _, link := range links {
-			if link.Active {
-				channelIDs = append(channelIDs, link.ChannelID)
-			}
-		}
-	}
-
-	if len(channelIDs) == 0 {
-		b.log.Debug("No Discord channel for topic, dropping message", "topic", topic)
-		return nil
-	}
-
 	// Discard the retired end-of-turn assistant-reply mirror; an older hub
 	// may still forward it.
 	if msg != nil && msg.Type == messages.TypeAssistantReply {
@@ -698,6 +680,76 @@ func (b *DiscordBroker) Publish(ctx context.Context, topic string, msg *messages
 		text = formatMessage(msg, agentSlug)
 	}
 	if text == "" {
+		return nil
+	}
+
+	// Only an all-digit ThreadID is a Discord channel or thread ID. Any
+	// other ThreadID (such as a Scion direct-message conversation key) is
+	// never sent to Discord as a channel ID: the message is resolved to the
+	// addressed user's own Discord channel below and is never broadcast.
+	recipientRouted := msg.ThreadID != "" && !isDiscordSnowflake(msg.ThreadID)
+	discordThreadID := msg.ThreadID
+	if recipientRouted {
+		discordThreadID = ""
+		if !strings.HasPrefix(msg.Recipient, "user:") {
+			b.log.Debug("No Discord channel for a non-Discord thread ID without a user recipient, dropping message",
+				"topic", topic, "recipient", msg.Recipient)
+			return nil
+		}
+	}
+
+	// Collect target channel IDs via dynamic routing.
+	var channelIDs []string
+
+	// Priority 0: Thread routing — ThreadID maps directly to a Discord
+	// channel or thread snowflake. This takes precedence over all other
+	// routing so replies land in the same channel/thread as the original.
+	if discordThreadID != "" {
+		channelIDs = append(channelIDs, discordThreadID)
+	}
+
+	// Priority 1: Direct channel ID from metadata.
+	if len(channelIDs) == 0 && msg != nil && msg.Metadata != nil {
+		if chID, ok := msg.Metadata["discord_channel_id"]; ok && chID != "" {
+			channelIDs = append(channelIDs, chID)
+		}
+	}
+
+	// Priority 2: Look up via ConversationContext for the recipient.
+	if len(channelIDs) == 0 && msg != nil && msg.Recipient != "" && store != nil {
+		ccSlug := agentSlug
+		if ccSlug == "" && msg.Sender != "" && strings.HasPrefix(msg.Sender, "agent:") {
+			ccSlug = strings.TrimPrefix(msg.Sender, "agent:")
+		}
+		channelIDs = b.resolveRecipientChannels(ctx, msg.Recipient, msg.RecipientID, projectID, ccSlug)
+	}
+
+	// Priority 2b: a direct message with no stored channel goes to the
+	// Discord DM channel of the addressed user's linked Discord account.
+	if len(channelIDs) == 0 && recipientRouted {
+		dmChannelID, err := b.resolveRecipientDMChannel(ctx, msg.Recipient, msg.RecipientID)
+		if err != nil {
+			return fmt.Errorf("discord: cannot deliver direct message to %s: %w", msg.Recipient, err)
+		}
+		channelIDs = append(channelIDs, dmChannelID)
+	}
+
+	// Priority 3: Broadcast to all ChannelLinks for the project. Never
+	// used for direct messages.
+	if len(channelIDs) == 0 && !recipientRouted && projectID != "" && store != nil {
+		links, err := store.GetChannelLinksForProject(ctx, projectID)
+		if err != nil {
+			b.log.Warn("Failed to get channel links for broadcast", "project_id", projectID, "error", err)
+		}
+		for _, link := range links {
+			if link.Active {
+				channelIDs = append(channelIDs, link.ChannelID)
+			}
+		}
+	}
+
+	if len(channelIDs) == 0 {
+		b.log.Debug("No Discord channel for topic, dropping message", "topic", topic)
 		return nil
 	}
 
@@ -759,7 +811,7 @@ func (b *DiscordBroker) Publish(ctx context.Context, topic string, msg *messages
 		// Forum and media channels (types 15, 16) are thread-only containers.
 		// Sending without a thread ID would broadcast to an invalid target;
 		// return an error so callers know a thread ID is required.
-		if msg.ThreadID == "" && b.isForumChannel(channelID) {
+		if discordThreadID == "" && b.isForumChannel(channelID) {
 			errs = append(errs, fmt.Errorf(
 				"discord channel %s is a forum/media channel — a thread ID is required to send messages; omit the channel or specify a thread ID",
 				channelID,
@@ -852,8 +904,12 @@ func (b *DiscordBroker) Publish(ctx context.Context, topic string, msg *messages
 					})
 				}
 			}
+		} else if msg.Type == messages.TypeInputNeeded && store != nil && senderSlug != "" {
+			// Questions get answer buttons and a pending ask-user entry.
+			err = b.sendInputNeeded(ctx, session, sendQueue, store, channelID, text, msg, senderSlug, projectID, files)
 		} else {
-			// Send via bot API (state changes, input-needed, non-agent messages).
+			// Send via bot API (state changes, non-agent messages, and
+			// input-needed without a store or sender slug).
 			if sendQueue != nil {
 				_, err = sendQueue.Send(ctx, channelID, text, nil, nil, files)
 			} else {
@@ -875,6 +931,82 @@ func (b *DiscordBroker) Publish(ctx context.Context, topic string, msg *messages
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// sendInputNeeded posts an input-needed message with answer buttons and
+// records the pending ask-user entry that the button and modal handlers
+// look up. Each channel gets its own request ID.
+func (b *DiscordBroker) sendInputNeeded(
+	ctx context.Context,
+	session *discordgo.Session,
+	sendQueue *SendQueue,
+	store Store,
+	channelID, text string,
+	msg *messages.StructuredMessage,
+	agentSlug, projectID string,
+	files []*discordgo.File,
+) error {
+	requestID := generateRequestID()
+	_, components := RenderInputNeeded(msg, agentSlug, requestID)
+
+	var sent *discordgo.Message
+	var err error
+	if sendQueue != nil {
+		sent, err = sendQueue.Send(ctx, channelID, text, nil, components, files)
+	} else {
+		sent, err = session.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
+			Content:    text,
+			Components: components,
+			Files:      files,
+		})
+	}
+	if err != nil {
+		return err
+	}
+
+	// Stored choices match the rendered buttons (nil for Reply/Dismiss)
+	// and keep the full text of any truncated label.
+	pending := &PendingAskUser{
+		RequestID: requestID,
+		ChannelID: channelID,
+		AgentSlug: agentSlug,
+		ProjectID: projectID,
+		Choices:   inputNeededChoices(msg),
+		ExpiresAt: time.Now().Add(askUserExpiry),
+	}
+	if sent != nil {
+		pending.MessageID = sent.ID
+	}
+	if b.askUserCleanupDue() {
+		if _, delErr := store.DeleteExpiredAskUsers(ctx); delErr != nil {
+			b.log.Warn("Failed to delete expired ask-user entries", "error", delErr)
+		}
+	}
+	// The message is already posted, so a failed write is logged rather
+	// than returned; returning it would not make the buttons answerable.
+	if createErr := store.CreatePendingAskUser(ctx, pending); createErr != nil {
+		b.log.Error("Failed to record pending ask-user; its buttons will not work",
+			"request_id", requestID, "channel_id", channelID,
+			"message_id", pending.MessageID, "error", createErr)
+	}
+	return nil
+}
+
+// askUserCleanupDue reports whether expired ask-user entries should be
+// deleted now, and if so records the time. Cleanup runs on the first call
+// and then at most once per askUserCleanupInterval.
+func (b *DiscordBroker) askUserCleanupDue() bool {
+	now := time.Now()
+	if b.now != nil {
+		now = b.now()
+	}
+	b.askUserCleanupMu.Lock()
+	defer b.askUserCleanupMu.Unlock()
+	if !b.lastAskUserCleanup.IsZero() && now.Sub(b.lastAskUserCleanup) < askUserCleanupInterval {
+		return false
+	}
+	b.lastAskUserCleanup = now
+	return true
 }
 
 // Close shuts down the Discord broker, closing the gateway session,
@@ -1389,9 +1521,12 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 	// included as implicit primary when explicit agent mentions are present).
 	targets, isAll := resolveTargetAgents(m, botUserID, effectiveDefault, agents)
 
-	// Fallback: reply-to-bot message — extract agent from webhook username.
+	// Fallback: a reply to an agent message posted through the plugin's
+	// own webhook goes to that agent (the webhook username is its slug).
 	if len(targets) == 0 && m.ReferencedMessage != nil {
-		slug := agentFromReply(m.ReferencedMessage, botUserID)
+		slug := agentFromReply(m.ReferencedMessage, func(webhookID string) bool {
+			return b.ownsWebhook(m.ChannelID, webhookID)
+		})
 		if slug != "" {
 			targets = []string{slug}
 		}
@@ -2203,7 +2338,13 @@ func (b *DiscordBroker) isReplyToBot(m *discordgo.MessageCreate, botUserID strin
 	if ref.Author != nil && botUserID != "" && ref.Author.ID == botUserID && ref.WebhookID == "" {
 		return true
 	}
-	if ref.WebhookID == "" {
+	return b.ownsWebhook(m.ChannelID, ref.WebhookID)
+}
+
+// ownsWebhook reports whether webhookID is the webhook this plugin uses
+// to post agent messages in channelID. It never creates a webhook.
+func (b *DiscordBroker) ownsWebhook(channelID, webhookID string) bool {
+	if webhookID == "" {
 		return false
 	}
 	b.mu.RLock()
@@ -2213,11 +2354,10 @@ func (b *DiscordBroker) isReplyToBot(m *discordgo.MessageCreate, botUserID strin
 		return false
 	}
 	// Threads use their parent channel's webhook.
-	channelID := m.ChannelID
-	if parentID, isThread := b.resolveThreadParent(m.ChannelID); isThread {
+	if parentID, isThread := b.resolveThreadParent(channelID); isThread {
 		channelID = parentID
 	}
-	return webhooks.owns(channelID, ref.WebhookID)
+	return webhooks.owns(channelID, webhookID)
 }
 
 // defaultAgentApplies reports whether an unaddressed message would go to
@@ -2350,24 +2490,8 @@ func (b *DiscordBroker) resolveRecipientChannels(ctx context.Context, recipient,
 		return nil
 	}
 
-	mapping, err := store.GetUserMappingByEmail(ctx, email)
-	if err != nil {
-		b.log.Error("Failed to look up user mapping by email", "email", email, "error", err)
-	}
-
-	// Fallback: try scion user ID lookup (handles display-name recipients).
-	if (err != nil || mapping == nil) && recipientID != "" {
-		var fallbackErr error
-		mapping, fallbackErr = store.GetUserMappingByScionUserID(ctx, recipientID)
-		if fallbackErr != nil {
-			b.log.Error("Failed to look up user mapping by scion user ID", "recipientID", recipientID, "error", fallbackErr)
-			err = fallbackErr
-		} else {
-			err = nil
-		}
-	}
-
-	if err != nil || mapping == nil {
+	mapping := b.lookupRecipientMapping(ctx, store, email, recipientID)
+	if mapping == nil {
 		return nil
 	}
 
@@ -2386,6 +2510,93 @@ func (b *DiscordBroker) resolveRecipientChannels(ctx context.Context, recipient,
 	}
 
 	return nil
+}
+
+// lookupRecipientMapping returns the Discord user mapping for a Scion user,
+// by email first and then by Scion user ID. It returns nil when the user has
+// no linked Discord account or the lookup fails.
+func (b *DiscordBroker) lookupRecipientMapping(ctx context.Context, store Store, email, recipientID string) *DiscordUserMapping {
+	mapping, err := store.GetUserMappingByEmail(ctx, email)
+	if err != nil {
+		b.log.Error("Failed to look up user mapping by email", "email", email, "error", err)
+	}
+
+	// Fallback: try scion user ID lookup (handles display-name recipients).
+	if (err != nil || mapping == nil) && recipientID != "" {
+		var fallbackErr error
+		mapping, fallbackErr = store.GetUserMappingByScionUserID(ctx, recipientID)
+		if fallbackErr != nil {
+			b.log.Error("Failed to look up user mapping by scion user ID", "recipientID", recipientID, "error", fallbackErr)
+			err = fallbackErr
+		} else {
+			err = nil
+		}
+	}
+
+	if err != nil || mapping == nil || mapping.DiscordUserID == "" {
+		return nil
+	}
+	return mapping
+}
+
+// resolveRecipientDMChannel returns the Discord DM channel ID for the
+// addressed Scion user, opening the DM channel through Discord when needed.
+// Only the recipient's own linked Discord account is used.
+func (b *DiscordBroker) resolveRecipientDMChannel(ctx context.Context, recipient, recipientID string) (string, error) {
+	email := strings.TrimPrefix(recipient, "user:")
+	if email == recipient || email == "" {
+		return "", fmt.Errorf("recipient is not a user")
+	}
+
+	b.mu.RLock()
+	store := b.store
+	session := b.session
+	createDM := b.createDMChannel
+	b.mu.RUnlock()
+
+	if store == nil {
+		return "", fmt.Errorf("no user mapping store configured")
+	}
+	mapping := b.lookupRecipientMapping(ctx, store, email, recipientID)
+	if mapping == nil {
+		return "", fmt.Errorf("user has no linked Discord account")
+	}
+
+	if createDM == nil {
+		if session == nil {
+			return "", fmt.Errorf("discord session not configured")
+		}
+		createDM = func(discordUserID string) (string, error) {
+			ch, err := session.UserChannelCreate(discordUserID, discordgo.WithContext(ctx))
+			if err != nil {
+				return "", err
+			}
+			return ch.ID, nil
+		}
+	}
+
+	channelID, err := createDM(mapping.DiscordUserID)
+	if err != nil {
+		return "", fmt.Errorf("opening Discord DM channel: %w", err)
+	}
+	if channelID == "" {
+		return "", fmt.Errorf("opening Discord DM channel: empty channel ID")
+	}
+	return channelID, nil
+}
+
+// isDiscordSnowflake reports whether id has the form of a Discord channel
+// or thread ID (a non-empty string of ASCII digits).
+func isDiscordSnowflake(id string) bool {
+	if id == "" {
+		return false
+	}
+	for i := 0; i < len(id); i++ {
+		if id[i] < '0' || id[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // resolveStaleChannelSlugs updates ChannelLinks where ProjectSlug equals

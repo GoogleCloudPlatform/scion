@@ -4,6 +4,7 @@
   "include": [
     "agent-store.test.ts",
     "agent-store-feed.test.ts",
+    "agent-store-probe.test.ts",
     "paginate-all.test.ts",
     "state.test.ts",
     "__fixtures__/agent-store-harness.ts"

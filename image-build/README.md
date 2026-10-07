@@ -16,7 +16,7 @@ core-base          System dependencies (Go, Node, Python)
         └── hub             Scion hub server
 
 thick-prep         Patches Cloud Workstations base for scion compatibility,
-                   including git >= 2.47 (amd64 only)
+                   including git >= 2.48 (amd64 only)
   └── scion-base   Same Dockerfile, different foundation
         ├── harness images
         └── hub
@@ -29,7 +29,7 @@ a `Dockerfile` and `cloudbuild.yaml`. See
 
 ### Where git comes from
 
-Scion hard-requires **git >= 2.47.0** (`pkg/util/git.go` `CheckGitVersion`, for
+Scion hard-requires **git >= 2.48.0** (`pkg/util/git.go` `CheckGitVersion`, for
 `git worktree add --relative-paths`). Below that, worktree-per-agent mode is
 disabled.
 
@@ -226,6 +226,59 @@ is a deliberate subset — see its own header — and is not part of this set).
 `harnesses/` tree and fails if one falls out of sync (ptone/scion#2357).
 Individual harness bundles can also carry their own
 `harnesses/<name>/cloudbuild.yaml` for one-off builds.
+
+## GKE Hub Image (`cloudbuild-hub-gke.yaml`)
+
+The `deploy/helm/scion-hub` chart runs the hub with `runAsNonRoot` as uid 1000,
+so it needs the non-root `hub-gke` stage of the repo-root `Dockerfile`, not the
+root-running `scion-hub` image above. `cloudbuild-hub-gke.yaml` builds that
+stage (linux/amd64, web UI embedded) and pushes only
+`$_REGISTRY/scion-hub-gke:$_SHORT_SHA`. It is not one of the `build-images.sh`
+targets; submit it directly from the repo root:
+
+```bash
+gcloud builds submit \
+  --config=image-build/cloudbuild-hub-gke.yaml \
+  --ignore-file=image-build/gcloudignore-omni \
+  --substitutions=_REGISTRY=<registry>,_SHORT_SHA=$(git rev-parse --short HEAD) \
+  .
+```
+
+`--ignore-file` is required because the default `.gcloudignore` drops the web
+source the Dockerfile builds. hub-gke uses the omni ignore file,
+`gcloudignore-omni`, which keeps it.
+
+All Cloud Build ignore files (`.gcloudignore` and `image-build/gcloudignore-*`)
+anchor every pattern that names a repo-root path with a leading `/`, as the
+root `.dockerignore` does. Gitignore semantics match a slash-less pattern at
+any depth, so an unanchored `agents.md`, `.gemini/`, `.claude/` or `README.md`
+would also drop files under `//go:embed` roots (`pkg/config/embeds/`,
+`resources/templates/`, `harnesses/`): the build would succeed with those files
+missing from the binary. Patterns left unanchored on purpose (`*_test.go`,
+`.git/`, `testdata/`, `downloads/`) say why in a comment.
+`cmd/gcloudignore_contract_test.go` fails if any ignore file matches a tracked
+file under a `//go:embed` root. Note that gcloud resolves `#!include:.gitignore`
+relative to the ignore file, so the `image-build/` files include the empty
+`image-build/.gitignore`, and only the root `.gcloudignore` pulls in the root
+`.gitignore`.
+
+No moving tag is pushed: repointing one needs an explicit ACK, and the chart
+prefers pinning the image by digest (`image.digest` over `image.tag`).
+
+The image is **linux/amd64 only** (the frontend and builder stages do not
+cross-compile; see the file's header). On a cluster with arm64 nodes, pin the
+hub pod to amd64 nodes, e.g. chart value
+`hub.nodeSelector: {kubernetes.io/arch: amd64}`.
+
+Locally, from a clean checkout, `docker build --platform linux/amd64 --target
+hub-gke .` builds from the same source files as the Cloud Build upload above,
+so the binary embeds the same templates and web UI. It is not byte-identical:
+base images are pulled at build time and layer timestamps differ.
+`docker build .` with no `--target` still builds the root-running runtime
+image. With BuildKit (the default `docker build`, and `buildx`), a default
+build skips the unused `hub-gke` stage; the legacy builder
+(`DOCKER_BUILDKIT=0`) runs that stage too but still outputs the runtime image,
+so it only costs build time.
 
 ## Package Registries
 

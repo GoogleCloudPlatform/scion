@@ -35,6 +35,7 @@ import (
 // real rootCmd, since the behavior depends on cobra's command-resolution
 // path through the actual tree, not a synthetic one.
 func TestConfigUnknownSubcommand_RejectsRemovedGroveAlias(t *testing.T) {
+	restoreAllSilenceUsage(t)
 	var buf bytes.Buffer
 	rootCmd.SetArgs([]string{"config", "cd-grove"})
 	rootCmd.SetOut(&buf)
@@ -67,6 +68,7 @@ func TestConfigUnknownSubcommand_RejectsRemovedGroveAlias(t *testing.T) {
 // special-cases zero args (dropping the "help" branch) passes unless the
 // "help" sub-case below is present.
 func TestConfigBareInvocation_PrintsHelpOutsideProject(t *testing.T) {
+	restoreAllSilenceUsage(t)
 	cases := []struct {
 		name string
 		args []string
@@ -211,4 +213,13 @@ func TestConfigGetCmd_NestedKeyErrors(t *testing.T) {
 			assert.Empty(t, out)
 		})
 	}
+}
+
+// TestConfigSetGlobalHelpNamesSettingsYAML: config set --global writes
+// ~/.scion/settings.yaml, and the help must say so.
+func TestConfigSetGlobalHelpNamesSettingsYAML(t *testing.T) {
+	usage := configSetCmd.Flags().Lookup("global").Usage
+	assert.Contains(t, usage, "settings.yaml")
+	assert.NotContains(t, usage, "settings.json")
+	assert.NotContains(t, configCmd.Long, "settings.json")
 }

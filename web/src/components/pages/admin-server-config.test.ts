@@ -1432,6 +1432,139 @@ describe('scion-page-admin-server-config', () => {
       expect(payload).not.toHaveProperty('default_gcp_identity_mode');
       expect(payload).toHaveProperty('default_gcp_identity_service_account_id', 'sa-123');
     });
+
+    // ptone/scion#2720: with the mode env-pinned, the form mode holds the
+    // settings-file value, not the effective one, so it must not drive
+    // clearing of the account. An unchanged account is left out of the
+    // payload, so the server neither clears nor re-checks it.
+    const pinnedFileConfig = (formMode: string, said: string) =>
+      makeBaseConfig({
+        settings_tier: 'file',
+        env_overrides: ['default_gcp_identity_mode'],
+        default_gcp_identity_mode: formMode,
+        default_gcp_identity_service_account_id: said,
+      });
+
+    it.each(['', 'block', 'passthrough', 'assign'])(
+      'buildFilePayload omits an unchanged GCP service account when the mode is env-pinned (form mode=%j)',
+      async (formMode) => {
+        element = await createComponent(createFetchHandler(pinnedFileConfig(formMode, 'sa-123')));
+        const el = element as any;
+        expect(el.defaultGCPIdentitySAID).toBe('sa-123');
+
+        const payload = el.buildFilePayload() as Record<string, unknown>;
+        expect(payload).not.toHaveProperty('default_gcp_identity_mode');
+        expect(payload).not.toHaveProperty('default_gcp_identity_service_account_id');
+      }
+    );
+
+    it.each([
+      ['changed', 'sa-456'],
+      ['cleared', ''],
+    ])(
+      'buildFilePayload sends an edited GCP service account when the mode is env-pinned (%s)',
+      async (_label, edited) => {
+        element = await createComponent(createFetchHandler(pinnedFileConfig('assign', 'sa-123')));
+        const el = element as any;
+        el.defaultGCPIdentitySAID = edited;
+
+        const payload = el.buildFilePayload() as Record<string, unknown>;
+        expect(payload).not.toHaveProperty('default_gcp_identity_mode');
+        expect(payload).toHaveProperty('default_gcp_identity_service_account_id', edited);
+      }
+    );
+
+    it('buildFilePayload compares the GCP service account with the latest load when the mode is env-pinned', async () => {
+      element = await createComponent(createFetchHandler(pinnedFileConfig('assign', 'sa-123')));
+      const el = element as any;
+      expect(el.defaultGCPIdentitySAID).toBe('sa-123');
+
+      // Reload (as after a save) with a different stored account.
+      vi.stubGlobal('fetch', vi.fn(createFetchHandler(pinnedFileConfig('assign', 'sa-789'))));
+      await el.loadConfig();
+      await el.updateComplete;
+      expect(el.defaultGCPIdentitySAID).toBe('sa-789');
+      expect(el.readOnlyReason('default_gcp_identity_mode')).not.toBeNull();
+
+      // Unchanged since the reload: omitted.
+      let payload = el.buildFilePayload() as Record<string, unknown>;
+      expect(payload).not.toHaveProperty('default_gcp_identity_mode');
+      expect(payload).not.toHaveProperty('default_gcp_identity_service_account_id');
+
+      // Back to the first-load value: now an edit, so it is sent.
+      el.defaultGCPIdentitySAID = 'sa-123';
+      payload = el.buildFilePayload() as Record<string, unknown>;
+      expect(payload).not.toHaveProperty('default_gcp_identity_mode');
+      expect(payload).toHaveProperty('default_gcp_identity_service_account_id', 'sa-123');
+    });
+
+    it.each([
+      ['assign', 'sa-123'],
+      ['block', ''],
+    ])(
+      'buildFilePayload sends the loaded GCP service account when the mode is editable (mode=%j)',
+      async (mode, expected) => {
+        element = await createComponent(
+          createFetchHandler(
+            makeBaseConfig({
+              settings_tier: 'file',
+              default_gcp_identity_mode: mode,
+              default_gcp_identity_service_account_id: 'sa-123',
+            })
+          )
+        );
+        const el = element as any;
+
+        const payload = el.buildFilePayload() as Record<string, unknown>;
+        expect(payload).toHaveProperty('default_gcp_identity_mode', mode);
+        expect(payload).toHaveProperty('default_gcp_identity_service_account_id', expected);
+      }
+    );
+
+    // The db-tier test schema does not list the GCP identity keys, so the
+    // tests set the Layer-1 key set the page uses to decide editability.
+    const GCP_KEYS = ['default_gcp_identity_mode', 'default_gcp_identity_service_account_id'];
+
+    it('buildLayer1Payload sends the GCP service account in assign mode', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig({ settings_tier: 'db' })));
+      const el = element as any;
+      el.layer1Keys = new Set(GCP_KEYS);
+      el.defaultGCPIdentityMode = 'assign';
+      el.defaultGCPIdentitySAID = 'sa-123';
+
+      const payload = el.buildLayer1Payload() as Record<string, unknown>;
+      expect(payload).toHaveProperty('default_gcp_identity_mode', 'assign');
+      expect(payload).toHaveProperty('default_gcp_identity_service_account_id', 'sa-123');
+    });
+
+    it('buildLayer1Payload clears the GCP service account when mode is not assign', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig({ settings_tier: 'db' })));
+      const el = element as any;
+      el.layer1Keys = new Set(GCP_KEYS);
+      el.defaultGCPIdentityMode = 'block';
+      el.defaultGCPIdentitySAID = 'stale-sa';
+
+      const payload = el.buildLayer1Payload() as Record<string, unknown>;
+      expect(payload).toHaveProperty('default_gcp_identity_mode', 'block');
+      expect(payload).toHaveProperty('default_gcp_identity_service_account_id', '');
+    });
+
+    // In the db tier env vars do not lock Layer-1 fields. Both GCP keys
+    // are in one settings section, so they are Layer-1 together or
+    // deployment-managed together; the page never reaches the read-only
+    // mode branch of the account helper there. When both are locked,
+    // neither key is sent.
+    it('buildLayer1Payload omits both GCP keys when they are not Layer-1', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig({ settings_tier: 'db' })));
+      const el = element as any;
+      el.layer1Keys = new Set();
+      el.defaultGCPIdentityMode = 'assign';
+      el.defaultGCPIdentitySAID = 'sa-123';
+
+      const payload = el.buildLayer1Payload() as Record<string, unknown>;
+      expect(payload).not.toHaveProperty('default_gcp_identity_mode');
+      expect(payload).not.toHaveProperty('default_gcp_identity_service_account_id');
+    });
   });
 
   // ── Cross-project messaging (D1) ──
@@ -2059,6 +2192,266 @@ describe('scion-page-admin-server-config', () => {
       expect('shared_dir_storage_backend' in capturedPayload!.runtimes.k8s).toBe(false);
     });
   });
+
+  describe('Cloud Run runtime editor field names (ptone/scion#3475)', () => {
+    function cloudRunConfig(
+      tier: Record<string, unknown>,
+      runtime: Record<string, unknown> = {
+        type: 'cloudrun',
+        cloudrun: { project_id: 'proj-a', location: 'us-central1' },
+      }
+    ) {
+      return makeBaseConfig({ ...tier, runtimes: { crun: runtime } });
+    }
+
+    function cloudRunInputs(el: HTMLElement): {
+      project: HTMLElement & { value: string };
+      location: HTMLElement & { value: string };
+    } {
+      const fields = queryAll(el, '.form-field');
+      const byLabel = (label: string) => {
+        const field = fields.find((f) => f.querySelector('label')?.textContent?.trim() === label);
+        return field?.querySelector('sl-input') as HTMLElement & { value: string };
+      };
+      return { project: byLabel('GCP Project'), location: byLabel('GCP Region') };
+    }
+
+    async function saveAndCapture(el: HTMLElement): Promise<void> {
+      await (el as any).updateComplete;
+      const buttons = queryAll(el, 'sl-button[variant="primary"]');
+      const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
+      (saveBtn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    }
+
+    for (const [mode, tier] of [
+      ['file', {}],
+      ['db', { settings_tier: 'db' }],
+    ] as const) {
+      it(`${mode} mode: reads and sends project_id and location`, async () => {
+        let capturedPayload: Record<string, any> | null = null;
+        element = await createComponent(
+          createFetchHandler(cloudRunConfig(tier), {
+            schemaResponse: {
+              sections: {
+                ...SCHEMA_RESPONSE.sections,
+                runtimes: { koanf_paths: ['runtimes'] },
+              },
+            },
+            putHandler: (body) => {
+              if ('runtimes' in body) capturedPayload = body;
+              return { status: 200, body: { reload: { applied: [] } } };
+            },
+          })
+        );
+
+        const { project, location } = cloudRunInputs(element);
+        expect(project).toBeDefined();
+        expect(location).toBeDefined();
+        expect(project.getAttribute('value')).toBe('proj-a');
+        expect(location.getAttribute('value')).toBe('us-central1');
+
+        project.value = 'proj-b';
+        project.dispatchEvent(new Event('sl-input'));
+        location.value = 'europe-west1';
+        location.dispatchEvent(new Event('sl-input'));
+        await saveAndCapture(element);
+
+        expect(capturedPayload).not.toBeNull();
+        expect(capturedPayload!.runtimes.crun.cloudrun).toEqual({
+          project_id: 'proj-b',
+          location: 'europe-west1',
+        });
+        expect('cloudrun_instances' in capturedPayload!.runtimes.crun).toBe(false);
+      });
+
+      it(`${mode} mode: cloudrun-instances reads and sends the cloudrun_instances block`, async () => {
+        let capturedPayload: Record<string, any> | null = null;
+        element = await createComponent(
+          createFetchHandler(
+            cloudRunConfig(tier, {
+              type: 'cloudrun-instances',
+              cloudrun_instances: { project_id: 'proj-a', region: 'us-central1' },
+            }),
+            {
+              schemaResponse: {
+                sections: {
+                  ...SCHEMA_RESPONSE.sections,
+                  runtimes: { koanf_paths: ['runtimes'] },
+                },
+              },
+              putHandler: (body) => {
+                if ('runtimes' in body) capturedPayload = body;
+                return { status: 200, body: { reload: { applied: [] } } };
+              },
+            }
+          )
+        );
+
+        const { project, location } = cloudRunInputs(element);
+        expect(project).toBeDefined();
+        expect(location).toBeDefined();
+        expect(project.getAttribute('value')).toBe('proj-a');
+        expect(location.getAttribute('value')).toBe('us-central1');
+
+        project.value = 'proj-b';
+        project.dispatchEvent(new Event('sl-input'));
+        location.value = 'europe-west1';
+        location.dispatchEvent(new Event('sl-input'));
+        await saveAndCapture(element);
+
+        expect(capturedPayload).not.toBeNull();
+        expect(capturedPayload!.runtimes.crun.cloudrun_instances).toEqual({
+          project_id: 'proj-b',
+          region: 'europe-west1',
+        });
+        expect('cloudrun' in capturedPayload!.runtimes.crun).toBe(false);
+      });
+
+      for (const [from, to, fromBlock, toBlock, toFields] of [
+        [
+          'cloudrun',
+          'cloudrun-instances',
+          'cloudrun',
+          'cloudrun_instances',
+          { project_id: 'proj-b', region: 'europe-west1' },
+        ],
+        [
+          'cloudrun-instances',
+          'cloudrun',
+          'cloudrun_instances',
+          'cloudrun',
+          { project_id: 'proj-b', location: 'europe-west1' },
+        ],
+      ] as const) {
+        it(`${mode} mode: switching ${from} to ${to} drops the ${fromBlock} block`, async () => {
+          let capturedPayload: Record<string, any> | null = null;
+          const fromFields =
+            from === 'cloudrun'
+              ? { project_id: 'proj-a', location: 'us-central1' }
+              : { project_id: 'proj-a', region: 'us-central1' };
+          element = await createComponent(
+            createFetchHandler(
+              cloudRunConfig(tier, {
+                type: from,
+                sync: 'tar',
+                env: { FOO: 'bar' },
+                [fromBlock]: fromFields,
+              }),
+              {
+                schemaResponse: {
+                  sections: {
+                    ...SCHEMA_RESPONSE.sections,
+                    runtimes: { koanf_paths: ['runtimes'] },
+                  },
+                },
+                putHandler: (body) => {
+                  if ('runtimes' in body) capturedPayload = body;
+                  return { status: 200, body: { reload: { applied: [] } } };
+                },
+              }
+            )
+          );
+
+          // Finds the runtime type select by its cloudrun-instances option;
+          // update this if another runtime-type select appears on the page.
+          const typeSelect = queryAll(element, 'sl-select').find((s) =>
+            s.querySelector('sl-option[value="cloudrun-instances"]')
+          ) as HTMLElement & { value: string };
+          expect(typeSelect).toBeDefined();
+          typeSelect.value = to;
+          typeSelect.dispatchEvent(new Event('sl-change'));
+          await (element as any).updateComplete;
+
+          const { project, location } = cloudRunInputs(element);
+          expect(project.getAttribute('value')).toBe('');
+          expect(location.getAttribute('value')).toBe('');
+          project.value = 'proj-b';
+          project.dispatchEvent(new Event('sl-input'));
+          location.value = 'europe-west1';
+          location.dispatchEvent(new Event('sl-input'));
+          await saveAndCapture(element);
+
+          expect(capturedPayload).not.toBeNull();
+          const crun = capturedPayload!.runtimes.crun;
+          expect(crun.type).toBe(to);
+          expect(fromBlock in crun).toBe(false);
+          expect(crun[toBlock]).toEqual(toFields);
+          expect(crun.env).toEqual({ FOO: 'bar' });
+          expect(crun.sync).toBe('tar');
+        });
+      }
+
+      for (const [type, block, fields] of [
+        ['cloudrun', 'cloudrun', { project_id: 'proj-a', location: 'us-central1' }],
+        [
+          'cloudrun-instances',
+          'cloudrun_instances',
+          { project_id: 'proj-a', region: 'us-central1' },
+        ],
+      ] as const) {
+        const loadRuntime = async (onPut: (body: Record<string, any>) => void) =>
+          createComponent(
+            createFetchHandler(
+              cloudRunConfig(tier, { type, env: { FOO: 'bar' }, [block]: fields }),
+              {
+                schemaResponse: {
+                  sections: {
+                    ...SCHEMA_RESPONSE.sections,
+                    runtimes: { koanf_paths: ['runtimes'] },
+                  },
+                },
+                putHandler: (body) => {
+                  if ('runtimes' in body) onPut(body);
+                  return { status: 200, body: { reload: { applied: [] } } };
+                },
+              }
+            )
+          );
+
+        it(`${mode} mode: clearing both ${type} fields drops the ${block} block`, async () => {
+          let capturedPayload: Record<string, any> | null = null;
+          element = await loadRuntime((body) => (capturedPayload = body));
+
+          const { project, location } = cloudRunInputs(element);
+          project.value = '';
+          project.dispatchEvent(new Event('sl-input'));
+          location.value = '';
+          location.dispatchEvent(new Event('sl-input'));
+          await saveAndCapture(element);
+
+          expect(capturedPayload).not.toBeNull();
+          const crun = capturedPayload!.runtimes.crun;
+          expect(crun.type).toBe(type);
+          expect(block in crun).toBe(false);
+          expect(crun.env).toEqual({ FOO: 'bar' });
+        });
+
+        it(`${mode} mode: switching ${type} to docker drops both Cloud Run blocks`, async () => {
+          let capturedPayload: Record<string, any> | null = null;
+          element = await loadRuntime((body) => (capturedPayload = body));
+
+          // Finds the runtime type select by its cloudrun-instances option;
+          // update this if another runtime-type select appears on the page.
+          const typeSelect = queryAll(element, 'sl-select').find((s) =>
+            s.querySelector('sl-option[value="cloudrun-instances"]')
+          ) as HTMLElement & { value: string };
+          expect(typeSelect).toBeDefined();
+          typeSelect.value = 'docker';
+          typeSelect.dispatchEvent(new Event('sl-change'));
+          await saveAndCapture(element);
+
+          expect(capturedPayload).not.toBeNull();
+          const crun = capturedPayload!.runtimes.crun;
+          expect(crun.type).toBe('docker');
+          expect('cloudrun' in crun).toBe(false);
+          expect('cloudrun_instances' in crun).toBe(false);
+          expect(crun.env).toEqual({ FOO: 'bar' });
+        });
+      }
+    }
+  });
+
   describe('home storage on runtimes and profiles', () => {
     function homeConfig() {
       return makeBaseConfig({

@@ -27,14 +27,17 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
+	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	stagedsecrets "github.com/GoogleCloudPlatform/scion/pkg/stagedsecrets"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
@@ -326,6 +329,10 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 	}
 
 	fullRepoRootMounted := false
+	// sharedWorkspaceAgentsMasked is set when the shared workspace mount
+	// (workspace == repo root) contains a .scion directory, whose agents/
+	// subdirectory is shadowed with a tmpfs below.
+	sharedWorkspaceAgentsMasked := false
 	if config.GitClone != nil {
 		// Git clone mode: mount the host-side workspace directory so the
 		// cloned repo is visible on the host for debugging and persistence.
@@ -339,6 +346,27 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 			// Worktree case: workspace is a subdirectory of repo root.
 			// Mount .git separately and workspace at its relative path.
 			registerMount(filepath.Join(config.RepoRoot, ".git"), "/repo-root/.git", false, true)
+			if config.RuntimeName == "docker" {
+				// Mount narrowing (Docker + hub-native only): narrow the
+				// container's write access to the shared base repo's admin
+				// surface — see narrowGitAdminMounts. This broader surface
+				// (hooks/info/config/config.worktree) stays hub-native-only:
+				// a linked project's own host-trusted hooks/config may have a
+				// legitimate need to stay writable that a hub-native base
+				// does not, and that question is unresolved for the local
+				// path.
+				if isHubManagedWorktreeBase(config.RepoRoot) {
+					narrowGitAdminMounts(registerMount, config.RepoRoot, config.Workspace)
+				}
+				// Mount narrowing (Part B, Docker, hub-native AND local): narrow the
+				// sharer registry and every worktree's admin back-link — see
+				// narrowSharerRegistryMounts. Unlike the broader surface
+				// above, neither of these two paths is ever legitimately
+				// written by anything other than the broker itself on any
+				// base type, so this narrower surface applies regardless of
+				// isHubManagedWorktreeBase.
+				narrowSharerRegistryMounts(registerMount, config.RepoRoot, config.Workspace)
+			}
 			containerWorkspace := filepath.Join("/repo-root", relWorkspace)
 			registerMount(config.Workspace, containerWorkspace, false, true)
 			addArg("--workdir", containerWorkspace)
@@ -354,11 +382,17 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 			// (config.GetAgentDir with sharedWorkspace=true), so there is
 			// nothing to leak through this mount. See
 			// .design/hub-shared-workspace-isolation.md (defense by absence).
-			// If the threat model ever requires in-container shadowing, mirror
-			// the /repo-root/.scion tmpfs pattern below at
-			// /workspace/.scion/agents.
+			// Agent state for shared-workspace projects is always resolved
+			// from the broker-side agent dir (pkg/agent agentStateDir), never
+			// from the in-project agents root under this mount; that is the
+			// control on every runtime. On Docker/Podman the in-project
+			// agents root is additionally shadowed with a tmpfs (below) when
+			// <workspace>/.scion is a directory.
 			registerMount(config.Workspace, "/workspace", false, true)
 			addArg("--workdir", "/workspace")
+			if info, err := os.Stat(filepath.Join(config.Workspace, ".scion")); err == nil && info.IsDir() {
+				sharedWorkspaceAgentsMasked = true
+			}
 		} else {
 			// Fallback if workspace is outside repo root or relative path is not straightforward.
 			// Still mount RepoRoot so that .git worktree pointers can potentially be resolved if
@@ -432,13 +466,7 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 	// continues to use the broker's host UID/GID (today's behavior, unchanged).
 	uid, gid := os.Getuid(), os.Getgid()
 	if config.WorkspaceBackendName == "nfs" {
-		uid, gid = config.NFSUID, config.NFSGID
-		if uid == 0 {
-			uid = 1000 // default stable NFS UID
-		}
-		if gid == 0 {
-			gid = 1000 // default stable NFS GID
-		}
+		uid, gid = nfsOwnerIDs(config.NFSUID, config.NFSGID)
 	}
 	addEnv("SCION_HOST_UID", fmt.Sprintf("%d", uid))
 	addEnv("SCION_HOST_GID", fmt.Sprintf("%d", gid))
@@ -545,6 +573,14 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 	if fullRepoRootMounted {
 		addArg("--mount", "type=tmpfs,destination=/repo-root/.scion")
 	}
+	// Docker/Podman: shadow the in-project agents root of a shared workspace
+	// mount the same way, so it is empty in the container. The Apple runtime
+	// drops --mount arguments (stripUnsupportedAppleFlags), and Kubernetes and
+	// Cloud Run build their own mounts; for those, agent state resolving only
+	// from the broker-side agent dir is the control.
+	if sharedWorkspaceAgentsMasked {
+		addArg("--mount", "type=tmpfs,destination=/workspace/.scion/agents")
+	}
 
 	// Add NET_ADMIN capability for iptables-based metadata server interception
 	if config.MetadataInterception {
@@ -622,6 +658,221 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 	}
 
 	return args, nil
+}
+
+// legacyProjectsDirName is the pre-rename name of the global
+// ~/.scion/projects directory (pkg/config's own legacyProjectsDirName,
+// unexported, is this same literal — duplicated here rather than imported so
+// this file's dependency surface stays unchanged; see
+// hack/check-project-compat-literals.sh's allowlist entry for this file).
+const legacyProjectsDirName = "groves"
+
+// isHubManagedWorktreeBase reports whether repoRoot is the broker-managed
+// shared base clone for a hub-native worktree-per-agent project, i.e. it
+// lives under the broker's conventional ~/.scion/projects/<slug> (or legacy
+// ~/.scion/groves/<slug>) path.
+//
+// This mirrors the hub's own linked-vs-hub-native distinction: per
+// pkg/hub/httpdispatcher.go (resolveDispatchProjectInfo), a project
+// provider's LocalPath — set when a project is linked to an existing local
+// checkout — takes precedence over hub-native slug resolution; only in its
+// absence does the broker (buildStartContext) resolve the project path via
+// the ~/.scion/projects/<slug> convention. A linked project's RepoRoot
+// therefore points at the user's own checkout, outside this tree, so this
+// check is false for it by construction. The narrowed .git admin-dir mount
+// (narrowGitAdminMounts) must apply only when this returns true — a linked
+// project's own hooks are host-trusted and must keep running unmodified.
+//
+// Any error resolving the broker's global dir (e.g. no home directory) fails
+// OPEN with respect to this mount narrowing — it is skipped for
+// that agent — rather than risk misclassifying a linked project as
+// hub-managed and breaking its legitimate hooks. This is a deliberate
+// trade-off given the two failure modes are asymmetric (a skipped mount
+// narrowing leaves the pre-existing exposure; a wrong positive breaks a
+// user's own repo), not a claim that it is the safer default in general.
+func isHubManagedWorktreeBase(repoRoot string) bool {
+	if repoRoot == "" {
+		return false
+	}
+	globalDir, err := config.GetGlobalDir()
+	if err != nil || globalDir == "" {
+		return false
+	}
+	repoAbs, err := filepath.Abs(repoRoot)
+	if err != nil {
+		return false
+	}
+	// `git rev-parse --git-common-dir` (how RepoRoot is ultimately derived,
+	// see pkg/agent/run.go's detectRepoRoot) returns a resolved (symlink-free)
+	// path, while os.UserHomeDir() may itself be reached through a symlink
+	// (e.g. /home -> /var/home). Resolve both sides the same way before
+	// comparing so a symlinked home directory doesn't cause a hub-native base
+	// to be misclassified as linked (and so miss the mount narrowing).
+	if resolved, evalErr := filepath.EvalSymlinks(repoAbs); evalErr == nil {
+		repoAbs = resolved
+	}
+	// Check both the canonical ~/.scion/projects/<slug> name and the
+	// pre-migration ~/.scion/groves/<slug> name: config.MigrateLegacyGlobalLayout
+	// renames the latter to the former, but runs separately from (and is not
+	// a precondition of) this check, so a not-yet-migrated hub-native base can
+	// still be live here. legacyProjectsDirName is a local literal, not
+	// imported from pkg/config's own (unexported) copy, mirroring
+	// pkg/config/paths.go's own ProjectsDir/legacy pairing — see
+	// hack/check-project-compat-literals.sh's allowlist entry for this file.
+	for _, sub := range []string{config.ProjectsDir, legacyProjectsDirName} {
+		base := filepath.Clean(filepath.Join(globalDir, sub))
+		if resolved, evalErr := filepath.EvalSymlinks(base); evalErr == nil {
+			base = resolved
+		}
+		if repoAbs == base || strings.HasPrefix(repoAbs, base+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
+}
+
+// narrowGitAdminMounts layers read-only bind mounts over the shared base
+// repo's admin surface — .git/config, .git/hooks/, .git/info/, and (if
+// present) the per-worktree .git/worktrees/<name>/config.worktree — on top of
+// the already-registered read-write /repo-root/.git mount. This is Part A of
+// the broker-git worktree containment change: it removes a container's
+// ability to write the files host-side git later honors (hooks,
+// core.hooksPath/fsmonitor/sshCommand, smudge/clean filter selection via
+// info/attributes) when the broker runs git against this same base — see
+// pkg/provision/provision.go's SafeGitCommand for the invocation-level
+// additional check.
+//
+// Objects, refs, packed-refs, and the per-worktree HEAD/index/logs/ORIG_HEAD
+// are deliberately left writable: a worktree shares the common object store,
+// so in-container `git commit` must still be able to write loose objects and
+// update refs. Only the admin subpaths above are narrowed — the container
+// never legitimately needs to write them (identity and credentials are
+// supplied via $HOME/.gitconfig, not .git/config, and there is no
+// in-container `git config --local` write).
+//
+// Each subpath is mounted read-only only if it currently exists, so a
+// freshly-cloned base without a config.worktree (the common case —
+// extensions.worktreeConfig is opt-in) does not cause Docker to create an
+// empty file/dir on the host for a nonexistent bind-mount source.
+func narrowGitAdminMounts(registerMount func(string, string, bool, bool), repoRoot, workspace string) {
+	gitDir := filepath.Join(repoRoot, ".git")
+
+	// .git/hooks and .git/info are present after a default `git init`, but
+	// an empty/custom init.templateDir (or `git init --template=`) can
+	// produce a base without one or both. Skipping the mount in that case
+	// would fail OPEN: the container could then create its own writable
+	// hooks/ or info/ directly in the rw .git root. Create them on the host
+	// first (an empty read-only directory is harmless) so the mount always
+	// applies.
+	for _, dir := range []string{"hooks", "info"} {
+		src := filepath.Join(gitDir, dir)
+		if err := os.MkdirAll(src, 0755); err != nil {
+			// If the directory cannot even be created, mounting it read-only
+			// isn't possible either; leave this one subpath uncovered rather
+			// than fail agent startup over it.
+			continue
+		}
+		registerMount(src, filepath.Join("/repo-root/.git", dir), true, true)
+	}
+
+	// .git/config always exists after `git init`/`git clone` — it is not
+	// template-populated — so no analogous fail-open gap applies here.
+	if configSrc := filepath.Join(gitDir, "config"); fileExists(configSrc) {
+		registerMount(configSrc, "/repo-root/.git/config", true, true)
+	}
+
+	// extensions.worktreeConfig, when enabled on the base, lets a worktree
+	// carry its own config.worktree that git also honors — narrow it too.
+	// This one keeps skip-if-missing: it is opt-in (needs the extension
+	// enabled in the now-read-only base config) and harmless if absent,
+	// unlike hooks/info which git always consults.
+	worktreeName := resolveWorktreeAdminName(workspace)
+	if configWorktree := filepath.Join(gitDir, "worktrees", worktreeName, "config.worktree"); fileExists(configWorktree) {
+		registerMount(configWorktree, filepath.Join("/repo-root/.git/worktrees", worktreeName, "config.worktree"), true, true)
+	}
+}
+
+// narrowSharerRegistryMounts layers read-only bind mounts over two further
+// paths in the shared base repo's .git, on top of the already-registered
+// read-write /repo-root/.git mount: the sharer-registry marker directory
+// (.git/scion-sharers/) and this worktree's admin back-link file
+// (.git/worktrees/<name>/gitdir). This is Part B of the broker-git worktree
+// containment change, and — unlike narrowGitAdminMounts above — applies on
+// Docker regardless of isHubManagedWorktreeBase: neither path is ever
+// legitimately written by anything other than the broker itself, on either
+// base type, so the hub-native-only carve-out that exists for the broader
+// admin surface (a linked project's own host-trusted hooks/config) does not
+// apply here.
+//
+// pkg/provision's read/JOIN/teardown boundary validation (sharers.go's
+// readMarker and worktree_validate.go's ValidateWorktreeForBase) is the
+// primary, base-type-independent control: it already makes an invalid
+// marker or a rewritten back-link harmless regardless of whether this mount
+// narrowing applies. This function is an additional layer on top of that —
+// it prevents the write from inside a container in the first place.
+//
+// The sharer registry directory may not exist yet (no branch has been
+// shared) — it is created on the host first so the read-only mount always
+// applies, the same fail-open concern narrowGitAdminMounts' hooks/info
+// handling documents: otherwise a container could create its own writable
+// one directly in the still-read-write .git root. The admin back-link file,
+// by contrast, is written once by `git worktree add` before this worktree's
+// container ever starts, so — like config.worktree above — it keeps
+// skip-if-missing: there is no create-first fail-open gap to close, only a
+// path that legitimately might not exist for a base with no worktrees yet.
+func narrowSharerRegistryMounts(registerMount func(string, string, bool, bool), repoRoot, workspace string) {
+	gitDir := filepath.Join(repoRoot, ".git")
+
+	sharersDir := filepath.Join(gitDir, sharerRegistryDirName)
+	if err := os.MkdirAll(sharersDir, 0755); err == nil {
+		registerMount(sharersDir, filepath.Join("/repo-root/.git", sharerRegistryDirName), true, true)
+	}
+	// If the directory cannot even be created, mounting it read-only isn't
+	// possible either; leave it uncovered rather than fail agent startup.
+
+	worktreeName := resolveWorktreeAdminName(workspace)
+	if backLink := filepath.Join(gitDir, "worktrees", worktreeName, "gitdir"); fileExists(backLink) {
+		registerMount(backLink, filepath.Join("/repo-root/.git/worktrees", worktreeName, "gitdir"), true, true)
+	}
+}
+
+// sharerRegistryDirName is the marker directory pkg/provision's sharer
+// registry stores under a shared base's .git — see the unexported sharerDir
+// constant in pkg/provision/sharers.go, which this must match. Duplicated as
+// a literal because that constant is unexported (an internal name for
+// pkg/provision's own registry-path helper, not part of its public API).
+const sharerRegistryDirName = "scion-sharers"
+
+// fileExists reports whether path exists (file or directory).
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// resolveWorktreeAdminName returns the name git used for this worktree's
+// admin directory under <repoRoot>/.git/worktrees/. It defaults to
+// filepath.Base(workspace), but `git worktree add` appends a numeric suffix
+// to disambiguate a name collision, so the actual name is read from the
+// worktree's own gitfile (a file at <workspace>/.git containing "gitdir:
+// <repoRoot>/.git/worktrees/<name>") when available. Falling back to the
+// basename on any read/parse failure only risks missing the optional
+// config.worktree mount (harmless — see narrowGitAdminMounts).
+func resolveWorktreeAdminName(workspace string) string {
+	fallback := filepath.Base(workspace)
+	data, err := os.ReadFile(filepath.Join(workspace, ".git"))
+	if err != nil {
+		return fallback
+	}
+	line := strings.TrimSpace(string(data))
+	const prefix = "gitdir:"
+	if !strings.HasPrefix(line, prefix) {
+		return fallback
+	}
+	adminDir := strings.TrimSpace(strings.TrimPrefix(line, prefix))
+	if adminDir == "" {
+		return fallback
+	}
+	return filepath.Base(adminDir)
 }
 
 // resolveContainerID maps an agent identifier (slug, name, or partial
@@ -1131,6 +1382,133 @@ func prepareContainerSecretEnv(config *RunConfig) error {
 	return nil
 }
 
+// envSizeLimit is the largest environment entry a runtime accepts.
+// maxBytes 0 means no check. When includeKey is set the limit covers the
+// whole "KEY=VALUE" string (plus its NUL terminator), as for an argv
+// string; otherwise it covers the value alone.
+type envSizeLimit struct {
+	maxBytes   int
+	includeKey bool
+}
+
+// size returns the bytes an entry counts against the limit.
+func (l envSizeLimit) size(key, value string) int {
+	if l.includeKey {
+		return len(key) + 1 + len(value) + 1
+	}
+	return len(value)
+}
+
+// exceeds reports whether key=value does not fit.
+func (l envSizeLimit) exceeds(key, value string) bool {
+	return l.maxBytes > 0 && l.size(key, value) > l.maxBytes
+}
+
+// unit names what the limit measures, for error messages.
+func (l envSizeLimit) unit() string {
+	if l.includeKey {
+		return "environment entry (KEY=VALUE)"
+	}
+	return "environment variable value"
+}
+
+// applyResolvedSecretsToEnv folds config.ResolvedSecrets into config.Env for
+// runtimes that hand the container a flat environment list (Cloud Run
+// instances and cloudrun-sandbox) rather than building it through
+// buildCommonRunArgs.
+//
+// Environment-type secrets become KEY=VALUE entries. As in Docker, a key
+// already present in config.Env wins and the secret is skipped; among
+// secrets sharing a target the later one wins (Docker keeps the last -e
+// flag). Keys this function adds itself (SCION_STAGED_SECRETS,
+// SCION_OTEL_GCP_CREDENTIALS) and any reservedKeys the runtime sets after
+// config.Env are treated the same way, so no env name is emitted twice.
+// File and variable secrets go into the SCION_STAGED_SECRETS blob via
+// prepareContainerSecretEnv, which sciontool init writes out in the
+// container.
+//
+// A secret that does not fit limit fails the call with an error naming it
+// rather than being dropped. Values are never included in the error.
+//
+// It returns the env-type secret keys it added, in order. config.Env is
+// clipped before appending, so a caller's backing array is never written.
+func applyResolvedSecretsToEnv(config *RunConfig, limit envSizeLimit, reservedKeys ...string) ([]string, error) {
+	if len(config.ResolvedSecrets) == 0 {
+		return nil, nil
+	}
+
+	staged := *config
+	staged.Env = nil
+	if err := prepareContainerSecretEnv(&staged); err != nil {
+		return nil, err
+	}
+	for _, e := range staged.Env {
+		key, val, _ := strings.Cut(e, "=")
+		if key == stagedsecrets.EnvVar && limit.exceeds(key, val) {
+			return nil, fmt.Errorf("file/variable secrets do not fit: %s is %d bytes, over the %d-byte limit for one %s on this runtime (largest secret: %q)",
+				stagedsecrets.EnvVar, limit.size(key, val), limit.maxBytes, limit.unit(), largestStagedSecretName(config.ResolvedSecrets))
+		}
+	}
+
+	envKeys := make(map[string]struct{}, len(config.Env)+len(reservedKeys)+2)
+	for _, e := range config.Env {
+		key, _, _ := strings.Cut(e, "=")
+		envKeys[key] = struct{}{}
+	}
+	// The staged keys are reserved even when this call does not set them:
+	// sciontool init reads them, so a secret must not supply them.
+	envKeys[stagedsecrets.EnvVar] = struct{}{}
+	envKeys[telemetryGCPCredentialsEnvVar] = struct{}{}
+	for _, key := range reservedKeys {
+		envKeys[key] = struct{}{}
+	}
+
+	// Collect env-type secrets in order, later duplicates replacing earlier ones.
+	var order []string
+	values := make(map[string]api.ResolvedSecret)
+	for _, s := range config.ResolvedSecrets {
+		if s.Type != "environment" && s.Type != "" {
+			continue
+		}
+		if _, collides := envKeys[s.Target]; collides {
+			continue
+		}
+		if _, seen := values[s.Target]; !seen {
+			order = append(order, s.Target)
+		}
+		values[s.Target] = s
+	}
+	for _, target := range order {
+		s := values[target]
+		if limit.exceeds(target, s.Value) {
+			return nil, fmt.Errorf("secret %q (env %s) is %d bytes, over the %d-byte limit for one %s on this runtime",
+				s.Name, s.Target, limit.size(target, s.Value), limit.maxBytes, limit.unit())
+		}
+	}
+
+	config.Env = slices.Clip(config.Env)
+	for _, target := range order {
+		config.Env = append(config.Env, target+"="+values[target].Value)
+	}
+	config.Env = append(config.Env, staged.Env...)
+	return order, nil
+}
+
+// largestStagedSecretName returns the name of the largest file or variable
+// secret, i.e. the one most responsible for an oversized staged blob.
+func largestStagedSecretName(secrets []api.ResolvedSecret) string {
+	name, size := "", -1
+	for _, s := range secrets {
+		if s.Type != "file" && s.Type != "variable" {
+			continue
+		}
+		if len(s.Value) > size {
+			name, size = s.Name, len(s.Value)
+		}
+	}
+	return name
+}
+
 // serializeSecrets collects file and variable secrets into a single JSON blob,
 // base64-encodes it, and returns the encoded string suitable for injection as
 // an environment variable. Returns "" when there are no file or variable secrets.
@@ -1238,12 +1616,22 @@ func ExitCodeFromContainerStatus(status string) (int, bool) {
 	return code, true
 }
 
-// SupplementalGIDsEnvVar tells sciontool init which supplementary groups to
-// keep when it drops from root to the agent user (Go's privilege drop
-// otherwise clears them). sciontool keeps only ids that are also in its own
-// supplementary groups, i.e. ids the runtime actually granted with
-// --group-add. The broker owns it: buildCommonRunArgs drops any value from
-// template or user env, and appendSharedDirGroupArgs sets it. Mirrored in
+// nfsOwnerIDs returns the stable uid and gid for an NFS workspace: each
+// id as configured, or the default 1000 when it is 0 (unset).
+func nfsOwnerIDs(uid, gid int) (int, int) {
+	return provision.DefaultOwnerID(uid), provision.DefaultOwnerID(gid)
+}
+
+// SupplementalGIDsEnvVar lists the nfs shared-dir groups the runtime
+// granted. sciontool keeps only ids that are also in its own supplementary
+// groups (what the runtime actually granted), keeps them when it drops from
+// root to the agent user (Go's privilege drop otherwise clears them), and
+// clears the group bits of the umask (077 becomes 007) when any remain.
+// Both runtimes set it and own it:
+// Docker/Podman via appendSharedDirGroupArgs (buildCommonRunArgs drops
+// template or user values), Kubernetes via withSupplementalGIDsEnv with
+// the leaf gids the pod holds (supplementalGroups plus one equal to
+// fsGroup). Mirrored in
 // pkg/sciontool/suppgroups (EnvVar) (ptone/scion#3155).
 const SupplementalGIDsEnvVar = "SCION_SUPPLEMENTAL_GIDS"
 

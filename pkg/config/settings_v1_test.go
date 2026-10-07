@@ -288,15 +288,17 @@ func TestLoadVersionedSettings_HubEnvVars(t *testing.T) {
 func TestLoadVersionedSettings_LegacyHubEnvNeverAdopted(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	originalHome := os.Getenv("HOME")
-	defer func() { _ = os.Setenv("HOME", originalHome) }()
-	_ = os.Setenv("HOME", tmpDir)
+	t.Setenv("HOME", tmpDir)
 
 	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
 	require.NoError(t, os.MkdirAll(projectDir, 0755))
 
-	_ = os.Setenv("SCION_HUB_GROVE_ID", "legacy-env-uuid")
-	defer func() { _ = os.Unsetenv("SCION_HUB_GROVE_ID") }()
+	// Agent containers export the canonical project-ID env vars, which
+	// populate ProjectID and would make this test fail for a reason
+	// unrelated to the variable under test.
+	unsetTestEnv(t, "SCION_PROJECT_ID", "SCION_HUB_PROJECT_ID")
+
+	t.Setenv("SCION_HUB_GROVE_ID", "legacy-env-uuid")
 
 	vs, err := LoadVersionedSettings(projectDir)
 	require.NoError(t, err)
@@ -314,9 +316,7 @@ func TestLoadVersionedSettings_LegacyHubEnvNeverAdopted(t *testing.T) {
 func TestLoadVersionedSettings_LegacyHubEnvDoesNotOverrideFile(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	originalHome := os.Getenv("HOME")
-	defer func() { _ = os.Setenv("HOME", originalHome) }()
-	_ = os.Setenv("HOME", tmpDir)
+	t.Setenv("HOME", tmpDir)
 
 	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
 	require.NoError(t, os.MkdirAll(projectDir, 0755))
@@ -324,8 +324,12 @@ func TestLoadVersionedSettings_LegacyHubEnvDoesNotOverrideFile(t *testing.T) {
 	v1Settings := "schema_version: \"1\"\nhub:\n  grove_id: \"file-grove\"\n"
 	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(v1Settings), 0644))
 
-	_ = os.Setenv("SCION_HUB_GROVE_ID", "legacy-env-uuid")
-	defer func() { _ = os.Unsetenv("SCION_HUB_GROVE_ID") }()
+	// Agent containers export the canonical project-ID env vars, which
+	// populate ProjectID and would make this test fail for a reason
+	// unrelated to the variable under test.
+	unsetTestEnv(t, "SCION_PROJECT_ID", "SCION_HUB_PROJECT_ID")
+
+	t.Setenv("SCION_HUB_GROVE_ID", "legacy-env-uuid")
 
 	vs, err := LoadVersionedSettings(projectDir)
 	require.NoError(t, err)
@@ -986,6 +990,89 @@ harnesses:
 	})
 }
 
+// TestLoadSettings_BareScionHubEnvDoesNotBreakDecode is the regression
+// test for https://github.com/ptone/scion/issues/2724. A bare SCION_HUB
+// variable used to map to the top-level key "hub" as a string, which
+// collides with the struct-typed hub settings and made koanf's Unmarshal
+// fail with "'hub' expected a map or struct, got string" for any project
+// whose settings.yaml has a hub: map. Nothing in scion reads a bare
+// SCION_HUB, so the env key mappers drop it.
+func TestLoadSettings_BareScionHubEnvDoesNotBreakDecode(t *testing.T) {
+	unsetTestEnv(t, "SCION_HUB_ENDPOINT", "SCION_AUTO_EXPOSE_PORTS", "SCION_HUB")
+
+	writeProject := func(t *testing.T, settingsYAML string) string {
+		t.Helper()
+		tmpDir := t.TempDir()
+		t.Setenv("HOME", tmpDir)
+		projectDir := filepath.Join(tmpDir, "my-project", ".scion")
+		require.NoError(t, os.MkdirAll(projectDir, 0755))
+		require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(settingsYAML), 0644))
+		return projectDir
+	}
+	newProject := func(t *testing.T) string {
+		t.Helper()
+		return writeProject(t, `schema_version: "1"
+hub:
+  endpoint: https://file.example.com
+`)
+	}
+	// newLegacyProject writes an unversioned settings.yaml (no
+	// schema_version), which LoadEffectiveSettings routes through
+	// LoadSettingsKoanf and its legacy env key mapper. The legacy
+	// Settings.Hub field is struct-typed too, so it collides the same way.
+	newLegacyProject := func(t *testing.T) string {
+		t.Helper()
+		return writeProject(t, `hub:
+  endpoint: https://file.example.com
+`)
+	}
+
+	t.Run("SCION_HUB unset: file hub map loads", func(t *testing.T) {
+		projectDir := newProject(t)
+		vs, err := LoadVersionedSettings(projectDir)
+		require.NoError(t, err)
+		require.NotNil(t, vs.Hub)
+		assert.Equal(t, "https://file.example.com", vs.Hub.Endpoint)
+	})
+
+	t.Run("SCION_HUB set: versioned load ignores it", func(t *testing.T) {
+		projectDir := newProject(t)
+		t.Setenv("SCION_HUB", "https://env.example.com")
+		vs, err := LoadVersionedSettings(projectDir)
+		require.NoError(t, err, "a bare SCION_HUB must never break LoadVersionedSettings decoding")
+		require.NotNil(t, vs.Hub)
+		assert.Equal(t, "https://file.example.com", vs.Hub.Endpoint)
+	})
+
+	t.Run("SCION_HUB set: effective load of legacy file ignores it", func(t *testing.T) {
+		projectDir := newLegacyProject(t)
+		t.Setenv("SCION_HUB", "https://env.example.com")
+		vs, _, err := LoadEffectiveSettings(projectDir)
+		require.NoError(t, err, "a bare SCION_HUB must never break LoadEffectiveSettings decoding")
+		require.NotNil(t, vs.Hub)
+		assert.Equal(t, "https://file.example.com", vs.Hub.Endpoint)
+	})
+
+	t.Run("SCION_HUB set: legacy koanf load ignores it", func(t *testing.T) {
+		projectDir := newLegacyProject(t)
+		t.Setenv("SCION_HUB", "https://env.example.com")
+		s, err := LoadSettingsKoanf(projectDir)
+		require.NoError(t, err, "a bare SCION_HUB must never break LoadSettingsKoanf decoding")
+		require.NotNil(t, s.Hub)
+		assert.Equal(t, "https://file.example.com", s.Hub.Endpoint)
+	})
+
+	t.Run("SCION_HUB set: SCION_HUB_ENDPOINT still applies", func(t *testing.T) {
+		projectDir := newProject(t)
+		t.Setenv("SCION_HUB", "https://env.example.com")
+		t.Setenv("SCION_HUB_ENDPOINT", "https://endpoint.example.com")
+		vs, err := LoadVersionedSettings(projectDir)
+		require.NoError(t, err)
+		require.NotNil(t, vs.Hub)
+		assert.Equal(t, "https://endpoint.example.com", vs.Hub.Endpoint)
+	})
+}
+
 // --- Default settings compatibility tests ---
 
 func TestGetDefaultSettingsData_ProducesSameEffectiveDefaults(t *testing.T) {
@@ -1142,6 +1229,7 @@ func TestVersionedEnvKeyMapper(t *testing.T) {
 		{"SCION_SERVER_LOG_LEVEL", "server.log_level"},
 		{"SCION_AUTO_EXPOSE_PORTS", ""},
 		{"SCION_AUTO_EXPOSE_PORTS_LIST", ""},
+		{"SCION_HUB", ""},
 	}
 
 	for _, tt := range tests {
@@ -5006,6 +5094,54 @@ func TestWorkspaceStorageConfig_ValidateNFS(t *testing.T) {
 		ws.ApplyNFSDefaults()
 		err := ws.ValidateNFS()
 		require.NoError(t, err)
+	})
+
+	// uid/gid are checked after ApplyNFSDefaults, so an unset (0) value is
+	// already the default 1000 and passes; negative values (including -1,
+	// which chown reads as "leave unchanged") and values above
+	// 4294967294 are rejected with the field named.
+	t.Run("uid and gid range", func(t *testing.T) {
+		tests := []struct {
+			name      string
+			uid, gid  int64
+			wantField string
+		}{
+			{"unset uses defaults", 0, 0, ""},
+			{"explicit", 2000, 3000, ""},
+			{"maximum", 4294967294, 4294967294, ""},
+			{"negative one uid", -1, 1000, "server.workspace_storage.nfs.uid"},
+			{"negative one gid", 1000, -1, "server.workspace_storage.nfs.gid"},
+			{"negative uid", -7, 1000, "server.workspace_storage.nfs.uid"},
+			{"unsigned sentinel gid", 1000, 4294967295, "server.workspace_storage.nfs.gid"},
+			{"out of range uid", 1 << 33, 1000, "server.workspace_storage.nfs.uid"},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				// A 32-bit int cannot hold ids above math.MaxInt32, so the
+				// int conversions below would wrap and test a different value.
+				if strconv.IntSize < 64 && max(tt.uid, tt.gid) > math.MaxInt32 {
+					t.Skipf("%d/%d does not fit in a %d-bit int", tt.uid, tt.gid, strconv.IntSize)
+				}
+				ws := &V1WorkspaceStorageConfig{
+					Backend: "nfs",
+					NFS: &V1NFSConfig{
+						Shares: []V1NFSShare{{ID: "share1", Server: "10.0.0.2", Export: "/data"}},
+						UID:    int(tt.uid),
+						GID:    int(tt.gid),
+					},
+				}
+				ws.ApplyNFSDefaults()
+				err := ws.ValidateNFS()
+				if tt.wantField == "" {
+					require.NoError(t, err)
+					return
+				}
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantField)
+				// ValidateWorkspaceStorage (hub startup) reports it too.
+				require.Error(t, ws.ValidateWorkspaceStorage())
+			})
+		}
 	})
 
 	t.Run("local backend skips validation", func(t *testing.T) {

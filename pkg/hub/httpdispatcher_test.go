@@ -59,6 +59,7 @@ type mockRuntimeBrokerClient struct {
 	createCalled               bool
 	startCalled                bool
 	stopCalled                 bool
+	lastStopRunID              string
 	restartCalled              bool
 	deleteCalled               bool
 	messageCalled              bool
@@ -82,7 +83,9 @@ type mockRuntimeBrokerClient struct {
 	lastCreateReq              *RemoteCreateAgentRequest
 	lastDeleteOpts             struct {
 		deleteFiles, removeBranch bool
+		localOnly                 bool
 		runID                     string
+		notAfter                  time.Time
 	}
 	returnErr            error
 	cleanupErr           error
@@ -150,8 +153,9 @@ func (m *mockRuntimeBrokerClient) StartAgent(ctx context.Context, brokerID, brok
 	}, nil
 }
 
-func (m *mockRuntimeBrokerClient) StopAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string) error {
+func (m *mockRuntimeBrokerClient) StopAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, runID string) error {
 	m.stopCalled = true
+	m.lastStopRunID = runID
 	m.lastBrokerID = brokerID
 	m.lastEndpoint = brokerEndpoint
 	m.lastAgentID = agentID
@@ -187,6 +191,8 @@ func (m *mockRuntimeBrokerClient) DeleteAgent(ctx context.Context, brokerID, bro
 	m.lastDeleteOpts.deleteFiles = opts.DeleteFiles
 	m.lastDeleteOpts.removeBranch = opts.RemoveBranch
 	m.lastDeleteOpts.runID = opts.RunID
+	m.lastDeleteOpts.notAfter = opts.NotAfter
+	m.lastDeleteOpts.localOnly = opts.LocalOnly
 	return m.returnErr
 }
 
@@ -560,7 +566,7 @@ func TestHTTPRuntimeBrokerClient_StopAgent(t *testing.T) {
 
 	client := NewHTTPRuntimeBrokerClient()
 
-	err := client.StopAgent(context.Background(), tid("host-1"), server.URL, "test-agent", "")
+	err := client.StopAgent(context.Background(), tid("host-1"), server.URL, "test-agent", "", "")
 	if err != nil {
 		t.Fatalf("StopAgent failed: %v", err)
 	}
@@ -972,6 +978,9 @@ func TestHTTPAgentDispatcher_DispatchAgentReprovision(t *testing.T) {
 			HarnessConfig: "claude",
 			TemplateHash:  "new-generation-hash",
 			Image:         "new-generation-image:v2",
+			// Only an explicit (request-level) image travels as
+			// Config.Image (ptone/scion#1799).
+			CreateInputs: &store.AgentCreateInputs{InlineConfig: &api.ScionConfig{Image: "new-generation-image:v2"}},
 		},
 	}
 
@@ -2161,7 +2170,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_RetryAfterHashMismatchCarriesWor
 		failFirstStartWith: errors.New("Failed to hydrate harness-config: hash mismatch for file config.yaml"),
 	}
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
-	dispatcher.SetHarnessConfigRepairer(func(ctx context.Context, name string) error { return nil })
+	dispatcher.SetHarnessConfigRepairer(func(ctx context.Context, ref HarnessConfigRepairRef) error { return nil })
 
 	gitClone := &api.GitCloneConfig{URL: "https://github.com/example/repo.git"}
 	agent := &store.Agent{
@@ -5004,6 +5013,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_AppliesImageRegistry(t *testing
 			HarnessConfig: "claude",
 			Task:          "do something",
 			Image:         "scion-claude:latest",
+			InlineConfig:  &api.ScionConfig{Image: "scion-claude:latest"},
 		},
 	}
 
@@ -5053,6 +5063,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_NoRegistryNoRewrite(t *testing.
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
 			Image:         "scion-claude:latest",
+			InlineConfig:  &api.ScionConfig{Image: "scion-claude:latest"},
 		},
 	}
 
@@ -5098,6 +5109,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_FullyQualifiedImageNotRewritten
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
 			Image:         "ghcr.io/custom/image:v2",
+			InlineConfig:  &api.ScionConfig{Image: "ghcr.io/custom/image:v2"},
 		},
 	}
 

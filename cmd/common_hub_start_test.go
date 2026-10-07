@@ -31,14 +31,19 @@ import (
 
 // hubStartStub is an httptest hub that answers the calls startAgentViaHub
 // makes on the non-attach path: project GET, existing-agent GET, and the
-// agent create POST (whose raw JSON body it captures).
+// agent create POST (whose raw JSON body it captures, even when the create
+// fails).
 type hubStartStub struct {
-	server        *httptest.Server
-	createBody    map[string]interface{}
-	createCalls   int
-	existingPhase string // "" → existing-agent GET returns 404
-	project       map[string]interface{}
-	createStatus  int // non-zero → the create POST fails with this status
+	server           *httptest.Server
+	createBody       map[string]interface{}
+	createCalls      int
+	existingPhase    string // "" → existing-agent GET returns 404
+	project          map[string]interface{}
+	createStatus     int                    // non-zero → the create POST fails with this status
+	createErrCode    string                 // error code for a failed create ("" → "conflict")
+	createErrMsg     string                 // error message for a failed create ("" → "refused by hub")
+	createErrDetails map[string]interface{} // error details for a failed create (nil → none)
+	afterCreate      []string               // "METHOD path" of every request after the first create
 }
 
 func newHubStartStub(t *testing.T, projectID, agentName, existingPhase string) *hubStartStub {
@@ -46,6 +51,9 @@ func newHubStartStub(t *testing.T, projectID, agentName, existingPhase string) *
 	stub := &hubStartStub{existingPhase: existingPhase}
 	stub.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		if stub.createCalls > 0 {
+			stub.afterCreate = append(stub.afterCreate, r.Method+" "+r.URL.Path)
+		}
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/"+projectID:
 			if stub.project != nil {
@@ -67,16 +75,35 @@ func newHubStartStub(t *testing.T, projectID, agentName, existingPhase string) *
 			})
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/projects/"+projectID+"/agents":
 			stub.createCalls++
-			if stub.createStatus != 0 {
-				w.WriteHeader(stub.createStatus)
-				_ = json.NewEncoder(w).Encode(map[string]interface{}{
-					"error": map[string]interface{}{"code": "conflict", "message": "refused by hub"},
-				})
+			// Never FailNow in the handler goroutine: it would exit without a
+			// response and leave the client hanging. Report and answer 500.
+			raw, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Errorf("hub stub: reading create body: %v", err)
+				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
-			raw, err := io.ReadAll(r.Body)
-			require.NoError(t, err)
-			require.NoError(t, json.Unmarshal(raw, &stub.createBody))
+			if err := json.Unmarshal(raw, &stub.createBody); err != nil {
+				t.Errorf("hub stub: decoding create body: %v", err)
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if stub.createStatus != 0 {
+				code, msg := stub.createErrCode, stub.createErrMsg
+				if code == "" {
+					code = "conflict"
+				}
+				if msg == "" {
+					msg = "refused by hub"
+				}
+				errBody := map[string]interface{}{"code": code, "message": msg}
+				if stub.createErrDetails != nil {
+					errBody["details"] = stub.createErrDetails
+				}
+				w.WriteHeader(stub.createStatus)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{"error": errBody})
+				return
+			}
 			_ = json.NewEncoder(w).Encode(&hubclient.CreateAgentResponse{
 				Agent: &hubclient.Agent{
 					ID: "agent-id", Slug: agentName, Name: agentName,
@@ -421,17 +448,27 @@ func TestHubCloneTransportNote(t *testing.T) {
 
 // The hub lists only brokers the caller may use in a 422 no_runtime_broker.
 // When that list is empty, the CLI surfaces the hub's message instead of
-// prompting; with a non-empty list and autoConfirm set (no picker), it asks for --broker.
+// prompting; with a non-empty list and autoConfirm set (no picker), it keeps
+// the hub's reason and asks for --broker, naming the broker when there is one.
 func TestCreateAgentWithBrokerResolution_NoRuntimeBroker(t *testing.T) {
 	const projectID = "proj-nrb"
+	// Hub reasons as pkg/hub resolveRuntimeBroker sends them: the
+	// permission message comes with an empty usable list, the
+	// default-unavailable one with alternatives.
+	const (
+		noneMsg    = "No runtime brokers available for this project that you have permission to use"
+		defaultMsg = "Default runtime broker is unavailable; specify an alternative"
+	)
 	for _, tc := range []struct {
 		name      string
+		hubMsg    string
 		brokers   []map[string]interface{}
 		wantInErr string
 	}{
-		{"empty list", []map[string]interface{}{}, "No runtime brokers available for this project that you have permission to use"},
-		{"missing list", nil, "No runtime brokers available for this project that you have permission to use"},
-		{"usable brokers, autoConfirm", []map[string]interface{}{{"id": "b1", "name": "one", "status": "online"}}, "--broker"},
+		{"empty list", noneMsg, []map[string]interface{}{}, noneMsg},
+		{"missing list", noneMsg, nil, noneMsg},
+		{"single usable broker, autoConfirm", defaultMsg, []map[string]interface{}{{"id": "b1", "name": "one", "status": "online"}}, `Default runtime broker is unavailable: runtime broker "one" is available, retry with --broker "one"`},
+		{"several usable brokers, autoConfirm", defaultMsg, []map[string]interface{}{{"id": "b1", "name": "one", "status": "online"}, {"id": "b2", "name": "two", "status": "online"}}, `Default runtime broker is unavailable: multiple runtime brokers available ("one", "two"), specify a broker with --broker <name>`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			// Never prompt, whatever stdin is: autoConfirm skips the
@@ -450,7 +487,7 @@ func TestCreateAgentWithBrokerResolution_NoRuntimeBroker(t *testing.T) {
 				w.WriteHeader(http.StatusUnprocessableEntity)
 				_ = json.NewEncoder(w).Encode(map[string]interface{}{"error": map[string]interface{}{
 					"code":    "no_runtime_broker",
-					"message": "No runtime brokers available for this project that you have permission to use",
+					"message": tc.hubMsg,
 					"details": details,
 				}})
 			}))
@@ -467,9 +504,104 @@ func TestCreateAgentWithBrokerResolution_NoRuntimeBroker(t *testing.T) {
 			require.Error(t, err)
 			assert.Nil(t, resp)
 			assert.Contains(t, err.Error(), tc.wantInErr)
+			assert.True(t, isHubFailure(err), "a no_runtime_broker rejection is a hub failure (no Usage block)")
 			assert.Equal(t, 1, calls, "must not retry")
 			assert.NotContains(t, stdout, "Select a broker")
 			assert.NotContains(t, stdout, "Use runtime broker")
+		})
+	}
+}
+
+// TestNonInteractiveBrokerMessage covers the message selection for a
+// no_runtime_broker 422 when the CLI cannot prompt (ptone/scion#2861): the
+// "multiple runtime brokers" wording only when there really are several
+// candidates, otherwise the hub's own reason plus the single broker's name.
+func TestNonInteractiveBrokerMessage(t *testing.T) {
+	one := []interface{}{map[string]interface{}{"id": "b1", "name": "laptop", "status": "online"}}
+	two := []interface{}{
+		map[string]interface{}{"id": "b1", "name": "laptop", "status": "online", "isDefault": true},
+		map[string]interface{}{"id": "b2", "name": "server", "status": "online"},
+	}
+	tests := []struct {
+		name       string
+		hubMessage string
+		brokers    []interface{}
+		want       string
+		notWant    string
+	}{
+		{
+			name:       "default unavailable, single alternative names it",
+			hubMessage: "Default runtime broker is unavailable; specify an alternative",
+			brokers:    one,
+			want:       `Default runtime broker is unavailable: runtime broker "laptop" is available, retry with --broker "laptop"`,
+			notWant:    "specify an alternative",
+		},
+		{
+			name:       "single broker without a name falls back to its id",
+			hubMessage: "Default runtime broker is unavailable; specify an alternative",
+			brokers:    []interface{}{map[string]interface{}{"id": "b1"}},
+			want:       `Default runtime broker is unavailable: runtime broker "b1" is available, retry with --broker "b1"`,
+		},
+		{
+			name:       "single broker entry with no name or id",
+			hubMessage: "Default runtime broker is unavailable; specify an alternative",
+			brokers:    []interface{}{map[string]interface{}{}},
+			want:       "Default runtime broker is unavailable: specify a broker with --broker <name>",
+		},
+		{
+			name:       "broker name with a space is quoted",
+			hubMessage: "Default runtime broker is unavailable; specify an alternative",
+			brokers:    []interface{}{map[string]interface{}{"id": "b1", "name": "my laptop"}},
+			want:       `Default runtime broker is unavailable: runtime broker "my laptop" is available, retry with --broker "my laptop"`,
+		},
+		{
+			name:       "hub multiple-brokers message is replaced by the CLI hint",
+			hubMessage: "Multiple runtime brokers available for this project; specify runtimeBrokerId to select one",
+			brokers:    two,
+			want:       `multiple runtime brokers available ("laptop", "server"), specify a broker with --broker <name>`,
+			notWant:    "runtimeBrokerId",
+		},
+		{
+			name:       "default unavailable with several alternatives keeps the hub reason",
+			hubMessage: "Default runtime broker is unavailable; specify an alternative",
+			brokers:    two,
+			want:       `Default runtime broker is unavailable: multiple runtime brokers available ("laptop", "server"), specify a broker with --broker <name>`,
+		},
+		{
+			name:       "several brokers but only one parsable name lists none",
+			hubMessage: "Default runtime broker is unavailable; specify an alternative",
+			brokers:    []interface{}{map[string]interface{}{"id": "b1", "name": "laptop"}, map[string]interface{}{}},
+			want:       "Default runtime broker is unavailable: multiple runtime brokers available, specify a broker with --broker <name>",
+		},
+		{
+			name:       "non-map broker entry is skipped",
+			hubMessage: "Default runtime broker is unavailable; specify an alternative",
+			brokers:    []interface{}{"not-a-map", map[string]interface{}{"id": "b1", "name": "laptop"}, map[string]interface{}{"id": "b2", "name": "server"}},
+			want:       `Default runtime broker is unavailable: multiple runtime brokers available ("laptop", "server"), specify a broker with --broker <name>`,
+		},
+		{
+			name:       "unrecognised hub reason is kept verbatim",
+			hubMessage: "Broker pool exhausted",
+			brokers:    one,
+			want:       `Broker pool exhausted: runtime broker "laptop" is available, retry with --broker "laptop"`,
+		},
+		{
+			name:       "empty hub message gets a generic reason",
+			hubMessage: "",
+			brokers:    one,
+			want:       `no runtime broker selected: runtime broker "laptop" is available, retry with --broker "laptop"`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := nonInteractiveBrokerMessage(tt.hubMessage, tt.brokers)
+			assert.Equal(t, tt.want, got)
+			if len(tt.brokers) == 1 {
+				assert.NotContains(t, got, "multiple", "a single candidate must not be described as multiple")
+			}
+			if tt.notWant != "" {
+				assert.NotContains(t, got, tt.notWant)
+			}
 		})
 	}
 }
