@@ -780,9 +780,8 @@ describe('scion-page-admin-users — invite dialog display name and submit routi
     expect(element.shadowRoot!.querySelector('sl-dialog[label="Invite User"]')).not.toBeNull();
   });
 
-  it('keeps a warning notice open; other notices close after 5 seconds', async () => {
+  it('sets the alert duration: warnings stay open, other notices close after 5 seconds', async () => {
     element = (await createComponent([makeUser()])) as PageEl;
-    const timeoutSpy = vi.spyOn(globalThis, 'setTimeout');
     vi.stubGlobal(
       'fetch',
       vi.fn(
@@ -801,12 +800,11 @@ describe('scion-page-admin-users — invite dialog display name and submit routi
       )
     );
     await openDialogAndSubmit(element, { email: 'a@other.example', displayName: 'A' });
-    const alert = element.shadowRoot!.querySelector('.feedback-alert') as HTMLElement & {
+    const warning = element.shadowRoot!.querySelector('.feedback-alert') as HTMLElement & {
       duration: number;
     };
-    expect(alert.getAttribute('variant')).toBe('warning');
-    expect(alert.duration).toBe(Infinity);
-    expect(timeoutSpy.mock.calls.some(([, ms]) => ms === 5000)).toBe(false);
+    expect(warning.getAttribute('variant')).toBe('warning');
+    expect(warning.duration).toBe(Infinity);
 
     vi.stubGlobal(
       'fetch',
@@ -827,7 +825,66 @@ describe('scion-page-admin-users — invite dialog display name and submit routi
     };
     expect(success.getAttribute('variant')).toBe('success');
     expect(success.duration).toBe(5000);
-    expect(timeoutSpy.mock.calls.some(([, ms]) => ms === 5000)).toBe(true);
+    expect(success).not.toBe(warning);
+  });
+
+  it('a newer notice is not cleared by an earlier notice closing', async () => {
+    element = (await createComponent([makeUser()])) as PageEl;
+    let provisionCalls = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        withSubmitResponses(
+          () => jsonResponse({}, 500),
+          () => {
+            provisionCalls++;
+            return provisionCalls === 1
+              ? jsonResponse(
+                  { error: { code: 'conflict', message: 'x', details: { reason: 'user_exists' } } },
+                  409
+                )
+              : jsonResponse(
+                  {
+                    user: { id: 'u1', email: 'a@other.example', status: 'invited' },
+                    created: true,
+                    warnings: ['domain_not_authorized'],
+                  },
+                  201
+                );
+          }
+        )
+      )
+    );
+    // A 409 danger notice, then a corrected resubmit within 5 s that
+    // returns 201 with warnings.
+    await openDialogAndSubmit(element, { email: 'a@other.example', displayName: 'A' });
+    const danger = element.shadowRoot!.querySelector('.feedback-alert') as HTMLElement;
+    expect(danger.getAttribute('variant')).toBe('danger');
+
+    vi.useFakeTimers();
+    try {
+      const dialog = element.shadowRoot!.querySelector('sl-dialog[label="Invite User"]')!;
+      const submit = Array.from(dialog.querySelectorAll('sl-button')).find(
+        (b) => b.textContent?.trim() === 'Invite User'
+      ) as HTMLElement;
+      submit.click();
+      await vi.advanceTimersByTimeAsync(50);
+      await element.updateComplete;
+      const warning = element.shadowRoot!.querySelector('.feedback-alert') as HTMLElement;
+      expect(warning.getAttribute('variant')).toBe('warning');
+      expect(warning).not.toBe(danger);
+
+      // The earlier notice's alert finishes closing after the newer one is
+      // shown; it must not clear the newer notice.
+      danger.dispatchEvent(new Event('sl-after-hide'));
+      await vi.advanceTimersByTimeAsync(5000);
+      await element.updateComplete;
+      const still = element.shadowRoot!.querySelector('.feedback-alert') as HTMLElement;
+      expect(still).not.toBeNull();
+      expect(still.getAttribute('variant')).toBe('warning');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('shows an unexpected 422 as a generic error', async () => {

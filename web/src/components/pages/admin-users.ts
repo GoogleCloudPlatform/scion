@@ -23,6 +23,7 @@
 
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
+import { keyed } from 'lit/directives/keyed.js';
 
 import { can, type AdminUser, type UserRole } from '../../shared/types.js';
 import type { SecurityReviewDetail } from '../shared/security-review-dialog.js';
@@ -1130,19 +1131,49 @@ export class ScionPageAdminUsers extends LitElement {
   }
 
   /**
-   * Shows the action feedback alert. Every variant except `warning` closes
-   * itself after 5 seconds; a warning (for example, sign-in for an invited
-   * email will be refused) stays until the admin closes it or another
-   * notice replaces it.
+   * Shows the action feedback alert. The alert closes itself: every
+   * variant except `warning` after 5 seconds (the alert's `duration`); a
+   * warning (for example, sign-in for an invited email will be refused)
+   * stays until the admin closes it or another notice replaces it. Each
+   * notice renders a fresh alert element (see render), so an earlier
+   * notice's timer cannot close a newer one.
    */
   private showFeedback(variant: FeedbackVariant, message: string): void {
-    const feedback = { variant, message };
-    this.actionFeedback = feedback;
-    if (variant === 'warning') return;
-    setTimeout(() => {
-      // Clear only this notice, not a later one that replaced it.
-      if (this.actionFeedback === feedback) this.actionFeedback = null;
-    }, FEEDBACK_AUTO_CLOSE_MS);
+    this.actionFeedback = { variant, message };
+  }
+
+  /**
+   * Renders one feedback notice. keyed() gives each notice its own alert
+   * element, and with it its own auto-close timer, so an earlier notice
+   * cannot hide a newer one.
+   */
+  private renderFeedbackAlert(feedback: { message: string; variant: FeedbackVariant }) {
+    return keyed(
+      feedback,
+      html`
+        <sl-alert
+          class="feedback-alert"
+          variant=${feedback.variant}
+          open
+          closable
+          .duration=${feedback.variant === 'warning' ? Infinity : FEEDBACK_AUTO_CLOSE_MS}
+          @sl-after-hide=${(): void => {
+            // Clear only this notice, never a newer one that replaced it.
+            if (this.actionFeedback === feedback) this.actionFeedback = null;
+          }}
+        >
+          <sl-icon
+            slot="icon"
+            name=${feedback.variant === 'success'
+              ? 'check-circle'
+              : feedback.variant === 'primary'
+                ? 'info-circle'
+                : 'exclamation-triangle'}
+          ></sl-icon>
+          ${feedback.message}
+        </sl-alert>
+      `
+    );
   }
 
   private isSelf(user: AdminUser): boolean {
@@ -1513,32 +1544,7 @@ export class ScionPageAdminUsers extends LitElement {
         <h1>Users</h1>
       </div>
 
-      ${this.actionFeedback
-        ? html`
-            <sl-alert
-              class="feedback-alert"
-              variant=${this.actionFeedback.variant}
-              open
-              closable
-              .duration=${this.actionFeedback.variant === 'warning'
-                ? Infinity
-                : FEEDBACK_AUTO_CLOSE_MS}
-              @sl-after-hide=${() => {
-                this.actionFeedback = null;
-              }}
-            >
-              <sl-icon
-                slot="icon"
-                name=${this.actionFeedback.variant === 'success'
-                  ? 'check-circle'
-                  : this.actionFeedback.variant === 'primary'
-                    ? 'info-circle'
-                    : 'exclamation-triangle'}
-              ></sl-icon>
-              ${this.actionFeedback.message}
-            </sl-alert>
-          `
-        : nothing}
+      ${this.actionFeedback ? this.renderFeedbackAlert(this.actionFeedback) : nothing}
 
       <div class="tabs" role="tablist">
         <button
