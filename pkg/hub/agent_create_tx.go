@@ -137,13 +137,10 @@ func (s *Server) commitAgentCreate(ctx context.Context, w agentCreateWrite) erro
 // audit record, so readers can tell a failure before dispatch from a
 // dispatch failure.
 const (
-	createStageStorage          = "storage"
-	createStageUploadURL        = "upload_url"
-	createStageWorkspaceStorage = "workspace_storage"
-	createStageManaged          = "managed"
-	// createStageManagedRecord: the managed create's post-create write
-	// (managed Runtime, interaction ID) failed (ptone/scion#3557).
-	createStageManagedRecord     = "managed_record"
+	createStageStorage           = "storage"
+	createStageUploadURL         = "upload_url"
+	createStageWorkspaceStorage  = "workspace_storage"
+	createStageManaged           = "managed"
 	createStageRunIntent         = "run_intent"
 	createStageDispatchEnvGather = "dispatch_env_gather"
 	createStageDispatch          = "dispatch"
@@ -152,34 +149,10 @@ const (
 	// createStageWorkspaceUpload: the hub-managed workspace upload ran past
 	// its own budget (hubWorkspaceUploadTimeout).
 	createStageWorkspaceUpload = "workspace_upload"
+	// createStageManagedRecord: the managed create's post-create write
+	// (managed Runtime, interaction ID) failed (ptone/scion#3557).
+	createStageManagedRecord = "managed_record"
 )
-
-// createCompensation is the input of compensateAgentCreate.
-type createCompensation struct {
-	Agent *store.Agent
-	// OriginalAuditID is the ID of the create's audit record; empty when
-	// unknown.
-	OriginalAuditID string
-	// OpID identifies the edge deactivation and is recorded in the audit
-	// record. A fresh ID is used when empty.
-	OpID string
-	// Stage is the create stage whose failure triggered the rollback (one
-	// of the createStage* values).
-	Stage string
-	// Cause is the failure that triggered the rollback; may be nil.
-	Cause error
-	// IfNotDeleteHeld makes the row delete conditional (ptone/scion#3557):
-	// the row is removed only when no delete holds it (createRowHeldCheck),
-	// checked inside the compensation's own transaction. When a delete holds it, or the row is already gone,
-	// nothing is written and errCreateRowDeleteHeld is returned: the row,
-	// its edge and its quotas are left to the delete.
-	IfNotDeleteHeld bool
-}
-
-// errCreateRowDeleteHeld is returned by a conditional compensation
-// (createCompensation.IfNotDeleteHeld) and deleteFailedCreateRow when a
-// delete holds the agent row, or the row is gone: the delete owns it.
-var errCreateRowDeleteHeld = errors.New("agent row is held by a delete")
 
 // createRowCompensable is the predicate of a conditional create
 // compensation: the row exists and is not soft-deleted. Whether a delete
@@ -226,9 +199,10 @@ type createCompensation struct {
 	Cause error
 	// IfNotDeleteHeld makes the row delete conditional (ptone/scion#3557):
 	// the row is removed only when no delete holds it (createRowHeldCheck),
-	// checked inside the compensation's own transaction. When a delete holds it, or the row is already gone,
-	// nothing is written and errCreateRowDeleteHeld is returned: the row,
-	// its edge and its quotas are left to the delete.
+	// checked inside the compensation's own transaction. When a delete
+	// holds it, or the row is already gone or soft-deleted, nothing is
+	// written and errCreateRowDeleteHeld is returned: the row, its edge
+	// and its quotas are left to the delete.
 	IfNotDeleteHeld bool
 }
 
@@ -236,19 +210,6 @@ type createCompensation struct {
 // (createCompensation.IfNotDeleteHeld) and deleteFailedCreateRow when a
 // delete holds the agent row, or the row is gone: the delete owns it.
 var errCreateRowDeleteHeld = errors.New("agent row is held by a delete")
-
-// createRowCompensable is the condition a conditional create compensation
-// re-checks on the row in its transaction: no delete marker, or a delete
-// that failed (the agent is live again), and not soft-deleted. A row a
-// delete holds (deleting or finalizing) does not match. Unlike
-// deletedOrDeleteHeld it also refuses a deleting row whose lease expired;
-// that row is then left to a delete retry, which is the safe side.
-func createRowCompensable() store.DeletionPredicate {
-	return store.DeletionPredicate{
-		States:        []string{store.DeletionStateNone, store.DeletionStateFailed},
-		DeletedAtNull: true,
-	}
-}
 
 // compensateAgentCreate rolls back a committed create after a later step
 // failed, in one transaction: it deletes the agent row (identity keys
