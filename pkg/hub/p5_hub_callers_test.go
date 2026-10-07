@@ -335,7 +335,7 @@ type mintAfterEmptySwapStore struct {
 func (s mintAfterEmptySwapStore) CompareAndSwapAgentRunID(ctx context.Context, agentID, from, to string) (bool, error) {
 	swapped, err := s.Store.CompareAndSwapAgentRunID(ctx, agentID, from, to)
 	if err == nil && swapped && to == "" {
-		if _, err := s.Store.SetAgentRunID(ctx, agentID, "run-other"); err != nil {
+		if _, err := s.SetAgentRunID(ctx, agentID, "run-other"); err != nil {
 			return swapped, err
 		}
 	}
