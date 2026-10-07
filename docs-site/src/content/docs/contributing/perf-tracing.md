@@ -28,7 +28,7 @@ With tracing off, the Hub installs no tracing middleware and no store or audit d
 
 ### What it records
 
-Every Hub API request writes one log line with message `perf_trace` and `subsystem` `hub.perf-trace`. A connection to the web server's SSE endpoint (`/events`) writes two: one when the stream opens (`"sse_stage":"connect"`) and one when it closes (`"sse_stage":"close"`).
+Every Hub API request writes one log line with message `perf_trace` and `subsystem` `hub.perf-trace`. An SSE stream on the web server's SSE endpoint (`/events`) that opens writes two: one when the stream opens (`"sse_stage":"connect"`) and one when it closes (`"sse_stage":"close"`). A connection that is refused writes only the `close` line, and a request with a malformed subject list writes none.
 
 Each line records:
 
@@ -67,9 +67,9 @@ With GCP log formatting (`SCION_LOG_GCP=true`, or on Cloud Run) the message is w
 
 ### Response headers (admin only)
 
-An unscoped local platform admin can also get the trace in the response by sending the request header `X-Scion-Perf-Trace: 1`. The response then carries `X-Scion-Perf-Endpoint`, `X-Scion-Perf-Phases`, `X-Scion-Perf-Phase-Counts`, `X-Scion-Perf-Store-Calls`, `X-Scion-Perf-Store-Us`, `X-Scion-Perf-Decisions` and, when pool figures are available, `X-Scion-Perf-DB`. Values are comma-separated `name=integer` pairs, and durations are in microseconds. For example, `X-Scion-Perf-Decisions: count=255,allow=162,deny=93,other=0,audit_us=188`.
+An unscoped local platform admin can also get the trace in the response by sending the request header `X-Scion-Perf-Trace: 1`. The response then carries `X-Scion-Perf-Endpoint`, `X-Scion-Perf-Phases`, `X-Scion-Perf-Phase-Counts`, `X-Scion-Perf-Store-Calls`, `X-Scion-Perf-Store-Us`, `X-Scion-Perf-Decisions` and, when pool figures are available, `X-Scion-Perf-DB`. Apart from `X-Scion-Perf-Endpoint` (the endpoint class), values are comma-separated `name=integer` pairs, and durations are in microseconds. For example, `X-Scion-Perf-Decisions: count=255,allow=162,deny=93,other=0,audit_us=188`.
 
-The headers are admin-only and only change what the response shows. No other caller gets them, and every caller's requests are still traced and logged. The headers are set when the response starts, so they never include `serialize`; the log line does. See the reference for [why the headers are restricted](/scion/reference/server-config/#request-performance-tracing).
+The headers are admin-only and presentation-only: they grant no access and change nothing about the response except adding these headers. No other caller gets them, and every caller's requests are still traced and logged. The headers are set when the response starts, so they never include `serialize`; the log line does. See the reference for [why the headers are restricted](/scion/reference/server-config/#request-performance-tracing).
 
 To look at the headers by hand on a local Hub, with an admin token in `ADMIN_TOKEN`:
 
@@ -169,7 +169,7 @@ This runs three scenarios as the seeded member: `project-agents-list` (`GET /api
 - `--want-perf-trace` sends `X-Scion-Perf-Trace: 1` and records any `X-Scion-Perf-*` headers that come back. The member is not an admin, so on its own this flag gets no headers.
 - `--hub-perf-log` makes `apibench` read the Hub's JSON log after the run and join each attempt to its `perf_trace` line by request ID, using the `X-Request-ID` the Hub returned. The joined data is stored in the same header-shaped form, and it includes the `serialize` phase that headers cannot carry.
 
-The tool prints how many attempts it joined. If the number is zero, check that the log path is right, that tracing is on, and that the Hub uses the default (non-GCP) log format.
+The tool prints how many attempts it joined. If the `--hub-perf-log` path does not exist, `apibench` exits with `read hub perf log` before it writes the report, so check the path before a long run. With a valid path, zero joins means tracing is off, the log uses the GCP format, or the log is from a different Hub.
 
 ### 5. Join trace lines by request ID yourself
 
@@ -233,7 +233,7 @@ jq -r '.scenarios[] | .name as $s | .attempts[] |
 
 Durations depend on the machine, its load and the database. On a shared host, repeated runs can differ by more than 2x, so a wall-clock budget needs a quiet, dedicated runner and a baseline of many repeated runs.
 
-**The exact counts do not depend on the host.** For a fixed seed (`--agents` and `--rand-seed`), caller, endpoint and code version, these numbers are the same on every attempt and every machine:
+**The exact counts do not depend on the host.** For a fixed seed (`--agents` and `--rand-seed`), caller, endpoint and code version, these numbers are the same on every attempt after the first request to a freshly started Hub, and on every machine (`apibench`'s default `--warmup 1` covers the first request):
 
 - authorization store calls, in total (`authz_store_calls`) and per method (`store_<Method>_n`)
 - decisions (`audit_records`) and the allow and deny split
@@ -241,13 +241,13 @@ Durations depend on the machine, its load and the database. On a shared host, re
 
 That makes them usable as regression budgets on any CI runner:
 
-1. **Record a baseline.** Seed at a fixed agent count and run `apibench` with `--want-perf-trace --hub-perf-log`. Check that every attempt of a scenario reports the same counts. If they differ, something other than the code changed between attempts.
+1. **Record a baseline.** Seed at a fixed agent count and run `apibench` with `--want-perf-trace --hub-perf-log`. Check that every attempt of a scenario reports the same counts (after the first request to a freshly started Hub, which the default `--warmup 1` covers). If they differ, something other than the code changed between attempts.
 2. **Set the budget.** Use the baseline counts as an upper bound per scenario and size. Because counts repeat exactly, you need no margin for noise; any increase is a real change in the request path. Budgeting at more than one size (for example 25 and 100 agents) also catches a change in how the count grows per agent, which a single size can hide.
 3. **Fail on an increase, update on a decrease.** If a change raises a count, investigate before raising the budget. If a change lowers a count on purpose, lower the budget in the same change so the improvement is held.
 4. **Inside Go tests**, `pkg/hub` has a `perfTracedRequest` test helper. It serves a request on a test server with tracing on and returns a snapshot whose `AuthzStoreCalls`, `StoreCalls`, `AuditRecords` and per-phase `Count` values are the same host-independent counts. A unit test can assert budgets on them without starting a real Hub.
 
-Keep the limits in mind. Only request-path reads are counted (see Counted scope above), and `audit_records` equals the decision count only while every decision emits one audit record, which is the default. As an example of scale, the run shown above made 88 authorization store calls and 255 decisions for one 25-agent project list. Those numbers come from one machine (SQLite, member caller) at one commit and are an illustration only, not targets.
+Keep the limits in mind. Only request-path reads are counted (see the reference's [Counted scope](/scion/reference/server-config/#request-performance-tracing)), and `audit_records` equals the decision count only while every decision emits one audit record, which is the default. As an example of scale, the run shown above made 88 authorization store calls and 255 decisions for one 25-agent project list. Those numbers come from one machine (SQLite, member caller) at one commit and are an illustration only, not targets.
 
 ## Readiness marks
 
-In-app readiness marks (for example "data arrived" or "rows visible" in the web client) have not landed yet. This guide will cover them when they do.
+In-app readiness marks (for example "data arrived" or "rows visible" in the web client) have not landed yet.
