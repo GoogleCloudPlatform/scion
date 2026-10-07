@@ -143,7 +143,7 @@ func TestAgentLifecycle_RestartToleratedStopThenFailedStartReleasesSlot(t *testi
 	// The agent has a run, as every dispatched agent does: a failed restart
 	// that leaves no run records nothing (ptone/scion#2550 P5, see
 	// TestRestartStartLegFailureWithEmptyCurrentRunRecordsNothing).
-	_, err := s.SetAgentRunID(context.Background(), running.ID, "run-x")
+	_, err := s.SetAgentRunID(context.Background(), running.ID, "run-x", nil)
 	require.NoError(t, err)
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+running.ID+"/restart", nil)
