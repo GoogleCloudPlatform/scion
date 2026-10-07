@@ -216,10 +216,7 @@ func (c *IAPExecConnector) runSSH(ctx context.Context, project, location, instan
 		sshArgs = append(sshArgs, "-v")
 	}
 	sshArgs = append(sshArgs, sshUser+"@"+sshHost)
-
-	if len(cmdArgs) > 0 {
-		sshArgs = append(sshArgs, cmdArgs...)
-	}
+	sshArgs = appendRemoteCommand(sshArgs, cmdArgs)
 
 	sshCmd := exec.CommandContext(ctx, "ssh", sshArgs...)
 	sshCmd.Stdin = stdin
@@ -234,6 +231,44 @@ func (c *IAPExecConnector) runSSH(ctx context.Context, project, location, instan
 	}
 
 	return nil
+}
+
+// appendRemoteCommand appends the remote command to run as a single trailing
+// element of sshArgs, or leaves sshArgs unchanged when cmdArgs is empty (the
+// interactive/attach path, where ssh should start a login shell instead of
+// running a command).
+//
+// ssh joins every argument that follows user@host with spaces into one
+// string and hands it to the remote login shell, which re-parses it. Passing
+// cmdArgs through as separate trailing args would let the remote shell
+// re-split and re-interpret any element containing a space or shell
+// metacharacter. Quoting each element and joining them into a single string
+// here ensures the remote shell instead sees each original argument as one
+// literal word.
+func appendRemoteCommand(sshArgs []string, cmdArgs []string) []string {
+	if len(cmdArgs) == 0 {
+		return sshArgs
+	}
+	return append(sshArgs, quoteRemoteCommand(cmdArgs))
+}
+
+// quoteRemoteCommand joins cmdArgs into a single POSIX shell command string
+// in which each original argument round-trips as one literal word once the
+// remote shell parses it.
+func quoteRemoteCommand(cmdArgs []string) string {
+	quoted := make([]string, len(cmdArgs))
+	for i, arg := range cmdArgs {
+		quoted[i] = shellQuote(arg)
+	}
+	return strings.Join(quoted, " ")
+}
+
+// shellQuote wraps s in single quotes for POSIX shell parsing. Each embedded
+// single quote is replaced by closing the quoted string, inserting a
+// backslash immediately before a literal single quote, and reopening the
+// quoted string. The result parses back to exactly s as one word.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 func fetchProjectNumber(ctx context.Context, projectID string) (string, error) {

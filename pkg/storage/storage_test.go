@@ -315,3 +315,20 @@ func TestProjectWorkspaceStoragePath(t *testing.T) {
 		})
 	}
 }
+
+func TestDirPrefix(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"hubs/h/templates/global/foo", "hubs/h/templates/global/foo/"},
+		{"hubs/h/templates/global/foo/", "hubs/h/templates/global/foo/"},
+		{"hubs/h/templates/global/foo//", "hubs/h/templates/global/foo/"},
+		// Never "/": GCS trims the leading "/" and would match the whole
+		// bucket. "" makes DeletePrefix fail with ErrInvalidPath instead.
+		{"", ""},
+		{"/", ""},
+		{"//", ""},
+	} {
+		if got := DirPrefix(tc.in); got != tc.want {
+			t.Errorf("DirPrefix(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}

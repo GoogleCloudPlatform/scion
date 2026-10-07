@@ -41,6 +41,12 @@ var (
 	// conflict.
 	ErrPhaseMismatch = fmt.Errorf("agent phase changed: %w", ErrVersionConflict)
 
+	// ErrRunChanged is returned by UpdateAgentStatus when
+	// AgentStatusUpdate.IfRunID is set and the stored run_id differs
+	// (ptone/scion#2550): the row has moved to a newer run since the caller
+	// dispatched its operation. It wraps ErrVersionConflict.
+	ErrRunChanged = fmt.Errorf("agent run changed: %w", ErrVersionConflict)
+
 	// ErrSuperAdminBindingRestricted is returned when a non-reconciler caller
 	// attempts to create a role binding for the super-admin role definition.
 	// Super-admin authority is conferred exclusively via User.Role (out-of-band)
@@ -387,6 +393,10 @@ type AgentStore interface {
 	// delete claim and a run-ID write are ordered by the database: a claim
 	// that lands first refuses the write, and a claim that lands after it
 	// snapshots the new run ID.
+	//
+	// The same write appends the replaced run to the row's PreviousRunIDs
+	// (AppendPreviousRunID, ptone/scion#3097), so a delete still names it
+	// until the new run settles.
 	SetAgentRunID(ctx context.Context, agentID, runID string) (previous string, err error)
 
 	// CompareAndSwapAgentRunID sets the agent's run_id to newRunID only if
@@ -394,8 +404,20 @@ type AgentStore interface {
 	// dispatch uses it to correct (or revert) the run ID it minted without
 	// overwriting a newer run ID a later dispatch has since recorded. Like
 	// SetAgentRunID it neither checks nor bumps state_version. A missing
-	// agent reports false with no error.
+	// agent reports false with no error. A swap also clears the row's
+	// PreviousRunIDs: callers use it only to settle the run (the broker
+	// reported the run its runtime holds, or a start landed and so replaced
+	// every entry of the name), so no other run's entry is left to delete.
 	CompareAndSwapAgentRunID(ctx context.Context, agentID, expectedRunID, newRunID string) (bool, error)
+
+	// RevertAgentRunID is CompareAndSwapAgentRunID (mintedRunID to
+	// previousRunID) for a dispatch the broker never acted on, and leaves
+	// PreviousRunIDs untouched (ptone/scion#3097): the restored run may
+	// itself be unsettled, so the runs listed before the dispatch may still
+	// have entries. The list then holds the restored run too, which is
+	// harmless: a delete skips the current run, and AppendPreviousRunID
+	// drops it.
+	RevertAgentRunID(ctx context.Context, agentID, mintedRunID, previousRunID string) (bool, error)
 
 	// UpdateAgentStatus updates only status-related fields.
 	// This is a partial update that doesn't require version checking.
@@ -404,7 +426,8 @@ type AgentStore interface {
 	// SetAgentWorkspacePlacement records where the agent's broker placed its
 	// workspace on the latest start (see Agent.WorkspacePlacement). It is a
 	// narrow single-column write that neither checks nor bumps
-	// state_version. Returns ErrNotFound if the agent doesn't exist.
+	// state_version. Returns ErrNotFound if the agent doesn't exist or is
+	// soft-deleted (a soft-deleted row is never written).
 	SetAgentWorkspacePlacement(ctx context.Context, agentID, placement string) error
 
 	// UpdateAgentExposedPorts updates only exposed port registrations.
@@ -604,9 +627,10 @@ type AgentStore interface {
 	// records run intent running in the same write (run_intent_at strictly
 	// increasing, as SetRunIntent). It requires that no claim is held, the
 	// agent is not deleted or being deleted, and no reincarnation is in
-	// flight. Returns *ClaimHeldError when a claim is held, ErrClaimPredicate
-	// when the agent is otherwise not eligible, and ErrNotFound when it does
-	// not exist.
+	// flight. Returns ErrDeleteInProgress when a delete holds the row or the
+	// agent is soft-deleted (as SwapRunIntent does for a running intent),
+	// *ClaimHeldError when a claim is held, ErrClaimPredicate when the agent
+	// is otherwise not eligible, and ErrNotFound when it does not exist.
 	ClaimAgentStart(ctx context.Context, agentID, owner string, kind StartClaimKind, target string, ttl time.Duration) (StartClaim, error)
 
 	// ClaimAgentStop takes a live claim of kind StartClaimStop, used while a
@@ -647,6 +671,13 @@ type AgentStore interface {
 	// name: claims owned by its previous process can no longer be renewed.
 	// excludeOwner (this process's own owner value) is never demoted.
 	DemoteOwnerStartClaims(ctx context.Context, ownerPrefix, excludeOwner string, holds StartClaimHolds) (int, error)
+
+	// ConvertUnconfirmedToStop replaces the unconfirmed claim claimID with a
+	// live stop-kind claim owned by owner, with a lease of ttl, when the agent
+	// has no active launch. It is taken before the hub stops a container an
+	// unconfirmed start left running, so no start can claim the agent while
+	// that stop is applied. ErrClaimPredicate when the claim changed.
+	ConvertUnconfirmedToStop(ctx context.Context, agentID, claimID, owner string, ttl time.Duration) (StartClaim, error)
 
 	// ReleaseUnconfirmedStart clears claimID when it is unconfirmed and the
 	// agent has no active launch.
@@ -733,6 +764,14 @@ type AgentFilter struct {
 	// AncestorID, when non-empty, restricts results to agents whose ancestry
 	// chain contains the given principal ID (transitive access via creation lineage).
 	AncestorID string
+
+	// CreatedBy, when non-empty, restricts results to agents whose
+	// created_by equals this value exactly. It is always ANDed with every
+	// other filter. The user delete guard uses it to find agents a user's
+	// schedules started, which record the user only as created_by
+	// (ptone/scion#2769). omitempty keeps list cursor bindings unchanged
+	// when it is unset.
+	CreatedBy string `json:",omitempty"`
 
 	// Labels, when non-empty, restricts results to agents whose labels
 	// contain all specified key-value pairs (AND semantics).
@@ -952,6 +991,21 @@ type AgentStatusUpdate struct {
 	// update's transaction; otherwise UpdateAgentStatus returns
 	// ErrPhaseMismatch and writes nothing. Internal to the hub — json:"-".
 	IfPhase string `json:"-"`
+	// IfRunID, when non-empty, makes the update conditional on the stored
+	// run_id equalling IfRunID, checked on the row read inside the update's
+	// transaction; otherwise UpdateAgentStatus returns ErrRunChanged and
+	// writes nothing (ptone/scion#2550). A hub that records the result of a
+	// stop dispatched for run X sets it to X, so the stop never marks a
+	// newer run stopped. Internal to the hub — json:"-".
+	IfRunID string `json:"-"`
+	// StartWrite marks a start's own post-dispatch status write. Its delete
+	// guard uses the start-block rule (DeletionHoldsRow) instead of the
+	// lease-aware active rule: a finalizing row holds even with its lease
+	// expired (teardown already ran; only a retry or force moves it on), so
+	// a start that landed after such a delete keeps the delete's phase, as
+	// the hub's deleteWonAfterLanding check answers. A status report
+	// (heartbeat) keeps the lease-aware rule. Internal to the hub — json:"-".
+	StartWrite bool `json:"-"`
 }
 
 // ProjectStore defines project-related persistence operations.
@@ -1024,6 +1078,17 @@ type ProjectStore interface {
 	// Must be called inside a transaction (WithTx) before any membership
 	// reads or writes. Returns ErrNotFound if the project does not exist.
 	LockProjectForMembership(ctx context.Context, projectID string) error
+
+	// LockProjectAgents locks every agent row of the project (soft-deleted
+	// ones included) in ascending agent-ID order. On PostgreSQL this is
+	// SELECT ... FOR UPDATE ordered by ID; on SQLite it is a plain read.
+	//
+	// Must be called inside a transaction (WithTx). Call it before deleting
+	// any group membership that may belong to one of the project's agents
+	// (for example a project-scoped group), so the transaction locks agent
+	// rows before membership rows, in ID order, like every other path that
+	// deletes agent memberships. Not finding any agents is not an error.
+	LockProjectAgents(ctx context.Context, projectID string) error
 
 	// UpdateProjectMessagingPolicy updates only the cross-project inbound
 	// policy and its revision using optimistic concurrency. The
@@ -1373,6 +1438,20 @@ type UserStore interface {
 	// Returns ErrNotFound if the user doesn't exist.
 	DeleteUser(ctx context.Context, id string) error
 
+	// LockUserRow locks the user row until the surrounding transaction ends
+	// (ptone/scion#2769). On PostgreSQL exclusive=true runs
+	// SELECT ... FOR UPDATE and exclusive=false runs SELECT ... FOR KEY SHARE,
+	// so a user delete (exclusive) and an agent create or restore for that
+	// user (shared) serialize under READ COMMITTED. FOR KEY SHARE conflicts
+	// only with FOR UPDATE (and DELETE), so ordinary updates of the user row
+	// (last seen, profile edits) do not wait on a create or restore. On
+	// SQLite this is a plain read (SQLite already serializes writes at the
+	// database level).
+	//
+	// Must be called inside a transaction (WithTx). Returns ErrNotFound if
+	// the user does not exist.
+	LockUserRow(ctx context.Context, id string, exclusive bool) error
+
 	// ListUsers returns users matching the filter criteria.
 	ListUsers(ctx context.Context, filter UserFilter, opts ListOptions) (*ListResult[User], error)
 
@@ -1640,8 +1719,52 @@ type GroupStore interface {
 	// through group membership.
 	GetParentGroups(ctx context.Context, groupID string) ([]string, error)
 
+	// RemoveChildGroupEdge removes the edge that makes childGroupID a direct
+	// child group of parentGroupID. It returns ErrNotFound when no edge row
+	// was deleted, including when another transaction removed it first.
+	// It refuses project_agents parent groups with ErrInvalidInput, as
+	// RemoveGroupMember does, but unlike RemoveGroupMember it does not bump
+	// the parent group's updated timestamp.
+	RemoveChildGroupEdge(ctx context.Context, parentGroupID, childGroupID string) error
+
+	// GetDirectParentGroupIDs returns the IDs of the groups that contain the
+	// given group as a direct child group (one level only, no ancestors). A
+	// group with a self-edge is included in its own result. The result is
+	// sorted and empty, not ErrNotFound, when there are none.
+	GetDirectParentGroupIDs(ctx context.Context, groupID string) ([]string, error)
+
 	// CountGroupMembersByRole counts how many members of a group have the given role.
+	// Only memberships that still reference a user or an agent are counted;
+	// orphaned rows (user and agent both cleared by ON DELETE SET NULL) are not.
 	CountGroupMembersByRole(ctx context.Context, groupID, role string) (int, error)
+
+	// DeleteGroupMembershipsForUser removes every group membership of the
+	// given user and returns the number of rows removed. Call it before the
+	// user row is deleted: the FK is ON DELETE SET NULL, so afterwards the
+	// rows no longer carry the user ID (ptone/scion#2769).
+	//
+	// Must be called inside the same transaction as the user delete. On
+	// PostgreSQL it first locks the groups the user owns (SELECT ... FOR NO
+	// KEY UPDATE ordered by ID), so the transaction locks owned group rows
+	// before membership rows, matching ProjectDeletionService's
+	// group-row-then-memberships order and avoiding a deadlock with a
+	// concurrent project delete. The strength is FOR NO KEY UPDATE, the lock
+	// the user-row delete's owner_id SET NULL takes, not FOR UPDATE: it must
+	// not conflict with the FK check's FOR KEY SHARE taken when a membership,
+	// child-group edge or policy binding referencing the group is inserted.
+	DeleteGroupMembershipsForUser(ctx context.Context, userID string) (int, error)
+
+	// DeleteGroupMembershipsForAgents removes every group membership of the
+	// given agents and returns the number of rows removed. Call it before the
+	// agent rows are deleted, for the same reason as
+	// DeleteGroupMembershipsForUser. An empty ids slice is a no-op.
+	DeleteGroupMembershipsForAgents(ctx context.Context, ids []string) (int, error)
+
+	// DeleteOrphanedGroupMemberships removes group memberships whose user and
+	// agent are both NULL and returns the number of rows removed. Such rows
+	// are always orphans: group-in-group membership uses the child-group
+	// edge, never a membership row. Idempotent.
+	DeleteOrphanedGroupMemberships(ctx context.Context) (int, error)
 
 	// GetGroupsByIDs retrieves groups by a list of IDs.
 	// Returns only groups that exist; missing IDs are silently skipped.
@@ -1752,6 +1875,23 @@ type BrokerSecretStore interface {
 	// Returns ErrAlreadyExists if a token for this broker already exists.
 	CreateJoinToken(ctx context.Context, token *BrokerJoinToken) error
 
+	// UpsertJoinToken stores a join token for token.BrokerID, replacing any
+	// existing token for that broker (one token per broker). replaced reports
+	// whether a token for the broker already existed.
+	UpsertJoinToken(ctx context.Context, token *BrokerJoinToken) (replaced bool, err error)
+
+	// ConsumeJoinToken deletes the join token with the given hash, but only
+	// if it belongs to brokerID and expires after now, in a single
+	// statement. It returns nil when a token was deleted and ErrNotFound
+	// otherwise, so exactly one of several concurrent callers succeeds.
+	ConsumeJoinToken(ctx context.Context, tokenHash, brokerID string, now time.Time) error
+
+	// DeleteExpiredJoinToken deletes the join token with the given hash, but
+	// only if it has expired at now, in a single statement. It returns
+	// ErrNotFound when no row matched. A token issued later for the same
+	// broker has a different hash and is never removed.
+	DeleteExpiredJoinToken(ctx context.Context, tokenHash string, now time.Time) error
+
 	// GetJoinToken retrieves a join token by token hash.
 	// Returns ErrNotFound if the token doesn't exist.
 	GetJoinToken(ctx context.Context, tokenHash string) (*BrokerJoinToken, error)
@@ -1764,8 +1904,9 @@ type BrokerSecretStore interface {
 	// Returns ErrNotFound if the token doesn't exist.
 	DeleteJoinToken(ctx context.Context, brokerID string) error
 
-	// CleanExpiredJoinTokens removes all expired join tokens.
-	CleanExpiredJoinTokens(ctx context.Context) error
+	// CleanExpiredJoinTokens removes all expired join tokens and returns how
+	// many were removed.
+	CleanExpiredJoinTokens(ctx context.Context) (int, error)
 }
 
 // =============================================================================

@@ -39,7 +39,7 @@ import (
 // item when every field is populated.
 var compactItemAllowlist = []string{
 	"id", "slug", "name", "template", "projectId", "project", "labels",
-	"phase", "activity", "containerStatus", "messageMode", "ancestry",
+	"phase", "activity", "containerStatus", "message", "messageMode", "ancestry",
 	"createdBy", "creatorName", "created", "updated", "lastActivityEvent",
 	"_capabilities", "_messageability", "deletion",
 }
@@ -672,8 +672,17 @@ func TestAgentCompactView_DeletionViewParityForEveryIdentityClass(t *testing.T) 
 					seen[id] = true
 					if assert.NotNil(t, d, "%s: failed view", cell) {
 						assert.Equal(t, store.DeletionStateFailed, d.State, cell)
-						assert.Equal(t, store.DeletionCodeRuntimeError, d.Code, cell)
-						assert.Equal(t, errMsg, d.Error, cell)
+						// Code, error and claim reach the unscoped local
+						// platform admin only (ptone/scion#3122).
+						if c.name == "super-admin" {
+							assert.Equal(t, store.DeletionCodeRuntimeError, d.Code, cell)
+							assert.Equal(t, errMsg, d.Error, cell)
+							assert.NotZero(t, d.Claim, cell)
+						} else {
+							assert.Empty(t, d.Code, cell)
+							assert.Empty(t, d.Error, cell)
+							assert.Zero(t, d.Claim, cell)
+						}
 					}
 				default:
 					assert.Equal(t, "null", string(cd), "%s: item %s has no delete", cell, id)
@@ -726,7 +735,7 @@ func TestAgentCompactView_KeySetIsAllowlist(t *testing.T) {
 		ID: tid("cv-allkeys"), Slug: "cv-allkeys", Name: "All Keys", Template: "claude",
 		ProjectID: f.project.ID, Labels: map[string]string{"k": "v"},
 		Phase: "running", Activity: "executing", ContainerStatus: "Up 5 minutes",
-		MessageMode: "project", Ancestry: []string{f.agentIDAt(0)},
+		Message: "Waiting for review", MessageMode: "project", Ancestry: []string{f.agentIDAt(0)},
 		CreatedBy: f.owner.ID, OwnerID: f.owner.ID,
 		AppliedConfig: &store.AgentAppliedConfig{CreatorName: "All Keys Creator", Env: map[string]string{"A": "b"}},
 	}

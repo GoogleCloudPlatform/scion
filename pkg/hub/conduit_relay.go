@@ -29,6 +29,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/router"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/target"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/transport/ws"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -95,6 +96,7 @@ type ConduitRelayOptions struct {
 type conduitRuntime struct {
 	relay    *relay.Relay
 	registry *registry.Registry
+	router   *router.Router
 	store    registry.Store
 	now      func() time.Time
 }
@@ -104,6 +106,17 @@ type conduitRuntime struct {
 // listener and start the relay.
 func (s *Server) ConduitEnabled() bool {
 	return s.experimentEnabled(conduitExperiment)
+}
+
+// conduitServing reports whether agents should dial the conduit endpoint:
+// hub.conduit is on and this node runs the relay.
+func (s *Server) conduitServing() bool {
+	return s.conduitServingIn(s.experimentsSnapshot())
+}
+
+// conduitServingIn is conduitServing with hub.conduit read from snap.
+func (s *Server) conduitServingIn(snap ExperimentsSnapshot) bool {
+	return s.experimentEnabledIn(snap, conduitExperiment) && s.conduit.Load() != nil
 }
 
 // ConduitGrantRingShared reports whether the grant key ring is persisted
@@ -178,7 +191,17 @@ func (s *Server) StartConduitRelay(ctx context.Context, opts ConduitRelayOptions
 	if err != nil {
 		return fmt.Errorf("conduit relay: %w", err)
 	}
-	rt := &conduitRuntime{relay: r, registry: reg, store: st, now: now}
+	rtr, err := router.New(router.Config{
+		Relay:    r,
+		Registry: reg,
+		Store:    st,
+		Peers:    &relay.PeerClient{HTTP: opts.HTTPClient, Auth: opts.PeerAuth},
+		Now:      now,
+	})
+	if err != nil {
+		return fmt.Errorf("conduit router: %w", err)
+	}
+	rt := &conduitRuntime{relay: r, registry: reg, router: rtr, store: st, now: now}
 	// Published before Start: the internal listener is already serving and
 	// the self-check probe must reach this relay's internal handler.
 	if !s.conduit.CompareAndSwap(nil, rt) {
@@ -408,7 +431,7 @@ func (s *Server) handleConduit(w http.ResponseWriter, r *http.Request) {
 		Kind:      registry.PrincipalAgent,
 		ID:        agent.ID,
 		ProjectID: agent.ProjectID,
-		Agent:     relay.AgentIncarnationFacts{LaunchID: agent.LaunchID, Generation: int64(agent.Generation)},
+		Agent:     agentIncarnationFacts(agent),
 	}
 	// The session outlives no request deadline: it ends when the
 	// connection closes or the relay drains.
@@ -423,4 +446,13 @@ func (s *Server) handleConduit(w http.ResponseWriter, r *http.Request) {
 			slog.Warn("Conduit: deleting the epoch row of a deleted agent failed", "agent_id", agent.ID, "error", err)
 		}
 	}
+}
+
+// agentIncarnationFacts returns the agent-row values that conduit admission
+// and routing compare a session's endpoint incarnation with. The agent's
+// launch id is its current run id (agents.run_id): the broker labels each
+// container it starts with the run id and passes the same value in
+// SCION_LAUNCH_ID, which sciontool presents in Hello.
+func agentIncarnationFacts(agent *store.Agent) relay.AgentIncarnationFacts {
+	return relay.AgentIncarnationFacts{LaunchID: agent.RunID, Generation: int64(agent.Generation)}
 }

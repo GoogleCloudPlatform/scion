@@ -67,53 +67,46 @@ func testServerWithStore(t *testing.T, s store.Store) (*Server, store.Store) {
 	// post-backfill behavior re-create the marker explicitly.
 	_ = s.DeleteHubSetting(context.Background(), "migration_delegation_edge_backfill_v1")
 
-	cfg := DefaultServerConfig()
-	cfg.DevAuthToken = testDevToken // Enable dev auth for testing
-	cfg.DevUserConfig = DevUserConfig{
-		Username:    "dev",
-		DisplayName: "Development User",
-		Email:       "dev@localhost",
-	}
-	srv, err := New(cfg, s)
+	srv, err := New(testServerConfig(), s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
 	srv.SetHubID("test-hub-id")
 	t.Cleanup(func() {
+		// Shutdown runs CleanupResources even though Start was never
+		// called, which stops every background goroutine New() starts
+		// (see TestTestServerCleanupStopsBackgroundGoroutines).
 		_ = srv.Shutdown(context.Background())
-		closeTestServerBackground(srv)
 		_ = s.Close() // Release in-memory SQLite database to avoid OOM across many tests.
 	})
+	waitUserScopedDataSweep(t, srv)
 	return srv, s
 }
 
-// closeTestServerBackground stops the background goroutines New() starts on
-// every Server: three chatLinkService.cleanupLoop (telegram/discord/teams),
-// NonceCache.cleanup, and PreviewService.cleanupNonces. srv.Shutdown() never
-// closes these when srv.httpServer is nil, i.e. without Start(), which unit
-// tests never call. Also cancels srv.ctxCancel, which Shutdown skips for the
-// same reason, in case any handler-triggered work is keyed on srv.ctx. Each
-// Close/Stop is idempotent, and these calls run sequentially, so
-// NonceCache.Stop's plain select/close (not sync.Once) is safe here. Refs
-// ptone/scion#2418 (possible contributor; not proven).
-func closeTestServerBackground(srv *Server) {
-	if srv.ctxCancel != nil {
-		srv.ctxCancel()
+// testServerConfig is the server config testServerWithStore passes to New().
+func testServerConfig() ServerConfig {
+	cfg := DefaultServerConfig()
+	cfg.DevAuthToken = testDevToken // Enable dev auth for testing
+	// Never build real Cloud Logging clients from an ambient GCP project
+	// env var (ptone/scion#3188).
+	cfg.DisableCloudLogQuery = true
+	cfg.DevUserConfig = DevUserConfig{
+		Username:    "dev",
+		DisplayName: "Development User",
+		Email:       "dev@localhost",
 	}
-	if srv.telegramLinkService != nil {
-		srv.telegramLinkService.Close()
-	}
-	if srv.discordLinkService != nil {
-		srv.discordLinkService.Close()
-	}
-	if srv.teamsLinkService != nil {
-		srv.teamsLinkService.Close()
-	}
-	if srv.brokerAuthService != nil {
-		srv.brokerAuthService.Close()
-	}
-	if srv.previewService != nil {
-		srv.previewService.Close()
+	return cfg
+}
+
+// waitUserScopedDataSweep waits for the startup sweep New() starts in the
+// background to end. The sweep reads srv.store, so a test helper calls this
+// before returning a server whose srv.store a test may replace.
+func waitUserScopedDataSweep(t testing.TB, srv *Server) {
+	t.Helper()
+	select {
+	case <-srv.userScopedDataSweepDone:
+	case <-time.After(time.Minute):
+		t.Fatal("startup sweep of user-scope data did not finish")
 	}
 }
 
@@ -2167,8 +2160,8 @@ func testServerWithBrokerAuth(t *testing.T) (*Server, store.Store) {
 	}
 	srv.SetHubID("test-hub-id")
 	t.Cleanup(func() {
+		// Shutdown runs CleanupResources; see testServerWithStore.
 		_ = srv.Shutdown(context.Background())
-		closeTestServerBackground(srv)
 		_ = s.Close()
 	})
 	return srv, s
@@ -2779,7 +2772,7 @@ func TestProjectRenameSlugOnly(t *testing.T) {
 	}
 }
 
-func TestProjectRenameSlugSanitized(t *testing.T) {
+func TestProjectRenameSlugMustMatchSlugFormat(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
@@ -2794,24 +2787,23 @@ func TestProjectRenameSlugSanitized(t *testing.T) {
 		t.Fatalf("failed to create project: %v", err)
 	}
 
-	// Slug with spaces and uppercase should be sanitized
+	// A slug with spaces and uppercase is refused, not rewritten.
 	body := map[string]interface{}{
 		"slug": "My New Project",
 	}
 
 	rec := doRequest(t, srv, http.MethodPatch, fmt.Sprintf("/api/v1/projects/%s", tid("project_rename_san")), body)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var resp store.Project
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-		t.Fatalf("failed to decode response: %v", err)
+	stored, err := s.GetProject(ctx, tid("project_rename_san"))
+	if err != nil {
+		t.Fatalf("failed to get project: %v", err)
 	}
-
-	if resp.Slug != "my-new-project" {
-		t.Errorf("expected sanitized slug %q, got %q", "my-new-project", resp.Slug)
+	if stored.Slug != "sanitize-test" {
+		t.Errorf("expected slug to stay %q, got %q", "sanitize-test", stored.Slug)
 	}
 }
 

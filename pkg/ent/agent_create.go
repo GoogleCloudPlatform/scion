@@ -630,6 +630,12 @@ func (_c *AgentCreate) SetNillableRunID(v *string) *AgentCreate {
 	return _c
 }
 
+// SetPreviousRunIds sets the "previous_run_ids" field.
+func (_c *AgentCreate) SetPreviousRunIds(v []string) *AgentCreate {
+	_c.mutation.SetPreviousRunIds(v)
+	return _c
+}
+
 // SetLaunchState sets the "launch_state" field.
 func (_c *AgentCreate) SetLaunchState(v string) *AgentCreate {
 	_c.mutation.SetLaunchState(v)
@@ -906,6 +912,20 @@ func (_c *AgentCreate) SetRunIntentAt(v time.Time) *AgentCreate {
 func (_c *AgentCreate) SetNillableRunIntentAt(v *time.Time) *AgentCreate {
 	if v != nil {
 		_c.SetRunIntentAt(*v)
+	}
+	return _c
+}
+
+// SetRunIntentMarkedAt sets the "run_intent_marked_at" field.
+func (_c *AgentCreate) SetRunIntentMarkedAt(v time.Time) *AgentCreate {
+	_c.mutation.SetRunIntentMarkedAt(v)
+	return _c
+}
+
+// SetNillableRunIntentMarkedAt sets the "run_intent_marked_at" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableRunIntentMarkedAt(v *time.Time) *AgentCreate {
+	if v != nil {
+		_c.SetRunIntentMarkedAt(*v)
 	}
 	return _c
 }
@@ -1586,6 +1606,10 @@ func (_c *AgentCreate) createSpec() (*Agent, *sqlgraph.CreateSpec) {
 		_spec.SetField(agent.FieldRunID, field.TypeString, value)
 		_node.RunID = value
 	}
+	if value, ok := _c.mutation.PreviousRunIds(); ok {
+		_spec.SetField(agent.FieldPreviousRunIds, field.TypeJSON, value)
+		_node.PreviousRunIds = value
+	}
 	if value, ok := _c.mutation.LaunchState(); ok {
 		_spec.SetField(agent.FieldLaunchState, field.TypeString, value)
 		_node.LaunchState = value
@@ -1665,6 +1689,10 @@ func (_c *AgentCreate) createSpec() (*Agent, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.RunIntentAt(); ok {
 		_spec.SetField(agent.FieldRunIntentAt, field.TypeTime, value)
 		_node.RunIntentAt = &value
+	}
+	if value, ok := _c.mutation.RunIntentMarkedAt(); ok {
+		_spec.SetField(agent.FieldRunIntentMarkedAt, field.TypeTime, value)
+		_node.RunIntentMarkedAt = &value
 	}
 	if value, ok := _c.mutation.StartClaimID(); ok {
 		_spec.SetField(agent.FieldStartClaimID, field.TypeString, value)
@@ -2585,6 +2613,24 @@ func (u *AgentUpsert) ClearRunID() *AgentUpsert {
 	return u
 }
 
+// SetPreviousRunIds sets the "previous_run_ids" field.
+func (u *AgentUpsert) SetPreviousRunIds(v []string) *AgentUpsert {
+	u.Set(agent.FieldPreviousRunIds, v)
+	return u
+}
+
+// UpdatePreviousRunIds sets the "previous_run_ids" field to the value that was provided on create.
+func (u *AgentUpsert) UpdatePreviousRunIds() *AgentUpsert {
+	u.SetExcluded(agent.FieldPreviousRunIds)
+	return u
+}
+
+// ClearPreviousRunIds clears the value of the "previous_run_ids" field.
+func (u *AgentUpsert) ClearPreviousRunIds() *AgentUpsert {
+	u.SetNull(agent.FieldPreviousRunIds)
+	return u
+}
+
 // SetLaunchState sets the "launch_state" field.
 func (u *AgentUpsert) SetLaunchState(v string) *AgentUpsert {
 	u.Set(agent.FieldLaunchState, v)
@@ -2942,6 +2988,24 @@ func (u *AgentUpsert) UpdateRunIntentAt() *AgentUpsert {
 // ClearRunIntentAt clears the value of the "run_intent_at" field.
 func (u *AgentUpsert) ClearRunIntentAt() *AgentUpsert {
 	u.SetNull(agent.FieldRunIntentAt)
+	return u
+}
+
+// SetRunIntentMarkedAt sets the "run_intent_marked_at" field.
+func (u *AgentUpsert) SetRunIntentMarkedAt(v time.Time) *AgentUpsert {
+	u.Set(agent.FieldRunIntentMarkedAt, v)
+	return u
+}
+
+// UpdateRunIntentMarkedAt sets the "run_intent_marked_at" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateRunIntentMarkedAt() *AgentUpsert {
+	u.SetExcluded(agent.FieldRunIntentMarkedAt)
+	return u
+}
+
+// ClearRunIntentMarkedAt clears the value of the "run_intent_marked_at" field.
+func (u *AgentUpsert) ClearRunIntentMarkedAt() *AgentUpsert {
+	u.SetNull(agent.FieldRunIntentMarkedAt)
 	return u
 }
 
@@ -4097,6 +4161,27 @@ func (u *AgentUpsertOne) ClearRunID() *AgentUpsertOne {
 	})
 }
 
+// SetPreviousRunIds sets the "previous_run_ids" field.
+func (u *AgentUpsertOne) SetPreviousRunIds(v []string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetPreviousRunIds(v)
+	})
+}
+
+// UpdatePreviousRunIds sets the "previous_run_ids" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdatePreviousRunIds() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdatePreviousRunIds()
+	})
+}
+
+// ClearPreviousRunIds clears the value of the "previous_run_ids" field.
+func (u *AgentUpsertOne) ClearPreviousRunIds() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearPreviousRunIds()
+	})
+}
+
 // SetLaunchState sets the "launch_state" field.
 func (u *AgentUpsertOne) SetLaunchState(v string) *AgentUpsertOne {
 	return u.Update(func(s *AgentUpsert) {
@@ -4514,6 +4599,27 @@ func (u *AgentUpsertOne) UpdateRunIntentAt() *AgentUpsertOne {
 func (u *AgentUpsertOne) ClearRunIntentAt() *AgentUpsertOne {
 	return u.Update(func(s *AgentUpsert) {
 		s.ClearRunIntentAt()
+	})
+}
+
+// SetRunIntentMarkedAt sets the "run_intent_marked_at" field.
+func (u *AgentUpsertOne) SetRunIntentMarkedAt(v time.Time) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetRunIntentMarkedAt(v)
+	})
+}
+
+// UpdateRunIntentMarkedAt sets the "run_intent_marked_at" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateRunIntentMarkedAt() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateRunIntentMarkedAt()
+	})
+}
+
+// ClearRunIntentMarkedAt clears the value of the "run_intent_marked_at" field.
+func (u *AgentUpsertOne) ClearRunIntentMarkedAt() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearRunIntentMarkedAt()
 	})
 }
 
@@ -5869,6 +5975,27 @@ func (u *AgentUpsertBulk) ClearRunID() *AgentUpsertBulk {
 	})
 }
 
+// SetPreviousRunIds sets the "previous_run_ids" field.
+func (u *AgentUpsertBulk) SetPreviousRunIds(v []string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetPreviousRunIds(v)
+	})
+}
+
+// UpdatePreviousRunIds sets the "previous_run_ids" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdatePreviousRunIds() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdatePreviousRunIds()
+	})
+}
+
+// ClearPreviousRunIds clears the value of the "previous_run_ids" field.
+func (u *AgentUpsertBulk) ClearPreviousRunIds() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearPreviousRunIds()
+	})
+}
+
 // SetLaunchState sets the "launch_state" field.
 func (u *AgentUpsertBulk) SetLaunchState(v string) *AgentUpsertBulk {
 	return u.Update(func(s *AgentUpsert) {
@@ -6286,6 +6413,27 @@ func (u *AgentUpsertBulk) UpdateRunIntentAt() *AgentUpsertBulk {
 func (u *AgentUpsertBulk) ClearRunIntentAt() *AgentUpsertBulk {
 	return u.Update(func(s *AgentUpsert) {
 		s.ClearRunIntentAt()
+	})
+}
+
+// SetRunIntentMarkedAt sets the "run_intent_marked_at" field.
+func (u *AgentUpsertBulk) SetRunIntentMarkedAt(v time.Time) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetRunIntentMarkedAt(v)
+	})
+}
+
+// UpdateRunIntentMarkedAt sets the "run_intent_marked_at" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateRunIntentMarkedAt() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateRunIntentMarkedAt()
+	})
+}
+
+// ClearRunIntentMarkedAt clears the value of the "run_intent_marked_at" field.
+func (u *AgentUpsertBulk) ClearRunIntentMarkedAt() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearRunIntentMarkedAt()
 	})
 }
 

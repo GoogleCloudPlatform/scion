@@ -18,6 +18,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/fsutil"
 	"github.com/spf13/cobra"
 )
 
@@ -98,9 +99,9 @@ func init() {
 	provisionCmd.Flags().IntVar(&provisionDepth, "depth", 1,
 		"Git clone depth (0=full clone, >0=that depth; default 1=shallow)")
 	provisionCmd.Flags().IntVar(&provisionUID, "uid", 1000,
-		"UID for chown of provisioned files")
+		"UID for chown of provisioned files (0 means 1000)")
 	provisionCmd.Flags().IntVar(&provisionGID, "gid", 1000,
-		"GID for chown of provisioned files")
+		"GID for chown of provisioned files (0 means 1000)")
 	provisionCmd.Flags().BoolVar(&provisionWaitSentinel, "wait-for-sentinel", false,
 		"Poll for sentinel file instead of provisioning (lock-loser mode)")
 	provisionCmd.Flags().IntVar(&provisionTimeout, "timeout", 300,
@@ -110,6 +111,9 @@ func init() {
 }
 
 func runProvision(ctx context.Context) error {
+	if err := validateProvisionOwner(provisionUID, provisionGID); err != nil {
+		return err
+	}
 	cloneURL := os.Getenv("SCION_CLONE_URL")
 	cloneBranch := os.Getenv("SCION_CLONE_BRANCH")
 	projectID := os.Getenv("SCION_PROJECT_ID")
@@ -201,8 +205,10 @@ func runProvision(ctx context.Context) error {
 			// Without the broker's preparation (no setgid and group write),
 			// the node created the directory as root: give it to the
 			// workspace owner, the same condition under which the workspace
-			// chown stays strict.
-			if err := provision.PrepareStateDir(stateDir, provisionUID, provisionGID, provisionRequireChownSuccess(os.Getenv)); err != nil {
+			// chown stays strict. 0 means the default 1000, as for the
+			// workspace.
+			uid, gid := provision.DefaultOwnerID(provisionUID), provision.DefaultOwnerID(provisionGID)
+			if err := prepareStateDir(stateDir, uid, gid, provisionRequireChownSuccess(os.Getenv)); err != nil {
 				return fmt.Errorf("provision: %w", err)
 			}
 			sentinelDir = stateDir
@@ -322,6 +328,10 @@ func worktreeSafeDirectoryEnv(getenv func(string) string, workspace, agentSlug s
 	return env
 }
 
+// prepareStateDir is provision.PrepareStateDir; a variable so tests can
+// observe the owner it is given.
+var prepareStateDir = provision.PrepareStateDir
+
 // provisionRequireChownSuccess keeps a chown failure fatal unless the
 // Kubernetes runtime marked the workspace directory as prepared by the
 // broker, created or found with setgid and group write
@@ -402,4 +412,17 @@ func runWaitForSentinel(ctx context.Context) error {
 		case <-time.After(interval):
 		}
 	}
+}
+
+// validateProvisionOwner checks the --uid and --gid values before anything
+// is created or chowned. 0 is accepted and keeps meaning "use the default
+// 1000" (see provision.ProvisionInput.NFSUID).
+func validateProvisionOwner(uid, gid int) error {
+	if err := fsutil.ValidateOwnerID("--uid", uid); err != nil {
+		return fmt.Errorf("provision: %w", err)
+	}
+	if err := fsutil.ValidateOwnerID("--gid", gid); err != nil {
+		return fmt.Errorf("provision: %w", err)
+	}
+	return nil
 }

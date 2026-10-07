@@ -26,7 +26,7 @@ import (
 // =============================================================================
 // Typed-nil BrokerIdentity guards (ptone/scion#2475): GetBrokerIdentityFromContext,
 // brokerOnBehalfOfAuthorizes, brokerMayReadCatalogResource, and
-// authorizedForBrokerOwnerAction all hold a BrokerIdentity interface value at
+// authorizedForBrokerRotate all hold a BrokerIdentity interface value at
 // some point and must not treat a typed-nil *brokerIdentityImpl as present.
 // See isNilIdentity (scheduled_initiator.go) for why a plain == nil
 // comparison does not catch this case.
@@ -160,11 +160,11 @@ func TestBrokerMayReadCatalogResource_TypedNilBrokerDenied(t *testing.T) {
 	}
 }
 
-// TestAuthorizedForBrokerOwnerAction_TypedNilBrokerIdentDoesNotShortcut
+// TestAuthorizedForBrokerRotate_TypedNilBrokerIdentDoesNotShortcut
 // covers the brokerIdent.BrokerID() shortcut: a typed-nil brokerIdent must
 // not take it. With no user supplied, every other branch is already closed,
 // so the call must simply deny without a nil dereference.
-func TestAuthorizedForBrokerOwnerAction_TypedNilBrokerIdentDoesNotShortcut(t *testing.T) {
+func TestAuthorizedForBrokerRotate_TypedNilBrokerIdentDoesNotShortcut(t *testing.T) {
 	s := &Server{}
 	var typedNil BrokerIdentity = (*brokerIdentityImpl)(nil)
 	fetchBroker := func() (*store.RuntimeBroker, error) {
@@ -174,8 +174,8 @@ func TestAuthorizedForBrokerOwnerAction_TypedNilBrokerIdentDoesNotShortcut(t *te
 
 	var allowed bool
 	var err error
-	requireNoNilDereference(t, "authorizedForBrokerOwnerAction must not hit a nil dereference when brokerIdent is typed-nil", func() {
-		allowed, err = s.authorizedForBrokerOwnerAction(context.Background(), nil, typedNil, "broker-1", fetchBroker)
+	requireNoNilDereference(t, "authorizedForBrokerRotate must not hit a nil dereference when brokerIdent is typed-nil", func() {
+		allowed, err = s.authorizedForBrokerRotate(context.Background(), nil, typedNil, "broker-1", fetchBroker)
 	})
 	require.NoError(t, err)
 	assert.False(t, allowed, "a typed-nil brokerIdent must not satisfy the broker-owner shortcut")

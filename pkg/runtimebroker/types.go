@@ -103,6 +103,11 @@ type BrokerCapabilities struct {
 	// reincarnate --broker`). The hub refuses a move unless both brokers
 	// report it (412).
 	AgentMove bool `json:"agentMove"`
+	// ReprovisionEmptyPerAgent indicates this broker's reprovision reuses an
+	// empty-per-agent agent's private workspace in place (same-broker
+	// `scion reincarnate`, miller79/scion#167). Set on every runtime: the
+	// hub checks runtime suitability separately.
+	ReprovisionEmptyPerAgent bool `json:"reprovisionEmptyPerAgent,omitempty"`
 	// StartsInFlight indicates the broker reports the agent starts still
 	// running on it in every heartbeat (BrokerHeartbeat.StartsInFlight). Only
 	// then does the hub read a start's absence from that list as "no start
@@ -155,24 +160,29 @@ type AgentResponse struct {
 	// HarnessConfigRevision records the harness-config bundle revision (e.g.
 	// the Hub artifact ContentHash) used to provision this agent. Empty for
 	// built-in or local-only configs without a tracked revision.
-	HarnessConfigRevision string            `json:"harnessConfigRevision,omitempty"`
-	HarnessAuth           string            `json:"harnessAuth,omitempty"` // Resolved harness auth method
-	Image                 string            `json:"image,omitempty"`       // Resolved container image
-	RuntimeType           string            `json:"runtime,omitempty"`     // Runtime type (docker, kubernetes, apple)
-	Profile               string            `json:"profile,omitempty"`     // Settings profile used
-	ProjectID             string            `json:"projectId,omitempty"`
-	UserID                string            `json:"userId,omitempty"`
-	Status                string            `json:"status"`
-	Phase                 string            `json:"phase,omitempty"`
-	Activity              string            `json:"activity,omitempty"`
-	StatusReason          string            `json:"statusReason,omitempty"`
-	Ready                 bool              `json:"ready,omitempty"`
-	ContainerStatus       string            `json:"containerStatus,omitempty"`
-	Config                *AgentConfig      `json:"config,omitempty"`
-	Runtime               *AgentRuntime     `json:"runtimeInfo,omitempty"` // Renamed JSON tag to avoid conflict
-	Labels                map[string]string `json:"labels,omitempty"`
-	CreatedAt             time.Time         `json:"createdAt,omitempty"`
-	UpdatedAt             time.Time         `json:"updatedAt,omitempty"`
+	HarnessConfigRevision string `json:"harnessConfigRevision,omitempty"`
+	// HarnessConfigSource mirrors api.AgentInfo.HarnessConfigSource: which
+	// resolution branch supplied the harness-config (hub-hydrated,
+	// template-bundled, broker-local, builtin, unresolved). Provenance only
+	// (ptone/scion#620).
+	HarnessConfigSource string            `json:"harnessConfigSource,omitempty"`
+	HarnessAuth         string            `json:"harnessAuth,omitempty"` // Resolved harness auth method
+	Image               string            `json:"image,omitempty"`       // Resolved container image
+	RuntimeType         string            `json:"runtime,omitempty"`     // Runtime type (docker, kubernetes, apple)
+	Profile             string            `json:"profile,omitempty"`     // Settings profile used
+	ProjectID           string            `json:"projectId,omitempty"`
+	UserID              string            `json:"userId,omitempty"`
+	Status              string            `json:"status"`
+	Phase               string            `json:"phase,omitempty"`
+	Activity            string            `json:"activity,omitempty"`
+	StatusReason        string            `json:"statusReason,omitempty"`
+	Ready               bool              `json:"ready,omitempty"`
+	ContainerStatus     string            `json:"containerStatus,omitempty"`
+	Config              *AgentConfig      `json:"config,omitempty"`
+	Runtime             *AgentRuntime     `json:"runtimeInfo,omitempty"` // Renamed JSON tag to avoid conflict
+	Labels              map[string]string `json:"labels,omitempty"`
+	CreatedAt           time.Time         `json:"createdAt,omitempty"`
+	UpdatedAt           time.Time         `json:"updatedAt,omitempty"`
 	// Warnings carries only the hub-only env drop warnings (a broker-local
 	// TZ value ignored for a hub-dispatched agent), so the hub can relay
 	// them in its own create and start responses. Other broker-local start
@@ -220,6 +230,11 @@ type ListAgentsResponse struct {
 
 // CreateAgentRequest is the request body for creating an agent.
 type CreateAgentRequest struct {
+	// workspaceAbsentAtAdmission is set by createAgent when the hub-managed
+	// project path ~/.scion/projects/<slug> did not exist when the request
+	// arrived. It is never read from the wire.
+	workspaceAbsentAtAdmission bool
+
 	RequestID   string             `json:"requestId,omitempty"`
 	ID          string             `json:"id,omitempty"`   // Hub UUID for status reporting
 	Slug        string             `json:"slug,omitempty"` // URL-safe identifier
@@ -266,12 +281,24 @@ type CreateAgentRequest struct {
 	// while preserving the agent's home directory and clone-per-agent
 	// workspace. Ignored when ProvisionOnly is false.
 	Reprovision bool `json:"reprovision,omitempty"`
+	// ExpectExistingNFSWorkspace, on a ProvisionOnly request, says the agent
+	// is being moved here from another broker on the same NFS export: before
+	// provisioning, the broker confirms through its own mount that the
+	// workspace already exists ("agent-dir": <subPathRoot>/<projectID>/
+	// agents/<name>/workspace; "project": <subPathRoot>/<projectID>/
+	// workspace) and refuses with 409 when it does not, instead of
+	// provisioning an empty workspace (design ptone/scion#2727 A9).
+	ExpectExistingNFSWorkspace string `json:"expectExistingNfsWorkspace,omitempty"`
 	// ProjectPath is the local filesystem path to the project on this runtime broker.
 	// This is provided by the Hub from the project provider record.
 	ProjectPath string `json:"projectPath,omitempty"`
 	// WorkspaceStoragePath is the GCS storage path for bootstrapped workspaces.
 	// When set, the broker downloads the workspace from GCS instead of using ProjectPath.
 	WorkspaceStoragePath string `json:"workspaceStoragePath,omitempty"`
+	// WorkspaceStorageBucket is the GCS bucket holding WorkspaceStoragePath,
+	// sent by the hub that uploaded it. When empty the broker falls back to
+	// its own StorageBucket setting (older hubs do not send it).
+	WorkspaceStorageBucket string `json:"workspaceStorageBucket,omitempty"`
 
 	// ProjectSlug is the project slug for hub-managed projects.
 	// When set, the broker creates the workspace at ~/.scion.projects/<slug>/
@@ -391,6 +418,13 @@ type CreateAgentConfig struct {
 	// workspace (git-workspace hybrid mode). When true, the broker skips
 	// worktree/clone creation and configures per-agent git credentials.
 	SharedWorkspace bool `json:"sharedWorkspace,omitempty"`
+
+	// SharedWorkspaceClone is a shared-plain git project's workspace clone
+	// settings, sent by the Hub alongside SharedWorkspace. It never turns on
+	// the per-agent clone mode GitClone does; it reaches the runtime only as
+	// the clone settings of the Kubernetes workspace-provision init container
+	// (api.StartOptions.SharedWorkspaceClone).
+	SharedWorkspaceClone *api.GitCloneConfig `json:"sharedWorkspaceClone,omitempty"`
 
 	// SharedDirs contains project-level shared directory declarations.
 	SharedDirs []api.SharedDir `json:"sharedDirs,omitempty"`
@@ -623,6 +657,7 @@ func AgentInfoToResponse(info api.AgentInfo) AgentResponse {
 		Template:              info.Template,
 		HarnessConfig:         info.HarnessConfig,
 		HarnessConfigRevision: info.HarnessConfigRevision,
+		HarnessConfigSource:   info.HarnessConfigSource,
 		HarnessAuth:           info.HarnessAuth,
 		Image:                 info.Image,
 		RuntimeType:           info.Runtime,

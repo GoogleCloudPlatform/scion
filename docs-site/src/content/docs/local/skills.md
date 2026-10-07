@@ -283,6 +283,7 @@ Because the cache is content-addressed, identical content is stored once regardl
 scion skills list
 scion skills list --scope global --search deploy
 scion skills list --tags ci,production          # comma-separated, AND semantics
+scion skills list --tags ci --tags production   # repeatable; same filter
 
 # Show a skill's details and its versions
 scion skills show deploy-checklist

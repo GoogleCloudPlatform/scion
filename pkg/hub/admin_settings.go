@@ -299,10 +299,26 @@ func (s *Server) handleAdminServerConfigSectionReset(w http.ResponseWriter, r *h
 
 // handleGetServerConfig reads and returns the global settings.yaml.
 func (s *Server) handleGetServerConfig(w http.ResponseWriter) {
+	resp, err := buildServerConfigFileResponse()
+	if err != nil {
+		var ue *serverConfigReadError
+		if errors.As(err, &ue) {
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, ue.userMsg, nil)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read settings", nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// buildServerConfigFileResponse builds the file-mode GET
+// /api/v1/admin/server-config body (sensitive fields masked). The file-mode
+// PUT also uses it as the reference view for echo detection.
+func buildServerConfigFileResponse() (*ServerConfigResponse, error) {
 	globalDir, err := config.GetGlobalDir()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to resolve settings directory", nil)
-		return
+		return nil, &serverConfigReadError{"Failed to resolve settings directory", err}
 	}
 
 	settingsPath := filepath.Join(globalDir, "settings.yaml")
@@ -321,17 +337,14 @@ func (s *Server) handleGetServerConfig(w http.ResponseWriter) {
 				sort.Strings(envOverrides)
 				resp.EnvOverrides = envOverrides
 			}
-			writeJSON(w, http.StatusOK, resp)
-			return
+			return &resp, nil
 		}
-		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read settings file", nil)
-		return
+		return nil, &serverConfigReadError{"Failed to read settings file", err}
 	}
 
 	var vs config.VersionedSettings
 	if err := yamlv3.Unmarshal(data, &vs); err != nil {
-		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to parse settings file", nil)
-		return
+		return nil, &serverConfigReadError{"Failed to parse settings file", err}
 	}
 
 	// Mask sensitive fields before sending to the client
@@ -384,7 +397,7 @@ func (s *Server) handleGetServerConfig(w http.ResponseWriter) {
 	}
 
 	maskSensitiveFields(&resp)
-	writeJSON(w, http.StatusOK, resp)
+	return &resp, nil
 }
 
 // validateDefaultTimezone checks an agent_defaults.default_timezone
@@ -422,6 +435,12 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	// The typed decode above silently drops a removed profiles.<name>.timezone
 	// key, so check the raw body before settings.yaml is touched.
 	if rejectRemovedProfileTimezone(w, rawBody) {
+		return
+	}
+	// Any other key the typed decode drops (unknown, misspelt, or a flat
+	// dotted "server.hub.x" key) is rejected with 422 before anything is
+	// written, unless it echoes the GET view (ptone/scion#3463).
+	if rejectUnknownFileConfigKeys(w, rawBody) {
 		return
 	}
 
@@ -485,6 +504,12 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	// cannot strand an existing nfs override. Configuration only; no mount
 	// is checked.
 	sdInRequest := req.Server != nil && req.Server.SharedDirStorage != nil
+	// Values and per-dir names do not depend on the current settings, so
+	// they are checked even when those cannot be read below.
+	if errs := config.ValidateSharedDirStorageBackendValues(req.Runtimes, req.Profiles); len(errs) > 0 {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, errs[0].Error(), nil)
+		return
+	}
 	if req.Runtimes != nil || req.Profiles != nil || sdInRequest {
 		runtimes, profiles := req.Runtimes, req.Profiles
 		var sdGlobal *config.V1SharedDirStorageConfig

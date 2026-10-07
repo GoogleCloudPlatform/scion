@@ -39,6 +39,12 @@ const (
 	FieldNewAppliedConfig = "new_applied_config"
 	// FieldHandoff holds the string denoting the handoff field in the database.
 	FieldHandoff = "handoff"
+	// FieldSourceBrokerID holds the string denoting the source_broker_id field in the database.
+	FieldSourceBrokerID = "source_broker_id"
+	// FieldTargetBrokerID holds the string denoting the target_broker_id field in the database.
+	FieldTargetBrokerID = "target_broker_id"
+	// FieldSourceCleanup holds the string denoting the source_cleanup field in the database.
+	FieldSourceCleanup = "source_cleanup"
 	// Table holds the table name of the agentreincarnation in the database.
 	Table = "agent_reincarnations"
 )
@@ -58,6 +64,9 @@ var Columns = []string{
 	FieldPreviousAppliedConfig,
 	FieldNewAppliedConfig,
 	FieldHandoff,
+	FieldSourceBrokerID,
+	FieldTargetBrokerID,
+	FieldSourceCleanup,
 }
 
 // ValidColumn reports if the column name is valid (part of the table columns).
@@ -179,4 +188,19 @@ func ByNewAppliedConfig(opts ...sql.OrderTermOption) OrderOption {
 // ByHandoff orders the results by the handoff field.
 func ByHandoff(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldHandoff, opts...).ToFunc()
+}
+
+// BySourceBrokerID orders the results by the source_broker_id field.
+func BySourceBrokerID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldSourceBrokerID, opts...).ToFunc()
+}
+
+// ByTargetBrokerID orders the results by the target_broker_id field.
+func ByTargetBrokerID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldTargetBrokerID, opts...).ToFunc()
+}
+
+// BySourceCleanup orders the results by the source_cleanup field.
+func BySourceCleanup(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldSourceCleanup, opts...).ToFunc()
 }

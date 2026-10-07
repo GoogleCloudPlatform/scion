@@ -2371,16 +2371,14 @@ func TestSendGroupMessageViaHub_A257_O1_JSONOutputIncludesDeferredStatus(t *test
 	_ = r.Close()
 	output := string(buf[:n])
 
-	var got []struct {
-		Recipient string `json:"recipient"`
-		Status    string `json:"status"`
-		Error     string `json:"error,omitempty"`
-	}
+	var got groupSendResult
 	require.NoError(t, json.Unmarshal([]byte(output), &got), "output must be valid JSON; got: %s", output)
-	require.Len(t, got, 2)
+	require.Len(t, got.Results, 2)
+	assert.Equal(t, 1, got.Deferred)
+	assert.Equal(t, 1, got.Delivered)
 
 	byRecipient := map[string]string{}
-	for _, r := range got {
+	for _, r := range got.Results {
 		byRecipient[r.Recipient] = r.Status
 	}
 	assert.Equal(t, "deferred", byRecipient["agent:agent-migrating"], "JSON output must carry status:\"deferred\"; got: %s", output)
@@ -3017,6 +3015,7 @@ func newCountingHubServer(t *testing.T) (*httptest.Server, *int32) {
 // and credentials).
 func setHermeticHubEnv(t *testing.T, server *httptest.Server) {
 	t.Helper()
+	restoreAllSilenceUsage(t)
 	clearHubContextEnv(t)
 	t.Setenv("HOME", t.TempDir())
 	t.Chdir(t.TempDir())
@@ -3668,6 +3667,39 @@ func TestSendGroupMessageViaHub_SkippedMentionPrintsBeforeSummary(t *testing.T) 
 	require.Contains(t, out, note)
 	assert.NotContains(t, out, "Warning: @not-an-agent", "a skipped mention must not read as a failure")
 	assert.Equal(t, "Group delivery complete: 2/2 delivered.", lastLine(out))
+}
+
+// TestSendGroupMessageViaHub_SkippedMentionPrintsBeforePartialSummary covers
+// the group path when only some recipients receive the message: the mention
+// note still prints before the "Group delivery incomplete" summary and its
+// per-outcome recipient lists, and the skipped mention leaves the partial
+// exit code and error unchanged.
+func TestSendGroupMessageViaHub_SkippedMentionPrintsBeforePartialSummary(t *testing.T) {
+	groupTestState(t, "")
+	h := newGroupFakeHub(t, map[string]groupOutcome{
+		"agent-a": ok(),
+		"agent-b": hubErr(http.StatusInternalServerError),
+	})
+	h.listAgents = []string{"agent-a", "agent-b"}
+
+	var sendErr error
+	out := captureCombinedOutput(t, func() {
+		sendErr = sendGroupMessageViaHub(h.hubCtx(t), agentRecipients("agent-a", "agent-b"), "hey @not-an-agent", false)
+	})
+
+	require.Error(t, sendErr)
+	assert.Equal(t, exitCodeGroupPartial, exitCodeFor(sendErr), "a skipped mention must not change the partial exit code")
+	assert.Contains(t, sendErr.Error(), "group delivery partially failed: 1 delivered, 0 deferred, 1 failed (of 2 total)")
+	assert.NotContains(t, sendErr.Error(), "not-an-agent", "a skipped mention must not be reported as a send failure")
+
+	note := "Note: @not-an-agent is not an agent in this project; no agent was notified."
+	summary := "Group delivery incomplete: 1 delivered, 0 deferred, 1 failed (of 2 total)."
+	noteIdx := strings.Index(out, note)
+	summaryIdx := strings.Index(out, summary)
+	require.GreaterOrEqual(t, noteIdx, 0, "missing mention note; got:\n%s", out)
+	require.GreaterOrEqual(t, summaryIdx, 0, "missing partial summary; got:\n%s", out)
+	assert.Less(t, noteIdx, summaryIdx, "the mention note must print before the group summary; got:\n%s", out)
+	assert.Greater(t, strings.Index(out, "Delivered (1): agent:agent-a"), noteIdx, "per-outcome lists belong to the summary, after the note; got:\n%s", out)
 }
 
 // TestSendCrossProjectMessage_MentionPrintsBeforeConfirmation covers the

@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -91,8 +92,11 @@ func TestHandleHealthSummary_ResponseShape(t *testing.T) {
 	// Verify dispatch is nil (no dispatch metrics available yet)
 	assert.Nil(t, resp.Dispatch)
 
-	// Verify stall config has defaults
-	assert.Equal(t, 300, resp.Stall.ThresholdSeconds, "default stalled threshold should be 5 minutes (300s)")
+	// Stall settings are configuration, not health: they are edited on the
+	// Server Config page and are not part of the health summary.
+	var raw map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &raw))
+	assert.NotContains(t, raw, "stall_config", "health summary must not carry stall settings")
 }
 
 func TestHandleHealthSummary_AgentAggregation(t *testing.T) {
@@ -301,4 +305,147 @@ func TestHandleHealthSummary_ViaRouter(t *testing.T) {
 	// Without auth, the auth middleware may return 401 or the handler returns 403
 	assert.True(t, rr.Code == http.StatusForbidden || rr.Code == http.StatusUnauthorized,
 		"unauthenticated request should be rejected, got %d", rr.Code)
+}
+
+// TestHandleHealthSummary_SurfacesNonHealthyChecks: a degraded hub must carry
+// its cause in the summary, not only the database check (ptone/scion#1094).
+func TestHandleHealthSummary_SurfacesNonHealthyChecks(t *testing.T) {
+	srv, _ := testServer(t)
+	srv.ExpectEmbeddedBroker()
+	srv.EmbeddedBrokerRegistrationFailed(errors.New("boom"))
+
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/admin/health/summary", nil)
+	require.Equal(t, http.StatusOK, rr.Code)
+
+	var resp HealthSummaryResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	assert.Equal(t, "degraded", resp.Status)
+	assert.Equal(t, "degraded", resp.Hub.Status)
+	assert.Equal(t, "healthy", resp.Database.Status, "database itself is fine; the cause is elsewhere")
+	assert.Equal(t, "unhealthy: registration failed", resp.Hub.Checks["colocated_broker"])
+	assert.Equal(t, []string{"colocated_broker: unhealthy: registration failed"}, resp.Hub.UnhealthyChecks)
+}
+
+// TestHandleHealthSummary_HealthyHasNoUnhealthyChecks: the cause list is
+// omitted when everything is healthy.
+func TestHandleHealthSummary_HealthyHasNoUnhealthyChecks(t *testing.T) {
+	srv, _ := testServer(t)
+
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/admin/health/summary", nil)
+	require.Equal(t, http.StatusOK, rr.Code)
+
+	var resp HealthSummaryResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	assert.Equal(t, "healthy", resp.Status)
+	assert.Empty(t, resp.Hub.UnhealthyChecks)
+	assert.Equal(t, "healthy", resp.Hub.Checks["database"])
+}
+
+// TestHandleHealthSummary_UnhealthyNotDowngraded: degrading signals (stalled
+// agents, offline brokers, aggregation errors) only raise severity, so an
+// unhealthy hub stays unhealthy in the summary.
+func TestHandleHealthSummary_UnhealthyNotDowngraded(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+		ID:     tid("summary-offline-broker"),
+		Name:   "offline-broker",
+		Slug:   "offline-broker",
+		Status: store.BrokerStatusOffline,
+	}))
+	srv.store = pingFailStore{srv.store}
+
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/admin/health/summary", nil)
+	require.Equal(t, http.StatusOK, rr.Code)
+
+	var resp HealthSummaryResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	assert.Equal(t, "unhealthy", resp.Status)
+	assert.Equal(t, "unhealthy", resp.Database.Status)
+	assert.Contains(t, resp.Hub.UnhealthyChecks, "database: unhealthy")
+}
+
+// Chat plugin broker records are always marked online; the connected broker
+// count in /healthz and the health summary must only count runtime brokers.
+func TestHealthStats_ConnectedBrokersExcludesPlugins(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+		ID:            tid("count-runtime-broker"),
+		Name:          "Runtime Broker",
+		Slug:          "runtime-broker",
+		Status:        store.BrokerStatusOnline,
+		LastHeartbeat: time.Now(),
+	}))
+	require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+		ID:            tid("count-plugin-broker"),
+		Name:          "plugin-broker-telegram",
+		Slug:          "plugin-broker-telegram",
+		Status:        store.BrokerStatusOnline,
+		Labels:        map[string]string{"scion.io/plugin": "telegram"},
+		LastHeartbeat: time.Now(),
+	}))
+
+	rr := doRequest(t, srv, http.MethodGet, "/healthz", nil)
+	require.Equal(t, http.StatusOK, rr.Code)
+	var health HealthResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &health))
+	require.NotNil(t, health.Stats)
+	assert.Equal(t, 1, health.Stats.ConnectedBrokers, "/healthz stats")
+
+	rr = doRequest(t, srv, http.MethodGet, "/api/v1/admin/health/summary", nil)
+	require.Equal(t, http.StatusOK, rr.Code)
+	var summary HealthSummaryResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &summary))
+	assert.Equal(t, 1, summary.Hub.ConnectedBrokers, "health summary")
+}
+
+// pageCountingStore counts ListRuntimeBrokers calls so a test can confirm
+// that a listing spanned more than one page.
+type pageCountingStore struct {
+	store.Store
+	calls int
+}
+
+func (p *pageCountingStore) ListRuntimeBrokers(ctx context.Context, filter store.RuntimeBrokerFilter, opts store.ListOptions) (*store.ListResult[store.RuntimeBroker], error) {
+	p.calls++
+	return p.Store.ListRuntimeBrokers(ctx, filter, opts)
+}
+
+// The connected broker count must follow the cursor across pages and still
+// skip plugin records.
+func TestHealthStats_ConnectedBrokersMultiPage(t *testing.T) {
+	orig := connectedBrokerPageSize
+	connectedBrokerPageSize = 1
+	t.Cleanup(func() { connectedBrokerPageSize = orig })
+
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	for _, name := range []string{"page-broker-a", "page-broker-b"} {
+		require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+			ID:            tid(name),
+			Name:          name,
+			Slug:          name,
+			Status:        store.BrokerStatusOnline,
+			LastHeartbeat: time.Now(),
+		}))
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+		ID:            tid("page-plugin-broker"),
+		Name:          "plugin-broker-discord",
+		Slug:          "plugin-broker-discord",
+		Status:        store.BrokerStatusOnline,
+		Labels:        map[string]string{"scion.io/plugin": "discord"},
+		LastHeartbeat: time.Now(),
+	}))
+
+	counting := &pageCountingStore{Store: srv.store}
+	srv.store = counting
+
+	count, err := srv.countOnlineRuntimeBrokers(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 2, count)
+	assert.Greater(t, counting.calls, 1, "count should span more than one page")
 }

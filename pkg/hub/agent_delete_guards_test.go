@@ -404,7 +404,7 @@ func TestDeleteGate_DMWake(t *testing.T) {
 
 			result, dmErr := srv.ExecuteAgentDM(context.Background(), &AgentDMInput{
 				SenderAgent:    sender,
-				SenderIdentity: &wakeDMTestIdentity{id: sender.ID, projectID: sender.ProjectID, ancestry: sender.Ancestry},
+				SenderIdentity: wakeDMSenderIdentity(sender, ScopeProjectRead, ScopeAgentLifecycle),
 				TargetAgent:    fresh,
 				Msg:            "hello",
 				Type:           "instruction",
@@ -561,7 +561,7 @@ func (d *dispatchErrStore) HasOutstandingBrokerDispatch(context.Context, string,
 }
 
 // AgentStatusEvent always carries the deletion key: populated during a
-// delete, explicit null otherwise.
+// delete (the generic view), explicit null otherwise.
 func TestAgentStatusEvent_Deletion(t *testing.T) {
 	pub := NewChannelEventPublisher()
 	defer pub.Close()
@@ -586,7 +586,9 @@ func TestAgentStatusEvent_Deletion(t *testing.T) {
 				d, isMap := v.(map[string]interface{})
 				require.True(t, isMap)
 				assert.Equal(t, "deleting", d["state"])
-				assert.Equal(t, float64(2), d["claim"])
+				// The event carries the generic view for every
+				// subscriber: no claim (ptone/scion#3122).
+				assert.NotContains(t, d, "claim")
 			} else {
 				assert.Nil(t, v)
 			}
@@ -673,9 +675,12 @@ func (d *raceClaimDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 	return nil
 }
 
-// Review N4 (and N1 over HTTP): a start that loses the race to a delete
-// claim publishes and returns the stored row (the phase the claim found, deletion
-// populated), not the requested phase with deletion:null.
+// A start whose dispatch succeeds while a delete claims the row answers 409
+// delete_in_progress with no agent body (ptone/scion#3255), not 200 with
+// the stored row: the delete won after the start landed. Nothing is written
+// or published after the dispatch: the claim keeps the phase the start found
+// and its marker. The dispatcher is a mock, so no compensating delete or
+// warning is involved (lifecycle_landed_delete_test.go covers those).
 func TestDeleteGate_StartLosesRaceToDeleteClaim(t *testing.T) {
 	for i, initial := range []*deleteSeed{
 		nil,
@@ -697,31 +702,24 @@ func TestDeleteGate_StartLosesRaceToDeleteClaim(t *testing.T) {
 			}
 
 			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/start", nil)
-			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			requireIntentDeleteInProgress(t, rec, agent.ID)
 			require.Equal(t, 1, disp.starts)
+			var raw map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &raw))
+			assert.NotContains(t, raw, "id", "no agent body")
+			assert.NotContains(t, raw, "agent", "no agent body")
+
+			for _, a := range pub.publishedAgents() {
+				assert.NotEqual(t, string(state.PhaseRunning), a.Phase, "the start publishes no running status")
+				assert.NotEqual(t, store.DeletionStateDeleting, a.DeletionState, "no status publish after the claim")
+			}
 
 			// The start marked the stopped agent starting before it
-			// dispatched (beginStartDispatch, ptone/scion#2014), so that is
-			// the phase the racing claim keeps; the start's running write
-			// is dropped.
-			stored := string(state.PhaseStarting)
-
-			var body map[string]interface{}
-			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
-			assert.Equal(t, stored, body["phase"], "response carries the stored phase")
-			d, ok := body["deletion"].(map[string]interface{})
-			require.True(t, ok, "response carries the racing delete: %s", rec.Body.String())
-			assert.Equal(t, store.DeletionStateDeleting, d["state"])
-
-			published := pub.publishedAgents()
-			require.NotEmpty(t, published)
-			last := published[len(published)-1]
-			assert.Equal(t, stored, last.Phase, "event carries the stored phase")
-			require.NotNil(t, store.ComputeAgentDeletion(last, time.Now()))
-
+			// dispatched (beginStartDispatch, ptone/scion#2014); the claim
+			// keeps that phase, and the start writes nothing after it.
 			got, err := s.GetAgent(context.Background(), agent.ID)
 			require.NoError(t, err)
-			assert.Equal(t, stored, got.Phase)
+			assert.Equal(t, string(state.PhaseStarting), got.Phase)
 			assert.Equal(t, store.DeletionStateDeleting, got.DeletionState, "the racing claim's marker is kept")
 		})
 	}

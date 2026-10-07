@@ -102,6 +102,7 @@ import { terminalHref } from '../../client/open-terminal.js';
 import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
 import { formatNumber } from '../../utils/format-number.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
+import { navigateTo } from '../../client/navigation.js';
 
 /** A request/refresh trigger; every one funnels into `loadAgentsForView`, which asks the window's planner for the one request it needs. */
 type AgentsViewTrigger = AgentListTrigger;
@@ -518,21 +519,41 @@ export class ScionPageProjectDetail extends LitElement {
 
     .header-title {
       display: flex;
-      align-items: center;
+      align-items: flex-start;
       gap: 0.75rem;
       margin-bottom: 0.5rem;
     }
 
-    .header-title sl-icon {
+    .header-title > sl-icon {
+      flex-shrink: 0;
       color: var(--scion-primary, #3b82f6);
       font-size: 1.5rem;
+      /* Centre the icon on the first line of the name: (1.95rem h1 line box
+         - 1.5rem icon) / 2. */
+      margin-top: 0.225rem;
+    }
+    /* A long name wraps on its own line; the badges then follow on the next
+       line instead of floating beside a multi-line name. */
+    .header-title-text {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.5rem 0.75rem;
+      min-width: 0;
     }
 
     .header h1 {
       font-size: 1.5rem;
       font-weight: 700;
+      line-height: 1.3;
       color: var(--scion-text, #1e293b);
       margin: 0;
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+    /* The linked-project icon inside the title keeps the primary colour. */
+    .header h1 sl-icon {
+      color: var(--scion-primary, #3b82f6);
     }
 
     .header-path {
@@ -693,7 +714,7 @@ export class ScionPageProjectDetail extends LitElement {
        flex item's min-width:auto holds the header open at the full name. */
     .agent-header > div {
       /* Full-width basis so the badge always wraps to its own row. A wide
-         status label like "Waiting_for_input" would otherwise crush the name
+         status label like "waiting on parent" would otherwise crush the name
          to a few characters, the same failure the agents grid had — it is the
          badge's width that matters, not how many there are. */
       flex: 1 1 100%;
@@ -1999,8 +2020,9 @@ export class ScionPageProjectDetail extends LitElement {
     ></sl-tooltip>`;
   }
 
-  private formatDate(dateString: string): string {
-    return formatInstantWithZone(dateString) || dateString;
+  /** Formats a timestamp for the header stats; "—" when missing or invalid. */
+  private formatDate(dateString: string | undefined): string {
+    return (dateString && formatInstantWithZone(dateString)) || '—';
   }
 
   private getTabDataSource(tabName: string): FileBrowserDataSource {
@@ -2453,8 +2475,7 @@ export class ScionPageProjectDetail extends LitElement {
       this.cloneDialogOpen = false;
 
       // Navigate to the newly cloned project
-      window.history.pushState({}, '', `/projects/${cloned.id}`);
-      window.dispatchEvent(new PopStateEvent('popstate'));
+      navigateTo(`/projects/${cloned.id}`);
     } catch (err) {
       this.cloneError = err instanceof Error ? err.message : 'Failed to clone project';
     } finally {
@@ -2488,8 +2509,7 @@ export class ScionPageProjectDetail extends LitElement {
       }
       this.templateDialogOpen = false;
       // Navigate to hub resources templates tab
-      window.history.pushState({}, '', '/settings?tab=project-templates');
-      window.dispatchEvent(new PopStateEvent('popstate'));
+      navigateTo('/settings?tab=project-templates');
     } catch (err) {
       this.templateError = err instanceof Error ? err.message : 'Failed to create template';
     } finally {
@@ -2612,7 +2632,9 @@ export class ScionPageProjectDetail extends LitElement {
         <div class="header-info">
           <div class="header-title">
             ${this.renderProjectIcon()}
-            <h1>${this.project.name}${this.renderLinkedBadge()}</h1>
+            <div class="header-title-text">
+              <h1>${this.project.name}${this.renderLinkedBadge()}</h1>
+            </div>
           </div>
           <div class="header-path">
             <scion-git-remote-display .project=${this.project}></scion-git-remote-display>
@@ -2702,13 +2724,13 @@ export class ScionPageProjectDetail extends LitElement {
         <div class="stat">
           <span class="stat-label">Created</span>
           <span class="stat-value" style="font-size: 1rem; font-weight: 500;">
-            ${this.formatDate(this.project.createdAt)}
+            ${this.formatDate(this.project.created || this.project.createdAt)}
           </span>
         </div>
         <div class="stat">
           <span class="stat-label">Updated</span>
           <span class="stat-value" style="font-size: 1rem; font-weight: 500;">
-            ${this.formatDate(this.project.updatedAt)}
+            ${this.formatDate(this.project.updated || this.project.updatedAt)}
           </span>
         </div>
       </div>

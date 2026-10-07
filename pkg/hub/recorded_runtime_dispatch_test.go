@@ -167,7 +167,7 @@ func (s *capturingSigner) Sign(_ context.Context, req *http.Request, _ string) e
 func TestRecordedRuntime_ControlChannelSendsSignedParam(t *testing.T) {
 	calls := map[string]func(ctx context.Context, c *ControlChannelBrokerClient){
 		"stop": func(ctx context.Context, c *ControlChannelBrokerClient) {
-			_ = c.StopAgent(ctx, "b", "", "w", "p")
+			_ = c.StopAgent(ctx, "b", "", "w", "p", "")
 		},
 		"restart": func(ctx context.Context, c *ControlChannelBrokerClient) {
 			_, _ = c.RestartAgent(ctx, "b", "", "w", "p", nil, StartExtras{})
@@ -244,7 +244,7 @@ func TestRecordedRuntime_ControlChannelKeepsRetryAfter(t *testing.T) {
 	}
 	c := &ControlChannelBrokerClient{manager: tunnel}
 
-	err := c.StopAgent(context.Background(), "b", "", "w", "p")
+	err := c.StopAgent(context.Background(), "b", "", "w", "p", "")
 
 	var se *brokerStatusError
 	require.True(t, errors.As(err, &se), "error %v is not a brokerStatusError", err)
@@ -431,7 +431,7 @@ func TestRecordedRuntime_DeleteRuntimeUnavailableRollsBack(t *testing.T) {
 
 	// A joiner of that delete answers the same 503 and Retry-After.
 	joined := httptest.NewRecorder()
-	require.True(t, srv.resolveJoinFromRow(joined, ctx, agent.ID, got.DeletionClaim))
+	require.True(t, srv.resolveJoinFromRow(joined, ctx, agent.ID, got.DeletionClaim, true))
 	require.Equal(t, http.StatusServiceUnavailable, joined.Code, joined.Body.String())
 	require.Equal(t, "7", joined.Header().Get("Retry-After"))
 	require.Contains(t, joined.Body.String(), brokerCodeRuntimeUnavailable)
@@ -444,7 +444,7 @@ func TestRecordedRuntime_DeleteRuntimeUnavailableRollsBack(t *testing.T) {
 	// remembered value and sends the default.
 	deletionRetryAfter.Delete(agent.ID)
 	joined = httptest.NewRecorder()
-	require.True(t, srv.resolveJoinFromRow(joined, ctx, agent.ID, got.DeletionClaim))
+	require.True(t, srv.resolveJoinFromRow(joined, ctx, agent.ID, got.DeletionClaim, true))
 	require.Equal(t, http.StatusServiceUnavailable, joined.Code, joined.Body.String())
 	require.Equal(t, defaultBrokerRuntimeRetryAfter, joined.Header().Get("Retry-After"))
 

@@ -172,8 +172,12 @@ export interface Project {
   ownerId?: string;
   ownerName?: string;
   agentCount: number;
-  createdAt: string;
-  updatedAt: string;
+  /** Creation and last-update times, as the hub sends them. */
+  created?: string;
+  updated?: string;
+  /** Older names for created / updated; read as a fallback. */
+  createdAt?: string;
+  updatedAt?: string;
   _capabilities?: Capabilities;
   sharedDirs?: SharedDir[];
   githubInstallationId?: number | undefined;
@@ -674,13 +678,17 @@ export type DeletionCode =
  * The hub's computed delete view for an agent (Go `store.DeletionInfo`).
  * While `deleting`, the engine renews `leaseExpiresAt` about every 20s; a
  * view whose lease passes without renewal reads as `failed`/`abandoned`.
+ *
+ * `code`, `error` and `claim` are sent to platform admins only
+ * (ptone/scion#3122). Every other caller, and every SSE delta, gets the
+ * generic view without them: same state, stage and timestamps.
  */
 export interface DeletionInfo {
   state: DeletionState;
   code?: DeletionCode;
   error?: string;
   soft: boolean;
-  claim: number;
+  claim?: number;
   startedAt: string;
   /** Set while `deleting`. */
   leaseExpiresAt?: string;
@@ -730,8 +738,12 @@ export interface Template {
   contentHash?: string;
   files?: TemplateFileInfo[];
   config?: TemplateConfig;
-  createdAt: string;
-  updatedAt: string;
+  /** Creation and last-update times, as the hub sends them. */
+  created?: string;
+  updated?: string;
+  /** Older names for created / updated; kept optional for compatibility. */
+  createdAt?: string;
+  updatedAt?: string;
   _capabilities?: Capabilities;
 }
 
@@ -878,8 +890,12 @@ export interface RuntimeBroker {
   labels?: Record<string, string>;
   createdBy?: string;
   createdByName?: string;
-  createdAt: string;
-  updatedAt: string;
+  /** Creation and last-update times, as the hub sends them. */
+  created?: string;
+  updated?: string;
+  /** Older names for created / updated; read as a fallback. */
+  createdAt?: string;
+  updatedAt?: string;
   _capabilities?: Capabilities;
   /**
    * The broker's effective max_agents_per_broker ceiling (ptone/scion#2061

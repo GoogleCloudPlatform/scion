@@ -60,6 +60,22 @@ func resetDetectLocalRuntimeCache() {
 // 4. External project config settings (for git projects with split storage)
 // 5. Environment variables (SCION_ prefix, top-level only)
 func LoadSettingsKoanf(projectPath string) (*Settings, error) {
+	return loadSettingsKoanf(projectPath, false)
+}
+
+// LoadSettingsIgnoringEnvProjectID is LoadSettingsKoanf without the
+// SCION_PROJECT_ID / SCION_HUB_PROJECT_ID environment overlay on project_id.
+// All other environment variables still apply.
+//
+// It is for callers that resolve an explicitly named project (the --project
+// or --global flag): the project ID must come from that project's own
+// settings, not from the environment of the agent container the CLI runs
+// in (ptone/scion#3123).
+func LoadSettingsIgnoringEnvProjectID(projectPath string) (*Settings, error) {
+	return loadSettingsKoanf(projectPath, true)
+}
+
+func loadSettingsKoanf(projectPath string, ignoreEnvProjectID bool) (*Settings, error) {
 	k := koanf.New(".")
 
 	// 1. Load embedded defaults (YAML with fallback to JSON)
@@ -147,14 +163,16 @@ func LoadSettingsKoanf(projectPath string) (*Settings, error) {
 	//       SCION_HUB_BROKER_TOKEN -> hub.brokerToken
 	_ = k.Load(env.Provider("SCION_", ".", func(s string) string {
 		if mapped, ok := projectkeys.EnvProjectIDConfigKey(s, true); ok {
+			if ignoreEnvProjectID {
+				return ""
+			}
 			return mapped
 		}
 		if isSettingsExcludedEnv(s) {
-			// SCION_AUTO_EXPOSE_PORTS and SCION_AUTO_EXPOSE_PORTS_LIST are
-			// sciontool-only (see settings_v1.go's versionedEnvKeyMapper,
-			// which drops them for the same reason). The legacy Settings
-			// struct has no colliding field today, but dropping them here
-			// too keeps both mappers' exclusions in sync.
+			// See settingsExcludedEnvVars for every excluded name and the
+			// reason. Dropping them here too keeps this legacy mapper in
+			// sync with settings_v1.go's versionedEnvKeyMapper (a bare
+			// SCION_HUB, for one, collides with Settings.Hub).
 			return ""
 		}
 		if isRemovedLegacyEnv(s) {

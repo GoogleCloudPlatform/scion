@@ -584,11 +584,12 @@ func (f *legacyFixture) assignBody(slug string) map[string]interface{} {
 	}
 }
 
-// assertSAGateDenied asserts the SA gate's generic 403.
-func assertSAGateDenied(t *testing.T, rec *httptest.ResponseRecorder) {
+// assertSAGateUnrecordedDenied asserts the SA gate's 403 for a delegation
+// chain with an unrecorded hop.
+func assertSAGateUnrecordedDenied(t *testing.T, rec *httptest.ResponseRecorder) {
 	t.Helper()
 	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-	assert.Equal(t, saAssignGenericForbiddenMsg, decodeTargetAPIError(t, rec).Message)
+	assert.Equal(t, scaUnrecordedDenyMsg, decodeTargetAPIError(t, rec).Message)
 }
 
 // agentIdentityFor returns the request identity for a production token.
@@ -600,7 +601,7 @@ func (f *chainFixture) agentIdentityFor(t *testing.T, token string) *agentIdenti
 }
 
 // assertGateUnrecorded asserts that the SA gate denies the token's agent at
-// surface with the generic SA-assign message, and that the gate's
+// surface with the unrecorded-provenance message, and that the gate's
 // CheckAccess denies with ceiling_unrecorded.
 func (f *legacyFixture) assertGateUnrecorded(t *testing.T, token, surface string) {
 	t.Helper()
@@ -611,7 +612,7 @@ func (f *legacyFixture) assertGateUnrecorded(t *testing.T, token, surface string
 	rec := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodPatch, "/api/v1/agents/"+identity.ID(), nil).WithContext(ctx)
 	require.False(t, f.srv.authorizeSAAssignment(rec, r, f.sa, surface))
-	assertSAGateDenied(t, rec)
+	assertSAGateUnrecordedDenied(t, rec)
 }
 
 // An agent whose only edge is unrecorded: a create that takes the project
@@ -622,7 +623,7 @@ func TestLegacyAgentChildWithDefaultSADenied(t *testing.T) {
 	f.setProjectAnnotation(t, projectSettingDefaultGCPIdentitySAID, f.sa.ID)
 	token := f.agentToken(t, f.legacy.ID)
 	writesBefore := countCreateWrites(t, f.store, f.proj.ID)
-	assertSAGateDenied(t, f.createAsParent(t, token, CreateAgentRequest{Name: "legacy-dsa-c"}))
+	assertSAGateUnrecordedDenied(t, f.createAsParent(t, token, CreateAgentRequest{Name: "legacy-dsa-c"}))
 	assertAgentCreateWroteNothing(t, f.store, f.proj.ID, "legacy-dsa-c", f.legacy.ID, 0, writesBefore)
 	f.assertGateUnrecorded(t, token, SurfaceAgentCreate)
 }
@@ -633,7 +634,7 @@ func TestLegacyAgentChildWithExplicitSADenied(t *testing.T) {
 	f := newLegacyFixture(t, "legacy-esa")
 	token := f.agentToken(t, f.legacy.ID)
 	writesBefore := countCreateWrites(t, f.store, f.proj.ID)
-	assertSAGateDenied(t, f.createAsParent(t, token, f.assignBody("legacy-esa-c")))
+	assertSAGateUnrecordedDenied(t, f.createAsParent(t, token, f.assignBody("legacy-esa-c")))
 	assertAgentCreateWroteNothing(t, f.store, f.proj.ID, "legacy-esa-c", f.legacy.ID, 0, writesBefore)
 	f.assertGateUnrecorded(t, token, SurfaceAgentCreate)
 }
@@ -664,7 +665,7 @@ func TestLegacyParentDescendantInheritsUnrecordedDenial(t *testing.T) {
 	token := f.agentToken(t, child.ID)
 
 	writesBefore := countCreateWrites(t, f.store, f.proj.ID)
-	assertSAGateDenied(t, f.createAsParent(t, token, f.assignBody("legacy-desc-esa")))
+	assertSAGateUnrecordedDenied(t, f.createAsParent(t, token, f.assignBody("legacy-desc-esa")))
 	assertAgentCreateWroteNothing(t, f.store, f.proj.ID, "legacy-desc-esa", child.ID, 0, writesBefore)
 
 	grand, _ := f.createdAgent(t, f.createAsParent(t, token, CreateAgentRequest{Name: "legacy-desc-gc"}), "legacy-desc-gc")
@@ -676,7 +677,7 @@ func TestLegacyParentDescendantInheritsUnrecordedDenial(t *testing.T) {
 	f.setProjectAnnotation(t, projectSettingDefaultGCPIdentityMode, store.GCPMetadataModeAssign)
 	f.setProjectAnnotation(t, projectSettingDefaultGCPIdentitySAID, f.sa.ID)
 	writesBefore = countCreateWrites(t, f.store, f.proj.ID)
-	assertSAGateDenied(t, f.createAsParent(t, token, CreateAgentRequest{Name: "legacy-desc-dsa"}))
+	assertSAGateUnrecordedDenied(t, f.createAsParent(t, token, CreateAgentRequest{Name: "legacy-desc-dsa"}))
 	assertAgentCreateWroteNothing(t, f.store, f.proj.ID, "legacy-desc-dsa", child.ID, 1, writesBefore)
 	f.assertGateUnrecorded(t, token, SurfaceAgentCreate)
 }
@@ -762,4 +763,43 @@ func TestLegacyAgentCreatedChildLaunchOmitsSecrets(t *testing.T) {
 
 	child, _ := f.childOf(t, f.legacy, "legacy-launch-c")
 	assert.False(t, launched(child), "an unrecorded chain launches without it")
+}
+
+// The remedy the unrecorded-provenance message names: a user recreates the
+// denied agent directly, and the replacement passes the SA gate's chain
+// check. Both denied shapes are covered: the agent whose own edge is
+// unrecorded, and a child of it whose unrecorded link is an ancestor. Agents
+// created from a replacement pass as well.
+func TestLegacyAgentRecreatedByUserClearsUnrecordedDenial(t *testing.T) {
+	f := newLegacyFixture(t, "legacy-fix")
+	ctx := t.Context()
+
+	legacyChild, _ := f.childOf(t, f.legacy, "legacy-fix-lc")
+	denied := []*store.Agent{f.legacy, legacyChild}
+	for _, a := range denied {
+		f.assertGateUnrecorded(t, f.agentToken(t, a.ID), SurfaceAgentCreate)
+	}
+
+	assertAssignAllowed := func(a *store.Agent) {
+		t.Helper()
+		identity := f.agentIdentityFor(t, f.agentToken(t, a.ID))
+		d := f.srv.authzService.CheckAccess(contextWithIdentity(ctx, identity), identity, gcpServiceAccountResource(f.sa), ActionAssign)
+		assert.NotEqual(t, DenyCauseCeilingUnrecorded, d.DenyCause, "agent %s: reason %q", a.Name, d.Reason)
+		assert.True(t, d.Allowed, "agent %s: reason %q", a.Name, d.Reason)
+	}
+
+	for _, old := range denied {
+		require.NoError(t, f.store.DeleteAgent(ctx, old.ID))
+		replacement, edge := f.createdAgent(t, f.create(t, authUser(f.owner), CreateAgentRequest{Name: old.Name}), old.Name)
+		require.NotEqual(t, old.ID, replacement.ID, "%s is a new agent", old.Name)
+		require.Equal(t, store.DelegationPrincipalUser, edge.DelegatorType, "%s is created by a user", old.Name)
+		require.Equal(t, f.owner.ID, edge.DelegatorID)
+		require.NotZero(t, edge.ProvenanceVersion, "a user create records provenance")
+		assertAssignAllowed(replacement)
+
+		child, childEdge := f.childOf(t, replacement, old.Name+"-c")
+		require.Equal(t, replacement.ID, childEdge.DelegatorID)
+		require.NotZero(t, childEdge.ProvenanceVersion, "an agent create records provenance")
+		assertAssignAllowed(child)
+	}
 }

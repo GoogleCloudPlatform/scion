@@ -44,6 +44,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
@@ -282,6 +283,11 @@ type ServerConfig struct {
 	// Used by the metrics dashboard to query Cloud Monitoring.
 	// Falls back to GCPProjectID if empty.
 	TelemetryProjectID string
+	// DisableCloudLogQuery skips building the Cloud Logging query service
+	// even when a GCP project ID is found in the environment
+	// (logging.ResolveProjectID). Tests set it so that constructing a server
+	// never creates real Cloud Logging clients from ambient env.
+	DisableCloudLogQuery bool
 	// GCPMintCapPerProject is the maximum number of minted service accounts allowed per project.
 	// Zero means unlimited (default).
 	GCPMintCapPerProject int
@@ -584,6 +590,9 @@ type WorkspaceDispatchSpec struct {
 	// "worktree-per-agent"), the same value create sends as
 	// RemoteCreateAgentRequest.WorkspaceMode.
 	WorkspaceMode string
+	// SharedWorkspaceClone is a shared-plain git project's workspace clone
+	// settings (RemoteAgentConfig.SharedWorkspaceClone); nil otherwise.
+	SharedWorkspaceClone *api.GitCloneConfig
 }
 
 // StartExtras carries the dispatch-time metadata that the create path already
@@ -612,6 +621,17 @@ type StartExtras struct {
 	// HubAgentDefaults carries the hub defaults a start applies at the
 	// broker's lowest tier (see startHubAgentDefaults). Nil = none.
 	HubAgentDefaults *RemoteHubAgentDefaults
+	// Image is the user's explicit image (explicitDispatchImage), already
+	// registry-rewritten; empty when the user chose none. The broker applies
+	// it as the top-tier image (opts.Image), the same as create's
+	// Config.Image, so a start or restart ranks the image exactly as the
+	// create did (ptone/scion#1799). A template-derived image is never sent.
+	Image string
+	// SharedWorkspace is set on a restart (the start request already
+	// carries it as its own field) so the broker reads and writes a
+	// shared-workspace agent's state under the same broker-side agents root
+	// as its start (ptone/scion#1799).
+	SharedWorkspace bool
 	// TemplateName is the agent's template slug. The broker uses it for
 	// naming only (the scion.template label, SCION_TEMPLATE_NAME and
 	// agent-info.json), never to locate or load a template. A content hash
@@ -646,11 +666,20 @@ func applyStartExtras(payload map[string]interface{}, extras StartExtras) {
 	if extras.Workspace.WorkspaceMode != "" {
 		payload["workspaceMode"] = extras.Workspace.WorkspaceMode
 	}
+	if extras.Workspace.SharedWorkspaceClone != nil {
+		payload["sharedWorkspaceClone"] = extras.Workspace.SharedWorkspaceClone
+	}
 	if extras.RunID != "" {
 		payload["runId"] = extras.RunID
 	}
 	if extras.HubAgentDefaults != nil {
 		payload["hubAgentDefaults"] = extras.HubAgentDefaults
+	}
+	if extras.Image != "" {
+		payload["image"] = extras.Image
+	}
+	if extras.SharedWorkspace {
+		payload["sharedWorkspace"] = true
 	}
 	if extras.TemplateName != "" && !transfer.IsContentHash(extras.TemplateName) {
 		payload["templateName"] = extras.TemplateName
@@ -683,7 +712,13 @@ type RuntimeBrokerClient interface {
 	// StopAgent stops an agent on a remote runtime broker.
 	// brokerID is used for HMAC authentication lookup.
 	// projectID scopes the lookup to a specific project (required for uniqueness).
-	StopAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string) error
+	// runID, when non-empty, names the run the stop is for
+	// (ptone/scion#2550): the broker then stops only that run's entry and
+	// answers a run_mismatch 404 (api.BrokerErrorCodeRunMismatch) when
+	// another run holds the name; only that 404 is returned as
+	// ErrStopRunNotFound, and any other 404 as a plain broker error. An
+	// empty runID keeps the legacy name-scoped stop.
+	StopAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, runID string) error
 
 	// RestartAgent restarts an agent on a remote runtime broker.
 	// brokerID is used for HMAC authentication lookup.
@@ -744,13 +779,20 @@ type RuntimeBrokerClient interface {
 // marking. RunID, when non-empty, is sent as runId: the broker then deletes
 // only the runtime entry labelled with that run and answers 404 (an
 // idempotent success) when only a different run holds the name
-// (ptone/scion#2550).
+// (ptone/scion#2550). NotAfter, when non-zero, is sent as notAfter: the
+// broker refuses the delete with 409 stale_dispatch, doing nothing, if it
+// arrives after that instant (ptone/scion#2906, see agent_delete_fence.go).
 type DeleteAgentOptions struct {
 	DeleteFiles  bool
 	RemoveBranch bool
 	SoftDelete   bool
 	DeletedAt    time.Time
 	RunID        string
+	NotAfter     time.Time
+	// LocalOnly removes only the broker's own state for the agent, never
+	// its files on the NFS export or its branch (runtimebroker deleteAgent,
+	// ?localOnly). Send it only to a broker advertising AgentMove.
+	LocalOnly bool
 }
 
 // deleteAgentQuery renders opts (and the context's linked-project path) as
@@ -765,13 +807,165 @@ func deleteAgentQuery(ctx context.Context, projectID string, opts DeleteAgentOpt
 	if opts.RunID != "" {
 		query += "&runId=" + url.QueryEscape(opts.RunID)
 	}
+	if !opts.NotAfter.IsZero() {
+		query += "&notAfter=" + url.QueryEscape(opts.NotAfter.UTC().Format(time.RFC3339))
+	}
 	if opts.SoftDelete {
 		query += fmt.Sprintf("&softDelete=true&deletedAt=%s", url.QueryEscape(opts.DeletedAt.UTC().Format(time.RFC3339)))
+	}
+	if opts.LocalOnly {
+		query += "&localOnly=true"
 	}
 	// The recorded runtime (GoogleCloudPlatform/scion#2423) rides on ctx, as
 	// for every other existing-agent operation, so both transports send it
 	// beside runId.
 	return withRecordedRuntimeQuery(ctx, query)
+}
+
+// stopAgentQuery builds the query string for a broker stop request. runId,
+// when set, names the run the stop is for (ptone/scion#2550); an old broker
+// ignores it and stops by name as before.
+func stopAgentQuery(ctx context.Context, projectID, runID string) string {
+	var query string
+	if projectID != "" {
+		query = "projectId=" + url.QueryEscape(projectID)
+	}
+	if runID != "" {
+		if query != "" {
+			query += "&"
+		}
+		query += "runId=" + url.QueryEscape(runID)
+	}
+	return withRecordedRuntimeQuery(ctx, query)
+}
+
+// withRunIDURL appends the runId query parameter to a start or restart
+// request URL (or path) when runID is set (ptone/scion#2550). The run also
+// travels in the body; the parameter lets the broker record it on the
+// tracked start before reading the body, so a run-scoped stop never sees
+// that start without its run. An older broker ignores it.
+func withRunIDURL(endpoint, runID string) string {
+	if runID == "" {
+		return endpoint
+	}
+	if strings.Contains(endpoint, "?") {
+		return endpoint + "&runId=" + url.QueryEscape(runID)
+	}
+	return endpoint + "?runId=" + url.QueryEscape(runID)
+}
+
+// withRunIDQuery is withRunIDURL for a bare query string.
+func withRunIDQuery(query, runID string) string {
+	if runID == "" {
+		return query
+	}
+	if query == "" {
+		return "runId=" + url.QueryEscape(runID)
+	}
+	return query + "&runId=" + url.QueryEscape(runID)
+}
+
+// ErrStopRunNotFound reports that a run-scoped stop found no entry of the
+// requested run on the broker: the broker answered 404 with error code
+// api.BrokerErrorCodeRunMismatch, because a different run holds the
+// agent's name and was left untouched (ptone/scion#2550). Callers must not
+// record the current run as stopped because of it. The error still unwraps
+// to the broker's status error; brokerStopCurrentRunID reads the run the
+// broker reported holding the name.
+var ErrStopRunNotFound = errors.New("runtime broker has no entry for the requested run")
+
+// stopAgentError marks the broker's run-mismatch 404 on a run-scoped stop
+// as ErrStopRunNotFound, on both transports. It keys on the broker's error
+// code, not the status alone, so a 404 from anything else (a proxy, an
+// unknown route) is returned unchanged, as is any error on a legacy stop
+// without a run ID.
+func stopAgentError(err error, runID string) error {
+	if err == nil || runID == "" || !isBrokerStatus(err, http.StatusNotFound) {
+		return err
+	}
+	var se *brokerStatusError
+	if !errors.As(err, &se) || se.brokerErrorCode() != api.BrokerErrorCodeRunMismatch {
+		return err
+	}
+	if current, ok := se.brokerErrorDetails()[api.BrokerErrorDetailCurrentRunID].(string); ok && current != "" {
+		return fmt.Errorf("%w (requested run %s; the broker holds run %s): %w", ErrStopRunNotFound, runID, current, err)
+	}
+	return fmt.Errorf("%w (requested run %s): %w", ErrStopRunNotFound, runID, err)
+}
+
+// brokerStopCurrentRunID returns the run the broker reported holding the
+// agent's name when it refused a run-scoped stop (ErrStopRunNotFound), so
+// a hub/broker run drift can be logged. ok is false for any other error or
+// when the broker did not know the run.
+func brokerStopCurrentRunID(err error) (string, bool) {
+	if !errors.Is(err, ErrStopRunNotFound) {
+		return "", false
+	}
+	var se *brokerStatusError
+	if !errors.As(err, &se) {
+		return "", false
+	}
+	current, ok := se.brokerErrorDetails()[api.BrokerErrorDetailCurrentRunID].(string)
+	return current, ok && current != ""
+}
+
+// recordStopStatus writes upd, the stopped (or suspended) status a caller
+// records after a stop it dispatched for run runID, only while the row
+// still holds runID (store.AgentStatusUpdate.IfRunID, ptone/scion#2550).
+// A broker's 202 for run X must never mark a newer run Y stopped.
+//
+// It reports whether the status was written. When the row has moved to
+// another run it writes nothing, logs a Warn naming both runs, and returns
+// false with a nil error: the caller must then skip its quota release and
+// publish too. An empty runID (a row from before run IDs) writes
+// unconditionally, as before.
+func (s *Server) recordStopStatus(ctx context.Context, agentID, runID, action string, upd store.AgentStatusUpdate) (bool, error) {
+	upd.IfRunID = runID
+	err := s.store.UpdateAgentStatus(ctx, agentID, upd)
+	if errors.Is(err, store.ErrRunChanged) {
+		current := ""
+		if a, gerr := s.store.GetAgent(ctx, agentID); gerr == nil {
+			current = a.RunID
+		}
+		s.agentLifecycleLog.Warn("Agent "+action+": the agent moved to a newer run after the stop was dispatched; not recording the "+action,
+			"agent_id", agentID, "stopped_run_id", runID, "current_run_id", current)
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// stopRunStillCurrent reports whether the row still holds runID, for a
+// caller that has no status to write after a stop dispatched for runID but
+// must not release a newer run's reservation (ptone/scion#2550). It logs a
+// Warn naming both runs when the run changed. An empty runID, or a failed
+// read, counts as current, as before run IDs.
+func (s *Server) stopRunStillCurrent(ctx context.Context, agentID, runID, action string) bool {
+	if runID == "" {
+		return true
+	}
+	current, err := s.store.GetAgent(ctx, agentID)
+	if err != nil || current.RunID == runID {
+		return true
+	}
+	s.agentLifecycleLog.Warn("Agent "+action+": the agent moved to a newer run after the stop was dispatched; not recording the "+action,
+		"agent_id", agentID, "stopped_run_id", runID, "current_run_id", current.RunID)
+	return false
+}
+
+// logStopRunMismatch logs a run-scoped stop the broker refused because a
+// different run holds the agent's name, naming both runs, so the operator
+// can see a hub/broker run drift behind the failed stop or suspend. It is a
+// no-op for any other error.
+func (s *Server) logStopRunMismatch(agent *store.Agent, action string, err error) {
+	if !errors.Is(err, ErrStopRunNotFound) {
+		return
+	}
+	current, _ := brokerStopCurrentRunID(err)
+	s.agentLifecycleLog.Warn("Agent "+action+": broker holds a different run than the hub recorded; nothing was stopped",
+		"agent_id", agent.ID, "agent", agent.Slug, "hub_run_id", agent.RunID, "broker_run_id", current)
 }
 
 // RemoteCreateAgentRequest is the request body for creating an agent on a remote runtime broker.
@@ -821,6 +1015,11 @@ type RemoteCreateAgentRequest struct {
 	// catalog rather than reused (`scion reincarnate`, design §3.4). See
 	// runtimebroker.CreateAgentRequest.Reprovision, the wire twin this maps to.
 	Reprovision bool `json:"reprovision,omitempty"`
+	// ExpectExistingNFSWorkspace mirrors
+	// runtimebroker.CreateAgentRequest.ExpectExistingNFSWorkspace: on a
+	// ProvisionOnly request for an agent moved from another broker, the
+	// broker confirms the workspace on its mount of the export first.
+	ExpectExistingNFSWorkspace string `json:"expectExistingNfsWorkspace,omitempty"`
 	// AsyncLaunch, LaunchID, LaunchTimeoutSeconds and LaunchKeepaliveSeconds
 	// mirror runtimebroker.CreateAgentRequest's async launch fields. They are
 	// set only by dispatchLaunching. LaunchTimeoutSeconds is the remaining
@@ -835,6 +1034,9 @@ type RemoteCreateAgentRequest struct {
 	// WorkspaceStoragePath is the GCS storage path for bootstrapped workspaces.
 	// When set, the broker downloads the workspace from GCS instead of using ProjectPath.
 	WorkspaceStoragePath string `json:"workspaceStoragePath,omitempty"`
+	// WorkspaceStorageBucket is the GCS bucket holding WorkspaceStoragePath.
+	// Brokers that predate it ignore it and use their own bucket setting.
+	WorkspaceStorageBucket string `json:"workspaceStorageBucket,omitempty"`
 
 	// GatherEnv indicates the broker should evaluate env completeness before starting.
 	// If required keys are missing, the broker returns HTTP 202 with env requirements.
@@ -940,6 +1142,14 @@ type RemoteAgentConfig struct {
 	// workspace (git-workspace hybrid mode). When true, the broker skips
 	// worktree/clone creation and configures per-agent git credentials.
 	SharedWorkspace bool `json:"sharedWorkspace,omitempty"`
+
+	// SharedWorkspaceClone carries a shared-plain git project's workspace
+	// clone settings (URL, default branch, full depth). Unlike GitClone it
+	// never makes the broker clone into a per-agent workspace: only the
+	// Kubernetes runtime uses it, to clone into an NFS-backed shared
+	// workspace from the workspace-provision init container. A broker that
+	// does not know the field ignores it.
+	SharedWorkspaceClone *api.GitCloneConfig `json:"sharedWorkspaceClone,omitempty"`
 
 	// GCPIdentity holds the GCP identity assignment for the agent.
 	GCPIdentity *RemoteGCPIdentityConfig `json:"gcpIdentity,omitempty"`
@@ -1061,6 +1271,11 @@ type RemoteAgentInfo struct {
 	// the runtime entry the broker created or found (ptone/scion#2550).
 	// Older brokers omit it.
 	RunID string `json:"runId,omitempty"`
+	// HarnessConfigSource mirrors runtimebroker.AgentResponse.HarnessConfigSource:
+	// which resolution branch supplied the harness-config (hub-hydrated,
+	// template-bundled, broker-local, builtin, unresolved). Provenance only
+	// (ptone/scion#620). Older brokers omit it.
+	HarnessConfigSource string `json:"harnessConfigSource,omitempty"`
 	// WorkspacePlacement mirrors runtimebroker.AgentResponse.WorkspacePlacement:
 	// where the start this answers placed the agent's workspace. Empty
 	// when no start resolved it (provision-only, older brokers).
@@ -1143,12 +1358,24 @@ type Server struct {
 	ctx         context.Context    // Server-lifetime context; cancelled on Shutdown
 	ctxCancel   context.CancelFunc // Cancels ctx
 
+	// userScopedDataSweepDone is closed when the startup sweep of deleted
+	// users' user-scope data ends (startUserScopedDataSweep).
+	userScopedDataSweepDone <-chan struct{}
+
+	// decisionAuditWriter is the buffered decision audit writer wired into
+	// authzService. CleanupResources does not close it: it runs before
+	// the HTTP drain, and requests still being served then emit records.
+	// Shutdown closes it after the HTTP drain, unless
+	// DeferDecisionAuditClose moved that to the caller.
+	decisionAuditWriter        *StoreDecisionAuditEmitter
+	decisionAuditCloseDeferred atomic.Bool
+
 	// githubWebhookNoSecretWarnOnce ensures the "no webhook secret configured"
 	// rejection is logged at most once per process, so a hub being repeatedly
 	// probed on the GitHub webhook endpoint does not fill its log.
 	githubWebhookNoSecretWarnOnce sync.Once
 
-	logQueryService  *LogQueryService         // Cloud Logging query service (nil = disabled)
+	logQueryService  logQuerier               // Cloud Logging query service (nil = disabled)
 	metricsDashboard *MetricsDashboardService // Cloud Monitoring metrics dashboard (nil = disabled)
 
 	// Telegram link service for code-based account linking (nil = disabled)
@@ -1165,6 +1392,9 @@ type Server struct {
 
 	// Web chat store for webchat_* tables (thread prefs, chat threads, etc.) — nil = disabled.
 	webChatStore WebChatStore
+
+	// Artifact store for the artifact_* tables (pkg/artifacts) — nil = artifacts unavailable.
+	artifactStore artifacts.Store
 
 	// Chat notifier for human mention + DM received notifications (W6). Nil-safe.
 	chatNotifier *ChatNotifier
@@ -1341,6 +1571,20 @@ type Server struct {
 	// startClaimCfg holds the current start-claim settings (see
 	// start_claim_settings.go); set at New and by ApplySnapshot.
 	startClaimCfg atomic.Pointer[StartClaimSettings]
+	// startClaimsOn turns start claims on (start_claim.go); New sets it.
+	startClaimsOn bool
+	// startClaimTestHook, when set, adjusts a claim run before its renewal
+	// starts (tests only).
+	startClaimTestHook func(*startClaimRun)
+	// claimStops records when the start-claim reaper last stopped an
+	// agent's container (agent ID -> time.Time), to rate-limit it.
+	claimStops sync.Map
+	// intentStops records when the hub last stopped an agent that ran with
+	// run intent stopped (agent ID -> time.Time), to rate-limit it.
+	intentStops sync.Map
+	// httpDrains marks brokers with a heartbeat-triggered drain of queued
+	// stops running on this node (http_broker_drain.go).
+	httpDrains sync.Map
 
 	// Subsystem loggers for handler methods
 	agentLifecycleLog *slog.Logger
@@ -1497,6 +1741,17 @@ func newInstanceID() string {
 // InstanceID returns the per-process unique identifier for this hub instance.
 func (s *Server) InstanceID() string { return s.instanceID }
 
+// cloudLogQueryProjectID returns the GCP project New() builds the Cloud
+// Logging query service for, or "" when that service must not be built:
+// cfg.DisableCloudLogQuery is set, or no project ID is found in the
+// environment (logging.ResolveProjectID).
+func cloudLogQueryProjectID(cfg ServerConfig) string {
+	if cfg.DisableCloudLogQuery {
+		return ""
+	}
+	return logging.ResolveProjectID()
+}
+
 // New creates a new Hub API server.
 func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	// Apply defaults for zero-value fields that have meaningful defaults.
@@ -1560,6 +1815,8 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	// the configured hub_name is unset.
 	srv.startupHubName = cfg.HubName
 	srv.setStartClaimSettings(cfg.StartClaim)
+	// Every start trigger runs under a start claim.
+	srv.startClaimsOn = true
 
 	// Wire tunnel disconnect handler: when an agent's port-forward tunnel
 	// closes (readLoop exits), clear its exposed port registrations so stale
@@ -1844,6 +2101,7 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 
 	// Wire decision audit emitter
 	auditEmitter := NewStoreDecisionAuditEmitter(s, logging.Subsystem("hub.decision-audit"))
+	srv.decisionAuditWriter = auditEmitter
 	srv.authzService.SetDecisionAuditEmitter(auditEmitter)
 
 	// Initialize B3-B6 boundary services (preview, governance, capabilities).
@@ -1962,6 +2220,13 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	// Shipped with unlimited defaults (DefaultValue=0) per sponsor decision OQ-2.
 	seedLimitDefinitions(ctx, s)
 
+	// Remove group memberships whose user and agent were both deleted
+	// (ON DELETE SET NULL leaves the row with both IDs NULL). Such rows are
+	// always orphans and would otherwise count toward group roles
+	// (ptone/scion#2769). Idempotent; runs on every startup, before the
+	// role-binding backfill reads group memberships. Non-fatal.
+	sweepOrphanedGroupMemberships(ctx, s)
+
 	// Backfill role bindings from existing User.Role and project group memberships.
 	// Must run after reconcileBuiltInRoles so the role definitions exist.
 	// Members receive hub-member permissions via the canonical Hub Members group,
@@ -1994,6 +2259,12 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	if cfg.DevAuthToken != "" {
 		seedDevUser(ctx, s, cfg.DevUserConfig)
 	}
+
+	// Remove user-scope secrets and env vars whose user no longer exists
+	// (ptone/scion#2769). Runs after seedDevUser so the dev user exists. The
+	// whole sweep, lookup and removal, runs in the background under one time
+	// budget and is non-fatal; see startUserScopedDataSweep.
+	srv.userScopedDataSweepDone = srv.startUserScopedDataSweep(srv.ctx)
 
 	// Seed platform skills into hub_settings["injected_skills"].system (idempotent).
 	// Runs on every startup so that the system list is always in sync with the binary.
@@ -2089,8 +2360,9 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 		srv.authConfig.ProxyUserProvisioner = MakeProxyUserProvisioner(srv)
 	}
 
-	// Initialize Cloud Logging query service (optional, gated on GCP project ID)
-	if projectID := logging.ResolveProjectID(); projectID != "" {
+	// Initialize Cloud Logging query service (optional, gated on GCP project
+	// ID and on cfg.DisableCloudLogQuery)
+	if projectID := cloudLogQueryProjectID(cfg); projectID != "" {
 		logQuerySvc, err := NewLogQueryService(ctx, projectID)
 		if err != nil {
 			slog.Warn("Failed to initialize Cloud Logging query service", "error", err)
@@ -3199,6 +3471,44 @@ func (s *Server) SetGCPTokenMetrics(m GCPTokenMetricsRecorder) {
 	s.gcpTokenMetrics = m
 }
 
+// SetDecisionAuditMetrics wires metrics into the decision audit writer. A
+// nil recorder disables them. Queue depth is read separately through
+// DecisionAuditQueueDepth.
+func (s *Server) SetDecisionAuditMetrics(m DecisionAuditMetricsRecorder) {
+	if s.decisionAuditWriter != nil {
+		s.decisionAuditWriter.SetMetrics(m)
+	}
+}
+
+// DecisionAuditQueueDepth reports the number of decision audit records
+// queued to be written (not in-flight: records a worker is writing or
+// retrying are not counted). It is the source for the queue depth gauge.
+func (s *Server) DecisionAuditQueueDepth() int64 {
+	if s.decisionAuditWriter == nil {
+		return 0
+	}
+	return int64(s.decisionAuditWriter.QueueDepth())
+}
+
+// DeferDecisionAuditClose tells the Server that the caller will call
+// CloseDecisionAudit itself, after every HTTP server that serves this
+// Server's handler has drained. Shutdown then leaves the writer open. Use
+// it when the handler is also mounted on another listener (for example
+// the WebServer), so records from requests that the other listener is
+// still draining are written rather than dropped.
+func (s *Server) DeferDecisionAuditClose() {
+	s.decisionAuditCloseDeferred.Store(true)
+}
+
+// CloseDecisionAudit drains and closes the decision audit writer. Call it
+// after the HTTP servers that serve this Server have drained and before
+// the store is closed. Safe to call more than once.
+func (s *Server) CloseDecisionAudit(ctx context.Context) {
+	if s.decisionAuditWriter != nil {
+		s.decisionAuditWriter.Close(ctx)
+	}
+}
+
 // SetExternalBearerMetrics wires the external-bearer authentication outcome
 // counter. Unlike SetMetrics/SetDBMetrics/SetDispatchMetrics/
 // SetGCPTokenMetrics above, this recorder is read from AuthConfig by the
@@ -3803,6 +4113,7 @@ func (s *Server) autoSuspendStalledAgents(ctx context.Context, agents []store.Ag
 				continue
 			}
 		}
+		supersedes := agent.StartClaimID
 		priorIntent, intentAt, err := s.swapRunIntent(ctx, agent, store.RunIntentStopped)
 		if err != nil {
 			slog.Error("Scheduler: auto-suspend intent write failed",
@@ -3810,9 +4121,11 @@ func (s *Server) autoSuspendStalledAgents(ctx context.Context, agents []store.Ag
 			endLifecycleOp()
 			continue
 		}
+		stopRunID := agent.RunID
 		if agent.RuntimeBrokerID != "" {
 			s.syncWorkspaceOnStop(ctx, agent)
 			if err := dispatcher.DispatchAgentStop(ctx, agent); err != nil {
+				s.logStopRunMismatch(agent, "auto-suspend", err)
 				slog.Error("Scheduler: auto-suspend dispatch failed",
 					"agent_id", agent.ID, "agent_name", agent.Name, "error", err)
 				// This stop was the system's, not the user's: if it
@@ -3829,17 +4142,31 @@ func (s *Server) autoSuspendStalledAgents(ctx context.Context, agents []store.Ag
 				continue
 			}
 		}
+		// The superseded start claim is released last on each path below,
+		// after the status write and the quota release (see suspendAgent).
+		releaseClaim := func() {
+			if agent.RuntimeBrokerID != "" {
+				s.releaseSupersededClaim(ctx, agent.ID, supersedes, intentAt)
+			}
+		}
 
 		statusUpdate := store.AgentStatusUpdate{
 			Phase:           string(state.PhaseSuspended),
 			ContainerStatus: "stopped",
 			Activity:        "",
 		}
-		err = s.store.UpdateAgentStatus(ctx, agent.ID, statusUpdate)
+		// Only while the row still holds the run the stop was dispatched
+		// for (ptone/scion#2550).
+		recorded, err := s.recordStopStatus(ctx, agent.ID, stopRunID, "auto-suspend", statusUpdate)
 		endLifecycleOp()
 		if err != nil {
 			slog.Error("Scheduler: auto-suspend status update failed",
 				"agent_id", agent.ID, "agent_name", agent.Name, "error", err)
+			releaseClaim()
+			continue
+		}
+		if !recorded {
+			releaseClaim()
 			continue
 		}
 
@@ -3850,6 +4177,7 @@ func (s *Server) autoSuspendStalledAgents(ctx context.Context, agents []store.Ag
 		// max_agents_per_broker reservation (ptone/scion#1963), mirroring
 		// suspendAgent's HTTP-path behavior.
 		s.releaseBrokerQuota(ctx, agent)
+		releaseClaim()
 		s.events.PublishAgentStatus(ctx, agent)
 		suspended++
 	}
@@ -3891,6 +4219,11 @@ type MessageEventPayload struct {
 	Interrupt bool   `json:"interrupt,omitempty"`
 	Plain     bool   `json:"plain,omitempty"`
 }
+
+// errScheduledMessageRefused is the one public refusal a scheduled message
+// records when its target cannot be resolved or fire-time authorization
+// refuses it. The specific cause is logged, never stored on the event.
+var errScheduledMessageRefused = errors.New("scheduled_message_denied: message delivery refused")
 
 // messageEventHandler returns an EventHandler that dispatches scheduled messages
 // to agents via the AgentDispatcher.
@@ -3938,20 +4271,26 @@ func (s *Server) messageEventHandler() EventHandler {
 			return fmt.Errorf("message payload must include agentId or agentName")
 		}
 		if err != nil {
+			// The returned error is persisted as ScheduledEvent.Error, which
+			// project readers can see. A missing target, a lookup failure
+			// and an authorization refusal below all return the same
+			// constant (errScheduledMessageRefused); the specific cause is
+			// logged here.
 			if errors.Is(err, store.ErrNotFound) {
 				slog.Warn("Scheduler: target agent no longer exists",
 					"eventID", evt.ID,
 					"agentName", payload.AgentName,
 					"agent_id", payload.AgentID,
 					"projectID", evt.ProjectID,
-					"message", payload.Message)
-				// Return the error — the enclosing scheduler wrapper
-				// (fireEvent / executeSchedule) owns status recording and
-				// will persist the error message on the event.
-				return fmt.Errorf("target agent deleted: agent %q not found in project %q",
-					targetName, evt.ProjectID)
+					"cause", "target agent deleted")
+			} else {
+				slog.Warn("Scheduler: target agent lookup failed",
+					"eventID", evt.ID,
+					"agentName", targetName,
+					"projectID", evt.ProjectID,
+					"error", err)
 			}
-			return fmt.Errorf("failed to resolve agent %q: %w", targetName, err)
+			return errScheduledMessageRefused
 		}
 
 		// ---- C1 containment: fire-time authorization ----
@@ -3961,7 +4300,13 @@ func (s *Server) messageEventHandler() EventHandler {
 		// status recording. No external effect occurs on denial.
 		_, authErr := s.authorizeScheduledMessageFire(ctx, evt, agent)
 		if authErr != nil {
-			return authErr
+			slog.Warn("Scheduler: scheduled message refused at fire time",
+				"eventID", evt.ID,
+				"agent_id", agent.ID,
+				"projectID", evt.ProjectID,
+				"creator", evt.CreatedBy,
+				"error", authErr)
+			return errScheduledMessageRefused
 		}
 
 		// Migration gate (design agent-reincarnate §3.7, R3 p2a-r1 review).
@@ -4191,7 +4536,8 @@ func (s *Server) scheduledCreatorIdentity(ctx context.Context, createdBy string)
 // applyScheduledProjectDefaultGCPIdentity is the scheduler-path twin of the
 // project-default/hub-default GCP identity ladder in createAgentInProject
 // (handlers_agents_core.go). A scheduled dispatch carries no explicit
-// gcp_identity, so the ladder here starts one rung down: project default,
+// gcp_identity, so the ladder here starts one rung down: the per-profile
+// default for the profile the agent runs under, then the project default,
 // then — when the project has no default at all — the hub default, then
 // block (#1927). The same checks run in the same order at each assign rung
 // (SA reachable from the project, SA verified, then the full
@@ -4221,6 +4567,20 @@ func (s *Server) scheduledCreatorIdentity(ctx context.Context, createdBy string)
 func (s *Server) applyScheduledProjectDefaultGCPIdentity(ctx context.Context, agent *store.Agent, project *store.Project) error {
 	if agent.AppliedConfig == nil {
 		agent.AppliedConfig = &store.AgentAppliedConfig{}
+	}
+	// A per-profile default for the profile this agent runs under wins over
+	// the project-wide default, as on the create path.
+	if profileName, profileSAID := s.projectProfileDefaultSA(ctx, agent.RuntimeBrokerID, project, agent.AppliedConfig.Profile); profileSAID != "" {
+		cfg, err := s.resolveDefaultSAAssignmentCore(ctx, nil, agent.ProjectID,
+			profileSAID, SurfaceProjectDefault, profileDefaultTier(profileName))
+		if err != nil {
+			return err
+		}
+		agent.AppliedConfig.GCPIdentity = cfg
+		pinResolvedProfile(agent.AppliedConfig, profileName)
+		slog.Debug("GCP identity chosen by default", "source", "project-profile-default",
+			"project_id", agent.ProjectID, "agent", agent.Name, "profile", profileName, "sa_id", cfg.ServiceAccountID)
+		return nil
 	}
 	projectSettings := projectSettingsFromAnnotations(project)
 	switch projectSettings.DefaultGCPIdentityMode {
@@ -4570,7 +4930,9 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 		// Apply project-level defaults, hub operational defaults, and the
 		// template/harness-config derivation pipeline, exactly as on the
 		// agent-create path. See deriveAgentConfig.
-		s.deriveAgentConfig(ctx, agent, project, tmpl)
+		if err := s.deriveAgentConfig(ctx, agent, project, tmpl); err != nil {
+			return fmt.Errorf("scheduled dispatch of agent %q: %w", slug, err)
+		}
 
 		// Scheduled creates have no waiting client, so they opt in to
 		// asynchronous launch server-side. It only takes effect when
@@ -4650,10 +5012,19 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 			return nil
 		}
 
-		if _, err := s.recordRunIntent(ctx, agent, store.RunIntentRunning); err != nil {
-			return fmt.Errorf("failed to dispatch agent %q: %w", slug, err)
+		// The create-and-start runs under a start claim, which records run
+		// intent running.
+		created, err := s.createUnderClaim(ctx, agent, func(ctx context.Context) (*CreateDispatchResult, error) {
+			return dispatcher.DispatchAgentCreate(ctx, agent)
+		})
+		var held *store.ClaimHeldError
+		if errors.As(err, &held) {
+			// The agent is already being started by the claim holder: the
+			// event is skipped (not retried), not failed.
+			slog.Info("Scheduler: agent already starting; event skipped",
+				"eventID", evt.ID, "agent_id", agent.ID, "holder", string(held.Kind))
+			return nil
 		}
-		created, err := dispatcher.DispatchAgentCreate(ctx, agent)
 		if err != nil {
 			slog.Error("Scheduler: failed to dispatch agent creation",
 				"eventID", evt.ID,
@@ -4834,6 +5205,9 @@ func (s *Server) registerSchedulerHandlers() {
 	s.scheduler.RegisterRecurringSingleton("schedule-evaluator", 1, store.LockScheduleEvaluator, s.evaluateSchedulesHandler())
 	s.scheduler.RegisterRecurringSingleton("broker-heartbeat-timeout", 5, store.LockBrokerHeartbeatTimeout, s.brokerHeartbeatTimeoutHandler())
 	s.scheduler.RegisterRecurringSingleton("broker-affinity-reap", 5, store.LockBrokerAffinityReap, s.brokerAffinityReapHandler())
+	// Hourly: an expired token is already refused at join, so this only
+	// keeps the table from collecting rows.
+	s.scheduler.RegisterRecurringSingleton("broker-join-token-cleanup", 60, store.LockBrokerJoinTokenCleanup, s.brokerJoinTokenCleanupHandler())
 	// Not a singleton: this instance can only self-heal the providers of
 	// brokers it personally holds a live local control-channel socket for
 	// (see brokerProviderSelfHealHandler), so every instance must run it.
@@ -4848,6 +5222,14 @@ func (s *Server) registerSchedulerHandlers() {
 	// future drift) without a separate one-shot migration.
 	s.scheduler.RegisterRecurringSingleton("broker-quota-reconcile", 60, store.LockBrokerQuotaReconcile, s.ReconcileStaleBrokerQuotaReservations)
 	s.scheduler.RegisterRecurringSingleton("reincarnation-sweep", 5, store.LockReincarnationSweep, s.reincarnationSweepHandler())
+	s.scheduler.RegisterRecurringSingleton("start-claim-reaper", 1, store.LockStartClaimReaper, s.startClaimReaperHandler())
+	go func() {
+		// Bounded: a store that does not answer at startup must not leave
+		// this goroutine behind.
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		s.demoteOwnClaimsOnRestart(ctx)
+	}()
 
 	// A2A bridge sweep — conditional on the bridge being registered as a standalone plugin.
 	if a2aExternalURL := s.getA2ABridgeExternalURL(); a2aExternalURL != "" {
@@ -4947,6 +5329,11 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	// and nothing at start depends on its result.
 	s.startStoredTimestampCheck(ctx)
 
+	// Record the workspaces this hub keeps as its own, and set the hub
+	// project ID as the workspace project identity of hub-cloned projects
+	// created with a locally generated one.
+	s.startClonedProjectIdentityAlignment(ctx)
+
 	// Pause schedules whose cron expression carries an unsupported zone
 	// prefix before the evaluator's first tick, so it never runs them.
 	s.startScheduler(ctx)
@@ -5037,7 +5424,9 @@ func (s *Server) Start(ctx context.Context) error {
 // and only the final HTTP listener shutdown is skipped when there is no
 // listener to shut down. It is also safe to call more than once, or
 // together with CleanupResources, since CleanupResources is idempotent and
-// http.Server.Shutdown tolerates repeated calls.
+// http.Server.Shutdown tolerates repeated calls. The order is:
+// CleanupResources, then the HTTP drain, then the decision audit writer
+// drain (skipped if DeferDecisionAuditClose was called).
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.mu.RLock()
 	srv := s.httpServer
@@ -5051,14 +5440,19 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	// so this is a no-op if it already ran.
 	_ = s.CleanupResources(ctx)
 
-	if srv == nil {
-		return nil
+	var err error
+	if srv != nil {
+		shutdownCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		err = srv.Shutdown(shutdownCtx)
+		cancel()
 	}
 
-	shutdownCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-
-	return srv.Shutdown(shutdownCtx)
+	// Close the decision audit writer only after the HTTP drain, so
+	// records from requests that finish during the drain are written.
+	if !s.decisionAuditCloseDeferred.Load() {
+		s.CloseDecisionAudit(ctx)
+	}
+	return err
 }
 
 // CleanupResources shuts down Hub-owned resources (control channel, broker auth,
@@ -5066,6 +5460,8 @@ func (s *Server) Shutdown(ctx context.Context) error {
 // where the Hub API is mounted on the WebServer and has no listener of its own.
 // It is also called internally by Shutdown, and is safe to call more than
 // once, including after Shutdown: the teardown below runs at most once.
+// It does not close the decision audit writer; in combined mode, call
+// CloseDecisionAudit after the WebServer's HTTP drain.
 func (s *Server) CleanupResources(ctx context.Context) error {
 	s.cleanupOnce.Do(func() {
 		s.mu.RLock()
@@ -5351,6 +5747,16 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/conduit/grant-keys", s.guarded("/api/v1/conduit/grant-keys", s.handleConduitGrantKeys))
 	s.mux.HandleFunc("/api/v1/conduit", s.guarded("/api/v1/conduit", s.handleConduit))
 
+	// Artifact service (pkg/artifacts), behind the hub.artifacts experiment.
+	// The patterns are literal here, not mounted through
+	// artifacts.Service.RegisterRoutes, because the route-metadata tests and
+	// the route-authz manifest lint read registrations from this file;
+	// TestArtifactRoutesMatchService pins them to artifacts.RoutePatterns().
+	artifactsHandler := s.artifactsHandler()
+	s.mux.Handle("/api/v1/artifacts", s.artifactsGuard("/api/v1/artifacts", artifactsHandler))
+	s.mux.Handle("/api/v1/artifacts/", s.artifactsGuard("/api/v1/artifacts/", artifactsHandler))
+	s.mux.Handle("/api/v1/artifacts/shared/", s.artifactsGuard("/api/v1/artifacts/shared/", artifactsHandler))
+
 	s.mux.HandleFunc("/api/v1/skills", s.guarded("/api/v1/skills", s.handleSkills))
 	s.mux.HandleFunc("/api/v1/skills/", s.guarded("/api/v1/skills/", s.handleSkillByID))
 
@@ -5449,6 +5855,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/admin/project-defaults", s.guarded("/api/v1/admin/project-defaults", s.handleAdminProjectDefaults))
 	s.mux.HandleFunc("/api/v1/admin/messaging", s.guarded("/api/v1/admin/messaging", s.handleAdminMessaging))
 	s.mux.HandleFunc("/api/v1/admin/experiments", s.guarded("/api/v1/admin/experiments", s.handleAdminExperiments))
+	s.mux.HandleFunc("/api/v1/admin/conduit/grant-keys/rotate", s.guarded("/api/v1/admin/conduit/grant-keys/rotate", s.handleAdminConduitGrantKeyRotate))
 	s.mux.HandleFunc("/api/v1/admin/agents/reset-auth-all", s.guarded("/api/v1/admin/agents/reset-auth-all", s.handleAdminResetAuthAll))
 	s.mux.HandleFunc("/api/v1/admin/gcp-quota", s.guarded("/api/v1/admin/gcp-quota", s.handleAdminGCPQuota))
 	s.mux.HandleFunc("/api/v1/admin/lifecycle-hooks", s.guarded("/api/v1/admin/lifecycle-hooks", s.handleAdminLifecycleHooks))
@@ -5745,7 +6152,7 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 			)
 		}
 
-		next.ServeHTTP(wrapped, r)
+		aborted := logging.ServeCatchingAbort(next, wrapped, r)
 
 		duration := time.Since(start)
 		level := slog.LevelInfo
@@ -5772,20 +6179,32 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 			)
 		}
 
-		slog.LogAttrs(r.Context(), level, "Request completed",
-			append(attrs,
-				slog.Int("status", wrapped.statusCode),
-				slog.Duration("duration", duration),
-			)...,
+		attrs = append(attrs,
+			slog.Int("status", wrapped.statusCode),
+			slog.Duration("duration", duration),
 		)
+		if aborted {
+			attrs = append(attrs, slog.Bool(logging.AttrAborted, true))
+		}
+		slog.LogAttrs(r.Context(), level, "Request completed", attrs...)
+		if aborted {
+			panic(http.ErrAbortHandler)
+		}
 	})
 }
 
-// recoveryMiddleware recovers from panics.
+// recoveryMiddleware recovers from panics. http.ErrAbortHandler is passed
+// on, not recovered: it is how a handler (the port proxy, mid-stream)
+// tells net/http to cut the connection instead of completing a response
+// whose headers are already out, and writing an error body after them
+// would end the stream as if it had completed.
 func (s *Server) recoveryMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if err := recover(); err != nil {
+				if err == http.ErrAbortHandler { //nolint:errorlint // net/http compares the sentinel by identity
+					panic(err)
+				}
 				slog.Error("Panic recovered",
 					slog.Any("error", err),
 					slog.String("path", r.URL.Path),
@@ -6236,6 +6655,23 @@ func (s *Server) nonceCacheEvictionHandler() func(ctx context.Context) {
 	}
 }
 
+// brokerJoinTokenCleanupHandler returns a recurring handler, run hourly,
+// that removes expired broker join tokens. Without it they would stay in
+// the table until someone tried to use them or the broker was deleted.
+func (s *Server) brokerJoinTokenCleanupHandler() func(ctx context.Context) {
+	return func(ctx context.Context) {
+		ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+
+		removed, err := s.store.CleanExpiredJoinTokens(ctx)
+		if err != nil {
+			slog.Error("Scheduler: broker join token cleanup failed", "error", err)
+			return
+		}
+		slog.Debug("Scheduler: broker join token cleanup completed", "removed", removed)
+	}
+}
+
 // chatLinkCodeEvictionHandler returns a recurring handler function that
 // purges expired chat link code entries. This prevents the chat_link_codes
 // table from growing unbounded.
@@ -6349,4 +6785,23 @@ func (s *Server) a2aBridgeSweepHandler(externalURL string) func(ctx context.Cont
 				"status", resp.StatusCode, "url", externalURL)
 		}
 	}
+}
+
+// sweepOrphanedGroupMemberships deletes group memberships whose user and
+// agent are both NULL and logs how many it removed. It runs on every startup
+// and is idempotent. A failure is logged at Warn and startup continues: the
+// rows are inert apart from role counts, and the next startup retries. The
+// count is logged at Info only when rows were removed; the usual no-op run
+// logs at Debug.
+func sweepOrphanedGroupMemberships(ctx context.Context, s store.Store) {
+	n, err := s.DeleteOrphanedGroupMemberships(ctx)
+	if err != nil {
+		slog.Warn("failed to delete orphaned group memberships", "error", err)
+		return
+	}
+	if n > 0 {
+		slog.Info("deleted orphaned group memberships", "count", n)
+		return
+	}
+	slog.Debug("deleted orphaned group memberships", "count", n)
 }
