@@ -102,7 +102,21 @@ type HealthSummaryBroker struct {
 	Runtime *HealthBrokerRuntime `json:"runtime"`
 	// WorkspaceStorage is null when the broker never reported it.
 	WorkspaceStorage *HealthBrokerStorage `json:"workspace_storage"`
-	Agents           HealthBrokerAgents   `json:"agents"`
+	// Health is the broker's last self-reported health, or null when the
+	// broker never reported it (an older broker). It is as fresh as
+	// LastHeartbeat and never changes Status. For an offline broker it is
+	// the last report before the broker went offline.
+	Health *HealthBrokerSelf  `json:"health"`
+	Agents HealthBrokerAgents `json:"agents"`
+}
+
+// HealthBrokerSelf is a runtime broker's self-reported health.
+type HealthBrokerSelf struct {
+	// Status is healthy, degraded or unhealthy.
+	Status string `json:"status"`
+	// Checks maps each check the broker ran to its result, for example
+	// {"runtime": "unavailable"}. Each value is at most 120 characters.
+	Checks map[string]string `json:"checks"`
 }
 
 // HealthBrokerAgents holds per-broker agent counts.
@@ -304,9 +318,10 @@ func (s *Server) healthSummaryBrokers(ctx context.Context, agentAgg *store.Agent
 }
 
 // healthSummaryBrokerHasProblem reports whether a runtime broker row needs
-// attention: it is not online, or its NFS workspace share is unhealthy.
+// attention: it is not online, it reports itself degraded or unhealthy, or
+// its NFS workspace share is unhealthy.
 func healthSummaryBrokerHasProblem(b HealthSummaryBroker) bool {
-	if healthSummaryBrokerStatusIsProblem(b.Status) {
+	if healthSummaryBrokerStatusIsProblem(b.Status) || healthSummaryBrokerSelfIsProblem(b.Health) {
 		return true
 	}
 	ws := b.WorkspaceStorage
@@ -322,6 +337,13 @@ func healthSummaryBrokerStatusIsProblem(status string) bool {
 	return status != store.BrokerStatusOnline
 }
 
+// healthSummaryBrokerSelfIsProblem reports whether a broker's self-reported
+// health needs attention: degraded or unhealthy. A broker that never
+// reported its health (nil) is not a problem; it is shown as not reported.
+func healthSummaryBrokerSelfIsProblem(h *HealthBrokerSelf) bool {
+	return h != nil && (h.Status == HealthStatusDegraded || h.Status == HealthStatusUnhealthy)
+}
+
 // healthSummaryBroker builds one runtime broker row of the health summary.
 func healthSummaryBroker(b *store.RuntimeBroker, agentAgg *store.AgentHealthAggregate) HealthSummaryBroker {
 	row := HealthSummaryBroker{
@@ -331,6 +353,7 @@ func healthSummaryBroker(b *store.RuntimeBroker, agentAgg *store.AgentHealthAggr
 		Status:           b.Status,
 		Runtime:          brokerRuntimeSummary(b),
 		WorkspaceStorage: brokerStorageSummary(b.WorkspaceStorage),
+		Health:           brokerSelfHealthSummary(b.Health),
 	}
 	if !b.LastHeartbeat.IsZero() {
 		hb := b.LastHeartbeat
@@ -373,6 +396,20 @@ func brokerStorageSummary(ws *api.BrokerWorkspaceStorage) *HealthBrokerStorage {
 	if ws.Backend == api.WorkspaceStorageBackendNFS {
 		healthy := ws.NFS != nil && ws.NFS.Healthy
 		out.NFSHealthy = &healthy
+	}
+	return out
+}
+
+// brokerSelfHealthSummary converts the health a broker reported on its
+// heartbeat, or returns nil when it never reported one. Checks is never
+// null in the response.
+func brokerSelfHealthSummary(h *api.BrokerHealthReport) *HealthBrokerSelf {
+	if h == nil {
+		return nil
+	}
+	out := &HealthBrokerSelf{Status: h.Status, Checks: make(map[string]string, len(h.Checks))}
+	for k, v := range h.Checks {
+		out.Checks[k] = v
 	}
 	return out
 }
