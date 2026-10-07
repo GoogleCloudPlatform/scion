@@ -267,7 +267,7 @@ func (s *artifactService) List(ctx context.Context, opts *ListArtifactsOptions) 
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[ArtifactListResponse](resp)
+	return apiclient.DecodeRequired[ArtifactListResponse](resp)
 }
 
 // OpenFile implements ArtifactService. The hub either streams the bytes or
