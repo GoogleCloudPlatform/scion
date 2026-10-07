@@ -57,7 +57,8 @@ export interface ScheduledMessage {
 
 /** The payload of a `user.<id>.chat.scheduled` SSE event. */
 export interface ScheduledMessageEvent {
-  action: 'created' | 'cancelled' | 'sending' | 'sent' | 'failed';
+  /** `released`: the hub handed a claimed message back to pending (a transient error). */
+  action: 'created' | 'cancelled' | 'sending' | 'released' | 'sent' | 'failed';
   scheduledMessage: ScheduledMessage;
 }
 

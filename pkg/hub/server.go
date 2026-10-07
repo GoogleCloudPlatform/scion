@@ -1777,10 +1777,9 @@ type Server struct {
 	// cross-instance replay protection.
 	nonceCacheStore *NonceCacheStore
 
-	// scheduledSendStop and scheduledSendDone stop and await the scheduled
-	// chat message sweeper (chat_scheduled_send.go); nil until it starts.
-	scheduledSendStop context.CancelFunc
-	scheduledSendDone chan struct{}
+	// scheduledSend is the scheduled chat message sweeper's state
+	// (chat_scheduled_send.go); created on first use.
+	scheduledSend *scheduledSendRuntime
 
 	// chatLinkStore is the DB-backed chat link code store (nil when entClient is nil).
 	// When non-nil, Telegram/Discord/Teams link services delegate to it.

@@ -20,14 +20,17 @@ package hub
 // topics).
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1007,12 +1010,16 @@ func TestScheduledSend_TransientCheckError_ReleasedThenSent(t *testing.T) {
 	flaky := &flakyTopicWebChatStore{WebChatStore: f.wcs, ScheduledMessageStore: f.sms}
 	flaky.failures.Store(1)
 	f.srv.SetWebChatStore(flaky)
+	events, unsub := f.srv.events.Subscribe("user." + f.bob.ID + ".chat.scheduled")
+	defer unsub()
 
 	assert.Equal(t, 1, f.srv.sweepScheduledMessages(ctx, fireAt.Add(time.Second)))
 	got := f.row(t, f.bob, sm.ID)
 	assert.Equal(t, ScheduledMessagePending, got.Status)
 	assert.Nil(t, got.ClaimedAt)
 	assert.Empty(t, f.topicMessages(t))
+	assert.Equal(t, []string{"sending", "released"}, scheduledEventActions(t, collectEvents(events)),
+		"the client learns the message is pending again")
 
 	assert.Equal(t, 1, f.srv.sweepScheduledMessages(ctx, fireAt.Add(time.Second)))
 	assert.Equal(t, ScheduledMessageSent, f.row(t, f.bob, sm.ID).Status)
@@ -1173,25 +1180,155 @@ func TestScheduledSend_DeliveryBudgetExpires_RowFinalized(t *testing.T) {
 func TestScheduledSend_DeliveryBudgetCoversLiveWorstCase(t *testing.T) {
 	worst := time.Duration(1+messages.MaxMentionRecipients) * chatWakeDeliveryBudget
 	assert.Greater(t, scheduledDeliveryBudget, worst)
-	assert.Equal(t, scheduledClaimTimeout+scheduledDeliveryBudget+scheduledFinalizeTimeout, scheduledSweeperStopWait())
 }
 
-// Stopping the sweeper honours the caller's shutdown deadline even when a
-// delivery has not finished.
-func TestScheduledSend_StopSweeperHonoursShutdownDeadline(t *testing.T) {
+// Stopping the sweeper is bounded even when callers pass no deadline (as
+// production does): after the grace period the delivery in progress is cut
+// short and the row is still finalized, sent or failed.
+func TestScheduledSend_StopCutsSlowDeliveryShort(t *testing.T) {
 	f := newScheduledSendFixture(t)
-	stopped := false
-	f.srv.mu.Lock()
-	f.srv.scheduledSendStop = func() { stopped = true }
-	f.srv.scheduledSendDone = make(chan struct{}) // a delivery that never ends
-	f.srv.mu.Unlock()
+	fireAt := time.Now().Add(2 * time.Minute)
+	sm := f.schedule(t, f.bob, "slow at shutdown", fireAt)
+	f.srv.SetDispatcher(&blockingDispatcher{})
+	savedGrace := scheduledStopGrace
+	scheduledStopGrace = 200 * time.Millisecond
+	t.Cleanup(func() { scheduledStopGrace = savedGrace })
+
+	f.srv.startScheduledSendSweeper(context.Background())
+	go f.srv.sweepScheduledMessages(context.Background(), fireAt.Add(time.Second))
+	require.Eventually(t, func() bool {
+		return f.row(t, f.bob, sm.ID).Status == ScheduledMessageSending
+	}, 5*time.Second, 20*time.Millisecond)
+
+	start := time.Now()
+	f.srv.stopScheduledSendSweeper(context.Background())
+	assert.Less(t, time.Since(start), scheduledStopGrace+scheduledFinalizeTimeout)
+	assert.Contains(t, []string{ScheduledMessageSent, ScheduledMessageFailed}, f.row(t, f.bob, sm.ID).Status)
+}
+
+// A caller's shutdown deadline shorter than the grace period is honoured.
+func TestScheduledSend_StopHonoursShutdownDeadline(t *testing.T) {
+	f := newScheduledSendFixture(t)
+	fireAt := time.Now().Add(2 * time.Minute)
+	sm := f.schedule(t, f.bob, "slow, short deadline", fireAt)
+	f.srv.SetDispatcher(&blockingDispatcher{})
+	go f.srv.sweepScheduledMessages(context.Background(), fireAt.Add(time.Second))
+	require.Eventually(t, func() bool {
+		return f.row(t, f.bob, sm.ID).Status == ScheduledMessageSending
+	}, 5*time.Second, 20*time.Millisecond)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 	start := time.Now()
 	f.srv.stopScheduledSendSweeper(ctx)
-	assert.True(t, stopped)
-	assert.Less(t, time.Since(start), 5*time.Second)
+	assert.Less(t, time.Since(start), 100*time.Millisecond+scheduledFinalizeTimeout)
+	assert.Contains(t, []string{ScheduledMessageSent, ScheduledMessageFailed}, f.row(t, f.bob, sm.ID).Status)
+}
+
+// selectiveDispatcher blocks dispatches to one agent until release is
+// closed; others are accepted at once.
+type selectiveDispatcher struct {
+	brokerMockDispatcher
+	slowSlug string
+	release  chan struct{}
+}
+
+func (d *selectiveDispatcher) DispatchAgentMessage(ctx context.Context, a *store.Agent, msg string, interrupt bool, sm *messages.StructuredMessage) error {
+	if a.Slug == d.slowSlug {
+		select {
+		case <-d.release:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return d.brokerMockDispatcher.DispatchAgentMessage(ctx, a, msg, interrupt, sm)
+}
+
+// One sender's slow batch does not hold up another sender: the other
+// sender's message is delivered while the slow one is still in progress,
+// in the same sweep and in a later one. Each sender has at most one
+// message in delivery.
+func TestScheduledSend_SlowSenderDoesNotBlockOthers(t *testing.T) {
+	f := newScheduledSendFixture(t)
+	ctx := context.Background()
+	// alice writes in a second topic whose default agent is hers.
+	aliceAgent := &store.Agent{
+		ID: tid("sched-fast-agent"), ProjectID: f.project.ID, Name: "fast-agent", Slug: "fast-agent",
+		Phase: "running", OwnerID: f.alice.ID, CreatedBy: f.alice.ID,
+	}
+	require.NoError(t, f.store.CreateAgent(ctx, aliceAgent))
+	topic2 := tid("sched-topic-fast")
+	require.NoError(t, f.wcs.CreateTopic(ctx, WebChatTopic{
+		ID: topic2, ProjectID: f.project.ID, Name: "fast", CreatedBy: f.alice.ID,
+		CreatedAt: time.Now().UTC(), DefaultAgent: aliceAgent.Slug,
+	}))
+	setTopicConversationID(t, f.db, f.store, topic2, f.project.ID)
+	disp := &selectiveDispatcher{slowSlug: f.agent.Slug, release: make(chan struct{})}
+	f.srv.SetDispatcher(disp)
+
+	fireAt := time.Now().Add(2 * time.Minute)
+	bob1 := f.schedule(t, f.bob, "bob one", fireAt)
+	bob2 := f.schedule(t, f.bob, "bob two", fireAt)
+	aliceRow := func(content string) scheduledMessageResponse {
+		rec := doRequestAsUser(t, f.srv, f.alice, http.MethodPost, "/api/v1/chat/conversations/"+topic2+"/scheduled",
+			map[string]interface{}{"content": content, "fire_at": fireAt.UTC().Format(time.RFC3339Nano), "idempotency_key": content})
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+		var r scheduledMessageResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &r))
+		return r
+	}
+	a1 := aliceRow("alice one")
+
+	first := make(chan int, 1)
+	go func() { first <- f.srv.sweepScheduledMessages(ctx, fireAt.Add(time.Second)) }()
+	require.Eventually(t, func() bool {
+		return f.row(t, f.alice, a1.ID).Status == ScheduledMessageSent
+	}, 5*time.Second, 20*time.Millisecond, "alice's message is not held up by bob's slow one")
+	assert.Equal(t, ScheduledMessageSending, f.row(t, f.bob, bob1.ID).Status)
+	assert.Equal(t, ScheduledMessagePending, f.row(t, f.bob, bob2.ID).Status, "one message per sender in delivery")
+
+	// A later tick, while bob's delivery is still in progress.
+	a2 := aliceRow("alice two")
+	assert.Equal(t, 1, f.srv.sweepScheduledMessages(ctx, fireAt.Add(2*time.Second)), "bob is skipped while in delivery")
+	assert.Equal(t, ScheduledMessageSent, f.row(t, f.alice, a2.ID).Status)
+
+	close(disp.release)
+	assert.Equal(t, 3, <-first, "alice one, bob one and bob two")
+	f.srv.waitScheduledDeliveries()
+	assert.Equal(t, ScheduledMessageSent, f.row(t, f.bob, bob1.ID).Status)
+	assert.Equal(t, ScheduledMessageSent, f.row(t, f.bob, bob2.ID).Status)
+}
+
+// experimentTogglingDispatcher turns the experiment off on its first
+// dispatch.
+type experimentTogglingDispatcher struct {
+	brokerMockDispatcher
+	t   *testing.T
+	srv *Server
+	off sync.Once
+}
+
+func (d *experimentTogglingDispatcher) DispatchAgentMessage(ctx context.Context, a *store.Agent, msg string, interrupt bool, sm *messages.StructuredMessage) error {
+	d.off.Do(func() { setScheduledSendExperiment(d.t, d.srv, false) })
+	return d.brokerMockDispatcher.DispatchAgentMessage(ctx, a, msg, interrupt, sm)
+}
+
+// The experiment is checked before each claim: turning it off during a
+// batch holds the rest of the batch.
+func TestScheduledSend_ExperimentTurnedOffMidBatch_RestHeld(t *testing.T) {
+	f := newScheduledSendFixture(t)
+	fireAt := time.Now().Add(2 * time.Minute)
+	first := f.schedule(t, f.bob, "first", fireAt)
+	second := f.schedule(t, f.bob, "second", fireAt)
+	f.srv.SetDispatcher(&experimentTogglingDispatcher{t: t, srv: f.srv})
+
+	assert.Equal(t, 1, f.srv.sweepScheduledMessages(context.Background(), fireAt.Add(time.Second)))
+	sent, held := f.row(t, f.bob, first.ID), f.row(t, f.bob, second.ID)
+	if sent.Status == ScheduledMessagePending {
+		sent, held = held, sent
+	}
+	assert.Equal(t, ScheduledMessageSent, sent.Status)
+	assert.Equal(t, ScheduledMessagePending, held.Status)
 }
 
 // A 404 from sendChatMessage at fire time is a delivery error: the checks
@@ -1201,4 +1338,90 @@ func TestScheduledSend_FailureMapping(t *testing.T) {
 	assert.Equal(t, ScheduledFailureDeliveryError, scheduledFailureFromSendError(chatSendNotFound("Thread")))
 	assert.Equal(t, ScheduledFailureDeliveryError, scheduledFailureFromSendError(
 		newChatSendError(http.StatusInternalServerError, "INTERNAL", "x", nil)))
+}
+
+// doScheduledRequestWithCredential serves a request as identity with the given
+// credential context, bypassing authentication (as doRequestAsIdentity).
+func doScheduledRequestWithCredential(t *testing.T, srv *Server, identity Identity, cred CredentialContext, method, path string, body interface{}) *httptest.ResponseRecorder {
+	t.Helper()
+	b, err := json.Marshal(body)
+	require.NoError(t, err)
+	req := httptest.NewRequest(method, path, bytes.NewReader(b))
+	req.Header.Set("Content-Type", "application/json")
+	ctx := contextWithCredentialContext(contextWithIdentity(req.Context(), identity), cred)
+	rec := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rec, req.WithContext(ctx))
+	return rec
+}
+
+// Only an interactive session may use the scheduled-message routes: a
+// broker request on behalf of the user is refused on create, list and
+// cancel; the same user with an interactive credential is accepted
+// (control). Fails if the credential-kind check in scheduledSendCaller is
+// removed.
+func TestScheduledSend_BrokerOnBehalfOfRefused(t *testing.T) {
+	f := newScheduledSendFixture(t)
+	bob := NewAuthenticatedUser(f.bob.ID, f.bob.Email, f.bob.DisplayName, f.bob.Role, "integration")
+	broker := CredentialContext{Kind: CredentialKindBroker, ID: "broker-1", Type: "broker"}
+	body := func(k string) map[string]interface{} {
+		return map[string]interface{}{
+			"content": "x", "fire_at": time.Now().Add(time.Hour).UTC().Format(time.RFC3339), "idempotency_key": k,
+		}
+	}
+	existing := f.schedule(t, f.bob, "existing", time.Now().Add(time.Hour))
+
+	rec := doScheduledRequestWithCredential(t, f.srv, bob, broker, http.MethodPost, f.scheduledPath(), body("broker"))
+	assert.Equal(t, http.StatusForbidden, rec.Code, "create: %s", rec.Body.String())
+	rec = doScheduledRequestWithCredential(t, f.srv, bob, broker, http.MethodGet, f.scheduledPath(), nil)
+	assert.Equal(t, http.StatusForbidden, rec.Code, "list: %s", rec.Body.String())
+	rec = doScheduledRequestWithCredential(t, f.srv, bob, broker, http.MethodDelete, f.scheduledPath()+"/"+existing.ID, nil)
+	assert.Equal(t, http.StatusForbidden, rec.Code, "cancel: %s", rec.Body.String())
+	assert.Equal(t, ScheduledMessagePending, f.row(t, f.bob, existing.ID).Status)
+	assert.Len(t, f.list(t, f.bob), 1)
+
+	interactive := NewAuthenticatedUser(f.bob.ID, f.bob.Email, f.bob.DisplayName, f.bob.Role, string(ClientTypeWeb))
+	rec = doScheduledRequestWithCredential(t, f.srv, interactive, CredentialContext{Kind: CredentialKindInteractive},
+		http.MethodPost, f.scheduledPath(), body("interactive"))
+	assert.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+}
+
+// scheduledSendCaller, which guards create, list and cancel alike, accepts
+// interactive and dev sessions only, and refuses scoped tokens and
+// federated identities whatever their credential kind. Fails if any of
+// those checks is removed.
+func TestScheduledSend_CallerGuard(t *testing.T) {
+	user := NewAuthenticatedUser(tid("guard-user"), "g@test.com", "G", "member", string(ClientTypeWeb))
+	scoped := NewScopedUserIdentity(user, tid("guard-project"), []string{"project:read"})
+	fed := NewFederatedUserIdentity("https://issuer.example", "sub-1", "g@test.com", "G", "member", nil)
+	cases := []struct {
+		name     string
+		identity Identity
+		kind     CredentialKind
+		allowed  bool
+	}{
+		{"interactive session", user, CredentialKindInteractive, true},
+		{"dev session", user, CredentialKindDev, true},
+		{"broker on behalf of the user", user, CredentialKindBroker, false},
+		{"no credential context", user, "", false},
+		{"scoped access token", scoped, CredentialKindInteractive, false},
+		{"federated identity", fed, CredentialKindInteractive, false},
+		{"federated identity, federation credential", fed, CredentialKindFederation, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/chat/conversations/x/scheduled", nil)
+			ctx := contextWithIdentity(req.Context(), tc.identity)
+			if tc.kind != "" {
+				ctx = contextWithCredentialContext(ctx, CredentialContext{Kind: tc.kind})
+			}
+			rec := httptest.NewRecorder()
+			got := scheduledSendCaller(rec, req.WithContext(ctx))
+			if tc.allowed {
+				assert.NotNil(t, got)
+			} else {
+				assert.Nil(t, got)
+				assert.Equal(t, http.StatusForbidden, rec.Code)
+			}
+		})
+	}
 }

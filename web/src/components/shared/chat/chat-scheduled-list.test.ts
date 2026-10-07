@@ -130,6 +130,16 @@ describe('scion-chat-scheduled-list', () => {
     expect(items()[0]!.querySelector('.cancel-btn')).toBeNull();
   });
 
+  it('a released message is pending again, with Cancel', async () => {
+    emit(sm('a', { status: 'sending' }), 'sending');
+    await flush(el);
+    expect(items()[0]!.querySelector('.cancel-btn')).toBeNull();
+    emit(sm('a', { status: 'pending' }), 'released');
+    await flush(el);
+    expect(items()[0]!.dataset.status).toBe('pending');
+    expect(items()[0]!.querySelector('.cancel-btn')).not.toBeNull();
+  });
+
   it('cancels and removes the bubble', async () => {
     cancelScheduledMessage.mockResolvedValue(undefined);
     (items()[0]!.querySelector('.cancel-btn') as HTMLButtonElement).click();
