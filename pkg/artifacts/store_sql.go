@@ -56,6 +56,7 @@ var migrations = []migration{
 	{name: migrationInitial, sqlite: sqliteSchema, postgres: postgresSchema},
 	{name: migrationRemoteFiles, sqlite: sqliteRemoteFiles, postgres: postgresRemoteFiles},
 	{name: migrationVersionUploads, sqlite: sqliteVersionUploads, postgres: postgresVersionUploads},
+	{name: migrationFinalizeClaims, sqlite: sqliteFinalizeClaims, postgres: postgresFinalizeClaims},
 }
 
 const ledgerSQLite = `CREATE TABLE IF NOT EXISTS artifact_migrations (
@@ -437,11 +438,13 @@ func (s *sqlStore) FinalizeVersion(ctx context.Context, artifactID string, seq i
 
 // ClaimFinalize implements Store. One conditional update claims the
 // version, so of two concurrent finalize requests exactly one succeeds.
-func (s *sqlStore) ClaimFinalize(ctx context.Context, artifactID string, seq int) error {
-	res, err := s.db.ExecContext(ctx, s.rebind(`UPDATE artifact_version SET state = ?
-		WHERE artifact_id = ? AND seq = ? AND state = ?
+func (s *sqlStore) ClaimFinalize(ctx context.Context, artifactID string, seq int, staleBefore time.Time) error {
+	res, err := s.db.ExecContext(ctx, s.rebind(`UPDATE artifact_version SET state = ?, claimed_at = ?
+		WHERE artifact_id = ? AND seq = ?
+		AND (state = ? OR (state = ? AND claimed_at IS NOT NULL AND claimed_at < ?))
 		AND NOT EXISTS (SELECT 1 FROM artifact_file WHERE version_id = artifact_version.id AND received = ?)`),
-		VersionStateFinalizing, artifactID, seq, VersionStatePending, false)
+		VersionStateFinalizing, s.timeArg(time.Now()), artifactID, seq,
+		VersionStatePending, VersionStateFinalizing, s.timeArg(staleBefore), false)
 	if err != nil {
 		return fmt.Errorf("artifacts: claim finalize: %w", err)
 	}

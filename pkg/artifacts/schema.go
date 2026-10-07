@@ -249,3 +249,15 @@ ALTER TABLE artifact_file ADD COLUMN IF NOT EXISTS received BOOLEAN NOT NULL DEF
 CREATE INDEX IF NOT EXISTS idx_artifact_version_state
     ON artifact_version (state, created_at);
 `
+
+// migrationFinalizeClaims records when a finalize request claimed a
+// version, so a claim left behind by a stopped hub can be taken over.
+const migrationFinalizeClaims = "0004_finalize_claims"
+
+const sqliteFinalizeClaims = `
+ALTER TABLE artifact_version ADD COLUMN claimed_at TEXT;
+`
+
+const postgresFinalizeClaims = `
+ALTER TABLE artifact_version ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ;
+`

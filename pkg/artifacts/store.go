@@ -197,10 +197,13 @@ type Store interface {
 	MarkReceived(ctx context.Context, versionID, path, mediaType string) error
 
 	// ClaimFinalize moves the pending version seq of an artifact to
-	// finalizing, so that exactly one finalize request completes it. It
-	// returns ErrConflict when the version is not pending or a file of its
-	// manifest is still pending, and ErrNotFound when it does not exist.
-	ClaimFinalize(ctx context.Context, artifactID string, seq int) error
+	// finalizing, so that exactly one finalize request completes it. A
+	// version already finalizing is taken over when its claim is older
+	// than staleBefore (left behind by a request that never completed). It
+	// returns ErrConflict when the version cannot be claimed or a file of
+	// its manifest is still pending, and ErrNotFound when it does not
+	// exist.
+	ClaimFinalize(ctx context.Context, artifactID string, seq int, staleBefore time.Time) error
 
 	// ReleaseFinalize returns a finalizing version to pending, for a
 	// finalize request that could not complete it.

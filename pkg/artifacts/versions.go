@@ -640,7 +640,7 @@ func (s *Service) handleFinalize(w http.ResponseWriter, r *http.Request, id stri
 	}
 	// Claim the version before any remote fetch, so that one finalize
 	// request completes it and concurrent ones answer 409 at once.
-	switch err := b.store.ClaimFinalize(ctx, a.ID, seq); {
+	switch err := b.store.ClaimFinalize(ctx, a.ID, seq, time.Now().Add(-staleFinalizeClaim)); {
 	case errors.Is(err, ErrConflict):
 		writeError(w, http.StatusConflict, "conflict", "the version is not pending or not complete")
 		return
@@ -721,6 +721,11 @@ func (s *Service) finalizeExtras(w http.ResponseWriter, r *http.Request, b backe
 	}
 	return s.remoteImages(ctx, w, b, v.ID, window, entry.Size > imageScanWindow, versionUsage{files: v.FileCount, bytes: v.TotalBytes})
 }
+
+// staleFinalizeClaim is how old a finalize claim must be before another
+// finalize request may take it over: longer than any finalize can run (the
+// longest remote image budget plus the write margin), with room to spare.
+const staleFinalizeClaim = MaxRemoteFetchBudget + publishDeadlineMargin + time.Minute
 
 // Version list pages.
 const (

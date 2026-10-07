@@ -70,7 +70,7 @@ func TestStoreTwoStepVersion(t *testing.T) {
 		if err := st.MarkReceived(ctx, v.ID, "index.html", "text/html"); err != nil {
 			t.Fatalf("MarkReceived: %v", err)
 		}
-		if err := st.ClaimFinalize(ctx, a.ID, 1); !errors.Is(err, ErrConflict) {
+		if err := st.ClaimFinalize(ctx, a.ID, 1, staleClaim()); !errors.Is(err, ErrConflict) {
 			t.Fatalf("claim with a missing file: %v, want ErrConflict", err)
 		}
 		if _, err := st.FinalizeVersion(ctx, a.ID, 1, nil); !errors.Is(err, ErrConflict) {
@@ -84,10 +84,10 @@ func TestStoreTwoStepVersion(t *testing.T) {
 		}
 		extra := []File{{VersionID: v.ID, Path: "_remote/" + strings.Repeat("cd", 32), Size: 7, SHA256: strings.Repeat("ef", 32),
 			MediaType: "image/png", Origin: FileOriginRemote, SourceURL: "https://example.com/x.png", FetchStatus: FetchStatusOK}}
-		if err := st.ClaimFinalize(ctx, a.ID, 1); err != nil {
+		if err := st.ClaimFinalize(ctx, a.ID, 1, staleClaim()); err != nil {
 			t.Fatalf("ClaimFinalize: %v", err)
 		}
-		if err := st.ClaimFinalize(ctx, a.ID, 1); !errors.Is(err, ErrConflict) {
+		if err := st.ClaimFinalize(ctx, a.ID, 1, staleClaim()); !errors.Is(err, ErrConflict) {
 			t.Fatalf("second claim: %v, want ErrConflict", err)
 		}
 		if err := st.MarkReceived(ctx, v.ID, "index.html", "text/html"); !errors.Is(err, ErrConflict) {
@@ -96,10 +96,10 @@ func TestStoreTwoStepVersion(t *testing.T) {
 		if err := st.ReleaseFinalize(ctx, a.ID, 1); err != nil {
 			t.Fatal(err)
 		}
-		if err := st.ClaimFinalize(ctx, a.ID, 1); err != nil {
+		if err := st.ClaimFinalize(ctx, a.ID, 1, staleClaim()); err != nil {
 			t.Fatalf("claim after release: %v", err)
 		}
-		if err := st.ClaimFinalize(ctx, a.ID, 9); !errors.Is(err, ErrNotFound) {
+		if err := st.ClaimFinalize(ctx, a.ID, 9, staleClaim()); !errors.Is(err, ErrNotFound) {
 			t.Errorf("claim of a missing version = %v, want ErrNotFound", err)
 		}
 		got, err = st.FinalizeVersion(ctx, a.ID, 1, extra)
@@ -139,7 +139,7 @@ func TestStoreTwoStepVersion(t *testing.T) {
 			t.Errorf("third pending version = %v, want ErrTooManyPending", err)
 		}
 		for _, seq := range []int{2, 3} {
-			if err := st.ClaimFinalize(ctx, a.ID, seq); err != nil {
+			if err := st.ClaimFinalize(ctx, a.ID, seq, staleClaim()); err != nil {
 				t.Fatalf("claim v%d: %v", seq, err)
 			}
 		}
@@ -232,7 +232,7 @@ func TestStoreReapPending(t *testing.T) {
 		if err := st.MarkReceived(ctx, kv.ID, "a.txt", "text/plain"); err != nil {
 			t.Fatal(err)
 		}
-		if err := st.ClaimFinalize(ctx, kept.ID, 1); err != nil {
+		if err := st.ClaimFinalize(ctx, kept.ID, 1, staleClaim()); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := st.FinalizeVersion(ctx, kept.ID, 1, nil); err != nil {
@@ -248,7 +248,7 @@ func TestStoreReapPending(t *testing.T) {
 		if err := st.MarkReceived(ctx, av.ID, "a.txt", "text/plain"); err != nil {
 			t.Fatal(err)
 		}
-		if err := st.ClaimFinalize(ctx, abandoned.ID, 1); err != nil {
+		if err := st.ClaimFinalize(ctx, abandoned.ID, 1, staleClaim()); err != nil {
 			t.Fatal(err)
 		}
 		// A fresh pending version is not reaped.
@@ -309,7 +309,7 @@ func TestStoreConcurrentFinalizes(t *testing.T) {
 			seqs = append(seqs, v.Seq)
 		}
 		for _, seq := range append([]int{1}, seqs...) {
-			if err := st.ClaimFinalize(ctx, a.ID, seq); err != nil {
+			if err := st.ClaimFinalize(ctx, a.ID, seq, staleClaim()); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -345,7 +345,7 @@ func TestStoreReapRacesFinalize(t *testing.T) {
 			if err := st.MarkReceived(ctx, v.ID, "a.txt", "text/plain"); err != nil {
 				t.Fatal(err)
 			}
-			if err := st.ClaimFinalize(ctx, a.ID, 1); err != nil {
+			if err := st.ClaimFinalize(ctx, a.ID, 1, staleClaim()); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := db.Exec(st.(*sqlStore).rebind("UPDATE artifact_version SET created_at = ? WHERE id = ?"),
@@ -375,6 +375,39 @@ func TestStoreReapRacesFinalize(t *testing.T) {
 			default:
 				t.Fatalf("round %d: finalize %v, reaped %d, state %s", round, finErr, reaped, gv.State)
 			}
+		}
+	})
+}
+
+// staleClaim is the cutoff the service passes: claims older than this may
+// be taken over.
+func staleClaim() time.Time { return time.Now().Add(-staleFinalizeClaim) }
+
+// TestStoreStaleFinalizeClaimIsTakenOver: a claim left behind by a finalize
+// that never completed can be taken over once it is older than the cutoff;
+// a recent one cannot.
+func TestStoreStaleFinalizeClaimIsTakenOver(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, db *sql.DB, st Store, _ func() *sql.DB) {
+		ctx := context.Background()
+		a, v := pendingArtifact(t, st, "", "a.txt")
+		if err := st.MarkReceived(ctx, v.ID, "a.txt", "text/plain"); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.ClaimFinalize(ctx, a.ID, 1, staleClaim()); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.ClaimFinalize(ctx, a.ID, 1, staleClaim()); !errors.Is(err, ErrConflict) {
+			t.Fatalf("recent claim taken over: %v", err)
+		}
+		old := st.(*sqlStore).timeArg(time.Now().Add(-staleFinalizeClaim - time.Minute))
+		if _, err := db.Exec(st.(*sqlStore).rebind("UPDATE artifact_version SET claimed_at = ? WHERE id = ?"), old, v.ID); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.ClaimFinalize(ctx, a.ID, 1, staleClaim()); err != nil {
+			t.Fatalf("stale claim not taken over: %v", err)
+		}
+		if got, err := st.FinalizeVersion(ctx, a.ID, 1, nil); err != nil || got.CurrentSeq != 1 {
+			t.Fatalf("finalize after takeover = %+v, %v", got, err)
 		}
 	})
 }
