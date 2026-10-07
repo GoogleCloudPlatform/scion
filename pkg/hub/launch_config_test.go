@@ -44,7 +44,7 @@ func TestNew_ClampsLaunchTimeoutBelowMinimum(t *testing.T) {
 
 	// Below the 30s minimum (the broker's fixed 20s abort margin would leave
 	// no time for a launch to actually run).
-	srv, err := New(ServerConfig{LaunchTimeout: 5 * time.Second}, s)
+	srv, err := newTestHubServer(t, ServerConfig{LaunchTimeout: 5 * time.Second}, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
@@ -63,7 +63,7 @@ func TestNew_PreservesValidLaunchTimeout(t *testing.T) {
 		t.Fatalf("failed to migrate test store: %v", err)
 	}
 
-	srv, err := New(ServerConfig{LaunchTimeout: 10 * time.Minute}, s)
+	srv, err := newTestHubServer(t, ServerConfig{LaunchTimeout: 10 * time.Minute}, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
@@ -89,7 +89,7 @@ func TestNew_PreservesValidLaunchKeepaliveSeconds(t *testing.T) {
 		t.Fatalf("failed to migrate test store: %v", err)
 	}
 
-	srv, err := New(ServerConfig{LaunchKeepaliveSeconds: 30}, s)
+	srv, err := newTestHubServer(t, ServerConfig{LaunchKeepaliveSeconds: 30}, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}

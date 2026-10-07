@@ -511,6 +511,13 @@ const FALLBACK_SCOPES: ScopeOption[] = [
     isAlias: false,
   },
   {
+    value: 'project:set_messaging_policy',
+    label: 'project:set_messaging_policy',
+    description: 'Set project cross-project messaging policy (owner/admin only)',
+    resource: 'project',
+    isAlias: false,
+  },
+  {
     value: 'scheduled_event:delete',
     label: 'scheduled_event:delete',
     description: 'Cancel scheduled events and delete schedules',

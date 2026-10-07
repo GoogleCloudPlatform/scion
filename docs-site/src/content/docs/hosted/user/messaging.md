@@ -162,6 +162,9 @@ scion message agent:tech-lead "Please review the auth module."
 # Attach a file
 scion message @tech-lead "See the test results." --attach ./results.json
 
+# Point at a published artifact (see Artifacts); the recipient is told how to fetch it
+scion message @tech-lead "Design ready for review." --artifact scion://artifact/5f1c2d3e-6b1a-4c55-9f3e-0d6e7a1b2c3d
+
 # Read message body from a file (useful for long messages or scripted workflows)
 scion message @tech-lead --body-file ./review-notes.md
 

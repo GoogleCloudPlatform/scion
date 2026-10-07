@@ -633,6 +633,34 @@ func TestHandleHealthSummary_UnhealthyNotDowngraded(t *testing.T) {
 	assert.Contains(t, resp.Hub.UnhealthyChecks, "database: unhealthy")
 }
 
+func TestHealthSummary_DecisionAuditWarningDegradesWithoutUnavailability(t *testing.T) {
+	srv, _ := testServer(t)
+	f := newAuditFixture(t, auditFixtureError)
+	f.requireAdmission(t)
+	f.observe(1, 1, true)
+	f.emit()
+	// Only this test attaches the finite fixture router for the summary projection.
+	srv.decisionAuditRouter = f.router
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/admin/health/summary", nil)
+	require.Equal(t, http.StatusOK, rr.Code)
+	var summary HealthSummaryResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &summary))
+	assert.Equal(t, HealthStatusDegraded, summary.Status)
+	assert.Equal(t, decisionAuditFaultWarning, summary.Hub.Checks[decisionAuditNewHealthKey])
+	assert.Contains(t, summary.Hub.UnhealthyChecks, decisionAuditNewHealthKey+": "+decisionAuditFaultWarning)
+	assert.Equal(t, "healthy", summary.Database.Status)
+	// Serving health stays HTTP 200; database-critical unavailability still wins.
+	health := httptest.NewRecorder()
+	srv.handleHealthz(health, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	assert.Equal(t, http.StatusOK, health.Code)
+	ready := httptest.NewRecorder()
+	srv.handleReadyz(ready, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	assert.Equal(t, http.StatusOK, ready.Code)
+	srv.store = pingFailStore{srv.store}
+	info := srv.GetHealthInfo(context.Background())
+	assert.Equal(t, HealthStatusUnhealthy, info.Status)
+}
+
 // Chat plugin broker records are always marked online; the connected broker
 // count in /healthz and the health summary must only count runtime brokers.
 func TestHealthStats_ConnectedBrokersExcludesPlugins(t *testing.T) {

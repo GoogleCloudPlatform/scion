@@ -37,7 +37,7 @@ func newShutdownTestServer(t *testing.T) *Server {
 		t.Fatalf("failed to migrate test store: %v", err)
 	}
 
-	srv, err := New(DefaultServerConfig(), st)
+	srv, err := newTestHubServer(t, DefaultServerConfig(), st)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}

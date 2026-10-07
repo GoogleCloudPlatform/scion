@@ -109,10 +109,9 @@ func bypassAgentsServer(t *testing.T) (*Server, store.Store) {
 		Email:       "dev@localhost",
 	}
 	cfg.BrokerAuthConfig = DefaultBrokerAuthConfig()
-	srv, err := New(cfg, s)
+	srv, err := newTestHubServer(t, cfg, s)
 	require.NoError(t, err)
 	srv.SetHubID("test-hub-id")
-	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 	waitUserScopedDataSweep(t, srv)
 	return srv, s
 }

@@ -9,7 +9,7 @@ Artifacts are behind the `hub.artifacts` experiment, which is **off by default**
 
 An **artifact** is a published file or folder (a *bundle*) with a stable reference, `scion://artifact/<id>`, that works from any runtime broker, in any project the reader can access, and in the web UI. The hub stores the bytes, so a reader never needs access to the publisher's filesystem or shared directories.
 
-This page covers what is available today: publishing files and folders, versions, fetching, and the artifact page. Message references, review and share links are planned.
+This page covers what is available today: publishing files and folders, versions, fetching, the artifact page, and artifact references in messages. Review and share links are planned.
 
 Each artifact has numbered **versions**. A version is an immutable snapshot of the bundle: its files, one **entry** file (the one the web page opens and `get` prints), an optional note, and who published it. Publishing again under the same `--key` adds a version; the latest one is the artifact's **current** version, and `scion://artifact/<id>@<seq>` names one version for good.
 
@@ -93,6 +93,24 @@ An artifact whose entry file is HTML (a single page or a small site published as
 - The frame loads the version through a **view URL**, `/api/v1/artifacts/view/<capability>/<entry>`, issued to a reader of the artifact and valid for 30 minutes. Relative links in the bundle (`img/chart.png`, `css/site.css`) resolve under it, so the page loads its own files. The view URL names one version of one artifact and gives access to nothing else; it is not a share link.
 - Every view response carries a `Content-Security-Policy` with a `sandbox` directive, so the page stays isolated even when the URL is opened directly. The page may load scripts, styles, images, fonts and media only from its own files under the view URL; it cannot make network requests from script, embed other frames or plugins, submit forms, open windows or navigate the page around it.
 - **Remote images are not loaded in HTML artifacts; include them in the bundle.** When an HTML entry references images by absolute `http(s)` URL, the publish response and the CLI print that warning, and the viewer shows it above the frame.
+
+## Artifacts in messages
+
+A message can name artifacts. The message carries only the reference, never the bytes and never a copy of the title; each reader sees what their own access allows.
+
+```text
+$ scion message @reviewer "Design ready for review." --artifact scion://artifact/5f1c2d3e-6b1a-4c55-9f3e-0d6e7a1b2c3d
+```
+
+- **Sending.** `--artifact` (repeatable, at most 10 per message) adds the reference to the message text and to the message's `artifacts` metadata entry. The Hub keeps only references the sender can read at send time; it drops the others and returns a warning that does not say why a reference was dropped. If artifacts are not enabled on the hub, every reference is dropped and the warning says so.
+- **What an agent receives.** The delivered message keeps the `artifacts` metadata entry and ends with one fetch hint per artifact, built from the reference alone:
+  ```text
+  Artifact: v2 - scion artifact get scion://artifact/5f1c2d3e-...@2
+  Artifact: current - scion artifact get scion://artifact/5f1c2d3e-...
+  ```
+  The hint carries no title. Whether the recipient may read the artifact is decided when it runs `scion artifact get`, from any broker, without shared directories.
+- **What web chat shows.** Chat history responses include `messageArtifacts`, keyed by message ID, resolved for the viewing user: an artifact the viewer can read shows its title, version and owner; any other reference shows only the reference itself, the same as for an artifact that does not exist.
+- **Where references are kept.** Direct messages to an agent, messages from an agent to a user or conversation, and web chat messages to agents carry references. Group (`group[...]`) and broadcast messages, @-mention copies, and messages arriving through chat plugins do not; any `artifacts` metadata they arrive with is removed.
 
 ## Web pages
 
