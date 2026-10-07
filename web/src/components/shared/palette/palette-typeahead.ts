@@ -326,7 +326,7 @@ export class PaletteTypeahead {
 
   /**
    * Whether `e` is a key an IME processed (keyCode 229) while the hidden
-   * field holds the keyboard. Such a key belongs to the field,
+   * field holds the keyboard and has focus. Such a key belongs to the field,
    * and leaves the captured text, which the field's text follows, alone:
    *
    * - A character or Delete passes through to the field. The field inserts
@@ -341,7 +341,7 @@ export class PaletteTypeahead {
    *   being replaced.
    */
   private isImeKeyForField(e: KeyboardEvent): boolean {
-    return e.keyCode === 229 && this.proxy !== null;
+    return e.keyCode === 229 && this.proxy !== null && document.activeElement === this.proxy;
   }
 }
 

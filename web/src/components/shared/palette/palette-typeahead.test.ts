@@ -766,6 +766,18 @@ describe('PaletteTypeahead: holding the on-screen keyboard', () => {
     expect(typeahead.take()).toBe('ahi');
   });
 
+  it('with the field out of focus, the capture takes IME-processed keys', () => {
+    typeahead = touchTypeahead();
+    typeahead.start();
+    const proxy = typeahead.keyboardProxy!;
+    press('a');
+    commitAtField(proxy, 'hi', false);
+    target.focus();
+    expect(press('x', { keyCode: 229 } as KeyboardEventInit).defaultPrevented).toBe(true);
+    expect(press('Backspace', { keyCode: 229 } as KeyboardEventInit).defaultPrevented).toBe(true);
+    expect(typeahead.take()).toBe('ahi');
+  });
+
   it('an IME-processed Enter is swallowed without moving field text', () => {
     typeahead = touchTypeahead();
     typeahead.start();
