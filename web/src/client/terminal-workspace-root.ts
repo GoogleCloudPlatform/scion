@@ -1312,10 +1312,7 @@ export class TerminalWorkspaceRoot {
         : `Reconnect all: reconnect ${countLabel(reconnectable)} that ${
             reconnectable === 1 ? 'is' : 'are'
           } disconnected and whose agent still exists. Connected terminals and terminals for deleted agents are left alone.`;
-    this.bulkReconnect.setAttribute(
-      'aria-label',
-      `Reconnect all disconnected terminals (${reconnectable})`
-    );
+    this.bulkReconnect.setAttribute('aria-label', `Reconnect all (${reconnectable} eligible)`);
 
     this.bulkRemove.disabled = inactive === 0;
     this.bulkRemove.title =
@@ -1324,7 +1321,7 @@ export class TerminalWorkspaceRoot {
         : `Remove all inactive: remove ${countLabel(inactive)} whose agent was deleted or that ${
             inactive === 1 ? 'is' : 'are'
           } disconnected. Connected terminals stay open.`;
-    this.bulkRemove.setAttribute('aria-label', `Remove all inactive terminals (${inactive})`);
+    this.bulkRemove.setAttribute('aria-label', `Remove all inactive (${inactive} eligible)`);
   }
 
   /** "Reconnect all": runs the row Reconnect action on every eligible entry. */
@@ -1798,12 +1795,12 @@ export class TerminalWorkspaceRoot {
         justify-content: center;
         border: 1px solid var(--scion-border, #e2e8f0);
         background: var(--scion-bg-subtle, #f1f5f9);
-        color: var(--scion-primary-600, #2563eb);
+        color: var(--scion-primary, #3b82f6);
         border-radius: 999px;
         cursor: pointer;
       }
       .terminal-bulk-remove {
-        color: var(--scion-danger-600, #dc2626);
+        color: var(--scion-status-danger, #ef4444);
       }
       .terminal-bulk-action:hover:not(:disabled),
       .terminal-bulk-action:focus-visible {
@@ -1865,7 +1862,7 @@ export class TerminalWorkspaceRoot {
       }
       .terminal-jump-btn:focus-visible {
         background: var(--scion-bg-subtle, #f1f5f9);
-        outline: 2px solid var(--scion-primary-600, #2563eb);
+        outline: 2px solid var(--scion-primary, #3b82f6);
         outline-offset: -2px;
       }
       /* Hover only where it does not stick after a tap. */
@@ -1906,7 +1903,7 @@ export class TerminalWorkspaceRoot {
         cursor: grabbing;
       }
       .terminal-rail-item[data-selected='true'] {
-        background: color-mix(in srgb, var(--scion-primary-600, #2563eb) 10%, transparent);
+        background: color-mix(in srgb, var(--scion-primary, #3b82f6) 10%, transparent);
       }
       .terminal-rail-select {
         min-width: 0;
@@ -2034,9 +2031,9 @@ export class TerminalWorkspaceRoot {
         outline: none;
       }
       .terminal-layout-btn[data-active='true'] {
-        background: color-mix(in srgb, var(--scion-primary-600, #2563eb) 15%, transparent);
-        border-color: var(--scion-primary-600, #2563eb);
-        color: var(--scion-primary-600, #2563eb);
+        background: color-mix(in srgb, var(--scion-primary, #3b82f6) 15%, transparent);
+        border-color: var(--scion-primary, #3b82f6);
+        color: var(--scion-primary, #3b82f6);
         font-weight: 600;
       }
       .terminal-layout-restore {
@@ -2076,9 +2073,9 @@ export class TerminalWorkspaceRoot {
       .terminal-pane-host[data-effective-layout='two-columns'] scion-terminal-pane[data-focused],
       .terminal-pane-host[data-effective-layout='two-rows'] scion-terminal-pane[data-focused],
       .terminal-pane-host[data-effective-layout='four'] scion-terminal-pane[data-focused] {
-        outline: 2px solid var(--scion-primary-600, #2563eb);
+        outline: 2px solid var(--scion-primary, #3b82f6);
         outline-offset: -2px;
-        border-color: var(--scion-primary-600, #2563eb);
+        border-color: var(--scion-primary, #3b82f6);
       }
       .terminal-slot-placeholder {
         display: flex;
@@ -2095,11 +2092,11 @@ export class TerminalWorkspaceRoot {
         transition: border-color 0.15s, background 0.15s;
       }
       .terminal-slot-placeholder[data-drag-over='true'] {
-        border-color: var(--scion-primary-600, #2563eb);
-        background: color-mix(in srgb, var(--scion-primary-600, #2563eb) 15%, transparent);
+        border-color: var(--scion-primary, #3b82f6);
+        background: color-mix(in srgb, var(--scion-primary, #3b82f6) 15%, transparent);
       }
       scion-terminal-pane[data-drag-over='true'] {
-        outline: 2px solid var(--scion-primary-600, #2563eb);
+        outline: 2px solid var(--scion-primary, #3b82f6);
         outline-offset: -2px;
       }
       .terminal-aria-live {
