@@ -529,6 +529,9 @@ func (s *DelegationEdgeStore) descendantLevel(ctx context.Context, q store.Desce
 			return nil, err
 		}
 		for _, a := range owned {
+			if a.OwnerID == nil {
+				continue
+			}
 			add(a.ID, store.DescendantRef{ViaID: via(*a.OwnerID), Depth: depth, Link: store.DescendantLinkOwner})
 		}
 	}
@@ -539,6 +542,9 @@ func (s *DelegationEdgeStore) descendantLevel(ctx context.Context, q store.Desce
 			return nil, err
 		}
 		for _, a := range created {
+			if a.CreatedBy == nil {
+				continue
+			}
 			add(a.ID, store.DescendantRef{ViaID: via(*a.CreatedBy), Depth: depth, Link: store.DescendantLinkCreatedBy})
 		}
 	}
