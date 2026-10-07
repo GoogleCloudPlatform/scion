@@ -92,9 +92,6 @@ func updateSingleHarnessConfig(ctx context.Context, hubCtx *HubContext, name, ur
 	if err != nil {
 		return fmt.Errorf("failed to search Hub: %w", err)
 	}
-	if resp == nil {
-		return fmt.Errorf("harness-config %q not found on Hub", name)
-	}
 
 	var match *hubclient.HarnessConfig
 	for i := range resp.HarnessConfigs {
@@ -123,9 +120,6 @@ func updateSingleHarnessConfig(ctx context.Context, hubCtx *HubContext, name, ur
 	if err != nil {
 		return fmt.Errorf("reimport failed: %w", err)
 	}
-	if result == nil {
-		return fmt.Errorf("reimport returned no result for %q", name)
-	}
 
 	if isJSONOutput() {
 		return outputJSON(ActionResult{
@@ -150,9 +144,6 @@ func updateAllHarnessConfigs(ctx context.Context, hubCtx *HubContext) error {
 	})
 	if err != nil {
 		return fmt.Errorf("failed to list harness-configs: %w", err)
-	}
-	if resp == nil {
-		return fmt.Errorf("no harness-configs found")
 	}
 
 	var updated, skipped, failed int

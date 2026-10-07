@@ -135,9 +135,7 @@ func assertListTopicsByProjectsParity(t *testing.T, db *sql.DB, dialect string, 
 }
 
 func TestListTopicsByProjects_SQLite(t *testing.T) {
-	db, err := sql.Open("sqlite3", ":memory:")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = db.Close() })
+	db := openTestMemorySQLite(t, "sqlite3")
 	wcs := NewWebChatStore(db, "sqlite3")
 	require.NoError(t, wcs.Init())
 	assertListTopicsByProjectsParity(t, db, "sqlite3", wcs)

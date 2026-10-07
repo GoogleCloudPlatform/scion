@@ -20,7 +20,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"maps"
 	"os"
 	"os/exec"
 	"os/user"
@@ -1699,24 +1698,29 @@ authDone:
 	if err != nil {
 		return nil, err
 	}
-	// After an explicit backend change to nfs, refuse an empty nfs
-	// directory while the previous local directory is not empty. Dirs that
-	// pass are not checked again.
-	if passed, err := checkChangedSharedDirs(sharedDirRecord, effectiveSharedDirs, sharedDirStorage, sharedDirVolumesByName, projectDir, m.Runtime.Name()); err != nil {
-		return nil, err
-	} else if len(passed) > 0 {
-		updated := *sharedDirRecord
-		updated.Previous = maps.Clone(sharedDirRecord.Previous)
-		for _, name := range passed {
-			delete(updated.Previous, name)
-		}
-		if len(updated.Previous) == 0 {
-			updated.Previous = nil
-		}
-		if err := saveSharedDirStorageRecord(agentDir, &updated); err != nil {
-			slog.Warn("Start: could not update the agent's shared-dir storage record after checking changed shared dirs", "agent", opts.Name, "error", err)
-		}
+	// After an explicit backend change, refuse an empty directory on the
+	// new backend while the directory on the previous backend is not
+	// empty. Dirs that pass are not checked again. Dirs changed back to
+	// local whose storage is a runtime claim are checked against the run
+	// config, just before the runtime starts the agent.
+	sdCheck := sharedDirCheckInput{
+		rec:         sharedDirRecord,
+		dirs:        effectiveSharedDirs,
+		realization: sharedDirStorage,
+		volumes:     sharedDirVolumesByName,
+		projectDir:  projectDir,
+		runtimeName: m.Runtime.Name(),
+		gs:          startGlobalSettings,
+		projectID:   hubDispatchedProjectID,
 	}
+	if checker, ok := m.Runtime.(runtime.SharedDirClaimChecker); ok {
+		sdCheck.claims = checker
+	}
+	passedSharedDirs, deferredSharedDirs, err := checkChangedSharedDirs(ctx, sdCheck)
+	if err != nil {
+		return nil, err
+	}
+	sharedDirRecord = dropCheckedSharedDirs(agentDir, sharedDirRecord, passedSharedDirs, opts.Name)
 	if len(effectiveSharedDirs) > 0 && sharedDirRecord == nil && sharedDirStorageResolved {
 		// Record the backends the agent's shared dirs were set up with, so
 		// later starts keep using them even if settings change.
@@ -2261,6 +2265,17 @@ authDone:
 	}
 	slog.Info("agent start: pre-runtime provisioning complete", "agent", opts.Name,
 		"elapsed_ms", time.Since(startEntry).Milliseconds())
+	if len(deferredSharedDirs) > 0 {
+		// A refusal here comes after the home storage and nfs workspace
+		// directories above are prepared; those steps are idempotent and
+		// are redone when the start is retried.
+		passed, err := checkSharedDirClaims(ctx, sdCheck, deferredSharedDirs, runCfg)
+		if err != nil {
+			return nil, err
+		}
+		// dropCheckedSharedDirs saves the record; nothing reads it after this.
+		_ = dropCheckedSharedDirs(agentDir, sharedDirRecord, passed, opts.Name)
+	}
 	id, err := m.Runtime.Run(ctx, runCfg)
 	if err != nil {
 		// Provisioning writes agent-info.json in "created" state before the
