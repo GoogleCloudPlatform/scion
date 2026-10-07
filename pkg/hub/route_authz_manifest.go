@@ -180,6 +180,9 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/admin/project-defaults":             "admin", // Project defaults
 	"/api/v1/admin/agents/reset-auth-all":        "admin", // Reset all agent auth
 	"/api/v1/admin/gcp-quota":                    "admin", // GCP quota management
+	"/api/v1/admin/delegation-adoption":          "admin", // Delegation-provenance adoption status
+	"/api/v1/admin/delegation-adoption/previews": "admin", // Delegation-provenance adoption preview
+	"/api/v1/admin/delegation-adoption/commits":  "admin", // Delegation-provenance adoption commit
 	"/api/v1/admin/lifecycle-hooks":              "admin", // Lifecycle hooks
 	"/api/v1/admin/lifecycle-hooks/":             "admin", // Lifecycle hook by ID
 	"/api/v1/admin/validate-resources":           "admin", // Validate resources
@@ -255,9 +258,10 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/conduit":            "agent-token",   // GET (WebSocket): the agent's own conduit session; agent:port:forward; 404 when the experiment is off
 
 	// ── Artifacts (hub.artifacts experiment) ──────────────────────────
-	"/api/v1/artifacts":         "authenticated", // Artifact collection; service checks artifact.* through artifacts.Host; 404 when the experiment is off
+	"/api/v1/artifacts":         "authenticated", // Artifact collection (publish; ?mine=1 list filtered per row); service checks artifact.* through artifacts.Host; 404 when the experiment is off
 	"/api/v1/artifacts/":        "authenticated", // Artifact by ID; service checks artifact.* through artifacts.Host; 404 when the experiment is off
 	"/api/v1/artifacts/shared/": "authenticated", // Share links (RoutePublic in route metadata); still behind UnifiedAuthMiddleware until token-only access ships; 404 when the experiment is off
+	"/api/v1/artifacts/view/":   "public",        // GET/HEAD: one version's files under a short-lived view capability in the path, verified by the service on every request (no session used); 404 when the experiment is off
 
 	// ── Agent GCP identity ─────────────────────────────────────────────
 	"/api/v1/agent/gcp-token":          "agent-token", // Agent GCP access token

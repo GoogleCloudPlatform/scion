@@ -155,6 +155,11 @@ type HubServerConfig struct {
 	// stay synchronous permanently, regardless of this flag.
 	AsyncAgentLaunch bool `json:"asyncAgentLaunch" yaml:"asyncAgentLaunch" koanf:"asyncAgentLaunch"`
 
+	// PerfTrace turns on per-request performance tracing (phase timings,
+	// authorization store-call and decision-audit counts, DB pool waits).
+	// Off by default; observe only; read at startup.
+	PerfTrace bool `json:"perfTrace" yaml:"perfTrace" koanf:"perfTrace"`
+
 	// LaunchTimeout is the whole-launch budget from BeginLaunch (design
 	// §3.10). Default 5 minutes. The Hub reaper ends every in-flight launch
 	// between this deadline and +15s; the broker aborts 20s before it. The
@@ -600,6 +605,12 @@ type DevAuthConfig struct {
 	// admin_emails list. Values: "member" (default), "viewer". "admin" is
 	// blocked — admin promotion is handled exclusively by admin_emails.
 	DefaultUserRole string `json:"defaultUserRole" yaml:"defaultUserRole" koanf:"defaultUserRole"`
+	// AgentRunScope selects how the hub treats the run an agent token was
+	// issued for: "off" (default) or "observe".
+	AgentRunScope string `json:"agentRunScope,omitempty" yaml:"agentRunScope,omitempty" koanf:"agentRunScope"`
+	// AgentRunScopeLegacyUntil (RFC 3339) is when tokens issued without a
+	// run stop being accepted by run-scope checks.
+	AgentRunScopeLegacyUntil string `json:"agentRunScopeLegacyUntil,omitempty" yaml:"agentRunScopeLegacyUntil,omitempty" koanf:"agentRunScopeLegacyUntil"`
 	// Proxy holds proxy authentication settings (consulted when Mode == "proxy").
 	Proxy *ProxyAuthConfig `json:"proxy,omitempty" yaml:"proxy,omitempty" koanf:"proxy"`
 	// Transport holds transport-layer auth settings for agent outbound requests.
@@ -1390,6 +1401,8 @@ var snakeCaseFields = map[string]string{
 	// Layer-1 compound segments (from opsettings registry)
 	"adminemails":                "admin_emails",
 	"agentendpoint":              "agent_endpoint",
+	"agentrunscope":              "agent_run_scope",
+	"agentrunscopelegacyuntil":   "agent_run_scope_legacy_until",
 	"apibaseurl":                 "api_base_url",
 	"appid":                      "app_id",
 	"authorizeddomains":          "authorized_domains",
@@ -1460,10 +1473,13 @@ var camelCaseFields = map[string]string{
 	"adminemails":                   "adminEmails",
 	"adminmode":                     "adminMode",
 	"agentendpoint":                 "agentEndpoint",
+	"agentrunscope":                 "agentRunScope",
+	"agentrunscopelegacyuntil":      "agentRunScopeLegacyUntil",
 	"allowcontainerscriptharnesses": "allowContainerScriptHarnesses",
 	"apibaseurl":                    "apiBaseUrl",
 	"appid":                         "appId",
 	"asyncagentlaunch":              "asyncAgentLaunch",
+	"perftrace":                     "perfTrace",
 	"authorizeddomains":             "authorizedDomains",
 	"autosuspendstalled":            "autoSuspendStalled",
 	"brokerid":                      "brokerId",

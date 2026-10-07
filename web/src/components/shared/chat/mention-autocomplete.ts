@@ -21,7 +21,9 @@
  *
  * Design decisions (from design doc §4.5):
  * - Trigger: `@` at a word boundary (start of input or preceded by whitespace)
- * - Source: stateManager.getAgents() — already cached, no network call
+ * - Source: the `agents` and `members` the parent passes in (chat's member
+ *   roster: a space's members, or the hub view's users and the agent store's
+ *   hub list) — no network call
  * - Matching: case-insensitive subsequence over slug and name; exact-prefix ranked first
  * - Keys: Up/Down navigate, Enter/Tab accept, Esc dismiss
  * - Insert: plain text `@<slug> ` — no chips, no hidden markup

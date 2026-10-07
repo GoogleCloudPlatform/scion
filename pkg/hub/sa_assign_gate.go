@@ -297,6 +297,10 @@ type saAssignDenial struct {
 	kind         saAssignDenialKind
 	msg          string
 	resourceType string
+	// cause is the Layer 1 decision's adoptionDetailsCause. A
+	// ceiling_unrecorded cause adds the delegation-provenance adoption
+	// details; msg is unchanged.
+	cause DenyCause
 }
 
 func (d *saAssignDenial) Error() string {
@@ -315,7 +319,7 @@ func (d *saAssignDenial) write(w http.ResponseWriter) {
 	case saAssignDenyUnauthorized:
 		Unauthorized(w)
 	case saAssignDenyForbiddenStructured:
-		writeForbiddenStructured(w, d.msg, d.resourceType, ActionAssign)
+		writeForbiddenStructuredDenialCause(w, d.msg, d.resourceType, ActionAssign, "", d.cause)
 	default:
 		writeForbidden(w, d.msg)
 	}
@@ -356,7 +360,10 @@ const saAssignGenericForbiddenMsg = "You don't have permission to assign this GC
 // and reincarnating an agent keeps its existing edge, so neither clears the
 // cause. The same cause also covers a hop whose provenance version this
 // binary does not interpret (hopEffectCeilingDeny); the remedy is the same
-// for both.
+// for both. When the unrecorded hop is a row that delegation-provenance
+// adoption can address, the 403 details also name the admin adoption route
+// (addCeilingUnrecordedDetails). The message names the user-side remedy and
+// the details the admin-side one; the details add no message text.
 //
 // DenyCauseCeilingError and any unrecognised cause (including "", the zero
 // value) fall through to the generic message: a store fault is
@@ -429,7 +436,8 @@ func (s *Server) evaluateSAAssignment(ctx context.Context, r *http.Request, sa *
 	if decision := s.authzService.CheckAccess(ctx, identity, resource, ActionAssign); !decision.Allowed {
 		logAuthzDenial(r, identity, resource, ActionAssign, decision.Reason)
 		return &saAssignDenial{kind: saAssignDenyForbiddenStructured,
-			msg: saAssignForbiddenMessage(decision.DenyCause), resourceType: resource.Type}
+			msg: saAssignForbiddenMessage(decision.DenyCause), resourceType: resource.Type,
+			cause: decision.adoptionDetailsCause()}
 	}
 
 	// Layer 2: GCP actAs.

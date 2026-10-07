@@ -87,11 +87,10 @@ func (w *lockingStoreWrapper) TryAdvisoryLockObject(_ context.Context, classID s
 
 func newTestQuotaService(t *testing.T) (*QuotaService, store.Store) {
 	t.Helper()
-	baseStore, err := newTestStore(":memory:")
+	baseStore, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("newTestStore: %v", err)
 	}
-	t.Cleanup(func() { _ = baseStore.Close() })
 
 	wrapped := newLockingStoreWrapper(baseStore)
 

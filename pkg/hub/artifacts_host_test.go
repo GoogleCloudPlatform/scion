@@ -175,6 +175,36 @@ func TestArtifactHostAgentWithoutReadScopeIsNotServed(t *testing.T) {
 	}
 }
 
+// TestArtifactHostMissingScope: only an agent that presented a real token
+// is told which artifact scope it lacks; users, synthetic in-process
+// identities and unauthenticated callers are told nothing, and an agent
+// holding the scopes is told nothing either.
+func TestArtifactHostMissingScope(t *testing.T) {
+	host := newArtifactHost(&Server{})
+	agentCtx := func(scopes ...AgentTokenScope) context.Context {
+		return contextWithIdentity(context.Background(), artifactTestAgent("agent-1", "proj-1", scopes...))
+	}
+	for name, tc := range map[string]struct {
+		ctx        context.Context
+		permission string
+		want       string
+	}{
+		"no scopes":              {agentCtx(), artifacts.PermissionCreate, string(ScopeProjectArtifactRead)},
+		"project:read only":      {agentCtx(ScopeProjectRead), artifacts.PermissionCreate, string(ScopeProjectArtifactRead)},
+		"write without read":     {agentCtx(ScopeProjectArtifactWrite), artifacts.PermissionCreate, string(ScopeProjectArtifactRead)},
+		"read without write":     {agentCtx(ScopeProjectArtifactRead), artifacts.PermissionCreate, string(ScopeProjectArtifactWrite)},
+		"both scopes":            {agentCtx(ScopeProjectArtifactRead, ScopeProjectArtifactWrite), artifacts.PermissionCreate, ""},
+		"read for read":          {agentCtx(ScopeProjectArtifactRead), artifacts.PermissionRead, ""},
+		"unknown permission":     {agentCtx(), "agent.read", ""},
+		"no identity":            {context.Background(), artifacts.PermissionCreate, ""},
+		"user":                   {contextWithIdentity(context.Background(), NewAuthenticatedUser("u1", "u1@example.com", "U1", "member", "web")), artifacts.PermissionCreate, ""},
+		"user access token":      {contextWithIdentity(context.Background(), NewScopedUserIdentityWithCeiling(NewAuthenticatedUser("u1", "u1@example.com", "U1", "member", "web"), "proj-1", []string{"agent:read"}, "uat-1", permissions.FrozenPermissionCeiling{Version: permissions.CeilingVersionV1, PermissionIDs: []string{"agent.read"}})), artifacts.PermissionCreate, ""},
+		"synthetic agent, no id": {contextWithIdentity(context.Background(), &agentIdentityWrapper{&AgentTokenClaims{Claims: jwt.Claims{Subject: "agent-1"}, ProjectID: "proj-1"}}), artifacts.PermissionCreate, ""},
+	} {
+		assert.Equal(t, tc.want, host.MissingScope(tc.ctx, tc.permission), name)
+	}
+}
+
 // TestArtifactHostAuthorizeUsers checks that user decisions come from the
 // authz engine against the artifact's home project.
 func TestArtifactHostAuthorizeUsers(t *testing.T) {
@@ -214,6 +244,45 @@ func TestArtifactRoutesMatchService(t *testing.T) {
 		assert.Equal(t, permissions.ResourceArtifact, meta.Resource, pattern)
 	}
 	assert.Equal(t, RoutePublic, routeMetadataTable[artifacts.RouteShared].Classification)
+	assert.Equal(t, RoutePublic, routeMetadataTable[artifacts.RouteView].Classification)
+}
+
+// TestIsArtifactViewRequest: only clean GET or HEAD paths under the view
+// route pass the authentication middleware without credentials.
+func TestIsArtifactViewRequest(t *testing.T) {
+	for _, tc := range []struct {
+		method, target string
+		want           bool
+	}{
+		{http.MethodGet, "/api/v1/artifacts/view/cap/index.html", true},
+		{http.MethodHead, "/api/v1/artifacts/view/cap/img/a.png", true},
+		{http.MethodPost, "/api/v1/artifacts/view/cap/index.html", false},
+		{http.MethodPut, "/api/v1/artifacts/view/cap/index.html", false},
+		{http.MethodGet, "/api/v1/artifacts/view/cap/../../x", false},
+		{http.MethodGet, "/api/v1/artifacts/view//index.html", false},
+		{http.MethodGet, "/api/v1/artifacts/view/cap/dir/", false},
+		{http.MethodGet, "/api/v1/artifacts/abc/files/index.html", false},
+		{http.MethodGet, "/api/v1/artifactsview/cap/index.html", false},
+		{http.MethodGet, "/api/v1/agents", false},
+		// Escaped forms (the request URL keeps them in RawPath).
+		{http.MethodGet, "/api/v1/artifacts/view/cap/a%20b.png", true},
+		{http.MethodGet, "/api/v1/artifacts/view%2Fcap/index.html", false},
+		{http.MethodGet, "/api/v1%2Fartifacts/view/cap/index.html", false},
+		{http.MethodGet, "/api/v1/artifacts/view/cap/a%2Fb.png", false},
+		{http.MethodGet, "/api/v1/artifacts/view/cap/a%2fb.png", false},
+		{http.MethodGet, "/api/v1/artifacts/view/cap/%2E%2E/x", false},
+		{http.MethodGet, "/api/v1/artifacts/view/cap/%2e/x", false},
+		{http.MethodGet, "/api/v1/artifacts/view/cap/a%5Cb", false},
+		{http.MethodGet, "/api/v1/artifacts/view/cap/a%5cb", false},
+		{http.MethodGet, "/api/v1/artifacts/view/cap/x%2F%2e%2E/y", false},
+		{http.MethodGet, "/api/v1/artifacts/view/cap/a%00b.png", false},
+		{http.MethodGet, "/api/v1/artifacts/view/cap/a%2Eb.png", false},
+		{http.MethodGet, "/api/v1/artifacts/view/c%61p/index.html", false},
+		{http.MethodGet, "/api/v1/artifacts/%76iew/cap/index.html", false},
+	} {
+		r := httptest.NewRequest(tc.method, "http://hub"+tc.target, nil)
+		assert.Equal(t, tc.want, isArtifactViewRequest(r), "%s %s (path %q raw %q)", tc.method, tc.target, r.URL.Path, r.URL.RawPath)
+	}
 }
 
 var artifactRequestPaths = []struct{ method, path string }{
@@ -223,6 +292,7 @@ var artifactRequestPaths = []struct{ method, path string }{
 	{http.MethodDelete, "/api/v1/artifacts/art-1"},
 	{http.MethodGet, "/api/v1/artifacts/art-1/files/index.html"},
 	{http.MethodGet, "/api/v1/artifacts/shared/some-token"},
+	{http.MethodGet, "/api/v1/artifacts/view/some-capability/index.html"},
 }
 
 func serveArtifactRequests(t *testing.T, mux http.Handler, identity Identity) {
@@ -242,7 +312,7 @@ func serveArtifactRequests(t *testing.T, mux http.Handler, identity Identity) {
 	}
 }
 
-// TestArtifactRoutes404WhileExperimentOff covers all three patterns through
+// TestArtifactRoutes404WhileExperimentOff covers every pattern through
 // the hub's real mux: with hub.artifacts off (its default), every route
 // answers 404, for an authenticated caller and an anonymous one alike.
 func TestArtifactRoutes404WhileExperimentOff(t *testing.T) {
@@ -276,7 +346,9 @@ func TestArtifactRoutesServedWhileExperimentOn(t *testing.T) {
 	}{
 		{http.MethodGet, "/api/v1/artifacts/shared/some-token", http.StatusNotFound},
 		{http.MethodGet, "/api/v1/artifacts/art-1/unknown", http.StatusNotFound},
-		{http.MethodGet, "/api/v1/artifacts", http.StatusMethodNotAllowed},
+		{http.MethodPut, "/api/v1/artifacts", http.StatusMethodNotAllowed},
+		{http.MethodGet, "/api/v1/artifacts", http.StatusBadRequest},
+		{http.MethodGet, "/api/v1/artifacts?mine=1", http.StatusServiceUnavailable},
 		{http.MethodDelete, "/api/v1/artifacts/00000000-0000-4000-8000-000000000001", http.StatusMethodNotAllowed},
 		{http.MethodGet, "/api/v1/artifacts/00000000-0000-4000-8000-000000000001", http.StatusServiceUnavailable},
 	} {

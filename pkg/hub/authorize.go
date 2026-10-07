@@ -94,6 +94,40 @@ func writeForbiddenStructured(w http.ResponseWriter, msg string, resourceType st
 // with a known deciding stage. A delegation-ceiling denial adds
 // details.denied_by; no other stage adds anything.
 func writeForbiddenStructuredDenial(w http.ResponseWriter, msg string, resourceType string, action Action, deniedBy DeniedBy) {
+	writeForbiddenStructuredDenialCause(w, msg, resourceType, action, deniedBy, "")
+}
+
+// Additive details on a ceiling_unrecorded denial. They name the recovery
+// route only; no edge or ancestor ID is returned to the caller. The message
+// text is unchanged.
+const (
+	detailDenyCause       = "deny_cause"
+	detailRemediation     = "remediation"
+	detailRemediationPath = "remediation_path"
+
+	remediationDelegationProvenanceAdoption = "delegation_provenance_adoption"
+)
+
+// addCeilingUnrecordedDetails adds the delegation-provenance adoption keys
+// to details when cause is DenyCauseCeilingUnrecorded, allocating details
+// when needed. Any other cause returns details unchanged.
+func addCeilingUnrecordedDetails(details map[string]interface{}, cause DenyCause) map[string]interface{} {
+	if cause != DenyCauseCeilingUnrecorded {
+		return details
+	}
+	if details == nil {
+		details = make(map[string]interface{}, 3)
+	}
+	details[detailDenyCause] = string(DenyCauseCeilingUnrecorded)
+	details[detailRemediation] = remediationDelegationProvenanceAdoption
+	details[detailRemediationPath] = delegationAdoptionPath
+	return details
+}
+
+// writeForbiddenStructuredDenialCause is writeForbiddenStructuredDenial
+// with the decision's DenyCause; a ceiling_unrecorded cause adds the
+// delegation-provenance adoption details.
+func writeForbiddenStructuredDenialCause(w http.ResponseWriter, msg string, resourceType string, action Action, deniedBy DeniedBy, cause DenyCause) {
 	if msg == "" {
 		msg = "Insufficient permissions"
 	}
@@ -110,6 +144,7 @@ func writeForbiddenStructuredDenial(w http.ResponseWriter, msg string, resourceT
 			details["denied_by"] = string(DeniedByDelegationCeiling)
 		}
 	}
+	details = addCeilingUnrecordedDetails(details, cause)
 	writeError(w, http.StatusForbidden, ErrCodeForbidden, msg, details)
 }
 
@@ -148,7 +183,7 @@ func (s *Server) authorizeWithMessage(w http.ResponseWriter, r *http.Request, re
 	decision := s.authzService.CheckAccess(ctx, identity, resource, action)
 	if !decision.Allowed {
 		logAuthzDenial(r, identity, resource, action, decision.Reason)
-		writeForbiddenStructuredDenial(w, msg, resource.Type, action, decision.DeniedBy)
+		writeForbiddenStructuredDenialCause(w, msg, resource.Type, action, decision.DeniedBy, decision.adoptionDetailsCause())
 		return false
 	}
 	return true
@@ -325,7 +360,7 @@ func (s *Server) authorizeAgentCreate(w http.ResponseWriter, r *http.Request, pr
 	decision := s.agentCreateDecision(ctx, identity, projectID)
 	if !decision.Allowed {
 		logAuthzDenial(r, identity, resource, ActionCreate, decision.Reason)
-		writeForbiddenDenial(w, agentCreateDenyMessage, decision.DeniedBy)
+		writeForbiddenDenialCause(w, agentCreateDenyMessage, decision.DeniedBy, decision.adoptionDetailsCause())
 		return false
 	}
 	return true
@@ -360,6 +395,9 @@ type agentTargetDenial struct {
 	reason string
 	// deniedBy is the decision stage that denied, when attributed.
 	deniedBy DeniedBy
+	// cause is the decision's adoptionDetailsCause: ceiling_unrecorded when
+	// delegation-provenance adoption can address the denial, else empty.
+	cause DenyCause
 }
 
 // authorizeAgentTargetAction decides whether identity may perform action on
@@ -427,6 +465,7 @@ func (s *Server) authorizeAgentTargetAction(ctx context.Context, identity Identi
 			message:  agentTargetDenyMessage,
 			reason:   decision.Reason,
 			deniedBy: decision.DeniedBy,
+			cause:    decision.adoptionDetailsCause(),
 		}
 	}
 	return nil
@@ -445,21 +484,32 @@ func writeAgentTargetDenial(w http.ResponseWriter, r *http.Request, identity Ide
 		resource = agentResource(target)
 	}
 	logAuthzDenial(r, identity, resource, action, denial.reason)
-	writeForbiddenDenial(w, denial.message, denial.deniedBy)
+	writeForbiddenDenialCause(w, denial.message, denial.deniedBy, denial.cause)
 }
 
 // writeForbiddenDenial writes a 403 with message (default text when empty).
 // A delegation-ceiling denial adds details.denied_by and no other detail.
 func writeForbiddenDenial(w http.ResponseWriter, message string, deniedBy DeniedBy) {
-	if deniedBy != DeniedByDelegationCeiling {
+	writeForbiddenDenialCause(w, message, deniedBy, "")
+}
+
+// writeForbiddenDenialCause is writeForbiddenDenial with the decision's
+// DenyCause; a ceiling_unrecorded cause adds the delegation-provenance
+// adoption details.
+func writeForbiddenDenialCause(w http.ResponseWriter, message string, deniedBy DeniedBy, cause DenyCause) {
+	var details map[string]interface{}
+	if deniedBy == DeniedByDelegationCeiling {
+		details = map[string]interface{}{"denied_by": string(DeniedByDelegationCeiling)}
+	}
+	details = addCeilingUnrecordedDetails(details, cause)
+	if details == nil {
 		writeForbidden(w, message)
 		return
 	}
 	if message == "" {
 		message = "Insufficient permissions"
 	}
-	writeError(w, http.StatusForbidden, ErrCodeForbidden, message,
-		map[string]interface{}{"denied_by": string(DeniedByDelegationCeiling)})
+	writeError(w, http.StatusForbidden, ErrCodeForbidden, message, details)
 }
 
 // authorizeAgentLifecycle gates operations on an existing agent, for every

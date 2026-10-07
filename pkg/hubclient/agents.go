@@ -630,6 +630,20 @@ type MessageResponse struct {
 	// one entry per resolved mention name. Empty when the message had no
 	// mentions, or on hubs that predate this field.
 	MentionResults []messages.MentionResult `json:"mention_results,omitempty"`
+	// AttachmentWarnings lists attachments the hub could not record on the
+	// message, which was still sent without them. Empty when every
+	// attachment was recorded, or on hubs that predate this field.
+	AttachmentWarnings []AttachmentWarning `json:"attachment_warnings,omitempty"`
+}
+
+// AttachmentWarning names one attachment the hub could not record on a sent
+// message, for example because the file was staged on a different broker
+// than the hub and so does not exist on the hub host.
+type AttachmentWarning struct {
+	// Path is the attachment path as sent.
+	Path string `json:"path"`
+	// Reason is the hub's short explanation.
+	Reason string `json:"reason"`
 }
 
 // SendMessageOptions holds the optional parameters for
@@ -781,6 +795,10 @@ type OutboundMessageResult struct {
 	// one entry per resolved mention name. Empty when the message had no
 	// mentions, or on hubs that predate this field.
 	MentionResults []messages.MentionResult `json:"mention_results,omitempty"`
+	// AttachmentWarnings lists attachments the hub could not record on the
+	// message, which was still sent without them. Empty when every
+	// attachment was recorded, or on hubs that predate this field.
+	AttachmentWarnings []AttachmentWarning `json:"attachment_warnings,omitempty"`
 }
 
 // SendOutboundMessage sends a message from an agent via the outbound endpoint.
@@ -1032,6 +1050,13 @@ type ReincarnateAgentRequest struct {
 	// TargetBroker (a broker ID, name or slug) asks to move the agent to
 	// that broker, which must mount the same NFS export as its current one.
 	TargetBroker string `json:"targetBroker,omitempty"`
+	// SharedDirBackends changes the recorded shared-dir storage backend of
+	// the named shared dirs (dir name to "nfs"). Only the agent's record
+	// changes; the data is copied by the operator.
+	SharedDirBackends map[string]string `json:"sharedDirBackends,omitempty"`
+	// AllowEmptySharedDir skips the start check that refuses an empty nfs
+	// directory while the previous local directory is not empty.
+	AllowEmptySharedDir bool `json:"allowEmptySharedDir,omitempty"`
 
 	// Patch fields: each changes the next generation's setting, and later
 	// reincarnations keep it. Empty (nil for ThinkingLevel) is unchanged.
@@ -1125,4 +1150,8 @@ type ReincarnationPlan struct {
 	ServiceAccount *FieldChange `json:"serviceAccount,omitempty"`
 	ThinkingLevel  *FieldChange `json:"thinkingLevel,omitempty"`
 	HarnessAuth    *FieldChange `json:"harnessAuth,omitempty"`
+	// SharedDirBackends and AllowEmptySharedDir echo the request's shared
+	// dir backend change.
+	SharedDirBackends   map[string]string `json:"sharedDirBackends,omitempty"`
+	AllowEmptySharedDir bool              `json:"allowEmptySharedDir,omitempty"`
 }

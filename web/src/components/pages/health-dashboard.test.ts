@@ -140,3 +140,63 @@ describe('formatHeartbeatAge', () => {
     expect(formatHeartbeatAge('not-a-date')).toBe('unknown');
   });
 });
+
+describe('scion-page-health-dashboard runtime brokers (ptone/scion#3582)', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+    vi.mocked(apiFetch).mockReset();
+  });
+
+  it('renders runtime_brokers as one table row per broker', async () => {
+    vi.mocked(apiFetch).mockImplementation(async () =>
+      json({
+        status: 'healthy',
+        hub: { status: 'healthy', version: 'v1', uptime: '1h', connected_brokers: 2 },
+        database: { status: 'healthy', pool_active: 1, pool_max: 10, pool_idle: 1 },
+        runtime_brokers: {
+          items: [
+            {
+              id: 'b1',
+              name: 'zulu',
+              version: '1.0.0',
+              status: 'online',
+              last_heartbeat: null,
+              runtime: null,
+              workspace_storage: { backend: 'nfs', nfs_healthy: true },
+              agents: { total: 0 },
+            },
+            {
+              id: 'b2',
+              name: 'alpha',
+              version: '1.0.0',
+              status: 'offline',
+              last_heartbeat: null,
+              runtime: { type: 'docker', profile: 'docker' },
+              workspace_storage: { backend: 'local' },
+              agents: { total: 0 },
+            },
+          ],
+          total: 5,
+          truncated: true,
+        },
+        agents: { total: 0, by_phase: {}, stalled: [], crashed: [], errored: [] },
+        dispatch: null,
+        stall_config: { threshold_seconds: 300, auto_suspend: false },
+      })
+    );
+    const page = document.createElement('scion-page-health-dashboard') as ScionPageHealthDashboard;
+    document.body.appendChild(page);
+    await (page as unknown as { fetchData(): Promise<void> }).fetchData();
+    await page.updateComplete;
+
+    const table = page.shadowRoot?.querySelector('scion-health-broker-table');
+    expect(table).not.toBeNull();
+    await (table as LitLike).updateComplete;
+    const rows = [...(table!.shadowRoot?.querySelectorAll('tbody tr') ?? [])];
+    expect(rows.map((r) => (r as HTMLElement).dataset.brokerId)).toEqual(['b2', 'b1']);
+    expect(table!.shadowRoot?.querySelector('.note')?.textContent?.trim()).toBe('Showing 2 of 5');
+    expect(page.shadowRoot?.querySelector('.broker-card')).toBeNull();
+  });
+});
+
+type LitLike = Element & { updateComplete: Promise<unknown> };

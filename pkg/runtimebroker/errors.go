@@ -210,13 +210,15 @@ func NotFound(w http.ResponseWriter, resource string) {
 	writeError(w, http.StatusNotFound, code, resource+" not found", nil)
 }
 
-// StopRunMismatch writes the 404 for a stop naming run runID when another
-// run holds the agent's name (ptone/scion#2550). The code
+// RunMismatch writes the 404 for a stop or delete naming run runID when
+// another run holds the agent's name (ptone/scion#2550). The code
 // (api.BrokerErrorCodeRunMismatch) lets the hub tell it apart from any
 // other 404; the details name the requested run and the run that holds
-// the name (current, omitted when unknown), so a hub/broker run drift is
-// diagnosable.
-func StopRunMismatch(w http.ResponseWriter, runID, current string) {
+// the name (current, omitted when unknown). On a stop it makes a hub/broker
+// run drift diagnosable; on a delete, a non-empty current tells the hub not
+// to finalize its row (ptone/scion#3080), since that run is still on this
+// broker.
+func RunMismatch(w http.ResponseWriter, runID, current string) {
 	details := map[string]interface{}{api.BrokerErrorDetailRunID: runID}
 	if current != "" {
 		details[api.BrokerErrorDetailCurrentRunID] = current

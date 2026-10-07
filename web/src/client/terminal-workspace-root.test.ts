@@ -15,6 +15,7 @@ import {
 } from 'vitest';
 import type { TerminalWorkspaceRoot } from './terminal-workspace-root.js';
 import { TerminalSessionRegistry } from './terminal-sessions.js';
+import type { Agent } from '../shared/types.js';
 import { _appFrameRefCountForTests } from '../components/shared/app-frame.js';
 import {
   TERMINAL_PALETTE_NEW_AGENT_EVENT,
@@ -24,6 +25,8 @@ import type { ScionQuickPalette } from '../components/shared/palette/quick-palet
 import type { ScionTerminalPane } from '../components/terminal/terminal-pane.js';
 import type { TerminalPaletteAgentsLoadOptions } from './terminal-palette-data.js';
 import type { PaletteCandidate } from './chat-palette-types.js';
+import { AgentStore } from './agent-store.js';
+import { FakeEventSource } from './__fixtures__/agent-store-harness.js';
 import { TOUCH_PRIMARY_QUERY } from '../utils/input-modality.js';
 
 // Mock terminal-pane custom element before importing workspace root
@@ -61,13 +64,21 @@ vi.mock('@xterm/xterm/css/xterm.css?inline', () => ({ default: '' }));
 
 /**
  * Lets a test replace the palette's Agents load; every other test gets the
- * real one, which reads the stubbed fetch.
+ * real one, over a fresh agent store per test (standing in for the
+ * singleton) that reads the stubbed fetch.
  */
 const paletteLoad = vi.hoisted(() => ({
   override: null as
     | null
     | ((options: TerminalPaletteAgentsLoadOptions) => Promise<PaletteCandidate[]>),
+  store: null as AgentStore | null,
+  /** Replaces the hub entry's retain once, when set (cleared after use). */
+  retainOverride: null as null | (() => () => void),
 }));
+function paletteStore(): AgentStore {
+  if (!paletteLoad.store) throw new Error('no agent store for this test');
+  return paletteLoad.store;
+}
 vi.mock('./terminal-palette-data.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./terminal-palette-data.js')>();
   return {
@@ -78,7 +89,43 @@ vi.mock('./terminal-palette-data.js', async (importOriginal) => {
       paletteLoad.override
         ? paletteLoad.override(options)
         : actual.loadTerminalPaletteAgents(options),
+    retainTerminalPaletteAgents: (
+      ...args: Parameters<typeof actual.retainTerminalPaletteAgents>
+    ): (() => void) => {
+      const override = paletteLoad.retainOverride;
+      paletteLoad.retainOverride = null;
+      return override ? override() : actual.retainTerminalPaletteAgents(...args);
+    },
   };
+});
+/** The store singleton, as the palette data module sees it: this test's store. */
+vi.mock('./agent-store.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./agent-store.js')>();
+  const agentStore = new Proxy({} as AgentStore, {
+    get: (_target, key): unknown => {
+      const store = paletteStore();
+      const value: unknown = Reflect.get(store, key);
+      return typeof value === 'function' ? (value as () => unknown).bind(store) : value;
+    },
+  });
+  return { ...actual, agentStore };
+});
+
+beforeEach(() => {
+  // The feed's stream never opens here: walks start once the (zero)
+  // connect wait is over, and a ready list revalidates on every load.
+  vi.stubGlobal('EventSource', FakeEventSource);
+  paletteLoad.store = new AgentStore({
+    events: null,
+    visibility: null,
+    connectTimeoutMs: 0,
+    currentUserId: (): string => '',
+  });
+});
+
+afterEach(() => {
+  paletteLoad.store?.destroy();
+  paletteLoad.store = null;
 });
 
 let WorkspaceRoot: typeof TerminalWorkspaceRoot;
@@ -866,8 +913,9 @@ describe('idle entries', () => {
 
     const item = railItem();
     expect(item.dataset.connection).toBe('idle');
-    const stateLabel = item.querySelector('.terminal-state-label');
-    expect(stateLabel?.textContent).toContain('Not connected');
+    expect(item.querySelector('.terminal-state-label')).toBeNull();
+    const dot = item.querySelector<HTMLElement>('.terminal-connection-dot');
+    expect(dot?.title).toContain('Not connected');
     const reconnectBtn = item.querySelector<HTMLButtonElement>(
       '[aria-label^="Reconnect"].terminal-icon-action'
     );
@@ -881,6 +929,81 @@ describe('idle entries', () => {
     expect(idleOverlay?.textContent).toContain('Select this terminal to connect');
     const errorBanner = pane.shadowRoot?.querySelector('.error-banner');
     expect(errorBanner).toBeNull();
+  });
+
+  it('rail row shows the project name with the full name in its title', async () => {
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'p1',
+    });
+    root.withAutoSelectSuspended(() => root.create(registry, agentId, { deferConnect: true }));
+    registry.metadata.seed(agentId, {
+      id: agentId,
+      name: 'test',
+      projectId: 'project-id-1',
+      project: 'A rather long project name',
+      phase: 'running',
+    } as Agent);
+    await flush();
+
+    const item = railItem();
+    const text = item.querySelector('.terminal-rail-text')!;
+    expect(text.children).toHaveLength(2);
+    const project = item.querySelector<HTMLElement>('.terminal-project-name');
+    expect(project?.textContent).toBe('A rather long project name');
+    expect(project?.title).toBe('A rather long project name');
+    expect(item.querySelector('.terminal-state-label')).toBeNull();
+    expect(item.querySelector('.terminal-connection-dot')).not.toBeNull();
+    const select = item.querySelector<HTMLButtonElement>('.terminal-rail-select')!;
+    expect(select.title).toBe('Not connected · metadata pending');
+    expect(select.getAttribute('aria-label')).toBe(
+      'Show terminal for test in A rather long project name, Not connected, metadata pending'
+    );
+    expect(item.querySelector<HTMLElement>('.terminal-connection-dot')?.title).toBe(select.title);
+  });
+
+  it('rail row falls back to the project id when the project name is unknown', async () => {
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'p2',
+    });
+    root.withAutoSelectSuspended(() => root.create(registry, agentId, { deferConnect: true }));
+    registry.metadata.seed(agentId, {
+      id: agentId,
+      name: 'test',
+      projectId: 'project-id-2',
+      phase: 'running',
+    } as Agent);
+    await flush();
+
+    const project = railItem().querySelector<HTMLElement>('.terminal-project-name');
+    expect(project?.textContent).toBe('project-id-2');
+    expect(project?.title).toBe('project-id-2');
+    const select = railItem().querySelector<HTMLButtonElement>('.terminal-rail-select')!;
+    expect(select.title).toBe('Not connected · metadata pending');
+    expect(select.getAttribute('aria-label')).toBe(
+      'Show terminal for test in project-id-2, Not connected, metadata pending'
+    );
+  });
+
+  it('rail row omits the project line when no agent metadata is loaded', async () => {
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'p3',
+    });
+    root.withAutoSelectSuspended(() => root.create(registry, agentId, { deferConnect: true }));
+    await flush();
+
+    const item = railItem();
+    expect(item.querySelector('.terminal-project-name')).toBeNull();
+    expect(item.querySelector('.terminal-rail-text')?.children).toHaveLength(1);
+    const select = item.querySelector<HTMLButtonElement>('.terminal-rail-select')!;
+    const status = item.querySelector<HTMLElement>('.terminal-connection-dot')!.title;
+    expect(status).toBe('Not connected · metadata pending');
+    expect(select.title).toBe(status);
+    expect(select.getAttribute('aria-label')).toBe(
+      `Show terminal for ${agentId}, Not connected, metadata pending`
+    );
   });
 
   it('selecting an idle entry connects it', async () => {
@@ -2198,6 +2321,277 @@ describe('"Jump to agent" palette: palette and focus lifecycle', () => {
   });
 });
 
+describe('"Jump to agent" palette: the agent store\'s hub entry', () => {
+  let root: TerminalWorkspaceRoot;
+  let listRequests: string[];
+
+  /** Serves `agents` as the hub list; records every list request. */
+  function serveAgents(agents: Array<{ id: string; name: string; phase?: string }>): void {
+    listRequests = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string) => {
+        const path = String(url).replace(/^https?:\/\/[^/]+/, '');
+        if (path.startsWith('/api/v1/agents?')) {
+          listRequests.push(path);
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                agents: agents.map((a) => ({
+                  id: a.id,
+                  name: a.name,
+                  projectId: 'p1',
+                  phase: a.phase ?? 'running',
+                  _capabilities: { actions: ['attach'] },
+                })),
+              }),
+              { status: 200 }
+            )
+          );
+        }
+        return Promise.resolve(new Response('{}', { status: 200 }));
+      })
+    );
+  }
+
+  /** Opens the store feed's stream, so a loaded list answers from memory. */
+  async function connectFeed(): Promise<void> {
+    await vi.waitFor(() => FakeEventSource.latestOpen());
+    FakeEventSource.latestOpen().open();
+    await flush();
+  }
+
+  function labels(palette: ScionQuickPalette): string[] {
+    return (palette.groups.agents?.candidates ?? []).map((c) => c.label);
+  }
+
+  beforeEach(() => {
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      cb(0);
+      return 0;
+    });
+    FakeEventSource.instances = [];
+    vi.stubGlobal('EventSource', FakeEventSource);
+    serveAgents([
+      { id: AGENT_A, name: 'Alice-bot' },
+      { id: AGENT_B, name: 'Bob-bot' },
+    ]);
+    root = new WorkspaceRoot();
+    document.body.append(root.element);
+  });
+
+  afterEach(() => {
+    // Reset here, not at the end of a test, so a test that fails partway
+    // cannot leave its override to the tests after it.
+    paletteLoad.override = null;
+    paletteLoad.retainOverride = null;
+    root.dispose();
+    root.element.remove();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it('retains the hub entry once while shown, however often it is shown', async () => {
+    const retain = vi.spyOn(paletteStore(), 'retain');
+
+    root.show(true);
+    root.show(true);
+    await vi.waitFor(() => expect(retain).toHaveBeenCalledTimes(1));
+    await flush();
+
+    expect(retain).toHaveBeenCalledTimes(1);
+    expect(retain.mock.calls[0]?.[0]).toEqual({ scope: 'hub' });
+  });
+
+  it('releases the hub entry when hidden, and retains it again when shown again', async () => {
+    const releases: Array<ReturnType<typeof vi.fn>> = [];
+    const store = paletteStore();
+    const realRetain = store.retain.bind(store);
+    vi.spyOn(store, 'retain').mockImplementation((q, listener) => {
+      const release = vi.fn(realRetain(q, listener));
+      releases.push(release);
+      return release;
+    });
+
+    root.show(true);
+    await vi.waitFor(() => expect(releases).toHaveLength(1));
+    root.show(false);
+    expect(releases[0]).toHaveBeenCalledTimes(1);
+
+    root.show(true);
+    await vi.waitFor(() => expect(releases).toHaveLength(2));
+    expect(releases[1]).not.toHaveBeenCalled();
+  });
+
+  it('releases the hub entry on dispose', async () => {
+    const release = vi.fn();
+    const retain = vi.spyOn(paletteStore(), 'retain').mockReturnValue(release);
+
+    root.show(true);
+    await vi.waitFor(() => expect(retain).toHaveBeenCalledTimes(1));
+    root.dispose();
+
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+
+  it('a hide before the store module loads retains nothing', async () => {
+    const retain = vi.spyOn(paletteStore(), 'retain');
+
+    root.show(true);
+    root.show(false);
+    // Once a later show has retained, the first show's import has settled too.
+    root.show(true);
+    await vi.waitFor(() => expect(retain).toHaveBeenCalledTimes(1));
+    await flush();
+
+    expect(retain).toHaveBeenCalledTimes(1);
+  });
+
+  it('showing the workspace issues no agent-list request', async () => {
+    root.show(true);
+    await connectFeed();
+
+    expect(listRequests).toEqual([]);
+  });
+
+  it('a reopen answers from the store with no request', async () => {
+    root.show(true);
+    await connectFeed();
+    const palette = await openLoadedPalette(root);
+    expect(labels(palette)).toEqual(['Alice-bot', 'Bob-bot']);
+    expect(listRequests).toHaveLength(1);
+
+    for (let i = 0; i < 3; i++) {
+      root['paletteHost'].close();
+      fireFromDialog(palette, 'sl-after-hide');
+      await openLoadedPalette(root);
+    }
+
+    expect(labels(palette)).toEqual(['Alice-bot', 'Bob-bot']);
+    expect(listRequests).toHaveLength(1);
+  });
+
+  it('an SSE status change updates the open palette with no request', async () => {
+    root.show(true);
+    await connectFeed();
+    const palette = await openLoadedPalette(root);
+
+    FakeEventSource.latestOpen().emit('project.p1.agent.status', {
+      agentId: AGENT_B,
+      projectId: 'p1',
+      phase: 'stopped',
+    });
+
+    await vi.waitFor(() => expect(labels(palette)).toEqual(['Alice-bot']));
+    expect(palette.groups.agents?.status).toBe('ready');
+    expect(listRequests).toHaveLength(1);
+  });
+
+  it('a change while the palette is closed is not published until the next open', async () => {
+    root.show(true);
+    await connectFeed();
+    const palette = await openLoadedPalette(root);
+    root['paletteHost'].close();
+    fireFromDialog(palette, 'sl-after-hide');
+    const setCandidates = vi.spyOn(root['paletteHost'], 'setCandidates');
+
+    FakeEventSource.latestOpen().emit('project.p1.agent.status', {
+      agentId: AGENT_B,
+      projectId: 'p1',
+      phase: 'stopped',
+    });
+    await flush();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(setCandidates).not.toHaveBeenCalled();
+    await openLoadedPalette(root);
+    expect(labels(palette)).toEqual(['Alice-bot']);
+    expect(listRequests).toHaveLength(1);
+  });
+
+  it('a ready snapshot during an Agents load leaves the group to that load', async () => {
+    root.show(true);
+    await connectFeed();
+    let finish: (candidates: PaletteCandidate[]) => void = () => {};
+    paletteLoad.override = (): Promise<PaletteCandidate[]> =>
+      new Promise((resolve) => {
+        finish = resolve;
+      });
+    const setCandidates = vi.spyOn(root['paletteHost'], 'setCandidates');
+    requestPaletteOpen(root);
+    const palette = await waitForPalette(root);
+    await vi.waitFor(() => expect(palette.open).toBe(true));
+    // A load the root did not ask for fills the hub entry and publishes it.
+    await paletteStore().ensure({ scope: 'hub' });
+    FakeEventSource.latestOpen().emit('project.p1.agent.status', {
+      agentId: AGENT_B,
+      projectId: 'p1',
+      phase: 'stopped',
+    });
+    await flush();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(setCandidates).not.toHaveBeenCalled();
+    expect(palette.groups.agents?.status).toBe('loading');
+
+    finish([]);
+    await vi.waitFor(() =>
+      expect(palette.groups.agents).toEqual({ status: 'ready', candidates: [] })
+    );
+    paletteLoad.override = null;
+  });
+
+  it('a failed retain lets the next show retain', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const retain = vi.spyOn(paletteStore(), 'retain');
+    paletteLoad.retainOverride = (): (() => void) => {
+      throw new Error('chunk failed to load');
+    };
+
+    root.show(true);
+    await vi.waitFor(() => expect(error).toHaveBeenCalledTimes(1));
+    root.show(true);
+
+    await vi.waitFor(() => expect(retain).toHaveBeenCalledTimes(1));
+  });
+
+  it("a superseded load's settling leaves the newer load to supersede a live update", async () => {
+    root.show(true);
+    await connectFeed();
+    const finishes: Array<(candidates: PaletteCandidate[]) => void> = [];
+    paletteLoad.override = (): Promise<PaletteCandidate[]> =>
+      new Promise((resolve) => {
+        finishes.push(resolve);
+      });
+    const host = root['paletteHost'];
+    requestPaletteOpen(root);
+    const palette = await waitForPalette(root);
+    await vi.waitFor(() => expect(palette.open).toBe(true));
+    host.close();
+    fireFromDialog(palette, 'sl-after-hide');
+    requestPaletteOpen(root);
+    await vi.waitFor(() => expect(finishes).toHaveLength(2));
+    await paletteStore().ensure({ scope: 'hub' });
+    const setCandidates = vi.spyOn(host, 'setCandidates');
+
+    finishes[0]?.([]);
+    await flush();
+    FakeEventSource.latestOpen().emit('project.p1.agent.status', {
+      agentId: AGENT_B,
+      projectId: 'p1',
+      phase: 'stopped',
+    });
+    await flush();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(setCandidates).not.toHaveBeenCalled();
+    expect(palette.groups.agents?.status).toBe('loading');
+    finishes[1]?.([]);
+    await vi.waitFor(() => expect(palette.groups.agents?.status).toBe('ready'));
+    paletteLoad.override = null;
+  });
+});
+
 describe('"Jump to agent" palette: keyboard shortcut', () => {
   let root: TerminalWorkspaceRoot;
   let reg: TerminalSessionRegistry;
@@ -2271,6 +2665,27 @@ describe('"Jump to agent" palette: keyboard shortcut', () => {
     expect(press({ key: 'k', ctrlKey: true }, pane)).toBe(true);
 
     await expectNotOpened();
+  });
+
+  it('on a Mac, leaves Ctrl+K typed in a text field to the field', async () => {
+    vi.spyOn(navigator, 'platform', 'get').mockReturnValue('MacIntel');
+    const input = document.createElement('input');
+    root.element.append(input);
+
+    expect(press({ key: 'k', ctrlKey: true }, input)).toBe(true);
+    await expectNotOpened();
+
+    expect(press({ key: 'k', metaKey: true }, input)).toBe(false);
+    await expectOpened();
+  });
+
+  it('off a Mac, Ctrl+K typed in a text field opens the palette', async () => {
+    vi.spyOn(navigator, 'platform', 'get').mockReturnValue('Linux x86_64');
+    const input = document.createElement('input');
+    root.element.append(input);
+
+    expect(press({ key: 'k', ctrlKey: true }, input)).toBe(false);
+    await expectOpened();
   });
 
   it('neither Ctrl+K nor Meta+K fire with both modifiers, Alt, or Shift held', async () => {
@@ -2425,6 +2840,19 @@ describe('"Jump to agent" palette: keyboard shortcut', () => {
     expect(
       fetchMock.mock.calls.filter(([url]) => String(url).startsWith('/api/v1/agents?')).length
     ).toBe(agentLoads);
+  });
+
+  it('on a Mac, Ctrl+K in the open palette search field edits the query, and Cmd+K closes it', async () => {
+    vi.spyOn(navigator, 'platform', 'get').mockReturnValue('MacIntel');
+    press({ key: 'k', metaKey: true });
+    const palette = await expectOpened();
+    const input = palette.shadowRoot!.querySelector<HTMLInputElement>('#palette-query-input')!;
+
+    expect(press({ key: 'k', ctrlKey: true, composed: true }, input)).toBe(true);
+    expect(palette.open).toBe(true);
+
+    expect(press({ key: 'k', metaKey: true, composed: true }, input)).toBe(false);
+    expect(palette.open).toBe(false);
   });
 
   it('a second press while the palette is still loading cancels the open', async () => {

@@ -189,8 +189,8 @@ func (s *Server) GetHealthInfo(ctx context.Context) *HealthResponse {
 var connectedBrokerPageSize = 200
 
 // countOnlineRuntimeBrokers counts online runtime brokers. Message broker
-// plugin records (Discord, Telegram, ...) carry the "scion.io/plugin" label
-// and are always marked online, so they are not counted.
+// plugin records (Discord, Telegram, ...) carry the plugin label (see
+// isPluginBroker) and are always marked online, so they are not counted.
 func (s *Server) countOnlineRuntimeBrokers(ctx context.Context) (int, error) {
 	filter := store.RuntimeBrokerFilter{Status: store.BrokerStatusOnline}
 	opts := store.ListOptions{Limit: connectedBrokerPageSize}

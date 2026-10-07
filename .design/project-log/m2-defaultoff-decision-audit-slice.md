@@ -541,3 +541,123 @@ Human-directed questions/messages from this publication worker: NONE; manager
 exchanges are agent-directed, with no inference about other workers' inventories.
 Retain and BLOCK for exact append acceptance and durability disposition; no
 completion or deletion authorized at this checkpoint.
+
+## 2026-10-07 — GoogleCloudPlatform/scion#2774 immutable-c885 forward merge
+
+This checkpoint records the accepted bounded forward-merge resolution and one
+focused GREEN. It does not record a merge commit, push, PR conflict clearance,
+CI result, fresh review approval, or production activation.
+
+Publication HEAD/ORIG_HEAD and prospective first parent:
+aaae9bc62e4819151ec044c4dd5013d0fd2bd58f.
+Pending MERGE_HEAD and prospective second parent:
+c885fe2aeeb5bc7433079e902e905c8d547ec702.
+Independently verified exact merge base:
+d8b2b692b1ff9c69812838ae67c1d052ab180b22.
+Original M2/live fork ref remains:
+6d6e4de4598c82f0579fb0c566ea422c7e997b29.
+Forward merge only; no rebase or force. No newer moving main was chased.
+
+Provisioning was explicitly released in bounded amendments. Amendment1 fetched
+base d8b2b692b1ff9c69812838ae67c1d052ab180b22 from origin with --no-tags --depth=1,
+then upstream 3aab0d4b1e26e7a8c1d9f3db9844fb6d38c066bc with --no-tags --depth=1
+from https://github.com/GoogleCloudPlatform/scion.git. Amendment2 fetched literal
+c885fe2aeeb5bc7433079e902e905c8d547ec702 once from that URL with --no-tags --depth=1.
+Those maps used the specified base honestly while shallow boundaries hid deeper
+ancestry; no traversed merge-base equality was claimed then. Amendment3 ran once,
+in order:
+- git fetch --no-tags --deepen=1 origin aaae9bc62e4819151ec044c4dd5013d0fd2bd58f
+- git fetch --no-tags --depth=10000 https://github.com/GoogleCloudPlatform/scion.git c885fe2aeeb5bc7433079e902e905c8d547ec702
+The authorized bookkeeping replaced four boundaries with three older ones, then
+removed the remaining shallow file. Exact merge-base traversal now returned d8.
+Every fetch exited 0; permitted effects were objects, FETCH_HEAD and inherent
+shallow bookkeeping. Ref/config/index/worktree preflight invariants held.
+Ordinary GIT_EDITOR=true git merge --no-ff --no-commit c885fe2aeeb5bc7433079e902e905c8d547ec702
+ran once and produced exactly the two mapped content conflicts.
+
+Protected old-pin evidence remains unchanged:
+- m2-defaultoff-pr2774-forward-merge-tree.txt: 128899 lines /5255584 bytes;
+  SHA-256 bb382014fd45d2f06fcdda4ff0f3593d6fc92bc2144854443e50ea61c8368c96.
+- m2-defaultoff-pr2774-forward-merge-map.md: 1919 lines /99289 bytes;
+  SHA-256 8ba70ae1e6266dd707347e7acef22cf83ca32e8bb52593668e440ece0dfc2c68.
+Protected immutable-c885 evidence:
+- m2-defaultoff-pr2774-forward-merge-tree-c885.txt: 138558 lines /5651495 bytes;
+  SHA-256 48d6cccf60bd6de91ec6f5086daa2868785710b4d8373f3d7f1053d567f944e2.
+- m2-defaultoff-pr2774-forward-merge-map-c885.md: 2180 lines /117422 bytes;
+  SHA-256 39e21cc8a4052cb9e229e28028d0a52b071f3feec2352f278572b372eb39da24.
+
+Base-to-c885 changes: 634 paths, four publication overlaps, two conflicts,
+changed-path union 642. The accepted authored ceiling is exactly thirteen:
+the original twelve plus only pkg/hub/perftrace_integration_test.go.
+The other 629 upstream changed paths are inherited-only, including deletions.
+All 6848 other current tree entries match exact c885 mode/blob. No path14 or
+excluded whole-M2/34-path historical merge/448-path branch payload was imported;
+seven historical operationId additions and three historical conflict tests remain
+excluded. The original 543-line/34994-byte log prefix remains byte-for-byte.
+
+C1 retained both independent OperationalSettings field groups with comments:
+the audit observer/observation/mutation fields and c885 remoteImagesWarnedRev;
+all c885 Artifacts warning behavior and atomic import remain.
+C2 composes outer perf decorator -> stable decision-audit router -> exact concrete
+legacy writer. Concrete writer field identity, upstream perf logger/warning,
+single ctx/record forwarding, counting/timing, writer metrics and separate HTTP
+drain/deferred legacy-close ownership remain. Production constructor populates
+only legacy/server; admission, contract handler and clock remain nil.
+The perftrace constructor fixture retains the concrete-writer type assertion at
+router.legacy and checks exact retained writer identity, off-mode exact router/
+decorator transparency, on-mode decorator.next == exact router, and nil admission/
+handler/clock in both modes. Existing store/default/logger/header/log/response/
+count assertions are preserved. Scoped formatting and staging affected only the
+three directly resolved/edited Go paths. Finite proof blobs remain unchanged.
+
+Protected resolution evidence:
+- m2-defaultoff-pr2774-forward-merge-resolution-amendment-3.patch:
+  3603 lines /163876 bytes; SHA-256
+  3261b80ea8b211986cc4d8e08dbd7f704781201cd1ae46cbe0e6e0f45451c92b.
+- m2-defaultoff-pr2774-forward-merge-resolution-review-amendment-3.md:
+  1467 lines /105290 bytes; SHA-256
+  c2affd60f223b8e1189622b224ff13e7fc2f86de501d796f59f13a66042b6c81.
+Direct index comparison, exact parents/merge base, inherited entry identity,
+no unmerged/unstaged/untracked entries, scoped gofmt and diff-check passed.
+
+Amendment4 authorized exactly one 2353-byte focused command, SHA-256
+e3d52263272a0e55dcfea0fe5d78173eeef8e8a7305dfb3970fc859b19fabb7f.
+Normal heavy-build wrapper acquired slot 3 after 0s; acquire-time available memory
+was 44GiB. UTC 2026-10-07 14:15:57.799813 to 14:29:13.309288;
+wall 795.508602s, exit 0. Experiments package 0.006s; Hub package 6.017s.
+Exactly 40 selected top-level tests plus 147 subtests =187 RUN =187 PASS.
+Independent census checks found no missing/unexpected/duplicate/FAIL/SKIP outcome.
+Historical A3 178 and A34 194 remain separate; neither was relabeled as this run.
+Protected m2-defaultoff-pr2774-forward-merge-green-amendment-4.txt:
+2501 lines /354796 bytes; SHA-256
+f2d95d9f8ffea6791f2e9f6d6d4115a0023fe4f1dc7530f855e380c1ddf07074.
+Complete raw output, all40 names/all147 subtest outcomes and postflight are sealed.
+Malformed-JSON and finite recovered-panic ERROR logs are negative fixture logs;
+diagnostic WARN logs are preserved separately from test failures.
+A read-only checker initially split a Git format argument incorrectly; its corrected
+exact-argument check proved refs unchanged, with both results retained in evidence.
+No source/test repair, retry or second Go invocation occurred. No Go/compiler/test/
+wrapper process survived. Merge parents, exact13 index, inherited entries,
+worktree and protected evidence stayed unchanged after the invocation.
+
+This GREEN proves only focused immutable-c885 integration mechanics. Mandatory
+fresh narrow review remains pending because C2 is significant/newly composed
+non-test behavior. Commit, push, upstream PR conflict clearance and CI remain
+pending and unclaimed. No reviewer or agent was started by this worker.
+Amendment5 releases only this append, its protected evidence, scoped diff-check,
+and staging of the exact log; durability requires separate disposition.
+
+Production NEW remains default false and structurally unadmitted even with a true
+override. Every census/trust/profile/binding/clock/store/handler/caller/
+complete-return/alert/freshness/drain/persistence/no-loss/activation gate remains
+rejecting, including constructor/live-build/provenance/SCC/suspension/timer/
+scheduler/cleanup/dashboard gates. No deploy, cutover, legacy retirement, full-M2,
+full-CI, race or explain-round-7 claim is made.
+
+Mutation inventory: explicitly authorized SHA provisioning/connectivity, one
+pending forward merge, mapped apply_patch resolutions, scoped gofmt/stage, one
+wrapped focused invocation and evidence, then log-only append/evidence/stage.
+No ref/config repair, rebase/force, commit/push, PR comment, reviewer/agent creation,
+admission, activation or deployment. Human questions: NONE. Agent-directed manager
+exchanges remain separate. Retain and BLOCK for exact append acceptance and
+durability disposition; never task-complete or self-delete.

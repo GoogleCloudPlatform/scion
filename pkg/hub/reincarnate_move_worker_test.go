@@ -38,7 +38,7 @@ import (
 func prepareMoveWorkerFixture(t *testing.T, f *moveFixture) {
 	t.Helper()
 	ctx := context.Background()
-	_, err := f.s.SetAgentRunID(ctx, f.agent.ID, "run-src")
+	_, err := f.s.SetAgentRunID(ctx, f.agent.ID, "run-src", nil)
 	require.NoError(t, err)
 	reserveBrokerSlot(t, f.s, f.src, f.agent.ID)
 	require.NoError(t, f.s.UpdateAgentExposedPorts(ctx, f.agent.ID, []store.ExposedPort{{Port: 8080, Label: "web", Mode: "http"}}))

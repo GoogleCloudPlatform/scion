@@ -71,6 +71,7 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/artifacts":                              "policy:artifact",
 	"/api/v1/artifacts/":                             "policy:artifact",
 	"/api/v1/artifacts/shared/":                      "public:artifact-share-link",
+	"/api/v1/artifacts/view/":                        "public:artifact-view-capability",
 	"/api/v1/messaging/capabilities":                 "authenticated:messaging",
 	"/api/v1/messaging/targets/resolve":              "authenticated:messaging",
 	"/api/v1/skills":                                 "policy:skill",
@@ -128,6 +129,9 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/admin/agents/reset-auth-all":            "hub-admin:agent-reset",
 	"/api/v1/admin/conduit/grant-keys/rotate":        "hub-admin:conduit-grant-keys",
 	"/api/v1/admin/gcp-quota":                        "hub-admin:gcp-quota",
+	"/api/v1/admin/delegation-adoption":              "hub-admin:delegation-adoption",
+	"/api/v1/admin/delegation-adoption/previews":     "hub-admin:delegation-adoption",
+	"/api/v1/admin/delegation-adoption/commits":      "hub-admin:delegation-adoption",
 	"/api/v1/admin/lifecycle-hooks":                  "hub-admin:lifecycle-hook",
 	"/api/v1/admin/lifecycle-hooks/":                 "hub-admin:lifecycle-hook",
 	"/api/v1/admin/validate-resources":               "hub-admin:resource-validation",
@@ -498,7 +502,8 @@ func scopedAdminUATRouteRequest(route string) (string, string, *bytes.Reader) {
 	switch route {
 	case "/api/v1/admin/users/invite", "/api/v1/admin/users/invite/bulk",
 		"/api/v1/admin/agents/reset-auth-all", "/api/v1/admin/maintenance/check-updates",
-		"/api/v1/admin/maintenance/restart", "/api/v1/admin/conduit/grant-keys/rotate":
+		"/api/v1/admin/maintenance/restart", "/api/v1/admin/delegation-adoption/previews",
+		"/api/v1/admin/delegation-adoption/commits", "/api/v1/admin/conduit/grant-keys/rotate":
 		method = http.MethodPost
 	case "/api/v1/admin/server-config", "/api/v1/admin/project-defaults",
 		"/api/v1/admin/messaging":

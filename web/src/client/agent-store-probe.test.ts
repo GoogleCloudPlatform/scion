@@ -52,6 +52,13 @@ function row(id: string, updated: number, extra: Partial<Agent> = {}): Agent {
   return agent(id, { updated: t(updated), _capabilities: CAPS, ...extra });
 }
 
+/** `a` with its activity cleared, which the compact view then omits. */
+function withoutActivity(a: Agent): Agent {
+  const rest = { ...a };
+  delete rest.activity;
+  return rest;
+}
+
 function ids(snapshot: AgentListSnapshot | undefined): string[] {
   return (snapshot?.agents ?? []).map((a) => a.id);
 }
@@ -493,35 +500,49 @@ describe('AgentStore delta probe', () => {
   describe('the order a probe reads', () => {
     /**
      * A row whose last activity time is `activity` seconds into the day, with
-     * `lastSeen`, a field the full rows have and compact probe rows lack.
+     * `lastSeen`, a field full rows have and compact rows lack: a full-view
+     * walk holds it, and the probe's compact rows never carry it.
      */
     const active = (id: string, activity: number, extra: Partial<Agent> = {}): Agent =>
       row(id, activity, { lastActivityEvent: t(activity), lastSeen: t(activity), ...extra });
 
-    it('does not publish while heartbeats move only `updated`, and merges a row changed with them', async () => {
-      let publishes = 0;
-      const h = await loaded(
-        Array.from({ length: 400 }, (_, i) => active(`a${i}`, 1, { labels: { team: 'red' } }))
-      );
-      h.store.retain(HUB, () => publishes++);
-      // Every activity time ties, so the first page is the highest ids.
-      const a99 = find(h.store.peek(HUB), 'a99');
-      for (let i = 1; i <= 4; i++) {
-        h.server.heartbeat(t(1000 + i * 30));
+    it.each(['compact', 'full'] as const)(
+      'in %s view, does not publish while heartbeats move only `updated`, and merges a row changed with them',
+      async (view) => {
+        let publishes = 0;
+        const h = await loaded(
+          Array.from({ length: 400 }, (_, i) => active(`a${i}`, 1, { labels: { team: 'red' } })),
+          HUB,
+          { view }
+        );
+        h.store.retain(HUB, () => publishes++);
+        // Every activity time ties, so the first page is the highest ids.
+        const a99 = find(h.store.peek(HUB), 'a99');
+        for (let i = 1; i <= 4; i++) {
+          h.server.heartbeat(t(1000 + i * 30));
+          await tick();
+        }
+        expect(h.server.probes()).toBe(4);
+        expect(publishes).toBe(0);
+        expect(find(h.store.peek(HUB), 'a99')).toBe(a99);
+
+        h.server.heartbeat(t(1200));
+        h.server.agents[99] = { ...h.server.agents[99], labels: { team: 'blue' } };
         await tick();
+        expect(publishes).toBe(1);
+        expect(find(h.store.peek(HUB), 'a99')?.labels).toEqual({ team: 'blue' });
       }
-      expect(h.server.probes()).toBe(4);
-      expect(publishes).toBe(0);
-      expect(find(h.store.peek(HUB), 'a99')).toBe(a99);
+    );
 
-      h.server.heartbeat(t(1200));
-      h.server.agents[99] = { ...h.server.agents[99], labels: { team: 'blue' } };
-      await tick();
-      expect(publishes).toBe(1);
-      expect(find(h.store.peek(HUB), 'a99')?.labels).toEqual({ team: 'blue' });
-    });
-
-    it('does not publish while heartbeats rewrite `containerStatus`, or for the creator name compact rows add', async () => {
+    // A compact walk holds the creator name the probe rows carry; a full-view
+    // walk holds it only inside `appliedConfig`.
+    it.each([
+      ['compact', 'does not publish while heartbeats rewrite `containerStatus`'],
+      [
+        'full',
+        'does not publish while heartbeats rewrite `containerStatus`, or for the creator name compact rows add',
+      ],
+    ] as const)('in %s view, %s', async (view, _title) => {
       let publishes = 0;
       const h = await loaded(
         Array.from({ length: 400 }, (_, i) =>
@@ -529,7 +550,9 @@ describe('AgentStore delta probe', () => {
             containerStatus: 'Up 1 minute',
             appliedConfig: { creatorName: 'Ada' },
           } as Partial<Agent>)
-        )
+        ),
+        HUB,
+        { view }
       );
       h.store.retain(HUB, () => publishes++);
       const a99 = find(h.store.peek(HUB), 'a99');
@@ -544,6 +567,71 @@ describe('AgentStore delta probe', () => {
       expect(h.server.probes()).toBe(4);
       expect(publishes).toBe(0);
       expect(find(h.store.peek(HUB), 'a99')).toBe(a99);
+    });
+
+    it('does not publish for a compact probe row over a full row a single-agent read holds', async () => {
+      const h = await loaded([active('a1', 1)]);
+      h.server.agents.push(
+        active('a2', 2, {
+          appliedConfig: { creatorName: 'Ada', harness: 'claude' },
+        } as Partial<Agent>)
+      );
+      await h.emitAgent('created', { agentId: 'a2', name: 'a2', slug: 'a2', phase: 'running' });
+      await settle();
+      const a2 = h.feeds[0].getAgent('a2') as (Agent & { appliedConfig?: unknown }) | undefined;
+      expect(a2?.appliedConfig).toEqual({ creatorName: 'Ada', harness: 'claude' });
+      expect(find(h.store.peek(HUB), 'a2')).toBe(a2);
+
+      let publishes = 0;
+      h.store.retain(HUB, () => publishes++);
+      for (let i = 1; i <= 4; i++) {
+        h.server.heartbeat(t(1000 + i * 30));
+        await tick();
+      }
+      expect(h.server.probes()).toBe(4);
+      expect(h.server.walks()).toBe(1);
+      expect(publishes).toBe(0);
+      expect(find(h.store.peek(HUB), 'a2')).toBe(a2);
+    });
+
+    it('does not publish when a probe row lacks a creator name the held row has', async () => {
+      const h = await loaded(
+        Array.from({ length: 10 }, (_, i) =>
+          active(`a${i}`, 1, { appliedConfig: { creatorName: 'Ada' } } as Partial<Agent>)
+        )
+      );
+      let publishes = 0;
+      h.store.retain(HUB, () => publishes++);
+      const a3 = find(h.store.peek(HUB), 'a3') as (Agent & { creatorName?: string }) | undefined;
+      expect(a3?.creatorName).toBe('Ada');
+      h.server.agents = h.server.agents.map((a) => ({ ...a, appliedConfig: {} }) as Agent);
+      h.server.heartbeat(t(1000));
+      await tick();
+
+      expect(h.server.probes()).toBe(1);
+      expect(publishes).toBe(0);
+      expect(find(h.store.peek(HUB), 'a3')).toBe(a3);
+    });
+
+    it('does not publish for the empty values a full row holds and compact probe rows omit', async () => {
+      const h = await loaded([active('a1', 1)]);
+      h.server.agents.push(
+        active('a2', 2, { template: '', labels: {}, ancestry: [] } as Partial<Agent>)
+      );
+      await h.emitAgent('created', { agentId: 'a2', name: 'a2', slug: 'a2', phase: 'running' });
+      await settle();
+      const a2 = h.feeds[0].getAgent('a2');
+      expect(a2?.template).toBe('');
+
+      let publishes = 0;
+      h.store.retain(HUB, () => publishes++);
+      for (let i = 1; i <= 4; i++) {
+        h.server.heartbeat(t(1000 + i * 30));
+        await tick();
+      }
+      expect(h.server.probes()).toBe(4);
+      expect(publishes).toBe(0);
+      expect(find(h.store.peek(HUB), 'a2')).toBe(a2);
     });
 
     // Every field a compact row carries that the probe compares, each changed
@@ -1304,9 +1392,94 @@ describe('AgentStore delta probe', () => {
     expect(h.feeds[0].isAgentSetComplete('compact')).toBe(false);
   });
 
+  it('clears an offline activity a stopped and restarted agent no longer has, and keeps full fields', async () => {
+    const h = await loaded([row('a1', 1, { activity: 'offline' })]);
+    h.feeds[0].seedAgents([
+      { ...(h.feeds[0].getAgent('a1') as Agent), harnessConfig: 'claude' } as Agent,
+    ]);
+    let publishes = 0;
+    h.store.retain(HUB, () => publishes++);
+    await h.emitAgent('status', { agentId: 'a1', phase: 'stopped' });
+    await h.emitAgent('status', { agentId: 'a1', phase: 'running' });
+    expect(h.feeds[0].getAgent('a1')?.activity).toBe('offline');
+    const before = publishes;
+
+    h.server.agents[0] = withoutActivity(row('a1', 10, { phase: 'running' }));
+    await tick();
+
+    expect(h.server.probes()).toBe(1);
+    expect(h.server.walks()).toBe(1);
+    expect(publishes).toBe(before + 1);
+    const a1 = h.feeds[0].getAgent('a1');
+    expect(a1 !== undefined && 'activity' in a1).toBe(false);
+    expect(a1?.harnessConfig).toBe('claude');
+    expect(find(h.store.peek(HUB), 'a1')).toBe(a1);
+  });
+
+  it('does not publish when a probe row only drops a field the probe does not compare', async () => {
+    const h = await loaded([row('a1', 1, { containerStatus: 'Up 1 minute' } as Partial<Agent>)]);
+    let publishes = 0;
+    h.store.retain(HUB, () => publishes++);
+    const held = find(h.store.peek(HUB), 'a1');
+    h.server.agents[0] = row('a1', 10);
+    await tick();
+
+    expect(h.server.probes()).toBe(1);
+    expect(publishes).toBe(0);
+    expect(find(h.store.peek(HUB), 'a1')).toBe(held);
+  });
+
+  it('clears labels the server removed', async () => {
+    const h = await loaded([row('a1', 1, { labels: { team: 'red' } })]);
+    h.server.agents[0] = row('a1', 10);
+    await tick();
+
+    expect(h.server.probes()).toBe(1);
+    expect(find(h.store.peek(HUB), 'a1')?.labels).toBeUndefined();
+  });
+
+  it("clears a status event's detail message a newer probe row omits, nested copy included", async () => {
+    const h = await loaded([row('a1', 1, { message: 'Cloning repository' })]);
+    await h.emitAgent('status', {
+      agentId: 'a1',
+      detail: { message: 'Installing tools', toolName: 'bash' },
+    });
+    expect(find(h.store.peek(HUB), 'a1')?.detail?.message).toBe('Installing tools');
+
+    h.server.agents[0] = row('a1', 10);
+    await tick();
+
+    expect(h.server.probes()).toBe(1);
+    expect(h.server.walks()).toBe(1);
+    const a1 = find(h.store.peek(HUB), 'a1');
+    expect(a1?.message).toBeUndefined();
+    expect(a1?.detail).toEqual({ toolName: 'bash' });
+  });
+
+  it('keeps the messageability a project probe row does not carry', async () => {
+    const h = await loaded([
+      row('a1', 1, {
+        activity: 'offline',
+        _messageability: { canMessage: true },
+      } as Partial<Agent>),
+    ]);
+    h.server.projectRow = ({ _messageability: _omitted, ...rest }): Agent => rest as Agent;
+    h.store.retain(P1, () => {});
+    await h.store.ensure(P1);
+    h.server.agents[0] = withoutActivity(
+      row('a1', 10, { _messageability: { canMessage: true } } as Partial<Agent>)
+    );
+    await tick();
+
+    expect(h.server.probes('/api/v1/projects/')).toBe(1);
+    const a1 = h.feeds[0].getAgent('a1');
+    expect(a1?.activity).toBeUndefined();
+    expect(a1?._messageability).toEqual({ canMessage: true });
+  });
+
   it('merges compact rows into full rows without dropping full fields', async () => {
     const full = row('a1', 1, { appliedConfig: { harness: 'claude' } } as Partial<Agent>);
-    const h = await loaded([full]);
+    const h = await loaded([full], HUB, { view: 'full' });
     h.server.agents[0] = row('a1', 10, { name: 'renamed' });
     await tick();
     const a1 = find(h.store.peek(HUB), 'a1') as Agent & { appliedConfig?: unknown };

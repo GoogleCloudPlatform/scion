@@ -214,6 +214,10 @@ type OperationalSettings struct {
 	decisionAuditObservation decisionAuditRefreshObservation
 	decisionAuditMutations   uint8
 
+	// remoteImagesWarnedRev is the artifacts revision whose invalid remote
+	// image setting was last logged.
+	remoteImagesWarnedRev atomic.Int64
+
 	// Event publisher for cross-replica propagation: LISTEN/NOTIFY on
 	// postgres, in-process channel on SQLite; nil until SetEventPublisher.
 	events EventPublisher
@@ -1690,6 +1694,12 @@ func (o *OperationalSettings) Artifacts() opsettings.ArtifactsConfig {
 	cfg, err := opsettings.ParseArtifactsDoc(state.Value)
 	if err != nil {
 		return opsettings.MalformedArtifactsConfig() // invalid value → fail closed
+	}
+	if cfg.RemoteImagesInvalid != "" && o.remoteImagesWarnedRev.Swap(state.Revision) != state.Revision {
+		// Writes refuse such a value; a stored one (written before that
+		// check existed) turns remote images off. Say so once per revision.
+		slog.Warn("artifacts settings: remote images are off because a remote image setting is invalid",
+			"problem", cfg.RemoteImagesInvalid, "revision", state.Revision)
 	}
 	return cfg
 }
