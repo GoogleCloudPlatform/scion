@@ -32,9 +32,9 @@ import (
 // checks, so each case must be refused by both or accepted by both, and
 // an accepted case must yield the same host directory.
 func TestSharedDirChainsParity(t *testing.T) {
-	const shareID = "scion-shared"
 	type fixture struct {
 		mountRoot string
+		shareID   string
 		projectID string
 		name      string
 		outside   string
@@ -49,12 +49,12 @@ func TestSharedDirChainsParity(t *testing.T) {
 	}{
 		{desc: "valid shared dir", refused: false, setup: func(t *testing.T, f *fixture) {}},
 		{desc: "symlinked leaf", refused: true, reason: "is a symlink", setup: func(t *testing.T, f *fixture) {
-			parent := filepath.Join(f.mountRoot, shareID, "projects", f.projectID, "shared-dirs")
+			parent := filepath.Join(f.mountRoot, f.shareID, "projects", f.projectID, "shared-dirs")
 			require.NoError(t, os.MkdirAll(parent, 0o775))
 			require.NoError(t, os.Symlink(f.outside, filepath.Join(parent, f.name)))
 		}},
 		{desc: "symlinked project directory", refused: true, reason: "is a symlink", setup: func(t *testing.T, f *fixture) {
-			parent := filepath.Join(f.mountRoot, shareID, "projects")
+			parent := filepath.Join(f.mountRoot, f.shareID, "projects")
 			require.NoError(t, os.MkdirAll(parent, 0o775))
 			require.NoError(t, os.Symlink(f.outside, filepath.Join(parent, f.projectID)))
 		}},
@@ -65,7 +65,29 @@ func TestSharedDirChainsParity(t *testing.T) {
 			f.projectID = "../victim"
 		}},
 		{desc: "unmounted host base", refused: true, reason: "mounted at", setup: func(t *testing.T, f *fixture) {
-			require.NoError(t, os.RemoveAll(filepath.Join(f.mountRoot, shareID)))
+			require.NoError(t, os.RemoveAll(filepath.Join(f.mountRoot, f.shareID)))
+		}},
+		// A host base that cleans to the filesystem root passes
+		// ConfineLeaf (the leaf still sits under its project subtree) and
+		// is refused only by ValidateNotExportRoot. Both chains must
+		// refuse it before any directory is touched.
+		{desc: "root host base", refused: true, reason: "is not under export root", setup: func(t *testing.T, f *fixture) {
+			if os.Geteuid() == 0 {
+				// If the resolver check ever regressed, its leaf walk
+				// would run against the real root; only run this as an
+				// unprivileged user, where that walk cannot create
+				// anything. The runtime package covers the resolver
+				// with the walk stubbed.
+				t.Skip("root host base case is not run as root")
+			}
+			f.mountRoot = "/"
+			f.shareID = ".."
+			orig := ensureSharedDirLeaf
+			t.Cleanup(func() { ensureSharedDirLeaf = orig })
+			ensureSharedDirLeaf = func(hostBase, rel string) (int, bool, error) {
+				t.Errorf("leaf walk ran for %q under %q", rel, hostBase)
+				return -1, false, os.ErrPermission
+			}
 		}},
 	} {
 		t.Run(tc.desc, func(t *testing.T) {
@@ -74,17 +96,18 @@ func TestSharedDirChainsParity(t *testing.T) {
 			newFixture := func(t *testing.T) *fixture {
 				f := &fixture{
 					mountRoot: newResolvedTempDir(t),
+					shareID:   "scion-shared",
 					projectID: "pid-1",
 					name:      "scratchpad",
 					outside:   t.TempDir(),
 				}
-				require.NoError(t, os.MkdirAll(filepath.Join(f.mountRoot, shareID), 0o755))
+				require.NoError(t, os.MkdirAll(filepath.Join(f.mountRoot, f.shareID), 0o755))
 				tc.setup(t, f)
 				return f
 			}
 			sdCfgFor := func(f *fixture) *config.V1SharedDirStorageConfig {
 				sdCfg := nfsSharedDirStorageCfg(f.mountRoot)
-				sdCfg.NFS.Shares[0].ID = shareID
+				sdCfg.NFS.Shares[0].ID = f.shareID
 				return sdCfg
 			}
 

@@ -270,3 +270,34 @@ func TestResolveSharedDirHostPath_NFSBackstopRefusesSwappedLeaf(t *testing.T) {
 		t.Fatalf("path = %q, want empty", got.Path)
 	}
 }
+
+// TestResolveSharedDirHostPath_NFSRefusesRootHostBase uses a host base
+// that cleans to the filesystem root. ConfineLeaf accepts it, since the
+// leaf still sits under <base>/<subpath_root>/<project>/shared-dirs, but
+// ValidateNotExportRoot does not. The leaf walk is stubbed so the check
+// is shown to refuse before any directory is touched.
+func TestResolveSharedDirHostPath_NFSRefusesRootHostBase(t *testing.T) {
+	orig := ensureSharedDirLeaf
+	t.Cleanup(func() { ensureSharedDirLeaf = orig })
+	walked := false
+	ensureSharedDirLeaf = func(hostBase, rel string) (int, bool, error) {
+		walked = true
+		return -1, false, errors.New("leaf walk must not run")
+	}
+
+	gs := nfsSharedDirSettings("/")
+	gs.Server.SharedDirStorage.NFS.Shares[0].ID = ".."
+	got, err := ResolveSharedDirHostPath(gs, t.TempDir(), "proj", testSharedDirProjectID, "scratchpad")
+	if !errors.Is(err, ErrSharedDirStorageUnavailable) {
+		t.Fatalf("got %+v, err %v; want ErrSharedDirStorageUnavailable", got, err)
+	}
+	if !strings.Contains(err.Error(), "is not under export root") {
+		t.Fatalf("err = %v, want the ValidateNotExportRoot refusal", err)
+	}
+	if got.Path != "" {
+		t.Fatalf("path = %q, want empty", got.Path)
+	}
+	if walked {
+		t.Fatal("the leaf walk ran before the refusal")
+	}
+}

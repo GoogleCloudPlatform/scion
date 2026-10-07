@@ -51,9 +51,10 @@ import (
 // Keep the nfs branch in lockstep with runtime.ResolveSharedDirHostPath,
 // which chat plugins use to find the same directories: both apply the same
 // path checks (name and project ID validation, Resolve, ConfineLeaf,
-// host-base stat refusal, EvalSymlinks of the host base, EnsureLeaf, then
-// the resolved-path backstop). That resolver relies on ConfineLeaf to
-// cover what ValidateNotExportRoot checks here. A change to either chain
+// ValidateNotExportRoot, host-base stat refusal, EvalSymlinks of the host
+// base, EnsureLeaf, then the resolved-path backstop). Both chains now
+// call ValidateNotExportRoot right after ConfineLeaf: here via
+// NFSSharedDirsToVolumeMounts, there directly. A change to either chain
 // must be made to both; TestSharedDirChainsParity runs one table of
 // refusals through both.
 func resolveSharedDirs(

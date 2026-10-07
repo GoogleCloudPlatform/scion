@@ -65,14 +65,13 @@ type SharedDirHostPath struct {
 //
 // Keep this chain in lockstep with pkg/agent resolveSharedDirs: both apply
 // the same path checks, in the same order (name and project ID
-// validation, Resolve, ConfineLeaf, host-base stat refusal, EvalSymlinks
-// of the host base, EnsureLeaf, then the resolved-path backstop). The
-// agent side also calls ValidateNotExportRoot (via
-// NFSSharedDirsToVolumeMounts); here ConfineLeaf covers that case, since
-// a leaf whose parent must be <base>/<subpath_root>/<project>/shared-dirs
-// can never equal or sit outside the host base. A change to either chain
-// must be made to both; TestSharedDirChainsParity in pkg/agent runs one
-// table of refusals through both.
+// validation, Resolve, ConfineLeaf, ValidateNotExportRoot, host-base stat
+// refusal, EvalSymlinks of the host base, EnsureLeaf, then the
+// resolved-path backstop). Both chains now call ValidateNotExportRoot
+// right after ConfineLeaf: here directly, on the agent side via
+// NFSSharedDirsToVolumeMounts. A change to either chain must be made to
+// both; TestSharedDirChainsParity in pkg/agent runs one table of
+// refusals through both.
 //
 // Limits, compared with agent start (which this does not replace):
 //   - Plugins run out of process, so they never see the hub settings DB
@@ -129,6 +128,9 @@ func ResolveSharedDirHostPath(gs *config.VersionedSettings, home, slug, projectI
 	}
 	subPathRoot := config.SubPathRootOrDefault(sdCfg.NFS.SubPathRoot)
 	if err := shareddirs.ConfineLeaf(sd.HostPath, res.HostBase, subPathRoot, projectID, name); err != nil {
+		return SharedDirHostPath{}, fmt.Errorf("%w: %v", ErrSharedDirStorageUnavailable, err)
+	}
+	if err := ValidateNotExportRoot(sd.HostPath, res.HostBase); err != nil {
 		return SharedDirHostPath{}, fmt.Errorf("%w: %v", ErrSharedDirStorageUnavailable, err)
 	}
 
