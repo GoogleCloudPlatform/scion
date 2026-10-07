@@ -341,7 +341,12 @@ func (r *KubernetesRuntime) deletePodRunObjects(ctx context.Context, namespace, 
 			runtimeLog.Warn("Failed to delete per-run object",
 				"kind", kind, "name", name, "agent", podName, "namespace", namespace, "run_id", podRun, "error", err)
 		},
-		func(kind, name string) {
+		func(kind, name string, err error) {
+			if err != nil {
+				runtimeLog.Info("Per-run object already gone or replaced; kept",
+					"kind", kind, "name", name, "namespace", namespace, "agent", podName, "object_run_id", podRun, "error", err)
+				return
+			}
 			runtimeLog.Info(reason, "kind", kind, "name", name, "namespace", namespace,
 				"agent", podName, "object_run_id", podRun)
 		})

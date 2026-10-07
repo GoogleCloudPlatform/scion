@@ -151,12 +151,13 @@ type perRunFilter func(kind string, obj metav1.Object) bool
 // Objects with other names are ignored. A delete that fails with NotFound
 // (already gone) or Conflict (recreated since the list) leaves the object
 // alone. Other failures are passed to warn. onDelete, when set, is called
-// after each successful delete (logging only). Returns how many objects
-// were deleted.
+// after each delete that succeeded (err nil) or found the object already
+// gone or replaced (NotFound or Conflict, err set); it is for logging only.
+// Returns how many objects were deleted.
 //
 // Listing rather than reading by name keeps this within the
 // create/list/delete permissions the runtime already needs.
-func (r *KubernetesRuntime) deleteAgentSecretsBySelector(ctx context.Context, namespace, agentName, selector string, perRun perRunFilter, warn func(kind, name string, err error), onDelete func(kind, name string)) int {
+func (r *KubernetesRuntime) deleteAgentSecretsBySelector(ctx context.Context, namespace, agentName, selector string, perRun perRunFilter, warn func(kind, name string, err error), onDelete func(kind, name string, err error)) int {
 	opts := metav1.ListOptions{LabelSelector: selector}
 	fixed := k8sAgentObjectNames(agentName, "")
 	selected := func(kind string, obj metav1.Object) bool {
@@ -186,9 +187,12 @@ func (r *KubernetesRuntime) deleteAgentSecretsBySelector(ctx context.Context, na
 		case err == nil:
 			removed++
 			if onDelete != nil {
-				onDelete(kind, name)
+				onDelete(kind, name, nil)
 			}
 		case k8serrors.IsNotFound(err), k8serrors.IsConflict(err):
+			if onDelete != nil {
+				onDelete(kind, name, err)
+			}
 		default:
 			warn(kind, name, err)
 		}

@@ -25,6 +25,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
 	corev1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
@@ -1338,5 +1339,47 @@ func TestK8sRun_NoRunID_NFSHome_RemovesPreviousRunObjectsAfterStop(t *testing.T)
 		if secretExists(t, rt, "default", name) {
 			t.Errorf("previous run's per-run Secret %s not removed after its pod stopped", name)
 		}
+	}
+}
+
+// onDelete is called for a delete that hit a Conflict (the object was
+// replaced since the list) as well as for a successful one, so every
+// attempt in deletePodRunObjects is logged.
+func TestDeleteAgentSecretsBySelector_OnDeleteSeesConflict(t *testing.T) {
+	rt, cs, _, _ := newRunScopeRuntime(t)
+	a := prSeedRunObjects(t, rt, rsRunA, "300", prNow)
+	cs.PrependReactor("delete", "secrets", func(action k8stesting.Action) (bool, k8sruntime.Object, error) {
+		if action.(k8stesting.DeleteAction).GetName() != a.Auth {
+			return false, nil, nil
+		}
+		return true, nil, k8serrors.NewConflict(schema.GroupResource{Resource: "secrets"}, a.Auth, errors.New("precondition failed"))
+	})
+	type call struct {
+		kind, name string
+		conflict   bool
+	}
+	var calls []call
+	removed := rt.deleteAgentSecretsBySelector(context.Background(), rt.DefaultNamespace, rsAgent, api.LabelRunID+"="+rsRunA, nil,
+		func(kind, name string, err error) { t.Errorf("warn(%s %s): %v", kind, name, err) },
+		func(kind, name string, err error) {
+			calls = append(calls, call{kind, name, k8serrors.IsConflict(err)})
+			if err != nil && !k8serrors.IsConflict(err) {
+				t.Errorf("onDelete(%s %s) with unexpected error %v", kind, name, err)
+			}
+		})
+	if removed != 2 {
+		t.Errorf("removed = %d, want 2 (the Conflict is not counted)", removed)
+	}
+	got := map[call]bool{}
+	for _, c := range calls {
+		got[c] = true
+	}
+	for _, want := range []call{{"Secret", a.Secret, false}, {"Secret", a.Auth, true}, {"SecretProviderClass", a.SPC, false}} {
+		if !got[want] {
+			t.Errorf("onDelete calls %v lack %+v", calls, want)
+		}
+	}
+	if !secretExists(t, rt, rt.DefaultNamespace, a.Auth) {
+		t.Error("the conflicting Secret was removed")
 	}
 }
