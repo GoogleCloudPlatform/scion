@@ -169,6 +169,33 @@ func TestUnrecordedSAAssignDenialMessageAndDetailsAgree(t *testing.T) {
 	}
 }
 
+// An unrecorded agent-to-agent hop under an agent delegator whose own chain
+// passes (its hop is adopted) denies the SA assign with ceiling_unrecorded,
+// and the denial carries the adoption details.
+func TestUnrecordedAgentDelegatorHopCarriesAdoptionDetails(t *testing.T) {
+	f := newLegacyFixture(t, "adopt-agent-hop")
+	adoptOnly(t, f.store, f.legacy.ID)
+	c := f.storeAgent(t, "adopt-agent-hop-c", []string{f.owner.ID, f.legacy.ID}, AgentRoleFull)
+	addProjectEdge(t, f.store, store.DelegationPrincipalAgent, f.legacy.ID, c.ID, f.proj.ID)
+	f.withAssignedSA(t, c)
+
+	rec := f.createAsParent(t, f.agentToken(t, c.ID), f.assignBody("adopt-agent-hop-gc"))
+	assertSAGateUnrecordedDenied(t, rec)
+	apiErr := decodeTargetAPIError(t, rec)
+	assert.Equal(t, map[string]interface{}{
+		"resource_type":    "gcp_service_account",
+		"denied_action":    string(ActionAssign),
+		"deny_cause":       string(DenyCauseCeilingUnrecorded),
+		"remediation":      remediationDelegationProvenanceAdoption,
+		"remediation_path": delegationAdoptionPath,
+	}, apiErr.Details)
+	body := rec.Body.String()
+	assert.NotContains(t, body, f.legacy.ID)
+	for _, e := range activeEdgesFor(t, f.store, c.ID) {
+		assert.NotContains(t, body, e.ID)
+	}
+}
+
 func TestDelegationAdoptionPreviewRequiresSystemAdmin(t *testing.T) {
 	f := newLegacyFixture(t, "adopt-authz")
 	admin := adoptionAdmin(t, f.store, "adopt-authz-admin")
