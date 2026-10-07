@@ -3922,7 +3922,10 @@ func (d *HTTPAgentDispatcher) deferredRestart(ctx context.Context, agent *store.
 }
 
 // deferredDelete handles a cross-node agent delete: subscribe → write intent →
-// signal → wait for the dispatch row to reach terminal state. Delete is
+// signal → wait for the dispatch row to reach terminal state. The intent
+// pins agent's run and previous runs as they are now (DeleteDispatchArgs),
+// so the owning node deletes those even if the row's run moves on before
+// it drains the intent (ptone/scion#2550). Delete is
 // idempotent: 404 from the owner is treated as success. The exception is
 // the broker's refusal because another run holds the name
 // (ErrDeleteRunMismatch, ptone/scion#3080): the executing node fails the
@@ -3934,6 +3937,7 @@ func (d *HTTPAgentDispatcher) deferredDelete(ctx context.Context, agent *store.A
 		RemoveBranch:   removeBranch,
 		SoftDelete:     softDelete,
 		DeletedAt:      deletedAt,
+		RunID:          agent.RunID,
 		PreviousRunIDs: agent.PreviousRunIDs,
 	}
 	// An engine delete records its claim, not its notAfter: the executing

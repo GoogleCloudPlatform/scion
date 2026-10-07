@@ -718,7 +718,18 @@ func (e *deletionEngine) dispatch() (out deletionOutcome, ok bool) {
 // container is on the broker either way. When it returns false, the
 // refusal falls through to the force or best-effort handling, which
 // finalizes as for any other dispatch error.
+//
+// Every hub delete caller that can finalize or remove an agent's row after
+// a broker delete (the engine here, and env-gather recreate) asks this one
+// function (ptone/scion#2550 P5), so the force and best-effort answer is a
+// change to deleteRunMismatchPolicy alone.
 func refuseDeleteRunMismatch(force, bestEffort bool) bool {
+	return deleteRunMismatchPolicy(force, bestEffort)
+}
+
+// deleteRunMismatchPolicy is refuseDeleteRunMismatch's rule. It is a
+// variable only so tests can flip it and check that every caller follows.
+var deleteRunMismatchPolicy = func(force, bestEffort bool) bool {
 	_, _ = force, bestEffort
 	return true
 }

@@ -54,10 +54,15 @@ type StopDispatchArgs struct {
 }
 
 // DeleteDispatchArgs carries the parameters for a cross-node agent delete.
-// PreviousRunIDs are the agent's previous runs the delete also names
-// (ptone/scion#3097), from the requesting node's copy of the agent (the
-// delete engine's claim snapshot); the owning node uses them instead of
-// its own read of the row.
+// RunID is the run the delete was dispatched for, and PreviousRunIDs are
+// the agent's previous runs the delete also names (ptone/scion#3097), both
+// from the requesting node's copy of the agent (the delete engine's claim
+// snapshot) when the intent is written (ptone/scion#2550). The owning node
+// sends exactly these, never its own later read of the row, so an intent
+// written for run A never deletes a run B started since. An intent with no
+// RunID (written by an older hub, or for an agent with no run ID) uses the
+// re-read row's run and, when the intent lists none, its previous runs, as
+// before.
 // Claim, when non-zero, is the delete engine's deletion claim: the executing
 // node sends the delete (the current run's and each previous run's) only
 // while that claim is still the row's current, live one (ptone/scion#2906).
@@ -66,6 +71,7 @@ type DeleteDispatchArgs struct {
 	RemoveBranch   bool      `json:"removeBranch,omitempty"`
 	SoftDelete     bool      `json:"softDelete,omitempty"`
 	DeletedAt      time.Time `json:"deletedAt,omitempty"`
+	RunID          string    `json:"runId,omitempty"`
 	PreviousRunIDs []string  `json:"previousRunIds,omitempty"`
 	Claim          int64     `json:"claim,omitempty"`
 }
