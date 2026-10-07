@@ -636,15 +636,14 @@ export class ScionPageAgents extends LitElement {
     this.agentWindow.setViewState(this.windowViewState());
 
     // Set SSE scope to dashboard (all project summaries).
-    // This must happen before checking hydrated data because setScope clears
+    // This must happen before checking the store because setScope clears
     // state maps when the scope changes (e.g. from agent-detail to dashboard).
     stateManager.setScope({ type: 'dashboard' });
 
-    // Use hydrated data from SSR if available, avoiding the initial fetch.
-    // Only trust it when scope was previously null (initial SSR page load);
-    // on client-side navigations the maps were just cleared by setScope above.
-    // Skip hydrated data when a scope filter is active — SSR data is unfiltered.
-    // Also require scope capabilities — without them the "New Agent" button
+    // Reuse the agents already in the store, avoiding the initial fetch, when
+    // the scope stayed dashboard (a client-side navigation from home or back
+    // to this page); after a scope change the maps were just cleared above.
+    // Skip it when a scope filter is active. Also require scope capabilities — without them the "New Agent" button
     // won't render, so we must fetch from the API to get them. And require
     // the state store to hold the complete dashboard set with full objects:
     // otherwise state may hold only a label, mine or shared subset, a

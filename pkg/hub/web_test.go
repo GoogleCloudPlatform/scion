@@ -2690,10 +2690,10 @@ func TestResolveAPIPath(t *testing.T) {
 		urlPath  string
 		expected string
 	}{
-		{"/agents", "/api/v1/agents"},
-		{"/agents/", "/api/v1/agents"},
-		{"/projects", "/api/v1/projects"},
-		{"/projects/", "/api/v1/projects"},
+		{"/agents", ""}, // list pages load their own lists
+		{"/agents/", ""},
+		{"/projects", ""},
+		{"/projects/", ""},
 		{"/agents/abc123", "/api/v1/agents/abc123"},
 		{"/projects/my-project", "/api/v1/projects/my-project"},
 		{"/", ""},
@@ -2720,23 +2720,16 @@ func TestSPAShellHandler_ContainsInitialData(t *testing.T) {
 	require.NoError(t, err)
 	ws.SetUserTokenService(tokenSvc)
 
-	// Mount a mock Hub handler that returns agent data with _capabilities
+	// Mount a mock Hub handler that returns one agent with _capabilities
 	mockHub := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"agents": []map[string]interface{}{
-				{
-					"id":     tid("agent-1"),
-					"name":   "test-agent",
-					"status": "running",
-					"_capabilities": map[string]interface{}{
-						"actions": []string{"start", "stop", "delete"},
-					},
-				},
-			},
+			"id":     tid("agent-1"),
+			"name":   "test-agent",
+			"status": "running",
 			"_capabilities": map[string]interface{}{
-				"actions": []string{"create", "list"},
+				"actions": []string{"start", "stop", "delete"},
 			},
 		})
 	})
@@ -2744,8 +2737,8 @@ func TestSPAShellHandler_ContainsInitialData(t *testing.T) {
 
 	handler := ws.Handler()
 
-	// Request the agents page
-	req := httptest.NewRequest("GET", "/agents", nil)
+	// Request an agent detail page (its page consumes the prefetch)
+	req := httptest.NewRequest("GET", "/agents/"+tid("agent-1"), nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
@@ -2771,9 +2764,54 @@ func TestSPAShellHandler_ContainsInitialData(t *testing.T) {
 	var pageData map[string]interface{}
 	require.NoError(t, json.Unmarshal([]byte(jsonData), &pageData), "initial data should be valid JSON")
 
-	assert.Equal(t, "/agents", pageData["path"])
+	assert.Equal(t, "/agents/"+tid("agent-1"), pageData["path"])
 	assert.NotNil(t, pageData["data"], "data field should be present")
 	assert.NotNil(t, pageData["user"], "user field should be present")
+}
+
+// The /agents and /projects list pages load their own lists, so their shells
+// carry no prefetched data and the hub API is not called while rendering them.
+func TestSPAShellHandler_ListPagesHaveNoPrefetch(t *testing.T) {
+	ws := newDevAuthWebServer(t)
+
+	tokenSvc, err := NewUserTokenService(UserTokenConfig{})
+	require.NoError(t, err)
+	ws.SetUserTokenService(tokenSvc)
+
+	var hubCalls []string
+	mockHub := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hubCalls = append(hubCalls, r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"agents": []interface{}{}, "projects": []interface{}{}})
+	})
+	ws.MountHubAPI(mockHub, func(ctx context.Context) error { return nil })
+	handler := ws.Handler()
+
+	for _, path := range []string{"/agents", "/agents/", "/projects", "/projects/"} {
+		t.Run(path, func(t *testing.T) {
+			hubCalls = nil
+			req := httptest.NewRequest("GET", path, nil)
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+
+			resp := rec.Result()
+			body, err := io.ReadAll(resp.Body)
+			require.NoError(t, err)
+			html := string(body)
+			require.Equal(t, http.StatusOK, resp.StatusCode)
+
+			dataStart := strings.Index(html, `type="application/json">`) + len(`type="application/json">`)
+			dataEnd := strings.Index(html[dataStart:], `</script>`)
+			require.True(t, dataStart > 0 && dataEnd > 0, "should find __SCION_DATA__ boundaries")
+			var pageData map[string]interface{}
+			require.NoError(t, json.Unmarshal([]byte(html[dataStart:dataStart+dataEnd]), &pageData))
+
+			assert.NotNil(t, pageData["user"], "user field should still be present")
+			assert.Nil(t, pageData["data"], "list page shell must carry no prefetched data")
+			assert.Empty(t, hubCalls, "rendering the shell must not call the hub API")
+		})
+	}
 }
 
 func TestSPAShellHandler_UserInInitialData(t *testing.T) {
@@ -2818,8 +2856,8 @@ func TestSPAShellHandler_NoHubMounted(t *testing.T) {
 	// Do NOT mount a Hub handler
 	handler := ws.Handler()
 
-	// Request the agents page — should still render with user info
-	req := httptest.NewRequest("GET", "/agents", nil)
+	// Request an agent detail page (a prefetched route) — should still render with user info
+	req := httptest.NewRequest("GET", "/agents/"+tid("agent-1"), nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
@@ -2863,8 +2901,8 @@ func TestSPAShellHandler_HubAPIError(t *testing.T) {
 
 	handler := ws.Handler()
 
-	// Request agents page
-	req := httptest.NewRequest("GET", "/agents", nil)
+	// Request an agent detail page (a prefetched route)
+	req := httptest.NewRequest("GET", "/agents/"+tid("agent-1"), nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 

@@ -1099,15 +1099,16 @@ func isHashedAsset(path string) bool {
 
 // resolveAPIPath maps a browser URL path to the Hub API endpoint that should
 // be prefetched for SSR hydration. Returns "" for paths with no prefetch.
+//
+// Only routes whose page consumes the prefetched response are listed. The
+// /agents and /projects list pages load their own windowed or scoped lists,
+// so prefetching the unscoped lists for them was discarded server work (and,
+// for a large agent list, a slower and much larger shell).
 func resolveAPIPath(urlPath string) string {
 	// Trim trailing slash for consistent matching
 	p := strings.TrimRight(urlPath, "/")
 
 	switch {
-	case p == "/agents":
-		return "/api/v1/agents"
-	case p == "/projects":
-		return "/api/v1/projects"
 	case strings.HasPrefix(p, "/agents/") && strings.Count(p, "/") == 2:
 		// /agents/{id} -> /api/v1/agents/{id}
 		return "/api/v1" + p
