@@ -1478,6 +1478,48 @@ func TestSubstrateExec_NonZeroExitIsCommandExitError(t *testing.T) {
 	}
 }
 
+// TestSubstrateRedactExecErr_WrappedCommandExitError pins that a wrapped
+// *CommandExitError (as ExecWithStdin's stdin probe returns) keeps its type
+// through redactExecErr, and that neither the message nor the unwrapped
+// error carries a cached secret, whether the secret sits in the wrapper's
+// own text or in the exit error's fields.
+func TestSubstrateRedactExecErr_WrappedCommandExitError(t *testing.T) {
+	const id = "scion-proj/agent-wrapped"
+	const secret = "sk-wrapped-exit-secret-value-0456"
+	substrateAgentStateMu.Lock()
+	substrateExecSecrets[id] = map[string]string{"ANTHROPIC_API_KEY": secret}
+	substrateAgentStateMu.Unlock()
+	t.Cleanup(func() {
+		substrateAgentStateMu.Lock()
+		delete(substrateExecSecrets, id)
+		substrateAgentStateMu.Unlock()
+	})
+
+	orig := &CommandExitError{Runtime: "substrate", Target: "ns/" + secret, Code: 3, Output: "boom " + secret}
+	wrapped := fmt.Errorf("substrate: stdin capability probe failed for %s (%s): %w", id, secret, orig)
+
+	err := (&SubstrateRuntime{}).redactExecErr(id, wrapped)
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("Error() leaks the cached secret: %v", err)
+	}
+	if !strings.HasPrefix(err.Error(), "substrate: stdin capability probe failed for "+id) {
+		t.Errorf("Error() = %q, want the wrapper's context kept", err.Error())
+	}
+	var exitErr *CommandExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("errors.As(*CommandExitError) = false for wrapped exit (err %T: %v)", err, err)
+	}
+	if exitErr == orig {
+		t.Fatal("errors.As reached the unredacted original exit error")
+	}
+	if exitErr.ExitStatus() != 3 {
+		t.Errorf("ExitStatus() = %d, want 3", exitErr.ExitStatus())
+	}
+	if strings.Contains(exitErr.Error(), secret) || strings.Contains(exitErr.Target, secret) || strings.Contains(exitErr.Output, secret) {
+		t.Fatalf("unwrapped exit error leaks the cached secret: %+v", exitErr)
+	}
+}
+
 func TestSubstrateExec_NoCachedToken(t *testing.T) {
 	rec := &callRecorder{}
 	rt, _, _, closeServer := newTestSubstrateHarness(t, rec)
