@@ -170,7 +170,7 @@ func (s *imageScan) addHit(pos int, raw string, kind int) {
 // name the same image. When the scan already holds limit labels, a new one
 // is not recorded and the result reports that the scan filled up.
 func (s *imageScan) addUse(pos int, label string) {
-	if s.full || label == "" || len(label) > maxLabelBytes {
+	if s.full || s.usesFull || label == "" || len(label) > maxLabelBytes {
 		return
 	}
 	h, ok := s.labelHash(label)
@@ -198,6 +198,11 @@ func (s *imageScan) addUse(pos int, label string) {
 type bracket struct {
 	start int // first byte after '['
 	image bool
+	// nested is set when another '[' opened inside this one. Its text then
+	// cannot be a reference label (labels hold no unescaped brackets), so
+	// alt texts used as labels never overlap and each byte is hashed by
+	// at most one use.
+	nested bool
 }
 
 // scanInline is the first pass: inline images, reference image uses and
@@ -221,6 +226,9 @@ func (s *imageScan) scanInline() {
 		case '!':
 			bang = i
 		case '[':
+			if depth > 0 {
+				stack[top].nested = true
+			}
 			top = (top + 1) % bracketDepth
 			stack[top] = bracket{start: i + 1, image: bang == i-1}
 			depth = min(depth+1, bracketDepth)
@@ -234,7 +242,7 @@ func (s *imageScan) scanInline() {
 			if !b.image {
 				continue
 			}
-			s.imageAfterAlt(b.start, i)
+			s.imageAfterAlt(b.start, i, b.nested)
 		case '<':
 			if end, ok := s.imgTag(i); ok {
 				i = end
@@ -245,7 +253,10 @@ func (s *imageScan) scanInline() {
 
 // imageAfterAlt handles what follows the ']' at close of an image whose alt
 // text starts at altStart.
-func (s *imageScan) imageAfterAlt(altStart, close int) {
+//
+// nested reports that the alt text holds another bracket, so it is not
+// used as a label (collapsed and shortcut references).
+func (s *imageScan) imageAfterAlt(altStart, close int, nested bool) {
 	doc := s.doc
 	next := close + 1
 	switch {
@@ -259,11 +270,16 @@ func (s *imageScan) imageAfterAlt(altStart, close int) {
 			return
 		}
 		if label == "" {
+			if nested {
+				return
+			}
 			label = doc[altStart:close]
 		}
 		s.addUse(close, label)
 	default:
-		s.addUse(close, doc[altStart:close])
+		if !nested {
+			s.addUse(close, doc[altStart:close])
+		}
 	}
 }
 

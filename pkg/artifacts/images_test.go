@@ -18,11 +18,15 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"net/url"
 	"os"
 	"runtime"
+	"sort"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestExtractImageURLs(t *testing.T) {
@@ -349,6 +353,12 @@ func costShapes() map[string]string {
 		"definitions one label, one pending":    "![never][nope]" + same.String() + "\n" + fill("[same]: https://img.example/x.png\n", w-same.Len()-15),
 		"definitions one label, unusable":       same.String() + "\n" + fill("[same]: ftp://img.example/x.png\n", w-same.Len()-1),
 		"newlines":                              fill("\n", w),
+		"distinct shortcut references":          distinct("![label%d] ", w),
+		"nested collapsed references":           fill(strings.Repeat("![", 32)+strings.Repeat("c", 500)+strings.Repeat("][]", 32), w),
+		"nested distinct collapsed references":  distinct("![x%d"+strings.Repeat("![", 30)+"y"+strings.Repeat("][]", 31), w),
+		"nested alt labels":                     fill(strings.Repeat("!["+strings.Repeat("a", 29), 32)+strings.Repeat("]", 32), w),
+		"nested long alt labels":                fill(strings.Repeat("![", 32)+strings.Repeat("a", 934)+strings.Repeat("]", 32), w),
+		"nested distinct alt labels":            distinct(strings.Repeat("![%d", 32)[:0]+"![a%d"+strings.Repeat("![b", 31)+strings.Repeat("]", 32), w),
 		"uses then one huge definition":         hugeDefinition[:w],
 		"distinct labels with long definitions": (distinctUses.String() + distinctDefs.String())[:w],
 		"tab-split distinct src":                distinct("<img src=\"h\tt\tt\tp\ts://img.example/%d/"+strings.Repeat("a\t", 900)+"\">", w),
@@ -484,6 +494,63 @@ func TestAttrValue(t *testing.T) {
 		got, ok := attrValue(tc.attrs, "src")
 		if got != tc.want || ok != tc.ok {
 			t.Errorf("attrValue(%q) = %q, %v; want %q, %v", tc.attrs, got, ok, tc.want, tc.ok)
+		}
+	}
+}
+
+// TestExtractImageURLsRandomCompositions builds windows from random slices
+// of every cost shape, joined in random order, and checks the per-byte
+// work, per-candidate normalization work and allocation ceilings on each.
+// The seed is logged; set SCION_TEST_SEED to replay a failure.
+func TestExtractImageURLsRandomCompositions(t *testing.T) {
+	seed := time.Now().UnixNano()
+	if v := os.Getenv("SCION_TEST_SEED"); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			t.Fatalf("SCION_TEST_SEED: %v", err)
+		}
+		seed = n
+	}
+	t.Logf("seed %d (replay with SCION_TEST_SEED=%d)", seed, seed)
+	rng := rand.New(rand.NewSource(seed))
+	shapes := costShapes()
+	names := make([]string, 0, len(shapes))
+	for name := range shapes {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	// Each round starts with half a window of one shape, in turn, so every
+	// shape is exercised at size; the rest is random slices of any shape.
+	for round := 0; round < len(names); round++ {
+		var b strings.Builder
+		lead := names[round]
+		b.WriteString(shapes[lead][:imageScanWindow/2])
+		used := []string{lead + " (lead)"}
+		for b.Len() < imageScanWindow {
+			name := names[rng.Intn(len(names))]
+			doc := shapes[name]
+			n := 1 + rng.Intn(256<<10)
+			off := rng.Intn(len(doc))
+			piece := doc[off:min(len(doc), off+n)]
+			if rng.Intn(4) == 0 {
+				piece = doc[:min(len(doc), n)] // a shape's own start, where its prefix lives
+			}
+			b.WriteString(piece)
+			used = append(used, name)
+		}
+		doc := b.String()[:imageScanWindow]
+		limit := []int{4, 128, maxPolicyLimit}[rng.Intn(3)]
+		ex := extractImageURLs(doc, limit)
+		if max := maxStepsPerByte*len(doc) + 4096; ex.steps > max {
+			t.Errorf("round %d (limit %d, shapes %v): %d steps for %d bytes (limit %d)", round, limit, used, ex.steps, len(doc), max)
+		}
+		if max := ex.normalized * 3 * (maxImageURLBytes + 8); ex.normSteps > max {
+			t.Errorf("round %d (limit %d, shapes %v): normalization examined %d bytes for %d candidates", round, limit, used, ex.normSteps, ex.normalized)
+		}
+		if !raceEnabled {
+			if got, allow := extractAlloc(doc, limit), allocAllowance(limit); got > allow {
+				t.Errorf("round %d (limit %d, shapes %v): allocated %d bytes, allowance %d", round, limit, used, got, allow)
+			}
 		}
 	}
 }
