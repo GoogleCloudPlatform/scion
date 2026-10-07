@@ -23,6 +23,7 @@ import (
 	"log/slog"
 	"maps"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 
@@ -227,61 +228,84 @@ type sharedDirCheckInput struct {
 	// hub-dispatched project ID that keys it.
 	gs        *config.VersionedSettings
 	projectID string
-	// nfsWorkspaceBackend is set when server.workspace_storage is nfs: on
-	// Kubernetes, local shared dirs are then served from the workspace
-	// export instead of a per-dir claim.
-	nfsWorkspaceBackend bool
-	// claims, when the runtime implements it, looks up a dir's local
-	// storage claim (Kubernetes). claimLabels are the labels it needs.
-	claims      runtime.SharedDirClaimChecker
-	claimLabels map[string]string
+	// claims, when the runtime implements it, tells whether a dir's local
+	// storage is a claim of its own and looks that claim up (Kubernetes).
+	claims runtime.SharedDirClaimChecker
 }
 
 // checkChangedSharedDirs runs the start check for each shared dir whose
 // backend an explicit change moved (rec.Previous). It returns the dirs that
-// passed, whose previous entries the caller drops, or an error for the
-// first dir that is refused. A dir whose backend for this start does not
-// match its change is skipped and keeps its entry.
+// passed, whose previous entries the caller drops, and the dirs changed
+// back to local whose local storage is a runtime claim, which the caller
+// checks with checkSharedDirClaims once the run config is known; or an
+// error for the first dir that is refused. A dir whose backend for this
+// start does not match its change is skipped and keeps its entry.
 //
 // A dir moved to nfs is refused when its nfs directory is empty while its
 // previous local directory is not. On Kubernetes the previous local
 // storage is a volume the broker cannot read, so an empty nfs directory is
 // refused.
 //
-// A dir moved back to local is refused when its previous nfs directory is
-// not empty while its local directory is empty, and when the nfs directory
-// cannot be checked. On Kubernetes the local storage is a claim the broker
-// cannot read: a missing claim (or one that cannot be looked up) is
-// refused, and an existing claim passes with a warning that its content was
-// not checked. A runtime that cannot look up claims, or one whose local
-// dirs are served from an nfs workspace export, skips the content check
-// with a warning.
-func checkChangedSharedDirs(ctx context.Context, in sharedDirCheckInput) ([]string, error) {
+// A dir moved back to local, on a runtime that bind-mounts the local
+// directory, is refused when its previous nfs directory cannot be checked,
+// or is not empty while the local directory is empty. On any other runtime
+// the local storage cannot be read here: a runtime that cannot look up
+// claims skips the check with a warning, and the others defer it.
+func checkChangedSharedDirs(ctx context.Context, in sharedDirCheckInput) (passed, deferred []string, err error) {
 	if in.rec == nil || len(in.rec.Previous) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
-	var passed []string
 	for _, d := range in.dirs {
 		previous, ok := in.rec.Previous[d.Name]
 		if !ok {
 			continue
 		}
 		served := in.realization.Serves(d.Name)
-		var err error
 		switch {
 		case previous == "local" && served:
-			err = checkChangedToNFS(in, d.Name)
+			if err := checkChangedToNFS(in, d.Name); err != nil {
+				return nil, nil, err
+			}
 		case previous == "nfs" && !served && in.rec.backendFor(d.Name) == "local":
-			err = checkChangedToLocal(ctx, in, d.Name)
+			if !isLocalContainerRuntime(in.runtimeName) {
+				if in.claims == nil {
+					slog.Warn("Start: not checking a shared dir changed back to the local backend; this runtime cannot look up its local storage",
+						"shared_dir", d.Name, "runtime", in.runtimeName)
+				} else {
+					deferred = append(deferred, d.Name)
+					continue
+				}
+			} else if err := checkChangedToLocalDir(in, d.Name); err != nil {
+				return nil, nil, err
+			}
 		default:
 			continue
 		}
-		if err != nil {
-			return nil, err
-		}
 		passed = append(passed, d.Name)
 	}
-	return passed, nil
+	return passed, deferred, nil
+}
+
+// dropCheckedSharedDirs removes the previous entries of the dirs in names
+// from rec and saves the result for the agent in agentDir. It returns the
+// updated record (rec itself when names is empty). A failed save only logs
+// a warning: the check then runs again at the next start.
+func dropCheckedSharedDirs(agentDir string, rec *sharedDirStorageRecord, names []string, agentName string) *sharedDirStorageRecord {
+	if rec == nil || len(names) == 0 {
+		return rec
+	}
+	updated := *rec
+	updated.Previous = maps.Clone(rec.Previous)
+	for _, name := range names {
+		delete(updated.Previous, name)
+	}
+	if len(updated.Previous) == 0 {
+		updated.Previous = nil
+	}
+	if err := saveSharedDirStorageRecord(agentDir, &updated); err != nil {
+		slog.Warn("Start: could not update the agent's shared-dir storage record after checking changed shared dirs", "agent", agentName, "error", err)
+	}
+	return &updated
 }
 
 // sharedDirCheckNext is the end of a refusal of the start check for the dir
@@ -324,90 +348,139 @@ func checkChangedToNFS(in sharedDirCheckInput, name string) error {
 	return nil
 }
 
-// checkChangedToLocal checks the dir name after a change from nfs back to
-// local.
-func checkChangedToLocal(ctx context.Context, in sharedDirCheckInput, name string) error {
-	nfsLeaf, err := previousNFSLeaf(in.gs, in.projectID, name)
-	if err == nil {
-		var nfsEmpty bool
-		nfsEmpty, err = localLeafIsEmpty(nfsLeaf)
-		if err == nil && nfsEmpty {
-			return nil
-		}
-	}
+// checkPreviousNFSDir reports whether the previous nfs directory of the dir
+// name holds data, and returns its path. A directory that cannot be checked
+// is a refusal of the start, naming the flag that skips the check.
+func checkPreviousNFSDir(in sharedDirCheckInput, name string) (nfsLeaf string, hasData bool, err error) {
+	nfsLeaf, empty, err := previousNFSLeafIsEmpty(in.gs, in.projectID, name)
 	if err != nil {
-		return fmt.Errorf("shared dir %q now uses the local backend, but its previous nfs directory cannot be checked, so the start is refused: %v. Start again once it can be checked, or reincarnate with %s %s=local %s to skip the check",
+		return "", false, fmt.Errorf("shared dir %q now uses the local backend, but its previous nfs directory cannot be checked, so the start is refused: %v. Start again once it can be checked, or reincarnate with %s %s=local %s to skip the check",
 			name, err, sharedDirBackendFlag, name, allowEmptySharedDirFlag)
 	}
-	next := sharedDirCheckNext(name, "local")
-	switch {
-	case isLocalContainerRuntime(in.runtimeName):
-		localLeaf, err := config.GetSharedDirPath(in.projectDir, name)
-		if err != nil {
-			return fmt.Errorf("shared dir %q: resolving its local directory: %w", name, err)
-		}
-		localEmpty, err := localLeafIsEmpty(localLeaf)
-		if err != nil {
-			return fmt.Errorf("shared dir %q: checking its local directory %s: %w", name, localLeaf, err)
-		}
-		if localEmpty {
-			return fmt.Errorf("shared dir %q now uses the local backend, but its local directory %s is empty while its previous nfs directory %s is not. %s",
-				name, localLeaf, nfsLeaf, next)
-		}
-		return nil
-	case isKubernetesRuntime(in.runtimeName) && in.nfsWorkspaceBackend:
-		slog.Warn("Start: not checking a shared dir changed back to the local backend; its local storage is served from the nfs workspace export",
-			"shared_dir", name, "previous_nfs_dir", nfsLeaf)
-		return nil
-	case in.claims == nil:
-		slog.Warn("Start: not checking a shared dir changed back to the local backend; this runtime cannot look up its local storage",
-			"shared_dir", name, "runtime", in.runtimeName, "previous_nfs_dir", nfsLeaf)
-		return nil
+	return nfsLeaf, !empty, nil
+}
+
+// checkChangedToLocalDir checks the dir name after a change from nfs back
+// to local on a runtime that bind-mounts the broker's local directory.
+func checkChangedToLocalDir(in sharedDirCheckInput, name string) error {
+	nfsLeaf, hasData, err := checkPreviousNFSDir(in, name)
+	if err != nil || !hasData {
+		return err
 	}
-	exists, err := in.claims.SharedDirClaimExists(ctx, in.claimLabels, name)
+	localLeaf, err := config.GetSharedDirPath(in.projectDir, name)
 	if err != nil {
-		return fmt.Errorf("shared dir %q now uses the local backend and its previous nfs directory %s is not empty, but its local storage cannot be looked up, so the start is refused: %v. Start again once it can be looked up, or reincarnate with %s %s=local %s to skip the check",
-			name, nfsLeaf, err, sharedDirBackendFlag, name, allowEmptySharedDirFlag)
+		return fmt.Errorf("shared dir %q: resolving its local directory: %w", name, err)
 	}
-	if !exists {
-		return fmt.Errorf("shared dir %q now uses the local backend and its previous nfs directory %s is not empty, but its local storage, a Kubernetes volume claim, does not exist, so it would start empty. %s",
-			name, nfsLeaf, next)
+	localEmpty, err := localLeafIsEmpty(localLeaf)
+	if err != nil {
+		return fmt.Errorf("shared dir %q: checking its local directory %s: %w", name, localLeaf, err)
 	}
-	slog.Warn("Start: a shared dir changed back to the local backend uses an existing Kubernetes volume claim whose content this broker cannot read; it was not checked",
-		"shared_dir", name, "previous_nfs_dir", nfsLeaf)
+	if localEmpty {
+		return fmt.Errorf("shared dir %q now uses the local backend, but its local directory %s is empty while its previous nfs directory %s is not. %s",
+			name, localLeaf, nfsLeaf, sharedDirCheckNext(name, "local"))
+	}
 	return nil
 }
 
-// previousNFSLeaf returns the nfs directory of the shared dir name for the
-// project projectID, resolved from gs's nfs block exactly as an nfs start
-// would, without creating anything. The nfs export must be mounted at its
-// host base.
-func previousNFSLeaf(gs *config.VersionedSettings, projectID, name string) (string, error) {
+// checkSharedDirClaims checks the dirs in names, deferred by
+// checkChangedSharedDirs, against cfg, the config the runtime is about to
+// run. A dir to which the runtime gives no claim of its own (on Kubernetes,
+// local dirs served from the nfs workspace claim) is skipped with a
+// warning. Otherwise a previous nfs directory that cannot be checked
+// refuses the start, an empty one passes, and when it holds data a missing
+// claim or a failed lookup refuses the start, while an existing claim
+// passes with a warning that its content was not checked. It returns the
+// dirs that passed.
+func checkSharedDirClaims(ctx context.Context, in sharedDirCheckInput, names []string, cfg runtime.RunConfig) ([]string, error) {
+	if in.claims == nil {
+		return nil, fmt.Errorf("checking shared dirs changed back to local: the runtime cannot look up their storage")
+	}
+	var passed []string
+	for _, name := range names {
+		if !in.claims.SharedDirUsesClaim(cfg, name) {
+			slog.Warn("Start: not checking a shared dir changed back to the local backend; its local storage has no claim of its own (it is served from the nfs workspace claim)",
+				"shared_dir", name)
+			passed = append(passed, name)
+			continue
+		}
+		nfsLeaf, hasData, err := checkPreviousNFSDir(in, name)
+		if err != nil {
+			return nil, err
+		}
+		if !hasData {
+			passed = append(passed, name)
+			continue
+		}
+		exists, err := in.claims.SharedDirClaimExists(ctx, cfg, name)
+		if err != nil {
+			return nil, fmt.Errorf("shared dir %q now uses the local backend and its previous nfs directory %s is not empty, but its local storage cannot be looked up, so the start is refused: %v. Start again once it can be looked up, or reincarnate with %s %s=local %s to skip the check",
+				name, nfsLeaf, err, sharedDirBackendFlag, name, allowEmptySharedDirFlag)
+		}
+		if !exists {
+			return nil, fmt.Errorf("shared dir %q now uses the local backend and its previous nfs directory %s is not empty, but its local storage, a Kubernetes volume claim, does not exist, so it would start empty. %s",
+				name, nfsLeaf, sharedDirCheckNext(name, "local"))
+		}
+		slog.Warn("Start: a shared dir changed back to the local backend uses an existing Kubernetes volume claim whose content this broker cannot read; it was not checked",
+			"shared_dir", name, "previous_nfs_dir", nfsLeaf)
+		passed = append(passed, name)
+	}
+	return passed, nil
+}
+
+// previousNFSLeafIsEmpty reports whether the nfs directory of the shared
+// dir name for the project projectID holds no data, and returns its path.
+// The directory is resolved from gs's nfs block as an nfs start resolves
+// it: the host base through its symlinks, then a walk of every component
+// below it that refuses any symlink (shareddirs.OpenAnchoredRoot). Nothing
+// is created. A missing directory is empty; the nfs export must be
+// available at its host base.
+func previousNFSLeafIsEmpty(gs *config.VersionedSettings, projectID, name string) (string, bool, error) {
 	nfs := nfsSharedDirStorage(gs)
 	if err := nfs.Validate(); err != nil {
-		return "", fmt.Errorf("server.shared_dir_storage.nfs is not complete on this broker: %w", err)
+		return "", false, fmt.Errorf("server.shared_dir_storage.nfs is not complete on this broker: %w", err)
 	}
 	if !shareddirs.ValidProjectID(projectID) {
-		return "", fmt.Errorf("no valid hub project ID (%q) to locate it", projectID)
+		return "", false, fmt.Errorf("no valid hub project ID (%q) to locate it", projectID)
 	}
 	if err := api.ValidateSharedDirs([]api.SharedDir{{Name: name}}); err != nil {
-		return "", err
+		return "", false, err
 	}
 	res, err := runtime.NewNFSBackend(nfs.NFS).Resolve(runtime.ResolveInput{ProjectID: projectID, SharedDirNames: []string{name}})
 	if err != nil {
-		return "", fmt.Errorf("resolving it: %w", err)
+		return "", false, fmt.Errorf("resolving it: %w", err)
 	}
 	sd, ok := res.SharedDirs[name]
 	if !ok {
-		return "", fmt.Errorf("it is not in the nfs resolution")
+		return "", false, fmt.Errorf("it is not in the nfs resolution")
 	}
 	if err := shareddirs.ConfineLeaf(sd.HostPath, res.HostBase, config.SubPathRootOrDefault(nfs.NFS.SubPathRoot), projectID, name); err != nil {
-		return "", err
+		return "", false, err
 	}
-	if _, err := os.Stat(res.HostBase); err != nil {
-		return "", fmt.Errorf("the nfs export is not available at %s: %w", res.HostBase, err)
+	resolvedHostBase, err := filepath.EvalSymlinks(res.HostBase)
+	if err != nil {
+		return "", false, fmt.Errorf("the nfs export is not available at %s: %w", res.HostBase, err)
 	}
-	return sd.HostPath, nil
+	root, err := shareddirs.OpenAnchoredRoot(resolvedHostBase, sd.ServerRelativePath)
+	if errors.Is(err, fs.ErrNotExist) {
+		return sd.HostPath, true, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("opening %s: %w", sd.HostPath, err)
+	}
+	defer func() { _ = root.Close() }()
+	f, err := root.Open(".")
+	if err != nil {
+		return "", false, fmt.Errorf("opening %s: %w", sd.HostPath, err)
+	}
+	defer func() { _ = f.Close() }()
+	_, err = f.Readdirnames(1)
+	if errors.Is(err, io.EOF) {
+		return sd.HostPath, true, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("reading %s: %w", sd.HostPath, err)
+	}
+	return sd.HostPath, false, nil
 }
 
 // pendingSharedDirBackendChange is a validated explicit backend change,

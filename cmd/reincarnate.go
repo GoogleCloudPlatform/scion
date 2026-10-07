@@ -186,17 +186,17 @@ Neither directory is ever moved or deleted. The start refuses an empty
 directory on the new backend while the previous one is not empty. On
 Kubernetes a change to nfs is refused whenever the nfs directory is empty,
 and a change back to local whose nfs directory is not empty is refused
-when the shared dir's volume claim does not exist (an existing claim's
-content is not checked). Add --allow-empty-shared-dir to start anyway. If
-a start is refused, copy the data and run scion start again; do not
-reincarnate again. The shared dir flags cannot be combined with a move to
-another broker.
+when the shared dir's own volume claim does not exist (an existing claim's
+content is not checked). To start anyway, reincarnate with
+--allow-empty-shared-dir. Otherwise, after a refused start, copy the data
+and run scion start again rather than reincarnating again. The shared dir
+flags cannot be combined with a move to another broker.
 
 The broker checks the change (the dir is one of the agent's shared dirs,
-for nfs the nfs settings are complete, the broker supports it) after the hub has
-stopped the agent. If the broker refuses, the reincarnation fails and the
-agent stays stopped with its record unchanged. --dry-run does not run these
-broker checks.`,
+for nfs the nfs settings are complete, the broker supports it) after the
+hub has stopped the agent. If the broker refuses, the reincarnation fails
+and the agent stays stopped with its record unchanged. --dry-run does not
+run these broker checks.`,
 	Args: func(cmd *cobra.Command, args []string) error {
 		if len(args) > 1 {
 			return fmt.Errorf("accepts at most 1 argument (agent name)")

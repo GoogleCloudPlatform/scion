@@ -25,10 +25,14 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	k8sruntime "k8s.io/apimachinery/pkg/runtime"
+	dynamicfake "k8s.io/client-go/dynamic/fake"
+	k8sfake "k8s.io/client-go/kubernetes/fake"
 )
 
 // Changes of a shared dir's backend from nfs back to local.
@@ -85,17 +89,23 @@ func TestChangeSharedDirBackends_ToLocal(t *testing.T) {
 	}
 }
 
-// fakeClaims is a SharedDirClaimChecker with a fixed answer.
+// fakeClaims is a SharedDirClaimChecker with fixed answers. A dir uses a
+// claim unless noClaim is set.
 type fakeClaims struct {
-	exists bool
-	err    error
-	calls  []string
-	labels map[string]string
+	noClaim bool
+	exists  bool
+	err     error
+	calls   []string
+	cfg     runtime.RunConfig
 }
 
-func (f *fakeClaims) SharedDirClaimExists(_ context.Context, labels map[string]string, dirName string) (bool, error) {
+func (f *fakeClaims) SharedDirUsesClaim(_ runtime.RunConfig, _ string) bool {
+	return !f.noClaim
+}
+
+func (f *fakeClaims) SharedDirClaimExists(_ context.Context, cfg runtime.RunConfig, dirName string) (bool, error) {
 	f.calls = append(f.calls, dirName)
-	f.labels = labels
+	f.cfg = cfg
 	return f.exists, f.err
 }
 
@@ -106,7 +116,9 @@ type localCheckFixture struct {
 	projectDir string
 	localLeaf  string
 	nfsLeaf    string
+	shareDir   string
 	in         sharedDirCheckInput
+	runCfg     runtime.RunConfig
 }
 
 func newLocalCheckFixture(t *testing.T, runtimeName string) *localCheckFixture {
@@ -116,13 +128,13 @@ func newLocalCheckFixture(t *testing.T, runtimeName string) *localCheckFixture {
 	require.NoError(t, err)
 	mountRoot := t.TempDir()
 	gs := perDirSettings(mountRoot, config.V1ProfileConfig{}, config.V1RuntimeConfig{})
-	shareID := gs.Server.SharedDirStorage.NFS.Shares[0].ID
-	require.NoError(t, os.MkdirAll(filepath.Join(mountRoot, shareID), 0o775))
-	nfsLeaf := filepath.Join(mountRoot, shareID, "projects", "pid-1", "shared-dirs", "notes")
+	shareDir := filepath.Join(mountRoot, gs.Server.SharedDirStorage.NFS.Shares[0].ID)
+	require.NoError(t, os.MkdirAll(shareDir, 0o775))
 	return &localCheckFixture{
 		projectDir: projectDir,
 		localLeaf:  localLeaf,
-		nfsLeaf:    nfsLeaf,
+		nfsLeaf:    filepath.Join(shareDir, "projects", "pid-1", "shared-dirs", "notes"),
+		shareDir:   shareDir,
 		in: sharedDirCheckInput{
 			rec:         &sharedDirStorageRecord{Backend: "local", Previous: map[string]string{"notes": "nfs"}},
 			dirs:        notesAndCache(),
@@ -131,13 +143,21 @@ func newLocalCheckFixture(t *testing.T, runtimeName string) *localCheckFixture {
 			runtimeName: runtimeName,
 			gs:          gs,
 			projectID:   "pid-1",
-			claimLabels: projectkeys.ProjectNameLabels("proj"),
 		},
+		runCfg: runtime.RunConfig{Labels: projectkeys.ProjectNameLabels("proj")},
 	}
 }
 
 func (c *localCheckFixture) check() ([]string, error) {
-	return checkChangedSharedDirs(context.Background(), c.in)
+	passed, deferred, err := checkChangedSharedDirs(context.Background(), c.in)
+	if err != nil || len(deferred) == 0 {
+		return passed, err
+	}
+	more, err := checkSharedDirClaims(context.Background(), c.in, deferred, c.runCfg)
+	if err != nil {
+		return nil, err
+	}
+	return append(passed, more...), nil
 }
 
 func captureWarnings(t *testing.T) *bytes.Buffer {
@@ -191,6 +211,45 @@ func TestCheckChangedSharedDirs_ToLocal_Docker(t *testing.T) {
 		_, statErr := os.Stat(c.nfsLeaf)
 		assert.True(t, errors.Is(statErr, os.ErrNotExist), "the check creates nothing")
 	})
+	t.Run("symlinked host base is followed", func(t *testing.T) {
+		c := newLocalCheckFixture(t, "docker")
+		writeFileIn(t, c.nfsLeaf, "note.md")
+		writeFileIn(t, c.localLeaf, "note.md")
+		link := filepath.Join(t.TempDir(), "mnt")
+		require.NoError(t, os.Symlink(filepath.Dir(c.shareDir), link))
+		c.in.gs.Server.SharedDirStorage.NFS.MountRoot = link
+		passed, err := c.check()
+		require.NoError(t, err)
+		assert.Equal(t, []string{"notes"}, passed)
+	})
+}
+
+// The nfs directory is opened as an nfs start opens it: a symlink at any
+// component below the host base is refused, so the start is refused as
+// unable to check it rather than reading through the link.
+func TestCheckChangedSharedDirs_ToLocal_SymlinkBelowHostBaseRefused(t *testing.T) {
+	for name, linkAt := range map[string]func(c *localCheckFixture) string{
+		"middle directory": func(c *localCheckFixture) string { return filepath.Join(c.shareDir, "projects", "pid-1") },
+		"leaf":             func(c *localCheckFixture) string { return c.nfsLeaf },
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := newLocalCheckFixture(t, "docker")
+			elsewhere := t.TempDir()
+			writeFileIn(t, filepath.Join(elsewhere, "shared-dirs", "notes"), "note.md")
+			writeFileIn(t, elsewhere, "note.md")
+			at := linkAt(c)
+			require.NoError(t, os.MkdirAll(filepath.Dir(at), 0o775))
+			target := elsewhere
+			if at == c.nfsLeaf {
+				target = filepath.Join(elsewhere, "shared-dirs", "notes")
+			}
+			require.NoError(t, os.Symlink(target, at))
+			_, err := c.check()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "previous nfs directory cannot be checked")
+			assert.Contains(t, err.Error(), "--shared-dir-backend notes=local --allow-empty-shared-dir")
+		})
+	}
 }
 
 func TestCheckChangedSharedDirs_ToLocal_NFSUncheckable(t *testing.T) {
@@ -203,19 +262,61 @@ func TestCheckChangedSharedDirs_ToLocal_NFSUncheckable(t *testing.T) {
 		},
 		"invalid project": func(c *localCheckFixture) { c.in.projectID = "../x" },
 	} {
-		t.Run(name, func(t *testing.T) {
-			c := newLocalCheckFixture(t, "docker")
-			writeFileIn(t, c.localLeaf, "note.md")
-			mutate(c)
-			_, err := c.check()
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), "previous nfs directory cannot be checked")
-			assert.Contains(t, err.Error(), "--shared-dir-backend notes=local --allow-empty-shared-dir")
-		})
+		for _, rt := range []string{"docker", "kubernetes"} {
+			t.Run(name+" on "+rt, func(t *testing.T) {
+				c := newLocalCheckFixture(t, rt)
+				c.in.claims = &fakeClaims{exists: true}
+				writeFileIn(t, c.localLeaf, "note.md")
+				mutate(c)
+				_, err := c.check()
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "previous nfs directory cannot be checked")
+				assert.Contains(t, err.Error(), "--shared-dir-backend notes=local --allow-empty-shared-dir")
+			})
+		}
 	}
 }
 
+// When the local storage cannot be checked anyway, the check is skipped
+// before the nfs directory is read: an nfs directory that cannot be
+// checked does not refuse the start there.
+func TestCheckChangedSharedDirs_ToLocal_SkipBeforeNFSCheck(t *testing.T) {
+	t.Run("runtime without claim lookup", func(t *testing.T) {
+		logs := captureWarnings(t)
+		c := newLocalCheckFixture(t, "kubernetes")
+		c.in.gs = nil
+		passed, deferred, err := checkChangedSharedDirs(context.Background(), c.in)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"notes"}, passed)
+		assert.Empty(t, deferred)
+		assert.Contains(t, logs.String(), "cannot look up its local storage")
+	})
+	t.Run("no claim of its own", func(t *testing.T) {
+		logs := captureWarnings(t)
+		c := newLocalCheckFixture(t, "kubernetes")
+		c.in.gs = nil
+		claims := &fakeClaims{noClaim: true}
+		c.in.claims = claims
+		passed, err := c.check()
+		require.NoError(t, err)
+		assert.Equal(t, []string{"notes"}, passed)
+		assert.Empty(t, claims.calls)
+		assert.Contains(t, logs.String(), "has no claim of its own")
+	})
+}
+
 func TestCheckChangedSharedDirs_ToLocal_Kubernetes(t *testing.T) {
+	t.Run("deferred to the run config", func(t *testing.T) {
+		c := newLocalCheckFixture(t, "kubernetes")
+		writeFileIn(t, c.nfsLeaf, "note.md")
+		claims := &fakeClaims{}
+		c.in.claims = claims
+		passed, deferred, err := checkChangedSharedDirs(context.Background(), c.in)
+		require.NoError(t, err)
+		assert.Empty(t, passed)
+		assert.Equal(t, []string{"notes"}, deferred)
+		assert.Empty(t, claims.calls, "nothing is looked up before the run config is known")
+	})
 	t.Run("missing claim is refused", func(t *testing.T) {
 		c := newLocalCheckFixture(t, "kubernetes")
 		writeFileIn(t, c.nfsLeaf, "note.md")
@@ -226,7 +327,7 @@ func TestCheckChangedSharedDirs_ToLocal_Kubernetes(t *testing.T) {
 		assert.Contains(t, err.Error(), "does not exist")
 		assert.Contains(t, err.Error(), "--shared-dir-backend notes=local --allow-empty-shared-dir")
 		assert.Equal(t, []string{"notes"}, claims.calls)
-		assert.Equal(t, "proj", projectkeys.ProjectNameFromLabels(claims.labels))
+		assert.Equal(t, "proj", projectkeys.ProjectNameFromLabels(claims.cfg.Labels))
 	})
 	t.Run("claim lookup error is refused", func(t *testing.T) {
 		c := newLocalCheckFixture(t, "kubernetes")
@@ -256,27 +357,36 @@ func TestCheckChangedSharedDirs_ToLocal_Kubernetes(t *testing.T) {
 		assert.Equal(t, []string{"notes"}, passed)
 		assert.Empty(t, claims.calls)
 	})
-	t.Run("nfs workspace backend skips with a warning", func(t *testing.T) {
-		logs := captureWarnings(t)
+}
+
+// With the Kubernetes runtime's own lookup: a workspace on nfs with a bound
+// claim serves local shared dirs from it, so the check is skipped; without
+// a pv_name the dir gets its own claim, and the claim is checked.
+func TestCheckSharedDirClaims_KubernetesRuntime(t *testing.T) {
+	newRT := func(t *testing.T) *runtime.KubernetesRuntime {
+		t.Helper()
+		rt := runtime.NewKubernetesRuntime(k8s.NewTestClient(dynamicfake.NewSimpleDynamicClient(k8sruntime.NewScheme()), k8sfake.NewClientset()))
+		rt.DefaultNamespace = "default"
+		return rt
+	}
+	t.Run("nfs workspace with a claim skips", func(t *testing.T) {
 		c := newLocalCheckFixture(t, "kubernetes")
 		writeFileIn(t, c.nfsLeaf, "note.md")
-		claims := &fakeClaims{}
-		c.in.claims = claims
-		c.in.nfsWorkspaceBackend = true
+		c.in.claims = newRT(t)
+		c.runCfg.WorkspaceBackendName = "nfs"
+		c.runCfg.NFSPVClaimName = "ws"
 		passed, err := c.check()
 		require.NoError(t, err)
 		assert.Equal(t, []string{"notes"}, passed)
-		assert.Empty(t, claims.calls)
-		assert.Contains(t, logs.String(), "nfs workspace export")
 	})
-	t.Run("runtime without claim lookup skips with a warning", func(t *testing.T) {
-		logs := captureWarnings(t)
+	t.Run("nfs workspace without pv_name checks the claim", func(t *testing.T) {
 		c := newLocalCheckFixture(t, "kubernetes")
 		writeFileIn(t, c.nfsLeaf, "note.md")
-		passed, err := c.check()
-		require.NoError(t, err)
-		assert.Equal(t, []string{"notes"}, passed)
-		assert.Contains(t, logs.String(), "cannot look up its local storage")
+		c.in.claims = newRT(t)
+		c.runCfg.WorkspaceBackendName = "nfs"
+		_, err := c.check()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "does not exist")
 	})
 }
 
@@ -425,7 +535,7 @@ func TestSharedDirBackendChange_ToLocalKubernetes(t *testing.T) {
 		assert.Contains(t, err.Error(), "does not exist")
 		assert.Equal(t, 0, refused.ran)
 		assert.Equal(t, []string{"notes"}, claims.calls)
-		assert.NotEmpty(t, projectkeys.ProjectNameFromLabels(claims.labels))
+		assert.NotEmpty(t, projectkeys.ProjectNameFromLabels(claims.cfg.Labels))
 
 		reprov.AllowEmptySharedDir = true
 		_, err = NewManager(newSDSMockRuntime("kubernetes", &sdsCapture{})).Reprovision(context.Background(), reprov)

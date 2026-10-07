@@ -193,10 +193,14 @@ func writeFileIn(t *testing.T, dir, name string) {
 }
 
 func (c checkFixture) check(runtimeName string) ([]string, error) {
-	return checkChangedSharedDirs(context.Background(), sharedDirCheckInput{
+	passed, deferred, err := checkChangedSharedDirs(context.Background(), sharedDirCheckInput{
 		rec: c.rec, dirs: c.dirs, realization: c.res, volumes: c.volumes,
 		projectDir: c.projectDir, runtimeName: runtimeName,
 	})
+	if len(deferred) > 0 {
+		return nil, fmt.Errorf("unexpected deferred dirs %v", deferred)
+	}
+	return passed, err
 }
 
 func TestCheckChangedSharedDirs_EmptyNFSWithLocalDataRefused(t *testing.T) {
