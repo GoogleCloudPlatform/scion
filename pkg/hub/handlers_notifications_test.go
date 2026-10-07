@@ -217,13 +217,14 @@ func TestHandleNotifications_FilterByAgent(t *testing.T) {
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent2))
 
-	// Create subscription: agent-watched subscribes to agent-other
+	// Create subscription: agent-watched subscribes to agent-other. Agent
+	// subscribers are keyed by slug.
 	sub2 := &store.NotificationSubscription{
 		ID:                api.NewUUID(),
 		Scope:             store.SubscriptionScopeAgent,
 		AgentID:           tid("agent-other"),
 		SubscriberType:    store.SubscriberTypeAgent,
-		SubscriberID:      tid("agent-watched"),
+		SubscriberID:      "watched-agent",
 		ProjectID:         tid("project-notif-handler"),
 		TriggerActivities: []string{"COMPLETED"},
 		CreatedAt:         time.Now(),
@@ -238,7 +239,7 @@ func TestHandleNotifications_FilterByAgent(t *testing.T) {
 		AgentID:        tid("agent-other"),
 		ProjectID:      tid("project-notif-handler"),
 		SubscriberType: store.SubscriberTypeAgent,
-		SubscriberID:   tid("agent-watched"),
+		SubscriberID:   "watched-agent",
 		Status:         "COMPLETED",
 		Message:        "agent-other completed (to agent-watched)",
 		Dispatched:     true,

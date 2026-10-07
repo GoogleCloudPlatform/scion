@@ -45,8 +45,9 @@ type inboxCredential int
 const (
 	// inboxCredentialRefused is every credential these routes do not
 	// accept: a missing identity, or a credential kind other than the
-	// three below (federation, broker on-behalf-of, an unknown or empty
-	// kind).
+	// three below (federation, broker on-behalf-of, an unknown kind). A
+	// request with no credential record is classified from its identity
+	// (inboxCredentialOf).
 	inboxCredentialRefused inboxCredential = iota
 	// inboxCredentialSession is an interactive session or a dev
 	// credential (the sessionCredentialAllowed allowlist).

@@ -248,10 +248,17 @@ func TestInboxToken_ProjectMembershipRecheckedOnEveryRequest(t *testing.T) {
 	f := newInboxFixture(t)
 	ctx := context.Background()
 	m := f.message(t, f.owner, f.projA)
-	tok := f.mint(t, f.owner, projectBoundary(f.projA), "inbox:read", "inbox:write")
+	dm := f.direct(t, f.owner, "agent", f.agentA.ID)
+	f.notification(t, store.SubscriberTypeUser, f.owner, f.agentA)
+	tok := f.mint(t, f.owner, projectBoundary(f.projA), "inbox:read", "inbox:write", "agent:read", "project:read")
 
 	assert.Equal(t, []string{m}, listMessageIDs(t, f.call(t, tok, http.MethodGet, "/api/v1/messages", nil)))
 	assert.Equal(t, http.StatusOK, f.call(t, tok, http.MethodGet, "/api/v1/messages/"+m, nil).Code)
+	assert.Equal(t, []string{dm.ID}, listConversationIDs(t, f.call(t, tok, http.MethodGet, "/api/v1/conversations", nil)))
+	readsBefore := []string{"/api/v1/conversations/" + dm.ID, "/api/v1/notifications/subscriptions", "/api/v1/notifications/templates"}
+	for _, p := range readsBefore {
+		assert.Equal(t, http.StatusOK, f.call(t, tok, http.MethodGet, p, nil).Code, "before removal: %s", p)
+	}
 
 	bindings, err := f.s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, f.owner)
 	require.NoError(t, err)
@@ -268,6 +275,10 @@ func TestInboxToken_ProjectMembershipRecheckedOnEveryRequest(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, f.call(t, tok, http.MethodGet, "/api/v1/messages/"+m, nil).Code)
 	assert.Equal(t, http.StatusForbidden, f.call(t, tok, http.MethodPost, "/api/v1/messages/"+m+"/read", nil).Code)
 	assert.Equal(t, http.StatusForbidden, f.call(t, tok, http.MethodGet, "/api/v1/notifications", nil).Code)
+	assert.Equal(t, http.StatusForbidden, f.call(t, tok, http.MethodGet, "/api/v1/conversations", nil).Code)
+	for _, p := range readsBefore {
+		assert.Equal(t, http.StatusForbidden, f.call(t, tok, http.MethodGet, p, nil).Code, "after removal: %s", p)
+	}
 
 	// The row check carries the same rule.
 	scoped, err := f.srv.uatService.ValidateToken(ctx, tok)
@@ -403,6 +414,11 @@ func TestDirectConversationToken_PeerAgentMustBeInsideBoundary(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, f.call(t, noAgentRead, http.MethodGet, "/api/v1/conversations/"+dA.ID, nil).Code)
 	noInbox := f.mint(t, f.admin, projectBoundary(f.projA), "agent:read")
 	assert.Equal(t, http.StatusForbidden, f.call(t, noInbox, http.MethodGet, "/api/v1/conversations/"+dA.ID, nil).Code)
+	projectReadOnly := f.mint(t, f.admin, projectBoundary(f.projA), "project:read")
+	for _, p := range paths(dA.ID) {
+		assert.Equal(t, http.StatusForbidden, f.call(t, projectReadOnly, http.MethodGet, p, nil).Code,
+			"project:read does not read a direct conversation: %s", p)
+	}
 
 	hubTok := f.mint(t, f.admin, hubBoundary(), "inbox:read", "agent:read")
 	for _, id := range []string{dA.ID, dB.ID, dHuman.ID} {
@@ -612,8 +628,9 @@ func TestMessagingTargetsResolve_TokenNeedsAgentMessage(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 }
 
-// notifyFixture adds a subscription and one notification per project for
-// subscriberID.
+// notification adds one agent subscription for subscriberID, watching
+// agent, and one notification from it in the agent's project; it returns
+// the notification ID.
 func (f *inboxFixture) notification(t *testing.T, subscriberType, subscriberID string, agent *store.Agent) string {
 	t.Helper()
 	ctx := context.Background()
@@ -715,7 +732,12 @@ func TestNotificationToken_RowsFilteredToBoundary(t *testing.T) {
 func TestNotificationsByAgent_OtherSubscriberRowsRequireAgentRead(t *testing.T) {
 	f := newInboxFixture(t)
 	outsider := f.plainUser(t)
-	agentRow := f.notification(t, store.SubscriberTypeAgent, f.agentB.ID, f.agentB)
+	// Agent subscriber rows are keyed by slug. A second agent in project A
+	// reuses agent B's slug; its row must not come back for agent B.
+	sameSlug := &store.Agent{ID: uuid.NewString(), Slug: f.agentB.Slug, Name: "Same Slug A", ProjectID: f.projA, Phase: string(state.PhaseRunning)}
+	require.NoError(t, f.s.CreateAgent(context.Background(), sameSlug))
+	agentRow := f.notification(t, store.SubscriberTypeAgent, f.agentB.Slug, f.agentB)
+	otherProjectRow := f.notification(t, store.SubscriberTypeAgent, f.agentB.Slug, sameSlug)
 	own := f.notification(t, store.SubscriberTypeUser, outsider, f.agentB)
 
 	decode := func(rec *httptest.ResponseRecorder) agentNotificationsResponse {
@@ -732,8 +754,9 @@ func TestNotificationsByAgent_OtherSubscriberRowsRequireAgentRead(t *testing.T) 
 	assert.Equal(t, own, resp.UserNotifications[0].ID)
 
 	resp = decode(f.session(t, f.admin, http.MethodGet, path, nil))
-	require.Len(t, resp.AgentNotifications, 1)
+	require.Len(t, resp.AgentNotifications, 1, "only agent B's project rows return")
 	assert.Equal(t, agentRow, resp.AgentNotifications[0].ID)
+	assert.NotEqual(t, otherProjectRow, resp.AgentNotifications[0].ID)
 
 	inboxOnly := f.mint(t, f.admin, hubBoundary(), "inbox:read")
 	assert.Empty(t, decode(f.call(t, inboxOnly, http.MethodGet, path, nil)).AgentNotifications)

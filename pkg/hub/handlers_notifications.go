@@ -398,9 +398,11 @@ func (s *Server) handleNotifications(w http.ResponseWriter, r *http.Request) {
 }
 
 // readableAgentNotifications returns the notifications addressed to the
-// agent subscriber agentID that the caller may read: none unless agentID
-// names an agent the caller passes agent:read on, and then only rows of
-// that agent's project. A store error other than not-found is returned.
+// agent named by agentID that the caller may read: none unless agentID
+// names an agent the caller passes agent:read on. Agent subscriber rows are
+// keyed by the agent's slug, which other projects reuse, so the rows are
+// looked up by the agent's slug and only rows of the agent's project are
+// kept. A store error other than not-found is returned.
 func (s *Server) readableAgentNotifications(ctx context.Context, agentID string) ([]store.Notification, error) {
 	none := []store.Notification{}
 	agent, err := s.store.GetAgent(ctx, agentID)
@@ -414,7 +416,7 @@ func (s *Server) readableAgentNotifications(ctx context.Context, agentID string)
 	if identity == nil || !s.authzService.CheckAccess(ctx, identity, agentResource(agent), ActionRead).Allowed {
 		return none, nil
 	}
-	notifs, err := s.store.GetNotifications(ctx, "agent", agentID, false)
+	notifs, err := s.store.GetNotifications(ctx, store.SubscriberTypeAgent, agent.Slug, false)
 	if err != nil {
 		return nil, err
 	}
