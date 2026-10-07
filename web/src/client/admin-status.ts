@@ -30,14 +30,19 @@
  *   retries.
  * - `fresh: true` always sends a new request (the admin route guard, so a
  *   grant or revocation applies as soon as an admin page is entered); its
- *   result replaces the shared value.
+ *   result replaces the shared value, and an older request still in flight
+ *   can no longer write it (its callers get the newest value instead). A
+ *   failed fresh request drops the shared value, so nobody keeps showing an
+ *   admin result that a recheck could not confirm.
+ * - It uses a plain credentialed fetch, as the startup check always did, so
+ *   a 401 here never triggers the session-expired login redirect on its own
+ *   (other requests on the page still do).
  *
  * This only decides what the UI shows; the server authorizes every admin
  * request itself.
  */
 
 import type { AdminStatus } from '../lib/admin-permissions.js';
-import { apiFetch } from './api.js';
 
 interface Inflight {
   userId: string;
@@ -48,6 +53,8 @@ interface Inflight {
 let cached: { userId: string; status: AdminStatus | null } | null = null;
 let inflight: Inflight | null = null;
 let generation = 0;
+/** Bumped by every request; only the newest request may write `cached`. */
+let writeSequence = 0;
 
 /** Drops the shared value and abandons any in-flight request. */
 export function clearAdminStatus(): void {
@@ -58,7 +65,7 @@ export function clearAdminStatus(): void {
 
 async function fetchAdminStatus(): Promise<{ ok: boolean; status: AdminStatus | null }> {
   try {
-    const res = await apiFetch('/api/v1/auth/admin-status');
+    const res = await fetch('/api/v1/auth/admin-status', { credentials: 'include' });
     if (!res.ok) return { ok: false, status: null };
     const data = (await res.json()) as {
       isAdmin?: unknown;
@@ -100,14 +107,21 @@ export function loadAdminStatus(
   }
 
   const myGeneration = generation;
+  const mySequence = ++writeSequence;
   const entry: Inflight = {
     userId,
     generation: myGeneration,
     promise: fetchAdminStatus().then(({ ok, status }) => {
-      const current = generation === myGeneration;
       if (inflight === entry) inflight = null;
-      if (!current) return null;
+      // A different user, or a clear, since this request started.
+      if (generation !== myGeneration) return null;
+      // A newer (fresh) request superseded this one: it alone writes the
+      // shared value, and this request's callers get that value.
+      if (mySequence !== writeSequence) {
+        return cached && cached.userId === userId ? cached.status : null;
+      }
       if (ok) cached = { userId, status };
+      else if (options.fresh) cached = null;
       return status;
     }),
   };

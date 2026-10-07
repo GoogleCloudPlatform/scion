@@ -161,6 +161,34 @@ describe('loadAdminStatus', () => {
     expect(f.calls()).toBe(2);
   });
 
+  it('a fresh revocation is not overwritten by an older request that resolves later', async () => {
+    const f = stubFetch();
+    f.hold();
+    const old = loadAdminStatus('u1'); // a nav's request
+    const fresh = loadAdminStatus('u1', { fresh: true }); // the admin route guard
+    expect(f.calls()).toBe(2);
+    f.pending[1].resolve(json({ isAdmin: false }));
+    expect((await fresh)?.isAdmin).toBe(false);
+    // The older request now lands with the stale admin answer.
+    f.pending[0].resolve(json(ADMIN));
+    expect((await old)?.isAdmin).toBe(false);
+    expect((await loadAdminStatus('u1'))?.isAdmin).toBe(false);
+    expect(f.calls()).toBe(2);
+  });
+
+  it('a failed fresh request drops the shared value; the next caller retries', async () => {
+    const f = stubFetch();
+    expect(await loadAdminStatus('u1')).toEqual(ADMIN);
+    f.respondWith(() => Promise.resolve(json({}, 503)));
+    expect(await loadAdminStatus('u1', { fresh: true })).toBeNull();
+    f.respondWith(() => Promise.reject(new TypeError('offline')));
+    expect(await loadAdminStatus('u1')).toBeNull(); // not the old admin value
+    expect(f.calls()).toBe(3);
+    f.respondWith(() => Promise.resolve(json({ isAdmin: false })));
+    expect((await loadAdminStatus('u1'))?.isAdmin).toBe(false);
+    expect(f.calls()).toBe(4);
+  });
+
   it('no user id: null and no request', async () => {
     const f = stubFetch();
     expect(await loadAdminStatus('')).toBeNull();
