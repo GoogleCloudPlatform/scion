@@ -378,6 +378,12 @@ func TestPerfHeaders_SingleChokepoint(t *testing.T) {
 				"headerPerfTraceStoreCalls", "headerPerfTraceStoreTime", "headerPerfTraceDecisions", "headerPerfTraceDB"} {
 				assert.NotContains(t, src, name, "%s must not reference %s", f, name)
 			}
+		} else {
+			// perftrace.go defines the names and renders values into a map;
+			// it never touches a response or its headers itself.
+			for _, forbidden := range []string{".Header()", "http.ResponseWriter", "http.Header", `"net/http"`} {
+				assert.NotContains(t, src, forbidden, "perftrace.go must not write response headers (%s)", forbidden)
+			}
 		}
 	}
 	defs, err := os.ReadFile("perftrace.go")

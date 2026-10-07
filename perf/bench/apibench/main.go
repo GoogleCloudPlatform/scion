@@ -51,12 +51,12 @@
 // response headers (endpoint class, phase times and counts, authorization
 // store calls and times, decision-audit counts, DB pool waits). The hub
 // sends those headers only to an unscoped local platform admin; for any
-// other caller, --hub-perf-log joins the hub's perf_trace log lines instead. Durations in
-// those headers are microseconds; counts are host-independent and suit a
-// CI budget. On a plain baseline run against unmodified main there is no such
-// data, and the report's perfTraceAvailable field is false rather than
-// silently omitted (only true when at least one attempt actually returned
-// trace headers).
+// other caller, --hub-perf-log joins the hub's perf_trace log lines
+// instead. Durations in those headers are microseconds; counts are
+// host-independent and suit a CI budget. On a plain baseline run against
+// unmodified main there is no such data, and the report's
+// perfTraceAvailable field is false rather than silently omitted (only
+// true when at least one attempt actually returned trace data).
 package main
 
 import (
