@@ -250,6 +250,8 @@ The Hub stores agent templates and other artifacts.
 - **Local File System**: Default. Stores files in `~/.scion/storage`.
 - **Google Cloud Storage (GCS)**: Recommended for cloud deployments. Set the `SCION_SERVER_STORAGE_BUCKET` environment variable.
 
+For Hub-managed workspaces, the Hub uploads the workspace to its GCS bucket and sends that bucket name to the Runtime Broker with the create, so the Runtime Broker downloads from the same bucket (the bucket is also kept across reincarnation). A Runtime Broker that receives no bucket falls back to its own GCS storage bucket setting. With neither, the create fails up front with `422 workspace_storage_unconfigured` instead of a generic gateway error.
+
 ## Deployment
 
 ### GCE VM

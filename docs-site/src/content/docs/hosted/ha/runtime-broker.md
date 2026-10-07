@@ -163,7 +163,7 @@ When you register your machine as a broker:
 
 ## Broker Registration Permission
 
-Registering a Runtime Broker, or re-minting its join token, requires the `broker.create` permission. This covers `POST /api/v1/brokers` and the embedded Runtime Broker path of `POST /api/v1/projects/register`. `broker.create` is granted through the built-in `hub-member` role, so users with the **member** or **admin** [hub role](/scion/hosted/ha/permissions/#hub-roles) can register Runtime Brokers. Users with the **viewer** hub role cannot. Runtime Broker creation requires a signed-in session: a request authenticated with a [user access token](/scion/hosted/user/personal-access-tokens/) is denied with `403`, whatever the token's boundary or scopes.
+Registering a Runtime Broker, or re-minting its join token, requires the `broker.create` permission. This covers `POST /api/v1/brokers` and the embedded Runtime Broker path of `POST /api/v1/projects/register`. `broker.create` is granted through the built-in `hub-member` role, so users with the **member** or **admin** [hub role](/scion/hosted/ha/permissions/#hub-roles) can register Runtime Brokers. Users with the **viewer** hub role cannot. Runtime Broker creation requires a signed-in session: a request authenticated with a [user access token](/scion/hosted/user/personal-access-tokens/) is denied with `403`, whatever the token's boundary or scopes. Registration, re-registration, and secret rotation also refuse agent, delivery, federation, and on-behalf-of credentials: only a user credential (or, for rotation, the Runtime Broker's own credential) is accepted.
 
 :::caution[Breaking change]
 Viewer-role users could previously register brokers; they now receive a 403. The `hub-member` role is reconciled to revision 3 on Hub start to add `broker.create`, so no manual migration is needed for members.
@@ -171,9 +171,11 @@ Viewer-role users could previously register brokers; they now receive a 403. The
 
 ## Broker Ownership
 
-The user who registers a broker becomes its owner. Re-registering an existing broker and rotating its HMAC secret are ownership-gated actions. This includes the embedded broker's registration path. These actions are allowed only for the broker's owner, the broker itself (authenticated via HMAC), or a system super-admin. The owner and super-admin shortcuts apply only to an unscoped sign-in: a scoped [user access token](/scion/hosted/user/personal-access-tokens/) never satisfies them, even if it belongs to the owner or a super-admin. Brokers registered before ownership was recorded get an owner assigned automatically when the Hub boots.
+The user who registers a broker becomes its owner. Re-registering an existing broker and rotating its HMAC secret are ownership-gated actions. This includes the embedded broker's registration path. These actions are allowed only for the broker's owner, the broker itself (authenticated via HMAC, and only for its own secret), or a system super-admin. The owner and super-admin shortcuts apply only to an unscoped sign-in: a scoped [user access token](/scion/hosted/user/personal-access-tokens/) never satisfies them, even if it belongs to the owner or a super-admin. Brokers registered before ownership was recorded get an owner assigned automatically when the Hub boots.
 
 ## Broker Health Monitoring
+
+A Runtime Broker whose default runtime failed to resolve at startup reports itself `degraded` on `/healthz` (still HTTP `200`), and its `/readyz` returns `503`, so point readiness probes at `/readyz`. Starting or restarting an existing agent whose saved profile the Runtime Broker cannot resolve returns a retryable `503 runtime_unavailable` (with `Retry-After`) before anything is stopped, instead of falling back to the default runtime. The one exception is an agent that last ran on a plain Docker or Podman default runtime, which falls back to it.
 
 The Hub monitors broker health via a recurring heartbeat timeout scheduler. If a broker's WebSocket control channel disconnects and the disconnect event is not received (for example, due to a Hub crash or network partition), the Hub automatically marks the broker as **offline** after approximately five minutes of missed heartbeats. This mirrors the existing agent heartbeat timeout pattern and ensures the broker selection cascade does not dispatch work to unreachable brokers.
 
