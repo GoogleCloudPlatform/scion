@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -138,7 +139,8 @@ func TestRelationshipDelegatorExecutionAdmission_InactiveDelegator(t *testing.T)
 	ok, _ := f.evaluate(t, f.personalSkill(), ActionRead, "skill.read")
 	assert.False(t, ok)
 
-	// The shared admission step gives B.2's reason for an inactive source.
+	// The shared admission step gives the execution-project stage's reason
+	// for an inactive source.
 	u, err := f.store.GetUser(context.Background(), f.userID)
 	require.NoError(t, err)
 	ok, reason, err := f.authz.delegatorExecutionAdmission(context.Background(), u, store.RoleScopeProject, f.projectID, "skill.read", "relationship grant: owner")
@@ -208,4 +210,93 @@ func TestRelationshipDelegatorExecutionAdmission_SourceAgentDelegatorNotAdmitted
 	last := steps[len(steps)-1]
 	assert.Equal(t, "delegation_ceiling_denied", last.Step)
 	assert.Contains(t, last.Detail, "restricted by "+RelationshipRejectExecutionProject+": execution source user lacks admission to the agent's project")
+}
+
+var errAdmissionLookupFault = errors.New("admission lookup fault")
+
+// admissionFaultStore counts the unscoped role-binding reads
+// (ListRoleBindingsForPrincipals with no scope filters) and fails the
+// failAt-th one when failAt is set.
+type admissionFaultStore struct {
+	store.Store
+	calls, failAt int
+}
+
+func (s *admissionFaultStore) ListRoleBindingsForPrincipals(ctx context.Context, principals []store.PrincipalRef, scopeTypes, scopeIDs []string) ([]*store.RoleBinding, error) {
+	if scopeTypes == nil && scopeIDs == nil {
+		s.calls++
+		if s.failAt > 0 && s.calls == s.failAt {
+			return nil, errAdmissionLookupFault
+		}
+	}
+	return s.Store.ListRoleBindingsForPrincipals(ctx, principals, scopeTypes, scopeIDs)
+}
+
+// installAdmissionFault puts an admissionFaultStore in front of authz's
+// store, runs control (which must succeed) to count the unscoped
+// role-binding reads, and arms the fault on the last of them. In an
+// admitted control run that last read is the membership lookup of the
+// delegator's execution-project admission, the final step of the decision.
+func installAdmissionFault(t *testing.T, authz *AuthzService, control func()) {
+	t.Helper()
+	real := authz.store
+	fs := &admissionFaultStore{Store: real}
+	authz.store = fs
+	t.Cleanup(func() { authz.store = real })
+	control()
+	require.Positive(t, fs.calls, "the control run reads role bindings")
+	fs.failAt, fs.calls = fs.calls, 0
+}
+
+// A failed admission lookup inside evaluateUserDelegatorAuthority denies
+// with a non-nil error; it is not treated as admitted.
+func TestRelationshipDelegatorExecutionAdmission_LookupErrorFailsClosed(t *testing.T) {
+	f := newDelegatorAdmissionFixture(t, "fault-gate")
+	f.admitWithoutGrant(t, f.projectID)
+	installAdmissionFault(t, f.authz, func() {
+		ok, reason := f.evaluate(t, f.personalSkill(), ActionRead, "skill.read")
+		require.True(t, ok, "control: admitted delegator holds skill.read, reason %q", reason)
+	})
+
+	ok, reason, err := f.authz.evaluateUserDelegatorAuthority(context.Background(), f.userID, f.personalSkill(), ActionRead, "skill.read", store.RoleScopeProject, f.projectID)
+	assert.False(t, ok)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrProjectAccessDenied)
+	assert.Contains(t, err.Error(), errAdmissionLookupFault.Error())
+	assert.Equal(t, "execution project admission check failed", reason)
+}
+
+// The same admission lookup failure for a source agent's user delegator
+// ends the delegation chain walk with a ceiling error.
+func TestRelationshipDelegatorExecutionAdmission_LookupErrorInWalk(t *testing.T) {
+	withTestProgenyPolicyRow(t, "template", "template.read")
+	f := newGoldenFixture(t)
+	ctx := context.Background()
+
+	sourceUser := tid("dea-walk-user")
+	require.NoError(t, f.store.CreateUser(ctx, &store.User{ID: sourceUser, Email: "dea-walk@golden.test", DisplayName: "dea-walk", Role: "member", Status: store.UserStatusActive}))
+	delegatorAdmissionFixture{store: f.store, userID: sourceUser}.admitWithoutGrant(t, f.projectAlpha.ID)
+	sourceAgent := tid("dea-walk-agent")
+	seedExecutionAgent(t, f.store, sourceAgent, f.projectAlpha.ID, []string{sourceUser}, []string{sourceUser})
+	record := Resource{Type: "template", ID: tid("dea-walk-template"), OwnerID: sourceUser}
+
+	walk := func() (bool, []DecisionStep, error) {
+		var steps []DecisionStep
+		allowed, _, err := f.authz.walkDelegationChain(context.Background(), record, ActionRead, "template.read", sourceAgent, true, store.RoleScopeProject, f.projectAlpha.ID, &steps)
+		return allowed, steps, err
+	}
+	installAdmissionFault(t, f.authz, func() {
+		allowed, steps, err := walk()
+		require.NoError(t, err)
+		require.True(t, allowed, "control: admitted delegator carries template.read, steps %+v", steps)
+	})
+
+	allowed, steps, err := walk()
+	assert.False(t, allowed)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrProjectAccessDenied)
+	require.NotEmpty(t, steps)
+	last := steps[len(steps)-1]
+	assert.Equal(t, "delegation_ceiling_error", last.Step)
+	assert.Contains(t, last.Detail, errAdmissionLookupFault.Error())
 }
