@@ -16,6 +16,8 @@ package telegram
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -24,6 +26,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	scionruntime "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
 const sharedDirTestProjectID = "abcd1234-ef56-7890-abcd-ef1234567890"
@@ -135,7 +139,8 @@ func TestResolveSharedDirAttachmentPath_Backends(t *testing.T) {
 		home := t.TempDir()
 		t.Setenv("HOME", home)
 		stubSharedDirSettings(t, &config.VersionedSettings{})
-		got := newBroker(t).resolveSharedDirAttachmentPath(context.Background(), nil, attach, sharedDirTestProjectID)
+		got, err := newBroker(t).resolveSharedDirAttachmentPath(context.Background(), nil, attach, sharedDirTestProjectID)
+		require.NoError(t, err)
 		assert.Equal(t, filepath.Join(localSharedDir(home, "scratchpad"), "out", "a.png"), got)
 	})
 
@@ -143,7 +148,8 @@ func TestResolveSharedDirAttachmentPath_Backends(t *testing.T) {
 		t.Setenv("HOME", t.TempDir())
 		mountRoot, nfsDir := mountedNFSRoot(t, "scratchpad")
 		stubSharedDirSettings(t, nfsSettings(mountRoot))
-		got := newBroker(t).resolveSharedDirAttachmentPath(context.Background(), nil, attach, sharedDirTestProjectID)
+		got, err := newBroker(t).resolveSharedDirAttachmentPath(context.Background(), nil, attach, sharedDirTestProjectID)
+		require.NoError(t, err)
 		assert.Equal(t, filepath.Join(nfsDir, "out", "a.png"), got)
 	})
 
@@ -151,7 +157,111 @@ func TestResolveSharedDirAttachmentPath_Backends(t *testing.T) {
 		home := t.TempDir()
 		t.Setenv("HOME", home)
 		stubSharedDirSettings(t, nfsSettings(filepath.Join(t.TempDir(), "not-mounted")))
-		got := newBroker(t).resolveSharedDirAttachmentPath(context.Background(), nil, attach, sharedDirTestProjectID)
-		assert.Equal(t, attach, got, "unresolved paths are returned unchanged, never mapped to the local dir")
+		got, err := newBroker(t).resolveSharedDirAttachmentPath(context.Background(), nil, attach, sharedDirTestProjectID)
+		require.Error(t, err)
+		assert.True(t, isSharedDirStorageUnavailable(err), "err = %v", err)
+		assert.Empty(t, got, "an unresolved path is never returned, as the container path or the local dir")
 	})
+}
+
+// TestPublish_UnresolvedSharedDirAttachment_NeverOpened checks that an
+// outbound attachment whose shared dir cannot be resolved is skipped: no
+// path is opened on this host, no document is sent, and the message text
+// is still delivered.
+func TestPublish_UnresolvedSharedDirAttachment_NeverOpened(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	stubSharedDirSettings(t, nfsSettings(filepath.Join(t.TempDir(), "not-mounted")))
+
+	var opened []string
+	orig := openAttachmentFile
+	t.Cleanup(func() { openAttachmentFile = orig })
+	openAttachmentFile = func(name string) (*os.File, error) {
+		opened = append(opened, name)
+		return orig(name)
+	}
+
+	tgSrv := newFakeTGServerV2(t)
+	b := newTestBrokerV2(t, tgSrv)
+	b.projectSlugMap = map[string]string{sharedDirTestProjectID: "my-project"}
+
+	msg := messages.NewInstruction("agent:coder", "user:alice", "report attached")
+	msg.Attachments = []string{"/scion-volumes/scratchpad/out/report.txt"}
+	msg.Metadata = map[string]string{"telegram_chat_id": "-300"}
+
+	err := b.Publish(context.Background(), "scion.project."+sharedDirTestProjectID+".agent.coder.messages", msg)
+	require.NoError(t, err)
+
+	assert.Empty(t, opened, "no attachment path may be opened when the shared dir is unresolved")
+	sent := tgSrv.getSentMessages()
+	require.Len(t, sent, 1, "the message text is delivered without the attachment")
+	assert.Contains(t, sent[0].Text, "report attached")
+}
+
+// TestPublish_ResolvedSharedDirAttachment_Opened is the control for the
+// test above: with the shared dir mounted, the resolved host path is the
+// one opened.
+func TestPublish_ResolvedSharedDirAttachment_Opened(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	mountRoot, nfsDir := mountedNFSRoot(t, "scratchpad")
+	stubSharedDirSettings(t, nfsSettings(mountRoot))
+
+	var opened []string
+	orig := openAttachmentFile
+	t.Cleanup(func() { openAttachmentFile = orig })
+	openAttachmentFile = func(name string) (*os.File, error) {
+		opened = append(opened, name)
+		return orig(name)
+	}
+
+	tgSrv := newFakeTGServerV2(t)
+	b := newTestBrokerV2(t, tgSrv)
+	b.projectSlugMap = map[string]string{sharedDirTestProjectID: "my-project"}
+
+	msg := messages.NewInstruction("agent:coder", "user:alice", "report attached")
+	msg.Attachments = []string{"/scion-volumes/scratchpad/out/report.txt"}
+	msg.Metadata = map[string]string{"telegram_chat_id": "-300"}
+
+	// The file does not exist, so the send fails after the open; only the
+	// opened path matters here.
+	_ = b.Publish(context.Background(), "scion.project."+sharedDirTestProjectID+".agent.coder.messages", msg)
+	assert.Equal(t, []string{filepath.Join(nfsDir, "out", "report.txt")}, opened)
+}
+
+// TestHandleGroupMessage_AttachmentErrorTextHasNoDetails checks that a
+// failed inbound attachment tells the sender only fixed text: no path and
+// none of the underlying error.
+func TestHandleGroupMessage_AttachmentErrorTextHasNoDetails(t *testing.T) {
+	b, tgSrv, hub := newRoutingTestBroker(t)
+	hub.agents["proj-1"] = []AgentInfo{{Slug: "coder"}}
+	linkTestUser(t, b.store, 456, "alice@example.com")
+
+	// A downloads path below a regular file cannot be created; the
+	// resulting error names that path.
+	blocker := filepath.Join(t.TempDir(), "blocker")
+	require.NoError(t, os.WriteFile(blocker, []byte("x"), 0o644))
+	b.downloadsPath = filepath.Join(blocker, "downloads")
+
+	msg := plainGroupMessage(456, "")
+	msg.Document = &TGDocument{FileID: "doc1", FileUniqueID: "u1", FileName: "note.txt", FileSize: 10}
+	b.handleGroupMessage(msg)
+
+	sent := tgSrv.getSentMessages()
+	require.Len(t, sent, 1, "the sender is told the attachment failed")
+	text := sent[0].Text
+	assert.Contains(t, text, "note.txt")
+	assert.Contains(t, text, "could not be processed")
+	assert.NotContains(t, text, "/", "the sender message must not contain a path")
+	assert.NotContains(t, text, "blocker")
+	assert.NotContains(t, text, "not a directory")
+}
+
+func TestAttachmentFailureText(t *testing.T) {
+	raw := errors.New("open /srv/private/file: permission denied")
+	generic := attachmentFailureText("a.txt", raw)
+	assert.NotContains(t, generic, "/")
+	assert.NotContains(t, generic, "permission denied")
+
+	unavailable := attachmentFailureText("a.txt", fmt.Errorf("%w: mount missing at /srv/x", scionruntime.ErrSharedDirStorageUnavailable))
+	assert.Equal(t, sharedDirUnavailableText("a.txt"), unavailable)
+	assert.NotContains(t, unavailable, "/")
 }

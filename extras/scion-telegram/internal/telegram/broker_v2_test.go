@@ -3609,7 +3609,8 @@ func TestV2_ResolveAttachmentPath_WorkspacePaths(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := b.resolveAttachmentPath(ctx, nil, tt.path, tt.projectID)
+			got, err := b.resolveAttachmentPath(ctx, nil, tt.path, tt.projectID)
+			require.NoError(t, err)
 			assert.Equal(t, tt.want, got)
 		})
 	}
@@ -3632,6 +3633,7 @@ func TestV2_ResolveAttachmentPath_SharedDirPaths(t *testing.T) {
 		path      string
 		projectID string
 		wantEnd   string // suffix to match (avoids hardcoding HOME)
+		wantErr   bool   // unresolvable: an error and no path, never the input
 	}{
 		{
 			name:      "scion-volumes path with file",
@@ -3658,28 +3660,34 @@ func TestV2_ResolveAttachmentPath_SharedDirPaths(t *testing.T) {
 			wantEnd:   "project-configs/my-project__550e8400/shared-dirs/cache/data.bin",
 		},
 		{
-			name:      "no project slug returns original",
+			name:      "no project slug is an error",
 			path:      "/scion-volumes/scratchpad/file.txt",
 			projectID: "unknown-proj",
-			wantEnd:   "/scion-volumes/scratchpad/file.txt",
+			wantErr:   true,
 		},
 		{
 			name:      "path traversal rejected",
 			path:      "/scion-volumes/scratchpad/../../etc/passwd",
 			projectID: "550e8400-e29b-41d4-a716-446655440000",
-			wantEnd:   "/scion-volumes/scratchpad/../../etc/passwd",
+			wantErr:   true,
 		},
 		{
 			name:      "path traversal in shared dir name rejected",
 			path:      "/scion-volumes/../.scion/settings.yaml",
 			projectID: "550e8400-e29b-41d4-a716-446655440000",
-			wantEnd:   "/scion-volumes/../.scion/settings.yaml",
+			wantErr:   true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := b.resolveAttachmentPath(ctx, nil, tt.path, tt.projectID)
+			got, err := b.resolveAttachmentPath(ctx, nil, tt.path, tt.projectID)
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Empty(t, got)
+				return
+			}
+			require.NoError(t, err)
 			assert.True(t, strings.HasSuffix(got, filepath.FromSlash(tt.wantEnd)),
 				"resolveAttachmentPath(%q) = %q, want suffix %q", tt.path, got, tt.wantEnd)
 		})
