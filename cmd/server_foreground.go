@@ -390,6 +390,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 			tp, tpErr := hubtracing.NewTracerProvider(ctx, cfg.Hub.GCPProjectID,
 				hubtracing.WithHubID(hubSrv.HubID()),
 				hubtracing.WithHubName(cfg.Hub.ResolveHubName()),
+				hubtracing.WithInstanceID(hubSrv.InstanceID()),
 			)
 			if tpErr != nil {
 				log.Printf("WARNING: hub tracing export disabled: %v", tpErr)
