@@ -485,6 +485,7 @@ func TestGCPIAMReload_RefreshFailureKeepsAppliedValue(t *testing.T) {
 	g.hs.failList.Store(true)
 	g.ops.refreshAndApply(context.Background(), g.srv)
 	assert.Equal(t, iamEnforceClosed, g.applied(t), "a failed read must not revert to the deploy-time value")
+	assert.Empty(t, g.refusals(t), "a failed read is not a missing row")
 
 	g.hs.failList.Store(false)
 	require.Equal(t, http.StatusOK, f.put(t, iamBody("", "fail-open")).Code)
