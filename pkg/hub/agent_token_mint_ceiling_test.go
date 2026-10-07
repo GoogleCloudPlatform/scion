@@ -180,8 +180,8 @@ func readonlyCoverageCeiling() store.EffectCeiling {
 	return boundedCeiling(sortedUniqueIDs(agentScopeCoverage(ScopesForRole(AgentRoleReadOnly)))...)
 }
 
-// Every mint site issues the same ceiled scope set, and no production caller
-// of the role-only GenerateAgentToken remains.
+// Every mint site issues the same ceiled scope set, and the role-only
+// GenerateAgentToken exists only in test files.
 func TestAllMintSitesUseCeiledHelper(t *testing.T) {
 	f := newMintFixture(t, "allsites")
 	ctx := context.Background()
@@ -208,12 +208,9 @@ func TestAllMintSitesUseCeiledHelper(t *testing.T) {
 	tok := refreshedToken(t, f.refresh(t, a, a.Ancestry))
 	assert.ElementsMatch(t, want, f.tokenClaims(t, tok).Scopes, "refresh")
 
-	// Grep pin: outside test files, GenerateAgentToken( appears only as the
-	// two declarations, the interface method, and the token-service call
-	// inside the old helper. Mint sites use AuthorizeAgentToken.
-	allowed := map[string]bool{
-		"server.go:return tokenService.GenerateAgentToken(agentID, projectID, scopes, ancestry)": true,
-	}
+	// Pin: GenerateAgentToken (no ceiling, best-effort record) is defined
+	// only in a _test.go file, so production code cannot call it; no
+	// non-test file names it.
 	call := regexp.MustCompile(`\bGenerateAgentToken\(`)
 	files, err := filepath.Glob("*.go")
 	require.NoError(t, err)
@@ -225,19 +222,12 @@ func TestAllMintSitesUseCeiledHelper(t *testing.T) {
 		data, err := os.ReadFile(file)
 		require.NoError(t, err)
 		for i, line := range strings.Split(string(data), "\n") {
-			trimmed := strings.TrimSpace(line)
-			if !call.MatchString(trimmed) || strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "func ") {
-				continue
-			}
-			if strings.HasPrefix(trimmed, "GenerateAgentToken(agentID, projectID string") && file == "httpdispatcher.go" {
-				continue // the interface method
-			}
-			if !allowed[file+":"+trimmed] {
-				unexpected = append(unexpected, file+":"+itoa(i+1)+": "+trimmed)
+			if call.MatchString(line) {
+				unexpected = append(unexpected, file+":"+itoa(i+1)+": "+strings.TrimSpace(line))
 			}
 		}
 	}
-	assert.Empty(t, unexpected, "production GenerateAgentToken callers outside the mint sites")
+	assert.Empty(t, unexpected, "GenerateAgentToken named outside test files")
 }
 
 // Start of an agent with no edge after the backfill: 403 at the delegation

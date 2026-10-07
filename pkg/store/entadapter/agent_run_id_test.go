@@ -18,6 +18,7 @@ package entadapter
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -335,6 +336,8 @@ func TestSetAgentRunIDWithCredentialIsOneTransaction(t *testing.T) {
 			_, err := s.SetAgentRunID(ctx, agentID, "run-2", cred)
 			if tt.wantErr {
 				require.Error(t, err)
+				assert.Equal(t, tt.duplicateJTI, errors.Is(err, store.ErrCredentialNotRecorded),
+					"only a failed credential record is reported as ErrCredentialNotRecorded")
 				assert.Empty(t, cred.ID, "a credential that was not recorded has no ID")
 			} else {
 				require.NoError(t, err)

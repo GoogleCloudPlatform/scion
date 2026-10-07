@@ -3976,49 +3976,6 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	return dispatcher
 }
 
-// GenerateAgentToken generates a JWT for an agent.
-// This is a convenience method that delegates to the token service.
-// Base scopes are determined by the passed role.
-// Dev-auth mode overrides to full if the role would be more restrictive,
-// preserving dev-mode behavior where all agents get full access.
-// Additional scopes are merged with the role-based defaults, deduplicated.
-//
-// It applies no delegation ceiling and has no production caller: every mint
-// and refresh site calls GenerateAgentTokenForAgent. It serves test helpers
-// (TestAllMintSitesUseCeiledHelper pins this).
-func (s *Server) GenerateAgentToken(agentID, projectID string, ancestry []string, role AgentRole, additionalScopes []AgentTokenScope) (string, error) {
-	s.mu.RLock()
-	tokenService := s.agentTokenService
-	s.mu.RUnlock()
-
-	if tokenService == nil {
-		return "", fmt.Errorf("agent token service not initialized")
-	}
-
-	// Use the specified role for base scopes.
-	// Dev-auth mode overrides to full if the role would be more restrictive,
-	// preserving dev-mode behavior where all agents get full access.
-	effectiveRole := role
-	if s.config.DevAuthToken != "" && CompareRoles(role, AgentRoleFull) < 0 {
-		effectiveRole = AgentRoleFull
-	}
-	scopes := ScopesForRole(effectiveRole)
-
-	// Merge additional scopes, deduplicating
-	seen := make(map[AgentTokenScope]bool, len(scopes))
-	for _, sc := range scopes {
-		seen[sc] = true
-	}
-	for _, scope := range additionalScopes {
-		if !seen[scope] {
-			scopes = append(scopes, scope)
-			seen[scope] = true
-		}
-	}
-
-	return tokenService.GenerateAgentToken(agentID, projectID, scopes, ancestry)
-}
-
 // storeCredentialRecorder adapts store.AgentCredentialStore to CredentialRecorder.
 type storeCredentialRecorder struct {
 	store store.AgentCredentialStore

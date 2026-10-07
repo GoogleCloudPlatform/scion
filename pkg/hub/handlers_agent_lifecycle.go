@@ -872,6 +872,9 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 	// If dispatch failed, return error. A required-skill resolution failure
 	// keeps the broker's status and code; anything else is a 502.
 	if dispatchErr != nil {
+		if writeAgentTokenRecordError(w, dispatchErr) {
+			return
+		}
 		if s.writeStartClaimError(ctx, w, dispatchErr, agent.ID) || writeStartQuotaError(w, dispatchErr) {
 			return
 		}

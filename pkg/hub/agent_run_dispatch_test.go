@@ -35,10 +35,6 @@ type runTokenGenerator struct {
 	jtiHash string
 }
 
-func (g runTokenGenerator) GenerateAgentToken(string, string, []string, AgentRole, []AgentTokenScope) (string, error) {
-	panic("runTokenGenerator: dispatch paths must not use GenerateAgentToken")
-}
-
 func (g runTokenGenerator) AuthorizeAgentToken(_ context.Context, agent *store.Agent) (AgentTokenGrant, error) {
 	return AgentTokenGrant{AgentID: agent.ID, ProjectID: agent.ProjectID}, nil
 }
@@ -52,7 +48,8 @@ func (g runTokenGenerator) SignAgentToken(grant AgentTokenGrant, runID string) (
 }
 
 // runDispatchFixture is a dispatcher on a real store holding a project, an
-// online broker and a stored agent row whose current run is "run-before".
+// online broker and a stored agent row whose current run is "run-before"
+// (after "run-earlier", so its previous-run list is not empty).
 type runDispatchFixture struct {
 	store  store.Store
 	client *mockRuntimeBrokerClient
@@ -83,7 +80,9 @@ func newRunDispatchFixture(t *testing.T) *runDispatchFixture {
 		AppliedConfig: &store.AgentAppliedConfig{HarnessConfig: "claude", Task: "task"},
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
-	_, err := s.SetAgentRunID(ctx, agent.ID, "run-before", nil)
+	_, err := s.SetAgentRunID(ctx, agent.ID, "run-earlier", nil)
+	require.NoError(t, err)
+	_, err = s.SetAgentRunID(ctx, agent.ID, "run-before", nil)
 	require.NoError(t, err)
 	agent, err = s.GetAgent(ctx, agent.ID)
 	require.NoError(t, err)
@@ -94,6 +93,14 @@ func newRunDispatchFixture(t *testing.T) *runDispatchFixture {
 	d := NewHTTPAgentDispatcherWithClient(s, client, false, slog.Default())
 	d.SetTokenGenerator(runTokenGenerator{svc: svc})
 	return &runDispatchFixture{store: s, client: client, d: d, svc: svc, agent: agent}
+}
+
+// sentCreate returns what a create request sent to the broker.
+func sentCreate(f *runDispatchFixture) (string, string, bool) {
+	if f.client.lastCreateReq == nil {
+		return "", "", f.client.createCalled
+	}
+	return f.client.lastCreateReq.AgentToken, f.client.lastCreateReq.RunID, f.client.createCalled
 }
 
 // runDispatches are the dispatch paths that begin a run. Each returns the
@@ -109,12 +116,23 @@ var runDispatches = []struct {
 			_, err := f.d.DispatchAgentCreate(ctx, f.agent)
 			return err
 		},
-		sent: func(f *runDispatchFixture) (string, string, bool) {
-			if f.client.lastCreateReq == nil {
-				return "", "", f.client.createCalled
-			}
-			return f.client.lastCreateReq.AgentToken, f.client.lastCreateReq.RunID, f.client.createCalled
+		sent: sentCreate,
+	},
+	{
+		name: "create with env gather",
+		dispatch: func(ctx context.Context, f *runDispatchFixture) error {
+			_, err := f.d.DispatchAgentCreateWithGather(ctx, f.agent)
+			return err
 		},
+		sent: sentCreate,
+	},
+	{
+		name: "finalize env",
+		dispatch: func(ctx context.Context, f *runDispatchFixture) error {
+			_, err := f.d.DispatchFinalizeEnv(ctx, f.agent, nil)
+			return err
+		},
+		sent: sentCreate,
 	},
 	{
 		name: "start",
@@ -134,7 +152,8 @@ var runDispatches = []struct {
 	},
 }
 
-// TestDispatchIssuesTokenForTheDispatchedRun: at create, start and restart
+// TestDispatchIssuesTokenForTheDispatchedRun: on every path that begins a
+// run (create, create with env gather, finalize env, start, restart)
 // the token the broker receives names the run sent with it, and its
 // credential row records the same run.
 func TestDispatchIssuesTokenForTheDispatchedRun(t *testing.T) {
@@ -173,6 +192,9 @@ func TestDispatchRecordsRunAndCredentialInOneTransaction(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
 			f := newRunDispatchFixture(t)
+			before, err := f.store.GetAgent(ctx, f.agent.ID)
+			require.NoError(t, err)
+			require.NotEmpty(t, before.PreviousRunIDs)
 
 			// An existing credential row with the hash the next token's
 			// credential will carry: the insert violates the unique index.
@@ -182,13 +204,16 @@ func TestDispatchRecordsRunAndCredentialInOneTransaction(t *testing.T) {
 			}))
 			f.d.SetTokenGenerator(runTokenGenerator{svc: f.svc, jtiHash: taken})
 
-			require.Error(t, tc.dispatch(ctx, f))
+			err = tc.dispatch(ctx, f)
+			require.Error(t, err)
+			assert.ErrorIs(t, err, errAgentTokenRecord)
 
 			_, _, called := tc.sent(f)
 			assert.False(t, called, "broker must not be called")
 			got, err := f.store.GetAgent(ctx, f.agent.ID)
 			require.NoError(t, err)
 			assert.Equal(t, "run-before", got.RunID, "agent run must be unchanged")
+			assert.Equal(t, before.PreviousRunIDs, got.PreviousRunIDs, "previous runs must be unchanged")
 		})
 	}
 }

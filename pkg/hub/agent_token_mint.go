@@ -57,7 +57,8 @@ const (
 )
 
 // agentTokenIssueError is the error a mint site returns when
-// GenerateAgentTokenForAgent issues no token. It unwraps to the cause.
+// AuthorizeAgentToken (via authorizeAgentTokenAt) grants no token. It
+// unwraps to the cause.
 type agentTokenIssueError struct {
 	Site mintSite
 	// Cause is set for a structural chain outcome (403).
@@ -86,7 +87,7 @@ func (e *agentTokenIssueError) errorClass() string {
 	}
 }
 
-// errMintLookup marks a ceiling lookup fault inside GenerateAgentTokenForAgent.
+// errMintLookup marks a ceiling lookup fault inside AuthorizeAgentToken.
 var errMintLookup = errors.New("agent token: ceiling lookup failed")
 
 // AuthorizeAgentToken computes what an agent JWT for the stored agent
@@ -183,6 +184,22 @@ func recordAgentCredential(ctx context.Context, st store.Store, cred *store.Agen
 		return fmt.Errorf("%w: %w", errAgentTokenRecord, err)
 	}
 	return nil
+}
+
+// agentTokenRecordFailedMessage is the message of the response to a mint
+// whose credential could not be recorded.
+const agentTokenRecordFailedMessage = "the agent token could not be issued; retry later"
+
+// writeAgentTokenRecordError answers a mint whose credential could not be
+// recorded (errAgentTokenRecord) with a 500 carrying a fixed message, and
+// reports whether it did. The cause is logged, never sent.
+func writeAgentTokenRecordError(w http.ResponseWriter, err error) bool {
+	if !errors.Is(err, errAgentTokenRecord) {
+		return false
+	}
+	slog.Error("agent token not issued: credential not recorded", "error", err)
+	writeError(w, http.StatusInternalServerError, ErrCodeInternalError, agentTokenRecordFailedMessage, nil)
+	return true
 }
 
 // recordAgentTokenIssueDenied writes the agent_token_issue_denied audit

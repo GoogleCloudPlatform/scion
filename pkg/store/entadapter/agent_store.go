@@ -2435,6 +2435,7 @@ func (s *AgentStore) setAgentRunIDOnce(ctx context.Context, uid uuid.UUID, agent
 // swapWithCredential runs swap and, when it updated the row, creates cred
 // (with RunID set to runID) in one transaction. On any failure, or when
 // the swap matched no row, nothing is committed and cred.ID is left empty.
+// A failure to create cred or to commit wraps store.ErrCredentialNotRecorded.
 func (s *AgentStore) swapWithCredential(ctx context.Context, swap func(*ent.AgentClient) (int, error), runID string, cred *store.AgentCredential) (int, error) {
 	tx, err := s.client.Tx(ctx)
 	if err != nil {
@@ -2453,11 +2454,11 @@ func (s *AgentStore) swapWithCredential(ctx context.Context, swap func(*ent.Agen
 	if err := createAgentCredential(ctx, tx.AgentCredential, cred); err != nil {
 		_ = tx.Rollback()
 		cred.ID = ""
-		return 0, err
+		return 0, fmt.Errorf("%w: %w", store.ErrCredentialNotRecorded, err)
 	}
 	if err := tx.Commit(); err != nil {
 		cred.ID = ""
-		return 0, mapError(err)
+		return 0, fmt.Errorf("%w: %w", store.ErrCredentialNotRecorded, mapError(err))
 	}
 	return n, nil
 }

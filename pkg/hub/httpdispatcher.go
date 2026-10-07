@@ -134,7 +134,6 @@ func (d *HTTPAgentDispatcher) GetClient() RuntimeBrokerClient {
 
 // AgentTokenGenerator generates JWT tokens for agents.
 type AgentTokenGenerator interface {
-	GenerateAgentToken(agentID, projectID string, ancestry []string, role AgentRole, additionalScopes []AgentTokenScope) (string, error)
 	// AuthorizeAgentToken computes the grant for a token for the stored
 	// agent record, bounded by its delegation chain. Every dispatcher mint
 	// site uses it. It has no side effects.
@@ -1488,6 +1487,8 @@ func (d *HTTPAgentDispatcher) beginRun(ctx context.Context, agent *store.Agent, 
 	if d.store != nil && agent.ID != "" {
 		prior, err := d.store.SetAgentRunID(ctx, agent.ID, runID, cred)
 		switch {
+		case cred != nil && errors.Is(err, store.ErrCredentialNotRecorded):
+			return "", "", "", false, fmt.Errorf("%w for agent %s: %w", errAgentTokenRecord, agent.ID, err)
 		case err == nil:
 			previous = prior
 			recorded = true
@@ -1507,7 +1508,7 @@ func (d *HTTPAgentDispatcher) beginRun(ctx context.Context, agent *store.Agent, 
 	}
 	if cred != nil && !credRecorded {
 		if err := recordAgentCredential(ctx, d.store, cred); err != nil {
-			return "", "", "", false, fmt.Errorf("failed to record the agent token for agent %s: %w", agent.ID, err)
+			return "", "", "", false, fmt.Errorf("failed to record the agent token for agent %s: %w", agent.ID, err) // wraps errAgentTokenRecord
 		}
 	}
 	agent.RunID = runID

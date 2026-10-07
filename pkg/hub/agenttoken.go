@@ -22,7 +22,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -118,7 +117,7 @@ const (
 // authz.go's effectiveAgentScopes actually keys on. ValidateAgentToken sets
 // legacyScopeSchema only when a verified token's wire form carries no
 // scope_schema claim (ScopeSchema reads as its Go zero value, 0, because
-// GenerateAgentToken — the only agent-JWT minter — has always stamped a
+// SignAgentToken — the only agent-JWT signer — has always stamped a
 // nonzero value since this field existed, so a verified 0 can only mean
 // "minted before the field existed"; any other value, including one from a
 // schema this package does not yet know about, is left as not legacy). Every
@@ -276,24 +275,6 @@ func NewAgentTokenService(config AgentTokenConfig) (*AgentTokenService, error) {
 	}, nil
 }
 
-// GenerateAgentToken generates a JWT for an agent with the specified scopes.
-func (s *AgentTokenService) GenerateAgentToken(agentID, projectID string, scopes []AgentTokenScope, ancestry []string) (string, error) {
-	token, cred, err := s.SignAgentToken(AgentTokenGrant{AgentID: agentID, ProjectID: projectID, Scopes: scopes, Ancestry: ancestry}, "")
-	if err != nil {
-		return "", err
-	}
-
-	// Record credential if recorder is configured (best-effort)
-	if s.credentialRecorder != nil {
-		if err := s.credentialRecorder.RecordAgentCredential(context.Background(), cred); err != nil {
-			slog.Warn("Failed to record agent credential",
-				"agent_id", agentID, "error", err)
-		}
-	}
-
-	return token, nil
-}
-
 // AgentTokenGrant is what an agent token is authorized to carry: the
 // subject, project, scopes and ancestry. It is produced before the token's
 // run is known and signed once it is (SignAgentToken).
@@ -376,7 +357,7 @@ func (s *AgentTokenService) ValidateAgentToken(tokenString string) (*AgentTokenC
 
 	// A verified token whose wire form carried no scope_schema claim (reads
 	// as the Go zero value, 0) predates CurrentAgentScopeSchema entirely:
-	// GenerateAgentToken has always stamped a nonzero schema since the field
+	// SignAgentToken has always stamped a nonzero schema since the field
 	// existed, and this method only returns claims that passed HS256
 	// verification against this hub's own signing key, so no other signer's
 	// output reaches this line. This is the one place legacyScopeSchema is
