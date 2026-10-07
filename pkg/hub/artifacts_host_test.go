@@ -244,6 +244,31 @@ func TestArtifactRoutesMatchService(t *testing.T) {
 		assert.Equal(t, permissions.ResourceArtifact, meta.Resource, pattern)
 	}
 	assert.Equal(t, RoutePublic, routeMetadataTable[artifacts.RouteShared].Classification)
+	assert.Equal(t, RoutePublic, routeMetadataTable[artifacts.RouteView].Classification)
+}
+
+// TestIsArtifactViewRequest: only clean GET or HEAD paths under the view
+// route pass the authentication middleware without credentials.
+func TestIsArtifactViewRequest(t *testing.T) {
+	for _, tc := range []struct {
+		method, target string
+		want           bool
+	}{
+		{http.MethodGet, "/api/v1/artifacts/view/cap/index.html", true},
+		{http.MethodHead, "/api/v1/artifacts/view/cap/img/a.png", true},
+		{http.MethodPost, "/api/v1/artifacts/view/cap/index.html", false},
+		{http.MethodPut, "/api/v1/artifacts/view/cap/index.html", false},
+		{http.MethodGet, "/api/v1/artifacts/view/cap/../../x", false},
+		{http.MethodGet, "/api/v1/artifacts/view//index.html", false},
+		{http.MethodGet, "/api/v1/artifacts/view/cap/dir/", false},
+		{http.MethodGet, "/api/v1/artifacts/abc/files/index.html", false},
+		{http.MethodGet, "/api/v1/artifactsview/cap/index.html", false},
+		{http.MethodGet, "/api/v1/agents", false},
+	} {
+		r := httptest.NewRequest(tc.method, "http://hub"+tc.target, nil)
+		r.URL.Path = tc.target
+		assert.Equal(t, tc.want, isArtifactViewRequest(r), "%s %s", tc.method, tc.target)
+	}
 }
 
 var artifactRequestPaths = []struct{ method, path string }{

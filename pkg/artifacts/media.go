@@ -69,6 +69,9 @@ var extMediaTypes = map[string]string{
 // images.
 const mediaTypeMarkdown = "text/markdown"
 
+// mediaTypeHTML is the media type of HTML entries, shown through a view.
+const mediaTypeHTML = "text/html"
+
 func detectMediaType(name, declared string, head []byte) string {
 	if mt, ok := extMediaTypes[strings.ToLower(path.Ext(name))]; ok {
 		return mt

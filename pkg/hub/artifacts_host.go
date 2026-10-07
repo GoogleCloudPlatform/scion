@@ -17,7 +17,9 @@ package hub
 import (
 	"context"
 	"net/http"
+	"path"
 	"slices"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
@@ -230,4 +232,17 @@ func (s *Server) artifactsGuard(pattern string, handler http.Handler) http.Handl
 		}
 		guarded(w, r)
 	})
+}
+
+// isArtifactViewRequest reports whether r is a read of the artifact view
+// route (artifacts.RouteView) with a clean path. Only the request shape is
+// checked here; the artifact service verifies the capability.
+func isArtifactViewRequest(r *http.Request) bool {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		return false
+	}
+	if !strings.HasPrefix(r.URL.Path, artifacts.RouteView) {
+		return false
+	}
+	return path.Clean(r.URL.Path) == r.URL.Path
 }

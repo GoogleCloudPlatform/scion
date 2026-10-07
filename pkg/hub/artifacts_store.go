@@ -16,12 +16,15 @@ package hub
 
 import (
 	"context"
+	"crypto/rand"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 )
 
 // SetArtifactStore installs the artifact service's store. The store owns the
@@ -86,7 +89,7 @@ func (s *Server) artifactsHandler() http.Handler {
 func (s *Server) artifactBackend() artifacts.Backend {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return artifacts.Backend{Store: s.artifactStore, Blobs: s.storage, HubID: s.hubID}
+	return artifacts.Backend{Store: s.artifactStore, Blobs: s.storage, HubID: s.hubID, ViewKey: s.artifactViewKey}
 }
 
 // artifactReapInterval is how often the hub reaps abandoned pending
@@ -128,4 +131,35 @@ func (s *Server) reapArtifactVersions(ctx context.Context) {
 	if n > 0 {
 		slog.InfoContext(ctx, "artifacts: reaped abandoned pending versions", "count", n)
 	}
+}
+
+// SecretKeyArtifactViewKey is the secret key name of the key that signs
+// artifact view capabilities. It is separate from every other hub key.
+const SecretKeyArtifactViewKey = "artifact_view_signing_key"
+
+// initArtifactViewKey loads or creates the artifact view capability key,
+// with the same stable-key policy as the download signing key: required
+// on deployments that need stable keys, otherwise an in-memory key, since
+// losing it only ends views within artifacts.ViewTTL.
+func (s *Server) initArtifactViewKey(ctx context.Context) error {
+	key, err := s.ensureSigningKey(ctx, SecretKeyArtifactViewKey, nil)
+	if err == nil && len(key) == 0 {
+		err = fmt.Errorf("artifact view key resolved to an empty value")
+	}
+	if err != nil {
+		_, isGCPBackend := s.secretBackend.(*secret.GCPBackend)
+		if isGCPBackend || s.config.RequireStableSigningKey {
+			return fmt.Errorf("artifact view key: %w", err)
+		}
+		slog.Warn("Artifact view key could not be loaded or persisted; using an ephemeral in-memory key "+
+			"(artifact views will not load on other replicas or after restart)", "error", err)
+		key = make([]byte, 32)
+		if _, rerr := rand.Read(key); rerr != nil {
+			return fmt.Errorf("generate ephemeral artifact view key: %w", rerr)
+		}
+	}
+	s.mu.Lock()
+	s.artifactViewKey = key
+	s.mu.Unlock()
+	return nil
 }

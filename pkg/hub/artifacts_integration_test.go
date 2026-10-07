@@ -860,3 +860,51 @@ func TestArtifactsRemoteImageRefusedOnRoutes(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, get.Code)
 	assert.Equal(t, artifacts.FetchStatusFailed, get.Header().Get(artifacts.HeaderRemoteStatus))
 }
+
+// TestArtifactsHTMLViewOnRoutes: through the real hub, an agent mints a
+// view of an HTML bundle; the view URL serves the bundle's files with no
+// credentials at all and the view CSP, a tampered capability gets 404, and
+// a credential-less request elsewhere under /api/v1/artifacts/ is still
+// refused.
+func TestArtifactsHTMLViewOnRoutes(t *testing.T) {
+	srv, s := testServer(t)
+	enableArtifactsForTest(t, srv)
+	require.NotEmpty(t, srv.artifactViewKey, "the hub initializes the view key")
+	p1 := artifactProject(t, s, "view-p1")
+	p2 := artifactProject(t, s, "view-p2")
+	_, tok := artifactAgent(t, srv, s, p1.ID, "view-agent", AgentRoleBaseline)
+	_, otherTok := artifactAgent(t, srv, s, p2.ID, "view-other", AgentRoleBaseline)
+
+	page := []byte(`<img src="img/a.png">`)
+	rec := doRawAgentRequest(t, srv, http.MethodPost, "/api/v1/artifacts?name=index.html", page, tok)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	id := decodeArtifactID(t, rec)
+
+	mint := "/api/v1/artifacts/" + id + "/versions/1/view"
+	assert.Equal(t, http.StatusNotFound, doRawAgentRequest(t, srv, http.MethodPost, mint, nil, otherTok).Code)
+	rec = doRawAgentRequest(t, srv, http.MethodPost, mint, nil, tok)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var view artifacts.ViewResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &view))
+	require.True(t, strings.HasPrefix(view.URL, artifacts.RouteView), view.URL)
+
+	anon := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(anon, httptest.NewRequest(http.MethodGet, view.URL, nil))
+	require.Equal(t, http.StatusOK, anon.Code, anon.Body.String())
+	assert.Equal(t, string(page), anon.Body.String())
+	assert.Contains(t, anon.Header().Get("Content-Security-Policy"), "sandbox allow-scripts;")
+	assert.NotContains(t, anon.Header().Get("Content-Security-Policy"), "allow-same-origin")
+
+	tampered := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(tampered, httptest.NewRequest(http.MethodGet, strings.Replace(view.URL, ".1.", ".2.", 1), nil))
+	assert.Equal(t, http.StatusNotFound, tampered.Code)
+
+	for _, p := range []string{"/api/v1/artifacts/" + id, "/api/v1/artifacts/" + id + "/files/index.html"} {
+		out := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(out, httptest.NewRequest(http.MethodGet, p, nil))
+		assert.Equal(t, http.StatusUnauthorized, out.Code, p)
+	}
+	post := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(post, httptest.NewRequest(http.MethodPost, view.URL, nil))
+	assert.Equal(t, http.StatusUnauthorized, post.Code, "only reads pass without credentials")
+}

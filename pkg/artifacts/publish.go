@@ -172,6 +172,11 @@ func (s *Service) handlePublish(w http.ResponseWriter, r *http.Request) {
 			totalBytes += rf.Size
 		}
 	}
+	if mediaType == mediaTypeHTML {
+		if window, _, err := spool.window(); err == nil && htmlHasRemoteImages(window) {
+			warnings = append(warnings, WarnHTMLRemoteImages)
+		}
+	}
 	a := &Artifact{
 		ID: uuid.NewString(), ScopeKind: ScopeKindProject, ScopeRef: scope,
 		OwnerKind: kind, OwnerRef: ref, Title: title, CurrentSeq: 1,

@@ -651,7 +651,16 @@ func (s *Service) finalizeExtras(w http.ResponseWriter, r *http.Request, b backe
 			entry = &files[i]
 		}
 	}
-	if entry == nil || entry.MediaType != mediaTypeMarkdown || entry.SHA256 == "" {
+	if entry == nil || entry.SHA256 == "" {
+		return nil, nil
+	}
+	if entry.MediaType == mediaTypeHTML {
+		if window, _, err := s.entryWindow(r, b, entry); err == nil && htmlHasRemoteImages(window) {
+			return nil, []string{WarnHTMLRemoteImages}
+		}
+		return nil, nil
+	}
+	if entry.MediaType != mediaTypeMarkdown {
 		return nil, nil
 	}
 	rc, _, err := b.blobs.Download(ctx, BlobPath(b.hubID, entry.SHA256))
