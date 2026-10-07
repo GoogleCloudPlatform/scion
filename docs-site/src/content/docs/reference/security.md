@@ -89,6 +89,7 @@ Scion implements a robust, hierarchical RBAC (Role-Based Access Control) and pol
 - **Override Model**: Lower-level policies (e.g., at the Agent level) override higher-level ones (e.g., at the Project level), allowing for granular delegation of authority.
 - **Actions**: Standardized CRUD actions (`create`, `read`, `update`, `delete`, `list`) plus resource-specific actions (`start`, `stop`, `attach`, `message`).
 - **Tiered Agent Authorization**: Agents are assigned tiered roles (`none`, `readonly`, `baseline`, `full`) that restrict their JWT scopes through project and parent-agent creation ceilings plus live delegation checks. Each delegation edge also freezes the creating credential's permission ceiling and authority provenance at creation; the delegation walk applies every hop's frozen ceiling, and edges without recorded provenance are denied for sensitive-material permissions (see [Permissions](/scion/hosted/ha/permissions/#delegation-and-revocation)).
+- **Delegation Provenance**: Delegation edges record the credential that authorized them and a frozen effect ceiling. Edges written before this was recorded are handled by a bounded adoption migration; see [Delegation Provenance Adoption](/scion/reference/delegation-provenance-adoption/).
 
 ### 3.3 GCP Service Account Assignment Gates
 

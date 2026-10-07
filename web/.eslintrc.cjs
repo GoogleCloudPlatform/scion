@@ -44,6 +44,10 @@ module.exports = {
             parserOptions: { project: './e2e/chat-mobile/tsconfig.json' },
         },
         {
+            files: ['e2e/agent-store-count/*.ts'],
+            parserOptions: { project: './e2e/agent-store-count/tsconfig.json' },
+        },
+        {
             files: ['src/client/terminal-*.test.ts'],
             parserOptions: { project: './src/client/tsconfig.terminal-tests.json' },
         },

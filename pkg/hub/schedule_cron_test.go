@@ -443,7 +443,7 @@ func setupLegacyScheduleTest(t *testing.T) (*Server, store.Store, string, *sql.D
 	t.Helper()
 	name := strings.NewReplacer("/", "_", " ", "_").Replace(t.Name())
 	dsn := "file:legacy_" + name + "?mode=memory&cache=shared"
-	st, err := newTestStoreAt(dsn)
+	st, err := newTestStoreAt(t, dsn)
 	require.NoError(t, err)
 	srv, s := testServerWithStore(t, st)
 	db, err := sql.Open("sqlite", dsn)

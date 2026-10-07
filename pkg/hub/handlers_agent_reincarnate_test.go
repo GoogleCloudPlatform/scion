@@ -5609,13 +5609,13 @@ func TestDispatchAgentEventHandler_SetsCreateInputs(t *testing.T) {
 	creatorID := seedFullRoleDispatchCreator(ms, "project-1")
 	srv := newEventHandlerTestServer(&resolvingTemplateStore{ms})
 
-	err := srv.dispatchAgentEventHandler()(context.Background(), store.ScheduledEvent{
+	err := srv.dispatchAgentEventHandler()(context.Background(), withMockAgentRevision(store.ScheduledEvent{
 		ID:        "dispatch-createinputs-1",
 		ProjectID: "project-1",
 		EventType: "dispatch_agent",
 		Payload:   `{"agentName":"sched-createinputs","task":"Do the thing","branch":"sched-branch"}`,
 		CreatedBy: creatorID,
-	})
+	}, creatorID))
 	require.NoError(t, err)
 
 	created := findMockAgent(ms, "sched-createinputs")

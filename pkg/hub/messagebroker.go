@@ -73,6 +73,7 @@ type MessageBrokerProxy struct {
 	mu                  sync.Mutex
 	subscriptions       map[string][]eventbus.Subscription // projectID -> active subscriptions
 	pluginSubscriptions map[string]eventbus.Subscription   // pattern -> plugin-initiated subscription
+	globalSubscription  eventbus.Subscription              // global broadcast subscription; Stop removes it
 	subscribedTopics    map[string]bool                    // dedup guard for project-level subscriptions
 	runningSeen         map[string]bool                    // agent IDs whose running status already ensured subscriptions
 	stopped             bool                               // set by Stop; no subscription is registered afterwards
@@ -198,9 +199,17 @@ func (p *MessageBrokerProxy) Stop() {
 			_ = sub.Unsubscribe()
 			delete(p.pluginSubscriptions, pattern)
 		}
+		globalSub := p.globalSubscription
+		p.globalSubscription = nil
 		p.subscribedTopics = make(map[string]bool)
 		p.runningSeen = make(map[string]bool)
 		p.mu.Unlock()
+
+		// Unsubscribe waits for an in-flight broadcast handler, so it runs
+		// without p.mu held.
+		if globalSub != nil {
+			_ = globalSub.Unsubscribe()
+		}
 
 		p.log.Info("Message broker proxy stopped")
 	})
@@ -888,13 +897,26 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 func (p *MessageBrokerProxy) subscribeGlobalBroadcast() {
 	topic := eventbus.TopicGlobalBroadcast()
 
-	_, err := p.bus.Subscribe(topic, func(_ context.Context, t string, msg *messages.StructuredMessage) {
+	sub, err := p.bus.Subscribe(topic, func(_ context.Context, t string, msg *messages.StructuredMessage) {
 		ctx, cancel := context.WithTimeout(context.Background(), brokerCallbackTimeout)
 		defer cancel()
 		p.fanOutGlobal(ctx, msg)
 	})
 	if err != nil {
 		p.log.Error("Failed to subscribe for global broadcast", "error", err)
+		return
+	}
+	// Keep the subscription so Stop can remove it. Dropping it left the
+	// bus's dispatch goroutine, and the proxy it references, alive after
+	// Stop.
+	p.mu.Lock()
+	stopped := p.stopped
+	if !stopped {
+		p.globalSubscription = sub
+	}
+	p.mu.Unlock()
+	if stopped {
+		_ = sub.Unsubscribe()
 	}
 }
 

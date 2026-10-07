@@ -247,16 +247,12 @@ func (c *ControlChannelBrokerClient) DeleteAgent(ctx context.Context, brokerID, 
 	path := fmt.Sprintf("/api/v1/agents/%s", url.PathEscape(agentID))
 	query := deleteAgentQuery(ctx, projectID, opts)
 	_, err := c.doRequest(ctx, brokerID, "DELETE", path, query, nil)
-	if err != nil {
-		// A 404 means the broker has no such agent in this project; treat
-		// it as an idempotent success, matching the HTTP transport
-		// (brokerHTTPTransport.DeleteAgent).
-		if isBrokerStatus(err, http.StatusNotFound) {
-			return nil
-		}
-		return err
-	}
-	return nil
+	// A 404 means the broker has no such agent in this project; treat it
+	// as an idempotent success, matching the HTTP transport
+	// (brokerHTTPTransport.DeleteAgent), unless the broker refused a
+	// run-scoped delete because another run holds the name
+	// (deleteAgentError, ptone/scion#3080).
+	return deleteAgentError(err, opts.RunID)
 }
 
 // MessageAgent sends a message to an agent via control channel.

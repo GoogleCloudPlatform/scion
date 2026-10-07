@@ -16,7 +16,6 @@ package cmd
 
 import (
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -415,10 +414,8 @@ func runSecretGet(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to get secret: %w", err)
 	}
 
-	if secretOutputJSON {
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		return enc.Encode(secret)
+	if wantJSON(secretOutputJSON) {
+		return outputJSON(secret)
 	}
 
 	fmt.Printf("Secret: %s\n", secret.Key)
@@ -499,7 +496,7 @@ func runSecretList(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("failed to list secrets: %w", err)
 	}
 
-	if secretOutputJSON || isJSONOutput() {
+	if wantJSON(secretOutputJSON) {
 		return outputJSON(newSecretListOutput(scope, resp.Secrets))
 	}
 
