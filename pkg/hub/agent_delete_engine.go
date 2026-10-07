@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -1079,11 +1080,26 @@ func deleteSyncWaitFor(r *http.Request) time.Duration {
 // broker conflict, a retryable 503 when the broker does not have the agent's
 // runtime available, 502 otherwise (today's codes on the fast path).
 // retryAfter is the 503's Retry-After; "" means defaultBrokerRuntimeRetryAfter.
-func writeDeletionFailure(w http.ResponseWriter, agentID, code, message, retryAfter string) {
-	if message == "" {
-		message = "agent delete failed (" + code + ")"
+//
+// The status, the API error code and Retry-After are the same for every
+// caller. The deletion code and the failure message (often broker or store
+// error text) are detail for platform admins only (ptone/scion#3122): for
+// any other caller (isAdmin false) the body carries a generic message and
+// no deletionCode.
+func writeDeletionFailure(w http.ResponseWriter, agentID, code, message, retryAfter string, isAdmin bool) {
+	// The operator log keeps the full failure for every caller; writeError
+	// below logs only the message the caller receives.
+	slog.Warn("agent delete failed", "agent_id", agentID, "deletion_code", code,
+		"message", message, "body_redacted", !isAdmin)
+	details := map[string]interface{}{"agentId": agentID}
+	if isAdmin {
+		if message == "" {
+			message = "agent delete failed (" + code + ")"
+		}
+		details["deletionCode"] = code
+	} else {
+		message = genericDeleteFailedMessage
 	}
-	details := map[string]interface{}{"agentId": agentID, "deletionCode": code}
 	if code == store.DeletionCodeConflict {
 		writeError(w, http.StatusConflict, ErrCodeConflict, message, details)
 		return
@@ -1099,13 +1115,14 @@ func writeDeletionFailure(w http.ResponseWriter, agentID, code, message, retryAf
 	writeError(w, http.StatusBadGateway, ErrCodeRuntimeError, message, details)
 }
 
-// writeDeleteAccepted writes 202 with the agent's current deletion view.
-func (s *Server) writeDeleteAccepted(w http.ResponseWriter, agentID string) {
+// writeDeleteAccepted writes 202 with the agent's current deletion view,
+// redacted for a caller who is not a platform admin (isAdmin false).
+func (s *Server) writeDeleteAccepted(w http.ResponseWriter, agentID string, isAdmin bool) {
 	var view *store.DeletionInfo
 	ctx, cancel := context.WithTimeout(context.Background(), deleteShortStep)
 	defer cancel()
 	if row, err := s.store.GetAgent(ctx, agentID); err == nil {
-		view = store.ComputeAgentDeletion(row, time.Now())
+		view = deletionViewForCaller(row, time.Now(), isAdmin)
 	}
 	writeJSON(w, http.StatusAccepted, agentDeleteAcceptedResponse{AgentID: agentID, Deletion: view})
 }
@@ -1119,7 +1136,11 @@ func (s *Server) writeDeleteAccepted(w http.ResponseWriter, agentID string) {
 //     the code the view shows: 409 for a conflict, a retryable 503 with
 //     Retry-After for runtime_unavailable, 502 otherwise;
 //   - deadline → 202.
-func (s *Server) joinAgentDeletion(w http.ResponseWriter, r *http.Request, agentID string, observedClaim int64, deadline time.Time) {
+//
+// isAdmin is callerSeesDeletionDetail for the request, evaluated once by
+// the caller; it decides whether the failure body and the 202 body carry
+// the deletion detail.
+func (s *Server) joinAgentDeletion(w http.ResponseWriter, r *http.Request, agentID string, observedClaim int64, deadline time.Time, isAdmin bool) {
 	evCh, unsub := s.events.Subscribe("agent."+agentID+".deleted", "agent."+agentID+".status")
 	defer unsub()
 
@@ -1129,7 +1150,7 @@ func (s *Server) joinAgentDeletion(w http.ResponseWriter, r *http.Request, agent
 	defer timer.Stop()
 
 	for first := true; ; first = false {
-		if s.resolveJoinFromRow(w, r.Context(), agentID, observedClaim) {
+		if s.resolveJoinFromRow(w, r.Context(), agentID, observedClaim, isAdmin) {
 			return
 		}
 		if first && joinAgentDeletionHook != nil {
@@ -1142,10 +1163,10 @@ func (s *Server) joinAgentDeletion(w http.ResponseWriter, r *http.Request, agent
 			}
 		case <-ticker.C:
 		case <-timer.C:
-			if s.resolveJoinFromRow(w, r.Context(), agentID, observedClaim) {
+			if s.resolveJoinFromRow(w, r.Context(), agentID, observedClaim, isAdmin) {
 				return
 			}
-			s.writeDeleteAccepted(w, agentID)
+			s.writeDeleteAccepted(w, agentID, isAdmin)
 			return
 		case <-r.Context().Done():
 			return
@@ -1159,7 +1180,7 @@ var joinAgentDeletionHook func(agentID string)
 
 // resolveJoinFromRow reads the row and, when it decides the outcome, writes
 // the response and returns true.
-func (s *Server) resolveJoinFromRow(w http.ResponseWriter, ctx context.Context, agentID string, observedClaim int64) bool {
+func (s *Server) resolveJoinFromRow(w http.ResponseWriter, ctx context.Context, agentID string, observedClaim int64, isAdmin bool) bool {
 	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), deleteShortStep)
 	defer cancel()
 	row, err := s.store.GetAgent(rctx, agentID)
@@ -1182,13 +1203,13 @@ func (s *Server) resolveJoinFromRow(w http.ResponseWriter, ctx context.Context, 
 		return false
 	}
 	if code := row.DeletionEffectiveCode(now); code != "" {
-		writeDeletionFailure(w, agentID, code, row.DeletionError, deletionRetryAfterFor(agentID, row.DeletionClaim))
+		writeDeletionFailure(w, agentID, code, row.DeletionError, deletionRetryAfterFor(agentID, row.DeletionClaim), isAdmin)
 		return true
 	}
 	if row.DeletionState == store.DeletionStateNone && row.DeletionClaim >= observedClaim {
 		// The marker was cleared after a failure (a successful start or stop
 		// clears it): the delete did not complete.
-		writeDeletionFailure(w, agentID, store.DeletionCodeRuntimeError, "agent delete did not complete", "")
+		writeDeletionFailure(w, agentID, store.DeletionCodeRuntimeError, "agent delete did not complete", "", isAdmin)
 		return true
 	}
 	return false

@@ -399,9 +399,9 @@ The control channel uses a custom WebSocket protocol (`pkg/wsprotocol`) with the
 
 ### Broker Registration Flow
 
-1. Admin creates a broker record in the Hub: `POST /api/v1/runtime-brokers`.
-2. Hub generates a short-lived **join token**: `POST /api/v1/brokers/join`.
-3. Broker uses the join token to obtain HMAC credentials: `POST /api/v1/brokers/join` (with token).
+1. A user with `broker.create` creates (or re-issues a token for) a broker record: `POST /api/v1/brokers`. The Hub returns a short-lived, single-use **join token**; its lifetime can be set with `joinTokenTtlSeconds` (300 to 86400 seconds, default 1 hour).
+2. The broker host redeems the join token for HMAC credentials: `POST /api/v1/brokers/join`. This endpoint takes no other credential. `scion runtime-broker register` runs steps 1 and 2 in one process; `scion hub brokers join-token create` and `scion runtime-broker join` run them on different machines.
+3. The token is consumed in the same transaction that stores the broker's secret.
 4. Broker stores credentials locally, one file per Hub connection (`~/.scion/hub-credentials/<name>.json`). A legacy `~/.scion/broker-credentials.json` is migrated into that directory on first use.
 5. Broker authenticates subsequent requests using HMAC-SHA256 signatures.
 
