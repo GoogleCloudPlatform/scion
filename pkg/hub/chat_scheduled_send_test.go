@@ -384,29 +384,36 @@ func TestScheduledSend_CancelAfterClaim_Conflict(t *testing.T) {
 // time.
 func TestScheduledSend_CancelRacingClaim_ExactlyOneOutcome(t *testing.T) {
 	sms, _ := openScheduledStorePair(t)
+	testCancelClaimRace(t, sms[0], sms[1], "race")
+}
+
+// testCancelClaimRace races a cancel through one store handle against a
+// claim through another on the same row, many times: exactly one wins.
+func testCancelClaimRace(t *testing.T, a, b ScheduledMessageStore, prefix string) {
+	t.Helper()
 	ctx := context.Background()
 	for i := 0; i < 50; i++ {
-		m := newTestScheduledRow(fmt.Sprintf("race-%d", i), "user-1", time.Now().Add(-time.Second))
-		_, _, err := sms[0].CreateScheduledMessage(ctx, m)
+		m := newTestScheduledRow(fmt.Sprintf("%s-%d", prefix, i), "user-1", time.Now().Add(-time.Second))
+		_, _, err := a.CreateScheduledMessage(ctx, m)
 		require.NoError(t, err)
 
 		start := make(chan struct{})
 		results := make(chan bool, 2)
 		go func() {
 			<-start
-			ok, err := sms[0].CancelScheduledMessage(ctx, "user-1", m.ID, time.Now())
+			ok, err := a.CancelScheduledMessage(ctx, "user-1", m.ID, time.Now())
 			assert.NoError(t, err)
 			results <- ok
 		}()
 		go func() {
 			<-start
-			ok, err := sms[1].ClaimScheduledMessage(ctx, m.ID, time.Now())
+			ok, err := b.ClaimScheduledMessage(ctx, m.ID, time.Now())
 			assert.NoError(t, err)
 			results <- ok
 		}()
 		close(start)
-		a, b := <-results, <-results
-		assert.True(t, a != b, "exactly one of cancel and claim must win (iteration %d)", i)
+		r1, r2 := <-results, <-results
+		assert.True(t, r1 != r2, "exactly one of cancel and claim must win (iteration %d)", i)
 	}
 }
 
@@ -848,6 +855,7 @@ func TestScheduledStore_Postgres(t *testing.T) {
 		sms[i] = scheduledMessageStoreFrom(wcs)
 	}
 	testScheduledStoreTransitions(t, sms[0])
+	testCancelClaimRace(t, sms[0], sms[1], "pg-race")
 
 	const n = 40
 	for i := 0; i < n; i++ {
