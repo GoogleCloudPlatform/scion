@@ -23,7 +23,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/go-jose/go-jose/v4/jwt"
 )
@@ -31,12 +30,11 @@ import (
 // authorizeScheduledMessageAuthoring validates a scheduled-message event at
 // authoring time (create / update). It resolves the target agent from
 // convenience fields or raw payload and rejects when:
-//   - the target agent cannot be resolved,
-//   - the target agent is in a different project from projectID (cross-project),
-//   - the caller identity is a scoped UAT whose caveats cannot be preserved
-//     at fire time (the scheduler stores only the creator ID, not the full
-//     credential; fire time re-resolves the user but cannot reconstruct
-//     scope restrictions), or
+//   - the request's credential may not author scheduled work
+//     (authorizeScheduleAuthoringCredential: every user access token is
+//     refused), checked before the target is resolved,
+//   - the target agent is in a different project from projectID and
+//     cross-project messaging is disabled, or
 //   - the caller is not currently authorized to message the target
 //     (fail-fast preview — the definitive check runs again at fire time).
 //
@@ -54,6 +52,11 @@ func (s *Server) authorizeScheduledMessageAuthoring(
 	identity := GetIdentityFromContext(ctx)
 	if identity == nil {
 		Unauthorized(w)
+		return false
+	}
+	// The credential gate runs before the target is resolved, so a refused
+	// credential is refused whether or not the target exists.
+	if !authorizeScheduleAuthoringCredential(w, r) {
 		return false
 	}
 
@@ -145,18 +148,6 @@ func (s *Server) authorizeScheduledMessageAuthoring(
 			CrossProject:     true,
 			Surface:          "scheduled_message",
 		})
-	}
-
-	// Reject scoped UATs: the scheduler persists only the creator ID.
-	// At fire time the user is re-resolved without scope restrictions, so
-	// admitting a scoped UAT here would silently discard its caveats.
-	// Credential provenance that cannot be reconstructed fails closed.
-	if scopedUATDeniedForFutureDispatchAuthoring(identity) {
-		// Session-only with the GOV_PENDING reason (session_only_gate.go).
-		writeSessionOnlyDenial(w, ErrCodeForbidden,
-			"scoped access tokens cannot author scheduled messages: credential caveats cannot be preserved at fire time",
-			authzop.ReasonGovernancePending)
-		return false
 	}
 
 	// Fail-fast: preview whether the caller is authorized to message this

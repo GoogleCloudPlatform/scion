@@ -226,7 +226,7 @@ func legacyCeiling(scopes ...string) permissions.FrozenPermissionCeiling {
 // TestBearerGate_PermissionBoundaryEligibilityAppliesToLegacyCeilings pins
 // stage 3b: a permission is usable only on a boundary kind its
 // allowed boundaries list. A project-boundary legacy ceiling that carries
-// group, hub or scheduled-event permissions is denied on a project target
+// group, hub or scheduled-event authoring permissions is denied on a project target
 // for each, with a stable reason, while a permission eligible for the
 // project boundary passes the stage.
 func TestBearerGate_PermissionBoundaryEligibilityAppliesToLegacyCeilings(t *testing.T) {
@@ -256,11 +256,9 @@ func TestBearerGate_PermissionBoundaryEligibilityAppliesToLegacyCeilings(t *test
 		{"group.create", projectGroup},
 		{"group.list", projectGroup},
 		{"hub.audit.read", projectTarget},
-		{"scheduled_event.read", projectEvent},
-		{"scheduled_event.list", projectEvent},
+		// scheduled_event.create has no allowed boundary; the read, list,
+		// update and delete permissions are eligible on a project boundary.
 		{"scheduled_event.create", projectEvent},
-		{"scheduled_event.update", projectEvent},
-		{"scheduled_event.delete", projectEvent},
 	}
 	for _, tc := range cases {
 		t.Run(tc.permissionID, func(t *testing.T) {

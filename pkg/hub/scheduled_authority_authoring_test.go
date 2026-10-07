@@ -30,9 +30,8 @@ import (
 
 // The revision ceiling of a scoped UAT is the token's frozen ceiling, with
 // its project boundary. revisionAuthorityCeiling is called directly: the
-// schedule routes refuse a project-scoped UAT at the bearer gate's boundary
-// eligibility stage before any schedule handler logic runs
-// (TestSchedUATAuthoringRefusedAtBoundary). Recording through the routes is
+// schedule routes refuse every UAT at the authoring credential gate before
+// any schedule handler logic runs (TestSchedUATAuthoringRefusedAtBoundary). Recording through the routes is
 // covered by session-authored schedules (TestScheduleAuthoringRecordsSessionCeiling,
 // TestSchedSessionReauthoringRecordsCeiling).
 func TestSchedUATRevisionCeilingIsTokenCeiling(t *testing.T) {
@@ -50,9 +49,10 @@ func TestSchedUATRevisionCeilingIsTokenCeiling(t *testing.T) {
 }
 
 // A project-scoped UAT cannot author a schedule or a one-shot event of any
-// type: no scheduled_event permission is eligible for a project boundary, so
-// the route refuses it and nothing is written. The scheduled-message rule
-// for scoped UATs is checked directly in TestSessionOnlyGate_ReasonIsReported.
+// type: the authoring credential gate refuses it and nothing is written, and
+// scheduled_event.create is not eligible for a project boundary either. The
+// scheduled-message rule for scoped UATs is checked directly in
+// TestSessionOnlyGate_ReasonIsReported.
 func TestSchedUATAuthoringRefusedAtBoundary(t *testing.T) {
 	srv, s, projectID := setupScheduleTest(t)
 	owner := setupScopedDispatchAgentOwner(t, srv, s, projectID, tid("sched-uat-boundary-owner"))
