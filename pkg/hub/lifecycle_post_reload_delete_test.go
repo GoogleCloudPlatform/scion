@@ -150,9 +150,24 @@ func (p *startWriteDeleteStore) GetAgent(ctx context.Context, id string) (*store
 // would be fragile. A rename that stops it matching is not silent: the tests
 // that inject this way require that the fault was applied (p.applied, or
 // failedReload), and fail otherwise.
+//
+// It does not skip a fixed number of frames: which frames exist depends on
+// what the compiler inlines, so a skip count could drop the frame being
+// looked for. It skips only runtime.Callers itself, collects the whole
+// stack (growing the buffer until it is not filled), and scans every frame.
+// Inlining cannot hide the caller: runtime.CallersFrames expands inlined
+// calls into their own frames, with their own function names.
 func calledFrom(suffix string) bool {
-	pcs := make([]uintptr, 32)
-	frames := runtime.CallersFrames(pcs[:runtime.Callers(3, pcs)])
+	pcs := make([]uintptr, 64)
+	for {
+		n := runtime.Callers(1, pcs)
+		if n < len(pcs) {
+			pcs = pcs[:n]
+			break
+		}
+		pcs = make([]uintptr, 2*len(pcs))
+	}
+	frames := runtime.CallersFrames(pcs)
 	for {
 		f, more := frames.Next()
 		if strings.HasSuffix(f.Function, suffix) {
