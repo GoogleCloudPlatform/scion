@@ -248,6 +248,30 @@ describe('scion-page-health-dashboard agents (ptone/scion#3587)', () => {
     expect(page.shadowRoot?.textContent ?? '').not.toMatch(/stall/i);
     expect(card!.shadowRoot?.textContent ?? '').not.toMatch(/stall/i);
   });
+
+  it('shows agents as not reported, not as all clear, when agents is null', async () => {
+    vi.mocked(apiFetch).mockImplementation(async () =>
+      json({
+        status: 'degraded',
+        hub: { status: 'healthy', version: 'v1', uptime: '1h', connected_brokers: 0 },
+        database: { status: 'healthy', pool_active: 0, pool_max: 10, pool_idle: 0 },
+        runtime_brokers: { items: [], total: 0, truncated: false },
+        agents: null,
+        dispatch: null,
+      })
+    );
+    const page = document.createElement('scion-page-health-dashboard') as ScionPageHealthDashboard;
+    document.body.appendChild(page);
+    await (page as unknown as { fetchData(): Promise<void> }).fetchData();
+    await page.updateComplete;
+
+    const card = page.shadowRoot?.querySelector('scion-health-agents-card');
+    expect(card).not.toBeNull();
+    await (card as LitLike).updateComplete;
+    const text = card!.shadowRoot?.textContent ?? '';
+    expect(text).toContain('Agent data not available');
+    expect(text).not.toContain('No agents need attention');
+  });
 });
 
 type LitLike = Element & { updateComplete: Promise<unknown> };

@@ -44,7 +44,7 @@ type HealthSummaryResponse struct {
 	Hub      HealthSummaryHub       `json:"hub"`
 	Database HealthSummaryDB        `json:"database"`
 	Brokers  HealthSummaryBrokers   `json:"runtime_brokers"`
-	Agents   HealthSummaryAgents    `json:"agents"`
+	Agents   *HealthSummaryAgents   `json:"agents"`   // nil when the agent aggregate is unavailable
 	Dispatch *HealthSummaryDispatch `json:"dispatch"` // nil when dispatch metrics are unavailable
 }
 
@@ -252,16 +252,16 @@ func (s *Server) handleHealthSummary(w http.ResponseWriter, r *http.Request) {
 
 	// Use aggregate queries instead of fetching full agent records.
 	// This avoids deserialising up to 10 000 structs on every 30 s poll.
-	agentsSummary := HealthSummaryAgents{
-		ByPhase:  []HealthPhaseCount{},
-		Problems: []HealthAgentGroup{},
-	}
+	// A nil section means "not reported": the dashboard must not read a
+	// failed aggregate as zero agents with nothing needing attention.
+	var agentsSummary *HealthSummaryAgents
 	agentAgg, err := s.store.AggregateAgentHealth(ctx)
 	if err != nil {
 		slog.Error("health summary: failed to aggregate agent health", "error", err)
 		degrade()
 	} else {
-		agentsSummary = s.healthSummaryAgents(ctx, agentAgg)
+		summary := s.healthSummaryAgents(ctx, agentAgg)
+		agentsSummary = &summary
 	}
 
 	// Build brokers section using pre-computed agent buckets from the aggregate.
@@ -280,7 +280,7 @@ func (s *Server) handleHealthSummary(w http.ResponseWriter, r *http.Request) {
 
 	// Propagate unhealthy agent/broker signals into overall status.
 	// Stalled agents never count.
-	if agentsSummary.Errored > 0 {
+	if agentsSummary != nil && agentsSummary.Errored > 0 {
 		degrade()
 	}
 	for _, b := range brokerList.Items {
@@ -359,7 +359,7 @@ func (s *Server) healthSummaryProjectSlugs(ctx context.Context, ids []string) ma
 	if len(ids) == 0 {
 		return slugs
 	}
-	res, err := s.store.ListProjectSummaries(ctx, store.ProjectFilter{MemberProjectIDs: ids}, store.ListOptions{Limit: len(ids)})
+	res, err := s.store.ListProjectSummaries(ctx, store.ProjectFilter{MemberProjectIDs: ids}, store.ListOptions{Limit: len(ids), SkipTotalCount: true})
 	if err != nil {
 		slog.Warn("health summary: failed to resolve project slugs", "error", err)
 		return slugs

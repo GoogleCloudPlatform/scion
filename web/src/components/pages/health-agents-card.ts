@@ -62,40 +62,29 @@ export interface HealthSummaryAgents {
   problems: HealthAgentGroup[];
 }
 
-/** Lifecycle order, mirroring state.Phases() on the hub. */
-export const PHASE_ORDER: readonly string[] = [
-  'created',
-  'provisioning',
-  'cloning',
-  'starting',
-  'running',
-  'suspended',
-  'stopping',
-  'stopped',
-  'error',
-];
-
-/** Display order and labels of the problem groups. */
+/**
+ * Display order and labels of the problem groups. The "errored" kind is
+ * phase error only, so its label says so: the share figure is a different
+ * number (error or crashed) with its own label.
+ */
 const GROUP_ORDER: readonly string[] = ['errored', 'crashed', 'offline'];
-const GROUP_LABELS: Record<string, string> = {
-  errored: 'Errored',
+export const GROUP_LABELS: Readonly<Record<string, string>> = {
+  errored: 'Error phase',
   crashed: 'Crashed',
   offline: 'Offline',
 };
 
+/** Label and tooltip of the errored-share figure (agents.errored / agents.considered). */
+export const ERRORED_SHARE_LABEL = 'Error or crashed';
+export const ERRORED_SHARE_TITLE =
+  'Agents in phase error or with a crashed activity, out of all agents that are not stopped';
+
 /**
- * Phase counts in lifecycle order, unknown phases after them sorted by
- * name, zero counts dropped. The server already orders the list; sorting
- * again keeps the chips stable even if it did not.
+ * The phase counts to show: the server's lifecycle order is kept as sent
+ * (it owns that order, see state.Phases()); only zero counts are dropped.
  */
-export function orderPhases(phases: readonly HealthPhaseCount[]): HealthPhaseCount[] {
-  const rank = (p: string): number => {
-    const i = PHASE_ORDER.indexOf(p);
-    return i === -1 ? PHASE_ORDER.length : i;
-  };
-  return phases
-    .filter((p) => p.count > 0)
-    .sort((a, b) => rank(a.phase) - rank(b.phase) || a.phase.localeCompare(b.phase));
+export function visiblePhases(phases: readonly HealthPhaseCount[]): HealthPhaseCount[] {
+  return phases.filter((p) => p.count > 0);
 }
 
 /** Problem groups in display order; unknown kinds and empty groups are dropped. */
@@ -119,7 +108,7 @@ export function moreCount(group: HealthAgentGroup): number {
   return Math.max(0, group.count - group.items.length);
 }
 
-/** "N of M (x%)" for the errored share of non-stopped agents. */
+/** "N of M (x%)": agents in error or crashed, out of non-stopped agents. */
 export function erroredShare(agents: Pick<HealthSummaryAgents, 'errored' | 'considered'>): string {
   if (!agents.considered) return `${agents.errored} of 0`;
   const pct = (agents.errored / agents.considered) * 100;
@@ -265,13 +254,14 @@ export class ScionHealthAgentsCard extends LitElement {
           <li class="total">
             <span class="stat">${a.total}</span> <span class="label">total</span>
           </li>
-          <li class="errored-share">
-            <span class="label">Errored</span> <span class="stat">${erroredShare(a)}</span>
+          <li class="errored-share" title=${ERRORED_SHARE_TITLE}>
+            <span class="label">${ERRORED_SHARE_LABEL}</span>
+            <span class="stat">${erroredShare(a)}</span>
           </li>
         </ul>
         ${(a.by_phase ?? []).length > 0
           ? html`<ul class="phases">
-              ${orderPhases(a.by_phase).map(
+              ${visiblePhases(a.by_phase).map(
                 (p) =>
                   html`<li data-phase=${p.phase}>
                     <span class="stat">${p.count}</span>

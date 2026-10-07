@@ -27,7 +27,9 @@ import {
   erroredShare,
   moreCount,
   orderGroups,
-  orderPhases,
+  visiblePhases,
+  GROUP_LABELS,
+  ERRORED_SHARE_LABEL,
   type HealthAgentRef,
   type HealthSummaryAgents,
 } from './health-agents-card.js';
@@ -79,18 +81,21 @@ afterEach(() => {
 });
 
 describe('health agents card helpers', () => {
-  it('orders phases by lifecycle, unknown phases last by name, zeros dropped', () => {
-    const shuffled = [
-      { phase: 'zz-legacy', count: 1 },
-      { phase: 'error', count: 1 },
-      { phase: 'stopped', count: 0 },
-      { phase: 'aa-legacy', count: 1 },
+  it('keeps the server phase order and drops zero counts', () => {
+    const sent = [
       { phase: 'running', count: 3 },
-      { phase: 'created', count: 1 },
+      { phase: 'stopped', count: 0 },
+      { phase: 'error', count: 1 },
+      { phase: 'legacy', count: 1 },
     ];
-    const want = ['created', 'running', 'error', 'aa-legacy', 'zz-legacy'];
-    expect(orderPhases(shuffled).map((p) => p.phase)).toEqual(want);
-    expect(orderPhases([...shuffled].reverse()).map((p) => p.phase)).toEqual(want);
+    expect(visiblePhases(sent).map((p) => p.phase)).toEqual(['running', 'error', 'legacy']);
+  });
+
+  it('labels the errored group and the errored share differently', () => {
+    // The share counts error or crashed; the group counts phase error only.
+    expect(GROUP_LABELS.errored).not.toBe(ERRORED_SHARE_LABEL);
+    expect(GROUP_LABELS.errored).toBe('Error phase');
+    expect(ERRORED_SHARE_LABEL).toBe('Error or crashed');
   });
 
   it('orders groups errored, crashed, offline and drops empty or unknown ones', () => {
@@ -123,32 +128,25 @@ describe('health agents card helpers', () => {
 });
 
 describe('scion-health-agents-card', () => {
-  it('shows active vs total and phases in lifecycle order', async () => {
-    const el = await mount(
-      agents({
-        by_phase: [
-          { phase: 'error', count: 2 },
-          { phase: 'running', count: 6 },
-          { phase: 'stopped', count: 2 },
-        ],
-      })
-    );
+  it('shows active vs total and phases in the order the server sends', async () => {
+    const el = await mount(agents());
     const root = el.shadowRoot!;
     expect(text(root.querySelector('.active'))).toBe('7 active');
     expect(text(root.querySelector('.total'))).toBe('10 total');
-    expect(text(root.querySelector('.errored-share'))).toBe('Errored 2 of 8 (25%)');
+    expect(text(root.querySelector('.errored-share'))).toBe('Error or crashed 2 of 8 (25%)');
+    expect(root.querySelector('.errored-share')?.getAttribute('title')).toContain('crashed');
     const phases = [...root.querySelectorAll<HTMLElement>('.phases li')].map(
       (li) => li.dataset.phase
     );
     expect(phases).toEqual(['running', 'stopped', 'error']);
   });
 
-  it('keeps the phase order stable across refreshes', async () => {
+  it('keeps the phase order stable across refreshes of the same order', async () => {
     const el = await mount(agents());
-    const order = () =>
+    const order = (): (string | undefined)[] =>
       [...el.shadowRoot!.querySelectorAll<HTMLElement>('.phases li')].map((li) => li.dataset.phase);
     const first = order();
-    el.agents = agents({ by_phase: [...agents().by_phase].reverse() });
+    el.agents = agents({ by_phase: agents().by_phase.map((p) => ({ ...p, count: p.count + 1 })) });
     await el.updateComplete;
     expect(order()).toEqual(first);
   });
@@ -170,7 +168,7 @@ describe('scion-health-agents-card', () => {
     const root = el.shadowRoot!;
     const groups = [...root.querySelectorAll<HTMLElement>('.group')];
     expect(groups.map((g) => g.dataset.kind)).toEqual(['errored', 'offline']);
-    expect(text(groups[0]!.querySelector('.group-head'))).toBe('Errored 23');
+    expect(text(groups[0]!.querySelector('.group-head'))).toBe('Error phase 23');
     expect(groups[0]!.querySelectorAll('a')).toHaveLength(20);
     expect(text(groups[0]!.querySelector('.more'))).toBe('+3 more');
     expect(groups[1]!.querySelector('.more')).toBeNull();

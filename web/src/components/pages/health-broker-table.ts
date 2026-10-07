@@ -226,6 +226,19 @@ export class ScionHealthBrokerTable extends LitElement {
       color: var(--scion-text-muted);
     }
 
+    /* Read by screen readers, not shown: the Agents cell's "4 / 1" spelled out. */
+    .visually-hidden {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
     .pill {
       display: inline-block;
       padding: 0.0625rem 0.5rem;
@@ -318,10 +331,12 @@ export class ScionHealthBrokerTable extends LitElement {
         </td>
         <td class="agents num" title=${ifDefined(agents?.title)}>
           ${agents
-            ? html`${agents.running} /
-                <span class=${agents.attention > 0 ? 'pill tone-warn attention' : 'attention'}
-                  >${agents.attention}</span
-                >`
+            ? html`<span class="counts" aria-hidden="true"
+                  >${agents.running} /
+                  <span class=${agents.attention > 0 ? 'pill tone-warn attention' : 'attention'}
+                    >${agents.attention}</span
+                  ></span
+                ><span class="visually-hidden">${agents.title}</span>`
             : html`<span class="muted">—</span>`}
         </td>
         <td class="version">${b.version || html`<span class="muted">—</span>`}</td>

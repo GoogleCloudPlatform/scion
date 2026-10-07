@@ -85,6 +85,7 @@ func TestHandleHealthSummary_ResponseShape(t *testing.T) {
 	assert.NotNil(t, resp.Brokers.Items)
 
 	// Verify agents section has initialized slices
+	require.NotNil(t, resp.Agents)
 	assert.NotNil(t, resp.Agents.ByPhase)
 	assert.NotNil(t, resp.Agents.Problems)
 
@@ -160,6 +161,7 @@ func TestHandleHealthSummary_AgentAggregation(t *testing.T) {
 
 	// Degraded because of the crashed and errored agents (not the stalled one).
 	assert.Equal(t, "degraded", resp.Status)
+	require.NotNil(t, resp.Agents)
 
 	assert.Equal(t, 5, resp.Agents.Total)
 	assert.Equal(t, 4, resp.Agents.Active)
@@ -229,6 +231,7 @@ func TestHandleHealthSummary_SameNamedAgentsDistinguishable(t *testing.T) {
 	var resp HealthSummaryResponse
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
 
+	require.NotNil(t, resp.Agents)
 	require.Len(t, resp.Agents.Problems, 1)
 	g := resp.Agents.Problems[0]
 	assert.Equal(t, HealthAgentGroupErrored, g.Kind)
@@ -247,10 +250,12 @@ type projectListCountingStore struct {
 	store.Store
 	summaryCalls, listCalls, getCalls int
 	failSummaries                     bool
+	lastSummaryOpts                   store.ListOptions
 }
 
 func (p *projectListCountingStore) ListProjectSummaries(ctx context.Context, f store.ProjectFilter, o store.ListOptions) (*store.ListResult[store.Project], error) {
 	p.summaryCalls++
+	p.lastSummaryOpts = o
 	if p.failSummaries {
 		return nil, errors.New("boom")
 	}
@@ -299,8 +304,10 @@ func TestHandleHealthSummary_ProjectSlugsOneLookup(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
 
 	assert.Equal(t, 1, counting.summaryCalls, "one batched project lookup")
+	assert.True(t, counting.lastSummaryOpts.SkipTotalCount, "the lookup never reads the total, so it skips the COUNT query")
 	assert.Zero(t, counting.getCalls, "no per-agent project lookup")
 
+	require.NotNil(t, resp.Agents)
 	require.Len(t, resp.Agents.Problems, 3)
 	kinds := []string{}
 	for _, g := range resp.Agents.Problems {
@@ -320,6 +327,7 @@ func TestHandleHealthSummary_ProjectSlugsOneLookup(t *testing.T) {
 	rr = doRequest(t, srv, http.MethodGet, "/api/v1/admin/health/summary", nil)
 	require.Equal(t, http.StatusOK, rr.Code)
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	require.NotNil(t, resp.Agents)
 	require.Len(t, resp.Agents.Problems, 3)
 	assert.Empty(t, resp.Agents.Problems[1].Items[0].ProjectSlug)
 	assert.Equal(t, tid("p2"), resp.Agents.Problems[1].Items[0].ProjectID)
@@ -345,12 +353,81 @@ func TestHandleHealthSummary_StalledOnlyStaysHealthy(t *testing.T) {
 	var resp HealthSummaryResponse
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
 	assert.Equal(t, "healthy", resp.Status)
+	require.NotNil(t, resp.Agents)
 	assert.Empty(t, resp.Agents.Problems)
 	assert.Equal(t, 0, resp.Agents.Errored)
 	assert.Equal(t, 2, resp.Agents.Considered)
 	assert.NotContains(t, rr.Body.String(), "stalled-one")
 	assert.NotContains(t, rr.Body.String(), "suspended-one")
 	assertNoStallData(t, rr.Body.Bytes())
+}
+
+// TestHandleHealthSummary_WarningOnlyAgentsStayHealthy pins the interim
+// status rule: only errored agents (phase error, or crashed outside stopped)
+// degrade the overall status. Offline agents are listed but do not, and a
+// crash on a stopped agent is neither listed nor counted.
+func TestHandleHealthSummary_WarningOnlyAgentsStayHealthy(t *testing.T) {
+	cases := []struct {
+		name       string
+		phase      string
+		activity   string
+		wantGroups []string
+	}{
+		{"offline only", string(state.PhaseRunning), string(state.ActivityOffline), []string{HealthAgentGroupOffline}},
+		{"stopped and crashed only", string(state.PhaseStopped), string(state.ActivityCrashed), nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, s := testServer(t)
+			ctx := context.Background()
+			require.NoError(t, s.CreateProject(ctx, &store.Project{ID: tid("warn-proj"), Name: "warn", Slug: "warn"}))
+			require.NoError(t, s.CreateAgent(ctx, &store.Agent{
+				ID: tid("warn-agent"), Name: "warn-agent", Slug: "warn-agent", ProjectID: tid("warn-proj"),
+				Phase: tc.phase, Activity: tc.activity,
+			}))
+
+			rr := doRequest(t, srv, http.MethodGet, "/api/v1/admin/health/summary", nil)
+			require.Equal(t, http.StatusOK, rr.Code)
+			var resp HealthSummaryResponse
+			require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+			assert.Equal(t, "healthy", resp.Status)
+			require.NotNil(t, resp.Agents)
+			assert.Equal(t, 0, resp.Agents.Errored)
+			var kinds []string
+			for _, g := range resp.Agents.Problems {
+				kinds = append(kinds, g.Kind)
+			}
+			assert.Equal(t, tc.wantGroups, kinds)
+		})
+	}
+}
+
+// aggregateFailStore wraps a real store but fails the agent health aggregate.
+type aggregateFailStore struct {
+	store.Store
+}
+
+func (aggregateFailStore) AggregateAgentHealth(context.Context) (*store.AgentHealthAggregate, error) {
+	return nil, errors.New("aggregate failed")
+}
+
+// TestHandleHealthSummary_AgentsNullWhenAggregateFails: a failed aggregate is
+// reported as agents: null (not reported), never as a zero-agent section that
+// would read as "nothing needs attention", and it degrades the status.
+func TestHandleHealthSummary_AgentsNullWhenAggregateFails(t *testing.T) {
+	srv, _ := testServer(t)
+	srv.store = aggregateFailStore{srv.store}
+
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/admin/health/summary", nil)
+	require.Equal(t, http.StatusOK, rr.Code)
+
+	var raw map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &raw))
+	assert.Equal(t, "null", string(raw["agents"]))
+	var resp HealthSummaryResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	assert.Nil(t, resp.Agents)
+	assert.Equal(t, "degraded", resp.Status)
 }
 
 func TestOrderedPhaseCounts(t *testing.T) {

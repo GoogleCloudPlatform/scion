@@ -60,7 +60,8 @@ interface HealthSummary {
     pool_idle: number;
   };
   runtime_brokers: HealthSummaryBrokerList;
-  agents: HealthSummaryAgents;
+  /** Null when the hub could not aggregate agents (not reported). */
+  agents: HealthSummaryAgents | null;
   dispatch: {
     stuck_messages: number;
     failed_1h: number;
