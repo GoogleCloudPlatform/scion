@@ -244,3 +244,70 @@ func (a *Aggregator) Finalize(inputTokens, outputTokens, cachedTokens, reasoning
 		ToolCalls:       toolCalls,
 	}
 }
+
+// AggregatorState is the serializable form of an Aggregator's per-session
+// state. Short-lived hook processes use it to carry a session's counts from
+// one hook invocation to the next. The agent ID, project ID and model are not
+// part of it: they come from the environment, which every hook process for
+// the agent shares.
+type AggregatorState struct {
+	SessionID       string                   `json:"session_id"`
+	StartedAt       time.Time                `json:"started_at"`
+	Open            bool                     `json:"open"`
+	Implicit        bool                     `json:"implicit"`
+	TurnCount       int                      `json:"turn_count"`
+	APICallCount    int                      `json:"api_call_count"`
+	TokensInput     int64                    `json:"tokens_input"`
+	TokensOutput    int64                    `json:"tokens_output"`
+	TokensCached    int64                    `json:"tokens_cached"`
+	TokensReasoning int64                    `json:"tokens_reasoning"`
+	ToolCalls       map[string]ToolCallStats `json:"tool_calls,omitempty"`
+}
+
+// State returns a snapshot of the aggregator's per-session state.
+func (a *Aggregator) State() AggregatorState {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	toolCalls := make(map[string]ToolCallStats, len(a.toolCalls))
+	for name, stats := range a.toolCalls {
+		toolCalls[name] = *stats
+	}
+	return AggregatorState{
+		SessionID:       a.sessionID,
+		StartedAt:       a.startedAt,
+		Open:            a.open,
+		Implicit:        a.implicit,
+		TurnCount:       a.turnCount,
+		APICallCount:    a.apiCallCount,
+		TokensInput:     a.tokensInput,
+		TokensOutput:    a.tokensOutput,
+		TokensCached:    a.tokensCached,
+		TokensReasoning: a.tokensReasoning,
+		ToolCalls:       toolCalls,
+	}
+}
+
+// RestoreState replaces the aggregator's per-session state with s, as
+// previously returned by State. The counting rules applied to later events
+// are unchanged.
+func (a *Aggregator) RestoreState(s AggregatorState) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	a.sessionID = s.SessionID
+	a.startedAt = s.StartedAt
+	a.open = s.Open
+	a.implicit = s.Implicit
+	a.turnCount = s.TurnCount
+	a.apiCallCount = s.APICallCount
+	a.tokensInput = s.TokensInput
+	a.tokensOutput = s.TokensOutput
+	a.tokensCached = s.TokensCached
+	a.tokensReasoning = s.TokensReasoning
+	a.toolCalls = make(map[string]*ToolCallStats, len(s.ToolCalls))
+	for name, stats := range s.ToolCalls {
+		stats := stats
+		a.toolCalls[name] = &stats
+	}
+}
