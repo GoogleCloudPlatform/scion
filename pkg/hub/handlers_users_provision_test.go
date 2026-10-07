@@ -474,12 +474,22 @@ func TestHandleProvisionUser(t *testing.T) {
 			``, `{not json`, `[]`, `"x"`, `null`, `5`,
 			`{"email":5}`, `{"email":"x@example.com","note":{}}`, `{"email":"x@example.com","displayName":true}`,
 			`{"email":"x@example.com"} {"email":"y@example.com"}`,
+			`{"email":"x@example.com"}}`,
+			`{"email":"x@example.com"}]`,
+			`{"email":"x@example.com"} x`,
+			`{"email":"x@example.com","email":"y@example.com"}`,
+			`{"email":"x@example.com","role":"admin","role":null}`,
 		} {
 			rec := provisionRaw(t, f.srv, f.hubAdmin, body)
 			assert.Equal(t, http.StatusBadRequest, rec.Code, "%q: %s", body, rec.Body.String())
 			code, _ := provisionErr(t, rec)
 			assert.Equal(t, ErrCodeInvalidRequest, code, body)
 		}
+		_, err := f.s.GetUserByEmail(ctx, "x@example.com")
+		assert.ErrorIs(t, err, store.ErrNotFound, "no malformed body creates a record")
+		// Surrounding whitespace is still accepted.
+		rec := provisionRaw(t, f.srv, f.hubAdmin, " \n {\"email\":\"ws@example.com\"} \n ")
+		assert.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 	})
 
 	t.Run("row09_unknown_fields", func(t *testing.T) {
@@ -690,8 +700,12 @@ func TestHandleProvisionUser(t *testing.T) {
 				rec := provisionAs(t, f.srv, caller, map[string]interface{}{"email": "racer@example.com", "displayName": "Winner"})
 				require.Equal(t, tc.wantCode, rec.Code, rec.Body.String())
 				if tc.wantCode == http.StatusOK {
-					assert.False(t, decodeProvisionResponse(t, rec).Created)
-					if !tc.detail {
+					resp := decodeProvisionResponse(t, rec)
+					assert.False(t, resp.Created)
+					if tc.detail {
+						assert.Equal(t, winnerID, resp.User.ID, "detailed view with detail authority")
+						assert.Equal(t, "Winner", resp.User.DisplayName)
+					} else {
 						assert.Equal(t, []string{"email", "status"}, provisionUserKeys(t, rec))
 					}
 				} else {

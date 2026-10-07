@@ -498,7 +498,12 @@ operator. It exists whether or not a record was provisioned, and provisioning do
         AfterFields:   []string{"target_user_id", "email", "status", "display_name"},
         Atomic:        true,
     },
-    DenialCodes: []DenialCode{DenialForbidden, DenialCredentialInsufficient, DenialUserSuspended,
+    // H.2 PR-1 (Phase 0 binding): forbidden covers rows 4, 5 and 8 (row 5 carries the
+    // session-only reason); user_suspended comes from the auth middleware (row 3); conflict
+    // covers rows 15-17; role_assignment_forbidden is the denial-log classification of row 12
+    // (wire code unprocessable). DenialCredentialInsufficient is added in Phase 2, when hub
+    // token admission can return it (rows 6-7).
+    DenialCodes: []DenialCode{DenialForbidden, DenialUserSuspended, DenialConflict,
         DenialRoleAssignmentForbidden},
     TestRefs:    []TestRef{{Package: "pkg/hub", Function: "TestHandleProvisionUser"}},
     // H.2 PR-1: token admission opens in Phase 2.
@@ -520,8 +525,8 @@ is chosen to avoid the existing `TestProvisionUser*` tests of the sign-in provis
 Every constant above exists in today's `authzop` vocabulary (`pkg/hub/authzop/operation.go`):
 `EffectCreateResource`, `EffectIssueCredential`, `DelegationNone`, `GovernanceIssuerCredential`,
 `AuthorityEvalNone`, `CredentialSessionJWT`, `CredentialScopedUAT`, `DenialForbidden`,
-`DenialCredentialInsufficient`, `DenialUserSuspended` and `DenialRoleAssignmentForbidden`
-(`operation.go:573`).
+`DenialCredentialInsufficient` (Phase 2), `DenialUserSuspended`, `DenialConflict` and
+`DenialRoleAssignmentForbidden` (`operation.go:573`).
 
 **Effects.** The entry **extends invite's effect set with `EffectCreateResource`**. `user.admin.invite`
 has only `EffectIssueCredential` (`catalog.go:1034`). In catalog vocabulary, `EffectIssueCredential`
@@ -1052,9 +1057,9 @@ behaviour. Add the UAT credential kind to the catalog, then the P2 tests.
 | --- | --- | --- |
 | `pkg/hub/permissions/registry.go` | `user.invite` Enforcement | **A.1 owns until merge-ready**; land after A.1 or via the A.1 owner |
 | `pkg/hub/permissions/project_applicability.go` | none (existing `user.invite`/`user.read` rows re-confirmed) | **A.1 owns** (provisional name) |
-| `pkg/hub/authzop/catalog.go` | new op; replace the single-invite classification row with the `createPendingUserTx` row | **A.1 owns until merge-ready**; D.2 edits the user.admin entries |
+| `pkg/hub/authzop/catalog_identity.go`, `pkg/hub/authzop/catalog.go` | `catalog_identity.go`: new op (renamed from the placeholder `user.provision`); `catalog.go`: replace the single-invite classification row with the `createPendingUserTx` row | **A.1 owns until merge-ready**; D.2 edits the user.admin entries |
 | `pkg/hub/route_metadata.go` | `/api/v1/users` (`:437`-`:440`) declares `users.list` / `user.read` / `read` for all methods. **Default: no change**, because `RoutePolicy` does not enforce the declared permission (`:1072`-`:1078`), POST authorization is handler-enforced, and the catalog carries `user.invite` for POST. **If A.1's final convention is per-method metadata**, H.2 adds a POST entry (`RouteID: "users.provision"`, `Permission: "user.invite"`, `Action: "invite"`) per that convention. | **A.1-owned**; decided in Phase 0 |
-| `pkg/hub/handlers_users_core.go` | new handler | **D.2 owns bearer admission** in this file; rebase onto D.2 |
+| `pkg/hub/handlers_users_provision.go` (new), `pkg/hub/handlers_users_core.go` | `handlers_users_provision.go`: the handler; `handlers_users_core.go`: POST dispatch only (`createUser` removed) | **D.2 owns bearer admission** in `handlers_users_core.go`; no D.2-owned function changes |
 | `pkg/hub/admin_user_invite.go` | shared core extraction | none known |
 | `pkg/hub/audit.go` | event type | E.2 |
 | `pkg/hubclient/users.go`, `cmd/hub_users.go`, `cmd/cli_mode.go` | client and CLI | C.2/D.3 edit the token client and CLI in different files |

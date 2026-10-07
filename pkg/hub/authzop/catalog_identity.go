@@ -516,11 +516,13 @@ var identityOperations = []OperationSpec{
 			AfterFields:   []string{"target_user_id", "email", "status", "display_name"},
 			Atomic:        true,
 		},
-		// DenialCredentialInsufficient and DenialUserSuspended come from
-		// the shared admission layers (session-only gate, auth
-		// middleware); DenialRoleAssignmentForbidden is a request that
-		// names a role.
-		DenialCodes: []DenialCode{DenialForbidden, DenialCredentialInsufficient, DenialUserSuspended,
+		// forbidden: rows 4, 5 and 8 (row 5 carries the session-only
+		// reason); user_suspended: the auth middleware (row 3); conflict:
+		// an existing record (rows 15-17); role_assignment_forbidden: the
+		// denial-log classification of a request that names a role (row
+		// 12, wire code unprocessable). credential_insufficient is added
+		// with hub token admission (rows 6-7).
+		DenialCodes: []DenialCode{DenialForbidden, DenialUserSuspended, DenialConflict,
 			DenialRoleAssignmentForbidden},
 		TestRefs: []TestRef{
 			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},

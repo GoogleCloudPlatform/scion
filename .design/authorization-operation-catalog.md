@@ -2295,7 +2295,7 @@
 - **After Fields:** target_user_id, email, status, display_name
 - **Atomic:** Yes
 
-**Denial Codes:** `forbidden`, `credential_insufficient`, `user_suspended`, `role_assignment_forbidden`
+**Denial Codes:** `forbidden`, `user_suspended`, `conflict`, `role_assignment_forbidden`
 
 ### Tests
 

@@ -134,6 +134,47 @@ func decodeProvisionString(fields map[string]json.RawMessage, name string) (valu
 	return value, true, nil
 }
 
+// decodeStrictJSONObject decodes body as exactly one JSON object with
+// unique top-level keys. Trailing data of any kind after the object (for
+// example a stray "}" or "]") and a repeated key are errors, so a later
+// duplicate cannot silently replace an earlier value.
+func decodeStrictJSONObject(body []byte) (map[string]json.RawMessage, error) {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	tok, err := dec.Token()
+	if err != nil {
+		return nil, err
+	}
+	if delim, ok := tok.(json.Delim); !ok || delim != '{' {
+		return nil, errors.New("a JSON object is required")
+	}
+	fields := make(map[string]json.RawMessage)
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return nil, err
+		}
+		key, ok := tok.(string)
+		if !ok {
+			return nil, errors.New("object key must be a string")
+		}
+		if _, dup := fields[key]; dup {
+			return nil, fmt.Errorf("duplicate field %q", key)
+		}
+		var value json.RawMessage
+		if err := dec.Decode(&value); err != nil {
+			return nil, err
+		}
+		fields[key] = value
+	}
+	if _, err := dec.Token(); err != nil { // the closing '}'
+		return nil, err
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return nil, errors.New("trailing data after the JSON object")
+	}
+	return fields, nil
+}
+
 // hasControlChar reports whether s contains a control character other
 // than the allowed ones.
 func hasControlChar(s string, allowNewline bool) bool {
@@ -171,13 +212,9 @@ func decodeProvisionRequest(r *http.Request) (PendingUserSpec, *provisionRequest
 	if len(trimmed) == 0 || trimmed[0] != '{' {
 		return PendingUserSpec{}, invalidBody("invalid request body: a JSON object is required")
 	}
-	var fields map[string]json.RawMessage
-	dec := json.NewDecoder(bytes.NewReader(trimmed))
-	if err := dec.Decode(&fields); err != nil {
+	fields, err := decodeStrictJSONObject(trimmed)
+	if err != nil {
 		return PendingUserSpec{}, invalidBody("invalid request body: " + err.Error())
-	}
-	if dec.More() {
-		return PendingUserSpec{}, invalidBody("invalid request body: trailing data after the JSON object")
 	}
 
 	// Row 9: unknown fields, reported in a stable (sorted) order.
@@ -369,17 +406,6 @@ func (s *Server) handleProvisionUser(w http.ResponseWriter, r *http.Request) {
 	}
 	spec.InvitedBy = actor.ID()
 
-	// Detail authority (design §5.4): user.read at hub scope, evaluated
-	// like user.invite. It never admits or denies; it selects the replay
-	// view and the collision detail.
-	detail := s.authzService.Decide(ctx, AuthzRequest{
-		Principal:  principalContextForIdentity(actor),
-		Credential: credentialContextForIdentity(actor),
-		Resource:   hubScopedResource("user", "hub"),
-		Action:     ActionRead,
-		Permission: "user.read",
-	}).Allowed
-
 	warnings := s.provisionWarnings(spec.Email)
 	auditActor := s.buildAuditActorFromContext(ctx)
 
@@ -414,6 +440,21 @@ func (s *Server) handleProvisionUser(w http.ResponseWriter, r *http.Request) {
 		slog.ErrorContext(ctx, "user provisioning failed", "operation", provisionOperationID, "email", spec.Email, "error", err)
 		InternalError(w)
 		return
+	}
+
+	// Detail authority (design §5.4): user.read at hub scope. It never
+	// admits or denies; it selects the replay view and the collision
+	// detail, so it is evaluated only for an existing record (a created
+	// record always gets the detailed view).
+	detail := false
+	if outcome != PendingCreated {
+		detail = s.authzService.Decide(ctx, AuthzRequest{
+			Principal:  principalContextForIdentity(actor),
+			Credential: credentialContextForIdentity(actor),
+			Resource:   hubScopedResource("user", "hub"),
+			Action:     ActionRead,
+			Permission: "user.read",
+		}).Allowed
 	}
 
 	switch outcome {
