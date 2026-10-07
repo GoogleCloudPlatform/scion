@@ -215,7 +215,7 @@ func (s *templateService) List(ctx context.Context, opts *ListTemplatesOptions) 
 		TotalCount int        `json:"totalCount,omitempty"`
 	}
 
-	result, err := apiclient.DecodeResponse[listResponse](resp)
+	result, err := apiclient.DecodeRequired[listResponse](resp)
 	if err != nil {
 		return nil, err
 	}
@@ -235,7 +235,7 @@ func (s *templateService) Get(ctx context.Context, templateID string) (*Template
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[Template](resp)
+	return apiclient.DecodeRequired[Template](resp)
 }
 
 // Create creates a new template.
@@ -244,7 +244,7 @@ func (s *templateService) Create(ctx context.Context, req *CreateTemplateRequest
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[CreateTemplateResponse](resp)
+	return apiclient.DecodeRequired[CreateTemplateResponse](resp)
 }
 
 // Update updates a template.
@@ -253,7 +253,7 @@ func (s *templateService) Update(ctx context.Context, templateID string, req *Up
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[Template](resp)
+	return apiclient.DecodeRequired[Template](resp)
 }
 
 // Delete removes a template.
@@ -271,7 +271,7 @@ func (s *templateService) Clone(ctx context.Context, templateID string, req *Clo
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[Template](resp)
+	return apiclient.DecodeRequired[Template](resp)
 }
 
 // RequestUploadURLs requests signed URLs for uploading template files.
@@ -285,7 +285,7 @@ func (s *templateService) RequestUploadURLs(ctx context.Context, templateID stri
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[UploadResponse](resp)
+	return apiclient.DecodeRequired[UploadResponse](resp)
 }
 
 // Finalize finalizes a template after file upload.
@@ -297,7 +297,7 @@ func (s *templateService) Finalize(ctx context.Context, templateID string, manif
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[Template](resp)
+	return apiclient.DecodeRequired[Template](resp)
 }
 
 // RequestDownloadURLs requests signed URLs for downloading template files.
@@ -306,7 +306,7 @@ func (s *templateService) RequestDownloadURLs(ctx context.Context, templateID st
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[DownloadResponse](resp)
+	return apiclient.DecodeRequired[DownloadResponse](resp)
 }
 
 // Validate checks storage consistency for a template.
@@ -315,7 +315,7 @@ func (s *templateService) Validate(ctx context.Context, templateID string) (*Val
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[ValidationReport](resp)
+	return apiclient.DecodeRequired[ValidationReport](resp)
 }
 
 // UploadFile uploads a file to the given signed URL.
