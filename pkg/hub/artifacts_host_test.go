@@ -273,6 +273,10 @@ func TestIsArtifactViewRequest(t *testing.T) {
 		{http.MethodGet, "/api/v1/artifacts/view/cap/%2E%2E/x", false},
 		{http.MethodGet, "/api/v1/artifacts/view/cap/%2e/x", false},
 		{http.MethodGet, "/api/v1/artifacts/view/cap/a%5Cb", false},
+		{http.MethodGet, "/api/v1/artifacts/view/cap/a%5cb", false},
+		{http.MethodGet, "/api/v1/artifacts/view/cap/x%2F%2e%2E/y", false},
+		{http.MethodGet, "/api/v1/artifacts/view/cap/a%00b.png", false},
+		{http.MethodGet, "/api/v1/artifacts/view/cap/a%2Eb.png", false},
 		{http.MethodGet, "/api/v1/artifacts/view/c%61p/index.html", false},
 		{http.MethodGet, "/api/v1/artifacts/%76iew/cap/index.html", false},
 	} {

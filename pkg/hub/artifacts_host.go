@@ -237,7 +237,8 @@ func (s *Server) artifactsGuard(pattern string, handler http.Handler) http.Handl
 // isArtifactViewRequest reports whether r is a read of the artifact view
 // route (artifacts.RouteView). Both the decoded and the escaped path must
 // be clean and under the route, the escaped path may not encode a slash,
-// dot or backslash, and the capability segment may not be escaped at all,
+// dot, backslash or NUL (in any letter case), and the capability segment
+// may not be escaped at all,
 // so the request this check admits is the one the mux routes to the view.
 // Only the request shape is checked here; the artifact service verifies
 // the capability.
@@ -253,7 +254,8 @@ func isArtifactViewRequest(r *http.Request) bool {
 		return false
 	}
 	lower := strings.ToLower(esc)
-	if strings.Contains(lower, "%2f") || strings.Contains(lower, "%2e") || strings.Contains(lower, "%5c") {
+	if strings.Contains(lower, "%2f") || strings.Contains(lower, "%2e") || strings.Contains(lower, "%5c") ||
+		strings.Contains(lower, "%00") || strings.IndexByte(r.URL.Path, 0) >= 0 {
 		return false
 	}
 	capability, _, _ := strings.Cut(esc[len(artifacts.RouteView):], "/")
