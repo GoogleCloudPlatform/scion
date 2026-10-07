@@ -234,11 +234,32 @@ export class PaletteTypeahead {
     if (!document.body) return;
     const active = deepActiveElement();
     const proxy = createKeyboardProxy();
+    proxy.addEventListener('input', this.handleProxyInput);
+    proxy.addEventListener('compositionend', this.flushProxy);
     document.body.append(proxy);
     this.proxy = proxy;
     this.proxyReturnFocus = active instanceof HTMLElement ? active : null;
     proxy.focus({ preventScroll: true });
   }
+
+  /**
+   * Text the hidden field took itself (IME composition, dictation, a
+   * predictive suggestion, or keys after the capture's time limit) joins the
+   * captured text as soon as it is committed, so it keeps its place among
+   * keys captured before and after it. Text still being composed stays in
+   * the field until its composition ends.
+   */
+  private readonly handleProxyInput = (e: Event): void => {
+    if ((e as InputEvent).isComposing) return;
+    this.flushProxy();
+  };
+
+  private readonly flushProxy = (): void => {
+    const proxy = this.proxy;
+    if (!proxy || !proxy.value) return;
+    this.text += proxy.value;
+    proxy.value = '';
+  };
 
   /**
    * Removes the hidden text field, keeping its text after the text captured

@@ -627,6 +627,73 @@ describe('PaletteTypeahead: holding the on-screen keyboard', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  /** Commits `text` into the field as the platform would: composed, or inserted directly. */
+  function commitAtField(proxy: HTMLInputElement, text: string, composed: boolean): void {
+    if (composed) {
+      proxy.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+      proxy.value += text;
+      proxy.dispatchEvent(new InputEvent('input', { bubbles: true, isComposing: true }));
+      proxy.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true, data: text }));
+    } else {
+      proxy.value += text;
+      proxy.dispatchEvent(new InputEvent('input', { bubbles: true, isComposing: false }));
+    }
+  }
+
+  it('text composed in the field keeps its place among captured keys', () => {
+    typeahead = touchTypeahead();
+    typeahead.start();
+    const proxy = typeahead.keyboardProxy!;
+    press('a');
+    commitAtField(proxy, '你好', true);
+    press('b');
+    expect(typeahead.pending).toBe('a你好b');
+    expect(typeahead.take()).toBe('a你好b');
+  });
+
+  it('text inserted into the field without a key (dictation, a suggestion) keeps its place', () => {
+    typeahead = touchTypeahead();
+    typeahead.start();
+    const proxy = typeahead.keyboardProxy!;
+    press('a');
+    commitAtField(proxy, 'hello', false);
+    press('b');
+    expect(typeahead.take()).toBe('ahellob');
+  });
+
+  it('Backspace after composed text deletes from its end', () => {
+    typeahead = touchTypeahead();
+    typeahead.start();
+    commitAtField(typeahead.keyboardProxy!, 'ok', true);
+    press('Backspace');
+    expect(typeahead.take()).toBe('o');
+  });
+
+  it('text still being composed stays in the field once, and joins at take()', () => {
+    typeahead = touchTypeahead();
+    typeahead.start();
+    const proxy = typeahead.keyboardProxy!;
+    press('a');
+    proxy.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+    proxy.value = 'ni';
+    proxy.dispatchEvent(new InputEvent('input', { bubbles: true, isComposing: true }));
+    expect(typeahead.pending).toBe('a');
+    expect(proxy.value).toBe('ni');
+    expect(typeahead.take()).toBe('ani');
+  });
+
+  it('after the capture time limit, text typed into the field keeps its order with captured keys', () => {
+    vi.useFakeTimers();
+    typeahead = touchTypeahead();
+    typeahead.start();
+    const proxy = typeahead.keyboardProxy!;
+    commitAtField(proxy, '日', true);
+    press('x');
+    vi.advanceTimersByTime(PALETTE_TYPEAHEAD_MAX_MS);
+    commitAtField(proxy, 'y', false);
+    expect(typeahead.take()).toBe('日xy');
+  });
+
   it('stop({ restoreFocus: false }) drops the field without giving focus back', () => {
     typeahead = touchTypeahead();
     typeahead.start();
