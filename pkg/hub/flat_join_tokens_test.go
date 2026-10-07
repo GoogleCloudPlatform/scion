@@ -24,6 +24,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
 
 // Flat Runtime Brokers and GoogleCloudPlatform/scion#2702 (headless join
@@ -106,4 +108,41 @@ func TestFlatRegistration_PreserveSettingsReissueReplacesOutstandingToken(t *tes
 	require.Equal(t, http.StatusOK, rec.Code, "the re-issued token joins: %s", rec.Body.String())
 	_, err = f.s.GetBrokerSecret(ctx, id)
 	require.NoError(t, err)
+}
+
+// TestFlatRegistration_RefusedJoinKeepsTokenUsable: a join refused by the
+// descriptor check (contract section 6) is answered 409
+// runtime_target_changed with the stored and reported targets, leaves the
+// broker secret unchanged and does NOT consume the join token: the refusal
+// rolls the join transaction back, so the same token then joins with the
+// stored descriptor (a sibling of the frozen
+// TestFlatRegistration_JoinDescriptorMismatchKeepsSecret).
+func TestFlatRegistration_RefusedJoinKeepsTokenUsable(t *testing.T) {
+	ctx := context.Background()
+	f := newFlatRegFixture(t, true)
+	id := f.registerFlat(t, tid("flat-refused-token"), "flat-refused-token")
+	before, err := f.s.GetBrokerSecret(ctx, id)
+	require.NoError(t, err)
+
+	rec := f.register(t, f.operator, CreateBrokerRegistrationRequest{BrokerID: id, Name: "flat-refused-token", RuntimeTarget: f.target})
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+	var resp CreateBrokerRegistrationResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+
+	wrong := &api.RuntimeTargetDescriptor{ID: tid("refused-wrong-target"), Type: "docker"}
+	rec = f.join(t, BrokerJoinRequest{BrokerID: id, JoinToken: resp.JoinToken, Hostname: "flat-refused-token", Version: "0.1.0", RuntimeTarget: wrong})
+	d := requireAPIError(t, rec, http.StatusConflict, ErrCodeRuntimeTargetChanged)
+	assert.Equal(t, id, d["runtimeBrokerId"])
+	assert.Equal(t, f.target.ID, d["storedRuntimeTargetId"])
+	assert.Equal(t, wrong.ID, d["reportedRuntimeTargetId"])
+	after, err := f.s.GetBrokerSecret(ctx, id)
+	require.NoError(t, err)
+	assert.Equal(t, before.SecretKey, after.SecretKey, "a refused join leaves the existing secret untouched")
+
+	// The refused join did not consume the token: it now joins.
+	rec = f.join(t, BrokerJoinRequest{BrokerID: id, JoinToken: resp.JoinToken, Hostname: "flat-refused-token", Version: "0.1.0", RuntimeTarget: f.target})
+	require.Equal(t, http.StatusOK, rec.Code, "the refused token stays usable: %s", rec.Body.String())
+	rotated, err := f.s.GetBrokerSecret(ctx, id)
+	require.NoError(t, err)
+	assert.NotEqual(t, before.SecretKey, rotated.SecretKey, "the successful join installs a new secret")
 }
