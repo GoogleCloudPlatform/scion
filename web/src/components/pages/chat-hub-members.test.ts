@@ -771,6 +771,35 @@ describe('hub members: live updates from the store', () => {
     }
   });
 
+  it("a walked row's detail message reaches the sidebar, and a row that omits it clears it", async () => {
+    harness.server.agents = [agent('a1', { message: 'Cloning repository' }), agent('a2')];
+    serveUsers(() => usersPage(['u1']));
+    const page = await mountPage();
+    try {
+      const member = (): ChatAgentMember | undefined =>
+        page.v2AgentMembers.find((m) => m.id === 'a1');
+      expect(member()?.detailMessage).toBe('Cloning repository');
+
+      await harness.emitAgent('status', {
+        agentId: 'a1',
+        projectId: 'p1',
+        detail: { message: 'Installing tools' },
+      });
+      expect(member()?.detailMessage).toBe('Installing tools');
+
+      // The agent cleared its message while the feed missed it: the next
+      // walk's compact row omits the empty value.
+      harness.server.agents = [agent('a1'), agent('a2')];
+      harness.store.invalidate('manual');
+      await settle();
+
+      expect(storeWalks()).toBe(2);
+      expect(member()?.detailMessage).toBe('');
+    } finally {
+      unmount(page);
+    }
+  });
+
   it('after a failed revalidation the kept rows stay live: an SSE change reaches the sidebar', async () => {
     serveUsers(() => usersPage(['u1']));
     const page = await mountPage();
