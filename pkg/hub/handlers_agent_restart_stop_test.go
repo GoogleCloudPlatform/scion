@@ -140,6 +140,11 @@ func TestAgentLifecycle_RestartToleratedStopThenFailedStartReleasesSlot(t *testi
 	broker, project := newQuotaTestBrokerAndProject(t, s, "restart-tolerated-stop")
 	running := newQuotaTestAgent(t, s, broker, project, "restart-tolerated-stop", state.PhaseRunning)
 	reserveBrokerSlot(t, s, broker, running.ID)
+	// The agent has a run, as every dispatched agent does: a failed restart
+	// that leaves no run records nothing (ptone/scion#2550 P5, see
+	// TestRestartStartLegFailureWithEmptyCurrentRunRecordsNothing).
+	_, err := s.SetAgentRunID(context.Background(), running.ID, "run-x")
+	require.NoError(t, err)
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+running.ID+"/restart", nil)
 	require.GreaterOrEqual(t, rec.Code, 500, rec.Body.String())

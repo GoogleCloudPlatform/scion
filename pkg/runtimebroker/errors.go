@@ -29,6 +29,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/templatecache"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 	"go.opentelemetry.io/otel/codes"
@@ -199,6 +200,19 @@ func (s *Server) currentRunID(ctx context.Context, mgr agent.Manager, id, projec
 		current, found = c.entry.RunID, true
 	}
 	return current, found
+}
+
+// isRunNameConflict reports whether a start (create, start, restart or an
+// async launch) failed because another run holds the agent's name
+// (ptone/scion#2550): scionrt.ErrRunConflict from a runtime's Run
+// pre-clean, or scionrt.ErrRunMismatch from Manager.Start's removal of the
+// existing entry, when that entry was replaced by another run between its
+// listing and the run-checked Delete (the runtime then deleted nothing of
+// the other run). Both answer 409 with ErrRunConflict's fixed text: the
+// wrapped errors name the namespace, object and the other run's ID, which
+// must not reach clients (see runtimeOpError).
+func isRunNameConflict(err error) bool {
+	return errors.Is(err, scionrt.ErrRunConflict) || errors.Is(err, scionrt.ErrRunMismatch)
 }
 
 // NotFound writes a 404 Not Found response.
