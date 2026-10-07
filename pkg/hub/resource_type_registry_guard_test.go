@@ -387,13 +387,15 @@ func TestResourceTypeLiterals_AllInRegistry(t *testing.T) {
 var unresolvedResourceTypeValues = []string{
 	"audit_authz.go: req.Resource.Type",
 	"authorized_list.go: resourceType",
+	"authz_hub_target.go: meta.Resource",
+	"authz_hub_target.go: meta.Resource",
+	"authz_hub_target.go: resourceType",
 	"authz_relationship_rules.go: kind",
 	"capabilities.go: resourceType",
 	"handlers_resource_import.go: authzResourceType",
 	"handlers_resource_import.go: authzResourceType",
 	"handlers_resource_import.go: authzType",
 	"handlers_resource_import.go: authzType",
-	"route_metadata.go: meta.Resource",
 }
 
 // TestResourceTypeLiterals_DetectsUnknownType proves the guard reports an
