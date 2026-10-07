@@ -1284,8 +1284,14 @@ func TestScheduledSend_SlowSenderDoesNotBlockOthers(t *testing.T) {
 	require.Eventually(t, func() bool {
 		return f.row(t, f.alice, a1.ID).Status == ScheduledMessageSent
 	}, 5*time.Second, 20*time.Millisecond, "alice's message is not held up by bob's slow one")
-	assert.Equal(t, ScheduledMessageSending, f.row(t, f.bob, bob1.ID).Status)
-	assert.Equal(t, ScheduledMessagePending, f.row(t, f.bob, bob2.ID).Status, "one message per sender in delivery")
+	// bob's first message is claimed (its worker may start after alice's).
+	require.Eventually(t, func() bool {
+		return f.row(t, f.bob, bob1.ID).Status == ScheduledMessageSending ||
+			f.row(t, f.bob, bob2.ID).Status == ScheduledMessageSending
+	}, 5*time.Second, 20*time.Millisecond)
+	statuses := []string{f.row(t, f.bob, bob1.ID).Status, f.row(t, f.bob, bob2.ID).Status}
+	assert.ElementsMatch(t, []string{ScheduledMessageSending, ScheduledMessagePending}, statuses,
+		"one message per sender in delivery")
 
 	// A later tick, while bob's delivery is still in progress.
 	a2 := aliceRow("alice two")
