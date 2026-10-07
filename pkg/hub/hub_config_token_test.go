@@ -491,6 +491,10 @@ func TestRepeatedJSONMember_FindsRepeatsInOneObjectOnly(t *testing.T) {
 		{body: `{"a":1}]`, invalid: true},
 		{body: `{"a":1} {}`, invalid: true},
 		{body: `{"a":1} {"a":2}`, invalid: true},
+		{body: `]`, invalid: true},
+		{body: `}`, invalid: true},
+		{body: `[1]]`, invalid: true},
+		{body: `{}}`, invalid: true},
 	}
 	for _, tc := range cases {
 		got, repeated, err := repeatedJSONMember([]byte(tc.body))
@@ -530,8 +534,8 @@ func rawHubConfigRequest(srv *Server, key, method, path, body string) *httptest.
 }
 
 // TestHubConfigWrite_BodyMustBeOneJSONValue requires a hub configuration
-// write whose body is followed by trailing data or a second JSON value, or
-// does not parse, to be rejected with 400 for a token and a session on the
+// write whose body is followed by trailing data or a second JSON value,
+// closes a container it never opened, or does not parse, to be rejected with 400 for a token and a session on the
 // file-backed and the DB-backed hub, with nothing written.
 func TestHubConfigWrite_BodyMustBeOneJSONValue(t *testing.T) {
 	bodies := []string{
@@ -540,6 +544,8 @@ func TestHubConfigWrite_BodyMustBeOneJSONValue(t *testing.T) {
 		`{"agent_secrets":{"user_scope_only":false}}]`,
 		`{"server":{"hub":{"hub_name":"zz"}}} {"server":{"hub":{"admin_emails":["zz@example.com"]}}}`,
 		`{"server":{"hub":{"admin_emails":["zz@example.com"]}}`,
+		`]`,
+		`[1]]`,
 	}
 
 	t.Run("file-backed hub", func(t *testing.T) {
