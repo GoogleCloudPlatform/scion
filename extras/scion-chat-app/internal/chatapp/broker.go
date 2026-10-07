@@ -556,10 +556,17 @@ func resolveSharedDirPath(containerPath, projectSlug, projectID string) (string,
 
 	hostPath := filepath.Join(base, relPath)
 	// Verify the resolved path doesn't escape the shared dir.
-	if !strings.HasPrefix(hostPath, base+string(filepath.Separator)) {
+	if !isStrictlyWithinDir(hostPath, base) {
 		return "", nil
 	}
 	return hostPath, nil
+}
+
+// isStrictlyWithinDir reports whether hostPath is below base, not base
+// itself. base is cleaned first, so a trailing separator on base does not
+// make a child fail the check; hostPath is compared as given.
+func isStrictlyWithinDir(hostPath, base string) bool {
+	return strings.HasPrefix(hostPath, filepath.Clean(base)+string(filepath.Separator))
 }
 
 // sanitizePathComponent removes characters that are unsafe in file paths.

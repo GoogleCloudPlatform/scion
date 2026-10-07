@@ -278,3 +278,129 @@ func TestSendOversizeErrorCards_Backends(t *testing.T) {
 		}
 	})
 }
+
+// --- Resolver results that must not be used as a path ---
+
+// stubEmptyResolvedPath makes the resolver succeed with an empty Path.
+func stubEmptyResolvedPath(t *testing.T) {
+	t.Helper()
+	orig := resolveSharedDirHost
+	resolveSharedDirHost = func(*config.VersionedSettings, string, string, string, string) (scionruntime.SharedDirHostPath, error) {
+		return scionruntime.SharedDirHostPath{}, nil
+	}
+	t.Cleanup(func() { resolveSharedDirHost = orig })
+}
+
+func assertDirEmpty(t *testing.T, dir string) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("%s has %d entries, want none", dir, len(entries))
+	}
+}
+
+func TestResolveSharedDirHostPath_EmptyPath(t *testing.T) {
+	home := useLocalSharedDirs(t)
+	stubEmptyResolvedPath(t)
+
+	got, err := resolveSharedDirHostPath(home, "my-project", sharedDirTestProjectID, "scratchpad")
+	if !errors.Is(err, scionruntime.ErrSharedDirStorageUnavailable) {
+		t.Fatalf("err = %v, want ErrSharedDirStorageUnavailable", err)
+	}
+	if got != "" {
+		t.Errorf("path = %q, want empty", got)
+	}
+}
+
+func TestResolveSharedDirPath_EmptyResolvedPath(t *testing.T) {
+	useLocalSharedDirs(t)
+	stubEmptyResolvedPath(t)
+
+	got, err := resolveSharedDirPath("/scion-volumes/scratchpad/out/report.md", "my-project", sharedDirTestProjectID)
+	if !errors.Is(err, scionruntime.ErrSharedDirStorageUnavailable) {
+		t.Fatalf("err = %v, want ErrSharedDirStorageUnavailable", err)
+	}
+	if got != "" {
+		t.Errorf("path = %q, want empty", got)
+	}
+}
+
+func TestDownloadInboundAttachment_EmptyResolvedPath(t *testing.T) {
+	home := useLocalSharedDirs(t)
+	stubEmptyResolvedPath(t)
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+
+	_, err := downloadTestInbound(t)
+	if !errors.Is(err, scionruntime.ErrSharedDirStorageUnavailable) {
+		t.Fatalf("err = %v, want ErrSharedDirStorageUnavailable", err)
+	}
+	assertDirEmpty(t, cwd)
+	assertNotExist(t, localSharedDir(home, "scratchpad"), "must not fall back to the local shared dir")
+}
+
+// --- Containment check for resolved shared-dir paths ---
+
+func TestIsStrictlyWithinDir(t *testing.T) {
+	base := filepath.Join(string(filepath.Separator), "srv", "shared-dirs", "scratchpad")
+	sep := string(filepath.Separator)
+	tests := []struct {
+		name     string
+		hostPath string
+		base     string
+		want     bool
+	}{
+		{"child", filepath.Join(base, "a.txt"), base, true},
+		{"nested child", filepath.Join(base, "out", "a.txt"), base, true},
+		{"child named ..foo", filepath.Join(base, "..foo"), base, true},
+		{"sibling sharing a prefix", base + "x", base, false},
+		{"sibling child sharing a prefix", filepath.Join(base+"x", "a.txt"), base, false},
+		{"base itself", base, base, false},
+		{"parent via ..", filepath.Join(base, ".."), base, false},
+		{"absolute path elsewhere", filepath.Join(sep, "etc", "passwd"), base, false},
+		{"base with trailing separator, child", filepath.Join(base, "a.txt"), base + sep, true},
+		{"base with trailing separator, base itself", base, base + sep, false},
+		{"base with trailing separator, sibling", base + "x", base + sep, false},
+		{"root base", filepath.Join(sep, "etc", "passwd"), sep, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isStrictlyWithinDir(tt.hostPath, tt.base); got != tt.want {
+				t.Errorf("isStrictlyWithinDir(%q, %q) = %v, want %v", tt.hostPath, tt.base, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestResolveSharedDirPath_Containment(t *testing.T) {
+	home := useLocalSharedDirs(t)
+	base := localSharedDir(home, "scratchpad")
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"child", "/scion-volumes/scratchpad/a.txt", filepath.Join(base, "a.txt")},
+		{"nested child", "/scion-volumes/scratchpad/out/a.txt", filepath.Join(base, "out", "a.txt")},
+		{"shared dir itself", "/scion-volumes/scratchpad", base},
+		{"shared dir with trailing slash", "/scion-volumes/scratchpad/", base},
+		{"parent via ..", "/scion-volumes/scratchpad/..", ""},
+		{"escape via ..", "/scion-volumes/scratchpad/../other/a.txt", ""},
+		{"child named ..foo is rejected", "/scion-volumes/scratchpad/..foo", ""},
+		{"absolute relative part is rejected", "/scion-volumes/scratchpad//etc/passwd", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := resolveSharedDirPath(tt.in, "my-project", sharedDirTestProjectID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tt.want {
+				t.Errorf("resolveSharedDirPath(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}

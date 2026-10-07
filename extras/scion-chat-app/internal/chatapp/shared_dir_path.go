@@ -15,6 +15,8 @@
 package chatapp
 
 import (
+	"fmt"
+
 	scionruntime "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
@@ -22,20 +24,30 @@ import (
 // dir's storage backend (local or nfs). Tests replace it with fake config.
 var loadSharedDirSettings = scionruntime.LoadSharedDirStorageSettings
 
+// resolveSharedDirHost resolves a shared dir's host path. Tests replace it
+// to return results the real resolver does not produce.
+var resolveSharedDirHost = scionruntime.ResolveSharedDirHostPath
+
 // resolveSharedDirHostPath returns the host directory agents on this
 // machine mount for the project's shared dir, through the same
 // backend-aware resolution agent start uses. For an nfs-backed dir whose
 // mount is unavailable it returns an error wrapping
 // scionruntime.ErrSharedDirStorageUnavailable; callers must not fall back
-// to the local layout, which no agent mounts in that case.
+// to the local layout, which no agent mounts in that case. An empty
+// resolved path is treated the same way, so it is never used as a path
+// relative to the working directory.
 func resolveSharedDirHostPath(home, slug, projectID, name string) (string, error) {
 	gs, err := loadSharedDirSettings()
 	if err != nil {
 		return "", err
 	}
-	res, err := scionruntime.ResolveSharedDirHostPath(gs, home, slug, projectID, name)
+	res, err := resolveSharedDirHost(gs, home, slug, projectID, name)
 	if err != nil {
 		return "", err
+	}
+	if res.Path == "" {
+		return "", fmt.Errorf("%w: shared dir %q resolved to an empty path",
+			scionruntime.ErrSharedDirStorageUnavailable, name)
 	}
 	return res.Path, nil
 }
