@@ -180,6 +180,9 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/admin/project-defaults":             "admin", // Project defaults
 	"/api/v1/admin/agents/reset-auth-all":        "admin", // Reset all agent auth
 	"/api/v1/admin/gcp-quota":                    "admin", // GCP quota management
+	"/api/v1/admin/delegation-adoption":          "admin", // Delegation-provenance adoption status
+	"/api/v1/admin/delegation-adoption/previews": "admin", // Delegation-provenance adoption preview
+	"/api/v1/admin/delegation-adoption/commits":  "admin", // Delegation-provenance adoption commit
 	"/api/v1/admin/lifecycle-hooks":              "admin", // Lifecycle hooks
 	"/api/v1/admin/lifecycle-hooks/":             "admin", // Lifecycle hook by ID
 	"/api/v1/admin/validate-resources":           "admin", // Validate resources
