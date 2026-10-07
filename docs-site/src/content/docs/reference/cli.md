@@ -888,7 +888,7 @@ Manages connection to and interaction with a Scion Hub. Authentication lives und
 Publishes files as artifacts and fetches them by reference (`scion://artifact/<id>[@<seq>]`). Requires Hub mode and the `hub.artifacts` experiment (off by default). Available in agent mode. See [Artifacts](/scion/reference/artifacts/) for access rules and the API.
 
 - `scion artifact publish <file|folder>`: Publish a file or folder in the current project; prints its reference, version and web page URL.
-    - Flags: `--title <title>` (default: the entry file's name), `--key <key>` (publishing again under the key adds a version), `--note <text>`, `--entry <path>` (a folder's entry file).
+    - Flags: `--title <title>` (set when the artifact is created; default: the entry file's name), `--key <key>` (publishing again under the key adds a version), `--note <text>`, `--entry <path>` (a folder's entry file).
 - `scion artifact get <ref>`: Write an artifact's entry file to stdout, or with `--out` the file or the whole bundle.
     - Flags: `--out`, `-o <path>` (a file, an existing directory for a single file, or the directory a bundle is written into).
 - `scion artifact versions <ref>`: List an artifact's versions, newest first; the current one is marked `*`.

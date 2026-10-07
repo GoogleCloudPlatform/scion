@@ -61,7 +61,7 @@ func fakeArtifactHub(t *testing.T, body []byte, digest string) (*httptest.Server
 			_ = json.NewEncoder(w).Encode(hubclient.ArtifactResponse{
 				Artifact: hubclient.Artifact{ID: testArtifactID, CurrentSeq: 1},
 				Version: &hubclient.ArtifactVersion{Seq: 1, EntryPath: "design.md",
-					Files: []hubclient.ArtifactFile{{Path: "design.md", SHA256: digest}}},
+					Files: []hubclient.ArtifactFile{{Path: "design.md", SHA256: digest, Size: int64(len(body))}}},
 			})
 		case r.URL.Path == "/api/v1/artifacts/"+testArtifactID+"/files/design.md",
 			r.URL.Path == "/api/v1/artifacts/"+testArtifactID+"/versions/1/files/design.md":

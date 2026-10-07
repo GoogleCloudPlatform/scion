@@ -20,6 +20,8 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"fmt"
+	"io"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -132,6 +134,11 @@ func TestArtifactBundleRoundTrip(t *testing.T) {
 	assert.True(t, strings.HasPrefix(lines[2], "  "+ref+"@1"), lines[2])
 	assert.Contains(t, lines[2], "first")
 
+	// A title given when appending is not applied, and the CLI says so.
+	errOut.Reset()
+	require.NoError(t, publishBundle(ctx, svc, &out, &errOut, "", root, bundlePublishOptions{Key: "site", Title: "Renamed"}))
+	assert.Contains(t, errOut.String(), "keeps its title")
+
 	// A single file with --key goes through the two-step API too.
 	file := filepath.Join(t.TempDir(), "notes.md")
 	require.NoError(t, os.WriteFile(file, []byte("# n"), 0o644))
@@ -223,4 +230,83 @@ func TestGetArtifactRefusesAnEntryWithoutDigest(t *testing.T) {
 	err := getArtifact(context.Background(), noDigestService{}, &stdout, &stderr, "5f1c2d3e-0000-4000-8000-000000000001", "")
 	assert.ErrorContains(t, err, "no digest")
 	assert.Empty(t, stdout.String())
+}
+
+// remoteRowsService serves a version whose manifest holds the files the
+// publisher sent plus remote image rows the hub added: one fetched, one
+// failed (no digest).
+type remoteRowsService struct {
+	hubclient.ArtifactService
+	files map[string]string
+	entry string
+}
+
+func (s remoteRowsService) Get(context.Context, string) (*hubclient.ArtifactResponse, error) {
+	v := &hubclient.ArtifactVersion{Seq: 1, EntryPath: s.entry}
+	for p, body := range s.files {
+		v.Files = append(v.Files, hubclient.ArtifactFile{Path: p, SHA256: sha256Hex([]byte(body)), Size: int64(len(body))})
+	}
+	v.Files = append(v.Files,
+		hubclient.ArtifactFile{Path: "_remote/" + strings.Repeat("a", 64), SHA256: sha256Hex([]byte("png")), Origin: "remote", FetchStatus: "ok"},
+		hubclient.ArtifactFile{Path: "_remote/" + strings.Repeat("b", 64), Origin: "remote", FetchStatus: "failed"})
+	return &hubclient.ArtifactResponse{Version: v}, nil
+}
+
+func (s remoteRowsService) OpenFile(_ context.Context, _ string, _ int, p string) (io.ReadCloser, error) {
+	body, ok := s.files[p]
+	if !ok {
+		return nil, fmt.Errorf("unexpected fetch of %s", p)
+	}
+	return io.NopCloser(strings.NewReader(body)), nil
+}
+
+// TestGetArtifactSkipsRemoteRows: the remote image rows the hub added are
+// not part of what get writes, so a single-file artifact with images stays
+// a single file and a bundle writes exactly its own files.
+func TestGetArtifactSkipsRemoteRows(t *testing.T) {
+	ctx := context.Background()
+	var stdout, stderr bytes.Buffer
+	single := remoteRowsService{files: map[string]string{"design.md": "# d"}, entry: "design.md"}
+	out := filepath.Join(t.TempDir(), "copy.md")
+	require.NoError(t, getArtifact(ctx, single, &stdout, &stderr, testArtifactID, out))
+	got, err := os.ReadFile(out)
+	require.NoError(t, err)
+	assert.Equal(t, "# d", string(got))
+	require.NoError(t, getArtifact(ctx, single, &stdout, &stderr, testArtifactID, ""))
+	assert.Equal(t, "# d", stdout.String())
+
+	pair := remoteRowsService{files: map[string]string{"index.md": "# i", "b.txt": "b"}, entry: "index.md"}
+	dir := t.TempDir()
+	require.NoError(t, getArtifact(ctx, pair, &stdout, &stderr, testArtifactID, dir))
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	assert.ElementsMatch(t, []string{"index.md", "b.txt"}, names)
+}
+
+func TestCopyVerified(t *testing.T) {
+	body := []byte("hello")
+	var out bytes.Buffer
+	assert.NoError(t, copyVerified(&out, bytes.NewReader(body), sha256Hex(body), 5))
+	assert.ErrorContains(t, copyVerified(&out, bytes.NewReader(body), "", 5), "no digest")
+	assert.ErrorContains(t, copyVerified(&out, bytes.NewReader(append(body, '!')), sha256Hex(body), 5), "size")
+	assert.ErrorContains(t, copyVerified(&out, bytes.NewReader(body[:4]), sha256Hex(body), 5), "size")
+	assert.ErrorContains(t, copyVerified(&out, bytes.NewReader([]byte("HELLO")), sha256Hex(body), 5), "sha256")
+	// No more than size+1 bytes are read from a source that runs on.
+	r := &countingReader{}
+	_ = copyVerified(io.Discard, r, sha256Hex(body), 5)
+	assert.LessOrEqual(t, r.n, 6)
+}
+
+type countingReader struct{ n int }
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	c.n += len(p)
+	for i := range p {
+		p[i] = 'x'
+	}
+	return len(p), nil
 }

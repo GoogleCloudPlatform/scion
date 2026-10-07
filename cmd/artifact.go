@@ -193,7 +193,7 @@ Example:
 }
 
 func init() {
-	artifactPublishCmd.Flags().StringVar(&artifactPublishTitle, "title", "", "Artifact title (default: the entry file name)")
+	artifactPublishCmd.Flags().StringVar(&artifactPublishTitle, "title", "", "Artifact title, set when the artifact is created (default: the entry file name)")
 	artifactPublishCmd.Flags().StringVar(&artifactPublishKey, "key", "", "Stable key: publishing again under it adds a version")
 	artifactPublishCmd.Flags().StringVar(&artifactPublishNote, "note", "", "Note describing this version")
 	artifactPublishCmd.Flags().StringVar(&artifactPublishEntry, "entry", "", "Entry file of a folder, relative to it")
@@ -309,13 +309,13 @@ func getArtifact(ctx context.Context, svc hubclient.ArtifactService, stdout, std
 	if outPath != "" && (len(files) > 1 || strings.Contains(entry, "/")) {
 		return writeBundle(ctx, svc, stderr, id, seq, files, outPath)
 	}
-	wantDigest := ""
-	for _, f := range files {
-		if f.Path == entry {
-			wantDigest = f.SHA256
+	var want *hubclient.ArtifactFile
+	for i := range files {
+		if files[i].Path == entry {
+			want = &files[i]
 		}
 	}
-	if wantDigest == "" {
+	if want == nil {
 		return errors.New("the hub recorded no digest for " + entry)
 	}
 	rc, err := svc.OpenFile(ctx, id, seq, entry)
@@ -332,7 +332,7 @@ func getArtifact(ctx context.Context, svc hubclient.ArtifactService, stdout, std
 			return err
 		}
 		defer func() { _ = spool.Close(); _ = os.Remove(spool.Name()) }()
-		if err := copyVerified(spool, rc, wantDigest); err != nil {
+		if err := copyVerified(spool, rc, want.SHA256, want.Size); err != nil {
 			return err
 		}
 		if _, err := spool.Seek(0, io.SeekStart); err != nil {
@@ -345,7 +345,7 @@ func getArtifact(ctx context.Context, svc hubclient.ArtifactService, stdout, std
 	if st, err := os.Stat(outPath); err == nil && st.IsDir() {
 		target = filepath.Join(outPath, path.Base(entry))
 	}
-	if err := writeVerifiedFile(target, rc, wantDigest); err != nil {
+	if err := writeVerifiedFile(target, rc, want.SHA256, want.Size); err != nil {
 		return err
 	}
 	_, _ = fmt.Fprintf(stderr, "Wrote %s\n", target)
@@ -354,14 +354,14 @@ func getArtifact(ctx context.Context, svc hubclient.ArtifactService, stdout, std
 
 // writeVerifiedFile writes src to target through a temporary file in the
 // same directory, renaming it into place only when the bytes match
-// wantDigest.
-func writeVerifiedFile(target string, src io.Reader, wantDigest string) error {
+// wantDigest and size.
+func writeVerifiedFile(target string, src io.Reader, wantDigest string, size int64) error {
 	tmp, err := os.CreateTemp(filepath.Dir(target), ".artifact-*")
 	if err != nil {
 		return err
 	}
 	defer func() { _ = os.Remove(tmp.Name()) }()
-	if err := copyVerified(tmp, src, wantDigest); err != nil {
+	if err := copyVerified(tmp, src, wantDigest, size); err != nil {
 		_ = tmp.Close()
 		return err
 	}
@@ -406,14 +406,22 @@ func artifactErrorHint(err error, publishing bool) string {
 	return ""
 }
 
-// copyVerified copies src to dst and, when wantDigest is set, fails if the
-// bytes do not hash to it.
-func copyVerified(dst io.Writer, src io.Reader, wantDigest string) error {
+// copyVerified copies src to dst and fails unless the bytes are exactly
+// size long and hash to wantDigest. It reads at most size+1 bytes, and
+// refuses to copy anything when no digest was recorded.
+func copyVerified(dst io.Writer, src io.Reader, wantDigest string, size int64) error {
+	if wantDigest == "" {
+		return errors.New("the hub recorded no digest for this file")
+	}
 	h := sha256.New()
-	if _, err := io.Copy(io.MultiWriter(dst, h), src); err != nil {
+	n, err := io.Copy(io.MultiWriter(dst, h), io.LimitReader(src, size+1))
+	if err != nil {
 		return fmt.Errorf("read artifact: %w", err)
 	}
-	if wantDigest != "" && hex.EncodeToString(h.Sum(nil)) != wantDigest {
+	if n != size {
+		return errors.New("artifact content does not match its recorded size")
+	}
+	if hex.EncodeToString(h.Sum(nil)) != wantDigest {
 		return errors.New("artifact content does not match its recorded sha256")
 	}
 	return nil

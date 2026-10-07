@@ -18,7 +18,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -194,6 +193,9 @@ func publishBundle(ctx context.Context, svc hubclient.ArtifactService, out, errO
 	for _, w := range resp.Warnings {
 		_, _ = fmt.Fprintf(errOut, "warning: %s\n", w)
 	}
+	if opts.Title != "" && resp.Artifact.Title != opts.Title {
+		_, _ = fmt.Fprintf(errOut, "note: the artifact keeps its title %q; --title applies when an artifact is created\n", resp.Artifact.Title)
+	}
 	_, _ = fmt.Fprintf(out, "%s  (v%d)\n", artifacts.FormatRef(id, 0), seq)
 	if page := artifactPageURL(hubEndpoint, resp.Artifact.ScopeRef, id); page != "" {
 		_, _ = fmt.Fprintln(out, page)
@@ -267,15 +269,12 @@ func writeBundle(ctx context.Context, svc hubclient.ArtifactService, stderr io.W
 }
 
 func fetchVerified(ctx context.Context, svc hubclient.ArtifactService, id string, seq int, f hubclient.ArtifactFile, target string) error {
-	if f.SHA256 == "" {
-		return errors.New("the hub recorded no digest for " + f.Path)
-	}
 	rc, err := svc.OpenFile(ctx, id, seq, f.Path)
 	if err != nil {
 		return fmt.Errorf("fetch %s: %w%s", f.Path, err, artifactErrorHint(err, false))
 	}
 	defer func() { _ = rc.Close() }()
-	if err := writeVerifiedFile(target, rc, f.SHA256); err != nil {
+	if err := writeVerifiedFile(target, rc, f.SHA256, f.Size); err != nil {
 		return fmt.Errorf("%s: %w", f.Path, err)
 	}
 	return nil
