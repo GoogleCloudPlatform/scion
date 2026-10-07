@@ -211,3 +211,25 @@ func TestPoolStatsPerPoolAndWaitCounter(t *testing.T) {
 		t.Errorf("wait_count after pool reset = %v, want store=11", waits)
 	}
 }
+
+// TestPoolStatsCallerCannotOverridePool checks a caller attribute named
+// "pool" does not replace the required pool name.
+func TestPoolStatsCallerCannotOverridePool(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
+	r, err := New(mp)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx := context.Background()
+	r.ObservePoolStats(ctx, PoolEvents, PoolStats{Active: 3, Max: 4}, attribute.String(AttrPool, "other"))
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(ctx, &rm); err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	active, _ := poolPoints(t, &rm, MetricPoolConnectionsActive)
+	if len(active) != 1 || active[PoolEvents] != 3 {
+		t.Fatalf("active = %v, want only events=3", active)
+	}
+}

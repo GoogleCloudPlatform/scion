@@ -295,7 +295,12 @@ func (r *recorder) RecordPayloadSize(ctx context.Context, bytes int64, attrs ...
 }
 
 func (r *recorder) ObservePoolStats(ctx context.Context, pool string, stats PoolStats, attrs ...attribute.KeyValue) {
-	set := attribute.NewSet(append([]attribute.KeyValue{attribute.String(AttrPool, pool)}, attrs...)...)
+	// attribute.NewSet keeps the last value of a duplicated key, so the pool
+	// name goes last: a caller attribute named "pool" cannot override it.
+	kvs := make([]attribute.KeyValue, 0, len(attrs)+1)
+	kvs = append(kvs, attrs...)
+	kvs = append(kvs, attribute.String(AttrPool, pool))
+	set := attribute.NewSet(kvs...)
 	opt := metric.WithAttributeSet(set)
 	r.poolActive.Record(ctx, stats.Active, opt)
 	r.poolIdle.Record(ctx, stats.Idle, opt)
