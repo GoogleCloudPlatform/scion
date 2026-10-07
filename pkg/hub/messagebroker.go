@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
@@ -69,6 +70,10 @@ type MessageBrokerProxy struct {
 	// MessageDecision. A denied message is NOT persisted to recipient-visible
 	// history. Nil means no reauthorization (legacy same-project behavior).
 	messageAuthorizer func(ctx context.Context, senderID string, targetAgent *store.Agent) *MessageDecision
+
+	// recordArtifactRefs, when non-nil, persists the admitted artifact
+	// references of a user message deliverToUser stored (ptone/scion#3222).
+	recordArtifactRefs func(ctx context.Context, messageID string, refs []artifacts.MessageRef)
 
 	mu                  sync.Mutex
 	subscriptions       map[string][]eventbus.Subscription // projectID -> active subscriptions
@@ -809,6 +814,16 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 	// SSE event so a client refetching on it already sees them.
 	linkAttachmentRefs(ctx, p.webChatStore, storeMsg.ID, parseAttachmentRefs(msg.Metadata), p.log)
 	delete(msg.Metadata, attachmentsMetadataKey) // strip internal transport key
+
+	// Artifact references are recorded only when the hub's admission step
+	// set them on this in-process message; any other value is removed.
+	if msg.ArtifactRefsAdmitted {
+		if refs, _ := artifacts.ParseMessageRefs(msg.Metadata[artifacts.MessageMetadataKey]); len(refs) > 0 && p.recordArtifactRefs != nil {
+			p.recordArtifactRefs(ctx, storeMsg.ID, refs)
+		}
+	} else if _, ok := msg.Metadata[artifacts.MessageMetadataKey]; ok {
+		msg.Metadata = messaging.StripReservedMetadata(msg.Metadata)
+	}
 
 	// Stamp the DM watermark with the store-assigned message ID. The web
 	// channel spoke already registered the participant rows and bumped

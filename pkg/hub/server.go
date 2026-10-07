@@ -3824,6 +3824,7 @@ func (s *Server) StartMessageBroker(b eventbus.EventBus) {
 		decision := s.EvaluateAgentMessage(ctx, agentIdent, targetAgent)
 		return &decision
 	}
+	proxy.recordArtifactRefs = s.recordMessageArtifacts
 	s.messageBrokerProxy = proxy
 	proxy.Start()
 

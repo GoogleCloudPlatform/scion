@@ -60,6 +60,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -489,6 +490,9 @@ var dmKeyRegexp = regexp.MustCompile(`^dm:(user|agent):[0-9a-f-]{36}:(user|agent
 // dropped to prevent arbitrary metadata injection.
 var allowedClientMetadataKeys = map[string]bool{
 	"RE-to": true,
+	// Artifact references the composer attached (ptone/scion#3222). They
+	// only reach the message through admitMessageArtifacts below.
+	artifacts.MessageMetadataKey: true,
 }
 
 // validDMKey returns true if the key matches the expected DM key format.
@@ -1613,7 +1617,14 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 	// offload metadata keys before render/dispatch. Defence in depth —
 	// allowedClientMetadataKeys above already excludes body_* — so this
 	// covers any future site that copies richer client metadata through.
-	msg.Metadata = messaging.StripReservedMetadata(msg.Metadata)
+	//
+	// admitMessageArtifacts performs that strip, then re-adds only the
+	// artifact references the user can read under their own request
+	// credential (ptone/scion#3222).
+	var artifactRefs []artifacts.MessageRef
+	var artifactRefsDropped int
+	msg.Metadata, artifactRefs, artifactRefsDropped = s.admitMessageArtifacts(ctx, msg.Metadata)
+	msg.ArtifactRefsAdmitted = len(artifactRefs) > 0
 
 	// Phase 3 msg-authz: Check message authorization on the primary agent.
 	// Replaces the ActionAttach check — chat v2 is purely messaging, not PTY/attach.
@@ -1836,6 +1847,7 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 	if opts.OnPersisted != nil {
 		opts.OnPersisted(storeMsg.ID)
 	}
+	s.recordMessageArtifacts(ctx, storeMsg.ID, artifactRefs)
 
 	// The row was stored with the optimistic "dispatched" state, which the
 	// primary dispatch below confirms or replaces. If the function exits
@@ -2189,6 +2201,10 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 		Attachments:         attachmentRefs,
 		DispatchState:       storeMsg.DispatchState,
 		DispatchFailureCode: dispatchFailureCode,
+		ArtifactWarning:     artifactRefsWarning(artifactRefsDropped),
+	}
+	if len(artifactRefs) > 0 {
+		resp.Artifacts = s.chatArtifactViews(ctx, artifactRefs, map[string]string{})
 	}
 	if storeMsg.DispatchFailureReason != nil {
 		resp.DispatchFailureReason = *storeMsg.DispatchFailureReason
@@ -3007,11 +3023,25 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
+	// Artifact references, resolved for this viewer under their own
+	// credential: an unreadable one carries no title, version or owner.
+	var messageArtifacts map[string][]chatArtifactRef
+	if len(result.Items) > 0 {
+		msgIDs := make([]string, 0, len(result.Items))
+		for _, msg := range result.Items {
+			if msg.Msg != "" { // soft-deleted messages show no references
+				msgIDs = append(msgIDs, msg.ID)
+			}
+		}
+		messageArtifacts = s.messageArtifactViews(ctx, msgIDs)
+	}
+
 	writeJSON(w, http.StatusOK, chatHistoryResponse{
 		Messages:           result.Items,
 		NextCursor:         result.NextCursor,
 		TotalCount:         result.TotalCount,
 		MessageAttachments: messageAttachments,
+		MessageArtifacts:   messageArtifacts,
 		MessageExtensions:  messageExtensions,
 		ReplyPreviews:      replyPreviews,
 	})
@@ -5220,6 +5250,12 @@ type chatMessageResponse struct {
 	Mentions    []messages.MentionResult `json:"mentions,omitempty"`
 	Attachments []AttachmentRef          `json:"attachments,omitempty"` // W7
 
+	// Artifacts are the message's artifact references as the sender sees
+	// them; ArtifactWarning is set when some were not attached
+	// (ptone/scion#3222, #3224).
+	Artifacts       []chatArtifactRef `json:"artifacts,omitempty"`
+	ArtifactWarning string            `json:"artifactWarning,omitempty"`
+
 	// DispatchState, DispatchFailureReason, and DispatchFailureCode report the
 	// real outcome of dispatching to the primary agent (nc-delivery-unreachable),
 	// so the frontend no longer has to assume "dispatched" on every HTTP 2xx.
@@ -5232,12 +5268,15 @@ type chatMessageResponse struct {
 }
 
 type chatHistoryResponse struct {
-	Messages           []store.Message               `json:"messages"`
-	NextCursor         string                        `json:"nextCursor,omitempty"`
-	TotalCount         int                           `json:"totalCount"`
-	MessageAttachments map[string][]AttachmentRef    `json:"messageAttachments,omitempty"` // W7: keyed by message ID
-	MessageExtensions  map[string]*WebChatMessageExt `json:"messageExtensions,omitempty"`  // Phase-3: keyed by message ID
-	ReplyPreviews      map[string]chatReplyPreview   `json:"replyPreviews,omitempty"`      // Phase-3: keyed by reply-to message ID
+	Messages           []store.Message            `json:"messages"`
+	NextCursor         string                     `json:"nextCursor,omitempty"`
+	TotalCount         int                        `json:"totalCount"`
+	MessageAttachments map[string][]AttachmentRef `json:"messageAttachments,omitempty"` // W7: keyed by message ID
+	// MessageArtifacts are artifact references keyed by message ID, as the
+	// viewer sees them (ptone/scion#3224).
+	MessageArtifacts  map[string][]chatArtifactRef  `json:"messageArtifacts,omitempty"`
+	MessageExtensions map[string]*WebChatMessageExt `json:"messageExtensions,omitempty"` // Phase-3: keyed by message ID
+	ReplyPreviews     map[string]chatReplyPreview   `json:"replyPreviews,omitempty"`     // Phase-3: keyed by reply-to message ID
 }
 
 // chatReplyPreview provides a truncated preview of the message being replied to.
