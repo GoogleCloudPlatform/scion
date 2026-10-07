@@ -109,8 +109,9 @@ type TokenRunBinding struct {
 	// Enforce refuses a Hello that does not match RunID with 4401.
 	// Without it a mismatch is only reported to OnMismatch.
 	Enforce bool
-	// OnMismatch, if set, is called once for a Hello that does not match.
-	OnMismatch func()
+	// OnMismatch, if set, is called once for a Hello that does not match,
+	// with the endpoint incarnation the Hello presented.
+	OnMismatch func(presented string)
 }
 
 // GrantKeySource returns the grant verification keys to publish in

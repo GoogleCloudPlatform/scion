@@ -57,7 +57,12 @@ func TestAdmitTokenRunBinding(t *testing.T) {
 			n := w.StartNode("relay-a", nil)
 			mismatches := 0
 			p := agentPrincipal("L2", 3)
-			p.TokenRun = &relay.TokenRunBinding{RunID: tc.tokenRun, Enforce: tc.enforce, OnMismatch: func() { mismatches++ }}
+			p.TokenRun = &relay.TokenRunBinding{RunID: tc.tokenRun, Enforce: tc.enforce, OnMismatch: func(presented string) {
+				mismatches++
+				if presented != tc.helloLaunch {
+					t.Errorf("OnMismatch presented = %q, want %q", presented, tc.helloLaunch)
+				}
+			}}
 			adm, _ := n.Relay.NewAdmitterForTest(p, registry.TransportWS)
 			_, err := adm.Admit(context.Background(), relaytest.AgentHello(agentID, tc.helloLaunch, "", "pty"))
 			if tc.wantCode == 0 {

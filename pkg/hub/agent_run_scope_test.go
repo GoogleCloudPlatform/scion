@@ -718,6 +718,46 @@ func TestAgentRunScopeLogDedup(t *testing.T) {
 		assert.Equal(t, []string{runScopeRouteAgentStatus}, metrics.routeClasses)
 	})
 
+	t.Run("route resolved only when logged", func(t *testing.T) {
+		c, logs, _, _ := newChecker(t)
+		resolved := 0
+		c.route = func(*http.Request) string {
+			resolved++
+			return "POST /api/v1/agents/{id}/status"
+		}
+		raw := httptest.NewRequest(http.MethodPost, "/api/v1/agents/agent-1/status", nil)
+		lazy := runScopeRequestFrom(raw)
+		bound, boundCS := tokenFor("run-current")
+		old, oldCS := tokenFor("run-old")
+
+		c.check(context.Background(), bound, boundCS, lazy, runScopeSourceHTTP)
+		assert.Zero(t, resolved, "a bound request is not logged, so its route is not resolved")
+		for range 3 {
+			c.check(context.Background(), old, oldCS, lazy, runScopeSourceHTTP)
+		}
+		assert.Equal(t, 1, resolved, "resolved once, for the one logged request")
+		recs := logs.records("agent_token_run_superseded")
+		require.Len(t, recs, 1)
+		assert.Equal(t, "POST /api/v1/agents/{id}/status", recs[0].attrs["route"])
+	})
+
+	t.Run("hello carries the presented launch id", func(t *testing.T) {
+		c, logs, metrics, _ := newChecker(t)
+		claims, _ := tokenFor("run-current")
+		b := c.conduitBinding(context.Background(), claims, runScopeRequestFrom(
+			httptest.NewRequest(http.MethodGet, "/api/v1/conduit", nil)))
+		require.NotNil(t, b)
+		b.OnMismatch("run-presented")
+
+		recs := logs.records("agent_token_run_superseded")
+		require.Len(t, recs, 1)
+		assert.Equal(t, runScopeOutcomeHello, recs[0].attrs["outcome"])
+		assert.Equal(t, "run-presented", recs[0].attrs["hello_run_id"])
+		assert.Equal(t, "run-current", recs[0].attrs["token_run_id"])
+		assert.Equal(t, runScopeRouteConduit, recs[0].attrs["route_class"])
+		assert.Equal(t, []string{runScopeRouteConduit}, metrics.routeClasses)
+	})
+
 	t.Run("dedup per token run", func(t *testing.T) {
 		c, logs, metrics, now := newChecker(t)
 		older, olderCS := tokenFor("run-older")
@@ -783,4 +823,28 @@ func TestAgentRunScopeLogDedup(t *testing.T) {
 		assert.False(t, d.first("k", t0.Add(59*time.Second)))
 		assert.True(t, d.first("k", t0.Add(61*time.Second)))
 	})
+}
+
+// TestRunScopeRouteClass: each request path maps to its bounded route class.
+func TestRunScopeRouteClass(t *testing.T) {
+	for _, tc := range []struct {
+		path string
+		want string
+	}{
+		{path: "/api/v1/agents/agent-1/token/refresh", want: runScopeRouteTokenRefresh},
+		{path: "/api/v1/agents/agent-1/status", want: runScopeRouteAgentStatus},
+		{path: "/api/v1/agents/agent-1", want: runScopeRouteAgent},
+		{path: "/api/v1/agents/agent-1/env", want: runScopeRouteAgent},
+		{path: "/api/v1/projects/project-1/agents", want: runScopeRouteProject},
+		{path: "/api/v1/conduit", want: runScopeRouteConduit},
+		{path: "/api/v1/conduit/stream", want: runScopeRouteConduit},
+		{path: "/api/v1/conduitx", want: runScopeRouteOther},
+		{path: "/api/v1/agents/agent-1/conduit", want: runScopeRouteAgent},
+		{path: "/api/v1/brokers/broker-1", want: runScopeRouteOther},
+		{path: "/healthz", want: runScopeRouteOther},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			assert.Equal(t, tc.want, runScopeRouteClass(tc.path))
+		})
+	}
 }

@@ -279,7 +279,7 @@ func checkTokenRun(p Principal, presented string) error {
 		return nil
 	}
 	if b.OnMismatch != nil {
-		b.OnMismatch()
+		b.OnMismatch(presented)
 	}
 	if !b.Enforce {
 		return nil

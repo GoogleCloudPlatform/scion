@@ -145,23 +145,24 @@ type runScopeRequest struct {
 	header     string
 	method     string
 	path       string
-	route      string // the matched route pattern ("" when unknown)
 	remoteAddr string
+	// route is the matched route pattern. When empty it is resolved from
+	// raw, only for a request that is logged.
+	route string
+	raw   *http.Request
+	// hello is the endpoint incarnation a conduit Hello presented.
+	hello string
 }
 
-// runScopeRequestFrom describes r. route resolves r's route pattern; it
-// may be nil.
-func runScopeRequestFrom(r *http.Request, route func(*http.Request) string) runScopeRequest {
-	req := runScopeRequest{
+// runScopeRequestFrom describes r.
+func runScopeRequestFrom(r *http.Request) runScopeRequest {
+	return runScopeRequest{
 		header:     r.Header.Get(AgentRunIDHeader),
 		method:     r.Method,
 		path:       r.URL.Path,
 		remoteAddr: r.RemoteAddr,
+		raw:        r,
 	}
-	if route != nil {
-		req.route = route(r)
-	}
-	return req
 }
 
 // Route classes, the bounded route label of the run-scope metric.
@@ -183,10 +184,10 @@ func runScopeRouteClass(path string) string {
 			return runScopeRouteTokenRefresh
 		case strings.HasSuffix(path, "/status"):
 			return runScopeRouteAgentStatus
-		case strings.HasSuffix(path, "/conduit"):
-			return runScopeRouteConduit
 		}
 		return runScopeRouteAgent
+	case path == "/api/v1/conduit" || strings.HasPrefix(path, "/api/v1/conduit/"):
+		return runScopeRouteConduit
 	case strings.HasPrefix(path, "/api/v1/projects/"):
 		return runScopeRouteProject
 	}
@@ -205,7 +206,7 @@ type agentRunScopeChecker struct {
 	metrics     atomic.Pointer[agentRunScopeMetrics]
 	dedup       *runScopeLogDedup
 	summary     runScopeLogSummary
-	// route resolves a request's route pattern for the log; nil leaves it
+	// route resolves a logged request's route pattern; nil leaves it
 	// empty.
 	route func(*http.Request) string
 }
@@ -340,6 +341,10 @@ func (c *agentRunScopeChecker) record(ctx context.Context, claims *AgentTokenCla
 	if !c.dedup.first(claims.Subject+"|"+claims.RunID+"|"+outcome, now) {
 		return
 	}
+	route := req.route
+	if route == "" && req.raw != nil && c.route != nil {
+		route = c.route(req.raw)
+	}
 	jtiHash := ""
 	if claims.ID != "" {
 		jtiHash = hashJTI(claims.ID)[:8]
@@ -353,12 +358,15 @@ func (c *agentRunScopeChecker) record(ctx context.Context, claims *AgentTokenCla
 		"token_run_id", claims.RunID,
 		"current_run_id", currentRunID,
 		"header_run_id", req.header,
-		"route", req.route,
+		"route", route,
 		"route_class", routeClass,
 		"path", req.path,
 		"method", req.method,
 		"jti_hash", jtiHash,
 		"remote_addr", req.remoteAddr,
+	}
+	if source == runScopeSourceConduit {
+		attrs = append(attrs, "hello_run_id", req.hello)
 	}
 	switch outcome {
 	case runScopeOutcomeUnscoped, runScopeOutcomeLegacyEnded:
@@ -381,8 +389,10 @@ func (c *agentRunScopeChecker) conduitBinding(ctx context.Context, claims *Agent
 	return &relay.TokenRunBinding{
 		RunID:   claims.RunID,
 		Enforce: c.mode == agentRunScopeEnforce,
-		OnMismatch: func() {
-			c.record(ctx, claims, runScopeSourceConduit, runScopeOutcomeHello, "", req)
+		OnMismatch: func(presented string) {
+			hreq := req
+			hreq.hello = presented
+			c.record(ctx, claims, runScopeSourceConduit, runScopeOutcomeHello, "", hreq)
 		},
 	}
 }
