@@ -318,8 +318,9 @@ type AgentAppliedConfig struct {
 	// SharedDirBackendChanges and AllowEmptySharedDir are a reincarnation's
 	// explicit shared dir backend change (`scion reincarnate
 	// --shared-dir-backend`), set on that generation's config only and sent
-	// to the broker on its reprovision. A later reincarnation does not
-	// carry them forward.
+	// to the broker on its reprovision. They are one-shot: the hub drops
+	// them once the broker confirms the change, and neither a later
+	// reincarnation nor a re-render of this config sends them again.
 	SharedDirBackendChanges map[string]string `json:"sharedDirBackendChanges,omitempty"`
 	AllowEmptySharedDir     bool              `json:"allowEmptySharedDir,omitempty"`
 
