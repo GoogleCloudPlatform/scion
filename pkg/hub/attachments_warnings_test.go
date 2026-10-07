@@ -17,6 +17,7 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -26,7 +27,9 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -50,7 +53,7 @@ func TestIngestAgentAttachments_MissingStagedFileWarns(t *testing.T) {
 	require.Len(t, warnings, 1, "the missing file must be reported, not silently dropped")
 	assert.Equal(t, missingStagedPath, warnings[0].Path, "the warning names the path the sender supplied")
 	assert.Equal(t, attachmentWarnNotFound, warnings[0].Reason)
-	assert.NotContains(t, warnings[0].Reason, sharedDir, "the reason must not leak the hub's host path")
+	assert.NotContains(t, warnings[0].Reason, sharedDir, "the reason must not include the hub's host path")
 }
 
 func TestIngestAgentAttachments_ReadableFileNoWarnings(t *testing.T) {
@@ -80,12 +83,11 @@ func TestIngestAgentAttachments_MixedBatchWarnsPerPath(t *testing.T) {
 }
 
 func TestIngestAgentAttachments_NoSharedDirWarnsAll(t *testing.T) {
-	srv, s, project, _ := agentAttachmentServer(t)
+	srv, s, _, _ := agentAttachmentServer(t)
 
 	// A project that does not declare the scratchpad shared dir at all.
 	bare := &store.Project{ID: api.NewUUID(), Name: "bare-project", Slug: "bare-project"}
 	require.NoError(t, s.CreateProject(context.Background(), bare))
-	_ = project
 
 	paths := []string{missingStagedPath, "/scion-volumes/" + attachmentSharedDirName + "/b.txt"}
 	refs, warnings := srv.ingestAgentAttachments(context.Background(), bare.ID, "agent-1", paths)
@@ -166,7 +168,7 @@ func attachmentDMSetup(t *testing.T) (*Server, store.Store, *store.Project, stri
 }
 
 func TestExecuteAgentDM_MissingAttachmentReturnsWarning(t *testing.T) {
-	srv, s, _, sharedDir, sender, target := attachmentDMSetup(t)
+	srv, _, _, sharedDir, sender, target := attachmentDMSetup(t)
 	staged := stageAgentFile(t, sharedDir, "notes.md", "# hello\n")
 
 	input := deliveryDMInput(sender, target, "with attachments")
@@ -179,10 +181,65 @@ func TestExecuteAgentDM_MissingAttachmentReturnsWarning(t *testing.T) {
 	assert.Equal(t, missingStagedPath, result.AttachmentWarnings[0].Path)
 	assert.Equal(t, attachmentWarnNotFound, result.AttachmentWarnings[0].Reason)
 
-	// The readable attachment still reached the persisted message.
-	msg, err := s.GetMessage(context.Background(), result.MessageID)
+	// The readable attachment was still stored and carried on the
+	// delivered message.
+	d, ok := srv.dispatcher.(*recordingDispatcher)
+	require.True(t, ok)
+	calls := d.getCalls()
+	require.Len(t, calls, 1)
+	require.NotNil(t, calls[0].StructuredMessage)
+	refs := parseAttachmentRefs(calls[0].StructuredMessage.Metadata)
+	require.Len(t, refs, 1, "only the readable attachment is carried")
+	assert.Equal(t, "notes.md", refs[0].Name)
+	meta, err := srv.webChatStore.GetAttachment(context.Background(), refs[0].ID)
 	require.NoError(t, err)
-	assert.NotNil(t, msg)
+	assert.Equal(t, "notes.md", meta.Filename)
+}
+
+// The agent-sender branch of the message handler (POST
+// /projects/P/agents/ID/message sent by an agent) carries the warnings
+// through to its JSON response.
+func TestHandleAgentMessage_AgentSenderMissingAttachmentReturnsWarning(t *testing.T) {
+	srv, _, _, sharedDir, sender, target := attachmentDMSetup(t)
+	staged := stageAgentFile(t, sharedDir, "notes.md", "# hello\n")
+
+	reqBody, err := json.Marshal(MessageRequest{StructuredMessage: &messages.StructuredMessage{
+		Version:     messages.Version,
+		Timestamp:   time.Now().UTC().Format(time.RFC3339),
+		Type:        messages.TypeInstruction,
+		Sender:      "agent:" + sender.Slug,
+		SenderID:    sender.ID,
+		Recipient:   "agent:" + target.Slug,
+		RecipientID: target.ID,
+		Msg:         "see attached",
+		Attachments: []string{staged, missingStagedPath},
+	}})
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/projects/"+target.ProjectID+"/agents/"+target.ID+"/message",
+		bytes.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(contextWithIdentity(req.Context(), &agentIdentityWrapper{&AgentTokenClaims{
+		Claims:    jwt.Claims{Subject: sender.ID},
+		ProjectID: sender.ProjectID,
+		Ancestry:  sender.Ancestry,
+	}}))
+	rr := httptest.NewRecorder()
+	srv.handleAgentMessage(rr, req, target.ID)
+	require.Equal(t, http.StatusOK, rr.Code, "an unreadable attachment must not fail the send: %s", rr.Body.String())
+
+	var resp struct {
+		MessageID          string              `json:"message_id"`
+		Status             string              `json:"status"`
+		AttachmentWarnings []AttachmentWarning `json:"attachment_warnings"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	assert.Equal(t, "dispatched", resp.Status)
+	require.Len(t, resp.AttachmentWarnings, 1, "body: %s", rr.Body.String())
+	assert.Equal(t, missingStagedPath, resp.AttachmentWarnings[0].Path)
+	assert.Equal(t, attachmentWarnNotFound, resp.AttachmentWarnings[0].Reason)
+	assert.NotContains(t, rr.Body.String(), sharedDir, "the response must not include the hub's host path")
 }
 
 func TestExecuteAgentDM_ReadableAttachmentNoWarning(t *testing.T) {
@@ -266,7 +323,7 @@ func TestOutboundMessage_MissingAttachmentReturnsWarning(t *testing.T) {
 	require.Len(t, resp.AttachmentWarnings, 1)
 	assert.Equal(t, missingStagedPath, resp.AttachmentWarnings[0].Path)
 	assert.Equal(t, attachmentWarnNotFound, resp.AttachmentWarnings[0].Reason)
-	assert.NotContains(t, rr.Body.String(), sharedDir, "the response must not leak the hub's host path")
+	assert.NotContains(t, rr.Body.String(), sharedDir, "the response must not include the hub's host path")
 
 	// The readable file was still linked to the message.
 	attachments, err := srv.webChatStore.GetAttachmentsByMessage(ctx, resp.MessageID)
