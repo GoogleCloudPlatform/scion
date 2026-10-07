@@ -84,7 +84,7 @@ func execDeleteFixture(t *testing.T, suffix string) (*Server, store.Store, *fenc
 	agent := setupBrokerAgentInPhase(t, s, suffix, state.PhaseRunning)
 	ctx := context.Background()
 	for _, run := range []string{"run-p1", "run-p2", "run-b"} {
-		_, err := s.SetAgentRunID(ctx, agent.ID, run)
+		_, err := s.SetAgentRunID(ctx, agent.ID, run, nil)
 		require.NoError(t, err)
 	}
 	row := mustGetAgent(t, s, agent.ID)
@@ -170,9 +170,9 @@ func TestDeferredDelete_IntentCapturesRunAtWrite(t *testing.T) {
 	originator.SetCrossNodeDeps(events, NoopCommandBus{})
 
 	agent := seedAgentWithBrokerID(t, cs, remoteBroker)
-	_, err := cs.SetAgentRunID(ctx, agent.ID, "run-p")
+	_, err := cs.SetAgentRunID(ctx, agent.ID, "run-p", nil)
 	require.NoError(t, err)
-	_, err = cs.SetAgentRunID(ctx, agent.ID, "run-a")
+	_, err = cs.SetAgentRunID(ctx, agent.ID, "run-a", nil)
 	require.NoError(t, err)
 	snapshot := mustGetAgent(t, cs, agent.ID)
 
@@ -206,7 +206,7 @@ func TestDeferredDelete_IntentCapturesRunAtWrite(t *testing.T) {
 	assert.Equal(t, []string{"run-p"}, args.PreviousRunIDs)
 
 	// Run-b starts before the owning node executes the intent.
-	_, err = cs.SetAgentRunID(ctx, agent.ID, "run-b")
+	_, err = cs.SetAgentRunID(ctx, agent.ID, "run-b", nil)
 	require.NoError(t, err)
 	owner, _ := testServerWithStore(t, cs)
 	client := &fenceRecordingClient{mockRuntimeBrokerClient: &mockRuntimeBrokerClient{}}
@@ -241,7 +241,7 @@ func TestDispatchDeleteFailedCreate_SendsRowRun(t *testing.T) {
 			agent := setupBrokerAgentInPhase(t, s, "p5-createfail-"+uuid.NewString()[:8], state.PhaseProvisioning)
 			ctx := context.Background()
 			for _, run := range tc.rowRuns {
-				_, err := s.SetAgentRunID(ctx, agent.ID, run)
+				_, err := s.SetAgentRunID(ctx, agent.ID, run, nil)
 				require.NoError(t, err)
 			}
 			local := *mustGetAgent(t, s, agent.ID)
@@ -377,7 +377,7 @@ type mintAfterEmptySwapStore struct {
 func (s mintAfterEmptySwapStore) CompareAndSwapAgentRunID(ctx context.Context, agentID, from, to string) (bool, error) {
 	swapped, err := s.Store.CompareAndSwapAgentRunID(ctx, agentID, from, to)
 	if err == nil && swapped && to == "" {
-		if _, err := s.SetAgentRunID(ctx, agentID, "run-other"); err != nil {
+		if _, err := s.SetAgentRunID(ctx, agentID, "run-other", nil); err != nil {
 			return swapped, err
 		}
 	}
@@ -457,7 +457,7 @@ func TestCleanupFailedCreate_RunMismatchKeepsRow(t *testing.T) {
 			broker, err := s.GetRuntimeBroker(ctx, agent.RuntimeBrokerID)
 			require.NoError(t, err)
 			reserveBrokerSlot(t, s, broker, agent.ID)
-			_, err = s.SetAgentRunID(ctx, agent.ID, "run-mine")
+			_, err = s.SetAgentRunID(ctx, agent.ID, "run-mine", nil)
 			require.NoError(t, err)
 			agent = mustGetAgent(t, s, agent.ID)
 			before := agent.Phase
@@ -469,7 +469,7 @@ func TestCleanupFailedCreate_RunMismatchKeepsRow(t *testing.T) {
 				Cause:           errors.New("dispatch failed"),
 				DeleteRuntime: func(dctx context.Context) error {
 					if tc.moveTo != "" {
-						if _, err := s.SetAgentRunID(dctx, agent.ID, tc.moveTo); err != nil {
+						if _, err := s.SetAgentRunID(dctx, agent.ID, tc.moveTo, nil); err != nil {
 							return err
 						}
 					}
@@ -519,7 +519,7 @@ type schedRefusingClient struct {
 func (c *schedRefusingClient) CreateAgent(ctx context.Context, brokerID, endpoint string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, error) {
 	c.lastCreateReq = req
 	c.lastBrokerID = brokerID
-	if _, err := c.st.SetAgentRunID(ctx, req.ID, "run-owner"); err != nil {
+	if _, err := c.st.SetAgentRunID(ctx, req.ID, "run-owner", nil); err != nil {
 		return nil, err
 	}
 	return nil, errors.New("broker unavailable")

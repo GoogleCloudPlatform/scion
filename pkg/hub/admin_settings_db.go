@@ -20,16 +20,22 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/version"
 	"github.com/knadh/koanf/v2"
@@ -657,6 +663,9 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "Invalid request body", nil)
 		return
 	}
+	if rejectRepeatedJSONMembers(w, rawBody) {
+		return
+	}
 	var req ServerConfigUpdateDBRequest
 	if err := json.Unmarshal(rawBody, &req); err != nil {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "Invalid request body", nil)
@@ -669,6 +678,10 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	// The typed decode above silently drops a removed profiles.<name>.timezone
 	// key, so check the raw body before anything is written.
 	if rejectRemovedProfileTimezone(w, rawBody) {
+		return
+	}
+	// A user access token writes configuration keys only.
+	if writeTokenRefusedSettingsKeys(w, r.Context(), tokenRefusedServerConfigKeys(rawBody)) {
 		return
 	}
 
@@ -2200,6 +2213,120 @@ func readRawBody(w http.ResponseWriter, r *http.Request) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+// repeatedJSONMember reports the first object member name that rawBody
+// repeats within one object, at any depth. Names compare under the same
+// case folding encoding/json uses to match struct fields, so "server" and
+// "Server" in one object are a repeat; the comparison applies to every
+// object, including the keys of map-valued objects such as profiles, so
+// "Foo" and "foo" there are a repeat too. A body that is not exactly one
+// JSON value (empty, malformed, or followed by anything other than
+// whitespace) returns an error: it is never reported as having no repeat.
+func repeatedJSONMember(rawBody []byte) (string, bool, error) {
+	type frame struct {
+		object    bool
+		expectKey bool
+		names     map[string]bool
+	}
+	var stack []*frame
+	valueDone := func() {
+		if n := len(stack); n > 0 && stack[n-1].object {
+			stack[n-1].expectKey = true
+		}
+	}
+	dec := json.NewDecoder(bytes.NewReader(rawBody))
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			return "", false, fmt.Errorf("request body is not one JSON value: %w", err)
+		}
+		if n := len(stack); n > 0 && stack[n-1].object && stack[n-1].expectKey {
+			top := stack[n-1]
+			if d, ok := tok.(json.Delim); ok && d == '}' {
+				stack = stack[:n-1]
+				valueDone()
+			} else if key, ok := tok.(string); ok {
+				folded := foldJSONMemberName(key)
+				if top.names[folded] {
+					return key, true, nil
+				}
+				top.names[folded] = true
+				top.expectKey = false
+			}
+		} else {
+			switch tok {
+			case json.Delim('{'):
+				stack = append(stack, &frame{object: true, expectKey: true, names: map[string]bool{}})
+			case json.Delim('['):
+				stack = append(stack, &frame{})
+			case json.Delim(']'):
+				// A closing bracket must close an open array.
+				// json.Decoder already refuses an unmatched closer;
+				// the guard keeps the stack pop from underflowing.
+				if len(stack) == 0 {
+					return "", false, errors.New("request body is not one JSON value: unmatched ']'")
+				}
+				stack = stack[:len(stack)-1]
+				valueDone()
+			default:
+				valueDone()
+			}
+		}
+		if len(stack) == 0 {
+			// The first top-level value is complete; only whitespace may
+			// follow it.
+			if _, err := dec.Token(); err != io.EOF {
+				return "", false, errors.New("request body has data after the first JSON value")
+			}
+			return "", false, nil
+		}
+	}
+}
+
+// foldJSONMemberName folds a member name the way encoding/json does when it
+// matches a name to a struct field: ASCII letters to upper case, and every
+// other rune to the smallest rune of its simple fold set.
+func foldJSONMemberName(name string) string {
+	var b strings.Builder
+	for _, r := range name {
+		if r < utf8.RuneSelf {
+			if 'a' <= r && r <= 'z' {
+				r -= 'a' - 'A'
+			}
+			b.WriteRune(r)
+			continue
+		}
+		for {
+			r2 := unicode.SimpleFold(r)
+			if r2 <= r {
+				r = r2
+				break
+			}
+			r = r2
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+// rejectRepeatedJSONMembers answers 400 and returns true when a hub
+// configuration write body is not exactly one JSON value, or repeats an
+// object member name at any depth. The key classification and the typed
+// write decode must read the same members, so a body they could read
+// differently is refused for every credential before either runs.
+func rejectRepeatedJSONMembers(w http.ResponseWriter, rawBody []byte) bool {
+	name, repeated, err := repeatedJSONMember(rawBody)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "Invalid request body: "+err.Error(), nil)
+		return true
+	}
+	if !repeated {
+		return false
+	}
+	writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+		"request body repeats the member name "+strconv.Quote(name)+" in one object", nil)
+	return true
+}
+
 // fieldPresence extracts which JSON fields are explicitly present (including
 // when set to "", [], null) in the raw request body by walking nested
 // map[string]json.RawMessage paths. This powers N6/N7: presence-aware
@@ -2255,4 +2382,205 @@ func maintenanceMessageOrDefault(msg string) string {
 		return defaultMaintenanceMessage
 	}
 	return msg
+}
+
+// Settings keys a user access token may write.
+//
+// The server-config and project-defaults writes admit a user access token
+// that carries the operation's selector, but only for keys classified as
+// configuration below. A key is refused for every credential other than an
+// interactive session or a dev credential (a user access token, or an
+// unknown or missing credential kind) when writing it confers authority
+// (who is an administrator, who may sign in, which external issuers are
+// trusted), decides the origin users and agents reach the hub on, or
+// selects the code, images, runtimes or credentials agents run with. A
+// refused key is refused whenever it is present in the body, including a
+// value equal to the stored one or an explicit clear. A key the tables do
+// not classify is refused too, so a new settings key reaches tokens only
+// after it is classified here.
+
+// settingsTokenClass classifies a settings section or key for writes by a
+// user access token.
+type settingsTokenClass int
+
+const (
+	// settingsTokenRefused refuses every user access token.
+	settingsTokenRefused settingsTokenClass = iota + 1
+	// settingsTokenConfiguration admits a token that holds the operation's
+	// selector and live authority.
+	settingsTokenConfiguration
+	// settingsTokenPerKey classifies each key of the section through
+	// serverConfigTokenKeys.
+	settingsTokenPerKey
+)
+
+// serverConfigTokenSections classifies every Layer-1 operational settings
+// section for token writes through PUT /api/v1/admin/server-config and for
+// token resets through DELETE /api/v1/admin/server-config/sections/{name}.
+// A section that contains a refused key cannot be reset by a token.
+var serverConfigTokenSections = map[string]settingsTokenClass{
+	"access":            settingsTokenRefused,       // administrators, sign-in mode, default user role, sign-in domains
+	"federation":        settingsTokenRefused,       // trusted external issuers
+	"github_app":        settingsTokenRefused,       // the hub's GitHub App credential
+	"agent_secrets":     settingsTokenRefused,       // which secret scopes agents may write
+	"auto_expose_ports": settingsTokenRefused,       // whether agent ports are reachable
+	"runtimes":          settingsTokenRefused,       // where and how agents run
+	"profiles":          settingsTokenRefused,       // runtime, image and environment agents run with
+	"harness_configs":   settingsTokenRefused,       // harness code and images agents run with
+	"maintenance":       settingsTokenRefused,       // admin mode, a session-only host operation
+	"messaging":         settingsTokenRefused,       // written through PUT /api/v1/admin/messaging
+	"experiments":       settingsTokenRefused,       // written through /api/v1/admin/experiments
+	"agent_defaults":    settingsTokenPerKey,        // see serverConfigTokenKeys
+	"endpoints":         settingsTokenPerKey,        // see serverConfigTokenKeys
+	"lifecycle":         settingsTokenConfiguration, // stall, retention and start timing
+	"telemetry":         settingsTokenConfiguration, // telemetry export
+	"quotas":            settingsTokenConfiguration, // broker quota enforcement switch
+	"notifications":     settingsTokenConfiguration, // notification channels
+	"project_defaults":  settingsTokenConfiguration, // see projectDefaultsTokenKeys
+	"artifacts":         settingsTokenConfiguration, // artifact limits
+}
+
+// serverConfigTokenKeys classifies each key of a settingsTokenPerKey
+// section, by koanf path.
+var serverConfigTokenKeys = map[string]settingsTokenClass{
+	// agent_defaults
+	"default_max_agent_role":                  settingsTokenRefused, // authority granted to agents
+	"default_agent_role":                      settingsTokenRefused, // authority granted to agents
+	"default_gcp_identity_mode":               settingsTokenRefused, // cloud identity agents run with
+	"default_gcp_identity_service_account_id": settingsTokenRefused, // cloud identity agents run with
+	"default_template":                        settingsTokenRefused, // code agents run with
+	"default_harness_config":                  settingsTokenRefused, // harness code and image agents run with
+	"default_runtime_broker":                  settingsTokenRefused, // broker and credentials agents run with
+	"default_max_turns":                       settingsTokenConfiguration,
+	"default_max_model_calls":                 settingsTokenConfiguration,
+	"default_max_duration":                    settingsTokenConfiguration,
+	"default_resources":                       settingsTokenConfiguration,
+	"default_model":                           settingsTokenConfiguration,
+	"default_thinking_level":                  settingsTokenConfiguration,
+	"default_timezone":                        settingsTokenConfiguration,
+	// endpoints
+	"server.hub.public_url": settingsTokenRefused, // the origin users and agents reach the hub on
+	"image_registry":        settingsTokenRefused, // the registry agent images come from
+	"server.hub.hub_name":   settingsTokenConfiguration,
+}
+
+// projectDefaultsTokenKeys classifies each key of the project_defaults
+// section, by JSON field name, for token writes through
+// PUT /api/v1/admin/project-defaults.
+var projectDefaultsTokenKeys = map[string]settingsTokenClass{
+	"default_scratchpad": settingsTokenConfiguration,
+}
+
+// serverConfigKeyTokenClass returns the token class of a Layer-1 koanf key.
+// A key outside every Layer-1 section, or not classified, is refused. That
+// covers the file-only keys (dbFileOnlyRequestPaths), among them
+// server.hub.agent_endpoint, which decides the origin agents reach the hub
+// on.
+func serverConfigKeyTokenClass(koanfKey string) settingsTokenClass {
+	section := opsettings.OwningSection(koanfKey)
+	switch serverConfigTokenSections[section] {
+	case settingsTokenConfiguration:
+		return settingsTokenConfiguration
+	case settingsTokenPerKey:
+		if serverConfigTokenKeys[koanfKey] == settingsTokenConfiguration {
+			return settingsTokenConfiguration
+		}
+	}
+	return settingsTokenRefused
+}
+
+// serverConfigSectionTokenResettable reports whether a token may reset the
+// named section: only a configuration section, never one that contains a
+// refused key.
+func serverConfigSectionTokenResettable(section string) bool {
+	return serverConfigTokenSections[section] == settingsTokenConfiguration
+}
+
+// serverConfigBodyKoanfKey maps a server-config request body path to its
+// koanf key. The request carries federation at the top level; its koanf
+// keys live under server.federation.
+func serverConfigBodyKoanfKey(path []string) string {
+	key := strings.Join(path, ".")
+	if len(path) > 0 && path[0] == "federation" {
+		key = "server." + key
+	}
+	return key
+}
+
+// unparsedBodyKey is the refused key a classifier reports for a body it
+// cannot parse as one JSON object: an unparsed body is refused, never read
+// as carrying no refused key.
+const unparsedBodyKey = "<body>"
+
+// tokenRefusedServerConfigKeys returns, sorted, the body keys of a
+// server-config write that a user access token may not write. Every
+// present leaf counts, null and empty values included. expected_revisions
+// carries compare-and-set revisions, not settings, and is not classified.
+func tokenRefusedServerConfigKeys(rawBody []byte) []string {
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(rawBody, &top); err != nil {
+		return []string{unparsedBodyKey}
+	}
+	refused := map[string]bool{}
+	for _, l := range presentBodyLeaves(top, reflect.TypeOf(ServerConfigUpdateDBRequest{}), nil, nil) {
+		if len(l.path) > 0 && l.path[0] == "expected_revisions" {
+			continue
+		}
+		if serverConfigKeyTokenClass(serverConfigBodyKoanfKey(l.path)) != settingsTokenConfiguration {
+			refused[strings.Join(l.path, ".")] = true
+		}
+	}
+	return sortedSettingsKeys(refused)
+}
+
+// tokenRefusedProjectDefaultsKeys returns, sorted, the body keys of a
+// project-defaults write that a user access token may not write: every
+// top-level key that is not a configuration key of projectDefaultsTokenKeys.
+// JSON field names match case-insensitively, as the decoder matches them.
+func tokenRefusedProjectDefaultsKeys(rawBody []byte) []string {
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(rawBody, &top); err != nil {
+		return []string{unparsedBodyKey}
+	}
+	refused := map[string]bool{}
+	for key := range top {
+		allowed := false
+		for name, class := range projectDefaultsTokenKeys {
+			if strings.EqualFold(key, name) && class == settingsTokenConfiguration {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			refused[key] = true
+		}
+	}
+	return sortedSettingsKeys(refused)
+}
+
+func sortedSettingsKeys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// writeTokenRefusedSettingsKeys refuses a hub configuration write that
+// carries refused keys (settings keys, or a lifecycle hook's execution
+// identity) from any credential other than an interactive session or a
+// dev credential (sessionCredentialAllowed): 403 with the session-only
+// details (reason GOV_PENDING) and details.keys listing the refused keys.
+// An unknown or missing credential kind is refused too. It writes nothing
+// and returns false for a session or dev credential, or when keys is empty.
+func writeTokenRefusedSettingsKeys(w http.ResponseWriter, ctx context.Context, keys []string) bool {
+	if sessionCredentialAllowed(ctx) || len(keys) == 0 {
+		return false
+	}
+	details := sessionOnlyDenialDetails(authzop.ReasonGovernancePending)
+	details["keys"] = keys
+	writeError(w, http.StatusForbidden, ErrCodeForbidden,
+		"these keys require an interactive session", details)
+	return true
 }
