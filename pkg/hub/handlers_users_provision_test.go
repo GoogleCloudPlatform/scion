@@ -81,16 +81,9 @@ func testServerNoDevAuth(t *testing.T) (*Server, store.Store) {
 	_ = s.DeleteHubSetting(context.Background(), "migration_delegation_edge_backfill_v1")
 	cfg := testServerConfig()
 	cfg.DevAuthToken = "" // dev-auth off
-	srv, err := New(cfg, s)
-	require.NoError(t, err)
-	srv.SetHubID("test-hub-id")
-	t.Cleanup(func() {
-		_ = srv.Shutdown(context.Background())
-		_ = s.Close()
-	})
-	waitUserScopedDataSweep(t, srv)
+	srv, st := testServerWithStoreConfig(t, s, cfg)
 	require.False(t, srv.authConfig.DevAuthEnabled)
-	return srv, s
+	return srv, st
 }
 
 func newProvisionFixtureOn(t *testing.T, srv *Server, s store.Store) *provisionFixture {
@@ -480,10 +473,36 @@ func TestHandleProvisionUser(t *testing.T) {
 		assert.ErrorIs(t, err, store.ErrNotFound)
 		assert.Empty(t, provisionAudits(t, s, ""))
 
-		// A caller without user.invite still gets 403; tokens still get the
-		// session-only refusal first (row 5).
+		// Row 4a is evaluated before row 8: on a dev-auth hub, a caller
+		// without user.invite also gets dev_auth_not_supported. (Tokens get
+		// the session-only refusal first, row 5.)
 		rec := provisionAs(t, srv, f.member, map[string]interface{}{"email": "x@example.com"})
-		assert.Equal(t, http.StatusForbidden, rec.Code)
+		require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		_, details := provisionErr(t, rec)
+		assert.Equal(t, provisionReasonDevAuthNotSupported, details["reason"])
+	})
+
+	t.Run("row04a_seeded_dev_user_refused_without_dev_auth", func(t *testing.T) {
+		// A hub that once ran with dev auth keeps the seeded dev user. With
+		// dev auth now off, a sign-in session for that user is still
+		// refused, even as a super-admin.
+		f := newProvisionFixture(t)
+		createTestUserWithRole(t, f.s, DevUserID, "dev-seeded@localhost", store.UserRoleAdmin, store.SystemRoleSuperAdmin)
+		devUser, err := f.s.GetUser(ctx, DevUserID)
+		require.NoError(t, err)
+		require.False(t, f.srv.authConfig.DevAuthEnabled)
+
+		rec := provisionAs(t, f.srv, devUser, map[string]interface{}{"email": "by-seeded-dev@example.com"})
+		require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		_, details := provisionErr(t, rec)
+		assert.Equal(t, provisionReasonDevAuthNotSupported, details["reason"])
+		_, err = f.s.GetUserByEmail(ctx, "by-seeded-dev@example.com")
+		assert.ErrorIs(t, err, store.ErrNotFound)
+		assert.Empty(t, provisionAudits(t, f.s, ""))
+
+		// Another super-admin on the same hub can provision.
+		rec = provisionAs(t, f.srv, f.superAdmin, map[string]interface{}{"email": "by-super@example.com"})
+		assert.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 	})
 
 	t.Run("row05_real_hub_token_with_user_invite_refused", func(t *testing.T) {

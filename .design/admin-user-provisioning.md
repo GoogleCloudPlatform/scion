@@ -650,7 +650,7 @@ the owner's status (`:366`), so a revoked token whose owner is suspended gets 40
 | 2 | UAT revoked/expired/unknown | 401 | `unauthorized` (existing UAT validation, `useraccesstoken.go:345`-`:351`) | none | none |
 | 3 | JWT or UAT path, caller or token owner suspended | 403 | `user_suspended` (existing middleware: `auth.go:495` for JWTs; `useraccesstoken.go:366`, `auth.go:411`-`:415` for UATs; D.2 may refine) | none | none |
 | 4 | Non-user principal (agent, broker, federation) | 403 | `forbidden` | none | denial log |
-| 4a | Hub running with dev auth enabled (any caller), or the dev credential or dev user | 403 | `forbidden` / `dev_auth_not_supported` | none | denial log |
+| 4a | Hub running with dev auth enabled (any caller; evaluated before row 8, so a caller without `user.invite` also gets this), or the dev credential or dev user (including a seeded dev user on a hub that has since turned dev auth off) | 403 | `forbidden` / `dev_auth_not_supported` | none | denial log |
 | 5 | UAT before D.2 admission is enabled | 403 | `forbidden` / `credential_insufficient` (PR-1: the session-only refusal, `details.reason: "GOV_PENDING"`, `details.credential: "session_required"`; see the Phase 0 binding in §16.2) | none | denial log |
 | 6 | UAT whose boundary does not admit the hub target | 403 | `forbidden` / `credential_insufficient` | none | denial log |
 | 7 | UAT whose frozen ceiling lacks the exact `user.invite` mapping | 403 | `forbidden` / `credential_insufficient` | none | denial log |
@@ -1187,7 +1187,7 @@ No regression:
 | 2 | revoked or expired hub UAT → 401; revoked hub UAT with suspended owner → 401 |
 | 3 | session caller suspended (JWT); hub UAT owner suspended (UAT) |
 | 4 | agent JWT, broker HMAC, federation → 403 |
-| 4a | dev-auth hub: dev credential, dev user's web session and another super-admin's session → 403 `dev_auth_not_supported` (valid, role-carrying and malformed bodies) |
+| 4a | dev-auth hub: dev credential, dev user's web session, another super-admin's session and a member → 403 `dev_auth_not_supported` (valid, role-carrying and malformed bodies); hub without dev auth: a seeded dev user's super-admin session → 403 `dev_auth_not_supported` |
 | 5 | before Phase 2, any UAT → 403 (session-only refusal in PR-1) |
 | 6 | project-bounded UAT → 403 |
 | 7 | hub UAT without the exact selector; empty/malformed/unknown-version ceiling |

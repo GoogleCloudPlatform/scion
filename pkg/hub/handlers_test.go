@@ -68,7 +68,15 @@ func testServerWithStore(t *testing.T, s store.Store) (*Server, store.Store) {
 	// post-backfill behavior re-create the marker explicitly.
 	_ = s.DeleteHubSetting(context.Background(), "migration_delegation_edge_backfill_v1")
 
-	srv, err := New(testServerConfig(), s)
+	return testServerWithStoreConfig(t, s, testServerConfig())
+}
+
+// testServerWithStoreConfig is testServerWithStore with the given server
+// config, on a store that is already migrated. The store is closed when the
+// test ends.
+func testServerWithStoreConfig(t *testing.T, s store.Store, cfg ServerConfig) (*Server, store.Store) {
+	t.Helper()
+	srv, err := New(cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}

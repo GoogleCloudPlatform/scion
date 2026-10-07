@@ -386,8 +386,10 @@ func (s *Server) handleProvisionUser(w http.ResponseWriter, r *http.Request) {
 	// other user authentication setups. Provisioning is therefore refused
 	// for every caller while the hub runs with dev auth enabled, which
 	// covers the dev credential and the session the web dev auto-login
-	// mints for the dev user. The credential-kind and dev-user checks keep
-	// the refusal for those identities even if the mode flag were unset.
+	// mints for the dev user. The dev-user check also refuses a session for
+	// the seeded dev user on a hub that has since turned dev auth off. The
+	// credential-kind check is belt-and-braces: redundant with the mode
+	// flag today, since a dev credential exists only in dev-auth mode.
 	if s.authConfig.DevAuthEnabled || GetCredentialContextFromContext(ctx).Kind == CredentialKindDev || actor.ID() == DevUserID {
 		logAuthzDenial(r, actor, target, ActionInvite, provisionOperationID+": dev auth is not supported")
 		writeError(w, http.StatusForbidden, ErrCodeForbidden,
