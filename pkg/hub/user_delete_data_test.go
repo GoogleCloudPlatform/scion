@@ -432,7 +432,7 @@ func TestDeleteUser_OwnsAgentDeniedListsEveryPage(t *testing.T) {
 // TestNew_SchedulesUserScopedDataSweep: building a server runs the startup
 // sweep in the background, removing a missing user's values.
 func TestNew_SchedulesUserScopedDataSweep(t *testing.T) {
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	require.NoError(t, err)
 	ctx := context.Background()
 	require.NoError(t, s.Migrate(ctx))
@@ -494,7 +494,7 @@ func (s *blockingUserScopeListStore) ListEnvVars(ctx context.Context, filter sto
 // lookups run in the background goroutine, so New() returns while they are
 // still blocked and the done channel closes only after they finish.
 func TestNew_UserScopedDataSweepLookupRunsInBackground(t *testing.T) {
-	inner, err := newTestStore(":memory:")
+	inner, err := newTestStore(t, ":memory:")
 	require.NoError(t, err)
 	ctx := context.Background()
 	require.NoError(t, inner.Migrate(ctx))

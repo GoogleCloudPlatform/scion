@@ -123,12 +123,11 @@ type notificationTestEnv struct {
 func setupNotificationTest(t *testing.T) *notificationTestEnv {
 	t.Helper()
 
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
 	require.NoError(t, s.Migrate(context.Background()))
-	t.Cleanup(func() { _ = s.Close() })
 
 	pub := NewChannelEventPublisher()
 	t.Cleanup(pub.Close)

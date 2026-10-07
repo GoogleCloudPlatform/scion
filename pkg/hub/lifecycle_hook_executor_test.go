@@ -113,7 +113,7 @@ func (l *capturingAuditLogger) getEvents() []*LifecycleHookExecutionEvent {
 
 func executorTestStore(t *testing.T) store.Store {
 	t.Helper()
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	require.NoError(t, err)
 	return s
 }
