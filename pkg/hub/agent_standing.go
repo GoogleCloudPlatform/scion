@@ -572,3 +572,56 @@ func (s *Server) agentStandingForbidden(ctx context.Context, w http.ResponseWrit
 	}
 	return true
 }
+
+// agentSuspensionView returns the API suspension view for one agent, nil
+// when it has no active hold. A lookup error leaves the view out (the
+// gates read holds on their own and fail closed).
+func (s *Server) agentSuspensionView(ctx context.Context, agentID string) *store.AgentSuspension {
+	if s == nil || s.store == nil || agentID == "" {
+		return nil
+	}
+	holds, err := s.store.ListActiveAgentHolds(ctx, agentID)
+	if err != nil {
+		slog.Warn("agent suspension view: hold lookup failed", "agent_id", agentID, "error", err)
+		return nil
+	}
+	if len(holds) == 0 {
+		return nil
+	}
+	return &store.AgentSuspension{Held: true, Since: holds[0].CreatedAt}
+}
+
+// agentSuspensionViews returns the suspension views of agents, keyed by agent
+// ID, reading the active holds once per project.
+func (s *Server) agentSuspensionViews(ctx context.Context, agents []store.Agent) map[string]*store.AgentSuspension {
+	out := map[string]*store.AgentSuspension{}
+	if s == nil || s.store == nil || len(agents) == 0 {
+		return out
+	}
+	projects := map[string]bool{}
+	for i := range agents {
+		if agents[i].ProjectID != "" {
+			projects[agents[i].ProjectID] = true
+		}
+	}
+	for p := range projects {
+		cursor := ""
+		for {
+			res, err := s.store.ListActiveAgentHoldsByProject(ctx, p, store.ListOptions{Limit: 500, Cursor: cursor})
+			if err != nil {
+				slog.Warn("agent suspension view: hold listing failed", "project_id", p, "error", err)
+				break
+			}
+			for _, h := range res.Items {
+				if v, ok := out[h.AgentID]; !ok || h.CreatedAt.Before(v.Since) {
+					out[h.AgentID] = &store.AgentSuspension{Held: true, Since: h.CreatedAt}
+				}
+			}
+			if res.NextCursor == "" || len(res.Items) == 0 {
+				break
+			}
+			cursor = res.NextCursor
+		}
+	}
+	return out
+}

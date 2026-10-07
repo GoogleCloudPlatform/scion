@@ -237,6 +237,20 @@ type Agent struct {
 	// on the wire: an explicit null when no delete is active or failed, so
 	// web delta merges clear it.
 	Deletion *DeletionInfo `json:"deletion"`
+
+	// Suspension is the computed, client-facing hold view
+	// (ptone/scion#3433): set when the agent has an active hold. Like
+	// Launch it is populated only by the hub at response time and never
+	// stored. It carries no reason; reasons are kept in audit records.
+	Suspension *AgentSuspension `json:"suspension,omitempty"`
+}
+
+// AgentSuspension is the client-facing view of an agent's active holds: the
+// agent is held (it does not run, send messages, fire schedules or create
+// agents until a project owner resumes it) since the oldest active hold.
+type AgentSuspension struct {
+	Held  bool      `json:"held"`
+	Since time.Time `json:"since"`
 }
 
 // InFlightPhases are the agent phases considered "in flight" for a launch
