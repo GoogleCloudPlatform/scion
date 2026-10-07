@@ -3313,10 +3313,13 @@ const (
 
 // AgentCredential represents a tracked agent JWT token credential.
 type AgentCredential struct {
-	ID           string     `json:"id"`
-	AgentID      string     `json:"agent_id"`
-	ProjectID    string     `json:"project_id"`
-	TokenJTIHash string     `json:"token_jti_hash"`
+	ID           string `json:"id"`
+	AgentID      string `json:"agent_id"`
+	ProjectID    string `json:"project_id"`
+	TokenJTIHash string `json:"token_jti_hash"`
+	// RunID is the agent run the token was issued for; empty for a token
+	// issued without one.
+	RunID        string     `json:"run_id,omitempty"`
 	IssuedAt     time.Time  `json:"issued_at"`
 	ExpiresAt    time.Time  `json:"expires_at"`
 	RevokedAt    *time.Time `json:"revoked_at,omitempty"`

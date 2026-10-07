@@ -40,6 +40,7 @@ func entAgentCredentialToStore(ac *ent.AgentCredential) *store.AgentCredential {
 		AgentID:      ac.AgentID,
 		ProjectID:    ac.ProjectID,
 		TokenJTIHash: ac.TokenJtiHash,
+		RunID:        ac.RunID,
 		IssuedAt:     ac.IssuedAt,
 		ExpiresAt:    ac.ExpiresAt,
 		RevokedAt:    ac.RevokedAt,
@@ -55,6 +56,7 @@ func (s *AgentCredentialStore) CreateAgentCredential(ctx context.Context, cred *
 		SetAgentID(cred.AgentID).
 		SetProjectID(cred.ProjectID).
 		SetTokenJtiHash(cred.TokenJTIHash).
+		SetRunID(cred.RunID).
 		SetIssuedAt(cred.IssuedAt).
 		SetExpiresAt(cred.ExpiresAt)
 

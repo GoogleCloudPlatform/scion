@@ -293,6 +293,7 @@ var (
 		{Name: "agent_id", Type: field.TypeString},
 		{Name: "project_id", Type: field.TypeString},
 		{Name: "token_jti_hash", Type: field.TypeString},
+		{Name: "run_id", Type: field.TypeString, Nullable: true, Default: ""},
 		{Name: "issued_at", Type: field.TypeTime},
 		{Name: "expires_at", Type: field.TypeTime},
 		{Name: "revoked_at", Type: field.TypeTime, Nullable: true},
@@ -324,7 +325,7 @@ var (
 			{
 				Name:    "agentcredential_expires_at",
 				Unique:  false,
-				Columns: []*schema.Column{AgentCredentialsColumns[5]},
+				Columns: []*schema.Column{AgentCredentialsColumns[6]},
 			},
 		},
 	}
