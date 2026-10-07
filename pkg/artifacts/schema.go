@@ -232,3 +232,32 @@ ALTER TABLE artifact_file ADD COLUMN IF NOT EXISTS fetch_status TEXT;
 ALTER TABLE artifact_file ADD COLUMN IF NOT EXISTS fetch_error TEXT;
 ALTER TABLE artifact_file ALTER COLUMN sha256 DROP NOT NULL;
 `
+
+// migrationVersionUploads supports the two-step publish: a file row of a
+// pending version records whether its bytes have arrived, and pending
+// versions can be found by age so abandoned ones are reaped.
+const migrationVersionUploads = "0003_version_uploads"
+
+const sqliteVersionUploads = `
+ALTER TABLE artifact_file ADD COLUMN received INTEGER NOT NULL DEFAULT 1;
+CREATE INDEX IF NOT EXISTS idx_artifact_version_state
+    ON artifact_version (state, created_at);
+`
+
+const postgresVersionUploads = `
+ALTER TABLE artifact_file ADD COLUMN IF NOT EXISTS received BOOLEAN NOT NULL DEFAULT TRUE;
+CREATE INDEX IF NOT EXISTS idx_artifact_version_state
+    ON artifact_version (state, created_at);
+`
+
+// migrationFinalizeClaims records when a finalize request claimed a
+// version, so a claim left behind by a stopped hub can be taken over.
+const migrationFinalizeClaims = "0004_finalize_claims"
+
+const sqliteFinalizeClaims = `
+ALTER TABLE artifact_version ADD COLUMN claimed_at TEXT;
+`
+
+const postgresFinalizeClaims = `
+ALTER TABLE artifact_version ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ;
+`

@@ -297,7 +297,8 @@ WEBCHAT_POSTGRES_TESTS := TestListTopicsByProjects_Postgres \
 	TestC4Fix_Postgres_FreshDB \
 	TestC4Fix_Postgres_PreExistingDB \
 	TestC4Fix_Postgres_Idempotent \
-	TestC4Fix_Postgres_PreExistingDB_Idempotent
+	TestC4Fix_Postgres_PreExistingDB_Idempotent \
+	TestUnreadMentionKeys_Postgres
 
 test-webchat-postgres:
 	@echo "Running web chat store tests against Postgres..."

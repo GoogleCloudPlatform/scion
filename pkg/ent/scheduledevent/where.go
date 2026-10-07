@@ -90,6 +90,36 @@ func AuthorizationRevision(v int) predicate.ScheduledEvent {
 	return predicate.ScheduledEvent(sql.FieldEQ(FieldAuthorizationRevision, v))
 }
 
+// AuthorityCeilingKind applies equality check predicate on the "authority_ceiling_kind" field. It's identical to AuthorityCeilingKindEQ.
+func AuthorityCeilingKind(v string) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldEQ(FieldAuthorityCeilingKind, v))
+}
+
+// AuthorityCeilingVersion applies equality check predicate on the "authority_ceiling_version" field. It's identical to AuthorityCeilingVersionEQ.
+func AuthorityCeilingVersion(v int32) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldEQ(FieldAuthorityCeilingVersion, v))
+}
+
+// AuthorityCeilingPermissionIds applies equality check predicate on the "authority_ceiling_permission_ids" field. It's identical to AuthorityCeilingPermissionIdsEQ.
+func AuthorityCeilingPermissionIds(v string) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldEQ(FieldAuthorityCeilingPermissionIds, v))
+}
+
+// AuthorityCeilingBoundaryKind applies equality check predicate on the "authority_ceiling_boundary_kind" field. It's identical to AuthorityCeilingBoundaryKindEQ.
+func AuthorityCeilingBoundaryKind(v string) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldEQ(FieldAuthorityCeilingBoundaryKind, v))
+}
+
+// AuthorityCeilingBoundaryProjectID applies equality check predicate on the "authority_ceiling_boundary_project_id" field. It's identical to AuthorityCeilingBoundaryProjectIDEQ.
+func AuthorityCeilingBoundaryProjectID(v string) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldEQ(FieldAuthorityCeilingBoundaryProjectID, v))
+}
+
+// AuthorityCeilingSourceExpiresAt applies equality check predicate on the "authority_ceiling_source_expires_at" field. It's identical to AuthorityCeilingSourceExpiresAtEQ.
+func AuthorityCeilingSourceExpiresAt(v time.Time) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldEQ(FieldAuthorityCeilingSourceExpiresAt, v))
+}
+
 // ProjectID applies equality check predicate on the "project_id" field. It's identical to ProjectIDEQ.
 func ProjectID(v uuid.UUID) predicate.ScheduledEvent {
 	return predicate.ScheduledEvent(sql.FieldEQ(FieldProjectID, v))
@@ -613,6 +643,366 @@ func AuthorizationRevisionIsNil() predicate.ScheduledEvent {
 // AuthorizationRevisionNotNil applies the NotNil predicate on the "authorization_revision" field.
 func AuthorizationRevisionNotNil() predicate.ScheduledEvent {
 	return predicate.ScheduledEvent(sql.FieldNotNull(FieldAuthorizationRevision))
+}
+
+// AuthorityCeilingKindEQ applies the EQ predicate on the "authority_ceiling_kind" field.
+func AuthorityCeilingKindEQ(v string) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldEQ(FieldAuthorityCeilingKind, v))
+}
+
+// AuthorityCeilingKindNEQ applies the NEQ predicate on the "authority_ceiling_kind" field.
+func AuthorityCeilingKindNEQ(v string) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldNEQ(FieldAuthorityCeilingKind, v))
+}
+
+// AuthorityCeilingKindIn applies the In predicate on the "authority_ceiling_kind" field.
+func AuthorityCeilingKindIn(vs ...string) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldIn(FieldAuthorityCeilingKind, vs...))
+}
+
+// AuthorityCeilingKindNotIn applies the NotIn predicate on the "authority_ceiling_kind" field.
+func AuthorityCeilingKindNotIn(vs ...string) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldNotIn(FieldAuthorityCeilingKind, vs...))
+}
+
+// AuthorityCeilingKindGT applies the GT predicate on the "authority_ceiling_kind" field.
+func AuthorityCeilingKindGT(v string) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldGT(FieldAuthorityCeilingKind, v))
+}
+
+// AuthorityCeilingKindGTE applies the GTE predicate on the "authority_ceiling_kind" field.
+func AuthorityCeilingKindGTE(v string) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldGTE(FieldAuthorityCeilingKind, v))
+}
+
+// AuthorityCeilingKindLT applies the LT predicate on the "authority_ceiling_kind" field.
+func AuthorityCeilingKindLT(v string) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldLT(FieldAuthorityCeilingKind, v))
+}
+
+// AuthorityCeilingKindLTE applies the LTE predicate on the "authority_ceiling_kind" field.
+func AuthorityCeilingKindLTE(v string) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldLTE(FieldAuthorityCeilingKind, v))
+}
+
+// AuthorityCeilingKindContains applies the Contains predicate on the "authority_ceiling_kind" field.
+func AuthorityCeilingKindContains(v string) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldContains(FieldAuthorityCeilingKind, v))
+}
+
+// AuthorityCeilingKindHasPrefix applies the HasPrefix predicate on the "authority_ceiling_kind" field.
+func AuthorityCeilingKindHasPrefix(v string) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldHasPrefix(FieldAuthorityCeilingKind, v))
+}
+
+// AuthorityCeilingKindHasSuffix applies the HasSuffix predicate on the "authority_ceiling_kind" field.
+func AuthorityCeilingKindHasSuffix(v string) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldHasSuffix(FieldAuthorityCeilingKind, v))
+}
+
+// AuthorityCeilingKindEqualFold applies the EqualFold predicate on the "authority_ceiling_kind" field.
+func AuthorityCeilingKindEqualFold(v string) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldEqualFold(FieldAuthorityCeilingKind, v))
+}
+
+// AuthorityCeilingKindContainsFold applies the ContainsFold predicate on the "authority_ceiling_kind" field.
+func AuthorityCeilingKindContainsFold(v string) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldContainsFold(FieldAuthorityCeilingKind, v))
+}
+
+// AuthorityCeilingVersionEQ applies the EQ predicate on the "authority_ceiling_version" field.
+func AuthorityCeilingVersionEQ(v int32) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldEQ(FieldAuthorityCeilingVersion, v))
+}
+
+// AuthorityCeilingVersionNEQ applies the NEQ predicate on the "authority_ceiling_version" field.
+func AuthorityCeilingVersionNEQ(v int32) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldNEQ(FieldAuthorityCeilingVersion, v))
+}
+
+// AuthorityCeilingVersionIn applies the In predicate on the "authority_ceiling_version" field.
+func AuthorityCeilingVersionIn(vs ...int32) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldIn(FieldAuthorityCeilingVersion, vs...))
+}
+
+// AuthorityCeilingVersionNotIn applies the NotIn predicate on the "authority_ceiling_version" field.
+func AuthorityCeilingVersionNotIn(vs ...int32) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldNotIn(FieldAuthorityCeilingVersion, vs...))
+}
+
+// AuthorityCeilingVersionGT applies the GT predicate on the "authority_ceiling_version" field.
+func AuthorityCeilingVersionGT(v int32) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldGT(FieldAuthorityCeilingVersion, v))
+}
+
+// AuthorityCeilingVersionGTE applies the GTE predicate on the "authority_ceiling_version" field.
+func AuthorityCeilingVersionGTE(v int32) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldGTE(FieldAuthorityCeilingVersion, v))
+}
+
+// AuthorityCeilingVersionLT applies the LT predicate on the "authority_ceiling_version" field.
+func AuthorityCeilingVersionLT(v int32) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldLT(FieldAuthorityCeilingVersion, v))
+}
+
+// AuthorityCeilingVersionLTE applies the LTE predicate on the "authority_ceiling_version" field.
+func AuthorityCeilingVersionLTE(v int32) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldLTE(FieldAuthorityCeilingVersion, v))
+}
+
+// AuthorityCeilingPermissionIdsEQ applies the EQ predicate on the "authority_ceiling_permission_ids" field.
+func AuthorityCeilingPermissionIdsEQ(v string) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldEQ(FieldAuthorityCeilingPermissionIds, v))
+}
+
+// AuthorityCeilingPermissionIdsNEQ applies the NEQ predicate on the "authority_ceiling_permission_ids" field.
+func AuthorityCeilingPermissionIdsNEQ(v string) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldNEQ(FieldAuthorityCeilingPermissionIds, v))
+}
+
+// AuthorityCeilingPermissionIdsIn applies the In predicate on the "authority_ceiling_permission_ids" field.
+func AuthorityCeilingPermissionIdsIn(vs ...string) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldIn(FieldAuthorityCeilingPermissionIds, vs...))
+}
+
+// AuthorityCeilingPermissionIdsNotIn applies the NotIn predicate on the "authority_ceiling_permission_ids" field.
+func AuthorityCeilingPermissionIdsNotIn(vs ...string) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldNotIn(FieldAuthorityCeilingPermissionIds, vs...))
+}
+
+// AuthorityCeilingPermissionIdsGT applies the GT predicate on the "authority_ceiling_permission_ids" field.
+func AuthorityCeilingPermissionIdsGT(v string) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldGT(FieldAuthorityCeilingPermissionIds, v))
+}
+
+// AuthorityCeilingPermissionIdsGTE applies the GTE predicate on the "authority_ceiling_permission_ids" field.
+func AuthorityCeilingPermissionIdsGTE(v string) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldGTE(FieldAuthorityCeilingPermissionIds, v))
+}
+
+// AuthorityCeilingPermissionIdsLT applies the LT predicate on the "authority_ceiling_permission_ids" field.
+func AuthorityCeilingPermissionIdsLT(v string) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldLT(FieldAuthorityCeilingPermissionIds, v))
+}
+
+// AuthorityCeilingPermissionIdsLTE applies the LTE predicate on the "authority_ceiling_permission_ids" field.
+func AuthorityCeilingPermissionIdsLTE(v string) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldLTE(FieldAuthorityCeilingPermissionIds, v))
+}
+
+// AuthorityCeilingPermissionIdsContains applies the Contains predicate on the "authority_ceiling_permission_ids" field.
+func AuthorityCeilingPermissionIdsContains(v string) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldContains(FieldAuthorityCeilingPermissionIds, v))
+}
+
+// AuthorityCeilingPermissionIdsHasPrefix applies the HasPrefix predicate on the "authority_ceiling_permission_ids" field.
+func AuthorityCeilingPermissionIdsHasPrefix(v string) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldHasPrefix(FieldAuthorityCeilingPermissionIds, v))
+}
+
+// AuthorityCeilingPermissionIdsHasSuffix applies the HasSuffix predicate on the "authority_ceiling_permission_ids" field.
+func AuthorityCeilingPermissionIdsHasSuffix(v string) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldHasSuffix(FieldAuthorityCeilingPermissionIds, v))
+}
+
+// AuthorityCeilingPermissionIdsIsNil applies the IsNil predicate on the "authority_ceiling_permission_ids" field.
+func AuthorityCeilingPermissionIdsIsNil() predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldIsNull(FieldAuthorityCeilingPermissionIds))
+}
+
+// AuthorityCeilingPermissionIdsNotNil applies the NotNil predicate on the "authority_ceiling_permission_ids" field.
+func AuthorityCeilingPermissionIdsNotNil() predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldNotNull(FieldAuthorityCeilingPermissionIds))
+}
+
+// AuthorityCeilingPermissionIdsEqualFold applies the EqualFold predicate on the "authority_ceiling_permission_ids" field.
+func AuthorityCeilingPermissionIdsEqualFold(v string) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldEqualFold(FieldAuthorityCeilingPermissionIds, v))
+}
+
+// AuthorityCeilingPermissionIdsContainsFold applies the ContainsFold predicate on the "authority_ceiling_permission_ids" field.
+func AuthorityCeilingPermissionIdsContainsFold(v string) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldContainsFold(FieldAuthorityCeilingPermissionIds, v))
+}
+
+// AuthorityCeilingBoundaryKindEQ applies the EQ predicate on the "authority_ceiling_boundary_kind" field.
+func AuthorityCeilingBoundaryKindEQ(v string) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldEQ(FieldAuthorityCeilingBoundaryKind, v))
+}
+
+// AuthorityCeilingBoundaryKindNEQ applies the NEQ predicate on the "authority_ceiling_boundary_kind" field.
+func AuthorityCeilingBoundaryKindNEQ(v string) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldNEQ(FieldAuthorityCeilingBoundaryKind, v))
+}
+
+// AuthorityCeilingBoundaryKindIn applies the In predicate on the "authority_ceiling_boundary_kind" field.
+func AuthorityCeilingBoundaryKindIn(vs ...string) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldIn(FieldAuthorityCeilingBoundaryKind, vs...))
+}
+
+// AuthorityCeilingBoundaryKindNotIn applies the NotIn predicate on the "authority_ceiling_boundary_kind" field.
+func AuthorityCeilingBoundaryKindNotIn(vs ...string) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldNotIn(FieldAuthorityCeilingBoundaryKind, vs...))
+}
+
+// AuthorityCeilingBoundaryKindGT applies the GT predicate on the "authority_ceiling_boundary_kind" field.
+func AuthorityCeilingBoundaryKindGT(v string) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldGT(FieldAuthorityCeilingBoundaryKind, v))
+}
+
+// AuthorityCeilingBoundaryKindGTE applies the GTE predicate on the "authority_ceiling_boundary_kind" field.
+func AuthorityCeilingBoundaryKindGTE(v string) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldGTE(FieldAuthorityCeilingBoundaryKind, v))
+}
+
+// AuthorityCeilingBoundaryKindLT applies the LT predicate on the "authority_ceiling_boundary_kind" field.
+func AuthorityCeilingBoundaryKindLT(v string) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldLT(FieldAuthorityCeilingBoundaryKind, v))
+}
+
+// AuthorityCeilingBoundaryKindLTE applies the LTE predicate on the "authority_ceiling_boundary_kind" field.
+func AuthorityCeilingBoundaryKindLTE(v string) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldLTE(FieldAuthorityCeilingBoundaryKind, v))
+}
+
+// AuthorityCeilingBoundaryKindContains applies the Contains predicate on the "authority_ceiling_boundary_kind" field.
+func AuthorityCeilingBoundaryKindContains(v string) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldContains(FieldAuthorityCeilingBoundaryKind, v))
+}
+
+// AuthorityCeilingBoundaryKindHasPrefix applies the HasPrefix predicate on the "authority_ceiling_boundary_kind" field.
+func AuthorityCeilingBoundaryKindHasPrefix(v string) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldHasPrefix(FieldAuthorityCeilingBoundaryKind, v))
+}
+
+// AuthorityCeilingBoundaryKindHasSuffix applies the HasSuffix predicate on the "authority_ceiling_boundary_kind" field.
+func AuthorityCeilingBoundaryKindHasSuffix(v string) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldHasSuffix(FieldAuthorityCeilingBoundaryKind, v))
+}
+
+// AuthorityCeilingBoundaryKindEqualFold applies the EqualFold predicate on the "authority_ceiling_boundary_kind" field.
+func AuthorityCeilingBoundaryKindEqualFold(v string) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldEqualFold(FieldAuthorityCeilingBoundaryKind, v))
+}
+
+// AuthorityCeilingBoundaryKindContainsFold applies the ContainsFold predicate on the "authority_ceiling_boundary_kind" field.
+func AuthorityCeilingBoundaryKindContainsFold(v string) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldContainsFold(FieldAuthorityCeilingBoundaryKind, v))
+}
+
+// AuthorityCeilingBoundaryProjectIDEQ applies the EQ predicate on the "authority_ceiling_boundary_project_id" field.
+func AuthorityCeilingBoundaryProjectIDEQ(v string) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldEQ(FieldAuthorityCeilingBoundaryProjectID, v))
+}
+
+// AuthorityCeilingBoundaryProjectIDNEQ applies the NEQ predicate on the "authority_ceiling_boundary_project_id" field.
+func AuthorityCeilingBoundaryProjectIDNEQ(v string) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldNEQ(FieldAuthorityCeilingBoundaryProjectID, v))
+}
+
+// AuthorityCeilingBoundaryProjectIDIn applies the In predicate on the "authority_ceiling_boundary_project_id" field.
+func AuthorityCeilingBoundaryProjectIDIn(vs ...string) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldIn(FieldAuthorityCeilingBoundaryProjectID, vs...))
+}
+
+// AuthorityCeilingBoundaryProjectIDNotIn applies the NotIn predicate on the "authority_ceiling_boundary_project_id" field.
+func AuthorityCeilingBoundaryProjectIDNotIn(vs ...string) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldNotIn(FieldAuthorityCeilingBoundaryProjectID, vs...))
+}
+
+// AuthorityCeilingBoundaryProjectIDGT applies the GT predicate on the "authority_ceiling_boundary_project_id" field.
+func AuthorityCeilingBoundaryProjectIDGT(v string) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldGT(FieldAuthorityCeilingBoundaryProjectID, v))
+}
+
+// AuthorityCeilingBoundaryProjectIDGTE applies the GTE predicate on the "authority_ceiling_boundary_project_id" field.
+func AuthorityCeilingBoundaryProjectIDGTE(v string) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldGTE(FieldAuthorityCeilingBoundaryProjectID, v))
+}
+
+// AuthorityCeilingBoundaryProjectIDLT applies the LT predicate on the "authority_ceiling_boundary_project_id" field.
+func AuthorityCeilingBoundaryProjectIDLT(v string) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldLT(FieldAuthorityCeilingBoundaryProjectID, v))
+}
+
+// AuthorityCeilingBoundaryProjectIDLTE applies the LTE predicate on the "authority_ceiling_boundary_project_id" field.
+func AuthorityCeilingBoundaryProjectIDLTE(v string) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldLTE(FieldAuthorityCeilingBoundaryProjectID, v))
+}
+
+// AuthorityCeilingBoundaryProjectIDContains applies the Contains predicate on the "authority_ceiling_boundary_project_id" field.
+func AuthorityCeilingBoundaryProjectIDContains(v string) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldContains(FieldAuthorityCeilingBoundaryProjectID, v))
+}
+
+// AuthorityCeilingBoundaryProjectIDHasPrefix applies the HasPrefix predicate on the "authority_ceiling_boundary_project_id" field.
+func AuthorityCeilingBoundaryProjectIDHasPrefix(v string) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldHasPrefix(FieldAuthorityCeilingBoundaryProjectID, v))
+}
+
+// AuthorityCeilingBoundaryProjectIDHasSuffix applies the HasSuffix predicate on the "authority_ceiling_boundary_project_id" field.
+func AuthorityCeilingBoundaryProjectIDHasSuffix(v string) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldHasSuffix(FieldAuthorityCeilingBoundaryProjectID, v))
+}
+
+// AuthorityCeilingBoundaryProjectIDEqualFold applies the EqualFold predicate on the "authority_ceiling_boundary_project_id" field.
+func AuthorityCeilingBoundaryProjectIDEqualFold(v string) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldEqualFold(FieldAuthorityCeilingBoundaryProjectID, v))
+}
+
+// AuthorityCeilingBoundaryProjectIDContainsFold applies the ContainsFold predicate on the "authority_ceiling_boundary_project_id" field.
+func AuthorityCeilingBoundaryProjectIDContainsFold(v string) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldContainsFold(FieldAuthorityCeilingBoundaryProjectID, v))
+}
+
+// AuthorityCeilingSourceExpiresAtEQ applies the EQ predicate on the "authority_ceiling_source_expires_at" field.
+func AuthorityCeilingSourceExpiresAtEQ(v time.Time) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldEQ(FieldAuthorityCeilingSourceExpiresAt, v))
+}
+
+// AuthorityCeilingSourceExpiresAtNEQ applies the NEQ predicate on the "authority_ceiling_source_expires_at" field.
+func AuthorityCeilingSourceExpiresAtNEQ(v time.Time) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldNEQ(FieldAuthorityCeilingSourceExpiresAt, v))
+}
+
+// AuthorityCeilingSourceExpiresAtIn applies the In predicate on the "authority_ceiling_source_expires_at" field.
+func AuthorityCeilingSourceExpiresAtIn(vs ...time.Time) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldIn(FieldAuthorityCeilingSourceExpiresAt, vs...))
+}
+
+// AuthorityCeilingSourceExpiresAtNotIn applies the NotIn predicate on the "authority_ceiling_source_expires_at" field.
+func AuthorityCeilingSourceExpiresAtNotIn(vs ...time.Time) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldNotIn(FieldAuthorityCeilingSourceExpiresAt, vs...))
+}
+
+// AuthorityCeilingSourceExpiresAtGT applies the GT predicate on the "authority_ceiling_source_expires_at" field.
+func AuthorityCeilingSourceExpiresAtGT(v time.Time) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldGT(FieldAuthorityCeilingSourceExpiresAt, v))
+}
+
+// AuthorityCeilingSourceExpiresAtGTE applies the GTE predicate on the "authority_ceiling_source_expires_at" field.
+func AuthorityCeilingSourceExpiresAtGTE(v time.Time) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldGTE(FieldAuthorityCeilingSourceExpiresAt, v))
+}
+
+// AuthorityCeilingSourceExpiresAtLT applies the LT predicate on the "authority_ceiling_source_expires_at" field.
+func AuthorityCeilingSourceExpiresAtLT(v time.Time) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldLT(FieldAuthorityCeilingSourceExpiresAt, v))
+}
+
+// AuthorityCeilingSourceExpiresAtLTE applies the LTE predicate on the "authority_ceiling_source_expires_at" field.
+func AuthorityCeilingSourceExpiresAtLTE(v time.Time) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldLTE(FieldAuthorityCeilingSourceExpiresAt, v))
+}
+
+// AuthorityCeilingSourceExpiresAtIsNil applies the IsNil predicate on the "authority_ceiling_source_expires_at" field.
+func AuthorityCeilingSourceExpiresAtIsNil() predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldIsNull(FieldAuthorityCeilingSourceExpiresAt))
+}
+
+// AuthorityCeilingSourceExpiresAtNotNil applies the NotNil predicate on the "authority_ceiling_source_expires_at" field.
+func AuthorityCeilingSourceExpiresAtNotNil() predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldNotNull(FieldAuthorityCeilingSourceExpiresAt))
 }
 
 // ProjectIDEQ applies the EQ predicate on the "project_id" field.

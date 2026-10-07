@@ -1433,6 +1433,9 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 			if hub.AsyncAgentLaunch != nil {
 				keys = append(keys, "server.hub.async_agent_launch")
 			}
+			if hub.PerfTrace != nil {
+				keys = append(keys, "server.hub.perf_trace")
+			}
 			if hub.LaunchTimeout != "" {
 				keys = append(keys, "server.hub.launch_timeout")
 			}

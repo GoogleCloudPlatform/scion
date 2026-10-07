@@ -150,6 +150,10 @@ func ceilingReadAllowance(resource Resource, action Action, permissionID string)
 // (see DenyCause) for the specific sub-cases callers need to distinguish.
 // It is left at its zero value ("") for every other outcome, including
 // allows and denials with no dedicated classification.
+//
+// note, when given and non-nil, is filled from an unrecorded-hop denial
+// (see unrecordedHopNote). Only the first value is used. The note is an
+// explicit out-parameter, so nothing is stored in the request context.
 func (a *AuthzService) checkDelegationCeiling(
 	ctx context.Context,
 	req AuthzRequest,
@@ -157,6 +161,7 @@ func (a *AuthzService) checkDelegationCeiling(
 	agentID string,
 	explain *[]DecisionStep,
 	cause *DenyCause,
+	note ...*unrecordedHopNote,
 ) (bool, string, error) {
 	// A hubDeliveryIdentity principal (ptone/scion#2228 part 2) never takes
 	// the ordinary delegator-permission proof below: it is routed to its own
@@ -192,7 +197,7 @@ func (a *AuthzService) checkDelegationCeiling(
 	}
 
 	attested := req.Principal.Identity != nil && AncestryIsHubAttested(req.Principal.Identity)
-	return a.walkDelegationChainWithCause(ctx, req.Resource, req.Action, permissionID, agentID, attested, scopeType, scopeID, explain, cause)
+	return a.walkDelegationChainWithCause(ctx, req.Resource, req.Action, permissionID, agentID, attested, scopeType, scopeID, explain, cause, note...)
 }
 
 // maxDelegationDepth limits the delegation chain walk.
@@ -226,6 +231,9 @@ func (a *AuthzService) walkDelegationChain(
 // effect ceiling and records ceiling_source_not_allowed, ceiling_unrecorded
 // or ceiling_effect_exceeded. A lookup error is returned as an error and
 // classified by the caller. Every other deny leaves cause unchanged.
+//
+// note, when given and non-nil, is filled from a hop's ceiling_unrecorded
+// denial (see logUnrecordedHop). Only the first value is used.
 func (a *AuthzService) walkDelegationChainWithCause(
 	ctx context.Context,
 	resource Resource,
@@ -236,7 +244,13 @@ func (a *AuthzService) walkDelegationChainWithCause(
 	scopeType, scopeID string,
 	explain *[]DecisionStep,
 	cause *DenyCause,
+	note ...*unrecordedHopNote,
 ) (bool, string, error) {
+	var hopNote *unrecordedHopNote
+	if len(note) > 0 {
+		hopNote = note[0]
+	}
+
 	// The delegator side is evaluated for principals other than the
 	// requester, so it must never read the requester's memoized principals
 	// or access constraints. Masking here covers every caller; only
@@ -374,6 +388,7 @@ func (a *AuthzService) walkDelegationChainWithCause(
 			}
 			if c, why := hopEffectCeilingDeny(edge, permissionID, resource, agentID, a.devLocalAuthorityEnabled()); c != "" {
 				addStep("delegation_ceiling_effect_denied", fmt.Sprintf("edge %s: %s", edge.ID, why))
+				a.logUnrecordedHop(hopNote, c, edge, permissionID)
 				setCause(c)
 				return false, why, nil
 			}
@@ -406,6 +421,7 @@ func (a *AuthzService) walkDelegationChainWithCause(
 			}
 			if c, why := hopEffectCeilingDeny(edge, permissionID, resource, agentID, a.devLocalAuthorityEnabled()); c != "" {
 				addStep("delegation_ceiling_effect_denied", fmt.Sprintf("edge %s: %s", edge.ID, why))
+				a.logUnrecordedHop(hopNote, c, edge, permissionID)
 				setCause(c)
 				return false, why, nil
 			}
@@ -419,6 +435,71 @@ func (a *AuthzService) walkDelegationChainWithCause(
 			return false, fmt.Sprintf("delegation edge %s has an unsupported delegator type", edge.ID), nil
 		}
 	}
+}
+
+// unrecordedHopNote receives, from a chain walk, whether a
+// ceiling_unrecorded denial came from a hop that delegation-provenance
+// adoption can address: an unrecorded row (provenance version 0), denied a
+// permission an adopted ceiling carries. A hop denied only because its
+// provenance version is not understood is not adoptable. The note is
+// descriptive: it selects response details and is never read by an
+// authorization decision. It is passed as an explicit out-parameter and is
+// never stored in a request context.
+type unrecordedHopNote struct {
+	adoptable bool
+}
+
+// logUnrecordedHop logs at Debug, server-side only, the delegate whose hop
+// denied with ceiling_unrecorded, so an admin can correlate the denial with
+// the delegation-adoption status view, and fills note when it is non-nil.
+// Nothing here reaches the caller.
+func (a *AuthzService) logUnrecordedHop(note *unrecordedHopNote, cause DenyCause, edge *store.DelegationEdge, permissionID string) {
+	if cause != DenyCauseCeilingUnrecorded {
+		return
+	}
+	unrecordedRow := edge.ProvenanceVersion == 0 && edge.Kind == store.EffectCeilingUnrecorded
+	adoptable := unrecordedRow && adoptionCeilingCovers(permissionID)
+	if note != nil {
+		note.adoptable = adoptable
+	}
+	if a.logger == nil {
+		return
+	}
+	if !unrecordedRow {
+		a.logger.Debug("delegation ceiling: hop with an unsupported provenance version denied a permission that requires recorded provenance",
+			"delegate_id", edge.DelegateID, "scope_id", edge.ScopeID, "permission", permissionID,
+			"provenance_version", edge.ProvenanceVersion)
+		return
+	}
+	if !adoptable {
+		a.logger.Debug("delegation ceiling: unrecorded hop denied a permission no adopted ceiling carries",
+			"delegate_id", edge.DelegateID, "scope_id", edge.ScopeID, "permission", permissionID)
+		return
+	}
+	a.logger.Debug("delegation ceiling: unrecorded hop denied a permission that requires recorded provenance",
+		"delegate_id", edge.DelegateID, "scope_id", edge.ScopeID, "permission", permissionID,
+		"remediation_path", delegationAdoptionPath)
+}
+
+// adoptionCeilingIDs is the union of the compatibility policy V1 ceilings
+// over every role, with the assigned-service-account additions.
+var adoptionCeilingIDs = func() map[string]bool {
+	ids := map[string]bool{}
+	for _, role := range permissions.CompatibilityRoles() {
+		row, _ := permissions.CompatibilityCeiling(permissions.CompatibilityPolicyV1, role, true)
+		for _, id := range row {
+			ids[id] = true
+		}
+	}
+	return ids
+}()
+
+// adoptionCeilingCovers reports whether some compatibility policy V1 ceiling
+// carries permissionID. A permission no adopted ceiling carries (for
+// example one registered after V1) is not addressed by adoption, so its
+// ceiling_unrecorded denial does not name adoption as the remedy.
+func adoptionCeilingCovers(permissionID string) bool {
+	return adoptionCeilingIDs[permissionID]
 }
 
 // hopEffectCeilingDeny applies a hop's frozen provenance and effect ceiling

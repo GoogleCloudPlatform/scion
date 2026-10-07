@@ -23,6 +23,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestArtifactPublish(t *testing.T) {
@@ -146,5 +147,87 @@ func TestArtifactOpenFileRedirectDropsCredentials(t *testing.T) {
 	b, _ := io.ReadAll(rc)
 	if string(b) != "object bytes" {
 		t.Errorf("body %q", b)
+	}
+}
+
+// TestArtifactLongCallsIgnoreClientTimeout: publishing, uploading,
+// finalizing and reading file bytes are bounded by the caller's context,
+// not by the client's whole-exchange timeout, which still applies to
+// metadata calls.
+func TestArtifactLongCallsIgnoreClientTimeout(t *testing.T) {
+	const slow = 300 * time.Millisecond
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(slow)
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPut:
+			w.WriteHeader(http.StatusNoContent)
+		case strings.HasSuffix(r.URL.Path, "/finalize"), r.URL.Query().Has("name"):
+			_, _ = io.WriteString(w, `{"artifact":{"id":"a"},"version":{"seq":1}}`)
+		case r.Method == http.MethodPost:
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, `{"artifact":{"id":"a"},"version":{"seq":1},"upload":{"required":[]}}`)
+		case strings.Contains(r.URL.Path, "/files/"):
+			_, _ = io.WriteString(w, "bytes")
+		default:
+			_, _ = io.WriteString(w, `{"artifact":{"id":"a"}}`)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := New(srv.URL, WithTimeout(slow/3))
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := c.Artifacts()
+	ctx := context.Background()
+	if _, err := svc.Publish(ctx, &PublishArtifactRequest{Name: "a.md", Content: strings.NewReader("x"), Size: 1}); err != nil {
+		t.Errorf("Publish: %v", err)
+	}
+	if _, err := svc.CreateVersion(ctx, "", &CreateVersionRequest{Entry: "a.md"}); err != nil {
+		t.Errorf("CreateVersion: %v", err)
+	}
+	if err := svc.UploadFile(ctx, "a", 1, "a.md", strings.NewReader("x"), 1, ""); err != nil {
+		t.Errorf("UploadFile: %v", err)
+	}
+	if _, err := svc.FinalizeVersion(ctx, "a", 1); err != nil {
+		t.Errorf("FinalizeVersion: %v", err)
+	}
+	rc, err := svc.OpenFile(ctx, "a", 1, "a.md")
+	if err != nil {
+		t.Errorf("OpenFile: %v", err)
+	} else {
+		_ = rc.Close()
+	}
+	if _, err := svc.Get(ctx, "a"); err == nil {
+		t.Errorf("Get: a metadata call must keep the client timeout")
+	}
+	// The caller's context still bounds the long calls.
+	short, cancel := context.WithTimeout(ctx, slow/3)
+	defer cancel()
+	if _, err := svc.FinalizeVersion(short, "a", 1); err == nil {
+		t.Errorf("FinalizeVersion ignored the context deadline")
+	}
+}
+
+func TestArtifactListVersionsPages(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Query().Get("before") {
+		case "":
+			_, _ = io.WriteString(w, `{"versions":[{"seq":3},{"seq":2}],"nextBefore":2}`)
+		case "2":
+			_, _ = io.WriteString(w, `{"versions":[{"seq":1}]}`)
+		default:
+			t.Errorf("unexpected page %q", r.URL.RawQuery)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	vs, err := c.Artifacts().ListVersions(context.Background(), "a")
+	if err != nil || len(vs) != 3 || vs[2].Seq != 1 {
+		t.Errorf("ListVersions = %+v, %v", vs, err)
 	}
 }

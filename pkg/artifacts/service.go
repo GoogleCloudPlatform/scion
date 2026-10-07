@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/google/uuid"
@@ -36,11 +37,15 @@ const (
 	// RouteShared serves share links. Its requests authenticate by link
 	// token only, so the host must mount it without requiring a session.
 	RouteShared = "/api/v1/artifacts/shared/"
+	// RouteView serves the files of one version to a sandboxed frame,
+	// authenticated by a view capability in the path only, so the host
+	// must mount it without requiring a session.
+	RouteView = "/api/v1/artifacts/view/"
 )
 
 // RoutePatterns returns every pattern RegisterRoutes mounts.
 func RoutePatterns() []string {
-	return []string{RouteCollection, RouteByID, RouteShared}
+	return []string{RouteCollection, RouteByID, RouteShared, RouteView}
 }
 
 // Mux is the subset of *http.ServeMux that RegisterRoutes needs.
@@ -68,27 +73,54 @@ type Service struct {
 	store    Store
 	blobs    storage.Storage
 	hubID    string
+	viewKey  []byte
 	limits   func(context.Context) Limits
 	provider func() Backend
+
+	// htmlNotice remembers, by entry digest, whether an HTML entry
+	// references remote images (see entryHasRemoteImages).
+	noticeMu   sync.Mutex
+	htmlNotice map[string]bool
+
+	fetcherFactory func(RemoteImageLimits) ImageFetcher
+	// fetchFloor overrides the fetch floor in tests; zero means the
+	// fetcher's connect timeout.
+	fetchFloor time.Duration
 }
 
 // Backend is what a request needs from the service's environment: the
-// metadata store, the blob storage and the hub id that namespaces blobs.
+// metadata store, the blob storage, the hub id that namespaces blobs and
+// the key that signs view capabilities.
 type Backend struct {
 	Store Store
 	Blobs storage.Storage
 	HubID string
+	// ViewKey signs view capabilities (see RouteView). Without one, HTML
+	// entries cannot be viewed.
+	ViewKey []byte
 }
 
 // Limits are the size limits the service enforces.
 type Limits struct {
 	// MaxFileBytes caps the size of one file.
 	MaxFileBytes int64
+	// MaxBundleBytes caps the total size of the files of one version.
+	MaxBundleBytes int64
+	// MaxFiles caps the number of files of one version.
+	MaxFiles int
+	// RemoteImages bound the remote images fetched at publish time. A host
+	// that sets a limits getter must fill them in: incomplete or invalid
+	// values turn remote images off.
+	RemoteImages RemoteImageLimits
 }
 
-// DefaultMaxFileBytes is the per-file limit used when no limits getter is
-// set or it yields a non-positive value (design D19).
-const DefaultMaxFileBytes int64 = 32 << 20
+// Default limits, used when no limits getter is set or it yields a
+// non-positive value (design D19).
+const (
+	DefaultMaxFileBytes   int64 = 32 << 20
+	DefaultMaxBundleBytes int64 = 256 << 20
+	DefaultMaxFiles             = 200
+)
 
 // NewService returns a service that identifies and authorizes callers
 // through host.
@@ -123,6 +155,14 @@ func (s *Service) SetBlobStorage(blobs storage.Storage, hubID string) {
 	s.mu.Unlock()
 }
 
+// SetViewKey sets the key that signs view capabilities, when no backend
+// provider supplies one.
+func (s *Service) SetViewKey(key []byte) {
+	s.mu.Lock()
+	s.viewKey = key
+	s.mu.Unlock()
+}
+
 // SetLimits sets the function that yields the current limits. It is called
 // on every write, so limits follow the host's settings without a restart.
 func (s *Service) SetLimits(fn func(context.Context) Limits) {
@@ -133,31 +173,46 @@ func (s *Service) SetLimits(fn func(context.Context) Limits) {
 
 // backend is a consistent snapshot of the service's configuration.
 type backend struct {
-	store  Store
-	blobs  storage.Storage
-	hubID  string
-	limits func(context.Context) Limits
+	store   Store
+	blobs   storage.Storage
+	hubID   string
+	viewKey []byte
+	limits  func(context.Context) Limits
 }
 
 func (s *Service) backend() (backend, bool) {
 	s.mu.RLock()
-	b := backend{store: s.store, blobs: s.blobs, hubID: s.hubID, limits: s.limits}
+	b := backend{store: s.store, blobs: s.blobs, hubID: s.hubID, viewKey: s.viewKey, limits: s.limits}
 	provider := s.provider
 	s.mu.RUnlock()
 	if provider != nil {
 		p := provider()
-		b.store, b.blobs, b.hubID = p.Store, p.Blobs, p.HubID
+		b.store, b.blobs, b.hubID, b.viewKey = p.Store, p.Blobs, p.HubID, p.ViewKey
 	}
 	return b, b.store != nil && b.blobs != nil && b.hubID != ""
 }
 
 func (b backend) maxFileBytes(ctx context.Context) int64 {
+	return b.currentLimits(ctx).MaxFileBytes
+}
+
+// currentLimits reads the limits once, defaulting each unset or
+// non-positive one.
+func (b backend) currentLimits(ctx context.Context) Limits {
+	var l Limits
 	if b.limits != nil {
-		if l := b.limits(ctx); l.MaxFileBytes > 0 {
-			return l.MaxFileBytes
-		}
+		l = b.limits(ctx)
 	}
-	return DefaultMaxFileBytes
+	if l.MaxFileBytes <= 0 {
+		l.MaxFileBytes = DefaultMaxFileBytes
+	}
+	if l.MaxBundleBytes <= 0 {
+		l.MaxBundleBytes = DefaultMaxBundleBytes
+	}
+	if l.MaxFiles <= 0 {
+		l.MaxFiles = DefaultMaxFiles
+	}
+	return l
 }
 
 // Handler returns the service's HTTP handler for every route pattern.
@@ -178,10 +233,18 @@ func (s *Service) RegisterRoutes(mux Mux, guard Guard) {
 
 // ServeHTTP routes a request:
 //
-//	POST /api/v1/artifacts?name=<file>[&title=][&scope=]   single-file publish
-//	GET  /api/v1/artifacts/{id}                            metadata of the current version
-//	GET  /api/v1/artifacts/{id}/files/{path}               a file of the current version
+//	POST /api/v1/artifacts?name=<file>[&title=][&scope=]    single-file publish
+//	POST /api/v1/artifacts                                  create a pending version (JSON manifest)
+//	GET  /api/v1/artifacts/{id}                             metadata of the current version
+//	GET  /api/v1/artifacts/{id}/files/{path}                a file of the current version
+//	GET  /api/v1/artifacts/{id}/versions                    the ready versions
+//	POST /api/v1/artifacts/{id}/versions                    append a pending version
+//	GET  /api/v1/artifacts/{id}/versions/{seq}              one ready version
+//	POST /api/v1/artifacts/{id}/versions/{seq}/finalize     make a pending version ready
+//	POST /api/v1/artifacts/{id}/versions/{seq}/view         a view capability for an HTML entry
+//	GET  /api/v1/artifacts/view/{capability}/{path}         a file of the version a capability names
 //	GET  /api/v1/artifacts/{id}/versions/{seq}/files/{path} a file of version seq
+//	PUT  /api/v1/artifacts/{id}/versions/{seq}/files/{path} upload a file of a pending version
 //
 // Everything else, including share links (a later phase), answers 404.
 func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -196,12 +259,24 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			writeMethodNotAllowed(w, http.MethodPost)
 			return
 		}
-		s.handlePublish(w, r)
+		if r.URL.Query().Has(paramName) {
+			s.handlePublish(w, r)
+			return
+		}
+		s.handleCreate(w, r)
 		return
 	}
 	segs, ok := splitEscapedPath(rest)
 	if !ok || segs[0] == "shared" {
 		writeNotFound(w)
+		return
+	}
+	if segs[0] == "view" {
+		if !isRead(r.Method) {
+			writeMethodNotAllowed(w, http.MethodGet, http.MethodHead)
+			return
+		}
+		s.handleView(w, r, segs[1:])
 		return
 	}
 	id := segs[0]
@@ -222,17 +297,53 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handleGetFile(w, r, id, 0, strings.Join(segs[2:], "/"))
-	case len(segs) >= 5 && segs[1] == "versions" && segs[3] == "files":
+	case len(segs) == 2 && segs[1] == "versions":
+		switch {
+		case isRead(r.Method):
+			s.handleListVersions(w, r, id)
+		case r.Method == http.MethodPost:
+			s.handleCreateVersion(w, r, id)
+		default:
+			writeMethodNotAllowed(w, http.MethodGet, http.MethodHead, http.MethodPost)
+		}
+	case len(segs) >= 3 && segs[1] == "versions":
 		seq, ok := parseSeq(segs[2])
 		if !ok {
 			writeNotFound(w)
 			return
 		}
-		if !isRead(r.Method) {
-			writeMethodNotAllowed(w, http.MethodGet, http.MethodHead)
-			return
+		switch {
+		case len(segs) == 3:
+			if !isRead(r.Method) {
+				writeMethodNotAllowed(w, http.MethodGet, http.MethodHead)
+				return
+			}
+			s.handleGetVersion(w, r, id, seq)
+		case len(segs) == 4 && segs[3] == "finalize":
+			if r.Method != http.MethodPost {
+				writeMethodNotAllowed(w, http.MethodPost)
+				return
+			}
+			s.handleFinalize(w, r, id, seq)
+		case len(segs) == 4 && segs[3] == "view":
+			if r.Method != http.MethodPost {
+				writeMethodNotAllowed(w, http.MethodPost)
+				return
+			}
+			s.handleMintView(w, r, id, seq)
+		case len(segs) >= 5 && segs[3] == "files":
+			filePath := strings.Join(segs[4:], "/")
+			switch {
+			case isRead(r.Method):
+				s.handleGetFile(w, r, id, seq, filePath)
+			case r.Method == http.MethodPut:
+				s.handlePutFile(w, r, id, seq, filePath)
+			default:
+				writeMethodNotAllowed(w, http.MethodGet, http.MethodHead, http.MethodPut)
+			}
+		default:
+			writeNotFound(w)
 		}
-		s.handleGetFile(w, r, id, seq, strings.Join(segs[4:], "/"))
 	default:
 		writeNotFound(w)
 	}
@@ -285,8 +396,9 @@ type errorResponse struct {
 }
 
 type errorBody struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	Code    string         `json:"code"`
+	Message string         `json:"message"`
+	Details map[string]any `json:"details,omitempty"`
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
