@@ -31,6 +31,7 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -192,6 +193,7 @@ func TestViewSandboxBrowserProbe(t *testing.T) {
 		_, _ = w.Write([]byte(strings.Replace(page, "SANDBOX", string(sandboxJSON), 1)))
 	})
 	var cookieSeen atomicBool
+	subResources := &requestLog{}
 	mux.HandleFunc("/cookie-check.png", func(w http.ResponseWriter, r *http.Request) {
 		if c := r.Header.Get("Cookie"); strings.Contains(c, "probe=") {
 			cookieSeen.set()
@@ -206,6 +208,9 @@ func TestViewSandboxBrowserProbe(t *testing.T) {
 		// The hub's session would identify the parent's requests; the
 		// probe's own requests must not be served as anyone.
 		if strings.HasPrefix(r.URL.Path, RouteView) {
+			if !strings.HasSuffix(r.URL.Path, "/index.html") {
+				subResources.record(r)
+			}
 			f.svc.ServeHTTP(w, r)
 			return
 		}
@@ -268,6 +273,21 @@ func TestViewSandboxBrowserProbe(t *testing.T) {
 		if cookieSeen.get() {
 			t.Errorf("a request from the framed document carried the host page's cookie")
 		}
+		// The framed document's own sub-resource requests, which its policy
+		// allows, reach the hub without the host page's session cookie.
+		paths, withCookie := subResources.take()
+		for _, want := range []string{"/img/a.png", "/css/s.css", "/js/app.js"} {
+			found := false
+			for _, p := range paths {
+				found = found || strings.HasSuffix(p, want)
+			}
+			if !found {
+				t.Errorf("no request for %s from the framed document (saw %v)", want, paths)
+			}
+		}
+		if len(withCookie) > 0 {
+			t.Errorf("framed sub-resource requests carried the host page's cookie: %v", withCookie)
+		}
 	}
 	t.Run("framed as the web UI frames it", func(t *testing.T) { framed(t, "allow-scripts") })
 	// The response's own sandbox keeps the document in an opaque origin
@@ -291,3 +311,28 @@ type atomicBool struct{ v atomic.Bool }
 
 func (b *atomicBool) set()      { b.v.Store(true) }
 func (b *atomicBool) get() bool { return b.v.Load() }
+
+// requestLog records the paths of requests and those that carried the
+// probe cookie.
+type requestLog struct {
+	mu         sync.Mutex
+	paths      []string
+	withCookie []string
+}
+
+func (l *requestLog) record(r *http.Request) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.paths = append(l.paths, r.URL.Path)
+	if strings.Contains(r.Header.Get("Cookie"), "probe=") {
+		l.withCookie = append(l.withCookie, r.URL.Path)
+	}
+}
+
+func (l *requestLog) take() ([]string, []string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	p, c := l.paths, l.withCookie
+	l.paths, l.withCookie = nil, nil
+	return p, c
+}
