@@ -61,8 +61,11 @@ func adminRequest(method, url, body string) *http.Request {
 		r = httptest.NewRequest(method, url, nil)
 	}
 	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
-	r = r.WithContext(contextWithIdentity(r.Context(), admin))
-	return r
+	// An interactive session, as the auth middleware records it for a
+	// signed-in admin: settings writes refuse every other credential kind
+	// for keys outside the configuration set.
+	ctx := contextWithCredentialContext(contextWithIdentity(r.Context(), admin), CredentialContext{Kind: CredentialKindInteractive})
+	return r.WithContext(ctx)
 }
 
 // ---- GET /api/v1/admin/server-config (postgres mode) ----
