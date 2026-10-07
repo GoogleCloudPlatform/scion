@@ -448,6 +448,47 @@ func TestStandingGates_HeldAgent(t *testing.T) {
 		_, getErr := f.s.GetAgentBySlug(ctx, f.projectID, "ms-held-sched-child")
 		assert.ErrorIs(t, getErr, store.ErrNotFound)
 	})
+	t.Run("heldSenderSameProject", func(t *testing.T) {
+		// Modes that allow the send; the hold refuses it.
+		for _, id := range []string{f.agentA.ID, f.childC.ID} {
+			a, err := f.s.GetAgent(ctx, id)
+			require.NoError(t, err)
+			a.MessageMode = store.MessageModeProject
+			require.NoError(t, f.s.UpdateAgent(ctx, a))
+		}
+		target, err := f.s.GetAgent(ctx, f.childC.ID)
+		require.NoError(t, err)
+		d := f.srv.EvaluateAgentMessage(ctx, f.agentIdentity(f.agentA), target)
+		assert.False(t, d.Allowed)
+		assert.Equal(t, messageReasonSenderNotPermitted, d.Reason)
+		ok, reason, _ := f.srv.authorizeAgentMessage(ctx, f.agentIdentity(f.agentA), target, false)
+		assert.False(t, ok)
+		assert.Equal(t, messageReasonSenderNotPermitted, reason)
+	})
+	t.Run("heldSenderSelfMessage", func(t *testing.T) {
+		ok, reason, _ := f.srv.authorizeAgentMessage(ctx, f.agentIdentity(f.agentA), f.agentA, false)
+		assert.False(t, ok)
+		assert.Equal(t, messageReasonSenderNotPermitted, reason)
+	})
+	t.Run("heldSenderCrossProject", func(t *testing.T) {
+		cp := crossProjectSetup(t)
+		enableCrossProjectMessaging(t, cp.srv)
+		_, err := cp.store.UpdateProjectMessagingPolicy(ctx, cp.projectB, store.CrossProjectInboundAny, 1)
+		require.NoError(t, err)
+		sender := msgAuthzAgent(t, cp.store, "held-cp-sender", cp.projectA, store.MessageModeHub, []string{cp.ownerA.ID})
+		target := msgAuthzAgent(t, cp.store, "held-cp-target", cp.projectB, store.MessageModeProject, []string{cp.ownerB.ID})
+		ident := msgAuthzAgentIdentity(sender.ID, cp.projectA, sender.Ancestry)
+		require.True(t, cp.srv.EvaluateAgentMessage(ctx, ident, target).Allowed, "control: allowed before the hold")
+		_, err = cp.store.CreateAgentHolds(ctx, []*store.AgentHold{{
+			AgentID: sender.ID, ProjectID: cp.projectA, Cause: store.AgentHoldCauseOwnerAccessEnded,
+			RootPrincipalType: store.AgentHoldRootUser, RootPrincipalID: cp.ownerA.ID,
+			Trigger: store.MembershipLossTriggerMemberRemove, ActorKind: "system", ActorID: "hub", CorrelationID: "test",
+		}})
+		require.NoError(t, err)
+		d := cp.srv.EvaluateAgentMessage(ctx, ident, target)
+		assert.False(t, d.Allowed)
+		assert.Equal(t, messageReasonSenderNotPermitted, d.Reason)
+	})
 	t.Run("agentCreateHeldCreator", func(t *testing.T) {
 		// The creating agent's chain admits the create; the hold refuses it.
 		rec := httptest.NewRecorder()

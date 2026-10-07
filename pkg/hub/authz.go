@@ -443,7 +443,10 @@ const (
 	// failure (Step 7c, detected after Step 9 because the failure there
 	// is folded into a deny-all restriction rather than an early return).
 	// The bearer gate (evaluateBearerGate) also sets it when the live
-	// project access lookup for a user access token fails on a store fault.
+	// project access lookup for a user access token fails on a store fault,
+	// and the delegation-ceiling walk sets it when the project-access stage
+	// on a user delegator's relationship authority (the ceiling hop) cannot
+	// evaluate the delegator's admission.
 	DenyCauseResolutionError DenyCause = "resolution_error"
 
 	// DenyCauseCeilingUnrecorded marks a deny where the source credential's
@@ -472,8 +475,9 @@ const (
 // resolution fault on the tagged paths, rather than a policy fact — the
 // access check could not be decided. Tagged: principal, role-binding,
 // role-definition and access-constraint resolution in decide(), the
-// user-access-token live project access lookup (evaluateBearerGate), and
-// the delegation-ceiling error. Not yet tagged: relationship-fact and
+// user-access-token live project access lookup (evaluateBearerGate), the
+// project-access lookup on the delegation-ceiling user hop, and the
+// delegation-ceiling error. Not yet tagged: relationship-fact and
 // source-active lookup failures (isCurrentHubMember, relationshipSourceActive,
 // progenySourceFor). A false result for those candidates does not prove a
 // policy deny.
