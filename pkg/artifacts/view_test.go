@@ -294,3 +294,62 @@ func TestViewMintRemembersTheNotice(t *testing.T) {
 		t.Errorf("entry read %d times for 3 views, want 1", n)
 	}
 }
+
+// TestViewRefusesExpiredArtifacts: a view capability stops working when
+// its artifact expires, even before the capability does.
+func TestViewRefusesExpiredArtifacts(t *testing.T) {
+	f := newFixture(t, false)
+	f.svc.SetViewKey(testViewKey)
+	pub := f.publishBundle(agentA, "/api/v1/artifacts", htmlSite.manifest("index.html"), htmlSite)
+	view, _ := f.mintView(&agentA, pub.Artifact.ID, 1)
+	if rec := f.do(nil, http.MethodGet, view.URL, nil, nil); rec.Code != http.StatusOK {
+		t.Fatalf("before expiry: %d", rec.Code)
+	}
+	past := time.Now().Add(-time.Minute).UTC().Format(sqliteTimeLayout)
+	if _, err := f.db.Exec("UPDATE artifact SET expires_at = ? WHERE id = ?", past, pub.Artifact.ID); err != nil {
+		t.Fatal(err)
+	}
+	if rec := f.do(nil, http.MethodGet, view.URL, nil, nil); rec.Code != http.StatusNotFound {
+		t.Errorf("after expiry: %d, want 404", rec.Code)
+	}
+}
+
+// TestViewRefusesVersionsNotReady: a capability names a version that is
+// not ready (one the service would never mint for) and is refused.
+func TestViewRefusesVersionsNotReady(t *testing.T) {
+	f := newFixture(t, false)
+	f.svc.SetViewKey(testViewKey)
+	pub := f.publishBundle(agentA, "/api/v1/artifacts", htmlSite.manifest("index.html"), htmlSite)
+	pend := f.createPending(agentA, "/api/v1/artifacts/"+pub.Artifact.ID+"/versions", htmlSite.manifest("index.html"))
+	for p, body := range htmlSite {
+		f.put(agentA, pub.Artifact.ID, pend.Version.Seq, p, body)
+	}
+	capability := mintViewCapability(testViewKey, pub.Artifact.ID, pend.Version.Seq, time.Now().Add(ViewTTL))
+	if rec := f.do(nil, http.MethodGet, RouteView+capability+"/index.html", nil, nil); rec.Code != http.StatusNotFound {
+		t.Errorf("pending version: %d, want 404", rec.Code)
+	}
+}
+
+// TestViewRefusesFailedRemoteRows: a remote row whose fetch failed has no
+// bytes and is refused through a view.
+func TestViewRefusesFailedRemoteRows(t *testing.T) {
+	f := newFixture(t, false)
+	f.svc.SetViewKey(testViewKey)
+	pub := f.publishBundle(agentA, "/api/v1/artifacts", htmlSite.manifest("index.html"), htmlSite)
+	v, err := f.store.GetVersion(context.Background(), pub.Artifact.ID, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed := RemotePath("https://img.example/x.png")
+	// A failed row that still names a digest, so only the status check
+	// keeps it from being served.
+	if _, err := f.db.Exec(`INSERT INTO artifact_file (version_id, path, size, sha256, media_type, origin, source_url, fetch_status, fetch_error, received)
+		VALUES (?, ?, ?, ?, 'image/png', 'remote', 'https://img.example/x.png', 'failed', 'x', 1)`,
+		v.ID, failed, len(testPNG), sha(htmlSite["img/a.png"])); err != nil {
+		t.Fatal(err)
+	}
+	capability := mintViewCapability(testViewKey, pub.Artifact.ID, 1, time.Now().Add(ViewTTL))
+	if rec := f.do(nil, http.MethodGet, RouteView+capability+"/"+failed, nil, nil); rec.Code != http.StatusNotFound {
+		t.Errorf("failed remote row: %d, want 404", rec.Code)
+	}
+}
