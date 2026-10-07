@@ -15,9 +15,16 @@
 package cmd
 
 import (
+	"context"
 	"testing"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/sdk/resource"
+	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/observability/hubmetrics"
+	"github.com/GoogleCloudPlatform/scion/pkg/observability/hubtracing"
 )
 
 type fakeTelemetrySource struct{ hubID, instanceID string }
@@ -32,12 +39,31 @@ func TestHubTelemetryIdentity(t *testing.T) {
 	if id.hubID != "hub-a" || id.hubName != "Hub A" || id.instanceID != "pod-0-1234" {
 		t.Fatalf("identity = %+v, want hub-a / Hub A / pod-0-1234", id)
 	}
-	if n := len(id.metricsOptions()); n != 3 {
-		t.Errorf("metrics options = %d, want hub ID, hub name and instance ID", n)
+
+	mres, err := hubmetrics.NewResource(context.Background(), id.metricsOptions()...)
+	if err != nil {
+		t.Fatalf("metrics resource: %v", err)
 	}
-	if n := len(id.tracingOptions()); n != 3 {
-		t.Errorf("tracing options = %d, want hub ID, hub name and instance ID", n)
+	tres, err := hubtracing.NewResource(context.Background(), id.tracingOptions()...)
+	if err != nil {
+		t.Fatalf("tracing resource: %v", err)
 	}
+	for signal, res := range map[string]*resource.Resource{"metrics": mres, "traces": tres} {
+		if got := resourceAttr(res, semconv.ServiceInstanceIDKey); got != "pod-0-1234" {
+			t.Errorf("%s service.instance.id = %q, want the hub instance ID pod-0-1234", signal, got)
+		}
+		if got := resourceAttr(res, "scion.hub.id"); got != "hub-a" {
+			t.Errorf("%s scion.hub.id = %q, want hub-a", signal, got)
+		}
+		if got := resourceAttr(res, "scion.hub.name"); got != "Hub A" {
+			t.Errorf("%s scion.hub.name = %q, want Hub A", signal, got)
+		}
+	}
+}
+
+func resourceAttr(res *resource.Resource, key attribute.Key) string {
+	v, _ := res.Set().Value(key)
+	return v.AsString()
 }
 
 // TestHubTelemetryIdentityFallback checks an empty instance ID is replaced
@@ -49,5 +75,17 @@ func TestHubTelemetryIdentityFallback(t *testing.T) {
 	}
 	if id.instanceID == "hub-a" {
 		t.Fatal("fallback must not reuse the hub ID")
+	}
+	mres, err := hubmetrics.NewResource(context.Background(), id.metricsOptions()...)
+	if err != nil {
+		t.Fatalf("metrics resource: %v", err)
+	}
+	tres, err := hubtracing.NewResource(context.Background(), id.tracingOptions()...)
+	if err != nil {
+		t.Fatalf("tracing resource: %v", err)
+	}
+	m, tr := resourceAttr(mres, semconv.ServiceInstanceIDKey), resourceAttr(tres, semconv.ServiceInstanceIDKey)
+	if m != id.instanceID || tr != id.instanceID {
+		t.Fatalf("service.instance.id metrics=%q traces=%q, want both %q", m, tr, id.instanceID)
 	}
 }

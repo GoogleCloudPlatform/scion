@@ -111,6 +111,17 @@ func NewTracerProvider(ctx context.Context, gcpProjectID string, opts ...Option)
 	return tp, nil
 }
 
+// NewResource builds the OTel resource NewTracerProvider attaches to every
+// hub span from opts, without creating an exporter. Callers use it to check
+// the identity a set of options produces.
+func NewResource(ctx context.Context, opts ...Option) (*resource.Resource, error) {
+	o := &options{serviceName: "scion-server"}
+	for _, fn := range opts {
+		fn(o)
+	}
+	return newResource(ctx, o)
+}
+
 // newResource builds the OTel resource attached to every hub span.
 func newResource(ctx context.Context, o *options) (*resource.Resource, error) {
 	resAttrs := []attribute.KeyValue{
