@@ -28,6 +28,9 @@ import {
   displayStatusLabel,
   computePreStaleIds,
   resolveBatchTickSettled,
+  expectedFirstPageCount,
+  pageCountFor,
+  summarizePageChanges,
   summarizeBurstScenario,
   BURST_TARGET_ROTATION,
 } from './lib.mjs';
@@ -502,4 +505,82 @@ test('summarizeBurstScenario handles an all-invalid scenario without crashing', 
   assert.equal(s.perAgentMaxSettleMs, null);
   assert.equal(s.runMedianMinMs, null);
   assert.equal(s.runMedianMaxMs, null);
+});
+
+test('expectedFirstPageCount: one full page, or every agent when fewer', () => {
+  assert.equal(expectedFirstPageCount(25, 100, 100), 25);
+  assert.equal(expectedFirstPageCount(25, 10, 10), 10);
+  assert.equal(expectedFirstPageCount(50, 500, 500), 50);
+  // The pager total wins over the seeded count when known.
+  assert.equal(expectedFirstPageCount(25, 100, 12), 12);
+  // Unknown total falls back to the seeded count.
+  assert.equal(expectedFirstPageCount(25, 100, null), 25);
+  assert.equal(expectedFirstPageCount(25, 7, undefined), 7);
+});
+
+test('expectedFirstPageCount: no pager (no page size) expects every agent', () => {
+  assert.equal(expectedFirstPageCount(null, 100, null), 100);
+  assert.equal(expectedFirstPageCount(0, 100, 100), 100);
+  assert.equal(expectedFirstPageCount(undefined, 25, 25), 25);
+});
+
+test('pageCountFor', () => {
+  assert.equal(pageCountFor(25, 100), 4);
+  assert.equal(pageCountFor(25, 101), 5);
+  assert.equal(pageCountFor(25, 25), 1);
+  assert.equal(pageCountFor(25, 0), 1);
+  assert.equal(pageCountFor(null, 100), null);
+  assert.equal(pageCountFor(25, null), null);
+});
+
+test('summarizePageChanges: completed changes of populated runs only', () => {
+  const results = [
+    {
+      outcome: 'populated',
+      pageSize: 25,
+      pageCount: 4,
+      pageChanges: [
+        { toPageIndex: 1, ok: true, ms: 100 },
+        { toPageIndex: 2, ok: true, ms: 300 },
+        { toPageIndex: 3, ok: false, ms: null },
+      ],
+    },
+    {
+      outcome: 'populated',
+      pageSize: 25,
+      pageCount: 4,
+      pageChanges: [{ toPageIndex: 1, ok: true, ms: 200 }],
+    },
+    // A run that never populated contributes no page changes.
+    { outcome: 'loaded-not-rendered', pageSize: 25, pageCount: 4, pageChanges: [] },
+  ];
+  const s = summarizePageChanges(results);
+  assert.equal(s.pageSize, 25);
+  assert.equal(s.pageCount, 4);
+  assert.equal(s.pageChangeAttemptCount, 4);
+  assert.equal(s.pageChangeSuccessCount, 3);
+  assert.equal(s.pageChangeFailureCount, 1);
+  assert.equal(s.medianPageChangeMs, 200);
+  assert.equal(s.minPageChangeMs, 100);
+  assert.equal(s.maxPageChangeMs, 300);
+});
+
+test('summarizePageChanges: a single page, no pager, or mixed page sizes', () => {
+  const single = summarizePageChanges([
+    { outcome: 'populated', pageSize: 25, pageCount: 1, pageChanges: [] },
+  ]);
+  assert.equal(single.pageChangeAttemptCount, 0);
+  assert.equal(single.medianPageChangeMs, null);
+  assert.equal(single.pageCount, 1);
+
+  const none = summarizePageChanges([{ outcome: 'populated', pageSize: null, pageCount: null }]);
+  assert.equal(none.pageSize, null);
+  assert.equal(none.pageCount, null);
+
+  const mixed = summarizePageChanges([
+    { outcome: 'populated', pageSize: 25, pageCount: 4, pageChanges: [] },
+    { outcome: 'populated', pageSize: 50, pageCount: 2, pageChanges: [] },
+  ]);
+  assert.deepEqual(mixed.pageSize, [25, 50]);
+  assert.deepEqual(mixed.pageCount, [4, 2]);
 });

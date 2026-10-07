@@ -177,6 +177,59 @@ export function summarizeScenario(scenario, results) {
   };
 }
 
+/**
+ * expectedFirstPageCount is how many cards or rows the first page of a
+ * paged project grid or list must render: one full page, or every agent
+ * when there are fewer. `total` is the pager's total when known (a number);
+ * otherwise the seeded agent count is used. A missing or non-positive page
+ * size (no pager rendered) means the view is not paged, so every agent is
+ * expected, as before paging existed.
+ */
+export function expectedFirstPageCount(pageSize, agentCount, total) {
+  const all = typeof total === 'number' && total >= 0 ? total : agentCount;
+  if (!(typeof pageSize === 'number' && pageSize > 0)) return all;
+  return Math.min(pageSize, all);
+}
+
+/** pageCountFor is the number of pages a paged view has for `total` items. */
+export function pageCountFor(pageSize, total) {
+  if (!(typeof pageSize === 'number' && pageSize > 0)) return null;
+  if (!(typeof total === 'number' && total >= 0)) return null;
+  return Math.max(1, Math.ceil(total / pageSize));
+}
+
+/**
+ * summarizePageChanges reports page-change latency (Next clicked to the
+ * next page rendered) over every completed change of every populated run.
+ * A change that did not complete within its timeout is counted in
+ * pageChangeFailureCount and excluded from the timing stats.
+ */
+export function summarizePageChanges(results) {
+  const changes = [];
+  let attempted = 0;
+  for (const r of results) {
+    if (r.outcome !== 'populated' || !Array.isArray(r.pageChanges)) continue;
+    for (const c of r.pageChanges) {
+      attempted++;
+      if (c.ok) changes.push(c.ms);
+    }
+  }
+  const mm = minMax(changes);
+  const sizes = [...new Set(results.map((r) => r.pageSize).filter((n) => n != null))];
+  const counts = [...new Set(results.map((r) => r.pageCount).filter((n) => n != null))];
+  return {
+    pageSize: sizes.length === 1 ? sizes[0] : sizes.length === 0 ? null : sizes,
+    pageCount: counts.length === 1 ? counts[0] : counts.length === 0 ? null : counts,
+    pageChangeAttemptCount: attempted,
+    pageChangeSuccessCount: changes.length,
+    pageChangeFailureCount: attempted - changes.length,
+    medianPageChangeMs: median(changes),
+    minPageChangeMs: mm.min,
+    maxPageChangeMs: mm.max,
+    stddevPageChangeMs: stddev(changes),
+  };
+}
+
 // ---- test-login session (mirrors web/e2e/harness/auth.ts) -----------------
 
 export const USER_TOKEN_ISSUER = 'scion-hub';
