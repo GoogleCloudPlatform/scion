@@ -53,6 +53,13 @@ import {
   TEXT_PREVIEW_MAX_BYTES,
   type PathLinkTarget,
 } from '../../../utils/chat-file-links.js';
+import {
+  artifactFileUrl,
+  artifactPageUrl,
+  formatArtifactRef,
+  rendererFor,
+  type ArtifactResponse,
+} from '../../../client/artifacts.js';
 import '../code-editor.js';
 import '../markdown-preview.js';
 
@@ -87,8 +94,41 @@ export interface GcsPreviewTarget {
   name: string;
 }
 
-/** What `<scion-chat-file-preview>` renders: an attachment, a resolved path, or a gs:// object. */
-export type PreviewTarget = AttachmentPreviewTarget | PathPreviewTarget | GcsPreviewTarget;
+/**
+ * An artifact reference (ptone/scion#3224, D23), addressed by id and, when
+ * the reference pins one, version. The dialog loads it under the viewer's
+ * own access; name is a placeholder title until the metadata arrives.
+ */
+export interface ArtifactPreviewTarget {
+  kind: 'artifact';
+  id: string;
+  /** Pinned version, or 0 for the current one. */
+  seq: number;
+  name: string;
+}
+
+/** What `<scion-chat-file-preview>` renders: an attachment, a resolved path, a gs:// object or an artifact. */
+export type PreviewTarget =
+  | AttachmentPreviewTarget
+  | PathPreviewTarget
+  | GcsPreviewTarget
+  | ArtifactPreviewTarget;
+
+/** Shown for an artifact the viewer cannot read, the same as for one that does not exist. */
+export const ARTIFACT_UNAVAILABLE_MESSAGE =
+  "This artifact doesn't exist or you don't have access to it.";
+
+/** Shown for an artifact whose entry file the dialog does not render. */
+const ARTIFACT_NOT_PREVIEWABLE_MESSAGE =
+  "This artifact can't be shown here. Open it in the artifact viewer.";
+
+/** What the dialog learned about an artifact target once its metadata loaded. */
+interface ArtifactInfo {
+  title: string;
+  version: number;
+  entry: string;
+  pageUrl: string;
+}
 
 /** Image MIME types rendered inline (mirrors chat-message.ts's IMAGE_MIMES). */
 const IMAGE_MIMES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
@@ -112,6 +152,10 @@ interface LoadState {
    * every one of its `isBinary` states uses the shared generic text).
    */
   binaryMessage?: string;
+  /** Artifact target only: resolved metadata, once loaded. */
+  artifact?: ArtifactInfo;
+  /** Artifact target only: the viewer cannot read it (or it is gone); no Retry. */
+  unavailable?: boolean;
 }
 
 /** A gcs target whose response is application/octet-stream, or an image/* type that does not take the image path. */
@@ -142,6 +186,8 @@ const IDLE_STATE: LoadState = {
  * try/catch.
  */
 function downloadUrlFor(target: PreviewTarget): string {
+  if (target.kind === 'artifact')
+    throw new Error('downloadUrlFor: artifact targets load their own URLs');
   if (target.kind === 'attachment') return buildAttachmentApiUrl(target.id);
   if (target.kind === 'gcs')
     return buildGcsObjectApiUrl(target.messageId, target.bucket, target.object);
@@ -306,6 +352,10 @@ export class ScionChatFilePreview extends LitElement {
 
     if (!target) {
       this.loadState = IDLE_STATE;
+      return;
+    }
+    if (target.kind === 'artifact') {
+      await this.loadArtifact(target, gen);
       return;
     }
 
@@ -544,6 +594,137 @@ export class ScionChatFilePreview extends LitElement {
     }
   }
 
+  /**
+   * Loads an artifact target: its metadata (the pinned version's, or the
+   * current one's), then the entry file through the hub's streaming route.
+   * Every request is made under the viewer's own session, so what shows is
+   * exactly what the artifact page would show them; a 403 or 404 is the
+   * same "unavailable" state either way.
+   */
+  private async loadArtifact(target: ArtifactPreviewTarget, gen: number): Promise<void> {
+    const base: LoadState = {
+      status: 'loading',
+      isImage: false,
+      isMarkdown: false,
+      isBinary: false,
+    };
+    this.loadState = base;
+    const controller = new AbortController();
+    this.controller = controller;
+    const id = encodeURIComponent(target.id);
+    const metaUrl =
+      target.seq > 0 ? `/api/v1/artifacts/${id}/versions/${target.seq}` : `/api/v1/artifacts/${id}`;
+    try {
+      const res = await apiFetch(metaUrl, { signal: controller.signal });
+      if (gen !== this.generation) return;
+      if (res.status === 403 || res.status === 404) {
+        this.loadState = {
+          ...base,
+          status: 'error',
+          error: ARTIFACT_UNAVAILABLE_MESSAGE,
+          unavailable: true,
+        };
+        return;
+      }
+      if (!res.ok) {
+        this.loadState = {
+          ...base,
+          status: 'error',
+          error: await extractApiError(res, `Failed to load artifact (HTTP ${res.status})`),
+        };
+        return;
+      }
+      const data = (await res.json()) as ArtifactResponse;
+      if (gen !== this.generation) return;
+      const version = data.version;
+      const entry = version?.files.find((f) => f.path === version.entryPath);
+      if (!version || !entry) {
+        this.loadState = {
+          ...base,
+          status: 'error',
+          error: ARTIFACT_UNAVAILABLE_MESSAGE,
+          unavailable: true,
+        };
+        return;
+      }
+      const artifact: ArtifactInfo = {
+        title: data.artifact.title,
+        version: version.seq,
+        entry: version.entryPath,
+        pageUrl: artifactPageUrl(data.artifact.scopeRef, data.artifact.id),
+      };
+      const renderer = rendererFor(entry.mediaType);
+      if (
+        renderer === 'download' ||
+        (renderer !== 'image' && entry.size > TEXT_PREVIEW_MAX_BYTES)
+      ) {
+        this.loadState = {
+          ...base,
+          status: 'ready',
+          isBinary: true,
+          binaryMessage: ARTIFACT_NOT_PREVIEWABLE_MESSAGE,
+          artifact,
+        };
+        return;
+      }
+      const fileUrl = artifactFileUrl(data.artifact.id, version.seq, entry.path, true);
+      const fileRes = await apiFetch(fileUrl, { signal: controller.signal });
+      if (gen !== this.generation) return;
+      if (!fileRes.ok) {
+        this.loadState = {
+          ...base,
+          status: 'error',
+          error:
+            fileRes.status === 403 || fileRes.status === 404
+              ? ARTIFACT_UNAVAILABLE_MESSAGE
+              : await extractApiError(fileRes, `Failed to load artifact (HTTP ${fileRes.status})`),
+          unavailable: fileRes.status === 403 || fileRes.status === 404,
+          artifact,
+        };
+        return;
+      }
+      if (renderer === 'image') {
+        const blob = await fileRes.blob();
+        if (gen !== this.generation) return;
+        this.loadState = {
+          ...base,
+          status: 'ready',
+          isImage: true,
+          objectUrl: URL.createObjectURL(blob),
+          artifact,
+        };
+        return;
+      }
+      const content = await fileRes.text();
+      if (gen !== this.generation) return;
+      this.loadState = {
+        ...base,
+        status: 'ready',
+        isMarkdown: renderer === 'markdown',
+        content,
+        artifact,
+      };
+    } catch {
+      if (gen !== this.generation || controller.signal.aborted) return;
+      this.loadState = { ...base, status: 'error', error: 'Failed to load artifact.' };
+    }
+  }
+
+  /** Copies the artifact's reference (scion://artifact/<id>[@<seq>]). */
+  private async copyArtifactRef(target: ArtifactPreviewTarget): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(formatArtifactRef(target.id, target.seq));
+      this.copied = true;
+      this.clearCopyTimer();
+      this.copyTimer = setTimeout(() => {
+        this.copied = false;
+        this.copyTimer = null;
+      }, 1500);
+    } catch {
+      // Clipboard write may fail in insecure contexts; silently ignore.
+    }
+  }
+
   private retry(): void {
     void this.load();
   }
@@ -629,10 +810,12 @@ export class ScionChatFilePreview extends LitElement {
                 Open in Cloud Console
               </a>`
             : nothing}
-          <sl-button size="small" @click=${() => this.retry()}>
-            <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
-            Retry
-          </sl-button>
+          ${state.unavailable
+            ? nothing
+            : html`<sl-button size="small" @click=${() => this.retry()}>
+                <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
+                Retry
+              </sl-button>`}
         </div>
       `;
     }
@@ -677,6 +860,7 @@ export class ScionChatFilePreview extends LitElement {
     // here is not also crashing the *rest* of this render over the Download
     // button's href — sl-dialog's own header close button and the error
     // placeholder's Retry stay available either way.
+    if (target.kind === 'artifact') return this.renderArtifactDialog(target);
     let downloadUrl: string | null;
     try {
       downloadUrl = downloadUrlFor(target);
@@ -726,6 +910,53 @@ export class ScionChatFilePreview extends LitElement {
                 <sl-button href=${downloadUrl} download=${target.name} size="small">
                   <sl-icon slot="prefix" name="download"></sl-icon>
                   Download
+                </sl-button>
+              `
+            : nothing}
+        </div>
+      </sl-dialog>
+    `;
+  }
+
+  /**
+   * The artifact dialog: same body renderers, titled with the artifact's own
+   * title once loaded, and a footer of Copy link, Source (markdown) and
+   * Open in artifact viewer.
+   */
+  private renderArtifactDialog(target: ArtifactPreviewTarget) {
+    const state = this.loadState;
+    const info = state.artifact;
+    const label = state.unavailable ? 'Artifact unavailable' : (info?.title ?? target.name);
+    const secondary = info ? `${info.entry} · v${info.version}` : '';
+    return html`
+      <sl-dialog
+        class="file-preview-dialog"
+        open
+        label=${label}
+        @sl-after-hide=${(e: Event) => {
+          if (e.target === e.currentTarget) this.close();
+        }}
+      >
+        ${this.renderBody()}
+        <div slot="footer" class="footer">
+          <span class="path" title=${secondary}>${secondary}</span>
+          <sl-button size="small" @click=${() => this.copyArtifactRef(target)}>
+            <sl-icon slot="prefix" name=${this.copied ? 'check2' : 'clipboard'}></sl-icon>
+            ${this.copied ? 'Copied!' : 'Copy link'}
+          </sl-button>
+          ${state.status === 'ready' && state.isMarkdown
+            ? html`
+                <sl-button size="small" @click=${() => this.toggleSource()}>
+                  <sl-icon slot="prefix" name=${this.showSource ? 'eye' : 'code'}></sl-icon>
+                  ${this.showSource ? 'Preview' : 'Source'}
+                </sl-button>
+              `
+            : nothing}
+          ${info && !state.unavailable
+            ? html`
+                <sl-button size="small" variant="primary" href=${info.pageUrl}>
+                  <sl-icon slot="prefix" name="box-arrow-up-right"></sl-icon>
+                  Open in artifact viewer
                 </sl-button>
               `
             : nothing}

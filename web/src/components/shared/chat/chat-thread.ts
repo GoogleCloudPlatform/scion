@@ -48,6 +48,12 @@ import { navigateTo, stateManager } from '../../../client/main.js';
 import { agentIndexOf, agentStore } from '../../../client/agent-store.js';
 import { openTerminal, agentGraphHref } from '../../../client/open-terminal.js';
 import { showToast } from '../../../utils/toast.js';
+import { isFeatureEnabled } from '../../../utils/feature-flags.js';
+import {
+  ARTIFACTS_FLAG,
+  ARTIFACTS_METADATA_KEY,
+  type MessageArtifactRef,
+} from '../../../client/artifacts.js';
 import { playChimeThrottled } from '../../../utils/audio.js';
 import type { ChatAgentMember } from './chat-members.js';
 import {
@@ -119,6 +125,7 @@ const HISTORY_PAGE_SIZE = 50;
 
 const EMPTY_ATTACHMENTS: NonNullable<Message['attachments']> = [];
 const EMPTY_ATTACHMENT_REFS: import('./chat-message.js').AttachmentRefInfo[] = [];
+const EMPTY_ARTIFACT_REFS: MessageArtifactRef[] = [];
 
 /** Threshold in pixels from top to trigger upward scroll loading. */
 const SCROLL_TOP_THRESHOLD = 100;
@@ -605,6 +612,13 @@ export class ScionChatThread extends LitElement {
 
   /** W7: Attachment refs keyed by message ID (from history endpoint + send response). */
   private v2AttachmentMap = new Map<string, import('./chat-message.js').AttachmentRefInfo[]>();
+
+  /**
+   * Artifact refs keyed by message ID, resolved by the hub for this viewer
+   * (history `messageArtifacts`, send response `artifacts`;
+   * ptone/scion#3224). Not @state(): writers call requestUpdate().
+   */
+  private v2ArtifactMap = new Map<string, MessageArtifactRef[]>();
 
   // ---- Phase-3 state ----
 
@@ -1564,6 +1578,22 @@ export class ScionChatThread extends LitElement {
     return this.v2AttachmentMap.get(messageId) ?? EMPTY_ATTACHMENT_REFS;
   }
 
+  /** Artifact refs for a message, as the hub resolved them for this viewer. */
+  private getMessageArtifactRefs(messageId: string): MessageArtifactRef[] {
+    return this.v2ArtifactMap.get(messageId) ?? EMPTY_ARTIFACT_REFS;
+  }
+
+  /** Merge a history page's messageArtifacts into the map; re-render when anything changed. */
+  private mergeMessageArtifacts(map: Record<string, MessageArtifactRef[]> | undefined): void {
+    if (!map) return;
+    let changed = false;
+    for (const [msgId, refs] of Object.entries(map)) {
+      this.v2ArtifactMap.set(msgId, refs);
+      changed = true;
+    }
+    if (changed) this.requestUpdate();
+  }
+
   /** Check if a message sender is an agent (v2 multi-sender). */
   private isSenderAgent(msg: Message): boolean {
     // Agent messages have sender like "agent:slug" or recipient patterns
@@ -1911,6 +1941,7 @@ export class ScionChatThread extends LitElement {
         messages?: Message[];
         nextCursor?: string;
         messageAttachments?: Record<string, import('./chat-message.js').AttachmentRefInfo[]>;
+        messageArtifacts?: Record<string, MessageArtifactRef[]>;
         messageExtensions?: Record<
           string,
           { messageId: string; replyToId?: string; editedAt?: string; deletedAt?: string }
@@ -1924,6 +1955,8 @@ export class ScionChatThread extends LitElement {
       if (!shouldMerge()) return true;
 
       const items = data?.items ?? data?.messages ?? [];
+
+      this.mergeMessageArtifacts(data?.messageArtifacts);
 
       // W7: Merge attachment refs from history response.
       if (data?.messageAttachments) {
@@ -2131,6 +2164,13 @@ export class ScionChatThread extends LitElement {
         playChimeThrottled(this.projectId || msg.projectId || '');
       }
 
+      // Artifact refs are resolved per viewer, so they never ride the
+      // broadcast event: fetch them with the latest page when the body
+      // names one.
+      if (isFeatureEnabled(ARTIFACTS_FLAG) && (msg.msg ?? '').includes('scion://artifact/')) {
+        void this.backfillV2();
+      }
+
       this.scrollToBottomAfterRender();
       this.maybeAdvanceReadWatermark();
       return;
@@ -2241,6 +2281,7 @@ export class ScionChatThread extends LitElement {
       items?: Message[];
       messages?: Message[];
       messageAttachments?: Record<string, import('./chat-message.js').AttachmentRefInfo[]>;
+      messageArtifacts?: Record<string, MessageArtifactRef[]>;
       messageExtensions?: Record<
         string,
         { messageId: string; replyToId?: string; editedAt?: string; deletedAt?: string }
@@ -2250,6 +2291,8 @@ export class ScionChatThread extends LitElement {
     // See fetchHistoryV2: re-checked once the body has been read.
     if (currentId !== this.fetchId) return;
     const items = data?.items ?? data?.messages ?? [];
+
+    this.mergeMessageArtifacts(data?.messageArtifacts);
 
     // W7: Merge attachment refs from history response.
     if (data?.messageAttachments) {
@@ -2521,8 +2564,11 @@ export class ScionChatThread extends LitElement {
 
   /** Send a message in v2 mode. */
   private async handleChatSendV2(e: CustomEvent<ChatSendDetail>): Promise<void> {
-    const { text, attachmentIds, onSuccess, onError } = e.detail;
-    const hasContent = text.length > 0 || (attachmentIds && attachmentIds.length > 0);
+    const { text, attachmentIds, artifactRefs, onSuccess, onError } = e.detail;
+    const hasContent =
+      text.length > 0 ||
+      (attachmentIds && attachmentIds.length > 0) ||
+      (artifactRefs && artifactRefs.length > 0);
     if (!hasContent) return;
     // One send at a time per conversation. The guard is per conversation,
     // not per thread element: chat.ts reuses one element across
@@ -2557,6 +2603,7 @@ export class ScionChatThread extends LitElement {
       interrupt,
       mentions,
       attachmentIds,
+      artifactRefs,
       replyToId,
       replyToContent,
       onSuccess,
@@ -2670,6 +2717,14 @@ export class ScionChatThread extends LitElement {
         };
         body.metadata = metadata;
       }
+      // ptone/scion#3224: artifact references picked in the composer. The
+      // hub keeps only those the sender can read.
+      if (artifactRefs && artifactRefs.length > 0) {
+        body.metadata = {
+          ...((body.metadata as Record<string, string> | undefined) ?? {}),
+          [ARTIFACTS_METADATA_KEY]: JSON.stringify(artifactRefs),
+        };
+      }
 
       const res = await this.postChatSend(
         `/api/v1/chat/conversations/${encodeURIComponent(sendConversationKey)}/messages`,
@@ -2713,12 +2768,21 @@ export class ScionChatThread extends LitElement {
         const resData = (await res.json().catch(() => null)) as {
           id?: string;
           attachments?: import('./chat-message.js').AttachmentRefInfo[];
+          artifacts?: MessageArtifactRef[];
+          artifactWarning?: string;
           dispatchState?: string;
           dispatchFailureReason?: string;
           dispatchFailureCode?: string;
         } | null;
         if (resData?.id && resData?.attachments && resData.attachments.length > 0) {
           this.v2AttachmentMap.set(resData.id, resData.attachments);
+        }
+        if (resData?.id && resData?.artifacts && resData.artifacts.length > 0) {
+          this.v2ArtifactMap.set(resData.id, resData.artifacts);
+          this.requestUpdate();
+        }
+        if (resData?.artifactWarning) {
+          showToast(resData.artifactWarning, 'warning');
         }
         // nc-delivery-unreachable: the backend now reports the real dispatch
         // outcome instead of always being "dispatched" on any HTTP 2xx.
@@ -3573,6 +3637,7 @@ export class ScionChatThread extends LitElement {
       this.messageMap.clear();
       this.messages = [];
       this.v2AttachmentMap.clear();
+      this.v2ArtifactMap.clear();
       this.v2MessageExtMap.clear();
       this.v2ReplyPreviewMap.clear();
       this.nextCursor = null;
@@ -3929,6 +3994,7 @@ export class ScionChatThread extends LitElement {
         messages?: Message[];
         nextCursor?: string;
         messageAttachments?: Record<string, import('./chat-message.js').AttachmentRefInfo[]>;
+        messageArtifacts?: Record<string, MessageArtifactRef[]>;
         messageExtensions?: Record<
           string,
           { messageId: string; replyToId?: string; editedAt?: string; deletedAt?: string }
@@ -3946,6 +4012,8 @@ export class ScionChatThread extends LitElement {
       for (const [msgId, refs] of Object.entries(data.messageAttachments ?? {})) {
         this.v2AttachmentMap.set(msgId, refs);
       }
+      this.v2ArtifactMap.clear();
+      this.mergeMessageArtifacts(data.messageArtifacts);
       for (const [msgId, ext] of Object.entries(data.messageExtensions ?? {})) {
         this.v2MessageExtMap.set(msgId, ext);
       }
@@ -5466,6 +5534,7 @@ export class ScionChatThread extends LitElement {
             dispatchFailureCode=${msg.dispatchFailureCode || ''}
             .attachments=${msg.attachments || EMPTY_ATTACHMENTS}
             .attachmentRefs=${this.getMessageAttachmentRefs(msg.id)}
+            .artifactRefs=${this.getMessageArtifactRefs(msg.id)}
             routedTo=${msgRoutedTo}
             .replyPreview=${replyPreview}
             editedAt=${ext?.editedAt || ''}

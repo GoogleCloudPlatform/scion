@@ -1137,3 +1137,43 @@ export function resolveMessageProjectId(ctx: MessageProjectContext): string {
   if (!ctx.isDM) return ctx.threadProjectId || fromMessage;
   return fromMessage || ctx.peerAgentProjectId || '';
 }
+
+// ---------------------------------------------------------------------------
+// scion://artifact/ references (ptone/scion#3225)
+// ---------------------------------------------------------------------------
+
+/**
+ * A `scion://artifact/<uuid>[@<seq>]` reference in message text. The id is
+ * a canonical UUID; seq is a positive integer without leading zeros. A
+ * trailing word character (or another `@`) after the match disqualifies it,
+ * so `…@12abc` is not linked as `@12`.
+ */
+export const ARTIFACT_REF_PATTERN =
+  /scion:\/\/artifact\/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})(?:@([1-9][0-9]{0,8}))?(?![\w@-])/g;
+
+/** A parsed artifact reference: lowercase id, and seq 0 for the current version. */
+export interface ArtifactRefTarget {
+  id: string;
+  seq: number;
+}
+
+/** Parses one whole artifact reference string, or returns null. */
+export function parseArtifactRef(ref: string): ArtifactRefTarget | null {
+  const re = new RegExp(`^${ARTIFACT_REF_PATTERN.source}$`);
+  const m = re.exec(ref.trim());
+  if (!m) return null;
+  return { id: m[1].toLowerCase(), seq: m[2] ? Number(m[2]) : 0 };
+}
+
+/**
+ * Build the `<a class="entity-link artifact-link">` markup for a matched
+ * artifact reference. The text stays exactly as written; the data
+ * attributes carry the parsed id and seq the click handler opens.
+ */
+export function buildArtifactLinkHtml(text: string, target: ArtifactRefTarget): string {
+  // `@` is written as an entity so the later @mention pass, which scans the
+  // whole HTML string, never restyles a version suffix (`@2`) as a mention.
+  const escaped = escAttr(text).replace(/@/g, '&#64;');
+  const seqAttr = target.seq > 0 ? ` data-artifact-seq="${target.seq}"` : '';
+  return `<a class="entity-link artifact-link" data-artifact-id="${escAttr(target.id)}"${seqAttr} href="javascript:void(0)" title="Open artifact">${escaped}</a>`;
+}
