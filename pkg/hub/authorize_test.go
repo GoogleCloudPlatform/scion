@@ -524,9 +524,13 @@ func TestAuthorizeAgentCreate_IdentityKinds(t *testing.T) {
 			wantStatus: http.StatusForbidden,
 		},
 		{
-			name:      "agent with create scope in its own project",
-			identity:  authzHelperAgent(authzHelperProjectA, ScopeAgentCreate),
-			wantAllow: true,
+			// The identity names no stored agent, so it has no good
+			// standing (ptone/scion#3433) and the create is refused like
+			// any other chain refusal.
+			name:       "agent with create scope in its own project but no stored row",
+			identity:   authzHelperAgent(authzHelperProjectA, ScopeAgentCreate),
+			wantAllow:  false,
+			wantStatus: http.StatusForbidden,
 		},
 		{
 			name:       "agent with create scope in a different project",

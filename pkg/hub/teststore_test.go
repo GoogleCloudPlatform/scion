@@ -63,6 +63,17 @@ func defaultTestAgentOwner(next ent.Mutator) ent.Mutator {
 				m.SetOwnerID(uuid.MustParse(DevUserID))
 			}
 		}
+		// A full-row UpdateAgent from the fixture's own (ownerless) struct
+		// keeps the owner this hook gave the row.
+		if m.Op().Is(entgo.OpUpdate|entgo.OpUpdateOne) && m.OwnerIDCleared() && !testAgentOwnerHookDisabled.Load() {
+			if ids, err := m.IDs(ctx); err == nil && len(ids) == 1 {
+				if row, err := m.Client().Agent.Get(ctx, ids[0]); err == nil && row.OwnerID != nil &&
+					row.OwnerID.String() == DevUserID && row.CreatedBy == nil && len(row.Ancestry) == 0 {
+					m.ResetOwnerID()
+					m.SetOwnerID(uuid.MustParse(DevUserID))
+				}
+			}
+		}
 		return next.Mutate(ctx, m)
 	})
 }

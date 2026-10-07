@@ -120,8 +120,11 @@ func TestStanding_ChainBeyondResolverBound(t *testing.T) {
 		parent = f.childAgent(fmt.Sprintf("deep-%d", i), parent)
 		chain = append(chain, parent)
 	}
-	require.NoError(t, f.srv.agentStanding(ctx, chain[standingMaxChainDepth-2].ID))
-	requireStandingReason(t, f.srv.agentStanding(ctx, chain[len(chain)-1].ID), standingReasonChainTooDeep)
+	// chain[i] sits at walk depth i+2 (agent A is depth 1). Depth 11 is
+	// within the bound; depth 12 is refused.
+	require.NoError(t, f.srv.agentStanding(ctx, chain[standingMaxChainDepth-2].ID), "depth 10")
+	require.NoError(t, f.srv.agentStanding(ctx, chain[standingMaxChainDepth-1].ID), "depth 11 is allowed")
+	requireStandingReason(t, f.srv.agentStanding(ctx, chain[standingMaxChainDepth].ID), standingReasonChainTooDeep)
 }
 
 func TestStanding_DeletedAgentDenied(t *testing.T) {
@@ -310,7 +313,16 @@ func TestStandingGates_RemovedRootDenied(t *testing.T) {
 		assert.Equal(t, messageReasonSenderNotPermitted, reason)
 	})
 	t.Run("evaluateAgentMessage", func(t *testing.T) {
-		d := f.srv.EvaluateAgentMessage(ctx, f.agentIdentity(f.agentA), f.childC)
+		// Modes that allow the send, so the standing check decides.
+		for _, id := range []string{f.agentA.ID, f.childC.ID} {
+			a, err := f.s.GetAgent(ctx, id)
+			require.NoError(t, err)
+			a.MessageMode = store.MessageModeProject
+			require.NoError(t, f.s.UpdateAgent(ctx, a))
+		}
+		target, err := f.s.GetAgent(ctx, f.childC.ID)
+		require.NoError(t, err)
+		d := f.srv.EvaluateAgentMessage(ctx, f.agentIdentity(f.agentA), target)
 		assert.False(t, d.Allowed)
 		assert.Equal(t, messageReasonSenderNotPermitted, d.Reason)
 	})

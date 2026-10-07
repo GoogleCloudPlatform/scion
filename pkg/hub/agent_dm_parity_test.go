@@ -82,6 +82,9 @@ func paritySetup(t *testing.T) (
 		CreatedBy: owner.ID,
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
+	// The agents' ancestry root is a member of the project, so they are
+	// in good standing (ptone/scion#3433).
+	ensureStandingRoot(t, s, project.ID, owner.ID)
 	// The owner messages its agents through the ancestry allow, which
 	// requires active project access (ptone/scion#2141); the binding grants
 	// no permission itself.

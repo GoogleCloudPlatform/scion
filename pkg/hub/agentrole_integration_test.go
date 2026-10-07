@@ -1234,6 +1234,9 @@ func TestCreateSubAgent_ParentLookupFails_CeilingIsBaseline(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, rec.Code,
 		"requesting full with a missing parent should be forbidden (baseline ceiling); got: %s",
 		rec.Body.String())
-	assert.Contains(t, rec.Body.String(), "parent agent role",
-		"error should mention the parent agent role constraint")
+	// A creating agent with no stored row has no good standing
+	// (ptone/scion#3433), so the create is refused before the role ceiling
+	// is evaluated, with the chain refusal.
+	assert.Contains(t, rec.Body.String(), `"denied_by":"delegation_ceiling"`,
+		"a missing parent is refused as a chain refusal")
 }

@@ -235,6 +235,34 @@ func (s *Server) drainMembershipLossChecks(ctx context.Context) int {
 	return completed
 }
 
+// onlyDepthLimitErrors reports whether err, and every error joined or
+// wrapped into it, is the descendant depth limit. A check is parked only
+// then: any other error keeps it failed and retried.
+func onlyDepthLimitErrors(err error) bool {
+	if err == nil {
+		return false
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		errs := joined.Unwrap()
+		if len(errs) == 0 {
+			return false
+		}
+		for _, e := range errs {
+			if !onlyDepthLimitErrors(e) {
+				return false
+			}
+		}
+		return true
+	}
+	if errors.Is(err, errMembershipLossDepthLimit) {
+		return true
+	}
+	if inner := errors.Unwrap(err); inner != nil {
+		return onlyDepthLimitErrors(inner)
+	}
+	return false
+}
+
 // processClaimedMembershipLossCheck processes one claimed check and settles
 // its claim: completed only when processing returned no error; failed (and
 // so claimable again after the lease) otherwise. A lost claim means another
@@ -245,7 +273,7 @@ func (s *Server) processClaimedMembershipLossCheck(ctx context.Context, c *store
 	if err == nil {
 		return s.completeMembershipLossCheck(ctx, c)
 	}
-	if errors.Is(err, errMembershipLossDepthLimit) && c.Attempts >= membershipLossDepthParkAttempts {
+	if onlyDepthLimitErrors(err) && c.Attempts >= membershipLossDepthParkAttempts {
 		// Permanent: holding more nodes cannot reach the agents below the
 		// depth bound. Park the check visibly instead of retrying it
 		// silently forever; the live standing check keeps refusing those
@@ -714,6 +742,12 @@ var heldStopAttempts sync.Map
 func (s *Server) retryHeldAgentStops(ctx context.Context) {
 	err := s.forEachActiveHoldAgent(ctx, func(agentID string) error {
 		agent, err := s.store.GetAgent(ctx, agentID)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			// A lookup fault keeps the retry: the next run tries again.
+			slog.Warn("membership loss: held agent lookup failed; the stop retry will try again",
+				"agent_id", agentID, "error", err)
+			return nil
+		}
 		if err != nil || !heldAgentNeedsStop(agent) {
 			heldStopAttempts.Delete(agentID)
 			return nil

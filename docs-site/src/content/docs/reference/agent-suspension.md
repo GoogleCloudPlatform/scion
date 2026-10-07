@@ -78,7 +78,7 @@ the audit log (`agent_hold_set` records).
 
 Starting, restarting, waking or reincarnating a held agent returns
 `409 conflict` with "This agent is suspended. A hub admin can lift the hold."
-(see [Resuming](#resuming)).
+See [Resuming](#resuming).
 
 ## Resuming
 
@@ -120,8 +120,9 @@ upgrade. Before it writes any hold, every sweep logs one line,
 
 Agents are traced to their root user through delegation records, and, for
 agents created before those records existed, through their owner, ancestry
-or creator. Agents more than ten delegation steps below their root user are
-refused live and held by the sweep.
+or creator. An agent up to eleven delegation steps below its root user is
+traced normally; agents twelve or more steps below are refused live and held
+by the sweep.
 
 The full sweep reads every agent and the links above it once an hour, so
 its cost grows with the number of agents (and the depth of their chains);

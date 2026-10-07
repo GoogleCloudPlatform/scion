@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -57,7 +58,7 @@ func countAudits(t *testing.T, s store.Store, mutationType, targetID string) int
 	return n
 }
 
-// The whole descendant tree is held: user agent, agent child,
+// The entire descendant tree is held: user agent, agent child,
 // a scheduled grandchild recorded only by created_by, and a soft-deleted
 // great-grandchild. Credentials are revoked and run intent stopped.
 func TestHold_DescendantTree(t *testing.T) {
@@ -138,7 +139,7 @@ func TestMembershipLoss_OtherProjectUntouched(t *testing.T) {
 }
 
 // With a node bound smaller than the tree, the processor holds what the
-// walk returns and walks again until the whole tree is held.
+// walk returns and walks again until the full tree is held.
 func TestMembershipLoss_WalkProgressSmallMaxNodes(t *testing.T) {
 	f := newMSFixture(t, "smallnodes")
 	parent := f.childC
@@ -204,11 +205,14 @@ func (w *walkFaultStore) ListDelegationDescendants(context.Context, store.Descen
 	return store.DescendantResult{}, errors.New("injected walk fault")
 }
 
-// Any walk error fails the check: nothing is held and the check stays
-// in the outbox with its error recorded.
+// Any walk error fails the check: nothing is held, and the check is kept
+// (failed, with its error and attempt recorded), not completed.
 func TestMembershipLoss_WalkErrorFailsCheck(t *testing.T) {
 	f := newMSFixture(t, "walkerr")
 	ctx := context.Background()
+	origLease := membershipLossLease
+	membershipLossLease = time.Millisecond
+	t.Cleanup(func() { membershipLossLease = origLease })
 	f.dropBindings(f.userID)
 	require.NoError(t, enqueueMembershipLossTx(ctx, f.s, f.userID, f.projectID, store.MembershipLossTriggerMemberRemove, AuditActor{}))
 	orig := f.srv.store
@@ -216,11 +220,71 @@ func TestMembershipLoss_WalkErrorFailsCheck(t *testing.T) {
 	f.srv.drainMembershipLossChecks(ctx)
 	f.srv.store = orig
 	assert.False(t, f.held(f.agentA.ID))
-	// The claim's lease is still running: nothing claimable yet, so the
-	// check was neither completed nor lost. Shorten the lease and look.
+	time.Sleep(5 * time.Millisecond)
 	checks, err := f.s.ClaimMembershipLossChecks(ctx, 10, time.Minute)
 	require.NoError(t, err)
-	assert.Empty(t, checks, "the failed check keeps its lease")
+	require.Len(t, checks, 1, "the failed check is kept, not completed")
+	assert.Contains(t, checks[0].LastError, "injected walk fault")
+	assert.GreaterOrEqual(t, checks[0].Attempts, 2, "claimed by the drain and again here")
+}
+
+// walkFaultProjectStore fails ListDelegationDescendants for one project,
+// inside transactions too.
+type walkFaultProjectStore struct {
+	store.Store
+	failProject string
+}
+
+func (w *walkFaultProjectStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	return w.Store.WithTx(ctx, func(tx store.Store) error {
+		return fn(&walkFaultProjectStore{Store: tx, failProject: w.failProject})
+	})
+}
+
+func (w *walkFaultProjectStore) ListDelegationDescendants(ctx context.Context, q store.DescendantQuery) (store.DescendantResult, error) {
+	if q.ProjectID == w.failProject {
+		return store.DescendantResult{}, errors.New("injected walk fault for one project")
+	}
+	return w.Store.ListDelegationDescendants(ctx, q)
+}
+
+// A check covering several projects is parked only when every project hit
+// the depth bound: with one project at the depth bound and another failing
+// for another reason, the check stays failed and is retried.
+func TestMembershipLoss_MixedErrorsNotParked(t *testing.T) {
+	f := newMSFixture(t, "mixed")
+	ctx := context.Background()
+	other := tid("ms-mixed-p2")
+	createRS1Project(t, f.s, other, tid("ms-mixed-o2"))
+	g := &msFixture{t: t, srv: f.srv, s: f.s, projectID: other}
+	g.addMember(f.userID, store.ProjectRoleMember)
+	b := g.userAgent("mixed-b", f.userID)
+	f.dropBindings(f.userID)
+	g.dropBindings(f.userID)
+
+	origBounds := descendantQueryBounds
+	descendantQueryBounds.MaxDepth = 1 // C sits at depth 2 in the first project
+	t.Cleanup(func() { descendantQueryBounds = origBounds })
+	origLease := membershipLossLease
+	membershipLossLease = time.Millisecond
+	t.Cleanup(func() { membershipLossLease = origLease })
+
+	require.NoError(t, enqueueMembershipLossTx(ctx, f.s, f.userID, "", store.MembershipLossTriggerGroupChange, AuditActor{}))
+	orig := f.srv.store
+	f.srv.store = &walkFaultProjectStore{Store: orig, failProject: other}
+	for i := 0; i < membershipLossDepthParkAttempts+3; i++ {
+		time.Sleep(3 * time.Millisecond)
+		f.srv.drainMembershipLossChecks(ctx)
+	}
+	f.srv.store = orig
+
+	assert.Equal(t, 0, countAudits(t, f.s, mutationTypeMembershipLossParked, f.userID), "not parked while another project fails")
+	assert.False(t, f.held(b.ID), "the failing project's agents are not held yet")
+	time.Sleep(3 * time.Millisecond)
+	checks, err := f.s.ClaimMembershipLossChecks(ctx, 10, time.Minute)
+	require.NoError(t, err)
+	require.Len(t, checks, 1, "the check is still pending")
+	assert.Contains(t, checks[0].LastError, "injected walk fault for one project")
 }
 
 // A check for a project that no longer exists completes as a no-op.
@@ -428,24 +492,30 @@ func TestAgentSuspensionField(t *testing.T) {
 // The agent create path enforces the creator's hold and its root's
 // membership at create time.
 func TestAgentCreate_CreatorStandingEnforced(t *testing.T) {
+	// A held creator: its token is refused at authentication, and the
+	// create gate itself refuses it (the creator's chain admits the create;
+	// the hold refuses it).
 	f := newMSFixture(t, "create")
+	f.childC.AppliedConfig = &store.AgentAppliedConfig{AgentRole: string(AgentRoleFull)}
+	require.NoError(t, f.s.UpdateAgent(context.Background(), f.childC))
 	tok := f.agentToken(f.childC)
-	body := map[string]interface{}{"name": "create-child", "projectId": f.projectID}
-
 	f.hold(f.childC.ID, f.userID)
-	rec := doRequestWithAgentToken(t, f.srv, http.MethodPost, "/api/v1/agents", body, f.agentToken(f.agentA))
-	_ = rec
-	// The held creator's own token is refused at auth; check the create
-	// gate directly with an identity.
-	ok := f.srv.agentStanding(context.Background(), f.childC.ID)
-	requireStandingReason(t, ok, standingReasonAgentHeld)
+	rec := doRequestWithAgentToken(t, f.srv, http.MethodPost, "/api/v1/agents",
+		map[string]interface{}{"name": "create-child", "projectId": f.projectID}, tok)
+	assert.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
+	direct := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", nil)
+	req = req.WithContext(contextWithIdentity(req.Context(), f.agentIdentity(f.childC)))
+	assert.False(t, f.srv.authorizeAgentCreate(direct, req, f.projectID))
+	assert.Equal(t, http.StatusForbidden, direct.Code, direct.Body.String())
 
+	// A creator whose root is no longer a member is refused at create.
 	g := newMSFixture(t, "create-removed")
 	tokG := g.agentToken(g.agentA)
 	g.dropBindings(g.userID)
-	rec = doRequestWithAgentToken(t, g.srv, http.MethodPost, "/api/v1/agents", map[string]interface{}{"name": "create-child2", "projectId": g.projectID}, tokG)
+	rec = doRequestWithAgentToken(t, g.srv, http.MethodPost, "/api/v1/agents",
+		map[string]interface{}{"name": "create-child2", "projectId": g.projectID}, tokG)
 	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-	_ = tok
 }
 
 // Principal IDs written to edges and ancestry are stored canonically,
@@ -494,7 +564,9 @@ func (h *holdFaultStore) HasActiveAgentHold(ctx context.Context, id string) (boo
 	return h.Store.HasActiveAgentHold(ctx, id)
 }
 
-func TestCeilingAgentHop_HoldLookupFaultIsResolutionError(t *testing.T) {
+// A hold lookup fault on the ceiling agent hop is returned as an error, so
+// the decision denies with the ceiling-error cause.
+func TestCeilingAgentHop_HoldLookupFaultIsCeilingError(t *testing.T) {
 	f := newMSFixture(t, "holdfault")
 	ctx := context.Background()
 	hs := &holdFaultStore{Store: f.s, fail: true}
@@ -505,11 +577,11 @@ func TestCeilingAgentHop_HoldLookupFaultIsResolutionError(t *testing.T) {
 	_, _, err := f.srv.authzService.checkAgentHoldsPermission(ctx, f.agentA.ID, "agent.read", store.RoleScopeProject, f.projectID)
 	require.ErrorIs(t, err, errCeilingHoldLookup)
 
-	var cause DenyCause
-	allowed, _, cerr := f.srv.authzService.checkDelegationCeiling(ctx, agentCeilingRequest(f.childC), "agent.read", f.childC.ID, nil, &cause)
-	require.NoError(t, cerr)
+	allowed, _, cerr := f.srv.authzService.checkDelegationCeiling(ctx, agentCeilingRequest(f.childC), "agent.read", f.childC.ID, nil, nil)
+	require.ErrorIs(t, cerr, errCeilingHoldLookup)
 	assert.False(t, allowed)
-	assert.Equal(t, DenyCauseResolutionError, cause)
+	// Decide tags every error the ceiling returns as DenyCauseCeilingError
+	// (authz.go, step 10).
 }
 
 func TestCeilingAgentHop_HeldDelegatorNotLive(t *testing.T) {

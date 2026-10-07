@@ -517,10 +517,11 @@ func TestRelationshipProjectAccess_Invariants(t *testing.T) {
 		assert.True(t, r.Accepted)
 	})
 
-	// The delegation-ceiling walk evaluates a user delegator's
-	// relationships with the stage disabled (userRelationshipAuthority is
-	// not covered by this decision).
-	t.Run("CeilingWalkUnchanged", func(t *testing.T) {
+	// The delegation-ceiling walk now applies the stage to a user
+	// delegator too (ptone/scion#3433): a delegator with no project access
+	// gets no relationship authority there (see
+	// authz_ceiling_project_access_test.go for the member case).
+	t.Run("CeilingWalkRequiresProjectAccess", func(t *testing.T) {
 		f := newRPAFixture(t, "ceiling")
 		userID := tid("rpa-ceiling-user")
 		f.hubUser(t, userID)
@@ -530,7 +531,8 @@ func TestRelationshipProjectAccess_Invariants(t *testing.T) {
 
 		ok, reason, err := f.srv.authzService.userRelationshipAuthority(ctx, user, agentResource(agent), ActionAttach, "agent.attach")
 		require.NoError(t, err)
-		assert.True(t, ok, "ceiling-walk relationship authority unchanged: %s", reason)
+		assert.False(t, ok, "ceiling-walk relationship authority requires project access: %s", reason)
+		assert.Contains(t, reason, RelationshipRejectProjectAccess)
 	})
 }
 

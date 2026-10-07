@@ -28,6 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
+	"github.com/google/uuid"
 )
 
 // AuthConfig holds authentication configuration.
@@ -314,6 +315,14 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 						// (ptone/scion#3433). Same response as a revoked
 						// credential; a lookup fault is the same 503.
 						if cfg.HoldStore != nil {
+							// A subject that is not an agent UUID names no agent:
+							// an authentication failure, refused before the hold
+							// lookup.
+							if _, perr := uuid.Parse(claims.Subject); perr != nil {
+								writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
+									"invalid agent token", nil)
+								return
+							}
 							held, holdErr := cfg.HoldStore.HasActiveAgentHold(ctx, claims.Subject)
 							if holdErr != nil {
 								log.Error("Agent hold lookup failed",

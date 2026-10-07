@@ -398,11 +398,6 @@ func (a *AuthzService) walkDelegationChainWithCause(
 
 		case store.DelegationPrincipalAgent:
 			allowed, reason, err := a.checkAgentHoldsPermission(ctx, edge.DelegatorID, permissionID, edge.ScopeType, edge.ScopeID)
-			if errors.Is(err, errCeilingHoldLookup) {
-				addStep("delegation_ceiling_error", reason)
-				setCause(DenyCauseResolutionError)
-				return false, "delegation ceiling check failed (fail-closed): " + reason, nil
-			}
 			if err != nil {
 				if errors.Is(err, store.ErrNotFound) {
 					addStep("delegation_ceiling_delegator_not_live",
@@ -831,8 +826,9 @@ func (a *AuthzService) evaluateUserDelegatorAuthority(
 var errCeilingProjectAccessFault = errors.New("delegator project access check failed")
 
 // errCeilingHoldLookup is returned by checkAgentHoldsPermission when the
-// agent hold lookup fails. The chain walk records it as
-// DenyCauseResolutionError.
+// agent hold lookup fails. Like every other ceiling lookup fault it is
+// returned by the chain walk, so the decision denies with
+// DenyCauseCeilingError.
 var errCeilingHoldLookup = errors.New("delegator agent hold lookup failed")
 
 // userRelationshipAuthority evaluates the named relationship grants of a live

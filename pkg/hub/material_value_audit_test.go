@@ -855,7 +855,7 @@ func TestAgentListSecrets_LivenessErrorRecordsAuditItem(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// The whole-request precheck already calls GetUser three times for the
+	// The request precheck already calls GetUser three times for the
 	// root user (check 5, then the agent standing check's ancestry-root
 	// lookup and admission check, ptone/scion#3433) and must succeed; only
 	// the per-row liveness check's own GetUser call, made after them, is
