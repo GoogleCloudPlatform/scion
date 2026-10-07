@@ -1518,6 +1518,19 @@ func (s *Server) handleExistingAgent(
 		dispatcher := s.GetDispatcher()
 		if dispatcher != nil && existingAgent.RuntimeBrokerID != "" {
 			if err := dispatcher.DispatchAgentDelete(ctx, existingAgent, false, false, false, time.Time{}); err != nil {
+				// The broker holds a different run of the agent than the
+				// row records and deleted nothing (ptone/scion#3080):
+				// removing the row would leave that run with no row.
+				// Whether force overrides it is decided in one place,
+				// refuseDeleteRunMismatch.
+				var refused *DeleteRunMismatchError
+				if errors.As(err, &refused) && refuseDeleteRunMismatch(cleanupMode == "force", false) {
+					s.agentLifecycleLog.Warn("Env-gather recreate: broker holds a different run than the hub recorded; not removing the agent",
+						"agent_id", existingAgent.ID, "hub_run_id", refused.RequestedRunID,
+						"broker_run_id", refused.CurrentRunID, "cleanup_mode", cleanupMode)
+					Conflict(w, "Failed to clean up existing provisioning agent before env-gather recreate: "+deleteRunMismatchMessage(refused))
+					return existingAgentErrored
+				}
 				if cleanupMode != "force" {
 					RuntimeError(w, "Failed to clean up existing provisioning agent before env-gather recreate: "+err.Error())
 					return existingAgentErrored
