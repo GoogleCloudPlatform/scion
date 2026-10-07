@@ -207,7 +207,7 @@ Scion ships a built-in **`team-creation`** skill for generating coordinated mult
 
 ## Built-in vs custom templates
 
-- **`default`** — the built-in template shipped inside the Scion binary. It seeds common `home/` dotfiles and the baseline `agents.md` status-signaling instructions, and it is the base layer every other template inherits. The local copy is re-materialized from the binary, so it cannot be permanently removed from disk; use `scion templates update-default` to refresh it (`--force` to overwrite an existing copy). The Hub copy can be deleted. A deleted Hub copy is not re-created when the Hub restarts; bring it back with `scion templates restore` (see [Hub commands](#hub-commands)).
+- **`default`** — the built-in template shipped inside the Scion binary. It seeds common `home/` dotfiles and the baseline `agents.md` status-signaling instructions, and it is the base layer every other template inherits. The local copy is **protected**: `scion templates delete default` refuses to delete it, and `scion templates update-default` refreshes it from the binary (`--force` to overwrite an existing copy). The Hub copy can be deleted. A deleted Hub copy is not re-created when the Hub restarts; bring it back with `scion templates restore` (see [Hub commands](#hub-commands)).
 - **Custom templates** — anything you create, clone, or import. They live in one of two scopes.
 
 ### Template locations & resolution order
