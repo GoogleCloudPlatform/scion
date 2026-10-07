@@ -328,6 +328,28 @@ func (s *Server) ensureGroupParticipants(ctx context.Context, conversationID str
 	}
 }
 
+// ensureGroupUserParticipant records the human user who posted into a group
+// conversation as a participant, so the conversation appears in that user's
+// conversation list. It mirrors the native group path, which already records
+// the poster (handleAgentMessage's group branch). Like
+// ensureGroupParticipants this is a listing index only: it is idempotent
+// (store.EnsureParticipant), best-effort, and a failure is logged at warn
+// and never fails the caller's send.
+func (s *Server) ensureGroupUserParticipant(ctx context.Context, conversationID, userID string) {
+	if conversationID == "" || userID == "" {
+		return
+	}
+	if err := s.store.EnsureParticipant(ctx, &store.ConversationParticipant{
+		ConversationID: conversationID,
+		PrincipalKind:  "user",
+		PrincipalID:    userID,
+		Role:           "member",
+	}); err != nil {
+		slog.WarnContext(ctx, "ensureGroupUserParticipant: ensure participant failed",
+			"conversationID", conversationID, "userID", userID, "error", err)
+	}
+}
+
 // registerGroupPrimary records the primary recipient of a handleAgentMessage
 // dispatch as a participant of a thread-derived group conversation (review
 // round 2 finding #2, factored out per round 3 finding #7).
