@@ -26,9 +26,6 @@ export default defineConfig({
   ...base,
   testMatch: 'touch-keyboard.pw.ts',
   outputDir: '../../test-results/chat-palette-webkit',
-  use: {
-    baseURL: base.use?.baseURL,
-    viewport: base.use?.viewport,
-    browserName: 'webkit',
-  },
+  // The Chromium executable and flags do not apply to WebKit.
+  use: { ...base.use, launchOptions: {}, browserName: 'webkit' },
 });
