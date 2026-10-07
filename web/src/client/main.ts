@@ -28,6 +28,7 @@ import type { PageData, User } from '../shared/types.js';
 import { stateManager } from './state.js';
 import { debugLog } from './debug-log.js';
 import { setDocumentTitle } from './page-title.js';
+import { initialPageDataFor } from './ssr-page-data.js';
 import { CHAT_DM_ROUTE, CHAT_SPACE_ROUTE, CHAT_THREAD_ROUTE } from './chat-routes.js';
 import { chatNotifications } from './chat-notifications.js';
 import { chatUnread, startChatUnreadIfEligible } from './chat-unread.js';
@@ -1030,6 +1031,11 @@ async function renderRoute(path: string): Promise<void> {
   if (!appContainer) return;
   const thisNav = ++navigationId;
 
+  // The SSR payload is offered to the first render only, whichever route it
+  // is, so it can never be reused by a later client-side navigation.
+  const initialData = initialPageDataFor(ssrPageData, path, currentUser, performance.now());
+  ssrPageData = null;
+
   // Strip query string and hash for route matching
   let pathname = path.split('?')[0].split('#')[0];
   if (terminalWorkspaceEnabled) {
@@ -1131,19 +1137,14 @@ async function renderRoute(path: string): Promise<void> {
   const tag = route.tag;
 
   // Build page data with current user context for page components.
-  // Include SSR-prefetched data on the initial render so page components
-  // can skip redundant API fetches.
-  const hasSsrData = ssrPageData && ssrPageData.path === path && ssrPageData.data;
+  // Include SSR-prefetched data on the initial render (see
+  // initialPageDataFor) so page components can skip redundant API fetches.
   const pageData: PageData = {
     path,
     title: 'Scion',
     user: currentUser || undefined,
-    data: hasSsrData ? ssrPageData!.data : undefined,
+    data: initialData,
   };
-  // Consume SSR data so it is not reused on subsequent client-side navigations.
-  if (hasSsrData) {
-    ssrPageData = null;
-  }
 
   // Block non-admin users from admin-only routes.
   // Hub-admin users (who have admin role bindings but not super-admin role)

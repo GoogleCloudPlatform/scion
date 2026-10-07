@@ -128,6 +128,21 @@ function listViewOf(mode: ViewMode): AgentListView {
 const AGENTS_EXPANDED_STORAGE_KEY = 'scion-project-agents-expanded';
 const PAGER_PAGE_SIZE_STORAGE_KEY = 'scion-pagesize-project-agents';
 
+/**
+ * The server-prefetched project in `pageData.data`, when it is the project
+ * this page shows; otherwise null and the page fetches it. The router only
+ * hands over a payload prefetched for this path and the current user, on
+ * the first render (see client/ssr-page-data.ts); this checks that the
+ * payload is a single project with the requested id.
+ */
+export function hydratedProjectFor(pageData: PageData | null, projectId: string): Project | null {
+  const data = pageData?.data;
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
+  if (!projectId || data.id !== projectId) return null;
+  if (typeof data.name !== 'string') return null;
+  return data as unknown as Project;
+}
+
 @customElement('scion-page-project-detail')
 export class ScionPageProjectDetail extends LitElement {
   /** Re-renders absolute times when the display timezone changes. */
@@ -156,6 +171,28 @@ export class ScionPageProjectDetail extends LitElement {
    */
   @state()
   private project: Project | null = null;
+
+  /**
+   * Whether the server-prefetched project in `pageData` was already offered
+   * to a load. It is offered to the first load only: a retry, or a
+   * reconnect of this element, always fetches.
+   */
+  private hydrationOffered = false;
+
+  /**
+   * Whether the page-load agents request (the first one, or a retry of it)
+   * has not finished yet. The project header renders while it is pending;
+   * the agents section shows a loading row instead of the empty state.
+   */
+  @state()
+  private agentsInitialLoadPending = true;
+
+  /** Error of the last failed page-load agents request; cleared by any adopted agents result. */
+  @state()
+  private agentsLoadError: string | null = null;
+
+  /** Bumped per page-load agents request, so only the latest one clears `agentsInitialLoadPending`. */
+  private agentsPageLoadSeq = 0;
 
   /**
    * Agents in this project
@@ -1477,17 +1514,32 @@ export class ScionPageProjectDetail extends LitElement {
     this.hubProjectCapabilities = caps;
   }
 
+  /**
+   * Loads the project and, independently, the agents window's first
+   * request. The project header renders as soon as the project is known,
+   * without waiting for the agents: a cold load with a matching
+   * server-prefetched project uses it and sends no project request, while
+   * client-side navigation, a retry or a mismatched payload fetches it.
+   * Resolves when both have finished.
+   */
   private async loadData(): Promise<void> {
-    this.loading = true;
     this.error = null;
+    const agentsLoad = this.loadPageAgents();
 
+    const offered = this.hydrationOffered
+      ? null
+      : hydratedProjectFor(this.pageData, this.projectId);
+    this.hydrationOffered = true;
+    if (offered) {
+      this.applyLoadedProject(offered);
+      this.loading = false;
+      await agentsLoad;
+      return;
+    }
+
+    this.loading = true;
     try {
-      // Load the project and the agents window's one first request in
-      // parallel.
-      const [projectResponse] = await Promise.all([
-        apiFetch(`/api/v1/projects/${this.projectId}`),
-        this.loadAgentsForView('page-load'),
-      ]);
+      const projectResponse = await apiFetch(`/api/v1/projects/${this.projectId}`);
 
       if (!projectResponse.ok) {
         throw new Error(
@@ -1498,42 +1550,66 @@ export class ScionPageProjectDetail extends LitElement {
         );
       }
 
-      this.project = (await projectResponse.json()) as Project;
-      dispatchPageTitle(this, this.project.name || this.projectId, 'Projects');
-
-      if (this.project) {
-        stateManager.seedProjects([this.project]);
-      }
-
-      // Pre-create data sources for file tabs (the component loads files on connect)
-      if (this.hasProjectWorkspace()) {
-        this.getTabDataSource('workspace');
-      }
-      // Without a project workspace (per-agent git, empty per agent), activate
-      // the first shared dir
-      if (this.project && !this.hasProjectWorkspace() && this.project.sharedDirs?.length) {
-        this.activeFileTab = this.project.sharedDirs[0].name;
-        this.getTabDataSource(this.project.sharedDirs[0].name);
-      }
-
-      // Fetch metrics summary (non-blocking, gracefully degrades)
-      void this.loadMetricsSummary();
-      void this.loadSessionMetricsSummary();
-
-      // Auto-discover GitHub App installation if project has a GitHub remote but no installation
-      if (
-        this.project &&
-        this.project.gitRemote &&
-        /github\.com[/:]/.test(this.project.gitRemote) &&
-        this.project.githubInstallationId == null
-      ) {
-        void this.autoDiscoverGitHubApp();
-      }
+      this.applyLoadedProject((await projectResponse.json()) as Project);
     } catch (err) {
       console.error('Failed to load project:', err);
       this.error = err instanceof Error ? err.message : 'Failed to load project';
     } finally {
       this.loading = false;
+    }
+    await agentsLoad;
+  }
+
+  /**
+   * The agents window's page-load request, tracked separately from the
+   * project: its loading and failure states belong to the agents section,
+   * never to the page as a whole.
+   */
+  private async loadPageAgents(): Promise<void> {
+    const seq = ++this.agentsPageLoadSeq;
+    this.agentsInitialLoadPending = true;
+    this.agentsLoadError = null;
+    try {
+      await this.loadAgentsForView('page-load');
+    } finally {
+      if (seq === this.agentsPageLoadSeq) this.agentsInitialLoadPending = false;
+    }
+  }
+
+  /** The agents section's Retry after a failed page-load request. */
+  private retryAgentsLoad(): void {
+    if (this.agentsLoading || this.agentWindow.loading) return;
+    void this.loadPageAgents();
+  }
+
+  private applyLoadedProject(project: Project): void {
+    this.project = project;
+    dispatchPageTitle(this, this.project.name || this.projectId, 'Projects');
+
+    stateManager.seedProjects([this.project]);
+
+    // Pre-create data sources for file tabs (the component loads files on connect)
+    if (this.hasProjectWorkspace()) {
+      this.getTabDataSource('workspace');
+    }
+    // Without a project workspace (per-agent git, empty per agent), activate
+    // the first shared dir
+    if (!this.hasProjectWorkspace() && this.project.sharedDirs?.length) {
+      this.activeFileTab = this.project.sharedDirs[0].name;
+      this.getTabDataSource(this.project.sharedDirs[0].name);
+    }
+
+    // Fetch metrics summary (non-blocking, gracefully degrades)
+    void this.loadMetricsSummary();
+    void this.loadSessionMetricsSummary();
+
+    // Auto-discover GitHub App installation if project has a GitHub remote but no installation
+    if (
+      this.project.gitRemote &&
+      /github\.com[/:]/.test(this.project.gitRemote) &&
+      this.project.githubInstallationId == null
+    ) {
+      void this.autoDiscoverGitHubApp();
     }
   }
 
@@ -1635,6 +1711,7 @@ export class ScionPageProjectDetail extends LitElement {
    */
   private onAgentsLoadFailed(trigger: AgentsViewTrigger): void {
     if (trigger === 'page-load') {
+      this.agentsLoadError = 'Could not load agents.';
       this.agents = [];
       this.agentScopeCapabilities = undefined;
       this.agentWindow.setSmall();
@@ -1674,6 +1751,7 @@ export class ScionPageProjectDetail extends LitElement {
     } finally {
       this.endLoadingIndicator();
     }
+    if (adopted) this.agentsLoadError = null;
     if (
       adopted &&
       viewEpoch !== this.viewEpoch &&
@@ -2863,11 +2941,16 @@ export class ScionPageProjectDetail extends LitElement {
         </div>
       </div>
 
-      ${this.agentStats.total === 0
-        ? html`${this.renderAgentWindowBanner()}${this.renderEmptyAgents()}`
-        : html`
-            ${this.renderFilterBar()} ${this.renderAgentWindowBanner()} ${this.renderAgentRows()}
-          `}
+      ${this.agentsLoadError
+        ? this.renderAgentsLoadError()
+        : this.agentsInitialLoadPending
+          ? html`<div class="empty-filter-state agents-initial-loading">Loading agents…</div>`
+          : this.agentStats.total === 0
+            ? html`${this.renderAgentWindowBanner()}${this.renderEmptyAgents()}`
+            : html`
+                ${this.renderFilterBar()} ${this.renderAgentWindowBanner()}
+                ${this.renderAgentRows()}
+              `}
       ${this.project?.cloudLogging ? this.renderMessagesSection() : nothing}
       ${this.shouldShowFilesSection()
         ? this.filesSectionVisible
@@ -3087,6 +3170,24 @@ export class ScionPageProjectDetail extends LitElement {
         </sl-button>
       </div>
     `;
+  }
+
+  /**
+   * The agents section when the page-load agents request failed: the
+   * project stays on screen, with a Retry for the agents only.
+   */
+  private renderAgentsLoadError(): TemplateResult {
+    return html`<div class="empty-filter-state agents-load-error">
+      ${this.agentsLoadError}
+      <sl-button
+        size="small"
+        ?disabled=${this.agentsLoading || this.agentWindow.loading}
+        @click=${(): void => this.retryAgentsLoad()}
+      >
+        <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
+        Retry
+      </sl-button>
+    </div>`;
   }
 
   private renderEmptyAgents() {
