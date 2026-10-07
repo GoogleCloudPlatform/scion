@@ -237,11 +237,10 @@ func testBootstrapServer(t *testing.T) (*Server, store.Store, *mockStorage, *moc
 
 	cfg := DefaultServerConfig()
 	cfg.DevAuthToken = testBootstrapDevToken
-	srv, err := New(cfg, s)
+	srv, err := newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
-	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 
 	stor := newMockStorage("test-bucket")
 	srv.SetStorage(stor)
@@ -462,7 +461,7 @@ func TestCreateAgentWithWorkspaceBootstrap_NoStorage(t *testing.T) {
 
 	cfg := DefaultServerConfig()
 	cfg.DevAuthToken = testBootstrapDevToken
-	srv, err := New(cfg, s)
+	srv, err := newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
@@ -973,7 +972,7 @@ func TestSyncToFinalize_BootstrapMode_NoDispatcher(t *testing.T) {
 
 	cfg := DefaultServerConfig()
 	cfg.DevAuthToken = testBootstrapDevToken
-	srv, err := New(cfg, s)
+	srv, err := newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
