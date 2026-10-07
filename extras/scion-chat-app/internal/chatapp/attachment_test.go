@@ -61,6 +61,7 @@ func TestSanitizePathComponent(t *testing.T) {
 // --- resolveAgentPath tests ---
 
 func TestResolveAgentPath(t *testing.T) {
+	home := useLocalSharedDirs(t)
 	tests := []struct {
 		name        string
 		agentPath   string
@@ -75,7 +76,7 @@ func TestResolveAgentPath(t *testing.T) {
 			projectSlug: "test-proj",
 			projectID:   "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
 			wantEmpty:   false,
-			wantPrefix:  filepath.Join(os.Getenv("HOME"), ".scion"),
+			wantPrefix:  filepath.Join(home, ".scion"),
 		},
 		{
 			name:        "workspace scion-volumes path resolves",
@@ -83,7 +84,7 @@ func TestResolveAgentPath(t *testing.T) {
 			projectSlug: "test-proj",
 			projectID:   "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
 			wantEmpty:   false,
-			wantPrefix:  filepath.Join(os.Getenv("HOME"), ".scion"),
+			wantPrefix:  filepath.Join(home, ".scion"),
 		},
 		{
 			name:        "traversal via scion-volumes rejected",
@@ -145,7 +146,10 @@ func TestResolveAgentPath(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := resolveAgentPath(tt.agentPath, tt.projectSlug, tt.projectID)
+			got, err := resolveAgentPath(tt.agentPath, tt.projectSlug, tt.projectID)
+			if err != nil {
+				t.Fatalf("resolveAgentPath(%q) error: %v", tt.agentPath, err)
+			}
 			if tt.wantEmpty && got != "" {
 				t.Errorf("resolveAgentPath(%q) = %q, want empty", tt.agentPath, got)
 			}
@@ -172,15 +176,16 @@ func TestResolveAgentPath_WorkspacePath(t *testing.T) {
 	// Workspace paths resolve only for existing files. Since /workspace/
 	// may not exist in the test environment, just verify that the safe-prefix
 	// check blocks non-workspace absolute paths.
-	got := resolveAgentPath("/tmp/should-not-resolve", "proj", "id-1234")
-	if got != "" {
-		t.Errorf("expected /tmp path to be rejected, got %q", got)
+	got, err := resolveAgentPath("/tmp/should-not-resolve", "proj", "id-1234")
+	if err != nil || got != "" {
+		t.Errorf("expected /tmp path to be rejected, got %q, %v", got, err)
 	}
 }
 
 // --- resolveSharedDirPath tests ---
 
 func TestResolveSharedDirPath(t *testing.T) {
+	useLocalSharedDirs(t)
 	tests := []struct {
 		name          string
 		containerPath string
@@ -248,7 +253,10 @@ func TestResolveSharedDirPath(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := resolveSharedDirPath(tt.containerPath, tt.projectSlug, tt.projectID)
+			got, err := resolveSharedDirPath(tt.containerPath, tt.projectSlug, tt.projectID)
+			if err != nil {
+				t.Fatalf("resolveSharedDirPath(%q) error: %v", tt.containerPath, err)
+			}
 			if tt.wantEmpty && got != "" {
 				t.Errorf("resolveSharedDirPath(%q) = %q, want empty", tt.containerPath, got)
 			}

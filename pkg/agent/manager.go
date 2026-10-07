@@ -501,10 +501,11 @@ func (m *AgentManager) deleteResolved(ctx context.Context, agentName string, ref
 // created beside its container (for example Kubernetes Secrets) when the
 // container itself is already gone, so deleteResolved never reaches
 // Runtime.Delete. It is a no-op for a runtime that does not implement
-// runtime.AgentResourceCleaner. See that interface for the scoping rules.
-func (m *AgentManager) CleanupAgentResources(ctx context.Context, agentName, projectID string) error {
+// runtime.AgentResourceCleaner. See that interface for the scoping rules,
+// including runID's.
+func (m *AgentManager) CleanupAgentResources(ctx context.Context, agentName, projectID, runID string) error {
 	if c, ok := m.Runtime.(runtime.AgentResourceCleaner); ok {
-		return c.CleanupAgentResources(ctx, agentName, projectID)
+		return c.CleanupAgentResources(ctx, agentName, projectID, runID)
 	}
 	return nil
 }
