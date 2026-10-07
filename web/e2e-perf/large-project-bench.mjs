@@ -108,6 +108,7 @@ import {
   pageCountFor,
   summarizePageChanges,
   walkEndReason,
+  mapWithConcurrency,
 } from './lib.mjs';
 
 // ---- CLI args --------------------------------------------------------
@@ -151,6 +152,8 @@ const settleTimeoutMs = parseInt(args['settle-timeout-ms'] || '30000', 10);
 // How many Next clicks each populated paged-view run times (fewer when the
 // view has fewer pages).
 const pageChanges = parseInt(args['page-changes'] || '3', 10);
+// At most this many burst-target state lookups in flight at once.
+const TARGET_LOOKUP_CONCURRENCY = 4;
 const notes = args.notes || '';
 // Lets a targeted re-measurement (e.g. re-running only the SSE burst after
 // a burst-logic-only change) skip the four view scenarios, which can take
@@ -1024,7 +1027,11 @@ async function runBurstOnce(page, runIndex, targetHistory, invalidateDueToPriorR
     walk(document);
     return ids;
   });
-  const visibleAgents = (await Promise.all(visibleIds.map((id) => getAgent(id)))).filter(Boolean);
+  // Read their state a few at a time (before anything is timed), so this
+  // lookup does not put a burst of up to a page of requests on the hub.
+  const visibleAgents = (
+    await mapWithConcurrency(visibleIds, TARGET_LOOKUP_CONCURRENCY, (id) => getAgent(id))
+  ).filter(Boolean);
   const candidates = visibleAgents.filter((a) => a.phase !== 'suspended');
   const targets = candidates.slice(0, burstCount);
   if (targets.length < burstCount) {

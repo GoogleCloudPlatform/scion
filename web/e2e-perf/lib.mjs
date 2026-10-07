@@ -199,6 +199,23 @@ export function pageCountFor(pageSize, total) {
 }
 
 /**
+ * mapWithConcurrency maps items through fn with at most `limit` calls in
+ * flight at once, preserving input order in the result.
+ */
+export async function mapWithConcurrency(items, limit, fn) {
+  const out = new Array(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, async () => {
+    while (next < items.length) {
+      const i = next++;
+      out[i] = await fn(items[i], i);
+    }
+  });
+  await Promise.all(workers);
+  return out;
+}
+
+/**
  * walkEndReason classifies a pager whose Next is disabled: `no-next-page`
  * when it is on the last page its total implies (or the total is unknown,
  * zero or capped, so no later page can be shown to exist), and

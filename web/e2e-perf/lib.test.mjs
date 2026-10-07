@@ -32,6 +32,7 @@ import {
   pageCountFor,
   summarizePageChanges,
   walkEndReason,
+  mapWithConcurrency,
   summarizeBurstScenario,
   BURST_TARGET_ROTATION,
 } from './lib.mjs';
@@ -646,4 +647,23 @@ test('walkEndReason: how a walk with Next disabled ended', () => {
   // Next still available, or no pager: not an end.
   assert.equal(walkEndReason(pager({ hasNext: true })), null);
   assert.equal(walkEndReason(null), null);
+});
+
+test('mapWithConcurrency: bounded in-flight calls, results in input order', async () => {
+  let inFlight = 0;
+  let peak = 0;
+  const items = Array.from({ length: 25 }, (_, i) => i);
+  const out = await mapWithConcurrency(items, 4, async (n) => {
+    inFlight++;
+    peak = Math.max(peak, inFlight);
+    await new Promise((r) => setTimeout(r, 1 + (n % 3)));
+    inFlight--;
+    return n * 2;
+  });
+  assert.equal(peak, 4);
+  assert.deepEqual(
+    out,
+    items.map((n) => n * 2)
+  );
+  assert.deepEqual(await mapWithConcurrency([], 4, async (n) => n), []);
 });
