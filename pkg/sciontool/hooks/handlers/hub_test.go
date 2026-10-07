@@ -750,3 +750,87 @@ func TestTruncateMessage(t *testing.T) {
 		}
 	}
 }
+
+// TestHubHandler_WaitingDefaultMessage checks the default status message
+// sent for waiting_for_input, which the web UI shows as "Waiting on
+// Parent". Only the display text is asserted here; the activity value
+// stays waiting_for_input.
+func TestHubHandler_WaitingDefaultMessage(t *testing.T) {
+	tests := []struct {
+		name        string
+		event       hooks.Event
+		wantMessage string
+	}{
+		{
+			name:        "notification without message",
+			event:       hooks.Event{Name: hooks.EventNotification},
+			wantMessage: "Waiting on parent",
+		},
+		{
+			name: "notification with message keeps detail",
+			event: hooks.Event{
+				Name: hooks.EventNotification,
+				Data: hooks.EventData{Message: "What should I do?"},
+			},
+			wantMessage: "What should I do?",
+		},
+		{
+			name: "claude AskUserQuestion",
+			event: hooks.Event{
+				Name:    hooks.EventToolStart,
+				Dialect: "claude",
+				Data:    hooks.EventData{ToolName: "AskUserQuestion"},
+			},
+			wantMessage: "Waiting on parent",
+		},
+		{
+			name: "claude ExitPlanMode",
+			event: hooks.Event{
+				Name:    hooks.EventToolStart,
+				Dialect: "claude",
+				Data:    hooks.EventData{ToolName: "ExitPlanMode"},
+			},
+			wantMessage: "Waiting for plan approval",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+
+			var payload map[string]interface{}
+			var mu sync.Mutex
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				defer mu.Unlock()
+				_ = json.NewDecoder(r.Body).Decode(&payload)
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{}`))
+			}))
+			defer server.Close()
+
+			scrubHubEnv(t)
+			t.Setenv("SCION_HUB_ENDPOINT", server.URL)
+			t.Setenv("SCION_AUTH_TOKEN", "test-token")
+			t.Setenv("SCION_AGENT_ID", "test-agent-id")
+
+			handler := NewHubHandler()
+			if handler == nil {
+				t.Fatal("Expected handler to be created")
+			}
+			event := tt.event
+			if err := handler.Handle(&event); err != nil {
+				t.Fatalf("Handle returned error: %v", err)
+			}
+
+			mu.Lock()
+			defer mu.Unlock()
+			if payload["activity"] != "waiting_for_input" {
+				t.Errorf("activity = %v, want waiting_for_input", payload["activity"])
+			}
+			if payload["message"] != tt.wantMessage {
+				t.Errorf("message = %v, want %q", payload["message"], tt.wantMessage)
+			}
+		})
+	}
+}
