@@ -153,6 +153,9 @@ type ServerConfig struct {
 	// DefaultUserRole is the role assigned to new users who are not in the
 	// admin_emails list. Values: "member" (default), "viewer".
 	DefaultUserRole string
+	// AgentRunScope is server.auth.agent_run_scope (ParseAgentRunScope);
+	// the zero value is off.
+	AgentRunScope AgentRunScope
 	// BrokerAuthConfig holds configuration for Runtime Broker HMAC authentication.
 	BrokerAuthConfig BrokerAuthConfig
 	// HubEndpoint is the public endpoint URL for this Hub (used in broker join responses).
@@ -1073,6 +1076,10 @@ type RemoteCreateAgentRequest struct {
 	ResolvedSecrets []ResolvedSecret `json:"resolvedSecrets,omitempty"`
 	HubEndpoint     string           `json:"hubEndpoint,omitempty"`
 	AgentToken      string           `json:"agentToken,omitempty"`
+	// tokenGrant is the authorized, not yet signed, agent token for this
+	// request (hub-side only, never sent). The dispatch signs it for the
+	// request's run and records its credential before setting AgentToken.
+	tokenGrant *AgentTokenGrant
 	// CreatorName is the human-readable identity of who created this agent.
 	// Injected as the SCION_CREATOR environment variable in the agent container.
 	CreatorName string `json:"creatorName,omitempty"`
@@ -2024,9 +2031,6 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 		slog.Warn("Failed to initialize agent token service", "error", err)
 	} else {
 		srv.agentTokenService = tokenService
-		// Wire credential recorder so issued tokens are persisted for revocation.
-		credAdapter := &storeCredentialRecorder{store: s}
-		tokenService.SetCredentialRecorder(credAdapter)
 		fp := sha256.Sum256(tokenService.config.SigningKey)
 		slog.Info("Agent token service initialized", "key_fingerprint", hex.EncodeToString(fp[:8]))
 	}
@@ -2476,6 +2480,14 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 		// not cfg.PlatformAuthSA directly, so this and Server.platformAuthSA
 		// can never diverge.
 		PlatformAuthSA: srv.platformAuthSA,
+		AgentRunScope:  newAgentRunScopeChecker(cfg.AgentRunScope, s, srv.authLog),
+	}
+	if rs := srv.authConfig.AgentRunScope; rs != nil {
+		rs.route = func(r *http.Request) string {
+			_, pattern := srv.mux.Handler(r)
+			return pattern
+		}
+		slog.Info("Agent token run scope enabled", "mode", cfg.AgentRunScope.String())
 	}
 	// Wire the proxy user provisioner (wraps provisionUser with 60s cache)
 	if cfg.ProxyAuth != nil {
@@ -3631,6 +3643,15 @@ func (s *Server) CloseDecisionAudit(ctx context.Context) {
 	}
 }
 
+// SetAgentRunScopeMetrics wires the agent token run-scope counter. It does
+// nothing when server.auth.agent_run_scope is off.
+func (s *Server) SetAgentRunScopeMetrics(m *OTelAgentRunScopeMetrics) {
+	if c := s.authConfig.AgentRunScope; c != nil && m != nil {
+		var r agentRunScopeMetrics = m
+		c.metrics.Store(&r)
+	}
+}
+
 // SetExternalBearerMetrics wires the external-bearer authentication outcome
 // counter. Unlike SetMetrics/SetDBMetrics/SetDispatchMetrics/
 // SetGCPTokenMetrics above, this recorder is read from AuthConfig by the
@@ -4076,58 +4097,6 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	dispatcher.SetImageRegistry(s.resolveImageRegistry())
 
 	return dispatcher
-}
-
-// GenerateAgentToken generates a JWT for an agent.
-// This is a convenience method that delegates to the token service.
-// Base scopes are determined by the passed role.
-// Dev-auth mode overrides to full if the role would be more restrictive,
-// preserving dev-mode behavior where all agents get full access.
-// Additional scopes are merged with the role-based defaults, deduplicated.
-//
-// It applies no delegation ceiling and has no production caller: every mint
-// and refresh site calls GenerateAgentTokenForAgent. It serves test helpers
-// (TestAllMintSitesUseCeiledHelper pins this).
-func (s *Server) GenerateAgentToken(agentID, projectID string, ancestry []string, role AgentRole, additionalScopes []AgentTokenScope) (string, error) {
-	s.mu.RLock()
-	tokenService := s.agentTokenService
-	s.mu.RUnlock()
-
-	if tokenService == nil {
-		return "", fmt.Errorf("agent token service not initialized")
-	}
-
-	// Use the specified role for base scopes.
-	// Dev-auth mode overrides to full if the role would be more restrictive,
-	// preserving dev-mode behavior where all agents get full access.
-	effectiveRole := role
-	if s.config.DevAuthToken != "" && CompareRoles(role, AgentRoleFull) < 0 {
-		effectiveRole = AgentRoleFull
-	}
-	scopes := ScopesForRole(effectiveRole)
-
-	// Merge additional scopes, deduplicating
-	seen := make(map[AgentTokenScope]bool, len(scopes))
-	for _, sc := range scopes {
-		seen[sc] = true
-	}
-	for _, scope := range additionalScopes {
-		if !seen[scope] {
-			scopes = append(scopes, scope)
-			seen[scope] = true
-		}
-	}
-
-	return tokenService.GenerateAgentToken(agentID, projectID, scopes, ancestry)
-}
-
-// storeCredentialRecorder adapts store.AgentCredentialStore to CredentialRecorder.
-type storeCredentialRecorder struct {
-	store store.AgentCredentialStore
-}
-
-func (r *storeCredentialRecorder) RecordAgentCredential(ctx context.Context, cred *store.AgentCredential) error {
-	return r.store.CreateAgentCredential(ctx, cred)
 }
 
 // agentHeartbeatTimeoutHandler returns a recurring handler function that marks

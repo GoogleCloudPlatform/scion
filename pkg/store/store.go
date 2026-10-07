@@ -34,6 +34,10 @@ var (
 	// ErrDeleteInProgress is returned by SetAgentRunID when a delete holds
 	// the agent's row (see AgentStore.SetAgentRunID).
 	ErrDeleteInProgress = errors.New("agent delete in progress")
+	// ErrCredentialNotRecorded is returned by SetAgentRunID when the
+	// agent credential it was given could not be recorded; nothing was
+	// written.
+	ErrCredentialNotRecorded = errors.New("agent credential not recorded")
 
 	// ErrPhaseMismatch is returned by UpdateAgentStatus when
 	// AgentStatusUpdate.IfPhase is set and the stored phase differs. It wraps
@@ -417,7 +421,11 @@ type AgentStore interface {
 	// The same write appends the replaced run to the row's PreviousRunIDs
 	// (AppendPreviousRunID, ptone/scion#3097), so a delete still names it
 	// until the new run settles.
-	SetAgentRunID(ctx context.Context, agentID, runID string) (previous string, err error)
+	//
+	// When cred is non-nil it is created in the same transaction as the
+	// run-ID write, with RunID set to runID: either both are recorded or
+	// neither is.
+	SetAgentRunID(ctx context.Context, agentID, runID string, cred *AgentCredential) (previous string, err error)
 
 	// CompareAndSwapAgentRunID sets the agent's run_id to newRunID only if
 	// it currently equals expectedRunID, and reports whether it did. A

@@ -86,9 +86,9 @@ func TestDeleteFence_PreviousRunDeleteCarriesNotAfter(t *testing.T) {
 			srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(s, client, false, slog.Default()))
 			agent := setupBrokerAgentInPhase(t, s, "fence-prev-"+map[bool]string{false: "ok", true: "late"}[late], state.PhaseRunning)
 			ctx := context.Background()
-			_, err := s.SetAgentRunID(ctx, agent.ID, "run-1")
+			_, err := s.SetAgentRunID(ctx, agent.ID, "run-1", nil)
 			require.NoError(t, err)
-			_, err = s.SetAgentRunID(ctx, agent.ID, "run-2")
+			_, err = s.SetAgentRunID(ctx, agent.ID, "run-2", nil)
 			require.NoError(t, err)
 			require.Equal(t, []string{"run-1"}, mustGetAgent(t, s, agent.ID).PreviousRunIDs)
 
@@ -128,7 +128,7 @@ func TestDeleteFence_ExecDeferredDeletePreviousRunsFenced(t *testing.T) {
 			client := &fenceRecordingClient{mockRuntimeBrokerClient: &mockRuntimeBrokerClient{}}
 			srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(s, client, false, slog.Default()))
 			agent := setupBrokerAgentInPhase(t, s, "fence-exec-prev", state.PhaseRunning)
-			_, err := s.SetAgentRunID(ctx, agent.ID, "run-cur")
+			_, err := s.SetAgentRunID(ctx, agent.ID, "run-cur", nil)
 			require.NoError(t, err)
 			seedAgentDeletion(t, s, agent.ID, seedLiveDeleting)
 			var claimAdj int64
