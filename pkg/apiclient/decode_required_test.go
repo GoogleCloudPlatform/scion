@@ -93,3 +93,20 @@ func TestDecodeResponse_NoContentUnchanged(t *testing.T) {
 		t.Fatalf("DecodeResponse on 204 = (%v, %v), want (nil, nil)", got, err)
 	}
 }
+
+// TestDecodeResponse_EmptyBodyUnchanged pins that DecodeResponse still treats
+// an empty 200 body as a decode failure, not as ErrNoContent. DecodeResponse
+// and DecodeRequired share one implementation, so this guards against the
+// required-body handling leaking into DecodeResponse.
+func TestDecodeResponse_EmptyBodyUnchanged(t *testing.T) {
+	got, err := DecodeResponse[struct{}](newTestResponse(http.StatusOK, ""))
+	if got != nil || err == nil {
+		t.Fatalf("DecodeResponse on empty 200 = (%v, %v), want a decode error", got, err)
+	}
+	if errors.Is(err, ErrNoContent) {
+		t.Fatalf("DecodeResponse on empty 200 wrapped ErrNoContent: %v", err)
+	}
+	if want := "failed to decode response: EOF"; err.Error() != want {
+		t.Fatalf("DecodeResponse on empty 200 error = %q, want %q", err.Error(), want)
+	}
+}

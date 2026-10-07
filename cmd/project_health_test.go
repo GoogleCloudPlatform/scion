@@ -16,10 +16,18 @@ package cmd
 
 import (
 	"bytes"
+	"context"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"os"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestProjectHealthCmdRegistration(t *testing.T) {
@@ -108,4 +116,41 @@ func TestPrintProjectHealthReports(t *testing.T) {
 	assert.Contains(t, output, "failing-agent")
 	assert.Contains(t, output, "1 agent(s) are blocked — run 'scion look <agent>' to see the block reason.")
 	assert.Contains(t, output, "1 agent(s) are in error phase")
+}
+
+// TestRunProjectHealth_EmptyProjectsListKeepsProxyHint pins that an empty
+// 200 from the projects list still carries the reverse-proxy hint. The list
+// call now fails with apiclient.ErrNoContent rather than a JSON decode error,
+// and HintProxyError must still recognise it.
+func TestRunProjectHealth_EmptyProjectsListKeepsProxyHint(t *testing.T) {
+	origHome := os.Getenv("HOME")
+	origProjectPath, origAll, origJSON, origFormat := projectPath, projectHealthAll, projectHealthJSON, outputFormat
+	defer func() {
+		_ = os.Setenv("HOME", origHome)
+		projectPath, projectHealthAll, projectHealthJSON, outputFormat = origProjectPath, origAll, origJSON, origFormat
+	}()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/projects" && r.Method == http.MethodGet {
+			w.WriteHeader(http.StatusOK) // empty body
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	isolateHubEnvForTest(t, server.URL, "")
+	tmpHome := t.TempDir()
+	_ = os.Setenv("HOME", tmpHome)
+	projectPath = setupConversationCreateProject(t, tmpHome, server.URL, "")
+	projectHealthAll = true
+	projectHealthJSON = false
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	err := runProjectHealth(cmd, nil)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, apiclient.ErrNoContent), "got %v", err)
+	assert.Contains(t, err.Error(), "failed to list projects from Hub")
+	assert.Contains(t, err.Error(), "Hint: a reverse proxy may be intercepting /healthz and /health")
 }

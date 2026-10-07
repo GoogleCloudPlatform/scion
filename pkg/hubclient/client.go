@@ -18,6 +18,7 @@ package hubclient
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -409,7 +410,10 @@ func isProxyIntercepted(resp *http.Response) bool {
 // HintProxyError returns err unchanged in most cases. If the error message
 // matches the pattern produced by apiclient.DecodeResponse when a proxy
 // intercepts a health endpoint and returns a non-JSON body, it appends a
-// diagnostic hint suggesting a Cloud Run / GFE configuration issue.
+// diagnostic hint suggesting a Cloud Run / GFE configuration issue. An
+// error wrapping apiclient.ErrNoContent (an empty body from a call that
+// needs one) gets the same hint, as an empty-body decode failure did before
+// apiclient.DecodeRequired.
 //
 // Note: the trigger ("failed to decode response") fires for any JSON decode
 // failure, including a genuinely malformed response from the hub server
@@ -421,7 +425,7 @@ func HintProxyError(err error) error {
 	if err == nil {
 		return nil
 	}
-	if strings.Contains(err.Error(), "failed to decode response") {
+	if strings.Contains(err.Error(), "failed to decode response") || errors.Is(err, apiclient.ErrNoContent) {
 		return fmt.Errorf("%w\nHint: a reverse proxy may be intercepting "+
 			"/healthz and /health — check your Cloud Run or GFE configuration", err)
 	}

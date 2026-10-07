@@ -373,24 +373,9 @@ func (t *Transport) doJSONVia(ctx context.Context, send func(context.Context, *h
 
 // DecodeResponse reads and decodes a JSON response body.
 // If the response indicates an error (status >= 400), it returns an APIError.
+// A 204 No Content returns (nil, nil).
 func DecodeResponse[T any](resp *http.Response) (*T, error) {
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode >= 400 {
-		return nil, ParseErrorResponse(resp)
-	}
-
-	// Handle 204 No Content
-	if resp.StatusCode == http.StatusNoContent {
-		return nil, nil
-	}
-
-	var result T
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("failed to decode response: %w", err)
-	}
-
-	return &result, nil
+	return decode[T](resp, false)
 }
 
 // ErrNoContent is returned by DecodeRequired when a successful response has
@@ -401,6 +386,13 @@ var ErrNoContent = errors.New("server returned no content")
 // body. A 204 No Content or an empty 2xx body returns an error wrapping
 // ErrNoContent instead of a nil result, so callers never see (nil, nil).
 func DecodeRequired[T any](resp *http.Response) (*T, error) {
+	return decode[T](resp, true)
+}
+
+// decode implements DecodeResponse and DecodeRequired. When required is
+// false, a 204 returns (nil, nil) and an empty body is a decode error; when
+// it is true, both return an error wrapping ErrNoContent.
+func decode[T any](resp *http.Response, required bool) (*T, error) {
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode >= 400 {
@@ -408,12 +400,15 @@ func DecodeRequired[T any](resp *http.Response) (*T, error) {
 	}
 
 	if resp.StatusCode == http.StatusNoContent {
-		return nil, fmt.Errorf("%w (status: %d)", ErrNoContent, resp.StatusCode)
+		if required {
+			return nil, fmt.Errorf("%w (status: %d)", ErrNoContent, resp.StatusCode)
+		}
+		return nil, nil
 	}
 
 	var result T
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		if errors.Is(err, io.EOF) {
+		if required && errors.Is(err, io.EOF) {
 			return nil, fmt.Errorf("%w (status: %d)", ErrNoContent, resp.StatusCode)
 		}
 		return nil, fmt.Errorf("failed to decode response: %w", err)
