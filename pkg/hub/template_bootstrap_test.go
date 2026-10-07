@@ -21,15 +21,19 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -1373,4 +1377,200 @@ type mockRoundTripper struct {
 
 func (m *mockRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	return m.roundTrip(req)
+}
+
+// TestBootstrapTemplatesFromDir_DeletedDefaultStaysDeleted covers AC1 of
+// ptone/scion#3544 for the workstation template path: the bundled default
+// template is re-materialized on disk every start but, once deleted, is not
+// re-imported. A user template next to it keeps today's behaviour.
+func TestBootstrapTemplatesFromDir_DeletedDefaultStaysDeleted(t *testing.T) {
+	srv, s, _ := testTemplateBootstrapServer(t)
+	ctx := context.Background()
+	globalDir := t.TempDir()
+	templatesDir := filepath.Join(globalDir, "templates")
+	scope := string(store.TemplateScopeGlobal)
+
+	materialize := func() {
+		t.Helper()
+		if err := config.MaterializeBundledTemplates(globalDir, config.MaterializeOptions{Force: true}); err != nil {
+			t.Fatalf("materialize: %v", err)
+		}
+		userTmpl := filepath.Join(templatesDir, "my-template")
+		if err := os.MkdirAll(userTmpl, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(userTmpl, "scion-agent.yaml"), []byte("harness: claude\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	materialize()
+	if err := srv.BootstrapTemplatesFromDir(ctx, templatesDir); err != nil {
+		t.Fatalf("initial bootstrap: %v", err)
+	}
+	def, err := s.GetTemplateBySlug(ctx, "default", scope, "")
+	if err != nil {
+		t.Fatalf("default not imported: %v", err)
+	}
+	user, err := s.GetTemplateBySlug(ctx, "my-template", scope, "")
+	if err != nil {
+		t.Fatalf("user template not imported: %v", err)
+	}
+	if err := s.DeleteTemplate(ctx, def.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteTemplate(ctx, user.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	for i := range 2 {
+		materialize()
+		if err := srv.BootstrapTemplatesFromDir(ctx, templatesDir); err != nil {
+			t.Fatalf("restart %d bootstrap: %v", i, err)
+		}
+		if _, err := s.GetTemplateBySlug(ctx, "default", scope, ""); !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("restart %d: deleted default template was re-imported (err=%v)", i, err)
+		}
+		if _, err := s.GetTemplateBySlug(ctx, "my-template", scope, ""); err != nil {
+			t.Fatalf("restart %d: user template not re-imported: %v", i, err)
+		}
+	}
+
+	doc := readBuiltinSeedLedgerDoc(t, s)
+	if doc == nil || !reflect.DeepEqual(doc.Templates, []string{"default"}) {
+		t.Errorf("ledger templates = %+v, want [default]", doc)
+	}
+}
+
+// TestBootstrapTemplatesFromDir_CorruptLedgerFailsClosedForBuiltins is the
+// template sibling of the harness-config corrupt-ledger test.
+func TestBootstrapTemplatesFromDir_CorruptLedgerFailsClosedForBuiltins(t *testing.T) {
+	srv, s, _ := testTemplateBootstrapServer(t)
+	ctx := context.Background()
+	globalDir := t.TempDir()
+	templatesDir := filepath.Join(globalDir, "templates")
+	scope := string(store.TemplateScopeGlobal)
+
+	if err := config.MaterializeBundledTemplates(globalDir, config.MaterializeOptions{Force: true}); err != nil {
+		t.Fatal(err)
+	}
+	// An existing user template, imported in the first pass and edited
+	// before the second, proves existing rows are still synced.
+	existingTmpl := filepath.Join(templatesDir, "existing-template")
+	if err := os.MkdirAll(existingTmpl, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(existingTmpl, "scion-agent.yaml"), []byte("harness: claude\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.BootstrapTemplatesFromDir(ctx, templatesDir); err != nil {
+		t.Fatal(err)
+	}
+	def, err := s.GetTemplateBySlug(ctx, "default", scope, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteTemplate(ctx, def.ID); err != nil {
+		t.Fatal(err)
+	}
+	existingBefore, err := s.GetTemplateBySlug(ctx, "existing-template", scope, "")
+	if err != nil {
+		t.Fatalf("existing user template not imported: %v", err)
+	}
+
+	if _, err := s.UpsertHubSetting(ctx, builtinSeedLedgerSection, json.RawMessage(`"not-a-ledger"`),
+		"test", -1, "seeded"); err != nil {
+		t.Fatal(err)
+	}
+	corrupt, err := s.GetHubSetting(ctx, builtinSeedLedgerSection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(existingTmpl, "scion-agent.yaml"), []byte("harness: claude\n# edited\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	userTmpl := filepath.Join(templatesDir, "my-template")
+	if err := os.MkdirAll(userTmpl, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(userTmpl, "scion-agent.yaml"), []byte("harness: claude\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.MaterializeBundledTemplates(globalDir, config.MaterializeOptions{Force: true}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := srv.BootstrapTemplatesFromDir(ctx, templatesDir); err == nil {
+		t.Fatal("expected an error for an unreadable ledger")
+	}
+	if _, err := s.GetTemplateBySlug(ctx, "my-template", scope, ""); err != nil {
+		t.Errorf("user template not imported with a corrupt ledger: %v", err)
+	}
+	if _, err := s.GetTemplateBySlug(ctx, "default", scope, ""); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("deleted default template re-created with a corrupt ledger (err=%v)", err)
+	}
+	existingAfter, err := s.GetTemplateBySlug(ctx, "existing-template", scope, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if existingAfter.ContentHash == existingBefore.ContentHash {
+		t.Error("existing template was not synced with a corrupt ledger (content hash unchanged)")
+	}
+	after, err := s.GetHubSetting(ctx, builtinSeedLedgerSection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Revision != corrupt.Revision || string(after.Value) != string(corrupt.Value) {
+		t.Errorf("corrupt ledger row was overwritten: rev %d -> %d, value %s", corrupt.Revision, after.Revision, after.Value)
+	}
+}
+
+// TestBootstrapTemplatesFromDir_MarksExistingBuiltinWhenSyncFails verifies
+// that an existing built-in row counts as seeded even if its content sync
+// fails (mark before sync, same rule as the hosted path): after a failed
+// sync the name is in the ledger, so deleting the row sticks.
+func TestBootstrapTemplatesFromDir_MarksExistingBuiltinWhenSyncFails(t *testing.T) {
+	srv, s, stor := testTemplateBootstrapServer(t)
+	ctx := context.Background()
+	scope := string(store.TemplateScopeGlobal)
+
+	dir := makeTemplateDir(t, "default", map[string]string{
+		"scion-agent.yaml": "harness: claude\n",
+	})
+	if err := srv.BootstrapTemplatesFromDir(ctx, dir); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a hub that predates the ledger.
+	if err := s.DeleteHubSetting(ctx, builtinSeedLedgerSection); err != nil {
+		t.Fatal(err)
+	}
+
+	// Change the content so the sync must upload, and make uploads fail.
+	if err := os.WriteFile(filepath.Join(dir, "default", "scion-agent.yaml"), []byte("harness: claude\n# v2\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	srv.SetStorage(&failingUploadStorage{mockStorage: stor})
+	if err := srv.BootstrapTemplatesFromDir(ctx, dir); err != nil {
+		t.Fatalf("bootstrap with failing sync: %v", err)
+	}
+	doc := readBuiltinSeedLedgerDoc(t, s)
+	if doc == nil || !reflect.DeepEqual(doc.Templates, []string{"default"}) {
+		t.Fatalf("ledger after failed sync = %+v, want templates [default]", doc)
+	}
+
+	// Delete the row, then bootstrap with a working sync: it stays deleted.
+	srv.SetStorage(stor)
+	def, err := s.GetTemplateBySlug(ctx, "default", scope, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteTemplate(ctx, def.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.BootstrapTemplatesFromDir(ctx, dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.GetTemplateBySlug(ctx, "default", scope, ""); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("deleted default template re-created (err=%v)", err)
+	}
 }
