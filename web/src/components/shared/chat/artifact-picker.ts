@@ -53,9 +53,6 @@ type PickerFilter = 'all' | 'owned' | 'project';
 /** Delay before a search keystroke reloads the list. */
 const SEARCH_DEBOUNCE_MS = 250;
 
-/** Rows fetched per page. */
-const PAGE_SIZE = 25;
-
 /** Name lookups run at most this many at a time. */
 const NAME_LOOKUP_CONCURRENCY = 6;
 
@@ -109,12 +106,10 @@ export class ScionArtifactPicker extends LitElement {
     this.error = '';
     try {
       const res = await apiFetch(
-        artifactListUrl({
-          q: this.query,
-          ownedOnly: this.filter === 'owned',
-          ...(more && this.nextCursor ? { cursor: this.nextCursor } : {}),
-          limit: PAGE_SIZE,
-        })
+        artifactListUrl(
+          { q: this.query, ownedOnly: this.filter === 'owned' },
+          more && this.nextCursor ? this.nextCursor : undefined
+        )
       );
       if (gen !== this.generation) return;
       if (!res.ok) {

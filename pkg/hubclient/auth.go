@@ -134,7 +134,7 @@ func (s *authService) Login(ctx context.Context, req *LoginRequest) (*LoginRespo
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[LoginResponse](resp)
+	return apiclient.DecodeRequired[LoginResponse](resp)
 }
 
 // Logout invalidates the current session.
@@ -157,7 +157,7 @@ func (s *authService) Refresh(ctx context.Context, refreshToken string) (*TokenR
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[TokenResponse](resp)
+	return apiclient.DecodeRequired[TokenResponse](resp)
 }
 
 // Me returns the current authenticated user.
@@ -166,7 +166,7 @@ func (s *authService) Me(ctx context.Context) (*User, error) {
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[User](resp)
+	return apiclient.DecodeRequired[User](resp)
 }
 
 // GetAuthProviders returns configured OAuth providers for a client type.
@@ -209,7 +209,7 @@ func (s *authService) GetAuthURL(ctx context.Context, callbackURL, state, provid
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[AuthURLResponse](resp)
+	return apiclient.DecodeRequired[AuthURLResponse](resp)
 }
 
 // ExchangeCode exchanges an authorization code for tokens.
@@ -227,7 +227,7 @@ func (s *authService) ExchangeCode(ctx context.Context, code, callbackURL, provi
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[CLITokenResponse](resp)
+	return apiclient.DecodeRequired[CLITokenResponse](resp)
 }
 
 // DeviceCodeResponse is the response from initiating a device authorization flow.
@@ -261,7 +261,7 @@ func (s *authService) RequestDeviceCode(ctx context.Context, provider string) (*
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[DeviceCodeResponse](resp)
+	return apiclient.DecodeRequired[DeviceCodeResponse](resp)
 }
 
 // PollDeviceToken polls for the device authorization result.

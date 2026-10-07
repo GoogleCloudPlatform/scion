@@ -215,7 +215,7 @@ describe('scion-artifact-picker', () => {
       )
     );
     const el = await openPicker();
-    expect(apiFetch.mock.calls[0][0]).toBe('/api/v1/artifacts?mine=1&limit=25');
+    expect(apiFetch.mock.calls[0][0]).toBe('/api/v1/artifacts?mine=1');
     expect(titles(el)).toEqual(['Design notes', 'Brand guide']);
 
     const picked: any[] = [];
@@ -241,11 +241,11 @@ describe('scion-artifact-picker', () => {
     vi.advanceTimersByTime(300);
     vi.useRealTimers();
     await settle(el);
-    expect(lastListCall()).toBe('/api/v1/artifacts?mine=1&q=brand&limit=25');
+    expect(lastListCall()).toBe('/api/v1/artifacts?mine=1&q=brand');
 
     el.setFilter('owned');
     await settle(el);
-    expect(lastListCall()).toBe('/api/v1/artifacts?mine=1&q=brand&owner=me&limit=25');
+    expect(lastListCall()).toBe('/api/v1/artifacts?mine=1&q=brand&owner=me');
 
     el.setFilter('project');
     await settle(el);
@@ -286,7 +286,7 @@ describe('scion-artifact-picker', () => {
     expect(more).toBeTruthy();
     more.click();
     await settle(el);
-    expect(lastListCall()).toBe('/api/v1/artifacts?mine=1&cursor=c1&limit=25');
+    expect(lastListCall()).toBe('/api/v1/artifacts?mine=1&cursor=c1');
     expect(titles(el)).toEqual(['Here']);
   });
 

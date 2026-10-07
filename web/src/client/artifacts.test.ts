@@ -18,8 +18,6 @@ import { describe, expect, it } from 'vitest';
 
 import {
   artifactFileUrl,
-  artifactListUrl,
-  artifactPageUrl,
   baseName,
   formatArtifactRef,
   formatBytes,
@@ -106,11 +104,10 @@ describe('message artifact helpers', () => {
     available: false,
   });
 
-  it('formats references and page URLs', () => {
+  it('formats references', () => {
     expect(formatArtifactRef(A)).toBe(`scion://artifact/${A}`);
     expect(formatArtifactRef(A, 0)).toBe(`scion://artifact/${A}`);
     expect(formatArtifactRef(A, 4)).toBe(`scion://artifact/${A}@4`);
-    expect(artifactPageUrl('proj 1', A)).toBe(`/projects/proj%201/artifacts/${A}`);
   });
 
   it('orders refs by first appearance in the body, case-insensitively, others last in input order', () => {
@@ -123,13 +120,5 @@ describe('message artifact helpers', () => {
       c.id,
       d.id,
     ]);
-  });
-
-  it('builds the list URL with mine=1 and only the set parameters', () => {
-    expect(artifactListUrl()).toBe('/api/v1/artifacts?mine=1');
-    expect(artifactListUrl({ q: '  design ', ownedOnly: true, cursor: 'c1', limit: 25 })).toBe(
-      '/api/v1/artifacts?mine=1&q=design&owner=me&cursor=c1&limit=25'
-    );
-    expect(artifactListUrl({ q: '   ' })).toBe('/api/v1/artifacts?mine=1');
   });
 });

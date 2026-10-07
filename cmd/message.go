@@ -880,7 +880,9 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 	if err != nil {
 		return agentMessageSendError(ref.Value, err)
 	}
-	if humanResp != nil && !isJSONOutput() {
+	// This path prints no JSON body, so the warning goes to stderr in
+	// either output mode.
+	if humanResp != nil {
 		printArtifactWarning(humanResp.ArtifactWarning)
 	}
 	if !isJSONOutput() {

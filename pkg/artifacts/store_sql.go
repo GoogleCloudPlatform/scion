@@ -937,36 +937,42 @@ func (s *sqlStore) ListMessageRefs(ctx context.Context, messageIDs []string) (ma
 	out := make(map[string][]MessageRef)
 	for start := 0; start < len(messageIDs); start += maxMessageRefQueryIDs {
 		end := min(start+maxMessageRefQueryIDs, len(messageIDs))
-		chunk := messageIDs[start:end]
-		args := make([]any, len(chunk))
-		for i, id := range chunk {
-			args[i] = id
-		}
-		placeholders := strings.TrimSuffix(strings.Repeat("?, ", len(chunk)), ", ")
-		rows, err := s.db.QueryContext(ctx, s.rebind(`SELECT message_id, artifact_id, seq
-			FROM artifact_message_ref WHERE message_id IN (`+placeholders+`)
-			ORDER BY message_id, artifact_id`), args...)
-		if err != nil {
-			return nil, fmt.Errorf("artifacts: list message refs: %w", err)
-		}
-		for rows.Next() {
-			var (
-				msgID string
-				r     MessageRef
-				seq   sql.NullInt64
-			)
-			if err := rows.Scan(&msgID, &r.ArtifactID, &seq); err != nil {
-				_ = rows.Close()
-				return nil, fmt.Errorf("artifacts: scan message ref: %w", err)
-			}
-			r.Seq = int(seq.Int64)
-			out[msgID] = append(out[msgID], r)
-		}
-		err = rows.Err()
-		_ = rows.Close()
-		if err != nil {
-			return nil, fmt.Errorf("artifacts: list message refs: %w", err)
+		if err := s.listMessageRefsChunk(ctx, messageIDs[start:end], out); err != nil {
+			return nil, err
 		}
 	}
 	return out, nil
+}
+
+// listMessageRefsChunk adds the references of one chunk of message ids to
+// out, in one query.
+func (s *sqlStore) listMessageRefsChunk(ctx context.Context, chunk []string, out map[string][]MessageRef) error {
+	args := make([]any, len(chunk))
+	for i, id := range chunk {
+		args[i] = id
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?, ", len(chunk)), ", ")
+	rows, err := s.db.QueryContext(ctx, s.rebind(`SELECT message_id, artifact_id, seq
+		FROM artifact_message_ref WHERE message_id IN (`+placeholders+`)
+		ORDER BY message_id, artifact_id`), args...)
+	if err != nil {
+		return fmt.Errorf("artifacts: list message refs: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var (
+			msgID string
+			r     MessageRef
+			seq   sql.NullInt64
+		)
+		if err := rows.Scan(&msgID, &r.ArtifactID, &seq); err != nil {
+			return fmt.Errorf("artifacts: scan message ref: %w", err)
+		}
+		r.Seq = int(seq.Int64)
+		out[msgID] = append(out[msgID], r)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("artifacts: list message refs: %w", err)
+	}
+	return nil
 }

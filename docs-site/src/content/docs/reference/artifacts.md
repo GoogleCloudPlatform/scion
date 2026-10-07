@@ -4,7 +4,7 @@ description: The scion artifact command and the /api/v1/artifacts routes for pub
 ---
 
 :::caution[Experimental]
-Artifacts are behind the `hub.artifacts` experiment, which is **off by default**. While it is off, or when the hub's `artifacts` settings section is disabled, every `/api/v1/artifacts` route answers `404` and the web UI shows no artifact pages. An admin enables it under **Admin → Server Config → Experiments** (see [Experiments](/scion/reference/experiments/)). Artifacts require Hub mode.
+Artifacts are behind the `hub.artifacts` experiment, which is **off by default**. While it is off, or when the hub's `artifacts` settings section is disabled, every `/api/v1/artifacts` route answers `404` and the web UI shows no artifact pages and no *Artifacts* item in the sidebar. An admin enables it under **Admin → Server Config → Experiments** (see [Experiments](/scion/reference/experiments/)). Artifacts require Hub mode.
 :::
 
 An **artifact** is a published file or folder (a *bundle*) with a stable reference, `scion://artifact/<id>`, that works from any runtime broker, in any project the reader can access, and in the web UI. The hub stores the bytes, so a reader never needs access to the publisher's filesystem or shared directories.
@@ -113,9 +113,11 @@ $ scion message @reviewer "Design ready for review." --artifact scion://artifact
 - **Attaching in web chat.** The composer's paperclip offers **Upload file** and **Attach artifact…**. The picker lists the artifacts you can read, with search and **Owned by me** / **This project** filters, and attaches the current version of up to 10 per message. Picked artifacts show as chips above the input; they travel as references, never as copies.
 - **Where references are kept.** Direct messages to an agent, messages from an agent to a user or conversation, and web chat messages to agents carry references. Group (`group[...]`) and broadcast messages, @-mention copies, and messages arriving through chat plugins do not; any `artifacts` metadata they arrive with is removed.
 
-## Web page
+## Web pages
 
-`/projects/<project-id>/artifacts/<id>` shows the artifact's title, owner, version and reference, and renders the entry file: Markdown as formatted text, text and code (including JSON, YAML, CSV) in a read-only editor, and PNG, JPEG, GIF and WebP images inline. Other types (including HTML, SVG and PDF) are offered as a download. The Markdown preview loads no images from other hosts: they appear as their alt text. Inline (data:) images are shown.
+**Artifacts list.** The *Artifacts* item in the sidebar, under *Management* beside *Skills*, opens `/artifacts`. It lists the same artifacts as [the list endpoint](#listing): the ones you own, the ones shared with you, and the ones published in your projects, newest first. Each row shows the title (with the key, when the artifact has one), the owner, the home project, when it was last updated and a *Review pending* badge when the current version is a review. Search filters by title or key; *Review pending* and *Owned by me* narrow the list further. *Load more* fetches the next page. A row opens the artifact's page. Owner and project names show as ids when you may not look them up.
+
+**Artifact page.** `/projects/<project-id>/artifacts/<id>` shows the artifact's title, owner, version and reference, and renders the entry file: Markdown as formatted text, text and code (including JSON, YAML, CSV) in a read-only editor, and PNG, JPEG, GIF and WebP images inline. Other types (including HTML, SVG and PDF) are offered as a download. The Markdown preview loads no images from other hosts: they appear as their alt text. Inline (data:) images are shown.
 
 ## API
 

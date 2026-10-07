@@ -1258,12 +1258,12 @@ type StartOptions struct {
 	SharedDirs        []SharedDir  // Project-level shared directories (from Hub, merged with settings)
 	// SharedDirBackendChanges asks a Reprovision to change the recorded
 	// shared-dir storage backend of the named shared dirs (dir name to
-	// backend; only "nfs" is supported). Only the agent's record changes;
+	// backend, "nfs" or "local"). Only the agent's record changes;
 	// no data is copied, moved or deleted. Ignored outside Reprovision.
 	SharedDirBackendChanges map[string]string
 	// AllowEmptySharedDir, with SharedDirBackendChanges, skips the start
-	// check that refuses an empty nfs directory while the dir's previous
-	// local directory is not empty.
+	// check that refuses an empty directory on the new backend while the
+	// dir's directory on its previous backend is not empty.
 	AllowEmptySharedDir bool
 	ExtraHosts          []string // Extra --add-host entries for container networking (e.g. "example.com:host-gateway")
 

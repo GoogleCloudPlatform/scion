@@ -55,7 +55,7 @@ import {
 } from '../../../utils/chat-file-links.js';
 import {
   artifactFileUrl,
-  artifactPageUrl,
+  artifactPagePath,
   formatArtifactRef,
   rendererFor,
   type ArtifactResponse,
@@ -659,7 +659,7 @@ export class ScionChatFilePreview extends LitElement {
         title: data.artifact.title,
         version: version.seq,
         entry: version.entryPath,
-        pageUrl: artifactPageUrl(data.artifact.scopeRef, data.artifact.id),
+        pageUrl: artifactPagePath(data.artifact),
         current: version.seq === data.artifact.currentSeq,
       };
       const renderer = rendererFor(entry.mediaType);

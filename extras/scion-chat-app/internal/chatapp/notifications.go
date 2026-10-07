@@ -437,7 +437,7 @@ func notificationStyle(activity string) (string, notificationStyleInfo) {
 	case "COMPLETED":
 		return "Completed", notificationStyleInfo{icon: "\u2705"}
 	case "WAITING_FOR_INPUT":
-		return "Needs Input", notificationStyleInfo{icon: "\u231b"}
+		return "Waiting on Parent", notificationStyleInfo{icon: "\u231b"}
 	case "ERROR":
 		return "Error", notificationStyleInfo{icon: "\u274c"}
 	case "STALLED":
