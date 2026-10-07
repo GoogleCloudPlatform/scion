@@ -60,8 +60,37 @@ type provisionFixture struct {
 
 func newProvisionFixture(t *testing.T) *provisionFixture {
 	t.Helper()
-	srv, s := testServer(t)
+	srv, s := testServerNoDevAuth(t)
 	return newProvisionFixtureOn(t, srv, s)
+}
+
+// testServerNoDevAuth is testServer with dev auth disabled. Provisioning is
+// refused on a hub in dev-auth mode (row 4a), so the provisioning tests run
+// on a hub that only has sign-in sessions; callers authenticate with
+// session tokens (doRequestAsUser, provisionAs).
+func testServerNoDevAuth(t *testing.T) (*Server, store.Store) {
+	t.Helper()
+	s, err := newTestStore(t, ":memory:")
+	if err != nil {
+		if strings.Contains(err.Error(), "sqlite driver not registered") {
+			t.Skip("Skipping test because sqlite driver is not registered (build with -tags sqlite to enable)")
+		}
+		t.Fatalf("failed to create test store: %v", err)
+	}
+	require.NoError(t, s.Migrate(context.Background()))
+	_ = s.DeleteHubSetting(context.Background(), "migration_delegation_edge_backfill_v1")
+	cfg := testServerConfig()
+	cfg.DevAuthToken = "" // dev-auth off
+	srv, err := New(cfg, s)
+	require.NoError(t, err)
+	srv.SetHubID("test-hub-id")
+	t.Cleanup(func() {
+		_ = srv.Shutdown(context.Background())
+		_ = s.Close()
+	})
+	waitUserScopedDataSweep(t, srv)
+	require.False(t, srv.authConfig.DevAuthEnabled)
+	return srv, s
 }
 
 func newProvisionFixtureOn(t *testing.T, srv *Server, s store.Store) *provisionFixture {
@@ -275,7 +304,7 @@ func TestHandleProvisionUser(t *testing.T) {
 
 	t.Run("row14_replay_of_invite_created_record", func(t *testing.T) {
 		f := newProvisionFixture(t)
-		rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/admin/users/invite", UserInviteRequest{Email: "invited@example.com", Note: "from invite"})
+		rec := doRequestAsUser(t, f.srv, f.superAdmin, http.MethodPost, "/api/v1/admin/users/invite", UserInviteRequest{Email: "invited@example.com", Note: "from invite"})
 		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 		var inv UserInviteResponse
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &inv))
@@ -415,25 +444,46 @@ func TestHandleProvisionUser(t *testing.T) {
 		assert.ErrorIs(t, err, store.ErrNotFound)
 	})
 
-	t.Run("row04a_dev_auth_refused", func(t *testing.T) {
-		// Dev auth is single-user local mode: provisioning refuses the
-		// dev credential (the dev user is a super-admin), before any body
-		// check, for valid and invalid bodies alike.
-		f := newProvisionFixture(t)
-		for _, body := range []string{
-			`{"email":"by-dev@example.com"}`,
-			`{"email":"by-dev@example.com","role":"admin"}`,
-			`{not json`,
-		} {
-			rec := doRequestRaw(t, f.srv, http.MethodPost, provisionPath, []byte(body), "application/json")
-			require.Equal(t, http.StatusForbidden, rec.Code, "%s: %s", body, rec.Body.String())
-			code, details := provisionErr(t, rec)
-			assert.Equal(t, ErrCodeForbidden, code)
-			assert.Equal(t, provisionReasonDevAuthNotSupported, details["reason"])
+	t.Run("row04a_dev_auth_mode_refused", func(t *testing.T) {
+		// Dev auth is single-user local mode: on a hub running with dev
+		// auth, provisioning is refused for every caller, before any body
+		// check: the dev credential, the session the web dev auto-login
+		// mints for the dev user, and any other admin's session.
+		srv, s := testServer(t)
+		require.True(t, srv.authConfig.DevAuthEnabled)
+		f := newProvisionFixtureOn(t, srv, s)
+		devUser := getDevUser(t, srv, s)
+
+		callers := map[string]func(body string) *httptest.ResponseRecorder{
+			"dev credential": func(b string) *httptest.ResponseRecorder {
+				return doRequestRaw(t, srv, http.MethodPost, provisionPath, []byte(b), "application/json")
+			},
+			"web session of the dev user": func(b string) *httptest.ResponseRecorder { return provisionRaw(t, srv, devUser, b) },
+			"session of another super-admin": func(b string) *httptest.ResponseRecorder {
+				return provisionRaw(t, srv, f.superAdmin, b)
+			},
 		}
-		_, err := f.s.GetUserByEmail(ctx, "by-dev@example.com")
+		for name, send := range callers {
+			for _, body := range []string{
+				`{"email":"by-dev@example.com"}`,
+				`{"email":"by-dev@example.com","role":"admin"}`,
+				`{not json`,
+			} {
+				rec := send(body)
+				require.Equal(t, http.StatusForbidden, rec.Code, "%s %s: %s", name, body, rec.Body.String())
+				code, details := provisionErr(t, rec)
+				assert.Equal(t, ErrCodeForbidden, code, name)
+				assert.Equal(t, provisionReasonDevAuthNotSupported, details["reason"], name)
+			}
+		}
+		_, err := s.GetUserByEmail(ctx, "by-dev@example.com")
 		assert.ErrorIs(t, err, store.ErrNotFound)
-		assert.Empty(t, provisionAudits(t, f.s, ""))
+		assert.Empty(t, provisionAudits(t, s, ""))
+
+		// A caller without user.invite still gets 403; tokens still get the
+		// session-only refusal first (row 5).
+		rec := provisionAs(t, srv, f.member, map[string]interface{}{"email": "x@example.com"})
+		assert.Equal(t, http.StatusForbidden, rec.Code)
 	})
 
 	t.Run("row05_real_hub_token_with_user_invite_refused", func(t *testing.T) {
@@ -526,7 +576,7 @@ func TestHandleProvisionUser(t *testing.T) {
 	t.Run("row10_invalid_emails_match_invite", func(t *testing.T) {
 		f := newProvisionFixture(t)
 		for _, email := range []string{"", "   ", "not-an-email", "a@", "@b.com", "a@@b.com"} {
-			inv := doRequest(t, f.srv, http.MethodPost, "/api/v1/admin/users/invite", UserInviteRequest{Email: email})
+			inv := doRequestAsUser(t, f.srv, f.superAdmin, http.MethodPost, "/api/v1/admin/users/invite", UserInviteRequest{Email: email})
 			prov := provisionAs(t, f.srv, f.hubAdmin, map[string]interface{}{"email": email})
 			require.Equal(t, http.StatusBadRequest, inv.Code, "invite %q", email)
 			require.Equal(t, http.StatusBadRequest, prov.Code, "provision %q: %s", email, prov.Body.String())
@@ -543,7 +593,7 @@ func TestHandleProvisionUser(t *testing.T) {
 
 	t.Run("row10_email_parity_display_name_form", func(t *testing.T) {
 		f := newProvisionFixture(t)
-		rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/admin/users/invite", UserInviteRequest{Email: "Bob <bob@x.com>"})
+		rec := doRequestAsUser(t, f.srv, f.superAdmin, http.MethodPost, "/api/v1/admin/users/invite", UserInviteRequest{Email: "Bob <bob@x.com>"})
 		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 		rec = provisionAs(t, f.srv, f.hubAdmin, map[string]interface{}{"email": "Carol <carol@x.com>"})
 		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
@@ -702,7 +752,7 @@ func TestHandleProvisionUser(t *testing.T) {
 		}
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
-				srv, s := testServer(t)
+				srv, s := testServerNoDevAuth(t)
 				race := &provisionRaceStore{Store: s}
 				installStoreFault(t, srv, func(inner store.Store, _ *storeFaultSwitch) *provisionRaceStore {
 					race.Store = inner
@@ -749,7 +799,7 @@ func TestHandleProvisionUser(t *testing.T) {
 	})
 
 	t.Run("row19_create_failure_rolls_back", func(t *testing.T) {
-		srv, s := testServer(t)
+		srv, s := testServerNoDevAuth(t)
 		fault := &provisionFaultStore{Store: s, createErr: errors.New("injected create fault")}
 		installStoreFault(t, srv, func(inner store.Store, _ *storeFaultSwitch) *provisionFaultStore {
 			fault.Store = inner
@@ -766,7 +816,7 @@ func TestHandleProvisionUser(t *testing.T) {
 	})
 
 	t.Run("row20_audit_failure_rolls_back_user_row", func(t *testing.T) {
-		srv, s := testServer(t)
+		srv, s := testServerNoDevAuth(t)
 		fault := &provisionFaultStore{Store: s, auditErr: errors.New("injected audit fault")}
 		installStoreFault(t, srv, func(inner store.Store, _ *storeFaultSwitch) *provisionFaultStore {
 			fault.Store = inner
@@ -825,7 +875,7 @@ func TestHandleProvisionUser_NoRegression(t *testing.T) {
 	id := decodeProvisionResponse(t, rec).User.ID
 
 	// Bulk invite skips an already provisioned email.
-	rec = doRequest(t, f.srv, http.MethodPost, "/api/v1/admin/users/invite/bulk", UserInviteBulkRequest{Emails: []UserInviteRequest{{Email: "prov@example.com"}, {Email: "fresh@example.com"}}})
+	rec = doRequestAsUser(t, f.srv, f.superAdmin, http.MethodPost, "/api/v1/admin/users/invite/bulk", UserInviteBulkRequest{Emails: []UserInviteRequest{{Email: "prov@example.com"}, {Email: "fresh@example.com"}}})
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	var bulk UserInviteBulkResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &bulk))
@@ -833,15 +883,15 @@ func TestHandleProvisionUser_NoRegression(t *testing.T) {
 	assert.Equal(t, 1, bulk.Skipped)
 
 	// Single invite of a provisioned email: the undifferentiated 409.
-	rec = doRequest(t, f.srv, http.MethodPost, "/api/v1/admin/users/invite", UserInviteRequest{Email: "prov@example.com"})
+	rec = doRequestAsUser(t, f.srv, f.superAdmin, http.MethodPost, "/api/v1/admin/users/invite", UserInviteRequest{Email: "prov@example.com"})
 	assert.Equal(t, http.StatusConflict, rec.Code)
 
 	// PATCH role on the provisioned (invited) record is refused.
-	rec = doRequest(t, f.srv, http.MethodPatch, "/api/v1/users/"+id, map[string]interface{}{"role": "viewer"})
+	rec = doRequestAsUser(t, f.srv, f.superAdmin, http.MethodPatch, "/api/v1/users/"+id, map[string]interface{}{"role": "viewer"})
 	assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
 
 	// DELETE of the provisioned record works.
-	rec = doRequest(t, f.srv, http.MethodDelete, "/api/v1/users/"+id, nil)
+	rec = doRequestAsUser(t, f.srv, f.superAdmin, http.MethodDelete, "/api/v1/users/"+id, nil)
 	assert.Contains(t, []int{http.StatusOK, http.StatusNoContent}, rec.Code, rec.Body.String())
 	_, err := f.s.GetUser(ctx, id)
 	assert.ErrorIs(t, err, store.ErrNotFound)

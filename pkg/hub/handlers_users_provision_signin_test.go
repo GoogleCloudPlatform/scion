@@ -173,12 +173,12 @@ func setAccessConfig(srv *Server, mode string, domains []string) {
 // each user is active with the configured default role and its grants.
 func TestHandleProvisionUser_EndToEndSignIn(t *testing.T) {
 	ctx := context.Background()
-	srv, s := testServer(t)
+	srv, s := testServerNoDevAuth(t)
 	setAccessConfig(srv, "invite_only", nil)
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
-	// Provision as an interactive super-admin session; dev auth is refused
-	// by provisioning.
+	// Provision as an interactive super-admin session on a hub without dev
+	// auth; provisioning is refused in dev-auth mode.
 	adminID := tid("e2e-super")
 	createTestUserWithRole(t, s, adminID, "e2e-super@example.com", store.UserRoleAdmin, store.SystemRoleSuperAdmin)
 	token, _, _, err := srv.userTokenService.GenerateTokenPair(adminID, "e2e-super@example.com", "E2E Super", store.UserRoleAdmin, ClientTypeWeb)
@@ -273,7 +273,7 @@ func TestHandleProvisionUser_SignInEquivalence(t *testing.T) {
 				// stored field provision adds over invite.
 				rec := provisionAs(t, f.srv, f.hubAdmin, map[string]interface{}{"email": prov, "note": "n", "displayName": "Admin Name"})
 				require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
-				rec = doRequest(t, f.srv, http.MethodPost, "/api/v1/admin/users/invite", UserInviteRequest{Email: inv, Note: "n"})
+				rec = doRequestAsUser(t, f.srv, f.superAdmin, http.MethodPost, "/api/v1/admin/users/invite", UserInviteRequest{Email: inv, Note: "n"})
 				require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 
 				setAccessConfig(f.srv, cfg.mode, cfg.domains)

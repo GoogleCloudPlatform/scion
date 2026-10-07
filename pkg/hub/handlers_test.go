@@ -2460,12 +2460,12 @@ func TestUserList(t *testing.T) {
 // (user.admin.provision) for its main refusals: an authorized session
 // caller (a super-admin) that names the admin role gets 422
 // privileged_role_not_provisionable (design §8 row 12); a caller without
-// user.invite gets 403 before any body check (row 8); and the dev-auth
-// caller gets 403 dev_auth_not_supported, because dev auth is single-user
-// local mode (row 4a). The full outcome table is in
+// user.invite gets 403 before any body check (row 8); and on a hub in
+// dev-auth mode every caller gets 403 dev_auth_not_supported, because dev
+// auth is single-user local mode (row 4a). The full outcome table is in
 // handlers_users_provision_test.go.
 func TestUserCreate_RoleRefusedAndNonAdminForbidden(t *testing.T) {
-	srv, s := testServer(t)
+	srv, s := testServerNoDevAuth(t)
 	ctx := context.Background()
 
 	body := map[string]interface{}{
@@ -2497,13 +2497,17 @@ func TestUserCreate_RoleRefusedAndNonAdminForbidden(t *testing.T) {
 		t.Errorf("caller without user.invite: expected status 403, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	rec = doRequest(t, srv, http.MethodPost, "/api/v1/users", body)
-	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "dev_auth_not_supported") {
-		t.Errorf("dev-auth caller: expected 403 dev_auth_not_supported, got %d: %s", rec.Code, rec.Body.String())
-	}
-
 	if _, err := s.GetUserByEmail(ctx, "newuser@example.com"); !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("no user record may be created, got err=%v", err)
+	}
+
+	devSrv, devStore := testServer(t)
+	rec = doRequest(t, devSrv, http.MethodPost, "/api/v1/users", body)
+	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "dev_auth_not_supported") {
+		t.Errorf("dev-auth hub: expected 403 dev_auth_not_supported, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if _, err := devStore.GetUserByEmail(ctx, "newuser@example.com"); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("no user record may be created on the dev-auth hub, got err=%v", err)
 	}
 }
 
