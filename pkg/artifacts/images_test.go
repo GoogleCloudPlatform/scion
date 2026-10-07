@@ -268,6 +268,7 @@ func TestExtractImageURLsStatedChecks(t *testing.T) {
 		"an over-long inline URL takes no candidate slot":    {"![a](https://img.example/" + strings.Repeat("a", maxImageURLBytes) + ".png) ![b](https://img.example/b.png)", 1, []string{"https://img.example/b.png"}},
 		"an over-long definition URL takes no slot":          {"![a][x] ![b](https://img.example/b.png)\n\n[x]: https://img.example/" + strings.Repeat("a", maxImageURLBytes), 1, []string{"https://img.example/b.png"}},
 		"an over-long img src takes no candidate slot":       {`<img src="https://img.example/` + strings.Repeat("a", maxImageURLBytes) + `"> <img src="https://img.example/b.png">`, 1, []string{"https://img.example/b.png"}},
+		"two spellings of one URL are kept once":             {`![a](https://IMG.example/a.png) <img src="https://img.example/a.png">`, 8, []string{"https://img.example/a.png"}},
 		"a bang behind nine backslashes is escaped":          {strings.Repeat(`\`, 9) + "![a](https://img.example/a.png)", 8, nil},
 		"a bang behind ten backslashes is not":               {strings.Repeat(`\`, 10) + "![a](https://img.example/a.png)", 8, []string{"https://img.example/a.png"}},
 	} {

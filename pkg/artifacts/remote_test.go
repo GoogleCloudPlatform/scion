@@ -644,3 +644,21 @@ func TestRemoteImagesCountSaysOrMoreWhenTheScanFills(t *testing.T) {
 		t.Errorf("warnings %q", resp.Warnings)
 	}
 }
+
+// TestPublishKeepsOneRowPerNormalizedURL: two spellings of one image URL
+// give one remote row, and the publish succeeds.
+func TestPublishKeepsOneRowPerNormalizedURL(t *testing.T) {
+	f := newFixture(t, false)
+	ff := &fakeFetcher{bodies: map[string][]byte{"https://img.example/a.png": testPNG}}
+	f.useFetcher(ff)
+	resp := f.publish(agentA, "doc.md", []byte(`![a](https://IMG.example/a.png) <img src="https://img.example/a.png">`), "")
+	n := 0
+	for _, fi := range resp.Version.Files {
+		if fi.Origin == FileOriginRemote {
+			n++
+		}
+	}
+	if n != 1 || len(ff.calls) != 1 {
+		t.Errorf("remote rows %d, fetches %v; want one each", n, ff.calls)
+	}
+}

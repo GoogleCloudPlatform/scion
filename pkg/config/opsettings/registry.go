@@ -446,7 +446,10 @@ func compileSchemas() {
 		// match ArtifactsSettings.Resolve; the cross-field rules (file limit
 		// <= bundle limit, default TTL <= max TTL, remote image limits
 		// against the file limits, budget >= fetch timeout) are not
-		// expressible here and are enforced by Resolve, which fails closed.
+		// expressible here: writes are refused by validateCrossField, and a
+		// stored document that breaks them is handled by Resolve (an invalid
+		// remote image value turns remote images off; any other invalid
+		// value disables the service).
 		"artifacts": {
 			"type": "object",
 			"properties": map[string]interface{}{

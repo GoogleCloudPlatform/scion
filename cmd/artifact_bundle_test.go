@@ -375,3 +375,11 @@ func TestGetArtifactOutRules(t *testing.T) {
 	got, _ = os.ReadFile(target)
 	assert.Equal(t, "new", string(got))
 }
+
+func TestPublishTitleNoteIgnoresSurroundingSpace(t *testing.T) {
+	svc := realArtifactHub(t)
+	var out, errOut bytes.Buffer
+	root := writeTree(t, map[string]string{"a.md": "# a"})
+	require.NoError(t, publishBundle(context.Background(), svc, &out, &errOut, "", root, bundlePublishOptions{Key: "t", Title: "  Q3  "}))
+	assert.NotContains(t, errOut.String(), "keeps its title")
+}

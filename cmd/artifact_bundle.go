@@ -193,7 +193,7 @@ func publishBundle(ctx context.Context, svc hubclient.ArtifactService, out, errO
 	for _, w := range resp.Warnings {
 		_, _ = fmt.Fprintf(errOut, "warning: %s\n", w)
 	}
-	if opts.Title != "" && resp.Artifact.Title != opts.Title {
+	if title := strings.TrimSpace(opts.Title); title != "" && resp.Artifact.Title != title {
 		_, _ = fmt.Fprintf(errOut, "note: the artifact keeps its title %q; --title applies when an artifact is created\n", resp.Artifact.Title)
 	}
 	_, _ = fmt.Fprintf(out, "%s  (v%d)\n", artifacts.FormatRef(id, 0), seq)
