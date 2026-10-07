@@ -90,7 +90,7 @@ func TestPublishArtifact(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "design.md")
 	require.NoError(t, os.WriteFile(file, body, 0o644))
 	var out bytes.Buffer
-	require.NoError(t, publishArtifact(context.Background(), c.Artifacts(), &out, "https://hub.example/", file, "My design", "proj-1"))
+	require.NoError(t, publishArtifact(context.Background(), c.Artifacts(), &out, &out, "https://hub.example/", file, "My design", "proj-1"))
 
 	assert.Equal(t, "scion://artifact/"+testArtifactID+"  (v1)\nhttps://hub.example/projects/proj-1/artifacts/"+testArtifactID+"\n", out.String())
 	require.Len(t, *seen, 1)
@@ -99,7 +99,7 @@ func TestPublishArtifact(t *testing.T) {
 	assert.Equal(t, "My design", q.Get("title"))
 	assert.Equal(t, "proj-1", q.Get("scope"))
 
-	err = publishArtifact(context.Background(), c.Artifacts(), &out, "", t.TempDir(), "", "")
+	err = publishArtifact(context.Background(), c.Artifacts(), &out, &out, "", t.TempDir(), "", "")
 	assert.ErrorContains(t, err, "not a regular file")
 }
 
@@ -217,7 +217,7 @@ func TestArtifactErrorHints(t *testing.T) {
 
 	file := filepath.Join(t.TempDir(), "a.md")
 	require.NoError(t, os.WriteFile(file, []byte("a"), 0o644))
-	err = publishArtifact(context.Background(), c.Artifacts(), &stdout, "", file, "", "")
+	err = publishArtifact(context.Background(), c.Artifacts(), &stdout, &stdout, "", file, "", "")
 	assert.ErrorContains(t, err, "project:artifact:write")
 
 	unauthorized := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -228,7 +228,7 @@ func TestArtifactErrorHints(t *testing.T) {
 	t.Cleanup(unauthorized.Close)
 	c401, err := hubclient.New(unauthorized.URL)
 	require.NoError(t, err)
-	err = publishArtifact(context.Background(), c401.Artifacts(), &stdout, "", file, "", "")
+	err = publishArtifact(context.Background(), c401.Artifacts(), &stdout, &stdout, "", file, "", "")
 	assert.ErrorContains(t, err, "invalid or expired")
 	assert.NotContains(t, err.Error(), "scope", "a 401 on publish is about the credential, not a scope")
 	err = getArtifact(context.Background(), c401.Artifacts(), &stdout, &stderr, testArtifactID, "")
@@ -243,7 +243,7 @@ func TestArtifactErrorHints(t *testing.T) {
 	t.Cleanup(missing.Close)
 	c403, err := hubclient.New(missing.URL)
 	require.NoError(t, err)
-	err = publishArtifact(context.Background(), c403.Artifacts(), &stdout, "", file, "", "")
+	err = publishArtifact(context.Background(), c403.Artifacts(), &stdout, &stdout, "", file, "", "")
 	assert.ErrorContains(t, err, "does not carry the project:artifact:read scope")
 	assert.ErrorContains(t, err, "Recreate the agent")
 	assert.NotContains(t, err.Error(), "may not publish artifacts in this project", "missing_scope has its own hint")

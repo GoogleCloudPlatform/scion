@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/google/uuid"
@@ -70,6 +71,11 @@ type Service struct {
 	hubID    string
 	limits   func(context.Context) Limits
 	provider func() Backend
+
+	fetcherFactory func(RemoteImageLimits) ImageFetcher
+	// fetchFloor overrides the fetch floor in tests; zero means the
+	// fetcher's connect timeout.
+	fetchFloor time.Duration
 }
 
 // Backend is what a request needs from the service's environment: the
@@ -88,6 +94,10 @@ type Limits struct {
 	MaxBundleBytes int64
 	// MaxFiles caps the number of files of one version.
 	MaxFiles int
+	// RemoteImages bound the remote images fetched at publish time. A host
+	// that sets a limits getter must fill them in: incomplete or invalid
+	// values turn remote images off.
+	RemoteImages RemoteImageLimits
 }
 
 // Default limits, used when no limits getter is set or it yields a

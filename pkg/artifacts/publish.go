@@ -74,6 +74,10 @@ func (s *Service) handlePublish(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", "name must be a plain file name")
 		return
 	}
+	if isReservedPath(name) {
+		writeError(w, http.StatusBadRequest, "bad_request", "names under "+RemotePrefix+" are reserved")
+		return
+	}
 	title := strings.TrimSpace(q.Get(paramTitle))
 	if title == "" {
 		title = name
@@ -149,29 +153,47 @@ func (s *Service) handlePublish(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := time.Now().UTC()
+	versionID := uuid.NewString()
+	f := File{VersionID: versionID, Path: name, Size: spool.size, SHA256: spool.digest, MediaType: mediaType}
+	files := []File{f}
+	totalBytes := spool.size
+	var warnings []string
+	if mediaType == mediaTypeMarkdown {
+		// Remote images are fetched now, once, so opening the artifact
+		// never makes the hub fetch anything.
+		window, truncated, err := spool.window()
+		if err != nil {
+			slog.ErrorContext(ctx, "artifacts: read spooled markdown failed", "error", err)
+		}
+		remote, warn := s.remoteImages(ctx, w, b, versionID, window, truncated)
+		warnings = warn
+		for _, rf := range remote {
+			files = append(files, rf)
+			totalBytes += rf.Size
+		}
+	}
 	a := &Artifact{
 		ID: uuid.NewString(), ScopeKind: ScopeKindProject, ScopeRef: scope,
 		OwnerKind: kind, OwnerRef: ref, Title: title, CurrentSeq: 1,
 		CreatedAt: now, UpdatedAt: now,
 	}
 	v := &Version{
-		ID: uuid.NewString(), ArtifactID: a.ID, Seq: 1, Kind: VersionKindPublish, EntryPath: name,
-		TotalBytes: spool.size, FileCount: 1, CreatedByKind: kind, CreatedByRef: ref,
+		ID: versionID, ArtifactID: a.ID, Seq: 1, Kind: VersionKindPublish, EntryPath: name,
+		TotalBytes: totalBytes, FileCount: len(files), CreatedByKind: kind, CreatedByRef: ref,
 		CreatedAt: now, State: VersionStateReady,
 	}
-	f := File{VersionID: v.ID, Path: name, Size: spool.size, SHA256: spool.digest, MediaType: mediaType}
 	g := Grant{
 		ID: uuid.NewString(), ArtifactID: a.ID, SubjectKind: SubjectScope, SubjectRef: scope,
 		Permission: GrantRead, CreatedByRef: PrincipalRef(kind, ref), CreatedAt: now,
 	}
 	// A failure here can leave an unreferenced blob behind; blobs are
 	// content-addressed, so a retry reuses it and the blob sweep reclaims it.
-	if err := b.store.CreatePublished(ctx, a, v, []File{f}, []Grant{g}); err != nil {
+	if err := b.store.CreatePublished(ctx, a, v, files, []Grant{g}); err != nil {
 		slog.ErrorContext(ctx, "artifacts: publish failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal", "could not record the artifact")
 		return
 	}
-	writeJSON(w, http.StatusCreated, ArtifactResponse{Artifact: artifactInfo(a), Version: versionInfo(v, []File{f})})
+	writeJSON(w, http.StatusCreated, ArtifactResponse{Artifact: artifactInfo(a), Version: versionInfo(v, files), Warnings: warnings})
 }
 
 // CodeMissingScope is the error code of a 403 answered to a publish whose
@@ -235,6 +257,25 @@ type spooled struct {
 	size   int64
 	digest string
 	head   []byte
+}
+
+// window returns the spooled body's first imageScanWindow bytes and
+// whether the body is longer.
+func (s *spooled) window() (string, bool, error) {
+	if _, err := s.file.Seek(0, io.SeekStart); err != nil {
+		return "", false, err
+	}
+	text, err := readWindow(s.file, s.size)
+	return text, s.size > imageScanWindow, err
+}
+
+// readWindow reads at most imageScanWindow bytes of r, a body of size
+// bytes, into one string.
+func readWindow(r io.Reader, size int64) (string, error) {
+	var b strings.Builder
+	b.Grow(int(min(max(size, 0), imageScanWindow)))
+	_, err := io.Copy(&b, io.LimitReader(r, imageScanWindow))
+	return b.String(), err
 }
 
 func (s *spooled) Close() {

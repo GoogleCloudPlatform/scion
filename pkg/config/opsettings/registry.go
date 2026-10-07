@@ -442,20 +442,26 @@ func compileSchemas() {
 			"additionalProperties": false,
 		},
 		// artifacts schema is hand-written -- it is runtime/API-owned state
-		// with no $defs in settings-v1.schema.json. The per-field minimums
+		// with no $defs in settings-v1.schema.json. The per-field bounds
 		// match ArtifactsSettings.Resolve; the cross-field rules (file limit
-		// <= bundle limit, default TTL <= max TTL) are not expressible here
-		// and are enforced by Resolve, which fails closed.
+		// <= bundle limit, default TTL <= max TTL, remote image limits
+		// against the file limits, budget >= fetch timeout) are not
+		// expressible here and are enforced by Resolve, which fails closed.
 		"artifacts": {
 			"type": "object",
 			"properties": map[string]interface{}{
-				"enabled":                map[string]interface{}{"type": "boolean"},
-				"max_file_bytes":         map[string]interface{}{"type": "integer", "minimum": 1},
-				"max_bundle_bytes":       map[string]interface{}{"type": "integer", "minimum": 1},
-				"max_files":              map[string]interface{}{"type": "integer", "minimum": 1},
-				"default_retention_days": map[string]interface{}{"type": "integer", "minimum": 0},
-				"link_default_ttl_hours": map[string]interface{}{"type": "integer", "minimum": 1},
-				"link_max_ttl_hours":     map[string]interface{}{"type": "integer", "minimum": 1},
+				"enabled":                      map[string]interface{}{"type": "boolean"},
+				"max_file_bytes":               map[string]interface{}{"type": "integer", "minimum": 1},
+				"max_bundle_bytes":             map[string]interface{}{"type": "integer", "minimum": 1},
+				"max_files":                    map[string]interface{}{"type": "integer", "minimum": 1},
+				"default_retention_days":       map[string]interface{}{"type": "integer", "minimum": 0},
+				"link_default_ttl_hours":       map[string]interface{}{"type": "integer", "minimum": 1},
+				"link_max_ttl_hours":           map[string]interface{}{"type": "integer", "minimum": 1},
+				"remote_images_enabled":        map[string]interface{}{"type": "boolean"},
+				"remote_image_max_count":       map[string]interface{}{"type": "integer", "minimum": 1},
+				"remote_image_max_bytes":       map[string]interface{}{"type": "integer", "minimum": 1},
+				"remote_image_fetch_timeout_s": map[string]interface{}{"type": "integer", "minimum": 1, "maximum": ArtifactsMaxRemoteImageTotalBudgetS},
+				"remote_image_total_budget_s":  map[string]interface{}{"type": "integer", "minimum": 1, "maximum": ArtifactsMaxRemoteImageTotalBudgetS},
 			},
 			"additionalProperties": false,
 		},

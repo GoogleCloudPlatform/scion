@@ -54,7 +54,16 @@ func (s *Server) artifactsConfig() opsettings.ArtifactsConfig {
 // every write, so a limit change applies without a restart.
 func (s *Server) artifactLimits(context.Context) artifacts.Limits {
 	c := s.artifactsConfig()
-	return artifacts.Limits{MaxFileBytes: c.MaxFileBytes, MaxBundleBytes: c.MaxBundleBytes, MaxFiles: c.MaxFiles}
+	return artifacts.Limits{
+		MaxFileBytes: c.MaxFileBytes, MaxBundleBytes: c.MaxBundleBytes, MaxFiles: c.MaxFiles,
+		RemoteImages: artifacts.RemoteImageLimits{
+			Enabled:      c.RemoteImagesEnabled,
+			MaxCount:     c.RemoteImageMaxCount,
+			MaxBytes:     c.RemoteImageMaxBytes,
+			FetchTimeout: time.Duration(c.RemoteImageFetchTimeoutS) * time.Second,
+			TotalBudget:  time.Duration(c.RemoteImageTotalBudgetS) * time.Second,
+		},
+	}
 }
 
 // artifactsHandler returns the artifact service's handler, built over this

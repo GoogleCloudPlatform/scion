@@ -20,7 +20,9 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -43,10 +45,11 @@ func TestArtifactsSettings_AbsentRowUsesDefaults(t *testing.T) {
 }
 
 func TestArtifactsSettings_ExplicitValues(t *testing.T) {
-	got := artifactsOps(t, `{"enabled":false,"max_files":10,"link_default_ttl_hours":24}`).Artifacts()
+	got := artifactsOps(t, `{"enabled":false,"max_files":10,"remote_image_max_count":10,"link_default_ttl_hours":24}`).Artifacts()
 	want := opsettings.DefaultArtifactsConfig()
 	want.Enabled = false
 	want.MaxFiles = 10
+	want.RemoteImageMaxCount = 10
 	want.LinkDefaultTTLHours = 24
 	assert.Equal(t, want, got)
 }
@@ -76,4 +79,23 @@ func TestArtifactsSettings_HotReload(t *testing.T) {
 	_, err := ops.Update(context.Background(), "artifacts", []byte(`{"enabled":false}`), "test", 0, "managed")
 	require.NoError(t, err)
 	assert.False(t, ops.Artifacts().Enabled, "Update must take effect without a restart")
+}
+
+// TestArtifactLimitsCarryRemoteImageSettings: the remote image settings
+// reach the artifact service's limits, in seconds converted to durations.
+func TestArtifactLimitsCarryRemoteImageSettings(t *testing.T) {
+	ops := artifactsOps(t, `{"remote_images_enabled":false,"remote_image_max_count":4,"remote_image_max_bytes":2048,"remote_image_fetch_timeout_s":3,"remote_image_total_budget_s":9}`)
+	srv := &Server{}
+	srv.SetOperationalSettings(ops)
+	l := srv.artifactLimits(context.Background())
+	assert.Equal(t, artifacts.RemoteImageLimits{
+		Enabled: false, MaxCount: 4, MaxBytes: 2048,
+		FetchTimeout: 3 * time.Second, TotalBudget: 9 * time.Second,
+	}, l.RemoteImages)
+
+	def := (&Server{}).artifactLimits(context.Background()).RemoteImages
+	assert.Equal(t, artifacts.RemoteImageLimits{
+		Enabled: true, MaxCount: 32, MaxBytes: 5 << 20,
+		FetchTimeout: 10 * time.Second, TotalBudget: 30 * time.Second,
+	}, def)
 }

@@ -1,0 +1,335 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package artifacts
+
+import (
+	"fmt"
+	"net/url"
+	"runtime"
+	"strings"
+	"testing"
+)
+
+func TestExtractImageURLs(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		md   string
+		want []string
+	}{
+		{"inline", "![a](https://img.example/a.png)", []string{"https://img.example/a.png"}},
+		{"inline with title", `![a](https://img.example/a.png "t") ![b](http://img.example/b.png 'x')`, []string{"https://img.example/a.png", "http://img.example/b.png"}},
+		{"angle destination", "![a](<https://img.example/a.png>)", []string{"https://img.example/a.png"}},
+		{"space after paren", "![a](  https://img.example/a.png)", []string{"https://img.example/a.png"}},
+		{"nested alt", "![a [b] c](https://img.example/a.png)", []string{"https://img.example/a.png"}},
+		{"link is not an image", "[a](https://example.com/page) ![b](https://img.example/b.png)", []string{"https://img.example/b.png"}},
+		{"image inside a link", "[![b](https://img.example/b.png)](https://example.com/)", []string{"https://img.example/b.png"}},
+		{"escaped bang", `\![a](https://img.example/a.png)`, nil},
+		{"escaped bracket", `!\[a](https://img.example/a.png)`, nil},
+		{"relative", "![a](img/a.png) ![b](/abs.png) ![c](//cdn.example/c.png)", nil},
+		{"other schemes", "![a](data:image/png;base64,AAAA) ![b](javascript:alert(1)) ![c](ftp://x/c.png)", nil},
+		{"uppercase scheme", "![a](HTTPS://img.example/a.png)", []string{"https://img.example/a.png"}},
+		{"dedupe and order", "![a](https://i.example/2.png) ![b](https://i.example/1.png) ![c](https://i.example/2.png)", []string{"https://i.example/2.png", "https://i.example/1.png"}},
+		{"parens in URL are not kept", "![a](https://img.example/a_(1).png)", nil},
+		{"unterminated", "![a](https://img.example/a.png", nil},
+		{"amp entity", "![a](https://img.example/a.png?w=1&amp;h=2)", []string{"https://img.example/a.png?w=1&h=2"}},
+		{"raw ampersand", "![a](https://img.example/a.png?w=1&h=2)", []string{"https://img.example/a.png?w=1&h=2"}},
+		{"other entity refused", "![a](https://img.example/a&copy;.png)", nil},
+		{"numeric entity refused", "![a](https://img.example/a&#47;b.png)", nil},
+		{"reference full", "![a][logo]\n\n[logo]: https://img.example/logo.png", []string{"https://img.example/logo.png"}},
+		{"reference collapsed", "![Logo][]\n\n[logo]: https://img.example/logo.png", []string{"https://img.example/logo.png"}},
+		{"reference shortcut", "![logo]\n\n[LOGO]: <https://img.example/logo.png> \"title\"", []string{"https://img.example/logo.png"}},
+		{"label whitespace folded", "![a][My   Logo]\n\n[my logo]: https://img.example/logo.png", []string{"https://img.example/logo.png"}},
+		{"definition on next line", "![a][x]\n\n[x]:\n  https://img.example/x.png", []string{"https://img.example/x.png"}},
+		{"first definition wins", "![a][x]\n\n[x]: https://img.example/1.png\n[x]: https://img.example/2.png", []string{"https://img.example/1.png"}},
+		{"unused definition", "[x]: https://img.example/x.png\n[y](https://example.com)", nil},
+		{"link reference not an image", "[a][x]\n\n[x]: https://img.example/x.png", nil},
+		{"definition indented four", "![a][x]\n\n    [x]: https://img.example/x.png", nil},
+		{"reference order", "![a][x] ![b](https://img.example/b.png)\n\n[x]: https://img.example/x.png", []string{"https://img.example/x.png", "https://img.example/b.png"}},
+		{"img tag", `<img src="https://img.example/a.png" alt="a">`, []string{"https://img.example/a.png"}},
+		{"img tag inline", `text <IMG alt=x SRC='https://img.example/a.png'> more`, []string{"https://img.example/a.png"}},
+		{"img tag unquoted", `<img src=https://img.example/a.png>`, []string{"https://img.example/a.png"}},
+		{"img tag self closing", `<img src="https://img.example/a.png"/>`, []string{"https://img.example/a.png"}},
+		{"img tag first src wins", `<img src="https://img.example/1.png" src="https://img.example/2.png">`, []string{"https://img.example/1.png"}},
+		{"img tag data-src is not src", `<img data-src="https://img.example/1.png">`, nil},
+		{"imgx is not img", `<imgx src="https://img.example/1.png">`, nil},
+		{"img tag unterminated quote", `<img src="https://img.example/1.png>`, nil},
+		{"img tag never closed", `<img src="https://img.example/1.png" `, nil},
+		{"img tag with lt inside", `<img src="https://img.example/1.png" <b>`, nil},
+		{"img src attribute rules", `<img src="https://img.example/a.png?a=1&amp;b=2&copy=3">`, []string{"https://img.example/a.png?a=1&b=2&copy=3"}},
+		{"img src legacy reference decoded", `<img src="https://img.example/a.png?x=&copy">`, nil},
+		{"img src numeric reference", `<img src="https://img.example/a&#x2F;b.png">`, []string{"https://img.example/a/b.png"}},
+		{"img src tab in scheme", "<img src=\"ht\ttps://img.example/a.png\">", []string{"https://img.example/a.png"}},
+		{"img src backslashes", `<img src="https:\\img.example\a.png">`, []string{"https://img.example/a.png"}},
+		{"img src no slashes", `<img src="https:img.example/a.png">`, []string{"https://img.example/a.png"}},
+		{"img src padded", `<img src="  https://img.example/a.png  ">`, []string{"https://img.example/a.png"}},
+	} {
+		got := extractImageURLs(tc.md, 128).urls
+		if strings.Join(got, " ") != strings.Join(tc.want, " ") {
+			t.Errorf("%s: got %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestNormalizeImageURL checks the decoding and the accepted URL subset,
+// and that every accepted URL parses in Go to the same scheme and host
+// with no userinfo.
+func TestNormalizeImageURL(t *testing.T) {
+	for _, tc := range []struct {
+		raw  string
+		kind int
+		want string // "" = refused
+	}{
+		{"https://h.example/a.png", fromMarkdown, "https://h.example/a.png"},
+		{"https://h.example:8443/a.png?x=1#f", fromMarkdown, "https://h.example:8443/a.png?x=1#f"},
+		{"https://h.example/%E2%9C%93.png", fromMarkdown, "https://h.example/%E2%9C%93.png"},
+		{"https://h.example/a%2.png", fromMarkdown, ""},
+		{"https://user@h.example/a.png", fromMarkdown, ""},
+		{"https://user:pw@h.example/a.png", fromMarkdown, ""},
+		{"https://[::1]/a.png", fromMarkdown, ""},
+		{"https://h.example:99999/a.png", fromMarkdown, ""},
+		{"https://h.example:/a.png", fromMarkdown, ""},
+		{"https:///a.png", fromMarkdown, "https://a.png"}, // the URL parser skips any run of slashes
+		{"https://.h/a.png", fromMarkdown, ""},
+		{"https://h_x.example/a.png", fromMarkdown, ""},
+		{"https://h.example/a b.png", fromMarkdown, ""},
+		{"https://h.example/a\"b.png", fromMarkdown, ""},
+		{"https://h.example/a.png#x#y", fromMarkdown, ""},
+		{"https://h.example/" + strings.Repeat("a", maxImageURLBytes), fromMarkdown, ""},
+		{"ftp://h.example/a.png", fromMarkdown, ""},
+		{"https://h.example/a\\b.png", fromAttribute, "https://h.example/a/b.png"},
+		{"https://h.example/a.png?q=\\x", fromAttribute, ""},
+		{"https://h.example\\a.png", fromAttribute, "https://h.example/a.png"},
+		{"https:/\\/h.example/a.png", fromAttribute, "https://h.example/a.png"},
+		{"h\nttps://h.example/a.png", fromAttribute, "https://h.example/a.png"},
+		{"https://h.ex\tample/a.png", fromAttribute, "https://h.example/a.png"},
+		{"https://h.example/a.png?a=1&b=2", fromAttribute, "https://h.example/a.png?a=1&b=2"},
+		{"https://h.example/a.png?a=1&amp;b=2", fromAttribute, "https://h.example/a.png?a=1&b=2"},
+		{"https://h.example/a.png?a=1&amp=2", fromAttribute, "https://h.example/a.png?a=1&amp=2"},
+		{"https://h.example/a.png?a=1&amp", fromAttribute, "https://h.example/a.png?a=1&"},
+		{"https://h.example/a.png?a=1&ampx", fromAttribute, "https://h.example/a.png?a=1&ampx"},
+		{"https://h.example/a.png?&copy", fromAttribute, ""},
+		{"https://h.example/a.png?&copy;", fromAttribute, ""},
+		{"https://h.example/a.png?&copy=1", fromAttribute, "https://h.example/a.png?&copy=1"},
+		{"https://h.example/a.png?&notanentity;", fromAttribute, ""},
+		{"https://h.example/a&#47;b.png", fromAttribute, "https://h.example/a/b.png"},
+		{"https://h.example/a&#47b.png", fromAttribute, "https://h.example/a/b.png"},
+		{"https://h.example/a&#9;b.png", fromAttribute, "https://h.example/ab.png"},
+		{"https://h.example/a&#0;b.png", fromAttribute, ""},
+		{"https://h.example/a&#233;.png", fromAttribute, ""},
+		{"https://h.example/a&#.png", fromAttribute, "https://h.example/a&#.png"}, // "&#" with no digit stays; '#' starts the fragment
+		{"https://h.example/a.png?a&amp;b", fromMarkdown, "https://h.example/a.png?a&b"},
+		{"https://h.example/a.png?a&lt;b", fromMarkdown, ""},
+		{"https://h.example/a.png?a&#38;b", fromMarkdown, ""},
+		{"https://h.example/a.png?a&b", fromMarkdown, "https://h.example/a.png?a&b"},
+	} {
+		got, ok := normalizeImageURL(tc.raw, tc.kind)
+		if !ok {
+			got = ""
+		}
+		if got != tc.want {
+			t.Errorf("normalize(%q, %d) = %q, want %q", tc.raw, tc.kind, got, tc.want)
+			continue
+		}
+		if got == "" {
+			continue
+		}
+		u, err := url.Parse(got)
+		if err != nil {
+			t.Errorf("%q does not parse: %v", got, err)
+			continue
+		}
+		if (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.Hostname() == "" || strings.ContainsAny(u.Host, "@[]") {
+			t.Errorf("%q parses to scheme %q host %q user %v", got, u.Scheme, u.Host, u.User)
+		}
+	}
+}
+
+func TestExtractImageURLsLimit(t *testing.T) {
+	for _, n := range []int{3, 4, 5, 50} {
+		var b strings.Builder
+		for i := 0; i < n; i++ {
+			fmt.Fprintf(&b, "![](https://img.example/%d.png)\n", i)
+		}
+		ex := extractImageURLs(b.String(), 4)
+		if want := min(n, 4); len(ex.urls) != want || ex.full != (n >= 4) {
+			t.Errorf("%d URLs, limit 4: got %d (full %v)", n, len(ex.urls), ex.full)
+		}
+		if ex.urls[0] != "https://img.example/0.png" {
+			t.Errorf("first URL %q", ex.urls[0])
+		}
+	}
+	if ex := extractImageURLs("![](https://img.example/a.png)", 0); len(ex.urls) != 0 {
+		t.Errorf("limit 0 found %v", ex.urls)
+	}
+}
+
+// fill repeats unit up to size bytes.
+func fill(unit string, size int) string {
+	return strings.Repeat(unit, size/len(unit)+1)[:size]
+}
+
+// costShapes are documents that make each part of the scan work as hard as
+// it can per byte. Each is imageScanWindow bytes.
+func costShapes() map[string]string {
+	w := imageScanWindow
+	longURL := "https://img.example/" + strings.Repeat("a", maxImageURLBytes-30)
+	var uses, same strings.Builder
+	for i := 0; i < 200; i++ {
+		fmt.Fprintf(&uses, "![x][label%d]", i%100)
+		same.WriteString("![x][same]")
+	}
+	return map[string]string{
+		"open brackets":                      fill("[", w),
+		"image opens":                        fill("![", w),
+		"closes":                             fill("]", w),
+		"empty images":                       fill("![](", w),
+		"image then paren":                   fill("![a](h", w),
+		"unclosed destinations":              fill("![a](https://img.example/"+strings.Repeat("b", 100), w),
+		"long destination":                   fill("![a]("+longURL, w),
+		"destination at the cap":             fill("![a]("+longURL+strings.Repeat("c", 40)+" ", w),
+		"duplicate images":                   fill("![a](https://img.example/a.png)", w),
+		"distinct invalid":                   distinct("![a](https://u@h/%d.png)", w),
+		"references":                         fill("![a][b]", w),
+		"reference labels":                   fill("![a]["+strings.Repeat("l", maxLabelBytes-1), w),
+		"shortcut references":                fill("![abc]", w),
+		"img starts":                         fill("<img", w),
+		"img unclosed":                       fill("<img src=\"https://img.example/a.png\" "+strings.Repeat("x", 200), w),
+		"img lt":                             fill("<img src=x <", w),
+		"img tags":                           fill(`<img src="https://img.example/a.png">`, w),
+		"img tags distinct":                  distinct(`<img src="https://img.example/%d.png?&copy;">`, w),
+		"escapes":                            fill(`\`, w),
+		"definitions":                        uses.String() + "\n" + fill("[label1]: https://img.example/x.png\n", w-uses.Len()-1),
+		"definitions unmatched":              uses.String() + "\n" + fill("[other]: https://img.example/x.png\n", w-uses.Len()-1),
+		"definitions long labels":            uses.String() + "\n" + fill("["+strings.Repeat("q", maxLabelBytes)+"]: https://img.example/x.png\n", w-uses.Len()-1),
+		"definition label lines":             uses.String() + "\n" + fill("[label1\n", w-uses.Len()-1),
+		"definitions one label":              same.String() + "\n" + fill("[same]: https://img.example/x.png\n", w-same.Len()-1),
+		"definitions one label, one pending": "![never][nope]" + same.String() + "\n" + fill("[same]: https://img.example/x.png\n", w-same.Len()-15),
+		"definitions one label, unusable":    same.String() + "\n" + fill("[same]: ftp://img.example/x.png\n", w-same.Len()-1),
+		"newlines":                           fill("\n", w),
+	}
+}
+
+func distinct(format string, size int) string {
+	var b strings.Builder
+	for i := 0; b.Len() < size; i++ {
+		fmt.Fprintf(&b, format, i)
+	}
+	return b.String()[:size]
+}
+
+// maxStepsPerByte bounds the scan's work: each byte is read by the main
+// pass and by at most one inner scan of each kind, and by the definition
+// pass and its inner scans.
+const maxStepsPerByte = 8
+
+// TestExtractImageURLsLinear: on every cost shape the scan examines at most
+// maxStepsPerByte steps per byte of the window.
+func TestExtractImageURLsLinear(t *testing.T) {
+	for name, doc := range costShapes() {
+		ex := extractImageURLs(doc, 128)
+		if testing.Verbose() {
+			t.Logf("%-32s steps/byte %.2f", name, float64(ex.steps)/float64(len(doc)))
+		}
+		if limit := maxStepsPerByte*len(doc) + 4096; ex.steps > limit {
+			t.Errorf("%s: %d steps for %d bytes (limit %d)", name, ex.steps, len(doc), limit)
+		}
+	}
+}
+
+// extractAlloc returns the bytes extractImageURLs allocates on doc.
+func extractAlloc(doc string, limit int) uint64 {
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	ex := extractImageURLs(doc, limit)
+	runtime.ReadMemStats(&after)
+	runtime.KeepAlive(ex)
+	return after.TotalAlloc - before.TotalAlloc
+}
+
+// allocAllowance is what extraction may allocate besides the window it is
+// given: a fixed amount plus a share for each URL it may keep.
+func allocAllowance(limit int) uint64 {
+	return 64<<10 + uint64(limit)*4*maxImageURLBytes
+}
+
+// TestExtractImageURLsAllocBound: whatever the document, extraction
+// allocates no more than allocAllowance, which depends on the number of
+// URLs it may keep and not on the document's size.
+func TestExtractImageURLsAllocBound(t *testing.T) {
+	if raceEnabled {
+		t.Skip("allocation counts differ under the race detector")
+	}
+	for name, doc := range costShapes() {
+		for _, limit := range []int{4, 128} {
+			got, allow := extractAlloc(doc, limit), allocAllowance(limit)
+			if testing.Verbose() {
+				t.Logf("%-32s limit %3d alloc %8d allowance %8d", name, limit, got, allow)
+			}
+			if got > allow {
+				t.Errorf("%s (limit %d): allocated %d bytes, allowance %d", name, limit, got, allow)
+			}
+		}
+	}
+	// Many distinct kept URLs, each at the size cap.
+	var b strings.Builder
+	for i := 0; b.Len() < imageScanWindow; i++ {
+		fmt.Fprintf(&b, "![](https://img.example/%06d/%s)\n", i, strings.Repeat("p", maxImageURLBytes-40))
+	}
+	if got, allow := extractAlloc(b.String(), 128), allocAllowance(128); got > allow {
+		t.Errorf("long distinct URLs: allocated %d bytes, allowance %d", got, allow)
+	}
+}
+
+func TestSameLabel(t *testing.T) {
+	for _, tc := range []struct {
+		a, b string
+		want bool
+	}{
+		{"Logo", "logo", true},
+		{"my  logo", "My Logo", true},
+		{" my\nlogo ", "my logo", true},
+		{"mylogo", "my logo", false},
+		{"a", "ab", false},
+		{"Ä", "ä", false},
+	} {
+		if got := sameLabel(tc.a, tc.b); got != tc.want {
+			t.Errorf("sameLabel(%q, %q) = %v", tc.a, tc.b, got)
+		}
+	}
+}
+
+func TestAttrValue(t *testing.T) {
+	for _, tc := range []struct {
+		attrs, want string
+		ok          bool
+	}{
+		{` src="a" alt="b"`, "a", true},
+		{` alt='x' SRC='a'`, "a", true},
+		{` src=a alt=b`, "a", true},
+		{` src = "a"`, "a", true},
+		{` src`, "", false},
+		{` src="a`, "", false},
+		{` srcset="a"`, "", false},
+		{` data-src="a" src="b"`, "b", true},
+		{` alt="src=x" src="b"`, "b", true},
+		{`/src="a"`, "a", true},
+	} {
+		got, ok := attrValue(tc.attrs, "src")
+		if got != tc.want || ok != tc.ok {
+			t.Errorf("attrValue(%q) = %q, %v; want %q, %v", tc.attrs, got, ok, tc.want, tc.ok)
+		}
+	}
+}

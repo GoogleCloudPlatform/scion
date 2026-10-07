@@ -130,7 +130,7 @@ func publishArtifactCmd(cmd *cobra.Command, settings *config.Settings, client hu
 		return err
 	}
 	if info.Mode().IsRegular() && opts.Key == "" && opts.Note == "" && opts.Entry == "" {
-		return publishArtifact(ctx, client.Artifacts(), cmd.OutOrStdout(), GetHubEndpoint(settings), file, opts.Title, opts.Scope)
+		return publishArtifact(ctx, client.Artifacts(), cmd.OutOrStdout(), cmd.ErrOrStderr(), GetHubEndpoint(settings), file, opts.Title, opts.Scope)
 	}
 	return publishBundle(ctx, client.Artifacts(), cmd.OutOrStdout(), cmd.ErrOrStderr(), GetHubEndpoint(settings), file, opts)
 }
@@ -224,7 +224,7 @@ func requireArtifactHubClient() (*config.Settings, hubclient.Client, error) {
 
 // publishArtifact publishes the file at filePath and prints the reference
 // and the artifact's web page.
-func publishArtifact(ctx context.Context, svc hubclient.ArtifactService, out io.Writer, hubEndpoint, filePath, title, scope string) error {
+func publishArtifact(ctx context.Context, svc hubclient.ArtifactService, out, warn io.Writer, hubEndpoint, filePath, title, scope string) error {
 	f, err := os.Open(filePath)
 	if err != nil {
 		return err
@@ -263,6 +263,9 @@ func publishArtifact(ctx context.Context, svc hubclient.ArtifactService, out io.
 	_, _ = fmt.Fprintf(out, "%s  (v%d)\n", artifacts.FormatRef(a.ID, 0), seq)
 	if page := artifactPageURL(hubEndpoint, a.ScopeRef, a.ID); page != "" {
 		_, _ = fmt.Fprintln(out, page)
+	}
+	for _, w := range resp.Warnings {
+		_, _ = fmt.Fprintf(warn, "warning: %s\n", w)
 	}
 	return nil
 }

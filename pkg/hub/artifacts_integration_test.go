@@ -753,7 +753,7 @@ func TestArtifactsPublishRefusedWithBothScopesIsPlainForbidden(t *testing.T) {
 func TestArtifactsTwoStepBundleOnRoutes(t *testing.T) {
 	srv, s := testServer(t)
 	enableArtifactsForTest(t, srv)
-	srv.SetOperationalSettings(artifactsOps(t, `{"max_files":2}`))
+	srv.SetOperationalSettings(artifactsOps(t, `{"max_files":2,"remote_image_max_count":2}`))
 	p1 := artifactProject(t, s, "twostep-p1")
 	p2 := artifactProject(t, s, "twostep-p2")
 	_, ownerTok := artifactAgent(t, srv, s, p1.ID, "twostep-owner", AgentRoleBaseline)
@@ -829,4 +829,34 @@ func TestArtifactsReaperRetiresAbandonedVersions(t *testing.T) {
 	got, err := st.GetVersion(ctx, a.ID, 1)
 	require.NoError(t, err)
 	assert.Equal(t, artifacts.VersionStateFailed, got.State)
+}
+
+// TestArtifactsRemoteImageRefusedOnRoutes: through the real hub, with the
+// production fetcher and default settings (remote images on), a markdown
+// artifact whose image points at the metadata address publishes; the image
+// is a failed manifest row with a generic warning, and reading it answers
+// 404 with the remote status header.
+func TestArtifactsRemoteImageRefusedOnRoutes(t *testing.T) {
+	srv, s := testServer(t)
+	enableArtifactsForTest(t, srv)
+	p1 := artifactProject(t, s, "remote-p1")
+	_, tok := artifactAgent(t, srv, s, p1.ID, "remote-agent", AgentRoleBaseline)
+	const metadata = "http://169.254.169.254/latest/meta-data/"
+	rec := doRawAgentRequest(t, srv, http.MethodPost, "/api/v1/artifacts?name=doc.md", []byte("# Doc\n\n![m]("+metadata+")\n"), tok)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var resp artifacts.ArtifactResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp.Version.Files, 2)
+	var row artifacts.FileInfo
+	for _, f := range resp.Version.Files {
+		if f.Path == artifacts.RemotePath(metadata) {
+			row = f
+		}
+	}
+	assert.Equal(t, artifacts.FetchStatusFailed, row.FetchStatus)
+	assert.Equal(t, metadata, row.SourceURL)
+	assert.Equal(t, []string{"image could not be fetched: " + metadata}, resp.Warnings)
+	get := doRawAgentRequest(t, srv, http.MethodGet, "/api/v1/artifacts/"+resp.Artifact.ID+"/versions/1/files/"+row.Path, nil, tok)
+	assert.Equal(t, http.StatusNotFound, get.Code)
+	assert.Equal(t, artifacts.FetchStatusFailed, get.Header().Get(artifacts.HeaderRemoteStatus))
 }

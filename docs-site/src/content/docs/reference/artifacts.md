@@ -45,6 +45,8 @@ $ scion artifact publish ./report --entry index.html --title "Q3 report"
 
 A folder is published as all the regular files under it, keeping their relative paths. Files and folders whose names start with `.` are left out, and symbolic links are refused. The CLI sends each file's SHA-256, and the hub rejects bytes that do not match. Limits (hub settings): 32 MiB per file (`artifacts.max_file_bytes`), 256 MiB per version (`artifacts.max_bundle_bytes`) and 200 files per version (`artifacts.max_files`).
 
+If the entry file is Markdown, the hub fetches the remote images it references while publishing (see [Images in Markdown artifacts](#images-in-markdown-artifacts)). An image that could not be fetched does not fail the publish; the CLI prints a warning for it on stderr.
+
 ### `scion artifact get <ref>`
 
 Fetches an artifact. Without `--out` it writes the entry file to stdout; with `--out` it writes a single file, or every file of a bundle.
@@ -71,6 +73,17 @@ $ scion artifact versions scion://artifact/5f1c2d3e-6b1a-4c55-9f3e-0d6e7a1b2c3d
   scion://artifact/5f1c2d3e-6b1a-4c55-9f3e-0d6e7a1b2c3d@1  publish  2026-10-06 17:02Z  agent:<id>     1      3.9 KiB
 ```
 
+## Images in Markdown artifacts
+
+Images in a Markdown artifact are fetched at publish time and served from the hub, so opening an artifact never makes the hub contact another server.
+
+- **Remote images.** When a version whose entry file is Markdown is published, the hub fetches each absolute `http(s)` image the entry references (`![alt](https://...)`, reference-style images, and `<img src="https://...">`) once, and stores it in the version as a file at `_remote/<sha256 of the URL>`. Images are taken from the first 2 MiB of the entry; if the entry is larger, the response and the CLI add one warning saying that later images were not fetched. Image URLs written in code are fetched as well, though they are not shown. Only PNG, JPEG, GIF and WebP images are kept; SVG and other types are not. An image that cannot be fetched (for example a non-`https` URL, an address the hub does not fetch from, a timeout, a missing image or another type) is recorded as failed, the publish still succeeds, and the response and the CLI list one warning per such image. Publishing a new version fetches again.
+- **Which URLs.** An `<img src>` is read as the browser reads it, and a reference-style image uses the first definition of its label. A URL is fetched only in a plain form: `http` or `https`, a host name (no IP literal in brackets), an optional port, no user name or password, and no spaces or parentheses. Other images are not fetched and show as "not fetched" in the preview.
+- **Reading a remote image.** `GET /api/v1/artifacts/{id}/versions/{seq}/files/_remote/<hash>` follows the same access checks as any other file. A fetched image is served with its detected type; a failed one answers `404` with the header `X-Artifact-Remote-Status: failed`. The version's file manifest lists each remote image with `origin: "remote"`, its `sourceUrl` and its `fetchStatus` (`ok` or `failed`).
+- **Reserved names.** Files may not be published under `_remote/`.
+
+Settings (in the `artifacts` section): `remote_images_enabled` (default `true`), `remote_image_max_count` (images fetched per version, default `32`; further images are not fetched and get one warning), `remote_image_max_bytes` (per image, default 5 MiB, at most `max_file_bytes`), `remote_image_fetch_timeout_s` (per image, default `10`) and `remote_image_total_budget_s` (all images of one version, default `30`, between the fetch timeout and 60 seconds; images are fetched while the publish or finalize request is open, and the hub keeps that request open for the budget plus a margin). `remote_image_max_count` may not exceed `max_files`. An invalid value disables the artifact service, remote images included, until it is corrected.
+
 ## Web page
 
 `/projects/<project-id>/artifacts/<id>` shows the artifact's title, owner, version and reference, and renders the entry file: Markdown as formatted text, text and code (including JSON, YAML, CSV) in a read-only editor, and PNG, JPEG, GIF and WebP images inline. Other types (including HTML, SVG and PDF) are offered as a download. The Markdown preview loads no images from other hosts: they appear as their alt text. Inline (data:) images are shown.
@@ -81,14 +94,14 @@ All routes are under `/api/v1/artifacts` and use the hub's usual authentication 
 
 | Method and path | Purpose |
 | :--- | :--- |
-| `POST /api/v1/artifacts?name=<file>[&title=<title>][&scope=<project-id>]` | Publish the raw request body as a new single-file artifact. `scope` defaults to the caller's project (agents); users must set it. Optional header `X-Content-SHA256` (hex) is verified. Returns `201` with the artifact and its first version. |
-| `GET /api/v1/artifacts/{id}` | The artifact and its current version, including the file manifest (`path`, `size`, `sha256`, `mediaType`). |
+| `POST /api/v1/artifacts?name=<file>[&title=<title>][&scope=<project-id>]` | Publish the raw request body as a new single-file artifact. `scope` defaults to the caller's project (agents); users must set it. Optional header `X-Content-SHA256` (hex) is verified. Returns `201` with the artifact, its first version and any publish `warnings`. |
+| `GET /api/v1/artifacts/{id}` | The artifact and its current version, including the file manifest (`path`, `size`, `sha256`, `mediaType`, and for remote images `origin`, `sourceUrl` and `fetchStatus`; see [Images in Markdown artifacts](#images-in-markdown-artifacts)). |
 | `GET /api/v1/artifacts/{id}/files/{path}` | A file of the current version. |
 | `GET /api/v1/artifacts/{id}/versions/{seq}/files/{path}` | A file of version `seq`. |
 | `POST /api/v1/artifacts` (JSON manifest) | Start a two-step publish: a new artifact with a pending first version, or, when `key` names an artifact the caller already published in the scope, a new pending version of it. Returns `201` with the artifact, the pending version and `upload.required`, the paths to upload. |
 | `POST /api/v1/artifacts/{id}/versions` (JSON manifest) | Start a new pending version of an artifact. |
 | `PUT /api/v1/artifacts/{id}/versions/{seq}/files/{path}` | Upload one file of a pending version (raw body). Its size and SHA-256 must match the manifest; `X-Content-SHA256`, when sent, must too. Returns `204`. |
-| `POST /api/v1/artifacts/{id}/versions/{seq}/finalize` | Make a pending version ready once every file has arrived; it becomes the current version unless a later one already is. Returns `200` with the artifact and the version; `409` with code `incomplete` and `details.missing` while files are missing. |
+| `POST /api/v1/artifacts/{id}/versions/{seq}/finalize` | Make a pending version ready once every file has arrived; it becomes the current version unless a later one already is. Returns `200` with the artifact, the version and any `warnings` (remote images that could not be fetched); `409` with code `incomplete` and `details.missing` while files are missing. |
 | `GET /api/v1/artifacts/{id}/versions` | The ready versions, newest first, without their files. |
 | `GET /api/v1/artifacts/{id}/versions/{seq}` | One ready version with its files. |
 

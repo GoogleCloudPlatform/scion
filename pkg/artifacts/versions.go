@@ -53,10 +53,6 @@ const (
 	maxKeyBytes   = 256
 	maxNoteRunes  = 2000
 	maxListedPath = 20
-
-	// remotePrefix is the reserved first path segment of files the hub
-	// fetches itself (remote images); publishers cannot use it.
-	remotePrefix = "_remote"
 )
 
 // CodeIncomplete is the error code of a finalize refused because files of
@@ -330,8 +326,8 @@ func validateManifest(w http.ResponseWriter, req *CreateVersionRequest, l Limits
 		if _, err := cleanFilePath(m.Path); err != nil {
 			return bad(fmt.Sprintf("invalid file path %q", truncate(m.Path, 80)))
 		}
-		if first, _, _ := strings.Cut(m.Path, "/"); first == remotePrefix {
-			return bad(fmt.Sprintf("paths under %s/ are reserved", remotePrefix))
+		if isReservedPath(m.Path) {
+			return bad("paths under " + RemotePrefix + " are reserved")
 		}
 		if paths[m.Path] {
 			return bad(fmt.Sprintf("file %q is listed twice", m.Path))
@@ -617,7 +613,7 @@ func (s *Service) handleFinalize(w http.ResponseWriter, r *http.Request, id stri
 		}})
 		return
 	}
-	extra, warnings := s.finalizeExtras(ctx, b, a, v, files)
+	extra, warnings := s.finalizeExtras(w, r, b, v, files)
 	updated, err := b.store.FinalizeVersion(ctx, a.ID, seq, extra)
 	switch {
 	case errors.Is(err, ErrConflict):
@@ -644,9 +640,32 @@ func (s *Service) handleFinalize(w http.ResponseWriter, r *http.Request, id stri
 }
 
 // finalizeExtras returns the manifest rows the hub adds to a version at
-// finalize, with warnings for the publisher. Nothing is added yet.
-func (s *Service) finalizeExtras(_ context.Context, _ backend, _ *Artifact, _ *Version, _ []File) ([]File, []string) {
-	return nil, nil
+// finalize, with warnings for the publisher: the remote images of a
+// markdown entry, fetched now so that reading the version never fetches
+// anything.
+func (s *Service) finalizeExtras(w http.ResponseWriter, r *http.Request, b backend, v *Version, files []File) ([]File, []string) {
+	ctx := r.Context()
+	var entry *File
+	for i := range files {
+		if files[i].Path == v.EntryPath {
+			entry = &files[i]
+		}
+	}
+	if entry == nil || entry.MediaType != mediaTypeMarkdown || entry.SHA256 == "" {
+		return nil, nil
+	}
+	rc, _, err := b.blobs.Download(ctx, BlobPath(b.hubID, entry.SHA256))
+	if err != nil {
+		slog.ErrorContext(ctx, "artifacts: read markdown entry failed", "error", err)
+		return nil, nil
+	}
+	window, err := readWindow(rc, entry.Size)
+	_ = rc.Close()
+	if err != nil {
+		slog.ErrorContext(ctx, "artifacts: read markdown entry failed", "error", err)
+		return nil, nil
+	}
+	return s.remoteImages(ctx, w, b, v.ID, window, entry.Size > imageScanWindow)
 }
 
 // handleListVersions implements GET /{id}/versions: the ready versions,

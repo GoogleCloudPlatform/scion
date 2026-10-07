@@ -152,6 +152,11 @@ type ArtifactFile struct {
 	Size      int64  `json:"size"`
 	SHA256    string `json:"sha256"`
 	MediaType string `json:"mediaType"`
+	// Origin is "remote" for an image the hub fetched at publish time;
+	// SourceURL and FetchStatus describe that fetch.
+	Origin      string `json:"origin,omitempty"`
+	SourceURL   string `json:"sourceUrl,omitempty"`
+	FetchStatus string `json:"fetchStatus,omitempty"`
 }
 
 type artifactService struct {
