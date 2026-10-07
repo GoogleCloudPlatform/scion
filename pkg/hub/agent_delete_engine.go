@@ -713,11 +713,12 @@ func (e *deletionEngine) dispatch() (out deletionOutcome, ok bool) {
 // refuseDeleteRunMismatch reports whether the delete engine refuses to
 // finalize when the broker answers its dispatch with ErrDeleteRunMismatch
 // (ptone/scion#3080), given the request's force flag and whether the
-// dispatch was best-effort (a created row with no launch in flight). It
-// refuses in every case, force and best-effort included: the other run's
-// container is on the broker either way. When it returns false, the
-// refusal falls through to the force or best-effort handling, which
-// finalizes as for any other dispatch error.
+// dispatch was best-effort (a created row with no launch in flight). By
+// ptone's decision on ptone/scion#3080 it refuses in every case, under
+// force and best-effort too: the other run's container is on the broker
+// either way, and finalizing would leave it running with no row. Were it
+// to return false, the refusal would fall through to the force or
+// best-effort handling, which finalizes as for any other dispatch error.
 func refuseDeleteRunMismatch(force, bestEffort bool) bool {
 	_, _ = force, bestEffort
 	return true
