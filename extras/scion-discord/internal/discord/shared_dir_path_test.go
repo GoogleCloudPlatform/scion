@@ -16,10 +16,16 @@ package discord
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/bwmarrin/discordgo"
@@ -27,6 +33,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	scionruntime "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
 const sharedDirTestProjectID = "abcd1234-ef56-7890-abcd-ef1234567890"
@@ -191,4 +198,93 @@ func TestResolveSharedDirAttachmentPath_Backends(t *testing.T) {
 		got := newBroker().resolveSharedDirAttachmentPath(context.Background(), "/scion-volumes/scratchpad/a.png", sharedDirTestProjectID)
 		assert.Empty(t, got)
 	})
+}
+
+// bodyRecordingTransport answers every Discord REST call with an empty
+// object and records each request body.
+type bodyRecordingTransport struct {
+	mu     sync.Mutex
+	bodies []string
+}
+
+func (rt *bodyRecordingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	var body []byte
+	if req.Body != nil {
+		body, _ = io.ReadAll(req.Body)
+	}
+	rt.mu.Lock()
+	rt.bodies = append(rt.bodies, string(body))
+	rt.mu.Unlock()
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(`{}`)),
+		Header:     make(http.Header),
+		Request:    req,
+	}, nil
+}
+
+// sentContents returns the content field of each recorded message send.
+func (rt *bodyRecordingTransport) sentContents(t *testing.T) []string {
+	t.Helper()
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	var out []string
+	for _, b := range rt.bodies {
+		var m struct {
+			Content string `json:"content"`
+		}
+		if json.Unmarshal([]byte(b), &m) == nil && m.Content != "" {
+			out = append(out, m.Content)
+		}
+	}
+	return out
+}
+
+// TestInboundAttachmentErrorTextHasNoDetails checks, for both inbound
+// paths, that a failed attachment tells the sender only fixed text: no
+// path and none of the underlying error.
+func TestInboundAttachmentErrorTextHasNoDetails(t *testing.T) {
+	for _, routed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("routed=%v", routed), func(t *testing.T) {
+			f := newDiscordRoutedFixture(t)
+			if routed {
+				f.enableRouted()
+			}
+			rt := &bodyRecordingTransport{}
+			f.session.Client = &http.Client{Transport: rt}
+
+			// A downloads path below a regular file cannot be created;
+			// the resulting error names that path.
+			blocker := filepath.Join(t.TempDir(), "blocker")
+			require.NoError(t, os.WriteFile(blocker, []byte("x"), 0o644))
+			f.broker.downloadsPath = filepath.Join(blocker, "downloads")
+
+			srv := attachmentServer(t)
+			att := &discordgo.MessageAttachment{ID: "att-1", Filename: "note.txt", URL: srv.URL + "/note.txt", Size: 16}
+			f.simulateMessage("hello", nil, []*discordgo.MessageAttachment{att})
+
+			var failure string
+			for _, c := range rt.sentContents(t) {
+				if strings.Contains(c, "note.txt") {
+					failure = c
+				}
+			}
+			require.NotEmpty(t, failure, "the sender is told the attachment failed")
+			assert.Contains(t, failure, "could not be processed")
+			assert.NotContains(t, failure, "/", "the sender message must not contain a path")
+			assert.NotContains(t, failure, "blocker")
+			assert.NotContains(t, failure, "not a directory")
+		})
+	}
+}
+
+func TestAttachmentFailureText(t *testing.T) {
+	raw := errors.New("open /srv/private/file: permission denied")
+	generic := attachmentFailureText("a.txt", raw)
+	assert.NotContains(t, generic, "/")
+	assert.NotContains(t, generic, "permission denied")
+
+	unavailable := attachmentFailureText("a.txt", fmt.Errorf("%w: mount missing at /srv/x", scionruntime.ErrSharedDirStorageUnavailable))
+	assert.Equal(t, sharedDirUnavailableText("a.txt"), unavailable)
+	assert.NotContains(t, unavailable, "/")
 }

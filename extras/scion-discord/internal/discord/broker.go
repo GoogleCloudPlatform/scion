@@ -1715,9 +1715,9 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 		if err != nil {
 			b.log.Error("Failed to download Discord attachment",
 				"filename", att.Filename, "error", err)
-			if isSharedDirStorageUnavailable(err) {
-				s.ChannelMessageSend(channelID, sharedDirUnavailableText(att.Filename))
-			}
+			// The error can name host paths; the sender only gets fixed
+			// text, and the full error stays in the plugin log.
+			s.ChannelMessageSend(channelID, attachmentFailureText(att.Filename, err))
 			continue
 		}
 		attachmentPaths = append(attachmentPaths, agentPath)
@@ -1926,9 +1926,9 @@ func (b *DiscordBroker) handleRoutedInbound(
 		if err != nil {
 			b.log.Error("Failed to download Discord attachment",
 				"filename", att.Filename, "error", err)
-			if isSharedDirStorageUnavailable(err) {
-				s.ChannelMessageSend(channelID, sharedDirUnavailableText(att.Filename))
-			}
+			// The error can name host paths; the sender only gets fixed
+			// text, and the full error stays in the plugin log.
+			s.ChannelMessageSend(channelID, attachmentFailureText(att.Filename, err))
 			continue
 		}
 		attachmentPaths = append(attachmentPaths, agentPath)
@@ -2804,7 +2804,7 @@ const maxDiscordAttachmentSize = 25 * 1024 * 1024 // 25 MB
 // The function uses a three-tier fallback for the destination directory:
 //  1. downloadsPath config (highest priority, supports {project_slug} placeholder)
 //  2. The scratchpad shared dir, resolved through its storage backend (local
-//     or nfs) — exposes the file at /scion-volumes/scratchpad/.attachments/_discord/.
+//     or nfs) — makes the file available at /scion-volumes/scratchpad/.attachments/_discord/.
 //     An unavailable nfs mount is an error, never a local fallback.
 //  3. Legacy /home/scion/.scion/projects/<slug>/downloads/ (last resort)
 func (b *DiscordBroker) downloadDiscordAttachment(ctx context.Context, att *discordgo.MessageAttachment, projectSlug, projectID string) (agentPath, placeholder string, err error) {

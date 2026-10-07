@@ -54,3 +54,13 @@ func isSharedDirStorageUnavailable(err error) bool {
 func sharedDirUnavailableText(filename string) string {
 	return fmt.Sprintf("Attachment %q was not delivered: the project's shared storage is unavailable on this broker. Ask an operator to check it.", filename)
 }
+
+// attachmentFailureText is the message shown to a Discord user when an
+// attachment they sent cannot be processed. It never includes err's text,
+// which can name host paths; the caller logs err in full.
+func attachmentFailureText(filename string, err error) string {
+	if isSharedDirStorageUnavailable(err) {
+		return sharedDirUnavailableText(filename)
+	}
+	return fmt.Sprintf("Attachment %q could not be processed. Ask an operator to check the plugin logs.", filename)
+}
