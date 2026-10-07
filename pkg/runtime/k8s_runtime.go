@@ -1467,6 +1467,10 @@ func toStringInterfaceMap(m map[string]string) map[string]interface{} {
 // recreate of the same agent name can then remove the new run's object. A
 // Delete or start that carries a run ID uses the run-scoped paths in
 // k8s_run_scope.go instead (ptone/scion#2550).
+//
+// These are the fixed names. A start with a run ID uses per-run names
+// (k8sAgentObjectNames, ptone/scion#3101), which this does not reach; the
+// no-run Delete also removes the per-run objects of the pod's own run.
 func (r *KubernetesRuntime) cleanupAgentSecrets(ctx context.Context, namespace, agentName string) {
 	secretNames := []string{
 		fmt.Sprintf("scion-agent-%s", agentName), // env/variable/file secrets (createAgentSecret)
@@ -1535,10 +1539,17 @@ func podNameForAgentObject(objectName string) (string, bool) {
 // With a runID (ptone/scion#2550), an object labelled with another run is
 // never removed, whatever its pod: only runID's objects and legacy objects
 // with no run label are candidates (k8sRunMatches), as deleteRun's pod-gone
-// branch keeps another run's objects. The per-agent object names are fixed
-// per agent, so without this a delete naming an older run would remove the
-// Secrets a newer run's start created before its pod. An empty runID
-// selects by name and project only, as before.
+// branch keeps another run's objects. Without this a delete naming an
+// older run would remove the Secrets a newer run's start created before its
+// pod. An empty runID selects by name and project only, as before.
+//
+// Per-run objects (k8sAgentObjectNames, ptone/scion#3101) name their pod in
+// the scion.pod_name annotation, since the object name may be truncated.
+// In addition, a stale per-run object of a run other than runID
+// (staleRunObject) is removed when its pod is gone or belongs to another
+// run: the backstop for a start that ended before its pod without its own
+// cleanup (a broker that stopped). Legacy fixed names are never removed by
+// age.
 //
 // Objects are looked up in the default namespace, or in every namespace
 // when ListAllNamespaces is set, the same scope List uses to find pods. An

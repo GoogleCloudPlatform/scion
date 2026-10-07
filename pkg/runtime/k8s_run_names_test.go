@@ -688,6 +688,31 @@ func TestCleanupAgentResources_StaleSweep(t *testing.T) {
 			t.Errorf("live run A objects = %v, want all", got)
 		}
 	})
+	t.Run("the named run's stale objects with a pod of another run are kept", func(t *testing.T) {
+		rt, _, _, _ := newRunScopeRuntime(t)
+		prClock(rt, prNow)
+		rsSeedPod(t, rt, "pod-b", rsLabels(rsRunB, "start-b"), corev1.PodRunning)
+		a := prSeedRunObjects(t, rt, rsRunA, startDeadlineNone, prNow.Add(-48*time.Hour))
+		if err := rt.CleanupAgentResources(ctx, "agent", "proj1", rsRunA); err != nil {
+			t.Fatal(err)
+		}
+		if got := prPresent(t, rt, a); got != prAll {
+			t.Errorf("named run A objects = %v, want all (never swept as the current run)", got)
+		}
+	})
+	t.Run("legacy fixed names of another run with a pod gone are never swept by age", func(t *testing.T) {
+		rt, _, _, _ := newRunScopeRuntime(t)
+		prClock(rt, prNow)
+		old := prNow.Add(-30 * 24 * time.Hour)
+		prSeed(t, rt, "Secret", rsAgentSecret, "sec-legacy", rsLabels(rsRunB, ""), prAnn(startDeadlineNone), old)
+		prSeed(t, rt, "SPC", rsSPC, "spc-legacy", rsLabels(rsRunB, ""), prAnn(startDeadlineNone), old)
+		if err := rt.CleanupAgentResources(ctx, "agent", "proj1", rsRunA); err != nil {
+			t.Fatal(err)
+		}
+		if !secretExists(t, rt, rt.DefaultNamespace, rsAgentSecret) || !spcExists(t, rt, rt.DefaultNamespace, rsSPC) {
+			t.Error("a legacy fixed-name object of another run was swept by age")
+		}
+	})
 	t.Run("legacy fixed name of another run is never swept by age", func(t *testing.T) {
 		rt, _, _, _ := newRunScopeRuntime(t)
 		prClock(rt, prNow)

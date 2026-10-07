@@ -47,6 +47,11 @@ import (
 //     is a filter on top of it.
 //
 // With no run, every path keeps its name-based behaviour.
+//
+// A start with a run ID names its Secrets and SecretProviderClass after the
+// run (k8sAgentObjectNames, ptone/scion#3101), so only the pod name is
+// still shared between runs. The rules above apply to both the fixed and
+// the per-run names; see k8s_run_names.go for the per-run rules.
 
 // k8sRunMatches reports whether an object whose run label is objRun belongs
 // to run runID under the broker's rule (filterDeleteCandidatesByRun): an
