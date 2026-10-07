@@ -15,7 +15,11 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
-import { PALETTE_TYPEAHEAD_MAX_MS, PaletteTypeahead } from './palette-typeahead.js';
+import {
+  PALETTE_KEYBOARD_PROXY_MAX_MS,
+  PALETTE_TYPEAHEAD_MAX_MS,
+  PaletteTypeahead,
+} from './palette-typeahead.js';
 
 let typeahead: PaletteTypeahead;
 let target: HTMLTextAreaElement;
@@ -553,15 +557,83 @@ describe('PaletteTypeahead: holding the on-screen keyboard', () => {
     expect(document.activeElement).not.toBe(target);
   });
 
-  it('the time limit drops the field and gives focus back, keeping its text for a late take()', () => {
+  it('the field outlives the capture time limit, keeping keys typed after it for take()', () => {
+    vi.useFakeTimers();
+    typeahead = touchTypeahead();
+    typeahead.start();
+    press('c');
+    const proxy = typeahead.keyboardProxy!;
+    vi.advanceTimersByTime(PALETTE_TYPEAHEAD_MAX_MS);
+    expect(typeahead.isCapturing).toBe(false);
+    expect(proxy.isConnected).toBe(true);
+    expect(document.activeElement).toBe(proxy);
+    // Past the limit, keys reach the field itself.
+    proxy.value = 'o';
+    const query = document.createElement('input');
+    document.body.append(query);
+    query.focus();
+    expect(typeahead.take()).toBe('co');
+    expect(proxy.isConnected).toBe(false);
+    expect(document.activeElement).toBe(query);
+    query.remove();
+  });
+
+  it('the field is dropped at its own cap, giving focus back and keeping its text for a late take()', () => {
     vi.useFakeTimers();
     typeahead = touchTypeahead();
     typeahead.start();
     press('c');
     typeahead.keyboardProxy!.value = 'o';
-    vi.advanceTimersByTime(PALETTE_TYPEAHEAD_MAX_MS);
+    vi.advanceTimersByTime(PALETTE_KEYBOARD_PROXY_MAX_MS - 1);
+    expect(proxies()).toHaveLength(1);
+    vi.advanceTimersByTime(1);
     expect(proxies()).toHaveLength(0);
     expect(document.activeElement).toBe(target);
     expect(typeahead.take()).toBe('co');
+  });
+
+  it('a start restarts the field cap', () => {
+    vi.useFakeTimers();
+    typeahead = touchTypeahead();
+    typeahead.start();
+    vi.advanceTimersByTime(PALETTE_KEYBOARD_PROXY_MAX_MS - 1);
+    typeahead.start();
+    vi.advanceTimersByTime(PALETTE_KEYBOARD_PROXY_MAX_MS - 1);
+    expect(proxies()).toHaveLength(1);
+    vi.advanceTimersByTime(1);
+    expect(proxies()).toHaveLength(0);
+  });
+
+  it('a fresh capture after the time limit starts with no text, in the field either', () => {
+    vi.useFakeTimers();
+    typeahead = touchTypeahead();
+    typeahead.start();
+    press('a');
+    vi.advanceTimersByTime(PALETTE_TYPEAHEAD_MAX_MS);
+    typeahead.keyboardProxy!.value = 'b';
+    typeahead.start();
+    press('c');
+    expect(typeahead.take()).toBe('c');
+  });
+
+  it('take() and stop() leave no timer behind', () => {
+    vi.useFakeTimers();
+    typeahead = touchTypeahead();
+    typeahead.start();
+    typeahead.take();
+    expect(vi.getTimerCount()).toBe(0);
+    typeahead.start();
+    typeahead.stop();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('stop({ restoreFocus: false }) drops the field without giving focus back', () => {
+    typeahead = touchTypeahead();
+    typeahead.start();
+    const proxy = typeahead.keyboardProxy!;
+    typeahead.stop({ restoreFocus: false });
+    expect(proxy.isConnected).toBe(false);
+    expect(document.activeElement).not.toBe(target);
+    expect(typeahead.take()).toBe('');
   });
 });
