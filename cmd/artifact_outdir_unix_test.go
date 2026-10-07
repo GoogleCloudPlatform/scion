@@ -64,4 +64,18 @@ func TestOutDirWithoutHardLinks(t *testing.T) {
 	got, _ := os.ReadFile(filepath.Join(dir, "a.md"))
 	assert.Equal(t, "new", string(got))
 	assert.ErrorContains(t, d.WriteFile("a.md", false, write), "already exists")
+
+	// A file that appears while the new one is written, on such a file
+	// system, is found by the check made just before the move.
+	linkat = func(int, string, int, string, int) error {
+		if err := os.WriteFile(filepath.Join(dir, "b.md"), []byte("theirs"), 0o644); err != nil {
+			return err
+		}
+		return unix.EPERM
+	}
+	assert.ErrorContains(t, d.WriteFile("b.md", false, write), "already exists")
+	got, _ = os.ReadFile(filepath.Join(dir, "b.md"))
+	assert.Equal(t, "theirs", string(got))
+	entries, _ := os.ReadDir(dir)
+	assert.Len(t, entries, 2, "no temporary file left behind")
 }
