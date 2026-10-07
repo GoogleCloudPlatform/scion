@@ -91,9 +91,19 @@ func builtinNames(kind storage.ResourceKind) []string {
 }
 
 // acquireBundledResourcesLock takes store.LockBundledResources, the lock both
-// startup bootstraps hold, retrying for up to builtinRestoreLockWait. A store
-// without advisory locks (or SQLite, where the lock always succeeds) runs
-// unlocked; s.builtinRestoreMu still serializes restores in this process.
+// startup bootstraps hold, retrying for up to builtinRestoreLockWait and then
+// failing with errBuiltinRestoreBusy. A store without advisory locks (or
+// SQLite, where the lock always succeeds) runs unlocked; s.builtinRestoreMu
+// still serializes restores in this process.
+//
+// Trade-off (ptone/scion#3544): startup bootstrap uses runWithAdvisoryLock,
+// which SKIPS the bundled bootstrap when the lock is held rather than
+// waiting. A replica that boots while a restore holds the lock therefore
+// skips its bundled bootstrap for that boot: content updates and new
+// built-ins are applied on its next restart instead. To keep that window
+// small, a restore request takes the lock once for its whole name list (see
+// withBuiltinRestoreLock), not once per name. Making bootstrap wait instead
+// of skip is a possible follow-up.
 func (s *Server) acquireBundledResourcesLock(ctx context.Context) (func(), error) {
 	locker, ok := s.store.(store.AdvisoryLocker)
 	if !ok {
@@ -124,6 +134,21 @@ func (s *Server) acquireBundledResourcesLock(ctx context.Context) (func(), error
 	}
 }
 
+// withBuiltinRestoreLock runs fn holding s.builtinRestoreMu and, once,
+// store.LockBundledResources. Callers restoring several names run the whole
+// loop inside one call so the advisory lock is taken a single time.
+func (s *Server) withBuiltinRestoreLock(ctx context.Context, fn func() error) error {
+	s.builtinRestoreMu.Lock()
+	defer s.builtinRestoreMu.Unlock()
+
+	release, err := s.acquireBundledResourcesLock(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
+	return fn()
+}
+
 // RestoreBuiltin re-creates the global row of a deleted built-in harness
 // config or template from this binary's embedded catalog.
 //
@@ -139,19 +164,24 @@ func (s *Server) acquireBundledResourcesLock(ctx context.Context) (func(), error
 // Restore runs outside the startup bootstrap, so the ledger save relies on
 // its CAS merge loop rather than on the lock alone.
 func (s *Server) RestoreBuiltin(ctx context.Context, kind storage.ResourceKind, name string) (created bool, err error) {
+	if _, ok := builtinCatalogEntry(kind, name); !ok {
+		return false, fmt.Errorf("%w: %s %q", ErrNotBuiltin, kind, name)
+	}
+	err = s.withBuiltinRestoreLock(ctx, func() error {
+		var rerr error
+		created, rerr = s.restoreBuiltinLocked(ctx, kind, name)
+		return rerr
+	})
+	return created, err
+}
+
+// restoreBuiltinLocked is RestoreBuiltin for a caller that already holds
+// withBuiltinRestoreLock.
+func (s *Server) restoreBuiltinLocked(ctx context.Context, kind storage.ResourceKind, name string) (bool, error) {
 	entry, ok := builtinCatalogEntry(kind, name)
 	if !ok {
 		return false, fmt.Errorf("%w: %s %q", ErrNotBuiltin, kind, name)
 	}
-
-	s.builtinRestoreMu.Lock()
-	defer s.builtinRestoreMu.Unlock()
-
-	release, err := s.acquireBundledResourcesLock(ctx)
-	if err != nil {
-		return false, err
-	}
-	defer release()
 
 	exists, err := s.builtinRowExists(ctx, kind, name)
 	if err != nil {
@@ -288,22 +318,31 @@ func (s *Server) handleBuiltinRestore(w http.ResponseWriter, r *http.Request, ki
 		return
 	}
 
+	// One lock acquisition for the whole list (see
+	// acquireBundledResourcesLock for why that matters).
 	resp := RestoreBuiltinsResponse{Restored: []string{}, AlreadyPresent: []string{}}
-	for _, n := range names {
-		created, err := s.RestoreBuiltin(r.Context(), kind, n)
-		switch {
-		case errors.Is(err, errBuiltinRestoreBusy):
-			ServiceNotReady(w, err.Error())
-			return
-		case err != nil:
-			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error(),
-				map[string]interface{}{"restored": resp.Restored, "alreadyPresent": resp.AlreadyPresent})
-			return
-		case created:
-			resp.Restored = append(resp.Restored, n)
-		default:
-			resp.AlreadyPresent = append(resp.AlreadyPresent, n)
+	err := s.withBuiltinRestoreLock(r.Context(), func() error {
+		for _, n := range names {
+			created, err := s.restoreBuiltinLocked(r.Context(), kind, n)
+			if err != nil {
+				return err
+			}
+			if created {
+				resp.Restored = append(resp.Restored, n)
+			} else {
+				resp.AlreadyPresent = append(resp.AlreadyPresent, n)
+			}
 		}
+		return nil
+	})
+	switch {
+	case errors.Is(err, errBuiltinRestoreBusy):
+		ServiceNotReady(w, err.Error())
+		return
+	case err != nil:
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error(),
+			map[string]interface{}{"restored": resp.Restored, "alreadyPresent": resp.AlreadyPresent})
+		return
 	}
 
 	status := http.StatusOK

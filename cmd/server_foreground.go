@@ -1456,9 +1456,15 @@ func migrateStore(ctx context.Context, s *entadapter.CompositeStore) error {
 // per-resource OverwritePolicy checks, secretmigration.MigratePluginSecrets
 // checks for existing secret values)
 // and no-ops if so. The winning replica does the work; the others skip it
-// here and will see the completed state on their next access. Exception:
-// the workstation resource bootstrap imports per-replica disk content; see
-// bootstrapWorkstationResources.
+// here and will see the completed state on their next access. Exceptions:
+//   - The workstation resource bootstrap imports per-replica disk content;
+//     see bootstrapWorkstationResources.
+//   - LockBundledResources is also taken by the built-in restore API
+//     (hub.Server.RestoreBuiltin, ptone/scion#3544), which does not do the
+//     bootstrap's work. A replica that boots while a restore holds the lock
+//     skips its bundled bootstrap for that boot; content updates and new
+//     built-ins converge on its next restart. A restore holds the lock once
+//     per request to keep this window short.
 func runWithAdvisoryLock(ctx context.Context, s store.Store, key store.AdvisoryLockKey, label string, fn func()) {
 	if s == nil {
 		fn()

@@ -574,25 +574,38 @@ func (s *Server) cleanupUnselectedHarnessConfigs(ctx context.Context, selected [
 }
 
 // restoreSelectedBuiltinHarnessConfigs restores each selected built-in
-// harness config that has no global row, through RestoreBuiltin. A name that
+// harness config that has no global row, the same way RestoreBuiltin does,
+// taking the bundled-resources lock once for the whole selection. A name that
 // is not a built-in is skipped; a failure is logged and does not fail init,
 // matching cleanupUnselectedHarnessConfigs.
 func (s *Server) restoreSelectedBuiltinHarnessConfigs(ctx context.Context, selected []string) {
 	if s.store == nil || s.GetStorage() == nil {
 		return
 	}
+	var builtins []string
 	for _, name := range selected {
-		if !isBuiltinName(storage.ResourceKindHarnessConfig, name) {
-			continue
+		if isBuiltinName(storage.ResourceKindHarnessConfig, name) {
+			builtins = append(builtins, name)
 		}
-		created, err := s.RestoreBuiltin(ctx, storage.ResourceKindHarnessConfig, name)
-		if err != nil {
-			slog.Warn("system init: failed to restore selected built-in harness config", "name", name, "error", err)
-			continue
+	}
+	if len(builtins) == 0 {
+		return
+	}
+	err := s.withBuiltinRestoreLock(ctx, func() error {
+		for _, name := range builtins {
+			created, err := s.restoreBuiltinLocked(ctx, storage.ResourceKindHarnessConfig, name)
+			if err != nil {
+				slog.Warn("system init: failed to restore selected built-in harness config", "name", name, "error", err)
+				continue
+			}
+			if created {
+				slog.Info("system init: restored selected built-in harness config", "name", name)
+			}
 		}
-		if created {
-			slog.Info("system init: restored selected built-in harness config", "name", name)
-		}
+		return nil
+	})
+	if err != nil {
+		slog.Warn("system init: could not restore selected built-in harness configs", "names", builtins, "error", err)
 	}
 }
 

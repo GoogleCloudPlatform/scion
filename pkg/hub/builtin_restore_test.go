@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sort"
+	"sync"
 	"testing"
 	"time"
 
@@ -322,4 +323,80 @@ func TestRestoreBuiltin_RequestValidation(t *testing.T) {
 		rec = doRequest(t, srv, http.MethodGet, path, nil)
 		assert.Equal(t, http.StatusMethodNotAllowed, rec.Code, "%s GET: %s", path, rec.Body.String())
 	}
+}
+
+// countingLockStore wraps a store and records LockBundledResources
+// acquisitions. With busy set, the lock is reported as held elsewhere.
+type countingLockStore struct {
+	store.Store
+	mu       sync.Mutex
+	acquired int
+	attempts int
+	busy     bool
+}
+
+func (c *countingLockStore) TryAdvisoryLock(_ context.Context, key store.AdvisoryLockKey) (bool, func() error, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if key == store.LockBundledResources {
+		c.attempts++
+		if c.busy {
+			return false, func() error { return nil }, nil
+		}
+		c.acquired++
+	}
+	return true, func() error { return nil }, nil
+}
+
+func (c *countingLockStore) TryAdvisoryLockObject(context.Context, store.AdvisoryLockKey, int32) (bool, func() error, error) {
+	return true, func() error { return nil }, nil
+}
+
+// TestRestoreBuiltin_LockTakenOncePerRequest pins the round 1 F3 decision: a
+// restore request takes LockBundledResources once for its whole name list,
+// so a concurrently booting replica's bootstrap skip window is one restore,
+// not one per name.
+func TestRestoreBuiltin_LockTakenOncePerRequest(t *testing.T) {
+	srv, s := testRestoreServer(t)
+	deleteHarnessConfigViaAPI(t, srv, s, "claude")
+	deleteHarnessConfigViaAPI(t, srv, s, "codex")
+	locker := &countingLockStore{Store: s}
+	srv.store = locker
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/harness-configs/restore",
+		map[string]interface{}{"all": true})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	assert.Equal(t, []string{"claude", "codex"}, decodeRestoreResponse(t, rec).Restored)
+	assert.Equal(t, 1, locker.acquired, "all:true must take the bundled-resources lock once")
+
+	deleteHarnessConfigViaAPI(t, srv, s, "claude")
+	deleteHarnessConfigViaAPI(t, srv, s, "codex")
+	locker.acquired = 0
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/harness-configs/restore",
+		map[string]interface{}{"names": []string{"claude", "codex"}})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	assert.Equal(t, []string{"claude", "codex"}, decodeRestoreResponse(t, rec).Restored)
+	assert.Equal(t, 1, locker.acquired, "a names list must take the bundled-resources lock once")
+}
+
+// TestRestoreBuiltin_LockBusyIs503 covers the lock-held path: after the
+// bounded wait the request answers 503 with Retry-After and creates nothing.
+func TestRestoreBuiltin_LockBusyIs503(t *testing.T) {
+	srv, s := testRestoreServer(t)
+	deleteHarnessConfigViaAPI(t, srv, s, "claude")
+	locker := &countingLockStore{Store: s, busy: true}
+	srv.store = locker
+	prev := builtinRestoreLockWait
+	builtinRestoreLockWait = 300 * time.Millisecond
+	t.Cleanup(func() { builtinRestoreLockWait = prev })
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/harness-configs/restore",
+		map[string]interface{}{"names": []string{"claude"}})
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+	assert.NotEmpty(t, rec.Header().Get("Retry-After"))
+	assert.GreaterOrEqual(t, locker.attempts, 2, "restore must retry the lock before giving up")
+
+	srv.store = s
+	_, err := s.GetHarnessConfigBySlug(context.Background(), "claude", store.HarnessConfigScopeGlobal, "")
+	assert.ErrorIs(t, err, store.ErrNotFound, "a busy restore must not create the row")
 }
