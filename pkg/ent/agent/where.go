@@ -4965,6 +4965,29 @@ func HasPolicyBindingsWith(preds ...predicate.PolicyBinding) predicate.Agent {
 	})
 }
 
+// HasHolds applies the HasEdge predicate on the "holds" edge.
+func HasHolds() predicate.Agent {
+	return predicate.Agent(func(s *sql.Selector) {
+		step := sqlgraph.NewStep(
+			sqlgraph.From(Table, FieldID),
+			sqlgraph.Edge(sqlgraph.O2M, false, HoldsTable, HoldsColumn),
+		)
+		sqlgraph.HasNeighbors(s, step)
+	})
+}
+
+// HasHoldsWith applies the HasEdge predicate on the "holds" edge with a given conditions (other predicates).
+func HasHoldsWith(preds ...predicate.AgentHold) predicate.Agent {
+	return predicate.Agent(func(s *sql.Selector) {
+		step := newHoldsStep()
+		sqlgraph.HasNeighborsWith(s, step, func(s *sql.Selector) {
+			for _, p := range preds {
+				p(s)
+			}
+		})
+	})
+}
+
 // And groups predicates with the AND operator between them.
 func And(predicates ...predicate.Agent) predicate.Agent {
 	return predicate.Agent(sql.AndPredicates(predicates...))

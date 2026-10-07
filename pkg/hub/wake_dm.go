@@ -140,13 +140,38 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 		// releases the claim like a success: the start itself was accepted.
 		var statusErr *AgentDMError
 		var readyErr error
-		// The caller's deadline, when it has one, bounds the resume
-		// dispatch and the readiness wait (KeepCallerDeadline, and the wait
-		// below); the post-start writes are not bounded by it. This path is
+		// From here the resume no longer follows the sender's request
+		// (ptone/scion#3471, as ptone/scion#1961 did for the other
+		// synchronous launches): a sender that disconnects or gives up must
+		// not cancel the broker launch, the readiness wait, the status
+		// writes or the rollback of a failed start. The admission checks
+		// and the start gate above stay on the request. What the sender
+		// sees is unchanged: a sender still connected gets the same answer,
+		// and a gone sender gets none.
+		//
+		// The resume dispatch is bounded by syncDispatchTimeout
+		// (SyncDispatchBound) and, when the caller has a deadline, by that
+		// deadline too (KeepCallerDeadline; the earlier wins). The caller's
+		// deadline also shortens the readiness wait below. This path is
 		// shared by the user and agent direct messages and the chat wake;
-		// only the chat wake carries a deadline today.
-		callerDeadline, hasCallerDeadline := ctx.Deadline()
-		err := s.startAgentCore(ctx, agent, StartOpts{Kind: store.StartClaimWake, Resume: true, KeepCallerDeadline: true, AfterStart: func(ctx context.Context, st startedState) error {
+		// only the chat wake carries a deadline today (its resume budget).
+		//
+		// A wake request that already ended (cancelled, or its time budget
+		// ran out) during the admission checks or the start gate gets no
+		// resume. On the direct-message paths the message is persisted on
+		// the request after the wake, so nobody would receive it; the chat
+		// wake persists on a detached context but answers the sender with
+		// an error once its wake budget is spent. Either way the resume
+		// would serve nobody. Nothing is claimed, dispatched or written.
+		if err := ctx.Err(); err != nil {
+			s.messageLog.Info("wake: skipped, the wake request ended or its time budget ran out before the resume",
+				"agent_id", agent.ID, "error", err)
+			return nil, requestEndedRefusal().dmError()
+		}
+		launchCtx, cancelLaunch := detachLaunchKeepDeadline(ctx)
+		defer cancelLaunch()
+		callerDeadline, hasCallerDeadline := launchCtx.Deadline()
+		err := s.startAgentCore(launchCtx, agent, StartOpts{Kind: store.StartClaimWake, Resume: true, KeepCallerDeadline: true, SyncDispatchBound: true, AfterStart: func(ctx context.Context, st startedState) error {
 			// Re-assert 'starting' (beginStartDispatch already wrote it) and
 			// clear the previous generation's leftovers while the lifecycle
 			// op is still held: a heartbeat guarded during the dispatch may
@@ -257,7 +282,7 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 			if ref := deleteClaimedDuringDispatch(err, agent.ID); ref != nil {
 				return nil, ref.dmError()
 			}
-			if refusal := s.launchRefusalFromError(ctx, agent.ID, err); refusal != nil {
+			if refusal := s.launchRefusalFromError(launchCtx, agent.ID, err); refusal != nil {
 				s.messageLog.Info("wake: skipped, agent create is launching or incomplete",
 					"agent_id", agent.ID, "code", refusal.Code)
 				return nil, refusal.dmError()
@@ -296,9 +321,9 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 			// reconcileBrokerQuotaOnPhaseChange the normal way. The Message
 			// field is still recorded for visibility.
 			//
-			// Use a detached context so this cleanup write succeeds even if
-			// the parent context was cancelled (e.g. client disconnect).
-			cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			// Use a context without the caller's deadline so this cleanup
+			// write succeeds even after the wake budget ran out.
+			cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(launchCtx), 5*time.Second)
 			_ = s.store.UpdateAgentStatus(cleanupCtx, agent.ID, store.AgentStatusUpdate{
 				Message: "Failed to become ready after wake",
 			})
@@ -313,8 +338,9 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 		// Agent is ready — transition to 'running'.
 		// The running write ran under the claim (above); publish from a
 		// re-read: a delete that claimed the row meanwhile
-		// must not be painted over (design ptone/scion#2483 note F).
-		s.publishAgentStatusFresh(ctx, agent)
+		// must not be painted over (design ptone/scion#2483 note F). On the
+		// launch context: a sender that left must not suppress it.
+		s.publishAgentStatusFresh(launchCtx, agent)
 
 		return &WakeResult{Outcome: WakeResumed}, nil
 

@@ -14,6 +14,7 @@ import (
 	"entgo.io/ent/dialect/sql/sqlgraph"
 	"entgo.io/ent/schema/field"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agenthold"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/groupmembership"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/policybinding"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
@@ -31,6 +32,7 @@ type AgentQuery struct {
 	withProject        *ProjectQuery
 	withMemberships    *GroupMembershipQuery
 	withPolicyBindings *PolicyBindingQuery
+	withHolds          *AgentHoldQuery
 	modifiers          []func(*sql.Selector)
 	// intermediate query (i.e. traversal path).
 	sql  *sql.Selector
@@ -127,6 +129,28 @@ func (_q *AgentQuery) QueryPolicyBindings() *PolicyBindingQuery {
 			sqlgraph.From(agent.Table, agent.FieldID, selector),
 			sqlgraph.To(policybinding.Table, policybinding.FieldID),
 			sqlgraph.Edge(sqlgraph.O2M, true, agent.PolicyBindingsTable, agent.PolicyBindingsColumn),
+		)
+		fromU = sqlgraph.SetNeighbors(_q.driver.Dialect(), step)
+		return fromU, nil
+	}
+	return query
+}
+
+// QueryHolds chains the current query on the "holds" edge.
+func (_q *AgentQuery) QueryHolds() *AgentHoldQuery {
+	query := (&AgentHoldClient{config: _q.config}).Query()
+	query.path = func(ctx context.Context) (fromU *sql.Selector, err error) {
+		if err := _q.prepareQuery(ctx); err != nil {
+			return nil, err
+		}
+		selector := _q.sqlQuery(ctx)
+		if err := selector.Err(); err != nil {
+			return nil, err
+		}
+		step := sqlgraph.NewStep(
+			sqlgraph.From(agent.Table, agent.FieldID, selector),
+			sqlgraph.To(agenthold.Table, agenthold.FieldID),
+			sqlgraph.Edge(sqlgraph.O2M, false, agent.HoldsTable, agent.HoldsColumn),
 		)
 		fromU = sqlgraph.SetNeighbors(_q.driver.Dialect(), step)
 		return fromU, nil
@@ -329,6 +353,7 @@ func (_q *AgentQuery) Clone() *AgentQuery {
 		withProject:        _q.withProject.Clone(),
 		withMemberships:    _q.withMemberships.Clone(),
 		withPolicyBindings: _q.withPolicyBindings.Clone(),
+		withHolds:          _q.withHolds.Clone(),
 		// clone intermediate query.
 		sql:  _q.sql.Clone(),
 		path: _q.path,
@@ -365,6 +390,17 @@ func (_q *AgentQuery) WithPolicyBindings(opts ...func(*PolicyBindingQuery)) *Age
 		opt(query)
 	}
 	_q.withPolicyBindings = query
+	return _q
+}
+
+// WithHolds tells the query-builder to eager-load the nodes that are connected to
+// the "holds" edge. The optional arguments are used to configure the query builder of the edge.
+func (_q *AgentQuery) WithHolds(opts ...func(*AgentHoldQuery)) *AgentQuery {
+	query := (&AgentHoldClient{config: _q.config}).Query()
+	for _, opt := range opts {
+		opt(query)
+	}
+	_q.withHolds = query
 	return _q
 }
 
@@ -446,10 +482,11 @@ func (_q *AgentQuery) sqlAll(ctx context.Context, hooks ...queryHook) ([]*Agent,
 	var (
 		nodes       = []*Agent{}
 		_spec       = _q.querySpec()
-		loadedTypes = [3]bool{
+		loadedTypes = [4]bool{
 			_q.withProject != nil,
 			_q.withMemberships != nil,
 			_q.withPolicyBindings != nil,
+			_q.withHolds != nil,
 		}
 	)
 	_spec.ScanValues = func(columns []string) ([]any, error) {
@@ -490,6 +527,13 @@ func (_q *AgentQuery) sqlAll(ctx context.Context, hooks ...queryHook) ([]*Agent,
 		if err := _q.loadPolicyBindings(ctx, query, nodes,
 			func(n *Agent) { n.Edges.PolicyBindings = []*PolicyBinding{} },
 			func(n *Agent, e *PolicyBinding) { n.Edges.PolicyBindings = append(n.Edges.PolicyBindings, e) }); err != nil {
+			return nil, err
+		}
+	}
+	if query := _q.withHolds; query != nil {
+		if err := _q.loadHolds(ctx, query, nodes,
+			func(n *Agent) { n.Edges.Holds = []*AgentHold{} },
+			func(n *Agent, e *AgentHold) { n.Edges.Holds = append(n.Edges.Holds, e) }); err != nil {
 			return nil, err
 		}
 	}
@@ -586,6 +630,36 @@ func (_q *AgentQuery) loadPolicyBindings(ctx context.Context, query *PolicyBindi
 		node, ok := nodeids[*fk]
 		if !ok {
 			return fmt.Errorf(`unexpected referenced foreign-key "agent_id" returned %v for node %v`, *fk, n.ID)
+		}
+		assign(node, n)
+	}
+	return nil
+}
+func (_q *AgentQuery) loadHolds(ctx context.Context, query *AgentHoldQuery, nodes []*Agent, init func(*Agent), assign func(*Agent, *AgentHold)) error {
+	fks := make([]driver.Value, 0, len(nodes))
+	nodeids := make(map[uuid.UUID]*Agent)
+	for i := range nodes {
+		fks = append(fks, nodes[i].ID)
+		nodeids[nodes[i].ID] = nodes[i]
+		if init != nil {
+			init(nodes[i])
+		}
+	}
+	if len(query.ctx.Fields) > 0 {
+		query.ctx.AppendFieldOnce(agenthold.FieldAgentID)
+	}
+	query.Where(predicate.AgentHold(func(s *sql.Selector) {
+		s.Where(sql.InValues(s.C(agent.HoldsColumn), fks...))
+	}))
+	neighbors, err := query.All(ctx)
+	if err != nil {
+		return err
+	}
+	for _, n := range neighbors {
+		fk := n.AgentID
+		node, ok := nodeids[fk]
+		if !ok {
+			return fmt.Errorf(`unexpected referenced foreign-key "agent_id" returned %v for node %v`, fk, n.ID)
 		}
 		assign(node, n)
 	}

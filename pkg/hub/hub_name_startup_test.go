@@ -33,7 +33,7 @@ import (
 // (LoadGlobalConfig(serverConfigPath)).
 func newStartupNamedServer(t *testing.T, hubName string) *Server {
 	t.Helper()
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	require.NoError(t, err)
 	require.NoError(t, s.Migrate(context.Background()))
 	cfg := DefaultServerConfig()
