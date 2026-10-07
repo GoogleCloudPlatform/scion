@@ -988,9 +988,11 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		// A start or restart run by startAgentCore wrote its status while
 		// its claim was held.
 		if err := s.store.UpdateAgentStatus(ctx, id, statusUpdate); err != nil {
-			// The row was hard-deleted between the re-read above and this
-			// write: the same delete_in_progress answer.
-			if landed && errors.Is(err, store.ErrNotFound) {
+			// The row was hard-deleted before this write (after the
+			// re-read above, or, with no broker, after the start's run
+			// intent was recorded): the same delete_in_progress answer
+			// (ptone/scion#3697), by deleteWonAfterLanding's rule.
+			if (action == api.AgentActionStart || action == api.AgentActionRestart) && deleteWonOnRead(nil, err) {
 				writeDeleteWon(w, id, deletedWhileStartingMessage, dispatchWarns.Warnings())
 				return
 			}
