@@ -241,13 +241,13 @@ export class ScionArtifactList extends LitElement {
   };
 
   private open(item: ArtifactListItem): void {
-    navigateTo(artifactPagePath(item.scopeRef || this.projectId, item.id));
+    navigateTo(artifactPagePath({ id: item.id, scopeRef: item.scopeRef || this.projectId }));
   }
 
   private onPublished = (e: CustomEvent<ArtifactResponse>): void => {
     this.publishOpen = false;
     const a = e.detail.artifact;
-    navigateTo(artifactPagePath(a.scopeRef || this.projectId, a.id));
+    navigateTo(artifactPagePath({ id: a.id, scopeRef: a.scopeRef || this.projectId }));
   };
 
   private resolveNames(items: ArtifactListItem[]): void {
@@ -329,7 +329,10 @@ export class ScionArtifactList extends LitElement {
                 <td>
                   <a
                     class="title"
-                    href=${artifactPagePath(item.scopeRef || this.projectId, item.id)}
+                    href=${artifactPagePath({
+                      id: item.id,
+                      scopeRef: item.scopeRef || this.projectId,
+                    })}
                     @click=${(e: MouseEvent): void => {
                       e.preventDefault();
                       e.stopPropagation();

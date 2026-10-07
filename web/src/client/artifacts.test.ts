@@ -101,8 +101,10 @@ describe('isInlineType and baseName', () => {
 
 describe('artifact page paths', () => {
   it('round-trips current and versioned paths', () => {
-    expect(artifactPagePath('p 1', 'a/b')).toBe('/projects/p%201/artifacts/a%2Fb');
-    expect(artifactPagePath('p', 'a', 3)).toBe('/projects/p/artifacts/a/v/3');
+    expect(artifactPagePath({ id: 'a/b', scopeRef: 'p 1' })).toBe(
+      '/projects/p%201/artifacts/a%2Fb'
+    );
+    expect(artifactPagePath({ id: 'a', scopeRef: 'p' }, 3)).toBe('/projects/p/artifacts/a/v/3');
     expect(parseArtifactPagePath('/projects/p%201/artifacts/a%2Fb')).toEqual({
       projectId: 'p 1',
       id: 'a/b',

@@ -498,7 +498,12 @@ export class ScionPageArtifactDetail extends LitElement {
 
   private goToVersion(seq: number): void {
     const current = this.data?.artifact.currentSeq ?? 0;
-    navigateTo(artifactPagePath(this.homeProject, this.artifactId, seq === current ? 0 : seq));
+    navigateTo(
+      artifactPagePath(
+        { id: this.artifactId, scopeRef: this.homeProject },
+        seq === current ? 0 : seq
+      )
+    );
   }
 
   /** The version shown is the current one, so a new version can build on it. */
@@ -563,7 +568,7 @@ export class ScionPageArtifactDetail extends LitElement {
    * page reloads itself.
    */
   private showCurrentVersion(): void {
-    const target = artifactPagePath(this.homeProject, this.artifactId);
+    const target = artifactPagePath({ id: this.artifactId, scopeRef: this.homeProject });
     this.editing = false;
     if (stripBasePath(window.location.pathname) !== target) {
       navigateTo(target);

@@ -37,11 +37,10 @@ import (
 // The caller controls when backfills run and in what order.
 func newDEF156TestStore(t *testing.T) (*sqliteWebChatStore, *sql.DB) {
 	t.Helper()
-	db, err := sql.Open("sqlite3", ":memory:")
-	require.NoError(t, err)
+	db := openTestMemorySQLite(t, "sqlite3")
 
 	// Create conversations table (Ent-managed in production).
-	_, err = db.Exec(conversationsTableDDL)
+	_, err := db.Exec(conversationsTableDDL)
 	require.NoError(t, err)
 
 	// Create messages table.

@@ -1639,7 +1639,7 @@ func resolveHubGlobalProjectID(ctx context.Context, client hubclient.Client, end
 	if err != nil {
 		return "", wrapHubError(fmt.Errorf("failed to look up the Global project on hub %s: %w", endpoint, err))
 	}
-	if resp == nil || len(resp.Projects) == 0 {
+	if len(resp.Projects) == 0 {
 		return "", fmt.Errorf("no project with slug %q was found on hub %s, or you do not have access to it.\n\n"+
 			"--global (-g global) targets the hub's Global project when no local global project is linked.\n"+
 			"Ask a hub admin to create it or grant access, or pass --project <slug|id> to target another hub project", hubGlobalProjectSlug, endpoint)

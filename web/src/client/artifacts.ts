@@ -73,16 +73,6 @@ export interface ArtifactResponse {
   warnings?: string[];
 }
 
-/** One row of GET /api/v1/artifacts?mine=1. */
-export interface ArtifactListItem extends Artifact {
-  reviewPending: boolean;
-}
-
-export interface ArtifactListResponse {
-  artifacts: ArtifactListItem[];
-  nextCursor?: string;
-}
-
 /** GET /api/v1/artifacts/{id}/versions: ready versions, newest first, without files. */
 export interface VersionListResponse {
   versions: ArtifactVersion[];
@@ -123,12 +113,6 @@ export interface PendingVersionResponse {
 /** Remote image rows the hub adds to a version; not part of what was published. */
 export function isRemoteFile(f: ArtifactFile): boolean {
   return f.origin === 'remote';
-}
-
-/** App path of an artifact page; seq 0 means the current version. */
-export function artifactPagePath(projectId: string, id: string, seq = 0): string {
-  const base = `/projects/${encodeURIComponent(projectId)}/artifacts/${encodeURIComponent(id)}`;
-  return seq > 0 ? `${base}/v/${seq}` : base;
 }
 
 /**
@@ -466,4 +450,50 @@ export function publishErrorMessage(err: unknown): string {
     return `${message}. Publish again to retry; the upload continues where it stopped. If you do not, the unfinished version is removed after ${PENDING_VERSION_LIFETIME}.`;
   }
   return message;
+}
+
+/** One row of GET /api/v1/artifacts?mine=1 (pkg/artifacts/list.go). */
+export interface ArtifactListItem extends Artifact {
+  /** The current version is a review awaiting the owner. */
+  reviewPending: boolean;
+}
+
+/** Body of GET /api/v1/artifacts?mine=1. */
+export interface ArtifactListResponse {
+  artifacts: ArtifactListItem[];
+  /** Opaque cursor of the next page; absent on the last page. */
+  nextCursor?: string;
+}
+
+/** Filters of the artifact list. */
+export interface ArtifactListFilters {
+  /** Title or key contains this text. */
+  q?: string;
+  /** Only artifacts whose current version is a review. */
+  reviewPending?: boolean;
+  /** Only artifacts the caller owns. */
+  ownedOnly?: boolean;
+}
+
+/**
+ * URL of one page of the caller's artifact list. Empty filters are left
+ * out, so a cursor (bound by the hub to the exact filters) stays valid.
+ */
+export function artifactListUrl(filters: ArtifactListFilters, cursor?: string): string {
+  const params = new URLSearchParams({ mine: '1' });
+  const q = filters.q?.trim();
+  if (q) params.set('q', q);
+  if (filters.reviewPending) params.set('review_pending', '1');
+  if (filters.ownedOnly) params.set('owner', 'me');
+  if (cursor) params.set('cursor', cursor);
+  return `/api/v1/artifacts?${params.toString()}`;
+}
+
+/**
+ * Path of an artifact's page in the web UI; seq above 0 names one of its
+ * versions, 0 the current one.
+ */
+export function artifactPagePath(a: Pick<Artifact, 'id' | 'scopeRef'>, seq = 0): string {
+  const base = `/projects/${encodeURIComponent(a.scopeRef)}/artifacts/${encodeURIComponent(a.id)}`;
+  return seq > 0 ? `${base}/v/${seq}` : base;
 }
