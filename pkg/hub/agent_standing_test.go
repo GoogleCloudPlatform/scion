@@ -346,18 +346,16 @@ func TestStandingGates_RemovedRootDenied(t *testing.T) {
 	t.Run("G19_hubEnv", func(t *testing.T) {
 		isForbidden(t, doRequestWithAgentToken(t, f.srv, http.MethodGet, "/api/v1/env?scope=hub", nil, tokA))
 	})
-	t.Run("G19_agentSecrets", func(t *testing.T) {
+	t.Run("G19_agentSecretWrite", func(t *testing.T) {
 		rec := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodGet, "/api/v1/agents/"+f.agentA.ID+"/secrets", nil)
-		req = req.WithContext(contextWithIdentity(req.Context(), f.agentIdentity(f.agentA)))
-		_, ok := f.srv.validateAgentSecretAccess(rec, req, f.agentA.ID)
-		assert.False(t, ok)
+		assert.True(t, f.srv.agentStandingForbidden(ctx, rec, f.agentA.ID))
 		isForbidden(t, rec)
 	})
 	t.Run("G20_materialPrecheck", func(t *testing.T) {
-		_, reason, status := f.srv.materialRuntimePrecheck(ctx, f.agentIdentity(f.agentA))
+		// The precheck's own ancestry-root membership check refuses first
+		// here; the standing gate's own row is G20_materialAfterHold.
+		_, _, status := f.srv.materialRuntimePrecheck(ctx, f.agentIdentity(f.agentA))
 		assert.Equal(t, http.StatusForbidden, status)
-		assert.Equal(t, ReasonDeniedByPolicy, reason)
 	})
 	t.Run("G22_githubToken", func(t *testing.T) {
 		isForbidden(t, doRequestWithAgentToken(t, f.srv, http.MethodPost, "/api/v1/agents/"+f.agentA.ID+"/refresh-token", nil, tokA))

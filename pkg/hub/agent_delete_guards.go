@@ -212,7 +212,12 @@ func (s *Server) startGate(ctx context.Context, a *store.Agent, entry startEntry
 	// refuse.
 	if entry != startEntryRestore {
 		allowDeleted := entry == startEntryReincarnate || entry == startEntryCreateExisting
-		if err := s.evaluateAgentRowStanding(ctx, a, allowDeleted); err != nil {
+		if err := s.evaluateStoredAgentStanding(ctx, a.ID, allowDeleted); err != nil {
+			if !errors.Is(err, errAgentNotInStanding) && requestEnded(ctx, err) {
+				s.agentLifecycleLog.Info("start gate: the request ended before the standing check",
+					"agent_id", a.ID, "entry", string(entry), "error", err)
+				return requestEndedRefusal()
+			}
 			if !errors.Is(err, errAgentNotInStanding) {
 				s.agentLifecycleLog.Error("start gate: standing check failed",
 					"agent_id", a.ID, "entry", string(entry), "error", err)

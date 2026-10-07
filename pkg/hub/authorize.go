@@ -307,15 +307,6 @@ func (s *Server) authorizeAgentCreate(w http.ResponseWriter, r *http.Request, pr
 			writeForbidden(w, "Agents can only create sub-agents within their own project")
 			return false
 		}
-		// The creating agent must be in good standing (ptone/scion#3433):
-		// not held, its chain live and not held, and its root user active
-		// and admitted to the project. Refused with the same generic
-		// response as any other create denial; a lookup fault refuses.
-		if err := s.agentStanding(ctx, agentIdent.ID()); err != nil {
-			logAuthzDenial(r, identity, resource, ActionCreate, "creating agent not in good standing: "+standingReason(err))
-			writeForbiddenDenial(w, agentCreateDenyMessage, "")
-			return false
-		}
 
 	case "user", "dev":
 		if _, ok := identity.(UserIdentity); !ok {
@@ -336,6 +327,17 @@ func (s *Server) authorizeAgentCreate(w http.ResponseWriter, r *http.Request, pr
 		logAuthzDenial(r, identity, resource, ActionCreate, decision.Reason)
 		writeForbiddenDenial(w, agentCreateDenyMessage, decision.DeniedBy)
 		return false
+	}
+	// A creating agent must also be in good standing (ptone/scion#3433):
+	// not held, its chain live and not held, and its root user active and
+	// admitted to the project. Refused with the same generic response as
+	// any other create denial; a lookup fault refuses.
+	if agentIdent, ok := identity.(AgentIdentity); ok {
+		if err := s.agentStanding(ctx, agentIdent.ID()); err != nil {
+			logAuthzDenial(r, identity, resource, ActionCreate, "creating agent not in good standing: "+standingReason(err))
+			writeForbiddenDenial(w, agentCreateDenyMessage, "")
+			return false
+		}
 	}
 	return true
 }

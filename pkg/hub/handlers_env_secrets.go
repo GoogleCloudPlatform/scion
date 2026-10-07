@@ -1121,6 +1121,11 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 	if !ok {
 		return
 	}
+	// Writing a secret requires good standing (ptone/scion#3433). The read
+	// paths check it in materialRuntimePrecheck.
+	if s.agentStandingForbidden(ctx, w, agentID) {
+		return
+	}
 
 	// Limit request body to 128 KiB (64 KiB value limit + headroom for JSON envelope).
 	r.Body = http.MaxBytesReader(w, r.Body, 128*1024)
@@ -1363,11 +1368,6 @@ func (s *Server) validateAgentSecretAccess(w http.ResponseWriter, r *http.Reques
 	projectID = agentIdent.ProjectID()
 	if projectID == "" {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Agent token lacks project context", nil)
-		return "", false
-	}
-
-	// The agent must be in good standing (ptone/scion#3433).
-	if s.agentStandingForbidden(ctx, w, agentIdent.ID()) {
 		return "", false
 	}
 

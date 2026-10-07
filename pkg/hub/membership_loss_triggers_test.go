@@ -27,6 +27,7 @@ import (
 	"context"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
@@ -64,7 +65,12 @@ func (f *msFixture) userBinding(userID string) *store.RoleBinding {
 
 func (f *msFixture) requireTreeHeldAndRefused() {
 	f.t.Helper()
-	f.srv.drainMembershipLossChecks(context.Background())
+	// A path may also process its checks in the background right after the
+	// change; drain until the holds are visible (bounded).
+	for i := 0; i < 50 && !(f.held(f.agentA.ID) && f.held(f.childC.ID)); i++ {
+		f.srv.drainMembershipLossChecks(context.Background())
+		time.Sleep(20 * time.Millisecond)
+	}
 	assert.True(f.t, f.held(f.agentA.ID), "agent A held")
 	assert.True(f.t, f.held(f.childC.ID), "child C held")
 	require.Error(f.t, f.srv.agentStanding(context.Background(), f.childC.ID))
@@ -73,7 +79,7 @@ func (f *msFixture) requireTreeHeldAndRefused() {
 // Path 1: remove member binding.
 func TestMembershipLossTrigger_RemoveMember(t *testing.T) {
 	f := newMSFixture(t, "trig-remove")
-	ctx := setTestIdentity(context.Background(), f.ownerIdentity())
+	ctx := mmrServiceCtx(f.ownerID, f.ownerID+"@test.com")
 	_, d := f.srv.membershipService.RemoveMember(ctx, MembershipRequest{
 		Op: MembershipOpRemove, ProjectID: f.projectID, Actor: f.ownerIdentity(), BindingID: f.userBinding(f.userID).ID,
 	})
@@ -101,7 +107,7 @@ func TestMembershipLossTrigger_RemoveGroupBinding(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, f.srv.agentStanding(ctx, f.agentA.ID), "admitted through the group")
 
-	octx := setTestIdentity(ctx, f.ownerIdentity())
+	octx := mmrServiceCtx(f.ownerID, f.ownerID+"@test.com")
 	_, d := f.srv.membershipService.RemoveMember(octx, MembershipRequest{
 		Op: MembershipOpRemove, ProjectID: f.projectID, Actor: f.ownerIdentity(), BindingID: rb.ID,
 	})
@@ -113,7 +119,7 @@ func TestMembershipLossTrigger_RemoveGroupBinding(t *testing.T) {
 // Path 2: role change (access continues: a check is written and is a no-op).
 func TestMembershipLossTrigger_UpdateMemberRole(t *testing.T) {
 	f := newMSFixture(t, "trig-role")
-	ctx := setTestIdentity(context.Background(), f.ownerIdentity())
+	ctx := mmrServiceCtx(f.ownerID, f.ownerID+"@test.com")
 	admin, err := f.s.GetRoleDefinitionByName(context.Background(), store.ProjectRoleAdmin, store.RoleScopeProject)
 	require.NoError(t, err)
 	_, d := f.srv.membershipService.UpdateMemberRole(ctx, MembershipRequest{
@@ -129,7 +135,7 @@ func TestMembershipLossTrigger_UpdateMemberRole(t *testing.T) {
 // Paths 3 and 4: PUT member roles and DELETE member principal.
 func TestMembershipLossTrigger_SetMemberRolesRemoveAll(t *testing.T) {
 	f := newMSFixture(t, "trig-setroles")
-	ctx := setTestIdentity(context.Background(), f.ownerIdentity())
+	ctx := mmrServiceCtx(f.ownerID, f.ownerID+"@test.com")
 	_, d := f.srv.membershipService.SetMemberRoles(ctx, SetMemberRolesRequest{
 		ProjectID: f.projectID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: f.userID,
 		Actor: f.ownerIdentity(), RemoveAll: true,
@@ -142,7 +148,7 @@ func TestMembershipLossTrigger_SetMemberRolesRemoveAll(t *testing.T) {
 
 func TestMembershipLossTrigger_SetMemberRolesChange(t *testing.T) {
 	f := newMSFixture(t, "trig-setroles-put")
-	ctx := setTestIdentity(context.Background(), f.ownerIdentity())
+	ctx := mmrServiceCtx(f.ownerID, f.ownerID+"@test.com")
 	admin, err := f.s.GetRoleDefinitionByName(context.Background(), store.ProjectRoleAdmin, store.RoleScopeProject)
 	require.NoError(t, err)
 	_, d := f.srv.membershipService.SetMemberRoles(ctx, SetMemberRolesRequest{
@@ -166,7 +172,7 @@ func TestMembershipLossTrigger_AdminBindingDelete(t *testing.T) {
 // Path 6: ownership transfer re-evaluates the previous owner (a no-op).
 func TestMembershipLossTrigger_TransferOwnership(t *testing.T) {
 	f := newMSFixture(t, "trig-transfer")
-	ctx := setTestIdentity(context.Background(), f.ownerIdentity())
+	ctx := mmrServiceCtx(f.ownerID, f.ownerID+"@test.com")
 	_, d := f.srv.membershipService.TransferOwnership(ctx, MembershipRequest{
 		Op: MembershipOpTransfer, ProjectID: f.projectID, Actor: f.ownerIdentity(), NewOwnerID: f.userID,
 	})
@@ -229,7 +235,7 @@ func TestMembershipLossTrigger_HubScopeChange(t *testing.T) {
 	require.NoError(t, err)
 	_, err = f.s.CreateRoleBinding(ctx, &store.RoleBinding{
 		RoleDefinitionID: rd.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: f.userID,
-		ScopeType: store.RoleScopeSystem, CreatedBy: "test",
+		ScopeType: store.RoleScopeSystem, CreatedBy: store.SystemReconcileCreatedBy,
 	})
 	require.NoError(t, err)
 	require.NoError(t, f.s.WithTx(ctx, func(tx store.Store) error {

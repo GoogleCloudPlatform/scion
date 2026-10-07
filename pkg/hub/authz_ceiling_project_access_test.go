@@ -82,11 +82,11 @@ func TestCeilingUserHop_SystemAuthorityAdmitted(t *testing.T) {
 	f := newMSFixture(t, "hop-system")
 	ctx := context.Background()
 	f.dropBindings(f.userID)
-	rd, err := f.s.GetRoleDefinitionByName(ctx, store.SystemRoleHubAdmin, store.RoleScopeSystem)
+	rd, err := f.s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
 	require.NoError(t, err)
 	_, err = f.s.CreateRoleBinding(ctx, &store.RoleBinding{
 		RoleDefinitionID: rd.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: f.userID,
-		ScopeType: store.RoleScopeSystem, CreatedBy: "test",
+		ScopeType: store.RoleScopeSystem, CreatedBy: store.SystemReconcileCreatedBy,
 	})
 	require.NoError(t, err)
 	ok, _, err := f.srv.authzService.userRelationshipAuthority(ctx, msUser(t, f, f.userID), agentResource(f.agentA), ActionAttach, "agent.attach")

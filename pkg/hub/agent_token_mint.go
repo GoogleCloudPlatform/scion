@@ -116,19 +116,18 @@ func (s *Server) GenerateAgentTokenForAgent(ctx context.Context, agent *store.Ag
 		return "", fmt.Errorf("%w: authorization service not initialized", errMintLookup)
 	}
 
-	// No token for an agent that is held or not in good standing
-	// (ptone/scion#3433). A lookup fault issues no token either.
-	if err := s.agentStanding(ctx, agent.ID); err != nil {
-		if errors.Is(err, errAgentNotInStanding) {
-			return "", err
-		}
-		return "", fmt.Errorf("%w: %w", errMintLookup, err)
-	}
-
 	candidates := s.authzService.mintCandidateScopes(agent)
 	scopes, err := s.authzService.ceilingFilteredAgentScopes(ctx, agent, candidates)
 	if err != nil {
 		if isStructuralProvenanceError(err) {
+			return "", err
+		}
+		return "", fmt.Errorf("%w: %w", errMintLookup, err)
+	}
+	// No token for an agent that is held or not in good standing
+	// (ptone/scion#3433). A lookup fault issues no token either.
+	if err := s.agentStanding(ctx, agent.ID); err != nil {
+		if errors.Is(err, errAgentNotInStanding) {
 			return "", err
 		}
 		return "", fmt.Errorf("%w: %w", errMintLookup, err)

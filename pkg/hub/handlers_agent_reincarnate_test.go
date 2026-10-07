@@ -343,6 +343,9 @@ func tidSlugSafe(name string) string {
 func newReincarnateTestAgent(t *testing.T, s store.Store, project *store.Project, broker *store.RuntimeBroker, mutate func(a *store.Agent)) *store.Agent {
 	t.Helper()
 	ctx := context.Background()
+	// The agent's creator is a live project member, so the agent is in good
+	// standing (ptone/scion#3433).
+	ensureStandingRoot(t, s, project.ID, tid("user-creator"))
 
 	a := &store.Agent{
 		ID:              tid("reincarnate-agent-" + t.Name()),

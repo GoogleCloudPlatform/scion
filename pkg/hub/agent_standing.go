@@ -190,10 +190,61 @@ func (s *Server) evaluateAgentStanding(ctx context.Context, agentID string) erro
 	return s.evaluateAgentRowStanding(ctx, agent, false)
 }
 
+// standingAdmission names the permission and class the root user's project
+// admission is evaluated for.
+type standingAdmission struct {
+	permissionID string
+	class        ProjectTargetClass
+}
+
+// defaultStandingAdmission is admission for agents in the project.
+var defaultStandingAdmission = standingAdmission{
+	permissionID: standingPermission,
+	class:        ProjectTargetClass{ResourceType: permissions.ResourceAgent},
+}
+
+// agentStandingFor is agentStanding with the root user's admission
+// evaluated for adm (unmemoised). The runtime material precheck uses it with
+// the secret-use permission, the same admission its own root check applies.
+func (s *Server) agentStandingFor(ctx context.Context, agentID string, adm standingAdmission) error {
+	if s == nil || s.store == nil {
+		return errors.New("agent standing: hub not fully configured")
+	}
+	agent, err := s.store.GetAgent(ctx, agentID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return denyStanding(standingReasonAgentMissing, agentID, "")
+		}
+		return fmt.Errorf("agent standing: agent lookup: %w", err)
+	}
+	return s.evaluateAgentRowStandingFor(ctx, agent, false, adm)
+}
+
 // evaluateAgentRowStanding is agentStanding for an already loaded row. With
 // allowDeleted, a soft-deleted row is evaluated like a live one (used by
 // entries that legitimately act on a deleted row, such as reincarnate).
 func (s *Server) evaluateAgentRowStanding(ctx context.Context, agent *store.Agent, allowDeleted bool) error {
+	return s.evaluateAgentRowStandingFor(ctx, agent, allowDeleted, defaultStandingAdmission)
+}
+
+// evaluateStoredAgentStanding re-reads the agent's row and evaluates its
+// standing, so a caller's stale copy never decides. allowDeleted as for
+// evaluateAgentRowStanding.
+func (s *Server) evaluateStoredAgentStanding(ctx context.Context, agentID string, allowDeleted bool) error {
+	if s == nil || s.store == nil {
+		return errors.New("agent standing: hub not fully configured")
+	}
+	agent, err := s.store.GetAgent(ctx, agentID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return denyStanding(standingReasonAgentMissing, agentID, "")
+		}
+		return fmt.Errorf("agent standing: agent lookup: %w", err)
+	}
+	return s.evaluateAgentRowStanding(ctx, agent, allowDeleted)
+}
+
+func (s *Server) evaluateAgentRowStandingFor(ctx context.Context, agent *store.Agent, allowDeleted bool, adm standingAdmission) error {
 	if s == nil || s.store == nil || s.authzService == nil {
 		return errors.New("agent standing: hub not fully configured")
 	}
@@ -219,12 +270,12 @@ func (s *Server) evaluateAgentRowStanding(ctx context.Context, agent *store.Agen
 	if err != nil {
 		return err
 	}
-	return s.rootUserAdmitted(ctx, root, agent.ProjectID, agent.ID)
+	return s.rootUserAdmitted(ctx, root, agent.ProjectID, agent.ID, adm)
 }
 
 // rootUserAdmitted checks that rootID names an active user admitted to
 // projectID. agentID is only used in the refusal.
-func (s *Server) rootUserAdmitted(ctx context.Context, rootID, projectID, agentID string) error {
+func (s *Server) rootUserAdmitted(ctx context.Context, rootID, projectID, agentID string, adm standingAdmission) error {
 	user, err := s.store.GetUser(ctx, rootID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -238,7 +289,7 @@ func (s *Server) rootUserAdmitted(ctx context.Context, rootID, projectID, agentI
 	if user.Status != store.UserStatusActive {
 		return denyStanding(standingReasonRootInactive, agentID, rootID)
 	}
-	admitted, err := s.userAdmittedToProject(ctx, user, projectID, nil)
+	admitted, err := s.userAdmittedToProjectAs(ctx, s.store, user, projectID, adm, nil)
 	if err != nil {
 		return fmt.Errorf("agent standing: root user admission: %w", err)
 	}
@@ -267,6 +318,11 @@ func (s *Server) authzFor(st store.Store) *AuthzService {
 
 // userAdmittedToProjectOn is userAdmittedToProject reading through st.
 func (s *Server) userAdmittedToProjectOn(ctx context.Context, st store.Store, user *store.User, projectID string, memo *ProjectAdmissionCache) (bool, error) {
+	return s.userAdmittedToProjectAs(ctx, st, user, projectID, defaultStandingAdmission, memo)
+}
+
+// userAdmittedToProjectAs is userAdmittedToProjectOn for admission adm.
+func (s *Server) userAdmittedToProjectAs(ctx context.Context, st store.Store, user *store.User, projectID string, adm standingAdmission, memo *ProjectAdmissionCache) (bool, error) {
 	authz := s.authzFor(st)
 	if authz == nil {
 		return false, errors.New("project admission: authz service not available")
@@ -276,8 +332,7 @@ func (s *Server) userAdmittedToProjectOn(ctx context.Context, st store.Store, us
 		ID:       user.ID,
 		Identity: NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, ""),
 	}
-	class := ProjectTargetClass{ResourceType: permissions.ResourceAgent}
-	res, err := authz.ProjectAdmissionForClass(maskAuthzInputs(ctx), pc, projectID, standingPermission, class, memo)
+	res, err := authz.ProjectAdmissionForClass(maskAuthzInputs(ctx), pc, projectID, adm.permissionID, adm.class, memo)
 	if err != nil {
 		return false, err
 	}

@@ -69,16 +69,6 @@ func (s *Server) materialRuntimePrecheck(ctx context.Context, ident AgentIdentit
 	if !rec.DeletedAt.IsZero() {
 		return nil, ReasonTargetUnresolved, http.StatusForbidden
 	}
-	// The agent must be in good standing (ptone/scion#3433): not held, its
-	// chain live and not held, and its root user active and admitted to the
-	// project. A refusal is the policy deny; the reason code is
-	// audit-only. A lookup fault fails closed.
-	if err := s.agentStanding(ctx, rec.ID); err != nil {
-		if errors.Is(err, errAgentNotInStanding) {
-			return nil, ReasonDeniedByPolicy, http.StatusForbidden
-		}
-		return nil, ReasonBackendError, http.StatusInternalServerError
-	}
 
 	// Check 3: store facts only.
 	project, err := s.store.GetProject(ctx, rec.ProjectID)
@@ -156,6 +146,21 @@ func (s *Server) materialRuntimePrecheck(ctx context.Context, ident AgentIdentit
 	}
 	if !admitted {
 		return nil, ReasonMembershipRequired, http.StatusForbidden
+	}
+
+	// The agent must also be in good standing (ptone/scion#3433): not
+	// held, its chain live and not held, and the user its chain is rooted
+	// at active and admitted to the project. Both this and the ancestry root
+	// check above must pass. A refusal is the policy deny (the reason code
+	// is audit-only); a lookup fault fails closed.
+	if err := s.agentStandingFor(ctx, rec.ID, standingAdmission{
+		permissionID: "secret.use",
+		class:        ProjectTargetClass{ResourceType: permissions.ResourceSecret, ScopeKind: store.ScopeProject},
+	}); err != nil {
+		if errors.Is(err, errAgentNotInStanding) {
+			return nil, ReasonDeniedByPolicy, http.StatusForbidden
+		}
+		return nil, ReasonBackendError, http.StatusInternalServerError
 	}
 
 	return &TargetFacts{

@@ -118,8 +118,12 @@ func (f *msFixture) removeAndProcess(userID string) {
 
 func (f *msFixture) newAgentRow(name, ownerID, createdBy string, ancestry []string) *store.Agent {
 	f.t.Helper()
+	id := tid("ms-agent-" + name)
+	if ownerID == "" && createdBy == "" && len(ancestry) == 0 {
+		markRootlessTestAgent(id)
+	}
 	a := &store.Agent{
-		ID:              tid("ms-agent-" + name),
+		ID:              id,
 		Slug:            "ms-" + name,
 		Name:            "ms-" + name,
 		ProjectID:       f.projectID,
@@ -216,4 +220,33 @@ func (f *msFixture) agentToken(a *store.Agent, scopes ...AgentTokenScope) string
 // agentIdentity returns an in-process identity for the agent.
 func (f *msFixture) agentIdentity(a *store.Agent) AgentIdentity {
 	return newFullAgentIdentity(a.ID, a.ProjectID, a.Ancestry, ScopesForRole(AgentRoleFull))
+}
+
+// ensureStandingRoot makes userID an active user with a project member
+// binding in projectID (idempotent), so agents rooted at the user are in
+// good standing (ptone/scion#3433). For shared fixtures whose agents name a
+// user as owner, creator or ancestry root.
+func ensureStandingRoot(t testing.TB, s store.Store, projectID, userID string) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := s.GetUser(ctx, userID); err != nil {
+		require.NoError(t, s.CreateUser(ctx, &store.User{
+			ID: userID, Email: userID + "@test.example", DisplayName: "Fixture User",
+			Role: store.UserRoleMember, Status: store.UserStatusActive,
+		}))
+	}
+	rbs, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
+	require.NoError(t, err)
+	for _, rb := range rbs {
+		if rb.ScopeType == store.RoleScopeProject && rb.ScopeID == projectID {
+			return
+		}
+	}
+	rd, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: userID,
+		ScopeType: store.RoleScopeProject, ScopeID: projectID, CreatedBy: "test",
+	})
+	require.NoError(t, err)
 }
