@@ -184,7 +184,7 @@ func jsonQuote(s string) string {
 // TestScheduleResume_RefusesTokensForEveryEventType requires a resume to
 // refuse every token, for a message and a dispatch_agent schedule alike,
 // on both boundaries and with every schedule selector: the schedule stays
-// paused and its authorization revision is unchanged. The owner's session
+// paused and its authorization revision stays as it was. The owner's session
 // resumes the same schedules.
 func TestScheduleResume_RefusesTokensForEveryEventType(t *testing.T) {
 	f := newScheduleTokenFixture(t, "sched-resume-tok")
@@ -227,7 +227,7 @@ func TestScheduleUpdate_RefusesTokensForEveryEventType(t *testing.T) {
 
 		for label, key := range keys {
 			for _, body := range []UpdateScheduleRequest{
-				{Name: "renamed"},
+				{Name: name + "-renamed"},
 				{Payload: payload},
 				{Status: store.ScheduleStatusPaused},
 			} {
@@ -241,7 +241,7 @@ func TestScheduleUpdate_RefusesTokensForEveryEventType(t *testing.T) {
 			}
 		}
 
-		rec := doAuthoredScheduleRequest(t, f.srv, f.owner, f.project, id, http.MethodPatch, UpdateScheduleRequest{Name: "renamed"})
+		rec := doAuthoredScheduleRequest(t, f.srv, f.owner, f.project, id, http.MethodPatch, UpdateScheduleRequest{Name: name + "-renamed"})
 		require.Equal(t, http.StatusOK, rec.Code, "%s: session update: %s", eventType, rec.Body.String())
 	}
 }
@@ -274,7 +274,7 @@ func TestSchedulePause_AdmitsTokenWithUpdateSelector(t *testing.T) {
 
 	for label, key := range f.tokens(t, "scheduled_event:update") {
 		for _, eventType := range []string{"message", "dispatch_agent"} {
-			id := createOwnerSchedule(t, f.srv, f.owner, f.project, "pause-"+eventType+"-"+tid("p"), eventType)
+			id := createOwnerSchedule(t, f.srv, f.owner, f.project, "pause-"+eventType+"-"+label, eventType)
 			before := loadScheduleRevision(t, f.store, id)
 			rec := doRequestWithToken(t, f.srv, key, http.MethodPost, f.path("/schedules/"+id+"/pause"), nil)
 			require.Equal(t, http.StatusOK, rec.Code, "%s, %s: %s", label, eventType, rec.Body.String())

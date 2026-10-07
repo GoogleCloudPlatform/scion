@@ -294,7 +294,7 @@ func TestBearerGate_PermissionBoundaryEligibilityAppliesToLegacyCeilings(t *test
 	assert.NotEqual(t, BearerStageBoundaryEligibility, hub.Stage, "reason %q", hub.Decision.Reason)
 
 	// A permission with no boundary entry is eligible on no boundary.
-	unlisted := f.srv.authzService.EvaluateBearerCeiling(ctx, principalContextForIdentity(owner), hubBoundary(), ceiling, "scheduled_event.read", projectEvent, BearerOptions{})
+	unlisted := f.srv.authzService.EvaluateBearerCeiling(ctx, principalContextForIdentity(owner), hubBoundary(), ceiling, "scheduled_event.create", projectEvent, BearerOptions{})
 	assert.Equal(t, BearerStageBoundaryEligibility, unlisted.Stage)
 }
 
