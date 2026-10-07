@@ -2463,7 +2463,10 @@ var projectDefaultsTokenKeys = map[string]settingsTokenClass{
 }
 
 // serverConfigKeyTokenClass returns the token class of a Layer-1 koanf key.
-// A key outside every Layer-1 section, or not classified, is refused.
+// A key outside every Layer-1 section, or not classified, is refused. That
+// covers the file-only keys (dbFileOnlyRequestPaths), among them
+// server.hub.agent_endpoint, which decides the origin agents reach the hub
+// on.
 func serverConfigKeyTokenClass(koanfKey string) settingsTokenClass {
 	section := opsettings.OwningSection(koanfKey)
 	switch serverConfigTokenSections[section] {

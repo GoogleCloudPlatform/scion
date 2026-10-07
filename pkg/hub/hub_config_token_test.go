@@ -165,6 +165,18 @@ func TestServerConfigUpdate_AuthorityKeysRefuseTokens(t *testing.T) {
 		fileKey := mintHubConfigToken(t, fileSrv, fileAdmin, hubBoundary(), "hub_config:read", "hub_config:update")
 		rec := doRequestWithToken(t, fileSrv, fileKey, http.MethodPut, "/api/v1/admin/server-config", json.RawMessage(`{"server":{"hub":{"admin_emails":["x@example.com"]}}}`))
 		requireTokenRefusedKeys(t, rec, "server.hub.admin_emails")
+
+		// server.hub.agent_endpoint decides the origin agents reach the hub
+		// on: a token may not write it, including an explicit clear.
+		for _, body := range []string{
+			`{"server":{"hub":{"agent_endpoint":"https://hub-internal.example.com"}}}`,
+			`{"server":{"hub":{"agent_endpoint":""}}}`,
+		} {
+			for _, method := range []string{http.MethodPut, http.MethodPatch, http.MethodPost} {
+				rec := doRequestWithToken(t, fileSrv, fileKey, method, "/api/v1/admin/server-config", json.RawMessage(body))
+				requireTokenRefusedKeys(t, rec, "server.hub.agent_endpoint")
+			}
+		}
 	})
 }
 
@@ -205,6 +217,8 @@ func TestServerConfigTokenSections_EveryLayer1KeyClassified(t *testing.T) {
 	// A key outside every Layer-1 section is refused.
 	assert.Equal(t, settingsTokenRefused, serverConfigKeyTokenClass("server.auth.dev_mode"))
 	assert.Equal(t, settingsTokenRefused, serverConfigKeyTokenClass("schema_version"))
+	// File-only keys sit outside every Layer-1 section and are refused.
+	assert.Equal(t, settingsTokenRefused, serverConfigKeyTokenClass("server.hub.agent_endpoint"))
 }
 
 // TestProjectDefaultsUpdate_EveryKeyClassifiedForTokens requires every
