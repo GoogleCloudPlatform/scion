@@ -15,8 +15,11 @@
 package artifacts
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"net/url"
+	"os"
 	"runtime"
 	"strings"
 	"testing"
@@ -82,16 +85,32 @@ func TestExtractImageURLs(t *testing.T) {
 	}
 }
 
-// TestNormalizeImageURL checks the decoding and the accepted URL subset,
-// and that every accepted URL parses in Go to the same scheme and host
-// with no userinfo.
-func TestNormalizeImageURL(t *testing.T) {
+// normalizeCase is one row of the remote image URL normalization table,
+// shared with the web renderer's tests through
+// testdata/remote_image_urls.json.
+type normalizeCase struct {
+	Raw  string `json:"raw"`
+	Kind string `json:"kind"` // "markdown" or "attribute"
+	Want string `json:"want"` // "" = refused
+}
+
+func kindName(k int) string {
+	if k == fromAttribute {
+		return "attribute"
+	}
+	return "markdown"
+}
+
+var normalizeCases = func() []normalizeCase {
+	var out []normalizeCase
 	for _, tc := range []struct {
 		raw  string
 		kind int
-		want string // "" = refused
+		want string
 	}{
+
 		{"https://h.example/a.png", fromMarkdown, "https://h.example/a.png"},
+		{"HTTPS://IMG.Example:443/A.png", fromMarkdown, "https://img.example:443/A.png"},
 		{"https://h.example:8443/a.png?x=1#f", fromMarkdown, "https://h.example:8443/a.png?x=1#f"},
 		{"https://h.example/%E2%9C%93.png", fromMarkdown, "https://h.example/%E2%9C%93.png"},
 		{"https://h.example/a%2.png", fromMarkdown, ""},
@@ -134,12 +153,47 @@ func TestNormalizeImageURL(t *testing.T) {
 		{"https://h.example/a.png?a&#38;b", fromMarkdown, ""},
 		{"https://h.example/a.png?a&b", fromMarkdown, "https://h.example/a.png?a&b"},
 	} {
-		got, ok := normalizeImageURL(tc.raw, tc.kind)
+		out = append(out, normalizeCase{Raw: tc.raw, Kind: kindName(tc.kind), Want: tc.want})
+	}
+	return out
+}()
+
+const normalizeFixture = "testdata/remote_image_urls.json"
+
+// TestNormalizeImageURLFixture keeps the shared fixture equal to the
+// table. Regenerate it with SCION_UPDATE_FIXTURES=1.
+func TestNormalizeImageURLFixture(t *testing.T) {
+	want, err := json.MarshalIndent(normalizeCases, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = append(want, '\n')
+	if os.Getenv("SCION_UPDATE_FIXTURES") != "" {
+		if err := os.WriteFile(normalizeFixture, want, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := os.ReadFile(normalizeFixture)
+	if err != nil || !bytes.Equal(got, want) {
+		t.Fatalf("%s is out of date (%v); run with SCION_UPDATE_FIXTURES=1", normalizeFixture, err)
+	}
+}
+
+// TestNormalizeImageURL checks the decoding and the accepted URL subset,
+// and that every accepted URL parses in Go to the same scheme and host
+// with no userinfo.
+func TestNormalizeImageURL(t *testing.T) {
+	for _, tc := range normalizeCases {
+		kind := fromMarkdown
+		if tc.Kind == "attribute" {
+			kind = fromAttribute
+		}
+		got, ok := normalizeImageURL(tc.Raw, kind)
 		if !ok {
 			got = ""
 		}
-		if got != tc.want {
-			t.Errorf("normalize(%q, %d) = %q, want %q", tc.raw, tc.kind, got, tc.want)
+		if got != tc.Want {
+			t.Errorf("normalize(%q, %s) = %q, want %q", tc.Raw, tc.Kind, got, tc.Want)
 			continue
 		}
 		if got == "" {

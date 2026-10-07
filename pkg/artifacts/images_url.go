@@ -275,7 +275,9 @@ func canonicalHTTPURL(v string, steps *int) (string, bool) {
 	b.Grow(len(scheme) + 3 + len(v))
 	b.WriteString(scheme)
 	b.WriteString("://")
-	b.WriteString(authority)
+	// Host names are case-insensitive; the lower case form is the one the
+	// browser's URL parser produces.
+	b.WriteString(strings.ToLower(authority))
 	inQuery, fragment := false, false
 	for i := 0; i < len(rest); i++ {
 		c := rest[i]
