@@ -516,9 +516,10 @@ var identityOperations = []OperationSpec{
 			AfterFields:   []string{"target_user_id", "email", "status", "display_name"},
 			Atomic:        true,
 		},
-		// forbidden: rows 4, 5 and 8 (row 5 carries the session-only
-		// reason); user_suspended: the auth middleware (row 3); conflict:
-		// an existing record (rows 15-17); role_assignment_forbidden: the
+		// forbidden: rows 4, 4a, 5 and 8 (row 4a carries the
+		// dev_auth_not_supported reason, row 5 the session-only reason);
+		// user_suspended: the auth middleware (row 3); conflict: an
+		// existing record (rows 15-17); role_assignment_forbidden: the
 		// denial-log classification of a request that names a role (row
 		// 12, wire code unprocessable). credential_insufficient is added
 		// with hub token admission (rows 6-7).

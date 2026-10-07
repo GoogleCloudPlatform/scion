@@ -1468,7 +1468,7 @@ func TestRS1_MemberCapabilities(t *testing.T) {
 func TestRS1_D4_IndexInstallationFailClosed(t *testing.T) {
 	// This test works by creating a server with a store that does NOT expose
 	// a DB() method, which simulates a missing raw-DB capability.
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	require.NoError(t, err)
 	require.NoError(t, s.Migrate(context.Background()))
 	_ = s.DeleteHubSetting(context.Background(), "migration_delegation_edge_backfill_v1")
@@ -1500,7 +1500,7 @@ type noDBStore struct {
 // a real DDL error by dropping the role_bindings table before the D4 DDL runs,
 // so ExecContext returns an error on the actual DDL path (server.go:3779).
 func TestRS1_D4_DDLFailurePath(t *testing.T) {
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	require.NoError(t, err)
 	require.NoError(t, s.Migrate(context.Background()))
 	_ = s.DeleteHubSetting(context.Background(), "migration_delegation_edge_backfill_v1")
@@ -1550,7 +1550,7 @@ func (s *ddlFailStore) DB() *sql.DB {
 // The MigrateMultiRoleBindings step normally cleans these up, but we insert
 // them AFTER migration by using the raw store (not the full test server).
 func TestRS1_D4_CreateIndexFailure_Rollback(t *testing.T) {
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	require.NoError(t, err)
 	require.NoError(t, s.Migrate(context.Background()))
 	_ = s.DeleteHubSetting(context.Background(), "migration_delegation_edge_backfill_v1")

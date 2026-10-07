@@ -27,7 +27,7 @@
 // @vitest-environment happy-dom
 
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
-import './agent-tree-view.js';
+import { jumpScale } from './agent-tree-view.js';
 import type { ScionAgentTreeView } from './agent-tree-view.js';
 import type { Agent } from '../../shared/types.js';
 import { PROVISIONED_ONLY_LABEL } from '../../shared/agent-state-display.js';
@@ -1082,6 +1082,27 @@ describe('hover/relatedIds highlighting', () => {
   });
 });
 
+describe('jumpScale', () => {
+  it('is the zoom that renders a label of that size at 16px', () => {
+    expect(jumpScale('16px', 1)).toBe(1);
+    expect(jumpScale('15.2px', 1)).toBeCloseTo(16 / 15.2);
+    expect(jumpScale('20px', 1)).toBe(0.8);
+    expect(jumpScale('10px', 1)).toBe(1.6);
+  });
+
+  it('stays within the zoom limits', () => {
+    expect(jumpScale('4px', 1)).toBe(2.5);
+    expect(jumpScale('100px', 1)).toBe(0.25);
+  });
+
+  it('falls back for a size that is not a positive px value', () => {
+    expect(jumpScale('', 1.3)).toBe(1.3);
+    expect(jumpScale('0.95rem', 1.3)).toBe(1.3);
+    expect(jumpScale('0px', 1.3)).toBe(1.3);
+    expect(jumpScale('abcpx', 1.3)).toBe(1.3);
+  });
+});
+
 describe('scion-agent-tree-view revealAgent and focusAgentNode', () => {
   let el: ScionAgentTreeView;
 
@@ -1184,14 +1205,56 @@ describe('scion-agent-tree-view revealAgent and focusAgentNode', () => {
     expect(el.shadowRoot!.querySelector('.jump-highlight')).toBeNull();
   });
 
-  it('centers on the node at the current zoom instead of resetting it', async () => {
-    internals().scale = 1.5;
-    await el.updateComplete;
+  it('centers on the node at the zoom that renders its name at about 16px', async () => {
+    const name = node('k2')!.querySelector<HTMLElement>('.name')!;
+    const fontPx = parseFloat(getComputedStyle(name).fontSize);
+    expect(fontPx).toBeGreaterThan(0);
 
-    expect(el.revealAgent('k2')).toBe(true);
+    for (const start of [0.25, 2.5]) {
+      internals().scale = start;
+      await el.updateComplete;
+
+      expect(el.revealAgent('k2')).toBe(true);
+      await settle();
+
+      expectCenteredOn('k2', 16 / fontPx);
+      expect(fontPx * internals().scale).toBeCloseTo(16);
+    }
+  });
+
+  it('centers a deep-linked agent at the same zoom as a jump to it', async () => {
+    const agents = el.agents;
+    el.remove();
+    el = document.createElement('scion-agent-tree-view');
+    el.focusId = 'k2';
+    el.agents = agents;
+    document.body.appendChild(el);
     await settle();
 
-    expectCenteredOn('k2', 1.5);
+    const name = node('k2')!.querySelector<HTMLElement>('.name')!;
+    const fontPx = parseFloat(getComputedStyle(name).fontSize);
+    expect(fontPx).toBeGreaterThan(0);
+    expectCenteredOn('k2', 16 / fontPx);
+  });
+
+  it("derives the zoom from the name label's computed font size", async () => {
+    const real = window.getComputedStyle.bind(window);
+    const spy = vi
+      .spyOn(window, 'getComputedStyle')
+      .mockImplementation((elt: Element, pseudo?: string | null) => {
+        const style = real(elt, pseudo);
+        if (!(elt as HTMLElement).classList?.contains('name')) return style;
+        return { ...style, fontSize: '20px' } as CSSStyleDeclaration;
+      });
+    try {
+      internals().scale = 1.5;
+      el.revealAgent('k1');
+      await settle();
+
+      expectCenteredOn('k1', 0.8);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('expands collapsed ancestors so the node is laid out, leaving other collapses alone', async () => {
@@ -1383,7 +1446,9 @@ describe('scion-agent-tree-view revealAgent and focusAgentNode', () => {
     await settle();
 
     expect(internals().pendingRevealId).toBeNull();
-    expectCenteredOn('k2', 1.25);
+    const fontPx = parseFloat(getComputedStyle(node('k2')!.querySelector('.name')!).fontSize);
+    expect(fontPx).toBeGreaterThan(0);
+    expectCenteredOn('k2', 16 / fontPx);
   });
 
   it('starts the highlight once the node is centered, not when the reveal is asked for', async () => {

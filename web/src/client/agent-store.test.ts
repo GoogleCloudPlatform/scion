@@ -23,7 +23,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { agent, createHarness, settle } from './__fixtures__/agent-store-harness.js';
-import { AgentStore, agentQueryKey } from './agent-store.js';
+import { AGENT_PROBE_INTERVAL_MS, AgentStore, agentQueryKey } from './agent-store.js';
 import type { AgentListSnapshot } from './agent-store.js';
 import { apiFetch } from './api.js';
 import { StateManager, stateManager } from './state.js';
@@ -248,6 +248,133 @@ describe('AgentStore coalescing', () => {
     expect(progress.every((s) => !s.complete)).toBe(true);
     expect(progress.map((s) => s.agents.length)).toEqual([0, 2, 4, 5]);
     expect(done.complete).toBe(true);
+  });
+
+  it('a caller joining a walk after its first page hears the rows so far at once', async () => {
+    const h = createHarness(many(5), { pageSize: 2 });
+    const realFetch = h.server.fetch.getMockImplementation()!;
+    let releasePage2 = (): void => {};
+    const page2 = new Promise<void>((resolve) => {
+      releasePage2 = resolve;
+    });
+    h.server.fetch.mockImplementation(async (path, options) => {
+      if (path.includes('cursor=')) await page2;
+      return realFetch(path, options);
+    });
+    const first = h.store.ensure(HUB);
+    await h.connect();
+    expect(ids(h.store.peek(HUB))).toEqual(['a0', 'a1']);
+
+    const progress: AgentListSnapshot[] = [];
+    const joined = h.store.ensure(HUB, { onProgress: (s) => progress.push(s) });
+    await settle();
+    expect(progress.map(ids)).toEqual([['a0', 'a1']]);
+    expect(progress[0]?.status).toBe('loading');
+
+    releasePage2();
+    await Promise.all([first, joined]);
+    expect(h.server.walks()).toBe(1);
+    expect(progress.map((s) => s.agents.length)).toEqual([2, 4, 5]);
+  });
+
+  it('a caller joining a walk hears progress in order, never an older snapshot after a newer one', async () => {
+    const h = createHarness(many(5), { pageSize: 2 });
+    const realFetch = h.server.fetch.getMockImplementation()!;
+    h.server.fetch.mockImplementation(async (path, options) => {
+      if (path.includes('cursor=')) await new Promise<void>(() => {});
+      return realFetch(path, options);
+    });
+    void h.store.ensure(HUB);
+    await h.connect();
+    const feed = h.feeds[0];
+
+    const progress: AgentListSnapshot[] = [];
+    void h.store.ensure(HUB, { onProgress: (s) => progress.push(s) });
+    // In the same turn as the join, a feed change publishes a newer
+    // snapshot of the walk's rows (dispatched directly: a real flush waits
+    // for the next frame).
+    feed.seedAgents([agent('a0', { activity: 'working' })]);
+    feed.dispatchEvent(
+      new CustomEvent('agents-changed', {
+        detail: {
+          data: { upserted: ['a0'], deleted: [], unknown: new Map(), generation: 0 },
+        },
+      })
+    );
+    await settle();
+
+    expect(progress.length).toBeGreaterThan(0);
+    const versions = progress.map((s) => s.version);
+    expect(versions).toEqual([...versions].sort((a, b) => a - b));
+    expect(new Set(versions).size).toBe(versions.length);
+    expect(progress[progress.length - 1]?.agents.find((a) => a.id === 'a0')?.activity).toBe(
+      'working'
+    );
+  });
+
+  it('a caller joining a background walk hears no progress: the list stays ready', async () => {
+    const h = createHarness(many(3), { pageSize: 2, probeFullWalkMs: 0 });
+    h.store.retain(HUB, () => {});
+    const first = h.store.ensure(HUB);
+    await h.connect();
+    await first;
+    const walksBefore = h.server.walks();
+
+    // The next probe tick walks in the background; its pages are held.
+    const release = h.server.pause();
+    await vi.advanceTimersByTimeAsync(AGENT_PROBE_INTERVAL_MS);
+    expect(h.server.walks()).toBe(walksBefore + 1);
+    expect(h.store.peek(HUB)?.status).toBe('ready');
+    // With the feed down, ensure joins the walk instead of answering from memory.
+    h.stream().drop();
+    await settle();
+
+    const progress: AgentListSnapshot[] = [];
+    const joined = h.store.ensure(HUB, { onProgress: (s) => progress.push(s) });
+    await settle();
+    expect(progress).toEqual([]);
+
+    release();
+    await settle();
+    // Whatever follows, a progress call never carries a ready snapshot.
+    expect(progress.filter((p) => p.status !== 'loading')).toEqual([]);
+    void joined.catch(() => {});
+    h.store.destroy();
+  });
+
+  it('a caller that joins a walk and leaves at once hears none of its rows', async () => {
+    const h = createHarness(many(5), { pageSize: 2 });
+    const realFetch = h.server.fetch.getMockImplementation()!;
+    h.server.fetch.mockImplementation(async (path, options) => {
+      if (path.includes('cursor=')) await new Promise<void>(() => {});
+      return realFetch(path, options);
+    });
+    void h.store.ensure(HUB);
+    await h.connect();
+
+    const progress: AgentListSnapshot[] = [];
+    const controller = new AbortController();
+    const joined = h.store.ensure(HUB, {
+      signal: controller.signal,
+      onProgress: (s) => progress.push(s),
+    });
+    controller.abort();
+    await expect(joined).rejects.toThrow();
+    await settle();
+    expect(progress).toEqual([]);
+  });
+
+  it('a caller joining a walk before any page lands hears nothing until one does', async () => {
+    const h = createHarness(many(3), { pageSize: 2 });
+    const first = h.store.ensure(HUB);
+    const progress: AgentListSnapshot[] = [];
+    const joined = h.store.ensure(HUB, { onProgress: (s) => progress.push(s) });
+    await settle();
+    expect(progress).toEqual([]);
+
+    await h.connect();
+    await Promise.all([first, joined]);
+    expect(progress.map((s) => s.agents.length)).toEqual([2, 3]);
   });
 
   it('a walk waits for the feed to connect before its first request', async () => {

@@ -16,8 +16,12 @@ package hub
 
 import (
 	"context"
+	"encoding/base64"
 	"net/http"
+	"path"
 	"slices"
+	"strings"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
@@ -162,6 +166,117 @@ func (h *artifactHost) Authorize(ctx context.Context, scopeRef, permission strin
 	return decision.Allowed
 }
 
+// MemberScopes returns the projects the caller belongs to: for a user (a
+// session, a scoped user access token or the dev user), every project it
+// holds an active project-scoped role binding in, directly or through a
+// group; for a token-backed agent, its own project. It reads live bindings
+// on every call, so a user who has left a project stops matching that
+// project's scope grants at once. The artifact service uses the result only
+// to bound list candidates; every candidate is re-checked like a GET, so a
+// token's boundary or ceiling still applies through Permits.
+func (h *artifactHost) MemberScopes(ctx context.Context) ([]string, error) {
+	identity := GetIdentityFromContext(ctx)
+	if isNilIdentity(identity) {
+		return nil, nil
+	}
+	switch id := identity.(type) {
+	case *agentIdentityWrapper:
+		if p := id.ProjectID(); p != "" {
+			return []string{p}, nil
+		}
+		return nil, nil
+	case *AuthenticatedUser, *ScopedUserIdentity, *DevUser:
+	default:
+		return nil, nil
+	}
+	if h.server == nil || h.server.authzService == nil {
+		return nil, nil
+	}
+	in := h.server.authzService.inputsFor(ctx, identity)
+	if _, err := in.Principals(); err != nil {
+		return nil, err
+	}
+	bindings, err := in.Bindings()
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now()
+	seen := map[string]bool{}
+	var out []string
+	for _, rb := range bindings {
+		if rb == nil || rb.ScopeType != store.RoleScopeProject || rb.ScopeID == "" || seen[rb.ScopeID] {
+			continue
+		}
+		if (rb.NotBefore != nil && now.Before(*rb.NotBefore)) || (rb.ExpiresAt != nil && !now.Before(*rb.ExpiresAt)) {
+			continue
+		}
+		seen[rb.ScopeID] = true
+		out = append(out, rb.ScopeID)
+	}
+	return out, nil
+}
+
+// artifactListEndpoint names the artifact list in cursor bindings.
+const artifactListEndpoint = "artifacts.list"
+
+// SealCursor seals a list position with the hub's list-cursor key, bound
+// to the caller's credential and to binding, in the same format the hub's
+// other authorized lists use, so the cursor reveals nothing about the row
+// it points after.
+func (h *artifactHost) SealCursor(ctx context.Context, position, binding string) (string, error) {
+	if h.server == nil {
+		return "", errListCursorSealerUnavailable
+	}
+	b := scopedCursorBinding(artifactListEndpoint, binding, GetIdentityFromContext(ctx))
+	inner := base64.URLEncoding.EncodeToString([]byte(position + "," + b))
+	return h.server.listCursorSealer.Seal(inner, b)
+}
+
+// OpenCursor reverses SealCursor. Any failure is errInvalidCursor.
+func (h *artifactHost) OpenCursor(ctx context.Context, cursor, binding string) (string, error) {
+	if h.server == nil {
+		return "", errInvalidCursor
+	}
+	b := scopedCursorBinding(artifactListEndpoint, binding, GetIdentityFromContext(ctx))
+	inner, err := openAndValidateListCursor(h.server.listCursorSealer, cursor, b)
+	if err != nil {
+		return "", errInvalidCursor
+	}
+	raw, err := base64.URLEncoding.DecodeString(inner)
+	if err != nil {
+		return "", errInvalidCursor
+	}
+	position, ok := strings.CutSuffix(string(raw), ","+b)
+	if !ok {
+		return "", errInvalidCursor
+	}
+	return position, nil
+}
+
+var _ artifacts.ScopeExplainer = (*artifactHost)(nil)
+
+// MissingScope implements artifacts.ScopeExplainer. Only an agent that
+// presented a real token (one with a token id) gets an answer: the scope
+// that Principal requires before serving it, then the token scopes the
+// permission maps to. Users and unauthenticated callers get "".
+func (h *artifactHost) MissingScope(ctx context.Context, permission string) string {
+	perm, ok := artifactPermission(permission)
+	if !ok {
+		return ""
+	}
+	agent, ok := GetIdentityFromContext(ctx).(*agentIdentityWrapper)
+	if !ok || agent == nil || agent.AgentTokenClaims == nil || agent.ID() == "" || agent.TokenID() == "" {
+		return ""
+	}
+	if !agentHasAnyScope(agent, []string{string(ScopeProjectArtifactRead)}) {
+		return string(ScopeProjectArtifactRead)
+	}
+	if len(perm.AgentScopes) > 0 && !agentHasAnyScope(agent, perm.AgentScopes) {
+		return perm.AgentScopes[0]
+	}
+	return ""
+}
+
 // artifactPermission returns the registry row for id when it is an artifact
 // permission.
 func artifactPermission(id string) (permissions.Permission, bool) {
@@ -206,4 +321,32 @@ func (s *Server) artifactsGuard(pattern string, handler http.Handler) http.Handl
 		}
 		guarded(w, r)
 	})
+}
+
+// isArtifactViewRequest reports whether r is a read of the artifact view
+// route (artifacts.RouteView). Both the decoded and the escaped path must
+// be clean and under the route, the escaped path may not encode a slash,
+// dot, backslash or NUL (in any letter case), and the capability segment
+// may not be escaped at all,
+// so the request this check admits is the one the mux routes to the view.
+// Only the request shape is checked here; the artifact service verifies
+// the capability.
+func isArtifactViewRequest(r *http.Request) bool {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		return false
+	}
+	esc := r.URL.EscapedPath()
+	if !strings.HasPrefix(r.URL.Path, artifacts.RouteView) || !strings.HasPrefix(esc, artifacts.RouteView) {
+		return false
+	}
+	if path.Clean(r.URL.Path) != r.URL.Path || path.Clean(esc) != esc {
+		return false
+	}
+	lower := strings.ToLower(esc)
+	if strings.Contains(lower, "%2f") || strings.Contains(lower, "%2e") || strings.Contains(lower, "%5c") ||
+		strings.Contains(lower, "%00") || strings.IndexByte(r.URL.Path, 0) >= 0 {
+		return false
+	}
+	capability, _, _ := strings.Cut(esc[len(artifacts.RouteView):], "/")
+	return capability != "" && !strings.Contains(capability, "%")
 }

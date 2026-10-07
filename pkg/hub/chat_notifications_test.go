@@ -50,10 +50,9 @@ type chatNotifTestEnv struct {
 func setupChatNotifTest(t *testing.T) *chatNotifTestEnv {
 	t.Helper()
 
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	require.NoError(t, err)
 	require.NoError(t, s.Migrate(context.Background()))
-	t.Cleanup(func() { _ = s.Close() })
 
 	db, err := sql.Open("sqlite3", ":memory:")
 	require.NoError(t, err)

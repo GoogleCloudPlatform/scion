@@ -42,7 +42,7 @@ const testDevToken = "scion_dev_test_token_for_unit_tests_1234567890"
 // The server is configured with dev auth enabled using testDevToken.
 func testServer(t *testing.T) (*Server, store.Store) {
 	t.Helper()
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		if strings.Contains(err.Error(), "sqlite driver not registered") {
 			t.Skip("Skipping test because sqlite driver is not registered (build with -tags sqlite to enable)")
@@ -68,7 +68,15 @@ func testServerWithStore(t *testing.T, s store.Store) (*Server, store.Store) {
 	// post-backfill behavior re-create the marker explicitly.
 	_ = s.DeleteHubSetting(context.Background(), "migration_delegation_edge_backfill_v1")
 
-	srv, err := New(testServerConfig(), s)
+	return testServerWithStoreConfig(t, s, testServerConfig())
+}
+
+// testServerWithStoreConfig is testServerWithStore with the given server
+// config, on a store that is already migrated. The store is closed when the
+// test ends.
+func testServerWithStoreConfig(t *testing.T, s store.Store, cfg ServerConfig) (*Server, store.Store) {
+	t.Helper()
+	srv, err := New(cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
@@ -2143,7 +2151,7 @@ func TestRuntimeBrokerListWithProjectLocalPath(t *testing.T) {
 // testServerWithBrokerAuth creates a test server with broker auth enabled.
 func testServerWithBrokerAuth(t *testing.T) (*Server, store.Store) {
 	t.Helper()
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
@@ -2457,13 +2465,16 @@ func TestUserList(t *testing.T) {
 }
 
 // TestUserCreate_RoleRefusedAndNonAdminForbidden pins POST /api/v1/users
-// (user.admin.provision) for the two callers this test used to cover with a
-// single 403: an authorized caller (the dev super-admin) that names the
-// admin role gets 422 privileged_role_not_provisionable (design §8 row 12),
-// and a caller without user.invite gets 403 before any body check (row 8).
-// The full outcome table is in handlers_users_provision_test.go.
+// (user.admin.provision) for its main refusals: an authorized session
+// caller (a super-admin) that names the admin role gets 422
+// privileged_role_not_provisionable (design §8 row 12); a caller without
+// user.invite gets 403 before any body check (row 8); and on a hub in
+// dev-auth mode every caller gets 403 dev_auth_not_supported, because dev
+// auth is single-user local mode (row 4a). The full outcome table is in
+// handlers_users_provision_test.go.
 func TestUserCreate_RoleRefusedAndNonAdminForbidden(t *testing.T) {
-	srv, s := testServer(t)
+	srv, s := testServerNoDevAuth(t)
+	ctx := context.Background()
 
 	body := map[string]interface{}{
 		"email":       "newuser@example.com",
@@ -2471,7 +2482,13 @@ func TestUserCreate_RoleRefusedAndNonAdminForbidden(t *testing.T) {
 		"role":        "admin",
 	}
 
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/users", body)
+	adminID := tid("usercreate-super")
+	createTestUserWithRole(t, s, adminID, "usercreate-super@example.com", store.UserRoleAdmin, store.SystemRoleSuperAdmin)
+	admin, err := s.GetUser(ctx, adminID)
+	if err != nil {
+		t.Fatalf("get super-admin: %v", err)
+	}
+	rec := doRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/users", body)
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("authorized caller with role admin: expected status 422, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -2480,15 +2497,25 @@ func TestUserCreate_RoleRefusedAndNonAdminForbidden(t *testing.T) {
 	}
 
 	member := &store.User{ID: tid("usercreate-member"), Email: "usercreate-member@example.com", DisplayName: "Member", Role: store.UserRoleMember, Status: store.UserStatusActive}
-	if err := s.CreateUser(context.Background(), member); err != nil {
+	if err := s.CreateUser(ctx, member); err != nil {
 		t.Fatalf("create member: %v", err)
 	}
 	rec = doRequestAsUser(t, srv, member, http.MethodPost, "/api/v1/users", body)
 	if rec.Code != http.StatusForbidden {
 		t.Errorf("caller without user.invite: expected status 403, got %d: %s", rec.Code, rec.Body.String())
 	}
-	if _, err := s.GetUserByEmail(context.Background(), "newuser@example.com"); !errors.Is(err, store.ErrNotFound) {
+
+	if _, err := s.GetUserByEmail(ctx, "newuser@example.com"); !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("no user record may be created, got err=%v", err)
+	}
+
+	devSrv, devStore := testServer(t)
+	rec = doRequest(t, devSrv, http.MethodPost, "/api/v1/users", body)
+	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "dev_auth_not_supported") {
+		t.Errorf("dev-auth hub: expected 403 dev_auth_not_supported, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if _, err := devStore.GetUserByEmail(ctx, "newuser@example.com"); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("no user record may be created on the dev-auth hub, got err=%v", err)
 	}
 }
 

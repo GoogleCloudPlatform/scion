@@ -477,6 +477,38 @@ func Spec() []TableFixture {
 			},
 		}},
 
+		// ---- Agent holds ----
+		{Table: "agent_holds", Rows: []row{
+			{ // active hold
+				"id": "ad000000-0000-0000-0000-000000000001", "agent_id": agentID,
+				"project_id": projectID, "cause": "owner_access_ended",
+				"root_principal_type": "user", "root_principal_id": userID,
+				"trigger": "member_remove", "actor_kind": "user", "actor_id": userID,
+				"correlation_id": "fixture-agent-hold-active", "created_at": baseTime,
+			},
+			{ // cleared hold kept as history
+				"id": "ad000000-0000-0000-0000-000000000002", "agent_id": agentID,
+				"project_id": projectID, "cause": "owner_access_ended",
+				"root_principal_type": "user", "root_principal_id": userID,
+				"trigger": "member_role_change", "actor_kind": "user", "actor_id": userID,
+				"correlation_id": "fixture-agent-hold-cleared",
+				"created_at":     baseTime.Add(-time.Hour), "cleared_at": baseTime.Add(-time.Minute),
+				"cleared_by_kind": "user", "cleared_by_id": userID,
+				"clear_reason": "access restored",
+			},
+		}},
+
+		// ---- Membership loss checks ----
+		{Table: "membership_loss_checks", Rows: []row{
+			{
+				"id": "ae000000-0000-0000-0000-000000000001", "user_id": userID,
+				"project_id": projectID, "trigger": "member_remove",
+				"actor_kind": "user", "actor_id": userID,
+				"correlation_id": "fixture-membership-loss-check",
+				"created_at":     baseTime, "attempts": 0, "last_error": "",
+			},
+		}},
+
 		// ---- Agent reincarnations ----
 		{Table: "agent_reincarnations", Rows: []row{
 			{ // completed record with both config snapshots
@@ -563,6 +595,26 @@ func Spec() []TableFixture {
 				"delegate_type": "agent", "delegate_id": agentID,
 				"scope_type": "project", "scope_id": projectID,
 				"role": "creator", "active": true, "grandfathered": false,
+			},
+		}},
+
+		// ---- Delegation adoptions (recognized edge; NULL original edge) ----
+		{Table: "delegation_adoptions", Rows: []row{
+			{
+				"id":        "dd000000-0000-0000-0000-000000000001",
+				"cohort_id": "dc000000-0000-0000-0000-000000000001",
+				"origin":    "boot_migration", "policy_version": 1,
+				"original_edge_id": nil,
+				"adopted_edge_id":  "de000000-0000-0000-0000-000000000001",
+				"delegate_id":      agentID,
+				"delegator_type":   "user", "delegator_id": userID,
+				"scope_id": projectID, "role": "creator", "depth": 1,
+				"status": "recognized", "reason": "",
+				"before_fingerprint": "", "after_summary": "",
+				"actor_kind": "", "actor_id": "",
+				"reverted_by_kind": "", "reverted_by_id": "", "revert_summary": "",
+				"reverted_at": nil,
+				"created":     baseTime, "updated": baseTime,
 			},
 		}},
 

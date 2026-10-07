@@ -62,7 +62,7 @@ func (f *failingSAUpdateStore) DB() *sql.DB {
 
 func newFailingSAUpdateServer(t *testing.T) (*Server, *failingSAUpdateStore) {
 	t.Helper()
-	base, err := newTestStore(":memory:")
+	base, err := newTestStore(t, ":memory:")
 	require.NoError(t, err)
 	wrapped := &failingSAUpdateStore{Store: base}
 	srv, _ := testServerWithStore(t, wrapped)
@@ -381,7 +381,7 @@ func (f *failingSAGetStore) DB() *sql.DB {
 // A store failure while checking admissibility is a 500, not a 400: the
 // assignment was not shown to be inadmissible, and the start does not proceed.
 func TestAgentLifecycle_StartAdmissibilityStoreErrorIs500(t *testing.T) {
-	base, err := newTestStore(":memory:")
+	base, err := newTestStore(t, ":memory:")
 	require.NoError(t, err)
 	wrapped := &failingSAGetStore{Store: base}
 	srv, s := testServerWithStore(t, wrapped)

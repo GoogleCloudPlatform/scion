@@ -32,6 +32,20 @@ adopted: a name collision fails the apply. All IAM grants are additive
 (`google_*_iam_member` only), so applying never replaces a project's existing
 IAM bindings.
 
+### Running a hub on GKE instead of Cloud Run
+
+A third root, `hub-gke`, is a sibling of `hub` that runs one hub inside the
+shared GKE Autopilot cluster instead of on Cloud Run. It installs the in-repo
+[`scion-hub` Helm chart](/scion/hosted/ha/helm/) with a digest-pinned image
+built from the `hub-gke` target, and puts a Terraform-owned global external
+HTTPS load balancer with IAP in front of it (managed certificate, a 24-hour
+backend timeout for WebSockets, and zonal standalone NEGs). DNS stays
+external. It needs GKE 1.36.2-gke.3104000 or later on the shared cluster.
+Cloud Run and GKE hubs share the same shared infra, naming rules, and state
+layout; see
+[`deploy/terraform/configurations/hub-gke/README.md`](https://github.com/GoogleCloudPlatform/scion/blob/main/deploy/terraform/configurations/hub-gke/README.md)
+for the apply sequence.
+
 ## When to choose it
 
 Choose this over the manual GCP setup guide when you want:

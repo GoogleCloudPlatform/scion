@@ -505,6 +505,9 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 		// which records run intent running; its dispatch is bounded by
 		// syncDispatch, derived from the claim's context.
 		ctx = detachLaunchFromClient(ctx)
+		// The collector carries the outcome of the compensating delete of
+		// a run that landed after a delete won (compensateLandedRun).
+		ctx, dispatchWarns := withDispatchWarnings(ctx)
 		created, err := s.createUnderClaim(ctx, agent, func(ctx context.Context) (out *CreateDispatchResult, err error) {
 			err = syncDispatch(ctx, func(dctx context.Context) error {
 				out, err = dispatcher.DispatchAgentCreate(dctx, agent)
@@ -514,6 +517,9 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 		})
 		if errors.Is(err, ErrLaunchInvalidPhase) {
 			writeLaunchInvalidPhase(w, err, agent.ID)
+			return
+		}
+		if writeAgentTokenRecordError(w, err) {
 			return
 		}
 		if s.writeStartClaimError(ctx, w, err, agent.ID) {
@@ -546,16 +552,29 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 			if _, err := s.persistAcceptedLaunch(ctx, agent); err != nil {
 				s.workspaceLog.Warn("Failed to update agent after accepted launch", "error", err)
 			}
+		} else if s.deleteWonAfterLanding(ctx, agent.ID) {
+			// A delete that won after the broker run landed answers 409,
+			// as the synchronous create does (ptone/scion#3099,
+			// ptone/scion#3518), with the outcome of the compensating
+			// delete the dispatch ran. An accepted launch is settled by
+			// its launch report instead.
+			s.workspaceLog.Info("Agent was deleted while its workspace finalize launched it; answering 409",
+				"agent_id", agent.ID)
+			writeDeletedDuringCreate(w, agent.ID, dispatchWarns.Warnings())
+			return
 		} else if err := s.store.UpdateAgent(ctx, agent); err != nil {
 			// Update agent status from broker response
 			s.workspaceLog.Warn("Failed to update agent status after dispatch", "error", err)
 		}
 
+		// The dispatch's warnings (for example a failed delete-won check
+		// in compensateLandedRun) are returned, as env submit does.
 		if emptyPerAgent {
 			resp := SyncToFinalizeResponse{ContentHash: contentHash}
 			if len(req.Manifest.Files) > 0 {
 				resp.Warnings = []string{api.WarningEmptyPerAgentWorkspaceFilesIgnored}
 			}
+			resp.Warnings = append(resp.Warnings, dispatchWarns.Warnings()...)
 			writeJSON(w, http.StatusOK, resp)
 			return
 		}
@@ -565,6 +584,7 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 			ContentHash:      contentHash,
 			FilesApplied:     len(req.Manifest.Files),
 			BytesTransferred: totalBytes,
+			Warnings:         dispatchWarns.Warnings(),
 		})
 		return
 	}

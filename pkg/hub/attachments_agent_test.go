@@ -176,7 +176,7 @@ func TestIngestAgentAttachments(t *testing.T) {
 	ctx := context.Background()
 
 	staged := stageAgentFile(t, sharedDir, "notes.md", "# hello\n")
-	refs := srv.ingestAgentAttachments(ctx, project.ID, "agent-1", []string{
+	refs, _ := srv.ingestAgentAttachments(ctx, project.ID, "agent-1", []string{
 		staged,
 		"/etc/passwd", // outside the shared dir: skipped, not fatal
 		filepath.Join(sharedDir, ".attachments", "sender", "msg1", "notes.md"), // host path, not a mount path
@@ -222,7 +222,7 @@ func TestIngestAgentAttachments_RefusesMarkup(t *testing.T) {
 
 	for _, name := range []string{"evil.html", "diagram.svg", "page.htm "} {
 		staged := stageAgentFile(t, sharedDir, name, `<img src=x onerror=alert(1)>`)
-		refs := srv.ingestAgentAttachments(context.Background(), project.ID, "agent-1", []string{staged})
+		refs, _ := srv.ingestAgentAttachments(context.Background(), project.ID, "agent-1", []string{staged})
 		if len(refs) != 0 {
 			t.Errorf("%q was published as %+v; markup extensions are refused on both paths", name, refs)
 		}
@@ -244,7 +244,7 @@ func TestIngestAgentAttachments_RejectsSymlink(t *testing.T) {
 		t.Fatalf("Symlink: %v", err)
 	}
 
-	refs := srv.ingestAgentAttachments(context.Background(), project.ID, "agent-1",
+	refs, _ := srv.ingestAgentAttachments(context.Background(), project.ID, "agent-1",
 		[]string{"/scion-volumes/" + attachmentSharedDirName + "/.attachments/sender/msg1/leak.txt"})
 	if len(refs) != 0 {
 		t.Fatalf("a symlink into the hub's filesystem must not be published: %+v", refs)

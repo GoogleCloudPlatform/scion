@@ -68,6 +68,9 @@ const (
 	provisionReasonUserExists          = "user_exists"
 	provisionReasonPendingUserExists   = "pending_user_exists"
 	provisionReasonSuspendedUserExists = "user_suspended_exists"
+	// provisionReasonDevAuthNotSupported refuses provisioning on a hub in
+	// dev-auth mode, and for the dev credential and dev user (row 4a).
+	provisionReasonDevAuthNotSupported = "dev_auth_not_supported"
 )
 
 // Advisory warnings (design §5.3). They never fail the request.
@@ -367,15 +370,31 @@ func (s *Server) handleProvisionUser(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	target := Resource{Type: "user"}
 
-	// Rows 1, 4, 5: admission through the D.2 session-only gate. A user
-	// access token is refused here until token admission is enabled. The
-	// gate writes the response; a refused identity is logged here so the
-	// log follows the gate's own decision.
+	// Rows 1, 4, 4a, 5: admission. The D.2 session-only gate admits an
+	// interactive session or a dev credential and refuses a user access
+	// token until token admission is enabled; dev auth is then refused
+	// below. The gate writes its own response; a refused identity
+	// is logged here so the log follows the gate's decision.
 	actor, ok := s.requireSessionCredentialFor(w, ctx, authzop.ReasonGovernancePending)
 	if !ok {
 		if identity := GetIdentityFromContext(ctx); identity != nil {
 			logAuthzDenial(r, identity, target, ActionInvite, provisionOperationID+": refused by the session-only gate")
 		}
+		return
+	}
+	// Row 4a: dev auth is single-user local mode and does not mix with
+	// other user authentication setups. Provisioning is therefore refused
+	// for every caller while the hub runs with dev auth enabled, which
+	// covers the dev credential and the session the web dev auto-login
+	// mints for the dev user. The dev-user check also refuses a session for
+	// the seeded dev user on a hub that has since turned dev auth off. The
+	// credential-kind check is belt-and-braces: redundant with the mode
+	// flag today, since a dev credential exists only in dev-auth mode.
+	if s.authConfig.DevAuthEnabled || GetCredentialContextFromContext(ctx).Kind == CredentialKindDev || actor.ID() == DevUserID {
+		logAuthzDenial(r, actor, target, ActionInvite, provisionOperationID+": dev auth is not supported")
+		writeError(w, http.StatusForbidden, ErrCodeForbidden,
+			"user provisioning is not available when the hub runs with dev authentication; dev auth is single-user local mode",
+			map[string]interface{}{"reason": provisionReasonDevAuthNotSupported})
 		return
 	}
 
