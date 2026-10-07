@@ -142,3 +142,21 @@ func TestHealthSummaryBrokerSelfIsProblem(t *testing.T) {
 		Status: store.BrokerStatusOnline, Health: &HealthBrokerSelf{Status: "healthy"},
 	}))
 }
+
+// The summary normalises the stored report again, so a row holding free
+// text (written by any path other than the heartbeat) still only yields
+// fixed values in the response.
+func TestHealthSummaryBrokers_HealthNormalisedFromStoredRow(t *testing.T) {
+	srv, s := testServer(t)
+	createSummaryBroker(t, s, &store.RuntimeBroker{
+		ID: tid("hs-health-raw"), Name: "hs-health-raw", LastHeartbeat: time.Now(),
+		Health: &api.BrokerHealthReport{
+			Status: "degraded: see /var/log/broker.log",
+			Checks: map[string]string{"nfs_mounts": rawNFSHealthCheck, "../etc": "healthy"},
+		},
+	})
+
+	_, rows := getHealthSummaryBrokers(t, srv)
+	assert.JSONEq(t, `{"status":"degraded","checks":{"nfs_mounts":"unhealthy"}}`,
+		string(rows[tid("hs-health-raw")]["health"]))
+}

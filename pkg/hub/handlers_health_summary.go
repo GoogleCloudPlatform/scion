@@ -115,7 +115,8 @@ type HealthBrokerSelf struct {
 	// Status is healthy, degraded or unhealthy.
 	Status string `json:"status"`
 	// Checks maps each check the broker ran to its result, for example
-	// {"runtime": "unavailable"}. Each value is at most 120 characters.
+	// {"runtime": "unavailable"}. Values are fixed words only (see
+	// api.NormalizeBrokerHealthReport), never free text.
 	Checks map[string]string `json:"checks"`
 }
 
@@ -401,9 +402,12 @@ func brokerStorageSummary(ws *api.BrokerWorkspaceStorage) *HealthBrokerStorage {
 }
 
 // brokerSelfHealthSummary converts the health a broker reported on its
-// heartbeat, or returns nil when it never reported one. Checks is never
+// heartbeat, or returns nil when it never reported one. The stored report
+// is normalised again (api.NormalizeBrokerHealthReport), so the response
+// only ever holds fixed values, whatever the row contains. Checks is never
 // null in the response.
-func brokerSelfHealthSummary(h *api.BrokerHealthReport) *HealthBrokerSelf {
+func brokerSelfHealthSummary(stored *api.BrokerHealthReport) *HealthBrokerSelf {
+	h := api.NormalizeBrokerHealthReport(stored)
 	if h == nil {
 		return nil
 	}

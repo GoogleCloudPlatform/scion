@@ -19,10 +19,10 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
-	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
@@ -114,12 +114,11 @@ func TestBrokerHeartbeat_HealthUnchangedNoWrite(t *testing.T) {
 	defer func() { srv.store = s }()
 
 	path := "/api/v1/runtime-brokers/" + broker.ID + "/heartbeat"
-	long := strings.Repeat("x", brokerHealthValueMaxChars+30)
 	hb := brokerHeartbeatRequest{
 		Status: "online",
 		Health: &api.BrokerHealthReport{
 			Status: "degraded",
-			Checks: map[string]string{"runtime": "unavailable", "nfs_mounts": long},
+			Checks: map[string]string{"runtime": "unavailable", "nfs_mounts": rawNFSHealthCheck},
 		},
 	}
 
@@ -127,11 +126,94 @@ func TestBrokerHeartbeat_HealthUnchangedNoWrite(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	require.Equal(t, 1, counting.updateRuntimeBrokerCalls, "the first report is written")
 
-	// The repeat is compared after truncation, so an over-long value that
-	// was stored cut does not count as a change on every heartbeat.
+	// The repeat is compared after normalisation, so a free-text value
+	// that was stored as a fixed word does not count as a change on every
+	// heartbeat.
 	rec = doRequest(t, srv, http.MethodPost, path, hb)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	assert.Equal(t, 1, counting.updateRuntimeBrokerCalls, "a repeated report must not write the row")
+}
+
+// rawNFSHealthCheck is an nfs_mounts value in the form /healthz shows it:
+// share ID, NFS server and export, mount path and mount command output.
+const rawNFSHealthCheck = "unhealthy: ws1: mount failed: mount 10.0.0.2:/export on /mnt/nfs/ws1 failed: exit status 32 (output: mount.nfs: access denied by server)"
+
+// Check values are stored as fixed words only: free text from the broker
+// (server, export, mount path, command output) is never stored nor
+// returned by the health summary.
+func TestBrokerHeartbeat_HealthCheckValuesNormalised(t *testing.T) {
+	srv, s := testServer(t)
+	grantDevUserRuntimeBrokerAccess(t, s)
+	ctx := context.Background()
+	broker := newBrokerHealthTestBroker(t, s, "broker-health-normalise")
+	path := "/api/v1/runtime-brokers/" + broker.ID + "/heartbeat"
+
+	rec := doRequest(t, srv, http.MethodPost, path, brokerHeartbeatRequest{
+		Status: "online",
+		Health: &api.BrokerHealthReport{
+			Status: "degraded",
+			Checks: map[string]string{
+				"nfs_mounts":   rawNFSHealthCheck,
+				"runtime":      "unavailable",
+				"/mnt/nfs/ws1": "healthy", // a name that is not a plain identifier is dropped
+			},
+		},
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	got, err := s.GetRuntimeBroker(ctx, broker.ID)
+	require.NoError(t, err)
+	assert.Equal(t, &api.BrokerHealthReport{
+		Status: "degraded",
+		Checks: map[string]string{"nfs_mounts": "unhealthy", "runtime": "unavailable"},
+	}, got.Health)
+
+	summary := doRequest(t, srv, http.MethodGet, "/api/v1/admin/health/summary", nil)
+	require.Equal(t, http.StatusOK, summary.Code)
+	body := summary.Body.String()
+	for _, fragment := range []string{"10.0.0.2", "/export", "/mnt/nfs", "ws1", "exit status", "output:", "access denied"} {
+		assert.NotContains(t, body, fragment, "the summary must not carry broker free text")
+	}
+	assert.Contains(t, body, `"health":{"status":"degraded","checks":{"nfs_mounts":"unhealthy","runtime":"unavailable"}}`)
+}
+
+// At most api.BrokerHealthMaxChecks checks are stored, the first in sorted
+// name order; the selection is the same on every heartbeat, so a repeat
+// causes no write.
+func TestBrokerHeartbeat_HealthChecksCapped(t *testing.T) {
+	srv, s := testServer(t)
+	grantDevUserRuntimeBrokerAccess(t, s)
+	ctx := context.Background()
+	broker := newBrokerHealthTestBroker(t, s, "broker-health-cap")
+
+	counting := &countingBrokerLoadStore{Store: s}
+	srv.store = counting
+	defer func() { srv.store = s }()
+
+	checks := map[string]string{}
+	for i := 0; i < api.BrokerHealthMaxChecks+20; i++ {
+		checks[fmt.Sprintf("check_%02d", i)] = "healthy"
+	}
+	// Names that are not plain identifiers or are over-long are dropped
+	// rather than truncated, so no two names can collide.
+	checks[strings.Repeat("a", api.BrokerHealthMaxNameChars+1)] = "unhealthy"
+	checks[strings.Repeat("a", api.BrokerHealthMaxNameChars+2)] = "healthy"
+	checks["a b"] = "unhealthy"
+	hb := brokerHeartbeatRequest{Status: "online", Health: &api.BrokerHealthReport{Status: "healthy", Checks: checks}}
+	path := "/api/v1/runtime-brokers/" + broker.ID + "/heartbeat"
+
+	for i := 0; i < 5; i++ {
+		rec := doRequest(t, srv, http.MethodPost, path, hb)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	}
+	assert.Equal(t, 1, counting.updateRuntimeBrokerCalls, "only the first report is written")
+
+	got, err := s.GetRuntimeBroker(ctx, broker.ID)
+	require.NoError(t, err)
+	require.Len(t, got.Health.Checks, api.BrokerHealthMaxChecks)
+	for i := 0; i < api.BrokerHealthMaxChecks; i++ {
+		assert.Contains(t, got.Health.Checks, fmt.Sprintf("check_%02d", i))
+	}
 }
 
 // Self-health never changes the broker's liveness status: a degraded
@@ -212,34 +294,4 @@ func TestBrokerHeartbeat_HealthWireCompatibility(t *testing.T) {
 	raw, err = json.Marshal(hubclient.BrokerHeartbeat{Status: "online"})
 	require.NoError(t, err)
 	assert.NotContains(t, string(raw), `"health"`)
-}
-
-func TestBoundBrokerHealthReport(t *testing.T) {
-	assert.Nil(t, boundBrokerHealthReport(nil))
-
-	long := strings.Repeat("a", brokerHealthValueMaxChars+1)
-	got := boundBrokerHealthReport(&api.BrokerHealthReport{
-		Status: long,
-		Checks: map[string]string{"nfs_mounts": long, long: "healthy"},
-	})
-	assert.Len(t, got.Status, brokerHealthValueMaxChars)
-	assert.Len(t, got.Checks["nfs_mounts"], brokerHealthValueMaxChars)
-	assert.Equal(t, "healthy", got.Checks[long[:brokerHealthValueMaxChars]], "check names are bounded too")
-
-	// Truncation counts characters, never splitting a multi-byte one.
-	wide := strings.Repeat("é", brokerHealthValueMaxChars+5)
-	got = boundBrokerHealthReport(&api.BrokerHealthReport{Status: "degraded", Checks: map[string]string{"nfs_mounts": wide}})
-	v := got.Checks["nfs_mounts"]
-	assert.True(t, utf8.ValidString(v))
-	assert.Equal(t, brokerHealthValueMaxChars, utf8.RuneCountInString(v))
-
-	// An empty check map normalizes to nil, matching what the store
-	// reads back, so it is not seen as a change on every heartbeat.
-	got = boundBrokerHealthReport(&api.BrokerHealthReport{Status: "healthy", Checks: map[string]string{}})
-	assert.Nil(t, got.Checks)
-
-	// The input is not modified.
-	in := &api.BrokerHealthReport{Status: "degraded", Checks: map[string]string{"runtime": long}}
-	_ = boundBrokerHealthReport(in)
-	assert.Equal(t, long, in.Checks["runtime"])
 }

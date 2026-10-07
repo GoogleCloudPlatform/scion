@@ -60,7 +60,11 @@ export interface HealthSummaryBroker {
 export interface HealthBrokerSelf {
   /** healthy, degraded or unhealthy. */
   status: string;
-  /** Check name to result, e.g. { runtime: 'unavailable' }. */
+  /**
+   * Check name to result, e.g. { runtime: 'unavailable' }. The hub keeps
+   * only fixed words (healthy, degraded, unhealthy, available,
+   * unavailable, unknown), never free text from the broker.
+   */
   checks?: Record<string, string>;
 }
 

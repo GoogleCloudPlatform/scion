@@ -670,8 +670,9 @@ type brokerHeartbeatRequest struct {
 	// broker, in which case the stored value is left unchanged.
 	DefaultProfile *string `json:"defaultProfile,omitempty"`
 	// Health is the broker's report of its own health (see
-	// hubclient.BrokerHeartbeat.Health). It is stored bounded (see
-	// boundBrokerHealthReport) and never changes the broker's status.
+	// hubclient.BrokerHeartbeat.Health). It is stored normalised to fixed
+	// values (api.NormalizeBrokerHealthReport) and never changes the
+	// broker's status.
 	// Omitted by an older broker, in which case the stored value is left
 	// unchanged.
 	Health *api.BrokerHealthReport `json:"health,omitempty"`
@@ -910,7 +911,7 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 				changed = true
 			}
 			if heartbeat.Health != nil {
-				if health := boundBrokerHealthReport(heartbeat.Health); !reflect.DeepEqual(broker.Health, health) {
+				if health := api.NormalizeBrokerHealthReport(heartbeat.Health); !reflect.DeepEqual(broker.Health, health) {
 					broker.Health = health
 					changed = true
 				}

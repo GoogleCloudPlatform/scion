@@ -239,17 +239,15 @@ describe('scion-health-broker-table health', () => {
           status: 'unhealthy',
           checks: {
             runtime: 'unavailable',
-            nfs_mounts: 'unhealthy: s1: not mounted',
+            nfs_mounts: 'unhealthy',
             docker: 'available',
           },
         },
       })
     );
-    expect(c.text).toBe('unhealthy: nfs_mounts unhealthy: s1: not mounted, runtime unavailable');
+    expect(c.text).toBe('unhealthy: nfs_mounts unhealthy, runtime unavailable');
     expect(c.tone).toBe('bad');
-    expect(c.title).toBe(
-      'docker: available\nnfs_mounts: unhealthy: s1: not mounted\nruntime: unavailable'
-    );
+    expect(c.title).toBe('docker: available\nnfs_mounts: unhealthy\nruntime: unavailable');
   });
 
   it('shows a degraded report without failing checks as its status alone', () => {

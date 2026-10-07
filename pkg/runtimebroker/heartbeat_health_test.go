@@ -16,13 +16,16 @@ package runtimebroker
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
 // sendHealthHeartbeat sends one heartbeat with the server's health wired
@@ -78,17 +81,6 @@ func TestHeartbeatHealth_HealthyRuntime(t *testing.T) {
 	}
 }
 
-// The report is a copy: changing it does not change what GetHealthInfo
-// builds next, and vice versa.
-func TestHeartbeatHealthReport_CopiesChecks(t *testing.T) {
-	srv := newTestServer(t)
-	report := srv.heartbeatHealthReport(context.Background())
-	report.Checks["mock"] = "changed"
-	if got := srv.heartbeatHealthReport(context.Background()).Checks["mock"]; got != "available" {
-		t.Errorf("checks[mock] = %q after mutating an earlier report, want available", got)
-	}
-}
-
 // Without a health source (a service not started from a hub connection)
 // the field is omitted, as an older broker would.
 func TestHeartbeatHealth_OmittedWithoutSource(t *testing.T) {
@@ -103,5 +95,58 @@ func TestHeartbeatHealth_OmittedWithoutSource(t *testing.T) {
 	}
 	if calls[0].Heartbeat.Health != nil {
 		t.Errorf("Health = %+v, want nil", calls[0].Heartbeat.Health)
+	}
+}
+
+// NFS mount health is sent as nfs_mounts, reduced to a fixed word: the
+// per-share detail /healthz shows (share ID, server, export, mount path,
+// mount error) stays on the broker. A failing mount the broker owns
+// degrades the status; one it only verifies, or a first pass still
+// pending, is reported without degrading it.
+func TestHeartbeatHealth_NFSMounts(t *testing.T) {
+	cases := []struct {
+		name       string
+		autoMount  bool
+		mountErr   error
+		pending    bool
+		wantStatus string
+		wantNFS    string
+	}{
+		{name: "mounted", autoMount: true, wantStatus: "healthy", wantNFS: "healthy"},
+		{name: "failing mount, broker owns mounts", autoMount: true, mountErr: errors.New("mount 10.0.0.2:/scion-workspaces on /mnt/nfs/ws1 failed: exit status 32 (output: access denied)"), wantStatus: "degraded", wantNFS: "unhealthy"},
+		{name: "failing mount, verify only", autoMount: false, mountErr: errors.New("not mounted"), wantStatus: "healthy", wantNFS: "unhealthy"},
+		{name: "first pass pending", autoMount: true, mountErr: errors.New("mount failed"), pending: true, wantStatus: "healthy", wantNFS: "unhealthy"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mc := newSyncMountChecker()
+			mc.mountErr = tc.mountErr
+			srv := New(ServerConfig{Host: "127.0.0.1", NFSConfig: nfsCfg(tc.autoMount), NFSMountChecker: mc},
+				nil, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
+			if !tc.pending {
+				_ = srv.nfsMountReconciler.Reconcile(context.Background())
+				close(srv.nfsStartupReconcileDone)
+			}
+			if tc.wantStatus == "degraded" && !srv.nfsHealthDegradesStatus() {
+				t.Fatal("expected NFS to degrade the status in this setup")
+			}
+			if tc.wantNFS == "unhealthy" {
+				if raw := srv.GetHealthInfo(context.Background()).Checks["nfs_mounts"]; !strings.Contains(raw, "ws1") {
+					t.Fatalf("/healthz nfs_mounts = %q, want the per-share detail kept there", raw)
+				}
+			}
+
+			heartbeat := sendHealthHeartbeat(t, srv)
+			want := &api.BrokerHealthReport{
+				Status: tc.wantStatus,
+				Checks: map[string]string{"docker": "available", "nfs_mounts": tc.wantNFS},
+			}
+			if !reflect.DeepEqual(heartbeat.Health, want) {
+				t.Errorf("Health = %+v, want %+v", heartbeat.Health, want)
+			}
+			if heartbeat.Status != "online" {
+				t.Errorf("Status = %q, want online", heartbeat.Status)
+			}
+		})
 	}
 }

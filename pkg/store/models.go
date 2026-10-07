@@ -962,7 +962,8 @@ type RuntimeBroker struct {
 
 	// Health is the broker's last self-reported health (default runtime,
 	// NFS mounts), refreshed from the heartbeat and written only when it
-	// changes (stored as JSON). Its freshness is LastHeartbeat. It is
+	// changes (stored as JSON), normalised to fixed values by
+	// api.NormalizeBrokerHealthReport. Its freshness is LastHeartbeat. It is
 	// separate from Status, which stays liveness only. Nil means the broker
 	// has never reported it (an older broker).
 	Health *api.BrokerHealthReport `json:"health,omitempty"`
