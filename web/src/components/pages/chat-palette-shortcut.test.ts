@@ -2289,7 +2289,7 @@ describe('on a touch-primary device, the open request holds the on-screen keyboa
     document.body.appendChild(page);
     await page.togglePalette();
     await page.togglePalette();
-    const button = focusedButton();
+    focusedButton();
     await page.togglePalette(); // queued
     const proxy = keyboardProxy();
     expect(document.activeElement).toBe(proxy);
@@ -2299,7 +2299,7 @@ describe('on a touch-primary device, the open request holds the on-screen keyboa
 
     expect(page.v2PaletteOpen).toBe(false);
     expect(proxy?.isConnected).toBe(false);
-    expect(document.activeElement).not.toBe(button);
+    expect(document.activeElement).toBe(document.body);
   });
 
   it('a reopen queued behind the document preview, abandoned, drops the field without refocusing', async () => {
@@ -2314,7 +2314,7 @@ describe('on a touch-primary device, the open request holds the on-screen keyboa
       name: 'notes.txt',
     };
     document.body.appendChild(page);
-    const button = focusedButton();
+    focusedButton();
     await page.togglePalette(); // queued
     const proxy = keyboardProxy();
     expect(document.activeElement).toBe(proxy);
@@ -2323,23 +2323,27 @@ describe('on a touch-primary device, the open request holds the on-screen keyboa
     page._closePaletteFilePreview();
 
     expect(proxy?.isConnected).toBe(false);
-    expect(document.activeElement).not.toBe(button);
+    expect(document.activeElement).toBe(document.body);
   });
 
-  it('a close that skips focus restore drops the field without refocusing', async () => {
+  it('a route change closing the open palette before its input takes focus drops the field without refocusing', async () => {
     stubTouchPrimary();
     const page = createEligiblePage();
     document.body.appendChild(page);
-    const button = focusedButton();
-    const opening = page.togglePalette();
+    focusedButton();
+    await page.togglePalette();
+    // Open, with the field still holding the keyboard: the dialog has not
+    // yet moved focus to the query input.
+    expect(page.v2PaletteOpen).toBe(true);
     const proxy = keyboardProxy();
     expect(document.activeElement).toBe(proxy);
+    vi.mocked(page._isOnChatRoute).mockReturnValue(false);
 
-    page._closePaletteWithoutFocusRestore();
+    page._handlePopStateForPalette();
 
+    expect(page.v2PaletteOpen).toBe(false);
     expect(proxy?.isConnected).toBe(false);
-    expect(document.activeElement).not.toBe(button);
-    await opening;
+    expect(document.activeElement).toBe(document.body);
   });
 
   it('a close that restores focus gives it back from the field', async () => {
@@ -2361,7 +2365,7 @@ describe('on a touch-primary device, the open request holds the on-screen keyboa
     stubTouchPrimary();
     const page = createEligiblePage();
     document.body.appendChild(page);
-    const button = focusedButton();
+    focusedButton();
     const opening = page.togglePalette();
     const proxy = keyboardProxy();
     expect(document.activeElement).toBe(proxy);
@@ -2369,7 +2373,7 @@ describe('on a touch-primary device, the open request holds the on-screen keyboa
     page.remove();
 
     expect(proxy?.isConnected).toBe(false);
-    expect(document.activeElement).not.toBe(button);
+    expect(document.activeElement).toBe(document.body);
     await opening;
   });
 
