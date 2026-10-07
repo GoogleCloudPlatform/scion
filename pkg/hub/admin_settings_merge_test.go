@@ -474,8 +474,8 @@ runtimes:
 	}
 }
 
-// When two sent keys fold to the same field, the last one in the body
-// wins, as in encoding/json, on every run.
+// When two sent keys fold to the same field and one value is null, the
+// later value replaces the earlier one, as in encoding/json, on every run.
 func TestMergeServerSettings_DuplicateFoldedKeysLastWins(t *testing.T) {
 	cases := []struct {
 		body     string
@@ -511,5 +511,107 @@ func TestMergeServerSettings_DuplicateFoldedKeysLastWins(t *testing.T) {
 				t.Fatalf("%s (run %d): private_key = %v, want kept", tc.body, i, gh["private_key"])
 			}
 		}
+	}
+}
+
+// The request decode matches the top-level "server" key
+// case-insensitively, so rawServerObject resolves it with the same rule.
+// A partial home_storage sent under "Server" is validated on the merged
+// result, and a failing result leaves settings.yaml byte-identical.
+func TestHandlePutServerConfig_MixedCaseServerKeyValidatedAsMerged(t *testing.T) {
+	stored := storedServerSettings + `  home_storage:
+    backend: local
+    leaf: bogus
+`
+	for _, key := range []string{"Server", "SERVER"} {
+		t.Run(key, func(t *testing.T) {
+			body := fmt.Sprintf(`{%q:{"home_storage":{"backend":"local"}}}`, key)
+			rr, settingsPath := putFileModeServerConfig(t, stored, body)
+			if rr.Code == http.StatusOK {
+				t.Fatalf("PUT: status 200, want an error: %s", rr.Body.String())
+			}
+			data, err := os.ReadFile(settingsPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(data) != stored {
+				t.Errorf("settings.yaml changed by a rejected PUT:\n%s", data)
+			}
+		})
+	}
+}
+
+// A valid partial update sent under a mixed-case top-level server key
+// merges exactly like the lower-case key: sent fields are updated,
+// explicit zero values clear their field, and siblings are kept.
+func TestHandlePutServerConfig_MixedCaseServerKeyMergesLikeLowerCase(t *testing.T) {
+	const update = `{"log_level":"debug","github_app":{"installation_url":""},"database":{"max_open_conns":3}}`
+	read := func(t *testing.T, key string) []byte {
+		t.Helper()
+		rr, settingsPath := putFileModeServerConfig(t, storedServerSettings, fmt.Sprintf(`{%q:%s}`, key, update))
+		if rr.Code != http.StatusOK {
+			t.Fatalf("PUT %s: %d %s", key, rr.Code, rr.Body.String())
+		}
+		data, err := os.ReadFile(settingsPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return data
+	}
+	want := read(t, "server")
+	for _, key := range []string{"Server", "SERVER"} {
+		t.Run(key, func(t *testing.T) {
+			got := read(t, key)
+			if !bytes.Equal(got, want) {
+				t.Errorf("settings.yaml for %q differs from \"server\":\n got:\n%s\nwant:\n%s", key, got, want)
+			}
+			settingsPath := filepath.Join(os.Getenv("HOME"), ".scion", "settings.yaml")
+			gh := readServerSection(t, settingsPath, "github_app")
+			if _, ok := gh["installation_url"]; ok {
+				t.Errorf("server.github_app.installation_url = %v, want cleared", gh["installation_url"])
+			}
+			if gh["private_key"] != "test-private-key" {
+				t.Errorf("server.github_app.private_key = %v, want kept", gh["private_key"])
+			}
+			db := readServerSection(t, settingsPath, "database")
+			if db["max_open_conns"] != 3 {
+				t.Errorf("server.database.max_open_conns = %v, want 3", db["max_open_conns"])
+			}
+			if db["url"] != "postgres://user:test-pass@db/scion" {
+				t.Errorf("server.database.url = %v, want kept", db["url"])
+			}
+		})
+	}
+}
+
+// Object values sent under keys that fold to the same field are applied
+// in body order, as encoding/json decodes them into the request: the
+// members of both objects are written. This holds for sections and for
+// the top-level server key.
+func TestHandlePutServerConfig_DuplicateFoldedObjectsMergedInBodyOrder(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"section", `{"server":{"github_app":{"app_id":5},"GitHub_App":{"installation_url":"x"}}}`},
+		{"server", `{"server":{"github_app":{"app_id":5}},"Server":{"github_app":{"installation_url":"x"}}}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rr, settingsPath := putFileModeServerConfig(t, storedServerSettings, tc.body)
+			if rr.Code != http.StatusOK {
+				t.Fatalf("PUT: %d %s", rr.Code, rr.Body.String())
+			}
+			gh := readServerSection(t, settingsPath, "github_app")
+			if gh["app_id"] != 5 {
+				t.Errorf("server.github_app.app_id = %v, want 5", gh["app_id"])
+			}
+			if gh["installation_url"] != "x" {
+				t.Errorf("server.github_app.installation_url = %v, want x", gh["installation_url"])
+			}
+			if gh["private_key"] != "test-private-key" {
+				t.Errorf("server.github_app.private_key = %v, want kept", gh["private_key"])
+			}
+		})
 	}
 }

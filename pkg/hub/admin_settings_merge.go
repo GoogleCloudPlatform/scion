@@ -24,14 +24,22 @@ import (
 	yamlv3 "gopkg.in/yaml.v3"
 )
 
-// rawServerObject returns the "server" member of a PUT body, or nil when
-// the body has none or is not a JSON object.
+// rawServerObject returns the server member of a PUT body, or nil when
+// the body has none, or it is not a JSON object. The top-level key is
+// resolved by sentStructFields over ServerConfigUpdateRequest, the same
+// rule the request decode and the server sections use, so "Server" or
+// "SERVER" select the same value as "server".
 func rawServerObject(rawBody []byte) json.RawMessage {
-	var top map[string]json.RawMessage
-	if err := json.Unmarshal(rawBody, &top); err != nil {
+	sent, ok := sentStructFields(reflect.TypeOf(ServerConfigUpdateRequest{}), rawBody)
+	if !ok {
 		return nil
 	}
-	return top["server"]
+	for _, sf := range sent {
+		if sf.field.Name == "Server" && isJSONObject(sf.val) {
+			return sf.val
+		}
+	}
+	return nil
 }
 
 // mergeServerSettings deep-merges a server config update into the server
@@ -89,12 +97,20 @@ type sentField struct {
 
 // sentStructFields resolves the keys of the JSON object raw to the fields
 // of struct type t, with the structFieldByJSONName rule (exact match,
-// otherwise case-insensitive). Keys that match no field are dropped. When
-// several keys resolve to the same field, the last one in the object
-// wins, as in encoding/json. ok is false when raw is not a JSON object.
+// otherwise case-insensitive). Keys that match no field are dropped.
 //
-// The merge and validateMergedServerSections both use this, so the
-// sections the validator checks are exactly the ones the merge writes.
+// Several keys can resolve to the same field (for example "github_app"
+// and "GitHub_App"). They are combined in body order the way
+// encoding/json decodes them into the request: when the earlier value and
+// the later value are both JSON objects, the later object's members are
+// appended to the earlier one's, so a struct field receives the members
+// of both and a member sent in both takes the later value; otherwise
+// (a scalar, an array or null) the later value replaces the earlier one.
+// ok is false when raw is not a JSON object.
+//
+// rawServerObject, the merge and validateMergedServerSections all use
+// this, so the top-level server key, the sections the merge writes and
+// the sections the validator checks are matched by one rule.
 func sentStructFields(t reflect.Type, raw json.RawMessage) (fields []sentField, ok bool) {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
@@ -116,13 +132,45 @@ func sentStructFields(t reflect.Type, raw json.RawMessage) (fields []sentField, 
 			continue
 		}
 		if i, dup := index[f.Index[0]]; dup {
-			fields[i].val = val
+			fields[i].val = combineJSONValues(fields[i].val, val)
 			continue
 		}
 		index[f.Index[0]] = len(fields)
 		fields = append(fields, sentField{field: f, val: val})
 	}
 	return fields, true
+}
+
+// combineJSONValues returns the value encoding/json leaves in a struct
+// field after decoding prev and then next into it: the members of both
+// objects in order when both are JSON objects, otherwise next.
+func combineJSONValues(prev, next json.RawMessage) json.RawMessage {
+	if !isJSONObject(prev) || !isJSONObject(next) {
+		return next
+	}
+	a := bytes.TrimSpace(prev)
+	b := bytes.TrimSpace(next)
+	ai := bytes.TrimSpace(a[1 : len(a)-1])
+	bi := bytes.TrimSpace(b[1 : len(b)-1])
+	switch {
+	case len(ai) == 0:
+		return next
+	case len(bi) == 0:
+		return prev
+	}
+	out := make([]byte, 0, len(ai)+len(bi)+3)
+	out = append(out, '{')
+	out = append(out, ai...)
+	out = append(out, ',')
+	out = append(out, bi...)
+	out = append(out, '}')
+	return out
+}
+
+// isJSONObject reports whether v is a JSON object.
+func isJSONObject(v json.RawMessage) bool {
+	v = bytes.TrimSpace(v)
+	return len(v) >= 2 && v[0] == '{' && v[len(v)-1] == '}'
 }
 
 // mergeSettingsStruct merges the sent fields of struct type t into
