@@ -269,6 +269,27 @@ func bearerMatrixPatternOverrides(f idFixtures) map[string]map[string]string {
 	}
 }
 
+// bearerMatrixGuardSelector returns the selector of the permission the
+// hub-admin route guard checks on the entry point's route, or "" when the
+// route has no such guard. A write behind a guard on a read permission
+// needs both selectors, so the admitting token carries this one too.
+func bearerMatrixGuardSelector(ep authzop.EntryPoint) string {
+	best := ""
+	var guard RouteMetadata
+	for key, meta := range routeMetadataTable {
+		_, path := splitRouteKey(key)
+		if path == ep.Pattern || (strings.HasSuffix(path, "/") && strings.HasPrefix(ep.Pattern, path)) {
+			if len(path) > len(best) {
+				best, guard = path, meta
+			}
+		}
+	}
+	if best == "" || guard.Classification != RouteHubAdmin || guard.Permission == "" {
+		return ""
+	}
+	return bearerMatrixSelector(guard.Permission)
+}
+
 // bearerMatrixBodyOverrides holds request bodies the matrix sends in place
 // of the live-inventory bodies, for handlers that validate the body before
 // they reach the credential check the matrix observes.
@@ -300,8 +321,9 @@ func sessionOnlyDetailsOf(rec *httptest.ResponseRecorder) (reason, credential st
 // TestBearerDispositionMatrix_CatalogEntryPoints drives real tokens through
 // every catalogued HTTP, SSE and WebSocket entry point and checks the
 // result against the operation's recorded bearer disposition:
-//   - admit: a hub token with the selector and live authority is not
-//     refused and reaches the seeded target (no 401, 403 or 404; a 5xx
+//   - admit: a hub token with the selector (plus the route guard's
+//     selector when the hub-admin guard checks a different permission) and
+//     live authority is not refused and reaches the seeded target (no 401, 403 or 404; a 5xx
 //     only on a row listed in bearerMatrixPositiveServerErrors); a token
 //     of the same user with an unrelated selector, and a project token for
 //     another project, are refused (403, or 404 on a GET, where read
@@ -404,8 +426,13 @@ func TestBearerDispositionMatrix_CatalogEntryPoints(t *testing.T) {
 			if !bearerMatrixHasBoundary(d, authzop.BearerBoundaryHub) {
 				boundary = projectBoundary(m.ids.project)
 			}
-			rec := m.request(t, e, m.mint(t, boundary, []string{sel}))
-			t.Logf("admit row %s: ceiling=%d boundary=%s positive=%d", label, ceilingRec.Code, boundaryStatus, rec.Code)
+			positive := []string{sel}
+			if guardSel := bearerMatrixGuardSelector(ep); guardSel != "" && guardSel != sel {
+				positive = append(positive, guardSel)
+				sort.Strings(positive)
+			}
+			rec := m.request(t, e, m.mint(t, boundary, positive))
+			t.Logf("admit row %s: ceiling=%d boundary=%s positive=%d with %v", label, ceilingRec.Code, boundaryStatus, rec.Code, positive)
 			if rec.Code == http.StatusUnauthorized || rec.Code == http.StatusForbidden {
 				t.Errorf("%s: a %s token with %s got %d, want neither 401 nor 403: %s", label, boundary.Kind, sel, rec.Code, rec.Body.String())
 			}
@@ -494,6 +521,26 @@ var bearerMatrixPositiveServerErrors = map[liveInventoryKey]bearerMatrixPositive
 		http.StatusInternalServerError, "the empty update body fails at the store write"},
 	{"harnessconfig.update", http.MethodPut, "/api/v1/harness-configs/{id}"}: {
 		http.StatusInternalServerError, "the empty update body fails at the store write"},
+	{"hub.config.update", http.MethodPut, "/api/v1/admin/server-config"}: {
+		http.StatusInternalServerError, "the test server has no writable settings file"},
+	{"hub.config.update", http.MethodPatch, "/api/v1/admin/server-config"}: {
+		http.StatusInternalServerError, "the test server has no writable settings file"},
+	{"hub.config.update", http.MethodPost, "/api/v1/admin/server-config"}: {
+		http.StatusInternalServerError, "the test server has no writable settings file"},
+	{"hub.messaging.update", http.MethodPut, "/api/v1/admin/messaging"}: {
+		http.StatusNotImplemented, "the test server configures no operational settings"},
+	{"hub.experiments.update", http.MethodGet, "/api/v1/admin/experiments"}: {
+		http.StatusServiceUnavailable, "the test server configures no operational settings"},
+	{"hub.experiments.update", http.MethodPut, "/api/v1/admin/experiments"}: {
+		http.StatusServiceUnavailable, "the test server configures no operational settings"},
+	{"hub.experiments.update", http.MethodDelete, "/api/v1/admin/experiments"}: {
+		http.StatusServiceUnavailable, "the test server configures no operational settings"},
+	{"hub.projectdefaults.update", http.MethodPut, "/api/v1/admin/project-defaults"}: {
+		http.StatusNotImplemented, "the test server configures no operational settings"},
+	{"hub.projectdefaults.update", http.MethodPatch, "/api/v1/admin/project-defaults"}: {
+		http.StatusNotImplemented, "the test server configures no operational settings"},
+	{"hub.projectdefaults.update", http.MethodPost, "/api/v1/admin/project-defaults"}: {
+		http.StatusNotImplemented, "the test server configures no operational settings"},
 }
 
 // bearerMatrixAuthzErrorCodes are error codes that report an authorization

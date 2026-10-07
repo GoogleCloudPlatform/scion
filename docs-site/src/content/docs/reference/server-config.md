@@ -70,7 +70,7 @@ Controls the central Hub API server.
 | `start_max_duration` | duration | `"12m"` | Hard deadline on any agent start, including a wait for another Hub node to dispatch it. Minimum `11m` (the broker's pod-ready bound plus a minute). Hot-reloaded. Env: `SCION_SERVER_HUB_STARTMAXDURATION`. |
 | `start_unconfirmed_hold` | duration | `"13m"` | Longest time a start whose outcome is unknown (for example a dispatch timeout) keeps other starts of the agent waiting, until the runtime shows whether it created anything. Minimum `12m40s` (the broker's whole start budget plus a minute). Hot-reloaded. Env: `SCION_SERVER_HUB_STARTUNCONFIRMEDHOLD`. |
 | `start_create_unconfirmed_hold` | duration | `"5m"` | `start_unconfirmed_hold` for a new agent's create-and-start. Allowed `3m` up to `start_unconfirmed_hold`. Hot-reloaded. Env: `SCION_SERVER_HUB_STARTCREATEUNCONFIRMEDHOLD`. |
-| `perf_trace` | bool | `false` | Turns on per-request performance tracing for diagnosis. Observe only. See [Request performance tracing](#request-performance-tracing). Startup-only: restart required to change. Env: `SCION_SERVER_HUB_PERFTRACE`. |
+| `perf_trace` | bool | `false` | Turns on per-request performance tracing for diagnosis. Observe only. See [Request performance tracing](#request-performance-tracing) and the [developer guide](/scion/contributing/perf-tracing/). Startup-only: restart required to change. Env: `SCION_SERVER_HUB_PERFTRACE`. |
 | `cors` | object | | CORS configuration (see below). |
 | `conduit` | object | | Conduit relay settings (see [Conduit](#conduit-serverhubconduit)). |
 
@@ -136,7 +136,7 @@ Both keys are read only at Hub startup; restart the Hub after changing them. The
 
 #### Request performance tracing
 
-`perf_trace: true` (env `SCION_SERVER_HUB_PERFTRACE=true`) records where Hub API requests and SSE connections spend their time, and how many authorization store reads and decision-audit records each request causes. It is for diagnosing slow agent lists, mainly on a test or staging Hub. On a production Hub, turn it on only for a short diagnosis window: the log volume grows by one line per request. It is off by default.
+`perf_trace: true` (env `SCION_SERVER_HUB_PERFTRACE=true`) records where Hub API requests and SSE connections spend their time, and how many authorization store reads and decision-audit records each request causes. It is for diagnosing slow agent lists, mainly on a test or staging Hub. On a production Hub, turn it on only for a short diagnosis window: the log volume grows by one line per request. It is off by default. For a how-to (reading the log lines, running the `perf/bench` harness, and using the counts as regression budgets), see [Hub Performance Tracing and Benchmarks](/scion/contributing/perf-tracing/).
 
 ```yaml
 server:
