@@ -1697,6 +1697,50 @@ describe('QuickPaletteHost: on a touch-primary device', () => {
     expect(document.activeElement).toBe(button);
   });
 
+  it('a first open slower than the type-ahead limit keeps the field focused, and the query input takes over', async () => {
+    const gate = deferred<void>();
+    vi.doMock('./quick-palette.js', async (importOriginal) => {
+      await gate.promise;
+      return importOriginal();
+    });
+    try {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      const h = createHost();
+      const { button } = openButton(h);
+      button.click();
+      const proxy = keyboardProxy()!;
+      vi.advanceTimersByTime(PALETTE_TYPEAHEAD_MAX_MS + 1000);
+      expect(proxy.isConnected).toBe(true);
+      expect(document.activeElement).toBe(proxy);
+      proxy.value = 'ui';
+      vi.useRealTimers();
+
+      gate.resolve();
+      const palette = await waitForPalette();
+      await vi.waitFor(() => expect(palette.open).toBe(true));
+      const input = await fireInitialFocus(palette);
+      expect(palette.shadowRoot!.activeElement).toBe(input);
+      expect(proxy.isConnected).toBe(false);
+      // Past the limit, keys reach the field itself and still become the query.
+      expect(input.value).toBe('ui');
+    } finally {
+      vi.useRealTimers();
+      gate.resolve();
+      vi.doUnmock('./quick-palette.js');
+    }
+  });
+
+  it('hide() while the open is pending drops the field without refocusing the button', () => {
+    const h = createHost();
+    const { button } = openButton(h);
+    button.click();
+    const proxy = keyboardProxy()!;
+    expect(document.activeElement).toBe(proxy);
+    h.hide();
+    expect(proxy.isConnected).toBe(false);
+    expect(document.activeElement).not.toBe(button);
+  });
+
   it('a close before the palette shows gives focus back to the button', () => {
     const h = createHost();
     const { button } = openButton(h);
