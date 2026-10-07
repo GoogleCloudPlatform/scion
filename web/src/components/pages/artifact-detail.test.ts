@@ -609,4 +609,69 @@ describe('artifact page', () => {
     expect(priv.viewTimer).toBeNull();
     expect(priv.viewExpired).toBe(false);
   });
+
+  it('keeps the newer result when an earlier load answers last', async () => {
+    mockFetch(artifact('a.png', 'image/png'));
+    const el = await mount(true);
+    const priv = el as unknown as { load(): Promise<void>; loadView(seq: number): Promise<void> };
+    const older = artifact('a.png', 'image/png');
+    older.artifact.title = 'Older';
+    const newer = artifact('a.png', 'image/png');
+    newer.artifact.title = 'Newer';
+    let releaseOlder: (() => void) | null = null;
+    let calls = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url === `/api/v1/artifacts/${ID}`) {
+          calls++;
+          if (calls === 1) {
+            return new Promise<Response>((resolve) => {
+              releaseOlder = (): void =>
+                resolve(new Response(JSON.stringify(older), { status: 200 }));
+            });
+          }
+          return Promise.resolve(new Response(JSON.stringify(newer), { status: 200 }));
+        }
+        return Promise.resolve(new Response(JSON.stringify({ versions: [] }), { status: 200 }));
+      })
+    );
+    const first = priv.load();
+    await priv.load();
+    releaseOlder!();
+    await first;
+    await el.updateComplete;
+    expect(el.shadowRoot!.querySelector('h1')!.textContent).toBe('Newer');
+  });
+
+  it('keeps the newer view when an earlier mint answers last', async () => {
+    mockFetch(artifact('page.html', 'text/html'));
+    const el = await mount(true);
+    const priv = el as unknown as {
+      loadView(seq: number): Promise<void>;
+      view: { url: string } | null;
+    };
+    let releaseOlder: (() => void) | null = null;
+    let mints = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => {
+        mints++;
+        const body = (url: string): Response =>
+          new Response(JSON.stringify({ url, expiresAt: '2999-01-01T00:00:00Z' }), { status: 200 });
+        if (mints === 1) {
+          return new Promise<Response>((resolve) => {
+            releaseOlder = (): void => resolve(body('/older/'));
+          });
+        }
+        return Promise.resolve(body('/newer/'));
+      })
+    );
+    const first = priv.loadView(1);
+    await priv.loadView(1);
+    releaseOlder!();
+    await first;
+    expect(priv.view!.url).toBe('/newer/');
+  });
 });

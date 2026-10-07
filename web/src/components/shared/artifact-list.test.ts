@@ -390,6 +390,18 @@ describe('publish dialog helpers', () => {
     expect(files.map((x) => x.path)).toEqual(['css/a.css', 'index.html']);
   });
 
+  it('skips hidden folders at the top of the picked folder; the picked folder name is not a path', () => {
+    const { folder, files } = folderFiles([
+      f('.github/workflows/ci.yml'),
+      f('.github/.cache/x'),
+      f('.github/README.md'),
+    ]);
+    expect(folder).toBe('.github');
+    expect(files.map((x) => x.path)).toEqual(['README.md', 'workflows/ci.yml']);
+    const nested = folderFiles([f('site/.hidden/a.txt'), f('site/ok.txt')]);
+    expect(nested.files.map((x) => x.path)).toEqual(['ok.txt']);
+  });
+
   it('picks an index or README entry, else a top-level file', () => {
     expect(defaultEntry(['a/b.md', 'README.md', 'index.html'])).toBe('index.html');
     expect(defaultEntry(['a/b.md', 'README.md'])).toBe('README.md');

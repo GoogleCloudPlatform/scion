@@ -102,6 +102,13 @@ export class ScionPageArtifactDetail extends LitElement {
   @state() private viewError: string | null = null;
   @state() private viewExpired = false;
   private viewTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * Generations of the page load and of the view mint. An answer that
+   * arrives after a newer load or mint started is dropped, so a slow
+   * earlier request cannot overwrite a newer result.
+   */
+  private loadGen = 0;
+  private viewGen = 0;
   @state() private editing = false;
   @state() private editText = '';
   @state() private editNote = '';
@@ -355,6 +362,8 @@ export class ScionPageArtifactDetail extends LitElement {
   }
 
   private async load(): Promise<void> {
+    const gen = ++this.loadGen;
+    this.viewGen++;
     this.loading = true;
     this.error = null;
     this.notFound = false;
@@ -366,6 +375,7 @@ export class ScionPageArtifactDetail extends LitElement {
     this.viewTimer = null;
     try {
       const res = await apiFetch(this.versionPath);
+      if (gen !== this.loadGen) return;
       if (res.status === 404) {
         this.notFound = true;
         return;
@@ -374,43 +384,48 @@ export class ScionPageArtifactDetail extends LitElement {
         throw new Error(await extractApiError(res, `HTTP ${res.status}`));
       }
       const data = (await res.json()) as ArtifactResponse;
+      if (gen !== this.loadGen) return;
       this.data = data;
       dispatchPageTitle(this, data.artifact.title, 'Artifacts');
       const version = data.version;
       this.entry = version?.files.find((f) => f.path === version.entryPath) ?? null;
       this.resolveNames();
-      void this.loadVersions();
+      void this.loadVersions(0, gen);
       const kind = this.entry ? rendererFor(this.entry.mediaType) : 'download';
       if ((kind === 'markdown' || kind === 'text') && this.entry) {
         if (this.entry.size <= MAX_INLINE_TEXT_BYTES) {
-          await this.loadText(this.entry);
+          await this.loadText(this.entry, gen);
         }
       }
-      if (kind === 'html' && version) {
+      if (kind === 'html' && version && gen === this.loadGen) {
         void this.loadView(version.seq);
       }
     } catch (err) {
+      if (gen !== this.loadGen) return;
       console.error('Failed to load artifact:', err);
       this.error = err instanceof Error ? err.message : 'Failed to load artifact';
     } finally {
-      this.loading = false;
+      if (gen === this.loadGen) this.loading = false;
     }
   }
 
-  private async loadText(file: ArtifactFile): Promise<void> {
+  private async loadText(file: ArtifactFile, gen: number): Promise<void> {
     const seq = this.data?.version?.seq ?? 0;
     const res = await apiFetch(artifactFileUrl(this.artifactId, seq, file.path, true));
     if (!res.ok) {
       throw new Error(await extractApiError(res, `HTTP ${res.status}`));
     }
-    this.text = await res.text();
+    const text = await res.text();
+    if (gen === this.loadGen) this.text = text;
   }
 
   private async loadView(seq: number): Promise<void> {
+    const gen = ++this.viewGen;
     if (this.viewTimer) clearTimeout(this.viewTimer);
     this.viewTimer = null;
     try {
       const view = await mintView(this.artifactId, seq);
+      if (gen !== this.viewGen) return;
       this.view = view;
       this.viewExpired = false;
       this.viewError = null;
@@ -428,6 +443,7 @@ export class ScionPageArtifactDetail extends LitElement {
         );
       }
     } catch (err) {
+      if (gen !== this.viewGen) return;
       this.viewError = err instanceof Error ? err.message : 'Could not open the view';
     }
   }
@@ -438,14 +454,16 @@ export class ScionPageArtifactDetail extends LitElement {
     this.viewTimer = null;
   }
 
-  private async loadVersions(before = 0): Promise<void> {
+  private async loadVersions(before = 0, gen = this.loadGen): Promise<void> {
     try {
       const page = await listVersions(this.artifactId, before);
+      if (gen !== this.loadGen) return;
       this.versions = before > 0 ? [...this.versions, ...page.versions] : page.versions;
       this.versionsNext = page.nextBefore ?? 0;
       this.resolveNames();
       this.versionsError = null;
     } catch (err) {
+      if (gen !== this.loadGen) return;
       this.versionsError = err instanceof Error ? err.message : 'Could not load versions';
     }
   }
