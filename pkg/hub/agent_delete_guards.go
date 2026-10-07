@@ -160,7 +160,7 @@ func (r *startRefusal) dmError() *AgentDMError {
 //     1c. not in good standing (agentStanding: held, held or deleted
 //     chain agent, root user inactive or not admitted to the project),
 //     on every entry but restore → 409 "This agent is suspended. A
-//     project owner can resume it."; a lookup fault → 500;
+//     hub admin can lift the hold."; a lookup fault → 500;
 //  2. IsIncompleteCreate → 409 agent_create_incomplete (T1 P1b-3);
 //  3. IsInFlight, before the launch deadline → 409 agent_launching with
 //     InFlight set (T1 P1b-3). Start, restart and create-existing answer

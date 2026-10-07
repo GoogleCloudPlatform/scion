@@ -58,7 +58,7 @@ func TestHeldTargetDelivery_AgentDM(t *testing.T) {
 	assert.Nil(t, result)
 	assert.Equal(t, ErrCodeAgentNotRunning, dmErr.Code)
 	assert.Equal(t, http.StatusConflict, dmErr.HTTPStatus)
-	assert.Contains(t, dmErr.Message, "A project owner can resume it")
+	assert.Contains(t, dmErr.Message, "A hub admin can lift the hold")
 
 	in := deliveryDMInput(sender, target, "mention-to-held")
 	in.Type = messages.TypeMention

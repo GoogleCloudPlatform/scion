@@ -527,7 +527,7 @@ func (s *Server) storedLinkCandidate(ctx context.Context, st store.Store, a *sto
 // agentSuspendedConflictMessage is the one refusal a user sees when starting,
 // restarting, waking or reincarnating an agent that is held or not in good
 // standing.
-const agentSuspendedConflictMessage = "This agent is suspended. A project owner can resume it."
+const agentSuspendedConflictMessage = "This agent is suspended. A hub admin can lift the hold."
 
 // agentSuspendedRefusal is the startGate refusal for an agent that is held
 // or not in good standing.
@@ -629,7 +629,7 @@ func (s *Server) dispatchStandingCheck(ctx context.Context, agent *store.Agent) 
 func heldTargetDMError(agent *store.Agent) *AgentDMError {
 	return &AgentDMError{
 		Code:       ErrCodeAgentNotRunning,
-		Message:    fmt.Sprintf("agent %q is suspended. A project owner can resume it.", agent.Slug),
+		Message:    fmt.Sprintf("agent %q is suspended. A hub admin can lift the hold.", agent.Slug),
 		HTTPStatus: http.StatusConflict,
 	}
 }

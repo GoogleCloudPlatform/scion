@@ -77,8 +77,8 @@ The field carries no reason. The reason, root user, trigger and actor are in
 the audit log (`agent_hold_set` records).
 
 Starting, restarting, waking or reincarnating a held agent returns
-`409 conflict` with "This agent is suspended. A project owner can resume it."
-In this release the hold is lifted by a hub admin (below).
+`409 conflict` with "This agent is suspended. A hub admin can lift the hold."
+(see [Resuming](#resuming)).
 
 ## Resuming
 
