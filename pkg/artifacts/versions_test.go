@@ -601,3 +601,43 @@ func TestUploadToAVersionReapedMeanwhile(t *testing.T) {
 		t.Errorf("PUT: %d, want 409", rec.Code)
 	}
 }
+
+// keyRaceStore makes the first key lookup miss while another publish
+// takes the key, as a concurrent publish would.
+type keyRaceStore struct {
+	Store
+	raced bool
+	race  func()
+}
+
+func (s *keyRaceStore) GetArtifactByKey(ctx context.Context, scopeKind, scopeRef, ownerKind, ownerRef, key string) (*Artifact, error) {
+	if !s.raced {
+		s.raced = true
+		s.race()
+		return nil, ErrNotFound
+	}
+	return s.Store.GetArtifactByKey(ctx, scopeKind, scopeRef, ownerKind, ownerRef, key)
+}
+
+// TestCreateWithKeyRace: when another publish takes the key between the
+// lookup and the create, the request appends to that artifact instead.
+func TestCreateWithKeyRace(t *testing.T) {
+	f := newFixture(t, false)
+	files := bundle{"a.txt": []byte("a")}
+	var winner string
+	ks := &keyRaceStore{Store: f.store}
+	ks.race = func() {
+		f.svc.SetStore(f.store)
+		req := files.manifest("a.txt")
+		req.Key = "k"
+		winner = f.createPending(agentA, "/api/v1/artifacts", req).Artifact.ID
+		f.svc.SetStore(ks)
+	}
+	f.svc.SetStore(ks)
+	req := files.manifest("a.txt")
+	req.Key = "k"
+	got := f.createPending(agentA, "/api/v1/artifacts", req)
+	if got.Artifact.ID != winner || got.Version.Seq != 2 {
+		t.Errorf("raced create = %s v%d, want %s v2", got.Artifact.ID, got.Version.Seq, winner)
+	}
+}

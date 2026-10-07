@@ -290,3 +290,91 @@ func TestStoreReapPending(t *testing.T) {
 		}
 	})
 }
+
+// TestStoreConcurrentFinalizes: two versions finalized at once leave the
+// higher one current, whichever commits last.
+func TestStoreConcurrentFinalizes(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, db *sql.DB, st Store, reopen func() *sql.DB) {
+		ctx := context.Background()
+		a, v1 := pendingArtifact(t, st, "", "a.txt")
+		if err := st.MarkReceived(ctx, v1.ID, "a.txt", "text/plain"); err != nil {
+			t.Fatal(err)
+		}
+		var seqs []int
+		for i := 0; i < 2; i++ {
+			v := &Version{ID: uuid.NewString(), ArtifactID: a.ID, Kind: VersionKindPublish, EntryPath: "a.txt", CreatedAt: time.Now(), State: VersionStatePending}
+			if err := st.CreateVersion(ctx, v, nil, 4); err != nil {
+				t.Fatal(err)
+			}
+			seqs = append(seqs, v.Seq)
+		}
+		for _, seq := range append([]int{1}, seqs...) {
+			if err := st.ClaimFinalize(ctx, a.ID, seq); err != nil {
+				t.Fatal(err)
+			}
+		}
+		var wg sync.WaitGroup
+		errs := make([]error, 3)
+		for i, seq := range append([]int{1}, seqs...) {
+			wg.Add(1)
+			go func(i, seq int) {
+				defer wg.Done()
+				_, errs[i] = NewStore(reopen(), driverOf(st)).FinalizeVersion(ctx, a.ID, seq, nil)
+			}(i, seq)
+		}
+		wg.Wait()
+		for i, err := range errs {
+			if err != nil {
+				t.Fatalf("finalize %d: %v", i, err)
+			}
+		}
+		got, err := st.GetArtifact(ctx, a.ID)
+		if err != nil || got.CurrentSeq != seqs[1] {
+			t.Errorf("current = %+v, %v; want %d", got, err, seqs[1])
+		}
+	})
+}
+
+// TestStoreReapRacesFinalize: a reap and a finalize of the same claimed
+// version never both succeed, and the version ends ready or failed.
+func TestStoreReapRacesFinalize(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, db *sql.DB, st Store, reopen func() *sql.DB) {
+		ctx := context.Background()
+		for round := 0; round < 5; round++ {
+			a, v := pendingArtifact(t, st, "", "a.txt")
+			if err := st.MarkReceived(ctx, v.ID, "a.txt", "text/plain"); err != nil {
+				t.Fatal(err)
+			}
+			if err := st.ClaimFinalize(ctx, a.ID, 1); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(st.(*sqlStore).rebind("UPDATE artifact_version SET created_at = ? WHERE id = ?"),
+				st.(*sqlStore).timeArg(time.Now().Add(-48*time.Hour)), v.ID); err != nil {
+				t.Fatal(err)
+			}
+			var wg sync.WaitGroup
+			var finErr error
+			var reaped int
+			wg.Add(2)
+			go func() {
+				defer wg.Done()
+				_, finErr = NewStore(reopen(), driverOf(st)).FinalizeVersion(ctx, a.ID, 1, nil)
+			}()
+			go func() {
+				defer wg.Done()
+				reaped, _ = NewStore(reopen(), driverOf(st)).ReapPending(ctx, time.Now().Add(-24*time.Hour), 100)
+			}()
+			wg.Wait()
+			gv, err := st.GetVersion(ctx, a.ID, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch {
+			case finErr == nil && reaped == 0 && gv.State == VersionStateReady:
+			case (errors.Is(finErr, ErrConflict) || errors.Is(finErr, ErrNotFound)) && reaped == 1 && gv.State == VersionStateFailed:
+			default:
+				t.Fatalf("round %d: finalize %v, reaped %d, state %s", round, finErr, reaped, gv.State)
+			}
+		}
+	})
+}
