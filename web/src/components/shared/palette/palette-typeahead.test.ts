@@ -714,6 +714,58 @@ describe('PaletteTypeahead: holding the on-screen keyboard', () => {
     expect(typeahead.take()).toBe('ahellox');
   });
 
+  /** An IME-processed Backspace, applied by the field itself when the capture lets it through. */
+  function imeBackspace(proxy: HTMLInputElement): KeyboardEvent {
+    const e = press('Backspace', { keyCode: 229 } as KeyboardEventInit);
+    if (!e.defaultPrevented) proxy.value = proxy.value.slice(0, -1);
+    return e;
+  }
+
+  it('IME-processed Backspaces delete the field text, then the captured text', () => {
+    typeahead = touchTypeahead();
+    typeahead.start();
+    const proxy = typeahead.keyboardProxy!;
+    press('a');
+    commitAtField(proxy, '日本', true);
+    expect(imeBackspace(proxy).defaultPrevented).toBe(false);
+    expect(imeBackspace(proxy).defaultPrevented).toBe(false);
+    expect(imeBackspace(proxy).defaultPrevented).toBe(true);
+    expect(typeahead.take()).toBe('');
+  });
+
+  it('an IME-processed Backspace with the field empty deletes captured text', () => {
+    typeahead = touchTypeahead();
+    typeahead.start();
+    const proxy = typeahead.keyboardProxy!;
+    press('a');
+    press('b');
+    expect(imeBackspace(proxy).defaultPrevented).toBe(true);
+    expect(typeahead.take()).toBe('a');
+  });
+
+  it('an IME-processed character passed to the field keeps its place before a later captured key', () => {
+    typeahead = touchTypeahead();
+    typeahead.start();
+    const proxy = typeahead.keyboardProxy!;
+    press('a');
+    const e = press('x', { keyCode: 229 } as KeyboardEventInit);
+    expect(e.defaultPrevented).toBe(false);
+    proxy.value += 'x';
+    press('y');
+    expect(typeahead.take()).toBe('axy');
+  });
+
+  it('an IME-processed Delete passes to the field and loses nothing, with or without field text', () => {
+    typeahead = touchTypeahead();
+    typeahead.start();
+    const proxy = typeahead.keyboardProxy!;
+    press('a');
+    expect(press('Delete', { keyCode: 229 } as KeyboardEventInit).defaultPrevented).toBe(false);
+    commitAtField(proxy, 'hi', false);
+    expect(press('Delete', { keyCode: 229 } as KeyboardEventInit).defaultPrevented).toBe(false);
+    expect(typeahead.take()).toBe('ahi');
+  });
+
   it('an IME-processed Enter is swallowed without moving field text', () => {
     typeahead = touchTypeahead();
     typeahead.start();

@@ -303,7 +303,8 @@ export class PaletteTypeahead {
     if (e.isComposing) return;
     const imeKey = this.isImeKeyForField(e);
     if (e.key === 'Backspace' || e.key === 'Delete') {
-      if (imeKey) return;
+      // A Backspace with nothing left in the field deletes captured text.
+      if (imeKey && (e.key === 'Delete' || this.proxy?.value)) return;
       this.flushProxy();
       if (e.key === 'Backspace') this.text = deleteBackward(this.text, e, this.mac);
       e.preventDefault();
@@ -325,13 +326,19 @@ export class PaletteTypeahead {
 
   /**
    * Whether `e` is a key an IME processed (keyCode 229) while the hidden
-   * field holds the keyboard. Such a key belongs to the field: a Backspace,
-   * Delete or character passes through and edits the field natively, and
-   * Enter, Tab or a navigation key is swallowed without moving the field's
-   * text, since it can arrive between WebKit's compositionend and its
-   * insertion of the confirmed text, when the field still holds the text
-   * being replaced. Either way the captured text is left alone, so the
-   * field's text stays after it.
+   * field holds the keyboard. Such a key belongs to the field,
+   * and leaves the captured text, which the field's text follows, alone:
+   *
+   * - A character or Delete passes through to the field. The field inserts
+   *   the character after its text; Delete, at the end of the field and of
+   *   the captured text, removes nothing either way.
+   * - A Backspace passes through while the field holds text, which the
+   *   field deletes natively. With the field empty it deletes captured text
+   *   instead, as the field has nothing to delete.
+   * - Enter, Tab or a navigation key is swallowed without moving the field's
+   *   text, since it can arrive between WebKit's compositionend and its
+   *   insertion of the confirmed text, when the field still holds the text
+   *   being replaced.
    */
   private isImeKeyForField(e: KeyboardEvent): boolean {
     return e.keyCode === 229 && this.proxy !== null;
