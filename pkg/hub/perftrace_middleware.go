@@ -129,7 +129,7 @@ func (w *perfResponseWriter) WriteHeader(code int) {
 		w.wroteHeader = true
 		w.firstWrite = time.Now()
 		if w.emitHeaders {
-			h := w.ResponseWriter.Header()
+			h := w.Header()
 			for k, v := range w.trace.Snapshot().HeaderValues() {
 				h.Set(k, v)
 			}
