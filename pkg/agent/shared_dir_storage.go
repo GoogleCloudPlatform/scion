@@ -47,6 +47,15 @@ import (
 // The returned SharedDirRealization is nil unless backend is "nfs"; it is
 // consumed by the Kubernetes runtime's buildPod to mount the shared PVC by
 // subPath instead of creating per-dir dynamic PVCs.
+//
+// Keep the nfs branch in lockstep with runtime.ResolveSharedDirHostPath,
+// which chat plugins use to find the same directories: both apply the same
+// path checks (name and project ID validation, Resolve, ConfineLeaf,
+// host-base stat refusal, EvalSymlinks of the host base, EnsureLeaf, then
+// the resolved-path backstop). That resolver relies on ConfineLeaf to
+// cover what ValidateNotExportRoot checks here. A change to either chain
+// must be made to both; TestSharedDirChainsParity runs one table of
+// refusals through both.
 func resolveSharedDirs(
 	sdCfg *config.V1SharedDirStorageConfig,
 	projectDir string,
@@ -229,7 +238,7 @@ func resolveSharedDirs(
 			sd := res.SharedDirs[name]
 			rel := sd.ServerRelativePath // relative to HostBase, e.g. projects/<pid>/shared-dirs/<name>
 
-			leafFd, _, walkErr := shareddirs.EnsureLeaf(resolvedHostBase, rel)
+			leafFd, _, walkErr := ensureSharedDirLeaf(resolvedHostBase, rel)
 			if walkErr != nil {
 				return nil, nil, fmt.Errorf("server.shared_dir_storage: shared dir %q: %w", name, walkErr)
 			}
@@ -292,6 +301,10 @@ func resolveSharedDirs(
 		SupplementalGroups: sharedDirLeafGroups(leafGIDs, sdCfg.NFS.GID),
 	}, nil
 }
+
+// ensureSharedDirLeaf is shareddirs.EnsureLeaf, replaceable in tests to
+// replace a path component after the walk and reach the backstop check.
+var ensureSharedDirLeaf = shareddirs.EnsureLeaf
 
 // fdGID is shareddirs.FdGID, replaceable in tests to simulate a failed stat.
 var fdGID = shareddirs.FdGID

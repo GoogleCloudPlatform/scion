@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 
@@ -32,6 +33,10 @@ import (
 // unusable nfs configuration apart from a bad request. The caller must not
 // fall back to the local layout: no agent mounts it for an nfs-backed dir.
 var ErrSharedDirStorageUnavailable = errors.New("nfs shared-dir storage is unavailable")
+
+// ensureSharedDirLeaf is shareddirs.EnsureLeaf, replaceable in tests to
+// replace a path component after the walk and reach the backstop check.
+var ensureSharedDirLeaf = shareddirs.EnsureLeaf
 
 // SharedDirHostPath is the host-side directory backing one shared dir, as
 // resolved by ResolveSharedDirHostPath.
@@ -57,6 +62,31 @@ type SharedDirHostPath struct {
 // walk and hardening. A missing or unreadable nfs host base, an
 // incomplete nfs block, or a leaf reached through a symlink returns an
 // error wrapping ErrSharedDirStorageUnavailable.
+//
+// Keep this chain in lockstep with pkg/agent resolveSharedDirs: both apply
+// the same path checks, in the same order (name and project ID
+// validation, Resolve, ConfineLeaf, host-base stat refusal, EvalSymlinks
+// of the host base, EnsureLeaf, then the resolved-path backstop). The
+// agent side also calls ValidateNotExportRoot (via
+// NFSSharedDirsToVolumeMounts); here ConfineLeaf covers that case, since
+// a leaf whose parent must be <base>/<subpath_root>/<project>/shared-dirs
+// can never equal or sit outside the host base. A change to either chain
+// must be made to both; TestSharedDirChainsParity in pkg/agent runs one
+// table of refusals through both.
+//
+// Limits, compared with agent start (which this does not replace):
+//   - Plugins run out of process, so they never see the hub settings DB
+//     overlay (config.LoadGlobalSettingsWithOverlay in a co-located hub
+//     and broker); only the global settings file is read.
+//   - The backend is resolved for the active profile in that file, not
+//     for the profile an agent was created or started with.
+//   - The per-agent shared-dir storage record, which keeps an existing
+//     agent on the backend it first started with, is not consulted.
+//
+// Operator note: switch a shared dir's backend only after restarting the
+// agents that use it, and set the backend in the global settings file,
+// not only through hub profiles, so plugins resolve the same directory
+// the agents mount.
 func ResolveSharedDirHostPath(gs *config.VersionedSettings, home, slug, projectID, name string) (SharedDirHostPath, error) {
 	if err := api.ValidateSharedDirs([]api.SharedDir{{Name: name}}); err != nil {
 		return SharedDirHostPath{}, err
@@ -121,12 +151,16 @@ func ResolveSharedDirHostPath(gs *config.VersionedSettings, home, slug, projectI
 	if err != nil {
 		return SharedDirHostPath{}, fmt.Errorf("%w: resolve host base symlinks: %v", ErrSharedDirStorageUnavailable, err)
 	}
-	leafFd, _, err := shareddirs.EnsureLeaf(resolvedHostBase, sd.ServerRelativePath)
+	leafFd, _, err := ensureSharedDirLeaf(resolvedHostBase, sd.ServerRelativePath)
 	if err != nil {
 		return SharedDirHostPath{}, fmt.Errorf("%w: shared dir %q: %v", ErrSharedDirStorageUnavailable, name, err)
 	}
 	_ = shareddirs.CloseFd(leafFd)
 
+	// Backstop, as on the agent side: the walk above works on descriptors
+	// opened at walk time, so re-resolve the path fresh and require it to
+	// be the expected clean path, in case a component was replaced after
+	// the walk.
 	want := filepath.Join(resolvedHostBase, sd.ServerRelativePath)
 	got, err := filepath.EvalSymlinks(sd.HostPath)
 	if err != nil {
@@ -152,6 +186,8 @@ func LoadSharedDirStorageSettings() (*config.VersionedSettings, error) {
 			return nil, fmt.Errorf("%w: loading global settings for server.shared_dir_storage: %v",
 				ErrSharedDirStorageUnavailable, err)
 		}
+		slog.Warn("Failed to load global settings; server.shared_dir_storage was not found in the raw file, using the local shared-dir layout",
+			"error", err)
 		return nil, nil
 	}
 	if gs != nil && (gs.Server == nil || gs.Server.SharedDirStorage == nil) &&
@@ -161,14 +197,4 @@ func LoadSharedDirStorageSettings() (*config.VersionedSettings, error) {
 			ErrSharedDirStorageUnavailable)
 	}
 	return gs, nil
-}
-
-// ResolveSharedDirHostPathFromGlobal is LoadSharedDirStorageSettings
-// followed by ResolveSharedDirHostPath.
-func ResolveSharedDirHostPathFromGlobal(home, slug, projectID, name string) (SharedDirHostPath, error) {
-	gs, err := LoadSharedDirStorageSettings()
-	if err != nil {
-		return SharedDirHostPath{}, err
-	}
-	return ResolveSharedDirHostPath(gs, home, slug, projectID, name)
 }

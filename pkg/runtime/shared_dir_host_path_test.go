@@ -18,6 +18,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -146,5 +147,126 @@ func TestResolveSharedDirHostPath_NFSUnavailable(t *testing.T) {
 func TestResolveSharedDirHostPath_InvalidName(t *testing.T) {
 	if _, err := ResolveSharedDirHostPath(nil, t.TempDir(), "proj", testSharedDirProjectID, "../x"); err == nil {
 		t.Fatal("expected an error for an invalid shared dir name")
+	}
+}
+
+// writeGlobalSettings points HOME at a temp dir whose global settings file
+// holds content, so LoadSharedDirStorageSettings reads only fake config.
+func writeGlobalSettings(t *testing.T, content string) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".scion")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "settings.yaml"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLoadSharedDirStorageSettings(t *testing.T) {
+	t.Run("malformed yaml mentioning shared_dir_storage fails closed", func(t *testing.T) {
+		writeGlobalSettings(t, "schema_version: \"1\"\nserver:\n  shared_dir_storage: [unclosed\n")
+		gs, err := LoadSharedDirStorageSettings()
+		if !errors.Is(err, ErrSharedDirStorageUnavailable) {
+			t.Fatalf("err = %v, want ErrSharedDirStorageUnavailable", err)
+		}
+		if gs != nil {
+			t.Fatalf("settings = %+v, want nil", gs)
+		}
+	})
+
+	t.Run("legacy format with a shared_dir_storage block fails closed", func(t *testing.T) {
+		// No schema_version: the legacy loader drops the server block.
+		writeGlobalSettings(t, `active_profile: local
+server:
+  shared_dir_storage:
+    backend: nfs
+    nfs:
+      mount_root: /srv
+      shares:
+        - id: share
+`)
+		gs, err := LoadSharedDirStorageSettings()
+		if !errors.Is(err, ErrSharedDirStorageUnavailable) {
+			t.Fatalf("err = %v, want ErrSharedDirStorageUnavailable", err)
+		}
+		if gs != nil {
+			t.Fatalf("settings = %+v, want nil", gs)
+		}
+	})
+
+	t.Run("malformed yaml without the key means the local layout", func(t *testing.T) {
+		writeGlobalSettings(t, "schema_version: \"1\"\nactive_profile: [unclosed\n")
+		gs, err := LoadSharedDirStorageSettings()
+		if err != nil || gs != nil {
+			t.Fatalf("got settings %+v, err %v; want nil, nil", gs, err)
+		}
+	})
+
+	t.Run("v1 file mentioning the key only in a comment resolves to local", func(t *testing.T) {
+		writeGlobalSettings(t, `schema_version: "1"
+# server:
+#   shared_dir_storage:
+#     backend: nfs
+`)
+		gs, err := LoadSharedDirStorageSettings()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if gs == nil {
+			t.Fatal("settings = nil, want the loaded v1 settings")
+		}
+		home := t.TempDir()
+		got, err := ResolveSharedDirHostPath(gs, home, "proj", testSharedDirProjectID, "scratchpad")
+		if err != nil {
+			t.Fatalf("resolve: %v", err)
+		}
+		want := config.SharedDirHostPath(home, "proj", testSharedDirProjectID, "scratchpad")
+		if got.Backend != "local" || got.Path != want {
+			t.Fatalf("got %+v, want local %q", got, want)
+		}
+	})
+}
+
+// TestResolveSharedDirHostPath_NFSBackstopRefusesSwappedLeaf replaces the
+// leaf with a symlink after the EnsureLeaf walk has finished, which the
+// walk itself cannot see, and checks that the fresh re-resolution refuses
+// it.
+func TestResolveSharedDirHostPath_NFSBackstopRefusesSwappedLeaf(t *testing.T) {
+	home := t.TempDir()
+	mountRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(mountRoot, "share1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	elsewhere := t.TempDir()
+
+	orig := ensureSharedDirLeaf
+	t.Cleanup(func() { ensureSharedDirLeaf = orig })
+	ensureSharedDirLeaf = func(hostBase, rel string) (int, bool, error) {
+		fd, existed, err := orig(hostBase, rel)
+		if err != nil {
+			return fd, existed, err
+		}
+		leaf := filepath.Join(hostBase, rel)
+		if err := os.Rename(leaf, leaf+".moved"); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(elsewhere, leaf); err != nil {
+			t.Fatal(err)
+		}
+		return fd, existed, nil
+	}
+
+	got, err := ResolveSharedDirHostPath(nfsSharedDirSettings(mountRoot), home, "proj", testSharedDirProjectID, "scratchpad")
+	if !errors.Is(err, ErrSharedDirStorageUnavailable) {
+		t.Fatalf("got %+v, err %v; want ErrSharedDirStorageUnavailable", got, err)
+	}
+	if !strings.Contains(err.Error(), "resolves through a symlink") {
+		t.Fatalf("err = %v, want the backstop refusal", err)
+	}
+	if got.Path != "" {
+		t.Fatalf("path = %q, want empty", got.Path)
 	}
 }
