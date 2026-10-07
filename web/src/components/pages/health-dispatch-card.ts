@@ -51,8 +51,10 @@ export interface DispatchRow {
 
 /**
  * The card's rows in display order. Only a non-zero stuck count is a
- * warning: the hub's status policy treats stuck work as degraded, while
- * failed dispatches are history that the reaper already finished with.
+ * warning: stuck work needs action, while failed dispatches are history
+ * that the reaper already finished with. The status policy (design 5.5,
+ * P6.1, ptone/scion#3593) will also treat stuck work as degraded; until it
+ * lands, the badge can show while the status pill reads healthy.
  */
 export function dispatchRows(d: HealthSummaryDispatch): DispatchRow[] {
   return [

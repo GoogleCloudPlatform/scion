@@ -123,9 +123,10 @@ func (BrokerDispatch) Indexes() []ent.Index {
 		// Delete start-block and engine classification (design
 		// ptone/scion#2483 §2.1): WHERE agent_id=$X AND op=$Y AND state IN (...).
 		index.Fields("agent_id", "op", "state"),
-		// Reaper stale scan (state=in_progress AND updated_at < $X) and the
-		// health summary's dispatch counts (ptone/scion#3588):
-		// WHERE state=$X AND updated_at {<,>=} $Y. The table is never pruned,
+		// Health summary dispatch counts (ptone/scion#3588): WHERE state=$X
+		// AND updated_at {<,>=} $Y, an equality plus a range. The reaper's
+		// stale scan uses only the state=in_progress prefix; its
+		// updated_at/deadline_at OR is filtered. The table is never pruned,
 		// so without this both are full scans.
 		index.Fields("state", "updated_at"),
 	}
