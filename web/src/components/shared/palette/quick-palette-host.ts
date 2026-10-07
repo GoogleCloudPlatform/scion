@@ -67,6 +67,7 @@ import type { ScionQuickPalette } from './quick-palette.js';
 import { hasOpenModalDescendant } from '../open-modal.js';
 import { deepActiveElement } from '../deep-active-element.js';
 import { PaletteTypeahead } from './palette-typeahead.js';
+import { isMacTextFieldCtrlKey } from '../text-field-keys.js';
 
 /** What {@link QuickPaletteHostOptions.load} receives for one load. */
 export interface QuickPaletteLoadContext {
@@ -106,13 +107,16 @@ export interface QuickPaletteHostOptions {
 /**
  * Whether `e` is the quick palette's shortcut: K with exactly one of Ctrl
  * and Meta, no Alt or Shift, not a repeat, not mid-composition, and not
- * already handled.
+ * already handled. On macOS, Ctrl+K typed in an editable text field
+ * deletes to the end of the line and is left to the field; Cmd+K is the
+ * shortcut there.
  */
 export function isQuickPaletteShortcut(e: KeyboardEvent): boolean {
   if (e.defaultPrevented || e.repeat || e.isComposing) return false;
   if (e.altKey || e.shiftKey) return false;
   if (e.metaKey === e.ctrlKey) return false;
-  return e.key.toLowerCase() === 'k';
+  if (e.key.toLowerCase() !== 'k') return false;
+  return !isMacTextFieldCtrlKey(e);
 }
 
 /** Whether `e` was fired by `palette`'s own dialog, not by something inside it. */

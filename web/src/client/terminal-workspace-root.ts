@@ -792,20 +792,25 @@ export class TerminalWorkspaceRoot {
   }
 
   // ── Keyboard shortcut: Cmd+K everywhere, Ctrl+K outside a pane ──────────
+  // (and, on macOS, outside any editable text field)
 
   /**
    * Cmd+K (Meta+K) opens the palette everywhere, including with a terminal
    * pane focused: xterm never cancels or stops-propagating a plain Meta+K
    * (it has no C0/C1 mapping for it), so this plain bubble-phase listener
    * already sees it from inside a pane with no capture-phase trick needed.
-   * Ctrl+K opens the palette only when focus is outside a pane: xterm DOES
+   * Ctrl+K opens the palette only when focus is outside a pane and, on
+   * macOS, outside any editable text field (see isQuickPaletteShortcut);
+   * xterm's input textarea is one, so the two rules agree. xterm DOES
    * send Ctrl+K to the PTY (kill-line, `\x0b`) and then stops its own
    * propagation, so a pane-focused Ctrl+K never reaches here at all — the
    * explicit `eventFromTerminalPane` check below is belt-and-suspenders, not
    * what does the work. Only `ctrlKey` skips that check; `metaKey` must still
    * open the palette from inside a pane, so it is deliberately exempted.
    *
-   * While the palette is open, the same shortcut closes it, as in chat.
+   * While the palette is open, the same shortcut closes it, as in chat. On
+   * macOS, Ctrl+K in the palette's own search field edits the query, so
+   * Cmd+K is what closes it from there.
    */
   private readonly handleGlobalKeydown = (e: KeyboardEvent): void => {
     if (this.element.hidden) return;
