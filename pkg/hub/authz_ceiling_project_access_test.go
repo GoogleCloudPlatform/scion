@@ -92,7 +92,7 @@ func TestCeilingUserHop_SystemAuthorityAdmitted(t *testing.T) {
 	ok, _, err := f.srv.authzService.userRelationshipAuthority(ctx, msUser(t, f, f.userID), agentResource(f.agentA), ActionAttach, "agent.attach")
 	require.NoError(t, err)
 	assert.True(t, ok)
-	require.NoError(t, f.srv.agentStanding(ctx, f.agentA.ID), "standing admits system authority too (Q5)")
+	require.NoError(t, f.srv.agentStanding(ctx, f.agentA.ID), "standing admits system authority too")
 }
 
 // newFedHopFixture serves a federated-shaped user ID through the federated
@@ -111,7 +111,7 @@ func newFedHopFixture(t *testing.T, name string, withUsersRow bool) (*msFixture,
 	return f, fs, fedID
 }
 
-// Hunk-4 test 1: on the ceiling, a federated-shaped user ID that has a users
+// On the ceiling, a federated-shaped user ID that has a users
 // row but no project binding is denied by the project-access stage, which
 // evaluated it as a user principal.
 func TestCeilingUserHop_FederatedUserNoProjectBinding_Denied(t *testing.T) {
@@ -129,7 +129,7 @@ func TestCeilingUserHop_FederatedUserNoProjectBinding_Denied(t *testing.T) {
 	assert.Contains(t, reason, RelationshipRejectProjectAccess)
 }
 
-// Hunk-4 test 2: the same ID with no users row is denied before stage 2c (the
+// The same ID with no users row is denied before stage 2c (the
 // delegator is not live).
 func TestCeilingUserHop_NoUsersRow_DeniedBeforeStage2c(t *testing.T) {
 	f, _, fedID := newFedHopFixture(t, "fed-nousers", false)
@@ -141,7 +141,7 @@ func TestCeilingUserHop_NoUsersRow_DeniedBeforeStage2c(t *testing.T) {
 	assert.False(t, ok)
 }
 
-// Hunk-4 test 3: a project-access fault on the ceiling path is
+// A project-access fault on the ceiling path is
 // indeterminate: userRelationshipAuthority fails closed, the chain walk
 // records DenyCauseResolutionError, and the public refusal is the same.
 func TestCeilingUserHop_ProjectAccessFault_Indeterminate(t *testing.T) {

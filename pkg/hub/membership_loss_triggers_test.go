@@ -16,7 +16,7 @@
 
 package hub
 
-// One test per membership-loss path (ptone/scion#3433, design section 3.2):
+// One test per membership-loss path (ptone/scion#3433):
 // each path writes a membership loss check, and processing it holds the
 // user's agents when access ended. Revert proof: drop a path's enqueue and
 // its test fails on the missing check or hold, while the live standing

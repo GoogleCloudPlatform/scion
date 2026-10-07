@@ -56,7 +56,7 @@ func countAudits(t *testing.T, s store.Store, mutationType, targetID string) int
 	return n
 }
 
-// Must-have 7: the whole descendant tree is held: user agent, agent child,
+// The whole descendant tree is held: user agent, agent child,
 // a scheduled grandchild recorded only by created_by, and a soft-deleted
 // great-grandchild. Credentials are revoked and run intent stopped.
 func TestHold_DescendantTree(t *testing.T) {
@@ -104,7 +104,7 @@ func TestMembershipLoss_AdmittedIsNoop(t *testing.T) {
 }
 
 // A re-add committed before processing means no hold; a re-add after does not
-// lift the hold (Q6).
+// lift the hold.
 func TestMembershipLoss_ReAdd(t *testing.T) {
 	f := newMSFixture(t, "readd")
 	ctx := context.Background()
@@ -136,7 +136,7 @@ func TestMembershipLoss_OtherProjectUntouched(t *testing.T) {
 	require.NoError(t, f.srv.agentStanding(context.Background(), b.ID))
 }
 
-// S2: with a node bound smaller than the tree, the processor holds what the
+// With a node bound smaller than the tree, the processor holds what the
 // walk returns and walks again until the whole tree is held.
 func TestMembershipLoss_WalkProgressSmallMaxNodes(t *testing.T) {
 	f := newMSFixture(t, "smallnodes")
@@ -158,7 +158,7 @@ func TestMembershipLoss_WalkProgressSmallMaxNodes(t *testing.T) {
 	assert.Empty(t, pendingChecks(t, f.s))
 }
 
-// R-a / R-b: a walk that reaches the depth bound fails the check (it is not
+// A walk that reaches the depth bound fails the check (it is not
 // completed) after holding what it found; after repeated claims the check is
 // parked visibly and completed. The live check refuses the deeper agents.
 func TestMembershipLoss_DepthLimitFailsThenParks(t *testing.T) {
@@ -203,7 +203,7 @@ func (w *walkFaultStore) ListDelegationDescendants(context.Context, store.Descen
 	return store.DescendantResult{}, errors.New("injected walk fault")
 }
 
-// R-a: any walk error fails the check: nothing is held and the check stays
+// Any walk error fails the check: nothing is held and the check stays
 // in the outbox with its error recorded.
 func TestMembershipLoss_WalkErrorFailsCheck(t *testing.T) {
 	f := newMSFixture(t, "walkerr")
@@ -222,7 +222,7 @@ func TestMembershipLoss_WalkErrorFailsCheck(t *testing.T) {
 	assert.Empty(t, checks, "the failed check keeps its lease")
 }
 
-// F3: a check for a project that no longer exists completes as a no-op.
+// A check for a project that no longer exists completes as a no-op.
 func TestMembershipLoss_MissingProjectCompletes(t *testing.T) {
 	f := newMSFixture(t, "noproject")
 	ctx := context.Background()
@@ -232,7 +232,7 @@ func TestMembershipLoss_MissingProjectCompletes(t *testing.T) {
 	assert.False(t, f.held(f.agentA.ID))
 }
 
-// CL: a claim lost before completion is not a failure: no error is recorded
+// A claim lost before completion is not a failure: no error is recorded
 // on the check, which the other claimer owns.
 func TestMembershipLoss_ClaimLostIsNotFailure(t *testing.T) {
 	f := newMSFixture(t, "claimlost")
@@ -266,7 +266,7 @@ func (d *msStopDispatcher) DispatchAgentStop(ctx context.Context, a *store.Agent
 	return nil
 }
 
-// S4 / must-have 4: with the broker unreachable the hold and the credential
+// With the broker unreachable the hold and the credential
 // revoke still commit; the stop is retried and the phase moves only once the
 // stop succeeds.
 func TestHold_BrokerOffline_RevokeCommittedStopRetried(t *testing.T) {
@@ -293,7 +293,7 @@ func TestHold_BrokerOffline_RevokeCommittedStopRetried(t *testing.T) {
 	assert.False(t, heldAgentNeedsStop(got))
 }
 
-// S5 / D12: the full sweep counts the agents it will hold, and the agents
+// The full sweep counts the agents it will hold, and the agents
 // with no resolvable root, before it enqueues; then it holds them.
 func TestMembershipSweep_MeasuresThenHolds(t *testing.T) {
 	f := newMSFixture(t, "sweep")
@@ -364,7 +364,7 @@ func TestRestoreHook_Registered(t *testing.T) {
 	assert.True(t, found)
 }
 
-// Must-have 6: no agent principal can clear a hold, and an agent's own
+// No agent principal can clear a hold, and an agent's own
 // requests do not lift it.
 func TestHeldAgent_CannotWakeOrStartItself(t *testing.T) {
 	f := newMSFixture(t, "selfresume")
@@ -382,7 +382,7 @@ func TestHeldAgent_CannotWakeOrStartItself(t *testing.T) {
 	require.ErrorIs(t, err, store.ErrInvalidActor)
 }
 
-// Q6 (c): the hub-admin lift clears holds only when every hold's root user
+// The hub-admin lift clears holds only when every hold's root user
 // is admitted again; it does not start the agent.
 func TestAgentHoldLift(t *testing.T) {
 	f := newMSFixture(t, "lift")
@@ -424,7 +424,7 @@ func TestAgentSuspensionField(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), `"suspension":{"held":true`)
 }
 
-// R-c: the agent create path enforces the creator's hold and its root's
+// The agent create path enforces the creator's hold and its root's
 // membership at create time.
 func TestAgentCreate_CreatorStandingEnforced(t *testing.T) {
 	f := newMSFixture(t, "create")
@@ -447,7 +447,7 @@ func TestAgentCreate_CreatorStandingEnforced(t *testing.T) {
 	_ = tok
 }
 
-// R-e: principal IDs written to edges and ancestry are stored canonically,
+// Principal IDs written to edges and ancestry are stored canonically,
 // so the walk finds agents however the writer spelled the IDs.
 func TestCanonicalPrincipalIDs_WalkFindsUpperCaseWrites(t *testing.T) {
 	f := newMSFixture(t, "canonical")
@@ -476,7 +476,7 @@ func TestCanonicalPrincipalIDs_WalkFindsUpperCaseWrites(t *testing.T) {
 	assert.True(t, f.held(a.ID))
 }
 
-// Hunk 3 error path: a hold lookup error on the ceiling agent hop denies with
+// A hold lookup error on the ceiling agent hop denies with
 // the resolution cause.
 type holdFaultStore struct {
 	store.Store

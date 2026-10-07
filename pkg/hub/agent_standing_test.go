@@ -75,7 +75,7 @@ func TestStanding_InactiveRootDenied(t *testing.T) {
 	requireStandingReason(t, f.srv.agentStanding(ctx, f.agentA.ID), standingReasonRootInactive)
 }
 
-// D13: an agent with no edge, no owner, no ancestry and no creator has no
+// An agent with no edge, no owner, no ancestry and no creator has no
 // resolvable root and is refused.
 func TestStanding_NoResolvableRootDenied(t *testing.T) {
 	f := newMSFixture(t, "noroot")
@@ -108,7 +108,7 @@ func TestStanding_BrokenChainDenied(t *testing.T) {
 	requireStandingReason(t, f.srv.agentStanding(ctx, child.ID), standingReasonChainBroken)
 }
 
-// S6: the standing resolver follows chains up to the delegation ceiling's
+// The standing resolver follows chains up to the delegation ceiling's
 // bound; deeper agents are refused with chain_too_deep (the descendant walk
 // still reaches and holds them).
 func TestStanding_ChainBeyondResolverBound(t *testing.T) {
@@ -200,7 +200,7 @@ func installStandingFaults(t *testing.T, f *msFixture) *standingFaultStore {
 	return fs
 }
 
-// Must-have 5: every failed lookup refuses, and a fault is not reported as
+// Every failed lookup refuses, and a fault is not reported as
 // good standing.
 func TestStanding_NilAndFaults(t *testing.T) {
 	f := newMSFixture(t, "faults")
@@ -221,7 +221,7 @@ func TestStanding_NilAndFaults(t *testing.T) {
 	requireStandingReason(t, f.srv.agentStanding(ctx, tid("ms-no-such-agent")), standingReasonAgentMissing)
 }
 
-// Must-have 3: results are memoised per request only.
+// Results are memoised per request only.
 func TestStanding_NoCrossRequestCache(t *testing.T) {
 	f := newMSFixture(t, "nocache")
 	req1 := withStandingMemo(context.Background())
@@ -233,7 +233,7 @@ func TestStanding_NoCrossRequestCache(t *testing.T) {
 	requireStandingReason(t, f.srv.agentStanding(context.Background(), f.agentA.ID), standingReasonRootNotAdmited)
 }
 
-// Must-have 1: the fallback reads no setting.
+// The check reads no setting.
 func TestFallback_IgnoresAutoSuspendSetting(t *testing.T) {
 	f := newMSFixture(t, "setting")
 	f.dropBindings(f.userID)
@@ -255,7 +255,7 @@ func TestStanding_StragglerChildDenied(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Gate table (design section 4.2). One fixture: U removed from P with no hold
+// Refusal table. One fixture: U removed from P with no hold
 // written, so each row exercises the live predicate at its own gate. Revert
 // proof: removing a gate's line makes its row fail.
 // ---------------------------------------------------------------------------
@@ -272,12 +272,12 @@ func TestStandingGates_RemovedRootDenied(t *testing.T) {
 		require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 	}
 
-	t.Run("G1_startGate", func(t *testing.T) {
+	t.Run("startGate", func(t *testing.T) {
 		rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+f.agentA.ID+"/start", nil)
 		require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
 		assert.Contains(t, rec.Body.String(), agentSuspendedConflictMessage)
 	})
-	t.Run("G1_startGate_direct", func(t *testing.T) {
+	t.Run("startGate_direct", func(t *testing.T) {
 		for _, entry := range []startEntry{startEntryStart, startEntryRestart, startEntryWake, startEntryReincarnate, startEntryCreateExisting} {
 			refusal := f.srv.startGate(ctx, f.agentA, entry)
 			require.NotNil(t, refusal, string(entry))
@@ -286,7 +286,7 @@ func TestStandingGates_RemovedRootDenied(t *testing.T) {
 		}
 		assert.Nil(t, f.srv.startGate(ctx, f.agentA, startEntryRestore), "restore is not refused by the gate")
 	})
-	t.Run("G2_dispatcher", func(t *testing.T) {
+	t.Run("dispatcher", func(t *testing.T) {
 		d := NewHTTPAgentDispatcherWithClient(f.s, nil, false, nil)
 		f.srv.SetDispatcher(d)
 		err := d.DispatchAgentStart(ctx, f.agentA, "", false)
@@ -294,73 +294,73 @@ func TestStandingGates_RemovedRootDenied(t *testing.T) {
 		err = d.DispatchAgentRestart(ctx, f.agentA)
 		require.ErrorIs(t, err, ErrAgentNotInStanding)
 	})
-	t.Run("G4_managed", func(t *testing.T) {
+	t.Run("managed", func(t *testing.T) {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+f.agentA.ID+"/start", nil)
 		f.srv.handleManagedAgentLifecycle(rec, req, f.agentA, "start")
 		require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
 	})
-	t.Run("G5_tokenMint", func(t *testing.T) {
+	t.Run("tokenMint", func(t *testing.T) {
 		_, err := f.srv.GenerateAgentTokenForAgent(ctx, f.agentA)
 		require.ErrorIs(t, err, errAgentNotInStanding)
 	})
-	t.Run("G8_selfMessage", func(t *testing.T) {
+	t.Run("selfMessage", func(t *testing.T) {
 		ok, reason, _ := f.srv.authorizeAgentMessage(ctx, f.agentIdentity(f.agentA), f.agentA, false)
 		assert.False(t, ok)
 		assert.Equal(t, messageReasonSenderNotPermitted, reason)
 	})
-	t.Run("G8_evaluateAgentMessage", func(t *testing.T) {
+	t.Run("evaluateAgentMessage", func(t *testing.T) {
 		d := f.srv.EvaluateAgentMessage(ctx, f.agentIdentity(f.agentA), f.childC)
 		assert.False(t, d.Allowed)
 		assert.Equal(t, messageReasonSenderNotPermitted, d.Reason)
 	})
-	t.Run("G12_scheduledAuthorAgent", func(t *testing.T) {
+	t.Run("scheduledAuthorAgent", func(t *testing.T) {
 		evt := store.ScheduledEvent{ID: "evt", EventType: "message", ProjectID: f.projectID, CreatedBy: f.agentA.ID}
 		require.Error(t, f.srv.scheduledFireStanding(ctx, evt, f.childC))
 	})
-	t.Run("G14_scheduledDispatchAuthor", func(t *testing.T) {
+	t.Run("scheduledDispatchAuthor", func(t *testing.T) {
 		evt := store.ScheduledEvent{ID: "evt2", EventType: "dispatch_agent", ProjectID: f.projectID, CreatedBy: f.agentA.ID}
 		require.Error(t, f.srv.scheduledFireStanding(ctx, evt, nil))
 	})
-	t.Run("G16_agentCreatesChild", func(t *testing.T) {
+	t.Run("agentCreatesChild", func(t *testing.T) {
 		rec := doRequestWithAgentToken(t, f.srv, http.MethodPost, "/api/v1/agents",
 			map[string]interface{}{"name": "gate-child", "projectId": f.projectID}, tokA)
 		isForbidden(t, rec)
 	})
-	t.Run("G18_ceilingUserHop", func(t *testing.T) {
+	t.Run("ceilingUserHop", func(t *testing.T) {
 		u, err := f.s.GetUser(ctx, f.userID)
 		require.NoError(t, err)
 		ok, _, err := f.srv.authzService.userRelationshipAuthority(ctx, u, agentResource(f.agentA), ActionRead, "agent.read")
 		require.NoError(t, err)
 		assert.False(t, ok, "the removed user's owner relationship must not grant authority")
 	})
-	t.Run("G19_projectEnv", func(t *testing.T) {
+	t.Run("projectEnv", func(t *testing.T) {
 		isForbidden(t, doRequestWithAgentToken(t, f.srv, http.MethodGet, "/api/v1/projects/"+f.projectID+"/env", nil, tokA))
 	})
-	t.Run("G19_projectSecrets", func(t *testing.T) {
+	t.Run("projectSecrets", func(t *testing.T) {
 		isForbidden(t, doRequestWithAgentToken(t, f.srv, http.MethodGet, "/api/v1/projects/"+f.projectID+"/secrets", nil, tokA))
 	})
-	t.Run("G19_scopedEnv", func(t *testing.T) {
+	t.Run("scopedEnv", func(t *testing.T) {
 		isForbidden(t, doRequestWithAgentToken(t, f.srv, http.MethodGet, "/api/v1/env?scope=project&scopeId="+f.projectID, nil, tokA))
 	})
-	t.Run("G19_hubEnv", func(t *testing.T) {
+	t.Run("hubEnv", func(t *testing.T) {
 		isForbidden(t, doRequestWithAgentToken(t, f.srv, http.MethodGet, "/api/v1/env?scope=hub", nil, tokA))
 	})
-	t.Run("G19_agentSecretWrite", func(t *testing.T) {
+	t.Run("agentSecretWrite", func(t *testing.T) {
 		rec := httptest.NewRecorder()
 		assert.True(t, f.srv.agentStandingForbidden(ctx, rec, f.agentA.ID))
 		isForbidden(t, rec)
 	})
-	t.Run("G20_materialPrecheck", func(t *testing.T) {
+	t.Run("materialPrecheck", func(t *testing.T) {
 		// The precheck's own ancestry-root membership check refuses first
-		// here; the standing gate's own row is G20_materialAfterHold.
+		// here; the standing check's own row is materialAfterHold.
 		_, _, status := f.srv.materialRuntimePrecheck(ctx, f.agentIdentity(f.agentA))
 		assert.Equal(t, http.StatusForbidden, status)
 	})
-	t.Run("G22_githubToken", func(t *testing.T) {
+	t.Run("githubToken", func(t *testing.T) {
 		isForbidden(t, doRequestWithAgentToken(t, f.srv, http.MethodPost, "/api/v1/agents/"+f.agentA.ID+"/refresh-token", nil, tokA))
 	})
-	t.Run("G22_gcpToken", func(t *testing.T) {
+	t.Run("gcpToken", func(t *testing.T) {
 		rec := doRequestWithAgentToken(t, f.srv, http.MethodPost, "/api/v1/agent/gcp-token", map[string]interface{}{}, tokA)
 		isForbidden(t, rec)
 		var body struct {
@@ -378,12 +378,12 @@ func TestStandingGates_HeldAgent(t *testing.T) {
 	tokA := f.agentToken(f.agentA)
 	f.hold(f.agentA.ID, f.userID)
 
-	t.Run("G6_agentTokenAuth", func(t *testing.T) {
+	t.Run("agentTokenAuth", func(t *testing.T) {
 		rec := doRequestWithAgentToken(t, f.srv, http.MethodGet, "/api/v1/agents/"+f.agentA.ID, nil, tokA)
 		require.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
 		assert.Contains(t, rec.Body.String(), "token has been revoked")
 	})
-	t.Run("G6_legacyToken", func(t *testing.T) {
+	t.Run("legacyToken", func(t *testing.T) {
 		legacyService, err := NewAgentTokenService(AgentTokenConfig{
 			SigningKey:    f.srv.agentTokenService.config.SigningKey,
 			TokenDuration: time.Hour,
@@ -394,57 +394,57 @@ func TestStandingGates_HeldAgent(t *testing.T) {
 		rec := doRequestWithAgentToken(t, f.srv, http.MethodGet, "/api/v1/agents/"+f.agentA.ID, nil, legacy)
 		require.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
 	})
-	// Lead S4 condition 1: no new external token for a held agent.
-	t.Run("G22_noGitHubTokenAfterHold", func(t *testing.T) {
+	// No new external token for a held agent.
+	t.Run("noGitHubTokenAfterHold", func(t *testing.T) {
 		rec := doRequestWithAgentToken(t, f.srv, http.MethodPost, "/api/v1/agents/"+f.agentA.ID+"/refresh-token", nil, tokA)
 		require.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
 	})
-	t.Run("G22_noGCPTokenAfterHold", func(t *testing.T) {
+	t.Run("noGCPTokenAfterHold", func(t *testing.T) {
 		for _, path := range []string{"/api/v1/agent/gcp-token", "/api/v1/agent/gcp-identity-token"} {
 			rec := doRequestWithAgentToken(t, f.srv, http.MethodPost, path, map[string]interface{}{}, tokA)
 			require.Equal(t, http.StatusUnauthorized, rec.Code, path+": "+rec.Body.String())
 		}
 	})
-	t.Run("G22_standingRefusesHeldBeforeAuth", func(t *testing.T) {
+	t.Run("standingRefusesHeldBeforeAuth", func(t *testing.T) {
 		rec := httptest.NewRecorder()
 		assert.True(t, f.srv.agentStandingForbidden(ctx, rec, f.agentA.ID))
 		assert.Equal(t, http.StatusForbidden, rec.Code)
 	})
-	t.Run("G20_materialAfterHold", func(t *testing.T) {
+	t.Run("materialAfterHold", func(t *testing.T) {
 		_, reason, status := f.srv.materialRuntimePrecheck(ctx, f.agentIdentity(f.agentA))
 		assert.Equal(t, http.StatusForbidden, status)
 		assert.Equal(t, ReasonDeniedByPolicy, reason)
 	})
-	t.Run("G10_reconcileDelivery", func(t *testing.T) {
+	t.Run("reconcileDelivery", func(t *testing.T) {
 		err := f.srv.deliverMessage(ctx, &store.Message{AgentID: f.agentA.ID, Msg: "hi"})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "suspended")
 	})
-	t.Run("G10_dmToHeldTarget", func(t *testing.T) {
+	t.Run("dmToHeldTarget", func(t *testing.T) {
 		assert.NotNil(t, heldTargetDMError(f.agentA))
 	})
-	t.Run("G11_suspendedPrimaryWakeable", func(t *testing.T) {
+	t.Run("suspendedPrimaryWakeable", func(t *testing.T) {
 		a := *f.agentA
 		a.Phase = string(state.PhaseSuspended)
 		owner := NewAuthenticatedUser(f.ownerID, f.ownerID+"@test.com", "Owner", "member", "")
 		assert.False(t, f.srv.suspendedPrimaryWakeable(ctx, owner, &a))
 	})
-	t.Run("G12_scheduledTargetHeld", func(t *testing.T) {
+	t.Run("scheduledTargetHeld", func(t *testing.T) {
 		evt := store.ScheduledEvent{ID: "evt3", EventType: "message", ProjectID: f.projectID, CreatedBy: f.ownerID}
 		require.ErrorIs(t, f.srv.scheduledFireStanding(ctx, evt, f.agentA), errScheduledMessageRefused)
 	})
-	t.Run("G17_ceilingAgentHop", func(t *testing.T) {
+	t.Run("ceilingAgentHop", func(t *testing.T) {
 		_, _, err := f.srv.authzService.checkAgentHoldsPermission(ctx, f.agentA.ID, "agent.read", store.RoleScopeProject, f.projectID)
 		require.ErrorIs(t, err, store.ErrNotFound)
 	})
-	t.Run("G1_heldMemberStillRefused", func(t *testing.T) {
+	t.Run("heldMemberStillRefused", func(t *testing.T) {
 		rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+f.agentA.ID+"/start", nil)
 		require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
 		assert.Contains(t, rec.Body.String(), agentSuspendedConflictMessage)
 	})
 }
 
-// Lead condition 3: with no dispatcher standing hook at all, a held agent is
+// With no dispatcher standing hook at all, a held agent is
 // still refused at token mint, auth and messaging.
 func TestHeldAgent_RefusedWithoutDispatcherHook(t *testing.T) {
 	f := newMSFixture(t, "nohook")
@@ -466,7 +466,7 @@ func TestHeldAgent_RefusedWithoutDispatcherHook(t *testing.T) {
 	assert.NotNil(t, f.srv.startGate(ctx, f.agentA, startEntryStart))
 }
 
-// Lead condition 1: every production path that attaches a dispatcher
+// Every production path that attaches a dispatcher
 // installs the standing check. Revert proof: drop the install in
 // SetDispatcher (or CreateAuthenticatedDispatcher) and this fails.
 func TestDispatcherStandingHook_ProductionWiring(t *testing.T) {
@@ -480,7 +480,7 @@ func TestDispatcherStandingHook_ProductionWiring(t *testing.T) {
 	require.NotNil(t, raw.requiredStandingCheck, "SetDispatcher must install the standing check")
 }
 
-// D14 / must-have 5: a removed root's agent and a never-member user's agent
+// A removed root's agent and a never-member user's agent
 // get the same answer at the agent-facing gates.
 func TestRemovedVsNeverMember_Indistinguishable(t *testing.T) {
 	f := newMSFixture(t, "oracle")
