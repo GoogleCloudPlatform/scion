@@ -75,6 +75,8 @@ var dbFileOnlyRequestPaths = [][]string{
 	{"server", "auth", "username"},
 	{"server", "auth", "display_name"},
 	{"server", "auth", "email"},
+	{"server", "auth", "agent_run_scope"},
+	{"server", "auth", "agent_run_scope_legacy_until"},
 }
 
 // dbUnpersistedRequestPaths is every request path the DB-backed PUT does not

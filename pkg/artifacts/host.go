@@ -68,6 +68,24 @@ type Host interface {
 	// neither ownership nor a grant reaches past what the credential allows.
 	// It fails closed like Authorize.
 	Permits(ctx context.Context, scopeRef, permission string) bool
+
+	// MemberScopes returns the scope refs the caller belongs to (for a
+	// user, the projects it holds a role in directly or through a group;
+	// for an agent, its own project). The list endpoint uses it only to
+	// bound which scope grants make an artifact a candidate: every
+	// candidate is still checked like a GET (Permits, then owner or
+	// Authorize, then grants), so this decides completeness, never
+	// visibility.
+	MemberScopes(ctx context.Context) ([]string, error)
+
+	// SealCursor turns a list resume position into an opaque,
+	// authenticated cursor bound to the caller and to binding (the
+	// normalized query it was issued for). OpenCursor reverses it, and
+	// fails for a cursor that was tampered with or issued to another
+	// caller or query. A cursor may carry the position of a row the
+	// caller cannot read, so it must reveal nothing about it.
+	SealCursor(ctx context.Context, position, binding string) (string, error)
+	OpenCursor(ctx context.Context, cursor, binding string) (string, error)
 }
 
 // ScopeExplainer is an optional extension of Host. When a credential

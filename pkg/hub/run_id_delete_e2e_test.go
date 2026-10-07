@@ -264,7 +264,7 @@ func TestRunID_DeleteEngineSendsRowRunID(t *testing.T) {
 	client := &mockRuntimeBrokerClient{}
 	srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(s, client, false, slog.Default()))
 	agent := setupBrokerAgentInPhase(t, s, "runid-engine", state.PhaseRunning)
-	if _, err := s.SetAgentRunID(context.Background(), agent.ID, "run-current"); err != nil {
+	if _, err := s.SetAgentRunID(context.Background(), agent.ID, "run-current", nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -289,9 +289,9 @@ type claimFirstStore struct {
 	claim func()
 }
 
-func (c *claimFirstStore) SetAgentRunID(ctx context.Context, agentID, runID string) (string, error) {
+func (c *claimFirstStore) SetAgentRunID(ctx context.Context, agentID, runID string, cred *store.AgentCredential) (string, error) {
 	c.once.Do(c.claim)
-	return c.Store.SetAgentRunID(ctx, agentID, runID)
+	return c.Store.SetAgentRunID(ctx, agentID, runID, cred)
 }
 
 // N3 (round 3): a delete that claims between the start gate and beginRun
@@ -311,7 +311,7 @@ func TestRunID_DeleteClaimBeforeBeginRunFailsStartClosed(t *testing.T) {
 				phase = state.PhaseRunning
 			}
 			agent := setupBrokerAgentInPhase(t, s, "runid-claim-"+op, phase)
-			if _, err := s.SetAgentRunID(ctx, agent.ID, "run-0"); err != nil {
+			if _, err := s.SetAgentRunID(ctx, agent.ID, "run-0", nil); err != nil {
 				t.Fatal(err)
 			}
 			var plan *agentDeletionPlan
@@ -356,7 +356,7 @@ func TestRunID_FinalizeEnvUnderDeleteIs409(t *testing.T) {
 	client := &mockRuntimeBrokerClient{}
 	srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(s, client, false, slog.Default()))
 	agent := setupBrokerAgentInPhase(t, s, "runid-finalize-del", state.PhaseProvisioning)
-	if _, err := s.SetAgentRunID(ctx, agent.ID, "run-0"); err != nil {
+	if _, err := s.SetAgentRunID(ctx, agent.ID, "run-0", nil); err != nil {
 		t.Fatal(err)
 	}
 	seedAgentDeletion(t, s, agent.ID, seedLiveDeleting)
