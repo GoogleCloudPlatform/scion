@@ -1686,7 +1686,7 @@ func TestAuthzService_DevLocalAuthorityEnabled(t *testing.T) {
 
 		cfg := DefaultServerConfig()
 		cfg.DevAuthToken = "" // dev-auth off
-		srv, err := New(cfg, s)
+		srv, err := newTestHubServer(t, cfg, s)
 		require.NoError(t, err)
 		t.Cleanup(func() {
 			_ = srv.Shutdown(context.Background())

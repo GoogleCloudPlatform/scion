@@ -658,9 +658,8 @@ func TestNew_ReconcileDemotesToConfiguredDefaultRole(t *testing.T) {
 	cfg := DefaultServerConfig()
 	cfg.AdminEmails = []string{anchor.Email}
 	cfg.DefaultUserRole = store.UserRoleViewer
-	srv, err := New(cfg, s)
+	_, err := newTestHubServer(t, cfg, s)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 
 	u, err := s.GetUser(context.Background(), demoted.ID)
 	require.NoError(t, err)

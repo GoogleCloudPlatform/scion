@@ -1267,7 +1267,7 @@ func TestColdStartSuperAdminBinding(t *testing.T) {
 	// Configure the admin email BEFORE server creation. On a fresh start
 	// ReconcileSuperAdminBindings will find zero users and create nothing.
 	cfg.AdminEmails = []string{"first-admin@example.com"}
-	srv, err := New(cfg, s)
+	srv, err := newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
@@ -1350,7 +1350,7 @@ func TestD11Fix2_LoginDemotionDeletesBinding(t *testing.T) {
 	}
 	// AdminEmails does NOT include the user we will test.
 	cfg.AdminEmails = []string{"real-admin@test.com"}
-	srv, err := New(cfg, s)
+	srv, err := newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}

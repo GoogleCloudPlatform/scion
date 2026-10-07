@@ -67,18 +67,18 @@ func testServerWithStore(t *testing.T, s store.Store) (*Server, store.Store) {
 	// post-backfill behavior re-create the marker explicitly.
 	_ = s.DeleteHubSetting(context.Background(), "migration_delegation_edge_backfill_v1")
 
-	srv, err := New(testServerConfig(), s)
+	// Release the in-memory SQLite database to avoid OOM across many
+	// tests. Registered before newTestHubServer so that, cleanups being
+	// LIFO, the server shuts down before its store closes.
+	t.Cleanup(func() { _ = s.Close() })
+	// newTestHubServer registers Shutdown, which runs CleanupResources even
+	// though Start was never called and so stops every background goroutine
+	// New() starts (see TestTestServerCleanupStopsBackgroundGoroutines).
+	srv, err := newTestHubServer(t, testServerConfig(), s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
 	srv.SetHubID("test-hub-id")
-	t.Cleanup(func() {
-		// Shutdown runs CleanupResources even though Start was never
-		// called, which stops every background goroutine New() starts
-		// (see TestTestServerCleanupStopsBackgroundGoroutines).
-		_ = srv.Shutdown(context.Background())
-		_ = s.Close() // Release in-memory SQLite database to avoid OOM across many tests.
-	})
 	waitUserScopedDataSweep(t, srv)
 	return srv, s
 }
@@ -2154,7 +2154,7 @@ func testServerWithBrokerAuth(t *testing.T) (*Server, store.Store) {
 	cfg := DefaultServerConfig()
 	cfg.DevAuthToken = testDevToken
 	cfg.BrokerAuthConfig = DefaultBrokerAuthConfig()
-	srv, err := New(cfg, s)
+	srv, err := newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}

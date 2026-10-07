@@ -18,6 +18,7 @@ package hub
 
 import (
 	"bytes"
+	"context"
 	"regexp"
 	"runtime"
 	"sort"
@@ -26,6 +27,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -128,10 +130,30 @@ var expectedServerGoroutines = map[string]int{
 // module-code rule to goroutines whose creator chain is attributed or
 // unknown.
 func TestTestServerCleanupStopsBackgroundGoroutines(t *testing.T) {
-	for name, newServer := range map[string]func(*testing.T) (*Server, store.Store){
-		"testServer":               testServer,
-		"testServerWithBrokerAuth": testServerWithBrokerAuth,
+	for name, tc := range map[string]struct {
+		newServer func(*testing.T) (*Server, store.Store)
+		// extra lists goroutines this variant starts on top of
+		// expectedServerGoroutines.
+		extra map[string]int
+	}{
+		"testServer":               {newServer: testServer},
+		"testServerWithBrokerAuth": {newServer: testServerWithBrokerAuth},
+		// newTestHubServer with OIDC enabled: New() starts the OIDC key
+		// cleanup and refresh loops, which used to run on
+		// context.Background() and outlive Shutdown (ptone/scion#3641).
+		"newTestHubServer/oidc": {
+			newServer: func(t *testing.T) (*Server, store.Store) { return testOIDCServerWithRoutes(t), nil },
+			extra:     map[string]int{"hub.(*OIDCKeyManager).Start": 2},
+		},
 	} {
+		newServer := tc.newServer
+		want := map[string]int{}
+		for fn, n := range expectedServerGoroutines {
+			want[fn] = n
+		}
+		for fn, n := range tc.extra {
+			want[fn] += n
+		}
 		t.Run(name, func(t *testing.T) {
 			outerID := currentGoroutineID(t)
 			before := liveGoroutines()
@@ -157,7 +179,7 @@ func TestTestServerCleanupStopsBackgroundGoroutines(t *testing.T) {
 					}
 				}
 				t.Logf("attributed %d goroutines to the server", len(attributed))
-				for fn, want := range expectedServerGoroutines {
+				for fn, want := range want {
 					got := 0
 					for _, g := range attributed {
 						if strings.Contains(g.stack, fn) {
@@ -197,5 +219,94 @@ func TestTestServerCleanupStopsBackgroundGoroutines(t *testing.T) {
 				time.Sleep(20 * time.Millisecond)
 			}
 		})
+	}
+}
+
+// leakedServerGoroutineSigs are the stack substrings of the background
+// loops New() starts before its last fallible step.
+var leakedServerGoroutineSigs = append([]string{"hub.(*OIDCKeyManager).Start"}, leakGuardSignatures[1:]...)
+
+// countServerLoopGoroutines counts live goroutines, not in skip, whose
+// stack contains one of leakedServerGoroutineSigs.
+func countServerLoopGoroutines(skip map[int64]goroutineInfo) (int, []string) {
+	var stacks []string
+	for id, g := range liveGoroutines() {
+		if _, old := skip[id]; old {
+			continue
+		}
+		for _, sig := range leakedServerGoroutineSigs {
+			if strings.Contains(g.stack, sig) {
+				stacks = append(stacks, g.stack)
+				break
+			}
+		}
+	}
+	sort.Strings(stacks)
+	return len(stacks), stacks
+}
+
+// TestNewFailureStopsBackgroundGoroutines: a New() that fails after it has
+// started its background loops (here, at the fail-closed D4 membership
+// index step, which runs after the link services, the preview engine, the
+// decision audit worker and the OIDC key loops are up) must stop them
+// itself, since the caller gets no *Server to shut down
+// (ptone/scion#3641).
+func TestNewFailureStopsBackgroundGoroutines(t *testing.T) {
+	s, err := newTestStore(t, ":memory:")
+	if err != nil {
+		t.Fatalf("newTestStore: %v", err)
+	}
+	cfg := testServerConfig()
+	cfg.OIDCConfig = config.OIDCProviderConfig{Enabled: true, IssuerURL: testOIDCIssuerURL}
+
+	before := liveGoroutines()
+	// Vacuity guard: the same config on a working store does start the
+	// loops, so a zero count after the failure means they were stopped.
+	ok, err := New(cfg, s)
+	if err != nil {
+		t.Fatalf("New on a working store: %v", err)
+	}
+	if n, _ := countServerLoopGoroutines(before); n < len(expectedServerGoroutines)+2 {
+		t.Fatalf("vacuity guard: a working New started only %d background loops", n)
+	}
+	_ = ok.Shutdown(context.Background())
+
+	before = liveGoroutines()
+	if _, err := New(cfg, &noDBStore{Store: s}); err == nil {
+		t.Fatal("New on a store without DB() succeeded; want the fail-closed D4 error")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		n, stacks := countServerLoopGoroutines(before)
+		if n == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d background goroutines still running after New failed:\n\n%s", n, strings.Join(stacks, "\n\n"))
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// TestLeakGuardReportsUnclosedStore checks that the package-exit leak guard
+// (leak_guard_helpers_test.go) sees an unclosed store and names it in its
+// failure output, and passes again once the store is closed.
+func TestLeakGuardReportsUnclosedStore(t *testing.T) {
+	base := scanLeakedGoroutines().total
+	s, err := newTestStore(t, ":memory:")
+	if err != nil {
+		t.Fatalf("newTestStore: %v", err)
+	}
+	var out bytes.Buffer
+	if checkPackageLeaks(&out, base, 0, false) {
+		t.Fatalf("leak guard passed with an open store; output:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "database/sql.(*DB).connectionOpener") || !strings.Contains(out.String(), "FAIL: leak guard") {
+		t.Errorf("leak guard output does not list the open store's stack:\n%s", out.String())
+	}
+	_ = s.Close()
+	out.Reset()
+	if !checkPackageLeaks(&out, base, 5*time.Second, false) {
+		t.Errorf("leak guard still fails after the store was closed:\n%s", out.String())
 	}
 }

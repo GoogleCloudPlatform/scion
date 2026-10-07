@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 
@@ -63,7 +64,10 @@ func TestServer_Shutdown_WritesDecisionAuditFromDrainingRequests(t *testing.T) {
 		rw.WriteHeader(http.StatusNoContent)
 	})}
 	drainStarted := make(chan struct{})
-	httpSrv.RegisterOnShutdown(func() { close(drainStarted) })
+	// http.Server runs OnShutdown hooks on every Shutdown call, and
+	// newTestHubServer's cleanup calls srv.Shutdown a second time.
+	var drainOnce sync.Once
+	httpSrv.RegisterOnShutdown(func() { drainOnce.Do(func() { close(drainStarted) }) })
 	srv.mu.Lock()
 	srv.httpServer = httpSrv
 	srv.mu.Unlock()

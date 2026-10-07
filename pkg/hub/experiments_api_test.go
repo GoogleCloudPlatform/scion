@@ -67,12 +67,11 @@ func newTestServerFromStore(t *testing.T, s store.Store, reg *experiments.Regist
 	cfg.DevAuthToken = testDevToken
 	cfg.DevUserConfig = DevUserConfig{Username: "dev", DisplayName: "Development User", Email: "dev@localhost"}
 	cfg.Experiments = reg
-	srv, err := New(cfg, s)
+	srv, err := newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
 	srv.SetHubID("test-hub-id")
-	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 
 	ops := NewOperationalSettings(s, emptyKoanf(), emptyKoanf())
 	if _, err := ops.Refresh(context.Background()); err != nil {

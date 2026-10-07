@@ -1764,7 +1764,7 @@ func cloudLogQueryProjectID(cfg ServerConfig) string {
 }
 
 // New creates a new Hub API server.
-func New(cfg ServerConfig, s store.Store) (*Server, error) {
+func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	// Apply defaults for zero-value fields that have meaningful defaults.
 	defaults := DefaultServerConfig()
 	if cfg.StalledThreshold == 0 || cfg.StalledThreshold < 2*time.Minute {
@@ -1822,6 +1822,17 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 		workspaceLog:      logging.Subsystem("hub.workspace"),
 		agentMetricsLog:   logging.Subsystem("hub.agent-metrics"),
 	}
+	// A New that fails part-way must not leak what it already started: the
+	// link-service and preview cleanup loops, the decision audit worker,
+	// the OIDC key loops. The caller gets no *Server to shut down, so tear
+	// it down here (ptone/scion#3641). Both calls are idempotent and
+	// nil-safe on a partly built Server.
+	defer func() {
+		if retErr != nil {
+			_ = srv.CleanupResources(context.Background())
+			srv.CloseDecisionAudit(context.Background())
+		}
+	}()
 	// The startup-resolved hub name, which ApplySnapshot returns to when
 	// the configured hub_name is unset.
 	srv.startupHubName = cfg.HubName
@@ -2068,9 +2079,12 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 			srv.oidcKeyManager = oidcMgr
 			srv.oidcIssuerURL = oidcIssuerURL
 
-			// Start background loops for key cleanup and cross-instance refresh.
-			oidcMgr.StartCleanupLoop(ctx)
-			oidcMgr.StartRefreshLoop(ctx)
+			// Start background loops for key cleanup and cross-instance
+			// refresh. They run on the server-lifetime context, so
+			// Shutdown/CleanupResources stops them; ctx here is
+			// context.Background() and would leak them (ptone/scion#3641).
+			oidcMgr.StartCleanupLoop(srvCtx)
+			oidcMgr.StartRefreshLoop(srvCtx)
 
 			// OIDC identity token lifetime: use config if set, else default 15m
 			srv.oidcTokenLifetime = 15 * time.Minute
