@@ -759,7 +759,8 @@ type instanceCall func(c cloudrun.InstancesAPI, name, etag string) (cloudrun.Ins
 //   - the call carries the read's etag, so an instance replaced (or changed)
 //     after the read is refused by the API (ABORTED or FAILED_PRECONDITION).
 //     The instance is then read and checked again, at most
-//     cloudRunRunCheckAttempts times in all;
+//     cloudRunRunCheckAttempts times in all. If the re-read shows the etag
+//     the call carried, nothing changed and that refusal is returned;
 //   - an instance that is gone at the read gives the same NotFound error the
 //     call itself gives.
 func (r *CloudRunRuntime) instanceOp(ctx context.Context, ref RunRef, verb string, call instanceCall) error {
@@ -787,20 +788,30 @@ func (r *CloudRunRuntime) instanceOp(ctx context.Context, ref RunRef, verb strin
 	want := sanitizeGCPLabelValue(ref.RunID)
 	runKey := sanitizeGCPLabelKey(api.LabelRunID)
 	var lastErr error
+	var sentEtag string
 	for attempt := 0; attempt < cloudRunRunCheckAttempts; attempt++ {
 		inst, err := c.GetInstance(ctx, &runpb.GetInstanceRequest{Name: name}, defaultCallOpts...)
 		if err != nil {
 			return fmt.Errorf("failed to %s instance: %w", verb, err)
+		}
+		if lastErr != nil && inst.GetEtag() == sentEtag {
+			// The refusal was not a change: the instance still has the
+			// etag the call carried, so the API refused it for another
+			// reason (for example a state precondition). Report that
+			// refusal rather than retrying it.
+			return fmt.Errorf("failed to %s instance: %w", verb, lastErr)
 		}
 		if run := inst.GetLabels()[runKey]; run != "" && run != want {
 			runtimeLog.Info("Left a Cloud Run instance of another run untouched",
 				"instance", name, "verb", verb, "run_id", ref.RunID, "instance_run_id", run)
 			return fmt.Errorf("instance %s belongs to run %q, not %q: %w", cloudRunShortInstanceID(name), run, want, ErrRunMismatch)
 		}
-		op, err := call(c, name, inst.GetEtag())
+		sentEtag = inst.GetEtag()
+		op, err := call(c, name, sentEtag)
 		if err != nil {
 			if code := status.Code(err); code == codes.Aborted || code == codes.FailedPrecondition {
-				// The instance changed after the read: re-read and re-check.
+				// The instance may have changed after the read: re-read
+				// and re-check.
 				runtimeLog.Info("Cloud Run instance changed before a run-checked call; re-checking",
 					"instance", name, "verb", verb, "run_id", ref.RunID, "attempt", attempt+1, "error", err)
 				lastErr = err

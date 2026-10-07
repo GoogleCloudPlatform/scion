@@ -40,34 +40,48 @@ const rbName = "proj--dev"
 
 func writeRollbackEngine(t *testing.T, binName string, runAExists bool) (string, string) {
 	t.Helper()
+	mode := "none"
+	if runAExists {
+		mode = "exists"
+	}
+	return writeRollbackEngineMode(t, binName, mode)
+}
+
+// writeRollbackEngineMode writes the mock engine. mode is "exists" (run
+// A's container is listed), "none" (the listing succeeds with no match) or
+// "listfail" (the listing exits 1).
+func writeRollbackEngineMode(t *testing.T, binName, mode string) (string, string) {
+	t.Helper()
 	dir := t.TempDir()
 	log := filepath.Join(dir, "calls.log")
 	listA := ""
-	if runAExists {
+	if mode == "exists" {
 		listA = "cid-run-a"
+	}
+	listFail := ""
+	if mode == "listfail" {
+		listFail = "1"
 	}
 	// Apple's list JSON: run B's container holds the name; run A's (if any)
 	// is listed under its own ID.
 	appleJSON := `[{"status":"running","configuration":{"id":"` + rbName + `","labels":{"` + api.LabelRunID + `":"run-b"}}}`
-	if runAExists {
-		appleJSON = `[{"status":"running","configuration":{"id":"` + rbName + `","labels":{"` + api.LabelRunID + `":"run-b"}}},` +
-			`{"status":"stopped","configuration":{"id":"cid-run-a","labels":{"` + api.LabelRunID + `":"run-a"}}}]`
-	} else {
-		appleJSON += "]"
+	if mode == "exists" {
+		appleJSON += `,{"status":"stopped","configuration":{"id":"cid-run-a","labels":{"` + api.LabelRunID + `":"run-a"}}}`
 	}
+	appleJSON += "]"
 	script := fmt.Sprintf(`#!/bin/sh
 case "$1" in
   run) exec sleep 30 ;;
-  ps)
+  ps|list)
+    if [ -n %q ]; then echo "listing failed" >&2; exit 1; fi
+    if [ "$1" = list ]; then echo '%s'; exit 0; fi
     for a in "$@"; do
-      if [ "$a" = "label=%s=run-a" ]; then
-        [ -n %q ] && echo %q
-      fi
-    done ;;
-  list) echo '%s' ;;
+      if [ "$a" = "label=%s=run-a" ] && [ -n %q ]; then echo %q; fi
+    done
+    exit 0 ;;
   *) echo "$@" >> %q ;;
 esac
-`, api.LabelRunID, listA, listA, appleJSON, log)
+`, listFail, appleJSON, api.LabelRunID, listA, listA, log)
 	bin := filepath.Join(dir, binName)
 	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
@@ -149,6 +163,46 @@ func TestRollbackCancelledCreate_NoOwnContainerRemovesNothing(t *testing.T) {
 
 			if calls := readRollbackCalls(t, log); calls != "" {
 				t.Errorf("rollback calls = %q, want none", calls)
+			}
+		})
+	}
+}
+
+// When the run's containers cannot be listed, nothing is removed: no name
+// fallback.
+func TestRollbackCancelledCreate_ListFailureRemovesNothing(t *testing.T) {
+	for _, kind := range []string{"docker", "podman", "apple"} {
+		t.Run(kind, func(t *testing.T) {
+			bin, log := writeRollbackEngineMode(t, binNameFor(kind), "listfail")
+			cancelledRun(t, rollbackRuntimes(bin)[kind], "run-a")
+
+			if calls := readRollbackCalls(t, log); calls != "" {
+				t.Errorf("rollback calls = %q, want none", calls)
+			}
+		})
+	}
+}
+
+// Apple: when the run cannot be checked because the listing fails, a
+// run-scoped stop or delete returns an error and stops, kills or removes
+// nothing by name.
+func TestAppleRunScoped_ListFailureDoesNothing(t *testing.T) {
+	for _, op := range []string{"Stop", "Delete"} {
+		t.Run(op, func(t *testing.T) {
+			bin, log := writeRollbackEngineMode(t, "container", "listfail")
+			rt := &AppleContainerRuntime{Command: bin}
+			ref := RunRef{ID: rbName, RunID: "run-a"}
+			var err error
+			if op == "Stop" {
+				err = rt.Stop(context.Background(), ref)
+			} else {
+				err = rt.Delete(context.Background(), ref)
+			}
+			if err == nil || errors.Is(err, ErrRunMismatch) {
+				t.Fatalf("%s = %v, want a listing error", op, err)
+			}
+			if calls := readRollbackCalls(t, log); calls != "" {
+				t.Errorf("calls = %q, want no stop, kill or rm", calls)
 			}
 		})
 	}

@@ -45,6 +45,10 @@ type statefulInstances struct {
 	// applied (after the runtime's read), to model a concurrent change.
 	beforeWrite func(s *statefulInstances, name string)
 
+	// failWrite, if set, is returned by every Stop, Start or Delete
+	// without changing the instance (a refusal that is not a change).
+	failWrite error
+
 	gets, creates, starts, stops, deletes int
 	lastEtag                              string
 }
@@ -103,6 +107,9 @@ func (s *statefulInstances) write(name, etag string, apply func()) (cloudrun.Ins
 		s.beforeWrite(s, name)
 	}
 	s.lastEtag = etag
+	if s.failWrite != nil {
+		return nil, s.failWrite
+	}
 	inst, ok := s.instances[name]
 	if !ok {
 		return nil, status.Error(codes.NotFound, "instance does not exist")
@@ -189,17 +196,24 @@ func TestCloudRunRunScoped_OtherRunUntouched(t *testing.T) {
 }
 
 // The run's own instance, and a legacy instance with no run label, are
-// stopped or deleted, with the read's etag as the precondition.
+// stopped or deleted, with the read's etag as the precondition. The run ID
+// is compared after GCP label sanitising, as Run stored it ("Run.A" is
+// stored as "run_a").
 func TestCloudRunRunScoped_OwnAndLegacyInstance(t *testing.T) {
+	cases := []struct{ label, runID string }{
+		{"run-a", "run-a"},
+		{"", "run-a"},
+		{"Run.A", "Run.A"},
+	}
 	for _, op := range crOps {
-		for _, label := range []string{"run-a", ""} {
-			t.Run(fmt.Sprintf("%s/label=%q", op.name, label), func(t *testing.T) {
+		for _, tc := range cases {
+			t.Run(fmt.Sprintf("%s/label=%q", op.name, tc.label), func(t *testing.T) {
 				s := newStatefulInstances()
-				s.put(crName, label)
+				s.put(crName, tc.label)
 				etag := s.instances[crName].Etag
 				rt := newStatefulCloudRunRuntime(t, s)
 
-				if err := op.call(rt, RunRef{ID: crInstanceID, RunID: "run-a"}); err != nil {
+				if err := op.call(rt, RunRef{ID: crInstanceID, RunID: tc.runID}); err != nil {
 					t.Fatalf("%s: %v", op.name, err)
 				}
 				if n := op.writes(s); n != 1 {
@@ -210,6 +224,48 @@ func TestCloudRunRunScoped_OwnAndLegacyInstance(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// A run-scoped stop or delete of a missing instance gives the API's
+// NotFound, as the name-based call does.
+func TestCloudRunRunScoped_MissingInstanceNotFound(t *testing.T) {
+	for _, op := range crOps {
+		t.Run(op.name, func(t *testing.T) {
+			s := newStatefulInstances()
+			rt := newStatefulCloudRunRuntime(t, s)
+
+			err := op.call(rt, RunRef{ID: crInstanceID, RunID: "run-a"})
+			var se interface{ GRPCStatus() *status.Status }
+			if !errors.As(err, &se) || se.GRPCStatus().Code() != codes.NotFound {
+				t.Fatalf("%s = %v, want a gRPC NotFound", op.name, err)
+			}
+			if n := op.writes(s); n != 0 {
+				t.Errorf("%sInstance called %d times, want 0", op.name, n)
+			}
+		})
+	}
+}
+
+// A refusal that is not a change (FAILED_PRECONDITION while the etag is
+// still the one sent, e.g. a state precondition) is returned after one
+// call, not retried as a change.
+func TestCloudRunRunScoped_UnchangedEtagRefusalNotRetried(t *testing.T) {
+	for _, op := range crOps {
+		t.Run(op.name, func(t *testing.T) {
+			s := newStatefulInstances()
+			s.put(crName, "run-a")
+			s.failWrite = status.Error(codes.FailedPrecondition, "instance is not in a state to do that")
+			rt := newStatefulCloudRunRuntime(t, s)
+
+			err := op.call(rt, RunRef{ID: crInstanceID, RunID: "run-a"})
+			if status.Code(errors.Unwrap(err)) != codes.FailedPrecondition {
+				t.Fatalf("%s = %v, want the FAILED_PRECONDITION refusal", op.name, err)
+			}
+			if n := op.writes(s); n != 1 {
+				t.Errorf("%sInstance called %d times, want 1", op.name, n)
+			}
+		})
 	}
 }
 
