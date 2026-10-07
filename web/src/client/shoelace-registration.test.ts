@@ -42,11 +42,21 @@ function sourceFiles(dir: string): string[] {
   return out;
 }
 
+/**
+ * Source text with comments removed: block comments, and line comments that
+ * start a line (after indentation) or follow code after whitespace, so a tag
+ * named only in a comment or doc comment is not counted. A `//` inside a
+ * string (a URL) is not preceded by whitespace and is kept.
+ */
+function stripComments(text: string): string {
+  return text.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|\s)\/\/[^\n]*/g, '$1');
+}
+
 /** sl-* tags rendered by app code: template tags and createElement calls. */
 function usedTags(): Map<string, string> {
   const used = new Map<string, string>();
   for (const file of sourceFiles(srcDir)) {
-    const text = readFileSync(file, 'utf8');
+    const text = stripComments(readFileSync(file, 'utf8'));
     for (const m of text.matchAll(/<(sl-[a-z][a-z-]*)[\s>/]/g)) {
       if (!used.has(m[1])) used.set(m[1], relative(srcDir, file));
     }
@@ -61,10 +71,12 @@ function usedTags(): Map<string, string> {
 function registeredTags(): Set<string> {
   const text = readFileSync(mainPath, 'utf8');
   const tags = new Set<string>();
-  for (const m of text.matchAll(
-    /import '@shoelace-style\/shoelace\/dist\/components\/([a-z-]+)\/\1\.js';/g
+  // Any quote style and whitespace, with or without the semicolon; a
+  // commented-out import does not count.
+  for (const m of stripComments(text).matchAll(
+    /import\s+(['"])@shoelace-style\/shoelace\/dist\/components\/([a-z-]+)\/\2\.js\1/g
   )) {
-    tags.add(`sl-${m[1]}`);
+    tags.add(`sl-${m[2]}`);
   }
   return tags;
 }
