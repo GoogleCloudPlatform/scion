@@ -227,6 +227,7 @@ func TestRemoteImageLimitsFailClosed(t *testing.T) {
 		"zero":            {},
 		"enabled, no cap": {Enabled: true, MaxBytes: 1, FetchTimeout: time.Second, TotalBudget: time.Second},
 		"negative bytes":  {Enabled: true, MaxCount: 1, MaxBytes: -1, FetchTimeout: time.Second, TotalBudget: time.Second},
+		"budget too long": {Enabled: true, MaxCount: 1, MaxBytes: 1, FetchTimeout: time.Second, TotalBudget: MaxRemoteFetchBudget + time.Second},
 	} {
 		b := backend{limits: func(context.Context) Limits { return Limits{RemoteImages: l} }}
 		if got := b.remoteImageLimits(ctx); got.Enabled {

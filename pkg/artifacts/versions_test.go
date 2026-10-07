@@ -357,6 +357,7 @@ func TestTwoStepManifestValidation(t *testing.T) {
 		"traversal":          {CreateVersionRequest{Entry: "../a", Files: []ManifestFile{file("../a", 1)}}, 400},
 		"absolute":           {CreateVersionRequest{Entry: "/a", Files: []ManifestFile{file("/a", 1)}}, 400},
 		"reserved":           {CreateVersionRequest{Entry: "_remote/x", Files: []ManifestFile{file("_remote/x", 1)}}, 400},
+		"reserved bare":      {CreateVersionRequest{Entry: "a", Files: []ManifestFile{file("a", 1), file("_remote", 1)}}, 400},
 		"bad digest":         {CreateVersionRequest{Entry: "a", Files: []ManifestFile{{Path: "a", Size: 1, SHA256: "zz"}}}, 400},
 		"negative size":      {CreateVersionRequest{Entry: "a", Files: []ManifestFile{file("a", -1)}}, 400},
 		"review kind":        {CreateVersionRequest{Kind: VersionKindReview, Entry: "a", Files: []ManifestFile{file("a", 1)}}, 400},

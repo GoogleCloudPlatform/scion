@@ -135,11 +135,17 @@ func (b backend) remoteImageLimits(ctx context.Context) RemoteImageLimits {
 		return DefaultRemoteImageLimits()
 	}
 	l := b.limits(ctx).RemoteImages
-	if l.MaxCount <= 0 || l.MaxBytes <= 0 || l.FetchTimeout <= 0 || l.TotalBudget <= 0 {
+	if l.MaxCount <= 0 || l.MaxBytes <= 0 || l.FetchTimeout <= 0 || l.TotalBudget <= 0 || l.TotalBudget > MaxRemoteFetchBudget {
 		return RemoteImageLimits{}
 	}
 	return l
 }
+
+// MaxRemoteFetchBudget caps the total fetch budget the service accepts
+// from its host; a larger one turns remote images off. With
+// publishDeadlineMargin it bounds how long a publish holds its request
+// open for fetching.
+const MaxRemoteFetchBudget = 60 * time.Second
 
 // fetchRemoteImages fetches the images at urls into the blob store and
 // returns one manifest row per URL it processed, in order, plus the
