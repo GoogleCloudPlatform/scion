@@ -15,7 +15,9 @@
 package cmd
 
 import (
+	"context"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
@@ -24,6 +26,15 @@ import (
 )
 
 const testIAPCloudRunURL = "https://scion-hub-123456.us-central1.run.app"
+
+// iapTargets is the per-runtime rewrite of an IAP-derived public URL: docker
+// at dockerTarget, podman at Podman's native host alias.
+func iapTargets(dockerTarget string) map[string]string {
+	return map[string]string{
+		"docker": dockerTarget,
+		"podman": "http://host.containers.internal:8080",
+	}
+}
 
 func TestComputeContainerHubEndpoint(t *testing.T) {
 	base := containerHubEndpointInputs{
@@ -50,9 +61,10 @@ func TestComputeContainerHubEndpoint(t *testing.T) {
 				in.PublicHubEndpointSource = hubEndpointSourceIAPAudience
 			}),
 			want: containerHubEndpointResult{
-				Endpoint:                   "http://scion-hub.internal:8080",
-				ColocatedPublicHubEndpoint: testIAPCloudRunURL,
-				HubListenPort:              8080,
+				Endpoint:                     "http://scion-hub.internal:8080",
+				ColocatedPublicHubEndpoint:   testIAPCloudRunURL,
+				ColocatedRuntimeHubEndpoints: iapTargets("http://scion-hub.internal:8080"),
+				HubListenPort:                8080,
 			},
 		},
 		{
@@ -63,9 +75,10 @@ func TestComputeContainerHubEndpoint(t *testing.T) {
 				in.HubListenPort = 9810
 			}),
 			want: containerHubEndpointResult{
-				Endpoint:                   "http://scion-hub.internal:9810",
-				ColocatedPublicHubEndpoint: testIAPCloudRunURL,
-				HubListenPort:              9810,
+				Endpoint:                     "http://scion-hub.internal:9810",
+				ColocatedPublicHubEndpoint:   testIAPCloudRunURL,
+				ColocatedRuntimeHubEndpoints: iapTargets("http://scion-hub.internal:9810"),
+				HubListenPort:                9810,
 			},
 		},
 		{
@@ -76,9 +89,10 @@ func TestComputeContainerHubEndpoint(t *testing.T) {
 				in.ForceHostNetwork = true
 			}),
 			want: containerHubEndpointResult{
-				Endpoint:                   "http://host.docker.internal:8080",
-				ColocatedPublicHubEndpoint: testIAPCloudRunURL,
-				HubListenPort:              8080,
+				Endpoint:                     "http://host.docker.internal:8080",
+				ColocatedPublicHubEndpoint:   testIAPCloudRunURL,
+				ColocatedRuntimeHubEndpoints: iapTargets("http://host.docker.internal:8080"),
+				HubListenPort:                8080,
 			},
 		},
 		{
@@ -89,9 +103,10 @@ func TestComputeContainerHubEndpoint(t *testing.T) {
 				in.HubListenPort = 0
 			}),
 			want: containerHubEndpointResult{
-				Endpoint:                   "http://host.docker.internal:8080",
-				ColocatedPublicHubEndpoint: testIAPCloudRunURL,
-				HubListenPort:              0,
+				Endpoint:                     "http://host.docker.internal:8080",
+				ColocatedPublicHubEndpoint:   testIAPCloudRunURL,
+				ColocatedRuntimeHubEndpoints: iapTargets("http://host.docker.internal:8080"),
+				HubListenPort:                0,
 			},
 		},
 		{
@@ -102,19 +117,105 @@ func TestComputeContainerHubEndpoint(t *testing.T) {
 				in.HostGatewaySupported = func() bool { return false }
 			}),
 			want: containerHubEndpointResult{
-				Endpoint:                   "http://host.docker.internal:8080",
-				ColocatedPublicHubEndpoint: testIAPCloudRunURL,
-				HubListenPort:              8080,
+				Endpoint:                     "http://host.docker.internal:8080",
+				ColocatedPublicHubEndpoint:   testIAPCloudRunURL,
+				ColocatedRuntimeHubEndpoints: iapTargets("http://host.docker.internal:8080"),
+				HubListenPort:                8080,
 			},
 		},
 		{
-			// Hybrid GKE: the kubernetes default runtime gets no container
-			// endpoint and no rewrite, so pods keep the IAP URL.
-			name: "IAP-derived public URL on kubernetes is unchanged",
+			// Hybrid GKE (ptone/scion#3635): the kubernetes default runtime
+			// gets no container endpoint, so pods keep the IAP URL, but
+			// agents dispatched through a docker or podman profile are
+			// still rewritten.
+			name: "IAP-derived public URL on kubernetes default still rewrites docker and podman profiles",
 			in: with(func(in *containerHubEndpointInputs) {
 				in.RuntimeName = "kubernetes"
 				in.PublicHubEndpoint = testIAPCloudRunURL
 				in.PublicHubEndpointSource = hubEndpointSourceIAPAudience
+			}),
+			want: containerHubEndpointResult{
+				ColocatedPublicHubEndpoint:   testIAPCloudRunURL,
+				ColocatedRuntimeHubEndpoints: iapTargets("http://scion-hub.internal:8080"),
+				HubListenPort:                8080,
+			},
+		},
+		{
+			name: "IAP-derived public URL on kubernetes default without host-gateway uses the docker bridge host",
+			in: with(func(in *containerHubEndpointInputs) {
+				in.RuntimeName = "kubernetes"
+				in.PublicHubEndpoint = testIAPCloudRunURL
+				in.PublicHubEndpointSource = hubEndpointSourceIAPAudience
+				in.HostGatewaySupported = func() bool { return false }
+			}),
+			want: containerHubEndpointResult{
+				ColocatedPublicHubEndpoint:   testIAPCloudRunURL,
+				ColocatedRuntimeHubEndpoints: iapTargets("http://host.docker.internal:8080"),
+				HubListenPort:                8080,
+			},
+		},
+		{
+			// ptone/scion#3635: the podman default runtime rewrites the
+			// IAP-derived URL to host.containers.internal.
+			name: "IAP-derived public URL on podman default rewrites to the podman host alias",
+			in: with(func(in *containerHubEndpointInputs) {
+				in.RuntimeName = "podman"
+				in.PublicHubEndpoint = testIAPCloudRunURL
+				in.PublicHubEndpointSource = hubEndpointSourceIAPAudience
+			}),
+			want: containerHubEndpointResult{
+				Endpoint:                     "http://host.containers.internal:8080",
+				ColocatedPublicHubEndpoint:   testIAPCloudRunURL,
+				ColocatedRuntimeHubEndpoints: iapTargets("http://scion-hub.internal:8080"),
+				HubListenPort:                8080,
+			},
+		},
+		{
+			name: "IAP-derived public URL on podman default with forced host networking",
+			in: with(func(in *containerHubEndpointInputs) {
+				in.RuntimeName = "podman"
+				in.PublicHubEndpoint = testIAPCloudRunURL
+				in.PublicHubEndpointSource = hubEndpointSourceIAPAudience
+				in.ForceHostNetwork = true
+			}),
+			want: containerHubEndpointResult{
+				Endpoint:                     "http://host.containers.internal:8080",
+				ColocatedPublicHubEndpoint:   testIAPCloudRunURL,
+				ColocatedRuntimeHubEndpoints: iapTargets("http://host.docker.internal:8080"),
+				HubListenPort:                8080,
+			},
+		},
+		{
+			name: "IAP-derived public URL with a non-localhost broker endpoint has no bridge targets",
+			in: with(func(in *containerHubEndpointInputs) {
+				in.RuntimeName = "kubernetes"
+				in.BrokerHubEndpoint = "http://10.0.0.5:8080"
+				in.PublicHubEndpoint = testIAPCloudRunURL
+				in.PublicHubEndpointSource = hubEndpointSourceIAPAudience
+				in.HubListenPort = 0
+			}),
+			want: containerHubEndpointResult{},
+		},
+		{
+			name: "IAP-derived public URL on Apple container keeps its own endpoint and adds per-runtime targets only",
+			in: with(func(in *containerHubEndpointInputs) {
+				in.RuntimeName = "container"
+				in.PublicHubEndpoint = testIAPCloudRunURL
+				in.PublicHubEndpointSource = hubEndpointSourceIAPAudience
+			}),
+			want: containerHubEndpointResult{
+				Endpoint:                     "http://host.containers.internal:8080",
+				ColocatedPublicHubEndpoint:   testIAPCloudRunURL,
+				ColocatedRuntimeHubEndpoints: iapTargets("http://scion-hub.internal:8080"),
+				HubListenPort:                8080,
+			},
+		},
+		{
+			name: "explicit public URL on kubernetes default adds no rewrite",
+			in: with(func(in *containerHubEndpointInputs) {
+				in.RuntimeName = "kubernetes"
+				in.PublicHubEndpoint = "https://hub.example.com"
+				in.PublicHubEndpointSource = hubEndpointSourceConfig
 			}),
 			want: containerHubEndpointResult{HubListenPort: 8080},
 		},
@@ -312,9 +413,10 @@ func TestBrokerContainerHubConfig(t *testing.T) {
 			probe:       true,
 			wantProbed:  true,
 			want: containerHubEndpointResult{
-				Endpoint:                   "http://scion-hub.internal:8080",
-				ColocatedPublicHubEndpoint: testIAPCloudRunURL,
-				HubListenPort:              8080,
+				Endpoint:                     "http://scion-hub.internal:8080",
+				ColocatedPublicHubEndpoint:   testIAPCloudRunURL,
+				ColocatedRuntimeHubEndpoints: iapTargets("http://scion-hub.internal:8080"),
+				HubListenPort:                8080,
 			},
 		},
 		{
@@ -326,9 +428,10 @@ func TestBrokerContainerHubConfig(t *testing.T) {
 			probe:       false,
 			wantProbed:  true,
 			want: containerHubEndpointResult{
-				Endpoint:                   "http://host.docker.internal:8080",
-				ColocatedPublicHubEndpoint: testIAPCloudRunURL,
-				HubListenPort:              8080,
+				Endpoint:                     "http://host.docker.internal:8080",
+				ColocatedPublicHubEndpoint:   testIAPCloudRunURL,
+				ColocatedRuntimeHubEndpoints: iapTargets("http://host.docker.internal:8080"),
+				HubListenPort:                8080,
 			},
 		},
 		{
@@ -339,9 +442,10 @@ func TestBrokerContainerHubConfig(t *testing.T) {
 			src:         hubEndpointSourceIAPAudience,
 			forceHost:   true,
 			want: containerHubEndpointResult{
-				Endpoint:                   "http://host.docker.internal:8080",
-				ColocatedPublicHubEndpoint: testIAPCloudRunURL,
-				HubListenPort:              8080,
+				Endpoint:                     "http://host.docker.internal:8080",
+				ColocatedPublicHubEndpoint:   testIAPCloudRunURL,
+				ColocatedRuntimeHubEndpoints: iapTargets("http://host.docker.internal:8080"),
+				HubListenPort:                8080,
 			},
 		},
 		{
@@ -353,12 +457,34 @@ func TestBrokerContainerHubConfig(t *testing.T) {
 			want:        containerHubEndpointResult{Endpoint: "http://custom:1234", HubListenPort: 8080},
 		},
 		{
-			name:        "kubernetes default runtime skips the probe and keeps the IAP URL",
+			name:        "kubernetes default runtime probes for the docker profile target",
 			cfg:         &config.GlobalConfig{},
 			runtimeName: "kubernetes",
 			hubEndpoint: testIAPCloudRunURL,
 			src:         hubEndpointSourceIAPAudience,
+			probe:       true,
+			wantProbed:  true,
+			want: containerHubEndpointResult{
+				ColocatedPublicHubEndpoint:   testIAPCloudRunURL,
+				ColocatedRuntimeHubEndpoints: iapTargets("http://scion-hub.internal:8080"),
+				HubListenPort:                8080,
+			},
+		},
+		{
+			name:        "kubernetes default runtime with an explicit public URL skips the probe",
+			cfg:         &config.GlobalConfig{},
+			runtimeName: "kubernetes",
+			hubEndpoint: "https://hub.example.com",
+			src:         hubEndpointSourceConfig,
 			want:        containerHubEndpointResult{HubListenPort: 8080},
+		},
+		{
+			name:        "podman default runtime with a localhost hub skips the probe",
+			cfg:         &config.GlobalConfig{},
+			runtimeName: "podman",
+			hubEndpoint: "http://localhost:8080",
+			src:         hubEndpointSourceLocalhost,
+			want:        containerHubEndpointResult{Endpoint: "http://host.containers.internal:8080", HubListenPort: 8080},
 		},
 		{
 			name:        "explicit base URL on docker routes at the public domain",
@@ -398,12 +524,49 @@ func TestBrokerContainerHubConfig(t *testing.T) {
 func TestContainerHubEndpointResultApplyTo(t *testing.T) {
 	cfg := runtimebroker.ServerConfig{BrokerID: "keep"}
 	containerHubEndpointResult{
-		Endpoint:                   "http://scion-hub.internal:8080",
-		ColocatedPublicHubEndpoint: testIAPCloudRunURL,
-		HubListenPort:              8080,
+		Endpoint:                     "http://scion-hub.internal:8080",
+		ColocatedPublicHubEndpoint:   testIAPCloudRunURL,
+		ColocatedRuntimeHubEndpoints: iapTargets("http://scion-hub.internal:8080"),
+		HubListenPort:                8080,
 	}.applyTo(&cfg)
 	assert.Equal(t, "http://scion-hub.internal:8080", cfg.ContainerHubEndpoint)
 	assert.Equal(t, testIAPCloudRunURL, cfg.ColocatedPublicHubEndpoint)
+	assert.Equal(t, iapTargets("http://scion-hub.internal:8080"), cfg.ColocatedRuntimeHubEndpoints)
 	assert.Equal(t, 8080, cfg.HubListenPort)
 	assert.Equal(t, "keep", cfg.BrokerID)
+}
+
+// TestBrokerContainerHubConfigPodmanOnlyBroker: a podman-only broker (no
+// docker binary) on an IAP-derived hub runs the real Docker host-gateway
+// probe at startup. The probe must fail fast rather than delay startup, and
+// podman agents must still get the podman target.
+func TestBrokerContainerHubConfigPodmanOnlyBroker(t *testing.T) {
+	origEnableHub, origEnableWeb, origWebPort := enableHub, enableWeb, webPort
+	defer func() { enableHub, enableWeb, webPort = origEnableHub, origEnableWeb, origWebPort }()
+	enableHub, enableWeb, webPort = true, true, 8080
+	t.Setenv(runtime.ForceHostNetworkEnvVar, "")
+	t.Setenv("PATH", t.TempDir()) // no docker binary
+
+	probed := false
+	start := time.Now()
+	got := brokerContainerHubConfig(&config.GlobalConfig{}, brokerContainerHubParams{
+		RuntimeName:             "podman",
+		BrokerHubEndpoint:       "http://localhost:8080",
+		PublicHubEndpoint:       testIAPCloudRunURL,
+		PublicHubEndpointSource: hubEndpointSourceIAPAudience,
+		HostGatewayProbe: func() bool {
+			probed = true
+			return runtime.DockerSupportsHostGateway(context.Background(), "")
+		},
+	}, nil)
+	elapsed := time.Since(start)
+
+	assert.True(t, probed, "host-gateway probe called")
+	assert.Less(t, elapsed, 2*time.Second, "probe without a docker binary must fail fast")
+	assert.Equal(t, containerHubEndpointResult{
+		Endpoint:                     "http://host.containers.internal:8080",
+		ColocatedPublicHubEndpoint:   testIAPCloudRunURL,
+		ColocatedRuntimeHubEndpoints: iapTargets("http://scion-hub.internal:8080"),
+		HubListenPort:                8080,
+	}, got)
 }
