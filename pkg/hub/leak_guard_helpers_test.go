@@ -156,7 +156,7 @@ func checkPackageLeaks(w io.Writer, max int, settle time.Duration, alwaysReport 
 	if res.total <= max {
 		return true
 	}
-	fmt.Fprintf(w, "FAIL: leak guard: a test leaks an unclosed store (connectionOpener) or a server that is never shut down.\n"+
+	_, _ = fmt.Fprintf(w, "FAIL: leak guard: a test leaks an unclosed store (connectionOpener) or a server that is never shut down.\n"+
 		"Build servers with newTestHubServer (or register srv.Shutdown in t.Cleanup) and stores with newTestStore.\n"+
 		"Offending goroutines:\n\n%s\n", strings.Join(res.stacks, "\n\n"))
 	return false
