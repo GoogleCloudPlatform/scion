@@ -207,8 +207,9 @@ func (s *Server) handleConversationScheduledRoutes(w http.ResponseWriter, r *htt
 // these routes (design §2.4): the credential must be an interactive (or
 // local dev) session, and scoped access tokens, federated identities,
 // broker requests on behalf of a user and agents are refused. A message is
-// sent later as the user, and only such a session matches that.
-func scheduledSendCaller(w http.ResponseWriter, r *http.Request) UserIdentity {
+// sent later as the user, and only such a session matches that. action is
+// the route's action, for the denial log.
+func scheduledSendCaller(w http.ResponseWriter, r *http.Request, action Action) UserIdentity {
 	ctx := r.Context()
 	identity := GetIdentityFromContext(ctx)
 	user := GetUserIdentityFromContext(ctx)
@@ -217,7 +218,7 @@ func scheduledSendCaller(w http.ResponseWriter, r *http.Request) UserIdentity {
 		return nil
 	}
 	deny := func(reason string) UserIdentity {
-		logAuthzDenial(r, identity, Resource{Type: "chat_scheduled_message"}, ActionCreate, reason)
+		logAuthzDenial(r, identity, Resource{Type: "chat_scheduled_message"}, action, reason)
 		writeError(w, http.StatusForbidden, ErrCodeForbidden,
 			"scheduled messages require a signed-in session", nil)
 		return nil
@@ -248,7 +249,7 @@ func scheduledSendRejectDM(w http.ResponseWriter, key string) bool {
 
 // handleScheduledCreate implements POST …/{key}/scheduled.
 func (s *Server) handleScheduledCreate(w http.ResponseWriter, r *http.Request, key string) {
-	user := scheduledSendCaller(w, r)
+	user := scheduledSendCaller(w, r, ActionCreate)
 	if user == nil || scheduledSendRejectDM(w, key) {
 		return
 	}
@@ -389,7 +390,7 @@ func (s *Server) writeScheduledReplay(w http.ResponseWriter, row *ScheduledChatM
 // pending, sending and failed messages in the conversation, only while the
 // caller can still access it.
 func (s *Server) handleScheduledList(w http.ResponseWriter, r *http.Request, key string) {
-	user := scheduledSendCaller(w, r)
+	user := scheduledSendCaller(w, r, ActionRead)
 	if user == nil || scheduledSendRejectDM(w, key) {
 		return
 	}
@@ -421,7 +422,7 @@ func (s *Server) handleScheduledList(w http.ResponseWriter, r *http.Request, key
 // sender's own pending message can be cancelled; one that is already being
 // sent or was sent answers 409.
 func (s *Server) handleScheduledCancel(w http.ResponseWriter, r *http.Request, key, id string) {
-	user := scheduledSendCaller(w, r)
+	user := scheduledSendCaller(w, r, ActionDelete)
 	if user == nil || scheduledSendRejectDM(w, key) {
 		return
 	}
@@ -486,8 +487,14 @@ const scheduledSendWorkers = 4
 var scheduledStopGrace = 15 * time.Second
 
 // scheduledSendRuntime is the sweeper's state on one replica.
+//
+// The runtime is single-use: once stopped it stays stopped (the abort
+// context is never renewed), and a later start or sweep does nothing.
 type scheduledSendRuntime struct {
 	mu sync.Mutex
+	// stopped is set by stopScheduledSendSweeper; start and sweeps check it
+	// under mu, so no work starts after a stop has begun.
+	stopped bool
 	// inFlight holds the senders with a message being claimed or delivered.
 	inFlight map[string]struct{}
 	// workers is a semaphore of scheduledSendWorkers slots.
@@ -530,9 +537,14 @@ func (s *Server) startScheduledSendSweeper(ctx context.Context) {
 	rt := s.scheduledRuntime()
 	loopCtx, cancel := context.WithCancel(ctx)
 	rt.mu.Lock()
+	if rt.stopped {
+		rt.mu.Unlock()
+		cancel()
+		return
+	}
 	rt.stopLoop = cancel
-	rt.mu.Unlock()
 	rt.running.Add(1)
+	rt.mu.Unlock()
 	go func() {
 		defer rt.running.Done()
 		ticker := time.NewTicker(scheduledSendTick)
@@ -542,7 +554,13 @@ func (s *Server) startScheduledSendSweeper(ctx context.Context) {
 			case <-loopCtx.Done():
 				return
 			case <-ticker.C:
+				rt.mu.Lock()
+				if rt.stopped {
+					rt.mu.Unlock()
+					return
+				}
 				rt.running.Add(1)
+				rt.mu.Unlock()
 				go func() {
 					defer rt.running.Done()
 					s.sweepScheduledMessages(loopCtx, time.Now().UTC())
@@ -557,10 +575,12 @@ func (s *Server) startScheduledSendSweeper(ctx context.Context) {
 // then cuts them short: a dispatch in progress returns, the message is
 // recorded as it would be after any dispatch error, and the row is
 // finalized sent or failed on its own context. Stopping therefore takes at
-// most about scheduledStopGrace + scheduledFinalizeTimeout.
+// most scheduledStopGrace + scheduledFinalizeTimeout (about 25 s). The
+// runtime cannot be started again afterwards.
 func (s *Server) stopScheduledSendSweeper(ctx context.Context) {
 	rt := s.scheduledRuntime()
 	rt.mu.Lock()
+	rt.stopped = true
 	stop := rt.stopLoop
 	rt.stopLoop = nil
 	rt.mu.Unlock()
@@ -581,7 +601,7 @@ func (s *Server) stopScheduledSendSweeper(ctx context.Context) {
 	case <-grace.C:
 	}
 	rt.abort()
-	final := time.NewTimer(scheduledFinalizeTimeout + 5*time.Second)
+	final := time.NewTimer(scheduledFinalizeTimeout)
 	defer final.Stop()
 	select {
 	case <-done:
@@ -597,13 +617,15 @@ func (s *Server) waitScheduledDeliveries() {
 }
 
 // sweepScheduledMessages delivers the messages due at now that this
-// replica manages to claim, and returns how many it claimed. Due messages
-// are grouped by sender: each sender's messages are delivered one after
-// another by one worker, at most scheduledSendWorkers senders at a time,
-// and a sender that already has a delivery in progress (from an earlier
-// tick) is skipped until it finishes. The experiment is checked before
-// each claim; while it is off nothing is claimed, so pending messages are
-// held, not sent or failed.
+// replica manages to claim, and returns how many it claimed. The due list
+// has one row per sender (the sender's oldest), so senders with many due
+// messages cannot fill it. Each sender gets one worker, which delivers
+// that sender's due messages one after another, fetching the next one
+// after each delivery; at most scheduledSendWorkers senders are delivered
+// at a time, and a sender that already has a delivery in progress (from
+// an earlier tick) is skipped until it finishes. The experiment is checked
+// before each claim; while it is off nothing is claimed, so pending
+// messages are held, not sent or failed.
 func (s *Server) sweepScheduledMessages(ctx context.Context, now time.Time) int {
 	if !s.experimentEnabled(experiments.ChatScheduledSend) {
 		return 0
@@ -618,29 +640,27 @@ func (s *Server) sweepScheduledMessages(ctx context.Context, now time.Time) int 
 		return 0
 	}
 
-	// Group by sender, keeping the oldest-first order of the senders.
-	var senders []string
-	bySender := make(map[string][]ScheduledChatMessage)
-	for _, row := range due {
-		if _, seen := bySender[row.SenderUserID]; !seen {
-			senders = append(senders, row.SenderUserID)
-		}
-		bySender[row.SenderUserID] = append(bySender[row.SenderUserID], row)
-	}
-
 	rt := s.scheduledRuntime()
 	var claimed atomic.Int64
 	var batch sync.WaitGroup
-	for _, sender := range senders {
+	for i := range due {
 		if ctx.Err() != nil {
 			break
 		}
+		first := due[i]
+		sender := first.SenderUserID
 		rt.mu.Lock()
+		if rt.stopped {
+			rt.mu.Unlock()
+			break
+		}
 		_, busy := rt.inFlight[sender]
 		if !busy {
 			select {
 			case rt.workers <- struct{}{}:
 				rt.inFlight[sender] = struct{}{}
+				batch.Add(1)
+				rt.running.Add(1)
 			default:
 				busy = true // all workers busy: try again next tick
 			}
@@ -649,9 +669,6 @@ func (s *Server) sweepScheduledMessages(ctx context.Context, now time.Time) int 
 		if busy {
 			continue
 		}
-		rows := bySender[sender]
-		batch.Add(1)
-		rt.running.Add(1)
 		go func() {
 			defer rt.running.Done()
 			defer batch.Done()
@@ -661,23 +678,56 @@ func (s *Server) sweepScheduledMessages(ctx context.Context, now time.Time) int 
 				rt.mu.Unlock()
 				<-rt.workers
 			}()
-			for i := range rows {
-				if ctx.Err() != nil || !s.experimentEnabled(experiments.ChatScheduledSend) {
-					return
-				}
-				if s.claimAndFire(ctx, sms, &rows[i]) {
-					claimed.Add(1)
-				}
-			}
+			claimed.Add(int64(s.deliverSenderDue(ctx, sms, &first, now)))
 		}()
 	}
 	batch.Wait()
 	return int(claimed.Load())
 }
 
+// deliverSenderDue delivers one sender's due messages one after another,
+// starting with row, and returns how many it claimed. It stops when the
+// sweeper stops, the experiment is turned off, a claim fails, a row is
+// handed back to pending (it is retried next tick), or the sender has no
+// more due messages.
+func (s *Server) deliverSenderDue(ctx context.Context, sms ScheduledMessageStore, row *ScheduledChatMessage, now time.Time) int {
+	claimed := 0
+	attempted := make(map[string]bool)
+	for row != nil && !attempted[row.ID] {
+		if ctx.Err() != nil || !s.experimentEnabled(experiments.ChatScheduledSend) {
+			return claimed
+		}
+		attempted[row.ID] = true
+		ok, outcome := s.claimAndFire(ctx, sms, row)
+		if ok {
+			claimed++
+		}
+		if outcome == scheduledClaimError || outcome == scheduledReleased {
+			return claimed
+		}
+		next, err := sms.NextDueScheduledMessage(ctx, row.SenderUserID, now)
+		if err != nil {
+			scheduledSendLog().Warn("scheduled send: fetching next due message failed", "error", err)
+			return claimed
+		}
+		row = next
+	}
+	return claimed
+}
+
+// scheduledFireOutcome is how claimAndFire ended for one row.
+type scheduledFireOutcome int
+
+const (
+	scheduledNotClaimed scheduledFireOutcome = iota // cancelled, or claimed elsewhere
+	scheduledClaimError                             // the claim could not be made
+	scheduledFinalized                              // sent or failed
+	scheduledReleased                               // handed back to pending
+)
+
 // claimAndFire claims one due row and, if this replica won the claim,
-// delivers it. It reports whether the row was claimed.
-func (s *Server) claimAndFire(ctx context.Context, sms ScheduledMessageStore, row *ScheduledChatMessage) bool {
+// delivers it. It reports whether the row was claimed and how it ended.
+func (s *Server) claimAndFire(ctx context.Context, sms ScheduledMessageStore, row *ScheduledChatMessage) (bool, scheduledFireOutcome) {
 	// The claim, once started, is not cut short by shutdown either: a
 	// claim that commits must be followed by delivery or release.
 	claimCtx, cancelClaim := context.WithTimeout(context.WithoutCancel(ctx), scheduledClaimTimeout)
@@ -685,15 +735,17 @@ func (s *Server) claimAndFire(ctx context.Context, sms ScheduledMessageStore, ro
 	cancelClaim()
 	if err != nil {
 		scheduledSendLog().Warn("scheduled send: claim failed", "id", row.ID, "error", err)
-		return false
+		return false, scheduledClaimError
 	}
 	if !ok {
-		return false // cancelled, or another replica claimed it
+		return false, scheduledNotClaimed
 	}
 	row.Status = ScheduledMessageSending
 	s.publishScheduledMessage(ctx, "sending", row)
-	s.fireScheduledMessage(ctx, sms, row)
-	return true
+	if s.fireScheduledMessage(ctx, sms, row) {
+		return true, scheduledReleased
+	}
+	return true, scheduledFinalized
 }
 
 // scheduledFireCheck is the outcome of the pre-send checks of a claimed row.
@@ -795,7 +847,9 @@ func finalizeContext(ctx context.Context) (context.Context, context.CancelFunc) 
 // cancellation (server shutdown) and bounded by scheduledDeliveryBudget;
 // each final state write gets its own fresh context (finalizeContext), so
 // neither a shutdown nor a slow send leaves the row in sending.
-func (s *Server) fireScheduledMessage(ctx context.Context, sms ScheduledMessageStore, m *ScheduledChatMessage) {
+//
+// It reports whether the row was handed back to pending.
+func (s *Server) fireScheduledMessage(ctx context.Context, sms ScheduledMessageStore, m *ScheduledChatMessage) (released bool) {
 	base := ContextWithExecutor(context.WithoutCancel(ctx), ExecutorContext{Kind: scheduledSendClientType, ID: "scheduled_message:" + m.ID})
 	ctx, cancel := context.WithTimeout(base, scheduledDeliveryBudget)
 	defer cancel()
@@ -804,6 +858,12 @@ func (s *Server) fireScheduledMessage(ctx context.Context, sms ScheduledMessageS
 	defer stopAbort()
 
 	check := s.checkScheduledFire(ctx, m)
+	// Cut short (shutdown) during or right after the checks: nothing was
+	// sent, and a check may have failed only because of that, so the row
+	// goes back to pending rather than failing.
+	if ctx.Err() != nil {
+		check.transient = true
+	}
 	if check.transient {
 		fctx, fcancel := finalizeContext(base)
 		defer fcancel()
@@ -816,11 +876,11 @@ func (s *Server) fireScheduledMessage(ctx context.Context, sms ScheduledMessageS
 		m.ClaimedAt = nil
 		m.UpdatedAt = now
 		s.publishScheduledMessage(base, "released", m)
-		return
+		return true
 	}
 	if check.reason != "" {
 		s.failScheduledMessage(base, sms, m, check.reason)
-		return
+		return false
 	}
 
 	ctx = contextWithIdentity(ctx, check.user)
@@ -844,8 +904,14 @@ func (s *Server) fireScheduledMessage(ctx context.Context, sms ScheduledMessageS
 	}()
 	if serr != nil {
 		scheduledSendLog().Info("scheduled send: delivery refused", "id", m.ID, "status", serr.Status, "code", serr.Code)
-		s.failScheduledMessage(base, sms, m, scheduledFailureFromSendError(serr))
-		return
+		reason := scheduledFailureFromSendError(serr)
+		if ctx.Err() != nil {
+			// Cut short during the send: a refusal then says nothing about
+			// access. The send may have started, so it is not retried.
+			reason = ScheduledFailureDeliveryError
+		}
+		s.failScheduledMessage(base, sms, m, reason)
+		return false
 	}
 
 	now := time.Now().UTC()
@@ -859,6 +925,7 @@ func (s *Server) fireScheduledMessage(ctx context.Context, sms ScheduledMessageS
 	m.UpdatedAt = now
 	auditScheduledMessage(base, "fire", m)
 	s.publishScheduledMessage(base, "sent", m)
+	return false
 }
 
 // failScheduledMessage records a claimed row as failed, on a fresh context

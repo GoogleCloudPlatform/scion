@@ -437,7 +437,7 @@ func TestScheduledSend_TwoReplicas_EachRowClaimedOnce(t *testing.T) {
 	ctx := context.Background()
 	const n = 40
 	for i := 0; i < n; i++ {
-		_, _, err := sms[0].CreateScheduledMessage(ctx, newTestScheduledRow(fmt.Sprintf("rep-%d", i), "user-1", time.Now().Add(-time.Second)))
+		_, _, err := sms[0].CreateScheduledMessage(ctx, newTestScheduledRow(fmt.Sprintf("rep-%d", i), fmt.Sprintf("rep-user-%d", i), time.Now().Add(-time.Second)))
 		require.NoError(t, err)
 	}
 	claims := make(chan string, 2*n)
@@ -767,12 +767,15 @@ func testScheduledStoreTransitions(t *testing.T, sms ScheduledMessageStore) {
 		_, _, err := sms.CreateScheduledMessage(ctx, r)
 		require.NoError(t, err)
 	}
+	// The due list has one row per sender (its oldest); the sender's next
+	// due row comes from NextDueScheduledMessage.
 	due, err := sms.ListDueScheduledMessages(ctx, base.Add(250*time.Millisecond), 10)
 	require.NoError(t, err)
-	require.Len(t, due, 2)
+	require.Len(t, due, 1)
 	assert.Equal(t, early.ID, due[0].ID)
-	assert.Equal(t, late.ID, due[1].ID)
-	assert.True(t, due[1].FireAt.Equal(base), "rounded up to the whole second")
+	gotLate, err := sms.GetScheduledMessage(ctx, "user-a", late.ID)
+	require.NoError(t, err)
+	assert.True(t, gotLate.FireAt.Equal(base), "rounded up to the whole second")
 	early2 := newTestScheduledRow("t5", "user-c", base.Add(1500*time.Millisecond))
 	_, _, err = sms.CreateScheduledMessage(ctx, early2)
 	require.NoError(t, err)
@@ -809,6 +812,10 @@ func testScheduledStoreTransitions(t *testing.T, sms ScheduledMessageStore) {
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.NoError(t, sms.MarkScheduledMessageSent(ctx, early.ID, "msg-1", base))
+	next, err := sms.NextDueScheduledMessage(ctx, "user-a", base.Add(250*time.Millisecond))
+	require.NoError(t, err)
+	require.NotNil(t, next)
+	assert.Equal(t, late.ID, next.ID, "the sender's next due row")
 	got, err = sms.GetScheduledMessage(ctx, "user-a", early.ID)
 	require.NoError(t, err)
 	assert.Equal(t, ScheduledMessageSent, got.Status)
@@ -888,11 +895,12 @@ func TestScheduledStore_Postgres(t *testing.T) {
 		sms[i] = scheduledMessageStoreFrom(wcs)
 	}
 	testScheduledStoreTransitions(t, sms[0])
+	testScheduledStoreDuePerSender(t, sms[0])
 	testCancelClaimRace(t, sms[0], sms[1], "pg-race")
 
 	const n = 40
 	for i := 0; i < n; i++ {
-		_, _, err := sms[0].CreateScheduledMessage(ctx, newTestScheduledRow(fmt.Sprintf("pg-rep-%d", i), "user-pg", time.Now().Add(-time.Second)))
+		_, _, err := sms[0].CreateScheduledMessage(ctx, newTestScheduledRow(fmt.Sprintf("pg-rep-%d", i), fmt.Sprintf("user-pg-%d", i), time.Now().Add(-time.Second)))
 		require.NoError(t, err)
 	}
 	claims := make(chan string, 2*n)
@@ -905,7 +913,7 @@ func TestScheduledStore_Postgres(t *testing.T) {
 				return
 			}
 			for _, m := range due {
-				if m.SenderUserID != "user-pg" {
+				if !strings.HasPrefix(m.SenderUserID, "user-pg-") {
 					continue
 				}
 				ok, err := st.ClaimScheduledMessage(ctx, m.ID, time.Now())
@@ -1421,7 +1429,7 @@ func TestScheduledSend_CallerGuard(t *testing.T) {
 				ctx = contextWithCredentialContext(ctx, CredentialContext{Kind: tc.kind})
 			}
 			rec := httptest.NewRecorder()
-			got := scheduledSendCaller(rec, req.WithContext(ctx))
+			got := scheduledSendCaller(rec, req.WithContext(ctx), ActionCreate)
 			if tc.allowed {
 				assert.NotNil(t, got)
 			} else {
@@ -1430,4 +1438,204 @@ func TestScheduledSend_CallerGuard(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Review round 4
+// ---------------------------------------------------------------------------
+
+// senderBlockingDispatcher blocks dispatches for messages from the listed
+// senders until release is closed (or the context ends).
+type senderBlockingDispatcher struct {
+	brokerMockDispatcher
+	blocked map[string]bool
+	release chan struct{}
+}
+
+func (d *senderBlockingDispatcher) DispatchAgentMessage(ctx context.Context, a *store.Agent, msg string, interrupt bool, sm *messages.StructuredMessage) error {
+	if sm != nil && d.blocked[sm.SenderID] {
+		select {
+		case <-d.release:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return d.brokerMockDispatcher.DispatchAgentMessage(ctx, a, msg, interrupt, sm)
+}
+
+// Two senders with many due messages behind a slow broker do not keep a
+// third sender's message from being listed and sent: the due list has one
+// row per sender.
+func TestScheduledSend_HeavySendersDoNotStarveOthers(t *testing.T) {
+	f := newScheduledSendFixture(t)
+	ctx := context.Background()
+
+	carol := &store.User{ID: tid("user-carol"), Email: "carol@test.com", DisplayName: "Carol",
+		Role: store.UserRoleMember, Status: "active", Created: time.Now()}
+	require.NoError(t, f.store.CreateUser(ctx, carol))
+	addProjectMemberWithRole(t, f.store, f.project, carol.ID, store.GroupMemberRoleMember)
+	carolAgent := &store.Agent{ID: tid("sched-carol-agent"), ProjectID: f.project.ID, Name: "carol-agent",
+		Slug: "carol-agent", Phase: "running", OwnerID: carol.ID, CreatedBy: carol.ID}
+	require.NoError(t, f.store.CreateAgent(ctx, carolAgent))
+	carolTopic := tid("sched-topic-carol")
+	require.NoError(t, f.wcs.CreateTopic(ctx, WebChatTopic{ID: carolTopic, ProjectID: f.project.ID, Name: "carol",
+		CreatedBy: carol.ID, CreatedAt: time.Now().UTC(), DefaultAgent: carolAgent.Slug}))
+	setTopicConversationID(t, f.db, f.store, carolTopic, f.project.ID)
+
+	disp := &senderBlockingDispatcher{blocked: map[string]bool{f.bob.ID: true, f.alice.ID: true}, release: make(chan struct{})}
+	f.srv.SetDispatcher(disp)
+
+	// bob and alice each have 26 due messages, older than carol's.
+	base := time.Now().Add(-time.Hour)
+	for i := 0; i < 26; i++ {
+		for _, sender := range []string{f.bob.ID, f.alice.ID} {
+			m := newTestScheduledRow(fmt.Sprintf("heavy-%s-%d", sender, i), sender, base.Add(time.Duration(i)*time.Second))
+			m.ConversationKey = f.topicID
+			_, _, err := f.sms.CreateScheduledMessage(ctx, m)
+			require.NoError(t, err)
+		}
+	}
+	carolRow := func(key string, at time.Time) *ScheduledChatMessage {
+		m := newTestScheduledRow(key, carol.ID, at)
+		m.ConversationKey = carolTopic
+		_, _, err := f.sms.CreateScheduledMessage(ctx, m)
+		require.NoError(t, err)
+		return m
+	}
+	c1 := carolRow("carol-1", base.Add(time.Minute))
+
+	now := time.Now()
+	first := make(chan int, 1)
+	go func() { first <- f.srv.sweepScheduledMessages(ctx, now) }()
+	require.Eventually(t, func() bool {
+		return f.row(t, carol, c1.ID).Status == ScheduledMessageSent
+	}, 5*time.Second, 20*time.Millisecond, "carol's message is listed and sent despite 52 older ones")
+
+	// A later sweep, while bob and alice are still blocked.
+	c2 := carolRow("carol-2", base.Add(2*time.Minute))
+	assert.Equal(t, 1, f.srv.sweepScheduledMessages(ctx, now.Add(time.Second)))
+	assert.Equal(t, ScheduledMessageSent, f.row(t, carol, c2.ID).Status)
+
+	close(disp.release)
+	assert.Equal(t, 53, <-first, "bob's and alice's 52 plus carol's first")
+	f.srv.waitScheduledDeliveries()
+	n, err := f.sms.CountActiveScheduledMessages(ctx, f.bob.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 0, n)
+}
+
+// Stopping cuts deliveries short; a claimed row whose checks are cut short
+// goes back to pending (with a released event), it does not fail.
+func TestScheduledSend_AbortBeforeSend_Released(t *testing.T) {
+	f := newScheduledSendFixture(t)
+	fireAt := time.Now().Add(2 * time.Minute)
+	sm := f.schedule(t, f.bob, "aborted", fireAt)
+	events, unsub := f.srv.events.Subscribe("user." + f.bob.ID + ".chat.scheduled")
+	defer unsub()
+
+	f.srv.scheduledRuntime().abort()
+	ok, err := f.sms.ClaimScheduledMessage(context.Background(), sm.ID, time.Now())
+	require.NoError(t, err)
+	require.True(t, ok)
+	released := f.srv.fireScheduledMessage(context.Background(), f.sms, f.row(t, f.bob, sm.ID))
+
+	assert.True(t, released)
+	assert.Equal(t, ScheduledMessagePending, f.row(t, f.bob, sm.ID).Status)
+	assert.Empty(t, f.topicMessages(t))
+	assert.Equal(t, []string{"released"}, scheduledEventActions(t, collectEvents(events)))
+}
+
+// abortingTopicStore aborts the sweeper's deliveries during the send's own
+// topic lookup (the second GetTopic of a fire), after the fire-time checks
+// passed.
+type abortingTopicStore struct {
+	WebChatStore
+	ScheduledMessageStore
+	srv   *Server
+	calls atomic.Int32
+}
+
+func (w *abortingTopicStore) GetTopic(ctx context.Context, id string) (*WebChatTopic, error) {
+	if w.calls.Add(1) == 2 {
+		w.srv.scheduledRuntime().abort()
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+	}
+	return w.WebChatStore.GetTopic(ctx, id)
+}
+
+// A send refused because it was cut short is recorded as a delivery error,
+// never as an access problem.
+func TestScheduledSend_AbortDuringSend_DeliveryError(t *testing.T) {
+	f := newScheduledSendFixture(t)
+	fireAt := time.Now().Add(2 * time.Minute)
+	sm := f.schedule(t, f.bob, "cut short", fireAt)
+	f.srv.SetWebChatStore(&abortingTopicStore{WebChatStore: f.wcs, ScheduledMessageStore: f.sms, srv: f.srv})
+
+	assert.Equal(t, 1, f.srv.sweepScheduledMessages(context.Background(), fireAt.Add(time.Second)))
+	got := f.row(t, f.bob, sm.ID)
+	assert.Equal(t, ScheduledMessageFailed, got.Status)
+	assert.Equal(t, ScheduledFailureDeliveryError, got.FailureReason)
+	assert.Empty(t, f.topicMessages(t))
+}
+
+// The runtime is single-use: after a stop, start and sweeps do nothing.
+func TestScheduledSend_NoWorkAfterStop(t *testing.T) {
+	f := newScheduledSendFixture(t)
+	fireAt := time.Now().Add(2 * time.Minute)
+	sm := f.schedule(t, f.bob, "after stop", fireAt)
+	f.srv.stopScheduledSendSweeper(context.Background())
+	f.srv.startScheduledSendSweeper(context.Background())
+	assert.Equal(t, 0, f.srv.sweepScheduledMessages(context.Background(), fireAt.Add(time.Second)))
+	assert.Equal(t, ScheduledMessagePending, f.row(t, f.bob, sm.ID).Status)
+	f.srv.waitScheduledDeliveries()
+}
+
+// The due list has one row per sender (the oldest); the next one is
+// fetched per sender.
+func TestScheduledStore_SQLite_DuePerSender(t *testing.T) {
+	sms, _ := openScheduledStorePair(t)
+	testScheduledStoreDuePerSender(t, sms[0])
+}
+
+func testScheduledStoreDuePerSender(t *testing.T, sms ScheduledMessageStore) {
+	ctx := context.Background()
+	base := time.Now().UTC().Truncate(time.Second).Add(-time.Hour)
+	add := func(key, sender string, at time.Time) *ScheduledChatMessage {
+		m := newTestScheduledRow(key, sender, at)
+		_, _, err := sms.CreateScheduledMessage(ctx, m)
+		require.NoError(t, err)
+		return m
+	}
+	a1 := add("dps-a1", "dps-a", base)
+	add("dps-a2", "dps-a", base.Add(time.Second))
+	add("dps-a3", "dps-a", base.Add(2*time.Second))
+	b1 := add("dps-b1", "dps-b", base.Add(3*time.Second))
+	add("dps-c-future", "dps-c", time.Now().Add(time.Hour))
+
+	due, err := sms.ListDueScheduledMessages(ctx, time.Now(), 10)
+	require.NoError(t, err)
+	var ids []string
+	for _, d := range due {
+		if strings.HasPrefix(d.SenderUserID, "dps-") {
+			ids = append(ids, d.ID)
+		}
+	}
+	assert.Equal(t, []string{a1.ID, b1.ID}, ids)
+
+	next, err := sms.NextDueScheduledMessage(ctx, "dps-a", time.Now())
+	require.NoError(t, err)
+	require.NotNil(t, next)
+	assert.Equal(t, a1.ID, next.ID)
+	ok, err := sms.ClaimScheduledMessage(ctx, a1.ID, time.Now())
+	require.NoError(t, err)
+	require.True(t, ok)
+	next, err = sms.NextDueScheduledMessage(ctx, "dps-a", time.Now())
+	require.NoError(t, err)
+	require.NotNil(t, next)
+	assert.Equal(t, tid("sched-dps-a2"), next.ID)
+	next, err = sms.NextDueScheduledMessage(ctx, "dps-c", time.Now())
+	require.NoError(t, err)
+	assert.Nil(t, next, "not due yet")
 }

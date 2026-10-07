@@ -98,9 +98,15 @@ type ScheduledMessageStore interface {
 	// the sender's).
 	CancelScheduledMessage(ctx context.Context, senderUserID, id string, now time.Time) (bool, error)
 
-	// ListDueScheduledMessages returns up to limit pending rows whose
-	// fire time is at or before now, oldest first.
+	// ListDueScheduledMessages returns, for up to limit senders, each
+	// sender's oldest pending row whose fire time is at or before now,
+	// oldest first. One row per sender keeps a sender with many due rows
+	// from filling the list; the sweeper fetches that sender's next row
+	// with NextDueScheduledMessage.
 	ListDueScheduledMessages(ctx context.Context, now time.Time, limit int) ([]ScheduledChatMessage, error)
+	// NextDueScheduledMessage returns the sender's oldest pending row whose
+	// fire time is at or before now, or nil when there is none.
+	NextDueScheduledMessage(ctx context.Context, senderUserID string, now time.Time) (*ScheduledChatMessage, error)
 	// ClaimScheduledMessage moves a row from pending to sending. Exactly
 	// one concurrent caller gets true; only that caller may deliver it.
 	ClaimScheduledMessage(ctx context.Context, id string, now time.Time) (bool, error)
@@ -334,15 +340,35 @@ func (s *sqliteWebChatStore) CancelScheduledMessage(ctx context.Context, senderU
 }
 
 func (s *sqliteWebChatStore) ListDueScheduledMessages(ctx context.Context, now time.Time, limit int) ([]ScheduledChatMessage, error) {
+	// Window functions need SQLite 3.25+; both bundled drivers are newer.
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT `+sqliteScheduledColumns+` FROM webchat_scheduled_message
-		  WHERE status = ? AND fire_at <= ?
+		`SELECT `+sqliteScheduledColumns+` FROM (
+		    SELECT *, ROW_NUMBER() OVER (PARTITION BY sender_user_id ORDER BY fire_at, id) AS sender_rank
+		      FROM webchat_scheduled_message
+		     WHERE status = ? AND fire_at <= ?
+		  ) AS due
+		  WHERE sender_rank = 1
 		  ORDER BY fire_at, id LIMIT ?`,
 		ScheduledMessagePending, sqliteScheduledTime(now.UTC().Truncate(time.Second)), limit)
 	if err != nil {
 		return nil, fmt.Errorf("webchat store: list due scheduled messages: %w", err)
 	}
 	return collectSQLiteScheduled(rows)
+}
+
+func (s *sqliteWebChatStore) NextDueScheduledMessage(ctx context.Context, senderUserID string, now time.Time) (*ScheduledChatMessage, error) {
+	row, err := scanSQLiteScheduled(s.db.QueryRowContext(ctx,
+		`SELECT `+sqliteScheduledColumns+` FROM webchat_scheduled_message
+		  WHERE sender_user_id = ? AND status = ? AND fire_at <= ?
+		  ORDER BY fire_at, id LIMIT 1`,
+		senderUserID, ScheduledMessagePending, sqliteScheduledTime(now.UTC().Truncate(time.Second))))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("webchat store: next due scheduled message: %w", err)
+	}
+	return row, nil
 }
 
 func (s *sqliteWebChatStore) ClaimScheduledMessage(ctx context.Context, id string, now time.Time) (bool, error) {

@@ -195,14 +195,33 @@ func (s *pgWebChatStore) CancelScheduledMessage(ctx context.Context, senderUserI
 
 func (s *pgWebChatStore) ListDueScheduledMessages(ctx context.Context, now time.Time, limit int) ([]ScheduledChatMessage, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT `+pgScheduledColumns+` FROM webchat_scheduled_message
-		  WHERE status = $1 AND fire_at <= $2
+		`SELECT `+pgScheduledColumns+` FROM (
+		    SELECT *, ROW_NUMBER() OVER (PARTITION BY sender_user_id ORDER BY fire_at, id) AS sender_rank
+		      FROM webchat_scheduled_message
+		     WHERE status = $1 AND fire_at <= $2
+		  ) AS due
+		  WHERE sender_rank = 1
 		  ORDER BY fire_at, id LIMIT $3`,
 		ScheduledMessagePending, now.UTC(), limit)
 	if err != nil {
 		return nil, fmt.Errorf("webchat store: list due scheduled messages: %w", err)
 	}
 	return collectPGScheduled(rows)
+}
+
+func (s *pgWebChatStore) NextDueScheduledMessage(ctx context.Context, senderUserID string, now time.Time) (*ScheduledChatMessage, error) {
+	row, err := scanPGScheduled(s.db.QueryRowContext(ctx,
+		`SELECT `+pgScheduledColumns+` FROM webchat_scheduled_message
+		  WHERE sender_user_id = $1 AND status = $2 AND fire_at <= $3
+		  ORDER BY fire_at, id LIMIT 1`,
+		senderUserID, ScheduledMessagePending, now.UTC()))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("webchat store: next due scheduled message: %w", err)
+	}
+	return row, nil
 }
 
 func (s *pgWebChatStore) ClaimScheduledMessage(ctx context.Context, id string, now time.Time) (bool, error) {
