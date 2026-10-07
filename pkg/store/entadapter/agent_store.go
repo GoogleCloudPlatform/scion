@@ -2319,36 +2319,55 @@ func (s *AgentStore) ReassignProjectBroker(ctx context.Context, oldBrokerID, new
 }
 
 // AggregateAgentHealth computes health-oriented counts via GROUP BY queries
-// instead of loading full agent records. The approach uses three lightweight
-// queries:
-//  1. COUNT(*) GROUP BY phase            → ByPhase + Total
+// instead of loading full agent records:
+//  1. COUNT(*) GROUP BY phase, activity → ByPhase, Total, Considered,
+//     Errored and each problem group's true count
 //  2. COUNT(*) GROUP BY runtime_broker_id, phase, activity → ByBroker
-//  3. SELECT name WHERE phase/activity ∈ unhealthy (limit 100 each)
+//  3. one capped SELECT per problem group for its references
+//
+// Nothing here reads activity "stalled": stalls are not a health signal.
 func (s *AgentStore) AggregateAgentHealth(ctx context.Context) (*store.AgentHealthAggregate, error) {
 	result := &store.AgentHealthAggregate{
 		ByPhase:  make(map[string]int),
 		ByBroker: make(map[string]store.AgentBrokerCounts),
 	}
 
-	// 1. Count agents by phase (non-deleted only).
-	var phaseCounts []struct {
-		Phase string `json:"phase"`
-		Count int    `json:"count"`
+	// 1. Fleet-wide counts by phase and activity (non-deleted only).
+	var stateCounts []struct {
+		Phase    string `json:"phase"`
+		Activity string `json:"activity"`
+		Count    int    `json:"count"`
 	}
 	err := s.client.Agent.Query().
 		Where(agent.DeletedAtIsNil()).
-		GroupBy(agent.FieldPhase).
+		GroupBy(agent.FieldPhase, agent.FieldActivity).
 		Aggregate(ent.Count()).
-		Scan(ctx, &phaseCounts)
+		Scan(ctx, &stateCounts)
 	if err != nil {
-		return nil, fmt.Errorf("aggregate phase counts: %w", err)
+		return nil, fmt.Errorf("aggregate agent state counts: %w", err)
 	}
-	for _, pc := range phaseCounts {
-		result.ByPhase[pc.Phase] += pc.Count
-		result.Total += pc.Count
+	for _, sc := range stateCounts {
+		result.ByPhase[sc.Phase] += sc.Count
+		result.Total += sc.Count
+		if sc.Phase == string(state.PhaseStopped) {
+			continue
+		}
+		result.Considered += sc.Count
+		if sc.Phase == string(state.PhaseError) || sc.Activity == string(state.ActivityCrashed) {
+			result.Errored += sc.Count
+		}
+		if sc.Phase == string(state.PhaseError) {
+			result.ErrorPhase.Count += sc.Count
+		}
+		switch sc.Activity {
+		case string(state.ActivityCrashed):
+			result.Crashed.Count += sc.Count
+		case string(state.ActivityOffline):
+			result.Offline.Count += sc.Count
+		}
 	}
 
-	// 2. Count agents by broker, phase, and activity for per-broker health tallies.
+	// 2. Per-broker running and needing-attention tallies.
 	var brokerCounts []struct {
 		BrokerID string `json:"runtime_broker_id"`
 		Phase    string `json:"phase"`
@@ -2364,58 +2383,81 @@ func (s *AgentStore) AggregateAgentHealth(ctx context.Context) (*store.AgentHeal
 		return nil, fmt.Errorf("aggregate broker counts: %w", err)
 	}
 	for _, bc := range brokerCounts {
-		bid := bc.BrokerID
-		if bid == "" {
+		if bc.BrokerID == "" {
 			continue
 		}
-		entry := result.ByBroker[bid]
-		entry.Count += bc.Count
-		if bc.Phase != "error" && bc.Activity != "stalled" && bc.Activity != "crashed" {
-			entry.Healthy += bc.Count
+		entry := result.ByBroker[bc.BrokerID]
+		if bc.Phase == string(state.PhaseRunning) {
+			entry.Running += bc.Count
 		}
-		result.ByBroker[bid] = entry
+		if agentNeedsAttention(bc.Phase, bc.Activity) {
+			entry.Attention += bc.Count
+		}
+		result.ByBroker[bc.BrokerID] = entry
 	}
 
-	// 3. Fetch names of unhealthy agents (capped lists).
-	const unhealthyCap = 100
-
-	stalledAgents, err := s.client.Agent.Query().
-		Where(agent.DeletedAtIsNil(), agent.ActivityEQ("stalled")).
-		Select(agent.FieldName).
-		Limit(unhealthyCap).
-		All(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("query stalled agents: %w", err)
+	// 3. Capped references per problem group. Only query a group that has
+	// members.
+	notStopped := agent.Or(agent.PhaseNEQ(string(state.PhaseStopped)), agent.PhaseIsNil())
+	groups := []struct {
+		kind  string
+		group *store.AgentProblemGroup
+		where []predicate.Agent
+	}{
+		{"errored", &result.ErrorPhase, []predicate.Agent{agent.PhaseEQ(string(state.PhaseError))}},
+		{"crashed", &result.Crashed, []predicate.Agent{agent.ActivityEQ(string(state.ActivityCrashed)), notStopped}},
+		{"offline", &result.Offline, []predicate.Agent{agent.ActivityEQ(string(state.ActivityOffline)), notStopped}},
 	}
-	for _, a := range stalledAgents {
-		result.StalledNames = append(result.StalledNames, a.Name)
-	}
-
-	crashedAgents, err := s.client.Agent.Query().
-		Where(agent.DeletedAtIsNil(), agent.ActivityEQ("crashed")).
-		Select(agent.FieldName).
-		Limit(unhealthyCap).
-		All(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("query crashed agents: %w", err)
-	}
-	for _, a := range crashedAgents {
-		result.CrashedNames = append(result.CrashedNames, a.Name)
-	}
-
-	erroredAgents, err := s.client.Agent.Query().
-		Where(agent.DeletedAtIsNil(), agent.PhaseEQ("error")).
-		Select(agent.FieldName).
-		Limit(unhealthyCap).
-		All(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("query errored agents: %w", err)
-	}
-	for _, a := range erroredAgents {
-		result.ErroredNames = append(result.ErroredNames, a.Name)
+	for _, g := range groups {
+		if g.group.Count == 0 {
+			continue
+		}
+		refs, err := s.agentHealthRefs(ctx, g.where...)
+		if err != nil {
+			return nil, fmt.Errorf("query %s agents: %w", g.kind, err)
+		}
+		g.group.Refs = refs
 	}
 
 	return result, nil
+}
+
+// agentNeedsAttention reports whether an agent in this phase and activity
+// needs an operator: phase error, or activity crashed or offline outside
+// phase stopped. Activity stalled never counts.
+func agentNeedsAttention(phase, activity string) bool {
+	if phase == string(state.PhaseError) {
+		return true
+	}
+	if phase == string(state.PhaseStopped) {
+		return false
+	}
+	return activity == string(state.ActivityCrashed) || activity == string(state.ActivityOffline)
+}
+
+// agentHealthRefs returns up to store.AgentHealthRefCap non-deleted agents
+// matching where, most recently updated first (ID breaks ties so the list is
+// stable across polls), reading only the reference columns.
+func (s *AgentStore) agentHealthRefs(ctx context.Context, where ...predicate.Agent) ([]store.AgentHealthRef, error) {
+	rows, err := s.client.Agent.Query().
+		Where(append([]predicate.Agent{agent.DeletedAtIsNil()}, where...)...).
+		Order(agent.ByUpdated(entsql.OrderDesc()), agent.ByID()).
+		Select(agent.FieldID, agent.FieldName, agent.FieldProjectID, agent.FieldRuntimeBrokerID).
+		Limit(store.AgentHealthRefCap).
+		All(ctx)
+	if err != nil {
+		return nil, err
+	}
+	refs := make([]store.AgentHealthRef, 0, len(rows))
+	for _, a := range rows {
+		refs = append(refs, store.AgentHealthRef{
+			ID:        a.ID.String(),
+			Name:      a.Name,
+			ProjectID: a.ProjectID.String(),
+			BrokerID:  a.RuntimeBrokerID,
+		})
+	}
+	return refs, nil
 }
 
 // setAgentRunIDAttempts bounds SetAgentRunID's read-then-swap loop. Each

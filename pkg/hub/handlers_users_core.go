@@ -66,7 +66,7 @@ func (s *Server) handleUsers(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		s.listUsers(w, r)
 	case http.MethodPost:
-		s.createUser(w, r)
+		s.handleProvisionUser(w, r)
 	default:
 		MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 	}
@@ -126,13 +126,6 @@ func (s *Server) listUsers(w http.ResponseWriter, r *http.Request) {
 		NextCursor: result.NextCursor,
 		TotalCount: totalCount,
 	})
-}
-
-func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
-	// User creation is managed by the hub's internal sign-in flows (OAuth).
-	// Direct API creation is not permitted.
-	writeError(w, http.StatusForbidden, ErrCodeForbidden,
-		"user creation is managed through sign-in flows and cannot be performed via the API", nil)
 }
 
 func (s *Server) handleUserByID(w http.ResponseWriter, r *http.Request) {

@@ -771,3 +771,106 @@ deployment. Human questions: NONE. Agent-directed manager exchanges are
 separate. The three accepted correction paths remain the only staged paths;
 this log is the sole unstaged path. Retain and BLOCK for log acceptance and
 durability disposition; never task-complete or self-delete.
+
+## 2026-10-07 — PR #2774 pinned upstream repair merge and focused GREEN
+
+The sole frozen upstream/main and GoogleCloudPlatform/scion#2782 repair pin is
+`b951814d8fb6b56f17adebca388baec9896b61b1`. Exact merge base is
+`c885fe2aeeb5bc7433079e902e905c8d547ec702`; publication HEAD/ORIG_HEAD remain
+`54bfc9559ce8f4824d9be7ca6174ac2c8fff583a`, with pending MERGE_HEAD exact b951.
+No moving-main query or chase occurred after the recovered pin was frozen.
+GoogleCloudPlatform/scion#2782 is separately owned and inherited, outside
+PR #2774 authored scope: `pkg/hub/handlers_agents_core.go` is exact upstream
+blob `70a6e59339e3c82bfc3de37bf9c9c56bdbd96485`, and line 2629 passes `s.store`
+to `dispatchDeleteFailedCreate`. No local repair was copied or authored.
+
+The bounded connectivity history remains truthful and preserved. Amendment 12
+stopped after a truncated pin-capture output; Amendment 13 recovered the exact
+pin and authorized one literal depth-1 b951 fetch, then stopped on absent raw
+parent `05df386e4e0b67d3a3b3bfbff425a176b04582e7` and merge-base exit 1.
+Amendment 14 authorized one literal depth-8 parent fetch; the nine raw commits
+from c885 through b951 were proved, but b951 remained shallow and merge-base
+still returned 1. Amendment 15 authorized one literal depth-9 b951 fetch;
+b951 ceased to be shallow and merge-base returned exact c885. Each fetch used
+`--no-tags` and literal `https://github.com/GoogleCloudPlatform/scion.git`, once,
+without retry, moving ref, manual shallow edit, deepen, unshallow or ref/config
+repair. Earlier stops were not rewritten or relabeled successful maps.
+All Amendment 12–15 blocker/map artifacts remain unchanged and protected.
+
+The accepted Amendment 15 non-writing `merge-tree --trivial-merge` map ran once:
+zero conflicts, two clean/noninterfering overlaps, exactly 13 existing authored
+paths and 6,862 inherited paths of 6,875 entries. `server.go` takes the inherited
+upstream rollback call's store argument; `handlers_health_summary_test.go`
+inherits upstream health-schema/test updates and retains the same 28-line
+decision-audit warning fixture. No path 14, additional authored dependency,
+API, behavior or scope expansion was required. Full map evidence is
+`m2-defaultoff-pr2774-repair-forward-map-amendment-15.txt`, 50,200 lines /
+1,858,169 bytes / SHA-256
+`d65c7157e1c4a403668493237f12f721b7e7ca024ae870a22f719dba356fb32a`;
+review `m2-defaultoff-pr2774-repair-forward-map-review-amendment-15.md`,
+2,891 lines / 115,753 bytes / SHA-256
+`7fa22fe0348152dfb864203f0cb07fc8fa2e02487b888a3e397e52e5189f4e56`.
+
+Amendment 16 released one ordinary `git merge --no-ff --no-commit` of exact b951.
+It exited 0 with automatic merging of the two overlaps, zero conflicts and no
+manual resolution/edit/format/staging. Pending candidate tree is
+`ab2d213e8932e1f98fb40cd6565020b4fdfe253c`; the full staged inventory matches the
+map exactly: 13 authored paths against b951 and 6,862 exact inherited entries.
+Inherited #2782 repair and both overlap postimages are exact. Complete index
+inventory SHA-256 is
+`9352104234bc6f6ff2edd4c031ace26e145db70f08ac5dee5e9eb57f76c5ba32`.
+Protected authored patch `m2-defaultoff-pr2774-repair-forward-merge-amendment-16.patch`:
+3,823 lines / 178,213 bytes / SHA-256
+`31a98c3f80832d82bc8dd422effb419ca6f36c0d9c7240b6ce0b67d8de1f165d`.
+Pre-validation review `m2-defaultoff-pr2774-repair-forward-merge-review-amendment-16.md`:
+4,158 lines / 224,758 bytes / SHA-256
+`b5cce59b867a7e73d833af18bd80db900c409710d1a46bc73bc36a7aec3799d8`.
+Both were exclusively created and completely verified before the focused gate.
+
+After every merge oracle passed, the one exact 2,353-byte focused command
+including final newline, SHA-256
+`e3d52263272a0e55dcfea0fe5d78173eeef8e8a7305dfb3970fc859b19fabb7f`, ran once.
+UTC start was `2026-10-07T17:33:32.148251+00:00`, end
+`2026-10-07T17:49:29.761371+00:00`; wall 957.6131339760032 seconds includes the
+normal wrapper queue. Slot 4 was acquired after 180 seconds with 42 GiB available.
+Controls retained `HEAVY_BUILD_MAX_WAIT=2700`, acquire-time `free -g` available
+at least 30 GiB, `ulimit -v 12000000`, `GOMEMLIMIT=6GiB`, `GOGC=40`, compiler
+concurrency 1 via `GOFLAGS=-gcflags=-c=1`, shared GOCACHE, outer 15-minute and
+Go-test 14-minute bounds, `-count=1 -p 1 -v`, experiments/Hub packages and the
+exact 40-name selector. Exit 0; experiments passed in 0.009 seconds and Hub in
+13.501 seconds. Exactly 40 top-level tests plus 147 subtests produced 187 RUN /
+187 PASS, with zero failure, skip, missing, unexpected, duplicate or unmatched
+outcome and no setup/compile/VCS/resource/timeout/deadlock/unrecovered-panic
+diagnostic. Two ERROR logs were expected passing negative fixtures: malformed
+experiment row and recovered subscription-loop failure. Both remain visible;
+there were no other ERROR logs. Complete sealed raw evidence with every selected
+name/subtest outcome is `m2-defaultoff-pr2774-repair-forward-merge-green-amendment-16.txt`,
+mode 0644, 3,560 lines / 382,269 bytes / SHA-256
+`6846642b649a0962fecd1367b6126d86a4a6cac94d8110765a24842de628f18b`.
+Postflight preserved exact pending metadata, index/tree/postimages, all working
+blobs, 13 authored/6,862 inherited paths, refs, repair and all protected evidence;
+no unstaged/unmerged/untracked entry or surviving task process preceded this append.
+
+Local lint remains INCONCLUSIVE (the sole prior invocation exited 124 during
+compilation), never GREEN, with no retry now or later. This focused GREEN cannot
+clear lint. Merge commit, normal push, new authoritative upstream CI and readiness
+remain pending; upstream lint and required checks must be GREEN after push.
+The previous fresh local review applies only to be96, not a later merge SHA.
+No new reviewer or readiness claim is made by this log entry.
+
+Production NEW remains default false and structurally unadmitted. The private
+fixture-only positive contract, outer performance decorator, stable router,
+exact legacy writer ownership and close/drain mechanics remain unchanged.
+No trust, admission, activation, deployment, persistence, timing, alerting,
+cutover, legacy retirement, full-M2 or explain-round-7 gate is opened or claimed.
+
+Mutation inventory: exact bounded connectivity fetches and protected map packets;
+one authorized ordinary pending merge, one wrapped focused invocation and its
+three protected artifacts; this single additions-only log append and two
+protected log artifacts. No manual source/test correction, retry, lint rerun,
+formatting, additional staging, log staging, commit, push, PR/reviewer/agent
+action, moving-main chase, ref/config repair, rebase/force, original-M2 update,
+production admission/activation/deployment/cutover/retirement. Human questions:
+NONE; agent-directed manager reports are separate. The accepted pending index
+is unchanged; this log is the sole unstaged path. Retain and BLOCK for log
+acceptance/durability disposition; never task-complete or self-delete.
