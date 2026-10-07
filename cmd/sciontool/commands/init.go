@@ -128,8 +128,9 @@ type InitRunOptions struct {
 	DisablePortForwarding bool
 
 	// DisableConduit keeps the legacy port-forward tunnel even when the hub
-	// advertises conduit (SCION_HUB_CONDUIT=true). The zero value dials the
-	// conduit endpoint when, and only when, the hub advertises it.
+	// advertises conduit (hub.conduit in SCION_HUB_EXPERIMENTS). The zero
+	// value dials the conduit endpoint when, and only when, the hub
+	// advertises it.
 	DisableConduit bool
 
 	// DisableReExec skips RunInit's environ-purge re-exec (see
@@ -587,8 +588,10 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// staged secrets are written so that the GCP credentials file
 	// referenced by SCION_OTEL_GCP_CREDENTIALS exists on disk.
 	var telemetryPipeline *telemetry.Pipeline
+	telemetryCtx := context.Background()
 	if pipeline := telemetry.New(); pipeline != nil {
-		telemetryCtx, telemetryCancel := context.WithCancel(context.Background())
+		var telemetryCancel context.CancelFunc
+		telemetryCtx, telemetryCancel = context.WithCancel(context.Background())
 		if err := pipeline.Start(telemetryCtx); err != nil {
 			log.Error("Failed to start telemetry: %v", err)
 			telemetryCancel()
@@ -627,10 +630,11 @@ func RunInit(args []string, opts InitRunOptions) int {
 		lifecycleManager.RegisterHandler(eventName, loggingHandler.Handle)
 	}
 
-	// Create telemetry handler for hook-to-span conversion
-	// Note: The hook command is invoked separately by harnesses, so telemetry
-	// handler registration happens in hook.go. This handler is for lifecycle events.
-	var telemetryHandler *handlers.TelemetryHandler
+	// Create telemetry handler for lifecycle-event spans and metrics.
+	// Harness hook events are handled by separate `sciontool hook`
+	// processes (hook.go), which also report session metrics to the Hub.
+	// This handler sees only lifecycle events, which carry no session ID or
+	// counts, so it does not report session metrics.
 	var lifecycleProviders *telemetry.Providers
 	if telemetryPipeline != nil && telemetryPipeline.Config() != nil {
 		redactor := telemetry.NewRedactor(telemetryPipeline.Config().Redaction)
@@ -643,7 +647,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 			log.Error("Failed to create lifecycle telemetry providers: %v", provErr)
 		}
 
-		telemetryHandler = registerLifecycleTelemetryHandler(lifecycleManager, lifecycleProviders, redactor)
+		registerLifecycleTelemetryHandler(lifecycleManager, lifecycleProviders, redactor)
 		log.Info("Telemetry handler initialized for hook-to-span conversion")
 	}
 	if lifecycleProviders != nil {
@@ -662,8 +666,8 @@ func RunInit(args []string, opts InitRunOptions) int {
 	harnessReq, harnessReqErr := hooks.LoadHarnessManifestRequirement(agentHome)
 	if harnessReqErr != nil {
 		log.Error("Failed to load harness manifest: %v", harnessReqErr)
-		// Treat parse errors on a present manifest as fatal — the harness
-		// staged something we cannot interpret.
+		// Fatal: the staged manifest cannot be interpreted, or names a
+		// provisioner that cannot run (legacy "builtin").
 		reportInitFailure(agentHome, fmt.Errorf("failed to load harness manifest: %w", harnessReqErr))
 		return 1
 	}
@@ -788,39 +792,13 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// same as this field's zero-value contract.
 	lifecycleManager.WorkloadWorkingDir = opts.WorkingDir
 
-	// Load the env overlay produced by the pre-start provisioner. Resolve
-	// any from_file references to in-memory values so secrets are not
-	// written back to logs or persistent JSON. Fail startup when the
-	// overlay is malformed or references missing files for a required
-	// container-script harness — the child would otherwise launch without
-	// its credentials.
-	var harnessEnvOverlay map[string]string
-	var nativeTelemetryPolicy string
-	if harnessReq.EnvOverlayPath != "" {
-		overlayPath, allowedRoots, err := harnessReq.ResolveEnvOverlay(agentHome)
-		var overlay map[string]string
-		if err == nil {
-			overlay, err = hooks.LoadEnvOverlay(overlayPath, allowedRoots)
-		}
-		if err != nil {
-			log.Error("Failed to load harness env overlay %s: %v", overlayPath, err)
-			if harnessReq.Required {
-				reportInitFailure(agentHome, fmt.Errorf("invalid harness env overlay: %w", err))
-				return 1
-			}
-		} else if len(overlay) > 0 {
-			if policy, ok := overlay[hooks.NativeTelemetryPolicyKey]; ok {
-				if policy != "enabled" && policy != "disabled" {
-					log.Error("Invalid native telemetry policy marker")
-					reportInitFailure(agentHome, errors.New("invalid native telemetry policy marker in harness env overlay"))
-					return 1
-				}
-				nativeTelemetryPolicy = policy
-				delete(overlay, hooks.NativeTelemetryPolicyKey)
-			}
-			harnessEnvOverlay = overlay
-			log.Info("Loaded %d env overlay entries from %s", len(overlay), overlayPath)
-		}
+	// Load and validate the env overlay produced by the pre-start
+	// provisioner, and hand its usage-source selection to the
+	// already-running telemetry pipeline.
+	harnessEnvOverlay, nativeTelemetryPolicy, overlayErr := loadHarnessEnvOverlay(telemetryCtx, harnessReq, agentHome, telemetryPipeline)
+	if overlayErr != nil {
+		reportInitFailure(agentHome, overlayErr)
+		return 1
 	}
 
 	// Configure git credentials for shared-workspace projects (git-workspace hybrid).
@@ -887,22 +865,6 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// Initialize hubClient early so the metadata server's fetch callbacks
 	// can use it without data races or startup race conditions.
 	hubClient := hub.NewClient()
-
-	// Wire the OnSessionEnd callback so the aggregator sends finalized
-	// session metrics to the Hub when a session completes. The closure
-	// captures hubClient, which is already initialized above.
-	if telemetryHandler != nil && hubClient != nil && hubClient.IsConfigured() {
-		telemetryHandler.OnSessionEnd = func(summary telemetry.SessionSummary) {
-			payload := hub.SummaryToMetricsPayload(summary)
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			if err := hubClient.ReportMetrics(ctx, payload); err != nil {
-				log.Error("Failed to report session metrics to hub: %v", err)
-			} else {
-				log.Info("Session metrics reported to hub for session %s", summary.SessionID)
-			}
-		}
-	}
 
 	// Start GCP metadata server if configured
 	var metadataServer *metadata.Server
@@ -1514,6 +1476,85 @@ waitLoop:
 
 	log.Info("Child exited with code %d", result.code)
 	return result.code
+}
+
+// loadHarnessEnvOverlay loads the env overlay produced by the pre-start
+// provisioner, validates and strips the native telemetry policy marker, and
+// hands the overlay's usage-source selection to the already-running telemetry
+// pipeline. It returns the overlay for the harness child and the policy.
+//
+// from_file references are resolved to in-memory values so secrets are not
+// written back to logs or persistent JSON. A non-nil error is fatal and is
+// secret-free, so RunInit passes it to reportInitFailure: either the overlay
+// is malformed or references missing files for a required container-script
+// harness (the child would otherwise launch without its credentials), or the
+// policy marker is invalid. A load failure for a non-required harness is
+// logged and the child launches without an overlay.
+func loadHarnessEnvOverlay(ctx context.Context, harnessReq hooks.HarnessManifestRequirement, agentHome string, pipeline *telemetry.Pipeline) (map[string]string, string, error) {
+	if harnessReq.EnvOverlayPath == "" {
+		return nil, "", nil
+	}
+	overlayPath, allowedRoots, err := harnessReq.ResolveEnvOverlay(agentHome)
+	var overlay map[string]string
+	if err == nil {
+		overlay, err = hooks.LoadEnvOverlay(overlayPath, allowedRoots)
+	}
+	if err != nil {
+		log.Error("Failed to load harness env overlay %s: %v", overlayPath, err)
+		if harnessReq.Required {
+			return nil, "", fmt.Errorf("invalid harness env overlay: %w", err)
+		}
+		return nil, "", nil
+	}
+	if len(overlay) == 0 {
+		return nil, "", nil
+	}
+	var nativeTelemetryPolicy string
+	if policy, ok := overlay[hooks.NativeTelemetryPolicyKey]; ok {
+		if policy != "enabled" && policy != "disabled" {
+			log.Error("Invalid native telemetry policy marker")
+			return nil, "", errors.New("invalid native telemetry policy marker in harness env overlay")
+		}
+		nativeTelemetryPolicy = policy
+		delete(overlay, hooks.NativeTelemetryPolicyKey)
+	}
+	log.Info("Loaded %d env overlay entries from %s", len(overlay), overlayPath)
+	activateOverlayUsageSource(ctx, pipeline, overlay, nativeTelemetryPolicy)
+	return overlay, nativeTelemetryPolicy, nil
+}
+
+// activateOverlayUsageSource hands the provisioner's usage-source selection
+// to the already-running telemetry pipeline (ptone/scion#3391). The pipeline
+// starts before the pre-start provisioner runs, so Start cannot see a
+// SCION_USAGE_SOURCE that only the generated env overlay declares. Only the
+// single SCION_USAGE_SOURCE value is passed, never the rest of the overlay,
+// and Pipeline.ActivateUsageSource accepts only "native" and keeps runtime
+// environment precedence. A disabled native telemetry policy never activates
+// native usage. When the overlay selects native usage but it is not
+// activated, the reason is logged so operators can tell why usage is absent.
+func activateOverlayUsageSource(ctx context.Context, pipeline *telemetry.Pipeline, overlay map[string]string, nativeTelemetryPolicy string) {
+	source, ok := overlay["SCION_USAGE_SOURCE"]
+	if !ok || source != telemetry.UsageSourceNative {
+		return
+	}
+	if nativeTelemetryPolicy == "disabled" {
+		log.Info("Native usage derivation not activated: native telemetry policy is disabled")
+		return
+	}
+	if pipeline == nil {
+		log.Info("Native usage derivation not activated: telemetry is not running")
+		return
+	}
+	outcome, err := pipeline.ActivateUsageSource(ctx, source)
+	if err != nil {
+		log.Error("Failed to activate usage source from harness env overlay: %v", err)
+		return
+	}
+	if outcome == telemetry.UsageActivated {
+		log.Info("Activated native usage derivation from harness env overlay")
+		return
+	}
+	log.Info("Native usage derivation not activated: %s", outcome)
 }
 
 func registerLifecycleTelemetryHandler(manager *hooks.LifecycleManager, providers *telemetry.Providers, redactor *telemetry.Redactor) *handlers.TelemetryHandler {
@@ -3022,12 +3063,13 @@ var errSharedWorkspaceGitPrivilegeDropRequired = errors.New(
 // directly against gitconfigPath under this process's own identity, no
 // Credential override.
 //
-// Independently of all three cases above, gitconfigPath is stat'd (never
-// opened) before every run: a FIFO planted there would make git's own open
-// block forever with no writer, hanging RunInit, and stat — unlike open —
-// never blocks on one. A hung startup is a concrete, self-contained failure
-// mode any of the three cases above can hit, not a symlink-specific
-// privilege question the uid separation above already answers.
+// Independently of which identity case above applies, gitconfigPath is
+// stat'd (never opened) before every run: a FIFO planted there would make
+// git's own open block forever with no writer, hanging RunInit, and stat —
+// unlike open — never blocks on one. A hung startup is a concrete,
+// self-contained failure mode any of those cases can hit, not a
+// symlink-specific privilege question the uid separation above already
+// answers.
 func configureSharedWorkspaceGit(agentHome string, uid, gid int, requirePrivilegeDrop bool) error {
 	log.Info("Configuring git credentials for shared workspace")
 
@@ -3038,6 +3080,17 @@ func configureSharedWorkspaceGit(agentHome string, uid, gid int, requirePrivileg
 		return nil
 	}
 
+	// This switch deliberately follows the supervisor's own privilege-drop
+	// decision (the Credential block in supervisor.Supervisor.Run: drop only
+	// when UID > 0 && GID > 0, refuse with ErrPrivilegeDropRequired when
+	// RequirePrivilegeDrop is set and it cannot drop), because the
+	// harness that later reads this .gitconfig runs under exactly that
+	// identity. A uid>0 with gid==0 in unenforced mode is therefore NOT a
+	// distinct workload: the supervisor skips the drop, the harness runs as
+	// this process (root), and root writing its own credential.helper and
+	// identity here is what lets it push. Skipping the write in that case
+	// would protect nothing and break git for the harness. See
+	// TestConfigureSharedWorkspaceGit_FollowsSupervisorDropDecision.
 	var configureCmd func(cmd *exec.Cmd)
 	switch {
 	case uid > 0 && gid > 0:
@@ -3091,6 +3144,11 @@ func configureSharedWorkspaceGit(agentHome string, uid, gid int, requirePrivileg
 	return nil
 }
 
+// configureGitCommandGetuid is a test-only seam: production never reassigns
+// it. Tests stub it to 0 to reach configureGitCommand's root-init branch
+// without running as root.
+var configureGitCommandGetuid = os.Getuid
+
 // configureGitCommand points cmd's environment and (when this process is
 // root and uid/gid name someone else) its Credential at the workload
 // identity. It has no opinion on RequirePrivilegeDrop: a caller that needs
@@ -3105,7 +3163,7 @@ func configureGitCommand(cmd *exec.Cmd, uid, gid int) {
 		return
 	}
 
-	currentUID := os.Getuid()
+	currentUID := configureGitCommandGetuid()
 	currentGID := os.Getgid()
 	if currentUID == uid && currentGID == gid {
 		return

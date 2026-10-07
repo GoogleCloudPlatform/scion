@@ -48,11 +48,24 @@ const (
 	// scion.run_id label. It is presented as
 	// Hello.capabilities.endpoint_incarnation.
 	EnvLaunchID = "SCION_LAUNCH_ID"
-	// EnvHubConduit is set to "true" by a hub that serves conduit
-	// sessions (hub.conduit on). Without it sciontool never dials
-	// /api/v1/conduit.
-	EnvHubConduit = "SCION_HUB_CONDUIT"
+	// EnvHubExperiments is the comma-separated list of hub experiments
+	// the agent acts on, set by the hub on every dispatch.
+	EnvHubExperiments = "SCION_HUB_EXPERIMENTS"
+	// ExperimentConduit in EnvHubExperiments means the hub serves conduit
+	// sessions. Without it sciontool never dials /api/v1/conduit.
+	ExperimentConduit = "hub.conduit"
 )
+
+// HubServesConduit reports whether the hub listed ExperimentConduit in
+// EnvHubExperiments, read through getenv.
+func HubServesConduit(getenv func(string) string) bool {
+	for _, name := range strings.Split(getenv(EnvHubExperiments), ",") {
+		if strings.TrimSpace(name) == ExperimentConduit {
+			return true
+		}
+	}
+	return false
+}
 
 // Close codes this package classifies that pkg/conduit does not define
 // (they belong to pkg/conduit/relay, which a target does not import).

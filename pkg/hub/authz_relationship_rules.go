@@ -170,9 +170,10 @@ type relationshipProjectAccess struct {
 }
 
 // isHubScopedServiceAccount reports whether the resource is a hub-scoped
-// GCP service account (no parent).
+// GCP service account: no project parent, either with no parent or with an
+// explicit system parent (isHubScopedResource).
 func isHubScopedServiceAccount(resource Resource) bool {
-	return resource.Type == "gcp_service_account" && resource.ParentType == "" && resource.ParentID == ""
+	return resource.Type == "gcp_service_account" && isHubScopedResource(resource)
 }
 
 // relationshipCandidates lists, in a stable order (ancestor, launcher,
@@ -469,10 +470,13 @@ func projectAccessRelationshipRule(rule RelationshipRuleID) bool {
 // an empty kind when the candidate passes or the stage does not apply, and
 // otherwise the rejection kind and detail.
 //
-// Covered principals: local user principals (PrincipalKindUser and
-// PrincipalKindDev), which includes interactive session users and UAT
-// holders (a *ScopedUserIdentity is PrincipalKindUser). Agents, federated
-// users and every other principal kind are unchanged.
+// Covered principals: user principals (isUserPrincipal). That is local
+// users (PrincipalKindUser and PrincipalKindDev), which includes
+// session users and UAT holders (a *ScopedUserIdentity is
+// PrincipalKindUser), and federated users (PrincipalKindFederatedUser,
+// ptone/scion#3427), whose access comes only from hub-recorded bindings
+// keyed to user:<issuer>:<sub>. Agents, federated agents, federated
+// services and every other principal kind are unchanged.
 //
 // Covered rules: owner and ancestor (projectAccessRelationshipRule).
 // Progeny and hub-member service-account assign are unchanged.
@@ -502,7 +506,7 @@ func (a *AuthzService) relationshipProjectAccessStage(
 	rule RelationshipRuleID,
 	memo *ProjectAdmissionCache,
 ) (string, string) {
-	if principal.Kind != PrincipalKindUser && principal.Kind != PrincipalKindDev {
+	if !isUserPrincipal(principal.Kind) {
 		return "", ""
 	}
 	if !projectAccessRelationshipRule(rule) {
