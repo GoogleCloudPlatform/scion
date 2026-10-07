@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -86,6 +87,9 @@ func TestBootstrapBundledResources_EmptyDB(t *testing.T) {
 			t.Errorf("harness-config %q: expected non-empty harness type", hc.Name)
 		}
 	}
+
+	// AC3 (ptone/scion#3544): the ledger records every built-in.
+	assertLedgerHasAllBuiltins(t, s)
 }
 
 func TestBootstrapBundledResources_Idempotent(t *testing.T) {
@@ -195,6 +199,9 @@ func TestBootstrapBundledResources_ParallelConverges(t *testing.T) {
 			t.Errorf("harness-config %q: expected active after parallel bootstrap, got %q", hc.Name, hc.Status)
 		}
 	}
+
+	// Concurrent ledger writes converge on every built-in.
+	assertLedgerHasAllBuiltins(t, s)
 }
 
 // TestBootstrapBundledResources_SeedsNewConfigsWhenExistingPresent verifies
@@ -202,6 +209,10 @@ func TestBootstrapBundledResources_ParallelConverges(t *testing.T) {
 // active harness configs already exist in the DB. This is a regression test
 // for the SkipIfAnyExist bug where the presence of ANY harness config caused
 // ALL harness-config bootstrapping to be skipped.
+//
+// It also covers the ptone/scion#3544 follow-on requirement: the seeded
+// ledger already lists the other built-ins but not a built-in that is new in
+// this release, and that new built-in is still created on upgrade.
 func TestBootstrapBundledResources_SeedsNewConfigsWhenExistingPresent(t *testing.T) {
 	srv, s, _ := testTemplateBootstrapServer(t)
 	ctx := context.Background()
@@ -232,6 +243,33 @@ func TestBootstrapBundledResources_SeedsNewConfigsWhenExistingPresent(t *testing
 		t.Fatal("pre-seeded config not found in DB")
 	}
 
+	// Simulate a hub seeded by an older release that lacked one built-in:
+	// rows and ledger entries exist for every other built-in, nothing for
+	// newName.
+	if err := srv.BootstrapBundledResources(ctx, hostedBootstrapOpts); err != nil {
+		t.Fatalf("older-release bootstrap failed: %v", err)
+	}
+	names := resources.BuiltinHarnessConfigNames()
+	newName := names[len(names)-1]
+	newRow, err := s.GetHarnessConfigBySlug(ctx, newName, store.HarnessConfigScopeGlobal, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteHarnessConfig(ctx, newRow.ID); err != nil {
+		t.Fatal(err)
+	}
+	ledger, err := srv.loadBuiltinSeedLedger(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger.Forget(storage.ResourceKindHarnessConfig, newName)
+	if err := srv.saveBuiltinSeedLedger(ctx, ledger); err != nil {
+		t.Fatal(err)
+	}
+	if doc := readBuiltinSeedLedgerDoc(t, s); len(doc.HarnessConfigs) != len(names)-1 {
+		t.Fatalf("pre-populated ledger has %d harness configs, want %d", len(doc.HarnessConfigs), len(names)-1)
+	}
+
 	// Bootstrap with the same options used in hosted mode.
 	err = srv.BootstrapBundledResources(ctx, BootstrapOptions{
 		RepairStorage:   true,
@@ -240,6 +278,10 @@ func TestBootstrapBundledResources_SeedsNewConfigsWhenExistingPresent(t *testing
 	if err != nil {
 		t.Fatalf("BootstrapBundledResources failed: %v", err)
 	}
+	if _, err := s.GetHarnessConfigBySlug(ctx, newName, store.HarnessConfigScopeGlobal, ""); err != nil {
+		t.Errorf("new built-in %q was not seeded on upgrade: %v", newName, err)
+	}
+	assertLedgerHasAllBuiltins(t, s)
 
 	// Verify ALL bundled harness configs were created despite the pre-seeded
 	// config already being present.
@@ -499,4 +541,192 @@ func TestResolveHarnessType(t *testing.T) {
 			}
 		})
 	}
+}
+
+// hostedBootstrapOpts are the options hosted mode passes at startup.
+var hostedBootstrapOpts = BootstrapOptions{
+	RepairStorage:   true,
+	OverwritePolicy: OverwriteBuiltinManaged,
+}
+
+// TestBootstrapBundledResources_DeletedBuiltinStaysDeleted covers AC1 and AC2
+// of ptone/scion#3544 for harness configs: a deleted built-in is not
+// re-created by later bootstraps (restart, then upgrade), and the surviving
+// built-ins still receive content updates.
+func TestBootstrapBundledResources_DeletedBuiltinStaysDeleted(t *testing.T) {
+	srv, s, _ := testTemplateBootstrapServer(t)
+	ctx := context.Background()
+	const victim = "claude"
+
+	if err := srv.BootstrapBundledResources(ctx, hostedBootstrapOpts); err != nil {
+		t.Fatalf("initial bootstrap: %v", err)
+	}
+	embedHashes := map[string]string{}
+	configs, _ := s.ListHarnessConfigs(ctx, store.HarnessConfigFilter{}, store.ListOptions{Limit: 100})
+	for _, hc := range configs.Items {
+		embedHashes[hc.Slug] = hc.ContentHash
+	}
+	if _, ok := embedHashes[victim]; !ok {
+		t.Fatalf("built-in %q not seeded by initial bootstrap", victim)
+	}
+
+	hc, err := s.GetHarnessConfigBySlug(ctx, victim, store.HarnessConfigScopeGlobal, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteHarnessConfig(ctx, hc.ID); err != nil {
+		t.Fatalf("delete %q: %v", victim, err)
+	}
+
+	// Restart twice.
+	for i := range 2 {
+		if err := srv.BootstrapBundledResources(ctx, hostedBootstrapOpts); err != nil {
+			t.Fatalf("restart bootstrap %d: %v", i, err)
+		}
+		if _, err := s.GetHarnessConfigBySlug(ctx, victim, store.HarnessConfigScopeGlobal, ""); !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("restart %d: deleted built-in %q was re-created (err=%v)", i, victim, err)
+		}
+	}
+
+	// Upgrade: the bundled content differs from what the surviving rows
+	// carry. Simulate that by staling every surviving row's stored hash.
+	configs, _ = s.ListHarnessConfigs(ctx, store.HarnessConfigFilter{}, store.ListOptions{Limit: 100})
+	for i := range configs.Items {
+		c := configs.Items[i]
+		c.ContentHash = "stale-" + c.Slug
+		if err := s.UpdateHarnessConfig(ctx, &c); err != nil {
+			t.Fatalf("stale %q: %v", c.Slug, err)
+		}
+	}
+	if err := srv.BootstrapBundledResources(ctx, hostedBootstrapOpts); err != nil {
+		t.Fatalf("upgrade bootstrap: %v", err)
+	}
+
+	if _, err := s.GetHarnessConfigBySlug(ctx, victim, store.HarnessConfigScopeGlobal, ""); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("upgrade: deleted built-in %q was re-created (err=%v)", victim, err)
+	}
+	configs, _ = s.ListHarnessConfigs(ctx, store.HarnessConfigFilter{}, store.ListOptions{Limit: 100})
+	if got, want := configs.TotalCount, len(resources.BuiltinHarnessConfigs())-1; got != want {
+		t.Errorf("after upgrade: %d harness configs, want %d", got, want)
+	}
+	for _, c := range configs.Items {
+		// AC2: surviving built-ins were updated to the bundled content.
+		if c.ContentHash != embedHashes[c.Slug] {
+			t.Errorf("built-in %q: content hash %q after upgrade, want bundled %q", c.Slug, c.ContentHash, embedHashes[c.Slug])
+		}
+		if c.Status != store.HarnessConfigStatusActive {
+			t.Errorf("built-in %q: status %q, want active", c.Slug, c.Status)
+		}
+	}
+	// The template built-in is untouched by the harness-config delete.
+	if _, err := s.GetTemplateBySlug(ctx, "default", string(store.TemplateScopeGlobal), ""); err != nil {
+		t.Errorf("template default missing: %v", err)
+	}
+	// The deleted name stays in the ledger.
+	assertLedgerHasAllBuiltins(t, s)
+}
+
+// TestBootstrapBundledResources_DeletedDefaultTemplateStaysDeleted is the
+// template sibling of _DeletedBuiltinStaysDeleted.
+func TestBootstrapBundledResources_DeletedDefaultTemplateStaysDeleted(t *testing.T) {
+	srv, s, _ := testTemplateBootstrapServer(t)
+	ctx := context.Background()
+	scope := string(store.TemplateScopeGlobal)
+
+	if err := srv.BootstrapBundledResources(ctx, hostedBootstrapOpts); err != nil {
+		t.Fatalf("initial bootstrap: %v", err)
+	}
+	tmpl, err := s.GetTemplateBySlug(ctx, "default", scope, "")
+	if err != nil {
+		t.Fatalf("default template not seeded: %v", err)
+	}
+	if err := s.DeleteTemplate(ctx, tmpl.ID); err != nil {
+		t.Fatalf("delete default: %v", err)
+	}
+	configsBefore, _ := s.ListHarnessConfigs(ctx, store.HarnessConfigFilter{}, store.ListOptions{Limit: 100})
+
+	for i := range 2 {
+		if err := srv.BootstrapBundledResources(ctx, hostedBootstrapOpts); err != nil {
+			t.Fatalf("restart bootstrap %d: %v", i, err)
+		}
+	}
+	// Upgrade with changed bundled content for the surviving harness configs.
+	for i := range configsBefore.Items {
+		c := configsBefore.Items[i]
+		c.ContentHash = "stale-" + c.Slug
+		if err := s.UpdateHarnessConfig(ctx, &c); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := srv.BootstrapBundledResources(ctx, hostedBootstrapOpts); err != nil {
+		t.Fatalf("upgrade bootstrap: %v", err)
+	}
+
+	if _, err := s.GetTemplateBySlug(ctx, "default", scope, ""); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("deleted default template was re-created (err=%v)", err)
+	}
+	configsAfter, _ := s.ListHarnessConfigs(ctx, store.HarnessConfigFilter{}, store.ListOptions{Limit: 100})
+	if configsAfter.TotalCount != len(resources.BuiltinHarnessConfigs()) {
+		t.Errorf("harness configs: got %d, want %d", configsAfter.TotalCount, len(resources.BuiltinHarnessConfigs()))
+	}
+	want := map[string]string{}
+	for _, c := range configsBefore.Items {
+		want[c.Slug] = c.ContentHash
+	}
+	for _, c := range configsAfter.Items {
+		if c.ContentHash != want[c.Slug] {
+			t.Errorf("built-in %q: content hash %q after upgrade, want bundled %q", c.Slug, c.ContentHash, want[c.Slug])
+		}
+	}
+	assertLedgerHasAllBuiltins(t, s)
+}
+
+// TestBootstrapBundledResources_UpgradeWithoutLedger covers the first boot on
+// this code (ptone/scion#3544 design 3.7): rows exist but no ledger row does.
+// Nothing is duplicated or re-created, and the ledger is backfilled from the
+// present rows.
+func TestBootstrapBundledResources_UpgradeWithoutLedger(t *testing.T) {
+	srv, s, _ := testTemplateBootstrapServer(t)
+	ctx := context.Background()
+
+	if err := srv.BootstrapBundledResources(ctx, hostedBootstrapOpts); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a hub that predates the ledger.
+	if err := s.DeleteHubSetting(ctx, builtinSeedLedgerSection); err != nil {
+		t.Fatalf("delete ledger row: %v", err)
+	}
+	ids := map[string]string{}
+	configs, _ := s.ListHarnessConfigs(ctx, store.HarnessConfigFilter{}, store.ListOptions{Limit: 100})
+	for _, c := range configs.Items {
+		ids["hc/"+c.Slug] = c.ID
+	}
+	templates, _ := s.ListTemplates(ctx, store.TemplateFilter{}, store.ListOptions{Limit: 100})
+	for _, tm := range templates.Items {
+		ids["tmpl/"+tm.Slug] = tm.ID
+	}
+
+	if err := srv.BootstrapBundledResources(ctx, hostedBootstrapOpts); err != nil {
+		t.Fatalf("upgrade bootstrap: %v", err)
+	}
+
+	configs, _ = s.ListHarnessConfigs(ctx, store.HarnessConfigFilter{}, store.ListOptions{Limit: 100})
+	templates, _ = s.ListTemplates(ctx, store.TemplateFilter{}, store.ListOptions{Limit: 100})
+	if configs.TotalCount != len(resources.BuiltinHarnessConfigs()) {
+		t.Errorf("harness configs: got %d, want %d", configs.TotalCount, len(resources.BuiltinHarnessConfigs()))
+	}
+	if templates.TotalCount != len(resources.BuiltinTemplates()) {
+		t.Errorf("templates: got %d, want %d", templates.TotalCount, len(resources.BuiltinTemplates()))
+	}
+	for _, c := range configs.Items {
+		if ids["hc/"+c.Slug] != c.ID {
+			t.Errorf("harness config %q re-created: id %s -> %s", c.Slug, ids["hc/"+c.Slug], c.ID)
+		}
+	}
+	for _, tm := range templates.Items {
+		if ids["tmpl/"+tm.Slug] != tm.ID {
+			t.Errorf("template %q re-created: id %s -> %s", tm.Slug, ids["tmpl/"+tm.Slug], tm.ID)
+		}
+	}
+	assertLedgerHasAllBuiltins(t, s)
 }
