@@ -960,6 +960,13 @@ type RuntimeBroker struct {
 	// the hub refuses a cross-broker move involving such a broker.
 	WorkspaceStorage *api.BrokerWorkspaceStorage `json:"workspaceStorage,omitempty"`
 
+	// Health is the broker's last self-reported health (default runtime,
+	// NFS mounts), refreshed from the heartbeat and written only when it
+	// changes (stored as JSON). Its freshness is LastHeartbeat. It is
+	// separate from Status, which stays liveness only. Nil means the broker
+	// has never reported it (an older broker).
+	Health *api.BrokerHealthReport `json:"health,omitempty"`
+
 	// Metadata
 	Labels      map[string]string `json:"labels,omitempty"`
 	Annotations map[string]string `json:"annotations,omitempty"`
