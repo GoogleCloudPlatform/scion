@@ -301,9 +301,7 @@ func ceilingAllowsScope(c store.EffectCeiling, scope AgentTokenScope) bool {
 // scope out of its tokens. The artifact scopes joined the agent roles after
 // UAT selector sets were in use, so making them optional keeps every token
 // that fit a role before still fitting it, while a child only uses the
-// artifact service when its source could. project:artifact:write is listed
-// although no role carries it yet, so adding it to a role later needs no
-// change here.
+// artifact service when its source could.
 var ceilingOptionalRoleScopes = map[AgentTokenScope]bool{
 	ScopeProjectArtifactRead:  true,
 	ScopeProjectArtifactWrite: true,
@@ -790,24 +788,45 @@ func (a *AuthzService) agentSourceEffectCeiling(ctx context.Context, id *agentId
 		}
 		return store.EffectCeiling{}, store.AuthorityProvenance{}, fmt.Errorf("source agent lookup: %w", err)
 	}
+	ec, err := a.agentRowEffectCeiling(ctx, parent)
+	if err != nil {
+		return store.EffectCeiling{}, store.AuthorityProvenance{}, err
+	}
+	return ec, store.AuthorityProvenance{
+		ProvenanceVersion:    store.ProvenanceVersionV1,
+		SourcePrincipalKind:  store.DelegationPrincipalAgent,
+		SourcePrincipalID:    parent.ID,
+		SourceCredentialKind: store.SourceCredentialAgent,
+		SourceCredentialID:   id.TokenID(),
+	}, nil
+}
+
+// agentRowEffectCeiling returns the ceiling an authority-producing write by
+// the stored agent parent carries (the agent row of sourceEffectCeiling):
+// bounded V1 over parent's current coverage, bounded further by parent's own
+// edge ceiling, plus parentDeliverEligibility(parent). When parent has no
+// active edge, the coverage-only form applies while the edge backfill is not
+// complete; otherwise ErrProvenanceMissing. A nil or deleted parent is
+// ErrProvenanceChain.
+func (a *AuthzService) agentRowEffectCeiling(ctx context.Context, parent *store.Agent) (store.EffectCeiling, error) {
 	if parent == nil || !parent.DeletedAt.IsZero() {
-		return store.EffectCeiling{}, store.AuthorityProvenance{}, fmt.Errorf("%w: source agent %s deleted", ErrProvenanceChain, id.ID())
+		return store.EffectCeiling{}, fmt.Errorf("%w: source agent deleted", ErrProvenanceChain)
 	}
 
 	active, err := a.activeProjectEdges(ctx, parent.ID, parent.ProjectID)
 	if err != nil {
-		return store.EffectCeiling{}, store.AuthorityProvenance{}, err
+		return store.EffectCeiling{}, err
 	}
 	if len(active) > 1 {
-		return store.EffectCeiling{}, store.AuthorityProvenance{}, fmt.Errorf("%w: agent %s", ErrProvenanceAmbiguous, parent.ID)
+		return store.EffectCeiling{}, fmt.Errorf("%w: agent %s", ErrProvenanceAmbiguous, parent.ID)
 	}
 	if len(active) == 0 && a.backfillCompleted(ctx) {
-		return store.EffectCeiling{}, store.AuthorityProvenance{}, fmt.Errorf("%w: agent %s", ErrProvenanceMissing, parent.ID)
+		return store.EffectCeiling{}, fmt.Errorf("%w: agent %s", ErrProvenanceMissing, parent.ID)
 	}
 
 	scopes, err := a.ceilingFilteredAgentScopes(ctx, parent, a.mintCandidateScopes(parent))
 	if err != nil {
-		return store.EffectCeiling{}, store.AuthorityProvenance{}, err
+		return store.EffectCeiling{}, err
 	}
 	coverage := agentScopeCoverage(scopes)
 
@@ -819,18 +838,12 @@ func (a *AuthzService) agentSourceEffectCeiling(ctx context.Context, id *agentId
 		parentCeiling = active[0].EffectCeiling
 		deliver, err = a.parentDeliverEligibility(ctx, parent)
 		if err != nil {
-			return store.EffectCeiling{}, store.AuthorityProvenance{}, err
+			return store.EffectCeiling{}, err
 		}
 	}
 
 	ec := childEffectCeiling(parentCeiling, coverage, deliver)
 	ec.BoundaryKind = string(permissions.BoundaryKindProject)
 	ec.BoundaryProjectID = parent.ProjectID
-	return ec, store.AuthorityProvenance{
-		ProvenanceVersion:    store.ProvenanceVersionV1,
-		SourcePrincipalKind:  store.DelegationPrincipalAgent,
-		SourcePrincipalID:    parent.ID,
-		SourceCredentialKind: store.SourceCredentialAgent,
-		SourceCredentialID:   id.TokenID(),
-	}, nil
+	return ec, nil
 }

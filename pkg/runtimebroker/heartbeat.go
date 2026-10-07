@@ -17,6 +17,7 @@ package runtimebroker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -101,11 +102,31 @@ type HeartbeatService struct {
 	// health changes. Nil omits the field.
 	workspaceStorage func() *api.BrokerWorkspaceStorage
 
+	// health, when set, returns the broker's self-reported health
+	// (Server.heartbeatHealthReport), sent on every heartbeat so the hub
+	// shows a degraded runtime or NFS mount. Nil omits the field.
+	health func(ctx context.Context) *api.BrokerHealthReport
+
 	// profileAttach, when set, returns the attach capability of each
 	// profile whose attach support the broker currently knows, reported on
 	// every heartbeat so the hub's stored per-profile Attach follows
 	// runtime changes without a re-registration. Nil omits the field.
 	profileAttach func() []hubclient.ProfileAttachState
+
+	// profileSAMappings, when set, returns each Kubernetes profile's GSA
+	// mappings, or nil when they cannot be read. They are sent on the first
+	// successful heartbeat, whenever they change, and every
+	// saMappingsResendInterval, so a broker restart or a mapping edit
+	// refreshes the hub without a re-registration.
+	profileSAMappings func() []hubclient.ProfileSAMappingsState
+	// sentSAMappingsKey is the fingerprint of the last profileSAMappings
+	// the hub accepted, "" before the first, and sentSAMappingsAt when it
+	// was accepted (both guarded by mu). Unchanged mappings are re-sent
+	// once saMappingsResendInterval has passed, so a hub that lost or never
+	// stored a report (an upgrade under a running broker, an overlapping
+	// send) catches up; the hub persists only on change.
+	sentSAMappingsKey string
+	sentSAMappingsAt  time.Time
 
 	// defaultProfile, when set, returns the broker's default (active)
 	// profile name, reported on every heartbeat. A nil func, or a nil
@@ -299,7 +320,48 @@ func (s *HeartbeatService) run(ctx context.Context) {
 // sendHeartbeat sends a single heartbeat to the Hub.
 func (s *HeartbeatService) sendHeartbeat(ctx context.Context) error {
 	heartbeat := s.buildHeartbeat(ctx)
-	return s.client.Heartbeat(ctx, s.brokerID, heartbeat)
+	saKey := s.addProfileSAMappings(heartbeat)
+	if err := s.client.Heartbeat(ctx, s.brokerID, heartbeat); err != nil {
+		return err
+	}
+	if saKey != "" {
+		s.mu.Lock()
+		s.sentSAMappingsKey = saKey
+		s.sentSAMappingsAt = time.Now()
+		s.mu.Unlock()
+	}
+	return nil
+}
+
+// saMappingsResendInterval is how often unchanged profile SA mappings are
+// re-sent on the heartbeat.
+const saMappingsResendInterval = 10 * time.Minute
+
+// addProfileSAMappings sets heartbeat.ProfileSAMappings when the current
+// mappings differ from the last ones the hub accepted (always on the first
+// heartbeat) or saMappingsResendInterval has passed since then, and returns
+// their fingerprint, or "" when nothing was added.
+func (s *HeartbeatService) addProfileSAMappings(heartbeat *hubclient.BrokerHeartbeat) string {
+	if s.profileSAMappings == nil {
+		return ""
+	}
+	mappings := s.profileSAMappings()
+	if mappings == nil {
+		return ""
+	}
+	b, err := json.Marshal(mappings)
+	if err != nil {
+		return ""
+	}
+	key := string(b)
+	s.mu.Lock()
+	skip := key == s.sentSAMappingsKey && time.Since(s.sentSAMappingsAt) < saMappingsResendInterval
+	s.mu.Unlock()
+	if skip {
+		return ""
+	}
+	heartbeat.ProfileSAMappings = mappings
+	return key
 }
 
 // buildHeartbeat constructs the heartbeat payload from current state.
@@ -325,12 +387,19 @@ func (s *HeartbeatService) buildHeartbeat(ctx context.Context) *hubclient.Broker
 			Reprovision:            true,
 			AsyncLaunch:            true,
 			EmptyPerAgentWorkspace: scionrt.HasEmptyPerAgentSupport(defaultRuntime),
-			// Cross-broker agent move is not implemented by this broker.
-			AgentMove: false,
+			// This broker honours localOnly deletes and confirms a moved
+			// agent's NFS workspace before provisioning it (agent move).
+			AgentMove: true,
+			// This broker's reprovision reuses an empty-per-agent
+			// workspace in place (miller79/scion#167).
+			ReprovisionEmptyPerAgent: true,
 		},
 	}
 	if s.workspaceStorage != nil {
 		heartbeat.WorkspaceStorage = s.workspaceStorage()
+	}
+	if s.health != nil {
+		heartbeat.Health = s.health(ctx)
 	}
 	if s.profileAttach != nil {
 		heartbeat.ProfileAttach = s.profileAttach()

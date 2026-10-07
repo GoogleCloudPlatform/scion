@@ -40,6 +40,10 @@ Scion provides two ways to authenticate with GitHub for your projects:
 1. **GitHub App Integration (Recommended)**: An automated, secure way to provide agents with short-lived installation tokens. If your Hub Administrator has configured this, authentication is automatic.
 2. **Personal Access Tokens (PATs)**: Manual token management using a `GITHUB_TOKEN` secret. Use this if the GitHub App is not configured or for repositories outside its scope.
 
+:::caution
+Do not put a token in the repository URL. The Hub stores a project's git remote without credentials, and refuses a `scion.dev/clone-url` label that contains a username, password, token, query string, or fragment (`400`). If an existing project relied on a token embedded in its clone URL, move that token to a `GITHUB_TOKEN` project secret or use the GitHub App.
+:::
+
 ### Option A: GitHub App Integration
 
 When creating a project, Scion automatically associates it with the corresponding GitHub App installation. The system maintains a background refresh loop for installation tokens, and the `sciontool` credential helper provides fresh tokens to `git` on-demand inside the agent container. No manual setup is required.
@@ -102,6 +106,10 @@ scion hub project create https://github.com/acme/backend.git --slug my-backend
 
 :::note[Multiple projects per remote]
 Project IDs are always randomly generated UUIDs, so a git remote is associated metadata rather than identity: creating a project from the same git URL twice yields two distinct projects, each with its own ID. Stale project links are still automatically detected and synchronized during hub-link sync operations.
+:::
+
+:::tip[Web Dashboard alternative]
+In the dashboard's New Project dialog, pick **Git Repository** as the workspace type, or set **Start from** to a project template and enter your repository as the **Git Remote URL** override. The new project keeps the template's settings and uses your repository. See [Web Dashboard: Projects](/scion/workstation/dashboard/#projects).
 :::
 
 ---

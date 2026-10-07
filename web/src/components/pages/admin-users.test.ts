@@ -558,3 +558,518 @@ describe('scion-page-admin-users — role filter across pages', () => {
     expect(text(element, '.pagination-info')).toBe('Showing 1-50 of 60');
   });
 });
+
+describe('scion-page-admin-users — invite dialog display name and submit routing', () => {
+  let element: PageEl | null = null;
+
+  beforeAll(async () => {
+    vi.stubGlobal('fetch', vi.fn(createFetchHandler([])));
+    mod = await import('./admin-users.js');
+  });
+
+  afterEach(() => {
+    element?.remove();
+    element = null;
+    vi.restoreAllMocks();
+  });
+
+  /** Fetch handler that answers the two submit endpoints with the given responses. */
+  function withSubmitResponses(inviteRes: () => Response, provisionRes: () => Response) {
+    const base = createFetchHandler([makeUser()]);
+    return (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const path = typeof url === 'string' ? url : url instanceof URL ? url.href : url.url;
+      if (init?.method === 'POST' && path.endsWith('/api/v1/admin/users/invite')) {
+        return Promise.resolve(inviteRes());
+      }
+      if (init?.method === 'POST' && path.endsWith('/api/v1/users')) {
+        return Promise.resolve(provisionRes());
+      }
+      return base(url, init);
+    };
+  }
+
+  async function openDialogAndSubmit(
+    el: PageEl,
+    fields: { email: string; displayName?: string; note?: string }
+  ): Promise<void> {
+    const inviteBtn = Array.from(el.shadowRoot!.querySelectorAll('sl-button')).find(
+      (b) => b.textContent?.trim() === 'Invite User'
+    ) as HTMLElement;
+    inviteBtn.click();
+    await el.updateComplete;
+    const dialog = el.shadowRoot!.querySelector('sl-dialog[label="Invite User"]')!;
+    const setInput = (label: string, value: string) => {
+      const input = dialog.querySelector(`sl-input[label="${label}"]`) as HTMLInputElement;
+      expect(input, label).not.toBeNull();
+      input.value = value;
+      input.dispatchEvent(new Event('sl-input'));
+    };
+    setInput('Email address', fields.email);
+    if (fields.displayName !== undefined) setInput('Display name (optional)', fields.displayName);
+    if (fields.note !== undefined) setInput('Note (optional)', fields.note);
+    await el.updateComplete;
+    const submit = Array.from(dialog.querySelectorAll('sl-button')).find(
+      (b) => b.textContent?.trim() === 'Invite User'
+    ) as HTMLElement;
+    submit.click();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await el.updateComplete;
+  }
+
+  function postCalls(): Array<{ path: string; body: Record<string, unknown> }> {
+    return vi
+      .mocked(fetch)
+      .mock.calls.filter(([, init]) => (init as RequestInit | undefined)?.method === 'POST')
+      .map(([url, init]) => ({
+        path: String(url),
+        body: JSON.parse(String((init as RequestInit).body)) as Record<string, unknown>,
+      }));
+  }
+
+  function feedback(el: PageEl): { variant: string | null; text: string } {
+    const alert = el.shadowRoot!.querySelector('.feedback-alert');
+    return {
+      variant: alert?.getAttribute('variant') ?? null,
+      text: alert?.textContent?.replace(/\s+/g, ' ').trim() ?? '',
+    };
+  }
+
+  it('has an optional Display name field', async () => {
+    element = (await createComponent([makeUser()])) as PageEl;
+    const inviteBtn = Array.from(element.shadowRoot!.querySelectorAll('sl-button')).find(
+      (b) => b.textContent?.trim() === 'Invite User'
+    ) as HTMLElement;
+    inviteBtn.click();
+    await element.updateComplete;
+    const input = element.shadowRoot!.querySelector(
+      'sl-dialog[label="Invite User"] sl-input[label="Display name (optional)"]'
+    );
+    expect(input).not.toBeNull();
+    expect(input!.hasAttribute('required')).toBe(false);
+  });
+
+  it('without a display name, submits to the invite endpoint as before', async () => {
+    element = (await createComponent([makeUser()])) as PageEl;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        withSubmitResponses(
+          () => jsonResponse({ id: 'u1', email: 'a@example.com', status: 'invited' }, 201),
+          () => jsonResponse({}, 500)
+        )
+      )
+    );
+    await openDialogAndSubmit(element, { email: 'A@Example.com', displayName: '   ', note: 'n' });
+    const posts = postCalls();
+    expect(posts).toHaveLength(1);
+    expect(posts[0].path).toContain('/api/v1/admin/users/invite');
+    expect(posts[0].body).toEqual({ email: 'a@example.com', note: 'n' });
+    expect(feedback(element)).toEqual({ variant: 'success', text: 'Invited a@example.com.' });
+    expect(element.shadowRoot!.querySelector('sl-dialog[label="Invite User"]')).toBeNull();
+  });
+
+  it('with a display name, submits to POST /api/v1/users without a role', async () => {
+    element = (await createComponent([makeUser()])) as PageEl;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        withSubmitResponses(
+          () => jsonResponse({}, 500),
+          () =>
+            jsonResponse(
+              { user: { id: 'u1', email: 'a@example.com', status: 'invited' }, created: true },
+              201
+            )
+        )
+      )
+    );
+    await openDialogAndSubmit(element, { email: 'a@example.com', displayName: ' Alice ' });
+    const posts = postCalls();
+    expect(posts).toHaveLength(1);
+    expect(posts[0].path).toMatch(/\/api\/v1\/users$/);
+    expect(posts[0].body).toEqual({ email: 'a@example.com', displayName: 'Alice' });
+    expect(feedback(element)).toEqual({ variant: 'success', text: 'Invited a@example.com.' });
+    expect(element.shadowRoot!.querySelector('sl-dialog[label="Invite User"]')).toBeNull();
+  });
+
+  it('shows provisioning warnings as a non-blocking notice', async () => {
+    element = (await createComponent([makeUser()])) as PageEl;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        withSubmitResponses(
+          () => jsonResponse({}, 500),
+          () =>
+            jsonResponse(
+              {
+                user: { id: 'u1', email: 'a@other.example', status: 'invited' },
+                created: true,
+                warnings: ['domain_not_authorized'],
+              },
+              201
+            )
+        )
+      )
+    );
+    await openDialogAndSubmit(element, { email: 'a@other.example', displayName: 'A' });
+    const fb = feedback(element);
+    expect(fb.variant).toBe('warning');
+    expect(fb.text).toContain('Invited a@other.example.');
+    expect(fb.text).toContain("outside the hub's authorized domains");
+    expect(element.shadowRoot!.querySelector('sl-dialog[label="Invite User"]')).toBeNull();
+  });
+
+  it('renders a 200 created:false replay as a notice, not an error', async () => {
+    element = (await createComponent([makeUser()])) as PageEl;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        withSubmitResponses(
+          () => jsonResponse({}, 500),
+          () =>
+            jsonResponse({ user: { email: 'a@example.com', status: 'invited' }, created: false })
+        )
+      )
+    );
+    await openDialogAndSubmit(element, { email: 'a@example.com', displayName: 'A' });
+    expect(feedback(element)).toEqual({
+      variant: 'primary',
+      text: 'a@example.com is already pre-registered with these details.',
+    });
+  });
+
+  for (const [reason, message] of [
+    ['pending_user_exists', 'A pending record for this email exists with different details.'],
+    ['user_suspended_exists', 'This email belongs to a suspended user.'],
+    ['user_exists', 'User already exists.'],
+  ] as const) {
+    it(`renders 409 ${reason} with its own message and keeps the dialog open`, async () => {
+      element = (await createComponent([makeUser()])) as PageEl;
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(
+          withSubmitResponses(
+            () => jsonResponse({}, 500),
+            () =>
+              jsonResponse(
+                { error: { code: 'conflict', message: 'x', details: { reason, userId: 'u9' } } },
+                409
+              )
+          )
+        )
+      );
+      await openDialogAndSubmit(element, { email: 'a@example.com', displayName: 'A' });
+      expect(feedback(element)).toEqual({ variant: 'danger', text: message });
+      expect(element.shadowRoot!.querySelector('sl-dialog[label="Invite User"]')).not.toBeNull();
+    });
+  }
+
+  it('renders a 409 without a reason with the fallback copy', async () => {
+    element = (await createComponent([makeUser()])) as PageEl;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        withSubmitResponses(
+          () => jsonResponse({}, 500),
+          () => jsonResponse({ error: { code: 'conflict', message: 'x' } }, 409)
+        )
+      )
+    );
+    await openDialogAndSubmit(element, { email: 'a@example.com', displayName: 'A' });
+    expect(feedback(element)).toEqual({ variant: 'danger', text: 'User already exists.' });
+    expect(element.shadowRoot!.querySelector('sl-dialog[label="Invite User"]')).not.toBeNull();
+  });
+
+  it('sets the alert duration: warnings stay open, other notices close after 5 seconds', async () => {
+    element = (await createComponent([makeUser()])) as PageEl;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        withSubmitResponses(
+          () => jsonResponse({}, 500),
+          () =>
+            jsonResponse(
+              {
+                user: { id: 'u1', email: 'a@other.example', status: 'invited' },
+                created: true,
+                warnings: ['domain_not_authorized'],
+              },
+              201
+            )
+        )
+      )
+    );
+    await openDialogAndSubmit(element, { email: 'a@other.example', displayName: 'A' });
+    const warning = element.shadowRoot!.querySelector('.feedback-alert') as HTMLElement & {
+      duration: number;
+    };
+    expect(warning.getAttribute('variant')).toBe('warning');
+    expect(warning.duration).toBe(Infinity);
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        withSubmitResponses(
+          () => jsonResponse({}, 500),
+          () =>
+            jsonResponse(
+              { user: { id: 'u2', email: 'b@example.com', status: 'invited' }, created: true },
+              201
+            )
+        )
+      )
+    );
+    await openDialogAndSubmit(element, { email: 'b@example.com', displayName: 'B' });
+    const success = element.shadowRoot!.querySelector('.feedback-alert') as HTMLElement & {
+      duration: number;
+    };
+    expect(success.getAttribute('variant')).toBe('success');
+    expect(success.duration).toBe(5000);
+    expect(success).not.toBe(warning);
+  });
+
+  it('a newer notice is not cleared by an earlier notice closing', async () => {
+    element = (await createComponent([makeUser()])) as PageEl;
+    let provisionCalls = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        withSubmitResponses(
+          () => jsonResponse({}, 500),
+          () => {
+            provisionCalls++;
+            return provisionCalls === 1
+              ? jsonResponse(
+                  { error: { code: 'conflict', message: 'x', details: { reason: 'user_exists' } } },
+                  409
+                )
+              : jsonResponse(
+                  {
+                    user: { id: 'u1', email: 'a@other.example', status: 'invited' },
+                    created: true,
+                    warnings: ['domain_not_authorized'],
+                  },
+                  201
+                );
+          }
+        )
+      )
+    );
+    // A 409 danger notice, then a corrected resubmit within 5 s that
+    // returns 201 with warnings.
+    await openDialogAndSubmit(element, { email: 'a@other.example', displayName: 'A' });
+    const danger = element.shadowRoot!.querySelector('.feedback-alert') as HTMLElement;
+    expect(danger.getAttribute('variant')).toBe('danger');
+
+    vi.useFakeTimers();
+    try {
+      const dialog = element.shadowRoot!.querySelector('sl-dialog[label="Invite User"]')!;
+      const submit = Array.from(dialog.querySelectorAll('sl-button')).find(
+        (b) => b.textContent?.trim() === 'Invite User'
+      ) as HTMLElement;
+      submit.click();
+      await vi.advanceTimersByTimeAsync(50);
+      await element.updateComplete;
+      const warning = element.shadowRoot!.querySelector('.feedback-alert') as HTMLElement;
+      expect(warning.getAttribute('variant')).toBe('warning');
+      expect(warning).not.toBe(danger);
+
+      // The earlier notice's alert finishes closing after the newer one is
+      // shown; it must not clear the newer notice.
+      danger.dispatchEvent(new Event('sl-after-hide'));
+      await vi.advanceTimersByTimeAsync(5000);
+      await element.updateComplete;
+      const still = element.shadowRoot!.querySelector('.feedback-alert') as HTMLElement;
+      expect(still).not.toBeNull();
+      expect(still.getAttribute('variant')).toBe('warning');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('shows an unexpected 422 as a generic error', async () => {
+    element = (await createComponent([makeUser()])) as PageEl;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        withSubmitResponses(
+          () => jsonResponse({}, 500),
+          () =>
+            jsonResponse(
+              { error: { code: 'unprocessable', message: 'role cannot be set at provisioning' } },
+              422
+            )
+        )
+      )
+    );
+    await openDialogAndSubmit(element, { email: 'a@example.com', displayName: 'A' });
+    expect(feedback(element)).toEqual({
+      variant: 'danger',
+      text: 'role cannot be set at provisioning',
+    });
+  });
+
+  it('forwards a non-empty note on the provisioning path', async () => {
+    element = (await createComponent([makeUser()])) as PageEl;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        withSubmitResponses(
+          () => jsonResponse({}, 500),
+          () =>
+            jsonResponse(
+              { user: { id: 'u1', email: 'a@example.com', status: 'invited' }, created: true },
+              201
+            )
+        )
+      )
+    );
+    await openDialogAndSubmit(element, { email: 'a@example.com', displayName: 'A', note: 'n' });
+    const posts = postCalls();
+    expect(posts).toHaveLength(1);
+    expect(posts[0].body).toEqual({ email: 'a@example.com', displayName: 'A', note: 'n' });
+  });
+
+  it('keeps advisory warnings on a 200 created:false replay', async () => {
+    element = (await createComponent([makeUser()])) as PageEl;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        withSubmitResponses(
+          () => jsonResponse({}, 500),
+          () =>
+            jsonResponse({
+              user: { email: 'a@other.example', status: 'invited' },
+              created: false,
+              warnings: ['domain_not_authorized'],
+            })
+        )
+      )
+    );
+    await openDialogAndSubmit(element, { email: 'a@other.example', displayName: 'A' });
+    const fb = feedback(element);
+    expect(fb.variant).toBe('warning');
+    expect(fb.text).toContain('a@other.example is already pre-registered with these details.');
+    expect(fb.text).toContain("outside the hub's authorized domains");
+  });
+
+  it('after success, reloads the user list and resets the form', async () => {
+    element = (await createComponent([makeUser()])) as PageEl;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        withSubmitResponses(
+          () => jsonResponse({}, 500),
+          () =>
+            jsonResponse(
+              { user: { id: 'u1', email: 'a@example.com', status: 'invited' }, created: true },
+              201
+            )
+        )
+      )
+    );
+    await openDialogAndSubmit(element, { email: 'a@example.com', displayName: 'A', note: 'n' });
+    const listCalls = vi
+      .mocked(fetch)
+      .mock.calls.filter(
+        ([url, init]) =>
+          String(url).includes('/api/v1/users') &&
+          ((init as RequestInit | undefined)?.method ?? 'GET') === 'GET'
+      );
+    expect(listCalls.length).toBeGreaterThan(0);
+
+    const inviteBtn = Array.from(element.shadowRoot!.querySelectorAll('sl-button')).find(
+      (b) => b.textContent?.trim() === 'Invite User'
+    ) as HTMLElement;
+    inviteBtn.click();
+    await element.updateComplete;
+    const dialog = element.shadowRoot!.querySelector('sl-dialog[label="Invite User"]')!;
+    for (const label of ['Email address', 'Display name (optional)', 'Note (optional)']) {
+      const input = dialog.querySelector(`sl-input[label="${label}"]`) as HTMLInputElement;
+      expect(input.value, label).toBe('');
+    }
+  });
+
+  it('shows a 400 validation error and keeps the dialog open', async () => {
+    element = (await createComponent([makeUser()])) as PageEl;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        withSubmitResponses(
+          () => jsonResponse({}, 500),
+          () =>
+            jsonResponse(
+              {
+                error: {
+                  code: 'validation_error',
+                  message: 'displayName must not contain control characters',
+                  details: { field: 'displayName' },
+                },
+              },
+              400
+            )
+        )
+      )
+    );
+    await openDialogAndSubmit(element, { email: 'a@example.com', displayName: 'A' });
+    expect(feedback(element)).toEqual({
+      variant: 'danger',
+      text: 'displayName must not contain control characters',
+    });
+    expect(element.shadowRoot!.querySelector('sl-dialog[label="Invite User"]')).not.toBeNull();
+  });
+
+  it('shows a network failure and keeps the dialog open', async () => {
+    element = (await createComponent([makeUser()])) as PageEl;
+    const base = createFetchHandler([makeUser()]);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string | URL | Request, init?: RequestInit) => {
+        if (init?.method === 'POST') return Promise.reject(new Error('network down'));
+        return base(url, init);
+      })
+    );
+    await openDialogAndSubmit(element, { email: 'a@example.com', displayName: 'A' });
+    expect(feedback(element)).toEqual({ variant: 'danger', text: 'network down' });
+    expect(element.shadowRoot!.querySelector('sl-dialog[label="Invite User"]')).not.toBeNull();
+  });
+
+  it('reports success when a 2xx body is not JSON', async () => {
+    element = (await createComponent([makeUser()])) as PageEl;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        withSubmitResponses(
+          () => jsonResponse({}, 500),
+          () => new Response('not json', { status: 201 })
+        )
+      )
+    );
+    await openDialogAndSubmit(element, { email: 'a@example.com', displayName: 'A' });
+    expect(feedback(element)).toEqual({ variant: 'success', text: 'Invited a@example.com.' });
+  });
+
+  it('explains display-name precedence in the field help text', async () => {
+    element = (await createComponent([makeUser()])) as PageEl;
+    const inviteBtn = Array.from(element.shadowRoot!.querySelectorAll('sl-button')).find(
+      (b) => b.textContent?.trim() === 'Invite User'
+    ) as HTMLElement;
+    inviteBtn.click();
+    await element.updateComplete;
+    const input = element.shadowRoot!.querySelector(
+      'sl-dialog[label="Invite User"] sl-input[label="Display name (optional)"]'
+    );
+    expect(input!.getAttribute('help-text')).toBe(
+      'Replaced at first sign-in by the name from the sign-in provider, if it supplies one.'
+    );
+  });
+
+  it('maps every documented warning to readable text', () => {
+    expect(mod.provisionWarningText('reserved_identity')).toContain('reserved platform identity');
+    expect(mod.provisionWarningText('domain_not_authorized')).toContain('authorized domains');
+    expect(mod.provisionWarningText('sign_in_currently_blocked_by_access_mode')).toContain(
+      'blocks all sign-ins'
+    );
+    expect(mod.provisionWarningText('something_new')).toBe('Warning: something_new.');
+  });
+});

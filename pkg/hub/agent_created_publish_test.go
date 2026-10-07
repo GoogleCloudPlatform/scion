@@ -349,12 +349,12 @@ func TestCreateAgentPublish_SyncDispatchRacesDelete(t *testing.T) {
 				rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", body)
 				require.NotEmpty(t, race.agentID, "the hook ran: %d %s", rec.Code, rec.Body.String())
 				assert.Zero(t, pub.count("created"), "no created after the delete claimed: %v", pub.kinds())
-				if site.name == "dispatch" || site.name == "env-gather" {
-					// A synchronous broker create that lost to the
-					// delete answers 409, also when the broker asked
-					// for env (ptone/scion#3099).
-					requireDeletedDuringCreate(t, rec, race.agentID)
-				}
+				// A synchronous create that lost to the delete answers
+				// 409, also when the broker asked for env
+				// (ptone/scion#3099), and on the workspace-bootstrap and
+				// managed paths, which dispatch nothing to a broker
+				// (ptone/scion#3454).
+				requireDeletedDuringCreate(t, rec, race.agentID)
 
 				race.finish()
 				assert.Zero(t, pub.count("created"), "no created at all: %v", pub.kinds())

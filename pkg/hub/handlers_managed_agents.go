@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -180,17 +181,14 @@ func (s *Server) managedAgentMessage(ctx context.Context, agent *store.Agent, me
 
 // managedAgentStop stops a managed agent by cancelling the active interaction.
 func (s *Server) managedAgentStop(ctx context.Context, agent *store.Agent) error {
-	backend, err := getManagedBackend()
-	if err != nil {
+	if _, err := getManagedBackend(); err != nil {
 		return fmt.Errorf("managed agent backend: %w", err)
 	}
 
+	// Best-effort: a failed read or cancel is logged, not returned.
 	if interactionID := agent.Annotations[annotationInteractionID]; interactionID != "" {
-		interactionState, getErr := backend.GetInteraction(ctx, interactionID)
-		if getErr == nil && interactionState.Status == managedagent.StatusInProgress {
-			if cancelErr := backend.CancelInteraction(ctx, interactionID); cancelErr != nil {
-				slog.Warn("failed to cancel interaction on stop", "agent_id", agent.ID, "err", cancelErr)
-			}
+		if err := stopManagedInteraction(ctx, interactionID); err != nil {
+			slog.Warn("managed agent stop: failed to stop interaction", "agent_id", agent.ID, "err", err)
 		}
 	}
 
@@ -201,6 +199,82 @@ func (s *Server) managedAgentStop(ctx context.Context, agent *store.Agent) error
 func (s *Server) managedAgentDelete(ctx context.Context, agent *store.Agent) error {
 	// Stop first (best-effort) — cancels the active interaction.
 	_ = s.managedAgentStop(ctx, agent)
+	return nil
+}
+
+// Warnings a managed create that lost to a delete reports in the 409's
+// details.warnings (compensateManagedCreate).
+const (
+	managedCreateCompensatedWarning      = "agent was deleted while it was being created; its managed-agent interaction was stopped"
+	managedCreateCompensateFailedWarning = "agent was deleted while it was being created; stopping its managed-agent interaction failed: "
+)
+
+// compensateManagedCreate cleans up the cloud side of a managed (hub-direct)
+// create whose delete won the race (ptone/scion#3454), and returns the
+// warnings for the 409.
+//
+// The delete engine already calls managedAgentDelete, but only when the row
+// it read right after its claim has the managed Runtime, and it can only
+// stop an interaction that row names. managedAgentCreate sets both in
+// memory, and only the create's post-create write persists them. So
+// whether the engine stops this create's interaction depends on whether
+// that write landed first:
+//
+//   - recorded (the write succeeded): it landed before the claim, since a
+//     claim bumps state_version and a later write would have conflicted. The
+//     engine's row carries the managed Runtime and the interaction ID, and
+//     the engine stops it, so nothing is done here; this avoids a second
+//     stop.
+//   - not recorded: the claim may have come first, so the engine's row has
+//     neither the managed Runtime nor the interaction ID, and the engine
+//     cannot stop it. This create holds the only copy of the ID, so it stops
+//     the interaction itself.
+//
+// A create with no task started no interaction: nothing to clean up.
+//
+// The stop runs detached from the request with its own budget, as
+// compensateLandedRun's delete does: a client that goes away must not leave
+// an interaction running that nothing else can stop. Unlike
+// managedAgentDelete, a failure is reported (stopManagedInteraction).
+func (s *Server) compensateManagedCreate(ctx context.Context, agent *store.Agent, recorded bool) []string {
+	interactionID := agent.Annotations[annotationInteractionID]
+	if recorded || interactionID == "" {
+		return nil
+	}
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), compensatingDeleteTimeout)
+	defer cancel()
+	if err := stopManagedInteraction(cctx, interactionID); err != nil {
+		s.agentLifecycleLog.Warn("Failed to stop the managed agent interaction of a create that lost to a delete",
+			"agent_id", agent.ID, "interaction_id", interactionID, "error", err)
+		return []string{managedCreateCompensateFailedWarning + err.Error()}
+	}
+	return []string{managedCreateCompensatedWarning}
+}
+
+// stopManagedInteraction cancels interactionID if it is still in progress,
+// and returns any backend error, including a failed read of the
+// interaction (its state is then unknown). An interaction that has already
+// ended needs no cancel. A read that returns no state is an error too: the
+// state is unknown. managedAgentStop calls it best-effort, logging and
+// swallowing these errors.
+func stopManagedInteraction(ctx context.Context, interactionID string) error {
+	backend, err := getManagedBackend()
+	if err != nil {
+		return fmt.Errorf("managed agent backend: %w", err)
+	}
+	st, err := backend.GetInteraction(ctx, interactionID)
+	if err != nil {
+		return fmt.Errorf("reading interaction: %w", err)
+	}
+	if st == nil {
+		return errors.New("reading interaction: no state returned")
+	}
+	if st.Status != managedagent.StatusInProgress {
+		return nil
+	}
+	if err := backend.CancelInteraction(ctx, interactionID); err != nil {
+		return fmt.Errorf("cancelling interaction: %w", err)
+	}
 	return nil
 }
 
@@ -267,12 +341,13 @@ func (s *Server) handleManagedAgentLifecycle(w http.ResponseWriter, r *http.Requ
 	// A successful start/stop/restart clears a failed delete marker
 	// (design ptone/scion#2483 §2.1); publish and respond from the stored
 	// row, which a racing delete claim may have kept off newPhase.
-	s.settleLifecycleWrite(ctx, agent, newPhase)
+	// A failed re-read is logged inside; the agent publishes as requested.
+	_ = s.settleLifecycleWrite(ctx, agent, newPhase)
 	s.events.PublishAgentStatus(ctx, agent)
 
 	respAgent := *agent
 	respAgent.AppliedConfig = redactAppliedConfigEnvForResponse(agent.AppliedConfig, canViewAgentEnv(ctx, s, agent))
-	respAgent.Deletion = store.ComputeAgentDeletion(agent, time.Now())
+	respAgent.Deletion = deletionViewForCaller(agent, time.Now(), callerSeesDeletionDetail(ctx))
 	writeJSON(w, http.StatusOK, &respAgent)
 }
 

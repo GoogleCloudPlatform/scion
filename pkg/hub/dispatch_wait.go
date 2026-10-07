@@ -101,9 +101,12 @@ var (
 //     other row state (done, or unreadable) return that error at once.
 //   - done event: read the row; return its failure if it is failed. If an
 //     error phase is waiting out its grace and the row is now finished
-//     without failing, return the error-phase error. Otherwise keep waiting
-//     (the executor's write may have lost its CAS). The rolling window is
-//     not reset.
+//     without failing, return the error-phase error. If the row is done and
+//     its result reports that a delete won after the broker start landed
+//     (LifecycleDispatchResult.DeleteWon), return nil: the success phase
+//     will not come, and the caller answers from its own re-read
+//     (ptone/scion#3456). Otherwise keep waiting (the executor's write may
+//     have lost its CAS). The rolling window is not reset.
 //   - other status events reset the rolling window.
 //   - every lifecycleRowPollInterval the row is read as on a done event, and
 //     when the rolling window expires it is read for its failure, in case
@@ -128,6 +131,10 @@ func waitForLifecycleOutcome(
 	// failure. A row that cannot be read reports state "" (a later read
 	// retries), unless the read failed because ctx ended: then ctx.Err() is
 	// returned as the outcome, as the ctx.Done case would.
+	//
+	// deleteWon is set when the row is done and its result reports that a
+	// delete won after the broker start landed (LifecycleDispatchResult).
+	deleteWon := false
 	readRow := func() (string, error) {
 		d, err := st.GetBrokerDispatch(ctx, dispatchID)
 		if err != nil {
@@ -137,6 +144,7 @@ func waitForLifecycleOutcome(
 			return "", nil
 		}
 		if d.State != store.DispatchStateFailed {
+			deleteWon = d.State == store.DispatchStateDone && decodeLifecycleResult(d.Result).DeleteWon
 			return d.State, nil
 		}
 		return d.State, dispatchFailureError(d)
@@ -144,6 +152,16 @@ func waitForLifecycleOutcome(
 	rowFailure := func() error {
 		_, err := readRow()
 		return err
+	}
+	// rowEnd is rowFailure for a closed event channel: done with the row's
+	// failure, or
+	// done with nil when the row is done and reports DeleteWon (see
+	// rowOutcome); else not done.
+	rowEnd := func() (done bool, err error) {
+		if _, err := readRow(); err != nil {
+			return true, err
+		}
+		return deleteWon, nil
 	}
 
 	timer := time.NewTimer(lifecycleRollingTimeout)
@@ -160,29 +178,32 @@ func waitForLifecycleOutcome(
 	// rowOutcome re-reads the row on a done event or a poll: its failure if
 	// it is failed, the error-phase error if an error phase is waiting out
 	// its grace and the executor has since finished the row without failing
-	// it, else nil (keep waiting).
-	rowOutcome := func() error {
+	// it, done=true with no error if the row is done and reports that a
+	// delete won after the broker start landed (the success phase will not
+	// come: the delete holds the row, and the caller answers from its own
+	// re-read, ptone/scion#3456), else nil (keep waiting).
+	rowOutcome := func() (done bool, err error) {
 		rowState, err := readRow()
 		if err != nil {
-			return err
+			return true, err
 		}
 		if grace != nil && rowState != "" && rowState != store.DispatchStatePending && rowState != store.DispatchStateInProgress {
-			return errorPhaseErr
+			return true, errorPhaseErr
 		}
-		return nil
+		return deleteWon, nil
 	}
 
 	for {
 		select {
 		case ev, ok := <-events:
 			if !ok {
-				if err := rowFailure(); err != nil {
+				if done, err := rowEnd(); done {
 					return err
 				}
 				return ErrDispatchFailed
 			}
 			if ev.Subject == doneSubject {
-				if err := rowOutcome(); err != nil {
+				if done, err := rowOutcome(); done {
 					return err
 				}
 				continue
@@ -226,12 +247,15 @@ func waitForLifecycleOutcome(
 			return errorPhaseErr
 
 		case <-poll.C:
-			if err := rowOutcome(); err != nil {
+			if done, err := rowOutcome(); done {
 				return err
 			}
 
 		case <-timer.C:
-			if err := rowFailure(); err != nil {
+			// rowOutcome, as the poll does: an error phase waiting out its
+			// grace keeps the error-phase answer, else a done row
+			// reporting DeleteWon ends with nil.
+			if done, err := rowOutcome(); done {
 				return err
 			}
 			if grace != nil {

@@ -173,7 +173,8 @@ func NewScheduler(st store.Store, log *slog.Logger, opts ...SchedulerOption) *Sc
 }
 
 // RegisterEventHandler registers a handler for a specific event type.
-// Must be called before Start(). Not safe for concurrent use.
+// Must be called before Start(). Not safe for concurrent use: after Start,
+// eventHandlers is read without a lock.
 func (s *Scheduler) RegisterEventHandler(eventType string, handler EventHandler) {
 	s.eventHandlers[eventType] = handler
 }
@@ -185,7 +186,8 @@ func (s *Scheduler) GetEventHandler(eventType string) (EventHandler, bool) {
 }
 
 // RegisterRecurring registers a recurring handler that runs every intervalMinutes
-// minutes. All handlers must be registered before Start is called.
+// minutes. All handlers must be registered before Start is called: after
+// Start, recurring is read without a lock by the ticker and Status.
 //
 // Tick-Zero Behavior: All recurring handlers run immediately on startup (tick 0)
 // because 0 % N == 0 for any interval N. This is intentional.
@@ -220,6 +222,8 @@ func (s *Scheduler) registerRecurring(name string, intervalMinutes int, fn func(
 //
 // If the store does not implement store.AdvisoryLocker, the handler runs
 // unguarded (correct for a single replica).
+//
+// Like RegisterRecurring, it must be called before Start.
 func (s *Scheduler) RegisterRecurringSingleton(name string, intervalMinutes int, key store.AdvisoryLockKey, fn func(ctx context.Context)) {
 	s.registerRecurring(name, intervalMinutes, s.singletonGuard(name, key, fn), true)
 }
@@ -717,7 +721,21 @@ func (s *Scheduler) Status() SchedulerStatus {
 // CancelEvent cancels a pending scheduled event. The in-memory timer is
 // stopped and the database record is marked as cancelled.
 func (s *Scheduler) CancelEvent(ctx context.Context, id string) error {
+	s.StopEventTimer(id)
+
+	if s.store == nil {
+		return fmt.Errorf("scheduler has no store configured")
+	}
+
+	return s.store.CancelScheduledEvent(ctx, id)
+}
+
+// StopEventTimer stops and forgets the in-memory timer of a scheduled event,
+// if one is armed. It does not change the stored event; a caller that
+// cancels the stored event itself calls it after that write commits.
+func (s *Scheduler) StopEventTimer(id string) {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	if st, ok := s.timers[id]; ok {
 		st.Timer.Stop()
 		if st.Cancel != nil {
@@ -725,11 +743,4 @@ func (s *Scheduler) CancelEvent(ctx context.Context, id string) error {
 		}
 		delete(s.timers, id)
 	}
-	s.mu.Unlock()
-
-	if s.store == nil {
-		return fmt.Errorf("scheduler has no store configured")
-	}
-
-	return s.store.CancelScheduledEvent(ctx, id)
 }

@@ -22,6 +22,15 @@
  * of one project) asks the store instead of walking the list endpoint itself,
  * so a list is fetched once and then kept current from SSE.
  *
+ * By default, lists are walked in the server's compact view. A compact row
+ * merges into the feed's row for that agent: it never strips the full-only
+ * fields a row holds (from a single-agent read), and it is authoritative
+ * for its endpoint's compact keys. The compact view omits empty values, so
+ * a compact key the row lacks (a cleared activity, detail message or
+ * labels) is deleted from the feed's row. `_messageability` is a compact
+ * key of the hub list only. The feed is the store's own, so compact rows
+ * never reach the global `stateManager`.
+ *
  * Live updates come from a store-owned feed: a dedicated {@link StateManager}
  * on the `agent-feed` scope, which subscribes to `project.*.agent.>`. Its
  * scope never changes, so page navigation (which re-scopes the global
@@ -112,7 +121,11 @@ export interface AgentStoreOptions {
    * listens to nothing.
    */
   events?: EventTarget | null;
-  /** Row projection requested from the server. Defaults to `full`. */
+  /**
+   * Row projection requested from the server. Defaults to `compact`: the
+   * rows carry every field the store's consumers read, without the heavy
+   * full-view fields such as `appliedConfig`.
+   */
   view?: 'full' | 'compact';
   pageSize?: number;
   maxPages?: number;
@@ -276,6 +289,24 @@ export function agentQueryKey(q: AgentQuery): string {
   return params.length > 0 ? `${base}?${params.join('&')}` : base;
 }
 
+/** Id indexes by row array; held only as long as the rows are. */
+const agentIndexes = new WeakMap<
+  readonly Agent[],
+  { key: string; version: number; byId: ReadonlyMap<string, Agent> }
+>();
+
+/**
+ * The rows of `snapshot` by id, memoised on its key and version: lookups
+ * between two publishes of a list share one index.
+ */
+export function agentIndexOf(snapshot: AgentListSnapshot): ReadonlyMap<string, Agent> {
+  const held = agentIndexes.get(snapshot.agents);
+  if (held && held.key === snapshot.key && held.version === snapshot.version) return held.byId;
+  const byId = new Map(snapshot.agents.map((a) => [a.id, a]));
+  agentIndexes.set(snapshot.agents, { key: snapshot.key, version: snapshot.version, byId });
+  return byId;
+}
+
 /** Probes cover the lists SSE adds to: the whole hub and unfiltered projects. */
 function isProbeable(q: AgentQuery): boolean {
   if (q.label?.trim()) return false;
@@ -354,8 +385,10 @@ function newestMark(rows: readonly Agent[]): ProbeMark | undefined {
  * Probe-row fields that do not make a held row stale: `updated`, which every
  * heartbeat moves; `containerStatus`, the runtime's text ("Up 5 minutes"),
  * which heartbeats rewrite and no list consumer reads; and `creatorName`, the
- * compact view's copy of `appliedConfig.creatorName`, which full rows hold.
- * A row that changes otherwise merges with all of them.
+ * compact view's copy of `appliedConfig.creatorName`, which a full row (from
+ * a full-view walk or a single-agent read) holds only inside `appliedConfig`.
+ * A probe row that lacks one of them does not make the held row stale
+ * either. A row that changes otherwise merges with all of them.
  */
 const PROBE_UNCOMPARED_FIELDS: ReadonlySet<string> = new Set([
   'updated',
@@ -364,12 +397,94 @@ const PROBE_UNCOMPARED_FIELDS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Whether merging a probe row into the row held would change a field the
- * probe compares (see {@link PROBE_UNCOMPARED_FIELDS}). A merge never clears
- * a field the probe row omits, so only the probe row's own fields count.
+ * The keys of a compact row from a project's agent list: the hub's compact
+ * item, which omits a key whose value is empty. A merge deletes any of these
+ * a row lacks (see {@link mergeCompactRow}), so the set must not hold a key
+ * the server does not send. The hub ships and serves this client, so the
+ * two do not skew in practice; a hub without the compact view lists full
+ * rows, which omit most empty values and hold the creator name only inside
+ * `appliedConfig`.
+ * `deletion` is not in the set: a row without it comes from a hub that does
+ * not send it, so the held value stays.
  */
-function differsBeyondHeartbeat(row: Agent, held: Agent): boolean {
+export const PROJECT_COMPACT_KEYS: ReadonlySet<string> = new Set([
+  'id',
+  'slug',
+  'name',
+  'template',
+  'projectId',
+  'project',
+  'labels',
+  'phase',
+  'activity',
+  'containerStatus',
+  'message',
+  'messageMode',
+  'ancestry',
+  'createdBy',
+  'creatorName',
+  'created',
+  'updated',
+  'lastActivityEvent',
+  '_capabilities',
+]);
+
+/** The keys of a compact row from the hub's agent list, which adds messageability. */
+export const HUB_COMPACT_KEYS: ReadonlySet<string> = new Set([
+  ...PROJECT_COMPACT_KEYS,
+  '_messageability',
+]);
+
+/** The compact keys of the endpoint that lists `q`. */
+function compactKeysOf(q: AgentQuery): ReadonlySet<string> {
+  return q.scope === 'hub' ? HUB_COMPACT_KEYS : PROJECT_COMPACT_KEYS;
+}
+
+/**
+ * `row`, a compact row, merged into `held`, the feed's row for the same
+ * agent. The row is authoritative for its endpoint's compact keys: the
+ * compact view omits empty values, so a compact key the row lacks was
+ * cleared and is deleted. Every other field `held` has (the full fields of
+ * a single-agent read) is kept, except the detail message a status event
+ * nested under `detail`: readers prefer it to `message`, so it is dropped
+ * and the row's `message` stands alone.
+ */
+function mergeCompactRow(held: Agent | undefined, row: Agent, keys: ReadonlySet<string>): Agent {
+  if (!held) return row;
+  const merged = { ...held, ...row } as Record<string, unknown>;
+  for (const key of keys) if (!(key in row)) delete merged[key];
+  if (keys.has('message') && held.detail && 'message' in held.detail) {
+    const detail = { ...held.detail };
+    delete detail.message;
+    merged.detail = detail;
+  }
+  return merged as unknown as Agent;
+}
+
+/**
+ * Whether a held value is one the compact view omits: absent, null, or an
+ * empty string, list or map. A full row holds some of these (`template` is
+ * always sent), so a compact row that lacks the key does not change it.
+ */
+function isEmptyValue(value: unknown): boolean {
+  if (value === undefined || value === null || value === '') return true;
+  if (Array.isArray(value)) return value.length === 0;
+  return typeof value === 'object' && Object.keys(value).length === 0;
+}
+
+/**
+ * Whether merging a probe row into the row held would change a field the
+ * probe compares (see {@link PROBE_UNCOMPARED_FIELDS}): one of the probe
+ * row's own fields differs, or a compact key the row lacks (see
+ * {@link mergeCompactRow}) holds a value on the held row that is not empty
+ * (see {@link isEmptyValue}), which the merge clears.
+ */
+function differsBeyondHeartbeat(row: Agent, held: Agent, keys: ReadonlySet<string>): boolean {
   const before = held as unknown as Record<string, unknown>;
+  for (const key of keys) {
+    if (PROBE_UNCOMPARED_FIELDS.has(key) || key in row) continue;
+    if (!isEmptyValue(before[key])) return true;
+  }
   for (const [key, value] of Object.entries(row)) {
     if (PROBE_UNCOMPARED_FIELDS.has(key)) continue;
     const other = before[key];
@@ -412,6 +527,21 @@ function shouldAddFor(q: AgentQuery): (agent: Agent) => boolean {
 const VISIBILITY_RESOURCES = new Set(['agent', 'project']);
 const VISIBILITY_ACTIONS = new Set(['read', 'list']);
 
+/**
+ * Whether a listing row (or the feed's row after a status event) shows the
+ * agent present with no active delete: its deletion view is an explicit null
+ * (never deleted, restored, or no delete active) or a failed delete. Such a
+ * row read on a later feed means the agent is live again, whatever an earlier
+ * feed saw. A row still deleting, one with a state this client does not know,
+ * or one without the deletion key says nothing about that.
+ */
+export function listedWithoutActiveDelete(row: Agent): boolean {
+  const deletion = row.deletion;
+  if (deletion === null) return true;
+  if (deletion === undefined) return false;
+  return deletion.state === 'failed';
+}
+
 function defaultFetch(path: string, options: ApiFetchOptions): Promise<Response> {
   // The store reports its own failures to its callers. Letting a store
   // request raise the global access-denied event would also make the store
@@ -429,10 +559,11 @@ export class AgentStore {
   /** The current feed was marked as holding the complete hub set. */
   private feedHoldsHubSet = false;
   /**
-   * Agents deleted on earlier feeds: a later feed's walks and probes must
-   * not bring them back. A restore the feed reports clears one; a restore
-   * while no feed is open goes unseen, and the agent stays hidden until a
-   * reload.
+   * Agents deleted on earlier feeds: a later feed's walks, probes and live
+   * events must not bring them back. A restore the feed reports clears one.
+   * A restore while no feed is open goes unseen; a later walk or probe row,
+   * or a status event, that shows the agent with no delete running clears
+   * it (see releaseRestored and withoutCarried).
    */
   private readonly carriedTombstones = new Set<string>();
   /** Agent ids whose single-agent read is in flight on the current feed. */
@@ -465,7 +596,7 @@ export class AgentStore {
     this.feedFactory = options.feedFactory ?? ((): StateManager => new StateManager());
     this.now = options.now ?? ((): number => Date.now());
     this.currentUserId = options.currentUserId ?? ((): string => stateManager.getCurrentUserId());
-    this.view = options.view ?? 'full';
+    this.view = options.view ?? 'compact';
     this.pageSize = options.pageSize ?? AGENT_STORE_PAGE_SIZE;
     this.maxPages = options.maxPages ?? AGENT_STORE_MAX_PAGES;
     this.pageTimeoutMs = options.pageTimeoutMs;
@@ -547,6 +678,19 @@ export class AgentStore {
         // A walk already fetching while the feed is down may miss changes
         // that land before the feed is back: walk once more after it.
         if (entry.walk.phase === 'fetching' && !feed.isConnected) entry.followUp = true;
+        // A caller joining a walk that has published pages hears them now,
+        // not only from the walk's next page on.
+        const joined = entry.snapshot;
+        if (onProgress && joined.status === 'loading' && joined.agents.length > 0) {
+          queueMicrotask(() => {
+            if (!entry.waiters.has(waiter) || entry.snapshot !== joined) return;
+            try {
+              onProgress(joined);
+            } catch (err) {
+              console.error('[agent-store] progress callback failed:', err);
+            }
+          });
+        }
         return;
       }
       this.startWalk(entry);
@@ -894,8 +1038,10 @@ export class AgentStore {
                 ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
               };
             },
-            onPage: (_page, all) => {
-              if (entry.walk !== walk || !firstLoad) return;
+            onPage: (page, all) => {
+              if (entry.walk !== walk || this.feed !== feed) return;
+              this.releaseRestored(page);
+              if (!firstLoad) return;
               const tombstones = this.tombstonesOf(feed);
               // Changes SSE delivered since the walk began win over its pages.
               const listed = dropTombstoned([...all], tombstones).map((a) =>
@@ -919,9 +1065,19 @@ export class AgentStore {
         if (this.carriedTombstones.size > 0) {
           rows = rows.filter((row) => !this.carriedTombstones.has(row.id));
         }
-        // Only the hub list replaces feed rows. Other lists merge: the
-        // project list, for one, omits fields the hub rows carry.
-        feed.seedAgents(rows, { token, partial: this.view === 'compact' || entry.key !== 'hub' });
+        if (this.view === 'compact') {
+          // Compact rows merge: they omit the full fields a row may hold
+          // (from a single-agent read), and clear the compact keys they lack.
+          const keys = compactKeysOf(entry.query);
+          feed.seedAgents(
+            rows.map((row) => mergeCompactRow(feed.getAgent(row.id), row, keys)),
+            { token }
+          );
+        } else {
+          // Only a full hub walk replaces feed rows: the project list omits
+          // fields the hub rows carry.
+          feed.seedAgents(rows, { token, partial: entry.key !== 'hub' });
+        }
       } finally {
         feed.endSeedEpoch(token);
       }
@@ -943,15 +1099,11 @@ export class AgentStore {
         if (agent) byId.set(id, agent);
       }
 
-      if (this.view === 'compact') {
-        // Compact rows carry every field the list consumers read; the feed
-        // only ever records the compact flag for them.
-        if (entry.key === 'hub' && !truncated && connected) {
-          feed.markAgentSetComplete('compact');
-          this.feedHoldsHubSet = true;
-        }
-      } else if (entry.key === 'hub' && !truncated && connected) {
-        feed.markAgentSetComplete('full');
+      // Only a complete, unfiltered hub walk that stayed connected marks the
+      // feed's agent set complete, in the view it walked: compact rows never
+      // promise full fields.
+      if (entry.key === 'hub' && !truncated && connected) {
+        feed.markAgentSetComplete(this.view);
         this.feedHoldsHubSet = true;
       }
 
@@ -1117,6 +1269,7 @@ export class AgentStore {
       entry.overflowBackoffMs > 0 && this.now() - (entry.walkedAt ?? 0) < entry.overflowBackoffMs;
     const extraPages = backingOff ? 0 : AGENT_PROBE_MAX_EXTRA_PAGES;
     const token = feed.beginSeedEpoch();
+    const keys = compactKeysOf(entry.query);
     const changed: Agent[] = [];
     const listed = new Set(entry.agents.map((a) => a.id));
     let total: number | undefined;
@@ -1134,6 +1287,11 @@ export class AgentStore {
         const body = (await response.json()) as ProbePage;
         if (signal.aborted || entry.probe !== controller) return;
         const rows = Array.isArray(body.agents) ? body.agents : [];
+        // The abort and identity check above already covers a feed swap
+        // today (a swap starts a walk, which aborts this probe). The feed
+        // check only guards a future path that swaps the feed without
+        // aborting the probe.
+        if (this.feed === feed) this.releaseRestored(rows);
         if (typeof body.totalCount === 'number') total = body.totalCount;
         for (const row of rows) {
           const held = feed.getAgent(row.id);
@@ -1144,7 +1302,7 @@ export class AgentStore {
             !listed.has(row.id) ||
             (rowUpdated !== undefined &&
               (heldUpdated === undefined || rowUpdated > heldUpdated) &&
-              differsBeyondHeartbeat(row, held))
+              differsBeyondHeartbeat(row, held, keys))
           ) {
             changed.push(row);
           }
@@ -1163,7 +1321,10 @@ export class AgentStore {
       }
       if (this.feed !== feed) return;
       fresh = changed.filter((row) => !this.carriedTombstones.has(row.id));
-      feed.seedAgents(fresh, { token, partial: true });
+      feed.seedAgents(
+        fresh.map((row) => mergeCompactRow(feed.getAgent(row.id), row, keys)),
+        { token }
+      );
       // Only a merged probe that caught up moves the mark. An interrupted
       // one reads the same pages again; one that did not catch up leaves
       // the mark to the walk it hands off to, so if that walk fails, later
@@ -1248,9 +1409,9 @@ export class AgentStore {
       if (this.feed === feed) this.applyChange(feed, event.detail.data);
     }) as EventListener;
     // Agent ids are not reused: a restore is the one way a deleted agent
-    // comes back, and it is never inferred from a listing, which can still
-    // show an agent while its delete completes. The restore mark is subject
-    // to the replay limit documented in state.ts.
+    // comes back. A listing row still deleting never counts as one (see
+    // releaseRestored). The restore mark is subject to the replay limit
+    // documented in state.ts.
     const onCreated = ((event: CustomEvent<{ data: { agentId: string; restored?: boolean } }>) => {
       if (this.feed === feed && event.detail.data.restored) {
         this.carriedTombstones.delete(event.detail.data.agentId);
@@ -1354,6 +1515,25 @@ export class AgentStore {
     }, this.feedIdleMs);
   }
 
+  /**
+   * Forget the tombstones that earlier feeds carried for agents these listing
+   * rows (walk or probe pages) show restored (see
+   * {@link listedWithoutActiveDelete}). The restore event went out while no
+   * feed was open. Every walk and probe on the current feed starts after those
+   * tombstones were carried, so its rows were read after the deletes were
+   * seen. A hard delete is published before its row is removed, so a row still
+   * deleting keeps the tombstone. The current feed's own tombstones are left
+   * alone: a page read before a delete on this feed can still list the agent.
+   */
+  private releaseRestored(rows: readonly Agent[]): void {
+    if (this.carriedTombstones.size === 0) return;
+    for (const row of rows) {
+      if (this.carriedTombstones.has(row.id) && listedWithoutActiveDelete(row)) {
+        this.carriedTombstones.delete(row.id);
+      }
+    }
+  }
+
   /** Tombstones of the current feed and of the feeds before it. */
   private tombstonesOf(feed: StateManager): Set<string> {
     const own = feed.getDeletedAgentIds();
@@ -1362,11 +1542,40 @@ export class AgentStore {
   }
 
   /**
+   * Hold back upserts for agents an earlier feed saw deleted. The current
+   * feed has not seen those deletes, so a live event can still add such an
+   * agent to it. An upsert releases the carried tombstone when the feed's
+   * row shows the agent with no delete running (see
+   * {@link listedWithoutActiveDelete}); only a status event sets that view
+   * live, since a created event carries none. Otherwise the upsert is
+   * dropped and the tombstone kept. A restore event releases the tombstone
+   * before this runs. The feed's own tombstones are not involved: the feed
+   * never reports an upsert for an agent it saw deleted.
+   */
+  private withoutCarried(feed: StateManager, change: AgentsChangedDetail): AgentsChangedDetail {
+    if (this.carriedTombstones.size === 0 || change.upserted.length === 0) return change;
+    let kept: string[] | null = null;
+    change.upserted.forEach((id, i) => {
+      if (this.carriedTombstones.has(id)) {
+        const agent = feed.getAgent(id);
+        if (!agent || !listedWithoutActiveDelete(agent)) {
+          kept ??= change.upserted.slice(0, i);
+          return;
+        }
+        this.carriedTombstones.delete(id);
+      }
+      kept?.push(id);
+    });
+    return kept ? { ...change, upserted: kept } : change;
+  }
+
+  /**
    * Apply one coalesced feed flush to every entry, notifying each changed
    * entry once. With `only`, the rows came from that entry's own read: only
    * it adds rows it lacks, and the others update rows they already hold.
    */
-  private applyChange(feed: StateManager, change: AgentsChangedDetail, only?: Entry): void {
+  private applyChange(feed: StateManager, rawChange: AgentsChangedDetail, only?: Entry): void {
+    const change = this.withoutCarried(feed, rawChange);
     const added = new Set<string>();
     for (const entry of this.entries.values()) {
       // An entry that never loaded and is not loading holds no rows to keep

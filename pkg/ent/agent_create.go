@@ -13,6 +13,7 @@ import (
 	"entgo.io/ent/dialect/sql/sqlgraph"
 	"entgo.io/ent/schema/field"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agenthold"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/groupmembership"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/policybinding"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/project"
@@ -916,6 +917,20 @@ func (_c *AgentCreate) SetNillableRunIntentAt(v *time.Time) *AgentCreate {
 	return _c
 }
 
+// SetRunIntentMarkedAt sets the "run_intent_marked_at" field.
+func (_c *AgentCreate) SetRunIntentMarkedAt(v time.Time) *AgentCreate {
+	_c.mutation.SetRunIntentMarkedAt(v)
+	return _c
+}
+
+// SetNillableRunIntentMarkedAt sets the "run_intent_marked_at" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableRunIntentMarkedAt(v *time.Time) *AgentCreate {
+	if v != nil {
+		_c.SetRunIntentMarkedAt(*v)
+	}
+	return _c
+}
+
 // SetStartClaimID sets the "start_claim_id" field.
 func (_c *AgentCreate) SetStartClaimID(v string) *AgentCreate {
 	_c.mutation.SetStartClaimID(v)
@@ -1117,6 +1132,21 @@ func (_c *AgentCreate) AddPolicyBindings(v ...*PolicyBinding) *AgentCreate {
 		ids[i] = v[i].ID
 	}
 	return _c.AddPolicyBindingIDs(ids...)
+}
+
+// AddHoldIDs adds the "holds" edge to the AgentHold entity by IDs.
+func (_c *AgentCreate) AddHoldIDs(ids ...uuid.UUID) *AgentCreate {
+	_c.mutation.AddHoldIDs(ids...)
+	return _c
+}
+
+// AddHolds adds the "holds" edges to the AgentHold entity.
+func (_c *AgentCreate) AddHolds(v ...*AgentHold) *AgentCreate {
+	ids := make([]uuid.UUID, len(v))
+	for i := range v {
+		ids[i] = v[i].ID
+	}
+	return _c.AddHoldIDs(ids...)
 }
 
 // Mutation returns the AgentMutation object of the builder.
@@ -1676,6 +1706,10 @@ func (_c *AgentCreate) createSpec() (*Agent, *sqlgraph.CreateSpec) {
 		_spec.SetField(agent.FieldRunIntentAt, field.TypeTime, value)
 		_node.RunIntentAt = &value
 	}
+	if value, ok := _c.mutation.RunIntentMarkedAt(); ok {
+		_spec.SetField(agent.FieldRunIntentMarkedAt, field.TypeTime, value)
+		_node.RunIntentMarkedAt = &value
+	}
 	if value, ok := _c.mutation.StartClaimID(); ok {
 		_spec.SetField(agent.FieldStartClaimID, field.TypeString, value)
 		_node.StartClaimID = &value
@@ -1762,6 +1796,22 @@ func (_c *AgentCreate) createSpec() (*Agent, *sqlgraph.CreateSpec) {
 			Bidi:    false,
 			Target: &sqlgraph.EdgeTarget{
 				IDSpec: sqlgraph.NewFieldSpec(policybinding.FieldID, field.TypeUUID),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges = append(_spec.Edges, edge)
+	}
+	if nodes := _c.mutation.HoldsIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   agent.HoldsTable,
+			Columns: []string{agent.HoldsColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(agenthold.FieldID, field.TypeUUID),
 			},
 		}
 		for _, k := range nodes {
@@ -2970,6 +3020,24 @@ func (u *AgentUpsert) UpdateRunIntentAt() *AgentUpsert {
 // ClearRunIntentAt clears the value of the "run_intent_at" field.
 func (u *AgentUpsert) ClearRunIntentAt() *AgentUpsert {
 	u.SetNull(agent.FieldRunIntentAt)
+	return u
+}
+
+// SetRunIntentMarkedAt sets the "run_intent_marked_at" field.
+func (u *AgentUpsert) SetRunIntentMarkedAt(v time.Time) *AgentUpsert {
+	u.Set(agent.FieldRunIntentMarkedAt, v)
+	return u
+}
+
+// UpdateRunIntentMarkedAt sets the "run_intent_marked_at" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateRunIntentMarkedAt() *AgentUpsert {
+	u.SetExcluded(agent.FieldRunIntentMarkedAt)
+	return u
+}
+
+// ClearRunIntentMarkedAt clears the value of the "run_intent_marked_at" field.
+func (u *AgentUpsert) ClearRunIntentMarkedAt() *AgentUpsert {
+	u.SetNull(agent.FieldRunIntentMarkedAt)
 	return u
 }
 
@@ -4563,6 +4631,27 @@ func (u *AgentUpsertOne) UpdateRunIntentAt() *AgentUpsertOne {
 func (u *AgentUpsertOne) ClearRunIntentAt() *AgentUpsertOne {
 	return u.Update(func(s *AgentUpsert) {
 		s.ClearRunIntentAt()
+	})
+}
+
+// SetRunIntentMarkedAt sets the "run_intent_marked_at" field.
+func (u *AgentUpsertOne) SetRunIntentMarkedAt(v time.Time) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetRunIntentMarkedAt(v)
+	})
+}
+
+// UpdateRunIntentMarkedAt sets the "run_intent_marked_at" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateRunIntentMarkedAt() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateRunIntentMarkedAt()
+	})
+}
+
+// ClearRunIntentMarkedAt clears the value of the "run_intent_marked_at" field.
+func (u *AgentUpsertOne) ClearRunIntentMarkedAt() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearRunIntentMarkedAt()
 	})
 }
 
@@ -6356,6 +6445,27 @@ func (u *AgentUpsertBulk) UpdateRunIntentAt() *AgentUpsertBulk {
 func (u *AgentUpsertBulk) ClearRunIntentAt() *AgentUpsertBulk {
 	return u.Update(func(s *AgentUpsert) {
 		s.ClearRunIntentAt()
+	})
+}
+
+// SetRunIntentMarkedAt sets the "run_intent_marked_at" field.
+func (u *AgentUpsertBulk) SetRunIntentMarkedAt(v time.Time) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetRunIntentMarkedAt(v)
+	})
+}
+
+// UpdateRunIntentMarkedAt sets the "run_intent_marked_at" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateRunIntentMarkedAt() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateRunIntentMarkedAt()
+	})
+}
+
+// ClearRunIntentMarkedAt clears the value of the "run_intent_marked_at" field.
+func (u *AgentUpsertBulk) ClearRunIntentMarkedAt() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearRunIntentMarkedAt()
 	})
 }
 

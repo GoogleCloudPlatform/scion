@@ -22,26 +22,23 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// listAgentsSorted implements the global agents endpoint's sorted mode:
-// pure SQL, because the SQL scope predicate already baked into filter by
-// the caller IS the authorization (AuthorizedProjectIDs and the
-// classification fields). There is no per-item read filter, unlike the
-// project endpoint's user path, so returned rows go through the same
-// buildGlobalAgentPage as the legacy branch, with no narrow AgentMember
-// projection and no race/re-decision machinery.
+// listAgentsSorted implements the global agents endpoint's sorted mode.
+// The SQL scope predicate already baked into filter by the caller
+// (AuthorizedProjectIDs and the classification fields) narrows the
+// candidates; the agent-list rule (see listReadableAgents) then keeps only
+// the agents the caller can read, in the fit branch, the paged branch and
+// the stats block alike. Returned rows go through the same
+// buildGlobalAgentPage as the legacy branch.
 func (s *Server) listAgentsSorted(w http.ResponseWriter, r *http.Request, filter store.AgentFilter, p agentListParams, identity Identity) {
 	ctx := r.Context()
 
 	binding := scopedCursorBinding(sortSuffix("agents", p.sort, p.dir), filter, identity)
 
-	var cur *store.AgentCursor
 	if p.cursor != "" {
-		decoded, err := store.DecodeAgentCursor(p.cursor, p.sort, p.dir, binding)
-		if err != nil {
+		if _, err := store.DecodeAgentCursor(p.cursor, p.sort, p.dir, binding); err != nil {
 			BadRequest(w, "invalid cursor")
 			return
 		}
-		cur = &decoded
 	}
 
 	// statsFilter is the request filter with Phase cleared: the fit probe
@@ -51,26 +48,46 @@ func (s *Server) listAgentsSorted(w http.ResponseWriter, r *http.Request, filter
 	statsFilter.Phase = ""
 
 	var (
-		items      []store.Agent
-		totalCount int
-		nextCursor string
-		complete   bool
+		items       []store.Agent
+		totalCount  int
+		totalApprox bool
+		nextCursor  string
+		complete    bool
 	)
+
+	// stats is read before any page row is decided, so a stats read error
+	// costs no decisions.
+	var statsResp *ListAgentsStats
+	if p.stats {
+		var err error
+		statsResp, err = s.buildGlobalAgentStats(ctx, identity, statsFilter, p)
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+	}
 
 	if p.hasFit {
 		// fit (race-free): the store's own limit+1 probe says whether
 		// more rows exist. No decision is made on any row yet.
+		fitDone := perfPhaseStart(ctx, perfPhaseListDBRead)
 		result, err := s.store.ListAgents(ctx, statsFilter, store.ListOptions{
 			Limit: p.fit, SortBy: p.sort, SortDir: p.dir, SkipTotalCount: true,
 		})
+		fitDone()
 		if err != nil {
 			writeErrorFromErr(w, err, "")
 			return
 		}
 		if result.NextCursor == "" {
-			// Complete: the candidate set fit. Caps and messageability for
-			// every row, exactly as today's load.
-			items = result.Items
+			// Complete: the candidate set fit. Keep the readable rows;
+			// caps and messageability for each of them.
+			readable, err := s.readableAgentRows(ctx, identity, result.Items)
+			if err != nil {
+				writeErrorFromErr(w, err, "")
+				return
+			}
+			items = readable
 			complete = true
 			totalCount = len(items)
 		}
@@ -80,46 +97,32 @@ func (s *Server) listAgentsSorted(w http.ResponseWriter, r *http.Request, filter
 	}
 
 	if !complete {
-		// Paged: filter (phase applied) in sorted order, keyset
-		// after cur. totalCount is the COUNT of filter, phase applied,
-		// which is exactly what ListAgents' own COUNT (driven
-		// by filter) already computes when SkipTotalCount is false.
-		result, err := s.store.ListAgents(ctx, filter, store.ListOptions{
-			Limit: p.limit, SortBy: p.sort, SortDir: p.dir,
-			SortCursor: cur, CursorBinding: binding,
-		})
+		// Paged: the readable rows of filter (phase applied) in sorted
+		// order, keyset after the request cursor. totalCount is the
+		// readable count of filter, phase applied.
+		result, err := s.listAgentsSortedPage(ctx, identity, filter, p, binding)
 		if err != nil {
 			writeErrorFromErr(w, err, "")
 			return
 		}
 		items = result.Items
 		totalCount = result.TotalCount
+		totalApprox = result.TotalCountApproximate
 		nextCursor = result.NextCursor
-	}
-
-	// stats is read before any decision is made, so a stats read error
-	// costs no decisions.
-	var statsResp *ListAgentsStats
-	if p.stats {
-		var err error
-		statsResp, err = buildGlobalAgentStats(ctx, s, statsFilter)
-		if err != nil {
-			writeErrorFromErr(w, err, "")
-			return
-		}
 	}
 
 	agents, scopeCap := s.buildGlobalAgentPage(ctx, identity, items)
 
 	resp := ListAgentsResponse{
-		Agents:       agents,
-		NextCursor:   nextCursor,
-		TotalCount:   totalCount,
-		Sort:         p.sort,
-		Dir:          p.dir,
-		Stats:        statsResp,
-		ServerTime:   time.Now().UTC(),
-		Capabilities: scopeCap,
+		Agents:                agents,
+		NextCursor:            nextCursor,
+		TotalCount:            totalCount,
+		TotalCountApproximate: totalApprox,
+		Sort:                  p.sort,
+		Dir:                   p.dir,
+		Stats:                 statsResp,
+		ServerTime:            time.Now().UTC(),
+		Capabilities:          scopeCap,
 	}
 	if p.hasFit {
 		c := complete
@@ -137,6 +140,7 @@ func (s *Server) listAgentsSorted(w http.ResponseWriter, r *http.Request, filter
 func (s *Server) buildGlobalAgentPage(ctx context.Context, identity Identity, items []store.Agent) ([]AgentWithCapabilities, *Capabilities) {
 	s.enrichAgents(ctx, items)
 
+	capsDone := perfPhaseStart(ctx, perfPhaseCapabilities)
 	agents := make([]AgentWithCapabilities, 0, len(items))
 	resources := make([]Resource, len(items))
 	for i := range items {
@@ -147,14 +151,17 @@ func (s *Server) buildGlobalAgentPage(ctx context.Context, identity Identity, it
 		item.AppliedConfig = redactAppliedConfigEnvForResponse(item.AppliedConfig, s.envViewAllowed(ctx, identity, &item, cap))
 		agents = append(agents, AgentWithCapabilities{Agent: item, Cap: cap})
 	}
+	capsDone()
 
 	// Messageability for each agent relative to the viewer.
 	for i := range agents {
 		agents[i].Messageability = s.ComputeMessageability(ctx, identity, &agents[i].Agent)
 	}
 
+	scopeCapDone := perfPhaseStart(ctx, perfPhaseScopeCapabilities)
 	scopeCap := s.authzService.ComputeScopeCapabilities(ctx, identity, "", "", "agent")
 	s.addAgentCreateIfAnyProjectAllows(ctx, identity, scopeCap)
+	scopeCapDone()
 	return agents, scopeCap
 }
 
@@ -165,13 +172,53 @@ func (s *Server) buildGlobalAgentPage(ctx context.Context, identity Identity, it
 const globalAgentStatsCap = 2000
 
 // buildGlobalAgentStats computes the "stats" block for the global
-// endpoint via CountAgentsByPhaseIDs (a SQL read with no decision made).
-// Unlike the project endpoint's buildAgentStats (which reads the already
-// in-memory, read-filtered member set), this is a dedicated store read: the
-// global endpoint's stats population has no read filter to piggyback on.
-// The [id, phase] list is only built when it will be sent.
-func buildGlobalAgentStats(ctx context.Context, s *Server, statsFilter store.AgentFilter) (*ListAgentsStats, error) {
+// endpoint over the readable agents of statsFilter, under the same
+// agent-list rule as the items. The candidates are read as narrow members,
+// bounded by authorizedListMaxCandidates; past that bound the counts are a
+// lower bound and the [id,phase] list is omitted. Otherwise at most
+// authorizedListMaxCandidates (<= globalAgentStatsCap) agents are
+// readable, so the list is always sent.
+func (s *Server) buildGlobalAgentStats(ctx context.Context, identity Identity, statsFilter store.AgentFilter, p agentListParams) (*ListAgentsStats, error) {
+	if !agentListAppliesReadRule(ctx) {
+		return buildUnfilteredGlobalAgentStats(ctx, s, statsFilter)
+	}
+	membersDone := perfPhaseStart(ctx, perfPhaseListDBRead)
+	members, err := s.store.ListAgentMembers(ctx, statsFilter, p.sort, p.dir, authorizedListMaxCandidates+1)
+	membersDone()
+	if err != nil {
+		return nil, err
+	}
+	truncated := len(members) > authorizedListMaxCandidates
+	if truncated {
+		members = members[:authorizedListMaxCandidates]
+	}
+	readable, err := s.readableAgentMembers(ctx, identity, members)
+	if err != nil {
+		return nil, err
+	}
+	stats := &ListAgentsStats{Total: len(readable), TotalApproximate: truncated}
+	for _, m := range readable {
+		if m.Phase == "running" {
+			stats.Running++
+		}
+	}
+	if !truncated {
+		agentsOut := make([][2]string, len(readable))
+		for i, m := range readable {
+			agentsOut[i] = [2]string{m.ID, m.Phase}
+		}
+		stats.Agents = &agentsOut
+	}
+	return stats, nil
+}
+
+// buildUnfilteredGlobalAgentStats is the stats block for a caller the
+// agent-list rule does not apply to (an agent): every candidate of
+// statsFilter, read via CountAgentsByPhaseIDs with no decision made.
+func buildUnfilteredGlobalAgentStats(ctx context.Context, s *Server, statsFilter store.AgentFilter) (*ListAgentsStats, error) {
+	countDone := perfPhaseStart(ctx, perfPhaseListDBRead)
 	idPhases, err := s.store.CountAgentsByPhaseIDs(ctx, statsFilter)
+	countDone()
 	if err != nil {
 		return nil, err
 	}

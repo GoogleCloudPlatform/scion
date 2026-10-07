@@ -66,6 +66,9 @@ type WebHealthInfo struct {
 // web server's /healthz endpoint. It includes backward-compatible top-level
 // fields (status, version, scionVersion, uptime) plus per-component sub-objects.
 type CompositeHealthResponse struct {
+	// Status must stay the first field: shell health checks
+	// (scripts/starter-hub/gce-start-hub.sh, scripts/single-node-vm/deploy.sh)
+	// read the top-level status by matching the body prefix {"status":"...".
 	Status       string      `json:"status"`
 	Version      string      `json:"version"`
 	ScionVersion string      `json:"scionVersion"`
@@ -184,6 +187,13 @@ type WebServerConfig struct {
 	// the server proactively closes it so the client can reconnect cleanly.
 	// Defaults to defaultSSEMaxConnectionAge (3500s) when zero.
 	SSEMaxConnectionAge time.Duration
+
+	// PerfTrace turns on performance tracing for the SSE endpoint
+	// (server.hub.perf_trace): connect-time wildcard expansion and subject
+	// authorization timings, authorization store-call and decision-audit
+	// counts, and delivered-event counts and write time, logged at connect
+	// and at close. Off by default; observe only. See perftrace.go.
+	PerfTrace bool
 	// SlowRequestThreshold is the duration after which an HTTP request is
 	// logged as slow. Zero uses logging.DefaultSlowRequestThreshold.
 	SlowRequestThreshold time.Duration
@@ -980,10 +990,11 @@ func (ws *WebServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		resp.Hub = hubHealth
 
 		// Inherit top-level version/uptime from hub health if available.
+		// Same severity semantics as GetHealthInfo: the composite is the
+		// worst of its components, so an unhealthy hub (critical check
+		// failed) makes the composite unhealthy, not merely degraded.
 		if h, ok := hubHealth.(interface{ HealthStatus() string }); ok {
-			if h.HealthStatus() != "healthy" {
-				resp.Status = "degraded"
-			}
+			resp.Status = worseHealthStatus(resp.Status, h.HealthStatus())
 		}
 		// Use hub's uptime as the authoritative uptime.
 		if h, ok := hubHealth.(*HealthResponse); ok {
@@ -1002,9 +1013,7 @@ func (ws *WebServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		resp.Broker = brokerHealth
 
 		if h, ok := brokerHealth.(interface{ HealthStatus() string }); ok {
-			if h.HealthStatus() != "healthy" {
-				resp.Status = "degraded"
-			}
+			resp.Status = worseHealthStatus(resp.Status, h.HealthStatus())
 		}
 	}
 
@@ -1328,11 +1337,23 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Performance tracing (server.hub.perf_trace), observe only. With the
+	// setting off, trace stays nil and nothing below records anything.
+	var trace *PerfTrace
+	if ws.config.PerfTrace {
+		trace = newPerfTrace(webPerfTraceDB(ws.store))
+		trace.setEndpoint(perfEndpointSSE)
+		r = r.WithContext(contextWithPerfTrace(r.Context(), trace))
+		defer logPerfTraceLine(perfTraceLogger(), r, trace.Snapshot, slog.String("sse_stage", "close"))
+	}
+
 	// Expand NATS-style wildcards (e.g. project.>) into specific
 	// resource-scoped subjects before authorization. This ensures the
 	// subscription only covers resources the caller can actually access,
 	// preventing over-subscription to events the user shouldn't see.
+	expandDone := perfPhaseStart(r.Context(), perfPhaseSSEExpand)
 	subjects = ws.expandSSEWildcards(r, subjects)
+	expandDone()
 	if len(subjects) == 0 {
 		// All wildcard subjects expanded to nothing (e.g. user has no
 		// accessible projects). Fail closed — deny the connection.
@@ -1348,7 +1369,10 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 
 	// Subject-level authorization: verify the caller has access to every
 	// requested subject. This runs once at connection time, not per-event.
-	if denied := ws.authorizeSSESubjects(r, subjects); len(denied) > 0 {
+	authorizeDone := perfPhaseStart(r.Context(), perfPhaseSSEAuthorize)
+	denied := ws.authorizeSSESubjects(r, subjects)
+	authorizeDone()
+	if len(denied) > 0 {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusForbidden)
 		body, _ := json.Marshal(map[string]interface{}{
@@ -1377,6 +1401,9 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 	flusher.Flush()
+	if trace != nil {
+		logPerfTraceLine(perfTraceLogger(), r, trace.Snapshot, slog.String("sse_stage", "connect"))
+	}
 
 	eventID := 0
 	heartbeat := time.NewTicker(30 * time.Second)
@@ -1399,6 +1426,10 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			eventID++
+			var writeStart time.Time
+			if trace != nil {
+				writeStart = time.Now()
+			}
 			// Wrap subject + data into the shape the client expects:
 			//   event: update
 			//   data: {"subject":"project.xxx.agent.created","data":{...}}
@@ -1407,6 +1438,9 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 			_, _ = fmt.Fprintf(w, "id: %d\nevent: update\ndata: {\"subject\":%q,\"data\":%s}\n\n",
 				eventID, evt.Subject, evt.Data)
 			flusher.Flush()
+			if trace != nil {
+				trace.addSSEEvent(time.Since(writeStart))
+			}
 		case <-heartbeat.C:
 			_, _ = fmt.Fprintf(w, ":heartbeat %d\n\n", time.Now().UnixMilli())
 			flusher.Flush()
@@ -2894,20 +2928,25 @@ func sessionString(session *sessions.Session, key string) string {
 	return ""
 }
 
+// webContentSecurityPolicy is the CSP sent with every web response.
+//
+// img-src allows blob: because the chat file preview fetches image bytes
+// with credentials and renders them through URL.createObjectURL (gs://
+// links, attachments, workspace files). A blob: URL matches neither 'self'
+// nor https:, so without it the browser blocks the load and the preview
+// shows a broken image. blob: is allowed for images only, never for
+// scripts or frames.
+const webContentSecurityPolicy = "default-src 'self'; " +
+	"script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdn.webawesome.com; " +
+	"style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdn.webawesome.com https://fonts.googleapis.com; " +
+	"font-src 'self' https://fonts.gstatic.com https://cdn.jsdelivr.net https://cdn.webawesome.com; " +
+	"img-src 'self' data: blob: https:; " +
+	"connect-src 'self' data: ws: wss: http://localhost:* http://127.0.0.1:* https://storage.googleapis.com"
+
 // securityHeadersMiddleware adds security headers to all responses.
 func (ws *WebServer) securityHeadersMiddleware(next http.Handler) http.Handler {
-	// Build CSP matching the Koa server's policy (web/src/server/config.ts:154-162)
-	csp := strings.Join([]string{
-		"default-src 'self'",
-		"script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdn.webawesome.com",
-		"style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdn.webawesome.com https://fonts.googleapis.com",
-		"font-src 'self' https://fonts.gstatic.com https://cdn.jsdelivr.net https://cdn.webawesome.com",
-		"img-src 'self' data: https:",
-		"connect-src 'self' data: ws: wss: http://localhost:* http://127.0.0.1:* https://storage.googleapis.com",
-	}, "; ")
-
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Security-Policy", csp)
+		w.Header().Set("Content-Security-Policy", webContentSecurityPolicy)
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-XSS-Protection", "1; mode=block")
@@ -2923,15 +2962,22 @@ func (ws *WebServer) loggingMiddleware(next http.Handler) http.Handler {
 		start := time.Now()
 		wrapped := &responseWriter{ResponseWriter: w, statusCode: http.StatusOK}
 
-		next.ServeHTTP(wrapped, r)
+		aborted := logging.ServeCatchingAbort(next, wrapped, r)
 
-		if ws.config.Debug || wrapped.statusCode >= 400 {
-			ws.logger().Info("Web request",
+		if ws.config.Debug || wrapped.statusCode >= 400 || aborted {
+			attrs := []slog.Attr{
 				slog.String("method", r.Method),
 				slog.String("path", r.URL.Path),
 				slog.Int("status", wrapped.statusCode),
 				slog.Duration("duration", time.Since(start)),
-			)
+			}
+			if aborted {
+				attrs = append(attrs, slog.Bool(logging.AttrAborted, true))
+			}
+			ws.logger().LogAttrs(r.Context(), slog.LevelInfo, "Web request", attrs...)
+		}
+		if aborted {
+			panic(http.ErrAbortHandler)
 		}
 	})
 }

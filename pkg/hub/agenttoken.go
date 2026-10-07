@@ -22,7 +22,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -95,9 +94,8 @@ const (
 	// ScopeProjectArtifactWrite allows the agent to publish artifacts, and
 	// new versions of them, homed in its own project (artifact.create,
 	// artifact.update). Deliberately excludes deletion and grant
-	// management. Not yet minted into any agent token: the artifact service
-	// has no behaviour until a later phase wires it into the mint
-	// candidates.
+	// management. Minted for the baseline and full agent roles
+	// (ScopesForRole).
 	ScopeProjectArtifactWrite AgentTokenScope = "project:artifact:write"
 	// ScopeAgentSetMessageMode allows the agent to change message mode
 	// for agents within the same project.
@@ -119,7 +117,7 @@ const (
 // authz.go's effectiveAgentScopes actually keys on. ValidateAgentToken sets
 // legacyScopeSchema only when a verified token's wire form carries no
 // scope_schema claim (ScopeSchema reads as its Go zero value, 0, because
-// GenerateAgentToken — the only agent-JWT minter — has always stamped a
+// SignAgentToken — the only agent-JWT signer — has always stamped a
 // nonzero value since this field existed, so a verified 0 can only mean
 // "minted before the field existed"; any other value, including one from a
 // schema this package does not yet know about, is left as not legacy). Every
@@ -149,6 +147,9 @@ type AgentTokenClaims struct {
 	// See CurrentAgentScopeSchema. Metadata only; see legacyScopeSchema for
 	// the field that actually gates compatibility behavior.
 	ScopeSchema int `json:"scope_schema,omitempty"`
+	// RunID is the agent run the token was issued for (agents.run_id at
+	// issue). Empty for a token issued without a run.
+	RunID string `json:"run_id,omitempty"`
 	// legacyScopeSchema is set only by ValidateAgentToken, and only when the
 	// verified token's wire form carries no scope_schema claim. It is
 	// deliberately unexported (so it is never part of the wire format and
@@ -169,23 +170,10 @@ type AgentTokenConfig struct {
 	TokenDuration time.Duration
 }
 
-// CredentialRecorder persists agent credentials after token generation.
-// Implementations should be safe to call concurrently.
-type CredentialRecorder interface {
-	RecordAgentCredential(ctx context.Context, cred *store.AgentCredential) error
-}
-
 // AgentTokenService handles agent token generation and validation.
 type AgentTokenService struct {
-	config             AgentTokenConfig
-	signer             jose.Signer
-	credentialRecorder CredentialRecorder
-}
-
-// SetCredentialRecorder sets the credential recorder for persisting issued tokens.
-// This is nil-safe: if not set, token generation works without persistence.
-func (s *AgentTokenService) SetCredentialRecorder(cr CredentialRecorder) {
-	s.credentialRecorder = cr
+	config AgentTokenConfig
+	signer jose.Signer
 }
 
 // hashJTI returns the SHA-256 hex hash of a JWT ID (JTI).
@@ -274,10 +262,24 @@ func NewAgentTokenService(config AgentTokenConfig) (*AgentTokenService, error) {
 	}, nil
 }
 
-// GenerateAgentToken generates a JWT for an agent with the specified scopes.
-func (s *AgentTokenService) GenerateAgentToken(agentID, projectID string, scopes []AgentTokenScope, ancestry []string) (string, error) {
+// AgentTokenGrant is what an agent token is authorized to carry: the
+// subject, project, scopes and ancestry. It is produced before the token's
+// run is known and signed once it is (SignAgentToken).
+type AgentTokenGrant struct {
+	AgentID   string
+	ProjectID string
+	Scopes    []AgentTokenScope
+	Ancestry  []string
+}
+
+// SignAgentToken signs a token for grant, bound to runID, and returns it
+// with the credential row describing it. It has no side effects: the
+// caller records the credential, and must not hand out the token unless
+// that record succeeded.
+func (s *AgentTokenService) SignAgentToken(grant AgentTokenGrant, runID string) (string, *store.AgentCredential, error) {
 	now := time.Now()
 
+	scopes := grant.Scopes
 	// Default to status update scope if none provided
 	if len(scopes) == 0 {
 		scopes = []AgentTokenScope{ScopeAgentStatusUpdate}
@@ -288,40 +290,33 @@ func (s *AgentTokenService) GenerateAgentToken(agentID, projectID string, scopes
 	claims := AgentTokenClaims{
 		Claims: jwt.Claims{
 			Issuer:    AgentTokenIssuer,
-			Subject:   agentID,
+			Subject:   grant.AgentID,
 			Audience:  jwt.Audience{AgentTokenAudience},
 			IssuedAt:  jwt.NewNumericDate(now),
 			Expiry:    jwt.NewNumericDate(expiry),
 			NotBefore: jwt.NewNumericDate(now),
 			ID:        jti,
 		},
-		ProjectID:   projectID,
+		ProjectID:   grant.ProjectID,
 		Scopes:      scopes,
-		Ancestry:    ancestry,
+		Ancestry:    grant.Ancestry,
 		ScopeSchema: CurrentAgentScopeSchema,
+		RunID:       runID,
 	}
 
 	token, err := jwt.Signed(s.signer).Claims(claims).Serialize()
 	if err != nil {
-		return "", fmt.Errorf("failed to sign token: %w", err)
+		return "", nil, fmt.Errorf("failed to sign token: %w", err)
 	}
-
-	// Record credential if recorder is configured (best-effort)
-	if s.credentialRecorder != nil {
-		cred := &store.AgentCredential{
-			AgentID:      agentID,
-			ProjectID:    projectID,
-			TokenJTIHash: hashJTI(jti),
-			IssuedAt:     now,
-			ExpiresAt:    expiry,
-		}
-		if err := s.credentialRecorder.RecordAgentCredential(context.Background(), cred); err != nil {
-			slog.Warn("Failed to record agent credential",
-				"agent_id", agentID, "error", err)
-		}
+	cred := &store.AgentCredential{
+		AgentID:      grant.AgentID,
+		ProjectID:    grant.ProjectID,
+		TokenJTIHash: hashJTI(jti),
+		RunID:        runID,
+		IssuedAt:     now,
+		ExpiresAt:    expiry,
 	}
-
-	return token, nil
+	return token, cred, nil
 }
 
 // ValidateAgentToken validates a JWT and returns the claims if valid.
@@ -349,7 +344,7 @@ func (s *AgentTokenService) ValidateAgentToken(tokenString string) (*AgentTokenC
 
 	// A verified token whose wire form carried no scope_schema claim (reads
 	// as the Go zero value, 0) predates CurrentAgentScopeSchema entirely:
-	// GenerateAgentToken has always stamped a nonzero schema since the field
+	// SignAgentToken has always stamped a nonzero schema since the field
 	// existed, and this method only returns claims that passed HS256
 	// verification against this hub's own signing key, so no other signer's
 	// output reaches this line. This is the one place legacyScopeSchema is

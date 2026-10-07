@@ -177,7 +177,7 @@ function ms(value: string | undefined): number {
 }
 
 /** The keys of a `view=compact` list item, as the hub's compact view emits them. */
-const COMPACT_KEYS = [
+export const COMPACT_KEYS = [
   'id',
   'slug',
   'name',
@@ -188,6 +188,7 @@ const COMPACT_KEYS = [
   'phase',
   'activity',
   'containerStatus',
+  'message',
   'messageMode',
   'ancestry',
   'createdBy',
@@ -196,13 +197,46 @@ const COMPACT_KEYS = [
   'lastActivityEvent',
   '_capabilities',
   '_messageability',
+  // Always sent by the hub (null when no delete is active or failed); rows
+  // here that leave it out stand for a listing without the deletion view.
+  'deletion',
 ] as const;
 
-/** A row as the compact view lists it: its compact keys, and the creator's name. */
+/** The compact keys the hub always emits; it omits the others when empty. */
+const ALWAYS_EMITTED: ReadonlySet<string> = new Set([
+  'id',
+  'slug',
+  'name',
+  'projectId',
+  'messageMode',
+  'created',
+  'updated',
+  'lastActivityEvent',
+  'deletion',
+]);
+
+/**
+ * Whether `value` is empty as the store reads it (absent, null, or an empty
+ * string, list or map), the values Go's `omitempty` drops.
+ */
+function isEmpty(value: unknown): boolean {
+  if (value === undefined || value === null || value === '') return true;
+  if (Array.isArray(value)) return value.length === 0;
+  return typeof value === 'object' && Object.keys(value).length === 0;
+}
+
+/**
+ * A row as the compact view lists it: its compact keys, and the creator's
+ * name, with the empty values the hub omits left out.
+ */
 function compactRow(a: Agent): Agent {
   const row: Record<string, unknown> = {};
   const full = a as unknown as Record<string, unknown>;
-  for (const key of COMPACT_KEYS) if (full[key] !== undefined) row[key] = full[key];
+  for (const key of COMPACT_KEYS) {
+    const value = full[key];
+    if (value === undefined || (!ALWAYS_EMITTED.has(key) && isEmpty(value))) continue;
+    row[key] = value;
+  }
   const creatorName = a.appliedConfig?.creatorName;
   if (creatorName) row.creatorName = creatorName;
   return row as unknown as Agent;

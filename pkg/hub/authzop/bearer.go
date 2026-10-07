@@ -132,6 +132,12 @@ const (
 	BearerTargetHubInstance       BearerTarget = "hub_instance"
 	BearerTargetHubCollection     BearerTarget = "hub_collection"
 	BearerTargetProjectCollection BearerTarget = "project_collection"
+	// BearerTargetArtifactRecord is an artifact's home project, read from
+	// the artifact record.
+	BearerTargetArtifactRecord BearerTarget = "artifact_record"
+	// BearerTargetProjectQuery is a project named by a query parameter (or
+	// the caller's own project when none is named).
+	BearerTargetProjectQuery BearerTarget = "project_query"
 )
 
 var validBearerTargets = map[BearerTarget]bool{
@@ -142,6 +148,8 @@ var validBearerTargets = map[BearerTarget]bool{
 	BearerTargetHubInstance:       true,
 	BearerTargetHubCollection:     true,
 	BearerTargetProjectCollection: true,
+	BearerTargetArtifactRecord:    true,
+	BearerTargetProjectQuery:      true,
 }
 
 // BearerSelfFilter is the result filter an admit_self operation applies.
@@ -167,12 +175,10 @@ type BearerOwner string
 
 const (
 	BearerOwnerBrokerRegistration BearerOwner = "broker-registration"
-	BearerOwnerUserProvisioning   BearerOwner = "user-provisioning"
 )
 
 var validBearerOwners = map[BearerOwner]bool{
 	BearerOwnerBrokerRegistration: true,
-	BearerOwnerUserProvisioning:   true,
 }
 
 // BearerDisposition records how an operation treats a user access token.

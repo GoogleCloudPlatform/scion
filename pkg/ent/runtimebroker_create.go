@@ -204,6 +204,20 @@ func (_c *RuntimeBrokerCreate) SetNillableWorkspaceStorage(v *string) *RuntimeBr
 	return _c
 }
 
+// SetHealth sets the "health" field.
+func (_c *RuntimeBrokerCreate) SetHealth(v string) *RuntimeBrokerCreate {
+	_c.mutation.SetHealth(v)
+	return _c
+}
+
+// SetNillableHealth sets the "health" field if the given value is not nil.
+func (_c *RuntimeBrokerCreate) SetNillableHealth(v *string) *RuntimeBrokerCreate {
+	if v != nil {
+		_c.SetHealth(*v)
+	}
+	return _c
+}
+
 // SetLabels sets the "labels" field.
 func (_c *RuntimeBrokerCreate) SetLabels(v map[string]string) *RuntimeBrokerCreate {
 	_c.mutation.SetLabels(v)
@@ -570,6 +584,10 @@ func (_c *RuntimeBrokerCreate) createSpec() (*RuntimeBroker, *sqlgraph.CreateSpe
 		_spec.SetField(runtimebroker.FieldWorkspaceStorage, field.TypeString, value)
 		_node.WorkspaceStorage = value
 	}
+	if value, ok := _c.mutation.Health(); ok {
+		_spec.SetField(runtimebroker.FieldHealth, field.TypeString, value)
+		_node.Health = value
+	}
 	if value, ok := _c.mutation.Labels(); ok {
 		_spec.SetField(runtimebroker.FieldLabels, field.TypeJSON, value)
 		_node.Labels = value
@@ -889,6 +907,24 @@ func (u *RuntimeBrokerUpsert) UpdateWorkspaceStorage() *RuntimeBrokerUpsert {
 // ClearWorkspaceStorage clears the value of the "workspace_storage" field.
 func (u *RuntimeBrokerUpsert) ClearWorkspaceStorage() *RuntimeBrokerUpsert {
 	u.SetNull(runtimebroker.FieldWorkspaceStorage)
+	return u
+}
+
+// SetHealth sets the "health" field.
+func (u *RuntimeBrokerUpsert) SetHealth(v string) *RuntimeBrokerUpsert {
+	u.Set(runtimebroker.FieldHealth, v)
+	return u
+}
+
+// UpdateHealth sets the "health" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsert) UpdateHealth() *RuntimeBrokerUpsert {
+	u.SetExcluded(runtimebroker.FieldHealth)
+	return u
+}
+
+// ClearHealth clears the value of the "health" field.
+func (u *RuntimeBrokerUpsert) ClearHealth() *RuntimeBrokerUpsert {
+	u.SetNull(runtimebroker.FieldHealth)
 	return u
 }
 
@@ -1385,6 +1421,27 @@ func (u *RuntimeBrokerUpsertOne) UpdateWorkspaceStorage() *RuntimeBrokerUpsertOn
 func (u *RuntimeBrokerUpsertOne) ClearWorkspaceStorage() *RuntimeBrokerUpsertOne {
 	return u.Update(func(s *RuntimeBrokerUpsert) {
 		s.ClearWorkspaceStorage()
+	})
+}
+
+// SetHealth sets the "health" field.
+func (u *RuntimeBrokerUpsertOne) SetHealth(v string) *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetHealth(v)
+	})
+}
+
+// UpdateHealth sets the "health" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertOne) UpdateHealth() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateHealth()
+	})
+}
+
+// ClearHealth clears the value of the "health" field.
+func (u *RuntimeBrokerUpsertOne) ClearHealth() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearHealth()
 	})
 }
 
@@ -2079,6 +2136,27 @@ func (u *RuntimeBrokerUpsertBulk) UpdateWorkspaceStorage() *RuntimeBrokerUpsertB
 func (u *RuntimeBrokerUpsertBulk) ClearWorkspaceStorage() *RuntimeBrokerUpsertBulk {
 	return u.Update(func(s *RuntimeBrokerUpsert) {
 		s.ClearWorkspaceStorage()
+	})
+}
+
+// SetHealth sets the "health" field.
+func (u *RuntimeBrokerUpsertBulk) SetHealth(v string) *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetHealth(v)
+	})
+}
+
+// UpdateHealth sets the "health" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertBulk) UpdateHealth() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateHealth()
+	})
+}
+
+// ClearHealth clears the value of the "health" field.
+func (u *RuntimeBrokerUpsertBulk) ClearHealth() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearHealth()
 	})
 }
 

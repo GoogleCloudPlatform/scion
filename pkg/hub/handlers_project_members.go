@@ -376,6 +376,12 @@ func (s *Server) addProjectMember(w http.ResponseWriter, r *http.Request, projec
 		BadRequest(w, "principalId is required")
 		return
 	}
+	// Same principal-address check as members PUT (ptone/scion#3478).
+	principalID, ok := validateMemberPrincipalAddress(w, req.PrincipalType, req.PrincipalID)
+	if !ok {
+		return
+	}
+	req.PrincipalID = principalID
 
 	// Resolve a user email or group slug to its canonical ID (extracted as
 	// resolveMemberPrincipal so the PUT/DELETE principal endpoints share
@@ -568,7 +574,7 @@ func (s *Server) removeProjectMember(w http.ResponseWriter, r *http.Request, pro
 		slog.Info("project member removal denied",
 			"project_id", projectID, "actor", user.Email(),
 			"denial_code", decision.DenialCode, "reason", decision.Reason)
-		writeError(w, decision.HTTPStatus, decision.DenialCode, decision.Reason, nil)
+		writeError(w, decision.HTTPStatus, decision.DenialCode, decision.Reason, legacyMembershipDenialDetails(decision))
 		return
 	}
 
@@ -645,7 +651,7 @@ func (s *Server) handleTransferOwnership(w http.ResponseWriter, r *http.Request,
 		slog.Info("project ownership transfer denied",
 			"project_id", projectID, "actor", user.Email(),
 			"denial_code", decision.DenialCode, "reason", decision.Reason)
-		writeError(w, decision.HTTPStatus, decision.DenialCode, decision.Reason, nil)
+		writeError(w, decision.HTTPStatus, decision.DenialCode, decision.Reason, legacyMembershipDenialDetails(decision))
 		return
 	}
 
@@ -795,12 +801,18 @@ func validateMemberPrincipalAddress(w http.ResponseWriter, principalType, princi
 	if ok {
 		return canonical, true
 	}
-	if principalType == store.RoleBindingPrincipalAgent {
-		BadRequest(w, "agent principal must be addressed by agent ID: "+principalID)
-	} else {
-		BadRequest(w, "user principal must be addressed by user ID or email: "+principalID)
-	}
+	BadRequest(w, memberPrincipalAddressMessage(principalType, principalID))
 	return "", false
+}
+
+// memberPrincipalAddressMessage is the 400 message for a principal ID that
+// canonicalMemberPrincipalID refuses. validateMemberPrincipalAddress and
+// ProjectMembershipService.AddMember share it so both return the same text.
+func memberPrincipalAddressMessage(principalType, principalID string) string {
+	if principalType == store.RoleBindingPrincipalAgent {
+		return "agent principal must be addressed by agent ID: " + principalID
+	}
+	return "user principal must be addressed by user ID or email: " + principalID
 }
 
 func (s *Server) putProjectMemberPrincipal(w http.ResponseWriter, r *http.Request, projectID, principalType, principalID string) {

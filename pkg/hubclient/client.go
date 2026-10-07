@@ -18,9 +18,11 @@ package hubclient
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -125,6 +127,9 @@ type Client interface {
 	// the list of skills found at the given GitHub directory URL.
 	DiscoverSkillsDirectory(ctx context.Context, req DiscoverSkillsDirectoryRequest) (*DiscoverSkillsDirectoryResponse, error)
 
+	// Artifacts returns the artifact operations interface.
+	Artifacts() ArtifactService
+
 	// Health checks API availability.
 	Health(ctx context.Context) (*HealthResponse, error)
 }
@@ -155,6 +160,7 @@ type client struct {
 	allowList             *allowListService
 	invites               *inviteService
 	messaging             *messagingService
+	artifacts             *artifactService
 }
 
 // New creates a new Hub API client.
@@ -209,6 +215,7 @@ func New(baseURL string, opts ...Option) (Client, error) {
 	c.allowList = &allowListService{c: c}
 	c.invites = &inviteService{c: c}
 	c.messaging = &messagingService{c: c}
+	c.artifacts = &artifactService{c: c}
 
 	return c, nil
 }
@@ -343,6 +350,11 @@ func (c *client) Messaging() MessagingService {
 	return c.messaging
 }
 
+// Artifacts returns the artifact operations interface.
+func (c *client) Artifacts() ArtifactService {
+	return c.artifacts
+}
+
 // get performs an HTTP GET request.
 func (c *client) get(ctx context.Context, path string, headers http.Header) (*http.Response, error) {
 	return c.getWithQuery(ctx, path, nil, headers)
@@ -399,7 +411,10 @@ func isProxyIntercepted(resp *http.Response) bool {
 // HintProxyError returns err unchanged in most cases. If the error message
 // matches the pattern produced by apiclient.DecodeResponse when a proxy
 // intercepts a health endpoint and returns a non-JSON body, it appends a
-// diagnostic hint suggesting a Cloud Run / GFE configuration issue.
+// diagnostic hint suggesting a Cloud Run / GFE configuration issue. An
+// error wrapping apiclient.ErrNoContent (an empty body from a call that
+// needs one) gets the same hint, as an empty-body decode failure did before
+// apiclient.DecodeRequired.
 //
 // Note: the trigger ("failed to decode response") fires for any JSON decode
 // failure, including a genuinely malformed response from the hub server
@@ -411,7 +426,7 @@ func HintProxyError(err error) error {
 	if err == nil {
 		return nil
 	}
-	if strings.Contains(err.Error(), "failed to decode response") {
+	if strings.Contains(err.Error(), "failed to decode response") || errors.Is(err, apiclient.ErrNoContent) {
 		return fmt.Errorf("%w\nHint: a reverse proxy may be intercepting "+
 			"/healthz and /health — check your Cloud Run or GFE configuration", err)
 	}
@@ -431,6 +446,8 @@ func (c *client) Health(ctx context.Context) (*HealthResponse, error) {
 			return nil, err
 		}
 	}
+	// Health is a reachability probe; several callers ignore the body, so a
+	// 204 still counts as reachable.
 	return apiclient.DecodeResponse[HealthResponse](resp)
 }
 
@@ -527,10 +544,11 @@ func WithAutoDevAuth() Option {
 }
 
 // WithAgentToken sets agent token authentication using the X-Scion-Agent-Token header.
-// Use this when authenticating as an agent (not a user) to the Hub API.
+// Use this when authenticating as an agent (not a user) to the Hub API. The
+// agent's run id (SCION_LAUNCH_ID), when set, is sent with it.
 func WithAgentToken(token string) Option {
 	return func(c *client) {
-		c.transport.Auth = &apiclient.AgentTokenAuth{Token: token}
+		c.transport.Auth = &apiclient.AgentTokenAuth{Token: token, RunID: os.Getenv("SCION_LAUNCH_ID")}
 	}
 }
 

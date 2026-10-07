@@ -455,20 +455,21 @@ func TestSchedulerFireEvent_RestartReplayPreservesInitiatorAttribution(t *testin
 // and that a failed resume is reported as an error rather than a false 200.
 type e2bFailingScheduleStore struct {
 	store.Store
+	fault                   *storeFaultSwitch // nil: always active
 	createScheduledEventErr error
 	createScheduleErr       error
 	updateScheduleErr       error
 }
 
 func (f *e2bFailingScheduleStore) CreateScheduledEvent(ctx context.Context, evt *store.ScheduledEvent) error {
-	if f.createScheduledEventErr != nil {
+	if f.createScheduledEventErr != nil && f.fault.Active() {
 		return f.createScheduledEventErr
 	}
 	return f.Store.CreateScheduledEvent(ctx, evt)
 }
 
 func (f *e2bFailingScheduleStore) CreateSchedule(ctx context.Context, sc *store.Schedule) error {
-	if f.createScheduleErr != nil {
+	if f.createScheduleErr != nil && f.fault.Active() {
 		return f.createScheduleErr
 	}
 	return f.Store.CreateSchedule(ctx, sc)
@@ -478,7 +479,7 @@ func (f *e2bFailingScheduleStore) UpdateSchedule(
 	ctx context.Context, sc *store.Schedule, fields store.ScheduleFieldMask,
 	prevRevision int, prevRevisionKnown bool, attribution *store.InitiatorAttribution,
 ) error {
-	if f.updateScheduleErr != nil {
+	if f.updateScheduleErr != nil && f.fault.Active() {
 		return f.updateScheduleErr
 	}
 	return f.Store.UpdateSchedule(ctx, sc, fields, prevRevision, prevRevisionKnown, attribution)
@@ -529,6 +530,11 @@ func TestCreateSchedule_StoreFailureLeavesNoPartialAttribution(t *testing.T) {
 // naming an attribution that was never persisted.
 func TestResumeSchedule_UpdateFailureReturnsErrorNotSuccess(t *testing.T) {
 	srv, s, projectID := setupScheduleTest(t)
+	// Installed before the pause below, whose mutation audit goroutine reads
+	// srv.store (ptone/scion#3184); armed for the resume.
+	_, fault := installStoreFault(t, srv, func(inner store.Store, f *storeFaultSwitch) *e2bFailingScheduleStore {
+		return &e2bFailingScheduleStore{Store: inner, fault: f, updateScheduleErr: errors.New("initiator attribution test: injected resume update failure")}
+	})
 
 	createReq := CreateScheduleRequest{Name: "n1", CronExpr: "0 9 * * *", EventType: "message", AgentName: "all", Message: "hi"}
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+projectID+"/schedules", createReq)
@@ -539,13 +545,11 @@ func TestResumeSchedule_UpdateFailureReturnsErrorNotSuccess(t *testing.T) {
 	pauseRec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+projectID+"/schedules/"+created.ID+"/pause", nil)
 	require.Equal(t, http.StatusOK, pauseRec.Code, pauseRec.Body.String())
 
-	fs := &e2bFailingScheduleStore{Store: s, updateScheduleErr: errors.New("initiator attribution test: injected resume update failure")}
-	srv.store = fs
+	fault.Arm()
 
 	resumeRec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+projectID+"/schedules/"+created.ID+"/resume", nil)
 	assert.NotEqual(t, http.StatusOK, resumeRec.Code, "a failed resume write must not report success")
 
-	srv.store = s
 	stored, err := s.GetSchedule(context.Background(), created.ID)
 	require.NoError(t, err)
 	assert.Equal(t, store.ScheduleStatusPaused, stored.Status, "a failed resume write must not leave the schedule active")
@@ -1138,6 +1142,9 @@ func TestDispatchAgentFire_SuccessAuditCarriesExecutorAndPairedCredential(t *tes
 		return records[0]
 	}
 
+	// The fire runs as the event's revision principal, so the executor is
+	// the initiator: the initiator's credential is paired on the success
+	// audit, mapped back into hub.CredentialKind's vocabulary.
 	t.Run("same principal: credential is copied and mapped to hub.CredentialKind", func(t *testing.T) {
 		evt := store.ScheduledEvent{
 			ID:        tid("e2b-r4-same-evt"),
@@ -1149,11 +1156,11 @@ func TestDispatchAgentFire_SuccessAuditCarriesExecutorAndPairedCredential(t *tes
 			InitiatorAttribution: store.InitiatorAttribution{
 				InitiatorPrincipalKind:  "user",
 				InitiatorPrincipalID:    f.owner.ID,
-				InitiatorCredentialKind: store.InitiatorCredentialKindUAT,
-				InitiatorCredentialID:   tid("e2b-r4-tok-a"),
+				InitiatorCredentialKind: store.InitiatorCredentialKindSession,
 				AttributionVersion:      1,
 				AuthorizationRevision:   1,
 			},
+			AuthorityCeiling: store.EffectCeiling{Kind: store.EffectCeilingPrincipal},
 		}
 		require.NoError(t, f.store.CreateScheduledEvent(ctx, &evt))
 		f.srv.scheduler.fireEvent(ctx, evt, false)
@@ -1164,8 +1171,7 @@ func TestDispatchAgentFire_SuccessAuditCarriesExecutorAndPairedCredential(t *tes
 		rec := waitForAudit(t, agent.ID)
 		assert.Equal(t, "user", rec.ActorPrincipalKind)
 		assert.Equal(t, f.owner.ID, rec.ActorPrincipalID)
-		assert.Equal(t, string(CredentialKindUAT), rec.ActorCredentialType, "must use hub.CredentialKind's vocabulary, not the attribution domain")
-		assert.Equal(t, tid("e2b-r4-tok-a"), rec.ActorCredentialID)
+		assert.Equal(t, string(CredentialKindInteractive), rec.ActorCredentialType, "must use hub.CredentialKind's vocabulary, not the attribution domain")
 		assert.Equal(t, "scheduler", rec.ExecutorKind)
 		assert.Equal(t, "scheduled_event:"+evt.ID, rec.ExecutorID)
 		assert.Equal(t, "allow", rec.CanDelegateResult)
@@ -1181,7 +1187,9 @@ func TestDispatchAgentFire_SuccessAuditCarriesExecutorAndPairedCredential(t *tes
 		assert.Equal(t, "scheduled_event:"+evt.ID, attrs["executor_id"])
 	})
 
-	t.Run("different principal: credential fields left empty", func(t *testing.T) {
+	t.Run("revision by another principal: the actor is that principal", func(t *testing.T) {
+		other := hubMemberUser(t, f.store, "e2b-r4-other-user")
+		require.NoError(t, f.srv.createProjectOwnerRoleBinding(ctx, f.proj.ID, other.ID))
 		evt := store.ScheduledEvent{
 			ID:        tid("e2b-r4-diff-evt"),
 			ProjectID: f.proj.ID,
@@ -1191,12 +1199,12 @@ func TestDispatchAgentFire_SuccessAuditCarriesExecutorAndPairedCredential(t *tes
 			CreatedBy: f.owner.ID,
 			InitiatorAttribution: store.InitiatorAttribution{
 				InitiatorPrincipalKind:  "user",
-				InitiatorPrincipalID:    tid("e2b-r4-other-user"),
-				InitiatorCredentialKind: store.InitiatorCredentialKindUAT,
-				InitiatorCredentialID:   tid("e2b-r4-tok-b"),
+				InitiatorPrincipalID:    other.ID,
+				InitiatorCredentialKind: store.InitiatorCredentialKindSession,
 				AttributionVersion:      1,
 				AuthorizationRevision:   2,
 			},
+			AuthorityCeiling: store.EffectCeiling{Kind: store.EffectCeilingPrincipal},
 		}
 		require.NoError(t, f.store.CreateScheduledEvent(ctx, &evt))
 		f.srv.scheduler.fireEvent(ctx, evt, false)
@@ -1206,14 +1214,39 @@ func TestDispatchAgentFire_SuccessAuditCarriesExecutorAndPairedCredential(t *tes
 
 		rec := waitForAudit(t, agent.ID)
 		assert.Equal(t, "user", rec.ActorPrincipalKind)
-		assert.Equal(t, f.owner.ID, rec.ActorPrincipalID, "the actor is still the creator/execution identity")
-		assert.Empty(t, rec.ActorCredentialType, "initiator differs from creator: no credential pairing")
-		assert.Empty(t, rec.ActorCredentialID)
+		assert.Equal(t, other.ID, rec.ActorPrincipalID, "the actor is the revision principal, not CreatedBy")
+		assert.Equal(t, string(CredentialKindInteractive), rec.ActorCredentialType)
 		assert.Equal(t, "scheduler", rec.ExecutorKind)
 		assert.Equal(t, "scheduled_event:"+evt.ID, rec.ExecutorID)
 	})
 
-	t.Run("legacy_unknown initiator: credential fields left empty", func(t *testing.T) {
+	t.Run("uat revision: the token is paired as a UAT credential", func(t *testing.T) {
+		sf := &schedFire{uatCreateFixture: &uatCreateFixture{bypassAgentsFixture: f, creator: f.owner}}
+		tok := sf.storedUAT(t, minimalSelectors(t)...)
+		evt := withUATRevision(store.ScheduledEvent{
+			ID:        tid("e2b-r4-uat-evt"),
+			ProjectID: f.proj.ID,
+			EventType: "dispatch_agent",
+			FireAt:    time.Now(),
+			Payload:   `{"agentName":"r4-uat-agent"}`,
+			CreatedBy: f.owner.ID,
+		}, tok)
+		require.NoError(t, f.store.CreateScheduledEvent(ctx, &evt))
+		f.srv.scheduler.fireEvent(ctx, evt, false)
+
+		agent, err := f.store.GetAgentBySlug(ctx, f.proj.ID, "r4-uat-agent")
+		require.NoError(t, err)
+
+		rec := waitForAudit(t, agent.ID)
+		assert.Equal(t, "user", rec.ActorPrincipalKind)
+		assert.Equal(t, f.owner.ID, rec.ActorPrincipalID)
+		assert.Equal(t, string(CredentialKindUAT), rec.ActorCredentialType)
+		assert.Equal(t, tok.ID, rec.ActorCredentialID)
+		assert.Equal(t, "scheduler", rec.ExecutorKind)
+		assert.Equal(t, "scheduled_event:"+evt.ID, rec.ExecutorID)
+	})
+
+	t.Run("legacy_unknown initiator: the fire is refused", func(t *testing.T) {
 		evt := store.ScheduledEvent{
 			ID:        tid("e2b-r4-legacy-evt"),
 			ProjectID: f.proj.ID,
@@ -1226,28 +1259,21 @@ func TestDispatchAgentFire_SuccessAuditCarriesExecutorAndPairedCredential(t *tes
 		require.NoError(t, f.store.CreateScheduledEvent(ctx, &evt))
 		f.srv.scheduler.fireEvent(ctx, evt, false)
 
-		agent, err := f.store.GetAgentBySlug(ctx, f.proj.ID, "r4-legacy-agent")
+		_, err := f.store.GetAgentBySlug(ctx, f.proj.ID, "r4-legacy-agent")
+		assert.ErrorIs(t, err, store.ErrNotFound, "a legacy dispatch_agent event creates no agent")
+		got, err := f.store.GetScheduledEvent(ctx, evt.ID)
 		require.NoError(t, err)
-
-		rec := waitForAudit(t, agent.ID)
-		assert.Equal(t, f.owner.ID, rec.ActorPrincipalID)
-		assert.Empty(t, rec.ActorCredentialType)
-		assert.Empty(t, rec.ActorCredentialID)
+		assert.Equal(t, store.ScheduledEventFailed, got.Status)
 	})
 
-	// The next two subtests cover ptone/scion#2342 review round 1, finding
-	// 1: a dev_local initiator's PrincipalKind is "dev"
-	// (hub.DevUser.Type()), but scheduledCreatorIdentity resolves CreatedBy
-	// generically as a "user" identity — never "dev" — so the general
-	// same-kind/same-ID rule alone could never pair a genuine dev_local
-	// self-fire. initiatorMatchesExecutor's dev_local addition closes that
-	// gap; these subtests pin both its positive and negative sides.
+	// A dev_local initiator's PrincipalKind is "dev" (hub.DevUser.Type());
+	// the fire runs as the local development user, resolved as a generic
+	// user identity, so initiatorMatchesExecutor's dev_local arm pairs it.
 
-	t.Run("dev_local initiator, same principal as the executed dev user: credential is copied and mapped to the dev kind", func(t *testing.T) {
+	t.Run("dev_local initiator: credential is copied and mapped to the dev kind", func(t *testing.T) {
 		// bypassAgentsServer (bypassAgentsSetup) configures cfg.DevAuthToken,
-		// so New() already seeded a User row at DevUserID (seedDevUser) —
-		// scheduledCreatorIdentity can resolve CreatedBy: DevUserID via
-		// GetUser without any extra setup here.
+		// so New() already seeded a User row at DevUserID (seedDevUser) and
+		// local development authority is on.
 		require.NoError(t, f.srv.createProjectOwnerRoleBinding(ctx, f.proj.ID, DevUserID))
 
 		evt := store.ScheduledEvent{
@@ -1264,6 +1290,7 @@ func TestDispatchAgentFire_SuccessAuditCarriesExecutorAndPairedCredential(t *tes
 				AttributionVersion:      1,
 				AuthorizationRevision:   1,
 			},
+			AuthorityCeiling: store.EffectCeiling{Kind: store.EffectCeilingPrincipal},
 		}
 		require.NoError(t, f.store.CreateScheduledEvent(ctx, &evt))
 		f.srv.scheduler.fireEvent(ctx, evt, false)
@@ -1272,24 +1299,13 @@ func TestDispatchAgentFire_SuccessAuditCarriesExecutorAndPairedCredential(t *tes
 		require.NoError(t, err)
 
 		rec := waitForAudit(t, agent.ID)
-		assert.Equal(t, "user", rec.ActorPrincipalKind, "scheduledCreatorIdentity resolves the seeded dev user as a generic user identity")
+		assert.Equal(t, "user", rec.ActorPrincipalKind, "the fire resolves the seeded dev user as a generic user identity")
 		assert.Equal(t, DevUserID, rec.ActorPrincipalID)
 		assert.Equal(t, string(CredentialKindDev), rec.ActorCredentialType, "must show the dev kind, distinct from an ordinary session")
 		assert.NotEqual(t, string(CredentialKindInteractive), rec.ActorCredentialType)
 	})
 
-	t.Run("dev_local initiator, executor is not DevUserID: credential fields left empty", func(t *testing.T) {
-		// The initiator's PrincipalID IS DevUserID; what varies here is the
-		// executor (CreatedBy is the ordinary owner, so exec.ID() !=
-		// DevUserID). Neither the general rule (PrincipalKind "dev" !=
-		// exec.Type() "user") nor the dev_local addition (requires
-		// exec.ID()==DevUserID) can match — this is the negative mirror of
-		// the subtest above, and it pins initiatorMatchesExecutor's
-		// exec.ID()==DevUserID clause specifically (ptone/scion#2342 review
-		// round 2, R1 — the direct table test TestInitiatorMatchesExecutor
-		// below is the primary pin for every clause of the dev_local arm;
-		// this subtest additionally proves the helper is wired correctly
-		// into the real fire/audit path).
+	t.Run("dev_local initiator naming another principal: the fire is refused", func(t *testing.T) {
 		evt := store.ScheduledEvent{
 			ID:        tid("e2b-r4-devlocal-wrongid-evt"),
 			ProjectID: f.proj.ID,
@@ -1299,23 +1315,60 @@ func TestDispatchAgentFire_SuccessAuditCarriesExecutorAndPairedCredential(t *tes
 			CreatedBy: f.owner.ID,
 			InitiatorAttribution: store.InitiatorAttribution{
 				InitiatorPrincipalKind:  "dev",
-				InitiatorPrincipalID:    DevUserID,
+				InitiatorPrincipalID:    f.owner.ID,
 				InitiatorCredentialKind: store.InitiatorCredentialKindDevLocal,
 				AttributionVersion:      1,
 				AuthorizationRevision:   1,
 			},
+			AuthorityCeiling: store.EffectCeiling{Kind: store.EffectCeilingPrincipal},
 		}
 		require.NoError(t, f.store.CreateScheduledEvent(ctx, &evt))
 		f.srv.scheduler.fireEvent(ctx, evt, false)
 
-		agent, err := f.store.GetAgentBySlug(ctx, f.proj.ID, "r4-devlocal-wrongid-agent")
+		_, err := f.store.GetAgentBySlug(ctx, f.proj.ID, "r4-devlocal-wrongid-agent")
+		assert.ErrorIs(t, err, store.ErrNotFound)
+		// The fire fails on the resolver's dev_local principal check, not
+		// for an unrelated reason.
+		got, err := f.store.GetScheduledEvent(ctx, evt.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.ScheduledEventFailed, got.Status)
+		assert.Contains(t, got.Error, errScheduledAuthorityDenied.Error())
+		assert.Contains(t, got.Error, errSourceNotAllowed.Error())
+		assert.Contains(t, got.Error, reasonPrincipalInactive)
+	})
+
+	// An agent revision fires as that agent: the recorded agent credential
+	// is paired on the success audit as agent_jwt with the recorded JTI.
+	t.Run("agent revision: the agent credential is paired as agent_jwt", func(t *testing.T) {
+		markEdgeBackfillComplete(t, f.store)
+		sf := &schedFire{uatCreateFixture: &uatCreateFixture{
+			bypassAgentsFixture: f,
+			creator:             f.owner,
+			path:                "/api/v1/projects/" + f.proj.ID + "/agents",
+		}}
+		parent := sf.sessionAgent(t, "r4-agent-parent")
+		evt := withAgentRevision(t, f.srv, store.ScheduledEvent{
+			ID:        tid("e2b-r4-agent-evt"),
+			ProjectID: f.proj.ID,
+			EventType: "dispatch_agent",
+			FireAt:    time.Now(),
+			Payload:   `{"agentName":"r4-agent-child"}`,
+			CreatedBy: f.owner.ID,
+		}, parent.ID)
+		require.NotEmpty(t, evt.InitiatorCredentialID)
+		require.NoError(t, f.store.CreateScheduledEvent(ctx, &evt))
+		f.srv.scheduler.fireEvent(ctx, evt, false)
+
+		agent, err := f.store.GetAgentBySlug(ctx, f.proj.ID, "r4-agent-child")
 		require.NoError(t, err)
 
 		rec := waitForAudit(t, agent.ID)
-		assert.Equal(t, "user", rec.ActorPrincipalKind)
-		assert.Equal(t, f.owner.ID, rec.ActorPrincipalID, "the actor is still the creator/execution identity")
-		assert.Empty(t, rec.ActorCredentialType, "a dev_local initiator paired with a non-DevUserID executor must not pair")
-		assert.Empty(t, rec.ActorCredentialID)
+		assert.Equal(t, store.DelegationPrincipalAgent, rec.ActorPrincipalKind)
+		assert.Equal(t, parent.ID, rec.ActorPrincipalID)
+		assert.Equal(t, string(CredentialKindAgentJWT), rec.ActorCredentialType)
+		assert.Equal(t, evt.InitiatorCredentialID, rec.ActorCredentialID)
+		assert.Equal(t, "scheduler", rec.ExecutorKind)
+		assert.Equal(t, "scheduled_event:"+evt.ID, rec.ExecutorID)
 	})
 }
 
@@ -1499,11 +1552,10 @@ func TestInitiatorMatchesExecutor(t *testing.T) {
 // newScopedUATInitiatorContext builds a live-request context carrying a
 // scoped UAT identity/credential (kind=uat), for tests that exercise
 // InitiatorAttribution capture directly rather than through the
-// scheduled-event/schedule HTTP authoring path — which denies every scoped
-// UAT today (B's interim dispatch_agent authoring gate; plan correction
-// (a): "Supported-UAT scheduled execution is a B.3 integration fixture, not
-// an E-only admission"). B.3's tests can reuse this fixture and the
-// assertions in TestCaptureInitiatorAttribution_ScopedUATFixture below.
+// scheduled-event/schedule HTTP authoring path, which refuses a
+// project-scoped UAT at the token boundary check: no scheduled_event
+// permission is eligible for a project boundary. Its only user is
+// TestCaptureInitiatorAttribution_ScopedUATFixture below.
 func newScopedUATInitiatorContext(userID, tokenID, projectID string, scopes []string) context.Context {
 	user := NewAuthenticatedUser(userID, userID+"@example.com", "Test User", "member", "api")
 	scoped := NewScopedUserIdentityWithCredentialID(user, projectID, scopes, tokenID)
@@ -1663,7 +1715,7 @@ func TestAuthzService_DevLocalAuthorityEnabled(t *testing.T) {
 	})
 
 	t.Run("dev-auth off: flag false, and the real wiring cannot produce a trusted dev identity, even though the seeded DevUserID row exists", func(t *testing.T) {
-		s, err := newTestStore(":memory:")
+		s, err := newTestStore(t, ":memory:")
 		if err != nil {
 			if strings.Contains(err.Error(), "sqlite driver not registered") {
 				t.Skip("Skipping test because sqlite driver is not registered (build with -tags sqlite to enable)")
@@ -1682,7 +1734,7 @@ func TestAuthzService_DevLocalAuthorityEnabled(t *testing.T) {
 
 		cfg := DefaultServerConfig()
 		cfg.DevAuthToken = "" // dev-auth off
-		srv, err := New(cfg, s)
+		srv, err := newTestHubServer(t, cfg, s)
 		require.NoError(t, err)
 		t.Cleanup(func() {
 			_ = srv.Shutdown(context.Background())

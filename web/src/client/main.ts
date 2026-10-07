@@ -55,6 +55,7 @@ import {
 import { ACCOUNT_TEARDOWN_EVENT, type AccountTeardownDetail } from '../utils/auth.js';
 import { chatRecentFiles } from './chat-recent-files.js';
 import { pushRouteEntry, type RouteShell } from './route-history.js';
+import { browserPath, stripBasePath } from './navigation.js';
 import { clearChatScrollAnchor } from '../components/shared/chat/chat-scroll-anchor.js';
 import { installViewportFrame } from './viewport.js';
 import {
@@ -68,31 +69,6 @@ import {
  * `DisplayZoneController` correct it late (review R3-1).
  */
 const TZ_LOAD_BUDGET_MS = 1500;
-
-/**
- * Strip the Vite base path prefix from a URL pathname so the client-side
- * router can match application routes when served behind a reverse proxy.
- * Uses import.meta.env.BASE_URL which Vite injects at build/dev time.
- * When base is '/' (no proxy), this is a no-op.
- */
-function stripBasePath(pathname: string): string {
-  const base = import.meta.env.BASE_URL;
-  if (!base || base === '/') return pathname;
-
-  // Normalize: strip trailing slash from base for comparison
-  const baseNoSlash = base.replace(/\/$/, '');
-
-  // Exact match (base path without trailing slash, e.g. /foo)
-  if (pathname === baseNoSlash) return '/';
-
-  // Prefix match (e.g. /foo/bar → /bar)
-  if (pathname.startsWith(base)) {
-    const stripped = pathname.slice(base.length - 1); // keep leading /
-    return stripped || '/';
-  }
-
-  return pathname;
-}
 
 // Inject theme CSS so it loads regardless of whether the page is served by
 // the Vite dev server (index.html) or the Go SPA shell template (web.go).
@@ -178,11 +154,6 @@ const terminalNavigations = new Map<string, number>();
 const uuidPath = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
 const terminalAgentRoute = new RegExp(`^/terminals/(${uuidPath})$`, 'i');
 const legacyTerminalRoute = new RegExp(`^/agents/(${uuidPath})/terminal$`, 'i');
-
-function browserPath(path: string): string {
-  const base = import.meta.env.BASE_URL;
-  return base && base !== '/' ? base.replace(/\/$/, '') + path : path;
-}
 
 function ensureRoots(): HTMLElement | null {
   const app = document.getElementById('app');
@@ -632,6 +603,18 @@ const ROUTES: RouteConfig[] = [
     pattern: /^\/projects\/[^/]+\/harness-configs\/[^/]+$/,
     tag: 'scion-page-harness-config-detail',
     load: () => import('../components/pages/harness-config-detail.js'),
+  },
+  {
+    // Artifacts list (experiment hub.artifacts; the page renders 404 when off).
+    pattern: /^\/artifacts$/,
+    tag: 'scion-page-artifacts',
+    load: () => import('../components/pages/artifacts.js'),
+  },
+  {
+    // Artifact page (experiment hub.artifacts; the page renders 404 when off).
+    pattern: /^\/projects\/[^/]+\/artifacts\/[^/]+$/,
+    tag: 'scion-page-artifact-detail',
+    load: () => import('../components/pages/artifact-detail.js'),
   },
   {
     pattern: /^\/projects\/[^/]+\/schedules$/,

@@ -450,6 +450,19 @@ func (s *Server) handleListThreads(w http.ResponseWriter, r *http.Request, proje
 		readMap[rs.ConversationKey] = rs
 	}
 
+	// One batched query over the same listed topic keys: which of them hold
+	// a mention of the caller after the caller's own read watermark. Only
+	// the caller's own mention and read-state rows are read. A watermark
+	// that resolves to no stored message counts all recorded mentions as
+	// unread; the HasUnread gate below bounds that. A failure degrades to
+	// plain unread dots.
+	mentionKeys, err := wcs.UnreadMentionKeys(r.Context(), user.ID(), convKeys)
+	if err != nil {
+		slog.Warn("chat threads: unread mention lookup failed",
+			"project_id", projectID, "error", err)
+		mentionKeys = nil
+	}
+
 	entries := make([]chatTopicEntry, 0, len(topics))
 	for _, t := range topics {
 		entry := chatTopicEntry{
@@ -471,6 +484,8 @@ func (s *Server) handleListThreads(w http.ResponseWriter, r *http.Request, proje
 		} else {
 			entry.HasUnread = t.LastMessageID != ""
 		}
+		// A mention never outlives the unread state it decorates.
+		entry.HasUnreadMention = entry.HasUnread && mentionKeys[t.ID]
 		entries = append(entries, entry)
 	}
 
@@ -1248,9 +1263,26 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 	// --- Human-to-human message ---
 	// No agent recipient was resolved. A thread message is no_recipient
 	// unless a lookup failed or it is addressed to a person.
+	members := s.projectMembersOnce(ctx, projectID)
 	noRecipient := !isDM && !routingLookupFailed &&
-		s.threadMessageUnaddressed(ctx, projectID, plan.MentionNames, body.ReplyToID, user.ID())
-	msgID := s.sendHumanToHuman(w, r, key, projectID, user, content, senderLabel, isDM, noRecipient, plan.MentionNames, attachmentRefs, now, body.ReplyToID, nil)
+		s.threadMessageUnaddressed(ctx, members, plan.MentionNames, body.ReplyToID, user.ID())
+	mentionNames := plan.MentionNames
+	if noRecipient {
+		// When an agent has posted in the thread, address the reply to the
+		// most recent other human poster (or the thread creator) with a
+		// note instead of leaving it unseen; no agent is invoked.
+		// Otherwise it stays no_recipient.
+		creatorID := ""
+		if threadTopic != nil {
+			creatorID = threadTopic.CreatedBy
+		}
+		if noted, token, ok := s.unmentionedHumanNote(ctx, members, projectID, key, creatorID, user.ID(), content); ok {
+			content = noted
+			mentionNames = append(slices.Clone(mentionNames), token)
+			noRecipient = false
+		}
+	}
+	msgID := s.sendHumanToHuman(w, r, key, projectID, user, content, senderLabel, isDM, noRecipient, mentionNames, attachmentRefs, now, body.ReplyToID, nil)
 	if msgID == "" {
 		return // error response already written by sendHumanToHuman
 	}
@@ -1508,9 +1540,12 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 	// Translate human @firstname-lastname mentions to @email for agents.
 	// The original content is preserved for storage and human-facing display;
 	// agentContent is what the dispatched agent sees.
+	// The member list is also reused below to record human @mentions.
 	agentContent := content
+	var humanMembers []chatMemberEntry
 	if projectID != "" {
-		if humanMembers := s.resolveProjectHumanMembers(ctx, projectID); len(humanMembers) > 0 {
+		humanMembers = s.resolveProjectHumanMembers(ctx, projectID)
+		if len(humanMembers) > 0 {
 			agentContent = translateMentionsOutbound(content, humanMembers)
 		}
 	}
@@ -1870,6 +1905,18 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 		s.ensureDMRegistered(ctx, key, user.ID())
 	}
 
+	// Resolve human @mentions (names that are not agents may be people)
+	// and record them before publish, as sendHumanToHuman does: clients
+	// refetch the thread list and its mention dots on this event.
+	// Matched against the member list already resolved above for mention
+	// translation, so this adds no lookup. Only names that matched no agent
+	// are candidates (agent slugs take precedence).
+	var mentionedHumans []string
+	if humanNames := unresolvedMentionNames(mentionResults); len(humanNames) > 0 {
+		mentionedHumans = mentionedHumanIDs(humanMembers, humanNames, user.ID())
+		s.recordHumanMentions(ctx, key, storeMsg.ID, mentionedHumans)
+	}
+
 	// Both watermarks must be current before publish: clients refetch unread
 	// state on this event.
 	s.touchConversationActivity(ctx, key, storeMsg.ID)
@@ -2155,10 +2202,10 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 	}
 
 	// --- W6: Human mention notifications ---
-	// Resolve @mentions that didn't match agents — they may be human members.
-	// Fire in a goroutine to avoid blocking the response.
-	if cn := s.getChatNotifier(); cn != nil && len(mentionNames) > 0 && projectID != "" {
-		go s.fireHumanMentionNotifications(context.Background(), mentionNames, projectID, key, user.ID(), senderLabel, content)
+	// Notify the human members resolved before publish. Fired in a
+	// goroutine to avoid blocking the response.
+	if len(mentionedHumans) > 0 && s.getChatNotifier() != nil {
+		go s.notifyHumanMentions(context.Background(), mentionedHumans, projectID, key, user.ID(), senderLabel, content)
 	}
 
 	resp := chatMessageResponse{
@@ -2393,6 +2440,15 @@ func (s *Server) sendHumanToHuman(w http.ResponseWriter, r *http.Request, key, p
 		s.ensureDMRegistered(ctx, key, user.ID())
 	}
 
+	// Resolve human @mentions once, against the same project member list
+	// the notifications use, and record them before publish: clients
+	// refetch the thread list (and its mention dots) on this event.
+	var mentionedHumans []string
+	if len(mentionNames) > 0 && projectID != "" {
+		mentionedHumans = mentionedHumanIDs(s.resolveProjectHumanMembers(ctx, projectID), mentionNames, user.ID())
+		s.recordHumanMentions(ctx, key, storeMsg.ID, mentionedHumans)
+	}
+
 	// Both watermarks must be current before publish: clients refetch unread
 	// state on this event.
 	if wcs != nil {
@@ -2422,8 +2478,8 @@ func (s *Server) sendHumanToHuman(w http.ResponseWriter, r *http.Request, key, p
 			})
 		}
 		// Human mention notifications.
-		if len(mentionNames) > 0 && projectID != "" {
-			go s.fireHumanMentionNotifications(context.Background(), mentionNames, projectID, key, user.ID(), senderLabel, content)
+		if len(mentionedHumans) > 0 {
+			go s.notifyHumanMentions(context.Background(), mentionedHumans, projectID, key, user.ID(), senderLabel, content)
 		}
 	}
 
@@ -3130,6 +3186,8 @@ func (s *Server) handleConversationInteragent(w http.ResponseWriter, r *http.Req
 	// returned only when the viewer is a conversation participant. For
 	// canonical (cross-project) rows, strip the body if the viewer has
 	// no participant relationship with the message's conversation.
+	// A row whose provenance stamps name different projects but which has
+	// no conversation ID cannot be checked, so its body is stripped too.
 	seen := make(map[string]bool, len(result.Items))
 	filtered := make([]store.Message, 0, len(result.Items)+len(senderResult.Items))
 	viewerID := user.ID()
@@ -3141,12 +3199,16 @@ func (s *Server) handleConversationInteragent(w http.ResponseWriter, r *http.Req
 			return
 		}
 		seen[m.ID] = true
-		if ClassifyLegacyViewQuery(&m) == LegacyViewCanonical && m.ConversationID != "" {
+		switch {
+		case isCrossProjectRow(&m) && m.ConversationID == "":
+			// No conversation to check participation against: fail closed.
+			m.Msg = ""
+		case ClassifyLegacyViewQuery(&m) == LegacyViewCanonical && m.ConversationID != "":
 			decision := s.AuthorizeCrossProjectContentAccess(
 				ctx, viewerID, m.ConversationID, ContentSurfaceInteragentView,
 			)
 			if !decision.Allowed {
-				// Strip body — viewer is not a participant.
+				// Strip body — participation not verified.
 				m.Msg = ""
 			}
 		}
@@ -4977,42 +5039,86 @@ func registerDMParticipants(ctx context.Context, wcs WebChatStore, key string) {
 // excluded from notifications. Agent slugs are skipped — they already get
 // type:mention messages through the existing pipeline.
 func (s *Server) fireHumanMentionNotifications(ctx context.Context, mentionNames []string, projectID, conversationKey, senderUserID, senderName, messageContent string) {
-	cn := s.getChatNotifier()
-	if cn == nil {
+	if s.getChatNotifier() == nil {
 		return
 	}
+	userIDs := mentionedHumanIDs(s.resolveProjectHumanMembers(ctx, projectID), mentionNames, senderUserID)
+	s.notifyHumanMentions(ctx, userIDs, projectID, conversationKey, senderUserID, senderName, messageContent)
+}
 
-	// Resolve human members for the project.
-	humanMembers := s.resolveProjectHumanMembers(ctx, projectID)
-	if len(humanMembers) == 0 {
-		return
+// mentionedHumanIDs matches @mention names against humanMembers by display
+// name, hyphenated display-name slug, email, and email local part, all
+// case-insensitively. It returns the matched user IDs in mention order,
+// deduplicated, with senderUserID excluded.
+func mentionedHumanIDs(humanMembers []chatMemberEntry, mentionNames []string, senderUserID string) []string {
+	if len(humanMembers) == 0 || len(mentionNames) == 0 {
+		return nil
 	}
-
-	// Build a lookup by lowercase display name and email.
-	type memberInfo struct {
-		ID          string
-		DisplayName string
-	}
-	lookup := make(map[string]memberInfo)
+	lookup := make(map[string]string)
 	for _, m := range humanMembers {
-		info := memberInfo{ID: m.ID, DisplayName: m.DisplayName}
 		if m.DisplayName != "" {
-			lookup[strings.ToLower(m.DisplayName)] = info
+			lookup[strings.ToLower(m.DisplayName)] = m.ID
 			// Also match the hyphenated slug that the frontend autocomplete
 			// generates (e.g. "John Smith" → "john-smith"). Without this,
 			// multi-word display names never match the autocomplete output.
 			if slug := strings.ToLower(strings.ReplaceAll(m.DisplayName, " ", "-")); slug != strings.ToLower(m.DisplayName) {
-				lookup[slug] = info
+				lookup[slug] = m.ID
 			}
 		}
 		if m.Email != "" {
 			// Also match by email prefix (before @).
-			lookup[strings.ToLower(m.Email)] = info
+			lookup[strings.ToLower(m.Email)] = m.ID
 			if at := strings.IndexByte(m.Email, '@'); at > 0 {
-				lookup[strings.ToLower(m.Email[:at])] = info
+				lookup[strings.ToLower(m.Email[:at])] = m.ID
 			}
 		}
 	}
+
+	var ids []string
+	seen := make(map[string]bool)
+	for _, name := range mentionNames {
+		id, ok := lookup[strings.ToLower(name)]
+		// Skip unknown names, the sender (don't notify yourself), and
+		// repeats.
+		if !ok || id == senderUserID || seen[id] {
+			continue
+		}
+		seen[id] = true
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+// unresolvedMentionNames returns the mention names the routing plan found
+// no agent for (status "not_found"): the only names that can address a
+// human. Names resolved to agents, including over the recipient cap, are
+// excluded.
+func unresolvedMentionNames(results []messages.MentionResult) []string {
+	var names []string
+	for _, mr := range results {
+		if mr.Status == "not_found" {
+			names = append(names, mr.Slug)
+		}
+	}
+	return names
+}
+
+// mentionNotifyBudget bounds one notifyHumanMentions call. Callers run it
+// in a background goroutine on context.Background() so it outlives the
+// request; the budget keeps a stalled dispatcher from leaking it. The
+// budget covers all recipients, notified one after another: a stalled
+// recipient can use it up, and later recipients then fail on the expired
+// context and are skipped (the notifier logs each failure).
+const mentionNotifyBudget = 15 * time.Second
+
+// notifyHumanMentions fires a mention notification to each user in userIDs.
+func (s *Server) notifyHumanMentions(ctx context.Context, userIDs []string, projectID, conversationKey, senderUserID, senderName, messageContent string) {
+	cn := s.getChatNotifier()
+	if cn == nil || len(userIDs) == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, mentionNotifyBudget)
+	defer cancel()
 
 	// Resolve the conversation name for the notification message.
 	conversationName := ""
@@ -5027,24 +5133,8 @@ func (s *Server) fireHumanMentionNotifications(ctx context.Context, mentionNames
 		}
 	}
 
-	seen := make(map[string]bool)
-	for _, name := range mentionNames {
-		lower := strings.ToLower(name)
-		member, ok := lookup[lower]
-		if !ok {
-			continue
-		}
-		// Skip the sender — don't notify yourself.
-		if member.ID == senderUserID {
-			continue
-		}
-		// Deduplicate.
-		if seen[member.ID] {
-			continue
-		}
-		seen[member.ID] = true
-
-		cn.NotifyMention(ctx, member.ID, ChatMessageContext{
+	for _, id := range userIDs {
+		cn.NotifyMention(ctx, id, ChatMessageContext{
 			SenderID:         senderUserID,
 			SenderName:       senderName,
 			ConversationKey:  conversationKey,
@@ -5052,6 +5142,28 @@ func (s *Server) fireHumanMentionNotifications(ctx context.Context, mentionNames
 			Preview:          messageContent,
 			ProjectID:        projectID,
 		})
+	}
+}
+
+// recordHumanMentions stores a per-recipient mention row for each user in
+// userIDs, so the thread list can mark threads holding an unread mention of
+// the caller. Thread conversations only: DM rollups do not use the records.
+// The rows are written regardless of mute, which only silences
+// notifications. Best-effort: a failure costs the mention dot, not the send.
+func (s *Server) recordHumanMentions(ctx context.Context, conversationKey, messageID string, userIDs []string) {
+	if len(userIDs) == 0 || messageID == "" || conversationKey == "" ||
+		strings.HasPrefix(conversationKey, "dm:") || strings.HasPrefix(conversationKey, "agent:") {
+		return
+	}
+	s.mu.RLock()
+	wcs := s.webChatStore
+	s.mu.RUnlock()
+	if wcs == nil {
+		return
+	}
+	if err := wcs.RecordMentions(ctx, conversationKey, messageID, userIDs); err != nil {
+		slog.Warn("chat: failed to record mentions",
+			"conversation_key", conversationKey, "message_id", messageID, "error", err)
 	}
 }
 
@@ -5185,6 +5297,9 @@ type chatTopicEntry struct {
 	Pinned            bool      `json:"pinned"`
 	Muted             bool      `json:"muted"`
 	HasUnread         bool      `json:"hasUnread"`
+	// HasUnreadMention is true when an unread message (after the caller's
+	// read watermark) in this thread mentions the caller.
+	HasUnreadMention bool `json:"hasUnreadMention"`
 }
 
 type chatMessageResponse struct {

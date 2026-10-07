@@ -26,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 )
 
@@ -71,6 +72,7 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/artifacts":                              "policy:artifact",
 	"/api/v1/artifacts/":                             "policy:artifact",
 	"/api/v1/artifacts/shared/":                      "public:artifact-share-link",
+	"/api/v1/artifacts/view/":                        "public:artifact-view-capability",
 	"/api/v1/messaging/capabilities":                 "authenticated:messaging",
 	"/api/v1/messaging/targets/resolve":              "authenticated:messaging",
 	"/api/v1/skills":                                 "policy:skill",
@@ -126,7 +128,11 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/admin/server-config":                    "hub-admin:server-config",
 	"/api/v1/admin/project-defaults":                 "hub-admin:project-defaults",
 	"/api/v1/admin/agents/reset-auth-all":            "hub-admin:agent-reset",
+	"/api/v1/admin/conduit/grant-keys/rotate":        "hub-admin:conduit-grant-keys",
 	"/api/v1/admin/gcp-quota":                        "hub-admin:gcp-quota",
+	"/api/v1/admin/delegation-adoption":              "hub-admin:delegation-adoption",
+	"/api/v1/admin/delegation-adoption/previews":     "hub-admin:delegation-adoption",
+	"/api/v1/admin/delegation-adoption/commits":      "hub-admin:delegation-adoption",
 	"/api/v1/admin/lifecycle-hooks":                  "hub-admin:lifecycle-hook",
 	"/api/v1/admin/lifecycle-hooks/":                 "hub-admin:lifecycle-hook",
 	"/api/v1/admin/validate-resources":               "hub-admin:resource-validation",
@@ -464,12 +470,20 @@ func TestHubAdminRoutesRejectScopedAdminUAT(t *testing.T) {
 
 	for _, route := range routes {
 		t.Run(route, func(t *testing.T) {
-			// Skip routes that have Permission set — they require an authzService
-			// to exercise the Decide path. These are tested in
-			// TestRouteGuardOpsPermissions with a full server.
-			if meta, ok := routeMetadataTable[route]; ok && meta.Permission != "" {
-				t.Skipf("skipping permission-based route %s (tested in TestRouteGuardOpsPermissions)", route)
-				return
+			// A permission route admits a token only through its catalog
+			// disposition: an operation on a hub resource route admits the
+			// hub boundary only, so this project token is outside it.
+			if meta, ok := routeMetadataTable[route]; ok && meta.Permission != "" && meta.Resource == permissions.ResourceHub {
+				for _, spec := range hubAdminRouteCatalogOperations(route) {
+					if !spec.Bearer.Kind.AdmitsToken() {
+						continue
+					}
+					for _, b := range spec.Bearer.Boundaries {
+						if b == authzop.BearerBoundaryProject {
+							t.Errorf("%s admits a project token on hub resource route %s", spec.ID, route)
+						}
+					}
+				}
 			}
 
 			method, path, body := scopedAdminUATRouteRequest(route)
@@ -489,15 +503,42 @@ func TestHubAdminRoutesRejectScopedAdminUAT(t *testing.T) {
 	}
 }
 
+// hubAdminRouteCatalogOperations returns the catalog operations with an
+// HTTP, SSE or WebSocket entry point on route; a route ending in "/" also
+// matches every entry point below it.
+func hubAdminRouteCatalogOperations(route string) []authzop.OperationSpec {
+	var out []authzop.OperationSpec
+	for _, spec := range authzop.Catalog {
+		for _, ep := range spec.EntryPoints {
+			switch ep.Kind {
+			case authzop.EntryPointHTTPRoute, authzop.EntryPointSSE, authzop.EntryPointWebSocket:
+			default:
+				continue
+			}
+			if ep.Pattern == route || (strings.HasSuffix(route, "/") && strings.HasPrefix(ep.Pattern, route)) {
+				out = append(out, spec)
+				break
+			}
+		}
+	}
+	return out
+}
+
 func scopedAdminUATRouteRequest(route string) (string, string, *bytes.Reader) {
 	method := http.MethodGet
 	path := route
 	body := ""
+	// A key registered with a method prefix ("DELETE /api/v1/...") names
+	// its method.
+	if i := strings.Index(route, " /"); i >= 0 {
+		method, path = route[:i], route[i+1:]
+	}
 
 	switch route {
 	case "/api/v1/admin/users/invite", "/api/v1/admin/users/invite/bulk",
 		"/api/v1/admin/agents/reset-auth-all", "/api/v1/admin/maintenance/check-updates",
-		"/api/v1/admin/maintenance/restart":
+		"/api/v1/admin/maintenance/restart", "/api/v1/admin/delegation-adoption/previews",
+		"/api/v1/admin/delegation-adoption/commits", "/api/v1/admin/conduit/grant-keys/rotate":
 		method = http.MethodPost
 	case "/api/v1/admin/server-config", "/api/v1/admin/project-defaults",
 		"/api/v1/admin/messaging":

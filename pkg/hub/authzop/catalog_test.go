@@ -256,17 +256,14 @@ func TestRegisteredPermissionsConsumed(t *testing.T) {
 		"broker.dispatch": "Broker-HMAC dispatch, not user-facing",
 
 		// Hub admin permissions — NonRouteUse only (no route declaration)
-		"hub.settings.read":           "NonRouteUse only, no route declaration",
-		"hub.settings.update":         "NonRouteUse only, no route declaration",
-		"hub.admin_mode.read":         "NonRouteUse only, no route declaration",
-		"hub.integrations.update":     "NonRouteUse only, no route declaration",
-		"hub.lifecycle_hooks.update":  "NonRouteUse only, no route declaration",
-		"hub.allow_list.read":         "NonRouteUse only, no route declaration",
-		"hub.project_defaults.update": "NonRouteUse only, no route declaration",
-		"hub.scheduler.update":        "NonRouteUse only, no route declaration",
-		"hub.federation.read":         "NonRouteUse only, no route declaration",
-		"hub.federation.update":       "NonRouteUse only, no route declaration",
-		"hub.teams_manifest.update":   "NonRouteUse only, no route declaration",
+		"hub.settings.read":         "NonRouteUse only, no route declaration",
+		"hub.admin_mode.read":       "NonRouteUse only, no route declaration",
+		"hub.integrations.update":   "NonRouteUse only, no route declaration",
+		"hub.allow_list.read":       "NonRouteUse only, no route declaration",
+		"hub.scheduler.update":      "NonRouteUse only, no route declaration",
+		"hub.federation.read":       "NonRouteUse only, no route declaration",
+		"hub.federation.update":     "NonRouteUse only, no route declaration",
+		"hub.teams_manifest.update": "NonRouteUse only, no route declaration",
 		// hub.github_app.read and hub.github_app.update: now route-enforced via route_metadata.go
 		"hub.audit.read": "Super-admin audit explain, NonRouteUse only",
 
@@ -290,13 +287,11 @@ func TestRegisteredPermissionsConsumed(t *testing.T) {
 		"agent.port_forward":   "Agent token scope, not route-enforced",
 		"agent.identity_token": "Agent token scope, not route-enforced",
 
-		// Artifact service — deferred, not stubbed: no handler behaviour yet
-		// (the routes answer 404); catalog operations land with the handlers.
-		"artifact.read":   "Artifact service: no handler behaviour in P0; catalog operations land with the handlers (ptone/scion#3202)",
-		"artifact.create": "Artifact service: no handler behaviour in P0; catalog operations land with the handlers (ptone/scion#3202)",
-		"artifact.update": "Artifact service: no handler behaviour in P0; catalog operations land with the handlers (ptone/scion#3202)",
-		"artifact.delete": "Artifact service: no handler behaviour in P0; catalog operations land with the handlers (ptone/scion#3202)",
-		"artifact.manage": "Artifact service: no handler behaviour in P0; catalog operations land with the handlers (ptone/scion#3202)",
+		// Artifact service: read and create are cataloged (P1); update,
+		// delete and manage have no handler behaviour yet.
+		"artifact.update": "Artifact service: new versions land with the two-step publish (ptone/scion#3215)",
+		"artifact.delete": "Artifact service: deletion lands with grants and retention (ptone/scion#3231)",
+		"artifact.manage": "Artifact service: grants and share links land in ptone/scion#3231",
 
 		// Material delivery and runtime-use permissions — NonRouteUse only
 		// (ptone/scion#2129)
@@ -305,6 +300,12 @@ func TestRegisteredPermissionsConsumed(t *testing.T) {
 		"skill_injection.deliver": "Material delivery grant evaluation, NonRouteUse only (ptone/scion#2129)",
 		"secret.use":              "Agent runtime secret retrieval, enforced in material_runtime.go, not route-enforced",
 		"gcp_service_account.use": "Agent GCP token-mint request, NonRouteUse only (ptone/scion#2129)",
+
+		// Self-scoped permissions — checked by Server.authorizeSelfScoped;
+		// their operations are catalogued by the batches that admit them.
+		"inbox.read":                  "Self-scoped, checked by authorizeSelfScoped; no route uses it yet",
+		"inbox.write":                 "Self-scoped, checked by authorizeSelfScoped; no route uses it yet",
+		"user_skill_injection.update": "Self-scoped, checked by authorizeSelfScoped; no route uses it yet",
 	}
 
 	var unconsumed []string
@@ -1252,6 +1253,7 @@ var domainResourceCompatibility = map[string][]string{
 	"schedule":           {"ResourceScheduledEvent"},
 	"chat":               {"ResourceProject"},
 	"env":                {"ResourceProject"},
+	"artifact":           {"ResourceArtifact"},
 }
 
 // TestCatalogBasePermissionSemanticsAssertive validates that each operation's

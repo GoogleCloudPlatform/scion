@@ -690,3 +690,13 @@ func TestHandleFilteredMessage_UnlinkedProjectDropped(t *testing.T) {
 		t.Errorf("expected no messages for unlinked project, got %d", len(fm.messages))
 	}
 }
+
+func TestNotificationStyle_WaitingForInputHeader(t *testing.T) {
+	header, style := notificationStyle("WAITING_FOR_INPUT")
+	if header != "Waiting on Parent" {
+		t.Errorf("header = %q, want %q", header, "Waiting on Parent")
+	}
+	if style.icon != "\u231b" {
+		t.Errorf("icon = %q, want %q", style.icon, "\u231b")
+	}
+}

@@ -32,7 +32,7 @@ Pass the session secret via the `SESSION_SECRET` environment variable (e.g., thr
 This is often best managed through something like systemd
 
 ### Hub vs. Broker Processes
-While they can run in the same process—known as **Combo Mode** (the default for `scion server start --workstation`)—they serve distinct roles:
+While they can run in the same process—known as **Combo Mode** (the default for `scion server start` with no flags, which runs in workstation mode)—they serve distinct roles:
 - **The Hub** is the stateless control plane. It provides the API and Web Dashboard, and should be accessible via a public or internal URL.
 - **The Broker** is the execution host. It registers with a Hub and executes agents. Brokers can run behind NAT or firewalls, as they establish outbound connections to the Hub. You can connect multiple external brokers to a single Hub.
 
@@ -189,11 +189,15 @@ The Scion Hub provides a built-in maintenance administration panel in the Web Da
 
 Administrators can trigger critical infrastructure operations directly from the dashboard:
 
-- **Check for Updates**: Checks for available updates and allows administrators to execute an "Update Now" action to perform a direct server rebuild.
+- **Check for Updates**: Checks for available updates and allows administrators to execute an "Update Now" action. The update banner on the maintenance and server configuration pages runs the operation that matches the deployment tier: **Update Binary (`update-binary`)** on binary-tier deployments (single-node VMs installed from releases), which downloads and verifies the release binary, swaps it in, and restarts the Hub; and `rebuild-server` on source-tier deployments. See [Maintenance (`server.maintenance`)](/scion/reference/server-config/#maintenance-servermaintenance).
 - **Rebuild Server (`rebuild-server`)**: Initiates a fire-and-forget server rebuild and restart sequence. It uses staging paths and sudoers implementation to ensure reliable updates even while the server is running.
 - **Rebuild Web (`rebuild-web`)**: Recompiles the web frontend assets.
 - **Pull Images (`pull-images`)**: Triggers the Docker/Podman executor to pull the latest agent container images.
 - **Restart Hub**: Initiates a fire-and-forget server restart (`POST /api/v1/admin/maintenance/restart`) via systemd, restricted to administrators. A modal confirmation dialog prevents accidental triggers of restarts.
+
+### Migrations
+
+The panel also lists one-time data migrations, with **Run** for a pending migration and **Retry** for a failed one. The timezone-related ones, `utc-timestamp-normalize` and `applied-config-tz-cleanup`, are described in [Times and timezones: Operator steps](/scion/reference/times-and-timezones/#operator-steps). On SQLite, the automatic start-up repair of unreadable timestamp rows first writes a one-time snapshot next to the database file (`<db>.pre-utc-timestamp-normalize-<time>.bak`). It needs about the database's size in free disk space and contains secrets, so store it like the database and delete it once the repair is verified. A dry run of `utc-timestamp-normalize` (`{"params":{"dryRun":true}}`) reports without writing.
 
 ### Operation Execution & History
 
@@ -246,6 +250,8 @@ The Hub stores agent templates and other artifacts.
 - **Local File System**: Default. Stores files in `~/.scion/storage`.
 - **Google Cloud Storage (GCS)**: Recommended for cloud deployments. Set the `SCION_SERVER_STORAGE_BUCKET` environment variable.
 
+For Hub-managed workspaces, the Hub uploads the workspace to its GCS bucket and sends that bucket name to the Runtime Broker in the agent create request, so the Runtime Broker downloads from the same bucket (the bucket is also kept across reincarnation). A Runtime Broker that receives no bucket falls back to its own GCS storage bucket setting. With neither, the create request fails up front with `422 workspace_storage_unconfigured` instead of a generic gateway error.
+
 ## Deployment
 
 ### GCE VM
@@ -280,8 +286,8 @@ To enable log forwarding, set `SCION_OTEL_LOG_ENABLED=true` and `SCION_OTEL_ENDP
 ## Monitoring
 
 The Hub exposes health check endpoints:
-- `/healthz`: Basic liveness check. Always `200`; the body's `status` is `healthy` or `degraded`, with `checks` naming any failing subsystem. On a single-node setup (Hub + co-located runtime broker), the co-located broker check reports `healthy`, `unhealthy: registration failed`, or `unhealthy: registration pending` — a failed registration is not retried, so `status` stays `degraded` until the broker configuration is fixed and the server is restarted. The single-node workstation setup runs combined (web server + Hub on one port), so the web server answers `/healthz` and nests the Hub's own health under `hub` — the check is at `hub.checks.colocated_broker`, not top-level `checks.colocated_broker` (that path is only for a standalone Hub with no web server). `scion server status` names this check (in either shape) instead of just reporting the Hub as not detected. `scion server start` names it too, but only when it waits to open a browser (an interactive, non-headless terminal with web enabled, and `SCION_NO_BROWSER` unset) — other `start` invocations print nothing about it.
-- `/readyz`: Readiness check (verifies database connectivity). Unaffected by the co-located broker check above — use `/readyz`, not `/healthz`, for Kubernetes/Cloud Run readiness probes.
+- `/healthz`: Basic liveness check. Always `200`; the body's `status` is `healthy`, `degraded` (the server is up, but a non-critical check such as the co-located broker is failing), or `unhealthy` (a critical check — the database, or the configured shared workspace storage mount — is failing), with `checks` naming any failing subsystem. On a single-node setup (Hub + co-located runtime broker), the co-located broker check reports `healthy`, `unhealthy: registration failed`, or `unhealthy: registration pending` — a failed registration is not retried, so `status` stays `degraded` until the broker configuration is fixed and the server is restarted. The single-node workstation setup runs combined (web server + Hub on one port), so the web server answers `/healthz` and nests the Hub's own health under `hub` — the check is at `hub.checks.colocated_broker`, not top-level `checks.colocated_broker` (that path is only for a standalone Hub with no web server). `scion server status` reports a degraded server as running and names the failing checks (in either shape); an unhealthy one is reported as `unhealthy` with its checks. `scion server start` names them too, but only when it waits to open a browser (an interactive, non-headless terminal with web enabled, and `SCION_NO_BROWSER` unset): it waits up to 20 seconds for `healthy`, then opens the browser anyway with a warning if the server is still degraded. Other `start` invocations print nothing about it.
+- `/readyz`: Readiness check (verifies database connectivity and, when a non-`local` workspace storage backend is configured, that its mount is available). Unaffected by the co-located broker check above — use `/readyz`, not `/healthz`, for Kubernetes/Cloud Run readiness probes.
 - `/health`: Legacy/alternative liveness check endpoint.
 
 ### Reverse Proxy / GFE Interception Handling

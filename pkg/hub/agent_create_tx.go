@@ -69,6 +69,14 @@ type agentCreateWrite struct {
 // A slug that fails display-name validation returns an error wrapping
 // errInvalidDisplayName before any write. An incomplete write (nil agent,
 // edge or audit, or a zero provenance) returns errAgentCreateWriteInvalid.
+//
+// The transaction first takes a shared lock on the row of the user the
+// user delete guard would count for the agent (its owner when that is a
+// user, else its ancestry root when that is a user, else its creator when
+// the agent has no owner) and re-checks that the user exists
+// (lockAgentGuardUserTx, ptone/scion#2769). A create racing that
+// user's delete then either commits first, so the delete sees the agent and
+// is refused, or fails with errAgentOwnerUserMissing and writes nothing.
 func (s *Server) commitAgentCreate(ctx context.Context, w agentCreateWrite) error {
 	switch {
 	case w.Agent == nil:
@@ -93,6 +101,9 @@ func (s *Server) commitAgentCreate(ctx context.Context, w agentCreateWrite) erro
 	w.Edge.AuthorityProvenance = w.Provenance
 
 	return s.store.WithTx(ctx, func(tx store.Store) error {
+		if err := lockAgentGuardUserTx(ctx, tx, w.Agent); err != nil {
+			return err
+		}
 		agent := w.Agent
 		if err := tx.CreateAgent(ctx, agent); err != nil {
 			return err
@@ -128,12 +139,16 @@ func (s *Server) commitAgentCreate(ctx context.Context, w agentCreateWrite) erro
 const (
 	createStageStorage           = "storage"
 	createStageUploadURL         = "upload_url"
+	createStageWorkspaceStorage  = "workspace_storage"
 	createStageManaged           = "managed"
 	createStageRunIntent         = "run_intent"
 	createStageDispatchEnvGather = "dispatch_env_gather"
 	createStageDispatch          = "dispatch"
 	createStageMissingEnv        = "missing_env"
 	createStageProvision         = "provision"
+	// createStageWorkspaceUpload: the hub-managed workspace upload ran past
+	// its own budget (hubWorkspaceUploadTimeout).
+	createStageWorkspaceUpload = "workspace_upload"
 )
 
 // createCompensation is the input of compensateAgentCreate.

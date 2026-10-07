@@ -101,7 +101,10 @@ var tracer = otel.Tracer("scion-hub")
 // still observable and is pinned by assertDeniedByAuthzNotByScope in
 // handlers_agents_gcp_hubscope_test.go. Only scope-versus-nonexistence went
 // dark, and it went dark on purpose.
-const msgSANotAvailableInProject = "GCP service account not available in this project"
+//
+// The wording names both causes without saying which one applies, so the
+// caller knows to check registration and their own access (ptone/scion#3335).
+const msgSANotAvailableInProject = "GCP service account is not available; it is not registered in this project or you are not authorized to use it"
 
 // parseLabelFilters parses label=key=value query parameters into a map and
 // validates the resulting labels against constraint rules.
@@ -167,13 +170,20 @@ type ListAgentsResponse struct {
 	Agents     []AgentWithCapabilities `json:"agents"`
 	NextCursor string                  `json:"nextCursor,omitempty"`
 	TotalCount int                     `json:"totalCount"`
+	// TotalCountApproximate marks TotalCount as a lower bound rather than an
+	// exact count: the agent-list rule's count pass stopped at
+	// authorizedListMaxCandidates candidates (see listReadableAgents).
+	TotalCountApproximate bool `json:"totalCountApproximate,omitempty"`
 	// Sort and Dir echo the request's sort mode. Both are omitted unless
 	// the request supplied "sort": legacy-mode responses never set these.
 	Sort string `json:"sort,omitempty"`
 	Dir  string `json:"dir,omitempty"`
 	// Complete is set only when the request supplied "fit" (sorted mode): true
 	// iff the unphased candidate set had at most fit members, in which case
-	// Agents is its whole readable subset. A pointer
+	// Agents is its whole readable subset. On the project user path it is
+	// also false when the complete response would exceed the per-request
+	// decision budget for the caller (completeBranchMaxCandidates); the
+	// response is then an ordinary paged one. A pointer
 	// so "fit not sent" (nil, omitted) is distinguishable from "fit sent,
 	// complete: false".
 	Complete *bool `json:"complete,omitempty"`
@@ -188,23 +198,30 @@ type ListAgentsResponse struct {
 
 // ListAgentsStats is the sorted-mode "stats" response block.
 type ListAgentsStats struct {
-	// Total is the exact readable, label(k=v)-filtered count, phase NOT
-	// applied.
+	// Total is the readable, label(k=v)-filtered count, phase NOT
+	// applied. It is exact unless TotalApproximate is set. For a user
+	// caller on the global endpoint it is capped at 2,000: only the first
+	// authorizedListMaxCandidates candidates are read.
 	Total int `json:"total"`
 	// Running is the count of phase == "running" among the same population,
 	// always present regardless of the request's own phase filter.
 	Running int `json:"running"`
-	// Agents is exactly the counted population as [id, phase] pairs, EXCEPT
-	// on the global endpoint when Total exceeds 2,000, where it is nil and
-	// so omitted from the response entirely. The project
-	// endpoint is already bounded by the 2,000 candidate ceiling,
-	// so it is never omitted there.
+	// TotalApproximate marks Total and Running as lower bounds: the
+	// global endpoint read only the first authorizedListMaxCandidates
+	// candidates (see buildGlobalAgentStats).
+	TotalApproximate bool `json:"totalApproximate,omitempty"`
+	// Agents is exactly the counted population as [id, phase] pairs. On
+	// the global endpoint it is nil, and so omitted from the response,
+	// when TotalApproximate is set (a user caller with more than 2,000
+	// candidates), and for an agent caller when Total exceeds 2,000. The
+	// project endpoint is already bounded by the 2,000 candidate
+	// ceiling, so it is never omitted there.
 	//
 	// A *slice, not a slice: encoding/json's omitempty on a plain slice
 	// can't distinguish "intentionally empty" (Total == 0, an empty but
-	// present array) from "omitted" (Total > 2000) — both have len 0.
-	// omitempty on a pointer checks only nilness, which is exactly the
-	// distinction this field needs.
+	// present array) from "omitted" — both have len 0. omitempty on a
+	// pointer checks only nilness, which is exactly the distinction this
+	// field needs.
 	Agents *[][2]string `json:"agents,omitempty"`
 }
 
@@ -337,6 +354,11 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	// echo only ever carries validated values. Without sort, nothing here
 	// runs and both short-circuits return the legacy empty list.
 	sorted := isSortedModeRequest(query)
+	if sorted {
+		perfSetEndpoint(ctx, perfEndpointAgentsGlobalSorted)
+	} else {
+		perfSetEndpoint(ctx, perfEndpointAgentsGlobalLegacy)
+	}
 	var sortParam, dirParam string
 	if sorted {
 		var ok bool
@@ -368,7 +390,9 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 
 	// RS2: Resolve authorization scope FIRST — before building filter or cursor
 	// binding. This is the single authoritative scope decision for the request.
+	scopeDone := perfPhaseStart(ctx, perfPhaseListScopeAuthz)
 	scopeResult, err := s.authzService.ResolveListScopes(ctx, identity, "agent.list")
+	scopeDone()
 	if err != nil {
 		slog.WarnContext(ctx, "listAgents: authorization scope resolution failed (fail-closed)",
 			"error", err)
@@ -447,8 +471,10 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 		filter.ExcludedProjectIDs = canonicalizeStringSlice(append([]string{}, scopeResult.ExcludedProjectIDs...))
 	}
 
+	classifyDone := perfPhaseStart(ctx, perfPhaseListScopeAuthz)
 	classification, err := s.resolveProjectListClassification(
 		ctx, identity, query.Get("scope"), query.Get("mine") == "true", scopeResult, "listAgents")
+	classifyDone()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 			"unable to resolve authorization", nil)
@@ -472,13 +498,13 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if sorted {
-		// Sorted mode: pure SQL, race-free,
-		// no per-item read filter -- the SQL scope predicate already baked
-		// into filter above (AuthorizedProjectIDs, classification, etc.) is
-		// the authorization, exactly as the legacy branch below relies on.
-		// Dispatched after every gate and filter-building step above, so
-		// caps/messageability for returned rows run through the same
-		// identity and filter the legacy branch uses.
+		// Sorted mode: the SQL scope predicate baked into filter above
+		// (AuthorizedProjectIDs, classification, etc.) narrows the
+		// candidates, and listAgentsSorted applies the same per-agent read
+		// rule as the legacy branch below. Dispatched after every gate and
+		// filter-building step above, so caps/messageability for returned
+		// rows run through the same identity and filter the legacy branch
+		// uses.
 		// sort and dir were already validated above; only the remaining
 		// parameters are parsed here, at the same point in the request as
 		// before, so the order of 400s is unchanged.
@@ -503,21 +529,27 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	result, err := s.store.ListAgents(ctx, filter, store.ListOptions{Limit: limit, Cursor: cursor, CursorBinding: cursorBinding})
+	// Agent-list rule (ptone/scion#3346): for a user caller, an agent appears
+	// in an agent list, its pages and its totalCount only if the caller can
+	// read that agent. listAgents and listProjectAgents both apply it, so the
+	// two endpoints return the same set for the same project. The SQL scope
+	// predicate above narrows the candidates; listAgentsLegacyPage then
+	// keeps only the readable ones.
+	result, err := s.listAgentsLegacyPage(ctx, identity, filter, cursor, cursorBinding, limit)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}
-	items, nextCursor, totalCount := result.Items, result.NextCursor, result.TotalCount
 
-	agents, scopeCap := s.buildGlobalAgentPage(ctx, identity, items)
+	agents, scopeCap := s.buildGlobalAgentPage(ctx, identity, result.Items)
 
 	writeAgentList(w, legacyAgentListView(query), ListAgentsResponse{
-		Agents:       agents,
-		NextCursor:   nextCursor,
-		TotalCount:   totalCount,
-		ServerTime:   time.Now().UTC(),
-		Capabilities: scopeCap,
+		Agents:                agents,
+		NextCursor:            result.NextCursor,
+		TotalCount:            result.TotalCount,
+		TotalCountApproximate: result.TotalCountApproximate,
+		ServerTime:            time.Now().UTC(),
+		Capabilities:          scopeCap,
 	})
 }
 
@@ -962,12 +994,18 @@ type createRollback struct {
 // so a canceled request cannot skip any of them. The cleanup runs
 // synchronously, before the caller writes its error response, so it may delay
 // that response by up to ~45s in the worst case (5s revoke + 30s runtime
-// delete + 5s compensation + 5s release), plus 5s for the fallback below.
+// delete + 5s compensation + 5s release), plus about 20s for the fallback
+// below (up to three row-delete attempts with backoff, then marking the row
+// failed or deactivating its edges).
 // That can exceed a client's own timeout (the CLI's is 30s), in which case
 // the client sees a timeout rather than the create error — a deliberate
 // trade for not leaking the agent's row, runtime resources and reservations.
 //
-// Failures of steps 1, 2 and 4 are logged and otherwise ignored. When the
+// Failures of steps 1, 2 and 4 are logged and otherwise ignored, with one
+// exception: when the broker refuses step 2 because it holds a different
+// run of the agent (ptone/scion#3080) and refuseDeleteRunMismatch refuses,
+// steps 3 and 4 are skipped, and the row is left in phase error with its
+// quotas held (markCreateCleanupRefused). When the
 // compensation transaction fails, the failure is logged at ERROR with a
 // correlation ID and the compensation's op ID, and a fallback runs: a
 // standalone best-effort deactivation of the agent's edges (same cause and
@@ -1000,13 +1038,28 @@ func (s *Server) cleanupFailedCreate(ctx context.Context, rb createRollback) (co
 				s.agentLifecycleLog.Warn("Create-failure cleanup: run intent write failed", "agent_id", agent.ID, "error", err)
 			}
 		}()
+		var refused *DeleteRunMismatchError
 		func() {
 			rctx, cancel := detachedCleanupContext(ctx, createCleanupRuntimeTimeout)
 			defer cancel()
 			if err := rb.DeleteRuntime(rctx); err != nil {
 				s.agentLifecycleLog.Warn("Create-failure cleanup: runtime delete failed", "agent_id", agent.ID, "error", err)
+				errors.As(err, &refused)
 			}
 		}()
+		// The broker holds a different run of the agent than the row
+		// records and deleted nothing (ptone/scion#3080): removing the row
+		// would leave that run with no row. The row is kept in phase error
+		// and its quotas stay held (ptone's ruling on ptone/scion#2550 P5
+		// Q1); deleting the agent later goes through the delete engine.
+		// The cleanup is best-effort, and whether that overrides the
+		// refusal is decided in one place, refuseDeleteRunMismatch.
+		if refused != nil && refuseDeleteRunMismatch(false, true) {
+			s.agentLifecycleLog.Warn("Create-failure cleanup: broker holds a different run than the hub recorded; keeping the agent row",
+				"agent_id", agent.ID, "hub_run_id", refused.RequestedRunID, "broker_run_id", refused.CurrentRunID, "stage", rb.Stage)
+			s.markCreateCleanupRefused(ctx, agent.ID, refused)
+			return ""
+		}
 	}
 	func() {
 		sctx, cancel := detachedCleanupContext(ctx, createCleanupStoreTimeout)
@@ -1033,12 +1086,23 @@ func (s *Server) cleanupFailedCreate(ctx context.Context, rb createRollback) (co
 		// deactivation fails, the edge stays active with a deleted delegate,
 		// which nothing reads as authority (the walk, the provenance lookup
 		// and the mint all need the agent row).
-		fctx, fcancel := detachedCleanupContext(ctx, createCleanupStoreTimeout)
-		defer fcancel()
-		if derr := s.store.DeleteAgent(fctx, agent.ID); derr != nil && !errors.Is(derr, store.ErrNotFound) {
+		// The row delete is retried a few times; if it still fails, the row
+		// is left visibly failed rather than in phase created with no
+		// message.
+		if derr := s.deleteFailedCreateRow(ctx, agent.ID); derr != nil {
 			s.agentLifecycleLog.Warn("Create-failure cleanup: agent row delete failed", "agent_id", agent.ID, "error", derr)
+			mctx, mcancel := detachedCleanupContext(ctx, createCleanupStoreTimeout)
+			defer mcancel()
+			if err := s.store.UpdateAgentStatus(mctx, agent.ID, store.AgentStatusUpdate{
+				Phase:   string(state.PhaseError),
+				Message: createRowRemoveFailedMessage,
+			}); err != nil {
+				s.agentLifecycleLog.Warn("Create-failure cleanup: marking the row failed also failed", "agent_id", agent.ID, "error", err)
+			}
 			return
 		}
+		fctx, fcancel := detachedCleanupContext(ctx, createCleanupStoreTimeout)
+		defer fcancel()
 		now := time.Now()
 		if _, derr := s.store.DeactivateDelegationEdgesForDelegate(fctx, store.DelegationPrincipalAgent, agent.ID, store.Deactivation{
 			Cause: store.EdgeDeactivationCreateCompensation,
@@ -1052,6 +1116,73 @@ func (s *Server) cleanupFailedCreate(ctx context.Context, rb createRollback) (co
 	s.releaseAgentQuotas(ctx, agent.ID, rb.RuntimeBrokerID)
 	return compensationFailureCorrelationID
 }
+
+// markCreateCleanupRefused leaves a failed create's row, whose runtime
+// delete the broker refused because it holds another run
+// (ptone/scion#3080), in phase error with the refusal's message.
+//
+// The write is guarded on the run the refused delete named
+// (IfRunID: refused.RequestedRunID, ptone/scion#2550): when the row has
+// moved on since (to the broker's run, or any newer one), it records a live
+// run, which must not be marked failed, so nothing is written. Failures
+// are logged.
+func (s *Server) markCreateCleanupRefused(ctx context.Context, agentID string, refused *DeleteRunMismatchError) {
+	mctx, cancel := detachedCleanupContext(ctx, createCleanupStoreTimeout)
+	defer cancel()
+	err := s.store.UpdateAgentStatus(mctx, agentID, store.AgentStatusUpdate{
+		Phase:   string(state.PhaseError),
+		Message: createCleanupRefusedMessage(refused),
+		IfRunID: refused.RequestedRunID,
+	})
+	switch {
+	case errors.Is(err, store.ErrRunChanged):
+		current := ""
+		if a, gerr := s.store.GetAgent(mctx, agentID); gerr == nil {
+			current = a.RunID
+		}
+		s.agentLifecycleLog.Warn("Create-failure cleanup: the agent moved to another run after the refused delete; not marking it failed",
+			"agent_id", agentID, "hub_run_id", refused.RequestedRunID, "broker_run_id", refused.CurrentRunID, "current_run_id", current)
+	case err != nil:
+		s.agentLifecycleLog.Warn("Create-failure cleanup: marking the kept row failed also failed", "agent_id", agentID, "error", err)
+	}
+}
+
+// createCleanupRefusedMessage is the kept row's message after a refused
+// create-failure cleanup.
+func createCleanupRefusedMessage(refused *DeleteRunMismatchError) string {
+	return "Create failed and its cleanup was refused: " + deleteRunMismatchMessage(refused) + ". Delete the agent to retry."
+}
+
+// deleteFailedCreateRow removes a failed create's agent row, trying
+// createCleanupDeleteAttempts times with a growing backoff, each attempt on
+// its own detached context. A row already gone counts as removed.
+func (s *Server) deleteFailedCreateRow(ctx context.Context, agentID string) error {
+	var err error
+	for attempt := 0; attempt < createCleanupDeleteAttempts; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Duration(attempt) * createCleanupDeleteBackoff)
+		}
+		func() {
+			sctx, cancel := detachedCleanupContext(ctx, createCleanupStoreTimeout)
+			defer cancel()
+			err = s.store.DeleteAgent(sctx, agentID)
+		}()
+		if err == nil || errors.Is(err, store.ErrNotFound) {
+			return nil
+		}
+	}
+	return err
+}
+
+// Create-failure cleanup: when the compensation fails, the fallback row
+// delete is tried createCleanupDeleteAttempts times, backing off
+// createCleanupDeleteBackoff more each time; a row that could not be removed
+// is left in phase error with createRowRemoveFailedMessage.
+const (
+	createCleanupDeleteAttempts  = 3
+	createCleanupDeleteBackoff   = 200 * time.Millisecond
+	createRowRemoveFailedMessage = "Create failed and the agent record could not be removed; delete the agent to retry."
+)
 
 // writeCreateFailure writes a create-failure response. When the create's
 // compensation failed (correlationID != ""), it writes a 500 that carries the
@@ -1075,13 +1206,41 @@ func writeCreateFailure(w http.ResponseWriter, correlationID string, writeOrigin
 // for a broker-dispatched create: remove the agent's provisioned files and
 // branch on the broker so orphaned local state doesn't trigger spurious
 // sync-registration attempts.
-func dispatchDeleteFailedCreate(dispatcher AgentDispatcher, agent *store.Agent) func(context.Context) error {
+//
+// The delete names the run the agent's row records when the cleanup runs,
+// and its previous runs (failedCreateDeleteTarget), not the caller's copy:
+// a create handed to another node mints its own run there, so the copy can
+// name a run that never reached the broker (ptone/scion#2550).
+func dispatchDeleteFailedCreate(st store.Store, dispatcher AgentDispatcher, agent *store.Agent) func(context.Context) error {
 	return func(ctx context.Context) error {
-		return dispatcher.DispatchAgentDelete(ctx, agent, true, true, false, time.Time{})
+		return dispatcher.DispatchAgentDelete(ctx, failedCreateDeleteTarget(ctx, st, agent), true, true, false, time.Time{})
 	}
 }
 
-// errInvalidDisplayName is returned by createAgentWithIdentityKey when slug
+// failedCreateDeleteTarget returns the agent a failed create's cleanup
+// deletes: a copy of agent with the run ID and previous runs its row records
+// now. The row is the failed create's own, still in place (the compensation
+// that removes it runs after the delete), so its run is the one the create
+// left there: this node's minted run, the owning node's for a cross-node
+// create, or the broker's after a settle. The delete sends that run and is
+// itself run-scoped, so it never removes a newer run of the same name. When
+// the row cannot be read (gone, or a store error), agent is used as is, as
+// before.
+func failedCreateDeleteTarget(ctx context.Context, st store.Store, agent *store.Agent) *store.Agent {
+	if st == nil || agent.ID == "" {
+		return agent
+	}
+	row, err := st.GetAgent(ctx, agent.ID)
+	if err != nil {
+		return agent
+	}
+	target := *agent
+	target.RunID = row.RunID
+	target.PreviousRunIDs = append([]string(nil), row.PreviousRunIDs...)
+	return &target
+}
+
+// errInvalidDisplayName is returned by commitAgentCreate when slug
 // fails api.ValidateDisplayName. It is deliberately distinct from
 // store.ErrInvalidInput: the transaction that follows can also fail with
 // store.ErrInvalidInput for unrelated reasons (e.g. a foreign-key violation
@@ -1089,37 +1248,6 @@ func dispatchDeleteFailedCreate(dispatcher AgentDispatcher, agent *store.Agent) 
 // text comes from the store layer, not from validating the display name --
 // it must not be reported to the caller as if it were one.
 var errInvalidDisplayName = errors.New("invalid display name")
-
-// createAgentWithIdentityKey validates slug as the identity key agent.Name
-// will hold at creation (both production callers set Name to Slug before
-// calling this), then writes agent and its identity-key row in the same
-// transaction: the key row is what makes the key's per-project uniqueness a
-// database invariant, so it must never be able to drift from the row it was
-// computed from. This is the single point every production create path --
-// createAgentInProject and the scheduler's dispatchAgentEventHandler -- goes
-// through for this, so they cannot drift on the invariant the way only one
-// of them did before.
-//
-// A validation failure is wrapped in errInvalidDisplayName so a caller that
-// wants the specific, safe-to-surface message can distinguish it with
-// errors.Is before falling through to the transaction's own errors, which
-// include store.ErrIdentityKeyConflict and, separately, store.ErrInvalidInput
-// for reasons unrelated to the display name itself.
-func (s *Server) createAgentWithIdentityKey(ctx context.Context, agent *store.Agent, slug string) error {
-	if _, err := api.ValidateDisplayName(slug); err != nil {
-		return fmt.Errorf("%w: %s", errInvalidDisplayName, err)
-	}
-	return s.store.WithTx(ctx, func(tx store.Store) error {
-		if err := tx.CreateAgent(ctx, agent); err != nil {
-			return err
-		}
-		// Both production callers set Name to slug before calling this, so
-		// api.IdentityKeysFor(slug, agent.Name) collapses to the single
-		// {slug} row -- the same function rename, restore, and the backfill
-		// migration use, rather than a separately-maintained literal here.
-		return tx.ReplaceAgentIdentityKeys(ctx, agent.ID, agent.ProjectID, api.IdentityKeysFor(slug, agent.Name))
-	})
-}
 
 // applyCreateEffectCeiling computes the source credential's frozen ceiling
 // and provenance for an interactive agent create, and caps role to what the
@@ -1782,6 +1910,20 @@ func (s *Server) createAgentInProject(
 			InternalError(w)
 			return
 		}
+	} else if profileName, profileSAID := s.projectProfileDefaultSA(ctx, runtimeBrokerID, project, agent.AppliedConfig.Profile); profileSAID != "" {
+		// No explicit GCP identity, and the project sets a default service
+		// account for the profile this agent runs under. It is more specific
+		// than the project-wide default below and wins over it, including an
+		// explicit project "block" (block is not offered on Kubernetes,
+		// ptone/scion#2328, where per-profile defaults matter most).
+		cfg, ok := s.resolveDefaultSAAssignment(ctx, w, r, projectID, profileSAID, SurfaceProjectDefault, profileDefaultTier(profileName))
+		if !ok {
+			return
+		}
+		agent.AppliedConfig.GCPIdentity = cfg
+		pinResolvedProfile(agent.AppliedConfig, profileName)
+		slog.Debug("GCP identity chosen by default", "source", "project-profile-default",
+			"project_id", projectID, "agent", agent.Name, "profile", profileName, "sa_id", cfg.ServiceAccountID)
 	} else {
 		// No explicit GCP identity — check project default, then fall back to
 		// the hub default, then to unset (the broker applies its runtime
@@ -1800,6 +1942,8 @@ func (s *Server) createAgentInProject(
 					return
 				}
 				agent.AppliedConfig.GCPIdentity = cfg
+				slog.Debug("GCP identity chosen by default", "source", "project-default",
+					"project_id", projectID, "agent", agent.Name, "sa_id", cfg.ServiceAccountID)
 			} else {
 				agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
 					MetadataMode: store.GCPMetadataModeBlock,
@@ -1892,6 +2036,8 @@ func (s *Server) createAgentInProject(
 						return
 					}
 					agent.AppliedConfig.GCPIdentity = cfg
+					slog.Debug("GCP identity chosen by default", "source", "hub-default",
+						"project_id", projectID, "agent", agent.Name, "sa_id", cfg.ServiceAccountID)
 				} else {
 					agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
 						MetadataMode: store.GCPMetadataModeBlock,
@@ -1959,7 +2105,14 @@ func (s *Server) createAgentInProject(
 
 	// Apply project-level defaults, hub operational defaults, and the
 	// template/harness-config derivation pipeline. See deriveAgentConfig.
-	s.deriveAgentConfig(ctx, agent, project, resolvedTemplate)
+	// It fails only when workspace storage did not respond; that is answered
+	// with 503 here, before any quota reservation or agent row exists.
+	if err := s.deriveAgentConfig(ctx, agent, project, resolvedTemplate); err != nil {
+		if !writeWorkspaceStorageUnavailable(w, err) {
+			InternalError(w)
+		}
+		return
+	}
 
 	// Quota enforcement, in order:
 	//  1. Per-broker agent ceiling (ptone/scion#1303). Exceeding the ceiling
@@ -2030,6 +2183,11 @@ func (s *Server) createAgentInProject(
 		s.releaseAgentQuotas(ctx, agent.ID, runtimeBrokerID)
 		if errors.Is(err, errInvalidDisplayName) {
 			writeError(w, http.StatusBadRequest, "invalid_name", err.Error(), nil)
+			return
+		}
+		if errors.Is(err, errAgentOwnerUserMissing) {
+			writeError(w, http.StatusConflict, ErrCodeConflict,
+				"cannot create the agent: the user or agent it belongs to no longer exists", nil)
 			return
 		}
 		if errors.Is(err, errAgentCreateWriteInvalid) {
@@ -2109,7 +2267,17 @@ func (s *Server) createAgentInProject(
 				s.agentLifecycleLog.Warn("Failed to update agent status to provisioning", "agent_id", agent.ID, "error", err)
 			}
 
-			s.publishAgentCreatedIfLive(ctx, agent)
+			// A delete that won the race answers 409, as the synchronous
+			// broker create does (ptone/scion#3099, ptone/scion#3454): no
+			// agent body and no upload URLs, so the client does not upload
+			// to a deleted agent. Nothing was dispatched, so there is
+			// nothing to compensate; the signed URLs simply go unused.
+			if !s.publishAgentCreatedIfLive(ctx, agent) {
+				s.agentLifecycleLog.Info("Hub: agent was deleted while it was being created (workspace bootstrap); answering 409",
+					"agent_id", agent.ID, "agent", agent.Name)
+				writeDeletedDuringCreate(w, agent.ID, nil)
+				return
+			}
 
 			expires := time.Now().Add(SignedURLExpiry)
 			s.enrichAgent(ctx, agent, project, nil)
@@ -2133,9 +2301,15 @@ func (s *Server) createAgentInProject(
 	// a remote broker can download it. Empty-per-agent projects have no
 	// project workspace to ship: each agent's directory is broker-local.
 	if syncsHubProjectWorkspace(project) && agent.AppliedConfig != nil && agent.AppliedConfig.Workspace != "" {
+		// The local-path read, the upload and the swap write run detached
+		// from the client (ptone/scion#1961) under their own budget: a
+		// client that gives up here must not make a broker with a local
+		// path read as one without, or leave the launch below to go ahead
+		// with the unswapped hub-local workspace.
+		uctx, ucancel := context.WithTimeout(detachLaunchFromClient(ctx), hubWorkspaceUploadTimeout)
 		hasLocalPath := false
 		if runtimeBrokerID != "" {
-			provider, err := s.store.GetProjectProvider(ctx, project.ID, runtimeBrokerID)
+			provider, err := s.store.GetProjectProvider(uctx, project.ID, runtimeBrokerID)
 			if err == nil && provider.LocalPath != "" {
 				hasLocalPath = true
 			}
@@ -2145,13 +2319,39 @@ func (s *Server) createAgentInProject(
 			stor := s.GetStorage()
 			if stor != nil {
 				resolvedWorkspace, workspaceErr := s.resolveHubManagedWorkspaceForUpload(agent.AppliedConfig.Workspace, project.Slug)
-				if workspaceErr != nil {
+				if errors.Is(workspaceErr, errWorkspaceContentTimeout) {
+					// Workspace storage did not respond. Dispatching without
+					// the upload would leave the remote broker resolving the
+					// workspace against its own stale or empty project copy,
+					// so the create fails here and answers 503 without the
+					// path. As with the workspace-bootstrap failures above,
+					// the agent row and quotas exist, nothing has been
+					// dispatched (nil DeleteRuntime) and no credential has
+					// been minted (no revoke). A failed compensation answers
+					// 500 with its correlation ID instead (writeCreateFailure).
+					s.agentLifecycleLog.Warn("Workspace storage did not respond; failing agent create",
+						"agent_id", agent.ID, "project_id", project.ID, "error", workspaceErr)
+					ucancel()
+					corrID := cleanup(createRollback{Stage: createStageWorkspaceStorage, Cause: workspaceErr})
+					writeCreateFailure(w, corrID, func() { writeWorkspaceStorageUnavailable(w, workspaceErr) })
+					return
+				} else if workspaceErr != nil {
 					s.agentLifecycleLog.Warn("Skipping GCS upload of invalid hub-managed project workspace",
 						"agent_id", agent.ID,
 						"project_id", project.ID, "error", workspaceErr)
 				} else {
 					storagePath := storage.ProjectWorkspaceStoragePath(s.HubID(), project.ID)
-					if err := syncToGCSForWorkspaceUpload(ctx, resolvedWorkspace, stor.Bucket(), storagePath+"/files"); err != nil {
+					if err := syncToGCSForWorkspaceUpload(uctx, resolvedWorkspace, stor.Bucket(), storagePath+"/files"); err != nil {
+						if errors.Is(err, context.DeadlineExceeded) && uctx.Err() != nil {
+							// The upload ran past our own budget: fail the
+							// create rather than launch with the hub-local
+							// workspace. Nothing was dispatched and no
+							// credential minted yet.
+							ucancel()
+							corrID := cleanup(createRollback{Stage: createStageWorkspaceUpload, Cause: err})
+							writeCreateFailure(w, corrID, func() { RuntimeError(w, "Timed out uploading the project workspace: "+err.Error()) })
+							return
+						}
 						s.agentLifecycleLog.Warn("Failed to upload hub-managed project workspace to GCS",
 							"agent_id", agent.ID,
 							"project_id", project.ID, "error", err)
@@ -2159,13 +2359,18 @@ func (s *Server) createAgentInProject(
 						// Swap workspace to storage path for remote broker
 						agent.AppliedConfig.Workspace = ""
 						agent.AppliedConfig.WorkspaceStoragePath = storagePath
-						if err := s.store.UpdateAgent(ctx, agent); err != nil {
+						// The upload above is always GCS (gcp.SyncToGCS), so
+						// stor.Bucket() names the GCS bucket whatever stor's
+						// provider; no workspaceDownloadBucket check is needed.
+						agent.AppliedConfig.WorkspaceStorageBucket = stor.Bucket()
+						if err := s.store.UpdateAgent(detachLaunchFromClient(ctx), agent); err != nil {
 							s.agentLifecycleLog.Warn("Failed to update agent with workspace storage path", "agent_id", agent.ID, "error", err)
 						}
 					}
 				}
 			}
 		}
+		ucancel()
 	}
 
 	// Managed agent path: bypass broker dispatch entirely and handle directly.
@@ -2196,11 +2401,21 @@ func (s *Server) createAgentInProject(
 		} else {
 			agent.Activity = "working"
 		}
+		recorded := true
 		if err := s.store.UpdateAgent(ctx, agent); err != nil {
+			recorded = false
 			s.agentLifecycleLog.Warn("Failed to update managed agent after create", "agent_id", agent.ID, "error", err)
 		}
 
-		s.publishAgentCreatedIfLive(ctx, agent)
+		// A delete that won the race answers 409 with no agent body, as
+		// the synchronous broker create does (ptone/scion#3099,
+		// ptone/scion#3454).
+		if !s.publishAgentCreatedIfLive(ctx, agent) {
+			s.agentLifecycleLog.Info("Hub: managed agent was deleted while it was being created; answering 409",
+				"agent_id", agent.ID, "agent", agent.Name)
+			writeDeletedDuringCreate(w, agent.ID, s.compensateManagedCreate(ctx, agent, recorded))
+			return
+		}
 		s.enrichAgent(ctx, agent, project, nil)
 
 		writeJSON(w, http.StatusCreated, CreateAgentResponse{
@@ -2218,20 +2433,25 @@ func (s *Server) createAgentInProject(
 	}
 	s.agentLifecycleLog.Info("Hub: pre-dispatch setup complete",
 		preDispatchAttrs...)
+	// From here the launch no longer follows the client (ptone/scion#1961):
+	// a client that gives up mid-dispatch must not cancel the broker launch,
+	// the post-dispatch phase writes, or a real failure's rollback. Each
+	// dispatch below is bounded by syncDispatch instead.
+	ctx = detachLaunchFromClient(ctx)
 	// acceptedLaunch is set when the broker accepted the create for
 	// asynchronous launch; the launch then reports back to the hub, which
 	// handles a delete that won the race (see compensateLandedRun).
 	acceptedLaunch := false
 	if dispatcher := s.GetDispatcher(); dispatcher != nil {
-		// A create is a start, unless it only provisions.
-		intent := store.RunIntentRunning
+		// A create is a start, unless it only provisions. A create-and-start
+		// runs under a start claim (createUnderClaim), which records run
+		// intent running; a provision-only create records stopped.
 		if req.ProvisionOnly {
-			intent = store.RunIntentStopped
-		}
-		if _, err := s.recordRunIntent(ctx, agent, intent); err != nil {
-			corrID := cleanup(createRollback{Stage: createStageRunIntent, Cause: err})
-			writeCreateFailure(w, corrID, func() { writeRunIntentError(w, err, agent.ID) })
-			return
+			if _, err := s.recordRunIntent(ctx, agent, store.RunIntentStopped); err != nil {
+				corrID := cleanup(createRollback{Stage: createStageRunIntent, Cause: err})
+				writeCreateFailure(w, corrID, func() { writeRunIntentError(w, err, agent.ID) })
+				return
+			}
 		}
 		if !req.ProvisionOnly {
 			// Use env-gather dispatch if requested
@@ -2239,7 +2459,15 @@ func (s *Server) createAgentInProject(
 				s.agentLifecycleLog.Debug("Hub: env-gather requested, using DispatchAgentCreateWithGather",
 					"agent_id", agent.ID,
 					"agent", agent.Name, "broker", agent.RuntimeBrokerID)
-				created, err := dispatcher.DispatchAgentCreateWithGather(ctx, agent)
+				// The create runs under its start claim; the dispatch is bounded
+				// by syncDispatch, derived from the claim's context.
+				created, err := s.createUnderClaim(ctx, agent, func(ctx context.Context) (out *CreateDispatchResult, err error) {
+					err = syncDispatch(ctx, func(dctx context.Context) error {
+						out, err = dispatcher.DispatchAgentCreateWithGather(dctx, agent)
+						return err
+					})
+					return out, err
+				})
 				envReqs := created.EnvRequirements()
 				if errors.Is(err, ErrLaunchInvalidPhase) {
 					// A stop or delete reached the record before the launch
@@ -2247,13 +2475,30 @@ func (s *Server) createAgentInProject(
 					// left to that operation.
 					writeLaunchInvalidPhase(w, err, agent.ID)
 					return
+				} else if errors.Is(err, errStartClaimWrite) {
+					// The start claim (this create's run-intent write)
+					// failed, or a delete holds the row: nothing was
+					// dispatched. Rolled back as a failed intent write.
+					corrID := cleanup(createRollback{Stage: createStageRunIntent, Cause: err})
+					writeCreateFailure(w, corrID, func() { writeRunIntentError(w, err, agent.ID) })
+					return
+				} else if !errors.Is(err, store.ErrDeleteInProgress) && s.writeStartClaimError(ctx, w, err, agent.ID) {
+					// Refused by the start claim before dispatch (held, or
+					// not eligible), or the claim was lost while the create
+					// ran: a stop superseded it, and whatever was
+					// dispatched now belongs to that stop and the
+					// start-claim reaper. Either way the record is kept,
+					// not cleaned up as a failed create. A delete that
+					// claimed the row during the dispatch is a dispatch
+					// failure, cleaned up below.
+					return
 				} else if err != nil {
 					// Dispatch failed — clean up provisioned files on the broker
 					// and delete the agent record so orphaned local files don't
 					// trigger spurious sync-registration attempts. No revoke here:
 					// DispatchAgentCreateWithGather already revoked any credential
 					// it minted on this error return.
-					corrID := cleanup(createRollback{Stage: createStageDispatchEnvGather, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(dispatcher, agent)})
+					corrID := cleanup(createRollback{Stage: createStageDispatchEnvGather, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)})
 					writeCreateFailure(w, corrID, func() { dispatchCreateErrorResponse(w, err, agent.ID) })
 					return
 				} else if created.AcceptedLaunch() != nil {
@@ -2298,7 +2543,15 @@ func (s *Server) createAgentInProject(
 					}
 				}
 			} else {
-				created, err := dispatcher.DispatchAgentCreateWithGather(ctx, agent)
+				// The create runs under its start claim; the dispatch is bounded
+				// by syncDispatch, derived from the claim's context.
+				created, err := s.createUnderClaim(ctx, agent, func(ctx context.Context) (out *CreateDispatchResult, err error) {
+					err = syncDispatch(ctx, func(dctx context.Context) error {
+						out, err = dispatcher.DispatchAgentCreateWithGather(dctx, agent)
+						return err
+					})
+					return out, err
+				})
 				envReqs := created.EnvRequirements()
 				if errors.Is(err, ErrLaunchInvalidPhase) {
 					// A stop or delete reached the record before the launch
@@ -2306,13 +2559,30 @@ func (s *Server) createAgentInProject(
 					// left to that operation.
 					writeLaunchInvalidPhase(w, err, agent.ID)
 					return
+				} else if errors.Is(err, errStartClaimWrite) {
+					// The start claim (this create's run-intent write)
+					// failed, or a delete holds the row: nothing was
+					// dispatched. Rolled back as a failed intent write.
+					corrID := cleanup(createRollback{Stage: createStageRunIntent, Cause: err})
+					writeCreateFailure(w, corrID, func() { writeRunIntentError(w, err, agent.ID) })
+					return
+				} else if !errors.Is(err, store.ErrDeleteInProgress) && s.writeStartClaimError(ctx, w, err, agent.ID) {
+					// Refused by the start claim before dispatch (held, or
+					// not eligible), or the claim was lost while the create
+					// ran: a stop superseded it, and whatever was
+					// dispatched now belongs to that stop and the
+					// start-claim reaper. Either way the record is kept,
+					// not cleaned up as a failed create. A delete that
+					// claimed the row during the dispatch is a dispatch
+					// failure, cleaned up below.
+					return
 				} else if err != nil {
 					// Dispatch failed — clean up provisioned files on the broker
 					// and delete the agent record so orphaned local files don't
 					// trigger spurious sync-registration attempts. No revoke here:
 					// DispatchAgentCreateWithGather already revoked any credential
 					// it minted on this error return.
-					corrID := cleanup(createRollback{Stage: createStageDispatch, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(dispatcher, agent)})
+					corrID := cleanup(createRollback{Stage: createStageDispatch, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)})
 					writeCreateFailure(w, corrID, func() { dispatchCreateErrorResponse(w, err, agent.ID) })
 					return
 				} else if created.AcceptedLaunch() != nil {
@@ -2331,7 +2601,7 @@ func (s *Server) createAgentInProject(
 					// (RevokeCredentials), before the row is deleted
 					// (ptone/scion#1956: a create that fails after the mint must
 					// not leave the credential valid for its full TTL).
-					corrID := cleanup(createRollback{Stage: createStageMissingEnv, Cause: errors.New("broker reported missing required environment variables"), RevokeCredentials: true, DeleteRuntime: dispatchDeleteFailedCreate(dispatcher, agent)})
+					corrID := cleanup(createRollback{Stage: createStageMissingEnv, Cause: errors.New("broker reported missing required environment variables"), RevokeCredentials: true, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)})
 					writeCreateFailure(w, corrID, func() { MissingEnvVars(w, envReqs.Needs, s.buildEnvGatherResponse(ctx, agent, envReqs)) })
 					return
 				} else {
@@ -2347,7 +2617,19 @@ func (s *Server) createAgentInProject(
 			}
 		} else {
 			// Provision-only: set up agent filesystem without starting
-			if err := dispatcher.DispatchAgentProvision(ctx, agent); err != nil {
+			if err := syncDispatch(ctx, func(dctx context.Context) error {
+				return dispatcher.DispatchAgentProvision(dctx, agent)
+			}); err != nil {
+				if errors.Is(err, errAgentTokenRecord) {
+					// The agent's token could not be recorded, so it was not
+					// handed to the broker. Fail the create and roll it back,
+					// as a full create does.
+					s.agentLifecycleLog.Warn("Provision-only create failed: agent token not issued",
+						"agent_id", agent.ID, "agent", agent.Name, "broker", agent.RuntimeBrokerID, "error", err)
+					corrID := cleanup(createRollback{Stage: createStageProvision, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)})
+					writeCreateFailure(w, corrID, func() { dispatchCreateErrorResponse(w, err, agent.ID) })
+					return
+				}
 				if isSkillResolutionDispatchError(err) {
 					// A required skill could not be resolved, so the agent
 					// can never start from this provision. Fail the create the
@@ -2358,7 +2640,7 @@ func (s *Server) createAgentInProject(
 					// provision failures stay warnings.
 					s.agentLifecycleLog.Warn("Provision-only create failed: required skill could not be resolved",
 						"agent_id", agent.ID, "agent", agent.Name, "broker", agent.RuntimeBrokerID, "error", err)
-					corrID := cleanup(createRollback{Stage: createStageProvision, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(dispatcher, agent)})
+					corrID := cleanup(createRollback{Stage: createStageProvision, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)})
 					writeCreateFailure(w, corrID, func() { dispatchCreateErrorResponse(w, err, agent.ID) })
 					return
 				}
@@ -2790,13 +3072,31 @@ func (s *Server) submitAgentEnv(w http.ResponseWriter, r *http.Request, projectI
 		return
 	}
 
+	// From here the launch no longer follows the client (ptone/scion#1961):
+	// the CLI creates with GatherEnv, so this submit is often where the
+	// launch actually runs. The dispatch is bounded by syncDispatch.
+	ctx = detachLaunchFromClient(ctx)
 	ctx, dispatchWarns := withDispatchWarnings(ctx)
-	finalized, err := dispatcher.DispatchFinalizeEnv(ctx, agent, req.Env)
+	// The finalize starts the agent: it runs under a start claim, its
+	// dispatch bounded by syncDispatch, derived from the claim's context.
+	finalized, err := s.createUnderClaim(ctx, agent, func(ctx context.Context) (out *CreateDispatchResult, err error) {
+		err = syncDispatch(ctx, func(dctx context.Context) error {
+			out, err = dispatcher.DispatchFinalizeEnv(dctx, agent, req.Env)
+			return err
+		})
+		return out, err
+	})
 	if errors.Is(err, ErrLaunchInvalidPhase) {
 		writeLaunchInvalidPhase(w, err, agent.ID)
 		return
 	}
+	if s.writeStartClaimError(ctx, w, err, agent.ID) {
+		return
+	}
 	if err != nil {
+		if writeAgentTokenRecordError(w, err) {
+			return
+		}
 		var stillMissing *ErrEnvStillMissing
 		if errors.As(err, &stillMissing) {
 			MissingEnvVars(w, stillMissing.Requirements.Needs,
@@ -2805,6 +3105,11 @@ func (s *Server) submitAgentEnv(w http.ResponseWriter, r *http.Request, projectI
 		}
 		if ref := deleteClaimedDuringDispatch(err, agent.ID); ref != nil {
 			ref.write(w)
+			return
+		}
+		// finalize-env creates the agent on the broker, so it can meet the
+		// same workspace-bucket refusal as create (ptone/scion#3422).
+		if relayWorkspaceStorageUnconfigured(w, err) {
 			return
 		}
 		RuntimeError(w, "Failed to finalize env on runtime broker: "+err.Error())
@@ -2817,6 +3122,17 @@ func (s *Server) submitAgentEnv(w http.ResponseWriter, r *http.Request, projectI
 		// phase on; do not write running here.
 		warnings = s.adoptAcceptedLaunch(ctx, agent)
 	} else {
+		// A delete that won after the broker run landed answers 409, as
+		// the synchronous create does (ptone/scion#3099,
+		// ptone/scion#3518). The dispatch has already run the compensating
+		// delete of the landed run; its outcome is in the dispatch
+		// warnings. An accepted launch is settled by its launch report.
+		if s.deleteWonAfterLanding(ctx, agent.ID) {
+			s.agentLifecycleLog.Info("Hub: agent was deleted while its env submit launched it; answering 409",
+				"agent_id", agent.ID, "agent", agent.Name)
+			writeDeletedDuringCreate(w, agent.ID, dispatchWarns.Warnings())
+			return
+		}
 		// Update agent phase from broker response
 		if agent.Phase == string(state.PhaseProvisioning) || agent.Phase == string(state.PhaseCreated) {
 			agent.Phase = string(state.PhaseRunning)
@@ -2887,6 +3203,7 @@ func (s *Server) enrichAgents(ctx context.Context, agents []store.Agent) {
 	if len(agents) == 0 {
 		return
 	}
+	defer perfPhaseStart(ctx, perfPhaseEnrich)()
 
 	// Collect unique project, broker, and template IDs
 	projectIDs := make(map[string]struct{})
@@ -2930,11 +3247,16 @@ func (s *Server) enrichAgents(ctx context.Context, agents []store.Agent) {
 
 	// Enrich agents
 	now := time.Now()
+	// Evaluated once for the whole list: the deletion detail fields are
+	// for platform admins only (ptone/scion#3122). Every list builder and
+	// the compact view read the items built here, so the redaction is
+	// upstream of toCompact.
+	seesDeletionDetail := callerSeesDeletionDetail(ctx)
 	for i := range agents {
 		// The client-facing `launch` view (design §3.2), computed fresh per response.
 		agents[i].Launch = store.ComputeAgentLaunch(&agents[i], now)
 		// The client-facing `deletion` view (design ptone/scion#2483 §2.2).
-		agents[i].Deletion = store.ComputeAgentDeletion(&agents[i], now)
+		agents[i].Deletion = deletionViewForCaller(&agents[i], now, seesDeletionDetail)
 		agents[i].ProvisionedOnly = store.ComputeAgentProvisionedOnly(&agents[i])
 		// Populate harness config from applied config
 		if agents[i].HarnessConfig == "" && agents[i].AppliedConfig != nil && agents[i].AppliedConfig.HarnessConfig != "" {
@@ -2974,8 +3296,9 @@ func (s *Server) enrichAgent(ctx context.Context, agent *store.Agent, project *s
 	// was last written.
 	now := time.Now()
 	agent.Launch = store.ComputeAgentLaunch(agent, now)
-	// The client-facing `deletion` view (design ptone/scion#2483 §2.2).
-	agent.Deletion = store.ComputeAgentDeletion(agent, now)
+	// The client-facing `deletion` view (design ptone/scion#2483 §2.2),
+	// with its detail fields for platform admins only (ptone/scion#3122).
+	agent.Deletion = deletionViewForCaller(agent, now, callerSeesDeletionDetail(ctx))
 	agent.ProvisionedOnly = store.ComputeAgentProvisionedOnly(agent)
 
 	// Populate harness config and auth from applied config
@@ -3184,26 +3507,61 @@ func (s *Server) getAgent(w http.ResponseWriter, r *http.Request, id string) {
 	isSelf := false
 	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
 		if agent.ProjectID != agentIdent.ProjectID() {
-			NotFound(w, "Agent")
+			writeAgentNotFound(w)
 			return
 		}
 		isSelf = agentIdent.ID() == agent.ID
 	}
 	// CO1: agent.read carries no AgentScopes mapping, so an agent identity is
-	// denied reading any *other* agent here. An agent reading its own record
-	// is exempt, matching getProjectAgent's self-read contract (see
+	// denied reading any *other* agent here, except an agent it directly
+	// launched in its project (authz_launcher_read.go). An agent reading its
+	// own record is exempt, matching getProjectAgent's self-read contract (see
 	// TestReadEndpoint_ProjectScopedAgents_WithReadScope_Allowed): this is the
 	// route the in-container CLI uses for `scion whoami --full` (GetSelf), and
 	// both routes return the same writeAgentGetResponse body, so the exemption
 	// exposes nothing the project route doesn't already. The project:read
 	// scope check above still applies to self-reads.
 	if !isSelf {
-		if !s.authorize(w, r, agentResource(agent), ActionRead) {
+		if !s.authorizeSingleAgentRead(w, r, agent) {
 			return
 		}
 	}
 
 	s.writeAgentGetResponse(w, r, agent)
+}
+
+// writeAgentNotFound is the single-agent GET answer for an agent that
+// does not exist. An agent caller gets the same answer for an agent it
+// may not read, so the two cannot be told apart.
+func writeAgentNotFound(w http.ResponseWriter) {
+	writeErrorFromErr(w, store.ErrNotFound, "")
+}
+
+// authorizeSingleAgentRead is the agent.read gate shared by the
+// single-agent GET routes (getAgent, getProjectAgent). The resource
+// carries the agent record read from the store above, which the launcher
+// status-read rule decides from (authz_launcher_read.go). A user caller's
+// denial is the usual 403; an agent caller's denial is writeAgentNotFound.
+func (s *Server) authorizeSingleAgentRead(w http.ResponseWriter, r *http.Request, agent *store.Agent) bool {
+	ctx := r.Context()
+	resource := agentStatusReadResource(agent)
+	if GetAgentIdentityFromContext(ctx) == nil {
+		return s.authorize(w, r, resource, ActionRead)
+	}
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		Unauthorized(w)
+		return false
+	}
+	decision := s.authzService.CheckAccess(ctx, identity, resource, ActionRead)
+	if !decision.Allowed {
+		logAuthzDenial(r, identity, resource, ActionRead, decision.Reason)
+		// Existence timing may differ; accepted for agent-ID existence,
+		// revisit if IDs become higher-value.
+		writeAgentNotFound(w)
+		return false
+	}
+	return true
 }
 
 // writeAgentGetResponse builds and writes the standard single-agent response
@@ -3495,6 +3853,7 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		// actually touched that field) always wins via cfg as already
 		// decoded; this only fills in a field the request left absent.
 		carryForwardAbsentPageOwnedFields(cfg, &old, presentConfigKeys)
+		dropEchoedInlineImage(cfg, &old, dispatchImageRegistry(s.GetDispatcher()))
 		agent.AppliedConfig.InlineConfig = cfg
 	}
 
@@ -3767,6 +4126,10 @@ func (s *Server) performAgentDelete(w http.ResponseWriter, r *http.Request, agen
 		writeAgentTargetDenial(w, r, identity, agent, ActionDelete, denial)
 		return
 	}
+	// Whether the response may carry the deletion detail (failure code,
+	// error text, claim): platform admins only (ptone/scion#3122).
+	// Evaluated once here and passed to every writer below.
+	isAdmin := callerSeesDeletionDetail(ctx)
 
 	query := r.URL.Query()
 	// Default deleteFiles and removeBranch to true for full cleanup.
@@ -3786,7 +4149,7 @@ func (s *Server) performAgentDelete(w http.ResponseWriter, r *http.Request, agen
 		}
 		// A live delete: join it rather than starting a second one.
 		if deletionActive(agent) {
-			s.joinAgentDeletion(w, r, agent.ID, agent.DeletionClaim, deadline)
+			s.joinAgentDeletion(w, r, agent.ID, agent.DeletionClaim, deadline, isAdmin)
 			return
 		}
 
@@ -3807,7 +4170,7 @@ func (s *Server) performAgentDelete(w http.ResponseWriter, r *http.Request, agen
 		if plan != nil {
 			s.events.PublishAgentStatus(ctx, plan.snapshot)
 			done := s.runAgentDeletion(ctx, plan)
-			s.awaitAgentDeletion(w, r, plan, done, deadline)
+			s.awaitAgentDeletion(w, r, plan, done, deadline, isAdmin)
 			return
 		}
 
@@ -3829,7 +4192,7 @@ func (s *Server) performAgentDelete(w http.ResponseWriter, r *http.Request, agen
 			// read here, so an older failed or cleared marker is not taken
 			// as this delete's outcome; with no later claim the join answers
 			// 202 at the deadline.
-			s.joinAgentDeletion(w, r, agent.ID, agent.DeletionClaim+1, deadline)
+			s.joinAgentDeletion(w, r, agent.ID, agent.DeletionClaim+1, deadline, isAdmin)
 			return
 		}
 	}
@@ -3837,7 +4200,8 @@ func (s *Server) performAgentDelete(w http.ResponseWriter, r *http.Request, agen
 
 // awaitAgentDeletion waits for this request's engine up to deadline and
 // writes the outcome; on a lost claim it joins whichever delete holds the row.
-func (s *Server) awaitAgentDeletion(w http.ResponseWriter, r *http.Request, plan *agentDeletionPlan, done <-chan deletionOutcome, deadline time.Time) {
+// isAdmin is callerSeesDeletionDetail for the request (see writeDeletionFailure).
+func (s *Server) awaitAgentDeletion(w http.ResponseWriter, r *http.Request, plan *agentDeletionPlan, done <-chan deletionOutcome, deadline time.Time, isAdmin bool) {
 	timer := time.NewTimer(time.Until(deadline))
 	defer timer.Stop()
 	select {
@@ -3846,12 +4210,12 @@ func (s *Server) awaitAgentDeletion(w http.ResponseWriter, r *http.Request, plan
 		case deletionOutcomeDeleted:
 			w.WriteHeader(http.StatusNoContent)
 		case deletionOutcomeFailed:
-			writeDeletionFailure(w, plan.snapshot.ID, out.code, out.message, out.retryAfter)
+			writeDeletionFailure(w, plan.snapshot.ID, out.code, out.message, out.retryAfter, isAdmin)
 		default: // lost: someone else holds the row now
-			s.joinAgentDeletion(w, r, plan.snapshot.ID, plan.claim, deadline)
+			s.joinAgentDeletion(w, r, plan.snapshot.ID, plan.claim, deadline, isAdmin)
 		}
 	case <-timer.C:
-		s.writeDeleteAccepted(w, plan.snapshot.ID)
+		s.writeDeleteAccepted(w, plan.snapshot.ID, isAdmin)
 	case <-r.Context().Done():
 		// The client went away; the engine keeps running detached.
 	}
@@ -4152,8 +4516,30 @@ func (s *Server) handleAgentExec(w http.ResponseWriter, r *http.Request, id stri
 		return
 	}
 
+	// Read before the dispatch: the reconcile below only counts the agent
+	// as unseen if nothing reported it from here on. last_seen may be
+	// stamped by another hub replica, so this assumes replica clocks agree
+	// to well within an exec's duration (NTP). No margin is subtracted: skew
+	// can only matter for a status report racing a real disappearance
+	// (start, restart and stop are caught by the run ID, state_version and
+	// start-claim guards), and the next heartbeat corrects that case.
+	dispatchedAt := time.Now()
 	output, exitCode, err := dispatcher.DispatchAgentExec(ctx, agent, req.Command, req.Timeout)
 	if err != nil {
+		if isBrokerAgentNotFound(err) {
+			// The broker answered that the agent has no running container
+			// (e.g. its pod is gone): a state conflict, not a broker
+			// failure (ptone/scion#3443). Record it on the agent too
+			// (ptone/scion#3470). This runs before the 409 on purpose: the
+			// response is buffered until the handler returns anyway, and a
+			// caller that re-reads the agent after the 409 sees the
+			// reconciled phase. The write is one list query plus one
+			// conditional update, bounded by execReconcileTimeout.
+			s.reconcileExecAgentNotFound(ctx, agent, dispatchedAt)
+			writeError(w, http.StatusConflict, ErrCodeAgentNotRunning,
+				"Agent has no running container on its runtime broker; start or restart the agent and retry", nil)
+			return
+		}
 		if writeBrokerRuntimeUnavailable(w, err, agent.Runtime) {
 			return
 		}
@@ -4265,7 +4651,7 @@ func (s *Server) handleAgentTokenRefresh(w http.ResponseWriter, r *http.Request,
 	// This is critical for backward compatibility: legacy agents created
 	// before the role system have tokens with old scope sets (missing
 	// ScopeProjectRead, etc.). Copying old scopes verbatim on refresh
-	// would perpetuate the gap. GenerateAgentTokenForAgent re-derives the
+	// would perpetuate the gap. AuthorizeAgentToken re-derives the
 	// scopes from the stored role and bounds them by the agent's chain
 	// ceiling, with the stored ancestry.
 	agent, err := s.store.GetAgent(r.Context(), id)
@@ -4291,13 +4677,20 @@ func (s *Server) handleAgentTokenRefresh(w http.ResponseWriter, r *http.Request,
 		}
 	}
 
-	newToken, err := mintAgentTokenAt(r.Context(), s, s.store, agent, mintSiteRefresh)
+	// The refreshed token keeps the run binding of the presented one: a
+	// token issued without a run stays without one.
+	grant, err := authorizeAgentTokenAt(r.Context(), s, s.store, agent, mintSiteRefresh)
+	var newToken string
+	if err == nil {
+		newToken, err = signAndRecordAgentToken(r.Context(), s, s.store, *grant, presentedAgentTokenRunID(r.Context()))
+	}
 	if err != nil {
 		if writeAgentTokenIssueError(w, err) {
 			return
 		}
+		slog.Error("Token refresh: token not issued", "agent_id", id, "error", err)
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
-			"failed to generate refreshed token: "+err.Error(), nil)
+			"failed to generate refreshed token", nil)
 		return
 	}
 
@@ -4400,6 +4793,9 @@ func (s *Server) handleAgentResetAuth(w http.ResponseWriter, r *http.Request, id
 
 	if err := disp.DispatchAgentResetAuth(ctx, agent); err != nil {
 		slog.Error("Failed to reset agent auth", "agent_id", id, "error", err)
+		if writeAgentTokenRecordError(w, err) {
+			return
+		}
 		if writeBrokerRuntimeUnavailable(w, err, agent.Runtime) {
 			return
 		}
@@ -4426,9 +4822,13 @@ func isContainerNameConflict(err error) bool {
 		strings.Contains(msg, "is already in use by container")
 }
 
-// skillResolutionErrorCode mirrors runtimebroker.ErrCodeSkillResolution; it
-// is duplicated because importing pkg/runtimebroker would invert layering.
-const skillResolutionErrorCode = "skill_resolution_failed"
+// skillResolutionErrorCode is the broker's code for a required-skill
+// resolution failure.
+const skillResolutionErrorCode = api.BrokerErrCodeSkillResolution
+
+// workspaceStorageUnconfiguredErrorCode is the broker's code for a create
+// with no bucket to download the workspace upload from.
+const workspaceStorageUnconfiguredErrorCode = api.BrokerErrCodeWorkspaceStorageUnconfigured
 
 // dispatchCreateErrorResponse classifies a failed create/provision dispatch to
 // the runtime broker and writes the matching HTTP response.
@@ -4448,6 +4848,9 @@ const skillResolutionErrorCode = "skill_resolution_failed"
 // dispatch's run-ID write (store.ErrDeleteInProgress); that answers 409
 // delete_in_progress, as start does (ptone/scion#2550).
 func dispatchCreateErrorResponse(w http.ResponseWriter, err error, agentID string) {
+	if writeAgentTokenRecordError(w, err) {
+		return
+	}
 	if ref := deleteClaimedDuringDispatch(err, agentID); ref != nil {
 		ref.write(w)
 		return
@@ -4460,6 +4863,8 @@ func dispatchCreateErrorResponse(w http.ResponseWriter, err error, agentID strin
 	case isContainerNameConflict(err):
 		Conflict(w, "Agent name is already in use by a stopped container. Please delete the existing agent or choose a different name.")
 	case relaySkillResolutionError(w, err):
+		// Response already written.
+	case relayWorkspaceStorageUnconfigured(w, err):
 		// Response already written.
 	case isBrokerStatus(err, http.StatusNotFound):
 		message := err.Error()
@@ -4515,6 +4920,19 @@ func relaySkillResolutionError(w http.ResponseWriter, err error) bool {
 	return true
 }
 
+// relayWorkspaceStorageUnconfigured writes the broker's refusal to create an
+// agent whose workspace upload it has no bucket for, keeping the broker's
+// status (422), code and message instead of the generic 502, and reports
+// whether it did (ptone/scion#3422).
+func relayWorkspaceStorageUnconfigured(w http.ResponseWriter, err error) bool {
+	var se *brokerStatusError
+	if !errors.As(err, &se) || se.brokerErrorCode() != workspaceStorageUnconfiguredErrorCode {
+		return false
+	}
+	writeError(w, se.StatusCode, workspaceStorageUnconfiguredErrorCode, "Failed to dispatch to runtime broker: "+se.brokerErrorMessage(), nil)
+	return true
+}
+
 // skillResolutionClientDetails keeps the skill and cause entries of a
 // broker skill resolution failure's details, or returns nil when neither is
 // present.
@@ -4529,33 +4947,6 @@ func skillResolutionClientDetails(details map[string]interface{}) map[string]int
 		}
 	}
 	return out
-}
-
-// recordDelegationEdgeWithType creates a delegation edge with an explicitly
-// specified delegator type. Used by the scheduled dispatch path, where the
-// caller resolves the creator type. Best-effort: errors are logged but do not
-// fail the operation. The interactive create path writes its edge inside the
-// agent-create transaction instead (commitAgentCreate).
-func (s *Server) recordDelegationEdgeWithType(ctx context.Context, agentID, projectID, role, delegatorType, delegatorID string) {
-	edge := &store.DelegationEdge{
-		DelegatorType: delegatorType,
-		DelegatorID:   delegatorID,
-		DelegateType:  store.DelegationPrincipalAgent,
-		DelegateID:    agentID,
-		ScopeType:     store.RoleScopeProject,
-		ScopeID:       projectID,
-		Role:          role,
-		Active:        true,
-		Grandfathered: false,
-	}
-	if err := s.store.CreateDelegationEdge(ctx, edge); err != nil {
-		slog.Warn("Failed to record delegation edge (best-effort)",
-			"agent_id", agentID,
-			"delegator_type", delegatorType,
-			"delegator_id", delegatorID,
-			"project_id", projectID,
-			"error", err)
-	}
 }
 
 // ---------------------------------------------------------------------------

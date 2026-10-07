@@ -35,6 +35,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/fsutil"
 	"github.com/knadh/koanf/parsers/yaml"
 	"github.com/knadh/koanf/providers/confmap"
 	"github.com/knadh/koanf/providers/env"
@@ -579,6 +580,82 @@ func (vs *VersionedSettings) ResolveKubernetesServiceAccountMappingForSelection(
 		}
 	}
 	return "", false
+}
+
+// KubernetesServiceAccountMappingGSAs returns, sorted, every GSA email that
+// ResolveKubernetesServiceAccountMappingForSelection(profileName,
+// runtimeEntryName, gsa) resolves to a KSA: the union of the profile-level
+// and runtime-entry-level kubernetes_service_account_mappings keys with a
+// non-empty value. Keys that are not lowercase are left out, since the
+// resolver lowercases the GSA before the lookup and so never matches them.
+// The result is nil when nothing is mapped.
+//
+// A broker reports this set per profile to the Hub (BrokerProfile
+// ServiceAccountMappings), which uses it to warn about registered GSAs no
+// profile maps (ptone/scion#3329 phase 2).
+func (vs *VersionedSettings) KubernetesServiceAccountMappingGSAs(profileName, runtimeEntryName string) []string {
+	if vs == nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	add := func(m map[string]string) {
+		for gsa, ksa := range m {
+			if ksa != "" && gsa == strings.ToLower(gsa) {
+				seen[gsa] = true
+			}
+		}
+	}
+	if profileName != "" {
+		if profile, ok := vs.Profiles[profileName]; ok {
+			add(profile.KubernetesServiceAccountMappings)
+		}
+	}
+	if runtimeEntryName != "" {
+		if rtConfig, ok := vs.Runtimes[runtimeEntryName]; ok {
+			add(rtConfig.KubernetesServiceAccountMappings)
+		}
+	}
+	if len(seen) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(seen))
+	for gsa := range seen {
+		out = append(out, gsa)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// ProfileKubernetesSAMappings describes profileName for the GSA-mapping
+// early warning (ptone/scion#3329 phase 2): the GSAs it maps to a KSA
+// (KubernetesServiceAccountMappingGSAs over the profile and the runtime
+// entry it selects), and whether its runtime is Kubernetes. The runtime type
+// is the entry's Type, or the entry key when Type is unset, so a custom key
+// such as "gke" with type kubernetes counts. known is false when the
+// profile is not in these settings (for example a broker's synthetic
+// "default" profile) or names no runtime entry, and the other results are
+// then empty.
+func (vs *VersionedSettings) ProfileKubernetesSAMappings(profileName string) (gsas []string, isKubernetes, known bool) {
+	if vs == nil {
+		return nil, false, false
+	}
+	profile, ok := vs.Profiles[profileName]
+	if !ok || profile.Runtime == "" {
+		// A profile without a runtime entry cannot be resolved here; the
+		// caller treats it as unknown.
+		return nil, false, false
+	}
+	runtimeType := profile.Runtime
+	if rt, ok := vs.Runtimes[profile.Runtime]; ok && rt.Type != "" {
+		runtimeType = rt.Type
+	}
+	switch runtimeType {
+	// The same names the Hub treats as Kubernetes (isKubernetesRuntimeType).
+	case "kubernetes", "k8s", "remote":
+		return vs.KubernetesServiceAccountMappingGSAs(profileName, profile.Runtime), true, true
+	default:
+		return nil, false, true
+	}
 }
 
 // ResolveKubernetesNamespace returns the namespace configured on the
@@ -1359,6 +1436,8 @@ type V1ServerHubConfig struct {
 	DisableLegacyStorageFallback *bool `json:"disable_legacy_storage_fallback,omitempty" yaml:"disable_legacy_storage_fallback,omitempty" koanf:"disable_legacy_storage_fallback"`
 	// AsyncAgentLaunch is the non-blocking agent create kill switch.
 	AsyncAgentLaunch *bool `json:"async_agent_launch,omitempty" yaml:"async_agent_launch,omitempty" koanf:"async_agent_launch"`
+	// PerfTrace turns on per-request performance tracing. Off by default.
+	PerfTrace *bool `json:"perf_trace,omitempty" yaml:"perf_trace,omitempty" koanf:"perf_trace"`
 	// LaunchTimeout is the whole-launch budget for an opted-in launch (e.g., "5m").
 	LaunchTimeout string `json:"launch_timeout,omitempty" yaml:"launch_timeout,omitempty" koanf:"launch_timeout"`
 	// LaunchKeepaliveSeconds is the broker keepalive interval, in seconds.
@@ -1446,18 +1525,24 @@ type V1DatabaseConfig struct {
 type V1AuthConfig struct {
 	// Mode selects the exclusive human auth mode: "oauth" (default), "proxy", or "dev".
 	// In proxy mode, OAuth handlers are disabled; in dev mode, dev token auth is used.
-	Mode              string             `json:"mode,omitempty" yaml:"mode,omitempty" koanf:"mode"`
-	DevMode           bool               `json:"dev_mode,omitempty" yaml:"dev_mode,omitempty" koanf:"dev_mode"`
-	DevToken          string             `json:"dev_token,omitempty" yaml:"dev_token,omitempty" koanf:"dev_token"`
-	DevTokenFile      string             `json:"dev_token_file,omitempty" yaml:"dev_token_file,omitempty" koanf:"dev_token_file"`
-	AuthorizedDomains []string           `json:"authorized_domains,omitempty" yaml:"authorized_domains,omitempty" koanf:"authorized_domains"`
-	UserAccessMode    string             `json:"user_access_mode,omitempty" yaml:"user_access_mode,omitempty" koanf:"user_access_mode"`
-	DefaultUserRole   string             `json:"default_user_role,omitempty" yaml:"default_user_role,omitempty" koanf:"default_user_role"`
-	Proxy             *V1ProxyConfig     `json:"proxy,omitempty" yaml:"proxy,omitempty" koanf:"proxy"`
-	Transport         *V1TransportConfig `json:"transport,omitempty" yaml:"transport,omitempty" koanf:"transport"`
-	Username          string             `json:"username,omitempty" yaml:"username,omitempty" koanf:"username"`
-	DisplayName       string             `json:"display_name,omitempty" yaml:"display_name,omitempty" koanf:"display_name"`
-	Email             string             `json:"email,omitempty" yaml:"email,omitempty" koanf:"email"`
+	Mode              string   `json:"mode,omitempty" yaml:"mode,omitempty" koanf:"mode"`
+	DevMode           bool     `json:"dev_mode,omitempty" yaml:"dev_mode,omitempty" koanf:"dev_mode"`
+	DevToken          string   `json:"dev_token,omitempty" yaml:"dev_token,omitempty" koanf:"dev_token"`
+	DevTokenFile      string   `json:"dev_token_file,omitempty" yaml:"dev_token_file,omitempty" koanf:"dev_token_file"`
+	AuthorizedDomains []string `json:"authorized_domains,omitempty" yaml:"authorized_domains,omitempty" koanf:"authorized_domains"`
+	UserAccessMode    string   `json:"user_access_mode,omitempty" yaml:"user_access_mode,omitempty" koanf:"user_access_mode"`
+	DefaultUserRole   string   `json:"default_user_role,omitempty" yaml:"default_user_role,omitempty" koanf:"default_user_role"`
+	// AgentRunScope selects how the hub treats the run an agent token was
+	// issued for: "off" (default) or "observe".
+	AgentRunScope string `json:"agent_run_scope,omitempty" yaml:"agent_run_scope,omitempty" koanf:"agent_run_scope"`
+	// AgentRunScopeLegacyUntil (RFC 3339) is when tokens issued without a
+	// run stop being accepted by run-scope checks.
+	AgentRunScopeLegacyUntil string             `json:"agent_run_scope_legacy_until,omitempty" yaml:"agent_run_scope_legacy_until,omitempty" koanf:"agent_run_scope_legacy_until"`
+	Proxy                    *V1ProxyConfig     `json:"proxy,omitempty" yaml:"proxy,omitempty" koanf:"proxy"`
+	Transport                *V1TransportConfig `json:"transport,omitempty" yaml:"transport,omitempty" koanf:"transport"`
+	Username                 string             `json:"username,omitempty" yaml:"username,omitempty" koanf:"username"`
+	DisplayName              string             `json:"display_name,omitempty" yaml:"display_name,omitempty" koanf:"display_name"`
+	Email                    string             `json:"email,omitempty" yaml:"email,omitempty" koanf:"email"`
 }
 
 // V1TransportConfig holds transport-layer auth settings for agent outbound requests.
@@ -1665,8 +1750,16 @@ func (ws *V1WorkspaceStorageConfig) ApplyNFSDefaults() {
 	}
 }
 
+// Full settings keys for the NFS owner ids, used in error messages so a
+// broker warning or a failed agent start names the exact setting.
+const (
+	NFSUIDKey = "server.workspace_storage.nfs.uid"
+	NFSGIDKey = "server.workspace_storage.nfs.gid"
+)
+
 // ValidateNFS returns an error if Backend is "nfs" but the NFS block is
-// misconfigured (e.g. no shares defined). Call after ApplyNFSDefaults.
+// misconfigured: no shares defined, or a uid or gid outside
+// [0, fsutil.MaxOwnerID]. Call after ApplyNFSDefaults.
 func (ws *V1WorkspaceStorageConfig) ValidateNFS() error {
 	if ws == nil || ws.Backend != WorkspaceStorageBackendNFS {
 		return nil
@@ -1674,6 +1767,13 @@ func (ws *V1WorkspaceStorageConfig) ValidateNFS() error {
 	if ws.NFS == nil || len(ws.NFS.Shares) == 0 {
 		return fmt.Errorf("workspace_storage.backend is \"nfs\" but no NFS shares are defined; " +
 			"add at least one entry under workspace_storage.nfs.shares")
+	}
+	// An unset (0) uid/gid has become the default 1000 in ApplyNFSDefaults.
+	if err := fsutil.ValidateOwnerID(NFSUIDKey, ws.NFS.UID); err != nil {
+		return err
+	}
+	if err := fsutil.ValidateOwnerID(NFSGIDKey, ws.NFS.GID); err != nil {
+		return err
 	}
 	return nil
 }
@@ -2651,9 +2751,16 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 // Both the versioned and legacy env key mappers drop them via this list so
 // that koanf's Unmarshal never fails just because one of them is present in
 // the process environment.
+//
+// SCION_HUB is the exception to "consumed by another subsystem": nothing in
+// scion reads a bare SCION_HUB, but left mapped it lands on the top-level
+// key "hub" as a string and collides with the struct-typed hub settings.
+// Hub settings come from the SCION_HUB_* variables (e.g.
+// SCION_HUB_ENDPOINT), which are unaffected.
 var settingsExcludedEnvVars = []string{
 	"SCION_AUTO_EXPOSE_PORTS",
 	"SCION_AUTO_EXPOSE_PORTS_LIST",
+	"SCION_HUB",
 }
 
 // isSettingsExcludedEnv reports whether name is in settingsExcludedEnvVars.
@@ -2673,6 +2780,7 @@ func versionedEnvKeyMapper(s string) string {
 		return mapped
 	}
 	if isSettingsExcludedEnv(s) {
+		// See settingsExcludedEnvVars for every excluded name and the reason.
 		// SCION_AUTO_EXPOSE_PORTS and SCION_AUTO_EXPOSE_PORTS_LIST are
 		// consumed directly by sciontool's auto-expose scanner
 		// (pkg/sciontool/autoexpose), not read as settings overrides. Left
@@ -3049,6 +3157,9 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		if v1.Hub.AsyncAgentLaunch != nil {
 			gc.Hub.AsyncAgentLaunch = *v1.Hub.AsyncAgentLaunch
 		}
+		if v1.Hub.PerfTrace != nil {
+			gc.Hub.PerfTrace = *v1.Hub.PerfTrace
+		}
 		if v1.Hub.LaunchTimeout != "" {
 			if d, err := time.ParseDuration(v1.Hub.LaunchTimeout); err == nil {
 				gc.Hub.LaunchTimeout = d
@@ -3223,6 +3334,8 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 				}
 			}
 		}
+		gc.Auth.AgentRunScope = v1.Auth.AgentRunScope
+		gc.Auth.AgentRunScopeLegacyUntil = v1.Auth.AgentRunScopeLegacyUntil
 		if v1.Auth.Transport != nil {
 			gc.Auth.Transport = &TransportAuthConfig{
 				Mode:           v1.Auth.Transport.Mode,
@@ -3453,6 +3566,10 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 		asyncLaunch := true
 		v1Hub.AsyncAgentLaunch = &asyncLaunch
 	}
+	if gc.Hub.PerfTrace {
+		perfTrace := true
+		v1Hub.PerfTrace = &perfTrace
+	}
 	if gc.Hub.LaunchTimeout > 0 {
 		v1Hub.LaunchTimeout = gc.Hub.LaunchTimeout.String()
 	}
@@ -3538,6 +3655,8 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 			}
 		}
 	}
+	v1.Auth.AgentRunScope = gc.Auth.AgentRunScope
+	v1.Auth.AgentRunScopeLegacyUntil = gc.Auth.AgentRunScopeLegacyUntil
 	if gc.Auth.Transport != nil {
 		v1.Auth.Transport = &V1TransportConfig{
 			Mode:           gc.Auth.Transport.Mode,
@@ -5165,9 +5284,18 @@ func writeVersionedSettingsFile(dir, targetPath string, vs *VersionedSettings) e
 // MigrateSettingsFile migrates a single legacy settings file in dir to versioned format.
 // If a server.yaml exists in the same directory, it is also merged into the settings
 // under the "server" key and backed up.
+// Top-level keys the legacy Settings struct does not decode (v1-only keys such
+// as server and image_registry, or any unknown key) are carried into the
+// migrated file unchanged; see legacyCarriedTopLevelKeys.
 // If dryRun is true, no files are written.
 // Returns MigrationResult describing what was (or would be) done.
 func MigrateSettingsFile(dir string, dryRun bool) (*MigrationResult, error) {
+	// Held from the first read to the final write, so the read, backup
+	// rename and write are one step for in-process writers (see
+	// LockSettingsFile). Nothing below takes the lock again.
+	unlock := LockSettingsFile()
+	defer unlock()
+
 	result := &MigrationResult{}
 
 	// 1. Find settings file
@@ -5216,6 +5344,14 @@ func MigrateSettingsFile(dir string, dryRun bool) (*MigrationResult, error) {
 	vs, warnings := AdaptLegacySettings(&legacy)
 	result.Warnings = warnings
 
+	// 4a. Top-level keys the legacy struct does not decode (v1-only keys
+	// such as server and image_registry) are carried through unchanged
+	// (ptone/scion#3497).
+	carried, err := legacyCarriedTopLevelKeys(data, result.WasJSON)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse settings: %w", err)
+	}
+
 	// 4b. Check for server.yaml and merge if present
 	serverPath := GetServerConfigPath(dir)
 	if serverPath != "" {
@@ -5250,19 +5386,11 @@ func MigrateSettingsFile(dir string, dryRun bool) (*MigrationResult, error) {
 		}
 	}
 
-	// 5. Handle hub.lastSyncedAt: migrate to state.yaml
+	// 5. Handle hub.lastSyncedAt: migrate to state.yaml (written in step 7b,
+	// once the output has passed every check, so a failed migration leaves
+	// nothing changed).
 	if legacy.Hub != nil && legacy.Hub.LastSyncedAt != "" {
 		result.StateMigrated = true
-		if !dryRun {
-			state, err := LoadProjectState(dir)
-			if err != nil {
-				return nil, fmt.Errorf("failed to load project state: %w", err)
-			}
-			state.LastSyncedAt = legacy.Hub.LastSyncedAt
-			if err := SaveProjectState(dir, state); err != nil {
-				return nil, fmt.Errorf("failed to save project state: %w", err)
-			}
-		}
 	}
 
 	// 6. Validate the output
@@ -5283,9 +5411,48 @@ func MigrateSettingsFile(dir string, dryRun bool) (*MigrationResult, error) {
 		return nil, fmt.Errorf("migrated settings failed validation: %s", strings.Join(errMsgs, "; "))
 	}
 
+	// 6b. Merge the carried keys into the output. They are the file's own
+	// data, so a value the loaders cannot decode (a wrong type, such as
+	// "server: hello") fails the migration with the file untouched, while
+	// any other schema mismatch (such as an unknown key) is a warning:
+	// dropping such a key is the data loss this step prevents.
+	if len(carried) > 0 {
+		var dropped []string
+		if outputData, dropped, err = marshalMigratedSettings(vs, carried); err != nil {
+			return nil, fmt.Errorf("failed to marshal converted settings: %w", err)
+		}
+		for _, p := range dropped {
+			result.Warnings = append(result.Warnings,
+				fmt.Sprintf("kept setting %s dropped: it conflicts with the value converted from the legacy settings, which is used instead", p))
+		}
+		if err := checkCarriedSettingsDecode(vs, carried, outputData); err != nil {
+			return nil, fmt.Errorf("cannot migrate %s (left unchanged): %w; fix or remove the key and retry", settingsPath, err)
+		}
+		carriedErrors, err := ValidateSettings(outputData, "1")
+		if err != nil {
+			return nil, fmt.Errorf("validation error: %w", err)
+		}
+		for _, ve := range carriedErrors {
+			result.Warnings = append(result.Warnings,
+				fmt.Sprintf("kept setting does not match the v1 schema: %s", ve.Error()))
+		}
+	}
+
 	// 7. If dryRun, return result without writing
 	if dryRun {
 		return result, nil
+	}
+
+	// 7b. Write hub.lastSyncedAt to state.yaml (see step 5).
+	if result.StateMigrated {
+		state, err := LoadProjectState(dir)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load project state: %w", err)
+		}
+		state.LastSyncedAt = legacy.Hub.LastSyncedAt
+		if err := SaveProjectState(dir, state); err != nil {
+			return nil, fmt.Errorf("failed to save project state: %w", err)
+		}
 	}
 
 	// 8. Back up the original settings file
@@ -5308,7 +5475,7 @@ func MigrateSettingsFile(dir string, dryRun bool) (*MigrationResult, error) {
 	}
 
 	// 9. Write versioned settings
-	if err := SaveVersionedSettings(dir, vs); err != nil {
+	if err := saveVersionedSettingsData(dir, outputData); err != nil {
 		// Attempt to restore backups on failure
 		_ = os.Rename(backupPath, settingsPath)
 		if result.ServerBackupPath != "" {

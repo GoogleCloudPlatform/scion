@@ -193,7 +193,7 @@ func TestClassifyPath_NotManaged(t *testing.T) {
 }
 
 func TestClassifyPath_AlreadyLinked(t *testing.T) {
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -240,7 +240,7 @@ func TestClassifyPath_AlreadyLinked(t *testing.T) {
 }
 
 func TestClassifyPath_NotLinked(t *testing.T) {
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatal(err)
 	}

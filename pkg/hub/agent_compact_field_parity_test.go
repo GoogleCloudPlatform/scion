@@ -26,6 +26,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
@@ -54,7 +55,12 @@ func fullTopLevel(key string) func(*testing.T, map[string]json.RawMessage) (json
 // for every caller class, endpoint, query and page.
 var compactParityFields = []compactParityField{
 	{compactKey: "message", fullValue: fullTopLevel("message")},
+	{compactKey: "deletion", fullValue: fullTopLevel("deletion")},
 }
+
+// compactParityAbsent is the value recorded in compactFieldTally.callerVals
+// for a field the full item omits.
+const compactParityAbsent = "<absent>"
 
 // compactParityQuery is one first-page request of the field parity
 // harness. Paged queries (those with a limit) are walked to the end by
@@ -101,6 +107,14 @@ type compactFieldTally struct {
 	// cellStatus is, per "caller endpoint" cell, the set of first-page
 	// response statuses.
 	cellStatus map[string]map[int]bool
+	// cellObjects counts, per "caller endpoint" cell and field, the rows
+	// whose full value is a JSON object (for deletion: a non-null view).
+	cellObjects map[string]map[string]int
+	// callerVals is, per caller, agent id and field, the raw full value
+	// compared (compactParityAbsent when omitted). The harness asserts that
+	// it is the same on every endpoint, query and page the caller reads the
+	// agent on, so a test can compare one caller's values with another's.
+	callerVals map[string]map[string]map[string]string
 }
 
 // runCompactFieldParity is a reusable parity harness for compact item
@@ -125,7 +139,8 @@ func runCompactFieldParity(t *testing.T, f *compactFixture, callers []compactCal
 		present: map[string]int{}, absent: map[string]int{},
 		seenVals: map[string]map[string]bool{}, cellRows: map[string]int{},
 		cellVals: map[string]map[string]bool{}, walkPages: map[string]int{}, walkRows: map[string]int{},
-		cellStatus: map[string]map[int]bool{},
+		cellStatus: map[string]map[int]bool{}, cellObjects: map[string]map[string]int{},
+		callerVals: map[string]map[string]map[string]string{},
 	}
 	for _, fd := range fields {
 		tally.seenVals[fd.compactKey] = map[string]bool{}
@@ -138,6 +153,10 @@ func runCompactFieldParity(t *testing.T, f *compactFixture, callers []compactCal
 				tally.cellRows[cell] = 0
 				tally.cellVals[cell] = map[string]bool{}
 				tally.cellStatus[cell] = map[int]bool{}
+				tally.cellObjects[cell] = map[string]int{}
+			}
+			if _, ok := tally.callerVals[c.name]; !ok {
+				tally.callerVals[c.name] = map[string]map[string]string{}
 			}
 			query := q.query
 			for page := 0; ; page++ {
@@ -169,13 +188,27 @@ func runCompactFieldParity(t *testing.T, f *compactFixture, callers []compactCal
 						cv, cok := compItems[i][fd.compactKey]
 						assert.Equal(t, fok, cok, "%s: agent %s: %q presence", label, fullIDs[i], fd.compactKey)
 						assert.Equal(t, string(fv), string(cv), "%s: agent %s: %q bytes", label, fullIDs[i], fd.compactKey)
+						rec := compactParityAbsent
 						if fok {
+							rec = string(fv)
 							tally.present[fd.compactKey]++
 							tally.seenVals[fd.compactKey][string(fv)] = true
 							tally.cellVals[cell][string(fv)] = true
+							if len(fv) > 0 && fv[0] == '{' {
+								tally.cellObjects[cell][fd.compactKey]++
+							}
 						} else {
 							tally.absent[fd.compactKey]++
 						}
+						agentVals := tally.callerVals[c.name][fullIDs[i]]
+						if agentVals == nil {
+							agentVals = map[string]string{}
+							tally.callerVals[c.name][fullIDs[i]] = agentVals
+						}
+						if prev, seen := agentVals[fd.compactKey]; seen {
+							assert.Equal(t, prev, rec, "%s: agent %s: %q differs from this caller's earlier reads", label, fullIDs[i], fd.compactKey)
+						}
+						agentVals[fd.compactKey] = rec
 					}
 				}
 				next := mustDecodeListAgentsResponse(t, full.Body).NextCursor
@@ -254,6 +287,94 @@ func setRawAgentLabels(t *testing.T, s store.Store, id string, labels map[string
 	n, err := res.RowsAffected()
 	require.NoError(t, err)
 	require.EqualValues(t, 1, n, "agent %s", id)
+}
+
+// compactDeletionSeed is a delete marker the field parity tests give to one
+// fixture agent, with the error text set on it afterwards ("" for none).
+type compactDeletionSeed struct {
+	agentID string
+	seed    deleteSeed
+	errText string
+	// detail is true when the admin view carries a code (and the error
+	// text, when set): the failed, in_doubt and abandoned views.
+	detail bool
+}
+
+// compactDeletionSeeds covers every view shape: a live deleting row, a
+// failed row with code and error, a live finalizing row (deleting with
+// stage finalizing), an in_doubt row with an error (no expiresAt), an
+// abandoned row (a deleting row whose lease lapsed, with an error) and a
+// failed conflict in the other project. Fixture agents 0 and 2 and the
+// other project's agent 0, whose tokens are callers, carry no marker, and
+// neither do the rest, so null views are compared too.
+func compactDeletionSeeds(f *compactFixture) []compactDeletionSeed {
+	return []compactDeletionSeed{
+		{agentID: f.agentIDAt(1), seed: seedLiveDeleting},
+		{agentID: f.agentIDAt(3), seed: deleteSeed{state: store.DeletionStateFailed, leaseIn: -time.Minute, code: store.DeletionCodeRuntimeError}, errText: "broker said: container c-3 exited 137", detail: true},
+		{agentID: f.agentIDAt(4), seed: deleteSeed{state: store.DeletionStateFinalizing, leaseIn: time.Hour}},
+		{agentID: f.agentIDAt(5), seed: deleteSeed{state: store.DeletionStateFailed, leaseIn: -time.Minute, code: store.DeletionCodeInDoubt}, errText: "teardown on broker unconfirmed", detail: true},
+		{agentID: f.agentIDAt(6), seed: deleteSeed{state: store.DeletionStateDeleting, leaseIn: -time.Minute}, errText: "lease lapsed during revoke", detail: true},
+		{agentID: tid("cv-other-1"), seed: deleteSeed{state: store.DeletionStateFailed, leaseIn: -time.Minute, code: store.DeletionCodeConflict}, errText: "ambiguous container on broker", detail: true},
+	}
+}
+
+func seedCompactDeletions(t *testing.T, f *compactFixture) []compactDeletionSeed {
+	t.Helper()
+	seeds := compactDeletionSeeds(f)
+	for _, d := range seeds {
+		seedDeletionWithError(t, f.store, d.agentID, d.seed, d.errText)
+	}
+	return seeds
+}
+
+// assertDeletionRedactionPerCaller checks the deletion visibility rule
+// (ptone/scion#3122) on the values the harness compared: adminCaller (an
+// unscoped local platform admin, who reads every agent) sees code and claim
+// on every seeded failed view and the error text where one was set; every
+// other caller sees, for every agent it reads, exactly the admin's view
+// without code, error and claim, with the same presence (null or object),
+// state, stage, soft flag and timestamps. It returns, per caller, the number
+// of non-null views checked.
+func assertDeletionRedactionPerCaller(t *testing.T, tally compactFieldTally, adminCaller string, seeds []compactDeletionSeed) map[string]int {
+	t.Helper()
+	adminRows := tally.callerVals[adminCaller]
+	require.NotEmpty(t, adminRows, "%s reads agents", adminCaller)
+	adminObj := func(id string) map[string]json.RawMessage {
+		raw, ok := adminRows[id]["deletion"]
+		require.True(t, ok, "%s reads agent %s", adminCaller, id)
+		require.NotEqual(t, compactParityAbsent, raw, "the full item always carries deletion")
+		return rawDeletionObject(t, json.RawMessage(raw))
+	}
+	for _, d := range seeds {
+		obj := adminObj(d.agentID)
+		require.NotNil(t, obj, "%s: agent %s has a deletion view", adminCaller, d.agentID)
+		assert.Contains(t, obj, "claim", "%s: agent %s claim", adminCaller, d.agentID)
+		if d.detail {
+			assert.Contains(t, obj, "code", "%s: agent %s code", adminCaller, d.agentID)
+		}
+		if d.errText != "" {
+			raw, err := json.Marshal(d.errText)
+			require.NoError(t, err)
+			assert.Equal(t, string(raw), string(obj["error"]), "%s: agent %s error", adminCaller, d.agentID)
+		}
+	}
+	views := map[string]int{}
+	for caller, rows := range tally.callerVals {
+		if caller == adminCaller {
+			continue
+		}
+		for id, vals := range rows {
+			raw, ok := vals["deletion"]
+			require.True(t, ok, "%s: agent %s: deletion compared", caller, id)
+			require.NotEqual(t, compactParityAbsent, raw, "%s: agent %s: the full item always carries deletion", caller, id)
+			got := rawDeletionObject(t, json.RawMessage(raw))
+			assertGenericDeletionOf(t, adminObj(id), got, caller+" agent "+id)
+			if got != nil {
+				views[caller]++
+			}
+		}
+	}
+	return views
 }
 
 // compactFieldParityQueries is every first-page request the field parity
@@ -347,11 +468,11 @@ var compactParityCells = map[string]compactParityCell{
 	"agent-binding project":       {http.StatusOK, true},
 	"agent-binding other-project": {http.StatusNotFound, false},
 
-	// The ceiling carries agent:list only: the global list returns rows,
-	// and both project endpoints return an empty list.
+	// The ceiling carries agent:list only: every endpoint lists the agents
+	// the holder can read (the agent-list rule).
 	"hub-uat global":        {http.StatusOK, true},
-	"hub-uat project":       {http.StatusOK, false},
-	"hub-uat other-project": {http.StatusOK, false},
+	"hub-uat project":       {http.StatusOK, true},
+	"hub-uat other-project": {http.StatusOK, true},
 
 	"agent-no-project-read global":        {http.StatusForbidden, false},
 	"agent-no-project-read project":       {http.StatusForbidden, false},
@@ -402,6 +523,7 @@ func TestAgentCompactView_FieldParityPerCallerClass(t *testing.T) {
 	for _, i := range []int{0, 1} {
 		setRawAgentLabels(t, f.store, tid(fmt.Sprintf("cv-other-%d", i)), map[string]string{"lane": "x"})
 	}
+	seeds := seedCompactDeletions(t, f)
 
 	otherUser := compactUser(t, f.store, "other-only")
 	msgAuthzAddProjectMember(t, f.store, otherUser.ID, f.other.ID, f.other.Slug, store.GroupMemberRoleMember)
@@ -476,6 +598,21 @@ func TestAgentCompactView_FieldParityPerCallerClass(t *testing.T) {
 		if msg != "" {
 			assert.True(t, tally.cellVals["other-project-agent-jwt other-project"][rawMessage(msg)], "other project message %q compared for its agent token", msg)
 		}
+	}
+
+	// Deletion: compact equals full for every caller class (the harness
+	// compared the deletion field on every row, null views included), and
+	// only the super admin sees code, error and claim. Every other class
+	// that reads rows, the agent token paths and both user access tokens
+	// among them, gets the generic view of the same rows.
+	assert.Positive(t, tally.present["deletion"], "deletion compared")
+	assert.Zero(t, tally.absent["deletion"], "the full item always carries deletion")
+	views := assertDeletionRedactionPerCaller(t, tally, "super-admin", seeds)
+	for _, caller := range []string{"owner", "member", "agent-jwt", "scoped-uat", "project-constrained", "other-project-agent-jwt", "agent-binding", "hub-uat"} {
+		assert.Positive(t, views[caller], "%s: non-null deletion views checked", caller)
+	}
+	for _, cell := range []string{"owner global", "owner project", "owner other-project", "agent-jwt project", "scoped-uat project", "other-project-agent-jwt other-project"} {
+		assert.Positive(t, tally.cellObjects[cell]["deletion"], "%s: non-null deletion views compared", cell)
 	}
 
 	// The full cell map: every caller and endpoint cell is pinned with its
@@ -655,4 +792,85 @@ func TestAgentCompactView_MessagePayloadBytesRecord(t *testing.T) {
 	for _, n := range []int{25, 100, 500} {
 		recordMessagePayload(t, "worst-case", n, worstCaseMessage, false)
 	}
+}
+
+// TestAgentCompactView_DeletionDetailAdminClasses runs the field parity
+// harness with the admin caller classes of the deletion visibility rule
+// (ptone/scion#3122): the unscoped local super admin, who sees code, error
+// and claim; a super admin's project-scoped user access token and a
+// federated user with the admin role, who get the generic view (the
+// federated user reads no rows here; see the end of the test); and a
+// member and an agent token for reference. The scoped admin is also a
+// project owner, so its token reads the project's rows. Every non-admin
+// row must be the super admin's view without the detail fields.
+func TestAgentCompactView_DeletionDetailAdminClasses(t *testing.T) {
+	f := compactSetup(t)
+	seeds := seedCompactDeletions(t, f)
+	ctx := context.Background()
+
+	scopedAdminID := tid("cv-scoped-admin")
+	createTestUserWithRole(t, f.store, scopedAdminID, "cv-scoped-admin@test.com", store.UserRoleAdmin, store.SystemRoleSuperAdmin)
+	ensureHubMembership(ctx, f.store, scopedAdminID)
+	createTestUserWithProjectRole(t, f.store, scopedAdminID, "cv-scoped-admin@test.com", f.project.ID, store.ProjectRoleOwner)
+	scopedAdminKey := mintScopedUAT(t, f.srv, scopedAdminID, f.project.ID, []string{"agent:manage"})
+
+	federatedAdmin := NewFederatedUserIdentity("https://issuer.example", "cv-fed-admin", "cv-fed-admin@example.com", "Fed Admin", "admin", nil)
+
+	callers := []compactCaller{
+		f.caller("super-admin"),
+		f.caller("member"),
+		f.caller("agent-jwt"),
+		{"scoped-admin-uat", func(t *testing.T, path string) *httptest.ResponseRecorder {
+			return doRequestWithUAT(t, f.srv, scopedAdminKey, http.MethodGet, path, nil)
+		}},
+		{"federated-admin", func(t *testing.T, path string) *httptest.ResponseRecorder {
+			req := httptest.NewRequest(http.MethodGet, path, nil)
+			req = req.WithContext(contextWithIdentity(req.Context(), federatedAdmin))
+			rec := httptest.NewRecorder()
+			f.srv.mux.ServeHTTP(rec, req)
+			return rec
+		}},
+	}
+	other := "/api/v1/projects/" + f.other.ID + "/agents"
+	queries := []compactParityQuery{
+		{"global", f.globalBase(), ""},
+		{"global", f.globalBase(), "sort=created&dir=asc&fit=500"},
+		{"project", f.projectBase(), ""},
+		{"project", f.projectBase(), "sort=updated&dir=desc&limit=1"},
+		{"other-project", other, ""},
+	}
+	tally := runCompactFieldParity(t, f, callers, queries, compactParityFields)
+
+	views := assertDeletionRedactionPerCaller(t, tally, "super-admin", seeds)
+	for _, caller := range []string{"member", "agent-jwt", "scoped-admin-uat"} {
+		assert.Positive(t, views[caller], "%s: non-null deletion views checked", caller)
+	}
+	assert.Positive(t, tally.cellObjects["scoped-admin-uat project"]["deletion"], "the scoped admin token reads deletion views on its project")
+	// The federated admin cannot read agent rows on these endpoints at all:
+	// a federated principal's ID is issuer:subject, not a local user UUID,
+	// so it holds no project membership or role binding and authorization
+	// resolves no grant for it (the same fail-closed path pinned for skills
+	// by TestListSkills_FederatedUserFailsClosedNotServerError). No fixture
+	// can grant it membership, so this harness pins that it reads nothing
+	// and the exact status of each cell, in both views alike. That federated users get the generic deletion view is
+	// pinned by TestCallerSeesDeletionDetail_OnlyUnscopedLocalAdmins and
+	// TestEnrichAgent_DeletionDetailFailsClosed, which call the predicate
+	// and both enrichment functions with a federated admin identity.
+	//
+	// Pinned statuses, observed in a run: the project endpoints deny with
+	// 403 (principal resolution fails closed in the authorize check), and
+	// the global list answers 500 "unable to resolve authorization", because
+	// listAgents treats the same principal resolution error from
+	// ResolveListScopes as a server error. Both views answer the same (the
+	// harness compares status and body), and no rows are read either way.
+	federatedCells := map[string]int{
+		"federated-admin global":        http.StatusInternalServerError,
+		"federated-admin project":       http.StatusForbidden,
+		"federated-admin other-project": http.StatusForbidden,
+	}
+	for cell, status := range federatedCells {
+		assert.Equal(t, map[int]bool{status: true}, tally.cellStatus[cell], "%s: first-page statuses", cell)
+		assert.Zero(t, tally.cellRows[cell], "%s: a federated principal reads no agent rows", cell)
+	}
+	assert.Zero(t, views["federated-admin"], "federated-admin: no deletion views read")
 }

@@ -1314,8 +1314,8 @@ func TestPublish_ObserveFilter_ThreadResolvesParentLink(t *testing.T) {
 
 			// Unique IDs per case: resolveChannelLink memoises thread parents
 			// in a package-level cache that outlives individual tests.
-			parentID := fmt.Sprintf("parent-%d", i)
-			threadID := fmt.Sprintf("thread-%d", i)
+			parentID := fmt.Sprintf("9000000000000001%02d", i)
+			threadID := fmt.Sprintf("9100000000000001%02d", i)
 			t.Cleanup(func() {
 				threadParentsMu.Lock()
 				delete(threadParents, threadID)
@@ -1377,8 +1377,8 @@ func TestPublish_ObserveFilter_StateChangeThreadResolvesParentLink(t *testing.T)
 		t.Run(fmt.Sprintf("show_state_changes=%v", showStateChanges), func(t *testing.T) {
 			ctx := context.Background()
 
-			parentID := fmt.Sprintf("sc-parent-%d", i)
-			threadID := fmt.Sprintf("sc-thread-%d", i)
+			parentID := fmt.Sprintf("9000000000000002%02d", i)
+			threadID := fmt.Sprintf("9100000000000002%02d", i)
 			t.Cleanup(func() {
 				threadParentsMu.Lock()
 				delete(threadParents, threadID)

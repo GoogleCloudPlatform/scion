@@ -19,6 +19,8 @@ package hub
 import (
 	"os"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/testutil"
 )
 
 // TestMain isolates $HOME for the whole (non-integration) pkg/hub test
@@ -29,11 +31,19 @@ import (
 // build, so the two are kept behind mutually exclusive build tags.
 //
 // It also starts the memory guard (mem_guard_helpers_test.go), which aborts
-// the binary with goroutine stacks if process memory runs away.
+// the binary with goroutine stacks if process memory runs away, and clears
+// the ambient GCP project env (clearAmbientGCPProjectEnv) so New() never
+// builds real Cloud Logging clients from it (ptone/scion#3188).
+//
+// After the tests, the leak guard (leak_guard_helpers_test.go) fails the
+// package if unclosed test stores or never-shut-down servers are still
+// running (ptone/scion#3641).
 func TestMain(m *testing.M) {
 	stopMemGuard := startMemGuard()
-	teardown := isolateTestHome()
+	teardown := testutil.IsolateHome("scion-hub-test-home-*")
+	clearAmbientGCPProjectEnv()
 	code := m.Run()
+	code = runLeakGuard(code)
 	teardown()
 	stopMemGuard()
 	os.Exit(code)

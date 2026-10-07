@@ -218,11 +218,13 @@ func TestUATChildRoleCappedWithinCeiling(t *testing.T) {
 	}
 
 	// The baseline cap carries project:read, the four self-op scopes and the
-	// ceiling-optional project:artifact:read. The minimal set holds no
-	// artifact permission, so the ceiling filter issues all but the last.
+	// ceiling-optional project:artifact:read and project:artifact:write. The
+	// minimal set holds no artifact permission, so the ceiling filter issues
+	// all but the two artifact scopes: optional scopes never decide the fit
+	// and are never issued beyond the ceiling.
 	capped, _, _ := childRoleWithinCeiling(minimal, AgentRoleFull, false)
 	want := []AgentTokenScope{ScopeProjectRead, ScopeAgentStatusUpdate, ScopeAgentTokenRefresh, ScopeAgentNotify, ScopeAgentPortForward}
-	assert.ElementsMatch(t, append(append([]AgentTokenScope{}, want...), ScopeProjectArtifactRead), ScopesForRole(capped))
+	assert.ElementsMatch(t, append(append([]AgentTokenScope{}, want...), ScopeProjectArtifactRead, ScopeProjectArtifactWrite), ScopesForRole(capped))
 	assert.ElementsMatch(t, want, filterScopes(ScopesForRole(capped), minimal, ScopeCeilings{}))
 }
 
@@ -702,12 +704,11 @@ func TestNewWiresMintDevAuthOverrideFromDevAuthToken(t *testing.T) {
 		{name: "dev auth on", token: "dev-token-value", want: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			s, err := newTestStore(":memory:")
+			s, err := newTestStore(t, ":memory:")
 			require.NoError(t, err)
 			require.NoError(t, s.Migrate(context.Background()))
-			t.Cleanup(func() { _ = s.Close() })
 
-			srv, err := New(ServerConfig{DevAuthToken: tc.token}, s)
+			srv, err := newTestHubServer(t, ServerConfig{DevAuthToken: tc.token}, s)
 			require.NoError(t, err)
 			assert.Equal(t, tc.want, srv.authzService.mintDevAuthOverride)
 

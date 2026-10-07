@@ -40,6 +40,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
 // ErrTokenRefreshUnauthorized indicates the hub rejected the token refresh
@@ -68,6 +69,9 @@ const (
 	EnvHubToken = "SCION_AUTH_TOKEN"
 	// EnvAgentID is the environment variable for the agent ID.
 	EnvAgentID = "SCION_AGENT_ID"
+	// EnvLaunchID is the environment variable for the agent's run (launch)
+	// id, set by the broker.
+	EnvLaunchID = "SCION_LAUNCH_ID"
 	// EnvAgentMode is the environment variable for the agent mode.
 	EnvAgentMode = "SCION_AGENT_MODE"
 
@@ -181,6 +185,10 @@ type Client struct {
 	// contract.
 	tokenChownUID int
 	tokenChownGID int
+	// runID is the agent's run id (EnvLaunchID), sent as RunIDHeader.
+	runID string
+	// writes paces status writes after the hub refuses the agent's token.
+	writes writeGate
 }
 
 // NewClient creates a new Hub client from environment variables.
@@ -219,6 +227,7 @@ func NewClient() *Client {
 		hubURL:         hubURL,
 		token:          token,
 		agentID:        agentID,
+		runID:          os.Getenv(EnvLaunchID),
 		maxRetries:     DefaultMaxRetries,
 		retryBaseDelay: DefaultRetryBaseDelay,
 		retryMaxDelay:  DefaultRetryMaxDelay,
@@ -316,6 +325,9 @@ func (c *Client) UpdateStatus(ctx context.Context, status StatusUpdate) error {
 }
 
 func (c *Client) postJSONWithRetry(ctx context.Context, endpoint string, body []byte) error {
+	if err := c.writes.allow(); err != nil {
+		return err
+	}
 	// Read token under lock to avoid data race with concurrent RefreshToken calls.
 	c.tokenMu.RLock()
 	currentToken := c.token
@@ -342,7 +354,7 @@ func (c *Client) postJSONWithRetry(ctx context.Context, endpoint string, body []
 		}
 
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("X-Scion-Agent-Token", currentToken)
+		c.setAgentAuth(req.Header, currentToken)
 
 		resp, err := c.client.Do(req)
 		if err != nil {
@@ -358,6 +370,7 @@ func (c *Client) postJSONWithRetry(ctx context.Context, endpoint string, body []
 		// Read response body
 		respBody, _ := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
+		c.writes.observe(resp.StatusCode)
 
 		// Success
 		if resp.StatusCode < 400 {
@@ -463,7 +476,7 @@ func (c *Client) RegisterPort(ctx context.Context, req RegisterPortRequest) (*Ex
 		return nil, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("X-Scion-Agent-Token", c.AuthToken())
+	c.setAgentAuth(httpReq.Header, c.AuthToken())
 	resp, err := c.client.Do(httpReq)
 	if err != nil {
 		return nil, err
@@ -490,7 +503,7 @@ func (c *Client) ListPorts(ctx context.Context) ([]ExposedPort, error) {
 	if err != nil {
 		return nil, err
 	}
-	httpReq.Header.Set("X-Scion-Agent-Token", c.AuthToken())
+	c.setAgentAuth(httpReq.Header, c.AuthToken())
 	resp, err := c.client.Do(httpReq)
 	if err != nil {
 		return nil, err
@@ -519,7 +532,7 @@ func (c *Client) DeletePort(ctx context.Context, port int) error {
 	if err != nil {
 		return err
 	}
-	httpReq.Header.Set("X-Scion-Agent-Token", c.AuthToken())
+	c.setAgentAuth(httpReq.Header, c.AuthToken())
 	resp, err := c.client.Do(httpReq)
 	if err != nil {
 		return err
@@ -574,7 +587,7 @@ func (c *Client) SetSecret(ctx context.Context, key, value, secretType, target, 
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Scion-Agent-Token", currentToken)
+	c.setAgentAuth(req.Header, currentToken)
 
 	resp, err := c.client.Do(req)
 	if err != nil {
@@ -630,7 +643,7 @@ func (c *Client) GetSecret(ctx context.Context, key string) (*GetSecretResponse,
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	req.Header.Set("X-Scion-Agent-Token", currentToken)
+	c.setAgentAuth(req.Header, currentToken)
 
 	resp, err := c.client.Do(req)
 	if err != nil {
@@ -681,7 +694,7 @@ func (c *Client) ListSecrets(ctx context.Context) (*ListSecretsResponse, error) 
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	req.Header.Set("X-Scion-Agent-Token", currentToken)
+	c.setAgentAuth(req.Header, currentToken)
 
 	resp, err := c.client.Do(req)
 	if err != nil {
@@ -746,7 +759,7 @@ func (c *Client) RefreshToken(ctx context.Context) (string, time.Time, error) {
 		return "", time.Time{}, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	req.Header.Set("X-Scion-Agent-Token", currentToken)
+	c.setAgentAuth(req.Header, currentToken)
 
 	resp, err := c.client.Do(req)
 	if err != nil {
@@ -763,6 +776,7 @@ func (c *Client) RefreshToken(ctx context.Context) (string, time.Time, error) {
 		// "token refresh failed with status %d" wording is preserved for the
 		// non-auth path because existing log-based tooling matches on it.
 		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			c.writes.refreshRefused()
 			return "", time.Time{}, fmt.Errorf("%w: token refresh failed with status %d: %s",
 				ErrTokenRefreshUnauthorized, resp.StatusCode, string(respBody))
 		}
@@ -785,6 +799,7 @@ func (c *Client) RefreshToken(ctx context.Context) (string, time.Time, error) {
 	c.token = result.Token
 	chownUID, chownGID := c.tokenChownUID, c.tokenChownGID
 	c.tokenMu.Unlock()
+	c.writes.reset()
 
 	// Persist the new token to a file so child processes can read it.
 	// Errors are non-fatal — the in-memory token is already updated.
@@ -1119,6 +1134,7 @@ func (c *Client) SetToken(token string) {
 	c.tokenMu.Lock()
 	c.token = token
 	c.tokenMu.Unlock()
+	c.writes.reset()
 }
 
 // Environment variable and file path constants for GitHub App token refresh.
@@ -1164,7 +1180,7 @@ func (c *Client) RefreshGitHubToken(ctx context.Context) (string, time.Time, err
 		return "", time.Time{}, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	req.Header.Set("X-Scion-Agent-Token", currentToken)
+	c.setAgentAuth(req.Header, currentToken)
 
 	resp, err := c.client.Do(req)
 	if err != nil {
@@ -1457,8 +1473,10 @@ func GitHubTokenPath() string {
 }
 
 // IsGitHubAppEnabled returns true if GitHub App token refresh is active.
+// The hub sets SCION_GITHUB_APP_ENABLED=true; util.ParseBoolEnv also accepts
+// the other boolean spellings so every reader of the variable agrees.
 func IsGitHubAppEnabled() bool {
-	return os.Getenv(EnvGitHubAppEnabled) == "true"
+	return util.ParseBoolEnv(EnvGitHubAppEnabled, false)
 }
 
 // ParseTokenExpiry extracts the expiry time from a JWT token without
@@ -2041,7 +2059,7 @@ func (c *Client) SendSelfMessage(ctx context.Context, msg *messages.StructuredMe
 		return fmt.Errorf("failed to create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Scion-Agent-Token", currentToken)
+	c.setAgentAuth(req.Header, currentToken)
 
 	resp, err := c.client.Do(req)
 	if err != nil {
@@ -2136,7 +2154,7 @@ func (c *Client) FetchGCPToken(ctx context.Context, scopes []string) (*GCPAccess
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Scion-Agent-Token", currentToken)
+	c.setAgentAuth(req.Header, currentToken)
 
 	resp, err := c.client.Do(req)
 	if err != nil {
@@ -2180,7 +2198,7 @@ func (c *Client) FetchGCPIdentityToken(ctx context.Context, audience string) (st
 		return "", fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Scion-Agent-Token", currentToken)
+	c.setAgentAuth(req.Header, currentToken)
 
 	resp, err := c.client.Do(req)
 	if err != nil {
@@ -2234,7 +2252,7 @@ func (c *Client) RequestIdentityToken(ctx context.Context, audience string) (*Id
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Scion-Agent-Token", currentToken)
+	c.setAgentAuth(req.Header, currentToken)
 
 	resp, err := c.client.Do(req)
 	if err != nil {
@@ -2291,7 +2309,7 @@ func (c *Client) GetSelf(ctx context.Context) (*AgentSelf, error) {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	req.Header.Set("X-Scion-Agent-Token", currentToken)
+	c.setAgentAuth(req.Header, currentToken)
 
 	resp, err := c.client.Do(req)
 	if err != nil {
@@ -2373,7 +2391,7 @@ func (c *Client) FetchSecrets(ctx context.Context, keys []string) (*SecretFetchR
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Scion-Agent-Token", currentToken)
+	c.setAgentAuth(req.Header, currentToken)
 
 	resp, err := c.client.Do(req)
 	if err != nil {

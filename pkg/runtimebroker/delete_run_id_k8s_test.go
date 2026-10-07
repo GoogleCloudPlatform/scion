@@ -282,7 +282,7 @@ func TestCreateAgent_RunConflictIs409(t *testing.T) {
 }
 
 func TestClassifyStartError_RunConflict(t *testing.T) {
-	code, msg := classifyStartError(context.Background(), errIdentityRunConflict)
+	code, msg := classifyStartError(context.Background(), errIdentityRunConflict, "")
 	if code != "name_in_use" {
 		t.Fatalf("code = %q, want name_in_use", code)
 	}
@@ -441,4 +441,44 @@ func TestDeleteAgent_InvalidRunID_400(t *testing.T) {
 		t.Errorf("DeleteTarget called %d times", mgr.DeleteCalls())
 	}
 	assertUntouched(t, scionB, "dev", infoB)
+}
+
+// errIdentityPreCleanMismatch is Manager.Start's error when its removal of
+// the existing entry was refused because another run replaced that entry
+// (runtime.ErrRunMismatch from the run-checked Delete), wrapped with the
+// identity the Kubernetes runtime puts in it.
+var errIdentityPreCleanMismatch = fmt.Errorf("failed to cleanup existing container: %w",
+	fmt.Errorf("pod leakns/leakobj belongs to run %q, not %q: %w", "run-leak-123", "run-old", runtime.ErrRunMismatch))
+
+// Manager.Start's ErrRunMismatch (ptone/scion#2550 P5, sentinel audit) is
+// mapped exactly like ErrRunConflict on every start path: 409 conflict
+// with the fixed text on create, start and restart, and name_in_use on an
+// async launch, never a 500 that carries the runtime's text.
+func TestStartPaths_PreCleanRunMismatchIs409NoLeak(t *testing.T) {
+	for _, path := range []string{"/api/v1/agents", "/api/v1/agents/test-agent-1/start", "/api/v1/agents/test-agent-1/restart"} {
+		t.Run(path, func(t *testing.T) {
+			srv := newTestServer(t)
+			mgr := srv.manager.(*mockManager)
+			mgr.startErr = errIdentityPreCleanMismatch
+			body := `{"runId":"run-x"}`
+			if path == "/api/v1/agents" {
+				body = `{"name": "new-agent", "config": {"template": "claude"}, "runId": "run-x"}`
+			}
+			req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(w, req)
+			if w.Code != http.StatusConflict {
+				t.Fatalf("status %d, want 409: %s", w.Code, w.Body.String())
+			}
+			assertNoRunConflictLeak(t, w.Body.String())
+		})
+	}
+	t.Run("async launch", func(t *testing.T) {
+		code, msg := classifyStartError(context.Background(), errIdentityPreCleanMismatch, "")
+		if code != "name_in_use" {
+			t.Fatalf("code = %q, want name_in_use", code)
+		}
+		assertNoRunConflictLeak(t, msg)
+	})
 }

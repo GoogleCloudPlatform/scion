@@ -17,16 +17,23 @@
 package hub
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
+	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
 
@@ -111,6 +118,8 @@ var suffixCheckExclusions = map[liveInventoryKey]string{
 	{OperationID: "role.binding.read", Method: "GET", Pattern: "/api/v1/admin/role-bindings/user/{userId}"}:                "handleAdminRoleBindingByID's \"user/\" branch (handlers_roles.go) takes the entire remaining path as the user ID with no further splitting; a nonexistent literal ID, suffixed or not, just returns an empty binding list (200), never a 404",
 	{OperationID: "env.read", Method: "GET", Pattern: "/api/v1/env/{key}"}:                                                 "handleEnvVarByKey (handlers_env_secrets.go) extracts the key with extractID, which truncates at the first '/' and discards everything after it, so the suffix never reaches the lookup",
 	{OperationID: "hub.lifecyclehooks.read", Method: "GET", Pattern: "/api/v1/admin/lifecycle-hooks/{id}"}:                 "handleAdminLifecycleHookByID (handlers_lifecycle_hooks.go) extracts the ID with extractID, which truncates at the first '/' and discards everything after it, so the suffix never reaches getLifecycleHook's lookup",
+	{OperationID: "hub.lifecyclehooks.update", Method: "PUT", Pattern: "/api/v1/admin/lifecycle-hooks/{id}"}:               "handleAdminLifecycleHookByID truncates the suffix with extractID the same way as the GET entry above, so the update runs on the real ID; its result (409 for the empty body's version check) is the same as on the bare path",
+	{OperationID: "hub.lifecyclehooks.update", Method: "DELETE", Pattern: "/api/v1/admin/lifecycle-hooks/{id}"}:            "handleAdminLifecycleHookByID truncates the suffix with extractID the same way as the GET entry above, so a suffixed DELETE would delete the real hook (204) exactly as the bare path does, and leave the positive check nothing to delete",
 	{OperationID: "group.member.remove", Method: "DELETE", Pattern: "/api/v1/groups/{id}/members/{memberType}/{memberId}"}: "handleGroupMemberByID (handlers_groups.go) splits memberPath into at most two parts, so a trailing suffix is appended onto memberID as one string rather than forming a separate segment; the resulting lookup fails with 400, not a routing 404",
 	{OperationID: "hub.config.update", Method: "DELETE", Pattern: "/api/v1/admin/server-config/sections/{id}"}:             "handleAdminServerConfigSectionReset (admin_settings.go) requires OperationalSettings and 400s \"Section reset requires DB-backed operational settings\" before it ever parses the section name from the path; testServer wires no OperationalSettings, so the same 400 happens on the bare path, independent of the suffix",
 	{OperationID: "hub.maintenance.execute", Method: "POST", Pattern: "/api/v1/admin/maintenance/operations/{id}/run"}:     "handleAdminMaintenanceOps (admin_maintenance.go) splits the sub-path into at most three parts, so a fourth segment is absorbed into the \"run\" branch's own remainder rather than changing dispatch; combined with this entry's deliberate cross-category key (see patternOverrides), the resulting 400 is the same category-mismatch rejection as the bare path",
@@ -179,11 +188,13 @@ type idFixtures struct {
 	maintenanceMigrationKey string
 	integrationName         string
 	lifecycleHook           string
+	hubPreStartHook         string
 	chatTopic               string
 	agentLifecycle          string
 	agentRestore            string
 	agentRestoreProject     string
 	agentProvisioning       string
+	artifact                string
 }
 
 // seedLiveInventoryFixtures creates one real store row per resource family
@@ -443,7 +454,55 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 		Updated: now,
 	}))
 
+	hubHook, err := s.CreateHubPreStartHook(ctx, &store.ProjectPreStartHook{
+		Scope: store.PreStartHookScopeHub, Name: "li-hub-pre-start-hook", Slug: "li-hub-pre-start-hook",
+		Script: "#!/bin/sh\necho li\n", CreatedBy: "li@test.com", UpdatedBy: "li@test.com",
+	})
+	require.NoError(t, err)
+	f.hubPreStartHook = hubHook.ID
+
+	// Artifact service: on (experiment, store, blob storage) with one
+	// single-file artifact owned by the dev user, homed in f.project.
+	artStore, artBlobs := enableArtifactsForTest(t, srv)
+	f.artifact = seedLiveInventoryArtifact(t, ctx, artStore, artBlobs, f.project)
+
+	// hub.conduit on too, so its experiment-gated routes are live: the
+	// registry above with hub.conduit also defaulting on (no operational
+	// settings, which the other entries rely on, are replaced).
+	var active []experiments.Experiment
+	for _, e := range srv.experimentRegistry().All() {
+		if e.Name == conduitExperiment {
+			e.Default = true
+		}
+		active = append(active, e)
+	}
+	reg, err := experiments.NewRegistry(active, nil)
+	require.NoError(t, err)
+	srv.experiments = reg
+	require.True(t, srv.experimentEnabled(conduitExperiment))
+	require.True(t, srv.experimentEnabled(experiments.Artifacts))
+
 	return f
+}
+
+// seedLiveInventoryArtifact publishes a one-file artifact directly through
+// the store and blob storage, the way the single-file publish endpoint
+// writes it, and returns its id.
+func seedLiveInventoryArtifact(t *testing.T, ctx context.Context, st artifacts.Store, blobs storage.Storage, projectID string) string {
+	t.Helper()
+	content := []byte("# live inventory\n")
+	sum := sha256.Sum256(content)
+	digest := hex.EncodeToString(sum[:])
+	_, err := blobs.Upload(ctx, artifacts.BlobPath("test-hub-id", digest), bytes.NewReader(content), storage.UploadOptions{ContentType: "text/markdown"})
+	require.NoError(t, err)
+	now := time.Now()
+	a := &artifacts.Artifact{ID: uuid.NewString(), ScopeKind: artifacts.ScopeKindProject, ScopeRef: projectID,
+		OwnerKind: artifacts.PrincipalKindUser, OwnerRef: DevUserID, Title: "live", CreatedAt: now, UpdatedAt: now}
+	v := &artifacts.Version{ID: uuid.NewString(), ArtifactID: a.ID, Seq: 1, Kind: artifacts.VersionKindPublish,
+		EntryPath: "live.md", TotalBytes: int64(len(content)), FileCount: 1, CreatedAt: now, State: artifacts.VersionStateReady}
+	files := []artifacts.File{{VersionID: v.ID, Path: "live.md", Size: int64(len(content)), SHA256: digest, MediaType: "text/markdown"}}
+	require.NoError(t, st.CreatePublished(ctx, a, v, files, nil))
+	return a.ID
 }
 
 // overrideKey identifies one (operation, pattern) pair for parameter
@@ -494,6 +553,11 @@ func opPatternOverrides(f idFixtures) map[overrideKey]map[string]string {
 // before the method switch.
 func patternOverrides(f idFixtures) map[string]map[string]string {
 	return map[string]map[string]string{
+		// --- artifact family ---
+		"/api/v1/artifacts/{id}":                             {"id": f.artifact},
+		"/api/v1/artifacts/{id}/files/{path}":                {"id": f.artifact, "path": "live.md"},
+		"/api/v1/artifacts/{id}/versions/{seq}/files/{path}": {"id": f.artifact, "seq": "1", "path": "live.md"},
+
 		// --- agent family ---
 		"/api/v1/agents/{id}":                                       {"id": f.agent},
 		"/api/v1/agents/{id}/ports":                                 {"id": f.agent},
@@ -541,7 +605,8 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/groups/{id}/members/{memberType}/{memberId}": {"id": f.group, "memberType": "user", "memberId": f.member},
 
 		// --- user family ---
-		"/api/v1/users/{id}": {"id": f.user},
+		"/api/v1/users/{id}":                 {"id": f.user},
+		"/api/v1/users/{id}/revoke-sessions": {"id": f.user},
 
 		// --- skill family ---
 		"/api/v1/skills/{id}": {"id": f.skill},
@@ -624,6 +689,10 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 
 		// --- lifecycle hooks family ---
 		"/api/v1/admin/lifecycle-hooks/{id}": {"id": f.lifecycleHook},
+
+		// --- hub pre-start hooks family ---
+		"/api/v1/pre-start-hooks/{id}":          {"id": f.hubPreStartHook},
+		"/api/v1/pre-start-hooks/{id}/activate": {"id": f.hubPreStartHook},
 	}
 }
 
@@ -635,6 +704,8 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 func queryOverrides(f idFixtures) map[string]string {
 	return map[string]string{
 		"/api/v1/chat/prefs": "agentId=" + f.agent,
+		// The single-file publish is selected by ?name= (pkg/artifacts).
+		"/api/v1/artifacts": "name=live-inventory.txt&scope=" + f.project,
 	}
 }
 
