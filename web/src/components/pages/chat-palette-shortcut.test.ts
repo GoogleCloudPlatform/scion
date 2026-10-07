@@ -2275,6 +2275,104 @@ describe('on a touch-primary device, the open request holds the on-screen keyboa
     await vi.waitFor(() => expect(page.v2PaletteOpen).toBe(true));
   });
 
+  /** A focused button standing in for whatever had focus before the open request. */
+  function focusedButton(): HTMLButtonElement {
+    const button = document.createElement('button');
+    document.body.appendChild(button);
+    button.focus();
+    return button;
+  }
+
+  it('a queued reopen abandoned after the close animation drops the field without refocusing', async () => {
+    stubTouchPrimary();
+    const page = createEligiblePage();
+    document.body.appendChild(page);
+    await page.togglePalette();
+    await page.togglePalette();
+    const button = focusedButton();
+    await page.togglePalette(); // queued
+    const proxy = keyboardProxy();
+    expect(document.activeElement).toBe(proxy);
+    vi.mocked(page._isUnrelatedModalActive).mockReturnValue(true);
+
+    page._handlePaletteAfterHide(ownDialogAfterHideEvent());
+
+    expect(page.v2PaletteOpen).toBe(false);
+    expect(proxy?.isConnected).toBe(false);
+    expect(document.activeElement).not.toBe(button);
+  });
+
+  it('a reopen queued behind the document preview, abandoned, drops the field without refocusing', async () => {
+    stubTouchPrimary();
+    const page = createEligiblePage();
+    page.v2SwitcherLoaded = true;
+    page._paletteFilePreviewTarget = {
+      kind: 'path',
+      projectId: 'p1',
+      containerPath: '/workspace/notes.txt',
+      location: { kind: 'workspace', filePath: 'notes.txt' },
+      name: 'notes.txt',
+    };
+    document.body.appendChild(page);
+    const button = focusedButton();
+    await page.togglePalette(); // queued
+    const proxy = keyboardProxy();
+    expect(document.activeElement).toBe(proxy);
+    vi.mocked(page._isUnrelatedModalActive).mockReturnValue(true);
+
+    page._closePaletteFilePreview();
+
+    expect(proxy?.isConnected).toBe(false);
+    expect(document.activeElement).not.toBe(button);
+  });
+
+  it('a close that skips focus restore drops the field without refocusing', async () => {
+    stubTouchPrimary();
+    const page = createEligiblePage();
+    document.body.appendChild(page);
+    const button = focusedButton();
+    const opening = page.togglePalette();
+    const proxy = keyboardProxy();
+    expect(document.activeElement).toBe(proxy);
+
+    page._closePaletteWithoutFocusRestore();
+
+    expect(proxy?.isConnected).toBe(false);
+    expect(document.activeElement).not.toBe(button);
+    await opening;
+  });
+
+  it('a close that restores focus gives it back from the field', async () => {
+    stubTouchPrimary();
+    const page = createEligiblePage();
+    document.body.appendChild(page);
+    const button = focusedButton();
+    const opening = page.togglePalette();
+    expect(document.activeElement).toBe(keyboardProxy());
+
+    page._closePaletteAndCancelLoad();
+
+    expect(keyboardProxy()).toBeNull();
+    expect(document.activeElement).toBe(button);
+    await opening;
+  });
+
+  it('a page leaving the document drops the field without refocusing', async () => {
+    stubTouchPrimary();
+    const page = createEligiblePage();
+    document.body.appendChild(page);
+    const button = focusedButton();
+    const opening = page.togglePalette();
+    const proxy = keyboardProxy();
+    expect(document.activeElement).toBe(proxy);
+
+    page.remove();
+
+    expect(proxy?.isConnected).toBe(false);
+    expect(document.activeElement).not.toBe(button);
+    await opening;
+  });
+
   it('a second press cancelling the pending open gives focus back to the button', async () => {
     stubTouchPrimary();
     const page = createEligiblePage();

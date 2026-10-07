@@ -1584,7 +1584,8 @@ export class ScionPageChat extends LitElement {
     this._palettePendingOpen = false;
     this._palettePendingReopen = false;
     this._paletteCloseAnimating = false;
-    this._paletteTypeahead.stop();
+    // A page leaving the document has nothing to give focus back to.
+    this._paletteTypeahead.stop({ restoreFocus: false });
     stateManager.removeEventListener('chat-message-received', this._onChatMessage);
     stateManager.removeEventListener('chat-topic-updated', this._onChatTopic);
     stateManager.removeEventListener('chat-presence-updated', this._onPresenceUpdated);
@@ -4494,7 +4495,9 @@ export class ScionPageChat extends LitElement {
     this._selfUserAbortController = null;
     this._stopPaletteVisibilityWatchdog();
     this._stopPaletteDebouncedRefresh();
-    this._paletteTypeahead.stop();
+    // A close that must not touch focus (see _paletteSkipFocusRestore) drops
+    // a pending open's hidden keyboard field without refocusing anything.
+    this._paletteTypeahead.stop({ restoreFocus: !this._paletteSkipFocusRestore });
     this.v2PaletteOpen = false;
     this._paletteCloseAnimating = true;
   }
@@ -4963,7 +4966,7 @@ export class ScionPageChat extends LitElement {
         // belong to.
         this._paletteInvoker = null;
         this._paletteInvokerSelection = null;
-        this._paletteTypeahead.stop();
+        this._paletteTypeahead.stop({ restoreFocus: false });
       }
       return;
     }
@@ -5033,7 +5036,7 @@ export class ScionPageChat extends LitElement {
       // restored into a page it may no longer belong to.
       this._paletteInvoker = null;
       this._paletteInvokerSelection = null;
-      this._paletteTypeahead.stop();
+      this._paletteTypeahead.stop({ restoreFocus: false });
       return;
     }
     this._restorePaletteInvokerFocus();
