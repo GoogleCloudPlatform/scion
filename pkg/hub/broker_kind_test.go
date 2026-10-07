@@ -31,6 +31,9 @@ func TestIsPluginBroker(t *testing.T) {
 		{name: "plugin label", labels: map[string]string{"scion.io/plugin": "telegram"}, want: true},
 		{name: "plugin label with empty value", labels: map[string]string{"scion.io/plugin": ""}, want: true},
 	}
+	if isPluginBroker(nil) {
+		t.Error("isPluginBroker(nil) = true, want false")
+	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			b := &store.RuntimeBroker{Labels: tt.labels}

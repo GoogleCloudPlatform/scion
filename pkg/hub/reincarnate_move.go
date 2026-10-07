@@ -438,6 +438,11 @@ func writeMoveTargetAmbiguous(w http.ResponseWriter, target string, candidates [
 		map[string]interface{}{"requestedBroker": target, "candidates": summaries})
 }
 
+// pluginBrokerLabel marks a broker record that represents a message-broker
+// plugin (e.g. a chat integration) rather than a runtime broker. See
+// isPluginBroker in broker_kind.go.
+const pluginBrokerLabel = "scion.io/plugin"
+
 // moveTargetVisible reports whether the caller may learn that dst exists and
 // see its configuration in a move verdict. A broker the caller cannot see
 // is answered exactly like an unknown one, so --broker is not an existence

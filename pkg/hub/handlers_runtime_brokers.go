@@ -86,7 +86,7 @@ func (s *Server) listRuntimeBrokers(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Exclude message broker plugins (e.g. Discord, Telegram) — they carry
-	// the "scion.io/plugin" label and are not runtime brokers.
+	// the plugin label (see isPluginBroker) and are not runtime brokers.
 	filtered := result.Items[:0]
 	for i := range result.Items {
 		if !isPluginBroker(&result.Items[i]) {

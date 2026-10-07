@@ -16,14 +16,15 @@ package hub
 
 import "github.com/GoogleCloudPlatform/scion/pkg/store"
 
-// pluginBrokerLabel marks a broker record that represents a message-broker
-// plugin (e.g. a chat integration) rather than a runtime broker.
-const pluginBrokerLabel = "scion.io/plugin"
-
 // isPluginBroker reports whether a broker record is a message-broker plugin
 // rather than a runtime broker. It is the single predicate used wherever
-// plugin records must be kept out of runtime broker listings.
+// plugin records must be kept out of runtime broker listings. The label it
+// checks, pluginBrokerLabel, is declared in reincarnate_move.go. A nil
+// broker is not a plugin.
 func isPluginBroker(b *store.RuntimeBroker) bool {
+	if b == nil {
+		return false
+	}
 	_, ok := b.Labels[pluginBrokerLabel]
 	return ok
 }
