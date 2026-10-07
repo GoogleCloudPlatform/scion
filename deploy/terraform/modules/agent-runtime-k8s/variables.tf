@@ -75,3 +75,9 @@ variable "init_job_image" {
   type        = string
   default     = "busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662"
 }
+
+variable "create_hub_rbac" {
+  description = "Create the hub's namespaced Role and RoleBinding (subjects: the hub GSA's email and numeric unique_id). Default true, which is what every Cloud Run hub needs and leaves its plan unchanged. hub-gke passes false: its Helm chart grants the hub pod's own Kubernetes service account in this namespace (rbac.create with runtime.namespace), and a second Role here would be an unused grant to identities the pod never presents."
+  type        = bool
+  default     = true
+}

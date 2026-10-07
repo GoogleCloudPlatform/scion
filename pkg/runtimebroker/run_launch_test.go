@@ -32,6 +32,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -804,8 +805,13 @@ func TestRunLaunch_DownloadValidatesWorkspaceDirBeforeCreatingIt(t *testing.T) {
 	if got.ErrorCode != "runtime_error" {
 		t.Fatalf("terminal error code = %q, want runtime_error", got.ErrorCode)
 	}
-	if !strings.Contains(got.Message, "invalid workspace directory") {
-		t.Fatalf("terminal message = %q, want it to name the invalid workspace directory", got.Message)
+	// The same text the synchronous 400 carries (ptone/scion#3496).
+	_, verr := runtime.ValidateWorkspaceSource(filepath.Join(srv.config.WorktreeBase, name, "workspace"), srv.config.WorktreeBase)
+	if verr == nil {
+		t.Fatal("expected the symlinked workspace directory to fail validation")
+	}
+	if want := "Invalid workspace directory: " + verr.Error(); got.Message != want {
+		t.Fatalf("terminal message = %q, want the synchronous 400 text %q", got.Message, want)
 	}
 }
 

@@ -126,6 +126,8 @@ func TestBuiltInRoles_HubMemberContainsExpectedPermissions(t *testing.T) {
 		"hub.settings.read",
 		// project.create (replacing hub-member-create-projects policy)
 		"project.create",
+		// Self-scoped permissions on the holder's own records.
+		"inbox.read", "inbox.write", "user_skill_injection.update",
 	}
 	for _, p := range expected {
 		assert.True(t, permSet[p],
@@ -448,10 +450,10 @@ func TestReconcileBuiltInRole_LegacyIntegerMarkerTriggersReconciliation(t *testi
 	reconcileBuiltInRoles(ctx, s)
 
 	// After reconciliation, marker should now have the hash and the
-	// current revision (hub-member is at revision 3 after adding
-	// broker.create, ptone/scion#2138).
+	// current revision (hub-member is at revision 4 after adding the
+	// self-scoped permissions).
 	updatedMarker := getAppliedBuiltInRoleMarker(ctx, s, roleName)
-	assert.Equal(t, 3, updatedMarker.Revision)
+	assert.Equal(t, 4, updatedMarker.Revision)
 	assert.NotEmpty(t, updatedMarker.PermHash, "marker should have PermHash after reconciliation")
 	assert.Equal(t, permListHash(hubMemberPermissionIDs()), updatedMarker.PermHash)
 }

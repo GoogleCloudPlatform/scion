@@ -98,6 +98,28 @@ func grantPermissionViaRoleBinding(t *testing.T, s store.Store, userID, permissi
 }
 
 // makeScopedIdentity creates a ScopedUserIdentity wrapping a non-admin member user.
+// projectBoundaryEligible reports whether permissionID's allowed boundary
+// kinds include the project boundary.
+func projectBoundaryEligible(permissionID string) bool {
+	kinds, _ := permissions.SelectorAllowedBoundaries(permissionID)
+	for _, k := range kinds {
+		if k == permissions.BoundaryKindProject {
+			return true
+		}
+	}
+	return false
+}
+
+// makeHubScopedIdentity builds a hub-boundary token identity whose ceiling
+// carries exactly the given selectors.
+func makeHubScopedIdentity(t *testing.T, userID string, scopes []string) *ScopedUserIdentity {
+	t.Helper()
+	ceiling, ok := permissions.BuildCeilingFromSelectors(scopes)
+	require.True(t, ok, "selectors must resolve: %v", scopes)
+	base := NewAuthenticatedUser(userID, "uat-user@test.com", "UAT User", store.UserRoleMember, "api")
+	return NewScopedUserIdentityWithBoundaryAndDecoration(base, TokenBoundary{Kind: BoundaryKindHub}, scopes, "", ceiling, nil)
+}
+
 func makeScopedIdentity(userID, projectID string, scopes []string) *ScopedUserIdentity {
 	base := NewAuthenticatedUser(userID, "uat-user@test.com", "UAT User", store.UserRoleMember, "api")
 	return NewScopedUserIdentity(base, projectID, scopes)
@@ -193,6 +215,19 @@ func TestUATEnforcement_ScopeAndBinding_Allowed(t *testing.T) {
 			grantPermissionViaRoleBinding(t, s, userID, tc.permissionID, store.RoleScopeSystem, "")
 
 			decision := decideAsUAT(ctx, authz, userID, projectID, []string{tc.uatScope}, tc.resource, tc.action, tc.permissionID)
+			if !projectBoundaryEligible(tc.permissionID) {
+				// The permission is not eligible for a project token; a
+				// hub token with the same selector and binding is allowed.
+				assert.False(t, decision.Allowed)
+				assert.Equal(t, "permission is not eligible for this token boundary", decision.Reason)
+				hub := makeHubScopedIdentity(t, userID, []string{tc.uatScope})
+				decision = authz.Decide(ctx, AuthzRequest{
+					Principal:  principalContextForIdentity(hub),
+					Resource:   tc.resource,
+					Action:     tc.action,
+					Permission: tc.permissionID,
+				})
+			}
 			assert.True(t, decision.Allowed, "expected allowed when UAT scope (%s) AND role binding (%s) both present; reason: %s",
 				tc.uatScope, tc.permissionID, decision.Reason)
 		})
@@ -840,6 +875,13 @@ func TestEnforceUATConstraints_NewResourceTypes(t *testing.T) {
 			permissionID, err := resolveResourcePermission(tc.resource.Type, tc.action)
 			require.NoError(t, err)
 			result := authz.enforceUATConstraints(ctx, principal, scoped, tc.resource, tc.action, permissionID)
+			if !projectBoundaryEligible(permissionID) {
+				// The permission is not eligible for this token boundary.
+				require.NotNil(t, result, "a project token must not use %s", permissionID)
+				assert.False(t, result.Allowed)
+				assert.Equal(t, "permission is not eligible for this token boundary", result.Reason)
+				return
+			}
 			assert.Nil(t, result, "enforceUATConstraints should pass (return nil) when scope %s is present", tc.scope)
 		})
 

@@ -16,7 +16,12 @@ package entadapter
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"time"
+
+	entsql "entgo.io/ent/dialect/sql"
+	"github.com/google/uuid"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokerjointoken"
@@ -221,6 +226,119 @@ func (s *BrokerSecretStore) CreateJoinToken(ctx context.Context, token *store.Br
 	return nil
 }
 
+// UpsertJoinToken stores a join token for token.BrokerID, replacing any
+// existing token for that broker. The existence check and the upsert run in
+// one transaction (the caller's, when called inside store.WithTx). The
+// upsert itself is a single INSERT ... ON CONFLICT (broker_id) DO UPDATE, so
+// concurrent calls for the same broker never fail on the primary key.
+func (s *BrokerSecretStore) UpsertJoinToken(ctx context.Context, token *store.BrokerJoinToken) (bool, error) {
+	if token.BrokerID == "" || token.TokenHash == "" {
+		return false, store.ErrInvalidInput
+	}
+	uid, err := parseUUID(token.BrokerID)
+	if err != nil {
+		return false, err
+	}
+	if token.CreatedAt.IsZero() {
+		token.CreatedAt = time.Now()
+	}
+
+	tx, err := s.client.Tx(ctx)
+	if err != nil {
+		if !errors.Is(err, ent.ErrTxStarted) {
+			return false, err
+		}
+		// Already inside store.WithTx: run on the caller's transaction.
+		return upsertJoinToken(ctx, s.client, uid, token)
+	}
+	replaced, err := upsertJoinToken(ctx, tx.Client(), uid, token)
+	if err != nil {
+		_ = tx.Rollback()
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("broker secret store: commit UpsertJoinToken: %w", err)
+	}
+	return replaced, nil
+}
+
+func upsertJoinToken(ctx context.Context, client *ent.Client, uid uuid.UUID, token *store.BrokerJoinToken) (bool, error) {
+	replaced, err := client.BrokerJoinToken.Query().
+		Where(brokerjointoken.IDEQ(uid)).
+		Exist(ctx)
+	if err != nil {
+		return false, mapError(err)
+	}
+	// ResolveWithNewValues replaces every column, including created and
+	// created_by, so a re-minted token records its own mint time and minter.
+	err = client.BrokerJoinToken.Create().
+		SetID(uid).
+		SetTokenHash(token.TokenHash).
+		SetExpiresAt(token.ExpiresAt).
+		SetCreatedBy(token.CreatedBy).
+		SetCreated(token.CreatedAt).
+		OnConflict(
+			entsql.ConflictColumns(brokerjointoken.FieldID),
+			entsql.ResolveWithNewValues(),
+		).
+		Exec(ctx)
+	if err != nil {
+		return false, mapError(err)
+	}
+	return replaced, nil
+}
+
+// ConsumeJoinToken deletes the join token with tokenHash if it belongs to
+// brokerID and expires after now. The check and the delete are one DELETE
+// statement, so of several concurrent callers only one deletes the row: on
+// Postgres a second DELETE waits on the row lock and then matches nothing,
+// and SQLite serializes writers.
+func (s *BrokerSecretStore) ConsumeJoinToken(ctx context.Context, tokenHash, brokerID string, now time.Time) error {
+	if tokenHash == "" {
+		return store.ErrNotFound
+	}
+	uid, err := parseUUID(brokerID)
+	if err != nil {
+		// No token can belong to a broker ID that is not a UUID.
+		return store.ErrNotFound
+	}
+	n, err := s.client.BrokerJoinToken.Delete().
+		Where(
+			brokerjointoken.TokenHashEQ(tokenHash),
+			brokerjointoken.IDEQ(uid),
+			brokerjointoken.ExpiresAtGT(now),
+		).
+		Exec(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+	if n == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
+// DeleteExpiredJoinToken deletes the join token with tokenHash if it has
+// expired at now, in one DELETE statement.
+func (s *BrokerSecretStore) DeleteExpiredJoinToken(ctx context.Context, tokenHash string, now time.Time) error {
+	if tokenHash == "" {
+		return store.ErrNotFound
+	}
+	n, err := s.client.BrokerJoinToken.Delete().
+		Where(
+			brokerjointoken.TokenHashEQ(tokenHash),
+			brokerjointoken.ExpiresAtLTE(now),
+		).
+		Exec(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+	if n == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
 // GetJoinToken retrieves a join token by token hash.
 func (s *BrokerSecretStore) GetJoinToken(ctx context.Context, tokenHash string) (*store.BrokerJoinToken, error) {
 	t, err := s.client.BrokerJoinToken.Query().
@@ -257,10 +375,14 @@ func (s *BrokerSecretStore) DeleteJoinToken(ctx context.Context, brokerID string
 	return nil
 }
 
-// CleanExpiredJoinTokens removes all expired join tokens.
-func (s *BrokerSecretStore) CleanExpiredJoinTokens(ctx context.Context) error {
-	_, err := s.client.BrokerJoinToken.Delete().
-		Where(brokerjointoken.ExpiresAtLT(time.Now())).
+// CleanExpiredJoinTokens removes all expired join tokens and returns how
+// many were removed.
+func (s *BrokerSecretStore) CleanExpiredJoinTokens(ctx context.Context) (int, error) {
+	n, err := s.client.BrokerJoinToken.Delete().
+		Where(brokerjointoken.ExpiresAtLTE(time.Now())).
 		Exec(ctx)
-	return err
+	if err != nil {
+		return 0, mapError(err)
+	}
+	return n, nil
 }
