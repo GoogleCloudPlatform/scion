@@ -2163,16 +2163,26 @@ export class ScionChatComposer extends LitElement {
   }
 
   /**
-   * The "Schedule send…" menu item. Attachments cannot be scheduled, so it
-   * is disabled while files are staged.
+   * Why "Schedule send…" is unavailable right now, or '' when it is
+   * available: there must be text to schedule, not an edit in progress,
+   * and no staged attachments (they cannot be scheduled).
    */
+  private scheduleBlockedReason(): string {
+    if (this.editMessage) return 'Finish or cancel the edit first';
+    if (this.pendingFiles.length > 0) return 'Attachments cannot be scheduled';
+    if (!this.text.trim()) return 'Type a message to schedule';
+    return '';
+  }
+
+  /** The "Schedule send…" menu item, disabled with a reason when unavailable. */
   private renderScheduleMenuItem(): TemplateResult {
-    const blocked = this.pendingFiles.length > 0;
+    const reason = this.scheduleBlockedReason();
+    const blocked = reason !== '';
     return html`
       <div
         class="send-context-item schedule-send-item ${blocked ? 'disabled' : ''}"
         aria-disabled=${blocked ? 'true' : 'false'}
-        title=${blocked ? 'Attachments cannot be scheduled' : ''}
+        title=${reason}
         @click=${this.handleScheduleMenuItem}
       >
         <sl-icon name="clock"></sl-icon>
@@ -2182,7 +2192,7 @@ export class ScionChatComposer extends LitElement {
   }
 
   private readonly handleScheduleMenuItem = (): void => {
-    if (this.pendingFiles.length > 0) return;
+    if (this.scheduleBlockedReason()) return;
     this.showSendContextMenu = false;
     this.showScheduleDialog = true;
   };

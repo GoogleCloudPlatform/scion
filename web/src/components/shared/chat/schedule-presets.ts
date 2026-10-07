@@ -60,8 +60,11 @@ export function schedulePresets(now: Date, zone: string): SchedulePreset[] {
   ];
 }
 
-/** Minimum lead time the dialog accepts, so the hub sees a future time. */
-export const MIN_SCHEDULE_LEAD_MS = 60_000;
+/**
+ * Minimum lead time the dialog accepts. The hub requires 60 s; the extra
+ * margin covers request latency and clock differences.
+ */
+export const MIN_SCHEDULE_LEAD_MS = 75_000;
 
 /**
  * Converts a `datetime-local` value in `zone` to a UTC ISO instant and

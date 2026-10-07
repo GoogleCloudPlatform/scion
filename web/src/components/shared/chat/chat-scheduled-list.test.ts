@@ -146,6 +146,24 @@ describe('scion-chat-scheduled-list', () => {
     expect(items()[0]!.dataset.status).toBe('sending');
   });
 
+  it('a load that started before an SSE update does not overwrite it', async () => {
+    let resolveList: (v: ScheduledMessage[]) => void = () => {};
+    listScheduledMessages.mockReturnValue(
+      new Promise<ScheduledMessage[]>((r) => {
+        resolveList = r;
+      })
+    );
+    // Reconnect starts a reload; while it is in flight, 'a' is sent and 'c' is created.
+    stateManager.dispatchEvent(new CustomEvent('connected'));
+    emit(sm('a', { status: 'sent', messageId: 'm1' }), 'sent');
+    emit(sm('c', { fireAt: '2099-10-10T07:00:00Z' }));
+    await flush(el);
+    // The stale GET result still lists 'a' as pending and lacks 'c'.
+    resolveList([sm('a'), sm('b', { fireAt: '2099-10-09T07:00:00Z' })]);
+    await flush(el);
+    expect(items().map((i) => i.dataset.id)).toEqual(['b', 'c']);
+  });
+
   it('shows nothing and ignores events while disabled', async () => {
     el.enabled = false;
     await flush(el);

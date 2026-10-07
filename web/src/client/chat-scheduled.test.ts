@@ -36,6 +36,7 @@ import {
   createScheduledMessage,
   listScheduledMessages,
   scheduledFailureText,
+  sortScheduled,
   type ScheduledMessage,
 } from './chat-scheduled.js';
 
@@ -82,6 +83,14 @@ describe('applyScheduledUpdate', () => {
     list = applyScheduledUpdate(list, sm('b', '2026-10-08T09:00:00Z', 'sent'));
     list = applyScheduledUpdate(list, sm('a', '2026-10-08T08:00:00Z', 'cancelled'));
     expect(list).toEqual([]);
+  });
+});
+
+describe('sortScheduled', () => {
+  it('orders by instant, not by text (the hub trims fractional zeros)', () => {
+    const later = sm('later', '2026-10-08T08:00:00.5Z');
+    const earlier = sm('earlier', '2026-10-08T08:00:00Z');
+    expect(sortScheduled([later, earlier]).map((m) => m.id)).toEqual(['earlier', 'later']);
   });
 });
 

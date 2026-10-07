@@ -154,12 +154,26 @@ describe('composer — schedule send', () => {
     expect(el.text).toBe('send this tomorrow');
   });
 
+  it('is disabled with a reason when there is no text to schedule', async () => {
+    el.scheduleSendEnabled = true;
+    el.text = '';
+    el.runeCount = 0;
+    el.showSendContextMenu = true;
+    await el.updateComplete;
+    expect(scheduleItem()?.getAttribute('aria-disabled')).toBe('true');
+    expect(scheduleItem()?.getAttribute('title')).toBe('Type a message to schedule');
+    scheduleItem()!.click();
+    await el.updateComplete;
+    expect(dialog().open).toBe(false);
+  });
+
   it('is disabled while attachments are staged', async () => {
     el.scheduleSendEnabled = true;
     el.pendingFiles = [{ id: 'a1', name: 'f.txt', mime: 'text/plain', size: 1, url: '' }];
     await el.updateComplete;
     await openMenu();
     expect(scheduleItem()?.getAttribute('aria-disabled')).toBe('true');
+    expect(scheduleItem()?.getAttribute('title')).toBe('Attachments cannot be scheduled');
 
     scheduleItem()!.click();
     await el.updateComplete;

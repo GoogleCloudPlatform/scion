@@ -57,7 +57,7 @@ export interface ScheduledMessage {
 
 /** The payload of a `user.<id>.chat.scheduled` SSE event. */
 export interface ScheduledMessageEvent {
-  action: 'created' | 'cancelled' | 'sent' | 'failed';
+  action: 'created' | 'cancelled' | 'sending' | 'sent' | 'failed';
   scheduledMessage: ScheduledMessage;
 }
 
@@ -168,12 +168,22 @@ export function applyScheduledUpdate(
   return sortScheduled([...rest, updated]);
 }
 
-/** Orders scheduled messages by fire time, then creation time. */
+/** Milliseconds since the epoch for an ISO instant; unparsable sorts last. */
+function instantMs(iso: string): number {
+  const ms = Date.parse(iso);
+  return Number.isNaN(ms) ? Number.MAX_SAFE_INTEGER : ms;
+}
+
+/**
+ * Orders scheduled messages by fire time, then creation time, then ID.
+ * Times are compared as instants: the hub trims trailing fractional zeros,
+ * so the ISO strings do not sort correctly as text.
+ */
 export function sortScheduled(list: readonly ScheduledMessage[]): ScheduledMessage[] {
   return [...list].sort(
     (a, b) =>
-      a.fireAt.localeCompare(b.fireAt) ||
-      a.createdAt.localeCompare(b.createdAt) ||
-      a.id.localeCompare(b.id)
+      instantMs(a.fireAt) - instantMs(b.fireAt) ||
+      instantMs(a.createdAt) - instantMs(b.createdAt) ||
+      (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
   );
 }

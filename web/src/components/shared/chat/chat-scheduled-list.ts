@@ -60,6 +60,11 @@ export class ScionChatScheduledList extends LitElement {
   readonly _zone = new DisplayZoneController(this);
   private refreshTimer: ReturnType<typeof setInterval> | null = null;
   private loadGeneration = 0;
+  /**
+   * Changes applied while a load is in flight, replayed onto its result so
+   * a GET that started earlier cannot overwrite them. Null when idle.
+   */
+  private updatesDuringLoad: ScheduledMessage[] | null = null;
 
   static override styles = css`
     :host {
@@ -154,6 +159,12 @@ export class ScionChatScheduledList extends LitElement {
   /** Show a message this session just scheduled (before its SSE event). */
   add(message: ScheduledMessage): void {
     if (message.conversationKey !== this.conversationKey) return;
+    this.applyUpdate(message);
+  }
+
+  /** Apply one change now, and again onto an in-flight load's result. */
+  private applyUpdate(message: ScheduledMessage): void {
+    this.updatesDuringLoad?.push(message);
     this.messages = applyScheduledUpdate(this.messages, message);
   }
 
@@ -165,13 +176,21 @@ export class ScionChatScheduledList extends LitElement {
   private async load(): Promise<void> {
     const generation = ++this.loadGeneration;
     const key = this.conversationKey;
+    this.updatesDuringLoad = null;
     if (!this.enabled || !key) return;
+    this.updatesDuringLoad = [];
     try {
       const list = await listScheduledMessages(key);
       if (generation !== this.loadGeneration) return;
-      this.messages = sortScheduled(list);
+      let merged = sortScheduled(list);
+      for (const update of this.updatesDuringLoad ?? []) {
+        merged = applyScheduledUpdate(merged, update);
+      }
+      this.messages = merged;
     } catch {
       // Best effort: the thread works without the list; a reconnect retries.
+    } finally {
+      if (generation === this.loadGeneration) this.updatesDuringLoad = null;
     }
   }
 
@@ -184,7 +203,7 @@ export class ScionChatScheduledList extends LitElement {
     const detail = (e as CustomEvent<{ data?: ScheduledMessageEvent }>).detail;
     const m = detail?.data?.scheduledMessage;
     if (!m || m.conversationKey !== this.conversationKey) return;
-    this.messages = applyScheduledUpdate(this.messages, m);
+    this.applyUpdate(m);
   };
 
   private async cancel(m: ScheduledMessage): Promise<void> {
@@ -192,7 +211,7 @@ export class ScionChatScheduledList extends LitElement {
     this.cancelling = new Set([...this.cancelling, m.id]);
     try {
       await cancelScheduledMessage(this.conversationKey, m.id);
-      this.messages = applyScheduledUpdate(this.messages, { ...m, status: 'cancelled' });
+      this.applyUpdate({ ...m, status: 'cancelled' });
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Failed to cancel message', 'danger');
       void this.load();
