@@ -348,6 +348,9 @@ test('E: back/forward navigation restores layout state from URL', async ({ page 
   // Start at a non-terminal page (creates a history entry)
   await page.goto('/');
   await expect(page).toHaveURL('/');
+  // The router listens for nav-click only once app init has rendered the
+  // first route; dispatching earlier drops the event.
+  await expect(page.locator('scion-page-home')).toBeVisible();
 
   // Navigate to a multi-pane layout URL (via nav-click → pushState)
   await page.evaluate(
