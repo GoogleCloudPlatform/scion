@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -252,4 +253,56 @@ func TestMessageArtifacts_ViewsAreReadCheckedPerViewer(t *testing.T) {
 	require.NoError(t, err)
 	srv.experiments = reg
 	assert.Nil(t, srv.messageArtifactViews(ownerCtx, []string{"msg-1"}))
+}
+
+// TestMessageArtifacts_UnreadableIsByteIdenticalToMissing: what a reader
+// gets for an artifact it cannot read is byte for byte what it gets for one
+// that does not exist, apart from the id it named itself: the web view's
+// JSON, and the sender's warning and resulting metadata.
+func TestMessageArtifacts_UnreadableIsByteIdenticalToMissing(t *testing.T) {
+	srv, s, _, sender, _, _, _, _ := paritySetup(t)
+	st, _ := enableArtifactsForTest(t, srv)
+	ident := tokenBackedSender(t, s, sender)
+	senderCtx := contextWithIdentity(context.Background(), ident)
+
+	unreadable := seedMessageArtifact(t, st, tid("msgart-other-project"), artifacts.PrincipalKindUser, tid("msgart-stranger"), "Secret title")
+	missing := uuid.NewString()
+
+	normalize := func(b []byte, id string) string { return strings.ReplaceAll(string(b), id, "<id>") }
+
+	// Web views, single and pinned refs.
+	for _, seq := range []int{0, 1} {
+		uMsg, mMsg := fmt.Sprintf("u-%d", seq), fmt.Sprintf("m-%d", seq)
+		require.NoError(t, st.AddMessageRefs(context.Background(), uMsg, []artifacts.MessageRef{{ArtifactID: unreadable, Seq: seq}}))
+		require.NoError(t, st.AddMessageRefs(context.Background(), mMsg, []artifacts.MessageRef{{ArtifactID: missing, Seq: seq}}))
+		views := srv.messageArtifactViews(senderCtx, []string{uMsg, mMsg})
+		u, err := json.Marshal(views[uMsg])
+		require.NoError(t, err)
+		m, err := json.Marshal(views[mMsg])
+		require.NoError(t, err)
+		assert.Equal(t, normalize(m, missing), normalize(u, unreadable), "seq %d", seq)
+		assert.NotContains(t, string(u), "Secret title")
+	}
+
+	// Send-time admission: same metadata, same dropped count, same warning.
+	outU, admU, dropU := srv.admitMessageArtifacts(senderCtx, map[string]string{"k": "v", artifacts.MessageMetadataKey: refsValue(artifacts.MessageRef{ArtifactID: unreadable})})
+	outM, admM, dropM := srv.admitMessageArtifacts(senderCtx, map[string]string{"k": "v", artifacts.MessageMetadataKey: refsValue(artifacts.MessageRef{ArtifactID: missing})})
+	assert.Equal(t, outM, outU)
+	assert.Equal(t, admM, admU)
+	assert.Equal(t, dropM, dropU)
+	assert.Equal(t, artifactRefsWarning(dropM), artifactRefsWarning(dropU))
+}
+
+// TestSanitizeCrossProjectObserver_DropsArtifactRefs: a cross-project
+// observer copy loses the artifact references and the admitted flag along
+// with the body.
+func TestSanitizeCrossProjectObserver_DropsArtifactRefs(t *testing.T) {
+	md := map[string]string{"keep": "me", artifacts.MessageMetadataKey: refsValue(artifacts.MessageRef{ArtifactID: uuid.NewString()})}
+	msg := &messages.StructuredMessage{Msg: "body", Metadata: md, ArtifactRefsAdmitted: true}
+	sanitizeCrossProjectObserver(msg)
+	assert.Empty(t, msg.Msg)
+	assert.False(t, msg.ArtifactRefsAdmitted)
+	assert.NotContains(t, msg.Metadata, artifacts.MessageMetadataKey)
+	assert.Equal(t, "me", msg.Metadata["keep"])
+	assert.Contains(t, md, artifacts.MessageMetadataKey, "the caller's map is not mutated")
 }
