@@ -68,10 +68,30 @@ func TestParseArtifactsDoc(t *testing.T) {
 		},
 		{
 			name: "file limit equal to bundle limit",
-			raw:  `{"max_file_bytes":4096,"max_bundle_bytes":4096,"remote_image_max_bytes":4096}`,
+			raw:  `{"max_file_bytes":4096,"max_bundle_bytes":4096}`,
 			want: func() ArtifactsConfig {
 				c := DefaultArtifactsConfig()
 				c.MaxFileBytes, c.MaxBundleBytes, c.RemoteImageMaxBytes = 4096, 4096, 4096
+				return c
+			}(),
+		},
+		{
+			// A document written before remote images existed stays valid:
+			// the omitted remote caps follow the lower file limits.
+			name: "lower file count clamps the remote image count",
+			raw:  `{"max_files":10}`,
+			want: func() ArtifactsConfig {
+				c := DefaultArtifactsConfig()
+				c.MaxFiles, c.RemoteImageMaxCount = 10, 10
+				return c
+			}(),
+		},
+		{
+			name: "lower file size clamps the remote image size",
+			raw:  `{"max_file_bytes":1048576}`,
+			want: func() ArtifactsConfig {
+				c := DefaultArtifactsConfig()
+				c.MaxFileBytes, c.RemoteImageMaxBytes = 1048576, 1048576
 				return c
 			}(),
 		},
@@ -87,15 +107,7 @@ func TestParseArtifactsDoc(t *testing.T) {
 		{name: "zero max link TTL", raw: `{"link_max_ttl_hours":0}`, want: malformed, wantErr: true},
 		{name: "file limit above bundle limit", raw: `{"max_file_bytes":2048,"max_bundle_bytes":1024}`, want: malformed, wantErr: true},
 		{name: "default TTL above max TTL", raw: `{"link_default_ttl_hours":800}`, want: malformed, wantErr: true},
-		{name: "zero remote image count", raw: `{"remote_image_max_count":0}`, want: malformed, wantErr: true},
-		{name: "zero remote image bytes", raw: `{"remote_image_max_bytes":0}`, want: malformed, wantErr: true},
-		{name: "zero remote fetch timeout", raw: `{"remote_image_fetch_timeout_s":0}`, want: malformed, wantErr: true},
-		{name: "negative remote budget", raw: `{"remote_image_total_budget_s":-1}`, want: malformed, wantErr: true},
 		{name: "remote images enabled wrong type", raw: `{"remote_images_enabled":"yes"}`, want: malformed, wantErr: true},
-		{name: "remote image larger than a file", raw: `{"max_file_bytes":1024,"max_bundle_bytes":4096,"remote_image_max_bytes":2048}`, want: malformed, wantErr: true},
-		{name: "more remote images than files", raw: `{"max_files":10,"remote_image_max_count":11}`, want: malformed, wantErr: true},
-		{name: "remote budget below one fetch timeout", raw: `{"remote_image_fetch_timeout_s":20,"remote_image_total_budget_s":10}`, want: malformed, wantErr: true},
-		{name: "remote budget above the cap", raw: `{"remote_image_total_budget_s":61}`, want: malformed, wantErr: true},
 		{name: "malformed doc with enabled true stays disabled", raw: `{"enabled":true,"max_files":-5}`, want: malformed, wantErr: true},
 	}
 	for _, tt := range tests {
@@ -139,5 +151,33 @@ func TestArtifactsSchema(t *testing.T) {
 		if errs := Validate("artifacts", json.RawMessage(doc)); len(errs) == 0 {
 			t.Errorf("Validate(%s) = no errors, want a rejection", doc)
 		}
+	}
+}
+
+// TestParseArtifactsDocRemoteImageValues: an invalid remote image value
+// turns remote images off and names the problem; the service stays on.
+func TestParseArtifactsDocRemoteImageValues(t *testing.T) {
+	for _, tc := range []struct{ name, raw string }{
+		{"zero remote image count", `{"remote_image_max_count":0}`},
+		{"zero remote image bytes", `{"remote_image_max_bytes":0}`},
+		{"zero remote fetch timeout", `{"remote_image_fetch_timeout_s":0}`},
+		{"negative remote budget", `{"remote_image_total_budget_s":-1}`},
+		{"remote image larger than a file", `{"max_file_bytes":1024,"max_bundle_bytes":4096,"remote_image_max_bytes":2048}`},
+		{"more remote images than files", `{"max_files":10,"remote_image_max_count":11}`},
+		{"remote budget below one fetch timeout", `{"remote_image_fetch_timeout_s":20,"remote_image_total_budget_s":10}`},
+		{"remote budget above the cap", `{"remote_image_total_budget_s":61}`},
+	} {
+		got, err := ParseArtifactsDoc(json.RawMessage(tc.raw))
+		if err != nil || got.Malformed || !got.Enabled {
+			t.Errorf("%s: service disabled: %+v, %v", tc.name, got, err)
+		}
+		if got.RemoteImagesEnabled || got.RemoteImagesInvalid == "" {
+			t.Errorf("%s: remote images still on: %+v", tc.name, got)
+		}
+	}
+	// Explicit values within the limits keep remote images on.
+	got, err := ParseArtifactsDoc(json.RawMessage(`{"max_files":10,"remote_image_max_count":10}`))
+	if err != nil || !got.RemoteImagesEnabled || got.RemoteImagesInvalid != "" {
+		t.Errorf("valid explicit values: %+v, %v", got, err)
 	}
 }

@@ -753,7 +753,7 @@ func TestArtifactsPublishRefusedWithBothScopesIsPlainForbidden(t *testing.T) {
 func TestArtifactsTwoStepBundleOnRoutes(t *testing.T) {
 	srv, s := testServer(t)
 	enableArtifactsForTest(t, srv)
-	srv.SetOperationalSettings(artifactsOps(t, `{"max_files":2,"remote_image_max_count":2}`))
+	srv.SetOperationalSettings(artifactsOps(t, `{"max_files":2}`))
 	p1 := artifactProject(t, s, "twostep-p1")
 	p2 := artifactProject(t, s, "twostep-p2")
 	_, ownerTok := artifactAgent(t, srv, s, p1.ID, "twostep-owner", AgentRoleBaseline)

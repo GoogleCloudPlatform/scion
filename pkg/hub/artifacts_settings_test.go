@@ -45,11 +45,11 @@ func TestArtifactsSettings_AbsentRowUsesDefaults(t *testing.T) {
 }
 
 func TestArtifactsSettings_ExplicitValues(t *testing.T) {
-	got := artifactsOps(t, `{"enabled":false,"max_files":10,"remote_image_max_count":10,"link_default_ttl_hours":24}`).Artifacts()
+	got := artifactsOps(t, `{"enabled":false,"max_files":10,"link_default_ttl_hours":24}`).Artifacts()
 	want := opsettings.DefaultArtifactsConfig()
 	want.Enabled = false
 	want.MaxFiles = 10
-	want.RemoteImageMaxCount = 10
+	want.RemoteImageMaxCount = 10 // the omitted remote cap follows max_files
 	want.LinkDefaultTTLHours = 24
 	assert.Equal(t, want, got)
 }
