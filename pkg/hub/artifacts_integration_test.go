@@ -911,6 +911,12 @@ func TestArtifactsHTMLViewOnRoutes(t *testing.T) {
 		srv.Handler().ServeHTTP(out, httptest.NewRequest(http.MethodGet, p, nil))
 		assert.Equal(t, http.StatusUnauthorized, out.Code, p)
 	}
+	// An escaped variant of the view prefix is not admitted without
+	// credentials.
+	escaped := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(escaped, httptest.NewRequest(http.MethodGet, strings.Replace(view.URL, "/view/", "/view%2F", 1), nil))
+	assert.Equal(t, http.StatusUnauthorized, escaped.Code, "escaped view prefix")
+
 	post := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(post, httptest.NewRequest(http.MethodPost, view.URL, nil))
 	assert.Equal(t, http.StatusUnauthorized, post.Code, "only reads pass without credentials")

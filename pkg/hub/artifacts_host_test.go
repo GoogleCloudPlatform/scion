@@ -264,10 +264,20 @@ func TestIsArtifactViewRequest(t *testing.T) {
 		{http.MethodGet, "/api/v1/artifacts/abc/files/index.html", false},
 		{http.MethodGet, "/api/v1/artifactsview/cap/index.html", false},
 		{http.MethodGet, "/api/v1/agents", false},
+		// Escaped forms (the request URL keeps them in RawPath).
+		{http.MethodGet, "/api/v1/artifacts/view/cap/a%20b.png", true},
+		{http.MethodGet, "/api/v1/artifacts/view%2Fcap/index.html", false},
+		{http.MethodGet, "/api/v1%2Fartifacts/view/cap/index.html", false},
+		{http.MethodGet, "/api/v1/artifacts/view/cap/a%2Fb.png", false},
+		{http.MethodGet, "/api/v1/artifacts/view/cap/a%2fb.png", false},
+		{http.MethodGet, "/api/v1/artifacts/view/cap/%2E%2E/x", false},
+		{http.MethodGet, "/api/v1/artifacts/view/cap/%2e/x", false},
+		{http.MethodGet, "/api/v1/artifacts/view/cap/a%5Cb", false},
+		{http.MethodGet, "/api/v1/artifacts/view/c%61p/index.html", false},
+		{http.MethodGet, "/api/v1/artifacts/%76iew/cap/index.html", false},
 	} {
 		r := httptest.NewRequest(tc.method, "http://hub"+tc.target, nil)
-		r.URL.Path = tc.target
-		assert.Equal(t, tc.want, isArtifactViewRequest(r), "%s %s", tc.method, tc.target)
+		assert.Equal(t, tc.want, isArtifactViewRequest(r), "%s %s (path %q raw %q)", tc.method, tc.target, r.URL.Path, r.URL.RawPath)
 	}
 }
 
