@@ -5110,7 +5110,7 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 				"executor_id", dispatchExecutor.ID)
 			// No revoke here: DispatchAgentCreate revokes any credential it
 			// minted on its error return.
-			return rollback(createRollback{Stage: createStageDispatch, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(dispatcher, agent)})
+			return rollback(createRollback{Stage: createStageDispatch, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)})
 		}
 		if created.AcceptedLaunch() != nil {
 			// The row is already provisioning; persist the non-status

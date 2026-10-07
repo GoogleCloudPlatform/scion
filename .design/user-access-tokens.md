@@ -96,7 +96,7 @@ type UserAccessToken struct {
 
 #### Capability Scopes
 
-Scopes are defined as `resource:action` pairs, derived from the existing `AuthzService` action constants and resource types. For the initial implementation, scopes map to what the system can currently enforce:
+Scopes are defined as `resource:action` pairs, derived from the existing `AuthzService` action constants and resource types. A selector is derived from its permission ID: every segment but the last joined with `_`, a colon, then the last segment (`agent.create` gives `agent:create`, `hub.config.read` gives `hub_config:read`). For the initial implementation, scopes map to what the system can currently enforce:
 
 | Scope | Permits | Typical CI/CD Use |
 |-------|---------|-------------------|
