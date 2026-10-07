@@ -70,6 +70,7 @@ Controls the central Hub API server.
 | `start_max_duration` | duration | `"12m"` | Hard deadline on any agent start, including a wait for another Hub node to dispatch it. Minimum `11m` (the broker's pod-ready bound plus a minute). Hot-reloaded. Env: `SCION_SERVER_HUB_STARTMAXDURATION`. |
 | `start_unconfirmed_hold` | duration | `"13m"` | Longest time a start whose outcome is unknown (for example a dispatch timeout) keeps other starts of the agent waiting, until the runtime shows whether it created anything. Minimum `12m40s` (the broker's whole start budget plus a minute). Hot-reloaded. Env: `SCION_SERVER_HUB_STARTUNCONFIRMEDHOLD`. |
 | `start_create_unconfirmed_hold` | duration | `"5m"` | `start_unconfirmed_hold` for a new agent's create-and-start. Allowed `3m` up to `start_unconfirmed_hold`. Hot-reloaded. Env: `SCION_SERVER_HUB_STARTCREATEUNCONFIRMEDHOLD`. |
+| `perf_trace` | bool | `false` | Turns on per-request performance tracing for diagnosis. Observe only. See [Request performance tracing](#request-performance-tracing). Startup-only: restart required to change. Env: `SCION_SERVER_HUB_PERFTRACE`. |
 | `cors` | object | | CORS configuration (see below). |
 | `conduit` | object | | Conduit relay settings (see [Conduit](#conduit-serverhubconduit)). |
 
@@ -130,6 +131,33 @@ server:
 ```
 
 Both keys are read only at Hub startup; restart the Hub after changing them. They cannot be set through the admin server-config API (see [Layer 0](#layer-0--bootstrap-file--env-only)).
+
+#### Request performance tracing
+
+`perf_trace: true` (env `SCION_SERVER_HUB_PERFTRACE=true`) records where Hub API requests and SSE connections spend their time, and how many authorization store reads and decision-audit records each request causes. It is for diagnosing slow agent lists on a test or staging Hub, or briefly on a production Hub. It is off by default.
+
+```yaml
+server:
+  hub:
+    perf_trace: true
+```
+
+**Observe only.** Tracing never changes an authorization decision, a decision-audit record (content, count or delivery), a response body, filtering, sorting, redaction or lineage. The only change a client can see is the extra response headers described below, and only on requests that ask for them.
+
+**What it records.** Each Hub API request writes one `perf_trace` log line (subsystem `hub.perf-trace`); an SSE connection writes one at connect and one at close (`sse_stage`). A line holds:
+
+- `endpoint`: a fixed endpoint class, for example `agents.global.legacy`, `agents.global.sorted`, `agents.project.legacy`, `agents.project.sorted`, `agents.project.sorted_agent`, `sse.events`, or `other`.
+- `phase_<name>_us` and `phase_<name>_n`: time (microseconds) and count per phase. Phases are `list_scope_authz` (list-level authorization before rows are read), `list_db_read` (agent row and member reads; database time only), `list_read_authz` (per-row read decisions), `enrich`, `capabilities` (per-item capabilities and the env-view decision), `messageability`, `scope_capabilities`, `serialize` (encoding and writing the body), and for SSE `sse_expand`, `sse_authorize` and `sse_write`.
+- `store_<method>_n` and `store_<method>_us`, `authz_store_calls`, `authz_store_us`: reads the authorization service makes to prepare its inputs (groups, role bindings, role definitions, access constraints, delegation edges, and user, agent, project and membership rows), counted after request-local reuse.
+- `audit_records`, `audit_allow`, `audit_deny`, `audit_emit_us`: decision-audit records handed to the audit writer. Each authorization decision emits one record, so `audit_records` is the request's decision count. The database write happens off the request path.
+- `db_wait_count`, `db_wait_us`, `db_in_use`, `db_open`: connection-pool waits during the request and pool use at its end, when the database driver reports them. The pool is shared, so waits include concurrent requests and the audit writer.
+- `elapsed_us`, `method`, `request_id` (for correlation only), and for SSE `sse_events`.
+
+**Response headers.** A request that sends `X-Scion-Perf-Trace: 1` also gets `X-Scion-Perf-Endpoint`, `X-Scion-Perf-Phases`, `X-Scion-Perf-Phase-Counts`, `X-Scion-Perf-Store-Calls`, `X-Scion-Perf-Store-Us`, `X-Scion-Perf-Decisions` and, when available, `X-Scion-Perf-DB`. Values are `name=integer` pairs; durations are microseconds. The headers are set when the response starts, so they omit `serialize`. The `perf/bench` API benchmark records them with `--want-perf-trace`. Counts (store calls, decisions, phase counts) do not depend on machine speed, so they suit CI budgets; durations do not.
+
+**Cardinality and privacy.** Phase names, store methods, endpoint classes and audit outcomes are fixed sets. No path, query, ID, name, email, token, secret or configuration value is logged or used as a label.
+
+**Overhead.** With tracing off, no middleware or decorator is installed, and each recording point in the list handlers is one context lookup that finds nothing. With tracing on, each recorded phase or store read adds two clock reads and an uncontended lock, plus a few hundred bytes and one log line per request. The headers expose request timing to the caller, so do not leave tracing on for a multi-tenant production Hub.
 
 ### Broker Settings (`server.broker`)
 
@@ -950,6 +978,7 @@ Settings required before the database connection exists, or that are restart-bou
 | CORS | `hub.cors.*`, `broker.cors` |
 | Messaging/plugins | `message_broker.*`, `plugins.*` |
 | Async agent create | `hub.async_agent_launch`, `hub.launch_timeout`, `hub.launch_keepalive_seconds` |
+| Diagnostics | `hub.perf_trace` |
 | Heartbeat reconcile | `hub.missing_agent_grace` |
 | Conduit relay | `hub.conduit.*` |
 
