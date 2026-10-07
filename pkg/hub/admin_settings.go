@@ -749,10 +749,15 @@ func setOrDeleteString(raw map[string]interface{}, key string, v *string) {
 }
 
 // applySettingsUpdates merges the update request into the raw settings map.
-// The server section is deep-merged from the typed request alone, so a
-// zero value in req.Server cannot be told apart from an omitted field and
-// keeps the stored value. The PUT handler uses applySettingsUpdatesFromBody
-// so that an explicit "" or null in the body clears a server field.
+// It is used only by tests of the non-server settings; the PUT handler
+// uses applySettingsUpdatesFromBody. The two differ for the server
+// section: here it is deep-merged from the typed request alone, so a zero
+// value in req.Server cannot be told apart from an omitted field and keeps
+// the stored value, while the PUT handler passes the request body so that
+// an explicit null, or the zero value of a non-pointer field, clears a
+// server field (see mergeServerSettings). Tests that
+// assert on server fields must use applySettingsUpdatesFromBody with a
+// real body.
 func applySettingsUpdates(raw map[string]interface{}, req *ServerConfigUpdateRequest) {
 	applySettingsUpdatesFromBody(raw, req, nil)
 }
