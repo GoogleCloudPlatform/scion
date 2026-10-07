@@ -256,6 +256,11 @@ type BrokerHeartbeat struct {
 	// on every heartbeat. Nil (an older broker) keeps the stored value; a
 	// non-nil empty string reports that the broker has no active profile.
 	DefaultProfile *string `json:"defaultProfile,omitempty"`
+	// Health is the broker's report of its own health (default runtime,
+	// NFS mounts), refreshed on every heartbeat. It never changes the
+	// broker's online/offline status. An older broker omits it and the
+	// hub keeps the stored value; an older hub ignores it.
+	Health *api.BrokerHealthReport `json:"health,omitempty"`
 }
 
 // StartInFlight identifies one agent start running on a broker.

@@ -2169,6 +2169,7 @@ var (
 		{Name: "runtimes", Type: field.TypeString, Nullable: true},
 		{Name: "default_profile", Type: field.TypeString, Nullable: true},
 		{Name: "workspace_storage", Type: field.TypeString, Nullable: true},
+		{Name: "health", Type: field.TypeString, Nullable: true},
 		{Name: "labels", Type: field.TypeJSON, Nullable: true},
 		{Name: "annotations", Type: field.TypeJSON, Nullable: true},
 		{Name: "endpoint", Type: field.TypeString, Nullable: true},
