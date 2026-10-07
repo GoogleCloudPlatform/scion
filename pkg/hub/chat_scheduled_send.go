@@ -481,6 +481,13 @@ func (s *Server) handleScheduledCancel(w http.ResponseWriter, r *http.Request, k
 // senders beyond the busy workers.
 const scheduledSendWorkers = 4
 
+// scheduledSendYieldAfter is how many messages a worker delivers for one
+// sender before it gives up its slot when that sender has more due. A
+// sender that yielded is listed after the others on the next sweep, so
+// more senders with long batches than there are workers take turns, and a
+// sender with one message gets a slot within a sweep or two.
+const scheduledSendYieldAfter = 5
+
 // scheduledStopGrace is how long stopping the sweeper lets deliveries in
 // progress run before cutting them short (see stopScheduledSendSweeper). It
 // is a variable so tests can shorten it.
@@ -497,6 +504,10 @@ type scheduledSendRuntime struct {
 	stopped bool
 	// inFlight holds the senders with a message being claimed or delivered.
 	inFlight map[string]struct{}
+	// yielded holds the senders whose worker gave up its slot with
+	// messages still due (scheduledSendYieldAfter); they are listed last
+	// until they get a slot again.
+	yielded map[string]struct{}
 	// workers is a semaphore of scheduledSendWorkers slots.
 	workers chan struct{}
 	// running tracks the ticker loop and every sweep and delivery.
@@ -517,6 +528,7 @@ func (s *Server) scheduledRuntime() *scheduledSendRuntime {
 		abortCtx, abort := context.WithCancel(context.Background())
 		s.scheduledSend = &scheduledSendRuntime{
 			inFlight: make(map[string]struct{}),
+			yielded:  make(map[string]struct{}),
 			workers:  make(chan struct{}, scheduledSendWorkers),
 			abortCtx: abortCtx,
 			abort:    abort,
@@ -641,6 +653,7 @@ func (s *Server) sweepScheduledMessages(ctx context.Context, now time.Time) int 
 	}
 
 	rt := s.scheduledRuntime()
+	due = rt.yieldedLast(due)
 	var claimed atomic.Int64
 	var batch sync.WaitGroup
 	for i := range due {
@@ -659,6 +672,7 @@ func (s *Server) sweepScheduledMessages(ctx context.Context, now time.Time) int 
 			select {
 			case rt.workers <- struct{}{}:
 				rt.inFlight[sender] = struct{}{}
+				delete(rt.yielded, sender)
 				batch.Add(1)
 				rt.running.Add(1)
 			default:
@@ -678,19 +692,40 @@ func (s *Server) sweepScheduledMessages(ctx context.Context, now time.Time) int 
 				rt.mu.Unlock()
 				<-rt.workers
 			}()
-			claimed.Add(int64(s.deliverSenderDue(ctx, sms, &first, now)))
+			claimed.Add(int64(s.deliverSenderDue(ctx, rt, sms, &first, now)))
 		}()
 	}
 	batch.Wait()
 	return int(claimed.Load())
 }
 
+// yieldedLast returns due with the senders that recently yielded their
+// worker moved after the others, keeping the order within each group.
+func (rt *scheduledSendRuntime) yieldedLast(due []ScheduledChatMessage) []ScheduledChatMessage {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if len(rt.yielded) == 0 {
+		return due
+	}
+	out := make([]ScheduledChatMessage, 0, len(due))
+	var later []ScheduledChatMessage
+	for _, row := range due {
+		if _, y := rt.yielded[row.SenderUserID]; y {
+			later = append(later, row)
+		} else {
+			out = append(out, row)
+		}
+	}
+	return append(out, later...)
+}
+
 // deliverSenderDue delivers one sender's due messages one after another,
 // starting with row, and returns how many it claimed. It stops when the
 // sweeper stops, the experiment is turned off, a claim fails, a row is
 // handed back to pending (it is retried next tick), or the sender has no
-// more due messages.
-func (s *Server) deliverSenderDue(ctx context.Context, sms ScheduledMessageStore, row *ScheduledChatMessage, now time.Time) int {
+// more due messages; after scheduledSendYieldAfter claims with more due, it
+// yields its slot (see scheduledSendYieldAfter).
+func (s *Server) deliverSenderDue(ctx context.Context, rt *scheduledSendRuntime, sms ScheduledMessageStore, row *ScheduledChatMessage, now time.Time) int {
 	claimed := 0
 	attempted := make(map[string]bool)
 	for row != nil && !attempted[row.ID] {
@@ -708,6 +743,12 @@ func (s *Server) deliverSenderDue(ctx context.Context, sms ScheduledMessageStore
 		next, err := sms.NextDueScheduledMessage(ctx, row.SenderUserID, now)
 		if err != nil {
 			scheduledSendLog().Warn("scheduled send: fetching next due message failed", "error", err)
+			return claimed
+		}
+		if next != nil && claimed >= scheduledSendYieldAfter {
+			rt.mu.Lock()
+			rt.yielded[next.SenderUserID] = struct{}{}
+			rt.mu.Unlock()
 			return claimed
 		}
 		row = next
@@ -833,6 +874,17 @@ func scheduledFailureFromSendError(serr *chatSendError) string {
 	return ScheduledFailureDeliveryError
 }
 
+// scheduledRefusalReason is the failure reason for a send refused at fire
+// time. A refusal on a delivery that was cut short (ctx done) says nothing
+// about access, so it is a delivery error; the send may have started, so
+// it is not retried.
+func scheduledRefusalReason(ctx context.Context, serr *chatSendError) string {
+	if ctx.Err() != nil {
+		return ScheduledFailureDeliveryError
+	}
+	return scheduledFailureFromSendError(serr)
+}
+
 // finalizeContext returns a fresh context for one final state write,
 // detached from both shutdown and the delivery bound.
 func finalizeContext(ctx context.Context) (context.Context, context.CancelFunc) {
@@ -904,13 +956,7 @@ func (s *Server) fireScheduledMessage(ctx context.Context, sms ScheduledMessageS
 	}()
 	if serr != nil {
 		scheduledSendLog().Info("scheduled send: delivery refused", "id", m.ID, "status", serr.Status, "code", serr.Code)
-		reason := scheduledFailureFromSendError(serr)
-		if ctx.Err() != nil {
-			// Cut short during the send: a refusal then says nothing about
-			// access. The send may have started, so it is not retried.
-			reason = ScheduledFailureDeliveryError
-		}
-		s.failScheduledMessage(base, sms, m, reason)
+		s.failScheduledMessage(base, sms, m, scheduledRefusalReason(ctx, serr))
 		return false
 	}
 

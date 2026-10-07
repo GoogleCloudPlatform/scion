@@ -74,6 +74,11 @@ func setScheduledSendExperiment(t *testing.T, srv *Server, enabled bool) {
 func newScheduledSendFixture(t *testing.T) *scheduledSendFixture {
 	t.Helper()
 	srv, s, alice, bob, project := setupDemoPolicyTest(t)
+	return newScheduledSendFixtureOn(t, srv, s, alice, bob, project)
+}
+
+func newScheduledSendFixtureOn(t *testing.T, srv *Server, s store.Store, alice, bob *store.User, project *store.Project) *scheduledSendFixture {
+	t.Helper()
 	ctx := context.Background()
 	// alice owns the project; bob is an ordinary project member.
 	addProjectMemberWithRole(t, s, project, bob.ID, store.GroupMemberRoleMember)
@@ -897,6 +902,7 @@ func TestScheduledStore_Postgres(t *testing.T) {
 	testScheduledStoreTransitions(t, sms[0])
 	testScheduledStoreDuePerSender(t, sms[0])
 	testCancelClaimRace(t, sms[0], sms[1], "pg-race")
+	testOneSenderTwoReplicas(t, sms[0], sms[1], "pg-one-sender", 30)
 
 	const n = 40
 	for i := 0; i < n; i++ {
@@ -1511,17 +1517,26 @@ func TestScheduledSend_HeavySendersDoNotStarveOthers(t *testing.T) {
 		return f.row(t, carol, c1.ID).Status == ScheduledMessageSent
 	}, 5*time.Second, 20*time.Millisecond, "carol's message is listed and sent despite 52 older ones")
 
-	// A later sweep, while bob and alice are still blocked.
-	c2 := carolRow("carol-2", base.Add(2*time.Minute))
-	assert.Equal(t, 1, f.srv.sweepScheduledMessages(ctx, now.Add(time.Second)))
+	// A later sweep, while bob and alice are still blocked. carol-2 falls
+	// due after the first sweep's "now", so only the later sweep sees it.
+	c2 := carolRow("carol-2", now.Add(time.Second))
+	assert.Equal(t, 1, f.srv.sweepScheduledMessages(ctx, now.Add(2*time.Second)))
 	assert.Equal(t, ScheduledMessageSent, f.row(t, carol, c2.ID).Status)
 
 	close(disp.release)
-	assert.Equal(t, 53, <-first, "bob's and alice's 52 plus carol's first")
+	// The first sweep's workers yield after scheduledSendYieldAfter each.
+	assert.Equal(t, 2*scheduledSendYieldAfter+1, <-first)
 	f.srv.waitScheduledDeliveries()
-	n, err := f.sms.CountActiveScheduledMessages(ctx, f.bob.ID)
-	require.NoError(t, err)
-	assert.Equal(t, 0, n)
+	for i := 0; i < 20; i++ {
+		if f.srv.sweepScheduledMessages(ctx, now.Add(2*time.Second)) == 0 {
+			break
+		}
+	}
+	for _, u := range []string{f.bob.ID, f.alice.ID, carol.ID} {
+		n, err := f.sms.CountActiveScheduledMessages(ctx, u)
+		require.NoError(t, err)
+		assert.Equal(t, 0, n, "all delivered eventually")
+	}
 }
 
 // Stopping cuts deliveries short; a claimed row whose checks are cut short
@@ -1638,4 +1653,193 @@ func testScheduledStoreDuePerSender(t *testing.T, sms ScheduledMessageStore) {
 	next, err = sms.NextDueScheduledMessage(ctx, "dps-c", time.Now())
 	require.NoError(t, err)
 	assert.Nil(t, next, "not due yet")
+}
+
+// ---------------------------------------------------------------------------
+// Review round 5
+// ---------------------------------------------------------------------------
+
+// A refusal on a delivery that was cut short is a delivery error; the same
+// refusal on a live delivery keeps its meaning.
+func TestScheduledSend_RefusalReason(t *testing.T) {
+	live := context.Background()
+	cut, cancel := context.WithCancel(context.Background())
+	cancel()
+	assert.Equal(t, ScheduledFailureNoAccess, scheduledRefusalReason(live, chatSendForbidden()))
+	assert.Equal(t, ScheduledFailureDeliveryError, scheduledRefusalReason(cut, chatSendForbidden()))
+	assert.Equal(t, ScheduledFailureDeliveryError, scheduledRefusalReason(cut, chatSendNotFound("Thread")))
+}
+
+// abortOnProjectStore aborts the scheduled-send runtime during the first
+// GetProject made by a scheduled delivery while armed, and still answers
+// it: the fire-time checks then finish their store reads and only the
+// access decision sees the cut-short context. Other callers (background
+// work of the test server) are not counted.
+type abortOnProjectStore struct {
+	store.Store
+	fault *storeFaultSwitch
+	srv   atomic.Pointer[Server]
+	calls atomic.Int32
+}
+
+func (w *abortOnProjectStore) GetProject(ctx context.Context, id string) (*store.Project, error) {
+	exec, _ := ExecutorContextFromContext(ctx)
+	if w.fault.Active() && exec.Kind == scheduledSendClientType && w.calls.Add(1) == 1 {
+		w.srv.Load().scheduledRuntime().abort()
+		return w.Store.GetProject(context.WithoutCancel(ctx), id)
+	}
+	return w.Store.GetProject(ctx, id)
+}
+
+// A delivery cut short after the fire-time store reads (so only the
+// access decision sees the cancelled context) goes back to pending with a
+// released event; it does not fail with a misleading reason.
+func TestScheduledSend_AbortAfterCheckReads_Released(t *testing.T) {
+	srv, s, alice, bob, project, wrapped, fault := setupDemoPolicyTestWithFault(t,
+		func(inner store.Store, fault *storeFaultSwitch) *abortOnProjectStore {
+			return &abortOnProjectStore{Store: inner, fault: fault}
+		})
+	wrapped.srv.Store(srv)
+	f := newScheduledSendFixtureOn(t, srv, s, alice, bob, project)
+	fireAt := time.Now().Add(2 * time.Minute)
+	sm := f.schedule(t, f.bob, "cut after checks", fireAt)
+	events, unsub := f.srv.events.Subscribe("user." + f.bob.ID + ".chat.scheduled")
+	defer unsub()
+
+	fault.Arm()
+	assert.Equal(t, 1, f.srv.sweepScheduledMessages(context.Background(), fireAt.Add(time.Second)))
+	assert.Equal(t, int32(1), wrapped.calls.Load(), "aborted inside the checks' GetProject")
+	got := f.row(t, f.bob, sm.ID)
+	assert.Equal(t, ScheduledMessagePending, got.Status)
+	assert.Empty(t, got.FailureReason)
+	assert.Empty(t, f.topicMessages(t))
+	assert.Equal(t, []string{"sending", "released"}, scheduledEventActions(t, collectEvents(events)))
+}
+
+// slowDispatcher delays every dispatch a little.
+type slowDispatcher struct {
+	brokerMockDispatcher
+	delay time.Duration
+}
+
+func (d *slowDispatcher) DispatchAgentMessage(ctx context.Context, a *store.Agent, msg string, interrupt bool, sm *messages.StructuredMessage) error {
+	time.Sleep(d.delay)
+	return d.brokerMockDispatcher.DispatchAgentMessage(ctx, a, msg, interrupt, sm)
+}
+
+// More senders with long batches than there are workers take turns: each
+// worker yields after scheduledSendYieldAfter messages, senders that
+// yielded are listed last, and a sender with one message is delivered
+// within two sweeps.
+func TestScheduledSend_ManyHeavySendersRotate(t *testing.T) {
+	f := newScheduledSendFixture(t)
+	ctx := context.Background()
+	f.srv.SetDispatcher(&slowDispatcher{delay: 20 * time.Millisecond})
+
+	// Five heavy senders. Rows are inserted directly; bob may message the
+	// topic's agent, so every heavy row is bob's or a stand-in sender that
+	// fails its fire-time checks (still claimed and finalized like any row).
+	heavy := []string{f.bob.ID}
+	for i := 1; i < scheduledSendWorkers+1; i++ {
+		u := &store.User{ID: tid(fmt.Sprintf("heavy-user-%d", i)), Email: fmt.Sprintf("heavy%d@test.com", i),
+			DisplayName: "Heavy", Role: store.UserRoleMember, Status: "active", Created: time.Now()}
+		require.NoError(t, f.store.CreateUser(ctx, u))
+		addProjectMemberWithRole(t, f.store, f.project, u.ID, store.GroupMemberRoleMember)
+		heavy = append(heavy, u.ID)
+	}
+	require.Len(t, heavy, scheduledSendWorkers+1)
+	base := time.Now().Add(-time.Hour)
+	for i := 0; i < 3*scheduledSendYieldAfter; i++ {
+		for j, sender := range heavy {
+			m := newTestScheduledRow(fmt.Sprintf("rot-%d-%d", j, i), sender, base.Add(time.Duration(i)*time.Second))
+			m.ConversationKey = f.topicID
+			_, _, err := f.sms.CreateScheduledMessage(ctx, m)
+			require.NoError(t, err)
+		}
+	}
+	light := newTestScheduledRow("rot-light", f.alice.ID, base.Add(time.Minute))
+	light.ConversationKey = f.topicID
+	_, _, err := f.sms.CreateScheduledMessage(ctx, light)
+	require.NoError(t, err)
+
+	now := time.Now()
+	for sweep := 1; sweep <= 2; sweep++ {
+		f.srv.sweepScheduledMessages(ctx, now)
+		if f.row(t, f.alice, light.ID).Status != ScheduledMessagePending {
+			break
+		}
+	}
+	assert.NotEqual(t, ScheduledMessagePending, f.row(t, f.alice, light.ID).Status,
+		"the light sender is delivered within two sweeps")
+	for _, sender := range heavy {
+		n, err := f.sms.CountActiveScheduledMessages(ctx, sender)
+		require.NoError(t, err)
+		assert.GreaterOrEqual(t, n, scheduledSendYieldAfter, "each heavy sender yielded after %d", scheduledSendYieldAfter)
+	}
+}
+
+// drainSender runs the sweeper's per-sender loop against one store handle:
+// list the sender's oldest due row, then claim and fetch the next until
+// none is left, recording every successful claim.
+func drainSender(ctx context.Context, t *testing.T, st ScheduledMessageStore, sender string, claims chan<- string) {
+	due, err := st.ListDueScheduledMessages(ctx, time.Now(), 100)
+	if !assert.NoError(t, err) {
+		return
+	}
+	var row *ScheduledChatMessage
+	for i := range due {
+		if due[i].SenderUserID == sender {
+			row = &due[i]
+			break
+		}
+	}
+	attempted := map[string]bool{}
+	for row != nil && !attempted[row.ID] {
+		attempted[row.ID] = true
+		ok, err := st.ClaimScheduledMessage(ctx, row.ID, time.Now())
+		assert.NoError(t, err)
+		if ok {
+			claims <- row.ID
+		}
+		next, err := st.NextDueScheduledMessage(ctx, sender, time.Now())
+		if !assert.NoError(t, err) {
+			return
+		}
+		row = next
+	}
+}
+
+// testOneSenderTwoReplicas: one sender with n due rows, two store handles
+// running the sweeper's per-sender loop at once; every row is claimed
+// exactly once.
+func testOneSenderTwoReplicas(t *testing.T, a, b ScheduledMessageStore, sender string, n int) {
+	ctx := context.Background()
+	for i := 0; i < n; i++ {
+		_, _, err := a.CreateScheduledMessage(ctx, newTestScheduledRow(fmt.Sprintf("%s-%d", sender, i), sender, time.Now().Add(-time.Minute)))
+		require.NoError(t, err)
+	}
+	claims := make(chan string, 2*n)
+	done := make(chan struct{})
+	for _, st := range []ScheduledMessageStore{a, b} {
+		go func(st ScheduledMessageStore) {
+			defer func() { done <- struct{}{} }()
+			drainSender(ctx, t, st, sender, claims)
+		}(st)
+	}
+	<-done
+	<-done
+	close(claims)
+	seen := map[string]int{}
+	for id := range claims {
+		seen[id]++
+	}
+	assert.Len(t, seen, n, "every row claimed")
+	for id, c := range seen {
+		assert.Equal(t, 1, c, "row %s claimed more than once", id)
+	}
+}
+
+func TestScheduledSend_TwoReplicas_OneSenderManyRows(t *testing.T) {
+	sms, _ := openScheduledStorePair(t)
+	testOneSenderTwoReplicas(t, sms[0], sms[1], "one-sender", 30)
 }
