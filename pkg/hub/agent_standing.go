@@ -299,13 +299,6 @@ func (s *Server) rootUserAdmitted(ctx context.Context, rootID, projectID, agentI
 	return nil
 }
 
-// userAdmittedToProject reports whether user has live admission to
-// projectID: project membership evidence, or system authority that applies
-// to agents in the project. memo may be nil.
-func (s *Server) userAdmittedToProject(ctx context.Context, user *store.User, projectID string, memo *ProjectAdmissionCache) (bool, error) {
-	return s.userAdmittedToProjectOn(ctx, s.store, user, projectID, memo)
-}
-
 // authzFor returns the authorization service reading through st: the
 // server's own for its store, otherwise one bound to st (a transaction, so
 // the reads run on the transaction's connection).
@@ -316,7 +309,9 @@ func (s *Server) authzFor(st store.Store) *AuthzService {
 	return NewAuthzService(st, s.authzService.logger)
 }
 
-// userAdmittedToProjectOn is userAdmittedToProject reading through st.
+// userAdmittedToProjectOn reports whether user has live admission to
+// projectID, reading through st: project membership evidence, or system
+// authority that applies to agents in the project. memo may be nil.
 func (s *Server) userAdmittedToProjectOn(ctx context.Context, st store.Store, user *store.User, projectID string, memo *ProjectAdmissionCache) (bool, error) {
 	return s.userAdmittedToProjectAs(ctx, st, user, projectID, defaultStandingAdmission, memo)
 }

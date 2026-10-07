@@ -67,7 +67,7 @@ func (f *msFixture) requireTreeHeldAndRefused() {
 	f.t.Helper()
 	// A path may also process its checks in the background right after the
 	// change; drain until the holds are visible (bounded).
-	for i := 0; i < 50 && !(f.held(f.agentA.ID) && f.held(f.childC.ID)); i++ {
+	for i := 0; i < 50 && (!f.held(f.agentA.ID) || !f.held(f.childC.ID)); i++ {
 		f.srv.drainMembershipLossChecks(context.Background())
 		time.Sleep(20 * time.Millisecond)
 	}
