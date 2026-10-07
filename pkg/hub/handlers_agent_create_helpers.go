@@ -1335,6 +1335,9 @@ func (s *Server) handleExistingAgent(
 			if answered {
 				return existingAgentErrored
 			}
+			if writeAgentTokenRecordError(w, err) {
+				return existingAgentErrored
+			}
 			if s.writeStartClaimError(ctx, w, err, existingAgent.ID) || writeStartQuotaError(w, err) {
 				return existingAgentErrored
 			}
@@ -1459,6 +1462,9 @@ func (s *Server) handleExistingAgent(
 			// start fails) and runs afterStart while the claim is held.
 			if err := s.startAgentCore(ctx, existingAgent, StartOpts{Kind: store.StartClaimUser, Task: req.Task, Resume: forcedRecovery, AfterStart: afterStart, SyncDispatchBound: true}); answered || err != nil {
 				if answered {
+					return existingAgentErrored
+				}
+				if writeAgentTokenRecordError(w, err) {
 					return existingAgentErrored
 				}
 				if s.writeStartClaimError(ctx, w, err, existingAgent.ID) || writeStartQuotaError(w, err) {
@@ -1630,6 +1636,9 @@ func (s *Server) handleExistingAgent(
 		// runs afterStart while the claim is held.
 		if err := s.startAgentCore(ctx, existingAgent, StartOpts{Kind: store.StartClaimUser, Task: req.Task, Resume: false, AfterStart: afterStart, SyncDispatchBound: true}); answered || err != nil {
 			if answered {
+				return existingAgentErrored
+			}
+			if writeAgentTokenRecordError(w, err) {
 				return existingAgentErrored
 			}
 			if s.writeStartClaimError(ctx, w, err, existingAgent.ID) || writeStartQuotaError(w, err) {

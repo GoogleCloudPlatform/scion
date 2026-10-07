@@ -136,8 +136,8 @@ func pinResolvedProfile(ac *store.AgentAppliedConfig, profile string) {
 //
 // r is used only to annotate authorization-denial logs with the request
 // path and may be nil for the scheduler, which authorizes against the
-// identity already on ctx (the schedule's creator) rather than an HTTP
-// request; evaluateSAAssignment accepts a nil request.
+// identity already on ctx (the principal of the schedule's latest revision)
+// rather than an HTTP request; evaluateSAAssignment accepts a nil request.
 //
 // A default that names an unavailable, unverified, or unauthorized account
 // fails resolution rather than silently falling back to block (P10): the

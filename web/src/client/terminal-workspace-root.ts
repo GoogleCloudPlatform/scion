@@ -29,6 +29,7 @@ import type { PaletteCandidate } from './chat-palette-types.js';
 import {
   QuickPaletteHost,
   isQuickPaletteShortcut,
+  type QuickPaletteLoadContext,
 } from '../components/shared/palette/quick-palette-host.js';
 import '../components/shared/header.js';
 import { isMacPlatform } from '../utils/platform.js';
@@ -161,8 +162,13 @@ export class TerminalWorkspaceRoot {
     label: 'Jump to agent',
     placeholder: 'Search agents…',
     load: async (context): Promise<PaletteCandidate[]> => {
-      const { loadTerminalPaletteAgents } = await import('./terminal-palette-data.js');
-      return loadTerminalPaletteAgents(context);
+      this.paletteLoad = context;
+      try {
+        const { loadTerminalPaletteAgents } = await import('./terminal-palette-data.js');
+        return await loadTerminalPaletteAgents(context);
+      } finally {
+        if (this.paletteLoad === context) this.paletteLoad = null;
+      }
     },
     onSelect: (target): void => {
       this.paletteFocusAgentId = target.agentId;
@@ -182,6 +188,15 @@ export class TerminalWorkspaceRoot {
    * that session closes ({@link syncSessions}).
    */
   private lastFocusedPaneSessionKey: string | null = null;
+  /** The palette's Agents load in flight, if any; its result supersedes a live update. */
+  private paletteLoad: QuickPaletteLoadContext | null = null;
+  /**
+   * Releases the agent store's hub entry, which the workspace retains while
+   * it is shown, so the palette opens from memory and stays current. Set
+   * as soon as the retain is requested: the store module loads on first
+   * show, outside the main bundle.
+   */
+  private paletteAgentsRelease: (() => void) | null = null;
   /**
    * The agent picked from the palette, whose pane takes focus once it is
    * visible and the palette's close has settled — see
@@ -634,8 +649,56 @@ export class TerminalWorkspaceRoot {
   dispose(): void {
     document.removeEventListener('keydown', this.handleGlobalKeydown);
     document.removeEventListener('focusin', this.handleGlobalFocusIn);
+    this.releasePaletteAgents();
     this.touchQuery?.removeEventListener?.('change', this.handleTouchQueryChange);
     this.paletteHost.dispose();
+  }
+
+  /**
+   * Retains the agent store's hub entry while the workspace is shown. The
+   * store module is imported here, so it stays out of the main bundle; a
+   * release before the import settles retains nothing.
+   */
+  private retainPaletteAgents(): void {
+    if (this.paletteAgentsRelease) return;
+    let release: (() => void) | null = null;
+    let released = false;
+    const handle = (): void => {
+      released = true;
+      release?.();
+      release = null;
+    };
+    this.paletteAgentsRelease = handle;
+    import('./terminal-palette-data.js')
+      .then(({ retainTerminalPaletteAgents }) => {
+        if (released) return;
+        release = retainTerminalPaletteAgents((candidates) =>
+          this.handlePaletteAgentsChange(candidates)
+        );
+      })
+      .catch((err: unknown) => {
+        if (this.paletteAgentsRelease === handle) this.paletteAgentsRelease = null;
+        console.error('[Terminal] agent list unavailable for the palette:', err);
+      });
+  }
+
+  private releasePaletteAgents(): void {
+    const release = this.paletteAgentsRelease;
+    this.paletteAgentsRelease = null;
+    release?.();
+  }
+
+  /**
+   * Keeps the open palette's Agents group current with the store, with no
+   * request. Nothing is published while the palette is closed (the next
+   * open reads the store) or while a load is in flight: its result
+   * supersedes this one, and `setCandidates` would abort it. A load is
+   * tracked from its start until it settles (a superseded load's settling
+   * leaves the newer one tracked), so this needs no check of its own.
+   */
+  private handlePaletteAgentsChange(candidates: PaletteCandidate[]): void {
+    if (!this.paletteHost.isOpen || this.paletteLoad) return;
+    this.paletteHost.setCandidates(candidates);
   }
 
   /**
@@ -849,9 +912,12 @@ export class TerminalWorkspaceRoot {
   }
 
   show(visible: boolean): void {
-    if (!visible) {
+    if (visible) {
+      this.retainPaletteAgents();
+    } else {
       this.paletteHost.hide();
       this.railFocusAgentId = null;
+      this.releasePaletteAgents();
     }
     this.element.hidden = !visible;
     this.element.style.display = visible ? 'flex' : 'none';

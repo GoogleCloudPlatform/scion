@@ -21,6 +21,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/telemetry"
+	"go.opentelemetry.io/otel"
 	otellog "go.opentelemetry.io/otel/log"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
@@ -203,61 +204,114 @@ func processHookData(data []byte) error {
 		processor.AddHandler(limitsHandler.Handle)
 	}
 
-	// Add telemetry handler if telemetry is enabled
-	cfg := telemetry.LoadConfig()
-	if cfg != nil && cfg.Enabled {
-		redactor := telemetry.NewRedactor(cfg.Redaction)
-
-		// Create real providers for span + log export (sync mode for short-lived hook)
-		ctx := context.Background()
-		providers, err := telemetry.NewProviders(ctx, cfg, false)
-		if err != nil {
-			log.Error("Failed to create telemetry providers: %v", err)
-		}
-		if providers != nil {
-			defer func() {
-				shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				defer cancel()
-				if err := providers.Shutdown(shutdownCtx); err != nil {
-					log.Error("Failed to shutdown telemetry providers: %v", err)
-				}
-			}()
-		}
-
-		var tp trace.TracerProvider
-		var lp otellog.LoggerProvider
-		var mp metric.MeterProvider
-		if providers != nil {
-			tp = providers.TracerProvider
-			lp = providers.LoggerProvider
-			if providers.MeterProvider != nil {
-				mp = providers.MeterProvider
-			}
-		}
-
-		telemetryHandler := handlers.NewTelemetryHandler(tp, lp, redactor, mp)
-		wireSessionMetrics(telemetryHandler, hub.NewClient(), hookHomeDir())
-		processor.AddHandler(telemetryHandler.Handle)
+	event, err := processor.ParseRaw(rawData, hookDialect)
+	if err != nil {
+		return err
 	}
-
-	if err := processor.ProcessRaw(rawData, hookDialect); err != nil {
+	if err := processor.Dispatch(event); err != nil {
 		return err
 	}
 
-	// Emit the response JSON that the harness expects on stdout.
-	// Dialects that don't declare a responses section (e.g. claude) produce
-	// no output, preserving backward compatibility.
-	if mappingDialect != nil {
-		if rawEventName := mappingDialect.EventName(rawData); rawEventName != "" {
-			if resp := mappingDialect.Response(rawEventName); resp != nil {
-				if err := json.NewEncoder(os.Stdout).Encode(resp); err != nil {
-					return fmt.Errorf("writing hook response: %w", err)
-				}
+	// Emit the response JSON that the harness expects on stdout BEFORE any
+	// telemetry export. The response depends only on the dialect, and some
+	// harnesses (antigravity: 10s) kill a hook that has not answered in time,
+	// which fails the tool call. Telemetry must never delay the answer.
+	if err := writeHookResponse(hookStdout, mappingDialect, rawData); err != nil {
+		return err
+	}
+
+	runHookTelemetry(event)
+	return nil
+}
+
+// hookStdout is where hook responses are written. Tests replace it to
+// observe when the response is written relative to telemetry export.
+var hookStdout io.Writer = os.Stdout
+
+// writeHookResponse writes the response declared by the dialect for this
+// event, if any. Dialects that don't declare a responses section (e.g.
+// claude) produce no output, preserving backward compatibility. os.Stdout is
+// unbuffered, so the response reaches the harness as soon as this returns.
+func writeHookResponse(w io.Writer, mappingDialect *dialects.MappingDialect, rawData map[string]interface{}) error {
+	if mappingDialect == nil {
+		return nil
+	}
+	rawEventName := mappingDialect.EventName(rawData)
+	if rawEventName == "" {
+		return nil
+	}
+	resp := mappingDialect.Response(rawEventName)
+	if resp == nil {
+		return nil
+	}
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		return fmt.Errorf("writing hook response: %w", err)
+	}
+	return nil
+}
+
+// hookOTelErrorHandler logs OTel SDK errors (failed exports) at debug level.
+var hookOTelErrorHandler = otel.ErrorHandlerFunc(func(err error) {
+	log.Debug("Hook telemetry export dropped: %v", err)
+})
+
+// runHookTelemetry exports the hook event as telemetry to the loopback
+// receiver, if telemetry is enabled. It runs after the response is written
+// and is best effort: exports are bounded by telemetry.HookExportTimeout and
+// telemetry.HookShutdownTimeout, are not retried, and a failure is logged at
+// debug level only. It never writes to stdout and never fails the hook.
+// When the Hub client is configured it also persists session counts and, on
+// session-end, reports the session summary to the Hub (bounded by
+// sessionMetricsReportTimeout).
+func runHookTelemetry(event *hooks.Event) {
+	cfg := telemetry.LoadConfig()
+	if cfg == nil || !cfg.Enabled {
+		return
+	}
+
+	// The OTel SDK reports failed exports to its global error handler, which
+	// by default logs to stderr. In the hook a missing receiver is expected
+	// (for example when the pipeline failed to start), so keep it at debug.
+	// This is process-wide and deliberately not restored: otel pins the
+	// default handler's delegate to the first handler ever set, so a restore
+	// would not take effect anyway. The hook subcommands run in their own
+	// short-lived process, so sciontool init is unaffected.
+	otel.SetErrorHandler(hookOTelErrorHandler)
+
+	redactor := telemetry.NewRedactor(cfg.Redaction)
+
+	// Synchronous, bounded providers for the short-lived hook process.
+	ctx := context.Background()
+	providers, err := telemetry.NewHookProviders(ctx, cfg)
+	if err != nil {
+		log.Error("Failed to create telemetry providers: %v", err)
+	}
+	if providers != nil {
+		defer func() {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), telemetry.HookShutdownTimeout)
+			defer cancel()
+			if err := providers.Shutdown(shutdownCtx); err != nil {
+				log.Debug("Hook telemetry shutdown incomplete: %v", err)
 			}
+		}()
+	}
+
+	var tp trace.TracerProvider
+	var lp otellog.LoggerProvider
+	var mp metric.MeterProvider
+	if providers != nil {
+		tp = providers.TracerProvider
+		lp = providers.LoggerProvider
+		if providers.MeterProvider != nil {
+			mp = providers.MeterProvider
 		}
 	}
 
-	return nil
+	telemetryHandler := handlers.NewTelemetryHandler(tp, lp, redactor, mp)
+	wireSessionMetrics(telemetryHandler, hub.NewClient(), hookHomeDir())
+	if err := telemetryHandler.Handle(event); err != nil {
+		log.Debug("Hook telemetry handler: %v", err)
+	}
 }
 
 // runAskUser updates status to waiting for input.

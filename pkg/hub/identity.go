@@ -189,6 +189,15 @@ func NewScopedUserIdentityWithCeilingAndDecoration(user UserIdentity, projectID 
 	return newScopedUserIdentity(user, TokenBoundary{Kind: BoundaryKindProject, ProjectID: projectID}, scopes, credentialID, ceiling, decoration)
 }
 
+// NewScopedUserIdentityWithBoundary creates a UAT-backed identity carrying an
+// explicit TokenBoundary (project or hub) and an explicit, already-normalized
+// FrozenPermissionCeiling, with no credential decoration. It is for callers
+// that rebuild an identity from a stored token row outside a request, such as
+// scheduled dispatch, and have no decoration to carry.
+func NewScopedUserIdentityWithBoundary(user UserIdentity, boundary TokenBoundary, scopes []string, credentialID string, ceiling permissions.FrozenPermissionCeiling) *ScopedUserIdentity {
+	return newScopedUserIdentity(user, boundary, scopes, credentialID, ceiling, nil)
+}
+
 // NewScopedUserIdentityWithBoundaryAndDecoration creates a UAT-backed
 // identity carrying an explicit TokenBoundary (project or hub), an explicit,
 // already-normalized FrozenPermissionCeiling, and descriptive credential

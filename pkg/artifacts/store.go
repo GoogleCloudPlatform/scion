@@ -24,6 +24,15 @@ import (
 // ErrNotFound is returned by Store lookups when no live row matches.
 var ErrNotFound = errors.New("artifacts: not found")
 
+// ErrConflict is returned when a write does not apply to the current state:
+// a key already taken, a version that is no longer pending, or a version
+// whose files have not all arrived.
+var ErrConflict = errors.New("artifacts: conflict")
+
+// ErrTooManyPending is returned by CreateVersion when an artifact already
+// has the maximum number of pending versions.
+var ErrTooManyPending = errors.New("artifacts: too many pending versions")
+
 // Version kinds.
 const (
 	VersionKindPublish = "publish"
@@ -31,12 +40,14 @@ const (
 )
 
 // Version states. A version is pending while its files upload (two-step
-// publish) and ready once every file is stored. The single-file fast path
-// writes ready directly.
+// publish), finalizing while one finalize request completes it, and ready
+// once every file is stored. The single-file fast path writes ready
+// directly.
 const (
-	VersionStatePending = "pending"
-	VersionStateReady   = "ready"
-	VersionStateFailed  = "failed"
+	VersionStatePending    = "pending"
+	VersionStateFinalizing = "finalizing"
+	VersionStateReady      = "ready"
+	VersionStateFailed     = "failed"
 )
 
 // Grant subject kinds.
@@ -126,6 +137,9 @@ type File struct {
 	SourceURL   string
 	FetchStatus string
 	FetchError  string
+	// Pending is true while the bytes of an uploaded file of a pending
+	// version have not arrived. Files of ready versions are never pending.
+	Pending bool
 }
 
 // Grant is a row of the artifact_grant table.
@@ -158,6 +172,65 @@ type Store interface {
 	// transaction. The artifact's CurrentSeq is set to v.Seq.
 	CreatePublished(ctx context.Context, a *Artifact, v *Version, files []File, grants []Grant) error
 
+	// CreatePending writes a new artifact together with its first version,
+	// which must be pending, that version's manifest and the given grants,
+	// in one transaction. The artifact has no current version until the
+	// version is finalized. When another live artifact already holds a's
+	// key for the same owner and scope, it returns ErrConflict.
+	CreatePending(ctx context.Context, a *Artifact, v *Version, files []File, grants []Grant) error
+
+	// CreateVersion appends the pending version v and its manifest to an
+	// existing artifact, assigning v.Seq (one above the artifact's highest
+	// seq). It returns ErrTooManyPending when the artifact already has
+	// maxPending pending versions, and ErrNotFound when the artifact is
+	// absent or deleted.
+	CreateVersion(ctx context.Context, v *Version, files []File, maxPending int) error
+
+	// GetArtifactByKey returns the live artifact with the given key, owner
+	// and scope, or ErrNotFound.
+	GetArtifactByKey(ctx context.Context, scopeKind, scopeRef, ownerKind, ownerRef, key string) (*Artifact, error)
+
+	// MarkReceived records that the bytes of file path of the pending
+	// version versionID have arrived, with their media type. It returns
+	// ErrNotFound when the file is not in the manifest and ErrConflict when
+	// the version is no longer pending.
+	MarkReceived(ctx context.Context, versionID, path, mediaType string) error
+
+	// ClaimFinalize moves the pending version seq of an artifact to
+	// finalizing, so that exactly one finalize request completes it. A
+	// version already finalizing is taken over when its claim is older
+	// than staleBefore (left behind by a request that never completed). It
+	// returns ErrConflict when the version cannot be claimed or a file of
+	// its manifest is still pending, and ErrNotFound when it does not
+	// exist.
+	// On success it returns the claim, which FinalizeVersion and
+	// ReleaseFinalize take to act only while that claim still holds.
+	ClaimFinalize(ctx context.Context, artifactID string, seq int, staleBefore time.Time) (time.Time, error)
+
+	// ReleaseFinalize returns a finalizing version to pending, for a
+	// finalize request that could not complete it, if the version still
+	// holds the given claim.
+	ReleaseFinalize(ctx context.Context, artifactID string, seq int, claim time.Time) error
+
+	// FinalizeVersion flips the claimed (finalizing) version seq of an
+	// artifact to ready, adds the extra manifest rows (files the hub produced, such as
+	// fetched remote images) and advances the artifact's current version to
+	// seq unless a later one is already current. It returns ErrConflict when
+	// the version is not finalizing under the given claim, and the updated
+	// artifact otherwise.
+	FinalizeVersion(ctx context.Context, artifactID string, seq int, claim time.Time, extra []File) (*Artifact, error)
+
+	// ListVersions returns up to limit ready versions of an artifact,
+	// newest first, with a seq below before (0 = from the newest).
+	ListVersions(ctx context.Context, artifactID string, before, limit int) ([]Version, error)
+
+	// ReapPending marks every version still pending or finalizing that was
+	// created before cutoff as failed and drops its manifest, so its blobs are no
+	// longer referenced. An artifact left with neither a ready nor a
+	// pending version is soft-deleted, which frees its key. It handles at
+	// most limit versions per call and returns how many it reaped.
+	ReapPending(ctx context.Context, cutoff time.Time, limit int) (int, error)
+
 	// GetArtifact returns the artifact with id unless it is absent or
 	// soft-deleted, in which case it returns ErrNotFound.
 	GetArtifact(ctx context.Context, id string) (*Artifact, error)
@@ -175,6 +248,19 @@ type Store interface {
 	// ordered by creation.
 	ListGrants(ctx context.Context, artifactID string) ([]Grant, error)
 
+	// ListGrantsFor returns every grant on each of the artifacts, expired
+	// ones included, keyed by artifact id and ordered by creation. At most
+	// MaxGrantsForIDs ids may be given.
+	ListGrantsFor(ctx context.Context, artifactIDs []string) (map[string][]Grant, error)
+
+	// ListCandidates returns live (not deleted, not expired) artifacts the
+	// query's principal owns, or that carry an unexpired read, write or
+	// admin grant naming the principal or one of the query's scopes,
+	// ordered by UpdatedAt then ID, both descending. It is a candidate
+	// query only: it decides nothing about access, and every row must
+	// still pass the service's read check before it is shown.
+	ListCandidates(ctx context.Context, q CandidateQuery) ([]Candidate, error)
+
 	// AddMessageRefs records that message messageID references refs, in the
 	// artifact_message_ref link table. A reference already recorded for the
 	// message and artifact is left as it is. The caller has already checked
@@ -185,6 +271,44 @@ type Store interface {
 	// messageIDs, keyed by message id and ordered by artifact id. Messages
 	// without references are absent from the map.
 	ListMessageRefs(ctx context.Context, messageIDs []string) (map[string][]MessageRef, error)
+}
+
+// CandidateQuery selects rows for ListCandidates.
+type CandidateQuery struct {
+	// PrincipalKind and PrincipalRef identify the owner to match and the
+	// principal grant subject (PrincipalRef(kind, ref)). Both are required.
+	PrincipalKind string
+	PrincipalRef  string
+	// ScopeRefs are the scope grant subjects to match. Empty matches no
+	// scope grant.
+	ScopeRefs []string
+	// OwnedOnly keeps only rows the principal owns; grants are ignored.
+	OwnedOnly bool
+	// Search, when set, keeps rows whose title or key contains it,
+	// case-insensitively. It is matched literally (no wildcards).
+	Search string
+	// ReviewPending keeps only rows whose current version is a review.
+	ReviewPending bool
+	// After, when set, keeps rows strictly after this position in the
+	// result order.
+	After *Position
+	// Limit caps the rows returned; it must be positive.
+	Limit int
+	// Now is the instant expiry is judged at.
+	Now time.Time
+}
+
+// Position is a place in ListCandidates' order.
+type Position struct {
+	UpdatedAt time.Time
+	ID        string
+}
+
+// Candidate is one ListCandidates row: the artifact and the kind of its
+// current version ("" when it has none).
+type Candidate struct {
+	Artifact
+	CurrentKind string
 }
 
 // NewStore returns the Store for db. driverName selects the SQL dialect:

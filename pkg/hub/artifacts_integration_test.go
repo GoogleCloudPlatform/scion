@@ -24,6 +24,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -510,7 +511,9 @@ func TestArtifactsPreArtifactCeilingTokenOnRoutes(t *testing.T) {
 		assert.Equal(t, http.StatusNotFound, doRawAgentRequest(t, srv, http.MethodGet, p, nil, childTok).Code, p)
 	}
 	rec = doRawAgentRequest(t, srv, http.MethodPost, "/api/v1/artifacts?name=b.txt", []byte("b"), childTok)
-	assert.Equal(t, http.StatusUnauthorized, rec.Code, "an agent without the artifact read scope is not served: %s", rec.Body.String())
+	assert.Equal(t, http.StatusForbidden, rec.Code, "an agent without the artifact scopes is told which one it lacks: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), `"code":"`+artifacts.CodeMissingScope+`"`)
+	assert.Contains(t, rec.Body.String(), string(ScopeProjectArtifactRead))
 }
 
 // doRawAgentRequest sends a raw-body request with an agent token through the
@@ -713,4 +716,228 @@ func TestArtifactsAgentChainCheckedAtUse(t *testing.T) {
 		store.Deactivation{Cause: store.EdgeDeactivationAgentSoftDelete, OpID: "chain-test"})
 	require.NoError(t, err)
 	expect("owner without an edge", ownerTok, http.StatusNotFound)
+}
+
+// TestArtifactsPublishRefusedWithBothScopesIsPlainForbidden: an agent whose
+// token carries both artifact scopes but is refused for another reason (a
+// project it does not belong to, or a delegation chain that no longer
+// allows publishing) gets the plain 403 forbidden, never missing_scope.
+func TestArtifactsPublishRefusedWithBothScopesIsPlainForbidden(t *testing.T) {
+	srv, s := testServer(t)
+	enableArtifactsForTest(t, srv)
+	ctx := context.Background()
+	p1 := artifactProject(t, s, "plain403-p1")
+	p2 := artifactProject(t, s, "plain403-p2")
+	_, tok := artifactAgent(t, srv, s, p1.ID, "plain403-agent", AgentRoleBaseline)
+	claims, err := srv.GetAgentTokenService().ValidateAgentToken(tok)
+	require.NoError(t, err)
+	require.Contains(t, claims.Scopes, ScopeProjectArtifactRead)
+	require.Contains(t, claims.Scopes, ScopeProjectArtifactWrite)
+
+	assertPlainForbidden := func(name, target string) {
+		t.Helper()
+		rec := doRawAgentRequest(t, srv, http.MethodPost, target, []byte("x"), tok)
+		assert.Equal(t, http.StatusForbidden, rec.Code, "%s: %s", name, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), `"code":"forbidden"`, name)
+		assert.NotContains(t, rec.Body.String(), artifacts.CodeMissingScope, name)
+	}
+	assertPlainForbidden("another project", "/api/v1/artifacts?name=a.txt&scope="+p2.ID)
+
+	// Its own project works until the delegator loses its role there.
+	rec := doRawAgentRequest(t, srv, http.MethodPost, "/api/v1/artifacts?name=a.txt", []byte("x"), tok)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	_, err = s.DeleteRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, tid("art-delegator-"+p1.ID))
+	require.NoError(t, err)
+	assertPlainForbidden("narrowed delegation chain", "/api/v1/artifacts?name=b.txt")
+}
+
+// TestArtifactsTwoStepBundleOnRoutes publishes a bundle through the real
+// routes with the two-step API, appends a version by key, and reads it
+// back as another agent of the project; an agent of another project sees
+// nothing. The bundle limits come from the artifacts settings.
+func TestArtifactsTwoStepBundleOnRoutes(t *testing.T) {
+	srv, s := testServer(t)
+	enableArtifactsForTest(t, srv)
+	srv.SetOperationalSettings(artifactsOps(t, `{"max_files":2}`))
+	p1 := artifactProject(t, s, "twostep-p1")
+	p2 := artifactProject(t, s, "twostep-p2")
+	_, ownerTok := artifactAgent(t, srv, s, p1.ID, "twostep-owner", AgentRoleBaseline)
+	_, peerTok := artifactAgent(t, srv, s, p1.ID, "twostep-peer", AgentRoleBaseline)
+	_, otherTok := artifactAgent(t, srv, s, p2.ID, "twostep-other", AgentRoleBaseline)
+
+	files := map[string][]byte{"index.html": []byte("<p>hi</p>"), "img/a.png": []byte("png")}
+	manifest := func(key string, fs map[string][]byte) []byte {
+		req := artifacts.CreateVersionRequest{Key: key, Entry: "index.html"}
+		for p, b := range fs {
+			sum := sha256.Sum256(b)
+			req.Files = append(req.Files, artifacts.ManifestFile{Path: p, Size: int64(len(b)), SHA256: hex.EncodeToString(sum[:])})
+		}
+		body, err := json.Marshal(req)
+		require.NoError(t, err)
+		return body
+	}
+	publish := func(fs map[string][]byte) artifacts.ArtifactResponse {
+		t.Helper()
+		rec := doRawAgentRequest(t, srv, http.MethodPost, "/api/v1/artifacts", manifest("site", fs), ownerTok)
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+		var pend artifacts.PendingVersionResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &pend))
+		base := fmt.Sprintf("/api/v1/artifacts/%s/versions/%d", pend.Artifact.ID, pend.Version.Seq)
+		for _, p := range pend.Upload.Required {
+			rec := doRawAgentRequest(t, srv, http.MethodPut, base+"/files/"+p, fs[p], ownerTok)
+			require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+		}
+		rec = doRawAgentRequest(t, srv, http.MethodPost, base+"/finalize", nil, ownerTok)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var out artifacts.ArtifactResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+		return out
+	}
+	v1 := publish(files)
+	assert.Equal(t, 1, v1.Artifact.CurrentSeq)
+	v2 := publish(map[string][]byte{"index.html": []byte("<p>v2</p>"), "img/a.png": []byte("png")})
+	assert.Equal(t, v1.Artifact.ID, v2.Artifact.ID, "the same key appends")
+	assert.Equal(t, 2, v2.Artifact.CurrentSeq)
+	id := v1.Artifact.ID
+
+	rec := doRawAgentRequest(t, srv, http.MethodGet, "/api/v1/artifacts/"+id+"/versions/1/files/img/a.png", nil, peerTok)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "png", rec.Body.String())
+	rec = doRawAgentRequest(t, srv, http.MethodGet, "/api/v1/artifacts/"+id+"/versions", nil, peerTok)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), `"seq":2`)
+	for _, p := range []string{"/versions", "/versions/1", "/versions/1/files/index.html"} {
+		assert.Equal(t, http.StatusNotFound, doRawAgentRequest(t, srv, http.MethodGet, "/api/v1/artifacts/"+id+p, nil, otherTok).Code, p)
+	}
+	// A project peer may read but not append.
+	rec = doRawAgentRequest(t, srv, http.MethodPost, "/api/v1/artifacts/"+id+"/versions", manifest("", files), peerTok)
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	// The settings' file count applies.
+	rec = doRawAgentRequest(t, srv, http.MethodPost, "/api/v1/artifacts", manifest("", map[string][]byte{
+		"index.html": []byte("a"), "b": []byte("b"), "c": []byte("c")}), ownerTok)
+	assert.Equal(t, http.StatusRequestEntityTooLarge, rec.Code, rec.Body.String())
+}
+
+// TestArtifactsReaperRetiresAbandonedVersions: the hub's reap pass fails a
+// pending version older than the TTL.
+func TestArtifactsReaperRetiresAbandonedVersions(t *testing.T) {
+	srv, _ := testServer(t)
+	st, _ := enableArtifactsForTest(t, srv)
+	ctx := context.Background()
+	old := time.Now().Add(-artifacts.PendingVersionTTL - time.Hour)
+	a := &artifacts.Artifact{ID: tid("reap-artifact"), ScopeKind: artifacts.ScopeKindProject, ScopeRef: "p",
+		OwnerKind: artifacts.PrincipalKindUser, OwnerRef: "u", Title: "t", CreatedAt: old, UpdatedAt: old}
+	v := &artifacts.Version{ID: tid("reap-v1"), ArtifactID: a.ID, Seq: 1, Kind: artifacts.VersionKindPublish,
+		EntryPath: "a.txt", CreatedAt: old, State: artifacts.VersionStatePending}
+	require.NoError(t, st.CreatePending(ctx, a, v, nil, nil))
+	srv.reapArtifactVersions(ctx)
+	got, err := st.GetVersion(ctx, a.ID, 1)
+	require.NoError(t, err)
+	assert.Equal(t, artifacts.VersionStateFailed, got.State)
+}
+
+// TestArtifactsRemoteImageRefusedOnRoutes: through the real hub, with the
+// production fetcher and default settings (remote images on), a markdown
+// artifact whose image points at the metadata address publishes; the image
+// is a failed manifest row with a generic warning, and reading it answers
+// 404 with the remote status header.
+func TestArtifactsRemoteImageRefusedOnRoutes(t *testing.T) {
+	srv, s := testServer(t)
+	enableArtifactsForTest(t, srv)
+	p1 := artifactProject(t, s, "remote-p1")
+	_, tok := artifactAgent(t, srv, s, p1.ID, "remote-agent", AgentRoleBaseline)
+	const metadata = "http://169.254.169.254/latest/meta-data/"
+	rec := doRawAgentRequest(t, srv, http.MethodPost, "/api/v1/artifacts?name=doc.md", []byte("# Doc\n\n![m]("+metadata+")\n"), tok)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var resp artifacts.ArtifactResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp.Version.Files, 2)
+	var row artifacts.FileInfo
+	for _, f := range resp.Version.Files {
+		if f.Path == artifacts.RemotePath(metadata) {
+			row = f
+		}
+	}
+	assert.Equal(t, artifacts.FetchStatusFailed, row.FetchStatus)
+	assert.Equal(t, metadata, row.SourceURL)
+	assert.Equal(t, []string{"image could not be fetched: " + metadata}, resp.Warnings)
+	get := doRawAgentRequest(t, srv, http.MethodGet, "/api/v1/artifacts/"+resp.Artifact.ID+"/versions/1/files/"+row.Path, nil, tok)
+	assert.Equal(t, http.StatusNotFound, get.Code)
+	assert.Equal(t, artifacts.FetchStatusFailed, get.Header().Get(artifacts.HeaderRemoteStatus))
+}
+
+// TestArtifactsHTMLViewOnRoutes: through the real hub, an agent mints a
+// view of an HTML bundle; the view URL serves the bundle's files with no
+// credentials at all and the view CSP, a tampered capability gets 404, and
+// a credential-less request elsewhere under /api/v1/artifacts/ is still
+// refused.
+func TestArtifactsHTMLViewOnRoutes(t *testing.T) {
+	srv, s := testServer(t)
+	enableArtifactsForTest(t, srv)
+	require.NotEmpty(t, srv.artifactViewKey, "the hub initializes the view key")
+	p1 := artifactProject(t, s, "view-p1")
+	p2 := artifactProject(t, s, "view-p2")
+	_, tok := artifactAgent(t, srv, s, p1.ID, "view-agent", AgentRoleBaseline)
+	_, otherTok := artifactAgent(t, srv, s, p2.ID, "view-other", AgentRoleBaseline)
+
+	page := []byte(`<img src="img/a.png">`)
+	rec := doRawAgentRequest(t, srv, http.MethodPost, "/api/v1/artifacts?name=index.html", page, tok)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	id := decodeArtifactID(t, rec)
+
+	mint := "/api/v1/artifacts/" + id + "/versions/1/view"
+	assert.Equal(t, http.StatusNotFound, doRawAgentRequest(t, srv, http.MethodPost, mint, nil, otherTok).Code)
+	rec = doRawAgentRequest(t, srv, http.MethodPost, mint, nil, tok)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var view artifacts.ViewResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &view))
+	require.True(t, strings.HasPrefix(view.URL, artifacts.RouteView), view.URL)
+
+	anon := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(anon, httptest.NewRequest(http.MethodGet, view.URL, nil))
+	require.Equal(t, http.StatusOK, anon.Code, anon.Body.String())
+	assert.Equal(t, string(page), anon.Body.String())
+	assert.Contains(t, anon.Header().Get("Content-Security-Policy"), "sandbox allow-scripts;")
+	assert.NotContains(t, anon.Header().Get("Content-Security-Policy"), "allow-same-origin")
+	assert.Contains(t, anon.Header().Get("Content-Security-Policy"), "img-src example.com"+strings.TrimSuffix(view.URL, "index.html")+" data:")
+
+	badCred := httptest.NewRequest(http.MethodGet, view.URL, nil)
+	badCred.Header.Set("Authorization", "Bearer not-a-valid-token")
+	rejected := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rejected, badCred)
+	assert.Equal(t, http.StatusUnauthorized, rejected.Code, "an invalid credential is rejected before the view pass")
+
+	tampered := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(tampered, httptest.NewRequest(http.MethodGet, strings.Replace(view.URL, ".1.", ".2.", 1), nil))
+	assert.Equal(t, http.StatusNotFound, tampered.Code)
+
+	for _, p := range []string{"/api/v1/artifacts/" + id, "/api/v1/artifacts/" + id + "/files/index.html"} {
+		out := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(out, httptest.NewRequest(http.MethodGet, p, nil))
+		assert.Equal(t, http.StatusUnauthorized, out.Code, p)
+	}
+	// An escaped variant of the view prefix is not admitted without
+	// credentials.
+	escaped := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(escaped, httptest.NewRequest(http.MethodGet, strings.Replace(view.URL, "/view/", "/view%2F", 1), nil))
+	assert.Equal(t, http.StatusUnauthorized, escaped.Code, "escaped view prefix")
+
+	post := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(post, httptest.NewRequest(http.MethodPost, view.URL, nil))
+	assert.Equal(t, http.StatusUnauthorized, post.Code, "only reads pass without credentials")
+
+	// The view route answers 404 when the artifacts settings section is
+	// disabled, and when the experiment is off.
+	srv.SetOperationalSettings(artifactsOps(t, `{"enabled":false}`))
+	off := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(off, httptest.NewRequest(http.MethodGet, view.URL, nil))
+	assert.Equal(t, http.StatusNotFound, off.Code, "settings off")
+	srv.SetOperationalSettings(artifactsOps(t, ""))
+	reg, err := experiments.NewRegistry(experiments.Default().All(), nil)
+	require.NoError(t, err)
+	srv.experiments = reg
+	require.False(t, srv.experimentEnabled(experiments.Artifacts))
+	off = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(off, httptest.NewRequest(http.MethodGet, view.URL, nil))
+	assert.Equal(t, http.StatusNotFound, off.Code, "experiment off")
 }

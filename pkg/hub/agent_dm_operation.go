@@ -211,6 +211,11 @@ type AgentDMResult struct {
 	// ArtifactWarning is set when artifact references the request named
 	// were not attached (admitMessageArtifacts).
 	ArtifactWarning string
+
+	// AttachmentWarnings lists the attachments the hub could not record
+	// (ptone/scion#3667). The message was still sent; adapters return these
+	// to the sender as an additive response field.
+	AttachmentWarnings []AttachmentWarning
 }
 
 // AgentDMError is a typed error from the shared DM operation. It carries
@@ -395,7 +400,7 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 	// ── Phase 2: Side effects ───────────────────────────────────────────
 
 	// 6. Attachment ingestion.
-	attachmentRefs := s.ingestAgentAttachments(ctx, input.ProjectID, input.SenderAgent.ID, input.Attachments)
+	attachmentRefs, attachmentWarnings := s.ingestAgentAttachments(ctx, input.ProjectID, input.SenderAgent.ID, input.Attachments)
 
 	// 7. Build store message.
 	// DispatchState is set to "pending" — the message row is its own
@@ -537,11 +542,12 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 	if deferred {
 		LogDMDispatchOutcome(input.SenderAgent, input.TargetAgent, msgID, DispatchDeferred, nil)
 		return &AgentDMResult{
-			Outcome:         AgentDMDeferred,
-			MessageID:       msgID,
-			Recipient:       storeMsg.Recipient,
-			RecipientID:     storeMsg.RecipientID,
-			ArtifactWarning: artifactWarning,
+			Outcome:            AgentDMDeferred,
+			MessageID:          msgID,
+			Recipient:          storeMsg.Recipient,
+			RecipientID:        storeMsg.RecipientID,
+			AttachmentWarnings: attachmentWarnings,
+			ArtifactWarning:    artifactWarning,
 		}, nil
 	}
 
@@ -616,12 +622,13 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 			// Audit: dispatch outcome (#1690).
 			LogDMDispatchOutcome(input.SenderAgent, input.TargetAgent, msgID, DispatchFailed, dispatchErr)
 			return &AgentDMResult{
-				Outcome:         AgentDMAmbiguous,
-				MessageID:       msgID,
-				Recipient:       storeMsg.Recipient,
-				RecipientID:     storeMsg.RecipientID,
-				DispatchErr:     dispatchErr,
-				ArtifactWarning: artifactWarning,
+				Outcome:            AgentDMAmbiguous,
+				MessageID:          msgID,
+				Recipient:          storeMsg.Recipient,
+				RecipientID:        storeMsg.RecipientID,
+				DispatchErr:        dispatchErr,
+				AttachmentWarnings: attachmentWarnings,
+				ArtifactWarning:    artifactWarning,
 			}, nil
 		}
 
@@ -656,12 +663,13 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 		// Audit: dispatch outcome (#1690) — dispatch succeeded but state tracking failed.
 		LogDMDispatchOutcome(input.SenderAgent, input.TargetAgent, msgID, DispatchSucceeded, casErr)
 		return &AgentDMResult{
-			Outcome:         AgentDMAmbiguous,
-			MessageID:       msgID,
-			Recipient:       storeMsg.Recipient,
-			RecipientID:     storeMsg.RecipientID,
-			DispatchErr:     fmt.Errorf("dispatch succeeded but state transition failed: %w", casErr),
-			ArtifactWarning: artifactWarning,
+			Outcome:            AgentDMAmbiguous,
+			MessageID:          msgID,
+			Recipient:          storeMsg.Recipient,
+			RecipientID:        storeMsg.RecipientID,
+			DispatchErr:        fmt.Errorf("dispatch succeeded but state transition failed: %w", casErr),
+			AttachmentWarnings: attachmentWarnings,
+			ArtifactWarning:    artifactWarning,
 		}, nil
 	}
 	if !dispatched {
@@ -707,11 +715,12 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 
 	// Return accepted result.
 	return &AgentDMResult{
-		Outcome:         AgentDMAccepted,
-		MessageID:       msgID,
-		Recipient:       storeMsg.Recipient,
-		RecipientID:     storeMsg.RecipientID,
-		ArtifactWarning: artifactWarning,
+		Outcome:            AgentDMAccepted,
+		MessageID:          msgID,
+		Recipient:          storeMsg.Recipient,
+		RecipientID:        storeMsg.RecipientID,
+		AttachmentWarnings: attachmentWarnings,
+		ArtifactWarning:    artifactWarning,
 	}, nil
 }
 
@@ -784,6 +793,9 @@ func WriteAgentDMResult(w http.ResponseWriter, result *AgentDMResult, mentionRes
 	}
 	if len(mentionResults) > 0 {
 		body["mention_results"] = mentionResults
+	}
+	if len(result.AttachmentWarnings) > 0 {
+		body["attachment_warnings"] = result.AttachmentWarnings
 	}
 	if result.ArtifactWarning != "" {
 		body["artifact_warning"] = result.ArtifactWarning

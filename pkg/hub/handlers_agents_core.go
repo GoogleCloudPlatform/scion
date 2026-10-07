@@ -354,6 +354,11 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	// echo only ever carries validated values. Without sort, nothing here
 	// runs and both short-circuits return the legacy empty list.
 	sorted := isSortedModeRequest(query)
+	if sorted {
+		perfSetEndpoint(ctx, perfEndpointAgentsGlobalSorted)
+	} else {
+		perfSetEndpoint(ctx, perfEndpointAgentsGlobalLegacy)
+	}
 	var sortParam, dirParam string
 	if sorted {
 		var ok bool
@@ -385,7 +390,9 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 
 	// RS2: Resolve authorization scope FIRST — before building filter or cursor
 	// binding. This is the single authoritative scope decision for the request.
+	scopeDone := perfPhaseStart(ctx, perfPhaseListScopeAuthz)
 	scopeResult, err := s.authzService.ResolveListScopes(ctx, identity, "agent.list")
+	scopeDone()
 	if err != nil {
 		slog.WarnContext(ctx, "listAgents: authorization scope resolution failed (fail-closed)",
 			"error", err)
@@ -464,8 +471,10 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 		filter.ExcludedProjectIDs = canonicalizeStringSlice(append([]string{}, scopeResult.ExcludedProjectIDs...))
 	}
 
+	classifyDone := perfPhaseStart(ctx, perfPhaseListScopeAuthz)
 	classification, err := s.resolveProjectListClassification(
 		ctx, identity, query.Get("scope"), query.Get("mine") == "true", scopeResult, "listAgents")
+	classifyDone()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 			"unable to resolve authorization", nil)
@@ -1148,7 +1157,7 @@ func dispatchDeleteFailedCreate(dispatcher AgentDispatcher, agent *store.Agent) 
 	}
 }
 
-// errInvalidDisplayName is returned by createAgentWithIdentityKey when slug
+// errInvalidDisplayName is returned by commitAgentCreate when slug
 // fails api.ValidateDisplayName. It is deliberately distinct from
 // store.ErrInvalidInput: the transaction that follows can also fail with
 // store.ErrInvalidInput for unrelated reasons (e.g. a foreign-key violation
@@ -1156,47 +1165,6 @@ func dispatchDeleteFailedCreate(dispatcher AgentDispatcher, agent *store.Agent) 
 // text comes from the store layer, not from validating the display name --
 // it must not be reported to the caller as if it were one.
 var errInvalidDisplayName = errors.New("invalid display name")
-
-// createAgentWithIdentityKey validates slug as the identity key agent.Name
-// will hold at creation (both production callers set Name to Slug before
-// calling this), then writes agent and its identity-key row in the same
-// transaction: the key row is what makes the key's per-project uniqueness a
-// database invariant, so it must never be able to drift from the row it was
-// computed from. This is the single point every production create path --
-// createAgentInProject and the scheduler's dispatchAgentEventHandler -- goes
-// through for this, so they cannot drift on the invariant the way only one
-// of them did before.
-//
-// A validation failure is wrapped in errInvalidDisplayName so a caller that
-// wants the specific, safe-to-surface message can distinguish it with
-// errors.Is before falling through to the transaction's own errors, which
-// include store.ErrIdentityKeyConflict and, separately, store.ErrInvalidInput
-// for reasons unrelated to the display name itself.
-//
-// Before the write it takes a shared lock on the row of the user the user
-// delete guard would count for the agent and re-checks that the user exists
-// (lockAgentGuardUserTx, ptone/scion#2769). For a scheduled dispatch that is
-// the schedule's creator (CreatedBy, the agent has no owner) when the
-// creator is a user; a creator that no longer exists fails the create with
-// errAgentOwnerUserMissing.
-func (s *Server) createAgentWithIdentityKey(ctx context.Context, agent *store.Agent, slug string) error {
-	if _, err := api.ValidateDisplayName(slug); err != nil {
-		return fmt.Errorf("%w: %s", errInvalidDisplayName, err)
-	}
-	return s.store.WithTx(ctx, func(tx store.Store) error {
-		if err := lockAgentGuardUserTx(ctx, tx, agent); err != nil {
-			return err
-		}
-		if err := tx.CreateAgent(ctx, agent); err != nil {
-			return err
-		}
-		// Both production callers set Name to slug before calling this, so
-		// api.IdentityKeysFor(slug, agent.Name) collapses to the single
-		// {slug} row -- the same function rename, restore, and the backfill
-		// migration use, rather than a separately-maintained literal here.
-		return tx.ReplaceAgentIdentityKeys(ctx, agent.ID, agent.ProjectID, api.IdentityKeysFor(slug, agent.Name))
-	})
-}
 
 // applyCreateEffectCeiling computes the source credential's frozen ceiling
 // and provenance for an interactive agent create, and caps role to what the
@@ -2216,7 +2184,17 @@ func (s *Server) createAgentInProject(
 				s.agentLifecycleLog.Warn("Failed to update agent status to provisioning", "agent_id", agent.ID, "error", err)
 			}
 
-			s.publishAgentCreatedIfLive(ctx, agent)
+			// A delete that won the race answers 409, as the synchronous
+			// broker create does (ptone/scion#3099, ptone/scion#3454): no
+			// agent body and no upload URLs, so the client does not upload
+			// to a deleted agent. Nothing was dispatched, so there is
+			// nothing to compensate; the signed URLs simply go unused.
+			if !s.publishAgentCreatedIfLive(ctx, agent) {
+				s.agentLifecycleLog.Info("Hub: agent was deleted while it was being created (workspace bootstrap); answering 409",
+					"agent_id", agent.ID, "agent", agent.Name)
+				writeDeletedDuringCreate(w, agent.ID, nil)
+				return
+			}
 
 			expires := time.Now().Add(SignedURLExpiry)
 			s.enrichAgent(ctx, agent, project, nil)
@@ -2340,11 +2318,21 @@ func (s *Server) createAgentInProject(
 		} else {
 			agent.Activity = "working"
 		}
+		recorded := true
 		if err := s.store.UpdateAgent(ctx, agent); err != nil {
+			recorded = false
 			s.agentLifecycleLog.Warn("Failed to update managed agent after create", "agent_id", agent.ID, "error", err)
 		}
 
-		s.publishAgentCreatedIfLive(ctx, agent)
+		// A delete that won the race answers 409 with no agent body, as
+		// the synchronous broker create does (ptone/scion#3099,
+		// ptone/scion#3454).
+		if !s.publishAgentCreatedIfLive(ctx, agent) {
+			s.agentLifecycleLog.Info("Hub: managed agent was deleted while it was being created; answering 409",
+				"agent_id", agent.ID, "agent", agent.Name)
+			writeDeletedDuringCreate(w, agent.ID, s.compensateManagedCreate(ctx, agent, recorded))
+			return
+		}
 		s.enrichAgent(ctx, agent, project, nil)
 
 		writeJSON(w, http.StatusCreated, CreateAgentResponse{
@@ -2549,6 +2537,16 @@ func (s *Server) createAgentInProject(
 			if err := syncDispatch(ctx, func(dctx context.Context) error {
 				return dispatcher.DispatchAgentProvision(dctx, agent)
 			}); err != nil {
+				if errors.Is(err, errAgentTokenRecord) {
+					// The agent's token could not be recorded, so it was not
+					// handed to the broker. Fail the create and roll it back,
+					// as a full create does.
+					s.agentLifecycleLog.Warn("Provision-only create failed: agent token not issued",
+						"agent_id", agent.ID, "agent", agent.Name, "broker", agent.RuntimeBrokerID, "error", err)
+					corrID := cleanup(createRollback{Stage: createStageProvision, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(dispatcher, agent)})
+					writeCreateFailure(w, corrID, func() { dispatchCreateErrorResponse(w, err, agent.ID) })
+					return
+				}
 				if isSkillResolutionDispatchError(err) {
 					// A required skill could not be resolved, so the agent
 					// can never start from this provision. Fail the create the
@@ -3013,6 +3011,9 @@ func (s *Server) submitAgentEnv(w http.ResponseWriter, r *http.Request, projectI
 		return
 	}
 	if err != nil {
+		if writeAgentTokenRecordError(w, err) {
+			return
+		}
 		var stillMissing *ErrEnvStillMissing
 		if errors.As(err, &stillMissing) {
 			MissingEnvVars(w, stillMissing.Requirements.Needs,
@@ -3038,6 +3039,17 @@ func (s *Server) submitAgentEnv(w http.ResponseWriter, r *http.Request, projectI
 		// phase on; do not write running here.
 		warnings = s.adoptAcceptedLaunch(ctx, agent)
 	} else {
+		// A delete that won after the broker run landed answers 409, as
+		// the synchronous create does (ptone/scion#3099,
+		// ptone/scion#3518). The dispatch has already run the compensating
+		// delete of the landed run; its outcome is in the dispatch
+		// warnings. An accepted launch is settled by its launch report.
+		if s.deleteWonAfterLanding(ctx, agent.ID) {
+			s.agentLifecycleLog.Info("Hub: agent was deleted while its env submit launched it; answering 409",
+				"agent_id", agent.ID, "agent", agent.Name)
+			writeDeletedDuringCreate(w, agent.ID, dispatchWarns.Warnings())
+			return
+		}
 		// Update agent phase from broker response
 		if agent.Phase == string(state.PhaseProvisioning) || agent.Phase == string(state.PhaseCreated) {
 			agent.Phase = string(state.PhaseRunning)
@@ -3108,6 +3120,7 @@ func (s *Server) enrichAgents(ctx context.Context, agents []store.Agent) {
 	if len(agents) == 0 {
 		return
 	}
+	defer perfPhaseStart(ctx, perfPhaseEnrich)()
 
 	// Collect unique project, broker, and template IDs
 	projectIDs := make(map[string]struct{})
@@ -4555,7 +4568,7 @@ func (s *Server) handleAgentTokenRefresh(w http.ResponseWriter, r *http.Request,
 	// This is critical for backward compatibility: legacy agents created
 	// before the role system have tokens with old scope sets (missing
 	// ScopeProjectRead, etc.). Copying old scopes verbatim on refresh
-	// would perpetuate the gap. GenerateAgentTokenForAgent re-derives the
+	// would perpetuate the gap. AuthorizeAgentToken re-derives the
 	// scopes from the stored role and bounds them by the agent's chain
 	// ceiling, with the stored ancestry.
 	agent, err := s.store.GetAgent(r.Context(), id)
@@ -4581,13 +4594,20 @@ func (s *Server) handleAgentTokenRefresh(w http.ResponseWriter, r *http.Request,
 		}
 	}
 
-	newToken, err := mintAgentTokenAt(r.Context(), s, s.store, agent, mintSiteRefresh)
+	// The refreshed token keeps the run binding of the presented one: a
+	// token issued without a run stays without one.
+	grant, err := authorizeAgentTokenAt(r.Context(), s, s.store, agent, mintSiteRefresh)
+	var newToken string
+	if err == nil {
+		newToken, err = signAndRecordAgentToken(r.Context(), s, s.store, *grant, presentedAgentTokenRunID(r.Context()))
+	}
 	if err != nil {
 		if writeAgentTokenIssueError(w, err) {
 			return
 		}
+		slog.Error("Token refresh: token not issued", "agent_id", id, "error", err)
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
-			"failed to generate refreshed token: "+err.Error(), nil)
+			"failed to generate refreshed token", nil)
 		return
 	}
 
@@ -4690,6 +4710,9 @@ func (s *Server) handleAgentResetAuth(w http.ResponseWriter, r *http.Request, id
 
 	if err := disp.DispatchAgentResetAuth(ctx, agent); err != nil {
 		slog.Error("Failed to reset agent auth", "agent_id", id, "error", err)
+		if writeAgentTokenRecordError(w, err) {
+			return
+		}
 		if writeBrokerRuntimeUnavailable(w, err, agent.Runtime) {
 			return
 		}
@@ -4742,6 +4765,9 @@ const workspaceStorageUnconfiguredErrorCode = api.BrokerErrCodeWorkspaceStorageU
 // dispatch's run-ID write (store.ErrDeleteInProgress); that answers 409
 // delete_in_progress, as start does (ptone/scion#2550).
 func dispatchCreateErrorResponse(w http.ResponseWriter, err error, agentID string) {
+	if writeAgentTokenRecordError(w, err) {
+		return
+	}
 	if ref := deleteClaimedDuringDispatch(err, agentID); ref != nil {
 		ref.write(w)
 		return
@@ -4838,33 +4864,6 @@ func skillResolutionClientDetails(details map[string]interface{}) map[string]int
 		}
 	}
 	return out
-}
-
-// recordDelegationEdgeWithType creates a delegation edge with an explicitly
-// specified delegator type. Used by the scheduled dispatch path, where the
-// caller resolves the creator type. Best-effort: errors are logged but do not
-// fail the operation. The interactive create path writes its edge inside the
-// agent-create transaction instead (commitAgentCreate).
-func (s *Server) recordDelegationEdgeWithType(ctx context.Context, agentID, projectID, role, delegatorType, delegatorID string) {
-	edge := &store.DelegationEdge{
-		DelegatorType: delegatorType,
-		DelegatorID:   delegatorID,
-		DelegateType:  store.DelegationPrincipalAgent,
-		DelegateID:    agentID,
-		ScopeType:     store.RoleScopeProject,
-		ScopeID:       projectID,
-		Role:          role,
-		Active:        true,
-		Grandfathered: false,
-	}
-	if err := s.store.CreateDelegationEdge(ctx, edge); err != nil {
-		slog.Warn("Failed to record delegation edge (best-effort)",
-			"agent_id", agentID,
-			"delegator_type", delegatorType,
-			"delegator_id", delegatorID,
-			"project_id", projectID,
-			"error", err)
-	}
 }
 
 // ---------------------------------------------------------------------------

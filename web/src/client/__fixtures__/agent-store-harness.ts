@@ -188,6 +188,7 @@ export const COMPACT_KEYS = [
   'phase',
   'activity',
   'containerStatus',
+  'message',
   'messageMode',
   'ancestry',
   'createdBy',
