@@ -431,20 +431,23 @@ func joinPerfCounts(m map[string]PerfCount, value func(PerfCount) int64) string 
 	return b.String()
 }
 
-func kv(parts ...any) string {
+// perfKV is one name=integer pair of a perf header value. Values are
+// numeric by type, so a non-numeric value cannot be rendered.
+type perfKV struct {
+	key   string
+	value int64
+}
+
+// kv renders pairs as "k1=v1,k2=v2" in the given order.
+func kv(pairs ...perfKV) string {
 	var b strings.Builder
-	for i := 0; i+1 < len(parts); i += 2 {
+	for i, p := range pairs {
 		if i > 0 {
 			b.WriteByte(',')
 		}
-		b.WriteString(parts[i].(string))
+		b.WriteString(p.key)
 		b.WriteByte('=')
-		switch v := parts[i+1].(type) {
-		case int64:
-			b.WriteString(strconv.FormatInt(v, 10))
-		case int:
-			b.WriteString(strconv.Itoa(v))
-		}
+		b.WriteString(strconv.FormatInt(p.value, 10))
 	}
 	return b.String()
 }
@@ -455,8 +458,8 @@ func (s PerfTraceSnapshot) HeaderValues() map[string]string {
 	out := map[string]string{
 		headerPerfTraceEndpoint: s.Endpoint,
 		headerPerfTraceDecisions: kv(
-			"count", s.AuditRecords, "allow", s.AuditAllow, "deny", s.AuditDeny,
-			"other", s.AuditOther, "audit_us", microseconds(s.AuditEmitTime)),
+			perfKV{"count", s.AuditRecords}, perfKV{"allow", s.AuditAllow}, perfKV{"deny", s.AuditDeny},
+			perfKV{"other", s.AuditOther}, perfKV{"audit_us", microseconds(s.AuditEmitTime)}),
 	}
 	if v := joinPerfCounts(s.Phases, func(c PerfCount) int64 { return microseconds(c.Duration) }); v != "" {
 		out[headerPerfTracePhases] = v
@@ -471,8 +474,9 @@ func (s PerfTraceSnapshot) HeaderValues() map[string]string {
 		out[headerPerfTraceStoreTime] = v
 	}
 	if s.DBAvailable {
-		out[headerPerfTraceDB] = kv("wait_count", s.DBWaitCount, "wait_us", microseconds(s.DBWaitDuration),
-			"in_use", s.DBInUse, "open", s.DBOpen)
+		out[headerPerfTraceDB] = kv(
+			perfKV{"wait_count", s.DBWaitCount}, perfKV{"wait_us", microseconds(s.DBWaitDuration)},
+			perfKV{"in_use", int64(s.DBInUse)}, perfKV{"open", int64(s.DBOpen)})
 	}
 	return out
 }

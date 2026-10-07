@@ -637,3 +637,26 @@ func TestPerfAuthzStore_AllMethodsForwardAndCountExactlyTheirOp(t *testing.T) {
 		})
 	}
 }
+
+// TestPerfTrace_HeaderValuesExactBytes pins the exact Decisions and DB
+// header strings for a fixed snapshot.
+func TestPerfTrace_HeaderValuesExactBytes(t *testing.T) {
+	snap := PerfTraceSnapshot{
+		Endpoint:       "agents.global.legacy",
+		AuditAllow:     162,
+		AuditDeny:      93,
+		AuditOther:     1,
+		AuditRecords:   256,
+		AuditEmitTime:  186 * time.Microsecond,
+		DBAvailable:    true,
+		DBWaitCount:    325,
+		DBWaitDuration: 2174935 * time.Microsecond,
+		DBInUse:        1,
+		DBOpen:         2,
+	}
+	h := snap.HeaderValues()
+	assert.Equal(t, "count=256,allow=162,deny=93,other=1,audit_us=186", h[headerPerfTraceDecisions])
+	assert.Equal(t, "wait_count=325,wait_us=2174935,in_use=1,open=2", h[headerPerfTraceDB])
+	assert.Equal(t, "", kv())
+	assert.Equal(t, "a=-1", kv(perfKV{"a", -1}))
+}
