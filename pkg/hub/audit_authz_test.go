@@ -848,7 +848,7 @@ func TestDecisionAuditRouter_PreservesSamplingAndResult(t *testing.T) {
 	for _, route := range []string{"legacy", "finite-new"} {
 		t.Run(route, func(t *testing.T) {
 			f := newAuditFixture(t, auditFixtureAccept)
-			var caller context.Context = context.Background()
+			caller := context.Background()
 			if route == "finite-new" {
 				caller = f.caller
 				f.requireAdmission(t)

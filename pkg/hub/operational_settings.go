@@ -1898,16 +1898,6 @@ func (o *OperationalSettings) loseDecisionAuditPropagation(attachment decisionAu
 	}
 }
 
-// Invalidation carries no freshness proof and cannot reset a NEW fault.
-func (o *OperationalSettings) invalidateDecisionAuditObservation() {
-	if observer := o.decisionAuditObserver.Load(); observer != nil {
-		observer.invalidateSettings(o)
-	}
-	o.mu.Lock()
-	o.decisionAuditObservation = decisionAuditRefreshObservation{}
-	o.mu.Unlock()
-}
-
 func (o *OperationalSettings) decisionAuditSnapshot() (ExperimentsSnapshot, decisionAuditRefreshObservation) {
 	o.mu.RLock()
 	defer o.mu.RUnlock()

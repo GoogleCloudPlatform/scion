@@ -783,7 +783,7 @@ func TestDecisionAuditRouter_CloseSeparatesLegacyDrain(t *testing.T) {
 					response, err := client.Get(httpServer.URL)
 					requestErr = err
 					if err == nil {
-						response.Body.Close()
+						requestErr = response.Body.Close()
 					}
 				}()
 				auditFixtureWait(httpEntered)

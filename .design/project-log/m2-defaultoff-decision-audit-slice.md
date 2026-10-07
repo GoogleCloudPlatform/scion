@@ -661,3 +661,113 @@ No ref/config repair, rebase/force, commit/push, PR comment, reviewer/agent crea
 admission, activation or deployment. Human questions: NONE. Agent-directed manager
 exchanges remain separate. Retain and BLOCK for exact append acceptance and
 durability disposition; never task-complete or self-delete.
+
+## 2026-10-07 — PR #2774 mechanical lint fixes and bounded validation closeout
+
+Base HEAD/local/tracking/live publication is
+`be96a1d1807e8af27d260c4563c98743e0511f79` on
+`scion/audit-update-m2-defaultoff-publish`; divergence is 0/0. Original live M2
+remains `6d6e4de4598c82f0579fb0c566ea422c7e997b29`. This entry records the
+Amendments 7–10 correction packet for the three upstream lint findings on PR
+#2774. Commit, push and a new upstream CI run are still pending.
+
+The upstream findings were errcheck at
+`pkg/hub/decision_audit_admission_test.go:786:26` for unchecked
+`response.Body.Close`, staticcheck QF1011 at `pkg/hub/audit_authz_test.go:851:15`
+for the redundant `context.Context` declaration, and unused at
+`pkg/hub/operational_settings.go:1902:31` for
+`(*OperationalSettings).invalidateDecisionAuditObservation`.
+
+The exact mechanical correction paths are:
+
+- `pkg/hub/audit_authz_test.go`: replace the redundant explicitly typed
+  `context.Context` local initialized by `context.Background()` with inferred
+  `caller := context.Background()`; the context and test assertions are unchanged.
+- `pkg/hub/decision_audit_admission_test.go`: assign `response.Body.Close()` to
+  existing `requestErr` on the successful request branch. The existing completion
+  synchronization and error assertion observe the close result; ownership,
+  timing, counts and assertions are preserved.
+- `pkg/hub/operational_settings.go`: delete only unused
+  `invalidateDecisionAuditObservation`. Whole-repository hidden-file search
+  excluding `.git` and tracked-file search each found only its declaration and
+  zero references before deletion; both found zero occurrences afterward.
+  Neighboring methods are unchanged. Removing unreachable code changes no
+  production behavior. Scoped formatting introduced no incidental changes.
+
+Protected Amendment 7 artifacts under
+`/scion-volumes/scratchpad/projects/audit-update/reviews/`:
+
+- `m2-defaultoff-pr2774-lint-fix-amendment-7.patch`: 47 lines / 2,100 bytes /
+  SHA-256 `22b165f368fc6431c63406a21f788936f98c27b881ceda5dc00b5b92b9f02c78`.
+- `m2-defaultoff-pr2774-lint-fix-review-amendment-7.md`: 565 lines / 27,662 bytes /
+  SHA-256 `1cfd827aec558d5abb88cb56999f820e04a9943015f486d29aa0203a3becb4d4`.
+
+Local lint is **INCONCLUSIVE, never GREEN**. The sole exact 517-byte command
+(SHA-256 `5d47e1525f392c9b9f0680e1a46e42445624268e59c737c9aa42b5c82dbda41e`)
+ran once through the normal heavy-build wrapper, acquired slot 3 after 0 seconds,
+and observed 30 GiB available at acquisition. It retained
+`HEAVY_BUILD_MAX_WAIT=2700`, the acquire gate, `ulimit -v 12000000`,
+`GOMEMLIMIT=6GiB`, `GOGC=40`, `GOFLAGS=-gcflags=-c=1`, shared GOCACHE,
+and `timeout 15m` around `golangci-lint run
+--new-from-rev=c885fe2aeeb5bc7433079e902e905c8d547ec702 --concurrency=1
+--timeout=14m ./pkg/hub`; its exact literal is preserved in the Amendment 7
+review and Amendment 8 raw evidence. UTC start was
+`2026-10-07T15:16:13.574159+00:00`, end
+`2026-10-07T15:31:13.846866+00:00`, wall 900.2728722559987 seconds, exit 124 at
+the outer 15-minute cap while compilation was active. There was no completed
+lint issue/result output; this is not a source finding. No retry is authorized
+now or later. Complete sealed evidence is
+`m2-defaultoff-pr2774-lint-fix-lint-amendment-8.txt`, mode 0644, 285 lines /
+26,620 bytes / SHA-256
+`57831d47da38683c4c4d4e8d10815196177cbf2c934c3b117e848a1871dff438`.
+The next upstream CI run remains the authoritative lint gate and must be green
+before readiness; the focused Go GREEN cannot clear lint.
+
+Amendment 9 independently released one exact focused Go invocation, 2,353 bytes
+including terminal newline / SHA-256
+`e3d52263272a0e55dcfea0fe5d78173eeef8e8a7305dfb3970fc859b19fabb7f`.
+Normal wrapper wait was retained (`HEAVY_BUILD_MAX_WAIT=2700`); slot 4 was
+acquired after 0 seconds with 31 GiB available. The command retained the 30 GiB
+acquire gate, `ulimit -v 12000000`, outer 15-minute and Go-test 14-minute bounds,
+`GOMEMLIMIT=6GiB`, `GOGC=40`, `GOFLAGS=-gcflags=-c=1`, shared
+`GOCACHE=/scion-volumes/gocache`, `-count=1 -p 1 -v`, experiments and Hub packages,
+and the exact 40-name selector. UTC start was
+`2026-10-07T15:37:02.444554+00:00`, end
+`2026-10-07T15:38:12.481448+00:00`, wall 70.03685644402867 seconds, exit 0.
+Experiments passed in 0.005 seconds; Hub passed in 7.036 seconds. Exactly 40
+top-level tests plus 147 subtests produced 187 RUN / 187 PASS, with zero failure,
+skip, missing, unexpected, duplicate or unmatched outcome. The malformed-row
+and recovered-subscription-loop ERROR logs are expected negative fixtures with
+passing outcomes; both logs remain visible in the evidence. No other ERROR log
+was present. Complete sealed evidence with every selected name and subtest
+outcome is `m2-defaultoff-pr2774-lint-fix-green-amendment-9.txt`, mode 0644,
+3,342 lines / 364,676 bytes / SHA-256
+`b0b4a1dacd2e2319cb5eb3a6100daf158632193c0f6b6e2a2c8b4c8801702915`.
+Postflight proved no surviving wrapper/timeout/Go/compiler/test process, exact
+accepted staged patch and file hashes, unchanged refs and protected evidence,
+and no unstaged/unmerged/untracked entries before this append.
+
+The fresh bounded conflict review APPROVE with zero findings applies only to
+exact be96, report `m2-defaultoff-pr2774-conflict-review-1.md`, 239 lines /
+25,242 bytes / SHA-256
+`4942674c87fa02df947d13dc307c2ab2e6fd1e8386f77b4a802e1f5678c60177`.
+It does not approve this correction packet or a later SHA. Commit/push, new
+upstream CI and later-SHA review/readiness disposition remain pending; no
+readiness or completed-campaign claim is made.
+
+Production remains default false and structurally unadmitted. All activation,
+trust, persistence, timing, alerting, cutover, legacy retirement and full-M2 gates
+remain closed. No deployment or explain-round-7 claim is made.
+
+Mutation inventory for Amendments 7–10: three exact mechanical corrections via
+apply_patch and scoped formatting; staging only those three accepted paths;
+one wrapped lint invocation (INCONCLUSIVE) and one independently released
+wrapped focused Go invocation (GREEN), with protected evidence; this single
+append-only project-log section and two protected log artifacts. No lint retry,
+second Go invocation, additional source/test edit, log staging, commit, push,
+reviewer/agent creation, PR comment/review/queue/merge, fetch/main chase,
+ref/config repair, rebase/force, original-M2 update, admission, activation or
+deployment. Human questions: NONE. Agent-directed manager exchanges are
+separate. The three accepted correction paths remain the only staged paths;
+this log is the sole unstaged path. Retain and BLOCK for log acceptance and
+durability disposition; never task-complete or self-delete.
