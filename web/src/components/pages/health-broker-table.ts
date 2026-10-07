@@ -20,7 +20,11 @@
  * One compact row per runtime broker from the summary's runtime_brokers
  * list. A null field means the broker did not report it and renders as a
  * neutral value: a dash for runtime, an empty cell for workspace storage,
- * "never" for the last heartbeat.
+ * "not reported" for health, "never" for the last heartbeat.
+ *
+ * Health (ptone/scion#3592) is the broker's own report about itself and is
+ * separate from Status (liveness). An offline broker's health is its last
+ * report, shown greyed as "last reported".
  */
 
 import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
@@ -43,8 +47,25 @@ export interface HealthSummaryBroker {
   runtime: { type: string; profile?: string } | null;
   /** Null when the broker never reported its workspace storage. */
   workspace_storage: { backend: string; nfs_healthy?: boolean } | null;
+  /**
+   * The broker's self-reported health; null when it never reported one
+   * (an older broker). As fresh as last_heartbeat.
+   */
+  health?: HealthBrokerSelf | null;
   /** Per-broker agent counts: running, and needing attention. */
   agents?: { running?: number; attention?: number };
+}
+
+/** A broker's self-reported health. */
+export interface HealthBrokerSelf {
+  /** healthy, degraded or unhealthy. */
+  status: string;
+  /**
+   * Check name to result, e.g. { runtime: 'unavailable' }. The hub keeps
+   * only fixed words (healthy, degraded, unhealthy, available,
+   * unavailable, unknown), never free text from the broker.
+   */
+  checks?: Record<string, string>;
 }
 
 /** The summary's runtime_brokers block. */
@@ -88,9 +109,19 @@ export function agentsCell(
   };
 }
 
-/** True when the row needs a look: not online, or an unhealthy NFS share. */
+/** True when a broker reports itself degraded or unhealthy. */
+function healthIsProblem(h: HealthBrokerSelf | null | undefined): boolean {
+  return h?.status === 'degraded' || h?.status === 'unhealthy';
+}
+
+/**
+ * True when the row needs a look: not online, self-reported degraded or
+ * unhealthy, or an unhealthy NFS share.
+ */
 export function brokerHasProblem(b: HealthSummaryBroker): boolean {
-  return b.status !== 'online' || b.workspace_storage?.nfs_healthy === false;
+  return (
+    b.status !== 'online' || healthIsProblem(b.health) || b.workspace_storage?.nfs_healthy === false
+  );
 }
 
 /** Problems first, then by display name, then by ID. */
@@ -117,6 +148,54 @@ export function storageCell(b: HealthSummaryBroker): {
     return { text: 'NFS', tone: 'plain' };
   }
   return { text: s.backend, tone: 'plain' };
+}
+
+/** Check results that mean the check passed. */
+const PASSING_CHECK_VALUES = new Set(['available', 'healthy']);
+
+/**
+ * The failing checks of a health report as "name value" phrases, sorted by
+ * name, e.g. ["runtime unavailable"].
+ */
+export function healthCauses(h: HealthBrokerSelf | null | undefined): string[] {
+  return Object.entries(h?.checks ?? {})
+    .filter(([, v]) => !PASSING_CHECK_VALUES.has(v))
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([k, v]) => `${k} ${v}`);
+}
+
+/**
+ * Health cell text, tone and detail. Null health is "not reported"
+ * (neutral, never healthy). A degraded or unhealthy report names its
+ * cause, e.g. "degraded: runtime unavailable". For a broker that is not
+ * online the report is stale: it is shown greyed as "last reported".
+ * `title` lists every check, or is undefined when there are none.
+ */
+export function healthCell(b: HealthSummaryBroker): {
+  text: string;
+  tone: 'ok' | 'bad' | 'warn' | 'neutral' | 'muted';
+  stale: boolean;
+  title: string | undefined;
+} {
+  const h = b.health;
+  if (!h || !h.status) {
+    return { text: 'not reported', tone: 'muted', stale: false, title: undefined };
+  }
+  const causes = healthCauses(h);
+  const text =
+    healthIsProblem(h) && causes.length > 0 ? `${h.status}: ${causes.join(', ')}` : h.status;
+  const checks = Object.entries(h.checks ?? {})
+    .sort(([a], [c]) => a.localeCompare(c))
+    .map(([k, v]) => `${k}: ${v}`);
+  const title = checks.length > 0 ? checks.join('\n') : undefined;
+  if (b.status !== 'online') {
+    return { text: `last reported: ${text}`, tone: 'muted', stale: true, title };
+  }
+  let tone: 'ok' | 'bad' | 'warn' | 'neutral' = 'neutral';
+  if (h.status === 'healthy') tone = 'ok';
+  else if (h.status === 'degraded') tone = 'warn';
+  else if (h.status === 'unhealthy') tone = 'bad';
+  return { text, tone, stale: false, title };
 }
 
 function statusTone(status: string): 'ok' | 'bad' | 'warn' | 'neutral' {
@@ -206,6 +285,12 @@ export class ScionHealthBrokerTable extends LitElement {
       min-width: 8rem;
     }
 
+    td.health {
+      white-space: normal;
+      overflow-wrap: anywhere;
+      min-width: 6rem;
+    }
+
     td.num {
       font-variant-numeric: tabular-nums;
     }
@@ -289,6 +374,7 @@ export class ScionHealthBrokerTable extends LitElement {
                 <th scope="col">Name</th>
                 <th scope="col">Status</th>
                 <th scope="col">Runtime</th>
+                <th scope="col">Health</th>
                 <th scope="col">Workspace storage</th>
                 <th scope="col" title="Running / needing attention">Agents</th>
                 <th scope="col">Version</th>
@@ -309,6 +395,7 @@ export class ScionHealthBrokerTable extends LitElement {
 
   private renderRow(b: HealthSummaryBroker): TemplateResult {
     const storage = storageCell(b);
+    const health = healthCell(b);
     const runtime = b.runtime?.type;
     const profile = b.runtime?.profile;
     const agents = agentsCell(b);
@@ -323,6 +410,11 @@ export class ScionHealthBrokerTable extends LitElement {
           title=${ifDefined(profile && profile !== runtime ? `profile ${profile}` : undefined)}
         >
           ${runtime ? runtime : html`<span class="muted">—</span>`}
+        </td>
+        <td class="health" title=${ifDefined(health.title)}>
+          ${health.tone === 'muted'
+            ? html`<span class="muted${health.stale ? ' stale' : ''}">${health.text}</span>`
+            : html`<span class="pill tone-${health.tone}">${health.text}</span>`}
         </td>
         <td class="storage">
           ${storage.tone === 'plain'

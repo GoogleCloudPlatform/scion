@@ -125,6 +125,11 @@ func WorkspaceStorage(v string) predicate.RuntimeBroker {
 	return predicate.RuntimeBroker(sql.FieldEQ(FieldWorkspaceStorage, v))
 }
 
+// Health applies equality check predicate on the "health" field. It's identical to HealthEQ.
+func Health(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldHealth, v))
+}
+
 // Endpoint applies equality check predicate on the "endpoint" field. It's identical to EndpointEQ.
 func Endpoint(v string) predicate.RuntimeBroker {
 	return predicate.RuntimeBroker(sql.FieldEQ(FieldEndpoint, v))
@@ -1113,6 +1118,81 @@ func WorkspaceStorageEqualFold(v string) predicate.RuntimeBroker {
 // WorkspaceStorageContainsFold applies the ContainsFold predicate on the "workspace_storage" field.
 func WorkspaceStorageContainsFold(v string) predicate.RuntimeBroker {
 	return predicate.RuntimeBroker(sql.FieldContainsFold(FieldWorkspaceStorage, v))
+}
+
+// HealthEQ applies the EQ predicate on the "health" field.
+func HealthEQ(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldHealth, v))
+}
+
+// HealthNEQ applies the NEQ predicate on the "health" field.
+func HealthNEQ(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNEQ(FieldHealth, v))
+}
+
+// HealthIn applies the In predicate on the "health" field.
+func HealthIn(vs ...string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIn(FieldHealth, vs...))
+}
+
+// HealthNotIn applies the NotIn predicate on the "health" field.
+func HealthNotIn(vs ...string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotIn(FieldHealth, vs...))
+}
+
+// HealthGT applies the GT predicate on the "health" field.
+func HealthGT(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGT(FieldHealth, v))
+}
+
+// HealthGTE applies the GTE predicate on the "health" field.
+func HealthGTE(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGTE(FieldHealth, v))
+}
+
+// HealthLT applies the LT predicate on the "health" field.
+func HealthLT(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLT(FieldHealth, v))
+}
+
+// HealthLTE applies the LTE predicate on the "health" field.
+func HealthLTE(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLTE(FieldHealth, v))
+}
+
+// HealthContains applies the Contains predicate on the "health" field.
+func HealthContains(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldContains(FieldHealth, v))
+}
+
+// HealthHasPrefix applies the HasPrefix predicate on the "health" field.
+func HealthHasPrefix(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldHasPrefix(FieldHealth, v))
+}
+
+// HealthHasSuffix applies the HasSuffix predicate on the "health" field.
+func HealthHasSuffix(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldHasSuffix(FieldHealth, v))
+}
+
+// HealthIsNil applies the IsNil predicate on the "health" field.
+func HealthIsNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIsNull(FieldHealth))
+}
+
+// HealthNotNil applies the NotNil predicate on the "health" field.
+func HealthNotNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotNull(FieldHealth))
+}
+
+// HealthEqualFold applies the EqualFold predicate on the "health" field.
+func HealthEqualFold(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEqualFold(FieldHealth, v))
+}
+
+// HealthContainsFold applies the ContainsFold predicate on the "health" field.
+func HealthContainsFold(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldContainsFold(FieldHealth, v))
 }
 
 // LabelsIsNil applies the IsNil predicate on the "labels" field.

@@ -505,9 +505,8 @@ func TestListCursorKey_SharedSigningSecretDerivesConsistentKeyNameSeparatedFromD
 		cfg := DefaultServerConfig()
 		cfg.HubID = hubID
 		cfg.SharedSigningSecret = sharedSecret
-		srv, err := New(cfg, s)
+		srv, err := newTestHubServer(t, cfg, s)
 		require.NoError(t, err)
-		t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 		return srv
 	}
 
@@ -593,9 +592,8 @@ func TestListCursorKey_PersistsAcrossServerRestart(t *testing.T) {
 	newSrv := func() *Server {
 		cfg := DefaultServerConfig()
 		cfg.HubID = hubID
-		srv, err := New(cfg, s)
+		srv, err := newTestHubServer(t, cfg, s)
 		require.NoError(t, err)
-		t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 		return srv
 	}
 

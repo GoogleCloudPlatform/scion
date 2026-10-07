@@ -103,6 +103,7 @@ module.exports = {
                 'e2e/chat-palette/terminal-and-modal.pw.ts',
                 'e2e/chat-palette/terminal-guard-under-shell.pw.ts',
                 'e2e/chat-palette/thread-navigation.pw.ts',
+                'e2e/chat-palette/touch-keyboard.pw.ts',
                 'e2e/chat-palette/typography.pw.ts',
                 'e2e/palette-typography.ts',
                 'e2e/palette-focus.ts',

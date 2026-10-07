@@ -1478,6 +1478,7 @@ type Server struct {
 	// the HTTP drain, and requests still being served then emit records.
 	// Shutdown closes it after the HTTP drain, unless
 	// DeferDecisionAuditClose moved that to the caller.
+	decisionAuditRouter        *decisionAuditRouter
 	decisionAuditWriter        *StoreDecisionAuditEmitter
 	decisionAuditCloseDeferred atomic.Bool
 
@@ -1867,7 +1868,10 @@ func cloudLogQueryProjectID(cfg ServerConfig) string {
 }
 
 // New creates a new Hub API server.
-func New(cfg ServerConfig, s store.Store) (*Server, error) {
+func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
+	if err := validateSessionOnlyRoutes(startupRouteMetadata()); err != nil {
+		return nil, err
+	}
 	// Apply defaults for zero-value fields that have meaningful defaults.
 	defaults := DefaultServerConfig()
 	if cfg.StalledThreshold == 0 || cfg.StalledThreshold < 2*time.Minute {
@@ -1925,6 +1929,17 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 		workspaceLog:      logging.Subsystem("hub.workspace"),
 		agentMetricsLog:   logging.Subsystem("hub.agent-metrics"),
 	}
+	// A New that fails part-way must not leak what it already started: the
+	// link-service and preview cleanup loops, the decision audit worker,
+	// the OIDC key loops. The caller gets no *Server to shut down, so tear
+	// it down here (ptone/scion#3641). Both calls are idempotent and
+	// nil-safe on a partly built Server.
+	defer func() {
+		if retErr != nil {
+			_ = srv.CleanupResources(context.Background())
+			srv.CloseDecisionAudit(context.Background())
+		}
+	}()
 	// The startup-resolved hub name, which ApplySnapshot returns to when
 	// the configured hub_name is unset.
 	srv.startupHubName = cfg.HubName
@@ -2173,9 +2188,12 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 			srv.oidcKeyManager = oidcMgr
 			srv.oidcIssuerURL = oidcIssuerURL
 
-			// Start background loops for key cleanup and cross-instance refresh.
-			oidcMgr.StartCleanupLoop(ctx)
-			oidcMgr.StartRefreshLoop(ctx)
+			// Start background loops for key cleanup and cross-instance
+			// refresh. They run on the server-lifetime context, so
+			// Shutdown/CleanupResources stops them; ctx here is
+			// context.Background() and would leak them (ptone/scion#3641).
+			oidcMgr.StartCleanupLoop(srvCtx)
+			oidcMgr.StartRefreshLoop(srvCtx)
 
 			// OIDC identity token lifetime: use config if set, else default 15m
 			srv.oidcTokenLifetime = 15 * time.Minute
@@ -2222,9 +2240,10 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	// Wire decision audit emitter
 	auditEmitter := NewStoreDecisionAuditEmitter(s, logging.Subsystem("hub.decision-audit"))
 	srv.decisionAuditWriter = auditEmitter
+	srv.decisionAuditRouter = newDecisionAuditRouter(auditEmitter, srv)
 	// With server.hub.perf_trace on, records pass through a counting
 	// decorator on their way to the same emitter (perftrace_audit.go).
-	srv.authzService.SetDecisionAuditEmitter(wrapAuditEmitterForPerfTrace(auditEmitter, cfg.PerfTrace))
+	srv.authzService.SetDecisionAuditEmitter(wrapAuditEmitterForPerfTrace(srv.decisionAuditRouter, cfg.PerfTrace))
 	if cfg.PerfTrace {
 		srv.perfTraceLog = perfTraceLogger()
 		slog.Warn("Request performance tracing is on (server.hub.perf_trace); per-request perf_trace lines are logged")
@@ -3384,6 +3403,10 @@ func (s *Server) IsPostgres() bool {
 // server. This is called during hub startup (any DB driver) after seeding and
 // initial refresh (settings-db §3.5/§3.9). Safe for concurrent use.
 func (s *Server) SetOperationalSettings(ops *OperationalSettings) {
+	if s.decisionAuditRouter != nil {
+		s.decisionAuditRouter.setSource(ops)
+		return
+	}
 	s.operationalSettings.Store(ops)
 }
 
@@ -3638,6 +3661,9 @@ func (s *Server) DeferDecisionAuditClose() {
 // after the HTTP servers that serve this Server have drained and before
 // the store is closed. Safe to call more than once.
 func (s *Server) CloseDecisionAudit(ctx context.Context) {
+	if s.decisionAuditRouter != nil {
+		_ = s.decisionAuditRouter.CloseNew(ctx)
+	}
 	if s.decisionAuditWriter != nil {
 		s.decisionAuditWriter.Close(ctx)
 	}
@@ -5431,7 +5457,7 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	// under multi-replica Postgres (see CONNECTION-BUDGET.md).
 	if rec := s.dbMetrics; rec != nil {
 		if dbp, ok := s.store.(interface{ DB() *sql.DB }); ok {
-			stop := dbmetrics.StartPoolSampler(ctx, rec, dbp.DB(), 0)
+			stop := dbmetrics.StartPoolSampler(ctx, rec, dbmetrics.PoolStore, dbp.DB(), 0)
 			s.mu.Lock()
 			s.stopPoolSampler = stop
 			s.mu.Unlock()
@@ -5554,6 +5580,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 // CloseDecisionAudit after the WebServer's HTTP drain.
 func (s *Server) CleanupResources(ctx context.Context) error {
 	s.cleanupOnce.Do(func() {
+		if s.decisionAuditRouter != nil {
+			_ = s.decisionAuditRouter.CloseNew(ctx)
+		}
 		s.mu.RLock()
 		cc := s.controlChannel
 		stopPoolSampler := s.stopPoolSampler

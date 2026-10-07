@@ -23,7 +23,11 @@
 
 import { test, expect, type Locator, type Page, type Route } from '@playwright/test';
 import { projectId, setup, type AgentFixture } from './fixtures.js';
-import { paletteInputHasFocus, slowPaletteModule } from '../palette-focus.js';
+import {
+  expectTapHoldsKeyboard,
+  paletteInputHasFocus,
+  slowPaletteModule,
+} from '../palette-focus.js';
 
 const USER = 'fixture-user';
 
@@ -393,6 +397,28 @@ for (const host of hosts) {
     await expectTypingRightAfterOpenFilters(page, () => page.keyboard.press('Control+k'));
   });
 }
+
+test.describe('on a touch-primary device', () => {
+  test.use({ hasTouch: true, isMobile: true });
+
+  test('a tap on the header button holds the keyboard until the query input has focus', async ({
+    page,
+  }) => {
+    await slowPaletteModule(page);
+    await openHost(page, '/agents/graph', {});
+    await expect(graphNode(page, targetId)).toBeVisible();
+    expect(
+      await page.evaluate(() => matchMedia('(hover: none) and (pointer: coarse)').matches)
+    ).toBe(true);
+
+    await expectTapHoldsKeyboard(page, () => paletteButton(page).tap());
+    await expect(paletteDialog(page)).toBeVisible();
+
+    await page.keyboard.press('Escape');
+    await expect(paletteDialog(page)).toBeHidden();
+    await expectTapHoldsKeyboard(page, () => paletteButton(page).tap());
+  });
+});
 
 test('typing straight after the header button becomes the query, while the palette module loads', async ({
   page,
