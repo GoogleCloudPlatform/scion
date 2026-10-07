@@ -17,6 +17,7 @@ package hub
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"reflect"
 	"strings"
 
@@ -302,16 +303,27 @@ func yamlFieldName(f reflect.StructField) string {
 	return strings.ToLower(f.Name)
 }
 
+// errServerSectionUnreadable is returned by validateMergedServerSections
+// when the request's server value cannot be read as a JSON object.
+var errServerSectionUnreadable = errors.New("server: request value is not a readable JSON object")
+
 // validateMergedServerSections re-runs the server checks whose result
 // depends on more than one field, on the merged settings: a request that
 // sends only part of home_storage or shared_dir_storage is combined with
 // the stored fields by the deep merge, so the request alone does not show
 // the result that will be written. Only sections the request sent are
 // checked, so a save is not blocked by an unrelated stored value.
+// rawServer must be the request's server object: when it is nil or not a
+// JSON object, the sent sections cannot be determined and an error is
+// returned.
 func validateMergedServerSections(raw map[string]interface{}, rawServer json.RawMessage) error {
 	sent, ok := sentStructFields(reflect.TypeOf(config.V1ServerConfig{}), rawServer)
 	if !ok {
-		return nil
+		// The caller only validates when the decoded request has a
+		// server value, so its raw object must be readable. Without it
+		// the sent sections are unknown: reject rather than skip the
+		// check.
+		return errServerSectionUnreadable
 	}
 	var sentHome, sentShared bool
 	for _, sf := range sent {

@@ -792,3 +792,19 @@ func BenchmarkSentStructFields_20kDuplicates(b *testing.B) {
 		sentStructFields(typ, body)
 	}
 }
+
+// When the decoded request has a server value but its raw server object
+// is missing or not an object, the sent sections cannot be told apart,
+// so validateMergedServerSections rejects instead of skipping the check.
+func TestValidateMergedServerSections_RejectsUnreadableServerObject(t *testing.T) {
+	raw := map[string]interface{}{
+		"server": map[string]interface{}{
+			"home_storage": map[string]interface{}{"backend": "local", "leaf": "bogus"},
+		},
+	}
+	for _, rs := range []json.RawMessage{nil, json.RawMessage(``), json.RawMessage(`null`), json.RawMessage(`[]`)} {
+		if err := validateMergedServerSections(raw, rs); err == nil {
+			t.Errorf("rawServer %q: got nil, want an error", rs)
+		}
+	}
+}
