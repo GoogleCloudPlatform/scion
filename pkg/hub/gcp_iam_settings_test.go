@@ -663,7 +663,9 @@ func TestGCPIAMReload_UnattributedChangeRefused(t *testing.T) {
 	f.ops.refreshAndApply(context.Background(), f.srv)
 	assert.Equal(t, iamEnforceClosed, f.applied(t))
 	assert.Empty(t, f.applyAudits(t))
-	assert.Len(t, f.refusals(t), 1)
+	recs := f.refusals(t)
+	require.Len(t, recs, 1)
+	assert.Contains(t, recs[0].AfterSummary, "not attributable to an audited write")
 }
 
 func TestGCPIAMReload_RelaxingRefusedWhileHubScopedAssignmentConfigured(t *testing.T) {
