@@ -1201,9 +1201,11 @@ func sendGroupMessageViaHubCtx(hubCtx *HubContext, recipients []messages.GroupRe
 	}
 	// recordAmbiguous handles the Hub's 202 "ambiguous" outcome: it may or
 	// may not have dispatched the message, so it is unknown, not delivered.
-	recordAmbiguous := func(idx int, recipStr, messageID string) {
+	// The attachment warnings are kept: the message was persisted either way.
+	recordAmbiguous := func(idx int, recipStr, messageID string, warnings []hubclient.AttachmentWarning) {
 		record(idx, groupRecipientResult{Recipient: recipStr, Status: groupStatusUnknown,
-			Error: fmt.Sprintf("Hub reported delivery as ambiguous (message %s); it may have been delivered", messageID)})
+			Error:              fmt.Sprintf("Hub reported delivery as ambiguous (message %s); it may have been delivered", messageID),
+			AttachmentWarnings: warnings})
 	}
 
 	// An interrupt before a recipient's request was started means it was
@@ -1254,7 +1256,7 @@ func sendGroupMessageViaHubCtx(hubCtx *HubContext, recipients []messages.GroupRe
 				return
 			}
 			if sendResp != nil && sendResp.Status == "ambiguous" {
-				recordAmbiguous(idx, recipStr, sendResp.MessageID)
+				recordAmbiguous(idx, recipStr, sendResp.MessageID, warnings)
 				return
 			}
 			record(idx, groupRecipientResult{Recipient: recipStr, Status: groupStatusDelivered, AttachmentWarnings: warnings})
@@ -1285,13 +1287,13 @@ func sendGroupMessageViaHubCtx(hubCtx *HubContext, recipients []messages.GroupRe
 				recordErr(idx, recipStr, err)
 				return
 			}
-			if outResp != nil && outResp.Status == "ambiguous" {
-				recordAmbiguous(idx, recipStr, outResp.MessageID)
-				return
-			}
 			var warnings []hubclient.AttachmentWarning
 			if outResp != nil {
 				warnings = outResp.AttachmentWarnings
+			}
+			if outResp != nil && outResp.Status == "ambiguous" {
+				recordAmbiguous(idx, recipStr, outResp.MessageID, warnings)
+				return
 			}
 			record(idx, groupRecipientResult{Recipient: recipStr, Status: groupStatusDelivered, AttachmentWarnings: warnings})
 		}
@@ -1827,7 +1829,7 @@ func init() {
 	// Retained flags (core message functionality)
 	messageCmd.Flags().BoolVarP(&msgInterrupt, "interrupt", "i", false, "Interrupt the harness before sending the message")
 	messageCmd.Flags().BoolVarP(&msgWake, "wake", "w", false, "Resume a suspended agent before delivering the message")
-	messageCmd.Flags().StringArrayVar(&msgAttach, "attach", nil, "Attach file path(s), repeatable; use paths under /workspace or /scion-volumes (bare relative paths resolve to /workspace). Absolute paths outside these roots are silently dropped on delivery.")
+	messageCmd.Flags().StringArrayVar(&msgAttach, "attach", nil, "Attach file path(s), repeatable; use paths under /workspace or /scion-volumes (bare relative paths resolve to /workspace). Absolute paths outside these roots are skipped with a warning; attachments the hub cannot read are reported as warnings after the message is sent.")
 	messageCmd.Flags().StringVar(&msgBodyFile, "body-file", "", "Read message body from a file instead of positional args ('-' reads stdin; trailing CR/LF characters are trimmed)")
 
 	// Deprecated flags — still functional, emit warnings when used.

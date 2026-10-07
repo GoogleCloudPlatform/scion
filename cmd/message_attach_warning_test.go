@@ -253,3 +253,61 @@ func TestPrintAttachmentWarnings_SilentUnderJSON(t *testing.T) {
 	})
 	assert.Empty(t, out)
 }
+
+// An ambiguous outcome still persisted the message, so a recipient reported
+// as unknown keeps its attachment warnings, the same as delivered ones.
+func TestSendGroupMessage_AmbiguousKeepsAttachmentWarnings(t *testing.T) {
+	setAttachWarnState(t, "json")
+	t.Setenv("SCION_AGENT_NAME", "attach-sender")
+	projectID := "proj-attach-warn-group-ambiguous"
+	prefix := "/api/v1/projects/" + projectID + "/agents/"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/healthz":
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, prefix) && strings.HasSuffix(r.URL.Path, "/outbound-message"):
+			w.WriteHeader(http.StatusAccepted)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"message_id":          "msg-out",
+				"status":              "ambiguous",
+				"attachment_warnings": attachWarnBody,
+			})
+		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, prefix) && strings.HasSuffix(r.URL.Path, "/message"):
+			w.WriteHeader(http.StatusAccepted)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"message_id":          "msg-agent",
+				"status":              "ambiguous",
+				"attachment_warnings": attachWarnBody,
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	hubCtx := attachWarnHubCtx(t, srv, projectID)
+
+	recipients := []messages.GroupRecipient{
+		{Kind: messages.RecipientAgent, Name: "alpha"},
+		{Kind: messages.RecipientUser, Name: "someone@example.com"},
+	}
+	stdout, _ := captureStdoutStderr(t, func() {
+		_ = sendGroupMessageViaHub(hubCtx, recipients, "see attached", false)
+	})
+
+	var summary groupSendResult
+	require.NoError(t, json.Unmarshal([]byte(stdout), &summary), "stdout: %s", stdout)
+	require.Len(t, summary.Results, 2)
+	for _, r := range summary.Results {
+		assert.Equal(t, groupStatusUnknown, r.Status, "recipient %s", r.Recipient)
+		require.Len(t, r.AttachmentWarnings, 1, "recipient %s", r.Recipient)
+		assert.Equal(t, attachWarnPath, r.AttachmentWarnings[0].Path)
+	}
+
+	// Text output prints the warning once for the whole group.
+	outputFormat = ""
+	_, stderr := captureStdoutStderr(t, func() {
+		_ = sendGroupMessageViaHub(hubCtx, recipients, "see attached", false)
+	})
+	assert.Equal(t, 1, strings.Count(stderr, "Warning: attachment "+attachWarnPath), stderr)
+}
