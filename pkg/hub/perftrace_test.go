@@ -101,13 +101,13 @@ func TestPerfTrace_SnapshotHeadersAndLogAttrs(t *testing.T) {
 	assert.False(t, snap.DBAvailable)
 
 	h := snap.HeaderValues()
-	assert.Equal(t, "agents.project.legacy", h[HeaderPerfTraceEndpoint])
-	assert.Equal(t, "enrich=1500,messageability=30", h[HeaderPerfTracePhases])
-	assert.Equal(t, "enrich=1,messageability=2", h[HeaderPerfTracePhaseCounts])
-	assert.Equal(t, "GetEffectiveGroups=2,ListRoleBindingsForPrincipals=1", h[HeaderPerfTraceStoreCalls])
-	assert.Equal(t, "GetEffectiveGroups=10,ListRoleBindingsForPrincipals=5", h[HeaderPerfTraceStoreTime])
-	assert.Equal(t, "count=3,allow=2,deny=1,other=0,audit_us=3", h[HeaderPerfTraceDecisions])
-	_, hasDB := h[HeaderPerfTraceDB]
+	assert.Equal(t, "agents.project.legacy", h[headerPerfTraceEndpoint])
+	assert.Equal(t, "enrich=1500,messageability=30", h[headerPerfTracePhases])
+	assert.Equal(t, "enrich=1,messageability=2", h[headerPerfTracePhaseCounts])
+	assert.Equal(t, "GetEffectiveGroups=2,ListRoleBindingsForPrincipals=1", h[headerPerfTraceStoreCalls])
+	assert.Equal(t, "GetEffectiveGroups=10,ListRoleBindingsForPrincipals=5", h[headerPerfTraceStoreTime])
+	assert.Equal(t, "count=3,allow=2,deny=1,other=0,audit_us=3", h[headerPerfTraceDecisions])
+	_, hasDB := h[headerPerfTraceDB]
 	assert.False(t, hasDB)
 
 	keys := map[string]bool{}
@@ -276,7 +276,7 @@ func TestPerfTraceMiddleware_HeadersOnlyForAdminOptInAndNoRequestDataLogged(t *t
 				req = req.WithContext(contextWithIdentity(req.Context(), tc.identity))
 			}
 			if tc.optIn {
-				req.Header.Set(HeaderPerfTraceRequest, "1")
+				req.Header.Set(headerPerfTraceRequest, "1")
 			}
 			rec := httptest.NewRecorder()
 			handler.ServeHTTP(rec, req)
@@ -284,9 +284,9 @@ func TestPerfTraceMiddleware_HeadersOnlyForAdminOptInAndNoRequestDataLogged(t *t
 			assert.Equal(t, http.StatusTeapot, rec.Code)
 			assert.Equal(t, `{"ok":true}`, rec.Body.String())
 			if tc.wantPerfH {
-				assert.Equal(t, "agents.global.legacy", rec.Header().Get(HeaderPerfTraceEndpoint))
-				assert.Equal(t, "enrich=1", rec.Header().Get(HeaderPerfTracePhaseCounts))
-				assert.NotContains(t, rec.Header().Get(HeaderPerfTracePhases), "serialize",
+				assert.Equal(t, "agents.global.legacy", rec.Header().Get(headerPerfTraceEndpoint))
+				assert.Equal(t, "enrich=1", rec.Header().Get(headerPerfTracePhaseCounts))
+				assert.NotContains(t, rec.Header().Get(headerPerfTracePhases), "serialize",
 					"headers are taken before the body is written")
 			} else {
 				assertNoPerfHeaders(t, rec.Header())
@@ -374,8 +374,8 @@ func TestPerfHeaders_SingleChokepoint(t *testing.T) {
 			if f != "perftrace_middleware.go" {
 				assert.NotContains(t, src, "HeaderValues()", "%s must not render perf headers", f)
 			}
-			for _, name := range []string{"HeaderPerfTraceEndpoint", "HeaderPerfTracePhases", "HeaderPerfTracePhaseCounts",
-				"HeaderPerfTraceStoreCalls", "HeaderPerfTraceStoreTime", "HeaderPerfTraceDecisions", "HeaderPerfTraceDB"} {
+			for _, name := range []string{"headerPerfTraceEndpoint", "headerPerfTracePhases", "headerPerfTracePhaseCounts",
+				"headerPerfTraceStoreCalls", "headerPerfTraceStoreTime", "headerPerfTraceDecisions", "headerPerfTraceDB"} {
 				assert.NotContains(t, src, name, "%s must not reference %s", f, name)
 			}
 		}
@@ -386,6 +386,25 @@ func TestPerfHeaders_SingleChokepoint(t *testing.T) {
 	mw, err := os.ReadFile("perftrace_middleware.go")
 	require.NoError(t, err)
 	assert.Equal(t, 1, strings.Count(string(mw), "HeaderValues()"), "headers are rendered at one call site")
+
+	// perfResponseWriter is constructed in exactly one place, the
+	// middleware, where emitHeaders is set behind perfHeadersAllowed.
+	constructions := 0
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		data, err := os.ReadFile(f)
+		require.NoError(t, err)
+		n := strings.Count(string(data), "perfResponseWriter{")
+		if n > 0 {
+			assert.Equal(t, "perftrace_middleware.go", f, "perfResponseWriter constructed outside the middleware")
+		}
+		constructions += n
+	}
+	assert.Equal(t, 1, constructions)
+	assert.Equal(t, 1, strings.Count(string(mw), "emitHeaders:"), "emitHeaders is set at one place")
+	assert.Contains(t, string(mw), "emitHeaders:    r.Header.Get(headerPerfTraceRequest) == \"1\" && perfHeadersAllowed(r),")
 }
 
 // TestPerfTraceLogLine_AttributeKeySet pins the exact set of log keys.

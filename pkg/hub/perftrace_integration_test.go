@@ -178,7 +178,7 @@ func (p *perfPair) request(t *testing.T, srv *Server, who perfCaller, path strin
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	if optIn {
-		req.Header.Set(HeaderPerfTraceRequest, "1")
+		req.Header.Set(headerPerfTraceRequest, "1")
 	}
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
@@ -270,12 +270,18 @@ func TestPerfTrace_OffInstallsNothing(t *testing.T) {
 	assert.IsType(t, perfAuthzStore{}, srvOn.authzService.store)
 	assert.IsType(t, perfAuditEmitter{}, srvOn.authzService.decisionAuditEmitter)
 
-	for _, tc := range perfListPaths {
-		rec := p.request(t, p.off, perfAsAlice, tc.path(p), true)
-		for k := range rec.Header() {
-			assert.False(t, strings.HasPrefix(k, "X-Scion-Perf"), "%s: header %s with tracing off", tc.name, k)
+	// Probe the off server as the one caller that would get headers if the
+	// middleware were installed: the unscoped local admin, opting in. With a
+	// capturing logger set, an installed middleware would also log.
+	logs := &perfLockedBuffer{}
+	p.off.perfTraceLog = slog.New(slog.NewJSONHandler(logs, nil))
+	for _, who := range []perfCaller{perfAsDev, perfAsAlice} {
+		for _, tc := range perfListPaths {
+			rec := p.request(t, p.off, who, tc.path(p), true)
+			assertNoPerfHeaders(t, rec.Header())
 		}
 	}
+	assert.Empty(t, logs.lines(), "off: no perf_trace line")
 }
 
 // TestPerfTrace_OnMatchesOff: with tracing on (with and without the opt-in
@@ -283,6 +289,9 @@ func TestPerfTrace_OffInstallsNothing(t *testing.T) {
 // the same decision-audit records as with tracing off.
 func TestPerfTrace_OnMatchesOff(t *testing.T) {
 	p := newPerfPair(t, 5)
+	// reached records, per caller, whether some path returned 200 with at
+	// least one agent, so every caller kind is proven to exercise a list.
+	reached := map[perfCaller]bool{}
 	for _, who := range []perfCaller{perfAsAlice, perfAsBob, perfAsDev, perfAsAgentJWT, perfAsScopedUAT} {
 		for _, tc := range perfListPaths {
 			for _, optIn := range []bool{false, true} {
@@ -300,15 +309,27 @@ func TestPerfTrace_OnMatchesOff(t *testing.T) {
 				require.Equal(t, perfComparableBody(t, offRec.Body.Bytes()), perfComparableBody(t, onRec.Body.Bytes()), name)
 				require.Equal(t, offAudits, onAudits, name)
 				require.Equal(t, offRec.Header().Get("Content-Type"), onRec.Header().Get("Content-Type"), name)
+				assertNoPerfHeaders(t, offRec.Header())
+				if offRec.Code == http.StatusOK {
+					var body struct {
+						Agents []json.RawMessage `json:"agents"`
+					}
+					if json.Unmarshal(offRec.Body.Bytes(), &body) == nil && len(body.Agents) > 0 {
+						reached[who] = true
+					}
+				}
 				// Headers only for the unscoped local admin (the dev user) who
 				// opted in; never for any other caller.
 				if optIn && who == perfAsDev {
-					assert.NotEmpty(t, onRec.Header().Get(HeaderPerfTraceEndpoint), name)
+					assert.NotEmpty(t, onRec.Header().Get(headerPerfTraceEndpoint), name)
 				} else {
 					assertNoPerfHeaders(t, onRec.Header())
 				}
 			}
 		}
+	}
+	for who, name := range perfCallerNames {
+		assert.True(t, reached[who], "caller %s must get a 200 with agents on at least one path", name)
 	}
 }
 
@@ -339,7 +360,7 @@ func TestPerfTrace_CountersOnSmallFixture(t *testing.T) {
 	get := func(path, bearer string) (*httptest.ResponseRecorder, PerfTraceSnapshot, []*store.DecisionAuditRecord, map[string]int64) {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
 		req.Header.Set("Authorization", "Bearer "+bearer)
-		req.Header.Set(HeaderPerfTraceRequest, "1")
+		req.Header.Set(headerPerfTraceRequest, "1")
 		p.onAudit.take()
 		p.counter.reset()
 		rec, snap := perfTracedRequest(t, p.on, req)
@@ -412,8 +433,8 @@ func TestPerfTrace_CountersOnSmallFixture(t *testing.T) {
 		assertIndependent(t, snap, independent)
 		// Headers are taken when the status is written: every count but
 		// serialize is final by then.
-		assert.Equal(t, "agents.project.legacy", rec.Header().Get(HeaderPerfTraceEndpoint))
-		counts := parsePerfHeader(t, rec.Header().Get(HeaderPerfTracePhaseCounts))
+		assert.Equal(t, "agents.project.legacy", rec.Header().Get(headerPerfTraceEndpoint))
+		counts := parsePerfHeader(t, rec.Header().Get(headerPerfTracePhaseCounts))
 		for name, c := range snap.Phases {
 			if name == "serialize" {
 				assert.NotContains(t, counts, name)
@@ -421,16 +442,16 @@ func TestPerfTrace_CountersOnSmallFixture(t *testing.T) {
 			}
 			assert.Equal(t, c.Count, counts[name], "phase %s", name)
 		}
-		storeCalls := parsePerfHeader(t, rec.Header().Get(HeaderPerfTraceStoreCalls))
+		storeCalls := parsePerfHeader(t, rec.Header().Get(headerPerfTraceStoreCalls))
 		var total int64
 		for name, c := range snap.StoreCalls {
 			assert.Equal(t, c.Count, storeCalls[name], "store op %s", name)
 			total += storeCalls[name]
 		}
 		assert.Equal(t, snap.AuthzStoreCalls, total)
-		decisions := parsePerfHeader(t, rec.Header().Get(HeaderPerfTraceDecisions))
+		decisions := parsePerfHeader(t, rec.Header().Get(headerPerfTraceDecisions))
 		assert.Equal(t, snap.AuditRecords, decisions["count"])
-		db := parsePerfHeader(t, rec.Header().Get(HeaderPerfTraceDB))
+		db := parsePerfHeader(t, rec.Header().Get(headerPerfTraceDB))
 		for _, k := range []string{"wait_count", "wait_us", "in_use", "open"} {
 			assert.Contains(t, db, k)
 		}
@@ -460,7 +481,7 @@ func TestPerfTrace_RejectedAndUnauthenticatedRequests(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/agents", nil)
 	req.Header.Set("Authorization", "Bearer not-a-valid-token")
-	req.Header.Set(HeaderPerfTraceRequest, "1")
+	req.Header.Set(headerPerfTraceRequest, "1")
 	rec := httptest.NewRecorder()
 	p.on.Handler().ServeHTTP(rec, req)
 	require.Equal(t, http.StatusUnauthorized, rec.Code)
