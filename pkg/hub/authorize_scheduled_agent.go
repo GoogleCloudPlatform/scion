@@ -16,31 +16,21 @@ package hub
 
 import "net/http"
 
-// authorizeScheduledDispatchAgentAuthoring requires that authoring a
-// dispatch_agent scheduled event or schedule — creating one, or any update,
-// resume, or re-target that changes what a future dispatch does or who it
-// runs as — use a credential whose scope can still be applied when the event
-// fires. It reuses scopedUATDeniedForFutureDispatchAuthoring, the same
-// predicate the scheduled-message authoring gate uses in
-// authorize_scheduled_message.go, so both event kinds enforce one rule
-// instead of two independently maintained checks.
+// authorizeScheduledDispatchAgentAuthoring is the authoring precondition of
+// a dispatch_agent scheduled event or schedule (create, any update, resume or
+// re-target that changes what a future dispatch does or who it runs as): the
+// request must carry an identity.
 //
-// This gate applies at authoring time (ptone/scion#2121). Fire-time
-// authorization is performed separately by authorizeScheduledAgentCreate in
-// server.go.
-//
-// The gate denies only scoped UATs. It supplements, and does not replace,
-// the caller's own authorization: create and update also require
-// authorizeAgentCreate, and resume requires schedule update access.
+// A scoped UAT may author a dispatch_agent revision. The revision records the
+// token's frozen effect ceiling with its attribution (revisionAuthorityCeiling),
+// and each fire requires the token to be live and bounds the scheduled child's
+// delegation edge by that ceiling (resolveScheduledAuthority,
+// scheduledEffectCeiling), so the token's restrictions are applied at
+// execution time. The caller's own authorization is checked separately: create
+// and update also require authorizeAgentCreate, and resume requires it too.
 func (s *Server) authorizeScheduledDispatchAgentAuthoring(w http.ResponseWriter, r *http.Request) bool {
-	identity := GetIdentityFromContext(r.Context())
-	if identity == nil {
+	if GetIdentityFromContext(r.Context()) == nil {
 		Unauthorized(w)
-		return false
-	}
-	if scopedUATDeniedForFutureDispatchAuthoring(identity) {
-		writeError(w, http.StatusForbidden, ErrCodeForbidden,
-			"scheduled agent creation requires a credential whose scope can be applied at execution time", nil)
 		return false
 	}
 	return true
@@ -51,11 +41,9 @@ func (s *Server) authorizeScheduledDispatchAgentAuthoring(w http.ResponseWriter,
 // scheduled dispatch does or who it runs as. The scheduler persists only the
 // creator's identity, not the authoring credential's boundary and scopes, so
 // a scoped credential's restrictions cannot be reconstructed and re-applied
-// when the event fires. Shared by authorizeScheduledMessageAuthoring
-// (authorize_scheduled_message.go) and
-// authorizeScheduledDispatchAgentAuthoring, so both event kinds enforce the
-// same rule through one predicate rather than two independently maintained
-// checks.
+// when the event fires. Used by authorizeScheduledMessageAuthoring
+// (authorize_scheduled_message.go); dispatch_agent revisions record the
+// credential's ceiling instead (authorizeScheduledDispatchAgentAuthoring).
 func scopedUATDeniedForFutureDispatchAuthoring(identity Identity) bool {
 	return IsScopedUserIdentity(identity)
 }

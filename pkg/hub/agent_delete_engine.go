@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -308,6 +309,12 @@ type deletionEngine struct {
 	// finished is set once finish() has committed the soft or hard delete.
 	// Only the engine goroutine touches it.
 	finished bool
+
+	// The run intent dispatch recorded (stopped, at intentAt) and the
+	// intent it replaced, so a rollback can restore the prior intent.
+	intentRecorded bool
+	priorIntent    store.RunIntent
+	intentAt       time.Time
 
 	// leaseUntil is the lease expiry this engine last wrote (at the claim,
 	// then on each renewal that took). It bounds the dispatch deadline.
@@ -599,12 +606,21 @@ func (e *deletionEngine) dispatch() (out deletionOutcome, ok bool) {
 
 	// A delete is a stop: record it before anything is dispatched. The
 	// claim already holds the row, so a failed write is logged rather than
-	// failing the delete. A rollback leaves this intent in place (see
-	// rollback).
-	if _, err := s.recordRunIntent(ctx, agent, store.RunIntentStopped); err != nil {
+	// failing the delete. A rollback restores the intent this replaced (see
+	// rollback). The start claim held when the stop was recorded is
+	// released once the dispatch succeeds: the delete superseded it.
+	supersededClaim := agent.StartClaimID
+	if prior, at, err := s.swapRunIntent(ctx, agent, store.RunIntentStopped); err != nil {
 		s.agentLifecycleLog.Warn("Failed to record run intent for agent delete",
 			"agent_id", agent.ID, "error", err)
+	} else {
+		e.intentRecorded, e.priorIntent, e.intentAt = true, prior, at
 	}
+	defer func() {
+		if ok && e.intentRecorded {
+			s.releaseSupersededClaim(e.base, agent.ID, supersededClaim, e.intentAt)
+		}
+	}()
 
 	// Managed agent: clean up cloud resources directly, skip the broker.
 	// Errors are logged, as before (follow-up 4).
@@ -667,6 +683,19 @@ func (e *deletionEngine) dispatch() (out deletionOutcome, ok bool) {
 			"agent_id", agent.ID, "claim", e.plan.claim, "not_after", notAfter.UTC().Format(time.RFC3339), "error", err)
 		return e.abandonWith(staleDispatchMessage), false
 	}
+	var refused *DeleteRunMismatchError
+	if errors.As(err, &refused) && refuseDeleteRunMismatch(req.Force, bestEffort) {
+		// The broker holds a different run of the agent than the row
+		// records, and deleted nothing (ptone/scion#3080): finalizing would
+		// leave that run's container running with no row. Fail the delete
+		// as a conflict and restore the prior phase, as for a broker 409.
+		// A retry sends the same run and is refused again until the row
+		// and the broker agree on the run.
+		s.agentLifecycleLog.Warn("delete engine: broker holds a different run than the hub recorded; not finalizing",
+			"agent_id", agent.ID, "claim", e.plan.claim, "hub_run_id", refused.RequestedRunID,
+			"broker_run_id", refused.CurrentRunID, "force", req.Force, "best_effort", bestEffort)
+		return e.rollback(store.DeletionCodeConflict, deleteRunMismatchMessage(refused)), false
+	}
 	switch {
 	case bestEffort:
 		s.agentLifecycleLog.Warn("Failed to dispatch created-phase agent delete to broker (continuing)",
@@ -680,6 +709,27 @@ func (e *deletionEngine) dispatch() (out deletionOutcome, ok bool) {
 
 	s.agentLifecycleLog.Error("Failed to dispatch agent delete to broker", "agent_id", agent.ID, "error", err)
 	return e.classifyDispatchFailure(err, startedAt)
+}
+
+// refuseDeleteRunMismatch reports whether the delete engine refuses to
+// finalize when the broker answers its dispatch with ErrDeleteRunMismatch
+// (ptone/scion#3080), given the request's force flag and whether the
+// dispatch was best-effort (a created row with no launch in flight). By
+// ptone's decision on ptone/scion#3080 it refuses in every case, under
+// force and best-effort too: the other run's container is on the broker
+// either way, and finalizing would leave it running with no row. Were it
+// to return false, the refusal would fall through to the force or
+// best-effort handling, which finalizes as for any other dispatch error.
+func refuseDeleteRunMismatch(force, bestEffort bool) bool {
+	_, _ = force, bestEffort
+	return true
+}
+
+// deleteRunMismatchMessage is the failed delete's message when the broker
+// refused it because it holds a different run (ptone/scion#3080).
+func deleteRunMismatchMessage(refused *DeleteRunMismatchError) string {
+	return fmt.Sprintf("The runtime broker holds run %s of this agent, not run %s that the hub recorded; nothing was deleted",
+		refused.CurrentRunID, refused.RequestedRunID)
 }
 
 // classifyDispatchFailure decides a non-force dispatch error from the
@@ -792,11 +842,11 @@ func (e *deletionEngine) rollback(code, msg string) deletionOutcome {
 			}
 		},
 	}
-	// The run intent stays stopped, as dispatch recorded it, even when the
-	// prior phase restored here is a live one (including a broker that was
-	// unavailable): a failed delete is treated like a stop whose dispatch
-	// failed. Nothing acts on a live agent with intent stopped yet, so this
-	// only records what the user last asked for.
+	// The run intent dispatch recorded (stopped) is put back to what it
+	// replaced, with a compare-and-set on the time dispatch wrote, so an
+	// agent restored to a live phase keeps a matching intent (the hub stops
+	// an agent that runs with intent stopped) and a newer start or stop
+	// recorded meanwhile wins.
 	n, err := e.s.store.UpdateAgentDeletion(ctx, e.agentID(), e.claimPred(store.DeletionStateDeleting), set)
 	if err != nil {
 		e.s.agentLifecycleLog.Error("delete engine: rollback write failed",
@@ -805,6 +855,12 @@ func (e *deletionEngine) rollback(code, msg string) deletionOutcome {
 	}
 	if n == 0 {
 		return e.lost()
+	}
+	if e.intentRecorded && e.priorIntent.Valid() && e.priorIntent != store.RunIntentStopped {
+		if _, err := e.s.store.RevertRunIntent(ctx, e.agentID(), store.RunIntentStopped, e.intentAt, e.priorIntent); err != nil {
+			e.s.agentLifecycleLog.Warn("delete engine: restoring the run intent failed",
+				"agent_id", e.agentID(), "error", err)
+		}
 	}
 	e.publishStatus(ctx)
 	return deletionOutcome{kind: deletionOutcomeFailed, code: code, message: msg}
@@ -1024,11 +1080,26 @@ func deleteSyncWaitFor(r *http.Request) time.Duration {
 // broker conflict, a retryable 503 when the broker does not have the agent's
 // runtime available, 502 otherwise (today's codes on the fast path).
 // retryAfter is the 503's Retry-After; "" means defaultBrokerRuntimeRetryAfter.
-func writeDeletionFailure(w http.ResponseWriter, agentID, code, message, retryAfter string) {
-	if message == "" {
-		message = "agent delete failed (" + code + ")"
+//
+// The status, the API error code and Retry-After are the same for every
+// caller. The deletion code and the failure message (often broker or store
+// error text) are detail for platform admins only (ptone/scion#3122): for
+// any other caller (isAdmin false) the body carries a generic message and
+// no deletionCode.
+func writeDeletionFailure(w http.ResponseWriter, agentID, code, message, retryAfter string, isAdmin bool) {
+	// The operator log keeps the full failure for every caller; writeError
+	// below logs only the message the caller receives.
+	slog.Warn("agent delete failed", "agent_id", agentID, "deletion_code", code,
+		"message", message, "body_redacted", !isAdmin)
+	details := map[string]interface{}{"agentId": agentID}
+	if isAdmin {
+		if message == "" {
+			message = "agent delete failed (" + code + ")"
+		}
+		details["deletionCode"] = code
+	} else {
+		message = genericDeleteFailedMessage
 	}
-	details := map[string]interface{}{"agentId": agentID, "deletionCode": code}
 	if code == store.DeletionCodeConflict {
 		writeError(w, http.StatusConflict, ErrCodeConflict, message, details)
 		return
@@ -1044,13 +1115,14 @@ func writeDeletionFailure(w http.ResponseWriter, agentID, code, message, retryAf
 	writeError(w, http.StatusBadGateway, ErrCodeRuntimeError, message, details)
 }
 
-// writeDeleteAccepted writes 202 with the agent's current deletion view.
-func (s *Server) writeDeleteAccepted(w http.ResponseWriter, agentID string) {
+// writeDeleteAccepted writes 202 with the agent's current deletion view,
+// redacted for a caller who is not a platform admin (isAdmin false).
+func (s *Server) writeDeleteAccepted(w http.ResponseWriter, agentID string, isAdmin bool) {
 	var view *store.DeletionInfo
 	ctx, cancel := context.WithTimeout(context.Background(), deleteShortStep)
 	defer cancel()
 	if row, err := s.store.GetAgent(ctx, agentID); err == nil {
-		view = store.ComputeAgentDeletion(row, time.Now())
+		view = deletionViewForCaller(row, time.Now(), isAdmin)
 	}
 	writeJSON(w, http.StatusAccepted, agentDeleteAcceptedResponse{AgentID: agentID, Deletion: view})
 }
@@ -1064,7 +1136,11 @@ func (s *Server) writeDeleteAccepted(w http.ResponseWriter, agentID string) {
 //     the code the view shows: 409 for a conflict, a retryable 503 with
 //     Retry-After for runtime_unavailable, 502 otherwise;
 //   - deadline → 202.
-func (s *Server) joinAgentDeletion(w http.ResponseWriter, r *http.Request, agentID string, observedClaim int64, deadline time.Time) {
+//
+// isAdmin is callerSeesDeletionDetail for the request, evaluated once by
+// the caller; it decides whether the failure body and the 202 body carry
+// the deletion detail.
+func (s *Server) joinAgentDeletion(w http.ResponseWriter, r *http.Request, agentID string, observedClaim int64, deadline time.Time, isAdmin bool) {
 	evCh, unsub := s.events.Subscribe("agent."+agentID+".deleted", "agent."+agentID+".status")
 	defer unsub()
 
@@ -1074,7 +1150,7 @@ func (s *Server) joinAgentDeletion(w http.ResponseWriter, r *http.Request, agent
 	defer timer.Stop()
 
 	for first := true; ; first = false {
-		if s.resolveJoinFromRow(w, r.Context(), agentID, observedClaim) {
+		if s.resolveJoinFromRow(w, r.Context(), agentID, observedClaim, isAdmin) {
 			return
 		}
 		if first && joinAgentDeletionHook != nil {
@@ -1087,10 +1163,10 @@ func (s *Server) joinAgentDeletion(w http.ResponseWriter, r *http.Request, agent
 			}
 		case <-ticker.C:
 		case <-timer.C:
-			if s.resolveJoinFromRow(w, r.Context(), agentID, observedClaim) {
+			if s.resolveJoinFromRow(w, r.Context(), agentID, observedClaim, isAdmin) {
 				return
 			}
-			s.writeDeleteAccepted(w, agentID)
+			s.writeDeleteAccepted(w, agentID, isAdmin)
 			return
 		case <-r.Context().Done():
 			return
@@ -1104,7 +1180,7 @@ var joinAgentDeletionHook func(agentID string)
 
 // resolveJoinFromRow reads the row and, when it decides the outcome, writes
 // the response and returns true.
-func (s *Server) resolveJoinFromRow(w http.ResponseWriter, ctx context.Context, agentID string, observedClaim int64) bool {
+func (s *Server) resolveJoinFromRow(w http.ResponseWriter, ctx context.Context, agentID string, observedClaim int64, isAdmin bool) bool {
 	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), deleteShortStep)
 	defer cancel()
 	row, err := s.store.GetAgent(rctx, agentID)
@@ -1127,13 +1203,13 @@ func (s *Server) resolveJoinFromRow(w http.ResponseWriter, ctx context.Context, 
 		return false
 	}
 	if code := row.DeletionEffectiveCode(now); code != "" {
-		writeDeletionFailure(w, agentID, code, row.DeletionError, deletionRetryAfterFor(agentID, row.DeletionClaim))
+		writeDeletionFailure(w, agentID, code, row.DeletionError, deletionRetryAfterFor(agentID, row.DeletionClaim), isAdmin)
 		return true
 	}
 	if row.DeletionState == store.DeletionStateNone && row.DeletionClaim >= observedClaim {
 		// The marker was cleared after a failure (a successful start or stop
 		// clears it): the delete did not complete.
-		writeDeletionFailure(w, agentID, store.DeletionCodeRuntimeError, "agent delete did not complete", "")
+		writeDeletionFailure(w, agentID, store.DeletionCodeRuntimeError, "agent delete did not complete", "", isAdmin)
 		return true
 	}
 	return false

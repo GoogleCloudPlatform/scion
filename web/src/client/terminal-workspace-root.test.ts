@@ -15,6 +15,7 @@ import {
 } from 'vitest';
 import type { TerminalWorkspaceRoot } from './terminal-workspace-root.js';
 import { TerminalSessionRegistry } from './terminal-sessions.js';
+import type { Agent } from '../shared/types.js';
 import { _appFrameRefCountForTests } from '../components/shared/app-frame.js';
 import {
   TERMINAL_PALETTE_NEW_AGENT_EVENT,
@@ -36,12 +37,18 @@ vi.mock('@xterm/xterm', () => ({
     dispose = vi.fn();
     reset = vi.fn();
     write = vi.fn();
-    focus = vi.fn();
-    blur = vi.fn();
+    /** Stands in for xterm's own helper textarea, its keyboard input. */
+    textarea: HTMLTextAreaElement | null = null;
+    focus = vi.fn(() => this.textarea?.focus());
+    blur = vi.fn(() => this.textarea?.blur());
     refresh = vi.fn();
     parser = { registerOscHandler: vi.fn() };
     loadAddon = vi.fn();
-    open = vi.fn();
+    open = vi.fn((parent: HTMLElement) => {
+      this.textarea = document.createElement('textarea');
+      this.textarea.className = 'xterm-helper-textarea';
+      parent.append(this.textarea);
+    });
     onData = vi.fn();
     onBinary = vi.fn();
     attachCustomKeyEventHandler = vi.fn();
@@ -906,8 +913,9 @@ describe('idle entries', () => {
 
     const item = railItem();
     expect(item.dataset.connection).toBe('idle');
-    const stateLabel = item.querySelector('.terminal-state-label');
-    expect(stateLabel?.textContent).toContain('Not connected');
+    expect(item.querySelector('.terminal-state-label')).toBeNull();
+    const dot = item.querySelector<HTMLElement>('.terminal-connection-dot');
+    expect(dot?.title).toContain('Not connected');
     const reconnectBtn = item.querySelector<HTMLButtonElement>(
       '[aria-label^="Reconnect"].terminal-icon-action'
     );
@@ -921,6 +929,81 @@ describe('idle entries', () => {
     expect(idleOverlay?.textContent).toContain('Select this terminal to connect');
     const errorBanner = pane.shadowRoot?.querySelector('.error-banner');
     expect(errorBanner).toBeNull();
+  });
+
+  it('rail row shows the project name with the full name in its title', async () => {
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'p1',
+    });
+    root.withAutoSelectSuspended(() => root.create(registry, agentId, { deferConnect: true }));
+    registry.metadata.seed(agentId, {
+      id: agentId,
+      name: 'test',
+      projectId: 'project-id-1',
+      project: 'A rather long project name',
+      phase: 'running',
+    } as Agent);
+    await flush();
+
+    const item = railItem();
+    const text = item.querySelector('.terminal-rail-text')!;
+    expect(text.children).toHaveLength(2);
+    const project = item.querySelector<HTMLElement>('.terminal-project-name');
+    expect(project?.textContent).toBe('A rather long project name');
+    expect(project?.title).toBe('A rather long project name');
+    expect(item.querySelector('.terminal-state-label')).toBeNull();
+    expect(item.querySelector('.terminal-connection-dot')).not.toBeNull();
+    const select = item.querySelector<HTMLButtonElement>('.terminal-rail-select')!;
+    expect(select.title).toBe('Not connected · metadata pending');
+    expect(select.getAttribute('aria-label')).toBe(
+      'Show terminal for test in A rather long project name, Not connected, metadata pending'
+    );
+    expect(item.querySelector<HTMLElement>('.terminal-connection-dot')?.title).toBe(select.title);
+  });
+
+  it('rail row falls back to the project id when the project name is unknown', async () => {
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'p2',
+    });
+    root.withAutoSelectSuspended(() => root.create(registry, agentId, { deferConnect: true }));
+    registry.metadata.seed(agentId, {
+      id: agentId,
+      name: 'test',
+      projectId: 'project-id-2',
+      phase: 'running',
+    } as Agent);
+    await flush();
+
+    const project = railItem().querySelector<HTMLElement>('.terminal-project-name');
+    expect(project?.textContent).toBe('project-id-2');
+    expect(project?.title).toBe('project-id-2');
+    const select = railItem().querySelector<HTMLButtonElement>('.terminal-rail-select')!;
+    expect(select.title).toBe('Not connected · metadata pending');
+    expect(select.getAttribute('aria-label')).toBe(
+      'Show terminal for test in project-id-2, Not connected, metadata pending'
+    );
+  });
+
+  it('rail row omits the project line when no agent metadata is loaded', async () => {
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'p3',
+    });
+    root.withAutoSelectSuspended(() => root.create(registry, agentId, { deferConnect: true }));
+    await flush();
+
+    const item = railItem();
+    expect(item.querySelector('.terminal-project-name')).toBeNull();
+    expect(item.querySelector('.terminal-rail-text')?.children).toHaveLength(1);
+    const select = item.querySelector<HTMLButtonElement>('.terminal-rail-select')!;
+    const status = item.querySelector<HTMLElement>('.terminal-connection-dot')!.title;
+    expect(status).toBe('Not connected · metadata pending');
+    expect(select.title).toBe(status);
+    expect(select.getAttribute('aria-label')).toBe(
+      `Show terminal for ${agentId}, Not connected, metadata pending`
+    );
   });
 
   it('selecting an idle entry connects it', async () => {
@@ -2584,6 +2667,27 @@ describe('"Jump to agent" palette: keyboard shortcut', () => {
     await expectNotOpened();
   });
 
+  it('on a Mac, leaves Ctrl+K typed in a text field to the field', async () => {
+    vi.spyOn(navigator, 'platform', 'get').mockReturnValue('MacIntel');
+    const input = document.createElement('input');
+    root.element.append(input);
+
+    expect(press({ key: 'k', ctrlKey: true }, input)).toBe(true);
+    await expectNotOpened();
+
+    expect(press({ key: 'k', metaKey: true }, input)).toBe(false);
+    await expectOpened();
+  });
+
+  it('off a Mac, Ctrl+K typed in a text field opens the palette', async () => {
+    vi.spyOn(navigator, 'platform', 'get').mockReturnValue('Linux x86_64');
+    const input = document.createElement('input');
+    root.element.append(input);
+
+    expect(press({ key: 'k', ctrlKey: true }, input)).toBe(false);
+    await expectOpened();
+  });
+
   it('neither Ctrl+K nor Meta+K fire with both modifiers, Alt, or Shift held', async () => {
     expect(press({ key: 'k', ctrlKey: true, metaKey: true })).toBe(true);
     expect(press({ key: 'k', ctrlKey: true, altKey: true })).toBe(true);
@@ -2738,6 +2842,19 @@ describe('"Jump to agent" palette: keyboard shortcut', () => {
     ).toBe(agentLoads);
   });
 
+  it('on a Mac, Ctrl+K in the open palette search field edits the query, and Cmd+K closes it', async () => {
+    vi.spyOn(navigator, 'platform', 'get').mockReturnValue('MacIntel');
+    press({ key: 'k', metaKey: true });
+    const palette = await expectOpened();
+    const input = palette.shadowRoot!.querySelector<HTMLInputElement>('#palette-query-input')!;
+
+    expect(press({ key: 'k', ctrlKey: true, composed: true }, input)).toBe(true);
+    expect(palette.open).toBe(true);
+
+    expect(press({ key: 'k', metaKey: true, composed: true }, input)).toBe(false);
+    expect(palette.open).toBe(false);
+  });
+
   it('a second press while the palette is still loading cancels the open', async () => {
     press({ key: 'k', metaKey: true });
     press({ key: 'k', metaKey: true });
@@ -2776,5 +2893,362 @@ describe('"Jump to agent" palette: keyboard shortcut', () => {
     other.dispose();
 
     expect(remove).toHaveBeenCalledWith('focusin', installed[0]);
+  });
+});
+
+describe('open terminals rail: selection focuses the terminal (ptone/scion#2900)', () => {
+  let root: TerminalWorkspaceRoot;
+  let reg: TerminalSessionRegistry;
+  const sessions = new Map<string, ReturnType<TerminalWorkspaceRoot['create']>>();
+  /** While set, agent B's metadata fetch waits for it, so B's terminal does not mount yet. */
+  let holdB: Promise<void> | null = null;
+  const sockets: Array<{ url: string; onmessage: ((event: MessageEvent) => void) | null }> = [];
+
+  function agentResponse(id: string): Response {
+    return new Response(JSON.stringify({ id, name: id, phase: 'running' }), { status: 200 });
+  }
+
+  beforeEach(() => {
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      cb(0);
+      return 0;
+    });
+    // Each agent's own metadata, so every session gets as far as mounting
+    // its terminal.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string) => {
+        const id = [AGENT_A, AGENT_B].find((agent) => String(url).includes(agent)) ?? AGENT_A;
+        if (id === AGENT_B && holdB) return holdB.then(() => agentResponse(id));
+        return Promise.resolve(agentResponse(id));
+      })
+    );
+    holdB = null;
+    stubWebSocketAndEventSource();
+    sockets.length = 0;
+    vi.stubGlobal(
+      'WebSocket',
+      class {
+        onopen = null;
+        onclose = null;
+        onmessage: ((event: MessageEvent) => void) | null = null;
+        send = vi.fn();
+        close = vi.fn();
+        readyState = 0;
+        constructor(public url: string) {
+          sockets.push(this);
+        }
+      }
+    );
+    reg = new TerminalSessionRegistry({ hubUrl: window.location.origin, accountId: 'r4' });
+    root = new WorkspaceRoot();
+    document.body.append(root.element);
+    sessions.clear();
+    // Stands in for main.ts: a rail navigation to an open agent ends in
+    // select(), as the coordinator does once the route settles.
+    root.element.addEventListener('nav-click', (e) => {
+      const agentId = (e as CustomEvent<{ path: string }>).detail.path.split('/').pop()!;
+      const session = sessions.get(agentId);
+      if (session) queueMicrotask(() => root.select(session));
+    });
+  });
+
+  afterEach(() => {
+    root.dispose();
+    root.element.remove();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  function open(agentId: string): void {
+    sessions.set(agentId, root.create(reg, agentId));
+  }
+
+  function railButton(agentId: string): HTMLButtonElement {
+    const key = root.findSessionKeyByAgentId(agentId);
+    const btn = [...root.element.querySelectorAll<HTMLButtonElement>('.terminal-rail-select')].find(
+      (el) => el.dataset.railFocusId === `${key}:select`
+    );
+    if (!btn) throw new Error(`No rail button for ${agentId}`);
+    return btn;
+  }
+
+  /** The agent's xterm input, once its terminal has mounted. */
+  async function terminalInput(agentId: string): Promise<HTMLTextAreaElement> {
+    return vi.waitFor(() => {
+      const input = paneFor(root, agentId).shadowRoot?.querySelector<HTMLTextAreaElement>(
+        '.xterm-helper-textarea'
+      );
+      if (!input) throw new Error('terminal not mounted yet');
+      return input;
+    });
+  }
+
+  function hasFocus(input: HTMLTextAreaElement): boolean {
+    const host = (input.getRootNode() as ShadowRoot).host;
+    return document.activeElement === host && host.shadowRoot?.activeElement === input;
+  }
+
+  /** A, then B open; B is in front (the single layout shows the last opened). */
+  async function twoOpen(): Promise<void> {
+    root.show(true);
+    open(AGENT_A);
+    open(AGENT_B);
+    await flush();
+    await terminalInput(AGENT_A);
+    await terminalInput(AGENT_B);
+  }
+
+  /** A mouse click: focus lands on the button, then the click fires. */
+  function clickRail(agentId: string): void {
+    const btn = railButton(agentId);
+    btn.focus();
+    btn.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1 }));
+  }
+
+  /**
+   * Enter or Space on the focused rail button. The rail item is a native
+   * `<button>` and the workspace adds no Enter or Space handler of its own
+   * (the rail's keydown handler takes only arrows, Home and End), so the
+   * browser's activation behavior is what turns either key into a click
+   * with detail 0. jsdom has no activation behavior, so the click is
+   * dispatched here; the keydown is real and must pass through the
+   * workspace untouched. Browsers activate a button on Enter keypress and
+   * on Space keyup, and the terminal only gets focus during that click, so
+   * the key itself never reaches the terminal.
+   */
+  function activateRailByKey(agentId: string, key: 'Enter' | ' '): void {
+    const btn = railButton(agentId);
+    btn.focus();
+    const keydown = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true });
+    btn.dispatchEvent(keydown);
+    expect(keydown.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(btn);
+    btn.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 0 }));
+  }
+
+  /** Stops the nav-click stand-in from calling select() for `agentId`. */
+  function navigationSelectsNothing(agentId: string): ReturnType<TerminalWorkspaceRoot['create']> {
+    const session = sessions.get(agentId)!;
+    sessions.delete(agentId);
+    return session;
+  }
+
+  /**
+   * Leaves a pending rail target for A whose pane stays hidden: the
+   * navigation does nothing, B stays in front, and focus stays on A's rail
+   * button.
+   */
+  async function pendingTargetForHiddenA(): Promise<{
+    inputA: HTMLTextAreaElement;
+    sessionA: ReturnType<TerminalWorkspaceRoot['create']>;
+  }> {
+    await twoOpen();
+    const inputA = await terminalInput(AGENT_A);
+    const sessionA = navigationSelectsNothing(AGENT_A);
+    clickRail(AGENT_A);
+    await flush();
+    expect(paneFor(root, AGENT_A).hidden).toBe(true);
+    expect(document.activeElement).toBe(railButton(AGENT_A));
+    return { inputA, sessionA };
+  }
+
+  it('a click brings a hidden pane to the front and focuses its terminal input', async () => {
+    await twoOpen();
+    const inputA = await terminalInput(AGENT_A);
+    expect(paneFor(root, AGENT_A).hidden).toBe(true);
+
+    clickRail(AGENT_A);
+
+    await vi.waitFor(() => expect(paneFor(root, AGENT_A).hidden).toBe(false));
+    await vi.waitFor(() => expect(hasFocus(inputA)).toBe(true));
+  });
+
+  it('a click on the pane already in front focuses its terminal input', async () => {
+    await twoOpen();
+    const inputB = await terminalInput(AGENT_B);
+    expect(paneFor(root, AGENT_B).hidden).toBe(false);
+
+    clickRail(AGENT_B);
+
+    await vi.waitFor(() => expect(hasFocus(inputB)).toBe(true));
+  });
+
+  it('a click on a pane already visible in a two-pane layout focuses its terminal input, with no re-render', async () => {
+    root.layoutManager.setLayout('two-columns');
+    await twoOpen();
+    const inputA = await terminalInput(AGENT_A);
+    expect(paneFor(root, AGENT_A).hidden).toBe(false);
+    expect(paneFor(root, AGENT_B).hidden).toBe(false);
+    // Navigating to a pane already on screen re-renders nothing here, so
+    // only the rail selection itself can move focus.
+    navigationSelectsNothing(AGENT_A);
+
+    clickRail(AGENT_A);
+
+    expect(hasFocus(inputA)).toBe(true);
+    await flush();
+    expect(hasFocus(inputA)).toBe(true);
+  });
+
+  it.each([
+    ['Enter', 'Enter'],
+    ['Space', ' '],
+  ] as const)('%s on a rail item focuses its terminal input', async (_name, key) => {
+    await twoOpen();
+    const inputA = await terminalInput(AGENT_A);
+
+    activateRailByKey(AGENT_A, key);
+
+    await vi.waitFor(() => expect(hasFocus(inputA)).toBe(true));
+  });
+
+  it('selecting a pane whose terminal has not mounted yet focuses the pane, then its terminal input', async () => {
+    let releaseB!: () => void;
+    holdB = new Promise((resolve) => (releaseB = resolve));
+    root.show(true);
+    open(AGENT_B);
+    open(AGENT_A);
+    await flush();
+    await terminalInput(AGENT_A);
+    const paneB = paneFor(root, AGENT_B);
+    expect(paneB.hidden).toBe(true);
+
+    clickRail(AGENT_B);
+    await vi.waitFor(() => expect(paneB.hidden).toBe(false));
+    expect(paneB.shadowRoot?.querySelector('.xterm-helper-textarea')).toBeNull();
+    expect(document.activeElement).toBe(paneB);
+
+    // The pane's own connect path focuses the terminal once the first data
+    // frame arrives, if the pane still holds focus and can be measured.
+    vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(800);
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(600);
+    releaseB();
+    const inputB = await terminalInput(AGENT_B);
+    expect(hasFocus(inputB)).toBe(false);
+    const socket = await vi.waitFor(() => {
+      const found = sockets.find((ws) => ws.url.includes(AGENT_B));
+      if (!found) throw new Error('no socket for B yet');
+      return found;
+    });
+    socket.onmessage?.(
+      new MessageEvent('message', { data: JSON.stringify({ type: 'data', data: btoa('$ ') }) })
+    );
+    await vi.waitFor(() => expect(hasFocus(inputB)).toBe(true));
+  });
+
+  it('a pane brought to the front without a rail selection does not take focus', async () => {
+    await twoOpen();
+    const inputA = await terminalInput(AGENT_A);
+    const btn = railButton(AGENT_B);
+    btn.focus();
+
+    // A restore or another entry point selecting A, not the rail.
+    root.select(sessions.get(AGENT_A)!);
+    await flush();
+
+    expect(paneFor(root, AGENT_A).hidden).toBe(false);
+    expect(hasFocus(inputA)).toBe(false);
+  });
+
+  it('focus moved elsewhere before the pane shows drops the pending rail focus', async () => {
+    await twoOpen();
+    const inputA = await terminalInput(AGENT_A);
+    const other = document.createElement('button');
+    document.body.append(other);
+    // No select() follows the navigation until the test asks for it.
+    sessions.delete(AGENT_A);
+
+    clickRail(AGENT_A);
+    other.focus();
+    root.select(reg.list().find((s) => s.state.agentId === AGENT_A)!);
+    await flush();
+
+    expect(paneFor(root, AGENT_A).hidden).toBe(false);
+    expect(hasFocus(inputA)).toBe(false);
+    expect(document.activeElement).toBe(other);
+    other.remove();
+  });
+  it("focus landing in another agent's pane drops the pending rail focus", async () => {
+    const { inputA, sessionA } = await pendingTargetForHiddenA();
+    const inputB = await terminalInput(AGENT_B);
+
+    inputB.focus();
+    expect(hasFocus(inputB)).toBe(true);
+    root.select(sessionA);
+    await flush();
+
+    expect(paneFor(root, AGENT_A).hidden).toBe(false);
+    expect(hasFocus(inputA)).toBe(false);
+  });
+
+  it('opening the palette drops the pending rail focus', async () => {
+    const { inputA, sessionA } = await pendingTargetForHiddenA();
+    const btn = railButton(AGENT_A);
+
+    // The shortcut from the rail button, so focus has not moved yet.
+    btn.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true }));
+    expect(document.activeElement).toBe(btn);
+    root.select(sessionA);
+
+    expect(paneFor(root, AGENT_A).hidden).toBe(false);
+    expect(hasFocus(inputA)).toBe(false);
+  });
+
+  it('hiding the workspace drops the pending rail focus', async () => {
+    const { inputA, sessionA } = await pendingTargetForHiddenA();
+
+    root.show(false);
+    root.show(true);
+    root.select(sessionA);
+    await flush();
+
+    expect(paneFor(root, AGENT_A).hidden).toBe(false);
+    expect(hasFocus(inputA)).toBe(false);
+  });
+
+  it('closing the agent from the rail drops the pending rail focus', async () => {
+    await pendingTargetForHiddenA();
+    const closeId = `${root.findSessionKeyByAgentId(AGENT_A)}:close`;
+    const close = [
+      ...root.element.querySelectorAll<HTMLButtonElement>('.terminal-icon-action'),
+    ].find((el) => el.dataset.railFocusId === closeId)!;
+
+    // A mouse click on the close button keeps focus inside the rail.
+    close.focus();
+    close.click();
+    await flush();
+    expect(root.findSessionKeyByAgentId(AGENT_A)).toBeFalsy();
+
+    // The agent is opened again later and brought to the front.
+    open(AGENT_A);
+    navigationSelectsNothing(AGENT_A);
+    await flush();
+    const inputA = await terminalInput(AGENT_A);
+    root.select(reg.list().find((s) => s.state.agentId === AGENT_A)!);
+    await flush();
+
+    expect(paneFor(root, AGENT_A).hidden).toBe(false);
+    expect(hasFocus(inputA)).toBe(false);
+    // Not even the pane itself, as it would be before its terminal mounts.
+    expect(document.activeElement).not.toBe(paneFor(root, AGENT_A));
+  });
+
+  it("removing the agent's entry elsewhere drops the pending rail focus", async () => {
+    const { sessionA } = await pendingTargetForHiddenA();
+
+    sessionA.close();
+    await flush();
+    open(AGENT_A);
+    navigationSelectsNothing(AGENT_A);
+    await flush();
+    const inputA = await terminalInput(AGENT_A);
+    root.select(reg.list().find((s) => s.state.agentId === AGENT_A)!);
+    await flush();
+
+    expect(paneFor(root, AGENT_A).hidden).toBe(false);
+    expect(hasFocus(inputA)).toBe(false);
+    // Not even the pane itself, as it would be before its terminal mounts.
+    expect(document.activeElement).not.toBe(paneFor(root, AGENT_A));
   });
 });

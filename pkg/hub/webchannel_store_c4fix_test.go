@@ -320,6 +320,7 @@ func pgMigrationRecorded(db *sql.DB, name string) bool {
 func pgDropWebchatTables(t *testing.T, db *sql.DB) {
 	t.Helper()
 	tables := []string{
+		"webchat_mention",
 		"webchat_message_ext",
 		"webchat_message_attachment",
 		"webchat_attachment",

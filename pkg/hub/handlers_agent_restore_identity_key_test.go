@@ -229,7 +229,7 @@ func TestRestoreAgent_PurgedAgentReturnsNotFound(t *testing.T) {
 // (this fixture predates the identity-key work and is shared by many other
 // tests), which writes no identity-key row at all -- so its own slug is
 // reserved here explicitly first, the same as it would have been had it
-// gone through createAgentWithIdentityKey at creation.
+// gone through commitAgentCreate at creation.
 func TestApplyAgentUpdate_SoftDeletedAgentStillReservesKey(t *testing.T) {
 	f := projectAgentAuthzSetup(t)
 	ctx := context.Background()

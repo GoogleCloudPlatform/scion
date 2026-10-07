@@ -35,23 +35,50 @@ const sortedProjectDecisionCeiling = 4005
 // effectivePagedPageSize keeps the paged branch inside
 // sortedProjectDecisionCeiling at every legal (limit, n) pair even with no
 // race involved: the sorted project endpoint's paged branch costs
-// 5 + n + 7*pageSize decisions, which breaches the ceiling on its own at
-// legal (limit, n) pairs -- e.g. limit=500 at n=2,000 costs 5,505 unraced.
-// P_eff = min(limit, floor((4000-n)/7)) keeps every paged request within
-// 4,005 unraced (4,504 raced) for every n up to the 2,000 candidate
-// ceiling, where n is the member-read count (len(members), already
-// capped at authorizedListMaxCandidates by the time this is called), not
-// the ceiling pre-check COUNT. At n<=500, P_eff==limit (up to 500, the
-// size before this page-size clamp was added); at n=2,000, P_eff<=285.
+// 5 + n + perRow*pageSize decisions, which breaches the ceiling on its own
+// at legal (limit, n) pairs -- e.g. limit=500 at n=2,000 costs 5,505
+// unraced at perRow=7.
+//
+// perRow is the unraced decision cost of one page row: 7 (the remaining
+// actions; the row's read decision is reused from the list read pass), or
+// 8 for a scoped token without agent.read, whose page rows also get a
+// plain read decision for their read capability (scopedPageRowDecisions).
+// P_eff = min(limit, floor((4000-n)/perRow)) keeps every paged request
+// within 4,005 unraced for every n up to the 2,000 candidate ceiling,
+// where n is the member-read count (len(members), already capped at
+// authorizedListMaxCandidates by the time this is called), not the
+// ceiling pre-check COUNT. A raced row costs one decision more than its
+// perRow: 8 at perRow=7 (the 8-action re-decision) and 9 at perRow=8 (its
+// plain read, the 7 remaining actions and one list read; read is not
+// re-decided, because a caller at that cost is always denied it). A page
+// or complete response holds at most 500 rows (the largest limit and fit),
+// so a raced request stays within the race allowance (4,505). At
+// perRow=7, P_eff==limit for n<=500 and P_eff<=285 at n=2,000; at
+// perRow=8, P_eff<=250 at n=2,000.
 // P_eff is NOT part of the cursor binding, so a later page computing a
-// different P_eff (n having changed) does not invalidate the cursor --
-// only the position within the walk is bound, never the page size.
-func effectivePagedPageSize(limit, n int) int {
-	maxP := (sortedProjectDecisionCeiling - 5 - n) / 7
+// different P_eff (n or perRow having changed) does not invalidate the
+// cursor -- only the position within the walk is bound, never the page
+// size.
+func effectivePagedPageSize(limit, n, perRow int) int {
+	maxP := (sortedProjectDecisionCeiling - 5 - n) / perRow
 	if maxP < limit {
 		return maxP
 	}
 	return limit
+}
+
+// Unraced decision cost of one paged-branch page row (see
+// effectivePagedPageSize).
+const (
+	pageRowDecisions       = 7
+	scopedPageRowDecisions = 8
+)
+
+// completeBranchMaxCandidates is the largest candidate count n for which
+// the complete branch, costing 5 + n*(1+perRow) decisions, fits
+// sortedProjectDecisionCeiling; larger fit requests use the paged branch.
+func completeBranchMaxCandidates(perRow int) int {
+	return (sortedProjectDecisionCeiling - 5) / (1 + perRow)
 }
 
 // This file implements sorted mode on the project agents endpoint: both
@@ -281,6 +308,13 @@ func filterMembersByPhase(members []store.AgentMember, phase string) []store.Age
 
 // listProjectAgentsSorted implements the project endpoint's sorted mode user
 // path (per-item read filter, kept exactly as the legacy user path has it).
+//
+// Agent-list rule (ptone/scion#3346): for a user caller, an agent appears
+// in an agent list, its pages and its totalCount only if the caller can
+// read that agent. listAgents and listProjectAgents both apply it, so the
+// two endpoints return the same set for the same project. Here the read
+// pass below covers every candidate, so totalCount and stats are the
+// readable counts.
 // The agent-JWT path is listProjectAgentsSortedAgentJWT. The agent.list gate has
 // already run in the caller.
 func (s *Server) listProjectAgentsSorted(w http.ResponseWriter, r *http.Request, projectID string, filter store.AgentFilter, p agentListParams) {
@@ -312,19 +346,44 @@ func (s *Server) listProjectAgentsSorted(w http.ResponseWriter, r *http.Request,
 	}
 	n := len(members)
 
-	// The thin ActionRead-only read pass over every candidate.
+	// The thin ActionRead-only read pass over every candidate, decided as
+	// agent-list row reads (AuthorizeListReadBatch). Its result is also
+	// the row's read capability, except for a scoped token without
+	// agent:read, whose read capability is recomputed for the page rows
+	// below.
 	resources := make([]Resource, len(members))
 	for i, m := range members {
 		resources[i] = memberResource(m)
 	}
-	readCaps := s.authzService.ComputeCapabilitiesForActions(ctx, identity, resources, []Action{ActionRead})
+	listed, err := s.authzService.AuthorizeListReadBatch(ctx, identity, resources)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+	// Only a scoped token without agent.read in its ceiling can be listed
+	// a row it cannot read (listRowReadCeiling); for every other caller
+	// the list read is the plain read decision.
+	scopedToken := false
+	if scoped, ok := identity.(*ScopedUserIdentity); ok && scoped != nil {
+		scopedToken = !scoped.Ceiling().Allows("agent.read")
+	}
+	// Fit requests whose complete branch would exceed the decision budget
+	// are served through the paged branch. Which agents are readable does
+	// not change; the response is an ordinary paged one.
+	perRow := pageRowDecisions
+	if scopedToken {
+		perRow = scopedPageRowDecisions
+	}
+	if complete && n > completeBranchMaxCandidates(perRow) {
+		complete = false
+	}
 
 	readable := make([]store.AgentMember, 0, len(members))
 	readableReadCaps := make([]*Capabilities, 0, len(members))
 	for i, m := range members {
-		if capabilityAllows(readCaps[i], ActionRead) {
+		if listed[i] {
 			readable = append(readable, m)
-			readableReadCaps = append(readableReadCaps, readCaps[i])
+			readableReadCaps = append(readableReadCaps, &Capabilities{Actions: []string{string(ActionRead)}})
 		}
 	}
 
@@ -354,13 +413,13 @@ func (s *Server) listProjectAgentsSorted(w http.ResponseWriter, r *http.Request,
 		}
 		// The paged branch's page size is bounded by n (this request's
 		// member-read count, i.e. len(members) above -- not the ceiling
-		// pre-check COUNT, which can be lower if the pool grew in between),
-		// not just the request's limit, so the per-request decision cost
-		// 5+n+7*pageSize never exceeds the decision ceiling. pEff deliberately
-		// does not enter the cursor binding (binding, above, is built before
-		// pEff exists): n can differ from one page to the next without
-		// invalidating a cursor.
-		pEff := effectivePagedPageSize(p.limit, n)
+		// pre-check COUNT, which can be lower if the pool grew in between)
+		// and by the per-row cost, not just the request's limit, so the
+		// per-request decision cost 5+n+perRow*pageSize never exceeds the
+		// decision ceiling. pEff deliberately does not enter the cursor
+		// binding (binding, above, is built before pEff exists): n can
+		// differ from one page to the next without invalidating a cursor.
+		pEff := effectivePagedPageSize(p.limit, n, perRow)
 		end := start + pEff
 		if end > len(r) {
 			end = len(r)
@@ -403,6 +462,16 @@ func (s *Server) listProjectAgentsSorted(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
+	if scopedToken && len(page) > 0 {
+		// The row is listed, but its read capability is the plain read
+		// decision, which a token without agent:read does not pass.
+		pageResources := make([]Resource, len(page))
+		for i, m := range page {
+			pageResources[i] = memberResource(m)
+		}
+		pageReadCaps = s.authzService.ComputeCapabilitiesForActions(ctx, identity, pageResources, []Action{ActionRead})
+	}
+
 	allAgentActions := ResourceActions["agent"]
 	remainingActions := make([]Action, 0, len(allAgentActions))
 	for _, action := range allAgentActions {
@@ -434,14 +503,29 @@ func (s *Server) listProjectAgentsSorted(w http.ResponseWriter, r *http.Request,
 
 		var finalCap *Capabilities
 		if !resourceEqual(fullRes, memberRes) {
-			// Race: authorization inputs changed. Re-run the read decision
-			// and the remaining actions on the full row's Resource,
-			// fail-closed.
-			redecided := s.authzService.ComputeCapabilitiesForActions(ctx, identity, []Resource{fullRes}, allAgentActions)[0]
-			if !capabilityAllows(redecided, ActionRead) {
-				continue // no longer readable
+			// Race: authorization inputs changed. Re-run the decisions on
+			// the full row's Resource, fail-closed.
+			if scopedToken {
+				// At the higher per-row cost the plain read decision is
+				// always denied (the token ceiling lacks agent.read and
+				// every grant path applies it), so read is not re-decided:
+				// only the remaining actions are, plus the list read that
+				// keeps the row. A raced row costs 1+7+1 = 9 decisions.
+				// The list read runs first, so a row it drops is not
+				// charged for the remaining actions.
+				relisted, err := s.authzService.AuthorizeListReadBatch(ctx, identity, []Resource{fullRes})
+				if err != nil || !relisted[0] {
+					continue // no longer listed
+				}
+				restCaps := s.authzService.ComputeCapabilitiesForActions(ctx, identity, []Resource{fullRes}, remainingActions)[0]
+				finalCap = mergeCapabilities(allAgentActions, &Capabilities{Actions: []string{}}, restCaps)
+			} else {
+				redecided := s.authzService.ComputeCapabilitiesForActions(ctx, identity, []Resource{fullRes}, allAgentActions)[0]
+				if !capabilityAllows(redecided, ActionRead) {
+					continue // no longer readable
+				}
+				finalCap = redecided
 			}
-			finalCap = redecided
 		} else {
 			restCaps := s.authzService.ComputeCapabilitiesForActions(ctx, identity, []Resource{fullRes}, remainingActions)[0]
 			finalCap = mergeCapabilities(allAgentActions, pageReadCaps[i], restCaps)

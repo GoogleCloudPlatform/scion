@@ -255,7 +255,8 @@ func TestAgent_JSON_DeletionPopulated(t *testing.T) {
 
 // The exact JSON key set of DeletionInfo (design §2.2 plus the additive
 // phase-2 "stage"): stage is omitted unless set, and present as
-// "finalizing" when set.
+// "finalizing" when set. code, error and claim are omitted when zero: that
+// is how the hub's generic (non-admin) view drops them (ptone/scion#3122).
 func TestDeletionInfo_JSONKeys(t *testing.T) {
 	keys := func(d DeletionInfo) map[string]interface{} {
 		data, err := json.Marshal(d)
@@ -268,7 +269,7 @@ func TestDeletionInfo_JSONKeys(t *testing.T) {
 	}
 	lease := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
 	base := keys(DeletionInfo{State: DeletionStateDeleting, LeaseExpiresAt: &lease})
-	want := []string{"state", "soft", "claim", "startedAt", "leaseExpiresAt"}
+	want := []string{"state", "soft", "startedAt", "leaseExpiresAt"}
 	if len(base) != len(want) {
 		t.Fatalf("keys = %v, want exactly %v", base, want)
 	}
@@ -278,7 +279,7 @@ func TestDeletionInfo_JSONKeys(t *testing.T) {
 		}
 	}
 	full := keys(DeletionInfo{
-		State: DeletionStateFailed, Code: DeletionCodeAbandoned, Error: "e",
+		State: DeletionStateFailed, Code: DeletionCodeAbandoned, Error: "e", Claim: 3,
 		ExpiresAt: &lease, LeaseExpiresAt: &lease, Stage: DeletionStageFinalizing,
 	})
 	if len(full) != 9 || full["stage"] != "finalizing" {

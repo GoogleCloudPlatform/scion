@@ -30,6 +30,7 @@ import (
 
 	gouuid "github.com/google/uuid"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -1248,6 +1249,9 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 		BadRequest(w, "principalId is required")
 		return
 	}
+	// requestedPrincipalID is the principal ID as the request sent it; the
+	// principal-address check below runs on it once permissions are decided.
+	requestedPrincipalID := req.PrincipalID
 
 	// Resolve email to UUID for user principals (mirrors addGroupMember pattern).
 	if req.PrincipalType == store.RoleBindingPrincipalUser && strings.Contains(req.PrincipalID, "@") {
@@ -1392,10 +1396,10 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 				// role-binding endpoint include structured details.
 				details := legacyMembershipDenialDetails(denial)
 				if denial.HTTPStatus == http.StatusForbidden {
-					details = map[string]interface{}{
+					details = withSessionOnlyDenialDetails(map[string]interface{}{
 						"resource_type": "role_binding",
 						"denied_action": "create",
-					}
+					}, denial.Details)
 				}
 				writeError(w, denial.HTTPStatus, denial.DenialCode, denial.Reason, details)
 				return
@@ -1426,6 +1430,19 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 			writeForbiddenStructured(w, "cannot create binding: "+decision.Reason, "role_binding", Action("create"))
 			return
 		}
+	}
+
+	// Same principal-address check as members PUT: a user must be an email
+	// or a well-formed user ID, an agent a well-formed agent ID
+	// (ptone/scion#3478). The canonical spelling is stored. Built-in
+	// project roles get the same check from the membership service above.
+	principalID, ok := validateMemberPrincipalAddress(w, req.PrincipalType, requestedPrincipalID)
+	if !ok {
+		return
+	}
+	if req.PrincipalID == requestedPrincipalID {
+		// Not replaced by email or group resolution above.
+		req.PrincipalID = principalID
 	}
 
 	rb := &store.RoleBinding{
@@ -1511,10 +1528,10 @@ func (s *Server) deleteRoleBinding(w http.ResponseWriter, r *http.Request, id st
 			// details carry the resource context the UI needs.
 			var details map[string]interface{}
 			if denial.HTTPStatus == http.StatusForbidden {
-				details = map[string]interface{}{
+				details = withSessionOnlyDenialDetails(map[string]interface{}{
 					"resource_type": "role_binding",
 					"denied_action": "delete",
-				}
+				}, denial.Details)
 			}
 			writeError(w, denial.HTTPStatus, denial.DenialCode, denial.Reason, details)
 			return
@@ -1576,10 +1593,12 @@ func (s *Server) deleteSystemSuperAdminBinding(
 	// Credential boundary: super-admin binding mutations require interactive
 	// session or dev credentials. Reject broker, agent JWT, UAT, and
 	// federation tokens (R6 credential gate).
-	cred := GetCredentialContextFromContext(ctx)
-	if !allowedMutationCredentials[cred.Kind] {
-		writeError(w, http.StatusForbidden, ErrCodeForbidden,
-			fmt.Sprintf("super-admin binding deletion requires an interactive session; credential kind %q is not allowed", cred.Kind), nil)
+	// Session-only with the GOV_PENDING reason (session_only_gate.go).
+	if !sessionCredentialAllowed(ctx) {
+		writeSessionOnlyDenial(w, ErrCodeForbidden,
+			fmt.Sprintf("super-admin binding deletion requires an interactive session; credential kind %q is not allowed",
+				GetCredentialContextFromContext(ctx).Kind),
+			authzop.ReasonGovernancePending)
 		return
 	}
 

@@ -119,6 +119,10 @@ func deviceID(fi os.FileInfo) (uint64, bool) {
 	return uint64(st.Dev), true
 }
 
+// ephemeralPathReasonVolumeEmpty is the fixed reason token logged by
+// warnEphemeralProjectPath.
+const ephemeralPathReasonVolumeEmpty = "volume_empty"
+
 // warnEphemeralProjectPath reports, once per slug, that a hub-managed project
 // is being served from the pod's local disk because the shared volume has no
 // content for it yet.
@@ -127,7 +131,11 @@ func deviceID(fi os.FileInfo) (uint64, bool) {
 // WebDAV, clone and cache request paths, so a deployment sitting in this state
 // would otherwise emit a line per request for as long as it runs. The
 // condition is a property of the deployment, not of the request.
-func (s *Server) warnEphemeralProjectPath(slug, localPath, volumePath string) {
+//
+// The log line carries the backend and a fixed reason token. No project ID is
+// in scope (callers resolve by slug), and the slug and both paths are left
+// out of the log; the slug is used only as the suppression key.
+func (s *Server) warnEphemeralProjectPath(slug string) {
 	if _, alreadyWarned := s.warnedEphemeralProjects.LoadOrStore(slug, struct{}{}); alreadyWarned {
 		return
 	}
@@ -136,13 +144,15 @@ func (s *Server) warnEphemeralProjectPath(slug, localPath, volumePath string) {
 		backend = wsCfg.Backend
 	}
 	s.projectsLogger().Warn("hub-managed project served from ephemeral local path; workspace volume mount has no content yet",
-		"slug", slug, "backend", backend, "local_path", localPath, "volume_path", volumePath)
+		"backend", backend, "reason", ephemeralPathReasonVolumeEmpty)
 }
 
 // volumeBackedProjectPath resolves the hub-managed project path for the
 // platform volume backends, "cloudrun-volume" and "gke-shared-volume". The
 // second return is false when wsCfg does not select one of them, or selects
 // one without a volume name; the caller then falls through to the local path.
+// A non-nil error (wrapping errWorkspaceContentTimeout) means the volume or
+// the legacy local path did not respond; see resolveDurableOrLegacyPath.
 //
 // Both backends share one guard. The mount root comes from workspaceMountRoot,
 // the same resolver checkWorkspaceStorageHealth probes for readiness, so the
@@ -154,9 +164,9 @@ func (s *Server) warnEphemeralProjectPath(slug, localPath, volumePath string) {
 //
 // Unlike nfs, the volume backends include subpath_root in the hub-managed
 // path: <mount root>/<subpath_root>/hub-projects/<slug>.
-func (s *Server) volumeBackedProjectPath(wsCfg *config.V1WorkspaceStorageConfig, slug string) (string, bool) {
+func (s *Server) volumeBackedProjectPath(wsCfg *config.V1WorkspaceStorageConfig, slug string) (string, bool, error) {
 	if wsCfg == nil {
-		return "", false
+		return "", false, nil
 	}
 
 	var subPathRoot string
@@ -166,28 +176,25 @@ func (s *Server) volumeBackedProjectPath(wsCfg *config.V1WorkspaceStorageConfig,
 	case wsCfg.Backend == "gke-shared-volume" && wsCfg.GKESharedVolume != nil:
 		subPathRoot = wsCfg.GKESharedVolume.SubPathRoot
 	default:
-		return "", false
+		return "", false, nil
 	}
 
 	mountRoot := workspaceMountRoot(wsCfg)
 	if mountRoot == "" {
-		return "", false
+		return "", false, nil
 	}
 	// No validation here: ValidateWorkspaceStorage rejects a bad
 	// subpath_root at hub startup, before any path is built.
 	subPathRoot = config.SubPathRootOrDefault(subPathRoot)
 
 	volPath := filepath.Join(mountRoot, subPathRoot, "hub-projects", slug)
-	if hasWorkspaceContent(volPath) {
-		return volPath, true
+	// The legacy local fallback (with warnEphemeral) is worth saying out
+	// loud: on Cloud Run and GKE the local path is always container-ephemeral
+	// storage, so its content disappears on the next restart or reschedule
+	// and the project silently moves to the volume.
+	path, err := s.resolveDurableOrLegacyPath(slug, volPath, true)
+	if err != nil {
+		return "", false, err
 	}
-	// Fallback: check legacy local path. Worth saying out loud: on Cloud Run
-	// and GKE the local path is always container-ephemeral storage, so this
-	// content disappears on the next restart or reschedule and the project
-	// silently moves to the volume.
-	if localPath, err := localProjectPath(slug); err == nil && hasWorkspaceContent(localPath) {
-		s.warnEphemeralProjectPath(slug, localPath, volPath)
-		return localPath, true
-	}
-	return volPath, true
+	return path, true, nil
 }

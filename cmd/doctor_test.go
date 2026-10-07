@@ -68,3 +68,53 @@ func TestCheckDoctorHubConnectivity_DegradedStatus(t *testing.T) {
 	assert.Equal(t, "warn", res.Status)
 	assert.Contains(t, res.Message, "is degraded")
 }
+
+// TestCheckDoctorHubConnectivity_Severity pins doctor to the hub's severity
+// semantics (ptone/scion#1094): an unhealthy hub (critical check failing)
+// must fail, not fall through to "healthy", on both the hubclient path and
+// the raw HTTP path, and non-healthy checks are named.
+func TestCheckDoctorHubConnectivity_Severity(t *testing.T) {
+	tests := []struct {
+		name       string
+		body       string
+		wantStatus string
+		wantMsg    []string
+	}{
+		{"healthy", `{"status":"healthy","checks":{"database":"healthy"}}`, "pass", []string{"is healthy"}},
+		{"degraded standalone", `{"status":"degraded","checks":{"database":"healthy","colocated_broker":"unhealthy: registration failed"}}`, "warn",
+			[]string{"is degraded", "colocated_broker: unhealthy: registration failed"}},
+		{"degraded composite", `{"status":"degraded","web":{"status":"ok"},"hub":{"status":"degraded","checks":{"colocated_broker":"unhealthy: registration pending"}}}`, "warn",
+			[]string{"is degraded", "colocated_broker: unhealthy: registration pending"}},
+		{"unhealthy database", `{"status":"unhealthy","checks":{"database":"unhealthy"}}`, "fail",
+			[]string{"is unhealthy", "database: unhealthy"}},
+		{"unhealthy composite storage", `{"status":"unhealthy","web":{"status":"ok"},"hub":{"status":"unhealthy","checks":{"database":"healthy","workspace_storage":"unhealthy: mount not available"}}}`, "fail",
+			[]string{"is unhealthy", "workspace_storage: unhealthy: mount not available"}},
+		{"unknown status", `{"status":"weird"}`, "warn", []string{`reported status "weird"`}},
+	}
+	for _, tt := range tests {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(tt.body))
+		}))
+
+		client, err := hubclient.New(server.URL)
+		assert.NoError(t, err)
+
+		for _, path := range []struct {
+			name   string
+			client hubclient.Client
+		}{{"hubclient", client}, {"raw", nil}} {
+			t.Run(tt.name+"/"+path.name, func(t *testing.T) {
+				res := checkDoctorHubConnectivity(server.URL, path.client)
+				assert.Equal(t, tt.wantStatus, res.Status)
+				for _, m := range tt.wantMsg {
+					assert.Contains(t, res.Message, m)
+				}
+				if tt.wantStatus == "fail" {
+					assert.Contains(t, res.Remediation, "critical check failing")
+				}
+			})
+		}
+		server.Close()
+	}
+}

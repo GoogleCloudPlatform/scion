@@ -316,6 +316,60 @@ test('rail list preserves valid semantics and real browser arrow key navigation'
     .toBe('Show terminal for alpha in project-a');
 });
 
+test('Enter and Space on a rail item focus its terminal without typing the key into it (ptone/scion#2900)', async ({
+  page,
+}) => {
+  const socket = await setup(page, true, true, {
+    [agent]: { id: agent, name: 'alpha', phase: 'running', projectId: 'project-a' },
+    [agentB]: { id: agentB, name: 'beta', phase: 'running', projectId: 'project-b' },
+  });
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+  await navigateToTerminal(page, agentB);
+  await expect.poll(() => socket.attaches).toBe(2);
+  for (const index of [0, 1]) {
+    socket.sendToSocket(
+      index,
+      JSON.stringify({ type: 'data', data: Buffer.from('$ ').toString('base64') })
+    );
+  }
+
+  /** Agent ID of the pane whose xterm input has keyboard focus. */
+  const focusedTerminal = (): Promise<string | null> =>
+    page.evaluate(() => {
+      const pane = document.activeElement as
+        | (HTMLElement & { session?: { state: { agentId: string } } | null })
+        | null;
+      if (pane?.tagName !== 'SCION-TERMINAL-PANE') return null;
+      return pane.shadowRoot?.activeElement?.classList.contains('xterm-helper-textarea')
+        ? (pane.session?.state.agentId ?? null)
+        : null;
+    });
+  const typed = (): string[] =>
+    socket.sent
+      .map((raw) => JSON.parse(raw) as { type?: string; data?: string })
+      .filter((frame) => frame.type === 'data')
+      .map((frame) => Buffer.from(frame.data ?? '', 'base64').toString());
+
+  // Enter on the pane already in front: the browser activates the button
+  // on keypress, after keydown, and focus moves then; the key must not
+  // follow it into the terminal.
+  await page.getByRole('button', { name: /beta in project-b/ }).focus();
+  await page.keyboard.press('Enter');
+  await expect.poll(focusedTerminal).toBe(agentB);
+
+  // Space on a hidden pane: activation happens on keyup.
+  await page.getByRole('button', { name: /alpha in project-a/ }).focus();
+  await page.keyboard.press(' ');
+  await expect(page).toHaveURL(`/terminals/${agent}`);
+  await expect.poll(focusedTerminal).toBe(agent);
+
+  // Neither key reached a terminal; the next key goes to the focused one.
+  expect(typed()).toEqual([]);
+  await page.keyboard.press('x');
+  await expect.poll(typed).toEqual(['x']);
+});
+
 test('metadata-only rail updates preserve focused control', async ({ page }) => {
   const agents: Record<string, AgentFixture> = {
     [agent]: {
@@ -365,6 +419,16 @@ test('close removes only that retained client and leaves peers connected', async
     `/terminals/${agentB}`
   );
   await expect.poll(() => socket.attaches).toBe(2);
+  // The detach keystroke is only sent on a connected session, and a session
+  // connects on its first inbound data frame (tmux's redraw on attach).
+  const redraw = JSON.stringify({ type: 'data', data: '' });
+  socket.sendToSocket(0, redraw);
+  socket.sendToSocket(1, redraw);
+  await expect(
+    page.locator('#terminal-workspace scion-terminal-pane .status-indicator', {
+      hasText: /^\s*Connected\s*$/,
+    })
+  ).toHaveCount(2);
   await page.getByRole('button', { name: 'Close alpha' }).click();
   await expect(page.getByRole('button', { name: 'Terminals (1)' })).toBeVisible();
   await expect(page.getByRole('button', { name: /beta in same-project/ })).toBeVisible();
@@ -2983,12 +3047,12 @@ test.describe('production icon and title verification', () => {
     // The header must show the "Terminals" mode button with session count
     await expect(page.getByRole('button', { name: 'Terminals (1)' })).toBeVisible();
 
-    // The header icon-button should use the "terminal" icon name
+    // The header mode button should use the "terminal" icon name
     const iconName = await page.evaluate(() => {
-      const btn = document
+      const icon = document
         .querySelector('scion-header')
-        ?.shadowRoot?.querySelector('sl-icon-button[label*="Terminals"]');
-      return btn?.getAttribute('name');
+        ?.shadowRoot?.querySelector('.mode-switch button[aria-label^="Terminals"] sl-icon');
+      return icon?.getAttribute('name');
     });
     expect(iconName).toBe('terminal');
   });

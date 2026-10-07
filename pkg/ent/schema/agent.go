@@ -379,6 +379,14 @@ func (Agent) Fields() []ent.Field {
 		field.Time("run_intent_at").
 			Optional().
 			Nillable(),
+		// run_intent_marked_at is set to run_intent_at by every intent write
+		// of code that maintains start claims, and by no other code. When the
+		// two differ, the intent was last written by earlier code (or the
+		// boot backfill), which could leave intent stopped on an agent that is
+		// meant to run; the hub's backstop does not stop such an agent.
+		field.Time("run_intent_marked_at").
+			Optional().
+			Nillable(),
 
 		// --- Start claim ---
 		// An owned, leased claim taken before any start is dispatched, so at
@@ -455,6 +463,8 @@ func (Agent) Edges() []ent.Edge {
 			Ref("agent"),
 		edge.From("policy_bindings", PolicyBinding.Type).
 			Ref("agent"),
+		edge.To("holds", AgentHold.Type).
+			Annotations(entsql.OnDelete(entsql.Cascade)),
 	}
 }
 
@@ -463,6 +473,10 @@ func (Agent) Indexes() []ent.Index {
 	return []ent.Index{
 		index.Fields("slug", "project_id").
 			Unique(),
+		// Per-project lookups by owner and by creator (the legacy links of
+		// the delegation descendant query).
+		index.Fields("project_id", "owner_id"),
+		index.Fields("project_id", "created_by"),
 		// Partial index backing the T1 launch reaper's deadline scan (design
 		// §3.3): a range scan on launch_deadline restricted to in-flight
 		// launches, so it stays cheap regardless of table size. Same shape as

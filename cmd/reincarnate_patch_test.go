@@ -20,6 +20,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -41,7 +42,13 @@ func setReincarnatePatchFlags(t *testing.T, sa, role, model string, thinking int
 		reincarnateServiceAccount, reincarnateRole, reincarnateModel, reincarnateThinkingLevel, reincarnateHarnessAuth, reincarnateImage = pSA, pRole, pModel, pTL, pAuth, pImage
 		reincarnateBroker, reincarnateDryRun = pBroker, pDryRun
 	})
-	reincarnateServiceAccount, reincarnateRole, reincarnateModel, reincarnateThinkingLevel, reincarnateHarnessAuth, reincarnateImage = sa, role, model, thinking, auth, image
+	// thinking -1 leaves --thinking-level unset; other values are passed as
+	// the flag's string form.
+	tl := ""
+	if thinking != -1 {
+		tl = strconv.Itoa(thinking)
+	}
+	reincarnateServiceAccount, reincarnateRole, reincarnateModel, reincarnateThinkingLevel, reincarnateHarnessAuth, reincarnateImage = sa, role, model, tl, auth, image
 }
 
 func TestValidateReincarnatePatchFlags(t *testing.T) {

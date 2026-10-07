@@ -358,7 +358,7 @@ func TestCreateSubAgent_NoEscalationEnforced(t *testing.T) {
 // Token scopes are derived solely from the agent role (Phase 2 change).
 func TestTemplateHubAccessScopes_StoredButIgnoredForToken(t *testing.T) {
 	// Use a non-dev-auth server so the role is not auto-upgraded to full.
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	require.NoError(t, err)
 	require.NoError(t, s.Migrate(context.Background()))
 
@@ -414,7 +414,7 @@ func TestTemplateHubAccessScopes_StoredButIgnoredForToken(t *testing.T) {
 	}
 
 	// Call populateAgentConfig to simulate the real code path
-	srv.populateAgentConfig(ctx, agent, project, tmpl)
+	require.NoError(t, srv.populateAgentConfig(ctx, agent, project, tmpl))
 
 	// Verify the template scopes are stored on AppliedConfig for visibility
 	require.NotNil(t, agent.AppliedConfig, "AppliedConfig should be set")
@@ -491,7 +491,7 @@ func TestTemplateHubAccessScopes_EmptyDoesNotWarn(t *testing.T) {
 	}
 
 	srv, _ := testServer(t)
-	srv.populateAgentConfig(context.Background(), agent, nil, tmpl)
+	require.NoError(t, srv.populateAgentConfig(context.Background(), agent, nil, tmpl))
 
 	assert.Empty(t, agent.AppliedConfig.HubAccessScopes,
 		"empty scopes array should not populate HubAccessScopes")
