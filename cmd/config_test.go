@@ -214,3 +214,12 @@ func TestConfigGetCmd_NestedKeyErrors(t *testing.T) {
 		})
 	}
 }
+
+// TestConfigSetGlobalHelpNamesSettingsYAML: config set --global writes
+// ~/.scion/settings.yaml, and the help must say so.
+func TestConfigSetGlobalHelpNamesSettingsYAML(t *testing.T) {
+	usage := configSetCmd.Flags().Lookup("global").Usage
+	assert.Contains(t, usage, "settings.yaml")
+	assert.NotContains(t, usage, "settings.json")
+	assert.NotContains(t, configCmd.Long, "settings.json")
+}
