@@ -155,6 +155,14 @@ func TestExecCommand_ErrorClassification(t *testing.T) {
 			wantCode:   ErrCodeRuntimeError,
 		},
 		{
+			// docker/podman/apple: the container was removed after the
+			// lookup (ptone/scion#3655).
+			name:       "container removed after lookup",
+			execErr:    fmt.Errorf("agent 'worker' %w, it may have exited and been removed", runtime.ErrContainerNotFound),
+			wantStatus: http.StatusNotFound,
+			wantCode:   ErrCodeAgentNotFound,
+		},
+		{
 			name:       "runtime reports container not found",
 			execErr:    errors.New(`cloudrun-sandbox: sandbox "agent" not found in state store`),
 			wantStatus: http.StatusNotFound,
@@ -265,6 +273,7 @@ func TestIsExecTargetNotFound(t *testing.T) {
 		{"k8s other status", fmt.Errorf("exec failed: %w (stderr: )", k8serrors.NewBadRequest(`container agent is not valid for pod p`)), false},
 
 		// A missing container, in each runtime's own wording.
+		{"runtime.ErrContainerNotFound", fmt.Errorf("exec: %w", runtime.ErrContainerNotFound), true},
 		{"k8s NotFound status", fmt.Errorf("exec failed: %w (stderr: )", k8serrors.NewNotFound(schema.GroupResource{Resource: "pods"}, "agent-pod")), true},
 		{"k8s NotFound as text", errors.New(`exec failed: pods "agent-pod" not found (stderr: )`), true},
 		{"k8s runtime lookup", errors.New("agent 'worker' pod not found, it may have been deleted"), true},
