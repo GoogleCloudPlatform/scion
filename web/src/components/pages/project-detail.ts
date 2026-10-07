@@ -1712,6 +1712,7 @@ export class ScionPageProjectDetail extends LitElement {
       this.agentsLoadError = 'Could not load agents.';
     }
     if (trigger === 'page-load') {
+      this.hasAgentsResult = false;
       this.agents = [];
       this.agentScopeCapabilities = undefined;
       this.agentWindow.setSmall();
@@ -1937,6 +1938,13 @@ export class ScionPageProjectDetail extends LitElement {
     const superseded = this.agentWindow.supersededRequest(this.committedLabel);
     if (superseded) {
       this.cancelAgentsLoad();
+      // Before any result, whatever was superseded is re-sent as the page
+      // load: a view change alone plans nothing in the small state, which
+      // would leave the loading row with nothing in flight.
+      if (!this.hasAgentsResult) {
+        this.backgroundRefresh('page-load');
+        return;
+      }
       if (superseded === 'page-load' || superseded === 'label-commit') {
         this.backgroundRefresh(superseded);
         return;

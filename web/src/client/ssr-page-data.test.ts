@@ -14,10 +14,11 @@
  * limitations under the License.
  */
 
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 
 import type { PageData } from '../shared/types.js';
 import {
+  currentDocumentTiming,
   initialPageDataFor,
   MAX_SSR_PAGE_DATA_AGE_MS,
   setInitialPageData,
@@ -128,13 +129,46 @@ describe('takeInitialPageData', () => {
     ).toBeUndefined();
     expect(takeInitialPageData('/projects/p-1', { id: 'u-1' }, fresh)).toBeUndefined();
   });
+});
 
-  it('reads the real document timing by default', () => {
+describe('currentDocumentTiming', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    setInitialPageData(null);
+  });
+
+  it('reports an unknown navigation type when there is no navigation entry', () => {
+    vi.spyOn(performance, 'getEntriesByType').mockReturnValue([]);
+    expect(currentDocumentTiming().navigationType).toBeNull();
+  });
+
+  it('reports an unknown navigation type, without throwing, when the API throws', () => {
+    vi.spyOn(performance, 'getEntriesByType').mockImplementation(() => {
+      throw new Error('unsupported');
+    });
+    expect(() => currentDocumentTiming()).not.toThrow();
+    expect(currentDocumentTiming().navigationType).toBeNull();
+  });
+
+  it('reports back_forward, and the default timing then refuses the payload', () => {
+    vi.spyOn(performance, 'getEntriesByType').mockReturnValue([
+      { type: 'back_forward' } as unknown as PerformanceEntry,
+    ]);
+    vi.spyOn(performance, 'now').mockReturnValue(100);
+    expect(currentDocumentTiming()).toEqual({
+      msSinceNavigationStart: 100,
+      navigationType: 'back_forward',
+    });
     setInitialPageData(payload);
-    // The test document has no navigation entry of type navigate/reload
-    // with a matching age guarantee, so the default timing either matches
-    // or fails closed; either way the payload is cleared.
-    takeInitialPageData('/projects/p-1', { id: 'u-1' });
-    expect(takeInitialPageData('/projects/p-1', { id: 'u-1' }, fresh)).toBeUndefined();
+    expect(takeInitialPageData('/projects/p-1', { id: 'u-1' })).toBeUndefined();
+  });
+
+  it('a navigate entry on a young document lets the default timing hand over the payload', () => {
+    vi.spyOn(performance, 'getEntriesByType').mockReturnValue([
+      { type: 'navigate' } as unknown as PerformanceEntry,
+    ]);
+    vi.spyOn(performance, 'now').mockReturnValue(100);
+    setInitialPageData(payload);
+    expect(takeInitialPageData('/projects/p-1', { id: 'u-1' })).toBe(payload.data);
   });
 });

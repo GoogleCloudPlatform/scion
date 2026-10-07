@@ -371,25 +371,54 @@ describe('scion-page-project-detail — startup hydration and readiness', () => 
     expect(el.shadowRoot?.querySelectorAll('.agent-card').length ?? 0).toBeGreaterThan(0);
   });
 
-  it('a request that fails before any result was adopted shows the agents error, whatever its trigger', async () => {
+  it('a lifecycle refresh that fails before any result was adopted shows the agents error', async () => {
+    // Stop All's follow-up refresh is the only non page-load trigger that can
+    // run before a result; it enters through backgroundRefresh.
     const first = deferred();
-    installFetch({ agents: [() => first.promise] });
+    installFetch({
+      agents: [() => first.promise, () => Promise.resolve(jsonResponse({ error: 'boom' }, 500))],
+    });
     el = mount(SSR_PROJECT);
     await flush(el);
-    // A superseding trigger replaces the first request before it lands, then fails.
-    const internals = el as unknown as {
-      cancelAgentsLoad(): void;
-      onAgentsLoadFailed(trigger: string): void;
-    };
-    internals.cancelAgentsLoad();
+    (el as unknown as { backgroundRefresh(trigger: string): void }).backgroundRefresh(
+      'lifecycle-refresh'
+    );
+    await flush(el);
+    expect(agentsRequests()).toBe(2);
+    // The superseded first response lands late and is ignored.
     first.resolve(jsonResponse({ agents: [], complete: true }));
-    await flush(el);
-    expect(text(el)).toContain('Loading agents…');
+    await vi.waitFor(() => expect(text(el!)).toContain('Could not load agents.'));
     expect(text(el)).not.toContain('No Agents');
-    internals.onAgentsLoadFailed('view-change');
+    expect(el.shadowRoot?.querySelector('.agents-load-error sl-button')).toBeTruthy();
+  });
+
+  it('a view change that supersedes a lifecycle refresh before any result re-sends the page load', async () => {
+    localStorage.setItem('scion-view-project-agents', 'grid');
+    const first = deferred();
+    const second = deferred();
+    installFetch({
+      agents: [
+        () => first.promise,
+        () => second.promise,
+        () => Promise.resolve(jsonResponse({ agents: [agent('a-1')], complete: true })),
+      ],
+    });
+    el = mount(SSR_PROJECT);
     await flush(el);
-    expect(text(el)).toContain('Could not load agents.');
+    (el as unknown as { backgroundRefresh(trigger: string): void }).backgroundRefresh(
+      'lifecycle-refresh'
+    );
+    await flush(el);
+    expect(agentsRequests()).toBe(2);
+
+    // Switching to graph needs the complete set, superseding the refresh.
+    switchView(el, 'graph');
+    await vi.waitFor(() => expect(agentsRequests()).toBe(3));
+    first.resolve(jsonResponse({ agents: [], complete: true }));
+    second.resolve(jsonResponse({ agents: [], complete: true }));
+    await vi.waitFor(() => expect(text(el!)).not.toContain('Loading agents…'));
     expect(text(el)).not.toContain('No Agents');
+    expect(el.shadowRoot?.querySelector('scion-agent-tree-view')).toBeTruthy();
   });
 
   it('case B: a view change that re-issues the first load keeps the loading row until it lands', async () => {
