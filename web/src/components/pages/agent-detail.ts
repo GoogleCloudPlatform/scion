@@ -125,6 +125,11 @@ function parseDuration(s: string): number {
  */
 export const DELETE_REDIRECT_DELAY_MS = 1000;
 
+/** Body of the Reincarnate confirm dialog (ptone/scion#3707). */
+export const REINCARNATE_CONFIRM_MESSAGE =
+  'The agent will be stopped and re-provisioned with its current configuration. ' +
+  'Any work running in its current session is interrupted.';
+
 /**
  * Format seconds as "Xh Ym Zs".
  */
@@ -199,6 +204,14 @@ export class ScionPageAgentDetail extends LitElement {
 
   @state()
   private cascadeDialogOpen = false;
+
+  /** True while a reincarnate request is in flight (ptone/scion#3707). */
+  @state()
+  private reincarnating = false;
+
+  /** The hub's error text from the last failed reincarnate, if any. */
+  @state()
+  private reincarnateError: string | null = null;
 
   /** Whether the Chat|Log toggle is in "chat" mode (vs "log" mode). */
   @state()
@@ -389,6 +402,14 @@ export class ScionPageAgentDetail extends LitElement {
     }
 
     /* ---- Cards ---- */
+    .reincarnate-help {
+      margin: 0 0 1rem;
+      color: var(--sl-color-neutral-600);
+      font-size: 0.875rem;
+    }
+    .reincarnate-error {
+      margin-bottom: 1rem;
+    }
     .card {
       background: var(--scion-surface, #ffffff);
       border: 1px solid var(--scion-border, #e2e8f0);
@@ -1959,7 +1980,7 @@ export class ScionPageAgentDetail extends LitElement {
     const inline = cfg?.inlineConfig;
 
     return html`
-      ${this.renderIdentityCard(agent)}
+      ${this.renderIdentityCard(agent)} ${this.renderReincarnateCard(agent)}
       <scion-effective-role-provenance
         principalType="agent"
         principalId=${this.agentId}
@@ -1975,6 +1996,79 @@ export class ScionPageAgentDetail extends LitElement {
       ${this.renderGCPIdentityCard(cfg?.gcpIdentity)} ${this.renderConfigLimitsCard(inline)}
       ${this.renderTelemetryCard(inline?.telemetry)} ${this.renderInitialTaskCard(cfg)}
     `;
+  }
+
+  /**
+   * Reincarnate action (ptone/scion#3707). The hub authorizes a user's
+   * reincarnate with the same `agent.lifecycle` permission as start/stop
+   * (authorizeAgentReincarnate), and the agent payload carries no separate
+   * `reincarnate` capability, so the card is gated on `lifecycle` exactly
+   * like the header's lifecycle buttons, and hidden while a delete runs.
+   */
+  private renderReincarnateCard(agent: Agent): TemplateResult | typeof nothing {
+    if (!canLifecycle(agent._capabilities) || this.deletionLease.isDeleting(agent)) {
+      return nothing;
+    }
+    return html`
+      <div class="card reincarnate-card">
+        <h3 class="card-title">Reincarnate</h3>
+        <p class="reincarnate-help">
+          Stop this agent and provision it again from its current configuration. Use this to apply
+          configuration changes.
+        </p>
+        ${this.reincarnateError
+          ? html`<sl-alert variant="danger" open class="reincarnate-error">
+              <sl-icon slot="icon" name="exclamation-octagon"></sl-icon>
+              ${this.reincarnateError}
+            </sl-alert>`
+          : nothing}
+        <sl-button
+          size="small"
+          variant="default"
+          ?loading=${this.reincarnating}
+          ?disabled=${this.reincarnating}
+          @click=${() => void this.handleReincarnate()}
+        >
+          <sl-icon slot="prefix" name="arrow-repeat"></sl-icon>
+          Reincarnate
+        </sl-button>
+      </div>
+    `;
+  }
+
+  /**
+   * Confirm, then POST the reincarnate action on the agent-scoped route the
+   * page uses for every other lifecycle action. The hub decodes a JSON body
+   * (an empty body is a 400), so an empty object is sent. A second click
+   * while the confirm is open or the request runs is ignored.
+   */
+  private async handleReincarnate(): Promise<void> {
+    if (!this.agent || this.reincarnating) return;
+    this.reincarnating = true;
+    try {
+      const confirmed = await showConfirm(REINCARNATE_CONFIRM_MESSAGE, {
+        title: 'Reincarnate agent',
+        confirmText: 'Reincarnate',
+      });
+      if (!confirmed) return;
+
+      this.reincarnateError = null;
+      const response = await apiFetch(`/api/v1/agents/${this.agentId}/reincarnate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+      });
+      if (!response.ok) {
+        throw new Error(await lifecycleActionErrorMessage(response, 'Failed to reincarnate agent'));
+      }
+      this.backgroundRefresh();
+    } catch (err) {
+      console.error('Failed to reincarnate agent:', err);
+      this.reincarnateError = err instanceof Error ? err.message : 'Failed to reincarnate agent';
+      this.backgroundRefresh();
+    } finally {
+      this.reincarnating = false;
+    }
   }
 
   private renderMessagingCard() {
