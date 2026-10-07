@@ -177,7 +177,7 @@ func TestExecDispatchStop_UsesIntentRunID(t *testing.T) {
 	client := &mockRuntimeBrokerClient{}
 	srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(s, client, false, slog.Default()))
 	_, _, agent := setupOnlineBrokerAgent(t, s, "stop-intent-run")
-	if _, err := s.SetAgentRunID(ctx, agent.ID, "run-new"); err != nil {
+	if _, err := s.SetAgentRunID(ctx, agent.ID, "run-new", nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -357,7 +357,7 @@ func TestRunID_E2E_StaleStopDoesNotMarkRowStopped(t *testing.T) {
 			}
 			srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(s, NewHTTPRuntimeBrokerClient(), false, slog.Default()))
 			mgr.run(agent.Slug, "cid-b", agent.ProjectID, "", "run-b")
-			if _, err := s.SetAgentRunID(ctx, agent.ID, "run-a"); err != nil {
+			if _, err := s.SetAgentRunID(ctx, agent.ID, "run-a", nil); err != nil {
 				t.Fatal(err)
 			}
 
@@ -380,7 +380,7 @@ func TestRunID_E2E_StaleStopDoesNotMarkRowStopped(t *testing.T) {
 			if action != "stop" {
 				return
 			}
-			if _, err := s.SetAgentRunID(ctx, agent.ID, "run-b"); err != nil {
+			if _, err := s.SetAgentRunID(ctx, agent.ID, "run-b", nil); err != nil {
 				t.Fatal(err)
 			}
 			rec = doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/stop", nil)
@@ -410,7 +410,7 @@ func TestQueueOfflineStop_IntentCarriesRunID(t *testing.T) {
 	srv.SetDispatcher(&runIntentDispatcher{})
 	srv.commandBus = &recordingCommandBus{}
 	_, broker, agent := setupOfflineBrokerAgent(t, s, "stop-q-run")
-	if _, err := s.SetAgentRunID(ctx, agent.ID, "run-q"); err != nil {
+	if _, err := s.SetAgentRunID(ctx, agent.ID, "run-q", nil); err != nil {
 		t.Fatal(err)
 	}
 	// A start claim held when the stop is recorded is carried too, for the
@@ -451,7 +451,7 @@ func TestDeferredStop_IntentCarriesRunID(t *testing.T) {
 	dispatcher.SetCrossNodeDeps(events, NoopCommandBus{})
 
 	agent := seedAgentWithBrokerID(t, cs, remoteBroker)
-	if _, err := cs.SetAgentRunID(ctx, agent.ID, "run-d"); err != nil {
+	if _, err := cs.SetAgentRunID(ctx, agent.ID, "run-d", nil); err != nil {
 		t.Fatal(err)
 	}
 	agent.RunID = "run-d"
