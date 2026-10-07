@@ -18,6 +18,8 @@ import { describe, expect, it } from 'vitest';
 
 import {
   artifactFileUrl,
+  artifactListUrl,
+  artifactPagePath,
   baseName,
   formatArtifactRef,
   formatBytes,
@@ -120,5 +122,26 @@ describe('message artifact helpers', () => {
       c.id,
       d.id,
     ]);
+  });
+});
+
+describe('artifactListUrl and artifactPagePath', () => {
+  const A = '5f1c2d3e-0000-4000-8000-0000000000aa';
+
+  it('builds the list URL with mine=1 and only the set filters', () => {
+    expect(artifactListUrl({})).toBe('/api/v1/artifacts?mine=1');
+    expect(artifactListUrl({ q: '  design ', ownedOnly: true, reviewPending: true }, 'c1')).toBe(
+      '/api/v1/artifacts?mine=1&q=design&review_pending=1&owner=me&cursor=c1'
+    );
+  });
+
+  it('drops a whitespace-only search', () => {
+    expect(artifactListUrl({ q: '   ' })).toBe('/api/v1/artifacts?mine=1');
+  });
+
+  it('percent-encodes the page path', () => {
+    expect(artifactPagePath({ id: A, scopeRef: 'proj 1' })).toBe(
+      `/projects/proj%201/artifacts/${A}`
+    );
   });
 });
