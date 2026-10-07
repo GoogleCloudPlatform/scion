@@ -85,12 +85,11 @@ type startWriteDeleteStore struct {
 	mu          sync.Mutex
 	startWrites int
 	wroteStart  bool
-	applied     bool
+	applied     atomic.Bool
 }
 
 func (p *startWriteDeleteStore) applyOnce() {
-	if !p.applied {
-		p.applied = true
+	if p.applied.CompareAndSwap(false, true) {
 		p.apply()
 	}
 }
@@ -133,7 +132,7 @@ func (p *startWriteDeleteStore) GetAgent(ctx context.Context, id string) (*store
 	a, err := p.Store.GetAgent(ctx, id)
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.window == windowAfterReRead && p.wroteStart && calledFromDeleteWonAfterLanding() {
+	if p.window == windowAfterReRead && p.wroteStart && calledFrom(".(*Server).deleteWonAfterLanding") {
 		// This read is the handler's deleteWonAfterLanding re-read (other
 		// reads run between the started write and it, such as the
 		// compensating-stop check); the delete claims the row right after
@@ -144,14 +143,20 @@ func (p *startWriteDeleteStore) GetAgent(ctx context.Context, id string) (*store
 	return a, err
 }
 
-// calledFromDeleteWonAfterLanding reports whether the store call in
-// progress was made by Server.deleteWonAfterLanding.
-func calledFromDeleteWonAfterLanding() bool {
-	pcs := make([]uintptr, 16)
+// calledFrom reports whether the store call in progress was made, directly
+// or not, by the function whose qualified name ends in suffix (for example
+// ".(*Server).deleteWonAfterLanding"). The tests use it to place a fault at
+// one specific read: several reads of the row run between the started write
+// and the reload (the compensating-stop check among them), so counting calls
+// would be fragile. A rename that stops it matching is not silent: the tests
+// that inject this way require that the fault was applied (p.applied, or
+// failedReload), and fail otherwise.
+func calledFrom(suffix string) bool {
+	pcs := make([]uintptr, 32)
 	frames := runtime.CallersFrames(pcs[:runtime.Callers(3, pcs)])
 	for {
 		f, more := frames.Next()
-		if strings.HasSuffix(f.Function, ".(*Server).deleteWonAfterLanding") {
+		if strings.HasSuffix(f.Function, suffix) {
 			return true
 		}
 		if !more {
@@ -175,7 +180,7 @@ func TestLifecycle_DeleteClaimAroundStartedWrite(t *testing.T) {
 					require.NotEmpty(t, client.lastStartExtras.RunID, "the start leg reached the broker")
 					assert.Empty(t, client.deleteRuns, "the start landed while the agent was live: no compensating delete")
 					if del.name != "none" {
-						require.True(t, p.applied, "the delete was applied in its window")
+						require.True(t, p.applied.Load(), "the delete was applied in its window")
 					}
 
 					// del.compensate is the delete-won rule: hard- or
@@ -231,7 +236,7 @@ func TestLifecycle_NoBrokerDeleteClaimBeforeFinalWrite(t *testing.T) {
 				rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/"+action, nil)
 				assert.Empty(t, client.lastStartExtras.RunID, "nothing reached a broker")
 				if del.name != "none" {
-					require.True(t, p.applied, "the delete was applied before the final write")
+					require.True(t, p.applied.Load(), "the delete was applied before the final write")
 				}
 				if !del.compensate {
 					require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
@@ -252,6 +257,82 @@ func TestLifecycle_NoBrokerDeleteClaimBeforeFinalWrite(t *testing.T) {
 				assert.NotContains(t, raw, "agent", "no agent body")
 			})
 		}
+	}
+}
+
+// failStartWriteStore fails every start status write (StartWrite and
+// ClearExit) with a database error that is not a delete.
+type failStartWriteStore struct {
+	store.Store
+	failed atomic.Bool
+}
+
+func (p *failStartWriteStore) UpdateAgentStatus(ctx context.Context, id string, u store.AgentStatusUpdate) error {
+	if u.StartWrite && u.ClearExit {
+		p.failed.Store(true)
+		return errors.New("db unavailable")
+	}
+	return p.Store.UpdateAgentStatus(ctx, id, u)
+}
+
+// A no-broker start or restart whose final status write fails with an error
+// that is not a delete answers a server error, not delete_in_progress.
+func TestLifecycle_NoBrokerFinalWriteError_NotDeleteWon(t *testing.T) {
+	for _, action := range []string{api.AgentActionStart, api.AgentActionRestart} {
+		t.Run(action, func(t *testing.T) {
+			srv, s, agent, _ := newLandedDeleteServer(t)
+			ctx := context.Background()
+			a, err := s.GetAgent(ctx, agent.ID)
+			require.NoError(t, err)
+			a.RuntimeBrokerID = ""
+			require.NoError(t, s.UpdateAgent(ctx, a))
+			p := &failStartWriteStore{Store: s}
+			srv.store = p
+
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/"+action, nil)
+			require.True(t, p.failed.Load(), "the final write ran and failed")
+			require.GreaterOrEqual(t, rec.Code, http.StatusInternalServerError, rec.Body.String())
+			var body ErrorResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+			assert.NotEqual(t, ErrCodeDeleteInProgress, body.Error.Code)
+		})
+	}
+}
+
+// failReloadStore fails settleLifecycleWrite's reload of the row with a
+// database error that is not store.ErrNotFound.
+type failReloadStore struct {
+	store.Store
+	failedReload atomic.Bool
+}
+
+func (p *failReloadStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
+	if calledFrom(".(*Server).settleLifecycleWrite") {
+		p.failedReload.Store(true)
+		return nil, errors.New("db unavailable")
+	}
+	return p.Store.GetAgent(ctx, id)
+}
+
+// A start or restart whose settle reload fails with an error that is not
+// "row gone" answers 200 from the requested phase, as before: the check
+// cannot tell, so it does not claim a delete won.
+func TestLifecycle_SettleReloadError_Answers200(t *testing.T) {
+	for _, action := range []string{api.AgentActionStart, api.AgentActionRestart} {
+		t.Run(action, func(t *testing.T) {
+			srv, s, agent, client := newLandedDeleteServer(t)
+			p := &failReloadStore{Store: s}
+			srv.store = p
+
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/"+action, nil)
+			require.NotEmpty(t, client.lastStartExtras.RunID, "the start leg reached the broker")
+			require.True(t, p.failedReload.Load(), "the settle reload ran and failed")
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			var resp agentLifecycleResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+			require.NotNil(t, resp.Agent)
+			assert.Equal(t, string(state.PhaseRunning), resp.Phase)
+		})
 	}
 }
 

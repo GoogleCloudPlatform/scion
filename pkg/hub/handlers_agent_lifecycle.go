@@ -991,7 +991,11 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			// The row was hard-deleted before this write (after the
 			// re-read above, or, with no broker, after the start's run
 			// intent was recorded): the same delete_in_progress answer
-			// (ptone/scion#3697), by deleteWonAfterLanding's rule.
+			// (ptone/scion#3697), by deleteWonAfterLanding's rule. Only a
+			// start or restart reaches this write today (a stop records its
+			// status above), so the action test is always true here; it is
+			// kept as a guard should another action reach it. Any other
+			// write error is not a delete and answers as before.
 			if (action == api.AgentActionStart || action == api.AgentActionRestart) && deleteWonOnRead(nil, err) {
 				writeDeleteWon(w, id, deletedWhileStartingMessage, dispatchWarns.Warnings())
 				return
@@ -1454,7 +1458,8 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 					res.Status = "stopped"
 					// Clear a failed delete marker, as a single stop does,
 					// and publish the row as stored.
-					s.settleLifecycleWrite(ctx, agent, string(state.PhaseStopped))
+					// A failed re-read is logged inside; the stop's result stands.
+					_ = s.settleLifecycleWrite(ctx, agent, string(state.PhaseStopped))
 					// Release the per-broker reservation, same as a single
 					// explicit stop (ptone/scion#1963).
 					s.releaseBrokerQuota(ctx, agent)
