@@ -27,6 +27,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { navigateTo } from '../../client/navigation.js';
 import { formatInstant } from '../../utils/time.js';
 import { artifactPagePath, listProjectArtifacts } from '../../client/artifacts.js';
+import { principalLabel, principalName } from '../../client/principal-names.js';
 import type { ArtifactListItem, ArtifactResponse } from '../../client/artifacts.js';
 import './artifact-publish-dialog.js';
 
@@ -39,6 +40,8 @@ const MAX_EMPTY_FOLLOWS = 10;
 @customElement('scion-artifact-list')
 export class ScionArtifactList extends LitElement {
   @property({ type: String }) projectId = '';
+  /** The signed-in user, shown as "You" in the Owner column. */
+  @property({ type: String }) currentUserId = '';
 
   @state() private items: ArtifactListItem[] = [];
   @state() private cursor = '';
@@ -47,6 +50,8 @@ export class ScionArtifactList extends LitElement {
   @state() private error: string | null = null;
   @state() private query = '';
   @state() private publishOpen = false;
+  /** Owner display names by "kind:id"; missing while unknown. */
+  @state() private names = new Map<string, string>();
 
   private searchTimer: ReturnType<typeof setTimeout> | null = null;
   private abort: AbortController | null = null;
@@ -211,6 +216,7 @@ export class ScionArtifactList extends LitElement {
       }
       this.items = items;
       this.cursor = cursor;
+      this.resolveNames(items);
     } catch (err) {
       if (abort.signal.aborted) return;
       this.error = err instanceof Error ? err.message : 'Could not load artifacts';
@@ -224,8 +230,11 @@ export class ScionArtifactList extends LitElement {
 
   private onSearch = (e: Event): void => {
     this.query = (e.target as HTMLInputElement).value;
-    // The cursor belongs to the previous query; Load more waits for the search.
+    // The cursor belongs to the previous query; Load more waits for the
+    // search, and a page still loading for the old query is dropped.
     this.cursor = '';
+    this.abort?.abort();
+    this.loadingMore = false;
     if (this.searchTimer) clearTimeout(this.searchTimer);
     this.searchTimer = setTimeout(() => void this.load(), SEARCH_DELAY_MS);
   };
@@ -240,9 +249,23 @@ export class ScionArtifactList extends LitElement {
     navigateTo(artifactPagePath(a.scopeRef || this.projectId, a.id));
   };
 
+  private resolveNames(items: ArtifactListItem[]): void {
+    for (const item of items) {
+      const key = `${item.ownerKind}:${item.ownerRef}`;
+      if (this.names.has(key)) continue;
+      // The signed-in user is shown as "You"; no lookup is needed.
+      if (item.ownerKind === 'user' && item.ownerRef === this.currentUserId) continue;
+      void principalName(item.ownerKind, item.ownerRef).then((name) => {
+        if (name && this.isConnected && !this.names.has(key)) {
+          this.names = new Map(this.names).set(key, name);
+        }
+      });
+    }
+  }
+
   private owner(item: ArtifactListItem): string {
-    const ref = item.ownerRef.length > 12 ? `${item.ownerRef.slice(0, 8)}…` : item.ownerRef;
-    return `${item.ownerKind} ${ref}`;
+    const name = this.names.get(`${item.ownerKind}:${item.ownerRef}`) ?? '';
+    return principalLabel(item.ownerKind, item.ownerRef, name, this.currentUserId);
   }
 
   private newButton(): TemplateResult {

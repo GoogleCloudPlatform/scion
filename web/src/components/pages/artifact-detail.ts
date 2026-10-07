@@ -64,6 +64,7 @@ import type {
   PublishFile,
   ViewResponse,
 } from '../../client/artifacts.js';
+import { principalLabel, principalName } from '../../client/principal-names.js';
 import { getLanguageFromPath } from '../shared/code-editor.js';
 import '../shared/artifact-markdown-frame.js';
 import '../shared/artifact-publish-dialog.js';
@@ -90,7 +91,8 @@ export class ScionPageArtifactDetail extends LitElement {
   @state() private data: ArtifactResponse | null = null;
   @state() private entry: ArtifactFile | null = null;
   @state() private text: string | null = null;
-  @state() private ownerName = '';
+  /** Owner and publisher display names by "kind:id"; missing while unknown. */
+  @state() private names = new Map<string, string>();
   @state() private copied = false;
   @state() private tab: Tab = 'preview';
   @state() private versions: ArtifactVersion[] = [];
@@ -359,6 +361,9 @@ export class ScionPageArtifactDetail extends LitElement {
     this.text = null;
     this.view = null;
     this.viewError = null;
+    this.viewExpired = false;
+    if (this.viewTimer) clearTimeout(this.viewTimer);
+    this.viewTimer = null;
     try {
       const res = await apiFetch(this.versionPath);
       if (res.status === 404) {
@@ -373,7 +378,7 @@ export class ScionPageArtifactDetail extends LitElement {
       dispatchPageTitle(this, data.artifact.title, 'Artifacts');
       const version = data.version;
       this.entry = version?.files.find((f) => f.path === version.entryPath) ?? null;
-      void this.loadOwnerName();
+      this.resolveNames();
       void this.loadVersions();
       const kind = this.entry ? rendererFor(this.entry.mediaType) : 'download';
       if ((kind === 'markdown' || kind === 'text') && this.entry) {
@@ -438,28 +443,41 @@ export class ScionPageArtifactDetail extends LitElement {
       const page = await listVersions(this.artifactId, before);
       this.versions = before > 0 ? [...this.versions, ...page.versions] : page.versions;
       this.versionsNext = page.nextBefore ?? 0;
+      this.resolveNames();
       this.versionsError = null;
     } catch (err) {
       this.versionsError = err instanceof Error ? err.message : 'Could not load versions';
     }
   }
 
-  /** Best-effort display name for an agent owner; falls back to the id. */
-  private async loadOwnerName(): Promise<void> {
+  /** Looks up the names of the owner and of the versions' publishers. */
+  private resolveNames(): void {
+    const refs: [string, string][] = [];
     const a = this.data?.artifact;
-    if (!a || a.ownerKind !== 'agent') return;
-    try {
-      // A reader may see the artifact without being allowed to see its
-      // owning agent; that is not an error worth a toast.
-      const res = await apiFetch(`/api/v1/agents/${encodeURIComponent(a.ownerRef)}`, {
-        suppressAccessDeniedToast: true,
-      });
-      if (!res.ok) return;
-      const agent = (await res.json()) as { name?: string; slug?: string };
-      this.ownerName = agent.name || agent.slug || '';
-    } catch {
-      // The id is shown instead.
+    if (a) refs.push([a.ownerKind, a.ownerRef]);
+    for (const v of this.versions) {
+      if (v.createdByKind && v.createdByRef) refs.push([v.createdByKind, v.createdByRef]);
     }
+    const me = this.pageData?.user?.id;
+    for (const [kind, ref] of refs) {
+      const key = `${kind}:${ref}`;
+      if (this.names.has(key) || (kind === 'user' && ref === me)) continue;
+      void principalName(kind, ref).then((name) => {
+        if (name && this.isConnected && !this.names.has(key)) {
+          this.names = new Map(this.names).set(key, name);
+        }
+      });
+    }
+  }
+
+  /** How a principal is shown: "You", "<name> (agent)", a name, or a short id. */
+  private label(kind: string, ref: string): string {
+    return principalLabel(
+      kind,
+      ref,
+      this.names.get(`${kind}:${ref}`) ?? '',
+      this.pageData?.user?.id
+    );
   }
 
   private async copyRef(): Promise<void> {
@@ -623,7 +641,7 @@ export class ScionPageArtifactDetail extends LitElement {
 
   private renderHeader(): TemplateResult {
     const { artifact: a, version: v } = this.data!;
-    const owner = this.ownerName || a.ownerRef;
+    const owner = this.label(a.ownerKind, a.ownerRef);
     const f = this.entry;
     const ownFiles = v ? v.files.filter((x) => !isRemoteFile(x)) : [];
     return html`
@@ -634,7 +652,7 @@ export class ScionPageArtifactDetail extends LitElement {
             <h1>${a.title}</h1>
           </div>
           <div class="meta">
-            <span>Owner: ${a.ownerKind} ${owner}</span>
+            <span>Owner: ${owner}</span>
             ${a.key ? html`<span>Key: <code>${a.key}</code></span>` : nothing}
             <span>Updated: ${formatInstant(a.updatedAt)}</span>
             <span class="ref">
@@ -764,7 +782,7 @@ export class ScionPageArtifactDetail extends LitElement {
 
   private renderHtmlView(v: ArtifactVersion, f: ArtifactFile): TemplateResult {
     const count = v.files.filter((x) => !isRemoteFile(x)).length;
-    const owner = this.ownerName || this.data!.artifact.ownerRef;
+    const owner = this.label(this.data!.artifact.ownerKind, this.data!.artifact.ownerRef);
     if (this.viewError) {
       return html`<div class="error-state">
         <sl-icon name="exclamation-triangle"></sl-icon>
@@ -814,8 +832,7 @@ export class ScionPageArtifactDetail extends LitElement {
       <div class="untrusted">
         <div class="untrusted-bar">
           <sl-icon name="shield-lock"></sl-icon>
-          Content published by ${this.data!.artifact.ownerKind} ${owner} · runs sandboxed, isolated
-          from Scion
+          Content published by ${owner} · runs sandboxed, isolated from Scion
         </div>
         <iframe
           title=${`${this.data!.artifact.title} (sandboxed)`}
@@ -900,8 +917,7 @@ export class ScionPageArtifactDetail extends LitElement {
 
   private createdBy(v: ArtifactVersion): string {
     if (!v.createdByKind) return '';
-    const ref = v.createdByRef ?? '';
-    return `${v.createdByKind} ${ref.length > 12 ? `${ref.slice(0, 8)}…` : ref}`;
+    return this.label(v.createdByKind, v.createdByRef ?? '');
   }
 
   private renderHistory(): TemplateResult {

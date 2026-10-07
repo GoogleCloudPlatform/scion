@@ -24,6 +24,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vite
 
 import type { PageData } from '../../shared/types.js';
 import { resetHubProjectCapabilitiesCache } from '../../client/hub-capabilities.js';
+import { resetPrincipalNames } from '../../client/principal-names.js';
 
 class FakeEventSource extends EventTarget {
   static readonly CONNECTING = 0;
@@ -133,6 +134,7 @@ describe('project Files area with artifacts', () => {
     element?.remove();
     element = null;
     delete window.__SCION_FEATURES__;
+    resetPrincipalNames();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
@@ -185,5 +187,33 @@ describe('project Files area with artifacts', () => {
       Array.from(el.shadowRoot!.querySelectorAll('sl-tab')).map((t) => t.textContent!.trim())
     ).toEqual(['workspace', 'datasets']);
     expect(urls.some((u) => u.startsWith('/api/v1/artifacts'))).toBe(false);
+  });
+
+  it('clears the artifact search when switching views and back', async () => {
+    const el = await mount(true);
+    const list = el.shadowRoot!.querySelector('scion-artifact-list') as HTMLElement & {
+      updateComplete: Promise<boolean>;
+    };
+    await list.updateComplete;
+    const input = list.shadowRoot!.querySelector('sl-input') as HTMLElement & { value: string };
+    input.value = 'report';
+    input.dispatchEvent(new CustomEvent('sl-input'));
+    await pickSegment(el, 'workspace');
+    await pickSegment(el, 'artifacts');
+    const again = el.shadowRoot!.querySelector('scion-artifact-list') as HTMLElement & {
+      updateComplete: Promise<boolean>;
+    };
+    await again.updateComplete;
+    expect(
+      (again.shadowRoot!.querySelector('sl-input') as HTMLElement & { value: string }).value
+    ).toBe('');
+  });
+
+  it('passes the signed-in user to the list', async () => {
+    const el = await mount(true);
+    const list = el.shadowRoot!.querySelector('scion-artifact-list') as HTMLElement & {
+      currentUserId: string;
+    };
+    expect(list.currentUserId).toBe('u');
   });
 });

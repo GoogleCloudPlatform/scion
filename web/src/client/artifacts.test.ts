@@ -269,45 +269,95 @@ describe('publishFiles after a failure', () => {
 
   const files = (): { path: string; data: Blob }[] => [{ path: 'a.md', data: new Blob(['abc']) }];
 
-  it('reports the pending version and resumes it on the next attempt', async () => {
-    let putStatus = 500;
+  it('reports the pending version and resumes only the files not yet uploaded', async () => {
+    let failB = true;
     const calls = recordFetch((c) => {
       if (c.method === 'POST' && c.url === '/api/v1/artifacts') {
         return json(
-          { artifact: { id: 'n-1' }, version: { seq: 1 }, upload: { required: ['a.md'] } },
+          { artifact: { id: 'n-1' }, version: { seq: 1 }, upload: { required: ['a.md', 'b.png'] } },
           201
         );
       }
       if (c.method === 'PUT') {
-        return putStatus === 204
-          ? new Response(null, { status: 204 })
-          : json({ error: { code: 'internal', message: 'boom' } }, putStatus);
+        return c.url.endsWith('/b.png') && failB
+          ? json({ error: { code: 'internal', message: 'boom' } }, 500)
+          : new Response(null, { status: 204 });
       }
       if (c.url.endsWith('/finalize'))
         return json({ artifact: { id: 'n-1' }, version: { seq: 1 } });
       return json({}, 500);
     });
-    const req = { scope: 'p-1', title: 'T', entry: 'a.md', files: files() };
-    let failure: unknown;
-    try {
-      await publishFiles(req);
-    } catch (err) {
-      failure = err;
-    }
+    const two = (): { path: string; data: Blob }[] => [
+      { path: 'a.md', data: new Blob(['abc']) },
+      { path: 'b.png', data: new Blob(['png']) },
+    ];
+    const req = { scope: 'p-1', title: 'T', entry: 'a.md' };
+    const failure = await publishFiles({ ...req, files: two() }).catch((e: unknown) => e);
     expect(failure).toBeInstanceOf(PublishError);
     const pending = (failure as PublishError).pending!;
-    expect(pending).toMatchObject({ artifactId: 'n-1', seq: 1, required: ['a.md'] });
+    expect(pending).toMatchObject({ artifactId: 'n-1', seq: 1, required: ['b.png'] });
+    expect(publishErrorMessage(failure)).toContain('continues where it stopped');
     expect(publishErrorMessage(failure)).toContain('removed after 24 hours');
 
-    putStatus = 204;
-    await publishFiles({ ...req, files: files(), resume: pending });
+    failB = false;
+    const progress: string[] = [];
+    await publishFiles({
+      ...req,
+      files: two(),
+      resume: pending,
+      onProgress: (done, total, path) => progress.push(`${done}/${total} ${path}`),
+    });
     expect(calls.map((c) => `${c.method} ${c.url}`)).toEqual([
       'POST /api/v1/artifacts',
       'PUT /api/v1/artifacts/n-1/versions/1/files/a.md',
-      'PUT /api/v1/artifacts/n-1/versions/1/files/a.md',
+      'PUT /api/v1/artifacts/n-1/versions/1/files/b.png',
+      'PUT /api/v1/artifacts/n-1/versions/1/files/b.png',
       'POST /api/v1/artifacts/n-1/versions/1/finalize',
     ]);
+    expect(progress).toEqual(['1/1 b.png']);
   });
+
+  it('uploads the files finalize reports missing on the next attempt', async () => {
+    recordFetch((c) => {
+      if (c.url.endsWith('/finalize')) {
+        return json(
+          {
+            error: {
+              code: 'incomplete',
+              message: '1 file(s) of the manifest have not been uploaded',
+              details: { missing: ['a.md'], missingCount: 1 },
+            },
+          },
+          409
+        );
+      }
+      if (c.method === 'PUT') return new Response(null, { status: 204 });
+      return json(
+        { artifact: { id: 'a' }, version: { seq: 2 }, upload: { required: ['a.md'] } },
+        201
+      );
+    });
+    const err = await publishFiles({ artifactId: 'a', entry: 'a.md', files: files() }).catch(
+      (e: unknown) => e
+    );
+    expect((err as PublishError).pending).toMatchObject({ seq: 2, required: ['a.md'] });
+  });
+
+  for (const status of [403, 404]) {
+    it(`does not offer to resume after a ${status}`, async () => {
+      recordFetch((c) => {
+        if (c.method === 'PUT') return json({ error: { code: 'x', message: 'no' } }, status);
+        return json(
+          { artifact: { id: 'a' }, version: { seq: 2 }, upload: { required: ['a.md'] } },
+          201
+        );
+      });
+      const err = await publishFiles({ artifactId: 'a', entry: 'a.md', files: files() }).catch(
+        (e: unknown) => e
+      );
+      expect((err as PublishError).pending).toBeNull();
+    });
+  }
 
   it('starts a new version when the content changed since the failure', async () => {
     const calls = recordFetch((c) => {

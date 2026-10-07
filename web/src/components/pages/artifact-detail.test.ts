@@ -24,6 +24,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import type { ArtifactResponse, ArtifactVersion } from '../../client/artifacts.js';
 import type { ScionPageArtifactDetail } from './artifact-detail.js';
+import { resetPrincipalNames } from '../../client/principal-names.js';
 
 const ID = '5f1c2d3e-0000-4000-8000-000000000001';
 
@@ -164,6 +165,7 @@ describe('artifact page', () => {
     document.body.innerHTML = '';
     vi.unstubAllGlobals();
     delete window.__SCION_FEATURES__;
+    resetPrincipalNames();
   });
 
   it('shows nothing but a 404 when the experiment is off', async () => {
@@ -550,5 +552,45 @@ describe('artifact page', () => {
     )!;
     expect(dl.getAttribute('href')).toBe(`/api/v1/artifacts/${ID}/versions/1/files/design.md`);
     expect(dl.getAttribute('download')).toBe('design.md');
+  });
+
+  it('shows the owner and publishers by name', async () => {
+    const meta = artifact('page.html', 'text/html');
+    meta.artifact.ownerKind = 'agent';
+    meta.artifact.ownerRef = 'agent-1';
+    meta.version!.createdByKind = 'user';
+    meta.version!.createdByRef = 'u-9';
+    vi.stubGlobal('fetch', vi.fn());
+    mockFetch(meta);
+    const inner = globalThis.fetch as unknown as (
+      i: RequestInfo | URL,
+      n?: RequestInit
+    ) => Promise<Response>;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url === '/api/v1/agents/agent-1') {
+          return Promise.resolve(
+            new Response(JSON.stringify({ name: 'metrics-agent' }), { status: 200 })
+          );
+        }
+        if (url === '/api/v1/users/u-9') {
+          return Promise.resolve(
+            new Response(JSON.stringify({ displayName: 'Jane Doe' }), { status: 200 })
+          );
+        }
+        return inner(input, init);
+      })
+    );
+    const el = await mount(true);
+    expect(el.shadowRoot!.querySelector('.meta')!.textContent).toContain(
+      'Owner: metrics-agent (agent)'
+    );
+    expect(el.shadowRoot!.querySelector('.untrusted-bar')!.textContent).toContain(
+      'Content published by metrics-agent (agent)'
+    );
+    const history = el.shadowRoot!.querySelector('sl-tab-panel[name="history"] tbody tr')!;
+    expect(history.textContent).toContain('Jane Doe');
   });
 });

@@ -387,23 +387,41 @@ export async function publishFiles(req: PublishRequest): Promise<ArtifactRespons
     };
   }
   const { artifactId: id, seq, required } = pending;
+  // Files still to upload. Each successful upload is taken off, so a
+  // failure reports, and the next attempt uploads, only what is left.
+  let remaining = [...required];
+  const left = (): PendingPublish => ({ ...pending, required: remaining });
   const fail = async (res: Response, prefix: string): Promise<never> => {
-    let code = '';
+    let body: {
+      error?: { code?: string; details?: { missing?: unknown; missingCount?: unknown } };
+    } = {};
     try {
-      const b = (await res.clone().json()) as { error?: { code?: string } };
-      code = b.error?.code ?? '';
+      body = (await res.clone().json()) as typeof body;
     } catch {
       // Not JSON; the status decides.
     }
+    const code = body.error?.code ?? '';
     const message = prefix + (await extractApiError(res, `HTTP ${res.status}`));
     // The version is gone (404), no longer pending (409 conflict), or not
     // the caller's (403): another attempt must start a new version.
     const gone =
       res.status === 404 || res.status === 403 || (res.status === 409 && code === 'conflict');
-    throw new PublishError(message, gone ? null : pending);
+    if (gone) throw new PublishError(message, null);
+    // Finalize found files missing: upload those next time. The hub lists
+    // at most a few; when it lists fewer than are missing, upload them all.
+    const missing = body.error?.details?.missing;
+    if (code === 'incomplete') {
+      const all =
+        Array.isArray(missing) && missing.length === body.error?.details?.missingCount
+          ? (missing as unknown[]).filter((p): p is string => typeof p === 'string')
+          : required;
+      remaining = all.filter((p) => byPath.has(p));
+    }
+    throw new PublishError(message, left());
   };
-  let done = 0;
+  let done = required.length - remaining.length;
   for (const path of required) {
+    if (!remaining.includes(path)) continue;
     const data = byPath.get(path);
     if (!data) {
       throw new PublishError(`The hub asked for ${path}, which is not being uploaded.`, null);
@@ -419,10 +437,11 @@ export async function publishFiles(req: PublishRequest): Promise<ArtifactRespons
     } catch (err) {
       throw new PublishError(
         `${path}: ${err instanceof Error ? err.message : 'upload failed'}`,
-        pending
+        left()
       );
     }
     if (!res.ok) await fail(res, `${path}: `);
+    remaining = remaining.filter((p) => p !== path);
     done++;
     req.onProgress?.(done, required.length, path);
   }
@@ -430,7 +449,7 @@ export async function publishFiles(req: PublishRequest): Promise<ArtifactRespons
   try {
     res = await apiFetch(`${artifactPath(id)}/versions/${seq}/finalize`, { method: 'POST' });
   } catch (err) {
-    throw new PublishError(err instanceof Error ? err.message : 'finalize failed', pending);
+    throw new PublishError(err instanceof Error ? err.message : 'finalize failed', left());
   }
   if (!res.ok) await fail(res, '');
   return (await res.json()) as ArtifactResponse;

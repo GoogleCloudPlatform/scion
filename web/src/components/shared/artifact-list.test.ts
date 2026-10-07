@@ -21,6 +21,7 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { defaultEntry, folderFiles } from './artifact-publish-dialog.js';
+import { resetPrincipalNames } from '../../client/principal-names.js';
 import type { ArtifactListItem } from '../../client/artifacts.js';
 
 function item(id: string, extra: Partial<ArtifactListItem> = {}): ArtifactListItem {
@@ -43,7 +44,8 @@ function item(id: string, extra: Partial<ArtifactListItem> = {}): ArtifactListIt
 type ListElement = HTMLElement & { projectId: string; updateComplete: Promise<boolean> };
 
 async function mountList(
-  pages: Record<string, unknown>
+  pages: Record<string, unknown>,
+  me = ''
 ): Promise<{ el: ListElement; urls: string[] }> {
   const urls: string[] = [];
   vi.stubGlobal(
@@ -57,8 +59,11 @@ async function mountList(
       );
     })
   );
-  const el = document.createElement('scion-artifact-list') as ListElement;
+  const el = document.createElement('scion-artifact-list') as ListElement & {
+    currentUserId: string;
+  };
   el.projectId = 'p-1';
+  el.currentUserId = me;
   document.body.appendChild(el);
   for (let i = 0; i < 10; i++) {
     await new Promise((r) => setTimeout(r, 0));
@@ -75,6 +80,7 @@ describe('artifact list', () => {
   afterEach(() => {
     document.body.innerHTML = '';
     vi.unstubAllGlobals();
+    resetPrincipalNames();
   });
 
   it('shows rows with version, owner and the review badge, and pages with Load more', async () => {
@@ -90,7 +96,7 @@ describe('artifact list', () => {
     expect(rows[0].textContent).toContain('Title a');
     expect(rows[0].textContent).toContain('k-a');
     expect(rows[0].textContent).toContain('v2');
-    expect(rows[0].textContent).toContain('agent agent-01');
+    expect(rows[0].textContent).toContain('agent-01… (agent)');
     expect(rows[1].querySelector('sl-badge')!.textContent).toContain('Review pending');
     expect(rows[0].querySelector('a.title')!.getAttribute('href')).toBe(
       '/projects/p-1/artifacts/a'
@@ -161,10 +167,138 @@ describe('artifact list', () => {
   });
 });
 
+describe('artifact list names', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+    vi.unstubAllGlobals();
+    resetPrincipalNames();
+  });
+
+  it('shows owner names, You for the signed-in user, and looks each owner up once', async () => {
+    const { el, urls } = await mountList(
+      {
+        '/api/v1/agents/agent-0123456789abcdef': { name: 'docs-writer' },
+        '/api/v1/users/u-2': { displayName: 'Jane Doe' },
+        'mine=1': {
+          artifacts: [
+            item('a'),
+            item('b'),
+            item('c', { ownerKind: 'user', ownerRef: 'u-1' }),
+            item('d', { ownerKind: 'user', ownerRef: 'u-2' }),
+          ],
+        },
+      },
+      'u-1'
+    );
+    for (let i = 0; i < 10; i++) {
+      await new Promise((r) => setTimeout(r, 0));
+      await el.updateComplete;
+    }
+    const owners = Array.from(el.shadowRoot!.querySelectorAll('tbody tr')).map((r) =>
+      r.querySelectorAll('td')[1].textContent!.trim()
+    );
+    expect(owners).toEqual(['docs-writer (agent)', 'docs-writer (agent)', 'You', 'Jane Doe']);
+    expect(urls.filter((u) => u.startsWith('/api/v1/agents/'))).toHaveLength(1);
+    expect(urls.some((u) => u === '/api/v1/users/u-1')).toBe(false);
+  });
+});
+
+describe('publish dialog retry', () => {
+  beforeAll(async () => {
+    await import('./artifact-publish-dialog.js');
+  });
+  afterEach(() => {
+    document.body.innerHTML = '';
+    vi.unstubAllGlobals();
+  });
+
+  it('resumes the version a failed attempt left instead of creating another artifact', async () => {
+    const calls: string[] = [];
+    let putStatus = 500;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = init?.method ?? 'GET';
+        calls.push(`${method} ${url}`);
+        if (method === 'POST' && url === '/api/v1/artifacts') {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                artifact: { id: 'n-1' },
+                version: { seq: 1 },
+                upload: { required: ['a.md'] },
+              }),
+              { status: 201 }
+            )
+          );
+        }
+        if (method === 'PUT') {
+          return Promise.resolve(
+            putStatus === 204
+              ? new Response(null, { status: 204 })
+              : new Response('{"error":{"code":"internal","message":"boom"}}', {
+                  status: putStatus,
+                })
+          );
+        }
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({ artifact: { id: 'n-1', scopeRef: 'p-1' }, version: { seq: 1 } }),
+            {
+              status: 200,
+            }
+          )
+        );
+      })
+    );
+    const el = document.createElement('scion-artifact-publish-dialog') as HTMLElement & {
+      projectId: string;
+      open: boolean;
+      updateComplete: Promise<boolean>;
+    };
+    el.projectId = 'p-1';
+    document.body.appendChild(el);
+    el.open = true;
+    await el.updateComplete;
+    const priv = el as unknown as {
+      picked: { path: string; file: File }[];
+      entry: string;
+      titleValue: string;
+    };
+    priv.picked = [{ path: 'a.md', file: new File(['x'], 'a.md') }];
+    priv.entry = 'a.md';
+    priv.titleValue = 'Notes';
+    await el.updateComplete;
+    const published = vi.fn();
+    el.addEventListener('artifact-published', published);
+    const clickPublish = async (): Promise<void> => {
+      const btn = Array.from(el.shadowRoot!.querySelectorAll('sl-button')).find(
+        (b) => b.textContent!.trim() === 'Publish'
+      ) as HTMLElement;
+      btn.click();
+      for (let i = 0; i < 20; i++) {
+        await new Promise((r) => setTimeout(r, 0));
+        await el.updateComplete;
+      }
+    };
+    await clickPublish();
+    expect(el.shadowRoot!.querySelector('sl-alert')!.textContent).toContain(
+      'Publish again to retry'
+    );
+    putStatus = 204;
+    await clickPublish();
+    expect(calls.filter((c) => c === 'POST /api/v1/artifacts')).toHaveLength(1);
+    expect(calls).toContain('POST /api/v1/artifacts/n-1/versions/1/finalize');
+    expect(published).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('artifact list paging', () => {
   afterEach(() => {
     document.body.innerHTML = '';
     vi.unstubAllGlobals();
+    resetPrincipalNames();
   });
 
   it('follows the cursor past empty pages instead of showing the empty state', async () => {
@@ -173,7 +307,7 @@ describe('artifact list paging', () => {
       'cursor=c1': { artifacts: [], nextCursor: 'c2' },
       'mine=1': { artifacts: [], nextCursor: 'c1' },
     });
-    expect(urls).toEqual([
+    expect(urls.filter((u) => u.startsWith('/api/v1/artifacts'))).toEqual([
       '/api/v1/artifacts?mine=1&scope=p-1',
       '/api/v1/artifacts?mine=1&scope=p-1&cursor=c1',
       '/api/v1/artifacts?mine=1&scope=p-1&cursor=c2',
