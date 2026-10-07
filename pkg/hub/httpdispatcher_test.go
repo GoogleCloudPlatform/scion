@@ -43,7 +43,7 @@ import (
 // createTestStore creates an in-memory SQLite store for testing.
 func createTestStore(t *testing.T) store.Store {
 	t.Helper()
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
