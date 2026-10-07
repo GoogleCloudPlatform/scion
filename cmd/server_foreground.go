@@ -1121,9 +1121,11 @@ func isHADeployment(cfg *config.GlobalConfig) bool {
 }
 
 // validateHostedBasic runs lightweight checks that apply to all --hosted
-// deployments (both single-instance VMs and Cloud Run HA).
+// deployments (both single-instance VMs and Cloud Run HA). The session
+// secret backs hub JWT signing and web sessions only, so a broker-only
+// process (runtime-broker start) does not warn about it (#3605).
 func validateHostedBasic(cfg *config.GlobalConfig) {
-	if !hostedMode || cfg == nil {
+	if !hostedMode || cfg == nil || (!enableHub && !enableWeb) {
 		return
 	}
 	if strings.TrimSpace(resolveSessionSecret()) == "" {
