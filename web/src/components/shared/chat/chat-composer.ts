@@ -26,7 +26,8 @@
  * - The composer knows nothing about the network
  * - Send on Enter (Shift+Enter for newline); on touch-primary devices Enter
  *   inserts a newline instead, since there is no Shift+Enter combo
- * - Right-click send button for "Send with interruption"
+ * - Right-click send button for "Send with interruption" and, when
+ *   `scheduleSendEnabled` is set, "Schedule send…" (`chat-schedule` event)
  */
 
 import { LitElement, html, css, nothing } from 'lit';
@@ -44,6 +45,8 @@ import { showToast } from '../../../utils/toast.js';
 import { LongPressController } from './long-press.js';
 import type { ActionSheetItem, ActionSheetSelectDetail } from './chat-action-sheet.js';
 import './chat-action-sheet.js';
+import type { ScheduleConfirmDetail } from './chat-schedule-dialog.js';
+import './chat-schedule-dialog.js';
 import { TOUCH_PRIMARY_QUERY } from '../../../utils/input-modality.js';
 import { chatDraftStorageKey } from '../../../client/chat-drafts.js';
 
@@ -107,6 +110,19 @@ export interface ChatSendDetail {
   replyToId?: string;
   /** Reply-to content for RE_msg_starting metadata. */
   replyToContent?: string;
+}
+
+/**
+ * Event detail for the chat-schedule custom event: send `text` at `fireAt`
+ * (a UTC ISO instant) instead of now.
+ */
+export interface ChatScheduleDetail {
+  text: string;
+  fireAt: string;
+  replyToId?: string;
+  onSuccess: () => void;
+  /** Restore composer state when scheduling fails. */
+  onError?: (errorMsg: string) => void;
 }
 
 /** Event detail for the chat-edit custom event (Phase 3). */
@@ -218,6 +234,16 @@ export class ScionChatComposer extends LitElement {
 
   /** Whether the right-click send context menu is visible. */
   @state() private showSendContextMenu = false;
+
+  /**
+   * Whether the send menu offers "Schedule send…". The parent sets it when
+   * the scheduled-send experiment is on and the conversation supports it.
+   */
+  @property({ type: Boolean })
+  scheduleSendEnabled = false;
+
+  /** Whether the Schedule send dialog is open. */
+  @state() private showScheduleDialog = false;
 
   /** Whether the send menu is open as an action sheet (a long-press on Send). */
   @state() private showSendSheet = false;
@@ -537,6 +563,15 @@ export class ScionChatComposer extends LitElement {
 
     .send-context-item:hover {
       background: var(--scion-bg-subtle, #f1f5f9);
+    }
+
+    .send-context-item.disabled {
+      cursor: default;
+      opacity: 0.5;
+    }
+
+    .send-context-item.disabled:hover {
+      background: none;
     }
 
     .composer-context {
@@ -1158,8 +1193,16 @@ export class ScionChatComposer extends LitElement {
                         <sl-icon name="lightning-charge"></sl-icon>
                         Send with interruption
                       </div>
+                      ${this.scheduleSendEnabled ? this.renderScheduleMenuItem() : nothing}
                     </div>
                   `
+                : nothing}
+              ${this.scheduleSendEnabled
+                ? html`<scion-chat-schedule-dialog
+                    .open=${this.showScheduleDialog}
+                    @schedule-confirm=${this.handleScheduleConfirm}
+                    @schedule-cancel=${this.handleScheduleCancel}
+                  ></scion-chat-schedule-dialog>`
                 : nothing}
               <scion-action-sheet
                 heading="Send options"
@@ -2117,6 +2160,91 @@ export class ScionChatComposer extends LitElement {
   /** Close the send context menu. */
   private closeSendContextMenu(): void {
     this.showSendContextMenu = false;
+  }
+
+  /**
+   * The "Schedule send…" menu item. Attachments cannot be scheduled, so it
+   * is disabled while files are staged.
+   */
+  private renderScheduleMenuItem(): TemplateResult {
+    const blocked = this.pendingFiles.length > 0;
+    return html`
+      <div
+        class="send-context-item schedule-send-item ${blocked ? 'disabled' : ''}"
+        aria-disabled=${blocked ? 'true' : 'false'}
+        title=${blocked ? 'Attachments cannot be scheduled' : ''}
+        @click=${this.handleScheduleMenuItem}
+      >
+        <sl-icon name="clock"></sl-icon>
+        Schedule send…
+      </div>
+    `;
+  }
+
+  private readonly handleScheduleMenuItem = (): void => {
+    if (this.pendingFiles.length > 0) return;
+    this.showSendContextMenu = false;
+    this.showScheduleDialog = true;
+  };
+
+  private readonly handleScheduleCancel = (): void => {
+    this.showScheduleDialog = false;
+  };
+
+  private readonly handleScheduleConfirm = (e: CustomEvent<ScheduleConfirmDetail>): void => {
+    this.showScheduleDialog = false;
+    this.doSchedule(e.detail.fireAt);
+  };
+
+  /**
+   * Schedule the current text for `fireAt`: clears the composer like a send
+   * and dispatches `chat-schedule`; the parent restores it via onError.
+   */
+  private doSchedule(fireAt: string): void {
+    if (this.editMessage || this.pendingFiles.length > 0) return;
+    const trimmed = this.text.trim();
+    if (!trimmed) return;
+
+    const savedText = this.text;
+    const savedRuneCount = this.runeCount;
+    const savedMentions = new Set(this.acceptedMentions);
+    const savedMentionRanges = [...this.mentionRanges];
+    const savedReplyTo = this.replyTo;
+
+    const detail: ChatScheduleDetail = {
+      text: trimmed,
+      fireAt,
+      onSuccess: () => {
+        // Input already cleared — nothing to do.
+      },
+      onError: () => {
+        this.text = savedText;
+        this.runeCount = savedRuneCount;
+        this.acceptedMentions = savedMentions;
+        this.mentionRanges = savedMentionRanges;
+        if (savedReplyTo) {
+          this.replyTo = savedReplyTo;
+        }
+        this.settleFocusAfterSend();
+      },
+    };
+    if (this.replyTo) {
+      detail.replyToId = this.replyTo.messageId;
+    }
+
+    this.text = '';
+    this.runeCount = 0;
+    this.resetMentionTracking();
+    this.clearDraft();
+    this.settleFocusAfterSend();
+
+    this.dispatchEvent(
+      new CustomEvent<ChatScheduleDetail>('chat-schedule', {
+        detail,
+        bubbles: true,
+        composed: true,
+      })
+    );
   }
 
   /**
