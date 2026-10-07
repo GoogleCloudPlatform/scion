@@ -168,12 +168,11 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	if opts.RunID == "" {
 		opts.RunID = uuid.NewString()
 	}
-	ctx = api.ContextWithRunID(ctx, opts.RunID)
 
 	// 0. Check if container already exists (scoped to this project)
 	slug := api.Slugify(opts.Name)
-	agents, err := m.Runtime.List(ctx, map[string]string{"scion.name": slug})
-	if err == nil {
+	agents, listErr := m.Runtime.List(ctx, map[string]string{"scion.name": slug})
+	if listErr == nil {
 		for _, a := range agents {
 			// Skip agents from a different project
 			if !matchAgentProject(a, projectName, projectID) {
@@ -207,16 +206,27 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		}
 	}
 
-	// Record this run as the owner of an already provisioned agent's files
-	// (provision-only, a restart, a resume) as soon as the previous run's
-	// container is gone (ptone/scion#2675). From here on the hub keeps this
-	// run even if the start fails, so the files must name it too, or a
-	// delete for this run would leave them behind. A fresh provision below
-	// records it as it writes agent-info.json; without agent-info.json this
-	// is a no-op.
-	if err := SetSavedRunID(opts.Name, opts.ProjectPath, opts.RunID); err != nil {
-		slog.Warn("Start: failed to record the run ID in agent-info.json; a delete for this run may leave the agent's files behind",
-			"agent", opts.Name, "run_id", opts.RunID, "error", err)
+	// List OK: every entry of the name in this project is gone, so record
+	// this run as the owner of the agent's files now (ptone/scion#2675). The
+	// hub keeps this run even if the start fails, so the files must name it
+	// too, or a delete for this run would leave them behind. A fresh
+	// provision records the run carried by ctx in agent-info.json.
+	//
+	// List failed: no pre-clean ran and a previous run's container may hold
+	// the name (ptone/scion#3242). If the create then collides, the hub may
+	// settle on that previous run, so keep the recorded owner (and record
+	// none on a fresh provision) and record this run only after a
+	// successful create, which proves the name was free.
+	recordAfterCreate := listErr != nil
+	if listErr == nil {
+		ctx = api.ContextWithRunID(ctx, opts.RunID)
+		if err := SetSavedRunID(opts.Name, opts.ProjectPath, opts.RunID); err != nil {
+			slog.Warn("Start: failed to record the run ID in agent-info.json; a delete for this run may leave the agent's files behind",
+				"agent", opts.Name, "run_id", opts.RunID, "error", err)
+		}
+	} else {
+		slog.Warn("Start: could not list existing runtime entries; leaving the recorded owner of the agent's files unchanged until the create succeeds",
+			"agent", opts.Name, "run_id", opts.RunID, "error", listErr)
 	}
 
 	// If resuming, verify the agent exists before proceeding. Probe both
@@ -2250,6 +2260,12 @@ authDone:
 	}
 	slog.Info("agent start: runtime.Run complete", "agent", opts.Name,
 		"total_elapsed_ms", time.Since(startEntry).Milliseconds())
+	if recordAfterCreate {
+		if err := SetSavedRunID(opts.Name, opts.ProjectPath, runID); err != nil {
+			slog.Warn("Start: failed to record the run ID in agent-info.json; a delete for this run may leave the agent's files behind",
+				"agent", opts.Name, "run_id", runID, "error", err)
+		}
+	}
 
 	// Phase is always "running" here, for both a fresh start and a resume:
 	// state.Phase has no "resumed" value, and a non-standard phase string
