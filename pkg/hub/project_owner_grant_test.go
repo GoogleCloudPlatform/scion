@@ -195,14 +195,14 @@ func TestOwnerGrantCoverageCheck(t *testing.T) {
 // "if !s.authorizeProjectOwnerGrant(w, ctx) { return }" must come before every
 // createProjectWithOwner call, in a block that encloses that call.
 func TestOwnerGrantCheckPrecedesOwnerWrite(t *testing.T) {
-	_, files := parseHubProduction(t)
+	fset, files := parseHubProduction(t)
 	for _, fn := range []string{"Server.createProject", "Server.handleProjectRegister", "Server.handleProjectClone"} {
 		decl := findHubFuncDecl(files, fn)
 		require.NotNil(t, decl, fn)
 		guards, writes := ownerGrantGuardsAndWrites(decl)
 		require.NotEmpty(t, writes, "%s calls createProjectWithOwner", fn)
 		for _, w := range writes {
-			assert.True(t, ownerGrantGuarded(guards, w), "%s: createProjectWithOwner at offset %d is not preceded by an enclosing authorizeProjectOwnerGrant guard", fn, w)
+			assert.True(t, ownerGrantGuarded(guards, w), "%s: createProjectWithOwner at %s is not preceded by an enclosing authorizeProjectOwnerGrant guard", fn, fset.Position(w))
 		}
 	}
 }

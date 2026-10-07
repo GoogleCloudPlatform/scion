@@ -153,7 +153,7 @@ func TestRoleBindingSummaryIsJSON(t *testing.T) {
 		PrincipalID:      "user\x01\"quoted\"\\",
 		RoleDefinitionID: "role\nname\x7f\tend",
 		ScopeType:        store.RoleScopeProject,
-		ScopeID:          "scope- -id",
+		ScopeID:          "scope-\u2028-id",
 	}
 	summary := roleBindingSummary(b)
 	require.True(t, json.Valid([]byte(summary)), summary)
