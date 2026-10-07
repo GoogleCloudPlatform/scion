@@ -752,9 +752,10 @@ export class ScionAgentTreeView extends LitElement {
   }
 
   /**
-   * Brings one agent into view: expands any collapsed ancestors so its node is laid out, centers
-   * the viewport on it at the zoom that renders its name at about 16px (see {@link jumpScale}) and
-   * highlights it briefly. Keyboard focus is left alone (see {@link focusAgentNode}).
+   * Brings one agent into view: expands any collapsed ancestors so its node
+   * is laid out, centers the viewport on it at the zoom that renders its
+   * name at about 16px (see {@link jumpScale}) and highlights it briefly.
+   * Keyboard focus is left alone (see {@link focusAgentNode}).
    *
    * The centering waits for the canvas to have a size, for a short while
    * only, and the highlight starts once the node is centered.
