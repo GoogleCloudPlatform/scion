@@ -112,6 +112,8 @@ type CompositeStore struct {
 	*RoleStore
 	*DelegationEdgeStore
 	*DelegationAdoptionStore
+	*AgentHoldStore
+	*MembershipLossCheckStore
 	*AgentCredentialStore
 	*AgentIdentityKeyStore
 	*DecisionAuditStore
@@ -198,7 +200,10 @@ func (c *CompositeStore) WithTx(ctx context.Context, fn func(tx store.Store) err
 func newTxCompositeStore(tx *ent.Tx) *CompositeStore {
 	txStore := NewCompositeStore(tx.Client())
 	txStore.inTx = true
+	txStore.AgentStore.inTx = true
 	txStore.AccessConstraintStore.inTx = true
+	txStore.MembershipLossCheckStore.inTx = true
+	txStore.AgentHoldStore.inTx = true
 	return txStore
 }
 
@@ -234,6 +239,8 @@ func NewCompositeStore(client *ent.Client) *CompositeStore {
 		RoleStore:                  NewRoleStore(client),
 		DelegationEdgeStore:        NewDelegationEdgeStore(client),
 		DelegationAdoptionStore:    NewDelegationAdoptionStore(client),
+		AgentHoldStore:             NewAgentHoldStore(client),
+		MembershipLossCheckStore:   NewMembershipLossCheckStore(client),
 		AgentCredentialStore:       NewAgentCredentialStore(client),
 		AgentIdentityKeyStore:      NewAgentIdentityKeyStore(client),
 		DecisionAuditStore:         NewDecisionAuditStore(client),

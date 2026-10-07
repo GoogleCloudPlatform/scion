@@ -68,4 +68,4 @@ substitutions:
 options:
   dynamicSubstitutions: true
   machineType: 'E2_HIGHCPU_8'
-timeout: 1800s # 30 minutes - much faster since core-base is pre-built
+timeout: 3600s # 1 hour - scion-base build measured ~40m (build 14e5e1c1)

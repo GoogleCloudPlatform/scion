@@ -33,7 +33,7 @@ import (
 
 func testHarnessConfigFileServer(t *testing.T) (*Server, store.Store, *contentMockStorage) {
 	t.Helper()
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		if strings.Contains(err.Error(), "sqlite driver not registered") {
 			t.Skip("Skipping: sqlite driver not registered")
