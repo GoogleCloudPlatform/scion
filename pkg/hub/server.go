@@ -1412,6 +1412,20 @@ type Server struct {
 	commandBus             CommandBus              // Inter-node dispatch signal bus (nil-safe; nil = no-op)
 	notificationDispatcher *NotificationDispatcher // Notification dispatcher for agent status events
 	lifecycleHookEvaluator *LifecycleHookEvaluator // Lifecycle hook evaluator for agent phase transitions
+
+	// delegationAdoptionCommitHook, when set, runs after authorization and
+	// before the delegation-adoption commit transaction. Tests use it to
+	// change state between the admin check and the commit.
+	delegationAdoptionCommitHook func()
+	// delegationAdoptionHopHook, when set, runs before each hop of a
+	// delegation-adoption commit inside the transaction; an error fails the
+	// commit. Tests use it to inject a write failure.
+	delegationAdoptionHopHook func(i int) error
+	// delegationAdoptionInitiatorKindHook, when set, replaces the mapping
+	// from a request's identity and credential kind to the recorded
+	// initiator credential kind in the delegation-adoption admin gate.
+	// Tests use it to check the request credential kind on its own.
+	delegationAdoptionInitiatorKindHook func(identity Identity, kind CredentialKind) string
 	// reconcile op executors (seams): default to executeDispatch/deliverMessage;
 	// Phase 3/4 supply the real local-tunnel ops; tests override for exactly-once.
 	execDispatch     func(ctx context.Context, d store.BrokerDispatch) (string, error)
@@ -5935,6 +5949,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/admin/experiments", s.guarded("/api/v1/admin/experiments", s.handleAdminExperiments))
 	s.mux.HandleFunc("/api/v1/admin/conduit/grant-keys/rotate", s.guarded("/api/v1/admin/conduit/grant-keys/rotate", s.handleAdminConduitGrantKeyRotate))
 	s.mux.HandleFunc("/api/v1/admin/agents/reset-auth-all", s.guarded("/api/v1/admin/agents/reset-auth-all", s.handleAdminResetAuthAll))
+	s.mux.HandleFunc("/api/v1/admin/delegation-adoption", s.guarded("/api/v1/admin/delegation-adoption", s.handleDelegationAdoption))
+	s.mux.HandleFunc("/api/v1/admin/delegation-adoption/previews", s.guarded("/api/v1/admin/delegation-adoption/previews", s.handleDelegationAdoptionPreviews))
+	s.mux.HandleFunc("/api/v1/admin/delegation-adoption/commits", s.guarded("/api/v1/admin/delegation-adoption/commits", s.handleDelegationAdoptionCommits))
 	s.mux.HandleFunc("/api/v1/admin/gcp-quota", s.guarded("/api/v1/admin/gcp-quota", s.handleAdminGCPQuota))
 	s.mux.HandleFunc("/api/v1/admin/lifecycle-hooks", s.guarded("/api/v1/admin/lifecycle-hooks", s.handleAdminLifecycleHooks))
 	s.mux.HandleFunc("/api/v1/admin/lifecycle-hooks/", s.guarded("/api/v1/admin/lifecycle-hooks/", s.handleAdminLifecycleHookByID))
