@@ -111,7 +111,11 @@ In Hub mode, `start` waits for the agent to reach `running` when the Hub
 launches it asynchronously, after a workspace upload, or with `--attach`.
 Otherwise (for example when the Hub does not launch asynchronously) it returns
 as soon as the Hub answers, as before, possibly while the agent is still
-provisioning. While waiting, each launch step is printed to stderr (nothing
+provisioning. A synchronous launch runs on the Hub independently of the CLI
+request: if the CLI gives up or you press Ctrl-C mid-dispatch, the Hub keeps
+going instead of rolling the agent back. Each dispatch attempt is bounded at
+120 seconds, so a slow cold start (for example on Kubernetes) can still fail on
+a synchronous launch; enable [asynchronous agent create](/scion/reference/server-config/#asynchronous-agent-create) for those. While waiting, each launch step is printed to stderr (nothing
 extra under `--format json`). If the wait times out, or you press Ctrl-C, only
 the wait stops: the launch continues on the Hub, and re-running
 `scion start <agent-name>` resumes waiting. Ctrl-C exits with status 130 and
@@ -291,7 +295,7 @@ Sends a message to a running agent or user.
     - `--at <time>`: *(Deprecated — use `scion schedule create --at` instead.)* Schedule message delivery at an absolute time.
 
 - **Group sends and exit codes:**
-  A `group[...]` send reports each recipient's outcome: `delivered`, `deferred` (saved while the agent reincarnates), `failed` (with the reason), or `unknown` (no definite answer, for example a timeout, a gateway error, or the Hub reporting delivery as `ambiguous`, so the message may have been delivered). When not every recipient was reached, the output lists the delivered and failed recipients and a recipient argument naming only the failed ones: the bare recipient (for example `agent:b`) when one failed, or `group[...]` when several did, since `group[...]` needs at least two recipients. With `--format json` the output is an object:
+  A `group[...]` send delivers to at most six recipients at a time, and reports each recipient's outcome: `delivered`, `deferred` (saved while the agent reincarnates), `failed` (with the reason), or `unknown` (no definite answer, for example a timeout, a gateway error, or the Hub reporting delivery as `ambiguous`, so the message may have been delivered). When not every recipient was reached, the output lists the delivered and failed recipients and a recipient argument naming only the failed ones: the bare recipient (for example `agent:b`) when one failed, or `group[...]` when several did, since `group[...]` needs at least two recipients. With `--format json` the output is an object:
   ```json
   {
     "group_id": "…",
@@ -356,6 +360,8 @@ Sends a message to all running agents in the current project (or across all proj
 **Usage:** `scion broadcast <message> [flags]`
 
 This command replaces the removed `--broadcast` / `--all` flags on `scion message`.
+
+Like a group send, a broadcast (including `--all`) sends to at most six agents at a time.
 
 ### `scion keys`
 
@@ -902,10 +908,11 @@ Manages connection to and interaction with a Scion Hub. Authentication lives und
 
 Publishes files as artifacts and fetches them by reference (`scion://artifact/<id>[@<seq>]`). Requires Hub mode and the `hub.artifacts` experiment (off by default). Available in agent mode. See [Artifacts](/scion/reference/artifacts/) for access rules and the API.
 
-- `scion artifact publish <file>`: Publish one file as a new artifact in the current project; prints its reference and web page URL.
-    - Flags: `--title <title>` (default: the file name).
-- `scion artifact get <ref>`: Write an artifact's entry file to stdout.
-    - Flags: `--out`, `-o <path>` (write to a file, or into an existing directory under the file's name).
+- `scion artifact publish <file|folder>`: Publish a file or folder in the current project; prints its reference, version and web page URL.
+    - Flags: `--title <title>` (set when the artifact is created; default: the entry file's name), `--key <key>` (publishing again under the key adds a version), `--note <text>`, `--entry <path>` (a folder's entry file).
+- `scion artifact get <ref>`: Write an artifact's entry file to stdout, or with `--out` the file or the whole bundle.
+    - Flags: `--out`, `-o <path>` (a file, an existing directory for a single file, or the directory a bundle is written into), `--force` (replace files that already exist under `--out`).
+- `scion artifact versions <ref>`: List an artifact's versions, newest first; the current one is marked `*`.
 
 ## Notification Management
 

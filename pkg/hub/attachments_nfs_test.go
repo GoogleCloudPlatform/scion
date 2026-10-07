@@ -147,7 +147,7 @@ func TestIngestAgentAttachments_NFSBackend_RefusedNoLeak(t *testing.T) {
 	require.NoError(t, os.Symlink(outside.dir, filepath.Join(leaf, "escape")))
 
 	before := outside.snapshot(t)
-	refs := srv.ingestAgentAttachments(context.Background(), project.ID, "agent-1", []string{
+	refs, _ := srv.ingestAgentAttachments(context.Background(), project.ID, "agent-1", []string{
 		"/scion-volumes/" + attachmentSharedDirName + "/escape/secret.txt",
 	})
 	assert.Empty(t, refs, "NFS-backed attachment ingest must be refused outright")

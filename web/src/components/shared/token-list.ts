@@ -237,7 +237,7 @@ const FALLBACK_SCOPES: ScopeOption[] = [
   {
     value: 'artifact:update',
     label: 'artifact:update',
-    description: 'Publish new versions of artifacts',
+    description: 'Edit artifact metadata (title, key, expiry)',
     resource: 'artifact',
     isAlias: false,
   },

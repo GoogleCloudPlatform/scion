@@ -26,10 +26,10 @@
  * merges into the feed's row for that agent: it never strips the full-only
  * fields a row holds (from a single-agent read), and it is authoritative
  * for its endpoint's compact keys. The compact view omits empty values, so
- * a compact key the row lacks (a cleared activity or labels) is deleted
- * from the feed's row. `_messageability` is a compact key of the hub list
- * only. The feed is the store's own, so compact rows never reach the global
- * `stateManager`.
+ * a compact key the row lacks (a cleared activity, detail message or
+ * labels) is deleted from the feed's row. `_messageability` is a compact
+ * key of the hub list only. The feed is the store's own, so compact rows
+ * never reach the global `stateManager`.
  *
  * Live updates come from a store-owned feed: a dedicated {@link StateManager}
  * on the `agent-feed` scope, which subscribes to `project.*.agent.>`. Its
@@ -289,6 +289,24 @@ export function agentQueryKey(q: AgentQuery): string {
   return params.length > 0 ? `${base}?${params.join('&')}` : base;
 }
 
+/** Id indexes by row array; held only as long as the rows are. */
+const agentIndexes = new WeakMap<
+  readonly Agent[],
+  { key: string; version: number; byId: ReadonlyMap<string, Agent> }
+>();
+
+/**
+ * The rows of `snapshot` by id, memoised on its key and version: lookups
+ * between two publishes of a list share one index.
+ */
+export function agentIndexOf(snapshot: AgentListSnapshot): ReadonlyMap<string, Agent> {
+  const held = agentIndexes.get(snapshot.agents);
+  if (held && held.key === snapshot.key && held.version === snapshot.version) return held.byId;
+  const byId = new Map(snapshot.agents.map((a) => [a.id, a]));
+  agentIndexes.set(snapshot.agents, { key: snapshot.key, version: snapshot.version, byId });
+  return byId;
+}
+
 /** Probes cover the lists SSE adds to: the whole hub and unfiltered projects. */
 function isProbeable(q: AgentQuery): boolean {
   if (q.label?.trim()) return false;
@@ -400,6 +418,7 @@ export const PROJECT_COMPACT_KEYS: ReadonlySet<string> = new Set([
   'phase',
   'activity',
   'containerStatus',
+  'message',
   'messageMode',
   'ancestry',
   'createdBy',
@@ -426,12 +445,19 @@ function compactKeysOf(q: AgentQuery): ReadonlySet<string> {
  * agent. The row is authoritative for its endpoint's compact keys: the
  * compact view omits empty values, so a compact key the row lacks was
  * cleared and is deleted. Every other field `held` has (the full fields of
- * a single-agent read) is kept.
+ * a single-agent read) is kept, except the detail message a status event
+ * nested under `detail`: readers prefer it to `message`, so it is dropped
+ * and the row's `message` stands alone.
  */
 function mergeCompactRow(held: Agent | undefined, row: Agent, keys: ReadonlySet<string>): Agent {
   if (!held) return row;
   const merged = { ...held, ...row } as Record<string, unknown>;
   for (const key of keys) if (!(key in row)) delete merged[key];
+  if (keys.has('message') && held.detail && 'message' in held.detail) {
+    const detail = { ...held.detail };
+    delete detail.message;
+    merged.detail = detail;
+  }
   return merged as unknown as Agent;
 }
 
@@ -652,6 +678,19 @@ export class AgentStore {
         // A walk already fetching while the feed is down may miss changes
         // that land before the feed is back: walk once more after it.
         if (entry.walk.phase === 'fetching' && !feed.isConnected) entry.followUp = true;
+        // A caller joining a walk that has published pages hears them now,
+        // not only from the walk's next page on.
+        const joined = entry.snapshot;
+        if (onProgress && joined.status === 'loading' && joined.agents.length > 0) {
+          queueMicrotask(() => {
+            if (!entry.waiters.has(waiter) || entry.snapshot !== joined) return;
+            try {
+              onProgress(joined);
+            } catch (err) {
+              console.error('[agent-store] progress callback failed:', err);
+            }
+          });
+        }
         return;
       }
       this.startWalk(entry);

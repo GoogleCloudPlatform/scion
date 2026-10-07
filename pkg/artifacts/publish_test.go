@@ -130,6 +130,7 @@ func TestPublishRejects(t *testing.T) {
 		{"no name", &agentA, "/api/v1/artifacts", []byte("x"), nil, 400},
 		{"path in name", &agentA, "/api/v1/artifacts?name=dir/a.txt", []byte("x"), nil, 400},
 		{"dotdot name", &agentA, "/api/v1/artifacts?name=..", []byte("x"), nil, 400},
+		{"dot name", &agentA, "/api/v1/artifacts?name=.env", []byte("x"), nil, 400},
 		{"backslash name", &agentA, "/api/v1/artifacts?name=a%5Cb", []byte("x"), nil, 400},
 		{"long title", &agentA, "/api/v1/artifacts?name=a.txt&title=" + strings.Repeat("t", 513), []byte("x"), nil, 400},
 		{"bad digest header", &agentA, "/api/v1/artifacts?name=a.txt", []byte("x"), map[string]string{HeaderContentSHA256: "abc"}, 400},
@@ -270,5 +271,89 @@ func TestBackendProvider(t *testing.T) {
 	svc.ServeHTTP(rec, withPrincipal(httptest.NewRequest(http.MethodPost, "/api/v1/artifacts?name=p.txt", strings.NewReader("p")), agentA))
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Errorf("empty provider: %d, want 503", rec.Code)
+	}
+}
+
+// explainingHost is a fakeHost that reports a missing credential scope.
+type explainingHost struct {
+	*fakeHost
+	scope string
+	calls int
+	// forbid fails the test on any call: set while exercising paths that
+	// must never reach the explainer.
+	forbid *testing.T
+}
+
+func (h *explainingHost) MissingScope(_ context.Context, permission string) string {
+	h.calls++
+	if h.forbid != nil {
+		h.forbid.Errorf("MissingScope(%q) called on a path that must not consult it", permission)
+	}
+	if permission != PermissionCreate {
+		return ""
+	}
+	return h.scope
+}
+
+func TestPublishMissingScope(t *testing.T) {
+	f := newFixture(t, false)
+	host := &explainingHost{fakeHost: f.host, scope: "project:artifact:read"}
+	f.svc.host = host
+	existing := f.publish(agentA, "a.txt", []byte("x"), "")
+
+	// A caller the host does not serve, whose credential lacks a scope,
+	// gets a 403 naming it rather than a 401.
+	rec := f.do(nil, http.MethodPost, "/api/v1/artifacts?name=b.txt", []byte("x"), nil)
+	if rec.Code != http.StatusForbidden || errCode(t, rec) != CodeMissingScope {
+		t.Fatalf("unserved caller: %d %s", rec.Code, rec.Body.String())
+	}
+	const wantBody = `{"error":{"code":"missing_scope","message":"the credential does not carry the project:artifact:read scope needed to publish artifacts","details":{"scope":"project:artifact:read"}}}` + "\n"
+	if rec.Body.String() != wantBody {
+		t.Errorf("body:\n got %q\nwant %q", rec.Body.String(), wantBody)
+	}
+	// The JSON manifest create answers the same way.
+	rec = f.do(nil, http.MethodPost, "/api/v1/artifacts", []byte(`{"entry":"a","files":[{"path":"a","size":1,"sha256":"`+sha([]byte("a"))+`"}]}`), nil)
+	if rec.Code != http.StatusForbidden || rec.Body.String() != wantBody {
+		t.Errorf("JSON create, unserved caller: %d %q", rec.Code, rec.Body.String())
+	}
+
+	// A served caller whose credential does not permit publishing gets the
+	// same answer.
+	host.scope = "project:artifact:write"
+	f.host.deny(agentB, "project-1", PermissionCreate)
+	rec = f.do(&agentB, http.MethodPost, "/api/v1/artifacts?name=b.txt", []byte("x"), nil)
+	if rec.Code != http.StatusForbidden || errCode(t, rec) != CodeMissingScope ||
+		!strings.Contains(rec.Body.String(), "project:artifact:write") {
+		t.Errorf("served caller without the scope: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// Without a missing scope the answers are unchanged.
+	host.scope = ""
+	if rec := f.do(nil, http.MethodPost, "/api/v1/artifacts?name=b.txt", []byte("x"), nil); rec.Code != http.StatusUnauthorized {
+		t.Errorf("unauthenticated: %d, want 401", rec.Code)
+	}
+	if rec := f.do(&agentB, http.MethodPost, "/api/v1/artifacts?name=b.txt", []byte("x"), nil); rec.Code != http.StatusForbidden || errCode(t, rec) != "forbidden" {
+		t.Errorf("credential refused for another reason: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// Reads never consult the explainer and keep their uniform 404: the
+	// spy fails the test on any call.
+	host.scope, host.calls, host.forbid = "project:artifact:read", 0, t
+	id := existing.Artifact.ID
+	for _, p := range []string{"/api/v1/artifacts/" + id, "/api/v1/artifacts/" + id + "/files/a.txt", "/api/v1/artifacts/" + id + "/versions/1/files/a.txt"} {
+		if rec := f.do(nil, http.MethodGet, p, nil, nil); rec.Code != http.StatusNotFound {
+			t.Errorf("GET %s: %d, want 404", p, rec.Code)
+		}
+	}
+	// The same holds for a served caller whose credential does not
+	// permit reading.
+	f.host.deny(agentB, "project-1", PermissionRead)
+	for _, p := range []string{"/api/v1/artifacts/" + id, "/api/v1/artifacts/" + id + "/files/a.txt", "/api/v1/artifacts/" + id + "/versions/1/files/a.txt"} {
+		if rec := f.do(&agentB, http.MethodGet, p, nil, nil); rec.Code != http.StatusNotFound {
+			t.Errorf("GET %s as a caller without read: %d, want 404", p, rec.Code)
+		}
+	}
+	if host.calls != 0 {
+		t.Errorf("reads consulted the explainer %d times", host.calls)
 	}
 }

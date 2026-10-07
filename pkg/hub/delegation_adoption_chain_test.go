@@ -460,21 +460,27 @@ func TestAdoptedAgentRuntimeSecretFetch(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "adopt-value")
 }
 
-// The automatic cohort excludes scheduled-dispatch rows because scheduled
-// dispatch writes every child with applied role none (and NoAuth) and an edge
-// of role none. This pins that invariant: if the scheduled-create path ever
-// wrote a real role, the role_none exclusion would not cover it.
+// Scheduled dispatch writes every child with applied role none (and NoAuth)
+// and an edge of role none. A fire runs on the schedule's recorded
+// authorization revision, so the edge carries recorded V1 scheduler
+// provenance and the automatic cohort leaves it as recorded. This pins the
+// role invariant: if the scheduled-create path ever wrote a real role, the
+// child would hold authority its schedule never granted. Legacy unrecorded
+// scheduled rows are excluded as role_none
+// (TestPlanExcludesRoleNoneScheduledRows).
 func TestScheduledDispatchChildEdgeHasRoleNone(t *testing.T) {
 	srv, s, user, project := setupAgentRoleTest(t)
 	ctx := context.Background()
-	require.NoError(t, srv.dispatchAgentEventHandler()(ctx, store.ScheduledEvent{
-		ID:        tid("scheduled-dispatch-edge-role"),
-		ProjectID: project.ID,
-		EventType: "dispatch_agent",
-		Payload:   `{"agentName":"scheduled-edge-child","task":"scheduled work"}`,
-		CreatedBy: user.ID,
-		FireAt:    time.Now(),
-	}))
+	evt := withSessionRevision(store.ScheduledEvent{
+		ID:         tid("scheduled-dispatch-edge-role"),
+		ProjectID:  project.ID,
+		EventType:  "dispatch_agent",
+		Payload:    `{"agentName":"scheduled-edge-child","task":"scheduled work"}`,
+		CreatedBy:  user.ID,
+		ScheduleID: tid("scheduled-dispatch-edge-role-schedule"),
+		FireAt:     time.Now(),
+	}, user.ID)
+	require.NoError(t, srv.dispatchAgentEventHandler()(ctx, evt))
 	child, err := s.GetAgentBySlug(ctx, project.ID, "scheduled-edge-child")
 	require.NoError(t, err)
 	require.NotNil(t, child.AppliedConfig)
@@ -484,12 +490,13 @@ func TestScheduledDispatchChildEdgeHasRoleNone(t *testing.T) {
 	edges := activeEdgesFor(t, s, child.ID)
 	require.Len(t, edges, 1)
 	assert.Equal(t, string(AgentRoleNone), edges[0].Role)
-	assert.Equal(t, 0, edges[0].ProvenanceVersion)
+	assertSchedulerProvenance(t, evt, edges[0], store.DelegationPrincipalUser, user.ID)
+	assert.Equal(t, store.EffectCeiling{Kind: store.EffectCeilingPrincipal}, edges[0].EffectCeiling)
 
 	plan, err := delegationadoption.Build(ctx, s, delegationadoption.Scope{AgentIDs: []string{child.ID}})
 	require.NoError(t, err)
 	h := plan.Hop(child.ID)
 	require.NotNil(t, h)
-	assert.Equal(t, delegationadoption.OutcomeExcluded, h.Outcome)
-	assert.Equal(t, delegationadoption.ReasonRoleNone, h.Reason)
+	assert.Equal(t, delegationadoption.OutcomeRecorded, h.Outcome)
+	assert.Empty(t, h.Reason)
 }
