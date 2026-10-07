@@ -504,14 +504,24 @@ clicks Next up to `--page-changes` times (default 3; fewer when the view has
 fewer pages) and times each change from the click until the pager shows the
 next page, idle, with its `rowsOnPage` rendered and a different first item
 (`pageChanges`: `toPageIndex`, `ok`, `ms`, `rows`). `pageChangesStopReason`
-says why a run timed fewer changes (`completed`, `no-next-page`,
-`next-disabled`, `pager-busy`, `timed-out`, `no-pager`, `not-populated`)
-and `pageChangesStopPager` records the pager at that point. The scenario
-summary adds `paged`, `pageSize`, `pageCount`, `pageChangeAttemptCount`,
-`pageChangeSuccessCount`, `pageChangeFailureCount` and median/min/max/
-stddev of `pageChangeMs` over completed changes of populated runs; the
-report top level adds `pageChangesPerRun`. Every other field keeps its
-meaning. Before this, these two scenarios waited for one card per agent,
+says how the run's walk ended: `completed` (all requested changes timed),
+`none-requested` (`--page-changes 0`), `no-next-page` (the last page was
+reached), `next-unavailable-before-last-page` (Next disabled although the
+pager's own total says more pages exist: the walk ended early, a product
+behaviour), `next-disabled`, `pager-busy`, `timed-out`, `no-pager` or
+`not-populated`; `pageChangesStopPager` records the pager at that point.
+The scenario summary adds `paged`, `pageSize`, `pageCount`,
+`pageChangeAttemptCount`, `pageChangeSuccessCount`,
+`pageChangeFailureCount`, `pageWalkEarlyStopCount` (runs that ended with
+`next-unavailable-before-last-page`; the console paged line prints it) and
+median/min/max/stddev of `pageChangeMs` over completed changes of
+populated runs; the report top level adds `pageChangesPerRun`. The network
+fields (`networkStatus`, `networkFailed`, `networkObservedAtMs`) still
+describe the first load only: the watch is detached before any page
+change. For grid and list, `expectedCount`, `populated` and
+`navToPopulatedMs` now refer to the first page; every other field keeps
+its meaning. A seed with no agents renders the empty state and counts as
+populated at once, as before. Before this, these two scenarios waited for one card per agent,
 which a paged view never renders above one page, so at 100 and 500 agents
 they always ended `loaded-not-rendered`.
 
@@ -535,7 +545,8 @@ count (near-zero at 25 agents, up to ~733ms at 500 for
 
 The burst scenario below likewise waits only for the grid's first page,
 and picks its target agents from the cards on that page (an agent on
-another page has no badge to observe).
+another page has no badge to observe), so `--burst-count` is effectively
+capped at the number of non-suspended cards on that first page.
 
 It then runs the SSE burst-update scenario `--burst-runs` times (default:
 same as `--runs`; pass `--burst-only` to skip the four view scenarios above

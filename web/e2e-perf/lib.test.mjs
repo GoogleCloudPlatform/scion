@@ -516,6 +516,8 @@ test('expectedFirstPageCount: one full page, or every agent when fewer', () => {
   // Unknown total falls back to the seeded count.
   assert.equal(expectedFirstPageCount(25, 100, null), 25);
   assert.equal(expectedFirstPageCount(25, 7, undefined), 7);
+  // No agents: nothing to render.
+  assert.equal(expectedFirstPageCount(25, 0, 0), 0);
 });
 
 test('expectedFirstPageCount: no pager (no page size) expects every agent', () => {
@@ -583,4 +585,43 @@ test('summarizePageChanges: a single page, no pager, or mixed page sizes', () =>
   ]);
   assert.deepEqual(mixed.pageSize, [25, 50]);
   assert.deepEqual(mixed.pageCount, [4, 2]);
+});
+
+test('summarizePageChanges: counts walks that stopped before the last page', () => {
+  const results = [
+    {
+      outcome: 'populated',
+      pageSize: 25,
+      pageCount: 4,
+      pageChangesStopReason: 'completed',
+      pageChanges: [
+        { toPageIndex: 1, ok: true, ms: 100 },
+        { toPageIndex: 2, ok: true, ms: 100 },
+        { toPageIndex: 3, ok: true, ms: 100 },
+      ],
+    },
+    {
+      outcome: 'populated',
+      pageSize: 25,
+      pageCount: 4,
+      pageChangesStopReason: 'next-unavailable-before-last-page',
+      pageChanges: [
+        { toPageIndex: 1, ok: true, ms: 100 },
+        { toPageIndex: 2, ok: true, ms: 100 },
+      ],
+    },
+    // A legitimately short view ends with no-next-page and is not counted.
+    {
+      outcome: 'populated',
+      pageSize: 25,
+      pageCount: 1,
+      pageChangesStopReason: 'no-next-page',
+      pageChanges: [],
+    },
+  ];
+  const s = summarizePageChanges(results);
+  assert.equal(s.pageWalkEarlyStopCount, 1);
+  assert.equal(s.pageChangeAttemptCount, 5);
+  assert.equal(s.pageChangeFailureCount, 0);
+  assert.equal(summarizePageChanges([]).pageWalkEarlyStopCount, 0);
 });

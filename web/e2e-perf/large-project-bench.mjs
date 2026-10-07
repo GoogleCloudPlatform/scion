@@ -474,6 +474,11 @@ async function waitForFirstPage(page, selector, agentCount, timeoutMs) {
     if (count >= 1 && count >= expected && !(pager && pager.loading)) {
       return { ...last, timedOut: false };
     }
+    // A seed with no agents renders the empty state, not a pager: populated
+    // at once, as the pre-paging wait for a count of 0 was.
+    if (agentCount === 0 && expected === 0 && !pager) {
+      return { ...last, timedOut: false };
+    }
     await page.waitForTimeout(100);
   }
   return { ...last, timedOut: true };
@@ -503,7 +508,14 @@ async function measurePageChanges(page, selector, maxChanges, timeoutMs) {
       break;
     }
     if (!before.hasNext) {
-      stopReason = 'no-next-page';
+      // Next is disabled. On the last page that is the normal end of the
+      // view; before it (the pager's own total says more pages exist) the
+      // walk ended early, which is a product behaviour worth surfacing.
+      const knownPages = pageCountFor(before.pageSize, before.total > 0 ? before.total : null);
+      stopReason =
+        knownPages != null && before.pageIndex + 1 < knownPages
+          ? 'next-unavailable-before-last-page'
+          : 'no-next-page';
       break;
     }
     const beforeKey = await firstItemKeyDeep(page, selector);
@@ -740,6 +752,11 @@ async function runOneScenarioAttempt(page, scenario, expectedCount, runIndex, co
     graphInteraction = await performGraphInteraction(page);
   }
 
+  // Stop watching the load-bearing request before any page change: Next
+  // fetches hit the same endpoint and would otherwise overwrite the first
+  // load's networkStatus, networkFailed and networkObservedAtMs.
+  netWatch.detach();
+
   // Paged views: the page size and page count as the pager reports them,
   // and the Next-click latency for a few pages.
   let pagedFields = {};
@@ -757,14 +774,14 @@ async function runOneScenarioAttempt(page, scenario, expectedCount, runIndex, co
       pageCount: pageCountFor(pageSize, pageTotal),
       pageChanges: measured.changes,
       // Why the run timed fewer than pageChangesPerRun changes, if it did:
-      // completed, no-next-page (fewer pages than requested), next-disabled,
-      // pager-busy, timed-out, no-pager or not-populated.
+      // completed, none-requested (--page-changes 0), no-next-page (the
+      // last page was reached), next-unavailable-before-last-page (Next
+      // disabled although the pager's total says more pages exist),
+      // next-disabled, pager-busy, timed-out, no-pager or not-populated.
       pageChangesStopReason: measured.stopReason,
       pageChangesStopPager: measured.stopPager,
     };
   }
-
-  netWatch.detach();
 
   return {
     run: runIndex,
@@ -1328,6 +1345,7 @@ async function main() {
           console.log(
             `  paged: page size ${JSON.stringify(s.pageSize)}, pages ${JSON.stringify(s.pageCount)}; ` +
               `page changes ${s.pageChangeSuccessCount}/${s.pageChangeAttemptCount} completed, ` +
+              `${s.pageWalkEarlyStopCount} walk(s) stopped before the last page, ` +
               `median ${s.medianPageChangeMs}ms [${s.minPageChangeMs}, ${s.maxPageChangeMs}]`
           );
         }

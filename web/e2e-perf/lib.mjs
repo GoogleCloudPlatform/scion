@@ -215,6 +215,12 @@ export function summarizePageChanges(results) {
     }
   }
   const mm = minMax(changes);
+  // Runs whose walk ended with Next disabled before the last page the
+  // pager's total implies: a product-side early stop, counted on its own so
+  // it is not hidden behind an all-completed change count.
+  const earlyStops = results.filter(
+    (r) => r.pageChangesStopReason === 'next-unavailable-before-last-page'
+  ).length;
   const sizes = [...new Set(results.map((r) => r.pageSize).filter((n) => n != null))];
   const counts = [...new Set(results.map((r) => r.pageCount).filter((n) => n != null))];
   return {
@@ -223,6 +229,7 @@ export function summarizePageChanges(results) {
     pageChangeAttemptCount: attempted,
     pageChangeSuccessCount: changes.length,
     pageChangeFailureCount: attempted - changes.length,
+    pageWalkEarlyStopCount: earlyStops,
     medianPageChangeMs: median(changes),
     minPageChangeMs: mm.min,
     maxPageChangeMs: mm.max,
