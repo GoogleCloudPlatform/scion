@@ -247,25 +247,27 @@ func TestCloudRunRunScoped_MissingInstanceNotFound(t *testing.T) {
 	}
 }
 
-// A refusal that is not a change (FAILED_PRECONDITION while the etag is
-// still the one sent, e.g. a state precondition) is returned after one
-// call, not retried as a change.
+// A refusal that is not a change (FAILED_PRECONDITION or ABORTED while
+// the etag is still the one sent, e.g. a state precondition) is returned
+// after one call, not retried as a change.
 func TestCloudRunRunScoped_UnchangedEtagRefusalNotRetried(t *testing.T) {
-	for _, op := range crOps {
-		t.Run(op.name, func(t *testing.T) {
-			s := newStatefulInstances()
-			s.put(crName, "run-a")
-			s.failWrite = status.Error(codes.FailedPrecondition, "instance is not in a state to do that")
-			rt := newStatefulCloudRunRuntime(t, s)
+	for _, code := range []codes.Code{codes.FailedPrecondition, codes.Aborted} {
+		for _, op := range crOps {
+			t.Run(code.String()+"/"+op.name, func(t *testing.T) {
+				s := newStatefulInstances()
+				s.put(crName, "run-a")
+				s.failWrite = status.Error(code, "refused")
+				rt := newStatefulCloudRunRuntime(t, s)
 
-			err := op.call(rt, RunRef{ID: crInstanceID, RunID: "run-a"})
-			if status.Code(errors.Unwrap(err)) != codes.FailedPrecondition {
-				t.Fatalf("%s = %v, want the FAILED_PRECONDITION refusal", op.name, err)
-			}
-			if n := op.writes(s); n != 1 {
-				t.Errorf("%sInstance called %d times, want 1", op.name, n)
-			}
-		})
+				err := op.call(rt, RunRef{ID: crInstanceID, RunID: "run-a"})
+				if status.Code(errors.Unwrap(err)) != code {
+					t.Fatalf("%s = %v, want the %s refusal", op.name, err, code)
+				}
+				if n := op.writes(s); n != 1 {
+					t.Errorf("%sInstance called %d times, want 1", op.name, n)
+				}
+			})
+		}
 	}
 }
 

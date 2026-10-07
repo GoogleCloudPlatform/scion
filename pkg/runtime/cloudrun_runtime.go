@@ -812,7 +812,7 @@ func (r *CloudRunRuntime) instanceOp(ctx context.Context, ref RunRef, verb strin
 			if code := status.Code(err); code == codes.Aborted || code == codes.FailedPrecondition {
 				// The instance may have changed after the read: re-read
 				// and re-check.
-				runtimeLog.Info("Cloud Run instance changed before a run-checked call; re-checking",
+				runtimeLog.Info("Cloud Run refused a run-checked call; re-checking",
 					"instance", name, "verb", verb, "run_id", ref.RunID, "attempt", attempt+1, "error", err)
 				lastErr = err
 				continue
@@ -824,7 +824,7 @@ func (r *CloudRunRuntime) instanceOp(ctx context.Context, ref RunRef, verb strin
 		}
 		return nil
 	}
-	return fmt.Errorf("failed to %s instance: it kept changing during %d run-checked attempts: %w", verb, cloudRunRunCheckAttempts, lastErr)
+	return fmt.Errorf("failed to %s instance: refused in each of %d run-checked attempts: %w", verb, cloudRunRunCheckAttempts, lastErr)
 }
 
 func (r *CloudRunRuntime) List(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
