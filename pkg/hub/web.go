@@ -2904,14 +2904,12 @@ func sessionString(session *sessions.Session, key string) string {
 // nor https:, so without it the browser blocks the load and the preview
 // shows a broken image. blob: is allowed for images only, never for
 // scripts or frames.
-var webContentSecurityPolicy = strings.Join([]string{
-	"default-src 'self'",
-	"script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdn.webawesome.com",
-	"style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdn.webawesome.com https://fonts.googleapis.com",
-	"font-src 'self' https://fonts.gstatic.com https://cdn.jsdelivr.net https://cdn.webawesome.com",
-	"img-src 'self' data: blob: https:",
-	"connect-src 'self' data: ws: wss: http://localhost:* http://127.0.0.1:* https://storage.googleapis.com",
-}, "; ")
+const webContentSecurityPolicy = "default-src 'self'; " +
+	"script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdn.webawesome.com; " +
+	"style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdn.webawesome.com https://fonts.googleapis.com; " +
+	"font-src 'self' https://fonts.gstatic.com https://cdn.jsdelivr.net https://cdn.webawesome.com; " +
+	"img-src 'self' data: blob: https:; " +
+	"connect-src 'self' data: ws: wss: http://localhost:* http://127.0.0.1:* https://storage.googleapis.com"
 
 // securityHeadersMiddleware adds security headers to all responses.
 func (ws *WebServer) securityHeadersMiddleware(next http.Handler) http.Handler {
