@@ -1002,7 +1002,27 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 	// A successful start/stop/restart clears a failed delete marker
 	// (design ptone/scion#2483 §2.1); publish and respond from the stored
 	// row, which a racing delete claim may have kept off newPhase.
-	reloaded := s.settleLifecycleWrite(ctx, agent, newPhase)
+	reloadErr := s.settleLifecycleWrite(ctx, agent, newPhase)
+	reloaded := reloadErr == nil
+	// A start or restart whose row a delete holds by now answers 409
+	// delete_in_progress, as the landed case above does
+	// (ptone/scion#3546): a delete that claimed the row after that re-read
+	// either made the store's delete guard neutralise the final write
+	// above (which then returns nil), or met no further write at all (a
+	// start through startAgentCore wrote its status before the re-read).
+	// The check runs on the row settleLifecycleWrite reloaded, with
+	// deleteWonAfterLanding's rule: a failed delete, or a deleting row
+	// whose lease expired, is a live agent and still answers 200; a row
+	// gone by the reload is a delete that won; any other reload error
+	// answers as before. Nothing is published and no reservation is
+	// re-asserted: the delete engine owns the row, its reservation and the
+	// teardown of the run. A delete that claims the row after this reload
+	// can still answer 200: a start that completed and then a delete is a
+	// valid order.
+	if (action == api.AgentActionStart || action == api.AgentActionRestart) && deleteWonOnRead(agent, reloadErr) {
+		writeDeleteWon(w, id, deletedWhileStartingMessage, dispatchWarns.Warnings())
+		return
+	}
 	// A stopped report about the old container (its own status POST still
 	// in flight, or a heartbeat handled by another replica) can land after
 	// the restart's post-stop re-assert and release the slot during the
