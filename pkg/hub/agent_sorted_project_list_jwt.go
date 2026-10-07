@@ -41,9 +41,7 @@ import (
 // decisions.
 func (s *Server) listProjectAgentsSortedAgentJWT(w http.ResponseWriter, r *http.Request, projectID string, filter store.AgentFilter, p agentListParams) {
 	// ids= narrows the candidate read as one more ANDed filter.
-	if p.ids != nil {
-		filter.IDs = p.ids
-	}
+	narrowFilterByIDs(&filter, p.ids)
 	ctx := r.Context()
 	identity := GetIdentityFromContext(ctx)
 

@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
@@ -36,6 +37,14 @@ import (
 // test can change sort keys mid-walk. It returns every id received, in
 // order, and checks that no page returns an id it did not ask for.
 func frozenWalk(t *testing.T, srv *Server, user *store.User, path func(string) string, dir string, pageSize int, mutate func(page int)) []string {
+	return frozenWalkInjecting(t, srv, user, path, dir, pageSize, nil, mutate)
+}
+
+// frozenWalkInjecting is frozenWalk, additionally naming the inject ids
+// (unreadable or nonexistent agents) in every ids page, so the per-row read
+// pass, not the client's choice of ids, is what keeps them out. The page
+// size is raised by len(inject) so the request stays within its cap.
+func frozenWalkInjecting(t *testing.T, srv *Server, user *store.User, path func(string) string, dir string, pageSize int, inject []string, mutate func(page int)) []string {
 	t.Helper()
 	base := "sort=updated&dir=" + dir + "&limit=" + strconv.Itoa(pageSize)
 
@@ -64,7 +73,9 @@ func frozenWalk(t *testing.T, srv *Server, user *store.User, path func(string) s
 			end = len(order)
 		}
 		want := order[page*pageSize : end]
-		q := base + "&ids=" + url.QueryEscape(strings.Join(want, ","))
+		named := append(append([]string{}, want...), inject...)
+		q := "sort=updated&dir=" + dir + "&limit=" + strconv.Itoa(pageSize+len(inject)) +
+			"&ids=" + url.QueryEscape(strings.Join(named, ","))
 		rec := doRequestAsUser(t, srv, user, http.MethodGet, path(q), nil)
 		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 		resp := mustDecodeListAgentsResponse(t, rec.Body)
@@ -129,7 +140,10 @@ func TestAgentListIDsWalk_FrozenOrderSurvivesSortKeyChanges(t *testing.T) {
 					order := frozenWalk(t, f.srv, f.caller, path, dir, pageSize, nil)
 					require.ElementsMatch(t, f.readable, order)
 
-					got := frozenWalk(t, f.srv, f.caller, path, dir, pageSize, func(page int) {
+					// Every ids page also names an unreadable and a nonexistent
+					// agent: only the per-row read pass keeps them out.
+					inject := []string{unreadable[0], uuid.NewString()}
+					got := frozenWalkInjecting(t, f.srv, f.caller, path, dir, pageSize, inject, func(page int) {
 						if page > 1 {
 							return
 						}
@@ -213,6 +227,63 @@ func TestAgentListIDs_NamesUnreadableOrNonexistent(t *testing.T) {
 		none := get(f.readable[:3], "&phase=running")
 		assert.Empty(t, none.Agents, "%s: phase still applies with ids", name)
 	}
+
+	// On the global endpoint ids= ANDs with id=: only ids named by both
+	// come back, and no overlap matches nothing.
+	both := func(idParams []string, ids []string) []string {
+		q := "sort=updated&limit=5&ids=" + url.QueryEscape(strings.Join(ids, ","))
+		for _, id := range idParams {
+			q += "&id=" + url.QueryEscape(id)
+		}
+		rec := doRequestAsUser(t, f.srv, f.caller, http.MethodGet, f.globalPath(q), nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var out []string
+		for _, a := range mustDecodeListAgentsResponse(t, rec.Body).Agents {
+			out = append(out, a.ID)
+		}
+		return out
+	}
+	assert.ElementsMatch(t, []string{f.readable[1]},
+		both([]string{f.readable[0], f.readable[1]}, []string{f.readable[1], f.readable[2]}),
+		"id= and ids= intersect")
+	assert.Empty(t, both([]string{f.readable[0]}, []string{f.readable[1]}), "no overlap matches nothing")
+}
+
+// TestAgentListIDs_AgentJWT pins ids= on the project agent-JWT path: ids of
+// agents in the token's own project come back, an id of an agent in
+// another project never does.
+func TestAgentListIDs_AgentJWT(t *testing.T) {
+	f := sortedListSetup(t)
+	ctx := context.Background()
+	self := f.createAgent(t, "ids-jwt-self", "running", nil)
+	sibling := f.createAgent(t, "ids-jwt-sibling", "stopped", nil)
+
+	other := &store.Project{
+		ID: tid("ids-jwt-other"), Name: "Other", Slug: "ids-jwt-other",
+		OwnerID: f.owner.ID, CreatedBy: f.owner.ID, Created: time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, f.store.CreateProject(ctx, other))
+	foreign := &store.Agent{
+		ID: tid("ids-jwt-foreign"), Slug: "ids-jwt-foreign", Name: "ids-jwt-foreign",
+		ProjectID: other.ID, Phase: "stopped", CreatedBy: f.owner.ID, OwnerID: f.owner.ID,
+	}
+	require.NoError(t, f.store.CreateAgent(ctx, foreign))
+
+	tok := f.agentJWTFor(t, self.ID)
+	q := "sort=updated&limit=5&ids=" + url.QueryEscape(strings.Join([]string{sibling.ID, foreign.ID, self.ID}, ","))
+	rec := doRequestWithAgentToken(t, f.srv, http.MethodGet, f.listPath(q), nil, tok)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	resp := mustDecodeListAgentsResponse(t, rec.Body)
+	var ids []string
+	for _, a := range resp.Agents {
+		ids = append(ids, a.ID)
+	}
+	assert.ElementsMatch(t, []string{sibling.ID, self.ID}, ids, "own-project ids only")
+	assert.Equal(t, 2, resp.TotalCount)
+
+	rec = doRequestWithAgentToken(t, f.srv, http.MethodGet, f.listPath("sort=updated&limit=5&ids="+foreign.ID), nil, tok)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Empty(t, mustDecodeListAgentsResponse(t, rec.Body).Agents, "a foreign-project id never comes back")
 }
 
 // TestAgentListIDs_Validation pins the 400s: each message is fixed and

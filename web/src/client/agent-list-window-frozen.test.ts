@@ -128,6 +128,11 @@ async function walk(win: AgentListWindow, server: FakeServer, between?: (page: n
   let page = 0;
   while (win.hasNext) {
     await win.next();
+    if (win.pageIndex === page) {
+      // Nothing was left past this page: the walk stays here and ends.
+      expect(win.hasNext).toBe(false);
+      break;
+    }
     page++;
     expect(win.pageIndex).toBe(page);
     seen.push(...win.items.map((a) => a.id));
@@ -230,5 +235,64 @@ describe('AgentListWindow — frozen walk order', () => {
     expect(win.items.map((a) => a.id)).toEqual(['a9', 'a0', 'a1']);
     await win.next();
     expect(server.requests.at(-1)?.ids).toEqual(['a2', 'a3', 'a4']);
+  });
+
+  it('an emptied middle slice: the walk moves on and ends, every surviving agent once', async () => {
+    const server = new FakeServer(ten());
+    const win = setup(server);
+    const seen = await walk(win, server, (page) => {
+      if (page === 0) ['a3', 'a4', 'a5'].forEach((id) => server.remove(id));
+    });
+    expect(seen).toEqual(['a0', 'a1', 'a2', 'a6', 'a7', 'a8', 'a9']);
+    expect(win.hasNext).toBe(false);
+    expect(win.total).toBe(7);
+  });
+
+  it('an emptied last slice: the walk stays on the previous page with no next', async () => {
+    const server = new FakeServer(ten());
+    const win = setup(server);
+    const seen = await walk(win, server, (page) => {
+      if (page === 2) server.remove('a9'); // the only agent of the last slice
+    });
+    expect(seen).toEqual(['a0', 'a1', 'a2', 'a3', 'a4', 'a5', 'a6', 'a7', 'a8']);
+    expect(win.pageIndex).toBe(2);
+    expect(win.hasNext).toBe(false);
+    expect(win.loading).toBe(false);
+    expect(win.items.map((a) => a.id)).toEqual(['a6', 'a7', 'a8']);
+    expect(win.total).toBe(9);
+  });
+
+  it('agents leaving the phase filter mid-walk drop out without stalling the walk', async () => {
+    const server = new FakeServer(ten());
+    const win = setup(server, { phaseFilter: 'running' });
+    const seen = await walk(win, server, (page) => {
+      if (page === 0) {
+        server.agents = server.agents.map((a) =>
+          ['a3', 'a4', 'a5', 'a9'].includes(a.id) ? { ...a, phase: 'stopped' } : a
+        );
+      }
+    });
+    expect(seen).toEqual(['a0', 'a1', 'a2', 'a6', 'a7', 'a8']);
+    expect(win.hasNext).toBe(false);
+  });
+
+  it('invalidateCursors drops the frozen order; refresh then starts a fresh frozen walk', async () => {
+    const server = new FakeServer(ten());
+    const win = setup(server);
+    win.setPaged(
+      server.page({ limit: 3, wantStats: true, signal: new AbortController().signal }),
+      ''
+    );
+    await win.next();
+    win.invalidateCursors();
+    expect(win.hasNext).toBe(false);
+    await win.next(); // a no-op while invalidated
+    expect(server.requests.at(-1)?.ids).toEqual(['a3', 'a4', 'a5']);
+    await win.refresh();
+    expect(win.pageIndex).toBe(0);
+    expect(server.requests.at(-1)?.wantStats).toBe(true);
+    await win.next();
+    expect(server.requests.at(-1)?.ids).toEqual(['a3', 'a4', 'a5']);
+    expect(win.pageIndex).toBe(1);
   });
 });

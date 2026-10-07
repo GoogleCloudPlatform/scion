@@ -33,9 +33,7 @@ func (s *Server) listAgentsSorted(w http.ResponseWriter, r *http.Request, filter
 	ctx := r.Context()
 	// ids= narrows every store read below (stats, fit probe, page) as one
 	// more ANDed filter; the per-row read pass is unchanged.
-	if p.ids != nil {
-		filter.IDs = p.ids
-	}
+	narrowFilterByIDs(&filter, p.ids)
 
 	binding := scopedCursorBinding(sortSuffix("agents", p.sort, p.dir), filter, identity)
 

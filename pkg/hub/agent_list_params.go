@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store/agentsort"
@@ -55,8 +56,9 @@ type agentListParams struct {
 const maxAgentListIDs = 100
 
 // parseAgentListIDs validates the ids= parameter: a comma-separated list
-// of canonical agent UUIDs, at most min(limit, maxAgentListIDs) of them
-// after de-duplication, never together with cursor or fit. It only checks
+// of canonical agent UUIDs, at most min(limit, 100) entries, duplicates
+// included (duplicates are then dropped), never together with cursor or
+// fit. It only checks
 // the format of the request, before any store or authorization call, and
 // its error messages never name an id, so a 400 says nothing about whether
 // any id exists or is readable. An absent or empty ids= returns nil.
@@ -101,6 +103,32 @@ func parseAgentListIDs(query url.Values, limit int) ([]string, string) {
 		ids = append(ids, part)
 	}
 	return ids, ""
+}
+
+// narrowFilterByIDs applies the ids= set to filter as one more ANDed
+// restriction: when filter.IDs is already set (the global endpoint's id=
+// filter), the result is the intersection, which may be a non-nil empty
+// slice that matches nothing; otherwise it is ids itself. ids never widens
+// the filter.
+func narrowFilterByIDs(filter *store.AgentFilter, ids []string) {
+	if ids == nil {
+		return
+	}
+	if filter.IDs == nil {
+		filter.IDs = append([]string{}, ids...)
+		return
+	}
+	existing := make(map[string]struct{}, len(filter.IDs))
+	for _, id := range filter.IDs {
+		existing[id] = struct{}{}
+	}
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if _, ok := existing[id]; ok {
+			out = append(out, id)
+		}
+	}
+	filter.IDs = out
 }
 
 // validateAgentListIDs runs parseAgentListIDs for a list request before any

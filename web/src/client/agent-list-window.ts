@@ -285,6 +285,15 @@ export class AgentListWindow extends EventTarget {
    * an agent whose sort key changes mid-walk.
    */
   private frozenOrder: string[] | null = null;
+  /**
+   * Where each page of the frozen walk starts in `frozenOrder`. Page i+1
+   * starts right after the ids page i asked for, so an id that drops out
+   * of a page (deleted, no longer readable, out of the phase filter) never
+   * shifts a later id onto a page already shown.
+   */
+  private frozenStarts: number[] = [0];
+  /** Ids of the frozen order the server no longer returns (they leave the pager total). */
+  private frozenDead = new Set<string>();
   /** Cleared by `invalidateCursors()`; restored by the next `setPaged()`. */
   private _cursorsValid = true;
   private _loading = false;
@@ -676,6 +685,8 @@ export class AgentListWindow extends EventTarget {
       if (order[i] !== result.agents[i]?.id) return;
     }
     this.frozenOrder = order;
+    this.frozenStarts = [0, result.agents.length];
+    this.frozenDead = new Set();
   }
 
   /**
@@ -881,7 +892,11 @@ export class AgentListWindow extends EventTarget {
     this.notifyChange();
     const pageSize = this.viewState.pageSize;
     const frozen = index > 0 && !wantStats ? this.frozenOrder : null;
-    const frozenIds = frozen ? frozen.slice(index * pageSize, (index + 1) * pageSize) : null;
+    const frozenStart = frozen ? this.frozenStarts[index] : undefined;
+    const frozenIds =
+      frozen && frozenStart !== undefined
+        ? frozen.slice(frozenStart, frozenStart + pageSize)
+        : null;
     try {
       const fetched = await this.fetchPage(
         frozenIds
@@ -896,19 +911,32 @@ export class AgentListWindow extends EventTarget {
       if (gen !== this.generation) return;
       if (this.pageController === controller) this.pageController = null;
       let result = fetched;
-      if (frozen && frozenIds) {
+      if (frozen && frozenIds && frozenStart !== undefined) {
         // Show the page in the frozen order, keeping only the ids asked
-        // for; the total and the next page come from the frozen order.
+        // for. An id the server did not return (deleted, no longer
+        // readable, or out of the phase filter now) just leaves this page;
+        // the next page still starts after every id asked for here.
         const byId = new Map(fetched.agents.map((a) => [a.id, a]));
         const agents = frozenIds.map((id) => byId.get(id)).filter((a): a is Agent => !!a);
-        const hasMore = (index + 1) * pageSize < frozen.length;
-        result = {
-          ...fetched,
-          agents,
-          totalCount: frozen.length,
-          nextCursor: undefined,
-        };
-        this._hasNext = hasMore;
+        for (const id of frozenIds) if (!byId.has(id)) this.frozenDead.add(id);
+        const nextStart = frozenStart + frozenIds.length;
+        const total = frozen.length - this.frozenDead.size;
+        if (agents.length === 0) {
+          if (nextStart < frozen.length) {
+            // The whole slice was gone: this page takes the next slice.
+            this.frozenStarts[index] = nextStart;
+            await this.fetchPageAt(index, false);
+          } else {
+            // Nothing is left past the previous page: stay on it, with no
+            // next page.
+            this._hasNext = false;
+            this._totalCount = total;
+          }
+          return;
+        }
+        this.frozenStarts[index + 1] = nextStart;
+        result = { ...fetched, agents, totalCount: total, nextCursor: undefined };
+        this._hasNext = nextStart < frozen.length;
       }
       if (result.agents.length === 0 && index > 0) {
         // An emptied last page: step back one page.

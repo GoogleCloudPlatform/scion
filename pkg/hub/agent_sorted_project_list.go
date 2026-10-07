@@ -327,9 +327,7 @@ func (s *Server) listProjectAgentsSorted(w http.ResponseWriter, r *http.Request,
 	ctx := r.Context()
 	// ids= narrows the candidate read as one more ANDed filter; the
 	// per-row read pass below is unchanged and still decides every row.
-	if p.ids != nil {
-		filter.IDs = p.ids
-	}
+	narrowFilterByIDs(&filter, p.ids)
 	identity := GetIdentityFromContext(ctx)
 
 	binding := scopedCursorBinding(sortSuffix("project-agents:"+projectID, p.sort, p.dir), filter, identity)
