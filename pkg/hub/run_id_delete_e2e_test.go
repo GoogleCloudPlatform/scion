@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -222,10 +223,13 @@ func TestRunID_E2E_StaleDeleteSparesRecreatedAgent(t *testing.T) {
 	}
 
 	// A late delete for run A (e.g. a retried request still carrying A's
-	// row) must leave B alone: 404 on the broker, which the hub client
-	// treats as an idempotent success.
-	if err := d.DispatchAgentDelete(ctx, agentA, true, true, true, time.Now()); err != nil {
-		t.Fatalf("stale delete for run A: %v", err)
+	// row) must leave B alone: the broker's run-mismatch 404 names run B,
+	// which the hub reports as the refusal, so nothing is finalized for it
+	// (ptone/scion#3080).
+	err := d.DispatchAgentDelete(ctx, agentA, true, true, true, time.Now())
+	var refused *DeleteRunMismatchError
+	if !errors.As(err, &refused) || refused.RequestedRunID != runA || refused.CurrentRunID != runB {
+		t.Fatalf("stale delete for run A: err = %v, want the refusal naming run B", err)
 	}
 	entries, deletes = mgr.snapshot()
 	if len(deletes) != 1 {
