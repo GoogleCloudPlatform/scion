@@ -282,6 +282,13 @@ func (s *Server) userAdmittedToProject(ctx context.Context, user *store.User, pr
 // (duplicate edges, a missing edge above the first link, a deleted link, a
 // cycle, or a chain deeper than standingMaxChainDepth) refuses.
 func (s *Server) resolveStandingRoot(ctx context.Context, agent *store.Agent) (string, error) {
+	return s.resolveChainRoot(ctx, agent, true)
+}
+
+// resolveChainRoot is resolveStandingRoot; with checkChain false it does not
+// refuse a held or deleted agent on the chain (the membership sweep uses it
+// to find the user an agent is rooted at).
+func (s *Server) resolveChainRoot(ctx context.Context, agent *store.Agent, checkChain bool) (string, error) {
 	visited := map[string]bool{}
 	projectID := agent.ProjectID
 	current := agent
@@ -297,7 +304,7 @@ func (s *Server) resolveStandingRoot(ctx context.Context, agent *store.Agent) (s
 			return "", denyStanding(standingReasonChainBroken, agent.ID, "")
 		}
 		visited[current.ID] = true
-		if current.ID != agent.ID {
+		if checkChain && current.ID != agent.ID {
 			if !current.DeletedAt.IsZero() {
 				return "", denyStanding(standingReasonChainDeleted, agent.ID, "")
 			}

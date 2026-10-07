@@ -53,6 +53,19 @@ type ProjectMembershipService struct {
 	authz   *AuthzService
 	logger  *slog.Logger
 	nowFunc func() time.Time
+
+	// onMembershipLoss, when set, is called after a transaction that wrote
+	// a membership loss check commits, so the check is processed right away
+	// (ptone/scion#3433). The hub server sets it; the reconciler processes
+	// the check regardless.
+	onMembershipLoss func()
+}
+
+// notifyMembershipLoss runs the post-commit membership loss callback.
+func (svc *ProjectMembershipService) notifyMembershipLoss() {
+	if svc != nil && svc.onMembershipLoss != nil {
+		svc.onMembershipLoss()
+	}
 }
 
 // NewProjectMembershipService creates a new ProjectMembershipService.
@@ -126,6 +139,10 @@ type MembershipRequest struct {
 
 	// Transfer fields — the target user who will become the new owner.
 	NewOwnerID string
+
+	// LossTrigger names the event recorded on the membership loss check a
+	// remove writes (ptone/scion#3433). Empty means member_remove.
+	LossTrigger store.MembershipLossTrigger
 }
 
 // MembershipDecision captures the governance outcome.
@@ -1221,6 +1238,12 @@ func (svc *ProjectMembershipService) UpdateMemberRole(ctx context.Context, req M
 				return err
 			}
 		}
+		// A role change can end access (for example a role without agent
+		// read): re-evaluate the principal (ptone/scion#3433). A no-op
+		// when access continues.
+		if err := enqueueMembershipLossForPrincipalTx(ctx, tx, existing.PrincipalType, existing.PrincipalID, req.ProjectID, store.MembershipLossTriggerMemberRoleChange, auditActorFromContext(ctx)); err != nil {
+			return err
+		}
 		return svc.createAuditRecord(ctx, tx, &store.MutationAuditRecord{
 			MutationType: "project_member_role_change",
 			TargetType:   "project_membership",
@@ -1248,6 +1271,8 @@ func (svc *ProjectMembershipService) UpdateMemberRole(ctx context.Context, req M
 		}
 		return nil, &MembershipDecision{Allowed: false, DenialCode: "internal_error", Reason: "role change failed: " + txErr.Error(), HTTPStatus: 500}
 	}
+
+	svc.notifyMembershipLoss()
 
 	svc.logger.Info("project member role changed via service",
 		"project_id", req.ProjectID, "old_role", oldRoleDef.Name,
@@ -1377,6 +1402,16 @@ func (svc *ProjectMembershipService) RemoveMember(ctx context.Context, req Membe
 				return err
 			}
 		}
+		// Ask for the removed principal's standing to be re-evaluated
+		// (ptone/scion#3433): a user, or every transitive member user of a
+		// group principal.
+		lossTrigger := req.LossTrigger
+		if lossTrigger == "" {
+			lossTrigger = store.MembershipLossTriggerMemberRemove
+		}
+		if err := enqueueMembershipLossForPrincipalTx(ctx, tx, binding.PrincipalType, binding.PrincipalID, req.ProjectID, lossTrigger, auditActorFromContext(ctx)); err != nil {
+			return err
+		}
 		return svc.createAuditRecord(ctx, tx, &store.MutationAuditRecord{
 			MutationType: "project_member_remove",
 			TargetType:   "project_membership",
@@ -1400,6 +1435,8 @@ func (svc *ProjectMembershipService) RemoveMember(ctx context.Context, req Membe
 		}
 		return nil, &MembershipDecision{Allowed: false, DenialCode: "internal_error", Reason: txErr.Error(), HTTPStatus: 500}
 	}
+
+	svc.notifyMembershipLoss()
 
 	svc.logger.Info("project member removed via service",
 		"project_id", req.ProjectID, "binding_id", req.BindingID,
@@ -1563,6 +1600,12 @@ func (svc *ProjectMembershipService) TransferOwnership(ctx context.Context, req 
 			return &lastOwnerError{projectID: req.ProjectID}
 		}
 
+		// Re-evaluate the previous owner (ptone/scion#3433); normally a
+		// no-op, since the previous owner stays a member.
+		if err := enqueueMembershipLossTx(ctx, tx, req.Actor.ID(), req.ProjectID, store.MembershipLossTriggerOwnershipTransfer, auditActorFromContext(ctx)); err != nil {
+			return err
+		}
+
 		// Audit record inside the same transaction.
 		return svc.createAuditRecord(ctx, tx, &store.MutationAuditRecord{
 			MutationType: "project_ownership_transfer",
@@ -1588,6 +1631,8 @@ func (svc *ProjectMembershipService) TransferOwnership(ctx context.Context, req 
 		}
 		return nil, &MembershipDecision{Allowed: false, DenialCode: "internal_error", Reason: "ownership transfer failed: " + txErr.Error(), HTTPStatus: 500}
 	}
+
+	svc.notifyMembershipLoss()
 
 	svc.logger.Info("project ownership transferred via service",
 		"project_id", req.ProjectID,

@@ -115,6 +115,11 @@ const (
 	// claims once the runtime shows the start's outcome.
 	LockStartClaimReaper AdvisoryLockKey = 0x5C100024
 
+	// LockMembershipStandingSweep guards the periodic membership standing
+	// scans (binding expiry and the full sweep) that ask the hub to
+	// re-evaluate users whose project access may have ended.
+	LockMembershipStandingSweep AdvisoryLockKey = 0x5C100026
+
 	// LockInlineSecretsMigration guards the one-shot migration of inline
 	// plugin secrets from settings.yaml to the secret backend at boot time.
 	LockInlineSecretsMigration AdvisoryLockKey = 0x5C100011

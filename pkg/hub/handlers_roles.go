@@ -1500,8 +1500,9 @@ func (s *Server) deleteRoleBinding(w http.ResponseWriter, r *http.Request, id st
 		mReq := MembershipRequest{
 			Op:        MembershipOpRemove,
 			ProjectID: binding.ScopeID,
-			Actor:     user,
-			BindingID: id,
+			Actor:       user,
+			BindingID:   id,
+			LossTrigger: store.MembershipLossTriggerAdminBindingDelete,
 		}
 		_, denial := s.membershipService.RemoveMember(ctx, mReq)
 		if denial != nil && !denial.Allowed {

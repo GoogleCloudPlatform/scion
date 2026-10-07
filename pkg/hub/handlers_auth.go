@@ -2278,6 +2278,12 @@ func deleteSuperAdminRoleBinding(ctx context.Context, st store.Store, userID str
 			} else {
 				slog.Info("deleted super-admin binding at login-time demotion",
 					"user_id", userID, "binding_id", b.ID)
+				// The user's system authority ended: re-evaluate the user's
+				// project standing (ptone/scion#3433). Best-effort like the
+				// delete; the full sweep covers a failure.
+				if err := enqueueMembershipLossTx(ctx, st, userID, "", store.MembershipLossTriggerSystemScopeChange, auditActorFromContext(ctx)); err != nil {
+					slog.Warn("deleteSuperAdminBinding: membership standing re-evaluation not enqueued", "user_id", userID, "error", err)
+				}
 			}
 		}
 	}
