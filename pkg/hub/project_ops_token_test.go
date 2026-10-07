@@ -178,6 +178,9 @@ func TestProjectMessagingPolicyPut_OwnerRuleStillApplies(t *testing.T) {
 	projectOpsGrant(t, s, admin, project, store.ProjectRoleAdmin)
 	rec = projectOpsSession(t, srv, admin, http.MethodPut, messagingPolicyPath(project), messagingPolicyBody(t, s, project, store.CrossProjectInboundAny))
 	require.Equal(t, http.StatusForbidden, rec.Code, "project admin session: %s", rec.Body.String())
+	// The project admin lacks project.set_messaging_policy, so this is the
+	// permission check's refusal.
+	permissionRefusal := rec.Body.String()
 
 	super := projectOpsUser(t, s, "pmp-rule-super", true)
 	projectOpsGrant(t, s, super, project, store.ProjectRoleMember)
@@ -189,11 +192,14 @@ func TestProjectMessagingPolicyPut_OwnerRuleStillApplies(t *testing.T) {
 	rec = projectOpsSession(t, srv, super, http.MethodPut, messagingPolicyPath(project), messagingPolicyBody(t, s, project, store.CrossProjectInboundAny))
 	require.Equal(t, http.StatusForbidden, rec.Code, "super-admin session without direct ownership: %s", rec.Body.String())
 	assert.Contains(t, rec.Body.String(), messagingPolicyOwnerRuleMessage)
+	assert.Equal(t, permissionRefusal, rec.Body.String(),
+		"the owner rule's refusal is the same response as the permission check's refusal")
 
 	key := projectOpsMint(t, srv, super, hubBoundary(), "project:set_messaging_policy")
 	rec = doRequestWithToken(t, srv, key, http.MethodPut, messagingPolicyPath(project), messagingPolicyBody(t, s, project, store.CrossProjectInboundAny))
 	require.Equal(t, http.StatusForbidden, rec.Code, "super-admin token without direct ownership: %s", rec.Body.String())
-	assert.Contains(t, rec.Body.String(), messagingPolicyOwnerRuleMessage)
+	assert.Equal(t, permissionRefusal, rec.Body.String(),
+		"the owner rule's refusal of a token is the same response as the permission check's refusal")
 
 	p, err := s.GetProject(context.Background(), project)
 	require.NoError(t, err)
@@ -214,8 +220,9 @@ func setTemplatePath(projectID string) string {
 // marks a project as a template to pass both project.update and
 // project.clone on that project. A token is admitted only when it carries
 // project:update and project:clone and its holder passes both permissions
-// on the project; missing either selector, a boundary for another project,
-// or a holder who cannot pass project.clone on the project is refused.
+// on the project; missing either selector, or a holder who cannot pass
+// project.clone on the project, is refused, and a project-boundary token
+// cannot carry project:clone at all.
 func TestSetTemplate_RequiresUpdateAndCloneOnTheProject(t *testing.T) {
 	srv, s := testServer(t)
 	project := projectOpsProject(t, s, "stp")
@@ -233,12 +240,15 @@ func TestSetTemplate_RequiresUpdateAndCloneOnTheProject(t *testing.T) {
 		rec := doRequestWithToken(t, srv, key, http.MethodPost, setTemplatePath(project), body)
 		require.Equal(t, http.StatusForbidden, rec.Code, "token with %v: %s", scopes, rec.Body.String())
 	}
-	if key, _, err := srv.uatService.CreateTokenWithParams(rs4MintContext(super), CreateTokenParams{
-		UserID: super, Name: "pot-" + tid("other"), Boundary: projectBoundary(other), Scopes: []string{"project:update", "project:clone"},
-	}); err == nil {
-		rec := doRequestWithToken(t, srv, key, http.MethodPost, setTemplatePath(project), body)
-		require.Equal(t, http.StatusForbidden, rec.Code, "token bound to another project: %s", rec.Body.String())
-	}
+	// A project-boundary token carrying project:clone cannot be minted: a
+	// project boundary takes its selectors from the holder's project role,
+	// and no project role holds project.clone. The refusal names the
+	// selector, so a project token never reaches set-template with it.
+	_, _, mintErr := srv.uatService.CreateTokenWithParams(rs4MintContext(super), CreateTokenParams{
+		UserID: super, Name: "pot-" + tid("other"), Boundary: projectBoundary(other), Scopes: []string{"project:clone"},
+	})
+	require.Error(t, mintErr, "a project token with project:clone must not mint")
+	require.Contains(t, mintErr.Error(), `selector "project:clone" denied`)
 	p, err := s.GetProject(context.Background(), project)
 	require.NoError(t, err)
 	require.NotEqual(t, "true", p.Labels[store.LabelTemplate], "refused calls write nothing")
@@ -275,13 +285,21 @@ func TestSetTemplate_RequiresUpdateAndCloneOnTheProject(t *testing.T) {
 // TestTemplateImport_RequiresTemplateCreate requires template discover and
 // import on a project to check template.create, and harness-config discover
 // and import to check harness_config.create: a token carrying agent:create
-// (or the other kind's create selector) is refused, and a token carrying
-// the matching create selector passes authorization.
+// (or the other kind's create selector) is refused, a token carrying the
+// matching create selector passes authorization, and the matching selector
+// on a token bound to another project, a non-member's hub token and a
+// non-member session are refused.
 func TestTemplateImport_RequiresTemplateCreate(t *testing.T) {
 	srv, s := testServer(t)
 	project := projectOpsProject(t, s, "tic")
 	member := projectOpsUser(t, s, "tic-member", false)
 	projectOpsGrant(t, s, member, project, store.ProjectRoleMember)
+	// The member also belongs to a second project, so it can mint a token
+	// bound there; an outsider belongs only to the second project.
+	elsewhere := projectOpsProject(t, s, "tic-elsewhere")
+	projectOpsGrant(t, s, member, elsewhere, store.ProjectRoleMember)
+	outsider := projectOpsUser(t, s, "tic-outsider", false)
+	projectOpsGrant(t, s, outsider, elsewhere, store.ProjectRoleMember)
 
 	cases := []struct {
 		route    string
@@ -308,6 +326,17 @@ func TestTemplateImport_RequiresTemplateCreate(t *testing.T) {
 			}
 			rec := projectOpsSession(t, srv, member, http.MethodPost, path, map[string]interface{}{})
 			requirePassedImportAuthorization(t, rec, "member session")
+
+			// The matching selector does not reach a project outside the
+			// token's boundary or the holder's membership.
+			rec = doRequestWithToken(t, srv, projectOpsMint(t, srv, member, projectBoundary(elsewhere), tc.selector),
+				http.MethodPost, path, map[string]interface{}{})
+			require.Equal(t, http.StatusForbidden, rec.Code, "token bound to another project: %s", rec.Body.String())
+			rec = doRequestWithToken(t, srv, projectOpsMint(t, srv, outsider, hubBoundary(), tc.selector),
+				http.MethodPost, path, map[string]interface{}{})
+			require.Equal(t, http.StatusForbidden, rec.Code, "non-member hub token: %s", rec.Body.String())
+			rec = projectOpsSession(t, srv, outsider, http.MethodPost, path, map[string]interface{}{})
+			require.Equal(t, http.StatusForbidden, rec.Code, "non-member session: %s", rec.Body.String())
 		})
 	}
 }

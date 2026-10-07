@@ -113,7 +113,8 @@ func (s *Server) handlePutProjectMessagingPolicy(w http.ResponseWriter, r *http.
 	// the project (for a token: the project:set_messaging_policy selector
 	// and a boundary covering the project). The owner rule then applies to
 	// every credential: only an active direct project owner or a local
-	// unscoped Hub admin may change the policy.
+	// unscoped Hub admin may change the policy. Both refusals write the
+	// same response.
 	identity := GetIdentityFromContext(ctx)
 	if identity == nil {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Authentication required", nil)
@@ -123,7 +124,7 @@ func (s *Server) handlePutProjectMessagingPolicy(w http.ResponseWriter, r *http.
 		return
 	}
 	if !s.messagingPolicyOwnerRule(ctx, identity, project.ID) {
-		writeError(w, http.StatusForbidden, ErrCodeForbidden, messagingPolicyOwnerRuleMessage, nil)
+		writeForbiddenStructured(w, messagingPolicyOwnerRuleMessage, "project", ActionSetMessagingPolicy)
 		return
 	}
 
