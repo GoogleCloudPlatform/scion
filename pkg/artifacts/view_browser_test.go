@@ -31,6 +31,7 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -98,6 +99,7 @@ document.addEventListener('securitypolicyviolation', (e) => r.violations.push(e.
 </head><body>
 <img id="local" src="img/a.png">
 <img id="remote" src="https://remote.invalid/x.png">
+<img id="hubimg" src="/cookie-check.png">
 <iframe id="nested" src="docs/page.htm"></iframe>
 <object id="obj" data="docs/page.htm"></object>
 <form id="form" action="/submit" method="post"><input name="a" value="b"></form>
@@ -180,6 +182,14 @@ func TestViewSandboxBrowserProbe(t *testing.T) {
 		page := strings.Replace(probeHost, "VIEW_URL", string(viewJSON), 1)
 		_, _ = w.Write([]byte(strings.Replace(page, "SANDBOX", string(sandboxJSON), 1)))
 	})
+	var cookieSeen atomicBool
+	mux.HandleFunc("/cookie-check.png", func(w http.ResponseWriter, r *http.Request) {
+		if c := r.Header.Get("Cookie"); strings.Contains(c, "probe=") {
+			cookieSeen.set()
+		}
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(pngBytes)
+	})
 	mux.HandleFunc("/submit", func(w http.ResponseWriter, r *http.Request) {
 		t.Errorf("the sandboxed form was submitted")
 	})
@@ -243,6 +253,9 @@ func TestViewSandboxBrowserProbe(t *testing.T) {
 			t.Fatalf("result %q: %v", m[1], err)
 		}
 		check(t, r, true)
+		if cookieSeen.get() {
+			t.Errorf("a request from the framed document carried the host page's cookie")
+		}
 	}
 	t.Run("framed as the web UI frames it", func(t *testing.T) { framed(t, "allow-scripts") })
 	// The response's own sandbox keeps the document in an opaque origin
@@ -261,3 +274,8 @@ func TestViewSandboxBrowserProbe(t *testing.T) {
 		check(t, r, false)
 	})
 }
+
+type atomicBool struct{ v atomic.Bool }
+
+func (b *atomicBool) set()      { b.v.Store(true) }
+func (b *atomicBool) get() bool { return b.v.Load() }
