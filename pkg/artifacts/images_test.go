@@ -175,6 +175,52 @@ func TestExtractImageURLsLimit(t *testing.T) {
 	}
 }
 
+// TestExtractImageURLsStatedChecks has one case per check the scan states,
+// each failing when that check is removed.
+func TestExtractImageURLsStatedChecks(t *testing.T) {
+	// The result keeps at most limit URLs, even with limit inline images
+	// and limit reference images.
+	var b strings.Builder
+	for i := 0; i < 4; i++ {
+		fmt.Fprintf(&b, "![a][r%d]\n", i)
+	}
+	for i := 0; i < 4; i++ {
+		fmt.Fprintf(&b, "![a](https://img.example/inline%d.png)\n", i)
+	}
+	for i := 0; i < 4; i++ {
+		fmt.Fprintf(&b, "\n[r%d]: https://img.example/ref%d.png", i, i)
+	}
+	if ex := extractImageURLs(b.String(), 4); len(ex.urls) != 4 || ex.urls[0] != "https://img.example/ref0.png" {
+		t.Errorf("limit 4 with 4 inline and 4 reference images: %v", ex.urls)
+	}
+	for name, tc := range map[string]struct {
+		md    string
+		limit int
+		want  []string
+	}{
+		"markdown inside an img attribute is not read":       {`<img alt="![a](https://img.example/alt.png)" src="https://img.example/src.png">`, 8, []string{"https://img.example/src.png"}},
+		"an img tag over the tag cap is ignored":             {`<img src="https://img.example/a.png" ` + strings.Repeat("x", maxTagBytes) + `>`, 8, nil},
+		"an img tag under the tag cap is read":               {`<img src="https://img.example/a.png" ` + strings.Repeat("x", maxTagBytes-100) + `>`, 8, []string{"https://img.example/a.png"}},
+		"a label over the label cap does not resolve":        {"![a][" + strings.Repeat("l", maxLabelBytes+1) + "]\n\n[" + strings.Repeat("l", maxLabelBytes+1) + "]: https://img.example/a.png", 8, nil},
+		"a label at the label cap resolves":                  {"![a][" + strings.Repeat("l", maxLabelBytes) + "]\n\n[" + strings.Repeat("l", maxLabelBytes) + "]: https://img.example/a.png", 8, []string{"https://img.example/a.png"}},
+		"a definition two line breaks away does not resolve": {"![a][x]\n\n[x]:\n\nhttps://img.example/a.png", 8, nil},
+		"an over-long inline URL takes no candidate slot":    {"![a](https://img.example/" + strings.Repeat("a", maxImageURLBytes) + ".png) ![b](https://img.example/b.png)", 1, []string{"https://img.example/b.png"}},
+		"an over-long definition URL takes no slot":          {"![a][x] ![b](https://img.example/b.png)\n\n[x]: https://img.example/" + strings.Repeat("a", maxImageURLBytes), 1, []string{"https://img.example/b.png"}},
+		"a bang behind nine backslashes is escaped":          {strings.Repeat(`\`, 9) + "![a](https://img.example/a.png)", 8, nil},
+		"a bang behind ten backslashes is not":               {strings.Repeat(`\`, 10) + "![a](https://img.example/a.png)", 8, []string{"https://img.example/a.png"}},
+	} {
+		got := extractImageURLs(tc.md, tc.limit).urls
+		if strings.Join(got, " ") != strings.Join(tc.want, " ") {
+			t.Errorf("%s: got %q, want %q", name, got, tc.want)
+		}
+	}
+	// Once every reference is resolved, the definition pass stops.
+	doc := "![a][x]\n\n[x]: https://img.example/a.png\n" + fill("plain line\n", 1<<20)
+	if ex := extractImageURLs(doc, 8); len(ex.urls) != 1 || float64(ex.steps) > 1.5*float64(len(doc)) {
+		t.Errorf("definition pass after the last reference: %d steps for %d bytes (%v)", ex.steps, len(doc), ex.urls)
+	}
+}
+
 // fill repeats unit up to size bytes.
 func fill(unit string, size int) string {
 	return strings.Repeat(unit, size/len(unit)+1)[:size]
@@ -218,6 +264,10 @@ func costShapes() map[string]string {
 		"definitions one label, one pending": "![never][nope]" + same.String() + "\n" + fill("[same]: https://img.example/x.png\n", w-same.Len()-15),
 		"definitions one label, unusable":    same.String() + "\n" + fill("[same]: ftp://img.example/x.png\n", w-same.Len()-1),
 		"newlines":                           fill("\n", w),
+		"tab-split distinct src":             distinct("<img src=\"h\tt\tt\tp\ts://img.example/%d/"+strings.Repeat("a\t", 900)+"\">", w),
+		"amp-heavy distinct src":             distinct("<img src=\"https://img.example/%d?"+strings.Repeat("&amp;", 380)+"\">", w),
+		"escaped bangs":                      fill(`\![a](https://img.example/a.png)`, w),
+		"long image tags":                    fill("<img src=\"https://img.example/a.png\" "+strings.Repeat("x", maxTagBytes)+">", w),
 	}
 }
 

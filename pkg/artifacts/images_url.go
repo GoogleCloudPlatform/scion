@@ -31,20 +31,28 @@ import "strings"
 //
 // It runs only on the candidates the scan kept, at most once each.
 func normalizeImageURL(raw string, kind int) (string, bool) {
+	var steps int
+	return normalizeCounted(raw, kind, &steps)
+}
+
+// normalizeCounted is normalizeImageURL that adds the bytes it examines to
+// *steps. Each step reads its input once, so the count is a fixed multiple
+// of len(raw) at most.
+func normalizeCounted(raw string, kind int, steps *int) (string, bool) {
 	if len(raw) > maxImageURLBytes {
 		return "", false
 	}
 	var decoded string
 	var ok bool
 	if kind == fromAttribute {
-		decoded, ok = decodeAttributeRefs(raw)
+		decoded, ok = decodeAttributeRefs(raw, steps)
 	} else {
-		decoded, ok = decodeMarkdownRefs(raw)
+		decoded, ok = decodeMarkdownRefs(raw, steps)
 	}
 	if !ok {
 		return "", false
 	}
-	return canonicalHTTPURL(decoded)
+	return canonicalHTTPURL(decoded, steps)
 }
 
 // legacyRefs are the named character references the HTML tokenizer
@@ -79,7 +87,8 @@ func isASCIIAlnum(c byte) bool {
 // not printable ASCII (or tab or line break, which the URL parser removes)
 // refuses the value, as does a named reference with ';' that is not one of
 // asciiRefs: without the full table its value is unknown.
-func decodeAttributeRefs(v string) (string, bool) {
+func decodeAttributeRefs(v string, steps *int) (string, bool) {
+	*steps += len(v)
 	if strings.IndexByte(v, '&') < 0 {
 		return v, true
 	}
@@ -144,7 +153,8 @@ func decodeAttributeRefs(v string) (string, bool) {
 // hold. Only &amp; is decoded; any other reference with ';', and any
 // numeric reference, refuses the destination (renderers differ on them).
 // An '&' that starts no reference stays as written.
-func decodeMarkdownRefs(v string) (string, bool) {
+func decodeMarkdownRefs(v string, steps *int) (string, bool) {
+	*steps += len(v)
 	if strings.IndexByte(v, '&') < 0 {
 		return v, true
 	}
@@ -227,10 +237,19 @@ func hexDigit(c byte) int {
 // canonicalHTTPURL applies the URL parser steps described at
 // normalizeImageURL and checks the result. It returns the URL with a lower
 // case scheme followed by "://".
-func canonicalHTTPURL(v string) (string, bool) {
+func canonicalHTTPURL(v string, steps *int) (string, bool) {
 	v = trimURLSpace(v)
+	*steps += 2 * len(v)
 	if strings.ContainsAny(v, "\t\n\r") {
-		v = strings.NewReplacer("\t", "", "\n", "", "\r", "").Replace(v)
+		// One buffer no longer than v, written once.
+		var b strings.Builder
+		b.Grow(len(v))
+		for i := 0; i < len(v); i++ {
+			if c := v[i]; c != '\t' && c != '\n' && c != '\r' {
+				b.WriteByte(c)
+			}
+		}
+		v = b.String()
 	}
 	var scheme string
 	switch {

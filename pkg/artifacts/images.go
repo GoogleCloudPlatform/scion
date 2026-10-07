@@ -191,14 +191,17 @@ func (s *imageScan) scanInline() {
 	// one is forgotten when a newer one needs its slot.
 	var stack [bracketDepth]bracket
 	top, depth := 0, 0
+	bang := -2 // index of the last unescaped '!'
 	for i := 0; i < len(doc) && !s.full; i++ {
 		s.steps++
 		switch doc[i] {
 		case '\\':
 			i++ // the next byte is escaped
+		case '!':
+			bang = i
 		case '[':
 			top = (top + 1) % bracketDepth
-			stack[top] = bracket{start: i + 1, image: i > 0 && doc[i-1] == '!' && !escapedAt(doc, i-1)}
+			stack[top] = bracket{start: i + 1, image: bang == i-1}
 			depth = min(depth+1, bracketDepth)
 		case ']':
 			if depth == 0 {
@@ -217,16 +220,6 @@ func (s *imageScan) scanInline() {
 			}
 		}
 	}
-}
-
-// escapedAt reports whether doc[i] is preceded by an odd number of
-// backslashes. It looks back at most a few bytes.
-func escapedAt(doc string, i int) bool {
-	n := 0
-	for j := i - 1; j >= 0 && doc[j] == '\\' && n < 8; j-- {
-		n++
-	}
-	return n%2 == 1
 }
 
 // imageAfterAlt handles what follows the ']' at close of an image whose alt
@@ -254,11 +247,12 @@ func (s *imageScan) imageAfterAlt(altStart, close int) {
 }
 
 // label reads a reference label starting at i (just after '[') up to its
-// ']'. It stops at the first '[' or ']' or after maxLabelBytes, so the
-// bytes it reads hold no bracket the outer scan would act on.
+// ']'. It stops at the first '[' or ']', so the bytes it reads hold no
+// bracket the outer scan would act on. The label's length is checked where
+// a use is recorded (addUse).
 func (s *imageScan) label(i int) (string, bool) {
 	doc := s.doc
-	for j := i; j < len(doc) && j-i <= maxLabelBytes; j++ {
+	for j := i; j < len(doc); j++ {
 		s.steps++
 		switch doc[j] {
 		case '\\':
@@ -333,6 +327,7 @@ func (s *imageScan) imgTag(i int) (int, bool) {
 	if j >= len(doc) || doc[j] != '>' {
 		return 0, false
 	}
+	s.steps += j - i // attrValue reads the tag's attributes once more
 	if src, ok := attrValue(doc[i+4:j], "src"); ok {
 		v := trimURLSpace(src)
 		if hasHTTPSchemeLoose(v) && len(v) <= maxImageURLBytes {
@@ -485,15 +480,15 @@ func (s *imageScan) definition(label string, i int) int {
 	if !hasHTTPScheme(doc[i:]) {
 		return s.markDefined(h, idx, label, "")
 	}
+	// An over-long destination is kept here and refused by normalization,
+	// which checks the length first.
 	j := i
-	for j < len(doc) && j-i < maxImageURLBytes && markdownURLByte(doc[j]) {
+	for j < len(doc) && markdownURLByte(doc[j]) {
 		s.steps++
 		j++
 	}
 	raw := doc[i:j]
 	switch {
-	case j-i >= maxImageURLBytes:
-		raw = ""
 	case angle:
 		if j >= len(doc) || doc[j] != '>' {
 			raw = ""
@@ -543,13 +538,15 @@ func (s *imageScan) result() imageExtract {
 	}
 	sort.SliceStable(hits, func(a, b int) bool { return hits[a].pos < hits[b].pos })
 	out := imageExtract{full: s.full, steps: s.steps}
+	// hits holds at most limit inline candidates and limit reference uses;
+	// the loop below keeps at most limit URLs.
 	kept := make(map[string]struct{}, len(hits))
 	for _, h := range hits {
 		if len(out.urls) >= s.limit {
 			out.full = true
 			break
 		}
-		u, ok := normalizeImageURL(h.raw, h.kind)
+		u, ok := normalizeCounted(h.raw, h.kind, &out.steps)
 		if !ok {
 			continue
 		}
