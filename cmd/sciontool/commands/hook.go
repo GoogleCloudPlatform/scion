@@ -260,6 +260,9 @@ var hookOTelErrorHandler = otel.ErrorHandlerFunc(func(err error) {
 // and is best effort: exports are bounded by telemetry.HookExportTimeout and
 // telemetry.HookShutdownTimeout, are not retried, and a failure is logged at
 // debug level only. It never writes to stdout and never fails the hook.
+// When the Hub client is configured it also persists session counts and, on
+// session-end, reports the session summary to the Hub (bounded by
+// sessionMetricsReportTimeout).
 func runHookTelemetry(event *hooks.Event) {
 	cfg := telemetry.LoadConfig()
 	if cfg == nil || !cfg.Enabled {
