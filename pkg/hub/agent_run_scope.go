@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -134,7 +135,62 @@ type agentRunReader interface {
 
 // agentRunScopeMetrics counts run-scope check outcomes.
 type agentRunScopeMetrics interface {
-	RecordAgentRunScope(source, outcome, mode string)
+	RecordAgentRunScope(source, outcome, mode, routeClass string)
+}
+
+// runScopeRequest is what a check knows about the request, for the
+// decision (header) and the log.
+type runScopeRequest struct {
+	// header is the AgentRunIDHeader value ("" when absent).
+	header     string
+	method     string
+	path       string
+	route      string // the matched route pattern ("" when unknown)
+	remoteAddr string
+}
+
+// runScopeRequestFrom describes r. route resolves r's route pattern; it
+// may be nil.
+func runScopeRequestFrom(r *http.Request, route func(*http.Request) string) runScopeRequest {
+	req := runScopeRequest{
+		header:     r.Header.Get(AgentRunIDHeader),
+		method:     r.Method,
+		path:       r.URL.Path,
+		remoteAddr: r.RemoteAddr,
+	}
+	if route != nil {
+		req.route = route(r)
+	}
+	return req
+}
+
+// Route classes, the bounded route label of the run-scope metric.
+const (
+	runScopeRouteTokenRefresh = "token_refresh"
+	runScopeRouteAgentStatus  = "agent_status"
+	runScopeRouteAgent        = "agent"
+	runScopeRouteProject      = "project"
+	runScopeRouteConduit      = "conduit"
+	runScopeRouteOther        = "other"
+)
+
+// runScopeRouteClass maps a request path to a route class.
+func runScopeRouteClass(path string) string {
+	switch {
+	case strings.HasPrefix(path, "/api/v1/agents/"):
+		switch {
+		case strings.HasSuffix(path, "/token/refresh"):
+			return runScopeRouteTokenRefresh
+		case strings.HasSuffix(path, "/status"):
+			return runScopeRouteAgentStatus
+		case strings.HasSuffix(path, "/conduit"):
+			return runScopeRouteConduit
+		}
+		return runScopeRouteAgent
+	case strings.HasPrefix(path, "/api/v1/projects/"):
+		return runScopeRouteProject
+	}
+	return runScopeRouteOther
 }
 
 // agentRunScopeChecker checks the run an agent token was issued for. It
@@ -148,6 +204,10 @@ type agentRunScopeChecker struct {
 	log         *slog.Logger
 	metrics     atomic.Pointer[agentRunScopeMetrics]
 	dedup       *runScopeLogDedup
+	summary     runScopeLogSummary
+	// route resolves a request's route pattern for the log; nil leaves it
+	// empty.
+	route func(*http.Request) string
 }
 
 // newAgentRunScopeChecker returns the checker for setting, or nil when
@@ -178,11 +238,10 @@ type agentTokenCredentialState struct {
 	cred *store.AgentCredential
 }
 
-// check decides a request made with claims. header is the request's
-// AgentRunIDHeader value ("" when absent).
-func (c *agentRunScopeChecker) check(ctx context.Context, claims *AgentTokenClaims, cs agentTokenCredentialState, header, source string) runScopeVerdict {
-	outcome := c.outcome(ctx, claims, cs, header)
-	c.record(ctx, claims, source, outcome)
+// check decides a request made with claims.
+func (c *agentRunScopeChecker) check(ctx context.Context, claims *AgentTokenClaims, cs agentTokenCredentialState, req runScopeRequest, source string) runScopeVerdict {
+	outcome, currentRunID := c.outcome(ctx, claims, cs, req.header)
+	c.record(ctx, claims, source, outcome, currentRunID, req)
 	switch outcome {
 	case runScopeOutcomeBound, runScopeOutcomeUnscoped:
 		return runScopeAllow
@@ -199,52 +258,76 @@ func (c *agentRunScopeChecker) check(ctx context.Context, claims *AgentTokenClai
 	}
 }
 
-// outcome classifies a token. The token's run must be backed by its
-// credential row; a token with a run must name the agent's current run;
-// a token without one is accepted until legacy_until. The header is only
-// compared with the token's run.
-func (c *agentRunScopeChecker) outcome(ctx context.Context, claims *AgentTokenClaims, cs agentTokenCredentialState, header string) string {
+// outcome classifies a token and returns the agent's current run when it
+// was read. The token's run must be backed by its credential row; a token
+// with a run must name the agent's current run; a token without one is
+// accepted until legacy_until. The header can only cause a refusal: with a
+// run it must equal the token's run, without one it must equal the
+// agent's current run.
+func (c *agentRunScopeChecker) outcome(ctx context.Context, claims *AgentTokenClaims, cs agentTokenCredentialState, header string) (outcome, currentRunID string) {
 	runID := claims.RunID
 	switch {
 	case !cs.evaluated || cs.cred == nil:
 		// No credential row backs the token's run.
 		if runID != "" {
-			return runScopeOutcomeUnbound
+			return runScopeOutcomeUnbound, ""
 		}
 	case cs.cred.RunID != runID:
-		return runScopeOutcomeUnbound
+		return runScopeOutcomeUnbound, ""
 	}
 	if runID == "" {
 		if !c.legacyUntil.IsZero() && !c.now().Before(c.legacyUntil) {
-			return runScopeOutcomeLegacyEnded
+			return runScopeOutcomeLegacyEnded, ""
 		}
-		return runScopeOutcomeUnscoped
+		if header == "" {
+			return runScopeOutcomeUnscoped, ""
+		}
+		agent, err := c.agents.GetAgent(ctx, claims.Subject)
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+			return runScopeOutcomeUnscoped, ""
+		case err != nil:
+			c.log.ErrorContext(ctx, "agent token run check: agent lookup failed",
+				"agent_id", claims.Subject, "error", err)
+			return runScopeOutcomeUnavailable, ""
+		case !agent.DeletedAt.IsZero():
+			return runScopeOutcomeUnscoped, ""
+		case agent.RunID != header:
+			return runScopeOutcomeHeader, agent.RunID
+		}
+		return runScopeOutcomeUnscoped, agent.RunID
 	}
 	if header != "" && header != runID {
-		return runScopeOutcomeHeader
+		return runScopeOutcomeHeader, ""
 	}
 	agent, err := c.agents.GetAgent(ctx, claims.Subject)
 	switch {
 	case errors.Is(err, store.ErrNotFound):
-		return runScopeOutcomeAgentGone
+		return runScopeOutcomeAgentGone, ""
 	case err != nil:
 		c.log.ErrorContext(ctx, "agent token run check: agent lookup failed",
 			"agent_id", claims.Subject, "error", err)
-		return runScopeOutcomeUnavailable
+		return runScopeOutcomeUnavailable, ""
 	case !agent.DeletedAt.IsZero():
-		return runScopeOutcomeAgentGone
+		return runScopeOutcomeAgentGone, agent.RunID
 	case agent.RunID != runID:
-		return runScopeOutcomeSuperseded
+		return runScopeOutcomeSuperseded, agent.RunID
 	}
-	return runScopeOutcomeBound
+	return runScopeOutcomeBound, agent.RunID
 }
 
 // record logs and counts an outcome. A token without a run is logged at
-// Info, any other refusable outcome at Warn, each at most once per agent
-// and outcome within the dedup window.
-func (c *agentRunScopeChecker) record(ctx context.Context, claims *AgentTokenClaims, source, outcome string) {
+// Info, any other refusable outcome at Warn, each at most once per agent,
+// token run and outcome within the dedup window; a summary of the counts
+// is logged once a minute. The log carries ids only, never the token or
+// its scopes.
+func (c *agentRunScopeChecker) record(ctx context.Context, claims *AgentTokenClaims, source, outcome, currentRunID string, req runScopeRequest) {
+	routeClass := runScopeRouteConduit
+	if source != runScopeSourceConduit {
+		routeClass = runScopeRouteClass(req.path)
+	}
 	if m := c.metrics.Load(); m != nil {
-		(*m).RecordAgentRunScope(source, outcome, c.mode.String())
+		(*m).RecordAgentRunScope(source, outcome, c.mode.String(), routeClass)
 	}
 	switch outcome {
 	case runScopeOutcomeBound:
@@ -252,10 +335,31 @@ func (c *agentRunScopeChecker) record(ctx context.Context, claims *AgentTokenCla
 	case runScopeOutcomeUnavailable:
 		return // logged where it happened
 	}
-	if !c.dedup.first(claims.Subject+"|"+outcome, c.now()) {
+	now := c.now()
+	c.summary.add(ctx, c.log, c.mode.String(), outcome, now)
+	if !c.dedup.first(claims.Subject+"|"+claims.RunID+"|"+outcome, now) {
 		return
 	}
-	attrs := []any{"agent_id", claims.Subject, "outcome", outcome, "source", source, "mode", c.mode.String()}
+	jtiHash := ""
+	if claims.ID != "" {
+		jtiHash = hashJTI(claims.ID)[:8]
+	}
+	attrs := []any{
+		"agent_id", claims.Subject,
+		"project_id", claims.ProjectID,
+		"outcome", outcome,
+		"source", source,
+		"mode", c.mode.String(),
+		"token_run_id", claims.RunID,
+		"current_run_id", currentRunID,
+		"header_run_id", req.header,
+		"route", req.route,
+		"route_class", routeClass,
+		"path", req.path,
+		"method", req.method,
+		"jti_hash", jtiHash,
+		"remote_addr", req.remoteAddr,
+	}
 	switch outcome {
 	case runScopeOutcomeUnscoped, runScopeOutcomeLegacyEnded:
 		c.log.InfoContext(ctx, "agent_token_run_unscoped", attrs...)
@@ -270,7 +374,7 @@ func (c *agentRunScopeChecker) record(ctx context.Context, claims *AgentTokenCla
 // claims, so admission compares the Hello's launch id with the token's
 // run (enforced: 4401). A token without a run has no binding: the
 // request that opened the session was already decided under legacy_until.
-func (c *agentRunScopeChecker) conduitBinding(ctx context.Context, claims *AgentTokenClaims) *relay.TokenRunBinding {
+func (c *agentRunScopeChecker) conduitBinding(ctx context.Context, claims *AgentTokenClaims, req runScopeRequest) *relay.TokenRunBinding {
 	if claims.RunID == "" {
 		return nil
 	}
@@ -278,7 +382,7 @@ func (c *agentRunScopeChecker) conduitBinding(ctx context.Context, claims *Agent
 		RunID:   claims.RunID,
 		Enforce: c.mode == agentRunScopeEnforce,
 		OnMismatch: func() {
-			c.record(ctx, claims, runScopeSourceConduit, runScopeOutcomeHello)
+			c.record(ctx, claims, runScopeSourceConduit, runScopeOutcomeHello, "", req)
 		},
 	}
 }
@@ -336,8 +440,54 @@ func (d *runScopeLogDedup) first(key string, now time.Time) bool {
 	return true
 }
 
+// runScopeLogSummaryWindow is how often the outcome counts are logged.
+const runScopeLogSummaryWindow = time.Minute
+
+// runScopeLogSummary counts refusable outcomes, including those whose log
+// line the dedup suppressed, and logs the counts once per window. The
+// summary for a window is logged by the first record after it ends.
+type runScopeLogSummary struct {
+	mu     sync.Mutex
+	start  time.Time
+	counts map[string]int
+}
+
+// add counts outcome at now, first logging the previous window's counts
+// if it has ended.
+func (s *runScopeLogSummary) add(ctx context.Context, log *slog.Logger, mode, outcome string, now time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.counts == nil || now.Sub(s.start) >= runScopeLogSummaryWindow {
+		if len(s.counts) > 0 {
+			total := 0
+			for _, n := range s.counts {
+				total += n
+			}
+			attrs := []any{"mode", mode, "window_start", s.start.UTC().Format(time.RFC3339),
+				"window_seconds", int(runScopeLogSummaryWindow / time.Second), "count", total}
+			for _, o := range runScopeSummaryOutcomes {
+				if n := s.counts[o]; n > 0 {
+					attrs = append(attrs, o, n)
+				}
+			}
+			log.InfoContext(ctx, "agent_token_run_scope_summary", attrs...)
+		}
+		s.start = now
+		s.counts = make(map[string]int)
+	}
+	s.counts[outcome]++
+}
+
+// runScopeSummaryOutcomes are the outcomes a summary reports, in order.
+var runScopeSummaryOutcomes = []string{
+	runScopeOutcomeUnscoped, runScopeOutcomeLegacyEnded, runScopeOutcomeUnbound,
+	runScopeOutcomeSuperseded, runScopeOutcomeAgentGone, runScopeOutcomeHeader,
+	runScopeOutcomeHello,
+}
+
 // OTelAgentRunScopeMetrics counts run-scope check outcomes as
-// scion.hub.agent_token.run_scope (attributes source, outcome, mode).
+// scion.hub.agent_token.run_scope (attributes source, outcome, mode,
+// route_class).
 type OTelAgentRunScopeMetrics struct {
 	total metric.Int64Counter
 }
@@ -356,10 +506,11 @@ func NewOTelAgentRunScopeMetrics(mp metric.MeterProvider) (*OTelAgentRunScopeMet
 }
 
 // RecordAgentRunScope implements agentRunScopeMetrics.
-func (m *OTelAgentRunScopeMetrics) RecordAgentRunScope(source, outcome, mode string) {
+func (m *OTelAgentRunScopeMetrics) RecordAgentRunScope(source, outcome, mode, routeClass string) {
 	m.total.Add(context.Background(), 1, metric.WithAttributes(
 		attribute.String("source", source),
 		attribute.String("outcome", outcome),
 		attribute.String("mode", mode),
+		attribute.String("route_class", routeClass),
 	))
 }

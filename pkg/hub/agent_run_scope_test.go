@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -59,36 +60,62 @@ func (f *fakeAgentRunReader) GetAgent(context.Context, string) (*store.Agent, er
 
 // fakeRunScopeMetrics records outcomes.
 type fakeRunScopeMetrics struct {
-	mu   sync.Mutex
-	seen []string
+	mu           sync.Mutex
+	seen         []string
+	routeClasses []string
 }
 
-func (m *fakeRunScopeMetrics) RecordAgentRunScope(source, outcome, mode string) {
+func (m *fakeRunScopeMetrics) RecordAgentRunScope(source, outcome, mode, routeClass string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.seen = append(m.seen, source+"/"+outcome+"/"+mode)
+	m.routeClasses = append(m.routeClasses, routeClass)
 }
 
-// captureHandler records log messages.
+// capturedLog is one log record with its attributes.
+type capturedLog struct {
+	msg   string
+	attrs map[string]any
+}
+
+// captureHandler records log messages and their attributes.
 type captureHandler struct {
 	mu   sync.Mutex
-	msgs []string
+	recs []capturedLog
 }
 
 func (h *captureHandler) Enabled(context.Context, slog.Level) bool { return true }
 func (h *captureHandler) Handle(_ context.Context, r slog.Record) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.msgs = append(h.msgs, r.Message)
+	rec := capturedLog{msg: r.Message, attrs: map[string]any{}}
+	r.Attrs(func(a slog.Attr) bool {
+		rec.attrs[a.Key] = a.Value.Any()
+		return true
+	})
+	h.recs = append(h.recs, rec)
 	return nil
+}
+
+// records returns the captured records named msg.
+func (h *captureHandler) records(msg string) []capturedLog {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	var out []capturedLog
+	for _, r := range h.recs {
+		if r.msg == msg {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 func (h *captureHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
 func (h *captureHandler) WithGroup(string) slog.Handler      { return h }
 
-func (h *captureHandler) messages() []string {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return append([]string(nil), h.msgs...)
+// outcomeName is outcome without the current run.
+func (c *agentRunScopeChecker) outcomeName(ctx context.Context, claims *AgentTokenClaims, cs agentTokenCredentialState, header string) string {
+	o, _ := c.outcome(ctx, claims, cs, header)
+	return o
 }
 
 // testRunScopeChecker builds a checker in mode (enforce included, which
@@ -187,6 +214,8 @@ func TestAgentRunScopeNoBindingBranches(t *testing.T) {
 		cs          agentTokenCredentialState
 		legacyUntil time.Time
 		agentRun    string
+		header      string
+		agentErr    error
 		want        string
 		wantReads   int32
 	}{
@@ -202,17 +231,27 @@ func TestAgentRunScopeNoBindingBranches(t *testing.T) {
 		{name: "no claim without legacy_until", claim: "", cs: cred(""), agentRun: "run-a", want: runScopeOutcomeUnscoped},
 		{name: "no claim after legacy_until", claim: "", cs: cred(""), legacyUntil: past, agentRun: "run-a", want: runScopeOutcomeLegacyEnded},
 		{name: "no claim without a row after legacy_until", claim: "", cs: noRow, legacyUntil: past, agentRun: "run-a", want: runScopeOutcomeLegacyEnded},
+		// No claim with a header: the header is compared with the agent's
+		// current run (one read); it can only refuse.
+		{name: "no claim, header names the current run", claim: "", cs: cred(""), legacyUntil: future, agentRun: "run-a", header: "run-a", want: runScopeOutcomeUnscoped, wantReads: 1},
+		{name: "no claim, header names another run", claim: "", cs: cred(""), legacyUntil: future, agentRun: "run-a", header: "run-b", want: runScopeOutcomeHeader, wantReads: 1},
+		{name: "no claim without a row, header names another run", claim: "", cs: noRow, legacyUntil: future, agentRun: "run-a", header: "run-b", want: runScopeOutcomeHeader, wantReads: 1},
+		{name: "no claim, header, agent gone", claim: "", cs: cred(""), legacyUntil: future, agentErr: store.ErrNotFound, header: "run-b", want: runScopeOutcomeUnscoped, wantReads: 1},
+		{name: "no claim, header, agent read fails", claim: "", cs: cred(""), legacyUntil: future, agentErr: errors.New("store unavailable"), header: "run-b", want: runScopeOutcomeUnavailable, wantReads: 1},
+		{name: "no claim after legacy_until, header", claim: "", cs: cred(""), legacyUntil: past, agentRun: "run-a", header: "run-a", want: runScopeOutcomeLegacyEnded},
+		// With a claim, the header is compared with the claim, before any read.
+		{name: "claim, header names another run", claim: "run-a", cs: cred("run-a"), agentRun: "run-a", header: "run-b", want: runScopeOutcomeHeader},
 		// Bound claims are compared with the agent's current run.
 		{name: "current run", claim: "run-a", cs: cred("run-a"), agentRun: "run-a", want: runScopeOutcomeBound, wantReads: 1},
 		{name: "superseded run", claim: "run-a", cs: cred("run-a"), agentRun: "run-b", want: runScopeOutcomeSuperseded, wantReads: 1},
 		{name: "agent row without a run", claim: "run-a", cs: cred("run-a"), agentRun: "", want: runScopeOutcomeSuperseded, wantReads: 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			reader := &fakeAgentRunReader{agent: &store.Agent{ID: "agent-1", RunID: tc.agentRun}}
+			reader := &fakeAgentRunReader{agent: &store.Agent{ID: "agent-1", RunID: tc.agentRun}, err: tc.agentErr}
 			c := testRunScopeChecker(agentRunScopeObserve, tc.legacyUntil, reader)
 			claims := &AgentTokenClaims{RunID: tc.claim}
 			claims.Subject = "agent-1"
-			assert.Equal(t, tc.want, c.outcome(context.Background(), claims, tc.cs, ""))
+			assert.Equal(t, tc.want, c.outcomeName(context.Background(), claims, tc.cs, tc.header))
 			assert.Equal(t, tc.wantReads, reader.calls.Load(), "agent reads")
 		})
 	}
@@ -221,9 +260,9 @@ func TestAgentRunScopeNoBindingBranches(t *testing.T) {
 		claims := &AgentTokenClaims{RunID: "run-a"}
 		claims.Subject = "agent-1"
 		gone := testRunScopeChecker(agentRunScopeObserve, time.Time{}, &fakeAgentRunReader{err: store.ErrNotFound})
-		assert.Equal(t, runScopeOutcomeAgentGone, gone.outcome(context.Background(), claims, cred("run-a"), ""))
+		assert.Equal(t, runScopeOutcomeAgentGone, gone.outcomeName(context.Background(), claims, cred("run-a"), ""))
 		deleted := testRunScopeChecker(agentRunScopeObserve, time.Time{}, &fakeAgentRunReader{agent: &store.Agent{RunID: "run-a", DeletedAt: time.Now()}})
-		assert.Equal(t, runScopeOutcomeAgentGone, deleted.outcome(context.Background(), claims, cred("run-a"), ""))
+		assert.Equal(t, runScopeOutcomeAgentGone, deleted.outcomeName(context.Background(), claims, cred("run-a"), ""))
 	})
 }
 
@@ -246,10 +285,10 @@ func TestAgentRunScopeVerdicts(t *testing.T) {
 		t.Run(tc.outcome, func(t *testing.T) {
 			claims, cs, reader, header, legacyUntil := runScopeInputsFor(tc.outcome)
 			observe := testRunScopeChecker(agentRunScopeObserve, legacyUntil, reader)
-			require.Equal(t, tc.outcome, observe.outcome(context.Background(), claims, cs, header))
-			assert.Equal(t, runScopeAllow, observe.check(context.Background(), claims, cs, header, runScopeSourceHTTP), "observe")
+			require.Equal(t, tc.outcome, observe.outcomeName(context.Background(), claims, cs, header))
+			assert.Equal(t, runScopeAllow, observe.check(context.Background(), claims, cs, runScopeRequest{header: header}, runScopeSourceHTTP), "observe")
 			assert.Equal(t, tc.enforce, testRunScopeChecker(agentRunScopeEnforce, legacyUntil, reader).
-				check(context.Background(), claims, cs, header, runScopeSourceHTTP), "enforce")
+				check(context.Background(), claims, cs, runScopeRequest{header: header}, runScopeSourceHTTP), "enforce")
 		})
 	}
 }
@@ -477,13 +516,15 @@ func TestAgentRunHeaderDoesNotElevate(t *testing.T) {
 
 	t.Run("checker", func(t *testing.T) {
 		enforce := testRunScopeChecker(agentRunScopeEnforce, time.Now().Add(-time.Hour), reader)
-		assert.Equal(t, runScopeDeny, enforce.check(ctx, claims(""), cred(""), "run-current", runScopeSourceHTTP), "no run after legacy_until")
-		assert.Equal(t, runScopeDeny, enforce.check(ctx, claims("run-old"), cred("run-old"), "run-current", runScopeSourceHTTP), "earlier run")
-		assert.Equal(t, runScopeDeny, enforce.check(ctx, claims("run-current"), cred("run-current"), "run-old", runScopeSourceHTTP), "header differs")
-		assert.Equal(t, runScopeAllow, enforce.check(ctx, claims("run-current"), cred("run-current"), "run-current", runScopeSourceHTTP), "header matches")
+		assert.Equal(t, runScopeDeny, enforce.check(ctx, claims(""), cred(""), runScopeRequest{header: "run-current"}, runScopeSourceHTTP), "no run after legacy_until")
+		assert.Equal(t, runScopeDeny, enforce.check(ctx, claims("run-old"), cred("run-old"), runScopeRequest{header: "run-current"}, runScopeSourceHTTP), "earlier run")
+		assert.Equal(t, runScopeDeny, enforce.check(ctx, claims("run-current"), cred("run-current"), runScopeRequest{header: "run-old"}, runScopeSourceHTTP), "header differs")
+		assert.Equal(t, runScopeAllow, enforce.check(ctx, claims("run-current"), cred("run-current"), runScopeRequest{header: "run-current"}, runScopeSourceHTTP), "header matches")
 
 		lenient := testRunScopeChecker(agentRunScopeEnforce, time.Now().Add(time.Hour), reader)
-		assert.Equal(t, runScopeOutcomeUnscoped, lenient.outcome(ctx, claims(""), cred(""), "run-current"), "a token without a run stays unscoped")
+		assert.Equal(t, runScopeOutcomeUnscoped, lenient.outcomeName(ctx, claims(""), cred(""), "run-current"), "a token without a run stays unscoped")
+		assert.Equal(t, runScopeDeny, lenient.check(ctx, claims(""), cred(""), runScopeRequest{header: "run-old"}, runScopeSourceHTTP), "no run, header names another run")
+		assert.Equal(t, runScopeAllow, lenient.check(ctx, claims(""), cred(""), runScopeRequest{header: "run-current"}, runScopeSourceHTTP), "no run, header names the current run")
 	})
 
 	t.Run("refresh keeps the presented run", func(t *testing.T) {
@@ -573,14 +614,14 @@ func TestConduitTokenRunClose4401(t *testing.T) {
 	t.Run("binding", func(t *testing.T) {
 		c := testRunScopeChecker(agentRunScopeEnforce, time.Time{}, &fakeAgentRunReader{agent: &store.Agent{}})
 		claims := &AgentTokenClaims{RunID: "run-a"}
-		b := c.conduitBinding(context.Background(), claims)
+		b := c.conduitBinding(context.Background(), claims, runScopeRequest{})
 		require.NotNil(t, b)
 		assert.Equal(t, "run-a", b.RunID)
 		assert.True(t, b.Enforce)
-		assert.Nil(t, c.conduitBinding(context.Background(), &AgentTokenClaims{}))
+		assert.Nil(t, c.conduitBinding(context.Background(), &AgentTokenClaims{}, runScopeRequest{}))
 
 		o := testRunScopeChecker(agentRunScopeObserve, time.Time{}, &fakeAgentRunReader{agent: &store.Agent{}})
-		assert.False(t, o.conduitBinding(context.Background(), claims).Enforce)
+		assert.False(t, o.conduitBinding(context.Background(), claims, runScopeRequest{}).Enforce)
 	})
 
 	for _, tc := range []struct {
@@ -619,33 +660,116 @@ func TestConduitTokenRunClose4401(t *testing.T) {
 
 // --- logging -----------------------------------------------------------------
 
-// TestAgentRunScopeLogDedup: each agent and outcome is logged at most once
-// per window, every outcome is counted, and the dedup set stays bounded.
+// TestAgentRunScopeLogDedup: a refusable outcome is logged with the
+// request's ids (never the token or its scopes) at most once per agent,
+// token run and outcome per window; every outcome is counted, with its
+// route class, and the counts are summarised once a minute; the dedup set
+// stays bounded.
 func TestAgentRunScopeLogDedup(t *testing.T) {
-	t.Run("checker", func(t *testing.T) {
+	newChecker := func(t *testing.T) (*agentRunScopeChecker, *captureHandler, *fakeRunScopeMetrics, *time.Time) {
 		logs := &captureHandler{}
 		metrics := &fakeRunScopeMetrics{}
-		reader := &fakeAgentRunReader{agent: &store.Agent{ID: "agent-1", RunID: "run-b"}}
+		reader := &fakeAgentRunReader{agent: &store.Agent{ID: "agent-1", RunID: "run-current"}}
 		c := newAgentRunScopeChecker(AgentRunScope{mode: agentRunScopeObserve}, reader, slog.New(logs))
 		var m agentRunScopeMetrics = metrics
 		c.metrics.Store(&m)
 		now := time.Unix(1_800_000_000, 0)
 		c.now = func() time.Time { return now }
-
-		claims := &AgentTokenClaims{RunID: "run-a"}
+		return c, logs, metrics, &now
+	}
+	tokenFor := func(run string) (*AgentTokenClaims, agentTokenCredentialState) {
+		claims := &AgentTokenClaims{RunID: run, ProjectID: "project-1",
+			Scopes: []AgentTokenScope{ScopeAgentStatusUpdate}}
 		claims.Subject = "agent-1"
-		cs := agentTokenCredentialState{evaluated: true, cred: &store.AgentCredential{RunID: "run-a"}}
-		check := func() { c.check(context.Background(), claims, cs, "", runScopeSourceHTTP) }
+		claims.ID = "jti-" + run
+		return claims, agentTokenCredentialState{evaluated: true, cred: &store.AgentCredential{RunID: run}}
+	}
+	req := runScopeRequest{header: "", method: http.MethodPost, path: "/api/v1/agents/agent-1/status",
+		route: "/api/v1/agents/", remoteAddr: "192.0.2.10:4000"}
 
-		check()
-		now = now.Add(runScopeLogDedupWindow - time.Second)
-		check()
-		assert.Equal(t, []string{"agent_token_run_superseded"}, logs.messages())
-		now = now.Add(time.Second)
-		check()
-		assert.Equal(t, []string{"agent_token_run_superseded", "agent_token_run_superseded"}, logs.messages())
-		assert.Len(t, metrics.seen, 3)
-		assert.Equal(t, "http/superseded/observe", metrics.seen[0])
+	t.Run("fields", func(t *testing.T) {
+		c, logs, metrics, _ := newChecker(t)
+		claims, cs := tokenFor("run-old")
+		c.check(context.Background(), claims, cs, req, runScopeSourceHTTP)
+
+		recs := logs.records("agent_token_run_superseded")
+		require.Len(t, recs, 1)
+		assert.Equal(t, map[string]any{
+			"agent_id":       "agent-1",
+			"project_id":     "project-1",
+			"outcome":        runScopeOutcomeSuperseded,
+			"source":         runScopeSourceHTTP,
+			"mode":           "observe",
+			"token_run_id":   "run-old",
+			"current_run_id": "run-current",
+			"header_run_id":  "",
+			"route":          "/api/v1/agents/",
+			"route_class":    runScopeRouteAgentStatus,
+			"path":           "/api/v1/agents/agent-1/status",
+			"method":         http.MethodPost,
+			"jti_hash":       hashJTI("jti-run-old")[:8],
+			"remote_addr":    "192.0.2.10:4000",
+		}, recs[0].attrs)
+		for _, v := range recs[0].attrs {
+			assert.NotContains(t, fmt.Sprint(v), string(ScopeAgentStatusUpdate), "scopes logged")
+			assert.NotContains(t, fmt.Sprint(v), "jti-run-old", "raw jti logged")
+		}
+		assert.Equal(t, []string{"http/superseded/observe"}, metrics.seen)
+		assert.Equal(t, []string{runScopeRouteAgentStatus}, metrics.routeClasses)
+	})
+
+	t.Run("dedup per token run", func(t *testing.T) {
+		c, logs, metrics, now := newChecker(t)
+		older, olderCS := tokenFor("run-older")
+		old, oldCS := tokenFor("run-old")
+		check := func(claims *AgentTokenClaims, cs agentTokenCredentialState) {
+			c.check(context.Background(), claims, cs, req, runScopeSourceHTTP)
+		}
+		superseded := func() []string {
+			var runs []string
+			for _, r := range logs.records("agent_token_run_superseded") {
+				runs = append(runs, r.attrs["token_run_id"].(string))
+			}
+			return runs
+		}
+
+		check(older, olderCS)
+		check(old, oldCS) // a second run of the same agent is logged too
+		check(old, oldCS)
+		assert.Equal(t, []string{"run-older", "run-old"}, superseded())
+		*now = now.Add(runScopeLogDedupWindow - time.Second)
+		check(old, oldCS)
+		assert.Equal(t, []string{"run-older", "run-old"}, superseded())
+		*now = now.Add(time.Second)
+		check(old, oldCS)
+		assert.Equal(t, []string{"run-older", "run-old", "run-old"}, superseded())
+		assert.Len(t, metrics.seen, 5, "every outcome counted")
+	})
+
+	t.Run("summary per minute", func(t *testing.T) {
+		c, logs, _, now := newChecker(t)
+		old, oldCS := tokenFor("run-old")
+		unscoped, unscopedCS := tokenFor("")
+		for i := 0; i < 3; i++ {
+			c.check(context.Background(), old, oldCS, req, runScopeSourceHTTP)
+		}
+		c.check(context.Background(), unscoped, unscopedCS, req, runScopeSourceHTTP)
+		bound, boundCS := tokenFor("run-current")
+		c.check(context.Background(), bound, boundCS, req, runScopeSourceHTTP) // not counted
+		assert.Empty(t, logs.records("agent_token_run_scope_summary"), "window still open")
+
+		*now = now.Add(runScopeLogSummaryWindow)
+		c.check(context.Background(), old, oldCS, req, runScopeSourceHTTP)
+		recs := logs.records("agent_token_run_scope_summary")
+		require.Len(t, recs, 1)
+		assert.Equal(t, map[string]any{
+			"mode":                    "observe",
+			"window_start":            time.Unix(1_800_000_000, 0).UTC().Format(time.RFC3339),
+			"window_seconds":          int64(60),
+			"count":                   int64(4),
+			runScopeOutcomeSuperseded: int64(3),
+			runScopeOutcomeUnscoped:   int64(1),
+		}, recs[0].attrs)
 	})
 
 	t.Run("bounded", func(t *testing.T) {

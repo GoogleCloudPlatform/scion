@@ -308,7 +308,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 						// Step 1b: the token's run, only when
 						// server.auth.agent_run_scope is not off.
 						if rs := cfg.AgentRunScope; rs != nil {
-							switch rs.check(ctx, claims, credState, r.Header.Get(AgentRunIDHeader), runScopeSourceHTTP) {
+							switch rs.check(ctx, claims, credState, runScopeRequestFrom(r, rs.route), runScopeSourceHTTP) {
 							case runScopeDeny:
 								writeAgentTokenRefused(w)
 								return

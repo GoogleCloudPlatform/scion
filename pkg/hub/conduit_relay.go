@@ -435,7 +435,7 @@ func (s *Server) handleConduit(w http.ResponseWriter, r *http.Request) {
 	}
 	if rs := s.authConfig.AgentRunScope; rs != nil {
 		if claims := GetAgentFromContext(r.Context()); claims != nil {
-			p.TokenRun = rs.conduitBinding(context.WithoutCancel(r.Context()), claims)
+			p.TokenRun = rs.conduitBinding(context.WithoutCancel(r.Context()), claims, runScopeRequestFrom(r, rs.route))
 		}
 	}
 	// The session outlives no request deadline: it ends when the

@@ -2363,7 +2363,11 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 		PlatformAuthSA: srv.platformAuthSA,
 		AgentRunScope:  newAgentRunScopeChecker(cfg.AgentRunScope, s, srv.authLog),
 	}
-	if srv.authConfig.AgentRunScope != nil {
+	if rs := srv.authConfig.AgentRunScope; rs != nil {
+		rs.route = func(r *http.Request) string {
+			_, pattern := srv.mux.Handler(r)
+			return pattern
+		}
 		slog.Info("Agent token run scope enabled", "mode", cfg.AgentRunScope.String())
 	}
 	// Wire the proxy user provisioner (wraps provisionUser with 60s cache)
