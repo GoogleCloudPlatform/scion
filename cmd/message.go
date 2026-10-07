@@ -665,9 +665,10 @@ func sendCrossProjectMessage(hubCtx *HubContext, targetProject, agentSlug, messa
 		}
 		return nil
 	}
+	// No attachment warnings here: the hub rejects attachments on a
+	// cross-project send outright instead of ingesting them.
 	if resp != nil {
 		printMentionResults(resp.MentionResults)
-		printAttachmentWarnings(resp.AttachmentWarnings)
 	}
 	fmt.Printf("Message delivered to agent '%s' in project '%s'.\n", agentSlug, targetProject)
 
@@ -843,21 +844,13 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 		return fmt.Errorf("message validation failed: %w", err)
 	}
 
-	resp, err := agentSvc.SendStructuredMessage(ctx, ref.Value, agentMsg, interrupt, false, wake)
-	if err != nil {
+	// The hub ingests attachments, and so reports attachment warnings,
+	// only for agent senders; this human path has none to print.
+	if _, err := agentSvc.SendStructuredMessage(ctx, ref.Value, agentMsg, interrupt, false, wake); err != nil {
 		return agentMessageSendError(ref.Value, err)
 	}
-	if isJSONOutput() {
-		// Emit the response like the other send paths, so --json carries
-		// any attachment warnings instead of dropping them.
-		if resp != nil {
-			return outputJSON(resp)
-		}
-		return nil
-	}
-	fmt.Printf("Message delivered to agent '%s'.\n", ref.Value)
-	if resp != nil {
-		printAttachmentWarnings(resp.AttachmentWarnings)
+	if !isJSONOutput() {
+		fmt.Printf("Message delivered to agent '%s'.\n", ref.Value)
 	}
 	return nil
 }
@@ -1703,6 +1696,12 @@ func printMentionResults(results []messages.MentionResult) {
 // could not record on a sent message (ptone/scion#3667). The message itself
 // was sent, so this is a warning and the exit status is unchanged. Skipped
 // under --json output, where the warnings are part of the JSON response.
+//
+// The hub ingests attachments only when the sender is an agent: an agent
+// DM to another agent (including each per-recipient send of a CLI group
+// fan-out) and an agent's outbound message. Human sends and cross-project
+// sends never carry warnings. Paths shared by humans and agents still call
+// this; for a human sender the list is simply empty.
 func printAttachmentWarnings(warnings []hubclient.AttachmentWarning) {
 	if isJSONOutput() {
 		return

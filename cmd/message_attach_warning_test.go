@@ -32,6 +32,12 @@ import (
 // ptone/scion#3667: when the hub cannot read a staged attachment it still
 // sends the message, and reports the dropped file in attachment_warnings. The
 // CLI surfaces that to the user instead of reporting a clean send.
+//
+// The hub ingests attachments, and so can report warnings, only when the
+// sender is an agent: an agent DM to an agent (each per-recipient send of
+// a CLI group fan-out is one) and an agent's outbound message. A human
+// sender or a cross-project send never gets warnings, so every test here
+// that expects them runs as an agent sender (SCION_AGENT_NAME set).
 
 const attachWarnPath = "/scion-volumes/scratchpad/.attachments/sender/msg1/shot.png"
 
@@ -41,8 +47,8 @@ var attachWarnBody = []map[string]string{{
 }}
 
 // newAttachWarnHub serves the agent-message and outbound-message endpoints of
-// projectID, answering every send as delivered with one attachment warning.
-// It counts the sends it received.
+// projectID, answering every send as delivered with one attachment warning,
+// as the hub does for an agent sender. It counts the sends it received.
 func newAttachWarnHub(t *testing.T, projectID string) (*httptest.Server, *int32) {
 	t.Helper()
 	var sends int32
@@ -99,6 +105,7 @@ func setAttachWarnState(t *testing.T, format string) {
 
 func TestSendMessageViaHub_AttachmentWarningPrintedToStderr(t *testing.T) {
 	setAttachWarnState(t, "")
+	t.Setenv("SCION_AGENT_NAME", "sender")
 	projectID := "proj-attach-warn-agent"
 	srv, _ := newAttachWarnHub(t, projectID)
 	hubCtx := attachWarnHubCtx(t, srv, projectID)
@@ -114,6 +121,7 @@ func TestSendMessageViaHub_AttachmentWarningPrintedToStderr(t *testing.T) {
 
 func TestSendMessageViaHub_AttachmentWarningInJSON(t *testing.T) {
 	setAttachWarnState(t, "json")
+	t.Setenv("SCION_AGENT_NAME", "sender")
 	projectID := "proj-attach-warn-agent-json"
 	srv, _ := newAttachWarnHub(t, projectID)
 	hubCtx := attachWarnHubCtx(t, srv, projectID)
@@ -163,41 +171,9 @@ func TestSendMessageViaConversation_ConvRef_AttachmentWarningPrintedToStderr(t *
 	assert.Contains(t, stderr, "Warning: attachment "+attachWarnPath+" was not delivered")
 }
 
-// The human (non-agent) @agent path used to discard the response entirely.
-func TestSendMessageViaConversation_HumanAgentRef_AttachmentWarning(t *testing.T) {
-	t.Setenv("SCION_AGENT_NAME", "")
-	projectID := "proj-attach-warn-human"
-	ref := &messaging.Reference{Kind: messaging.RefAgent, Value: "builder", Raw: "@builder"}
-
-	t.Run("text", func(t *testing.T) {
-		setAttachWarnState(t, "")
-		srv, _ := newAttachWarnHub(t, projectID)
-		hubCtx := attachWarnHubCtx(t, srv, projectID)
-		var sendErr error
-		_, stderr := captureStdoutStderr(t, func() {
-			sendErr = sendMessageViaConversation(hubCtx, ref, "see attached", false, false, msgAttach)
-		})
-		require.NoError(t, sendErr)
-		assert.Contains(t, stderr, "Warning: attachment "+attachWarnPath+" was not delivered")
-	})
-
-	t.Run("json", func(t *testing.T) {
-		setAttachWarnState(t, "json")
-		srv, _ := newAttachWarnHub(t, projectID)
-		hubCtx := attachWarnHubCtx(t, srv, projectID)
-		var sendErr error
-		stdout, _ := captureStdoutStderr(t, func() {
-			sendErr = sendMessageViaConversation(hubCtx, ref, "see attached", false, false, msgAttach)
-		})
-		require.NoError(t, sendErr)
-		var resp hubclient.MessageResponse
-		require.NoError(t, json.Unmarshal([]byte(stdout), &resp), "stdout: %s", stdout)
-		require.Len(t, resp.AttachmentWarnings, 1)
-	})
-}
-
 func TestSendGroupMessage_AttachmentWarningReportedOnce(t *testing.T) {
 	setAttachWarnState(t, "")
+	t.Setenv("SCION_AGENT_NAME", "sender")
 	projectID := "proj-attach-warn-group"
 	srv, sends := newAttachWarnHub(t, projectID)
 	hubCtx := attachWarnHubCtx(t, srv, projectID)
@@ -218,6 +194,7 @@ func TestSendGroupMessage_AttachmentWarningReportedOnce(t *testing.T) {
 
 func TestSendGroupMessage_AttachmentWarningInJSONResults(t *testing.T) {
 	setAttachWarnState(t, "json")
+	t.Setenv("SCION_AGENT_NAME", "sender")
 	projectID := "proj-attach-warn-group-json"
 	srv, _ := newAttachWarnHub(t, projectID)
 	hubCtx := attachWarnHubCtx(t, srv, projectID)
