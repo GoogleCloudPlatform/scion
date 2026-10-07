@@ -44,6 +44,10 @@ module.exports = {
             parserOptions: { project: './e2e/chat-mobile/tsconfig.json' },
         },
         {
+            files: ['e2e/agent-store-count/*.ts'],
+            parserOptions: { project: './e2e/agent-store-count/tsconfig.json' },
+        },
+        {
             files: ['src/client/terminal-*.test.ts'],
             parserOptions: { project: './src/client/tsconfig.terminal-tests.json' },
         },
@@ -77,6 +81,8 @@ module.exports = {
                 'src/components/shared/header.test.ts',
                 'src/components/shared/group-member-editor-membership.test.ts',
                 'src/components/pages/onboarding.test.ts',
+                'src/components/pages/chat-hub-members.test.ts',
+                'src/components/shared/chat/chat-thread-peer-project.test.ts',
             ],
             parserOptions: { project: './src/components/tsconfig.component-tests.json' },
         },

@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -537,10 +538,11 @@ func WithAutoDevAuth() Option {
 }
 
 // WithAgentToken sets agent token authentication using the X-Scion-Agent-Token header.
-// Use this when authenticating as an agent (not a user) to the Hub API.
+// Use this when authenticating as an agent (not a user) to the Hub API. The
+// agent's run id (SCION_LAUNCH_ID), when set, is sent with it.
 func WithAgentToken(token string) Option {
 	return func(c *client) {
-		c.transport.Auth = &apiclient.AgentTokenAuth{Token: token}
+		c.transport.Auth = &apiclient.AgentTokenAuth{Token: token, RunID: os.Getenv("SCION_LAUNCH_ID")}
 	}
 }
 

@@ -61,12 +61,18 @@ func (a *BrokerTokenAuth) Refresh() (bool, error) { return false, nil }
 // AgentTokenAuth implements Agent token authentication.
 type AgentTokenAuth struct {
 	Token string
+	// RunID is the agent's run id, sent as X-Scion-Run-Id when set.
+	RunID string
 }
 
-// ApplyAuth adds the agent token to the X-Scion-Agent-Token header.
+// ApplyAuth adds the agent token to the X-Scion-Agent-Token header, and
+// the run id to X-Scion-Run-Id.
 func (a *AgentTokenAuth) ApplyAuth(req *http.Request) error {
 	if a.Token != "" {
 		req.Header.Set("X-Scion-Agent-Token", a.Token)
+		if a.RunID != "" {
+			req.Header.Set("X-Scion-Run-Id", a.RunID)
+		}
 	}
 	return nil
 }

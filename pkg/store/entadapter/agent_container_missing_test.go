@@ -706,7 +706,7 @@ func TestAgentStore_MarkAgentContainerMissingIfUnchanged(t *testing.T) {
 		a.LastSeen = time.Now().Add(-time.Hour)
 		require.NoError(t, s.CreateAgent(ctx, a))
 		if runID != "" {
-			_, err := s.SetAgentRunID(ctx, a.ID, runID)
+			_, err := s.SetAgentRunID(ctx, a.ID, runID, nil)
 			require.NoError(t, err)
 		}
 		got, err := s.GetAgent(ctx, a.ID)
@@ -735,7 +735,7 @@ func TestAgentStore_MarkAgentContainerMissingIfUnchanged(t *testing.T) {
 			require.NoError(t, s.UpdateAgent(ctx, &cp))
 		},
 		"run_id moved": func(t *testing.T, a *store.Agent) {
-			_, err := s.SetAgentRunID(ctx, a.ID, "run-2")
+			_, err := s.SetAgentRunID(ctx, a.ID, "run-2", nil)
 			require.NoError(t, err)
 		},
 		"start claim held": func(t *testing.T, a *store.Agent) {

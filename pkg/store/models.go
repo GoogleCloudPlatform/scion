@@ -318,8 +318,10 @@ type AgentAppliedConfig struct {
 	// SharedDirBackendChanges and AllowEmptySharedDir are a reincarnation's
 	// explicit shared dir backend change (`scion reincarnate
 	// --shared-dir-backend`), set on that generation's config only and sent
-	// to the broker on its reprovision. A later reincarnation does not
-	// carry them forward.
+	// to the broker on its reprovision. They are one-shot: the hub drops
+	// them once the broker confirms the change (a stored config can still
+	// hold them after some failures), and neither a later reincarnation nor
+	// a re-render of this config sends them again.
 	SharedDirBackendChanges map[string]string `json:"sharedDirBackendChanges,omitempty"`
 	AllowEmptySharedDir     bool              `json:"allowEmptySharedDir,omitempty"`
 
@@ -2549,6 +2551,12 @@ type ScheduledEvent struct {
 	// read the row from the store; B.3 and E.2b's own tests read the
 	// embedded struct field directly.
 	InitiatorAttribution `json:"-"`
+
+	// AuthorityCeiling is the frozen effect ceiling of the authorization
+	// revision this event runs under, copied from the schedule at
+	// materialization (or recorded at authoring for a one-shot event). The
+	// zero value is unrecorded.
+	AuthorityCeiling EffectCeiling `json:"-"`
 }
 
 // ScheduledEventStatus constants
@@ -2597,6 +2605,12 @@ type Schedule struct {
 	// overwritten by a re-attribution. See the type doc above. json:"-": see
 	// ScheduledEvent's field doc above for why.
 	InitiatorAttribution `json:"-"`
+
+	// AuthorityCeiling is the frozen effect ceiling of the current
+	// authorization revision. It is written together with
+	// InitiatorAttribution and AuthorizationRevision, and never on its own.
+	// The zero value is unrecorded.
+	AuthorityCeiling EffectCeiling `json:"-"`
 }
 
 // ScheduleStatus constants
@@ -3286,6 +3300,13 @@ const (
 	EdgeDeactivationDelegatorDeleted    EdgeDeactivationCause = "delegator_deleted"
 	EdgeDeactivationCreateCompensation  EdgeDeactivationCause = "create_compensation"
 	EdgeDeactivationReincarnateReplaced EdgeDeactivationCause = "reincarnate_replaced"
+	// EdgeDeactivationProvenanceAdopted marks an unrecorded edge replaced by
+	// a recorded edge under a delegation-provenance compatibility policy.
+	// The row is kept as evidence and is what a revert reactivates.
+	EdgeDeactivationProvenanceAdopted EdgeDeactivationCause = "provenance_adopted"
+	// EdgeDeactivationAdoptionReverted marks an adopted edge deactivated by
+	// an adoption revert.
+	EdgeDeactivationAdoptionReverted EdgeDeactivationCause = "adoption_reverted"
 )
 
 // ValidEdgeDeactivationCause reports whether c is a cause that may be
@@ -3314,6 +3335,104 @@ const (
 	DelegationPrincipalUser  = "user"
 	DelegationPrincipalAgent = "agent"
 )
+
+// DelegationEdgeDeactivateGuard is the precondition of a guarded edge
+// deactivation. The row must be active in every case. At most one of
+// Unrecorded and Recorded may be set. The zero guard (neither set, no
+// UpdatedAt) places no condition beyond the row being active, so it
+// deactivates any active edge; callers that replace an edge by provenance
+// set Unrecorded or Recorded, and the store rejects both set together with
+// ErrInvalidInput.
+type DelegationEdgeDeactivateGuard struct {
+	// Unrecorded requires provenance version 0 and an unrecorded ceiling.
+	Unrecorded bool
+	// Recorded requires provenance version 1 and a bounded or principal
+	// ceiling.
+	Recorded bool
+	// UpdatedAt, when non-nil, requires the row's updated time to equal it.
+	UpdatedAt *time.Time
+}
+
+// =============================================================================
+// Delegation-provenance adoption records
+// =============================================================================
+
+// DelegationAdoptionStatus is the outcome recorded for one examined edge.
+type DelegationAdoptionStatus string
+
+const (
+	// DelegationAdoptionPending: in the boot snapshot, not written.
+	DelegationAdoptionPending DelegationAdoptionStatus = "pending"
+	// DelegationAdoptionAdopted: the original edge was replaced by a
+	// recorded edge (AdoptedEdgeID).
+	DelegationAdoptionAdopted DelegationAdoptionStatus = "adopted"
+	// DelegationAdoptionRecognized: the active edge already carries a
+	// migration-recorded bounded ceiling; it is left as is.
+	DelegationAdoptionRecognized DelegationAdoptionStatus = "recognized"
+	// DelegationAdoptionRecognizedAbovePolicy: recognized, and its ceiling
+	// is not a subset of the compatibility policy. Reported only.
+	DelegationAdoptionRecognizedAbovePolicy DelegationAdoptionStatus = "recognized_above_policy"
+	// DelegationAdoptionExcluded: never adopted automatically (Reason).
+	DelegationAdoptionExcluded DelegationAdoptionStatus = "excluded"
+	// DelegationAdoptionSkippedChanged: state changed after the snapshot.
+	DelegationAdoptionSkippedChanged DelegationAdoptionStatus = "skipped_changed"
+	// DelegationAdoptionReverted: the adoption was reverted.
+	DelegationAdoptionReverted DelegationAdoptionStatus = "reverted"
+)
+
+// Delegation adoption origins.
+const (
+	DelegationAdoptionOriginBoot  = "boot_migration"
+	DelegationAdoptionOriginAdmin = "admin_commit"
+)
+
+// DelegationAdoption is one examined edge of a delegation-provenance
+// adoption (boot snapshot or admin commit). It is evidence only and is never
+// read by authorization. Records are retained indefinitely and carry no
+// foreign keys.
+type DelegationAdoption struct {
+	ID                string                   `json:"id"`
+	CohortID          string                   `json:"cohortId"`
+	Origin            string                   `json:"origin"`
+	PolicyVersion     int                      `json:"policyVersion"`
+	OriginalEdgeID    string                   `json:"originalEdgeId,omitempty"`
+	AdoptedEdgeID     string                   `json:"adoptedEdgeId,omitempty"`
+	DelegateID        string                   `json:"delegateId"`
+	DelegatorType     string                   `json:"delegatorType,omitempty"`
+	DelegatorID       string                   `json:"delegatorId,omitempty"`
+	ScopeID           string                   `json:"scopeId,omitempty"`
+	Role              string                   `json:"role,omitempty"`
+	Depth             int                      `json:"depth"`
+	Status            DelegationAdoptionStatus `json:"status"`
+	Reason            string                   `json:"reason,omitempty"`
+	BeforeFingerprint string                   `json:"beforeFingerprint,omitempty"`
+	AfterSummary      string                   `json:"afterSummary,omitempty"`
+	ActorKind         string                   `json:"actorKind,omitempty"`
+	ActorID           string                   `json:"actorId,omitempty"`
+	// RevertedBy* and RevertSummary are set by a revert. Actor* and
+	// AfterSummary keep the adopter and the adopted edge's summary.
+	RevertedByKind string     `json:"revertedByKind,omitempty"`
+	RevertedByID   string     `json:"revertedById,omitempty"`
+	RevertSummary  string     `json:"revertSummary,omitempty"`
+	RevertedAt     *time.Time `json:"revertedAt,omitempty"`
+	CreatedAt      time.Time  `json:"createdAt"`
+	UpdatedAt      time.Time  `json:"updatedAt"`
+}
+
+// DelegationAdoptionFilter selects adoption records. Empty fields do not
+// filter. Limit 0 returns every match.
+type DelegationAdoptionFilter struct {
+	CohortID   string
+	Origin     string
+	Status     DelegationAdoptionStatus
+	Reason     string
+	ScopeID    string
+	DelegateID string
+	// AdoptedEdgeID selects the records that point at one recorded edge.
+	AdoptedEdgeID string
+	Limit         int
+	Offset        int
+}
 
 // =============================================================================
 // Delegation Descendants (read-only walk over delegation edges)
@@ -3527,10 +3646,13 @@ type MembershipLossCheck struct {
 
 // AgentCredential represents a tracked agent JWT token credential.
 type AgentCredential struct {
-	ID           string     `json:"id"`
-	AgentID      string     `json:"agent_id"`
-	ProjectID    string     `json:"project_id"`
-	TokenJTIHash string     `json:"token_jti_hash"`
+	ID           string `json:"id"`
+	AgentID      string `json:"agent_id"`
+	ProjectID    string `json:"project_id"`
+	TokenJTIHash string `json:"token_jti_hash"`
+	// RunID is the agent run the token was issued for; empty for a token
+	// issued without one.
+	RunID        string     `json:"-"`
 	IssuedAt     time.Time  `json:"issued_at"`
 	ExpiresAt    time.Time  `json:"expires_at"`
 	RevokedAt    *time.Time `json:"revoked_at,omitempty"`

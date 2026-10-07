@@ -861,7 +861,7 @@ func TestStartClaimWiring_QueuedStopDrainForAnOlderRun(t *testing.T) {
 	at, err := f.s.SetRunIntent(ctx, a.ID, store.RunIntentStopped)
 	require.NoError(t, err)
 	require.NoError(t, f.s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{ContainerStatus: containerStatusStopQueued, Message: offlineStopMessage}))
-	_, err = f.s.SetAgentRunID(ctx, a.ID, "run-new")
+	_, err = f.s.SetAgentRunID(ctx, a.ID, "run-new", nil)
 	require.NoError(t, err)
 
 	drain := func(runID string) {
@@ -916,7 +916,7 @@ func TestStartClaimWiring_StopReleasesTheClaimAfterItsStatusAndQuota(t *testing.
 	ctx := context.Background()
 	setBrokerAgentCeiling(t, f.s, 5)
 	require.NoError(t, f.s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: string(state.PhaseRunning)}))
-	_, err := f.s.SetAgentRunID(ctx, a.ID, "run-1")
+	_, err := f.s.SetAgentRunID(ctx, a.ID, "run-1", nil)
 	require.NoError(t, err)
 	_, err = f.srv.checkAndReserveBrokerQuota(ctx, getAgent(t, f.s, a.ID))
 	require.NoError(t, err)

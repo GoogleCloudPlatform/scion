@@ -303,6 +303,7 @@ var (
 		{Name: "agent_id", Type: field.TypeString},
 		{Name: "project_id", Type: field.TypeString},
 		{Name: "token_jti_hash", Type: field.TypeString},
+		{Name: "run_id", Type: field.TypeString, Nullable: true, Default: ""},
 		{Name: "issued_at", Type: field.TypeTime},
 		{Name: "expires_at", Type: field.TypeTime},
 		{Name: "revoked_at", Type: field.TypeTime, Nullable: true},
@@ -334,7 +335,7 @@ var (
 			{
 				Name:    "agentcredential_expires_at",
 				Unique:  false,
-				Columns: []*schema.Column{AgentCredentialsColumns[5]},
+				Columns: []*schema.Column{AgentCredentialsColumns[6]},
 			},
 		},
 	}
@@ -936,6 +937,64 @@ var (
 				Name:    "decisionaudit_denied_by",
 				Unique:  false,
 				Columns: []*schema.Column{DecisionAuditsColumns[24]},
+			},
+		},
+	}
+	// DelegationAdoptionsColumns holds the columns for the "delegation_adoptions" table.
+	DelegationAdoptionsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "cohort_id", Type: field.TypeString},
+		{Name: "origin", Type: field.TypeString},
+		{Name: "policy_version", Type: field.TypeInt, Default: 0},
+		{Name: "original_edge_id", Type: field.TypeString, Nullable: true},
+		{Name: "adopted_edge_id", Type: field.TypeString, Nullable: true},
+		{Name: "delegate_id", Type: field.TypeString, Default: ""},
+		{Name: "delegator_type", Type: field.TypeString, Default: ""},
+		{Name: "delegator_id", Type: field.TypeString, Default: ""},
+		{Name: "scope_id", Type: field.TypeString, Default: ""},
+		{Name: "role", Type: field.TypeString, Default: ""},
+		{Name: "depth", Type: field.TypeInt, Default: 0},
+		{Name: "status", Type: field.TypeString},
+		{Name: "reason", Type: field.TypeString, Default: ""},
+		{Name: "before_fingerprint", Type: field.TypeString, Default: ""},
+		{Name: "after_summary", Type: field.TypeString, Default: ""},
+		{Name: "actor_kind", Type: field.TypeString, Default: ""},
+		{Name: "actor_id", Type: field.TypeString, Default: ""},
+		{Name: "reverted_by_kind", Type: field.TypeString, Default: ""},
+		{Name: "reverted_by_id", Type: field.TypeString, Default: ""},
+		{Name: "revert_summary", Type: field.TypeString, Default: ""},
+		{Name: "reverted_at", Type: field.TypeTime, Nullable: true},
+		{Name: "created", Type: field.TypeTime},
+		{Name: "updated", Type: field.TypeTime},
+	}
+	// DelegationAdoptionsTable holds the schema information for the "delegation_adoptions" table.
+	DelegationAdoptionsTable = &schema.Table{
+		Name:       "delegation_adoptions",
+		Columns:    DelegationAdoptionsColumns,
+		PrimaryKey: []*schema.Column{DelegationAdoptionsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "delegationadoption_cohort_id_original_edge_id",
+				Unique:  true,
+				Columns: []*schema.Column{DelegationAdoptionsColumns[1], DelegationAdoptionsColumns[4]},
+			},
+			{
+				Name:    "delegationadoption_adopted_edge_id",
+				Unique:  true,
+				Columns: []*schema.Column{DelegationAdoptionsColumns[5]},
+				Annotation: &entsql.IndexAnnotation{
+					Where: "status = 'adopted'",
+				},
+			},
+			{
+				Name:    "delegationadoption_delegate_id_status",
+				Unique:  false,
+				Columns: []*schema.Column{DelegationAdoptionsColumns[6], DelegationAdoptionsColumns[12]},
+			},
+			{
+				Name:    "delegationadoption_cohort_id_status",
+				Unique:  false,
+				Columns: []*schema.Column{DelegationAdoptionsColumns[1], DelegationAdoptionsColumns[12]},
 			},
 		},
 	}
@@ -2151,6 +2210,12 @@ var (
 		{Name: "initiator_credential_snapshot", Type: field.TypeString, Nullable: true},
 		{Name: "attribution_version", Type: field.TypeInt, Nullable: true},
 		{Name: "authorization_revision", Type: field.TypeInt, Nullable: true},
+		{Name: "authority_ceiling_kind", Type: field.TypeString, Default: ""},
+		{Name: "authority_ceiling_version", Type: field.TypeInt32, Default: 0},
+		{Name: "authority_ceiling_permission_ids", Type: field.TypeString, Nullable: true},
+		{Name: "authority_ceiling_boundary_kind", Type: field.TypeString, Default: ""},
+		{Name: "authority_ceiling_boundary_project_id", Type: field.TypeString, Default: ""},
+		{Name: "authority_ceiling_source_expires_at", Type: field.TypeTime, Nullable: true},
 		{Name: "project_id", Type: field.TypeUUID},
 		{Name: "name", Type: field.TypeString},
 		{Name: "cron_expr", Type: field.TypeString},
@@ -2176,12 +2241,12 @@ var (
 			{
 				Name:    "schedule_project_id_name",
 				Unique:  true,
-				Columns: []*schema.Column{SchedulesColumns[8], SchedulesColumns[9]},
+				Columns: []*schema.Column{SchedulesColumns[14], SchedulesColumns[15]},
 			},
 			{
 				Name:    "schedule_next_run_at",
 				Unique:  false,
-				Columns: []*schema.Column{SchedulesColumns[14]},
+				Columns: []*schema.Column{SchedulesColumns[20]},
 			},
 		},
 	}
@@ -2195,6 +2260,12 @@ var (
 		{Name: "initiator_credential_snapshot", Type: field.TypeString, Nullable: true},
 		{Name: "attribution_version", Type: field.TypeInt, Nullable: true},
 		{Name: "authorization_revision", Type: field.TypeInt, Nullable: true},
+		{Name: "authority_ceiling_kind", Type: field.TypeString, Default: ""},
+		{Name: "authority_ceiling_version", Type: field.TypeInt32, Default: 0},
+		{Name: "authority_ceiling_permission_ids", Type: field.TypeString, Nullable: true},
+		{Name: "authority_ceiling_boundary_kind", Type: field.TypeString, Default: ""},
+		{Name: "authority_ceiling_boundary_project_id", Type: field.TypeString, Default: ""},
+		{Name: "authority_ceiling_source_expires_at", Type: field.TypeTime, Nullable: true},
 		{Name: "project_id", Type: field.TypeUUID},
 		{Name: "event_type", Type: field.TypeString},
 		{Name: "fire_at", Type: field.TypeTime},
@@ -2215,17 +2286,17 @@ var (
 			{
 				Name:    "scheduledevent_fire_at",
 				Unique:  false,
-				Columns: []*schema.Column{ScheduledEventsColumns[10]},
+				Columns: []*schema.Column{ScheduledEventsColumns[16]},
 			},
 			{
 				Name:    "scheduledevent_project_id",
 				Unique:  false,
-				Columns: []*schema.Column{ScheduledEventsColumns[8]},
+				Columns: []*schema.Column{ScheduledEventsColumns[14]},
 			},
 			{
 				Name:    "scheduledevent_status",
 				Unique:  false,
-				Columns: []*schema.Column{ScheduledEventsColumns[12]},
+				Columns: []*schema.Column{ScheduledEventsColumns[18]},
 			},
 		},
 	}
@@ -2667,6 +2738,7 @@ var (
 		ConversationsTable,
 		ConversationParticipantsTable,
 		DecisionAuditsTable,
+		DelegationAdoptionsTable,
 		DelegationEdgesTable,
 		EntitlementBindingsTable,
 		EnvVarsTable,

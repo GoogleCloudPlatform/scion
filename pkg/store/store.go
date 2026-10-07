@@ -34,6 +34,10 @@ var (
 	// ErrDeleteInProgress is returned by SetAgentRunID when a delete holds
 	// the agent's row (see AgentStore.SetAgentRunID).
 	ErrDeleteInProgress = errors.New("agent delete in progress")
+	// ErrCredentialNotRecorded is returned by SetAgentRunID when the
+	// agent credential it was given could not be recorded; nothing was
+	// written.
+	ErrCredentialNotRecorded = errors.New("agent credential not recorded")
 
 	// ErrPhaseMismatch is returned by UpdateAgentStatus when
 	// AgentStatusUpdate.IfPhase is set and the stored phase differs. It wraps
@@ -260,6 +264,9 @@ type Store interface {
 	// Delegation Edge operations (Permissions Foundation Phase 1G)
 	DelegationEdgeStore
 
+	// Delegation-provenance adoption records
+	DelegationAdoptionStore
+
 	// Agent Hold operations
 	AgentHoldStore
 
@@ -414,7 +421,11 @@ type AgentStore interface {
 	// The same write appends the replaced run to the row's PreviousRunIDs
 	// (AppendPreviousRunID, ptone/scion#3097), so a delete still names it
 	// until the new run settles.
-	SetAgentRunID(ctx context.Context, agentID, runID string) (previous string, err error)
+	//
+	// When cred is non-nil it is created in the same transaction as the
+	// run-ID write, with RunID set to runID: either both are recorded or
+	// neither is.
+	SetAgentRunID(ctx context.Context, agentID, runID string, cred *AgentCredential) (previous string, err error)
 
 	// CompareAndSwapAgentRunID sets the agent's run_id to newRunID only if
 	// it currently equals expectedRunID, and reports whether it did. A
@@ -2902,6 +2913,27 @@ type DelegationEdgeStore interface {
 	// reactivate. It writes nothing.
 	GetDeactivatedDelegationEdgesForDelegate(ctx context.Context, delegateType, delegateID string, cause EdgeDeactivationCause, opID string) ([]*DelegationEdge, error)
 
+	// GetDelegationEdge returns one edge by ID, active or not.
+	// Returns ErrNotFound if the edge doesn't exist.
+	GetDelegationEdge(ctx context.Context, edgeID string) (*DelegationEdge, error)
+
+	// ListAllDelegationEdgesForDelegate returns every edge, active or not,
+	// where the given principal is the delegate, oldest first.
+	ListAllDelegationEdgesForDelegate(ctx context.Context, delegateType, delegateID string) ([]*DelegationEdge, error)
+
+	// DeactivateDelegationEdgeGuarded deactivates edgeID with cause and
+	// opID only when it is active and satisfies guard. It reports false,
+	// with no write, when the precondition does not hold; ErrNotFound when
+	// the edge does not exist.
+	DeactivateDelegationEdgeGuarded(ctx context.Context, edgeID string, guard DelegationEdgeDeactivateGuard, cause EdgeDeactivationCause, opID string) (bool, error)
+
+	// ReactivateDelegationEdge reactivates edgeID and clears its
+	// deactivation record. It requires the edge to be inactive with
+	// deactivation cause expectCause, and no other active edge for the
+	// same delegate and scope; otherwise it returns ErrRevisionConflict
+	// with no write. ErrNotFound when the edge does not exist.
+	ReactivateDelegationEdge(ctx context.Context, edgeID string, expectCause EdgeDeactivationCause) error
+
 	// ListDelegationDescendants returns the agents reachable from the root
 	// principal (q.RootType, q.RootID) inside q.ProjectID, breadth-first.
 	// It follows delegation edges with delegate type agent and scope
@@ -2939,6 +2971,23 @@ type DelegationEdgeStore interface {
 	//
 	// Read-only; writes nothing.
 	ListDelegationDescendants(ctx context.Context, q DescendantQuery) (DescendantResult, error)
+}
+
+// DelegationAdoptionStore persists delegation-provenance adoption records.
+type DelegationAdoptionStore interface {
+	// CreateDelegationAdoption inserts a record. ID is generated when empty.
+	CreateDelegationAdoption(ctx context.Context, rec *DelegationAdoption) error
+
+	// UpdateDelegationAdoption writes the mutable fields of rec (status,
+	// reason, edge IDs, after summary, actor) by ID.
+	UpdateDelegationAdoption(ctx context.Context, rec *DelegationAdoption) error
+
+	// GetDelegationAdoption returns a record by ID, or ErrNotFound.
+	GetDelegationAdoption(ctx context.Context, id string) (*DelegationAdoption, error)
+
+	// ListDelegationAdoptions returns matching records ordered by depth,
+	// then creation, and the total match count.
+	ListDelegationAdoptions(ctx context.Context, filter DelegationAdoptionFilter) ([]*DelegationAdoption, int, error)
 }
 
 // =============================================================================
