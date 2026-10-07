@@ -155,6 +155,11 @@ type HubServerConfig struct {
 	// stay synchronous permanently, regardless of this flag.
 	AsyncAgentLaunch bool `json:"asyncAgentLaunch" yaml:"asyncAgentLaunch" koanf:"asyncAgentLaunch"`
 
+	// PerfTrace turns on per-request performance tracing (phase timings,
+	// authorization store-call and decision-audit counts, DB pool waits).
+	// Off by default; observe only; read at startup.
+	PerfTrace bool `json:"perfTrace" yaml:"perfTrace" koanf:"perfTrace"`
+
 	// LaunchTimeout is the whole-launch budget from BeginLaunch (design
 	// §3.10). Default 5 minutes. The Hub reaper ends every in-flight launch
 	// between this deadline and +15s; the broker aborts 20s before it. The
@@ -1464,6 +1469,7 @@ var camelCaseFields = map[string]string{
 	"apibaseurl":                    "apiBaseUrl",
 	"appid":                         "appId",
 	"asyncagentlaunch":              "asyncAgentLaunch",
+	"perftrace":                     "perfTrace",
 	"authorizeddomains":             "authorizedDomains",
 	"autosuspendstalled":            "autoSuspendStalled",
 	"brokerid":                      "brokerId",

@@ -261,6 +261,7 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/artifacts":         "authenticated", // Artifact collection; service checks artifact.* through artifacts.Host; 404 when the experiment is off
 	"/api/v1/artifacts/":        "authenticated", // Artifact by ID; service checks artifact.* through artifacts.Host; 404 when the experiment is off
 	"/api/v1/artifacts/shared/": "authenticated", // Share links (RoutePublic in route metadata); still behind UnifiedAuthMiddleware until token-only access ships; 404 when the experiment is off
+	"/api/v1/artifacts/view/":   "public",        // GET/HEAD: one version's files under a short-lived view capability in the path, verified by the service on every request (no session used); 404 when the experiment is off
 
 	// ── Agent GCP identity ─────────────────────────────────────────────
 	"/api/v1/agent/gcp-token":          "agent-token", // Agent GCP access token

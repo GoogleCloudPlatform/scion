@@ -193,6 +193,12 @@ type ServerConfig struct {
 	// default; a launch is non-blocking only when this is on AND the request
 	// opts in.
 	AsyncAgentLaunch bool
+	// PerfTrace turns on per-request performance tracing
+	// (server.hub.perf_trace): phase timings, authorization store-call and
+	// decision-audit counts, and DB pool waits, logged per request and
+	// returned in X-Scion-Perf-* headers to admin requests that opt in. Off by
+	// default; observe only. See perftrace.go.
+	PerfTrace bool
 	// LaunchTimeout is the whole-launch budget for an opted-in launch
 	// (design §3.10). Default 5 minutes. Below minLaunchTimeout the broker's
 	// fixed 20s abort margin (§3.10) would leave no time for a launch to
@@ -1385,6 +1391,7 @@ type Server struct {
 	agentTokenService  *AgentTokenService   // Agent JWT token service
 	userTokenService   *UserTokenService    // User JWT token service
 	downloadSigningKey []byte               // HMAC key for skill file capability URLs (#1792)
+	artifactViewKey    []byte               // HMAC key for artifact view capabilities (pkg/artifacts RouteView)
 
 	// chatSpacesBatch sets the GET /chat/spaces rollup batch sizes; the
 	// zero value uses the defaults (handlers_chat_v2.go).
@@ -1695,6 +1702,9 @@ type Server struct {
 	templateLog       *slog.Logger
 	workspaceLog      *slog.Logger
 	agentMetricsLog   *slog.Logger
+	// perfTraceLog receives the per-request perf_trace lines. Set only when
+	// server.hub.perf_trace is on; nil otherwise.
+	perfTraceLog *slog.Logger
 
 	// Cached rate limit info from the most recent GitHub App API call
 	githubAppRateLimit *githubapp.RateLimitInfo
@@ -2045,6 +2055,11 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 		return nil, err
 	}
 
+	// Initialize the artifact view capability key (pkg/artifacts RouteView).
+	if err := srv.initArtifactViewKey(ctx); err != nil {
+		return nil, err
+	}
+
 	// Initialize the dedicated authorized-list cursor sealing key
 	// (ptone/scion#2124).
 	if err := srv.initListCursorSealer(ctx); err != nil {
@@ -2188,7 +2203,11 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	slog.Info("Control channel manager initialized")
 
 	// Initialize authorization service
-	srv.authzService = NewAuthzService(s, logging.Subsystem("hub.auth"))
+	//
+	// With server.hub.perf_trace on, the authorization service gets a store
+	// decorator that counts and times its input reads (perftrace_store.go).
+	// With it off, wrapAuthzStoreForPerfTrace returns s itself.
+	srv.authzService = NewAuthzService(wrapAuthzStoreForPerfTrace(s, cfg.PerfTrace), logging.Subsystem("hub.auth"))
 	// ptone/scion#2342 (B.3 R6): the same condition that enables dev-token
 	// acceptance and DevUserID seeding below (cfg.DevAuthToken != "") also
 	// gates whether this server currently admits dev_local authority at
@@ -2199,7 +2218,13 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	// Wire decision audit emitter
 	auditEmitter := NewStoreDecisionAuditEmitter(s, logging.Subsystem("hub.decision-audit"))
 	srv.decisionAuditWriter = auditEmitter
-	srv.authzService.SetDecisionAuditEmitter(auditEmitter)
+	// With server.hub.perf_trace on, records pass through a counting
+	// decorator on their way to the same emitter (perftrace_audit.go).
+	srv.authzService.SetDecisionAuditEmitter(wrapAuditEmitterForPerfTrace(auditEmitter, cfg.PerfTrace))
+	if cfg.PerfTrace {
+		srv.perfTraceLog = perfTraceLogger()
+		slog.Warn("Request performance tracing is on (server.hub.perf_trace); per-request perf_trace lines are logged")
+	}
 
 	// Initialize B3-B6 boundary services (preview, governance, capabilities).
 	srv.initBoundaryServices()
@@ -5443,6 +5468,9 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 		}
 	}
 
+	// Reap abandoned pending artifact versions (exits when ctx is cancelled).
+	s.startArtifactReaper(ctx)
+
 	// Start rate limiter cleanup goroutines (exit when ctx is cancelled).
 	if s.gcpTokenRateLimiter != nil {
 		s.gcpTokenRateLimiter.StartCleanup(ctx)
@@ -5851,6 +5879,7 @@ func (s *Server) registerRoutes() {
 	s.mux.Handle("/api/v1/artifacts", s.artifactsGuard("/api/v1/artifacts", artifactsHandler))
 	s.mux.Handle("/api/v1/artifacts/", s.artifactsGuard("/api/v1/artifacts/", artifactsHandler))
 	s.mux.Handle("/api/v1/artifacts/shared/", s.artifactsGuard("/api/v1/artifacts/shared/", artifactsHandler))
+	s.mux.Handle("/api/v1/artifacts/view/", s.artifactsGuard("/api/v1/artifacts/view/", artifactsHandler))
 
 	s.mux.HandleFunc("/api/v1/skills", s.guarded("/api/v1/skills", s.handleSkills))
 	s.mux.HandleFunc("/api/v1/skills/", s.guarded("/api/v1/skills/", s.handleSkillByID))
@@ -6115,6 +6144,13 @@ func (s *Server) registerRoutes() {
 // applyMiddleware wraps the handler with middleware.
 func (s *Server) applyMiddleware(h http.Handler) http.Handler {
 	// Apply middleware in reverse order (last applied runs first)
+
+	// Innermost: the per-request performance trace, only when
+	// server.hub.perf_trace is on (perftrace_middleware.go).
+	if s.config.PerfTrace {
+		h = s.perfTraceMiddleware(h)
+	}
+
 	h = s.recoveryMiddleware(h)
 
 	// Apply broker auth middleware (checks X-Scion-Broker-ID header for HMAC auth)

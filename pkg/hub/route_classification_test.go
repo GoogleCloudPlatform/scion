@@ -71,6 +71,7 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/artifacts":                              "policy:artifact",
 	"/api/v1/artifacts/":                             "policy:artifact",
 	"/api/v1/artifacts/shared/":                      "public:artifact-share-link",
+	"/api/v1/artifacts/view/":                        "public:artifact-view-capability",
 	"/api/v1/messaging/capabilities":                 "authenticated:messaging",
 	"/api/v1/messaging/targets/resolve":              "authenticated:messaging",
 	"/api/v1/skills":                                 "policy:skill",
