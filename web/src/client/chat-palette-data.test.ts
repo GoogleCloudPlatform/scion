@@ -36,7 +36,6 @@ vi.mock('./api.js', async (importOriginal) => {
 import { apiFetch } from './api.js';
 import { setPreferredTimeZone } from '../utils/time.js';
 import {
-  fetchAllPaletteAgents,
   fetchPaletteDms,
   buildAgentCandidates,
   isPaletteAgentViable,
@@ -49,7 +48,6 @@ import {
   buildDocumentCandidates,
   PaletteLoadError,
   ChatPaletteDataController,
-  loadPaletteAgentsBounded,
   AGENT_DMS_CACHE_MS,
   type PaletteAgentSource,
   type RawPaletteAgent,
@@ -74,184 +72,6 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-describe('fetchAllPaletteAgents: full pagination', () => {
-  it('traverses more than 100 entries across pages', async () => {
-    const page1Agents = Array.from({ length: 100 }, (_, i) => ({ id: `a${i}` }));
-    const page2Agents = Array.from({ length: 30 }, (_, i) => ({ id: `b${i}` }));
-    apiFetchMock
-      .mockResolvedValueOnce(jsonResponse({ agents: page1Agents, nextCursor: 'cursor-1' }))
-      .mockResolvedValueOnce(jsonResponse({ agents: page2Agents }));
-
-    const all = await fetchAllPaletteAgents();
-
-    expect(all).toHaveLength(130);
-    expect(apiFetchMock).toHaveBeenCalledTimes(2);
-    expect(apiFetchMock.mock.calls[1][0]).toContain('cursor=cursor-1');
-  });
-
-  it('continues past a filtered empty intermediate page that still carries a cursor', async () => {
-    apiFetchMock
-      .mockResolvedValueOnce(jsonResponse({ agents: [{ id: 'a0' }], nextCursor: 'cursor-1' }))
-      // Filtered empty page: zero items, but a cursor is still present.
-      .mockResolvedValueOnce(jsonResponse({ agents: [], nextCursor: 'cursor-2' }))
-      .mockResolvedValueOnce(jsonResponse({ agents: [{ id: 'a1' }] }));
-
-    const all = await fetchAllPaletteAgents();
-
-    expect(all.map((a) => a.id)).toEqual(['a0', 'a1']);
-    expect(apiFetchMock).toHaveBeenCalledTimes(3);
-  });
-
-  it('stops when nextCursor is absent even if totalCount implied more', async () => {
-    apiFetchMock.mockResolvedValueOnce(jsonResponse({ agents: [{ id: 'a0' }] }));
-    const all = await fetchAllPaletteAgents();
-    expect(all).toHaveLength(1);
-    expect(apiFetchMock).toHaveBeenCalledTimes(1);
-  });
-
-  it('treats a repeated cursor as a load error, not an infinite loop', async () => {
-    apiFetchMock
-      .mockResolvedValueOnce(jsonResponse({ agents: [{ id: 'a0' }], nextCursor: 'loop' }))
-      .mockResolvedValueOnce(jsonResponse({ agents: [{ id: 'a1' }], nextCursor: 'loop' }));
-
-    await expect(fetchAllPaletteAgents()).rejects.toThrow(PaletteLoadError);
-    expect(apiFetchMock).toHaveBeenCalledTimes(2);
-  });
-
-  it('throws PaletteLoadError on a non-ok response', async () => {
-    apiFetchMock.mockResolvedValueOnce(jsonResponse({}, 500));
-    await expect(fetchAllPaletteAgents()).rejects.toThrow(PaletteLoadError);
-  });
-
-  it('an abort landing during the body read rejects with the original AbortError, not PaletteLoadError', async () => {
-    // A cancelled/superseded load can abort its signal after `res` has
-    // already resolved but before `res.json()` finishes reading the body —
-    // that rejects with an AbortError that must propagate as-is, not be
-    // rewritten into a load-failure error — a catch block that
-    // unconditionally did `throw new PaletteLoadError(...)` here would do
-    // exactly that, masking the cancellation as a failure.
-    const controller = new AbortController();
-    apiFetchMock.mockImplementationOnce(() => {
-      controller.abort();
-      return Promise.resolve({
-        ok: true,
-        status: 200,
-        json: () => Promise.reject(new DOMException('aborted', 'AbortError')),
-      } as unknown as Response);
-    });
-    let caught: unknown;
-    try {
-      await fetchAllPaletteAgents(controller.signal);
-    } catch (err) {
-      caught = err;
-    }
-    expect(caught).toBeInstanceOf(DOMException);
-    expect((caught as DOMException).name).toBe('AbortError');
-    expect(caught).not.toBeInstanceOf(PaletteLoadError);
-  });
-
-  it('a genuinely malformed body under a live (non-aborted) signal still becomes a PaletteLoadError', async () => {
-    // The abort guard `if (signal?.aborted) { throw err; }` around the
-    // `res.json()` catch must check `.aborted` specifically, not just
-    // whether a signal was passed — the production caller (loadPaletteAgentsBounded)
-    // *always* passes a signal, so weakening the guard to `if (signal)`
-    // would turn every real non-JSON response into a raw `SyntaxError` for
-    // any caller that happens to pass a signal, which is the only real
-    // caller there is. This test drives a live, non-aborted signal
-    // alongside a malformed body specifically to pin that distinction.
-    const liveSignal = new AbortController().signal;
-    expect(liveSignal.aborted).toBe(false);
-    apiFetchMock.mockResolvedValueOnce(new Response('not json', { status: 200 }));
-    await expect(fetchAllPaletteAgents(liveSignal)).rejects.toBeInstanceOf(PaletteLoadError);
-    apiFetchMock.mockResolvedValueOnce(new Response('not json', { status: 200 }));
-    await expect(fetchAllPaletteAgents(liveSignal)).rejects.toThrow(/not valid JSON/);
-  });
-
-  it('ignores a malformed (non-array) agents field instead of spreading it', async () => {
-    // `if (Array.isArray(data.agents))` guards the spread — without it,
-    // `data.agents ?? []` only catches null/undefined, not a wrong-shaped
-    // value like a string, which would then be spread character-by-character
-    // into the candidate list (strings are iterable). Covers the case where
-    // the field is present but not an array.
-    apiFetchMock.mockResolvedValueOnce(jsonResponse({ agents: 'not-an-array' }));
-    const all = await fetchAllPaletteAgents();
-    expect(all).toEqual([]);
-  });
-
-  it('throws PaletteLoadError on a literal null body instead of a raw TypeError', async () => {
-    // A JSON body of `null` parses successfully, so it skips the "not valid
-    // JSON" catch block entirely — without the object guard,
-    // `Array.isArray(data.agents)` then reads `.agents` off a null receiver
-    // and throws a raw TypeError.
-    apiFetchMock.mockResolvedValueOnce(jsonResponse(null));
-    await expect(fetchAllPaletteAgents()).rejects.toBeInstanceOf(PaletteLoadError);
-    apiFetchMock.mockResolvedValueOnce(jsonResponse(null));
-    await expect(fetchAllPaletteAgents()).rejects.not.toBeInstanceOf(TypeError);
-  });
-
-  it('throws PaletteLoadError on an array JSON body instead of silently treating it as zero agents', async () => {
-    // A top-level JSON array parses successfully and is not null, so it
-    // would pass a null-only guard — `Array.isArray(data.agents)` on an
-    // array is false (arrays have no `.agents` property), so without the
-    // stricter object guard this would silently resolve to an empty agents
-    // list instead of surfacing the malformed response.
-    apiFetchMock.mockResolvedValueOnce(jsonResponse([]));
-    await expect(fetchAllPaletteAgents()).rejects.toBeInstanceOf(PaletteLoadError);
-    apiFetchMock.mockResolvedValueOnce(jsonResponse([{ id: 'a0' }]));
-    await expect(fetchAllPaletteAgents()).rejects.toBeInstanceOf(PaletteLoadError);
-  });
-
-  it('throws PaletteLoadError on a primitive JSON body instead of silently treating it as zero agents', async () => {
-    // A bare JSON string or number parses successfully and is not null —
-    // `typeof data !== 'object'` is what catches these, not the null check.
-    // `'x'.agents`/`(42).agents` are just `undefined`, so without this guard
-    // `Array.isArray(data.agents)` is false and this would silently resolve
-    // to an empty agents list rather than surfacing the malformed response.
-    apiFetchMock.mockResolvedValueOnce(jsonResponse('agents-unavailable'));
-    await expect(fetchAllPaletteAgents()).rejects.toBeInstanceOf(PaletteLoadError);
-    apiFetchMock.mockResolvedValueOnce(jsonResponse(42));
-    await expect(fetchAllPaletteAgents()).rejects.toBeInstanceOf(PaletteLoadError);
-  });
-
-  it('follows nextCursor through the full 500-page safety bound and then throws, rather than looping forever', async () => {
-    // Isolates the `pages < MAX_AGENT_PAGES` half of the while-loop
-    // condition, and both halves of the trailing
-    // `if (cursor && pages >= MAX_AGENT_PAGES)` check — a server that keeps
-    // returning a new cursor forever (buggy or hostile) must not hang the
-    // palette. Drives pagination up to the safety bound itself.
-    for (let i = 0; i < 501; i++) {
-      apiFetchMock.mockResolvedValueOnce(
-        jsonResponse({ agents: [{ id: `a${i}` }], nextCursor: `cursor-${i}` })
-      );
-    }
-    await expect(fetchAllPaletteAgents()).rejects.toThrow(PaletteLoadError);
-    expect(apiFetchMock).toHaveBeenCalledTimes(500);
-  });
-
-  it('exactly 500 pages that terminate normally on the last one does not throw', async () => {
-    // Isolates the `cursor` half of the trailing
-    // `if (cursor && pages >= MAX_AGENT_PAGES)` check from the `pages >=
-    // MAX_AGENT_PAGES` half (the previous test alone can't tell them apart,
-    // since it never ends pagination with `pages` at exactly 500 — the
-    // `pages >= MAX_AGENT_PAGES` half turns out to be implied by reaching
-    // this check with `cursor` still truthy at all, since the loop's own
-    // condition, `cursor && pages < MAX_AGENT_PAGES`, cannot otherwise exit
-    // while `cursor` is truthy; confirmed redundant by mutation). A hub
-    // that happens to have exactly 500 pages, with pagination legitimately
-    // ending on the last one (`cursor` empty), must not be treated as
-    // having hit the safety bound.
-    for (let i = 0; i < 499; i++) {
-      apiFetchMock.mockResolvedValueOnce(
-        jsonResponse({ agents: [{ id: `a${i}` }], nextCursor: `cursor-${i}` })
-      );
-    }
-    apiFetchMock.mockResolvedValueOnce(jsonResponse({ agents: [{ id: 'a499' }] })); // 500th page, no nextCursor
-    const all = await fetchAllPaletteAgents();
-    expect(all).toHaveLength(500);
-    expect(apiFetchMock).toHaveBeenCalledTimes(500);
-  });
-});
-
 describe('fetchPaletteDms', () => {
   it('returns the dms array', async () => {
     apiFetchMock.mockResolvedValueOnce(
@@ -273,8 +93,8 @@ describe('fetchPaletteDms', () => {
   });
 
   it('an abort landing during the body read rejects with the original AbortError, not PaletteLoadError', async () => {
-    // See the matching fetchAllPaletteAgents test — the second of the two
-    // abort-timing scenarios this guards against.
+    // A cancelled load can abort its signal after the response arrived but
+    // during the body read; that must stay an AbortError.
     const controller = new AbortController();
     apiFetchMock.mockImplementationOnce(() => {
       controller.abort();
@@ -296,7 +116,7 @@ describe('fetchPaletteDms', () => {
   });
 
   it('a genuinely malformed body under a live (non-aborted) signal still becomes a PaletteLoadError', async () => {
-    // See the matching fetchAllPaletteAgents test above.
+    // Only an aborted signal turns a body-read failure into an AbortError.
     const liveSignal = new AbortController().signal;
     expect(liveSignal.aborted).toBe(false);
     apiFetchMock.mockResolvedValueOnce(new Response('not json', { status: 200 }));
@@ -1010,126 +830,6 @@ describe('ChatPaletteDataController over a real agent store', () => {
     expect(h.server.walks()).toBe(1);
     release();
     h.store.destroy();
-  });
-});
-
-describe('loadPaletteAgentsBounded: idle timeout', () => {
-  function boundedLoad(): { controller: AbortController; load: Promise<unknown[]> } {
-    const controller = new AbortController();
-    const load = loadPaletteAgentsBounded({
-      controller,
-      isCurrent: () => true,
-      finish: async (agents, signal) => buildAgentCandidates(agents, await fetchPaletteDms(signal)),
-    });
-    return { controller, load };
-  }
-
-  function hanging(onAbort?: () => void) {
-    return (_url: string, options?: { signal?: AbortSignal | null }): Promise<Response> =>
-      new Promise((_resolve, reject) => {
-        options?.signal?.addEventListener('abort', () => {
-          onAbort?.();
-          reject(new DOMException('aborted', 'AbortError'));
-        });
-      });
-  }
-
-  it('a request that never settles is aborted after the idle bound and surfaces a retryable PaletteLoadError, not a silent AbortError', async () => {
-    vi.useFakeTimers();
-    apiFetchMock.mockImplementationOnce(hanging());
-    const { load } = boundedLoad();
-    const expectation = expect(load).rejects.toBeInstanceOf(PaletteLoadError);
-    await vi.advanceTimersByTimeAsync(90_000 + 1);
-    await expectation;
-  });
-
-  it('does not trip 1ms before the idle bound, but does 1ms after', async () => {
-    vi.useFakeTimers();
-    let aborted = false;
-    apiFetchMock.mockImplementationOnce(hanging(() => (aborted = true)));
-    const { load } = boundedLoad();
-    load.catch(() => {});
-
-    await vi.advanceTimersByTimeAsync(89_999);
-    expect(aborted).toBe(false);
-
-    const expectation = expect(load).rejects.toBeInstanceOf(PaletteLoadError);
-    await vi.advanceTimersByTimeAsync(2);
-    expect(aborted).toBe(true);
-    await expectation;
-  });
-
-  it('a load whose total duration exceeds the idle bound still succeeds, as long as each step arrives inside its own window', async () => {
-    vi.useFakeTimers();
-    let resolvePage1!: (v: Response) => void;
-    let resolvePage2!: (v: Response) => void;
-    let resolvePage3!: (v: Response) => void;
-    let resolveDms!: (v: Response) => void;
-    const abortable = (resolve: (fn: (v: Response) => void) => void) => {
-      return (_url: string, options?: { signal?: AbortSignal | null }) =>
-        new Promise<Response>((res, reject) => {
-          resolve(res);
-          options?.signal?.addEventListener('abort', () =>
-            reject(new DOMException('aborted', 'AbortError'))
-          );
-        });
-    };
-    apiFetchMock
-      .mockImplementationOnce(abortable((r) => (resolvePage1 = r)))
-      .mockImplementationOnce(abortable((r) => (resolvePage2 = r)))
-      .mockImplementationOnce(abortable((r) => (resolvePage3 = r)))
-      .mockImplementationOnce(abortable((r) => (resolveDms = r)));
-
-    const { load } = boundedLoad();
-    await vi.advanceTimersByTimeAsync(30_000);
-    resolvePage1(jsonResponse({ agents: [CODER], nextCursor: 'c1' }));
-    await vi.advanceTimersByTimeAsync(30_000);
-    resolvePage2(jsonResponse({ agents: [SECOND], nextCursor: 'c2' }));
-    await vi.advanceTimersByTimeAsync(30_000);
-    resolvePage3(jsonResponse({ agents: [] }));
-    await vi.advanceTimersByTimeAsync(30_000);
-    resolveDms(jsonResponse({ dms: [] }));
-
-    expect(await load).toHaveLength(2);
-    expect(vi.getTimerCount()).toBe(0);
-  });
-
-  it('clears its idle timer once a load settles successfully', async () => {
-    vi.useFakeTimers();
-    apiFetchMock
-      .mockResolvedValueOnce(jsonResponse({ agents: [CODER] }))
-      .mockResolvedValueOnce(jsonResponse({ dms: [] }));
-    const { load } = boundedLoad();
-    expect(await load).toHaveLength(1);
-    expect(vi.getTimerCount()).toBe(0);
-  });
-
-  it('clears its idle timer when the load is cancelled', async () => {
-    vi.useFakeTimers();
-    apiFetchMock.mockImplementationOnce(hanging());
-    const { controller, load } = boundedLoad();
-    const expectation = expect(load).rejects.toMatchObject({ name: 'AbortError' });
-    controller.abort();
-    await expectation;
-    expect(vi.getTimerCount()).toBe(0);
-  });
-
-  it('a DM fetch that hangs after every agents page lands is still aborted by the idle bound', async () => {
-    vi.useFakeTimers();
-    let dmAborted = false;
-    apiFetchMock
-      .mockResolvedValueOnce(jsonResponse({ agents: [CODER] }))
-      .mockImplementationOnce(hanging(() => (dmAborted = true)));
-    const { load } = boundedLoad();
-    load.catch(() => {});
-
-    await vi.advanceTimersByTimeAsync(89_999);
-    expect(dmAborted).toBe(false);
-
-    const expectation = expect(load).rejects.toBeInstanceOf(PaletteLoadError);
-    await vi.advanceTimersByTimeAsync(2);
-    expect(dmAborted).toBe(true);
-    await expectation;
   });
 });
 

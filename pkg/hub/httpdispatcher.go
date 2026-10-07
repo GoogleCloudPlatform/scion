@@ -2058,6 +2058,9 @@ func (d *HTTPAgentDispatcher) deferredCreateWithGather(ctx context.Context, agen
 	if err := json.Unmarshal([]byte(result.Result), &cr); err != nil {
 		return nil, fmt.Errorf("unmarshal create result: %w", err)
 	}
+	// The owner's warnings (ptone/scion#3456), e.g. the outcome of the
+	// compensating delete of a run that landed after a delete won.
+	addDispatchWarnings(ctx, cr.Warnings...)
 	if cr.Launch != nil {
 		return &CreateDispatchResult{Launch: cr.Launch}, nil
 	}
@@ -2245,6 +2248,7 @@ func (d *HTTPAgentDispatcher) deferredFinalizeEnv(ctx context.Context, agent *st
 	if err := json.Unmarshal([]byte(result.Result), &fr); err != nil {
 		return nil, fmt.Errorf("unmarshal finalize_env result: %w", err)
 	}
+	addDispatchWarnings(ctx, fr.Warnings...) // the owner's (ptone/scion#3456)
 	if fr.Launch != nil {
 		return &CreateDispatchResult{Launch: fr.Launch}, nil
 	}
@@ -4131,7 +4135,18 @@ func (d *HTTPAgentDispatcher) deferredLifecycle(
 	}
 
 	// 4. Wait for the outcome.
-	return waitForLifecycleOutcome(ctx, eventCh, unsub, d.store, dispatchID, op, terminal)
+	if err := waitForLifecycleOutcome(ctx, eventCh, unsub, d.store, dispatchID, op, terminal); err != nil {
+		return err
+	}
+	// 5. Carry the owner's dispatch warnings into this request's collector
+	//    (ptone/scion#3456), so a 409 delete_in_progress reports the outcome
+	//    of the compensating delete the owner ran. Best-effort: a wait that
+	//    ended on the success phase before the owner finished the row finds
+	//    no result yet.
+	if row, err := d.store.GetBrokerDispatch(ctx, dispatchID); err == nil && row.State == store.DispatchStateDone {
+		addDispatchWarnings(ctx, decodeLifecycleResult(row.Result).Warnings...)
+	}
+	return nil
 }
 
 // resolveSecrets queries secrets from all applicable scopes and merges them

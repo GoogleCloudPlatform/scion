@@ -100,6 +100,10 @@ type FinalizeEnvResult struct {
 	// Launch is set when the owner's send was accepted for asynchronous
 	// launch.
 	Launch *LaunchAccepted `json:"launch,omitempty"`
+	// Warnings are the owner's dispatch warnings, such as the outcome of
+	// the compensating delete of a run that landed after a delete won
+	// (ptone/scion#3456). The requester adds them to its own collector.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // CreateWithGatherResult is serialized into broker_dispatch.result by the owner.
@@ -108,6 +112,46 @@ type CreateWithGatherResult struct {
 	// Launch is set when the owner's send was accepted for asynchronous
 	// launch.
 	Launch *LaunchAccepted `json:"launch,omitempty"`
+	// Warnings are the owner's dispatch warnings (see FinalizeEnvResult).
+	Warnings []string `json:"warnings,omitempty"`
+}
+
+// LifecycleDispatchResult is serialized into broker_dispatch.result by the
+// owner of a completed start or restart (ptone/scion#3456). Rows written by
+// owners that predate it carry an empty result, which decodes to the zero
+// value.
+type LifecycleDispatchResult struct {
+	// Warnings are the owner's dispatch warnings, such as the outcome of
+	// the compensating delete of a run that landed after a delete won.
+	Warnings []string `json:"warnings,omitempty"`
+	// DeleteWon reports that the broker start landed but a delete won
+	// while it was in flight (deleteWonAfterLanding on the owner). The
+	// agent never reaches the start's success phase then, so the requester
+	// stops waiting for it once the row is done.
+	DeleteWon bool `json:"deleteWon,omitempty"`
+}
+
+// marshalLifecycleResult returns the result for a completed start or restart
+// row: "" when there is nothing to carry, as before.
+func marshalLifecycleResult(r LifecycleDispatchResult) string {
+	if len(r.Warnings) == 0 && !r.DeleteWon {
+		return ""
+	}
+	b, err := json.Marshal(r)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+// decodeLifecycleResult decodes a completed start or restart row's result;
+// an empty or unreadable result is the zero value.
+func decodeLifecycleResult(result string) LifecycleDispatchResult {
+	var r LifecycleDispatchResult
+	if result != "" {
+		_ = json.Unmarshal([]byte(result), &r)
+	}
+	return r
 }
 
 // MarshalDispatchArgs serializes a dispatch args struct to JSON for storage in

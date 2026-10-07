@@ -27,10 +27,10 @@
  * expires the request is aborted through its signal and the walk rejects,
  * instead of a request that never settles leaving it pending forever.
  *
- * This mirrors the agents/users pagination contract already implemented by
- * `chat-palette-data.ts`'s `fetchAllPaletteAgents`/`fetchAllPaletteUsers`;
- * it is factored out here so other full-list consumers (for example
- * `chat.ts`'s hub members sidebar) don't hand-roll the same cursor loop.
+ * This mirrors the users pagination contract implemented by
+ * `chat-palette-data.ts`'s `fetchAllPaletteUsers`; it is factored out here
+ * so full-list consumers (the agent store, `chat.ts`'s hub members sidebar)
+ * don't hand-roll the same cursor loop.
  *
  * The existing generic helper `apiFetchAllPages` (`api.ts`) is not reused
  * because it returns a partial list when a later page fails, silently stops

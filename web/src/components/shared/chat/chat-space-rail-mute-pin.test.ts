@@ -316,6 +316,20 @@ describe('space rail — muted rendering', () => {
     expect(el.shadowRoot.querySelector('sl-icon[name="bell-slash"]')).not.toBeNull();
   });
 
+  it('shows the mention dot instead of the unread dot for an unread mention', async () => {
+    const el = await mount([thread({ hasUnread: true, hasUnreadMention: true })]);
+
+    expect(el.shadowRoot.querySelector('.mention-dot')).not.toBeNull();
+    expect(el.shadowRoot.querySelector('.unread-dot')).toBeNull();
+  });
+
+  it('keeps the plain unread dot when the unread messages do not mention the user', async () => {
+    const el = await mount([thread({ hasUnread: true, hasUnreadMention: false })]);
+
+    expect(el.shadowRoot.querySelector('.unread-dot')).not.toBeNull();
+    expect(el.shadowRoot.querySelector('.mention-dot')).toBeNull();
+  });
+
   it('suppresses the mention dot for a muted thread', async () => {
     const el = await mount([thread({ hasUnread: true, hasUnreadMention: true, muted: true })]);
 

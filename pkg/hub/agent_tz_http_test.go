@@ -233,13 +233,13 @@ func TestDispatchAgentEventHandler_CapturesTimezone(t *testing.T) {
 	creatorID := seedFullRoleDispatchCreator(ms, "project-1")
 	srv := newEventHandlerTestServer(&tzTemplateStore{ms})
 
-	err := srv.dispatchAgentEventHandler()(context.Background(), store.ScheduledEvent{
+	err := srv.dispatchAgentEventHandler()(context.Background(), withMockAgentRevision(store.ScheduledEvent{
 		ID:        "dispatch-tz-1",
 		ProjectID: "project-1",
 		EventType: "dispatch_agent",
 		Payload:   `{"agentName":"sched-tz","template":"tz-tmpl","task":"Do the thing"}`,
 		CreatedBy: creatorID,
-	})
+	}, creatorID))
 	require.NoError(t, err)
 
 	created := findMockAgent(ms, "sched-tz")
