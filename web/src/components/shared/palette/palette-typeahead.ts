@@ -197,8 +197,8 @@ export class PaletteTypeahead {
 
   /**
    * Stops capturing and returns the captured text, clearing it. Drops the
-   * hidden text field, whose text (typed since the last captured key: IME
-   * input, dictation, or keys after the capture's time limit) ends the
+   * hidden text field, whose text (IME input, dictation, or keys after the
+   * capture's time limit, all typed after the captured text) ends the
    * returned text.
    */
   take(): string {
@@ -242,14 +242,14 @@ export class PaletteTypeahead {
 
   /**
    * Moves the hidden field's text to the end of the captured text. Run just
-   * before the capture takes a key, so the field only ever holds text typed
-   * since the last captured key, and the text the field took itself (an IME
-   * composition, dictation, a predictive suggestion) keeps its place among
-   * captured keys. Nothing else moves it: no input or composition event,
-   * whose order differs between engines (WebKit fires compositionend before
-   * inserting the confirmed text), and nothing after the capture's time
-   * limit, so the field's own editing, Backspace included, applies to what
-   * it holds.
+   * before the capture adds or deletes captured text, so the field only ever
+   * holds text typed after all the captured text, and the text the field
+   * took itself (an IME composition, dictation, a predictive suggestion)
+   * keeps its place among captured keys. Nothing else moves it: no input or
+   * composition event, whose order differs between engines (WebKit fires
+   * compositionend before inserting the confirmed text), and nothing after
+   * the capture's time limit, so the field's own editing, Backspace
+   * included, applies to what it holds.
    */
   private flushProxy(): void {
     const proxy = this.proxy;
@@ -260,9 +260,9 @@ export class PaletteTypeahead {
 
   /**
    * Removes the hidden text field, adding its text to the end of the
-   * captured text: it holds only text typed since the last captured key
-   * (see {@link flushProxy}). A field that still has focus gives it back to what had it
-   * before, unless `restoreFocus` is false.
+   * captured text, after which it was typed (see {@link flushProxy}). A
+   * field that still has focus gives it back to what had it before, unless
+   * `restoreFocus` is false.
    */
   private dropKeyboardProxy(restoreFocus = true): void {
     clearTimeout(this.proxyTimer);
@@ -295,11 +295,16 @@ export class PaletteTypeahead {
    * Backspace edits the captured text close to how the same chord edits a
    * text field on the platform (see {@link deleteBackward}); Delete has no
    * text after the caret to remove.
+   *
+   * While the hidden field holds the keyboard, a key an IME processed is
+   * the field's (see {@link isImeKeyForField}).
    */
   private readonly handleKeydown = (e: KeyboardEvent): void => {
     if (e.isComposing) return;
+    const imeKey = this.isImeKeyForField(e);
     if (e.key === 'Backspace' || e.key === 'Delete') {
-      this.flushProxyBefore(e);
+      if (imeKey) return;
+      this.flushProxy();
       if (e.key === 'Backspace') this.text = deleteBackward(this.text, e, this.mac);
       e.preventDefault();
       e.stopImmediatePropagation();
@@ -311,20 +316,25 @@ export class PaletteTypeahead {
     const optionText = printable && this.mac && e.altKey && !e.ctrlKey;
     if (!altGraph && !optionText && (e.ctrlKey || e.altKey)) return;
     if (!printable && !SWALLOWED_KEYS.has(e.key)) return;
-    this.flushProxyBefore(e);
+    if (imeKey && printable) return;
+    if (!imeKey) this.flushProxy();
     if (printable) this.text += e.key;
     e.preventDefault();
     e.stopImmediatePropagation();
   };
 
   /**
-   * {@link flushProxy} before the capture takes `e`, unless an IME
-   * processed it (keyCode 229): such a key can arrive between WebKit's
-   * compositionend and its insertion of the confirmed text, when the field
-   * still holds the text being replaced.
+   * Whether `e` is a key an IME processed (keyCode 229) while the hidden
+   * field holds the keyboard. Such a key belongs to the field: a Backspace,
+   * Delete or character passes through and edits the field natively, and
+   * Enter, Tab or a navigation key is swallowed without moving the field's
+   * text, since it can arrive between WebKit's compositionend and its
+   * insertion of the confirmed text, when the field still holds the text
+   * being replaced. Either way the captured text is left alone, so the
+   * field's text stays after it.
    */
-  private flushProxyBefore(e: KeyboardEvent): void {
-    if (e.keyCode !== 229) this.flushProxy();
+  private isImeKeyForField(e: KeyboardEvent): boolean {
+    return e.keyCode === 229 && this.proxy !== null;
   }
 }
 

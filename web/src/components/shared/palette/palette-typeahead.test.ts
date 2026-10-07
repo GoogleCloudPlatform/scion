@@ -688,6 +688,51 @@ describe('PaletteTypeahead: holding the on-screen keyboard', () => {
     expect(typeahead.take()).toBe('a日本');
   });
 
+  it('an IME-processed Backspace after field text passes to the field, which edits its own text', () => {
+    typeahead = touchTypeahead();
+    typeahead.start();
+    const proxy = typeahead.keyboardProxy!;
+    press('a');
+    commitAtField(proxy, '日本', true);
+    const e = press('Backspace', { keyCode: 229 } as KeyboardEventInit);
+    expect(e.defaultPrevented).toBe(false);
+    // The field's own Backspace.
+    proxy.value = proxy.value.slice(0, -1);
+    expect(typeahead.take()).toBe('a日');
+  });
+
+  it('an IME-processed character after field text passes to the field, keeping typing order', () => {
+    typeahead = touchTypeahead();
+    typeahead.start();
+    const proxy = typeahead.keyboardProxy!;
+    press('a');
+    commitAtField(proxy, 'hello', false);
+    const e = press('x', { keyCode: 229 } as KeyboardEventInit);
+    expect(e.defaultPrevented).toBe(false);
+    // The field takes the character itself.
+    proxy.value += 'x';
+    expect(typeahead.take()).toBe('ahellox');
+  });
+
+  it('an IME-processed Enter is swallowed without moving field text', () => {
+    typeahead = touchTypeahead();
+    typeahead.start();
+    const proxy = typeahead.keyboardProxy!;
+    commitAtField(proxy, 'hi', false);
+    const e = press('Enter', { keyCode: 229 } as KeyboardEventInit);
+    expect(e.defaultPrevented).toBe(true);
+    expect(proxy.value).toBe('hi');
+    expect(typeahead.pending).toBe('');
+  });
+
+  it('without the field, the capture takes an IME-processed key', () => {
+    typeahead.start();
+    expect(press('x', { keyCode: 229 } as KeyboardEventInit).defaultPrevented).toBe(true);
+    press('y');
+    expect(press('Backspace', { keyCode: 229 } as KeyboardEventInit).defaultPrevented).toBe(true);
+    expect(typeahead.take()).toBe('x');
+  });
+
   it('after the capture time limit, Backspace in the field edits the text it holds', () => {
     vi.useFakeTimers();
     typeahead = touchTypeahead();
