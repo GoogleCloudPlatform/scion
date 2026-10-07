@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -2455,8 +2456,14 @@ func TestUserList(t *testing.T) {
 	}
 }
 
-func TestUserCreate_Forbidden(t *testing.T) {
-	srv, _ := testServer(t)
+// TestUserCreate_RoleRefusedAndNonAdminForbidden pins POST /api/v1/users
+// (user.admin.provision) for the two callers this test used to cover with a
+// single 403: an authorized caller (the dev super-admin) that names the
+// admin role gets 422 privileged_role_not_provisionable (design §8 row 12),
+// and a caller without user.invite gets 403 before any body check (row 8).
+// The full outcome table is in handlers_users_provision_test.go.
+func TestUserCreate_RoleRefusedAndNonAdminForbidden(t *testing.T) {
+	srv, s := testServer(t)
 
 	body := map[string]interface{}{
 		"email":       "newuser@example.com",
@@ -2465,9 +2472,23 @@ func TestUserCreate_Forbidden(t *testing.T) {
 	}
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/users", body)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("authorized caller with role admin: expected status 422, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "privileged_role_not_provisionable") {
+		t.Errorf("expected reason privileged_role_not_provisionable: %s", rec.Body.String())
+	}
 
+	member := &store.User{ID: tid("usercreate-member"), Email: "usercreate-member@example.com", DisplayName: "Member", Role: store.UserRoleMember, Status: store.UserStatusActive}
+	if err := s.CreateUser(context.Background(), member); err != nil {
+		t.Fatalf("create member: %v", err)
+	}
+	rec = doRequestAsUser(t, srv, member, http.MethodPost, "/api/v1/users", body)
 	if rec.Code != http.StatusForbidden {
-		t.Errorf("expected status 403, got %d: %s", rec.Code, rec.Body.String())
+		t.Errorf("caller without user.invite: expected status 403, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if _, err := s.GetUserByEmail(context.Background(), "newuser@example.com"); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("no user record may be created, got err=%v", err)
 	}
 }
 
