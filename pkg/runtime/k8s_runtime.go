@@ -685,6 +685,12 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 		if nfsHomeStart {
 			r.cleanupAgentSecrets(ctx, namespace, config.Name)
 		}
+		// Remaining case: if a start of that previous pod's run is retrying
+		// at this moment (before its pod exists), this also removes that
+		// start's objects. The no-run start wins, as a no-run delete does
+		// (see the delete-wins note in CleanupAgentResources); the retrying
+		// start then fails (verifyStartObjects, or its pod create) or its
+		// pod cannot mount them.
 		r.deletePodRunObjects(ctx, namespace, config.Name, prevPodRun, "Removing a per-run object of the previous pod's run before a start without a run ID")
 	}
 	cleanupArmed = true
