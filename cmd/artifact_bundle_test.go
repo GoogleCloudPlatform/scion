@@ -174,3 +174,9 @@ func TestSafeBundlePath(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, filepath.Join("/out", "img", "a.png"), got)
 }
+
+func TestWriteBundleRefusesFoldedCollisions(t *testing.T) {
+	files := []hubclient.ArtifactFile{{Path: "a.md", SHA256: "x"}, {Path: "A.md", SHA256: "y"}}
+	err := writeBundle(context.Background(), nil, &bytes.Buffer{}, "id", 1, files, t.TempDir())
+	assert.ErrorContains(t, err, "same file")
+}

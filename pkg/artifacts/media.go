@@ -20,7 +20,10 @@ import (
 	"net/http"
 	"path"
 	"strings"
+	"unicode"
 	"unicode/utf8"
+
+	"golang.org/x/text/unicode/norm"
 )
 
 // extMediaTypes maps file extensions to media types. It is consulted before
@@ -155,7 +158,10 @@ func cleanFilePath(p string) (string, error) {
 		return "", errBadPath
 	}
 	for _, r := range p {
-		if r < 0x20 || r == 0x7f || r == '\\' {
+		// C0 and C1 controls, DEL, backslash, and format characters
+		// (bidirectional controls, zero-width characters), which make a path
+		// display differently from what it is.
+		if r < 0x20 || (r >= 0x7f && r <= 0x9f) || r == '\\' || unicode.Is(unicode.Cf, r) {
 			return "", errBadPath
 		}
 	}
@@ -165,4 +171,10 @@ func cleanFilePath(p string) (string, error) {
 		}
 	}
 	return p, nil
+}
+
+// pathFoldKey is the form in which two manifest paths are the same file on
+// a case-insensitive or normalizing file system: NFC, then lower case.
+func pathFoldKey(p string) string {
+	return strings.ToLower(norm.NFC.String(p))
 }

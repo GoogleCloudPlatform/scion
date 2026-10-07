@@ -320,6 +320,7 @@ func validateManifest(w http.ResponseWriter, req *CreateVersionRequest, l Limits
 		return false
 	}
 	paths := make(map[string]bool, len(req.Files))
+	folded := make(map[string]string, len(req.Files))
 	var total int64
 	for i := range req.Files {
 		m := &req.Files[i]
@@ -333,6 +334,11 @@ func validateManifest(w http.ResponseWriter, req *CreateVersionRequest, l Limits
 			return bad(fmt.Sprintf("file %q is listed twice", m.Path))
 		}
 		paths[m.Path] = true
+		key := pathFoldKey(m.Path)
+		if other, ok := folded[key]; ok {
+			return bad(fmt.Sprintf("files %q and %q differ only in case or Unicode form", other, m.Path))
+		}
+		folded[key] = m.Path
 		m.SHA256 = strings.ToLower(m.SHA256)
 		if !isHexDigest(m.SHA256) {
 			return bad(fmt.Sprintf("file %q needs a hex SHA-256 digest", m.Path))
@@ -361,6 +367,9 @@ func validateManifest(w http.ResponseWriter, req *CreateVersionRequest, l Limits
 		for dir := path.Dir(p); dir != "."; dir = path.Dir(dir) {
 			if paths[dir] {
 				return bad(fmt.Sprintf("%q is both a file and a directory", dir))
+			}
+			if other, ok := folded[pathFoldKey(dir)]; ok {
+				return bad(fmt.Sprintf("%q and the directory %q differ only in case or Unicode form", other, dir))
 			}
 		}
 	}

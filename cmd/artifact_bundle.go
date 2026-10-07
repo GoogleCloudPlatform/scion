@@ -30,6 +30,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"golang.org/x/text/unicode/norm"
 )
 
 // bundlePublishOptions are the flags of a two-step publish.
@@ -231,11 +232,19 @@ func writeBundle(ctx context.Context, svc hubclient.ArtifactService, stderr io.W
 		return fmt.Errorf("%s exists and is not a directory; a bundle is written into a directory", dir)
 	}
 	targets := make([]string, len(files))
+	seen := make(map[string]string, len(files))
 	for i, f := range files {
 		t, err := safeBundlePath(dir, f.Path)
 		if err != nil {
 			return err
 		}
+		// On a case-insensitive or normalizing file system these two
+		// paths would be one file; refuse rather than overwrite.
+		key := strings.ToLower(norm.NFC.String(f.Path))
+		if other, ok := seen[key]; ok {
+			return fmt.Errorf("bundle paths %q and %q would be the same file on some file systems", other, f.Path)
+		}
+		seen[key] = f.Path
 		targets[i] = t
 	}
 	for i, f := range files {
