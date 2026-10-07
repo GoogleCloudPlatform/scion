@@ -140,6 +140,7 @@ var entRunIDSetters = map[string]bool{
 	"SetRunID":         true,
 	"SetNillableRunID": true,
 	"ClearRunID":       true,
+	"UpdateRunID":      true, // agent upsert
 }
 
 // wantEntRunIDSetterCallers is every function outside the generated ent
@@ -159,6 +160,67 @@ var wantEntRunIDSetterCallers = []string{
 // fails here.
 func TestAgentRunIDStoreWritersAreAClosedSet(t *testing.T) {
 	assert.Equal(t, wantEntRunIDSetterCallers, moduleReferences(t, entRunIDSetters, filepath.Join("pkg", "ent")))
+
+	// An agent upsert could write run_id through its conflict update
+	// (UpdateNewValues) without naming a run_id setter, so nothing outside
+	// the generated code upserts agents: no conflict clause on an Agent
+	// create builder, and no use of the agent upsert types.
+	assert.Empty(t, moduleReferences(t, map[string]bool{
+		"AgentUpsert": true, "AgentUpsertOne": true, "AgentUpsertBulk": true,
+	}, filepath.Join("pkg", "ent")), "agent upsert type outside the generated ent code")
+	assert.Empty(t, agentUpsertCalls(t), "agent upsert outside the generated ent code")
+}
+
+// agentUpsertCalls returns the functions outside the generated ent code
+// that put a conflict clause (OnConflict, OnConflictColumns) on a chain
+// starting from an Agent create builder (….Agent.Create() or
+// ….Agent.CreateBulk(…)).
+func agentUpsertCalls(t *testing.T) []string {
+	t.Helper()
+	var calls []string
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	require.NoError(t, err)
+	fset := token.NewFileSet()
+	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, _ := filepath.Rel(root, path)
+		if d.IsDir() {
+			switch rel {
+			case ".git", "node_modules", "web", "docs-site", "extras", "vendor", ".scion", filepath.Join("pkg", "ent"):
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		file, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
+		if err != nil {
+			return err
+		}
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			found := false
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				sel, ok := n.(*ast.SelectorExpr)
+				if ok && (sel.Sel.Name == "OnConflict" || sel.Sel.Name == "OnConflictColumns") && chainFromAgentCreate(sel.X) {
+					found = true
+				}
+				return !found
+			})
+			if found {
+				calls = append(calls, filepath.ToSlash(rel)+" "+funcKey(fn))
+			}
+		}
+		return nil
+	})
+	require.NoError(t, err)
+	return calls
 }
 
 // TestAgentRunIDWritersAreAClosedSet: the functions that change an agent's
@@ -222,4 +284,45 @@ func TestAgentRunIDWritersAreAClosedSet(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "run-current", got.RunID)
 	})
+}
+
+// chainFromAgentCreate reports whether the call/selector chain e starts
+// from an Agent create builder (….Agent.Create() or ….Agent.CreateBulk(…)).
+func chainFromAgentCreate(e ast.Expr) bool {
+	for {
+		switch x := e.(type) {
+		case *ast.CallExpr:
+			e = x.Fun
+		case *ast.SelectorExpr:
+			if x.Sel.Name == "Create" || x.Sel.Name == "CreateBulk" {
+				if inner, ok := x.X.(*ast.SelectorExpr); ok && inner.Sel.Name == "Agent" {
+					return true
+				}
+			}
+			e = x.X
+		default:
+			return false
+		}
+	}
+}
+
+// TestChainFromAgentCreate pins the matcher agentUpsertCalls relies on.
+func TestChainFromAgentCreate(t *testing.T) {
+	for _, tc := range []struct {
+		expr string
+		want bool
+	}{
+		{expr: "s.client.Agent.Create().SetID(id).SetRunID(r)", want: true},
+		{expr: "tx.Agent.CreateBulk(builders...)", want: true},
+		{expr: "s.client.Agent.Create()", want: true},
+		{expr: "s.client.AgentRecovery.Create().SetID(id)", want: false},
+		{expr: "s.client.Agent.UpdateOneID(id)", want: false},
+		{expr: "builder.SetID(id)", want: false},
+	} {
+		t.Run(tc.expr, func(t *testing.T) {
+			e, err := parser.ParseExpr(tc.expr)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, chainFromAgentCreate(e))
+		})
+	}
 }
