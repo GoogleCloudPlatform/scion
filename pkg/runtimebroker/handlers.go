@@ -4501,13 +4501,15 @@ var execContainerNotFoundRe = regexp.MustCompile(`(?i)\b(?:containers?|pods?|san
 // isExecTargetNotFound reports whether an rt.Exec error (that is not a
 // command exit, see execCommandExitCode) means the agent's container is
 // gone. Structured signals come first: a Kubernetes NotFound status (the pod
-// no longer exists) is; a missing runtime binary (os/exec.ErrNotFound,
+// no longer exists) or runtime.ErrContainerNotFound (docker, podman and
+// apple, when the container was removed after the lookup; ptone/scion#3655)
+// is; a missing runtime binary (os/exec.ErrNotFound,
 // "executable file not found") is a broker problem, not a missing agent.
 // Otherwise the fallback is container-specific wording
 // (execContainerNotFoundRe), matched only on the part of the message that
 // cannot carry command output.
 func isExecTargetNotFound(err error) bool {
-	if k8serrors.IsNotFound(err) {
+	if k8serrors.IsNotFound(err) || errors.Is(err, scionrt.ErrContainerNotFound) {
 		return true
 	}
 	if errors.Is(err, exec.ErrNotFound) {

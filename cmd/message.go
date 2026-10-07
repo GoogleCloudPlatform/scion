@@ -608,6 +608,9 @@ func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, int
 	if notify {
 		fmt.Printf("Subscribed to notifications for agent '%s'.\n", agentName)
 	}
+	if resp != nil {
+		printAttachmentWarnings(resp.AttachmentWarnings)
+	}
 
 	return nil
 }
@@ -662,6 +665,9 @@ func sendCrossProjectMessage(hubCtx *HubContext, targetProject, agentSlug, messa
 		}
 		return nil
 	}
+	// No attachment warnings here: an agent sender's cross-project send
+	// with attachments is rejected with a 422, and a human sender's
+	// attachments are not ingested, so neither case carries warnings.
 	if resp != nil {
 		printMentionResults(resp.MentionResults)
 	}
@@ -747,6 +753,9 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 			} else {
 				fmt.Printf("Message delivered to agent '%s'.\n", ref.Value)
 			}
+			if resp != nil {
+				printAttachmentWarnings(resp.AttachmentWarnings)
+			}
 			return nil
 		}
 
@@ -813,6 +822,7 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 		default:
 			fmt.Printf("Message dispatched to %s (message %s, status: %s).\n", ref.Raw, result.MessageID, result.Status)
 		}
+		printAttachmentWarnings(result.AttachmentWarnings)
 		return nil
 	}
 
@@ -835,6 +845,8 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 		return fmt.Errorf("message validation failed: %w", err)
 	}
 
+	// The hub ingests attachments, and so reports attachment warnings,
+	// only for agent senders; this human path has none to print.
 	if _, err := agentSvc.SendStructuredMessage(ctx, ref.Value, agentMsg, interrupt, false, wake); err != nil {
 		return agentMessageSendError(ref.Value, err)
 	}
@@ -933,6 +945,9 @@ func sendOutboundMessageViaHub(hubCtx *HubContext, userRecipient string, message
 	} else {
 		fmt.Printf("Message sent to %s via Hub.\n", userRecipient)
 	}
+	if result != nil {
+		printAttachmentWarnings(result.AttachmentWarnings)
+	}
 	return nil
 }
 
@@ -963,6 +978,9 @@ type groupRecipientResult struct {
 	Recipient string `json:"recipient"`
 	Status    string `json:"status"`
 	Error     string `json:"error,omitempty"`
+	// AttachmentWarnings lists attachments the hub could not record on this
+	// recipient's copy of the message (ptone/scion#3667).
+	AttachmentWarnings []hubclient.AttachmentWarning `json:"attachment_warnings,omitempty"`
 }
 
 // retryRecipientArg builds a recipient argument for scion message naming the
@@ -1186,9 +1204,11 @@ func sendGroupMessageViaHubCtx(hubCtx *HubContext, recipients []messages.GroupRe
 	}
 	// recordAmbiguous handles the Hub's 202 "ambiguous" outcome: it may or
 	// may not have dispatched the message, so it is unknown, not delivered.
-	recordAmbiguous := func(idx int, recipStr, messageID string) {
+	// The attachment warnings are kept: the message was persisted either way.
+	recordAmbiguous := func(idx int, recipStr, messageID string, warnings []hubclient.AttachmentWarning) {
 		record(idx, groupRecipientResult{Recipient: recipStr, Status: groupStatusUnknown,
-			Error: fmt.Sprintf("Hub reported delivery as ambiguous (message %s); it may have been delivered", messageID)})
+			Error:              fmt.Sprintf("Hub reported delivery as ambiguous (message %s); it may have been delivered", messageID),
+			AttachmentWarnings: warnings})
 	}
 
 	// An interrupt before a recipient's request was started means it was
@@ -1230,15 +1250,19 @@ func sendGroupMessageViaHubCtx(hubCtx *HubContext, recipients []messages.GroupRe
 				recordErr(idx, recipStr, err)
 				return
 			}
+			var warnings []hubclient.AttachmentWarning
+			if sendResp != nil {
+				warnings = sendResp.AttachmentWarnings
+			}
 			if sendResp != nil && sendResp.Status == "deferred" {
-				record(idx, groupRecipientResult{Recipient: recipStr, Status: groupStatusDeferred})
+				record(idx, groupRecipientResult{Recipient: recipStr, Status: groupStatusDeferred, AttachmentWarnings: warnings})
 				return
 			}
 			if sendResp != nil && sendResp.Status == "ambiguous" {
-				recordAmbiguous(idx, recipStr, sendResp.MessageID)
+				recordAmbiguous(idx, recipStr, sendResp.MessageID, warnings)
 				return
 			}
-			record(idx, groupRecipientResult{Recipient: recipStr, Status: groupStatusDelivered})
+			record(idx, groupRecipientResult{Recipient: recipStr, Status: groupStatusDelivered, AttachmentWarnings: warnings})
 
 		case messages.RecipientUser:
 			senderAgent := os.Getenv("SCION_AGENT_NAME")
@@ -1266,11 +1290,15 @@ func sendGroupMessageViaHubCtx(hubCtx *HubContext, recipients []messages.GroupRe
 				recordErr(idx, recipStr, err)
 				return
 			}
+			var warnings []hubclient.AttachmentWarning
+			if outResp != nil {
+				warnings = outResp.AttachmentWarnings
+			}
 			if outResp != nil && outResp.Status == "ambiguous" {
-				recordAmbiguous(idx, recipStr, outResp.MessageID)
+				recordAmbiguous(idx, recipStr, outResp.MessageID, warnings)
 				return
 			}
-			record(idx, groupRecipientResult{Recipient: recipStr, Status: groupStatusDelivered})
+			record(idx, groupRecipientResult{Recipient: recipStr, Status: groupStatusDelivered, AttachmentWarnings: warnings})
 		}
 	}
 	boundedFanOut(fanCtx, len(recipients), maxFanOutConcurrency, hooks.onQueued, sendOne, recordNotSent)
@@ -1354,6 +1382,7 @@ func sendGroupMessageViaHubCtx(hubCtx *HubContext, recipients []messages.GroupRe
 	// come first, since mentions are only sent once the group sends finish.
 	if !isJSONOutput() {
 		printGroupSendSummary(summary, interrupted)
+		printAttachmentWarnings(groupAttachmentWarnings(results))
 	}
 
 	// A25.6 F2: a deferred recipient is not a failure (design agent-reincarnate
@@ -1384,6 +1413,23 @@ func sendGroupMessageViaHubCtx(hubCtx *HubContext, recipients []messages.GroupRe
 		msg += "; do not resend to the whole group"
 	}
 	return &groupSendError{msg: msg, partial: true}
+}
+
+// groupAttachmentWarnings collects the attachment warnings across a group
+// send's recipients. Every recipient is sent the same attachments, so the same
+// file usually fails for each of them; it is reported once.
+func groupAttachmentWarnings(results []groupRecipientResult) []hubclient.AttachmentWarning {
+	var out []hubclient.AttachmentWarning
+	seen := make(map[hubclient.AttachmentWarning]bool)
+	for _, r := range results {
+		for _, w := range r.AttachmentWarnings {
+			if !seen[w] {
+				seen[w] = true
+				out = append(out, w)
+			}
+		}
+	}
+	return out
 }
 
 // groupSendCounts formats a group send's outcome counts.
@@ -1647,6 +1693,25 @@ func printMentionResults(results []messages.MentionResult) {
 	}
 }
 
+// printAttachmentWarnings prints one stderr line per attachment the hub
+// could not record on a sent message (ptone/scion#3667). The message itself
+// was sent, so this is a warning and the exit status is unchanged. Skipped
+// under --json output, where the warnings are part of the JSON response.
+//
+// The hub ingests attachments only when the sender is an agent: an agent
+// DM to another agent (including each per-recipient send of a CLI group
+// fan-out) and an agent's outbound message. Human sends and cross-project
+// sends never carry warnings. Paths shared by humans and agents still call
+// this; for a human sender the list is simply empty.
+func printAttachmentWarnings(warnings []hubclient.AttachmentWarning) {
+	if isJSONOutput() {
+		return
+	}
+	for _, w := range warnings {
+		fmt.Fprintf(os.Stderr, "Warning: attachment %s was not delivered: %s\n", w.Path, w.Reason)
+	}
+}
+
 // sendMentionMessages resolves @mentions and --cc names against project agents
 // and sends TypeMention messages to each resolved agent. The primary recipient
 // is excluded from mentions. Unresolved names produce a non-fatal stderr note
@@ -1781,7 +1846,7 @@ func init() {
 	// Retained flags (core message functionality)
 	messageCmd.Flags().BoolVarP(&msgInterrupt, "interrupt", "i", false, "Interrupt the harness before sending the message")
 	messageCmd.Flags().BoolVarP(&msgWake, "wake", "w", false, "Resume a suspended agent before delivering the message")
-	messageCmd.Flags().StringArrayVar(&msgAttach, "attach", nil, "Attach file path(s), repeatable; use paths under /workspace or /scion-volumes (bare relative paths resolve to /workspace). Absolute paths outside these roots are silently dropped on delivery.")
+	messageCmd.Flags().StringArrayVar(&msgAttach, "attach", nil, "Attach file path(s), repeatable; use paths under /workspace or /scion-volumes (bare relative paths resolve to /workspace). Absolute paths outside these roots are skipped with a warning; attachments the hub cannot read are reported as warnings after the message is sent.")
 	messageCmd.Flags().StringVar(&msgBodyFile, "body-file", "", "Read message body from a file instead of positional args ('-' reads stdin; trailing CR/LF characters are trimmed)")
 
 	// Deprecated flags — still functional, emit warnings when used.
