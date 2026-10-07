@@ -288,3 +288,49 @@ func TestSendGroupMessage_AmbiguousKeepsAttachmentWarnings(t *testing.T) {
 	})
 	assert.Equal(t, 1, strings.Count(stderr, "Warning: attachment "+attachWarnPath), stderr)
 }
+
+// An agent sender's @agent reference goes through the structured message
+// endpoint, which reports attachment warnings like a direct agent DM.
+func TestSendMessageViaConversation_AgentRef_AttachmentWarning(t *testing.T) {
+	ref := &messaging.Reference{Kind: messaging.RefAgent, Value: "builder", Raw: "@builder"}
+
+	t.Run("text", func(t *testing.T) {
+		setAttachWarnState(t, "")
+		t.Setenv("SCION_AGENT_NAME", "sender")
+		projectID := "proj-attach-warn-conv-agent"
+		srv, sends := newAttachWarnHub(t, projectID)
+		hubCtx := attachWarnHubCtx(t, srv, projectID)
+
+		var sendErr error
+		stdout, stderr := captureStdoutStderr(t, func() {
+			sendErr = sendMessageViaConversation(hubCtx, ref, "see attached", false, false, msgAttach)
+		})
+		require.NoError(t, sendErr, "a warning must not turn the send into an error")
+		assert.EqualValues(t, 1, atomic.LoadInt32(sends))
+		assert.Contains(t, stdout, "Message delivered to agent 'builder'.")
+		assert.Equal(t, 1, strings.Count(stderr,
+			"Warning: attachment "+attachWarnPath+" was not delivered: file not found on the hub host"),
+			"the warning is printed to stderr exactly once: %s", stderr)
+	})
+
+	t.Run("json", func(t *testing.T) {
+		setAttachWarnState(t, "json")
+		t.Setenv("SCION_AGENT_NAME", "sender")
+		projectID := "proj-attach-warn-conv-agent-json"
+		srv, _ := newAttachWarnHub(t, projectID)
+		hubCtx := attachWarnHubCtx(t, srv, projectID)
+
+		var sendErr error
+		stdout, stderr := captureStdoutStderr(t, func() {
+			sendErr = sendMessageViaConversation(hubCtx, ref, "see attached", false, false, msgAttach)
+		})
+		require.NoError(t, sendErr)
+		assert.NotContains(t, stderr, "Warning: attachment", "under --json the warning belongs in the JSON object")
+
+		var resp hubclient.MessageResponse
+		require.NoError(t, json.Unmarshal([]byte(stdout), &resp), "stdout: %s", stdout)
+		require.Len(t, resp.AttachmentWarnings, 1)
+		assert.Equal(t, attachWarnPath, resp.AttachmentWarnings[0].Path)
+		assert.Equal(t, "file not found on the hub host", resp.AttachmentWarnings[0].Reason)
+	})
+}

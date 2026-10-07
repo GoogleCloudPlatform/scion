@@ -665,8 +665,9 @@ func sendCrossProjectMessage(hubCtx *HubContext, targetProject, agentSlug, messa
 		}
 		return nil
 	}
-	// No attachment warnings here: the hub rejects attachments on a
-	// cross-project send outright instead of ingesting them.
+	// No attachment warnings here: an agent sender's cross-project send
+	// with attachments is rejected with a 422, and a human sender's
+	// attachments are not ingested, so neither case carries warnings.
 	if resp != nil {
 		printMentionResults(resp.MentionResults)
 	}
