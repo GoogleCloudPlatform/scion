@@ -150,21 +150,31 @@ func rawMemorySQLiteOpens(files map[string][]byte) ([]string, error) {
 }
 
 // collectStringConsts records the string-literal constants declared by decl.
+// A spec with no values in a const block implicitly repeats the previous
+// spec's value list (const ( a = ":memory:"; b ) gives b ":memory:" too), so
+// the last explicit list is carried forward.
 func collectStringConsts(decl ast.Decl, into map[string]string) {
 	gd, ok := decl.(*ast.GenDecl)
 	if !ok || gd.Tok != token.CONST {
 		return
 	}
+	var last []ast.Expr
 	for _, spec := range gd.Specs {
 		vs, ok := spec.(*ast.ValueSpec)
 		if !ok {
 			continue
 		}
+		values := vs.Values
+		if len(values) == 0 {
+			values = last
+		} else {
+			last = values
+		}
 		for i, n := range vs.Names {
-			if i >= len(vs.Values) {
+			if i >= len(values) {
 				break
 			}
-			if lit, ok := vs.Values[i].(*ast.BasicLit); ok && lit.Kind == token.STRING {
+			if lit, ok := values[i].(*ast.BasicLit); ok && lit.Kind == token.STRING {
 				if v, err := strconv.Unquote(lit.Value); err == nil {
 					into[n.Name] = v
 				}
@@ -209,6 +219,11 @@ import "database/sql"
 
 const memDSN = ":memory:"
 
+const (
+	implicitBase = ":memory:"
+	implicitDSN
+)
+
 func drv() string { return "sqlite3" }
 
 func openTestMemorySQLite() { _, _ = sql.Open("sqlite3", ":memory:") } // exempt
@@ -224,6 +239,7 @@ func bad() {
 	_, _ = sql.Open(drv(), ":memory:")
 	_, _ = sql.Open("sqlite3", localDSN)
 	_, _ = ent.Open("sqlite3", "file::memory:?_fk=1")
+	_, _ = sql.Open("sqlite3", implicitDSN)
 }
 
 func good() {
@@ -237,8 +253,8 @@ func good() {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 6 {
-		t.Fatalf("want 6 offenders (literal, const, multi-line, paren arg, local mode=memory const, ent), got %d:\n  %s",
+	if len(got) != 7 {
+		t.Fatalf("want 7 offenders (literal, const, multi-line, paren arg, local mode=memory const, ent, implicit const), got %d:\n  %s",
 			len(got), strings.Join(got, "\n  "))
 	}
 }
