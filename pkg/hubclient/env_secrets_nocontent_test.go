@@ -15,7 +15,6 @@
 package hubclient
 
 import (
-	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -43,7 +42,7 @@ func TestEnvGet_NoContent(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	envVar, err := client.Env().Get(context.Background(), "GONE", nil)
+	envVar, err := client.Env().Get(t.Context(), "GONE", nil)
 	if err == nil {
 		t.Fatalf("expected an error for a 204 response, got %+v", envVar)
 	}
@@ -62,7 +61,7 @@ func TestSecretGet_NoContent(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	secret, err := client.Secrets().Get(context.Background(), "GONE", nil)
+	secret, err := client.Secrets().Get(t.Context(), "GONE", nil)
 	if err == nil {
 		t.Fatalf("expected an error for a 204 response, got %+v", secret)
 	}

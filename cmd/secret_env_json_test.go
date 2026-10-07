@@ -440,7 +440,7 @@ func TestRunAgentSecretGet_NoContent(t *testing.T) {
 			})
 			origCtx := agentSecretGetCmd.Context()
 			t.Cleanup(func() { agentSecretGetCmd.SetContext(origCtx) })
-			agentSecretGetCmd.SetContext(context.Background())
+			agentSecretGetCmd.SetContext(t.Context())
 			outputFormat = mode.format
 
 			var runErr error
