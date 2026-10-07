@@ -912,6 +912,15 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 			}
 			if heartbeat.Health != nil {
 				if health := api.NormalizeBrokerHealthReport(heartbeat.Health); !reflect.DeepEqual(broker.Health, health) {
+					// Logged only when the stored report changes, so at
+					// most once per distinct report, with counts only.
+					if n := countBrokerHealthNormalization(heartbeat.Health, health); n.any() {
+						s.agentLifecycleLog.Info("heartbeat: broker health report normalised",
+							"broker_id", id,
+							"dropped_checks", n.DroppedChecks,
+							"unrecognised_values", n.UnrecognisedValues,
+							"unrecognised_status", n.UnrecognisedStatus)
+					}
 					broker.Health = health
 					changed = true
 				}

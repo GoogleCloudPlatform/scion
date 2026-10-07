@@ -81,7 +81,9 @@ var (
 //     else becomes unknown.
 //   - Each check value is reduced to its leading word (so
 //     "unhealthy: <share>: <error>" becomes "unhealthy") and kept when that
-//     word is one of the fixed check values; anything else becomes unknown.
+//     whole word is one of the fixed check values; anything else, including
+//     a fixed word run on into other characters ("healthy_x"), becomes
+//     unknown.
 //     No other text from the broker is kept.
 //   - A check name must be 1-64 characters of [A-Za-z0-9_.-]; any other
 //     name is dropped. At most BrokerHealthMaxChecks checks are kept, the
@@ -116,8 +118,10 @@ func NormalizeBrokerHealthReport(r *BrokerHealthReport) *BrokerHealthReport {
 	return out
 }
 
-// leadingHealthWord returns the lower-cased leading run of letters of v when
-// it is in allowed, else unknown.
+// leadingHealthWord returns the lower-cased leading word of v when it is in
+// allowed and is a whole word: it ends v, or is followed by whitespace,
+// ':', ';', ',' or '(' (the start of a cause, which is discarded).
+// Anything else, such as "healthy_x" or "available-not", is unknown.
 func leadingHealthWord(v string, allowed map[string]bool) string {
 	v = strings.TrimSpace(v)
 	end := 0
@@ -127,6 +131,13 @@ func leadingHealthWord(v string, allowed map[string]bool) string {
 			break
 		}
 		end++
+	}
+	if end < len(v) {
+		switch v[end] {
+		case ' ', '\t', '\n', '\r', ':', ';', ',', '(':
+		default:
+			return BrokerHealthUnknown
+		}
 	}
 	if w := strings.ToLower(v[:end]); allowed[w] {
 		return w

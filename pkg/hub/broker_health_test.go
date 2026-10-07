@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"testing"
@@ -294,4 +295,63 @@ func TestBrokerHeartbeat_HealthWireCompatibility(t *testing.T) {
 	raw, err = json.Marshal(hubclient.BrokerHeartbeat{Status: "online"})
 	require.NoError(t, err)
 	assert.NotContains(t, string(raw), `"health"`)
+}
+
+func TestCountBrokerHealthNormalization(t *testing.T) {
+	assert.False(t, countBrokerHealthNormalization(nil, nil).any())
+
+	clean := &api.BrokerHealthReport{Status: "degraded", Checks: map[string]string{"runtime": "unavailable", "x": "unknown"}}
+	assert.False(t, countBrokerHealthNormalization(clean, api.NormalizeBrokerHealthReport(clean)).any(),
+		"fixed words, including a value the broker sent as unknown, are not counted")
+
+	checks := map[string]string{"nfs_mounts": rawNFSHealthCheck, "odd": "pending", "bad name": "healthy"}
+	for i := 0; i < api.BrokerHealthMaxChecks; i++ {
+		checks[fmt.Sprintf("z_%02d", i)] = "healthy"
+	}
+	in := &api.BrokerHealthReport{Status: "on fire", Checks: checks}
+	got := countBrokerHealthNormalization(in, api.NormalizeBrokerHealthReport(in))
+	assert.Equal(t, brokerHealthNormalization{
+		// "bad name" is invalid; of the 18 valid names, the last 2 in
+		// sorted order are past the cap.
+		DroppedChecks:      3,
+		UnrecognisedValues: 1, // "pending"; the NFS value keeps its leading word
+		UnrecognisedStatus: true,
+	}, got)
+}
+
+// What normalisation discarded is logged once per distinct report (only
+// when the stored report changes), as counts without the broker's text.
+// A report that needed no normalisation is not logged.
+func TestBrokerHeartbeat_HealthNormalisationLogged(t *testing.T) {
+	srv, s := testServer(t)
+	grantDevUserRuntimeBrokerAccess(t, s)
+	broker := newBrokerHealthTestBroker(t, s, "broker-health-log")
+	logs := &syncBuffer{}
+	srv.agentLifecycleLog = slog.New(slog.NewTextHandler(logs, nil))
+	path := "/api/v1/runtime-brokers/" + broker.ID + "/heartbeat"
+	const msg = "broker health report normalised"
+
+	send := func(report *api.BrokerHealthReport) {
+		t.Helper()
+		rec := doRequest(t, srv, http.MethodPost, path, brokerHeartbeatRequest{Status: "online", Health: report})
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	}
+
+	send(degradedRuntimeReport())
+	assert.NotContains(t, logs.String(), msg, "a report of fixed words is not logged")
+
+	odd := &api.BrokerHealthReport{
+		Status: "degraded",
+		Checks: map[string]string{"runtime": "pending: /var/run/x", "/mnt/nfs/ws1": "healthy"},
+	}
+	for i := 0; i < 3; i++ {
+		send(odd)
+	}
+	out := logs.String()
+	assert.Equal(t, 1, strings.Count(out, msg), "logged once, when the stored report changed")
+	assert.Contains(t, out, "dropped_checks=1")
+	assert.Contains(t, out, "unrecognised_values=1")
+	assert.Contains(t, out, "unrecognised_status=false")
+	assert.NotContains(t, out, "/var/run/x")
+	assert.NotContains(t, out, "/mnt/nfs")
 }

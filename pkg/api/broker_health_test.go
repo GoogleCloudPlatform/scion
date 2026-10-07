@@ -42,7 +42,11 @@ func TestNormalizeBrokerHealthReport_Status(t *testing.T) {
 		"available":                 "unknown", // a check value, not a status
 		"on fire":                   "unknown",
 		"healthyish":                "unknown",
-		"degraded/../../etc/passwd": "degraded",
+		"degraded/../../etc/passwd": "unknown",
+		"degraded (runtime)":        "degraded",
+		"degraded;runtime":          "degraded",
+		"degraded,runtime":          "degraded",
+		"degraded\tcause":           "degraded",
 		strings.Repeat("x", 500):    "unknown",
 		rawNFSError:                 "unhealthy",
 	} {
@@ -64,6 +68,12 @@ func TestNormalizeBrokerHealthReport_CheckValuesFixed(t *testing.T) {
 			"docker":     "Available",
 			"other":      "pending: waiting for 10.0.0.2",
 			"empty":      "",
+			"word_x":     "healthy_x",
+			"word_dash":  "available-not",
+			"word_digit": "healthy123",
+			"word_utf8":  "healthyé",
+			"word_dot":   "available.",
+			"word_cause": "unavailable (no runtime)",
 		},
 	})
 	want := map[string]string{
@@ -72,6 +82,12 @@ func TestNormalizeBrokerHealthReport_CheckValuesFixed(t *testing.T) {
 		"docker":     "available",
 		"other":      "unknown",
 		"empty":      "unknown",
+		"word_x":     "unknown",
+		"word_dash":  "unknown",
+		"word_digit": "unknown",
+		"word_utf8":  "unknown",
+		"word_dot":   "unknown",
+		"word_cause": "unavailable",
 	}
 	if !reflect.DeepEqual(got.Checks, want) {
 		t.Errorf("checks = %v, want %v", got.Checks, want)
@@ -145,5 +161,16 @@ func TestNormalizeBrokerHealthReport_EmptyChecksNil(t *testing.T) {
 		if got.Checks != nil {
 			t.Errorf("checks %v -> %v, want nil", checks, got.Checks)
 		}
+	}
+}
+
+// The cap bounds the stored broker row. It is pinned here so a change to
+// it is deliberate.
+func TestBrokerHealthLimitsPinned(t *testing.T) {
+	if BrokerHealthMaxChecks != 16 {
+		t.Errorf("BrokerHealthMaxChecks = %d, want 16", BrokerHealthMaxChecks)
+	}
+	if BrokerHealthMaxNameChars != 64 {
+		t.Errorf("BrokerHealthMaxNameChars = %d, want 64", BrokerHealthMaxNameChars)
 	}
 }
