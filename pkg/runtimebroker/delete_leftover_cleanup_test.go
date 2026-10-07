@@ -30,7 +30,7 @@ import (
 // Tests that an agent delete removes per-agent runtime objects when the
 // agent's container was already removed outside scion, and only then.
 
-type cleanupCall struct{ agentName, projectID string }
+type cleanupCall struct{ agentName, projectID, runID string }
 
 // cleanupRecordingManager is a filteringMockManager whose runtime can
 // remove leftover per-agent objects; it records each request.
@@ -41,10 +41,10 @@ type cleanupRecordingManager struct {
 	cleanupErr error
 }
 
-func (m *cleanupRecordingManager) CleanupAgentResources(_ context.Context, agentName, projectID string) error {
+func (m *cleanupRecordingManager) CleanupAgentResources(_ context.Context, agentName, projectID, runID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.calls = append(m.calls, cleanupCall{agentName, projectID})
+	m.calls = append(m.calls, cleanupCall{agentName, projectID, runID})
 	return m.cleanupErr
 }
 
@@ -110,8 +110,8 @@ func TestDeleteAgent_ContainerGone_FilesPresent_CleansLeftoverObjects(t *testing
 	if mgr.LastDeleteContainerID() != "" {
 		t.Fatalf("file-only delete must not target a container, got %q", mgr.LastDeleteContainerID())
 	}
-	assertCleanupCalls(t, mgr.cleanupCalls(), cleanupCall{"dev", scopeProjB})
-	assertCleanupCalls(t, aux.cleanupCalls(), cleanupCall{"dev", scopeProjB})
+	assertCleanupCalls(t, mgr.cleanupCalls(), cleanupCall{"dev", scopeProjB, ""})
+	assertCleanupCalls(t, aux.cleanupCalls(), cleanupCall{"dev", scopeProjB, ""})
 }
 
 func TestDeleteAgent_ContainerAndFilesGone_CleansLeftoverObjects(t *testing.T) {
@@ -125,7 +125,7 @@ func TestDeleteAgent_ContainerAndFilesGone_CleansLeftoverObjects(t *testing.T) {
 	if mgr.DeleteCalls() != 0 {
 		t.Errorf("expected no delete call, got %d", mgr.DeleteCalls())
 	}
-	assertCleanupCalls(t, mgr.cleanupCalls(), cleanupCall{"dev", scopeProjB})
+	assertCleanupCalls(t, mgr.cleanupCalls(), cleanupCall{"dev", scopeProjB, ""})
 }
 
 func TestDeleteAgent_ContainerPresent_NoLeftoverCleanup(t *testing.T) {
@@ -171,7 +171,7 @@ func TestDeleteAgent_LeftoverCleanupFailure_ResponseUnchanged(t *testing.T) {
 		if mgr.DeleteCalls() != 1 {
 			t.Errorf("expected the file delete to run, got %d calls", mgr.DeleteCalls())
 		}
-		assertCleanupCalls(t, mgr.cleanupCalls(), cleanupCall{"dev", scopeProjB})
+		assertCleanupCalls(t, mgr.cleanupCalls(), cleanupCall{"dev", scopeProjB, ""})
 	})
 	t.Run("not found 404", func(t *testing.T) {
 		mgr := &cleanupRecordingManager{cleanupErr: errors.New("list failed")}
@@ -181,7 +181,7 @@ func TestDeleteAgent_LeftoverCleanupFailure_ResponseUnchanged(t *testing.T) {
 		if rec.Code != http.StatusNotFound {
 			t.Fatalf("expected 404, got %d: %s", rec.Code, rec.Body.String())
 		}
-		assertCleanupCalls(t, mgr.cleanupCalls(), cleanupCall{"dev", scopeProjB})
+		assertCleanupCalls(t, mgr.cleanupCalls(), cleanupCall{"dev", scopeProjB, ""})
 	})
 }
 
@@ -218,7 +218,7 @@ func TestDeleteAgent_RecordedRuntime_CleansOnlyThatRuntime(t *testing.T) {
 			if rec.Code != http.StatusNoContent {
 				t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
 			}
-			want := []cleanupCall{{"dev", scopeProjB}}
+			want := []cleanupCall{{"dev", scopeProjB, ""}}
 			if tc.wantDefault {
 				assertCleanupCalls(t, mgr.cleanupCalls(), want...)
 			} else {
@@ -229,6 +229,38 @@ func TestDeleteAgent_RecordedRuntime_CleansOnlyThatRuntime(t *testing.T) {
 			} else {
 				assertCleanupCalls(t, aux.cleanupCalls())
 			}
+		})
+	}
+}
+
+// A run-scoped delete whose container is gone passes its run to the
+// leftover cleanup (ptone/scion#2550 P5), on the file-only path and the
+// not-found path alike, so the runtime removes only that run's objects and
+// legacy ones; a delete naming no run passes none, as before.
+func TestDeleteAgent_ContainerGone_LeftoverCleanupCarriesRun(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		files    bool
+		query    string
+		wantCode int
+		wantRun  string
+	}{
+		{"files present, run named", true, "&runId=run-a&deleteFiles=true", http.StatusNoContent, "run-a"},
+		{"files present, no run", true, "&deleteFiles=true", http.StatusNoContent, ""},
+		{"nothing left, run named", false, "&runId=run-a", http.StatusNotFound, "run-a"},
+		{"nothing left, no run", false, "", http.StatusNotFound, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr := &cleanupRecordingManager{}
+			srv, home := newCleanupTestServer(t, mgr)
+			if tc.files {
+				makeHubProject(t, home, "proj-b", scopeProjB, "dev")
+			}
+			rec := doDelete(t, srv, "dev", "projectId="+scopeProjB+tc.query)
+			if rec.Code != tc.wantCode {
+				t.Fatalf("expected %d, got %d: %s", tc.wantCode, rec.Code, rec.Body.String())
+			}
+			assertCleanupCalls(t, mgr.cleanupCalls(), cleanupCall{"dev", scopeProjB, tc.wantRun})
 		})
 	}
 }

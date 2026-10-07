@@ -23,6 +23,7 @@
 
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
+import { keyed } from 'lit/directives/keyed.js';
 
 import { can, type AdminUser, type UserRole } from '../../shared/types.js';
 import type { SecurityReviewDetail } from '../shared/security-review-dialog.js';
@@ -35,7 +36,7 @@ import '../shared/effective-role-provenance.js';
 import '../shared/effective-access-boundary-notice.js';
 import '../shared/security-review-dialog.js';
 import { formatRelative } from '../../utils/time.js';
-import { apiFetch, extractApiError } from '../../client/api.js';
+import { apiFetch, extractApiError, parseApiError } from '../../client/api.js';
 
 type SortField = 'name' | 'created';
 type SortDir = 'asc' | 'desc';
@@ -102,6 +103,33 @@ export const HUB_ROLE_DESCRIPTIONS: Record<UserRole, string> = {
     'The same as Member, but cannot create projects (including cloning). Viewers can still be added to projects and work there according to their project role.',
 };
 
+/** How long a non-warning action feedback alert stays open. */
+const FEEDBACK_AUTO_CLOSE_MS = 5000;
+
+/** Variants of the page's action feedback alert. */
+type FeedbackVariant = 'success' | 'danger' | 'warning' | 'primary';
+
+/** Response body of POST /api/v1/users. */
+interface ProvisionUserResponse {
+  user: { id?: string; email: string; status: string };
+  created: boolean;
+  warnings?: string[];
+}
+
+/** Describes an advisory warning of POST /api/v1/users. */
+export function provisionWarningText(warning: string): string {
+  switch (warning) {
+    case 'reserved_identity':
+      return 'This email is a reserved platform identity; sign-in will be refused.';
+    case 'domain_not_authorized':
+      return "This email is outside the hub's authorized domains; sign-in will be refused.";
+    case 'sign_in_currently_blocked_by_access_mode':
+      return "The hub's access mode currently blocks all sign-ins.";
+    default:
+      return `Warning: ${warning}.`;
+  }
+}
+
 @customElement('scion-page-admin-users')
 export class ScionPageAdminUsers extends LitElement {
   @state()
@@ -141,7 +169,7 @@ export class ScionPageAdminUsers extends LitElement {
   private actionInProgress = false;
 
   @state()
-  private actionFeedback: { message: string; variant: 'success' | 'danger' } | null = null;
+  private actionFeedback: { message: string; variant: FeedbackVariant } | null = null;
 
   @state()
   private activeTab: AdminTab = 'users';
@@ -165,6 +193,14 @@ export class ScionPageAdminUsers extends LitElement {
 
   @state()
   private inviteUserNote = '';
+
+  /**
+   * Optional display name. When set, the invite dialog pre-registers the
+   * user through POST /api/v1/users, which stores the name; otherwise it
+   * uses the invite endpoint as before.
+   */
+  @state()
+  private inviteUserDisplayName = '';
 
   @state()
   private inviteUserInProgress = false;
@@ -1094,11 +1130,50 @@ export class ScionPageAdminUsers extends LitElement {
     }
   }
 
-  private showFeedback(variant: 'success' | 'danger', message: string): void {
+  /**
+   * Shows the action feedback alert. The alert closes itself: every
+   * variant except `warning` after 5 seconds (the alert's `duration`); a
+   * warning (for example, sign-in for an invited email will be refused)
+   * stays until the admin closes it or another notice replaces it. Each
+   * notice renders a fresh alert element (see render), so an earlier
+   * notice's timer cannot close a newer one.
+   */
+  private showFeedback(variant: FeedbackVariant, message: string): void {
     this.actionFeedback = { variant, message };
-    setTimeout(() => {
-      this.actionFeedback = null;
-    }, 5000);
+  }
+
+  /**
+   * Renders one feedback notice. keyed() gives each notice its own alert
+   * element, and with it its own auto-close timer, so an earlier notice
+   * cannot hide a newer one.
+   */
+  private renderFeedbackAlert(feedback: { message: string; variant: FeedbackVariant }) {
+    return keyed(
+      feedback,
+      html`
+        <sl-alert
+          class="feedback-alert"
+          variant=${feedback.variant}
+          open
+          closable
+          .duration=${feedback.variant === 'warning' ? Infinity : FEEDBACK_AUTO_CLOSE_MS}
+          @sl-after-hide=${(): void => {
+            // Clear only this notice, never a newer one that replaced it.
+            if (this.actionFeedback === feedback) this.actionFeedback = null;
+          }}
+        >
+          <sl-icon
+            slot="icon"
+            name=${feedback.variant === 'success'
+              ? 'check-circle'
+              : feedback.variant === 'primary'
+                ? 'info-circle'
+                : 'exclamation-triangle'}
+          ></sl-icon>
+          ${feedback.message}
+        </sl-alert>
+      `
+    );
   }
 
   private isSelf(user: AdminUser): boolean {
@@ -1225,22 +1300,15 @@ export class ScionPageAdminUsers extends LitElement {
 
     this.inviteUserInProgress = true;
     try {
-      const response = await apiFetch('/api/v1/admin/users/invite', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, note: this.inviteUserNote }),
-      });
-      if (response.status === 409) {
-        this.showFeedback('danger', 'User already exists.');
-        return;
-      }
-      if (!response.ok) {
-        throw new Error(await extractApiError(response, `HTTP ${response.status}`));
-      }
-      this.showFeedback('success', `Invited ${email}.`);
+      const displayName = this.inviteUserDisplayName.trim();
+      const done = displayName
+        ? await this.provisionUser(email, displayName)
+        : await this.inviteUserByEmail(email);
+      if (!done) return;
       this.showInviteUserDialog = false;
       this.inviteUserEmail = '';
       this.inviteUserNote = '';
+      this.inviteUserDisplayName = '';
       void this.loadUsers(
         this.currentPage > 1 ? this.cursorHistory[this.cursorHistory.length - 1] : undefined
       );
@@ -1249,6 +1317,74 @@ export class ScionPageAdminUsers extends LitElement {
     } finally {
       this.inviteUserInProgress = false;
     }
+  }
+
+  /** Invites through the invite endpoint. Returns true on success. */
+  private async inviteUserByEmail(email: string): Promise<boolean> {
+    const response = await apiFetch('/api/v1/admin/users/invite', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, note: this.inviteUserNote }),
+    });
+    if (response.status === 409) {
+      this.showFeedback('danger', 'User already exists.');
+      return false;
+    }
+    if (!response.ok) {
+      throw new Error(await extractApiError(response, `HTTP ${response.status}`));
+    }
+    this.showFeedback('success', `Invited ${email}.`);
+    return true;
+  }
+
+  /**
+   * Pre-registers the user with a display name through POST /api/v1/users.
+   * Returns true when the user is (or already was) pre-registered with
+   * these details.
+   */
+  private async provisionUser(email: string, displayName: string): Promise<boolean> {
+    const body: { email: string; displayName: string; note?: string } = { email, displayName };
+    if (this.inviteUserNote) body.note = this.inviteUserNote;
+    const response = await apiFetch('/api/v1/users', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (response.status === 409) {
+      const { details } = await parseApiError(response, '');
+      const reason = typeof details?.reason === 'string' ? details.reason : undefined;
+      if (reason === 'pending_user_exists') {
+        this.showFeedback(
+          'danger',
+          'A pending record for this email exists with different details.'
+        );
+      } else if (reason === 'user_suspended_exists') {
+        this.showFeedback('danger', 'This email belongs to a suspended user.');
+      } else {
+        this.showFeedback('danger', 'User already exists.');
+      }
+      return false;
+    }
+    if (!response.ok) {
+      throw new Error(await extractApiError(response, `HTTP ${response.status}`));
+    }
+    let result: ProvisionUserResponse | null = null;
+    try {
+      result = (await response.json()) as ProvisionUserResponse;
+    } catch {
+      // A success response without a readable body: report the success.
+    }
+    const warnings = (result?.warnings ?? []).map(provisionWarningText);
+    const message =
+      result && !result.created
+        ? `${email} is already pre-registered with these details.`
+        : `Invited ${email}.`;
+    if (warnings.length > 0) {
+      this.showFeedback('warning', `${message} ${warnings.join(' ')}`);
+    } else {
+      this.showFeedback(result && !result.created ? 'primary' : 'success', message);
+    }
+    return true;
   }
 
   // ==================== Bulk Import ====================
@@ -1408,28 +1544,7 @@ export class ScionPageAdminUsers extends LitElement {
         <h1>Users</h1>
       </div>
 
-      ${this.actionFeedback
-        ? html`
-            <sl-alert
-              class="feedback-alert"
-              variant=${this.actionFeedback.variant}
-              open
-              closable
-              duration="5000"
-              @sl-after-hide=${() => {
-                this.actionFeedback = null;
-              }}
-            >
-              <sl-icon
-                slot="icon"
-                name=${this.actionFeedback.variant === 'success'
-                  ? 'check-circle'
-                  : 'exclamation-triangle'}
-              ></sl-icon>
-              ${this.actionFeedback.message}
-            </sl-alert>
-          `
-        : nothing}
+      ${this.actionFeedback ? this.renderFeedbackAlert(this.actionFeedback) : nothing}
 
       <div class="tabs" role="tablist">
         <button
@@ -1916,6 +2031,16 @@ export class ScionPageAdminUsers extends LitElement {
               this.inviteUserEmail = (e.target as HTMLInputElement).value;
             }}
             required
+          ></sl-input>
+          <sl-input
+            label="Display name (optional)"
+            placeholder="e.g., Alice Smith"
+            help-text="Replaced at first sign-in by the name from the sign-in provider, if it supplies one."
+            maxlength="128"
+            .value=${this.inviteUserDisplayName}
+            @sl-input=${(e: Event): void => {
+              this.inviteUserDisplayName = (e.target as HTMLInputElement).value;
+            }}
           ></sl-input>
           <sl-input
             label="Note (optional)"

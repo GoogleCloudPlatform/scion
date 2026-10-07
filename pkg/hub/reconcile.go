@@ -365,9 +365,7 @@ func (s *Server) execDispatchDelete(ctx context.Context, d store.BrokerDispatch)
 		softDelete = args.SoftDelete
 		deletedAt = args.DeletedAt
 		claim = args.Claim
-		if len(args.PreviousRunIDs) > 0 {
-			agent.PreviousRunIDs = args.PreviousRunIDs
-		}
+		applyDeleteIntentRuns(agent, args)
 	}
 	// A delete engine's intent applies only while the claim it was created
 	// under is still the row's current claim, live or failed in_doubt (see
@@ -378,11 +376,11 @@ func (s *Server) execDispatchDelete(ctx context.Context, d store.BrokerDispatch)
 	// that ran. The deadline sent to the broker is computed now, not when
 	// the intent was written.
 	//
-	// An intent records no run ID of its own until ptone/scion#2550 P5; the
-	// broker gets the re-read row's run ID. The intent's previous runs
-	// (ptone/scion#3097) are deleted by the same DispatchAgentDelete call
-	// under this fence, so each previous-run delete carries the same
-	// notAfter and a stale intent deletes none of them.
+	// The broker gets the intent's run ID (applyDeleteIntentRuns), not the
+	// re-read row's. The intent's previous runs (ptone/scion#3097) are
+	// deleted by the same DispatchAgentDelete call under this fence, so
+	// each previous-run delete carries the same notAfter and a stale intent
+	// deletes none of them.
 	if claim != 0 {
 		notAfter, ok := deferredDeleteDeadline(ctx, agent, claim, deleteClock())
 		if !ok {
@@ -401,6 +399,25 @@ func (s *Server) execDispatchDelete(ctx context.Context, d store.BrokerDispatch)
 		return "", fmt.Errorf("dispatch delete: %w", err)
 	}
 	return "", nil
+}
+
+// applyDeleteIntentRuns points agent (execDispatchDelete's own copy of the
+// row) at the runs a delete intent was written for (ptone/scion#2550): an
+// intent that records its run ID deletes exactly that run and the previous
+// runs it lists, even none, whatever the row records now, so an intent
+// written for run A never deletes a run B started since. An intent with no
+// run ID (written by an older hub, or for an agent with no run ID) keeps
+// the row's run, and the row's previous runs unless it lists its own, as
+// before.
+func applyDeleteIntentRuns(agent *store.Agent, args *DeleteDispatchArgs) {
+	if args.RunID != "" {
+		agent.RunID = args.RunID
+		agent.PreviousRunIDs = append([]string(nil), args.PreviousRunIDs...)
+		return
+	}
+	if len(args.PreviousRunIDs) > 0 {
+		agent.PreviousRunIDs = args.PreviousRunIDs
+	}
 }
 
 func (s *Server) execDispatchCheckPrompt(ctx context.Context, d store.BrokerDispatch) (string, error) {
