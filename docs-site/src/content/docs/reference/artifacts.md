@@ -70,9 +70,9 @@ Lists an artifact's versions, newest first, with kind, publish time, publisher, 
 
 ```text
 $ scion artifact versions scion://artifact/5f1c2d3e-6b1a-4c55-9f3e-0d6e7a1b2c3d
-  REF                                                  KIND     PUBLISHED          BY             FILES  SIZE     NOTE
-* scion://artifact/5f1c2d3e-6b1a-4c55-9f3e-0d6e7a1b2c3d@2  publish  2026-10-06 18:20Z  agent:<id>     1      4.1 KiB  round 2
-  scion://artifact/5f1c2d3e-6b1a-4c55-9f3e-0d6e7a1b2c3d@1  publish  2026-10-06 17:02Z  agent:<id>     1      3.9 KiB
+  REF                                                  KIND     PUBLISHED             BY             FILES  SIZE     NOTE
+* scion://artifact/5f1c2d3e-6b1a-4c55-9f3e-0d6e7a1b2c3d@2  publish  2026-10-06 18:20 UTC  agent:<id>     1      4.1 KiB  round 2
+  scion://artifact/5f1c2d3e-6b1a-4c55-9f3e-0d6e7a1b2c3d@1  publish  2026-10-06 17:02 UTC  agent:<id>     1      3.9 KiB
 ```
 
 ## Images in Markdown artifacts

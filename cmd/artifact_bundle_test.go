@@ -391,3 +391,20 @@ func TestPublishTitleNoteIgnoresSurroundingSpace(t *testing.T) {
 	require.NoError(t, publishBundle(context.Background(), svc, &out, &errOut, "", root, bundlePublishOptions{Key: "t", Title: "  Q3  "}))
 	assert.NotContains(t, errOut.String(), "keeps its title")
 }
+
+// noVersionService answers the create step without a version.
+type noVersionService struct{ hubclient.ArtifactService }
+
+func (noVersionService) CreateVersion(context.Context, string, *hubclient.CreateVersionRequest) (*hubclient.PendingVersionResponse, error) {
+	return &hubclient.PendingVersionResponse{Artifact: hubclient.Artifact{ID: "5f1c2d3e-0000-4000-8000-000000000001"}}, nil
+}
+
+// TestPublishBundleReplyWithoutVersion: a create reply without a version
+// is an error, not a crash.
+func TestPublishBundleReplyWithoutVersion(t *testing.T) {
+	root := writeTree(t, map[string]string{"index.md": "# hi"})
+	var out, errOut bytes.Buffer
+	err := publishBundle(context.Background(), noVersionService{}, &out, &errOut, "", root, bundlePublishOptions{})
+	assert.ErrorContains(t, err, "has no version")
+	assert.Empty(t, out.String())
+}

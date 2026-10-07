@@ -28,6 +28,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
+	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"golang.org/x/text/unicode/norm"
 )
@@ -175,6 +176,9 @@ func publishBundle(ctx context.Context, svc hubclient.ArtifactService, out, errO
 	pend, err := svc.CreateVersion(ctx, "", req)
 	if err != nil {
 		return fmt.Errorf("publish failed: %w%s", err, artifactErrorHint(err, true))
+	}
+	if pend.Version == nil {
+		return fmt.Errorf("publish failed: the hub's reply has no version")
 	}
 	id, seq := pend.Artifact.ID, pend.Version.Seq
 	for _, p := range pend.Upload.Required {
@@ -324,7 +328,7 @@ func listArtifactVersions(ctx context.Context, svc hubclient.ArtifactService, ou
 			by += ":" + v.CreatedByRef
 		}
 		_, _ = fmt.Fprintf(tw, "%s %s\t%s\t%s\t%s\t%d\t%s\t%s\n", mark, artifacts.FormatRef(id, v.Seq), v.Kind,
-			v.CreatedAt.UTC().Format("2006-01-02 15:04Z"), by, v.FileCount, humanBytes(v.TotalBytes), noteOneLine(v.Note))
+			clitime.Format(v.CreatedAt, clitime.Minute), by, v.FileCount, humanBytes(v.TotalBytes), noteOneLine(v.Note))
 	}
 	return tw.Flush()
 }
