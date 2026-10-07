@@ -21,6 +21,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 
@@ -37,13 +38,38 @@ import (
 // they were dispatched for, and every hub delete caller honours the
 // broker's run-mismatch refusal (ptone/scion#3080).
 
+// policyCall is one call of deleteRunMismatchPolicy: the (force,
+// bestEffort) a caller passed through refuseDeleteRunMismatch.
+type policyCall struct{ force, bestEffort bool }
+
+// policyRecorder records each call of the flipped policy.
+type policyRecorder struct {
+	mu    sync.Mutex
+	calls []policyCall
+}
+
+func (r *policyRecorder) got() []policyCall {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]policyCall(nil), r.calls...)
+}
+
 // flipDeleteRunMismatchPolicy makes refuseDeleteRunMismatch answer refuse
-// for the test's duration. Tests calling it must not be parallel.
-func flipDeleteRunMismatchPolicy(t *testing.T, refuse bool) {
+// for the test's duration and records the arguments of every call, so a
+// test can check both that a caller follows the answer and that it passes
+// the right (force, bestEffort). Tests calling it must not be parallel.
+func flipDeleteRunMismatchPolicy(t *testing.T, refuse bool) *policyRecorder {
 	t.Helper()
+	rec := &policyRecorder{}
 	prev := deleteRunMismatchPolicy
-	deleteRunMismatchPolicy = func(bool, bool) bool { return refuse }
+	deleteRunMismatchPolicy = func(force, bestEffort bool) bool {
+		rec.mu.Lock()
+		rec.calls = append(rec.calls, policyCall{force, bestEffort})
+		rec.mu.Unlock()
+		return refuse
+	}
 	t.Cleanup(func() { deleteRunMismatchPolicy = prev })
+	return rec
 }
 
 // execDeleteFixture is an agent whose row records run-b, after run-p1 and
@@ -263,7 +289,7 @@ func TestEnvGatherRecreate_RunMismatchRefusal(t *testing.T) {
 		{"force, policy flipped", "force", false, http.StatusAccepted, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			flipDeleteRunMismatchPolicy(t, tc.refuse)
+			policy := flipDeleteRunMismatchPolicy(t, tc.refuse)
 			srv, st := testServer(t)
 			ctx := context.Background()
 			suffix := uuid.NewString()[:8]
@@ -300,6 +326,9 @@ func TestEnvGatherRecreate_RunMismatchRefusal(t *testing.T) {
 				assert.Equal(t, ErrCodeConflict, code)
 				assert.Contains(t, rec2.Body.String(), "holds run run-other of this agent")
 			}
+			// Env-gather passes force for cleanupMode=force, and is never
+			// best-effort.
+			assert.Equal(t, []policyCall{{force: tc.cleanupMode == "force", bestEffort: false}}, policy.got())
 			_, err := st.GetAgent(ctx, oldID)
 			if tc.wantKept {
 				require.NoError(t, err, "the provisioning row was removed after the refusal")
@@ -313,14 +342,25 @@ func TestEnvGatherRecreate_RunMismatchRefusal(t *testing.T) {
 // The delete engine follows the flipped policy too: with force, a refused
 // delete then finalizes, as for any other dispatch error under force.
 func TestAgentDelete_RunMismatchPolicyFlipped_ForceFinalizes(t *testing.T) {
-	flipDeleteRunMismatchPolicy(t, false)
-	f := newRunMismatchFixture(t, "p5-rm-flip", state.PhaseRunning)
-	f.client.answer = func(runID string) error { return runMismatchEnvelope(t, runID, "run-b", true) }
-	r := f.del(t, "?force=true")
-	require.Less(t, r.rec.Code, 300, r.rec.Body.String())
-	got, err := f.store.GetAgent(context.Background(), f.agent.ID)
-	if err == nil {
-		assert.False(t, got.DeletedAt.IsZero(), "the row was finalized")
+	for _, tc := range []struct {
+		name  string
+		phase state.Phase
+		want  policyCall
+	}{
+		{"running agent: force, not best-effort", state.PhaseRunning, policyCall{force: true, bestEffort: false}},
+		{"created agent with no launch: force, best-effort", state.PhaseCreated, policyCall{force: true, bestEffort: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			policy := flipDeleteRunMismatchPolicy(t, false)
+			f := newRunMismatchFixture(t, "p5-rm-flip-"+uuid.NewString()[:8], tc.phase)
+			f.client.answer = func(runID string) error { return runMismatchEnvelope(t, runID, "run-b", true) }
+			r := f.del(t, "?force=true")
+			require.Less(t, r.rec.Code, 300, r.rec.Body.String())
+			got, err := f.store.GetAgent(context.Background(), f.agent.ID)
+			require.True(t, errors.Is(err, store.ErrNotFound) || (err == nil && !got.DeletedAt.IsZero()),
+				"the row was not finalized (err %v)", err)
+			assert.Equal(t, []policyCall{tc.want}, policy.got(), "the engine passes the request's force and its best-effort")
+		})
 	}
 }
 
@@ -373,18 +413,39 @@ func TestRestartStoppedRecordable(t *testing.T) {
 // A failed create whose cleanup the broker refuses because it holds a
 // different run (ptone/scion#3080) keeps its row (ptone's ruling, P5 Q1):
 // no compensation, the row in phase error naming both runs, its quotas
-// held, and the refusal logged with both runs. A cleanup failing any other
-// way still removes the row and releases the quotas, as before.
+// held, and the refusal logged with both runs. The decision goes through
+// refuseDeleteRunMismatch as a best-effort, non-force delete: with the
+// policy flipped, the row is compensated as for any other failure. The
+// phase-error write is guarded on the refused run: when the row has moved
+// to another run meanwhile (the broker's), it is left as it is. A cleanup
+// failing any other way still removes the row and releases the quotas.
 func TestCleanupFailedCreate_RunMismatchKeepsRow(t *testing.T) {
+	refusal := &DeleteRunMismatchError{RequestedRunID: "run-mine", CurrentRunID: "run-other", Err: ErrDeleteRunMismatch}
+	type outcome int
+	const (
+		removed outcome = iota
+		markedError
+		untouched
+	)
 	for _, tc := range []struct {
-		name     string
-		err      error
-		wantKept bool
+		name       string
+		err        error
+		flip       *bool // nil: the real policy
+		moveTo     string
+		want       outcome
+		wantPolicy []policyCall
 	}{
-		{"refused", &DeleteRunMismatchError{RequestedRunID: "run-mine", CurrentRunID: "run-other", Err: ErrDeleteRunMismatch}, true},
-		{"other failure", errors.New("broker unreachable"), false},
+		{name: "refused", err: refusal, want: markedError},
+		{name: "refused, policy refuses", err: refusal, flip: ptrBool(true), want: markedError, wantPolicy: []policyCall{{false, true}}},
+		{name: "refused, policy flipped", err: refusal, flip: ptrBool(false), want: removed, wantPolicy: []policyCall{{false, true}}},
+		{name: "refused, row moved to the broker's run", err: refusal, moveTo: "run-other", want: untouched},
+		{name: "other failure", err: errors.New("broker unreachable"), flip: ptrBool(true), want: removed, wantPolicy: nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			var policy *policyRecorder
+			if tc.flip != nil {
+				policy = flipDeleteRunMismatchPolicy(t, *tc.flip)
+			}
 			srv, s := testServer(t)
 			var logs bytes.Buffer
 			srv.agentLifecycleLog = slog.New(slog.NewTextHandler(&logs, nil))
@@ -394,28 +455,50 @@ func TestCleanupFailedCreate_RunMismatchKeepsRow(t *testing.T) {
 			broker, err := s.GetRuntimeBroker(ctx, agent.RuntimeBrokerID)
 			require.NoError(t, err)
 			reserveBrokerSlot(t, s, broker, agent.ID)
+			_, err = s.SetAgentRunID(ctx, agent.ID, "run-mine")
+			require.NoError(t, err)
+			agent = mustGetAgent(t, s, agent.ID)
+			before := agent.Phase
 
 			corrID := srv.cleanupFailedCreate(ctx, createRollback{
 				Agent:           agent,
 				RuntimeBrokerID: agent.RuntimeBrokerID,
 				Stage:           createStageDispatch,
 				Cause:           errors.New("dispatch failed"),
-				DeleteRuntime:   func(context.Context) error { return tc.err },
+				DeleteRuntime: func(dctx context.Context) error {
+					if tc.moveTo != "" {
+						if _, err := s.SetAgentRunID(dctx, agent.ID, tc.moveTo); err != nil {
+							return err
+						}
+					}
+					return tc.err
+				},
 			})
 			assert.Empty(t, corrID)
+			if policy != nil {
+				assert.Equal(t, tc.wantPolicy, policy.got(), "the cleanup asks the switch as a best-effort, non-force delete")
+			}
 
 			got, err := s.GetAgent(ctx, agent.ID)
-			if !tc.wantKept {
+			switch tc.want {
+			case removed:
 				require.ErrorIs(t, err, store.ErrNotFound, "the row is removed")
 				assert.EqualValues(t, 0, brokerReservationCount(t, s, agent.RuntimeBrokerID), "the reservation is released")
-				return
+			case markedError:
+				require.NoError(t, err, "the row was removed after the refusal")
+				assert.Equal(t, string(state.PhaseError), got.Phase)
+				assert.Contains(t, got.Message, "holds run run-other of this agent, not run run-mine")
+				assert.EqualValues(t, 1, brokerReservationCount(t, s, agent.RuntimeBrokerID), "the reservation is held")
+				assert.Contains(t, logs.String(), "hub_run_id=run-mine")
+				assert.Contains(t, logs.String(), "broker_run_id=run-other")
+			case untouched:
+				require.NoError(t, err, "the row was removed after the refusal")
+				assert.Equal(t, tc.moveTo, got.RunID)
+				assert.Equal(t, before, got.Phase, "the live run was marked failed")
+				assert.NotContains(t, got.Message, "cleanup was refused")
+				assert.EqualValues(t, 1, brokerReservationCount(t, s, agent.RuntimeBrokerID), "the reservation is held")
+				assert.Contains(t, logs.String(), "not marking it failed")
 			}
-			require.NoError(t, err, "the row was removed after the refusal")
-			assert.Equal(t, string(state.PhaseError), got.Phase)
-			assert.Contains(t, got.Message, "holds run run-other of this agent, not run run-mine")
-			assert.EqualValues(t, 1, brokerReservationCount(t, s, agent.RuntimeBrokerID), "the reservation is held")
-			assert.Contains(t, logs.String(), "hub_run_id=run-mine")
-			assert.Contains(t, logs.String(), "broker_run_id=run-other")
 		})
 	}
 }

@@ -3953,8 +3953,10 @@ func (d *HTTPAgentDispatcher) deferredDelete(ctx context.Context, agent *store.A
 // (*DeleteRunMismatchError) from the failed dispatch row's broker error:
 // the executing node fails the row only for the refusal, not for a plain
 // 404 (deleteAgentError). The requested run is the one the broker names
-// (api.BrokerErrorDetailRunID): the executing node sends the run of the row
-// it re-read, which may differ from this node's copy. Any other error,
+// (api.BrokerErrorDetailRunID): the executing node sends the intent's run
+// (DeleteDispatchArgs.RunID, ptone/scion#2550), or, for a legacy intent
+// with no run, the run of the row it re-read, which may differ from this
+// node's copy. Any other error,
 // including a run-mismatch 404 that does not refuse, is returned unchanged.
 func deferredDeleteError(err error) error {
 	if err == nil || errors.Is(err, ErrDeleteRunMismatch) {

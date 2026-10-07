@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
 // A run-scoped stop resolves its target exactly as a run-scoped delete does
@@ -80,8 +81,11 @@ func TestStopDeleteResolutionParity(t *testing.T) {
 		name    string
 		agents  func(scionB string) []api.AgentInfo
 		listErr bool
-		run     string
-		want    outcome
+		// auxFails registers an auxiliary runtime whose List fails, beside
+		// the default runtime listing agents.
+		auxFails bool
+		run      string
+		want     outcome
 	}{
 		{
 			name: "requested run's entry",
@@ -171,6 +175,36 @@ func TestStopDeleteResolutionParity(t *testing.T) {
 			run: "run-a", want: notFound,
 		},
 		{
+			name: "one other run in two namespaces",
+			agents: func(b string) []api.AgentInfo {
+				pod := func(ns, cid, run string, b string) api.AgentInfo {
+					e := withRun(labelled("dev", cid, scopeProjB, b), run)
+					e.Kubernetes = &api.AgentK8sMetadata{Namespace: ns, PodName: "dev"}
+					return e
+				}
+				return []api.AgentInfo{pod("ns-1", "dev", "run-b", b), pod("ns-2", "dev", "run-b", b)}
+			},
+			run: "run-a", want: mismatch("run-b"),
+		},
+		{
+			name: "two legacy entries",
+			agents: func(b string) []api.AgentInfo {
+				return []api.AgentInfo{labelled("dev", "cid-l1", scopeProjB, b), labelled("dev", "cid-l2", scopeProjB, b)}
+			},
+			run: "run-a", want: ambiguous,
+		},
+		{
+			// Another run holds the name in the runtime that listed, and a
+			// second runtime could not be listed: the requested run may be
+			// there, so neither answers run mismatch.
+			name: "another run beside a runtime that cannot be listed",
+			agents: func(b string) []api.AgentInfo {
+				return []api.AgentInfo{withRun(labelled("dev", "cid-b", scopeProjB, b), "run-b")}
+			},
+			auxFails: true,
+			run:      "run-a", want: unavailable,
+		},
+		{
 			name:    "runtime list fails",
 			agents:  func(b string) []api.AgentInfo { return nil },
 			listErr: true,
@@ -187,6 +221,16 @@ func TestStopDeleteResolutionParity(t *testing.T) {
 			mgr.agents = tc.agents(scionB)
 			if tc.listErr {
 				mgr.listErr = errors.New("list failed")
+			}
+			if tc.auxFails {
+				aux := &filteringMockManager{}
+				aux.listErr = errors.New("aux list failed")
+				srv.auxiliaryRuntimesMu.Lock()
+				srv.auxiliaryRuntimes["k8s-aux"] = auxiliaryRuntime{
+					Runtime: &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }},
+					Manager: aux,
+				}
+				srv.auxiliaryRuntimesMu.Unlock()
 			}
 			ctx := context.Background()
 

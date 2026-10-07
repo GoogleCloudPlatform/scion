@@ -1497,6 +1497,12 @@ func podNameForAgentObject(objectName string) (string, bool) {
 //
 // NotFound when deleting an object counts as success.
 //
+// Each delete carries a UID precondition taken from the listed object
+// (k8sUIDPrecondition, as deleteRun's pod-gone branch uses): the per-agent
+// object names are fixed, so a start can recreate an object under the same
+// name between the List and the Delete. Such an object has a new UID; its
+// delete fails with Conflict, which leaves it in place and is not an error.
+//
 // With a runID (ptone/scion#2550), an object labelled with another run is
 // never removed, whatever its pod: only runID's objects and legacy objects
 // with no run label are candidates (k8sRunMatches), as deleteRun's pod-gone
@@ -1566,7 +1572,15 @@ func (r *KubernetesRuntime) CleanupAgentResources(ctx context.Context, agentName
 			if !ok {
 				continue
 			}
-			if err := r.Client.Clientset.CoreV1().Secrets(s.Namespace).Delete(ctx, s.Name, metav1.DeleteOptions{}); err != nil && !k8serrors.IsNotFound(err) {
+			err = r.Client.Clientset.CoreV1().Secrets(s.Namespace).Delete(ctx, s.Name, metav1.DeleteOptions{
+				Preconditions: k8sUIDPrecondition(s.UID),
+			})
+			if k8serrors.IsConflict(err) {
+				runtimeLog.Info("Left a per-agent object recreated under the same name since it was listed",
+					"kind", "Secret", "name", s.Name, "agent", agentName, "namespace", s.Namespace, "run_id", runID)
+				continue
+			}
+			if err != nil && !k8serrors.IsNotFound(err) {
 				errs = append(errs, fmt.Errorf("failed to delete Secret %s/%s: %w", s.Namespace, s.Name, err))
 				continue
 			}
@@ -1592,7 +1606,15 @@ func (r *KubernetesRuntime) CleanupAgentResources(ctx context.Context, agentName
 				if !ok {
 					continue
 				}
-				if err := r.Client.DeleteSecretProviderClass(ctx, ns, name); err != nil && !k8serrors.IsNotFound(err) {
+				err = r.Client.Dynamic().Resource(k8s.SecretProviderClassGVR).Namespace(ns).Delete(ctx, name, metav1.DeleteOptions{
+					Preconditions: k8sUIDPrecondition(spc.GetUID()),
+				})
+				if k8serrors.IsConflict(err) {
+					runtimeLog.Info("Left a per-agent object recreated under the same name since it was listed",
+						"kind", "SecretProviderClass", "name", name, "agent", agentName, "namespace", ns, "run_id", runID)
+					continue
+				}
+				if err != nil && !k8serrors.IsNotFound(err) {
 					errs = append(errs, fmt.Errorf("failed to delete SecretProviderClass %s/%s: %w", ns, name, err))
 					continue
 				}

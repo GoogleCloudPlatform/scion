@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic/fake"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
@@ -349,7 +350,7 @@ func seedAgentObjectsForRun(t *testing.T, rt *KubernetesRuntime, runID string) {
 	}
 	for _, name := range []string{"scion-agent-proj1--agent", "scion-auth-proj1--agent"} {
 		if _, err := rt.Client.Clientset.CoreV1().Secrets("default").Create(context.Background(), &corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default", Labels: labels},
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default", Labels: labels, UID: types.UID("uid-" + name)},
 		}, metav1.CreateOptions{}); err != nil {
 			t.Fatalf("seed Secret %s: %v", name, err)
 		}
@@ -359,6 +360,7 @@ func seedAgentObjectsForRun(t *testing.T, rt *KubernetesRuntime, runID string) {
 	spc.SetName("scion-agent-proj1--agent")
 	spc.SetNamespace("default")
 	spc.SetLabels(labels)
+	spc.SetUID(types.UID("uid-spc"))
 	if _, err := rt.Client.Dynamic().Resource(k8s.SecretProviderClassGVR).Namespace("default").Create(context.Background(), spc, metav1.CreateOptions{}); err != nil {
 		t.Fatalf("seed SecretProviderClass: %v", err)
 	}
@@ -410,5 +412,51 @@ func TestCleanupAgentResources_InvalidRunID(t *testing.T) {
 	}
 	if !secretExists(t, rt, "default", "scion-agent-proj1--agent") {
 		t.Error("an invalid run ID removed an object")
+	}
+}
+
+// recreatedOnDelete makes every delete of resource act as if the object had
+// been recreated under the same name (a new UID) after it was listed: a
+// delete carrying a UID precondition fails with Conflict, as the API server
+// answers, and the object stays; a delete without one goes ahead and removes
+// it.
+func recreatedOnDelete(t *testing.T, tracker interface {
+	PrependReactor(verb, resource string, reaction k8stesting.ReactionFunc)
+}, resource string) {
+	t.Helper()
+	tracker.PrependReactor("delete", resource, func(action k8stesting.Action) (bool, k8sruntime.Object, error) {
+		del, ok := action.(k8stesting.DeleteActionImpl)
+		if !ok || del.DeleteOptions.Preconditions == nil || del.DeleteOptions.Preconditions.UID == nil {
+			return false, nil, nil
+		}
+		return true, nil, k8serrors.NewConflict(schema.GroupResource{Resource: resource}, del.Name,
+			errors.New("Precondition failed: UID in precondition does not match the object"))
+	})
+}
+
+// A leftover cleanup deletes each object with a UID precondition taken from
+// the listed object (ptone/scion#2550 P5, review R2): an object recreated
+// under the same name between the List and the Delete (a new run's start)
+// survives, and that is not an error. With a run and without.
+func TestCleanupAgentResources_RecreatedObjectSurvives(t *testing.T) {
+	for _, run := range []string{"run-a", ""} {
+		t.Run("run="+run, func(t *testing.T) {
+			rt, clientset, dynClient := newGKECleanupTestRuntime(t)
+			seedAgentObjectsForRun(t, rt, run)
+			recreatedOnDelete(t, clientset, "secrets")
+			recreatedOnDelete(t, dynClient, "secretproviderclasses")
+
+			if err := rt.CleanupAgentResources(context.Background(), "agent", "p1", run); err != nil {
+				t.Fatalf("CleanupAgentResources: %v", err)
+			}
+			for _, name := range []string{"scion-agent-proj1--agent", "scion-auth-proj1--agent"} {
+				if !secretExists(t, rt, "default", name) {
+					t.Errorf("Secret %s recreated since the List was removed", name)
+				}
+			}
+			if !spcExists(t, rt, "default", "scion-agent-proj1--agent") {
+				t.Error("SecretProviderClass recreated since the List was removed")
+			}
+		})
 	}
 }
