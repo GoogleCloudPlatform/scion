@@ -17,7 +17,9 @@ package hub
 import (
 	"context"
 	"net/http"
+	"path"
 	"slices"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
@@ -162,6 +164,30 @@ func (h *artifactHost) Authorize(ctx context.Context, scopeRef, permission strin
 	return decision.Allowed
 }
 
+var _ artifacts.ScopeExplainer = (*artifactHost)(nil)
+
+// MissingScope implements artifacts.ScopeExplainer. Only an agent that
+// presented a real token (one with a token id) gets an answer: the scope
+// that Principal requires before serving it, then the token scopes the
+// permission maps to. Users and unauthenticated callers get "".
+func (h *artifactHost) MissingScope(ctx context.Context, permission string) string {
+	perm, ok := artifactPermission(permission)
+	if !ok {
+		return ""
+	}
+	agent, ok := GetIdentityFromContext(ctx).(*agentIdentityWrapper)
+	if !ok || agent == nil || agent.AgentTokenClaims == nil || agent.ID() == "" || agent.TokenID() == "" {
+		return ""
+	}
+	if !agentHasAnyScope(agent, []string{string(ScopeProjectArtifactRead)}) {
+		return string(ScopeProjectArtifactRead)
+	}
+	if len(perm.AgentScopes) > 0 && !agentHasAnyScope(agent, perm.AgentScopes) {
+		return perm.AgentScopes[0]
+	}
+	return ""
+}
+
 // artifactPermission returns the registry row for id when it is an artifact
 // permission.
 func artifactPermission(id string) (permissions.Permission, bool) {
@@ -206,4 +232,32 @@ func (s *Server) artifactsGuard(pattern string, handler http.Handler) http.Handl
 		}
 		guarded(w, r)
 	})
+}
+
+// isArtifactViewRequest reports whether r is a read of the artifact view
+// route (artifacts.RouteView). Both the decoded and the escaped path must
+// be clean and under the route, the escaped path may not encode a slash,
+// dot, backslash or NUL (in any letter case), and the capability segment
+// may not be escaped at all,
+// so the request this check admits is the one the mux routes to the view.
+// Only the request shape is checked here; the artifact service verifies
+// the capability.
+func isArtifactViewRequest(r *http.Request) bool {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		return false
+	}
+	esc := r.URL.EscapedPath()
+	if !strings.HasPrefix(r.URL.Path, artifacts.RouteView) || !strings.HasPrefix(esc, artifacts.RouteView) {
+		return false
+	}
+	if path.Clean(r.URL.Path) != r.URL.Path || path.Clean(esc) != esc {
+		return false
+	}
+	lower := strings.ToLower(esc)
+	if strings.Contains(lower, "%2f") || strings.Contains(lower, "%2e") || strings.Contains(lower, "%5c") ||
+		strings.Contains(lower, "%00") || strings.IndexByte(r.URL.Path, 0) >= 0 {
+		return false
+	}
+	capability, _, _ := strings.Cut(esc[len(artifacts.RouteView):], "/")
+	return capability != "" && !strings.Contains(capability, "%")
 }
