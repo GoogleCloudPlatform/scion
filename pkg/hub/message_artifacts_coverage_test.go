@@ -331,3 +331,114 @@ func TestArtifactRefResolverReachableOnlyFromRequestContexts(t *testing.T) {
 		t.Error("resolveArtifactRefs must check that the request credential binds the current identity before resolving")
 	}
 }
+
+// TestCredentialSubjectKeyOnlyInIdentityAndAuthFiles widens the setter pin
+// above to every reference: the credential subject key and the
+// contextWithCredentialContext function may be named (called, passed as a
+// value, or used as a key) only in identity.go, where they are defined, and
+// in the three authentication middleware files. Anything else could record
+// or overwrite the identity a request credential is bound to.
+func TestCredentialSubjectKeyOnlyInIdentityAndAuthFiles(t *testing.T) {
+	allowed := map[string]bool{"identity.go": true, "auth.go": true, "auth_external_bearer.go": true, "brokerauth.go": true}
+	names := map[string]bool{"credentialSubjectContextKey": true, "contextWithCredentialContext": true}
+	found := map[string]int{}
+	forEachHubFile(t, func(name string, fset *token.FileSet, f *ast.File) {
+		ast.Inspect(f, func(n ast.Node) bool {
+			id, ok := n.(*ast.Ident)
+			if !ok || !names[id.Name] {
+				return true
+			}
+			found[id.Name]++
+			if !allowed[name] {
+				t.Errorf("%s referenced at %s; only identity.go and the authentication middleware files may name it",
+					id.Name, fset.Position(id.Pos()))
+			}
+			return true
+		})
+	})
+	for n := range names {
+		if found[n] == 0 {
+			t.Errorf("found no references to %s: scanner broken", n)
+		}
+	}
+}
+
+// firstCallOffset returns the byte offset in file of the first call to
+// symbol in the body of function, or -1. Offsets, not token.Pos values, so
+// results from separate parses of the same file compare correctly.
+func firstCallOffset(t *testing.T, file, function, symbol string) int {
+	t.Helper()
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, filepath.Join(findHubDir(t), file), nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	off := -1
+	for _, decl := range f.Decls {
+		fd, ok := decl.(*ast.FuncDecl)
+		if !ok || fd.Name.Name != function || fd.Body == nil {
+			continue
+		}
+		ast.Inspect(fd.Body, func(n ast.Node) bool {
+			if call, ok := n.(*ast.CallExpr); ok && extractCallSymbol(call) == symbol {
+				if o := fset.Position(call.Pos()).Offset; off < 0 || o < off {
+					off = o
+				}
+			}
+			return true
+		})
+	}
+	return off
+}
+
+// TestArtifactRefsAdmittedAfterAuthzAtEverySite extends the chat v2 order
+// guard to the other three admitting sites, so a denied send never does
+// artifact lookups:
+//   - ExecuteAgentDM: authorizeAgentMessage runs before admission in the
+//     same function.
+//   - handleAgentOutboundMessage: resolveOutboundRouting (sender ownership
+//     and conversation authorization for the outbound request) runs before
+//     admission; the agent-recipient branch delegates to ExecuteAgentDM.
+//   - handleAgentMessage has no authorization step of its own: each of its
+//     callers authorizes the request (authorizeAgentMessage or
+//     authorizeAgentTargetAction) before calling it, so the guard checks
+//     every caller instead. In handleAgentAction the target check is
+//     skipped only for self access (an agent acting on itself); there the
+//     sender reads artifacts under its own credential anyway.
+func TestArtifactRefsAdmittedAfterAuthzAtEverySite(t *testing.T) {
+	inFunc := []struct{ file, function, authz string }{
+		{"agent_dm_operation.go", "ExecuteAgentDM", "authorizeAgentMessage"},
+		{"handlers_agent_messaging.go", "handleAgentOutboundMessage", "resolveOutboundRouting"},
+		{"handlers_chat_v2.go", "sendAgentRouted", "authorizeAgentMessage"},
+	}
+	for _, c := range inFunc {
+		authz := firstCallOffset(t, c.file, c.function, c.authz)
+		admit := firstCallOffset(t, c.file, c.function, "admitMessageArtifacts")
+		if authz < 0 || admit < 0 {
+			t.Errorf("%s:%s: %s or admitMessageArtifacts not found", c.file, c.function, c.authz)
+			continue
+		}
+		if admit < authz {
+			t.Errorf("%s:%s admits artifact references (offset %d) before %s (offset %d)",
+				c.file, c.function, admit, c.authz, authz)
+		}
+	}
+
+	callers := hubCallSites(t, "handleAgentMessage")["handleAgentMessage"]
+	if len(callers) == 0 {
+		t.Fatal("found no handleAgentMessage callers: scanner broken")
+	}
+	for key := range callers {
+		call := firstCallOffset(t, key.file, key.function, "handleAgentMessage")
+		authz := -1
+		for _, sym := range []string{"authorizeAgentMessage", "authorizeAgentTargetAction"} {
+			if o := firstCallOffset(t, key.file, key.function, sym); o >= 0 && (authz < 0 || o < authz) {
+				authz = o
+			}
+		}
+		if authz < 0 || call < authz {
+			t.Errorf("%s:%s calls handleAgentMessage without authorizing the request first; handleAgentMessage admits artifact references and has no authorization step of its own",
+				key.file, key.function)
+		}
+	}
+}
