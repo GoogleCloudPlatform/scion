@@ -352,12 +352,31 @@ func newMockStore() *mockScheduledEventStore {
 
 func seedFullRoleDispatchCreator(ms *mockScheduledEventStore, projectID string) string {
 	creatorID := "creator-agent"
+	// The creator is owned by an active project member, so it is in good
+	// standing (ptone/scion#3433).
+	ownerID := "creator-owner"
+	ms.users[ownerID] = &store.User{ID: ownerID, Email: "creator-owner@test.example", Role: store.UserRoleMember, Status: store.UserStatusActive}
+	ms.roleDefinitions["rd-creator-member"] = &store.RoleDefinition{
+		ID: "rd-creator-member", Name: store.ProjectRoleMember, ScopeType: store.RoleScopeProject,
+		Permissions: []string{"agent.read"},
+	}
+	ms.roleBindings = append(ms.roleBindings, &store.RoleBinding{
+		ID: "rb-creator-member", RoleDefinitionID: "rd-creator-member",
+		PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: ownerID,
+		ScopeType: store.RoleScopeProject, ScopeID: projectID,
+	})
 	ms.agents[creatorID] = &store.Agent{
 		ID:            creatorID,
 		ProjectID:     projectID,
+		OwnerID:       ownerID,
 		AppliedConfig: &store.AgentAppliedConfig{AgentRole: string(AgentRoleFull)},
 	}
 	return creatorID
+}
+
+// HasActiveAgentHold reports no holds: the mock records none.
+func (m *mockScheduledEventStore) HasActiveAgentHold(_ context.Context, _ string) (bool, error) {
+	return false, nil
 }
 
 func (m *mockScheduledEventStore) CreateScheduledEvent(_ context.Context, event *store.ScheduledEvent) error {
@@ -1483,11 +1502,7 @@ func TestDispatchAgentEventHandler_AgentAlreadyExists(t *testing.T) {
 func TestDispatchAgentEventHandler_CreatesAgentNoDispatcher(t *testing.T) {
 	ms := newMockStore()
 	ms.projects["project-1"] = &store.Project{ID: "project-1", Name: "test-project"}
-	ms.agents["creator-agent"] = &store.Agent{
-		ID:            "creator-agent",
-		ProjectID:     "project-1",
-		AppliedConfig: &store.AgentAppliedConfig{AgentRole: string(AgentRoleFull)},
-	}
+	seedFullRoleDispatchCreator(ms, "project-1")
 
 	srv := newEventHandlerTestServer(ms)
 	handler := srv.dispatchAgentEventHandler()
@@ -2415,12 +2430,8 @@ func TestSchedulerNoLaunchReaperRegistered(t *testing.T) {
 func TestDispatchAgentEventHandler_AgentCreatorSetsCreatorName(t *testing.T) {
 	ms := newMockStore()
 	ms.projects["project-1"] = &store.Project{ID: "project-1", Name: "test-project"}
-	ms.agents["creator-agent"] = &store.Agent{
-		ID:            "creator-agent",
-		Name:          "lead-agent",
-		ProjectID:     "project-1",
-		AppliedConfig: &store.AgentAppliedConfig{AgentRole: string(AgentRoleFull)},
-	}
+	seedFullRoleDispatchCreator(ms, "project-1")
+	ms.agents["creator-agent"].Name = "lead-agent"
 
 	srv := newEventHandlerTestServer(ms)
 	if err := srv.dispatchAgentEventHandler()(context.Background(), withMockAgentRevision(store.ScheduledEvent{

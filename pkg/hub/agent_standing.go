@@ -577,21 +577,31 @@ func (s *Server) scheduledFireStanding(ctx context.Context, evt store.ScheduledE
 			return refuse("target agent is suspended", nil)
 		}
 	}
-	if evt.CreatedBy == "" {
-		return nil
+	// The authoring principal is the event's recorded revision principal;
+	// CreatedBy (history) is checked too, so an agent named by either must
+	// be in good standing.
+	var authors []string
+	if init := s.scheduledInitiator(evt.InitiatorAttribution); !init.LegacyUnknown &&
+		init.PrincipalKind == store.DelegationPrincipalAgent && init.PrincipalID != "" {
+		authors = append(authors, init.PrincipalID)
 	}
-	creator, err := s.store.GetAgent(ctx, evt.CreatedBy)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return nil
+	if evt.CreatedBy != "" {
+		authors = append(authors, evt.CreatedBy)
+	}
+	for _, id := range authors {
+		creator, err := s.store.GetAgent(ctx, id)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				continue
+			}
+			return refuse("author lookup failed", err)
 		}
-		return refuse("author lookup failed", err)
-	}
-	if creator == nil {
-		return nil
-	}
-	if err := s.agentStanding(ctx, creator.ID); err != nil {
-		return refuse("authoring agent is not in good standing", err)
+		if creator == nil {
+			continue
+		}
+		if err := s.agentStanding(ctx, creator.ID); err != nil {
+			return refuse("authoring agent is not in good standing", err)
+		}
 	}
 	return nil
 }

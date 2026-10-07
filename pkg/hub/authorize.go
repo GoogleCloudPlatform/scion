@@ -370,7 +370,9 @@ func (s *Server) authorizeAgentCreate(w http.ResponseWriter, r *http.Request, pr
 	if agentIdent, ok := identity.(AgentIdentity); ok {
 		if err := s.agentStanding(ctx, agentIdent.ID()); err != nil {
 			logAuthzDenial(r, identity, resource, ActionCreate, "creating agent not in good standing: "+standingReason(err))
-			writeForbiddenDenial(w, agentCreateDenyMessage, "")
+			// The agent's authority comes from its chain, like a delegation
+			// ceiling refusal, and is answered the same way.
+			writeForbiddenDenial(w, agentCreateDenyMessage, DeniedByDelegationCeiling)
 			return false
 		}
 	}

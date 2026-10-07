@@ -48,13 +48,6 @@ func setupScheduledEventTest(t *testing.T) (*Server, store.Store, string) {
 	require.NoError(t, s.CreateProject(ctx, project))
 	seedScheduleAuthorAgent(t, s, project.ID)
 
-	// The helper agent identity names a stored agent in good standing
-	// (ptone/scion#3433); the test store gives it the dev admin as owner.
-	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
-		ID: authzHelperAgentID, Slug: "authz-caller-agent", Name: "authz-caller-agent",
-		ProjectID: project.ID, Phase: "running",
-	}))
-
 	return srv, s, project.ID
 }
 
