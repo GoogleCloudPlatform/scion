@@ -395,11 +395,11 @@ type StartOpts struct {
 	KeepCallerDeadline bool
 	// SyncDispatchBound bounds the DispatchAgentStart call by
 	// syncDispatchTimeout (syncDispatch), as a synchronous launch that no
-	// longer follows its client is bounded (ptone/scion#1961). Set only by
-	// the HTTP handler sites (lifecycle start and restart, and the starts of
-	// create-on-existing); scheduled, reconcile and wake starts are not
-	// bounded by it. It composes with KeepCallerDeadline: the earlier
-	// deadline wins.
+	// longer follows its client is bounded (ptone/scion#1961). Set by the
+	// HTTP handler sites (lifecycle start and restart, and the starts of
+	// create-on-existing) and by the direct-message wake
+	// (ptone/scion#3471); scheduled and reconcile starts are not bounded by
+	// it. It composes with KeepCallerDeadline: the earlier deadline wins.
 	SyncDispatchBound bool
 	// NewGeneration clears the previous run's message, stalled marker and
 	// exit fields in the post-start write even when the agent was already
