@@ -151,7 +151,10 @@ func Upgrade(w http.ResponseWriter, r *http.Request, up *websocket.Upgrader, opt
 // denial and never a reason to downgrade transports.
 type DialError struct {
 	StatusCode int
-	Err        error
+	// Header is the server's response header when it answered (nil
+	// otherwise).
+	Header http.Header
+	Err    error
 }
 
 func (e *DialError) Error() string {
@@ -209,6 +212,7 @@ func (d *Dialer) Dial(ctx context.Context) (transport.Conn, error) {
 		de := &DialError{Err: err}
 		if resp != nil {
 			de.StatusCode = resp.StatusCode
+			de.Header = resp.Header
 			_ = resp.Body.Close()
 		}
 		return nil, de

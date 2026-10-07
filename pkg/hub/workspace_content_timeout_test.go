@@ -137,8 +137,11 @@ func TestServerHubManagedProjectPath_NFSHungMountReturnsError(t *testing.T) {
 	assert.Empty(t, path)
 	nfsPath := filepath.Join(mountRoot, "share1", "hub-projects", f.slug)
 	assert.NotContains(t, err.Error(), mountRoot, "the error text must not carry the path (it can be stored, e.g. ScheduledEvent.Error)")
-	assert.Contains(t, logs.String(), "Workspace storage did not respond")
-	assert.Contains(t, logs.String(), "path="+nfsPath)
+	// The log line carries the timeout and a fixed error class only. No
+	// project ID is in scope when resolving by slug.
+	assertSingleLogLine(t, logs, "Workspace storage did not respond",
+		map[string]string{"error_class": fsErrorClassTimeout, "timeout": workspaceContentTimeout.String()},
+		f.slug, nfsPath, mountRoot, f.tmpHome, errWorkspaceContentTimeout.Error(), "slug=", "path=", "error=")
 }
 
 // N2: durable NFS path empty, legacy local path hangs. The project might
@@ -149,12 +152,16 @@ func TestServerHubManagedProjectPath_NFSEmptyLocalHungReturnsError(t *testing.T)
 	require.NoError(t, os.MkdirAll(filepath.Join(mountRoot, "share1", "hub-projects", f.slug), 0755))
 	hangReadDirFor(t, f.localDir)
 
+	logs := captureSlog(t) // before testServer: the projects logger snapshots slog.Default()
 	srv, _ := testServer(t)
 	srv.config.WorkspaceStorageConfig = nfsConfig(mountRoot)
 
 	path, err := srv.hubManagedProjectPath(f.slug)
 	require.ErrorIs(t, err, errWorkspaceContentTimeout)
 	assert.Empty(t, path)
+	assertSingleLogLine(t, logs, "Workspace storage did not respond",
+		map[string]string{"error_class": fsErrorClassTimeout},
+		f.slug, f.localDir, f.tmpHome, errWorkspaceContentTimeout.Error(), "slug=", "path=", "error=")
 }
 
 // NFS has content: the local path is never probed, so a hung local path

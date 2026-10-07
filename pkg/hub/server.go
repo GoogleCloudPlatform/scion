@@ -740,6 +740,10 @@ type RuntimeBrokerClient interface {
 	// brokerID is used for HMAC authentication lookup.
 	// projectID scopes the lookup to a specific project (required for uniqueness).
 	// opts carries the query params (see DeleteAgentOptions).
+	// A broker 404 returns nil (an idempotent success), except the broker's
+	// refusal of a run-scoped delete because another run holds the name,
+	// returned as *DeleteRunMismatchError (see deleteAgentError,
+	// ptone/scion#3080).
 	DeleteAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, opts DeleteAgentOptions) error
 
 	// MessageAgent sends a message to an agent on a remote runtime broker.
@@ -880,17 +884,31 @@ var ErrStopRunNotFound = errors.New("runtime broker has no entry for the request
 // unknown route) is returned unchanged, as is any error on a legacy stop
 // without a run ID.
 func stopAgentError(err error, runID string) error {
-	if err == nil || runID == "" || !isBrokerStatus(err, http.StatusNotFound) {
+	if err == nil || runID == "" {
 		return err
 	}
-	var se *brokerStatusError
-	if !errors.As(err, &se) || se.brokerErrorCode() != api.BrokerErrorCodeRunMismatch {
+	current, ok := brokerRunMismatch(err)
+	if !ok {
 		return err
 	}
-	if current, ok := se.brokerErrorDetails()[api.BrokerErrorDetailCurrentRunID].(string); ok && current != "" {
+	if current != "" {
 		return fmt.Errorf("%w (requested run %s; the broker holds run %s): %w", ErrStopRunNotFound, runID, current, err)
 	}
 	return fmt.Errorf("%w (requested run %s): %w", ErrStopRunNotFound, runID, err)
+}
+
+// brokerRunMismatch reports whether err is the broker's run-mismatch 404
+// (api.BrokerErrorCodeRunMismatch) on a run-scoped stop or delete, and
+// returns the run it reported holding the agent's name ("" when it did not
+// know one). It keys on the broker's error code, not the status alone, so
+// a 404 from anything else (a proxy, an unknown route) is not one.
+func brokerRunMismatch(err error) (current string, ok bool) {
+	var se *brokerStatusError
+	if !errors.As(err, &se) || se.StatusCode != http.StatusNotFound || se.brokerErrorCode() != api.BrokerErrorCodeRunMismatch {
+		return "", false
+	}
+	current, _ = brokerCurrentRunID(err)
+	return current, true
 }
 
 // brokerStopCurrentRunID returns the run the broker reported holding the
@@ -901,12 +919,67 @@ func brokerStopCurrentRunID(err error) (string, bool) {
 	if !errors.Is(err, ErrStopRunNotFound) {
 		return "", false
 	}
-	var se *brokerStatusError
-	if !errors.As(err, &se) {
-		return "", false
+	current, _ := brokerRunMismatch(err)
+	return current, current != ""
+}
+
+// ErrDeleteRunMismatch reports that the broker refused a run-scoped delete
+// because a different run holds the agent's name there: it deleted nothing
+// and the other run is still on the broker (ptone/scion#3080). A caller
+// must not finalize (remove or soft-delete) the agent's row because of the
+// delete. *DeleteRunMismatchError carries both runs; errors.Is matches this
+// sentinel and errors.As still finds the broker's status error.
+var ErrDeleteRunMismatch = errors.New("runtime broker holds a different run of the agent; nothing was deleted")
+
+// DeleteRunMismatchError is the refusal of a run-scoped delete: the broker
+// answered the run-mismatch 404 naming CurrentRunID, a non-empty run other
+// than RequestedRunID (ptone/scion#3080). Err is the broker's status error.
+type DeleteRunMismatchError struct {
+	RequestedRunID string
+	CurrentRunID   string
+	Err            error
+}
+
+func (e *DeleteRunMismatchError) Error() string {
+	return fmt.Sprintf("%s (requested run %s; the broker holds run %s)", ErrDeleteRunMismatch, e.RequestedRunID, e.CurrentRunID)
+}
+
+func (e *DeleteRunMismatchError) Unwrap() []error { return []error{ErrDeleteRunMismatch, e.Err} }
+
+// deleteRunMismatch returns the refusal in err of a delete that named run
+// runID: the broker's run-mismatch 404 reporting a non-empty current run
+// other than runID. ok is false for any other error, for a delete naming
+// no run, and for a run-mismatch 404 with no current run or the same one
+// (an older broker, a file-only entry, a failed re-list): those stay the
+// broker's plain "not found".
+func deleteRunMismatch(err error, runID string) (*DeleteRunMismatchError, bool) {
+	if err == nil || runID == "" {
+		return nil, false
 	}
-	current, ok := se.brokerErrorDetails()[api.BrokerErrorDetailCurrentRunID].(string)
-	return current, ok && current != ""
+	var refused *DeleteRunMismatchError
+	if errors.As(err, &refused) {
+		return refused, true
+	}
+	current, ok := brokerRunMismatch(err)
+	if !ok || current == "" || current == runID {
+		return nil, false
+	}
+	return &DeleteRunMismatchError{RequestedRunID: runID, CurrentRunID: current, Err: err}, true
+}
+
+// deleteAgentError is the result of a broker delete that named run runID,
+// on both transports. A 404 is an idempotent success (nil), except the
+// broker's refusal (deleteRunMismatch), returned as *DeleteRunMismatchError
+// so the caller does not finalize the row (ptone/scion#3080). Any other
+// error is returned unchanged.
+func deleteAgentError(err error, runID string) error {
+	if refused, ok := deleteRunMismatch(err, runID); ok {
+		return refused
+	}
+	if isBrokerStatus(err, http.StatusNotFound) {
+		return nil
+	}
+	return err
 }
 
 // recordStopStatus writes upd, the stopped (or suspended) status a caller
@@ -1015,6 +1088,11 @@ type RemoteCreateAgentRequest struct {
 	// catalog rather than reused (`scion reincarnate`, design §3.4). See
 	// runtimebroker.CreateAgentRequest.Reprovision, the wire twin this maps to.
 	Reprovision bool `json:"reprovision,omitempty"`
+	// SharedDirBackendChanges and AllowEmptySharedDir mirror
+	// runtimebroker.CreateAgentRequest's fields of the same names. Set only
+	// on a reprovision for `scion reincarnate --shared-dir-backend`.
+	SharedDirBackendChanges map[string]string `json:"sharedDirBackendChanges,omitempty"`
+	AllowEmptySharedDir     bool              `json:"allowEmptySharedDir,omitempty"`
 	// ExpectExistingNFSWorkspace mirrors
 	// runtimebroker.CreateAgentRequest.ExpectExistingNFSWorkspace: on a
 	// ProvisionOnly request for an agent moved from another broker, the
@@ -1217,6 +1295,12 @@ type RemoteAgentResponse struct {
 	// an old broker has no such field and silently ran a plain Provision
 	// instead, which must not be reported as reincarnate success.
 	Reprovisioned bool `json:"reprovisioned,omitempty"`
+
+	// SharedDirBackendsChanged mirrors
+	// runtimebroker.CreateAgentResponse.SharedDirBackendsChanged.
+	// dispatchProvision fails a reprovision that asked for a shared dir
+	// backend change when the broker does not confirm it.
+	SharedDirBackendsChanged bool `json:"sharedDirBackendsChanged,omitempty"`
 
 	// LaunchPending, LaunchID and LaunchInstanceID mirror
 	// runtimebroker.CreateAgentResponse's async launch echo. LaunchPending

@@ -536,7 +536,7 @@ func (p *PostgresEventPublisher) handleNotification(channel, payload string) {
 	var env pgEnvelope
 	if err := json.Unmarshal([]byte(payload), &env); err != nil {
 		p.log.Error("Failed to decode NOTIFY payload", "channel", channel, "error", err)
-		p.metrics.IncDropped(p.ctx, 1, attribute.String("reason", "decode"))
+		p.metrics.IncDropped(p.ctx, 1, attribute.String(dbmetrics.AttrDropReason, "decode"))
 		return
 	}
 
@@ -545,7 +545,7 @@ func (p *PostgresEventPublisher) handleNotification(channel, payload string) {
 		fetched, err := p.refetchPayload(env.Ref)
 		if err != nil {
 			p.log.Error("Failed to refetch oversized payload", "ref", env.Ref, "subject", env.Subject, "error", err)
-			p.metrics.IncDropped(p.ctx, 1, attribute.String("reason", "refetch"))
+			p.metrics.IncDropped(p.ctx, 1, attribute.String(dbmetrics.AttrDropReason, "refetch"))
 			return
 		}
 		data = fetched
@@ -585,7 +585,7 @@ func (p *PostgresEventPublisher) fanout(channel string, evt Event) {
 		case sub.ch <- evt:
 			p.metrics.IncDelivered(p.ctx, 1, attribute.String("scope", channelScope(evt.Subject)))
 		default:
-			p.metrics.IncDropped(p.ctx, 1, attribute.String("reason", "full_buffer"))
+			p.metrics.IncDropped(p.ctx, 1, attribute.String(dbmetrics.AttrDropReason, "full_buffer"))
 		}
 	}
 }

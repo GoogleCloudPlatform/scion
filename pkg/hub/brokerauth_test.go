@@ -40,7 +40,7 @@ import (
 func setupTestBrokerAuthService(t *testing.T) (*BrokerAuthService, store.Store) {
 	t.Helper()
 
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create store: %v", err)
 	}
@@ -356,7 +356,7 @@ func TestJoinWithInvalidToken(t *testing.T) {
 
 func TestJoinWithExpiredToken(t *testing.T) {
 	// Create service with short token expiry
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create store: %v", err)
 	}
@@ -536,7 +536,7 @@ func TestValidateBrokerSignature_InvalidSignature(t *testing.T) {
 
 func TestValidateBrokerSignature_ClockSkew(t *testing.T) {
 	// Create service with short clock skew tolerance
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create store: %v", err)
 	}
