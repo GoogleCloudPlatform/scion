@@ -75,6 +75,12 @@ type ServerConfig struct {
 	// into agent containers. Used for local development where containers
 	// need a bridge address (e.g. host.containers.internal) instead of localhost.
 	ContainerHubEndpoint string
+	// ColocatedPublicHubEndpoint is the co-located hub's public URL when this
+	// host does not serve it, so containers cannot reach it (e.g. a Cloud Run
+	// URL derived from the IAP audience on a single-node VM). An agent hub
+	// endpoint equal to it is replaced by ContainerHubEndpoint, except on
+	// Kubernetes runtimes. Empty disables the rewrite.
+	ColocatedPublicHubEndpoint string
 	// HubListenPort is the port the co-located hub HTTP server is listening
 	// on (e.g. 8080 for the combined web+API server). Used by cloudrun-sandbox
 	// to construct the link-local hub endpoint for sandboxes. Zero means the

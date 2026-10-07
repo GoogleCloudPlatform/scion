@@ -757,7 +757,10 @@ func getClientIP(r *http.Request) string {
 }
 
 // LogRegistrationEvent logs a broker registration event.
-func LogRegistrationEvent(ctx context.Context, logger AuditLogger, brokerID, brokerName, actorID, ipAddress string) {
+//
+// details is recorded as the event's Details; it must not carry the join
+// token or its hash.
+func LogRegistrationEvent(ctx context.Context, logger AuditLogger, brokerID, brokerName, actorID, ipAddress string, details map[string]string) {
 	if logger == nil {
 		return
 	}
@@ -771,6 +774,7 @@ func LogRegistrationEvent(ctx context.Context, logger AuditLogger, brokerID, bro
 		ActorID:    actorID,
 		ActorType:  "user",
 		Timestamp:  time.Now(),
+		Details:    details,
 	}
 
 	_ = logger.LogBrokerAuthEvent(ctx, event)
