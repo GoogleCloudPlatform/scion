@@ -1393,7 +1393,9 @@ export class TerminalWorkspaceRoot {
     const metadata = entry.metadata;
     const agent = metadata.agent ?? entry.state.agent;
     const agentName = agent?.name || entry.state.agentId;
-    const projectId = agent?.projectId || 'Unknown project';
+    // Prefer the hub-resolved project name; fall back to the project id
+    // when the name is not known yet, and omit the line when neither is.
+    const projectLabel = agent?.project || agent?.projectId || '';
     const item = document.createElement('div');
     item.className = 'terminal-rail-item';
     item.setAttribute('role', 'listitem');
@@ -1404,32 +1406,49 @@ export class TerminalWorkspaceRoot {
     item.dataset.availability = metadata.availability;
     if (entry.state.disconnectReason) item.dataset.disconnectReason = entry.state.disconnectReason;
 
+    // One list of status parts feeds both forms: the visible titles join them
+    // with a middle dot, the accessible label with a comma so screen readers
+    // pause between them instead of announcing or skipping the dot.
+    const statusParts = [
+      disconnectLabel(entry.state.connection, entry.state.disconnectReason),
+      availabilityLabel(metadata.availability),
+    ];
+    const statusLabel = statusParts.join(' · ');
+    const spokenStatus = statusParts.join(', ');
+
     const select = document.createElement('button');
     select.type = 'button';
     select.className = 'terminal-rail-select';
-    select.setAttribute('aria-label', `Show terminal for ${agentName} in ${projectId}`);
+    // The status dot is small and aria-hidden, so surface its status text on
+    // the whole row: as the hover title and in the accessible label.
+    select.title = statusLabel;
+    select.setAttribute(
+      'aria-label',
+      projectLabel
+        ? `Show terminal for ${agentName} in ${projectLabel}, ${spokenStatus}`
+        : `Show terminal for ${agentName}, ${spokenStatus}`
+    );
     if (visibleSlots.includes(entry.state.key)) select.setAttribute('aria-current', 'page');
     select.dataset.railFocusId = `${entry.state.key}:select`;
     select.addEventListener('click', () => this.openSessionRoute(entry));
 
     const connection = document.createElement('span');
     connection.className = 'terminal-connection-dot';
-    connection.title = connectionLabel(entry.state.connection);
+    connection.title = statusLabel;
     connection.setAttribute('aria-hidden', 'true');
     const text = document.createElement('span');
     text.className = 'terminal-rail-text';
     const name = document.createElement('span');
     name.className = 'terminal-agent-name';
     name.textContent = agentName;
-    const project = document.createElement('span');
-    project.className = 'terminal-project-name';
-    project.textContent = projectId;
-    const details = document.createElement('span');
-    details.className = 'terminal-state-label';
-    details.textContent = `${disconnectLabel(entry.state.connection, entry.state.disconnectReason)} · ${availabilityLabel(
-      metadata.availability
-    )}`;
-    text.append(name, project, details);
+    text.append(name);
+    if (projectLabel) {
+      const project = document.createElement('span');
+      project.className = 'terminal-project-name';
+      project.textContent = projectLabel;
+      project.title = projectLabel;
+      text.append(project);
+    }
     select.append(connection, text);
 
     const actions = document.createElement('span');
@@ -1989,8 +2008,7 @@ export class TerminalWorkspaceRoot {
         gap: 0.125rem;
       }
       .terminal-agent-name,
-      .terminal-project-name,
-      .terminal-state-label {
+      .terminal-project-name {
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
@@ -1999,8 +2017,7 @@ export class TerminalWorkspaceRoot {
         font-size: 0.875rem;
         font-weight: 600;
       }
-      .terminal-project-name,
-      .terminal-state-label {
+      .terminal-project-name {
         font-size: 0.75rem;
         color: var(--scion-text-muted, #64748b);
       }
