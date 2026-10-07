@@ -139,7 +139,9 @@ describe('bulk action eligibility rules', () => {
     expect(mod.isInactiveEntry(status('idle', null, 'ready', 'stopped'))).toBe(true);
     expect(mod.isInactiveEntry(status('idle', null, 'ready', 'error'))).toBe(true);
     expect(mod.isInactiveEntry(status('idle', null, 'deleted'))).toBe(true);
-    expect(mod.isInactiveEntry(status('idle', null, 'unavailable'))).toBe(true);
+    // Unavailable can be transient (hub blip), so it alone does not count.
+    expect(mod.isInactiveEntry(status('idle', null, 'unavailable'))).toBe(false);
+    expect(mod.isInactiveEntry(status('idle', null, 'unavailable', 'running'))).toBe(false);
   });
 
   it('the row Reconnect rule matches the bulk rule except for metadata deletion and idle', () => {
@@ -448,12 +450,30 @@ describe('Open terminals bulk actions', () => {
     setMetadata(UNAVAILABLE, 'unavailable');
     await flush();
     // The deleted row is closed out by the metadata bridge or stays idle;
-    // either way it must not be left behind.
-    expect(bulkRemove().getAttribute('aria-label')).toBe('Remove all inactive (4 eligible)');
+    // either way it must not be left behind. The unavailable row stays:
+    // unavailable can be a transient metadata failure.
+    expect(bulkRemove().getAttribute('aria-label')).toBe('Remove all inactive (3 eligible)');
     confirmMock.showConfirm.mockResolvedValue(true);
-    expect(await root.removeAllInactive()).toBe(4);
+    expect(await root.removeAllInactive()).toBe(3);
     await flush();
-    expect(railAgentIds().sort()).toEqual([CONNECTED, IDLE].sort());
+    expect(railAgentIds().sort()).toEqual([CONNECTED, IDLE, UNAVAILABLE].sort());
+  });
+
+  it('Remove all inactive keeps idle rows whose metadata is transiently unavailable', async () => {
+    // A hub blip after a reload marks every restored row unavailable; rows
+    // for running agents must not become removable.
+    const BLIP_RUNNING = '88888888-8888-4888-8888-888888888888';
+    const BLIP_NO_PHASE = '99999999-9999-4999-8999-999999999999';
+    await open(CONNECTED, BLIP_RUNNING, BLIP_NO_PHASE);
+    setState(sessions.get(CONNECTED)!, { connection: 'connected' });
+    setMetadata(BLIP_RUNNING, 'unavailable', 'running');
+    setMetadata(BLIP_NO_PHASE, 'unavailable');
+    await flush();
+    expect(isDisabled(bulkRemove())).toBe(true);
+    expect(bulkRemove().getAttribute('aria-label')).toBe('Remove all inactive (0 eligible)');
+    expect(await root.removeAllInactive()).toBe(0);
+    expect(confirmMock.showConfirm).not.toHaveBeenCalled();
+    expect(railAgentIds().sort()).toEqual([CONNECTED, BLIP_RUNNING, BLIP_NO_PHASE].sort());
   });
 
   it('Reconnect all is disabled when the only dropped rows are deleted', async () => {

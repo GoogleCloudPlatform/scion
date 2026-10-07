@@ -77,11 +77,14 @@ export function isBulkReconnectEligible(entry: RailEntryStatus): boolean {
 }
 
 /**
- * Whether metadata says an entry's agent is gone: deleted or unavailable,
- * or in the stopped or error phase.
+ * Whether metadata says an entry's agent is gone: deleted, or in the stopped
+ * or error phase. Availability "unavailable" does not count: it is also set
+ * for transient failures (a failed metadata stream handshake, a 401, a 5xx
+ * or a network error), so a brief hub outage after a reload must not make
+ * restored rows for running agents removable.
  */
 export function isAgentGone(metadata: TerminalAgentMetadata): boolean {
-  if (metadata.availability === 'deleted' || metadata.availability === 'unavailable') return true;
+  if (metadata.availability === 'deleted') return true;
   const phase = metadata.agent?.phase;
   return phase === 'stopped' || phase === 'error';
 }
