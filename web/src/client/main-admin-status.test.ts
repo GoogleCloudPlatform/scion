@@ -70,6 +70,9 @@ function json(body: unknown, status = 200): Response {
 }
 
 let adminStatusRequests = 0;
+// Booting the entry module takes about 1.7 s locally; leave room for a
+// slower CI runner without hiding a real hang.
+const WAIT = { timeout: 5_000 };
 let infoSpy: MockInstance<typeof console.info>;
 
 describe('main.ts admin-status wiring', () => {
@@ -114,17 +117,17 @@ describe('main.ts admin-status wiring', () => {
     const status = await import('./admin-status.js');
 
     // Startup's shared request, then the guard's fresh one for /admin/users.
-    await vi.waitFor(() => expect(calls.some((c) => c.fresh)).toBe(true));
+    await vi.waitFor(() => expect(calls.some((c) => c.fresh)).toBe(true), WAIT);
     // Exactly one startup (non-fresh) request before the guard's fresh one.
     const firstFresh = calls.findIndex((c) => c.fresh);
     expect(calls.slice(0, firstFresh)).toEqual([{ userId: 'u1', fresh: false }]);
-    await vi.waitFor(() => expect(adminStatusRequests).toBeGreaterThanOrEqual(2));
+    await vi.waitFor(() => expect(adminStatusRequests).toBeGreaterThanOrEqual(2), WAIT);
 
     // The shared value is warm now; entering another admin route still sends
     // a request of its own.
     const before = adminStatusRequests;
     main.navigateTo('/admin/groups');
-    await vi.waitFor(() => expect(adminStatusRequests).toBe(before + 1));
+    await vi.waitFor(() => expect(adminStatusRequests).toBe(before + 1), WAIT);
     expect(calls.at(-1)).toEqual({ userId: 'u1', fresh: true });
 
     // A warm, non-fresh read is served without a request ...
@@ -135,10 +138,12 @@ describe('main.ts admin-status wiring', () => {
     // ... until account teardown drops it: the next read fetches again.
     // (main.ts registers its teardown listener once the first page has
     // rendered.)
-    await vi.waitFor(() =>
-      expect(infoSpy.mock.calls.some((c) => String(c[0]).includes('initialization complete'))).toBe(
-        true
-      )
+    await vi.waitFor(
+      () =>
+        expect(
+          infoSpy.mock.calls.some((c) => String(c[0]).includes('initialization complete'))
+        ).toBe(true),
+      WAIT
     );
     window.dispatchEvent(
       new CustomEvent('scion:account-teardown', { detail: { reason: 'logout' } })
@@ -146,5 +151,5 @@ describe('main.ts admin-status wiring', () => {
     expect(status.clearAdminStatus).toHaveBeenCalled();
     await status.loadAdminStatus('u1');
     expect(adminStatusRequests).toBe(warm + 1);
-  });
+  }, 15_000);
 });
