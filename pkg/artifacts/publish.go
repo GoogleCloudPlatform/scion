@@ -196,7 +196,7 @@ func (s *Service) writeMissingScope(w http.ResponseWriter, r *http.Request) bool
 	writeJSON(w, http.StatusForbidden, errorResponse{Error: errorBody{
 		Code:    CodeMissingScope,
 		Message: "the credential does not carry the " + scope + " scope needed to publish artifacts",
-		Details: map[string]string{"scope": scope},
+		Details: map[string]any{"scope": scope},
 	}})
 	return true
 }

@@ -16,7 +16,9 @@ package hub
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
@@ -51,7 +53,8 @@ func (s *Server) artifactsConfig() opsettings.ArtifactsConfig {
 // artifactLimits feeds the artifacts settings section to the service on
 // every write, so a limit change applies without a restart.
 func (s *Server) artifactLimits(context.Context) artifacts.Limits {
-	return artifacts.Limits{MaxFileBytes: s.artifactsConfig().MaxFileBytes}
+	c := s.artifactsConfig()
+	return artifacts.Limits{MaxFileBytes: c.MaxFileBytes, MaxBundleBytes: c.MaxBundleBytes, MaxFiles: c.MaxFiles}
 }
 
 // artifactsHandler returns the artifact service's handler, built over this
@@ -75,4 +78,45 @@ func (s *Server) artifactBackend() artifacts.Backend {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return artifacts.Backend{Store: s.artifactStore, Blobs: s.storage, HubID: s.hubID}
+}
+
+// artifactReapInterval is how often the hub reaps abandoned pending
+// artifact versions.
+const artifactReapInterval = 10 * time.Minute
+
+// artifactReapBatch caps the versions one reap pass handles.
+const artifactReapBatch = 500
+
+// startArtifactReaper reaps pending artifact versions older than
+// artifacts.PendingVersionTTL every artifactReapInterval until ctx ends.
+// It runs whether or not the experiment is on: reaping only retires
+// abandoned uploads.
+func (s *Server) startArtifactReaper(ctx context.Context) {
+	go func() {
+		ticker := time.NewTicker(artifactReapInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				s.reapArtifactVersions(ctx)
+			}
+		}
+	}()
+}
+
+func (s *Server) reapArtifactVersions(ctx context.Context) {
+	st := s.ArtifactStore()
+	if st == nil {
+		return
+	}
+	n, err := st.ReapPending(ctx, time.Now().Add(-artifacts.PendingVersionTTL), artifactReapBatch)
+	if err != nil {
+		slog.WarnContext(ctx, "artifacts: reaping pending versions failed", "error", err)
+		return
+	}
+	if n > 0 {
+		slog.InfoContext(ctx, "artifacts: reaped abandoned pending versions", "count", n)
+	}
 }

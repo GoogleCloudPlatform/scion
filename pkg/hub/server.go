@@ -5348,6 +5348,9 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 		}
 	}
 
+	// Reap abandoned pending artifact versions (exits when ctx is cancelled).
+	s.startArtifactReaper(ctx)
+
 	// Start rate limiter cleanup goroutines (exit when ctx is cancelled).
 	if s.gcpTokenRateLimiter != nil {
 		s.gcpTokenRateLimiter.StartCleanup(ctx)

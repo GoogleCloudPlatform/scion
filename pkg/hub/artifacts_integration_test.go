@@ -24,6 +24,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -743,4 +744,89 @@ func TestArtifactsPublishRefusedWithBothScopesIsPlainForbidden(t *testing.T) {
 	_, err = s.DeleteRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, tid("art-delegator-"+p1.ID))
 	require.NoError(t, err)
 	assertPlainForbidden("narrowed delegation chain", "/api/v1/artifacts?name=b.txt")
+}
+
+// TestArtifactsTwoStepBundleOnRoutes publishes a bundle through the real
+// routes with the two-step API, appends a version by key, and reads it
+// back as another agent of the project; an agent of another project sees
+// nothing. The bundle limits come from the artifacts settings.
+func TestArtifactsTwoStepBundleOnRoutes(t *testing.T) {
+	srv, s := testServer(t)
+	enableArtifactsForTest(t, srv)
+	srv.SetOperationalSettings(artifactsOps(t, `{"max_files":2}`))
+	p1 := artifactProject(t, s, "twostep-p1")
+	p2 := artifactProject(t, s, "twostep-p2")
+	_, ownerTok := artifactAgent(t, srv, s, p1.ID, "twostep-owner", AgentRoleBaseline)
+	_, peerTok := artifactAgent(t, srv, s, p1.ID, "twostep-peer", AgentRoleBaseline)
+	_, otherTok := artifactAgent(t, srv, s, p2.ID, "twostep-other", AgentRoleBaseline)
+
+	files := map[string][]byte{"index.html": []byte("<p>hi</p>"), "img/a.png": []byte("png")}
+	manifest := func(key string, fs map[string][]byte) []byte {
+		req := artifacts.CreateVersionRequest{Key: key, Entry: "index.html"}
+		for p, b := range fs {
+			sum := sha256.Sum256(b)
+			req.Files = append(req.Files, artifacts.ManifestFile{Path: p, Size: int64(len(b)), SHA256: hex.EncodeToString(sum[:])})
+		}
+		body, err := json.Marshal(req)
+		require.NoError(t, err)
+		return body
+	}
+	publish := func(fs map[string][]byte) artifacts.ArtifactResponse {
+		t.Helper()
+		rec := doRawAgentRequest(t, srv, http.MethodPost, "/api/v1/artifacts", manifest("site", fs), ownerTok)
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+		var pend artifacts.PendingVersionResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &pend))
+		base := fmt.Sprintf("/api/v1/artifacts/%s/versions/%d", pend.Artifact.ID, pend.Version.Seq)
+		for _, p := range pend.Upload.Required {
+			rec := doRawAgentRequest(t, srv, http.MethodPut, base+"/files/"+p, fs[p], ownerTok)
+			require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+		}
+		rec = doRawAgentRequest(t, srv, http.MethodPost, base+"/finalize", nil, ownerTok)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var out artifacts.ArtifactResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+		return out
+	}
+	v1 := publish(files)
+	assert.Equal(t, 1, v1.Artifact.CurrentSeq)
+	v2 := publish(map[string][]byte{"index.html": []byte("<p>v2</p>"), "img/a.png": []byte("png")})
+	assert.Equal(t, v1.Artifact.ID, v2.Artifact.ID, "the same key appends")
+	assert.Equal(t, 2, v2.Artifact.CurrentSeq)
+	id := v1.Artifact.ID
+
+	rec := doRawAgentRequest(t, srv, http.MethodGet, "/api/v1/artifacts/"+id+"/versions/1/files/img/a.png", nil, peerTok)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "png", rec.Body.String())
+	rec = doRawAgentRequest(t, srv, http.MethodGet, "/api/v1/artifacts/"+id+"/versions", nil, peerTok)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), `"seq":2`)
+	for _, p := range []string{"/versions", "/versions/1", "/versions/1/files/index.html"} {
+		assert.Equal(t, http.StatusNotFound, doRawAgentRequest(t, srv, http.MethodGet, "/api/v1/artifacts/"+id+p, nil, otherTok).Code, p)
+	}
+	// A project peer may read but not append.
+	rec = doRawAgentRequest(t, srv, http.MethodPost, "/api/v1/artifacts/"+id+"/versions", manifest("", files), peerTok)
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	// The settings' file count applies.
+	rec = doRawAgentRequest(t, srv, http.MethodPost, "/api/v1/artifacts", manifest("", map[string][]byte{
+		"index.html": []byte("a"), "b": []byte("b"), "c": []byte("c")}), ownerTok)
+	assert.Equal(t, http.StatusRequestEntityTooLarge, rec.Code, rec.Body.String())
+}
+
+// TestArtifactsReaperRetiresAbandonedVersions: the hub's reap pass fails a
+// pending version older than the TTL.
+func TestArtifactsReaperRetiresAbandonedVersions(t *testing.T) {
+	srv, _ := testServer(t)
+	st, _ := enableArtifactsForTest(t, srv)
+	ctx := context.Background()
+	old := time.Now().Add(-artifacts.PendingVersionTTL - time.Hour)
+	a := &artifacts.Artifact{ID: tid("reap-artifact"), ScopeKind: artifacts.ScopeKindProject, ScopeRef: "p",
+		OwnerKind: artifacts.PrincipalKindUser, OwnerRef: "u", Title: "t", CreatedAt: old, UpdatedAt: old}
+	v := &artifacts.Version{ID: tid("reap-v1"), ArtifactID: a.ID, Seq: 1, Kind: artifacts.VersionKindPublish,
+		EntryPath: "a.txt", CreatedAt: old, State: artifacts.VersionStatePending}
+	require.NoError(t, st.CreatePending(ctx, a, v, nil, nil))
+	srv.reapArtifactVersions(ctx)
+	got, err := st.GetVersion(ctx, a.ID, 1)
+	require.NoError(t, err)
+	assert.Equal(t, artifacts.VersionStateFailed, got.State)
 }

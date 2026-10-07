@@ -1,0 +1,430 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//go:build !no_sqlite
+
+package artifacts
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+)
+
+// bundle is a set of files by path.
+type bundle map[string][]byte
+
+func (bd bundle) manifest(entry string) CreateVersionRequest {
+	req := CreateVersionRequest{Entry: entry}
+	for p, b := range bd {
+		req.Files = append(req.Files, ManifestFile{Path: p, Size: int64(len(b)), SHA256: sha(b)})
+	}
+	return req
+}
+
+func (f *fixture) postJSON(p *principal, target string, v any) *httptest.ResponseRecorder {
+	f.t.Helper()
+	body, err := json.Marshal(v)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	return f.do(p, http.MethodPost, target, body, map[string]string{"Content-Type": "application/json"})
+}
+
+func decodeInto[T any](t *testing.T, rec *httptest.ResponseRecorder) T {
+	t.Helper()
+	var v T
+	if err := json.Unmarshal(rec.Body.Bytes(), &v); err != nil {
+		t.Fatalf("decode %q: %v", rec.Body.String(), err)
+	}
+	return v
+}
+
+func (f *fixture) createPending(p principal, target string, req CreateVersionRequest) PendingVersionResponse {
+	f.t.Helper()
+	rec := f.postJSON(&p, target, req)
+	if rec.Code != http.StatusCreated {
+		f.t.Fatalf("create %s: %d %s", target, rec.Code, rec.Body.String())
+	}
+	return decodeInto[PendingVersionResponse](f.t, rec)
+}
+
+func (f *fixture) put(p principal, id string, seq int, filePath string, body []byte) *httptest.ResponseRecorder {
+	f.t.Helper()
+	return f.do(&p, http.MethodPut, fmt.Sprintf("/api/v1/artifacts/%s/versions/%d/files/%s", id, seq, filePath), body, nil)
+}
+
+func (f *fixture) finalize(p principal, id string, seq int) *httptest.ResponseRecorder {
+	f.t.Helper()
+	return f.do(&p, http.MethodPost, fmt.Sprintf("/api/v1/artifacts/%s/versions/%d/finalize", id, seq), nil, nil)
+}
+
+// publishBundle runs the whole two-step publish and returns the finalized
+// response.
+func (f *fixture) publishBundle(p principal, target string, req CreateVersionRequest, files bundle) ArtifactResponse {
+	f.t.Helper()
+	pend := f.createPending(p, target, req)
+	for _, path := range pend.Upload.Required {
+		if rec := f.put(p, pend.Artifact.ID, pend.Version.Seq, path, files[path]); rec.Code != http.StatusNoContent {
+			f.t.Fatalf("PUT %s: %d %s", path, rec.Code, rec.Body.String())
+		}
+	}
+	rec := f.finalize(p, pend.Artifact.ID, pend.Version.Seq)
+	if rec.Code != http.StatusOK {
+		f.t.Fatalf("finalize: %d %s", rec.Code, rec.Body.String())
+	}
+	return decodeInto[ArtifactResponse](f.t, rec)
+}
+
+var site = bundle{
+	"index.html":  []byte(`<html><img src="img/a.png"></html>`),
+	"img/a.png":   []byte("\x89PNG\r\n\x1a\nfake"),
+	"css/s.css":   []byte("body{}"),
+	"notes/a.dat": []byte("plain words"),
+}
+
+func TestTwoStepPublishBundle(t *testing.T) {
+	f := newFixture(t, false)
+	req := site.manifest("index.html")
+	req.Title, req.Note = "Site", "first"
+	pend := f.createPending(agentA, "/api/v1/artifacts", req)
+	if pend.Version.State != VersionStatePending || pend.Version.Seq != 1 || len(pend.Upload.Required) != len(site) {
+		t.Fatalf("pending = %+v", pend)
+	}
+	id := pend.Artifact.ID
+	if pend.Artifact.CurrentSeq != 0 {
+		t.Errorf("pending artifact has current version %d", pend.Artifact.CurrentSeq)
+	}
+	// Nothing of a pending version is readable.
+	for _, p := range []string{"/api/v1/artifacts/" + id + "/versions/1", "/api/v1/artifacts/" + id + "/versions/1/files/index.html", "/api/v1/artifacts/" + id + "/files/index.html"} {
+		if rec := f.do(&agentA, http.MethodGet, p, nil, nil); rec.Code != http.StatusNotFound {
+			t.Errorf("GET %s while pending: %d, want 404", p, rec.Code)
+		}
+	}
+	// Finalize refuses while files are missing and names them.
+	if rec := f.put(agentA, id, 1, "index.html", site["index.html"]); rec.Code != http.StatusNoContent {
+		t.Fatalf("PUT: %d %s", rec.Code, rec.Body.String())
+	}
+	rec := f.finalize(agentA, id, 1)
+	if rec.Code != http.StatusConflict || errCode(t, rec) != CodeIncomplete || !strings.Contains(rec.Body.String(), "img/a.png") {
+		t.Fatalf("incomplete finalize: %d %s", rec.Code, rec.Body.String())
+	}
+	// Re-uploading is idempotent while pending.
+	if rec := f.put(agentA, id, 1, "index.html", site["index.html"]); rec.Code != http.StatusNoContent {
+		t.Errorf("second PUT: %d", rec.Code)
+	}
+	for _, p := range []string{"img/a.png", "css/s.css", "notes/a.dat"} {
+		if rec := f.put(agentA, id, 1, p, site[p]); rec.Code != http.StatusNoContent {
+			t.Fatalf("PUT %s: %d %s", p, rec.Code, rec.Body.String())
+		}
+	}
+	rec = f.finalize(agentA, id, 1)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("finalize: %d %s", rec.Code, rec.Body.String())
+	}
+	done := decodeInto[ArtifactResponse](t, rec)
+	if done.Artifact.CurrentSeq != 1 || done.Version.State != VersionStateReady || done.Version.EntryPath != "index.html" ||
+		done.Version.Note != "first" || done.Version.FileCount != 4 || len(done.Version.Files) != 4 {
+		t.Errorf("finalized = %+v / %+v", done.Artifact, done.Version)
+	}
+	types := map[string]string{}
+	for _, fi := range done.Version.Files {
+		types[fi.Path] = fi.MediaType
+	}
+	if types["img/a.png"] != "image/png" || types["css/s.css"] != "text/css" || types["notes/a.dat"] != "text/plain" {
+		t.Errorf("media types = %v", types)
+	}
+	// Every file is readable by a project member, at the current and the
+	// pinned version.
+	for p, body := range site {
+		for _, u := range []string{"/api/v1/artifacts/" + id + "/files/" + p, "/api/v1/artifacts/" + id + "/versions/1/files/" + p} {
+			rec := f.do(&agentB, http.MethodGet, u, nil, nil)
+			if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), body) {
+				t.Errorf("GET %s: %d", u, rec.Code)
+			}
+		}
+	}
+	// After finalize the version takes no more uploads and no second
+	// finalize.
+	if rec := f.put(agentA, id, 1, "index.html", site["index.html"]); rec.Code != http.StatusConflict {
+		t.Errorf("PUT after finalize: %d, want 409", rec.Code)
+	}
+	if rec := f.finalize(agentA, id, 1); rec.Code != http.StatusConflict {
+		t.Errorf("second finalize: %d, want 409", rec.Code)
+	}
+}
+
+func TestTwoStepKeyAppendsVersions(t *testing.T) {
+	f := newFixture(t, false)
+	first := bundle{"design.md": []byte("# v1"), "img/a.png": []byte("png-1")}
+	req := first.manifest("design.md")
+	req.Key = "artifacts/design"
+	v1 := f.publishBundle(agentA, "/api/v1/artifacts", req, first)
+
+	// Same key, changed entry, unchanged image: v2 of the same artifact,
+	// and only the changed file needs uploading.
+	second := bundle{"design.md": []byte("# v2"), "img/a.png": []byte("png-1")}
+	req = second.manifest("design.md")
+	req.Key = "artifacts/design"
+	pend := f.createPending(agentA, "/api/v1/artifacts", req)
+	if pend.Artifact.ID != v1.Artifact.ID || pend.Version.Seq != 2 {
+		t.Fatalf("same key made %s v%d, want %s v2", pend.Artifact.ID, pend.Version.Seq, v1.Artifact.ID)
+	}
+	if fmt.Sprint(pend.Upload.Required) != "[design.md]" {
+		t.Errorf("required = %v, want only the changed file", pend.Upload.Required)
+	}
+	if rec := f.put(agentA, pend.Artifact.ID, 2, "design.md", second["design.md"]); rec.Code != http.StatusNoContent {
+		t.Fatalf("PUT: %d", rec.Code)
+	}
+	rec := f.finalize(agentA, pend.Artifact.ID, 2)
+	if rec.Code != http.StatusOK || decodeInto[ArtifactResponse](t, rec).Artifact.CurrentSeq != 2 {
+		t.Fatalf("finalize v2: %d %s", rec.Code, rec.Body.String())
+	}
+	id := v1.Artifact.ID
+	// v1 stays fetchable by seq; the current version is v2.
+	if rec := f.do(&agentB, http.MethodGet, "/api/v1/artifacts/"+id+"/versions/1/files/design.md", nil, nil); rec.Body.String() != "# v1" {
+		t.Errorf("v1 entry = %q", rec.Body.String())
+	}
+	if rec := f.do(&agentB, http.MethodGet, "/api/v1/artifacts/"+id+"/files/design.md", nil, nil); rec.Body.String() != "# v2" {
+		t.Errorf("current entry = %q", rec.Body.String())
+	}
+	// The unchanged image is one blob shared by both versions.
+	pngPath := BlobPath("hub-1", sha([]byte("png-1")))
+	if ok, err := f.blobs.Exists(context.Background(), pngPath); err != nil || !ok {
+		t.Errorf("shared blob missing: %v", err)
+	}
+	vs := decodeInto[VersionListResponse](t, f.do(&agentB, http.MethodGet, "/api/v1/artifacts/"+id+"/versions", nil, nil))
+	if len(vs.Versions) != 2 || vs.Versions[0].Seq != 2 || vs.Versions[1].Seq != 1 || vs.Versions[0].Files != nil {
+		t.Errorf("versions = %+v", vs.Versions)
+	}
+	one := decodeInto[ArtifactResponse](t, f.do(&agentB, http.MethodGet, "/api/v1/artifacts/"+id+"/versions/1", nil, nil))
+	if one.Version.Seq != 1 || len(one.Version.Files) != 2 {
+		t.Errorf("version 1 = %+v", one.Version)
+	}
+	// The same key for another publisher is another artifact.
+	req = first.manifest("design.md")
+	req.Key = "artifacts/design"
+	other := f.createPending(agentB, "/api/v1/artifacts", req)
+	if other.Artifact.ID == id || other.Version.Seq != 1 {
+		t.Errorf("another publisher's key reused the artifact: %+v", other.Artifact)
+	}
+
+	// POST /{id}/versions appends too.
+	third := bundle{"design.md": []byte("# v3")}
+	req = third.manifest("")
+	req.Note = "three"
+	pend = f.createPending(agentA, "/api/v1/artifacts/"+id+"/versions", req)
+	if pend.Version.Seq != 3 || pend.Version.EntryPath != "design.md" || pend.Version.Note != "three" {
+		t.Errorf("appended = %+v", pend.Version)
+	}
+}
+
+func TestTwoStepUploadChecks(t *testing.T) {
+	f := newFixture(t, false)
+	files := bundle{"a.txt": []byte("hello")}
+	pend := f.createPending(agentA, "/api/v1/artifacts", files.manifest("a.txt"))
+	id := pend.Artifact.ID
+	for name, tc := range map[string]struct {
+		p      principal
+		path   string
+		body   []byte
+		hdr    map[string]string
+		status int
+	}{
+		"wrong bytes":          {agentA, "a.txt", []byte("HELLO"), nil, http.StatusBadRequest},
+		"short body":           {agentA, "a.txt", []byte("hell"), nil, http.StatusBadRequest},
+		"long body":            {agentA, "a.txt", []byte("hello!"), nil, http.StatusBadRequest},
+		"header digest":        {agentA, "a.txt", []byte("hello"), map[string]string{HeaderContentSHA256: sha([]byte("x"))}, http.StatusBadRequest},
+		"not in manifest":      {agentA, "b.txt", []byte("hello"), nil, http.StatusNotFound},
+		"other member":         {agentB, "a.txt", []byte("hello"), nil, http.StatusForbidden},
+		"outside the project":  {agentX, "a.txt", []byte("hello"), nil, http.StatusNotFound},
+		"unauthenticated":      {principal{}, "a.txt", []byte("hello"), nil, http.StatusNotFound},
+		"traversal":            {agentA, "..%2Fa.txt", []byte("hello"), nil, http.StatusNotFound},
+		"reserved remote path": {agentA, "_remote/" + sha([]byte("u")), []byte("hello"), nil, http.StatusNotFound},
+	} {
+		var p *principal
+		if tc.p.ref != "" {
+			p = &tc.p
+		}
+		rec := f.do(p, http.MethodPut, fmt.Sprintf("/api/v1/artifacts/%s/versions/1/files/%s", id, tc.path), tc.body, tc.hdr)
+		if rec.Code != tc.status {
+			t.Errorf("%s: %d, want %d (%s)", name, rec.Code, tc.status, rec.Body.String())
+		}
+	}
+	if rec := f.finalize(agentB, id, 1); rec.Code != http.StatusForbidden {
+		t.Errorf("finalize by another member: %d, want 403", rec.Code)
+	}
+	if rec := f.finalize(agentX, id, 1); rec.Code != http.StatusNotFound {
+		t.Errorf("finalize from outside: %d, want 404", rec.Code)
+	}
+	if rec := f.finalize(agentA, id, 1); rec.Code != http.StatusConflict {
+		t.Errorf("finalize after only failed uploads: %d, want 409", rec.Code)
+	}
+	if rec := f.finalize(agentA, id, 9); rec.Code != http.StatusNotFound {
+		t.Errorf("finalize of a missing version: %d, want 404", rec.Code)
+	}
+	// An exact Content-Length mismatch is refused before reading.
+	r := httptest.NewRequest(http.MethodPut, "/api/v1/artifacts/"+id+"/versions/1/files/a.txt", strings.NewReader("hello"))
+	r.ContentLength = 4
+	rec := httptest.NewRecorder()
+	f.svc.ServeHTTP(rec, withPrincipal(r, agentA))
+	if rec.Code != http.StatusBadRequest || errCode(t, rec) != "size_mismatch" {
+		t.Errorf("Content-Length mismatch: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestTwoStepWriteAuthorization(t *testing.T) {
+	f := newFixture(t, false)
+	files := bundle{"a.txt": []byte("a")}
+	pub := f.publishBundle(agentA, "/api/v1/artifacts", files.manifest("a.txt"), files)
+	id := pub.Artifact.ID
+	target := "/api/v1/artifacts/" + id + "/versions"
+	// A project member can read but not append to another's artifact.
+	if rec := f.postJSON(&agentB, target, files.manifest("a.txt")); rec.Code != http.StatusForbidden {
+		t.Errorf("member append: %d, want 403", rec.Code)
+	}
+	// Outside the project the artifact does not exist.
+	if rec := f.postJSON(&agentX, target, files.manifest("a.txt")); rec.Code != http.StatusNotFound {
+		t.Errorf("outsider append: %d, want 404", rec.Code)
+	}
+	// A principal write grant allows appending.
+	now := time.Now()
+	if _, err := f.db.Exec("INSERT INTO artifact_grant (id, artifact_id, subject_kind, subject_ref, permission, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+		"g-write", id, SubjectPrincipal, PrincipalRef(agentB.kind, agentB.ref), GrantWrite, now.UTC().Format(sqliteTimeLayout)); err != nil {
+		t.Fatal(err)
+	}
+	if rec := f.postJSON(&agentB, target, files.manifest("a.txt")); rec.Code != http.StatusCreated {
+		t.Errorf("grantee append: %d %s", rec.Code, rec.Body.String())
+	}
+	// The owner whose credential does not permit publishing cannot.
+	f.host.deny(agentA, "project-1", PermissionCreate)
+	if rec := f.postJSON(&agentA, target, files.manifest("a.txt")); rec.Code != http.StatusForbidden {
+		t.Errorf("owner without update: %d, want 403", rec.Code)
+	}
+	// Nor can it upload to or finalize a version it started.
+	delete(f.host.denied, PrincipalRef(agentA.kind, agentA.ref)+" project-1 "+PermissionCreate)
+	keyed := files.manifest("a.txt")
+	keyed.Key = "k"
+	pend := f.createPending(agentA, "/api/v1/artifacts", keyed)
+	f.host.deny(agentA, "project-1", PermissionCreate)
+	if rec := f.put(agentA, pend.Artifact.ID, 1, "a.txt", files["a.txt"]); rec.Code != http.StatusForbidden {
+		t.Errorf("PUT without publish permission: %d, want 403", rec.Code)
+	}
+	if rec := f.finalize(agentA, pend.Artifact.ID, 1); rec.Code != http.StatusForbidden {
+		t.Errorf("finalize without publish permission: %d, want 403", rec.Code)
+	}
+	// Creating needs artifact.create in the scope.
+	if rec := f.postJSON(&agentA, "/api/v1/artifacts", CreateVersionRequest{Scope: "project-2", Entry: "a.txt",
+		Files: []ManifestFile{{Path: "a.txt", Size: 1, SHA256: sha([]byte("a"))}}}); rec.Code != http.StatusForbidden {
+		t.Errorf("create in a foreign scope: %d, want 403", rec.Code)
+	}
+	if rec := f.postJSON(nil, "/api/v1/artifacts", files.manifest("a.txt")); rec.Code != http.StatusUnauthorized {
+		t.Errorf("unauthenticated create: %d, want 401", rec.Code)
+	}
+}
+
+func TestTwoStepManifestValidation(t *testing.T) {
+	f := newFixture(t, false)
+	f.svc.SetLimits(func(context.Context) Limits { return Limits{MaxFileBytes: 10, MaxBundleBytes: 15, MaxFiles: 3} })
+	d := sha([]byte("x"))
+	file := func(p string, size int64) ManifestFile { return ManifestFile{Path: p, Size: size, SHA256: d} }
+	for name, tc := range map[string]struct {
+		req    CreateVersionRequest
+		status int
+	}{
+		"no files":           {CreateVersionRequest{Entry: "a"}, 400},
+		"entry missing":      {CreateVersionRequest{Entry: "b", Files: []ManifestFile{file("a", 1)}}, 400},
+		"no entry, several":  {CreateVersionRequest{Files: []ManifestFile{file("a", 1), file("b", 1)}}, 400},
+		"duplicate path":     {CreateVersionRequest{Entry: "a", Files: []ManifestFile{file("a", 1), file("a", 1)}}, 400},
+		"file and directory": {CreateVersionRequest{Entry: "a", Files: []ManifestFile{file("a", 1), file("a/b", 1)}}, 400},
+		"traversal":          {CreateVersionRequest{Entry: "../a", Files: []ManifestFile{file("../a", 1)}}, 400},
+		"absolute":           {CreateVersionRequest{Entry: "/a", Files: []ManifestFile{file("/a", 1)}}, 400},
+		"reserved":           {CreateVersionRequest{Entry: "_remote/x", Files: []ManifestFile{file("_remote/x", 1)}}, 400},
+		"bad digest":         {CreateVersionRequest{Entry: "a", Files: []ManifestFile{{Path: "a", Size: 1, SHA256: "zz"}}}, 400},
+		"negative size":      {CreateVersionRequest{Entry: "a", Files: []ManifestFile{file("a", -1)}}, 400},
+		"review kind":        {CreateVersionRequest{Kind: VersionKindReview, Entry: "a", Files: []ManifestFile{file("a", 1)}}, 400},
+		"unknown kind":       {CreateVersionRequest{Kind: "draft", Entry: "a", Files: []ManifestFile{file("a", 1)}}, 400},
+		"long note":          {CreateVersionRequest{Note: strings.Repeat("n", maxNoteRunes+1), Entry: "a", Files: []ManifestFile{file("a", 1)}}, 400},
+		"long key":           {CreateVersionRequest{Key: strings.Repeat("k", maxKeyBytes+1), Entry: "a", Files: []ManifestFile{file("a", 1)}}, 400},
+		"control in key":     {CreateVersionRequest{Key: "a\nb", Entry: "a", Files: []ManifestFile{file("a", 1)}}, 400},
+		"file too large":     {CreateVersionRequest{Entry: "a", Files: []ManifestFile{file("a", 11)}}, 413},
+		"bundle too large":   {CreateVersionRequest{Entry: "a", Files: []ManifestFile{file("a", 8), file("b", 8)}}, 413},
+		"too many files":     {CreateVersionRequest{Entry: "a", Files: []ManifestFile{file("a", 1), file("b", 1), file("c", 1), file("d", 1)}}, 413},
+		"at the limits":      {CreateVersionRequest{Entry: "a", Files: []ManifestFile{file("a", 10), file("b", 5), file("c", 0)}}, 201},
+	} {
+		if rec := f.postJSON(&agentA, "/api/v1/artifacts", tc.req); rec.Code != tc.status {
+			t.Errorf("%s: %d, want %d (%s)", name, rec.Code, tc.status, rec.Body.String())
+		}
+	}
+	// Not JSON, unknown fields, trailing data, oversized body.
+	for name, body := range map[string]string{
+		"not json":      "name=a",
+		"unknown field": `{"entry":"a","files":[],"owner":"x"}`,
+		"trailing":      `{"entry":"a","files":[{"path":"a","size":1,"sha256":"` + d + `"}]} {}`,
+		"oversized":     `{"note":"` + strings.Repeat("x", maxManifestBytes) + `"}`,
+	} {
+		rec := f.do(&agentA, http.MethodPost, "/api/v1/artifacts", []byte(body), nil)
+		if rec.Code != http.StatusBadRequest && rec.Code != http.StatusRequestEntityTooLarge {
+			t.Errorf("%s: %d", name, rec.Code)
+		}
+	}
+	// Title, key and scope belong to creation only.
+	pend := f.createPending(agentA, "/api/v1/artifacts", CreateVersionRequest{Entry: "a", Files: []ManifestFile{file("a", 1)}})
+	if rec := f.postJSON(&agentA, "/api/v1/artifacts/"+pend.Artifact.ID+"/versions",
+		CreateVersionRequest{Title: "t", Entry: "a", Files: []ManifestFile{file("a", 1)}}); rec.Code != http.StatusBadRequest {
+		t.Errorf("title on append: %d, want 400", rec.Code)
+	}
+}
+
+func TestTwoStepPendingCap(t *testing.T) {
+	f := newFixture(t, false)
+	files := bundle{"a.txt": []byte("a")}
+	pend := f.createPending(agentA, "/api/v1/artifacts", files.manifest("a.txt"))
+	target := "/api/v1/artifacts/" + pend.Artifact.ID + "/versions"
+	for i := 1; i < MaxPendingVersions; i++ {
+		f.createPending(agentA, target, files.manifest("a.txt"))
+	}
+	rec := f.postJSON(&agentA, target, files.manifest("a.txt"))
+	if rec.Code != http.StatusConflict || errCode(t, rec) != "too_many_pending" {
+		t.Errorf("pending beyond the cap: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestServiceReapPending(t *testing.T) {
+	f := newFixture(t, false)
+	files := bundle{"a.txt": []byte("a")}
+	pend := f.createPending(agentA, "/api/v1/artifacts", files.manifest("a.txt"))
+	if n, err := f.svc.ReapPending(context.Background(), 10); err != nil || n != 0 {
+		t.Fatalf("fresh version reaped: %d, %v", n, err)
+	}
+	old := time.Now().Add(-PendingVersionTTL - time.Minute).UTC().Format(sqliteTimeLayout)
+	if _, err := f.db.Exec("UPDATE artifact_version SET created_at = ?", old); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := f.svc.ReapPending(context.Background(), 10); err != nil || n != 1 {
+		t.Fatalf("ReapPending = %d, %v; want 1", n, err)
+	}
+	if rec := f.put(agentA, pend.Artifact.ID, 1, "a.txt", files["a.txt"]); rec.Code != http.StatusNotFound {
+		t.Errorf("PUT to a reaped version's artifact: %d, want 404", rec.Code)
+	}
+	if rec := f.do(&agentA, http.MethodGet, "/api/v1/artifacts/"+pend.Artifact.ID, nil, nil); rec.Code != http.StatusNotFound {
+		t.Errorf("reaped empty artifact: %d, want 404", rec.Code)
+	}
+}

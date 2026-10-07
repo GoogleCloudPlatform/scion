@@ -63,8 +63,60 @@ func ParseRef(ref string) (id string, seq int, err error) {
 // successful publish.
 type ArtifactResponse struct {
 	Artifact ArtifactInfo `json:"artifact"`
-	// Version is the current version.
+	// Version is the current version, or the version a write created or
+	// finalized.
 	Version *VersionInfo `json:"version,omitempty"`
+	// Warnings are notes about the write that did not fail it.
+	Warnings []string `json:"warnings,omitempty"`
+}
+
+// CreateVersionRequest is the body of POST /api/v1/artifacts (create an
+// artifact with a pending first version, or append to the caller's
+// artifact with the same key) and of POST /api/v1/artifacts/{id}/versions
+// (append a pending version). Title, Key and Scope apply to the first form
+// only.
+type CreateVersionRequest struct {
+	Title string `json:"title,omitempty"`
+	Key   string `json:"key,omitempty"`
+	Scope string `json:"scope,omitempty"`
+	// Kind is the version kind; "" means publish.
+	Kind  string `json:"kind,omitempty"`
+	Entry string `json:"entry"`
+	Note  string `json:"note,omitempty"`
+	// Files is the version's manifest.
+	Files []ManifestFile `json:"files"`
+}
+
+// ManifestFile is one file of a version manifest.
+type ManifestFile struct {
+	Path   string `json:"path"`
+	Size   int64  `json:"size"`
+	SHA256 string `json:"sha256"`
+	// MediaType is optional; the service derives one from the path and the
+	// bytes when it is empty or generic.
+	MediaType string `json:"mediaType,omitempty"`
+}
+
+// PendingVersionResponse answers a request that created a pending
+// version.
+type PendingVersionResponse struct {
+	Artifact ArtifactInfo `json:"artifact"`
+	Version  *VersionInfo `json:"version"`
+	Upload   UploadInfo   `json:"upload"`
+}
+
+// UploadInfo tells the publisher what to upload before finalizing.
+type UploadInfo struct {
+	// Required lists the manifest paths whose bytes must be uploaded with
+	// PUT .../versions/{seq}/files/{path}. A file identical to one of the
+	// artifact's current version needs no upload.
+	Required []string `json:"required"`
+}
+
+// VersionListResponse is the body of GET /api/v1/artifacts/{id}/versions:
+// the ready versions, newest first, without their files.
+type VersionListResponse struct {
+	Versions []VersionInfo `json:"versions"`
 }
 
 // ArtifactInfo describes an artifact.
@@ -95,7 +147,7 @@ type VersionInfo struct {
 	CreatedByRef  string     `json:"createdByRef,omitempty"`
 	CreatedAt     time.Time  `json:"createdAt"`
 	State         string     `json:"state"`
-	Files         []FileInfo `json:"files"`
+	Files         []FileInfo `json:"files,omitempty"`
 }
 
 // FileInfo describes one file of a version.
