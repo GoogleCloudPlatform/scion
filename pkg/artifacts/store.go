@@ -175,6 +175,11 @@ type Store interface {
 	// ordered by creation.
 	ListGrants(ctx context.Context, artifactID string) ([]Grant, error)
 
+	// ListGrantsFor returns every grant on each of the artifacts, expired
+	// ones included, keyed by artifact id and ordered by creation. At most
+	// MaxGrantsForIDs ids may be given.
+	ListGrantsFor(ctx context.Context, artifactIDs []string) (map[string][]Grant, error)
+
 	// ListCandidates returns live (not deleted, not expired) artifacts the
 	// query's principal owns, or that carry an unexpired read, write or
 	// admin grant naming the principal or one of the query's scopes,

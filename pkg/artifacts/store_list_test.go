@@ -216,3 +216,73 @@ func TestStoreListCandidatesValidates(t *testing.T) {
 		t.Error("too many scopes: want error")
 	}
 }
+
+// TestStoreListCandidatesSearchCase: search compares the pattern and the
+// column under the database's own case rules. ASCII letters match in any
+// case on every database; other letters always match in their exact case.
+func TestStoreListCandidatesSearchCase(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, db *sql.DB, st Store, _ func() *sql.DB) {
+		now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+		seedList(t, db, st, listSeed{title: "Été report", key: "Größe-Plan", ownerRef: "alice", scope: "p", updated: now})
+		q := CandidateQuery{PrincipalKind: PrincipalKindUser, PrincipalRef: "alice"}
+		for _, search := range []string{"Été", "Été REPORT", "REPORT", "rEpOrT", "Größe", "größe-plan", "PLAN"} {
+			sq := q
+			sq.Search = search
+			if got := candidateTitles(t, st, sq); !slices.Equal(got, []string{"Été report"}) {
+				t.Errorf("search %q = %q, want the artifact", search, got)
+			}
+		}
+	})
+}
+
+// TestStoreListCandidatesDistinctAcrossScopes: an artifact shared with two
+// of the caller's scopes is one candidate, so duplicates never use up the
+// limit and hide later rows.
+func TestStoreListCandidatesDistinctAcrossScopes(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, db *sql.DB, st Store, _ func() *sql.DB) {
+		base := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+		seedList(t, db, st, listSeed{title: "both", ownerRef: "bob", scope: "p1", updated: base.Add(2 * time.Hour),
+			grants: []Grant{{SubjectKind: SubjectScope, SubjectRef: "p2", Permission: GrantRead}}})
+		seedList(t, db, st, listSeed{title: "older", ownerRef: "bob", scope: "p1", updated: base.Add(time.Hour),
+			grants: []Grant{{SubjectKind: SubjectPrincipal, SubjectRef: PrincipalRef(PrincipalKindUser, "alice"), Permission: GrantRead}}})
+		seedList(t, db, st, listSeed{title: "own", ownerRef: "alice", scope: "p1", updated: base})
+		q := CandidateQuery{PrincipalKind: PrincipalKindUser, PrincipalRef: "alice", ScopeRefs: []string{"p1", "p2"}, Limit: 2}
+		if got, want := candidateTitles(t, st, q), []string{"both", "older"}; !slices.Equal(got, want) {
+			t.Errorf("limit 2 = %q, want %q", got, want)
+		}
+		q.Limit = 10
+		if got, want := candidateTitles(t, st, q), []string{"both", "older", "own"}; !slices.Equal(got, want) {
+			t.Errorf("all = %q, want %q", got, want)
+		}
+	})
+}
+
+func TestStoreListGrantsFor(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, db *sql.DB, st Store, _ func() *sql.DB) {
+		now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+		a := seedList(t, db, st, listSeed{title: "a", ownerRef: "bob", scope: "p", updated: now,
+			grants: []Grant{{SubjectKind: SubjectPrincipal, SubjectRef: "user:alice", Permission: GrantRead}}})
+		b := seedList(t, db, st, listSeed{title: "b", ownerRef: "bob", scope: "q", updated: now})
+		ctx := context.Background()
+		got, err := st.ListGrantsFor(ctx, []string{a, b, "00000000-0000-4000-8000-000000000000"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got[a]) != 2 || len(got[b]) != 1 || len(got) != 2 {
+			t.Fatalf("grants = %v", got)
+		}
+		single, err := st.ListGrants(ctx, a)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(single) != 2 || single[0].ID != got[a][0].ID || single[1].ID != got[a][1].ID {
+			t.Errorf("ListGrants %v differs from ListGrantsFor %v", single, got[a])
+		}
+		if empty, err := st.ListGrantsFor(ctx, nil); err != nil || len(empty) != 0 {
+			t.Errorf("no ids: %v, %v", empty, err)
+		}
+		if _, err := st.ListGrantsFor(ctx, make([]string, MaxGrantsForIDs+1)); err == nil {
+			t.Error("too many ids: want error")
+		}
+	})
+}

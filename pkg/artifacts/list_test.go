@@ -17,12 +17,15 @@
 package artifacts
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/url"
 	"slices"
 	"strconv"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -289,6 +292,23 @@ func TestListScanCap(t *testing.T) {
 	if len(first.Artifacts) != 0 || first.NextCursor == "" {
 		t.Fatalf("first page: %d items, cursor %q; want a short page with a cursor", len(first.Artifacts), first.NextCursor)
 	}
+	// The scan-position cursor goes through the host's sealing, bound to
+	// the caller and the query like any other cursor.
+	if !strings.HasPrefix(first.NextCursor, "fake.") {
+		t.Errorf("cursor %q was not sealed by the host", first.NextCursor)
+	}
+	for name, tc := range map[string]struct {
+		p      principal
+		target string
+	}{
+		"another caller": {outside, listPath + "&cursor=" + url.QueryEscape(first.NextCursor)},
+		"another query":  {userU, listPath + "&q=hidden&cursor=" + url.QueryEscape(first.NextCursor)},
+	} {
+		rec := f.do(&tc.p, http.MethodGet, tc.target, nil, nil)
+		if rec.Code != http.StatusBadRequest || errCode(t, rec) != "invalid_cursor" {
+			t.Errorf("scan cursor, %s: %d %s, want 400 invalid_cursor", name, rec.Code, rec.Body.String())
+		}
+	}
 	var got []string
 	target := listPath + "&cursor=" + url.QueryEscape(first.NextCursor)
 	for range 5 {
@@ -325,5 +345,94 @@ func TestListMemoizesHost(t *testing.T) {
 	}
 	if counts["permits project-1 "+PermissionRead] != 1 || counts["project-1 "+PermissionRead] != 1 {
 		t.Errorf("host calls %v, want one Permits and one Authorize", counts)
+	}
+}
+
+// countingStore counts the queries the list endpoint makes.
+type countingStore struct {
+	Store
+	mu         sync.Mutex
+	candidates int
+	grantsFor  int
+	grants     int
+}
+
+func (c *countingStore) ListCandidates(ctx context.Context, q CandidateQuery) ([]Candidate, error) {
+	c.mu.Lock()
+	c.candidates++
+	c.mu.Unlock()
+	return c.Store.ListCandidates(ctx, q)
+}
+
+func (c *countingStore) ListGrantsFor(ctx context.Context, ids []string) (map[string][]Grant, error) {
+	c.mu.Lock()
+	c.grantsFor++
+	c.mu.Unlock()
+	return c.Store.ListGrantsFor(ctx, ids)
+}
+
+func (c *countingStore) ListGrants(ctx context.Context, id string) ([]Grant, error) {
+	c.mu.Lock()
+	c.grants++
+	c.mu.Unlock()
+	return c.Store.ListGrants(ctx, id)
+}
+
+func (f *fixture) countStore() *countingStore {
+	cs := &countingStore{Store: f.store}
+	f.svc.SetStore(cs)
+	return cs
+}
+
+// TestListStoreQueriesBounded: one list request makes one candidate query
+// and at most one grants query, however many candidates the caller cannot
+// read and however small the page.
+func TestListStoreQueriesBounded(t *testing.T) {
+	old := maxListScan
+	maxListScan = 6
+	t.Cleanup(func() { maxListScan = old })
+
+	f := newFixture(t, false)
+	f.host.allow(userU, "project-3", PermissionRead, PermissionCreate)
+	for i := range 10 {
+		f.publish(userU, "hidden"+strconv.Itoa(i)+".md", []byte{byte(i)}, "scope=project-3")
+	}
+	f.host.deny(userU, "project-3", PermissionRead)
+	cs := f.countStore()
+
+	page := f.list(&userU, listPath+"&limit=1")
+	if len(page.Artifacts) != 0 || page.NextCursor == "" {
+		t.Fatalf("page: %d items, cursor %q; want an empty page with a cursor", len(page.Artifacts), page.NextCursor)
+	}
+	if cs.candidates != 1 {
+		t.Errorf("one request made %d candidate queries, want 1", cs.candidates)
+	}
+
+	// Rows reached through grants: one grants query for the whole page,
+	// never one per row.
+	for i := range 4 {
+		id := f.publish(agentX, "x"+strconv.Itoa(i)+".md", []byte{byte(i)}, "").Artifact.ID
+		f.grantPrincipal(id, outside)
+	}
+	cs.candidates, cs.grantsFor, cs.grants = 0, 0, 0
+	if got := f.list(&outside, listPath); len(got.Artifacts) != 4 {
+		t.Fatalf("granted rows: %d, want 4", len(got.Artifacts))
+	}
+	if cs.candidates != 1 || cs.grantsFor != 1 || cs.grants != 0 {
+		t.Errorf("queries: candidates=%d grantsFor=%d grants=%d, want 1, 1, 0", cs.candidates, cs.grantsFor, cs.grants)
+	}
+	// Owned rows need no grants at all.
+	cs.candidates, cs.grantsFor, cs.grants = 0, 0, 0
+	f.list(&agentX, listPath+"&owner=me")
+	if cs.grantsFor != 0 || cs.grants != 0 {
+		t.Errorf("owned rows read grants: grantsFor=%d grants=%d", cs.grantsFor, cs.grants)
+	}
+}
+
+// TestListScanBudgetFitsGrantBatch: the grants of a whole scan budget fit
+// in one ListGrantsFor call.
+func TestListScanBudgetFitsGrantBatch(t *testing.T) {
+	if maxListScan > MaxGrantsForIDs {
+		t.Fatalf("maxListScan %d exceeds MaxGrantsForIDs %d", maxListScan, MaxGrantsForIDs)
 	}
 }

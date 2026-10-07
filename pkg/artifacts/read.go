@@ -56,12 +56,14 @@ const fileCSP = "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inl
 //
 // An expired artifact is unreadable to everyone.
 func (s *Service) canRead(ctx context.Context, b backend, a *Artifact) bool {
-	return canReadWith(ctx, s.host, b, a)
+	return canReadWith(ctx, s.host, a, func() ([]Grant, error) { return b.store.ListGrants(ctx, a.ID) })
 }
 
-// canReadWith is canRead asking host. The list endpoint passes a host that
-// memoizes answers for the length of one request.
-func canReadWith(ctx context.Context, host Host, b backend, a *Artifact) bool {
+// canReadWith is canRead asking host, with grants loading a's grants (all
+// of them, expired ones included) only if step 3 is reached. The list
+// endpoint passes a host that memoizes answers for the length of one
+// request, and a loader that reads the grants of a whole batch at once.
+func canReadWith(ctx context.Context, host Host, a *Artifact, grants func() ([]Grant, error)) bool {
 	kind, ref, _, ok := host.Principal(ctx)
 	if !ok {
 		return false
@@ -82,12 +84,12 @@ func canReadWith(ctx context.Context, host Host, b backend, a *Artifact) bool {
 		return true
 	}
 	// 3. Grants.
-	grants, err := b.store.ListGrants(ctx, a.ID)
+	gs, err := grants()
 	if err != nil {
 		slog.ErrorContext(ctx, "artifacts: list grants failed", "error", err)
 		return false
 	}
-	for _, g := range grants {
+	for _, g := range gs {
 		if g.ExpiresAt != nil && !now.Before(*g.ExpiresAt) {
 			continue
 		}

@@ -31,6 +31,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/go-jose/go-jose/v4/jwt"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -232,31 +234,129 @@ func TestArtifactsListUserAccessTokensAreBounded(t *testing.T) {
 	}
 }
 
-// TestArtifactHostMemberScopes: projects come from live project-scoped role
-// bindings (direct or through a group); agents get their own project.
+// TestArtifactHostMemberScopes: projects come from live, active
+// project-scoped role bindings, direct or through a group; bindings that
+// have expired or are not yet valid, and system-scoped ones, do not count.
+// Agents get their own project.
 func TestArtifactHostMemberScopes(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
-	p1 := artifactProject(t, s, "members-scope-p1")
-	p2 := artifactProject(t, s, "members-scope-p2")
+	direct := artifactProject(t, s, "members-scope-direct")
+	viaGroup := artifactProject(t, s, "members-scope-group")
+	expired := artifactProject(t, s, "members-scope-expired")
+	future := artifactProject(t, s, "members-scope-future")
 	userID := tid("members-scope-user")
-	createTestUserWithProjectRole(t, s, userID, "members-scope@test.com", p1.ID, store.ProjectRoleMember)
-	createTestUserWithProjectRole(t, s, userID, "members-scope@test.com", p2.ID, store.ProjectRoleOwner)
+	createTestUserWithProjectRole(t, s, userID, "members-scope@test.com", direct.ID, store.ProjectRoleMember)
 	user, err := s.GetUser(ctx, userID)
 	require.NoError(t, err)
+	member, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err)
+
+	// A project role reached through a group the user belongs to.
+	groupID := tid("members-scope-group")
+	require.NoError(t, s.CreateGroup(ctx, &store.Group{ID: groupID, Slug: "members-scope-group", Name: "members-scope-group",
+		GroupType: store.GroupTypeExplicit, Created: time.Now(), Updated: time.Now()}))
+	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{GroupID: groupID, MemberType: store.GroupMemberTypeUser,
+		MemberID: userID, Role: store.GroupMemberRoleMember, AddedAt: time.Now()}))
+	bind := func(principalType, principalID, project string, notBefore, expiresAt *time.Time) {
+		t.Helper()
+		_, err := s.CreateRoleBinding(ctx, &store.RoleBinding{RoleDefinitionID: member.ID, PrincipalType: principalType,
+			PrincipalID: principalID, ScopeType: store.RoleScopeProject, ScopeID: project, NotBefore: notBefore,
+			ExpiresAt: expiresAt, CreatedBy: "test"})
+		require.NoError(t, err)
+	}
+	past, later := time.Now().Add(-time.Hour), time.Now().Add(time.Hour)
+	bind(store.RoleBindingPrincipalGroup, groupID, viaGroup.ID, nil, nil)
+	bind(store.RoleBindingPrincipalUser, userID, expired.ID, nil, &past)
+	bind(store.RoleBindingPrincipalUser, userID, future.ID, &later, nil)
 	host := newArtifactHost(srv)
 
-	got, err := host.MemberScopes(contextWithIdentity(ctx, NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "web")))
+	userCtx := func() context.Context {
+		return contextWithIdentity(ctx, NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "web"))
+	}
+	got, err := host.MemberScopes(userCtx())
 	require.NoError(t, err)
-	assert.ElementsMatch(t, []string{p1.ID, p2.ID}, got)
+	assert.ElementsMatch(t, []string{direct.ID, viaGroup.ID}, got, "direct and group bindings count; expired and future ones do not")
 
+	// A scoped user access token resolves to the same user's projects; its
+	// boundary is applied per row by Permits, not here.
+	got, err = host.MemberScopes(contextWithIdentity(ctx, artifactTestUAT(t, NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "web"), direct.ID, "artifact:read")))
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{direct.ID, viaGroup.ID}, got, "scoped token")
+
+	// Read live: removing the direct binding and the group membership
+	// removes both projects at once.
 	_, err = s.DeleteRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, user.ID)
 	require.NoError(t, err)
-	got, err = host.MemberScopes(contextWithIdentity(ctx, NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "web")))
+	require.NoError(t, s.RemoveGroupMember(ctx, groupID, store.GroupMemberTypeUser, userID))
+	got, err = host.MemberScopes(userCtx())
 	require.NoError(t, err)
 	assert.Empty(t, got, "membership is read live")
+
+	// An agent gets its own project, from its token.
+	agent := &agentIdentityWrapper{&AgentTokenClaims{Claims: jwt.Claims{Subject: tid("members-scope-agent")}, ProjectID: direct.ID}}
+	got, err = host.MemberScopes(contextWithIdentity(ctx, agent))
+	require.NoError(t, err)
+	assert.Equal(t, []string{direct.ID}, got, "agent")
 
 	got, err = host.MemberScopes(ctx)
 	require.NoError(t, err)
 	assert.Empty(t, got, "no identity")
+}
+
+// TestArtifactsListScanCapCursorIsSealed: when a page stops at the scan
+// budget (500 rows) without filling, the cursor that resumes after the last
+// examined row is sealed like any other: it carries no artifact id, works
+// only for the same credential and query, and the walk still reaches the
+// readable row behind the unreadable ones.
+func TestArtifactsListScanCapCursorIsSealed(t *testing.T) {
+	srv, s := testServer(t)
+	st, _ := enableArtifactsForTest(t, srv)
+	ctx := context.Background()
+	p1 := artifactProject(t, s, "scancap-p1")
+	p2 := artifactProject(t, s, "scancap-p2")
+	userID := tid("scancap-user")
+	createTestUserWithProjectRole(t, s, userID, "scancap-user@test.com", p1.ID, store.ProjectRoleMember)
+	user, err := s.GetUser(ctx, userID)
+	require.NoError(t, err)
+	session := NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "web")
+
+	// One readable artifact in p1, then 501 newer ones in p2 that a token
+	// bounded to p1 cannot read.
+	readable := seedListedArtifact(t, st, "scancap-readable", p1.ID, artifacts.PrincipalKindUser, user.ID)
+	var hidden []string
+	base := time.Now().Add(time.Minute)
+	for i := range 501 {
+		now := base.Add(time.Duration(i) * time.Millisecond)
+		a := &artifacts.Artifact{ID: uuid.NewString(), ScopeKind: artifacts.ScopeKindProject, ScopeRef: p2.ID,
+			OwnerKind: artifacts.PrincipalKindUser, OwnerRef: user.ID, Title: "hidden", CreatedAt: now, UpdatedAt: now}
+		v := &artifacts.Version{ID: uuid.NewString(), ArtifactID: a.ID, Seq: 1, Kind: artifacts.VersionKindPublish,
+			EntryPath: "h.md", TotalBytes: 1, FileCount: 1, CreatedAt: now, State: artifacts.VersionStateReady}
+		require.NoError(t, st.CreatePublished(ctx, a, v, nil, nil))
+		hidden = append(hidden, a.ID)
+	}
+	token := artifactTestUAT(t, session, p1.ID, "artifact:read")
+
+	first := decodeArtifactList(t, identityArtifactRequest(t, srv, token, http.MethodGet, artifactListPath+"&limit=1", nil))
+	require.Empty(t, first.Artifacts, "the scan budget is spent on unreadable rows")
+	require.NotEmpty(t, first.NextCursor)
+	assert.True(t, strings.HasPrefix(first.NextCursor, listCursorPrefix), "sealed: %q", first.NextCursor)
+	for _, id := range append(hidden, readable) {
+		require.NotContains(t, first.NextCursor, id)
+		require.NotContains(t, first.NextCursor, strings.ReplaceAll(id, "-", ""))
+	}
+	cursor := url.QueryEscape(first.NextCursor)
+	for name, tc := range map[string]struct {
+		identity Identity
+		target   string
+	}{
+		"session":         {session, artifactListPath + "&limit=1&cursor=" + cursor},
+		"other token":     {artifactTestUAT(t, session, p2.ID, "artifact:read"), artifactListPath + "&limit=1&cursor=" + cursor},
+		"different query": {token, artifactListPath + "&owner=me&limit=1&cursor=" + cursor},
+	} {
+		rec := identityArtifactRequest(t, srv, tc.identity, http.MethodGet, tc.target, nil)
+		assert.Equal(t, http.StatusBadRequest, rec.Code, "%s: %s", name, rec.Body.String())
+	}
+	second := decodeArtifactList(t, identityArtifactRequest(t, srv, token, http.MethodGet, artifactListPath+"&limit=1&cursor="+cursor, nil))
+	assert.Equal(t, []string{readable}, listedIDs(second), "the walk resumes past the unreadable rows")
 }

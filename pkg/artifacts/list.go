@@ -22,6 +22,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 )
@@ -186,46 +187,75 @@ func (s *Service) handleList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// collect walks candidates in store order, keeping those canReadWith
-// allows, until it has a full page, runs out, or has examined maxListScan
-// rows. next is where the following page starts: after the last returned
-// row when the page is full, after the last examined row when the scan cap
-// stopped it, and nil at the end.
+// collect fetches up to maxListScan candidates in store order with one
+// store query, and keeps those canReadWith allows until it has a full page.
+// next is where the following page starts: after the last returned row when
+// the page is full, after the last examined row when the scan budget ran
+// out first (the host seals it, so that position is not revealed), and nil
+// at the end.
+//
+// The whole budget is fetched at once because the rows that fill the page
+// may come after any number of rows the caller cannot read; fetching only
+// the page remainder would cost one store query per unreadable row or two.
+// Rows fetched past a full page are dropped.
 func (s *Service) collect(ctx context.Context, host Host, b backend, q CandidateQuery, limit int) ([]ArtifactListItem, *Position, error) {
+	q.Limit = maxListScan
+	q.Now = time.Now()
+	rows, err := b.store.ListCandidates(ctx, q)
+	if err != nil {
+		return nil, nil, err
+	}
+	grants := batchGrants(ctx, b.store, rows)
 	items := []ArtifactListItem{}
 	var last *Position
-	scanned := 0
-	for scanned < maxListScan {
-		q.Limit = min(limit+1-len(items), maxListScan-scanned)
-		q.Now = time.Now()
-		rows, err := b.store.ListCandidates(ctx, q)
-		if err != nil {
-			return nil, nil, err
+	for i := range rows {
+		c := &rows[i]
+		last = &Position{UpdatedAt: c.UpdatedAt, ID: c.ID}
+		if !canReadWith(ctx, host, &c.Artifact, func() ([]Grant, error) { return grants(c.ID) }) {
+			continue
 		}
-		for i := range rows {
-			c := &rows[i]
-			scanned++
-			last = &Position{UpdatedAt: c.UpdatedAt, ID: c.ID}
-			if !canReadWith(ctx, host, b, &c.Artifact) {
-				continue
-			}
-			items = append(items, ArtifactListItem{
-				ArtifactInfo:  artifactInfo(&c.Artifact),
-				ReviewPending: c.CurrentKind == VersionKindReview,
-			})
-			if len(items) > limit {
-				items = items[:limit]
-				end := items[limit-1]
-				return items, &Position{UpdatedAt: end.UpdatedAt, ID: end.ID}, nil
-			}
+		items = append(items, ArtifactListItem{
+			ArtifactInfo:  artifactInfo(&c.Artifact),
+			ReviewPending: c.CurrentKind == VersionKindReview,
+		})
+		if len(items) > limit {
+			items = items[:limit]
+			end := items[limit-1]
+			return items, &Position{UpdatedAt: end.UpdatedAt, ID: end.ID}, nil
 		}
-		if len(rows) < q.Limit {
-			return items, nil, nil
-		}
-		q.After = last
+	}
+	if len(rows) < q.Limit {
+		return items, nil, nil
 	}
 	return items, last, nil
 }
+
+// batchGrants returns a loader for the grants of one candidate. The first
+// call reads the grants of every candidate in rows with one store query;
+// later calls are answered from that result. If no row needs its grants
+// (every row owned, or authorized in its home scope) nothing is read.
+func batchGrants(ctx context.Context, st Store, rows []Candidate) func(id string) ([]Grant, error) {
+	var (
+		loaded bool
+		byID   map[string][]Grant
+		err    error
+	)
+	return func(id string) ([]Grant, error) {
+		if !loaded {
+			loaded = true
+			ids := make([]string, len(rows))
+			for i := range rows {
+				ids[i] = rows[i].ID
+			}
+			byID, err = st.ListGrantsFor(ctx, ids)
+		}
+		return byID[id], err
+	}
+}
+
+// truncatedScopesOnce limits the truncation warning to one per process, so
+// a caller in very many projects does not log on every request.
+var truncatedScopesOnce sync.Once
 
 // candidateScopes sorts and deduplicates scope refs and caps them at what
 // one store query binds. Dropping scopes only loses completeness: a
@@ -241,7 +271,9 @@ func candidateScopes(ctx context.Context, scopes []string) []string {
 	}
 	sort.Strings(out)
 	if len(out) > maxCandidateScopes {
-		slog.WarnContext(ctx, "artifacts: list truncated member scopes", "scopes", len(out), "max", maxCandidateScopes)
+		truncatedScopesOnce.Do(func() {
+			slog.WarnContext(ctx, "artifacts: list truncated member scopes (logged once per process)", "scopes", len(out), "max", maxCandidateScopes)
+		})
 		out = out[:maxCandidateScopes]
 	}
 	return out
