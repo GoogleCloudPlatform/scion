@@ -744,6 +744,50 @@ func TestCleanupAgentResources_NoRun_RemovesPerRunObjectsOfGonePod(t *testing.T)
 	enf.assertAllConditional(t)
 }
 
+// NB1: CleanupAgentResources trusts the scion.pod_name annotation only when
+// the object's name is that pod's per-run name for the object's run, and
+// the pod is this agent's. Otherwise the object is kept, even though the
+// pod it names is absent.
+func TestCleanupAgentResources_MismatchedPodAnnotation_Kept(t *testing.T) {
+	ownA := k8sAgentObjectNames(rsAgent, rsRunA)
+	for _, tc := range []struct {
+		name      string
+		secret    string // Secret name
+		spc       string // SPC name
+		annotated string
+	}{
+		{"annotation names a different, absent pod", ownA.Secret, ownA.SPC, "proj9--agent"},
+		{"annotation names another agent's pod", k8sAgentObjectNames("proj1--other", rsRunA).Secret, k8sAgentObjectNames("proj1--other", rsRunA).SPC, "proj1--other"},
+		{"mismatched name (another pod) with a matching annotation", k8sAgentObjectNames("proj9--agent", rsRunA).Secret, k8sAgentObjectNames("proj9--agent", rsRunA).SPC, rsAgent},
+		{"mismatched name (another run's token) with a matching annotation", k8sAgentObjectNames(rsAgent, rsRunB).Secret, k8sAgentObjectNames(rsAgent, rsRunB).SPC, rsAgent},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rt, _, _, _ := newRunScopeRuntime(t)
+			prClock(rt, prNow)
+			ann := map[string]string{annotationPodName: tc.annotated, annotationStartDeadlineOffset: "300"}
+			prSeed(t, rt, "Secret", tc.secret, "sec-a", rsLabels(rsRunA, ""), ann, prNow)
+			prSeed(t, rt, "SPC", tc.spc, "spc-a", rsLabels(rsRunA, ""), ann, prNow)
+			for _, run := range []string{"", rsRunA} {
+				if err := rt.CleanupAgentResources(context.Background(), "agent", "proj1", run); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if !secretExists(t, rt, rt.DefaultNamespace, tc.secret) || !spcExists(t, rt, rt.DefaultNamespace, tc.spc) {
+				t.Error("an object whose name and pod annotation disagree was removed")
+			}
+		})
+	}
+	// Control: a consistent object of the same shape is removed.
+	rt, _, _, _ := newRunScopeRuntime(t)
+	a := prSeedRunObjects(t, rt, rsRunA, "300", prNow)
+	if err := rt.CleanupAgentResources(context.Background(), "agent", "proj1", rsRunA); err != nil {
+		t.Fatal(err)
+	}
+	if got := prPresent(t, rt, a); got != prNone {
+		t.Errorf("consistent per-run objects = %v, want none", got)
+	}
+}
+
 // A delete with no run while the pod exists removes the per-run objects of
 // the pod's run, and the pod.
 func TestK8sDelete_NoRun_RemovesPodsPerRunObjects(t *testing.T) {

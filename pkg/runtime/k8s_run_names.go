@@ -305,3 +305,23 @@ func (r *KubernetesRuntime) verifyStartObjects(ctx context.Context, handles []ap
 	}
 	return nil
 }
+
+// perRunNameMatches reports whether objectName is the per-run name of kind
+// ("Secret" or "SecretProviderClass") for pod podName and run runID.
+func perRunNameMatches(kind, objectName, podName, runID string) bool {
+	n := k8sAgentObjectNames(podName, runID)
+	switch kind {
+	case "Secret":
+		return objectName == n.Secret || objectName == n.Auth
+	case "SecretProviderClass":
+		return objectName == n.SPC
+	}
+	return false
+}
+
+// podBelongsToAgent reports whether podName is the pod name of the agent
+// with slug agentSlug: the slug itself, or "<project>--<slug>" (see
+// containerName in pkg/agent/run.go).
+func podBelongsToAgent(podName, agentSlug string) bool {
+	return podName == agentSlug || strings.HasSuffix(podName, "--"+agentSlug)
+}

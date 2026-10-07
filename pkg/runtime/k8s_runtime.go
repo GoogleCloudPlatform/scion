@@ -1596,7 +1596,11 @@ func (r *KubernetesRuntime) CleanupAgentResources(ctx context.Context, agentName
 			// Per-run names may be truncated: the pod name is in the
 			// annotation. A per-run object has a run label.
 			podName = obj.GetAnnotations()[annotationPodName]
-			if podName == "" || objRun == "" {
+			if podName == "" || objRun == "" || !perRunNameMatches(kind, objectName, podName, objRun) || !podBelongsToAgent(podName, agentName) {
+				// The annotation must name this agent's pod, and the
+				// object name must be that pod's name for its run (as
+				// deleteAgentSecretsBySelector requires): never look up,
+				// and act on the absence of, some other pod.
 				return false, nil
 			}
 		} else {
