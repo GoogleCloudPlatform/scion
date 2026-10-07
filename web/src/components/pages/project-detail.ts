@@ -136,11 +136,17 @@ const PAGER_PAGE_SIZE_STORAGE_KEY = 'scion-pagesize-project-agents';
  * payload is a single project with the requested id.
  */
 export function hydratedProjectFor(pageData: PageData | null, projectId: string): Project | null {
-  const data = pageData?.data;
-  if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
+  const data: unknown = pageData?.data;
+  if (!isProjectShaped(data)) return null;
   if (!projectId || data.id !== projectId) return null;
-  if (typeof data.name !== 'string') return null;
   return data as unknown as Project;
+}
+
+/** A non-null, non-array object with a string id and a string name. */
+function isProjectShaped(value: unknown): value is { id: string; name: string } {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  const record = value as { id?: unknown; name?: unknown };
+  return typeof record.id === 'string' && typeof record.name === 'string';
 }
 
 @customElement('scion-page-project-detail')
