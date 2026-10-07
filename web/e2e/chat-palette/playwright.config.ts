@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import { defineConfig } from '@playwright/test';
+import { defineConfig, devices } from '@playwright/test';
 
 // Isolated fixture for the native chat quick command palette. Mounts the
 // real scion-page-chat, scion-quick-palette and
@@ -36,6 +36,22 @@ export default defineConfig({
       args: ['--no-sandbox', '--disable-setuid-sandbox'],
     },
   },
+  // WebKit, the engine iOS Safari uses, may not be installed in every
+  // sandbox, so its project runs only when explicitly requested, and only
+  // the touch keyboard checks. Linux WebKit shows no on-screen keyboard:
+  // they check where focus is during and after the tap.
+  ...(process.env.PW_WEBKIT === '1'
+    ? {
+        projects: [
+          { name: 'chromium' },
+          {
+            name: 'webkit-iphone',
+            testMatch: 'touch-keyboard.pw.ts',
+            use: { ...devices['iPhone 13'], launchOptions: {} },
+          },
+        ],
+      }
+    : {}),
   webServer: {
     command: 'node e2e/chat-palette/serve.mjs',
     cwd: new URL('../../', import.meta.url).pathname,

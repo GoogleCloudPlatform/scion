@@ -16,8 +16,8 @@
  * Touch emulation, real <scion-chat-shell>: a tap on the header's
  * quick-switcher button gives a text field focus before the tap ends, so
  * iOS Safari shows the on-screen keyboard, and the query input takes focus
- * over from it once the palette shows. Runs on Chromium with the suite and
- * on WebKit with playwright.webkit.config.ts.
+ * over from it once the palette shows. Runs on Chromium with the suite, and
+ * on WebKit too with PW_WEBKIT=1 (see playwright.config.ts).
  */
 
 import { test, expect, type Locator, type Page } from '@playwright/test';
