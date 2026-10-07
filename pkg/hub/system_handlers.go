@@ -595,17 +595,17 @@ func (s *Server) restoreSelectedBuiltinHarnessConfigs(ctx context.Context, selec
 		for _, name := range builtins {
 			created, err := s.restoreBuiltinLocked(ctx, storage.ResourceKindHarnessConfig, name)
 			if err != nil {
-				slog.Warn("system init: failed to restore selected built-in harness config", "name", name, "error", err)
+				s.resourceLog.Warn("system init: failed to restore selected built-in harness config", "name", name, "error", err)
 				continue
 			}
 			if created {
-				slog.Info("system init: restored selected built-in harness config", "name", name)
+				s.resourceLog.Info("system init: restored selected built-in harness config", "name", name)
 			}
 		}
 		return nil
 	})
 	if err != nil {
-		slog.Warn("system init: could not restore selected built-in harness configs", "names", builtins, "error", err)
+		s.resourceLog.Warn("system init: could not restore selected built-in harness configs", "names", builtins, "error", err)
 	}
 }
 
