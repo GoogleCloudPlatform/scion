@@ -2549,6 +2549,12 @@ type ScheduledEvent struct {
 	// read the row from the store; B.3 and E.2b's own tests read the
 	// embedded struct field directly.
 	InitiatorAttribution `json:"-"`
+
+	// AuthorityCeiling is the frozen effect ceiling of the authorization
+	// revision this event runs under, copied from the schedule at
+	// materialization (or recorded at authoring for a one-shot event). The
+	// zero value is unrecorded.
+	AuthorityCeiling EffectCeiling `json:"-"`
 }
 
 // ScheduledEventStatus constants
@@ -2597,6 +2603,12 @@ type Schedule struct {
 	// overwritten by a re-attribution. See the type doc above. json:"-": see
 	// ScheduledEvent's field doc above for why.
 	InitiatorAttribution `json:"-"`
+
+	// AuthorityCeiling is the frozen effect ceiling of the current
+	// authorization revision. It is written together with
+	// InitiatorAttribution and AuthorizationRevision, and never on its own.
+	// The zero value is unrecorded.
+	AuthorityCeiling EffectCeiling `json:"-"`
 }
 
 // ScheduleStatus constants

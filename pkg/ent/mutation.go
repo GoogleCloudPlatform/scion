@@ -63062,39 +63062,46 @@ func (m *RuntimeBrokerMutation) ResetEdge(name string) error {
 // ScheduleMutation represents an operation that mutates the Schedule nodes in the graph.
 type ScheduleMutation struct {
 	config
-	op                            Op
-	typ                           string
-	id                            *uuid.UUID
-	initiator_principal_kind      *string
-	initiator_principal_id        *string
-	initiator_credential_kind     *string
-	initiator_credential_id       *string
-	initiator_credential_snapshot *string
-	attribution_version           *int
-	addattribution_version        *int
-	authorization_revision        *int
-	addauthorization_revision     *int
-	project_id                    *uuid.UUID
-	name                          *string
-	cron_expr                     *string
-	event_type                    *string
-	payload                       *string
-	status                        *string
-	next_run_at                   *time.Time
-	last_run_at                   *time.Time
-	last_run_status               *string
-	last_run_error                *string
-	run_count                     *int
-	addrun_count                  *int
-	error_count                   *int
-	adderror_count                *int
-	created_by                    *string
-	created                       *time.Time
-	updated                       *time.Time
-	clearedFields                 map[string]struct{}
-	done                          bool
-	oldValue                      func(context.Context) (*Schedule, error)
-	predicates                    []predicate.Schedule
+	op                                    Op
+	typ                                   string
+	id                                    *uuid.UUID
+	initiator_principal_kind              *string
+	initiator_principal_id                *string
+	initiator_credential_kind             *string
+	initiator_credential_id               *string
+	initiator_credential_snapshot         *string
+	attribution_version                   *int
+	addattribution_version                *int
+	authorization_revision                *int
+	addauthorization_revision             *int
+	authority_ceiling_kind                *string
+	authority_ceiling_version             *int32
+	addauthority_ceiling_version          *int32
+	authority_ceiling_permission_ids      *string
+	authority_ceiling_boundary_kind       *string
+	authority_ceiling_boundary_project_id *string
+	authority_ceiling_source_expires_at   *time.Time
+	project_id                            *uuid.UUID
+	name                                  *string
+	cron_expr                             *string
+	event_type                            *string
+	payload                               *string
+	status                                *string
+	next_run_at                           *time.Time
+	last_run_at                           *time.Time
+	last_run_status                       *string
+	last_run_error                        *string
+	run_count                             *int
+	addrun_count                          *int
+	error_count                           *int
+	adderror_count                        *int
+	created_by                            *string
+	created                               *time.Time
+	updated                               *time.Time
+	clearedFields                         map[string]struct{}
+	done                                  bool
+	oldValue                              func(context.Context) (*Schedule, error)
+	predicates                            []predicate.Schedule
 }
 
 var _ ent.Mutation = (*ScheduleMutation)(nil)
@@ -63584,6 +63591,268 @@ func (m *ScheduleMutation) ResetAuthorizationRevision() {
 	m.authorization_revision = nil
 	m.addauthorization_revision = nil
 	delete(m.clearedFields, schedule.FieldAuthorizationRevision)
+}
+
+// SetAuthorityCeilingKind sets the "authority_ceiling_kind" field.
+func (m *ScheduleMutation) SetAuthorityCeilingKind(s string) {
+	m.authority_ceiling_kind = &s
+}
+
+// AuthorityCeilingKind returns the value of the "authority_ceiling_kind" field in the mutation.
+func (m *ScheduleMutation) AuthorityCeilingKind() (r string, exists bool) {
+	v := m.authority_ceiling_kind
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAuthorityCeilingKind returns the old "authority_ceiling_kind" field's value of the Schedule entity.
+// If the Schedule object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ScheduleMutation) OldAuthorityCeilingKind(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAuthorityCeilingKind is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAuthorityCeilingKind requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAuthorityCeilingKind: %w", err)
+	}
+	return oldValue.AuthorityCeilingKind, nil
+}
+
+// ResetAuthorityCeilingKind resets all changes to the "authority_ceiling_kind" field.
+func (m *ScheduleMutation) ResetAuthorityCeilingKind() {
+	m.authority_ceiling_kind = nil
+}
+
+// SetAuthorityCeilingVersion sets the "authority_ceiling_version" field.
+func (m *ScheduleMutation) SetAuthorityCeilingVersion(i int32) {
+	m.authority_ceiling_version = &i
+	m.addauthority_ceiling_version = nil
+}
+
+// AuthorityCeilingVersion returns the value of the "authority_ceiling_version" field in the mutation.
+func (m *ScheduleMutation) AuthorityCeilingVersion() (r int32, exists bool) {
+	v := m.authority_ceiling_version
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAuthorityCeilingVersion returns the old "authority_ceiling_version" field's value of the Schedule entity.
+// If the Schedule object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ScheduleMutation) OldAuthorityCeilingVersion(ctx context.Context) (v int32, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAuthorityCeilingVersion is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAuthorityCeilingVersion requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAuthorityCeilingVersion: %w", err)
+	}
+	return oldValue.AuthorityCeilingVersion, nil
+}
+
+// AddAuthorityCeilingVersion adds i to the "authority_ceiling_version" field.
+func (m *ScheduleMutation) AddAuthorityCeilingVersion(i int32) {
+	if m.addauthority_ceiling_version != nil {
+		*m.addauthority_ceiling_version += i
+	} else {
+		m.addauthority_ceiling_version = &i
+	}
+}
+
+// AddedAuthorityCeilingVersion returns the value that was added to the "authority_ceiling_version" field in this mutation.
+func (m *ScheduleMutation) AddedAuthorityCeilingVersion() (r int32, exists bool) {
+	v := m.addauthority_ceiling_version
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetAuthorityCeilingVersion resets all changes to the "authority_ceiling_version" field.
+func (m *ScheduleMutation) ResetAuthorityCeilingVersion() {
+	m.authority_ceiling_version = nil
+	m.addauthority_ceiling_version = nil
+}
+
+// SetAuthorityCeilingPermissionIds sets the "authority_ceiling_permission_ids" field.
+func (m *ScheduleMutation) SetAuthorityCeilingPermissionIds(s string) {
+	m.authority_ceiling_permission_ids = &s
+}
+
+// AuthorityCeilingPermissionIds returns the value of the "authority_ceiling_permission_ids" field in the mutation.
+func (m *ScheduleMutation) AuthorityCeilingPermissionIds() (r string, exists bool) {
+	v := m.authority_ceiling_permission_ids
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAuthorityCeilingPermissionIds returns the old "authority_ceiling_permission_ids" field's value of the Schedule entity.
+// If the Schedule object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ScheduleMutation) OldAuthorityCeilingPermissionIds(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAuthorityCeilingPermissionIds is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAuthorityCeilingPermissionIds requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAuthorityCeilingPermissionIds: %w", err)
+	}
+	return oldValue.AuthorityCeilingPermissionIds, nil
+}
+
+// ClearAuthorityCeilingPermissionIds clears the value of the "authority_ceiling_permission_ids" field.
+func (m *ScheduleMutation) ClearAuthorityCeilingPermissionIds() {
+	m.authority_ceiling_permission_ids = nil
+	m.clearedFields[schedule.FieldAuthorityCeilingPermissionIds] = struct{}{}
+}
+
+// AuthorityCeilingPermissionIdsCleared returns if the "authority_ceiling_permission_ids" field was cleared in this mutation.
+func (m *ScheduleMutation) AuthorityCeilingPermissionIdsCleared() bool {
+	_, ok := m.clearedFields[schedule.FieldAuthorityCeilingPermissionIds]
+	return ok
+}
+
+// ResetAuthorityCeilingPermissionIds resets all changes to the "authority_ceiling_permission_ids" field.
+func (m *ScheduleMutation) ResetAuthorityCeilingPermissionIds() {
+	m.authority_ceiling_permission_ids = nil
+	delete(m.clearedFields, schedule.FieldAuthorityCeilingPermissionIds)
+}
+
+// SetAuthorityCeilingBoundaryKind sets the "authority_ceiling_boundary_kind" field.
+func (m *ScheduleMutation) SetAuthorityCeilingBoundaryKind(s string) {
+	m.authority_ceiling_boundary_kind = &s
+}
+
+// AuthorityCeilingBoundaryKind returns the value of the "authority_ceiling_boundary_kind" field in the mutation.
+func (m *ScheduleMutation) AuthorityCeilingBoundaryKind() (r string, exists bool) {
+	v := m.authority_ceiling_boundary_kind
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAuthorityCeilingBoundaryKind returns the old "authority_ceiling_boundary_kind" field's value of the Schedule entity.
+// If the Schedule object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ScheduleMutation) OldAuthorityCeilingBoundaryKind(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAuthorityCeilingBoundaryKind is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAuthorityCeilingBoundaryKind requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAuthorityCeilingBoundaryKind: %w", err)
+	}
+	return oldValue.AuthorityCeilingBoundaryKind, nil
+}
+
+// ResetAuthorityCeilingBoundaryKind resets all changes to the "authority_ceiling_boundary_kind" field.
+func (m *ScheduleMutation) ResetAuthorityCeilingBoundaryKind() {
+	m.authority_ceiling_boundary_kind = nil
+}
+
+// SetAuthorityCeilingBoundaryProjectID sets the "authority_ceiling_boundary_project_id" field.
+func (m *ScheduleMutation) SetAuthorityCeilingBoundaryProjectID(s string) {
+	m.authority_ceiling_boundary_project_id = &s
+}
+
+// AuthorityCeilingBoundaryProjectID returns the value of the "authority_ceiling_boundary_project_id" field in the mutation.
+func (m *ScheduleMutation) AuthorityCeilingBoundaryProjectID() (r string, exists bool) {
+	v := m.authority_ceiling_boundary_project_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAuthorityCeilingBoundaryProjectID returns the old "authority_ceiling_boundary_project_id" field's value of the Schedule entity.
+// If the Schedule object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ScheduleMutation) OldAuthorityCeilingBoundaryProjectID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAuthorityCeilingBoundaryProjectID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAuthorityCeilingBoundaryProjectID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAuthorityCeilingBoundaryProjectID: %w", err)
+	}
+	return oldValue.AuthorityCeilingBoundaryProjectID, nil
+}
+
+// ResetAuthorityCeilingBoundaryProjectID resets all changes to the "authority_ceiling_boundary_project_id" field.
+func (m *ScheduleMutation) ResetAuthorityCeilingBoundaryProjectID() {
+	m.authority_ceiling_boundary_project_id = nil
+}
+
+// SetAuthorityCeilingSourceExpiresAt sets the "authority_ceiling_source_expires_at" field.
+func (m *ScheduleMutation) SetAuthorityCeilingSourceExpiresAt(t time.Time) {
+	m.authority_ceiling_source_expires_at = &t
+}
+
+// AuthorityCeilingSourceExpiresAt returns the value of the "authority_ceiling_source_expires_at" field in the mutation.
+func (m *ScheduleMutation) AuthorityCeilingSourceExpiresAt() (r time.Time, exists bool) {
+	v := m.authority_ceiling_source_expires_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAuthorityCeilingSourceExpiresAt returns the old "authority_ceiling_source_expires_at" field's value of the Schedule entity.
+// If the Schedule object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ScheduleMutation) OldAuthorityCeilingSourceExpiresAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAuthorityCeilingSourceExpiresAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAuthorityCeilingSourceExpiresAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAuthorityCeilingSourceExpiresAt: %w", err)
+	}
+	return oldValue.AuthorityCeilingSourceExpiresAt, nil
+}
+
+// ClearAuthorityCeilingSourceExpiresAt clears the value of the "authority_ceiling_source_expires_at" field.
+func (m *ScheduleMutation) ClearAuthorityCeilingSourceExpiresAt() {
+	m.authority_ceiling_source_expires_at = nil
+	m.clearedFields[schedule.FieldAuthorityCeilingSourceExpiresAt] = struct{}{}
+}
+
+// AuthorityCeilingSourceExpiresAtCleared returns if the "authority_ceiling_source_expires_at" field was cleared in this mutation.
+func (m *ScheduleMutation) AuthorityCeilingSourceExpiresAtCleared() bool {
+	_, ok := m.clearedFields[schedule.FieldAuthorityCeilingSourceExpiresAt]
+	return ok
+}
+
+// ResetAuthorityCeilingSourceExpiresAt resets all changes to the "authority_ceiling_source_expires_at" field.
+func (m *ScheduleMutation) ResetAuthorityCeilingSourceExpiresAt() {
+	m.authority_ceiling_source_expires_at = nil
+	delete(m.clearedFields, schedule.FieldAuthorityCeilingSourceExpiresAt)
 }
 
 // SetProjectID sets the "project_id" field.
@@ -64265,7 +64534,7 @@ func (m *ScheduleMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *ScheduleMutation) Fields() []string {
-	fields := make([]string, 0, 22)
+	fields := make([]string, 0, 28)
 	if m.initiator_principal_kind != nil {
 		fields = append(fields, schedule.FieldInitiatorPrincipalKind)
 	}
@@ -64286,6 +64555,24 @@ func (m *ScheduleMutation) Fields() []string {
 	}
 	if m.authorization_revision != nil {
 		fields = append(fields, schedule.FieldAuthorizationRevision)
+	}
+	if m.authority_ceiling_kind != nil {
+		fields = append(fields, schedule.FieldAuthorityCeilingKind)
+	}
+	if m.authority_ceiling_version != nil {
+		fields = append(fields, schedule.FieldAuthorityCeilingVersion)
+	}
+	if m.authority_ceiling_permission_ids != nil {
+		fields = append(fields, schedule.FieldAuthorityCeilingPermissionIds)
+	}
+	if m.authority_ceiling_boundary_kind != nil {
+		fields = append(fields, schedule.FieldAuthorityCeilingBoundaryKind)
+	}
+	if m.authority_ceiling_boundary_project_id != nil {
+		fields = append(fields, schedule.FieldAuthorityCeilingBoundaryProjectID)
+	}
+	if m.authority_ceiling_source_expires_at != nil {
+		fields = append(fields, schedule.FieldAuthorityCeilingSourceExpiresAt)
 	}
 	if m.project_id != nil {
 		fields = append(fields, schedule.FieldProjectID)
@@ -64354,6 +64641,18 @@ func (m *ScheduleMutation) Field(name string) (ent.Value, bool) {
 		return m.AttributionVersion()
 	case schedule.FieldAuthorizationRevision:
 		return m.AuthorizationRevision()
+	case schedule.FieldAuthorityCeilingKind:
+		return m.AuthorityCeilingKind()
+	case schedule.FieldAuthorityCeilingVersion:
+		return m.AuthorityCeilingVersion()
+	case schedule.FieldAuthorityCeilingPermissionIds:
+		return m.AuthorityCeilingPermissionIds()
+	case schedule.FieldAuthorityCeilingBoundaryKind:
+		return m.AuthorityCeilingBoundaryKind()
+	case schedule.FieldAuthorityCeilingBoundaryProjectID:
+		return m.AuthorityCeilingBoundaryProjectID()
+	case schedule.FieldAuthorityCeilingSourceExpiresAt:
+		return m.AuthorityCeilingSourceExpiresAt()
 	case schedule.FieldProjectID:
 		return m.ProjectID()
 	case schedule.FieldName:
@@ -64407,6 +64706,18 @@ func (m *ScheduleMutation) OldField(ctx context.Context, name string) (ent.Value
 		return m.OldAttributionVersion(ctx)
 	case schedule.FieldAuthorizationRevision:
 		return m.OldAuthorizationRevision(ctx)
+	case schedule.FieldAuthorityCeilingKind:
+		return m.OldAuthorityCeilingKind(ctx)
+	case schedule.FieldAuthorityCeilingVersion:
+		return m.OldAuthorityCeilingVersion(ctx)
+	case schedule.FieldAuthorityCeilingPermissionIds:
+		return m.OldAuthorityCeilingPermissionIds(ctx)
+	case schedule.FieldAuthorityCeilingBoundaryKind:
+		return m.OldAuthorityCeilingBoundaryKind(ctx)
+	case schedule.FieldAuthorityCeilingBoundaryProjectID:
+		return m.OldAuthorityCeilingBoundaryProjectID(ctx)
+	case schedule.FieldAuthorityCeilingSourceExpiresAt:
+		return m.OldAuthorityCeilingSourceExpiresAt(ctx)
 	case schedule.FieldProjectID:
 		return m.OldProjectID(ctx)
 	case schedule.FieldName:
@@ -64494,6 +64805,48 @@ func (m *ScheduleMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetAuthorizationRevision(v)
+		return nil
+	case schedule.FieldAuthorityCeilingKind:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAuthorityCeilingKind(v)
+		return nil
+	case schedule.FieldAuthorityCeilingVersion:
+		v, ok := value.(int32)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAuthorityCeilingVersion(v)
+		return nil
+	case schedule.FieldAuthorityCeilingPermissionIds:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAuthorityCeilingPermissionIds(v)
+		return nil
+	case schedule.FieldAuthorityCeilingBoundaryKind:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAuthorityCeilingBoundaryKind(v)
+		return nil
+	case schedule.FieldAuthorityCeilingBoundaryProjectID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAuthorityCeilingBoundaryProjectID(v)
+		return nil
+	case schedule.FieldAuthorityCeilingSourceExpiresAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAuthorityCeilingSourceExpiresAt(v)
 		return nil
 	case schedule.FieldProjectID:
 		v, ok := value.(uuid.UUID)
@@ -64614,6 +64967,9 @@ func (m *ScheduleMutation) AddedFields() []string {
 	if m.addauthorization_revision != nil {
 		fields = append(fields, schedule.FieldAuthorizationRevision)
 	}
+	if m.addauthority_ceiling_version != nil {
+		fields = append(fields, schedule.FieldAuthorityCeilingVersion)
+	}
 	if m.addrun_count != nil {
 		fields = append(fields, schedule.FieldRunCount)
 	}
@@ -64632,6 +64988,8 @@ func (m *ScheduleMutation) AddedField(name string) (ent.Value, bool) {
 		return m.AddedAttributionVersion()
 	case schedule.FieldAuthorizationRevision:
 		return m.AddedAuthorizationRevision()
+	case schedule.FieldAuthorityCeilingVersion:
+		return m.AddedAuthorityCeilingVersion()
 	case schedule.FieldRunCount:
 		return m.AddedRunCount()
 	case schedule.FieldErrorCount:
@@ -64658,6 +65016,13 @@ func (m *ScheduleMutation) AddField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.AddAuthorizationRevision(v)
+		return nil
+	case schedule.FieldAuthorityCeilingVersion:
+		v, ok := value.(int32)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddAuthorityCeilingVersion(v)
 		return nil
 	case schedule.FieldRunCount:
 		v, ok := value.(int)
@@ -64701,6 +65066,12 @@ func (m *ScheduleMutation) ClearedFields() []string {
 	}
 	if m.FieldCleared(schedule.FieldAuthorizationRevision) {
 		fields = append(fields, schedule.FieldAuthorizationRevision)
+	}
+	if m.FieldCleared(schedule.FieldAuthorityCeilingPermissionIds) {
+		fields = append(fields, schedule.FieldAuthorityCeilingPermissionIds)
+	}
+	if m.FieldCleared(schedule.FieldAuthorityCeilingSourceExpiresAt) {
+		fields = append(fields, schedule.FieldAuthorityCeilingSourceExpiresAt)
 	}
 	if m.FieldCleared(schedule.FieldNextRunAt) {
 		fields = append(fields, schedule.FieldNextRunAt)
@@ -64752,6 +65123,12 @@ func (m *ScheduleMutation) ClearField(name string) error {
 	case schedule.FieldAuthorizationRevision:
 		m.ClearAuthorizationRevision()
 		return nil
+	case schedule.FieldAuthorityCeilingPermissionIds:
+		m.ClearAuthorityCeilingPermissionIds()
+		return nil
+	case schedule.FieldAuthorityCeilingSourceExpiresAt:
+		m.ClearAuthorityCeilingSourceExpiresAt()
+		return nil
 	case schedule.FieldNextRunAt:
 		m.ClearNextRunAt()
 		return nil
@@ -64795,6 +65172,24 @@ func (m *ScheduleMutation) ResetField(name string) error {
 		return nil
 	case schedule.FieldAuthorizationRevision:
 		m.ResetAuthorizationRevision()
+		return nil
+	case schedule.FieldAuthorityCeilingKind:
+		m.ResetAuthorityCeilingKind()
+		return nil
+	case schedule.FieldAuthorityCeilingVersion:
+		m.ResetAuthorityCeilingVersion()
+		return nil
+	case schedule.FieldAuthorityCeilingPermissionIds:
+		m.ResetAuthorityCeilingPermissionIds()
+		return nil
+	case schedule.FieldAuthorityCeilingBoundaryKind:
+		m.ResetAuthorityCeilingBoundaryKind()
+		return nil
+	case schedule.FieldAuthorityCeilingBoundaryProjectID:
+		m.ResetAuthorityCeilingBoundaryProjectID()
+		return nil
+	case schedule.FieldAuthorityCeilingSourceExpiresAt:
+		m.ResetAuthorityCeilingSourceExpiresAt()
 		return nil
 	case schedule.FieldProjectID:
 		m.ResetProjectID()
@@ -64896,32 +65291,39 @@ func (m *ScheduleMutation) ResetEdge(name string) error {
 // ScheduledEventMutation represents an operation that mutates the ScheduledEvent nodes in the graph.
 type ScheduledEventMutation struct {
 	config
-	op                            Op
-	typ                           string
-	id                            *uuid.UUID
-	initiator_principal_kind      *string
-	initiator_principal_id        *string
-	initiator_credential_kind     *string
-	initiator_credential_id       *string
-	initiator_credential_snapshot *string
-	attribution_version           *int
-	addattribution_version        *int
-	authorization_revision        *int
-	addauthorization_revision     *int
-	project_id                    *uuid.UUID
-	event_type                    *string
-	fire_at                       *time.Time
-	payload                       *string
-	status                        *string
-	created_by                    *string
-	fired_at                      *time.Time
-	error                         *string
-	schedule_id                   *string
-	created                       *time.Time
-	clearedFields                 map[string]struct{}
-	done                          bool
-	oldValue                      func(context.Context) (*ScheduledEvent, error)
-	predicates                    []predicate.ScheduledEvent
+	op                                    Op
+	typ                                   string
+	id                                    *uuid.UUID
+	initiator_principal_kind              *string
+	initiator_principal_id                *string
+	initiator_credential_kind             *string
+	initiator_credential_id               *string
+	initiator_credential_snapshot         *string
+	attribution_version                   *int
+	addattribution_version                *int
+	authorization_revision                *int
+	addauthorization_revision             *int
+	authority_ceiling_kind                *string
+	authority_ceiling_version             *int32
+	addauthority_ceiling_version          *int32
+	authority_ceiling_permission_ids      *string
+	authority_ceiling_boundary_kind       *string
+	authority_ceiling_boundary_project_id *string
+	authority_ceiling_source_expires_at   *time.Time
+	project_id                            *uuid.UUID
+	event_type                            *string
+	fire_at                               *time.Time
+	payload                               *string
+	status                                *string
+	created_by                            *string
+	fired_at                              *time.Time
+	error                                 *string
+	schedule_id                           *string
+	created                               *time.Time
+	clearedFields                         map[string]struct{}
+	done                                  bool
+	oldValue                              func(context.Context) (*ScheduledEvent, error)
+	predicates                            []predicate.ScheduledEvent
 }
 
 var _ ent.Mutation = (*ScheduledEventMutation)(nil)
@@ -65413,6 +65815,268 @@ func (m *ScheduledEventMutation) ResetAuthorizationRevision() {
 	delete(m.clearedFields, scheduledevent.FieldAuthorizationRevision)
 }
 
+// SetAuthorityCeilingKind sets the "authority_ceiling_kind" field.
+func (m *ScheduledEventMutation) SetAuthorityCeilingKind(s string) {
+	m.authority_ceiling_kind = &s
+}
+
+// AuthorityCeilingKind returns the value of the "authority_ceiling_kind" field in the mutation.
+func (m *ScheduledEventMutation) AuthorityCeilingKind() (r string, exists bool) {
+	v := m.authority_ceiling_kind
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAuthorityCeilingKind returns the old "authority_ceiling_kind" field's value of the ScheduledEvent entity.
+// If the ScheduledEvent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ScheduledEventMutation) OldAuthorityCeilingKind(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAuthorityCeilingKind is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAuthorityCeilingKind requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAuthorityCeilingKind: %w", err)
+	}
+	return oldValue.AuthorityCeilingKind, nil
+}
+
+// ResetAuthorityCeilingKind resets all changes to the "authority_ceiling_kind" field.
+func (m *ScheduledEventMutation) ResetAuthorityCeilingKind() {
+	m.authority_ceiling_kind = nil
+}
+
+// SetAuthorityCeilingVersion sets the "authority_ceiling_version" field.
+func (m *ScheduledEventMutation) SetAuthorityCeilingVersion(i int32) {
+	m.authority_ceiling_version = &i
+	m.addauthority_ceiling_version = nil
+}
+
+// AuthorityCeilingVersion returns the value of the "authority_ceiling_version" field in the mutation.
+func (m *ScheduledEventMutation) AuthorityCeilingVersion() (r int32, exists bool) {
+	v := m.authority_ceiling_version
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAuthorityCeilingVersion returns the old "authority_ceiling_version" field's value of the ScheduledEvent entity.
+// If the ScheduledEvent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ScheduledEventMutation) OldAuthorityCeilingVersion(ctx context.Context) (v int32, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAuthorityCeilingVersion is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAuthorityCeilingVersion requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAuthorityCeilingVersion: %w", err)
+	}
+	return oldValue.AuthorityCeilingVersion, nil
+}
+
+// AddAuthorityCeilingVersion adds i to the "authority_ceiling_version" field.
+func (m *ScheduledEventMutation) AddAuthorityCeilingVersion(i int32) {
+	if m.addauthority_ceiling_version != nil {
+		*m.addauthority_ceiling_version += i
+	} else {
+		m.addauthority_ceiling_version = &i
+	}
+}
+
+// AddedAuthorityCeilingVersion returns the value that was added to the "authority_ceiling_version" field in this mutation.
+func (m *ScheduledEventMutation) AddedAuthorityCeilingVersion() (r int32, exists bool) {
+	v := m.addauthority_ceiling_version
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetAuthorityCeilingVersion resets all changes to the "authority_ceiling_version" field.
+func (m *ScheduledEventMutation) ResetAuthorityCeilingVersion() {
+	m.authority_ceiling_version = nil
+	m.addauthority_ceiling_version = nil
+}
+
+// SetAuthorityCeilingPermissionIds sets the "authority_ceiling_permission_ids" field.
+func (m *ScheduledEventMutation) SetAuthorityCeilingPermissionIds(s string) {
+	m.authority_ceiling_permission_ids = &s
+}
+
+// AuthorityCeilingPermissionIds returns the value of the "authority_ceiling_permission_ids" field in the mutation.
+func (m *ScheduledEventMutation) AuthorityCeilingPermissionIds() (r string, exists bool) {
+	v := m.authority_ceiling_permission_ids
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAuthorityCeilingPermissionIds returns the old "authority_ceiling_permission_ids" field's value of the ScheduledEvent entity.
+// If the ScheduledEvent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ScheduledEventMutation) OldAuthorityCeilingPermissionIds(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAuthorityCeilingPermissionIds is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAuthorityCeilingPermissionIds requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAuthorityCeilingPermissionIds: %w", err)
+	}
+	return oldValue.AuthorityCeilingPermissionIds, nil
+}
+
+// ClearAuthorityCeilingPermissionIds clears the value of the "authority_ceiling_permission_ids" field.
+func (m *ScheduledEventMutation) ClearAuthorityCeilingPermissionIds() {
+	m.authority_ceiling_permission_ids = nil
+	m.clearedFields[scheduledevent.FieldAuthorityCeilingPermissionIds] = struct{}{}
+}
+
+// AuthorityCeilingPermissionIdsCleared returns if the "authority_ceiling_permission_ids" field was cleared in this mutation.
+func (m *ScheduledEventMutation) AuthorityCeilingPermissionIdsCleared() bool {
+	_, ok := m.clearedFields[scheduledevent.FieldAuthorityCeilingPermissionIds]
+	return ok
+}
+
+// ResetAuthorityCeilingPermissionIds resets all changes to the "authority_ceiling_permission_ids" field.
+func (m *ScheduledEventMutation) ResetAuthorityCeilingPermissionIds() {
+	m.authority_ceiling_permission_ids = nil
+	delete(m.clearedFields, scheduledevent.FieldAuthorityCeilingPermissionIds)
+}
+
+// SetAuthorityCeilingBoundaryKind sets the "authority_ceiling_boundary_kind" field.
+func (m *ScheduledEventMutation) SetAuthorityCeilingBoundaryKind(s string) {
+	m.authority_ceiling_boundary_kind = &s
+}
+
+// AuthorityCeilingBoundaryKind returns the value of the "authority_ceiling_boundary_kind" field in the mutation.
+func (m *ScheduledEventMutation) AuthorityCeilingBoundaryKind() (r string, exists bool) {
+	v := m.authority_ceiling_boundary_kind
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAuthorityCeilingBoundaryKind returns the old "authority_ceiling_boundary_kind" field's value of the ScheduledEvent entity.
+// If the ScheduledEvent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ScheduledEventMutation) OldAuthorityCeilingBoundaryKind(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAuthorityCeilingBoundaryKind is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAuthorityCeilingBoundaryKind requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAuthorityCeilingBoundaryKind: %w", err)
+	}
+	return oldValue.AuthorityCeilingBoundaryKind, nil
+}
+
+// ResetAuthorityCeilingBoundaryKind resets all changes to the "authority_ceiling_boundary_kind" field.
+func (m *ScheduledEventMutation) ResetAuthorityCeilingBoundaryKind() {
+	m.authority_ceiling_boundary_kind = nil
+}
+
+// SetAuthorityCeilingBoundaryProjectID sets the "authority_ceiling_boundary_project_id" field.
+func (m *ScheduledEventMutation) SetAuthorityCeilingBoundaryProjectID(s string) {
+	m.authority_ceiling_boundary_project_id = &s
+}
+
+// AuthorityCeilingBoundaryProjectID returns the value of the "authority_ceiling_boundary_project_id" field in the mutation.
+func (m *ScheduledEventMutation) AuthorityCeilingBoundaryProjectID() (r string, exists bool) {
+	v := m.authority_ceiling_boundary_project_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAuthorityCeilingBoundaryProjectID returns the old "authority_ceiling_boundary_project_id" field's value of the ScheduledEvent entity.
+// If the ScheduledEvent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ScheduledEventMutation) OldAuthorityCeilingBoundaryProjectID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAuthorityCeilingBoundaryProjectID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAuthorityCeilingBoundaryProjectID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAuthorityCeilingBoundaryProjectID: %w", err)
+	}
+	return oldValue.AuthorityCeilingBoundaryProjectID, nil
+}
+
+// ResetAuthorityCeilingBoundaryProjectID resets all changes to the "authority_ceiling_boundary_project_id" field.
+func (m *ScheduledEventMutation) ResetAuthorityCeilingBoundaryProjectID() {
+	m.authority_ceiling_boundary_project_id = nil
+}
+
+// SetAuthorityCeilingSourceExpiresAt sets the "authority_ceiling_source_expires_at" field.
+func (m *ScheduledEventMutation) SetAuthorityCeilingSourceExpiresAt(t time.Time) {
+	m.authority_ceiling_source_expires_at = &t
+}
+
+// AuthorityCeilingSourceExpiresAt returns the value of the "authority_ceiling_source_expires_at" field in the mutation.
+func (m *ScheduledEventMutation) AuthorityCeilingSourceExpiresAt() (r time.Time, exists bool) {
+	v := m.authority_ceiling_source_expires_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAuthorityCeilingSourceExpiresAt returns the old "authority_ceiling_source_expires_at" field's value of the ScheduledEvent entity.
+// If the ScheduledEvent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ScheduledEventMutation) OldAuthorityCeilingSourceExpiresAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAuthorityCeilingSourceExpiresAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAuthorityCeilingSourceExpiresAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAuthorityCeilingSourceExpiresAt: %w", err)
+	}
+	return oldValue.AuthorityCeilingSourceExpiresAt, nil
+}
+
+// ClearAuthorityCeilingSourceExpiresAt clears the value of the "authority_ceiling_source_expires_at" field.
+func (m *ScheduledEventMutation) ClearAuthorityCeilingSourceExpiresAt() {
+	m.authority_ceiling_source_expires_at = nil
+	m.clearedFields[scheduledevent.FieldAuthorityCeilingSourceExpiresAt] = struct{}{}
+}
+
+// AuthorityCeilingSourceExpiresAtCleared returns if the "authority_ceiling_source_expires_at" field was cleared in this mutation.
+func (m *ScheduledEventMutation) AuthorityCeilingSourceExpiresAtCleared() bool {
+	_, ok := m.clearedFields[scheduledevent.FieldAuthorityCeilingSourceExpiresAt]
+	return ok
+}
+
+// ResetAuthorityCeilingSourceExpiresAt resets all changes to the "authority_ceiling_source_expires_at" field.
+func (m *ScheduledEventMutation) ResetAuthorityCeilingSourceExpiresAt() {
+	m.authority_ceiling_source_expires_at = nil
+	delete(m.clearedFields, scheduledevent.FieldAuthorityCeilingSourceExpiresAt)
+}
+
 // SetProjectID sets the "project_id" field.
 func (m *ScheduledEventMutation) SetProjectID(u uuid.UUID) {
 	m.project_id = &u
@@ -65859,7 +66523,7 @@ func (m *ScheduledEventMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *ScheduledEventMutation) Fields() []string {
-	fields := make([]string, 0, 17)
+	fields := make([]string, 0, 23)
 	if m.initiator_principal_kind != nil {
 		fields = append(fields, scheduledevent.FieldInitiatorPrincipalKind)
 	}
@@ -65880,6 +66544,24 @@ func (m *ScheduledEventMutation) Fields() []string {
 	}
 	if m.authorization_revision != nil {
 		fields = append(fields, scheduledevent.FieldAuthorizationRevision)
+	}
+	if m.authority_ceiling_kind != nil {
+		fields = append(fields, scheduledevent.FieldAuthorityCeilingKind)
+	}
+	if m.authority_ceiling_version != nil {
+		fields = append(fields, scheduledevent.FieldAuthorityCeilingVersion)
+	}
+	if m.authority_ceiling_permission_ids != nil {
+		fields = append(fields, scheduledevent.FieldAuthorityCeilingPermissionIds)
+	}
+	if m.authority_ceiling_boundary_kind != nil {
+		fields = append(fields, scheduledevent.FieldAuthorityCeilingBoundaryKind)
+	}
+	if m.authority_ceiling_boundary_project_id != nil {
+		fields = append(fields, scheduledevent.FieldAuthorityCeilingBoundaryProjectID)
+	}
+	if m.authority_ceiling_source_expires_at != nil {
+		fields = append(fields, scheduledevent.FieldAuthorityCeilingSourceExpiresAt)
 	}
 	if m.project_id != nil {
 		fields = append(fields, scheduledevent.FieldProjectID)
@@ -65933,6 +66615,18 @@ func (m *ScheduledEventMutation) Field(name string) (ent.Value, bool) {
 		return m.AttributionVersion()
 	case scheduledevent.FieldAuthorizationRevision:
 		return m.AuthorizationRevision()
+	case scheduledevent.FieldAuthorityCeilingKind:
+		return m.AuthorityCeilingKind()
+	case scheduledevent.FieldAuthorityCeilingVersion:
+		return m.AuthorityCeilingVersion()
+	case scheduledevent.FieldAuthorityCeilingPermissionIds:
+		return m.AuthorityCeilingPermissionIds()
+	case scheduledevent.FieldAuthorityCeilingBoundaryKind:
+		return m.AuthorityCeilingBoundaryKind()
+	case scheduledevent.FieldAuthorityCeilingBoundaryProjectID:
+		return m.AuthorityCeilingBoundaryProjectID()
+	case scheduledevent.FieldAuthorityCeilingSourceExpiresAt:
+		return m.AuthorityCeilingSourceExpiresAt()
 	case scheduledevent.FieldProjectID:
 		return m.ProjectID()
 	case scheduledevent.FieldEventType:
@@ -65976,6 +66670,18 @@ func (m *ScheduledEventMutation) OldField(ctx context.Context, name string) (ent
 		return m.OldAttributionVersion(ctx)
 	case scheduledevent.FieldAuthorizationRevision:
 		return m.OldAuthorizationRevision(ctx)
+	case scheduledevent.FieldAuthorityCeilingKind:
+		return m.OldAuthorityCeilingKind(ctx)
+	case scheduledevent.FieldAuthorityCeilingVersion:
+		return m.OldAuthorityCeilingVersion(ctx)
+	case scheduledevent.FieldAuthorityCeilingPermissionIds:
+		return m.OldAuthorityCeilingPermissionIds(ctx)
+	case scheduledevent.FieldAuthorityCeilingBoundaryKind:
+		return m.OldAuthorityCeilingBoundaryKind(ctx)
+	case scheduledevent.FieldAuthorityCeilingBoundaryProjectID:
+		return m.OldAuthorityCeilingBoundaryProjectID(ctx)
+	case scheduledevent.FieldAuthorityCeilingSourceExpiresAt:
+		return m.OldAuthorityCeilingSourceExpiresAt(ctx)
 	case scheduledevent.FieldProjectID:
 		return m.OldProjectID(ctx)
 	case scheduledevent.FieldEventType:
@@ -66053,6 +66759,48 @@ func (m *ScheduledEventMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetAuthorizationRevision(v)
+		return nil
+	case scheduledevent.FieldAuthorityCeilingKind:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAuthorityCeilingKind(v)
+		return nil
+	case scheduledevent.FieldAuthorityCeilingVersion:
+		v, ok := value.(int32)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAuthorityCeilingVersion(v)
+		return nil
+	case scheduledevent.FieldAuthorityCeilingPermissionIds:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAuthorityCeilingPermissionIds(v)
+		return nil
+	case scheduledevent.FieldAuthorityCeilingBoundaryKind:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAuthorityCeilingBoundaryKind(v)
+		return nil
+	case scheduledevent.FieldAuthorityCeilingBoundaryProjectID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAuthorityCeilingBoundaryProjectID(v)
+		return nil
+	case scheduledevent.FieldAuthorityCeilingSourceExpiresAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAuthorityCeilingSourceExpiresAt(v)
 		return nil
 	case scheduledevent.FieldProjectID:
 		v, ok := value.(uuid.UUID)
@@ -66138,6 +66886,9 @@ func (m *ScheduledEventMutation) AddedFields() []string {
 	if m.addauthorization_revision != nil {
 		fields = append(fields, scheduledevent.FieldAuthorizationRevision)
 	}
+	if m.addauthority_ceiling_version != nil {
+		fields = append(fields, scheduledevent.FieldAuthorityCeilingVersion)
+	}
 	return fields
 }
 
@@ -66150,6 +66901,8 @@ func (m *ScheduledEventMutation) AddedField(name string) (ent.Value, bool) {
 		return m.AddedAttributionVersion()
 	case scheduledevent.FieldAuthorizationRevision:
 		return m.AddedAuthorizationRevision()
+	case scheduledevent.FieldAuthorityCeilingVersion:
+		return m.AddedAuthorityCeilingVersion()
 	}
 	return nil, false
 }
@@ -66172,6 +66925,13 @@ func (m *ScheduledEventMutation) AddField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.AddAuthorizationRevision(v)
+		return nil
+	case scheduledevent.FieldAuthorityCeilingVersion:
+		v, ok := value.(int32)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddAuthorityCeilingVersion(v)
 		return nil
 	}
 	return fmt.Errorf("unknown ScheduledEvent numeric field %s", name)
@@ -66201,6 +66961,12 @@ func (m *ScheduledEventMutation) ClearedFields() []string {
 	}
 	if m.FieldCleared(scheduledevent.FieldAuthorizationRevision) {
 		fields = append(fields, scheduledevent.FieldAuthorizationRevision)
+	}
+	if m.FieldCleared(scheduledevent.FieldAuthorityCeilingPermissionIds) {
+		fields = append(fields, scheduledevent.FieldAuthorityCeilingPermissionIds)
+	}
+	if m.FieldCleared(scheduledevent.FieldAuthorityCeilingSourceExpiresAt) {
+		fields = append(fields, scheduledevent.FieldAuthorityCeilingSourceExpiresAt)
 	}
 	if m.FieldCleared(scheduledevent.FieldCreatedBy) {
 		fields = append(fields, scheduledevent.FieldCreatedBy)
@@ -66249,6 +67015,12 @@ func (m *ScheduledEventMutation) ClearField(name string) error {
 	case scheduledevent.FieldAuthorizationRevision:
 		m.ClearAuthorizationRevision()
 		return nil
+	case scheduledevent.FieldAuthorityCeilingPermissionIds:
+		m.ClearAuthorityCeilingPermissionIds()
+		return nil
+	case scheduledevent.FieldAuthorityCeilingSourceExpiresAt:
+		m.ClearAuthorityCeilingSourceExpiresAt()
+		return nil
 	case scheduledevent.FieldCreatedBy:
 		m.ClearCreatedBy()
 		return nil
@@ -66289,6 +67061,24 @@ func (m *ScheduledEventMutation) ResetField(name string) error {
 		return nil
 	case scheduledevent.FieldAuthorizationRevision:
 		m.ResetAuthorizationRevision()
+		return nil
+	case scheduledevent.FieldAuthorityCeilingKind:
+		m.ResetAuthorityCeilingKind()
+		return nil
+	case scheduledevent.FieldAuthorityCeilingVersion:
+		m.ResetAuthorityCeilingVersion()
+		return nil
+	case scheduledevent.FieldAuthorityCeilingPermissionIds:
+		m.ResetAuthorityCeilingPermissionIds()
+		return nil
+	case scheduledevent.FieldAuthorityCeilingBoundaryKind:
+		m.ResetAuthorityCeilingBoundaryKind()
+		return nil
+	case scheduledevent.FieldAuthorityCeilingBoundaryProjectID:
+		m.ResetAuthorityCeilingBoundaryProjectID()
+		return nil
+	case scheduledevent.FieldAuthorityCeilingSourceExpiresAt:
+		m.ResetAuthorityCeilingSourceExpiresAt()
 		return nil
 	case scheduledevent.FieldProjectID:
 		m.ResetProjectID()

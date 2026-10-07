@@ -1792,8 +1792,27 @@ func init() {
 	runtimebrokerDescID := runtimebrokerFields[0].Descriptor()
 	// runtimebroker.DefaultID holds the default value on creation for the id field.
 	runtimebroker.DefaultID = runtimebrokerDescID.Default.(func() uuid.UUID)
+	scheduleMixin := schema.Schedule{}.Mixin()
+	scheduleMixinFields1 := scheduleMixin[1].Fields()
+	_ = scheduleMixinFields1
 	scheduleFields := schema.Schedule{}.Fields()
 	_ = scheduleFields
+	// scheduleDescAuthorityCeilingKind is the schema descriptor for authority_ceiling_kind field.
+	scheduleDescAuthorityCeilingKind := scheduleMixinFields1[0].Descriptor()
+	// schedule.DefaultAuthorityCeilingKind holds the default value on creation for the authority_ceiling_kind field.
+	schedule.DefaultAuthorityCeilingKind = scheduleDescAuthorityCeilingKind.Default.(string)
+	// scheduleDescAuthorityCeilingVersion is the schema descriptor for authority_ceiling_version field.
+	scheduleDescAuthorityCeilingVersion := scheduleMixinFields1[1].Descriptor()
+	// schedule.DefaultAuthorityCeilingVersion holds the default value on creation for the authority_ceiling_version field.
+	schedule.DefaultAuthorityCeilingVersion = scheduleDescAuthorityCeilingVersion.Default.(int32)
+	// scheduleDescAuthorityCeilingBoundaryKind is the schema descriptor for authority_ceiling_boundary_kind field.
+	scheduleDescAuthorityCeilingBoundaryKind := scheduleMixinFields1[3].Descriptor()
+	// schedule.DefaultAuthorityCeilingBoundaryKind holds the default value on creation for the authority_ceiling_boundary_kind field.
+	schedule.DefaultAuthorityCeilingBoundaryKind = scheduleDescAuthorityCeilingBoundaryKind.Default.(string)
+	// scheduleDescAuthorityCeilingBoundaryProjectID is the schema descriptor for authority_ceiling_boundary_project_id field.
+	scheduleDescAuthorityCeilingBoundaryProjectID := scheduleMixinFields1[4].Descriptor()
+	// schedule.DefaultAuthorityCeilingBoundaryProjectID holds the default value on creation for the authority_ceiling_boundary_project_id field.
+	schedule.DefaultAuthorityCeilingBoundaryProjectID = scheduleDescAuthorityCeilingBoundaryProjectID.Default.(string)
 	// scheduleDescName is the schema descriptor for name field.
 	scheduleDescName := scheduleFields[2].Descriptor()
 	// schedule.NameValidator is a validator for the "name" field. It is called by the builders before save.
@@ -1836,8 +1855,27 @@ func init() {
 	scheduleDescID := scheduleFields[0].Descriptor()
 	// schedule.DefaultID holds the default value on creation for the id field.
 	schedule.DefaultID = scheduleDescID.Default.(func() uuid.UUID)
+	scheduledeventMixin := schema.ScheduledEvent{}.Mixin()
+	scheduledeventMixinFields1 := scheduledeventMixin[1].Fields()
+	_ = scheduledeventMixinFields1
 	scheduledeventFields := schema.ScheduledEvent{}.Fields()
 	_ = scheduledeventFields
+	// scheduledeventDescAuthorityCeilingKind is the schema descriptor for authority_ceiling_kind field.
+	scheduledeventDescAuthorityCeilingKind := scheduledeventMixinFields1[0].Descriptor()
+	// scheduledevent.DefaultAuthorityCeilingKind holds the default value on creation for the authority_ceiling_kind field.
+	scheduledevent.DefaultAuthorityCeilingKind = scheduledeventDescAuthorityCeilingKind.Default.(string)
+	// scheduledeventDescAuthorityCeilingVersion is the schema descriptor for authority_ceiling_version field.
+	scheduledeventDescAuthorityCeilingVersion := scheduledeventMixinFields1[1].Descriptor()
+	// scheduledevent.DefaultAuthorityCeilingVersion holds the default value on creation for the authority_ceiling_version field.
+	scheduledevent.DefaultAuthorityCeilingVersion = scheduledeventDescAuthorityCeilingVersion.Default.(int32)
+	// scheduledeventDescAuthorityCeilingBoundaryKind is the schema descriptor for authority_ceiling_boundary_kind field.
+	scheduledeventDescAuthorityCeilingBoundaryKind := scheduledeventMixinFields1[3].Descriptor()
+	// scheduledevent.DefaultAuthorityCeilingBoundaryKind holds the default value on creation for the authority_ceiling_boundary_kind field.
+	scheduledevent.DefaultAuthorityCeilingBoundaryKind = scheduledeventDescAuthorityCeilingBoundaryKind.Default.(string)
+	// scheduledeventDescAuthorityCeilingBoundaryProjectID is the schema descriptor for authority_ceiling_boundary_project_id field.
+	scheduledeventDescAuthorityCeilingBoundaryProjectID := scheduledeventMixinFields1[4].Descriptor()
+	// scheduledevent.DefaultAuthorityCeilingBoundaryProjectID holds the default value on creation for the authority_ceiling_boundary_project_id field.
+	scheduledevent.DefaultAuthorityCeilingBoundaryProjectID = scheduledeventDescAuthorityCeilingBoundaryProjectID.Default.(string)
 	// scheduledeventDescEventType is the schema descriptor for event_type field.
 	scheduledeventDescEventType := scheduledeventFields[2].Descriptor()
 	// scheduledevent.EventTypeValidator is a validator for the "event_type" field. It is called by the builders before save.
