@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -32,7 +33,31 @@ const RelationshipRejectExecutionProject = "execution_project"
 // admission. The progeny rule covers every such read, including a personal
 // skill owned by the agent's origin user (ptone/scion#2128).
 func executionProjectRule(rule RelationshipRuleID) bool {
-	return rule == RelationshipRuleProgeny
+	for _, r := range executionProjectRules {
+		if rule == r {
+			return true
+		}
+	}
+	return false
+}
+
+// executionProjectRules are the relationship rules that give an agent its
+// source user's resources. Stage 2b (executionProjectAdmission) applies to
+// an agent candidate of these rules, and relationshipExecutionClass reads
+// the same list, so the agent stage and the user-delegator check
+// (delegatorExecutionAdmission) cover the same permissions.
+var executionProjectRules = []RelationshipRuleID{RelationshipRuleProgeny}
+
+// relationshipExecutionClass reports whether permissionID on resource is an
+// execution-class permission: one that an execution-project rule
+// (executionProjectRules) grants to agents for resource's type.
+func relationshipExecutionClass(resource Resource, permissionID string) bool {
+	for _, rule := range executionProjectRules {
+		if permissions.RelationshipPolicyAllows(string(rule), permissions.RelationshipPrincipalKind(string(PrincipalKindAgent)), resource.Type, permissionID) {
+			return true
+		}
+	}
+	return false
 }
 
 // ExecutionSourceResolver identifies the single authoritative local source
@@ -129,21 +154,49 @@ func (a *AuthzService) executionProjectAdmission(ctx context.Context, principal 
 	if err != nil || source == nil {
 		return false, "execution agent has no authoritative source user"
 	}
-	if source.Status != store.UserStatusActive {
-		return false, "execution source user is not active"
-	}
+	ok, reason, _ := a.sourceUserExecutionAdmission(ctx, source, stored.ProjectID, permissionID)
+	return ok, reason
+}
 
+// sourceUserExecutionAdmission requires that source is active and holds
+// live admission to projectID for the exact permission, through
+// ProjectAdmissionForClass with executionProjectClass(permissionID). A
+// failed admission lookup returns its error with the denial.
+func (a *AuthzService) sourceUserExecutionAdmission(ctx context.Context, source *store.User, projectID, permissionID string) (bool, string, error) {
+	if source.Status != store.UserStatusActive {
+		return false, "execution source user is not active", nil
+	}
 	sourcePC := PrincipalContext{
 		Kind:     PrincipalKindUser,
 		ID:       source.ID,
 		Identity: NewAuthenticatedUser(source.ID, source.Email, source.DisplayName, source.Role, ""),
 	}
-	res, err := a.ProjectAdmissionForClass(ctx, sourcePC, stored.ProjectID, permissionID, executionProjectClass(permissionID), nil)
+	res, err := a.ProjectAdmissionForClass(ctx, sourcePC, projectID, permissionID, executionProjectClass(permissionID), nil)
 	if err != nil {
-		return false, "execution project admission check failed"
+		return false, "execution project admission check failed", err
 	}
 	if !res.Admitted {
-		return false, "execution source user lacks admission to the agent's project"
+		return false, "execution source user lacks admission to the agent's project", nil
 	}
-	return true, ""
+	return true, "", nil
+}
+
+// delegatorExecutionAdmission applies execution-project admission to a user
+// delegator whose authority for an execution-class permission comes from a
+// relationship grant: the delegator must be active and admitted to the
+// delegation scope's project (the agent's project) for the exact
+// permission. grantReason is the relationship grant's reason. A failed
+// admission lookup is returned as an error.
+func (a *AuthzService) delegatorExecutionAdmission(ctx context.Context, user *store.User, scopeType, scopeID, permissionID, grantReason string) (bool, string, error) {
+	if scopeType != store.RoleScopeProject || scopeID == "" {
+		return false, grantReason + " restricted by " + RelationshipRejectExecutionProject + ": execution project does not match the agent's project", nil
+	}
+	ok, detail, err := a.sourceUserExecutionAdmission(maskAuthzInputs(ctx), user, scopeID, permissionID)
+	if err != nil {
+		return false, detail, err
+	}
+	if !ok {
+		return false, grantReason + " restricted by " + RelationshipRejectExecutionProject + ": " + detail, nil
+	}
+	return true, grantReason, nil
 }
