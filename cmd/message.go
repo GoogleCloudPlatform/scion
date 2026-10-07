@@ -605,6 +605,7 @@ func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, int
 	}
 	if resp != nil {
 		printMentionResults(resp.MentionResults)
+		printAttachmentWarnings(resp.AttachmentWarnings)
 	}
 
 	return nil
@@ -663,6 +664,7 @@ func sendCrossProjectMessage(hubCtx *HubContext, targetProject, agentSlug, messa
 	fmt.Printf("Message delivered to agent '%s' in project '%s'.\n", agentSlug, targetProject)
 	if resp != nil {
 		printMentionResults(resp.MentionResults)
+		printAttachmentWarnings(resp.AttachmentWarnings)
 	}
 
 	return nil
@@ -744,6 +746,7 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 			}
 			if resp != nil {
 				printMentionResults(resp.MentionResults)
+				printAttachmentWarnings(resp.AttachmentWarnings)
 			}
 			return nil
 		}
@@ -810,6 +813,7 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 			fmt.Printf("Message dispatched to %s (message %s, status: %s).\n", ref.Raw, result.MessageID, result.Status)
 		}
 		printMentionResults(result.MentionResults)
+		printAttachmentWarnings(result.AttachmentWarnings)
 		return nil
 	}
 
@@ -832,11 +836,21 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 		return fmt.Errorf("message validation failed: %w", err)
 	}
 
-	if _, err := agentSvc.SendStructuredMessage(ctx, ref.Value, agentMsg, interrupt, false, wake); err != nil {
+	resp, err := agentSvc.SendStructuredMessage(ctx, ref.Value, agentMsg, interrupt, false, wake)
+	if err != nil {
 		return agentMessageSendError(ref.Value, err)
 	}
-	if !isJSONOutput() {
-		fmt.Printf("Message delivered to agent '%s'.\n", ref.Value)
+	if isJSONOutput() {
+		// Emit the response like the other send paths, so --json carries
+		// any attachment warnings instead of dropping them.
+		if resp != nil {
+			return outputJSON(resp)
+		}
+		return nil
+	}
+	fmt.Printf("Message delivered to agent '%s'.\n", ref.Value)
+	if resp != nil {
+		printAttachmentWarnings(resp.AttachmentWarnings)
 	}
 	return nil
 }
@@ -929,6 +943,7 @@ func sendOutboundMessageViaHub(hubCtx *HubContext, userRecipient string, message
 	}
 	if result != nil {
 		printMentionResults(result.MentionResults)
+		printAttachmentWarnings(result.AttachmentWarnings)
 	}
 	return nil
 }
@@ -960,6 +975,9 @@ type groupRecipientResult struct {
 	Recipient string `json:"recipient"`
 	Status    string `json:"status"`
 	Error     string `json:"error,omitempty"`
+	// AttachmentWarnings lists attachments the hub could not record on this
+	// recipient's copy of the message (ptone/scion#3667).
+	AttachmentWarnings []hubclient.AttachmentWarning `json:"attachment_warnings,omitempty"`
 }
 
 // retryRecipientArg builds a recipient argument for scion message naming the
@@ -1227,15 +1245,19 @@ func sendGroupMessageViaHubCtx(hubCtx *HubContext, recipients []messages.GroupRe
 				recordErr(idx, recipStr, err)
 				return
 			}
+			var warnings []hubclient.AttachmentWarning
+			if sendResp != nil {
+				warnings = sendResp.AttachmentWarnings
+			}
 			if sendResp != nil && sendResp.Status == "deferred" {
-				record(idx, groupRecipientResult{Recipient: recipStr, Status: groupStatusDeferred})
+				record(idx, groupRecipientResult{Recipient: recipStr, Status: groupStatusDeferred, AttachmentWarnings: warnings})
 				return
 			}
 			if sendResp != nil && sendResp.Status == "ambiguous" {
 				recordAmbiguous(idx, recipStr, sendResp.MessageID)
 				return
 			}
-			record(idx, groupRecipientResult{Recipient: recipStr, Status: groupStatusDelivered})
+			record(idx, groupRecipientResult{Recipient: recipStr, Status: groupStatusDelivered, AttachmentWarnings: warnings})
 
 		case messages.RecipientUser:
 			senderAgent := os.Getenv("SCION_AGENT_NAME")
@@ -1267,7 +1289,11 @@ func sendGroupMessageViaHubCtx(hubCtx *HubContext, recipients []messages.GroupRe
 				recordAmbiguous(idx, recipStr, outResp.MessageID)
 				return
 			}
-			record(idx, groupRecipientResult{Recipient: recipStr, Status: groupStatusDelivered})
+			var warnings []hubclient.AttachmentWarning
+			if outResp != nil {
+				warnings = outResp.AttachmentWarnings
+			}
+			record(idx, groupRecipientResult{Recipient: recipStr, Status: groupStatusDelivered, AttachmentWarnings: warnings})
 		}
 	}
 	boundedFanOut(fanCtx, len(recipients), maxFanOutConcurrency, hooks.onQueued, sendOne, recordNotSent)
@@ -1309,6 +1335,7 @@ func sendGroupMessageViaHubCtx(hubCtx *HubContext, recipients []messages.GroupRe
 		}
 	} else {
 		printGroupSendSummary(summary, interrupted)
+		printAttachmentWarnings(groupAttachmentWarnings(results))
 	}
 
 	// @mention and --cc fan-out for group messages: mentioned agents that are
@@ -1374,6 +1401,23 @@ func sendGroupMessageViaHubCtx(hubCtx *HubContext, recipients []messages.GroupRe
 		msg += "; do not resend to the whole group"
 	}
 	return &groupSendError{msg: msg, partial: true}
+}
+
+// groupAttachmentWarnings collects the attachment warnings across a group
+// send's recipients. Every recipient is sent the same attachments, so the same
+// file usually fails for each of them; it is reported once.
+func groupAttachmentWarnings(results []groupRecipientResult) []hubclient.AttachmentWarning {
+	var out []hubclient.AttachmentWarning
+	seen := make(map[hubclient.AttachmentWarning]bool)
+	for _, r := range results {
+		for _, w := range r.AttachmentWarnings {
+			if !seen[w] {
+				seen[w] = true
+				out = append(out, w)
+			}
+		}
+	}
+	return out
 }
 
 // groupSendCounts formats a group send's outcome counts.
@@ -1633,6 +1677,19 @@ func printMentionResults(results []messages.MentionResult) {
 				fmt.Fprintf(os.Stderr, "Warning: mention to @%s: %s\n", r.Slug, r.Status)
 			}
 		}
+	}
+}
+
+// printAttachmentWarnings prints one stderr line per attachment the hub
+// could not record on a sent message (ptone/scion#3667). The message itself
+// was sent, so this is a warning and the exit status is unchanged. Skipped
+// under --json output, where the warnings are part of the JSON response.
+func printAttachmentWarnings(warnings []hubclient.AttachmentWarning) {
+	if isJSONOutput() {
+		return
+	}
+	for _, w := range warnings {
+		fmt.Fprintf(os.Stderr, "Warning: attachment %s was not delivered: %s\n", w.Path, w.Reason)
 	}
 }
 

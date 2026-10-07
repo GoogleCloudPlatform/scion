@@ -630,6 +630,20 @@ type MessageResponse struct {
 	// one entry per resolved mention name. Empty when the message had no
 	// mentions, or on hubs that predate this field.
 	MentionResults []messages.MentionResult `json:"mention_results,omitempty"`
+	// AttachmentWarnings lists attachments the hub could not record on the
+	// message, which was still sent without them. Empty when every
+	// attachment was recorded, or on hubs that predate this field.
+	AttachmentWarnings []AttachmentWarning `json:"attachment_warnings,omitempty"`
+}
+
+// AttachmentWarning names one attachment the hub could not record on a sent
+// message, for example because the file was staged on a different broker
+// than the hub and so does not exist on the hub host.
+type AttachmentWarning struct {
+	// Path is the attachment path as sent.
+	Path string `json:"path"`
+	// Reason is the hub's short explanation.
+	Reason string `json:"reason"`
 }
 
 // SendMessageOptions holds the optional parameters for
@@ -781,6 +795,10 @@ type OutboundMessageResult struct {
 	// one entry per resolved mention name. Empty when the message had no
 	// mentions, or on hubs that predate this field.
 	MentionResults []messages.MentionResult `json:"mention_results,omitempty"`
+	// AttachmentWarnings lists attachments the hub could not record on the
+	// message, which was still sent without them. Empty when every
+	// attachment was recorded, or on hubs that predate this field.
+	AttachmentWarnings []AttachmentWarning `json:"attachment_warnings,omitempty"`
 }
 
 // SendOutboundMessage sends a message from an agent via the outbound endpoint.
