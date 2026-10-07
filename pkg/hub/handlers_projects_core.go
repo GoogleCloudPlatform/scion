@@ -2374,6 +2374,14 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, proje
 	agentIdent := GetAgentIdentityFromContext(ctx)
 	query := r.URL.Query()
 	sorted := isSortedModeRequest(query)
+	switch {
+	case !sorted:
+		perfSetEndpoint(ctx, perfEndpointAgentsProjectLegacy)
+	case agentIdent != nil:
+		perfSetEndpoint(ctx, perfEndpointAgentsProjectSortedAg)
+	default:
+		perfSetEndpoint(ctx, perfEndpointAgentsProjectSorted)
+	}
 
 	if agentIdent != nil {
 		// checkAgentReadScope only checks that the token carries the
@@ -2394,7 +2402,10 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, proje
 		// every agent record in the project. Require agent.list on the
 		// project, matching what listAgents (handlers_agents_core.go) already
 		// enforces for the global list.
-		if !s.authorize(w, r, Resource{Type: "agent", ParentType: "project", ParentID: projectID}, ActionList) {
+		gateDone := perfPhaseStart(ctx, perfPhaseListScopeAuthz)
+		allowed := s.authorize(w, r, Resource{Type: "agent", ParentType: "project", ParentID: projectID}, ActionList)
+		gateDone()
+		if !allowed {
 			return
 		}
 	}
@@ -2472,6 +2483,7 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, proje
 
 	// Compute per-item and scope capabilities. Every item is rendered: the
 	// user path above already holds only readable agents.
+	capsDone := perfPhaseStart(ctx, perfPhaseCapabilities)
 	resources := make([]Resource, len(result.Items))
 	for i := range result.Items {
 		resources[i] = agentResource(&result.Items[i])
@@ -2483,12 +2495,15 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, proje
 		item.AppliedConfig = redactAppliedConfigEnvForResponse(item.AppliedConfig, s.envViewAllowed(ctx, identity, &item, caps[i]))
 		agents = append(agents, AgentWithCapabilities{Agent: item, Cap: caps[i]})
 	}
+	capsDone()
 	// identity == nil is unreachable here: the authorize call above already
 	// writes 401 for an unauthenticated non-agent caller before this point.
 
 	var scopeCap *Capabilities
 	if identity != nil {
+		scopeCapDone := perfPhaseStart(ctx, perfPhaseScopeCapabilities)
 		scopeCap = s.authzService.ComputeScopeCapabilities(ctx, identity, "project", projectID, "agent")
+		scopeCapDone()
 	}
 
 	writeAgentList(w, legacyAgentListView(query), ListAgentsResponse{
