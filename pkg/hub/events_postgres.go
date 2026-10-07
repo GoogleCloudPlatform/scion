@@ -573,20 +573,37 @@ func (p *PostgresEventPublisher) refetchPayload(ref string) ([]byte, error) {
 // fanout delivers evt to every subscriber of channel whose patterns (scoped to
 // that channel) match the event subject. Sends are non-blocking; a full
 // subscriber buffer drops the event (backpressure).
+//
+// It also records the subscriber lag: the number of notifications the event
+// queues behind in the most-behind matching subscriber's buffer, read before
+// the send, so a subscriber that keeps up reports 0. A full buffer, which
+// drops the event, counts as its capacity. runMaintenance samples the lag
+// again on every tick so the gauge decays to 0 once traffic stops.
 func (p *PostgresEventPublisher) fanout(channel string, evt Event) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
+	matched := false
+	var maxLag int64
 	for sub, patterns := range p.subs[channel] {
 		if !anyPatternMatches(patterns, evt.Subject) {
 			continue
 		}
+		matched = true
+		lag := int64(len(sub.ch))
 		select {
 		case sub.ch <- evt:
 			p.metrics.IncDelivered(p.ctx, 1, attribute.String("scope", channelScope(evt.Subject)))
 		default:
+			lag = int64(cap(sub.ch))
 			p.metrics.IncDropped(p.ctx, 1, attribute.String(dbmetrics.AttrDropReason, "full_buffer"))
 		}
+		if lag > maxLag {
+			maxLag = lag
+		}
+	}
+	if matched {
+		p.metrics.ObserveSubscriberLag(p.ctx, maxLag, attribute.String("scope", channelScope(evt.Subject)))
 	}
 }
 
@@ -620,21 +637,56 @@ func (p *PostgresEventPublisher) runMaintenance() {
 				p.log.Warn("Failed to purge expired event payloads", "error", err)
 			}
 			p.observePoolStats()
+			p.observeSubscriberLag()
 		}
 	}
 }
 
-// observePoolStats records a snapshot of the pgx pool gauges.
+// observeSubscriberLag samples the subscriber lag outside of event delivery,
+// so the gauge does not hold the depth of the last burst while the hub is
+// idle. For each scope it records the number of notifications queued in the
+// most-behind subscriber that can receive events of that scope; a scope with
+// no such subscriber records 0. Without this sample the synchronous gauge
+// would keep exporting the last value written by fanout.
+func (p *PostgresEventPublisher) observeSubscriberLag() {
+	if !p.metrics.Enabled() {
+		return
+	}
+	var globalLag, projectLag int64
+	p.mu.RLock()
+	for _, subs := range p.subs {
+		for sub, patterns := range subs {
+			lag := int64(len(sub.ch))
+			for _, pattern := range patterns {
+				global, project := patternScopes(pattern)
+				if global && lag > globalLag {
+					globalLag = lag
+				}
+				if project && lag > projectLag {
+					projectLag = lag
+				}
+			}
+		}
+	}
+	p.mu.RUnlock()
+	p.metrics.ObserveSubscriberLag(p.ctx, globalLag, attribute.String("scope", "global"))
+	p.metrics.ObserveSubscriberLag(p.ctx, projectLag, attribute.String("scope", "project"))
+}
+
+// observePoolStats records a snapshot of the pgx event pool.
 func (p *PostgresEventPublisher) observePoolStats() {
 	if !p.metrics.Enabled() {
 		return
 	}
 	s := p.pool.Stat()
-	p.metrics.ObservePoolStats(p.ctx, dbmetrics.PoolStats{
-		Active:  int64(s.AcquiredConns()),
-		Idle:    int64(s.IdleConns()),
-		Waiting: int64(s.EmptyAcquireCount()),
-		Max:     int64(s.MaxConns()),
+	// EmptyAcquireCount, the cumulative number of acquires that had to wait
+	// because the pool had no idle connection, is the pgx equivalent of
+	// database/sql's WaitCount.
+	p.metrics.ObservePoolStats(p.ctx, dbmetrics.PoolEvents, dbmetrics.PoolStats{
+		Active:    int64(s.AcquiredConns()),
+		Idle:      int64(s.IdleConns()),
+		WaitCount: s.EmptyAcquireCount(),
+		Max:       int64(s.MaxConns()),
 	})
 }
 
@@ -762,6 +814,20 @@ func channelScope(subject string) string {
 		return "project"
 	}
 	return "global"
+}
+
+// patternScopes reports which channelScope values a subscription pattern can
+// match: project-scoped subjects ("project.<id>...") and/or global ones.
+func patternScopes(pattern string) (global, project bool) {
+	first, _, _ := strings.Cut(pattern, ".")
+	switch first {
+	case "project":
+		return false, true
+	case "*", ">":
+		return true, true
+	default:
+		return true, false
+	}
 }
 
 func isConcreteToken(t string) bool { return t != "" && t != "*" && t != ">" }
