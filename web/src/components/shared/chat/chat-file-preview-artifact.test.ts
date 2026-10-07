@@ -116,7 +116,7 @@ describe('scion-chat-file-preview artifact target', () => {
     expect(el.shadowRoot?.querySelectorAll('img')).toHaveLength(0);
     expect(q(el, 'scion-code-editor')).toBeTruthy();
     expect(q(el, '.artifact-source-note')?.textContent).toContain('Open in artifact viewer');
-    expect(q(el, '.footer .path')?.textContent).toBe('design.md · v3');
+    expect(q(el, '.footer .path')?.textContent).toBe('design.md');
     expect(q(el, '.version-badge')?.textContent?.trim()).toBe('v3 · current');
     expect(buttons(el)).toEqual(['Copy link', 'Open in artifact viewer']);
     const viewer = el.shadowRoot?.querySelectorAll('.footer sl-button')[1];
@@ -134,6 +134,7 @@ describe('scion-chat-file-preview artifact target', () => {
       `/api/v1/artifacts/${ID}/versions/1/files/design.md?stream=1`,
     ]);
     expect(q(el, 'scion-code-editor')).toBeTruthy();
+    expect(q(el, '.version-badge')?.textContent?.trim()).toBe('v1');
     expect(buttons(el)).toEqual(['Copy link', 'Open in artifact viewer']);
   });
 

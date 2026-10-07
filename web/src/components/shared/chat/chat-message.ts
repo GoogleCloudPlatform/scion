@@ -2109,10 +2109,6 @@ export class ScionChatMessage extends LitElement {
   }
 
   /**
-   * Unified click handler for .md-content: delegates to mention or path-link
-   * handlers based on the click target.
-   */
-  /**
    * A middle-click fires auxclick, not click: keep it from opening the
    * artifact link's "#" href in a new tab. The preview opens on a plain
    * click only.
@@ -2123,6 +2119,10 @@ export class ScionChatMessage extends LitElement {
     }
   }
 
+  /**
+   * Unified click handler for .md-content: delegates to mention or path-link
+   * handlers based on the click target.
+   */
   private handleContentClick(e: MouseEvent): void {
     // Check for the more specific selectors first.
     const artifactTarget = (e.target as HTMLElement | null)?.closest(

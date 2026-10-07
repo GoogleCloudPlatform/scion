@@ -937,14 +937,14 @@ export class ScionChatFilePreview extends LitElement {
 
   /**
    * The artifact dialog: same body renderers, titled with the artifact's own
-   * title once loaded, and a footer of Copy link, Source (markdown) and
-   * Open in artifact viewer.
+   * title and version once loaded, and a footer of the entry path, Copy
+   * link and Open in artifact viewer (Close instead when unavailable).
    */
   private renderArtifactDialog(target: ArtifactPreviewTarget) {
     const state = this.loadState;
     const info = state.artifact;
     const label = state.unavailable ? 'Artifact unavailable' : (info?.title ?? target.name);
-    const secondary = info ? `${info.entry} · v${info.version}` : '';
+    const secondary = info?.entry ?? '';
     return html`
       <sl-dialog
         class="file-preview-dialog"
