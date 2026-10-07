@@ -319,7 +319,7 @@ var SupportedTargetClasses = map[string][]TargetClassKind{
 	"agent.port_access": {TargetClassKindProjectScoped}, "agent.message": {TargetClassKindProjectScoped},
 
 	// project.* — read/update/manage/set_messaging_policy target an existing
-	// project; clone is a hub-level collection action (reviewed false in
+	// project; clone is a hub-level collection action (false in
 	// ProjectTargetApplicability) even though it is mintable.
 	"project.read": {TargetClassKindProjectScoped}, "project.update": {TargetClassKindProjectScoped},
 	"project.manage": {TargetClassKindProjectScoped}, "project.clone": {TargetClassKindHubResource}, "project.set_messaging_policy": {TargetClassKindProjectScoped},
