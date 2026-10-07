@@ -535,8 +535,9 @@ func rawHubConfigRequest(srv *Server, key, method, path, body string) *httptest.
 
 // TestHubConfigWrite_BodyMustBeOneJSONValue requires a hub configuration
 // write whose body is followed by trailing data or a second JSON value,
-// closes a container it never opened, or does not parse, to be rejected with 400 for a token and a session on the
-// file-backed and the DB-backed hub, with nothing written.
+// closes a container it never opened, or does not parse, to be rejected
+// with 400 for a token and a session on the file-backed and the DB-backed
+// hub, with nothing written.
 func TestHubConfigWrite_BodyMustBeOneJSONValue(t *testing.T) {
 	bodies := []string{
 		`{"server":{"hub":{"public_url":"https://zz.example.com"}}} {}`,

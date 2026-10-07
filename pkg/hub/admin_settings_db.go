@@ -2257,6 +2257,8 @@ func repeatedJSONMember(rawBody []byte) (string, bool, error) {
 				stack = append(stack, &frame{})
 			case json.Delim(']'):
 				// A closing bracket must close an open array.
+				// json.Decoder already refuses an unmatched closer;
+				// the guard keeps the stack pop from underflowing.
 				if len(stack) == 0 {
 					return "", false, errors.New("request body is not one JSON value: unmatched ']'")
 				}
