@@ -333,8 +333,8 @@ export class PaletteTypeahead {
    *   the character after its text; Delete, at the end of the field and of
    *   the captured text, removes nothing either way.
    * - A Backspace passes through while the field holds text, which the
-   *   field deletes natively. With the field empty it deletes captured text
-   *   instead, as the field has nothing to delete.
+   *   field deletes natively. With the field empty it deletes captured
+   *   text, as the field has nothing to delete.
    * - Enter, Tab or a navigation key is swallowed without moving the field's
    *   text, since it can arrive between WebKit's compositionend and its
    *   insertion of the confirmed text, when the field still holds the text
