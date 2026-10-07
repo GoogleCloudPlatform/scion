@@ -331,7 +331,11 @@ func TestReincarnateAgent_SharedDirBackends_ConfirmedChangeNotStored(t *testing.
 
 // ptone/scion#3685: a later reincarnation that fails at reprovision
 // re-renders the previous config, and that re-render must not repeat the
-// earlier backend change over a record edited since.
+// earlier backend change over a record edited since. This test guards the
+// two clears together: each backs the other up, so removing one alone
+// still passes here. Each is pinned by its own test:
+// ConfirmedChangeNotStored (the clear after a confirmed reprovision) and
+// RerenderStripsStoredChange (the clear on the re-render copy).
 func TestReincarnateAgent_SharedDirBackends_RerenderAfterReprovisionFailureDoesNotRepeat(t *testing.T) {
 	disp := newSharedDirRecordDispatcher()
 	srv, s, agent, identity := changeBackendToNFS(t, disp)
