@@ -2441,44 +2441,41 @@ func (s *Server) createAgentInProject(
 		} else {
 			agent.Activity = "working"
 		}
-		recorded := true
 		if err := s.store.UpdateAgent(ctx, agent); err != nil {
-			recorded = false
 			s.agentLifecycleLog.Warn("Failed to update managed agent after create", "agent_id", agent.ID, "error", err)
 			// Without this write the row has neither the managed Runtime
 			// nor the interaction ID, so a later delete could not stop the
-			// interaction (ptone/scion#3557). Unless a delete won the race
-			// (the 409 below), fail the create: stop the interaction, then
-			// roll back the row, its edge and its quotas.
-			// A delete that claims after this re-read still wins: the
-			// rollback removes the row only if no delete holds it,
-			// re-checked in its transaction (DeleteWon).
-			if !s.managedCreateDeleteWonRace(ctx, agent.ID) {
-				var stop managedCreateStop
-				deleteWon := false
-				corrID := cleanup(createRollback{Stage: createStageManagedRecord, Cause: err, DeleteWon: &deleteWon, DeleteRuntime: func(cctx context.Context) error {
-					stop = s.stopManagedCreateInteraction(cctx, agent, false)
-					return nil
-				}})
-				if deleteWon {
-					// The delete claimed the row after the re-read and
-					// owns it now; nothing of the create's records was
-					// removed. Answer as a delete that won does.
-					writeDeletedDuringCreate(w, agent.ID, stop.warnings(managedCreateDeleteWon))
-					return
-				}
-				writeManagedCreateUnrecorded(w, agent.ID, corrID, stop.warnings(managedCreateUnrecorded))
+			// interaction (ptone/scion#3557). Fail the create: stop the
+			// interaction, then roll back the row, its edge and its quotas.
+			// The row is removed only if no delete holds it, decided in the
+			// rollback's own transaction (DeleteWon); a delete that holds it
+			// or removed it wins, and the create answers 409 as below.
+			var stop managedCreateStop
+			deleteWon := false
+			corrID := cleanup(createRollback{Stage: createStageManagedRecord, Cause: err, DeleteWon: &deleteWon, DeleteRuntime: func(cctx context.Context) error {
+				stop = s.stopManagedCreateInteraction(cctx, agent, false)
+				return nil
+			}})
+			if deleteWon {
+				// Nothing of the create's records was removed: the delete
+				// owns them.
+				writeDeletedDuringCreate(w, agent.ID, stop.warnings(managedCreateDeleteWon))
 				return
 			}
+			writeManagedCreateUnrecorded(w, agent.ID, corrID, stop.warnings(managedCreateUnrecorded))
+			return
 		}
 
 		// A delete that won the race answers 409 with no agent body, as
 		// the synchronous broker create does (ptone/scion#3099,
-		// ptone/scion#3454).
+		// ptone/scion#3454). The post-create write landed, so it landed
+		// before the delete's claim (a claim bumps state_version), and the
+		// delete's row carries the managed Runtime and the interaction ID:
+		// the delete stops the interaction, so the create does not.
 		if !s.publishAgentCreatedIfLive(ctx, agent) {
 			s.agentLifecycleLog.Info("Hub: managed agent was deleted while it was being created; answering 409",
 				"agent_id", agent.ID, "agent", agent.Name)
-			writeDeletedDuringCreate(w, agent.ID, s.compensateManagedCreate(ctx, agent, recorded))
+			writeDeletedDuringCreate(w, agent.ID, nil)
 			return
 		}
 		s.enrichAgent(ctx, agent, project, nil)

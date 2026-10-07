@@ -285,18 +285,18 @@ func TestManagedCreate_NoTask_DeleteWon_Answers409(t *testing.T) {
 }
 
 // The rule itself, per case.
-func TestCompensateManagedCreate(t *testing.T) {
+func TestStopManagedCreateInteraction(t *testing.T) {
 	srv, s := testServer(t)
 	backend := &recordingManagedBackend{s: s}
 	useManagedBackend(t, backend)
 	ctx := context.Background()
 	withID := &store.Agent{ID: "a1", Annotations: map[string]string{annotationInteractionID: "i-1"}}
 
-	assert.Nil(t, srv.compensateManagedCreate(ctx, withID, true), "recorded: the delete owns the stop")
-	assert.Nil(t, srv.compensateManagedCreate(ctx, &store.Agent{ID: "a2"}, false), "no interaction: nothing to stop")
+	assert.Nil(t, srv.stopManagedCreateInteraction(ctx, withID, true).warnings(managedCreateDeleteWon), "recorded: the delete owns the stop")
+	assert.Nil(t, srv.stopManagedCreateInteraction(ctx, &store.Agent{ID: "a2"}, false).warnings(managedCreateDeleteWon), "no interaction: nothing to stop")
 	assert.Empty(t, backend.cancels())
 
-	assert.Equal(t, []string{managedCreateCompensatedWarning}, srv.compensateManagedCreate(ctx, withID, false))
+	assert.Equal(t, []string{managedCreateCompensatedWarning}, srv.stopManagedCreateInteraction(ctx, withID, false).warnings(managedCreateDeleteWon))
 	assert.Equal(t, []string{"i-1"}, backend.cancels())
 }
 
@@ -365,13 +365,13 @@ func TestManagedCreate_DeleteWon_AfterWrite_EngineStopsOnce(t *testing.T) {
 
 // A read that returns no state (and no error) leaves the state unknown: it
 // is reported as a failure, not as stopped.
-func TestCompensateManagedCreate_NoState_Fails(t *testing.T) {
+func TestStopManagedCreateInteraction_NoState_Fails(t *testing.T) {
 	srv, s := testServer(t)
 	backend := &recordingManagedBackend{s: s, noState: true}
 	useManagedBackend(t, backend)
 	withID := &store.Agent{ID: "a1", Annotations: map[string]string{annotationInteractionID: "i-1"}}
 
-	warnings := srv.compensateManagedCreate(context.Background(), withID, false)
+	warnings := srv.stopManagedCreateInteraction(context.Background(), withID, false).warnings(managedCreateDeleteWon)
 	require.Len(t, warnings, 1)
 	assert.True(t, strings.HasPrefix(warnings[0], managedCreateCompensateFailedWarning), "got %q", warnings[0])
 	assert.Contains(t, warnings[0], "no state")
@@ -380,7 +380,7 @@ func TestCompensateManagedCreate_NoState_Fails(t *testing.T) {
 
 // The stop runs detached from the request: a request context that is
 // already cancelled (the client went away) still stops the interaction.
-func TestCompensateManagedCreate_DetachedFromRequest(t *testing.T) {
+func TestStopManagedCreateInteraction_DetachedFromRequest(t *testing.T) {
 	srv, s := testServer(t)
 	backend := &recordingManagedBackend{s: s}
 	useManagedBackend(t, backend)
@@ -388,7 +388,7 @@ func TestCompensateManagedCreate_DetachedFromRequest(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	assert.Equal(t, []string{managedCreateCompensatedWarning}, srv.compensateManagedCreate(ctx, withID, false))
+	assert.Equal(t, []string{managedCreateCompensatedWarning}, srv.stopManagedCreateInteraction(ctx, withID, false).warnings(managedCreateDeleteWon))
 	require.Equal(t, []string{"i-1"}, backend.cancels())
 	backend.mu.Lock()
 	defer backend.mu.Unlock()

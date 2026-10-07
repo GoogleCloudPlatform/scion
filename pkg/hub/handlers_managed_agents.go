@@ -203,7 +203,7 @@ func (s *Server) managedAgentDelete(ctx context.Context, agent *store.Agent) err
 }
 
 // Warnings a managed create that lost to a delete reports in the 409's
-// details.warnings (compensateManagedCreate).
+// details.warnings (managedCreateDeleteWon).
 const (
 	managedCreateCompensatedWarning      = "agent was deleted while it was being created; its managed-agent interaction was stopped"
 	managedCreateCompensateFailedWarning = "agent was deleted while it was being created; stopping its managed-agent interaction failed: "
@@ -216,8 +216,8 @@ const (
 	managedCreateUnrecordedStopFailedWarning = "the managed agent could not be recorded; stopping its managed-agent interaction failed: "
 )
 
-// managedCreateCompensation names why compensateManagedCreateFor stops a
-// managed create's interaction: the words of the warnings it returns.
+// managedCreateCompensation words a managed create's interaction stop
+// (managedCreateStop.warnings) by why the create failed.
 type managedCreateCompensation struct {
 	stoppedWarning    string
 	stopFailedWarning string // prefix; the error follows
@@ -242,45 +242,6 @@ var (
 		namesIDs:          true,
 	}
 )
-
-// compensateManagedCreate cleans up the cloud side of a managed (hub-direct)
-// create whose delete won the race (ptone/scion#3454), and returns the
-// warnings for the 409.
-//
-// The delete engine already calls managedAgentDelete, but only when the row
-// it read right after its claim has the managed Runtime, and it can only
-// stop an interaction that row names. managedAgentCreate sets both in
-// memory, and only the create's post-create write persists them. So
-// whether the engine stops this create's interaction depends on whether
-// that write landed first:
-//
-//   - recorded (the write succeeded): it landed before the claim, since a
-//     claim bumps state_version and a later write would have conflicted. The
-//     engine's row carries the managed Runtime and the interaction ID, and
-//     the engine stops it, so nothing is done here; this avoids a second
-//     stop.
-//   - not recorded: the claim may have come first, so the engine's row has
-//     neither the managed Runtime nor the interaction ID, and the engine
-//     cannot stop it. This create holds the only copy of the ID, so it stops
-//     the interaction itself.
-//
-// A create with no task started no interaction: nothing to clean up.
-//
-// The stop runs detached from the request with its own budget, as
-// compensateLandedRun's delete does: a client that goes away must not leave
-// an interaction running that nothing else can stop. Unlike
-// managedAgentDelete, a failure is reported (stopManagedInteraction).
-func (s *Server) compensateManagedCreate(ctx context.Context, agent *store.Agent, recorded bool) []string {
-	return s.compensateManagedCreateFor(ctx, agent, recorded, managedCreateDeleteWon)
-}
-
-// compensateManagedCreateFor is compensateManagedCreate with the warnings
-// worded for why: managedCreateDeleteWon for a delete that won the
-// race, managedCreateUnrecorded for a failed post-create write
-// (ptone/scion#3557). The rule is the same for both.
-func (s *Server) compensateManagedCreateFor(ctx context.Context, agent *store.Agent, recorded bool, why managedCreateCompensation) []string {
-	return s.stopManagedCreateInteraction(ctx, agent, recorded).warnings(why)
-}
 
 // managedCreateStop is the outcome of stopManagedCreateInteraction.
 type managedCreateStop struct {
@@ -307,10 +268,33 @@ func (stop managedCreateStop) warnings(why managedCreateCompensation) []string {
 	return []string{why.stoppedWarning + ids}
 }
 
-// stopManagedCreateInteraction applies compensateManagedCreate's rule and
-// stop, and returns the outcome; the caller words it (warnings), because
-// whether a delete won may only be known afterwards (ptone/scion#3557).
-// A failure is logged here.
+// stopManagedCreateInteraction cleans up the cloud side of a managed
+// (hub-direct) create that failed after managedAgentCreate started its
+// interaction, and returns the outcome; the caller words it
+// (managedCreateStop.warnings), because whether a delete won is only known
+// after the rollback ran (ptone/scion#3454, ptone/scion#3557).
+//
+// The delete engine calls managedAgentDelete only when the row it read right
+// after its claim has the managed Runtime, and it can only stop an
+// interaction that row names. managedAgentCreate sets both in memory, and
+// only the create's post-create write persists them:
+//
+//   - recorded (the write succeeded): it landed before any claim, since a
+//     claim bumps state_version and a later write would have conflicted. The
+//     engine's row carries the managed Runtime and the interaction ID, and
+//     the engine stops it, so nothing is done here; this avoids a second
+//     stop.
+//   - not recorded: no row carries the interaction ID, so neither a delete
+//     that won the race nor a later delete can stop it. This create holds
+//     the only copy of the ID, so it stops the interaction itself.
+//
+// A create with no task started no interaction: nothing to clean up.
+//
+// The stop runs detached from the request with its own budget, as
+// compensateLandedRun's delete does: a client that goes away must not leave
+// an interaction running that nothing else can stop. Unlike
+// managedAgentDelete, a failure is reported (stopManagedInteraction) and
+// logged here.
 func (s *Server) stopManagedCreateInteraction(ctx context.Context, agent *store.Agent, recorded bool) managedCreateStop {
 	interactionID := agent.Annotations[annotationInteractionID]
 	if recorded || interactionID == "" {
@@ -325,19 +309,6 @@ func (s *Server) stopManagedCreateInteraction(ctx context.Context, agent *store.
 		stop.err = err
 	}
 	return stop
-}
-
-// managedCreateDeleteWonRace reports whether a delete got to a managed
-// create's row first: the row is gone, soft-deleted or held by a delete
-// claim (deletedOrDeleteHeld, the rule publishAgentCreatedIfLive applies).
-// A failed re-read counts as not won: the caller then rolls the create back
-// itself, which is safe whether or not a delete is running.
-func (s *Server) managedCreateDeleteWonRace(ctx context.Context, agentID string) bool {
-	fresh, err := s.store.GetAgent(ctx, agentID)
-	if errors.Is(err, store.ErrNotFound) {
-		return true
-	}
-	return err == nil && deletedOrDeleteHeld(fresh)
 }
 
 // managedCreateUnrecordedMessage is the message of the 500 a managed create
