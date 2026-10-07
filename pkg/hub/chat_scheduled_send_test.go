@@ -1686,6 +1686,12 @@ func (w *abortOnProjectStore) GetProject(ctx context.Context, id string) (*store
 	exec, _ := ExecutorContextFromContext(ctx)
 	if w.fault.Active() && exec.Kind == scheduledSendClientType && w.calls.Add(1) == 1 {
 		w.srv.Load().scheduledRuntime().abort()
+		// The abort reaches the delivery context through context.AfterFunc,
+		// which runs on its own goroutine: wait until it has.
+		select {
+		case <-ctx.Done():
+		case <-time.After(5 * time.Second):
+		}
 		return w.Store.GetProject(context.WithoutCancel(ctx), id)
 	}
 	return w.Store.GetProject(ctx, id)
