@@ -170,6 +170,13 @@ func (r *startRefusal) dmError() *AgentDMError {
 func (s *Server) startGate(ctx context.Context, a *store.Agent, entry startEntry) *startRefusal {
 	// Step 1: delete in progress.
 	blocked, err := s.deleteBlocksStart(ctx, a)
+	if err != nil && requestEnded(ctx, err) {
+		// The caller's own request ended (cancelled, or its time budget ran
+		// out): an ordinary outcome, not a store failure.
+		s.agentLifecycleLog.Info("start gate: the request ended before the delete check",
+			"agent_id", a.ID, "entry", string(entry), "error", err)
+		return requestEndedRefusal()
+	}
 	if err != nil {
 		// Fail closed: without the dispatch table we cannot rule out an
 		// outstanding cross-node delete intent.
@@ -208,6 +215,23 @@ func agentDeletedRefusal(agentID string) *startRefusal {
 		Details: map[string]interface{}{
 			"agentId": agentID,
 		},
+	}
+}
+
+// requestEnded reports whether err is ctx's own end: ctx was cancelled or
+// its deadline passed, and err carries that cause.
+func requestEnded(ctx context.Context, err error) bool {
+	return ctx.Err() != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded))
+}
+
+// requestEndedRefusal is the answer to a start whose request ended
+// (cancelled, or its time budget ran out) before the start began. Nothing
+// was claimed, dispatched or written.
+func requestEndedRefusal() *startRefusal {
+	return &startRefusal{
+		HTTPStatus: http.StatusServiceUnavailable,
+		Code:       ErrCodeRuntimeError,
+		Message:    "not started: the request ended or its time budget ran out before the start",
 	}
 }
 

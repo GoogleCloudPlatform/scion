@@ -47,6 +47,11 @@ const (
 	MetricPoolConnectionsMax      = "scion.db.pool.connections.max"
 )
 
+// AttrDropReason is the attribute key callers set on MetricNotificationsDropped
+// to say why a notification was dropped (for example "decode", "refetch" or
+// "full_buffer"). Dashboards group drops by it.
+const AttrDropReason = "reason"
+
 // Recorder is the interface callers use to record Postgres LISTEN/NOTIFY and
 // connection-pool metrics. All methods are safe to call concurrently and are
 // cheap no-ops when metrics are disabled.

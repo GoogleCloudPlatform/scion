@@ -114,7 +114,7 @@ func (r *mockRegistry) waitForRequests(t *testing.T, n int, timeout time.Duratio
 // integration tests. Uses the same newTestStore helper as the executor tests.
 func integrationTestStore(t *testing.T) store.Store {
 	t.Helper()
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	require.NoError(t, err)
 	return s
 }
