@@ -105,10 +105,14 @@ type imageExtract struct {
 	// at most the scan's limit.
 	urls []string
 	// full is true when the scan stopped because it had found limit
-	// distinct candidates.
+	// distinct candidates, or left out a reference label because it held
+	// limit of them.
 	full bool
 	// steps counts the bytes the scan examined, for the linearity tests.
 	steps int
+	// normalized and normSteps count the candidates normalized and the
+	// bytes normalization examined, for the per-candidate work test.
+	normalized, normSteps int
 }
 
 // imageScan is the state of one scan. It only ever holds substrings of doc
@@ -124,6 +128,9 @@ type imageScan struct {
 	byHash map[uint64][]int
 	seed   maphash.Seed
 	full   bool
+	// usesFull is set when a reference label was not recorded because the
+	// scan already held limit labels.
+	usesFull bool
 }
 
 // extractImageURLs returns the absolute http(s) image URLs doc (already cut
@@ -158,12 +165,26 @@ func (s *imageScan) addHit(pos int, raw string, kind int) {
 }
 
 // addUse records a reference image's label.
+//
+// A label is recorded once, at its first use: later uses of the same label
+// name the same image. When the scan already holds limit labels, a new one
+// is not recorded and the result reports that the scan filled up.
 func (s *imageScan) addUse(pos int, label string) {
-	if s.full || len(s.uses) >= s.limit || label == "" || len(label) > maxLabelBytes {
+	if s.full || label == "" || len(label) > maxLabelBytes {
 		return
 	}
 	h, ok := s.labelHash(label)
 	if !ok {
+		return
+	}
+	for _, k := range s.byHash[h] {
+		s.steps += len(label) + len(s.uses[k].label)
+		if sameLabel(s.uses[k].label, label) {
+			return
+		}
+	}
+	if len(s.uses) >= s.limit {
+		s.usesFull = true
 		return
 	}
 	if s.byHash == nil {
@@ -537,7 +558,7 @@ func (s *imageScan) result() imageExtract {
 		}
 	}
 	sort.SliceStable(hits, func(a, b int) bool { return hits[a].pos < hits[b].pos })
-	out := imageExtract{full: s.full, steps: s.steps}
+	out := imageExtract{full: s.full || s.usesFull, steps: s.steps}
 	// hits holds at most limit inline candidates and limit reference uses;
 	// the loop below keeps at most limit URLs.
 	kept := make(map[string]struct{}, len(hits))
@@ -546,7 +567,10 @@ func (s *imageScan) result() imageExtract {
 			out.full = true
 			break
 		}
+		before := out.steps
+		out.normalized++
 		u, ok := normalizeCounted(h.raw, h.kind, &out.steps)
+		out.normSteps += out.steps - before
 		if !ok {
 			continue
 		}

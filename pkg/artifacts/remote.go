@@ -113,7 +113,7 @@ func (s *Service) remoteImages(ctx context.Context, w http.ResponseWriter, b bac
 	// the fetch budget so the response is not cut off after the version is
 	// recorded.
 	extendWriteDeadline(w, lim.TotalBudget+publishDeadlineMargin)
-	files, warn := s.fetchRemoteImages(ctx, b, lim, versionID, ex.urls, vl.MaxFiles-used.files)
+	files, warn := s.fetchRemoteImages(ctx, b, lim, versionID, ex.urls, vl.MaxFiles-used.files, ex.full)
 	warnings = append(warnings, warn...)
 	left := vl.MaxBundleBytes - used.bytes
 	kept := files[:0]
@@ -186,15 +186,15 @@ const MaxRemoteFetchBudget = 60 * time.Second
 // returns one manifest row per URL it processed, in order, plus the
 // warnings for the publisher. A failure never fails the publish: the row is
 // marked failed with a generic error and the warning is generic too.
-func (s *Service) fetchRemoteImages(ctx context.Context, b backend, lim RemoteImageLimits, versionID string, urls []string, room int) ([]File, []string) {
+func (s *Service) fetchRemoteImages(ctx context.Context, b backend, lim RemoteImageLimits, versionID string, urls []string, room int, scanFull bool) ([]File, []string) {
 	if !lim.Enabled || len(urls) == 0 {
 		return nil, nil
 	}
 	var warnings []string
 	if len(urls) > lim.MaxCount {
 		more := fmt.Sprintf("%d", len(urls)-lim.MaxCount)
-		if len(urls) >= remoteExtractLimit(lim) {
-			more += " or more"
+		if scanFull || len(urls) >= remoteExtractLimit(lim) {
+			more = "at least " + more
 		}
 		warnings = append(warnings, fmt.Sprintf("%s more remote images were not fetched (at most %d per version)", more, lim.MaxCount))
 		urls = urls[:lim.MaxCount]

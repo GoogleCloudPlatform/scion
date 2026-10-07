@@ -616,3 +616,31 @@ func TestRemoteImagesWarnWhenTheScanFills(t *testing.T) {
 		t.Errorf("warnings %q", resp.Warnings)
 	}
 }
+
+// TestRemoteImagesCountSaysOrMoreWhenTheScanFills: when the scan stopped
+// full, the count of images not fetched is a lower bound.
+func TestRemoteImagesCountSaysOrMoreWhenTheScanFills(t *testing.T) {
+	f := newFixture(t, false)
+	ff := &fakeFetcher{bodies: map[string][]byte{}}
+	f.useFetcher(ff)
+	f.svc.SetLimits(func(context.Context) Limits {
+		return Limits{MaxFileBytes: 1 << 20, RemoteImages: RemoteImageLimits{
+			Enabled: true, MaxCount: 2, MaxBytes: 1 << 20, FetchTimeout: time.Second, TotalBudget: time.Second}}
+	})
+	var md strings.Builder
+	// Six valid images, then refused ones until the scan fills (limit 8),
+	// then more valid ones it never reads.
+	for i := 0; i < 6; i++ {
+		u := fmt.Sprintf("https://img.example/%d.png", i)
+		ff.bodies[u] = testPNG
+		fmt.Fprintf(&md, "![x](%s)\n", u)
+	}
+	for i := 0; i < 2; i++ {
+		fmt.Fprintf(&md, "![x](https://user@img.example/r%d.png)\n", i)
+	}
+	md.WriteString("![x](https://img.example/late.png)\n")
+	resp := f.publish(agentA, "doc.md", []byte(md.String()), "")
+	if strings.Join(resp.Warnings, "|") != "at least 4 more remote images were not fetched (at most 2 per version)" {
+		t.Errorf("warnings %q", resp.Warnings)
+	}
+}

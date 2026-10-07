@@ -126,6 +126,9 @@ var normalizeCases = func() []normalizeCase {
 		{"https://h.example/a\"b.png", fromMarkdown, ""},
 		{"https://h.example/a.png#x#y", fromMarkdown, ""},
 		{"https://h.example/" + strings.Repeat("a", maxImageURLBytes), fromMarkdown, ""},
+		// Within the input cap, but the normalized URL ("https://" added)
+		// is over it.
+		{"https:h.example/" + strings.Repeat("a", maxImageURLBytes-len("https:h.example/")-1), fromAttribute, ""},
 		{"ftp://h.example/a.png", fromMarkdown, ""},
 		{"https://h.example/a\\b.png", fromAttribute, "https://h.example/a/b.png"},
 		{"https://h.example/a.png?q=\\x", fromAttribute, ""},
@@ -260,6 +263,7 @@ func TestExtractImageURLsStatedChecks(t *testing.T) {
 		"a definition two line breaks away does not resolve": {"![a][x]\n\n[x]:\n\nhttps://img.example/a.png", 8, nil},
 		"an over-long inline URL takes no candidate slot":    {"![a](https://img.example/" + strings.Repeat("a", maxImageURLBytes) + ".png) ![b](https://img.example/b.png)", 1, []string{"https://img.example/b.png"}},
 		"an over-long definition URL takes no slot":          {"![a][x] ![b](https://img.example/b.png)\n\n[x]: https://img.example/" + strings.Repeat("a", maxImageURLBytes), 1, []string{"https://img.example/b.png"}},
+		"an over-long img src takes no candidate slot":       {`<img src="https://img.example/` + strings.Repeat("a", maxImageURLBytes) + `"> <img src="https://img.example/b.png">`, 1, []string{"https://img.example/b.png"}},
 		"a bang behind nine backslashes is escaped":          {strings.Repeat(`\`, 9) + "![a](https://img.example/a.png)", 8, nil},
 		"a bang behind ten backslashes is not":               {strings.Repeat(`\`, 10) + "![a](https://img.example/a.png)", 8, []string{"https://img.example/a.png"}},
 	} {
@@ -267,6 +271,20 @@ func TestExtractImageURLsStatedChecks(t *testing.T) {
 		if strings.Join(got, " ") != strings.Join(tc.want, " ") {
 			t.Errorf("%s: got %q, want %q", name, got, tc.want)
 		}
+	}
+	// Repeated uses of one label take one slot, so a later reference still
+	// resolves; labels beyond the cap make the scan report that it filled.
+	var reps strings.Builder
+	for i := 0; i < 128; i++ {
+		reps.WriteString("![x][logo] ")
+	}
+	reps.WriteString("![y][other]\n\n[logo]: https://img.example/logo.png\n[other]: https://img.example/other.png")
+	if ex := extractImageURLs(reps.String(), 128); strings.Join(ex.urls, " ") != "https://img.example/logo.png https://img.example/other.png" || ex.full {
+		t.Errorf("repeated label uses: %v (full %v)", ex.urls, ex.full)
+	}
+	three := "![a][l1] ![a][l2] ![a][l3]\n\n[l1]: https://img.example/1.png\n[l2]: https://img.example/2.png\n[l3]: https://img.example/3.png"
+	if ex := extractImageURLs(three, 2); len(ex.urls) != 2 || !ex.full {
+		t.Errorf("labels beyond the cap: %v (full %v)", ex.urls, ex.full)
 	}
 	// Once every reference is resolved, the definition pass stops.
 	doc := "![a][x]\n\n[x]: https://img.example/a.png\n" + fill("plain line\n", 1<<20)
@@ -284,6 +302,19 @@ func fill(unit string, size int) string {
 // it can per byte. Each is imageScanWindow bytes.
 func costShapes() map[string]string {
 	w := imageScanWindow
+	var manyUses strings.Builder
+	for i := 0; i < 200; i++ {
+		manyUses.WriteString("![x][huge]")
+	}
+	hugeDefinition := manyUses.String() + "\n[huge]: https://img.example/" + strings.Repeat("a", w)
+	var distinctUses strings.Builder
+	for i := 0; i < 800; i++ {
+		fmt.Fprintf(&distinctUses, "![x][d%d]", i)
+	}
+	var distinctDefs strings.Builder
+	for i := 0; distinctDefs.Len() < w; i++ {
+		fmt.Fprintf(&distinctDefs, "\n[d%d]: https://img.example/%s", i%800, strings.Repeat("b", 4000))
+	}
 	longURL := "https://img.example/" + strings.Repeat("a", maxImageURLBytes-30)
 	var uses, same strings.Builder
 	for i := 0; i < 200; i++ {
@@ -291,37 +322,39 @@ func costShapes() map[string]string {
 		same.WriteString("![x][same]")
 	}
 	return map[string]string{
-		"open brackets":                      fill("[", w),
-		"image opens":                        fill("![", w),
-		"closes":                             fill("]", w),
-		"empty images":                       fill("![](", w),
-		"image then paren":                   fill("![a](h", w),
-		"unclosed destinations":              fill("![a](https://img.example/"+strings.Repeat("b", 100), w),
-		"long destination":                   fill("![a]("+longURL, w),
-		"destination at the cap":             fill("![a]("+longURL+strings.Repeat("c", 40)+" ", w),
-		"duplicate images":                   fill("![a](https://img.example/a.png)", w),
-		"distinct invalid":                   distinct("![a](https://u@h/%d.png)", w),
-		"references":                         fill("![a][b]", w),
-		"reference labels":                   fill("![a]["+strings.Repeat("l", maxLabelBytes-1), w),
-		"shortcut references":                fill("![abc]", w),
-		"img starts":                         fill("<img", w),
-		"img unclosed":                       fill("<img src=\"https://img.example/a.png\" "+strings.Repeat("x", 200), w),
-		"img lt":                             fill("<img src=x <", w),
-		"img tags":                           fill(`<img src="https://img.example/a.png">`, w),
-		"img tags distinct":                  distinct(`<img src="https://img.example/%d.png?&copy;">`, w),
-		"escapes":                            fill(`\`, w),
-		"definitions":                        uses.String() + "\n" + fill("[label1]: https://img.example/x.png\n", w-uses.Len()-1),
-		"definitions unmatched":              uses.String() + "\n" + fill("[other]: https://img.example/x.png\n", w-uses.Len()-1),
-		"definitions long labels":            uses.String() + "\n" + fill("["+strings.Repeat("q", maxLabelBytes)+"]: https://img.example/x.png\n", w-uses.Len()-1),
-		"definition label lines":             uses.String() + "\n" + fill("[label1\n", w-uses.Len()-1),
-		"definitions one label":              same.String() + "\n" + fill("[same]: https://img.example/x.png\n", w-same.Len()-1),
-		"definitions one label, one pending": "![never][nope]" + same.String() + "\n" + fill("[same]: https://img.example/x.png\n", w-same.Len()-15),
-		"definitions one label, unusable":    same.String() + "\n" + fill("[same]: ftp://img.example/x.png\n", w-same.Len()-1),
-		"newlines":                           fill("\n", w),
-		"tab-split distinct src":             distinct("<img src=\"h\tt\tt\tp\ts://img.example/%d/"+strings.Repeat("a\t", 900)+"\">", w),
-		"amp-heavy distinct src":             distinct("<img src=\"https://img.example/%d?"+strings.Repeat("&amp;", 380)+"\">", w),
-		"escaped bangs":                      fill(`\![a](https://img.example/a.png)`, w),
-		"long image tags":                    fill("<img src=\"https://img.example/a.png\" "+strings.Repeat("x", maxTagBytes)+">", w),
+		"open brackets":                         fill("[", w),
+		"image opens":                           fill("![", w),
+		"closes":                                fill("]", w),
+		"empty images":                          fill("![](", w),
+		"image then paren":                      fill("![a](h", w),
+		"unclosed destinations":                 fill("![a](https://img.example/"+strings.Repeat("b", 100), w),
+		"long destination":                      fill("![a]("+longURL, w),
+		"destination at the cap":                fill("![a]("+longURL+strings.Repeat("c", 40)+" ", w),
+		"duplicate images":                      fill("![a](https://img.example/a.png)", w),
+		"distinct invalid":                      distinct("![a](https://u@h/%d.png)", w),
+		"references":                            fill("![a][b]", w),
+		"reference labels":                      fill("![a]["+strings.Repeat("l", maxLabelBytes-1), w),
+		"shortcut references":                   fill("![abc]", w),
+		"img starts":                            fill("<img", w),
+		"img unclosed":                          fill("<img src=\"https://img.example/a.png\" "+strings.Repeat("x", 200), w),
+		"img lt":                                fill("<img src=x <", w),
+		"img tags":                              fill(`<img src="https://img.example/a.png">`, w),
+		"img tags distinct":                     distinct(`<img src="https://img.example/%d.png?&copy;">`, w),
+		"escapes":                               fill(`\`, w),
+		"definitions":                           uses.String() + "\n" + fill("[label1]: https://img.example/x.png\n", w-uses.Len()-1),
+		"definitions unmatched":                 uses.String() + "\n" + fill("[other]: https://img.example/x.png\n", w-uses.Len()-1),
+		"definitions long labels":               uses.String() + "\n" + fill("["+strings.Repeat("q", maxLabelBytes)+"]: https://img.example/x.png\n", w-uses.Len()-1),
+		"definition label lines":                uses.String() + "\n" + fill("[label1\n", w-uses.Len()-1),
+		"definitions one label":                 same.String() + "\n" + fill("[same]: https://img.example/x.png\n", w-same.Len()-1),
+		"definitions one label, one pending":    "![never][nope]" + same.String() + "\n" + fill("[same]: https://img.example/x.png\n", w-same.Len()-15),
+		"definitions one label, unusable":       same.String() + "\n" + fill("[same]: ftp://img.example/x.png\n", w-same.Len()-1),
+		"newlines":                              fill("\n", w),
+		"uses then one huge definition":         hugeDefinition[:w],
+		"distinct labels with long definitions": (distinctUses.String() + distinctDefs.String())[:w],
+		"tab-split distinct src":                distinct("<img src=\"h\tt\tt\tp\ts://img.example/%d/"+strings.Repeat("a\t", 900)+"\">", w),
+		"amp-heavy distinct src":                distinct("<img src=\"https://img.example/%d?"+strings.Repeat("&amp;", 380)+"\">", w),
+		"escaped bangs":                         fill(`\![a](https://img.example/a.png)`, w),
+		"long image tags":                       fill("<img src=\"https://img.example/a.png\" "+strings.Repeat("x", maxTagBytes)+">", w),
 	}
 }
 
@@ -337,6 +370,23 @@ func distinct(format string, size int) string {
 // pass and by at most one inner scan of each kind, and by the definition
 // pass and its inner scans.
 const maxStepsPerByte = 8
+
+// maxPolicyLimit is the scan limit at the largest image cap the default
+// settings allow (remote_image_max_count may not exceed max_files).
+const maxPolicyLimit = 4 * 200
+
+// TestExtractImageURLsNormalizationWork: at the largest scan limit the
+// settings allow, normalizing a candidate examines a fixed number of bytes
+// per candidate, whatever the document, because over-long candidates are
+// refused before they are decoded.
+func TestExtractImageURLsNormalizationWork(t *testing.T) {
+	for name, doc := range costShapes() {
+		ex := extractImageURLs(doc, maxPolicyLimit)
+		if limit := ex.normalized * 3 * (maxImageURLBytes + 8); ex.normSteps > limit {
+			t.Errorf("%s: normalization examined %d bytes for %d candidates (limit %d)", name, ex.normSteps, ex.normalized, limit)
+		}
+	}
+}
 
 // TestExtractImageURLsLinear: on every cost shape the scan examines at most
 // maxStepsPerByte steps per byte of the window.
@@ -377,7 +427,7 @@ func TestExtractImageURLsAllocBound(t *testing.T) {
 		t.Skip("allocation counts differ under the race detector")
 	}
 	for name, doc := range costShapes() {
-		for _, limit := range []int{4, 128} {
+		for _, limit := range []int{4, 128, maxPolicyLimit} {
 			got, allow := extractAlloc(doc, limit), allocAllowance(limit)
 			if testing.Verbose() {
 				t.Logf("%-32s limit %3d alloc %8d allowance %8d", name, limit, got, allow)
