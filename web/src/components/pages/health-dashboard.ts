@@ -21,7 +21,7 @@
  * - Hub status and version
  * - Database pool health
  * - Runtime brokers (compact table, see health-broker-table.ts)
- * - Agent health summary
+ * - Agents (phase counts and problem groups, see health-agents-card.ts)
  * - Dispatch pipeline status
  *
  * Auto-refreshes every 30 seconds via polling.
@@ -33,6 +33,8 @@ import { customElement, state } from 'lit/decorators.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import type { HealthSummaryBrokerList } from './health-broker-table.js';
 import './health-broker-table.js';
+import type { HealthSummaryAgents } from './health-agents-card.js';
+import './health-agents-card.js';
 
 export { formatHeartbeatAge } from './health-broker-table.js';
 
@@ -58,13 +60,7 @@ interface HealthSummary {
     pool_idle: number;
   };
   runtime_brokers: HealthSummaryBrokerList;
-  agents: {
-    total: number;
-    by_phase: Record<string, number>;
-    stalled: string[];
-    crashed: string[];
-    errored: string[];
-  };
+  agents: HealthSummaryAgents;
   dispatch: {
     stuck_messages: number;
     failed_1h: number;
@@ -284,34 +280,6 @@ export class ScionPageHealthDashboard extends LitElement {
       word-break: break-word;
     }
 
-    .agent-summary {
-      display: flex;
-      gap: 1.5rem;
-      flex-wrap: wrap;
-      margin-bottom: 0.75rem;
-      font-size: 0.9375rem;
-    }
-
-    .agent-summary .stat {
-      font-weight: 600;
-    }
-
-    .agent-alert {
-      display: flex;
-      align-items: center;
-      gap: 0.375rem;
-      font-size: 0.875rem;
-      padding: 0.25rem 0;
-    }
-
-    .alert-warn {
-      color: var(--scion-warning, #f59e0b);
-    }
-
-    .alert-error {
-      color: var(--scion-error, #ef4444);
-    }
-
     .loading,
     .error-msg {
       text-align: center;
@@ -486,43 +454,7 @@ export class ScionPageHealthDashboard extends LitElement {
   private renderAgentsCard(d: HealthSummary) {
     return html`
       <div class="grid-full">
-        <div class="card">
-          <div class="card-title">Agents</div>
-          <div class="agent-summary">
-            <div><span class="stat">${d.agents.total}</span> Total</div>
-            ${Object.entries(d.agents.by_phase).map(
-              ([phase, count]) => html`<div><span class="stat">${count}</span> ${phase}</div>`
-            )}
-          </div>
-          ${d.agents.stalled.length > 0
-            ? html`
-                <div class="agent-alert alert-warn">
-                  ⚠ ${d.agents.stalled.length} stalled: ${d.agents.stalled.join(', ')}
-                </div>
-              `
-            : nothing}
-          ${d.agents.crashed.length > 0
-            ? html`
-                <div class="agent-alert alert-error">
-                  ✗ ${d.agents.crashed.length} crashed: ${d.agents.crashed.join(', ')}
-                </div>
-              `
-            : nothing}
-          ${d.agents.errored.length > 0
-            ? html`
-                <div class="agent-alert alert-error">
-                  ✗ ${d.agents.errored.length} errored: ${d.agents.errored.join(', ')}
-                </div>
-              `
-            : nothing}
-          ${d.agents.stalled.length === 0 &&
-          d.agents.crashed.length === 0 &&
-          d.agents.errored.length === 0
-            ? html`<div style="font-size:0.875rem;color:var(--scion-success,#22c55e)">
-                All agents healthy
-              </div>`
-            : nothing}
-        </div>
+        <scion-health-agents-card .agents=${d.agents ?? null}></scion-health-agents-card>
       </div>
     `;
   }
