@@ -1113,7 +1113,10 @@ func (s *Server) cleanupFailedCreate(ctx context.Context, rb createRollback) (co
 		derr := s.deleteFailedCreateRow(ctx, agent.ID, rb.DeleteWon != nil)
 		if errors.Is(derr, errCreateRowDeleteHeld) {
 			// A delete claimed the row since: it owns the row and its
-			// edge. The failed compensation is still reported.
+			// edge. The failed compensation's correlation ID is logged
+			// above (logCompensationFailure) and returned, but a caller
+			// that answers 409 for a delete that won does not put it in
+			// the response.
 			*rb.DeleteWon = true
 			return
 		}

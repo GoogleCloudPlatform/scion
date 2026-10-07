@@ -132,6 +132,9 @@ type managedRecordFaultStore struct {
 	finalizeErrFrom int
 	// finalizeCalls counts FinalizeAgentDeletion calls.
 	finalizeCalls int
+	// onFinalizeCall, when set, runs before every FinalizeAgentDeletion
+	// with its 1-based call index.
+	onFinalizeCall func(call int, agentID string)
 }
 
 func (s *managedRecordFaultStore) UpdateAgent(ctx context.Context, a *store.Agent) error {
@@ -156,10 +159,15 @@ func (s *managedRecordFaultStore) FinalizeAgentDeletion(ctx context.Context, id 
 	before := s.beforeFinalize
 	s.beforeFinalize = nil
 	s.finalizeCalls++
-	failNow := s.finalizeErr != nil && s.finalizeCalls >= s.finalizeErrFrom
+	call := s.finalizeCalls
+	onCall := s.onFinalizeCall
+	failNow := s.finalizeErr != nil && call >= s.finalizeErrFrom
 	s.mu.Unlock()
 	if before != nil {
 		before(id)
+	}
+	if onCall != nil {
+		onCall(call, id)
 	}
 	if failNow {
 		return 0, s.finalizeErr
@@ -547,7 +555,7 @@ func TestManagedCreate_Unrecorded_CompensationFails_ReportsCorrelationID(t *test
 
 // Every conditional row delete gives up because the row kept changing
 // (ErrVersionConflict): the compensation fails, the fallback's conditional
-// deletes (3 attempts) fail the same way, and the rollback then leaves the
+// deletes (createCleanupDeleteAttempts attempts) fail the same way, and the rollback then leaves the
 // row to whatever is writing it. The row is kept, its phase is not marked
 // error, its quotas are held, and the 500 reports the correlation ID.
 func TestManagedCreate_Unrecorded_RowContended_LeavesRow(t *testing.T) {
@@ -604,4 +612,39 @@ func TestManagedCreate_Unrecorded_CompensationFails_ThenContended_LeavesRow(t *t
 	defer fs.mu.Unlock()
 	assert.Equal(t, 1+createCleanupDeleteAttempts, fs.finalizeCalls,
 		"the failed compensation, then the fallback's conditional deletes")
+}
+
+// The compensation fails (its audit insert), and a live delete claims the
+// row before the fallback's first conditional row delete: that delete
+// refuses the held row (createRowHeldCheck), so the create answers 409
+// and leaves the row and its quotas to the delete.
+func TestManagedCreate_Unrecorded_CompensationFails_ThenHeld_Answers409(t *testing.T) {
+	srv, s, project := setupCreateAgentServer(t, &createRaceDispatcher{})
+	backend := newInteractionLedgerBackend()
+	useManagedBackend(t, backend)
+	var agentID string
+	fs := &managedRecordFaultStore{
+		Store:    &createTxFaultStore{Store: s, auditErrFor: mutationTypeAgentCreateDispatchFailed},
+		failures: 1,
+		onFinalizeCall: func(call int, id string) {
+			if call == 2 {
+				agentID = id
+				claimForTest(t, s, id, store.DeletionStateDeleting, time.Minute)
+			}
+		},
+	}
+	srv.store = fs
+
+	rec := managedCreate(t, srv, project.ID, "mgd-unrec-compfail-held")
+	require.NotEmpty(t, agentID, "the claim ran: %d %s", rec.Code, rec.Body.String())
+	assert.Equal(t, []string{managedCreateCompensatedWarning}, requireDeletedDuringCreate(t, rec, agentID))
+	assert.Equal(t, []string{"interaction-1"}, backend.cancels())
+
+	row, err := s.GetAgent(context.Background(), agentID)
+	require.NoError(t, err, "the delete's row is kept")
+	assert.Equal(t, store.DeletionStateDeleting, row.DeletionState)
+	assert.EqualValues(t, 1, brokerReservationCount(t, s, project.DefaultRuntimeBrokerID), "the quotas are left to the delete")
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	assert.Equal(t, 2, fs.finalizeCalls, "the failed compensation, then one refused fallback delete")
 }
