@@ -130,7 +130,7 @@ func newResource(ctx context.Context, o *options) (*resource.Resource, error) {
 		// Without service.instance.id, spans from different replicas can't
 		// be told apart, so never export without one.
 		instanceID = uuid.NewString()
-		slog.Warn("hub tracing: no hub instance ID supplied; using a generated one",
+		slog.WarnContext(ctx, "hub tracing: no hub instance ID supplied; using a generated one",
 			"service_instance_id", instanceID)
 	}
 	resAttrs = append(resAttrs, semconv.ServiceInstanceID(instanceID))
