@@ -1215,6 +1215,76 @@ describe('chat page — promote DM dialog', () => {
   });
 });
 
+describe('chat page — promote toast', () => {
+  let toast: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    toast = vi.fn(() => Promise.resolve());
+    (HTMLElement.prototype as any).toast = toast;
+  });
+
+  afterEach(() => {
+    delete (HTMLElement.prototype as any).toast;
+    document.body.querySelectorAll('sl-alert').forEach((a) => a.remove());
+  });
+
+  function lastAlert(): HTMLElement {
+    const alerts = document.body.querySelectorAll('sl-alert');
+    return alerts[alerts.length - 1] as HTMLElement;
+  }
+
+  it('renders markup in the message as literal text', () => {
+    const el = createPage();
+    const message = 'Topic <b>bold</b> <img src=x onerror="alert(1)">';
+
+    el.showPromoteToast(message, 'danger');
+
+    const alert = lastAlert();
+    expect(alert.textContent).toBe(message);
+    expect(alert.children).toHaveLength(1);
+    expect(alert.children[0]?.tagName.toLowerCase()).toBe('sl-icon');
+    expect(alert.querySelector('b, img')).toBeNull();
+    expect(alert.children[0]?.getAttribute('name')).toBe('exclamation-circle');
+    expect(toast).toHaveBeenCalledTimes(1);
+  });
+
+  it('renders a normal message with the variant icon', () => {
+    const el = createPage();
+
+    el.showPromoteToast('Conversation promoted to #general', 'success');
+
+    const alert = lastAlert() as HTMLElement & {
+      variant: string;
+      closable: boolean;
+      duration: number;
+    };
+    const icon = alert.querySelector('sl-icon');
+    expect(alert.textContent).toBe('Conversation promoted to #general');
+    expect(icon?.getAttribute('name')).toBe('check-circle');
+    expect(icon?.getAttribute('slot')).toBe('icon');
+    expect(alert.variant).toBe('success');
+    expect(alert.closable).toBe(true);
+    expect(alert.duration).toBe(4000);
+    expect(toast).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses the warning icon for warnings', () => {
+    const el = createPage();
+
+    el.showPromoteToast('Try again', 'warning');
+
+    expect(lastAlert().querySelector('sl-icon')?.getAttribute('name')).toBe('exclamation-triangle');
+  });
+
+  it('falls back to the danger icon for an unknown variant', () => {
+    const el = createPage();
+
+    el.showPromoteToast('Odd', 'neutral' as never);
+
+    expect(lastAlert().querySelector('sl-icon')?.getAttribute('name')).toBe('exclamation-circle');
+  });
+});
+
 describe('chat page — late route lookups', () => {
   /**
    * Hold the project-by-slug lookup until `release` is called; every other

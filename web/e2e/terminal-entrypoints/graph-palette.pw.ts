@@ -17,7 +17,8 @@
 /**
  * The "Jump to agent" palette on the graph views: /agents and the project
  * page in graph mode, and /agents/graph. Picking an agent centres the graph
- * on its node in place, at the current zoom, highlights it and focuses it.
+ * on its node in place, at the zoom that renders its name at about 16px,
+ * highlights it and focuses it.
  */
 
 import { test, expect, type Locator, type Page, type Route } from '@playwright/test';
@@ -114,6 +115,28 @@ function stageTransform(page: Page): Promise<string> {
 
 function scaleOf(transform: string): string | undefined {
   return /scale\(([^)]+)\)/.exec(transform)?.[1];
+}
+
+/** The rendered size of an agent node's name: its font size times the graph's zoom. */
+async function renderedNamePx(page: Page, id: string): Promise<number> {
+  const fontPx = await graphNode(page, id)
+    .locator('.name')
+    .evaluate((el) => parseFloat(getComputedStyle(el).fontSize));
+  return fontPx * Number(scaleOf(await stageTransform(page)));
+}
+
+/** Zooms the graph out with its zoom-out button until it stops changing. */
+async function zoomAllTheWayOut(page: Page): Promise<void> {
+  const button = page.locator('scion-agent-tree-view .zoom-controls sl-button[title^="Zoom out"]');
+  const maxClicks = 30;
+  let last = '';
+  for (let i = 0; i < maxClicks; i++) {
+    await button.click();
+    const transform = await stageTransform(page);
+    if (transform === last) return;
+    last = transform;
+  }
+  throw new Error(`the graph was still zooming out after ${maxClicks} clicks`);
 }
 
 /** How far the node's centre is from the graph canvas's centre, in px. */
@@ -319,7 +342,7 @@ for (const host of hosts) {
       await expect.poll(() => offCentre(page, targetId)).toBeLessThan(2);
       const after = await stageTransform(page);
       expect(after).not.toBe(before);
-      expect(scaleOf(after)).toBe(scaleOf(before));
+      expect(await renderedNamePx(page, targetId)).toBeCloseTo(16, 1);
       await expect(graphNode(page, targetId)).toHaveClass(/jump-highlight/);
       await expect.poll(async () => (await deepActive(page)).agentId).toBe(targetId);
       expect(page.url()).toBe(url);
@@ -409,6 +432,23 @@ test('a jump expands the collapsed ancestors of the picked agent', async ({ page
   await expect(graphNode(page, targetId)).toBeVisible();
   await expect(graphNode(page, childId)).toBeVisible();
   await expect.poll(() => offCentre(page, targetId)).toBeLessThan(2);
+  await expect(graphNode(page, targetId)).toHaveClass(/jump-highlight/);
+});
+
+test('a jump from a far zoomed-out graph zooms in until the name renders at about 16px', async ({
+  page,
+}) => {
+  await openHost(page, '/agents', { 'scion-view-agents': 'graph' });
+  await expect(graphNode(page, targetId)).toBeVisible();
+  await settledStageTransform(page);
+  await zoomAllTheWayOut(page);
+  expect(await renderedNamePx(page, targetId)).toBeLessThan(8);
+
+  await page.keyboard.press('Control+k');
+  await jumpTo(page, 'gamma');
+
+  await expect.poll(() => offCentre(page, targetId)).toBeLessThan(2);
+  expect(await renderedNamePx(page, targetId)).toBeCloseTo(16, 1);
   await expect(graphNode(page, targetId)).toHaveClass(/jump-highlight/);
 });
 
@@ -503,7 +543,7 @@ test('a pick followed by a reopen during the close animation still jumps to the 
 }) => {
   await openHost(page, '/agents', { 'scion-view-agents': 'graph' });
   await expect(graphNode(page, targetId)).toBeVisible();
-  const before = await settledStageTransform(page);
+  await settledStageTransform(page);
   expect(await offCentre(page, targetId)).toBeGreaterThan(50);
   const input = page.locator('scion-quick-palette #palette-query-input');
 
@@ -516,7 +556,7 @@ test('a pick followed by a reopen during the close animation still jumps to the 
 
   await expect.poll(() => paletteSettledOpen(page)).toBe(true);
   await expect.poll(() => offCentre(page, targetId)).toBeLessThan(2);
-  expect(scaleOf(await stageTransform(page))).toBe(scaleOf(before));
+  expect(await renderedNamePx(page, targetId)).toBeCloseTo(16, 1);
   await expect(graphNode(page, targetId)).toHaveClass(/jump-highlight/);
   // Focus belongs to the reopened palette, not to the picked node.
   await expect(input).toBeFocused();

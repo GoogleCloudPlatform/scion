@@ -32,6 +32,18 @@ type ScheduledEvent struct {
 	AttributionVersion *int `json:"attribution_version,omitempty"`
 	// AuthorizationRevision holds the value of the "authorization_revision" field.
 	AuthorizationRevision *int `json:"authorization_revision,omitempty"`
+	// AuthorityCeilingKind holds the value of the "authority_ceiling_kind" field.
+	AuthorityCeilingKind string `json:"authority_ceiling_kind,omitempty"`
+	// AuthorityCeilingVersion holds the value of the "authority_ceiling_version" field.
+	AuthorityCeilingVersion int32 `json:"authority_ceiling_version,omitempty"`
+	// AuthorityCeilingPermissionIds holds the value of the "authority_ceiling_permission_ids" field.
+	AuthorityCeilingPermissionIds *string `json:"authority_ceiling_permission_ids,omitempty"`
+	// AuthorityCeilingBoundaryKind holds the value of the "authority_ceiling_boundary_kind" field.
+	AuthorityCeilingBoundaryKind string `json:"authority_ceiling_boundary_kind,omitempty"`
+	// AuthorityCeilingBoundaryProjectID holds the value of the "authority_ceiling_boundary_project_id" field.
+	AuthorityCeilingBoundaryProjectID string `json:"authority_ceiling_boundary_project_id,omitempty"`
+	// AuthorityCeilingSourceExpiresAt holds the value of the "authority_ceiling_source_expires_at" field.
+	AuthorityCeilingSourceExpiresAt *time.Time `json:"authority_ceiling_source_expires_at,omitempty"`
 	// ProjectID holds the value of the "project_id" field.
 	ProjectID uuid.UUID `json:"project_id,omitempty"`
 	// EventType holds the value of the "event_type" field.
@@ -60,11 +72,11 @@ func (*ScheduledEvent) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
-		case scheduledevent.FieldAttributionVersion, scheduledevent.FieldAuthorizationRevision:
+		case scheduledevent.FieldAttributionVersion, scheduledevent.FieldAuthorizationRevision, scheduledevent.FieldAuthorityCeilingVersion:
 			values[i] = new(sql.NullInt64)
-		case scheduledevent.FieldInitiatorPrincipalKind, scheduledevent.FieldInitiatorPrincipalID, scheduledevent.FieldInitiatorCredentialKind, scheduledevent.FieldInitiatorCredentialID, scheduledevent.FieldInitiatorCredentialSnapshot, scheduledevent.FieldEventType, scheduledevent.FieldPayload, scheduledevent.FieldStatus, scheduledevent.FieldCreatedBy, scheduledevent.FieldError, scheduledevent.FieldScheduleID:
+		case scheduledevent.FieldInitiatorPrincipalKind, scheduledevent.FieldInitiatorPrincipalID, scheduledevent.FieldInitiatorCredentialKind, scheduledevent.FieldInitiatorCredentialID, scheduledevent.FieldInitiatorCredentialSnapshot, scheduledevent.FieldAuthorityCeilingKind, scheduledevent.FieldAuthorityCeilingPermissionIds, scheduledevent.FieldAuthorityCeilingBoundaryKind, scheduledevent.FieldAuthorityCeilingBoundaryProjectID, scheduledevent.FieldEventType, scheduledevent.FieldPayload, scheduledevent.FieldStatus, scheduledevent.FieldCreatedBy, scheduledevent.FieldError, scheduledevent.FieldScheduleID:
 			values[i] = new(sql.NullString)
-		case scheduledevent.FieldFireAt, scheduledevent.FieldFiredAt, scheduledevent.FieldCreated:
+		case scheduledevent.FieldAuthorityCeilingSourceExpiresAt, scheduledevent.FieldFireAt, scheduledevent.FieldFiredAt, scheduledevent.FieldCreated:
 			values[i] = new(sql.NullTime)
 		case scheduledevent.FieldID, scheduledevent.FieldProjectID:
 			values[i] = new(uuid.UUID)
@@ -137,6 +149,44 @@ func (_m *ScheduledEvent) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.AuthorizationRevision = new(int)
 				*_m.AuthorizationRevision = int(value.Int64)
+			}
+		case scheduledevent.FieldAuthorityCeilingKind:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field authority_ceiling_kind", values[i])
+			} else if value.Valid {
+				_m.AuthorityCeilingKind = value.String
+			}
+		case scheduledevent.FieldAuthorityCeilingVersion:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field authority_ceiling_version", values[i])
+			} else if value.Valid {
+				_m.AuthorityCeilingVersion = int32(value.Int64)
+			}
+		case scheduledevent.FieldAuthorityCeilingPermissionIds:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field authority_ceiling_permission_ids", values[i])
+			} else if value.Valid {
+				_m.AuthorityCeilingPermissionIds = new(string)
+				*_m.AuthorityCeilingPermissionIds = value.String
+			}
+		case scheduledevent.FieldAuthorityCeilingBoundaryKind:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field authority_ceiling_boundary_kind", values[i])
+			} else if value.Valid {
+				_m.AuthorityCeilingBoundaryKind = value.String
+			}
+		case scheduledevent.FieldAuthorityCeilingBoundaryProjectID:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field authority_ceiling_boundary_project_id", values[i])
+			} else if value.Valid {
+				_m.AuthorityCeilingBoundaryProjectID = value.String
+			}
+		case scheduledevent.FieldAuthorityCeilingSourceExpiresAt:
+			if value, ok := values[i].(*sql.NullTime); !ok {
+				return fmt.Errorf("unexpected type %T for field authority_ceiling_source_expires_at", values[i])
+			} else if value.Valid {
+				_m.AuthorityCeilingSourceExpiresAt = new(time.Time)
+				*_m.AuthorityCeilingSourceExpiresAt = value.Time
 			}
 		case scheduledevent.FieldProjectID:
 			if value, ok := values[i].(*uuid.UUID); !ok {
@@ -268,6 +318,28 @@ func (_m *ScheduledEvent) String() string {
 	if v := _m.AuthorizationRevision; v != nil {
 		builder.WriteString("authorization_revision=")
 		builder.WriteString(fmt.Sprintf("%v", *v))
+	}
+	builder.WriteString(", ")
+	builder.WriteString("authority_ceiling_kind=")
+	builder.WriteString(_m.AuthorityCeilingKind)
+	builder.WriteString(", ")
+	builder.WriteString("authority_ceiling_version=")
+	builder.WriteString(fmt.Sprintf("%v", _m.AuthorityCeilingVersion))
+	builder.WriteString(", ")
+	if v := _m.AuthorityCeilingPermissionIds; v != nil {
+		builder.WriteString("authority_ceiling_permission_ids=")
+		builder.WriteString(*v)
+	}
+	builder.WriteString(", ")
+	builder.WriteString("authority_ceiling_boundary_kind=")
+	builder.WriteString(_m.AuthorityCeilingBoundaryKind)
+	builder.WriteString(", ")
+	builder.WriteString("authority_ceiling_boundary_project_id=")
+	builder.WriteString(_m.AuthorityCeilingBoundaryProjectID)
+	builder.WriteString(", ")
+	if v := _m.AuthorityCeilingSourceExpiresAt; v != nil {
+		builder.WriteString("authority_ceiling_source_expires_at=")
+		builder.WriteString(v.Format(time.ANSIC))
 	}
 	builder.WriteString(", ")
 	builder.WriteString("project_id=")

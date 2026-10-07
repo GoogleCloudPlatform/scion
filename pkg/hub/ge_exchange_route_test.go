@@ -69,7 +69,7 @@ func (v *countingRouteValidator) totalCalls() int64 {
 func newGERouteTestServer(t *testing.T, validator GoogleCredentialValidator) *Server {
 	t.Helper()
 
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
@@ -98,7 +98,7 @@ func newGERouteTestServer(t *testing.T, validator GoogleCredentialValidator) *Se
 func newGERouteTestServerDisabled(t *testing.T) *Server {
 	t.Helper()
 
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
@@ -365,7 +365,7 @@ func TestGEExchange_Route_BodyLimitStillOperates(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestGEExchange_Route_SharesValidatorAndResolverWithExternalBearer(t *testing.T) {
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
@@ -424,7 +424,7 @@ func TestGEExchange_Route_SharesValidatorAndResolverWithExternalBearer(t *testin
 // gated on GEGoogleExchange or startup-time trust detection, so that Google
 // trust added later via hot reload takes effect without a restart.
 func TestGEExchange_Route_GoogleStackBuiltWithoutExchangeOrTrust(t *testing.T) {
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
@@ -457,7 +457,7 @@ func TestGEExchange_Route_GoogleStackBuiltWithoutExchangeOrTrust(t *testing.T) {
 // return srv.getUserRole(ctx, email, "", "") }) actually honours AdminEmails
 // in production. This resolves against the actual resolver New() builds.
 func TestGEExchange_Route_ProductionResolverHonoursAdminEmails(t *testing.T) {
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
@@ -522,7 +522,7 @@ func TestGEExchange_Route_ProductionResolverHonoursAdminEmails(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestServer_MetricsSettersReachRunningHandler(t *testing.T) {
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
@@ -605,7 +605,7 @@ func TestServer_MetricsSettersReachRunningHandler(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestServer_DefaultMetricsWiring_RecordsWithoutSetters(t *testing.T) {
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
@@ -705,7 +705,7 @@ func decodeExternalBearerSection(t *testing.T, body []byte) *ExternalBearerMetri
 // ever dropped (passed as nil, a legal value), the section would freeze the
 // moment GCP export is configured.
 func TestServer_DefaultMetricsWiring_OTelSetterStillMovesSnapshot(t *testing.T) {
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
