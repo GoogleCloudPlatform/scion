@@ -469,7 +469,7 @@ describe('PaletteTypeahead: holding the on-screen keyboard', () => {
 
   it('reads holdsKeyboard at each start, and uses no field where it does not hold', () => {
     let touch = false;
-    typeahead = new PaletteTypeahead({ mac: false, holdsKeyboard: () => touch });
+    typeahead = new PaletteTypeahead({ mac: false, holdsKeyboard: (): boolean => touch });
     typeahead.start();
     expect(typeahead.keyboardProxy).toBeNull();
     expect(document.activeElement).toBe(target);

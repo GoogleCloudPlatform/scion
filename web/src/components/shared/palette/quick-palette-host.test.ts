@@ -1646,7 +1646,7 @@ describe('QuickPaletteHost: on a touch-primary device', () => {
     return { button, focusedInTap: () => focused };
   }
 
-  it('a text field has focus within the tap that opens the palette, before anything loads', async () => {
+  it('a text field has focus within the tap that opens the palette, before anything loads', () => {
     const h = createHost();
     const { button, focusedInTap } = openButton(h);
     button.click();

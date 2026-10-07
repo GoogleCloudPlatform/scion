@@ -20,7 +20,7 @@
  * on WebKit with playwright.webkit.config.ts.
  */
 
-import { test, expect, type Page } from '@playwright/test';
+import { test, expect, type Locator, type Page } from '@playwright/test';
 import { setupApiMocks } from './mock-api.js';
 import {
   expectTapHoldsKeyboard,
@@ -36,11 +36,11 @@ async function gotoShell(page: Page): Promise<void> {
   await page.waitForFunction(() => !!document.querySelector('scion-page-chat'));
 }
 
-function paletteButton(page: Page) {
+function paletteButton(page: Page): Locator {
   return page.locator('scion-header .palette-button');
 }
 
-function paletteDialog(page: Page) {
+function paletteDialog(page: Page): Locator {
   return page.locator('scion-quick-palette sl-dialog[label="Quick switcher"]');
 }
 
