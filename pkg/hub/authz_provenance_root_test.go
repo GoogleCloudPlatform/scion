@@ -227,6 +227,64 @@ func TestProvenanceRoot_SchedulerEdgeConsistent(t *testing.T) {
 	})
 }
 
+// An edge whose ceiling and provenance come from the scheduler writer
+// (scheduledEffectCeiling) resolves through resolveProvenanceChain, for
+// every principal and initiator credential the writer records.
+func TestProvenanceRoot_SchedulerWriterRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	scheduledEvent := func(kind, id, cred string) store.ScheduledEvent {
+		evt := store.ScheduledEvent{ID: "evt-rt-" + cred, ScheduleID: "sch-rt-" + cred}
+		evt.InitiatorPrincipalKind = kind
+		evt.InitiatorPrincipalID = id
+		evt.InitiatorCredentialKind = cred
+		evt.InitiatorCredentialID = "cred-rt-" + cred
+		evt.AuthorizationRevision = 3
+		return evt
+	}
+	writeAndResolve := func(t *testing.T, f provenanceFixture, srv *Server, auth ScheduledAuthority, evt store.ScheduledEvent) RecordedProvenanceRoot {
+		t.Helper()
+		c, prov, err := srv.scheduledEffectCeiling(ctx, auth, evt)
+		require.NoError(t, err)
+		ag := f.agent(t, "rt-"+auth.CredentialKind, AgentRoleFull)
+		f.edge(t, auth.PrincipalKind, auth.PrincipalID, ag.ID, c, prov)
+		root, err := f.a.resolveProvenanceChain(ctx, ag, false)
+		require.NoError(t, err)
+		assert.Equal(t, ProvenanceRevision{ScheduleID: evt.ScheduleID, EventID: evt.ID, AuthorizationRevision: evt.AuthorizationRevision}, root.Revision)
+		assert.Equal(t, ProvenancePrincipal{Kind: auth.PrincipalKind, ID: auth.PrincipalID}, root.Principal)
+		return root
+	}
+
+	for _, cred := range []string{store.InitiatorCredentialKindSession, store.InitiatorCredentialKindUAT} {
+		t.Run(cred, func(t *testing.T) {
+			f := newProvenanceFixture(t, "sched-rt-"+cred, false)
+			c := ceilPrincip
+			if cred == store.InitiatorCredentialKindUAT {
+				c = boundedCeiling("agent.create")
+			}
+			auth := ScheduledAuthority{PrincipalKind: store.DelegationPrincipalUser, PrincipalID: f.userID, CredentialKind: cred, Ceiling: c}
+			root := writeAndResolve(t, f, &Server{authzService: f.a}, auth, scheduledEvent(store.DelegationPrincipalUser, f.userID, cred))
+			require.NotNil(t, root.RootUser)
+			assert.Equal(t, f.userID, root.RootUser.ID)
+		})
+	}
+	t.Run("agent", func(t *testing.T) {
+		f := newProvenanceFixture(t, "sched-rt-agent", false)
+		p := f.userChild(t, "sched-rt-agent-p", ceilPrincip)
+		auth := ScheduledAuthority{PrincipalKind: store.DelegationPrincipalAgent, PrincipalID: p.ID, CredentialKind: store.InitiatorCredentialKindAgent, Ceiling: boundedCeiling("agent.create"), agent: p}
+		root := writeAndResolve(t, f, &Server{authzService: f.a}, auth, scheduledEvent(store.DelegationPrincipalAgent, p.ID, store.InitiatorCredentialKindAgent))
+		require.NotNil(t, root.RootUser)
+		assert.Equal(t, f.userID, root.RootUser.ID)
+	})
+	t.Run("dev_local", func(t *testing.T) {
+		f := newProvenanceFixture(t, "sched-rt-dev", true)
+		f.devUserInProject(t, store.UserStatusActive)
+		auth := ScheduledAuthority{PrincipalKind: store.DelegationPrincipalUser, PrincipalID: DevUserID, CredentialKind: store.InitiatorCredentialKindDevLocal, Ceiling: ceilPrincip}
+		root := writeAndResolve(t, f, &Server{authzService: f.a}, auth, scheduledEvent(string(PrincipalKindDev), DevUserID, store.InitiatorCredentialKindDevLocal))
+		require.NotNil(t, root.RootUser)
+		assert.Equal(t, DevUserID, root.RootUser.ID)
+	})
+}
+
 // The seeded local development user row is active and resolves as the
 // provenance root of a dev_local edge.
 func TestDevUserSeededRowResolvesAsRoot(t *testing.T) {
@@ -1051,7 +1109,7 @@ func callsIn(files []*ast.File, name string) map[string][]*ast.CallExpr {
 // resolveProvenanceChain is provenanceRootSourceResolver, and no production
 // code sets AllowUnrecordedLegacy.
 func TestAllowUnrecordedLegacyCallersPinned(t *testing.T) {
-	_, files := parseHubProduction(t)
+	fset, files := parseHubProduction(t)
 	allowedTrue := map[string]bool{"provenanceRootSourceResolver.ResolveExecutionSource": true}
 	for fn, calls := range callsIn(files, "resolveProvenanceChain") {
 		for _, call := range calls {
@@ -1071,16 +1129,48 @@ func TestAllowUnrecordedLegacyCallersPinned(t *testing.T) {
 		}
 	}
 	for _, f := range files {
-		ast.Inspect(f, func(n ast.Node) bool {
-			kv, ok := n.(*ast.KeyValueExpr)
-			if !ok {
-				return true
+		for _, pos := range allowUnrecordedLegacySetters(f) {
+			t.Errorf("production code sets AllowUnrecordedLegacy at %s", fset.Position(pos))
+		}
+	}
+}
+
+// allowUnrecordedLegacySetters returns the positions in f that set an
+// AllowUnrecordedLegacy field: a composite-literal key, or the left side of
+// an assignment (x.AllowUnrecordedLegacy = …).
+func allowUnrecordedLegacySetters(f *ast.File) []token.Pos {
+	var out []token.Pos
+	ast.Inspect(f, func(n ast.Node) bool {
+		switch n := n.(type) {
+		case *ast.KeyValueExpr:
+			if key, ok := n.Key.(*ast.Ident); ok && key.Name == "AllowUnrecordedLegacy" {
+				out = append(out, n.Pos())
 			}
-			if key, ok := kv.Key.(*ast.Ident); ok && key.Name == "AllowUnrecordedLegacy" {
-				t.Errorf("production code sets AllowUnrecordedLegacy at %s", f.Name.Name)
+		case *ast.AssignStmt:
+			for _, lhs := range n.Lhs {
+				if sel, ok := lhs.(*ast.SelectorExpr); ok && sel.Sel.Name == "AllowUnrecordedLegacy" {
+					out = append(out, lhs.Pos())
+				}
 			}
-			return true
-		})
+		}
+		return true
+	})
+	return out
+}
+
+// The setter matcher finds both the composite-literal and the assignment
+// form, and ignores reads.
+func TestAllowUnrecordedLegacySetterMatcher(t *testing.T) {
+	for src, want := range map[string]int{
+		"o := ResolveProvenanceOptions{AllowUnrecordedLegacy: true}; _ = o": 1,
+		"var o ResolveProvenanceOptions; o.AllowUnrecordedLegacy = true":    1,
+		"p.opts.AllowUnrecordedLegacy, x = true, 1":                         1,
+		"var o ResolveProvenanceOptions; _ = o.AllowUnrecordedLegacy":       0,
+		"var o ResolveProvenanceOptions; o.PermissionID = \"x\"":            0,
+	} {
+		f, err := parser.ParseFile(token.NewFileSet(), "x.go", "package x\nfunc f() {\n"+src+"\n}\n", 0)
+		require.NoError(t, err, src)
+		assert.Len(t, allowUnrecordedLegacySetters(f), want, src)
 	}
 }
 
