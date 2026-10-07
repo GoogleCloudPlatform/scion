@@ -977,7 +977,7 @@ not depend on the remaining D.2 admission batches; the sign-in item [GoogleCloud
 | frozen ceiling | A.2 |
 | system authority for the exact canonical permission and the actual target, after scope-sensitive grant filters (§7.3 "What counts as authority") | A.1 (final helper; the earlier project-access helper signature is withdrawn and is not used) |
 | per-operation admission and credential restrictions | D.2 |
-| governance and `CanDelegate` contract for the invitation effect (§7.3 item 6) | D.2 with B.3 |
+| governance and `CanDelegate` contract for the invitation effect (§7.3 item 6) | D.2 (G5, [ptone/scion#2124](https://github.com/ptone/scion/issues/2124)); B.3 defines none (§16.1) |
 | per-method route metadata convention for `/api/v1/users` | A.1 |
 
 Record the mapping in the H.2 PR description. If a final contract cannot express a requirement in
@@ -1342,8 +1342,8 @@ expires, the token owner is suspended, or the owner loses `user.invite` (§12).
   still holding `user.invite`, token not revoked or expired) before the record admits sign-in. This is
   additional B.3-linked scope on the activation paths.
 
-Under either option, the existing provider and access-policy checks at sign-in stay mandatory, and
-B.3 is coordinated for the invitation effect contract (§16.1).
+Under either option, the existing provider and access-policy checks at sign-in stay mandatory. For the
+invitation effect, B.3 defines nothing and the governance side is D.2 G5 (§16.1).
 
 ## 20. Consultation and decision record
 

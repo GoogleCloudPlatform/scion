@@ -102,6 +102,9 @@ export const HUB_ROLE_DESCRIPTIONS: Record<UserRole, string> = {
     'The same as Member, but cannot create projects (including cloning). Viewers can still be added to projects and work there according to their project role.',
 };
 
+/** How long a non-warning action feedback alert stays open. */
+const FEEDBACK_AUTO_CLOSE_MS = 5000;
+
 /** Variants of the page's action feedback alert. */
 type FeedbackVariant = 'success' | 'danger' | 'warning' | 'primary';
 
@@ -1126,11 +1129,20 @@ export class ScionPageAdminUsers extends LitElement {
     }
   }
 
+  /**
+   * Shows the action feedback alert. Every variant except `warning` closes
+   * itself after 5 seconds; a warning (for example, sign-in for an invited
+   * email will be refused) stays until the admin closes it or another
+   * notice replaces it.
+   */
   private showFeedback(variant: FeedbackVariant, message: string): void {
-    this.actionFeedback = { variant, message };
+    const feedback = { variant, message };
+    this.actionFeedback = feedback;
+    if (variant === 'warning') return;
     setTimeout(() => {
-      this.actionFeedback = null;
-    }, 5000);
+      // Clear only this notice, not a later one that replaced it.
+      if (this.actionFeedback === feedback) this.actionFeedback = null;
+    }, FEEDBACK_AUTO_CLOSE_MS);
   }
 
   private isSelf(user: AdminUser): boolean {
@@ -1508,7 +1520,9 @@ export class ScionPageAdminUsers extends LitElement {
               variant=${this.actionFeedback.variant}
               open
               closable
-              duration="5000"
+              .duration=${this.actionFeedback.variant === 'warning'
+                ? Infinity
+                : FEEDBACK_AUTO_CLOSE_MS}
               @sl-after-hide=${() => {
                 this.actionFeedback = null;
               }}

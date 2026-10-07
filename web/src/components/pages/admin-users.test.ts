@@ -764,6 +764,72 @@ describe('scion-page-admin-users — invite dialog display name and submit routi
     });
   }
 
+  it('renders a 409 without a reason with the fallback copy', async () => {
+    element = (await createComponent([makeUser()])) as PageEl;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        withSubmitResponses(
+          () => jsonResponse({}, 500),
+          () => jsonResponse({ error: { code: 'conflict', message: 'x' } }, 409)
+        )
+      )
+    );
+    await openDialogAndSubmit(element, { email: 'a@example.com', displayName: 'A' });
+    expect(feedback(element)).toEqual({ variant: 'danger', text: 'User already exists.' });
+    expect(element.shadowRoot!.querySelector('sl-dialog[label="Invite User"]')).not.toBeNull();
+  });
+
+  it('keeps a warning notice open; other notices close after 5 seconds', async () => {
+    element = (await createComponent([makeUser()])) as PageEl;
+    const timeoutSpy = vi.spyOn(globalThis, 'setTimeout');
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        withSubmitResponses(
+          () => jsonResponse({}, 500),
+          () =>
+            jsonResponse(
+              {
+                user: { id: 'u1', email: 'a@other.example', status: 'invited' },
+                created: true,
+                warnings: ['domain_not_authorized'],
+              },
+              201
+            )
+        )
+      )
+    );
+    await openDialogAndSubmit(element, { email: 'a@other.example', displayName: 'A' });
+    const alert = element.shadowRoot!.querySelector('.feedback-alert') as HTMLElement & {
+      duration: number;
+    };
+    expect(alert.getAttribute('variant')).toBe('warning');
+    expect(alert.duration).toBe(Infinity);
+    expect(timeoutSpy.mock.calls.some(([, ms]) => ms === 5000)).toBe(false);
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        withSubmitResponses(
+          () => jsonResponse({}, 500),
+          () =>
+            jsonResponse(
+              { user: { id: 'u2', email: 'b@example.com', status: 'invited' }, created: true },
+              201
+            )
+        )
+      )
+    );
+    await openDialogAndSubmit(element, { email: 'b@example.com', displayName: 'B' });
+    const success = element.shadowRoot!.querySelector('.feedback-alert') as HTMLElement & {
+      duration: number;
+    };
+    expect(success.getAttribute('variant')).toBe('success');
+    expect(success.duration).toBe(5000);
+    expect(timeoutSpy.mock.calls.some(([, ms]) => ms === 5000)).toBe(true);
+  });
+
   it('shows an unexpected 422 as a generic error', async () => {
     element = (await createComponent([makeUser()])) as PageEl;
     vi.stubGlobal(
