@@ -61,7 +61,8 @@ func remoteExtractLimit(l RemoteImageLimits) int { return 4 * l.MaxCount }
 // Publish warnings about the scan for remote images. They sit next to the
 // per-image warnings.
 const (
-	warnBeyondWindow = "remote images beyond the first 2 MiB of the entry were not fetched"
+	warnBeyondWindow      = "remote images beyond the first 2 MiB of the entry were not fetched"
+	warnTooManyReferences = "the entry has more image references than the hub reads; later remote images were not fetched"
 )
 
 // publishDeadlineMargin is the time a publish keeps for storing the fetched
@@ -84,7 +85,12 @@ func extendWriteDeadline(w http.ResponseWriter, d time.Duration) {
 // warnings. window is the entry's first imageScanWindow bytes and
 // truncated tells whether the entry is longer. Nothing is fetched when
 // remote images are off or the entry references none.
-func (s *Service) remoteImages(ctx context.Context, w http.ResponseWriter, b backend, versionID, window string, truncated bool) ([]File, []string) {
+//
+// Remote images count toward the version's file and size limits: used is
+// what the version holds without them, and images that would take it past
+// either limit are not fetched (or, past the size limit once fetched, not
+// kept), with a warning.
+func (s *Service) remoteImages(ctx context.Context, w http.ResponseWriter, b backend, versionID, window string, truncated bool, used versionUsage) ([]File, []string) {
 	lim := b.remoteImageLimits(ctx)
 	if !lim.Enabled {
 		return nil, nil
@@ -94,15 +100,44 @@ func (s *Service) remoteImages(ctx context.Context, w http.ResponseWriter, b bac
 	if truncated {
 		warnings = append(warnings, warnBeyondWindow)
 	}
+	if ex.full && len(ex.urls) <= lim.MaxCount {
+		// The scan stopped at its candidate limit, so later images in the
+		// entry were not read.
+		warnings = append(warnings, warnTooManyReferences)
+	}
 	if len(ex.urls) == 0 {
 		return nil, warnings
 	}
+	vl := b.currentLimits(ctx)
 	// Fetching happens inside this request: move its write deadline past
 	// the fetch budget so the response is not cut off after the version is
 	// recorded.
 	extendWriteDeadline(w, lim.TotalBudget+publishDeadlineMargin)
-	files, warn := s.fetchRemoteImages(ctx, b, lim, versionID, ex.urls)
-	return files, append(warnings, warn...)
+	files, warn := s.fetchRemoteImages(ctx, b, lim, versionID, ex.urls, vl.MaxFiles-used.files)
+	warnings = append(warnings, warn...)
+	left := vl.MaxBundleBytes - used.bytes
+	kept := files[:0]
+	dropped := 0
+	for _, f := range files {
+		if f.FetchStatus == FetchStatusOK {
+			if f.Size > left {
+				dropped++
+				continue
+			}
+			left -= f.Size
+		}
+		kept = append(kept, f)
+	}
+	if dropped > 0 {
+		warnings = append(warnings, fmt.Sprintf("%d more remote images were not fetched (the version's size limit)", dropped))
+	}
+	return kept, warnings
+}
+
+// versionUsage is what a version holds before its remote images.
+type versionUsage struct {
+	files int
+	bytes int64
 }
 
 // remoteFetchConcurrency is how many images of one version are fetched at
@@ -151,7 +186,7 @@ const MaxRemoteFetchBudget = 60 * time.Second
 // returns one manifest row per URL it processed, in order, plus the
 // warnings for the publisher. A failure never fails the publish: the row is
 // marked failed with a generic error and the warning is generic too.
-func (s *Service) fetchRemoteImages(ctx context.Context, b backend, lim RemoteImageLimits, versionID string, urls []string) ([]File, []string) {
+func (s *Service) fetchRemoteImages(ctx context.Context, b backend, lim RemoteImageLimits, versionID string, urls []string, room int) ([]File, []string) {
 	if !lim.Enabled || len(urls) == 0 {
 		return nil, nil
 	}
@@ -163,6 +198,13 @@ func (s *Service) fetchRemoteImages(ctx context.Context, b backend, lim RemoteIm
 		}
 		warnings = append(warnings, fmt.Sprintf("%s more remote images were not fetched (at most %d per version)", more, lim.MaxCount))
 		urls = urls[:lim.MaxCount]
+	}
+	if len(urls) > room {
+		warnings = append(warnings, fmt.Sprintf("%d more remote images were not fetched (the version's file limit)", len(urls)-max(room, 0)))
+		urls = urls[:max(room, 0)]
+	}
+	if len(urls) == 0 {
+		return nil, warnings
 	}
 	s.mu.RLock()
 	factory := s.fetcherFactory
@@ -180,10 +222,12 @@ func (s *Service) fetchRemoteImages(ctx context.Context, b backend, lim RemoteIm
 	sem := make(chan struct{}, remoteFetchConcurrency)
 	var wg sync.WaitGroup
 	for i, u := range urls {
+		// Take a slot before starting the goroutine, so at most
+		// remoteFetchConcurrency goroutines exist at once.
+		sem <- struct{}{}
 		wg.Add(1)
 		go func(i int, u string) {
 			defer wg.Done()
-			sem <- struct{}{}
 			defer func() { <-sem }()
 			files[i], floored[i] = s.fetchOne(ctx, budget, b, fetcher, versionID, u)
 		}(i, u)

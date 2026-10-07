@@ -694,7 +694,7 @@ func (s *Service) finalizeExtras(w http.ResponseWriter, r *http.Request, b backe
 		slog.ErrorContext(ctx, "artifacts: read markdown entry failed", "error", err)
 		return nil, nil
 	}
-	return s.remoteImages(ctx, w, b, v.ID, window, entry.Size > imageScanWindow)
+	return s.remoteImages(ctx, w, b, v.ID, window, entry.Size > imageScanWindow, versionUsage{files: v.FileCount, bytes: v.TotalBytes})
 }
 
 // handleListVersions implements GET /{id}/versions: the ready versions,

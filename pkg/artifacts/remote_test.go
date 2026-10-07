@@ -529,3 +529,90 @@ func TestConcurrentFinalizeFetchesOnce(t *testing.T) {
 		t.Errorf("fetch calls %v, want each image once", ff.calls)
 	}
 }
+
+// TestRemoteImagesStayWithinVersionLimits: remote images count toward the
+// version's file and size limits; images past either limit are not
+// fetched, or not kept, and the publisher gets a warning.
+func TestRemoteImagesStayWithinVersionLimits(t *testing.T) {
+	big := append(append([]byte{}, testPNG...), bytes.Repeat([]byte{1}, 400)...)
+	ff := &fakeFetcher{bodies: map[string][]byte{}}
+	var md strings.Builder
+	for i := 0; i < 4; i++ {
+		u := fmt.Sprintf("https://img.example/%d.png", i)
+		ff.bodies[u] = big
+		md.WriteString("![x](" + u + ")\n")
+	}
+	limits := func(files int, bundle int64) func(context.Context) Limits {
+		return func(context.Context) Limits {
+			return Limits{MaxFileBytes: 1 << 20, MaxBundleBytes: bundle, MaxFiles: files, RemoteImages: RemoteImageLimits{
+				Enabled: true, MaxCount: 10, MaxBytes: 1 << 20, FetchTimeout: time.Second, TotalBudget: time.Second}}
+		}
+	}
+	t.Run("file limit", func(t *testing.T) {
+		f := newFixture(t, false)
+		f.useFetcher(ff)
+		ff.calls = nil
+		f.svc.SetLimits(limits(3, 1<<20)) // the entry plus two images
+		resp := f.publish(agentA, "doc.md", []byte(md.String()), "")
+		if resp.Version.FileCount != 3 || len(ff.calls) != 2 {
+			t.Errorf("files %d, fetches %v; want 3 files and 2 fetches", resp.Version.FileCount, ff.calls)
+		}
+		if strings.Join(resp.Warnings, "|") != "2 more remote images were not fetched (the version's file limit)" {
+			t.Errorf("warnings %q", resp.Warnings)
+		}
+	})
+	t.Run("size limit", func(t *testing.T) {
+		f := newFixture(t, false)
+		f.useFetcher(ff)
+		ff.calls = nil
+		size := int64(md.Len() + 2*len(big)) // the entry plus two images
+		f.svc.SetLimits(limits(200, size))
+		resp := f.publish(agentA, "doc.md", []byte(md.String()), "")
+		if resp.Version.FileCount != 3 || resp.Version.TotalBytes > size {
+			t.Errorf("files %d, bytes %d (limit %d)", resp.Version.FileCount, resp.Version.TotalBytes, size)
+		}
+		if strings.Join(resp.Warnings, "|") != "2 more remote images were not fetched (the version's size limit)" {
+			t.Errorf("warnings %q", resp.Warnings)
+		}
+	})
+	t.Run("two-step version already at its file limit", func(t *testing.T) {
+		f := newFixture(t, false)
+		f.useFetcher(ff)
+		ff.calls = nil
+		f.svc.SetLimits(limits(2, 1<<20))
+		files := bundle{"doc.md": []byte(md.String()), "a.txt": []byte("a")}
+		resp := f.publishBundle(agentA, "/api/v1/artifacts", files.manifest("doc.md"), files)
+		if resp.Version.FileCount != 2 || len(ff.calls) != 0 {
+			t.Errorf("files %d, fetches %v", resp.Version.FileCount, ff.calls)
+		}
+		if strings.Join(resp.Warnings, "|") != "4 more remote images were not fetched (the version's file limit)" {
+			t.Errorf("warnings %q", resp.Warnings)
+		}
+	})
+}
+
+// TestRemoteImagesWarnWhenTheScanFills: when the scan's candidates are
+// used up by references that cannot be fetched, a later valid image is not
+// read, and the publisher is told.
+func TestRemoteImagesWarnWhenTheScanFills(t *testing.T) {
+	f := newFixture(t, false)
+	good := "https://img.example/late.png"
+	ff := &fakeFetcher{bodies: map[string][]byte{good: testPNG}}
+	f.useFetcher(ff)
+	f.svc.SetLimits(func(context.Context) Limits {
+		return Limits{MaxFileBytes: 1 << 20, RemoteImages: RemoteImageLimits{
+			Enabled: true, MaxCount: 2, MaxBytes: 1 << 20, FetchTimeout: time.Second, TotalBudget: time.Second}}
+	})
+	var md strings.Builder
+	for i := 0; i < remoteExtractLimit(RemoteImageLimits{MaxCount: 2}); i++ {
+		fmt.Fprintf(&md, "![x](https://user@img.example/%d.png)\n", i) // userinfo: never fetched
+	}
+	md.WriteString("![late](" + good + ")\n")
+	resp := f.publish(agentA, "doc.md", []byte(md.String()), "")
+	if len(ff.calls) != 0 || resp.Version.FileCount != 1 {
+		t.Errorf("fetches %v, files %d", ff.calls, resp.Version.FileCount)
+	}
+	if strings.Join(resp.Warnings, "|") != warnTooManyReferences {
+		t.Errorf("warnings %q", resp.Warnings)
+	}
+}

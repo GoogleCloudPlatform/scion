@@ -165,7 +165,7 @@ func (s *Service) handlePublish(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			slog.ErrorContext(ctx, "artifacts: read spooled markdown failed", "error", err)
 		}
-		remote, warn := s.remoteImages(ctx, w, b, versionID, window, truncated)
+		remote, warn := s.remoteImages(ctx, w, b, versionID, window, truncated, versionUsage{files: 1, bytes: spool.size})
 		warnings = warn
 		for _, rf := range remote {
 			files = append(files, rf)
