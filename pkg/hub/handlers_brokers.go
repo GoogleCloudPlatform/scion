@@ -18,8 +18,8 @@ package hub
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -97,6 +97,13 @@ func (s *Server) createBrokerRegistration(w http.ResponseWriter, r *http.Request
 		}
 	}
 
+	if !ValidJoinTokenTTLSeconds(req.JoinTokenTTLSeconds) {
+		ValidationError(w, ErrJoinTokenTTLOutOfRange.Error(), map[string]interface{}{
+			"field": "joinTokenTtlSeconds",
+		})
+		return
+	}
+
 	// If this request matches an existing broker record (by name or by a
 	// caller-supplied ID), treat it as re-registration of that broker rather
 	// than a brand-new one. Re-registration mutates the existing record and
@@ -154,7 +161,7 @@ func (s *Server) createBrokerRegistration(w http.ResponseWriter, r *http.Request
 	}
 
 	// Log audit event
-	LogRegistrationEvent(r.Context(), s.auditLogger, resp.BrokerID, req.Name, user.ID(), getClientIP(r))
+	LogRegistrationEvent(r.Context(), s.auditLogger, resp.BrokerID, req.Name, user.ID(), getClientIP(r), joinTokenAuditDetails(resp))
 
 	writeJSON(w, http.StatusCreated, resp)
 }
@@ -166,16 +173,26 @@ func (s *Server) createBrokerRegistration(w http.ResponseWriter, r *http.Request
 func (s *Server) createFlatBrokerRegistration(ctx context.Context, req CreateBrokerRegistrationRequest, createdBy string, existing *store.RuntimeBroker) (*CreateBrokerRegistrationResponse, error) {
 	labels := registrationLabels(req.Labels)
 	saEmail := strings.ToLower(req.GCPHostServiceAccountEmail)
+	// PreserveSettings (GoogleCloudPlatform/scion#2702) applies as on the
+	// legacy path: a re-registration leaves the row's metadata as it is and
+	// only issues a new join token; a new row gets AutoProvide off and no
+	// GCP host fields, with only the labels applied.
+	preserve := req.PreserveSettings
 	row, created, err := s.registerFlatRuntimeBroker(ctx, flatRegistration{
 		BrokerID:  req.BrokerID,
 		Name:      req.Name,
 		Target:    *req.RuntimeTarget,
 		CreatedBy: createdBy,
 		Existing:  existing,
-		Apply: func(b *store.RuntimeBroker, _ bool) {
-			b.AutoProvide = req.AutoProvide
-			b.GCPHostServiceAccountEmail = saEmail
-			b.GCPHostProjectID = req.GCPHostProjectID
+		Apply: func(b *store.RuntimeBroker, created bool) {
+			if preserve && !created {
+				return
+			}
+			if !preserve {
+				b.AutoProvide = req.AutoProvide
+				b.GCPHostServiceAccountEmail = saEmail
+				b.GCPHostProjectID = req.GCPHostProjectID
+			}
 			if b.Labels == nil {
 				b.Labels = map[string]string{}
 			}
@@ -187,14 +204,20 @@ func (s *Server) createFlatBrokerRegistration(ctx context.Context, req CreateBro
 	if err != nil {
 		return nil, err
 	}
-	if !created {
-		// A flat re-registration re-mints the join token: an outstanding
-		// one (for example left by a refused join) is replaced.
-		if err := s.store.DeleteJoinToken(ctx, row.ID); err != nil && !errors.Is(err, store.ErrNotFound) {
-			return nil, fmt.Errorf("failed to replace the outstanding join token: %w", err)
-		}
+	// A flat re-registration re-mints the join token: issueJoinToken's upsert
+	// replaces an outstanding one (for example left by a refused join).
+	return s.brokerAuthService.issueJoinToken(ctx, row.ID, createdBy, !created, req.JoinTokenTTLSeconds, row.RuntimeTarget)
+}
+
+// joinTokenAuditDetails describes an issued join token for the register
+// audit event: when it expires, the lifetime it was issued with, and whether
+// it replaced an earlier token. The token itself is never included.
+func joinTokenAuditDetails(resp *CreateBrokerRegistrationResponse) map[string]string {
+	return map[string]string{
+		"join_token_expires_at": resp.ExpiresAt.UTC().Format(time.RFC3339),
+		"join_token_ttl":        resp.JoinTokenTTL.String(),
+		"reissued":              strconv.FormatBool(resp.Reissued),
 	}
-	return s.brokerAuthService.issueJoinToken(ctx, row.ID, createdBy, !created, row.RuntimeTarget)
 }
 
 // writeBrokerRegistrationError maps an error from
@@ -207,6 +230,10 @@ func (s *Server) createFlatBrokerRegistration(ctx context.Context, req CreateBro
 func writeBrokerRegistrationError(w http.ResponseWriter, err error) {
 	if errors.Is(err, ErrBrokerRegistrationAuthorizationStale) {
 		Conflict(w, err.Error())
+		return
+	}
+	if errors.Is(err, ErrJoinTokenTTLOutOfRange) {
+		ValidationError(w, err.Error(), map[string]interface{}{"field": "joinTokenTtlSeconds"})
 		return
 	}
 	writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
@@ -415,15 +442,14 @@ func (s *Server) handleBrokerJoin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// Determine error type and return appropriate response
-		errMsg := err.Error()
-		switch errMsg {
-		case "invalid join token", "join token does not match broker":
-			writeError(w, http.StatusUnauthorized, ErrCodeInvalidJoinToken, errMsg, nil)
-		case "join token has expired":
-			writeError(w, http.StatusUnauthorized, ErrCodeExpiredJoinToken, errMsg, nil)
+		switch {
+		case errors.Is(err, ErrJoinTokenInvalid), errors.Is(err, ErrJoinTokenBrokerMismatch):
+			writeError(w, http.StatusUnauthorized, ErrCodeInvalidJoinToken, err.Error(), nil)
+		case errors.Is(err, ErrJoinTokenExpired):
+			writeError(w, http.StatusUnauthorized, ErrCodeExpiredJoinToken, err.Error(), nil)
 		default:
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
-				"failed to complete broker join: "+errMsg, nil)
+				"failed to complete broker join: "+err.Error(), nil)
 		}
 		return
 	}

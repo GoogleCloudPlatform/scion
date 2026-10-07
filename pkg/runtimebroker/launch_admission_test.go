@@ -1350,12 +1350,12 @@ func TestCreateAgent_SyncGCSDownload_UsesRequestBucket(t *testing.T) {
 	}
 }
 
-// TestCreateAgent_SyncGCSDownloadFailure_PinsOriginalErrorText pins the
-// synchronous path's GCS-download failure body (capitalized, with no
-// wrapped-error prefix) through a failing fake download. The request names
-// no bucket, so it also checks the download falls back to the broker's
-// StorageBucket setting.
-func TestCreateAgent_SyncGCSDownloadFailure_PinsOriginalErrorText(t *testing.T) {
+// TestCreateAgent_SyncGCSDownloadFailure_PinsFixedText pins the
+// synchronous path's GCS-download failure body (the fixed lead text, with
+// no wrapped error: ptone/scion#3496) through a failing fake download. The
+// request names no bucket, so it also checks the download falls back to the
+// broker's StorageBucket setting.
+func TestCreateAgent_SyncGCSDownloadFailure_PinsFixedText(t *testing.T) {
 	mgr := newAsyncManager()
 	srv, _ := newAsyncTestServer(t, mgr)
 	srv.config.WorktreeBase = t.TempDir()
@@ -1373,8 +1373,8 @@ func TestCreateAgent_SyncGCSDownloadFailure_PinsOriginalErrorText(t *testing.T) 
 	if err := json.NewDecoder(w.Body).Decode(&errResp); err != nil {
 		t.Fatalf("decode error response: %v", err)
 	}
-	if errResp.Error.Message != "Failed to download workspace from GCS: fake sync failure" {
-		t.Fatalf("message = %q, want the capitalized GCS error text", errResp.Error.Message)
+	if errResp.Error.Message != "Failed to download workspace from GCS" {
+		t.Fatalf("message = %q, want the fixed GCS download failure text", errResp.Error.Message)
 	}
 	calls := fake.Calls()
 	if len(calls) != 1 || calls[0].bucket != "broker-bucket" {
@@ -1520,7 +1520,7 @@ func TestAsyncCreate_GCSDownloadRunsOnlyOnceInRunLaunch(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if !strings.Contains(failedMessage, "failed to download workspace from GCS") {
+	if failedMessage != "Failed to download workspace from GCS" {
 		t.Fatalf("failed message = %q, want runLaunch's GCS download failure", failedMessage)
 	}
 	if calls := fake.Calls(); len(calls) != 1 || calls[0].bucket != "hub-bucket" {
@@ -1886,7 +1886,7 @@ func TestAsyncCreate_HubManagedGCSBootstrap_NotAmbiguous(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if !strings.Contains(failedMessage, "failed to download workspace from GCS") {
+	if failedMessage != "Failed to download workspace from GCS" {
 		t.Fatalf("failed message = %q, want runLaunch's GCS download failure", failedMessage)
 	}
 }

@@ -330,6 +330,12 @@ type CreateBrokerRequest struct {
 	// RuntimeTarget is the flat Runtime Broker registration descriptor
 	// (.design/flat-runtime-brokers-contract.md section 6); nil is legacy.
 	RuntimeTarget *api.RuntimeTargetDescriptor `json:"runtimeTarget,omitempty"`
+	// JoinTokenTTLSeconds is the join token lifetime in seconds. Zero uses
+	// the hub default; otherwise the hub accepts 300 to 86400.
+	JoinTokenTTLSeconds int `json:"joinTokenTtlSeconds,omitempty"`
+	// PreserveSettings asks the hub to only issue a join token when the
+	// name matches an existing broker, leaving its settings unchanged.
+	PreserveSettings bool `json:"preserveSettings,omitempty"`
 }
 
 // CreateBrokerResponse is returned when creating a new broker.
@@ -341,6 +347,9 @@ type CreateBrokerResponse struct {
 	// RuntimeTarget is the Hub's acknowledgement of the stored flat target
 	// binding; nil from a legacy row or a Hub that predates the contract.
 	RuntimeTarget *api.RuntimeTargetDescriptor `json:"runtimeTarget,omitempty"`
+	// Reissued is true when an earlier, unused join token for this broker
+	// was replaced and no longer works.
+	Reissued bool `json:"reissued,omitempty"`
 }
 
 // JoinBrokerRequest is the request to complete broker registration.
