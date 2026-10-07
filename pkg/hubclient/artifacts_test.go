@@ -208,3 +208,26 @@ func TestArtifactLongCallsIgnoreClientTimeout(t *testing.T) {
 		t.Errorf("FinalizeVersion ignored the context deadline")
 	}
 }
+
+func TestArtifactListVersionsPages(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Query().Get("before") {
+		case "":
+			_, _ = io.WriteString(w, `{"versions":[{"seq":3},{"seq":2}],"nextBefore":2}`)
+		case "2":
+			_, _ = io.WriteString(w, `{"versions":[{"seq":1}]}`)
+		default:
+			t.Errorf("unexpected page %q", r.URL.RawQuery)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	vs, err := c.Artifacts().ListVersions(context.Background(), "a")
+	if err != nil || len(vs) != 3 || vs[2].Seq != 1 {
+		t.Errorf("ListVersions = %+v, %v", vs, err)
+	}
+}

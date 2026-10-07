@@ -722,14 +722,39 @@ func (s *Service) finalizeExtras(w http.ResponseWriter, r *http.Request, b backe
 	return s.remoteImages(ctx, w, b, v.ID, window, entry.Size > imageScanWindow, versionUsage{files: v.FileCount, bytes: v.TotalBytes})
 }
 
-// handleListVersions implements GET /{id}/versions: the ready versions,
+// Version list pages.
+const (
+	defaultVersionPage = 100
+	maxVersionPage     = 500
+)
+
+// handleListVersions implements GET /{id}/versions[?limit=][&before=]: the ready versions,
 // newest first, without their files.
 func (s *Service) handleListVersions(w http.ResponseWriter, r *http.Request, id string) {
 	b, a, ok := s.readableArtifact(w, r, id)
 	if !ok {
 		return
 	}
-	versions, err := b.store.ListVersions(r.Context(), a.ID)
+	q := r.URL.Query()
+	limit := defaultVersionPage
+	if v := q.Get("limit"); v != "" {
+		n, ok := parseSeq(v)
+		if !ok {
+			writeError(w, http.StatusBadRequest, "bad_request", "limit must be a positive integer")
+			return
+		}
+		limit = min(n, maxVersionPage)
+	}
+	before := 0
+	if v := q.Get("before"); v != "" {
+		n, ok := parseSeq(v)
+		if !ok {
+			writeError(w, http.StatusBadRequest, "bad_request", "before must be a version number")
+			return
+		}
+		before = n
+	}
+	versions, err := b.store.ListVersions(r.Context(), a.ID, before, limit)
 	if err != nil {
 		slog.ErrorContext(r.Context(), "artifacts: list versions failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal", "could not read the versions")
@@ -740,6 +765,9 @@ func (s *Service) handleListVersions(w http.ResponseWriter, r *http.Request, id 
 		vi := versionInfo(&versions[i], nil)
 		vi.Files = nil
 		resp.Versions = append(resp.Versions, *vi)
+	}
+	if len(versions) == limit {
+		resp.NextBefore = versions[len(versions)-1].Seq
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

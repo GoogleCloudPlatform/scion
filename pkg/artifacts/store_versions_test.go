@@ -56,7 +56,7 @@ func TestStoreTwoStepVersion(t *testing.T) {
 		if err != nil || got.CurrentSeq != 0 {
 			t.Fatalf("pending artifact = %+v, %v; want no current version", got, err)
 		}
-		if vs, err := st.ListVersions(ctx, a.ID); err != nil || len(vs) != 0 {
+		if vs, err := st.ListVersions(ctx, a.ID, 0, 10); err != nil || len(vs) != 0 {
 			t.Errorf("ListVersions lists a pending version: %+v, %v", vs, err)
 		}
 		files, _ := st.ListFiles(ctx, v.ID)
@@ -149,7 +149,10 @@ func TestStoreTwoStepVersion(t *testing.T) {
 		if got, err := st.FinalizeVersion(ctx, a.ID, 2, nil); err != nil || got.CurrentSeq != 3 {
 			t.Errorf("finalize v2 after v3 = %+v, %v; current must stay 3", got, err)
 		}
-		vs, err := st.ListVersions(ctx, a.ID)
+		if page, err := st.ListVersions(ctx, a.ID, 3, 1); err != nil || len(page) != 1 || page[0].Seq != 2 {
+			t.Errorf("ListVersions(before 3, limit 1) = %+v, %v; want [2]", page, err)
+		}
+		vs, err := st.ListVersions(ctx, a.ID, 0, 10)
 		if err != nil || len(vs) != 3 || vs[0].Seq != 3 || vs[2].Seq != 1 {
 			t.Errorf("ListVersions = %+v, %v; want 3,2,1", vs, err)
 		}

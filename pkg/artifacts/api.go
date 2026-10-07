@@ -117,6 +117,8 @@ type UploadInfo struct {
 // the ready versions, newest first, without their files.
 type VersionListResponse struct {
 	Versions []VersionInfo `json:"versions"`
+	// NextBefore, when set, is the before= value of the next page.
+	NextBefore int `json:"nextBefore,omitempty"`
 }
 
 // ArtifactInfo describes an artifact.

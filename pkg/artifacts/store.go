@@ -213,8 +213,9 @@ type Store interface {
 	// the version is not finalizing, and the updated artifact otherwise.
 	FinalizeVersion(ctx context.Context, artifactID string, seq int, extra []File) (*Artifact, error)
 
-	// ListVersions returns the ready versions of an artifact, newest first.
-	ListVersions(ctx context.Context, artifactID string) ([]Version, error)
+	// ListVersions returns up to limit ready versions of an artifact,
+	// newest first, with a seq below before (0 = from the newest).
+	ListVersions(ctx context.Context, artifactID string, before, limit int) ([]Version, error)
 
 	// ReapPending marks every version still pending or finalizing that was
 	// created before cutoff as failed and drops its manifest, so its blobs are no

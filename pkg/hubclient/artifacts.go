@@ -328,17 +328,30 @@ func (s *artifactService) FinalizeVersion(ctx context.Context, id string, seq in
 
 // ListVersions implements ArtifactService.
 func (s *artifactService) ListVersions(ctx context.Context, id string) ([]ArtifactVersion, error) {
-	resp, err := s.c.get(ctx, artifactPath(id)+"/versions", nil)
-	if err != nil {
-		return nil, err
+	var all []ArtifactVersion
+	before := 0
+	for {
+		p := artifactPath(id) + "/versions"
+		if before > 0 {
+			p += "?before=" + strconv.Itoa(before)
+		}
+		resp, err := s.c.get(ctx, p, nil)
+		if err != nil {
+			return nil, err
+		}
+		page, err := apiclient.DecodeResponse[struct {
+			Versions   []ArtifactVersion `json:"versions"`
+			NextBefore int               `json:"nextBefore"`
+		}](resp)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, page.Versions...)
+		if page.NextBefore <= 0 || (before > 0 && page.NextBefore >= before) {
+			return all, nil
+		}
+		before = page.NextBefore
 	}
-	out, err := apiclient.DecodeResponse[struct {
-		Versions []ArtifactVersion `json:"versions"`
-	}](resp)
-	if err != nil {
-		return nil, err
-	}
-	return out.Versions, nil
 }
 
 // GetVersion implements ArtifactService.

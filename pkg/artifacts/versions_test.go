@@ -214,6 +214,17 @@ func TestTwoStepKeyAppendsVersions(t *testing.T) {
 	if len(vs.Versions) != 2 || vs.Versions[0].Seq != 2 || vs.Versions[1].Seq != 1 || vs.Versions[0].Files != nil {
 		t.Errorf("versions = %+v", vs.Versions)
 	}
+	page := decodeInto[VersionListResponse](t, f.do(&agentB, http.MethodGet, "/api/v1/artifacts/"+id+"/versions?limit=1", nil, nil))
+	if len(page.Versions) != 1 || page.Versions[0].Seq != 2 || page.NextBefore != 2 {
+		t.Errorf("first page = %+v", page)
+	}
+	page = decodeInto[VersionListResponse](t, f.do(&agentB, http.MethodGet, "/api/v1/artifacts/"+id+"/versions?limit=1&before=2", nil, nil))
+	if len(page.Versions) != 1 || page.Versions[0].Seq != 1 || page.NextBefore != 1 {
+		t.Errorf("second page = %+v", page)
+	}
+	if rec := f.do(&agentB, http.MethodGet, "/api/v1/artifacts/"+id+"/versions?limit=0", nil, nil); rec.Code != http.StatusBadRequest {
+		t.Errorf("limit=0: %d", rec.Code)
+	}
 	one := decodeInto[ArtifactResponse](t, f.do(&agentB, http.MethodGet, "/api/v1/artifacts/"+id+"/versions/1", nil, nil))
 	if one.Version.Seq != 1 || len(one.Version.Files) != 2 {
 		t.Errorf("version 1 = %+v", one.Version)

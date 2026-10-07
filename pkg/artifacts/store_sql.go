@@ -19,6 +19,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -466,9 +467,16 @@ func (s *sqlStore) ReleaseFinalize(ctx context.Context, artifactID string, seq i
 }
 
 // ListVersions implements Store.
-func (s *sqlStore) ListVersions(ctx context.Context, artifactID string) ([]Version, error) {
+func (s *sqlStore) ListVersions(ctx context.Context, artifactID string, before, limit int) ([]Version, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	if before <= 0 {
+		before = math.MaxInt32
+	}
 	rows, err := s.db.QueryContext(ctx, s.rebind(`SELECT `+versionColumns+`
-		FROM artifact_version WHERE artifact_id = ? AND state = ? ORDER BY seq DESC`), artifactID, VersionStateReady)
+		FROM artifact_version WHERE artifact_id = ? AND state = ? AND seq < ? ORDER BY seq DESC LIMIT `+strconv.Itoa(limit)),
+		artifactID, VersionStateReady, before)
 	if err != nil {
 		return nil, fmt.Errorf("artifacts: list versions: %w", err)
 	}
