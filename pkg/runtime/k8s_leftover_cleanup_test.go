@@ -417,16 +417,19 @@ func TestCleanupAgentResources_InvalidRunID(t *testing.T) {
 
 // recreatedOnDelete makes every delete of resource act as if the object had
 // been recreated under the same name (a new UID) after it was listed: a
-// delete carrying a UID precondition fails with Conflict, as the API server
-// answers, and the object stays; a delete without one goes ahead and removes
-// it.
+// delete carrying a UID precondition equal to the listed object's UID
+// (listedUID(name)) fails with Conflict, as the API server answers, and the
+// object stays. A delete without a precondition, or with any other UID,
+// goes ahead and removes it, so the test fails unless the cleanup sends
+// the listed object's own UID.
 func recreatedOnDelete(t *testing.T, tracker interface {
 	PrependReactor(verb, resource string, reaction k8stesting.ReactionFunc)
-}, resource string) {
+}, resource string, listedUID func(name string) types.UID) {
 	t.Helper()
 	tracker.PrependReactor("delete", resource, func(action k8stesting.Action) (bool, k8sruntime.Object, error) {
 		del, ok := action.(k8stesting.DeleteActionImpl)
-		if !ok || del.DeleteOptions.Preconditions == nil || del.DeleteOptions.Preconditions.UID == nil {
+		if !ok || del.DeleteOptions.Preconditions == nil || del.DeleteOptions.Preconditions.UID == nil ||
+			*del.DeleteOptions.Preconditions.UID != listedUID(del.Name) {
 			return false, nil, nil
 		}
 		return true, nil, k8serrors.NewConflict(schema.GroupResource{Resource: resource}, del.Name,
@@ -443,8 +446,8 @@ func TestCleanupAgentResources_RecreatedObjectSurvives(t *testing.T) {
 		t.Run("run="+run, func(t *testing.T) {
 			rt, clientset, dynClient := newGKECleanupTestRuntime(t)
 			seedAgentObjectsForRun(t, rt, run)
-			recreatedOnDelete(t, clientset, "secrets")
-			recreatedOnDelete(t, dynClient, "secretproviderclasses")
+			recreatedOnDelete(t, clientset, "secrets", func(name string) types.UID { return types.UID("uid-" + name) })
+			recreatedOnDelete(t, dynClient, "secretproviderclasses", func(string) types.UID { return "uid-spc" })
 
 			if err := rt.CleanupAgentResources(context.Background(), "agent", "p1", run); err != nil {
 				t.Fatalf("CleanupAgentResources: %v", err)
