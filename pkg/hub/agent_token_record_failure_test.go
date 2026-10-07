@@ -30,6 +30,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -141,11 +142,13 @@ func (f *recordFailureFixture) brokerReceivedToken() bool {
 	return c.createCalled || c.startCalled || c.restartCalled || c.resetAuthCalled
 }
 
-// TestAgentTokenRecordFailureIsFixed500: at every mint site, a token whose
-// credential cannot be recorded is not issued. The request is answered
-// with the same 500 and fixed message in every run-scope mode, without the
-// store's error, and nothing carrying a token reaches the broker. A
-// provision-only create is rolled back. Refresh is covered by
+// TestAgentTokenRecordFailureIsFixed500: at every mint site (create,
+// provision, env gather and finalize, workspace start, start, restart, the
+// three starts of an existing agent through create, and reset-auth), a
+// token whose credential cannot be recorded is not issued. The request is
+// answered with the same 500 and fixed message in every run-scope mode,
+// without the store's error, and nothing carrying a token reaches the
+// broker. A failed create is rolled back. Refresh is covered by
 // TestAgentTokenRefreshRecordFailureIsGeneric500.
 func TestAgentTokenRecordFailureIsFixed500(t *testing.T) {
 	want := httptest.NewRecorder()
@@ -168,6 +171,46 @@ func TestAgentTokenRecordFailureIsFixed500(t *testing.T) {
 			return doRequest(t, f.srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 				Name: "record-fail-create", ProjectID: f.project.ID, Task: "task",
 			}), "record-fail-create"
+		}},
+		{name: "create with env gather", do: func(t *testing.T, f *recordFailureFixture) (*httptest.ResponseRecorder, string) {
+			f.fault.Arm()
+			return doRequest(t, f.srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+				Name: "record-fail-gather", ProjectID: f.project.ID, Task: "task", GatherEnv: true,
+			}), "record-fail-gather"
+		}},
+		{name: "finalize env", do: func(t *testing.T, f *recordFailureFixture) (*httptest.ResponseRecorder, string) {
+			agent := f.agentIn(t, "record-fail-env", state.PhaseProvisioning)
+			f.fault.Arm()
+			return doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/env",
+				SubmitEnvRequest{Env: map[string]string{"SOME_KEY": "v"}}), ""
+		}},
+		{name: "workspace start", do: func(t *testing.T, f *recordFailureFixture) (*httptest.ResponseRecorder, string) {
+			f.srv.SetStorage(newContentMockStorage("test-bucket"))
+			agent := f.agentIn(t, "record-fail-workspace", state.PhaseProvisioning)
+			f.fault.Arm()
+			return doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/workspace/sync-to/finalize",
+				SyncToFinalizeRequest{Manifest: &transfer.Manifest{Version: "1.0"}}), ""
+		}},
+		{name: "existing agent, suspended", do: func(t *testing.T, f *recordFailureFixture) (*httptest.ResponseRecorder, string) {
+			f.agentIn(t, "record-fail-existing-suspended", state.PhaseSuspended)
+			f.fault.Arm()
+			return doRequest(t, f.srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+				Name: "record-fail-existing-suspended", ProjectID: f.project.ID, Task: "task",
+			}), ""
+		}},
+		{name: "existing agent, resume in place", do: func(t *testing.T, f *recordFailureFixture) (*httptest.ResponseRecorder, string) {
+			f.agentIn(t, "record-fail-existing-stopped", state.PhaseStopped)
+			f.fault.Arm()
+			return doRequest(t, f.srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+				Name: "record-fail-existing-stopped", ProjectID: f.project.ID, Task: "task", Resume: true,
+			}), ""
+		}},
+		{name: "existing agent, provisioned", do: func(t *testing.T, f *recordFailureFixture) (*httptest.ResponseRecorder, string) {
+			f.agentIn(t, "record-fail-existing-provisioned", state.PhaseProvisioning)
+			f.fault.Arm()
+			return doRequest(t, f.srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+				Name: "record-fail-existing-provisioned", ProjectID: f.project.ID, Task: "task",
+			}), ""
 		}},
 		{name: "start", do: func(t *testing.T, f *recordFailureFixture) (*httptest.ResponseRecorder, string) {
 			agent := f.agentIn(t, "record-fail-start", state.PhaseStopped)
