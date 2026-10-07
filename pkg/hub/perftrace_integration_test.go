@@ -47,6 +47,13 @@ type perfPair struct {
 	offAudit      *perfRecordingEmitter
 	onAudit       *perfRecordingEmitter
 	agentsInAlice int
+	// counter, when set, is an independent counting store under both
+	// servers (see perfIndependentCounter).
+	counter *perfIndependentCounter
+	// agentToken is an agent JWT for an agent in alice's project;
+	// uatKey is a project-scoped user access token of alice's.
+	agentToken string
+	uatKey     string
 }
 
 func newPerfServer(t *testing.T, s store.Store, on bool) *Server {
@@ -65,6 +72,13 @@ func newPerfServer(t *testing.T, s store.Store, on bool) *Server {
 // two in a project bob owns.
 func newPerfPair(t *testing.T, agentCount int) *perfPair {
 	t.Helper()
+	return newPerfPairWith(t, agentCount, false)
+}
+
+// newPerfPairWith is newPerfPair; with independent set, both servers run on
+// an independent counting store wrapped around the real one.
+func newPerfPairWith(t *testing.T, agentCount int, independent bool) *perfPair {
+	t.Helper()
 	s, err := newTestStore(":memory:")
 	if err != nil {
 		if strings.Contains(err.Error(), "sqlite driver not registered") {
@@ -78,7 +92,12 @@ func newPerfPair(t *testing.T, agentCount int) *perfPair {
 	_ = s.DeleteHubSetting(ctx, "migration_delegation_edge_backfill_v1")
 
 	p := &perfPair{store: s, agentsInAlice: agentCount}
-	p.off = newPerfServer(t, s, false)
+	serverStore := s
+	if independent {
+		p.counter = newPerfIndependentCounter(s)
+		serverStore = p.counter
+	}
+	p.off = newPerfServer(t, serverStore, false)
 	p.alice, p.bob, p.project = setupDemoPolicyOn(t, p.off, s)
 
 	p.otherProject = &store.Project{
@@ -105,7 +124,17 @@ func newPerfPair(t *testing.T, agentCount int) *perfPair {
 		mk(i, p.otherProject, p.bob, "running")
 	}
 
-	p.on = newPerfServer(t, s, true)
+	p.on = newPerfServer(t, serverStore, true)
+
+	// Both servers share the store and its signing keys, so one agent JWT
+	// and one user access token work on both.
+	if agentCount > 0 {
+		var err error
+		p.agentToken, err = p.off.GetAgentTokenService().GenerateAgentToken(
+			tid(fmt.Sprintf("perf-%s-0", p.project.Slug)), p.project.ID, []AgentTokenScope{ScopeProjectRead}, nil)
+		require.NoError(t, err)
+	}
+	p.uatKey = mintScopedUAT(t, p.off, p.alice.ID, p.project.ID, []string{"agent:manage"})
 	// Replace each server's audit emitter with a recorder, wired exactly as
 	// New() wires the real one, so records can be compared across the pair.
 	p.offAudit, p.onAudit = &perfRecordingEmitter{}, &perfRecordingEmitter{}
@@ -120,7 +149,14 @@ const (
 	perfAsAlice perfCaller = iota
 	perfAsBob
 	perfAsDev
+	perfAsAgentJWT
+	perfAsScopedUAT
 )
+
+var perfCallerNames = map[perfCaller]string{
+	perfAsAlice: "member-owner", perfAsBob: "non-member", perfAsDev: "dev-admin",
+	perfAsAgentJWT: "agent-jwt", perfAsScopedUAT: "scoped-uat",
+}
 
 func (p *perfPair) request(t *testing.T, srv *Server, who perfCaller, path string, optIn bool) *httptest.ResponseRecorder {
 	t.Helper()
@@ -128,6 +164,10 @@ func (p *perfPair) request(t *testing.T, srv *Server, who perfCaller, path strin
 	switch who {
 	case perfAsDev:
 		req.Header.Set("Authorization", "Bearer "+testDevToken)
+	case perfAsAgentJWT:
+		req.Header.Set("X-Scion-Agent-Token", p.agentToken)
+	case perfAsScopedUAT:
+		req.Header.Set("Authorization", "Bearer "+p.uatKey)
 	default:
 		u := p.alice
 		if who == perfAsBob {
@@ -150,11 +190,12 @@ func (p *perfPair) request(t *testing.T, srv *Server, who perfCaller, path strin
 // helper a CI budget reads counts from: StoreCalls, AuthzStoreCalls,
 // AuditRecords and phase Counts are host-independent. srv must have
 // server.hub.perf_trace on (the store and audit decorators are installed
-// only then); the middleware keeps a trace it finds in the context.
+// only then); the middleware keeps a trace it finds in the context. The
+// trace reads the server's DB pool, as the middleware's own would.
 func perfTracedRequest(t *testing.T, srv *Server, req *http.Request) (*httptest.ResponseRecorder, PerfTraceSnapshot) {
 	t.Helper()
 	require.True(t, srv.config.PerfTrace, "perfTracedRequest needs a server with PerfTrace on")
-	tr := newPerfTrace(nil)
+	tr := newPerfTrace(srv.perfTraceDB())
 	req = req.WithContext(contextWithPerfTrace(req.Context(), tr))
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
@@ -242,10 +283,10 @@ func TestPerfTrace_OffInstallsNothing(t *testing.T) {
 // the same decision-audit records as with tracing off.
 func TestPerfTrace_OnMatchesOff(t *testing.T) {
 	p := newPerfPair(t, 5)
-	for _, who := range []perfCaller{perfAsAlice, perfAsBob, perfAsDev} {
+	for _, who := range []perfCaller{perfAsAlice, perfAsBob, perfAsDev, perfAsAgentJWT, perfAsScopedUAT} {
 		for _, tc := range perfListPaths {
 			for _, optIn := range []bool{false, true} {
-				name := fmt.Sprintf("caller%d/%s/optin=%v", who, tc.name, optIn)
+				name := fmt.Sprintf("%s/%s/optin=%v", perfCallerNames[who], tc.name, optIn)
 				path := tc.path(p)
 
 				p.offAudit.take()
@@ -259,10 +300,12 @@ func TestPerfTrace_OnMatchesOff(t *testing.T) {
 				require.Equal(t, perfComparableBody(t, offRec.Body.Bytes()), perfComparableBody(t, onRec.Body.Bytes()), name)
 				require.Equal(t, offAudits, onAudits, name)
 				require.Equal(t, offRec.Header().Get("Content-Type"), onRec.Header().Get("Content-Type"), name)
-				if optIn && onRec.Code == http.StatusOK {
+				// Headers only for the unscoped local admin (the dev user) who
+				// opted in; never for any other caller.
+				if optIn && who == perfAsDev {
 					assert.NotEmpty(t, onRec.Header().Get(HeaderPerfTraceEndpoint), name)
-				} else if !optIn {
-					assert.Empty(t, onRec.Header().Get(HeaderPerfTraceEndpoint), name)
+				} else {
+					assertNoPerfHeaders(t, onRec.Header())
 				}
 			}
 		}
@@ -289,25 +332,39 @@ func parsePerfHeader(t *testing.T, v string) map[string]int64 {
 // independent counts on a small fixture.
 func TestPerfTrace_CountersOnSmallFixture(t *testing.T) {
 	const n = 3
-	p := newPerfPair(t, n)
+	p := newPerfPairWith(t, n, true)
 
 	token, _, _, err := p.on.userTokenService.GenerateTokenPair(p.alice.ID, p.alice.Email, p.alice.DisplayName, p.alice.Role, ClientTypeWeb)
 	require.NoError(t, err)
-	get := func(path string) (*httptest.ResponseRecorder, PerfTraceSnapshot, []*store.DecisionAuditRecord) {
+	get := func(path, bearer string) (*httptest.ResponseRecorder, PerfTraceSnapshot, []*store.DecisionAuditRecord, map[string]int64) {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
-		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Authorization", "Bearer "+bearer)
 		req.Header.Set(HeaderPerfTraceRequest, "1")
 		p.onAudit.take()
+		p.counter.reset()
 		rec, snap := perfTracedRequest(t, p.on, req)
 		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-		return rec, snap, p.onAudit.take()
+		return rec, snap, p.onAudit.take(), p.counter.reset()
+	}
+	// assertIndependent: the decorator's per-op counts equal the counts
+	// taken by method name under it, with no forwarding mismatch.
+	assertIndependent := func(t *testing.T, snap PerfTraceSnapshot, independent map[string]int64) {
+		t.Helper()
+		got := map[string]int64{}
+		for name, c := range snap.StoreCalls {
+			got[name] = c.Count
+		}
+		assert.Equal(t, independent, got, "decorator counts must equal independent counts per op")
+		assert.Positive(t, snap.AuthzStoreCalls)
 	}
 
-	t.Run("global legacy", func(t *testing.T) {
-		rec, snap, audits := get("/api/v1/agents")
+	t.Run("global legacy, member", func(t *testing.T) {
+		rec, snap, audits, independent := get("/api/v1/agents", token)
 		var body ListAgentsResponse
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 		require.Len(t, body.Agents, n, "alice sees exactly her project's agents")
+		assertNoPerfHeaders(t, rec.Header())
+		assertIndependent(t, snap, independent)
 
 		assert.Equal(t, "agents.global.legacy", snap.Endpoint)
 		assert.Equal(t, int64(len(audits)), snap.AuditRecords, "one counted record per emitted record")
@@ -332,11 +389,30 @@ func TestPerfTrace_CountersOnSmallFixture(t *testing.T) {
 		assert.GreaterOrEqual(t, snap.Phases["list_db_read"].Count, int64(1))
 		assert.GreaterOrEqual(t, snap.Phases["list_read_authz"].Count, int64(1))
 		assert.Equal(t, int64(1), snap.Phases["serialize"].Count)
-		assert.Positive(t, snap.AuthzStoreCalls)
+		assert.True(t, snap.DBAvailable, "the trace finds the sqlite pool through the store")
+		assert.Positive(t, snap.DBOpen)
+	})
 
+	t.Run("project sorted, member", func(t *testing.T) {
+		_, snap, audits, independent := get("/api/v1/projects/"+p.project.ID+"/agents?sort=updated&fit=500", token)
+		assertIndependent(t, snap, independent)
+		assert.Equal(t, "agents.project.sorted", snap.Endpoint)
+		assert.Equal(t, int64(len(audits)), snap.AuditRecords)
+		assert.Equal(t, int64(1), snap.Phases["list_scope_authz"].Count, "project agent.list gate")
+		assert.Equal(t, int64(1), snap.Phases["list_read_authz"].Count)
+		// count pre-check, member read, full-row read, recheck read
+		assert.Equal(t, int64(4), snap.Phases["list_db_read"].Count)
+		assert.Equal(t, int64(1), snap.Phases["enrich"].Count)
+		assert.Equal(t, int64(1), snap.Phases["capabilities"].Count)
+		assert.Equal(t, int64(1), snap.Phases["scope_capabilities"].Count)
+	})
+
+	t.Run("admin opt-in headers match the trace", func(t *testing.T) {
+		rec, snap, _, independent := get("/api/v1/projects/"+p.project.ID+"/agents", testDevToken)
+		assertIndependent(t, snap, independent)
 		// Headers are taken when the status is written: every count but
 		// serialize is final by then.
-		assert.Equal(t, "agents.global.legacy", rec.Header().Get(HeaderPerfTraceEndpoint))
+		assert.Equal(t, "agents.project.legacy", rec.Header().Get(HeaderPerfTraceEndpoint))
 		counts := parsePerfHeader(t, rec.Header().Get(HeaderPerfTracePhaseCounts))
 		for name, c := range snap.Phases {
 			if name == "serialize" {
@@ -354,30 +430,69 @@ func TestPerfTrace_CountersOnSmallFixture(t *testing.T) {
 		assert.Equal(t, snap.AuthzStoreCalls, total)
 		decisions := parsePerfHeader(t, rec.Header().Get(HeaderPerfTraceDecisions))
 		assert.Equal(t, snap.AuditRecords, decisions["count"])
-	})
-
-	t.Run("project sorted", func(t *testing.T) {
-		_, snap, audits := get("/api/v1/projects/" + p.project.ID + "/agents?sort=updated&fit=500")
-		assert.Equal(t, "agents.project.sorted", snap.Endpoint)
-		assert.Equal(t, int64(len(audits)), snap.AuditRecords)
-		assert.Equal(t, int64(1), snap.Phases["list_scope_authz"].Count, "project agent.list gate")
-		assert.Equal(t, int64(1), snap.Phases["list_read_authz"].Count)
-		// count pre-check, member read, full-row read, recheck read
-		assert.Equal(t, int64(4), snap.Phases["list_db_read"].Count)
-		assert.Equal(t, int64(1), snap.Phases["enrich"].Count)
-		assert.Equal(t, int64(1), snap.Phases["capabilities"].Count)
-		assert.Equal(t, int64(1), snap.Phases["scope_capabilities"].Count)
+		db := parsePerfHeader(t, rec.Header().Get(HeaderPerfTraceDB))
+		for _, k := range []string{"wait_count", "wait_us", "in_use", "open"} {
+			assert.Contains(t, db, k)
+		}
+		assert.Positive(t, db["open"])
 	})
 
 	t.Run("counts are stable across identical requests", func(t *testing.T) {
-		_, a, _ := get("/api/v1/projects/" + p.project.ID + "/agents")
-		_, b, _ := get("/api/v1/projects/" + p.project.ID + "/agents")
+		_, a, _, _ := get("/api/v1/projects/"+p.project.ID+"/agents", token)
+		_, b, _, _ := get("/api/v1/projects/"+p.project.ID+"/agents", token)
 		assert.Equal(t, a.AuditRecords, b.AuditRecords)
 		assert.Equal(t, a.AuthzStoreCalls, b.AuthzStoreCalls)
 		for name, c := range a.StoreCalls {
 			assert.Equal(t, c.Count, b.StoreCalls[name].Count, name)
 		}
 	})
+}
+
+// TestPerfTrace_RejectedAndUnauthenticatedRequests pins the middleware
+// placement: a request auth rejects (401) never reaches the trace, so it
+// gets no perf headers and writes no perf_trace line; an unauthenticated
+// endpoint is traced and logged but never gets perf headers, even when the
+// caller is the admin, and its body equals tracing off.
+func TestPerfTrace_RejectedAndUnauthenticatedRequests(t *testing.T) {
+	p := newPerfPair(t, 1)
+	logs := &perfLockedBuffer{}
+	p.on.perfTraceLog = slog.New(slog.NewJSONHandler(logs, nil))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/agents", nil)
+	req.Header.Set("Authorization", "Bearer not-a-valid-token")
+	req.Header.Set(HeaderPerfTraceRequest, "1")
+	rec := httptest.NewRecorder()
+	p.on.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusUnauthorized, rec.Code)
+	assertNoPerfHeaders(t, rec.Header())
+	assert.Empty(t, logs.lines(), "a rejected request writes no perf_trace line")
+
+	for _, path := range []string{"/healthz", "/api/v1/settings/public"} {
+		offRec := p.request(t, p.off, perfAsDev, path, true)
+		onRec := p.request(t, p.on, perfAsDev, path, true)
+		assert.Equal(t, offRec.Code, onRec.Code, path)
+		assert.Equal(t, perfComparableBody(t, offRec.Body.Bytes()), perfComparableBody(t, onRec.Body.Bytes()), path)
+		assertNoPerfHeaders(t, onRec.Header())
+	}
+	lines := logs.lines()
+	require.Len(t, lines, 2, "unauthenticated endpoints are still traced")
+	for _, l := range lines {
+		assert.Contains(t, l, `"endpoint":"other"`)
+	}
+}
+
+// TestPerfTrace_AdminSettingsRejectsPerfTrace: server.hub.perf_trace is
+// Layer-0, so an admin settings write carrying it gets 422 with the key.
+func TestPerfTrace_AdminSettingsRejectsPerfTrace(t *testing.T) {
+	srv, _, ops := newTestDBServer(t)
+	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", `{"server": {"hub": {"perf_trace": true}}}`)
+	rr := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, req, ops)
+	require.Equal(t, http.StatusUnprocessableEntity, rr.Code, rr.Body.String())
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	assert.Equal(t, "layer0_rejected", resp["error"])
+	assert.Contains(t, resp["keys"], "server.hub.perf_trace")
 }
 
 // perfLockedBuffer collects log output from concurrent writers.
