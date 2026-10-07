@@ -532,6 +532,7 @@ func TestHubConfigWrite_BodyMustBeOneJSONValue(t *testing.T) {
 		home := t.TempDir()
 		t.Setenv("HOME", home)
 		settingsPath := filepath.Join(home, ".scion", "settings.yaml")
+		require.NoError(t, os.MkdirAll(filepath.Dir(settingsPath), 0o755))
 		srv, s := testServer(t)
 		admin := hubConfigTokenUser(t, s, "hct-trail-file", store.SystemRoleSuperAdmin)
 		key := mintHubConfigToken(t, srv, admin, hubBoundary(), "hub_config:read", "hub_config:update")
