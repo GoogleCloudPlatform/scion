@@ -178,6 +178,25 @@ describe('agent detail Reincarnate action (ptone/scion#3707)', () => {
     expect(reincarnateCard(el)).toBeNull();
   });
 
+  it('hides the card while the agent is being deleted, like the header actions', async () => {
+    const now = Date.now();
+    const el = await mount(
+      makeAgent({
+        deletion: {
+          state: 'deleting',
+          soft: false,
+          claim: 1,
+          startedAt: new Date(now).toISOString(),
+          leaseExpiresAt: new Date(now + 60_000).toISOString(),
+        },
+      })
+    );
+    expect(reincarnateCard(el)).toBeNull();
+    // The header hides its lifecycle actions on the same condition.
+    const headerActions = el.shadowRoot!.querySelector('.header-actions');
+    expect(headerActions?.textContent ?? '').not.toContain('Stop');
+  });
+
   it('hides the button when capabilities are missing (fail closed)', async () => {
     const agent: Partial<Agent> = makeAgent();
     delete agent._capabilities;
@@ -190,6 +209,8 @@ describe('agent detail Reincarnate action (ptone/scion#3707)', () => {
     const button = reincarnateButton(el);
     expect(button.textContent).toContain('Reincarnate');
     expect(button.hasAttribute('disabled')).toBe(false);
+    // Control for the delete test: the header shows Stop when not deleting.
+    expect(el.shadowRoot!.querySelector('.header-actions')?.textContent).toContain('Stop');
   });
 
   it('confirms, then POSTs to the agent-scoped reincarnate route and refreshes', async () => {
@@ -199,7 +220,9 @@ describe('agent detail Reincarnate action (ptone/scion#3707)', () => {
     await vi.waitFor(() => expect(reincarnateCalls()).toHaveLength(1));
     expect(showConfirm).toHaveBeenCalledTimes(1);
     expect(vi.mocked(showConfirm).mock.calls[0][0]).toBe(REINCARNATE_CONFIRM_MESSAGE);
-    expect(REINCARNATE_CONFIRM_MESSAGE).toMatch(/stopped and re-provisioned/);
+    expect(REINCARNATE_CONFIRM_MESSAGE).toMatch(
+      /stopped and re-provisioned with its current settings and template/
+    );
 
     const [url, init] = reincarnateCalls()[0] as [string, RequestInit];
     // The page addresses every lifecycle action by agent ID; the
@@ -287,6 +310,9 @@ describe('agent detail Reincarnate action (ptone/scion#3707)', () => {
     reincarnateButton(el).click();
     await el.updateComplete;
     expect(showConfirm).toHaveBeenCalledTimes(1);
+    // No spinner behind the open dialog: progress shows only after confirm.
+    expect(reincarnateButton(el).hasAttribute('loading')).toBe(false);
+    expect(reincarnateButton(el).hasAttribute('disabled')).toBe(false);
 
     answer(true);
     await vi.waitFor(() => expect(reincarnateCalls()).toHaveLength(1));

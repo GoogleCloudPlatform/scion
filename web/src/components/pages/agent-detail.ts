@@ -127,7 +127,7 @@ export const DELETE_REDIRECT_DELAY_MS = 1000;
 
 /** Body of the Reincarnate confirm dialog (ptone/scion#3707). */
 export const REINCARNATE_CONFIRM_MESSAGE =
-  'The agent will be stopped and re-provisioned with its current configuration. ' +
+  'The agent will be stopped and re-provisioned with its current settings and template. ' +
   'Any work running in its current session is interrupted.';
 
 /**
@@ -205,9 +205,19 @@ export class ScionPageAgentDetail extends LitElement {
   @state()
   private cascadeDialogOpen = false;
 
-  /** True while a reincarnate request is in flight (ptone/scion#3707). */
+  /**
+   * True while a confirmed reincarnate request is in flight; drives the
+   * button's loading state (ptone/scion#3707).
+   */
   @state()
   private reincarnating = false;
+
+  /**
+   * Double-submit guard: true from the first click until the request
+   * settles, including while the confirm dialog is open. Not rendered, so
+   * no spinner shows behind the dialog.
+   */
+  private reincarnateBusy = false;
 
   /** The hub's error text from the last failed reincarnate, if any. */
   @state()
@@ -2013,8 +2023,8 @@ export class ScionPageAgentDetail extends LitElement {
       <div class="card reincarnate-card">
         <h3 class="card-title">Reincarnate</h3>
         <p class="reincarnate-help">
-          Stop this agent and provision it again from its current configuration. Use this to apply
-          configuration changes.
+          Stop this agent and provision it again from its current settings and template. Use this to
+          apply configuration changes.
         </p>
         ${this.reincarnateError
           ? html`<sl-alert variant="danger" open class="reincarnate-error">
@@ -2043,8 +2053,8 @@ export class ScionPageAgentDetail extends LitElement {
    * while the confirm is open or the request runs is ignored.
    */
   private async handleReincarnate(): Promise<void> {
-    if (!this.agent || this.reincarnating) return;
-    this.reincarnating = true;
+    if (!this.agent || this.reincarnateBusy) return;
+    this.reincarnateBusy = true;
     try {
       const confirmed = await showConfirm(REINCARNATE_CONFIRM_MESSAGE, {
         title: 'Reincarnate agent',
@@ -2052,6 +2062,7 @@ export class ScionPageAgentDetail extends LitElement {
       });
       if (!confirmed) return;
 
+      this.reincarnating = true;
       this.reincarnateError = null;
       const response = await apiFetch(`/api/v1/agents/${this.agentId}/reincarnate`, {
         method: 'POST',
@@ -2068,6 +2079,7 @@ export class ScionPageAgentDetail extends LitElement {
       this.backgroundRefresh();
     } finally {
       this.reincarnating = false;
+      this.reincarnateBusy = false;
     }
   }
 
