@@ -454,7 +454,8 @@ function mergeCompactRow(held: Agent | undefined, row: Agent, keys: ReadonlySet<
   const merged = { ...held, ...row } as Record<string, unknown>;
   for (const key of keys) if (!(key in row)) delete merged[key];
   if (keys.has('message') && held.detail && 'message' in held.detail) {
-    const { message: _nested, ...detail } = held.detail;
+    const detail = { ...held.detail };
+    delete detail.message;
     merged.detail = detail;
   }
   return merged as unknown as Agent;
