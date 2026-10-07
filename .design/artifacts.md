@@ -1,6 +1,6 @@
 # Artifact system
 
-Status: design accepted (decisions D1–D20); implementation in phases tracked by ptone/scion#3202. Phase P0 (scaffolding) is ptone/scion#3203, phase P1 (vertical slice) is ptone/scion#3208. This document carries the proposed design, data model, API and UX of the artifact system so the design travels with the code. Prior art: ptone/scion#874 ("Praxis"), ptone/scion#518.
+Status: design accepted (decisions D1–D21); implementation in phases tracked by ptone/scion#3202. Phase P0 (scaffolding) is ptone/scion#3203, phase P1 (vertical slice) is ptone/scion#3208. This document carries the proposed design, data model, API and UX of the artifact system so the design travels with the code. Prior art: ptone/scion#874 ("Praxis"), ptone/scion#518.
 
 The feature is behind the `hub.artifacts` experiment (default off).
 
@@ -28,6 +28,7 @@ The feature is behind the `hub.artifacts` experiment (default off).
 | D18 | `current_seq` is the latest version of any kind. |
 | D19 | Default limits: 32 MiB/file, 256 MiB/bundle, 200 files/bundle, share-link TTL 7 days (max 30). |
 | D20 | A review version that changes text outside CriticMarkup is rejected at finalize (`422 unmarked_changes`). |
+| D21 | A hub-level *Artifacts* item in the management sidebar, beside *Skills*, ships as phase P1c and lists the artifacts the user owns or holds grants on; the project *Artifacts* tab stays in P2. Artifacts are principal-owned (D7), so the primary list is per user. |
 
 ## 5. Proposed design
 
@@ -207,7 +208,7 @@ Rule (D18): **`current_seq` is the latest version of any kind.** `get --clean` o
 
 ### 8.3 Web
 
-- **Artifact page** `/projects/<project-id>/artifacts/<id>[/v/<seq>]`: title, owner, version selector, rendered entry, *Files* (file browser over the version manifest), *Edit* (saves a `kind: publish` version by the user, D17), *Review* (D11), *Share* (links and grants, user-only), *History*. The project *Artifacts* tab has *New artifact* (upload through the two-step API). A hub-level `/artifacts` view lists artifacts the user owns or has grants on, including those whose home project is gone (D16).
+- **Artifact page** `/projects/<project-id>/artifacts/<id>[/v/<seq>]`: title, owner, version selector, rendered entry, *Files* (file browser over the version manifest), *Edit* (saves a `kind: publish` version by the user, D17), *Review* (D11), *Share* (links and grants, user-only), *History*. The project *Artifacts* tab has *New artifact* (upload through the two-step API). A hub-level `/artifacts` view (management sidebar item beside *Skills*, phase P1c, D21) lists artifacts the user owns, holds a principal grant on, or that are homed in or shared to a project the user is a member of, including owned ones whose home project is gone (D16); an "Owned by me" filter narrows it to owned artifacts. It is backed by `GET /api/v1/artifacts?mine=1` (cursor paginated, `q`, `review_pending`, `owner=me`). Membership only bounds the candidate set; every row passes the same read check as `GET /api/v1/artifacts/{id}`.
 - **Renderers** by entry media type: markdown → `markdown-preview.ts` (later with a CriticMarkup extension); text/code → `code-editor.ts` read-only; raster images → `<img>`; HTML bundles → sandboxed iframe whose `src` is the hub file route with a per-view capability so relative sub-resources resolve (D8); CSV/JSON → code view in v1. Phase P1 ships the page with the markdown, text and image renderers; other types are offered as a download.
 - **Chat**: an `artifacts` ref on a message renders a chip (title · vN · owner); clicking opens a side panel hosting the same renderer. Composer: *Attach artifact* picker; drag-drop in the composer still creates a chat attachment in v1 (D14).
 - **Project → Artifacts tab**: list with search, owner, updated, review-pending filter.

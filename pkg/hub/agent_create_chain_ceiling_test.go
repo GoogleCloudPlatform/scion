@@ -50,7 +50,7 @@ func (f *chainFixture) agentToken(t *testing.T, agentID string) string {
 	t.Helper()
 	a, err := f.store.GetAgent(context.Background(), agentID)
 	require.NoError(t, err)
-	tok, err := f.srv.GenerateAgentTokenForAgent(context.Background(), a)
+	tok, err := f.srv.issueAgentTokenForTest(context.Background(), a)
 	require.NoError(t, err)
 	return tok
 }
@@ -274,7 +274,7 @@ func edgeReadCaller() string {
 		"ceilingFilteredAgentScopes",
 		"agentSourceEffectCeiling",
 		"walkDelegationChainWithCause",
-		"GenerateAgentTokenForAgent",
+		"AuthorizeAgentToken",
 	}
 	pcs := make([]uintptr, 64)
 	frames := runtime.CallersFrames(pcs[:runtime.Callers(2, pcs)])
@@ -429,7 +429,7 @@ func TestAgentCreateDeliverIDs_MultiHop(t *testing.T) {
 	t.Run("dev-local parent with dev authority off", func(t *testing.T) {
 		mf := newMintFixture(t, "chain-multi-dev")
 		parent := devCreatedChild(t, mf, "chain-multi-dev-p")
-		token, err := mf.srv.GenerateAgentTokenForAgent(context.Background(), parent)
+		token, err := mf.srv.issueAgentTokenForTest(context.Background(), parent)
 		require.NoError(t, err)
 		mf.srv.authzService.setDevLocalAuthorityEnabled(false)
 
@@ -503,7 +503,7 @@ func TestGrandchildCeilingSubsetOfChild(t *testing.T) {
 func TestDevAuthGrandchildBoundedByParent(t *testing.T) {
 	mf := newMintFixture(t, "chain-dev-gc")
 	parent := devCreatedChild(t, mf, "chain-dev-gc-p")
-	token, err := mf.srv.GenerateAgentTokenForAgent(context.Background(), parent)
+	token, err := mf.srv.issueAgentTokenForTest(context.Background(), parent)
 	require.NoError(t, err)
 
 	rec := doRequestWithAgentToken(t, mf.srv, http.MethodPost, "/api/v1/projects/"+mf.projectID+"/agents",
@@ -704,7 +704,7 @@ func TestLegacyAgentRuntimeSecretFetchNotFound(t *testing.T) {
 		require.NoError(t, err)
 		a.AppliedConfig = &store.AgentAppliedConfig{AgentRole: string(AgentRoleFull)}
 		require.NoError(t, mf.Store.UpdateAgent(ctx, a))
-		tok, err := mf.Server.GenerateAgentTokenForAgent(ctx, a)
+		tok, err := mf.Server.issueAgentTokenForTest(ctx, a)
 		require.NoError(t, err)
 		return tok
 	}

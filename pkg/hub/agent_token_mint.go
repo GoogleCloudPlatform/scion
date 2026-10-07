@@ -57,7 +57,8 @@ const (
 )
 
 // agentTokenIssueError is the error a mint site returns when
-// GenerateAgentTokenForAgent issues no token. It unwraps to the cause.
+// AuthorizeAgentToken (via authorizeAgentTokenAt) grants no token. It
+// unwraps to the cause.
 type agentTokenIssueError struct {
 	Site mintSite
 	// Cause is set for a structural chain outcome (403).
@@ -86,48 +87,59 @@ func (e *agentTokenIssueError) errorClass() string {
 	}
 }
 
-// errMintLookup marks a ceiling lookup fault inside GenerateAgentTokenForAgent.
+// errMintLookup marks a ceiling lookup fault inside AuthorizeAgentToken.
 var errMintLookup = errors.New("agent token: ceiling lookup failed")
 
-// GenerateAgentTokenForAgent issues an agent JWT for the stored agent record.
+// AuthorizeAgentToken computes what an agent JWT for the stored agent
+// record may carry.
 // The scopes are the mint candidates (role scopes plus config-derived
 // scopes, after the dev-auth override) filtered by the agent's chain effect
 // ceiling; the ancestry is the stored agent.Ancestry. It issues no token on
-// any error: a structural chain outcome returns an error wrapping the
+// any error (no grant): a structural chain outcome returns an error wrapping the
 // provenance sentinel, a lookup fault returns an error wrapping
 // errMintLookup.
-func (s *Server) GenerateAgentTokenForAgent(ctx context.Context, agent *store.Agent) (string, error) {
-	s.mu.RLock()
-	tokenService := s.agentTokenService
-	s.mu.RUnlock()
-	if tokenService == nil {
-		return "", fmt.Errorf("agent token service not initialized")
-	}
+//
+// It has no side effects. The token is signed separately, once its run is
+// known (SignAgentToken).
+func (s *Server) AuthorizeAgentToken(ctx context.Context, agent *store.Agent) (AgentTokenGrant, error) {
 	if agent == nil {
-		return "", fmt.Errorf("%w: no agent", ErrProvenanceChain)
+		return AgentTokenGrant{}, fmt.Errorf("%w: no agent", ErrProvenanceChain)
 	}
 	if s.authzService == nil {
-		return "", fmt.Errorf("%w: authorization service not initialized", errMintLookup)
+		return AgentTokenGrant{}, fmt.Errorf("%w: authorization service not initialized", errMintLookup)
 	}
 
 	candidates := s.authzService.mintCandidateScopes(agent)
 	scopes, err := s.authzService.ceilingFilteredAgentScopes(ctx, agent, candidates)
 	if err != nil {
 		if isStructuralProvenanceError(err) {
-			return "", err
+			return AgentTokenGrant{}, err
 		}
-		return "", fmt.Errorf("%w: %w", errMintLookup, err)
+		return AgentTokenGrant{}, fmt.Errorf("%w: %w", errMintLookup, err)
 	}
-	return tokenService.GenerateAgentToken(agent.ID, agent.ProjectID, scopes, agent.Ancestry)
+	return AgentTokenGrant{AgentID: agent.ID, ProjectID: agent.ProjectID, Scopes: scopes, Ancestry: agent.Ancestry}, nil
 }
 
-// mintAgentTokenAt calls gen.GenerateAgentTokenForAgent for the named site.
+// SignAgentToken signs grant for runID with the server's token service.
+// See AgentTokenService.SignAgentToken: the caller records the returned
+// credential.
+func (s *Server) SignAgentToken(grant AgentTokenGrant, runID string) (string, *store.AgentCredential, error) {
+	s.mu.RLock()
+	tokenService := s.agentTokenService
+	s.mu.RUnlock()
+	if tokenService == nil {
+		return "", nil, fmt.Errorf("agent token service not initialized")
+	}
+	return tokenService.SignAgentToken(grant, runID)
+}
+
+// authorizeAgentTokenAt calls gen.AuthorizeAgentToken for the named site.
 // On error it writes the agent_token_issue_denied audit record synchronously
 // and returns an *agentTokenIssueError.
-func mintAgentTokenAt(ctx context.Context, gen AgentTokenGenerator, st store.Store, agent *store.Agent, site mintSite) (string, error) {
-	token, err := gen.GenerateAgentTokenForAgent(ctx, agent)
+func authorizeAgentTokenAt(ctx context.Context, gen AgentTokenGenerator, st store.Store, agent *store.Agent, site mintSite) (*AgentTokenGrant, error) {
+	grant, err := gen.AuthorizeAgentToken(ctx, agent)
 	if err == nil {
-		return token, nil
+		return &grant, nil
 	}
 	issueErr := &agentTokenIssueError{Site: site, Err: err}
 	if cause, structural := ceilingDenyCauseForError(err); structural {
@@ -136,7 +148,58 @@ func mintAgentTokenAt(ctx context.Context, gen AgentTokenGenerator, st store.Sto
 		issueErr.Lookup = true
 	}
 	recordAgentTokenIssueDenied(ctx, st, agent, issueErr)
-	return "", issueErr
+	return nil, issueErr
+}
+
+// errAgentTokenRecord marks a token that was signed but whose credential
+// could not be recorded. The token is discarded: an agent token is only
+// handed out once its credential is stored.
+var errAgentTokenRecord = errors.New("agent credential not recorded")
+
+// signAndRecordAgentToken signs grant for runID and records its credential
+// on its own. It is used where no run starts (provision, reset-auth,
+// refresh); a run start records the credential with the run (beginRun).
+// The token is returned only when the record succeeded.
+func signAndRecordAgentToken(ctx context.Context, gen AgentTokenGenerator, st store.Store, grant AgentTokenGrant, runID string) (string, error) {
+	token, cred, err := gen.SignAgentToken(grant, runID)
+	if err != nil {
+		return "", err
+	}
+	if err := recordAgentCredential(ctx, st, cred); err != nil {
+		return "", err
+	}
+	return token, nil
+}
+
+// recordAgentCredential stores cred, or returns an error wrapping
+// errAgentTokenRecord.
+func recordAgentCredential(ctx context.Context, st store.Store, cred *store.AgentCredential) error {
+	if cred == nil {
+		return fmt.Errorf("%w: no credential", errAgentTokenRecord)
+	}
+	if st == nil {
+		return fmt.Errorf("%w: no store", errAgentTokenRecord)
+	}
+	if err := st.CreateAgentCredential(ctx, cred); err != nil {
+		return fmt.Errorf("%w: %w", errAgentTokenRecord, err)
+	}
+	return nil
+}
+
+// agentTokenRecordFailedMessage is the message of the response to a mint
+// whose credential could not be recorded.
+const agentTokenRecordFailedMessage = "the agent token could not be issued; retry later"
+
+// writeAgentTokenRecordError answers a mint whose credential could not be
+// recorded (errAgentTokenRecord) with a 500 carrying a fixed message, and
+// reports whether it did. The cause is logged, never sent.
+func writeAgentTokenRecordError(w http.ResponseWriter, err error) bool {
+	if !errors.Is(err, errAgentTokenRecord) {
+		return false
+	}
+	slog.Error("agent token not issued: credential not recorded", "error", err)
+	writeError(w, http.StatusInternalServerError, ErrCodeInternalError, agentTokenRecordFailedMessage, nil)
+	return true
 }
 
 // recordAgentTokenIssueDenied writes the agent_token_issue_denied audit
@@ -205,4 +268,14 @@ func agentTokenDenialMessage(cause DenyCause) string {
 	default:
 		return "The agent's delegation record is missing or inconsistent; recreate the agent"
 	}
+}
+
+// presentedAgentTokenRunID returns the run the request's agent token was
+// issued for, or "" when it was issued without one or the request carries
+// no agent token.
+func presentedAgentTokenRunID(ctx context.Context) string {
+	if claims := GetAgentFromContext(ctx); claims != nil {
+		return claims.RunID
+	}
+	return ""
 }

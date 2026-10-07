@@ -48,6 +48,18 @@ func (oneAgentHost) Principal(context.Context) (string, string, string, bool) {
 }
 func (oneAgentHost) Authorize(_ context.Context, scope, _ string) bool { return scope == "project-1" }
 func (oneAgentHost) Permits(_ context.Context, scope, _ string) bool   { return scope == "project-1" }
+func (oneAgentHost) MemberScopes(context.Context) ([]string, error) {
+	return []string{"project-1"}, nil
+}
+
+// SealCursor and OpenCursor pass the list position through unchanged: this
+// test host has one caller, so there is nothing to bind it to.
+func (oneAgentHost) SealCursor(_ context.Context, position, _ string) (string, error) {
+	return position, nil
+}
+func (oneAgentHost) OpenCursor(_ context.Context, cursor, _ string) (string, error) {
+	return cursor, nil
+}
 
 // realArtifactHub runs the artifact service itself, on SQLite and local
 // storage, so the CLI is tested against the real API.
