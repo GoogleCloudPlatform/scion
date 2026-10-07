@@ -1895,6 +1895,23 @@ type BrokerSecretStore interface {
 	// Returns ErrAlreadyExists if a token for this broker already exists.
 	CreateJoinToken(ctx context.Context, token *BrokerJoinToken) error
 
+	// UpsertJoinToken stores a join token for token.BrokerID, replacing any
+	// existing token for that broker (one token per broker). replaced reports
+	// whether a token for the broker already existed.
+	UpsertJoinToken(ctx context.Context, token *BrokerJoinToken) (replaced bool, err error)
+
+	// ConsumeJoinToken deletes the join token with the given hash, but only
+	// if it belongs to brokerID and expires after now, in a single
+	// statement. It returns nil when a token was deleted and ErrNotFound
+	// otherwise, so exactly one of several concurrent callers succeeds.
+	ConsumeJoinToken(ctx context.Context, tokenHash, brokerID string, now time.Time) error
+
+	// DeleteExpiredJoinToken deletes the join token with the given hash, but
+	// only if it has expired at now, in a single statement. It returns
+	// ErrNotFound when no row matched. A token issued later for the same
+	// broker has a different hash and is never removed.
+	DeleteExpiredJoinToken(ctx context.Context, tokenHash string, now time.Time) error
+
 	// GetJoinToken retrieves a join token by token hash.
 	// Returns ErrNotFound if the token doesn't exist.
 	GetJoinToken(ctx context.Context, tokenHash string) (*BrokerJoinToken, error)
@@ -1907,8 +1924,9 @@ type BrokerSecretStore interface {
 	// Returns ErrNotFound if the token doesn't exist.
 	DeleteJoinToken(ctx context.Context, brokerID string) error
 
-	// CleanExpiredJoinTokens removes all expired join tokens.
-	CleanExpiredJoinTokens(ctx context.Context) error
+	// CleanExpiredJoinTokens removes all expired join tokens and returns how
+	// many were removed.
+	CleanExpiredJoinTokens(ctx context.Context) (int, error)
 }
 
 // =============================================================================
