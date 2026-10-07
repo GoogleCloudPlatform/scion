@@ -107,6 +107,7 @@ import {
   expectedFirstPageCount,
   pageCountFor,
   summarizePageChanges,
+  walkEndReason,
 } from './lib.mjs';
 
 // ---- CLI args --------------------------------------------------------
@@ -474,9 +475,10 @@ async function waitForFirstPage(page, selector, agentCount, timeoutMs) {
     if (count >= 1 && count >= expected && !(pager && pager.loading)) {
       return { ...last, timedOut: false };
     }
-    // A seed with no agents renders the empty state, not a pager: populated
-    // at once, as the pre-paging wait for a count of 0 was.
-    if (agentCount === 0 && expected === 0 && !pager) {
+    // A seed with no agents renders the project's empty state, not a
+    // pager: populated once that empty state is on screen (not while the
+    // page is still loading).
+    if (agentCount === 0 && !pager && (await countSelectorDeep(page, '.empty-state')) > 0) {
       return { ...last, timedOut: false };
     }
     await page.waitForTimeout(100);
@@ -511,11 +513,7 @@ async function measurePageChanges(page, selector, maxChanges, timeoutMs) {
       // Next is disabled. On the last page that is the normal end of the
       // view; before it (the pager's own total says more pages exist) the
       // walk ended early, which is a product behaviour worth surfacing.
-      const knownPages = pageCountFor(before.pageSize, before.total > 0 ? before.total : null);
-      stopReason =
-        knownPages != null && before.pageIndex + 1 < knownPages
-          ? 'next-unavailable-before-last-page'
-          : 'no-next-page';
+      stopReason = walkEndReason(before);
       break;
     }
     const beforeKey = await firstItemKeyDeep(page, selector);
@@ -557,6 +555,11 @@ async function measurePageChanges(page, selector, maxChanges, timeoutMs) {
   // The pager as it stood when the run stopped, so an early stop (for
   // example no Next on a short page) can be told apart from a short view.
   const stopPager = await readPagerDeep(page);
+  if (stopReason === null && walkEndReason(stopPager) === 'next-unavailable-before-last-page') {
+    // Every requested change completed, but the last one landed on a page
+    // with Next disabled before the last page: still an early stop.
+    stopReason = 'next-unavailable-before-last-page';
+  }
   return { changes: out, stopReason: stopReason ?? 'completed', stopPager };
 }
 

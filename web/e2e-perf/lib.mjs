@@ -199,6 +199,24 @@ export function pageCountFor(pageSize, total) {
 }
 
 /**
+ * walkEndReason classifies a pager whose Next is disabled: `no-next-page`
+ * when it is on the last page its total implies (or the total is unknown,
+ * zero or capped, so no later page can be shown to exist), and
+ * `next-unavailable-before-last-page` when its own total says more pages
+ * exist, i.e. the walk ended early. Returns null while Next is available
+ * or with no pager.
+ */
+export function walkEndReason(pager) {
+  if (!pager || pager.hasNext) return null;
+  const total = typeof pager.total === 'number' && pager.total > 0 ? pager.total : null;
+  const knownPages = pageCountFor(pager.pageSize, total);
+  if (knownPages != null && pager.pageIndex + 1 < knownPages) {
+    return 'next-unavailable-before-last-page';
+  }
+  return 'no-next-page';
+}
+
+/**
  * summarizePageChanges reports page-change latency (Next clicked to the
  * next page rendered) over every completed change of every populated run.
  * A change that did not complete within its timeout is counted in

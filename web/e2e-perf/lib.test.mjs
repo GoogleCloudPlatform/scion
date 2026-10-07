@@ -31,6 +31,7 @@ import {
   expectedFirstPageCount,
   pageCountFor,
   summarizePageChanges,
+  walkEndReason,
   summarizeBurstScenario,
   BURST_TARGET_ROTATION,
 } from './lib.mjs';
@@ -624,4 +625,25 @@ test('summarizePageChanges: counts walks that stopped before the last page', () 
   assert.equal(s.pageChangeAttemptCount, 5);
   assert.equal(s.pageChangeFailureCount, 0);
   assert.equal(summarizePageChanges([]).pageWalkEarlyStopCount, 0);
+});
+
+test('walkEndReason: how a walk with Next disabled ended', () => {
+  const pager = (o) => ({ pageSize: 25, pageIndex: 0, total: 100, hasNext: false, ...o });
+  // Last page of 4: the normal end.
+  assert.equal(walkEndReason(pager({ pageIndex: 3 })), 'no-next-page');
+  // Page index 2 of 4 with Next disabled: an early stop.
+  assert.equal(walkEndReason(pager({ pageIndex: 2 })), 'next-unavailable-before-last-page');
+  // Unknown or capped total: no later page can be shown to exist.
+  assert.equal(walkEndReason(pager({ pageIndex: 1, total: null })), 'no-next-page');
+  assert.equal(
+    walkEndReason(pager({ pageIndex: 1, total: { loaded: 2000, capped: true } })),
+    'no-next-page'
+  );
+  // Total 0.
+  assert.equal(walkEndReason(pager({ total: 0 })), 'no-next-page');
+  // A one-page view.
+  assert.equal(walkEndReason(pager({ total: 20 })), 'no-next-page');
+  // Next still available, or no pager: not an end.
+  assert.equal(walkEndReason(pager({ hasNext: true })), null);
+  assert.equal(walkEndReason(null), null);
 });
