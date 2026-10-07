@@ -70,6 +70,7 @@ type capturingMeterProvider struct {
 	noop.MeterProvider
 	mu          sync.Mutex
 	instruments map[string]instrumentKind
+	units       map[string]string
 	unsupported []string
 }
 
@@ -81,6 +82,15 @@ func (p *capturingMeterProvider) add(name string, k instrumentKind) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.instruments[name] = k
+}
+
+func (p *capturingMeterProvider) setUnit(name, unit string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.units == nil {
+		p.units = map[string]string{}
+	}
+	p.units[name] = unit
 }
 
 func (p *capturingMeterProvider) addUnsupported(name string) {
@@ -116,11 +126,13 @@ func (m *capturingMeter) Float64UpDownCounter(n string, o ...otelmetric.Float64U
 
 func (m *capturingMeter) Int64Histogram(n string, o ...otelmetric.Int64HistogramOption) (otelmetric.Int64Histogram, error) {
 	m.p.add(n, kindInt64Histogram)
+	m.p.setUnit(n, otelmetric.NewInt64HistogramConfig(o...).Unit())
 	return m.Meter.Int64Histogram(n, o...)
 }
 
 func (m *capturingMeter) Float64Histogram(n string, o ...otelmetric.Float64HistogramOption) (otelmetric.Float64Histogram, error) {
 	m.p.add(n, kindFloat64Histogram)
+	m.p.setUnit(n, otelmetric.NewFloat64HistogramConfig(o...).Unit())
 	return m.Meter.Float64Histogram(n, o...)
 }
 
@@ -164,6 +176,23 @@ func (m *capturingMeter) Int64ObservableGauge(n string, o ...otelmetric.Int64Obs
 func (m *capturingMeter) Float64ObservableGauge(n string, o ...otelmetric.Float64ObservableGaugeOption) (otelmetric.Float64ObservableGauge, error) {
 	m.p.addUnsupported(n)
 	return m.Meter.Float64ObservableGauge(n, o...)
+}
+
+// hubHistogramUnits returns the unit of every histogram the hub recorders
+// register, keyed by OTel metric name.
+func hubHistogramUnits(t *testing.T) map[string]string {
+	t.Helper()
+	p := &capturingMeterProvider{instruments: map[string]instrumentKind{}}
+	if _, err := dbmetrics.New(p); err != nil {
+		t.Fatalf("dbmetrics.New: %v", err)
+	}
+	if _, err := dispatchmetrics.New(p); err != nil {
+		t.Fatalf("dispatchmetrics.New: %v", err)
+	}
+	if _, err := reapermetrics.New(p); err != nil {
+		t.Fatalf("reapermetrics.New: %v", err)
+	}
+	return p.units
 }
 
 // hubRecorderInstruments returns every instrument registered by the hub
