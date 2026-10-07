@@ -189,6 +189,40 @@ describe('loadAdminStatus', () => {
     expect(f.calls()).toBe(4);
   });
 
+  it('a superseded request waits for the newer one still in flight (cached empty)', async () => {
+    const f = stubFetch();
+    f.hold();
+    const n = loadAdminStatus('u1'); // startup or a nav
+    const fresh = loadAdminStatus('u1', { fresh: true }); // the guard
+    // N settles first, as admin, while nothing is cached yet.
+    f.pending[0].resolve(json(ADMIN));
+    let nValue: unknown = 'pending';
+    void n.then((v) => (nValue = v));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(nValue).toBe('pending'); // not null, not its own stale answer
+    f.pending[1].resolve(json({ isAdmin: true, isSuperAdmin: true, permissions: [] }));
+    const fValue = await fresh;
+    expect(await n).toEqual(fValue);
+    expect(fValue?.isSuperAdmin).toBe(true);
+  });
+
+  it('an earlier fresh request resolves to the newest one, not the seeded value', async () => {
+    const f = stubFetch();
+    expect(await loadAdminStatus('u1')).toEqual(ADMIN); // seeded
+    f.hold();
+    const f1 = loadAdminStatus('u1', { fresh: true });
+    const f2 = loadAdminStatus('u1', { fresh: true });
+    f.pending[0].resolve(json({ isAdmin: false })); // F1: a revocation
+    f.pending[1].resolve(
+      json({ isAdmin: true, isSuperAdmin: false, permissions: ['groups.read'] })
+    );
+    const v2 = await f2;
+    expect(await f1).toEqual(v2);
+    expect(v2?.permissions).toEqual(['groups.read']);
+    expect(await loadAdminStatus('u1')).toEqual(v2);
+  });
+
   it('no user id: null and no request', async () => {
     const f = stubFetch();
     expect(await loadAdminStatus('')).toBeNull();

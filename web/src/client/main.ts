@@ -1142,7 +1142,9 @@ async function renderRoute(path: string): Promise<void> {
   // Re-fetch admin status on every admin-route navigation so that role
   // grants or revocations made mid-session take effect immediately rather
   // than being cached for the entire SPA lifetime. The fresh result also
-  // replaces the shared value the nav reads (client/admin-status.ts).
+  // replaces the shared value (client/admin-status.ts); a nav already on
+  // screen read that value once for this user, so only later nav renders
+  // see it.
   //
   // Per-route permission checks: super-admin-only routes (Diagnostics,
   // Maintenance) require isSuperAdmin; other admin routes require at least

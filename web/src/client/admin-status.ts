@@ -31,9 +31,11 @@
  * - `fresh: true` always sends a new request (the admin route guard, so a
  *   grant or revocation applies as soon as an admin page is entered); its
  *   result replaces the shared value, and an older request still in flight
- *   can no longer write it (its callers get the newest value instead). A
- *   failed fresh request drops the shared value, so nobody keeps showing an
- *   admin result that a recheck could not confirm.
+ *   can no longer write it (its callers get the newest answer instead). A
+ *   failed fresh request drops the shared value, so a later reader does not
+ *   get an admin result that a recheck could not confirm. A nav that has
+ *   already rendered reads the value once per user, so a fresh result or a
+ *   failed recheck only reaches nav renders that happen after it.
  * - It uses a plain credentialed fetch, as the startup check always did, so
  *   a 401 here never triggers the session-expired login redirect on its own
  *   (other requests on the page still do).
@@ -116,8 +118,12 @@ export function loadAdminStatus(
       // A different user, or a clear, since this request started.
       if (generation !== myGeneration) return null;
       // A newer (fresh) request superseded this one: it alone writes the
-      // shared value, and this request's callers get that value.
+      // shared value, and this request's callers get its answer (waiting
+      // for it if it is still in flight), not this request's older one.
       if (mySequence !== writeSequence) {
+        if (inflight && inflight !== entry && inflight.userId === userId) {
+          return inflight.promise;
+        }
         return cached && cached.userId === userId ? cached.status : null;
       }
       if (ok) cached = { userId, status };
