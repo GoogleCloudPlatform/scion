@@ -77,20 +77,32 @@ export function isBulkReconnectEligible(entry: RailEntryStatus): boolean {
 }
 
 /**
- * Whether "Remove all inactive" removes an entry: its agent was deleted, or
- * its session is not connected: dropped (disconnected or unavailable), or
- * idle (restored from the saved list and shown as "Not connected").
- * Connected entries stay, as do entries that are still connecting.
+ * Whether metadata says an entry's agent is gone: deleted or unavailable,
+ * or in the stopped or error phase.
+ */
+export function isAgentGone(metadata: TerminalAgentMetadata): boolean {
+  if (metadata.availability === 'deleted' || metadata.availability === 'unavailable') return true;
+  const phase = metadata.agent?.phase;
+  return phase === 'stopped' || phase === 'error';
+}
+
+/**
+ * Whether "Remove all inactive" removes an entry: its agent was deleted, its
+ * session dropped (disconnected or unavailable), or it is idle (restored
+ * from the saved list and shown as "Not connected") and metadata says its
+ * agent is gone. After a page load every row but the frontmost is idle, so
+ * an idle row for an agent that is still running stays. Connected entries
+ * stay, as do entries that are still connecting.
  */
 export function isInactiveEntry(entry: RailEntryStatus): boolean {
   const { connection, disconnectReason } = entry.state;
   if (connection === 'closed') return false;
+  if (connection === 'idle') return isAgentGone(entry.metadata);
   return (
     entry.metadata.availability === 'deleted' ||
     disconnectReason === 'agent-deleted' ||
     connection === 'disconnected' ||
-    connection === 'unavailable' ||
-    connection === 'idle'
+    connection === 'unavailable'
   );
 }
 
@@ -1488,9 +1500,7 @@ export class TerminalWorkspaceRoot {
       this.bulkRemove,
       this.bulkRemoveTip,
       inactive === 0 ? BULK_REMOVE_DISABLED_REASON : null,
-      `Remove all inactive: remove ${countLabel(inactive)} whose agent was deleted or that ${
-        inactive === 1 ? 'is' : 'are'
-      } not connected. Connected terminals stay open.`
+      `Remove all inactive: remove ${countLabel(inactive)} whose connection dropped or whose agent is stopped, errored or deleted. Connected terminals and not yet opened terminals for running agents stay.`
     );
     this.bulkRemove.setAttribute('aria-label', `Remove all inactive (${inactive} eligible)`);
   }
@@ -1517,7 +1527,7 @@ export class TerminalWorkspaceRoot {
     const count = confirmedKeys.size;
     if (count === 0) return 0;
     const confirmed = await showConfirm(
-      `Remove ${countLabel(count)} from the list? This removes terminals whose agent was deleted and terminals that are not connected. Connected terminals stay open.`,
+      `Remove ${countLabel(count)} from the list? This removes terminals whose connection dropped and terminals whose agent is stopped, errored or deleted. Connected terminals and not yet opened terminals for running agents stay.`,
       { title: 'Remove inactive terminals', confirmText: `Remove ${count}` }
     );
     if (!confirmed) return 0;
@@ -2050,7 +2060,8 @@ export class TerminalWorkspaceRoot {
         display: inline-flex;
       }
       /* Shoelace's default tooltip colours resolve to the same neutral in
-         the dark theme, so set them from the theme's text and background. */
+         the dark theme, so set them from the theme's text and background;
+         see ptone/scion#3715. */
       .terminal-bulk-tooltip {
         --sl-tooltip-background-color: var(--scion-text, #1e293b);
         --sl-tooltip-color: var(--scion-bg, #f8fafc);
