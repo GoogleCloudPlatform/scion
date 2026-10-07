@@ -305,15 +305,26 @@ func deleteClaimedDuringDispatch(err error, agentID string) *startRefusal {
 // whose lease expired, leaves the agent live, so it reports false too.
 func (s *Server) deleteWonAfterLanding(ctx context.Context, agentID string) bool {
 	fresh, err := s.store.GetAgent(ctx, agentID)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		s.agentLifecycleLog.Warn("failed to re-read agent after the broker started it; cannot check for a delete",
+			"agent_id", agentID, "error", err)
+	}
+	return deleteWonOnRead(fresh, err)
+}
+
+// deleteWonOnRead is deleteWonAfterLanding's rule applied to the result of
+// a read of the agent's row: the row is gone (store.ErrNotFound), or it is
+// deletedOrDeleteHeld. Any other read error reports false, so the caller
+// answers as before. A failed delete, or a deleting row whose lease
+// expired, leaves the agent live and reports false.
+func deleteWonOnRead(a *store.Agent, err error) bool {
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		return true
 	case err != nil:
-		s.agentLifecycleLog.Warn("failed to re-read agent after the broker started it; cannot check for a delete",
-			"agent_id", agentID, "error", err)
 		return false
 	default:
-		return deletedOrDeleteHeld(fresh)
+		return deletedOrDeleteHeld(a)
 	}
 }
 
@@ -417,16 +428,16 @@ func (s *Server) clearFailedDeletionAtClaim(ctx context.Context, a *store.Agent,
 // Only the columns the in-tx guard and the clear can change are carried over
 // from the re-read; in-memory fields the dispatch set are kept. If the re-read
 // fails, a falls back to the requested phase (the pre-guard behaviour) and
-// reloaded is false.
-func (s *Server) settleLifecycleWrite(ctx context.Context, a *store.Agent, newPhase string) (reloaded bool) {
+// the re-read's error is returned (nil when the re-read succeeded).
+func (s *Server) settleLifecycleWrite(ctx context.Context, a *store.Agent, newPhase string) (reloadErr error) {
 	a.Phase = newPhase
 	s.clearFailedDeletion(ctx, a)
 	if err := s.reloadGuardedColumns(ctx, a); err != nil {
 		s.agentLifecycleLog.Warn("failed to re-read agent after lifecycle write",
 			"agent_id", a.ID, "error", err)
-		return false
+		return err
 	}
-	return true
+	return nil
 }
 
 // reloadGuardedColumns re-reads a's row and copies the columns a concurrent
