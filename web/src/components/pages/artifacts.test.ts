@@ -366,9 +366,12 @@ describe('artifacts list page', () => {
     });
     const el = await mount(true);
     expect(el.shadowRoot!.querySelector('.empty-state sl-button')).toBeNull();
-    expect(el.shadowRoot!.querySelector('.empty-state h2')!.textContent).toBe(
-      'No Artifacts Found Yet'
+    const interim = el.shadowRoot!.querySelector('.empty-state')!;
+    expect(interim.querySelector('h2')).toBeNull();
+    expect(interim.textContent!.trim()).toBe(
+      'Nothing on this page. There may be more artifacts further on.'
     );
+    expect(el.shadowRoot!.textContent).not.toContain('No Artifacts Found');
     loadMoreButton(el)!.click();
     await settle(el);
     expect(rows(el).map((r) => r.querySelector('a')!.textContent)).toEqual(['further on']);

@@ -337,9 +337,7 @@ export class ScionPageArtifacts extends LitElement {
       // request) and still have more after it: keep the walk going.
       return html`
         <div class="empty-state">
-          <sl-icon name="file-earmark-richtext"></sl-icon>
-          <h2>No Artifacts Found Yet</h2>
-          <p>There may be more artifacts further on.</p>
+          <p>Nothing on this page. There may be more artifacts further on.</p>
         </div>
         ${this.renderLoadMore()}
       `;
