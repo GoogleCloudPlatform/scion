@@ -1333,19 +1333,26 @@ export class TerminalWorkspaceRoot {
 
   /**
    * "Remove all inactive": asks for confirmation, then runs the row Close
-   * action on every inactive entry. Eligibility is checked again after the
-   * dialog, so an entry that reconnected while it was open is kept.
+   * action on the entries that were inactive when the dialog opened.
+   * Eligibility is checked again after the dialog, so an entry that
+   * reconnected while it was open is kept, and an entry that dropped while
+   * it was open is not removed because the dialog did not count it.
    * Resolves to the number of entries removed.
    */
   async removeAllInactive(): Promise<number> {
-    const count = [...this.entries.values()].filter(isInactiveEntry).length;
+    const confirmedKeys = new Set(
+      [...this.entries.values()].filter(isInactiveEntry).map((entry) => entry.state.key)
+    );
+    const count = confirmedKeys.size;
     if (count === 0) return 0;
     const confirmed = await showConfirm(
       `Remove ${countLabel(count)} from the list? This removes terminals whose agent was deleted and terminals that are disconnected. Connected terminals stay open.`,
       { title: 'Remove inactive terminals', confirmText: `Remove ${count}` }
     );
     if (!confirmed) return 0;
-    const targets = [...this.entries.values()].filter(isInactiveEntry);
+    const targets = [...this.entries.values()].filter(
+      (entry) => confirmedKeys.has(entry.state.key) && isInactiveEntry(entry)
+    );
     for (const entry of targets) this.removeEntry(entry);
     if (targets.length > 0) {
       // Render now so the focus target reflects the remaining rows.

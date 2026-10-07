@@ -325,6 +325,25 @@ describe('Open terminals bulk actions', () => {
     expect(railAgentIds().sort()).toEqual([CONNECTED, DISCONNECTED, IDLE].sort());
   });
 
+  it('a row that drops while the dialog is open is not removed', async () => {
+    await openMixed();
+    let answer!: (value: boolean) => void;
+    confirmMock.showConfirm.mockReturnValue(new Promise((resolve) => (answer = resolve)));
+    const pending = root.removeAllInactive();
+    const [, options] = confirmMock.showConfirm.mock.calls[0];
+    expect(options).toMatchObject({ confirmText: 'Remove 3' });
+    setState(sessions.get(CONNECTED)!, {
+      connection: 'disconnected',
+      disconnectReason: 'network',
+    });
+    answer(true);
+    const removed = await pending;
+    expect(removed).toBe(3);
+    expect(removed).toBeLessThanOrEqual(3);
+    await flush();
+    expect(railAgentIds().sort()).toEqual([CONNECTED, IDLE].sort());
+  });
+
   /** Mimics the dialog returning focus to its trigger before it resolves. */
   function confirmReturningFocusTo(trigger: HTMLElement): void {
     confirmMock.showConfirm.mockImplementation(() => {
