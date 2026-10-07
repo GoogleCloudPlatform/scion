@@ -1093,6 +1093,9 @@ func (s *Server) checkLastSuperAdminTx(
 // Guards: self-deletion and last-active-super-admin are prevented based on
 // bindings (not User.Role). All operations — last-admin check, skill cleanup,
 // user deletion, and audit — execute in a single atomic transaction (R4-C2).
+// A user who still owns agents is refused with 409 (ptone/scion#2769). The
+// user's user-scope secrets and env vars are removed after commit, best
+// effort.
 // ---------------------------------------------------------------------------
 
 func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
@@ -1153,6 +1156,11 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
 			return err
 		}
 
+		// Refuse while the user owns agents (ptone/scion#2769).
+		if err := checkUserOwnsNoAgentsTx(ctx, tx, user.ID); err != nil {
+			return err
+		}
+
 		// Last-project-owner guard plus role-binding cascade
 		// (ptone/scion#2598). Runs before the user row is deleted, in the
 		// same transaction; a concurrent grant or role change to the
@@ -1205,11 +1213,14 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
 
 	if err != nil {
 		var lastOwnerErr *lastProjectOwnerDeleteError
+		var ownsAgentsErr *userOwnsAgentsDeleteError
 		if errors.Is(err, errLastSuperAdmin) {
 			writeError(w, http.StatusConflict, ErrCodeConflict,
 				"cannot delete the last super-admin; promote another user first", nil)
 		} else if errors.As(err, &lastOwnerErr) {
 			writeLastProjectOwnerDeleteError(w, lastOwnerErr)
+		} else if errors.As(err, &ownsAgentsErr) {
+			writeUserOwnsAgentsDeleteError(w, ownsAgentsErr)
 		} else if errors.Is(err, errUserRoleBindingsChanged) {
 			writeUserRoleBindingsChangedError(w)
 		} else {
@@ -1218,6 +1229,10 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
 		}
 		return
 	}
+
+	// Best effort, after commit: remove the user's user-scope secrets and
+	// env vars (ptone/scion#2769). Failures are logged, not returned.
+	s.removeUserScopedData(ctx, id)
 
 	w.WriteHeader(http.StatusNoContent)
 }

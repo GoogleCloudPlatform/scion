@@ -125,6 +125,9 @@ var ProjectTargetApplicability = map[string]bool{
 	"hub.allow_list.read": false, "hub.allow_list.update": false,
 	"hub.project_defaults.read": false, "hub.project_defaults.update": false,
 	"hub.messaging.update": false, "hub.experiments.update": false, "hub.auth_reset.execute": false,
+
+	"hub.conduit_grant_keys.execute": false,
+
 	"hub.scheduler.read": false, "hub.scheduler.update": false,
 	"hub.federation.read": false, "hub.federation.update": false,
 	"hub.teams_manifest.read": false, "hub.teams_manifest.update": false,
@@ -165,6 +168,11 @@ var ProjectTargetApplicability = map[string]bool{
 	// secret/env var/skill, or a project-parented GCP service account).
 	"secret.deliver": true, "env_var.deliver": true, "skill_injection.deliver": true,
 	"secret.use": true, "gcp_service_account.use": true,
+
+	// Self-scoped permissions (TargetClassKindSelf) target the holder's own
+	// records, never an existing project, so no project role binding or
+	// system authority proof admits them.
+	"inbox.read": false, "inbox.write": false, "user_skill_injection.update": false,
 }
 
 // AppliesToExistingProjectTarget reports the reviewed disposition for
@@ -221,6 +229,13 @@ var PermissionAllowedBoundaries = map[string][]BoundaryKind{
 	// broker.create's selector "broker:create" is hub-only: a broker is a
 	// hub-level resource.
 	"broker.create": {BoundaryKindHub},
+
+	// Self-scoped permissions. inbox.* may be selected on either boundary;
+	// a project token sees only its boundary project's records.
+	// user_skill_injection.update is hub-only, because a user's injected
+	// skills reach agents in every project.
+	"inbox.read": {BoundaryKindProject, BoundaryKindHub}, "inbox.write": {BoundaryKindProject, BoundaryKindHub},
+	"user_skill_injection.update": {BoundaryKindHub},
 }
 
 // SelectorAllowedBoundaries returns the reviewed boundary kinds for a single
@@ -274,6 +289,12 @@ const (
 	// class exists so MintTimeSystemGrant has an explicit, reviewed entry
 	// to iterate for these permissions instead of silently having none.
 	TargetClassKindHubResource TargetClassKind = "hub_resource"
+	// TargetClassKindSelf represents the holder's own records (inbox items,
+	// direct messages, user-scope skill injections). They have no project
+	// or hub target that a role binding could authorize: a self permission
+	// is checked by Server.authorizeSelfScoped against the record's
+	// project, and minting its selector requires only an active issuer.
+	TargetClassKindSelf TargetClassKind = "self"
 )
 
 // SupportedTargetClasses is an explicit, reviewed, per-permission-ID list of
@@ -369,6 +390,10 @@ var SupportedTargetClasses = map[string][]TargetClassKind{
 
 	// broker.create targets the hub-level broker collection only.
 	"broker.create": {TargetClassKindHubResource},
+
+	// Self-scoped permissions.
+	"inbox.read": {TargetClassKindSelf}, "inbox.write": {TargetClassKindSelf},
+	"user_skill_injection.update": {TargetClassKindSelf},
 }
 
 // SupportedTargetClassesFor returns the reviewed classes for permissionID.
@@ -378,4 +403,12 @@ var SupportedTargetClasses = map[string][]TargetClassKind{
 // or PermissionAllowedBoundaries.
 func SupportedTargetClassesFor(permissionID string) []TargetClassKind {
 	return SupportedTargetClasses[permissionID]
+}
+
+// IsSelfPermission reports whether permissionID's only supported target class
+// is TargetClassKindSelf: the permission acts on the holder's own records.
+// A permission with no entry is not a self permission.
+func IsSelfPermission(permissionID string) bool {
+	classes := SupportedTargetClasses[permissionID]
+	return len(classes) == 1 && classes[0] == TargetClassKindSelf
 }

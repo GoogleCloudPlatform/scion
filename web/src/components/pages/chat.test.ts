@@ -30,7 +30,16 @@
 
 // @vitest-environment happy-dom
 
-import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
+import {
+  describe,
+  it,
+  expect,
+  vi,
+  beforeAll,
+  beforeEach,
+  afterEach,
+  type MockInstance,
+} from 'vitest';
 import { html, nothing, render, type TemplateResult } from 'lit';
 import { apiFetch } from '../../client/api.js';
 import { navigateTo, pushRoute, replaceRoute } from '../../client/main.js';
@@ -1917,6 +1926,36 @@ describe('chat page — startup after the page is removed', () => {
     return el;
   }
 
+  /**
+   * Record every initV2 the page starts, so a test can await all of them
+   * settling — the superseded ones included. A fixed flush() is not enough:
+   * initV2 resumes only once the test runner has answered its imports,
+   * which may take any number of macrotask turns under load.
+   */
+  function trackStartups(page: unknown): {
+    count: () => number;
+    settled: () => Promise<void>;
+  } {
+    const el = page as { initV2: () => Promise<void> };
+    const startups: Promise<void>[] = [];
+    const initV2 = el.initV2;
+    if (typeof initV2 !== 'function') {
+      throw new Error('initV2 is not a function on the chat page. Was it renamed or removed?');
+    }
+    // Deliberately shadows the private initV2 on this instance only.
+    el.initV2 = function (this: unknown): Promise<void> {
+      const startup = initV2.call(this);
+      startups.push(startup);
+      return startup;
+    };
+    return {
+      count: () => startups.length,
+      settled: async (): Promise<void> => {
+        await Promise.all(startups);
+      },
+    };
+  }
+
   function dmListLoads(): number {
     return vi.mocked(apiFetch).mock.calls.filter(([path]) => path === '/api/v1/chat/dms').length;
   }
@@ -1946,12 +1985,15 @@ describe('chat page — startup after the page is removed', () => {
     const intervals = trackIntervals();
     await loadLazyModules();
     const el = createUnrenderedPage();
+    const startups = trackStartups(el);
     window.history.replaceState({}, '', '/chat');
     document.body.appendChild(el);
     // The router replaces the page before initV2's imports come back.
     el.remove();
 
-    await flush();
+    // Startup really ran, so the assertions below cannot pass vacuously.
+    expect(startups.count()).toBe(1);
+    await startups.settled();
 
     expect(dmListLoads()).toBe(0);
     expect(el._fallbackPollInterval).toBeNull();
@@ -1964,13 +2006,16 @@ describe('chat page — startup after the page is removed', () => {
     const intervals = trackIntervals();
     await loadLazyModules();
     const el = createUnrenderedPage();
+    const startups = trackStartups(el);
     window.history.replaceState({}, '', '/chat');
     try {
       document.body.appendChild(el);
       el.remove();
       document.body.appendChild(el);
 
-      await flush();
+      // Both startups: the superseded one must have given up, not just
+      // not yet arrived.
+      await startups.settled();
 
       expect(el.v2SpaceRailLoaded).toBe(true);
       expect(dmListLoads()).toBe(1);
@@ -1991,6 +2036,22 @@ describe('chat page — startup after the page is removed', () => {
     let unhandled: unknown[];
     const onUnhandled = (reason: unknown) => unhandled.push(reason);
 
+    /**
+     * Wait until initV2 has caught the failed import, by the log its catch
+     * writes. The rejection's timing is up to the test runner: a vi.doMock
+     * is resolved by the runner's main process, which may answer after any
+     * number of macrotask turns, so a fixed flush() is not enough.
+     */
+    async function untilStartupFails(errorSpy: MockInstance): Promise<void> {
+      await vi.waitFor(() =>
+        expect(errorSpy).toHaveBeenCalledWith(
+          'Chat page failed to load its components:',
+          // Vitest wraps an error thrown by a mock factory.
+          expect.objectContaining({ cause: chunkError })
+        )
+      );
+    }
+
     beforeEach(async () => {
       // Load the real modules first, so these tests time the same whether
       // or not an earlier test already did: only the mocked import differs.
@@ -2001,10 +2062,19 @@ describe('chat page — startup after the page is removed', () => {
       vi.doMock('../shared/chat/chat-members.js', () => {
         throw chunkError;
       });
+      // Vitest applies a vi.doMock or vi.doUnmock at the next import, and
+      // drops any queued while that import is still being resolved. Importing
+      // here applies the mock before the test starts, and proves it is active.
+      await expect(import('../shared/chat/chat-members.js')).rejects.toMatchObject({
+        cause: chunkError,
+      });
     });
 
-    afterEach(() => {
+    afterEach(async () => {
       vi.doUnmock('../shared/chat/chat-members.js');
+      // Apply the unmock now, so the throwing mock cannot leak into the next
+      // test; a failure here means the real module did not load back.
+      await import('../shared/chat/chat-members.js');
       process.off('unhandledRejection', onUnhandled);
     });
 
@@ -2017,13 +2087,9 @@ describe('chat page — startup after the page is removed', () => {
       try {
         document.body.appendChild(el);
 
-        await flush();
+        await untilStartupFails(errorSpy);
 
         expect(unhandled).toEqual([]);
-        expect(errorSpy).toHaveBeenCalledWith(
-          'Chat page failed to load its components:',
-          expect.anything()
-        );
         expect(el.v2SpaceRailLoaded).toBe(false);
         expect(el.v2SpaceRailLoadFailed).toBe(true);
         expect(dmListLoads()).toBe(0);
@@ -2043,13 +2109,9 @@ describe('chat page — startup after the page is removed', () => {
         document.body.appendChild(el);
         el.remove();
 
-        await flush();
+        await untilStartupFails(errorSpy);
 
         expect(unhandled).toEqual([]);
-        expect(errorSpy).toHaveBeenCalledWith(
-          'Chat page failed to load its components:',
-          expect.anything()
-        );
         expect(el.v2SpaceRailLoadFailed).toBe(false);
         expect(el.v2SpaceRailLoaded).toBe(false);
       } finally {
@@ -2065,8 +2127,9 @@ describe('chat page — startup after the page is removed', () => {
       window.history.replaceState({}, '', '/chat');
       try {
         document.body.appendChild(el);
-        await flush();
+        await untilStartupFails(errorSpy);
 
+        expect(unhandled).toEqual([]);
         const rail = renderToFragment(el.renderV2Rail());
         const alert = rail.querySelector('[role="alert"]');
         expect(alert).not.toBeNull();

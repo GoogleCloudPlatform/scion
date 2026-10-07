@@ -946,3 +946,127 @@ func TestForeignAttach_EmptyAttachmentList_Allowed(t *testing.T) {
 	require.Equal(t, http.StatusOK, rr.Code,
 		"empty attachment list must not trigger rejection; body: %s", rr.Body.String())
 }
+
+// TestInteragentView_LegacyViewParticipantGate pins participant gating
+// for legacy view rows whose provenance stamps name different projects:
+// the body is shown only when the viewer's participation in the row's
+// conversation can be verified. A row with no conversation ID cannot be
+// verified, so its body is cleared. Same-project rows are unchanged.
+func TestInteragentView_LegacyViewParticipantGate(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	projectA := &store.Project{
+		ID: tid("pg-proj-a"), Name: "pg-proj-a", Slug: "pg-proj-a",
+		OwnerID: DevUserID, CreatedBy: DevUserID,
+	}
+	require.NoError(t, s.CreateProject(ctx, projectA))
+	projectB := &store.Project{ID: tid("pg-proj-b"), Name: "pg-proj-b", Slug: "pg-proj-b"}
+	require.NoError(t, s.CreateProject(ctx, projectB))
+
+	newAgent := func(name, projectID string) *store.Agent {
+		a := &store.Agent{
+			ID: tid(name), Name: name, Slug: name, ProjectID: projectID,
+			Phase: "running", MessageMode: store.MessageModeHub,
+		}
+		require.NoError(t, s.CreateAgent(ctx, a))
+		return a
+	}
+	agentA := newAgent("pg-agent-a", projectA.ID)
+	agentA2 := newAgent("pg-agent-a2", projectA.ID)
+	agentB := newAgent("pg-agent-b", projectB.ID)
+	agentB2 := newAgent("pg-agent-b2", projectB.ID)
+
+	// A direct conversation names exactly its two agents, so the case
+	// with the viewer as a member uses a group conversation instead.
+	newConv := func(peer *store.Agent, extraUser string) string {
+		kind := "direct"
+		key, err := messages.DMConversationKey("agent", agentA.ID, "agent", peer.ID)
+		require.NoError(t, err)
+		if extraUser != "" {
+			kind, key = "group", "test-group:"+tid("pg-group-"+peer.Slug)
+		}
+		conv, err := s.UpsertConversationByExternalRef(ctx, &store.Conversation{
+			Kind: kind, Surface: "native", ExternalRef: key, DriftState: "active",
+		})
+		require.NoError(t, err)
+		for _, id := range []string{agentA.ID, peer.ID} {
+			require.NoError(t, s.EnsureParticipant(ctx, &store.ConversationParticipant{
+				ConversationID: conv.ID, PrincipalKind: "agent", PrincipalID: id, Role: "member",
+			}))
+		}
+		if extraUser != "" {
+			require.NoError(t, s.EnsureParticipant(ctx, &store.ConversationParticipant{
+				ConversationID: conv.ID, PrincipalKind: "user", PrincipalID: extraUser, Role: "member",
+			}))
+		}
+		return conv.ID
+	}
+	nonParticipantConv := newConv(agentB, "")
+	participantConv := newConv(agentB2, DevUserID)
+	sameProjConv := newConv(agentA2, "")
+
+	newMsg := func(id string, peer *store.Agent, convID, body string) *store.Message {
+		senderProj, recipientProj := agentA.ProjectID, peer.ProjectID
+		m := &store.Message{
+			ID: tid(id), ProjectID: peer.ProjectID,
+			Sender: "agent:" + agentA.Slug, SenderID: agentA.ID,
+			Recipient: "agent:" + peer.Slug, RecipientID: peer.ID,
+			Msg: body, Type: "instruction", AgentID: agentA.ID,
+			ConversationID:  convID,
+			SenderProjectID: &senderProj, RecipientProjectID: &recipientProj,
+			CreatedAt: time.Now(),
+		}
+		require.NoError(t, s.CreateMessage(ctx, m))
+		return m
+	}
+	noConv := newMsg("pg-msg-no-conv", agentB, "", "row without conversation")
+	nonParticipant := newMsg("pg-msg-non-participant", agentB, nonParticipantConv, "non-participant row")
+	participant := newMsg("pg-msg-participant", agentB2, participantConv, "participant row")
+	sameProj := newMsg("pg-msg-same", agentA2, sameProjConv, "same-project row")
+
+	// Rows without a conversation ID whose stamps do not name two
+	// different projects keep the previous behaviour: body shown.
+	newUnpairedMsg := func(id string, senderProj *string, body string) *store.Message {
+		m := &store.Message{
+			ID: tid(id), ProjectID: agentB.ProjectID,
+			Sender: "agent:" + agentA.Slug, SenderID: agentA.ID,
+			Recipient: "agent:" + agentB.Slug, RecipientID: agentB.ID,
+			Msg: body, Type: "instruction", AgentID: agentA.ID,
+			SenderProjectID: senderProj, CreatedAt: time.Now(),
+		}
+		require.NoError(t, s.CreateMessage(ctx, m))
+		return m
+	}
+	oneStamp := newUnpairedMsg("pg-msg-one-stamp", &agentA.ProjectID, "one-stamp row")
+	noStamp := newUnpairedMsg("pg-msg-no-stamp", nil, "unstamped row")
+
+	enableCPM(t, srv, s)
+
+	userDMKey, err := messages.DMConversationKey("user", DevUserID, "agent", agentA.ID)
+	require.NoError(t, err)
+	endpoint := "/api/v1/chat/conversations/" + url.PathEscape(userDMKey) + "/interagent"
+	rr := doRequest(t, srv, http.MethodGet, endpoint, nil)
+	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+
+	var iaResp interagentResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &iaResp))
+	got := make(map[string]string, len(iaResp.Messages))
+	for _, m := range iaResp.Messages {
+		got[m.ID] = m.Msg
+	}
+
+	want := map[string]string{
+		noConv.ID:         "", // no conversation to verify: cleared
+		nonParticipant.ID: "", // viewer not a participant: cleared
+		participant.ID:    "participant row",
+		sameProj.ID:       "same-project row",
+		oneStamp.ID:       "one-stamp row",
+		noStamp.ID:        "unstamped row",
+	}
+	for id, body := range want {
+		gotBody, ok := got[id]
+		require.True(t, ok, "row %s must be listed (only the body is cleared)", id)
+		assert.Equal(t, body, gotBody, "row %s body", id)
+	}
+}
