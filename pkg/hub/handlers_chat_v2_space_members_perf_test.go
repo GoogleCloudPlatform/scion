@@ -32,7 +32,7 @@ import (
 // memo, while making one audited attach decision per agent and loading the
 // caller's groups once for the whole attach phase instead of once per agent.
 func TestSpaceMembers_MemoizedAttachMatchesUnmemoized(t *testing.T) {
-	srv, s, owner, member, projectID := msgAuthzSetup(t)
+	srv, s, owner, member, projectID, wrapped, fault := msgAuthzSetupWithFault(t, newSpaceMembersStore)
 	ctx := context.Background()
 
 	ownerAgents := createSpaceMembersAgents(t, s, projectID, owner.ID, "memo-owner", 3)
@@ -62,21 +62,22 @@ func TestSpaceMembers_MemoizedAttachMatchesUnmemoized(t *testing.T) {
 		wants = append(wants, want{agents[i].ID, allowed})
 	}
 	require.True(t, sawAllow && sawDeny, "fixture: need both attachable and non-attachable agents")
-	require.Equal(t, nAgents, legacyGroupLoads, "unmemoized: one group load per attach decision")
+	// Unmemoized, each decision loads groups once for the kernel and once
+	// more for the project-access check of an owner or ancestor
+	// relationship (the member's own agents).
+	require.Equal(t, nAgents+len(memberAgents), legacyGroupLoads,
+		"unmemoized: one group load per attach decision, plus one per relationship project-access check")
 
 	// Count group loads made after the agent walk, i.e. by the attach phase.
 	walkDone := false
 	attachGroupLoads := 0
-	wrapped := &spaceMembersStore{
-		Store:       s,
-		onAgentPage: func(_ int, last bool) { walkDone = walkDone || last },
-		onEffectiveGroups: func() {
-			if walkDone {
-				attachGroupLoads++
-			}
-		},
+	wrapped.onAgentPage = func(_ int, last bool) { walkDone = walkDone || last }
+	wrapped.onEffectiveGroups = func() {
+		if walkDone {
+			attachGroupLoads++
+		}
 	}
-	srv.store = wrapped
+	fault.Arm()
 	srv.authzService.store = wrapped
 	emitter := &parityRecordingAuditEmitter{}
 	srv.authzService.SetDecisionAuditEmitter(emitter)

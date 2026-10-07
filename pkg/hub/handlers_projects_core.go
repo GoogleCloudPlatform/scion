@@ -24,11 +24,11 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
-	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/labels"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
@@ -314,7 +314,17 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	normalizedRemote := util.NormalizeGitRemote(req.GitRemote)
+	if msg := validateCloneURLLabelValue(req.Labels); msg != "" {
+		ValidationError(w, msg, cloneURLLabelErrorDetails())
+		return
+	}
+	sanitizeSourceURLLabel(req.Labels)
+
+	normalizedRemote, msg := normalizeRequestGitRemote(req.GitRemote)
+	if msg != "" {
+		ValidationError(w, msg, map[string]interface{}{"field": "gitRemote"})
+		return
+	}
 
 	// Workspace mode is create-only and server-owned: validate the requested
 	// mode against the project's git-ness and set the label only from the
@@ -367,6 +377,8 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 		baseSlug = api.Slugify(req.Name)
 	} else if isReservedProjectSlug(baseSlug) {
 		ValidationError(w, reservedProjectSlugMessage, map[string]interface{}{"field": "slug"})
+		return
+	} else if !requireProjectSlugFormat(w, baseSlug) {
 		return
 	}
 
@@ -522,6 +534,34 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// rollbackCreatedProject undoes this request's project creation (secret,
+	// role bindings, project row) after a workspace initialization failure.
+	rollbackCreatedProject := func() {
+		if req.GitHubToken != "" && s.secretBackend != nil && project.GitRemote != "" {
+			if delErr := s.secretBackend.Delete(ctx, "GITHUB_TOKEN", secret.ScopeProject, project.ID); delErr != nil {
+				s.projectsLogger().Warn("failed to clean up project secret after workspace init failure",
+					"project_id", project.ID, "error", delErr)
+			}
+		}
+		// Cascade-delete role bindings before the project row to avoid
+		// orphaned bindings referencing a deleted project (R1 review fix).
+		if _, rbErr := s.store.DeleteRoleBindingsForScope(ctx, store.RoleScopeProject, project.ID); rbErr != nil {
+			s.projectsLogger().Warn("failed to clean up role bindings after workspace init failure",
+				"project_id", project.ID, "error", rbErr)
+		}
+		if delErr := s.store.DeleteProject(ctx, project.ID); delErr != nil {
+			s.projectsLogger().Warn("failed to clean up project record after workspace init failure",
+				"project_id", project.ID, "error", delErr)
+		}
+		// Release the max_projects_per_user reservation taken above, like the
+		// other rollbacks in this handler. Nothing reconciles project
+		// reservations, so skipping this would leak a slot on every
+		// rolled-back create (and a hung mount invites retries).
+		if s.quotaService != nil && project.CreatedBy != "" {
+			s.quotaService.Release(ctx, "max_projects_per_user", project.ID)
+		}
+	}
+
 	// Initialize filesystem workspace for hub-managed projects and shared-workspace git projects.
 	if project.IsSharedWorkspace() {
 		// Shared-workspace git project: clone the repository into the workspace.
@@ -529,21 +569,11 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 		if err := s.cloneSharedWorkspaceProject(ctx, project); err != nil {
 			s.projectsLogger().Error("shared workspace clone failed, rolling back project creation",
 				"project_id", project.ID, "slug", project.Slug, "error", err)
-			if req.GitHubToken != "" && s.secretBackend != nil && project.GitRemote != "" {
-				if delErr := s.secretBackend.Delete(ctx, "GITHUB_TOKEN", secret.ScopeProject, project.ID); delErr != nil {
-					s.projectsLogger().Warn("failed to clean up project secret after clone failure",
-						"project_id", project.ID, "error", delErr)
-				}
-			}
-			// Cascade-delete role bindings before the project row to avoid
-			// orphaned bindings referencing a deleted project (R1 review fix).
-			if _, rbErr := s.store.DeleteRoleBindingsForScope(ctx, store.RoleScopeProject, project.ID); rbErr != nil {
-				s.projectsLogger().Warn("failed to clean up role bindings after clone failure",
-					"project_id", project.ID, "error", rbErr)
-			}
-			if delErr := s.store.DeleteProject(ctx, project.ID); delErr != nil {
-				s.projectsLogger().Warn("failed to clean up project record after clone failure",
-					"project_id", project.ID, "error", delErr)
+			rollbackCreatedProject()
+			// Workspace storage did not respond: 503, with no clone wording
+			// and no filesystem path in the body.
+			if writeWorkspaceStorageUnavailable(w, err) {
+				return
 			}
 			// Use appropriate HTTP status based on the error kind
 			statusCode := http.StatusInternalServerError
@@ -567,6 +597,17 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 	} else if project.GitRemote == "" {
 		// Hub-native project (no git remote): create workspace directory.
 		if err := s.initHubManagedProject(project); err != nil {
+			// Workspace storage did not respond: the workspace (and its
+			// seeded .scion/settings.yaml) cannot be created, so roll back
+			// like the clone failure above and answer 503. Other failures
+			// stay best-effort, as before.
+			if errors.Is(err, errWorkspaceContentTimeout) {
+				s.projectsLogger().Error("project workspace storage did not respond, rolling back project creation",
+					"project_id", project.ID, "slug", project.Slug, "error", err)
+				rollbackCreatedProject()
+				writeWorkspaceStorageUnavailable(w, err)
+				return
+			}
 			s.projectsLogger().Warn("failed to initialize project workspace",
 				"project_id", project.ID, "slug", project.Slug, "error", err)
 		}
@@ -862,7 +903,9 @@ func (s *Server) createProjectMembersGroup(ctx context.Context, project *store.P
 // "cloudrun-volume" or "gke-shared-volume", the durable volume-backed path is
 // returned instead. A backward-compatible fallback checks the durable path
 // first, then the legacy local path, so existing local deployments continue to
-// work when durable storage is first configured.
+// work when durable storage is first configured. If either check times out,
+// it returns an error wrapping errWorkspaceContentTimeout and no path (see
+// resolveDurableOrLegacyPath); HTTP handlers map that to 503.
 func (s *Server) hubManagedProjectPath(slug string) (string, error) {
 	if err := validateProjectSlug(slug); err != nil {
 		return "", err
@@ -873,19 +916,13 @@ func (s *Server) hubManagedProjectPath(slug string) (string, error) {
 	// --- NFS backend ---
 	if wsCfg != nil && wsCfg.Backend == "nfs" && wsCfg.NFS != nil && len(wsCfg.NFS.Shares) > 0 {
 		nfsPath := filepath.Join(workspaceMountRoot(wsCfg), "hub-projects", slug)
-		if hasWorkspaceContent(nfsPath) {
-			return nfsPath, nil
-		}
-		// Fallback: check legacy local path for backward compatibility
-		if localPath, err := localProjectPath(slug); err == nil && hasWorkspaceContent(localPath) {
-			return localPath, nil
-		}
-		// Neither has content — return NFS path (new projects go to NFS)
-		return nfsPath, nil
+		return s.resolveDurableOrLegacyPath(slug, nfsPath, false)
 	}
 
 	// --- Cloud Run volume and GKE shared volume backends ---
-	if volPath, ok := s.volumeBackedProjectPath(wsCfg, slug); ok {
+	if volPath, ok, err := s.volumeBackedProjectPath(wsCfg, slug); err != nil {
+		return "", err
+	} else if ok {
 		return volPath, nil
 	}
 
@@ -901,14 +938,19 @@ func hubManagedProjectPath(slug string) (string, error) {
 	return localProjectPath(slug)
 }
 
-// validateProjectSlug rejects empty slugs and slugs containing path-traversal
-// characters (/, \, ..) to prevent directory-traversal attacks.
+// validateProjectSlug accepts only slugs that name a single directory directly
+// under a projects root: non-empty, free of path separators, ":" and "..",
+// not ".", and unchanged by path cleaning. The character rules apply the same
+// way on every platform.
 func validateProjectSlug(slug string) error {
 	if slug == "" {
 		return fmt.Errorf("project slug must not be empty")
 	}
-	if strings.Contains(slug, "/") || strings.Contains(slug, "\\") || strings.Contains(slug, "..") {
+	if strings.ContainsAny(slug, "/\\:") || strings.Contains(slug, "..") {
 		return fmt.Errorf("project slug contains invalid characters")
+	}
+	if slug == "." || filepath.Clean(slug) != slug || filepath.Base(slug) != slug {
+		return fmt.Errorf("project slug must name a single directory directly under the projects root")
 	}
 	return nil
 }
@@ -926,22 +968,147 @@ func localProjectPath(slug string) (string, error) {
 	return filepath.Join(globalDir, "projects", slug), nil
 }
 
-// hasWorkspaceContent returns true if dir exists and contains meaningful
+// workspaceContentTimeout bounds the directory read in probeWorkspaceContent.
+// It mirrors the 2s mount check in checkWorkspaceStorageHealth. It is a
+// package-level var so tests can shorten it.
+var workspaceContentTimeout = 2 * time.Second
+
+// workspaceReadDir is the directory read used by probeWorkspaceContent. It is
+// a package-level var so tests can inject a read that hangs.
+var workspaceReadDir = os.ReadDir
+
+// errWorkspaceContentTimeout is returned by probeWorkspaceContent when the
+// directory read does not finish within workspaceContentTimeout. It reaches
+// hubManagedProjectPath's callers wrapped; HTTP handlers map it to 503 with
+// writeWorkspaceStorageUnavailable.
+var errWorkspaceContentTimeout = errors.New("workspace storage did not respond")
+
+// workspaceProbeCall is one in-flight directory read shared by every
+// probeWorkspaceContent call for the same directory. entries and err are
+// written before done is closed and read only after it is closed.
+type workspaceProbeCall struct {
+	done    chan struct{}
+	entries []os.DirEntry
+	err     error
+}
+
+// workspaceProbesInFlight maps a directory to its in-flight
+// *workspaceProbeCall. On a hung mount a read never returns and its
+// goroutine holds an OS thread in the syscall. Without deduplication every
+// request would add one more stuck thread (and Go aborts the process at its
+// thread limit). With it, there is at most one stuck read per directory:
+// later probes wait on the existing read, with their own timeout, instead of
+// starting a new one.
+var workspaceProbesInFlight sync.Map
+
+// probeWorkspaceContent reports whether dir exists and contains meaningful
 // workspace files beyond just infrastructure directories.
-func hasWorkspaceContent(dir string) bool {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return false
+//
+// dir may be on a network-backed mount (NFS, Filestore, a Cloud Run or GKE
+// volume). A hung mount would block a bare os.ReadDir indefinitely, and this
+// runs on the request path, so the read runs in a goroutine bounded by
+// workspaceContentTimeout. This is the same guard checkWorkspaceStorageHealth
+// applies to os.Stat on the same mount. Concurrent probes of the same
+// directory share one read (see workspaceProbesInFlight); a probe that joins
+// an in-flight read can see a result up to one read old.
+//
+// On timeout it returns (false, errWorkspaceContentTimeout). The read keeps
+// running until it returns, then removes itself from
+// workspaceProbesInFlight. A read error (missing dir, permission) is not an
+// error here. It means "no content" and returns (false, nil).
+func probeWorkspaceContent(dir string) (bool, error) {
+	call := &workspaceProbeCall{done: make(chan struct{})}
+	if existing, loaded := workspaceProbesInFlight.LoadOrStore(dir, call); loaded {
+		call = existing.(*workspaceProbeCall)
+	} else {
+		readDir := workspaceReadDir
+		go func(c *workspaceProbeCall) {
+			c.entries, c.err = readDir(dir)
+			workspaceProbesInFlight.CompareAndDelete(dir, c)
+			close(c.done)
+		}(call)
 	}
-	for _, e := range entries {
+
+	timer := time.NewTimer(workspaceContentTimeout)
+	defer timer.Stop()
+
+	select {
+	case <-call.done:
+	case <-timer.C:
+		return false, errWorkspaceContentTimeout
+	}
+	res := call
+	if res.err != nil {
+		return false, nil
+	}
+	for _, e := range res.entries {
 		switch e.Name() {
 		case "shared-dirs", ".scion":
 			continue
 		default:
-			return true
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
+}
+
+// resolveDurableOrLegacyPath picks between a project's durable path and its
+// legacy local path: the durable path if it has content, else the legacy
+// local path if that has content, else the durable path (new projects go to
+// durable storage). warnEphemeral logs when the legacy local path is chosen
+// on a platform where it is container-ephemeral.
+//
+// If either probe times out, the right answer is unknown: a legacy project
+// may live at the local path, and returning the durable path would route it
+// to an empty directory (a write splits the project, a delete removes the
+// wrong directory). It also would not unblock the request, because callers
+// do I/O on the returned path right away. So a timeout is an error and no
+// path is returned.
+func (s *Server) resolveDurableOrLegacyPath(slug, durablePath string, warnEphemeral bool) (string, error) {
+	has, err := probeWorkspaceContent(durablePath)
+	if err != nil {
+		return "", s.workspaceProbeError(slug, durablePath, err)
+	}
+	if has {
+		return durablePath, nil
+	}
+	// Fallback: check legacy local path for backward compatibility.
+	if localPath, lerr := localProjectPath(slug); lerr == nil {
+		has, err := probeWorkspaceContent(localPath)
+		if err != nil {
+			return "", s.workspaceProbeError(slug, localPath, err)
+		}
+		if has {
+			if warnEphemeral {
+				s.warnEphemeralProjectPath(slug, localPath, durablePath)
+			}
+			return localPath, nil
+		}
+	}
+	// Neither has content: return the durable path.
+	return durablePath, nil
+}
+
+// workspaceProbeError logs a timed-out workspace probe (with the path) and
+// wraps err with the project slug only. The error text can reach stored,
+// API-visible fields (e.g. a scheduled event's error), so it must not carry
+// the filesystem path. It still matches errWorkspaceContentTimeout.
+func (s *Server) workspaceProbeError(slug, path string, err error) error {
+	s.projectsLogger().Warn("Workspace storage did not respond; not resolving project path",
+		"slug", slug, "path", path, "timeout", workspaceContentTimeout, "error", err)
+	return fmt.Errorf("workspace content check for project %q: %w", slug, err)
+}
+
+// writeWorkspaceStorageUnavailable writes a 503 and returns true when err is
+// a workspace storage timeout (errWorkspaceContentTimeout). Otherwise it
+// writes nothing and returns false. The response does not include the path.
+func writeWorkspaceStorageUnavailable(w http.ResponseWriter, err error) bool {
+	if !errors.Is(err, errWorkspaceContentTimeout) {
+		return false
+	}
+	writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
+		"Workspace storage is not responding; try again later", nil)
+	return true
 }
 
 // initHubManagedProject initializes the filesystem workspace for a hub-managed project.
@@ -961,6 +1128,10 @@ func (s *Server) initHubManagedProject(project *store.Project) error {
 	scionDir := filepath.Join(workspacePath, ".scion")
 	if err := os.MkdirAll(scionDir, 0755); err != nil {
 		return fmt.Errorf("failed to create .scion directory: %w", err)
+	}
+	if _, err := s.recordHubWorkspace(project); err != nil {
+		s.projectsLogger().Warn("failed to write hub workspace record",
+			append([]any{"project_id", project.ID}, alignErrorAttrs(err)...)...)
 	}
 
 	// Seed default settings.yaml directly in scionDir. Hub-native projects
@@ -1024,11 +1195,17 @@ func (s *Server) cloneSharedWorkspaceProject(ctx context.Context, project *store
 		return fmt.Errorf("shared workspace clone failed: %w", err)
 	}
 
-	// Seed the .scion project on top of the cloned workspace
+	// Seed the .scion project on top of the cloned workspace, with the hub
+	// project ID as the workspace project identity (replacing any identity
+	// the repository carries).
 	scionDir := filepath.Join(workspacePath, ".scion")
-	if err := config.InitProject(scionDir, nil, config.InitProjectOpts{SkipRuntimeCheck: true}); err != nil {
+	if err := config.InitProject(scionDir, nil, config.InitProjectOpts{SkipRuntimeCheck: true, ProjectID: project.ID}); err != nil {
 		s.projectsLogger().Warn("failed to initialize .scion in cloned workspace",
 			"project_id", project.ID, "error", err.Error())
+	}
+	if _, err := s.recordHubWorkspace(project); err != nil {
+		s.projectsLogger().Warn("failed to write hub workspace record for cloned workspace",
+			append([]any{"project_id", project.ID}, alignErrorAttrs(err)...)...)
 	}
 
 	// Write hub connection settings
@@ -1185,7 +1362,7 @@ func (s *Server) syncWorkspaceOnStop(ctx context.Context, agent *store.Agent) {
 		return
 	}
 
-	if err := gcp.SyncFromGCS(ctx, stor.Bucket(), storagePath+"/files", workspacePath); err != nil {
+	if err := s.syncHubWorkspaceFromGCS(ctx, stor.Bucket(), storagePath+"/files", workspacePath); err != nil {
 		s.agentLifecycleLog.Warn("syncWorkspaceOnStop: GCS download failed",
 			"agent_id", agent.ID,
 			"project_id", project.ID, "error", err)
@@ -1222,7 +1399,17 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	normalizedRemote := util.NormalizeGitRemote(req.GitRemote)
+	if msg := validateCloneURLLabelValue(req.Labels); msg != "" {
+		ValidationError(w, msg, cloneURLLabelErrorDetails())
+		return
+	}
+	sanitizeSourceURLLabel(req.Labels)
+
+	normalizedRemote, msg := normalizeRequestGitRemote(req.GitRemote)
+	if msg != "" {
+		ValidationError(w, msg, map[string]interface{}{"field": "gitRemote"})
+		return
+	}
 
 	// The workspace-mode label is server-owned (design #2703 §2.4): reject
 	// values register cannot honour before any lookup or mutation.
@@ -1417,7 +1604,7 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 			matched := embeddedBroker
 			callerUser := GetUserIdentityFromContext(ctx)
 			brokerIdent := GetBrokerIdentityFromContext(ctx)
-			allowed, err := s.authorizedForBrokerOwnerAction(ctx, callerUser, brokerIdent, matched.ID,
+			allowed, err := s.authorizedForBrokerRotate(ctx, callerUser, brokerIdent, matched.ID,
 				func() (*store.RuntimeBroker, error) { return matched, nil })
 			if err != nil {
 				writeErrorFromErr(w, err, "")
@@ -2267,11 +2454,14 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, proje
 		}
 	}
 
-	result, err := s.store.ListAgents(ctx, filter, store.ListOptions{
-		Limit:         limit,
-		Cursor:        cursor,
-		CursorBinding: cursorBinding,
-	})
+	// Agent-list rule (ptone/scion#3346): for a user caller, an agent appears
+	// in an agent list, its pages and its totalCount only if the caller can
+	// read that agent. listAgents and listProjectAgents both apply it, so the
+	// two endpoints return the same set for the same project. Passing the
+	// project-level agent.list gate above does not by itself make every
+	// agent in the project readable. Agent callers are outside this rule and
+	// keep the unfiltered sibling listing (listAgentsLegacyPage).
+	result, err := s.listAgentsLegacyPage(ctx, identity, filter, cursor, cursorBinding, limit)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
@@ -2280,43 +2470,18 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, proje
 	// Enrich agents with project and broker names
 	s.enrichAgents(ctx, result.Items)
 
-	// Compute per-item and scope capabilities
+	// Compute per-item and scope capabilities. Every item is rendered: the
+	// user path above already holds only readable agents.
+	resources := make([]Resource, len(result.Items))
+	for i := range result.Items {
+		resources[i] = agentResource(&result.Items[i])
+	}
+	caps := s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "agent")
 	agents := make([]AgentWithCapabilities, 0, len(result.Items))
-	switch {
-	case agentIdent != nil:
-		// Already confirmed above to be scoped to this project. Render every
-		// item, gating only per-item env visibility, exactly as before --
-		// this is the existing sibling-agent-listing use case agent tokens
-		// rely on this endpoint for.
-		resources := make([]Resource, len(result.Items))
-		for i := range result.Items {
-			resources[i] = agentResource(&result.Items[i])
-		}
-		caps := s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "agent")
-		for i := range result.Items {
-			item := result.Items[i]
-			item.AppliedConfig = redactAppliedConfigEnvForResponse(item.AppliedConfig, s.envViewAllowed(ctx, identity, &item, caps[i]))
-			agents = append(agents, AgentWithCapabilities{Agent: item, Cap: caps[i]})
-		}
-	case identity != nil:
-		// Per-item ActionRead filter: defense in depth so that passing the
-		// project-level agent.list gate above is not by itself treated as
-		// license to read every item the store returned, matching listAgents'
-		// pattern (handlers_agents_core.go) of computing and checking
-		// per-item capabilities rather than trusting the coarse scope alone.
-		resources := make([]Resource, len(result.Items))
-		for i := range result.Items {
-			resources[i] = agentResource(&result.Items[i])
-		}
-		caps := s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "agent")
-		for i := range result.Items {
-			if !capabilityAllows(caps[i], ActionRead) {
-				continue
-			}
-			item := result.Items[i]
-			item.AppliedConfig = redactAppliedConfigEnvForResponse(item.AppliedConfig, s.envViewAllowed(ctx, identity, &item, caps[i]))
-			agents = append(agents, AgentWithCapabilities{Agent: item, Cap: caps[i]})
-		}
+	for i := range result.Items {
+		item := result.Items[i]
+		item.AppliedConfig = redactAppliedConfigEnvForResponse(item.AppliedConfig, s.envViewAllowed(ctx, identity, &item, caps[i]))
+		agents = append(agents, AgentWithCapabilities{Agent: item, Cap: caps[i]})
 	}
 	// identity == nil is unreachable here: the authorize call above already
 	// writes 401 for an unauthenticated non-agent caller before this point.
@@ -2327,11 +2492,12 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, proje
 	}
 
 	writeAgentList(w, legacyAgentListView(query), ListAgentsResponse{
-		Agents:       agents,
-		NextCursor:   result.NextCursor,
-		TotalCount:   result.TotalCount,
-		ServerTime:   time.Now().UTC(),
-		Capabilities: scopeCap,
+		Agents:                agents,
+		NextCursor:            result.NextCursor,
+		TotalCount:            result.TotalCount,
+		TotalCountApproximate: result.TotalCountApproximate,
+		ServerTime:            time.Now().UTC(),
+		Capabilities:          scopeCap,
 	})
 }
 
@@ -2408,9 +2574,11 @@ func (s *Server) createProjectAgent(w http.ResponseWriter, r *http.Request, proj
 // (TestReadEndpoint_ProjectScopedAgents_WithReadScope_Allowed): agent.read
 // has no AgentScopes mapping, so the strict check would otherwise deny even
 // an agent reading its own record. getAgent applies the same exemption.
-// Reading a *different* agent in the caller's project still goes through
-// the same agent.read check as getAgent and is denied by it (CO1); an agent
-// in another project is answered 404 before that check.
+// Reading a *different* agent in the caller's project goes through the
+// same agent.read check as getAgent (authorizeSingleAgentRead), which
+// denies it unless the caller directly launched that agent
+// (authz_launcher_read.go). An agent caller that is denied, or that names
+// an agent in another project, gets the same 404 as for a missing agent.
 func (s *Server) getProjectAgent(w http.ResponseWriter, r *http.Request, projectID, agentID string) {
 	if !checkAgentReadScope(w, r) {
 		return
@@ -2426,13 +2594,13 @@ func (s *Server) getProjectAgent(w http.ResponseWriter, r *http.Request, project
 	isSelf := false
 	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
 		if agentIdent.ProjectID() != projectID {
-			NotFound(w, "Agent")
+			writeAgentNotFound(w)
 			return
 		}
 		isSelf = agentIdent.ID() == agent.ID
 	}
 	if !isSelf {
-		if !s.authorize(w, r, agentResource(agent), ActionRead) {
+		if !s.authorizeSingleAgentRead(w, r, agent) {
 			return
 		}
 	}
@@ -2759,16 +2927,15 @@ func (s *Server) updateProject(w http.ResponseWriter, r *http.Request, id string
 		project.Name = updates.Name
 	}
 	if updates.Slug != "" {
-		newSlug := api.Slugify(updates.Slug)
-		if newSlug == "" {
-			BadRequest(w, "Invalid slug: must contain at least one alphanumeric character")
-			return
-		}
-		if newSlug != oldSlug && isReservedProjectSlug(newSlug) {
-			ValidationError(w, reservedProjectSlugMessage, map[string]interface{}{"field": "slug"})
-			return
-		}
+		newSlug := updates.Slug
 		if newSlug != oldSlug {
+			if isReservedProjectSlug(newSlug) {
+				ValidationError(w, reservedProjectSlugMessage, map[string]interface{}{"field": "slug"})
+				return
+			}
+			if !requireProjectSlugFormat(w, newSlug) {
+				return
+			}
 			existing, err := s.store.GetProjectBySlug(ctx, newSlug)
 			if err != nil && err != store.ErrNotFound {
 				writeErrorFromErr(w, err, "")
@@ -2783,6 +2950,17 @@ func (s *Server) updateProject(w http.ResponseWriter, r *http.Request, id string
 		}
 	}
 	if updates.Labels != nil {
+		// Validate the clone-url only when this request adds or changes it:
+		// the full map is resent on every PATCH, and an unchanged legacy
+		// value must not block unrelated label edits (NormalizeCloneURL
+		// strips it on read).
+		if v, ok := updates.Labels[store.LabelCloneURL]; ok && v != project.Labels[store.LabelCloneURL] {
+			if msg := validateCloneURLLabelValue(updates.Labels); msg != "" {
+				ValidationError(w, msg, cloneURLLabelErrorDetails())
+				return
+			}
+		}
+		sanitizeSourceURLLabel(updates.Labels)
 		// PATCH replaces the labels map wholesale; keep the server-owned
 		// workspace-mode label and refuse attempts to change it (design
 		// #2703 §2.4 / D6).
@@ -2909,6 +3087,9 @@ func (s *Server) migrateProjectSlug(ctx context.Context, project *store.Project,
 				}
 			}
 		}
+	} else {
+		s.projectsLogger().Warn("could not resolve project workspace directory; skipping rename, the directory may keep the old slug",
+			"project_id", project.ID, "slug", oldSlug, "new_slug", newSlug, "error", err)
 	}
 
 	// Migrate the project config directory (~/.scion/project-configs/<slug>__<short-uuid>/).
@@ -2984,7 +3165,7 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, id string
 	}
 	result, decision := s.deletionService.Delete(ctx, req)
 	if decision != nil {
-		writeError(w, decision.HTTPStatus, decision.DenialCode, decision.Reason, nil)
+		writeError(w, decision.HTTPStatus, decision.DenialCode, decision.Reason, decision.Details)
 		return
 	}
 
@@ -3076,12 +3257,8 @@ func (s *Server) executePostDeletionEffects(ctx context.Context, projectID strin
 
 	// Effect 5: Filesystem cleanup (hub-managed projects).
 	if (project.GitRemote == "" || project.IsSharedWorkspace()) && project.Slug != "" {
-		if projectPath, err := s.hubManagedProjectPath(project.Slug); err == nil {
-			if err := util.RemoveAllSafe(projectPath); err != nil {
-				s.projectsLogger().Warn("failed to remove hub-managed project directory",
-					"project_id", projectID, "slug", project.Slug, "path", projectPath, "error", err)
-			}
-		}
+		projectPath := s.removeHubManagedProjectDir(projectID, project.Slug)
+		s.removeEmbeddedBrokerProjectDir(project.Slug, projectPath)
 	}
 	s.webdavLocks.Delete(projectID)
 
@@ -3105,6 +3282,137 @@ func (s *Server) executePostDeletionEffects(ctx context.Context, projectID strin
 
 	// Effect 8: Publish project-deleted event.
 	s.events.PublishProjectDeleted(ctx, projectID)
+}
+
+// removeHubManagedProjectDir removes the hub-managed workspace directory of a
+// deleted project, subject to removeProjectDirUnderProjectsRoot. When the slug
+// does not name a direct child of a projects root, or the directory cannot be
+// resolved, nothing is removed and a warning is logged.
+//
+// It returns the resolved hub-managed path, or "" when the slug fails the slug
+// rule or the path cannot be resolved.
+func (s *Server) removeHubManagedProjectDir(projectID, slug string) string {
+	if err := validateProjectSlug(slug); err != nil {
+		s.projectsLogger().Warn("hub-managed project directory not removed: it is not a direct child of a projects root",
+			"project_id", projectID, "error", err)
+		return ""
+	}
+	projectPath, err := s.hubManagedProjectPath(slug)
+	if err != nil {
+		s.projectsLogger().Warn("could not resolve hub-managed project directory; skipping removal, the directory may be left behind",
+			"project_id", projectID)
+		return ""
+	}
+	s.removeProjectDirUnderProjectsRoot(projectID, projectPath)
+	return projectPath
+}
+
+// removeProjectDirUnderProjectsRoot removes projectPath only when it is a
+// direct child of one of the projects roots the server resolves hub-managed
+// project directories under. Any other path is left in place and a warning is
+// logged; no other path is tried instead.
+func (s *Server) removeProjectDirUnderProjectsRoot(projectID, projectPath string) {
+	if !isDirectChildOfAny(projectPath, s.hubManagedProjectsRoots()) {
+		s.projectsLogger().Warn("hub-managed project directory not removed: it is not a direct child of a projects root",
+			"project_id", projectID)
+		return
+	}
+	if err := util.RemoveAllSafe(projectPath); err != nil {
+		s.projectsLogger().Warn("failed to remove hub-managed project directory",
+			"project_id", projectID, "path", projectPath, "error", err)
+	}
+}
+
+// hubManagedProjectsRoots returns the projects roots that hubManagedProjectPath
+// resolves hub-managed project directories under for the current workspace
+// storage configuration: the local ~/.scion/projects root, which is always a
+// possible result (directly or as a fallback), and the configured backend's
+// hub-projects root, if any.
+func (s *Server) hubManagedProjectsRoots() []string {
+	var roots []string
+	if globalDir, err := config.GetGlobalDir(); err == nil {
+		roots = append(roots, filepath.Join(globalDir, "projects"))
+	}
+
+	wsCfg := s.config.WorkspaceStorageConfig
+	if wsCfg == nil {
+		return roots
+	}
+	switch {
+	case wsCfg.Backend == "nfs" && wsCfg.NFS != nil && len(wsCfg.NFS.Shares) > 0:
+		if mountRoot := workspaceMountRoot(wsCfg); mountRoot != "" {
+			roots = append(roots, filepath.Join(mountRoot, "hub-projects"))
+		}
+	case wsCfg.Backend == "cloudrun-volume" && wsCfg.CloudRunVolume != nil:
+		if mountRoot := workspaceMountRoot(wsCfg); mountRoot != "" {
+			subPathRoot := config.SubPathRootOrDefault(wsCfg.CloudRunVolume.SubPathRoot)
+			roots = append(roots, filepath.Join(mountRoot, subPathRoot, "hub-projects"))
+		}
+	case wsCfg.Backend == "gke-shared-volume" && wsCfg.GKESharedVolume != nil:
+		if mountRoot := workspaceMountRoot(wsCfg); mountRoot != "" {
+			subPathRoot := config.SubPathRootOrDefault(wsCfg.GKESharedVolume.SubPathRoot)
+			roots = append(roots, filepath.Join(mountRoot, subPathRoot, "hub-projects"))
+		}
+	}
+	return roots
+}
+
+// isDirectChildOfAny reports whether target, once cleaned, is a direct child
+// of one of roots: its parent is the cleaned root and it is not the root
+// itself. Only absolute paths qualify: a target that is not absolute never
+// matches, and a root that is empty or not absolute is never matched against.
+func isDirectChildOfAny(target string, roots []string) bool {
+	if !filepath.IsAbs(target) {
+		return false
+	}
+	cleaned := filepath.Clean(target)
+	for _, root := range roots {
+		if root == "" || !filepath.IsAbs(root) {
+			continue
+		}
+		cleanedRoot := filepath.Clean(root)
+		if cleaned != cleanedRoot && filepath.Dir(cleaned) == cleanedRoot {
+			return true
+		}
+	}
+	return false
+}
+
+// removeEmbeddedBrokerProjectDir removes the co-located broker's local
+// project directory, ~/.scion/projects/<slug>, after a project is deleted.
+//
+// The embedded broker shares this process's filesystem and materializes
+// hub-native projects at that path whatever workspace storage backend the hub
+// uses, and the broker cleanup step leaves this directory to the hub. With the
+// default local backend the hub-managed path is that same directory, so it has
+// already been removed (removedPath) and nothing more is done. With a
+// configured backend the hub-managed path may be on the backend mount, and
+// this removes the local directory as well. Only a single direct child of the
+// projects root is removed. An absent directory is not an error.
+func (s *Server) removeEmbeddedBrokerProjectDir(slug, removedPath string) {
+	if s.GetEmbeddedBrokerID() == "" {
+		return
+	}
+	if err := validateProjectSlug(slug); err != nil {
+		return
+	}
+	globalDir, err := config.GetGlobalDir()
+	if err != nil {
+		return
+	}
+	projectsRoot := filepath.Join(globalDir, "projects")
+	localPath := filepath.Join(projectsRoot, slug)
+	if filepath.Dir(localPath) != projectsRoot {
+		return
+	}
+	// An empty removedPath means no hub-managed path was removed, so the
+	// local directory is still to be removed.
+	if removedPath != "" && localPath == filepath.Clean(removedPath) {
+		return
+	}
+	if err := util.RemoveAllSafe(localPath); err != nil {
+		s.projectsLogger().Warn("embedded broker project directory removal did not complete")
+	}
 }
 
 // dispatchAgentDeletions dispatches agent deletion to runtime brokers

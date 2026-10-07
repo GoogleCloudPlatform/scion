@@ -28,8 +28,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay"
+	sconduit "github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit"
 	scionhub "github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 	scionportforward "github.com/GoogleCloudPlatform/scion/pkg/sciontool/portforward"
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
@@ -189,25 +191,41 @@ func TestConduitProxyEventStreamSoak(t *testing.T) {
 	assert.Greater(t, time.Since(start), portForwardTimeout)
 }
 
-// TestConduitProxyVersionMatrix: old and new sciontool against a hub with
-// hub.conduit on. A new sciontool is served over conduit; an old one
-// (port-forward tunnel only) still works through the tunnel. The other
-// cells: an old hub never advertises SCION_HUB_CONDUIT, so a new
-// sciontool keeps the tunnel (TestPortForwardingConduitGate), and old
-// against old is the unchanged tunnel path (TestAgentPortProxyThroughTunnel).
+// TestConduitProxyVersionMatrix: sciontool versions against a hub with
+// hub.conduit on. Each row applies its version's gate to the env the hub
+// dispatches. A new sciontool finds hub.conduit in SCION_HUB_EXPERIMENTS
+// and is served over conduit. A sciontool that gates on the retired
+// SCION_HUB_CONDUIT, and one with only the port-forward tunnel, both work
+// through the tunnel. The other cells: an old hub never lists hub.conduit,
+// so a new sciontool keeps the tunnel (TestPortForwardingConduitGate), and
+// old against old is the unchanged tunnel path
+// (TestAgentPortProxyThroughTunnel).
 func TestConduitProxyVersionMatrix(t *testing.T) {
 	for _, tc := range []struct {
-		name       string
-		start      func(t *testing.T, f *conduitProxyFixture)
-		wantTunnel bool
+		name         string
+		dialsConduit func(getenv func(string) string) bool
+		wantTunnel   bool
 	}{
+		{name: "new sciontool, conduit", dialsConduit: sconduit.HubServesConduit},
 		{
-			name:  "new sciontool, conduit",
-			start: func(t *testing.T, f *conduitProxyFixture) { f.startAgent(t) },
+			name:         "SCION_HUB_CONDUIT sciontool, tunnel",
+			dialsConduit: func(getenv func(string) string) bool { return getenv("SCION_HUB_CONDUIT") == "true" },
+			wantTunnel:   true,
 		},
 		{
-			name: "old sciontool, tunnel",
-			start: func(t *testing.T, f *conduitProxyFixture) {
+			name:         "old sciontool, tunnel",
+			dialsConduit: func(func(string) string) bool { return false },
+			wantTunnel:   true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newConduitProxyFixture(t, nil)
+			env := map[string]string{}
+			var cls map[string]api.EnvKind
+			applyAgentExperiments(env, &cls, f.srv.dispatchExperiments())
+			if tc.dialsConduit(func(k string) string { return env[k] }) {
+				f.startAgent(t)
+			} else {
 				guardSciontoolLog()
 				ctx, cancel := context.WithCancel(context.Background())
 				t.Cleanup(cancel)
@@ -215,13 +233,7 @@ func TestConduitProxyVersionMatrix(t *testing.T) {
 				go m.Run(ctx)
 				require.Eventually(t, func() bool { return f.srv.portTunnels.has(f.launched.ID) },
 					10*time.Second, 20*time.Millisecond, "tunnel not established")
-			},
-			wantTunnel: true,
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			f := newConduitProxyFixture(t, nil)
-			tc.start(t, f)
+			}
 			resp := f.get(t, "/matrix?v=1", nil)
 			body, err := io.ReadAll(resp.Body)
 			require.NoError(t, err)

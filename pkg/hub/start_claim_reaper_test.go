@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -353,4 +354,49 @@ func TestStartClaimReaper_SuccessInventoryInsideLagKeeps(t *testing.T) {
 	f.heartbeat(completeInventory(), a.Slug)
 	f.srv.reapStartClaims(ctx)
 	assert.Equal(t, store.StartClaimUnconfirmed, getAgent(t, f.s, a.ID).StartClaimState)
+}
+
+// claimDuringStopDispatcher tries a user start while the reaper's stop is
+// being applied.
+type claimDuringStopDispatcher struct {
+	*claimTestDispatcher
+	s        store.Store
+	agentID  string
+	heldKind store.StartClaimKind
+}
+
+func (d *claimDuringStopDispatcher) DispatchAgentStop(ctx context.Context, a *store.Agent) error {
+	_, err := d.s.ClaimAgentStart(context.Background(), d.agentID, "user-hub", store.StartClaimUser, "", time.Minute)
+	var held *store.ClaimHeldError
+	if errors.As(err, &held) {
+		d.heldKind = held.Kind
+	}
+	return d.claimTestDispatcher.DispatchAgentStop(ctx, a)
+}
+
+// While the reaper stops a container an unconfirmed start left running, no
+// start can claim the agent, and afterwards the stop claim stays held,
+// unconfirmed, until an inventory shows the container gone.
+func TestStartClaimReaper_StopHoldsAStopClaim(t *testing.T) {
+	f, base, a := newClaimFixture(t)
+	noObservationLag(t)
+	d := &claimDuringStopDispatcher{claimTestDispatcher: base, s: f.s, agentID: a.ID}
+	f.srv.SetDispatcher(d)
+	unconfirmedClaim(t, f, a, store.StartClaimUser, time.Millisecond)
+	time.Sleep(5 * time.Millisecond)
+	f.send(brokerHeartbeatRequest{
+		Status:    store.BrokerStatusOnline,
+		Inventory: completeInventory(),
+		Projects: []brokerProjectHeartbeat{{ProjectID: f.projectID, Agents: []brokerAgentHeartbeat{
+			{Slug: a.Slug, Phase: "starting", ContainerStatus: "Pending", RuntimeTarget: "docker"},
+		}}},
+	})
+	f.srv.reapStartClaims(context.Background())
+	require.Eventually(t, func() bool { return base.stops.Load() == 1 }, 5*time.Second, 10*time.Millisecond)
+	require.Eventually(t, func() bool {
+		return getAgent(t, f.s, a.ID).StartClaimState == store.StartClaimUnconfirmed
+	}, 5*time.Second, 10*time.Millisecond)
+	assert.Equal(t, store.StartClaimStop, d.heldKind, "a start during the stop meets the stop claim")
+	got := getAgent(t, f.s, a.ID)
+	assert.Equal(t, store.StartClaimStop, got.StartClaimKind)
 }

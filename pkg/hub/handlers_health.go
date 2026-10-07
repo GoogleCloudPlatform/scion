@@ -26,6 +26,9 @@ import (
 )
 
 type HealthResponse struct {
+	// Status must stay the first field: shell health checks
+	// (scripts/starter-hub/gce-start-hub.sh, scripts/single-node-vm/deploy.sh)
+	// read the top-level status by matching the body prefix {"status":"...".
 	Status       string            `json:"status"`
 	Version      string            `json:"version"`
 	ScionVersion string            `json:"scionVersion"`
@@ -34,6 +37,100 @@ type HealthResponse struct {
 	Uptime       string            `json:"uptime"`
 	Checks       map[string]string `json:"checks,omitempty"`
 	Stats        *HealthStats      `json:"stats,omitempty"`
+}
+
+// Composite health status values reported by /healthz (HealthResponse.Status
+// and CompositeHealthResponse.Status).
+//
+//   - healthy:   every check reports "healthy".
+//   - degraded:  only non-critical checks are non-healthy. The process is up
+//     and serving; something worth an operator's attention is wrong (e.g.
+//     the co-located broker failed to register). "Process is up" consumers
+//     (scion server start/status, gce-start-hub.sh) treat this as up and
+//     name the non-healthy checks.
+//   - unhealthy: a critical check (see criticalHealthChecks) failed. The hub
+//     cannot serve requests meaningfully; consumers treat this as down.
+//
+// Uptime monitoring (deploy/monitoring/uptime-checks.yaml) still matches
+// "healthy" exactly, so degraded continues to alert there.
+const (
+	HealthStatusHealthy   = "healthy"
+	HealthStatusDegraded  = "degraded"
+	HealthStatusUnhealthy = "unhealthy"
+)
+
+// criticalHealthChecks is the single definition of which check-map keys make
+// the composite status "unhealthy" rather than "degraded" when they report
+// anything but "healthy". Keep it small: a key belongs here only if, when it
+// fails, the hub cannot serve requests at all.
+//
+//   - database: nothing works without the store.
+//   - workspace_storage: the configured shared workspace mount is missing,
+//     unmounted, or hung. handleReadyz already takes the pod out of service
+//     for this, so /healthz agrees and reports unhealthy. Its companion
+//     workspace_storage_mount_verification ("mount could not be verified")
+//     is deliberately NOT critical: it only degrades.
+//
+// Check-map contract (for anyone adding a key in GetHealthInfo or a check*
+// helper): the value is "healthy" or a non-healthy string, conventionally
+// "unhealthy: <short fixed reason>" (the endpoint is unauthenticated, so no
+// raw error text). A non-healthy value of a key not listed here makes the
+// composite status "degraded", which consumers treat as "up, with a named
+// problem" — so an informational key no longer reads as "down". Add the key
+// here only if it should take the hub down for those consumers.
+// handleReadyz (Kubernetes readiness) is deliberately independent of this
+// set and consults its own checks.
+var criticalHealthChecks = map[string]bool{
+	"database":          true,
+	"workspace_storage": true,
+}
+
+// deriveHealthStatus computes the composite status from a check map: unhealthy
+// if any critical check is non-healthy, degraded if only non-critical checks
+// are, healthy otherwise.
+func deriveHealthStatus(checks map[string]string) string {
+	status := HealthStatusHealthy
+	for k, v := range checks {
+		if v == HealthStatusHealthy {
+			continue
+		}
+		if criticalHealthChecks[k] {
+			return HealthStatusUnhealthy
+		}
+		status = HealthStatusDegraded
+	}
+	return status
+}
+
+// healthStatusRank orders composite statuses by severity. Unknown non-empty
+// values rank as degraded: something reported a problem we cannot classify,
+// but nothing said the component is down.
+func healthStatusRank(status string) int {
+	switch status {
+	case HealthStatusHealthy:
+		return 0
+	case HealthStatusUnhealthy:
+		return 2
+	default:
+		return 1
+	}
+}
+
+// worseHealthStatus returns the more severe of two composite statuses,
+// normalizing unknown non-healthy values to degraded.
+func worseHealthStatus(a, b string) string {
+	worst := a
+	if healthStatusRank(b) > healthStatusRank(a) {
+		worst = b
+	}
+	switch healthStatusRank(worst) {
+	case 0:
+		return HealthStatusHealthy
+	case 2:
+		return HealthStatusUnhealthy
+	default:
+		return HealthStatusDegraded
+	}
 }
 
 type HealthStats struct {
@@ -69,20 +166,12 @@ func (s *Server) GetHealthInfo(ctx context.Context) *HealthResponse {
 	if projectResult, err := s.store.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{Limit: 1}); err == nil {
 		stats.Projects = projectResult.TotalCount
 	}
-	if brokerResult, err := s.store.ListRuntimeBrokers(ctx, store.RuntimeBrokerFilter{Status: store.BrokerStatusOnline}, store.ListOptions{Limit: 1}); err == nil {
-		stats.ConnectedBrokers = brokerResult.TotalCount
-	}
-
-	status := "healthy"
-	for _, v := range checks {
-		if v != "healthy" {
-			status = "degraded"
-			break
-		}
+	if count, err := s.countOnlineRuntimeBrokers(ctx); err == nil {
+		stats.ConnectedBrokers = count
 	}
 
 	return &HealthResponse{
-		Status:       status,
+		Status:       deriveHealthStatus(checks),
 		Version:      "0.1.0", // TODO: Get from build info
 		ScionVersion: version.Short(),
 		HubID:        s.HubID(),
@@ -90,6 +179,34 @@ func (s *Server) GetHealthInfo(ctx context.Context) *HealthResponse {
 		Uptime:       time.Since(s.startTime).Round(time.Second).String(),
 		Checks:       checks,
 		Stats:        stats,
+	}
+}
+
+// connectedBrokerPageSize is the page size countOnlineRuntimeBrokers uses
+// when listing brokers. It is a variable so tests can force multiple pages.
+var connectedBrokerPageSize = 200
+
+// countOnlineRuntimeBrokers counts online runtime brokers. Message broker
+// plugin records (Discord, Telegram, ...) carry the plugin label (see
+// isPluginBroker) and are always marked online, so they are not counted.
+func (s *Server) countOnlineRuntimeBrokers(ctx context.Context) (int, error) {
+	filter := store.RuntimeBrokerFilter{Status: store.BrokerStatusOnline}
+	opts := store.ListOptions{Limit: connectedBrokerPageSize}
+	count := 0
+	for {
+		result, err := s.store.ListRuntimeBrokers(ctx, filter, opts)
+		if err != nil {
+			return 0, err
+		}
+		for i := range result.Items {
+			if !isPluginBroker(&result.Items[i]) {
+				count++
+			}
+		}
+		if result.NextCursor == "" || result.NextCursor == opts.Cursor {
+			return count, nil
+		}
+		opts.Cursor = result.NextCursor
 	}
 }
 
@@ -164,55 +281,15 @@ func (s *Server) checkWorkspaceStorageHealth(checks map[string]string) {
 			// a distinct signal instead of an indistinguishable "healthy". A
 			// separate key rather than a qualified workspace_storage value,
 			// because handleReadyz compares that value to "healthy" exactly
-			// and would 503 the pod on any suffix.
+			// and would 503 the pod on any suffix, and, since
+			// workspace_storage is critical, would also make /healthz
+			// unhealthy.
 			//
-			// This is not free, and the cost is not local. GetHealthInfo marks
-			// the whole response "degraded" on any non-healthy check value, and
-			// six comparators downstream test for "healthy" exactly. Four
-			// consequences, most reachable first; this key is set only under a
-			// gke-shared-volume config, so exposure depends on the deployment:
-			//   - the diagnostics UI styles it unhealthy and labels it
-			//     "degraded": renderStatusBanner in diagnostics.ts has no
-			//     degraded class, so degraded falls through its statusClass
-			//     ternary to the red unhealthy style, and through its
-			//     statusLabel ternary to printing the raw status. Not "anything
-			//     but healthy is red" — unknown has its own neutral class, and
-			//     it is what the banner shows before the health fetch resolves.
-			//     This is the one that actually happens on a GKE hub with this
-			//     backend;
-			//   - on a workstation configured with this backend, and only
-			//     there: waitForServerReady (cmd/server_daemon.go) never
-			//     returns true, so `scion server start` stalls for its full 20s
-			//     wait and then skips the browser open with "server not yet
-			//     ready" — in an interactive non-headless terminal with web
-			//     enabled — and `scion server status` leaves WebRunning and
-			//     HubRunning both false, reporting the web frontend and the hub
-			//     API as not detected. Both, and the hub half is the one worth
-			//     spelling out: a workstation enables web by default
-			//     (cmd/server_config.go), so the hub is mounted on the web port
-			//     rather than binding :9810 (cmd/server_foreground.go), and the
-			//     status command's :9810 fallback — which would otherwise leave
-			//     HubRunning true, since it parses the body without comparing
-			//     the status — has nothing to connect to here;
-			//   - scripts/starter-hub/gce-start-hub.sh greps for
-			//     '"status":"healthy"' and exits 1 on both its health checks.
-			//     The settings.yaml that script writes declares no
-			//     workspace_storage, and the script health-checks only the hub
-			//     it just deployed, so this clause bites only where an operator
-			//     supplies that config out of band — via the hub.env
-			//     EnvironmentFile, say, whose SCION_ overrides were not traced.
-			// The other two only forward degraded: WebServer.handleHealthz into
-			// the web composite at /healthz, handleHealthSummary into the health
-			// dashboard, which does have a degraded class. Counted, not damage.
-			//
-			// That coupling is pre-existing and tracked in ptone/scion#1094.
-			// Tolerated here because this branch is unreachable on the
-			// platforms we ship — os.Stat always yields a *syscall.Stat_t on
-			// linux and darwin, and a container whose root cannot be stat'ed
-			// has larger problems. Note that hedge is a PLATFORM one: if it
-			// stops holding, the consequences above go live on their own
-			// reachability, not on this one. If it ever does become reachable,
-			// prefer logging over a check-map entry.
+			// A non-critical key, so this makes /healthz report "degraded"
+			// (up, with a named problem), never "unhealthy"; see
+			// criticalHealthChecks. Previously any non-healthy key read as
+			// "down" to scion server start/status and gce-start-hub.sh
+			// (ptone/scion#1094).
 			checks["workspace_storage_mount_verification"] = "unavailable: could not compare filesystem device IDs"
 		}
 		checks["workspace_storage"] = "healthy"
@@ -238,51 +315,16 @@ func (s *Server) checkWorkspaceStorageHealth(checks map[string]string) {
 // second attempt), so this stays degraded until the broker configuration is
 // fixed and the process is restarted — not until "resolved" in place.
 //
-// Consequences of returning a non-"healthy" key here: the exact-"healthy"
-// comparators downstream that make this consequential are the same coupling
-// checkWorkspaceStorageHealth's workspace_storage_mount_verification note
-// documents (that coupling is pre-existing and tracked in
-// ptone/scion#1094). This is reachable on the default single-node
-// workstation setup (hub + co-located broker, colocatedBrokerRegisters), not
-// just an edge case, so a failed or still-pending registration visibly
-// degrades:
-//   - the web diagnostics page (renderStatusBanner in
-//     web/src/components/pages/diagnostics.ts) fetches /healthz and, having
-//     no degraded class, renders a composite "degraded" status in the red
-//     unhealthy style with the raw label — intended here, since agent
-//     dispatch is in fact broken.
-//   - `scion server status` (cmd/server_daemon.go) used to report the Hub
-//     API/Web Frontend as "not detected" even though the process is up and
-//     serving. It now names the colocated_broker reason instead, on both the
-//     standalone Hub port (checks at the top level of the response) and the
-//     combined workstation setup, where the web server answers /healthz and
-//     nests the Hub's checks under "hub" (WebServer.handleHealthz in web.go,
-//     CompositeHealthResponse) — cmd/server_daemon.go's colocatedBrokerReason
-//     looks in both places.
-//   - `scion server start` names the same reason, but only through
-//     printWorkstationQuickstart's wait-for-ready path, which runs solely
-//     when it is about to open a browser: web enabled, an interactive
-//     non-headless terminal, and SCION_NO_BROWSER unset. Any other `start`
-//     invocation prints nothing about this at all (see the workstation
-//     bullet in checkWorkspaceStorageHealth's
-//     workspace_storage_mount_verification note above, on why this path
-//     polls the web port specifically).
-//   - scripts/starter-hub/gce-start-hub.sh greps for
-//     `"status":"healthy"` and exits 1.
-//   - web/e2e/harness/hub.ts throws waiting for a healthy response.
-//     These last two are not patched to name the check; they still see a
-//     hard "not healthy" stop.
-//
-// The registration-pending window (as opposed to a hard failure) is bounded
-// — registration runs immediately after the listener starts — so callers
-// polling during that brief window still see healthy shortly after. A
-// terminal registration failure does not self-heal, so the consumers above
-// degrade for the rest of the process's life, which is judged the right
-// tradeoff here: the Hub genuinely cannot dispatch agents without its
-// only broker, so a check-map entry — rather than logging-only, which the
-// workspace_storage_mount_verification note's closing guidance would
-// otherwise prefer for an unreachable branch like that one — is deliberate
-// here, not an oversight.
+// colocated_broker is a non-critical key (see criticalHealthChecks), so a
+// failed or still-pending registration makes /healthz "degraded", not
+// "unhealthy": the process is up and serving, but agent dispatch is broken.
+// Consumers treat degraded as up and name this check — `scion server status`
+// and `scion server start` (cmd/server_daemon.go) print it,
+// gce-start-hub.sh warns, the diagnostics banner shows an amber "Degraded",
+// and the admin health summary lists it under hub.checks. The
+// registration-pending window is bounded (registration runs immediately
+// after the listener starts), so `scion server start` keeps polling for
+// "healthy" until its deadline before settling for degraded.
 func (s *Server) checkColocatedBrokerHealth(checks map[string]string) {
 	state := s.embeddedBrokerSnapshot()
 	switch {
