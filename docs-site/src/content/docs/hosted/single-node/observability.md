@@ -536,5 +536,6 @@ The response returns process uptime and real-time divergence counters, along wit
 ## Related Guides
 
 - [Metrics & OpenTelemetry](/scion/hosted/single-node/metrics/) - Detailed telemetry configuration
+- [Hub Monitoring Dashboard](/scion/hosted/single-node/hub-monitoring-dashboard/) - Cloud Monitoring dashboard for Hub metrics
 - [Hub Server](/scion/hosted/single-node/hub-server/) - Hub integration for hosted mode
 - [Runtime Broker](/scion/hosted/ha/runtime-broker/) - Broker setup and configuration

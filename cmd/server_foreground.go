@@ -404,6 +404,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 			mp, mpErr := hubmetrics.NewMeterProvider(ctx, cfg.Hub.GCPProjectID,
 				hubmetrics.WithHubID(hubSrv.HubID()),
 				hubmetrics.WithHubName(cfg.Hub.ResolveHubName()),
+				hubmetrics.WithInstanceID(hubSrv.InstanceID()),
 			)
 			if mpErr != nil {
 				log.Printf("WARNING: hub metrics export disabled: %v", mpErr)
