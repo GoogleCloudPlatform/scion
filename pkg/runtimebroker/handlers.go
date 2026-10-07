@@ -27,6 +27,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime/debug"
 	"slices"
 	"sort"
@@ -4414,14 +4415,26 @@ func execCommandExitCode(err error) (int, bool) {
 // is command output and must not drive classification.
 const execStderrMarker = " (stderr: "
 
+// execContainerNotFoundRe matches the runtimes' own wording for a missing
+// agent container, never a bare "not found" (a missing config file, user or
+// binary must not read as the container being gone; the hub would mark a
+// healthy agent container_missing):
+//   - "container not found" / "pod not found": the runtimes' agent lookups
+//     (docker.go, podman.go, apple_container.go, k8s_runtime.go).
+//   - `pods "<name>" not found`: a Kubernetes NotFound status in text form.
+//   - `sandbox "<name>" not found`: cloudrun_sandbox_runtime.go.
+//   - "no such container" (docker, podman) and "no container with name or
+//     ID ... found" (podman): the container CLIs' daemon wording.
+var execContainerNotFoundRe = regexp.MustCompile(`(?i)\b(?:containers?|pods?|sandbox(?:es)?)(?: "[^"]*"| '[^']*')? not found\b|\bno such container\b|\bno container with name or id\b`)
+
 // isExecTargetNotFound reports whether an rt.Exec error (that is not a
 // command exit, see execCommandExitCode) means the agent's container is
-// gone. The structured signal is a Kubernetes NotFound status (the pod no
-// longer exists). The runtimes have no not-found sentinel otherwise, so the
-// fallback is the runtime's own "not found" wording, matched only on the
-// part of the message that cannot carry command output. A missing runtime
-// binary (os/exec.ErrNotFound, "executable file not found") is a broker
-// problem, not a missing agent.
+// gone. Structured signals come first: a Kubernetes NotFound status (the pod
+// no longer exists) is; a missing runtime binary (os/exec.ErrNotFound,
+// "executable file not found") is a broker problem, not a missing agent.
+// Otherwise the fallback is container-specific wording
+// (execContainerNotFoundRe), matched only on the part of the message that
+// cannot carry command output.
 func isExecTargetNotFound(err error) bool {
 	if k8serrors.IsNotFound(err) {
 		return true
@@ -4433,7 +4446,7 @@ func isExecTargetNotFound(err error) bool {
 	if i := strings.Index(msg, execStderrMarker); i >= 0 {
 		msg = msg[:i]
 	}
-	return strings.Contains(msg, "not found")
+	return execContainerNotFoundRe.MatchString(msg)
 }
 
 // scionTokenDirScript sets TOKEN_DIR to the scion user's ~/.scion inside

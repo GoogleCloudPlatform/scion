@@ -120,10 +120,19 @@ func TestExecCommand_ErrorClassification(t *testing.T) {
 			wantExit:   -1,
 		},
 		{
-			name:       "substrate actor gone (control server unreachable)",
+			// A missing substrate actor is caught by the lookup miss (its
+			// List is complete); a non-200 router response has no
+			// documented container wording and stays a runtime error.
+			name:       "substrate non-200 router response",
 			execErr:    errors.New("substrate: exec on ns/actor failed: status 404: actor not found"),
-			wantStatus: http.StatusNotFound,
-			wantCode:   ErrCodeAgentNotFound,
+			wantStatus: http.StatusInternalServerError,
+			wantCode:   ErrCodeRuntimeError,
+		},
+		{
+			name:       "runtime config file not found",
+			execErr:    errors.New("failed to resolve Cloud Run config: config file /etc/scion/cloudrun.yaml not found"),
+			wantStatus: http.StatusInternalServerError,
+			wantCode:   ErrCodeRuntimeError,
 		},
 		{
 			name:       "runtime binary missing",
@@ -230,5 +239,45 @@ func TestExecCommand_LookupMissIsAgentNotFound(t *testing.T) {
 	}
 	if execed {
 		t.Error("rt.Exec must not run when the lookup finds no container")
+	}
+}
+
+// TestIsExecTargetNotFound pins the agent_not_found fallback to
+// container-specific wording: a runtime error that merely says "not found"
+// (a missing config file, user, binary or image) must not read as the
+// container being gone, while each runtime's own missing-container wording
+// must.
+func TestIsExecTargetNotFound(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		// Not a missing container.
+		{"config file", errors.New("open /home/scion/.scion/settings.yaml: config file not found"), false},
+		{"runtime binary (wrapped exec.ErrNotFound)", fmt.Errorf("docker failed: %w", &exec.Error{Name: "docker", Err: exec.ErrNotFound}), false},
+		{"binary as plain text", errors.New(`sandbox failed: exec: "sandbox": executable file not found in $PATH`), false},
+		{"user", errors.New("unable to find user scion: no matching entries in passwd file: user not found"), false},
+		{"image", errors.New("container image not found"), false},
+		{"substrate router 404", errors.New("substrate: exec on ns/actor failed: status 404: actor not found"), false},
+		{"substrate no cached token", errors.New("substrate: no control token cached for ns/actor"), false},
+		{"container wording only in k8s command stderr", errors.New("exec failed: stream reset (stderr: Error: container not found)"), false},
+		{"k8s other status", fmt.Errorf("exec failed: %w (stderr: )", k8serrors.NewBadRequest(`container agent is not valid for pod p`)), false},
+
+		// A missing container, in each runtime's own wording.
+		{"k8s NotFound status", fmt.Errorf("exec failed: %w (stderr: )", k8serrors.NewNotFound(schema.GroupResource{Resource: "pods"}, "agent-pod")), true},
+		{"k8s NotFound as text", errors.New(`exec failed: pods "agent-pod" not found (stderr: )`), true},
+		{"k8s runtime lookup", errors.New("agent 'worker' pod not found, it may have been deleted"), true},
+		{"docker/podman/apple runtime lookup", errors.New("agent 'worker' container not found, it may have exited and been removed"), true},
+		{"cloudrun-sandbox state store", errors.New(`cloudrun-sandbox: sandbox "agent" not found in state store`), true},
+		{"docker daemon", errors.New("Error response from daemon: No such container: proj--worker"), true},
+		{"podman", errors.New(`Error: no container with name or ID "proj--worker" found: no such container`), true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isExecTargetNotFound(tt.err); got != tt.want {
+				t.Errorf("isExecTargetNotFound(%q) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
 	}
 }
