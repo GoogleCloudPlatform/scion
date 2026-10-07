@@ -2273,7 +2273,8 @@ authDone:
 		if err != nil {
 			return nil, err
 		}
-		sharedDirRecord = dropCheckedSharedDirs(agentDir, sharedDirRecord, passed, opts.Name)
+		// dropCheckedSharedDirs saves the record; nothing reads it after this.
+		_ = dropCheckedSharedDirs(agentDir, sharedDirRecord, passed, opts.Name)
 	}
 	id, err := m.Runtime.Run(ctx, runCfg)
 	if err != nil {
