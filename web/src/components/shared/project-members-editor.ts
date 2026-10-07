@@ -292,13 +292,17 @@ export function builtInCatalog(
     .sort((a, b) => rank[getRoleTier(a.name)] - rank[getRoleTier(b.name)]);
 }
 
+/** Whether a catalog role is custom: its roleKind when the hub sent one,
+ *  else whether its name is outside the built-in set. */
+function isCustomCatalogRole(r: AssignableProjectRole): boolean {
+  return r.roleKind ? r.roleKind === 'custom' : isCustomProjectRole(r.name);
+}
+
 /** Custom roles from the catalog, sorted by name. */
 export function customCatalog(
   assignable: readonly AssignableProjectRole[]
 ): AssignableProjectRole[] {
-  return assignable
-    .filter((r) => (r.roleKind ? r.roleKind === 'custom' : isCustomProjectRole(r.name)))
-    .sort((a, b) => a.name.localeCompare(b.name));
+  return assignable.filter(isCustomCatalogRole).sort((a, b) => a.name.localeCompare(b.name));
 }
 
 /** Add-mode default: Admin when the actor may grant it to this principal
@@ -337,9 +341,14 @@ export function showNoProjectRoleOption(opts: {
   currentBuiltInId: string;
   heldCustomCount: number;
 }): boolean {
-  const hasCustom = customCatalog(opts.assignable).length > 0;
-  if (opts.mode === 'add') return hasCustom && opts.principalType !== 'agent';
-  return hasCustom || opts.currentBuiltInId === NO_PROJECT_ROLE || opts.heldCustomCount > 0;
+  if (opts.mode === 'add' && opts.principalType === 'agent') return false;
+  if (
+    opts.mode !== 'add' &&
+    (opts.currentBuiltInId === NO_PROJECT_ROLE || opts.heldCustomCount > 0)
+  ) {
+    return true;
+  }
+  return opts.assignable.some(isCustomCatalogRole);
 }
 
 /** Whether any binding in the view comes from somewhere other than a direct

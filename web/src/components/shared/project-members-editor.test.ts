@@ -625,6 +625,12 @@ describe('None radio visibility', () => {
     expect(show('edit', OWNER_CATALOG, 'r-member')).toBe(true);
   });
 
+  it('counts a non-grantable custom role as a custom role', () => {
+    const catalog = [...BUILTIN_ONLY_CATALOG, R_CEIL];
+    expect(show('add', catalog)).toBe(true);
+    expect(show('edit', catalog, 'r-member')).toBe(true);
+  });
+
   it('is hidden for an agent in Add mode even with custom roles in the catalog', () => {
     expect(show('add', OWNER_CATALOG, NO_PROJECT_ROLE, 0, 'agent')).toBe(false);
     expect(show('add', OWNER_CATALOG, NO_PROJECT_ROLE, 0, 'user')).toBe(true);
