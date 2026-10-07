@@ -1667,7 +1667,7 @@ func TestAuthzService_DevLocalAuthorityEnabled(t *testing.T) {
 	})
 
 	t.Run("dev-auth off: flag false, and the real wiring cannot produce a trusted dev identity, even though the seeded DevUserID row exists", func(t *testing.T) {
-		s, err := newTestStore(":memory:")
+		s, err := newTestStore(t, ":memory:")
 		if err != nil {
 			if strings.Contains(err.Error(), "sqlite driver not registered") {
 				t.Skip("Skipping test because sqlite driver is not registered (build with -tags sqlite to enable)")
