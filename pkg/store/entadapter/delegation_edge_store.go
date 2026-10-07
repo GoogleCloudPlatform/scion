@@ -120,6 +120,12 @@ func (s *DelegationEdgeStore) CreateDelegationEdge(ctx context.Context, edge *st
 	if err := validateEdgeCeiling(edge.EffectCeiling); err != nil {
 		return err
 	}
+	// Principal and scope IDs that are UUIDs are stored in canonical form,
+	// so the descendant walk and every lookup by ID match them whatever
+	// form the caller passed (ptone/scion#3433). Other IDs are kept as given.
+	edge.DelegatorID = canonicalPrincipalID(edge.DelegatorID)
+	edge.DelegateID = canonicalPrincipalID(edge.DelegateID)
+	edge.ScopeID = canonicalPrincipalID(edge.ScopeID)
 	builder := s.client.DelegationEdge.Create().
 		SetDelegatorType(delegationedge.DelegatorType(edge.DelegatorType)).
 		SetDelegatorID(edge.DelegatorID).
@@ -631,4 +637,28 @@ func (s *DelegationEdgeStore) heldForRoot(ctx context.Context, rootID string, ca
 		}
 	}
 	return held, nil
+}
+
+// canonicalPrincipalID returns id in canonical UUID form when it parses as a
+// UUID (upper case, braced or urn forms included), and id unchanged
+// otherwise.
+func canonicalPrincipalID(id string) string {
+	if id == "" {
+		return id
+	}
+	u, err := uuid.Parse(id)
+	if err != nil {
+		return id
+	}
+	return u.String()
+}
+
+// canonicalPrincipalIDs returns a copy of ids with every UUID in canonical
+// form (see canonicalPrincipalID).
+func canonicalPrincipalIDs(ids []string) []string {
+	out := make([]string, len(ids))
+	for i, id := range ids {
+		out[i] = canonicalPrincipalID(id)
+	}
+	return out
 }

@@ -329,6 +329,9 @@ func (s *AgentStore) CreateAgent(ctx context.Context, a *store.Agent) error {
 		create.SetAnnotations(a.Annotations)
 	}
 	if len(a.Ancestry) > 0 {
+		// Principal IDs are stored in canonical UUID form so lookups by ID
+		// (the delegation descendant walk, ancestry filters) match them.
+		a.Ancestry = canonicalPrincipalIDs(a.Ancestry)
 		create.SetAncestry(a.Ancestry)
 	}
 	if cfg := marshalAppliedConfig(a.AppliedConfig); cfg != "" {
