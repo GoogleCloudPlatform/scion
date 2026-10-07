@@ -22,6 +22,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -30,6 +31,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts/remotefetch"
+	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 )
 
 var testPNG = append([]byte("\x89PNG\r\n\x1a\n"), bytes.Repeat([]byte{7}, 64)...)
@@ -660,5 +662,47 @@ func TestPublishKeepsOneRowPerNormalizedURL(t *testing.T) {
 	}
 	if n != 1 || len(ff.calls) != 1 {
 		t.Errorf("remote rows %d, fetches %v; want one each", n, ff.calls)
+	}
+}
+
+// deadlineStorage records the deadline of the contexts its downloads get.
+type deadlineStorage struct {
+	*storage.LocalStorage
+	mu        sync.Mutex
+	deadlines []time.Time
+	missing   int
+}
+
+func (d *deadlineStorage) Download(ctx context.Context, p string) (io.ReadCloser, *storage.Object, error) {
+	d.mu.Lock()
+	if dl, ok := ctx.Deadline(); ok {
+		d.deadlines = append(d.deadlines, dl)
+	} else {
+		d.missing++
+	}
+	d.mu.Unlock()
+	return d.LocalStorage.Download(ctx, p)
+}
+
+// TestFinalizeWorkRunsUnderTheWorkLimit: the work a finalize request does
+// after its claim (here, reading the entry) runs under a deadline no later
+// than finalizeWorkLimit from the request.
+func TestFinalizeWorkRunsUnderTheWorkLimit(t *testing.T) {
+	f := newFixture(t, false)
+	f.useFetcher(&fakeFetcher{bodies: map[string][]byte{"https://img.example/a.png": testPNG}})
+	ds := &deadlineStorage{LocalStorage: f.local}
+	f.svc.SetBlobStorage(ds, "hub-1")
+	files := bundle{"doc.md": []byte("![a](https://img.example/a.png)")}
+	start := time.Now()
+	f.publishBundle(agentA, "/api/v1/artifacts", files.manifest("doc.md"), files)
+	ds.mu.Lock()
+	defer ds.mu.Unlock()
+	if ds.missing > 0 || len(ds.deadlines) == 0 {
+		t.Fatalf("finalize read the entry without a deadline (%d without, %d with)", ds.missing, len(ds.deadlines))
+	}
+	for _, dl := range ds.deadlines {
+		if dl.After(start.Add(finalizeWorkLimit + time.Second)) {
+			t.Errorf("deadline %v is later than the work limit allows", dl.Sub(start))
+		}
 	}
 }
