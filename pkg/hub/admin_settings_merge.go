@@ -109,6 +109,12 @@ type sentField struct {
 // (a scalar, an array or null) the later value replaces the earlier one.
 // ok is false when raw is not a JSON object.
 //
+// handlePutServerConfig refuses a body that repeats a member name in one
+// object (rejectRepeatedJSONMembers, with the same case folding), so the
+// combining above is not reached from the PUT handler. It is kept so this
+// function reads any object the way encoding/json does, and stays correct
+// for a caller that has not run that check.
+//
 // rawServerObject, the merge and validateMergedServerSections all use
 // this, so the top-level server key, the sections the merge writes and
 // the sections the validator checks are matched by one rule.

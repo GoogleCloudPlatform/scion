@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -586,33 +587,43 @@ func TestHandlePutServerConfig_MixedCaseServerKeyMergesLikeLowerCase(t *testing.
 	}
 }
 
-// Object values sent under keys that fold to the same field are applied
-// in body order, as encoding/json decodes them into the request: the
-// members of both objects are written. This holds for sections and for
-// the top-level server key.
-func TestHandlePutServerConfig_DuplicateFoldedObjectsMergedInBodyOrder(t *testing.T) {
+// A PUT body that sends one member twice in an object, under the same
+// name or names that fold to the same field, is refused with 400 by
+// rejectRepeatedJSONMembers before the decode, and settings.yaml is
+// left byte-identical. This holds for sections and for the top-level
+// server key.
+func TestHandlePutServerConfig_RepeatedFoldedKeysRejectedWithoutWriting(t *testing.T) {
 	cases := []struct {
 		name string
 		body string
+		key  string
 	}{
-		{"section", `{"server":{"github_app":{"app_id":5},"GitHub_App":{"installation_url":"x"}}}`},
-		{"server", `{"server":{"github_app":{"app_id":5}},"Server":{"github_app":{"installation_url":"x"}}}`},
+		{"section", `{"server":{"github_app":{"app_id":5},"GitHub_App":{"installation_url":"x"}}}`, "GitHub_App"},
+		{"server", `{"server":{"github_app":{"app_id":5}},"Server":{"github_app":{"installation_url":"x"}}}`, "Server"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			rr, settingsPath := putFileModeServerConfig(t, storedServerSettings, tc.body)
-			if rr.Code != http.StatusOK {
-				t.Fatalf("PUT: %d %s", rr.Code, rr.Body.String())
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("PUT: status %d, want 400: %s", rr.Code, rr.Body.String())
 			}
-			gh := readServerSection(t, settingsPath, "github_app")
-			if gh["app_id"] != 5 {
-				t.Errorf("server.github_app.app_id = %v, want 5", gh["app_id"])
+			var resp struct {
+				Error struct {
+					Message string `json:"message"`
+				} `json:"error"`
 			}
-			if gh["installation_url"] != "x" {
-				t.Errorf("server.github_app.installation_url = %v, want x", gh["installation_url"])
+			if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("PUT body %s: %v", rr.Body.String(), err)
 			}
-			if gh["private_key"] != "test-private-key" {
-				t.Errorf("server.github_app.private_key = %v, want kept", gh["private_key"])
+			if want := "repeats the member name " + strconv.Quote(tc.key); !strings.Contains(resp.Error.Message, want) {
+				t.Errorf("PUT error = %q, want it to contain %s", resp.Error.Message, want)
+			}
+			data, err := os.ReadFile(settingsPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(data) != storedServerSettings {
+				t.Errorf("settings.yaml changed by a rejected PUT:\n%s", data)
 			}
 		})
 	}
