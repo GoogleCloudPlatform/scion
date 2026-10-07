@@ -354,6 +354,11 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	// echo only ever carries validated values. Without sort, nothing here
 	// runs and both short-circuits return the legacy empty list.
 	sorted := isSortedModeRequest(query)
+	if sorted {
+		perfSetEndpoint(ctx, perfEndpointAgentsGlobalSorted)
+	} else {
+		perfSetEndpoint(ctx, perfEndpointAgentsGlobalLegacy)
+	}
 	var sortParam, dirParam string
 	if sorted {
 		var ok bool
@@ -385,7 +390,9 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 
 	// RS2: Resolve authorization scope FIRST — before building filter or cursor
 	// binding. This is the single authoritative scope decision for the request.
+	scopeDone := perfPhaseStart(ctx, perfPhaseListScopeAuthz)
 	scopeResult, err := s.authzService.ResolveListScopes(ctx, identity, "agent.list")
+	scopeDone()
 	if err != nil {
 		slog.WarnContext(ctx, "listAgents: authorization scope resolution failed (fail-closed)",
 			"error", err)
@@ -464,8 +471,10 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 		filter.ExcludedProjectIDs = canonicalizeStringSlice(append([]string{}, scopeResult.ExcludedProjectIDs...))
 	}
 
+	classifyDone := perfPhaseStart(ctx, perfPhaseListScopeAuthz)
 	classification, err := s.resolveProjectListClassification(
 		ctx, identity, query.Get("scope"), query.Get("mine") == "true", scopeResult, "listAgents")
+	classifyDone()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 			"unable to resolve authorization", nil)
@@ -3098,6 +3107,7 @@ func (s *Server) enrichAgents(ctx context.Context, agents []store.Agent) {
 	if len(agents) == 0 {
 		return
 	}
+	defer perfPhaseStart(ctx, perfPhaseEnrich)()
 
 	// Collect unique project, broker, and template IDs
 	projectIDs := make(map[string]struct{})

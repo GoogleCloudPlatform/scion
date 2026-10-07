@@ -458,6 +458,17 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 					return
 				}
 
+				// Step 3d: Artifact view capability. A credential-less GET or
+				// HEAD under /api/v1/artifacts/view/ is passed through WITHOUT
+				// an identity: the artifact service verifies the capability
+				// in the path on every request and serves nothing without
+				// one, and the route never uses an identity.
+				if isArtifactViewRequest(r) {
+					ctx = contextWithAuthType(ctx, AuthTypeSignedURL)
+					serveAfterAuth(w, next, r.WithContext(ctx))
+					return
+				}
+
 				writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
 					"missing authorization header", nil)
 				return
