@@ -229,7 +229,7 @@ Examples:
 		}
 
 		// Ensure we have a message body
-		if message == "" {
+		if message == "" && len(msgArtifacts) == 0 {
 			return fmt.Errorf("message body is empty; provide a message via positional args, --body-file, or pipe to stdin with '-'")
 		}
 
@@ -307,6 +307,23 @@ Examples:
 				}
 				return fmt.Errorf("attachment %q: is not a regular file", p)
 			}
+		}
+
+		// Validate artifact references (ptone/scion#3223). They are carried
+		// in message metadata and as URLs in the body.
+		artifactRefs, err := parseArtifactFlags(msgArtifacts)
+		if err != nil {
+			return err
+		}
+		msgArtifactRefs = artifactRefs
+		if len(artifactRefs) > 0 {
+			if msgIn != "" || msgAt != "" {
+				return newUsageError("--artifact cannot be combined with --in or --at")
+			}
+			if len(groupRecipients) > 0 {
+				return newUsageError("--artifact cannot be used with group[] recipients")
+			}
+			message = appendArtifactRefsToBody(message, artifactRefs)
 		}
 
 		// Cross-project detection: when running as an agent and --project
@@ -448,6 +465,11 @@ Examples:
 			return fmt.Errorf("--wake requires Hub mode (use 'scion hub enable' first)")
 		}
 
+		// --artifact requires Hub mode: references are resolved by the Hub.
+		if len(msgArtifactRefs) > 0 {
+			return fmt.Errorf("--artifact requires Hub mode (use 'scion hub enable' first)")
+		}
+
 		// --attach requires Hub mode: attachments are delivered through Hub
 		// storage, while local mode writes plain text to the agent terminal
 		// and cannot transfer files.
@@ -512,6 +534,7 @@ func buildStructuredMessage(sender, recipient, message string, attachments []str
 	}
 	msg.Channel = msgChannel
 	msg.ThreadID = msgThreadID
+	msg.Metadata = artifactRefsMetadata(msgArtifactRefs)
 	return msg
 }
 
@@ -597,6 +620,7 @@ func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, int
 	// reports the send itself; a skipped mention never means a failed send.
 	if resp != nil {
 		printMentionResults(resp.MentionResults)
+		printArtifactWarning(resp.ArtifactWarning)
 	}
 	if resp != nil && resp.Status == "deferred" {
 		// Design agent-reincarnate §3.7: the recipient is mid-`scion
@@ -664,6 +688,7 @@ func sendCrossProjectMessage(hubCtx *HubContext, targetProject, agentSlug, messa
 	}
 	if resp != nil {
 		printMentionResults(resp.MentionResults)
+		printArtifactWarning(resp.ArtifactWarning)
 	}
 	fmt.Printf("Message delivered to agent '%s' in project '%s'.\n", agentSlug, targetProject)
 
@@ -738,6 +763,7 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 			}
 			if resp != nil {
 				printMentionResults(resp.MentionResults)
+				printArtifactWarning(resp.ArtifactWarning)
 			}
 			if resp != nil && resp.Status == "deferred" {
 				// Design agent-reincarnate §3.7: the recipient is
@@ -760,6 +786,7 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 			ConversationRef: ref.Raw,
 			Attachments:     attachments,
 			Wake:            wake,
+			Metadata:        artifactRefsMetadata(msgArtifactRefs),
 		}
 		if ref.Kind == messaging.RefEmail {
 			outMsg.Recipient = "user:" + ref.Value
@@ -802,6 +829,7 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 		}
 		// Mention outcomes first, so the confirmation is the last line.
 		printMentionResults(result.MentionResults)
+		printArtifactWarning(result.ArtifactWarning)
 		// Distinguish accepted dispatch from confirmed delivery.
 		switch result.Status {
 		case "sent":
@@ -835,8 +863,12 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 		return fmt.Errorf("message validation failed: %w", err)
 	}
 
-	if _, err := agentSvc.SendStructuredMessage(ctx, ref.Value, agentMsg, interrupt, false, wake); err != nil {
+	humanResp, err := agentSvc.SendStructuredMessage(ctx, ref.Value, agentMsg, interrupt, false, wake)
+	if err != nil {
 		return agentMessageSendError(ref.Value, err)
+	}
+	if humanResp != nil && !isJSONOutput() {
+		printArtifactWarning(humanResp.ArtifactWarning)
 	}
 	if !isJSONOutput() {
 		fmt.Printf("Message delivered to agent '%s'.\n", ref.Value)
@@ -910,6 +942,7 @@ func sendOutboundMessageViaHub(hubCtx *HubContext, userRecipient string, message
 		Attachments: msgAttach,
 		Channel:     msgChannel,
 		ThreadID:    msgThreadID,
+		Metadata:    artifactRefsMetadata(msgArtifactRefs),
 	}
 
 	result, err := agentSvc.SendOutboundMessage(ctx, senderAgent, outMsg)
@@ -925,6 +958,7 @@ func sendOutboundMessageViaHub(hubCtx *HubContext, userRecipient string, message
 	}
 	if result != nil {
 		printMentionResults(result.MentionResults)
+		printArtifactWarning(result.ArtifactWarning)
 	}
 	// #2026: name the conversation the message landed in when the hub
 	// reports it, so a send with --channel/--thread-id shows where it went.
@@ -1781,6 +1815,7 @@ func init() {
 	// Retained flags (core message functionality)
 	messageCmd.Flags().BoolVarP(&msgInterrupt, "interrupt", "i", false, "Interrupt the harness before sending the message")
 	messageCmd.Flags().BoolVarP(&msgWake, "wake", "w", false, "Resume a suspended agent before delivering the message")
+	messageCmd.Flags().StringArrayVar(&msgArtifacts, "artifact", nil, "Reference a published artifact (scion://artifact/<id>[@<seq>]), repeatable, at most 10. The reference is added to the message text and the recipient is shown how to fetch it; the hub attaches only artifacts you can read.")
 	messageCmd.Flags().StringArrayVar(&msgAttach, "attach", nil, "Attach file path(s), repeatable; use paths under /workspace or /scion-volumes (bare relative paths resolve to /workspace). Absolute paths outside these roots are silently dropped on delivery.")
 	messageCmd.Flags().StringVar(&msgBodyFile, "body-file", "", "Read message body from a file instead of positional args ('-' reads stdin; trailing CR/LF characters are trimmed)")
 

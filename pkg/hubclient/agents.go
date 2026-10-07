@@ -630,6 +630,9 @@ type MessageResponse struct {
 	// one entry per resolved mention name. Empty when the message had no
 	// mentions, or on hubs that predate this field.
 	MentionResults []messages.MentionResult `json:"mention_results,omitempty"`
+	// ArtifactWarning is set when artifact references the message named
+	// were not attached. Empty on hubs that predate this field.
+	ArtifactWarning string `json:"artifact_warning,omitempty"`
 }
 
 // SendMessageOptions holds the optional parameters for
@@ -781,6 +784,9 @@ type OutboundMessageResult struct {
 	// one entry per resolved mention name. Empty when the message had no
 	// mentions, or on hubs that predate this field.
 	MentionResults []messages.MentionResult `json:"mention_results,omitempty"`
+	// ArtifactWarning is set when artifact references the message named
+	// were not attached. Empty on hubs that predate this field.
+	ArtifactWarning string `json:"artifact_warning,omitempty"`
 }
 
 // SendOutboundMessage sends a message from an agent via the outbound endpoint.
