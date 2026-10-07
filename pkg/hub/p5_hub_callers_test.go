@@ -502,3 +502,81 @@ func TestCleanupFailedCreate_RunMismatchKeepsRow(t *testing.T) {
 		})
 	}
 }
+
+// schedRefusingClient fails every create after moving the agent's row to
+// run-owner (as a create handed to another node records the owning node's
+// run), and answers the cleanup's delete with the broker's run-mismatch
+// refusal (ptone/scion#3080), naming the run the delete sent.
+type schedRefusingClient struct {
+	*mintBrokerClient
+	st      store.Store
+	mu      sync.Mutex
+	deletes []string
+}
+
+func (c *schedRefusingClient) CreateAgent(ctx context.Context, brokerID, endpoint string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, error) {
+	c.lastCreateReq = req
+	c.lastBrokerID = brokerID
+	if _, err := c.st.SetAgentRunID(ctx, req.ID, "run-owner"); err != nil {
+		return nil, err
+	}
+	return nil, errors.New("broker unavailable")
+}
+
+func (c *schedRefusingClient) DeleteAgent(_ context.Context, _, _, _, _ string, opts DeleteAgentOptions) error {
+	c.mu.Lock()
+	c.deletes = append(c.deletes, opts.RunID)
+	c.mu.Unlock()
+	return &DeleteRunMismatchError{RequestedRunID: opts.RunID, CurrentRunID: "run-other", Err: ErrDeleteRunMismatch}
+}
+
+// A scheduled create whose dispatch fails runs the same create-failure
+// cleanup as the HTTP create paths (server.go dispatchAgentEventHandler,
+// rollback → cleanupFailedCreate). When the broker refuses the cleanup's
+// delete because it holds another run, the scheduled child's row stays in
+// phase error naming both runs (and is not compensated); the delete named the
+// run the row records (the re-read of failedCreateDeleteTarget). The
+// decision goes through refuseDeleteRunMismatch as a best-effort,
+// non-force delete: with the policy flipped, the row is compensated.
+func TestSchedDispatchFailure_RunMismatchKeepsRow(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		refuse   bool
+		wantKept bool
+	}{
+		{"policy refuses: the row is kept", true, true},
+		{"policy flipped: the row is compensated", false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			policy := flipDeleteRunMismatchPolicy(t, tc.refuse)
+			f := newSchedFire(t, "sched-p5-"+uuid.NewString()[:6])
+			client := &schedRefusingClient{mintBrokerClient: &mintBrokerClient{mockRuntimeBrokerClient: &mockRuntimeBrokerClient{}}, st: f.store}
+			disp := NewHTTPAgentDispatcherWithClient(f.store, client, false, slog.Default())
+			disp.SetTokenGenerator(f.srv)
+			f.srv.SetDispatcher(disp)
+			slug := "sched-p5-child"
+
+			err := f.fire(t, withSessionRevision(f.event(slug), f.creator.ID))
+			require.Error(t, err)
+			assert.Equal(t, []policyCall{{force: false, bestEffort: true}}, policy.got(),
+				"the scheduled cleanup asks the switch as a best-effort, non-force delete")
+			require.Len(t, client.deletes, 1)
+
+			require.NotNil(t, client.lastCreateReq)
+			child, gerr := f.store.GetAgentBySlug(context.Background(), f.proj.ID, slug)
+			if !tc.wantKept {
+				require.ErrorIs(t, gerr, store.ErrNotFound, "the row is compensated")
+				return
+			}
+			require.NoError(t, gerr, "the scheduled child's row was removed after the refusal")
+			assert.Equal(t, string(state.PhaseError), child.Phase)
+			assert.Contains(t, child.Message, "holds run run-other of this agent")
+			assert.Equal(t, "run-owner", child.RunID)
+			assert.Equal(t, "run-owner", client.deletes[0], "the delete named the run the row records, not the dispatch's minted run")
+			// The scheduled create takes no quota reservation (the fire path
+			// reserves none), so there is no reservation to hold or release
+			// here; the HTTP path's quota hold is pinned by
+			// TestCleanupFailedCreate_RunMismatchKeepsRow.
+		})
+	}
+}
