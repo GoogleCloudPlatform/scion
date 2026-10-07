@@ -137,11 +137,19 @@ type Attempt struct {
 	TTFBMs  float64 `json:"ttfbMs,omitempty"`
 	TotalMs float64 `json:"totalMs"`
 	// PerfTrace is set only when the hub was started with request
-	// performance tracing on (server.hub.perf_trace), the request carried
-	// the opt-in X-Scion-Perf-Trace header, AND the response actually
-	// included trace headers -- not merely because --want-perf-trace was
-	// passed. Keys are the X-Scion-Perf-* header names.
+	// performance tracing on (server.hub.perf_trace) and the data actually
+	// came back: either in the response headers (the request carried the
+	// opt-in X-Scion-Perf-Trace header and the caller is an unscoped local
+	// platform admin) or from the hub's perf_trace log line joined by
+	// request ID (--hub-perf-log). Keys are the X-Scion-Perf-* header names.
 	PerfTrace map[string]string `json:"perfTrace,omitempty"`
+	// PerfTraceSource is "headers" when PerfTrace came from the response
+	// headers (admin callers only) and "hub-log" when apibench joined it
+	// from the hub's perf_trace log line by RequestID (--hub-perf-log).
+	PerfTraceSource string `json:"perfTraceSource,omitempty"`
+	// RequestID is the hub's X-Request-ID response header, used to join
+	// the attempt to the hub's log.
+	RequestID string `json:"requestId,omitempty"`
 }
 
 // ScenarioStats holds repeated-trial timing for one (endpoint, agentCount)

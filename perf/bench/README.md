@@ -418,9 +418,13 @@ When the hub runs with request performance tracing on (add
 set `server.hub.perf_trace: true`), add `--want-perf-trace` to additionally
 capture the `X-Scion-Perf-*` response headers per attempt: endpoint class,
 phase times (microseconds) and counts, authorization store calls and times,
-decision-audit counts, and DB pool waits. The hub also logs one
-`perf_trace` line per request, which adds the `serialize` phase the headers
-cannot include. See `pkg/hub/perftrace.go` for the phase definitions. On a baseline run against
+decision-audit counts, and DB pool waits. The hub sends those headers only
+to unscoped local platform admins, so for the seeded member caller also
+pass `--hub-perf-log <hub log file>` (redirect the hub's output to a file):
+after the run, apibench joins each attempt to the hub's `perf_trace` log
+line by request ID and stores the same fields, plus the `serialize` phase,
+with `perfTraceSource: "hub-log"`. See `pkg/hub/perftrace.go` for the phase
+definitions. On a baseline run against
 unmodified `main`, or if the flag was passed but no trace headers actually
 came back, the report's `perfTraceAvailable` field is `false` for that
 scenario, not silently omitted or wrongly true.

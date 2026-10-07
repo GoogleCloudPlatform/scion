@@ -202,6 +202,7 @@ func main() {
 	outPath := flag.String("out", "", "path to write the JSON report (required)")
 	wantPerfTrace := flag.Bool("want-perf-trace", false, "set the opt-in X-Scion-Perf-Trace header and record any perf-trace response data (only meaningful when the hub runs with server.hub.perf_trace on)")
 	notes := flag.String("notes", "", "free-form note about machine/CPU conditions for this run, copied into the report")
+	hubPerfLog := flag.String("hub-perf-log", "", "path to the hub's JSON log; after the run, its perf_trace lines are joined to attempts by request ID (for callers that do not receive the admin-only perf headers)")
 	timeoutSeconds := flag.Int("timeout-seconds", 60, "per-request client timeout; the unmodified-main baseline at 500 agents can exceed the 60s default, per ptone/scion#2367's superlinear-scaling diagnosis")
 	flag.Parse()
 
@@ -308,6 +309,14 @@ func main() {
 		}
 	}
 
+	if *hubPerfLog != "" {
+		n, err := mergeHubPerfLog(&report, *hubPerfLog)
+		if err != nil {
+			log.Fatalf("read hub perf log: %v", err)
+		}
+		fmt.Printf("joined %d attempts to hub perf_trace lines\n", n)
+	}
+
 	// Sample again at the end, not just the start.
 	report.Machine.LoadAvg1AtEnd, report.Machine.LoadAvg5AtEnd, report.Machine.LoadAvg15AtEnd = readLoadAvg()
 
@@ -381,6 +390,7 @@ func runScenario(client *http.Client, hubURL, name, endpoint, token string, agen
 			a.Error = fmt.Sprintf("non-2xx status %d", a.Status)
 		}
 
+		a.RequestID = resp.Header.Get("X-Request-ID")
 		if wantPerfTrace {
 			trace := map[string]string{}
 			for _, k := range perfTraceResponseHeaders {
@@ -393,6 +403,7 @@ func runScenario(client *http.Client, hubURL, name, endpoint, token string, agen
 			// hitting an unmodified-main hub with the flag on).
 			if len(trace) > 0 {
 				a.PerfTrace = trace
+				a.PerfTraceSource = "headers"
 			}
 		}
 		return a
