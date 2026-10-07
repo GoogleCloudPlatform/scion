@@ -95,9 +95,13 @@ describe('scion-chat-file-preview artifact target', () => {
     document.body.innerHTML = '';
   });
 
-  it('loads the current version and renders markdown with the artifact actions', async () => {
+  it('loads the current version and shows Markdown as source only, with the artifact actions', async () => {
     apiFetchMock.mockImplementation((path: string) =>
-      Promise.resolve(path.includes('/files/') ? text('# Title') : json(meta(3)))
+      Promise.resolve(
+        path.includes('/files/')
+          ? text('# Title\n\n![x](https://example.com/x.png)')
+          : json(meta(3))
+      )
     );
     const el = await open();
 
@@ -106,10 +110,15 @@ describe('scion-chat-file-preview artifact target', () => {
       `/api/v1/artifacts/${ID}/versions/3/files/design.md?stream=1`,
     ]);
     expect(q(el, 'sl-dialog')?.getAttribute('label')).toBe('Design notes');
-    expect(q(el, 'scion-markdown-preview')).toBeTruthy();
+    // Artifact Markdown is never rendered in the page: no markdown preview,
+    // no <img>, only the read-only source and a pointer to the viewer.
+    expect(q(el, 'scion-markdown-preview')).toBeNull();
+    expect(el.shadowRoot?.querySelectorAll('img')).toHaveLength(0);
+    expect(q(el, 'scion-code-editor')).toBeTruthy();
+    expect(q(el, '.artifact-source-note')?.textContent).toContain('Open in artifact viewer');
     expect(q(el, '.footer .path')?.textContent).toBe('design.md · v3');
-    expect(buttons(el)).toEqual(['Copy link', 'Source', 'Open in artifact viewer']);
-    const viewer = el.shadowRoot?.querySelectorAll('.footer sl-button')[2];
+    expect(buttons(el)).toEqual(['Copy link', 'Open in artifact viewer']);
+    const viewer = el.shadowRoot?.querySelectorAll('.footer sl-button')[1];
     expect(viewer?.getAttribute('href')).toBe(`/projects/proj-1/artifacts/${ID}`);
     expect(viewer?.querySelector('sl-icon')?.getAttribute('name')).toBe('box-arrow-up-right');
   });

@@ -128,6 +128,12 @@ interface ArtifactInfo {
   version: number;
   entry: string;
   pageUrl: string;
+  /**
+   * A Markdown entry shown as source text. Rendered artifact Markdown is
+   * only ever shown in the artifact viewer's sandboxed frame, which keeps
+   * every image on the hub; the chat preview does not render it.
+   */
+  markdownSource?: boolean;
 }
 
 /** Image MIME types rendered inline (mirrors chat-message.ts's IMAGE_MIMES). */
@@ -697,12 +703,12 @@ export class ScionChatFilePreview extends LitElement {
       }
       const content = await fileRes.text();
       if (gen !== this.generation) return;
+      // Markdown is shown as source, never rendered here: see markdownSource.
       this.loadState = {
         ...base,
         status: 'ready',
-        isMarkdown: renderer === 'markdown',
         content,
-        artifact,
+        artifact: renderer === 'markdown' ? { ...artifact, markdownSource: true } : artifact,
       };
     } catch {
       if (gen !== this.generation || controller.signal.aborted) return;
@@ -840,9 +846,14 @@ export class ScionChatFilePreview extends LitElement {
       ></scion-markdown-preview>`;
     }
     return html`
+      ${state.artifact?.markdownSource
+        ? html`<div class="artifact-source-note">
+            Markdown source. Open in artifact viewer for the rendered view.
+          </div>`
+        : nothing}
       <scion-code-editor
         .content=${state.content ?? ''}
-        language=${getLanguageFromPath(target.name)}
+        language=${getLanguageFromPath(state.artifact?.entry ?? target.name)}
         readonly
       ></scion-code-editor>
     `;
@@ -1004,6 +1015,12 @@ export class ScionChatFilePreview extends LitElement {
       max-width: 100%;
       max-height: calc(var(--scion-app-height, 100dvh) * 0.75);
       object-fit: contain;
+    }
+    .artifact-source-note {
+      padding: 0.5rem 1rem;
+      font-size: var(--chat-fs-sm, 0.8125rem);
+      color: var(--scion-text-muted, #64748b);
+      border-bottom: 1px solid var(--scion-border, #e2e8f0);
     }
     .footer {
       display: flex;
