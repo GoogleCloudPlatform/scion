@@ -103,7 +103,7 @@ var messagingOperations = []OperationSpec{
 		Bearer: AdmitOn(BearerTargetSelfRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},
 	{
-		ID:          "messaging.channels.list",
+		ID:          "inbox.channels.list",
 		Domain:      "inbox",
 		Description: "List the registered message channels: static capability metadata with no records",
 		EntryPoints: []EntryPoint{
@@ -128,7 +128,7 @@ var messagingOperations = []OperationSpec{
 		Bearer: BearerDisposition{Kind: BearerAdmitSelf, SelfFilter: BearerSelfFilterNone, Pin: "TestMessagingStaticMetadata_AnyTokenReads"},
 	},
 	{
-		ID:          "messaging.capabilities.read",
+		ID:          "inbox.capabilities.read",
 		Domain:      "inbox",
 		Description: "Read the hub messaging capabilities: static capability metadata with no records",
 		EntryPoints: []EntryPoint{
@@ -153,7 +153,7 @@ var messagingOperations = []OperationSpec{
 		Bearer: BearerDisposition{Kind: BearerAdmitSelf, SelfFilter: BearerSelfFilterNone, Pin: "TestMessagingStaticMetadata_AnyTokenReads"},
 	},
 	{
-		ID:          "conversation.list",
+		ID:          "inbox.conversation.list",
 		Domain:      "inbox",
 		Description: "List the caller's conversations. A token lists only conversations inside its boundary, and a direct conversation with an agent only with agent:read on that agent; the project group union also needs project:read",
 		EntryPoints: []EntryPoint{
@@ -173,7 +173,7 @@ var messagingOperations = []OperationSpec{
 		Bearer: AdmitOn(BearerTargetSelfRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},
 	{
-		ID:          "conversation.create",
+		ID:          "inbox.conversation.create",
 		Domain:      "inbox",
 		Description: "Create a group conversation in a project. Needs project:read on the project; a token also needs inbox:write for it",
 		EntryPoints: []EntryPoint{
@@ -194,7 +194,7 @@ var messagingOperations = []OperationSpec{
 		Bearer: AdmitOn(BearerTargetProjectBody, BearerBoundaryProject, BearerBoundaryHub),
 	},
 	{
-		ID:          "conversation.group.read",
+		ID:          "project.conversation.read",
 		Domain:      "project",
 		Description: "Read a group conversation, its messages and one message. Needs project:read on the conversation's project; a group with no project needs participation, and a token needs inbox:read on a hub boundary for it",
 		EntryPoints: []EntryPoint{
@@ -216,7 +216,7 @@ var messagingOperations = []OperationSpec{
 		Bearer: AdmitOn(BearerTargetConversationRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},
 	{
-		ID:          "conversation.direct.read",
+		ID:          "inbox.conversation.direct.read",
 		Domain:      "inbox",
 		Description: "Read a direct conversation, its messages and one message. A token needs inbox:read for the peer agent's project and agent:read on the peer agent; a direct conversation between users needs a hub boundary",
 		EntryPoints: []EntryPoint{
@@ -238,7 +238,7 @@ var messagingOperations = []OperationSpec{
 		Bearer: AdmitOn(BearerTargetSelfRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},
 	{
-		ID:          "conversation.defaultagent.set",
+		ID:          "inbox.conversation.defaultagent.set",
 		Domain:      "inbox",
 		Description: "Set the default agent of a group conversation. Needs project:read on the conversation's project; a token also needs inbox:write for it",
 		EntryPoints: []EntryPoint{
@@ -258,7 +258,7 @@ var messagingOperations = []OperationSpec{
 		Bearer: AdmitOn(BearerTargetConversationRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},
 	{
-		ID:          "conversation.participant.add",
+		ID:          "inbox.conversation.participant.add",
 		Domain:      "inbox",
 		Description: "Add a participant to a group conversation. Every caller needs project:read on the conversation's project; an added agent must be in that project and an added user must be a member of it; a token also needs inbox:write for it",
 		EntryPoints: []EntryPoint{
@@ -278,7 +278,7 @@ var messagingOperations = []OperationSpec{
 		Bearer: AdmitOn(BearerTargetConversationRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},
 	{
-		ID:          "conversation.leave",
+		ID:          "inbox.conversation.leave",
 		Domain:      "inbox",
 		Description: "Leave a conversation the caller takes part in. A token needs inbox:write for the conversation",
 		EntryPoints: []EntryPoint{
@@ -298,7 +298,7 @@ var messagingOperations = []OperationSpec{
 		Bearer: AdmitOn(BearerTargetSelfRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},
 	{
-		ID:          "conversation.resolve",
+		ID:          "inbox.conversation.resolve",
 		Domain:      "inbox",
 		Description: "Resolve a conversation reference. A group reference needs project:read on its project and an agent reference needs agent:read on the agent, for every user caller; a token also needs inbox:read for the result",
 		EntryPoints: []EntryPoint{
@@ -319,7 +319,7 @@ var messagingOperations = []OperationSpec{
 		Bearer: AdmitOn(BearerTargetSelfRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},
 	{
-		ID:          "messaging.target.resolve",
+		ID:          "agent.message.target.resolve",
 		Domain:      "agent.message",
 		Description: "Resolve a cross-project messaging target through the agent message authorization",
 		EntryPoints: []EntryPoint{
@@ -339,7 +339,7 @@ var messagingOperations = []OperationSpec{
 		Bearer: AdmitOn(BearerTargetAgentRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},
 	{
-		ID:          "notification.read",
+		ID:          "inbox.notification.read",
 		Domain:      "inbox",
 		Description: "List the caller's notifications. A token lists only rows inside its boundary; with agentId, rows addressed to the agent subscriber need agent:read on that agent, for every user caller",
 		EntryPoints: []EntryPoint{
@@ -360,7 +360,7 @@ var messagingOperations = []OperationSpec{
 		Bearer: AdmitOn(BearerTargetSelfRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},
 	{
-		ID:          "notification.ack",
+		ID:          "inbox.notification.ack",
 		Domain:      "inbox",
 		Description: "Acknowledge the caller's notifications. Ack-all by a project token touches only rows of its boundary project",
 		EntryPoints: []EntryPoint{
@@ -381,7 +381,7 @@ var messagingOperations = []OperationSpec{
 		Bearer: AdmitOn(BearerTargetSelfRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},
 	{
-		ID:          "notification.subscription.create",
+		ID:          "inbox.notification.subscription.create",
 		Domain:      "inbox",
 		Description: "Create notification subscriptions. A user caller needs project:read on the project and agent:read on a watched agent; a token also needs inbox:write for the project",
 		EntryPoints: []EntryPoint{
@@ -402,7 +402,7 @@ var messagingOperations = []OperationSpec{
 		Bearer: AdmitOn(BearerTargetProjectBody, BearerBoundaryProject, BearerBoundaryHub),
 	},
 	{
-		ID:          "notification.subscription.read",
+		ID:          "inbox.notification.subscription.read",
 		Domain:      "inbox",
 		Description: "List the caller's notification subscriptions. A token lists only rows inside its boundary",
 		EntryPoints: []EntryPoint{
@@ -422,7 +422,7 @@ var messagingOperations = []OperationSpec{
 		Bearer: AdmitOn(BearerTargetSelfRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},
 	{
-		ID:          "notification.subscription.write",
+		ID:          "inbox.notification.subscription.write",
 		Domain:      "inbox",
 		Description: "Update and delete the caller's notification subscriptions. A token changes only rows inside its boundary",
 		EntryPoints: []EntryPoint{
@@ -438,7 +438,7 @@ var messagingOperations = []OperationSpec{
 		DelegationKind:   DelegationNone,
 		AuthorityEval:    AuthorityEvalNone,
 		AuditObligation: &AuditObligation{
-			EventType:     "notification.subscription.write",
+			EventType:     "inbox.notification.subscription.write",
 			ContextFields: []string{"actor_id"},
 			BeforeFields:  []string{"subscription_id"},
 			Atomic:        true,
@@ -450,7 +450,7 @@ var messagingOperations = []OperationSpec{
 		Bearer: AdmitOn(BearerTargetSelfRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},
 	{
-		ID:          "notification.template.create",
+		ID:          "inbox.notification.template.create",
 		Domain:      "inbox",
 		Description: "Create a subscription template. A template filed under a project needs project:read on it; a token also needs inbox:write for it",
 		EntryPoints: []EntryPoint{
@@ -470,7 +470,7 @@ var messagingOperations = []OperationSpec{
 		Bearer: AdmitOn(BearerTargetProjectBody, BearerBoundaryProject, BearerBoundaryHub),
 	},
 	{
-		ID:          "notification.template.read",
+		ID:          "inbox.notification.template.read",
 		Domain:      "inbox",
 		Description: "List subscription templates: only templates of projects the caller may read, and for a token only templates inside its boundary",
 		EntryPoints: []EntryPoint{
@@ -490,7 +490,7 @@ var messagingOperations = []OperationSpec{
 		Bearer: AdmitOn(BearerTargetSelfRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},
 	{
-		ID:          "notification.template.delete",
+		ID:          "inbox.notification.template.delete",
 		Domain:      "inbox",
 		Description: "Delete a subscription template the caller created. A token needs inbox:write for the template's project",
 		EntryPoints: []EntryPoint{
@@ -504,7 +504,7 @@ var messagingOperations = []OperationSpec{
 		DelegationKind:   DelegationNone,
 		AuthorityEval:    AuthorityEvalNone,
 		AuditObligation: &AuditObligation{
-			EventType:     "notification.template.delete",
+			EventType:     "inbox.notification.template.delete",
 			ContextFields: []string{"actor_id"},
 			BeforeFields:  []string{"template_id"},
 			Atomic:        true,

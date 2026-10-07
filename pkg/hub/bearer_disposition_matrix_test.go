@@ -67,35 +67,35 @@ var bearerMatrixExclusions = map[liveInventoryKey]bearerMatrixExclusion{
 		Reason: "mark-all-read touches only rows inside the token boundary instead of refusing the request, so a project token for another project gets 200 and marks nothing of the fixture project",
 		Pin:    "TestInboxToken_MarkAllReadTouchesOnlyVisibleRows",
 	},
-	{OperationID: "conversation.list", Method: "GET", Pattern: "/api/v1/conversations"}: {
+	{OperationID: "inbox.conversation.list", Method: "GET", Pattern: "/api/v1/conversations"}: {
 		Reason: "the conversation list filters rows to the token boundary instead of refusing the request, so a project token for another project gets 200 with no rows",
 		Pin:    "TestConversationListToken_FilteredToBoundary",
 	},
-	{OperationID: "messaging.target.resolve", Method: "GET", Pattern: "/api/v1/messaging/targets/resolve"}: {
+	{OperationID: "agent.message.target.resolve", Method: "GET", Pattern: "/api/v1/messaging/targets/resolve"}: {
 		Reason: "target resolution answers 404 for every caller while cross-project messaging is off, which it is in the matrix server; the pin enables it",
 		Pin:    "TestMessagingTargetsResolve_TokenNeedsAgentMessage",
 	},
-	{OperationID: "notification.read", Method: "GET", Pattern: "/api/v1/notifications"}: {
+	{OperationID: "inbox.notification.read", Method: "GET", Pattern: "/api/v1/notifications"}: {
 		Reason: "the notification list filters rows to the token boundary instead of refusing the request, so a project token for another project gets 200 with no rows",
 		Pin:    "TestNotificationToken_RowsFilteredToBoundary",
 	},
-	{OperationID: "notification.ack", Method: "POST", Pattern: "/api/v1/notifications/ack-all"}: {
+	{OperationID: "inbox.notification.ack", Method: "POST", Pattern: "/api/v1/notifications/ack-all"}: {
 		Reason: "ack-all touches only rows inside the token boundary instead of refusing the request, so a project token for another project gets 200",
 		Pin:    "TestNotificationToken_RowsFilteredToBoundary",
 	},
-	{OperationID: "notification.subscription.create", Method: "POST", Pattern: "/api/v1/notifications/subscriptions/bulk"}: {
+	{OperationID: "inbox.notification.subscription.create", Method: "POST", Pattern: "/api/v1/notifications/subscriptions/bulk"}: {
 		Reason: "bulk create takes a JSON array, which the matrix body overrides cannot express; with an object body every token gets 400 after the selector check",
 		Pin:    "TestNotificationSubscription_RequiresProjectAndAgentRead",
 	},
-	{OperationID: "notification.subscription.read", Method: "GET", Pattern: "/api/v1/notifications/subscriptions"}: {
+	{OperationID: "inbox.notification.subscription.read", Method: "GET", Pattern: "/api/v1/notifications/subscriptions"}: {
 		Reason: "the subscription list filters rows to the token boundary instead of refusing the request, so a project token for another project gets 200 with no rows",
 		Pin:    "TestNotificationToken_RowsFilteredToBoundary",
 	},
-	{OperationID: "notification.subscription.write", Method: "POST", Pattern: "/api/v1/notifications/subscriptions/bulk-delete"}: {
+	{OperationID: "inbox.notification.subscription.write", Method: "POST", Pattern: "/api/v1/notifications/subscriptions/bulk-delete"}: {
 		Reason: "bulk delete skips rows outside the token boundary instead of refusing the request, so a project token for another project gets 200 with nothing deleted",
 		Pin:    "TestNotificationToken_RowsFilteredToBoundary",
 	},
-	{OperationID: "notification.template.read", Method: "GET", Pattern: "/api/v1/notifications/templates"}: {
+	{OperationID: "inbox.notification.template.read", Method: "GET", Pattern: "/api/v1/notifications/templates"}: {
 		Reason: "the template list filters rows to readable projects inside the token boundary instead of refusing the request, so a project token for another project gets 200 with no rows",
 		Pin:    "TestNotificationTemplates_ListedOnlyForReadableProjects",
 	},
@@ -337,13 +337,13 @@ func bearerMatrixGuardSelector(ep authzop.EntryPoint) string {
 // admitting token carries besides the operation's own: the operation also
 // checks project:read or agent:read on a target the record names.
 var bearerMatrixCompanionSelectors = map[authzop.OperationID][]string{
-	"conversation.create":              {"project:read"},
-	"conversation.direct.read":         {"agent:read"},
-	"conversation.defaultagent.set":    {"project:read"},
-	"conversation.participant.add":     {"project:read"},
-	"conversation.resolve":             {"project:read"},
-	"notification.subscription.create": {"project:read"},
-	"notification.template.create":     {"project:read"},
+	"inbox.conversation.create":              {"project:read"},
+	"inbox.conversation.direct.read":         {"agent:read"},
+	"inbox.conversation.defaultagent.set":    {"project:read"},
+	"inbox.conversation.participant.add":     {"project:read"},
+	"inbox.conversation.resolve":             {"project:read"},
+	"inbox.notification.subscription.create": {"project:read"},
+	"inbox.notification.template.create":     {"project:read"},
 }
 
 // bearerMatrixBodyOverrides holds request bodies the matrix sends in place
@@ -360,15 +360,15 @@ func bearerMatrixBodyOverrides(f idFixtures) map[overrideKey]map[string]interfac
 		// probe asks for agentRole "none", which every creator may grant.
 		{"agent.lifecycle.create", "/api/v1/agents"}: {"name": "bdm-created", "projectId": f.project, "agentRole": "none"},
 		// Inbox writes name the fixture project and agent.
-		{"conversation.create", "/api/v1/conversations"}:                              {"displayName": f.inbox.createConversations + "-a", "projectId": f.project},
-		{"conversation.create", "/api/v1/conversations/"}:                             {"displayName": f.inbox.createConversations + "-b", "projectId": f.project},
-		{"conversation.defaultagent.set", "/api/v1/conversations/{id}/default-agent"}: {"agentId": f.agent},
-		{"conversation.participant.add", "/api/v1/conversations/{id}/participants"}:   {"principalKind": "agent", "principalId": f.agent},
-		{"notification.subscription.create", "/api/v1/notifications/subscriptions"}: {
+		{"inbox.conversation.create", "/api/v1/conversations"}:                              {"displayName": f.inbox.createConversations + "-a", "projectId": f.project},
+		{"inbox.conversation.create", "/api/v1/conversations/"}:                             {"displayName": f.inbox.createConversations + "-b", "projectId": f.project},
+		{"inbox.conversation.defaultagent.set", "/api/v1/conversations/{id}/default-agent"}: {"agentId": f.agent},
+		{"inbox.conversation.participant.add", "/api/v1/conversations/{id}/participants"}:   {"principalKind": "agent", "principalId": f.agent},
+		{"inbox.notification.subscription.create", "/api/v1/notifications/subscriptions"}: {
 			"projectId": f.project, "scope": "project", "triggerActivities": []string{"COMPLETED"},
 		},
-		{"notification.subscription.write", "/api/v1/notifications/subscriptions/{id}"}: {"triggerActivities": []string{"FAILED"}},
-		{"notification.template.create", "/api/v1/notifications/templates"}: {
+		{"inbox.notification.subscription.write", "/api/v1/notifications/subscriptions/{id}"}: {"triggerActivities": []string{"FAILED"}},
+		{"inbox.notification.template.create", "/api/v1/notifications/templates"}: {
 			"name": f.inbox.createConversations + "-template", "triggerActivities": []string{"COMPLETED"}, "projectId": f.project,
 		},
 	}

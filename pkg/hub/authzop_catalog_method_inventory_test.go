@@ -137,8 +137,8 @@ var suffixCheckExclusions = map[liveInventoryKey]string{
 	{OperationID: "hub.policies.removed", Method: "GET", Pattern: "/api/v1/policies"}:                                      "the by-ID route \"/api/v1/policies/\" registers as a prefix, so a suffix on this bare collection route reaches handlePolicyRoutes, which answers 410 Gone for every sub-path by design",
 	{OperationID: "hub.policies.removed", Method: "GET", Pattern: "/api/v1/policies/{id}"}:                                 "handlePolicyRoutes (handlers_policies.go) answers 410 Gone for every sub-path by design, so a suffixed path gets the same 410 as the bare one",
 	{OperationID: "user.admin.invite", Method: "GET", Pattern: "/api/v1/admin/invites/{id}"}:                               "handleAdminInviteByID (admin_invites.go:65-96) special-cases only a second segment of \"revoke\"; any other suffix, including this check's bogus one, falls through to the same GET handling as the bare ID",
-	{OperationID: "conversation.create", Method: "POST", Pattern: "/api/v1/conversations/"}:                                "the pattern ends in a slash, so the suffixed path has an empty segment (\"//\"), which the server mux answers with a 307 redirect to the cleaned path before any handler runs",
-	{OperationID: "conversation.direct.read", Method: "GET", Pattern: "/api/v1/conversations/{id}/messages"}:               "a suffix on the messages collection is the messages/{messageId} route; handleGetConversationMessage checks the direct conversation's key before it looks the message up, and the dev caller is not named in the key, so it answers 403 on any message ID",
+	{OperationID: "inbox.conversation.create", Method: "POST", Pattern: "/api/v1/conversations/"}:                          "the pattern ends in a slash, so the suffixed path has an empty segment (\"//\"), which the server mux answers with a 307 redirect to the cleaned path before any handler runs",
+	{OperationID: "inbox.conversation.direct.read", Method: "GET", Pattern: "/api/v1/conversations/{id}/messages"}:         "a suffix on the messages collection is the messages/{messageId} route; handleGetConversationMessage checks the direct conversation's key before it looks the message up, and the dev caller is not named in the key, so it answers 403 on any message ID",
 	{OperationID: "user.admin.invite", Method: "DELETE", Pattern: "/api/v1/admin/invites/{id}"}:                            "same as the GET invites/{id} suffix entry above — and because the suffix is silently ignored, a DELETE with a bogus suffix would delete the real fixture, so this exclusion also protects the positive check that runs after it",
 }
 
@@ -642,12 +642,12 @@ func opPatternOverrides(f idFixtures) map[overrideKey]map[string]string {
 		{"project.membership.update", "/api/v1/projects/{id}/members/{memberId}"}: {"id": f.project, "memberId": f.projectMembershipUpdate},
 
 		// Group and direct conversation reads share their patterns.
-		{"conversation.group.read", "/api/v1/conversations/{id}"}:                       {"id": f.inbox.groupConversation},
-		{"conversation.group.read", "/api/v1/conversations/{id}/messages"}:              {"id": f.inbox.groupConversation},
-		{"conversation.group.read", "/api/v1/conversations/{id}/messages/{messageId}"}:  {"id": f.inbox.groupConversation, "messageId": f.inbox.groupMessage},
-		{"conversation.direct.read", "/api/v1/conversations/{id}"}:                      {"id": f.inbox.directConversation},
-		{"conversation.direct.read", "/api/v1/conversations/{id}/messages"}:             {"id": f.inbox.directConversation},
-		{"conversation.direct.read", "/api/v1/conversations/{id}/messages/{messageId}"}: {"id": f.inbox.directConversation, "messageId": f.inbox.directMessage},
+		{"project.conversation.read", "/api/v1/conversations/{id}"}:                           {"id": f.inbox.groupConversation},
+		{"project.conversation.read", "/api/v1/conversations/{id}/messages"}:                  {"id": f.inbox.groupConversation},
+		{"project.conversation.read", "/api/v1/conversations/{id}/messages/{messageId}"}:      {"id": f.inbox.groupConversation, "messageId": f.inbox.groupMessage},
+		{"inbox.conversation.direct.read", "/api/v1/conversations/{id}"}:                      {"id": f.inbox.directConversation},
+		{"inbox.conversation.direct.read", "/api/v1/conversations/{id}/messages"}:             {"id": f.inbox.directConversation},
+		{"inbox.conversation.direct.read", "/api/v1/conversations/{id}/messages/{messageId}"}: {"id": f.inbox.directConversation, "messageId": f.inbox.directMessage},
 	}
 }
 
