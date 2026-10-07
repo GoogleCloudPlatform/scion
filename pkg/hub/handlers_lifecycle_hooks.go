@@ -142,6 +142,12 @@ func (s *Server) createLifecycleHook(w http.ResponseWriter, r *http.Request, use
 		BadRequest(w, "name is required")
 		return
 	}
+	// The execution identity binds a service account to the hook's
+	// actions; only an interactive session or dev credential sets it.
+	if req.ExecutionIdentity != "" &&
+		writeTokenRefusedSettingsKeys(w, r.Context(), []string{"executionIdentity"}) {
+		return
+	}
 
 	hook := &store.LifecycleHook{
 		ID:                uuid.New().String(),
@@ -274,6 +280,14 @@ func (s *Server) updateLifecycleHook(w http.ResponseWriter, r *http.Request, id 
 				"expected": req.StateVersion,
 				"actual":   existing.StateVersion,
 			})
+		return
+	}
+
+	// The execution identity binds a service account to the hook's
+	// actions; only an interactive session or dev credential changes it,
+	// clearing it included.
+	if req.ExecutionIdentity != existing.ExecutionIdentity &&
+		writeTokenRefusedSettingsKeys(w, r.Context(), []string{"executionIdentity"}) {
 		return
 	}
 
