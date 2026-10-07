@@ -28,7 +28,7 @@ With tracing off, the Hub installs no tracing middleware and no store or audit d
 
 ### What it records
 
-Every Hub API request writes one log line with message `perf_trace` and `subsystem` `hub.perf-trace`. An SSE stream on the web server's SSE endpoint (`/events`) that opens writes two: one when the stream opens (`"sse_stage":"connect"`) and one when it closes (`"sse_stage":"close"`). A connection that is refused writes only the `close` line, and a request with a malformed subject list writes none.
+Every Hub API request writes one log line with message `perf_trace` and `subsystem` `hub.perf-trace`. When an SSE stream opens on the web server's SSE endpoint (`/events`), it writes two log lines: one when the stream opens (`"sse_stage":"connect"`) and one when it closes (`"sse_stage":"close"`). A connection that is refused writes only the `close` line, and a request with a malformed subject list writes none.
 
 Each line records:
 
