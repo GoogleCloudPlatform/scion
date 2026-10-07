@@ -180,19 +180,23 @@ export class ScionPageProjectDetail extends LitElement {
   private hydrationOffered = false;
 
   /**
-   * Whether the page-load agents request (the first one, or a retry of it)
-   * has not finished yet. The project header renders while it is pending;
-   * the agents section shows a loading row instead of the empty state.
+   * Whether any agents request has adopted a result since this element was
+   * created. Derived from outcomes, not from one request's lifetime: a
+   * superseded first request (a view change while it is in flight) leaves
+   * it false, so the agents section keeps showing its loading row (or the
+   * error, if the request that replaced it fails) instead of the empty
+   * state. The project header renders regardless.
    */
   @state()
-  private agentsInitialLoadPending = true;
+  private hasAgentsResult = false;
 
-  /** Error of the last failed page-load agents request; cleared by any adopted agents result. */
+  /**
+   * Error shown in the agents section, with an agents-only Retry: set when
+   * the page-load request fails, or when any request fails before a result
+   * was ever adopted. Cleared by Retry and by any adopted result.
+   */
   @state()
   private agentsLoadError: string | null = null;
-
-  /** Bumped per page-load agents request, so only the latest one clears `agentsInitialLoadPending`. */
-  private agentsPageLoadSeq = 0;
 
   /**
    * Agents in this project
@@ -1566,14 +1570,8 @@ export class ScionPageProjectDetail extends LitElement {
    * never to the page as a whole.
    */
   private async loadPageAgents(): Promise<void> {
-    const seq = ++this.agentsPageLoadSeq;
-    this.agentsInitialLoadPending = true;
     this.agentsLoadError = null;
-    try {
-      await this.loadAgentsForView('page-load');
-    } finally {
-      if (seq === this.agentsPageLoadSeq) this.agentsInitialLoadPending = false;
-    }
+    await this.loadAgentsForView('page-load');
   }
 
   /** The agents section's Retry after a failed page-load request. */
@@ -1710,8 +1708,10 @@ export class ScionPageProjectDetail extends LitElement {
    * client label filter applied to it.
    */
   private onAgentsLoadFailed(trigger: AgentsViewTrigger): void {
-    if (trigger === 'page-load') {
+    if (trigger === 'page-load' || !this.hasAgentsResult) {
       this.agentsLoadError = 'Could not load agents.';
+    }
+    if (trigger === 'page-load') {
       this.agents = [];
       this.agentScopeCapabilities = undefined;
       this.agentWindow.setSmall();
@@ -1751,7 +1751,10 @@ export class ScionPageProjectDetail extends LitElement {
     } finally {
       this.endLoadingIndicator();
     }
-    if (adopted) this.agentsLoadError = null;
+    if (adopted) {
+      this.hasAgentsResult = true;
+      this.agentsLoadError = null;
+    }
     if (
       adopted &&
       viewEpoch !== this.viewEpoch &&
@@ -2943,7 +2946,7 @@ export class ScionPageProjectDetail extends LitElement {
 
       ${this.agentsLoadError
         ? this.renderAgentsLoadError()
-        : this.agentsInitialLoadPending
+        : !this.hasAgentsResult
           ? html`<div class="empty-filter-state agents-initial-loading">Loading agents…</div>`
           : this.agentStats.total === 0
             ? html`${this.renderAgentWindowBanner()}${this.renderEmptyAgents()}`

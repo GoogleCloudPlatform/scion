@@ -24,8 +24,12 @@ import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vite
 import type { PageData } from '../../shared/types.js';
 import { resetHubProjectCapabilitiesCache } from '../../client/hub-capabilities.js';
 import { stateManager } from '../../client/state.js';
+import { AgentDrainRunner } from '../../client/agent-drain.js';
 
-/** happy-dom has no EventSource; setScope opens one. */
+/**
+ * happy-dom has no EventSource; setScope opens one. Opens on the next tick,
+ * so a drain's wait for the live connection resolves at once.
+ */
 class FakeEventSource extends EventTarget {
   static readonly CONNECTING = 0;
   static readonly OPEN = 1;
@@ -35,6 +39,11 @@ class FakeEventSource extends EventTarget {
   onerror: ((ev: Event) => void) | null = null;
   constructor(readonly url: string) {
     super();
+    setTimeout(() => {
+      if (this.readyState === FakeEventSource.CLOSED) return;
+      this.readyState = FakeEventSource.OPEN;
+      this.onopen?.(new Event('open'));
+    }, 0);
   }
   close(): void {
     this.readyState = FakeEventSource.CLOSED;
@@ -119,6 +128,10 @@ type TestEl = HTMLElement & {
 function mount(data?: Record<string, unknown>): TestEl {
   const el = document.createElement('scion-page-project-detail') as TestEl;
   el.projectId = PROJECT_ID;
+  // Drain retries without a delay.
+  (el as unknown as { drainRunner: AgentDrainRunner }).drainRunner = new AgentDrainRunner({
+    retryDelayMs: 0,
+  });
   el.pageData = {
     path: `/projects/${PROJECT_ID}`,
     title: 'Project',
@@ -163,6 +176,7 @@ describe('scion-page-project-detail — startup hydration and readiness', () => 
   });
 
   afterEach(() => {
+    localStorage.removeItem('scion-view-project-agents');
     el?.remove();
     el = null;
     vi.restoreAllMocks();
@@ -267,7 +281,7 @@ describe('scion-page-project-detail — startup hydration and readiness', () => 
     expect(text(el)).toContain('Could not load agents.');
   });
 
-  it('a failed project load shows the page error; its retry refetches and does not reuse the payload', async () => {
+  it('a failed project load shows the page error; its retry refetches', async () => {
     let fail = true;
     installFetch({
       project: () =>
@@ -306,5 +320,120 @@ describe('scion-page-project-detail — startup hydration and readiness', () => 
     await flush(el);
     expect(heading(el)).toContain('Renamed Live');
     expect(projectRequests()).toBe(0);
+  });
+  const switchView = (target: TestEl, view: string): void => {
+    target
+      .shadowRoot!.querySelector('scion-view-toggle')!
+      .dispatchEvent(new CustomEvent('view-change', { detail: { view } }));
+  };
+
+  it('case A: a graph-to-grid view change during the pending first load; No Agents never shows, and a failure shows the error and Retry', async () => {
+    localStorage.setItem('scion-view-project-agents', 'graph');
+    const first = deferred();
+    let failing = true;
+    installFetch({
+      agents: [
+        () => first.promise,
+        () =>
+          Promise.resolve(
+            failing
+              ? jsonResponse({ error: 'boom' }, 500)
+              : jsonResponse({ agents: [agent('a-1')], complete: true })
+          ),
+      ],
+    });
+    el = mount(SSR_PROJECT);
+    await flush(el);
+    expect(agentsRequests()).toBe(1);
+    expect(text(el)).toContain('Loading agents…');
+
+    switchView(el, 'grid');
+    await flush(el);
+    // In the small state a view change plans no request of its own: the
+    // first (drain) request stays the live one.
+    expect(agentsRequests()).toBe(1);
+    expect(text(el)).toContain('Loading agents…');
+    expect(text(el)).not.toContain('No Agents');
+
+    first.resolve(jsonResponse({ error: 'boom' }, 500));
+    // The drain retries the failed page before giving up.
+    await vi.waitFor(() => expect(text(el!)).toContain('Could not load agents.'));
+    expect(text(el)).not.toContain('No Agents');
+    expect(heading(el)).toContain('Prefetched Name');
+
+    const retry = el.shadowRoot?.querySelector('.agents-load-error sl-button') as HTMLElement;
+    expect(retry).toBeTruthy();
+    failing = false;
+    const before = agentsRequests();
+    retry.click();
+    await vi.waitFor(() => expect(text(el!)).not.toContain('Could not load agents.'));
+    expect(agentsRequests()).toBe(before + 1);
+    expect(el.shadowRoot?.querySelectorAll('.agent-card').length ?? 0).toBeGreaterThan(0);
+  });
+
+  it('a request that fails before any result was adopted shows the agents error, whatever its trigger', async () => {
+    const first = deferred();
+    installFetch({ agents: [() => first.promise] });
+    el = mount(SSR_PROJECT);
+    await flush(el);
+    // A superseding trigger replaces the first request before it lands, then fails.
+    const internals = el as unknown as {
+      cancelAgentsLoad(): void;
+      onAgentsLoadFailed(trigger: string): void;
+    };
+    internals.cancelAgentsLoad();
+    first.resolve(jsonResponse({ agents: [], complete: true }));
+    await flush(el);
+    expect(text(el)).toContain('Loading agents…');
+    expect(text(el)).not.toContain('No Agents');
+    internals.onAgentsLoadFailed('view-change');
+    await flush(el);
+    expect(text(el)).toContain('Could not load agents.');
+    expect(text(el)).not.toContain('No Agents');
+  });
+
+  it('case B: a view change that re-issues the first load keeps the loading row until it lands', async () => {
+    localStorage.setItem('scion-view-project-agents', 'grid');
+    const first = deferred();
+    const second = deferred();
+    installFetch({ agents: [() => first.promise, () => second.promise] });
+    el = mount(SSR_PROJECT);
+    await flush(el);
+    expect(agentsRequests()).toBe(1);
+
+    switchView(el, 'graph');
+    await flush(el);
+    expect(agentsRequests()).toBe(2);
+    expect(text(el)).toContain('Loading agents…');
+    expect(text(el)).not.toContain('No Agents');
+
+    first.resolve(jsonResponse({ agents: [], complete: true }));
+    await flush(el);
+    expect(text(el)).toContain('Loading agents…');
+    expect(text(el)).not.toContain('No Agents');
+
+    second.resolve(jsonResponse({ agents: [agent('a-1')], complete: true }));
+    await flush(el);
+    expect(text(el)).not.toContain('Loading agents…');
+    expect(text(el)).not.toContain('No Agents');
+    expect(el.shadowRoot?.querySelector('scion-agent-tree-view')).toBeTruthy();
+  });
+
+  it('case B failure: a re-issued first load that fails shows the error and Retry', async () => {
+    localStorage.setItem('scion-view-project-agents', 'grid');
+    const first = deferred();
+    installFetch({
+      agents: [() => first.promise, () => Promise.resolve(jsonResponse({ error: 'boom' }, 500))],
+    });
+    el = mount(SSR_PROJECT);
+    await flush(el);
+    switchView(el, 'graph');
+    await flush(el);
+    // The re-issued first load (a drain) and its retries.
+    expect(agentsRequests()).toBeGreaterThanOrEqual(2);
+    first.resolve(jsonResponse({ agents: [], complete: true }));
+    await vi.waitFor(() => expect(text(el!)).toContain('Could not load agents.'));
+    expect(text(el)).not.toContain('No Agents');
+    expect(el.shadowRoot?.querySelector('.agents-load-error sl-button')).toBeTruthy();
   });
 });
