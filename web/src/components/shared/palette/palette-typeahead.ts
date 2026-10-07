@@ -28,12 +28,24 @@
  * would have typed, for the palette to apply as its query once its input
  * has focus.
  *
+ * On a touch-primary device, starting a capture also focuses a hidden text
+ * field (see {@link PaletteTypeaheadOptions.holdsKeyboard}). iOS Safari
+ * shows the on-screen keyboard only for a text field focused synchronously
+ * inside the tap that asked for it, and the palette's query input can only
+ * take focus later: after the module loads, the element renders and
+ * Shoelace's dialog shows. Focus moved from one text field to another keeps
+ * the keyboard up, so the query input inherits it from the hidden field
+ * when it takes focus. Hosts therefore start capturing from the open
+ * request itself, after reading the element to refocus on close.
+ *
  * Kept in its own small module, with no Lit or Shoelace imports, so a host
  * can start capturing synchronously from its open request without pulling
  * the palette component into its bundle.
  */
 
 import { isMacPlatform } from '../../../utils/platform.js';
+import { TOUCH_PRIMARY_QUERY } from '../../../utils/input-modality.js';
+import { deepActiveElement } from '../deep-active-element.js';
 
 /**
  * How long a capture lasts at most after its latest
@@ -65,16 +77,71 @@ export interface PaletteTypeaheadOptions {
    * shortcut. Defaults to {@link isMacPlatform}.
    */
   mac?: boolean;
+  /**
+   * Whether a capture should hold the on-screen keyboard: focus a hidden
+   * text field from {@link PaletteTypeahead.start} until the capture ends.
+   * Read at each start. Defaults to whether the primary pointer is touch
+   * ({@link TOUCH_PRIMARY_QUERY}); elsewhere focus stays where it was until
+   * the query input takes it.
+   */
+  holdsKeyboard?: () => boolean;
+}
+
+function primaryPointerIsTouch(): boolean {
+  return typeof window.matchMedia === 'function' && window.matchMedia(TOUCH_PRIMARY_QUERY).matches;
+}
+
+/**
+ * A text field that holds focus, and with it the on-screen keyboard, until
+ * the palette's query input can take it. Fixed at the top left, transparent
+ * and 16px, so focusing it neither scrolls nor zooms the page and nothing
+ * shows; it takes no pointer events and is out of the tab order.
+ */
+function createKeyboardProxy(): HTMLInputElement {
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.tabIndex = -1;
+  input.autocomplete = 'off';
+  input.setAttribute('autocapitalize', 'off');
+  input.setAttribute('autocorrect', 'off');
+  input.spellcheck = false;
+  input.setAttribute('aria-label', 'Search');
+  input.dataset.paletteKeyboardProxy = '';
+  Object.assign(input.style, {
+    position: 'fixed',
+    top: '0',
+    left: '0',
+    width: '1px',
+    height: '1px',
+    margin: '0',
+    padding: '0',
+    border: '0',
+    opacity: '0',
+    fontSize: '16px',
+    pointerEvents: 'none',
+  });
+  return input;
 }
 
 export class PaletteTypeahead {
   private readonly mac: boolean;
+  private readonly holdsKeyboard: () => boolean;
   private text = '';
   private capturing = false;
   private timer: ReturnType<typeof setTimeout> | undefined;
+  /** The hidden text field holding the on-screen keyboard, while a capture holds it. */
+  private proxy: HTMLInputElement | null = null;
+  /** What had focus when {@link proxy} took it, given focus back if the proxy still has it at the end. */
+  private proxyReturnFocus: HTMLElement | null = null;
 
   constructor(options: PaletteTypeaheadOptions = {}) {
     this.mac = options.mac ?? isMacPlatform();
+    this.holdsKeyboard = options.holdsKeyboard ?? primaryPointerIsTouch;
+  }
+
+  /** The hidden text field holding the on-screen keyboard, if a capture holds it. */
+  get keyboardProxy(): HTMLInputElement | null {
+    return this.proxy;
   }
 
   /** Whether keys are being captured. */
@@ -91,14 +158,21 @@ export class PaletteTypeahead {
    * Starts capturing keys, and restarts the time limit. A fresh capture
    * starts with no text; a start while capturing keeps the text captured so
    * far, so an open that runs a queued open request carries its keys.
+   *
+   * Where {@link PaletteTypeaheadOptions.holdsKeyboard} holds, also moves
+   * focus to a hidden text field, synchronously, so a start from a tap
+   * shows the on-screen keyboard. A host reads the element to refocus on
+   * close before it starts.
    */
   start(): void {
     clearTimeout(this.timer);
     this.timer = setTimeout(() => this.release(), PALETTE_TYPEAHEAD_MAX_MS);
-    if (this.capturing) return;
-    this.text = '';
-    this.capturing = true;
-    window.addEventListener('keydown', this.handleKeydown, true);
+    if (!this.capturing) {
+      this.text = '';
+      this.capturing = true;
+      window.addEventListener('keydown', this.handleKeydown, true);
+    }
+    if (!this.proxy && this.holdsKeyboard()) this.holdKeyboard();
   }
 
   /** Stops capturing and returns the captured text, clearing it. */
@@ -114,12 +188,41 @@ export class PaletteTypeahead {
     this.take();
   }
 
+  /**
+   * Stops capturing and drops the hidden text field. Text the field took
+   * itself (keys this capture let through, such as IME input) is kept after
+   * the text captured so far. A field that still has focus gives it back to
+   * what had it before, as the query input never took it.
+   */
   private release(): void {
     clearTimeout(this.timer);
     this.timer = undefined;
+    this.dropKeyboardProxy();
     if (!this.capturing) return;
     this.capturing = false;
     window.removeEventListener('keydown', this.handleKeydown, true);
+  }
+
+  private holdKeyboard(): void {
+    if (!document.body) return;
+    const active = deepActiveElement();
+    const proxy = createKeyboardProxy();
+    document.body.append(proxy);
+    this.proxy = proxy;
+    this.proxyReturnFocus = active instanceof HTMLElement ? active : null;
+    proxy.focus({ preventScroll: true });
+  }
+
+  private dropKeyboardProxy(): void {
+    const proxy = this.proxy;
+    if (!proxy) return;
+    const returnFocus = this.proxyReturnFocus;
+    this.proxy = null;
+    this.proxyReturnFocus = null;
+    this.text += proxy.value;
+    const focused = document.activeElement === proxy;
+    proxy.remove();
+    if (focused && returnFocus?.isConnected) returnFocus.focus({ preventScroll: true });
   }
 
   /**

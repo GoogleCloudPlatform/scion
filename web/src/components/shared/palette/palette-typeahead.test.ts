@@ -429,3 +429,139 @@ describe('PaletteTypeahead', () => {
     expect(remove.mock.calls[0]).toEqual(add.mock.calls[0]);
   });
 });
+
+describe('PaletteTypeahead: holding the on-screen keyboard', () => {
+  function proxies(): NodeListOf<HTMLInputElement> {
+    return document.querySelectorAll<HTMLInputElement>('input[data-palette-keyboard-proxy]');
+  }
+
+  function touchTypeahead(): PaletteTypeahead {
+    return new PaletteTypeahead({ mac: false, holdsKeyboard: () => true });
+  }
+
+  afterEach(() => {
+    for (const proxy of proxies()) proxy.remove();
+  });
+
+  it('focuses a hidden text field synchronously from start(), so a tap shows the keyboard', () => {
+    typeahead = touchTypeahead();
+    typeahead.start();
+    const proxy = typeahead.keyboardProxy;
+    expect(proxy).toBeInstanceOf(HTMLInputElement);
+    expect(proxy?.type).toBe('text');
+    expect(proxy?.isConnected).toBe(true);
+    expect(document.activeElement).toBe(proxy);
+  });
+
+  it('keeps the field from scrolling, zooming or showing', () => {
+    typeahead = touchTypeahead();
+    const focus = vi.spyOn(HTMLElement.prototype, 'focus');
+    typeahead.start();
+    const proxy = typeahead.keyboardProxy!;
+    expect(focus).toHaveBeenCalledWith({ preventScroll: true });
+    expect(proxy.style.position).toBe('fixed');
+    expect(proxy.style.opacity).toBe('0');
+    expect(proxy.style.fontSize).toBe('16px');
+    expect(proxy.style.pointerEvents).toBe('none');
+    expect(proxy.tabIndex).toBe(-1);
+    expect(proxy.readOnly).toBe(false);
+  });
+
+  it('reads holdsKeyboard at each start, and uses no field where it does not hold', () => {
+    let touch = false;
+    typeahead = new PaletteTypeahead({ mac: false, holdsKeyboard: () => touch });
+    typeahead.start();
+    expect(typeahead.keyboardProxy).toBeNull();
+    expect(document.activeElement).toBe(target);
+    typeahead.stop();
+    touch = true;
+    typeahead.start();
+    expect(document.activeElement).toBe(typeahead.keyboardProxy);
+  });
+
+  it('does not hold the keyboard by default off a touch-primary device', () => {
+    typeahead.start();
+    expect(typeahead.keyboardProxy).toBeNull();
+    expect(proxies()).toHaveLength(0);
+    expect(document.activeElement).toBe(target);
+  });
+
+  it('holds the keyboard by default on a touch-primary device', () => {
+    vi.spyOn(window, 'matchMedia').mockImplementation(
+      (query: string) =>
+        ({
+          matches: query === '(hover: none) and (pointer: coarse)',
+          media: query,
+        }) as MediaQueryList
+    );
+    typeahead = new PaletteTypeahead({ mac: false });
+    typeahead.start();
+    expect(document.activeElement).toBe(typeahead.keyboardProxy);
+  });
+
+  it('a start while capturing keeps the one field', () => {
+    typeahead = touchTypeahead();
+    typeahead.start();
+    const proxy = typeahead.keyboardProxy;
+    typeahead.start();
+    expect(typeahead.keyboardProxy).toBe(proxy);
+    expect(proxies()).toHaveLength(1);
+  });
+
+  it('still captures keys typed at the field', () => {
+    typeahead = touchTypeahead();
+    typeahead.start();
+    const proxy = typeahead.keyboardProxy!;
+    const e = new KeyboardEvent('keydown', { key: 'q', bubbles: true, cancelable: true });
+    proxy.dispatchEvent(e);
+    expect(e.defaultPrevented).toBe(true);
+    expect(typeahead.pending).toBe('q');
+  });
+
+  it('take() once another field has focus removes the field without moving focus, keeping its text', () => {
+    typeahead = touchTypeahead();
+    typeahead.start();
+    press('a');
+    const proxy = typeahead.keyboardProxy!;
+    // Text the field took itself: a key the capture lets through, like IME input.
+    proxy.value = 'b';
+    const query = document.createElement('input');
+    document.body.append(query);
+    query.focus();
+    expect(typeahead.take()).toBe('ab');
+    expect(proxy.isConnected).toBe(false);
+    expect(typeahead.keyboardProxy).toBeNull();
+    expect(document.activeElement).toBe(query);
+    query.remove();
+  });
+
+  it('a stop while the field still has focus gives focus back to what had it', () => {
+    typeahead = touchTypeahead();
+    typeahead.start();
+    const proxy = typeahead.keyboardProxy!;
+    typeahead.stop();
+    expect(proxy.isConnected).toBe(false);
+    expect(document.activeElement).toBe(target);
+  });
+
+  it('a stop leaves focus alone when what had it has left the page', () => {
+    typeahead = touchTypeahead();
+    typeahead.start();
+    target.remove();
+    typeahead.stop();
+    expect(proxies()).toHaveLength(0);
+    expect(document.activeElement).not.toBe(target);
+  });
+
+  it('the time limit drops the field and gives focus back, keeping its text for a late take()', () => {
+    vi.useFakeTimers();
+    typeahead = touchTypeahead();
+    typeahead.start();
+    press('c');
+    typeahead.keyboardProxy!.value = 'o';
+    vi.advanceTimersByTime(PALETTE_TYPEAHEAD_MAX_MS);
+    expect(proxies()).toHaveLength(0);
+    expect(document.activeElement).toBe(target);
+    expect(typeahead.take()).toBe('co');
+  });
+});

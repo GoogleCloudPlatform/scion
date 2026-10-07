@@ -4254,9 +4254,11 @@ export class ScionPageChat extends LitElement {
   private async _openPalette(options: { skipInvokerCapture?: boolean } = {}): Promise<void> {
     this._palettePendingOpen = true;
     this._paletteOpenEpoch++;
-    this._paletteTypeahead.start();
     try {
+      // The invoker is read first: on touch, starting the type-ahead moves
+      // focus to a hidden field that holds the on-screen keyboard.
       if (!options.skipInvokerCapture) this._capturePaletteInvokerFocus();
+      this._paletteTypeahead.start();
       if (!this.v2SwitcherLoaded) {
         await loadQuickPalette();
         this.v2SwitcherLoaded = true;

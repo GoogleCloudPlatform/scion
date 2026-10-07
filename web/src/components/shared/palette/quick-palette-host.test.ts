@@ -1612,3 +1612,98 @@ describe('isQuickPaletteShortcut', () => {
     expect(shortcutTypedIn(textarea, { ctrlKey: true })).toBe(true);
   });
 });
+
+describe('QuickPaletteHost: on a touch-primary device', () => {
+  beforeEach(() => {
+    vi.spyOn(window, 'matchMedia').mockImplementation(
+      (query: string) =>
+        ({
+          matches: query === '(hover: none) and (pointer: coarse)',
+          media: query,
+          addEventListener: () => {},
+          removeEventListener: () => {},
+        }) as unknown as MediaQueryList
+    );
+  });
+
+  function keyboardProxy(): HTMLInputElement | null {
+    return document.querySelector<HTMLInputElement>('input[data-palette-keyboard-proxy]');
+  }
+
+  /** A button that opens the palette from its click handler, recording what has focus as the handler returns. */
+  function openButton(h: QuickPaletteHost): {
+    button: HTMLButtonElement;
+    focusedInTap: () => Element | null;
+  } {
+    const button = document.createElement('button');
+    document.body.append(button);
+    let focused: Element | null = null;
+    button.addEventListener('click', () => {
+      button.focus();
+      h.open();
+      focused = document.activeElement;
+    });
+    return { button, focusedInTap: () => focused };
+  }
+
+  it('a text field has focus within the tap that opens the palette, before anything loads', async () => {
+    const h = createHost();
+    const { button, focusedInTap } = openButton(h);
+    button.click();
+
+    const proxy = keyboardProxy();
+    expect(proxy).not.toBeNull();
+    expect(focusedInTap()).toBe(proxy);
+    expect(mount.querySelector('scion-quick-palette')).toBeNull();
+  });
+
+  it('the query input takes focus from the field once the palette shows, and the field is removed', async () => {
+    const h = createHost();
+    const { button } = openButton(h);
+    button.click();
+    const proxy = keyboardProxy()!;
+    const palette = await waitForPalette();
+    await vi.waitFor(() => expect(palette.open).toBe(true));
+    const input = await fireInitialFocus(palette);
+
+    expect(palette.shadowRoot!.activeElement).toBe(input);
+    expect(proxy.isConnected).toBe(false);
+    expect(keyboardProxy()).toBeNull();
+  });
+
+  it('keys typed at the field before the palette shows become the query', async () => {
+    const h = createHost();
+    const { button } = openButton(h);
+    button.click();
+    const proxy = keyboardProxy()!;
+    typeAt(proxy, 'z');
+    proxy.value = 'e';
+    const palette = await waitForPalette();
+    await vi.waitFor(() => expect(palette.open).toBe(true));
+    const input = await fireInitialFocus(palette);
+    expect(input.value).toBe('ze');
+  });
+
+  it('a dismiss refocuses the button that opened the palette, not the field', async () => {
+    const h = createHost();
+    const { button } = openButton(h);
+    button.click();
+    const palette = await waitForPalette();
+    await vi.waitFor(() => expect(palette.open).toBe(true));
+    await fireInitialFocus(palette);
+
+    palette.dispatchEvent(new CustomEvent('palette-dismiss', { detail: { reason: 'escape' } }));
+    fireFromDialog(palette, 'sl-after-hide');
+    expect(document.activeElement).toBe(button);
+  });
+
+  it('a close before the palette shows gives focus back to the button', () => {
+    const h = createHost();
+    const { button } = openButton(h);
+    button.click();
+    expect(document.activeElement).toBe(keyboardProxy());
+    h.close();
+    expect(keyboardProxy()).toBeNull();
+    expect(document.activeElement).toBe(button);
+  });
+});
