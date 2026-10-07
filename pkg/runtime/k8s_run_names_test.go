@@ -257,28 +257,57 @@ func podShapeNames(pod *corev1.Pod) string {
 
 // Upgrade mid-run: a pod created by an older broker with fixed-name
 // objects keeps them while it exists, whatever another run's cleanup does,
-// and they are removed once its own run is deleted.
+// and they are removed once its own run is deleted (or, for a pod with no
+// run label, by a no-run delete), and the leftover cleanup after the pod is
+// gone removes nothing more of it and fails nothing.
 func TestUpgradeMidRun_FixedNamePodKeepsObjectsUntilStopped(t *testing.T) {
-	rt, _, _, enf := newRunScopeRuntime(t)
-	rsSeedRun(t, rt, rsLabels(rsRunA, "start-a"), corev1.PodRunning, "a")
 	ctx := context.Background()
+	t.Run("run-labelled fixed-name pod", func(t *testing.T) {
+		rt, _, _, enf := newRunScopeRuntime(t)
+		rsSeedRun(t, rt, rsLabels(rsRunA, "start-a"), corev1.PodRunning, "a")
 
-	if err := rt.CleanupAgentResources(ctx, "agent", "proj1", rsRunB); err != nil {
-		t.Fatalf("CleanupAgentResources(B): %v", err)
-	}
-	if err := rt.CleanupAgentResources(ctx, "agent", "proj1", ""); err != nil {
-		t.Fatalf("CleanupAgentResources(no run): %v", err)
-	}
-	if err := rt.preCleanForRun(ctx, rt.DefaultNamespace, rsAgent, rsRunB, false, nil); err == nil {
-		t.Fatal("pre-clean of run B succeeded against run A's live pod")
-	}
-	rsExpect(t, rt, rsAllPresent)
+		if err := rt.CleanupAgentResources(ctx, "agent", "proj1", rsRunB); err != nil {
+			t.Fatalf("CleanupAgentResources(B): %v", err)
+		}
+		if err := rt.CleanupAgentResources(ctx, "agent", "proj1", ""); err != nil {
+			t.Fatalf("CleanupAgentResources(no run): %v", err)
+		}
+		if err := rt.preCleanForRun(ctx, rt.DefaultNamespace, rsAgent, rsRunB, false, nil); err == nil {
+			t.Fatal("pre-clean of run B succeeded against run A's live pod")
+		}
+		rsExpect(t, rt, rsAllPresent)
 
-	if err := rt.Delete(ctx, RunRef{ID: rsAgent, RunID: rsRunA}); err != nil {
-		t.Fatalf("Delete(A): %v", err)
-	}
-	rsExpect(t, rt, rsAllGone)
-	enf.assertAllConditional(t)
+		if err := rt.Delete(ctx, RunRef{ID: rsAgent, RunID: rsRunA}); err != nil {
+			t.Fatalf("Delete(A): %v", err)
+		}
+		rsExpect(t, rt, rsAllGone)
+		if err := rt.CleanupAgentResources(ctx, "agent", "proj1", ""); err != nil {
+			t.Fatalf("CleanupAgentResources(no run) after the pod is gone: %v", err)
+		}
+		enf.assertAllConditional(t)
+	})
+	t.Run("unlabelled fixed-name pod, objects left after the pod is gone", func(t *testing.T) {
+		rt, cs, _, _ := newRunScopeRuntime(t)
+		rsSeedRun(t, rt, rsLabels("", "start-old"), corev1.PodRunning, "old")
+
+		if err := rt.CleanupAgentResources(ctx, "agent", "proj1", rsRunB); err != nil {
+			t.Fatalf("CleanupAgentResources(B): %v", err)
+		}
+		if err := rt.CleanupAgentResources(ctx, "agent", "proj1", ""); err != nil {
+			t.Fatalf("CleanupAgentResources(no run): %v", err)
+		}
+		rsExpect(t, rt, rsAllPresent)
+
+		// The pod goes away outside scion: its fixed-name objects are left
+		// until the leftover cleanup (no run) removes them.
+		if err := cs.CoreV1().Pods(rt.DefaultNamespace).Delete(ctx, rsAgent, metav1.DeleteOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		if err := rt.CleanupAgentResources(ctx, "agent", "proj1", ""); err != nil {
+			t.Fatalf("CleanupAgentResources(no run) after the pod is gone: %v", err)
+		}
+		rsExpect(t, rt, rsAllGone)
+	})
 }
 
 // --- helpers ---
@@ -583,6 +612,8 @@ func TestK8sPreCleanForRun_StaleSweep(t *testing.T) {
 		{"60s deadline passed but under the 1h floor", "60", 30 * time.Minute, false},
 		{"just before deadline plus margin", "3600", time.Hour + 15*time.Minute - time.Second, false},
 		{"just after deadline plus margin", "3600", time.Hour + 15*time.Minute + time.Second, true},
+		{"exactly at deadline plus margin", "3600", time.Hour + 15*time.Minute, false},
+		{"no deadline, exactly 1h", startDeadlineNone, time.Hour, false},
 		{"malformed offset", "soon", 30 * 24 * time.Hour, false},
 		{"no annotation", "", 30 * 24 * time.Hour, false},
 	} {

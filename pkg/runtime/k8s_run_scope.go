@@ -356,7 +356,11 @@ func legacyAgentObjectSelector(pod *corev1.Pod) string {
 // such object it meets later, so one skipped here would fail every retry
 // of the start. It is therefore selected by the run label and the object
 // name only, never by other labels (a project recreated under the same
-// name gets a new project ID but the same object names).
+// name gets a new project ID but the same object names). For per-run names
+// (ptone/scion#3101) another run's object cannot have the name this start
+// creates short of a run-token collision, which replaceExistingAgentObject
+// treats as run_conflict; so pre-clean may leave another run's non-stale
+// per-run objects.
 func (r *KubernetesRuntime) preCleanForRun(ctx context.Context, namespace, podName, runID string, nfsHomeStart bool, hs *HomeStorageRealization) error {
 	if err := validateRunIDLabel(runID); err != nil {
 		return err
@@ -512,7 +516,9 @@ func nfsHomeTerminationBound(pod *corev1.Pod, hs *HomeStorageRealization) time.D
 //     concurrent start. This holds only while pre-clean's selection covers
 //     every same-name object of another run with no live pod (see
 //     preCleanForRun); narrowing it by other labels would turn a stale
-//     object into a conflict on every retry.
+//     object into a conflict on every retry. For per-run names
+//     (ptone/scion#3101) another run's object cannot have this name short
+//     of a run-token collision, which this treats as run_conflict.
 //
 // A delete that fails with Conflict means the object was recreated since
 // the list, also by a concurrent start: ErrRunConflict.

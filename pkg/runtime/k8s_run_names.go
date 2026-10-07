@@ -113,11 +113,11 @@ type k8sObjectNames struct {
 // and "-" trimmed, to stay a DNS-1123 subdomain) followed by "-" and
 // podHashLen hex characters of sha256(podName).
 //
-// Two equal per-run names have equal tokens, so the same run ID up to a
-// 64-bit hash collision, and a run belongs to one agent. Even for one run
-// ID, two pod names that share a truncated prefix differ in the pod hash.
-// A collision is still safe: the object carries its own run's label, and
-// replaceExistingAgentObject refuses another run's object (run_conflict)
+// Two pods share a name only with the same run ID (a run has one pod), or
+// a 64-bit token or 32-bit pod-hash collision. Two runs of one pod never
+// share a name short of a 64-bit token collision. A collision is still
+// safe: an object of another run under the name a create uses carries that
+// run's label, and replaceExistingAgentObject refuses it (run_conflict)
 // rather than delete it.
 func k8sAgentObjectNames(podName, runID string) k8sObjectNames {
 	if runID == "" {
