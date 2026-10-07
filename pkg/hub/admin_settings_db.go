@@ -26,8 +26,11 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
@@ -657,6 +660,9 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	rawBody, err := readRawBody(w, r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "Invalid request body", nil)
+		return
+	}
+	if rejectRepeatedJSONMembers(w, rawBody) {
 		return
 	}
 	var req ServerConfigUpdateDBRequest
@@ -2203,6 +2209,102 @@ func readRawBody(w http.ResponseWriter, r *http.Request) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+// repeatedJSONMember reports the first object member name that rawBody
+// repeats within one object, at any depth. Names compare under the same
+// case folding encoding/json uses to match struct fields, so "server" and
+// "Server" in one object are a repeat. A body that is not valid JSON
+// reports no repeat; the typed decode rejects it.
+func repeatedJSONMember(rawBody []byte) (string, bool) {
+	type frame struct {
+		object    bool
+		expectKey bool
+		names     map[string]bool
+	}
+	var stack []*frame
+	valueDone := func() {
+		if n := len(stack); n > 0 && stack[n-1].object {
+			stack[n-1].expectKey = true
+		}
+	}
+	dec := json.NewDecoder(bytes.NewReader(rawBody))
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			return "", false
+		}
+		if n := len(stack); n > 0 && stack[n-1].object && stack[n-1].expectKey {
+			top := stack[n-1]
+			if d, ok := tok.(json.Delim); ok && d == '}' {
+				stack = stack[:n-1]
+				valueDone()
+			} else if key, ok := tok.(string); ok {
+				folded := foldJSONMemberName(key)
+				if top.names[folded] {
+					return key, true
+				}
+				top.names[folded] = true
+				top.expectKey = false
+			}
+		} else {
+			switch tok {
+			case json.Delim('{'):
+				stack = append(stack, &frame{object: true, expectKey: true, names: map[string]bool{}})
+			case json.Delim('['):
+				stack = append(stack, &frame{})
+			case json.Delim(']'):
+				stack = stack[:len(stack)-1]
+				valueDone()
+			default:
+				valueDone()
+			}
+		}
+		if len(stack) == 0 && !dec.More() {
+			return "", false
+		}
+	}
+}
+
+// foldJSONMemberName folds a member name the way encoding/json does when it
+// matches a name to a struct field: ASCII letters to upper case, and every
+// other rune to the smallest rune of its simple fold set.
+func foldJSONMemberName(name string) string {
+	var b strings.Builder
+	for _, r := range name {
+		if r < utf8.RuneSelf {
+			if 'a' <= r && r <= 'z' {
+				r -= 'a' - 'A'
+			}
+			b.WriteRune(r)
+			continue
+		}
+		for {
+			r2 := unicode.SimpleFold(r)
+			if r2 <= r {
+				r = r2
+				break
+			}
+			r = r2
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+// rejectRepeatedJSONMembers answers 400 and returns true when a hub
+// configuration write body repeats an object member name at any depth. The
+// key classification and the typed write decode must read the same
+// members, so a body they could read differently is refused for every
+// credential before either runs.
+func rejectRepeatedJSONMembers(w http.ResponseWriter, rawBody []byte) bool {
+	name, repeated := repeatedJSONMember(rawBody)
+	if !repeated {
+		return false
+	}
+	writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+		"request body repeats the member name "+strconv.Quote(name)+" in one object", nil)
+	return true
+}
+
 // fieldPresence extracts which JSON fields are explicitly present (including
 // when set to "", [], null) in the raw request body by walking nested
 // map[string]json.RawMessage paths. This powers N6/N7: presence-aware
@@ -2435,8 +2537,9 @@ func sortedSettingsKeys(m map[string]bool) []string {
 	return out
 }
 
-// writeTokenRefusedSettingsKeys refuses a settings write that carries
-// refused keys from any credential other than an interactive session or a
+// writeTokenRefusedSettingsKeys refuses a hub configuration write that
+// carries refused keys (settings keys, or a lifecycle hook's execution
+// identity) from any credential other than an interactive session or a
 // dev credential (sessionCredentialAllowed): 403 with the session-only
 // details (reason GOV_PENDING) and details.keys listing the refused keys.
 // An unknown or missing credential kind is refused too. It writes nothing
@@ -2448,6 +2551,6 @@ func writeTokenRefusedSettingsKeys(w http.ResponseWriter, ctx context.Context, k
 	details := sessionOnlyDenialDetails(authzop.ReasonGovernancePending)
 	details["keys"] = keys
 	writeError(w, http.StatusForbidden, ErrCodeForbidden,
-		"these settings keys require an interactive session", details)
+		"these keys require an interactive session", details)
 	return true
 }

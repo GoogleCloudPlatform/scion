@@ -29,6 +29,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -246,18 +247,26 @@ func TestHubConfigToken_ProjectBoundaryDenied(t *testing.T) {
 	require.NoError(t, s.CreateProject(context.Background(), &store.Project{ID: project, Name: "HCT", Slug: "hct-project"}))
 	createTestUserWithProjectRole(t, s, admin, admin+"@test.com", project, store.ProjectRoleOwner)
 
+	// A super-admin who owns the project holds live authority for every
+	// selector, so only the boundary refuses the project token.
+	super := hubConfigTokenUser(t, s, "hct-pb-super", store.SystemRoleSuperAdmin)
+	createTestUserWithProjectRole(t, s, super, super+"@test.com", project, store.ProjectRoleOwner)
 	for _, sel := range []string{
 		"hub_config:read", "hub_config:update", "hub_project_defaults:read", "hub_project_defaults:update",
+		"hub_messaging:update", "hub_experiments:update",
 		"hub_lifecycle_hooks:read", "hub_lifecycle_hooks:update", "hub_settings:update",
 	} {
-		_, _, err := srv.uatService.CreateTokenWithParams(rs4MintContext(admin), CreateTokenParams{
-			UserID: admin, Name: "hct-" + tid("pb"), Boundary: projectBoundary(project), Scopes: []string{sel},
-		})
-		require.Error(t, err, "a project token with %s must not mint", sel)
+		for _, holder := range []string{admin, super} {
+			_, _, err := srv.uatService.CreateTokenWithParams(rs4MintContext(holder), CreateTokenParams{
+				UserID: holder, Name: "hct-" + tid("pb"), Boundary: projectBoundary(project), Scopes: []string{sel},
+			})
+			require.Error(t, err, "a project token with %s must not mint", sel)
+		}
+		mintHubConfigToken(t, srv, super, hubBoundary(), sel)
 	}
 
-	key := mintHubConfigToken(t, srv, admin, projectBoundary(project), "project:read")
-	for _, path := range []string{"/api/v1/admin/server-config", "/api/v1/admin/project-defaults", "/api/v1/admin/lifecycle-hooks"} {
+	key := mintHubConfigToken(t, srv, super, projectBoundary(project), "project:read")
+	for _, path := range []string{"/api/v1/admin/server-config", "/api/v1/admin/project-defaults", "/api/v1/admin/lifecycle-hooks", "/api/v1/admin/messaging", "/api/v1/admin/experiments"} {
 		rec := doRequestWithToken(t, srv, key, http.MethodGet, path, nil)
 		require.Equal(t, http.StatusForbidden, rec.Code, "%s: %s", path, rec.Body.String())
 	}
@@ -357,10 +366,12 @@ func TestHubPreStartHookRead_TokenGetsRedactedScript(t *testing.T) {
 // TestHubConfig_MissingCredentialKindRefusedAndRedacted requires the
 // settings key rule and the hub hook script redaction to treat a request
 // with no credential context like a token: a refused key is refused, and a
-// hub pre-start hook script is redacted, even for an admin identity.
+// hub pre-start hook script is redacted, even for a super-admin whose
+// interactive session sees the script.
 func TestHubConfig_MissingCredentialKindRefusedAndRedacted(t *testing.T) {
 	srv, s := testServerWithOps(t, nil)
-	admin := NewAuthenticatedUser("hct-nocred", "hct-nocred@example.com", "Admin", "admin", "cli")
+	id := hubConfigTokenUser(t, s, "hct-nocred", store.SystemRoleSuperAdmin)
+	admin := NewAuthenticatedUser(id, id+"@test.com", "Admin", "admin", "cli")
 
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/admin/server-config", strings.NewReader(`{"server":{"hub":{"admin_emails":["x@example.com"]}}}`))
 	req.Header.Set("Content-Type", "application/json")
@@ -371,10 +382,140 @@ func TestHubConfig_MissingCredentialKindRefusedAndRedacted(t *testing.T) {
 
 	hook, err := s.CreateHubPreStartHook(context.Background(), &store.ProjectPreStartHook{
 		Scope: store.PreStartHookScopeHub, Name: "hct-nocred-hook", Slug: "hct-nocred-hook", Script: "#!/bin/sh\necho nocred\n",
-		CreatedBy: "hct-nocred@example.com", UpdatedBy: "hct-nocred@example.com",
+		CreatedBy: id + "@test.com", UpdatedBy: id + "@test.com",
 	})
 	require.NoError(t, err)
-	rec = doHubPSHRequestAsIdentity(t, srv, admin, http.MethodGet, hubPSHPath+"/"+hook.ID, nil)
+	getHook := func(ctx context.Context) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, hubPSHPath+"/"+hook.ID, nil).WithContext(ctx)
+		rec := httptest.NewRecorder()
+		srv.handleHubPreStartHookByID(rec, req)
+		return rec
+	}
+
+	session := contextWithCredentialContext(contextWithIdentity(context.Background(), admin), CredentialContext{Kind: CredentialKindInteractive})
+	rec = getHook(session)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	assert.NotContains(t, rec.Body.String(), "echo nocred")
+	assert.Contains(t, rec.Body.String(), "echo nocred", "an interactive session of the super-admin sees the script")
+
+	rec = getHook(contextWithIdentity(context.Background(), admin))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), "echo nocred", "no credential context gets the redacted script")
+}
+
+// TestHubConfigWrite_RepeatedMemberNamesRejected requires a hub
+// configuration write whose body repeats an object member name, at any
+// depth and under the decoder's case folding, to be rejected with 400 for
+// every credential before anything is written, and a body with no repeated
+// member to be processed.
+func TestHubConfigWrite_RepeatedMemberNamesRejected(t *testing.T) {
+	srv, s := testServerWithOps(t, nil)
+	admin := hubConfigTokenUser(t, s, "hct-dup-super", store.SystemRoleSuperAdmin)
+	key := mintHubConfigToken(t, srv, admin, hubBoundary(), "hub_config:read", "hub_config:update")
+
+	repeated := []string{
+		`{"server":{"hub":{"public_url":"https://zz.example.com"}},"server":{"hub":{"hub_name":"zz"}}}`,
+		`{"server":{"hub":{"admin_emails":["zz@example.com"]}},"server":{}}`,
+		`{"agent_secrets":{"user_scope_only":false},"agent_secrets":{}}`,
+		`{"server":{"hub":{"hub_name":"a","hub_name":"b"}}}`,
+		`{"server":{"hub":{"hub_name":"a"}},"Server":{"hub":{"public_url":"https://zz.example.com"}}}`,
+		`{"profiles":{"p":{"runtime":"a","runtime":"b"}}}`,
+	}
+	for _, body := range repeated {
+		for _, method := range []string{http.MethodPut, http.MethodPatch, http.MethodPost} {
+			rec := doRequestWithToken(t, srv, key, method, "/api/v1/admin/server-config", json.RawMessage(body))
+			require.Equal(t, http.StatusBadRequest, rec.Code, "%s %s: %s", method, body, rec.Body.String())
+		}
+		rec := doRequest(t, srv, http.MethodPut, "/api/v1/admin/server-config", json.RawMessage(body))
+		require.Equal(t, http.StatusBadRequest, rec.Code, "session %s: %s", body, rec.Body.String())
+	}
+	for _, section := range []string{"endpoints", "access", "agent_secrets", "profiles"} {
+		_, err := s.GetHubSetting(context.Background(), section)
+		require.ErrorIs(t, err, store.ErrNotFound, "section %s must not be written", section)
+	}
+
+	rec := doRequestWithToken(t, srv, key, http.MethodPut, "/api/v1/admin/server-config", json.RawMessage(`{"server":{"hub":{"hub_name":"zz"}}}`))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	pdKey := mintHubConfigToken(t, srv, admin, hubBoundary(), "hub_project_defaults:read", "hub_project_defaults:update")
+	rec = doRequestWithToken(t, srv, pdKey, http.MethodPut, "/api/v1/admin/project-defaults", json.RawMessage(`{"default_scratchpad":true,"default_scratchpad":false}`))
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+
+	fileSrv, fileStore := testServer(t)
+	fileAdmin := hubConfigTokenUser(t, fileStore, "hct-dup-file-super", store.SystemRoleSuperAdmin)
+	fileKey := mintHubConfigToken(t, fileSrv, fileAdmin, hubBoundary(), "hub_config:read", "hub_config:update")
+	rec = doRequestWithToken(t, fileSrv, fileKey, http.MethodPut, "/api/v1/admin/server-config", json.RawMessage(repeated[0]))
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+}
+
+// TestRepeatedJSONMember_FindsRepeatsInOneObjectOnly requires a repeat to
+// be reported only for two members of the same object, at any depth.
+func TestRepeatedJSONMember_FindsRepeatsInOneObjectOnly(t *testing.T) {
+	cases := []struct {
+		body string
+		want string
+	}{
+		{`{"a":1,"b":2}`, ""},
+		{`{"a":{"x":1},"b":{"x":2}}`, ""},
+		{`[{"a":1},{"a":2}]`, ""},
+		{`{"a":[{"x":1},{"x":2}],"b":[1,2,{"y":{}}]}`, ""},
+		{`{"a":1,"a":2}`, "a"},
+		{`{"a":1,"A":2}`, "A"},
+		{`{"k":1,"\u212a":2}`, "\u212a"},
+		{`{"a":{"b":{"c":1,"c":2}}}`, "c"},
+		{`{"a":[{"x":1,"x":2}]}`, "x"},
+		{`not json`, ""},
+	}
+	for _, tc := range cases {
+		got, repeated := repeatedJSONMember([]byte(tc.body))
+		if tc.want == "" {
+			assert.False(t, repeated, "%s reported %q", tc.body, got)
+			continue
+		}
+		assert.True(t, repeated, tc.body)
+		assert.Equal(t, tc.want, got, tc.body)
+	}
+}
+
+// TestLifecycleHookWrite_ExecutionIdentityRequiresSession requires a token
+// that creates or updates a lifecycle hook to leave its execution identity
+// as it is: setting, changing or clearing it is refused with the
+// GOV_PENDING session-only reason, and other hook fields stay writable.
+func TestLifecycleHookWrite_ExecutionIdentityRequiresSession(t *testing.T) {
+	srv, s := testServerWithOps(t, nil)
+	admin := hubConfigTokenUser(t, s, "hct-lh-admin", store.SystemRoleHubAdmin)
+	key := mintHubConfigToken(t, srv, admin, hubBoundary(), "hub_lifecycle_hooks:read", "hub_lifecycle_hooks:update")
+
+	create := validCreateRequest()
+	rec := doRequestWithToken(t, srv, key, http.MethodPost, "/api/v1/admin/lifecycle-hooks", create)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var plain store.LifecycleHook
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &plain))
+
+	withIdentity := validCreateRequest()
+	withIdentity.Name = "with-identity"
+	withIdentity.ExecutionIdentity = "hct-sa"
+	rec = doRequestWithToken(t, srv, key, http.MethodPost, "/api/v1/admin/lifecycle-hooks", withIdentity)
+	requireTokenRefusedKeys(t, rec, "executionIdentity")
+
+	update := func(h store.LifecycleHook, name, identity string) *httptest.ResponseRecorder {
+		return doRequestWithToken(t, srv, key, http.MethodPut, "/api/v1/admin/lifecycle-hooks/"+h.ID, updateLifecycleHookRequest{
+			Name: name, Selector: h.Selector, Trigger: h.Trigger, Action: h.Action,
+			ExecutionIdentity: identity, Enabled: h.Enabled, StateVersion: h.StateVersion,
+		})
+	}
+	rec = update(plain, "renamed", "")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &plain))
+	requireTokenRefusedKeys(t, update(plain, "renamed-again", "hct-sa"), "executionIdentity")
+
+	seeded := &store.LifecycleHook{
+		ID: uuid.New().String(), Name: "seeded", ScopeType: store.LifecycleHookScopeHub,
+		Trigger: store.LifecycleHookTriggerRunning, Action: validWebhookAction(),
+		ExecutionIdentity: "hct-seeded-sa", Enabled: true, CreatedBy: admin + "@test.com",
+	}
+	require.NoError(t, s.CreateLifecycleHook(context.Background(), seeded))
+	stored, err := s.GetLifecycleHook(context.Background(), seeded.ID)
+	require.NoError(t, err)
+	requireTokenRefusedKeys(t, update(*stored, "seeded", ""), "executionIdentity")
+	requireTokenRefusedKeys(t, update(*stored, "seeded", "hct-other-sa"), "executionIdentity")
 }

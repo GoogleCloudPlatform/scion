@@ -92,6 +92,9 @@ func (s *Server) handlePutProjectDefaults(w http.ResponseWriter, r *http.Request
 		BadRequest(w, "Invalid request body: "+err.Error())
 		return
 	}
+	if rejectRepeatedJSONMembers(w, rawBody) {
+		return
+	}
 	var body opsettings.ProjectDefaultsSettings
 	if err := json.Unmarshal(rawBody, &body); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
