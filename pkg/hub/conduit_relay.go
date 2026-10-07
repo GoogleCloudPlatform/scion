@@ -433,6 +433,11 @@ func (s *Server) handleConduit(w http.ResponseWriter, r *http.Request) {
 		ProjectID: agent.ProjectID,
 		Agent:     agentIncarnationFacts(agent),
 	}
+	if rs := s.authConfig.AgentRunScope; rs != nil {
+		if claims := GetAgentFromContext(r.Context()); claims != nil {
+			p.TokenRun = rs.conduitBinding(context.WithoutCancel(r.Context()), claims, runScopeRequestFrom(r))
+		}
+	}
 	// The session outlives no request deadline: it ends when the
 	// connection closes or the relay drains.
 	ctx := context.WithoutCancel(r.Context())

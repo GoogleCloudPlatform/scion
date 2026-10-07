@@ -123,7 +123,9 @@ func sortSuffix(endpoint, sort, dir string) string {
 // callers only need to check ok.
 func (s *Server) sortedProjectCandidates(w http.ResponseWriter, ctx context.Context, memberFilter store.AgentFilter, p agentListParams) (members []store.AgentMember, complete bool, ok bool) {
 	// Candidate ceiling pre-check.
+	countDone := perfPhaseStart(ctx, perfPhaseListDBRead)
 	n, err := s.store.CountAgents(ctx, memberFilter)
+	countDone()
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return nil, false, false
@@ -135,7 +137,9 @@ func (s *Server) sortedProjectCandidates(w http.ResponseWriter, ctx context.Cont
 
 	// Member read, max = ceiling+1 so a candidate pool that grew
 	// between the COUNT and this read is still caught.
+	membersDone := perfPhaseStart(ctx, perfPhaseListDBRead)
 	members, err = s.store.ListAgentMembers(ctx, memberFilter, p.sort, p.dir, authorizedListMaxCandidates+1)
+	membersDone()
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return nil, false, false
@@ -211,6 +215,7 @@ func (s *Server) loadFullRowsForPage(ctx context.Context, ids []string, includeD
 	if len(ids) > maxSortedLimit {
 		return nil, fmt.Errorf("sorted full-row read of %d ids exceeds the %d-row page bound", len(ids), maxSortedLimit)
 	}
+	defer perfPhaseStart(ctx, perfPhaseListDBRead)()
 	result, err := s.store.ListAgents(ctx, store.AgentFilter{IDs: ids, IncludeDeleted: includeDeleted},
 		store.ListOptions{Limit: len(ids), SkipTotalCount: true})
 	if err != nil {
@@ -241,6 +246,7 @@ func (s *Server) recheckStillMatchesFilter(ctx context.Context, memberFilter sto
 	}
 	recheckFilter := memberFilter
 	recheckFilter.IDs = candidateIDs
+	defer perfPhaseStart(ctx, perfPhaseListDBRead)()
 	matched, err := s.store.ListAgentMembers(ctx, recheckFilter, sortKey, dir, len(candidateIDs))
 	if err != nil {
 		return nil, err
@@ -355,7 +361,7 @@ func (s *Server) listProjectAgentsSorted(w http.ResponseWriter, r *http.Request,
 	for i, m := range members {
 		resources[i] = memberResource(m)
 	}
-	listed, err := s.authzService.AuthorizeListReadBatch(ctx, identity, resources)
+	listed, err := s.authorizeListReadTimed(ctx, identity, resources)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
@@ -462,6 +468,7 @@ func (s *Server) listProjectAgentsSorted(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
+	capsDone := perfPhaseStart(ctx, perfPhaseCapabilities)
 	if scopedToken && len(page) > 0 {
 		// The row is listed, but its read capability is the plain read
 		// decision, which a token without agent:read does not pass.
@@ -535,6 +542,7 @@ func (s *Server) listProjectAgentsSorted(w http.ResponseWriter, r *http.Request,
 		agents = append(agents, AgentWithCapabilities{Agent: item, Cap: finalCap})
 		plainAgents = append(plainAgents, item)
 	}
+	capsDone()
 
 	s.enrichAgents(ctx, plainAgents)
 	for i := range agents {
@@ -553,7 +561,9 @@ func (s *Server) listProjectAgentsSorted(w http.ResponseWriter, r *http.Request,
 		totalCount = len(agents)
 	}
 
+	scopeCapDone := perfPhaseStart(ctx, perfPhaseScopeCapabilities)
 	scopeCap := s.authzService.ComputeScopeCapabilities(ctx, identity, "project", projectID, "agent")
+	scopeCapDone()
 
 	resp := ListAgentsResponse{
 		Agents:       agents,

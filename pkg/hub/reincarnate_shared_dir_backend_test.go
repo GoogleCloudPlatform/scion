@@ -535,3 +535,194 @@ func TestHTTPAgentDispatcher_ReprovisionCarriesSharedDirBackendChangeToLocal(t *
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "did not confirm the shared dir backend change")
 }
+
+// sharedDirRecordDispatcher models the broker's shared dir record: a
+// successful reprovision that carries a backend change rewrites it, as the
+// broker does.
+type sharedDirRecordDispatcher struct {
+	*reincarnateTestDispatcher
+	mu     sync.Mutex
+	record map[string]string
+}
+
+func (d *sharedDirRecordDispatcher) DispatchAgentReprovision(ctx context.Context, agent *store.Agent) error {
+	if err := d.reincarnateTestDispatcher.DispatchAgentReprovision(ctx, agent); err != nil {
+		return err
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if agent.AppliedConfig != nil {
+		for name, backend := range agent.AppliedConfig.SharedDirBackendChanges {
+			d.record[name] = backend
+		}
+	}
+	return nil
+}
+
+func (d *sharedDirRecordDispatcher) backend(name string) string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.record[name]
+}
+
+func (d *sharedDirRecordDispatcher) setBackend(name, backend string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.record[name] = backend
+}
+
+// resetReprovisions makes the next reprovision the "first" one again, so
+// reprovisionErr applies to the next reincarnation's own reprovision and
+// rerenderErr to its re-render.
+func (d *reincarnateTestDispatcher) resetReprovisions(reprovisionErr error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.reprovisionCalls = 0
+	d.reprovisionConfigs = nil
+	d.reprovisionErr = reprovisionErr
+}
+
+// changeBackendToNFS runs a successful reincarnation that changes the
+// "notes" shared dir to nfs and returns the server, store and agent.
+func changeBackendToNFS(t *testing.T, disp *sharedDirRecordDispatcher) (*Server, store.Store, *store.Agent, Identity) {
+	t.Helper()
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	identity := sessionAdminFor(t, s, project, "sd-once")
+
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, identity, ReincarnateAgentRequest{
+		Handoff: "h", SharedDirBackends: map[string]string{"notes": "nfs"}, AllowEmptySharedDir: true,
+	}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	r := waitForReincarnationSettled(t, s, agent.ID)
+	require.Equal(t, store.AgentReincarnationStateCompleted, r.State, r.Error)
+	require.Equal(t, "nfs", disp.backend("notes"), "the requested change is applied once")
+	_, cfgs := disp.reprovisionSnapshot()
+	require.Len(t, cfgs, 1)
+	assert.Equal(t, map[string]string{"notes": "nfs"}, cfgs[0].SharedDirBackendChanges)
+	assert.True(t, cfgs[0].AllowEmptySharedDir)
+	return srv, s, agent, identity
+}
+
+func newSharedDirRecordDispatcher() *sharedDirRecordDispatcher {
+	return &sharedDirRecordDispatcher{
+		reincarnateTestDispatcher: newReincarnateTestDispatcher(),
+		record:                    map[string]string{"notes": "local"},
+	}
+}
+
+// Once the broker has confirmed the change, the stored config no longer
+// carries it.
+func TestReincarnateAgent_SharedDirBackends_ConfirmedChangeNotStored(t *testing.T) {
+	disp := newSharedDirRecordDispatcher()
+	_, s, agent, _ := changeBackendToNFS(t, disp)
+
+	got, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got.AppliedConfig)
+	assert.Nil(t, got.AppliedConfig.SharedDirBackendChanges)
+	assert.False(t, got.AppliedConfig.AllowEmptySharedDir)
+}
+
+// ptone/scion#3685: a later reincarnation that fails at reprovision
+// re-renders the previous config, and that re-render must not repeat the
+// earlier backend change over a record edited since. This test guards the
+// two clears together: each backs the other up, so removing one alone
+// still passes here. Each is pinned by its own test:
+// ConfirmedChangeNotStored (the clear after a confirmed reprovision) and
+// RerenderStripsStoredChange (the clear on the re-render copy).
+func TestReincarnateAgent_SharedDirBackends_RerenderAfterReprovisionFailureDoesNotRepeat(t *testing.T) {
+	disp := newSharedDirRecordDispatcher()
+	srv, s, agent, identity := changeBackendToNFS(t, disp)
+	disp.setBackend("notes", "local") // edited back by hand
+	disp.resetReprovisions(errors.New("broker unavailable"))
+
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, identity, ReincarnateAgentRequest{Handoff: "h2"}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	r := waitForReincarnationSettled(t, s, agent.ID)
+	require.Equal(t, store.AgentReincarnationStateFailed, r.State)
+
+	calls, cfgs := disp.reprovisionSnapshot()
+	require.Equal(t, 2, calls, "the failed reprovision and the re-render")
+	for i, cfg := range cfgs {
+		assert.Nil(t, cfg.SharedDirBackendChanges, "reprovision %d", i)
+		assert.False(t, cfg.AllowEmptySharedDir, "reprovision %d", i)
+	}
+	assert.Equal(t, "local", disp.backend("notes"), "the re-render does not rewrite the record")
+}
+
+// A later successful reincarnation without the flag does not carry the
+// change either.
+func TestReincarnateAgent_SharedDirBackends_LaterReincarnationDoesNotRepeat(t *testing.T) {
+	disp := newSharedDirRecordDispatcher()
+	srv, s, agent, identity := changeBackendToNFS(t, disp)
+	disp.setBackend("notes", "local")
+	disp.resetReprovisions(nil)
+
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, identity, ReincarnateAgentRequest{Handoff: "h2"}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	r := waitForReincarnationSettled(t, s, agent.ID)
+	require.Equal(t, store.AgentReincarnationStateCompleted, r.State, r.Error)
+
+	_, cfgs := disp.reprovisionSnapshot()
+	require.Len(t, cfgs, 1)
+	assert.Nil(t, cfgs[0].SharedDirBackendChanges)
+	assert.Equal(t, "local", disp.backend("notes"))
+}
+
+// A config stored before this fix may still hold a confirmed change; the
+// re-render strips it all the same.
+func TestReincarnateAgent_SharedDirBackends_RerenderStripsStoredChange(t *testing.T) {
+	disp := newSharedDirRecordDispatcher()
+	disp.reprovisionErr = errors.New("broker unavailable")
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.AppliedConfig.SharedDirBackendChanges = map[string]string{"notes": "nfs"}
+		a.AppliedConfig.AllowEmptySharedDir = true
+	})
+	identity := sessionAdminFor(t, s, project, "sd-legacy")
+
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, identity, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	r := waitForReincarnationSettled(t, s, agent.ID)
+	require.Equal(t, store.AgentReincarnationStateFailed, r.State)
+
+	calls, cfgs := disp.reprovisionSnapshot()
+	require.Equal(t, 2, calls)
+	assert.Nil(t, cfgs[1].SharedDirBackendChanges)
+	assert.False(t, cfgs[1].AllowEmptySharedDir)
+	assert.Equal(t, "local", disp.backend("notes"))
+}
+
+// A reincarnation that asks for the change still fails when the broker
+// does not confirm it, and the stored config goes back to the previous one.
+func TestReincarnateAgent_SharedDirBackends_UnconfirmedChangeFails(t *testing.T) {
+	disp := newSharedDirRecordDispatcher()
+	disp.reprovisionErr = errors.New("broker did not confirm the shared dir backend change")
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	identity := sessionAdminFor(t, s, project, "sd-unconfirmed")
+
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, identity, ReincarnateAgentRequest{
+		Handoff: "h", SharedDirBackends: map[string]string{"notes": "nfs"},
+	}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	r := waitForReincarnationSettled(t, s, agent.ID)
+	require.Equal(t, store.AgentReincarnationStateFailed, r.State)
+	assert.Contains(t, r.Error, "did not confirm the shared dir backend change")
+
+	_, cfgs := disp.reprovisionSnapshot()
+	require.Len(t, cfgs, 2)
+	assert.Equal(t, map[string]string{"notes": "nfs"}, cfgs[0].SharedDirBackendChanges)
+	assert.Nil(t, cfgs[1].SharedDirBackendChanges, "the re-render of the previous config")
+	assert.Equal(t, "local", disp.backend("notes"))
+	got, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 1, got.Generation)
+	assert.Nil(t, got.AppliedConfig.SharedDirBackendChanges)
+}

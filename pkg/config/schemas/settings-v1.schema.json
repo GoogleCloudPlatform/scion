@@ -1222,6 +1222,13 @@
           "x-env-var": "SCION_SERVER_HUB_ASYNCAGENTLAUNCH",
           "x-since": "1"
         },
+        "perf_trace": {
+          "type": "boolean",
+          "default": false,
+          "description": "Turns on per-request performance tracing, off by default. Each Hub API request and SSE connection then logs one perf_trace line with phase timings, authorization store-call and decision-audit counts and DB pool waits; an unscoped local platform admin who sends X-Scion-Perf-Trace: 1 also gets them in X-Scion-Perf-* response headers; no other caller does. Observe only: decisions, audit records and response bodies are unchanged. For diagnosis; not for routine production use. Restart required to change.",
+          "x-env-var": "SCION_SERVER_HUB_PERFTRACE",
+          "x-since": "1"
+        },
         "launch_timeout": {
           "type": "string",
           "description": "Whole-launch budget for an asynchronous create, from the start of the launch to a terminal Hub state (Go duration, e.g. '15m'; default '5m'). A launch that has not reached a terminal Hub state by the deadline is ended. A non-zero value below 30s is rejected and the default is used, since the broker's fixed 20s abort margin would leave no time for a launch to run. Restart required to change.",
@@ -1419,6 +1426,21 @@
           "enum": ["member", "viewer"],
           "default": "member",
           "x-env-var": "SCION_SERVER_AUTH_DEFAULTUSERROLE",
+          "x-since": "1"
+        },
+        "agent_run_scope": {
+          "type": "string",
+          "description": "How the hub treats the run an agent token was issued for: 'off' (default) or 'observe' (log and count only).",
+          "enum": ["off", "observe"],
+          "default": "off",
+          "x-env-var": "SCION_SERVER_AUTH_AGENTRUNSCOPE",
+          "x-since": "1"
+        },
+        "agent_run_scope_legacy_until": {
+          "type": "string",
+          "description": "RFC 3339 time after which agent tokens issued without a run are no longer accepted by run-scope checks. Empty means no cut-off.",
+          "format": "date-time",
+          "x-env-var": "SCION_SERVER_AUTH_AGENTRUNSCOPELEGACYUNTIL",
           "x-since": "1"
         }
       }

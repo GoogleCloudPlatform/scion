@@ -20,7 +20,10 @@ import (
 	"net/http"
 	"path"
 	"strings"
+	"unicode"
 	"unicode/utf8"
+
+	"golang.org/x/text/unicode/norm"
 )
 
 // extMediaTypes maps file extensions to media types. It is consulted before
@@ -60,6 +63,13 @@ var extMediaTypes = map[string]string{
 	".svg":      "image/svg+xml",
 	".pdf":      "application/pdf",
 }
+
+// mediaTypeMarkdown is the media type whose entries are scanned for remote
+// images.
+const mediaTypeMarkdown = "text/markdown"
+
+// mediaTypeHTML is the media type of HTML entries, shown through a view.
+const mediaTypeHTML = "text/html"
 
 // detectMediaType returns the media type to store for a file named name,
 // uploaded with the Content-Type header declared, whose first bytes are
@@ -139,23 +149,35 @@ var errBadPath = errors.New("invalid file path")
 
 // cleanFilePath validates a relative file path inside an artifact and
 // returns it unchanged. It rejects anything that is not already a clean,
-// relative, slash-separated path: empty or dot segments, a leading slash,
-// backslashes, control characters, invalid UTF-8 and overlong names. Paths
-// are never joined onto a filesystem location, but rejecting these forms
-// keeps manifest paths canonical so one file has exactly one name.
+// relative, slash-separated path: empty segments, segments whose name
+// starts with '.', a leading slash, backslashes, control and format
+// characters, invalid UTF-8 and overlong names. Every path a version holds
+// passes here, so readers that write a version to disk get only plain,
+// visible names.
 func cleanFilePath(p string) (string, error) {
 	if p == "" || len(p) > maxPathBytes || !utf8.ValidString(p) {
 		return "", errBadPath
 	}
 	for _, r := range p {
-		if r < 0x20 || r == 0x7f || r == '\\' {
+		// C0 and C1 controls, DEL, backslash, and format characters
+		// (bidirectional controls, zero-width characters), which make a path
+		// display differently from what it is.
+		if r < 0x20 || (r >= 0x7f && r <= 0x9f) || r == '\\' || unicode.Is(unicode.Cf, r) {
 			return "", errBadPath
 		}
 	}
 	for _, seg := range strings.Split(p, "/") {
-		if seg == "" || seg == "." || seg == ".." || len(seg) > maxSegmentBytes {
+		// No empty segments, and no names starting with '.' (which also
+		// covers "." and ".."), in any segment.
+		if seg == "" || strings.HasPrefix(seg, ".") || len(seg) > maxSegmentBytes {
 			return "", errBadPath
 		}
 	}
 	return p, nil
+}
+
+// pathFoldKey is the form in which two manifest paths are the same file on
+// a case-insensitive or normalizing file system: NFC, then lower case.
+func pathFoldKey(p string) string {
+	return strings.ToLower(norm.NFC.String(p))
 }

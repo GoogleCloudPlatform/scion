@@ -1319,7 +1319,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	}
 
 	// Process attachments.
-	attachmentRefs := s.ingestAgentAttachments(ctx, agent.ProjectID, agent.ID, req.Attachments)
+	attachmentRefs, attachmentWarnings := s.ingestAgentAttachments(ctx, agent.ProjectID, agent.ID, req.Attachments)
 	if encoded, ok := attachmentRefsMetadata(attachmentRefs); ok {
 		if structuredMsg.Metadata == nil {
 			structuredMsg.Metadata = make(map[string]string, 1)
@@ -1490,6 +1490,11 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	if len(mentionResults) > 0 {
 		respBody["mention_results"] = mentionResults
 	}
+	// ptone/scion#3667: attachments the hub could not record. Additive: the
+	// message was still sent, and the status is unchanged.
+	if len(attachmentWarnings) > 0 {
+		respBody["attachment_warnings"] = attachmentWarnings
+	}
 	writeJSON(w, http.StatusOK, respBody)
 }
 
@@ -1621,9 +1626,10 @@ func (s *Server) restoreAgent(w http.ResponseWriter, r *http.Request, id string)
 	// delete deactivated is live (otherwise a 409, or a 503 when the lookup
 	// fails), reactivates those edges (a conflicting active edge is a 409)
 	// and writes the agent_restore audit record. It also refuses an agent
-	// whose guard user (its owner, ancestry root or schedule creator) no
-	// longer exists, normally a deleted user but possibly a purged legacy
-	// root agent (ptone/scion#2769; errAgentOwnerUserMissing, see
+	// whose guard user (its owner, ancestry root or, for a scheduled agent,
+	// the principal of its schedule's latest revision) does not exist,
+	// normally a deleted user but possibly a purged legacy root agent
+	// (ptone/scion#2769; errAgentOwnerUserMissing, see
 	// lockAgentGuardUserTx).
 	if err := s.restoreAgentTx(ctx, agent, auditActorFromContext(ctx)); err != nil {
 		if errors.Is(err, errAgentNotSoftDeleted) {
@@ -2557,6 +2563,8 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				AgentPhase:     agent.Phase,
 				MentionResults: mentionResults,
 				Deferred:       deferredNote,
+				// ptone/scion#3667: attachments the hub could not record.
+				AttachmentWarnings: dmResult.AttachmentWarnings,
 			})
 			return
 		}
@@ -2845,6 +2853,10 @@ type MessageDeliveryResponse struct {
 	// saved to conversation history, and dispatch was deliberately skipped.
 	// The CLI keys on this field to print its deferred notice.
 	Deferred string `json:"deferred,omitempty"`
+	// AttachmentWarnings lists attachments the hub could not record on this
+	// message (ptone/scion#3667). The message was still delivered without
+	// them. Omitted when every attachment was recorded.
+	AttachmentWarnings []AttachmentWarning `json:"attachment_warnings,omitempty"`
 }
 
 // GroupMessageRecipientResult represents the delivery status for one recipient in a group[] delivery.

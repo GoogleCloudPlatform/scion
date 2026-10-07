@@ -97,7 +97,6 @@ var PendingBearerDispositions = []PendingEntry{
 	{Kind: EntryPointSSE, Pattern: "/api/v1/projects/{id}/agents/{agentId}/message-logs/stream", Method: "GET", Area: AreaAgents},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/agents/{agentId}/status", Method: "POST", Area: AreaAgents},
 	// --- projects ---
-	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts", Method: "GET", Area: AreaProjects},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/shared/{token}", Method: "GET", Area: AreaProjects},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/broadcast", Method: "POST", Area: AreaProjects},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/clone", Method: "POST", Area: AreaProjects},
@@ -291,6 +290,9 @@ var PendingBearerDispositions = []PendingEntry{
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/me/templates/{id}/finalize", Method: "POST", Area: AreaIdentity},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/me/templates/{id}/upload", Method: "POST", Area: AreaIdentity},
 	// --- hub ---
+	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/delegation-adoption", Method: "GET", Area: AreaHub},
+	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/delegation-adoption/commits", Method: "POST", Area: AreaHub},
+	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/delegation-adoption/previews", Method: "POST", Area: AreaHub},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/integrations/available", Method: "GET", Area: AreaHub},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/integrations/{name}/config", Method: "PUT", Area: AreaHub},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/integrations/{name}/health", Method: "GET", Area: AreaHub},

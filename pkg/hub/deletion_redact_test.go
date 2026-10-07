@@ -431,7 +431,7 @@ func TestLifecycleStopNotRecorded_DeletionAdminVsNonAdmin(t *testing.T) {
 	} {
 		srv, s := testServer(t)
 		_, _, agent := setupOnlineBrokerAgent(t, s, "redact-stop-notrec-"+c.name)
-		_, err := s.SetAgentRunID(context.Background(), agent.ID, "run-old")
+		_, err := s.SetAgentRunID(context.Background(), agent.ID, "run-old", nil)
 		require.NoError(t, err)
 		seedDeletionWithError(t, s, agent.ID, deleteSeed{state: store.DeletionStateFailed, leaseIn: -time.Minute, code: store.DeletionCodeRuntimeError}, "broker said: stop detail")
 		client := &runSwapStopClient{s: s, agentID: agent.ID}
