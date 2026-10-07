@@ -16,6 +16,8 @@ package cmd
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -75,10 +77,13 @@ func TestComputeContainerHubEndpoint(t *testing.T) {
 				in.HubListenPort = 9810
 			}),
 			want: containerHubEndpointResult{
-				Endpoint:                     "http://scion-hub.internal:9810",
-				ColocatedPublicHubEndpoint:   testIAPCloudRunURL,
-				ColocatedRuntimeHubEndpoints: iapTargets("http://scion-hub.internal:9810"),
-				HubListenPort:                9810,
+				Endpoint:                   "http://scion-hub.internal:9810",
+				ColocatedPublicHubEndpoint: testIAPCloudRunURL,
+				ColocatedRuntimeHubEndpoints: map[string]string{
+					"docker": "http://scion-hub.internal:9810",
+					"podman": "http://host.containers.internal:9810",
+				},
+				HubListenPort: 9810,
 			},
 		},
 		{
@@ -195,6 +200,37 @@ func TestComputeContainerHubEndpoint(t *testing.T) {
 				in.HubListenPort = 0
 			}),
 			want: containerHubEndpointResult{},
+		},
+		{
+			// A non-localhost runtime_broker.hub_endpoint must not drop the
+			// targets: they are built from the hub listen port.
+			name: "IAP-derived public URL with a non-localhost broker endpoint uses the listen port",
+			in: with(func(in *containerHubEndpointInputs) {
+				in.RuntimeName = "kubernetes"
+				in.BrokerHubEndpoint = "http://10.0.0.5:9000"
+				in.PublicHubEndpoint = testIAPCloudRunURL
+				in.PublicHubEndpointSource = hubEndpointSourceIAPAudience
+			}),
+			want: containerHubEndpointResult{
+				ColocatedPublicHubEndpoint:   testIAPCloudRunURL,
+				ColocatedRuntimeHubEndpoints: iapTargets("http://scion-hub.internal:8080"),
+				HubListenPort:                8080,
+			},
+		},
+		{
+			name: "IAP-derived public URL with a non-localhost broker endpoint and host networking uses the listen port",
+			in: with(func(in *containerHubEndpointInputs) {
+				in.RuntimeName = "kubernetes"
+				in.BrokerHubEndpoint = "http://10.0.0.5:9000"
+				in.PublicHubEndpoint = testIAPCloudRunURL
+				in.PublicHubEndpointSource = hubEndpointSourceIAPAudience
+				in.ForceHostNetwork = true
+			}),
+			want: containerHubEndpointResult{
+				ColocatedPublicHubEndpoint:   testIAPCloudRunURL,
+				ColocatedRuntimeHubEndpoints: iapTargets("http://host.docker.internal:8080"),
+				HubListenPort:                8080,
+			},
 		},
 		{
 			name: "IAP-derived public URL on Apple container keeps its own endpoint and adds per-runtime targets only",
@@ -569,4 +605,39 @@ func TestBrokerContainerHubConfigPodmanOnlyBroker(t *testing.T) {
 		ColocatedRuntimeHubEndpoints: iapTargets("http://scion-hub.internal:8080"),
 		HubListenPort:                8080,
 	}, got)
+}
+
+// TestComputeContainerHubEndpointHostGatewayLogLevel: a failed host-gateway
+// probe is a warning on a docker default runtime. On a podman default (for
+// example with the podman-docker shim, where `docker version` reports
+// Podman's version) it only affects docker profiles and is logged as info.
+func TestComputeContainerHubEndpointHostGatewayLogLevel(t *testing.T) {
+	for _, tt := range []struct {
+		runtimeName string
+		wantPrefix  string
+	}{
+		{runtimeName: "docker", wantPrefix: "WARNING: host-gateway support not detected via docker"},
+		{runtimeName: "podman", wantPrefix: "INFO: host-gateway support not detected via docker"},
+	} {
+		t.Run(tt.runtimeName, func(t *testing.T) {
+			var logs []string
+			computeContainerHubEndpoint(containerHubEndpointInputs{
+				HubEnabled:              true,
+				BrokerHubEndpoint:       "http://localhost:8080",
+				RuntimeName:             tt.runtimeName,
+				HubListenPort:           8080,
+				PublicHubEndpoint:       testIAPCloudRunURL,
+				PublicHubEndpointSource: hubEndpointSourceIAPAudience,
+				HostGatewaySupported:    func() bool { return false },
+			}, func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) })
+			found := false
+			for _, l := range logs {
+				if strings.HasPrefix(l, tt.wantPrefix) {
+					found = true
+				}
+				assert.NotContains(t, l, "Docker daemon lacks host-gateway")
+			}
+			assert.True(t, found, "logs %v lack %q", logs, tt.wantPrefix)
+		})
+	}
 }

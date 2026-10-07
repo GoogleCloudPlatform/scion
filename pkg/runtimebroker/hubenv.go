@@ -360,9 +360,9 @@ func colocatedExtraHosts(hubEndpoint string, isColocated bool, runtimeName strin
 	if host == "" || net.ParseIP(host) != nil {
 		return nil
 	}
-	// Podman resolves host.containers.internal itself, and the host-gateway
-	// special value needs Podman >= 5.1: older versions reject it and the
-	// container fails to start.
+	// Podman maps host.containers.internal to the host itself, so it needs
+	// no --add-host flag. That works on every Podman version, including
+	// those before 4.7, which reject the host-gateway value.
 	if runtimeName == "podman" && host == podmanHostAlias {
 		return nil
 	}

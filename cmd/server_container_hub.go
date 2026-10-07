@@ -53,8 +53,11 @@ type containerHubEndpointInputs struct {
 	// ForceHostNetwork is true when SCION_FORCE_HOST_NETWORK is set.
 	ForceHostNetwork bool
 	// HostGatewaySupported reports whether the Docker daemon supports
-	// host-gateway. It is called at most once, only for a Docker runtime
-	// that is not already forced onto host networking. Nil means supported.
+	// host-gateway. It is called at most once, and only when host
+	// networking is not already forced and the answer matters: for a docker
+	// default runtime, or, for any default runtime, to pick the docker
+	// target of an IAP-derived public URL (colocatedRuntimeHubEndpoints).
+	// Nil means supported.
 	HostGatewaySupported func() bool
 }
 
@@ -163,7 +166,15 @@ func computeContainerHubEndpoint(in containerHubEndpointInputs, logf func(format
 	// asked at most once.
 	needsProbe := isDocker || (iapDerived && in.HubListenPort > 0)
 	if !in.ForceHostNetwork && needsProbe && in.HostGatewaySupported != nil && !in.HostGatewaySupported() {
-		logf("WARNING: Docker daemon lacks host-gateway support; colocated Docker agents will use host networking (re-introduces metadata-server port contention for concurrent agents). Upgrade Docker Engine to >= 20.10 to enable per-agent bridge networking.")
+		// The probe reads `docker version`. With the podman-docker shim
+		// that reports Podman's version, so on a non-docker default this is
+		// expected and only affects agents dispatched through a docker
+		// profile: log it at info level there.
+		level := "INFO"
+		if isDocker {
+			level = "WARNING"
+		}
+		logf("%s: host-gateway support not detected via docker (requires Docker Engine >= 20.10); colocated docker agents fall back to host networking, which re-introduces metadata-server port contention for concurrent agents.", level)
 		in.ForceHostNetwork = true
 	}
 
@@ -205,20 +216,34 @@ func computeContainerHubEndpoint(in containerHubEndpointInputs, logf func(format
 // it. in.ForceHostNetwork already reflects the host-gateway probe.
 //   - docker: http://<colocatedHubHostAlias>:<listen port> on bridge
 //     networking (colocatedExtraHosts maps the alias to host-gateway), or
-//     host.docker.internal (host networking) when host networking is forced
-//     or the listen port is unknown.
-//   - podman: host.containers.internal, which Podman resolves natively. An
-//     --add-host <alias>:host-gateway entry needs Podman >= 5.1.
+//     host.docker.internal (host networking) when host networking is forced.
+//   - podman: host.containers.internal, which Podman maps to the host
+//     itself, so it needs no --add-host flag and works on every Podman
+//     version (host-gateway in --add-host arrived in Podman 4.7).
+//
+// Both use the hub listen port, so a non-localhost
+// runtime_broker.hub_endpoint does not drop them. Only when the listen port
+// is unknown do they fall back to the port of the broker's localhost hub
+// endpoint.
 //
 // Apple container and remote runtimes get no entry: they keep the public URL.
 func colocatedRuntimeHubEndpoints(in containerHubEndpointInputs) map[string]string {
+	// bridgeTarget is http://<bridge host>:<listen port>, or the broker's
+	// localhost hub endpoint rewritten to the bridge host when the listen
+	// port is unknown.
+	bridgeTarget := func(runtimeName string) string {
+		if in.HubListenPort > 0 {
+			return containerBridgeEndpoint(fmt.Sprintf("http://localhost:%d", in.HubListenPort), runtimeName)
+		}
+		return containerBridgeEndpoint(in.BrokerHubEndpoint, runtimeName)
+	}
 	targets := map[string]string{}
 	if !in.ForceHostNetwork && in.HubListenPort > 0 {
 		targets["docker"] = fmt.Sprintf("http://%s:%d", colocatedHubHostAlias, in.HubListenPort)
-	} else if ep := containerBridgeEndpoint(in.BrokerHubEndpoint, "docker"); ep != "" {
+	} else if ep := bridgeTarget("docker"); ep != "" {
 		targets["docker"] = ep
 	}
-	if ep := containerBridgeEndpoint(in.BrokerHubEndpoint, "podman"); ep != "" {
+	if ep := bridgeTarget("podman"); ep != "" {
 		targets["podman"] = ep
 	}
 	if len(targets) == 0 {
