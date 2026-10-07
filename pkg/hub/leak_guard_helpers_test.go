@@ -55,6 +55,12 @@ const (
 	// matching leakGuardSignatures at package exit. Measured after the fix:
 	// 0 at the end of every shard (and of the full package). The margin of
 	// 5 absorbs stragglers; do not raise it to hide a leak.
+	//
+	// Sensitivity: one leaked *server* adds about 9 matching goroutines and
+	// is always caught. One leaked *store* adds a single connectionOpener
+	// (about 3 MiB), so up to 5 leaked stores pass this guard; the memory
+	// guard still bounds them. This is a deliberate trade-off against
+	// flaking on stragglers, not per-store sensitivity.
 	leakGuardMaxGoroutines = 5
 
 	// leakGuardSettle is how long the guard waits for goroutines that are
@@ -81,7 +87,14 @@ var leakGuardSignatures = []string{
 	"hub.(*chatLinkService).cleanupLoop",
 	"hub.(*PreviewService).cleanupNonces",
 	"hub.(*NonceCache).cleanup",
+	// OIDC key cleanup/refresh loops, which run on the server-lifetime
+	// context and stop on Shutdown (ptone/scion#3641).
+	"hub.(*OIDCKeyManager).Start",
 }
+
+// leakGuardStoreSignature is the leakGuardSignatures entry for an unclosed
+// store; every other entry is a server background loop.
+const leakGuardStoreSignature = "database/sql.(*DB).connectionOpener"
 
 // leakGuardResult is what checkPackageLeaks found.
 type leakGuardResult struct {

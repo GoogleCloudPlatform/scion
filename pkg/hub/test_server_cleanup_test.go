@@ -19,6 +19,7 @@ package hub
 import (
 	"bytes"
 	"context"
+	"io"
 	"regexp"
 	"runtime"
 	"sort"
@@ -224,7 +225,15 @@ func TestTestServerCleanupStopsBackgroundGoroutines(t *testing.T) {
 
 // leakedServerGoroutineSigs are the stack substrings of the background
 // loops New() starts before its last fallible step.
-var leakedServerGoroutineSigs = append([]string{"hub.(*OIDCKeyManager).Start"}, leakGuardSignatures[1:]...)
+var leakedServerGoroutineSigs = func() []string {
+	var sigs []string
+	for _, sig := range leakGuardSignatures {
+		if sig != leakGuardStoreSignature {
+			sigs = append(sigs, sig)
+		}
+	}
+	return sigs
+}()
 
 // countServerLoopGoroutines counts live goroutines, not in skip, whose
 // stack contains one of leakedServerGoroutineSigs.
@@ -266,6 +275,9 @@ func TestNewFailureStopsBackgroundGoroutines(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New on a working store: %v", err)
 	}
+	// Shut down even if the vacuity check below fails (Shutdown is
+	// idempotent, so the explicit call after it is still fine).
+	t.Cleanup(func() { _ = ok.Shutdown(context.Background()) })
 	if n, _ := countServerLoopGoroutines(before); n < len(expectedServerGoroutines)+2 {
 		t.Fatalf("vacuity guard: a working New started only %d background loops", n)
 	}
@@ -292,6 +304,11 @@ func TestNewFailureStopsBackgroundGoroutines(t *testing.T) {
 // (leak_guard_helpers_test.go) sees an unclosed store and names it in its
 // failure output, and passes again once the store is closed.
 func TestLeakGuardReportsUnclosedStore(t *testing.T) {
+	// Let goroutines from earlier tests (for example the connectionOpener
+	// of a store that was just closed) finish exiting before taking the
+	// baseline, so one exiting between the snapshot and the check cannot
+	// cancel out the new store's goroutine.
+	checkPackageLeaks(io.Discard, 0, leakGuardSettle, false)
 	base := scanLeakedGoroutines().total
 	s, err := newTestStore(t, ":memory:")
 	if err != nil {
