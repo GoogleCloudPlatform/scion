@@ -729,6 +729,7 @@ Hub-only commands (require an enabled Hub):
 - `sync [template]` (alias `push`): Create or update a template in the Hub; only changed files are uploaded. Use `--all` to sync every local template, or `--name <name>` to sync under a different Hub name.
 - `pull <name>`: Download a template from the Hub to the local filesystem. Use `--to <path>` for a custom destination.
 - `status`: Show the sync status of templates relative to the Hub.
+- `restore [default]`: Re-create the deleted built-in `default` template on the Hub from the Hub's embedded defaults. With no argument, or with `--all`, every missing built-in template is restored. A template that still exists is left unchanged. Not available in agent mode.
 
 See [Templates & Roles](/scion/local/templates/) for the full guide.
 
@@ -780,6 +781,7 @@ full lifecycle.
 - `reset <name>`: Restore a config to the binary's embedded defaults.
 - `upgrade [name]`: Add missing support files and metadata without clobbering user values. Flags: `--dry-run`, `--activate-script`, `--force`. With no name, upgrades all configs in the global directory.
 - `delete <name>`: Delete a config from the Hub (does not remove local files). The web UI additionally offers an "Also delete stored files" option.
+- `restore <name>... | --all`: Re-create deleted built-in configs on the Hub from the Hub's embedded defaults (a Hub restart does not bring them back). Only built-in names are accepted; a built-in that still exists is left unchanged. Requires a Hub connection. Not available in agent mode. See [Restoring deleted built-ins](/scion/reference/harness-settings/#restoring-deleted-built-ins).
 
 ## Hub Integration
 

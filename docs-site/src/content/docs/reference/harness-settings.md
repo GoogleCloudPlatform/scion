@@ -176,6 +176,33 @@ your local on-disk files. In the web UI, the delete dialog offers an **"Also del
 checkbox to remove the Hub-stored files as well. To remove a local directory, delete it from the
 filesystem or reinstall with `--force`.
 
+### Restoring deleted built-ins
+
+A deleted built-in harness config (for example `claude`) stays deleted: a Hub restart or upgrade
+does not re-create it. The same applies to built-ins left unselected in the setup wizard. To bring
+one back, restore it on the Hub:
+
+```bash
+scion harness-config restore claude          # one or more built-in names
+scion harness-config restore claude codex
+scion harness-config restore --all           # every missing built-in
+```
+
+`restore` re-creates the global Hub config from the Hub's embedded defaults, with its built-in
+source URL, so it keeps receiving content updates on upgrade like any other built-in. It only
+accepts built-in names; any other name fails the whole request. A built-in that still exists is
+left unchanged and reported as already present. To reset an existing config's content, use
+`update` (re-import) or `reset` instead. Restore needs a Hub connection and permission to create
+global harness configs. It is available in human and assistant CLI mode, not agent mode.
+
+Re-running the setup wizard and selecting a harness you left unselected earlier restores that
+built-in in the same way.
+
+The API equivalent is `POST /api/v1/harness-configs/restore` with `{"names": ["claude"]}` or
+`{"all": true}`. It answers `{"restored": [...], "alreadyPresent": [...]}`, with `201` when it
+re-created at least one config and `200` otherwise. A name that is not a built-in harness config
+returns `400`, and a caller without global `harness_config.create` gets `403`.
+
 ## Configuration (`config.yaml`)
 
 The `config.yaml` file at the root of a harness-config bundle defines its runtime parameters. Beyond basic fields like `image`, `harness` type, and `model_aliases`, it includes capabilities and launch configurations.

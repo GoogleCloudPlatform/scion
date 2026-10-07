@@ -309,7 +309,12 @@ scion templates pull code-reviewer --to .scion/templates/code-reviewer
 
 # Compare local vs Hub (synced / out of date / local-only / hub-only)
 scion templates status
+
+# Re-create the built-in default template on the Hub after it was deleted
+scion templates restore                     # same as: scion templates restore default
 ```
+
+A deleted Hub copy of the built-in `default` template is not re-created by a Hub restart or upgrade. `scion templates restore` (or `--all`) re-creates it from the Hub's embedded defaults. If it still exists, it is left unchanged and reported as already present. Any name other than `default` is rejected. Restore needs permission to create global templates, and it is not available in agent CLI mode. The API equivalent is `POST /api/v1/templates/restore` with `{"names": ["default"]}` or `{"all": true}`.
 
 `sync` is content-aware: it hashes files and uploads only what changed, and templates carry a content hash for traceability (visible in `scion templates list`, `scion templates show`, and the Web UI). Syncing an existing template mirrors the local directory: files deleted locally are removed from the Hub copy, and sync lists them as it removes them.
 
