@@ -437,7 +437,7 @@ func notificationStyle(activity string) (string, notificationStyleInfo) {
 	case "COMPLETED":
 		return "Completed", notificationStyleInfo{icon: "\u2705"}
 	case "WAITING_FOR_INPUT":
-		return "Needs Input", notificationStyleInfo{icon: "\u231b"}
+		return "Waiting on Parent", notificationStyleInfo{icon: "\u231b"}
 	case "ERROR":
 		return "Error", notificationStyleInfo{icon: "\u274c"}
 	case "STALLED":
@@ -596,7 +596,12 @@ func (n *NotificationRelay) sendOversizeErrorCards(ctx context.Context, attachPa
 		if agentPath == "" {
 			continue
 		}
-		hostPath := resolveAgentPath(agentPath, projectSlug, projectID)
+		hostPath, err := resolveAgentPath(agentPath, projectSlug, projectID)
+		if err != nil {
+			n.log.Warn("cannot resolve attachment path for size check",
+				"agent_path", agentPath, "error", err)
+			continue
+		}
 		if hostPath == "" {
 			continue
 		}

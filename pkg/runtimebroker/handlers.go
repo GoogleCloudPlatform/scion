@@ -134,6 +134,22 @@ func (s *Server) GetHealthInfo(ctx context.Context) *HealthResponse {
 	}
 }
 
+// heartbeatHealthReport returns the broker's health for the heartbeat,
+// from the same computation as /healthz (GetHealthInfo): a degraded
+// default runtime is reported as status "degraded" with check runtime
+// "unavailable", and NFS mount health as nfs_mounts. The report is
+// normalised to fixed values (api.NormalizeBrokerHealthReport): the
+// per-share detail /healthz shows (share IDs, mount errors) is not sent,
+// so nfs_mounts is "healthy" or "unhealthy". The hub stores it for display
+// only; it never changes the broker's online/offline status.
+func (s *Server) heartbeatHealthReport(ctx context.Context) *api.BrokerHealthReport {
+	info := s.GetHealthInfo(ctx)
+	if info == nil {
+		return nil
+	}
+	return api.NormalizeBrokerHealthReport(&api.BrokerHealthReport{Status: info.Status, Checks: info.Checks})
+}
+
 // degradeHealthStatus lowers a healthy status to degraded. Any other
 // status (already degraded, or worse) is returned unchanged, so a
 // degrading check never raises a worse status back to degraded.
@@ -1632,7 +1648,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			// Fixed text, as restart and the async launch give: a wrapped
 			// error can carry runtime detail. The full error is logged above.
 			Conflict(w, agent.ErrContainerNameInUse.Error())
-		case errors.Is(err, scionrt.ErrRunConflict):
+		case isRunNameConflict(err):
 			// Fixed text: the wrapped error names the namespace, object and
 			// the other run's ID, which must not reach clients (see
 			// runtimeOpError). The full error is logged above.
@@ -2085,9 +2101,6 @@ func (s *Server) resourceObjectPath(ctx context.Context, kind storage.ResourceKi
 		if err != nil {
 			return "", wrapResourceMetaErr(err, "harness-config")
 		}
-		if hc == nil {
-			return "", nil
-		}
 		if hc.StoragePath != "" {
 			return hc.StoragePath, nil
 		}
@@ -2096,9 +2109,6 @@ func (s *Server) resourceObjectPath(ctx context.Context, kind storage.ResourceKi
 		tmpl, err := conn.HubClient.Templates().Get(ctx, ref)
 		if err != nil {
 			return "", wrapResourceMetaErr(err, "template")
-		}
-		if tmpl == nil {
-			return "", nil
 		}
 		if tmpl.StoragePath != "" {
 			return tmpl.StoragePath, nil
@@ -2370,7 +2380,7 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 				RunMismatch(w, runID, current)
 				return
 			}
-			s.cleanupLeftoverAgentResources(ctx, id, projectID)
+			s.cleanupLeftoverAgentResources(ctx, id, projectID, runID)
 			s.agentLifecycleLog.Info("Agent delete: no matching agent in project",
 				"agent_id", id, "project_id", projectID)
 			NotFound(w, "Agent")
@@ -2566,7 +2576,7 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 		// The container was already gone, so DeleteTarget made no runtime
 		// call and the runtime never removed the objects it created with
 		// the container.
-		s.cleanupLeftoverAgentResources(ctx, target.name, projectID)
+		s.cleanupLeftoverAgentResources(ctx, target.name, projectID, runID)
 	}
 
 	// On the NFS workspace, the agent's worktree (worktree-per-agent) or
@@ -2973,7 +2983,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 			// Fixed text, as restart and the async launch give: a wrapped
 			// error can carry runtime detail. The full error is logged above.
 			writeError(w, http.StatusConflict, ErrCodeConflict, agent.ErrContainerNameInUse.Error(), details)
-		case errors.Is(err, scionrt.ErrRunConflict):
+		case isRunNameConflict(err):
 			// Another live run holds the agent name, and the runtime
 			// deleted nothing of it (ptone/scion#2550). Fixed text: the
 			// wrapped error carries identity (see runtimeOpError).
@@ -3894,7 +3904,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 			writeError(w, http.StatusConflict, ErrCodeConflict, agent.ErrContainerNameInUse.Error(), details)
 			return
 		}
-		if errors.Is(err, scionrt.ErrRunConflict) {
+		if isRunNameConflict(err) {
 			// Another live run holds the agent name, and the runtime
 			// deleted nothing of it (ptone/scion#2550). Fixed text: the
 			// wrapped error carries identity (see runtimeOpError).
@@ -4485,13 +4495,15 @@ var execContainerNotFoundRe = regexp.MustCompile(`(?i)\b(?:containers?|pods?|san
 // isExecTargetNotFound reports whether an rt.Exec error (that is not a
 // command exit, see execCommandExitCode) means the agent's container is
 // gone. Structured signals come first: a Kubernetes NotFound status (the pod
-// no longer exists) is; a missing runtime binary (os/exec.ErrNotFound,
+// no longer exists) or runtime.ErrContainerNotFound (docker, podman and
+// apple, when the container was removed after the lookup; ptone/scion#3655)
+// is; a missing runtime binary (os/exec.ErrNotFound,
 // "executable file not found") is a broker problem, not a missing agent.
 // Otherwise the fallback is container-specific wording
 // (execContainerNotFoundRe), matched only on the part of the message that
 // cannot carry command output.
 func isExecTargetNotFound(err error) bool {
-	if k8serrors.IsNotFound(err) {
+	if k8serrors.IsNotFound(err) || errors.Is(err, scionrt.ErrContainerNotFound) {
 		return true
 	}
 	if errors.Is(err, exec.ErrNotFound) {
@@ -6789,6 +6801,53 @@ func (s *Server) collectAgentCandidates(ctx context.Context, managers []agent.Ma
 	return matches, listErr
 }
 
+// collectTargetCandidates lists the entries a delete or a run-scoped stop
+// of id in projectID chooses its target from (ptone/scion#2550): the
+// recorded-runtime restriction (GoogleCloudPlatform/scion#2423) narrows
+// the managers first (allManagers), collectAgentCandidates applies the
+// project scoping and the legacy-path check, and, when the agent's own
+// runtime holds no container for it, the other registered runtimes are
+// searched too (see below). A run filter (selectDeleteCandidates) applies
+// only to what this returns, so stop and delete see the same candidates
+// for the same project, name and runtime state. op names the operation in
+// log messages. The error is collectAgentCandidates' List failure on the
+// first listing.
+func (s *Server) collectTargetCandidates(ctx context.Context, id, projectID, op string) ([]agentCandidate, error) {
+	managers := s.allManagers(ctx)
+	matches, listErr := s.collectAgentCandidates(ctx, managers, id, projectID, op+": runtime list failed")
+
+	// The agent's own runtime (ensureAgentOwnRuntime; managers is then just
+	// that runtime) listed cleanly but holds no container for the agent (at
+	// most an entry for its files). Its container may still run in a
+	// runtime its profile selected before (the profile's runtime or
+	// namespace was changed), so search the other registered runtimes too,
+	// best effort: a runtime that cannot be listed is logged and skipped,
+	// and does not fail the operation. A container found there is the target.
+	// The run filter below applies to what this search finds as well.
+	if own := s.ownRuntimeFor(ctx); own != nil && listErr == nil && !candidatesHaveContainer(matches) {
+		walked, _ := s.collectAgentCandidates(ctx, s.otherManagers(ctx, own), id, projectID,
+			op+": runtime list failed while searching the other runtimes; skipped")
+		if candidatesHaveContainer(walked) {
+			matches = matches[:0]
+			for _, c := range walked {
+				if c.entry.ContainerID != "" {
+					matches = append(matches, c)
+				}
+			}
+		} else if len(matches) == 0 {
+			matches = walked
+		}
+		if !candidatesHaveContainer(matches) {
+			// Name what was checked, so an operator can find a container
+			// left where earlier settings put it.
+			s.agentLifecycleLog.Warn(op+": no container found in the agent's own runtime or the other registered runtimes",
+				"agent_id", id, "project_id", projectID, "profile", own.profile,
+				"runtime", own.rt.Name(), "namespace", ownRuntimeNamespace(own.rt))
+		}
+	}
+	return matches, listErr
+}
+
 // resolveDeleteTarget finds the one agent entry a delete of id in projectID
 // must act on, searching the default runtime and every auxiliary runtime.
 //
@@ -6824,41 +6883,8 @@ func (s *Server) collectAgentCandidates(ctx context.Context, managers []agent.Ma
 //
 // More than one distinct match is an error (fail closed) rather than a guess.
 func (s *Server) resolveDeleteTarget(ctx context.Context, id, projectID, runID, projectPathHint string, needProjectPath bool) (*deleteTarget, error) {
-	// The recorded-runtime restriction (GoogleCloudPlatform/scion#2423)
-	// narrows the managers first; the run filter below applies only to
-	// what those managers list.
 	managers := s.allManagers(ctx)
-	matches, listErr := s.collectAgentCandidates(ctx, managers, id, projectID, "Agent delete: runtime list failed")
-
-	// The agent's own runtime (ensureAgentOwnRuntime; managers is then just
-	// that runtime) listed cleanly but holds no container for the agent (at
-	// most an entry for its files). Its container may still run in a
-	// runtime its profile selected before (the profile's runtime or
-	// namespace was changed), so search the other registered runtimes too,
-	// best effort: a runtime that cannot be listed is logged and skipped,
-	// and does not fail the delete. A container found there is the target.
-	// The run filter below applies to what this search finds as well.
-	if own := s.ownRuntimeFor(ctx); own != nil && listErr == nil && !candidatesHaveContainer(matches) {
-		walked, _ := s.collectAgentCandidates(ctx, s.otherManagers(ctx, own), id, projectID,
-			"Agent delete: runtime list failed while searching the other runtimes; skipped")
-		if candidatesHaveContainer(walked) {
-			matches = matches[:0]
-			for _, c := range walked {
-				if c.entry.ContainerID != "" {
-					matches = append(matches, c)
-				}
-			}
-		} else if len(matches) == 0 {
-			matches = walked
-		}
-		if !candidatesHaveContainer(matches) {
-			// Name what was checked, so an operator can find a container
-			// left where earlier settings put it.
-			s.agentLifecycleLog.Warn("Agent delete: no container found in the agent's own runtime or the other registered runtimes",
-				"agent_id", id, "project_id", projectID, "profile", own.profile,
-				"runtime", own.rt.Name(), "namespace", ownRuntimeNamespace(own.rt))
-		}
-	}
+	matches, listErr := s.collectTargetCandidates(ctx, id, projectID, "Agent delete")
 
 	if runID != "" {
 		var mismatch bool
@@ -7023,7 +7049,7 @@ func filterDeleteCandidatesByRun[T any](cands []T, runID string, entry func(T) a
 // per-agent objects left behind after the agent's container is gone (see
 // runtime.AgentResourceCleaner and agent.AgentManager.CleanupAgentResources).
 type agentResourceCleaner interface {
-	CleanupAgentResources(ctx context.Context, agentName, projectID string) error
+	CleanupAgentResources(ctx context.Context, agentName, projectID, runID string) error
 }
 
 // cleanupLeftoverAgentResources removes the per-agent runtime objects of an
@@ -7034,7 +7060,13 @@ type agentResourceCleaner interface {
 // nothing without one. It is best effort: a failure is logged and does not
 // fail the delete, matching the cleanup that runtime Delete does when the
 // container still exists.
-func (s *Server) cleanupLeftoverAgentResources(ctx context.Context, agentName, projectID string) {
+//
+// runID is the run the delete names (ptone/scion#2550): only that run's
+// objects and legacy objects with no run label are removed, never another
+// run's, so a delete naming an older run leaves the objects of a newer run
+// whose container does not exist yet (as Kubernetes deleteRun does when the
+// pod is gone). An empty runID cleans by name, as before.
+func (s *Server) cleanupLeftoverAgentResources(ctx context.Context, agentName, projectID, runID string) {
 	if projectID == "" {
 		return
 	}
@@ -7044,9 +7076,9 @@ func (s *Server) cleanupLeftoverAgentResources(ctx context.Context, agentName, p
 		if !ok {
 			continue
 		}
-		if err := c.CleanupAgentResources(ctx, slug, projectID); err != nil {
+		if err := c.CleanupAgentResources(ctx, slug, projectID, runID); err != nil {
 			s.agentLifecycleLog.Warn("Agent delete: failed to remove leftover runtime objects",
-				"agent_id", agentName, "project_id", projectID, "error", err)
+				"agent_id", agentName, "project_id", projectID, "run_id", runID, "error", err)
 		}
 	}
 }

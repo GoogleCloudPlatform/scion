@@ -35,6 +35,11 @@ type ArtifactService interface {
 	// Get returns an artifact and its current version.
 	Get(ctx context.Context, id string) (*ArtifactResponse, error)
 
+	// List returns one page of the artifacts the caller owns, is granted,
+	// or that are shared to a project it is a member of, newest first.
+	// opts may be nil.
+	List(ctx context.Context, opts *ListArtifactsOptions) (*ArtifactListResponse, error)
+
 	// OpenFile opens a file of version seq of an artifact (0 = the current
 	// version). The caller must close the returned reader.
 	OpenFile(ctx context.Context, id string, seq int, filePath string) (io.ReadCloser, error)
@@ -106,6 +111,33 @@ type PublishArtifactRequest struct {
 	// ContentType is the declared media type; the hub prefers the type
 	// implied by Name's extension.
 	ContentType string
+}
+
+// ListArtifactsOptions filters and pages List.
+type ListArtifactsOptions struct {
+	// Query keeps artifacts whose title or key contains it.
+	Query string
+	// ReviewPending keeps artifacts whose current version is a review.
+	ReviewPending bool
+	// OwnedOnly keeps artifacts the caller owns.
+	OwnedOnly bool
+	// Limit is the page size (0 = the hub's default).
+	Limit int
+	// Cursor is the NextCursor of the previous page.
+	Cursor string
+}
+
+// ArtifactListResponse mirrors the hub's list response body.
+type ArtifactListResponse struct {
+	Artifacts []ArtifactListItem `json:"artifacts"`
+	// NextCursor is empty on the last page.
+	NextCursor string `json:"nextCursor,omitempty"`
+}
+
+// ArtifactListItem is one listed artifact.
+type ArtifactListItem struct {
+	Artifact
+	ReviewPending bool `json:"reviewPending"`
 }
 
 // ArtifactResponse mirrors the hub's artifact response body.
@@ -198,7 +230,7 @@ func (s *artifactService) Publish(ctx context.Context, req *PublishArtifactReque
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[ArtifactResponse](resp)
+	return apiclient.DecodeRequired[ArtifactResponse](resp)
 }
 
 // Get implements ArtifactService.
@@ -207,7 +239,35 @@ func (s *artifactService) Get(ctx context.Context, id string) (*ArtifactResponse
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[ArtifactResponse](resp)
+	return apiclient.DecodeRequired[ArtifactResponse](resp)
+}
+
+// List implements ArtifactService.
+func (s *artifactService) List(ctx context.Context, opts *ListArtifactsOptions) (*ArtifactListResponse, error) {
+	q := url.Values{}
+	q.Set("mine", "1")
+	if opts != nil {
+		if opts.Query != "" {
+			q.Set("q", opts.Query)
+		}
+		if opts.ReviewPending {
+			q.Set("review_pending", "1")
+		}
+		if opts.OwnedOnly {
+			q.Set("owner", "me")
+		}
+		if opts.Limit > 0 {
+			q.Set("limit", strconv.Itoa(opts.Limit))
+		}
+		if opts.Cursor != "" {
+			q.Set("cursor", opts.Cursor)
+		}
+	}
+	resp, err := s.c.getWithQuery(ctx, "/api/v1/artifacts", q, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[ArtifactListResponse](resp)
 }
 
 // OpenFile implements ArtifactService. The hub either streams the bytes or
@@ -295,7 +355,7 @@ func (s *artifactService) CreateVersion(ctx context.Context, id string, req *Cre
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[PendingVersionResponse](resp)
+	return apiclient.DecodeRequired[PendingVersionResponse](resp)
 }
 
 // UploadFile implements ArtifactService.
@@ -323,7 +383,7 @@ func (s *artifactService) FinalizeVersion(ctx context.Context, id string, seq in
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[ArtifactResponse](resp)
+	return apiclient.DecodeRequired[ArtifactResponse](resp)
 }
 
 // ListVersions implements ArtifactService.
@@ -339,7 +399,7 @@ func (s *artifactService) ListVersions(ctx context.Context, id string) ([]Artifa
 		if err != nil {
 			return nil, err
 		}
-		page, err := apiclient.DecodeResponse[struct {
+		page, err := apiclient.DecodeRequired[struct {
 			Versions   []ArtifactVersion `json:"versions"`
 			NextBefore int               `json:"nextBefore"`
 		}](resp)
@@ -360,5 +420,5 @@ func (s *artifactService) GetVersion(ctx context.Context, id string, seq int) (*
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[ArtifactResponse](resp)
+	return apiclient.DecodeRequired[ArtifactResponse](resp)
 }

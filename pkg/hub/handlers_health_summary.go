@@ -22,6 +22,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -43,7 +44,7 @@ type HealthSummaryResponse struct {
 	Hub      HealthSummaryHub       `json:"hub"`
 	Database HealthSummaryDB        `json:"database"`
 	Brokers  HealthSummaryBrokers   `json:"runtime_brokers"`
-	Agents   HealthSummaryAgents    `json:"agents"`
+	Agents   *HealthSummaryAgents   `json:"agents"`   // nil when the agent aggregate is unavailable
 	Dispatch *HealthSummaryDispatch `json:"dispatch"` // nil when dispatch metrics are unavailable
 }
 
@@ -102,15 +103,32 @@ type HealthSummaryBroker struct {
 	Runtime *HealthBrokerRuntime `json:"runtime"`
 	// WorkspaceStorage is null when the broker never reported it.
 	WorkspaceStorage *HealthBrokerStorage `json:"workspace_storage"`
-	Agents           HealthBrokerAgents   `json:"agents"`
+	// Health is the broker's last self-reported health, or null when the
+	// broker never reported it (an older broker). It is as fresh as
+	// LastHeartbeat and never changes Status. For an offline broker it is
+	// the last report before the broker went offline.
+	Health *HealthBrokerSelf  `json:"health"`
+	Agents HealthBrokerAgents `json:"agents"`
+}
+
+// HealthBrokerSelf is a runtime broker's self-reported health.
+type HealthBrokerSelf struct {
+	// Status is healthy, degraded or unhealthy.
+	Status string `json:"status"`
+	// Checks maps each check the broker ran to its result, for example
+	// {"runtime": "unavailable"}. Values are fixed words only (see
+	// api.NormalizeBrokerHealthReport), never free text.
+	Checks map[string]string `json:"checks"`
 }
 
 // HealthBrokerAgents holds per-broker agent counts.
 type HealthBrokerAgents struct {
-	// Total is the number of non-deleted agents placed on the broker, in
-	// any phase: it includes stopped, suspended and errored agents, not
-	// only running ones.
-	Total int `json:"total"`
+	// Running is the number of agents on the broker in phase running.
+	Running int `json:"running"`
+	// Attention is the number of agents on the broker needing attention:
+	// phase error, or activity crashed or offline outside phase stopped.
+	// Stalled agents never count.
+	Attention int `json:"attention"`
 }
 
 // HealthBrokerRuntime is the runtime a broker places agents on by default.
@@ -128,13 +146,58 @@ type HealthBrokerStorage struct {
 	NFSHealthy *bool `json:"nfs_healthy,omitempty"`
 }
 
-// HealthSummaryAgents contains agent health summary.
+// HealthSummaryAgents is the agents section of the health summary. It
+// carries no stall data: stalls are routine and are not a health signal.
 type HealthSummaryAgents struct {
-	Total   int            `json:"total"`
-	ByPhase map[string]int `json:"by_phase"`
-	Stalled []string       `json:"stalled"`
-	Crashed []string       `json:"crashed"`
-	Errored []string       `json:"errored"`
+	// Total is the number of non-deleted agents.
+	Total int `json:"total"`
+	// Active is Total minus agents in phase stopped or error.
+	Active int `json:"active"`
+	// Errored is the number of agents in phase error or with activity
+	// crashed, each agent once, stopped agents excluded.
+	Errored int `json:"errored"`
+	// Considered is the number of non-deleted agents not in phase stopped.
+	// Errored never exceeds it.
+	Considered int `json:"considered"`
+	// ByPhase lists the phases that have agents, in lifecycle order
+	// (state.Phases()); phases outside that list follow, sorted by name.
+	ByPhase []HealthPhaseCount `json:"by_phase"`
+	// Problems has one group per problem kind (errored, crashed, offline),
+	// in that order. Empty groups are omitted.
+	Problems []HealthAgentGroup `json:"problems"`
+}
+
+// HealthPhaseCount is the number of agents in one phase.
+type HealthPhaseCount struct {
+	Phase string `json:"phase"`
+	Count int    `json:"count"`
+}
+
+// Agent problem group kinds.
+const (
+	HealthAgentGroupErrored = "errored" // phase error
+	HealthAgentGroupCrashed = "crashed" // activity crashed, not stopped
+	HealthAgentGroupOffline = "offline" // activity offline, not stopped
+)
+
+// HealthAgentGroup is one kind of agent problem.
+type HealthAgentGroup struct {
+	Kind string `json:"kind"`
+	// Count is the true number of agents of this kind; Items is capped at
+	// store.AgentHealthRefCap.
+	Count int              `json:"count"`
+	Items []HealthAgentRef `json:"items"`
+}
+
+// HealthAgentRef identifies one agent in a problem group.
+type HealthAgentRef struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	ProjectID string `json:"project_id"`
+	// ProjectSlug is empty when the project could not be resolved.
+	ProjectSlug string `json:"project_slug"`
+	// BrokerID is empty when the agent is not placed on a broker.
+	BrokerID string `json:"broker_id"`
 }
 
 // HealthSummaryDispatch contains dispatch pipeline health.
@@ -204,29 +267,16 @@ func (s *Server) handleHealthSummary(w http.ResponseWriter, r *http.Request) {
 
 	// Use aggregate queries instead of fetching full agent records.
 	// This avoids deserialising up to 10 000 structs on every 30 s poll.
-	agentsSummary := HealthSummaryAgents{
-		ByPhase: make(map[string]int),
-		Stalled: []string{},
-		Crashed: []string{},
-		Errored: []string{},
-	}
-
+	// A nil section means "not reported": the dashboard must not read a
+	// failed aggregate as zero agents with nothing needing attention.
+	var agentsSummary *HealthSummaryAgents
 	agentAgg, err := s.store.AggregateAgentHealth(ctx)
 	if err != nil {
 		slog.Error("health summary: failed to aggregate agent health", "error", err)
 		degrade()
 	} else {
-		agentsSummary.Total = agentAgg.Total
-		agentsSummary.ByPhase = agentAgg.ByPhase
-		if len(agentAgg.StalledNames) > 0 {
-			agentsSummary.Stalled = agentAgg.StalledNames
-		}
-		if len(agentAgg.CrashedNames) > 0 {
-			agentsSummary.Crashed = agentAgg.CrashedNames
-		}
-		if len(agentAgg.ErroredNames) > 0 {
-			agentsSummary.Errored = agentAgg.ErroredNames
-		}
+		summary := s.healthSummaryAgents(ctx, agentAgg)
+		agentsSummary = &summary
 	}
 
 	// Build brokers section using pre-computed agent buckets from the aggregate.
@@ -244,7 +294,8 @@ func (s *Server) handleHealthSummary(w http.ResponseWriter, r *http.Request) {
 	var dispatchSummary *HealthSummaryDispatch // nil = unavailable
 
 	// Propagate unhealthy agent/broker signals into overall status.
-	if len(agentsSummary.Stalled) > 0 || len(agentsSummary.Crashed) > 0 || len(agentsSummary.Errored) > 0 {
+	// Stalled agents never count.
+	if agentsSummary != nil && agentsSummary.Errored > 0 {
 		degrade()
 	}
 	for _, b := range brokerList.Items {
@@ -264,6 +315,99 @@ func (s *Server) handleHealthSummary(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// healthSummaryAgents builds the agents section from the store aggregate.
+// Project slugs for the capped references are resolved with one batched
+// project lookup; if it fails the slugs stay empty and the rest is kept.
+func (s *Server) healthSummaryAgents(ctx context.Context, agg *store.AgentHealthAggregate) HealthSummaryAgents {
+	out := HealthSummaryAgents{
+		Total:      agg.Total,
+		Active:     agg.Total - agg.ByPhase[string(state.PhaseStopped)] - agg.ByPhase[string(state.PhaseError)],
+		Errored:    agg.Errored,
+		Considered: agg.Considered,
+		ByPhase:    orderedPhaseCounts(agg.ByPhase),
+		Problems:   []HealthAgentGroup{},
+	}
+	groups := []struct {
+		kind  string
+		group store.AgentProblemGroup
+	}{
+		{HealthAgentGroupErrored, agg.ErrorPhase},
+		{HealthAgentGroupCrashed, agg.Crashed},
+		{HealthAgentGroupOffline, agg.Offline},
+	}
+	var projectIDs []string
+	seen := map[string]bool{}
+	for _, g := range groups {
+		for _, r := range g.group.Refs {
+			if r.ProjectID != "" && !seen[r.ProjectID] {
+				seen[r.ProjectID] = true
+				projectIDs = append(projectIDs, r.ProjectID)
+			}
+		}
+	}
+	slugs := s.healthSummaryProjectSlugs(ctx, projectIDs)
+	for _, g := range groups {
+		if g.group.Count == 0 {
+			continue
+		}
+		items := make([]HealthAgentRef, 0, len(g.group.Refs))
+		for _, r := range g.group.Refs {
+			items = append(items, HealthAgentRef{
+				ID:          r.ID,
+				Name:        r.Name,
+				ProjectID:   r.ProjectID,
+				ProjectSlug: slugs[r.ProjectID],
+				BrokerID:    r.BrokerID,
+			})
+		}
+		out.Problems = append(out.Problems, HealthAgentGroup{Kind: g.kind, Count: g.group.Count, Items: items})
+	}
+	return out
+}
+
+// healthSummaryProjectSlugs maps project IDs to slugs with one batched
+// lookup. It returns an empty map when ids is empty or the lookup fails.
+func (s *Server) healthSummaryProjectSlugs(ctx context.Context, ids []string) map[string]string {
+	slugs := make(map[string]string, len(ids))
+	if len(ids) == 0 {
+		return slugs
+	}
+	res, err := s.store.ListProjectSummaries(ctx, store.ProjectFilter{MemberProjectIDs: ids}, store.ListOptions{Limit: len(ids), SkipTotalCount: true})
+	if err != nil {
+		slog.Warn("health summary: failed to resolve project slugs", "error", err)
+		return slugs
+	}
+	for _, p := range res.Items {
+		slugs[p.ID] = p.Slug
+	}
+	return slugs
+}
+
+// orderedPhaseCounts returns the non-zero phase counts in lifecycle order
+// (state.Phases()), followed by any phase outside that list sorted by name,
+// so the order is stable across polls.
+func orderedPhaseCounts(byPhase map[string]int) []HealthPhaseCount {
+	out := make([]HealthPhaseCount, 0, len(byPhase))
+	known := map[string]bool{}
+	for _, p := range state.Phases() {
+		known[string(p)] = true
+		if n := byPhase[string(p)]; n > 0 {
+			out = append(out, HealthPhaseCount{Phase: string(p), Count: n})
+		}
+	}
+	var other []string
+	for p, n := range byPhase {
+		if !known[p] && n > 0 {
+			other = append(other, p)
+		}
+	}
+	sort.Strings(other)
+	for _, p := range other {
+		out = append(out, HealthPhaseCount{Phase: p, Count: byPhase[p]})
+	}
+	return out
 }
 
 // healthSummaryBrokers lists runtime brokers for the health summary,
@@ -304,9 +448,10 @@ func (s *Server) healthSummaryBrokers(ctx context.Context, agentAgg *store.Agent
 }
 
 // healthSummaryBrokerHasProblem reports whether a runtime broker row needs
-// attention: it is not online, or its NFS workspace share is unhealthy.
+// attention: it is not online, it reports itself degraded or unhealthy, or
+// its NFS workspace share is unhealthy.
 func healthSummaryBrokerHasProblem(b HealthSummaryBroker) bool {
-	if healthSummaryBrokerStatusIsProblem(b.Status) {
+	if healthSummaryBrokerStatusIsProblem(b.Status) || healthSummaryBrokerSelfIsProblem(b.Health) {
 		return true
 	}
 	ws := b.WorkspaceStorage
@@ -322,6 +467,13 @@ func healthSummaryBrokerStatusIsProblem(status string) bool {
 	return status != store.BrokerStatusOnline
 }
 
+// healthSummaryBrokerSelfIsProblem reports whether a broker's self-reported
+// health needs attention: degraded or unhealthy. A broker that never
+// reported its health (nil) is not a problem; it is shown as not reported.
+func healthSummaryBrokerSelfIsProblem(h *HealthBrokerSelf) bool {
+	return h != nil && (h.Status == HealthStatusDegraded || h.Status == HealthStatusUnhealthy)
+}
+
 // healthSummaryBroker builds one runtime broker row of the health summary.
 func healthSummaryBroker(b *store.RuntimeBroker, agentAgg *store.AgentHealthAggregate) HealthSummaryBroker {
 	row := HealthSummaryBroker{
@@ -331,6 +483,7 @@ func healthSummaryBroker(b *store.RuntimeBroker, agentAgg *store.AgentHealthAggr
 		Status:           b.Status,
 		Runtime:          brokerRuntimeSummary(b),
 		WorkspaceStorage: brokerStorageSummary(b.WorkspaceStorage),
+		Health:           brokerSelfHealthSummary(b.Health),
 	}
 	if !b.LastHeartbeat.IsZero() {
 		hb := b.LastHeartbeat
@@ -338,7 +491,7 @@ func healthSummaryBroker(b *store.RuntimeBroker, agentAgg *store.AgentHealthAggr
 	}
 	if agentAgg != nil {
 		if bucket, ok := agentAgg.ByBroker[b.ID]; ok {
-			row.Agents.Total = bucket.Count
+			row.Agents = HealthBrokerAgents{Running: bucket.Running, Attention: bucket.Attention}
 		}
 	}
 	return row
@@ -373,6 +526,23 @@ func brokerStorageSummary(ws *api.BrokerWorkspaceStorage) *HealthBrokerStorage {
 	if ws.Backend == api.WorkspaceStorageBackendNFS {
 		healthy := ws.NFS != nil && ws.NFS.Healthy
 		out.NFSHealthy = &healthy
+	}
+	return out
+}
+
+// brokerSelfHealthSummary converts the health a broker reported on its
+// heartbeat, or returns nil when it never reported one. The stored report
+// is normalised again (api.NormalizeBrokerHealthReport), so the response
+// only ever holds fixed values, whatever the row contains. Checks is never
+// null in the response.
+func brokerSelfHealthSummary(stored *api.BrokerHealthReport) *HealthBrokerSelf {
+	h := api.NormalizeBrokerHealthReport(stored)
+	if h == nil {
+		return nil
+	}
+	out := &HealthBrokerSelf{Status: h.Status, Checks: make(map[string]string, len(h.Checks))}
+	for k, v := range h.Checks {
+		out.Checks[k] = v
 	}
 	return out
 }

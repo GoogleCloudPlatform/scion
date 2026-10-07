@@ -708,7 +708,7 @@ func TestNewWiresMintDevAuthOverrideFromDevAuthToken(t *testing.T) {
 			require.NoError(t, err)
 			require.NoError(t, s.Migrate(context.Background()))
 
-			srv, err := New(ServerConfig{DevAuthToken: tc.token}, s)
+			srv, err := newTestHubServer(t, ServerConfig{DevAuthToken: tc.token}, s)
 			require.NoError(t, err)
 			assert.Equal(t, tc.want, srv.authzService.mintDevAuthOverride)
 

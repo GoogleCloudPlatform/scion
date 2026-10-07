@@ -26,7 +26,9 @@ import (
 // GET returns the current project defaults (merged with compiled defaults).
 // PUT accepts a partial update to the project_defaults opsettings section.
 //
-// Both endpoints are admin-gated (same auth check as handleAdminMaintenance).
+// The route guard checks hub.project_defaults.read; writes also require
+// hub.project_defaults.update. A user access token needs both selectors, and
+// writes only the keys projectDefaultsTokenKeys classifies as configuration.
 // The section follows the maintenance pattern: DB-only, no settings.yaml
 // representation, with a dedicated admin API endpoint.
 func (s *Server) handleAdminProjectDefaults(w http.ResponseWriter, r *http.Request) {
@@ -85,9 +87,21 @@ func (s *Server) handleGetProjectDefaults(w http.ResponseWriter) {
 // handles validation, persistence, and cross-replica propagation) or falls
 // back to a 501 when the hub has no OperationalSettings.
 func (s *Server) handlePutProjectDefaults(w http.ResponseWriter, r *http.Request) {
-	var body opsettings.ProjectDefaultsSettings
-	if err := readJSON(r, &body); err != nil {
+	rawBody, err := readRawBody(w, r)
+	if err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
+		return
+	}
+	if rejectRepeatedJSONMembers(w, rawBody) {
+		return
+	}
+	var body opsettings.ProjectDefaultsSettings
+	if err := json.Unmarshal(rawBody, &body); err != nil {
+		BadRequest(w, "Invalid request body: "+err.Error())
+		return
+	}
+	// A user access token writes configuration keys only.
+	if writeTokenRefusedSettingsKeys(w, r.Context(), tokenRefusedProjectDefaultsKeys(rawBody)) {
 		return
 	}
 

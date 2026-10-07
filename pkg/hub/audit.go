@@ -100,6 +100,9 @@ const (
 	InviteAuditUserActivated    InviteAuditEventType = "user_activated"
 	InviteAuditUserInvited      InviteAuditEventType = "user_invited"
 	InviteAuditUserInvitedBulk  InviteAuditEventType = "user_invited_bulk"
+	// InviteAuditUserProvisioned records a pending user created through
+	// POST /api/v1/users (post-commit, best-effort).
+	InviteAuditUserProvisioned InviteAuditEventType = "user_provisioned"
 )
 
 // InviteAuditEvent represents an auditable event for the invite/allow-list system.

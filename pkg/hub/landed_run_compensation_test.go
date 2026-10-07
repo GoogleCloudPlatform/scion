@@ -49,13 +49,16 @@ type landingClient struct {
 	reportRunID bool
 	deleteRuns  []string
 	deleteErr   error
+	// warnings, when set, are the hub-only env warnings the broker's
+	// answer carries (relayed to the dispatch warnings collector).
+	warnings []string
 }
 
 func (c *landingClient) answer(slug, runID string) *RemoteAgentResponse {
 	if c.onLand != nil {
 		c.onLand()
 	}
-	info := &RemoteAgentInfo{ID: slug, Slug: slug, Name: slug, Phase: string(state.PhaseRunning)}
+	info := &RemoteAgentInfo{ID: slug, Slug: slug, Name: slug, Phase: string(state.PhaseRunning), Warnings: c.warnings}
 	if c.reportRunID {
 		info.RunID = runID
 	}

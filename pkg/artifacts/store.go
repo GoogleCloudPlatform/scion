@@ -247,6 +247,57 @@ type Store interface {
 	// ListGrants returns every grant on an artifact, expired ones included,
 	// ordered by creation.
 	ListGrants(ctx context.Context, artifactID string) ([]Grant, error)
+
+	// ListGrantsFor returns every grant on each of the artifacts, expired
+	// ones included, keyed by artifact id and ordered by creation. At most
+	// MaxGrantsForIDs ids may be given.
+	ListGrantsFor(ctx context.Context, artifactIDs []string) (map[string][]Grant, error)
+
+	// ListCandidates returns live (not deleted, not expired) artifacts the
+	// query's principal owns, or that carry an unexpired read, write or
+	// admin grant naming the principal or one of the query's scopes,
+	// ordered by UpdatedAt then ID, both descending. It is a candidate
+	// query only: it decides nothing about access, and every row must
+	// still pass the service's read check before it is shown.
+	ListCandidates(ctx context.Context, q CandidateQuery) ([]Candidate, error)
+}
+
+// CandidateQuery selects rows for ListCandidates.
+type CandidateQuery struct {
+	// PrincipalKind and PrincipalRef identify the owner to match and the
+	// principal grant subject (PrincipalRef(kind, ref)). Both are required.
+	PrincipalKind string
+	PrincipalRef  string
+	// ScopeRefs are the scope grant subjects to match. Empty matches no
+	// scope grant.
+	ScopeRefs []string
+	// OwnedOnly keeps only rows the principal owns; grants are ignored.
+	OwnedOnly bool
+	// Search, when set, keeps rows whose title or key contains it,
+	// case-insensitively. It is matched literally (no wildcards).
+	Search string
+	// ReviewPending keeps only rows whose current version is a review.
+	ReviewPending bool
+	// After, when set, keeps rows strictly after this position in the
+	// result order.
+	After *Position
+	// Limit caps the rows returned; it must be positive.
+	Limit int
+	// Now is the instant expiry is judged at.
+	Now time.Time
+}
+
+// Position is a place in ListCandidates' order.
+type Position struct {
+	UpdatedAt time.Time
+	ID        string
+}
+
+// Candidate is one ListCandidates row: the artifact and the kind of its
+// current version ("" when it has none).
+type Candidate struct {
+	Artifact
+	CurrentKind string
 }
 
 // NewStore returns the Store for db. driverName selects the SQL dialect:

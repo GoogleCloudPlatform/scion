@@ -229,7 +229,7 @@ func (s *projectService) List(ctx context.Context, opts *ListProjectsOptions) (*
 		TotalCount int       `json:"totalCount,omitempty"`
 	}
 
-	result, err := apiclient.DecodeResponse[listResponse](resp)
+	result, err := apiclient.DecodeRequired[listResponse](resp)
 	if err != nil {
 		return nil, err
 	}
@@ -249,7 +249,7 @@ func (s *projectService) Get(ctx context.Context, projectID string) (*Project, e
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[Project](resp)
+	return apiclient.DecodeRequired[Project](resp)
 }
 
 // Register registers a project (upsert based on git remote).
@@ -258,7 +258,7 @@ func (s *projectService) Register(ctx context.Context, req *RegisterProjectReque
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[RegisterProjectResponse](resp)
+	return apiclient.DecodeRequired[RegisterProjectResponse](resp)
 }
 
 // Create creates a project without a contributing broker.
@@ -267,7 +267,7 @@ func (s *projectService) Create(ctx context.Context, req *CreateProjectRequest) 
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[Project](resp)
+	return apiclient.DecodeRequired[Project](resp)
 }
 
 // Update updates project metadata.
@@ -276,7 +276,7 @@ func (s *projectService) Update(ctx context.Context, projectID string, req *Upda
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[Project](resp)
+	return apiclient.DecodeRequired[Project](resp)
 }
 
 // Delete removes a project and all its agents.
@@ -331,7 +331,7 @@ func (s *projectService) ListAgents(ctx context.Context, projectID string, opts 
 		TotalCount int     `json:"totalCount,omitempty"`
 	}
 
-	result, err := apiclient.DecodeResponse[listResponse](resp)
+	result, err := apiclient.DecodeRequired[listResponse](resp)
 	if err != nil {
 		return nil, err
 	}
@@ -351,7 +351,7 @@ func (s *projectService) ListProviders(ctx context.Context, projectID string) (*
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[ListProvidersResponse](resp)
+	return apiclient.DecodeRequired[ListProvidersResponse](resp)
 }
 
 // AddProvider adds a broker as a provider to a project.
@@ -360,7 +360,7 @@ func (s *projectService) AddProvider(ctx context.Context, projectID string, req 
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[AddProviderResponse](resp)
+	return apiclient.DecodeRequired[AddProviderResponse](resp)
 }
 
 // RemoveProvider removes a broker from a project.
@@ -378,7 +378,7 @@ func (s *projectService) GetSettings(ctx context.Context, projectID string) (*Pr
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[ProjectSettings](resp)
+	return apiclient.DecodeRequired[ProjectSettings](resp)
 }
 
 // UpdateSettings updates project settings.
@@ -387,7 +387,7 @@ func (s *projectService) UpdateSettings(ctx context.Context, projectID string, s
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[ProjectSettings](resp)
+	return apiclient.DecodeRequired[ProjectSettings](resp)
 }
 
 // GetAgent returns an agent by ID or slug within a project.
@@ -396,7 +396,7 @@ func (s *projectService) GetAgent(ctx context.Context, projectID, agentID string
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[Agent](resp)
+	return apiclient.DecodeRequired[Agent](resp)
 }
 
 // DeleteAgent removes an agent by ID or slug within a project.
@@ -447,7 +447,7 @@ func (s *projectService) RefreshCache(ctx context.Context, projectID string) (*P
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[ProjectCacheRefreshResponse](resp)
+	return apiclient.DecodeRequired[ProjectCacheRefreshResponse](resp)
 }
 
 // GetCacheStatus returns the cache status for a project workspace.
@@ -456,7 +456,7 @@ func (s *projectService) GetCacheStatus(ctx context.Context, projectID string) (
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[ProjectCacheStatusResponse](resp)
+	return apiclient.DecodeRequired[ProjectCacheStatusResponse](resp)
 }
 
 // Clone creates a new project seeded from an existing project's configuration.
@@ -465,5 +465,5 @@ func (s *projectService) Clone(ctx context.Context, sourceID string, req ClonePr
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[Project](resp)
+	return apiclient.DecodeRequired[Project](resp)
 }

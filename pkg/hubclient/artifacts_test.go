@@ -150,6 +150,33 @@ func TestArtifactOpenFileRedirectDropsCredentials(t *testing.T) {
 	}
 }
 
+func TestArtifactList(t *testing.T) {
+	var queries []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/artifacts" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		queries = append(queries, r.URL.Query().Encode())
+		_, _ = io.WriteString(w, `{"artifacts":[{"id":"id-1","title":"T","ownerKind":"agent","reviewPending":true}],"nextCursor":"c1.next"}`)
+	}))
+	defer srv.Close()
+	c, _ := New(srv.URL)
+	ctx := context.Background()
+
+	got, err := c.Artifacts().List(ctx, nil)
+	if err != nil || len(got.Artifacts) != 1 || got.Artifacts[0].ID != "id-1" || !got.Artifacts[0].ReviewPending || got.NextCursor != "c1.next" {
+		t.Fatalf("List = %+v, %v", got, err)
+	}
+	if _, err := c.Artifacts().List(ctx, &ListArtifactsOptions{Query: "a b", ReviewPending: true, OwnedOnly: true, Limit: 10, Cursor: "c1.x"}); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"mine=1", "cursor=c1.x&limit=10&mine=1&owner=me&q=a+b&review_pending=1"}
+	if len(queries) != 2 || queries[0] != want[0] || queries[1] != want[1] {
+		t.Errorf("queries = %q, want %q", queries, want)
+	}
+}
+
 // TestArtifactLongCallsIgnoreClientTimeout: publishing, uploading,
 // finalizing and reading file bytes are bounded by the caller's context,
 // not by the client's whole-exchange timeout, which still applies to

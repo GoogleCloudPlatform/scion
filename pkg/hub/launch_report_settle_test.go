@@ -63,7 +63,7 @@ func newLaunchSettleFixture(t *testing.T, name string) *launchSettleFixture {
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 	for _, r := range []string{"run-0", "run-1"} {
-		_, err := s.SetAgentRunID(ctx, agent.ID, r)
+		_, err := s.SetAgentRunID(ctx, agent.ID, r, nil)
 		require.NoError(t, err)
 	}
 	launchID, err := s.BeginLaunch(ctx, agent.ID, store.LaunchKindCreate, 5*time.Minute)
@@ -164,7 +164,7 @@ func TestLaunchReportSettle_DuplicateSucceeded_Keeps(t *testing.T) {
 	require.Empty(t, f.previousRuns(t))
 
 	ctx := context.Background()
-	_, err := f.store.SetAgentRunID(ctx, f.agent.ID, "run-2")
+	_, err := f.store.SetAgentRunID(ctx, f.agent.ID, "run-2", nil)
 	require.NoError(t, err)
 	swapped, err := f.store.RevertAgentRunID(ctx, f.agent.ID, "run-2", "run-1")
 	require.NoError(t, err)

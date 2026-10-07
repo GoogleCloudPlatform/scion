@@ -106,6 +106,8 @@ export interface Hub {
   otherWalks(): number;
   /** Every agent-list request: walks, their later pages, and probes. */
   total(): number;
+  /** `GET /api/v1/users` requests (the chat sidebar's users walk). */
+  usersRequests(): number;
   /** The `cursor` of every store page request after a walk's first, in order. */
   storeCursors(): string[];
   /**
@@ -144,11 +146,13 @@ export async function setupHub(page: Page, options: { latencyMs?: number } = {})
   const latencyMs = options.latencyMs ?? 0;
   const agents = fixtureAgents();
   const requests: ListRequest[] = [];
+  let users = 0;
   let hold: Promise<void> | null = null;
 
   page.on('request', (request) => {
     const listRequest = classify(request);
     if (listRequest) requests.push(listRequest);
+    if (request.method() === 'GET' && new URL(request.url()).pathname === '/api/v1/users') users++;
   });
   await installPaletteFinder(page);
 
@@ -271,6 +275,7 @@ export async function setupHub(page: Page, options: { latencyMs?: number } = {})
     storeWalks: () => requests.filter((r) => r.walk && r.store).length,
     otherWalks: () => requests.filter((r) => r.walk && !r.store).length,
     total: () => requests.length,
+    usersRequests: () => users,
     storeCursors: () =>
       requests
         .filter((r) => r.store && !r.probe && !r.walk)

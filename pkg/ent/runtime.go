@@ -328,8 +328,12 @@ func init() {
 	agentcredentialDescTokenJtiHash := agentcredentialFields[3].Descriptor()
 	// agentcredential.TokenJtiHashValidator is a validator for the "token_jti_hash" field. It is called by the builders before save.
 	agentcredential.TokenJtiHashValidator = agentcredentialDescTokenJtiHash.Validators[0].(func(string) error)
+	// agentcredentialDescRunID is the schema descriptor for run_id field.
+	agentcredentialDescRunID := agentcredentialFields[4].Descriptor()
+	// agentcredential.DefaultRunID holds the default value on creation for the run_id field.
+	agentcredential.DefaultRunID = agentcredentialDescRunID.Default.(string)
 	// agentcredentialDescIssuedAt is the schema descriptor for issued_at field.
-	agentcredentialDescIssuedAt := agentcredentialFields[4].Descriptor()
+	agentcredentialDescIssuedAt := agentcredentialFields[5].Descriptor()
 	// agentcredential.DefaultIssuedAt holds the default value on creation for the issued_at field.
 	agentcredential.DefaultIssuedAt = agentcredentialDescIssuedAt.Default.(func() time.Time)
 	// agentcredentialDescID is the schema descriptor for id field.
@@ -1864,15 +1868,15 @@ func init() {
 	// runtimebroker.DefaultConnectionState holds the default value on creation for the connection_state field.
 	runtimebroker.DefaultConnectionState = runtimebrokerDescConnectionState.Default.(string)
 	// runtimebrokerDescAutoProvide is the schema descriptor for auto_provide field.
-	runtimebrokerDescAutoProvide := runtimebrokerFields[19].Descriptor()
+	runtimebrokerDescAutoProvide := runtimebrokerFields[20].Descriptor()
 	// runtimebroker.DefaultAutoProvide holds the default value on creation for the auto_provide field.
 	runtimebroker.DefaultAutoProvide = runtimebrokerDescAutoProvide.Default.(bool)
 	// runtimebrokerDescCreated is the schema descriptor for created field.
-	runtimebrokerDescCreated := runtimebrokerFields[25].Descriptor()
+	runtimebrokerDescCreated := runtimebrokerFields[26].Descriptor()
 	// runtimebroker.DefaultCreated holds the default value on creation for the created field.
 	runtimebroker.DefaultCreated = runtimebrokerDescCreated.Default.(func() time.Time)
 	// runtimebrokerDescUpdated is the schema descriptor for updated field.
-	runtimebrokerDescUpdated := runtimebrokerFields[26].Descriptor()
+	runtimebrokerDescUpdated := runtimebrokerFields[27].Descriptor()
 	// runtimebroker.DefaultUpdated holds the default value on creation for the updated field.
 	runtimebroker.DefaultUpdated = runtimebrokerDescUpdated.Default.(func() time.Time)
 	// runtimebroker.UpdateDefaultUpdated holds the default value on update for the updated field.
