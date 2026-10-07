@@ -163,6 +163,14 @@ func TestExecCommand_ErrorClassification(t *testing.T) {
 			wantCode:   ErrCodeAgentNotFound,
 		},
 		{
+			// The structured signal alone, with text no wording fallback
+			// matches.
+			name:       "container not found sentinel only",
+			execErr:    fmt.Errorf("exec: %w", sentinelOnlyErr{}),
+			wantStatus: http.StatusNotFound,
+			wantCode:   ErrCodeAgentNotFound,
+		},
+		{
 			name:       "runtime reports container not found",
 			execErr:    errors.New(`cloudrun-sandbox: sandbox "agent" not found in state store`),
 			wantStatus: http.StatusNotFound,
@@ -256,6 +264,9 @@ func TestExecCommand_LookupMissIsAgentNotFound(t *testing.T) {
 // container being gone, while each runtime's own missing-container wording
 // must.
 func TestIsExecTargetNotFound(t *testing.T) {
+	if execContainerNotFoundRe.MatchString(sentinelOnlyErr{}.Error()) {
+		t.Fatalf("sentinelOnlyErr text %q must not match the wording fallback", sentinelOnlyErr{}.Error())
+	}
 	tests := []struct {
 		name string
 		err  error
@@ -274,6 +285,7 @@ func TestIsExecTargetNotFound(t *testing.T) {
 
 		// A missing container, in each runtime's own wording.
 		{"runtime.ErrContainerNotFound", fmt.Errorf("exec: %w", runtime.ErrContainerNotFound), true},
+		{"runtime.ErrContainerNotFound without its wording", fmt.Errorf("exec: %w", sentinelOnlyErr{}), true},
 		{"k8s NotFound status", fmt.Errorf("exec failed: %w (stderr: )", k8serrors.NewNotFound(schema.GroupResource{Resource: "pods"}, "agent-pod")), true},
 		{"k8s NotFound as text", errors.New(`exec failed: pods "agent-pod" not found (stderr: )`), true},
 		{"k8s runtime lookup", errors.New("agent 'worker' pod not found, it may have been deleted"), true},
@@ -290,3 +302,10 @@ func TestIsExecTargetNotFound(t *testing.T) {
 		})
 	}
 }
+
+// sentinelOnlyErr is runtime.ErrContainerNotFound by errors.Is, but its text
+// matches no wording fallback, so only the structured check classifies it.
+type sentinelOnlyErr struct{}
+
+func (sentinelOnlyErr) Error() string        { return "exec target gone" }
+func (sentinelOnlyErr) Is(target error) bool { return target == runtime.ErrContainerNotFound }

@@ -51,12 +51,14 @@ var (
 	}
 	// podman exec: libpod's define.ErrNoSuchCtr ("no such container"),
 	// wrapped by the name/ID lookup or, if the container went away
-	// mid-exec, the database lookup. Podman exits 125 for its own errors
+	// mid-exec, the database lookup (which prints the container's full ID;
+	// Exec's id is that full ID when it was resolved from List). Both are
+	// bound to the target id. Podman exits 125 for its own errors
 	// (define.ExecErrorCodeGeneric), never for the command's.
 	podmanExecNotFound = containerExecNotFound{
 		exitCode: 125,
 		line: func(id string) string {
-			return `Error: no container with (?:name or ID "` + id + `" found|ID [0-9a-f]+ found in database): no such container`
+			return `Error: no container with (?:name or ID "` + id + `" found|ID ` + id + ` found in database): no such container`
 		},
 	}
 	// Apple `container exec`: ContainerizationError(.notFound) from the
@@ -91,6 +93,8 @@ func (n containerExecNotFound) classifyExecErr(ctx context.Context, err error, o
 	if reErr != nil || !re.MatchString(out) {
 		return err
 	}
+	// Belt-and-braces: a cancelled ctx would also make list fail, but do
+	// not even ask; a list under a dying ctx is no evidence either way.
 	if ctx.Err() != nil {
 		return err
 	}
