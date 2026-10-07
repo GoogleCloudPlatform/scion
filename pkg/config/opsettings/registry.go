@@ -881,11 +881,26 @@ func Validate(section string, doc json.RawMessage) []config.ValidationError {
 	}
 
 	err := sec.Schema.Validate(parsed)
-	if err == nil {
+	if err != nil {
+		return extractValidationErrors(err)
+	}
+	return validateCrossField(section, doc)
+}
+
+// validateCrossField applies the rules a JSON schema cannot express, so a
+// write that would leave a section unusable is refused instead of stored.
+func validateCrossField(section string, doc json.RawMessage) []config.ValidationError {
+	if section != "artifacts" {
 		return nil
 	}
-
-	return extractValidationErrors(err)
+	cfg, err := ParseArtifactsDoc(doc)
+	if err != nil {
+		return []config.ValidationError{{Message: err.Error()}}
+	}
+	if cfg.RemoteImagesInvalid != "" {
+		return []config.ValidationError{{Message: "artifacts settings: " + cfg.RemoteImagesInvalid}}
+	}
+	return nil
 }
 
 func extractValidationErrors(err error) []config.ValidationError {

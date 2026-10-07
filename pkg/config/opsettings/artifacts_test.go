@@ -181,3 +181,25 @@ func TestParseArtifactsDocRemoteImageValues(t *testing.T) {
 		t.Errorf("valid explicit values: %+v, %v", got, err)
 	}
 }
+
+// TestValidateArtifactsCrossField: a write is refused when the document
+// would turn remote images off or make the section unusable, rules the
+// schema cannot express.
+func TestValidateArtifactsCrossField(t *testing.T) {
+	for _, raw := range []string{
+		`{"max_file_bytes":1024,"max_bundle_bytes":4096,"remote_image_max_bytes":2048}`,
+		`{"max_files":10,"remote_image_max_count":11}`,
+		`{"remote_image_fetch_timeout_s":20,"remote_image_total_budget_s":10}`,
+		`{"max_file_bytes":2048,"max_bundle_bytes":1024}`,
+		`{"link_default_ttl_hours":800}`,
+	} {
+		if errs := Validate("artifacts", json.RawMessage(raw)); len(errs) == 0 {
+			t.Errorf("Validate(%s) accepted", raw)
+		}
+	}
+	for _, raw := range []string{`{}`, `{"max_files":10}`, `{"max_file_bytes":1048576}`, `{"remote_images_enabled":false}`} {
+		if errs := Validate("artifacts", json.RawMessage(raw)); len(errs) != 0 {
+			t.Errorf("Validate(%s) = %v", raw, errs)
+		}
+	}
+}

@@ -17,8 +17,11 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -98,4 +101,25 @@ func TestArtifactLimitsCarryRemoteImageSettings(t *testing.T) {
 		Enabled: true, MaxCount: 32, MaxBytes: 5 << 20,
 		FetchTimeout: 10 * time.Second, TotalBudget: 30 * time.Second,
 	}, def)
+}
+
+// TestArtifactsSettings_InvalidRemoteValueRefusedAndLogged: a write that
+// would turn remote images off is refused; a stored one is logged once per
+// revision and turns remote images off only.
+func TestArtifactsSettings_InvalidRemoteValueRefusedAndLogged(t *testing.T) {
+	ops := artifactsOps(t, "")
+	_, err := ops.Update(context.Background(), "artifacts", []byte(`{"max_files":10,"remote_image_max_count":11}`), "test", 0, "managed")
+	require.Error(t, err, "the write must be refused")
+
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	stored := artifactsOps(t, `{"max_files":10,"remote_image_max_count":11}`)
+	for i := 0; i < 3; i++ {
+		got := stored.Artifacts()
+		assert.True(t, got.Enabled)
+		assert.False(t, got.RemoteImagesEnabled)
+	}
+	assert.Equal(t, 1, strings.Count(logs.String(), "remote images are off"), logs.String())
 }
