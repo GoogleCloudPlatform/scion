@@ -269,10 +269,10 @@ export class PaletteTypeahead {
     this.proxyTimer = undefined;
     const proxy = this.proxy;
     if (!proxy) return;
+    this.flushProxy();
     const returnFocus = this.proxyReturnFocus;
     this.proxy = null;
     this.proxyReturnFocus = null;
-    this.text += proxy.value;
     const focused = document.activeElement === proxy;
     proxy.remove();
     if (restoreFocus && focused && returnFocus?.isConnected)
