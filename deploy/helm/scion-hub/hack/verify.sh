@@ -225,7 +225,12 @@ NO_RENDERED_SETTINGS=(existing-secret)
 #        rendered settings.yaml; no rendered-settings claims)
 #    -1  the NOT_YET needle for "the session secret", removed from the notes
 # 362 - 2 + 2 - 1 = 361.
-EXPECTED_TOTAL=361
+#
+# 361 -> 362 for POD_NAME on the hub container (ptone/scion#3650):
+#    +1  the hub.extraEnv shadow check for POD_NAME, a new container env entry
+#        the extraction reads back out of the rendered manifest
+# 361 + 1 = 362.
+EXPECTED_TOTAL=362
 
 failures=0
 assertions=0
@@ -854,10 +859,10 @@ mapfile -t shadow_names < <(
 )
 # Vacuity guard, and the number is deliberate: HOME, KUBECONFIG,
 # SCION_SERVER_BASE_URL, SCION_REQUIRE_STABLE_SIGNING_KEY,
-# SCION_SERVER_ADMIN_MODE, SCION_SERVER_MAINTENANCE_MESSAGE, POD_NAMESPACE. An
-# extraction that silently returned two names would leave this whole step
-# reporting success on nothing.
-if [[ ${#shadow_names[@]} -lt 7 ]]; then
+# SCION_SERVER_ADMIN_MODE, SCION_SERVER_MAINTENANCE_MESSAGE, POD_NAMESPACE,
+# POD_NAME. An extraction that silently returned two names would leave this
+# whole step reporting success on nothing.
+if [[ ${#shadow_names[@]} -lt 8 ]]; then
   fail "only ${#shadow_names[@]} environment variable names were extracted from the rendered chart (${shadow_names[*]:-none}) - the shadow checks below would be testing almost nothing"
 else
   pass "extracted ${#shadow_names[@]} chart-set environment variables to check the guard against"

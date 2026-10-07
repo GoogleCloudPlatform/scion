@@ -2317,14 +2317,14 @@ mechanism rather than a request. It also gets the conditional keys exactly
 right: when hub.adminMode is unset the chart emits nothing to shadow, and an
 extraEnv entry of that name is legitimately allowed.
 
-POD_NAMESPACE is the one literal, and it has to be. It is not in the ConfigMap -
-it is a fieldRef in the container's env list, which cannot be rendered from here
-without the Deployment rendering itself. hack/verify.sh closes that by reading
+POD_NAMESPACE and POD_NAME are the only literals, and they have to be. They are
+not in the ConfigMap - they are fieldRefs in the container's env list, which
+cannot be rendered from here without the Deployment rendering itself. hack/verify.sh closes that by reading
 the shadowable names back out of the rendered manifest, ConfigMap keys and
 container env entries alike, and asserting this guard refuses every one of them.
 */}}
 {{- $envDoc := fromYaml (include (print .Template.BasePath "/configmap-env.yaml") .) }}
-{{- $shadowable := concat (keys (default dict $envDoc.data)) (list "POD_NAMESPACE") }}
+{{- $shadowable := concat (keys (default dict $envDoc.data)) (list "POD_NAMESPACE" "POD_NAME") }}
 {{- if lt (len $shadowable) 5 }}
 {{- fail (printf "the environment ConfigMap rendered %d keys, which is fewer than the chart is known to emit unconditionally - hub.extraEnv's shadow guard derives its list from those keys and would be checking almost nothing." (len (default dict $envDoc.data))) }}
 {{- end }}
