@@ -102,14 +102,16 @@ describe('bulk action eligibility rules', () => {
     expect(mod.isBulkReconnectEligible(status('connected'))).toBe(false);
     expect(mod.isBulkReconnectEligible(status('connecting'))).toBe(false);
     expect(mod.isBulkReconnectEligible(status('loading'))).toBe(false);
-    expect(mod.isBulkReconnectEligible(status('idle'))).toBe(false);
+    // Restored from the saved list and shown as "Not connected".
+    expect(mod.isBulkReconnectEligible(status('idle'))).toBe(true);
+    expect(mod.isBulkReconnectEligible(status('idle', null, 'deleted'))).toBe(false);
     expect(mod.isBulkReconnectEligible(status('closed'))).toBe(false);
     expect(mod.isBulkReconnectEligible(status('unavailable', 'agent-deleted'))).toBe(false);
     // Metadata already knows the agent is gone, before the session does.
     expect(mod.isBulkReconnectEligible(status('disconnected', 'network', 'deleted'))).toBe(false);
   });
 
-  it('Remove all inactive applies to deleted or dropped sessions only', () => {
+  it('Remove all inactive applies to deleted or not connected sessions only', () => {
     expect(mod.isInactiveEntry(status('disconnected', 'network'))).toBe(true);
     expect(mod.isInactiveEntry(status('unavailable', 'agent-stopped'))).toBe(true);
     expect(mod.isInactiveEntry(status('unavailable', 'agent-deleted'))).toBe(true);
@@ -117,13 +119,14 @@ describe('bulk action eligibility rules', () => {
     expect(mod.isInactiveEntry(status('connected'))).toBe(false);
     expect(mod.isInactiveEntry(status('connecting'))).toBe(false);
     expect(mod.isInactiveEntry(status('loading'))).toBe(false);
-    expect(mod.isInactiveEntry(status('idle'))).toBe(false);
+    expect(mod.isInactiveEntry(status('idle'))).toBe(true);
     expect(mod.isInactiveEntry(status('closed'))).toBe(false);
   });
 
-  it('the row Reconnect rule matches the bulk rule except for metadata deletion', () => {
+  it('the row Reconnect rule matches the bulk rule except for metadata deletion and idle', () => {
     expect(mod.canReconnectEntry(status('disconnected', 'network', 'deleted'))).toBe(true);
     expect(mod.canReconnectEntry(status('unavailable', 'agent-deleted'))).toBe(false);
+    // Idle rows connect through selection; only the bulk action covers them.
     expect(mod.canReconnectEntry(status('idle'))).toBe(false);
   });
 });
@@ -214,6 +217,26 @@ describe('Open terminals bulk actions', () => {
     return root.element.querySelector<HTMLButtonElement>('.terminal-bulk-remove')!;
   }
 
+  /** The bulk buttons use aria-disabled so they stay focusable. */
+  function isDisabled(button: HTMLButtonElement): boolean {
+    return button.getAttribute('aria-disabled') === 'true';
+  }
+
+  function tooltipFor(button: HTMLButtonElement): HTMLElement {
+    return button.closest<HTMLElement>('sl-tooltip')!;
+  }
+
+  /** The text assistive tech gets from the button's aria-describedby. */
+  function describedBy(button: HTMLButtonElement): string {
+    const ids = (button.getAttribute('aria-describedby') ?? '').split(/\s+/).filter(Boolean);
+    return ids
+      .map((id) => document.getElementById(id))
+      .filter((el): el is HTMLElement => !!el && !el.hidden)
+      .map((el) => el.textContent ?? '')
+      .join(' ')
+      .trim();
+  }
+
   function railAgentIds(): string[] {
     return [...root.element.querySelectorAll<HTMLElement>('.terminal-rail-select')].map(
       (el) => [...sessions].find(([, s]) => el.dataset.railFocusId === `${s.state.key}:select`)![0]
@@ -233,25 +256,119 @@ describe('Open terminals bulk actions', () => {
   });
 
   it('both buttons are disabled when nothing is eligible', async () => {
-    await open(CONNECTED, IDLE);
+    await open(CONNECTED);
     setState(sessions.get(CONNECTED)!, { connection: 'connected' });
     await flush();
-    expect(bulkReconnect().disabled).toBe(true);
-    expect(bulkRemove().disabled).toBe(true);
-    expect(bulkReconnect().title).toContain('no disconnected terminals');
-    expect(bulkRemove().title).toContain('no deleted or disconnected terminals');
+    expect(isDisabled(bulkReconnect())).toBe(true);
+    expect(isDisabled(bulkRemove())).toBe(true);
+    expect(bulkReconnect().getAttribute('aria-label')).toBe('Reconnect all (0 eligible)');
+    expect(bulkRemove().getAttribute('aria-label')).toBe('Remove all inactive (0 eligible)');
+  });
+
+  describe('disabled-reason tooltip', () => {
+    beforeEach(async () => {
+      await open(CONNECTED);
+      setState(sessions.get(CONNECTED)!, { connection: 'connected' });
+      await flush();
+    });
+
+    it('Reconnect all explains there is nothing to reconnect', () => {
+      const tip = tooltipFor(bulkReconnect());
+      expect(tip.getAttribute('content')).toBe('No disconnected terminals to reconnect');
+      expect(tip.hasAttribute('disabled')).toBe(false);
+      // No second, native tooltip on top of the Shoelace one.
+      expect(bulkReconnect().hasAttribute('title')).toBe(false);
+    });
+
+    it('Remove all inactive explains there is nothing to remove', () => {
+      const tip = tooltipFor(bulkRemove());
+      expect(tip.getAttribute('content')).toBe('No inactive terminals to remove');
+      expect(tip.hasAttribute('disabled')).toBe(false);
+      expect(bulkRemove().hasAttribute('title')).toBe(false);
+    });
+
+    it('the tooltip wraps a span, not the button itself', () => {
+      for (const button of [bulkReconnect(), bulkRemove()]) {
+        const wrap = button.parentElement!;
+        expect(wrap.tagName).toBe('SPAN');
+        expect(wrap.parentElement).toBe(tooltipFor(button));
+      }
+    });
+
+    it('the reason reaches assistive tech through aria-describedby', () => {
+      expect(describedBy(bulkReconnect())).toBe('No disconnected terminals to reconnect');
+      expect(describedBy(bulkRemove())).toBe('No inactive terminals to remove');
+    });
+
+    it('a disabled button stays keyboard focusable so the reason can be reached', () => {
+      for (const button of [bulkReconnect(), bulkRemove()]) {
+        expect(button.disabled).toBe(false);
+        button.focus();
+        expect(document.activeElement).toBe(button);
+      }
+    });
+
+    it('clicking a disabled button does nothing', async () => {
+      bulkReconnect().click();
+      bulkRemove().click();
+      await flush();
+      expect(connectSpies.get(CONNECTED)).not.toHaveBeenCalled();
+      expect(confirmMock.showConfirm).not.toHaveBeenCalled();
+    });
+  });
+
+  it('enabled buttons have no disabled-reason tooltip or description', async () => {
+    await openMixed();
+    for (const button of [bulkReconnect(), bulkRemove()]) {
+      expect(isDisabled(button)).toBe(false);
+      expect(tooltipFor(button).hasAttribute('disabled')).toBe(true);
+      expect(tooltipFor(button).hasAttribute('content')).toBe(false);
+      expect(describedBy(button)).toBe('');
+    }
   });
 
   it('with mixed rows, both buttons are enabled with hover help naming the count', async () => {
     await openMixed();
-    expect(bulkReconnect().disabled).toBe(false);
-    expect(bulkRemove().disabled).toBe(false);
-    // Disconnected and stopped are reconnectable; deleted is not.
-    expect(bulkReconnect().title).toContain('reconnect 2 terminals');
+    expect(isDisabled(bulkReconnect())).toBe(false);
+    expect(isDisabled(bulkRemove())).toBe(false);
+    // Disconnected, stopped and idle are reconnectable; deleted is not.
+    expect(bulkReconnect().title).toContain('reconnect 3 terminals');
     expect(bulkReconnect().title).toContain('terminals for deleted agents are left alone');
-    // Disconnected, stopped and deleted are inactive.
-    expect(bulkRemove().title).toContain('remove 3 terminals');
+    expect(bulkReconnect().getAttribute('aria-label')).toBe('Reconnect all (3 eligible)');
+    // Everything but the connected row is inactive.
+    expect(bulkRemove().title).toContain('remove 4 terminals');
     expect(bulkRemove().title).toContain('Connected terminals stay open');
+    expect(bulkRemove().getAttribute('aria-label')).toBe('Remove all inactive (4 eligible)');
+  });
+
+  it('rows restored from the saved list enable both buttons', async () => {
+    // How the list looks after a page load: the frontmost row connects,
+    // every other row is restored idle and shown as "Not connected".
+    await open(CONNECTED, DISCONNECTED, IDLE);
+    setState(sessions.get(CONNECTED)!, { connection: 'connected' });
+    await flush();
+    expect(isDisabled(bulkReconnect())).toBe(false);
+    expect(isDisabled(bulkRemove())).toBe(false);
+    expect(bulkReconnect().getAttribute('aria-label')).toBe('Reconnect all (2 eligible)');
+    bulkReconnect().click();
+    expect(connectSpies.get(DISCONNECTED)).toHaveBeenCalledTimes(1);
+    expect(connectSpies.get(IDLE)).toHaveBeenCalledTimes(1);
+    expect(connectSpies.get(CONNECTED)).not.toHaveBeenCalled();
+  });
+
+  it('a row that drops after the first render enables both buttons', async () => {
+    await open(CONNECTED);
+    setState(sessions.get(CONNECTED)!, { connection: 'connected' });
+    await flush();
+    expect(isDisabled(bulkReconnect())).toBe(true);
+    expect(isDisabled(bulkRemove())).toBe(true);
+    setState(sessions.get(CONNECTED)!, { connection: 'disconnected', disconnectReason: 'network' });
+    await flush();
+    expect(isDisabled(bulkReconnect())).toBe(false);
+    expect(isDisabled(bulkRemove())).toBe(false);
+    expect(tooltipFor(bulkReconnect()).hasAttribute('disabled')).toBe(true);
+    bulkReconnect().click();
+    expect(connectSpies.get(CONNECTED)).toHaveBeenCalledTimes(1);
   });
 
   it('Reconnect all is disabled when the only dropped rows are deleted', async () => {
@@ -259,22 +376,23 @@ describe('Open terminals bulk actions', () => {
     setState(sessions.get(CONNECTED)!, { connection: 'connected' });
     sessions.get(DELETED)!.markUnavailable('agent-deleted', 'Agent was deleted.');
     await flush();
-    expect(bulkReconnect().disabled).toBe(true);
-    expect(bulkRemove().disabled).toBe(false);
+    expect(isDisabled(bulkReconnect())).toBe(true);
+    expect(isDisabled(bulkRemove())).toBe(false);
   });
 
-  it('Reconnect all reconnects only disconnected rows whose agent exists', async () => {
+  it('Reconnect all reconnects only not connected rows whose agent exists', async () => {
     await openMixed();
     bulkReconnect().click();
     expect(connectSpies.get(DISCONNECTED)).toHaveBeenCalledTimes(1);
     expect(connectSpies.get(STOPPED)).toHaveBeenCalledTimes(1);
+    expect(connectSpies.get(IDLE)).toHaveBeenCalledTimes(1);
     expect(connectSpies.get(CONNECTED)).not.toHaveBeenCalled();
     expect(connectSpies.get(DELETED)).not.toHaveBeenCalled();
-    expect(connectSpies.get(IDLE)).not.toHaveBeenCalled();
     // Same path as the row Reconnect: metadata is refreshed for each.
     expect(refreshSpy).toHaveBeenCalledWith(DISCONNECTED);
     expect(refreshSpy).toHaveBeenCalledWith(STOPPED);
-    expect(refreshSpy).toHaveBeenCalledTimes(2);
+    expect(refreshSpy).toHaveBeenCalledWith(IDLE);
+    expect(refreshSpy).toHaveBeenCalledTimes(3);
   });
 
   it('Remove all inactive confirms with the count, then removes only inactive rows', async () => {
@@ -284,20 +402,20 @@ describe('Open terminals bulk actions', () => {
 
     expect(confirmMock.showConfirm).toHaveBeenCalledTimes(1);
     const [message, options] = confirmMock.showConfirm.mock.calls[0];
-    expect(message).toMatch(/^Remove 3 terminals from the list\?/);
-    expect(options).toMatchObject({ confirmText: 'Remove 3' });
-    expect(removed).toBe(3);
+    expect(message).toMatch(/^Remove 4 terminals from the list\?/);
+    expect(options).toMatchObject({ confirmText: 'Remove 4' });
+    expect(removed).toBe(4);
     await flush();
-    expect(railAgentIds().sort()).toEqual([CONNECTED, IDLE].sort());
-    expect(bulkRemove().disabled).toBe(true);
-    expect(bulkReconnect().disabled).toBe(true);
+    expect(railAgentIds()).toEqual([CONNECTED]);
+    expect(isDisabled(bulkRemove())).toBe(true);
+    expect(isDisabled(bulkReconnect())).toBe(true);
   });
 
   it('the button click runs the same confirmation flow', async () => {
     await openMixed();
     confirmMock.showConfirm.mockResolvedValue(true);
     bulkRemove().click();
-    await vi.waitFor(() => expect(railAgentIds()).toHaveLength(2));
+    await vi.waitFor(() => expect(railAgentIds()).toHaveLength(1));
     expect(confirmMock.showConfirm).toHaveBeenCalledTimes(1);
   });
 
@@ -310,7 +428,7 @@ describe('Open terminals bulk actions', () => {
     expect(removed).toBe(0);
     expect(railAgentIds()).toEqual(before);
     expect(railAgentIds()).toHaveLength(5);
-    expect(bulkRemove().disabled).toBe(false);
+    expect(isDisabled(bulkRemove())).toBe(false);
   });
 
   it('a row that reconnects while the dialog is open is kept', async () => {
@@ -320,9 +438,9 @@ describe('Open terminals bulk actions', () => {
     const pending = root.removeAllInactive();
     setState(sessions.get(DISCONNECTED)!, { connection: 'connected', disconnectReason: null });
     answer(true);
-    expect(await pending).toBe(2);
+    expect(await pending).toBe(3);
     await flush();
-    expect(railAgentIds().sort()).toEqual([CONNECTED, DISCONNECTED, IDLE].sort());
+    expect(railAgentIds().sort()).toEqual([CONNECTED, DISCONNECTED].sort());
   });
 
   it('a row that drops while the dialog is open is not removed', async () => {
@@ -331,16 +449,16 @@ describe('Open terminals bulk actions', () => {
     confirmMock.showConfirm.mockReturnValue(new Promise((resolve) => (answer = resolve)));
     const pending = root.removeAllInactive();
     const [, options] = confirmMock.showConfirm.mock.calls[0];
-    expect(options).toMatchObject({ confirmText: 'Remove 3' });
+    expect(options).toMatchObject({ confirmText: 'Remove 4' });
     setState(sessions.get(CONNECTED)!, {
       connection: 'disconnected',
       disconnectReason: 'network',
     });
     answer(true);
     const removed = await pending;
-    expect(removed).toBe(3);
+    expect(removed).toBe(4);
     await flush();
-    expect(railAgentIds().sort()).toEqual([CONNECTED, IDLE].sort());
+    expect(railAgentIds()).toEqual([CONNECTED]);
   });
 
   /** Mimics the dialog returning focus to its trigger before it resolves. */
@@ -355,7 +473,7 @@ describe('Open terminals bulk actions', () => {
     await openMixed();
     confirmReturningFocusTo(bulkRemove());
     await root.removeAllInactive();
-    expect(bulkRemove().disabled).toBe(true);
+    expect(isDisabled(bulkRemove())).toBe(true);
     const focused = document.activeElement as HTMLElement;
     expect(focused).not.toBe(document.body);
     expect(focused.classList.contains('terminal-rail-select')).toBe(true);

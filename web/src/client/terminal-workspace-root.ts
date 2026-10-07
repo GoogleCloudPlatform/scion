@@ -65,18 +65,22 @@ export function canReconnectEntry(entry: RailEntryStatus): boolean {
 }
 
 /**
- * Whether "Reconnect all" acts on an entry: the per-row Reconnect applies
- * and the agent still exists.
+ * Whether "Reconnect all" acts on an entry: the agent still exists and the
+ * entry is not connected. That is every entry the per-row Reconnect
+ * applies to, plus idle entries restored from the saved list, which the
+ * rail shows as "Not connected" (one at a time they connect through
+ * selection, but "Reconnect all" is how a user connects them in bulk).
  */
 export function isBulkReconnectEligible(entry: RailEntryStatus): boolean {
-  return canReconnectEntry(entry) && entry.metadata.availability !== 'deleted';
+  if (entry.metadata.availability === 'deleted') return false;
+  return canReconnectEntry(entry) || entry.state.connection === 'idle';
 }
 
 /**
- * Whether "Remove all inactive" removes an entry: its agent was deleted,
- * or its session has dropped (disconnected or unavailable). Connected
- * entries stay, as do entries still connecting and idle entries restored
- * from a saved list, which have not tried to connect yet.
+ * Whether "Remove all inactive" removes an entry: its agent was deleted, or
+ * its session is not connected: dropped (disconnected or unavailable), or
+ * idle (restored from the saved list and shown as "Not connected").
+ * Connected entries stay, as do entries that are still connecting.
  */
 export function isInactiveEntry(entry: RailEntryStatus): boolean {
   const { connection, disconnectReason } = entry.state;
@@ -85,8 +89,21 @@ export function isInactiveEntry(entry: RailEntryStatus): boolean {
     entry.metadata.availability === 'deleted' ||
     disconnectReason === 'agent-deleted' ||
     connection === 'disconnected' ||
-    connection === 'unavailable'
+    connection === 'unavailable' ||
+    connection === 'idle'
   );
+}
+
+/** Tooltip and described-by text for a bulk button with nothing to act on. */
+export const BULK_RECONNECT_DISABLED_REASON = 'No disconnected terminals to reconnect';
+export const BULK_REMOVE_DISABLED_REASON = 'No inactive terminals to remove';
+
+/** Gives each workspace root unique ids for its described-by targets. */
+let nextInstanceId = 0;
+
+/** Whether a bulk button is in its disabled (nothing to act on) state. */
+function isBulkActionDisabled(button: HTMLButtonElement): boolean {
+  return button.getAttribute('aria-disabled') === 'true';
 }
 
 // TERMINAL_DRAG_MIME imported from ./terminal-workspace-events.js
@@ -144,6 +161,10 @@ export class TerminalWorkspaceRoot {
   private readonly railBulk = document.createElement('div');
   private readonly bulkReconnect = document.createElement('button');
   private readonly bulkRemove = document.createElement('button');
+  /** Disabled-reason tooltips around each bulk button (see buildRailBulkActions). */
+  private readonly bulkReconnectTip = document.createElement('sl-tooltip');
+  private readonly bulkRemoveTip = document.createElement('sl-tooltip');
+  private readonly instanceId = nextInstanceId++;
   private readonly empty = document.createElement('div');
   private readonly layoutBar = document.createElement('div');
   private readonly paneHost = document.createElement('section');
@@ -1347,6 +1368,12 @@ export class TerminalWorkspaceRoot {
   /**
    * Builds the bulk-action bar between the rail header and the list. Each
    * button sits above the row column it acts on (Reconnect, then Close).
+   *
+   * A button with nothing to act on is marked aria-disabled rather than
+   * disabled, so it stays focusable and keyboard users can reach the
+   * reason; its click handler checks the same flag. The reason shows in a
+   * tooltip on a wrapper span (disabled controls do not get pointer events
+   * in every browser) and is linked to the button with aria-describedby.
    */
   private buildRailBulkActions(): void {
     this.railBulk.className = 'terminal-rail-bulk';
@@ -1360,14 +1387,85 @@ export class TerminalWorkspaceRoot {
     this.bulkReconnect.type = 'button';
     this.bulkReconnect.className = 'terminal-bulk-action terminal-bulk-reconnect';
     this.bulkReconnect.innerHTML = '<sl-icon name="arrow-repeat"></sl-icon>';
-    this.bulkReconnect.addEventListener('click', () => this.reconnectAll());
+    this.bulkReconnect.addEventListener('click', () => {
+      if (!isBulkActionDisabled(this.bulkReconnect)) this.reconnectAll();
+    });
 
     this.bulkRemove.type = 'button';
     this.bulkRemove.className = 'terminal-bulk-action terminal-bulk-remove';
     this.bulkRemove.innerHTML = '<sl-icon name="trash"></sl-icon>';
-    this.bulkRemove.addEventListener('click', () => void this.removeAllInactive());
+    this.bulkRemove.addEventListener('click', () => {
+      if (!isBulkActionDisabled(this.bulkRemove)) void this.removeAllInactive();
+    });
 
-    this.railBulk.append(label, this.bulkReconnect, this.bulkRemove);
+    this.railBulk.append(
+      label,
+      this.wrapBulkAction(
+        this.bulkReconnect,
+        this.bulkReconnectTip,
+        'terminal-bulk-reconnect-reason'
+      ),
+      this.wrapBulkAction(this.bulkRemove, this.bulkRemoveTip, 'terminal-bulk-remove-reason')
+    );
+  }
+
+  /**
+   * Wraps a bulk button as sl-tooltip > span > button, plus a visually
+   * hidden reason element the button's aria-describedby points at.
+   */
+  private wrapBulkAction(
+    button: HTMLButtonElement,
+    tip: HTMLElement,
+    reasonId: string
+  ): HTMLElement {
+    tip.className = 'terminal-bulk-tooltip';
+    tip.setAttribute('placement', 'bottom');
+    tip.setAttribute('hoist', '');
+    tip.setAttribute('disabled', '');
+    const wrap = document.createElement('span');
+    wrap.className = 'terminal-bulk-action-wrap';
+    const reason = document.createElement('span');
+    reason.className = 'terminal-bulk-reason terminal-aria-live';
+    reason.id = `${reasonId}-${this.instanceId}`;
+    reason.hidden = true;
+    button.setAttribute('aria-describedby', reason.id);
+    wrap.append(button, reason);
+    tip.append(wrap);
+    return tip;
+  }
+
+  /**
+   * Sets a bulk button's enabled state. Disabled: aria-disabled, the
+   * reason in the tooltip and the described-by text, no native title (it
+   * would show a second tooltip). Enabled: the tooltip is off and the
+   * native title carries the usual hover help.
+   */
+  private setBulkActionState(
+    button: HTMLButtonElement,
+    tip: HTMLElement,
+    disabledReason: string | null,
+    enabledHelp: string
+  ): void {
+    const reason = button.parentElement?.querySelector<HTMLElement>('.terminal-bulk-reason');
+    if (disabledReason) {
+      button.setAttribute('aria-disabled', 'true');
+      button.removeAttribute('title');
+      tip.setAttribute('content', disabledReason);
+      tip.removeAttribute('disabled');
+      if (reason) {
+        reason.textContent = disabledReason;
+        reason.hidden = false;
+      }
+    } else {
+      button.removeAttribute('aria-disabled');
+      button.title = enabledHelp;
+      tip.removeAttribute('content');
+      tip.setAttribute('disabled', '');
+      if (reason) {
+        reason.textContent = '';
+        reason.hidden = true;
+      }
+    }
   }
 
   /** Syncs the bulk buttons' enabled state and hover help with the entries. */
@@ -1376,22 +1474,24 @@ export class TerminalWorkspaceRoot {
     const reconnectable = entries.filter(isBulkReconnectEligible).length;
     const inactive = entries.filter(isInactiveEntry).length;
 
-    this.bulkReconnect.disabled = reconnectable === 0;
-    this.bulkReconnect.title =
-      reconnectable === 0
-        ? 'Reconnect all: no disconnected terminals for existing agents'
-        : `Reconnect all: reconnect ${countLabel(reconnectable)} that ${
-            reconnectable === 1 ? 'is' : 'are'
-          } disconnected and whose agent still exists. Connected terminals and terminals for deleted agents are left alone.`;
+    this.setBulkActionState(
+      this.bulkReconnect,
+      this.bulkReconnectTip,
+      reconnectable === 0 ? BULK_RECONNECT_DISABLED_REASON : null,
+      `Reconnect all: reconnect ${countLabel(reconnectable)} that ${
+        reconnectable === 1 ? 'is' : 'are'
+      } not connected and whose agent still exists. Connected terminals and terminals for deleted agents are left alone.`
+    );
     this.bulkReconnect.setAttribute('aria-label', `Reconnect all (${reconnectable} eligible)`);
 
-    this.bulkRemove.disabled = inactive === 0;
-    this.bulkRemove.title =
-      inactive === 0
-        ? 'Remove all inactive: no deleted or disconnected terminals'
-        : `Remove all inactive: remove ${countLabel(inactive)} whose agent was deleted or that ${
-            inactive === 1 ? 'is' : 'are'
-          } disconnected. Connected terminals stay open.`;
+    this.setBulkActionState(
+      this.bulkRemove,
+      this.bulkRemoveTip,
+      inactive === 0 ? BULK_REMOVE_DISABLED_REASON : null,
+      `Remove all inactive: remove ${countLabel(inactive)} whose agent was deleted or that ${
+        inactive === 1 ? 'is' : 'are'
+      } not connected. Connected terminals stay open.`
+    );
     this.bulkRemove.setAttribute('aria-label', `Remove all inactive (${inactive} eligible)`);
   }
 
@@ -1417,7 +1517,7 @@ export class TerminalWorkspaceRoot {
     const count = confirmedKeys.size;
     if (count === 0) return 0;
     const confirmed = await showConfirm(
-      `Remove ${countLabel(count)} from the list? This removes terminals whose agent was deleted and terminals that are disconnected. Connected terminals stay open.`,
+      `Remove ${countLabel(count)} from the list? This removes terminals whose agent was deleted and terminals that are not connected. Connected terminals stay open.`,
       { title: 'Remove inactive terminals', confirmText: `Remove ${count}` }
     );
     if (!confirmed) return 0;
@@ -1434,15 +1534,15 @@ export class TerminalWorkspaceRoot {
   }
 
   /**
-   * The dialog returns focus to "Remove all inactive", which is now
-   * disabled, so focus would drop to the page. Move it to "Reconnect all"
+   * The dialog returns focus to "Remove all inactive", which now has
+   * nothing to act on. Move it to "Reconnect all"
    * when that is still enabled, else the first remaining row, else the
    * rail itself. Focus the user moved elsewhere is left alone.
    */
   private focusAfterBulkRemove(): void {
     const active = document.activeElement;
     if (active && active !== document.body && active !== this.bulkRemove) return;
-    if (!this.railBulk.hidden && !this.bulkReconnect.disabled) {
+    if (!this.railBulk.hidden && !isBulkActionDisabled(this.bulkReconnect)) {
       this.bulkReconnect.focus();
       return;
     }
@@ -1926,15 +2026,34 @@ export class TerminalWorkspaceRoot {
       .terminal-bulk-remove {
         color: var(--scion-status-danger, #ef4444);
       }
-      .terminal-bulk-action:hover:not(:disabled),
+      .terminal-bulk-action:hover:not([aria-disabled='true']),
       .terminal-bulk-action:focus-visible {
         border-color: currentColor;
         outline: none;
       }
-      .terminal-bulk-action:disabled {
-        cursor: default;
+      /* Nothing to act on: dimmed, dashed and flat, so it does not read as
+         a live control in either theme. Still focusable (see
+         buildRailBulkActions), so focus keeps a visible ring. */
+      .terminal-bulk-action[aria-disabled='true'] {
+        cursor: not-allowed;
         color: var(--scion-text-muted, #64748b);
-        opacity: 0.45;
+        background: transparent;
+        border-style: dashed;
+        border-color: var(--scion-text-muted, #64748b);
+        opacity: 0.5;
+      }
+      .terminal-bulk-action[aria-disabled='true']:focus-visible {
+        outline: 2px solid var(--scion-text-muted, #64748b);
+        outline-offset: 1px;
+      }
+      .terminal-bulk-action-wrap {
+        display: inline-flex;
+      }
+      /* Shoelace's default tooltip colours resolve to the same neutral in
+         the dark theme, so set them from the theme's text and background. */
+      .terminal-bulk-tooltip {
+        --sl-tooltip-background-color: var(--scion-text, #1e293b);
+        --sl-tooltip-color: var(--scion-bg, #f8fafc);
       }
       .terminal-rail-list {
         flex: 1;
