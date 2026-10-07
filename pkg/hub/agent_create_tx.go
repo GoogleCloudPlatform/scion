@@ -169,8 +169,8 @@ func createRowCompensable() store.DeletionPredicate {
 // FinalizeAgentDeletion's transaction and refuses, rolling the delete back,
 // when a delete holds the row by the rule deletedOrDeleteHeld applies: a
 // live deleting claim, or finalizing (expired or not). A failed delete, or a
-// deleting row whose lease lapsed, does not hold it. then runs after the
-// check, inside the same transaction; nil for none.
+// deleting row whose lease lapsed, does not hold it. The then callback, if
+// non-nil, runs after the check, inside the same transaction.
 func createRowHeldCheck(then func(tx store.Store) error) store.DeletionFinalizeHook {
 	return func(_ context.Context, tx store.Store, a *store.Agent, _ store.DeletionFinalizeMode) error {
 		if deletedOrDeleteHeld(a) {

@@ -43,7 +43,8 @@ type createTxFaultStore struct {
 	auditErrFor string
 	subErr      error
 	deactErr    error
-	// outerDeleteErr fails DeleteAgent outside a transaction only.
+	// outerDeleteErr fails DeleteAgent outside a transaction, and every
+	// FinalizeAgentDeletion (the conditional compensation's row delete).
 	outerDeleteErr error
 }
 

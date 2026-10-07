@@ -193,10 +193,13 @@ func (s *afterRunningWriteStore) UpdateAgent(ctx context.Context, a *store.Agent
 
 // The delete lands while the backend creates the first interaction, before
 // the create's post-create write. A delete claim bumps state_version, so
-// that write conflicts and the delete's row has no interaction ID: the
-// create stops the interaction itself and reports it. A hard delete or soft
-// delete written straight to the store (no engine) behaves the same.
-func TestManagedCreate_DeleteWon_BeforeWrite_Answers409AndStopsInteraction(t *testing.T) {
+// that write conflicts and no row records the interaction ID: the create
+// stops the interaction itself and reports it. A delete that holds or
+// removed the row (claimed, finalizing, hard or soft delete written straight
+// to the store) answers 409. A delete that gave up (failed, or its lease
+// lapsed) leaves the agent live, so the unrecorded create is rolled back and
+// answers 500 (ptone/scion#3557). With no delete, the create answers 201.
+func TestManagedCreate_DeleteWon_BeforeWrite_StopsInteraction(t *testing.T) {
 	for i, del := range landingDeletes {
 		t.Run(del.name, func(t *testing.T) {
 			srv, s, project := setupCreateAgentServer(t, &createRaceDispatcher{})

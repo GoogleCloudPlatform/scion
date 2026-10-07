@@ -53,6 +53,7 @@ type interactionLedgerBackend struct {
 	status    map[string]managedagent.InteractionStatus
 	cancelled []string
 	cancelErr error
+	getErr    error
 }
 
 func newInteractionLedgerBackend() *interactionLedgerBackend {
@@ -71,6 +72,9 @@ func (b *interactionLedgerBackend) CreateInteraction(context.Context, managedage
 func (b *interactionLedgerBackend) GetInteraction(_ context.Context, id string) (*managedagent.InteractionState, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.getErr != nil {
+		return nil, b.getErr
+	}
 	st, ok := b.status[id]
 	if !ok {
 		return nil, fmt.Errorf("no interaction %s", id)
@@ -122,6 +126,10 @@ type managedRecordFaultStore struct {
 	failures       int
 	beforeFail     func(agentID string)
 	beforeFinalize func(agentID string)
+	// finalizeErr, when set, is returned by every FinalizeAgentDeletion.
+	finalizeErr error
+	// finalizeCalls counts FinalizeAgentDeletion calls.
+	finalizeCalls int
 }
 
 func (s *managedRecordFaultStore) UpdateAgent(ctx context.Context, a *store.Agent) error {
@@ -145,9 +153,13 @@ func (s *managedRecordFaultStore) FinalizeAgentDeletion(ctx context.Context, id 
 	s.mu.Lock()
 	before := s.beforeFinalize
 	s.beforeFinalize = nil
+	s.finalizeCalls++
 	s.mu.Unlock()
 	if before != nil {
 		before(id)
+	}
+	if s.finalizeErr != nil {
+		return 0, s.finalizeErr
 	}
 	return s.Store.FinalizeAgentDeletion(ctx, id, pred, mode, set, hook)
 }
@@ -223,22 +235,40 @@ func TestManagedCreate_Unrecorded_Answers500AndRollsBack(t *testing.T) {
 // the failure, naming the agent and the interaction so an operator can stop
 // it by hand, and the rollback still runs.
 func TestManagedCreate_Unrecorded_StopFails_Warns(t *testing.T) {
-	srv, s, project := setupCreateAgentServer(t, &createRaceDispatcher{})
-	backend := newInteractionLedgerBackend()
-	backend.cancelErr = errors.New("backend unavailable")
-	useManagedBackend(t, backend)
-	srv.store = &managedRecordFaultStore{Store: s, failures: 1}
+	cases := []struct {
+		name       string
+		cancelErr  error
+		getErr     error
+		wantCancel bool
+	}{
+		{name: "cancel fails", cancelErr: errors.New("backend unavailable"), wantCancel: true},
+		{name: "read fails", getErr: errors.New("backend unavailable")},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, s, project := setupCreateAgentServer(t, &createRaceDispatcher{})
+			backend := newInteractionLedgerBackend()
+			backend.cancelErr = tc.cancelErr
+			backend.getErr = tc.getErr
+			useManagedBackend(t, backend)
+			srv.store = &managedRecordFaultStore{Store: s, failures: 1}
 
-	rec := managedCreate(t, srv, project.ID, "mgd-unrec-stopfail")
-	agentID, warnings := requireManagedCreateUnrecorded(t, rec)
+			rec := managedCreate(t, srv, project.ID, fmt.Sprintf("mgd-unrec-stopfail-%d", i))
+			agentID, warnings := requireManagedCreateUnrecorded(t, rec)
 
-	require.Len(t, warnings, 1)
-	assert.True(t, strings.HasPrefix(warnings[0], managedCreateUnrecordedStopFailedWarning), "got %q", warnings[0])
-	assert.Contains(t, warnings[0], "backend unavailable")
-	assert.Contains(t, warnings[0], agentID, "the warning names the agent")
-	assert.Contains(t, warnings[0], "interaction-1", "the warning names the interaction")
-	assert.Equal(t, []string{"interaction-1"}, backend.cancels(), "the cancel was tried once")
-	assertManagedCreateRolledBack(t, s, project, agentID)
+			require.Len(t, warnings, 1)
+			assert.True(t, strings.HasPrefix(warnings[0], managedCreateUnrecordedStopFailedWarning), "got %q", warnings[0])
+			assert.Contains(t, warnings[0], "backend unavailable")
+			assert.Contains(t, warnings[0], agentID, "the warning names the agent")
+			assert.Contains(t, warnings[0], "interaction-1", "the warning names the interaction")
+			if tc.wantCancel {
+				assert.Equal(t, []string{"interaction-1"}, backend.cancels(), "the cancel was tried once")
+			} else {
+				assert.Empty(t, backend.cancels(), "no cancel without knowing the state")
+			}
+			assertManagedCreateRolledBack(t, s, project, agentID)
+		})
+	}
 }
 
 // After the failed create, nothing blocks the name: a delete of the failed
@@ -340,7 +370,7 @@ func TestManagedCreate_Unrecorded_DeleteHoldsRow_Answers409(t *testing.T) {
 
 // A delete that already removed or soft-deleted the row also wins: 409, and
 // nothing of the delete's outcome is undone.
-func TestManagedCreate_Unrecorded_RowGoneOrSoftDeleted_Answers409(t *testing.T) {
+func TestManagedCreate_Unrecorded_DeleteHoldsOrRemovedRow_Answers409(t *testing.T) {
 	for i, del := range landingDeletes {
 		if !del.compensate {
 			continue
@@ -470,4 +500,71 @@ func TestManagedCreate_CreateFails_DeleteHoldsRow(t *testing.T) {
 			assert.EqualValues(t, 0, brokerReservationCount(t, s, project.DefaultRuntimeBrokerID))
 		})
 	}
+}
+
+// requireManagedCreateRollbackIncomplete checks rec is the 500 of an
+// unrecorded managed create whose rollback did not complete, and returns
+// the agent ID and the warnings.
+func requireManagedCreateRollbackIncomplete(t *testing.T, rec *httptest.ResponseRecorder) (string, []string) {
+	t.Helper()
+	require.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+	var body ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.Equal(t, ErrCodeInternalError, body.Error.Code)
+	assert.Contains(t, body.Error.Message, "did not complete")
+	assert.NotEmpty(t, body.Error.Details["correlation_id"], "the correlation ID is reported")
+	agentID, _ := body.Error.Details["agentId"].(string)
+	require.NotEmpty(t, agentID)
+	var warnings []string
+	if ws, ok := body.Error.Details["warnings"].([]interface{}); ok {
+		for _, w := range ws {
+			warnings = append(warnings, w.(string))
+		}
+	}
+	return agentID, warnings
+}
+
+// The rollback's compensation transaction fails (its audit insert): the
+// fallback still removes the row, and the 500 says the rollback did not
+// complete, with the correlation ID and the stop's warning.
+func TestManagedCreate_Unrecorded_CompensationFails_ReportsCorrelationID(t *testing.T) {
+	srv, s, project := setupCreateAgentServer(t, &createRaceDispatcher{})
+	backend := newInteractionLedgerBackend()
+	useManagedBackend(t, backend)
+	srv.store = &managedRecordFaultStore{
+		Store:    &createTxFaultStore{Store: s, auditErrFor: mutationTypeAgentCreateDispatchFailed},
+		failures: 1,
+	}
+
+	agentID, warnings := requireManagedCreateRollbackIncomplete(t, managedCreate(t, srv, project.ID, "mgd-unrec-compfail"))
+	assert.Equal(t, []string{managedCreateUnrecordedStoppedWarning + " (agent " + agentID + ", interaction interaction-1)"}, warnings)
+	assert.Equal(t, []string{"interaction-1"}, backend.cancels())
+	assert.True(t, agentGone(t, s, agentID), "the fallback removed the row")
+}
+
+// The conditional row delete gives up because the row kept changing
+// (ErrVersionConflict): the rollback does not fall into the unconditional
+// fallback. The row is kept, its phase is not marked error, its quotas are
+// held for whatever is writing it, and the 500 reports the correlation ID.
+func TestManagedCreate_Unrecorded_RowContended_LeavesRow(t *testing.T) {
+	srv, s, project := setupCreateAgentServer(t, &createRaceDispatcher{})
+	backend := newInteractionLedgerBackend()
+	useManagedBackend(t, backend)
+	fs := &managedRecordFaultStore{Store: s, failures: 1,
+		finalizeErr: fmt.Errorf("finalize agent deletion: %w", store.ErrVersionConflict)}
+	srv.store = fs
+
+	agentID, warnings := requireManagedCreateRollbackIncomplete(t, managedCreate(t, srv, project.ID, "mgd-unrec-contended"))
+	assert.Len(t, warnings, 1)
+	assert.Equal(t, []string{"interaction-1"}, backend.cancels())
+
+	row, err := s.GetAgent(context.Background(), agentID)
+	require.NoError(t, err, "the row is kept")
+	assert.NotEqual(t, string(state.PhaseError), row.Phase, "no phase-error write")
+	assert.NotEqual(t, createRowRemoveFailedMessage, row.Message)
+	assert.Empty(t, agentAudits(t, s, mutationTypeAgentCreateDispatchFailed, agentID), "no compensation was written")
+	assert.EqualValues(t, 1, brokerReservationCount(t, s, project.DefaultRuntimeBrokerID), "no quota release")
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	assert.Equal(t, 1, fs.finalizeCalls, "no fallback row delete after the conflict")
 }
