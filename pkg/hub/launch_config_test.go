@@ -34,14 +34,13 @@ func TestNew_DefaultsLaunchTimeoutWhenZero(t *testing.T) {
 }
 
 func TestNew_ClampsLaunchTimeoutBelowMinimum(t *testing.T) {
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
 	if err := s.Migrate(context.Background()); err != nil {
 		t.Fatalf("failed to migrate test store: %v", err)
 	}
-	t.Cleanup(func() { _ = s.Close() })
 
 	// Below the 30s minimum (the broker's fixed 20s abort margin would leave
 	// no time for a launch to actually run).
@@ -56,14 +55,13 @@ func TestNew_ClampsLaunchTimeoutBelowMinimum(t *testing.T) {
 }
 
 func TestNew_PreservesValidLaunchTimeout(t *testing.T) {
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
 	if err := s.Migrate(context.Background()); err != nil {
 		t.Fatalf("failed to migrate test store: %v", err)
 	}
-	t.Cleanup(func() { _ = s.Close() })
 
 	srv, err := New(ServerConfig{LaunchTimeout: 10 * time.Minute}, s)
 	if err != nil {
@@ -83,14 +81,13 @@ func TestNew_DefaultsLaunchKeepaliveSecondsWhenZero(t *testing.T) {
 }
 
 func TestNew_PreservesValidLaunchKeepaliveSeconds(t *testing.T) {
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
 	if err := s.Migrate(context.Background()); err != nil {
 		t.Fatalf("failed to migrate test store: %v", err)
 	}
-	t.Cleanup(func() { _ = s.Close() })
 
 	srv, err := New(ServerConfig{LaunchKeepaliveSeconds: 30}, s)
 	if err != nil {

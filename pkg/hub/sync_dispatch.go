@@ -55,6 +55,20 @@ func detachLaunchFromClient(ctx context.Context) context.Context {
 	return context.WithoutCancel(ctx)
 }
 
+// detachLaunchKeepDeadline is detachLaunchFromClient for a launch whose
+// caller set its own budget: the returned context drops ctx's cancellation
+// but keeps its deadline, when it has one. A client that disconnects no
+// longer cancels the launch, while a deadline the caller chose (the chat
+// wake's resume budget) still bounds it. The direct-message wake uses it
+// (ptone/scion#3471). The caller must call the returned cancel func.
+func detachLaunchKeepDeadline(ctx context.Context) (context.Context, context.CancelFunc) {
+	detached := detachLaunchFromClient(ctx)
+	if deadline, ok := ctx.Deadline(); ok {
+		return context.WithDeadline(detached, deadline)
+	}
+	return detached, func() {}
+}
+
 // syncDispatch runs one synchronous dispatcher call under
 // syncDispatchTimeout, derived from ctx (normally a detachLaunchFromClient
 // context). fn must use the ctx it is given, not the caller's.
