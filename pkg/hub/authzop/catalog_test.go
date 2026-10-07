@@ -303,8 +303,6 @@ func TestRegisteredPermissionsConsumed(t *testing.T) {
 
 		// Self-scoped permissions — checked by Server.authorizeSelfScoped;
 		// their operations are catalogued by the batches that admit them.
-		"inbox.read":                  "Self-scoped, checked by authorizeSelfScoped; no route uses it yet",
-		"inbox.write":                 "Self-scoped, checked by authorizeSelfScoped; no route uses it yet",
 		"user_skill_injection.update": "Self-scoped, checked by authorizeSelfScoped; no route uses it yet",
 	}
 
@@ -1254,6 +1252,7 @@ var domainResourceCompatibility = map[string][]string{
 	"chat":               {"ResourceProject"},
 	"env":                {"ResourceProject"},
 	"artifact":           {"ResourceArtifact"},
+	"inbox":              {"ResourceInbox"},
 }
 
 // TestCatalogBasePermissionSemanticsAssertive validates that each operation's

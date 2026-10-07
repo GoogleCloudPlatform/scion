@@ -31,6 +31,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
@@ -195,6 +196,99 @@ type idFixtures struct {
 	agentRestoreProject     string
 	agentProvisioning       string
 	artifact                string
+	// inbox holds the caller's own messaging records (seedInboxRecords):
+	// the dev user's here, the matrix super-admin's in the bearer
+	// disposition matrix.
+	inbox inboxRecords
+}
+
+// inboxRecords are messaging records owned by one user in one project: a
+// message, a notification with its subscription, a subscription template,
+// a group conversation (with a message) the user takes part in, a second
+// group conversation for the leave entry, and a direct conversation (with
+// a message) between the user and an agent.
+type inboxRecords struct {
+	message             string
+	notification        string
+	subscription        string
+	template            string
+	groupConversation   string
+	groupMessage        string
+	leaveConversation   string
+	directConversation  string
+	directMessage       string
+	createConversations string // display name prefix for conversations a test creates
+}
+
+// seedInboxRecords creates inboxRecords for userID in projectID; agentID
+// is the peer of the direct conversation and the watched agent.
+func seedInboxRecords(t *testing.T, ctx context.Context, s store.Store, userID, projectID, agentID string) inboxRecords {
+	t.Helper()
+	now := time.Now().UTC()
+	r := inboxRecords{createConversations: "inbox-" + uuid.NewString()[:8]}
+
+	r.message = uuid.NewString()
+	require.NoError(t, s.CreateMessage(ctx, &store.Message{
+		ID: r.message, ProjectID: projectID, Sender: "agent:li", Recipient: "user:" + userID, RecipientID: userID,
+		Msg: "inbox record", Type: "instruction", CreatedAt: now,
+	}))
+
+	r.subscription = uuid.NewString()
+	require.NoError(t, s.CreateNotificationSubscription(ctx, &store.NotificationSubscription{
+		ID: r.subscription, Scope: store.SubscriptionScopeAgent, AgentID: agentID,
+		SubscriberType: store.SubscriberTypeUser, SubscriberID: userID, ProjectID: projectID,
+		TriggerActivities: []string{"COMPLETED"}, CreatedBy: userID,
+	}))
+	r.notification = uuid.NewString()
+	require.NoError(t, s.CreateNotification(ctx, &store.Notification{
+		ID: r.notification, SubscriptionID: r.subscription, AgentID: agentID, ProjectID: projectID,
+		SubscriberType: store.SubscriberTypeUser, SubscriberID: userID, Status: "COMPLETED", Message: "inbox record",
+	}))
+	r.template = uuid.NewString()
+	require.NoError(t, s.CreateSubscriptionTemplate(ctx, &store.SubscriptionTemplate{
+		ID: r.template, Name: "inbox-template-" + r.template[:8], Scope: store.SubscriptionScopeProject,
+		TriggerActivities: []string{"COMPLETED"}, ProjectID: projectID, CreatedBy: userID,
+	}))
+
+	group := func(name string) string {
+		id := uuid.NewString()
+		pid := projectID
+		require.NoError(t, s.CreateConversation(ctx, &store.Conversation{
+			ID: id, ProjectID: &pid, Kind: "group", Surface: "native", DisplayName: name,
+			DriftState: "active", LastActivityAt: now, CreatedAt: now,
+		}))
+		require.NoError(t, s.AddParticipant(ctx, &store.ConversationParticipant{
+			ID: uuid.NewString(), ConversationID: id, PrincipalKind: "user", PrincipalID: userID, Role: "member", JoinedAt: now,
+		}))
+		return id
+	}
+	r.groupConversation = group("inbox-group-" + r.template[:8])
+	r.leaveConversation = group("inbox-leave-" + r.template[:8])
+
+	extRef, err := messages.DMConversationKey("user", userID, "agent", agentID)
+	require.NoError(t, err)
+	r.directConversation = uuid.NewString()
+	require.NoError(t, s.CreateConversation(ctx, &store.Conversation{
+		ID: r.directConversation, Kind: "direct", Surface: "native", ExternalRef: extRef,
+		DriftState: "active", LastActivityAt: now, CreatedAt: now,
+	}))
+	for _, p := range []struct{ kind, id string }{{"user", userID}, {"agent", agentID}} {
+		require.NoError(t, s.AddParticipant(ctx, &store.ConversationParticipant{
+			ID: uuid.NewString(), ConversationID: r.directConversation, PrincipalKind: p.kind, PrincipalID: p.id, Role: "member", JoinedAt: now,
+		}))
+	}
+
+	conversationMessage := func(convID string) string {
+		id := uuid.NewString()
+		require.NoError(t, s.CreateMessage(ctx, &store.Message{
+			ID: id, ProjectID: projectID, Sender: "user:" + userID, SenderID: userID, Recipient: "agent:li", RecipientID: agentID,
+			Msg: "inbox conversation record", Type: "instruction", ConversationID: convID, CreatedAt: now,
+		}))
+		return id
+	}
+	r.groupMessage = conversationMessage(r.groupConversation)
+	r.directMessage = conversationMessage(r.directConversation)
+	return r
 }
 
 // seedLiveInventoryFixtures creates one real store row per resource family
@@ -482,6 +576,9 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	require.True(t, srv.experimentEnabled(conduitExperiment))
 	require.True(t, srv.experimentEnabled(experiments.Artifacts))
 
+	// Inbox, conversation and notification records of the dev user.
+	f.inbox = seedInboxRecords(t, ctx, s, DevUserID, f.project, f.agent)
+
 	return f
 }
 
@@ -541,6 +638,14 @@ func opPatternOverrides(f idFixtures) map[overrideKey]map[string]string {
 		{"access.constraint.update", "/api/v1/admin/access-constraints/{id}"}:     {"id": f.accessConstraintUD},
 		{"access.constraint.delete", "/api/v1/admin/access-constraints/{id}"}:     {"id": f.accessConstraintUD},
 		{"project.membership.update", "/api/v1/projects/{id}/members/{memberId}"}: {"id": f.project, "memberId": f.projectMembershipUpdate},
+
+		// Group and direct conversation reads share their patterns.
+		{"conversation.group.read", "/api/v1/conversations/{id}"}:                       {"id": f.inbox.groupConversation},
+		{"conversation.group.read", "/api/v1/conversations/{id}/messages"}:              {"id": f.inbox.groupConversation},
+		{"conversation.group.read", "/api/v1/conversations/{id}/messages/{messageId}"}:  {"id": f.inbox.groupConversation, "messageId": f.inbox.groupMessage},
+		{"conversation.direct.read", "/api/v1/conversations/{id}"}:                      {"id": f.inbox.directConversation},
+		{"conversation.direct.read", "/api/v1/conversations/{id}/messages"}:             {"id": f.inbox.directConversation},
+		{"conversation.direct.read", "/api/v1/conversations/{id}/messages/{messageId}"}: {"id": f.inbox.directConversation, "messageId": f.inbox.directMessage},
 	}
 }
 
@@ -690,6 +795,16 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		// --- lifecycle hooks family ---
 		"/api/v1/admin/lifecycle-hooks/{id}": {"id": f.lifecycleHook},
 
+		// --- inbox, conversation and notification family ---
+		"/api/v1/messages/{id}":                    {"id": f.inbox.message},
+		"/api/v1/messages/{id}/read":               {"id": f.inbox.message},
+		"/api/v1/notifications/{id}/ack":           {"id": f.inbox.notification},
+		"/api/v1/notifications/subscriptions/{id}": {"id": f.inbox.subscription},
+		"/api/v1/notifications/templates/{id}":     {"id": f.inbox.template},
+		"/api/v1/conversations/{id}/default-agent": {"id": f.inbox.groupConversation},
+		"/api/v1/conversations/{id}/participants":  {"id": f.inbox.groupConversation},
+		"/api/v1/conversations/{id}/leave":         {"id": f.inbox.leaveConversation},
+
 		// --- hub pre-start hooks family ---
 		"/api/v1/pre-start-hooks/{id}":          {"id": f.hubPreStartHook},
 		"/api/v1/pre-start-hooks/{id}/activate": {"id": f.hubPreStartHook},
@@ -706,6 +821,8 @@ func queryOverrides(f idFixtures) map[string]string {
 		"/api/v1/chat/prefs": "agentId=" + f.agent,
 		// The single-file publish is selected by ?name= (pkg/artifacts).
 		"/api/v1/artifacts": "name=live-inventory.txt&scope=" + f.project,
+		// handleConversationResolve 400s without a reference.
+		"/api/v1/conversations/resolve": "reference=conv:" + f.inbox.groupConversation,
 	}
 }
 

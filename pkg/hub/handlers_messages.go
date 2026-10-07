@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -41,6 +42,13 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		Forbidden(w)
 		return
 	}
+	cls, token, ok := requireInboxCredential(w, r)
+	if !ok {
+		return
+	}
+	if cls == inboxCredentialToken && !s.authorizeInboxToken(w, r, token, permInboxRead) {
+		return
+	}
 
 	q := r.URL.Query()
 
@@ -52,6 +60,17 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	}
 	if projectID := q.Get("project"); projectID != "" {
 		filter.ProjectID = projectID
+	}
+	// A project-boundary token lists only messages of its boundary
+	// project; naming another project lists nothing.
+	if cls == inboxCredentialToken {
+		if boundaryProject := tokenBoundaryProject(token); boundaryProject != "" {
+			if filter.ProjectID != "" && filter.ProjectID != boundaryProject {
+				writeJSON(w, http.StatusOK, &store.ListResult[store.Message]{Items: []store.Message{}})
+				return
+			}
+			filter.ProjectID = boundaryProject
+		}
 	}
 	agentID := q.Get("agent")
 	if agentID != "" {
@@ -125,6 +144,17 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		writeErrorFromErr(w, err, "")
 		return
 	}
+	if cls == inboxCredentialToken {
+		// The store filter already holds a project token to its boundary
+		// project; the row check keeps the response to rows the token may
+		// see should the store return any other.
+		check := s.newSelfScopeCheck(r.Context(), token, permInboxRead)
+		visible := filterSelfScopedRows(check, result.Items, func(m store.Message) string { return m.ProjectID })
+		if len(visible) != len(result.Items) {
+			result.TotalCount -= len(result.Items) - len(visible)
+			result.Items = visible
+		}
+	}
 
 	writeJSON(w, http.StatusOK, result)
 }
@@ -141,10 +171,31 @@ func (s *Server) handleMessageRoutes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	cls, token, ok := requireInboxCredential(w, r)
+	if !ok {
+		return
+	}
+
 	id, action := extractAction(r, "/api/v1/messages")
 
 	// POST /api/v1/messages/read-all
 	if id == "read-all" && r.Method == http.MethodPost {
+		if cls == inboxCredentialToken {
+			if !s.authorizeInboxToken(w, r, token, permInboxWrite) {
+				return
+			}
+			if tokenBoundaryProject(token) != "" {
+				// A project token marks read only the unread messages it
+				// may see: those of its boundary project.
+				if err := s.markVisibleMessagesRead(r.Context(), token, user.ID()); err != nil {
+					writeErrorFromErr(w, err, "")
+					return
+				}
+				slog.Info("Visible messages marked as read", "userID", user.ID(), "projectID", tokenBoundaryProject(token))
+				writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+				return
+			}
+		}
 		if err := s.store.MarkAllMessagesRead(r.Context(), user.ID()); err != nil {
 			writeErrorFromErr(w, err, "")
 			return
@@ -171,6 +222,9 @@ func (s *Server) handleMessageRoutes(w http.ResponseWriter, r *http.Request) {
 			Forbidden(w)
 			return
 		}
+		if cls == inboxCredentialToken && !s.authorizeSelfScoped(w, r, permInboxWrite, msg.ProjectID) {
+			return
+		}
 		if err := s.store.MarkMessageRead(r.Context(), id); err != nil {
 			writeErrorFromErr(w, err, "Message")
 			return
@@ -192,6 +246,9 @@ func (s *Server) handleMessageRoutes(w http.ResponseWriter, r *http.Request) {
 			Forbidden(w)
 			return
 		}
+		if cls == inboxCredentialToken && !s.authorizeSelfScoped(w, r, permInboxRead, msg.ProjectID) {
+			return
+		}
 		writeJSON(w, http.StatusOK, msg)
 		return
 	}
@@ -201,6 +258,40 @@ func (s *Server) handleMessageRoutes(w http.ResponseWriter, r *http.Request) {
 	} else {
 		MethodNotAllowed(w, http.MethodGet)
 	}
+}
+
+// markVisibleMessagesReadPageSize is the page size markVisibleMessagesRead
+// reads unread messages with.
+const markVisibleMessagesReadPageSize = 200
+
+// markVisibleMessagesRead marks read every unread message addressed to
+// userID that a project-boundary token may see: the messages of its
+// boundary project that pass the self-scope row check. It collects the IDs
+// first and then marks them, so marking does not move the pages it reads.
+func (s *Server) markVisibleMessagesRead(ctx context.Context, token *ScopedUserIdentity, userID string) error {
+	check := s.newSelfScopeCheck(ctx, token, permInboxWrite)
+	filter := store.MessageFilter{RecipientID: userID, ProjectID: tokenBoundaryProject(token), OnlyUnread: true}
+	var ids []string
+	cursor := ""
+	for {
+		page, err := s.store.ListMessages(ctx, filter, store.ListOptions{Limit: markVisibleMessagesReadPageSize, Cursor: cursor, SkipTotalCount: true})
+		if err != nil {
+			return err
+		}
+		for _, m := range filterSelfScopedRows(check, page.Items, func(m store.Message) string { return m.ProjectID }) {
+			ids = append(ids, m.ID)
+		}
+		if page.NextCursor == "" || len(page.Items) == 0 {
+			break
+		}
+		cursor = page.NextCursor
+	}
+	for _, id := range ids {
+		if err := s.store.MarkMessageRead(ctx, id); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // handleAgentMessages handles GET /api/v1/agents/{id}/messages.

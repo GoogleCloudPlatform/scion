@@ -76,6 +76,13 @@ func (s *Server) handleListConversations(w http.ResponseWriter, r *http.Request)
 		Forbidden(w)
 		return
 	}
+	cls, token, ok := requireInboxCredential(w, r)
+	if !ok {
+		return
+	}
+	if cls == inboxCredentialToken && !s.authorizeInboxToken(w, r, token, permInboxRead) {
+		return
+	}
 
 	principalKind := identity.Type()
 	principalID := identity.ID()
@@ -137,6 +144,10 @@ func (s *Server) handleListConversations(w http.ResponseWriter, r *http.Request)
 	// For agent callers, also apply Hub-off cross-project guard (silently
 	// exclude rather than 403 mid-list, per design §7).
 	agentIdent := GetAgentIdentityFromContext(ctx)
+	var tokenCheck *selfScopeCheck
+	if cls == inboxCredentialToken {
+		tokenCheck = s.newSelfScopeCheck(ctx, token, permInboxRead)
+	}
 	var filtered []store.Conversation
 	for _, conv := range conversations {
 		if kindFilter != "" && conv.Kind != kindFilter {
@@ -160,6 +171,14 @@ func (s *Server) handleListConversations(w http.ResponseWriter, r *http.Request)
 		// the feature is disabled. Silently filter rather than 403 mid-list.
 		if agentIdent != nil && !s.isCrossProjectReadAllowed(ctx, &conv, agentIdent) {
 			continue
+		}
+		// A token lists only conversations inside its boundary, and a
+		// direct conversation with an agent only when it may read that
+		// agent. A lookup error drops the row rather than fail the list.
+		if tokenCheck != nil {
+			if visible, err := s.tokenMayUseConversation(ctx, token, tokenCheck, &conv); err != nil || !visible {
+				continue
+			}
 		}
 		filtered = append(filtered, conv)
 	}
@@ -262,6 +281,10 @@ func (s *Server) handleGetConversation(w http.ResponseWriter, r *http.Request, i
 		Forbidden(w)
 		return
 	}
+	cls, token, ok := requireInboxCredential(w, r)
+	if !ok {
+		return
+	}
 
 	conv, err := s.store.GetConversation(ctx, id)
 	if err != nil {
@@ -288,6 +311,9 @@ func (s *Server) handleGetConversation(w http.ResponseWriter, r *http.Request, i
 		if !s.authorizeGroupConversationAccess(w, r, conv, ActionRead) {
 			return
 		}
+	}
+	if cls == inboxCredentialToken && !s.authorizeTokenConversationRead(w, r, token, conv) {
+		return
 	}
 
 	// Fetch participants — the response still includes them (design doc §3.2 table).
@@ -329,6 +355,10 @@ func (s *Server) handleConvListMessages(w http.ResponseWriter, r *http.Request, 
 		Forbidden(w)
 		return
 	}
+	cls, token, ok := requireInboxCredential(w, r)
+	if !ok {
+		return
+	}
 
 	// Authorization: for direct conversations, use canonical DM key (kind+ID).
 	// For group conversations, project membership is the gate (design doc
@@ -353,6 +383,9 @@ func (s *Server) handleConvListMessages(w http.ResponseWriter, r *http.Request, 
 		if !s.authorizeGroupConversationAccess(w, r, conv, ActionRead) {
 			return
 		}
+	}
+	if cls == inboxCredentialToken && !s.authorizeTokenConversationRead(w, r, token, conv) {
+		return
 	}
 
 	q := r.URL.Query()
@@ -418,6 +451,10 @@ func (s *Server) handleGetConversationMessage(w http.ResponseWriter, r *http.Req
 		Forbidden(w)
 		return
 	}
+	cls, token, ok := requireInboxCredential(w, r)
+	if !ok {
+		return
+	}
 
 	// Authorization: for direct conversations, use canonical DM key (kind+ID).
 	// For group conversations, project membership is the gate (design doc
@@ -437,6 +474,9 @@ func (s *Server) handleGetConversationMessage(w http.ResponseWriter, r *http.Req
 		if !s.authorizeGroupConversationAccess(w, r, conv, ActionRead) {
 			return
 		}
+	}
+	if cls == inboxCredentialToken && !s.authorizeTokenConversationRead(w, r, token, conv) {
+		return
 	}
 
 	msg, err := s.store.GetMessage(ctx, messageID)
@@ -498,6 +538,10 @@ func (s *Server) handleCreateConversation(w http.ResponseWriter, r *http.Request
 	identity := GetIdentityFromContext(ctx)
 	if identity == nil {
 		Forbidden(w)
+		return
+	}
+	cls, _, ok := requireInboxCredential(w, r)
+	if !ok {
 		return
 	}
 
@@ -565,6 +609,10 @@ func (s *Server) handleCreateConversation(w http.ResponseWriter, r *http.Request
 	// project reaches this.
 	if req.ProjectID == "" {
 		BadRequest(w, "projectId is required")
+		return
+	}
+	// A token also needs inbox:write for the conversation's project.
+	if cls == inboxCredentialToken && !s.authorizeSelfScoped(w, r, permInboxWrite, req.ProjectID) {
 		return
 	}
 
@@ -642,6 +690,10 @@ func (s *Server) handleSetDefaultAgent(w http.ResponseWriter, r *http.Request, i
 		Forbidden(w)
 		return
 	}
+	cls, token, ok := requireInboxCredential(w, r)
+	if !ok {
+		return
+	}
 
 	// Fetch the conversation first: DM-specific rejection must run before
 	// the project-based auth check so that DMs without project access
@@ -665,6 +717,11 @@ func (s *Server) handleSetDefaultAgent(w http.ResponseWriter, r *http.Request, i
 	// separate check that the AGENT BEING SET belongs to conv's project
 	// (below) is unrelated and unchanged.
 	if !s.authorizeGroupConversationAccess(w, r, conv, ActionRead) {
+		return
+	}
+	// A token also needs inbox:write for the conversation's project; a
+	// group with no project needs a hub boundary.
+	if cls == inboxCredentialToken && !s.authorizeTokenConversation(w, r, token, permInboxWrite, conv) {
 		return
 	}
 
@@ -773,6 +830,10 @@ func (s *Server) handleAddParticipant(w http.ResponseWriter, r *http.Request, id
 		Forbidden(w)
 		return
 	}
+	cls, token, ok := requireInboxCredential(w, r)
+	if !ok {
+		return
+	}
 
 	// Authorization: caller must be a participant.
 	isParticipant, err := isConversationParticipant(ctx, s.store, id, identity.Type(), identity.ID())
@@ -815,6 +876,17 @@ func (s *Server) handleAddParticipant(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
+	// Every caller needs read access to the conversation's project (for a
+	// group with no project, the participant rule above). A token also
+	// needs inbox:write for that project; a group with no project needs a
+	// hub boundary.
+	if !s.authorizeGroupConversationAccess(w, r, conv, ActionRead) {
+		return
+	}
+	if cls == inboxCredentialToken && !s.authorizeTokenConversation(w, r, token, permInboxWrite, conv) {
+		return
+	}
+
 	// For agent principals, verify the agent exists and belongs to the
 	// conversation's project. Without this check, a cross-project agent
 	// could be added as a participant and read messages via ListMessages
@@ -832,6 +904,21 @@ func (s *Server) handleAddParticipant(w http.ResponseWriter, r *http.Request, id
 
 		if conv.ProjectID != nil && agent.ProjectID != *conv.ProjectID {
 			BadRequest(w, "agent does not belong to the conversation's project")
+			return
+		}
+	}
+
+	// A user added to a project group must currently be a member of the
+	// conversation's project.
+	if req.PrincipalKind == "user" && conv.ProjectID != nil && *conv.ProjectID != "" {
+		member, _, memberErr := s.authzService.ProjectMembershipEvidence(ctx,
+			PrincipalContext{Kind: PrincipalKindUser, ID: req.PrincipalID}, *conv.ProjectID)
+		if memberErr != nil && isProjectAccessLookupFault(memberErr) {
+			writeErrorFromErr(w, memberErr, "")
+			return
+		}
+		if !member {
+			BadRequest(w, "user is not a member of the conversation's project")
 			return
 		}
 	}
@@ -871,6 +958,10 @@ func (s *Server) handleLeaveConversation(w http.ResponseWriter, r *http.Request,
 		Forbidden(w)
 		return
 	}
+	cls, token, ok := requireInboxCredential(w, r)
+	if !ok {
+		return
+	}
 
 	// Authorization: caller must be a participant.
 	isParticipant, err := isConversationParticipant(ctx, s.store, id, identity.Type(), identity.ID())
@@ -883,6 +974,18 @@ func (s *Server) handleLeaveConversation(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
+	// A token needs inbox:write for the conversation's project.
+	if cls == inboxCredentialToken {
+		conv, err := s.store.GetConversation(ctx, id)
+		if err != nil {
+			writeErrorFromErr(w, err, "Conversation")
+			return
+		}
+		if !s.authorizeTokenConversation(w, r, token, permInboxWrite, conv) {
+			return
+		}
+	}
+
 	if err := s.store.RemoveParticipant(ctx, id, identity.Type(), identity.ID()); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "not_found", "participant not found", nil)
@@ -893,6 +996,19 @@ func (s *Server) handleLeaveConversation(w http.ResponseWriter, r *http.Request,
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// authorizeTokenConversationRead is the token rule for reading one
+// conversation, applied after the checks every caller passes: a direct
+// conversation needs inbox:read for the peer agent's project (a hub
+// boundary for a direct conversation between users) and agent:read on the
+// peer agent; a group with no project needs inbox:read on a hub boundary.
+// A project group needs only the project:read check it already passed.
+func (s *Server) authorizeTokenConversationRead(w http.ResponseWriter, r *http.Request, token *ScopedUserIdentity, conv *store.Conversation) bool {
+	if conv.Kind != "direct" && conv.ProjectID != nil && *conv.ProjectID != "" {
+		return true
+	}
+	return s.authorizeTokenConversation(w, r, token, permInboxRead, conv)
 }
 
 // isConversationParticipant checks whether a principal is an active participant

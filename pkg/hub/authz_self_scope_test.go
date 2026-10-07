@@ -45,6 +45,17 @@ func selfRowIDs(rows []selfRow) []string {
 	return ids
 }
 
+// seedSelfScopeMember creates projectID and makes userID an active member
+// of it, so the live membership check for project tokens passes.
+func seedSelfScopeMember(t *testing.T, s store.Store, userID, projectID string) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := s.GetProject(ctx, projectID); err != nil {
+		require.NoError(t, s.CreateProject(ctx, &store.Project{ID: projectID, Name: projectID, Slug: projectID}))
+	}
+	createTestUserWithProjectRole(t, s, userID, userID+"@test.com", projectID, store.ProjectRoleMember)
+}
+
 // selfToken builds a token identity with the given boundary and selectors.
 func selfToken(t *testing.T, userID string, boundary TokenBoundary, selectors ...string) *ScopedUserIdentity {
 	t.Helper()
@@ -69,8 +80,9 @@ func callAuthorizeSelfScoped(srv *Server, identity Identity, permissionID, rowPr
 // that list totals and cursors count only the rows it may see. A hub token
 // and a session see every row.
 func TestSelfScopedPermission_ProjectTokenSeesOnlyItsProject(t *testing.T) {
-	srv, _ := testServer(t)
+	srv, s := testServer(t)
 	projectA, projectB := "proj-a", "proj-b"
+	seedSelfScopeMember(t, s, "self-user", projectA)
 	token := selfToken(t, "self-user", projectBoundary(projectA), "inbox:read")
 
 	ok, code := callAuthorizeSelfScoped(srv, token, "inbox.read", projectA)
@@ -81,38 +93,39 @@ func TestSelfScopedPermission_ProjectTokenSeesOnlyItsProject(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, code)
 
 	rows := []selfRow{{"a1", projectA}, {"b1", projectB}, {"a2", projectA}, {"n1", ""}, {"a3", projectA}, {"b2", projectB}}
-	assert.Equal(t, []string{"a1", "a2", "a3"}, selfRowIDs(filterSelfScopedRows(token, "inbox.read", rows, selfRowProject)))
+	assert.Equal(t, []string{"a1", "a2", "a3"}, selfRowIDs(filterSelfScopedRows(srv.newSelfScopeCheck(context.Background(), token, "inbox.read"), rows, selfRowProject)))
 
-	page, total, next, err := pageSelfScopedRows(token, "inbox.read", rows, selfRowProject, "", 2)
+	page, total, next, err := pageSelfScopedRows(srv.newSelfScopeCheck(context.Background(), token, "inbox.read"), rows, selfRowProject, "", 2)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"a1", "a2"}, selfRowIDs(page))
 	assert.Equal(t, 3, total, "the total counts only visible rows")
 	require.NotEmpty(t, next)
-	page, total, next, err = pageSelfScopedRows(token, "inbox.read", rows, selfRowProject, next, 2)
+	page, total, next, err = pageSelfScopedRows(srv.newSelfScopeCheck(context.Background(), token, "inbox.read"), rows, selfRowProject, next, 2)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"a3"}, selfRowIDs(page), "the cursor indexes visible rows")
 	assert.Equal(t, 3, total)
 	assert.Empty(t, next, "no cursor after the last visible row")
-	_, _, _, err = pageSelfScopedRows(token, "inbox.read", rows, selfRowProject, "9", 2)
+	_, _, _, err = pageSelfScopedRows(srv.newSelfScopeCheck(context.Background(), token, "inbox.read"), rows, selfRowProject, "9", 2)
 	assert.ErrorIs(t, err, errInvalidSelfScopedCursor)
 
 	hub := selfToken(t, "self-user", hubBoundary(), "inbox:read")
-	assert.Len(t, filterSelfScopedRows(hub, "inbox.read", rows, selfRowProject), len(rows))
-	_, total, _, err = pageSelfScopedRows(hub, "inbox.read", rows, selfRowProject, "", 10)
+	assert.Len(t, filterSelfScopedRows(srv.newSelfScopeCheck(context.Background(), hub, "inbox.read"), rows, selfRowProject), len(rows))
+	_, total, _, err = pageSelfScopedRows(srv.newSelfScopeCheck(context.Background(), hub, "inbox.read"), rows, selfRowProject, "", 10)
 	require.NoError(t, err)
 	assert.Equal(t, len(rows), total)
 
 	session := bearerUser("self-user")
-	assert.Len(t, filterSelfScopedRows(session, "inbox.read", rows, selfRowProject), len(rows))
+	assert.Len(t, filterSelfScopedRows(srv.newSelfScopeCheck(context.Background(), session, "inbox.read"), rows, selfRowProject), len(rows))
 	dev := &DevUser{id: "dev-user"}
-	assert.Len(t, filterSelfScopedRows(dev, "inbox.read", rows, selfRowProject), len(rows))
+	assert.Len(t, filterSelfScopedRows(srv.newSelfScopeCheck(context.Background(), dev, "inbox.read"), rows, selfRowProject), len(rows))
 }
 
 // TestSelfScopedPermission_ProjectlessRowsRequireHubBoundary pins that a
 // record with no project, such as a direct message between two users, is
 // reachable only with a hub token.
 func TestSelfScopedPermission_ProjectlessRowsRequireHubBoundary(t *testing.T) {
-	srv, _ := testServer(t)
+	srv, s := testServer(t)
+	seedSelfScopeMember(t, s, "self-user", "proj-a")
 	project := selfToken(t, "self-user", projectBoundary("proj-a"), "inbox:read", "inbox:write")
 	hub := selfToken(t, "self-user", hubBoundary(), "inbox:read", "inbox:write")
 
@@ -147,7 +160,7 @@ func TestSelfScopedPermission_CeilingWithoutSelectorDenies(t *testing.T) {
 	readOnly := selfToken(t, "self-user", hubBoundary(), "inbox:read")
 	ok, _ = selfScopedDecision(readOnly, "inbox.write", "")
 	assert.False(t, ok, "inbox:read does not cover inbox.write")
-	assert.Empty(t, filterSelfScopedRows(unrelated, "inbox.read", []selfRow{{"n1", ""}}, selfRowProject))
+	assert.Empty(t, filterSelfScopedRows(srv.newSelfScopeCheck(context.Background(), unrelated, "inbox.read"), []selfRow{{"n1", ""}}, selfRowProject))
 
 	// user_skill_injection.update is hub-only: a project-boundary ceiling
 	// carrying it is denied.
