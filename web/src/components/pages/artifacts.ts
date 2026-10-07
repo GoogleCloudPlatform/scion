@@ -93,6 +93,11 @@ export class ScionPageArtifacts extends LitElement {
       .muted {
         color: var(--scion-text-muted, #64748b);
       }
+      .count {
+        margin-left: auto;
+        font-size: 0.8125rem;
+        color: var(--scion-text-muted, #64748b);
+      }
       .load-more {
         display: flex;
         justify-content: center;
@@ -127,10 +132,18 @@ export class ScionPageArtifacts extends LitElement {
     return this.search.trim() !== '' || this.reviewPending || this.ownedOnly;
   }
 
-  /** Loads the first page for the current filters. */
+  /**
+   * Loads the first page for the current filters. The previous filters'
+   * cursor is dropped at once (a cursor only works for the filters it was
+   * issued for), and so is any load-more still in flight. The old rows stay
+   * on screen while the new page loads, but not after a failure: then the
+   * full error state, with Retry, replaces them.
+   */
   private async load(): Promise<void> {
     const gen = ++this.generation;
     this.loading = true;
+    this.loadingMore = false;
+    this.nextCursor = '';
     this.error = null;
     try {
       const page = await this.fetchPage();
@@ -140,6 +153,7 @@ export class ScionPageArtifacts extends LitElement {
       this.resolveNames(this.items);
     } catch (err) {
       if (gen !== this.generation) return;
+      this.items = [];
       this.error = err instanceof Error ? err.message : 'Failed to load artifacts';
     } finally {
       if (gen === this.generation) this.loading = false;
@@ -148,7 +162,7 @@ export class ScionPageArtifacts extends LitElement {
 
   /** Appends the next page. */
   private async loadMore(): Promise<void> {
-    if (!this.nextCursor || this.loadingMore) return;
+    if (!this.nextCursor || this.loadingMore || this.loading) return;
     const gen = this.generation;
     this.loadingMore = true;
     this.error = null;
@@ -210,9 +224,8 @@ export class ScionPageArtifacts extends LitElement {
           name?: string;
           slug?: string;
           displayName?: string;
-          email?: string;
         };
-        const name = body.displayName || body.name || body.slug || body.email || '';
+        const name = body.displayName || body.name || body.slug || '';
         if (name) {
           const next = new Map(this.names);
           next.set(key, name);
@@ -263,6 +276,7 @@ export class ScionPageArtifacts extends LitElement {
           class="search-input"
           size="small"
           placeholder="Search title or key..."
+          aria-label="Search artifacts"
           clearable
           @sl-input=${(e: Event): void => this.onSearchInput(e)}
         >
@@ -285,6 +299,9 @@ export class ScionPageArtifacts extends LitElement {
         >
         ${this.loading && this.items.length > 0
           ? html`<sl-spinner class="inline-loading" aria-label="Loading artifacts"></sl-spinner>`
+          : nothing}
+        ${this.items.length > 0
+          ? html`<span class="count">Showing ${this.items.length}</span>`
           : nothing}
       </div>
     `;
@@ -312,25 +329,41 @@ export class ScionPageArtifacts extends LitElement {
         </div>
       `;
     }
-    if (this.items.length === 0) {
+    if (this.items.length === 0 && !this.nextCursor) {
       return this.filtered ? this.renderNoMatch() : this.renderEmpty();
+    }
+    if (this.items.length === 0) {
+      // A page can end early (the hub examines a bounded number of rows per
+      // request) and still have more after it: keep the walk going.
+      return html`
+        <div class="empty-state">
+          <sl-icon name="file-earmark-richtext"></sl-icon>
+          <h2>No Artifacts Found Yet</h2>
+          <p>There may be more artifacts further on.</p>
+        </div>
+        ${this.renderLoadMore()}
+      `;
     }
     return html`
       ${this.renderTable()}
       ${this.error ? html`<p class="muted" role="alert">${this.error}</p>` : nothing}
-      ${this.nextCursor
-        ? html`
-            <div class="load-more">
-              <sl-button
-                size="small"
-                ?loading=${this.loadingMore}
-                @click=${(): void => void this.loadMore()}
-              >
-                Load more
-              </sl-button>
-            </div>
-          `
-        : nothing}
+      ${this.renderLoadMore()}
+    `;
+  }
+
+  private renderLoadMore(): TemplateResult | typeof nothing {
+    if (!this.nextCursor) return nothing;
+    return html`
+      <div class="load-more">
+        <sl-button
+          size="small"
+          ?loading=${this.loadingMore}
+          ?disabled=${this.loading}
+          @click=${(): void => void this.loadMore()}
+        >
+          Load more
+        </sl-button>
+      </div>
     `;
   }
 
@@ -400,7 +433,13 @@ export class ScionPageArtifacts extends LitElement {
           ${a.key ? html`<span class="key">${a.key}</span>` : nothing}
         </td>
         <td>${this.renderOwner(a)}</td>
-        <td class="hide-mobile">${this.names.get(`project:${a.scopeRef}`) || a.scopeRef}</td>
+        <td class="hide-mobile">
+          <a
+            href=${`/projects/${encodeURIComponent(a.scopeRef)}`}
+            @click=${(e: Event): void => e.stopPropagation()}
+            >${this.names.get(`project:${a.scopeRef}`) || a.scopeRef}</a
+          >
+        </td>
         <td title=${formatInstant(a.updatedAt)}>${formatRelative(a.updatedAt)}</td>
         <td>
           ${a.reviewPending

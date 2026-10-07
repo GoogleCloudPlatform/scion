@@ -299,33 +299,173 @@ describe('artifacts list page', () => {
   });
 
   it('drops a slow response for filters that changed meanwhile', async () => {
-    let releaseFirst: (() => void) | null = null;
-    const first = new Promise<void>((r) => (releaseFirst = r));
-    let calls = 0;
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async (input: RequestInfo | URL) => {
-        const url = String(input);
-        if (!url.startsWith('/api/v1/artifacts?')) return new Response('{}', { status: 404 });
-        calls++;
-        if (calls === 1) await first;
-        const title = calls === 1 ? 'stale' : 'fresh';
-        return new Response(JSON.stringify({ artifacts: [item(calls, { title })] }), {
-          status: 200,
-        });
-      })
-    );
-    window.__SCION_FEATURES__ = { 'hub.artifacts': true };
-    const el = document.createElement('scion-page-artifacts') as ScionPageArtifacts;
-    el.pageData = { path: '/artifacts', title: 'Artifacts' } as ScionPageArtifacts['pageData'];
-    document.body.appendChild(el);
-    await el.updateComplete;
-    const owned = el.shadowRoot!.querySelector('sl-checkbox') as HTMLElement & { checked: boolean };
-    owned.checked = true;
-    owned.dispatchEvent(new Event('sl-change'));
+    const list = scriptedListFetch();
+    const el = await mountNoSettle();
+    // First request (no filter) is held; the filter change sends a second.
+    tickOwned(el);
     await settle(el);
-    releaseFirst!();
+    list.respond(1, { artifacts: [item(2, { title: 'fresh' })] });
+    await settle(el);
+    // The stale first response arrives last and must be ignored.
+    list.respond(0, { artifacts: [item(1, { title: 'stale' })] });
     await settle(el);
     expect(rows(el).map((r) => r.querySelector('a')!.textContent)).toEqual(['fresh']);
+    expect(list.urls[1].get('owner')).toBe('me');
+  });
+
+  it('a filter change during "Load more" does not leave the button stuck', async () => {
+    const list = scriptedListFetch();
+    const el = await mountNoSettle();
+    list.respond(0, { artifacts: [item(1)], nextCursor: 'c1.page2' });
+    await settle(el);
+    loadMoreButton(el)!.click(); // request 1, held
+    await settle(el);
+    tickOwned(el); // request 2
+    await settle(el);
+    list.respond(2, { artifacts: [item(5, { title: 'owned' })], nextCursor: 'c1.owned2' });
+    await settle(el);
+    list.respond(1, { artifacts: [item(9, { title: 'stale page 2' })] });
+    await settle(el);
+    expect(rows(el).map((r) => r.querySelector('a')!.textContent)).toEqual(['owned']);
+    const more = loadMoreButton(el)!;
+    expect(more.hasAttribute('loading')).toBe(false);
+    more.click(); // request 3
+    await settle(el);
+    expect(list.urls).toHaveLength(4);
+    expect(list.urls[3].get('cursor')).toBe('c1.owned2');
+    expect(list.urls[3].get('owner')).toBe('me');
+  });
+
+  it('a failed reload shows the error with Retry, no stale rows and no stale cursor', async () => {
+    const list = scriptedListFetch();
+    const el = await mountNoSettle();
+    list.respond(0, { artifacts: [item(1, { title: 'unfiltered' })], nextCursor: 'c1.old' });
+    await settle(el);
+    tickOwned(el); // request 1
+    await settle(el);
+    // While the reload runs, the old cursor is gone: no Load more.
+    expect(loadMoreButton(el)).toBeNull();
+    list.fail(1, 500);
+    await settle(el);
+    expect(rows(el)).toHaveLength(0);
+    const err = el.shadowRoot!.querySelector('.error-state')!;
+    expect(err.textContent).toContain('boom');
+    expect(err.querySelector('sl-button')!.textContent).toContain('Retry');
+    expect(loadMoreButton(el)).toBeNull();
+    // Retry reloads with the current filters and no cursor.
+    (err.querySelector('sl-button') as HTMLElement).click();
+    await settle(el);
+    expect(list.urls[2].get('owner')).toBe('me');
+    expect(list.urls[2].get('cursor')).toBeNull();
+  });
+
+  it('an empty page that still has a cursor offers Load more, not the empty state', async () => {
+    const m = mockFetch({
+      '': { artifacts: [], nextCursor: 'c1.more' },
+      'c1.more': { artifacts: [item(3, { title: 'further on' })] },
+    });
+    const el = await mount(true);
+    expect(el.shadowRoot!.querySelector('.empty-state sl-button')).toBeNull();
+    expect(el.shadowRoot!.querySelector('.empty-state h2')!.textContent).toBe(
+      'No Artifacts Found Yet'
+    );
+    loadMoreButton(el)!.click();
+    await settle(el);
+    expect(rows(el).map((r) => r.querySelector('a')!.textContent)).toEqual(['further on']);
+    expect(listUrls(m).at(-1)!.get('cursor')).toBe('c1.more');
+  });
+
+  it('shows the loaded count, links the home project and labels the search box', async () => {
+    mockFetch({ '': { artifacts: [item(1), item(2)], nextCursor: 'c1.x' } });
+    const el = await mount(true);
+    expect(el.shadowRoot!.querySelector('.count')!.textContent).toBe('Showing 2');
+    const projectLink = rows(el)[0].querySelectorAll('a')[1];
+    expect(projectLink.getAttribute('href')).toBe('/projects/proj-1');
+    expect(el.shadowRoot!.querySelector('sl-input')!.getAttribute('aria-label')).toBe(
+      'Search artifacts'
+    );
+  });
+
+  it('never shows another user’s email as their name', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.startsWith('/api/v1/artifacts?')) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({ artifacts: [item(1, { ownerKind: 'user', ownerRef: 'user-x' })] }),
+              { status: 200 }
+            )
+          );
+        }
+        return Promise.resolve(
+          new Response(JSON.stringify({ email: 'x@example.com' }), { status: 200 })
+        );
+      })
+    );
+    const el = await mount(true);
+    const r = rows(el)[0];
+    expect(r.textContent).not.toContain('x@example.com');
+    expect(r.textContent).toContain('user-x');
   });
 });
+
+interface ScriptedList {
+  /** Query parameters of each list request, in order. */
+  urls: URLSearchParams[];
+  respond(n: number, body: ArtifactListResponse): void;
+  fail(n: number, status: number): void;
+}
+
+/** A fetch whose n-th list request waits until the test answers it. */
+function scriptedListFetch(): ScriptedList {
+  const waiting: ((r: Response) => void)[] = [];
+  const answered: Response[] = [];
+  const s: ScriptedList = {
+    urls: [],
+    respond(n, body) {
+      settleRequest(n, new Response(JSON.stringify(body), { status: 200 }));
+    },
+    fail(n, status) {
+      settleRequest(n, new Response('{"error":{"code":"internal","message":"boom"}}', { status }));
+    },
+  };
+  function settleRequest(n: number, res: Response): void {
+    if (waiting[n]) waiting[n](res);
+    else answered[n] = res;
+  }
+  vi.stubGlobal(
+    'fetch',
+    vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (!url.startsWith('/api/v1/artifacts?')) {
+        return Promise.resolve(new Response('{}', { status: 404 }));
+      }
+      const n = s.urls.length;
+      s.urls.push(new URL(url, 'http://x').searchParams);
+      if (answered[n]) return Promise.resolve(answered[n]);
+      return new Promise<Response>((resolve) => (waiting[n] = resolve));
+    })
+  );
+  return s;
+}
+
+async function mountNoSettle(): Promise<ScionPageArtifacts> {
+  window.__SCION_FEATURES__ = { 'hub.artifacts': true };
+  const el = document.createElement('scion-page-artifacts') as ScionPageArtifacts;
+  el.pageData = { path: '/artifacts', title: 'Artifacts' } as ScionPageArtifacts['pageData'];
+  document.body.appendChild(el);
+  await el.updateComplete;
+  return el;
+}
+
+function tickOwned(el: ScionPageArtifacts): void {
+  const owned = el.shadowRoot!.querySelector('sl-checkbox') as HTMLElement & { checked: boolean };
+  owned.checked = !owned.checked;
+  owned.dispatchEvent(new Event('sl-change'));
+}
+
+function loadMoreButton(el: ScionPageArtifacts): HTMLElement | null {
+  return el.shadowRoot!.querySelector('.load-more sl-button');
+}
