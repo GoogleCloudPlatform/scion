@@ -130,7 +130,10 @@ func mergeSettingsStruct(existing map[string]interface{}, t reflect.Type, sent m
 }
 
 // structFieldByJSONName returns the field of struct type t whose JSON name
-// is name.
+// is name. Like encoding/json, it prefers an exact match and otherwise
+// accepts a case-insensitive one, so a key that decoded into the request
+// is also found here (the strict unknown-key check folds case the same
+// way).
 func structFieldByJSONName(t reflect.Type, name string) (reflect.StructField, bool) {
 	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
@@ -138,6 +141,8 @@ func structFieldByJSONName(t reflect.Type, name string) (reflect.StructField, bo
 	if t.Kind() != reflect.Struct {
 		return reflect.StructField{}, false
 	}
+	var folded reflect.StructField
+	foundFolded := false
 	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
 		if !f.IsExported() {
@@ -153,8 +158,11 @@ func structFieldByJSONName(t reflect.Type, name string) (reflect.StructField, bo
 		if jn == name {
 			return f, true
 		}
+		if !foundFolded && strings.EqualFold(jn, name) {
+			folded, foundFolded = f, true
+		}
 	}
-	return reflect.StructField{}, false
+	return folded, foundFolded
 }
 
 // yamlFieldName returns the key yaml.v3 uses for f.
