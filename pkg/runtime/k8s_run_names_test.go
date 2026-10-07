@@ -719,18 +719,6 @@ func TestCleanupAgentResources_StaleSweep(t *testing.T) {
 			t.Errorf("live run A objects = %v, want all", got)
 		}
 	})
-	t.Run("the named run's stale objects with a pod of another run are kept", func(t *testing.T) {
-		rt, _, _, _ := newRunScopeRuntime(t)
-		prClock(rt, prNow)
-		rsSeedPod(t, rt, "pod-b", rsLabels(rsRunB, "start-b"), corev1.PodRunning)
-		a := prSeedRunObjects(t, rt, rsRunA, startDeadlineNone, prNow.Add(-48*time.Hour))
-		if err := rt.CleanupAgentResources(ctx, "agent", "proj1", rsRunA); err != nil {
-			t.Fatal(err)
-		}
-		if got := prPresent(t, rt, a); got != prAll {
-			t.Errorf("named run A objects = %v, want all (never swept as the current run)", got)
-		}
-	})
 	t.Run("legacy fixed names of another run with a pod gone are never swept by age", func(t *testing.T) {
 		rt, _, _, _ := newRunScopeRuntime(t)
 		prClock(rt, prNow)
@@ -755,6 +743,103 @@ func TestCleanupAgentResources_StaleSweep(t *testing.T) {
 			t.Error("a legacy fixed-name object of another run was swept by age")
 		}
 	})
+}
+
+// --- O1: a delete naming run A while a run-B pod holds the name ---
+
+// prSeedPodRefs creates pod rsAgent labelled with run, whose spec
+// references the given Secret names through Secret volumes.
+func prSeedPodRefs(t *testing.T, rt *KubernetesRuntime, run string, phase corev1.PodPhase, secretNames ...string) {
+	t.Helper()
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: rsAgent, Namespace: rt.DefaultNamespace, UID: types.UID("pod-" + run[:4]), Labels: rsLabels(run, "start-"+run[:4])},
+		Status:     corev1.PodStatus{Phase: phase},
+	}
+	for i, n := range secretNames {
+		pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{
+			Name: "v" + string(rune('a'+i)), VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: n}},
+		})
+	}
+	if _, err := rt.Client.Clientset.CoreV1().Pods(rt.DefaultNamespace).Create(context.Background(), pod, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("seed pod: %v", err)
+	}
+}
+
+// A cleanup naming run A while run B's pod holds the name removes A's
+// per-run objects (B's pod cannot mount them) and leaves B's pod and
+// objects.
+func TestCleanupAgentResources_NamedRun_OtherRunsPod_RemovesNamedRunsObjects(t *testing.T) {
+	rt, _, _, enf := newRunScopeRuntime(t)
+	prClock(rt, prNow)
+	b := k8sAgentObjectNames(rsAgent, rsRunB)
+	prSeedPodRefs(t, rt, rsRunB, corev1.PodRunning, b.Secret, b.Auth)
+	prSeedRunObjects(t, rt, rsRunB, "300", prNow)
+	a := prSeedRunObjects(t, rt, rsRunA, "300", prNow)
+	if err := rt.CleanupAgentResources(context.Background(), "agent", "proj1", rsRunA); err != nil {
+		t.Fatal(err)
+	}
+	if got := prPresent(t, rt, a); got != prNone {
+		t.Errorf("run A objects = %v, want none", got)
+	}
+	if got := prPresent(t, rt, b); got != prAll {
+		t.Errorf("run B objects = %v, want all", got)
+	}
+	if rsPod(t, rt) == nil {
+		t.Error("run B's pod was removed")
+	}
+	enf.assertAllConditional(t)
+}
+
+// Never an object the live pod references, even of the named run.
+func TestCleanupAgentResources_NamedRun_ObjectReferencedByPodKept(t *testing.T) {
+	rt, _, _, _ := newRunScopeRuntime(t)
+	prClock(rt, prNow)
+	a := k8sAgentObjectNames(rsAgent, rsRunA)
+	prSeedPodRefs(t, rt, rsRunB, corev1.PodRunning, a.Secret)
+	prSeedRunObjects(t, rt, rsRunA, startDeadlineNone, prNow.Add(-48*time.Hour))
+	if err := rt.CleanupAgentResources(context.Background(), "agent", "proj1", rsRunA); err != nil {
+		t.Fatal(err)
+	}
+	if !secretExists(t, rt, rt.DefaultNamespace, a.Secret) {
+		t.Error("a Secret referenced by the live pod was removed")
+	}
+	if secretExists(t, rt, rt.DefaultNamespace, a.Auth) {
+		t.Error("an unreferenced Secret of the named run was kept")
+	}
+}
+
+// --- O2: a start without a run ID after a run-ID pod ---
+
+// A no-run start removes the per-run objects of the previous (finished)
+// pod's run, and leaves another run's.
+func TestK8sRun_NoRunID_PreClean_RemovesPreviousPodsPerRunObjects(t *testing.T) {
+	rt, cs, _, _ := newRunScopeRuntime(t)
+	prClock(rt, prNow)
+	x := k8sAgentObjectNames(rsAgent, rsRunA)
+	prSeedPodRefs(t, rt, rsRunA, corev1.PodSucceeded, x.Secret, x.Auth)
+	prSeedRunObjects(t, rt, rsRunA, "300", prNow)
+	y := prSeedRunObjects(t, rt, rsRunB, "300", prNow)
+	runUntilPodSubmittedLate(t, rt, cs, rsRunConfig(""))
+	if got := prPresent(t, rt, x); got != prNone {
+		t.Errorf("previous pod's run objects = %v, want none", got)
+	}
+	if got := prPresent(t, rt, y); got != prAll {
+		t.Errorf("another run's objects = %v, want all", got)
+	}
+}
+
+// A no-run start replacing a live run-ID pod leaves that pod's per-run
+// objects (nothing a live pod uses is removed here).
+func TestK8sRun_NoRunID_PreClean_LivePodsPerRunObjectsKept(t *testing.T) {
+	rt, cs, _, _ := newRunScopeRuntime(t)
+	prClock(rt, prNow)
+	x := k8sAgentObjectNames(rsAgent, rsRunA)
+	prSeedPodRefs(t, rt, rsRunA, corev1.PodRunning, x.Secret, x.Auth)
+	prSeedRunObjects(t, rt, rsRunA, "300", prNow)
+	runUntilPodSubmittedLate(t, rt, cs, rsRunConfig(""))
+	if got := prPresent(t, rt, x); got != prAll {
+		t.Errorf("live pod's run objects = %v, want all", got)
+	}
 }
 
 // --- no-run paths (an older hub) ---

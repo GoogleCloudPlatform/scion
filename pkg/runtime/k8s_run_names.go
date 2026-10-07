@@ -26,6 +26,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/types"
@@ -324,4 +325,70 @@ func perRunNameMatches(kind, objectName, podName, runID string) bool {
 // containerName in pkg/agent/run.go).
 func podBelongsToAgent(podName, agentSlug string) bool {
 	return podName == agentSlug || strings.HasSuffix(podName, "--"+agentSlug)
+}
+
+// deletePodRunObjects removes, with UID preconditions, the per-agent
+// objects of pod podName labelled with run podRun (its per-run objects and
+// any fixed-name objects of that run), logging each per-run removal with
+// reason. Nothing is done for an empty or invalid run.
+func (r *KubernetesRuntime) deletePodRunObjects(ctx context.Context, namespace, podName, podRun, reason string) {
+	if podRun == "" || ValidateRunID(podRun) != nil {
+		return
+	}
+	r.deleteAgentSecretsBySelector(ctx, namespace, podName, api.LabelRunID+"="+podRun,
+		func(kind string, obj metav1.Object) bool {
+			runtimeLog.Info(reason, "kind", kind, "name", obj.GetName(), "namespace", namespace,
+				"agent", podName, "object_run_id", podRun)
+			return true
+		},
+		func(kind, name string, err error) {
+			runtimeLog.Warn("Failed to delete per-run object",
+				"kind", kind, "name", name, "agent", podName, "namespace", namespace, "run_id", podRun, "error", err)
+		})
+}
+
+// podReferencesObject reports whether pod's spec references the Secret
+// (kind "Secret") or SecretProviderClass (kind "SecretProviderClass")
+// named name: a Secret or projected Secret volume, a CSI volume's
+// secretProviderClass, or an env/envFrom Secret reference of any container.
+func podReferencesObject(pod *corev1.Pod, kind, name string) bool {
+	for _, v := range pod.Spec.Volumes {
+		switch {
+		case kind == "Secret" && v.Secret != nil && v.Secret.SecretName == name:
+			return true
+		case kind == "SecretProviderClass" && v.CSI != nil && v.CSI.VolumeAttributes["secretProviderClass"] == name:
+			return true
+		case kind == "Secret" && v.Projected != nil:
+			for _, src := range v.Projected.Sources {
+				if src.Secret != nil && src.Secret.Name == name {
+					return true
+				}
+			}
+		}
+	}
+	if kind != "Secret" {
+		return false
+	}
+	containers := append(append(append([]corev1.Container{}, pod.Spec.InitContainers...), pod.Spec.Containers...), ephemeralAsContainers(pod)...)
+	for _, c := range containers {
+		for _, e := range c.Env {
+			if e.ValueFrom != nil && e.ValueFrom.SecretKeyRef != nil && e.ValueFrom.SecretKeyRef.Name == name {
+				return true
+			}
+		}
+		for _, ef := range c.EnvFrom {
+			if ef.SecretRef != nil && ef.SecretRef.Name == name {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func ephemeralAsContainers(pod *corev1.Pod) []corev1.Container {
+	out := make([]corev1.Container, 0, len(pod.Spec.EphemeralContainers))
+	for _, e := range pod.Spec.EphemeralContainers {
+		out = append(out, corev1.Container{Env: e.Env, EnvFrom: e.EnvFrom})
+	}
+	return out
 }

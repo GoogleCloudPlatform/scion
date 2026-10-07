@@ -667,6 +667,15 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 		// An NFS-home start removes the previous pod first and its secrets
 		// only once the pod is confirmed stopped, so a pod still shutting
 		// down keeps the secrets it mounted.
+		//
+		// A previous pod started with a run ID mounts its run's per-run
+		// objects (ptone/scion#3101), which the fixed-name cleanup does not
+		// reach. When that pod is not live they are removed too, after it
+		// is (a live pod's are left, for the sweep or a delete of that run).
+		prevPodRun := ""
+		if p, gerr := r.Client.Clientset.CoreV1().Pods(namespace).Get(ctx, config.Name, metav1.GetOptions{}); gerr == nil && !k8sPodIsLive(p) {
+			prevPodRun = p.Labels[api.LabelRunID]
+		}
 		if !nfsHomeStart {
 			r.cleanupAgentSecrets(ctx, namespace, config.Name)
 		}
@@ -676,6 +685,7 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 		if nfsHomeStart {
 			r.cleanupAgentSecrets(ctx, namespace, config.Name)
 		}
+		r.deletePodRunObjects(ctx, namespace, config.Name, prevPodRun, "Removing a per-run object of the previous pod's run before a start without a run ID")
 	}
 	cleanupArmed = true
 
@@ -1611,7 +1621,20 @@ func (r *KubernetesRuntime) CleanupAgentResources(ctx context.Context, agentName
 		}
 		pod, err := r.Client.Clientset.CoreV1().Pods(ns).Get(ctx, podName, metav1.GetOptions{})
 		if err == nil {
-			if staleOther && pod.Labels[api.LabelRunID] != objRun {
+			// The pod holding the name belongs to another run: it cannot
+			// mount this run's per-run objects (they are named for their
+			// own run), and never one it references is removed. Removable
+			// then are the named run's own objects (a delete naming that
+			// run) and stale objects of other runs.
+			if !perRun || pod.Labels[api.LabelRunID] == objRun || podReferencesObject(pod, kind, objectName) {
+				return false, nil
+			}
+			switch {
+			case runID != "" && objRun == runID:
+				runtimeLog.Info("Removing a per-run object of the named run while another run's pod holds the name",
+					"kind", kind, "name", objectName, "namespace", ns, "run_id", runID, "pod_run_id", pod.Labels[api.LabelRunID])
+				return true, nil
+			case staleOther:
 				runtimeLog.Info("Removing a stale per-run object of another run",
 					"kind", kind, "name", objectName, "namespace", ns, "object_run_id", objRun, "run_id", runID,
 					"created", obj.GetCreationTimestamp().UTC().Format(time.RFC3339),
@@ -3414,13 +3437,7 @@ func (r *KubernetesRuntime) Delete(ctx context.Context, ref RunRef) error {
 		// A pod started with a run ID mounts its run's per-run objects
 		// (ptone/scion#3101), which the fixed-name cleanup above does not
 		// reach: remove that run's, with UID preconditions.
-		if podRun := pod.Labels[api.LabelRunID]; podRun != "" && ValidateRunID(podRun) == nil {
-			r.deleteAgentSecretsBySelector(ctx, namespace, id, api.LabelRunID+"="+podRun, nil,
-				func(kind, name string, err error) {
-					runtimeLog.Warn("Failed to delete per-run object during cleanup",
-						"kind", kind, "name", name, "agent", id, "namespace", namespace, "run_id", podRun, "error", err)
-				})
-		}
+		r.deletePodRunObjects(ctx, namespace, id, pod.Labels[api.LabelRunID], "Removing a per-run object of the deleted pod's run")
 	}
 	err := pods.Delete(ctx, id, opts)
 	if err != nil && !k8serrors.IsNotFound(err) {
