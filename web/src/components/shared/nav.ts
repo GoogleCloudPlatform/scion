@@ -25,6 +25,8 @@ import { customElement, property, state } from 'lit/decorators.js';
 
 import type { User } from '../../shared/types.js';
 import { apiFetch } from '../../client/api.js';
+import { ARTIFACTS_FLAG } from '../../client/artifacts.js';
+import { isFeatureEnabled } from '../../utils/feature-flags.js';
 import {
   type AdminStatus,
   hasAnyPermission,
@@ -35,6 +37,8 @@ interface NavItem {
   path: string;
   label: string;
   icon: string;
+  /** Feature flag the item needs; the item is hidden while it is off. */
+  flag?: string;
 }
 
 interface NavSection {
@@ -57,9 +61,20 @@ const NAV_SECTIONS: NavSection[] = [
       { path: '/agents', label: 'Agents', icon: 'cpu' },
       { path: '/brokers', label: 'Brokers', icon: 'hdd-rack' },
       { path: '/skills', label: 'Skills', icon: 'lightning-charge' },
+      {
+        path: '/artifacts',
+        label: 'Artifacts',
+        icon: 'file-earmark-richtext',
+        flag: ARTIFACTS_FLAG,
+      },
     ],
   },
 ];
+
+/** The items whose feature flag, if any, is on. */
+function visibleItems(items: NavItem[]): NavItem[] {
+  return items.filter((item) => !item.flag || isFeatureEnabled(item.flag));
+}
 
 /**
  * Admin nav items visible to both hub-admin and super-admin users.
@@ -438,7 +453,7 @@ export class ScionNav extends LitElement {
             <div class="nav-section">
               <div class="nav-section-title">${section.title}</div>
               <ul class="nav-list">
-                ${section.items.map(
+                ${visibleItems(section.items).map(
                   (item) => html`
                     <li class="nav-item">
                       <sl-tooltip
