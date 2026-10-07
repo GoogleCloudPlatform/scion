@@ -39,6 +39,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conversation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conversationparticipant"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionaudit"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/delegationadoption"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/delegationedge"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entitlementbinding"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/envvar"
@@ -141,6 +142,8 @@ type Client struct {
 	ConversationParticipant *ConversationParticipantClient
 	// DecisionAudit is the client for interacting with the DecisionAudit builders.
 	DecisionAudit *DecisionAuditClient
+	// DelegationAdoption is the client for interacting with the DelegationAdoption builders.
+	DelegationAdoption *DelegationAdoptionClient
 	// DelegationEdge is the client for interacting with the DelegationEdge builders.
 	DelegationEdge *DelegationEdgeClient
 	// EntitlementBinding is the client for interacting with the EntitlementBinding builders.
@@ -273,6 +276,7 @@ func (c *Client) init() {
 	c.Conversation = NewConversationClient(c.config)
 	c.ConversationParticipant = NewConversationParticipantClient(c.config)
 	c.DecisionAudit = NewDecisionAuditClient(c.config)
+	c.DelegationAdoption = NewDelegationAdoptionClient(c.config)
 	c.DelegationEdge = NewDelegationEdgeClient(c.config)
 	c.EntitlementBinding = NewEntitlementBindingClient(c.config)
 	c.EnvVar = NewEnvVarClient(c.config)
@@ -437,6 +441,7 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 		Conversation:             NewConversationClient(cfg),
 		ConversationParticipant:  NewConversationParticipantClient(cfg),
 		DecisionAudit:            NewDecisionAuditClient(cfg),
+		DelegationAdoption:       NewDelegationAdoptionClient(cfg),
 		DelegationEdge:           NewDelegationEdgeClient(cfg),
 		EntitlementBinding:       NewEntitlementBindingClient(cfg),
 		EnvVar:                   NewEnvVarClient(cfg),
@@ -528,6 +533,7 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 		Conversation:             NewConversationClient(cfg),
 		ConversationParticipant:  NewConversationParticipantClient(cfg),
 		DecisionAudit:            NewDecisionAuditClient(cfg),
+		DelegationAdoption:       NewDelegationAdoptionClient(cfg),
 		DelegationEdge:           NewDelegationEdgeClient(cfg),
 		EntitlementBinding:       NewEntitlementBindingClient(cfg),
 		EnvVar:                   NewEnvVarClient(cfg),
@@ -612,18 +618,18 @@ func (c *Client) Use(hooks ...Hook) {
 		c.BrokerDispatch, c.BrokerJoinToken, c.BrokerSecret, c.BrokerSetting,
 		c.BrokerTargetInventory, c.ChatLinkCode, c.ConduitPrincipalEpoch,
 		c.ConduitSession, c.Conversation, c.ConversationParticipant, c.DecisionAudit,
-		c.DelegationEdge, c.EntitlementBinding, c.EnvVar, c.ExternalIdentity,
-		c.GCPServiceAccount, c.GitHubResolutionCache, c.GithubInstallation, c.Group,
-		c.GroupMembership, c.HarnessConfig, c.HubSetting, c.IntegrationConfig,
-		c.IntegrationUpdate, c.InviteCode, c.LaunchReaperState, c.LifecycleHook,
-		c.LifecycleHookAgentPhase, c.LimitDefinition, c.MaintenanceOperation,
-		c.MaintenanceOperationRun, c.MembershipLossCheck, c.Message,
-		c.MessageAddressee, c.MutationAudit, c.NonceCache, c.Notification,
-		c.NotificationSubscription, c.PolicyBinding, c.Project, c.ProjectContributor,
-		c.ProjectPreStartHook, c.ProjectSyncState, c.RelayInstance, c.RoleBinding,
-		c.RoleDefinition, c.RuntimeBroker, c.Schedule, c.ScheduledEvent, c.Secret,
-		c.Skill, c.SkillInjection, c.SkillRegistry, c.SkillVersion,
-		c.SubscriptionTemplate, c.Template, c.UsageReservation, c.User,
+		c.DelegationAdoption, c.DelegationEdge, c.EntitlementBinding, c.EnvVar,
+		c.ExternalIdentity, c.GCPServiceAccount, c.GitHubResolutionCache,
+		c.GithubInstallation, c.Group, c.GroupMembership, c.HarnessConfig,
+		c.HubSetting, c.IntegrationConfig, c.IntegrationUpdate, c.InviteCode,
+		c.LaunchReaperState, c.LifecycleHook, c.LifecycleHookAgentPhase,
+		c.LimitDefinition, c.MaintenanceOperation, c.MaintenanceOperationRun,
+		c.MembershipLossCheck, c.Message, c.MessageAddressee, c.MutationAudit,
+		c.NonceCache, c.Notification, c.NotificationSubscription, c.PolicyBinding,
+		c.Project, c.ProjectContributor, c.ProjectPreStartHook, c.ProjectSyncState,
+		c.RelayInstance, c.RoleBinding, c.RoleDefinition, c.RuntimeBroker, c.Schedule,
+		c.ScheduledEvent, c.Secret, c.Skill, c.SkillInjection, c.SkillRegistry,
+		c.SkillVersion, c.SubscriptionTemplate, c.Template, c.UsageReservation, c.User,
 		c.UserAccessToken, c.UserTerminalWorkspace,
 	} {
 		n.Use(hooks...)
@@ -640,18 +646,18 @@ func (c *Client) Intercept(interceptors ...Interceptor) {
 		c.BrokerDispatch, c.BrokerJoinToken, c.BrokerSecret, c.BrokerSetting,
 		c.BrokerTargetInventory, c.ChatLinkCode, c.ConduitPrincipalEpoch,
 		c.ConduitSession, c.Conversation, c.ConversationParticipant, c.DecisionAudit,
-		c.DelegationEdge, c.EntitlementBinding, c.EnvVar, c.ExternalIdentity,
-		c.GCPServiceAccount, c.GitHubResolutionCache, c.GithubInstallation, c.Group,
-		c.GroupMembership, c.HarnessConfig, c.HubSetting, c.IntegrationConfig,
-		c.IntegrationUpdate, c.InviteCode, c.LaunchReaperState, c.LifecycleHook,
-		c.LifecycleHookAgentPhase, c.LimitDefinition, c.MaintenanceOperation,
-		c.MaintenanceOperationRun, c.MembershipLossCheck, c.Message,
-		c.MessageAddressee, c.MutationAudit, c.NonceCache, c.Notification,
-		c.NotificationSubscription, c.PolicyBinding, c.Project, c.ProjectContributor,
-		c.ProjectPreStartHook, c.ProjectSyncState, c.RelayInstance, c.RoleBinding,
-		c.RoleDefinition, c.RuntimeBroker, c.Schedule, c.ScheduledEvent, c.Secret,
-		c.Skill, c.SkillInjection, c.SkillRegistry, c.SkillVersion,
-		c.SubscriptionTemplate, c.Template, c.UsageReservation, c.User,
+		c.DelegationAdoption, c.DelegationEdge, c.EntitlementBinding, c.EnvVar,
+		c.ExternalIdentity, c.GCPServiceAccount, c.GitHubResolutionCache,
+		c.GithubInstallation, c.Group, c.GroupMembership, c.HarnessConfig,
+		c.HubSetting, c.IntegrationConfig, c.IntegrationUpdate, c.InviteCode,
+		c.LaunchReaperState, c.LifecycleHook, c.LifecycleHookAgentPhase,
+		c.LimitDefinition, c.MaintenanceOperation, c.MaintenanceOperationRun,
+		c.MembershipLossCheck, c.Message, c.MessageAddressee, c.MutationAudit,
+		c.NonceCache, c.Notification, c.NotificationSubscription, c.PolicyBinding,
+		c.Project, c.ProjectContributor, c.ProjectPreStartHook, c.ProjectSyncState,
+		c.RelayInstance, c.RoleBinding, c.RoleDefinition, c.RuntimeBroker, c.Schedule,
+		c.ScheduledEvent, c.Secret, c.Skill, c.SkillInjection, c.SkillRegistry,
+		c.SkillVersion, c.SubscriptionTemplate, c.Template, c.UsageReservation, c.User,
 		c.UserAccessToken, c.UserTerminalWorkspace,
 	} {
 		n.Intercept(interceptors...)
@@ -707,6 +713,8 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.ConversationParticipant.mutate(ctx, m)
 	case *DecisionAuditMutation:
 		return c.DecisionAudit.mutate(ctx, m)
+	case *DelegationAdoptionMutation:
+		return c.DelegationAdoption.mutate(ctx, m)
 	case *DelegationEdgeMutation:
 		return c.DelegationEdge.mutate(ctx, m)
 	case *EntitlementBindingMutation:
@@ -4010,6 +4018,139 @@ func (c *DecisionAuditClient) mutate(ctx context.Context, m *DecisionAuditMutati
 		return (&DecisionAuditDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
 	default:
 		return nil, fmt.Errorf("ent: unknown DecisionAudit mutation op: %q", m.Op())
+	}
+}
+
+// DelegationAdoptionClient is a client for the DelegationAdoption schema.
+type DelegationAdoptionClient struct {
+	config
+}
+
+// NewDelegationAdoptionClient returns a client for the DelegationAdoption from the given config.
+func NewDelegationAdoptionClient(c config) *DelegationAdoptionClient {
+	return &DelegationAdoptionClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `delegationadoption.Hooks(f(g(h())))`.
+func (c *DelegationAdoptionClient) Use(hooks ...Hook) {
+	c.hooks.DelegationAdoption = append(c.hooks.DelegationAdoption, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `delegationadoption.Intercept(f(g(h())))`.
+func (c *DelegationAdoptionClient) Intercept(interceptors ...Interceptor) {
+	c.inters.DelegationAdoption = append(c.inters.DelegationAdoption, interceptors...)
+}
+
+// Create returns a builder for creating a DelegationAdoption entity.
+func (c *DelegationAdoptionClient) Create() *DelegationAdoptionCreate {
+	mutation := newDelegationAdoptionMutation(c.config, OpCreate)
+	return &DelegationAdoptionCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of DelegationAdoption entities.
+func (c *DelegationAdoptionClient) CreateBulk(builders ...*DelegationAdoptionCreate) *DelegationAdoptionCreateBulk {
+	return &DelegationAdoptionCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *DelegationAdoptionClient) MapCreateBulk(slice any, setFunc func(*DelegationAdoptionCreate, int)) *DelegationAdoptionCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &DelegationAdoptionCreateBulk{err: fmt.Errorf("calling to DelegationAdoptionClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*DelegationAdoptionCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &DelegationAdoptionCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for DelegationAdoption.
+func (c *DelegationAdoptionClient) Update() *DelegationAdoptionUpdate {
+	mutation := newDelegationAdoptionMutation(c.config, OpUpdate)
+	return &DelegationAdoptionUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *DelegationAdoptionClient) UpdateOne(_m *DelegationAdoption) *DelegationAdoptionUpdateOne {
+	mutation := newDelegationAdoptionMutation(c.config, OpUpdateOne, withDelegationAdoption(_m))
+	return &DelegationAdoptionUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *DelegationAdoptionClient) UpdateOneID(id uuid.UUID) *DelegationAdoptionUpdateOne {
+	mutation := newDelegationAdoptionMutation(c.config, OpUpdateOne, withDelegationAdoptionID(id))
+	return &DelegationAdoptionUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for DelegationAdoption.
+func (c *DelegationAdoptionClient) Delete() *DelegationAdoptionDelete {
+	mutation := newDelegationAdoptionMutation(c.config, OpDelete)
+	return &DelegationAdoptionDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *DelegationAdoptionClient) DeleteOne(_m *DelegationAdoption) *DelegationAdoptionDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *DelegationAdoptionClient) DeleteOneID(id uuid.UUID) *DelegationAdoptionDeleteOne {
+	builder := c.Delete().Where(delegationadoption.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &DelegationAdoptionDeleteOne{builder}
+}
+
+// Query returns a query builder for DelegationAdoption.
+func (c *DelegationAdoptionClient) Query() *DelegationAdoptionQuery {
+	return &DelegationAdoptionQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeDelegationAdoption},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a DelegationAdoption entity by its id.
+func (c *DelegationAdoptionClient) Get(ctx context.Context, id uuid.UUID) (*DelegationAdoption, error) {
+	return c.Query().Where(delegationadoption.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *DelegationAdoptionClient) GetX(ctx context.Context, id uuid.UUID) *DelegationAdoption {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *DelegationAdoptionClient) Hooks() []Hook {
+	return c.hooks.DelegationAdoption
+}
+
+// Interceptors returns the client interceptors.
+func (c *DelegationAdoptionClient) Interceptors() []Interceptor {
+	return c.inters.DelegationAdoption
+}
+
+func (c *DelegationAdoptionClient) mutate(ctx context.Context, m *DelegationAdoptionMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&DelegationAdoptionCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&DelegationAdoptionUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&DelegationAdoptionUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&DelegationAdoptionDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown DelegationAdoption mutation op: %q", m.Op())
 	}
 }
 
@@ -10970,9 +11111,9 @@ type (
 		AgentSessionMetrics, AllowListEntry, ApiKey, BrokerDispatch, BrokerJoinToken,
 		BrokerSecret, BrokerSetting, BrokerTargetInventory, ChatLinkCode,
 		ConduitPrincipalEpoch, ConduitSession, Conversation, ConversationParticipant,
-		DecisionAudit, DelegationEdge, EntitlementBinding, EnvVar, ExternalIdentity,
-		GCPServiceAccount, GitHubResolutionCache, GithubInstallation, Group,
-		GroupMembership, HarnessConfig, HubSetting, IntegrationConfig,
+		DecisionAudit, DelegationAdoption, DelegationEdge, EntitlementBinding, EnvVar,
+		ExternalIdentity, GCPServiceAccount, GitHubResolutionCache, GithubInstallation,
+		Group, GroupMembership, HarnessConfig, HubSetting, IntegrationConfig,
 		IntegrationUpdate, InviteCode, LaunchReaperState, LifecycleHook,
 		LifecycleHookAgentPhase, LimitDefinition, MaintenanceOperation,
 		MaintenanceOperationRun, MembershipLossCheck, Message, MessageAddressee,
@@ -10989,9 +11130,9 @@ type (
 		AgentSessionMetrics, AllowListEntry, ApiKey, BrokerDispatch, BrokerJoinToken,
 		BrokerSecret, BrokerSetting, BrokerTargetInventory, ChatLinkCode,
 		ConduitPrincipalEpoch, ConduitSession, Conversation, ConversationParticipant,
-		DecisionAudit, DelegationEdge, EntitlementBinding, EnvVar, ExternalIdentity,
-		GCPServiceAccount, GitHubResolutionCache, GithubInstallation, Group,
-		GroupMembership, HarnessConfig, HubSetting, IntegrationConfig,
+		DecisionAudit, DelegationAdoption, DelegationEdge, EntitlementBinding, EnvVar,
+		ExternalIdentity, GCPServiceAccount, GitHubResolutionCache, GithubInstallation,
+		Group, GroupMembership, HarnessConfig, HubSetting, IntegrationConfig,
 		IntegrationUpdate, InviteCode, LaunchReaperState, LifecycleHook,
 		LifecycleHookAgentPhase, LimitDefinition, MaintenanceOperation,
 		MaintenanceOperationRun, MembershipLossCheck, Message, MessageAddressee,

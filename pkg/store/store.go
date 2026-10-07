@@ -260,6 +260,9 @@ type Store interface {
 	// Delegation Edge operations (Permissions Foundation Phase 1G)
 	DelegationEdgeStore
 
+	// Delegation-provenance adoption records
+	DelegationAdoptionStore
+
 	// Agent Hold operations
 	AgentHoldStore
 
@@ -2937,6 +2940,27 @@ type DelegationEdgeStore interface {
 	// reactivate. It writes nothing.
 	GetDeactivatedDelegationEdgesForDelegate(ctx context.Context, delegateType, delegateID string, cause EdgeDeactivationCause, opID string) ([]*DelegationEdge, error)
 
+	// GetDelegationEdge returns one edge by ID, active or not.
+	// Returns ErrNotFound if the edge doesn't exist.
+	GetDelegationEdge(ctx context.Context, edgeID string) (*DelegationEdge, error)
+
+	// ListAllDelegationEdgesForDelegate returns every edge, active or not,
+	// where the given principal is the delegate, oldest first.
+	ListAllDelegationEdgesForDelegate(ctx context.Context, delegateType, delegateID string) ([]*DelegationEdge, error)
+
+	// DeactivateDelegationEdgeGuarded deactivates edgeID with cause and
+	// opID only when it is active and satisfies guard. It reports false,
+	// with no write, when the precondition does not hold; ErrNotFound when
+	// the edge does not exist.
+	DeactivateDelegationEdgeGuarded(ctx context.Context, edgeID string, guard DelegationEdgeDeactivateGuard, cause EdgeDeactivationCause, opID string) (bool, error)
+
+	// ReactivateDelegationEdge reactivates edgeID and clears its
+	// deactivation record. It requires the edge to be inactive with
+	// deactivation cause expectCause, and no other active edge for the
+	// same delegate and scope; otherwise it returns ErrRevisionConflict
+	// with no write. ErrNotFound when the edge does not exist.
+	ReactivateDelegationEdge(ctx context.Context, edgeID string, expectCause EdgeDeactivationCause) error
+
 	// ListDelegationDescendants returns the agents reachable from the root
 	// principal (q.RootType, q.RootID) inside q.ProjectID, breadth-first.
 	// It follows delegation edges with delegate type agent and scope
@@ -2974,6 +2998,23 @@ type DelegationEdgeStore interface {
 	//
 	// Read-only; writes nothing.
 	ListDelegationDescendants(ctx context.Context, q DescendantQuery) (DescendantResult, error)
+}
+
+// DelegationAdoptionStore persists delegation-provenance adoption records.
+type DelegationAdoptionStore interface {
+	// CreateDelegationAdoption inserts a record. ID is generated when empty.
+	CreateDelegationAdoption(ctx context.Context, rec *DelegationAdoption) error
+
+	// UpdateDelegationAdoption writes the mutable fields of rec (status,
+	// reason, edge IDs, after summary, actor) by ID.
+	UpdateDelegationAdoption(ctx context.Context, rec *DelegationAdoption) error
+
+	// GetDelegationAdoption returns a record by ID, or ErrNotFound.
+	GetDelegationAdoption(ctx context.Context, id string) (*DelegationAdoption, error)
+
+	// ListDelegationAdoptions returns matching records ordered by depth,
+	// then creation, and the total match count.
+	ListDelegationAdoptions(ctx context.Context, filter DelegationAdoptionFilter) ([]*DelegationAdoption, int, error)
 }
 
 // =============================================================================
