@@ -194,7 +194,7 @@ func (s *artifactService) Publish(ctx context.Context, req *PublishArtifactReque
 	if req.SHA256 != "" {
 		httpReq.Header.Set("X-Content-SHA256", req.SHA256)
 	}
-	resp, err := s.c.transport.DoNoRetry(ctx, httpReq)
+	resp, err := s.longTransport().DoNoRetry(ctx, httpReq)
 	if err != nil {
 		return nil, err
 	}
@@ -224,7 +224,7 @@ func (s *artifactService) OpenFile(ctx context.Context, id string, seq int, file
 	if err != nil {
 		return nil, fmt.Errorf("create file request: %w", err)
 	}
-	resp, err := s.c.transport.DoNoRetry(ctx, req)
+	resp, err := s.longTransport().DoNoRetry(ctx, req)
 	if err != nil {
 		return nil, err
 	}
@@ -250,7 +250,8 @@ func (s *artifactService) fetchObject(ctx context.Context, signedURL string) (io
 	}
 	hc := s.objectClient
 	if hc == nil {
-		hc = &http.Client{Timeout: 10 * time.Minute}
+		// No whole-exchange timeout: the caller's context bounds it.
+		hc = &http.Client{}
 	}
 	resp, err := hc.Do(req)
 	if err != nil {
@@ -265,6 +266,24 @@ func (s *artifactService) fetchObject(ctx context.Context, signedURL string) (io
 
 func artifactPath(id string) string { return "/api/v1/artifacts/" + url.PathEscape(id) }
 
+// longTransport is the client's transport without its whole-exchange
+// timeout. Publishing, uploading, finalizing and reading file bytes can
+// legitimately take longer than that timeout (large files, or the hub
+// fetching a markdown entry's remote images before it answers), so these
+// calls are bounded by the caller's context instead. A publish that timed
+// out on the client while the hub completed it would invite a retry that
+// creates a second artifact or version.
+func (s *artifactService) longTransport() *apiclient.Transport {
+	t := *s.c.transport
+	hc := http.Client{}
+	if t.HTTPClient != nil {
+		hc = *t.HTTPClient
+	}
+	hc.Timeout = 0
+	t.HTTPClient = &hc
+	return &t
+}
+
 // CreateVersion implements ArtifactService. It is sent once, never retried,
 // because a replay would start a second version.
 func (s *artifactService) CreateVersion(ctx context.Context, id string, req *CreateVersionRequest) (*PendingVersionResponse, error) {
@@ -272,7 +291,7 @@ func (s *artifactService) CreateVersion(ctx context.Context, id string, req *Cre
 	if id != "" {
 		p = artifactPath(id) + "/versions"
 	}
-	resp, err := s.c.transport.PostNoRetry(ctx, p, req, nil)
+	resp, err := s.longTransport().PostNoRetry(ctx, p, req, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -291,7 +310,7 @@ func (s *artifactService) UploadFile(ctx context.Context, id string, seq int, fi
 	if sha256 != "" {
 		req.Header.Set("X-Content-SHA256", sha256)
 	}
-	resp, err := s.c.transport.DoNoRetry(ctx, req)
+	resp, err := s.longTransport().DoNoRetry(ctx, req)
 	if err != nil {
 		return err
 	}
@@ -300,7 +319,7 @@ func (s *artifactService) UploadFile(ctx context.Context, id string, seq int, fi
 
 // FinalizeVersion implements ArtifactService.
 func (s *artifactService) FinalizeVersion(ctx context.Context, id string, seq int) (*ArtifactResponse, error) {
-	resp, err := s.c.transport.PostNoRetry(ctx, artifactPath(id)+"/versions/"+strconv.Itoa(seq)+"/finalize", nil, nil)
+	resp, err := s.longTransport().PostNoRetry(ctx, artifactPath(id)+"/versions/"+strconv.Itoa(seq)+"/finalize", nil, nil)
 	if err != nil {
 		return nil, err
 	}
