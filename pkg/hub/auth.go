@@ -117,6 +117,9 @@ type AuthConfig struct {
 	// server.go's New) so the two cannot diverge. Empty when no transport
 	// service account is configured, which leaves the check inert.
 	PlatformAuthSA string
+	// AgentRunScope checks the run an agent token was issued for. Nil when
+	// server.auth.agent_run_scope is off: the check is then not run.
+	AgentRunScope *agentRunScopeChecker
 }
 
 // tokenType represents the type of authentication token.
@@ -263,8 +266,10 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 						// Step 1a: Agent-token authentication requires a successful
 						// credential-status evaluation (Phase 1H). See
 						// evaluateAgentCredentialStatus for the possible outcomes.
+						var credState agentTokenCredentialState
 						if cfg.CredentialStore != nil && claims.ID != "" {
 							cred, isLegacy, credErr := evaluateAgentCredentialStatus(ctx, cfg.CredentialStore, claims.ID)
+							credState.evaluated = true
 							switch {
 							case errors.Is(credErr, errAgentCredentialRevoked):
 								writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
@@ -290,12 +295,27 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 								ctx = context.WithValue(ctx, legacyTokenContextKey{}, true)
 							default:
 								// Credential found and active.
+								credState.cred = cred
 								ctx = context.WithValue(ctx, agentCredentialIDContextKey{}, cred.ID)
 								// Update last_seen_at (fire-and-forget)
 								go func() {
 									_ = cfg.CredentialStore.UpdateAgentCredentialLastSeen(
 										context.Background(), cred.ID, time.Now())
 								}()
+							}
+						}
+
+						// Step 1b: the token's run, only when
+						// server.auth.agent_run_scope is not off.
+						if rs := cfg.AgentRunScope; rs != nil {
+							switch rs.check(ctx, claims, credState, r.Header.Get(AgentRunIDHeader), runScopeSourceHTTP) {
+							case runScopeDeny:
+								writeAgentTokenRefused(w)
+								return
+							case runScopeUnavailable:
+								writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
+									"unable to verify credential status", nil)
+								return
 							}
 						}
 

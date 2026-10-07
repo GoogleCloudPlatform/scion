@@ -1420,6 +1420,21 @@
           "default": "member",
           "x-env-var": "SCION_SERVER_AUTH_DEFAULTUSERROLE",
           "x-since": "1"
+        },
+        "agent_run_scope": {
+          "type": "string",
+          "description": "How the hub treats the run an agent token was issued for: 'off' (default) or 'observe' (log and count only).",
+          "enum": ["off", "observe"],
+          "default": "off",
+          "x-env-var": "SCION_SERVER_AUTH_AGENTRUNSCOPE",
+          "x-since": "1"
+        },
+        "agent_run_scope_legacy_until": {
+          "type": "string",
+          "description": "RFC 3339 time after which agent tokens issued without a run are no longer accepted by run-scope checks. Empty means no cut-off.",
+          "format": "date-time",
+          "x-env-var": "SCION_SERVER_AUTH_AGENTRUNSCOPELEGACYUNTIL",
+          "x-since": "1"
         }
       }
     },

@@ -1523,18 +1523,24 @@ type V1DatabaseConfig struct {
 type V1AuthConfig struct {
 	// Mode selects the exclusive human auth mode: "oauth" (default), "proxy", or "dev".
 	// In proxy mode, OAuth handlers are disabled; in dev mode, dev token auth is used.
-	Mode              string             `json:"mode,omitempty" yaml:"mode,omitempty" koanf:"mode"`
-	DevMode           bool               `json:"dev_mode,omitempty" yaml:"dev_mode,omitempty" koanf:"dev_mode"`
-	DevToken          string             `json:"dev_token,omitempty" yaml:"dev_token,omitempty" koanf:"dev_token"`
-	DevTokenFile      string             `json:"dev_token_file,omitempty" yaml:"dev_token_file,omitempty" koanf:"dev_token_file"`
-	AuthorizedDomains []string           `json:"authorized_domains,omitempty" yaml:"authorized_domains,omitempty" koanf:"authorized_domains"`
-	UserAccessMode    string             `json:"user_access_mode,omitempty" yaml:"user_access_mode,omitempty" koanf:"user_access_mode"`
-	DefaultUserRole   string             `json:"default_user_role,omitempty" yaml:"default_user_role,omitempty" koanf:"default_user_role"`
-	Proxy             *V1ProxyConfig     `json:"proxy,omitempty" yaml:"proxy,omitempty" koanf:"proxy"`
-	Transport         *V1TransportConfig `json:"transport,omitempty" yaml:"transport,omitempty" koanf:"transport"`
-	Username          string             `json:"username,omitempty" yaml:"username,omitempty" koanf:"username"`
-	DisplayName       string             `json:"display_name,omitempty" yaml:"display_name,omitempty" koanf:"display_name"`
-	Email             string             `json:"email,omitempty" yaml:"email,omitempty" koanf:"email"`
+	Mode              string   `json:"mode,omitempty" yaml:"mode,omitempty" koanf:"mode"`
+	DevMode           bool     `json:"dev_mode,omitempty" yaml:"dev_mode,omitempty" koanf:"dev_mode"`
+	DevToken          string   `json:"dev_token,omitempty" yaml:"dev_token,omitempty" koanf:"dev_token"`
+	DevTokenFile      string   `json:"dev_token_file,omitempty" yaml:"dev_token_file,omitempty" koanf:"dev_token_file"`
+	AuthorizedDomains []string `json:"authorized_domains,omitempty" yaml:"authorized_domains,omitempty" koanf:"authorized_domains"`
+	UserAccessMode    string   `json:"user_access_mode,omitempty" yaml:"user_access_mode,omitempty" koanf:"user_access_mode"`
+	DefaultUserRole   string   `json:"default_user_role,omitempty" yaml:"default_user_role,omitempty" koanf:"default_user_role"`
+	// AgentRunScope selects how the hub treats the run an agent token was
+	// issued for: "off" (default) or "observe".
+	AgentRunScope string `json:"agent_run_scope,omitempty" yaml:"agent_run_scope,omitempty" koanf:"agent_run_scope"`
+	// AgentRunScopeLegacyUntil (RFC 3339) is when tokens issued without a
+	// run stop being accepted by run-scope checks.
+	AgentRunScopeLegacyUntil string             `json:"agent_run_scope_legacy_until,omitempty" yaml:"agent_run_scope_legacy_until,omitempty" koanf:"agent_run_scope_legacy_until"`
+	Proxy                    *V1ProxyConfig     `json:"proxy,omitempty" yaml:"proxy,omitempty" koanf:"proxy"`
+	Transport                *V1TransportConfig `json:"transport,omitempty" yaml:"transport,omitempty" koanf:"transport"`
+	Username                 string             `json:"username,omitempty" yaml:"username,omitempty" koanf:"username"`
+	DisplayName              string             `json:"display_name,omitempty" yaml:"display_name,omitempty" koanf:"display_name"`
+	Email                    string             `json:"email,omitempty" yaml:"email,omitempty" koanf:"email"`
 }
 
 // V1TransportConfig holds transport-layer auth settings for agent outbound requests.
@@ -3323,6 +3329,8 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 				}
 			}
 		}
+		gc.Auth.AgentRunScope = v1.Auth.AgentRunScope
+		gc.Auth.AgentRunScopeLegacyUntil = v1.Auth.AgentRunScopeLegacyUntil
 		if v1.Auth.Transport != nil {
 			gc.Auth.Transport = &TransportAuthConfig{
 				Mode:           v1.Auth.Transport.Mode,
@@ -3638,6 +3646,8 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 			}
 		}
 	}
+	v1.Auth.AgentRunScope = gc.Auth.AgentRunScope
+	v1.Auth.AgentRunScopeLegacyUntil = gc.Auth.AgentRunScopeLegacyUntil
 	if gc.Auth.Transport != nil {
 		v1.Auth.Transport = &V1TransportConfig{
 			Mode:           gc.Auth.Transport.Mode,

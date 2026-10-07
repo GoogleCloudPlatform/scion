@@ -154,6 +154,9 @@ type ServerConfig struct {
 	// DefaultUserRole is the role assigned to new users who are not in the
 	// admin_emails list. Values: "member" (default), "viewer".
 	DefaultUserRole string
+	// AgentRunScope is server.auth.agent_run_scope (ParseAgentRunScope);
+	// the zero value is off.
+	AgentRunScope AgentRunScope
 	// BrokerAuthConfig holds configuration for Runtime Broker HMAC authentication.
 	BrokerAuthConfig BrokerAuthConfig
 	// HubEndpoint is the public endpoint URL for this Hub (used in broker join responses).
@@ -2358,6 +2361,10 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 		// not cfg.PlatformAuthSA directly, so this and Server.platformAuthSA
 		// can never diverge.
 		PlatformAuthSA: srv.platformAuthSA,
+		AgentRunScope:  newAgentRunScopeChecker(cfg.AgentRunScope, s, srv.authLog),
+	}
+	if srv.authConfig.AgentRunScope != nil {
+		slog.Info("Agent token run scope enabled", "mode", cfg.AgentRunScope.String())
 	}
 	// Wire the proxy user provisioner (wraps provisionUser with 60s cache)
 	if cfg.ProxyAuth != nil {
@@ -3510,6 +3517,15 @@ func (s *Server) DeferDecisionAuditClose() {
 func (s *Server) CloseDecisionAudit(ctx context.Context) {
 	if s.decisionAuditWriter != nil {
 		s.decisionAuditWriter.Close(ctx)
+	}
+}
+
+// SetAgentRunScopeMetrics wires the agent token run-scope counter. It does
+// nothing when server.auth.agent_run_scope is off.
+func (s *Server) SetAgentRunScopeMetrics(m *OTelAgentRunScopeMetrics) {
+	if c := s.authConfig.AgentRunScope; c != nil && m != nil {
+		var r agentRunScopeMetrics = m
+		c.metrics.Store(&r)
 	}
 }
 
