@@ -156,6 +156,20 @@ describe('scion-chat-message artifact references', () => {
     expect(previewTarget(el)).toEqual({ kind: 'artifact', id: A, seq: 2, name: 'Artifact' });
   });
 
+  it('keeps a middle-click on an artifact link from opening a tab', async () => {
+    const el = await mount(`read scion://artifact/${A}`);
+    const link = el.shadowRoot?.querySelector<HTMLAnchorElement>('a.artifact-link');
+    const aux = new MouseEvent('auxclick', {
+      bubbles: true,
+      composed: true,
+      cancelable: true,
+      button: 1,
+    });
+    link?.dispatchEvent(aux);
+    expect(aux.defaultPrevented).toBe(true);
+    expect(previewTarget(el)).toBeNull();
+  });
+
   it('leaves references inside code and malformed references as text', async () => {
     const el = await mount(`\`scion://artifact/${A}\` and scion://artifact/not-a-uuid`);
     expect(el.shadowRoot?.querySelectorAll('a.artifact-link')).toHaveLength(0);
