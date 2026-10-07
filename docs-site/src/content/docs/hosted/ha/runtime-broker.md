@@ -171,7 +171,7 @@ Viewer-role users could previously register brokers; they now receive a 403. The
 
 ## Broker Ownership
 
-The user who registers a broker becomes its owner. Re-registering an existing broker and rotating its HMAC secret are ownership-gated actions. This includes the embedded broker's registration path. These actions are allowed only for the broker's owner, the broker itself (authenticated via HMAC, and only for its own secret), or a system super-admin. The owner and super-admin shortcuts apply only to an unscoped sign-in: a scoped [user access token](/scion/hosted/user/personal-access-tokens/) never satisfies them, even if it belongs to the owner or a super-admin. Brokers registered before ownership was recorded get an owner assigned automatically when the Hub boots.
+The user who registers a Runtime Broker becomes its owner. Re-registering an existing Runtime Broker and rotating its HMAC secret are ownership-gated actions. This includes the embedded Runtime Broker's registration path. These actions are allowed only for the Runtime Broker's owner, the Runtime Broker itself (authenticated via HMAC, and only for its own secret), or a system super-admin. The owner and super-admin shortcuts apply only to an unscoped sign-in: a scoped [user access token](/scion/hosted/user/personal-access-tokens/) never satisfies them, even if it belongs to the owner or a super-admin. Runtime Brokers registered before ownership was recorded get an owner assigned automatically when the Hub boots.
 
 ## Broker Health Monitoring
 
