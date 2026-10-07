@@ -315,7 +315,7 @@ func TestBrokerAuthEvent_ActorIsEmittedAsAPair(t *testing.T) {
 	logger := NewLogAuditLogger("[Test]", false)
 
 	LogRegistrationEvent(context.Background(), logger,
-		"broker-1", "broker-name", "user-9", "203.0.113.7")
+		"broker-1", "broker-name", "user-9", "203.0.113.7", nil)
 
 	rec := auditRecordWithMsg(t, buf, "Broker auth audit event")
 	if rec == nil {

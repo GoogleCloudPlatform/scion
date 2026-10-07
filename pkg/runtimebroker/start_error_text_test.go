@@ -365,6 +365,10 @@ func TestRunLaunch_LaunchMarkerWriteFailure_FixedText(t *testing.T) {
 // default template's name when the caller named none, and the fixed
 // sentinel text only when nothing names the resource.
 func TestNotFoundResourceText(t *testing.T) {
+	// A HOME of its own: an earlier test's create can seed the default
+	// template into the package-wide test HOME (TestMain), and this lookup
+	// needs it to be absent.
+	t.Setenv("HOME", t.TempDir())
 	// The caller named no template, so resolution looked up "default";
 	// that is the name the real lookup records on its error.
 	_, defaultErr := config.FindTemplateInProjectPath("default", t.TempDir())

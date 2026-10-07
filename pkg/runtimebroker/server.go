@@ -47,6 +47,7 @@ import (
 	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/templatecache"
+	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth/adcsource"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
@@ -74,6 +75,12 @@ type ServerConfig struct {
 	// into agent containers. Used for local development where containers
 	// need a bridge address (e.g. host.containers.internal) instead of localhost.
 	ContainerHubEndpoint string
+	// ColocatedPublicHubEndpoint is the co-located hub's public URL when this
+	// host does not serve it, so containers cannot reach it (e.g. a Cloud Run
+	// URL derived from the IAP audience on a single-node VM). An agent hub
+	// endpoint equal to it is replaced by ContainerHubEndpoint, except on
+	// Kubernetes runtimes. Empty disables the rewrite.
+	ColocatedPublicHubEndpoint string
 	// HubListenPort is the port the co-located hub HTTP server is listening
 	// on (e.g. 8080 for the combined web+API server). Used by cloudrun-sandbox
 	// to construct the link-local hub endpoint for sandboxes. Zero means the
@@ -230,6 +237,15 @@ type Server struct {
 	// bootstrap when set (see SetWorkspaceDownloader).
 	workspaceDownload func(ctx context.Context, bucket, prefix, localPath string) error
 	version           string
+
+	// Workspace transfer and project delete steps, like workspaceDownload:
+	// each replaces its real implementation when set (see the setters in
+	// workspace_handlers.go), per Server, so tests can fake one without
+	// racing parallel tests. Guarded by mu.
+	workspaceUpload      func(ctx context.Context, localPath, bucket, prefix string) error
+	manifestUpload       func(ctx context.Context, bucket, storagePath string, manifest *transfer.Manifest) error
+	projectWorkspaceStat func(path string) (os.FileInfo, error)
+	projectPathAbs       func(path string) (string, error)
 
 	// Hub connections (replaces single hubClient, heartbeat, controlChannel, etc.)
 	hubConnections map[string]*HubConnection // keyed by connection name

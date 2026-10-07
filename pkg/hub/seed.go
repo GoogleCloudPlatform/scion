@@ -124,7 +124,7 @@ func BuiltInRoles() []BuiltInRole {
 			Name:        store.SystemRoleHubMember,
 			Description: "Hub member with read access to directory resources and project creation",
 			ScopeType:   store.RoleScopeSystem,
-			Revision:    3, // R3: add broker.create (ptone/scion#2138) — explicit hub-member grant for broker registration
+			Revision:    4, // R4: self-scoped inbox.read, inbox.write, user_skill_injection.update; R3: add broker.create (ptone/scion#2138)
 			Permissions: hubMemberPermissionIDs(),
 		},
 		{
@@ -240,6 +240,12 @@ func hubMemberPermissionIDs() []string {
 		"hub.settings.read",
 		// Project creation — hub members may create projects
 		"project.create",
+		// Self-scoped permissions: each acts only on the holder's own
+		// records (permissions.IsSelfPermission), so a system-scope grant
+		// reaches no other user's or project's records.
+		"inbox.read",
+		"inbox.write",
+		"user_skill_injection.update",
 	}
 }
 
