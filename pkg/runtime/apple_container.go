@@ -342,7 +342,10 @@ func (r *AppleContainerRuntime) Exec(ctx context.Context, id string, cmd []strin
 		id = resolveContainerID(agents, id)
 	}
 	args := append([]string{"exec", "--user", "scion", id}, cmd...)
-	return runSimpleCommand(ctx, r.Command, args...)
+	out, err := runSimpleCommand(ctx, r.Command, args...)
+	// A container removed after the lookup above must surface as
+	// ErrContainerNotFound, not as the command's exit (ptone/scion#3655).
+	return out, appleExecNotFound.classifyExecErr(ctx, err, out, id, r.List)
 }
 
 // ExecWithStdin runs cmd inside the container with stdin piped from the

@@ -971,6 +971,81 @@ describe('AgentStore compact rows clear the compact keys they omit', () => {
     expect(find(h.store.peek(HUB), 'a1')).toBe(row);
   });
 
+  it('a walk clears a stale detail message the compact row omits, and takes a new one', async () => {
+    const h = createHarness([agent('a1', { phase: 'running', message: 'Cloning repository' })]);
+    h.store.retain(HUB, () => {});
+    h.feeds[0]?.seedAgents([
+      agent('a1', { harnessConfig: 'claude', message: 'Cloning repository' }),
+    ]);
+    const first = h.store.ensure(HUB);
+    await h.connect();
+    await first;
+    expect(h.feeds[0]?.getAgent('a1')?.message).toBe('Cloning repository');
+    expect(find(h.store.peek(HUB), 'a1')?.message).toBe('Cloning repository');
+
+    // The agent cleared its message: the compact view omits the empty value.
+    h.server.agents = [agent('a1', { phase: 'running' })];
+    h.store.invalidate('manual');
+    await settle();
+
+    expect(h.server.walks()).toBe(2);
+    const row = h.feeds[0]?.getAgent('a1');
+    expect('message' in (row as object)).toBe(false);
+    expect(row?.harnessConfig).toBe('claude');
+    expect(find(h.store.peek(HUB), 'a1')?.message).toBeUndefined();
+
+    h.server.agents = [agent('a1', { phase: 'running', message: 'Waiting for review' })];
+    h.store.invalidate('manual');
+    await settle();
+
+    expect(h.server.walks()).toBe(3);
+    expect(find(h.store.peek(HUB), 'a1')?.message).toBe('Waiting for review');
+  });
+
+  it("a walk drops a status event's nested detail message the compact row omits", async () => {
+    const h = createHarness([agent('a1', { phase: 'running', message: 'Cloning repository' })]);
+    h.store.retain(HUB, () => {});
+    const first = h.store.ensure(HUB);
+    await h.connect();
+    await first;
+    await h.emitAgent('status', {
+      agentId: 'a1',
+      phase: 'running',
+      detail: { message: 'Installing tools', toolName: 'bash' },
+    });
+    expect(find(h.store.peek(HUB), 'a1')?.detail?.message).toBe('Installing tools');
+
+    h.server.agents = [agent('a1', { phase: 'running' })];
+    h.store.invalidate('manual');
+    await settle();
+
+    expect(h.server.walks()).toBe(2);
+    const row = find(h.store.peek(HUB), 'a1');
+    expect(row?.message).toBeUndefined();
+    expect(row?.detail).toEqual({ toolName: 'bash' });
+  });
+
+  it("a walk keeps a status event's detail message that arrives during the walk", async () => {
+    const h = createHarness([agent('a1', { phase: 'running', message: 'Cloning repository' })]);
+    h.store.retain(HUB, () => {});
+    const first = h.store.ensure(HUB);
+    await h.connect();
+    await first;
+
+    h.server.agents = [agent('a1', { phase: 'running' })];
+    const release = h.server.pause();
+    h.store.invalidate('manual');
+    await settle();
+    await h.emitAgent('status', { agentId: 'a1', detail: { message: 'Installing tools' } });
+    release();
+    await settle();
+
+    expect(h.server.walks()).toBe(2);
+    const row = find(h.store.peek(HUB), 'a1');
+    expect(row?.message).toBe('Installing tools');
+    expect(row?.detail?.message).toBe('Installing tools');
+  });
+
   // The harness's compact keys, as the hub list sends them, less `deletion`:
   // the store keeps a held deletion a row lacks (pinned below). The clear
   // cases below come from these, so a key missing from the store's set fails
@@ -996,6 +1071,7 @@ describe('AgentStore compact rows clear the compact keys they omit', () => {
       phase: 'running',
       activity: 'working',
       containerStatus: 'Up 1 minute',
+      message: 'Waiting for review',
       messageMode: 'lineage',
       ancestry: ['root'],
       createdBy: 'u1',

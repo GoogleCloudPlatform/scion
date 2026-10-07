@@ -354,6 +354,11 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	// echo only ever carries validated values. Without sort, nothing here
 	// runs and both short-circuits return the legacy empty list.
 	sorted := isSortedModeRequest(query)
+	if sorted {
+		perfSetEndpoint(ctx, perfEndpointAgentsGlobalSorted)
+	} else {
+		perfSetEndpoint(ctx, perfEndpointAgentsGlobalLegacy)
+	}
 	var sortParam, dirParam string
 	if sorted {
 		var ok bool
@@ -385,7 +390,9 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 
 	// RS2: Resolve authorization scope FIRST — before building filter or cursor
 	// binding. This is the single authoritative scope decision for the request.
+	scopeDone := perfPhaseStart(ctx, perfPhaseListScopeAuthz)
 	scopeResult, err := s.authzService.ResolveListScopes(ctx, identity, "agent.list")
+	scopeDone()
 	if err != nil {
 		slog.WarnContext(ctx, "listAgents: authorization scope resolution failed (fail-closed)",
 			"error", err)
@@ -464,8 +471,10 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 		filter.ExcludedProjectIDs = canonicalizeStringSlice(append([]string{}, scopeResult.ExcludedProjectIDs...))
 	}
 
+	classifyDone := perfPhaseStart(ctx, perfPhaseListScopeAuthz)
 	classification, err := s.resolveProjectListClassification(
 		ctx, identity, query.Get("scope"), query.Get("mine") == "true", scopeResult, "listAgents")
+	classifyDone()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 			"unable to resolve authorization", nil)
@@ -2528,6 +2537,16 @@ func (s *Server) createAgentInProject(
 			if err := syncDispatch(ctx, func(dctx context.Context) error {
 				return dispatcher.DispatchAgentProvision(dctx, agent)
 			}); err != nil {
+				if errors.Is(err, errAgentTokenRecord) {
+					// The agent's token could not be recorded, so it was not
+					// handed to the broker. Fail the create and roll it back,
+					// as a full create does.
+					s.agentLifecycleLog.Warn("Provision-only create failed: agent token not issued",
+						"agent_id", agent.ID, "agent", agent.Name, "broker", agent.RuntimeBrokerID, "error", err)
+					corrID := cleanup(createRollback{Stage: createStageProvision, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(dispatcher, agent)})
+					writeCreateFailure(w, corrID, func() { dispatchCreateErrorResponse(w, err, agent.ID) })
+					return
+				}
 				if isSkillResolutionDispatchError(err) {
 					// A required skill could not be resolved, so the agent
 					// can never start from this provision. Fail the create the
@@ -2992,6 +3011,9 @@ func (s *Server) submitAgentEnv(w http.ResponseWriter, r *http.Request, projectI
 		return
 	}
 	if err != nil {
+		if writeAgentTokenRecordError(w, err) {
+			return
+		}
 		var stillMissing *ErrEnvStillMissing
 		if errors.As(err, &stillMissing) {
 			MissingEnvVars(w, stillMissing.Requirements.Needs,
@@ -3098,6 +3120,7 @@ func (s *Server) enrichAgents(ctx context.Context, agents []store.Agent) {
 	if len(agents) == 0 {
 		return
 	}
+	defer perfPhaseStart(ctx, perfPhaseEnrich)()
 
 	// Collect unique project, broker, and template IDs
 	projectIDs := make(map[string]struct{})
@@ -4545,7 +4568,7 @@ func (s *Server) handleAgentTokenRefresh(w http.ResponseWriter, r *http.Request,
 	// This is critical for backward compatibility: legacy agents created
 	// before the role system have tokens with old scope sets (missing
 	// ScopeProjectRead, etc.). Copying old scopes verbatim on refresh
-	// would perpetuate the gap. GenerateAgentTokenForAgent re-derives the
+	// would perpetuate the gap. AuthorizeAgentToken re-derives the
 	// scopes from the stored role and bounds them by the agent's chain
 	// ceiling, with the stored ancestry.
 	agent, err := s.store.GetAgent(r.Context(), id)
@@ -4571,13 +4594,20 @@ func (s *Server) handleAgentTokenRefresh(w http.ResponseWriter, r *http.Request,
 		}
 	}
 
-	newToken, err := mintAgentTokenAt(r.Context(), s, s.store, agent, mintSiteRefresh)
+	// The refreshed token keeps the run binding of the presented one: a
+	// token issued without a run stays without one.
+	grant, err := authorizeAgentTokenAt(r.Context(), s, s.store, agent, mintSiteRefresh)
+	var newToken string
+	if err == nil {
+		newToken, err = signAndRecordAgentToken(r.Context(), s, s.store, *grant, presentedAgentTokenRunID(r.Context()))
+	}
 	if err != nil {
 		if writeAgentTokenIssueError(w, err) {
 			return
 		}
+		slog.Error("Token refresh: token not issued", "agent_id", id, "error", err)
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
-			"failed to generate refreshed token: "+err.Error(), nil)
+			"failed to generate refreshed token", nil)
 		return
 	}
 
@@ -4680,6 +4710,9 @@ func (s *Server) handleAgentResetAuth(w http.ResponseWriter, r *http.Request, id
 
 	if err := disp.DispatchAgentResetAuth(ctx, agent); err != nil {
 		slog.Error("Failed to reset agent auth", "agent_id", id, "error", err)
+		if writeAgentTokenRecordError(w, err) {
+			return
+		}
 		if writeBrokerRuntimeUnavailable(w, err, agent.Runtime) {
 			return
 		}
@@ -4732,6 +4765,9 @@ const workspaceStorageUnconfiguredErrorCode = api.BrokerErrCodeWorkspaceStorageU
 // dispatch's run-ID write (store.ErrDeleteInProgress); that answers 409
 // delete_in_progress, as start does (ptone/scion#2550).
 func dispatchCreateErrorResponse(w http.ResponseWriter, err error, agentID string) {
+	if writeAgentTokenRecordError(w, err) {
+		return
+	}
 	if ref := deleteClaimedDuringDispatch(err, agentID); ref != nil {
 		ref.write(w)
 		return

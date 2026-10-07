@@ -293,9 +293,9 @@ func TestGetFilePaths(t *testing.T) {
 			t.Errorf("%s: %d, want 404", p, rec.Code)
 		}
 	}
-	for _, p := range []string{"", "/files/a%20b.txt", "/versions/1/files/a%20b.txt"} {
+	for p, allow := range map[string]string{"": "GET, HEAD", "/files/a%20b.txt": "GET, HEAD", "/versions/1/files/a%20b.txt": "GET, HEAD, PUT"} {
 		rec := f.do(&agentA, http.MethodDelete, "/api/v1/artifacts/"+id+p, nil, nil)
-		if rec.Code != http.StatusMethodNotAllowed || rec.Header().Get("Allow") != "GET, HEAD" {
+		if rec.Code != http.StatusMethodNotAllowed || rec.Header().Get("Allow") != allow {
 			t.Errorf("DELETE %s: %d Allow=%q", p, rec.Code, rec.Header().Get("Allow"))
 		}
 	}

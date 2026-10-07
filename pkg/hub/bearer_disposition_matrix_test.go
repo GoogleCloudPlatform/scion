@@ -59,6 +59,10 @@ var bearerMatrixExclusions = map[liveInventoryKey]bearerMatrixExclusion{
 		Reason: "the collection list filters each row by harness_config.read instead of refusing the request, so a token without the selector gets 200 with no rows rather than 403; the list gets its own harness_config.list disposition in a later batch",
 		Pin:    "TestScopedAdminListEndpointsFilterCrossProjectRowsAndCountAuthorizedMatches",
 	},
+	{OperationID: "artifact.list", Method: "GET", Pattern: "/api/v1/artifacts"}: {
+		Reason: "the artifact list filters each row by the artifact.read check instead of refusing the request, so a token without the selector, or bounded to another project, gets 200 with no rows rather than 403 or 404 (no existence oracle)",
+		Pin:    "TestArtifactsListUserAccessTokensAreBounded",
+	},
 }
 
 // bearerMatrixEntry is one catalog entry point with a request surface.
