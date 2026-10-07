@@ -88,7 +88,7 @@ func (s *userService) List(ctx context.Context, opts *ListUsersOptions) (*ListUs
 		TotalCount int    `json:"totalCount,omitempty"`
 	}
 
-	result, err := apiclient.DecodeResponse[listResponse](resp)
+	result, err := apiclient.DecodeRequired[listResponse](resp)
 	if err != nil {
 		return nil, err
 	}
@@ -108,7 +108,7 @@ func (s *userService) Get(ctx context.Context, userID string) (*User, error) {
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[User](resp)
+	return apiclient.DecodeRequired[User](resp)
 }
 
 // Update updates a user.
@@ -117,7 +117,7 @@ func (s *userService) Update(ctx context.Context, userID string, req *UpdateUser
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[User](resp)
+	return apiclient.DecodeRequired[User](resp)
 }
 
 // ProvisionUserRequest is the request for POST /api/v1/users. There is no
@@ -179,7 +179,7 @@ func (s *userService) Provision(ctx context.Context, req *ProvisionUserRequest) 
 	if err != nil {
 		return nil, err
 	}
-	out, err := apiclient.DecodeResponse[ProvisionUserResponse](resp)
+	out, err := apiclient.DecodeRequired[ProvisionUserResponse](resp)
 	if err != nil {
 		var apiErr *apiclient.APIError
 		if errors.As(err, &apiErr) && (apiErr.StatusCode == http.StatusConflict || apiErr.StatusCode == http.StatusUnprocessableEntity) {

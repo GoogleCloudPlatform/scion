@@ -28,8 +28,7 @@ import (
 // for testing wave-2 features. The caller should close the returned *sql.DB.
 func newTestWebChatStoreV2(t *testing.T) (WebChatStore, *sql.DB) {
 	t.Helper()
-	db, err := sql.Open("sqlite3", ":memory:")
-	require.NoError(t, err)
+	db := openTestMemorySQLite(t, "sqlite3")
 
 	store := NewWebChatStore(db, "sqlite3")
 	require.NoError(t, store.Init())
@@ -658,12 +657,10 @@ func TestWave2_DM_ListEmpty(t *testing.T) {
 // --- Migration: thread_id backfill ---
 
 func TestWave2_Migration_ThreadIDBackfill(t *testing.T) {
-	db, err := sql.Open("sqlite3", ":memory:")
-	require.NoError(t, err)
-	defer db.Close() //nolint:errcheck
+	db := openTestMemorySQLite(t, "sqlite3")
 
 	// Create a minimal messages table.
-	_, err = db.Exec(`
+	_, err := db.Exec(`
 CREATE TABLE messages (
     id TEXT PRIMARY KEY,
     sender TEXT NOT NULL,
@@ -718,12 +715,10 @@ INSERT INTO messages (id, sender, sender_id, recipient, recipient_id, channel, t
 }
 
 func TestWave2_Migration_ThreadIDBackfill_Batching(t *testing.T) {
-	db, err := sql.Open("sqlite3", ":memory:")
-	require.NoError(t, err)
-	defer db.Close() //nolint:errcheck
+	db := openTestMemorySQLite(t, "sqlite3")
 
 	// Create a minimal messages table.
-	_, err = db.Exec(`
+	_, err := db.Exec(`
 CREATE TABLE messages (
     id TEXT PRIMARY KEY,
     sender TEXT NOT NULL,
@@ -771,12 +766,10 @@ CREATE TABLE IF NOT EXISTS webchat_migrations (
 }
 
 func TestWave2_Migration_Idempotent(t *testing.T) {
-	db, err := sql.Open("sqlite3", ":memory:")
-	require.NoError(t, err)
-	defer db.Close() //nolint:errcheck
+	db := openTestMemorySQLite(t, "sqlite3")
 
 	// Create messages table.
-	_, err = db.Exec(`
+	_, err := db.Exec(`
 CREATE TABLE messages (
     id TEXT PRIMARY KEY,
     sender TEXT NOT NULL,
@@ -812,12 +805,10 @@ CREATE TABLE messages (
 // --- Wave-1 seeding ---
 
 func TestWave2_SeedFromWave1(t *testing.T) {
-	db, err := sql.Open("sqlite3", ":memory:")
-	require.NoError(t, err)
-	defer db.Close() //nolint:errcheck
+	db := openTestMemorySQLite(t, "sqlite3")
 
 	// Manually create wave-1 tables and seed them.
-	_, err = db.Exec(`
+	_, err := db.Exec(`
 CREATE TABLE webchat_thread (
     user_id TEXT NOT NULL,
     project_id TEXT NOT NULL,
@@ -875,11 +866,9 @@ INSERT INTO webchat_thread_prefs VALUES ('user-1', 'proj-1', 'agent-1', 'convers
 }
 
 func TestWave2_SeedFromWave1_Idempotent(t *testing.T) {
-	db, err := sql.Open("sqlite3", ":memory:")
-	require.NoError(t, err)
-	defer db.Close() //nolint:errcheck
+	db := openTestMemorySQLite(t, "sqlite3")
 
-	_, err = db.Exec(`
+	_, err := db.Exec(`
 CREATE TABLE webchat_thread (
     user_id TEXT NOT NULL,
     project_id TEXT NOT NULL,

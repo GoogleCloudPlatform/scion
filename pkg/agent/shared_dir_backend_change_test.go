@@ -46,7 +46,10 @@ func TestValidateSharedDirBackendChanges(t *testing.T) {
 		{name: "allow empty alone", allowEmpty: true, gs: gs, dirs: dirs, wantErr: "--allow-empty-shared-dir needs a shared dir backend change"},
 		{name: "unknown dir", changes: map[string]string{"other": "nfs"}, gs: gs, dirs: dirs, wantErr: `shared dir "other" is not one of the agent's shared dirs (notes, gocache)`},
 		{name: "no dirs", changes: map[string]string{"notes": "nfs"}, gs: gs, wantErr: "it has none"},
-		{name: "to local", changes: map[string]string{"notes": "local"}, gs: gs, dirs: dirs, wantErr: "only a change to the nfs backend is supported"},
+		{name: "to local", changes: map[string]string{"notes": "local"}, gs: gs, dirs: dirs},
+		{name: "to local without an nfs block", changes: map[string]string{"notes": "local"}, gs: noBlock, dirs: dirs},
+		{name: "mixed without an nfs block", changes: map[string]string{"notes": "local", "gocache": "nfs"}, gs: noBlock, dirs: dirs, wantErr: "needs a complete server.shared_dir_storage.nfs block"},
+		{name: "unknown backend", changes: map[string]string{"notes": "gcs"}, gs: gs, dirs: dirs, wantErr: "only a change to the nfs or local backend is supported"},
 		{name: "invalid name", changes: map[string]string{"../x": "nfs"}, gs: gs, dirs: dirs, wantErr: "invalid shared dir name"},
 		{name: "no nfs block", changes: map[string]string{"notes": "nfs"}, gs: noBlock, dirs: dirs, wantErr: "needs a complete server.shared_dir_storage.nfs block"},
 		{name: "no settings", changes: map[string]string{"notes": "nfs"}, dirs: dirs, wantErr: "needs a complete server.shared_dir_storage.nfs block"},
@@ -134,8 +137,13 @@ func TestLoadSharedDirStorageRecord_Previous(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, map[string]string{"notes": "local"}, rec.Previous)
 
+	writeRawSharedDirRecord(t, dir, `{"backend":"local","previous":{"notes":"nfs"}}`)
+	rec, err = loadSharedDirStorageRecord(dir)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"notes": "nfs"}, rec.Previous)
+
 	for _, content := range []string{
-		`{"backend":"local","previous":{"notes":"nfs"}}`,
+		`{"backend":"local","previous":{"notes":"gcs"}}`,
 		`{"backend":"local","previous":{"../x":"local"}}`,
 	} {
 		writeRawSharedDirRecord(t, dir, content)
@@ -185,7 +193,14 @@ func writeFileIn(t *testing.T, dir, name string) {
 }
 
 func (c checkFixture) check(runtimeName string) ([]string, error) {
-	return checkChangedSharedDirs(c.rec, c.dirs, c.res, c.volumes, c.projectDir, runtimeName)
+	passed, deferred, err := checkChangedSharedDirs(context.Background(), sharedDirCheckInput{
+		rec: c.rec, dirs: c.dirs, realization: c.res, volumes: c.volumes,
+		projectDir: c.projectDir, runtimeName: runtimeName,
+	})
+	if len(deferred) > 0 {
+		return nil, fmt.Errorf("unexpected deferred dirs %v", deferred)
+	}
+	return passed, err
 }
 
 func TestCheckChangedSharedDirs_EmptyNFSWithLocalDataRefused(t *testing.T) {
@@ -379,8 +394,8 @@ func TestSharedDirBackendChange_RefusalsLeaveRecord(t *testing.T) {
 	require.NoError(t, err)
 
 	for name, change := range map[string]map[string]string{
-		"unknown dir": {"other": "nfs"},
-		"to local":    {"notes": "local"},
+		"unknown dir":     {"other": "nfs"},
+		"unknown backend": {"notes": "gcs"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := NewManager(newSDSMockRuntime("docker", &sdsCapture{})).Reprovision(context.Background(), api.StartOptions{

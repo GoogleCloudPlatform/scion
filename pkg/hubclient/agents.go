@@ -421,7 +421,7 @@ func (s *agentService) List(ctx context.Context, opts *ListAgentsOptions) (*List
 		ServerTime time.Time `json:"serverTime"`
 	}
 
-	result, err := apiclient.DecodeResponse[listResponse](resp)
+	result, err := apiclient.DecodeRequired[listResponse](resp)
 	if err != nil {
 		return nil, err
 	}
@@ -442,7 +442,7 @@ func (s *agentService) Get(ctx context.Context, agentID string) (*Agent, error) 
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[Agent](resp)
+	return apiclient.DecodeRequired[Agent](resp)
 }
 
 // Create creates a new agent.
@@ -451,7 +451,7 @@ func (s *agentService) Create(ctx context.Context, req *CreateAgentRequest) (*Cr
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[CreateAgentResponse](resp)
+	return apiclient.DecodeRequired[CreateAgentResponse](resp)
 }
 
 // SubmitEnv submits gathered environment variables for an agent after a 202 env-gather response.
@@ -460,7 +460,7 @@ func (s *agentService) SubmitEnv(ctx context.Context, agentID string, req *Submi
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[CreateAgentResponse](resp)
+	return apiclient.DecodeRequired[CreateAgentResponse](resp)
 }
 
 // Update updates an agent's metadata.
@@ -469,7 +469,7 @@ func (s *agentService) Update(ctx context.Context, agentID string, req *UpdateAg
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[Agent](resp)
+	return apiclient.DecodeRequired[Agent](resp)
 }
 
 // Delete removes an agent.
@@ -588,7 +588,7 @@ func (s *agentService) StopAll(ctx context.Context) (*StopAllResponse, error) {
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[StopAllResponse](resp)
+	return apiclient.DecodeRequired[StopAllResponse](resp)
 }
 
 // Restore restores a soft-deleted agent.
@@ -597,7 +597,7 @@ func (s *agentService) Restore(ctx context.Context, agentID string) (*Agent, err
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[Agent](resp)
+	return apiclient.DecodeRequired[Agent](resp)
 }
 
 // SendMessage sends a message to an agent.
@@ -696,7 +696,7 @@ func (s *agentService) SendStructuredMessageWithOptions(ctx context.Context, age
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[MessageResponse](resp)
+	return apiclient.DecodeRequired[MessageResponse](resp)
 }
 
 // SendKeys implements AgentService.SendKeys. See that method's doc comment
@@ -818,6 +818,7 @@ func (s *agentService) SendOutboundMessage(ctx context.Context, agentID string, 
 	if err != nil {
 		return nil, err
 	}
+	// No body is valid here: the CLI prints a minimal confirmation on a 204.
 	return apiclient.DecodeResponse[OutboundMessageResult](resp)
 }
 
@@ -846,6 +847,7 @@ func (s *agentService) BroadcastMessage(ctx context.Context, msg *messages.Struc
 	if err != nil {
 		return nil, err
 	}
+	// No body is valid here: the CLI reports "Broadcast accepted." on a 204.
 	return apiclient.DecodeResponse[BroadcastResponse](resp)
 }
 
@@ -862,7 +864,7 @@ func (s *agentService) Exec(ctx context.Context, agentID string, command []strin
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[ExecResponse](resp)
+	return apiclient.DecodeRequired[ExecResponse](resp)
 }
 
 // GetLogs retrieves agent logs.
@@ -886,7 +888,7 @@ func (s *agentService) GetLogs(ctx context.Context, agentID string, opts *GetLog
 		Logs string `json:"logs"`
 	}
 
-	result, err := apiclient.DecodeResponse[logsResponse](resp)
+	result, err := apiclient.DecodeRequired[logsResponse](resp)
 	if err != nil {
 		return "", err
 	}
@@ -954,7 +956,7 @@ func (s *agentService) GetCloudLogs(ctx context.Context, agentID string, opts *G
 		return nil, err
 	}
 
-	return apiclient.DecodeResponse[CloudLogsResponse](resp)
+	return apiclient.DecodeRequired[CloudLogsResponse](resp)
 }
 
 // StreamCloudLogs opens an SSE connection for streaming cloud log entries.
@@ -1034,7 +1036,7 @@ func (s *agentService) SetMessageMode(ctx context.Context, agentID string, req *
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[SetMessageModeResponse](resp)
+	return apiclient.DecodeRequired[SetMessageModeResponse](resp)
 }
 
 // Reincarnate requests a `scion reincarnate` migration for an agent (design
@@ -1044,7 +1046,7 @@ func (s *agentService) Reincarnate(ctx context.Context, agentID string, req *Rei
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[ReincarnateAgentResponse](resp)
+	return apiclient.DecodeRequired[ReincarnateAgentResponse](resp)
 }
 
 // ReincarnateAgentRequest is the request body for Reincarnate. Besides
@@ -1059,11 +1061,11 @@ type ReincarnateAgentRequest struct {
 	// that broker, which must mount the same NFS export as its current one.
 	TargetBroker string `json:"targetBroker,omitempty"`
 	// SharedDirBackends changes the recorded shared-dir storage backend of
-	// the named shared dirs (dir name to "nfs"). Only the agent's record
-	// changes; the data is copied by the operator.
+	// the named shared dirs (dir name to "nfs" or "local"). Only the
+	// agent's record changes; the data is copied by the operator.
 	SharedDirBackends map[string]string `json:"sharedDirBackends,omitempty"`
-	// AllowEmptySharedDir skips the start check that refuses an empty nfs
-	// directory while the previous local directory is not empty.
+	// AllowEmptySharedDir skips the start check that refuses an empty
+	// directory on the new backend while the previous one is not empty.
 	AllowEmptySharedDir bool `json:"allowEmptySharedDir,omitempty"`
 
 	// Patch fields: each changes the next generation's setting, and later
