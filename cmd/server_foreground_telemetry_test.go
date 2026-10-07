@@ -31,7 +31,8 @@ import (
 // must take their options from one hubTelemetryIdentity built from hubSrv,
 // so they carry the instance ID the hub uses for dispatch claims and broker
 // affinity, and the same one on both signals. TestHubTelemetryIdentity checks
-// that those options set service.instance.id to that ID.
+// that those options set service.instance.id to that ID. The identity must
+// not be reassigned, or have a field changed, after it is built.
 func TestServerWiresInstanceID(t *testing.T) {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, "server_foreground.go", nil, 0)
@@ -47,9 +48,21 @@ func TestServerWiresInstanceID(t *testing.T) {
 	// sources the identity variables are built from.
 	identitySources := map[string]string{}
 	providerOptions := map[string][]string{}
+	// Every statement that writes to a variable or to one of its fields,
+	// keyed by the variable's name.
+	writes := map[string][]string{}
 	ast.Inspect(f, func(n ast.Node) bool {
 		switch n := n.(type) {
+		case *ast.IncDecStmt:
+			if root := rootIdent(n.X); root != "" {
+				writes[root] = append(writes[root], show(n))
+			}
 		case *ast.AssignStmt:
+			for _, lhs := range n.Lhs {
+				if root := rootIdent(lhs); root != "" {
+					writes[root] = append(writes[root], show(n))
+				}
+			}
 			if len(n.Lhs) != 1 || len(n.Rhs) != 1 {
 				return true
 			}
@@ -92,4 +105,35 @@ func TestServerWiresInstanceID(t *testing.T) {
 		}
 	}
 	assert.Len(t, used, 1, "metrics and traces must share one telemetry identity, got %v", used)
+	for recv := range used {
+		// The one write allowed is the newHubTelemetryIdentity assignment.
+		assert.Len(t, writes[recv], 1,
+			"the telemetry identity %q must not be changed after it is built, got writes %q", recv, writes[recv])
+	}
+}
+
+// rootIdent returns the name of the variable that an assignment target
+// writes to, following field selectors, index expressions, dereferences and
+// parentheses (so "id.instanceID", "id" and "(*id).x" all give "id"). It
+// returns "" for targets with no named root, such as "_".
+func rootIdent(e ast.Expr) string {
+	for {
+		switch x := e.(type) {
+		case *ast.Ident:
+			if x.Name == "_" {
+				return ""
+			}
+			return x.Name
+		case *ast.SelectorExpr:
+			e = x.X
+		case *ast.IndexExpr:
+			e = x.X
+		case *ast.StarExpr:
+			e = x.X
+		case *ast.ParenExpr:
+			e = x.X
+		default:
+			return ""
+		}
+	}
 }
