@@ -357,7 +357,8 @@ func TestReincarnateClaimTxHookOrder(t *testing.T) {
 	srv.RegisterReincarnateClaimHook("second", recordingHook(&log, "second", nil, nil))
 
 	rec := httptest.NewRecorder()
-	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, delegatingRequesterFor(coordinator.ID, project.ID), ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
+	// A role change, so the edge is re-recorded (ptone/scion#3762).
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, delegatingRequesterFor(coordinator.ID, project.ID), ReincarnateAgentRequest{Handoff: "h", Role: string(AgentRoleReadOnly)}), agent.ID)
 	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
 	waitForReincarnationSettled(t, s, agent.ID)
 
@@ -600,6 +601,8 @@ func TestSelfReincarnateKeepsExistingEdge(t *testing.T) {
 
 // A requester who passes the lifecycle check but fails CanDelegate for the
 // agent's role gets 403 with nothing claimed, on a dry run and a real run.
+// The check applies although a reincarnation without a role change keeps
+// the agent's edge (ptone/scion#3762).
 func TestReincarnateRequiresCanDelegate(t *testing.T) {
 	srv, s, project, broker := setupReincarnateTestServer(t, newReincarnateTestDispatcher())
 	agent := newReincarnateTestAgent(t, s, project, broker, nil)
@@ -619,10 +622,11 @@ func TestReincarnateRequiresCanDelegate(t *testing.T) {
 	assertNothingClaimed(t, s, agent, edge)
 }
 
-// A reincarnation by another agent writes a new edge with the requester's
-// provenance and ceiling and the agent's role; the replaced edge is
-// deactivated under the claim's operation ID with cause
-// reincarnate_replaced.
+// A reincarnation by another agent that changes the role writes a new edge
+// with the requester's provenance and ceiling and the new role; the
+// replaced edge is deactivated under the claim's operation ID with cause
+// reincarnate_replaced. Without a role change the edge is kept
+// (TestReincarnateByOtherAgentKeepsEdge).
 func TestReincarnateReRecordsProvenance(t *testing.T) {
 	srv, s, project, broker := setupReincarnateTestServer(t, newReincarnateTestDispatcher())
 	agent := newReincarnateTestAgent(t, s, project, broker, nil)
@@ -634,7 +638,7 @@ func TestReincarnateReRecordsProvenance(t *testing.T) {
 
 	requester := delegatingRequesterFor(coordinator.ID, project.ID)
 	rec := httptest.NewRecorder()
-	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, requester, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, requester, ReincarnateAgentRequest{Handoff: "h", Role: string(AgentRoleReadOnly)}), agent.ID)
 	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
 	waitForReincarnationSettled(t, s, agent.ID)
 
@@ -647,7 +651,7 @@ func TestReincarnateReRecordsProvenance(t *testing.T) {
 	assert.Equal(t, coordinator.ID, e.DelegatorID)
 	assert.Equal(t, store.RoleScopeProject, e.ScopeType)
 	assert.Equal(t, project.ID, e.ScopeID)
-	assert.Equal(t, string(AgentRoleBaseline), e.Role)
+	assert.Equal(t, string(AgentRoleReadOnly), e.Role)
 	assert.Equal(t, store.ProvenanceVersionV1, e.ProvenanceVersion)
 	assert.Equal(t, store.DelegationPrincipalAgent, e.SourcePrincipalKind)
 	assert.Equal(t, coordinator.ID, e.SourcePrincipalID)
@@ -664,7 +668,8 @@ func TestReincarnateReRecordsProvenance(t *testing.T) {
 
 // A requester whose effect ceiling does not cover the agent's role gets 403
 // (delegation_ceiling) with nothing claimed, on a dry run and a real run,
-// even when its token scopes pass CanDelegate.
+// even when its token scopes pass CanDelegate, and although a reincarnation
+// without a role change keeps the agent's edge (ptone/scion#3762).
 func TestReincarnateOverCeilingForbidden(t *testing.T) {
 	srv, s, project, broker := setupReincarnateTestServer(t, newReincarnateTestDispatcher())
 	agent := newReincarnateTestAgent(t, s, project, broker, nil)
