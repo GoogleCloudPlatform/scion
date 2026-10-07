@@ -801,17 +801,21 @@ func (s *Server) addGroupMember(w http.ResponseWriter, r *http.Request, group *s
 		return
 	}
 
-	if err := s.store.AddGroupMember(ctx, member); err != nil {
+	// The membership and its audit record commit or roll back together.
+	if err := s.store.WithTx(ctx, func(tx store.Store) error {
+		if err := tx.AddGroupMember(ctx, member); err != nil {
+			return err
+		}
+		return s.auditGroupMemberAddTx(ctx, tx, member, canDelegateResult, canDelegateReason)
+	}); err != nil {
 		s.releaseGroupMemberSlot(ctx, member.GroupID, member.MemberType, member.MemberID)
-		if err == store.ErrAlreadyExists {
+		if errors.Is(err, store.ErrAlreadyExists) {
 			Conflict(w, "Member already exists in this group")
 			return
 		}
 		writeErrorFromErr(w, err, "")
 		return
 	}
-
-	s.auditGroupMemberAdd(ctx, member, canDelegateResult, canDelegateReason)
 
 	s.groupsLogger().Info("group member added",
 		"group_id", groupID,
@@ -881,6 +885,27 @@ func (s *Server) auditGroupMemberAdd(ctx context.Context, member *store.GroupMem
 		CanDelegateResult: canDelegateResult,
 		CanDelegateReason: canDelegateReason,
 	})
+}
+
+// auditGroupMemberAddTx writes the group_member_add mutation audit record
+// for member on tx, attributed to the request actor, so it commits or rolls
+// back with the membership.
+func (s *Server) auditGroupMemberAddTx(ctx context.Context, tx store.Store, member *store.GroupMember, canDelegateResult, canDelegateReason string) error {
+	record := &store.MutationAuditRecord{
+		MutationType:      "group_member_add",
+		TargetType:        "group_membership",
+		TargetID:          member.GroupID,
+		AfterSummary:      `{"groupId":"` + member.GroupID + `","memberType":"` + member.MemberType + `","memberId":"` + member.MemberID + `","role":"` + member.Role + `"}`,
+		CanDelegateResult: canDelegateResult,
+		CanDelegateReason: canDelegateReason,
+	}
+	// The store stamps the record's time.
+	s.buildAuditActorFromContext(ctx).ApplyActor(record)
+	applyHubActorFallback(record)
+	if err := tx.CreateMutationAudit(ctx, record); err != nil {
+		return fmt.Errorf("audit group member add: %w", err)
+	}
+	return nil
 }
 
 // authorizeGroupMemberGrant runs the authorization for adding a member with
