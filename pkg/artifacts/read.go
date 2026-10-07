@@ -62,7 +62,8 @@ func (s *Service) canRead(ctx context.Context, b backend, a *Artifact) bool {
 // canReadWith is canRead asking host, with grants loading a's grants (all
 // of them, expired ones included) only if step 3 is reached. The list
 // endpoint passes a host that memoizes answers for the length of one
-// request, and a loader that reads the grants of a whole batch at once.
+// request, and a loader that reads the grants of a window of candidates at
+// a time (grantsWindow).
 func canReadWith(ctx context.Context, host Host, a *Artifact, grants func() ([]Grant, error)) bool {
 	kind, ref, _, ok := host.Principal(ctx)
 	if !ok {
