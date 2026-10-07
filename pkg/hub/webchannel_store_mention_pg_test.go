@@ -18,12 +18,13 @@ package hub
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/stretchr/testify/require"
 )
 
@@ -37,19 +38,23 @@ import (
 // touches an existing messages table in the target database.
 func TestUnreadMentionKeys_Postgres(t *testing.T) {
 	dsn := requirePostgresDSN(t)
-	db, err := sql.Open("pgx", dsn)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = db.Close() })
-	// One connection, so the session search_path applies to every query.
-	db.SetMaxOpenConns(1)
-
 	ctx := context.Background()
 	schema := fmt.Sprintf("mention_dot_test_%d", time.Now().UnixNano())
+
+	// search_path is a startup parameter of every pooled connection, so
+	// all of them see the throwaway schema. Do not pin the pool to one
+	// connection instead: Init holds one connection for the migration
+	// advisory lock while it runs the migrations on the pool, which
+	// deadlocks at MaxOpenConns=1 (production Postgres pools are >= 2).
+	cfg, err := pgx.ParseConfig(dsn)
+	require.NoError(t, err)
+	cfg.RuntimeParams["search_path"] = schema
+	db := stdlib.OpenDB(*cfg)
+	t.Cleanup(func() { _ = db.Close() })
+
 	_, err = db.ExecContext(ctx, "CREATE SCHEMA "+schema)
 	require.NoError(t, err)
 	t.Cleanup(func() { _, _ = db.Exec("DROP SCHEMA " + schema + " CASCADE") })
-	_, err = db.ExecContext(ctx, "SET search_path TO "+schema)
-	require.NoError(t, err)
 	_, err = db.ExecContext(ctx, `CREATE TABLE messages (
     id      uuid PRIMARY KEY,
     created timestamptz NOT NULL
