@@ -47,6 +47,7 @@ import { applyServerFeatureFlags } from './server-feature-flags.js';
 import { setPreferredTimeZone } from '../utils/time.js';
 import { withTimeout } from './with-timeout.js';
 import {
+  type AdminStatus,
   hasAnyPermission,
   ROUTE_PERMISSION_MAP,
   SUPERADMIN_ROUTES,
@@ -136,6 +137,13 @@ let currentUser: User | null = null;
 /** SSR-prefetched page data, consumed once on initial render */
 let ssrPageData: PageData | null = null;
 
+/**
+ * The admin-status flags the route guard last fetched fresh on entering an
+ * admin page (see client/admin-status.ts). Used to allow hub-admin users
+ * (not just super-admins) into admin pages, with the permissions array for
+ * per-route permission checks.
+ */
+let cachedAdminStatus: AdminStatus | null = null;
 let terminalWorkspaceEnabled = false;
 let terminalCoordinator: TerminalCoordinator | null = null;
 let terminalWorkspace: TerminalWorkspaceRoot | null = null;
@@ -1140,7 +1148,7 @@ async function renderRoute(path: string): Promise<void> {
   // Maintenance) require isSuperAdmin; other admin routes require at least
   // one matching permission from ROUTE_PERMISSION_MAP.
   if (ADMIN_ROUTES.has(tag)) {
-    const cachedAdminStatus = await loadAdminStatus(currentUser?.id, { fresh: true });
+    cachedAdminStatus = await loadAdminStatus(currentUser?.id, { fresh: true });
 
     if (SUPERADMIN_ROUTES.has(tag)) {
       if (!cachedAdminStatus?.isSuperAdmin) {
