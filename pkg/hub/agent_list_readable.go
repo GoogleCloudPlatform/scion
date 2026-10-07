@@ -65,7 +65,7 @@ func (s *Server) listReadableAgents(
 			}
 			return authorizedCandidatePage[store.Agent]{Items: page.Items, NextCursor: page.NextCursor}, nil
 		},
-		agentResource, cursorFor, perfTimedListRead(s.authzService.AuthorizeListReadBatch))
+		agentResource, cursorFor, s.authorizeListReadTimed)
 }
 
 // listAgentsLegacyPage returns one legacy-order (created DESC, id DESC)
@@ -133,7 +133,7 @@ func (s *Server) readableAgentRows(ctx context.Context, identity Identity, items
 	if !agentListAppliesReadRule(ctx) {
 		return items, nil
 	}
-	allowed, err := perfTimedListRead(s.authzService.AuthorizeListReadBatch)(ctx, identity, agentResources(items))
+	allowed, err := s.authorizeListReadTimed(ctx, identity, agentResources(items))
 	if err != nil {
 		return nil, err
 	}
@@ -155,7 +155,7 @@ func (s *Server) readableAgentMembers(ctx context.Context, identity Identity, me
 	for i, m := range members {
 		resources[i] = memberResource(m)
 	}
-	allowed, err := perfTimedListRead(s.authzService.AuthorizeListReadBatch)(ctx, identity, resources)
+	allowed, err := s.authorizeListReadTimed(ctx, identity, resources)
 	if err != nil {
 		return nil, err
 	}
@@ -177,12 +177,12 @@ func agentResources(items []store.Agent) []Resource {
 	return resources
 }
 
-// perfTimedListRead returns read, timed as the list_read_authz phase of the
-// request's perf trace. With tracing off the timer is a no-op; the
-// arguments, results and errors pass through unchanged either way.
-func perfTimedListRead(read func(context.Context, Identity, []Resource) ([]bool, error)) func(context.Context, Identity, []Resource) ([]bool, error) {
-	return func(ctx context.Context, identity Identity, resources []Resource) ([]bool, error) {
-		defer perfPhaseStart(ctx, perfPhaseListReadAuthz)()
-		return read(ctx, identity, resources)
-	}
+// authorizeListReadTimed is AuthorizeListReadBatch timed as the
+// list_read_authz phase of the request's perf trace. With tracing off the
+// timer is the shared no-op; arguments, results and errors pass through
+// unchanged either way.
+func (s *Server) authorizeListReadTimed(ctx context.Context, identity Identity, resources []Resource) ([]bool, error) {
+	done := perfPhaseStart(ctx, perfPhaseListReadAuthz)
+	defer done()
+	return s.authzService.AuthorizeListReadBatch(ctx, identity, resources)
 }

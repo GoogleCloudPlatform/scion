@@ -134,7 +134,7 @@ Both keys are read only at Hub startup; restart the Hub after changing them. The
 
 #### Request performance tracing
 
-`perf_trace: true` (env `SCION_SERVER_HUB_PERFTRACE=true`) records where Hub API requests and SSE connections spend their time, and how many authorization store reads and decision-audit records each request causes. It is for diagnosing slow agent lists on a test or staging Hub, or briefly on a production Hub. It is off by default.
+`perf_trace: true` (env `SCION_SERVER_HUB_PERFTRACE=true`) records where Hub API requests and SSE connections spend their time, and how many authorization store reads and decision-audit records each request causes. It is for diagnosing slow agent lists, mainly on a test or staging Hub. On a production Hub, turn it on only for a short diagnosis window: the log volume grows by one line per request. It is off by default.
 
 ```yaml
 server:
@@ -142,22 +142,26 @@ server:
     perf_trace: true
 ```
 
-**Observe only.** Tracing never changes an authorization decision, a decision-audit record (content, count or delivery), a response body, filtering, sorting, redaction or lineage. The only change a client can see is the extra response headers described below, and only on requests that ask for them.
+**Observe only.** Tracing never changes an authorization decision, a decision-audit record (content, count or delivery), a response body, filtering, sorting, redaction or lineage. The only change a client can see is the extra response headers described below, and only an unscoped local platform admin who asks for them can see it.
 
 **What it records.** Each Hub API request writes one `perf_trace` log line (subsystem `hub.perf-trace`); an SSE connection writes one at connect and one at close (`sse_stage`). A line holds:
 
 - `endpoint`: a fixed endpoint class, for example `agents.global.legacy`, `agents.global.sorted`, `agents.project.legacy`, `agents.project.sorted`, `agents.project.sorted_agent`, `sse.events`, or `other`.
 - `phase_<name>_us` and `phase_<name>_n`: time (microseconds) and count per phase. Phases are `list_scope_authz` (list-level authorization before rows are read), `list_db_read` (agent row and member reads; database time only), `list_read_authz` (per-row read decisions), `enrich`, `capabilities` (per-item capabilities and the env-view decision), `messageability`, `scope_capabilities`, `serialize` (encoding and writing the body), and for SSE `sse_expand`, `sse_authorize` and `sse_write`.
 - `store_<method>_n` and `store_<method>_us`, `authz_store_calls`, `authz_store_us`: reads the authorization service makes to prepare its inputs (groups, role bindings, role definitions, access constraints, delegation edges, and user, agent, project and membership rows), counted after request-local reuse.
-- `audit_records`, `audit_allow`, `audit_deny`, `audit_emit_us`: decision-audit records handed to the audit writer. Each authorization decision emits one record, so `audit_records` is the request's decision count. The database write happens off the request path.
-- `db_wait_count`, `db_wait_us`, `db_in_use`, `db_open`: connection-pool waits during the request and pool use at its end, when the database driver reports them. The pool is shared, so waits include concurrent requests and the audit writer.
+- `audit_records`, `audit_allow`, `audit_deny`, `audit_other`, `audit_emit_us`: decision-audit records handed to the audit writer. Each authorization decision emits one record, so `audit_records` is the request's decision count. The database write happens off the request path.
+- `db_wait_count`, `db_wait_us`, `db_in_use`, `db_open`: connection-pool waits during the request and pool use when the line is written (the end of the request), when the database driver reports them. In the response headers they are taken when the response starts. The pool is shared, so waits include concurrent requests and the audit writer.
 - `elapsed_us`, `method`, `request_id` (for correlation only), and for SSE `sse_events`.
 
-**Response headers.** A request that sends `X-Scion-Perf-Trace: 1` also gets `X-Scion-Perf-Endpoint`, `X-Scion-Perf-Phases`, `X-Scion-Perf-Phase-Counts`, `X-Scion-Perf-Store-Calls`, `X-Scion-Perf-Store-Us`, `X-Scion-Perf-Decisions` and, when available, `X-Scion-Perf-DB`. Values are `name=integer` pairs; durations are microseconds. The headers are set when the response starts, so they omit `serialize`. The `perf/bench` API benchmark records them with `--want-perf-trace`. Counts (store calls, decisions, phase counts) do not depend on machine speed, so they suit CI budgets; durations do not.
+**Counted scope.** The store counts cover the authorization service's request-path reads of the methods above. Relationship progeny lookups and reads inside a store transaction are not counted, and work handed to a detached background context after the request ends records into a trace that is no longer logged. `capabilities` also includes the rare re-list read decision for a sorted-list row whose authorization inputs changed between reads.
+
+**Response headers.** Only an unscoped local platform admin (a local user with the admin role, not using a scoped access token, not federated) who sends `X-Scion-Perf-Trace: 1` also gets `X-Scion-Perf-Endpoint`, `X-Scion-Perf-Phases`, `X-Scion-Perf-Phase-Counts`, `X-Scion-Perf-Store-Calls`, `X-Scion-Perf-Store-Us`, `X-Scion-Perf-Decisions` and, when available, `X-Scion-Perf-DB`. Values are `name=integer` pairs; durations are microseconds. The headers are set when the response starts, so they omit `serialize`. No other caller gets them: not unauthenticated endpoints, agents, brokers, scoped tokens, federated identities or non-admin users. Their requests are still traced and logged. The `perf/bench` API benchmark records the headers with `--want-perf-trace`, and for its non-admin caller joins the hub's `perf_trace` log lines by request ID with `--hub-perf-log`. Counts (store calls, decisions, phase counts) do not depend on machine speed, so they suit CI budgets; durations do not.
+
+**What the counts reveal.** The counts are not just timing. A deny count is the number of candidate rows hidden from the caller (on a filtered list, whether one specific agent exists). Store-call counts hint at owner, delegator and group structure behind the rows. DB pool figures describe process-wide load. That is why the headers go only to unscoped local platform admins, and why the log line belongs with other operator logs.
 
 **Cardinality and privacy.** Phase names, store methods, endpoint classes and audit outcomes are fixed sets. No path, query, ID, name, email, token, secret or configuration value is logged or used as a label.
 
-**Overhead.** With tracing off, no middleware or decorator is installed, and each recording point in the list handlers is one context lookup that finds nothing. With tracing on, each recorded phase or store read adds two clock reads and an uncontended lock, plus a few hundred bytes and one log line per request. The headers expose request timing to the caller, so do not leave tracing on for a multi-tenant production Hub.
+**Overhead.** With tracing off, no middleware or decorator is installed, and each recording point in the list handlers is one context lookup that finds nothing. With tracing on, each recorded phase or store read adds two clock reads and an uncontended lock, plus a few hundred bytes and one log line per request.
 
 ### Broker Settings (`server.broker`)
 

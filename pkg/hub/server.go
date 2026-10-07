@@ -197,7 +197,7 @@ type ServerConfig struct {
 	// PerfTrace turns on per-request performance tracing
 	// (server.hub.perf_trace): phase timings, authorization store-call and
 	// decision-audit counts, and DB pool waits, logged per request and
-	// returned in X-Scion-Perf-* headers to requests that opt in. Off by
+	// returned in X-Scion-Perf-* headers to admin requests that opt in. Off by
 	// default; observe only. See perftrace.go.
 	PerfTrace bool
 	// LaunchTimeout is the whole-launch budget for an opted-in launch

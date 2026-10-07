@@ -43,6 +43,14 @@ package hub
 // request for the trace, one sql.DB.Stats call at request start and end, and
 // one log line per request.
 //
+// Counted scope: the store decorator counts the reads listed in perfStoreOp
+// that reach it with the request context. Reads the authorization service
+// makes through other paths (relationship progeny lookups such as
+// ListProgeny*, anything inside a store transaction) are not counted, and
+// work moved onto a detached background context after the request's log
+// line is written records into a trace nobody reads. A CI budget on these
+// counts covers the request-path reads only.
+//
 // Cardinality is bounded by construction. Phases, authorization store
 // operations and endpoint classes are small enums declared below; their
 // names are fixed strings. Decision-audit records are counted only by
@@ -80,7 +88,10 @@ const (
 	// perfPhaseEnrich: enrichAgents (project and broker names).
 	perfPhaseEnrich
 	// perfPhaseCapabilities: per-item capability evaluation, including the
-	// env-view decision used for appliedConfig redaction.
+	// env-view decision used for appliedConfig redaction. On the sorted
+	// project list it also includes the re-list read decision for a row
+	// whose authorization inputs changed between the member and full-row
+	// reads (rare).
 	perfPhaseCapabilities
 	// perfPhaseMessageability: ComputeMessageability, summed over items.
 	perfPhaseMessageability
@@ -378,8 +389,11 @@ func (t *PerfTrace) Snapshot() PerfTraceSnapshot {
 	return s
 }
 
-// Response header names. The request opts in with HeaderPerfTraceRequest:
-// 1; the server must also have server.hub.perf_trace on. Values are
+// Response header names, defined only here. The request opts in with
+// HeaderPerfTraceRequest: 1; the server must have server.hub.perf_trace on,
+// and the caller must be an unscoped local platform admin
+// (perfHeadersAllowed). perfResponseWriter is the only writer of these
+// headers. Values are
 // comma-separated name=integer pairs, sorted by name; durations are in
 // microseconds. The headers are taken when the response status is written,
 // so they never include the serialize phase (the log line does).
@@ -489,6 +503,7 @@ func (s PerfTraceSnapshot) LogAttrs() []slog.Attr {
 		slog.Int64("audit_records", s.AuditRecords),
 		slog.Int64("audit_allow", s.AuditAllow),
 		slog.Int64("audit_deny", s.AuditDeny),
+		slog.Int64("audit_other", s.AuditOther),
 		slog.Int64("audit_emit_us", microseconds(s.AuditEmitTime)),
 	)
 	if s.SSEEvents > 0 {

@@ -38,7 +38,9 @@ import (
 // the setting off it is not in the chain at all.
 //
 // The response body and status are passed through unchanged; only the
-// opt-in headers are added, and only when asked for.
+// opt-in headers are added, and only for an unscoped local platform admin
+// (see perfHeadersAllowed). The serialize phase and the log line are
+// deferred, so a handler panic is still traced.
 func (s *Server) perfTraceMiddleware(next http.Handler) http.Handler {
 	db := s.perfTraceDB()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -52,14 +54,31 @@ func (s *Server) perfTraceMiddleware(next http.Handler) http.Handler {
 		pw := &perfResponseWriter{
 			ResponseWriter: w,
 			trace:          trace,
-			emitHeaders:    r.Header.Get(HeaderPerfTraceRequest) == "1",
+			emitHeaders:    r.Header.Get(HeaderPerfTraceRequest) == "1" && perfHeadersAllowed(r),
 		}
+		defer func() {
+			if pw.wroteHeader {
+				trace.addPhase(perfPhaseSerialize, time.Since(pw.firstWrite))
+			}
+			s.logPerfTrace(r, trace)
+		}()
 		next.ServeHTTP(pw, r)
-		if pw.wroteHeader {
-			trace.addPhase(perfPhaseSerialize, time.Since(pw.firstWrite))
-		}
-		s.logPerfTrace(r, trace)
 	})
+}
+
+// perfHeadersAllowed reports whether a request may receive the
+// X-Scion-Perf-* response headers. The counts reveal more than timing: deny
+// counts give the number of candidate rows hidden from the caller, store
+// calls hint at owner and group structure, and DB pool figures describe
+// process-wide load. So only an unscoped local platform admin gets them,
+// never on an unauthenticated endpoint, and never an agent, broker, scoped
+// token or federated identity. The check reads identity fields only: no
+// decision, store read or audit record.
+func perfHeadersAllowed(r *http.Request) bool {
+	if isUnauthenticatedEndpoint(r.URL.Path) {
+		return false
+	}
+	return IsUnscopedLocalPlatformAdmin(GetUserIdentityFromContext(r.Context()))
 }
 
 // perfTraceDB returns the store's connection pool when the store exposes
@@ -113,8 +132,9 @@ func logPerfTraceLine(logger *slog.Logger, r *http.Request, snap func() PerfTrac
 	logger.LogAttrs(r.Context(), slog.LevelInfo, "perf_trace", attrs...)
 }
 
-// perfResponseWriter records when the response starts and, for an opt-in
-// request, sets the perf headers just before the status line is written.
+// perfResponseWriter records when the response starts and, for an allowed
+// opt-in request, sets the perf headers just before the status line is
+// written.
 // It forwards every write, flush and hijack unchanged.
 type perfResponseWriter struct {
 	http.ResponseWriter
@@ -160,7 +180,7 @@ func (w *perfResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	if hj, ok := w.ResponseWriter.(http.Hijacker); ok {
 		return hj.Hijack()
 	}
-	return nil, nil, fmt.Errorf("hijack not supported")
+	return nil, nil, fmt.Errorf("perf trace writer: %w", http.ErrNotSupported)
 }
 
 // Unwrap returns the underlying ResponseWriter for http.ResponseController.

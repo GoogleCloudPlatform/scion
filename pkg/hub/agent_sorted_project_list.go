@@ -361,7 +361,7 @@ func (s *Server) listProjectAgentsSorted(w http.ResponseWriter, r *http.Request,
 	for i, m := range members {
 		resources[i] = memberResource(m)
 	}
-	listed, err := perfTimedListRead(s.authzService.AuthorizeListReadBatch)(ctx, identity, resources)
+	listed, err := s.authorizeListReadTimed(ctx, identity, resources)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
