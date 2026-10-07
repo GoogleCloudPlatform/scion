@@ -693,3 +693,16 @@ func (s *Server) agentSuspensionViews(ctx context.Context, agents []store.Agent)
 	}
 	return out
 }
+
+// standingRefusalLeftToItems reports whether a standing refusal concerns the
+// chain above the agent, which the per-item delegation checks of a material
+// read refuse on their own (a held or deleted link is not live there, and a
+// missing or broken link has no authority).
+func standingRefusalLeftToItems(err error) bool {
+	switch standingReason(err) {
+	case standingReasonChainHeld, standingReasonChainDeleted, standingReasonChainBroken,
+		standingReasonChainTooDeep, standingReasonRootMissing:
+		return true
+	}
+	return false
+}
