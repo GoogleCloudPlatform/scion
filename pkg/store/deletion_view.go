@@ -51,12 +51,16 @@ const DeletionDisplayTTL = 15 * time.Minute
 // delete (design §2.2). It appears on the REST agent (Agent.Deletion) and on
 // every AgentStatusEvent, as an explicit null when no delete is active or
 // failed.
+//
+// Code, Error and Claim are detail for platform admins only: the hub clears
+// them for every other caller (pkg/hub redactDeletionForCaller), so all
+// three are omitempty and absent from the generic view.
 type DeletionInfo struct {
 	State          string     `json:"state"`          // "deleting" (incl. finalizing) | "failed"
 	Code           string     `json:"code,omitempty"` // runtime_error | conflict | in_doubt | abandoned | revoke_failed | finalize_failed | runtime_unavailable
 	Error          string     `json:"error,omitempty"`
 	Soft           bool       `json:"soft"`
-	Claim          int64      `json:"claim"` // named to avoid confusion with Agent.Generation (reincarnation)
+	Claim          int64      `json:"claim,omitempty"` // named to avoid confusion with Agent.Generation (reincarnation)
 	StartedAt      time.Time  `json:"startedAt"`
 	LeaseExpiresAt *time.Time `json:"leaseExpiresAt,omitempty"` // deleting
 	ExpiresAt      *time.Time `json:"expiresAt,omitempty"`      // failed, except in_doubt and finalizing

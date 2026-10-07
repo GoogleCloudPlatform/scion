@@ -23,7 +23,6 @@
  * - Broker status (per-broker cards)
  * - Agent health summary
  * - Dispatch pipeline status
- * - Stall detection configuration (editable)
  *
  * Auto-refreshes every 30 seconds via polling.
  */
@@ -32,7 +31,6 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
-import { showToast } from '../../utils/toast.js';
 import { formatRelative } from '../../utils/time.js';
 
 interface HealthSummary {
@@ -78,64 +76,6 @@ interface HealthSummary {
     stuck_messages: number;
     failed_1h: number;
   } | null;
-  stall_config: {
-    threshold_seconds: number;
-    auto_suspend: boolean;
-  };
-}
-
-/** The parts of the GET /api/v1/admin/server-config response the stall editor reads. */
-export interface ServerConfigSnapshot {
-  server?: {
-    hub?: {
-      stalled_threshold?: string;
-      soft_delete_retention?: string;
-      soft_delete_retain_files?: boolean;
-    };
-  };
-  /** Present on a DB-backed hub only; absent in file mode. */
-  section_metadata?: Record<string, { source?: string; revision?: number }>;
-}
-
-/**
- * Builds the PUT /api/v1/admin/server-config body that sets
- * server.hub.auto_suspend_stalled.
- *
- * The hub decodes a nested object; a flat dotted key such as
- * "server.hub.auto_suspend_stalled" is silently dropped and the PUT still
- * returns 200 (ptone/scion#3059). A DB-backed hub also replaces the whole
- * lifecycle row, keeping only the start-claim keys a PUT omits, so the other
- * lifecycle keys are carried over from `current`.
- *
- * On a DB-backed hub (section_metadata present) the write is a CAS: when the
- * lifecycle row exists its revision is sent, otherwise revision 0, which the
- * store treats as create-only. Either way a concurrent edit gets a 409
- * instead of being overwritten. A file-backed hub sends no metadata and gets
- * no expected_revisions.
- */
-export function buildStallConfigUpdate(
-  current: ServerConfigSnapshot,
-  autoSuspend: boolean
-): Record<string, unknown> {
-  const curHub = current.server?.hub ?? {};
-  const hub: Record<string, unknown> = { auto_suspend_stalled: autoSuspend };
-  if (curHub.stalled_threshold) hub.stalled_threshold = curHub.stalled_threshold;
-  if (curHub.soft_delete_retention) hub.soft_delete_retention = curHub.soft_delete_retention;
-  if (typeof curHub.soft_delete_retain_files === 'boolean') {
-    hub.soft_delete_retain_files = curHub.soft_delete_retain_files;
-  }
-  const body: Record<string, unknown> = { server: { hub } };
-  const meta = current.section_metadata;
-  if (meta) {
-    const lifecycle = meta.lifecycle;
-    const rev = lifecycle?.revision;
-    if (lifecycle?.source === 'db' && typeof rev === 'number' && rev > 0) {
-      body.expected_revisions = { lifecycle: rev };
-    } else if (lifecycle) {
-      body.expected_revisions = { lifecycle: 0 };
-    }
-  }
-  return body;
 }
 
 @customElement('scion-page-health-dashboard')
@@ -151,15 +91,6 @@ export class ScionPageHealthDashboard extends LitElement {
 
   @state()
   private autoRefresh = true;
-
-  @state()
-  private editingStall = false;
-
-  @state()
-  private stallAutoSuspend = false;
-
-  @state()
-  private savingStall = false;
 
   private refreshTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -206,10 +137,6 @@ export class ScionPageHealthDashboard extends LitElement {
       }
       this.data = await res.json();
       this.error = null;
-      // Sync stall config editor state
-      if (this.data && !this.editingStall) {
-        this.stallAutoSuspend = this.data.stall_config.auto_suspend;
-      }
     } catch (e) {
       this.error = e instanceof Error ? e.message : 'Network error';
     } finally {
@@ -252,42 +179,6 @@ export class ScionPageHealthDashboard extends LitElement {
         return 'var(--scion-error, #ef4444)';
       default:
         return 'var(--scion-text-muted, #94a3b8)';
-    }
-  }
-
-  private async saveStallConfig(): Promise<void> {
-    this.savingStall = true;
-    try {
-      // Read the current lifecycle settings first: a DB-backed hub replaces
-      // the whole lifecycle row on PUT, so the keys this form does not edit
-      // must be sent back or they are dropped (ptone/scion#3059).
-      const cur = await apiFetch('/api/v1/admin/server-config');
-      if (!cur.ok) {
-        const msg = await extractApiError(cur, 'Failed to load current stall settings');
-        showToast(msg, 'danger');
-        return;
-      }
-      const body = buildStallConfigUpdate(
-        (await cur.json()) as ServerConfigSnapshot,
-        this.stallAutoSuspend
-      );
-      const res = await apiFetch('/api/v1/admin/server-config', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-      if (!res.ok) {
-        const msg = await extractApiError(res, 'Failed to save stall settings');
-        showToast(msg, 'danger');
-        return;
-      }
-      showToast('Stall detection settings saved', 'success');
-      this.editingStall = false;
-      void this.fetchData();
-    } catch (e) {
-      showToast(e instanceof Error ? e.message : 'Save failed', 'danger');
-    } finally {
-      this.savingStall = false;
     }
   }
 
@@ -456,81 +347,6 @@ export class ScionPageHealthDashboard extends LitElement {
       color: var(--scion-error, #ef4444);
     }
 
-    .stall-config {
-      display: flex;
-      align-items: center;
-      gap: 1rem;
-      flex-wrap: wrap;
-    }
-
-    .stall-config .stat-row {
-      flex: 1;
-      min-width: 200px;
-    }
-
-    .edit-btn {
-      background: none;
-      border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: 0.375rem;
-      padding: 0.25rem 0.625rem;
-      font-size: 0.75rem;
-      cursor: pointer;
-      color: var(--scion-text-muted, #64748b);
-    }
-
-    .edit-btn:hover {
-      background: var(--scion-surface-hover, #f1f5f9);
-    }
-
-    .stall-edit-form {
-      display: flex;
-      align-items: center;
-      gap: 0.75rem;
-      flex-wrap: wrap;
-    }
-
-    .stall-edit-form label {
-      font-size: 0.875rem;
-      color: var(--scion-text, #1e293b);
-    }
-
-    .stall-edit-form input[type='number'] {
-      width: 60px;
-      padding: 0.25rem 0.5rem;
-      border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: 0.25rem;
-      font-size: 0.875rem;
-    }
-
-    .save-btn {
-      background: var(--scion-primary, #3b82f6);
-      color: white;
-      border: none;
-      border-radius: 0.375rem;
-      padding: 0.375rem 0.75rem;
-      font-size: 0.8125rem;
-      cursor: pointer;
-    }
-
-    .save-btn:hover {
-      opacity: 0.9;
-    }
-
-    .save-btn:disabled {
-      opacity: 0.5;
-      cursor: not-allowed;
-    }
-
-    .cancel-btn {
-      background: none;
-      border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: 0.375rem;
-      padding: 0.375rem 0.75rem;
-      font-size: 0.8125rem;
-      cursor: pointer;
-      color: var(--scion-text-muted, #64748b);
-    }
-
     .loading,
     .error-msg {
       text-align: center;
@@ -540,16 +356,6 @@ export class ScionPageHealthDashboard extends LitElement {
 
     .error-msg {
       color: var(--scion-error, #ef4444);
-    }
-
-    .alerts-link {
-      font-size: 0.875rem;
-      color: var(--scion-primary, #3b82f6);
-      text-decoration: none;
-    }
-
-    .alerts-link:hover {
-      text-decoration: underline;
     }
 
     .overall-status {
@@ -639,26 +445,8 @@ export class ScionPageHealthDashboard extends LitElement {
       <!-- Agents -->
       ${this.renderAgentsCard(d)}
 
-      <!-- Dispatch & Stall Config -->
-      <div class="grid-2">${this.renderDispatchCard(d)} ${this.renderStallCard(d)}</div>
-
-      <!-- Recent Alerts placeholder -->
-      <div class="grid-full">
-        <div class="card">
-          <div class="card-title">Recent Alerts</div>
-          <div style="font-size:0.875rem;color:var(--scion-text-muted,#64748b)">
-            View recent alerts in the
-            <a
-              class="alerts-link"
-              href="https://console.cloud.google.com/monitoring/alerting"
-              target="_blank"
-              rel="noopener"
-            >
-              GCP Cloud Monitoring Console
-            </a>
-          </div>
-        </div>
-      </div>
+      <!-- Dispatch -->
+      <div class="grid-full">${this.renderDispatchCard(d)}</div>
     `;
   }
 
@@ -839,82 +627,6 @@ export class ScionPageHealthDashboard extends LitElement {
         </div>
         <div class="stat-row">
           <span class="label">Failed (1h)</span><span>${d.dispatch.failed_1h}</span>
-        </div>
-      </div>
-    `;
-  }
-
-  private renderStallCard(d: HealthSummary) {
-    if (this.editingStall) {
-      return html`
-        <div class="card">
-          <div class="card-title">Stall Detection Settings</div>
-          <!-- Threshold is a startup-time ServerConfig setting and cannot be
-               changed at runtime via the operational settings API. Display it
-               as read-only. Only auto_suspend_stalled is a runtime setting. -->
-          <div class="stat-row" style="margin-bottom:0.75rem">
-            <span class="label">Stalled Threshold</span>
-            <span
-              >${Math.round(d.stall_config.threshold_seconds / 60)} min
-              <span style="font-size:0.75rem;color:var(--scion-text-muted,#94a3b8)"
-                >(set at startup)</span
-              ></span
-            >
-          </div>
-          <div class="stall-edit-form">
-            <label style="display:flex;align-items:center;gap:0.375rem">
-              <input
-                type="checkbox"
-                .checked=${this.stallAutoSuspend}
-                @change=${() => {
-                  this.stallAutoSuspend = !this.stallAutoSuspend;
-                }}
-              />
-              Auto-suspend stalled agents
-            </label>
-            <button
-              class="save-btn"
-              ?disabled=${this.savingStall}
-              @click=${() => void this.saveStallConfig()}
-            >
-              ${this.savingStall ? 'Saving...' : 'Save'}
-            </button>
-            <button
-              class="cancel-btn"
-              @click=${() => {
-                this.editingStall = false;
-              }}
-            >
-              Cancel
-            </button>
-          </div>
-        </div>
-      `;
-    }
-
-    return html`
-      <div class="card">
-        <div
-          class="card-title"
-          style="display:flex;justify-content:space-between;align-items:center"
-        >
-          Stall Detection Settings
-          <button
-            class="edit-btn"
-            @click=${() => {
-              this.editingStall = true;
-            }}
-          >
-            Edit
-          </button>
-        </div>
-        <div class="stat-row">
-          <span class="label">Stalled Threshold</span
-          ><span>${Math.round(d.stall_config.threshold_seconds / 60)} min</span>
-        </div>
-        <div class="stat-row">
-          <span class="label">Auto-Suspend Stalled</span
-          ><span>${d.stall_config.auto_suspend ? 'enabled' : 'disabled'}</span>
         </div>
       </div>
     `;
