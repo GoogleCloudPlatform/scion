@@ -486,3 +486,144 @@ func TestNewProviders_BatchMode(t *testing.T) {
 
 	shutdownProvidersForTest(t, p)
 }
+
+func TestNewHookProviders_NilAndDisabled(t *testing.T) {
+	for _, cfg := range []*Config{nil, {Enabled: false}} {
+		p, err := NewHookProviders(context.Background(), cfg)
+		if err != nil || p != nil {
+			t.Fatalf("NewHookProviders(%+v) = %v, %v; want nil, nil", cfg, p, err)
+		}
+	}
+}
+
+// hookProviderTestBound is the CI bound for a full hook-provider export cycle
+// (span, log, metric flush on shutdown) when the receiver is missing or
+// unresponsive. The designed worst case is 2*HookExportTimeout +
+// HookShutdownTimeout (0.75s); the OTLP defaults this replaces take 10s or
+// more, so 2s leaves CI headroom while still catching a regression.
+const hookProviderTestBound = 2 * time.Second
+
+// exerciseHookProviders runs one span, one log record and one counter through
+// p, shuts it down within HookShutdownTimeout, and returns the elapsed time.
+func exerciseHookProviders(t *testing.T, p *Providers) time.Duration {
+	t.Helper()
+	ctx := context.Background()
+	start := time.Now()
+	_, span := p.TracerProvider.Tracer("hook.test").Start(ctx, "tool.call")
+	span.End()
+	var record otellog.Record
+	record.SetEventName("tool.call")
+	p.LoggerProvider.Logger("hook.test").Emit(ctx, record)
+	counter, err := p.MeterProvider.Meter("hook.test").Int64Counter("hook.counter")
+	if err != nil {
+		t.Fatalf("create counter: %v", err)
+	}
+	counter.Add(ctx, 1)
+	shutdownCtx, cancel := context.WithTimeout(ctx, HookShutdownTimeout)
+	defer cancel()
+	_ = p.Shutdown(shutdownCtx) // the metric flush fails: no usable receiver
+	return time.Since(start)
+}
+
+// With nothing listening, hook providers must fail every export immediately
+// because retries are disabled; this takes a few milliseconds. With retries
+// on, the OTLP exporter retries Unavailable until each export's
+// HookExportTimeout, so the three exports take about 3*HookExportTimeout.
+// The 2*HookExportTimeout bound separates the two with wide margin on both
+// sides.
+func TestNewHookProviders_NoReceiverFailsFast(t *testing.T) {
+	p, err := NewHookProviders(context.Background(), &Config{Enabled: true, GRPCPort: availableTCPPort(t)})
+	if err != nil {
+		t.Fatalf("NewHookProviders: %v", err)
+	}
+	if elapsed := exerciseHookProviders(t, p); elapsed > 2*HookExportTimeout {
+		t.Fatalf("hook export with no receiver took %s; are retries enabled?", elapsed)
+	}
+}
+
+// A receiver that accepts TCP connections but never answers cannot fail
+// fast, so only HookExportTimeout and HookShutdownTimeout bound the exports.
+// Without them each export waits the OTLP default 10s.
+func TestNewHookProviders_UnresponsiveReceiverIsBounded(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	var mu sync.Mutex
+	var conns []net.Conn
+	go func() {
+		for {
+			c, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			conns = append(conns, c)
+			mu.Unlock()
+		}
+	}()
+	t.Cleanup(func() {
+		_ = listener.Close()
+		mu.Lock()
+		defer mu.Unlock()
+		for _, c := range conns {
+			_ = c.Close()
+		}
+	})
+
+	p, err := NewHookProviders(context.Background(), &Config{Enabled: true, GRPCPort: listener.Addr().(*net.TCPAddr).Port})
+	if err != nil {
+		t.Fatalf("NewHookProviders: %v", err)
+	}
+	if elapsed := exerciseHookProviders(t, p); elapsed > hookProviderTestBound {
+		t.Fatalf("hook export with an unresponsive receiver took %s", elapsed)
+	}
+}
+
+// Hook providers still deliver every signal to a live receiver.
+func TestNewHookProviders_RoutesAllSignalsToLoopback(t *testing.T) {
+	var spans, logs, metrics atomic.Int64
+	receiver := NewReceiver(&Config{Enabled: true},
+		func(_ context.Context, batches []*tracepb.ResourceSpans) error {
+			spans.Add(int64(len(batches)))
+			return nil
+		},
+		WithLogHandler(func(_ context.Context, batches []*logspb.ResourceLogs) error {
+			logs.Add(int64(len(batches)))
+			return nil
+		}),
+		WithMetricHandler(func(_ context.Context, batches []*metricpb.ResourceMetrics) error {
+			metrics.Add(int64(len(batches)))
+			return nil
+		}),
+	)
+	if err := receiver.Start(context.Background()); err != nil {
+		t.Fatalf("start receiver: %v", err)
+	}
+	defer func() { _ = receiver.Stop(context.Background()) }()
+	port, _ := receiver.BoundPorts()
+
+	p, err := NewHookProviders(context.Background(), &Config{Enabled: true, GRPCPort: port})
+	if err != nil {
+		t.Fatalf("NewHookProviders: %v", err)
+	}
+	ctx := context.Background()
+	_, span := p.TracerProvider.Tracer("hook.test").Start(ctx, "tool.call")
+	span.End()
+	var record otellog.Record
+	record.SetEventName("tool.call")
+	p.LoggerProvider.Logger("hook.test").Emit(ctx, record)
+	counter, err := p.MeterProvider.Meter("hook.test").Int64Counter("hook.counter")
+	if err != nil {
+		t.Fatalf("create counter: %v", err)
+	}
+	counter.Add(ctx, 1)
+	shutdownCtx, cancel := context.WithTimeout(ctx, HookShutdownTimeout)
+	defer cancel()
+	if err := p.Shutdown(shutdownCtx); err != nil {
+		t.Fatalf("shutdown providers: %v", err)
+	}
+	if spans.Load() == 0 || logs.Load() == 0 || metrics.Load() == 0 {
+		t.Fatalf("loopback captures: spans=%d logs=%d metrics=%d", spans.Load(), logs.Load(), metrics.Load())
+	}
+}

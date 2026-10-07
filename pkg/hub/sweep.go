@@ -118,5 +118,24 @@ func (s *Server) failedMessageRetentionHandler() func(ctx context.Context) {
 			s.agentLifecycleLog.Info("failed-message-retention: purged failed messages",
 				"count", purged, "retentionDays", retentionDays, "cutoff", cutoff)
 		}
+
+		// Drop webchat mention rows whose message is gone. The webchat
+		// tables live outside the Ent graph, so the purge above cannot
+		// cascade to them; sweeping orphans here also covers any other
+		// hard delete of messages.
+		s.mu.RLock()
+		wcs := s.webChatStore
+		s.mu.RUnlock()
+		if wcs != nil {
+			orphans, err := wcs.PurgeOrphanMentions(ctx)
+			if err != nil {
+				s.agentLifecycleLog.Error("failed-message-retention: mention sweep failed", "error", err)
+				return
+			}
+			if orphans > 0 {
+				s.agentLifecycleLog.Info("failed-message-retention: purged orphan mention rows",
+					"count", orphans)
+			}
+		}
 	}
 }

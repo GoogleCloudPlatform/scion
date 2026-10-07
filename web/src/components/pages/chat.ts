@@ -343,6 +343,18 @@ interface SpaceMember {
   kind: 'user' | 'agent';
 }
 
+type PromoteToastVariant = 'success' | 'warning' | 'danger';
+
+/**
+ * Icon for each promote toast variant. Callers outside the type system
+ * fall back to 'exclamation-circle'.
+ */
+const PROMOTE_TOAST_ICONS: Readonly<Record<PromoteToastVariant, string>> = {
+  success: 'check-circle',
+  warning: 'exclamation-triangle',
+  danger: 'exclamation-circle',
+};
+
 @customElement('scion-page-chat')
 export class ScionPageChat extends LitElement {
   @property({ type: Object })
@@ -6109,17 +6121,18 @@ export class ScionPageChat extends LitElement {
   }
 
   /** Show a toast notification for promote results. */
-  private showPromoteToast(
-    message: string,
-    variant: 'success' | 'warning' | 'danger' = 'success'
-  ): void {
-    // Use the Shoelace alert/toast pattern if available, else console
+  private showPromoteToast(message: string, variant: PromoteToastVariant = 'success'): void {
+    // Build the content from DOM nodes and text so the message is never
+    // parsed as HTML.
     const alert = Object.assign(document.createElement('sl-alert'), {
       variant,
       closable: true,
       duration: 4000,
-      innerHTML: `<sl-icon name="${variant === 'success' ? 'check-circle' : variant === 'warning' ? 'exclamation-triangle' : 'exclamation-circle'}" slot="icon"></sl-icon>${message}`,
     });
+    const icon = document.createElement('sl-icon');
+    icon.setAttribute('name', PROMOTE_TOAST_ICONS[variant] ?? 'exclamation-circle');
+    icon.setAttribute('slot', 'icon');
+    alert.append(icon, document.createTextNode(message));
     document.body.appendChild(alert);
     void (alert as unknown as { toast(): Promise<void> }).toast();
   }

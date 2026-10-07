@@ -112,10 +112,16 @@ func TestSessionOnlyGate_ReasonIsReported(t *testing.T) {
 	// TestRS3_ProjectDeleteScopedUATDenied.
 	ctx := realTokenContext(t, m.srv, key)
 
+	// Scheduled dispatch authoring is not session-only: the revision records
+	// the token's ceiling, and each fire requires the token to be live
+	// (authorizeScheduledDispatchAgentAuthoring). This checks the function
+	// alone: the schedule routes refuse a project-scoped token earlier, at
+	// the bearer gate's boundary eligibility stage.
 	rec := httptest.NewRecorder()
 	ok := m.srv.authorizeScheduledDispatchAgentAuthoring(rec, requestWithContext(ctx, http.MethodPost, "/api/v1/projects/"+f.project+"/scheduled-events", nil))
-	assert.False(t, ok)
-	requireSessionOnlyRefusal(t, rec, authzop.ReasonGovernancePending, "scheduled dispatch authoring")
+	assert.True(t, ok, "scheduled dispatch authoring admits a scoped token: %s", rec.Body.String())
+	_, credential := sessionOnlyDetailsOf(rec)
+	assert.NotEqual(t, sessionRequiredCredential, credential, "scheduled dispatch authoring: refused as session-only: %s", rec.Body.String())
 
 	rec = httptest.NewRecorder()
 	payload := `{"agentId":"` + f.agent + `","message":"x"}`

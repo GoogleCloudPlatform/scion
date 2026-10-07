@@ -598,6 +598,26 @@ func Spec() []TableFixture {
 			},
 		}},
 
+		// ---- Delegation adoptions (recognized edge; NULL original edge) ----
+		{Table: "delegation_adoptions", Rows: []row{
+			{
+				"id":        "dd000000-0000-0000-0000-000000000001",
+				"cohort_id": "dc000000-0000-0000-0000-000000000001",
+				"origin":    "boot_migration", "policy_version": 1,
+				"original_edge_id": nil,
+				"adopted_edge_id":  "de000000-0000-0000-0000-000000000001",
+				"delegate_id":      agentID,
+				"delegator_type":   "user", "delegator_id": userID,
+				"scope_id": projectID, "role": "creator", "depth": 1,
+				"status": "recognized", "reason": "",
+				"before_fingerprint": "", "after_summary": "",
+				"actor_kind": "", "actor_id": "",
+				"reverted_by_kind": "", "reverted_by_id": "", "revert_summary": "",
+				"reverted_at": nil,
+				"created":     baseTime, "updated": baseTime,
+			},
+		}},
+
 		// ---- Limit definitions (must precede entitlement_bindings & usage_reservations) ----
 		{Table: "limit_definitions", Rows: []row{
 			{

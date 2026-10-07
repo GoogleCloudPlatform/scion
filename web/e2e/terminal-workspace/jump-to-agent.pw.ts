@@ -73,10 +73,11 @@ async function setup(
       json: Object.values(agents).map((a) => ({ ...a, _capabilities: { actions: ['attach'] } })),
     });
   });
-  // The palette's own paginated fetch (fetchAllPaletteAgents): registered
-  // after the generic route above, so Playwright tries it first — a more
-  // specific override wins over an earlier, broader registration.
-  await page.route(/\/api\/v1\/agents\?limit=100(&|$)/, (route) => {
+  // The agent store's paginated list walk (`limit` set), which the palette
+  // reads: registered after the generic route above, so Playwright tries it
+  // first — a more specific override wins over an earlier, broader
+  // registration.
+  await page.route(/\/api\/v1\/agents\?(?:[^#]*&)?limit=/, (route) => {
     void route.fulfill({
       json: {
         agents: Object.values(agents).map((a) => ({

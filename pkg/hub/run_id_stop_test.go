@@ -84,7 +84,7 @@ func TestStopAgentQuery_RunID(t *testing.T) {
 }
 
 // runMismatchBody is the broker's run-mismatch 404 body for a stop naming
-// run-1 while run-2 holds the name (runtimebroker.StopRunMismatch).
+// run-1 while run-2 holds the name (runtimebroker.RunMismatch).
 const runMismatchBody = `{"error":{"code":"` + api.BrokerErrorCodeRunMismatch + `","message":"Agent not found for the requested run","details":{"runId":"run-1","currentRunId":"run-2"}}}`
 
 func TestHTTPRuntimeBrokerClient_StopAgentRunID(t *testing.T) {
