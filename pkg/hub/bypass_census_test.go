@@ -91,6 +91,9 @@ func TestBypassCensus(t *testing.T) {
 		// ─── Deletion detail visibility (ptone/scion#3122) ───────────────
 		{file: "deletion_redact.go", lineSubstr: "IsUnscopedLocalPlatformAdmin(user)", description: "callerSeesDeletionDetail: decides whether response bodies carry deletion code, error and claim (presentation only, grants no access)"},
 
+		// ─── Perf trace response headers ─────────────────────────────────
+		{file: "perftrace_middleware.go", lineSubstr: "IsUnscopedLocalPlatformAdmin(GetUserIdentityFromContext(r.Context()))", description: "perfHeadersAllowed: decides whether opt-in perf trace response headers are written (presentation only, grants no access)"},
+
 		// ─── Passthrough gate ───────────────────────────────────────────
 		{file: "passthrough_gate.go", lineSubstr: "IsUnscopedLocalPlatformAdmin(userIdent)", description: "the embedded broker counts as owned by an unscoped local platform administrator"},
 
