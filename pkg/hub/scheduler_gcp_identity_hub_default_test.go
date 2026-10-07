@@ -384,8 +384,9 @@ func TestScheduledDispatch_HubDefaultAssignSameAuthorizationAsProjectDefault(t *
 
 // TestScheduledDispatch_HubDefaultAssignDeniedFailsDispatch mirrors
 // TestScheduledDispatch_ProjectDefaultSADeniedFailsDispatch one rung down:
-// a hub default naming an SA the schedule's creator cannot act as must fail
-// the dispatch rather than silently falling back to block.
+// a hub default naming an SA the principal of the event's latest revision
+// cannot act as must fail the dispatch rather than silently falling back
+// to block.
 func TestScheduledDispatch_HubDefaultAssignDeniedFailsDispatch(t *testing.T) {
 	f := bypassAgentsSetup(t)
 	sa := bypassAgentsCreateSA(t, f, f.proj.ID, true)

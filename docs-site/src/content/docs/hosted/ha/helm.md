@@ -36,7 +36,9 @@ The chart does **not** create an Ingress, Gateway, load balancer, IAP
 configuration, Cloud SQL instance, GCS bucket, Secret Manager permissions, or
 any IAM binding. Provision those separately, for example with
 [Terraform](/scion/hosted/ha/terraform/) or the manual steps in
-[Deploy on GCP](/scion/hosted/ha/setup-gcp/).
+[Deploy on GCP](/scion/hosted/ha/setup-gcp/). The Terraform `hub-gke`
+configuration installs this chart for you behind a global load balancer with
+IAP; see [Running a hub on GKE instead of Cloud Run](/scion/hosted/ha/terraform/#running-a-hub-on-gke-instead-of-cloud-run).
 
 The chart defaults to `replicaCount: 1`. With more than one replica, the web
 terminal, exec, log tailing, and port forwarding fail for roughly (N-1)/N of

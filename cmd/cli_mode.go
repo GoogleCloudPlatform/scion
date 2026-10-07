@@ -132,6 +132,7 @@ var agentAllowed = map[string]bool{
 	"artifact":                    true,
 	"artifact.publish":            true,
 	"artifact.get":                true,
+	"artifact.versions":           true,
 }
 
 // resolveMode determines the active CLI mode from environment and settings.

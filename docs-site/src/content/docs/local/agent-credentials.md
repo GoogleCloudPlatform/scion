@@ -258,6 +258,10 @@ your host, where Scion discovers it and mounts it into the agent.
 | **Copilot** | `~/.copilot/config.json` | `COPILOT_CONFIG` |
 | **Antigravity** | `~/.gemini/antigravity-cli/antigravity-oauth-token` | `AGY_TOKEN` |
 
+:::caution[Upgrading a Hub]
+Harness-config resolution changed in the 2026-10-06 release. Upgrade the Hub before, or together with, its Runtime Brokers. Existing agents that use `auth-file` must re-authenticate (or be re-created) once after the upgrade. Agents that authenticate with environment secrets are not affected.
+:::
+
 **Local Setup:**
 If you have run the harness's native authentication command (e.g. an OAuth login on your host), Scion will automatically detect the resulting credential file and mount it into the agent.
 

@@ -52,6 +52,10 @@ vi.mock('../../../client/main.js', () => ({
   stateManager: new EventTarget(),
 }));
 
+// The real tooltip renders the markup test's message. It is defined before
+// any member renders: a row first rendered while sl-tooltip is undefined
+// fails to upgrade once it is defined.
+import '@shoelace-style/shoelace/dist/components/tooltip/tooltip.js';
 import './chat-members.js';
 import type { ScionChatMembers, ChatAgentMember } from './chat-members.js';
 
@@ -123,6 +127,24 @@ describe('scion-chat-members agent tooltip', () => {
     ]);
     expect(tooltipContent(el)).toContain('Waiting for user decision on c34');
     expect(tooltipContent(el).split('\n')[0]).toBe('Waiting for user decision on c34');
+  });
+
+  it('renders a detail message holding markup as text, not HTML', async () => {
+    // The detail message is free text the agent reports, so it must render
+    // as text whatever it holds.
+    const message = '<img src=x onerror="window.__pwned=1"><b>bold</b>';
+    const el = await mount([agent({ detailMessage: message })]);
+    expect(tooltipContent(el)).toBe(message);
+
+    const tip = el.shadowRoot?.querySelector('sl-tooltip') as
+      | (HTMLElement & { updateComplete: Promise<unknown> })
+      | null;
+    await tip?.updateComplete;
+    const body = tip?.shadowRoot?.querySelector('[part~="body"]');
+    expect(body?.textContent).toContain(message);
+    expect(body?.querySelector('img, b')).toBeNull();
+    expect(el.shadowRoot?.querySelector('img, b')).toBeNull();
+    expect((window as unknown as { __pwned?: number }).__pwned).toBeUndefined();
   });
 
   it('falls back to the activity when no detail message was reported', async () => {
