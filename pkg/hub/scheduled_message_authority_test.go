@@ -444,8 +444,8 @@ func TestScheduledMessageAuthority(t *testing.T) {
 		assert.Equal(t, errScheduledAuthorityUnrecorded.Error(), err.Error())
 		f.assertDelivered(t, 0)
 
-		// The same principal with a recorded ceiling is still not a user
-		// principal the resolver admits.
+		// With a recorded ceiling, a federated principal kind is not a user
+		// principal the resolver admits either.
 		evt := *stored
 		evt.AuthorityCeiling = store.EffectCeiling{Kind: store.EffectCeilingPrincipal}
 		evt.InitiatorPrincipalKind = string(PrincipalKindFederatedUser)
