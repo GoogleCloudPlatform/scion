@@ -1,11 +1,15 @@
 {
   "extends": "../../tsconfig.json",
   "compilerOptions": { "noEmit": true, "types": ["vite/client"] },
-  // The isolated terminal-test project compiles transitive toast.ts without
-  // client/main.ts. main.ts normally imports alert.js, supplying the
-  // HTMLElementTagNameMap augmentation. This type-only declaration is pinned
-  // to the installed Shoelace package.
-  "files": ["../../node_modules/@shoelace-style/shoelace/dist/components/alert/alert.d.ts"],
+  // The isolated terminal-test project compiles transitive toast.ts and
+  // confirm-dialog.ts without client/main.ts. main.ts normally imports
+  // alert.js and dialog.js, supplying the HTMLElementTagNameMap
+  // augmentation. These type-only declarations are pinned to the installed
+  // Shoelace package.
+  "files": [
+    "../../node_modules/@shoelace-style/shoelace/dist/components/alert/alert.d.ts",
+    "../../node_modules/@shoelace-style/shoelace/dist/components/dialog/dialog.d.ts"
+  ],
   "include": [
     "terminal-layout.test.ts",
     "terminal-sessions.test.ts",
@@ -15,6 +19,7 @@
     "terminal-reconnect.test.ts",
     "terminal-close-codes.test.ts",
     "terminal-workspace-root.test.ts",
+    "terminal-workspace-bulk-actions.test.ts",
     "terminal-foreground-reconnect.test.ts",
     "terminal-persistence.test.ts",
     "terminal-palette-data.test.ts",

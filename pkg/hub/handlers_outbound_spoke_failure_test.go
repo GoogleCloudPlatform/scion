@@ -129,6 +129,20 @@ func (f *outboundSpokeFixture) storedRows(t *testing.T) int {
 	return len(res.Items)
 }
 
+// requireStoredRowsStay asserts the stored row count stays at want for
+// 200ms. It polls on the test goroutine rather than using require.Never:
+// Never returns at its deadline without waiting for an in-flight condition
+// goroutine, which can then call storedRows (and require.NoError) after
+// cleanup has closed the store, failing the test from a goroutine after it
+// completed and panicking the whole test binary.
+func (f *outboundSpokeFixture) requireStoredRowsStay(t *testing.T, want int, msg string) {
+	t.Helper()
+	for deadline := time.Now().Add(200 * time.Millisecond); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		require.Equal(t, want, f.storedRows(t), msg)
+	}
+	require.Equal(t, want, f.storedRows(t), msg)
+}
+
 // requireSentOnce asserts the normal success response (status "sent" and a
 // message_id) and that exactly one row is stored, with no duplicate write.
 func (f *outboundSpokeFixture) requireSentOnce(t *testing.T, rr *httptest.ResponseRecorder) {
@@ -144,9 +158,7 @@ func (f *outboundSpokeFixture) requireSentOnce(t *testing.T, rr *httptest.Respon
 
 	require.Eventually(t, func() bool { return f.storedRows(t) >= 1 },
 		3*time.Second, 20*time.Millisecond, "expected a stored row")
-	require.Never(t, func() bool { return f.storedRows(t) > 1 },
-		200*time.Millisecond, 20*time.Millisecond, "expected exactly one stored row")
-	require.Equal(t, 1, f.storedRows(t))
+	f.requireStoredRowsStay(t, 1, "expected exactly one stored row")
 }
 
 // TestHandleAgentOutboundMessage_PluginSpokeFailureIsDelivered covers
@@ -261,8 +273,7 @@ func (f *outboundSpokeFixture) requireDeliveryFailedNoRow(t *testing.T, rr *http
 	var resp ErrorResponse
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
 	require.Equal(t, ErrCodeDeliveryFailed, resp.Error.Code)
-	require.Never(t, func() bool { return f.storedRows(t) > 0 },
-		200*time.Millisecond, 20*time.Millisecond, "expected no stored row")
+	f.requireStoredRowsStay(t, 0, "expected no stored row")
 }
 
 // TestHandleAgentOutboundMessage_PluginSpokeFailureAfterStopFails pins that
