@@ -100,6 +100,44 @@ func TestEffectiveSharedWorkspace_HubNativeProjectIsNotShared(t *testing.T) {
 	}
 }
 
+// With HOME behind a symlink, the canonical project dir (ResolveProjectPath
+// runs EvalSymlinks on a .scion directory) and the external agents root
+// derived from HOME are different paths for the same directory; the agent is
+// still not reported as shared-workspace.
+func TestEffectiveSharedWorkspace_HubNativeProjectViaSymlinkedHome(t *testing.T) {
+	realHome := t.TempDir()
+	home := filepath.Join(t.TempDir(), "home-link")
+	if err := os.Symlink(realHome, home); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	_, linkedDir := makeHubNativeProject(t, home, "hn-proj", hubNativeTestProjectID)
+	projectDir, err := filepath.EvalSymlinks(linkedDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved, err := config.GetResolvedProjectDir(projectDir); err != nil || resolved != projectDir {
+		t.Fatalf("fixture: canonical project dir should resolve to itself: %q, %v", resolved, err)
+	}
+	ext, err := config.AgentsRootForProject(projectDir, true, hubNativeTestProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Clean(ext) == filepath.Join(projectDir, "agents") {
+		t.Fatal("fixture: expected the external root and the project agents root to differ as paths")
+	}
+	agentDir := filepath.Join(projectDir, "agents", "dev")
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if effectiveSharedWorkspace(projectDir, "dev", false, hubNativeTestProjectID) {
+		t.Error("an agent in a hub-native project reached via a symlinked HOME must not be reported as shared-workspace")
+	}
+}
+
 // A linked project with a hub project ID keeps the external-root detection:
 // its external agents root differs from the in-project one, and an agent
 // whose external dir holds scion-agent.json is shared-workspace.

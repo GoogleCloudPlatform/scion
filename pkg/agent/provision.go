@@ -1145,7 +1145,9 @@ func checkAgentDirContained(projectDir, agentName string, sharedWorkspace bool) 
 //     shared-workspace agent whatever sharedWorkspace says (in worktree mode
 //     only home/ is external, never scion-agent.json), so its in-project
 //     <project>/agents/<name>, which a shared workspace mount exposes to
-//     containers, is never used;
+//     containers, is never used (except when the external root is the
+//     project's own agents root, as in a hub-native project; see
+//     effectiveSharedWorkspace);
 //   - with strict set (broker mode, or a hub-supplied project ID), a
 //     shared-workspace agent whose external root cannot be determined is an
 //     error (config.ErrAgentStateDirUnavailable), never the in-project root.
