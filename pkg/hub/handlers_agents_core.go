@@ -366,6 +366,11 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// The ids= format check runs before any authorization or store call
+	// (see parseAgentListIDs).
+	if !validateAgentListIDs(w, query, agentListLimit(query), sorted) {
+		return
+	}
 
 	// writeShortCircuit writes the empty list for an unauthenticated or
 	// None-scope caller. In sorted mode it first validates the remaining

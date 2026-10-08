@@ -47,6 +47,10 @@ type HealthSummaryResponse struct {
 	Brokers  HealthSummaryBrokers   `json:"runtime_brokers"`
 	Agents   *HealthSummaryAgents   `json:"agents"`   // nil when the agent aggregate is unavailable
 	Dispatch *HealthSummaryDispatch `json:"dispatch"` // nil when a dispatch store count failed
+
+	// Integrations lists chat and messaging plugins; never nil. See
+	// health_summary_integrations.go.
+	Integrations []HealthSummaryIntegration `json:"integrations"`
 }
 
 // HealthSummaryHub contains hub-level health information.
@@ -327,6 +331,9 @@ func (s *Server) handleHealthSummary(w http.ResponseWriter, r *http.Request) {
 		Brokers:  brokerList,
 		Agents:   agentsSummary,
 		Dispatch: dispatchSummary,
+
+		// See health_summary_integrations.go.
+		Integrations: s.healthSummaryIntegrations(ctx),
 	}
 
 	writeJSON(w, http.StatusOK, resp)

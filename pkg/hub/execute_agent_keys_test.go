@@ -274,6 +274,9 @@ func (e *agentKeysEventSpy) PublishChatMessageDeleted(_ context.Context, _, _ st
 func (e *agentKeysEventSpy) PublishDMPromotedEvent(_ context.Context, _ string, _ WebChatTopic) {
 	e.record("PublishDMPromotedEvent")
 }
+func (e *agentKeysEventSpy) PublishChatScheduledEvent(_ context.Context, _ string, _ ChatScheduledEvent) {
+	e.record("PublishChatScheduledEvent")
+}
 func (e *agentKeysEventSpy) PublishRaw(_ string, _ interface{}) {
 	e.record("PublishRaw")
 }
