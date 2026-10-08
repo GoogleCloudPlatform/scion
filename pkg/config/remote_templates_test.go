@@ -30,6 +30,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -583,15 +584,29 @@ func TestFetchGitHubTarball(t *testing.T) {
 	type seenRequest struct {
 		method, scheme, host, path, auth string
 	}
-	var seen []seenRequest
-	var status int
-	var body []byte
+	// The handler runs on the server's goroutine, so all state shared with
+	// the test goroutine is guarded by mu and only accessed under it.
+	var (
+		mu     sync.Mutex
+		seen   []seenRequest
+		status int
+		body   []byte
+	)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		seen[len(seen)-1].host = r.Host
-		seen[len(seen)-1].path = r.URL.Path
-		seen[len(seen)-1].auth = r.Header.Get("Authorization")
-		w.WriteHeader(status)
-		_, _ = w.Write(body)
+		mu.Lock()
+		// The round tripper records method and scheme first; if it somehow
+		// did not, record the request here rather than indexing an empty slice.
+		if len(seen) == 0 {
+			seen = append(seen, seenRequest{})
+		}
+		last := &seen[len(seen)-1]
+		last.host = r.Host
+		last.path = r.URL.Path
+		last.auth = r.Header.Get("Authorization")
+		respStatus, respBody := status, body
+		mu.Unlock()
+		w.WriteHeader(respStatus)
+		_, _ = w.Write(respBody)
 	}))
 	t.Cleanup(srv.Close)
 	srvURL, err := url.Parse(srv.URL)
@@ -600,7 +615,9 @@ func TestFetchGitHubTarball(t *testing.T) {
 	oldTransport := http.DefaultClient.Transport
 	t.Cleanup(func() { http.DefaultClient.Transport = oldTransport })
 	http.DefaultClient.Transport = remoteTemplatesRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+		mu.Lock()
 		seen = append(seen, seenRequest{method: r.Method, scheme: r.URL.Scheme})
+		mu.Unlock()
 		// Redirect to the local server; r.Host stays "github.com", so the
 		// server still sees the host the production code targeted.
 		out := r.Clone(r.Context())
@@ -670,25 +687,31 @@ func TestFetchGitHubTarball(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			respBody := githubTarballFixture(t, tt.root, files)
+			if tt.status != http.StatusOK {
+				respBody = []byte("Not Found")
+			}
+			mu.Lock()
 			seen = nil
 			status = tt.status
-			body = githubTarballFixture(t, tt.root, files)
-			if tt.status != http.StatusOK {
-				body = []byte("Not Found")
-			}
+			body = respBody
+			mu.Unlock()
 			dest := t.TempDir()
 			parts := tt.parts
 
 			err := fetchGitHubTarball(context.Background(), &parts, dest, tt.token)
 
-			require.Len(t, seen, 1, "exactly one HTTP request")
+			mu.Lock()
+			gotSeen := append([]seenRequest(nil), seen...)
+			mu.Unlock()
+			require.Len(t, gotSeen, 1, "exactly one HTTP request")
 			assert.Equal(t, seenRequest{
 				method: http.MethodGet,
 				scheme: "https",
 				host:   "github.com",
 				path:   tt.wantPath,
 				auth:   tt.wantAuth,
-			}, seen[0])
+			}, gotSeen[0])
 			if tt.wantErr != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.wantErr)
