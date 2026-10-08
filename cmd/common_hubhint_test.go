@@ -206,7 +206,7 @@ func TestWrapHubError_EmptyResponseFromHubclient(t *testing.T) {
 	_, err = client.Env().List(t.Context(), nil)
 	got := wrapHubError(fmt.Errorf("failed to list environment variables: %w", err))
 	want := "failed to list environment variables: server returned no content (status: 204)" +
-		"\n\nThe Hub returned an empty response where a result was expected."
+		"\n\nThe hub returned an empty response where a result was expected."
 	if got.Error() != want {
 		t.Errorf("empty response:\n got %q\nwant %q", got.Error(), want)
 	}

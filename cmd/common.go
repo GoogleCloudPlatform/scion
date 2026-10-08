@@ -429,10 +429,10 @@ func PrintUsingHub(endpoint string) {
 // is a plausible remedy (the hub is unreachable or failing).
 const localOnlyHint = "\n\nTo use local-only mode, run: scion hub disable"
 
-// emptyResponseNote replaces localOnlyHint when the Hub answered a call that
-// needs a body with an empty response (apiclient.ErrNoContent). The Hub was
+// emptyResponseNote replaces localOnlyHint when the hub answered a call that
+// needs a body with an empty response (apiclient.ErrNoContent). The hub was
 // reachable, so suggesting local-only mode would be misleading.
-const emptyResponseNote = "\n\nThe Hub returned an empty response where a result was expected."
+const emptyResponseNote = "\n\nThe hub returned an empty response where a result was expected."
 
 // hubError marks an error that has been through wrapHubError. Error() is the
 // fully rendered message (including any hint); Unwrap exposes the original
@@ -473,10 +473,11 @@ func isHubFailure(err error) bool {
 //
 //   - 401: replaced with a "login with scion hub auth login" hint (or, inside a
 //     hub-managed agent, a credentials-rejected message that keeps the cause).
-//   - Connectivity failures (anything that is not an *apiclient.APIError, e.g.
-//     a transport error or timeout) and 5xx responses: the "scion hub disable"
-//     local-only hint is appended, since the hub being down is the case where
-//     falling back to local mode can help.
+//   - Connectivity failures (anything that is not an *apiclient.APIError,
+//     other than the empty-response case below, e.g. a transport error or
+//     timeout) and 5xx responses: the "scion hub disable" local-only hint is
+//     appended, since the hub being down is the case where falling back to
+//     local mode can help.
 //   - Other API errors (4xx such as 400/403/404/409/422): returned as-is. The
 //     hub answered and the message is about the request, so suggesting that
 //     the user disable the hub would be misleading noise.
