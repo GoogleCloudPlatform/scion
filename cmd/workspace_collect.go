@@ -33,9 +33,12 @@ import (
 // entry or lies under it (for example because the defaults were changed),
 // the collect fails instead of returning it.
 //
-// Every workspace collect in this package goes through here; a guard test
-// fails if a call site uses transfer.CollectFiles or a ManifestBuilder
-// directly.
+// Every workspace collect in this package goes through here. A source guard
+// test resolves the pkg/transfer and pkg/hubclient imports by import path in
+// each file, so it fails if any other call site uses their CollectFiles or
+// ManifestBuilder (under any import name), or if either package is dot- or
+// blank-imported; only the listed template and harness-config uploads may use
+// hubclient.CollectFiles.
 func collectWorkspaceFiles(root string, extra []string) ([]transfer.FileInfo, error) {
 	// transfer.CollectFiles seeds the defaults; extra only adds to them.
 	files, err := transfer.CollectFiles(root, extra)

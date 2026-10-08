@@ -15,12 +15,15 @@
 package cmd
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"os"
+	pathpkg "path"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -132,34 +135,121 @@ func TestCollectWorkspaceFiles_FailsClosed(t *testing.T) {
 	}
 }
 
-// TestWorkspaceCollectSitesUseHelper is a source guard: every workspace
-// collect in package cmd goes through collectWorkspaceFiles. It fails if a
-// non-test file calls transfer.CollectFiles or builds a transfer
-// ManifestBuilder anywhere else, if a hubclient collect appears outside the
-// listed template/harness-config uploads, or if a known workspace transfer
-// site stops calling the helper.
-func TestWorkspaceCollectSitesUseHelper(t *testing.T) {
+// Workspace transfer sites that must call collectWorkspaceFiles.
+var workspaceCollectRequiredSites = []string{
+	"startAgentViaHub", // non-git workspace bootstrap upload
+	"syncToViaHub",     // scion sync to (hub)
+	"syncFromViaHub",   // scion sync from (hub): local comparison set
+}
+
+// Template and harness-config uploads collect a resource directory, not a
+// workspace. They go through hubclient.CollectFiles, which applies the same
+// defaults; new uses must be added here deliberately.
+var workspaceCollectAllowedHubclient = map[string]bool{
+	"syncTemplateToHub":         true,
+	"runTemplateStatus":         true,
+	"handleHubAndLocalTemplate": true,
+	"syncHarnessConfigToHub":    true,
+}
+
+const (
+	transferImportPath  = "github.com/GoogleCloudPlatform/scion/pkg/transfer"
+	hubclientImportPath = "github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+)
+
+// workspaceCollectBanned lists, per import path, the collect entry points
+// that only collectWorkspaceFiles (transfer) or the allow-listed resource
+// uploads (hubclient.CollectFiles) may use.
+var workspaceCollectBanned = map[string]map[string]bool{
+	transferImportPath:  {"CollectFiles": true, "NewManifestBuilder": true, "ManifestBuilder": true},
+	hubclientImportPath: {"CollectFiles": true, "NewManifestBuilder": true, "ManifestBuilder": true},
+}
+
+// checkWorkspaceCollectSource parses one non-test source file of package cmd
+// and reports uses of the banned collect entry points outside the helper and
+// the allow-list. Uses are matched by import path: the local name of each
+// banned package is resolved from the file's imports, so an aliased import
+// is checked like a default one. A dot or blank import of a banned package is
+// reported outright. Functions that call the helper are added to
+// callsHelper.
+func checkWorkspaceCollectSource(fset *token.FileSet, filename string, src any, callsHelper map[string]bool) ([]string, error) {
 	const helper = "collectWorkspaceFiles"
-	// Workspace transfer sites that must call the helper.
-	requiredSites := []string{
-		"startAgentViaHub", // non-git workspace bootstrap upload
-		"syncToViaHub",     // scion sync to (hub)
-		"syncFromViaHub",   // scion sync from (hub): local comparison set
+	f, err := parser.ParseFile(fset, filename, src, parser.SkipObjectResolution)
+	if err != nil {
+		return nil, err
 	}
-	// Template and harness-config uploads collect a resource directory, not a
-	// workspace. They go through hubclient.CollectFiles, which applies the
-	// same defaults; new uses must be added here deliberately.
-	allowedHubclientCollect := map[string]bool{
-		"syncTemplateToHub":         true,
-		"runTemplateStatus":         true,
-		"handleHubAndLocalTemplate": true,
-		"syncHarnessConfigToHub":    true,
-	}
-	banned := map[string]map[string]bool{
-		"transfer":  {"CollectFiles": true, "NewManifestBuilder": true, "ManifestBuilder": true},
-		"hubclient": {"CollectFiles": true, "NewManifestBuilder": true, "ManifestBuilder": true},
+	var problems []string
+	// Local package name -> import path, for the banned packages only.
+	local := map[string]string{}
+	for _, imp := range f.Imports {
+		path, err := strconv.Unquote(imp.Path.Value)
+		if err != nil {
+			return nil, err
+		}
+		if workspaceCollectBanned[path] == nil {
+			continue
+		}
+		name := pathpkg.Base(path)
+		if imp.Name != nil {
+			name = imp.Name.Name
+		}
+		if name == "." || name == "_" {
+			problems = append(problems, fmt.Sprintf("%s: %q imported as %s; import it by name so the collect guard can check its uses",
+				fset.Position(imp.Pos()), path, name))
+			continue
+		}
+		local[name] = path
 	}
 
+	// Package-level declarations (outside any function) count as an
+	// enclosing function named "".
+	check := func(fn string, root ast.Node) {
+		ast.Inspect(root, func(n ast.Node) bool {
+			if call, ok := n.(*ast.CallExpr); ok {
+				if id, ok := call.Fun.(*ast.Ident); ok && id.Name == helper {
+					callsHelper[fn] = true
+				}
+			}
+			sel, ok := n.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			pkg, ok := sel.X.(*ast.Ident)
+			if !ok {
+				return true
+			}
+			path, ok := local[pkg.Name]
+			if !ok || !workspaceCollectBanned[path][sel.Sel.Name] {
+				return true
+			}
+			switch {
+			case path == transferImportPath && fn == helper:
+			case path == hubclientImportPath && sel.Sel.Name == "CollectFiles" && workspaceCollectAllowedHubclient[fn]:
+			default:
+				problems = append(problems, fmt.Sprintf("%s: %s.%s (%s) used in %q; collect workspace files with %s",
+					fset.Position(sel.Pos()), pkg.Name, sel.Sel.Name, path, fn, helper))
+			}
+			return true
+		})
+	}
+	for _, decl := range f.Decls {
+		if fd, ok := decl.(*ast.FuncDecl); ok {
+			check(fd.Name.Name, fd)
+		} else {
+			check("", decl)
+		}
+	}
+	return problems, nil
+}
+
+// TestWorkspaceCollectSitesUseHelper is a source guard: every workspace
+// collect in package cmd goes through collectWorkspaceFiles. It fails if a
+// non-test file uses transfer.CollectFiles or a transfer ManifestBuilder
+// anywhere else (under any import name), if a hubclient collect appears
+// outside the listed template/harness-config uploads, if either package is
+// dot- or blank-imported, or if a known workspace transfer site stops calling
+// the helper.
+func TestWorkspaceCollectSitesUseHelper(t *testing.T) {
 	paths, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatal(err)
@@ -170,48 +260,88 @@ func TestWorkspaceCollectSitesUseHelper(t *testing.T) {
 		if strings.HasSuffix(path, "_test.go") {
 			continue
 		}
-		f, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
+		problems, err := checkWorkspaceCollectSource(fset, path, nil, callsHelper)
 		if err != nil {
 			t.Fatalf("parse %s: %v", path, err)
 		}
-		// Package-level declarations (outside any function) count as an
-		// enclosing function named "".
-		check := func(fn string, root ast.Node) {
-			ast.Inspect(root, func(n ast.Node) bool {
-				if call, ok := n.(*ast.CallExpr); ok {
-					if id, ok := call.Fun.(*ast.Ident); ok && id.Name == helper {
-						callsHelper[fn] = true
-					}
-				}
-				sel, ok := n.(*ast.SelectorExpr)
-				if !ok {
-					return true
-				}
-				pkg, ok := sel.X.(*ast.Ident)
-				if !ok || !banned[pkg.Name][sel.Sel.Name] {
-					return true
-				}
-				switch {
-				case pkg.Name == "transfer" && fn == helper:
-				case pkg.Name == "hubclient" && sel.Sel.Name == "CollectFiles" && allowedHubclientCollect[fn]:
-				default:
-					t.Errorf("%s: %s.%s used in %q; collect workspace files with %s",
-						fset.Position(sel.Pos()), pkg.Name, sel.Sel.Name, fn, helper)
-				}
-				return true
-			})
-		}
-		for _, decl := range f.Decls {
-			if fd, ok := decl.(*ast.FuncDecl); ok {
-				check(fd.Name.Name, fd)
-			} else {
-				check("", decl)
-			}
+		for _, p := range problems {
+			t.Error(p)
 		}
 	}
-	for _, site := range requiredSites {
+	for _, site := range workspaceCollectRequiredSites {
 		if !callsHelper[site] {
-			t.Errorf("%s no longer calls %s", site, helper)
+			t.Errorf("%s no longer calls collectWorkspaceFiles", site)
 		}
 	}
+}
+
+// TestCheckWorkspaceCollectSource feeds the source guard synthetic files: a
+// bypass is reported whatever name the package is imported under, and code
+// that goes through the helper or the allow-list passes.
+func TestCheckWorkspaceCollectSource(t *testing.T) {
+	bypass := map[string]string{
+		"default import": `package cmd
+import "github.com/GoogleCloudPlatform/scion/pkg/transfer"
+func newSite(p string) { transfer.CollectFiles(p, nil) }
+`,
+		"aliased import": `package cmd
+import xfer "github.com/GoogleCloudPlatform/scion/pkg/transfer"
+func newSite(p string) { xfer.CollectFiles(p, nil) }
+`,
+		"dot import": `package cmd
+import . "github.com/GoogleCloudPlatform/scion/pkg/transfer"
+func newSite(p string) { CollectFiles(p, nil) }
+`,
+		"blank import": `package cmd
+import _ "github.com/GoogleCloudPlatform/scion/pkg/transfer"
+`,
+		"aliased manifest builder": `package cmd
+import t2 "github.com/GoogleCloudPlatform/scion/pkg/transfer"
+var b = t2.NewManifestBuilder
+`,
+		"aliased hubclient collect": `package cmd
+import hc "github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+func newSite(p string) { hc.CollectFiles(p, nil) }
+`,
+		"hubclient dot import": `package cmd
+import . "github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+`,
+	}
+	for name, src := range bypass {
+		t.Run(name, func(t *testing.T) {
+			problems, err := checkWorkspaceCollectSource(token.NewFileSet(), "bypass.go", src, map[string]bool{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(problems) == 0 {
+				t.Errorf("guard did not report the bypass in:\n%s", src)
+			}
+		})
+	}
+
+	t.Run("clean source", func(t *testing.T) {
+		src := `package cmd
+import (
+	xfer "github.com/GoogleCloudPlatform/scion/pkg/transfer"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+)
+type transferLike struct{}
+func (transferLike) CollectFiles() {}
+func collectWorkspaceFiles(p string, extra []string) ([]xfer.FileInfo, error) { return xfer.CollectFiles(p, extra) }
+func syncToViaHub(p string) { collectWorkspaceFiles(p, nil); _ = xfer.BuildManifest(nil) }
+func syncTemplateToHub(p string) { hubclient.CollectFiles(p, nil) }
+func other() { var transfer transferLike; transfer.CollectFiles() }
+`
+		callsHelper := map[string]bool{}
+		problems, err := checkWorkspaceCollectSource(token.NewFileSet(), "clean.go", src, callsHelper)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(problems) != 0 {
+			t.Errorf("guard reported clean source: %v", problems)
+		}
+		if !callsHelper["syncToViaHub"] {
+			t.Errorf("guard did not record syncToViaHub calling the helper: %v", callsHelper)
+		}
+	})
 }
