@@ -46,14 +46,16 @@ interface PageCase {
   state: Record<string, unknown>;
   /** Page method that returns the header template. */
   method: 'render' | 'renderHeader';
-  /** The slotted icon, as tag.class[name]. */
-  icon: string;
+  /** The slotted icon, as tag.class[name]; null for a page with no icon. */
+  icon: string | null;
   /** Tags of the badges (unslotted children), in order. */
   badges: string[];
   /** Classes of the meta slot's elements, in order. */
   meta: string[];
   /** Whether the page has header actions (the template page has none). */
   actions?: false;
+  /** State overrides under which no header action renders. */
+  noActions?: Record<string, unknown>;
 }
 
 const CAPS = { _capabilities: { actions: ['read', 'update', 'delete'] } };
@@ -80,6 +82,7 @@ const cases: Array<[string, PageCase]> = [
       icon: 'sl-icon.[hdd-rack]',
       badges: ['span', 'scion-status-badge'],
       meta: ['header-subtitle'],
+      noActions: { pageData: { path: '/brokers/b-1', user: { id: 'u', role: 'member' } } },
     },
   ],
   [
@@ -95,6 +98,15 @@ const cases: Array<[string, PageCase]> = [
       icon: 'sl-icon.[lightning-charge]',
       badges: ['scion-status-badge'],
       meta: ['header-meta'],
+      noActions: {
+        skill: {
+          id: 's-1',
+          name: LONG_NAME,
+          status: 'active',
+          scope: 'global',
+          _capabilities: { actions: ['read'] },
+        },
+      },
     },
   ],
   [
@@ -118,6 +130,17 @@ const cases: Array<[string, PageCase]> = [
       icon: 'div.group-icon explicit[]',
       badges: ['span'],
       meta: ['header-slug'],
+      noActions: {
+        group: {
+          id: 'g-1',
+          name: LONG_NAME,
+          slug: 'g',
+          groupType: 'explicit',
+          created: '2026-01-01T00:00:00Z',
+          updated: '2026-01-01T00:00:00Z',
+          _capabilities: { actions: ['read'] },
+        },
+      },
     },
   ],
   [
@@ -168,6 +191,7 @@ const cases: Array<[string, PageCase]> = [
         harnessConfig: {
           id: 'h-1',
           name: LONG_NAME,
+          description: 'd',
           harness: 'claude',
           scope: 'global',
           sourceUrl: 'https://example.com/hc',
@@ -177,7 +201,17 @@ const cases: Array<[string, PageCase]> = [
       method: 'renderHeader',
       icon: 'sl-icon.[sliders]',
       badges: ['span'],
-      meta: ['resource-meta-row'],
+      // The description sits in the title column, beside the actions.
+      meta: ['resource-description', 'resource-meta-row'],
+      noActions: {
+        harnessConfig: {
+          id: 'h-1',
+          name: LONG_NAME,
+          harness: 'claude',
+          scope: 'global',
+          _capabilities: { actions: ['read'] },
+        },
+      },
     },
   ],
   [
@@ -193,6 +227,75 @@ const cases: Array<[string, PageCase]> = [
       icon: 'sl-icon.[cloud-arrow-down]',
       badges: [],
       meta: [],
+    },
+  ],
+  [
+    'artifact',
+    {
+      module: './artifact-detail.js',
+      tag: 'scion-page-artifact-detail',
+      state: {
+        data: {
+          artifact: {
+            id: 'a-1',
+            ref: 'scion://artifact/a-1',
+            scopeKind: 'project',
+            scopeRef: 'p-1',
+            ownerKind: 'user',
+            ownerRef: 'u-1',
+            title: LONG_NAME,
+            currentSeq: 1,
+            createdAt: '2026-01-01T00:00:00Z',
+            updatedAt: '2026-01-01T00:00:00Z',
+          },
+          version: {
+            seq: 1,
+            ref: 'scion://artifact/a-1@1',
+            kind: 'publish',
+            entryPath: 'a.md',
+            totalBytes: 5,
+            fileCount: 1,
+            createdAt: '2026-01-01T00:00:00Z',
+            state: 'ready',
+            files: [{ path: 'a.md', size: 5, sha256: 'ab', mediaType: 'text/markdown' }],
+          },
+        },
+      },
+      method: 'renderHeader',
+      icon: 'sl-icon.[file-earmark-richtext]',
+      badges: [],
+      meta: ['meta'],
+      // The actions hide while the artifact is being edited.
+      noActions: { editing: true },
+    },
+  ],
+  [
+    'gcp service account',
+    {
+      module: './gcp-service-account-detail.js',
+      tag: 'scion-page-gcp-service-account-detail',
+      state: {
+        loading: false,
+        account: {
+          id: 'sa-1',
+          email: `${LONG_NAME}@example-project.iam.gserviceaccount.com`,
+          displayName: 'Builder',
+          scope: 'hub',
+          _capabilities: { actions: ['read', 'verify', 'delete'] },
+        },
+      },
+      method: 'render',
+      icon: null,
+      badges: [],
+      meta: ['display-name'],
+      noActions: {
+        account: {
+          id: 'sa-1',
+          email: `${LONG_NAME}@example-project.iam.gserviceaccount.com`,
+          scope: 'hub',
+          _capabilities: { actions: ['read'] },
+        },
+      },
     },
   ],
 ];
@@ -213,6 +316,10 @@ const LAYOUT_SELECTORS = [
   '.resource-title',
   '.resource-title-main',
   '.resource-title h1',
+  '.title',
+  '.title h1',
+  '.title sl-icon',
+  '.actions',
 ];
 
 const loaded = new Map<string, Map<string, string>>();
@@ -244,7 +351,7 @@ const describeEl = (n: Element): string =>
 describe.each(cases)('%s detail header', (_label, c) => {
   it('renders the name as the shared header heading', () => {
     const header = renderHeader(c);
-    expect(header.heading).toBe(LONG_NAME);
+    expect(header.heading).toContain(LONG_NAME);
     // The h1 is the shared header's; the page adds none of its own.
     expect(header.querySelector('h1')).toBeNull();
   });
@@ -253,7 +360,7 @@ describe.each(cases)('%s detail header', (_label, c) => {
     const header = renderHeader(c);
     const children = Array.from(header.children);
     const inSlot = (name: string) => children.filter((n) => n.getAttribute('slot') === name);
-    expect(inSlot('icon').map(describeEl)).toEqual([c.icon]);
+    expect(inSlot('icon').map(describeEl)).toEqual(c.icon ? [c.icon] : []);
     expect(
       children.filter((n) => !n.hasAttribute('slot')).map((n) => n.tagName.toLowerCase())
     ).toEqual(c.badges);
@@ -281,9 +388,24 @@ describe.each(cases)('%s detail header', (_label, c) => {
       expect(node.getAttribute('style') ?? '').not.toMatch(/(min-|max-)?width/);
     }
     // The icon takes its size from the shared header's stylesheet.
-    expect(header.querySelector(':scope > [slot="icon"]')!.hasAttribute('style')).toBe(false);
+    expect(header.querySelector(':scope > [slot="icon"]')?.hasAttribute('style') ?? false).toBe(
+      false
+    );
   });
 });
+
+// Pages whose actions all depend on state render no actions wrapper when
+// none applies: an empty wrapper would still be a flex item taking the row
+// gap.
+describe.each(cases.filter(([, c]) => c.noActions))(
+  '%s detail header without actions',
+  (_label, c) => {
+    it('renders no actions wrapper', () => {
+      const header = renderHeader({ ...c, state: { ...c.state, ...c.noActions } });
+      expect(header.querySelector(':scope > [slot="actions"]')).toBeNull();
+    });
+  }
+);
 
 describe('project detail linked badge', () => {
   const c = cases.find(([label]) => label === 'project')![1];

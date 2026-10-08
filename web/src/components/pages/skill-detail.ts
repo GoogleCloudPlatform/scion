@@ -625,6 +625,8 @@ export class ScionPageSkillDetail extends LitElement {
 
   private renderHeader() {
     const skill = this.skill!;
+    const canUpdate = can(skill._capabilities, 'update');
+    const canDelete = can(skill._capabilities, 'delete');
     return html`
       <scion-detail-header heading=${skill.name}>
         <sl-icon slot="icon" name="lightning-charge"></sl-icon>
@@ -635,50 +637,54 @@ export class ScionPageSkillDetail extends LitElement {
         <div slot="meta" class="header-meta">
           <span class="scope-badge">${skill.scope}</span>
         </div>
-        <div slot="actions" class="header-actions">
-          ${can(skill._capabilities, 'update')
-            ? html`
-                <sl-button
-                  variant="default"
-                  size="small"
-                  outline
-                  @click=${() => this.startEditing()}
-                >
-                  <sl-icon slot="prefix" name="pencil"></sl-icon>
-                  Edit
-                </sl-button>
-              `
-            : nothing}
-          ${can(skill._capabilities, 'update')
-            ? html`
-                <sl-button
-                  variant="primary"
-                  size="small"
-                  @click=${() => {
-                    this.publishDialogOpen = true;
-                  }}
-                >
-                  <sl-icon slot="prefix" name="upload"></sl-icon>
-                  Publish Version
-                </sl-button>
-              `
-            : nothing}
-          ${can(skill._capabilities, 'delete')
-            ? html`
-                <sl-button
-                  variant="danger"
-                  size="small"
-                  outline
-                  ?loading=${this.actionLoading['archive']}
-                  ?disabled=${this.actionLoading['archive']}
-                  @click=${() => this.handleArchive()}
-                >
-                  <sl-icon slot="prefix" name="trash"></sl-icon>
-                  Archive
-                </sl-button>
-              `
-            : nothing}
-        </div>
+        ${canUpdate || canDelete
+          ? html`
+              <div slot="actions" class="header-actions">
+                ${canUpdate
+                  ? html`
+                      <sl-button
+                        variant="default"
+                        size="small"
+                        outline
+                        @click=${() => this.startEditing()}
+                      >
+                        <sl-icon slot="prefix" name="pencil"></sl-icon>
+                        Edit
+                      </sl-button>
+                    `
+                  : nothing}
+                ${canUpdate
+                  ? html`
+                      <sl-button
+                        variant="primary"
+                        size="small"
+                        @click=${() => {
+                          this.publishDialogOpen = true;
+                        }}
+                      >
+                        <sl-icon slot="prefix" name="upload"></sl-icon>
+                        Publish Version
+                      </sl-button>
+                    `
+                  : nothing}
+                ${canDelete
+                  ? html`
+                      <sl-button
+                        variant="danger"
+                        size="small"
+                        outline
+                        ?loading=${this.actionLoading['archive']}
+                        ?disabled=${this.actionLoading['archive']}
+                        @click=${() => this.handleArchive()}
+                      >
+                        <sl-icon slot="prefix" name="trash"></sl-icon>
+                        Archive
+                      </sl-button>
+                    `
+                  : nothing}
+              </div>
+            `
+          : nothing}
       </scion-detail-header>
     `;
   }

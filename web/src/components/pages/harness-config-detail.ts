@@ -631,6 +631,7 @@ export class ScionPageHarnessConfigDetail extends LitElement {
 
   private renderHeader() {
     const hc = this.harnessConfig!;
+    const canDelete = can(hc._capabilities, 'delete') || can(hc._capabilities, 'manage');
     return html`
       <scion-detail-header heading=${hc.displayName || hc.name}>
         <sl-icon slot="icon" name="sliders"></sl-icon>
@@ -662,38 +663,42 @@ export class ScionPageHarnessConfigDetail extends LitElement {
         ${this.reimportError
           ? html`<p slot="meta" class="reimport-status error">${this.reimportError}</p>`
           : ''}
-        <div slot="actions" class="header-actions">
-          ${hc.sourceUrl
-            ? html`
-                <sl-button
-                  size="small"
-                  variant="default"
-                  @click=${this.startReimport}
-                  ?disabled=${this.reimportRunning}
-                  ?loading=${this.reimportRunning}
-                >
-                  <sl-icon slot="prefix" name="arrow-repeat"></sl-icon>
-                  Refresh from Source
-                </sl-button>
-              `
-            : nothing}
-          ${can(hc._capabilities, 'delete') || can(hc._capabilities, 'manage')
-            ? html`
-                <sl-button
-                  size="small"
-                  variant="danger"
-                  outline
-                  @click=${() => {
-                    this.deleteDialogOpen = true;
-                    this.deleteError = '';
-                  }}
-                >
-                  <sl-icon slot="prefix" name="trash"></sl-icon>
-                  Delete
-                </sl-button>
-              `
-            : nothing}
-        </div>
+        ${hc.sourceUrl || canDelete
+          ? html`
+              <div slot="actions" class="header-actions">
+                ${hc.sourceUrl
+                  ? html`
+                      <sl-button
+                        size="small"
+                        variant="default"
+                        @click=${this.startReimport}
+                        ?disabled=${this.reimportRunning}
+                        ?loading=${this.reimportRunning}
+                      >
+                        <sl-icon slot="prefix" name="arrow-repeat"></sl-icon>
+                        Refresh from Source
+                      </sl-button>
+                    `
+                  : nothing}
+                ${canDelete
+                  ? html`
+                      <sl-button
+                        size="small"
+                        variant="danger"
+                        outline
+                        @click=${() => {
+                          this.deleteDialogOpen = true;
+                          this.deleteError = '';
+                        }}
+                      >
+                        <sl-icon slot="prefix" name="trash"></sl-icon>
+                        Delete
+                      </sl-button>
+                    `
+                  : nothing}
+              </div>
+            `
+          : nothing}
       </scion-detail-header>
     `;
   }
