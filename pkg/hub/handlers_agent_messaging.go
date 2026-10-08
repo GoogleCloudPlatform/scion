@@ -184,6 +184,22 @@ func outboundThreadGateApplies(channel string) bool {
 	return err == nil && surface == "native"
 }
 
+// outboundThreadSurface returns the conversation surface for an outbound
+// thread send (kind "group") on an external channel, matching the surface
+// the inbound path stores the same thread under. It returns "" for other
+// kinds, native channels and channels with no known surface, which keep
+// the default native surface.
+func outboundThreadSurface(kind, channel string) string {
+	if kind != "group" {
+		return ""
+	}
+	surface, err := messaging.ChannelToSurfaceStrict(channel)
+	if err != nil || surface == "native" {
+		return ""
+	}
+	return surface
+}
+
 // outboundThreadConversationState reports whether a free-text thread key
 // (extRef = "thread:<project>:<threadID>") names a conversation that
 // ResolveOrCreateConversationByKey would reuse rather than mint, and whether
@@ -658,6 +674,13 @@ func (s *Server) resolveOutboundRouting(
 			}
 			if wcs != nil {
 				keyOpts = append(keyOpts, messaging.WithKeyTopicLookup(wcs))
+			}
+			// A thread on an external channel is stored under that
+			// channel's surface, the same key the inbound path uses for
+			// replies on the thread, so both directions share one
+			// conversation.
+			if surface := outboundThreadSurface(kind, req.Channel); surface != "" {
+				keyOpts = append(keyOpts, messaging.WithSurface(surface))
 			}
 			// A25.6 F1/F3: register both DM principals as participants so
 			// the conversation is discoverable via `conversation list`.
