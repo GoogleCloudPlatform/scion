@@ -67,6 +67,9 @@ func setupDMObserverTest(t *testing.T) dmObserverTestEnv {
 		CreatedBy: owner.ID,
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
+	// The agents' ancestry root is a member of the project, so they are
+	// in good standing (ptone/scion#3433).
+	ensureStandingRoot(t, s, project.ID, owner.ID)
 
 	brokerID := tid("obs-broker")
 	require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{

@@ -62,6 +62,11 @@ const fakeState = vi.hoisted(() => {
   t.seedAgents = (list: any[]) => list.forEach((a: any) => t.agents.set(a.id, a));
   t.removeAgent = (id: string) => t.agents.delete(id);
   t.setScope = () => {};
+  t.getAgent = (id: string) => t.agents.get(id);
+  // Seed epochs record nothing here.
+  t.scopeGeneration = 0;
+  t.beginSeedEpoch = () => Symbol('seed-epoch');
+  t.endSeedEpoch = () => {};
   return t;
 });
 

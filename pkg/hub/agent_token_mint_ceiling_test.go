@@ -690,6 +690,10 @@ func TestDevLocalEdgeDeniedWhenDevUserInactive(t *testing.T) {
 		require.NoError(t, f.store.UpdateUser(ctx, u))
 
 		rec := httptest.NewRecorder()
+		// This case pins the mint-time ceiling refusal; the dispatcher's
+		// standing check (ptone/scion#3433), which refuses an inactive root
+		// before any mint, is taken out of the way for it.
+		f.disp.requiredStandingCheck = nil
 		err = f.disp.DispatchAgentStart(ctx, a, "", false)
 		require.True(t, writeAgentTokenIssueError(rec, err), "err %v", err)
 		assertCeilingDenied(t, rec)

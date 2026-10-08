@@ -65,6 +65,9 @@ func newLandedDeleteServer(t *testing.T) (*Server, store.Store, *store.Agent, *l
 	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
 		ProjectID: project.ID, BrokerID: broker.ID, BrokerName: broker.Name, Status: broker.Status,
 	}))
+	// The owner is a project member, so the agent is in good standing
+	// (ptone/scion#3433).
+	ensureStandingRoot(t, s, project.ID, tid("landed-del-user"))
 	agent := &store.Agent{
 		ID:              tid("landed-del-agent-" + t.Name()),
 		Name:            "landed-del-agent",

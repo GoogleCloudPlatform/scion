@@ -2055,4 +2055,10 @@ func (s *Server) initBoundaryServices() {
 	gs.auditWriter = auditWriter
 	gs.eventBus = eventBus
 	s.governanceService = gs
+
+	// A committed boundary or binding change can narrow what a principal
+	// may do: re-check open conduit user streams on every node.
+	eventBus.Subscribe("conduit-stream-authz", nil, func(InvalidationEvent) {
+		s.publishConduitAuthzChanged(conduitAuthzMatch{})
+	}, true)
 }

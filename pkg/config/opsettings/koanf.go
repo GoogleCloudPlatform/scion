@@ -134,6 +134,10 @@ var koanfPathToJSONField = map[string]map[string]string{
 	"quotas": {
 		"quotas.enforce_broker_quotas": "enforce_broker_quotas",
 	},
+	"gcp_iam": {
+		"server.hub.gcp_iam_check_mode":          "gcp_iam_check_mode",
+		"server.hub.gcp_iam_deny_unknown_policy": "gcp_iam_deny_unknown_policy",
+	},
 	"agent_secrets": {
 		"agent_secrets.user_scope_only": "user_scope_only",
 	},
@@ -185,6 +189,10 @@ var jsonFieldToKoanfPaths = map[string]map[string]string{
 	},
 	"quotas": {
 		"enforce_broker_quotas": "quotas.enforce_broker_quotas",
+	},
+	"gcp_iam": {
+		"gcp_iam_check_mode":          "server.hub.gcp_iam_check_mode",
+		"gcp_iam_deny_unknown_policy": "server.hub.gcp_iam_deny_unknown_policy",
 	},
 	"agent_secrets": {
 		"user_scope_only": "agent_secrets.user_scope_only",
