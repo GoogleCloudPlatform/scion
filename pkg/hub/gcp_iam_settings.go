@@ -484,7 +484,7 @@ func (s *Server) auditGCPIAMNotApplied(ctx context.Context, cur, next gcpIAMSett
 		AfterSummary:  next.CheckMode + "," + next.denyUnknownPolicy(),
 	}
 	auditActorFromContext(ctx).ApplyActor(rec)
-	rec.Timestamp = time.Now()
+	rec.Timestamp = time.Now().UTC()
 	if s.store == nil {
 		slog.Warn("failed to emit mutation audit record",
 			"mutation_type", rec.MutationType, "error", "no store")

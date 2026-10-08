@@ -936,6 +936,49 @@ func TestGCPIAMReload_NotAppliedWriteIsNotAttributable(t *testing.T) {
 	assert.Contains(t, recs[0].AfterSummary, "not attributable to an audited write")
 }
 
+// TestGCPIAMReload_NotAppliedWriteIsNotAttributableInNonUTCZone runs the
+// not-applied scenario with the process local zone set west of UTC. Every
+// audit record the feature writes (change, not-applied, refusal) must carry
+// a UTC timestamp, and the later not-applied record must still sort after
+// the change it names. Not parallel: it changes time.Local.
+func TestGCPIAMReload_NotAppliedWriteIsNotAttributableInNonUTCZone(t *testing.T) {
+	orig := time.Local
+	time.Local = time.FixedZone("UTC-10", -10*60*60)
+	t.Cleanup(func() { time.Local = orig })
+
+	f := newIAMFixture(t, iamEnforceClosed)
+	g := newIAMFixture(t, iamEnforceClosed)
+	g.shareStore(f)
+	var zones []string
+	f.st.onAudit = func(rec *store.MutationAuditRecord) {
+		zones = append(zones, rec.MutationType+"="+rec.Timestamp.Location().String())
+	}
+	f.hs.onUpsert = func() error { return errors.New("injected write failure") }
+	require.Equal(t, http.StatusInternalServerError, f.put(t, iamBody("off", "")).Code)
+	f.hs.onUpsert = nil
+	notApplied, _, err := f.st.ListMutationAudits(context.Background(),
+		store.MutationAuditFilter{MutationType: gcpIAMNotAppliedMutation})
+	require.NoError(t, err)
+	require.Len(t, notApplied, 1)
+	audits := f.audits(t)
+	require.Len(t, audits, 1)
+	assert.False(t, notApplied[0].Timestamp.Before(audits[0].Timestamp),
+		"the not-applied record sorts after the change it names")
+
+	g.hs.seed(gcpIAMSection, json.RawMessage(`{"gcp_iam_check_mode":"off"}`))
+	g.ops.refreshAndApply(context.Background(), g.srv)
+	assert.Equal(t, iamEnforceClosed, g.applied(t))
+	assert.Empty(t, g.applyAudits(t))
+	recs := g.refusals(t)
+	require.Len(t, recs, 1)
+	assert.Contains(t, recs[0].AfterSummary, "not attributable to an audited write")
+	assert.Equal(t, []string{
+		gcpIAMAuditMutation + "=UTC",
+		gcpIAMNotAppliedMutation + "=UTC",
+		gcpIAMRefusedMutation + "=UTC",
+	}, zones, "audit records are written in UTC")
+}
+
 func TestGCPIAMNotAppliedRecordWrittenBeforeHandlerReturns(t *testing.T) {
 	f := newIAMFixture(t, iamEnforceClosed)
 	// A slow store write: the record is only present when the handler
