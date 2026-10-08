@@ -842,7 +842,7 @@ func (s *Server) mintHubScopedGCPServiceAccount(w http.ResponseWriter, r *http.R
 		slog.Error("GCP SA mint (hub scope): failed to create service account",
 			"hub_gcp_project_id", hubGCPProjectID, "account_id", accountID, "error", err)
 		writeError(w, http.StatusBadGateway, ErrCodeRuntimeError,
-			"failed to create GCP service account: "+err.Error(), nil)
+			mintCreateErrorMessage(err, hubGCPProjectID), nil)
 		return
 	}
 

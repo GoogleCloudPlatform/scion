@@ -15,6 +15,7 @@
 package cmd
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -24,11 +25,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Tests for ptone/scion#3602: stop --all and suspend --all via the Hub keep
-// at most maxFanOutConcurrency agents in flight, and still report every
-// agent's result and the same exit error as before. The local
-// stopAllAgents/suspendAllAgents paths use the same boundedFanOut call but
-// are not cap-tested here because they need a real runtime.
+// Tests for stop --all and suspend --all via the Hub.
+//
+// ptone/scion#3602: both keep at most maxFanOutConcurrency agents in flight
+// and still report every agent's result.
+//
+// ptone/scion#3755: suspend --all --format json now exits non-zero (with no
+// extra error banner) on partial failure, like stop --all, while the JSON
+// document and text mode are unchanged; with no failures it exits zero.
+//
+// The local stopAllAgents/suspendAllAgents paths use the same boundedFanOut
+// call but are not tested here because they need a real runtime.
 
 const lifecycleFanOutTotal = 40
 
@@ -41,13 +48,20 @@ var lifecycleFailAgents = map[string]bool{"agent-03": true, "agent-17": true, "a
 // Hub plus captured stdout, stderr and the returned error.
 func runLifecycleAll(t *testing.T, action, format string, fn func(*HubContext) error) (*gateHub, string, string, error) {
 	t.Helper()
+	return runLifecycleAllFailing(t, action, format, lifecycleFailAgents, fn)
+}
+
+// runLifecycleAllFailing is runLifecycleAll with the set of agents the Hub
+// fails given explicitly (nil: every action succeeds).
+func runLifecycleAllFailing(t *testing.T, action, format string, fail map[string]bool, fn func(*HubContext) error) (*gateHub, string, string, error) {
+	t.Helper()
 	origFormat, origHook, origRm := outputFormat, lifecycleFanOutQueuedHook, stopRm
 	t.Cleanup(func() { outputFormat, lifecycleFanOutQueuedHook, stopRm = origFormat, origHook, origRm })
 	outputFormat, stopRm = format, false
 
 	h := newGateHub(t, fanOutNames(lifecycleFanOutTotal))
 	h.gatedAction = "/" + action
-	h.failAgents = lifecycleFailAgents
+	h.failAgents = fail
 	queued := make(chan struct{}, lifecycleFanOutTotal)
 	lifecycleFanOutQueuedHook = func() { queued <- struct{}{} }
 
@@ -137,8 +151,73 @@ func TestSuspendAllViaHub3602_FanOutIsCapped(t *testing.T) {
 func TestSuspendAllViaHub3602_FanOutIsCappedJSON(t *testing.T) {
 	h, stdout, _, err := runLifecycleAll(t, "suspend", "json", suspendAllAgentsViaHub)
 	assert.Equal(t, maxFanOutConcurrency, h.peakInFlight(), "at most maxFanOutConcurrency suspends may be in flight")
-	// suspend --all --format json reports a partial failure in the document
-	// only; its nil error is existing behaviour, kept as is.
-	require.NoError(t, err)
+	// ptone/scion#3755: like stop --all, a partial failure is reported in the
+	// document and the command exits non-zero without an extra banner.
+	var reported *jsonReportedError
+	require.ErrorAs(t, err, &reported)
+	assert.Equal(t, "failed to suspend some agents via Hub", err.Error())
 	assertLifecycleJSON(t, stdout, "suspend")
+	assertLifecycleJSONBytes(t, stdout, "suspend", lifecycleFailAgents)
+}
+
+// assertLifecycleJSONBytes checks stdout byte for byte against the document
+// shape --all has always written: two-space indent, trailing newline, keys
+// command/results/status, and per agent agent/status plus error on failure.
+// Result order follows completion, so it is taken from stdout itself, but
+// every agent must be reported exactly once.
+func assertLifecycleJSONBytes(t *testing.T, stdout, command string, fail map[string]bool) {
+	t.Helper()
+	var parsed struct {
+		Results []struct {
+			Agent string `json:"agent"`
+			Error string `json:"error"`
+		} `json:"results"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(stdout), &parsed), stdout)
+	require.Len(t, parsed.Results, lifecycleFanOutTotal)
+	agents := make([]string, len(parsed.Results))
+	for i, r := range parsed.Results {
+		agents[i] = r.Agent
+	}
+	require.ElementsMatch(t, fanOutNames(lifecycleFanOutTotal), agents)
+	results := make([]map[string]interface{}, len(parsed.Results))
+	status := "success"
+	for i, r := range parsed.Results {
+		entry := map[string]interface{}{"agent": r.Agent, "status": "success"}
+		if fail[r.Agent] {
+			entry["status"] = "error"
+			entry["error"] = r.Error
+			status = "partial"
+		}
+		results[i] = entry
+	}
+	var want bytes.Buffer
+	enc := json.NewEncoder(&want)
+	enc.SetIndent("", "  ")
+	require.NoError(t, enc.Encode(map[string]interface{}{
+		"status":  status,
+		"command": command,
+		"results": results,
+	}))
+	assert.Equal(t, want.String(), stdout)
+}
+
+// ptone/scion#3755: suspend --all --format json exits 0 when every suspend
+// succeeds, with an all-success document.
+func TestSuspendAllViaHub3755_JSONAllSucceedExitsZero(t *testing.T) {
+	_, stdout, _, err := runLifecycleAllFailing(t, "suspend", "json", nil, suspendAllAgentsViaHub)
+	require.NoError(t, err)
+	assertLifecycleJSONBytes(t, stdout, "suspend", nil)
+	assert.Contains(t, stdout, `"status": "success"`)
+	assert.NotContains(t, stdout, `"error"`)
+}
+
+// ptone/scion#3755: text mode is unchanged when every suspend succeeds.
+func TestSuspendAllViaHub3755_TextAllSucceedExitsZero(t *testing.T) {
+	_, stdout, stderr, err := runLifecycleAllFailing(t, "suspend", "", nil, suspendAllAgentsViaHub)
+	require.NoError(t, err)
+	assert.Empty(t, stdout)
+	for _, name := range fanOutNames(lifecycleFanOutTotal) {
+		assert.Equal(t, 1, strings.Count(stderr, fmt.Sprintf("Agent '%s' suspended via Hub.\n", name)), name)
+	}
 }

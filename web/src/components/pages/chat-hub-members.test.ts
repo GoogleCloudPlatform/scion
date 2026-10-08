@@ -48,16 +48,16 @@ const globalMap = vi.hoisted(() => {
         agents.delete(id);
       },
       setScope: (): void => {},
+      // Seed epochs record nothing here.
+      scopeGeneration: 0,
+      beginSeedEpoch: (): symbol => Symbol('seed-epoch'),
+      endSeedEpoch: (): void => {},
     }),
   };
 });
 
-vi.mock('../../client/main.js', () => ({
-  navigateTo: vi.fn(),
-  pushRoute: vi.fn((path: string) => {
-    window.history.pushState({}, '', path);
-    return Promise.resolve();
-  }),
+vi.mock('../../client/main.js', async () => ({
+  ...(await import('../../client/__fixtures__/main-stub.js')),
   replaceRoute: vi.fn((path: string) => {
     window.history.replaceState({}, '', path);
     return Promise.resolve();

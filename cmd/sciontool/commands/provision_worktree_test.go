@@ -66,6 +66,7 @@ func setupProvisionCmd(t *testing.T, workspace, modeFlag, cloneURL string) {
 	t.Setenv("SCION_CLONE_URL", cloneURL)
 	t.Setenv("SCION_CLONE_BRANCH", "main")
 	t.Setenv("SCION_PROJECT_ID", "proj-1")
+	t.Setenv(provision.GitTokenEnv, "") // no ambient git token
 	t.Setenv("SCION_SHARED_DIR_PATHS", "")
 	t.Setenv("SCION_WORKSPACE_MODE", "")
 	t.Setenv("SCION_AGENT_SLUG", "")

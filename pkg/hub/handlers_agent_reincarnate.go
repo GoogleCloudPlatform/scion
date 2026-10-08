@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"sort"
 	"time"
 
@@ -291,10 +292,11 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 
 	// Patch access checks (ptone/scion#3302): --role runs create's role
 	// lattice, --service-account create's assignment gate. Then the
-	// authority re-record: a requester other than the agent itself becomes
-	// the agent's recorded delegator, so it must pass CanDelegate and its
-	// ceiling must cover the role the next generation runs with (the
-	// patched role, else the stored one). All of this runs before the
+	// authority check: a requester other than the agent itself must pass
+	// CanDelegate and its ceiling must cover the role the next generation
+	// runs with (the patched role, else the stored one); it becomes the
+	// agent's recorded delegator only when it changes the role
+	// (ptone/scion#3762). All of this runs before the
 	// broker and the agent state are examined and before anything is
 	// written, so a refused request claims nothing and a dry run reports
 	// the same refusal.
@@ -303,10 +305,11 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	targetRole, _ := agentRoleAndScopes(agent)
+	storedRole := targetRole
 	if req.Role != "" {
 		targetRole = AgentRole(req.Role)
 	}
-	auth, ok := s.reincarnateAuthorityFor(w, r, agent, targetRole, req.Role != "")
+	auth, ok := s.reincarnateAuthorityFor(w, r, agent, targetRole, targetRole != storedRole)
 	if !ok {
 		return
 	}
@@ -552,7 +555,8 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 }
 
 // startReincarnation claims the agent, records the reincarnation (with the
-// authority re-record auth, nil for a self-reincarnation) and starts the
+// authority re-record auth, nil when the edge is kept: a self-reincarnation
+// or one that keeps the role) and starts the
 // detached worker, answering 202. sourceBrokerID and targetBrokerID are
 // echoed in the response (both empty unless the request named a target);
 // move is non-nil for a cross-broker move.
@@ -906,15 +910,27 @@ func effectiveAgentRuntime(agent *store.Agent, broker *store.RuntimeBroker) stri
 
 // reincarnateAuthorityFor decides what authority a reincarnation of agent
 // re-records. role is the role the next generation runs with: the stored
-// role, or the --role patch (roleChanged). A self-reincarnation re-records
-// nothing: it returns nil, and the existing edge with its frozen provenance
-// and ceiling stays in force; when it changes the role it must still pass
-// CanDelegate and the ceiling for the new role, as create requires of an
-// agent granting a role. Any other requester becomes the recorded
-// delegator, so it must pass CanDelegate for role, and its source ceiling
-// must cover role (childRoleWithinCeiling, role explicit). On a refusal the
-// response is written (403, 503 for a ceiling lookup fault, or 500 for a
-// nil agent) and ok is false; nothing has been written to the store.
+// role, or the --role patch. roleChanged is true only when the patch names
+// a role other than the stored one.
+//
+// Every requester other than the agent itself must be able to delegate role:
+// it must pass CanDelegate for role, and its source ceiling must cover role
+// (childRoleWithinCeiling, role explicit). A self-reincarnation that changes
+// the role must pass the same checks for the new role, as create requires
+// of an agent granting a role; one that keeps the role is not checked.
+//
+// The edge is re-recorded only when another requester changes the role: the
+// requester then becomes the recorded delegator, and it is refused (403)
+// when it descends from agent, because the new edge would close a loop in
+// the delegation chain (requesterDescendsFrom). In every other case,
+// including any self-reincarnation and a reincarnation by another requester
+// that keeps the role, it returns nil: the existing edge with its frozen
+// provenance and ceiling stays in force, so restarting an agent does not
+// change whose authority it runs on.
+//
+// On a refusal the response is written (403, 503 for a ceiling or chain
+// lookup fault, or 500 for a nil agent) and ok is false; nothing has been
+// written to the store.
 func (s *Server) reincarnateAuthorityFor(w http.ResponseWriter, r *http.Request, agent *store.Agent, role AgentRole, roleChanged bool) (auth *reincarnateAuthority, ok bool) {
 	if agent == nil {
 		s.agentLifecycleLog.Error("reincarnate: nil agent in reincarnateAuthorityFor")
@@ -974,13 +990,31 @@ func (s *Server) reincarnateAuthorityFor(w http.ResponseWriter, r *http.Request,
 		writeForbiddenDenial(w, msg, DeniedByDelegationCeiling)
 		return nil, false
 	}
-	if self {
+	if self || !roleChanged {
 		// Decision D1: a self request does not re-record the edge.
+		// ptone/scion#3762: neither does another requester's reincarnate
+		// that keeps the role; the agent keeps its existing delegator.
 		return nil, true
+	}
+	if agentIdent != nil {
+		descends, err := s.requesterDescendsFrom(ctx, agentIdent.ID(), agent)
+		if err != nil {
+			s.agentLifecycleLog.Error("handleReincarnateAgent: delegation chain lookup failed",
+				"agent_id", agent.ID, "requester_id", agentIdent.ID(), "error", err)
+			writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
+				"Unable to evaluate the requester's delegation chain; retry later", nil)
+			return nil, false
+		}
+		if descends {
+			msg := "Cannot change the role of an agent you descend from: you would become its delegator, which closes a loop in the delegation chain"
+			logAuthzDenial(r, identity, resource, ActionLifecycle, "delegation cycle: requester descends from the agent")
+			writeForbidden(w, msg)
+			return nil, false
+		}
 	}
 
 	delegatorType := store.DelegationPrincipalUser
-	if GetAgentIdentityFromContext(ctx) != nil {
+	if agentIdent != nil {
 		delegatorType = store.DelegationPrincipalAgent
 	}
 	return &reincarnateAuthority{
@@ -990,4 +1024,46 @@ func (s *Server) reincarnateAuthorityFor(w http.ResponseWriter, r *http.Request,
 		Ceiling:       ceiling,
 		Provenance:    prov,
 	}, true
+}
+
+// requesterDescendsFrom reports whether the requesting agent descends from
+// agent: agent is in the requester's stored ancestry (a lineage descendant,
+// refused conservatively even if its edge has since been re-pointed), or on
+// the requester's active delegation chain in agent's project, where
+// recording agent -> requester would close a loop that chainEffectCeiling
+// rejects (ErrProvenanceChain). The chain is walked as well because a
+// role-changing reincarnation re-points an edge without touching the
+// (immutable) ancestry. The walk stops at a user delegator, a migration
+// sentinel, a missing or ambiguous edge, a repeat, or maxDelegationDepth:
+// those are not loops through agent, and the requester's own ceiling check
+// has already judged its chain. Only a lookup fault is an error.
+func (s *Server) requesterDescendsFrom(ctx context.Context, requesterID string, agent *store.Agent) (bool, error) {
+	requester, err := s.store.GetAgent(ctx, requesterID)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return false, fmt.Errorf("requester agent lookup: %w", err)
+	}
+	if requester != nil && slices.Contains(requester.Ancestry, agent.ID) {
+		return true, nil
+	}
+	visited := make(map[string]bool, maxDelegationDepth+1)
+	delegateID := requesterID
+	for depth := 0; depth <= maxDelegationDepth; depth++ {
+		if delegateID == agent.ID {
+			return true, nil
+		}
+		if visited[delegateID] {
+			return false, nil
+		}
+		visited[delegateID] = true
+		active, err := s.authzService.activeProjectEdges(ctx, delegateID, agent.ProjectID)
+		if err != nil {
+			return false, err
+		}
+		if len(active) != 1 || isMigrationSentinel(active[0]) ||
+			active[0].DelegatorType != store.DelegationPrincipalAgent {
+			return false, nil
+		}
+		delegateID = active[0].DelegatorID
+	}
+	return false, nil
 }

@@ -66,6 +66,12 @@ class FakeStateManager extends EventTarget {
     }
   }
   seedProjects(): void {}
+  /** Seed-epoch surface used through AgentSeedEpoch; epochs record nothing here. */
+  readonly scopeGeneration = 0;
+  beginSeedEpoch(): symbol {
+    return Symbol('seed-epoch');
+  }
+  endSeedEpoch(): void {}
   /**
    * Mirrors the real `applyDeleteAccepted` (DELETE 202): merge the returned
    * deletion into the known agent and flush, without removing it. The real
@@ -110,8 +116,8 @@ vi.mock('../../client/state.js', () => ({
 // real main.ts — with its SSE/terminal-workspace singleton side effects —
 // never loads in this test.
 // Remove once chat-thread stops importing client/main (chat lane, ptone/scion#3118).
-vi.mock('../../client/main.js', () => ({
-  navigateTo: vi.fn(),
+vi.mock('../../client/main.js', async () => ({
+  ...(await import('../../client/__fixtures__/main-stub.js')),
   get stateManager() {
     return fakeStateManager;
   },

@@ -407,6 +407,171 @@ func TestStaticAssetHandler_HashedCaching(t *testing.T) {
 	}
 }
 
+// writeFingerprintFixture writes a client build with a Vite manifest into a
+// temp dir: real chunk names from a current build (hashes containing - and
+// _), the unhashed entry, a public file and a Shoelace icon.
+func writeFingerprintFixture(t *testing.T, manifest string) string {
+	t.Helper()
+	dir := t.TempDir()
+	files := map[string]string{
+		"assets/main.js":                           "// entry",
+		"assets/shoelace-B3-XBhED.js":              "// chunk",
+		"assets/project-detail-CeCkJL--.js":        "// chunk",
+		"assets/model-utils-UsxIS_8q.js":           "// chunk",
+		"assets/entry-AbCdEfGh.js":                 "// a hashed-looking entry",
+		"assets/font-Xy_z9-Ab.woff2":               "font",
+		"assets/shoelace-BZzytDYN.css":             "/* css */",
+		"assets/settings-AbCdEfGh.js":              "// not in the manifest",
+		"assets/chunk-abc12345.js":                 "// hex name",
+		"assets/shoelace-B3-XBhED.js.map":          "{}",
+		"favicon.ico":                              "icon",
+		"shoelace/assets/icons/cloud-download.svg": "<svg/>",
+	}
+	if manifest != "" {
+		files[".vite/manifest.json"] = manifest
+	}
+	for name, data := range files {
+		p := filepath.Join(dir, filepath.FromSlash(name))
+		require.NoError(t, os.MkdirAll(filepath.Dir(p), 0o755))
+		require.NoError(t, os.WriteFile(p, []byte(data), 0o644))
+	}
+	return dir
+}
+
+const fingerprintManifest = `{
+  "src/client/main.ts": {"file": "assets/main.js", "isEntry": true, "imports": ["_shoelace-B3-XBhED.js"]},
+  "_shoelace-B3-XBhED.js": {"file": "assets/shoelace-B3-XBhED.js", "css": ["assets/shoelace-BZzytDYN.css"]},
+  "src/components/pages/project-detail.ts": {"file": "assets/project-detail-CeCkJL--.js", "isDynamicEntry": true},
+  "_model-utils-UsxIS_8q.js": {"file": "assets/model-utils-UsxIS_8q.js", "assets": ["assets/font-Xy_z9-Ab.woff2"]},
+  "src/other-entry.ts": {"file": "assets/entry-AbCdEfGh.js", "isEntry": true},
+  "_bad-1": {"file": "../outside-AbCdEfGh.js"},
+  "_bad-2": {"file": "/assets/abs-AbCdEfGh.js"},
+  "_bad-3": {"file": "https://cdn.example.com/x-AbCdEfGh.js"},
+  "_bad-4": {"file": "assets/../assets/settings-AbCdEfGh.js"}
+}`
+
+func cacheControlOf(t *testing.T, ws *WebServer, p string) string {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, p, nil)
+	rec := httptest.NewRecorder()
+	ws.Handler().ServeHTTP(rec, req)
+	resp := rec.Result()
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusOK, resp.StatusCode, p)
+	return resp.Header.Get("Cache-Control")
+}
+
+// TestStaticAssetFingerprintedCaching pins ptone/scion#3789: the files Vite
+// fingerprinted, read from its build manifest, get the long cache lifetime,
+// from the disk and the embedded asset source alike; the entry, source maps,
+// public files and unlisted names stay no-cache; hex names keep working.
+func TestStaticAssetFingerprintedCaching(t *testing.T) {
+	const long = "public, max-age=86400"
+	want := map[string]string{
+		"/assets/shoelace-B3-XBhED.js":              long,       // chunk
+		"/assets/project-detail-CeCkJL--.js":        long,       // dynamic entry chunk, hash ends in --
+		"/assets/model-utils-UsxIS_8q.js":           long,       // hash contains _
+		"/assets/shoelace-BZzytDYN.css":             long,       // css listed by a chunk
+		"/assets/chunk-abc12345.js":                 long,       // hex name, not in the manifest
+		"/assets/font-Xy_z9-Ab.woff2":               long,       // listed in a chunk's assets
+		"/assets/main.js":                           "no-cache", // the unhashed entry
+		"/assets/entry-AbCdEfGh.js":                 "no-cache", // an entry, even with a hash-like name
+		"/assets/settings-AbCdEfGh.js":              "no-cache", // looks hashed, not in the manifest
+		"/assets/shoelace-B3-XBhED.js.map":          "no-cache", // source map
+		"/favicon.ico":                              "no-cache", // public file
+		"/shoelace/assets/icons/cloud-download.svg": "no-cache",
+	}
+	dir := writeFingerprintFixture(t, fingerprintManifest)
+
+	t.Run("disk", func(t *testing.T) {
+		ws := newTestWebServer(t, WebServerConfig{AssetsDir: dir})
+		assert.Len(t, ws.fingerprintedAssets, 5, "the five clean, non-entry manifest paths, nothing else")
+		for p, cc := range want {
+			assert.Equal(t, cc, cacheControlOf(t, ws, p), p)
+		}
+	})
+
+	t.Run("embedded", func(t *testing.T) {
+		ws := newTestWebServer(t, WebServerConfig{})
+		ws.assets = os.DirFS(dir)
+		ws.assetsDisk = ""
+		ws.hasAssets = ws.detectWebAssets()
+		ws.fingerprintedAssets = ws.loadFingerprintedAssets()
+		assert.Len(t, ws.fingerprintedAssets, 5)
+		for p, cc := range want {
+			assert.Equal(t, cc, cacheControlOf(t, ws, p), p)
+		}
+	})
+
+	t.Run("no manifest read without the entry", func(t *testing.T) {
+		bare := writeFingerprintFixture(t, fingerprintManifest)
+		require.NoError(t, os.Remove(filepath.Join(bare, "assets", "main.js")))
+		ws := newTestWebServer(t, WebServerConfig{AssetsDir: bare})
+		assert.False(t, ws.hasAssets)
+		assert.Nil(t, ws.fingerprintedAssets)
+		assert.Equal(t, "no-cache", cacheControlOf(t, ws, "/assets/shoelace-B3-XBhED.js"))
+	})
+
+	t.Run("manifest paths outside the build are ignored", func(t *testing.T) {
+		ws := newTestWebServer(t, WebServerConfig{AssetsDir: dir})
+		for _, p := range []string{"/../outside-AbCdEfGh.js", "/outside-AbCdEfGh.js", "//assets/abs-AbCdEfGh.js", "/assets/abs-AbCdEfGh.js", "/assets/settings-AbCdEfGh.js"} {
+			assert.False(t, ws.fingerprintedAssets[p], p)
+		}
+	})
+}
+
+// TestStaticAssetFingerprintedCaching_NoUsableManifest pins the fallback: with
+// no manifest, or one that does not parse, only hex names get the long
+// lifetime and Vite names stay no-cache.
+func TestStaticAssetFingerprintedCaching_NoUsableManifest(t *testing.T) {
+	cases := []struct {
+		name, manifest string
+		manifestIsDir  bool // a directory where the manifest file should be: unreadable
+		wantNil        bool // no set at all, so never a partial one
+	}{
+		{name: "missing", wantNil: true},
+		{name: "malformed", manifest: `{"src/client/main.ts": {"file": `, wantNil: true},
+		{name: "empty", manifest: `{}`},
+		{name: "null", manifest: `null`},
+		{name: "type mismatch", manifest: `{"a": {"file": 1}, "b": {"file": "assets/shoelace-B3-XBhED.js"}}`, wantNil: true},
+		{name: "unreadable", manifestIsDir: true, wantNil: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := writeFingerprintFixture(t, tc.manifest)
+			if tc.manifestIsDir {
+				require.NoError(t, os.MkdirAll(filepath.Join(dir, ".vite", "manifest.json"), 0o755))
+			}
+			ws := newTestWebServer(t, WebServerConfig{AssetsDir: dir})
+			assert.Empty(t, ws.fingerprintedAssets)
+			if tc.wantNil {
+				assert.Nil(t, ws.fingerprintedAssets, "no partial set")
+			}
+			assert.Equal(t, "public, max-age=86400", cacheControlOf(t, ws, "/assets/chunk-abc12345.js"))
+			assert.Equal(t, "no-cache", cacheControlOf(t, ws, "/assets/shoelace-B3-XBhED.js"))
+			assert.Equal(t, "no-cache", cacheControlOf(t, ws, "/assets/main.js"))
+		})
+	}
+}
+
+func TestFingerprintedRequestPath(t *testing.T) {
+	for p, want := range map[string]string{
+		"assets/shoelace-B3-XBhED.js":       "/assets/shoelace-B3-XBhED.js",
+		"assets/project-detail-CeCkJL--.js": "/assets/project-detail-CeCkJL--.js",
+		"assets/main.js":                    "", // no hash segment
+		"../assets/x-AbCdEfGh.js":           "",
+		"assets/../x-AbCdEfGh.js":           "",
+		"/assets/x-AbCdEfGh.js":             "",
+		"https://h/x-AbCdEfGh.js":           "",
+		`assets\x-AbCdEfGh.js`:              "",
+		"":                                  "",
+	} {
+		got, ok := fingerprintedRequestPath(p)
+		assert.Equal(t, want, got, p)
+		assert.Equal(t, want != "", ok, p)
+	}
+}
+
 func TestStaticAssetHandler_NoAssets(t *testing.T) {
 	ws := newTestWebServer(t, WebServerConfig{})
 	// Force the no-assets state regardless of whether web.AssetsEmbedded is true.
@@ -649,10 +814,39 @@ func TestSecurityHeaders(t *testing.T) {
 				t.Errorf("CSP missing %q", check)
 			}
 		}
-		// Nothing is loaded from jsDelivr any more, so the CSP must not allow it.
-		if strings.Contains(csp, "cdn.jsdelivr.net") {
-			t.Errorf("CSP still allows cdn.jsdelivr.net: %q", csp)
+		// Nothing is loaded from jsDelivr or Web Awesome, so the CSP must not
+		// allow either.
+		for _, host := range []string{"cdn.jsdelivr.net", "cdn.webawesome.com"} {
+			if strings.Contains(csp, host) {
+				t.Errorf("CSP still allows %s: %q", host, csp)
+			}
 		}
+
+		// The host sources, per directive, are exactly these. Every source
+		// counts as a host except quoted keywords ('self', 'unsafe-inline'),
+		// bare schemes ending in a colon (data:, blob:, ws:, wss:, and the
+		// https: source in img-src that allows any HTTPS image) and the two
+		// local development origins below, matched exactly.
+		wantHosts := map[string][]string{
+			"style-src":   {"https://fonts.googleapis.com"},
+			"font-src":    {"https://fonts.gstatic.com"},
+			"connect-src": {"https://storage.googleapis.com"},
+		}
+		localDev := map[string]bool{"http://localhost:*": true, "http://127.0.0.1:*": true}
+		gotHosts := map[string][]string{}
+		for _, directive := range strings.Split(csp, ";") {
+			fields := strings.Fields(directive)
+			if len(fields) == 0 {
+				continue
+			}
+			for _, src := range fields[1:] {
+				if strings.HasPrefix(src, "'") || strings.HasSuffix(src, ":") || localDev[src] {
+					continue
+				}
+				gotHosts[fields[0]] = append(gotHosts[fields[0]], src)
+			}
+		}
+		assert.Equal(t, wantHosts, gotHosts, "host sources per directive")
 	}
 
 	// Verify Permissions-Policy is set
@@ -2700,11 +2894,14 @@ func TestResolveAPIPath(t *testing.T) {
 		urlPath  string
 		expected string
 	}{
-		{"/agents", "/api/v1/agents"},
-		{"/agents/", "/api/v1/agents"},
-		{"/projects", "/api/v1/projects"},
-		{"/projects/", "/api/v1/projects"},
+		{"/agents", ""}, // list pages load their own lists
+		{"/agents/", ""},
+		{"/projects", ""},
+		{"/projects/", ""},
 		{"/agents/abc123", "/api/v1/agents/abc123"},
+		{"/skills", "/api/v1/skills"},
+		{"/skills/", "/api/v1/skills"},
+		{"/skills/s1", "/api/v1/skills/s1"},
 		{"/projects/my-project", "/api/v1/projects/my-project"},
 		{"/", ""},
 		{"/login", ""},
@@ -2730,23 +2927,16 @@ func TestSPAShellHandler_ContainsInitialData(t *testing.T) {
 	require.NoError(t, err)
 	ws.SetUserTokenService(tokenSvc)
 
-	// Mount a mock Hub handler that returns agent data with _capabilities
+	// Mount a mock Hub handler that returns one agent with _capabilities
 	mockHub := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"agents": []map[string]interface{}{
-				{
-					"id":     tid("agent-1"),
-					"name":   "test-agent",
-					"status": "running",
-					"_capabilities": map[string]interface{}{
-						"actions": []string{"start", "stop", "delete"},
-					},
-				},
-			},
+			"id":     tid("agent-1"),
+			"name":   "test-agent",
+			"status": "running",
 			"_capabilities": map[string]interface{}{
-				"actions": []string{"create", "list"},
+				"actions": []string{"start", "stop", "delete"},
 			},
 		})
 	})
@@ -2754,8 +2944,8 @@ func TestSPAShellHandler_ContainsInitialData(t *testing.T) {
 
 	handler := ws.Handler()
 
-	// Request the agents page
-	req := httptest.NewRequest("GET", "/agents", nil)
+	// Request an agent detail page (its page consumes the prefetch)
+	req := httptest.NewRequest("GET", "/agents/"+tid("agent-1"), nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
@@ -2781,9 +2971,57 @@ func TestSPAShellHandler_ContainsInitialData(t *testing.T) {
 	var pageData map[string]interface{}
 	require.NoError(t, json.Unmarshal([]byte(jsonData), &pageData), "initial data should be valid JSON")
 
-	assert.Equal(t, "/agents", pageData["path"])
+	assert.Equal(t, "/agents/"+tid("agent-1"), pageData["path"])
 	assert.NotNil(t, pageData["data"], "data field should be present")
 	assert.NotNil(t, pageData["user"], "user field should be present")
+}
+
+// The /agents and /projects list pages load their own lists, so their shells
+// carry no prefetched data and the hub API is not called while rendering them.
+func TestSPAShellHandler_ListPagesHaveNoPrefetch(t *testing.T) {
+	ws := newDevAuthWebServer(t)
+
+	tokenSvc, err := NewUserTokenService(UserTokenConfig{})
+	require.NoError(t, err)
+	ws.SetUserTokenService(tokenSvc)
+
+	var hubCalls []string
+	mockHub := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hubCalls = append(hubCalls, r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"agents": []interface{}{}, "projects": []interface{}{}})
+	})
+	ws.MountHubAPI(mockHub, func(ctx context.Context) error { return nil })
+	handler := ws.Handler()
+
+	for _, path := range []string{"/agents", "/agents/", "/projects", "/projects/"} {
+		t.Run(path, func(t *testing.T) {
+			hubCalls = nil
+			req := httptest.NewRequest("GET", path, nil)
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+
+			resp := rec.Result()
+			body, err := io.ReadAll(resp.Body)
+			require.NoError(t, err)
+			html := string(body)
+			require.Equal(t, http.StatusOK, resp.StatusCode)
+
+			const dataMarker = `type="application/json">`
+			markerAt := strings.Index(html, dataMarker)
+			require.GreaterOrEqual(t, markerAt, 0, "should find the __SCION_DATA__ script tag")
+			dataStart := markerAt + len(dataMarker)
+			dataEnd := strings.Index(html[dataStart:], `</script>`)
+			require.Greater(t, dataEnd, 0, "should find the end of the __SCION_DATA__ script tag")
+			var pageData map[string]interface{}
+			require.NoError(t, json.Unmarshal([]byte(html[dataStart:dataStart+dataEnd]), &pageData))
+
+			assert.NotNil(t, pageData["user"], "user field should still be present")
+			assert.Nil(t, pageData["data"], "list page shell must carry no prefetched data")
+			assert.Empty(t, hubCalls, "rendering the shell must not call the hub API")
+		})
+	}
 }
 
 func TestSPAShellHandler_UserInInitialData(t *testing.T) {
@@ -2828,8 +3066,8 @@ func TestSPAShellHandler_NoHubMounted(t *testing.T) {
 	// Do NOT mount a Hub handler
 	handler := ws.Handler()
 
-	// Request the agents page — should still render with user info
-	req := httptest.NewRequest("GET", "/agents", nil)
+	// Request an agent detail page (a prefetched route) — should still render with user info
+	req := httptest.NewRequest("GET", "/agents/"+tid("agent-1"), nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
@@ -2873,8 +3111,8 @@ func TestSPAShellHandler_HubAPIError(t *testing.T) {
 
 	handler := ws.Handler()
 
-	// Request agents page
-	req := httptest.NewRequest("GET", "/agents", nil)
+	// Request an agent detail page (a prefetched route)
+	req := httptest.NewRequest("GET", "/agents/"+tid("agent-1"), nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
@@ -4352,4 +4590,76 @@ func TestNewWebServer_DevAuth_NonLoopback_Rejected(t *testing.T) {
 		Host: "0.0.0.0",
 	})
 	assert.NotNil(t, ws4)
+}
+
+// TestSPAShellCacheControl pins ptone/scion#3732: every HTML document that
+// renders the __SCION_DATA__ object (the session user and the API data
+// prefetched as that user) is served with Cache-Control no-store, while
+// static assets keep their own headers.
+func TestSPAShellCacheControl(t *testing.T) {
+	tmpDir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(tmpDir, "assets"), 0o755))
+	for name, data := range map[string]string{
+		"assets/app-entry.js":      "// entry",
+		"assets/chunk-abc12345.js": "// chunk",
+		"favicon.ico":              "icon",
+	} {
+		require.NoError(t, os.WriteFile(filepath.Join(tmpDir, filepath.FromSlash(name)), []byte(data), 0o644))
+	}
+
+	ws := newDevAuthWebServer(t, func(cfg *WebServerConfig) { cfg.AssetsDir = tmpDir })
+	tokenSvc, err := NewUserTokenService(UserTokenConfig{})
+	require.NoError(t, err)
+	ws.SetUserTokenService(tokenSvc)
+	agentID := tid("cache-agent")
+	ws.MountHubAPI(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"id": agentID, "name": "cache-agent"})
+	}), func(ctx context.Context) error { return nil })
+	handler := ws.Handler()
+
+	get := func(path string) (*http.Response, string) {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Header.Set("Accept", "text/html")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		resp := rec.Result()
+		defer func() { _ = resp.Body.Close() }()
+		body, _ := io.ReadAll(resp.Body)
+		return resp, string(body)
+	}
+
+	cases := []struct {
+		name, path, cacheControl, bodyContains string
+	}{
+		{"shell, signed-in user", "/", "no-store", DevUserID},
+		{"shell with prefetched agent data", "/agents/" + agentID, "no-store", `"cache-agent"`},
+		{"shell, projects list", "/projects", "no-store", DevUserID},
+		{"login shell", "/login", "no-store", "__SCION_DATA__"},
+		{"invite shell", "/invite", "no-store", "__SCION_DATA__"},
+		{"hashed asset", "/assets/chunk-abc12345.js", "public, max-age=86400", "// chunk"},
+		{"non-hashed asset", "/assets/app-entry.js", "no-cache", "// entry"},
+		{"root static file", "/favicon.ico", "no-cache", "icon"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resp, body := get(tc.path)
+			require.Equal(t, http.StatusOK, resp.StatusCode, body)
+			assert.Equal(t, tc.cacheControl, resp.Header.Get("Cache-Control"))
+			assert.Contains(t, body, tc.bodyContains)
+		})
+	}
+
+	// The no-assets page carries no per-user data and keeps no-cache.
+	bare := newDevAuthWebServer(t)
+	bare.assets = nil
+	bare.assetsDisk = ""
+	bare.hasAssets = false
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	bare.Handler().ServeHTTP(rec, req)
+	bareResp := rec.Result()
+	defer func() { _ = bareResp.Body.Close() }()
+	assert.Equal(t, "no-cache", bareResp.Header.Get("Cache-Control"))
+	assert.NotContains(t, rec.Body.String(), "__SCION_DATA__")
 }
