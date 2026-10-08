@@ -888,13 +888,16 @@ func TestWorkstationSettingsPatch_UneditableFile422(t *testing.T) {
 	}
 }
 
-// The registry endpoint (like the runtime endpoint and the
-// hubsync cleanup, through the same config.LoadModifySaveVersionedSettings)
-// loads, modifies and saves under the settings-file lock, so a concurrent
-// broker-token write survives.
+// On a hub without OperationalSettings, the registry endpoint (like the
+// runtime endpoint and the hubsync cleanup, through the same
+// config.LoadModifySaveVersionedSettings) loads, modifies and saves under the
+// settings-file lock, so a concurrent broker-token write survives. A hub with
+// OperationalSettings writes these keys to the DB instead (see
+// system_handlers_db_test.go).
 func TestSystemStructWriters_KeepConcurrentTokenWrite(t *testing.T) {
 	settingsPath := workstationHome(t)
 	srv, _, _ := newSQLiteHubInMode(t, true, nil)
+	srv.operationalSettings.Store(nil) // file mode: settings.yaml is authoritative
 	globalDir := filepath.Dir(settingsPath)
 	for i := 0; i < 10; i++ {
 		var wg sync.WaitGroup
