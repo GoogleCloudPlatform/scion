@@ -35,6 +35,7 @@ import type { AdminGroup } from '../../shared/types.js';
 import type { AccessBoundarySummary } from '../../shared/access-boundaries.js';
 import type { BoundarySummaryGroup } from '../shared/boundary-summary-notice.js';
 import { canGroup } from '../../shared/groups.js';
+import '../shared/detail-header.js';
 import '../shared/group-member-editor.js';
 import '../shared/boundary-summary-notice.js';
 import '../shared/group-form-dialog.js';
@@ -107,46 +108,6 @@ export class ScionPageAdminGroupDetail extends LitElement {
       color: var(--scion-primary, #3b82f6);
     }
 
-    .header {
-      display: flex;
-      align-items: flex-start;
-      justify-content: space-between;
-      margin-bottom: 1.5rem;
-      gap: 1rem;
-    }
-
-    .header-info {
-      flex: 1;
-    }
-
-    .header-title {
-      display: flex;
-      align-items: flex-start;
-      gap: 0.75rem;
-      margin-bottom: 0.25rem;
-    }
-
-    /* A long name wraps on its own line; the badge then follows on the next
-       line. The min-height matches .group-icon so a one-line name stays
-       centred on the icon. */
-    .header-title-text {
-      display: flex;
-      flex-wrap: wrap;
-      align-items: center;
-      gap: 0.5rem 0.75rem;
-      min-width: 0;
-      min-height: 2.5rem;
-    }
-
-    .header h1 {
-      font-size: 1.5rem;
-      font-weight: 700;
-      color: var(--scion-text, #1e293b);
-      margin: 0;
-      min-width: 0;
-      overflow-wrap: anywhere;
-    }
-
     .header-slug {
       font-family: var(--scion-font-mono, monospace);
       font-size: 0.875rem;
@@ -160,7 +121,6 @@ export class ScionPageAdminGroupDetail extends LitElement {
       display: flex;
       align-items: center;
       justify-content: center;
-      flex-shrink: 0;
     }
 
     .group-icon.explicit {
@@ -299,13 +259,6 @@ export class ScionPageAdminGroupDetail extends LitElement {
       margin-bottom: 1rem;
     }
 
-    .header-actions {
-      display: flex;
-      gap: 0.5rem;
-      align-items: center;
-      flex-shrink: 0;
-    }
-
     .system-managed-alert {
       margin-bottom: 1.5rem;
     }
@@ -313,15 +266,6 @@ export class ScionPageAdminGroupDetail extends LitElement {
     @media (max-width: 768px) {
       .details-grid {
         grid-template-columns: 1fr 1fr;
-      }
-
-      .header {
-        flex-direction: column;
-      }
-
-      .header-actions {
-        width: 100%;
-        justify-content: flex-start;
       }
     }
   `;
@@ -450,25 +394,17 @@ export class ScionPageAdminGroupDetail extends LitElement {
         Back to Groups
       </a>
 
-      <div class="header">
-        <div class="header-info">
-          <div class="header-title">
-            <div class="group-icon ${this.group.groupType}" aria-hidden="true">
-              <sl-icon name="${isProjectAgents ? 'cpu' : 'people'}"></sl-icon>
-            </div>
-            <div class="header-title-text">
-              <h1>${this.group.name}</h1>
-              <span class="type-badge ${this.group.groupType}">
-                ${isProjectAgents ? 'project agents' : 'explicit'}
-              </span>
-            </div>
-          </div>
-          <span class="header-slug">${this.group.slug}</span>
+      <scion-detail-header heading=${this.group.name}>
+        <div slot="icon" class="group-icon ${this.group.groupType}" aria-hidden="true">
+          <sl-icon name="${isProjectAgents ? 'cpu' : 'people'}"></sl-icon>
         </div>
-
+        <span class="type-badge ${this.group.groupType}">
+          ${isProjectAgents ? 'project agents' : 'explicit'}
+        </span>
+        <span slot="meta" class="header-slug">${this.group.slug}</span>
         ${canEdit || canDelete
           ? html`
-              <div class="header-actions">
+              <div slot="actions" class="header-actions">
                 ${canEdit
                   ? html`
                       <sl-button
@@ -510,7 +446,7 @@ export class ScionPageAdminGroupDetail extends LitElement {
               </div>
             `
           : nothing}
-      </div>
+      </scion-detail-header>
 
       ${isProjectAgents
         ? html`

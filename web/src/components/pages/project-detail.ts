@@ -68,6 +68,7 @@ import { AgentSeedEpoch } from '../../client/agent-seed-epoch.js';
 import type { SeededDrainResult } from '../../client/agent-drain.js';
 import { mergeChanged, dropTombstonedPairs } from '../../client/agent-merge.js';
 import type { AgentSortField, SortDir } from '../../shared/agent-sort.js';
+import '../shared/detail-header.js';
 import '../shared/git-remote-display.js';
 import type { ViewMode } from '../shared/view-toggle.js';
 import '../shared/status-badge.js';
@@ -563,55 +564,11 @@ export class ScionPageProjectDetail extends LitElement {
       display: block;
     }
 
-    .header {
-      display: flex;
-      align-items: flex-start;
-      justify-content: space-between;
-      margin-bottom: 1.5rem;
-      gap: 1rem;
-    }
-
-    .header-info {
-      flex: 1;
-    }
-
-    .header-title {
-      display: flex;
-      align-items: flex-start;
-      gap: 0.75rem;
-      margin-bottom: 0.5rem;
-    }
-
-    .header-title > sl-icon {
-      flex-shrink: 0;
+    /* The linked-project marker beside the name. */
+    .linked-badge {
       color: var(--scion-primary, #3b82f6);
-      font-size: 1.5rem;
-      /* Centre the icon on the first line of the name: (1.95rem h1 line box
-         - 1.5rem icon) / 2. */
-      margin-top: 0.225rem;
-    }
-    /* A long name wraps on its own line; the badges then follow on the next
-       line instead of floating beside a multi-line name. */
-    .header-title-text {
-      display: flex;
-      flex-wrap: wrap;
-      align-items: center;
-      gap: 0.5rem 0.75rem;
-      min-width: 0;
-    }
-
-    .header h1 {
-      font-size: 1.5rem;
-      font-weight: 700;
-      line-height: 1.3;
-      color: var(--scion-text, #1e293b);
-      margin: 0;
-      min-width: 0;
-      overflow-wrap: anywhere;
-    }
-    /* The linked-project icon inside the title keeps the primary colour. */
-    .header h1 sl-icon {
-      color: var(--scion-primary, #3b82f6);
+      font-size: 0.875rem;
+      opacity: 0.7;
     }
 
     .header-path {
@@ -620,12 +577,6 @@ export class ScionPageProjectDetail extends LitElement {
       color: var(--scion-text-muted, #64748b);
       margin-top: 0.25rem;
       word-break: break-all;
-    }
-
-    .header-actions {
-      display: flex;
-      gap: 0.5rem;
-      flex-shrink: 0;
     }
 
     .stats-row {
@@ -2114,16 +2065,13 @@ export class ScionPageProjectDetail extends LitElement {
   }
 
   private renderProjectIcon() {
-    return html`<sl-icon name="folder-fill"></sl-icon>`;
+    return html`<sl-icon slot="icon" name="folder-fill"></sl-icon>`;
   }
 
   private renderLinkedBadge() {
     if (!this.project || this.project.projectType !== 'linked') return nothing;
-    return html` <sl-tooltip content="Linked project"
-      ><sl-icon
-        name="link-45deg"
-        style="font-size: 0.875rem; vertical-align: middle; opacity: 0.7;"
-      ></sl-icon
+    return html`<sl-tooltip content="Linked project"
+      ><sl-icon class="linked-badge" name="link-45deg"></sl-icon
     ></sl-tooltip>`;
   }
 
@@ -2735,19 +2683,12 @@ export class ScionPageProjectDetail extends LitElement {
         Back to Projects
       </a>
 
-      <div class="header">
-        <div class="header-info">
-          <div class="header-title">
-            ${this.renderProjectIcon()}
-            <div class="header-title-text">
-              <h1>${this.project.name}${this.renderLinkedBadge()}</h1>
-            </div>
-          </div>
-          <div class="header-path">
-            <scion-git-remote-display .project=${this.project}></scion-git-remote-display>
-          </div>
+      <scion-detail-header heading=${this.project.name}>
+        ${this.renderProjectIcon()} ${this.renderLinkedBadge()}
+        <div slot="meta" class="header-path">
+          <scion-git-remote-display .project=${this.project}></scion-git-remote-display>
         </div>
-        <div class="header-actions">
+        <div slot="actions" class="header-actions">
           ${can(this.agentScopeCapabilities, 'create')
             ? html`
                 <a href="/agents/new?projectId=${this.projectId}" style="text-decoration: none;">
@@ -2817,7 +2758,7 @@ export class ScionPageProjectDetail extends LitElement {
               `
             : nothing}
         </div>
-      </div>
+      </scion-detail-header>
 
       <div class="stats-row">
         <div class="stat">

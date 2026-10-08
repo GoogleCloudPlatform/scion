@@ -28,6 +28,7 @@ import { can } from '../../shared/types.js';
 import type { StatusType } from '../shared/status-badge.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import '../shared/status-badge.js';
+import '../shared/detail-header.js';
 import '../shared/hash-display.js';
 import '../shared/skill-publish-dialog.js';
 import { showToast } from '../../utils/toast.js';
@@ -85,58 +86,11 @@ export class ScionPageSkillDetail extends LitElement {
       color: var(--scion-primary, #3b82f6);
     }
 
-    .header {
-      display: flex;
-      align-items: flex-start;
-      justify-content: space-between;
-      margin-bottom: 1.5rem;
-      gap: 1rem;
-    }
-    .header-info {
-      flex: 1;
-    }
-    .header-title {
-      display: flex;
-      align-items: flex-start;
-      gap: 0.75rem;
-      margin-bottom: 0.5rem;
-    }
-    .header-title > sl-icon {
-      flex-shrink: 0;
-      color: var(--scion-primary, #3b82f6);
-      font-size: 1.5rem;
-      /* Centre the icon on the first line of the name: (1.95rem h1 line box
-         - 1.5rem icon) / 2. */
-      margin-top: 0.225rem;
-    }
-    /* A long name wraps on its own line; the badges then follow on the next
-       line instead of floating beside a multi-line name. */
-    .header-title-text {
-      display: flex;
-      flex-wrap: wrap;
-      align-items: center;
-      gap: 0.5rem 0.75rem;
-      min-width: 0;
-    }
-    .header h1 {
-      font-size: 1.5rem;
-      font-weight: 700;
-      line-height: 1.3;
-      color: var(--scion-text, #1e293b);
-      margin: 0;
-      min-width: 0;
-      overflow-wrap: anywhere;
-    }
     .header-meta {
       display: flex;
       align-items: center;
       gap: 0.75rem;
       margin-top: 0.5rem;
-    }
-    .header-actions {
-      display: flex;
-      gap: 0.5rem;
-      flex-shrink: 0;
     }
 
     sl-tab-group {
@@ -672,23 +626,16 @@ export class ScionPageSkillDetail extends LitElement {
   private renderHeader() {
     const skill = this.skill!;
     return html`
-      <div class="header">
-        <div class="header-info">
-          <div class="header-title">
-            <sl-icon name="lightning-charge"></sl-icon>
-            <div class="header-title-text">
-              <h1>${skill.name}</h1>
-              <scion-status-badge
-                status=${skill.status as StatusType}
-                label=${skill.status}
-              ></scion-status-badge>
-            </div>
-          </div>
-          <div class="header-meta">
-            <span class="scope-badge">${skill.scope}</span>
-          </div>
+      <scion-detail-header heading=${skill.name}>
+        <sl-icon slot="icon" name="lightning-charge"></sl-icon>
+        <scion-status-badge
+          status=${skill.status as StatusType}
+          label=${skill.status}
+        ></scion-status-badge>
+        <div slot="meta" class="header-meta">
+          <span class="scope-badge">${skill.scope}</span>
         </div>
-        <div class="header-actions">
+        <div slot="actions" class="header-actions">
           ${can(skill._capabilities, 'update')
             ? html`
                 <sl-button
@@ -732,7 +679,7 @@ export class ScionPageSkillDetail extends LitElement {
               `
             : nothing}
         </div>
-      </div>
+      </scion-detail-header>
     `;
   }
 
