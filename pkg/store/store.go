@@ -496,10 +496,10 @@ type AgentStore interface {
 	// caller that read the agent before a broker call and learned from that
 	// call that the container is gone (ptone/scion#3470). On top of every
 	// MarkAgentContainerMissing guard, the conditional UPDATE also requires
-	// phase running (not stopping), that the row's state_version and run_id still equal pre's (so a start,
-	// restart or other versioned write since the read wins) and that no
-	// start claim of any kind (start, restart, stop) is held. Returns
-	// (nil, nil) when any check fails.
+	// phase running (not stopping), that the row's state_version and run_id
+	// still equal pre's (so a start, restart or other versioned write since
+	// the read wins) and that no start claim of any kind (start, restart,
+	// stop) is held. Returns (nil, nil) when any check fails.
 	MarkAgentContainerMissingIfUnchanged(ctx context.Context, id, brokerID string, cutoff time.Time, pre ContainerMissingPrecondition, message string) (*Agent, error)
 
 	// ClearAgentRuntimeTarget removes the runtime target and any runtime
