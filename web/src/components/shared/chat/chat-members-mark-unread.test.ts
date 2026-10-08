@@ -32,7 +32,8 @@ import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vite
 // main.ts registers every Shoelace component and runs the app bootstrap,
 // so happy-dom tries to fetch from 127.0.0.1:3000 and logs ECONNREFUSED on
 // stderr. These tests only need a stub; it matches the one in
-// chat-members.test.ts (ptone/scion#3392).
+// chat-members.test.ts (stub from ptone/scion#3369; applied here for
+// ptone/scion#3392).
 vi.mock('../../../client/main.js', () => ({
   navigateTo: vi.fn(),
   pushRoute: vi.fn((path: string) => {
