@@ -60,8 +60,6 @@ type Store interface {
 	GetConversationContext(ctx context.Context, teamsUserID, projectID, agentSlug string) (*ConversationContext, error)
 	GetLatestConversationContext(ctx context.Context, teamsUserID, projectID string) (*ConversationContext, error)
 
-	// Agent cache
-
 	// Pending ask-user requests
 	// CreatePendingAskUser stores req unless a request with the same ID
 	// already exists, in which case the existing request is kept unchanged.
