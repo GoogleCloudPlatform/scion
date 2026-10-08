@@ -46,6 +46,7 @@ interface CreatePrivate extends HTMLElement {
   brokerId: string;
   profile: string;
   gcpMetadataMode: string;
+  gcpServiceAccountId: string;
   gcpIdentityUserSet: boolean;
   telemetryEnabled: boolean;
   updateComplete: Promise<unknown>;
@@ -55,6 +56,20 @@ interface CreatePrivate extends HTMLElement {
 let projectDefaultMode = '';
 let hubTelemetry = false;
 let bodies: Array<Record<string, unknown>> = [];
+
+/** A verified account, so a project default of assign applies on load. */
+const verifiedServiceAccount = {
+  id: 'sa-a',
+  scope: 'project',
+  scopeId: 'p1',
+  email: 'sa-a@example.iam.gserviceaccount.com',
+  projectId: 'gcp-proj',
+  displayName: '',
+  defaultScopes: [],
+  verified: true,
+  verifiedAt: '2026-01-01T00:00:00Z',
+  createdBy: 'user-1',
+};
 
 function stubFetch(): void {
   bodies = [];
@@ -79,9 +94,13 @@ function stubFetch(): void {
       } else if (url.includes('/api/v1/projects?')) {
         body = { projects: [{ id: 'p1', name: 'P1' }] };
       } else if (url.includes('/api/v1/projects/p1/settings')) {
-        body = projectDefaultMode ? { defaultGCPIdentityMode: projectDefaultMode } : {};
+        body = !projectDefaultMode
+          ? {}
+          : projectDefaultMode === 'assign'
+            ? { defaultGCPIdentityMode: 'assign', defaultGCPIdentityServiceAccountID: 'sa-a' }
+            : { defaultGCPIdentityMode: projectDefaultMode };
       } else if (url.includes('/gcp-service-accounts')) {
-        body = { items: [] };
+        body = { items: [verifiedServiceAccount] };
       }
       return Promise.resolve({ ok: true, status: 200, json: async () => body } as Response);
     })
@@ -121,15 +140,15 @@ async function mount(): Promise<CreatePrivate> {
   return c;
 }
 
-/** The target runtime selections the omission must hold for. */
-const targets: Array<{
+interface TargetFixture {
   label: string;
   brokers: BrokerFixture[];
   brokerId: string;
   profile: string;
-}> = [
-  { label: 'no broker selected', brokers: [], brokerId: '', profile: '' },
-  ...['docker', 'podman', 'apple', 'kubernetes'].map((type) => ({
+}
+
+function singleTypeTarget(type: string): TargetFixture {
+  return {
     label: `a broker of type ${type}`,
     brokers: [
       {
@@ -141,9 +160,14 @@ const targets: Array<{
     ],
     brokerId: `broker-${type}`,
     profile: '',
-  })),
-  {
-    label: 'a mixed broker with no profile chosen',
+  };
+}
+
+function mixedTarget(profile: string): TargetFixture {
+  return {
+    label: profile
+      ? 'a mixed broker with a kubernetes profile chosen'
+      : 'a mixed broker with no profile chosen',
     brokers: [
       {
         id: 'broker-mixed',
@@ -156,27 +180,31 @@ const targets: Array<{
       },
     ],
     brokerId: 'broker-mixed',
-    profile: '',
-  },
-  {
-    label: 'a mixed broker with a kubernetes profile chosen',
-    brokers: [
-      {
-        id: 'broker-mixed',
-        name: 'mixed-broker',
-        status: 'online',
-        profiles: [
-          { name: 'k8s', type: 'kubernetes', available: true },
-          { name: 'local', type: 'docker', available: true },
-        ],
-      },
-    ],
-    brokerId: 'broker-mixed',
-    profile: 'k8s',
-  },
+    profile,
+  };
+}
+
+const noBrokerTarget: TargetFixture = {
+  label: 'no broker selected',
+  brokers: [],
+  brokerId: '',
+  profile: '',
+};
+const dockerTarget = singleTypeTarget('docker');
+const k8sTarget = singleTypeTarget('kubernetes');
+
+/** The target runtime selections the omission must hold for. */
+const targets: TargetFixture[] = [
+  noBrokerTarget,
+  dockerTarget,
+  singleTypeTarget('podman'),
+  singleTypeTarget('apple'),
+  k8sTarget,
+  mixedTarget(''),
+  mixedTarget('k8s'),
 ];
 
-async function selectTarget(c: CreatePrivate, t: (typeof targets)[number]): Promise<void> {
+async function selectTarget(c: CreatePrivate, t: TargetFixture): Promise<void> {
   c.brokers = t.brokers;
   c.brokerId = t.brokerId;
   c.profile = t.profile;
@@ -191,6 +219,14 @@ function gcpIdentitySelect(c: CreatePrivate): HTMLElement & { value: string } {
   const select = field?.querySelector('sl-select');
   expect(select).toBeTruthy();
   return select as HTMLElement & { value: string };
+}
+
+function gcpIdentityHint(c: CreatePrivate): string {
+  const fields = Array.from(c.shadowRoot?.querySelectorAll('.form-field') ?? []);
+  const field = fields.find(
+    (f) => f.querySelector('label')?.textContent?.trim() === 'GCP Identity'
+  );
+  return (field?.querySelector('.hint')?.textContent ?? '').replace(/\s+/g, ' ').trim();
 }
 
 /** Operates the GCP Identity select the way a user pick does. */
@@ -221,7 +257,7 @@ async function submit(c: CreatePrivate): Promise<Record<string, unknown>> {
 }
 
 describe('Create Agent: gcp_identity is sent only when the user chose it', () => {
-  for (const projectDefault of ['', 'passthrough']) {
+  for (const projectDefault of ['', 'passthrough', 'assign']) {
     for (const t of targets) {
       it(`omits gcp_identity when untouched, on ${t.label} (project default: ${projectDefault || 'none'})`, async () => {
         projectDefaultMode = projectDefault;
@@ -240,6 +276,60 @@ describe('Create Agent: gcp_identity is sent only when the user chose it', () =>
     const c = await mount();
     expect(c.gcpMetadataMode).toBe('passthrough');
     expect(c.gcpIdentityUserSet).toBe(false);
+    expect(gcpIdentitySelect(c).value).toBe('passthrough');
+  });
+
+  for (const t of [dockerTarget, k8sTarget]) {
+    it(`does not count an applied project default of assign as a user choice, on ${t.label}`, async () => {
+      projectDefaultMode = 'assign';
+      const c = await mount();
+      await selectTarget(c, t);
+      expect(c.gcpMetadataMode).toBe('assign');
+      expect(c.gcpServiceAccountId).toBe('sa-a');
+      expect(c.gcpIdentityUserSet).toBe(false);
+    });
+  }
+
+  for (const t of [noBrokerTarget, dockerTarget, k8sTarget]) {
+    it(`renders the picker blank with no project default and nothing chosen, on ${t.label}`, async () => {
+      const c = await mount();
+      await selectTarget(c, t);
+      expect(gcpIdentitySelect(c).value).toBe('');
+    });
+  }
+
+  it('names the hub-wide default in the hint with no project default on a docker broker', async () => {
+    const c = await mount();
+    await selectTarget(c, dockerTarget);
+    expect(gcpIdentityHint(c)).toBe(
+      'No mode chosen: the hub-wide default applies, or Block if none is configured.'
+    );
+  });
+
+  // The picker is blank, so picking Block (this page's own internal
+  // placeholder value) is a real change and is sent explicitly.
+  it('sends Block when the user picks it with no project default on a docker broker', async () => {
+    const c = await mount();
+    await selectTarget(c, dockerTarget);
+    expect(c.gcpMetadataMode).toBe('block');
+
+    await chooseIdentity(c, 'block');
+    expect(c.gcpIdentityUserSet).toBe(true);
+    expect(gcpIdentitySelect(c).value).toBe('block');
+
+    const body = await submit(c);
+    expect(body.gcp_identity).toEqual({ metadata_mode: 'block' });
+  });
+
+  it('sends Passthrough when the user picks it with no project default on a kubernetes broker', async () => {
+    const c = await mount();
+    await selectTarget(c, k8sTarget);
+    expect(c.gcpMetadataMode).toBe('passthrough');
+
+    await chooseIdentity(c, 'passthrough');
+
+    const body = await submit(c);
+    expect(body.gcp_identity).toEqual({ metadata_mode: 'passthrough' });
   });
 
   for (const mode of ['block', 'passthrough']) {
@@ -247,7 +337,7 @@ describe('Create Agent: gcp_identity is sent only when the user chose it', () =>
       // Start from a different default so the pick is a real change.
       projectDefaultMode = mode === 'block' ? 'passthrough' : 'block';
       const c = await mount();
-      await selectTarget(c, targets[1]);
+      await selectTarget(c, dockerTarget);
 
       await chooseIdentity(c, mode);
       expect(c.gcpIdentityUserSet).toBe(true);
@@ -260,7 +350,7 @@ describe('Create Agent: gcp_identity is sent only when the user chose it', () =>
   it('sends the chosen mode on a kubernetes broker once the user changes it', async () => {
     projectDefaultMode = 'block';
     const c = await mount();
-    await selectTarget(c, targets[4]);
+    await selectTarget(c, k8sTarget);
 
     await chooseIdentity(c, 'passthrough');
 

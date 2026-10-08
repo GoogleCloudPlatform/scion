@@ -129,9 +129,9 @@ export class ScionPageAgentCreate extends LitElement {
    *
    * Gates whether gcp_identity is sent at all on submit: with no explicit
    * user choice, on any target runtime, the request omits gcp_identity so
-   * the server resolves it from its own precedence (project default, then
-   * hub default, then unset) rather than the form pinning the identity mode
-   * client-side.
+   * the server resolves it from its own precedence (per-profile and project
+   * defaults, then hub default, then unset) rather than the form pinning the
+   * identity mode client-side.
    */
   @state() private gcpIdentityUserSet = false;
   /**
@@ -265,6 +265,20 @@ export class ScionPageAgentCreate extends LitElement {
       this.projectGCPIdentityDefaultMode === 'block' &&
       !this.gcpIdentityUserSet
     );
+  }
+
+  /**
+   * True when the user has not chosen a GCP identity mode and this project
+   * has no default of its own, on any target runtime. The request then omits
+   * gcp_identity and the server resolves the mode from the hub default, so
+   * the page has no value it can show as the outcome: the picker renders
+   * blank instead of this page's own placeholder. That also makes any pick,
+   * including the placeholder's value, a real sl-change that sets
+   * gcpIdentityUserSet. Unlike blockDefaultNeedsExplicitChoice this does not
+   * block submit: creating with nothing chosen is allowed.
+   */
+  private get noIdentityModeChosen(): boolean {
+    return !this.gcpIdentityUserSet && !this.projectGCPIdentityDefaultMode;
   }
 
   /**
@@ -1245,8 +1259,8 @@ export class ScionPageAgentCreate extends LitElement {
     }
 
     // Telemetry (structured config property, matching agent-configure.ts):
-    // sent only when the user toggled it. Otherwise the server resolves it
-    // from the project or template, then the hub default.
+    // sent only when the user toggled it. Otherwise the server uses the
+    // template, then the hub default; a project setting overrides either.
     if (this.telemetryUserSet) {
       config.telemetry = { enabled: this.telemetryEnabled };
     }
@@ -1344,9 +1358,10 @@ export class ScionPageAgentCreate extends LitElement {
 
       // GCP identity: sent only when the user chose it here. Otherwise the
       // request omits gcp_identity, so the server resolves it from its own
-      // precedence (project default, then hub default, then unset) instead
-      // of the form pinning the identity mode client-side. The displayed
-      // mode is that default for context, not a user choice.
+      // precedence (per-profile and project defaults, then hub default, then
+      // unset) instead of the form pinning the identity mode client-side.
+      // The displayed mode is the project default for context, or blank when
+      // there is none (noIdentityModeChosen), not a user choice.
       if (!this.gcpIdentityUserSet) {
         // omit body.gcp_identity
       } else if (this.gcpMetadataMode === 'assign' && this.gcpServiceAccountId) {
@@ -2061,7 +2076,9 @@ export class ScionPageAgentCreate extends LitElement {
         <label>GCP Identity</label>
         <sl-select
           placeholder="Choose an identity..."
-          .value=${this.blockDefaultNeedsExplicitChoice ? '' : this.gcpMetadataMode}
+          .value=${this.blockDefaultNeedsExplicitChoice || this.noIdentityModeChosen
+            ? ''
+            : this.gcpMetadataMode}
           @sl-change=${(e: Event) => {
             this.gcpMetadataMode = (e.target as HTMLElement & { value: string }).value as
               | 'block'
@@ -2085,11 +2102,15 @@ export class ScionPageAgentCreate extends LitElement {
         <div class="hint">
           ${this.blockDefaultNeedsExplicitChoice
             ? 'No GCP identity is selected yet.'
-            : this.gcpMetadataMode === 'block'
-              ? 'Prevents the agent from accessing any GCP identity. Token requests are denied.'
-              : this.gcpMetadataMode === 'assign'
-                ? 'Assigns a registered GCP service account. GCP client libraries will authenticate automatically.'
-                : "No metadata interception. The agent inherits the broker's GCP identity. Requires broker ownership."}
+            : this.noIdentityModeChosen
+              ? this.targetRuntimeIsKubernetesOnly
+                ? '' // kubernetesIdentityHintSuffix below explains the untouched case
+                : 'No mode chosen: the hub-wide default applies, or Block if none is configured.'
+              : this.gcpMetadataMode === 'block'
+                ? 'Prevents the agent from accessing any GCP identity. Token requests are denied.'
+                : this.gcpMetadataMode === 'assign'
+                  ? 'Assigns a registered GCP service account. GCP client libraries will authenticate automatically.'
+                  : "No metadata interception. The agent inherits the broker's GCP identity. Requires broker ownership."}
           ${this.targetRuntimeIsKubernetesOnly ? ` ${this.kubernetesIdentityHintSuffix}` : ''}
         </div>
       </div>

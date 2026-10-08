@@ -699,7 +699,7 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
     expect(bodies[0]).not.toHaveProperty('gcp_identity');
   });
 
-  it('displays the project default of assign (with its service account) after switching from a Kubernetes broker to docker, and omits it on submit', async () => {
+  it('displays the project default of assign after switching from a Kubernetes broker to docker, and omits it on submit', async () => {
     const { bodies } = stubFetchForKubernetesProjectDefault(
       'assign',
       [makeServiceAccount('sa-a')],
