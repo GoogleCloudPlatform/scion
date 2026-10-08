@@ -33,6 +33,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/google/uuid"
 )
 
@@ -2290,7 +2291,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 						"auth_kind", authKind,
 						"error", err,
 					)
-					writeConversationIDNotFound(ctx, w, r.URL.Path, "sender is not a participant of the direct conversation", authKind, authID)
+					writeConversationIDNotFound(ctx, w, logging.RequestPath(r), "sender is not a participant of the direct conversation", authKind, authID)
 					return
 				}
 			case "group":
@@ -2307,14 +2308,14 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 						"conv_project_id", conv.ProjectID,
 						"agent_project_id", agent.ProjectID,
 					)
-					writeConversationIDNotFound(ctx, w, r.URL.Path, "group conversation is not in the recipient agent's project", authKind, authID)
+					writeConversationIDNotFound(ctx, w, logging.RequestPath(r), "group conversation is not in the recipient agent's project", authKind, authID)
 					return
 				}
 				// The sender must be able to read the group conversation
 				// (an agent only within its own project), checked before
 				// any participant row is written.
 				if !s.senderCanReadGroup(ctx, *conv.ProjectID) {
-					writeConversationIDNotFound(ctx, w, r.URL.Path, "sender cannot read the group conversation's project", authKind, authID)
+					writeConversationIDNotFound(ctx, w, logging.RequestPath(r), "sender cannot read the group conversation's project", authKind, authID)
 					return
 				}
 
@@ -2353,7 +2354,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 					"conversation_id", conv.ID,
 					"kind", conv.Kind,
 				)
-				writeConversationIDNotFound(ctx, w, r.URL.Path, "unsupported conversation kind", authKind, authID)
+				writeConversationIDNotFound(ctx, w, logging.RequestPath(r), "unsupported conversation kind", authKind, authID)
 				return
 			}
 

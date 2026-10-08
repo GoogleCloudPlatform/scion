@@ -64,6 +64,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/google/uuid"
 )
 
@@ -2606,7 +2607,7 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 		}
 		if !isDMParticipant(key, user.ID()) {
 			// Answered as a missing thread; the reason is logged.
-			logReferenceRefused(ctx, r.URL.Path, "caller is not a participant of this DM", user)
+			logReferenceRefused(ctx, logging.RequestPath(r), "caller is not a participant of this DM", user)
 			NotFound(w, "Thread")
 			return
 		}
@@ -2627,7 +2628,7 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 		}
 		project, err := s.store.GetProject(ctx, topic.ProjectID)
 		if err != nil {
-			logReferenceRefused(ctx, r.URL.Path, "topic project lookup failed: "+err.Error(), user)
+			logReferenceRefused(ctx, logging.RequestPath(r), "topic project lookup failed: "+err.Error(), user)
 			NotFound(w, "Thread")
 			return
 		}
@@ -3212,7 +3213,7 @@ func (s *Server) handleConversationRead(w http.ResponseWriter, r *http.Request, 
 			}
 		}
 		if !sameConversation(targetMsg, key, convID) {
-			logReferenceRefused(ctx, r.URL.Path, "read marker is not a message of this conversation", user)
+			logReferenceRefused(ctx, logging.RequestPath(r), "read marker is not a message of this conversation", user)
 			ValidationError(w, watermarkNotInConversation, nil)
 			return
 		}
@@ -3431,7 +3432,7 @@ func (s *Server) authorizeConversationAccess(
 			return false
 		}
 		if !isDMParticipant(key, userID) {
-			logReferenceRefused(r.Context(), r.URL.Path, "caller is not a participant of this DM", GetIdentityFromContext(r.Context()))
+			logReferenceRefused(r.Context(), logging.RequestPath(r), "caller is not a participant of this DM", GetIdentityFromContext(r.Context()))
 			NotFound(w, "Thread")
 			return false
 		}
@@ -3446,7 +3447,7 @@ func (s *Server) authorizeConversationAccess(
 	}
 	project, err := s.store.GetProject(ctx, topic.ProjectID)
 	if err != nil {
-		logReferenceRefused(ctx, r.URL.Path, "topic project lookup failed: "+err.Error(), GetIdentityFromContext(ctx))
+		logReferenceRefused(ctx, logging.RequestPath(r), "topic project lookup failed: "+err.Error(), GetIdentityFromContext(ctx))
 		NotFound(w, "Thread")
 		return false
 	}
@@ -5577,7 +5578,7 @@ func (s *Server) handleAttachmentDownload(w http.ResponseWriter, r *http.Request
 	// attached to. Anyone else gets the same answer as for an unknown
 	// attachment; the reason is logged.
 	if !s.canReadAttachment(ctx, user, meta) {
-		logReferenceRefused(ctx, r.URL.Path, "caller may not read this attachment", user)
+		logReferenceRefused(ctx, logging.RequestPath(r), "caller may not read this attachment", user)
 		NotFound(w, "Attachment")
 		return
 	}
