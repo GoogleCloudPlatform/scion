@@ -43,6 +43,15 @@ type workspaceCheckDispatcher struct {
 	execOutput string
 	execErr    error
 	block      bool
+	// stopErr, when set, is returned by DispatchAgentStop.
+	stopErr error
+}
+
+func (d *workspaceCheckDispatcher) DispatchAgentStop(ctx context.Context, agent *store.Agent) error {
+	if d.stopErr != nil {
+		return d.stopErr
+	}
+	return d.quotaLifecycleDispatcher.DispatchAgentStop(ctx, agent)
 }
 
 func (d *workspaceCheckDispatcher) DispatchAgentExec(ctx context.Context, _ *store.Agent, _ []string, _ int) (string, int, error) {
@@ -170,7 +179,8 @@ func TestEphemeralWorkspace_NotEphemeralUntouched(t *testing.T) {
 // unchecked.
 func TestEphemeralWorkspace_CheckFailureDoesNotBlockStop(t *testing.T) {
 	old := workspaceCheckTimeout
-	workspaceCheckTimeout = 200 * time.Millisecond
+	// 1.5s for the exec, 300ms reserved for the record write.
+	workspaceCheckTimeout = 1800 * time.Millisecond
 	t.Cleanup(func() { workspaceCheckTimeout = old })
 
 	cases := []struct {
@@ -189,7 +199,7 @@ func TestEphemeralWorkspace_CheckFailureDoesNotBlockStop(t *testing.T) {
 			start := time.Now()
 			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/stop", nil)
 			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-			assert.Less(t, time.Since(start), 5*time.Second)
+			assert.Less(t, time.Since(start), 4*time.Second, "the check and its record write stay within the check budget")
 			assert.Empty(t, lifecycleWarnings(t, rec.Body.Bytes()))
 			assert.EqualValues(t, 1, tc.disp.stopCount.Load(), "the stop is dispatched")
 			got, err := s.GetAgent(context.Background(), a.ID)
@@ -308,4 +318,85 @@ func TestEphemeralWorkspaceWarningText(t *testing.T) {
 	assert.Empty(t, ephemeralWorkspaceStopWarning(ephemeralWorkspaceRecord{Unchecked: true}))
 	assert.Equal(t, ephemeralWorkspaceRecloneNotice, ephemeralWorkspaceStartWarning(nil))
 	assert.Equal(t, ephemeralWorkspaceRecloneNotice, ephemeralWorkspaceStartWarning(&ephemeralWorkspaceRecord{Unchecked: true}))
+}
+
+// A lifecycle start of a running agent keeps the running pod (the broker
+// returns the existing run), so there is no re-clone notice.
+func TestEphemeralWorkspace_StartOfRunningAgentNoNotice(t *testing.T) {
+	disp := &workspaceCheckDispatcher{execOutput: workAt23}
+	srv, s, broker, project := newWorkspaceCheckServer(t, disp)
+	a := newWorkspaceAgent(t, s, broker, project, "ws-start-running", "kubernetes", api.WorkspacePlacementLocal, state.PhaseRunning)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/start", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Empty(t, lifecycleWarnings(t, rec.Body.Bytes()))
+	assert.Zero(t, disp.calls())
+}
+
+// When the stop (or suspend) dispatch fails, the agent may still be
+// running: the record the check wrote is removed, so a later start does not
+// report it.
+func TestEphemeralWorkspace_FailedStopClearsRecord(t *testing.T) {
+	for _, action := range []string{"stop", "suspend"} {
+		t.Run(action, func(t *testing.T) {
+			disp := &workspaceCheckDispatcher{execOutput: workAt23, stopErr: errors.New("broker failed the stop")}
+			srv, s, broker, project := newWorkspaceCheckServer(t, disp)
+			a := newWorkspaceAgent(t, s, broker, project, "ws-failed-"+action, "kubernetes", api.WorkspacePlacementLocal, state.PhaseRunning)
+
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/"+action, nil)
+			require.NotEqual(t, http.StatusOK, rec.Code, rec.Body.String())
+			assert.Equal(t, 1, disp.calls(), "the check ran before the failed dispatch")
+			assert.Empty(t, workspaceAnnotation(t, s, a.ID), "a failed stop leaves no record")
+		})
+	}
+}
+
+// scion start and scion resume restart an existing agent through the create
+// call (handleExistingAgent): a stopped agent with resume restarts in place,
+// a suspended one is resumed. The create response carries the start warning
+// too.
+func TestEphemeralWorkspace_CreateOnExistingShowsRecordedResult(t *testing.T) {
+	for _, resume := range []bool{false, true} {
+		name := "start"
+		if resume {
+			name = "resume"
+		}
+		t.Run(name, func(t *testing.T) {
+			disp := &workspaceCheckDispatcher{execOutput: workAt23}
+			srv, s, broker, project := newWorkspaceCheckServer(t, disp)
+			ctx := context.Background()
+			owner := tid("ws-create-owner")
+			ensureStandingRoot(t, s, project.ID, owner)
+			a := &store.Agent{
+				ID:              tid("agent-ws-create-" + name),
+				Slug:            "ws-create-" + name,
+				Name:            "ws-create-" + name,
+				ProjectID:       project.ID,
+				OwnerID:         owner,
+				RuntimeBrokerID: broker.ID,
+				Runtime:         "kubernetes",
+				Phase:           string(state.PhaseRunning),
+			}
+			require.NoError(t, s.CreateAgent(ctx, a))
+			require.NoError(t, s.SetAgentWorkspacePlacement(ctx, a.ID, api.WorkspacePlacementLocal))
+
+			action := "stop"
+			if resume {
+				action = "suspend"
+			}
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/"+action, nil)
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+			rec = doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+				Name: a.Name, ProjectID: project.ID, Task: "x", Resume: true,
+			})
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			var resp CreateAgentResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+			require.NotNil(t, resp.Agent)
+			assert.Equal(t, a.ID, resp.Agent.ID, "the existing agent was started, not recreated")
+			assert.Contains(t, resp.Warnings, startWarning23)
+			assert.Empty(t, workspaceAnnotation(t, s, a.ID))
+		})
+	}
 }

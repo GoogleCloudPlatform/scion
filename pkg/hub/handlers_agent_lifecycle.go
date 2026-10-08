@@ -398,6 +398,7 @@ func (s *Server) suspendAgent(ctx context.Context, agent *store.Agent) error {
 		s.checkEphemeralWorkspaceBeforeStop(ctx, dispatcher, agent, true)
 		if err := dispatcher.DispatchAgentStop(ctx, agent); err != nil {
 			s.logStopRunMismatch(agent, "suspend", err)
+			s.clearWorkspaceAtStop(ctx, agent)
 			return err
 		}
 		// The superseded start claim is released last, after the
@@ -672,6 +673,9 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			s.checkEphemeralWorkspaceBeforeStop(ctx, dispatcher, agent, true)
 			dispatchErr = dispatcher.DispatchAgentStop(ctx, agent)
 			s.logStopRunMismatch(agent, "stop", dispatchErr)
+			if dispatchErr != nil {
+				s.clearWorkspaceAtStop(ctx, agent)
+			}
 		}
 		// The max_agents_per_broker reservation is released once the
 		// stopped status is recorded below, for the run that was stopped.
@@ -803,6 +807,7 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			if writeBrokerRuntimeUnavailable(w, stopErr, agent.Runtime) {
 				slog.Warn("Restart: agent's runtime not available on broker, not starting",
 					"agent_id", id, "runtime", agent.Runtime)
+				s.clearWorkspaceAtStop(ctx, agent)
 				sd.rollback(ctx)
 				return
 			}
@@ -816,6 +821,7 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 					// so a running agent keeps the slot it already held.
 					slog.Warn("Restart: stop dispatch failed, not starting",
 						"agent_id", id, "error", stopErr)
+					s.clearWorkspaceAtStop(ctx, agent)
 					sd.rollback(ctx)
 					writeRestartStopFailed(w, stopErr)
 					return

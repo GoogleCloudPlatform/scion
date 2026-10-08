@@ -52,9 +52,20 @@ const (
 	workspaceCheckMarker = "scion-workspace-check"
 )
 
-// workspaceCheckTimeout bounds the whole check on the hub side, so a stop
-// never waits longer than this for it. A variable so tests can shorten it.
+// workspaceCheckTimeout bounds the whole check on the hub side, the exec
+// and the write of its result together, so a stop never waits longer than
+// this for it. A variable so tests can shorten it.
 var workspaceCheckTimeout = 6 * time.Second
+
+// workspaceRecordReserve is the share of workspaceCheckTimeout kept for
+// writing the result after the exec (1s of the default 6s).
+func workspaceRecordReserve() time.Duration {
+	return workspaceCheckTimeout / 6
+}
+
+// workspaceClearTimeout bounds the write that clears the record outside the
+// stop's check (after a start, or a stop that failed).
+const workspaceClearTimeout = 5 * time.Second
 
 // workspaceCheckScript prints "scion-workspace-check commits=N files=M":
 // N is the number of commits on HEAD not on its upstream (or, without an
@@ -211,7 +222,10 @@ func (s *Server) checkEphemeralWorkspaceBeforeStop(ctx context.Context, dispatch
 		agent.Phase != string(state.PhaseRunning) {
 		return
 	}
-	cctx, cancel := context.WithTimeout(ctx, workspaceCheckTimeout)
+	// One deadline covers the exec and the record write: the exec gets the
+	// budget less a reserve for the write, which gets the rest.
+	deadline := time.Now().Add(workspaceCheckTimeout)
+	cctx, cancel := context.WithDeadline(ctx, deadline.Add(-workspaceRecordReserve()))
 	output, exitCode, err := dispatcher.DispatchAgentExec(cctx, agent, workspaceCheckCommand(), workspaceCheckExecTimeoutSeconds)
 	cancel()
 
@@ -225,7 +239,7 @@ func (s *Server) checkEphemeralWorkspaceBeforeStop(ctx context.Context, dispatch
 		s.agentLifecycleLog.Info("Pre-stop workspace check did not complete; continuing without it",
 			"agent_id", agent.ID, "agent", agent.Name, "exit_code", exitCode, "error", err)
 	}
-	s.setWorkspaceAtStop(ctx, agent, &rec)
+	s.setWorkspaceAtStop(ctx, agent, &rec, deadline)
 	if warn {
 		addDispatchWarnings(ctx, ephemeralWorkspaceStopWarning(rec))
 	}
@@ -241,14 +255,22 @@ func (s *Server) addEphemeralWorkspaceStartWarning(ctx context.Context, agent *s
 		return
 	}
 	addDispatchWarnings(ctx, ephemeralWorkspaceStartWarning(recordedWorkspaceAtStop(agent)))
-	s.setWorkspaceAtStop(ctx, agent, nil)
+	s.clearWorkspaceAtStop(ctx, agent)
+}
+
+// clearWorkspaceAtStop removes the workspace-at-stop record, for example
+// after a stop whose dispatch failed: the agent may still be running, and
+// what the check found is no longer the state of a stopped workspace. A
+// later start without a record gives the generic notice.
+func (s *Server) clearWorkspaceAtStop(ctx context.Context, agent *store.Agent) {
+	s.setWorkspaceAtStop(ctx, agent, nil, time.Now().Add(workspaceClearTimeout))
 }
 
 // setWorkspaceAtStop writes (or, for nil, removes) the workspace-at-stop
-// annotation with the narrow SetAgentAnnotation write, and mirrors it on the
-// in-memory agent so a later whole-row write of that copy keeps it. A failed
-// write is logged only.
-func (s *Server) setWorkspaceAtStop(ctx context.Context, agent *store.Agent, rec *ephemeralWorkspaceRecord) {
+// annotation with the narrow SetAgentAnnotation write, bounded by deadline,
+// and mirrors it on the in-memory agent so a later whole-row write of that
+// copy keeps it. A failed write is logged only.
+func (s *Server) setWorkspaceAtStop(ctx context.Context, agent *store.Agent, rec *ephemeralWorkspaceRecord, deadline time.Time) {
 	value := ""
 	if rec != nil {
 		b, err := json.Marshal(rec)
@@ -260,7 +282,7 @@ func (s *Server) setWorkspaceAtStop(ctx context.Context, agent *store.Agent, rec
 	if value == "" && agent.Annotations[workspaceAtStopAnnotation] == "" {
 		return
 	}
-	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	wctx, cancel := context.WithDeadline(context.WithoutCancel(ctx), deadline)
 	defer cancel()
 	if err := s.store.SetAgentAnnotation(wctx, agent.ID, workspaceAtStopAnnotation, value); err != nil {
 		slog.Warn("Recording the pre-stop workspace check failed", "agent_id", agent.ID, "error", err)
