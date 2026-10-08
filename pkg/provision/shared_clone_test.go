@@ -174,18 +174,18 @@ func TestCloneError_NamesMissingCredentials(t *testing.T) {
 	output := "Cloning into '/workspace/.scion-clone-1'...\n" +
 		"fatal: could not read Username for 'https://tok123@github.com': terminal prompts disabled\n"
 
-	err := cloneError(rawURL, output, errors.New("exit status 128"))
+	err := cloneError(rawURL, output, errors.New("exit status 128"), false)
 	msg := err.Error()
 	assert.Contains(t, msg, "git clone https://github.com/org/private.git")
 	assert.Contains(t, msg, "needs credentials")
 	assert.Contains(t, msg, "without a git token")
 	assert.NotContains(t, msg, "tok123")
 
-	notFound := cloneError("https://github.com/org/gone.git", "remote: Repository not found.\n", nil)
+	notFound := cloneError("https://github.com/org/gone.git", "remote: Repository not found.\n", nil, false)
 	assert.Contains(t, notFound.Error(), "not found")
 	assert.Contains(t, notFound.Error(), "no credentials")
 
-	other := cloneError("https://github.com/org/repo.git", "fatal: something else\n", nil)
+	other := cloneError("https://github.com/org/repo.git", "fatal: something else\n", nil, false)
 	assert.Equal(t, "git clone https://github.com/org/repo.git: fatal: something else", other.Error())
 }
 

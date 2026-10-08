@@ -32,6 +32,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/autoexpose"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
@@ -2797,7 +2798,7 @@ func gitCloneWorkspace(uid, gid int, agentHome string, requirePrivilegeDrop bool
 	if hub.IsGitHubAppEnabled() {
 		credentialHelper = "!sciontool credential-helper"
 	} else {
-		credentialHelper = `!f() { echo "password=${GITHUB_TOKEN}"; echo "username=oauth2"; }; f`
+		credentialHelper = provision.GitTokenCredentialHelper
 	}
 	credCmd := exec.Command("git", "config", "--file", gitconfigPath, "credential.helper", credentialHelper)
 	setupGitCmd(credCmd)
@@ -3124,7 +3125,7 @@ func configureSharedWorkspaceGit(agentHome string, uid, gid int, requirePrivileg
 		credentialHelper = "!sciontool credential-helper"
 	} else {
 		// Simple credential helper using GITHUB_TOKEN env var
-		credentialHelper = `!f() { echo "password=${GITHUB_TOKEN}"; echo "username=oauth2"; }; f`
+		credentialHelper = provision.GitTokenCredentialHelper
 	}
 	// This is idempotent and works even if provisioning already set it.
 	runGitConfig("credential.helper", credentialHelper)

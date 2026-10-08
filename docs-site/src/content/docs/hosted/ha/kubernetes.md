@@ -591,6 +591,8 @@ Worktree-per-agent needs git 2.48 or later in the provisioning init container, i
 
 The provisioning init container runs as root, while the shared checkout and the worktrees belong to the agents' user (uid 1000, the Pod's user). Its git commands list exactly the shared checkout and the agent's worktree in git's `safe.directory` setting, for those commands only, so git works in them. Afterwards it sets the ownership of what it added or changed in this step (the agent's new worktree, its entry and branch under `.git`, `.git/config` and the agent's entry in the sharing registry) to that user and the group the provisioning step chowns to. A worktree that already exists is left as it is.
 
+In shared-plain and worktree-per-agent modes, the provisioning init container clones private repositories with the project's git credential (`GITHUB_TOKEN`), the same one the agent container uses. It reads the credential from the agent's per-agent Secret (`scion-agent-<agent>`), and only the init container that clones gets it; a container that only waits for another Pod's clone does not. The credential is given to the clone command alone through a credential helper. It is not written to the clone URL, the remote in `.git/config`, the workspace or the provisioning state directory. A `GITHUB_TOKEN` that the Hub sends as a plain value, such as a GitHub App token, is stored in the same Secret under the key `scion-git-credential`, and both containers read it from there. Without a configured git credential, the init container clones without one, as before.
+
 Starting an agent in worktree-per-agent mode stops with an error that says what to do when:
 
 - the branch name is not a valid git branch name.

@@ -259,6 +259,14 @@ type ProvisionInput struct {
 	// GitClone holds git-clone config when the project is git-backed; nil otherwise.
 	GitClone *api.GitCloneConfig
 
+	// CloneWithToken makes the clone authenticate with the token in the
+	// GITHUB_TOKEN environment variable (GitTokenEnv). The clone command
+	// alone gets a credential helper, through GIT_CONFIG_* entries in its
+	// own environment, that reads the variable when git asks for a
+	// credential (GitTokenCredentialHelper). The token is not added to the
+	// clone URL, the command line or any file.
+	CloneWithToken bool
+
 	// Locker provides the per-project advisory lock for the NFS first-access
 	// provisioning guard (design §7, risk RN1). On Postgres-backed deployments
 	// this uses pg_try_advisory_lock(classid, objid) for cross-node mutual
@@ -2887,22 +2895,74 @@ func runGitClone(ctx context.Context, in ProvisionInput) error {
 
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	if in.CloneWithToken {
+		cmd.Env = append(cmd.Env, TokenCredentialHelperEnv(cmd.Env)...)
+	}
 	output, err := cmd.CombinedOutput()
 	if err == nil {
 		return nil
 	}
-	return cloneError(gc.URL, string(output), err)
+	return cloneError(gc.URL, string(output), err, in.CloneWithToken)
+}
+
+// GitTokenEnv is the environment variable holding the project's git token,
+// the same variable the agent container's clone uses.
+const GitTokenEnv = "GITHUB_TOKEN"
+
+// GitTokenCredentialHelper is the git credential helper that answers with
+// the token in GITHUB_TOKEN, read from the environment when git runs it.
+// sciontool init configures the same helper for the agent container, so
+// workspace provisioning and the agent authenticate the same way.
+const GitTokenCredentialHelper = `!f() { echo "password=${GITHUB_TOKEN}"; echo "username=oauth2"; }; f`
+
+// TokenCredentialHelperEnv returns the GIT_CONFIG_COUNT/KEY/VALUE entries
+// to append to env, the environment of one git command, so that the command
+// uses GitTokenCredentialHelper and no other credential helper: the first
+// entry clears the helpers from git's config files (so none of them stores
+// the credential), the second adds this one. Entries already counted in env
+// are kept. The returned values name the variable, never the token.
+func TokenCredentialHelperEnv(env []string) []string {
+	base := 0
+	for _, e := range env {
+		if v, ok := strings.CutPrefix(e, "GIT_CONFIG_COUNT="); ok {
+			// The last entry is the one exec uses.
+			base = 0
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				base = n
+			}
+		}
+	}
+	return []string{
+		"GIT_CONFIG_COUNT=" + strconv.Itoa(base+2),
+		fmt.Sprintf("GIT_CONFIG_KEY_%d=credential.helper", base),
+		fmt.Sprintf("GIT_CONFIG_VALUE_%d=", base),
+		fmt.Sprintf("GIT_CONFIG_KEY_%d=credential.helper", base+1),
+		fmt.Sprintf("GIT_CONFIG_VALUE_%d=%s", base+1, GitTokenCredentialHelper),
+	}
 }
 
 // cloneError builds the error for a failed clone of rawURL. git's output is
 // stripped of the URL's credentials before it is included.
-func cloneError(rawURL, output string, runErr error) error {
+// withToken reports whether the clone was given the project's git token.
+func cloneError(rawURL, output string, runErr error, withToken bool) error {
 	safeURL := redactCloneURL(rawURL)
 	detail := strings.TrimSpace(sanitizeCloneOutput(output, rawURL))
 	if detail == "" && runErr != nil {
 		detail = runErr.Error()
 	}
-	switch util.ClassifyGitError(detail).Kind {
+	kind := util.ClassifyGitError(detail).Kind
+	if withToken {
+		switch kind {
+		case util.GitErrAuth:
+			return fmt.Errorf("git clone %s: the repository did not accept the project's git credential (GITHUB_TOKEN): %s", safeURL, detail)
+		case util.GitErrNotFound:
+			return fmt.Errorf("git clone %s: repository or branch not found, "+
+				"or the project's git credential (GITHUB_TOKEN) has no access to it: %s", safeURL, detail)
+		default:
+			return fmt.Errorf("git clone %s: %s", safeURL, detail)
+		}
+	}
+	switch kind {
 	case util.GitErrAuth:
 		return fmt.Errorf("git clone %s: the repository needs credentials, and workspace provisioning has none "+
 			"(it clones without a git token, so a private repository cannot be cloned here): %s", safeURL, detail)
