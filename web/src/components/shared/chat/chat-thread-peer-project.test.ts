@@ -293,6 +293,91 @@ describe('agent DM peer project', () => {
   });
 });
 
+describe('peer-agent-resolved', () => {
+  let listeners = new AbortController();
+  afterEach(() => {
+    listeners.abort();
+    listeners = new AbortController();
+  });
+
+  /** Every `peer-agent-resolved` detail that reaches the document. */
+  function listen(): Array<Record<string, unknown>> {
+    const seen: Array<Record<string, unknown>> = [];
+    document.addEventListener(
+      'peer-agent-resolved',
+      (e) => seen.push((e as CustomEvent<Record<string, unknown>>).detail),
+      { signal: listeners.signal }
+    );
+    return seen;
+  }
+
+  it("reports the peer's name and project from its read, outside the thread", async () => {
+    apiFetch.mockImplementation((path) =>
+      Promise.resolve(
+        /^\/api\/v1\/agents\/coder$/.test(path)
+          ? json({ id: 'coder', name: 'Coder One', slug: 'coder-one', projectId: 'proj-coder' })
+          : json({ items: [] })
+      )
+    );
+    const seen = listen();
+    await openDM('coder');
+
+    expect(seen).toEqual([
+      {
+        conversationKey: 'dm:agent:coder:user:u1',
+        agentId: 'coder',
+        name: 'Coder One',
+        projectId: 'proj-coder',
+      },
+    ]);
+  });
+
+  it('falls back to the slug for the name', async () => {
+    apiFetch.mockImplementation((path) =>
+      Promise.resolve(
+        /^\/api\/v1\/agents\/coder$/.test(path)
+          ? json({ id: 'coder', slug: 'coder-one', projectId: 'proj-coder' })
+          : json({ items: [] })
+      )
+    );
+    const seen = listen();
+    await openDM('coder');
+    expect(seen.map((d) => d.name)).toEqual(['coder-one']);
+  });
+
+  it('is not reported without a read, or for a failed read', async () => {
+    const seen = listen();
+    store.hub = hubSnapshot([row('coder', 'proj-hub')]);
+    await openDM('coder');
+    store.hub = undefined;
+    peerStatus = 500;
+    await openDM('coder', document.createElement('scion-chat-thread'));
+    expect(seen).toEqual([]);
+  });
+
+  it('is not reported for a DM the thread has since left', async () => {
+    let answerCoder = (): void => {};
+    const base = apiFetch.getMockImplementation()!;
+    apiFetch.mockImplementation((path, init) => {
+      if (path === '/api/v1/agents/coder') {
+        return new Promise<Response>((resolve) => {
+          answerCoder = (): void => resolve(json({ id: 'coder', projectId: 'proj-coder' }));
+        });
+      }
+      return base(path, init);
+    });
+    const seen = listen();
+    const el = await openDM('coder');
+    apiFetch.mockImplementation(() => new Promise<Response>(() => {}));
+    el.conversationKey = 'dm:agent:stranger:user:u1';
+    await el.updateComplete;
+
+    answerCoder();
+    for (let i = 0; i < 10; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(seen).toEqual([]);
+  });
+});
+
 describe('agentIndexOf', () => {
   it('reuses the index for the same list and version, and builds a new one when either changes', () => {
     const agents = [row('a1', 'p1'), row('a2', 'p2')];

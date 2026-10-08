@@ -61,6 +61,7 @@ vi.mock('../../client/main.js', async () => ({
     scopeGeneration: 0,
     beginSeedEpoch: () => Symbol('seed-epoch'),
     endSeedEpoch: () => {},
+    getAgent: () => undefined,
   }),
 }));
 
@@ -537,6 +538,146 @@ describe('chat page — deep-linked thread header', () => {
 
     const header = renderToFragment(el.renderV2Conversation()).querySelector('.v2-thread-header');
     expect(header).not.toBeNull();
+  });
+});
+
+describe('chat page — a DM opened from its URL', () => {
+  const membersRequests = (projectId: string): number =>
+    vi
+      .mocked(apiFetch)
+      .mock.calls.filter(
+        ([path]) => path === `/api/v1/chat/spaces/${encodeURIComponent(projectId)}/members`
+      ).length;
+
+  const peerResolved = (detail: Record<string, string>): CustomEvent =>
+    new CustomEvent('peer-agent-resolved', { detail });
+
+  beforeEach(() => {
+    vi.mocked(apiFetch).mockClear();
+  });
+
+  it("takes an agent DM's peer from its key, and its name and project from the members held", () => {
+    const el = createPage();
+    el.v2AgentMembers = [
+      { id: 'agent-1', kind: 'agent', displayName: 'Coder One', projectId: 'p1' },
+    ];
+    window.history.replaceState({}, '', '/chat/dm/dm:agent:agent-1:user:user-me');
+
+    el.parseV2Route();
+
+    expect(el.v2Conversation).toMatchObject({
+      conversationKey: 'dm:agent:agent-1:user:user-me',
+      isDM: true,
+      peerId: 'agent-1',
+      peerKind: 'agent',
+      peerName: 'Coder One',
+      projectId: 'p1',
+    });
+    expect(membersRequests('p1')).toBe(1);
+  });
+
+  it("takes a user DM's peer from its key: the other participant", () => {
+    const el = createPage();
+    window.history.replaceState({}, '', '/chat/dm/dm:user:user-1:user:user-me');
+
+    el.parseV2Route();
+
+    expect(el.v2Conversation).toMatchObject({
+      peerId: 'user-1',
+      peerKind: 'user',
+      peerName: 'Ada Lovelace',
+      projectId: '',
+    });
+  });
+
+  it("names an unknown agent peer and loads its project's members from the thread's peer read", () => {
+    const el = createPage();
+    el.v2AgentMembers = [];
+    window.history.replaceState({}, '', '/chat/dm/dm:agent:agent-9:user:user-me');
+    el.parseV2Route();
+    expect(el.v2Conversation).toMatchObject({
+      peerId: 'agent-9',
+      peerKind: 'agent',
+      peerName: '',
+      projectId: '',
+    });
+    expect(vi.mocked(apiFetch).mock.calls.some(([p]) => String(p).includes('/members'))).toBe(
+      false
+    );
+
+    el.handlePeerAgentResolved(
+      peerResolved({
+        conversationKey: 'dm:agent:agent-9:user:user-me',
+        agentId: 'agent-9',
+        name: 'Nine',
+        projectId: 'p9',
+      })
+    );
+
+    expect(el.v2Conversation).toMatchObject({ peerName: 'Nine', projectId: 'p9' });
+    expect(membersRequests('p9')).toBe(1);
+
+    // A second report (a reload of the conversation) changes nothing more.
+    el.handlePeerAgentResolved(
+      peerResolved({
+        conversationKey: 'dm:agent:agent-9:user:user-me',
+        agentId: 'agent-9',
+        name: 'Nine',
+        projectId: 'p9',
+      })
+    );
+    expect(membersRequests('p9')).toBe(1);
+  });
+
+  it('a DM that inherits a project keeps it and its members when the peer read lands', () => {
+    const el = createPage();
+    el.v2AgentMembers = [];
+    el.v2Conversation = {
+      conversationKey: 'topic-1',
+      projectId: 'p1',
+      projectSlug: 'alpha',
+      threadName: 'general',
+      defaultAgent: '',
+      isDM: false,
+      peerName: '',
+      peerId: '',
+      peerKind: 'user',
+    };
+    window.history.replaceState({}, '', '/chat/dm/dm:agent:agent-9:user:user-me');
+    el.parseV2Route();
+    expect(el.v2Conversation.projectId).toBe('p1');
+
+    el.handlePeerAgentResolved(
+      peerResolved({
+        conversationKey: 'dm:agent:agent-9:user:user-me',
+        agentId: 'agent-9',
+        name: 'Nine',
+        projectId: 'p9',
+      })
+    );
+
+    expect(el.v2Conversation).toMatchObject({ peerName: 'Nine', projectId: 'p1' });
+    expect(membersRequests('p9')).toBe(0);
+  });
+
+  it('ignores a peer read for a conversation no longer open', () => {
+    const el = createPage();
+    el.v2AgentMembers = [];
+    window.history.replaceState({}, '', '/chat/dm/dm:agent:agent-9:user:user-me');
+    el.parseV2Route();
+    const open = el.v2Conversation;
+
+    el.handlePeerAgentResolved(
+      peerResolved({
+        conversationKey: 'dm:agent:agent-8:user:user-me',
+        agentId: 'agent-8',
+        name: 'Eight',
+        projectId: 'p8',
+      })
+    );
+
+    expect(el.v2Conversation).toBe(open);
+    expect(membersRequests('p8')).toBe(0);
   });
 });
 

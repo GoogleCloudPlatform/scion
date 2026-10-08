@@ -410,6 +410,15 @@ const PATH_LINK_NO_PROJECT_ERROR =
 // lives in utils/chat-file-links.ts so the recorder can share it.
 export { parseContainerPath, buildFileApiUrl, type PathLinkTarget };
 
+/** Detail of `peer-agent-resolved`: the agent DM peer, read for the open conversation. */
+export interface PeerAgentResolvedDetail {
+  conversationKey: string;
+  agentId: string;
+  /** The agent's name, or its slug; empty when the row carries neither. */
+  name: string;
+  projectId: string;
+}
+
 @customElement('scion-chat-thread')
 export class ScionChatThread extends LitElement {
   /**
@@ -4731,6 +4740,22 @@ export class ScionChatThread extends LitElement {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const agent = (await res.json()) as Partial<Agent>;
       read.projectId = agent.projectId || '';
+      // The page names the peer and fills the members sidebar from this read
+      // when it has no row for the agent of its own (a DM opened by URL).
+      if (this._peerAgentProject === read && this.conversationKey === conversationKey) {
+        this.dispatchEvent(
+          new CustomEvent<PeerAgentResolvedDetail>('peer-agent-resolved', {
+            detail: {
+              conversationKey,
+              agentId: peerAgentId,
+              name: agent.name || agent.slug || '',
+              projectId: read.projectId,
+            },
+            bubbles: true,
+            composed: true,
+          })
+        );
+      }
     } catch {
       // Non-critical: path links in this DM fall back to the message's own project.
       if (this._peerAgentProject === read) this._peerAgentProject = null;
