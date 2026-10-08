@@ -23,9 +23,11 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -353,5 +355,33 @@ func TestLocalUploadSyncsDirectories(t *testing.T) {
 	}
 	if synced[len(synced)-1] != dir {
 		t.Errorf("the last sync is not the rename's directory: %v", synced)
+	}
+}
+
+// TestLocalUploadDirSyncUnsupported: a file system that does not support
+// syncing a directory (EINVAL, ENOTSUP, EOPNOTSUPP) does not fail the
+// upload; any other sync failure does.
+func TestLocalUploadDirSyncUnsupported(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("directories are not synced on Windows")
+	}
+	orig := dirSync
+	t.Cleanup(func() { dirSync = orig })
+	for _, tc := range []struct {
+		err     error
+		wantErr bool
+	}{
+		{syscall.EINVAL, false},
+		{syscall.ENOTSUP, false},
+		{syscall.EOPNOTSUPP, false},
+		{&os.PathError{Op: "sync", Path: "d", Err: syscall.EOPNOTSUPP}, false},
+		{syscall.EIO, true},
+	} {
+		s, _ := newTestLocal(t)
+		dirSync = func(*os.File) error { return tc.err }
+		_, err := s.Upload(context.Background(), "d/obj", strings.NewReader("x"), UploadOptions{})
+		if (err != nil) != tc.wantErr {
+			t.Errorf("sync error %v: upload error %v, want error %v", tc.err, err, tc.wantErr)
+		}
 	}
 }

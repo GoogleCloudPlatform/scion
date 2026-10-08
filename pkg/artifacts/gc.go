@@ -103,7 +103,9 @@ var errUnknownGeneration = errors.New("artifacts: blob generation unknown; not d
 // one (storeBlob always uploads). A missing object or a changed generation
 // counts as done: the bytes the sweep meant to delete are gone or were
 // replaced. A provider that versions objects but gives no generation for
-// this blob gets no delete at all: the blob and its mark stay.
+// this blob gets no delete at all: the blob and its mark stay. A failed
+// delete keeps only that blob; the pass goes on with the others (see
+// Store.ReclaimBlobs).
 func deleteBlob(ctx context.Context, blobs storage.Storage, p string, generation int64) error {
 	dctx, cancel := context.WithTimeout(ctx, gcDeleteTimeout)
 	defer cancel()

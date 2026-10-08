@@ -381,7 +381,9 @@ type Store interface {
 	// with the digest and the generation recorded at marking (0 when
 	// unknown), which removes the bytes, and drops the row; a writer
 	// touching the blob meanwhile waits for that transaction. It returns
-	// how many blobs it deleted; an error from del ends the pass.
+	// how many blobs it deleted. An error from del keeps that blob and its
+	// mark and the pass goes on with the others; the pass then returns an
+	// error wrapping the first such failure. Any other error ends the pass.
 	ReclaimBlobs(ctx context.Context, cutoff time.Time, limit int, del func(digest string, generation int64) error) (int, error)
 
 	// AddMessageRefs records that message messageID references refs, in the

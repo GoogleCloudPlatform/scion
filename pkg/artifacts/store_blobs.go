@@ -17,6 +17,7 @@ package artifacts
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -138,11 +139,18 @@ func (s *sqlStore) ReclaimBlobs(ctx context.Context, cutoff time.Time, limit int
 		return 0, fmt.Errorf("artifacts: find reclaimable blobs: %w", err)
 	}
 	n := 0
+	var kept []error
 	for _, d := range found {
 		if reclaimCandidateHook != nil {
 			reclaimCandidateHook(d)
 		}
 		ok, err := s.reclaimOne(ctx, d, at, del)
+		var de *blobDeleteError
+		if errors.As(err, &de) {
+			// This blob stays, with its mark; the others are still tried.
+			kept = append(kept, err)
+			continue
+		}
 		if err != nil {
 			return n, err
 		}
@@ -150,8 +158,24 @@ func (s *sqlStore) ReclaimBlobs(ctx context.Context, cutoff time.Time, limit int
 			n++
 		}
 	}
+	if len(kept) > 0 {
+		return n, fmt.Errorf("artifacts: %d of %d reclaimable blobs kept: %w", len(kept), len(found), kept[0])
+	}
 	return n, nil
 }
+
+// blobDeleteError is a failure to delete one blob's bytes. Its transaction
+// rolls back, so the blob and its mark stay; the pass goes on.
+type blobDeleteError struct {
+	digest string
+	err    error
+}
+
+func (e *blobDeleteError) Error() string {
+	return "artifacts: delete blob " + e.digest + ": " + e.err.Error()
+}
+
+func (e *blobDeleteError) Unwrap() error { return e.err }
 
 // reclaimOne deletes one blob if, under its state row's lock, it is still
 // marked unreferenced since at or before cutoff, untouched since cutoff (a
@@ -189,7 +213,7 @@ func (s *sqlStore) reclaimOne(ctx context.Context, digest string, cutoff any, de
 		return false, fmt.Errorf("artifacts: read blob generation: %w", err)
 	}
 	if err := del(digest, gen.Int64); err != nil {
-		return false, fmt.Errorf("artifacts: delete blob: %w", err)
+		return false, &blobDeleteError{digest: digest, err: err}
 	}
 	if _, err := tx.ExecContext(ctx, s.rebind(`DELETE FROM artifact_blob WHERE sha256 = ?`), digest); err != nil {
 		return false, fmt.Errorf("artifacts: clear blob state: %w", err)
