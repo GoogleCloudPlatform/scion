@@ -3435,11 +3435,11 @@
 
 **Base Permission:** `project.read`
 
-**Resource Resolver:** project-from-url
+**Resource Resolver:** project-from-row
 
 **Effects:** `read-one`, `list-scoped`
 
-**Denial Codes:** `forbidden`
+**Denial Codes:** `forbidden`, `not_found`
 
 ### Tests
 
