@@ -45,6 +45,13 @@ func (s *Server) handleConversationResolve(w http.ResponseWriter, r *http.Reques
 		Unauthorized(w)
 		return
 	}
+	cls, token, ok := requireInboxCredential(w, r)
+	if !ok {
+		return
+	}
+	if cls == inboxCredentialToken && !s.authorizeInboxToken(w, r, token, permInboxRead) {
+		return
+	}
 
 	q := r.URL.Query()
 	reference := q.Get("reference")
@@ -86,6 +93,33 @@ func (s *Server) handleConversationResolve(w http.ResponseWriter, r *http.Reques
 			}
 		}
 
+		// A group reference needs read access to the group's project, for
+		// every caller. A token also needs inbox:read for the
+		// conversation (tokenMayUseConversation). A denial answers as for
+		// a conversation that does not exist.
+		if conv.Kind != "direct" {
+			allowed, err := s.canReadGroupConversation(ctx, identity, conv)
+			if err != nil {
+				writeErrorFromErr(w, err, "")
+				return
+			}
+			if !allowed {
+				NotFound(w, "Conversation")
+				return
+			}
+		}
+		if cls == inboxCredentialToken {
+			allowed, err := s.tokenMayUseConversation(ctx, token, s.newSelfScopeCheck(ctx, token, permInboxRead), conv)
+			if err != nil {
+				writeErrorFromErr(w, err, "")
+				return
+			}
+			if !allowed {
+				NotFound(w, "Conversation")
+				return
+			}
+		}
+
 		// If project_id is specified, verify the conversation matches.
 		if projectID != "" {
 			matches := false
@@ -112,11 +146,11 @@ func (s *Server) handleConversationResolve(w http.ResponseWriter, r *http.Reques
 
 	case messaging.RefAgent:
 		// @<agent-slug> — resolve the agent, then look up the DM.
-		s.resolveAgentConversation(w, r, identity, ref.Value, projectID)
+		s.resolveAgentConversation(w, r, identity, token, ref.Value, projectID)
 
 	case messaging.RefThread:
 		// #<thread-name> — resolve the named thread.
-		s.resolveThreadConversation(w, r, identity, ref.Value, projectID)
+		s.resolveThreadConversation(w, r, identity, token, ref.Value, projectID)
 
 	default:
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
@@ -128,7 +162,7 @@ func (s *Server) handleConversationResolve(w http.ResponseWriter, r *http.Reques
 // without creating one. Returns exists: false if no DM exists.
 func (s *Server) resolveAgentConversation(
 	w http.ResponseWriter, r *http.Request,
-	identity Identity, agentSlug string, projectID string,
+	identity Identity, token *ScopedUserIdentity, agentSlug string, projectID string,
 ) {
 	ctx := r.Context()
 
@@ -165,6 +199,18 @@ func (s *Server) resolveAgentConversation(
 		// Privacy-preserving: return exists: false instead of an error.
 		writeJSON(w, http.StatusOK, conversationResolveResponse{Exists: false})
 		return
+	}
+
+	// A user caller needs agent:read on the target agent; a token also
+	// needs inbox:read for the agent's project. A denial answers as for an
+	// agent that does not exist. Agent callers keep the project
+	// containment below.
+	if _, isAgent := identity.(AgentIdentity); !isAgent {
+		if !s.authzService.CheckAccess(ctx, identity, agentResource(targetAgent), ActionRead).Allowed ||
+			(token != nil && !s.newSelfScopeCheck(ctx, token, permInboxRead).allows(targetAgent.ProjectID)) {
+			writeJSON(w, http.StatusOK, conversationResolveResponse{Exists: false})
+			return
+		}
 	}
 
 	// R1: Gate cross-project resolution on the Hub CPM feature switch.
@@ -237,7 +283,7 @@ func (s *Server) resolveAgentConversation(
 // resolveThreadConversation resolves a #thread reference to a group conversation.
 func (s *Server) resolveThreadConversation(
 	w http.ResponseWriter, r *http.Request,
-	identity Identity, threadName string, projectID string,
+	identity Identity, token *ScopedUserIdentity, threadName string, projectID string,
 ) {
 	ctx := r.Context()
 
@@ -248,6 +294,10 @@ func (s *Server) resolveThreadConversation(
 		return
 	}
 
+	var tokenCheck *selfScopeCheck
+	if token != nil {
+		tokenCheck = s.newSelfScopeCheck(ctx, token, permInboxRead)
+	}
 	var matches []store.Conversation
 	for _, conv := range convs {
 		if conv.Kind != "group" {
@@ -258,6 +308,16 @@ func (s *Server) resolveThreadConversation(
 		}
 		if projectID != "" && conv.ProjectID != nil && *conv.ProjectID != projectID {
 			continue
+		}
+		// Every caller needs read access to the group's project; a token
+		// also needs inbox:read for it. A lookup error drops the group.
+		if allowed, err := s.canReadGroupConversation(ctx, identity, &conv); err != nil || !allowed {
+			continue
+		}
+		if tokenCheck != nil {
+			if allowed, err := s.tokenMayUseConversation(ctx, token, tokenCheck, &conv); err != nil || !allowed {
+				continue
+			}
 		}
 		matches = append(matches, conv)
 	}
