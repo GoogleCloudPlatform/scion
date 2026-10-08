@@ -66,6 +66,12 @@ class FakeStateManager extends EventTarget {
     }
   }
   seedProjects(): void {}
+  /** Seed-epoch surface used through AgentSeedEpoch; epochs record nothing here. */
+  readonly scopeGeneration = 0;
+  beginSeedEpoch(): symbol {
+    return Symbol('seed-epoch');
+  }
+  endSeedEpoch(): void {}
   /**
    * Mirrors the real `applyDeleteAccepted` (DELETE 202): merge the returned
    * deletion into the known agent and flush, without removing it. The real

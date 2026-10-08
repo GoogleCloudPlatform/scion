@@ -92,14 +92,18 @@ func (s *Server) handleSchedules(w http.ResponseWriter, r *http.Request, project
 	// authorization and dispatch below.
 	pathParts := strings.SplitN(schedulePath, "/", 2)
 
-	// Determine the authorization action from method and path.
+	// Determine the authorization action from method and path. authoring
+	// is set for the routes that author future work (create, update and
+	// resume); pause and delete only stop future runs.
 	var authzAction Action
+	authoring := false
 	if schedulePath == "" {
 		switch r.Method {
 		case http.MethodGet:
 			authzAction = ActionList
 		case http.MethodPost:
 			authzAction = ActionCreate
+			authoring = true
 		default:
 			MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 			return
@@ -117,6 +121,7 @@ func (s *Server) handleSchedules(w http.ResponseWriter, r *http.Request, project
 				authzAction = ActionRead
 			case http.MethodPatch:
 				authzAction = ActionUpdate
+				authoring = true
 			case http.MethodDelete:
 				authzAction = ActionDelete
 			default:
@@ -129,6 +134,7 @@ func (s *Server) handleSchedules(w http.ResponseWriter, r *http.Request, project
 				return
 			}
 			authzAction = ActionUpdate
+			authoring = subAction == "resume"
 		case "history":
 			if r.Method != http.MethodGet {
 				MethodNotAllowed(w, http.MethodGet)
@@ -139,6 +145,12 @@ func (s *Server) handleSchedules(w http.ResponseWriter, r *http.Request, project
 			NotFound(w, "Schedule action")
 			return
 		}
+	}
+
+	// The authoring credential gate runs before the permission check and
+	// before any schedule lookup or body read.
+	if authoring && !authorizeScheduleAuthoringCredential(w, r) {
+		return
 	}
 
 	// Authorize access — fail closed for all identity types.
@@ -283,7 +295,7 @@ func (s *Server) createSchedule(w http.ResponseWriter, r *http.Request, projectI
 	}
 
 	// The revision's frozen ceiling is computed before any write.
-	ceiling, ok := s.revisionAuthorityCeiling(w, r, projectID, req.EventType, ActionCreate)
+	ceiling, ok := s.revisionAuthorityCeiling(w, r, projectID, ActionCreate)
 	if !ok {
 		return
 	}
@@ -537,7 +549,7 @@ func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request, projectI
 	if changesFutureDispatch {
 		// The store writes this ceiling in the same conditional update as
 		// the attribution and the revision bump.
-		ceiling, ok := s.revisionAuthorityCeiling(w, r, projectID, schedule.EventType, ActionUpdate)
+		ceiling, ok := s.revisionAuthorityCeiling(w, r, projectID, ActionUpdate)
 		if !ok {
 			return
 		}
@@ -670,7 +682,7 @@ func (s *Server) resumeSchedule(w http.ResponseWriter, r *http.Request, projectI
 	}
 	nextRunAt := cronSchedule.Next(time.Now().UTC())
 
-	ceiling, ok := s.revisionAuthorityCeiling(w, r, projectID, schedule.EventType, ActionUpdate)
+	ceiling, ok := s.revisionAuthorityCeiling(w, r, projectID, ActionUpdate)
 	if !ok {
 		return
 	}
