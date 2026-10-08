@@ -57,6 +57,7 @@ import { agentStatusBadge, stateLabel } from '../../shared/agent-state-display.j
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { stateManager } from '../../client/state.js';
+import { AgentSeedEpoch } from '../../client/agent-seed-epoch.js';
 import '../shared/status-badge.js';
 import { DeletionLeaseController } from '../shared/deletion-badge.js';
 import '../shared/deletion-banner.js';
@@ -916,6 +917,12 @@ export class ScionPageAgentDetail extends LitElement {
   private async loadData(): Promise<void> {
     this.loading = true;
     this.error = null;
+    // Opened before the agent request, so a live change that lands while
+    // any request below is in flight is re-applied over the agent response
+    // when it is seeded.
+    let epoch = new AgentSeedEpoch();
+    let epochGeneration = stateManager.scopeGeneration;
+    const agentId = this.agentId;
 
     try {
       // Use SSR-prefetched agent data when available to avoid a redundant fetch.
@@ -943,6 +950,14 @@ export class ScionPageAgentDetail extends LitElement {
           projectId: this.agent.projectId,
           agentId: this.agentId,
         });
+      }
+
+      // A scope change (this setScope, or another) discards the epoch's
+      // store epoch: reopen it for the requests below.
+      if (stateManager.scopeGeneration !== epochGeneration) {
+        epoch.close();
+        epoch = new AgentSeedEpoch();
+        epochGeneration = stateManager.scopeGeneration;
       }
 
       // Fetch project and notifications in parallel — they are independent.
@@ -1026,7 +1041,7 @@ export class ScionPageAgentDetail extends LitElement {
       // Load metrics summary (non-blocking).
       this.loadMetricsSummary();
 
-      stateManager.seedAgents([this.agent]);
+      this.seedAgent(this.agent, agentId, epoch, epochGeneration);
       if (this.project) {
         stateManager.seedProjects([this.project]);
         dispatchPageTitle(this, this.agent.name, this.project.name || this.agent.projectId);
@@ -1037,6 +1052,7 @@ export class ScionPageAgentDetail extends LitElement {
       console.error('Failed to load agent:', err);
       this.error = err instanceof Error ? err.message : 'Failed to load agent';
     } finally {
+      epoch.close();
       this.loading = false;
     }
   }
@@ -1168,11 +1184,42 @@ export class ScionPageAgentDetail extends LitElement {
   }
 
   private async fetchAndMergeAgent(): Promise<void> {
-    const agentResponse = await apiFetch(`/api/v1/agents/${this.agentId}`);
-    if (!agentResponse.ok) return;
+    const epoch = new AgentSeedEpoch();
+    const epochGeneration = stateManager.scopeGeneration;
+    const agentId = this.agentId;
+    try {
+      const agentResponse = await apiFetch(`/api/v1/agents/${agentId}`);
+      if (!agentResponse.ok) return;
 
-    this.agent = (await agentResponse.json()) as Agent;
-    stateManager.seedAgents([this.agent]);
+      const agent = (await agentResponse.json()) as Agent;
+      this.seedAgent(agent, agentId, epoch, epochGeneration);
+    } finally {
+      epoch.close();
+    }
+  }
+
+  /**
+   * Seed the store with an agent response read under `epoch`, so live
+   * changes that landed while the request was in flight are re-applied
+   * over it, and show the result. A scope change since the epoch opened
+   * means the user left this view: the response may belong to a scope the
+   * store no longer holds, so it is not seeded, and it is shown only if
+   * the page still shows the agent it was requested for (`agentId`).
+   */
+  private seedAgent(
+    agent: Agent,
+    agentId: string,
+    epoch: AgentSeedEpoch,
+    epochGeneration: number
+  ): void {
+    if (stateManager.scopeGeneration !== epochGeneration) {
+      if (this.agentId === agentId) this.agent = agent;
+      return;
+    }
+    const seeded = epoch.seed([agent], { partial: false });
+    // Empty when the agent was deleted while the request was in flight;
+    // the deleted state then follows from the store's tombstone.
+    this.agent = seeded.agents[0] ?? agent;
   }
 
   private handleTabShow(e: CustomEvent<{ name: string }>): void {

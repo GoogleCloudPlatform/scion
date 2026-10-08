@@ -20,6 +20,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strconv"
 	"time"
 
@@ -105,11 +106,30 @@ func canReadWith(ctx context.Context, host Host, a *Artifact, grants func() ([]G
 		slog.ErrorContext(ctx, "artifacts: list grants failed", "error", err)
 		return false
 	}
-	for _, g := range gs {
+	return grantAllows(ctx, host, a, gs, now, kind, ref, grantsForRead, PermissionRead, true)
+}
+
+// Permission sets a grant must carry for each kind of access.
+var (
+	grantsForRead  = []string{GrantRead, GrantWrite, GrantAdmin}
+	grantsForWrite = []string{GrantWrite, GrantAdmin}
+	grantsForAdmin = []string{GrantAdmin}
+)
+
+// grantAllows reports whether one of grants, unexpired at now and carrying
+// one of perms, gives the caller (kind, ref) access to a: a principal grant
+// naming the caller, or a scope grant for a scope in which the host
+// authorizes the caller for scopePerm. With excludeHome, a scope grant for
+// a's home scope does not count (the caller's checks already asked the
+// host about the home scope). Share links never count. It is the one place
+// grants are matched, for reading, writing and administering alike.
+func grantAllows(ctx context.Context, host Host, a *Artifact, grants []Grant, now time.Time,
+	kind, ref string, perms []string, scopePerm string, excludeHome bool) bool {
+	for _, g := range grants {
 		if g.ExpiresAt != nil && !now.Before(*g.ExpiresAt) {
 			continue
 		}
-		if g.Permission != GrantRead && g.Permission != GrantWrite && g.Permission != GrantAdmin {
+		if !slices.Contains(perms, g.Permission) {
 			continue
 		}
 		switch g.SubjectKind {
@@ -118,7 +138,10 @@ func canReadWith(ctx context.Context, host Host, a *Artifact, grants func() ([]G
 				return true
 			}
 		case SubjectScope:
-			if g.SubjectRef != "" && g.SubjectRef != a.ScopeRef && host.Authorize(ctx, g.SubjectRef, PermissionRead) {
+			if g.SubjectRef == "" || (excludeHome && g.SubjectRef == a.ScopeRef) {
+				continue
+			}
+			if host.Authorize(ctx, g.SubjectRef, scopePerm) {
 				return true
 			}
 		}

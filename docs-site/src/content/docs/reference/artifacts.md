@@ -9,7 +9,7 @@ Artifacts are behind the `hub.artifacts` experiment, which is **off by default**
 
 An **artifact** is a published file or folder (a *bundle*) with a stable reference, `scion://artifact/<id>`, that works from any runtime broker, in any project the reader can access, and in the web UI. The hub stores the bytes, so a reader never needs access to the publisher's filesystem or shared directories.
 
-This page covers what is available today: publishing files and folders, versions, fetching, the web pages, and artifact references in messages. Review and share links are planned.
+This page covers what is available today: publishing files and folders, versions, fetching, the web pages, artifact references in messages and share links. Review is planned.
 
 Each artifact has numbered **versions**. A version is an immutable snapshot of the bundle: its files, one **entry** file (the one the web page opens and `get` prints), an optional note, and who published it. Publishing again under the same `--key` adds a version; the latest one is the artifact's **current** version, and `scion://artifact/<id>@<seq>` names one version for good.
 
@@ -84,7 +84,7 @@ Images in a Markdown artifact are fetched at publish time and served from the hu
 - **Reading a remote image.** `GET /api/v1/artifacts/{id}/versions/{seq}/files/_remote/<hash>` follows the same access checks as any other file. A fetched image is served with its detected type; a failed one answers `404` with the header `X-Artifact-Remote-Status: failed`. The version's file manifest lists each remote image with `origin: "remote"`, its `sourceUrl` and its `fetchStatus` (`ok` or `failed`).
 - **Reserved names.** Files may not be published under `_remote/`.
 
-Settings (in the `artifacts` section): `remote_images_enabled` (default `true`), `remote_image_max_count` (images fetched per version, default `32`; further images are not fetched and get one warning), `remote_image_max_bytes` (per image, default 5 MiB, at most `max_file_bytes`), `remote_image_fetch_timeout_s` (per image, default `10`) and `remote_image_total_budget_s` (all images of one version, default `30`, between the fetch timeout and 60 seconds; images are fetched while the publish or finalize request is open, and the hub keeps that request open for the budget plus a margin). `remote_image_max_count` may not exceed `max_files`; when the two remote image caps are not set, they follow a lower `max_files` or `max_file_bytes`. A settings write with an invalid value, including a remote image cap above the matching file limit or a budget below the fetch timeout, is refused. A stored document with an invalid remote image value turns remote images off and is logged; any other invalid stored value disables the artifact service.
+Settings (in the `artifacts` section): `remote_images_enabled` (default `true`), `remote_image_max_count` (images fetched per version, default `32`; further images are not fetched and get one warning), `remote_image_max_bytes` (per image, default 5 MiB, at most `max_file_bytes`), `remote_image_fetch_timeout_s` (per image, default `10`) and `remote_image_total_budget_s` (all images of one version, default `30`, between the fetch timeout and 60 seconds; images are fetched while the publish or finalize request is open, and the hub keeps that request open for the budget plus a margin). `remote_image_max_count` may not exceed `max_files`; when the two remote image caps are not set, they follow a lower `max_files` or `max_file_bytes`. A settings write with an invalid value, including a remote image cap above the matching file limit or a budget below the fetch timeout, is refused. A stored document with an invalid remote image value turns remote images off and is logged; any other invalid stored value disables the artifact service. A deployment that embeds the artifact service with its own limits and leaves the remote image limits unset gets remote image fetching off.
 
 ## HTML artifacts
 
@@ -93,6 +93,17 @@ An artifact whose entry file is HTML (a single page or a small site published as
 - The frame loads the version through a **view URL**, `/api/v1/artifacts/view/<capability>/<entry>`, issued to a reader of the artifact and valid for 30 minutes. Relative links in the bundle (`img/chart.png`, `css/site.css`) resolve under it, so the page loads its own files. The view URL names one version of one artifact and gives access to nothing else; it is not a share link.
 - Every view response carries a `Content-Security-Policy` with a `sandbox` directive, so the page stays isolated even when the URL is opened directly. The page may load scripts, styles, images, fonts and media only from its own files under the view URL; it cannot make network requests from script, embed other frames or plugins, submit forms, open windows or navigate the page around it.
 - **Remote images are not loaded in HTML artifacts; include them in the bundle.** When an HTML entry references images by absolute `http(s)` URL, the publish response and the CLI print that warning, and the viewer shows it above the frame.
+
+## Share links
+
+A share link lets anyone who holds it open an artifact's current version in a browser, without signing in. Links always expire.
+
+- **Who creates them.** The artifact's owner, or a user holding an admin grant on it, while their credential allows `artifact.manage` in the artifact's home project. Agents cannot create share links. A caller that cannot read the artifact gets `404`, the same as for a missing one; a reader that may not manage links gets `403`.
+- **Lifetime.** A link lasts `link_default_ttl_hours` (default 168, seven days) unless the request asks for less or more, up to `link_max_ttl_hours` (default 720, thirty days); a longer request is refused with `400`. When the artifact itself expires sooner, the link ends with it and the response says so (`clampedToArtifactExpiry`). An artifact has at most 50 unexpired links at a time.
+- **The token.** The link is `/api/v1/artifacts/shared/<token>`, where the token is 256 random bits. It is shown once, in the response that creates the link. The hub stores only its SHA-256 and never logs it; listing the links shows their ids and expiry, never the token. Keep the link private: anyone holding it can open the artifact until it expires or is revoked.
+- **Opening a link.** The link answers `303` to a [view URL](#html-artifacts) for the current version's entry, and `/api/v1/artifacts/shared/<token>/files/<path>` to one for another file of it. Everything a link reaches is served through the view route, with its sandbox and `Content-Security-Policy`, and every response carries `Referrer-Policy: no-referrer`. The view URL lasts at most 30 minutes and no longer than the link, and stops working as soon as the link is revoked or expires. The view route serves files as they are: an HTML entry renders in its sandbox, while a Markdown entry opens as plain text.
+- **When a link stops working.** A revoked or expired link, a link whose artifact was deleted or has expired, and a token that never existed all get the same `404`. Share-link reads are rate limited per client address (`429` with `Retry-After`). Revoking a link that has already expired still answers `204` until the next link created on the artifact clears expired links; after that it answers `404`.
+- **Links and access.** A link never makes the artifact readable through the other routes and never adds it to anyone's list.
 
 ## Artifacts in messages
 
@@ -131,7 +142,7 @@ $ scion message @reviewer "Design ready for review." --artifact scion://artifact
 
 ## API
 
-All routes are under `/api/v1/artifacts` and use the hub's usual authentication (session, user access token or agent token). Errors use the hub's JSON error envelope.
+All routes are under `/api/v1/artifacts` and use the hub's usual authentication (session, user access token or agent token). Errors use the hub's JSON error envelope. The hub's request logs record every artifact request path as `/api/v1/artifacts/REDACTED` (paths that contain the word `artifacts` anywhere are treated the same way), and artifact requests are not traced, because some artifact URLs carry share-link tokens or view capabilities.
 
 | Method and path | Purpose |
 | :--- | :--- |
@@ -146,6 +157,10 @@ All routes are under `/api/v1/artifacts` and use the hub's usual authentication 
 | `POST /api/v1/artifacts/{id}/versions/{seq}/finalize` | Make a pending version ready once every file has arrived; it becomes the current version unless a later one already is. Returns `200` with the artifact, the version and any `warnings` (remote images that could not be fetched); `409` with code `incomplete` and `details.missing` while files are missing. |
 | `POST /api/v1/artifacts/{id}/versions/{seq}/view` | For a version whose entry is HTML: a view URL for showing it in a sandboxed frame (`url`, `expiresAt`, and `remoteImages` when the entry references images on other servers). Requires read access; the URL is valid for 30 minutes. |
 | `GET /api/v1/artifacts/view/{capability}/{path}` | A file of the version the view URL was issued for; see [HTML artifacts](#html-artifacts). |
+| `POST /api/v1/artifacts/{id}/links` | Create a share link. Optional body `{"ttlHours": <n>}`. Returns `201` with `link` (`id`, `createdAt`, `expiresAt`, `createdBy`), `url` (the link, shown only here) and `clampedToArtifactExpiry` when the artifact's own expiry shortened it; `400` for a lifetime above the maximum, `409` with code `too_many_links` at the per-artifact cap, `409` for an artifact with no published version. See [Share links](#share-links). |
+| `GET /api/v1/artifacts/{id}/links` | The artifact's unexpired share links, oldest first, without tokens. |
+| `DELETE /api/v1/artifacts/{id}/links/{linkId}` | Revoke a share link. Returns `204`. |
+| `GET /api/v1/artifacts/shared/{token}[/files/{path}]` | Open a share link, with no credentials: `303` to a view URL. |
 | `GET /api/v1/artifacts/{id}/versions[?limit=][&before=]` | The ready versions, newest first, without their files: up to `limit` (default 100, at most 500) with a version number below `before`; `nextBefore` in the response gives the next page. |
 | `GET /api/v1/artifacts/{id}/versions/{seq}` | One ready version with its files. |
 

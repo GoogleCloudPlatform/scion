@@ -89,6 +89,8 @@ export interface Fake {
   deletes?: string[];
   /** An agent DELETE without `force=true` answers 502 (an unreachable broker). */
   deleteUnreachable?: boolean;
+  /** Sorted responses mark `totalCount` and the stats counts as lower bounds. */
+  approximate?: boolean;
 }
 
 /**
@@ -176,12 +178,18 @@ export function fakeFetch(fake: Fake) {
     const dir = u.searchParams.get('dir') === 'asc' ? 1 : -1;
     const field = sort === 'created' ? 'created' : 'updated';
     const sorted = [...list].sort((a, b) => dir * (a[field] ?? '').localeCompare(b[field] ?? ''));
-    const statsOf = (): { total: number; running: number; agents?: Array<[string, string]> } => ({
+    const statsOf = (): {
+      total: number;
+      running: number;
+      agents?: Array<[string, string]>;
+      totalApproximate?: boolean;
+    } => ({
       total: sorted.length,
       running: sorted.filter((a) => a.phase === 'running').length,
       ...(sorted.length <= 2000
         ? { agents: sorted.map((a) => [a.id, a.phase]) as Array<[string, string]> }
         : {}),
+      ...(fake.approximate ? { totalApproximate: true } : {}),
     });
     const phase = u.searchParams.get('phase') ?? '';
     const phased = phase ? sorted.filter((a) => a.phase === phase) : sorted;
@@ -222,6 +230,7 @@ export function fakeFetch(fake: Fake) {
       jsonResponse({
         agents: phased.slice(start, end),
         totalCount: phased.length,
+        ...(fake.approximate ? { totalCountApproximate: true } : {}),
         complete: false,
         nextCursor: end < phased.length ? String(end) : undefined,
         ...(wantStats ? { stats: statsOf() } : {}),
