@@ -1604,9 +1604,21 @@ type Server struct {
 	// a way to switch the check off. Turning the check off is done by
 	// installing store.NewDisabledCallerPermissionChecker, which is a value
 	// somebody has to construct and pass. See saAssignCheckerFor.
-	saAssignChecker     store.CallerPermissionChecker
-	saAssignCheckMode   string
-	denyUnknownFailOpen bool
+	saAssignChecker   store.CallerPermissionChecker
+	saAssignCheckMode string
+	// denyUnknownFailOpen is written with saAssignCheckMode under s.mu
+	// (applyGCPIAMSettingsLocked) and read lock-free by the checker.
+	denyUnknownFailOpen atomic.Bool
+	// gcpIAMStartup is the deploy-time pair of GCP permission-check
+	// settings, resolved once in New. A stored value that is absent or
+	// cannot be used resolves to it (resolveGCPIAMSettings).
+	gcpIAMStartup gcpIAMSettings
+	// gcpIAMApproved is the transition a guarded write on this replica has
+	// admitted for the next ApplySnapshot (approveGCPIAMTransition).
+	gcpIAMApproved *gcpIAMTransition
+	// gcpIAMLastRefusal identifies the last refused reload that was
+	// recorded (recordGCPIAMRefusal), so it is recorded once.
+	gcpIAMLastRefusal string
 
 	// The same pair for the lifecycle-hook execution-identity surface. A
 	// SEPARATE field rather than a shared one, deliberately: the two surfaces
@@ -2307,35 +2319,17 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	// Installed explicitly rather than left nil on purpose: a nil checker
 	// denies, so "forgot to wire it" and "chose to switch it off" cannot be
 	// confused for one another. See NewDisabledCallerPermissionChecker.
-	gcpIAMMode := cfg.GCPIAMCheckMode
-	switch gcpIAMMode {
-	case SAAssignCheckEnforce:
-		srv.saAssignCheckMode = SAAssignCheckEnforce
-		srv.hookIdentityCheckMode = SAAssignCheckEnforce
-	case SAAssignCheckOff, "":
-		srv.saAssignCheckMode = SAAssignCheckOff
-		srv.hookIdentityCheckMode = SAAssignCheckOff
-	default:
-		slog.Warn("unrecognised gcpIamCheckMode value, defaulting to off",
-			"value", gcpIAMMode)
-		srv.saAssignCheckMode = SAAssignCheckOff
-		srv.hookIdentityCheckMode = SAAssignCheckOff
-	}
-
-	// Parse deny-unknown fallback policy (default: fail-open).
-	srv.denyUnknownFailOpen = true
-	switch cfg.GCPIAMDenyUnknownPolicy {
-	case "fail-closed":
-		srv.denyUnknownFailOpen = false
-	case "fail-open", "":
-		srv.denyUnknownFailOpen = true
-	default:
-		slog.Warn("unrecognised gcpIamDenyUnknownPolicy value, defaulting to fail-open",
-			"value", cfg.GCPIAMDenyUnknownPolicy)
-	}
+	//
+	// The pair is reloadable (gcp_iam_settings.go): ApplySnapshot replaces it
+	// when the gcp_iam section changes. An unset key takes its documented
+	// default; a set but unrecognised value takes the stricter value.
+	srv.gcpIAMStartup = startupGCPIAMSettings(cfg.GCPIAMCheckMode, cfg.GCPIAMDenyUnknownPolicy)
+	srv.saAssignCheckMode = srv.gcpIAMStartup.CheckMode
+	srv.hookIdentityCheckMode = srv.gcpIAMStartup.CheckMode
+	srv.denyUnknownFailOpen.Store(srv.gcpIAMStartup.DenyUnknownFailOpen)
 	slog.Info("GCP deny-unknown fallback policy",
-		"policy", cfg.GCPIAMDenyUnknownPolicy,
-		"failOpen", srv.denyUnknownFailOpen)
+		"policy", srv.gcpIAMStartup.denyUnknownPolicy(),
+		"failOpen", srv.gcpIAMStartup.DenyUnknownFailOpen)
 
 	srv.saAssignChecker = store.NewDisabledCallerPermissionChecker()
 	if srv.saAssignCheckMode == SAAssignCheckOff {
@@ -3815,9 +3809,11 @@ func (s *Server) SetGCPServiceAccountAdmin(a GCPServiceAccountAdmin) {
 }
 
 // DenyUnknownFailOpen returns the configured deny-unknown fallback policy.
-// Used by server_foreground.go to pass the setting to the PT checker constructor.
+// server_foreground.go passes it to the PT checker as its policy source.
+// It reflects reloads of server.hub.gcp_iam_deny_unknown_policy, so a
+// checker that calls it per check follows the applied setting.
 func (s *Server) DenyUnknownFailOpen() bool {
-	return s.denyUnknownFailOpen
+	return s.denyUnknownFailOpen.Load()
 }
 
 // SetSAAssignChecker replaces the caller-permission checker for the agent

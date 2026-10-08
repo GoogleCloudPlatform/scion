@@ -550,13 +550,8 @@ const KOANF_KEY_LABELS: Record<string, string> = {
   harness_configs: 'Harness Configs',
 };
 
-// server.hub.gcp_iam_* have labels but are file-only on the server (not
-// Layer-1), so they are not in the fallback Layer-1 list.
-const STATIC_LAYER1_KEYS: Set<string> = new Set(
-  Object.keys(KOANF_KEY_LABELS).filter(
-    (k) => k !== 'server.hub.gcp_iam_check_mode' && k !== 'server.hub.gcp_iam_deny_unknown_policy'
-  )
-);
+/** Fallback Layer-1 key list, used until the schema endpoint answers. */
+const STATIC_LAYER1_KEYS: Set<string> = new Set(Object.keys(KOANF_KEY_LABELS));
 
 /** Why a field is read-only: hosted Layer-0, env-pinned, or workstation flag-managed. */
 type ReadOnlyReason = 'bootstrap' | 'env' | 'flag';
@@ -686,6 +681,9 @@ export class ScionPageAdminServerConfig extends LitElement {
   @state() private hubStalledThreshold = '';
   @state() private hubGcpIamCheckMode = 'off';
   @state() private hubGcpIamDenyUnknownPolicy = 'fail-open';
+  /** The GCP permission-check values as loaded, so a save sends only a changed key. */
+  private loadedGcpIamCheckMode = 'off';
+  private loadedGcpIamDenyUnknownPolicy = 'fail-open';
 
   // Runtime Broker
   @state() private brokerEnabled = false;
@@ -1748,6 +1746,8 @@ export class ScionPageAdminServerConfig extends LitElement {
         this.hubStalledThreshold = srv.hub.stalled_threshold || '';
         this.hubGcpIamCheckMode = srv.hub.gcp_iam_check_mode || 'off';
         this.hubGcpIamDenyUnknownPolicy = srv.hub.gcp_iam_deny_unknown_policy || 'fail-open';
+        this.loadedGcpIamCheckMode = this.hubGcpIamCheckMode;
+        this.loadedGcpIamDenyUnknownPolicy = this.hubGcpIamDenyUnknownPolicy;
       }
 
       // Broker
@@ -2117,7 +2117,18 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (ok('server.hub.auto_suspend_stalled'))
       hub.auto_suspend_stalled = this.hubAutoSuspendStalled;
     if (ok('server.hub.stalled_threshold')) hub.stalled_threshold = this.hubStalledThreshold;
-    // server.hub.gcp_iam_* are file-only, sent by buildLayer0Payload.
+    // The GCP permission-check keys are sent only when changed: each change
+    // is checked and recorded by the server.
+    if (
+      ok('server.hub.gcp_iam_check_mode') &&
+      this.hubGcpIamCheckMode !== this.loadedGcpIamCheckMode
+    )
+      hub.gcp_iam_check_mode = this.hubGcpIamCheckMode;
+    if (
+      ok('server.hub.gcp_iam_deny_unknown_policy') &&
+      this.hubGcpIamDenyUnknownPolicy !== this.loadedGcpIamDenyUnknownPolicy
+    )
+      hub.gcp_iam_deny_unknown_policy = this.hubGcpIamDenyUnknownPolicy;
     if (Object.keys(hub).length > 0) server.hub = hub;
 
     // Auth — only Layer-1 auth fields
@@ -2270,9 +2281,6 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (ok('server.hub.host')) hub.host = this.hubHost || '';
     if (ok('server.hub.read_timeout')) hub.read_timeout = this.hubReadTimeout || '';
     if (ok('server.hub.write_timeout')) hub.write_timeout = this.hubWriteTimeout || '';
-    if (ok('server.hub.gcp_iam_check_mode')) hub.gcp_iam_check_mode = this.hubGcpIamCheckMode || '';
-    if (ok('server.hub.gcp_iam_deny_unknown_policy'))
-      hub.gcp_iam_deny_unknown_policy = this.hubGcpIamDenyUnknownPolicy || '';
     if (Object.keys(hub).length > 0) server.hub = hub;
 
     const broker: Record<string, unknown> = {};
@@ -5525,13 +5533,17 @@ export class ScionPageAdminServerConfig extends LitElement {
                   automatic (global) replication. Required when org policy
                   constraints/gcp.resourceLocations restricts global resources.</span
                 >
-                <sl-input
-                  value=${this.secretsGCPReplicationLocations}
-                  placeholder="e.g. northamerica-northeast1, us-east1"
-                  @sl-input=${(e: Event) => {
-                    this.secretsGCPReplicationLocations = (e.target as HTMLInputElement).value;
-                  }}
-                ></sl-input>
+                ${this.renderFieldValue(
+                  'server.secrets.gcp_replication_locations',
+                  this.secretsGCPReplicationLocations,
+                  html`${this.renderEnvBadge('server.secrets.gcp_replication_locations')}<sl-input
+                      value=${this.secretsGCPReplicationLocations}
+                      placeholder="e.g. northamerica-northeast1, us-east1"
+                      @sl-input=${(e: Event) => {
+                        this.secretsGCPReplicationLocations = (e.target as HTMLInputElement).value;
+                      }}
+                    ></sl-input>`
+                )}
               </div>`
             : ''}
         </div>
@@ -5906,15 +5918,19 @@ export class ScionPageAdminServerConfig extends LitElement {
         <div class="form-grid">
           <div class="form-field">
             <label>IAM Check Mode</label>
-            <sl-select
-              value=${this.hubGcpIamCheckMode}
-              @sl-change=${(e: Event) => {
-                this.hubGcpIamCheckMode = (e.target as HTMLSelectElement).value;
-              }}
-            >
-              <sl-option value="off">Off (policy-only gating)</sl-option>
-              <sl-option value="enforce">Enforce (IAM actAs check required)</sl-option>
-            </sl-select>
+            ${this.renderFieldValue(
+              'server.hub.gcp_iam_check_mode',
+              this.hubGcpIamCheckMode,
+              html`${this.renderEnvBadge('server.hub.gcp_iam_check_mode')}<sl-select
+                  value=${this.hubGcpIamCheckMode}
+                  @sl-change=${(e: Event) => {
+                    this.hubGcpIamCheckMode = (e.target as HTMLSelectElement).value;
+                  }}
+                >
+                  <sl-option value="off">Off (policy-only gating)</sl-option>
+                  <sl-option value="enforce">Enforce (IAM actAs check required)</sl-option>
+                </sl-select>`
+            )}
             <div class="help-text">
               Controls whether GCP IAM actAs permission is verified when assigning a service account
               to an agent. When "off", assignment is gated by Hub policy only. When "enforce", the
@@ -5923,15 +5939,19 @@ export class ScionPageAdminServerConfig extends LitElement {
           </div>
           <div class="form-field">
             <label>Deny Policy Fallback</label>
-            <sl-select
-              value=${this.hubGcpIamDenyUnknownPolicy}
-              @sl-change=${(e: Event) => {
-                this.hubGcpIamDenyUnknownPolicy = (e.target as HTMLSelectElement).value;
-              }}
-            >
-              <sl-option value="fail-open">Fail Open (recommended)</sl-option>
-              <sl-option value="fail-closed">Fail Closed</sl-option>
-            </sl-select>
+            ${this.renderFieldValue(
+              'server.hub.gcp_iam_deny_unknown_policy',
+              this.hubGcpIamDenyUnknownPolicy,
+              html`${this.renderEnvBadge('server.hub.gcp_iam_deny_unknown_policy')}<sl-select
+                  value=${this.hubGcpIamDenyUnknownPolicy}
+                  @sl-change=${(e: Event) => {
+                    this.hubGcpIamDenyUnknownPolicy = (e.target as HTMLSelectElement).value;
+                  }}
+                >
+                  <sl-option value="fail-open">Fail Open (recommended)</sl-option>
+                  <sl-option value="fail-closed">Fail Closed</sl-option>
+                </sl-select>`
+            )}
             <div class="help-text">
               Controls behavior when IAM deny policies cannot be fully evaluated (e.g., the Hub
               service account lacks org-level permissions to read deny policies). "Fail open" treats
