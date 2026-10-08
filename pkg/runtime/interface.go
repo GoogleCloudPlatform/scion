@@ -232,6 +232,10 @@ const (
 type launchHooks struct {
 	checkpointFn func(ctx context.Context, step string) error
 	createdFn    func(api.ResourceHandle)
+	// recordFn, when set, also receives every created handle. Unlike
+	// createdFn it does not make the hooks active: the Kubernetes runtime
+	// uses it to remember the objects a start created (verifyStartObjects).
+	recordFn func(api.ResourceHandle)
 }
 
 // launchHooks returns config's async-launch hooks.
@@ -260,6 +264,9 @@ func (h launchHooks) active() bool {
 
 // created is called after a true create of a launch-owned resource.
 func (h launchHooks) created(handle api.ResourceHandle) {
+	if h.recordFn != nil {
+		h.recordFn(handle)
+	}
 	if h.createdFn == nil {
 		return
 	}

@@ -197,6 +197,7 @@ func (s *Server) StartConduitRelay(ctx context.Context, opts ConduitRelayOptions
 		Store:    st,
 		Peers:    &relay.PeerClient{HTTP: opts.HTTPClient, Auth: opts.PeerAuth},
 		Now:      now,
+		Brokers:  newLegacyBrokerResolver(s.controlChannel, id),
 	})
 	if err != nil {
 		return fmt.Errorf("conduit router: %w", err)

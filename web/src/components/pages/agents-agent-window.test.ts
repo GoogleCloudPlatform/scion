@@ -718,7 +718,8 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
       h.hold();
       void internals(el).agentWindow.next();
       await vi.waitFor(() => expect(h.sent).toHaveLength(2));
-      expect(query(h.sent[1].url).get('cursor')).toBe('25');
+      // Next asks for the next slice of the walk order frozen from page 0.
+      expect(query(h.sent[1].url).get('ids')?.split(',')).toHaveLength(25);
       expect(h.sent[1].signal?.aborted).toBe(false);
       return { el, h, fake };
     }
@@ -1156,7 +1157,7 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
       h.hold();
       void win.next();
       await vi.waitFor(() => expect(h.heldCount).toBe(1));
-      expect(query(h.sent.at(-1)!.url).get('cursor')).toBe('25');
+      expect(query(h.sent.at(-1)!.url).get('ids')?.split(',')).toHaveLength(25);
       // Page 1 holds g-01174 down to g-01150; this activity time sorts inside it.
       handleUpdate('agent.g-00010.status', {
         agentId: 'g-00010',
