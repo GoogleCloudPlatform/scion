@@ -219,8 +219,9 @@ type UploadOptions struct {
 	// Idempotent says that writing these bytes again is harmless (a
 	// content-addressed object always gets the same bytes) and that the
 	// caller retries a failed write itself, with its own bound on attempts
-	// and time: the provider makes one attempt per call (GCS turns off its
-	// client's retrying) and returns its error.
+	// and time: the provider makes one request per call at any size (GCS
+	// turns off its client's retrying and sends the object in a single
+	// non-resumable request) and returns its error.
 	Idempotent bool
 }
 
