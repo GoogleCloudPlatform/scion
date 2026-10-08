@@ -41,7 +41,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
-	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
@@ -1709,11 +1708,6 @@ var errInvalidWorkspaceDir = errors.New("invalid workspace directory")
 // writeWorkspaceStorageUnconfigured (422), not a runtime error
 // (ptone/scion#3422).
 var errWorkspaceStorageUnconfigured = errors.New("storage bucket not configured for workspace bootstrap")
-
-// syncWorkspaceFromGCS downloads a workspace upload (the create-time
-// bootstrap and handleWorkspaceApply, through Server.workspaceDownloader);
-// a variable so tests can substitute a fake for real GCS.
-var syncWorkspaceFromGCS = gcp.SyncFromGCS
 
 // workspaceStorageUnconfiguredMessage is the user-facing text for
 // errWorkspaceStorageUnconfigured.

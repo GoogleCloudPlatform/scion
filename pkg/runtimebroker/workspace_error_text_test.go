@@ -173,7 +173,7 @@ func TestGCSBootstrapError_FixedText(t *testing.T) {
 		{
 			name: "mkdir", op: opCreateWorkspaceDir, wantText: "Failed to create workspace directory",
 			setup: func(t *testing.T, srv *Server, name string) string {
-				installFakeWorkspaceSync(t, nil)
+				installFakeWorkspaceSync(t, srv, nil)
 				return blockWorkspaceDir(t, srv, name)
 			},
 		},
@@ -181,7 +181,7 @@ func TestGCSBootstrapError_FixedText(t *testing.T) {
 			name: "gcs-sync", op: opDownloadWorkspace, wantText: "Failed to download workspace from GCS",
 			setup: func(t *testing.T, srv *Server, name string) string {
 				srv.config.WorktreeBase = t.TempDir()
-				installFakeWorkspaceSync(t, errors.New(bootstrapDetail))
+				installFakeWorkspaceSync(t, srv, errors.New(bootstrapDetail))
 				return bootstrapDetail
 			},
 		},
@@ -292,7 +292,7 @@ func TestGCSBootstrapError_ClientRefusalsUnchanged(t *testing.T) {
 			name := "agent-3496-invalid-" + mode
 			srv, _ := newAsyncTestServer(t, newAsyncManager())
 			symlinkedWorktreeAgentDir(t, srv, name)
-			installFakeWorkspaceSync(t, nil)
+			installFakeWorkspaceSync(t, srv, nil)
 			_, verr := runtime.ValidateWorkspaceSource(filepath.Join(srv.config.WorktreeBase, name, "workspace"), srv.config.WorktreeBase)
 			if verr == nil {
 				t.Fatal("expected the symlinked workspace directory to fail validation")
@@ -313,7 +313,7 @@ func TestGCSBootstrapError_ClientRefusalsUnchanged(t *testing.T) {
 			name := "agent-3496-nobucket-" + mode
 			srv, _ := newAsyncTestServer(t, newAsyncManager())
 			srv.config.WorktreeBase = t.TempDir()
-			installFakeWorkspaceSync(t, nil)
+			installFakeWorkspaceSync(t, srv, nil)
 			body := bootstrapCreate(name, async)
 			delete(body, "workspaceStorageBucket")
 			w := postCreate(t, srv, body)
@@ -629,7 +629,7 @@ func TestRunLaunch_NoBucketReportsSyncText(t *testing.T) {
 	}
 	srv.config.WorktreeBase = t.TempDir()
 	srv.config.StorageBucket = ""
-	installFakeWorkspaceSync(t, nil)
+	installFakeWorkspaceSync(t, srv, nil)
 	const name = "agent-3496-runlaunch-nobucket"
 
 	got := runLaunchTerminal(t, srv, rtb, launchCtx{
