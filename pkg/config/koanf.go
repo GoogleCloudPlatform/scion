@@ -186,7 +186,7 @@ func loadSettingsKoanf(projectPath string, ignoreEnvProjectID bool) (*Settings, 
 			// below and land on the unrecognised key hub.grove_id.
 			// Returning "" makes the env provider drop the variable
 			// entirely (env.go's Provider skips a "" key), the same idiom
-			// settings_v1.go already uses for SCION_OTEL_INSECURE.
+			// this callback uses above for an empty value.
 			// WarnRemovedLegacyEnv reports it separately.
 			return ""
 		}

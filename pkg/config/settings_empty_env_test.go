@@ -34,23 +34,38 @@ server:
     broker_name: file-broker
 `
 
-// envOverlayCase is one state of an env var: unset, exported but empty, or
-// set to a value.
+// envState is the state an env var is put into for one test case.
+type envState int
+
+const (
+	envUnset envState = iota // not in the environment at all
+	envEmpty                 // exported with an empty value
+	envSet                   // exported with a non-empty value
+)
+
+// envOverlayCase names one envState by the behaviour it checks.
 type envOverlayCase struct {
 	name  string
-	state string // "unset", "empty" or "set"
+	state envState
 }
 
 var envOverlayCases = []envOverlayCase{
-	{"unset", "unset"},
-	{"empty", "empty"},
-	{"set", "set"},
+	{"unset_keeps_file_value", envUnset},
+	{"empty_keeps_file_value", envEmpty},
+	{"set_overrides_file_value", envSet},
 }
 
 // setupEmptyEnvProject writes emptyEnvSettingsYAML into a fresh project
 // under a temporary HOME and clears SCION_* variables an agent container
 // may have exported, so the test sees only the variable under test.
 func setupEmptyEnvProject(t *testing.T) string {
+	t.Helper()
+	return setupEmptyEnvProjectWith(t, emptyEnvSettingsYAML)
+}
+
+// setupEmptyEnvProjectWith is setupEmptyEnvProject with the given
+// settings.yaml content.
+func setupEmptyEnvProjectWith(t *testing.T, settingsYAML string) string {
 	t.Helper()
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
@@ -60,30 +75,32 @@ func setupEmptyEnvProject(t *testing.T) string {
 		"SCION_PROJECT_ID", "SCION_HUB_PROJECT_ID", "SCION_AUTO_EXPOSE_PORTS")
 	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
 	require.NoError(t, os.MkdirAll(projectDir, 0755))
-	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(emptyEnvSettingsYAML), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(settingsYAML), 0644))
 	return projectDir
 }
 
 // applyEnvState puts name into the given state for the rest of the test.
-func applyEnvState(t *testing.T, name, state, value string) {
+func applyEnvState(t *testing.T, name string, state envState, value string) {
 	t.Helper()
 	switch state {
-	case "unset":
+	case envUnset:
 		// t.Setenv first so the original value is restored on cleanup.
 		t.Setenv(name, "")
 		require.NoError(t, os.Unsetenv(name))
-	case "empty":
+	case envEmpty:
 		t.Setenv(name, "")
-	case "set":
+	case envSet:
 		t.Setenv(name, value)
+	default:
+		t.Fatalf("unknown env state %d", state)
 	}
 }
 
 // expectedFor returns the env value when the variable is set to a non-empty
 // value, and the settings-file value otherwise: an exported but empty
 // variable is treated as unset.
-func expectedFor(state, fileValue, envValue string) string {
-	if state == "set" {
+func expectedFor(state envState, fileValue, envValue string) string {
+	if state == envSet {
 		return envValue
 	}
 	return fileValue
@@ -106,6 +123,27 @@ func TestLoadSettingsKoanf_EmptyEnvTreatedAsUnset(t *testing.T) {
 				s, err := LoadSettingsKoanf(projectDir)
 				require.NoError(t, err)
 				assert.Equal(t, expectedFor(c.state, v.fileValue, v.envValue), v.get(s))
+			})
+		}
+	}
+}
+
+// TestLoadSettingsKoanf_EmptyProjectIDEnvTreatedAsUnset covers the
+// project-ID branch of the legacy env callback, the one key it maps
+// specially: SCION_PROJECT_ID and SCION_HUB_PROJECT_ID both land on the
+// top-level project_id, and an empty value must leave the file's
+// project_id in place.
+func TestLoadSettingsKoanf_EmptyProjectIDEnvTreatedAsUnset(t *testing.T) {
+	const fileValue, envValue = "file-project-id", "env-project-id"
+	for _, name := range []string{"SCION_PROJECT_ID", "SCION_HUB_PROJECT_ID"} {
+		for _, c := range envOverlayCases {
+			t.Run(name+"/"+c.name, func(t *testing.T) {
+				projectDir := setupEmptyEnvProjectWith(t, "project_id: "+fileValue+"\n")
+				applyEnvState(t, name, c.state, envValue)
+
+				s, err := LoadSettingsKoanf(projectDir)
+				require.NoError(t, err)
+				assert.Equal(t, expectedFor(c.state, fileValue, envValue), s.ProjectID)
 			})
 		}
 	}
