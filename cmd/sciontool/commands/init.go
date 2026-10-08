@@ -1384,11 +1384,14 @@ waitLoop:
 	// being stopped, or the harness has no session-end hook). The session
 	// is tombstoned, so hook events that still arrive from a running
 	// harness, a late session-end included, are ignored rather than
-	// reported again; the report may miss those last events. This runs
-	// first in the shutdown sequence, before the slower steps below, so it
-	// fits inside the runtime's stop grace period. It is bounded (2s lock
-	// wait plus shutdownSessionReportTimeout) and deliberately runs ahead
-	// of the stopping and final status reports.
+	// reported again; the report may miss those last events. Once the wait
+	// loop has ended, this is the first Hub call: it runs before the slower
+	// steps below, so it fits inside the runtime's stop grace period. (On
+	// the hook-triggered limit paths, trigger file and SIGUSR1, the wait
+	// loop has already made the limits_exceeded report; init started that
+	// shutdown itself, so no stop grace period was running.) It is bounded
+	// (2s lock wait plus shutdownSessionReportTimeout) and deliberately
+	// runs ahead of the stopping and final status reports.
 	runReportOpenSessionAtShutdown(agentHome, outcome, hub.NewClient)
 
 	// Clean up the GitHub token file on exit
