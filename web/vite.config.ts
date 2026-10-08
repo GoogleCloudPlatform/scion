@@ -169,6 +169,10 @@ export default defineConfig({
             },
         },
         sourcemap: true,
+        // Write .vite/manifest.json: the hub reads it to give the files Vite
+        // fingerprinted (chunks, their CSS and assets) the long cache
+        // lifetime, while the unhashed entry (assets/main.js) stays no-cache.
+        manifest: true,
         // CodeMirror and xterm are lazy-loaded, so large chunks are acceptable
         chunkSizeWarningLimit: 800,
         // Ensure Lit components are properly bundled

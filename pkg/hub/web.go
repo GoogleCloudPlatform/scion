@@ -32,6 +32,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -218,6 +219,12 @@ type WebServer struct {
 	hasAssets      bool                        // cached result of asset detection
 	startTime      time.Time
 	log            *slog.Logger // subsystem logger for hub.web
+
+	// fingerprintedAssets holds the request paths (/assets/x-<hash>.js) of
+	// the files Vite fingerprinted, read from its build manifest when assets
+	// are detected (see loadFingerprintedAssets). It is built before the
+	// server starts serving and only read afterwards, so it needs no lock.
+	fingerprintedAssets map[string]bool
 
 	// Dedicated request logger (nil = disabled)
 	requestLogger *slog.Logger
@@ -637,6 +644,7 @@ func NewWebServer(cfg WebServerConfig) *WebServer {
 	ws.shellTmpl = tmpl
 
 	ws.hasAssets = ws.detectWebAssets()
+	ws.fingerprintedAssets = ws.loadFingerprintedAssets()
 
 	ws.registerRoutes()
 
@@ -1048,10 +1056,10 @@ func (ws *WebServer) serveStaticAsset(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", ct)
 	}
 
-	// Set cache headers based on whether the filename contains a hash.
-	// Vite hashed assets (e.g., chunk-abc123.js) get long-lived caching.
-	// Non-hashed entry points (e.g., main.js) get revalidation.
-	if isHashedAsset(r.URL.Path) {
+	// Files Vite fingerprinted (listed in its build manifest) and other
+	// hex-hashed names get long-lived caching; the unhashed entry
+	// (assets/main.js) and every other file get revalidation.
+	if ws.fingerprintedAssets[r.URL.Path] || isHashedAsset(r.URL.Path) {
 		w.Header().Set("Cache-Control", "public, max-age=86400")
 	} else {
 		w.Header().Set("Cache-Control", "no-cache")
@@ -1064,6 +1072,97 @@ func (ws *WebServer) serveStaticAsset(w http.ResponseWriter, r *http.Request) {
 var staticContentTypes = map[string]string{
 	".ico":         "image/x-icon",
 	".webmanifest": "application/manifest+json",
+}
+
+// viteManifestPath is where Vite writes its build manifest inside the
+// client build (build.manifest in web/vite.config.ts).
+const viteManifestPath = ".vite/manifest.json"
+
+// viteManifestChunk is the part of a Vite manifest entry the hub reads.
+type viteManifestChunk struct {
+	File    string   `json:"file"`
+	CSS     []string `json:"css"`
+	Assets  []string `json:"assets"`
+	IsEntry bool     `json:"isEntry"`
+}
+
+// fingerprintSegment matches a Vite content hash at the end of a file name:
+// name-<8 or more URL-safe base64 characters>.ext.
+var fingerprintSegment = regexp.MustCompile(`-[A-Za-z0-9_-]{8,}\.[A-Za-z0-9]+$`)
+
+// loadFingerprintedAssets reads the Vite build manifest from the asset
+// source (embedded FS or --web-assets-dir) and returns the request paths of
+// every file Vite fingerprinted: each chunk's file (except the entry,
+// assets/main.js, which is not hashed) and the CSS and assets it lists.
+// Only clean relative paths that carry a hash segment are kept. A missing
+// manifest (an older build or the dev server) or one that does not parse
+// yields nil, so only the hex rule in isHashedAsset applies; a manifest
+// that does not parse is logged once and never used partially.
+//
+// It runs once, when assets are detected. If --web-assets-dir is replaced
+// or rebuilt while the hub runs, the set describes the earlier build until
+// the hub restarts.
+func (ws *WebServer) loadFingerprintedAssets() map[string]bool {
+	var (
+		raw    []byte
+		err    error
+		source string
+	)
+	switch {
+	case ws.assetsDisk != "":
+		source = "disk"
+		raw, err = os.ReadFile(filepath.Join(ws.assetsDisk, filepath.FromSlash(viteManifestPath)))
+	case ws.assets != nil:
+		source = "embedded"
+		raw, err = fs.ReadFile(ws.assets, viteManifestPath)
+	default:
+		return nil
+	}
+	if err != nil {
+		ws.logger().Debug("No Vite build manifest; only hex-named assets get the long cache lifetime", "source", source)
+		return nil
+	}
+	var manifest map[string]viteManifestChunk
+	if err := json.Unmarshal(raw, &manifest); err != nil {
+		ws.logger().Warn("Vite build manifest does not parse; only hex-named assets get the long cache lifetime", "source", source, "error", err)
+		return nil
+	}
+	set := make(map[string]bool)
+	add := func(p string) {
+		if requestPath, ok := fingerprintedRequestPath(p); ok {
+			set[requestPath] = true
+		}
+	}
+	for _, chunk := range manifest {
+		if !chunk.IsEntry {
+			add(chunk.File)
+		}
+		for _, p := range chunk.CSS {
+			add(p)
+		}
+		for _, p := range chunk.Assets {
+			add(p)
+		}
+	}
+	ws.logger().Debug("Vite build manifest loaded", "source", source, "fingerprinted", len(set))
+	return set
+}
+
+// fingerprintedRequestPath maps a manifest path (relative to the client
+// build, e.g. assets/x-AbCd1234.js) to its request path (/assets/x-AbCd1234.js).
+// It accepts only clean relative paths: no scheme, no absolute path, no ".."
+// segment, no backslash; and only names with a hash segment.
+func fingerprintedRequestPath(p string) (string, bool) {
+	if p == "" || strings.Contains(p, ":") || strings.Contains(p, "\\") || strings.HasPrefix(p, "/") {
+		return "", false
+	}
+	if path.Clean(p) != p || p == ".." || strings.HasPrefix(p, "../") {
+		return "", false
+	}
+	if !fingerprintSegment.MatchString(path.Base(p)) {
+		return "", false
+	}
+	return "/" + p, true
 }
 
 // isHashedAsset checks if a path looks like it contains a content hash.
