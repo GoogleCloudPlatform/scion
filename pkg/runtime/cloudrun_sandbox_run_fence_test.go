@@ -31,16 +31,30 @@ import (
 // one agent must not remove or take over each other's sandbox.
 
 // newFenceSandboxRuntime returns a runtime whose mock sandbox binary logs
-// every call and answers exec with execExit.
+// every call except wait and answers exec with execExit. wait blocks like a
+// live sandbox's, so the exit watcher a successful Run starts never writes
+// the state file; a cleanup registered after the TempDirs (cleanups run
+// last-in first-out) cancels the watchers before those directories are
+// removed.
 func newFenceSandboxRuntime(t *testing.T, execExit int) (*CloudRunSandboxRuntime, string) {
 	t.Helper()
 	log := filepath.Join(t.TempDir(), "calls.log")
-	bin := writeMockBin(t, fmt.Sprintf(`echo "$1" >> %q
+	bin := writeMockBin(t, fmt.Sprintf(`[ "$1" = wait ] && exec sleep 60
+echo "$1" >> %q
 case "$1" in
   exec) exit %d ;;
   *)    exit 0 ;;
 esac`, log, execExit))
-	return newWorkaroundTestRuntime(t, bin), log
+	rt := newWorkaroundTestRuntime(t, bin)
+	t.Cleanup(func() {
+		rt.watchMu.Lock()
+		defer rt.watchMu.Unlock()
+		for name, cancel := range rt.watchCancels {
+			cancel()
+			delete(rt.watchCancels, name)
+		}
+	})
+	return rt, log
 }
 
 func fenceRunConfig(t *testing.T, runID string) RunConfig {
