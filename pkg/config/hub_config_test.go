@@ -1815,8 +1815,8 @@ func TestLoadGlobalConfig_TelemetryYAML11Bool(t *testing.T) {
 // both load paths. CORS lists are normalized at every length (each item
 // split on commas, trimmed, empty items dropped). authorized_domains keeps
 // its original behaviour exactly: only a single comma-containing element is
-// split; empty, blank and padded values are left as loaded, because an empty
-// list means "allow every domain" in checkUserAuthorized.
+// split; blank and padded values are left as loaded. An exported but empty
+// env variable is treated as unset on both paths (ptone/scion#3809).
 func TestLoadGlobalConfig_ListFieldNormalization(t *testing.T) {
 	type row struct {
 		name   string
@@ -1837,8 +1837,9 @@ func TestLoadGlobalConfig_ListFieldNormalization(t *testing.T) {
 			get: hubOrigins, want: []string{"https://a", "https://b"}},
 		{name: "env single origin trimmed", env: map[string]string{"SCION_SERVER_HUB_CORSALLOWEDORIGINS": "  https://only.example  "},
 			get: hubOrigins, want: []string{"https://only.example"}},
-		{name: "env empty origin dropped", env: map[string]string{"SCION_SERVER_HUB_CORSALLOWEDORIGINS": ""},
-			get: hubOrigins, want: []string{}},
+		// An exported but empty variable is unset: the default stays.
+		{name: "env empty origin unset", env: map[string]string{"SCION_SERVER_HUB_CORSALLOWEDORIGINS": ""},
+			get: hubOrigins, want: []string{"*"}},
 		{name: "env hub methods", env: map[string]string{"SCION_SERVER_HUB_CORSALLOWEDMETHODS": "GET,POST"},
 			get: func(gc *GlobalConfig) []string { return gc.Hub.CORSAllowedMethods }, want: []string{"GET", "POST"}},
 		{name: "env hub headers", env: map[string]string{"SCION_SERVER_HUB_CORSALLOWEDHEADERS": "X-A, X-B"},
@@ -1873,8 +1874,11 @@ func TestLoadGlobalConfig_ListFieldNormalization(t *testing.T) {
 		// authorized_domains: unchanged behaviour.
 		{name: "domains env comma list split", env: map[string]string{"SCION_SERVER_AUTH_AUTHORIZEDDOMAINS": "a.com, b.com"},
 			get: domains, want: []string{"a.com", "b.com"}},
-		{name: "domains env empty kept", env: map[string]string{"SCION_SERVER_AUTH_AUTHORIZEDDOMAINS": ""},
-			get: domains, want: []string{""}},
+		// An exported but empty variable is unset: the file value stays.
+		{name: "domains env empty unset", env: map[string]string{"SCION_SERVER_AUTH_AUTHORIZEDDOMAINS": ""},
+			legacy: "auth:\n  authorizedDomains: [\"file.example\"]\n",
+			v1:     "  auth:\n    authorized_domains: [\"file.example\"]\n",
+			get:    domains, want: []string{"file.example"}},
 		{name: "domains env blank kept", env: map[string]string{"SCION_SERVER_AUTH_AUTHORIZEDDOMAINS": "   "},
 			get: domains, want: []string{"   "}},
 		{name: "domains env padded single kept", env: map[string]string{"SCION_SERVER_AUTH_AUTHORIZEDDOMAINS": " a.com "},
