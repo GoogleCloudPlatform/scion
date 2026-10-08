@@ -115,12 +115,12 @@ func mergeSectionOnCurrent(ctx context.Context, ops *OperationalSettings, sectio
 
 	schema, _ := opsettings.SchemaInfo()[section].Schema.(map[string]interface{})
 	if dropped := dropKeysForbiddenBySchema(section, schema, base); len(dropped) > 0 {
-		slog.Warn("admin settings save: dropping stored keys the section schema does not allow",
+		slog.Warn("admin settings save: removing stored keys the section schema does not allow (takes effect only if the save is written)",
 			"section", section, "keys", dropped)
 	}
 	validate := func(doc json.RawMessage) bool { return len(opsettings.Validate(section, doc)) == 0 }
 	if dropped := dropInvalidCarriedKeys(section, schema, base, sent, validate); len(dropped) > 0 {
-		slog.Warn("admin settings save: dropping stored keys whose value fails the section schema",
+		slog.Warn("admin settings save: removing stored keys whose value fails the section schema (takes effect only if the save is written)",
 			"section", section, "keys", dropped)
 	}
 
@@ -284,7 +284,10 @@ func githubAppPresence(rawBody []byte) *fieldPresence {
 
 // githubAppPresenceFromTop returns the presence of the server.github_app
 // object from the top-level presence of a PUT body, resolved with the same
-// rule as githubAppPresence. It returns nil when fp is nil.
+// rule as githubAppPresence. It returns nil when fp is nil. It re-derives
+// the same presence handlePutServerConfigDB passes to mergeSectionOnCurrent
+// (githubAppPresence(rawBody)); both must stay on githubAppPresence so the
+// doc builder and the merge agree on which keys were sent.
 func githubAppPresenceFromTop(fp *fieldPresence) *fieldPresence {
 	if fp == nil {
 		return nil
