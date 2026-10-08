@@ -163,7 +163,7 @@ func (s *conversationService) Get(ctx context.Context, id string) (*Conversation
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[ConversationDetail](resp)
+	return apiclient.DecodeRequired[ConversationDetail](resp)
 }
 
 // ListMessages returns messages in a conversation.
@@ -207,7 +207,7 @@ func (s *conversationService) GetMessage(ctx context.Context, conversationID, me
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[store.Message](resp)
+	return apiclient.DecodeRequired[store.Message](resp)
 }
 
 // Create creates a new conversation.
@@ -216,7 +216,7 @@ func (s *conversationService) Create(ctx context.Context, req *CreateConversatio
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[ConversationDetail](resp)
+	return apiclient.DecodeRequired[ConversationDetail](resp)
 }
 
 // SetDefaultAgent sets the default agent for a conversation.
@@ -235,7 +235,7 @@ func (s *conversationService) AddParticipant(ctx context.Context, conversationID
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[store.ConversationParticipant](resp)
+	return apiclient.DecodeRequired[store.ConversationParticipant](resp)
 }
 
 // Leave removes the caller from a conversation.

@@ -84,7 +84,7 @@ func TestStopAgentQuery_RunID(t *testing.T) {
 }
 
 // runMismatchBody is the broker's run-mismatch 404 body for a stop naming
-// run-1 while run-2 holds the name (runtimebroker.StopRunMismatch).
+// run-1 while run-2 holds the name (runtimebroker.RunMismatch).
 const runMismatchBody = `{"error":{"code":"` + api.BrokerErrorCodeRunMismatch + `","message":"Agent not found for the requested run","details":{"runId":"run-1","currentRunId":"run-2"}}}`
 
 func TestHTTPRuntimeBrokerClient_StopAgentRunID(t *testing.T) {
@@ -177,7 +177,7 @@ func TestExecDispatchStop_UsesIntentRunID(t *testing.T) {
 	client := &mockRuntimeBrokerClient{}
 	srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(s, client, false, slog.Default()))
 	_, _, agent := setupOnlineBrokerAgent(t, s, "stop-intent-run")
-	if _, err := s.SetAgentRunID(ctx, agent.ID, "run-new"); err != nil {
+	if _, err := s.SetAgentRunID(ctx, agent.ID, "run-new", nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -357,7 +357,7 @@ func TestRunID_E2E_StaleStopDoesNotMarkRowStopped(t *testing.T) {
 			}
 			srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(s, NewHTTPRuntimeBrokerClient(), false, slog.Default()))
 			mgr.run(agent.Slug, "cid-b", agent.ProjectID, "", "run-b")
-			if _, err := s.SetAgentRunID(ctx, agent.ID, "run-a"); err != nil {
+			if _, err := s.SetAgentRunID(ctx, agent.ID, "run-a", nil); err != nil {
 				t.Fatal(err)
 			}
 
@@ -380,7 +380,7 @@ func TestRunID_E2E_StaleStopDoesNotMarkRowStopped(t *testing.T) {
 			if action != "stop" {
 				return
 			}
-			if _, err := s.SetAgentRunID(ctx, agent.ID, "run-b"); err != nil {
+			if _, err := s.SetAgentRunID(ctx, agent.ID, "run-b", nil); err != nil {
 				t.Fatal(err)
 			}
 			rec = doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/stop", nil)
@@ -410,7 +410,13 @@ func TestQueueOfflineStop_IntentCarriesRunID(t *testing.T) {
 	srv.SetDispatcher(&runIntentDispatcher{})
 	srv.commandBus = &recordingCommandBus{}
 	_, broker, agent := setupOfflineBrokerAgent(t, s, "stop-q-run")
-	if _, err := s.SetAgentRunID(ctx, agent.ID, "run-q"); err != nil {
+	if _, err := s.SetAgentRunID(ctx, agent.ID, "run-q", nil); err != nil {
+		t.Fatal(err)
+	}
+	// A start claim held when the stop is recorded is carried too, for the
+	// drain to release.
+	claim, err := s.ClaimAgentStart(ctx, agent.ID, "other-hub", store.StartClaimUser, "", time.Minute)
+	if err != nil {
 		t.Fatal(err)
 	}
 
@@ -419,6 +425,17 @@ func TestQueueOfflineStop_IntentCarriesRunID(t *testing.T) {
 		t.Fatalf("offline stop: status %d: %s", rec.Code, rec.Body.String())
 	}
 	assertStopIntentRunID(t, s, broker.ID, "run-q")
+	pending, err := s.ListPendingDispatch(ctx, broker.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args, err := UnmarshalStopArgs(pending[0].Args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if args.SupersedesClaim != claim.ID {
+		t.Errorf("stop intent supersedesClaim = %q, want %q", args.SupersedesClaim, claim.ID)
+	}
 }
 
 // A cross-node stop (DispatchAgentStop → ErrLifecycleDeferred) writes a
@@ -434,7 +451,7 @@ func TestDeferredStop_IntentCarriesRunID(t *testing.T) {
 	dispatcher.SetCrossNodeDeps(events, NoopCommandBus{})
 
 	agent := seedAgentWithBrokerID(t, cs, remoteBroker)
-	if _, err := cs.SetAgentRunID(ctx, agent.ID, "run-d"); err != nil {
+	if _, err := cs.SetAgentRunID(ctx, agent.ID, "run-d", nil); err != nil {
 		t.Fatal(err)
 	}
 	agent.RunID = "run-d"

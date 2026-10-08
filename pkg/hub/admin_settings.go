@@ -15,7 +15,6 @@
 package hub
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -259,6 +258,12 @@ func (s *Server) handleAdminServerConfigSectionReset(w http.ResponseWriter, r *h
 		return
 	}
 
+	// A user access token resets only a section with no refused key.
+	if !serverConfigSectionTokenResettable(sectionName) &&
+		writeTokenRefusedSettingsKeys(w, r.Context(), []string{sectionName}) {
+		return
+	}
+
 	// The "experiments" section has its own compare-and-set reset with a
 	// per-name audit log (DELETE /api/v1/admin/experiments), gated on
 	// hub.experiments.update. This generic route has no compare-and-set and
@@ -299,10 +304,26 @@ func (s *Server) handleAdminServerConfigSectionReset(w http.ResponseWriter, r *h
 
 // handleGetServerConfig reads and returns the global settings.yaml.
 func (s *Server) handleGetServerConfig(w http.ResponseWriter) {
+	resp, err := buildServerConfigFileResponse()
+	if err != nil {
+		var ue *serverConfigReadError
+		if errors.As(err, &ue) {
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, ue.userMsg, nil)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read settings", nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// buildServerConfigFileResponse builds the file-mode GET
+// /api/v1/admin/server-config body (sensitive fields masked). The file-mode
+// PUT also uses it as the reference view for echo detection.
+func buildServerConfigFileResponse() (*ServerConfigResponse, error) {
 	globalDir, err := config.GetGlobalDir()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to resolve settings directory", nil)
-		return
+		return nil, &serverConfigReadError{"Failed to resolve settings directory", err}
 	}
 
 	settingsPath := filepath.Join(globalDir, "settings.yaml")
@@ -321,17 +342,14 @@ func (s *Server) handleGetServerConfig(w http.ResponseWriter) {
 				sort.Strings(envOverrides)
 				resp.EnvOverrides = envOverrides
 			}
-			writeJSON(w, http.StatusOK, resp)
-			return
+			return &resp, nil
 		}
-		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read settings file", nil)
-		return
+		return nil, &serverConfigReadError{"Failed to read settings file", err}
 	}
 
 	var vs config.VersionedSettings
 	if err := yamlv3.Unmarshal(data, &vs); err != nil {
-		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to parse settings file", nil)
-		return
+		return nil, &serverConfigReadError{"Failed to parse settings file", err}
 	}
 
 	// Mask sensitive fields before sending to the client
@@ -384,7 +402,7 @@ func (s *Server) handleGetServerConfig(w http.ResponseWriter) {
 	}
 
 	maskSensitiveFields(&resp)
-	writeJSON(w, http.StatusOK, resp)
+	return &resp, nil
 }
 
 // validateDefaultTimezone checks an agent_defaults.default_timezone
@@ -414,14 +432,27 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "Invalid request body", nil)
 		return
 	}
+	if rejectRepeatedJSONMembers(w, rawBody) {
+		return
+	}
 	var req ServerConfigUpdateRequest
-	if err := json.NewDecoder(bytes.NewReader(rawBody)).Decode(&req); err != nil {
+	if err := json.Unmarshal(rawBody, &req); err != nil {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "Invalid request body", nil)
 		return
 	}
 	// The typed decode above silently drops a removed profiles.<name>.timezone
 	// key, so check the raw body before settings.yaml is touched.
 	if rejectRemovedProfileTimezone(w, rawBody) {
+		return
+	}
+	// A user access token writes configuration keys only.
+	if writeTokenRefusedSettingsKeys(w, r.Context(), tokenRefusedServerConfigKeys(rawBody)) {
+		return
+	}
+	// Any other key the typed decode drops (unknown, misspelt, or a flat
+	// dotted "server.hub.x" key) is rejected with 422 before anything is
+	// written, unless it echoes the GET view (ptone/scion#3463).
+	if rejectUnknownFileConfigKeys(w, rawBody) {
 		return
 	}
 
@@ -563,8 +594,19 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Apply updates by marshaling the request fields and merging
-	applySettingsUpdates(raw, &req)
+	// Apply updates by marshaling the request fields and merging. The raw
+	// server object tells the merge which server fields were sent.
+	rawServer := rawServerObject(rawBody)
+	applySettingsUpdatesFromBody(raw, &req, rawServer)
+
+	// The server section is deep-merged, so a section the request changes
+	// only in part is validated again as merged with the stored fields.
+	if req.Server != nil {
+		if err := validateMergedServerSections(raw, rawServer); err != nil {
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
+			return
+		}
+	}
 
 	// Validate the effective hub default GCP identity (the merged result, so
 	// a PUT that changes only one of the pair is checked against the other's
@@ -719,7 +761,23 @@ func setOrDeleteString(raw map[string]interface{}, key string, v *string) {
 }
 
 // applySettingsUpdates merges the update request into the raw settings map.
+// It is used only by tests of the non-server settings; the PUT handler
+// uses applySettingsUpdatesFromBody. The two differ for the server
+// section: here it is deep-merged from the typed request alone, so a zero
+// value in req.Server cannot be told apart from an omitted field and keeps
+// the stored value, while the PUT handler passes the request body so that
+// an explicit null, or the zero value of a non-pointer field, clears a
+// server field (see mergeServerSettings). Tests that
+// assert on server fields must use applySettingsUpdatesFromBody with a
+// real body.
 func applySettingsUpdates(raw map[string]interface{}, req *ServerConfigUpdateRequest) {
+	applySettingsUpdatesFromBody(raw, req, nil)
+}
+
+// applySettingsUpdatesFromBody is applySettingsUpdates with the request's
+// raw "server" JSON object, which tells mergeServerSettings which server
+// fields the client sent. A nil rawServer derives that from req.Server.
+func applySettingsUpdatesFromBody(raw map[string]interface{}, req *ServerConfigUpdateRequest, rawServer json.RawMessage) {
 	if req.SchemaVersion != nil {
 		raw["schema_version"] = *req.SchemaVersion
 	}
@@ -732,20 +790,7 @@ func applySettingsUpdates(raw map[string]interface{}, req *ServerConfigUpdateReq
 	setOrDeleteString(raw, "workspace_path", req.WorkspacePath)
 
 	if req.Server != nil {
-		newServer := marshalToMap(req.Server)
-		// Merge into existing server section to preserve keys not present in the
-		// update (e.g. github_app managed via its own endpoint).
-		if existing, ok := raw["server"]; ok {
-			if existingMap, ok := existing.(map[string]interface{}); ok {
-				if newMap, ok := newServer.(map[string]interface{}); ok {
-					for k, v := range newMap {
-						existingMap[k] = v
-					}
-					newServer = existingMap
-				}
-			}
-		}
-		raw["server"] = newServer
+		mergeServerSettings(raw, req.Server, rawServer)
 	}
 	if req.Telemetry != nil {
 		raw["telemetry"] = marshalToMap(req.Telemetry)

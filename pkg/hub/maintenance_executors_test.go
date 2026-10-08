@@ -31,7 +31,7 @@ import (
 )
 
 func TestSecretMigrationExecutor_NoGCPBackend(t *testing.T) {
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create sqlite store: %v", err)
 	}

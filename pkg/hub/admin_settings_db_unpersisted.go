@@ -36,7 +36,10 @@ import (
 //     have no DB home (dbUnpersistedRequestPaths).
 //
 // Either kind is accepted only when it is a no-op echo of the GET view, so a
-// client that sends the GET body back keeps getting 200.
+// client that sends the GET body back keeps getting 200. A key the GET view
+// type does not know either is never an echo and is always rejected
+// (ptone/scion#3463). The file-mode PUT applies the same rule
+// (rejectUnknownFileConfigKeys).
 
 // dbUnwrittenLayer1Paths are Layer-1 agent_defaults request fields that the
 // DB path does not write (buildSingleSectionDoc), report (GET) or apply
@@ -72,6 +75,8 @@ var dbFileOnlyRequestPaths = [][]string{
 	{"server", "auth", "username"},
 	{"server", "auth", "display_name"},
 	{"server", "auth", "email"},
+	{"server", "auth", "agent_run_scope"},
+	{"server", "auth", "agent_run_scope_legacy_until"},
 }
 
 // dbUnpersistedRequestPaths is every request path the DB-backed PUT does not
@@ -96,6 +101,8 @@ func isEmptySettingsBody(rawBody []byte) bool {
 
 // rejectUnpersistedKeys writes a 422 naming every key in rawBody that the
 // DB-backed PUT would drop, unless that key is a no-op echo of the GET view.
+// A key that neither the request nor the GET view type knows (a flat dotted
+// key, a misspelt field) is always rejected (ptone/scion#3463).
 // With routeFileOnly (workstation hubs) the dbFileOnlyRequestPaths present in
 // the body are not candidates; they are returned as koanf-style keys for the
 // settings.yaml write. done is true if the response has been written.
@@ -105,7 +112,7 @@ func (s *Server) rejectUnpersistedKeys(ctx context.Context, w http.ResponseWrite
 		return nil, false
 	}
 
-	candidates := unknownJSONPaths(top, reflect.TypeOf(ServerConfigUpdateDBRequest{}), nil)
+	candidates := unknownSettingsKeys(top, reflect.TypeOf(ServerConfigUpdateDBRequest{}), reflect.TypeOf(ServerConfigDBResponse{}))
 	for _, p := range dbUnwrittenLayer1Paths {
 		if v, ok := rawAtPath(top, p); ok {
 			candidates = append(candidates, rawPath{path: p, value: v})
@@ -122,35 +129,106 @@ func (s *Server) rejectUnpersistedKeys(ctx context.Context, w http.ResponseWrite
 	}
 	// Unknown keys under a file-routed path (server.scheduler.bogus) stay
 	// candidates: the decoder drops them, so the file write would too.
-	candidates = dropNestedPaths(candidates)
-	if len(candidates) == 0 {
-		return fileKeys, false
-	}
-
-	view, err := s.serverConfigDBView(ctx, ops)
+	rejected, err := rejectedSettingsKeys(candidates, func() (map[string]any, error) {
+		return s.serverConfigDBView(ctx, ops)
+	})
 	if err != nil {
 		slog.Error("PUT server-config: failed to build GET view for echo check", "error", err)
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read existing settings", nil)
 		return nil, true
 	}
-
-	var rejected []string
-	for _, c := range candidates {
-		if !isEchoOfView(c, view) {
-			rejected = append(rejected, strings.Join(c.path, "."))
-		}
-	}
 	if len(rejected) == 0 {
 		return fileKeys, false
 	}
+	writeUnpersistedKeysRejected(w, rejected)
+	return nil, true
+}
+
+// rejectUnknownFileConfigKeys is the file-mode PUT's counterpart of
+// rejectUnpersistedKeys: it writes a 422 naming every key in rawBody that
+// the ServerConfigUpdateRequest decode would drop, unless that key is a
+// no-op echo of the file-mode GET view. It runs before settings.yaml is
+// read for the merge, so a rejected request writes nothing. done is true
+// if the response has been written.
+func rejectUnknownFileConfigKeys(w http.ResponseWriter, rawBody []byte) (done bool) {
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(rawBody, &top); err != nil {
+		return false
+	}
+	candidates := unknownSettingsKeys(top, reflect.TypeOf(ServerConfigUpdateRequest{}), reflect.TypeOf(ServerConfigResponse{}))
+	rejected, err := rejectedSettingsKeys(candidates, serverConfigFileView)
+	if err != nil {
+		slog.Error("PUT server-config: failed to build GET view for echo check", "error", err)
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read existing settings", nil)
+		return true
+	}
+	if len(rejected) == 0 {
+		return false
+	}
+	writeUnpersistedKeysRejected(w, rejected)
+	return true
+}
+
+// unknownSettingsKeys returns every key in top that a decode into reqType
+// would silently drop. A key viewType (the GET response) does not know
+// either can never be an echo of the GET view, so it is marked noEcho and
+// always rejected: a flat dotted key such as
+// "server.hub.auto_suspend_stalled", or a misspelt field, even when its
+// value is a zero value. A key only viewType knows (a read-only GET field
+// such as scion_version) stays subject to the echo rule, so a client that
+// sends the GET body back keeps getting 200.
+func unknownSettingsKeys(top map[string]json.RawMessage, reqType, viewType reflect.Type) []rawPath {
+	paths := unknownJSONPaths(top, reqType, nil)
+	for i := range paths {
+		paths[i].noEcho = !jsonPathKnown(viewType, paths[i].path)
+	}
+	return paths
+}
+
+// rejectedSettingsKeys returns the sorted dotted keys of the candidates that
+// are not a no-op echo of the GET view. view is only called when a
+// candidate needs the echo check.
+func rejectedSettingsKeys(candidates []rawPath, view func() (map[string]any, error)) ([]string, error) {
+	candidates = dropNestedPaths(candidates)
+	var v map[string]any
+	var rejected []string
+	for _, c := range candidates {
+		if !c.noEcho {
+			if v == nil {
+				var err error
+				if v, err = view(); err != nil {
+					return nil, err
+				}
+			}
+			if isEchoOfView(c, v) {
+				continue
+			}
+		}
+		rejected = append(rejected, strings.Join(c.path, "."))
+	}
 	sort.Strings(rejected)
+	return rejected, nil
+}
+
+// writeUnpersistedKeysRejected writes the 422 both server-config PUT
+// handlers return for keys they would otherwise drop.
+func writeUnpersistedKeysRejected(w http.ResponseWriter, rejected []string) {
 	slog.Warn("PUT server-config: rejecting keys that cannot be persisted", "keys", rejected)
 	writeJSON(w, http.StatusUnprocessableEntity, map[string]interface{}{
 		"error":   "unpersisted_keys_rejected",
-		"message": "These settings are not recognised or cannot be saved through the server config API.",
+		"message": "These settings are not recognised or cannot be saved through the server config API. Nothing was saved.",
 		"keys":    rejected,
 	})
-	return nil, true
+}
+
+// serverConfigFileView returns the file-mode GET /api/v1/admin/server-config
+// body as a generic JSON value, the reference for echo detection.
+func serverConfigFileView() (map[string]any, error) {
+	resp, err := buildServerConfigFileResponse()
+	if err != nil {
+		return nil, err
+	}
+	return toJSONView(resp)
 }
 
 // serverConfigDBView returns the GET /api/v1/admin/server-config body as a
@@ -160,7 +238,12 @@ func (s *Server) serverConfigDBView(ctx context.Context, ops *OperationalSetting
 	if err != nil {
 		return nil, err
 	}
-	b, err := json.Marshal(resp)
+	return toJSONView(resp)
+}
+
+// toJSONView round-trips v through JSON into a generic map.
+func toJSONView(v any) (map[string]any, error) {
+	b, err := json.Marshal(v)
 	if err != nil {
 		return nil, err
 	}
@@ -202,6 +285,9 @@ func jsonPathHasPrefix(p, prefix []string) bool {
 type rawPath struct {
 	path  []string
 	value json.RawMessage
+	// noEcho marks a key the GET view can never carry, so it is rejected
+	// whatever its value.
+	noEcho bool
 }
 
 // isEchoOfView reports whether the value sent at c.path equals the GET
@@ -292,15 +378,7 @@ func unknownJSONPaths(obj map[string]json.RawMessage, t reflect.Type, prefix []s
 	fields := jsonFields(t)
 	var out []rawPath
 	for key, val := range obj {
-		ft, ok := fields[key]
-		if !ok {
-			for name, f := range fields {
-				if strings.EqualFold(name, key) {
-					ft, ok = f, true
-					break
-				}
-			}
-		}
+		ft, ok := fieldFold(fields, key)
 		path := append(append([]string{}, prefix...), key)
 		if !ok {
 			out = append(out, rawPath{path: path, value: val})
@@ -309,6 +387,49 @@ func unknownJSONPaths(obj map[string]json.RawMessage, t reflect.Type, prefix []s
 		out = append(out, unknownJSONPathsInValue(val, ft, path)...)
 	}
 	return out
+}
+
+// fieldFold finds key in fields the way encoding/json matches field names:
+// exact match first, then case-insensitive.
+func fieldFold(fields map[string]reflect.Type, key string) (reflect.Type, bool) {
+	if ft, ok := fields[key]; ok {
+		return ft, true
+	}
+	for name, ft := range fields {
+		if strings.EqualFold(name, key) {
+			return ft, true
+		}
+	}
+	return nil, false
+}
+
+// jsonPathKnown reports whether a JSON object path (in the form
+// unknownJSONPaths returns: map keys are segments, slice indexes are not)
+// names a field encoding/json would decode into t.
+func jsonPathKnown(t reflect.Type, path []string) bool {
+	for _, seg := range path {
+		for t.Kind() == reflect.Pointer || t.Kind() == reflect.Slice || t.Kind() == reflect.Array {
+			t = t.Elem()
+		}
+		if reflect.PointerTo(t).Implements(jsonUnmarshalerType) {
+			return true
+		}
+		switch t.Kind() {
+		case reflect.Struct:
+			ft, ok := fieldFold(jsonFields(t), seg)
+			if !ok {
+				return false
+			}
+			t = ft
+		case reflect.Map:
+			t = t.Elem()
+		case reflect.Interface:
+			return true
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func unknownJSONPathsInValue(val json.RawMessage, t reflect.Type, path []string) []rawPath {

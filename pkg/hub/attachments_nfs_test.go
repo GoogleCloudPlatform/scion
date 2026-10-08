@@ -18,7 +18,6 @@ package hub
 
 import (
 	"context"
-	"database/sql"
 	"os"
 	"path/filepath"
 	"strings"
@@ -47,9 +46,7 @@ func nfsAttachmentServer(t *testing.T) (srv *Server, project *store.Project, hos
 	hostBase = setNFSSharedDirStorageGlobalSettings(t)
 	srv, s := testServer(t)
 
-	db, err := sql.Open("sqlite3", ":memory:")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = db.Close() })
+	db := openTestMemorySQLite(t, "sqlite3")
 
 	wcs := NewWebChatStore(db, "sqlite3")
 	require.NoError(t, wcs.Init())
@@ -147,7 +144,7 @@ func TestIngestAgentAttachments_NFSBackend_RefusedNoLeak(t *testing.T) {
 	require.NoError(t, os.Symlink(outside.dir, filepath.Join(leaf, "escape")))
 
 	before := outside.snapshot(t)
-	refs := srv.ingestAgentAttachments(context.Background(), project.ID, "agent-1", []string{
+	refs, _ := srv.ingestAgentAttachments(context.Background(), project.ID, "agent-1", []string{
 		"/scion-volumes/" + attachmentSharedDirName + "/escape/secret.txt",
 	})
 	assert.Empty(t, refs, "NFS-backed attachment ingest must be refused outright")

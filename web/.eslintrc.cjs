@@ -44,6 +44,10 @@ module.exports = {
             parserOptions: { project: './e2e/chat-mobile/tsconfig.json' },
         },
         {
+            files: ['e2e/agent-store-count/*.ts'],
+            parserOptions: { project: './e2e/agent-store-count/tsconfig.json' },
+        },
+        {
             files: ['src/client/terminal-*.test.ts'],
             parserOptions: { project: './src/client/tsconfig.terminal-tests.json' },
         },
@@ -77,6 +81,8 @@ module.exports = {
                 'src/components/shared/header.test.ts',
                 'src/components/shared/group-member-editor-membership.test.ts',
                 'src/components/pages/onboarding.test.ts',
+                'src/components/pages/chat-hub-members.test.ts',
+                'src/components/shared/chat/chat-thread-peer-project.test.ts',
             ],
             parserOptions: { project: './src/components/tsconfig.component-tests.json' },
         },
@@ -97,11 +103,62 @@ module.exports = {
                 'e2e/chat-palette/terminal-and-modal.pw.ts',
                 'e2e/chat-palette/terminal-guard-under-shell.pw.ts',
                 'e2e/chat-palette/thread-navigation.pw.ts',
+                'e2e/chat-palette/touch-keyboard.pw.ts',
                 'e2e/chat-palette/typography.pw.ts',
                 'e2e/palette-typography.ts',
                 'e2e/palette-focus.ts',
             ],
             parserOptions: { project: './e2e/chat-palette/tsconfig.json' },
+        },
+        // Components navigate through src/client/navigation.ts (#2857, #3118):
+        // no importing the client entry module (its load boots the app) and
+        // no raw history.pushState/replaceState (skips the base path). The
+        // router itself (src/client/main.ts, route-history.ts, navigation.ts)
+        // lives outside src/components and is unaffected. Tests are excluded:
+        // they vi.mock client/main legitimately.
+        {
+            files: ['src/components/**/*.ts'],
+            // TEMPORARY: chat still needs stateManager/pushRoute/replaceRoute
+            // from main.ts; the chat lane migrates these files later.
+            excludedFiles: [
+                'src/components/**/*.test.ts',
+                'src/components/pages/chat*.ts',
+                'src/components/shared/chat/**',
+            ],
+            rules: {
+                'no-restricted-imports': [
+                    'error',
+                    {
+                        patterns: [
+                            {
+                                group: ['**/client/main', '**/client/main.js', '**/client/main.ts'],
+                                message:
+                                    'Import navigation helpers from client/navigation.js; importing client/main boots the app.',
+                            },
+                        ],
+                    },
+                ],
+                // Raw history writes in any form: history.pushState,
+                // window.history.pushState, history['pushState'],
+                // history[`pushState`], const { pushState } = history.
+                // Plus dynamic import() of client/main, which
+                // no-restricted-imports does not see.
+                'no-restricted-syntax': [
+                    'error',
+                    {
+                        selector:
+                            'MemberExpression[property.name=/^(push|replace)State$/], MemberExpression[property.value=/^(push|replace)State$/], MemberExpression[property.type="TemplateLiteral"][property.quasis.0.value.cooked=/^(push|replace)State$/], ObjectPattern > Property[key.name=/^(push|replace)State$/], ObjectPattern > Property[key.value=/^(push|replace)State$/]',
+                        message:
+                            'Use navigateTo(), pushUrl() or replaceSearch() from client/navigation.js instead of raw history.pushState/replaceState.',
+                    },
+                    {
+                        selector:
+                            'ImportExpression[source.value=/\\/client\\/main(\\.(js|ts))?$/], ImportExpression[source.type="TemplateLiteral"][source.quasis.length=1][source.quasis.0.value.cooked=/\\/client\\/main(\\.(js|ts))?$/]',
+                        message:
+                            'Import navigation helpers from client/navigation.js; importing client/main boots the app.',
+                    },
+                ],
+            },
         },
         // e2e-perf/*.mjs (the large-project performance harness's browser
         // benchmark) isn't part of the tsconfig.json TS program the root

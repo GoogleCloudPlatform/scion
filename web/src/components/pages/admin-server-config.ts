@@ -255,10 +255,22 @@ interface V1TelemetryConfig {
   local?: V1TelemetryLocalConfig;
 }
 
+// Keys match CloudRunConfig JSON tags in pkg/config/settings_v1.go.
 interface V1CloudRunConfig {
-  project?: string;
+  project_id?: string;
+  location?: string;
+}
+
+// Keys match V1CloudRunInstancesConfig JSON tags in
+// pkg/config/settings_v1.go.
+interface V1CloudRunInstancesConfig {
+  project_id?: string;
   region?: string;
 }
+
+// The two Cloud Run fields the runtime editor shows. Each maps to a
+// different block and key depending on the runtime type.
+type CloudRunEditorField = 'project' | 'region';
 
 interface V1RuntimeConfig {
   type?: string;
@@ -270,10 +282,32 @@ interface V1RuntimeConfig {
   list_all_namespaces?: boolean;
   env?: Record<string, string>;
   cloudrun?: V1CloudRunConfig;
+  cloudrun_instances?: V1CloudRunInstancesConfig;
   safe_to_evict?: boolean;
   shared_dir_storage_backend?: string;
   home_storage_backend?: string;
   home_storage_leaf?: string;
+}
+
+// Sets or clears one key in a runtime's Cloud Run block, and drops the
+// block when it becomes empty.
+function setCloudRunKey<B extends 'cloudrun' | 'cloudrun_instances'>(
+  rt: V1RuntimeConfig,
+  block: B,
+  key: keyof NonNullable<V1RuntimeConfig[B]>,
+  value: string
+): void {
+  const next: Record<string, string> = { ...rt[block] };
+  if (value) {
+    next[key as string] = value;
+  } else {
+    delete next[key as string];
+  }
+  if (Object.keys(next).length > 0) {
+    rt[block] = next as V1RuntimeConfig[B];
+  } else {
+    delete rt[block];
+  }
 }
 
 interface V1ProfileConfig {
@@ -622,6 +656,8 @@ export class ScionPageAdminServerConfig extends LitElement {
   // Default GCP identity (hub-wide fallback)
   @state() private defaultGCPIdentityMode = '';
   @state() private defaultGCPIdentitySAID = '';
+  /** Account as loaded from the server; used to detect admin edits. */
+  private loadedGCPIdentitySAID = '';
   @state() private hubGCPServiceAccounts: GCPServiceAccount[] = [];
 
   // Agent defaults sub-tab
@@ -1689,6 +1725,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     this.defaultTimezone = data.default_timezone || '';
     this.defaultGCPIdentityMode = data.default_gcp_identity_mode || '';
     this.defaultGCPIdentitySAID = data.default_gcp_identity_service_account_id || '';
+    this.loadedGCPIdentitySAID = this.defaultGCPIdentitySAID;
 
     // Server
     const srv = data.server;
@@ -1974,6 +2011,28 @@ export class ScionPageAdminServerConfig extends LitElement {
     return html`${this.renderSupersededBadge(koanfKey)}${editableTemplate}`;
   }
 
+  /**
+   * Service account value to save, or undefined to leave it out of the
+   * payload. The account only applies in "assign" mode, so it is cleared
+   * when the admin picks another mode in the form.
+   *
+   * When the mode itself is read-only (env-pinned or deployment-managed),
+   * the form mode is not the effective mode and the page cannot see the
+   * effective one, so the form mode must not drive clearing
+   * (ptone/scion#2720). In that case the account is sent only when the
+   * admin edited it. An unchanged account is left out, so the server
+   * neither clears it nor re-checks it on unrelated saves. In the db tier
+   * both GCP keys are in one settings section and lock together, so this
+   * branch is file-tier (env-pinned) in practice.
+   */
+  private gcpIdentitySAIDForPayload(ok: (key: string) => boolean): string | undefined {
+    const said = this.defaultGCPIdentitySAID || '';
+    if (!ok('default_gcp_identity_mode')) {
+      return said === this.loadedGCPIdentitySAID ? undefined : said;
+    }
+    return this.defaultGCPIdentityMode === 'assign' ? said : '';
+  }
+
   private buildLayer1Payload(): Record<string, unknown> {
     const payload: Record<string, unknown> = {};
     const ok = (key: string) => this.readOnlyReason(key) === null;
@@ -2034,8 +2093,8 @@ export class ScionPageAdminServerConfig extends LitElement {
       payload.default_gcp_identity_mode = this.defaultGCPIdentityMode || '';
     }
     if (ok('default_gcp_identity_service_account_id')) {
-      payload.default_gcp_identity_service_account_id =
-        this.defaultGCPIdentityMode === 'assign' ? this.defaultGCPIdentitySAID || '' : '';
+      const said = this.gcpIdentitySAIDForPayload(ok);
+      if (said !== undefined) payload.default_gcp_identity_service_account_id = said;
     }
 
     const server: Record<string, unknown> = {};
@@ -2344,25 +2403,27 @@ export class ScionPageAdminServerConfig extends LitElement {
       payload.default_gcp_identity_mode = this.defaultGCPIdentityMode || '';
     }
     if (ok('default_gcp_identity_service_account_id')) {
-      payload.default_gcp_identity_service_account_id =
-        this.defaultGCPIdentityMode === 'assign' ? this.defaultGCPIdentitySAID || '' : '';
+      const said = this.gcpIdentitySAIDForPayload(ok);
+      if (said !== undefined) payload.default_gcp_identity_service_account_id = said;
     }
 
-    // Server
+    // Server — file mode deep-merges each server section, so an omitted
+    // field keeps its stored value. Send every shown field, a cleared one
+    // as "" / 0 / [] (explicit empties delete the key), so clearing a field
+    // in the form still clears it in settings.yaml (ptone/scion#2938).
+    // Masked secrets still showing "********" are left out to keep them.
     const server: Record<string, unknown> = {};
-    if (ok('server.mode')) server.mode = this.serverMode || undefined;
-    if (ok('server.log_level')) server.log_level = this.logLevel || undefined;
-    if (ok('server.log_format')) server.log_format = this.logFormat || undefined;
+    if (ok('server.mode')) server.mode = this.serverMode || '';
+    if (ok('server.log_level')) server.log_level = this.logLevel || '';
+    if (ok('server.log_format')) server.log_format = this.logFormat || '';
 
     // Hub server
     const hub: Record<string, unknown> = {};
-    if (ok('server.hub.port') && this.hubPort) hub.port = this.hubPort;
-    if (ok('server.hub.host') && this.hubHost) hub.host = this.hubHost;
-    if (ok('server.hub.public_url') && this.hubPublicUrl) hub.public_url = this.hubPublicUrl;
-    if (ok('server.hub.read_timeout') && this.hubReadTimeout)
-      hub.read_timeout = this.hubReadTimeout;
-    if (ok('server.hub.write_timeout') && this.hubWriteTimeout)
-      hub.write_timeout = this.hubWriteTimeout;
+    if (ok('server.hub.port')) hub.port = this.hubPort || 0;
+    if (ok('server.hub.host')) hub.host = this.hubHost || '';
+    if (ok('server.hub.public_url')) hub.public_url = this.hubPublicUrl || '';
+    if (ok('server.hub.read_timeout')) hub.read_timeout = this.hubReadTimeout || '';
+    if (ok('server.hub.write_timeout')) hub.write_timeout = this.hubWriteTimeout || '';
     if (ok('server.hub.admin_emails')) {
       hub.admin_emails = this.hubAdminEmails
         ? this.hubAdminEmails
@@ -2371,8 +2432,8 @@ export class ScionPageAdminServerConfig extends LitElement {
             .filter(Boolean)
         : [];
     }
-    if (ok('server.hub.soft_delete_retention') && this.hubSoftDeleteRetention)
-      hub.soft_delete_retention = this.hubSoftDeleteRetention;
+    if (ok('server.hub.soft_delete_retention'))
+      hub.soft_delete_retention = this.hubSoftDeleteRetention || '';
     if (ok('server.hub.soft_delete_retain_files'))
       hub.soft_delete_retain_files = this.hubSoftDeleteRetainFiles;
     if (ok('server.hub.auto_suspend_stalled'))
@@ -2386,58 +2447,55 @@ export class ScionPageAdminServerConfig extends LitElement {
     // Broker
     const broker: Record<string, unknown> = {};
     if (ok('server.broker.enabled')) broker.enabled = this.brokerEnabled;
-    if (ok('server.broker.port') && this.brokerPort) broker.port = this.brokerPort;
-    if (ok('server.broker.host') && this.brokerHost) broker.host = this.brokerHost;
-    if (ok('server.broker.hub_endpoint') && this.brokerHubEndpoint)
-      broker.hub_endpoint = this.brokerHubEndpoint;
-    if (ok('server.broker.container_hub_endpoint') && this.brokerContainerHubEndpoint)
-      broker.container_hub_endpoint = this.brokerContainerHubEndpoint;
-    if (ok('server.broker.name') && this.brokerName) broker.broker_name = this.brokerName;
-    if (ok('server.broker.nickname') && this.brokerNickname)
-      broker.broker_nickname = this.brokerNickname;
+    if (ok('server.broker.port')) broker.port = this.brokerPort || 0;
+    if (ok('server.broker.host')) broker.host = this.brokerHost || '';
+    if (ok('server.broker.hub_endpoint')) broker.hub_endpoint = this.brokerHubEndpoint || '';
+    if (ok('server.broker.container_hub_endpoint'))
+      broker.container_hub_endpoint = this.brokerContainerHubEndpoint || '';
+    if (ok('server.broker.name')) broker.broker_name = this.brokerName || '';
+    if (ok('server.broker.nickname')) broker.broker_nickname = this.brokerNickname || '';
     if (ok('server.broker.auto_provide')) broker.auto_provide = this.brokerAutoProvide;
     server.broker = broker;
 
     // Database
     const database: Record<string, unknown> = {};
-    if (ok('server.database.driver') && this.dbDriver) database.driver = this.dbDriver;
-    if (ok('server.database.url') && this.dbUrl && this.dbUrl !== '********')
-      database.url = this.dbUrl;
+    if (ok('server.database.driver')) database.driver = this.dbDriver || '';
+    if (ok('server.database.url') && this.dbUrl !== '********') database.url = this.dbUrl || '';
     server.database = database;
 
     // Auth
     const auth: Record<string, unknown> = {};
     if (ok('server.auth.dev_mode')) auth.dev_mode = this.authDevMode;
-    if (ok('server.auth.dev_token') && this.authDevToken && this.authDevToken !== '********')
-      auth.dev_token = this.authDevToken;
-    if (ok('server.auth.authorized_domains') && this.authAuthorizedDomains) {
+    if (ok('server.auth.dev_token') && this.authDevToken !== '********')
+      auth.dev_token = this.authDevToken || '';
+    if (ok('server.auth.authorized_domains')) {
       auth.authorized_domains = this.authAuthorizedDomains
-        .split(',')
-        .map((s) => s.trim())
-        .filter(Boolean);
+        ? this.authAuthorizedDomains
+            .split(',')
+            .map((s) => s.trim())
+            .filter(Boolean)
+        : [];
     }
-    if (ok('server.auth.user_access_mode') && this.authUserAccessMode) {
-      auth.user_access_mode = this.authUserAccessMode;
+    if (ok('server.auth.user_access_mode')) {
+      auth.user_access_mode = this.authUserAccessMode || '';
     }
-    if (ok('server.auth.default_user_role') && this.authDefaultUserRole) {
-      auth.default_user_role = this.authDefaultUserRole;
+    if (ok('server.auth.default_user_role')) {
+      auth.default_user_role = this.authDefaultUserRole || '';
     }
     server.auth = auth;
 
     // Storage
     const storage: Record<string, unknown> = {};
-    if (ok('server.storage.provider') && this.storageProvider)
-      storage.provider = this.storageProvider;
-    if (ok('server.storage.bucket') && this.storageBucket) storage.bucket = this.storageBucket;
-    if (ok('server.storage.local_path') && this.storageLocalPath)
-      storage.local_path = this.storageLocalPath;
+    if (ok('server.storage.provider')) storage.provider = this.storageProvider || '';
+    if (ok('server.storage.bucket')) storage.bucket = this.storageBucket || '';
+    if (ok('server.storage.local_path')) storage.local_path = this.storageLocalPath || '';
     server.storage = storage;
 
     // Secrets
     const secrets: Record<string, unknown> = {};
-    if (ok('server.secrets.backend') && this.secretsBackend) secrets.backend = this.secretsBackend;
-    if (ok('server.secrets.gcp_project_id') && this.secretsGCPProjectId)
-      secrets.gcp_project_id = this.secretsGCPProjectId;
+    if (ok('server.secrets.backend')) secrets.backend = this.secretsBackend || '';
+    if (ok('server.secrets.gcp_project_id'))
+      secrets.gcp_project_id = this.secretsGCPProjectId || '';
     if (ok('server.secrets.gcp_replication_locations')) {
       secrets.gcp_replication_locations = this.secretsGCPReplicationLocations
         ? this.secretsGCPReplicationLocations
@@ -2452,7 +2510,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (ok('server.message_broker.enabled')) {
       server.message_broker = {
         enabled: this.messageBrokerEnabled,
-        type: ok('server.message_broker.type') ? this.messageBrokerType || undefined : undefined,
+        type: ok('server.message_broker.type') ? this.messageBrokerType || '' : undefined,
       };
     }
 
@@ -4508,7 +4566,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                 <div class="form-field">
                   <label>GCP Project</label>
                   <sl-input
-                    value=${rt.cloudrun?.project || ''}
+                    value=${this.cloudRunFieldValue(rt, 'project')}
                     ?disabled=${readOnly}
                     @sl-input=${(e: Event) => {
                       this.updateRuntimeCloudRun(
@@ -4522,7 +4580,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                 <div class="form-field">
                   <label>GCP Region</label>
                   <sl-input
-                    value=${rt.cloudrun?.region || ''}
+                    value=${this.cloudRunFieldValue(rt, 'region')}
                     placeholder="e.g. us-central1"
                     ?disabled=${readOnly}
                     @sl-input=${(e: Event) => {
@@ -4560,9 +4618,16 @@ export class ScionPageAdminServerConfig extends LitElement {
         delete rt.gke;
         delete rt.list_all_namespaces;
         delete rt.safe_to_evict;
+        // Each Cloud Run type reads its own block; drop the other one.
+        if (value === 'cloudrun-instances') {
+          delete rt.cloudrun;
+        } else {
+          delete rt.cloudrun_instances;
+        }
       } else {
-        // Switching away from Cloud Run — clear cloudrun sub-object
+        // Switching away from Cloud Run — clear both Cloud Run blocks
         delete rt.cloudrun;
+        delete rt.cloudrun_instances;
       }
     }
     updated[name] = rt;
@@ -4648,19 +4713,30 @@ export class ScionPageAdminServerConfig extends LitElement {
     this.runtimes = updated;
   }
 
-  private updateRuntimeCloudRun(name: string, field: 'project' | 'region', value: string): void {
+  // The hub reads cloudrun-instances runtimes from cloudrun_instances
+  // (project_id, region) and cloudrun runtimes from cloudrun
+  // (project_id, location).
+  private cloudRunFieldValue(rt: V1RuntimeConfig, field: CloudRunEditorField): string {
+    if (rt.type === 'cloudrun-instances') {
+      const ci = rt.cloudrun_instances;
+      return (field === 'project' ? ci?.project_id : ci?.region) || '';
+    }
+    const cr = rt.cloudrun;
+    return (field === 'project' ? cr?.project_id : cr?.location) || '';
+  }
+
+  private updateRuntimeCloudRun(name: string, field: CloudRunEditorField, value: string): void {
     const updated = { ...this.runtimes };
     const rt = { ...updated[name] };
-    const cr = { ...(rt.cloudrun || {}) };
-    if (value) {
-      cr[field] = value;
+    if (rt.type === 'cloudrun-instances') {
+      setCloudRunKey(
+        rt,
+        'cloudrun_instances',
+        field === 'project' ? 'project_id' : 'region',
+        value
+      );
     } else {
-      delete cr[field];
-    }
-    if (Object.keys(cr).length > 0) {
-      rt.cloudrun = cr;
-    } else {
-      delete rt.cloudrun;
+      setCloudRunKey(rt, 'cloudrun', field === 'project' ? 'project_id' : 'location', value);
     }
     updated[name] = rt;
     this.runtimes = updated;

@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -44,10 +45,18 @@ type ReincarnateAgentRequest struct {
 	DryRun  bool   `json:"dryRun,omitempty"`
 	// TargetBroker (a broker ID, name or slug) asks to move the agent to
 	// that broker; it must mount the same NFS export as the current one.
-	// Empty, or the agent's current broker, is a plain reincarnation. Only
-	// a dry run is carried out for a different broker; a real move returns
-	// 501.
+	// Empty, or the agent's current broker, is a plain reincarnation.
 	TargetBroker string `json:"targetBroker,omitempty"`
+
+	// SharedDirBackends changes the recorded shared-dir storage backend of
+	// the named shared dirs (dir name to "nfs" or "local"). Only the
+	// agent's record on its broker changes; no data is copied, moved or
+	// deleted. Not accepted for a self-reincarnation.
+	SharedDirBackends map[string]string `json:"sharedDirBackends,omitempty"`
+	// AllowEmptySharedDir, with SharedDirBackends, skips the start check
+	// that refuses an empty directory on the new backend while the dir's
+	// directory on its previous backend is not empty.
+	AllowEmptySharedDir bool `json:"allowEmptySharedDir,omitempty"`
 
 	// Patch fields (ptone/scion#3302): each changes the next generation's
 	// setting and is kept by later reincarnations. Empty (nil for
@@ -128,6 +137,38 @@ type ReincarnationPlan struct {
 	ServiceAccount *FieldChange `json:"serviceAccount,omitempty"`
 	ThinkingLevel  *FieldChange `json:"thinkingLevel,omitempty"`
 	HarnessAuth    *FieldChange `json:"harnessAuth,omitempty"`
+	// SharedDirBackends and AllowEmptySharedDir echo the request's explicit
+	// shared dir backend change.
+	SharedDirBackends   map[string]string `json:"sharedDirBackends,omitempty"`
+	AllowEmptySharedDir bool              `json:"allowEmptySharedDir,omitempty"`
+}
+
+// validateSharedDirBackendRequest checks a reincarnate request's explicit
+// shared dir backend change: each target must be "nfs" or "local". Whether
+// each dir is one of the agent's shared dirs, and whether the broker has a
+// complete nfs block, is checked by the broker, which holds the project
+// settings and the agent's record.
+func validateSharedDirBackendRequest(req ReincarnateAgentRequest) error {
+	if len(req.SharedDirBackends) == 0 {
+		if req.AllowEmptySharedDir {
+			return fmt.Errorf("allowEmptySharedDir needs a shared dir backend change")
+		}
+		return nil
+	}
+	names := make([]string, 0, len(req.SharedDirBackends))
+	for name := range req.SharedDirBackends {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if err := api.ValidateSharedDirs([]api.SharedDir{{Name: name}}); err != nil {
+			return fmt.Errorf("sharedDirBackends: invalid shared dir name %q", name)
+		}
+		if backend := req.SharedDirBackends[name]; backend != "nfs" && backend != "local" {
+			return fmt.Errorf("sharedDirBackends: shared dir %q: only a change to the nfs or local backend is supported (got %q)", name, backend)
+		}
+	}
+	return nil
 }
 
 // authorizeAgentReincarnate gates POST .../reincarnate for every caller kind
@@ -205,6 +246,17 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	if req.hasUnsupportedOverrides() {
 		writeError(w, http.StatusBadRequest, ErrCodeValidationError,
 			"config overrides are not yet supported for scion reincarnate", nil)
+		return
+	}
+	if err := validateSharedDirBackendRequest(req); err != nil {
+		writeError(w, http.StatusBadRequest, ErrCodeValidationError, err.Error(), nil)
+		return
+	}
+	// A shared dir backend change is an operator action: the self
+	// exemption in authorizeAgentReincarnate does not cover it.
+	if (len(req.SharedDirBackends) > 0 || req.AllowEmptySharedDir) && isSelfRequest(ctx, agent) {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden,
+			"an agent cannot change its own shared dir backend; ask a user or another agent with lifecycle access", nil)
 		return
 	}
 	if !validateReincarnatePatchRequest(w, req) {
@@ -288,12 +340,11 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 			moveTarget = dst
 		}
 	}
-	if moveTarget != nil && !req.DryRun {
-		writeError(w, http.StatusNotImplemented, ErrCodeNotImplemented,
-			"moving an agent to another broker is not yet implemented; use --dry-run to check eligibility", nil)
+	if moveTarget != nil && (len(req.SharedDirBackends) > 0 || req.AllowEmptySharedDir) {
+		writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+			"a shared dir backend change cannot be combined with a move to another broker", nil)
 		return
 	}
-
 	// Design §3.4 Amendments A2/A4/A23/A23.1/A23.2: eligible workspaces are
 	// clone-per-agent (a real GitClone, on a project that is neither
 	// worktree-per-agent nor shared — A23.1 R3: a project can be switched to
@@ -340,11 +391,19 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	// touch a workspace it did not find already on disk): this is what
 	// makes --dry-run report the restriction too, instead of a dry run
 	// showing a plan that a real request could not safely execute.
-	// Empty-per-agent workspaces are broker-local, unsynced state: the only
-	// possible reincarnation would be a fresh empty directory, silently
-	// discarding work. Refused explicitly in v1 (design #2703 D4).
+	// Empty-per-agent workspaces are broker-local, unsynced state.
+	// A4 (ptone/scion#2727): an empty-per-agent workspace can move when it
+	// is on the shared export (placement export) and both brokers see the
+	// same export (equal identity markers): the target finds it in place.
+	// miller79/scion#167: on the same broker (no move target, including
+	// `--broker <current>`) the broker reuses the private workspace in
+	// place, gated below on a local-disk runtime and the broker's
+	// ReprovisionEmptyPerAgent capability. Any other empty-per-agent
+	// request (a move whose workspace is not movable) is still refused.
+	emptyPerAgentMove := moveTarget != nil && project.IsEmptyPerAgent() && s.emptyPerAgentWorkspaceMovable(ctx, agent, moveTarget)
+	sameBrokerEmptyPerAgent := project.IsEmptyPerAgent() && moveTarget == nil
 	workspaceModeErr := ""
-	if project.IsEmptyPerAgent() {
+	if project.IsEmptyPerAgent() && !emptyPerAgentMove && !sameBrokerEmptyPerAgent {
 		workspaceModeErr = `reincarnate does not yet support "Empty directory per agent" (empty-per-agent) workspaces`
 	}
 
@@ -357,10 +416,10 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	}
 	switchedToCloneOnly := !hasGitClone && project.GitRemote != "" && !project.IsSharedWorkspace() &&
 		linkedProjectPath == "" && effectiveWorkspace != ""
-	if workspaceModeErr == "" && (agent.AppliedConfig == nil || project.IsWorktreePerAgent() ||
+	if workspaceModeErr == "" && (agent.AppliedConfig == nil || (!emptyPerAgentMove && (project.IsWorktreePerAgent() ||
 		(hasGitClone && project.IsSharedWorkspace()) ||
 		switchedToCloneOnly ||
-		!api.ReincarnateEligible(hasGitClone, effectiveWorkspace)) {
+		!api.ReincarnateEligible(hasGitClone, effectiveWorkspace, project.IsEmptyPerAgent())))) {
 		// FYI-6 (review p1b-r1): the generic message now covers every
 		// eligible mode, not just clone-per-agent.
 		workspaceModeErr = "reincarnate requires a clone-per-agent, shared-workspace or hub-managed workspace"
@@ -374,7 +433,7 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 		workspaceModeErr = "reincarnate --broker does not support linked projects; the workspace is local to the current broker"
 	}
 	if moveTarget != nil {
-		s.planReincarnateMove(w, r, agent, project, moveTarget, workspaceModeErr, hasGitClone, req, patch)
+		s.planReincarnateMove(w, r, req, agent, auth, project, moveTarget, workspaceModeErr, hasGitClone || emptyPerAgentMove, admittedDeletionClaim, patch)
 		return
 	}
 	if workspaceModeErr != "" {
@@ -409,6 +468,25 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 			"runtime broker does not support agent reincarnation; upgrade the broker", nil)
 		return
 	}
+	// miller79/scion#167: in-place reuse is safe only where the private
+	// workspace is a directory on the broker's own disk. Checked, like the
+	// capability below, before anything is planned or stopped, so a dry
+	// run reports the same verdict. An unrecorded runtime falls back to
+	// resolveAgentRuntime (the value enrichAgents displays), which returns
+	// "" when the broker's profiles are ambiguous: still refused.
+	if sameBrokerEmptyPerAgent && !api.IsLocalDiskRuntime(effectiveAgentRuntime(agent, broker)) {
+		writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+			"empty-per-agent reincarnation is supported only on local-disk runtimes (docker, podman, container)", nil)
+		return
+	}
+	if sameBrokerEmptyPerAgent && !broker.Capabilities.ReprovisionEmptyPerAgent {
+		// An older broker advertises Reprovision and EmptyPerAgentWorkspace
+		// but its reprovision refuses empty-per-agent, which would only
+		// surface after the worker had stopped the agent. Refuse up front.
+		writeError(w, http.StatusPreconditionFailed, ErrCodeUnsupportedCapability,
+			"runtime broker does not support in-place empty-per-agent reincarnation; upgrade the broker", nil)
+		return
+	}
 
 	// AC-8 / design §3.4 Amendment A3, moved ahead of the plan computation
 	// (design §3.4 Amendment A11 item 3): a reincarnation already in flight
@@ -438,6 +516,20 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 			"failed to resolve new configuration: "+err.Error(), nil)
 		return
 	}
+	if len(req.SharedDirBackends) > 0 {
+		fresh.SharedDirBackendChanges = req.SharedDirBackends
+		fresh.AllowEmptySharedDir = req.AllowEmptySharedDir
+	}
+	// Fail fast, as start and restart do, when the GCP identity the fresh
+	// config will run with is no longer allowed for this agent. Checked
+	// before the claim and the worker's stop, so a refused request leaves
+	// the agent as it was, and a dry run reports the same refusal.
+	runAs := *agent
+	runAs.AppliedConfig = fresh
+	if s.gcpIdentityStartRefusal(ctx, w, &runAs, "reincarnate") {
+		return
+	}
+
 	plan := computeReincarnationPlan(agent.AppliedConfig, fresh, warnings, imageRegistry)
 	addPatchToPlan(&plan, agent.AppliedConfig, fresh, req)
 	targetGeneration := agent.Generation + 1
@@ -454,6 +546,18 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 		})
 		return
 	}
+
+	s.startReincarnation(w, r, agent, auth, fresh, plan, targetGeneration, req.Handoff, admittedDeletionClaim,
+		brokerIDIfSet(targetBrokerID, agent.RuntimeBrokerID), targetBrokerID, nil)
+}
+
+// startReincarnation claims the agent, records the reincarnation (with the
+// authority re-record auth, nil for a self-reincarnation) and starts the
+// detached worker, answering 202. sourceBrokerID and targetBrokerID are
+// echoed in the response (both empty unless the request named a target);
+// move is non-nil for a cross-broker move.
+func (s *Server) startReincarnation(w http.ResponseWriter, r *http.Request, agent *store.Agent, auth *reincarnateAuthority, fresh *store.AgentAppliedConfig, plan ReincarnationPlan, targetGeneration int, handoff string, admittedDeletionClaim int64, sourceBrokerID, targetBrokerID string, move *reincarnationMove) {
+	ctx := r.Context()
 
 	// The claim is guarded by the agent row's own optimistic lock
 	// (state_version), and the claim and the reincarnation record commit
@@ -484,7 +588,9 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 		RequestedBy:           requestedBy,
 		State:                 store.AgentReincarnationStatePending,
 		PreviousAppliedConfig: agent.AppliedConfig,
-		Handoff:               req.Handoff,
+		Handoff:               handoff,
+		SourceBrokerID:        moveSourceID(move),
+		TargetBrokerID:        moveTargetID(move),
 	}
 	// The claim, the reincarnation record, the authority re-record, the
 	// reincarnate-claim hooks and the audit record commit in one
@@ -515,6 +621,16 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 		writeErrorFromErr(w, err, "")
 		return
 	}
+	// A reincarnation starts the agent (also one that was stopped): record
+	// that the agent is meant to run, now, before the worker's start, so a
+	// stop the user records during the reincarnation is newer and wins.
+	// Limits: the intent is written after the claim commits, so a stop
+	// recorded in that short gap is overwritten by this running intent; and
+	// if the write fails, the reincarnation proceeds with only a warning
+	// (the intent keeps its previous value).
+	if _, err := s.recordRunIntent(ctx, agent, store.RunIntentRunning); err != nil {
+		s.agentLifecycleLog.Warn("Reincarnate: failed to record run intent", "agent_id", agent.ID, "error", err)
+	}
 
 	// design §3.4 Amendment A3: the requester and the creator must both
 	// learn of a failure. The creator is already subscribed (from create);
@@ -538,15 +654,14 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	// this exact claim instant, not rec.RequestedAt — the store stamps that
 	// a few ms later inside CreateAgentReincarnation, after the gate in the
 	// three delivery paths could already have started deferring messages.
-	go s.runReincarnationWorker(context.Background(), agent.ID, rec.ID, rec.PreviousAppliedConfig, fresh, req.Handoff, claimedAt, requestedBy, &plan, targetGeneration, admittedDeletionClaim)
+	go s.runReincarnationWorker(context.Background(), agent.ID, rec.ID, rec.PreviousAppliedConfig, fresh, handoff, claimedAt, requestedBy, &plan, targetGeneration, admittedDeletionClaim, move)
 
 	writeJSON(w, http.StatusAccepted, ReincarnateAgentResponse{
-		AgentID:    agent.ID,
-		Generation: targetGeneration,
-		State:      store.AgentReincarnationStatePending,
-		Plan:       plan,
-		// A named target here is the agent's current broker.
-		SourceBrokerID: brokerIDIfSet(targetBrokerID, agent.RuntimeBrokerID),
+		AgentID:        agent.ID,
+		Generation:     targetGeneration,
+		State:          store.AgentReincarnationStatePending,
+		Plan:           plan,
+		SourceBrokerID: sourceBrokerID,
 		TargetBrokerID: targetBrokerID,
 	})
 }
@@ -561,6 +676,20 @@ func isSelfRequest(ctx context.Context, agent *store.Agent) bool {
 	return ok && agentIdent.ID() == agent.ID
 }
 
+func moveSourceID(m *reincarnationMove) string {
+	if m == nil {
+		return ""
+	}
+	return m.SourceBrokerID
+}
+
+func moveTargetID(m *reincarnationMove) string {
+	if m == nil {
+		return ""
+	}
+	return m.TargetBrokerID
+}
+
 // brokerIDIfSet returns id when target is non-empty, else "".
 func brokerIDIfSet(target, id string) string {
 	if target == "" {
@@ -569,12 +698,16 @@ func brokerIDIfSet(target, id string) string {
 	return id
 }
 
-// planReincarnateMove answers a dry-run move of agent to dst: it runs the
-// move eligibility checks and returns the first refusal, or 200 with the
-// reincarnation plan and the verdict. It writes no agent, broker, project or
-// quota state; the passthrough re-check may record its authorization
-// decision in the audit log and call IAM, like every passthrough gate.
-func (s *Server) planReincarnateMove(w http.ResponseWriter, r *http.Request, agent *store.Agent, project *store.Project, dst *store.RuntimeBroker, workspaceModeErr string, cloneMode bool, req ReincarnateAgentRequest, patch *reincarnatePatch) {
+// planReincarnateMove answers a move of agent to dst: it runs the move
+// eligibility checks and returns the first refusal. Otherwise a dry run gets
+// 200 with the reincarnation plan and the verdict, writing no agent, broker,
+// project or quota state, and a real request starts the move (202; the
+// worker re-checks eligibility before its first side effect). The
+// passthrough re-check may record its authorization decision in the audit
+// log and call IAM, like every passthrough gate. A patch (validated and
+// authorized by the caller) is part of the plan and of the config the agent
+// is provisioned with on the target.
+func (s *Server) planReincarnateMove(w http.ResponseWriter, r *http.Request, req ReincarnateAgentRequest, agent *store.Agent, auth *reincarnateAuthority, project *store.Project, dst *store.RuntimeBroker, workspaceModeErr string, cloneMode bool, admittedDeletionClaim int64, patch *reincarnatePatch) {
 	ctx := r.Context()
 	src, err := s.store.GetRuntimeBroker(ctx, agent.RuntimeBrokerID)
 	if err != nil {
@@ -619,23 +752,66 @@ func (s *Server) planReincarnateMove(w http.ResponseWriter, r *http.Request, age
 			"failed to resolve new configuration: "+err.Error(), nil)
 		return
 	}
+	// A dry-run move reports the same GCP identity refusal as start and
+	// as an in-place reincarnate, so every dry-run variant agrees.
+	runAs := *agent
+	runAs.AppliedConfig = fresh
+	if s.gcpIdentityStartRefusal(ctx, w, &runAs, "reincarnate") {
+		return
+	}
+
 	plan := computeReincarnationPlan(agent.AppliedConfig, fresh, warnings, imageRegistry)
 	addPatchToPlan(&plan, agent.AppliedConfig, fresh, req)
 	in.Profile = effectiveRuntimeProfileName(fresh.Profile, project)
+	// The access probes judge the config the next generation runs with: a
+	// --service-account patch replaces a passthrough identity, so the
+	// passthrough gate (and the self-move passthrough refusal) follow the
+	// patched GCP identity, not the outgoing one.
+	in.Probes = s.moveProbesFor(r, project, fresh)
 	v, ref := evaluateMoveEligibility(in)
 	if ref != nil {
 		writeMoveRefusal(w, ref, v)
 		return
 	}
-	writeJSON(w, http.StatusOK, ReincarnateAgentResponse{
-		AgentID:        agent.ID,
-		Generation:     agent.Generation + 1,
-		State:          "planned",
-		Plan:           plan,
-		SourceBrokerID: src.ID,
-		TargetBrokerID: dst.ID,
-		MoveVerdict:    &v,
+	if req.DryRun {
+		writeJSON(w, http.StatusOK, ReincarnateAgentResponse{
+			AgentID:        agent.ID,
+			Generation:     agent.Generation + 1,
+			State:          "planned",
+			Plan:           plan,
+			SourceBrokerID: src.ID,
+			TargetBrokerID: dst.ID,
+			MoveVerdict:    &v,
+		})
+		return
+	}
+	s.startReincarnation(w, r, agent, auth, fresh, plan, agent.Generation+1, req.Handoff, admittedDeletionClaim, src.ID, dst.ID, &reincarnationMove{
+		SourceBrokerID:    src.ID,
+		TargetBrokerID:    dst.ID,
+		ProjectID:         project.ID,
+		SelfMove:          in.SelfMove,
+		AgentDirWorkspace: cloneMode,
+		Profile:           in.Profile,
 	})
+}
+
+// emptyPerAgentWorkspaceMovable reports whether an empty-per-agent agent's
+// workspace can move to dst: its last start placed it on the shared export,
+// and the source and dst report the same export with equal identity
+// markers.
+func (s *Server) emptyPerAgentWorkspaceMovable(ctx context.Context, agent *store.Agent, dst *store.RuntimeBroker) bool {
+	if !isWorkspacePlacementOnExport(agent.WorkspacePlacement) {
+		return false
+	}
+	src, err := s.store.GetRuntimeBroker(ctx, agent.RuntimeBrokerID)
+	if err != nil {
+		return false
+	}
+	if !api.SameWorkspaceExport(src.WorkspaceStorage, dst.WorkspaceStorage) {
+		return false
+	}
+	srcID, dstID := src.WorkspaceStorage.NFS.ExportID, dst.WorkspaceStorage.NFS.ExportID
+	return srcID != "" && srcID == dstID
 }
 
 // linkedProjectPath resolves the local path a runtime broker has registered
@@ -716,6 +892,16 @@ func (s *Server) ensureReincarnateRequesterSubscribed(ctx context.Context, agent
 	}
 
 	s.createNotifySubscription(ctx, agent.ID, agent.ProjectID, subscriberType, subscriberID, requestedBy)
+}
+
+// effectiveAgentRuntime is the agent's recorded runtime, or, when none is
+// recorded yet, the one resolveAgentRuntime derives from the broker's
+// profiles ("" when ambiguous).
+func effectiveAgentRuntime(agent *store.Agent, broker *store.RuntimeBroker) string {
+	if agent.Runtime != "" {
+		return agent.Runtime
+	}
+	return resolveAgentRuntime(agent, broker)
 }
 
 // reincarnateAuthorityFor decides what authority a reincarnation of agent

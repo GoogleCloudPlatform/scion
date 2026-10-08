@@ -309,3 +309,58 @@ describe('deletionBannerText', () => {
     }
   });
 });
+
+// ptone/scion#3122: code, error and claim reach platform admins only. Every
+// other caller, and every SSE delta, gets the generic view without them.
+describe('generic (non-admin) deletion view', () => {
+  const generic = (o: Partial<DeletionInfo> = {}): DeletionInfo => {
+    const d: DeletionInfo = { ...deleting(), ...o };
+    delete d.claim;
+    delete d.code;
+    delete d.error;
+    return d;
+  };
+
+  it('a failed generic view reads Delete failed, never Delete interrupted', () => {
+    const f = generic({ state: 'failed', leaseExpiresAt: undefined });
+    expect(deletionBadgeLabel(f)).toBe('Delete failed');
+    const t = deletionBannerText(f);
+    expect(t.title).toBe('Delete failed');
+    expect(t.detail).toMatch(/Retry/);
+    expect(t.detail).toMatch(/Force delete/);
+  });
+
+  it('a lapsed generic deleting view flips to failed with no code', () => {
+    const v = effectiveDeletion(generic(), T0 + 60_000);
+    expect(v?.state).toBe('failed');
+    expect(v?.code).toBeUndefined();
+    expect(v && deletionBadgeLabel(v)).toBe('Delete failed');
+    expect(v?.expiresAt).toBe(iso(T0 + 60_000 + DELETION_DISPLAY_TTL_MS));
+  });
+
+  it('a lapsed generic finalizing view flips to failed, blocks start, never expires', () => {
+    const v = effectiveDeletion(generic({ stage: 'finalizing' }), T0 + 60_000);
+    expect(v).toMatchObject({ state: 'failed', stage: 'finalizing' });
+    expect(v?.code).toBeUndefined();
+    expect(v?.expiresAt).toBeUndefined();
+    expect(deletionBlocksStart(v)).toBe(true);
+    expect(deletionBannerText(v!).detail).toMatch(/starting this agent is blocked/i);
+  });
+
+  it('a lapsed admin view still flips to Delete interrupted', () => {
+    const v = effectiveDeletion(deleting(), T0 + 60_000);
+    expect(v && deletionBadgeLabel(v)).toBe('Delete interrupted');
+  });
+
+  it('shouldApplyAcceptedDeletion falls back to startedAt when a claim is missing', () => {
+    const older = generic({ startedAt: iso(T0) });
+    const newer = generic({ startedAt: iso(T0 + 5_000) });
+    expect(shouldApplyAcceptedDeletion(older, newer)).toBe(true);
+    expect(shouldApplyAcceptedDeletion(newer, older)).toBe(false);
+    expect(shouldApplyAcceptedDeletion(older, generic({ startedAt: iso(T0) }))).toBe(false);
+    // An admin 202 (with claim) over a generic SSE view of the same claim.
+    expect(shouldApplyAcceptedDeletion(older, deleting({ startedAt: iso(T0) }))).toBe(false);
+    expect(shouldApplyAcceptedDeletion(older, deleting({ startedAt: iso(T0 + 1) }))).toBe(true);
+    expect(shouldApplyAcceptedDeletion(null, generic())).toBe(true);
+  });
+});

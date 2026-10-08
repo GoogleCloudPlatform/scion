@@ -244,6 +244,8 @@ type BrokerHeartbeat struct {
 	// An older broker omits the field and the hub keeps every stored
 	// value.
 	ProfileAttach []ProfileAttachState `json:"profileAttach,omitempty"`
+	// ProfileSAMappings: see ProfileSAMappingsState.
+	ProfileSAMappings []ProfileSAMappingsState `json:"profileSAMappings,omitempty"`
 	// StartsInFlight lists the agent starts still running on the broker
 	// when this heartbeat was built, read before the agents were listed, so
 	// a start that finishes between the two reads is either listed here or
@@ -254,6 +256,11 @@ type BrokerHeartbeat struct {
 	// on every heartbeat. Nil (an older broker) keeps the stored value; a
 	// non-nil empty string reports that the broker has no active profile.
 	DefaultProfile *string `json:"defaultProfile,omitempty"`
+	// Health is the broker's report of its own health (default runtime,
+	// NFS mounts), refreshed on every heartbeat. It never changes the
+	// broker's online/offline status. An older broker omits it and the
+	// hub keeps the stored value; an older hub ignores it.
+	Health *api.BrokerHealthReport `json:"health,omitempty"`
 }
 
 // StartInFlight identifies one agent start running on a broker.
@@ -325,6 +332,12 @@ type CreateBrokerRequest struct {
 	Capabilities []string          `json:"capabilities,omitempty"`
 	Labels       map[string]string `json:"labels,omitempty"`
 	AutoProvide  bool              `json:"autoProvide,omitempty"` // Automatically add as provider for new projects
+	// JoinTokenTTLSeconds is the join token lifetime in seconds. Zero uses
+	// the hub default; otherwise the hub accepts 300 to 86400.
+	JoinTokenTTLSeconds int `json:"joinTokenTtlSeconds,omitempty"`
+	// PreserveSettings asks the hub to only issue a join token when the
+	// name matches an existing broker, leaving its settings unchanged.
+	PreserveSettings bool `json:"preserveSettings,omitempty"`
 }
 
 // CreateBrokerResponse is returned when creating a new broker.
@@ -333,6 +346,9 @@ type CreateBrokerResponse struct {
 	JoinToken    string `json:"joinToken"`
 	ExpiresAt    string `json:"expiresAt"`
 	Reregistered bool   `json:"reregistered,omitempty"`
+	// Reissued is true when an earlier, unused join token for this broker
+	// was replaced and no longer works.
+	Reissued bool `json:"reissued,omitempty"`
 }
 
 // JoinBrokerRequest is the request to complete broker registration.
@@ -364,7 +380,7 @@ func (s *runtimeBrokerService) Create(ctx context.Context, req *CreateBrokerRequ
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[CreateBrokerResponse](resp)
+	return apiclient.DecodeRequired[CreateBrokerResponse](resp)
 }
 
 // Join completes broker registration using a join token.
@@ -373,7 +389,7 @@ func (s *runtimeBrokerService) Join(ctx context.Context, req *JoinBrokerRequest)
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[JoinBrokerResponse](resp)
+	return apiclient.DecodeRequired[JoinBrokerResponse](resp)
 }
 
 // List returns runtime brokers matching the filter criteria.
@@ -403,7 +419,7 @@ func (s *runtimeBrokerService) List(ctx context.Context, opts *ListBrokersOption
 		TotalCount int             `json:"totalCount,omitempty"`
 	}
 
-	result, err := apiclient.DecodeResponse[listResponse](resp)
+	result, err := apiclient.DecodeRequired[listResponse](resp)
 	if err != nil {
 		return nil, err
 	}
@@ -423,7 +439,7 @@ func (s *runtimeBrokerService) Get(ctx context.Context, brokerID string) (*Runti
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[RuntimeBroker](resp)
+	return apiclient.DecodeRequired[RuntimeBroker](resp)
 }
 
 // Update updates broker metadata.
@@ -432,7 +448,7 @@ func (s *runtimeBrokerService) Update(ctx context.Context, brokerID string, req 
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[RuntimeBroker](resp)
+	return apiclient.DecodeRequired[RuntimeBroker](resp)
 }
 
 // Delete removes a broker from all projects.
@@ -450,7 +466,7 @@ func (s *runtimeBrokerService) ListProjects(ctx context.Context, brokerID string
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[ListBrokerProjectsResponse](resp)
+	return apiclient.DecodeRequired[ListBrokerProjectsResponse](resp)
 }
 
 // Heartbeat sends a heartbeat for a broker.

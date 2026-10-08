@@ -96,7 +96,13 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 	// clone-url label by ToHTTPSCloneURL. The query string and fragment are
 	// dropped first: git remotes never need them and they can carry tokens
 	// (?access_token=…).
-	overrideRemote := stripQueryAndFragment(trimRemote(req.GitRemote))
+	overrideRemote, cutOK := util.CutQueryAndFragment(trimRemote(req.GitRemote))
+	if !cutOK {
+		// A '?' or '#' inside the userinfo: cutting there would keep part of
+		// the password.
+		ValidationError(w, errCloneRemoteInvalid, map[string]interface{}{"field": "gitRemote"})
+		return
+	}
 	if overrideRemote != "" {
 		if msg := validateCloneGitRemote(overrideRemote); msg != "" {
 			ValidationError(w, msg, map[string]interface{}{"field": "gitRemote"})
@@ -118,6 +124,8 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 		baseSlug = api.Slugify(req.Name)
 	} else if isReservedProjectSlug(baseSlug) {
 		ValidationError(w, reservedProjectSlugMessage, map[string]interface{}{"field": "slug"})
+		return
+	} else if !requireProjectSlugFormat(w, baseSlug) {
 		return
 	}
 
@@ -197,6 +205,9 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 			}
 			clone.Labels[k] = v
 		}
+		// Labels copied from the source may predate write-time validation.
+		sanitizeSourceURLLabel(clone.Labels)
+		sanitizeCopiedCloneURLLabel(clone.Labels)
 		if len(clone.Labels) == 0 {
 			clone.Labels = nil
 		}
@@ -212,7 +223,10 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 			clone.Labels = make(map[string]string)
 		}
 		clone.Labels[store.LabelCloneURL] = util.ToHTTPSCloneURL(overrideCanonical)
-		clone.Labels[store.LabelSourceURL] = overrideRemote
+		// Defence in depth: overrideRemote is already query-stripped, validated and credential-stripped above.
+		if src := util.SanitizeGitSourceURL(overrideRemote); src != "" {
+			clone.Labels[store.LabelSourceURL] = src
+		}
 		clone.Labels[store.LabelDefaultBranch] = "main"
 	}
 
@@ -715,6 +729,27 @@ func (s *Server) cloneProjectGCPServiceAccounts(ctx context.Context, srcProjectI
 		clonedIDs = append(clonedIDs, newSA.ID)
 	}
 
+	// Remap the per-profile default SA map's entries that reference a
+	// source SA. Entries naming other (hub-scoped) accounts are kept.
+	if byProfile := profileDefaultSAIDsFromAnnotations(clone.Annotations); len(byProfile) > 0 {
+		changed := false
+		for profile, saID := range byProfile {
+			for i, srcSA := range accounts {
+				if srcSA.ID == saID {
+					byProfile[profile] = clonedIDs[i]
+					changed = true
+					break
+				}
+			}
+		}
+		if changed {
+			setProfileDefaultSAIDsAnnotation(clone.Annotations, byProfile)
+			if err := s.store.UpdateProject(ctx, clone); err != nil {
+				return fmt.Errorf("remap per-profile default SA annotation: %w", err)
+			}
+		}
+	}
+
 	// Remap default SA annotation if it references a source SA.
 	defaultSAID, ok := clone.Annotations[projectSettingDefaultGCPIdentitySAID]
 	if ok && defaultSAID != "" {
@@ -825,19 +860,6 @@ func trimRemote(remote string) string {
 	return strings.Trim(remote, " \t\n\v\f\r")
 }
 
-// isPrintableASCII reports whether s contains only printable, non-space
-// ASCII (0x21-0x7E). This rejects whitespace, control and format characters
-// (e.g. RTL overrides) and non-ASCII homoglyphs; IDN hosts must be given in
-// punycode (xn--...).
-func isPrintableASCII(s string) bool {
-	for i := 0; i < len(s); i++ {
-		if s[i] < 0x21 || s[i] > 0x7e {
-			return false
-		}
-	}
-	return true
-}
-
 // validRemotePath reports whether a decoded remote path (without the leading
 // '/' of a scheme URL) has only non-empty segments that are neither "." nor
 // "..", and no '@' (ambiguous with userinfo), '\\' or control characters. A single trailing '/' is allowed. Dot
@@ -888,15 +910,6 @@ func validEscapedRemotePath(path string) bool {
 	return err == nil && validRawRemotePath(path) && validRemotePath(path) && validRemotePath(decoded)
 }
 
-// stripQueryAndFragment drops everything from the first '?' or '#'. Git remote
-// URLs never need either, and a query can carry credentials.
-func stripQueryAndFragment(remote string) string {
-	if i := strings.IndexAny(remote, "?#"); i >= 0 {
-		return remote[:i]
-	}
-	return remote
-}
-
 // scpLogin matches the login of an SCP-style remote (user@host:path).
 var scpLogin = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
@@ -939,7 +952,7 @@ func splitSCPRemote(remote string) (login, host, path string, ok bool) {
 // (raw or %40), "." / ".." or empty segments. git:// with a port and
 // http:// with a port other than 80 get errCloneRemoteTLSPort.
 func validateCloneGitRemote(remote string) string {
-	if !isPrintableASCII(remote) {
+	if !util.IsPrintableASCII(remote) {
 		return errCloneRemoteInvalid
 	}
 	if strings.Contains(remote, "://") {
@@ -1138,4 +1151,110 @@ func isGitSourceLabel(k string) bool {
 		return true
 	}
 	return false
+}
+
+// validateCloneURLLabelValue checks the clone-url label in labels (if any)
+// and returns a user-facing message when it is not a plain repository URL,
+// or "" when it is acceptable. Every hub path that writes project labels from
+// a request calls it, so credentials, query strings and fragments never reach
+// the stored label. Clone authentication belongs in project secrets or the
+// GitHub App instead.
+func validateCloneURLLabelValue(labels map[string]string) string {
+	v, ok := labels[store.LabelCloneURL]
+	if !ok {
+		return ""
+	}
+	if err := util.ValidateCloneURLLabel(v); err != nil {
+		return cloneURLRefusalMessage(err)
+	}
+	return ""
+}
+
+// cloneURLRefusalMessage is the constant user-facing 400 message for a
+// refused clone URL. It names what to remove but never echoes the value.
+func cloneURLRefusalMessage(err error) string {
+	var problem string
+	switch {
+	case errors.Is(err, util.ErrCloneURLInvalid):
+		problem = "remove whitespace and control or non-ASCII characters from the URL"
+	case errors.Is(err, util.ErrCloneURLUserinfo):
+		problem = "remove the username, password or token from the URL ('@' is allowed only in an ssh or scp-style login)"
+	case errors.Is(err, util.ErrCloneURLQuery):
+		problem = "remove the query string (?...) from the URL"
+	case errors.Is(err, util.ErrCloneURLFragment):
+		problem = "remove the fragment (#...) from the URL"
+	default:
+		problem = "use a plain repository URL"
+	}
+	return "Invalid " + store.LabelCloneURL + " label: " + problem +
+		". The label must be a plain repository URL; configure clone authentication with project secrets or the GitHub App instead"
+}
+
+// normalizeRequestGitRemote returns the normalized form of a git remote from a
+// create or register request, or a constant 400 message. The query and
+// fragment are dropped first (as the clone path does): git remotes never need
+// them and they can carry tokens. A remote whose dropped part contains '@'
+// (a '?' or '#' inside the password) or whose normalized form still contains
+// '@' is refused rather than repaired.
+func normalizeRequestGitRemote(raw string) (normalized, msg string) {
+	rest, ok := util.CutQueryAndFragment(raw)
+	if !ok {
+		return "", cloneURLRefusalMessage(util.ErrCloneURLUserinfo)
+	}
+	normalized = util.NormalizeGitRemote(rest)
+	return normalized, validateNormalizedGitRemote(normalized)
+}
+
+// validateNormalizedGitRemote refuses a git remote whose normalized form
+// (util.NormalizeGitRemote, which drops ordinary userinfo) still contains
+// '@': the input carried a password or an extra '@' in scp form
+// (git@user:PASS@host:org/repo), and storing it would keep the credential in
+// Project.GitRemote. The value is not repaired. The message is the same
+// constant as the clone-url refusal and never echoes the value.
+func validateNormalizedGitRemote(normalized string) string {
+	if strings.Contains(normalized, "@") {
+		return cloneURLRefusalMessage(util.ErrCloneURLUserinfo)
+	}
+	return ""
+}
+
+// sanitizeSourceURLLabel rewrites the source-url label in labels (if any) to
+// its credential-, query- and fragment-free form, mirroring how the clone
+// path above sanitizes a git remote override before storing it. The label is
+// readable by project members, so it never keeps what was stripped; a value
+// that cannot be sanitized unambiguously is removed. labels is modified in
+// place.
+func sanitizeSourceURLLabel(labels map[string]string) {
+	v, ok := labels[store.LabelSourceURL]
+	if !ok {
+		return
+	}
+	if clean := util.SanitizeGitSourceURL(v); clean != "" {
+		labels[store.LabelSourceURL] = clean
+	} else {
+		delete(labels, store.LabelSourceURL)
+	}
+}
+
+// sanitizeCopiedCloneURLLabel makes a clone-url label copied from another
+// project (which may predate write-time validation) acceptable to
+// validateCloneURLLabelValue: a value that fails validation is replaced by its
+// sanitized form, or removed when that is still not a plain repository URL.
+// labels is modified in place.
+func sanitizeCopiedCloneURLLabel(labels map[string]string) {
+	v, ok := labels[store.LabelCloneURL]
+	if !ok || util.ValidateCloneURLLabel(v) == nil {
+		return
+	}
+	if clean := util.SanitizeGitSourceURL(v); clean != "" && util.ValidateCloneURLLabel(clean) == nil {
+		labels[store.LabelCloneURL] = clean
+	} else {
+		delete(labels, store.LabelCloneURL)
+	}
+}
+
+// cloneURLLabelErrorDetails is the details payload for a rejected clone-url
+// label. It names the field but never echoes the value.
+func cloneURLLabelErrorDetails() map[string]interface{} {
+	return map[string]interface{}{"field": "labels." + store.LabelCloneURL}
 }

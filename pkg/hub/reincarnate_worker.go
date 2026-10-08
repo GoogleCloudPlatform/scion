@@ -85,6 +85,10 @@ type reincarnationStepUpdate struct {
 	// first. Zero means "compute internally" (used by writes with no
 	// paired record-side CAS, e.g. the agent-state backstop's reset).
 	now time.Time
+	// runtimeBrokerID and runtime move the agent to another broker (a
+	// cross-broker move, and its rollback). nil = leave untouched.
+	runtimeBrokerID *string
+	runtime         *string
 }
 
 // updateReincarnationStep re-reads the agent and writes back reincarnation-
@@ -145,6 +149,12 @@ func (s *Server) updateReincarnationStep(ctx context.Context, agentID string, up
 		if upd.generation != nil {
 			agent.Generation = *upd.generation
 		}
+		if upd.runtimeBrokerID != nil {
+			agent.RuntimeBrokerID = *upd.runtimeBrokerID
+		}
+		if upd.runtime != nil {
+			agent.Runtime = *upd.runtime
+		}
 		if upd.message != nil {
 			agent.Message = *upd.message
 		} else if upd.clearMessageIfEquals != "" && agent.Message == upd.clearMessageIfEquals {
@@ -164,7 +174,8 @@ func (s *Server) updateReincarnationStep(ctx context.Context, agentID string, up
 
 // copyBrokerEcho copies the fields a broker answer writes onto the
 // dispatched agent's AppliedConfig from src to dst: HarnessConfig,
-// HarnessAuth, Profile and, when includeImage is set, Image.
+// HarnessAuth, HarnessConfigSource, Profile and, when includeImage is set,
+// Image.
 // applyBrokerAgentConfig (httpdispatcher.go) is the source of truth for that
 // field list; TestCopyBrokerEcho_MirrorsApplyBrokerAgentConfig fails if it
 // starts writing an AppliedConfig field this helper does not copy.
@@ -181,12 +192,26 @@ func copyBrokerEcho(dst, src *store.AgentAppliedConfig, includeImage bool) {
 	if src.HarnessAuth != "" {
 		dst.HarnessAuth = src.HarnessAuth
 	}
+	if src.HarnessConfigSource != "" {
+		dst.HarnessConfigSource = src.HarnessConfigSource
+	}
 	if src.Profile != "" {
 		dst.Profile = src.Profile
 	}
 	if includeImage && src.Image != "" {
 		dst.Image = src.Image
 	}
+}
+
+// clearSharedDirBackendChange drops a config's one-shot shared dir backend
+// change (SharedDirBackendChanges and AllowEmptySharedDir), so a
+// reprovision built from it does not send the change again.
+func clearSharedDirBackendChange(cfg *store.AgentAppliedConfig) {
+	if cfg == nil {
+		return
+	}
+	cfg.SharedDirBackendChanges = nil
+	cfg.AllowEmptySharedDir = false
 }
 
 // reincarnateStrPtr is a small helper for populating
@@ -474,7 +499,7 @@ func (s *Server) advanceListedRecord(ctx context.Context, rec *store.AgentReinca
 // carries a Phase or Activity while a migration is in flight, so the
 // worker is the sole writer of §3.9's "migrating to generation N+1" for
 // both self and non-self migrations.
-func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnationID string, previous, fresh *store.AgentAppliedConfig, handoff string, migrationStart time.Time, requestedBy string, plan *ReincarnationPlan, toGeneration int, admittedDeletionClaim int64) {
+func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnationID string, previous, fresh *store.AgentAppliedConfig, handoff string, migrationStart time.Time, requestedBy string, plan *ReincarnationPlan, toGeneration int, admittedDeletionClaim int64, move *reincarnationMove) {
 	defer func() {
 		if p := recover(); p != nil {
 			s.agentLifecycleLog.Error("reincarnation worker panicked",
@@ -491,6 +516,37 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 	if dispatcher == nil {
 		s.failReincarnation(ctx, agentID, reincarnationID, store.AgentReincarnationStatePending, "no dispatcher available", previous)
 		return
+	}
+
+	// A cross-broker move (design ptone/scion#2727 §3.4) needs the move
+	// dispatch, re-checks eligibility before any side effect, and keeps the
+	// agent as it is on the source broker for the source cleanup (its run
+	// and runtime there) and for a rollback.
+	var md agentMoveDispatcher
+	var srcAgent *store.Agent
+	if move != nil {
+		var ok bool
+		if md, ok = dispatcher.(agentMoveDispatcher); !ok {
+			s.failReincarnation(ctx, agentID, reincarnationID, store.AgentReincarnationStatePending, "the dispatcher cannot move agents between brokers", previous)
+			return
+		}
+		a, err := s.recheckMoveEligibility(ctx, agentID, move)
+		if err != nil {
+			s.failReincarnation(ctx, agentID, reincarnationID, store.AgentReincarnationStatePending, err.Error(), previous)
+			return
+		}
+		srcAgent = a
+	}
+	// failAfterProvision fails the reincarnation once the new config has
+	// been provisioned (or a move assigned the agent to the target): a
+	// move is rolled back to the source broker; a plain reincarnation
+	// re-renders the previous config on its broker.
+	failAfterProvision := func(fromState, errMsg string) {
+		if move != nil {
+			s.failMoveAndRollBack(ctx, md, agentID, reincarnationID, fromState, errMsg, previous, move, srcAgent)
+			return
+		}
+		s.failAfterReprovision(ctx, dispatcher, agentID, reincarnationID, fromState, errMsg, previous)
 	}
 
 	stoppingNow, ok, err := s.tryAdvanceReincarnation(ctx, reincarnationID, store.AgentReincarnationStatePending, store.AgentReincarnationStateStopping, reincarnationStepMaxAttempts, nil)
@@ -540,6 +596,10 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 		s.failReincarnation(ctx, agentID, reincarnationID, store.AgentReincarnationStateStopping, "stop failed: "+err.Error(), previous)
 		return
 	}
+	if move != nil {
+		// The source's exposed ports die with its container.
+		s.clearExposedPortsForAgent(ctx, agentID)
+	}
 
 	provisioningNow, ok, err := s.tryAdvanceReincarnation(ctx, reincarnationID, store.AgentReincarnationStateStopping, store.AgentReincarnationStateProvisioning, reincarnationStepMaxAttempts, nil)
 	if err != nil {
@@ -549,6 +609,16 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 	if !ok {
 		return
 	}
+	if move != nil {
+		// The broker reservation follows the agent to the target, moved
+		// only once this worker owns the provisioning step. When the
+		// target has no room the source reservation is restored and the
+		// agent stays stopped on the source.
+		if err := s.moveBrokerQuota(ctx, agent, move); err != nil {
+			s.failReincarnation(ctx, agentID, reincarnationID, store.AgentReincarnationStateProvisioning, "target broker quota: "+err.Error(), previous)
+			return
+		}
+	}
 	// Step: write the new AppliedConfig. The Task is replaced by the hub-built
 	// preamble plus handoff — this is the new generation's first harness
 	// input (AC-3), delivered as the task argument to DispatchAgentStart below
@@ -556,12 +626,26 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 	requesterCtx := s.buildReincarnationRequesterContext(ctx, agent, requestedBy)
 	preamble := s.buildReincarnationPreamble(agent, toGeneration, handoff, migrationStart, requesterCtx, plan)
 	fresh.Task = preamble
-	agent, err = s.updateReincarnationStep(ctx, agentID, reincarnationStepUpdate{
+	provisioningUpd := reincarnationStepUpdate{
 		reincarnationState: store.ReincarnationStateProvisioning,
 		phase:              string(state.PhaseProvisioning),
 		appliedConfig:      fresh,
 		now:                provisioningNow,
-	}, reincarnationStepMaxAttempts)
+	}
+	if move != nil {
+		// Assign the agent to the target broker. Its runtime is the
+		// source's and is re-learned from the target's start.
+		target, noRuntime := move.TargetBrokerID, ""
+		provisioningUpd.runtimeBrokerID = &target
+		provisioningUpd.runtime = &noRuntime
+	}
+	agent, err = s.updateReincarnationStep(ctx, agentID, provisioningUpd, reincarnationStepMaxAttempts)
+	if err != nil && move != nil {
+		// Restore the source reservation (and assignment, should the
+		// write have landed) before failing.
+		failAfterProvision(store.AgentReincarnationStateProvisioning, "failed to persist new applied config: "+err.Error())
+		return
+	}
 	if err != nil {
 		// The write itself failed, so the store still holds `previous`
 		// (this call is a no-op restore, kept for consistency with every
@@ -570,9 +654,27 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 		return
 	}
 
+	// A move links the target to the project if needed and provisions
+	// the agent fresh there. The target first confirms the agent's
+	// workspace on its own mount of the export (409 when it is missing),
+	// so a move never provisions an empty workspace; any failure rolls the
+	// agent back to the source.
+	if move != nil {
+		if err := s.linkMoveTargetProvider(ctx, move); err != nil {
+			failAfterProvision(store.AgentReincarnationStateProvisioning, "failed to link the target broker to the project: "+err.Error())
+			return
+		}
+		if err := md.DispatchAgentProvisionForMove(ctx, agent, move.expectedNFSWorkspace()); err != nil {
+			failAfterProvision(store.AgentReincarnationStateProvisioning, "provision on the target broker failed: "+err.Error())
+			return
+		}
+	}
+
 	// Step: reprovision (re-render scion-agent.json/agent-info.json, re-inject
 	// skills, preserve home and workspace — design §3.4).
-	if err := dispatcher.DispatchAgentReprovision(ctx, agent); err != nil {
+	if move != nil {
+		// Provisioned on the target above.
+	} else if err := dispatcher.DispatchAgentReprovision(ctx, agent); err != nil {
 		// The store now holds `fresh` (gen N+1) from the write just above,
 		// but the disk was never successfully re-rendered — restore
 		// `previous` so the store does not claim a generation that was
@@ -589,8 +691,9 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 		return
 	}
 
-	// Take the reprovision echo (HarnessConfig, HarnessAuth, Profile) into
-	// fresh, so the starting step's write below persists it, the same as
+	// Take the reprovision echo (HarnessConfig, HarnessAuth,
+	// HarnessConfigSource, Profile) into fresh, so the starting step's
+	// write below persists it, the same as
 	// create. The echoed image is deliberately NOT taken: the broker's
 	// provision-only response reports the rendered config's image
 	// (runtimebroker handlers.go, agentResp.Image = cfg.Image), before the
@@ -606,12 +709,20 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 	// broker's started-but-not-listed fallback, an empty response body, a
 	// deferred start), the qualified image stays too.
 	copyBrokerEcho(fresh, agent.AppliedConfig, false)
+	// The reprovision succeeded, so the broker confirmed any shared dir
+	// backend change it carried (dispatchProvision fails otherwise). The
+	// change is one-shot: the starting step's write drops it, so no later
+	// re-render of this config repeats it (ptone/scion#3685). This clear
+	// and the one in rerenderPreviousConfig back each other up, so each is
+	// pinned by its own test: this one by
+	// TestReincarnateAgent_SharedDirBackends_ConfirmedChangeNotStored.
+	clearSharedDirBackendChange(fresh)
 
 	startingNow, ok, err := s.tryAdvanceReincarnation(ctx, reincarnationID, store.AgentReincarnationStateProvisioning, store.AgentReincarnationStateStarting, reincarnationStepMaxAttempts, nil)
 	if err != nil {
 		// Reprovision already succeeded (same handling as the other
 		// post-reprovision-success failure sites below).
-		s.failAfterReprovision(ctx, dispatcher, agentID, reincarnationID, store.AgentReincarnationStateProvisioning, "failed to advance record to starting: "+err.Error(), previous)
+		failAfterProvision(store.AgentReincarnationStateProvisioning, "failed to advance record to starting: "+err.Error())
 		return
 	}
 	if !ok {
@@ -649,12 +760,23 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 		now:                startingNow,
 	}, reincarnationStepMaxAttempts)
 	if err != nil {
-		s.failAfterReprovision(ctx, dispatcher, agentID, reincarnationID, store.AgentReincarnationStateStarting, "failed to record starting state: "+err.Error(), previous)
+		failAfterProvision(store.AgentReincarnationStateStarting, "failed to record starting state: "+err.Error())
 		return
 	}
 	if err := dispatcher.DispatchAgentStart(ctx, agent, preamble, false); err != nil {
 		errMsg := "start failed: " + err.Error()
+		// A move follows the same rule: on an ambiguous outcome the agent
+		// stays assigned to the target at gen N+1, with its reservation
+		// there (a container may be running there), and the source is
+		// left alone; only a start that definitely left no container is
+		// rolled back to the source.
 		if !reincarnationStartLeftNoContainer(err) {
+			if move != nil {
+				if cerr := s.store.SetAgentReincarnationSourceCleanup(ctx, reincarnationID, sourceCleanupSkippedAmbiguousStart); cerr != nil {
+					s.agentLifecycleLog.Warn("move: failed to record the skipped source cleanup",
+						"agent_id", agentID, "reincarnation_id", reincarnationID, "error", cerr)
+				}
+			}
 			// Ambiguous outcome (a timeout, a transport error, a lost or
 			// unreadable response, a proxy error, a deferred start, or a
 			// broker failure from inside Manager.Start): a gen N+1
@@ -670,7 +792,7 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 			s.failReincarnation(ctx, agentID, reincarnationID, store.AgentReincarnationStateStarting, errMsg, nil)
 			return
 		}
-		s.failAfterReprovision(ctx, dispatcher, agentID, reincarnationID, store.AgentReincarnationStateStarting, errMsg, previous)
+		failAfterProvision(store.AgentReincarnationStateStarting, errMsg)
 		return
 	}
 	// Take the start echo, image included: this is the runtime-resolved
@@ -762,6 +884,12 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 
 	s.agentLifecycleLog.Info("reincarnation completed",
 		"agent_id", agentID, "reincarnation_id", reincarnationID, "generation", toGeneration)
+
+	// The move has succeeded; the source's own state is removed best effort
+	// and the outcome recorded, never failing the move.
+	if move != nil {
+		s.cleanUpMoveSource(ctx, md, reincarnationID, srcAgent)
+	}
 }
 
 // reincarnationRerenderTimeout bounds the best-effort re-render of the
@@ -827,6 +955,14 @@ func reincarnationStartLeftNoContainer(err error) bool {
 // may still be running when the re-render arrives. Nothing on the broker
 // serialises the two, so a successful re-render can still leave mixed
 // N/N+1 files.
+//
+// The copy of previous dispatched here has its shared dir backend change
+// cleared (clearSharedDirBackendChange). The worker drops the change from
+// the stored config at its starting-step write. When that write, or the
+// advance to starting, fails and the re-render also fails, the row keeps a
+// config that still carries the change. That is harmless: the only other
+// reprovision built from a stored config is this re-render, which strips
+// it, and a later reincarnation's fresh config never carries it.
 func (s *Server) rerenderPreviousConfig(ctx context.Context, dispatcher AgentDispatcher, agentID, reincarnationID, fromState, cause string, previous *store.AgentAppliedConfig) bool {
 	if dispatcher == nil || previous == nil {
 		return false
@@ -840,6 +976,11 @@ func (s *Server) rerenderPreviousConfig(ctx context.Context, dispatcher AgentDis
 		return false
 	}
 	cfg := *previous
+	// previous's own shared dir backend change, if any, was confirmed when
+	// that generation was reprovisioned; a re-render must not repeat it.
+	// Pinned by TestReincarnateAgent_SharedDirBackends_RerenderStripsStoredChange
+	// (the worker's post-reprovision clear backs this one up).
+	clearSharedDirBackendChange(&cfg)
 	agent.AppliedConfig = &cfg
 	if err := dispatcher.DispatchAgentReprovision(rctx, agent); err != nil {
 		s.agentLifecycleLog.Warn("reincarnation failed: best-effort re-render of the previous config failed; the on-disk agent config may be partly the new generation",
@@ -917,6 +1058,27 @@ func (s *Server) failReincarnation(ctx context.Context, agentID, reincarnationID
 	s.finishFailReincarnation(ctx, agentID, reincarnationID, errMsg, restoreConfig, failNow, ok, err)
 }
 
+// failMoveAndRollBack fails a move after the agent was assigned to the
+// target: it CASes the record to failed first, and only the CAS winner
+// rolls the agent back to the source and writes the failed agent row (with
+// previous), so a record another owner (the stale sweep) already resolved
+// never has its agent rolled back from under it.
+func (s *Server) failMoveAndRollBack(ctx context.Context, md agentMoveDispatcher, agentID, reincarnationID, fromState, errMsg string, previous *store.AgentAppliedConfig, move *reincarnationMove, srcAgent *store.Agent) {
+	s.agentLifecycleLog.Error("reincarnation failed",
+		"agent_id", agentID, "reincarnation_id", reincarnationID, "error", errMsg)
+	failNow, ok, err := s.tryAdvanceReincarnation(ctx, reincarnationID, fromState, store.AgentReincarnationStateFailed, reincarnationStepMaxAttempts+3, func(rec *store.AgentReincarnation, _ time.Time) {
+		rec.Error = errMsg
+	})
+	if err != nil || !ok {
+		s.agentLifecycleLog.Warn("move: record no longer owned by this worker; not rolling the agent back",
+			"agent_id", agentID, "reincarnation_id", reincarnationID, "error", err)
+		return
+	}
+	s.rollbackMove(ctx, md, agentID, move, srcAgent)
+	s.writeFailedAgent(ctx, agentID, errMsg, previous, failNow)
+	s.reconcileFailedMove(ctx, reincarnationID)
+}
+
 // failReincarnationUnknownState is failReincarnation's fallback for panic
 // recovery, the one caller that cannot know fromState (design §3.4
 // Amendment A8.1): it goes through tryAdvanceReincarnationUnknownState
@@ -947,6 +1109,7 @@ func (s *Server) finishFailReincarnation(ctx context.Context, agentID, reincarna
 		return
 	}
 	s.writeFailedAgent(ctx, agentID, errMsg, restoreConfig, failNow)
+	s.reconcileFailedMove(ctx, reincarnationID)
 }
 
 // writeFailedAgent is the agent-row half shared by failReincarnation (the
@@ -1018,6 +1181,7 @@ func (s *Server) failListedReincarnation(ctx context.Context, rec *store.AgentRe
 		return false
 	}
 	s.writeFailedAgent(ctx, rec.AgentID, errMsg, restoreConfig, failNow)
+	s.reconcileFailedMove(ctx, rec.ID)
 	return true
 }
 

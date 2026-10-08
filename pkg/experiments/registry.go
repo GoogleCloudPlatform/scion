@@ -126,10 +126,25 @@ const K8sNFSHome = "hub.k8s_nfs_home"
 // every artifact surface.
 const Artifacts = "hub.artifacts"
 
+// AuthorizationDecisionAuditV2 identifies the default-off decision-audit slice.
+// Registration alone never grants production admission.
+const AuthorizationDecisionAuditV2 = "hub.authorization_decision_audit_v2"
+
 // compiled is the production experiment list. It is reachable only through
 // Default(); there is no package-level Lookup/All, so hub code cannot bypass
 // the Registry instance it was given (ptone/scion#2217).
 var compiled = []Experiment{
+	{
+		Name:        AuthorizationDecisionAuditV2,
+		Title:       "Authorization decision audit v2",
+		Description: "Routes admitted authorization decisions to the typed structured log sink; defaults to the retained legacy writer when admission, freshness or logging health fails.",
+		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#2379",
+		Owner:       "audit-update",
+		ReviewBy:    "2026-11-30",
+	},
 	{
 		Name:        "web.terminal_workspace",
 		Title:       "Persistent terminal workspace",
@@ -166,7 +181,7 @@ var compiled = []Experiment{
 	{
 		Name:        Artifacts,
 		Title:       "Artifacts",
-		Description: "Lets agents and users publish files and bundles with stable, versioned references, and view them in the web UI. Gates both the web surfaces (LayerWeb) and the hub's /api/v1/artifacts routes (LayerServer), which answer 404 while it is off. In development: the routes have no behaviour yet.",
+		Description: "Lets agents and users publish files and bundles with stable, versioned references, and view them in the web UI. Gates the artifact page and other web surfaces (LayerWeb) and the hub's /api/v1/artifacts routes (LayerServer), which answer 404 while it is off.",
 		Default:     false,
 		Layers:      []Layer{LayerWeb, LayerServer},
 		Stage:       StageAlpha,

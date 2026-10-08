@@ -139,7 +139,9 @@ func (s *Server) listProjectAgentsSortedAgentJWT(w http.ResponseWriter, r *http.
 	for i := range plainAgents {
 		resources[i] = agentResource(&plainAgents[i])
 	}
+	capsDone := perfPhaseStart(ctx, perfPhaseCapabilities)
 	caps := s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "agent")
+	capsDone()
 
 	s.enrichAgents(ctx, plainAgents)
 	agents := make([]AgentWithCapabilities, len(plainAgents))
@@ -155,7 +157,9 @@ func (s *Server) listProjectAgentsSortedAgentJWT(w http.ResponseWriter, r *http.
 		totalCount = len(agents)
 	}
 
+	scopeCapDone := perfPhaseStart(ctx, perfPhaseScopeCapabilities)
 	scopeCap := s.authzService.ComputeScopeCapabilities(ctx, identity, "project", projectID, "agent")
+	scopeCapDone()
 
 	resp := ListAgentsResponse{
 		Agents:       agents,

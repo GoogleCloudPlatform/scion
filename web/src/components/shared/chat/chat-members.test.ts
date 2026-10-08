@@ -29,6 +29,33 @@
 // @vitest-environment happy-dom
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+
+// chat-members imports navigateTo from the app entry. Loading the real
+// main.ts registers every Shoelace component and runs the app bootstrap,
+// so happy-dom tries to fetch icons from localhost:3000 and logs
+// ECONNREFUSED on stderr. These tests only need a stub; it matches the
+// one in pages/chat.test.ts.
+vi.mock('../../../client/main.js', () => ({
+  navigateTo: vi.fn(),
+  pushRoute: vi.fn((path: string) => {
+    window.history.pushState({}, '', path);
+    return Promise.resolve();
+  }),
+  replaceRoute: vi.fn((path: string) => {
+    window.history.replaceState(
+      window.history.state,
+      '',
+      path + window.location.search + window.location.hash
+    );
+    return Promise.resolve();
+  }),
+  stateManager: new EventTarget(),
+}));
+
+// The real tooltip renders the markup test's message. It is defined before
+// any member renders: a row first rendered while sl-tooltip is undefined
+// fails to upgrade once it is defined.
+import '@shoelace-style/shoelace/dist/components/tooltip/tooltip.js';
 import './chat-members.js';
 import type { ScionChatMembers, ChatAgentMember } from './chat-members.js';
 
@@ -102,6 +129,24 @@ describe('scion-chat-members agent tooltip', () => {
     expect(tooltipContent(el).split('\n')[0]).toBe('Waiting for user decision on c34');
   });
 
+  it('renders a detail message holding markup as text, not HTML', async () => {
+    // The detail message is free text the agent reports, so it must render
+    // as text whatever it holds.
+    const message = '<img src=x onerror="window.__pwned=1"><b>bold</b>';
+    const el = await mount([agent({ detailMessage: message })]);
+    expect(tooltipContent(el)).toBe(message);
+
+    const tip = el.shadowRoot?.querySelector('sl-tooltip') as
+      | (HTMLElement & { updateComplete: Promise<unknown> })
+      | null;
+    await tip?.updateComplete;
+    const body = tip?.shadowRoot?.querySelector('[part~="body"]');
+    expect(body?.textContent).toContain(message);
+    expect(body?.querySelector('img, b')).toBeNull();
+    expect(el.shadowRoot?.querySelector('img, b')).toBeNull();
+    expect((window as unknown as { __pwned?: number }).__pwned).toBeUndefined();
+  });
+
   it('falls back to the activity when no detail message was reported', async () => {
     const el = await mount([agent({ activity: 'thinking' })]);
     expect(tooltipContent(el)).toBe('thinking');
@@ -112,7 +157,7 @@ describe('scion-chat-members agent tooltip', () => {
     expect(tooltipContent(blocked)).toBe('waiting on others');
     document.body.innerHTML = '';
     const waiting = await mount([agent({ activity: 'waiting_for_input' })]);
-    expect(tooltipContent(waiting)).toBe('waiting for input');
+    expect(tooltipContent(waiting)).toBe('waiting on parent');
     document.body.innerHTML = '';
     // Matched case-insensitively, like resolveAgentStatus (the badge's status source).
     const upper = await mount([agent({ activity: 'BLOCKED' as never })]);

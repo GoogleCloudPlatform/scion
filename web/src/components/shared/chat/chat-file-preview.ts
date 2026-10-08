@@ -548,6 +548,29 @@ export class ScionChatFilePreview extends LitElement {
     void this.load();
   }
 
+  /**
+   * An image that downloaded but will not decode (corrupt bytes, or a type
+   * the browser can't render) would otherwise show the browser's
+   * broken-image icon. Switch to the same error state as a fetch failure,
+   * so Retry stays available. The handler is bound to the object URL it was
+   * rendered with: a late event for a URL that is no longer current (the
+   * target changed, or a retry already replaced it) is ignored. Revoking
+   * here and dropping `objectUrl` from the state means a later disconnect
+   * or retry has nothing left to revoke, so the URL is revoked exactly once.
+   */
+  private onImageError(objectUrl: string | undefined): void {
+    const state = this.loadState;
+    if (!objectUrl || state.status !== 'ready' || state.objectUrl !== objectUrl) return;
+    this.revokeObjectUrl();
+    this.loadState = {
+      status: 'error',
+      isImage: true,
+      isMarkdown: false,
+      isBinary: false,
+      error: "This image couldn't be displayed.",
+    };
+  }
+
   private close(): void {
     this.dispatchEvent(
       new CustomEvent('chat-file-preview-close', { bubbles: true, composed: true })
@@ -618,6 +641,7 @@ export class ScionChatFilePreview extends LitElement {
         class="file-preview-image"
         src=${state.objectUrl ?? ''}
         alt=${target.name}
+        @error=${(): void => this.onImageError(state.objectUrl)}
       />`;
     }
     if (state.isBinary) {

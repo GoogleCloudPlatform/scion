@@ -61,8 +61,11 @@ func adminRequest(method, url, body string) *http.Request {
 		r = httptest.NewRequest(method, url, nil)
 	}
 	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
-	r = r.WithContext(contextWithIdentity(r.Context(), admin))
-	return r
+	// An interactive session, as the auth middleware records it for a
+	// signed-in admin: settings writes refuse every other credential kind
+	// for keys outside the configuration set.
+	ctx := contextWithCredentialContext(contextWithIdentity(r.Context(), admin), CredentialContext{Kind: CredentialKindInteractive})
+	return r.WithContext(ctx)
 }
 
 // ---- GET /api/v1/admin/server-config (postgres mode) ----
@@ -3911,7 +3914,7 @@ func TestPutServerConfigDB_SharedDirStorageBackend_RoundTrip(t *testing.T) {
 	put(string(body))
 
 	// Write a different section.
-	put(`{"server": {"hub": {"admin_mode": false}}}`)
+	put(`{"server": {"hub": {"auto_suspend_stalled": false}}}`)
 
 	profiles = sdsGetProfilesDB(t, srv, ops)
 	if got := profiles["gke"].SharedDirStorageBackend; got != "nfs" {
@@ -4005,7 +4008,7 @@ func TestPutServerConfigDB_HomeStorage_RoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	put(string(body))
-	put(`{"server": {"hub": {"admin_mode": false}}}`)
+	put(`{"server": {"hub": {"auto_suspend_stalled": false}}}`)
 
 	profiles = sdsGetProfilesDB(t, srv, ops)
 	if got := profiles["gke"]; got.HomeStorageBackend != "nfs" || got.HomeStorageLeaf != "pod" || got.DefaultTemplate != "edited-template" {

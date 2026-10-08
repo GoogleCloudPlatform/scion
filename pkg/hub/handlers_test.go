@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -41,7 +42,7 @@ const testDevToken = "scion_dev_test_token_for_unit_tests_1234567890"
 // The server is configured with dev auth enabled using testDevToken.
 func testServer(t *testing.T) (*Server, store.Store) {
 	t.Helper()
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		if strings.Contains(err.Error(), "sqlite driver not registered") {
 			t.Skip("Skipping test because sqlite driver is not registered (build with -tags sqlite to enable)")
@@ -67,26 +68,55 @@ func testServerWithStore(t *testing.T, s store.Store) (*Server, store.Store) {
 	// post-backfill behavior re-create the marker explicitly.
 	_ = s.DeleteHubSetting(context.Background(), "migration_delegation_edge_backfill_v1")
 
+	return testServerWithStoreConfig(t, s, testServerConfig())
+}
+
+// testServerWithStoreConfig is testServerWithStore with the given server
+// config, on a store that is already migrated. The store is closed when the
+// test ends.
+func testServerWithStoreConfig(t *testing.T, s store.Store, cfg ServerConfig) (*Server, store.Store) {
+	t.Helper()
+	// Release the in-memory SQLite database to avoid OOM across many
+	// tests. Registered before newTestHubServer so that, cleanups being
+	// LIFO, the server shuts down before its store closes.
+	t.Cleanup(func() { _ = s.Close() })
+	// newTestHubServer registers Shutdown, which runs CleanupResources even
+	// though Start was never called and so stops every background goroutine
+	// New() starts (see TestTestServerCleanupStopsBackgroundGoroutines).
+	srv, err := newTestHubServer(t, cfg, s)
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	srv.SetHubID("test-hub-id")
+	waitUserScopedDataSweep(t, srv)
+	return srv, s
+}
+
+// testServerConfig is the server config testServerWithStore passes to New().
+func testServerConfig() ServerConfig {
 	cfg := DefaultServerConfig()
 	cfg.DevAuthToken = testDevToken // Enable dev auth for testing
+	// Never build real Cloud Logging clients from an ambient GCP project
+	// env var (ptone/scion#3188).
+	cfg.DisableCloudLogQuery = true
 	cfg.DevUserConfig = DevUserConfig{
 		Username:    "dev",
 		DisplayName: "Development User",
 		Email:       "dev@localhost",
 	}
-	srv, err := New(cfg, s)
-	if err != nil {
-		t.Fatalf("New() failed: %v", err)
+	return cfg
+}
+
+// waitUserScopedDataSweep waits for the startup sweep New() starts in the
+// background to end. The sweep reads srv.store, so a test helper calls this
+// before returning a server whose srv.store a test may replace.
+func waitUserScopedDataSweep(t testing.TB, srv *Server) {
+	t.Helper()
+	select {
+	case <-srv.userScopedDataSweepDone:
+	case <-time.After(time.Minute):
+		t.Fatal("startup sweep of user-scope data did not finish")
 	}
-	srv.SetHubID("test-hub-id")
-	t.Cleanup(func() {
-		// Shutdown runs CleanupResources even though Start was never
-		// called, which stops every background goroutine New() starts
-		// (see TestTestServerCleanupStopsBackgroundGoroutines).
-		_ = srv.Shutdown(context.Background())
-		_ = s.Close() // Release in-memory SQLite database to avoid OOM across many tests.
-	})
-	return srv, s
 }
 
 // doRequest performs an HTTP request against the test server.
@@ -2121,7 +2151,7 @@ func TestRuntimeBrokerListWithProjectLocalPath(t *testing.T) {
 // testServerWithBrokerAuth creates a test server with broker auth enabled.
 func testServerWithBrokerAuth(t *testing.T) (*Server, store.Store) {
 	t.Helper()
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
@@ -2133,7 +2163,7 @@ func testServerWithBrokerAuth(t *testing.T) (*Server, store.Store) {
 	cfg := DefaultServerConfig()
 	cfg.DevAuthToken = testDevToken
 	cfg.BrokerAuthConfig = DefaultBrokerAuthConfig()
-	srv, err := New(cfg, s)
+	srv, err := newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
@@ -2434,8 +2464,17 @@ func TestUserList(t *testing.T) {
 	}
 }
 
-func TestUserCreate_Forbidden(t *testing.T) {
-	srv, _ := testServer(t)
+// TestUserCreate_RoleRefusedAndNonAdminForbidden pins POST /api/v1/users
+// (user.admin.provision) for its main refusals: an authorized session
+// caller (a super-admin) that names the admin role gets 422
+// privileged_role_not_provisionable (design §8 row 12); a caller without
+// user.invite gets 403 before any body check (row 8); and on a hub in
+// dev-auth mode every caller gets 403 dev_auth_not_supported, because dev
+// auth is single-user local mode (row 4a). The full outcome table is in
+// handlers_users_provision_test.go.
+func TestUserCreate_RoleRefusedAndNonAdminForbidden(t *testing.T) {
+	srv, s := testServerNoDevAuth(t)
+	ctx := context.Background()
 
 	body := map[string]interface{}{
 		"email":       "newuser@example.com",
@@ -2443,10 +2482,40 @@ func TestUserCreate_Forbidden(t *testing.T) {
 		"role":        "admin",
 	}
 
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/users", body)
+	adminID := tid("usercreate-super")
+	createTestUserWithRole(t, s, adminID, "usercreate-super@example.com", store.UserRoleAdmin, store.SystemRoleSuperAdmin)
+	admin, err := s.GetUser(ctx, adminID)
+	if err != nil {
+		t.Fatalf("get super-admin: %v", err)
+	}
+	rec := doRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/users", body)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("authorized caller with role admin: expected status 422, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "privileged_role_not_provisionable") {
+		t.Errorf("expected reason privileged_role_not_provisionable: %s", rec.Body.String())
+	}
 
+	member := &store.User{ID: tid("usercreate-member"), Email: "usercreate-member@example.com", DisplayName: "Member", Role: store.UserRoleMember, Status: store.UserStatusActive}
+	if err := s.CreateUser(ctx, member); err != nil {
+		t.Fatalf("create member: %v", err)
+	}
+	rec = doRequestAsUser(t, srv, member, http.MethodPost, "/api/v1/users", body)
 	if rec.Code != http.StatusForbidden {
-		t.Errorf("expected status 403, got %d: %s", rec.Code, rec.Body.String())
+		t.Errorf("caller without user.invite: expected status 403, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	if _, err := s.GetUserByEmail(ctx, "newuser@example.com"); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("no user record may be created, got err=%v", err)
+	}
+
+	devSrv, devStore := testServer(t)
+	rec = doRequest(t, devSrv, http.MethodPost, "/api/v1/users", body)
+	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "dev_auth_not_supported") {
+		t.Errorf("dev-auth hub: expected 403 dev_auth_not_supported, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if _, err := devStore.GetUserByEmail(ctx, "newuser@example.com"); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("no user record may be created on the dev-auth hub, got err=%v", err)
 	}
 }
 
@@ -2751,7 +2820,7 @@ func TestProjectRenameSlugOnly(t *testing.T) {
 	}
 }
 
-func TestProjectRenameSlugSanitized(t *testing.T) {
+func TestProjectRenameSlugMustMatchSlugFormat(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
@@ -2766,24 +2835,23 @@ func TestProjectRenameSlugSanitized(t *testing.T) {
 		t.Fatalf("failed to create project: %v", err)
 	}
 
-	// Slug with spaces and uppercase should be sanitized
+	// A slug with spaces and uppercase is refused, not rewritten.
 	body := map[string]interface{}{
 		"slug": "My New Project",
 	}
 
 	rec := doRequest(t, srv, http.MethodPatch, fmt.Sprintf("/api/v1/projects/%s", tid("project_rename_san")), body)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var resp store.Project
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-		t.Fatalf("failed to decode response: %v", err)
+	stored, err := s.GetProject(ctx, tid("project_rename_san"))
+	if err != nil {
+		t.Fatalf("failed to get project: %v", err)
 	}
-
-	if resp.Slug != "my-new-project" {
-		t.Errorf("expected sanitized slug %q, got %q", "my-new-project", resp.Slug)
+	if stored.Slug != "sanitize-test" {
+		t.Errorf("expected slug to stay %q, got %q", "sanitize-test", stored.Slug)
 	}
 }
 

@@ -100,6 +100,9 @@ const (
 	InviteAuditUserActivated    InviteAuditEventType = "user_activated"
 	InviteAuditUserInvited      InviteAuditEventType = "user_invited"
 	InviteAuditUserInvitedBulk  InviteAuditEventType = "user_invited_bulk"
+	// InviteAuditUserProvisioned records a pending user created through
+	// POST /api/v1/users (post-commit, best-effort).
+	InviteAuditUserProvisioned InviteAuditEventType = "user_provisioned"
 )
 
 // InviteAuditEvent represents an auditable event for the invite/allow-list system.
@@ -757,7 +760,10 @@ func getClientIP(r *http.Request) string {
 }
 
 // LogRegistrationEvent logs a broker registration event.
-func LogRegistrationEvent(ctx context.Context, logger AuditLogger, brokerID, brokerName, actorID, ipAddress string) {
+//
+// details is recorded as the event's Details; it must not carry the join
+// token or its hash.
+func LogRegistrationEvent(ctx context.Context, logger AuditLogger, brokerID, brokerName, actorID, ipAddress string, details map[string]string) {
 	if logger == nil {
 		return
 	}
@@ -771,6 +777,7 @@ func LogRegistrationEvent(ctx context.Context, logger AuditLogger, brokerID, bro
 		ActorID:    actorID,
 		ActorType:  "user",
 		Timestamp:  time.Now(),
+		Details:    details,
 	}
 
 	_ = logger.LogBrokerAuthEvent(ctx, event)

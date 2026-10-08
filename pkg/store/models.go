@@ -171,6 +171,9 @@ type Agent struct {
 	// writers are SetRunIntent, RevertRunIntent and BackfillRunIntent.
 	RunIntent   RunIntent  `json:"-"`
 	RunIntentAt *time.Time `json:"-"`
+	// RunIntentMarkedAt equals RunIntentAt when the intent was last written
+	// by code that maintains start claims (see RunIntentWrittenWithClaims).
+	RunIntentMarkedAt *time.Time `json:"-"`
 
 	// Start claim (see start_claim.go). StartClaimID is "" when no claim is
 	// held. Internal bookkeeping, untagged like the launch columns.
@@ -312,6 +315,16 @@ type AgentAppliedConfig struct {
 	Workspace     string              `json:"workspace,omitempty"` // Host path to mount as /workspace (overrides default project root)
 	GitClone      *api.GitCloneConfig `json:"gitClone,omitempty"`
 
+	// SharedDirBackendChanges and AllowEmptySharedDir are a reincarnation's
+	// explicit shared dir backend change (`scion reincarnate
+	// --shared-dir-backend`), set on that generation's config only and sent
+	// to the broker on its reprovision. They are one-shot: the hub drops
+	// them once the broker confirms the change (a stored config can still
+	// hold them after some failures), and neither a later reincarnation nor
+	// a re-render of this config sends them again.
+	SharedDirBackendChanges map[string]string `json:"sharedDirBackendChanges,omitempty"`
+	AllowEmptySharedDir     bool              `json:"allowEmptySharedDir,omitempty"`
+
 	// Template info for Runtime Broker hydration
 	TemplateID   string `json:"templateId,omitempty"`   // Hub template ID for fetching
 	TemplateHash string `json:"templateHash,omitempty"` // Content hash for cache validation
@@ -328,6 +341,15 @@ type AgentAppliedConfig struct {
 	// requiring it to exist on the broker's local filesystem.
 	HarnessConfigID   string `json:"harnessConfigId,omitempty"`   // Hub harness-config ID for fetching
 	HarnessConfigHash string `json:"harnessConfigHash,omitempty"` // Content hash for cache validation
+	// HarnessConfigSource is broker-reported provenance: which resolution
+	// branch supplied the harness-config the agent last ran (hub-hydrated,
+	// template-bundled, broker-local, builtin, unresolved; see
+	// config.HarnessConfigSource). Only hub-hydrated means the record named
+	// by HarnessConfigID was used. template-bundled may still be hub-managed
+	// content (a harness-config inside a hydrated template). Empty from an
+	// older broker, in which case the previously recorded value is kept.
+	// Observability only; never read by a decision path (ptone/scion#620).
+	HarnessConfigSource string `json:"harnessConfigSource,omitempty"`
 
 	// CreatorName is the human-readable identity of who created this agent.
 	// For user-created agents, this is the user's email.
@@ -352,6 +374,10 @@ type AgentAppliedConfig struct {
 	// WorkspaceStoragePath is the GCS storage path for bootstrapped workspaces.
 	// Set during workspace bootstrap for non-git projects.
 	WorkspaceStoragePath string `json:"workspaceStoragePath,omitempty"`
+	// WorkspaceStorageBucket is the GCS bucket the hub uploaded
+	// WorkspaceStoragePath to. It is sent to the broker with the create so
+	// a broker without its own bucket setting can download the workspace.
+	WorkspaceStorageBucket string `json:"workspaceStorageBucket,omitempty"`
 
 	// InlineConfig holds the full ScionConfig provided via the --config flag
 	// or Hub API config field. When set, the dispatcher threads it through to the
@@ -936,6 +962,14 @@ type RuntimeBroker struct {
 	// the hub refuses a cross-broker move involving such a broker.
 	WorkspaceStorage *api.BrokerWorkspaceStorage `json:"workspaceStorage,omitempty"`
 
+	// Health is the broker's last self-reported health (default runtime,
+	// NFS mounts), refreshed from the heartbeat and written only when it
+	// changes (stored as JSON), normalised to fixed values by
+	// api.NormalizeBrokerHealthReport. Its freshness is LastHeartbeat. It is
+	// separate from Status, which stays liveness only. Nil means the broker
+	// has never reported it (an older broker).
+	Health *api.BrokerHealthReport `json:"health,omitempty"`
+
 	// Metadata
 	Labels      map[string]string `json:"labels,omitempty"`
 	Annotations map[string]string `json:"annotations,omitempty"`
@@ -992,6 +1026,13 @@ type BrokerCapabilities struct {
 	// --broker`). The hub refuses a move unless both the source and the
 	// target broker report it (412).
 	AgentMove bool `json:"agentMove"`
+	// ReprovisionEmptyPerAgent indicates the broker's reprovision reuses an
+	// empty-per-agent agent's private workspace in place (same-broker
+	// `scion reincarnate`, miller79/scion#167). The hub refuses same-broker
+	// empty-per-agent reincarnation without it (412), before the agent is
+	// stopped. It says what the broker build can do; runtime suitability is
+	// a separate hub check.
+	ReprovisionEmptyPerAgent bool `json:"reprovisionEmptyPerAgent,omitempty"`
 	// StartsInFlight indicates the broker reports the agent starts still
 	// running on it in every heartbeat (BrokerHeartbeat.StartsInFlight). Only
 	// then does the hub read a start's absence from that list as "no start
@@ -1014,6 +1055,25 @@ type BrokerProfile struct {
 	// pkg/runtime.HasAttachSupport uses), not false. A plain bool could not
 	// tell that "never reported" apart from an explicit false.
 	Attach *bool `json:"attach,omitempty"`
+	// ServiceAccountMappings lists the GCP service accounts this profile
+	// maps to a Kubernetes ServiceAccount (kubernetes_service_account_mappings
+	// in the broker's global settings, profile and runtime-entry level).
+	// Reported at broker join and refreshed by heartbeat (ProfileSAMappings),
+	// only for Kubernetes profiles; the Hub uses it only to warn about registered
+	// service accounts no profile maps (ptone/scion#3329 phase 2).
+	ServiceAccountMappings []BrokerProfileSAMapping `json:"serviceAccountMappings,omitempty"`
+	// MappingsReported is true when the broker reported
+	// ServiceAccountMappings for this profile, so an empty list means
+	// "nothing mapped" rather than "unknown" (an older broker, or a broker
+	// that could not read its settings).
+	MappingsReported bool `json:"mappingsReported,omitempty"`
+}
+
+// BrokerProfileSAMapping is one GCP service account a broker profile maps
+// to a Kubernetes ServiceAccount. A struct, not a bare string, so a later
+// phase can add per-entry details (such as the namespace) without a rename.
+type BrokerProfileSAMapping struct {
+	GSA string `json:"gsa"`
 }
 
 // ProjectProvider links a runtime broker to a project.
@@ -2499,6 +2559,12 @@ type ScheduledEvent struct {
 	// read the row from the store; B.3 and E.2b's own tests read the
 	// embedded struct field directly.
 	InitiatorAttribution `json:"-"`
+
+	// AuthorityCeiling is the frozen effect ceiling of the authorization
+	// revision this event runs under, copied from the schedule at
+	// materialization (or recorded at authoring for a one-shot event). The
+	// zero value is unrecorded.
+	AuthorityCeiling EffectCeiling `json:"-"`
 }
 
 // ScheduledEventStatus constants
@@ -2547,6 +2613,12 @@ type Schedule struct {
 	// overwritten by a re-attribution. See the type doc above. json:"-": see
 	// ScheduledEvent's field doc above for why.
 	InitiatorAttribution `json:"-"`
+
+	// AuthorityCeiling is the frozen effect ceiling of the current
+	// authorization revision. It is written together with
+	// InitiatorAttribution and AuthorizationRevision, and never on its own.
+	// The zero value is unrecorded.
+	AuthorityCeiling EffectCeiling `json:"-"`
 }
 
 // ScheduleStatus constants
@@ -3236,6 +3308,13 @@ const (
 	EdgeDeactivationDelegatorDeleted    EdgeDeactivationCause = "delegator_deleted"
 	EdgeDeactivationCreateCompensation  EdgeDeactivationCause = "create_compensation"
 	EdgeDeactivationReincarnateReplaced EdgeDeactivationCause = "reincarnate_replaced"
+	// EdgeDeactivationProvenanceAdopted marks an unrecorded edge replaced by
+	// a recorded edge under a delegation-provenance compatibility policy.
+	// The row is kept as evidence and is what a revert reactivates.
+	EdgeDeactivationProvenanceAdopted EdgeDeactivationCause = "provenance_adopted"
+	// EdgeDeactivationAdoptionReverted marks an adopted edge deactivated by
+	// an adoption revert.
+	EdgeDeactivationAdoptionReverted EdgeDeactivationCause = "adoption_reverted"
 )
 
 // ValidEdgeDeactivationCause reports whether c is a cause that may be
@@ -3265,16 +3344,323 @@ const (
 	DelegationPrincipalAgent = "agent"
 )
 
+// DelegationEdgeDeactivateGuard is the precondition of a guarded edge
+// deactivation. The row must be active in every case. At most one of
+// Unrecorded and Recorded may be set. The zero guard (neither set, no
+// UpdatedAt) places no condition beyond the row being active, so it
+// deactivates any active edge; callers that replace an edge by provenance
+// set Unrecorded or Recorded, and the store rejects both set together with
+// ErrInvalidInput.
+type DelegationEdgeDeactivateGuard struct {
+	// Unrecorded requires provenance version 0 and an unrecorded ceiling.
+	Unrecorded bool
+	// Recorded requires provenance version 1 and a bounded or principal
+	// ceiling.
+	Recorded bool
+	// UpdatedAt, when non-nil, requires the row's updated time to equal it.
+	UpdatedAt *time.Time
+}
+
+// =============================================================================
+// Delegation-provenance adoption records
+// =============================================================================
+
+// DelegationAdoptionStatus is the outcome recorded for one examined edge.
+type DelegationAdoptionStatus string
+
+const (
+	// DelegationAdoptionPending: in the boot snapshot, not written.
+	DelegationAdoptionPending DelegationAdoptionStatus = "pending"
+	// DelegationAdoptionAdopted: the original edge was replaced by a
+	// recorded edge (AdoptedEdgeID).
+	DelegationAdoptionAdopted DelegationAdoptionStatus = "adopted"
+	// DelegationAdoptionRecognized: the active edge already carries a
+	// migration-recorded bounded ceiling; it is left as is.
+	DelegationAdoptionRecognized DelegationAdoptionStatus = "recognized"
+	// DelegationAdoptionRecognizedAbovePolicy: recognized, and its ceiling
+	// is not a subset of the compatibility policy. Reported only.
+	DelegationAdoptionRecognizedAbovePolicy DelegationAdoptionStatus = "recognized_above_policy"
+	// DelegationAdoptionExcluded: never adopted automatically (Reason).
+	DelegationAdoptionExcluded DelegationAdoptionStatus = "excluded"
+	// DelegationAdoptionSkippedChanged: state changed after the snapshot.
+	DelegationAdoptionSkippedChanged DelegationAdoptionStatus = "skipped_changed"
+	// DelegationAdoptionReverted: the adoption was reverted.
+	DelegationAdoptionReverted DelegationAdoptionStatus = "reverted"
+)
+
+// Delegation adoption origins.
+const (
+	DelegationAdoptionOriginBoot  = "boot_migration"
+	DelegationAdoptionOriginAdmin = "admin_commit"
+)
+
+// DelegationAdoption is one examined edge of a delegation-provenance
+// adoption (boot snapshot or admin commit). It is evidence only and is never
+// read by authorization. Records are retained indefinitely and carry no
+// foreign keys.
+type DelegationAdoption struct {
+	ID                string                   `json:"id"`
+	CohortID          string                   `json:"cohortId"`
+	Origin            string                   `json:"origin"`
+	PolicyVersion     int                      `json:"policyVersion"`
+	OriginalEdgeID    string                   `json:"originalEdgeId,omitempty"`
+	AdoptedEdgeID     string                   `json:"adoptedEdgeId,omitempty"`
+	DelegateID        string                   `json:"delegateId"`
+	DelegatorType     string                   `json:"delegatorType,omitempty"`
+	DelegatorID       string                   `json:"delegatorId,omitempty"`
+	ScopeID           string                   `json:"scopeId,omitempty"`
+	Role              string                   `json:"role,omitempty"`
+	Depth             int                      `json:"depth"`
+	Status            DelegationAdoptionStatus `json:"status"`
+	Reason            string                   `json:"reason,omitempty"`
+	BeforeFingerprint string                   `json:"beforeFingerprint,omitempty"`
+	AfterSummary      string                   `json:"afterSummary,omitempty"`
+	ActorKind         string                   `json:"actorKind,omitempty"`
+	ActorID           string                   `json:"actorId,omitempty"`
+	// RevertedBy* and RevertSummary are set by a revert. Actor* and
+	// AfterSummary keep the adopter and the adopted edge's summary.
+	RevertedByKind string     `json:"revertedByKind,omitempty"`
+	RevertedByID   string     `json:"revertedById,omitempty"`
+	RevertSummary  string     `json:"revertSummary,omitempty"`
+	RevertedAt     *time.Time `json:"revertedAt,omitempty"`
+	CreatedAt      time.Time  `json:"createdAt"`
+	UpdatedAt      time.Time  `json:"updatedAt"`
+}
+
+// DelegationAdoptionFilter selects adoption records. Empty fields do not
+// filter. Limit 0 returns every match.
+type DelegationAdoptionFilter struct {
+	CohortID   string
+	Origin     string
+	Status     DelegationAdoptionStatus
+	Reason     string
+	ScopeID    string
+	DelegateID string
+	// AdoptedEdgeID selects the records that point at one recorded edge.
+	AdoptedEdgeID string
+	Limit         int
+	Offset        int
+}
+
+// =============================================================================
+// Delegation Descendants (read-only walk over delegation edges)
+// =============================================================================
+
+// Bounds of ListDelegationDescendants used when the query leaves them zero.
+const (
+	DefaultDescendantMaxDepth = 32
+	DefaultDescendantMaxNodes = 5000
+)
+
+// ErrDescendantLimit is returned by ListDelegationDescendants, together with
+// the descendants found so far, when the walk reaches DescendantQuery.MaxDepth
+// or DescendantQuery.MaxNodes with descendants still unvisited. The returned
+// set is then incomplete: callers must refuse to treat it as the full set of
+// descendants.
+var ErrDescendantLimit = errors.New("delegation descendant limit reached")
+
+// DescendantLink is how a descendant was reached from its walk parent.
+type DescendantLink string
+
+const (
+	// DescendantLinkEdge: a delegation edge from the parent to the agent.
+	DescendantLinkEdge DescendantLink = "edge"
+	// DescendantLinkOwner: the agent's owner_id is the parent.
+	DescendantLinkOwner DescendantLink = "owner"
+	// DescendantLinkCreatedBy: the agent has no owner_id and its
+	// created_by is the parent.
+	DescendantLinkCreatedBy DescendantLink = "created_by"
+	// DescendantLinkAncestry: the agent has no owner_id and its ancestry
+	// contains the root principal (direct children of the root only).
+	DescendantLinkAncestry DescendantLink = "ancestry"
+)
+
+// DescendantQuery selects the agents reachable from a root principal inside
+// one project.
+type DescendantQuery struct {
+	// RootType and RootID name the root principal (DelegationPrincipalUser
+	// or DelegationPrincipalAgent). RootID must be a UUID.
+	RootType string
+	RootID   string
+	// ProjectID restricts the walk to edges with scope (project, ProjectID)
+	// and, for legacy links, to agents whose project_id is ProjectID.
+	ProjectID string
+	// IncludeSoftDeleted also returns soft-deleted agents. The walk expands
+	// soft-deleted agents (and agents without a row) either way.
+	IncludeSoftDeleted bool
+	// LegacyLinks adds the owner_id / created_by / ancestry links to the
+	// delegation edges (see DescendantLink).
+	LegacyLinks bool
+	// SkipHeldForRoot leaves out agents that already have an active
+	// AgentHold whose root principal ID is RootID: they are still expanded
+	// (their descendants are still reached) but are not returned and do not
+	// count toward MaxNodes. A caller that holds the returned agents and
+	// calls again therefore continues further into the tree. Hold roots
+	// are users, so SkipHeldForRoot requires RootType
+	// DelegationPrincipalUser; with an agent root the query returns
+	// ErrInvalidInput.
+	SkipHeldForRoot bool
+	// MaxDepth bounds the walk depth (DefaultDescendantMaxDepth when zero).
+	MaxDepth int
+	// MaxNodes bounds the number of returned agents
+	// (DefaultDescendantMaxNodes when zero).
+	MaxNodes int
+}
+
+// DescendantRef is one agent reached by ListDelegationDescendants.
+type DescendantRef struct {
+	AgentID string
+	// ViaID is the walk parent agent; empty when the agent was reached
+	// directly from the root principal.
+	ViaID string
+	// Depth is 1 for a direct child of the root principal.
+	Depth int
+	Link  DescendantLink
+	// EdgeActive and EdgeDeactivationCause describe the delegation edge
+	// when Link is DescendantLinkEdge; both are zero for legacy links.
+	EdgeActive            bool
+	EdgeDeactivationCause EdgeDeactivationCause
+}
+
+// DescendantResult is the result of ListDelegationDescendants, in walk order
+// (breadth-first; within a level, edge links before legacy links).
+type DescendantResult struct {
+	Agents []DescendantRef
+}
+
+// =============================================================================
+// Agent Holds
+// =============================================================================
+
+// AgentHoldCause is why an agent is held.
+type AgentHoldCause string
+
+const (
+	// AgentHoldCauseOwnerAccessEnded: the root principal's access to the
+	// agent's project ended.
+	AgentHoldCauseOwnerAccessEnded AgentHoldCause = "owner_access_ended"
+)
+
+// ValidAgentHoldCause reports whether c is a recognised hold cause.
+func ValidAgentHoldCause(c AgentHoldCause) bool {
+	return c == AgentHoldCauseOwnerAccessEnded
+}
+
+// MembershipLossTrigger is the event that asked for a membership
+// re-evaluation; it is recorded on MembershipLossCheck rows and on the holds
+// they produce.
+type MembershipLossTrigger string
+
+const (
+	MembershipLossTriggerMemberRemove          MembershipLossTrigger = "member_remove"
+	MembershipLossTriggerMemberRoleChange      MembershipLossTrigger = "member_role_change"
+	MembershipLossTriggerMemberPrincipalDelete MembershipLossTrigger = "member_principal_delete"
+	MembershipLossTriggerAdminBindingDelete    MembershipLossTrigger = "admin_binding_delete"
+	MembershipLossTriggerOwnershipTransfer     MembershipLossTrigger = "ownership_transfer"
+	MembershipLossTriggerGroupChange           MembershipLossTrigger = "group_change"
+	MembershipLossTriggerBindingExpiry         MembershipLossTrigger = "binding_expiry"
+	MembershipLossTriggerSystemScopeChange     MembershipLossTrigger = "system_scope_change"
+	MembershipLossTriggerRestoreCheck          MembershipLossTrigger = "restore_check"
+	MembershipLossTriggerReconcile             MembershipLossTrigger = "reconcile"
+)
+
+// ValidMembershipLossTrigger reports whether t is a recognised trigger.
+func ValidMembershipLossTrigger(t MembershipLossTrigger) bool {
+	switch t {
+	case MembershipLossTriggerMemberRemove,
+		MembershipLossTriggerMemberRoleChange,
+		MembershipLossTriggerMemberPrincipalDelete,
+		MembershipLossTriggerAdminBindingDelete,
+		MembershipLossTriggerOwnershipTransfer,
+		MembershipLossTriggerGroupChange,
+		MembershipLossTriggerBindingExpiry,
+		MembershipLossTriggerSystemScopeChange,
+		MembershipLossTriggerRestoreCheck,
+		MembershipLossTriggerReconcile:
+		return true
+	}
+	return false
+}
+
+// AgentHold records that an agent is held because its root principal's
+// access to the agent's project ended. An agent is held while it has at
+// least one active hold (ClearedAt nil). There is at most one active hold
+// per (AgentID, RootPrincipalID).
+type AgentHold struct {
+	ID                string                `json:"id"`
+	AgentID           string                `json:"agentId"`
+	ProjectID         string                `json:"projectId"`
+	Cause             AgentHoldCause        `json:"cause"`
+	RootPrincipalType string                `json:"rootPrincipalType"`
+	RootPrincipalID   string                `json:"rootPrincipalId"`
+	ViaAgentID        string                `json:"viaAgentId,omitempty"`
+	Trigger           MembershipLossTrigger `json:"trigger"`
+	ActorKind         string                `json:"actorKind"`
+	ActorID           string                `json:"actorId"`
+	CorrelationID     string                `json:"correlationId"`
+	CreatedAt         time.Time             `json:"createdAt"`
+	ClearedAt         *time.Time            `json:"clearedAt,omitempty"`
+	ClearedByKind     string                `json:"clearedByKind,omitempty"`
+	ClearedByID       string                `json:"clearedById,omitempty"`
+	ClearReason       string                `json:"clearReason,omitempty"`
+}
+
+// AgentHoldRootUser is the only AgentHold.RootPrincipalType accepted.
+const AgentHoldRootUser = "user"
+
+// ClearActorUser is the only ClearActor kind ClearAgentHolds accepts.
+const ClearActorUser = "user"
+
+// ClearActor is the principal clearing agent holds.
+type ClearActor struct {
+	Kind string
+	ID   string
+}
+
+// ErrInvalidActor is returned by ClearAgentHolds when the actor is not a
+// user principal. It wraps ErrInvalidInput.
+var ErrInvalidActor = fmt.Errorf("%w: agent holds can only be cleared by a user principal", ErrInvalidInput)
+
+// =============================================================================
+// Membership Loss Checks (durable re-evaluation work items)
+// =============================================================================
+
+// ErrClaimLost is returned by CompleteMembershipLossCheck and
+// FailMembershipLossCheck when the check is no longer held by the caller's
+// claim: it was claimed again after the lease expired, or it no longer
+// exists.
+var ErrClaimLost = errors.New("membership loss check claim lost")
+
+// MembershipLossCheck asks the hub to re-evaluate UserID's access to
+// ProjectID (every project where the user roots agents when ProjectID is
+// empty) and the agents rooted at the user.
+type MembershipLossCheck struct {
+	ID            string                `json:"id"`
+	UserID        string                `json:"userId"`
+	ProjectID     string                `json:"projectId,omitempty"`
+	Trigger       MembershipLossTrigger `json:"trigger"`
+	ActorKind     string                `json:"actorKind"`
+	ActorID       string                `json:"actorId"`
+	CorrelationID string                `json:"correlationId"`
+	CreatedAt     time.Time             `json:"createdAt"`
+	Attempts      int                   `json:"attempts"`
+	LastError     string                `json:"lastError,omitempty"`
+	LeaseUntil    *time.Time            `json:"leaseUntil,omitempty"`
+}
+
 // =============================================================================
 // Agent Credentials (Permissions Foundation Phase 1H)
 // =============================================================================
 
 // AgentCredential represents a tracked agent JWT token credential.
 type AgentCredential struct {
-	ID           string     `json:"id"`
-	AgentID      string     `json:"agent_id"`
-	ProjectID    string     `json:"project_id"`
-	TokenJTIHash string     `json:"token_jti_hash"`
+	ID           string `json:"id"`
+	AgentID      string `json:"agent_id"`
+	ProjectID    string `json:"project_id"`
+	TokenJTIHash string `json:"token_jti_hash"`
+	// RunID is the agent run the token was issued for; empty for a token
+	// issued without one.
+	RunID        string     `json:"-"`
 	IssuedAt     time.Time  `json:"issued_at"`
 	ExpiresAt    time.Time  `json:"expires_at"`
 	RevokedAt    *time.Time `json:"revoked_at,omitempty"`

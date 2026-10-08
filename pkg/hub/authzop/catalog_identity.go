@@ -319,6 +319,34 @@ var identityOperations = []OperationSpec{
 	// Domain: credential — token and credential management
 	// =====================================================================
 	{
+		ID:          "credential.token.read",
+		Domain:      "credential",
+		Description: "List or read the caller's own user access tokens",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/auth/tokens", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/auth/tokens/{id}", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "self-principal",
+		BasePermission:   "user.read",
+		Effects:          []SecurityEffect{EffectListScoped, EffectReadOne},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestSessionOnlyGate_ReasonIsReported"},
+		},
+		Exemptions: []Exemption{{
+			Kind:   ExemptionAuthenticationOnly,
+			Reason: "Token reads are authenticated-only (user reads own tokens); no per-resource permission required beyond session validity",
+			Scope:  "self-token management only",
+			Waives: []WaivedObligation{WaiveBasePermission},
+		}},
+		Bearer: SessionOnly(ReasonCredentialManagement),
+	},
+	{
 		ID:          "credential.token.create",
 		Domain:      "credential",
 		Description: "Create a user access token (UAT)",
@@ -461,6 +489,50 @@ var identityOperations = []OperationSpec{
 		TestRefs:    []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
 	},
 	{
+		ID:          "user.admin.provision",
+		Domain:      "user.admin",
+		Description: "Pre-register a user (status invited) through POST /api/v1/users; invitation-equivalent, shares the invite creation core; no role, no grants",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users", Method: "POST"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "hub-scoped",
+		BasePermission:   "user.invite",
+		// EffectCreateResource: the invited row. EffectIssueCredential and
+		// GovernanceIssuerCredential label it an admission-conferring
+		// record, as for user.admin.invite: under invite_only it admits a
+		// later sign-in through a configured provider.
+		Effects:        []SecurityEffect{EffectCreateResource, EffectIssueCredential},
+		DelegationKind: DelegationNone,
+		Governance: &GovernancePolicy{
+			Kind:        GovernanceIssuerCredential,
+			Description: "Pre-registration admits sign-in under invite_only, identical to user.admin.invite",
+		},
+		AuthorityEval: AuthorityEvalNone,
+		AuditObligation: &AuditObligation{
+			EventType:     "user.admin.provision",
+			ContextFields: []string{"actor_id", "credential_id", "credential_kind"},
+			AfterFields:   []string{"target_user_id", "email", "status", "display_name"},
+			Atomic:        true,
+		},
+		// forbidden: rows 4, 4a, 5 and 8 (row 4a carries the
+		// dev_auth_not_supported reason, row 5 the session-only reason);
+		// user_suspended: the auth middleware (row 3); conflict: an
+		// existing record (rows 15-17); role_assignment_forbidden: the
+		// denial-log classification of a request that names a role (row
+		// 12, wire code unprocessable). credential_insufficient is added
+		// with hub token admission (rows 6-7).
+		DenialCodes: []DenialCode{DenialForbidden, DenialUserSuspended, DenialConflict,
+			DenialRoleAssignmentForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestHandleProvisionUser"},
+		},
+		// Token admission opens with the hub UAT phase of this operation.
+		Bearer: SessionOnly(ReasonGovernancePending),
+	},
+	{
 		ID:          "user.admin.promote",
 		Domain:      "user.admin",
 		Description: "Promote or demote a user's administrative level (dispatched from PATCH /api/v1/users/{id} when role field is present)",
@@ -508,8 +580,9 @@ var identityOperations = []OperationSpec{
 			Atomic:        true,
 		},
 		// last_owner: the user is the last active owner of a project.
-		// conflict: last super-admin, self-delete, or the user's role
-		// bindings changed concurrently during the delete.
+		// conflict: last super-admin, self-delete, the user still has
+		// agents (owned, descendants, or started by their schedules), or
+		// the user's role bindings changed concurrently during the delete.
 		DenialCodes: []DenialCode{DenialForbidden, DenialLastOwner, DenialConflict},
 		TestRefs:    []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
 		Bearer:      SessionOnly(ReasonGovernancePending),
@@ -676,29 +749,6 @@ var identityOperations = []OperationSpec{
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
 	},
 	{
-		ID:          "user.provision",
-		Domain:      "user",
-		Description: "Create a user directly through the API; refused for every caller, because sign-in flows create users",
-		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users", Method: "POST"},
-		},
-		Principals:       []PrincipalKind{PrincipalUser},
-		Credentials:      []CredentialKind{CredentialSessionJWT},
-		ResourceResolver: "none",
-		Effects:          []SecurityEffect{EffectCreateResource},
-		DelegationKind:   DelegationNone,
-		AuthorityEval:    AuthorityEvalNone,
-		DenialCodes:      []DenialCode{DenialForbidden},
-		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestBearerDisposition_EveryRoutePatternCovered"}},
-		Exemptions: []Exemption{{
-			Kind:   ExemptionInternalOnly,
-			Reason: "Direct user creation is refused for every caller; user records come from sign-in flows",
-			Scope:  "direct user creation",
-			Waives: []WaivedObligation{WaiveBasePermission},
-		}},
-		Bearer: BearerDisposition{Kind: BearerOutOfScope, Owner: BearerOwnerUserProvisioning},
-	},
-	{
 		ID:          "user.session.logout",
 		Domain:      "user",
 		Description: "Sign-in flow logout step; the hub holds no server-side session state for it to change",
@@ -719,5 +769,62 @@ var identityOperations = []OperationSpec{
 			Waives: []WaivedObligation{WaiveBasePermission, WaiveDenialCodes},
 		}},
 		Bearer: NonUser(),
+	},
+	{
+		ID:          "user.session.revoke",
+		Domain:      "user",
+		Description: "Revoke every cookie session of a user (platform admin only)",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/{id}/revoke-sessions", Method: "POST"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "user-from-url",
+		Effects:          []SecurityEffect{EffectRevokeAuthority},
+		DelegationKind:   DelegationNone,
+		Governance: &GovernancePolicy{
+			Kind:        GovernancePeerSuperior,
+			Description: "Only an unscoped local platform admin may revoke another user's sessions",
+		},
+		AuthorityEval: AuthorityEvalNone,
+		DenialCodes:   []DenialCode{DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestSessionOnlyGate_ReasonIsReported"},
+		},
+		Exemptions: []Exemption{{
+			Kind:   ExemptionHubAdmin,
+			Reason: "Platform-admin role check (requireAdminFor); the session generation increment is logged, not audited",
+			Scope:  "user session revocation",
+			Waives: []WaivedObligation{WaiveBasePermission, WaiveAuditObligation},
+		}},
+		Bearer: SessionOnly(ReasonSessionRecovery),
+	},
+	{
+		ID:          "user.terminalworkspace",
+		Domain:      "user",
+		Description: "Read or replace the caller's own terminal workspace",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/me/terminal-workspace", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/me/terminal-workspace", Method: "PUT"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "self-principal",
+		Effects:          []SecurityEffect{EffectReadOne, EffectUpdateResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestSessionOnlyGate_ReasonIsReported"},
+		},
+		Exemptions: []Exemption{{
+			Kind:   ExemptionAuthenticationOnly,
+			Reason: "The path names no user; the subject is always the caller, so no resource permission applies",
+			Scope:  "caller's own terminal workspace",
+			Waives: []WaivedObligation{WaiveBasePermission},
+		}},
+		Bearer: SessionOnly(ReasonInteractiveState),
 	},
 }

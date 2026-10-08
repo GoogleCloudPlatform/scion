@@ -335,9 +335,9 @@ func TestPreviousRunDelete_DeferredCarriesPreviousRuns(t *testing.T) {
 	setDeleteWaitTimeout(t, func(context.Context) time.Duration { return 100 * time.Millisecond })
 	df := newDeferredDeleteFixture(t, "prevdefer", nil)
 	ctx := context.Background()
-	_, err := df.store.SetAgentRunID(ctx, df.agent.ID, "run-1")
+	_, err := df.store.SetAgentRunID(ctx, df.agent.ID, "run-1", nil)
 	require.NoError(t, err)
-	_, err = df.store.SetAgentRunID(ctx, df.agent.ID, "run-2")
+	_, err = df.store.SetAgentRunID(ctx, df.agent.ID, "run-2", nil)
 	require.NoError(t, err)
 
 	requireInDoubt(t, df, df.del(t, ""))
@@ -361,6 +361,15 @@ func TestPreviousRunDelete_DeferredCarriesPreviousRuns(t *testing.T) {
 func (f *prevRunFixture) stopAgent(t *testing.T) {
 	t.Helper()
 	a := mustGetAgent(t, f.store, f.agent.ID)
+	if a.StartClaimID != "" {
+		// A stop supersedes the start claim an in-doubt start left, as the
+		// lifecycle stop does: intent stopped, then the claim released.
+		at, err := f.store.SetRunIntent(context.Background(), a.ID, store.RunIntentStopped)
+		require.NoError(t, err)
+		_, err = f.store.ReleaseSupersededStart(context.Background(), a.ID, a.StartClaimID, at)
+		require.NoError(t, err)
+		a = mustGetAgent(t, f.store, f.agent.ID)
+	}
 	if a.Phase != string(state.PhaseStopped) {
 		a.Phase = string(state.PhaseStopped)
 		require.NoError(t, f.store.UpdateAgent(context.Background(), a))
@@ -466,7 +475,7 @@ func TestPreviousRunDelete_MidLoopDeferral_HandsOffRemainingRuns(t *testing.T) {
 	df.srv.SetDispatcher(d)
 	ctx := context.Background()
 	for _, r := range []string{"run-1", "run-2", "run-3"} {
-		_, err := df.store.SetAgentRunID(ctx, df.agent.ID, r)
+		_, err := df.store.SetAgentRunID(ctx, df.agent.ID, r, nil)
 		require.NoError(t, err)
 	}
 

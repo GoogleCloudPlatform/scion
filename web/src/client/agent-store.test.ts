@@ -23,7 +23,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { agent, createHarness, settle } from './__fixtures__/agent-store-harness.js';
-import { AgentStore, agentQueryKey } from './agent-store.js';
+import { AGENT_PROBE_INTERVAL_MS, AgentStore, agentQueryKey } from './agent-store.js';
 import type { AgentListSnapshot } from './agent-store.js';
 import { apiFetch } from './api.js';
 import { StateManager, stateManager } from './state.js';
@@ -104,7 +104,7 @@ describe('AgentStore coalescing', () => {
     await h.connect();
     await loading;
 
-    expect(h.server.requests).toEqual(['/api/v1/agents?limit=200']);
+    expect(h.server.requests).toEqual(['/api/v1/agents?view=compact&limit=200']);
   });
 
   it('one caller aborting detaches only that caller; the walk continues for the others', async () => {
@@ -250,6 +250,133 @@ describe('AgentStore coalescing', () => {
     expect(done.complete).toBe(true);
   });
 
+  it('a caller joining a walk after its first page hears the rows so far at once', async () => {
+    const h = createHarness(many(5), { pageSize: 2 });
+    const realFetch = h.server.fetch.getMockImplementation()!;
+    let releasePage2 = (): void => {};
+    const page2 = new Promise<void>((resolve) => {
+      releasePage2 = resolve;
+    });
+    h.server.fetch.mockImplementation(async (path, options) => {
+      if (path.includes('cursor=')) await page2;
+      return realFetch(path, options);
+    });
+    const first = h.store.ensure(HUB);
+    await h.connect();
+    expect(ids(h.store.peek(HUB))).toEqual(['a0', 'a1']);
+
+    const progress: AgentListSnapshot[] = [];
+    const joined = h.store.ensure(HUB, { onProgress: (s) => progress.push(s) });
+    await settle();
+    expect(progress.map(ids)).toEqual([['a0', 'a1']]);
+    expect(progress[0]?.status).toBe('loading');
+
+    releasePage2();
+    await Promise.all([first, joined]);
+    expect(h.server.walks()).toBe(1);
+    expect(progress.map((s) => s.agents.length)).toEqual([2, 4, 5]);
+  });
+
+  it('a caller joining a walk hears progress in order, never an older snapshot after a newer one', async () => {
+    const h = createHarness(many(5), { pageSize: 2 });
+    const realFetch = h.server.fetch.getMockImplementation()!;
+    h.server.fetch.mockImplementation(async (path, options) => {
+      if (path.includes('cursor=')) await new Promise<void>(() => {});
+      return realFetch(path, options);
+    });
+    void h.store.ensure(HUB);
+    await h.connect();
+    const feed = h.feeds[0];
+
+    const progress: AgentListSnapshot[] = [];
+    void h.store.ensure(HUB, { onProgress: (s) => progress.push(s) });
+    // In the same turn as the join, a feed change publishes a newer
+    // snapshot of the walk's rows (dispatched directly: a real flush waits
+    // for the next frame).
+    feed.seedAgents([agent('a0', { activity: 'working' })]);
+    feed.dispatchEvent(
+      new CustomEvent('agents-changed', {
+        detail: {
+          data: { upserted: ['a0'], deleted: [], unknown: new Map(), generation: 0 },
+        },
+      })
+    );
+    await settle();
+
+    expect(progress.length).toBeGreaterThan(0);
+    const versions = progress.map((s) => s.version);
+    expect(versions).toEqual([...versions].sort((a, b) => a - b));
+    expect(new Set(versions).size).toBe(versions.length);
+    expect(progress[progress.length - 1]?.agents.find((a) => a.id === 'a0')?.activity).toBe(
+      'working'
+    );
+  });
+
+  it('a caller joining a background walk hears no progress: the list stays ready', async () => {
+    const h = createHarness(many(3), { pageSize: 2, probeFullWalkMs: 0 });
+    h.store.retain(HUB, () => {});
+    const first = h.store.ensure(HUB);
+    await h.connect();
+    await first;
+    const walksBefore = h.server.walks();
+
+    // The next probe tick walks in the background; its pages are held.
+    const release = h.server.pause();
+    await vi.advanceTimersByTimeAsync(AGENT_PROBE_INTERVAL_MS);
+    expect(h.server.walks()).toBe(walksBefore + 1);
+    expect(h.store.peek(HUB)?.status).toBe('ready');
+    // With the feed down, ensure joins the walk instead of answering from memory.
+    h.stream().drop();
+    await settle();
+
+    const progress: AgentListSnapshot[] = [];
+    const joined = h.store.ensure(HUB, { onProgress: (s) => progress.push(s) });
+    await settle();
+    expect(progress).toEqual([]);
+
+    release();
+    await settle();
+    // Whatever follows, a progress call never carries a ready snapshot.
+    expect(progress.filter((p) => p.status !== 'loading')).toEqual([]);
+    void joined.catch(() => {});
+    h.store.destroy();
+  });
+
+  it('a caller that joins a walk and leaves at once hears none of its rows', async () => {
+    const h = createHarness(many(5), { pageSize: 2 });
+    const realFetch = h.server.fetch.getMockImplementation()!;
+    h.server.fetch.mockImplementation(async (path, options) => {
+      if (path.includes('cursor=')) await new Promise<void>(() => {});
+      return realFetch(path, options);
+    });
+    void h.store.ensure(HUB);
+    await h.connect();
+
+    const progress: AgentListSnapshot[] = [];
+    const controller = new AbortController();
+    const joined = h.store.ensure(HUB, {
+      signal: controller.signal,
+      onProgress: (s) => progress.push(s),
+    });
+    controller.abort();
+    await expect(joined).rejects.toThrow();
+    await settle();
+    expect(progress).toEqual([]);
+  });
+
+  it('a caller joining a walk before any page lands hears nothing until one does', async () => {
+    const h = createHarness(many(3), { pageSize: 2 });
+    const first = h.store.ensure(HUB);
+    const progress: AgentListSnapshot[] = [];
+    const joined = h.store.ensure(HUB, { onProgress: (s) => progress.push(s) });
+    await settle();
+    expect(progress).toEqual([]);
+
+    await h.connect();
+    await Promise.all([first, joined]);
+    expect(progress.map((s) => s.agents.length)).toEqual([2, 3]);
+  });
+
   it('a walk waits for the feed to connect before its first request', async () => {
     const h = createHarness(many(1));
     const loading = h.store.ensure(HUB);
@@ -269,7 +396,7 @@ describe('AgentStore coalescing', () => {
 
     expect(snapshot.status).toBe('ready');
     expect(h.server.walks()).toBe(1);
-    expect(h.feeds[0]?.isAgentSetComplete('full')).toBe(false);
+    expect(h.feeds[0]?.isAgentSetComplete('compact')).toBe(false);
 
     await h.connect();
     await h.store.ensure(HUB);
@@ -371,8 +498,8 @@ describe('AgentStore coalescing', () => {
     await Promise.all(loads);
 
     expect(h.server.requests.sort()).toEqual([
-      '/api/v1/agents?scope=mine&label=team%3Da&limit=200',
-      '/api/v1/projects/p%201/agents?limit=200',
+      '/api/v1/agents?scope=mine&label=team%3Da&view=compact&limit=200',
+      '/api/v1/projects/p%201/agents?view=compact&limit=200',
     ]);
   });
 });
@@ -766,15 +893,15 @@ describe('AgentStore refetch triggers', () => {
     vi.mocked(apiFetch).mockResolvedValue({
       ok: true,
       status: 200,
-      json: () => Promise.resolve({ agents: [] }),
+      json: () => Promise.resolve({ agents: [{ id: 'g1', name: 'g1', projectId: 'p1' }] }),
     } as unknown as Response);
     const setScope = vi.spyOn(StateManager.prototype, 'setScope');
     const store = new AgentStore({ events: null });
 
-    await store.ensure(HUB);
+    const snapshot = await store.ensure(HUB);
 
     expect(apiFetch).toHaveBeenCalledWith(
-      '/api/v1/agents?limit=200',
+      '/api/v1/agents?view=compact&limit=200',
       expect.objectContaining({ suppressAccessDeniedToast: true })
     );
     // The default feed is a StateManager of its own, never the app-wide one.
@@ -782,6 +909,10 @@ describe('AgentStore refetch triggers', () => {
     const feed = setScope.mock.contexts[setScope.mock.calls.length - 1];
     expect(feed).toBeInstanceOf(StateManager);
     expect(feed).not.toBe(stateManager);
+    // Its compact rows stay in that feed.
+    expect(snapshot.agents.map((a) => a.id)).toEqual(['g1']);
+    expect((feed as StateManager).getAgent('g1')).toBeDefined();
+    expect(stateManager.getAgent('g1')).toBeUndefined();
     store.destroy();
   });
 });

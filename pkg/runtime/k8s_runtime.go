@@ -490,12 +490,7 @@ func filterDescriptiveLabels(agentName string, labels map[string]string) map[str
 
 func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName string, err error) {
 	fmt.Printf("Starting agent '%s' on Kubernetes...\n", config.Name)
-	namespace := r.DefaultNamespace
-	if ns, ok := config.Labels["scion.namespace"]; ok {
-		namespace = ns
-	} else if ns, ok := config.Labels["namespace"]; ok {
-		namespace = ns
-	}
+	namespace := r.runNamespace(config.Labels)
 
 	if config.Name == "" {
 		config.Name = fmt.Sprintf("scion-%d", time.Now().UnixNano())
@@ -1497,14 +1492,33 @@ func podNameForAgentObject(objectName string) (string, bool) {
 //
 // NotFound when deleting an object counts as success.
 //
+// Each delete carries a UID precondition taken from the listed object
+// (k8sUIDPrecondition, as deleteRun's pod-gone branch uses): the per-agent
+// object names are fixed, so a start can recreate an object under the same
+// name between the List and the Delete. Such an object has a new UID; its
+// delete fails with Conflict, which leaves it in place and is not an error.
+//
+// With a runID (ptone/scion#2550), an object labelled with another run is
+// never removed, whatever its pod: only runID's objects and legacy objects
+// with no run label are candidates (k8sRunMatches), as deleteRun's pod-gone
+// branch keeps another run's objects. The per-agent object names are fixed
+// per agent, so without this a delete naming an older run would remove the
+// Secrets a newer run's start created before its pod. An empty runID
+// selects by name and project only, as before.
+//
 // Objects are looked up in the default namespace, or in every namespace
 // when ListAllNamespaces is set, the same scope List uses to find pods. An
 // agent started in another namespace (the scion.namespace label) with
 // ListAllNamespaces off is therefore not found, and its objects are left
 // in place rather than searched for.
-func (r *KubernetesRuntime) CleanupAgentResources(ctx context.Context, agentName, projectID string) error {
+func (r *KubernetesRuntime) CleanupAgentResources(ctx context.Context, agentName, projectID, runID string) error {
 	if agentName == "" || projectID == "" {
 		return nil
+	}
+	if runID != "" {
+		if err := validateRunIDLabel(runID); err != nil {
+			return err
+		}
 	}
 	selector, err := labels.ValidatedSelectorFromSet(map[string]string{
 		"scion.name":               agentName,
@@ -1521,7 +1535,10 @@ func (r *KubernetesRuntime) CleanupAgentResources(ctx context.Context, agentName
 	// removable reports whether an object may be removed (see the rules
 	// above). A non-nil error means the pod lookup failed and the object
 	// must be kept.
-	removable := func(ns, objectName string) (bool, error) {
+	removable := func(ns, objectName string, objLabels map[string]string) (bool, error) {
+		if runID != "" && !k8sRunMatches(objLabels[api.LabelRunID], runID) {
+			return false, nil
+		}
 		podName, ok := podNameForAgentObject(objectName)
 		if !ok {
 			return false, nil
@@ -1542,7 +1559,7 @@ func (r *KubernetesRuntime) CleanupAgentResources(ctx context.Context, agentName
 		errs = append(errs, fmt.Errorf("failed to list agent Secrets: %w", err))
 	} else {
 		for _, s := range secrets.Items {
-			ok, err := removable(s.Namespace, s.Name)
+			ok, err := removable(s.Namespace, s.Name, s.Labels)
 			if err != nil {
 				errs = append(errs, fmt.Errorf("failed to check pod for Secret %s/%s: %w", s.Namespace, s.Name, err))
 				continue
@@ -1550,7 +1567,15 @@ func (r *KubernetesRuntime) CleanupAgentResources(ctx context.Context, agentName
 			if !ok {
 				continue
 			}
-			if err := r.Client.Clientset.CoreV1().Secrets(s.Namespace).Delete(ctx, s.Name, metav1.DeleteOptions{}); err != nil && !k8serrors.IsNotFound(err) {
+			err = r.Client.Clientset.CoreV1().Secrets(s.Namespace).Delete(ctx, s.Name, metav1.DeleteOptions{
+				Preconditions: k8sUIDPrecondition(s.UID),
+			})
+			if k8serrors.IsConflict(err) {
+				runtimeLog.Info("Left a per-agent object recreated under the same name since it was listed",
+					"kind", "Secret", "name", s.Name, "agent", agentName, "namespace", s.Namespace, "run_id", runID)
+				continue
+			}
+			if err != nil && !k8serrors.IsNotFound(err) {
 				errs = append(errs, fmt.Errorf("failed to delete Secret %s/%s: %w", s.Namespace, s.Name, err))
 				continue
 			}
@@ -1568,7 +1593,7 @@ func (r *KubernetesRuntime) CleanupAgentResources(ctx context.Context, agentName
 		} else {
 			for _, spc := range spcs.Items {
 				ns, name := spc.GetNamespace(), spc.GetName()
-				ok, err := removable(ns, name)
+				ok, err := removable(ns, name, spc.GetLabels())
 				if err != nil {
 					errs = append(errs, fmt.Errorf("failed to check pod for SecretProviderClass %s/%s: %w", ns, name, err))
 					continue
@@ -1576,7 +1601,15 @@ func (r *KubernetesRuntime) CleanupAgentResources(ctx context.Context, agentName
 				if !ok {
 					continue
 				}
-				if err := r.Client.DeleteSecretProviderClass(ctx, ns, name); err != nil && !k8serrors.IsNotFound(err) {
+				err = r.Client.Dynamic().Resource(k8s.SecretProviderClassGVR).Namespace(ns).Delete(ctx, name, metav1.DeleteOptions{
+					Preconditions: k8sUIDPrecondition(spc.GetUID()),
+				})
+				if k8serrors.IsConflict(err) {
+					runtimeLog.Info("Left a per-agent object recreated under the same name since it was listed",
+						"kind", "SecretProviderClass", "name", name, "agent", agentName, "namespace", ns, "run_id", runID)
+					continue
+				}
+				if err != nil && !k8serrors.IsNotFound(err) {
 					errs = append(errs, fmt.Errorf("failed to delete SecretProviderClass %s/%s: %w", ns, name, err))
 					continue
 				}
@@ -1673,6 +1706,62 @@ func sharedDirPVCName(projectName, dirName string) string {
 	return projectRWXClaimName(projectName, "shared", dirName)
 }
 
+// runNamespace returns the namespace Run places an agent with labels in:
+// the scion.namespace label, else the namespace label, else
+// DefaultNamespace.
+func (r *KubernetesRuntime) runNamespace(labels map[string]string) string {
+	if ns, ok := labels["scion.namespace"]; ok {
+		return ns
+	}
+	if ns, ok := labels["namespace"]; ok {
+		return ns
+	}
+	return r.DefaultNamespace
+}
+
+// sharedDirsHaveOwnClaims reports whether the local shared dirs of config
+// get a claim of their own (createSharedDirPVCs creates or reuses one per
+// dir). They do not when the workspace is on nfs with a bound claim: they
+// are then served by subPath from the workspace claim.
+func sharedDirsHaveOwnClaims(config RunConfig) bool {
+	return config.WorkspaceBackendName != "nfs" || config.NFSPVClaimName == ""
+}
+
+// SharedDirUsesClaim implements SharedDirClaimChecker with the same rules
+// as createSharedDirPVCs: a dir served from the shared_dir_storage nfs
+// export has no claim of its own, and neither has any dir when
+// sharedDirsHaveOwnClaims is false.
+func (r *KubernetesRuntime) SharedDirUsesClaim(config RunConfig, dirName string) bool {
+	if config.SharedDirStorage.Serves(dirName) {
+		return false
+	}
+	return sharedDirsHaveOwnClaims(config)
+}
+
+// SharedDirClaimExists implements SharedDirClaimChecker: it looks up, by
+// name, the shared-dir PVC that createSharedDirPVCs would create or reuse
+// for dirName, in the namespace Run would use for config. Any error other
+// than NotFound is returned.
+func (r *KubernetesRuntime) SharedDirClaimExists(ctx context.Context, config RunConfig, dirName string) (bool, error) {
+	projectName := projectkeys.ProjectNameFromLabels(config.Labels)
+	if projectName == "" {
+		return false, fmt.Errorf("cannot look up the shared dir PVC: missing scion.project label")
+	}
+	if r.Client == nil || r.Client.Clientset == nil {
+		return false, fmt.Errorf("cannot look up the shared dir PVC: no Kubernetes client")
+	}
+	namespace := r.runNamespace(config.Labels)
+	pvcName := sharedDirPVCName(projectName, dirName)
+	_, err := r.Client.Clientset.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, pvcName, metav1.GetOptions{})
+	if err == nil {
+		return true, nil
+	}
+	if k8serrors.IsNotFound(err) {
+		return false, nil
+	}
+	return false, fmt.Errorf("looking up shared dir PVC %s/%s: %w", namespace, pvcName, err)
+}
+
 // defaultSharedDirSize is the default PVC size when not specified in settings.
 const defaultSharedDirSize = "10Gi"
 
@@ -1709,7 +1798,7 @@ func (r *KubernetesRuntime) createSharedDirPVCs(ctx context.Context, namespace s
 
 	// NFS backend: shared dirs use subPaths on the workspace NFS PVC,
 	// no separate PVCs needed (design §5.3).
-	if config.WorkspaceBackendName == "nfs" && config.NFSPVClaimName != "" {
+	if !sharedDirsHaveOwnClaims(config) {
 		runtimeLog.Info("NFS backend: shared dirs served via NFS subPath, skipping PVC creation",
 			"shared_dir_count", len(sharedDirs))
 		return nil
@@ -2135,6 +2224,14 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		},
 		SupplementalGroups: sharedDirSupplementalGroups(config, fsGroupGID),
 	}
+	// SCION_SUPPLEMENTAL_GIDS is broker-owned: drop any template, user env
+	// or secret value, and set it to the nfs leaf gids the pod holds (its
+	// supplementalGroups plus a leaf gid skipped there because it equals
+	// fsGroup, which the pod holds through fsGroup), so sciontool clears the
+	// umask group bits for nfs shared-dir writers (ptone/scion#3155). Pods start
+	// as the agent user via runAsUser, so sciontool does no privilege drop
+	// here; the variable only drives the umask.
+	envVars = withSupplementalGIDsEnv(envVars, sharedDirGroups(config))
 
 	// Determine image pull policy
 	pullPolicy := corev1.PullIfNotPresent
@@ -2509,87 +2606,18 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		pod.Spec.Containers[0].VolumeMounts = append(pod.Spec.Containers[0].VolumeMounts, extraVolumeMounts...)
 	}
 
-	// Apply resource requests/limits from the common resource spec with safe parsing.
-	// When no resources are specified, apply defaults so that GKE Autopilot
-	// (and other environments) get predictable scheduling behavior.
-	if config.Resources == nil {
-		config.Resources = &api.ResourceSpec{
-			Requests: api.ResourceList{CPU: "250m", Memory: "512Mi"},
-			Limits:   api.ResourceList{CPU: "2", Memory: "4Gi"},
-			Disk:     "10Gi",
-		}
+	// Apply resource requests/limits from the resolved spec and
+	// kubernetes.resources. Default requests fill only resources with neither a
+	// request nor a limit (see buildK8sResourceRequirements).
+	var k8sResources *api.K8sResources
+	if config.Kubernetes != nil {
+		k8sResources = config.Kubernetes.Resources
 	}
-	if config.Resources != nil {
-		reqs := corev1.ResourceList{}
-		limits := corev1.ResourceList{}
-		if config.Resources.Requests.CPU != "" {
-			q, err := parseResourceSafe(config.Resources.Requests.CPU, "requests.cpu")
-			if err != nil {
-				return nil, err
-			}
-			reqs[corev1.ResourceCPU] = q
-		}
-		if config.Resources.Requests.Memory != "" {
-			q, err := parseResourceSafe(config.Resources.Requests.Memory, "requests.memory")
-			if err != nil {
-				return nil, err
-			}
-			reqs[corev1.ResourceMemory] = q
-		}
-		if config.Resources.Limits.CPU != "" {
-			q, err := parseResourceSafe(config.Resources.Limits.CPU, "limits.cpu")
-			if err != nil {
-				return nil, err
-			}
-			limits[corev1.ResourceCPU] = q
-		}
-		if config.Resources.Limits.Memory != "" {
-			q, err := parseResourceSafe(config.Resources.Limits.Memory, "limits.memory")
-			if err != nil {
-				return nil, err
-			}
-			limits[corev1.ResourceMemory] = q
-		}
-		if config.Resources.Disk != "" {
-			q, err := parseResourceSafe(config.Resources.Disk, "disk (ephemeral-storage)")
-			if err != nil {
-				return nil, err
-			}
-			reqs[corev1.ResourceEphemeralStorage] = q
-			limits[corev1.ResourceEphemeralStorage] = q
-		}
-		if len(reqs) > 0 || len(limits) > 0 {
-			pod.Spec.Containers[0].Resources = corev1.ResourceRequirements{
-				Requests: reqs,
-				Limits:   limits,
-			}
-		}
+	containerResources, err := buildK8sResourceRequirements(config.Resources, k8sResources)
+	if err != nil {
+		return nil, err
 	}
-
-	// Merge Kubernetes-specific resources on top (supports extended resources like GPUs).
-	if config.Kubernetes != nil && config.Kubernetes.Resources != nil {
-		res := &pod.Spec.Containers[0].Resources
-		if res.Requests == nil {
-			res.Requests = corev1.ResourceList{}
-		}
-		if res.Limits == nil {
-			res.Limits = corev1.ResourceList{}
-		}
-		for k, v := range config.Kubernetes.Resources.Requests {
-			q, err := parseResourceSafe(v, fmt.Sprintf("kubernetes.resources.requests.%s", k))
-			if err != nil {
-				return nil, err
-			}
-			res.Requests[corev1.ResourceName(k)] = q
-		}
-		for k, v := range config.Kubernetes.Resources.Limits {
-			q, err := parseResourceSafe(v, fmt.Sprintf("kubernetes.resources.limits.%s", k))
-			if err != nil {
-				return nil, err
-			}
-			res.Limits[corev1.ResourceName(k)] = q
-		}
-	}
+	pod.Spec.Containers[0].Resources = containerResources
 
 	// Process shared directories — mount shared-dir volumes.
 	// Build a set of shared dir targets so we can skip them in the regular volume loop.
@@ -4376,4 +4404,26 @@ func sharedDirSupplementalGroups(config RunConfig, fsGroup int64) []int64 {
 		out = append(out, gid)
 	}
 	return out
+}
+
+// withSupplementalGIDsEnv removes every SupplementalGIDsEnvVar entry from
+// env and, when groups is non-empty, appends the broker's own value listing
+// exactly those gids (ptone/scion#3155).
+func withSupplementalGIDsEnv(env []corev1.EnvVar, groups []int64) []corev1.EnvVar {
+	// A new backing array (room for the broker's own entry), so the
+	// caller's slice is never modified.
+	out := make([]corev1.EnvVar, 0, len(env)+1)
+	for _, ev := range env {
+		if ev.Name != SupplementalGIDsEnvVar {
+			out = append(out, ev)
+		}
+	}
+	if len(groups) == 0 {
+		return out
+	}
+	ids := make([]string, 0, len(groups))
+	for _, gid := range groups {
+		ids = append(ids, strconv.FormatInt(gid, 10))
+	}
+	return append(out, corev1.EnvVar{Name: SupplementalGIDsEnvVar, Value: strings.Join(ids, ",")})
 }

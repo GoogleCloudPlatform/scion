@@ -14,7 +14,11 @@
 
 package hub
 
-import "net/http"
+import (
+	"net/http"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
+)
 
 // RouteClassification categorizes routes by their authentication/authorization model.
 type RouteClassification string
@@ -53,6 +57,21 @@ type RouteMetadata struct {
 	// Action is the action from the permission registry (e.g., "read", "create", "update").
 	// Only meaningful when Classification == RoutePolicy.
 	Action string
+
+	// BearerTarget selects the hub-level target the RouteHubAdmin guard
+	// checks for a route that declares a Permission (routeGuardTarget):
+	// "" checks {Type: Resource, ID: "hub"}; "hub_instance" checks
+	// hubScopedResource(Resource, "hub"); "hub_collection" checks a
+	// collection-level request with hubCollectionEvidence(Permission).
+	// It is set only on a route whose catalog operations admit a user
+	// access token on the hub boundary, and never on a "hub" resource
+	// route, whose target already resolves to the hub scope.
+	BearerTarget string
+	// SessionOnly, when set, is the catalog's session-only reason for the
+	// route: the RouteHubAdmin guard refuses any credential other than an
+	// interactive session or dev credential with a session-only refusal
+	// (session_only_gate.go), before the permission decision.
+	SessionOnly authzop.SessionOnlyReason
 }
 
 // routeMetadataTable maps every registered mux pattern to its authorization metadata.
@@ -419,6 +438,13 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/artifacts/shared/", RouteID: "artifacts.shared",
 		Classification: RoutePublic,
 	},
+	// The view route serves one version's files to a sandboxed frame and
+	// authenticates by the view capability in its path only (the service
+	// verifies it on every request).
+	"/api/v1/artifacts/view/": {
+		Pattern: "/api/v1/artifacts/view/", RouteID: "artifacts.view",
+		Classification: RoutePublic,
+	},
 
 	// -------------------------------------------------------------------------
 	// Policy: Skills
@@ -730,10 +756,33 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Classification: RouteHubAdmin,
 		Permission:     "hub.experiments.update", Resource: "hub", Action: "update",
 	},
+	// Conduit grant key rotation, behind hub.conduit. Returns kids and
+	// timestamps only.
+	"/api/v1/admin/conduit/grant-keys/rotate": {
+		Pattern: "/api/v1/admin/conduit/grant-keys/rotate", RouteID: "admin.conduit.grantKeys.rotate",
+		Classification: RouteHubAdmin,
+		Permission:     "hub.conduit_grant_keys.execute", Resource: "hub", Action: "execute",
+		SessionOnly: authzop.ReasonCredentialManagement,
+	},
 	"/api/v1/admin/agents/reset-auth-all": {
 		Pattern: "/api/v1/admin/agents/reset-auth-all", RouteID: "admin.agents.resetAuthAll",
 		Classification: RouteHubAdmin,
 		Permission:     "hub.auth_reset.execute", Resource: "hub", Action: "execute",
+	},
+	// Delegation-provenance adoption recovery: hub system admin on a session
+	// or local development credential only (checked again in the handler).
+	// Deliberately no registered permission, so it cannot be delegated.
+	"/api/v1/admin/delegation-adoption": {
+		Pattern: "/api/v1/admin/delegation-adoption", RouteID: "admin.delegationAdoption",
+		Classification: RouteHubAdmin,
+	},
+	"/api/v1/admin/delegation-adoption/previews": {
+		Pattern: "/api/v1/admin/delegation-adoption/previews", RouteID: "admin.delegationAdoption.previews",
+		Classification: RouteHubAdmin,
+	},
+	"/api/v1/admin/delegation-adoption/commits": {
+		Pattern: "/api/v1/admin/delegation-adoption/commits", RouteID: "admin.delegationAdoption.commits",
+		Classification: RouteHubAdmin,
 	},
 	"/api/v1/admin/gcp-quota": {
 		Pattern: "/api/v1/admin/gcp-quota", RouteID: "admin.gcpQuota",
@@ -1150,7 +1199,15 @@ func (s *Server) routeGuard(meta RouteMetadata, next http.HandlerFunc) http.Hand
 			}
 			next(w, r)
 		case RouteHubAdmin:
-			if meta.Permission != "" && s.authzService != nil {
+			if meta.Permission != "" {
+				// A route that declares a Permission is only ever
+				// evaluated through the authorization service; without
+				// one it is refused rather than served via requireAdmin.
+				if s.authzService == nil {
+					writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError,
+						"authorization unavailable", nil)
+					return
+				}
 				// Validate route metadata completeness
 				if meta.Resource == "" || meta.Action == "" {
 					writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError,
@@ -1173,23 +1230,38 @@ func (s *Server) routeGuard(meta RouteMetadata, next http.HandlerFunc) http.Hand
 					writeForbiddenStructured(w, "", meta.Resource, Action(meta.Action))
 					return
 				}
+				target, evidence, targetOK := routeGuardTarget(meta)
+				if !targetOK {
+					writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError,
+						"route misconfigured: unknown bearer target", nil)
+					return
+				}
+				// Session-only: a route-level refusal of every non-session
+				// credential, before the permission decision. Decide still
+				// runs for a session.
+				if meta.SessionOnly != "" && !sessionCredentialAllowed(r.Context()) {
+					logAuthzDenial(r, identity, target, Action(meta.Action), "session-only operation")
+					writeSessionOnlyDenial(w, ErrCodeForbidden, "Insufficient permissions", meta.SessionOnly)
+					return
+				}
 				decision := s.authzService.Decide(r.Context(), AuthzRequest{
-					Principal:  principalContextForIdentity(user),
-					Credential: credentialContextForIdentity(user),
-					Resource:   Resource{Type: meta.Resource, ID: "hub"},
-					Action:     Action(meta.Action),
-					Permission: meta.Permission,
+					Principal:      principalContextForIdentity(user),
+					Credential:     credentialContextForIdentity(user),
+					Resource:       target,
+					Action:         Action(meta.Action),
+					Permission:     meta.Permission,
+					TargetEvidence: evidence,
 				})
 				if !decision.Allowed {
-					logAuthzDenial(r, identity, Resource{Type: meta.Resource, ID: "hub"}, Action(meta.Action), decision.Reason)
+					logAuthzDenial(r, identity, target, Action(meta.Action), decision.Reason)
 					writeForbiddenStructured(w, "", meta.Resource, Action(meta.Action))
 					return
 				}
 				next(w, r)
 			} else {
-				// Fallback: unconverted route still uses requireAdmin.
-				// This makes incremental D4 conversion safe — routes
-				// without a declared Permission behave exactly as before.
+				// Fallback: a route without a declared Permission still
+				// uses requireAdmin. This makes incremental D4 conversion
+				// safe — such routes behave exactly as before.
 				if _, ok := s.requireAdmin(w, r); !ok {
 					return
 				}

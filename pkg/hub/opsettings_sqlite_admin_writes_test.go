@@ -48,11 +48,10 @@ import (
 // self-applies, as StartPropagation arranges in production.
 func newSQLiteOpsServer(t *testing.T, bootstrap *koanf.Koanf, seed map[string]string) (*Server, store.Store, *OperationalSettings) {
 	t.Helper()
-	st, err := newTestStore(":memory:")
+	st, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create sqlite store: %v", err)
 	}
-	t.Cleanup(func() { _ = st.Close() })
 
 	ctx := context.Background()
 	for section, doc := range seed {
@@ -451,9 +450,11 @@ func TestSQLite_PutServerConfig_EmptyBodyRejected(t *testing.T) {
 
 // No-op echoes keep getting 200: GET-only fields sent back unchanged
 // (section_metadata, superseded_keys, version info, ...) and unpersisted
-// keys at the GET view's value (here an empty default_harness_auth, which the
-// admin UI always sends and GET omits). The full GET body is not a 200 echo
-// on any driver: it carries schema_version, rejected as unclassified (#938).
+// request keys at the GET view's value (here auto_inject_gcloud_adc false,
+// which GET omits). A key neither the request nor the GET view knows is
+// never an echo, even at a zero value (ptone/scion#3463). The full GET body
+// is not a 200 echo on any driver: it carries schema_version, rejected as
+// unclassified (ptone/scion#938).
 func TestSQLite_PutServerConfig_EchoAccepted(t *testing.T) {
 	tempSettingsHome(t)
 	srv, st, _ := newSQLiteOpsServer(t, nil, map[string]string{
@@ -483,7 +484,14 @@ func TestSQLite_PutServerConfig_EchoAccepted(t *testing.T) {
 		t.Errorf("echo of GET-only fields: expected 200, got %d: %s", rr.Code, rr.Body.String())
 	}
 
-	rr := putServerConfig(t, srv, `{"default_harness_auth":"","auto_inject_gcloud_adc":false,"quotas":{"enforce_broker_quotas":false}}`)
+	if rr := putServerConfig(t, srv, `{"default_harness_auth":"","quotas":{"enforce_broker_quotas":false}}`); rr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("zero-valued unknown key: expected 422, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if _, doc := hubSettingDocMap(t, st, "quotas"); doc["enforce_broker_quotas"] != true {
+		t.Fatalf("a rejected PUT must write nothing, got quotas %v", doc)
+	}
+
+	rr := putServerConfig(t, srv, `{"auto_inject_gcloud_adc":false,"quotas":{"enforce_broker_quotas":false}}`)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("zero-valued unpersisted keys with a Layer-1 change: expected 200, got %d: %s", rr.Code, rr.Body.String())
 	}

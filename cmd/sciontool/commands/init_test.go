@@ -3493,6 +3493,187 @@ func TestConfigureSharedWorkspaceGit_EnforcedRefusesWithoutUsableUID(t *testing.
 	}
 }
 
+// TestConfigureSharedWorkspaceGit_FollowsSupervisorDropDecision pins that the
+// identity configureSharedWorkspaceGit writes $HOME/.gitconfig under is the
+// identity the harness will later run as, by feeding each uid/gid/enforced
+// combination to both configureSharedWorkspaceGit and the real
+// supervisor.Supervisor and requiring the same outcome from each:
+//
+//   - drop: a usable uid/gid pair (enforced or not) runs as the container
+//     user, i.e. with a Credential for the workload;
+//   - refuse: enforced mode without a usable pair refuses outright;
+//   - self: anything else runs as this process, unchanged. That includes
+//     unenforced uid>0/gid==0, where root writes the config and the
+//     supervisor also skips the drop, so the harness reading it is root too
+//     (ptone/scion#2317).
+//
+// The supervisor's outcome is observed, not restated, so if its drop
+// predicate changes, this test fails until the git-config switch follows.
+//
+// Observation: the workload uid/gid (4242) differs from the test process and
+// both write into a 0700 t.TempDir owned by the test process. A dropped
+// child therefore never produces its file: as non-root, the Credential exec
+// itself fails with EPERM, or with EINVAL in a rootless container or user
+// namespace where 4242 is unmapped (see isUIDMapped in init.go); as root, the
+// dropped child cannot write into the directory. An undropped child always can. getuid is stubbed to 0 for
+// configureGitCommand so a non-root test process takes the same root-init
+// path production does.
+//
+// On the supervisor side, "drop" is only inferred from that expected failure
+// (EPERM or EINVAL at start as non-root, or a nonzero exit as root); any
+// other outcome fails the test. On the git side, init only logs git
+// failures, so "drop" is inferred from a missing .gitconfig. That cannot tell a dropped write from a skipped
+// one; TestConfigureSharedWorkspaceGit_UsablePairWritesConfig and
+// TestConfigureGitCommand_RootInitSetsWorkloadCredential cover that half.
+func TestConfigureSharedWorkspaceGit_FollowsSupervisorDropDecision(t *testing.T) {
+	if os.Getuid() == 4242 {
+		t.Skip("test process uid collides with the workload uid used here")
+	}
+	runningAsRoot := os.Getuid() == 0
+	origGetuid := configureGitCommandGetuid
+	configureGitCommandGetuid = func() int { return 0 }
+	t.Cleanup(func() { configureGitCommandGetuid = origGetuid })
+
+	const (
+		drop   = "drop"
+		refuse = "refuse"
+		self   = "self"
+	)
+	const w = 4242
+	for _, tc := range []struct {
+		name     string
+		uid, gid int
+		enforced bool
+		want     string
+	}{
+		{"usable pair", w, w, false, drop},
+		{"usable pair, enforced", w, w, true, drop},
+		{"uid only (gid 0)", w, 0, false, self},
+		{"uid only (gid 0), enforced", w, 0, true, refuse},
+		{"gid only (uid 0)", 0, w, false, self},
+		{"gid only (uid 0), enforced", 0, w, true, refuse},
+		{"no workload user", 0, 0, false, self},
+		{"no workload user, enforced", 0, 0, true, refuse},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Supervisor side: what identity would the harness run as?
+			marker := filepath.Join(t.TempDir(), "ran")
+			cfg := supervisor.DefaultConfig()
+			cfg.UID, cfg.GID, cfg.RequirePrivilegeDrop = tc.uid, tc.gid, tc.enforced
+			// touch is exec'd directly (no shell), so the temp path is
+			// passed as one argv element whatever characters it contains.
+			exit, supErr := supervisor.New(cfg).Run(context.Background(), []string{"touch", marker})
+			var supGot string
+			switch {
+			case errors.Is(supErr, supervisor.ErrPrivilegeDropRequired):
+				supGot = refuse
+			case supErr == nil && exit == 0 && fileExists(marker):
+				supGot = self
+			case !runningAsRoot && (errors.Is(supErr, syscall.EPERM) || errors.Is(supErr, syscall.EINVAL)):
+				// Non-root cannot set a Credential: the drop is the
+				// start failure itself. That is EPERM, or EINVAL when
+				// the workload uid is unmapped in a user namespace.
+				supGot = drop
+			case runningAsRoot && supErr == nil && exit != 0 && !fileExists(marker):
+				// Root can drop; the dropped child then cannot write
+				// into the 0700 test-owned directory.
+				supGot = drop
+			default:
+				t.Fatalf("supervisor probe: unclassifiable outcome (exit=%d, err=%v, marker=%v)", exit, supErr, fileExists(marker))
+			}
+
+			// Git-config side: what identity does the .gitconfig write use?
+			agentHome := t.TempDir()
+			gitErr := configureSharedWorkspaceGit(agentHome, tc.uid, tc.gid, tc.enforced)
+			gitGot := self
+			switch {
+			case errors.Is(gitErr, errSharedWorkspaceGitPrivilegeDropRequired):
+				gitGot = refuse
+			case gitErr != nil:
+				t.Fatalf("configureSharedWorkspaceGit: unexpected error %v", gitErr)
+			case !fileExists(filepath.Join(agentHome, ".gitconfig")):
+				gitGot = drop
+			}
+
+			if supGot != tc.want {
+				t.Errorf("supervisor outcome = %s, want %s (supervisor drop predicate changed? update this table and configureSharedWorkspaceGit together)", supGot, tc.want)
+			}
+			if gitGot != supGot {
+				t.Errorf("git config outcome = %s, supervisor outcome = %s: .gitconfig would be written under a different identity than the harness runs as", gitGot, supGot)
+			}
+			if gitGot == self {
+				if got := gitConfigGet(t, filepath.Join(agentHome, ".gitconfig"), "user.email"); got != "agent@scion.dev" {
+					t.Errorf("user.email = %q, want agent@scion.dev", got)
+				}
+			}
+		})
+	}
+}
+
+// TestConfigureSharedWorkspaceGit_UsablePairWritesConfig pins that a usable
+// uid/gid pair actually writes the shared .gitconfig, rather than skipping
+// it. The pair is the test process's own identity, so configureGitCommand
+// sets no Credential and git runs unprivileged as this process; a skipped
+// write would leave no file. Skipped when the test process uid or gid is 0,
+// because that is not a usable pair.
+func TestConfigureSharedWorkspaceGit_UsablePairWritesConfig(t *testing.T) {
+	uid, gid := os.Getuid(), os.Getgid()
+	if uid <= 0 || gid <= 0 {
+		t.Skipf("test process uid/gid %d/%d is not a usable pair", uid, gid)
+	}
+	for _, enforced := range []bool{false, true} {
+		t.Run(fmt.Sprintf("enforced=%v", enforced), func(t *testing.T) {
+			agentHome := t.TempDir()
+			if err := configureSharedWorkspaceGit(agentHome, uid, gid, enforced); err != nil {
+				t.Fatalf("configureSharedWorkspaceGit: %v", err)
+			}
+			gitconfig := filepath.Join(agentHome, ".gitconfig")
+			if got := gitConfigGet(t, gitconfig, "user.email"); got != "agent@scion.dev" {
+				t.Errorf("user.email = %q, want agent@scion.dev", got)
+			}
+			if got := gitConfigGet(t, gitconfig, "credential.helper"); got == "" {
+				t.Error("credential.helper not written")
+			}
+		})
+	}
+}
+
+// TestConfigureGitCommand_RootInitSetsWorkloadCredential pins the "runs as
+// the container user" half directly: from root init, a usable uid/gid pair
+// gets a Credential for exactly that pair; a uid<=0 gets none. A uid>0 with
+// gid==0 also gets a Credential (uid:0): configureSharedWorkspaceGit never
+// passes that input (its switch requires gid>0 first), but gitCloneWorkspace
+// can, so today's behaviour is pinned here.
+func TestConfigureGitCommand_RootInitSetsWorkloadCredential(t *testing.T) {
+	origGetuid := configureGitCommandGetuid
+	configureGitCommandGetuid = func() int { return 0 }
+	t.Cleanup(func() { configureGitCommandGetuid = origGetuid })
+
+	cmd := exec.Command("git")
+	configureGitCommand(cmd, 4242, 4343)
+	if cmd.SysProcAttr == nil || cmd.SysProcAttr.Credential == nil {
+		t.Fatal("expected a Credential for the workload from root init")
+	}
+	if c := cmd.SysProcAttr.Credential; c.Uid != 4242 || c.Gid != 4343 {
+		t.Errorf("Credential = %d:%d, want 4242:4343", c.Uid, c.Gid)
+	}
+
+	cmd = exec.Command("git")
+	configureGitCommand(cmd, 4242, 0)
+	if cmd.SysProcAttr == nil || cmd.SysProcAttr.Credential == nil {
+		t.Fatal("uid>0, gid 0: expected a Credential from root init")
+	}
+	if c := cmd.SysProcAttr.Credential; c.Uid != 4242 || c.Gid != 0 {
+		t.Errorf("uid>0, gid 0: Credential = %d:%d, want 4242:0", c.Uid, c.Gid)
+	}
+
+	cmd = exec.Command("git")
+	configureGitCommand(cmd, 0, 4343)
+	if cmd.SysProcAttr != nil {
+		t.Errorf("uid 0: expected no SysProcAttr, got %+v", cmd.SysProcAttr)
+	}
+}
+
 // TestConfigureSharedWorkspaceGit_FifoDoesNotHang proves a FIFO planted at
 // $HOME/.gitconfig with no writer is refused immediately — via a stat, which
 // never blocks, unlike opening the FIFO for real — rather than hanging

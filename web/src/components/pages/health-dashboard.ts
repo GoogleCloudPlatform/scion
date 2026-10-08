@@ -20,10 +20,9 @@
  * Displays a centralized health view of the Scion system including:
  * - Hub status and version
  * - Database pool health
- * - Broker status (per-broker cards)
- * - Agent health summary
+ * - Runtime brokers (compact table, see health-broker-table.ts)
+ * - Agents (phase counts and problem groups, see health-agents-card.ts)
  * - Dispatch pipeline status
- * - Stall detection configuration (editable)
  *
  * Auto-refreshes every 30 seconds via polling.
  */
@@ -32,8 +31,14 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
-import { showToast } from '../../utils/toast.js';
-import { formatRelative } from '../../utils/time.js';
+import type { HealthSummaryBrokerList } from './health-broker-table.js';
+import './health-broker-table.js';
+import type { HealthSummaryAgents } from './health-agents-card.js';
+import './health-agents-card.js';
+import type { HealthSummaryDispatch } from './health-dispatch-card.js';
+import './health-dispatch-card.js';
+
+export { formatHeartbeatAge } from './health-broker-table.js';
 
 interface HealthSummary {
   status: string;
@@ -56,31 +61,11 @@ interface HealthSummary {
     pool_wait_count_total: number;
     pool_idle: number;
   };
-  brokers: Array<{
-    id: string;
-    name: string;
-    status: string;
-    runtime: string;
-    runtime_available: boolean;
-    agent_count: number;
-    agent_healthy: number;
-    last_heartbeat: string;
-  }>;
-  agents: {
-    total: number;
-    by_phase: Record<string, number>;
-    stalled: string[];
-    crashed: string[];
-    errored: string[];
-  };
-  dispatch: {
-    stuck_messages: number;
-    failed_1h: number;
-  } | null;
-  stall_config: {
-    threshold_seconds: number;
-    auto_suspend: boolean;
-  };
+  runtime_brokers: HealthSummaryBrokerList;
+  /** Null when the hub could not aggregate agents (not reported). */
+  agents: HealthSummaryAgents | null;
+  /** Null when the hub could not count dispatch health (not reported). */
+  dispatch: HealthSummaryDispatch | null;
 }
 
 @customElement('scion-page-health-dashboard')
@@ -96,15 +81,6 @@ export class ScionPageHealthDashboard extends LitElement {
 
   @state()
   private autoRefresh = true;
-
-  @state()
-  private editingStall = false;
-
-  @state()
-  private stallAutoSuspend = false;
-
-  @state()
-  private savingStall = false;
 
   private refreshTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -151,10 +127,6 @@ export class ScionPageHealthDashboard extends LitElement {
       }
       this.data = await res.json();
       this.error = null;
-      // Sync stall config editor state
-      if (this.data && !this.editingStall) {
-        this.stallAutoSuspend = this.data.stall_config.auto_suspend;
-      }
     } catch (e) {
       this.error = e instanceof Error ? e.message : 'Network error';
     } finally {
@@ -197,32 +169,6 @@ export class ScionPageHealthDashboard extends LitElement {
         return 'var(--scion-error, #ef4444)';
       default:
         return 'var(--scion-text-muted, #94a3b8)';
-    }
-  }
-
-  private async saveStallConfig(): Promise<void> {
-    this.savingStall = true;
-    try {
-      const settings: Record<string, unknown> = {
-        'server.hub.auto_suspend_stalled': this.stallAutoSuspend,
-      };
-      const res = await apiFetch('/api/v1/admin/server-config', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(settings),
-      });
-      if (!res.ok) {
-        const msg = await extractApiError(res, 'Failed to save stall settings');
-        showToast(msg, 'danger');
-        return;
-      }
-      showToast('Stall detection settings saved', 'success');
-      this.editingStall = false;
-      void this.fetchData();
-    } catch (e) {
-      showToast(e instanceof Error ? e.message : 'Save failed', 'danger');
-    } finally {
-      this.savingStall = false;
     }
   }
 
@@ -335,135 +281,6 @@ export class ScionPageHealthDashboard extends LitElement {
       word-break: break-word;
     }
 
-    .broker-grid {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 1rem;
-    }
-
-    .broker-card {
-      background: var(--scion-surface-alt, #f8fafc);
-      border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: 0.5rem;
-      padding: 1rem;
-      min-width: 200px;
-      flex: 1;
-    }
-
-    .broker-name {
-      font-weight: 600;
-      margin-bottom: 0.5rem;
-    }
-
-    .broker-stat {
-      font-size: 0.8125rem;
-      color: var(--scion-text-muted, #64748b);
-      padding: 0.125rem 0;
-    }
-
-    .agent-summary {
-      display: flex;
-      gap: 1.5rem;
-      flex-wrap: wrap;
-      margin-bottom: 0.75rem;
-      font-size: 0.9375rem;
-    }
-
-    .agent-summary .stat {
-      font-weight: 600;
-    }
-
-    .agent-alert {
-      display: flex;
-      align-items: center;
-      gap: 0.375rem;
-      font-size: 0.875rem;
-      padding: 0.25rem 0;
-    }
-
-    .alert-warn {
-      color: var(--scion-warning, #f59e0b);
-    }
-
-    .alert-error {
-      color: var(--scion-error, #ef4444);
-    }
-
-    .stall-config {
-      display: flex;
-      align-items: center;
-      gap: 1rem;
-      flex-wrap: wrap;
-    }
-
-    .stall-config .stat-row {
-      flex: 1;
-      min-width: 200px;
-    }
-
-    .edit-btn {
-      background: none;
-      border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: 0.375rem;
-      padding: 0.25rem 0.625rem;
-      font-size: 0.75rem;
-      cursor: pointer;
-      color: var(--scion-text-muted, #64748b);
-    }
-
-    .edit-btn:hover {
-      background: var(--scion-surface-hover, #f1f5f9);
-    }
-
-    .stall-edit-form {
-      display: flex;
-      align-items: center;
-      gap: 0.75rem;
-      flex-wrap: wrap;
-    }
-
-    .stall-edit-form label {
-      font-size: 0.875rem;
-      color: var(--scion-text, #1e293b);
-    }
-
-    .stall-edit-form input[type='number'] {
-      width: 60px;
-      padding: 0.25rem 0.5rem;
-      border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: 0.25rem;
-      font-size: 0.875rem;
-    }
-
-    .save-btn {
-      background: var(--scion-primary, #3b82f6);
-      color: white;
-      border: none;
-      border-radius: 0.375rem;
-      padding: 0.375rem 0.75rem;
-      font-size: 0.8125rem;
-      cursor: pointer;
-    }
-
-    .save-btn:hover {
-      opacity: 0.9;
-    }
-
-    .save-btn:disabled {
-      opacity: 0.5;
-      cursor: not-allowed;
-    }
-
-    .cancel-btn {
-      background: none;
-      border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: 0.375rem;
-      padding: 0.375rem 0.75rem;
-      font-size: 0.8125rem;
-      cursor: pointer;
-      color: var(--scion-text-muted, #64748b);
-    }
-
     .loading,
     .error-msg {
       text-align: center;
@@ -473,16 +290,6 @@ export class ScionPageHealthDashboard extends LitElement {
 
     .error-msg {
       color: var(--scion-error, #ef4444);
-    }
-
-    .alerts-link {
-      font-size: 0.875rem;
-      color: var(--scion-primary, #3b82f6);
-      text-decoration: none;
-    }
-
-    .alerts-link:hover {
-      text-decoration: underline;
     }
 
     .overall-status {
@@ -572,26 +379,8 @@ export class ScionPageHealthDashboard extends LitElement {
       <!-- Agents -->
       ${this.renderAgentsCard(d)}
 
-      <!-- Dispatch & Stall Config -->
-      <div class="grid-2">${this.renderDispatchCard(d)} ${this.renderStallCard(d)}</div>
-
-      <!-- Recent Alerts placeholder -->
-      <div class="grid-full">
-        <div class="card">
-          <div class="card-title">Recent Alerts</div>
-          <div style="font-size:0.875rem;color:var(--scion-text-muted,#64748b)">
-            View recent alerts in the
-            <a
-              class="alerts-link"
-              href="https://console.cloud.google.com/monitoring/alerting"
-              target="_blank"
-              rel="noopener"
-            >
-              GCP Cloud Monitoring Console
-            </a>
-          </div>
-        </div>
-      </div>
+      <!-- Dispatch -->
+      <div class="grid-full">${this.renderDispatchCard(d)}</div>
     `;
   }
 
@@ -656,51 +445,9 @@ export class ScionPageHealthDashboard extends LitElement {
   }
 
   private renderBrokersCard(d: HealthSummary) {
-    if (d.brokers.length === 0) {
-      return html`
-        <div class="grid-full">
-          <div class="card">
-            <div class="card-title">Brokers</div>
-            <div style="font-size:0.875rem;color:var(--scion-text-muted,#64748b)">
-              No brokers registered
-            </div>
-          </div>
-        </div>
-      `;
-    }
-
     return html`
       <div class="grid-full">
-        <div class="card">
-          <div class="card-title">Brokers</div>
-          <div class="broker-grid">
-            ${d.brokers.map(
-              (b) => html`
-                <div class="broker-card">
-                  <div class="broker-name">${b.name || b.id}</div>
-                  <div class="status-line" style="font-size:0.875rem">
-                    <span style="color: ${this.statusColor(b.status)}"
-                      >${this.statusIcon(b.status)}</span
-                    >
-                    ${b.status}
-                  </div>
-                  <div class="broker-stat">Agents: ${b.agent_healthy}/${b.agent_count} healthy</div>
-                  <div class="broker-stat">
-                    Runtime: ${b.runtime} ${b.runtime_available ? '✓' : '✗'}
-                  </div>
-                  <div class="broker-stat" style="color:var(--scion-text-muted,#64748b)">
-                    NFS: not reported
-                  </div>
-                  ${b.last_heartbeat
-                    ? html`<div class="broker-stat">
-                        Heartbeat: ${this.timeAgo(b.last_heartbeat)}
-                      </div>`
-                    : nothing}
-                </div>
-              `
-            )}
-          </div>
-        </div>
+        <scion-health-broker-table .brokers=${d.runtime_brokers}></scion-health-broker-table>
       </div>
     `;
   }
@@ -708,161 +455,14 @@ export class ScionPageHealthDashboard extends LitElement {
   private renderAgentsCard(d: HealthSummary) {
     return html`
       <div class="grid-full">
-        <div class="card">
-          <div class="card-title">Agents</div>
-          <div class="agent-summary">
-            <div><span class="stat">${d.agents.total}</span> Total</div>
-            ${Object.entries(d.agents.by_phase).map(
-              ([phase, count]) => html`<div><span class="stat">${count}</span> ${phase}</div>`
-            )}
-          </div>
-          ${d.agents.stalled.length > 0
-            ? html`
-                <div class="agent-alert alert-warn">
-                  ⚠ ${d.agents.stalled.length} stalled: ${d.agents.stalled.join(', ')}
-                </div>
-              `
-            : nothing}
-          ${d.agents.crashed.length > 0
-            ? html`
-                <div class="agent-alert alert-error">
-                  ✗ ${d.agents.crashed.length} crashed: ${d.agents.crashed.join(', ')}
-                </div>
-              `
-            : nothing}
-          ${d.agents.errored.length > 0
-            ? html`
-                <div class="agent-alert alert-error">
-                  ✗ ${d.agents.errored.length} errored: ${d.agents.errored.join(', ')}
-                </div>
-              `
-            : nothing}
-          ${d.agents.stalled.length === 0 &&
-          d.agents.crashed.length === 0 &&
-          d.agents.errored.length === 0
-            ? html`<div style="font-size:0.875rem;color:var(--scion-success,#22c55e)">
-                All agents healthy
-              </div>`
-            : nothing}
-        </div>
+        <scion-health-agents-card .agents=${d.agents ?? null}></scion-health-agents-card>
       </div>
     `;
   }
 
   private renderDispatchCard(d: HealthSummary) {
-    if (!d.dispatch) {
-      return html`
-        <div class="card">
-          <div class="card-title">Dispatch Pipeline</div>
-          <div style="font-size:0.875rem;color:var(--scion-text-muted,#64748b)">
-            Dispatch metrics not yet available. A future update will expose dispatch pipeline stats
-            via the health summary API.
-          </div>
-        </div>
-      `;
-    }
     return html`
-      <div class="card">
-        <div class="card-title">Dispatch Pipeline</div>
-        <div class="stat-row">
-          <span class="label">Stuck Messages</span>
-          <span
-            style="color: ${d.dispatch.stuck_messages > 0
-              ? 'var(--scion-error,#ef4444)'
-              : 'inherit'}; font-weight: ${d.dispatch.stuck_messages > 0 ? '600' : 'normal'}"
-          >
-            ${d.dispatch.stuck_messages}
-          </span>
-        </div>
-        <div class="stat-row">
-          <span class="label">Failed (1h)</span><span>${d.dispatch.failed_1h}</span>
-        </div>
-      </div>
+      <scion-health-dispatch-card .dispatch=${d.dispatch ?? null}></scion-health-dispatch-card>
     `;
-  }
-
-  private renderStallCard(d: HealthSummary) {
-    if (this.editingStall) {
-      return html`
-        <div class="card">
-          <div class="card-title">Stall Detection Settings</div>
-          <!-- Threshold is a startup-time ServerConfig setting and cannot be
-               changed at runtime via the operational settings API. Display it
-               as read-only. Only auto_suspend_stalled is a runtime setting. -->
-          <div class="stat-row" style="margin-bottom:0.75rem">
-            <span class="label">Stalled Threshold</span>
-            <span
-              >${Math.round(d.stall_config.threshold_seconds / 60)} min
-              <span style="font-size:0.75rem;color:var(--scion-text-muted,#94a3b8)"
-                >(set at startup)</span
-              ></span
-            >
-          </div>
-          <div class="stall-edit-form">
-            <label style="display:flex;align-items:center;gap:0.375rem">
-              <input
-                type="checkbox"
-                .checked=${this.stallAutoSuspend}
-                @change=${() => {
-                  this.stallAutoSuspend = !this.stallAutoSuspend;
-                }}
-              />
-              Auto-suspend stalled agents
-            </label>
-            <button
-              class="save-btn"
-              ?disabled=${this.savingStall}
-              @click=${() => void this.saveStallConfig()}
-            >
-              ${this.savingStall ? 'Saving...' : 'Save'}
-            </button>
-            <button
-              class="cancel-btn"
-              @click=${() => {
-                this.editingStall = false;
-              }}
-            >
-              Cancel
-            </button>
-          </div>
-        </div>
-      `;
-    }
-
-    return html`
-      <div class="card">
-        <div
-          class="card-title"
-          style="display:flex;justify-content:space-between;align-items:center"
-        >
-          Stall Detection Settings
-          <button
-            class="edit-btn"
-            @click=${() => {
-              this.editingStall = true;
-            }}
-          >
-            Edit
-          </button>
-        </div>
-        <div class="stat-row">
-          <span class="label">Stalled Threshold</span
-          ><span>${Math.round(d.stall_config.threshold_seconds / 60)} min</span>
-        </div>
-        <div class="stat-row">
-          <span class="label">Auto-Suspend Stalled</span
-          ><span>${d.stall_config.auto_suspend ? 'enabled' : 'disabled'}</span>
-        </div>
-      </div>
-    `;
-  }
-
-  private timeAgo(isoDate: string): string {
-    if (!isoDate) return 'never';
-    const ms = new Date(isoDate).getTime();
-    if (Number.isNaN(ms)) return 'unknown';
-    // A future instant is clock skew between hub and browser.
-    if (ms > Date.now()) return 'just now';
-    return formatRelative(isoDate, { style: 'narrow' });
   }
 }

@@ -33,7 +33,7 @@ import (
 
 func testHarnessConfigFileServer(t *testing.T) (*Server, store.Store, *contentMockStorage) {
 	t.Helper()
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		if strings.Contains(err.Error(), "sqlite driver not registered") {
 			t.Skip("Skipping: sqlite driver not registered")
@@ -46,11 +46,10 @@ func testHarnessConfigFileServer(t *testing.T) (*Server, store.Store, *contentMo
 
 	cfg := DefaultServerConfig()
 	cfg.DevAuthToken = testDevToken
-	srv, err := New(cfg, s)
+	srv, err := newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
-	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 
 	stor := newContentMockStorage("test-bucket")
 	srv.SetStorage(stor)

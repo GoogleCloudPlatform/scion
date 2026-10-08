@@ -361,6 +361,11 @@ func RunIntentAt(v time.Time) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldRunIntentAt, v))
 }
 
+// RunIntentMarkedAt applies equality check predicate on the "run_intent_marked_at" field. It's identical to RunIntentMarkedAtEQ.
+func RunIntentMarkedAt(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldRunIntentMarkedAt, v))
+}
+
 // StartClaimID applies equality check predicate on the "start_claim_id" field. It's identical to StartClaimIDEQ.
 func StartClaimID(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldStartClaimID, v))
@@ -4116,6 +4121,56 @@ func RunIntentAtNotNil() predicate.Agent {
 	return predicate.Agent(sql.FieldNotNull(FieldRunIntentAt))
 }
 
+// RunIntentMarkedAtEQ applies the EQ predicate on the "run_intent_marked_at" field.
+func RunIntentMarkedAtEQ(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldRunIntentMarkedAt, v))
+}
+
+// RunIntentMarkedAtNEQ applies the NEQ predicate on the "run_intent_marked_at" field.
+func RunIntentMarkedAtNEQ(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldRunIntentMarkedAt, v))
+}
+
+// RunIntentMarkedAtIn applies the In predicate on the "run_intent_marked_at" field.
+func RunIntentMarkedAtIn(vs ...time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldRunIntentMarkedAt, vs...))
+}
+
+// RunIntentMarkedAtNotIn applies the NotIn predicate on the "run_intent_marked_at" field.
+func RunIntentMarkedAtNotIn(vs ...time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldRunIntentMarkedAt, vs...))
+}
+
+// RunIntentMarkedAtGT applies the GT predicate on the "run_intent_marked_at" field.
+func RunIntentMarkedAtGT(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldRunIntentMarkedAt, v))
+}
+
+// RunIntentMarkedAtGTE applies the GTE predicate on the "run_intent_marked_at" field.
+func RunIntentMarkedAtGTE(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldRunIntentMarkedAt, v))
+}
+
+// RunIntentMarkedAtLT applies the LT predicate on the "run_intent_marked_at" field.
+func RunIntentMarkedAtLT(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldRunIntentMarkedAt, v))
+}
+
+// RunIntentMarkedAtLTE applies the LTE predicate on the "run_intent_marked_at" field.
+func RunIntentMarkedAtLTE(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldRunIntentMarkedAt, v))
+}
+
+// RunIntentMarkedAtIsNil applies the IsNil predicate on the "run_intent_marked_at" field.
+func RunIntentMarkedAtIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldRunIntentMarkedAt))
+}
+
+// RunIntentMarkedAtNotNil applies the NotNil predicate on the "run_intent_marked_at" field.
+func RunIntentMarkedAtNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldRunIntentMarkedAt))
+}
+
 // StartClaimIDEQ applies the EQ predicate on the "start_claim_id" field.
 func StartClaimIDEQ(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldStartClaimID, v))
@@ -4902,6 +4957,29 @@ func HasPolicyBindings() predicate.Agent {
 func HasPolicyBindingsWith(preds ...predicate.PolicyBinding) predicate.Agent {
 	return predicate.Agent(func(s *sql.Selector) {
 		step := newPolicyBindingsStep()
+		sqlgraph.HasNeighborsWith(s, step, func(s *sql.Selector) {
+			for _, p := range preds {
+				p(s)
+			}
+		})
+	})
+}
+
+// HasHolds applies the HasEdge predicate on the "holds" edge.
+func HasHolds() predicate.Agent {
+	return predicate.Agent(func(s *sql.Selector) {
+		step := sqlgraph.NewStep(
+			sqlgraph.From(Table, FieldID),
+			sqlgraph.Edge(sqlgraph.O2M, false, HoldsTable, HoldsColumn),
+		)
+		sqlgraph.HasNeighbors(s, step)
+	})
+}
+
+// HasHoldsWith applies the HasEdge predicate on the "holds" edge with a given conditions (other predicates).
+func HasHoldsWith(preds ...predicate.AgentHold) predicate.Agent {
+	return predicate.Agent(func(s *sql.Selector) {
+		step := newHoldsStep()
 		sqlgraph.HasNeighborsWith(s, step, func(s *sql.Selector) {
 			for _, p := range preds {
 				p(s)

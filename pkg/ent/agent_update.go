@@ -13,6 +13,7 @@ import (
 	"entgo.io/ent/dialect/sql/sqljson"
 	"entgo.io/ent/schema/field"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agenthold"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/groupmembership"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/policybinding"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
@@ -1297,6 +1298,26 @@ func (_u *AgentUpdate) ClearRunIntentAt() *AgentUpdate {
 	return _u
 }
 
+// SetRunIntentMarkedAt sets the "run_intent_marked_at" field.
+func (_u *AgentUpdate) SetRunIntentMarkedAt(v time.Time) *AgentUpdate {
+	_u.mutation.SetRunIntentMarkedAt(v)
+	return _u
+}
+
+// SetNillableRunIntentMarkedAt sets the "run_intent_marked_at" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableRunIntentMarkedAt(v *time.Time) *AgentUpdate {
+	if v != nil {
+		_u.SetRunIntentMarkedAt(*v)
+	}
+	return _u
+}
+
+// ClearRunIntentMarkedAt clears the value of the "run_intent_marked_at" field.
+func (_u *AgentUpdate) ClearRunIntentMarkedAt() *AgentUpdate {
+	_u.mutation.ClearRunIntentMarkedAt()
+	return _u
+}
+
 // SetStartClaimID sets the "start_claim_id" field.
 func (_u *AgentUpdate) SetStartClaimID(v string) *AgentUpdate {
 	_u.mutation.SetStartClaimID(v)
@@ -1552,6 +1573,21 @@ func (_u *AgentUpdate) AddPolicyBindings(v ...*PolicyBinding) *AgentUpdate {
 	return _u.AddPolicyBindingIDs(ids...)
 }
 
+// AddHoldIDs adds the "holds" edge to the AgentHold entity by IDs.
+func (_u *AgentUpdate) AddHoldIDs(ids ...uuid.UUID) *AgentUpdate {
+	_u.mutation.AddHoldIDs(ids...)
+	return _u
+}
+
+// AddHolds adds the "holds" edges to the AgentHold entity.
+func (_u *AgentUpdate) AddHolds(v ...*AgentHold) *AgentUpdate {
+	ids := make([]uuid.UUID, len(v))
+	for i := range v {
+		ids[i] = v[i].ID
+	}
+	return _u.AddHoldIDs(ids...)
+}
+
 // Mutation returns the AgentMutation object of the builder.
 func (_u *AgentUpdate) Mutation() *AgentMutation {
 	return _u.mutation
@@ -1603,6 +1639,27 @@ func (_u *AgentUpdate) RemovePolicyBindings(v ...*PolicyBinding) *AgentUpdate {
 		ids[i] = v[i].ID
 	}
 	return _u.RemovePolicyBindingIDs(ids...)
+}
+
+// ClearHolds clears all "holds" edges to the AgentHold entity.
+func (_u *AgentUpdate) ClearHolds() *AgentUpdate {
+	_u.mutation.ClearHolds()
+	return _u
+}
+
+// RemoveHoldIDs removes the "holds" edge to AgentHold entities by IDs.
+func (_u *AgentUpdate) RemoveHoldIDs(ids ...uuid.UUID) *AgentUpdate {
+	_u.mutation.RemoveHoldIDs(ids...)
+	return _u
+}
+
+// RemoveHolds removes "holds" edges to AgentHold entities.
+func (_u *AgentUpdate) RemoveHolds(v ...*AgentHold) *AgentUpdate {
+	ids := make([]uuid.UUID, len(v))
+	for i := range v {
+		ids[i] = v[i].ID
+	}
+	return _u.RemoveHoldIDs(ids...)
 }
 
 // Save executes the query and returns the number of nodes affected by the update operation.
@@ -2068,6 +2125,12 @@ func (_u *AgentUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	if _u.mutation.RunIntentAtCleared() {
 		_spec.ClearField(agent.FieldRunIntentAt, field.TypeTime)
 	}
+	if value, ok := _u.mutation.RunIntentMarkedAt(); ok {
+		_spec.SetField(agent.FieldRunIntentMarkedAt, field.TypeTime, value)
+	}
+	if _u.mutation.RunIntentMarkedAtCleared() {
+		_spec.ClearField(agent.FieldRunIntentMarkedAt, field.TypeTime)
+	}
 	if value, ok := _u.mutation.StartClaimID(); ok {
 		_spec.SetField(agent.FieldStartClaimID, field.TypeString, value)
 	}
@@ -2246,6 +2309,51 @@ func (_u *AgentUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 			Bidi:    false,
 			Target: &sqlgraph.EdgeTarget{
 				IDSpec: sqlgraph.NewFieldSpec(policybinding.FieldID, field.TypeUUID),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Add = append(_spec.Edges.Add, edge)
+	}
+	if _u.mutation.HoldsCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   agent.HoldsTable,
+			Columns: []string{agent.HoldsColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(agenthold.FieldID, field.TypeUUID),
+			},
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.RemovedHoldsIDs(); len(nodes) > 0 && !_u.mutation.HoldsCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   agent.HoldsTable,
+			Columns: []string{agent.HoldsColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(agenthold.FieldID, field.TypeUUID),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.HoldsIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   agent.HoldsTable,
+			Columns: []string{agent.HoldsColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(agenthold.FieldID, field.TypeUUID),
 			},
 		}
 		for _, k := range nodes {
@@ -3536,6 +3644,26 @@ func (_u *AgentUpdateOne) ClearRunIntentAt() *AgentUpdateOne {
 	return _u
 }
 
+// SetRunIntentMarkedAt sets the "run_intent_marked_at" field.
+func (_u *AgentUpdateOne) SetRunIntentMarkedAt(v time.Time) *AgentUpdateOne {
+	_u.mutation.SetRunIntentMarkedAt(v)
+	return _u
+}
+
+// SetNillableRunIntentMarkedAt sets the "run_intent_marked_at" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableRunIntentMarkedAt(v *time.Time) *AgentUpdateOne {
+	if v != nil {
+		_u.SetRunIntentMarkedAt(*v)
+	}
+	return _u
+}
+
+// ClearRunIntentMarkedAt clears the value of the "run_intent_marked_at" field.
+func (_u *AgentUpdateOne) ClearRunIntentMarkedAt() *AgentUpdateOne {
+	_u.mutation.ClearRunIntentMarkedAt()
+	return _u
+}
+
 // SetStartClaimID sets the "start_claim_id" field.
 func (_u *AgentUpdateOne) SetStartClaimID(v string) *AgentUpdateOne {
 	_u.mutation.SetStartClaimID(v)
@@ -3791,6 +3919,21 @@ func (_u *AgentUpdateOne) AddPolicyBindings(v ...*PolicyBinding) *AgentUpdateOne
 	return _u.AddPolicyBindingIDs(ids...)
 }
 
+// AddHoldIDs adds the "holds" edge to the AgentHold entity by IDs.
+func (_u *AgentUpdateOne) AddHoldIDs(ids ...uuid.UUID) *AgentUpdateOne {
+	_u.mutation.AddHoldIDs(ids...)
+	return _u
+}
+
+// AddHolds adds the "holds" edges to the AgentHold entity.
+func (_u *AgentUpdateOne) AddHolds(v ...*AgentHold) *AgentUpdateOne {
+	ids := make([]uuid.UUID, len(v))
+	for i := range v {
+		ids[i] = v[i].ID
+	}
+	return _u.AddHoldIDs(ids...)
+}
+
 // Mutation returns the AgentMutation object of the builder.
 func (_u *AgentUpdateOne) Mutation() *AgentMutation {
 	return _u.mutation
@@ -3842,6 +3985,27 @@ func (_u *AgentUpdateOne) RemovePolicyBindings(v ...*PolicyBinding) *AgentUpdate
 		ids[i] = v[i].ID
 	}
 	return _u.RemovePolicyBindingIDs(ids...)
+}
+
+// ClearHolds clears all "holds" edges to the AgentHold entity.
+func (_u *AgentUpdateOne) ClearHolds() *AgentUpdateOne {
+	_u.mutation.ClearHolds()
+	return _u
+}
+
+// RemoveHoldIDs removes the "holds" edge to AgentHold entities by IDs.
+func (_u *AgentUpdateOne) RemoveHoldIDs(ids ...uuid.UUID) *AgentUpdateOne {
+	_u.mutation.RemoveHoldIDs(ids...)
+	return _u
+}
+
+// RemoveHolds removes "holds" edges to AgentHold entities.
+func (_u *AgentUpdateOne) RemoveHolds(v ...*AgentHold) *AgentUpdateOne {
+	ids := make([]uuid.UUID, len(v))
+	for i := range v {
+		ids[i] = v[i].ID
+	}
+	return _u.RemoveHoldIDs(ids...)
 }
 
 // Where appends a list predicates to the AgentUpdate builder.
@@ -4337,6 +4501,12 @@ func (_u *AgentUpdateOne) sqlSave(ctx context.Context) (_node *Agent, err error)
 	if _u.mutation.RunIntentAtCleared() {
 		_spec.ClearField(agent.FieldRunIntentAt, field.TypeTime)
 	}
+	if value, ok := _u.mutation.RunIntentMarkedAt(); ok {
+		_spec.SetField(agent.FieldRunIntentMarkedAt, field.TypeTime, value)
+	}
+	if _u.mutation.RunIntentMarkedAtCleared() {
+		_spec.ClearField(agent.FieldRunIntentMarkedAt, field.TypeTime)
+	}
 	if value, ok := _u.mutation.StartClaimID(); ok {
 		_spec.SetField(agent.FieldStartClaimID, field.TypeString, value)
 	}
@@ -4515,6 +4685,51 @@ func (_u *AgentUpdateOne) sqlSave(ctx context.Context) (_node *Agent, err error)
 			Bidi:    false,
 			Target: &sqlgraph.EdgeTarget{
 				IDSpec: sqlgraph.NewFieldSpec(policybinding.FieldID, field.TypeUUID),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Add = append(_spec.Edges.Add, edge)
+	}
+	if _u.mutation.HoldsCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   agent.HoldsTable,
+			Columns: []string{agent.HoldsColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(agenthold.FieldID, field.TypeUUID),
+			},
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.RemovedHoldsIDs(); len(nodes) > 0 && !_u.mutation.HoldsCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   agent.HoldsTable,
+			Columns: []string{agent.HoldsColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(agenthold.FieldID, field.TypeUUID),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.HoldsIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   agent.HoldsTable,
+			Columns: []string{agent.HoldsColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(agenthold.FieldID, field.TypeUUID),
 			},
 		}
 		for _, k := range nodes {

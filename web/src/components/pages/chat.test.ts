@@ -23,13 +23,23 @@
  *  2. Mobile swipe navigation between the rail / conversation / members
  *     panels, which must ignore vertical scrolling and desktop viewports.
  *
- * Elements are created but never appended, so connectedCallback (and its
- * network calls) never runs.
+ * Most elements are created but never appended, so connectedCallback (and
+ * its network calls) never runs. The few tests that do append a page rely
+ * on the beforeAll below, which warms the lazily imported modules first.
  */
 
 // @vitest-environment happy-dom
 
-import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
+import {
+  describe,
+  it,
+  expect,
+  vi,
+  beforeAll,
+  beforeEach,
+  afterEach,
+  type MockInstance,
+} from 'vitest';
 import { html, nothing, render, type TemplateResult } from 'lit';
 import { apiFetch } from '../../client/api.js';
 import { navigateTo, pushRoute, replaceRoute } from '../../client/main.js';
@@ -247,6 +257,17 @@ beforeAll(async () => {
   const mod = await import('./chat.js');
   ScionPageChat = mod.ScionPageChat;
   expect(ScionPageChat).toBeDefined();
+  // Mounting a page runs connectedCallback's unawaited initV2(), which
+  // lazily imports chat-space-rail and chat-members (and through them
+  // confirm-dialog, status-badge and agent-state-display). If a first-time
+  // module load is still running when this file finishes, the worker
+  // tears down with the import pending and Vitest reports an
+  // EnvironmentTeardownError. Loading them here, awaited, warms the module
+  // cache so the in-test imports resolve from it.
+  await Promise.all([
+    import('../shared/chat/chat-space-rail.js'),
+    import('../shared/chat/chat-members.js'),
+  ]);
 });
 
 afterEach(() => {
@@ -1194,6 +1215,76 @@ describe('chat page — promote DM dialog', () => {
   });
 });
 
+describe('chat page — promote toast', () => {
+  let toast: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    toast = vi.fn(() => Promise.resolve());
+    (HTMLElement.prototype as any).toast = toast;
+  });
+
+  afterEach(() => {
+    delete (HTMLElement.prototype as any).toast;
+    document.body.querySelectorAll('sl-alert').forEach((a) => a.remove());
+  });
+
+  function lastAlert(): HTMLElement {
+    const alerts = document.body.querySelectorAll('sl-alert');
+    return alerts[alerts.length - 1] as HTMLElement;
+  }
+
+  it('renders markup in the message as literal text', () => {
+    const el = createPage();
+    const message = 'Topic <b>bold</b> <img src=x onerror="alert(1)">';
+
+    el.showPromoteToast(message, 'danger');
+
+    const alert = lastAlert();
+    expect(alert.textContent).toBe(message);
+    expect(alert.children).toHaveLength(1);
+    expect(alert.children[0]?.tagName.toLowerCase()).toBe('sl-icon');
+    expect(alert.querySelector('b, img')).toBeNull();
+    expect(alert.children[0]?.getAttribute('name')).toBe('exclamation-circle');
+    expect(toast).toHaveBeenCalledTimes(1);
+  });
+
+  it('renders a normal message with the variant icon', () => {
+    const el = createPage();
+
+    el.showPromoteToast('Conversation promoted to #general', 'success');
+
+    const alert = lastAlert() as HTMLElement & {
+      variant: string;
+      closable: boolean;
+      duration: number;
+    };
+    const icon = alert.querySelector('sl-icon');
+    expect(alert.textContent).toBe('Conversation promoted to #general');
+    expect(icon?.getAttribute('name')).toBe('check-circle');
+    expect(icon?.getAttribute('slot')).toBe('icon');
+    expect(alert.variant).toBe('success');
+    expect(alert.closable).toBe(true);
+    expect(alert.duration).toBe(4000);
+    expect(toast).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses the warning icon for warnings', () => {
+    const el = createPage();
+
+    el.showPromoteToast('Try again', 'warning');
+
+    expect(lastAlert().querySelector('sl-icon')?.getAttribute('name')).toBe('exclamation-triangle');
+  });
+
+  it('falls back to the danger icon for an unknown variant', () => {
+    const el = createPage();
+
+    el.showPromoteToast('Odd', 'neutral' as never);
+
+    expect(lastAlert().querySelector('sl-icon')?.getAttribute('name')).toBe('exclamation-circle');
+  });
+});
+
 describe('chat page — late route lookups', () => {
   /**
    * Hold the project-by-slug lookup until `release` is called; every other
@@ -1905,6 +1996,36 @@ describe('chat page — startup after the page is removed', () => {
     return el;
   }
 
+  /**
+   * Record every initV2 the page starts, so a test can await all of them
+   * settling — the superseded ones included. A fixed flush() is not enough:
+   * initV2 resumes only once the test runner has answered its imports,
+   * which may take any number of macrotask turns under load.
+   */
+  function trackStartups(page: unknown): {
+    count: () => number;
+    settled: () => Promise<void>;
+  } {
+    const el = page as { initV2: () => Promise<void> };
+    const startups: Promise<void>[] = [];
+    const initV2 = el.initV2;
+    if (typeof initV2 !== 'function') {
+      throw new Error('initV2 is not a function on the chat page. Was it renamed or removed?');
+    }
+    // Deliberately shadows the private initV2 on this instance only.
+    el.initV2 = function (this: unknown): Promise<void> {
+      const startup = initV2.call(this);
+      startups.push(startup);
+      return startup;
+    };
+    return {
+      count: () => startups.length,
+      settled: async (): Promise<void> => {
+        await Promise.all(startups);
+      },
+    };
+  }
+
   function dmListLoads(): number {
     return vi.mocked(apiFetch).mock.calls.filter(([path]) => path === '/api/v1/chat/dms').length;
   }
@@ -1934,12 +2055,15 @@ describe('chat page — startup after the page is removed', () => {
     const intervals = trackIntervals();
     await loadLazyModules();
     const el = createUnrenderedPage();
+    const startups = trackStartups(el);
     window.history.replaceState({}, '', '/chat');
     document.body.appendChild(el);
     // The router replaces the page before initV2's imports come back.
     el.remove();
 
-    await flush();
+    // Startup really ran, so the assertions below cannot pass vacuously.
+    expect(startups.count()).toBe(1);
+    await startups.settled();
 
     expect(dmListLoads()).toBe(0);
     expect(el._fallbackPollInterval).toBeNull();
@@ -1952,13 +2076,16 @@ describe('chat page — startup after the page is removed', () => {
     const intervals = trackIntervals();
     await loadLazyModules();
     const el = createUnrenderedPage();
+    const startups = trackStartups(el);
     window.history.replaceState({}, '', '/chat');
     try {
       document.body.appendChild(el);
       el.remove();
       document.body.appendChild(el);
 
-      await flush();
+      // Both startups: the superseded one must have given up, not just
+      // not yet arrived.
+      await startups.settled();
 
       expect(el.v2SpaceRailLoaded).toBe(true);
       expect(dmListLoads()).toBe(1);
@@ -1979,6 +2106,22 @@ describe('chat page — startup after the page is removed', () => {
     let unhandled: unknown[];
     const onUnhandled = (reason: unknown) => unhandled.push(reason);
 
+    /**
+     * Wait until initV2 has caught the failed import, by the log its catch
+     * writes. The rejection's timing is up to the test runner: a vi.doMock
+     * is resolved by the runner's main process, which may answer after any
+     * number of macrotask turns, so a fixed flush() is not enough.
+     */
+    async function untilStartupFails(errorSpy: MockInstance): Promise<void> {
+      await vi.waitFor(() =>
+        expect(errorSpy).toHaveBeenCalledWith(
+          'Chat page failed to load its components:',
+          // Vitest wraps an error thrown by a mock factory.
+          expect.objectContaining({ cause: chunkError })
+        )
+      );
+    }
+
     beforeEach(async () => {
       // Load the real modules first, so these tests time the same whether
       // or not an earlier test already did: only the mocked import differs.
@@ -1989,10 +2132,19 @@ describe('chat page — startup after the page is removed', () => {
       vi.doMock('../shared/chat/chat-members.js', () => {
         throw chunkError;
       });
+      // Vitest applies a vi.doMock or vi.doUnmock at the next import, and
+      // drops any queued while that import is still being resolved. Importing
+      // here applies the mock before the test starts, and proves it is active.
+      await expect(import('../shared/chat/chat-members.js')).rejects.toMatchObject({
+        cause: chunkError,
+      });
     });
 
-    afterEach(() => {
+    afterEach(async () => {
       vi.doUnmock('../shared/chat/chat-members.js');
+      // Apply the unmock now, so the throwing mock cannot leak into the next
+      // test; a failure here means the real module did not load back.
+      await import('../shared/chat/chat-members.js');
       process.off('unhandledRejection', onUnhandled);
     });
 
@@ -2005,13 +2157,9 @@ describe('chat page — startup after the page is removed', () => {
       try {
         document.body.appendChild(el);
 
-        await flush();
+        await untilStartupFails(errorSpy);
 
         expect(unhandled).toEqual([]);
-        expect(errorSpy).toHaveBeenCalledWith(
-          'Chat page failed to load its components:',
-          expect.anything()
-        );
         expect(el.v2SpaceRailLoaded).toBe(false);
         expect(el.v2SpaceRailLoadFailed).toBe(true);
         expect(dmListLoads()).toBe(0);
@@ -2031,13 +2179,9 @@ describe('chat page — startup after the page is removed', () => {
         document.body.appendChild(el);
         el.remove();
 
-        await flush();
+        await untilStartupFails(errorSpy);
 
         expect(unhandled).toEqual([]);
-        expect(errorSpy).toHaveBeenCalledWith(
-          'Chat page failed to load its components:',
-          expect.anything()
-        );
         expect(el.v2SpaceRailLoadFailed).toBe(false);
         expect(el.v2SpaceRailLoaded).toBe(false);
       } finally {
@@ -2053,8 +2197,9 @@ describe('chat page — startup after the page is removed', () => {
       window.history.replaceState({}, '', '/chat');
       try {
         document.body.appendChild(el);
-        await flush();
+        await untilStartupFails(errorSpy);
 
+        expect(unhandled).toEqual([]);
         const rail = renderToFragment(el.renderV2Rail());
         const alert = rail.querySelector('[role="alert"]');
         expect(alert).not.toBeNull();

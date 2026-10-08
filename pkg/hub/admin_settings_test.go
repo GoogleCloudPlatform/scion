@@ -106,14 +106,13 @@ func TestApplySettingsUpdates_PreservesServerKeys(t *testing.T) {
 	}
 
 	// Update request changes log_level but doesn't include github_app
-	logLevel := "debug"
-	req := &ServerConfigUpdateRequest{
-		Server: &config.V1ServerConfig{
-			LogLevel: logLevel,
-		},
+	body := []byte(`{"server":{"log_level":"debug"}}`)
+	var req ServerConfigUpdateRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		t.Fatal(err)
 	}
 
-	applySettingsUpdates(raw, req)
+	applySettingsUpdatesFromBody(raw, &req, rawServerObject(body))
 
 	serverMap, ok := raw["server"].(map[string]interface{})
 	if !ok {

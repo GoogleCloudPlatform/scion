@@ -217,28 +217,8 @@ func (r *AppleContainerRuntime) List(ctx context.Context, labelFilter map[string
 	var agents []api.AgentInfo
 	for _, c := range raw {
 		// Filter by labels if requested
-		if len(labelFilter) > 0 {
-			match := true
-			for k, v := range labelFilter {
-				actual := c.Configuration.Labels[k]
-				if actual == "" {
-					switch k {
-					case projectkeys.LabelProject:
-						actual = projectkeys.ProjectNameFromLabels(c.Configuration.Labels)
-					case projectkeys.LabelProjectID:
-						actual = projectkeys.ProjectIDFromLabels(c.Configuration.Labels)
-					case projectkeys.LabelProjectPath:
-						actual = projectkeys.ProjectPathFromLabels(c.Configuration.Labels)
-					}
-				}
-				if !projectkeys.LabelValuesMatch(k, actual, v) {
-					match = false
-					break
-				}
-			}
-			if !match {
-				continue
-			}
+		if !LabelsMatchFilter(c.Configuration.Labels, labelFilter) {
+			continue
 		}
 
 		info := api.AgentInfo{
@@ -362,7 +342,10 @@ func (r *AppleContainerRuntime) Exec(ctx context.Context, id string, cmd []strin
 		id = resolveContainerID(agents, id)
 	}
 	args := append([]string{"exec", "--user", "scion", id}, cmd...)
-	return runSimpleCommand(ctx, r.Command, args...)
+	out, err := runSimpleCommand(ctx, r.Command, args...)
+	// A container removed after the lookup above must surface as
+	// ErrContainerNotFound, not as the command's exit (ptone/scion#3655).
+	return out, appleExecNotFound.classifyExecErr(ctx, err, out, id, r.List)
 }
 
 // ExecWithStdin runs cmd inside the container with stdin piped from the

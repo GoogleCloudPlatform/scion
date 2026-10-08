@@ -16,6 +16,7 @@ package hubclient
 
 import (
 	"context"
+	"fmt"
 	"net/url"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
@@ -97,7 +98,7 @@ func (s *envService) List(ctx context.Context, opts *ListEnvOptions) (*ListEnvRe
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[ListEnvResponse](resp)
+	return apiclient.DecodeRequired[ListEnvResponse](resp)
 }
 
 // Get returns a specific environment variable by key.
@@ -116,7 +117,15 @@ func (s *envService) Get(ctx context.Context, key string, opts *EnvScopeOptions)
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[EnvVar](resp)
+	envVar, err := apiclient.DecodeResponse[EnvVar](resp)
+	if err != nil {
+		return nil, err
+	}
+	if envVar == nil {
+		// A 204 No Content response decodes to nil, nil.
+		return nil, fmt.Errorf("hub returned no content for %q", key)
+	}
+	return envVar, nil
 }
 
 // Set creates or updates an environment variable.
@@ -125,7 +134,7 @@ func (s *envService) Set(ctx context.Context, key string, req *SetEnvRequest) (*
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[SetEnvResponse](resp)
+	return apiclient.DecodeRequired[SetEnvResponse](resp)
 }
 
 // Delete removes an environment variable.

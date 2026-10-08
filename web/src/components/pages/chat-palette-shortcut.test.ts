@@ -2221,3 +2221,172 @@ describe('touch focus handoff: a conversation selection on touch does not focus 
     expect(retargetSpy).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('on a touch-primary device, the open request holds the on-screen keyboard', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    for (const proxy of document.querySelectorAll('input[data-palette-keyboard-proxy]')) {
+      proxy.remove();
+    }
+  });
+
+  function stubTouchPrimary(): void {
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn((query: string) => ({
+        matches: query === TOUCH_PRIMARY_QUERY,
+        media: query,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      }))
+    );
+  }
+
+  function keyboardProxy(): HTMLInputElement | null {
+    return document.querySelector<HTMLInputElement>('input[data-palette-keyboard-proxy]');
+  }
+
+  /** A button that focuses itself and sends the open request from its click, as the header's does. */
+  function headerButton(): { button: HTMLButtonElement; focusedInTap: () => Element | null } {
+    const button = document.createElement('button');
+    document.body.appendChild(button);
+    let focused: Element | null = null;
+    button.addEventListener('click', () => {
+      button.focus();
+      button.dispatchEvent(
+        new CustomEvent(CHAT_PALETTE_OPEN_REQUEST_EVENT, { bubbles: true, composed: true })
+      );
+      focused = document.activeElement;
+    });
+    return { button, focusedInTap: () => focused };
+  }
+
+  it('a text field has focus within the tap, and the button stays the invoker', async () => {
+    stubTouchPrimary();
+    const page = createEligiblePage();
+    document.body.appendChild(page);
+    const { button, focusedInTap } = headerButton();
+
+    button.click();
+
+    expect(keyboardProxy()).not.toBeNull();
+    expect(focusedInTap()).toBe(keyboardProxy());
+    expect(page._paletteInvoker).toBe(button);
+    await vi.waitFor(() => expect(page.v2PaletteOpen).toBe(true));
+  });
+
+  /** A focused button standing in for whatever had focus before the open request. */
+  function focusedButton(): HTMLButtonElement {
+    const button = document.createElement('button');
+    document.body.appendChild(button);
+    button.focus();
+    return button;
+  }
+
+  it('a queued reopen abandoned after the close animation drops the field without refocusing', async () => {
+    stubTouchPrimary();
+    const page = createEligiblePage();
+    document.body.appendChild(page);
+    await page.togglePalette();
+    await page.togglePalette();
+    focusedButton();
+    await page.togglePalette(); // queued
+    const proxy = keyboardProxy();
+    expect(document.activeElement).toBe(proxy);
+    vi.mocked(page._isUnrelatedModalActive).mockReturnValue(true);
+
+    page._handlePaletteAfterHide(ownDialogAfterHideEvent());
+
+    expect(page.v2PaletteOpen).toBe(false);
+    expect(proxy?.isConnected).toBe(false);
+    expect(document.activeElement).toBe(document.body);
+  });
+
+  it('a reopen queued behind the document preview, abandoned, drops the field without refocusing', async () => {
+    stubTouchPrimary();
+    const page = createEligiblePage();
+    page.v2SwitcherLoaded = true;
+    page._paletteFilePreviewTarget = {
+      kind: 'path',
+      projectId: 'p1',
+      containerPath: '/workspace/notes.txt',
+      location: { kind: 'workspace', filePath: 'notes.txt' },
+      name: 'notes.txt',
+    };
+    document.body.appendChild(page);
+    focusedButton();
+    await page.togglePalette(); // queued
+    const proxy = keyboardProxy();
+    expect(document.activeElement).toBe(proxy);
+    vi.mocked(page._isUnrelatedModalActive).mockReturnValue(true);
+
+    page._closePaletteFilePreview();
+
+    expect(proxy?.isConnected).toBe(false);
+    expect(document.activeElement).toBe(document.body);
+  });
+
+  it('a route change closing the open palette before its input takes focus drops the field without refocusing', async () => {
+    stubTouchPrimary();
+    const page = createEligiblePage();
+    document.body.appendChild(page);
+    focusedButton();
+    await page.togglePalette();
+    // Open, with the field still holding the keyboard: the dialog has not
+    // yet moved focus to the query input.
+    expect(page.v2PaletteOpen).toBe(true);
+    const proxy = keyboardProxy();
+    expect(document.activeElement).toBe(proxy);
+    vi.mocked(page._isOnChatRoute).mockReturnValue(false);
+
+    page._handlePopStateForPalette();
+
+    expect(page.v2PaletteOpen).toBe(false);
+    expect(proxy?.isConnected).toBe(false);
+    expect(document.activeElement).toBe(document.body);
+  });
+
+  it('a close that restores focus gives it back from the field', async () => {
+    stubTouchPrimary();
+    const page = createEligiblePage();
+    document.body.appendChild(page);
+    const button = focusedButton();
+    const opening = page.togglePalette();
+    expect(document.activeElement).toBe(keyboardProxy());
+
+    page._closePaletteAndCancelLoad();
+
+    expect(keyboardProxy()).toBeNull();
+    expect(document.activeElement).toBe(button);
+    await opening;
+  });
+
+  it('a page leaving the document drops the field without refocusing', async () => {
+    stubTouchPrimary();
+    const page = createEligiblePage();
+    document.body.appendChild(page);
+    focusedButton();
+    const opening = page.togglePalette();
+    const proxy = keyboardProxy();
+    expect(document.activeElement).toBe(proxy);
+
+    page.remove();
+
+    expect(proxy?.isConnected).toBe(false);
+    expect(document.activeElement).toBe(document.body);
+    await opening;
+  });
+
+  it('a second press cancelling the pending open gives focus back to the button', async () => {
+    stubTouchPrimary();
+    const page = createEligiblePage();
+    document.body.appendChild(page);
+    const { button } = headerButton();
+    button.click();
+    await page.togglePalette();
+    // The pending open stops its capture once its lazy import settles.
+    await vi.waitFor(() => expect(keyboardProxy()).toBeNull());
+    expect(page.v2PaletteOpen).toBe(false);
+    expect(document.activeElement).toBe(button);
+  });
+});

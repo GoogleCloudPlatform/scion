@@ -157,6 +157,8 @@ type Agent struct {
 	RunIntent *string `json:"run_intent,omitempty"`
 	// RunIntentAt holds the value of the "run_intent_at" field.
 	RunIntentAt *time.Time `json:"run_intent_at,omitempty"`
+	// RunIntentMarkedAt holds the value of the "run_intent_marked_at" field.
+	RunIntentMarkedAt *time.Time `json:"run_intent_marked_at,omitempty"`
 	// StartClaimID holds the value of the "start_claim_id" field.
 	StartClaimID *string `json:"start_claim_id,omitempty"`
 	// StartClaimKind holds the value of the "start_claim_kind" field.
@@ -193,9 +195,11 @@ type AgentEdges struct {
 	Memberships []*GroupMembership `json:"memberships,omitempty"`
 	// PolicyBindings holds the value of the policy_bindings edge.
 	PolicyBindings []*PolicyBinding `json:"policy_bindings,omitempty"`
+	// Holds holds the value of the holds edge.
+	Holds []*AgentHold `json:"holds,omitempty"`
 	// loadedTypes holds the information for reporting if a
 	// type was loaded (or requested) in eager-loading or not.
-	loadedTypes [3]bool
+	loadedTypes [4]bool
 }
 
 // ProjectOrErr returns the Project value or an error if the edge
@@ -227,6 +231,15 @@ func (e AgentEdges) PolicyBindingsOrErr() ([]*PolicyBinding, error) {
 	return nil, &NotLoadedError{edge: "policy_bindings"}
 }
 
+// HoldsOrErr returns the Holds value or an error if the edge
+// was not loaded in eager-loading.
+func (e AgentEdges) HoldsOrErr() ([]*AgentHold, error) {
+	if e.loadedTypes[3] {
+		return e.Holds, nil
+	}
+	return nil, &NotLoadedError{edge: "holds"}
+}
+
 // scanValues returns the types for scanning values from sql.Rows.
 func (*Agent) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
@@ -242,7 +255,7 @@ func (*Agent) scanValues(columns []string) ([]any, error) {
 			values[i] = new(sql.NullInt64)
 		case agent.FieldSlug, agent.FieldName, agent.FieldTemplate, agent.FieldStatus, agent.FieldMessageMode, agent.FieldPhase, agent.FieldActivity, agent.FieldToolName, agent.FieldConnectionState, agent.FieldContainerStatus, agent.FieldExitReason, agent.FieldRuntimeState, agent.FieldStalledFromActivity, agent.FieldImage, agent.FieldRuntime, agent.FieldRuntimeBrokerID, agent.FieldWorkspacePlacement, agent.FieldTaskSummary, agent.FieldMessage, agent.FieldAppliedConfig, agent.FieldHarnessConfig, agent.FieldReincarnationState, agent.FieldLaunchID, agent.FieldRunID, agent.FieldLaunchState, agent.FieldLaunchEndReason, agent.FieldLaunchKind, agent.FieldLaunchOwner, agent.FieldLaunchStep, agent.FieldLaunchError, agent.FieldDeletionState, agent.FieldDeletionCode, agent.FieldDeletionError, agent.FieldDeletionPrior, agent.FieldDeletionRequest, agent.FieldRunIntent, agent.FieldStartClaimID, agent.FieldStartClaimKind, agent.FieldStartClaimState, agent.FieldStartClaimOwner, agent.FieldStartClaimTarget, agent.FieldStartClaimLaunchID, agent.FieldSoftDeleteOpID:
 			values[i] = new(sql.NullString)
-		case agent.FieldCreated, agent.FieldUpdated, agent.FieldLastSeen, agent.FieldLastActivityEvent, agent.FieldStartedAt, agent.FieldDeletedAt, agent.FieldReincarnationUpdatedAt, agent.FieldLaunchDeadline, agent.FieldLaunchLastReportAt, agent.FieldDeletionLeaseAt, agent.FieldDeletionStartedAt, agent.FieldDeletionFailedAt, agent.FieldRunIntentAt, agent.FieldStartClaimAt, agent.FieldStartClaimLeaseUntil, agent.FieldStartClaimUnconfirmedAt, agent.FieldStartClaimHoldUntil:
+		case agent.FieldCreated, agent.FieldUpdated, agent.FieldLastSeen, agent.FieldLastActivityEvent, agent.FieldStartedAt, agent.FieldDeletedAt, agent.FieldReincarnationUpdatedAt, agent.FieldLaunchDeadline, agent.FieldLaunchLastReportAt, agent.FieldDeletionLeaseAt, agent.FieldDeletionStartedAt, agent.FieldDeletionFailedAt, agent.FieldRunIntentAt, agent.FieldRunIntentMarkedAt, agent.FieldStartClaimAt, agent.FieldStartClaimLeaseUntil, agent.FieldStartClaimUnconfirmedAt, agent.FieldStartClaimHoldUntil:
 			values[i] = new(sql.NullTime)
 		case agent.FieldID, agent.FieldProjectID:
 			values[i] = new(uuid.UUID)
@@ -700,6 +713,13 @@ func (_m *Agent) assignValues(columns []string, values []any) error {
 				_m.RunIntentAt = new(time.Time)
 				*_m.RunIntentAt = value.Time
 			}
+		case agent.FieldRunIntentMarkedAt:
+			if value, ok := values[i].(*sql.NullTime); !ok {
+				return fmt.Errorf("unexpected type %T for field run_intent_marked_at", values[i])
+			} else if value.Valid {
+				_m.RunIntentMarkedAt = new(time.Time)
+				*_m.RunIntentMarkedAt = value.Time
+			}
 		case agent.FieldStartClaimID:
 			if value, ok := values[i].(*sql.NullString); !ok {
 				return fmt.Errorf("unexpected type %T for field start_claim_id", values[i])
@@ -798,6 +818,11 @@ func (_m *Agent) QueryMemberships() *GroupMembershipQuery {
 // QueryPolicyBindings queries the "policy_bindings" edge of the Agent entity.
 func (_m *Agent) QueryPolicyBindings() *PolicyBindingQuery {
 	return NewAgentClient(_m.config).QueryPolicyBindings(_m)
+}
+
+// QueryHolds queries the "holds" edge of the Agent entity.
+func (_m *Agent) QueryHolds() *AgentHoldQuery {
+	return NewAgentClient(_m.config).QueryHolds(_m)
 }
 
 // Update returns a builder for updating this Agent.
@@ -1054,6 +1079,11 @@ func (_m *Agent) String() string {
 	builder.WriteString(", ")
 	if v := _m.RunIntentAt; v != nil {
 		builder.WriteString("run_intent_at=")
+		builder.WriteString(v.Format(time.ANSIC))
+	}
+	builder.WriteString(", ")
+	if v := _m.RunIntentMarkedAt; v != nil {
+		builder.WriteString("run_intent_marked_at=")
 		builder.WriteString(v.Format(time.ANSIC))
 	}
 	builder.WriteString(", ")

@@ -108,15 +108,15 @@ func (s *Server) ConduitEnabled() bool {
 	return s.experimentEnabled(conduitExperiment)
 }
 
-// envHubConduit tells sciontool that this hub serves conduit sessions. Its
-// absence (an older hub, or hub.conduit off) keeps sciontool on the legacy
-// port-forward tunnel without ever calling /api/v1/conduit.
-const envHubConduit = "SCION_HUB_CONDUIT"
-
 // conduitServing reports whether agents should dial the conduit endpoint:
 // hub.conduit is on and this node runs the relay.
 func (s *Server) conduitServing() bool {
-	return s.experimentEnabled(conduitExperiment) && s.conduit.Load() != nil
+	return s.conduitServingIn(s.experimentsSnapshot())
+}
+
+// conduitServingIn is conduitServing with hub.conduit read from snap.
+func (s *Server) conduitServingIn(snap ExperimentsSnapshot) bool {
+	return s.experimentEnabledIn(snap, conduitExperiment) && s.conduit.Load() != nil
 }
 
 // ConduitGrantRingShared reports whether the grant key ring is persisted
@@ -432,6 +432,11 @@ func (s *Server) handleConduit(w http.ResponseWriter, r *http.Request) {
 		ID:        agent.ID,
 		ProjectID: agent.ProjectID,
 		Agent:     agentIncarnationFacts(agent),
+	}
+	if rs := s.authConfig.AgentRunScope; rs != nil {
+		if claims := GetAgentFromContext(r.Context()); claims != nil {
+			p.TokenRun = rs.conduitBinding(context.WithoutCancel(r.Context()), claims, runScopeRequestFrom(r))
+		}
 	}
 	// The session outlives no request deadline: it ends when the
 	// connection closes or the relay drains.

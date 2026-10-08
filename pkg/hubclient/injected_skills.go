@@ -84,7 +84,7 @@ func (s *projectInjectedSkillsService) List(ctx context.Context) (*api.SkillInje
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[api.SkillInjectionList](resp)
+	return apiclient.DecodeRequired[api.SkillInjectionList](resp)
 }
 
 // Add adds a single skill entry to the project's injected-skills list.
@@ -93,7 +93,7 @@ func (s *projectInjectedSkillsService) Add(ctx context.Context, req *AddInjected
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[api.SkillInjectionEntry](resp)
+	return apiclient.DecodeRequired[api.SkillInjectionEntry](resp)
 }
 
 // Set replaces the entire project injected-skills list atomically.
@@ -103,7 +103,7 @@ func (s *projectInjectedSkillsService) Set(ctx context.Context, entries []api.Sk
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[api.SkillInjectionList](resp)
+	return apiclient.DecodeRequired[api.SkillInjectionList](resp)
 }
 
 // Remove deletes a single entry from the project's injected-skills list.
@@ -126,7 +126,7 @@ func (s *userInjectedSkillsService) List(ctx context.Context) (*api.SkillInjecti
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[api.SkillInjectionList](resp)
+	return apiclient.DecodeRequired[api.SkillInjectionList](resp)
 }
 
 // Add adds a single skill entry to the user's injected-skills list.
@@ -135,7 +135,7 @@ func (s *userInjectedSkillsService) Add(ctx context.Context, req *AddInjectedSki
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[api.SkillInjectionEntry](resp)
+	return apiclient.DecodeRequired[api.SkillInjectionEntry](resp)
 }
 
 // Set replaces the entire user injected-skills list atomically.
@@ -145,7 +145,7 @@ func (s *userInjectedSkillsService) Set(ctx context.Context, entries []api.Skill
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[api.SkillInjectionList](resp)
+	return apiclient.DecodeRequired[api.SkillInjectionList](resp)
 }
 
 // Remove deletes a single entry from the user's injected-skills list.
