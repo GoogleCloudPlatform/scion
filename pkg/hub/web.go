@@ -2170,7 +2170,7 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 			ws.logger().Warn("Proxy auth rejected in web middleware",
 				"provider", ws.config.ProxyAuthenticator.Name(),
 				"error", proxyErr,
-				"path", r.URL.Path)
+				"path", logging.RequestPath(r))
 			http.Error(w, "proxy authentication failed", http.StatusUnauthorized)
 			return
 		}
@@ -3001,7 +3001,7 @@ func (ws *WebServer) loggingMiddleware(next http.Handler) http.Handler {
 		if ws.config.Debug || wrapped.statusCode >= 400 || aborted {
 			attrs := []slog.Attr{
 				slog.String("method", r.Method),
-				slog.String("path", r.URL.Path),
+				slog.String("path", logging.RequestPath(r)),
 				slog.Int("status", wrapped.statusCode),
 				slog.Duration("duration", time.Since(start)),
 			}
