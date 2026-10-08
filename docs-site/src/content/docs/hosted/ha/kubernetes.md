@@ -657,13 +657,19 @@ With [`server.home_storage`](/scion/reference/server-config/#agent-home-storage-
 
 Secrets are composable: `ResolvedAuth` and `ResolvedSecrets` are applied independently (not mutually exclusive).
 
+**Object names.** A start from the Hub carries a run ID, and the runtime names the agent's Secrets and SecretProviderClass after that run: `scion-run-secret-<pod>-<token>` for the env/file Secret and the SecretProviderClass, and `scion-run-auth-<pod>-<token>` for the `ResolvedAuth` Secret, where `<token>` is derived from the run ID (a very long pod name is truncated and hashed). Two runs of the same agent therefore never share object names, and a new run's start does not delete an earlier run's objects; those are removed by that run's own cleanup or delete, or by an age-based sweep once stale. A start without a run ID (for example a local CLI start) keeps the fixed names `scion-agent-<pod>` and `scion-auth-<pod>`.
+
+:::caution[Upgrade Runtime Brokers with the Hub]
+Runtime Brokers older than the Hub ignore per-run objects. Upgrade your Kubernetes Runtime Brokers together with the Hub.
+:::
+
 File-type secrets, harness auth files, and `secrets.json` whose targets are inside the agent home are not mounted there directly. Their volumes are mounted under `/run/scion/` (`secrets-store`, `agent-secrets`, `auth-files`), and after the home sync each file is copied to its target in the home as the Pod user, with mode `0600`. This keeps the home writable for non-root Pods: a direct `subPath` mount would make the container runtime create missing parent directories owned by root, and the home sync would then fail with "Permission denied". Targets outside the agent home keep their direct `subPath` mounts.
 
 ### Hub Transport Credential
 
 When the Hub uses transport auth (see [Auth Proxy (IAP)](/scion/hosted/ha/auth-proxy-iap/)), it sends the initial transport credential as `SCION_TRANSPORT_TOKEN` with each start, resume, and restart. On Kubernetes, the runtime does not write this value into the Pod spec as a plain environment value. Instead it:
 
-- stores it in the agent's per-agent Secret (`scion-agent-<agent>`) under the key `scion-transport-credential`, and
+- stores it in the agent's per-agent Secret (`scion-run-secret-…` for a Hub start, see [Secret Modes](#secret-modes); `scion-agent-<agent>` otherwise) under the key `scion-transport-credential`, and
 - sets `SCION_TRANSPORT_TOKEN` in the container with `valueFrom.secretKeyRef` pointing at that key.
 
 The per-agent Secret is created even when the agent has no other secrets. It is rebuilt on every start, resume, and restart, so the new Pod always reads the value the Hub sent for that dispatch. In GKE mode the value is stored in this Kubernetes Secret, not in the SecretProviderClass. If a user or project secret also targets `SCION_TRANSPORT_TOKEN`, the value from the Hub is used and the other secret is skipped, with a warning in the broker log. A secret named `scion-transport-credential` is also skipped, because that key is reserved. `SCION_TRANSPORT_TOKEN_EXPIRY` and `SCION_TRANSPORT_AUDIENCE` stay plain environment values. Docker and the other runtimes are unchanged.
