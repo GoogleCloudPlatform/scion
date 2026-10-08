@@ -407,6 +407,138 @@ func TestStaticAssetHandler_HashedCaching(t *testing.T) {
 	}
 }
 
+// writeFingerprintFixture writes a client build with a Vite manifest into a
+// temp dir: real chunk names from a current build (hashes containing - and
+// _), the unhashed entry, a public file and a Shoelace icon.
+func writeFingerprintFixture(t *testing.T, manifest string) string {
+	t.Helper()
+	dir := t.TempDir()
+	files := map[string]string{
+		"assets/main.js":                           "// entry",
+		"assets/shoelace-B3-XBhED.js":              "// chunk",
+		"assets/project-detail-CeCkJL--.js":        "// chunk",
+		"assets/model-utils-UsxIS_8q.js":           "// chunk",
+		"assets/shoelace-BZzytDYN.css":             "/* css */",
+		"assets/settings-AbCdEfGh.js":              "// not in the manifest",
+		"assets/chunk-abc12345.js":                 "// hex name",
+		"assets/shoelace-B3-XBhED.js.map":          "{}",
+		"favicon.ico":                              "icon",
+		"shoelace/assets/icons/cloud-download.svg": "<svg/>",
+	}
+	if manifest != "" {
+		files[".vite/manifest.json"] = manifest
+	}
+	for name, data := range files {
+		p := filepath.Join(dir, filepath.FromSlash(name))
+		require.NoError(t, os.MkdirAll(filepath.Dir(p), 0o755))
+		require.NoError(t, os.WriteFile(p, []byte(data), 0o644))
+	}
+	return dir
+}
+
+const fingerprintManifest = `{
+  "src/client/main.ts": {"file": "assets/main.js", "isEntry": true, "imports": ["_shoelace-B3-XBhED.js"]},
+  "_shoelace-B3-XBhED.js": {"file": "assets/shoelace-B3-XBhED.js", "css": ["assets/shoelace-BZzytDYN.css"]},
+  "src/components/pages/project-detail.ts": {"file": "assets/project-detail-CeCkJL--.js", "isDynamicEntry": true},
+  "_model-utils-UsxIS_8q.js": {"file": "assets/model-utils-UsxIS_8q.js"},
+  "_bad-1": {"file": "../outside-AbCdEfGh.js"},
+  "_bad-2": {"file": "/assets/abs-AbCdEfGh.js"},
+  "_bad-3": {"file": "https://cdn.example.com/x-AbCdEfGh.js"},
+  "_bad-4": {"file": "assets/../assets/settings-AbCdEfGh.js"}
+}`
+
+func cacheControlOf(t *testing.T, ws *WebServer, p string) string {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, p, nil)
+	rec := httptest.NewRecorder()
+	ws.Handler().ServeHTTP(rec, req)
+	resp := rec.Result()
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusOK, resp.StatusCode, p)
+	return resp.Header.Get("Cache-Control")
+}
+
+// TestStaticAssetFingerprintedCaching pins ptone/scion#3789: the files Vite
+// fingerprinted, read from its build manifest, get the long cache lifetime,
+// from the disk and the embedded asset source alike; the entry, source maps,
+// public files and unlisted names stay no-cache; hex names keep working.
+func TestStaticAssetFingerprintedCaching(t *testing.T) {
+	const long = "public, max-age=86400"
+	want := map[string]string{
+		"/assets/shoelace-B3-XBhED.js":              long,       // chunk
+		"/assets/project-detail-CeCkJL--.js":        long,       // dynamic entry chunk, hash ends in --
+		"/assets/model-utils-UsxIS_8q.js":           long,       // hash contains _
+		"/assets/shoelace-BZzytDYN.css":             long,       // css listed by a chunk
+		"/assets/chunk-abc12345.js":                 long,       // hex name, not in the manifest
+		"/assets/main.js":                           "no-cache", // the unhashed entry
+		"/assets/settings-AbCdEfGh.js":              "no-cache", // looks hashed, not in the manifest
+		"/assets/shoelace-B3-XBhED.js.map":          "no-cache", // source map
+		"/favicon.ico":                              "no-cache", // public file
+		"/shoelace/assets/icons/cloud-download.svg": "no-cache",
+	}
+	dir := writeFingerprintFixture(t, fingerprintManifest)
+
+	t.Run("disk", func(t *testing.T) {
+		ws := newTestWebServer(t, WebServerConfig{AssetsDir: dir})
+		assert.Len(t, ws.fingerprintedAssets, 4, "the four clean manifest paths, nothing else")
+		for p, cc := range want {
+			assert.Equal(t, cc, cacheControlOf(t, ws, p), p)
+		}
+	})
+
+	t.Run("embedded", func(t *testing.T) {
+		ws := newTestWebServer(t, WebServerConfig{})
+		ws.assets = os.DirFS(dir)
+		ws.assetsDisk = ""
+		ws.hasAssets = ws.detectWebAssets()
+		ws.fingerprintedAssets = ws.loadFingerprintedAssets()
+		assert.Len(t, ws.fingerprintedAssets, 4)
+		for p, cc := range want {
+			assert.Equal(t, cc, cacheControlOf(t, ws, p), p)
+		}
+	})
+
+	t.Run("manifest paths outside the build are ignored", func(t *testing.T) {
+		ws := newTestWebServer(t, WebServerConfig{AssetsDir: dir})
+		for _, p := range []string{"/../outside-AbCdEfGh.js", "/outside-AbCdEfGh.js", "//assets/abs-AbCdEfGh.js", "/assets/abs-AbCdEfGh.js", "/assets/settings-AbCdEfGh.js"} {
+			assert.False(t, ws.fingerprintedAssets[p], p)
+		}
+	})
+}
+
+// TestStaticAssetFingerprintedCaching_NoUsableManifest pins the fallback: with
+// no manifest, or one that does not parse, only hex names get the long
+// lifetime and Vite names stay no-cache.
+func TestStaticAssetFingerprintedCaching_NoUsableManifest(t *testing.T) {
+	for name, manifest := range map[string]string{"missing": "", "malformed": `{"src/client/main.ts": {"file": `} {
+		t.Run(name, func(t *testing.T) {
+			ws := newTestWebServer(t, WebServerConfig{AssetsDir: writeFingerprintFixture(t, manifest)})
+			assert.Nil(t, ws.fingerprintedAssets)
+			assert.Equal(t, "public, max-age=86400", cacheControlOf(t, ws, "/assets/chunk-abc12345.js"))
+			assert.Equal(t, "no-cache", cacheControlOf(t, ws, "/assets/shoelace-B3-XBhED.js"))
+			assert.Equal(t, "no-cache", cacheControlOf(t, ws, "/assets/main.js"))
+		})
+	}
+}
+
+func TestFingerprintedRequestPath(t *testing.T) {
+	for p, want := range map[string]string{
+		"assets/shoelace-B3-XBhED.js":       "/assets/shoelace-B3-XBhED.js",
+		"assets/project-detail-CeCkJL--.js": "/assets/project-detail-CeCkJL--.js",
+		"assets/main.js":                    "", // no hash segment
+		"../assets/x-AbCdEfGh.js":           "",
+		"assets/../x-AbCdEfGh.js":           "",
+		"/assets/x-AbCdEfGh.js":             "",
+		"https://h/x-AbCdEfGh.js":           "",
+		`assets\x-AbCdEfGh.js`:              "",
+		"":                                  "",
+	} {
+		got, ok := fingerprintedRequestPath(p)
+		assert.Equal(t, want, got, p)
+		assert.Equal(t, want != "", ok, p)
+	}
+}
+
 func TestStaticAssetHandler_NoAssets(t *testing.T) {
 	ws := newTestWebServer(t, WebServerConfig{})
 	// Force the no-assets state regardless of whether web.AssetsEmbedded is true.
@@ -4352,136 +4484,4 @@ func TestNewWebServer_DevAuth_NonLoopback_Rejected(t *testing.T) {
 		Host: "0.0.0.0",
 	})
 	assert.NotNil(t, ws4)
-}
-
-// writeFingerprintFixture writes a client build with a Vite manifest into a
-// temp dir: real chunk names from a current build (hashes containing - and
-// _), the unhashed entry, a public file and a Shoelace icon.
-func writeFingerprintFixture(t *testing.T, manifest string) string {
-	t.Helper()
-	dir := t.TempDir()
-	files := map[string]string{
-		"assets/main.js":                           "// entry",
-		"assets/shoelace-B3-XBhED.js":              "// chunk",
-		"assets/project-detail-CeCkJL--.js":        "// chunk",
-		"assets/model-utils-UsxIS_8q.js":           "// chunk",
-		"assets/shoelace-BZzytDYN.css":             "/* css */",
-		"assets/settings-AbCdEfGh.js":              "// not in the manifest",
-		"assets/chunk-abc12345.js":                 "// hex name",
-		"assets/shoelace-B3-XBhED.js.map":          "{}",
-		"favicon.ico":                              "icon",
-		"shoelace/assets/icons/cloud-download.svg": "<svg/>",
-	}
-	if manifest != "" {
-		files[".vite/manifest.json"] = manifest
-	}
-	for name, data := range files {
-		p := filepath.Join(dir, filepath.FromSlash(name))
-		require.NoError(t, os.MkdirAll(filepath.Dir(p), 0o755))
-		require.NoError(t, os.WriteFile(p, []byte(data), 0o644))
-	}
-	return dir
-}
-
-const fingerprintManifest = `{
-  "src/client/main.ts": {"file": "assets/main.js", "isEntry": true, "imports": ["_shoelace-B3-XBhED.js"]},
-  "_shoelace-B3-XBhED.js": {"file": "assets/shoelace-B3-XBhED.js", "css": ["assets/shoelace-BZzytDYN.css"]},
-  "src/components/pages/project-detail.ts": {"file": "assets/project-detail-CeCkJL--.js", "isDynamicEntry": true},
-  "_model-utils-UsxIS_8q.js": {"file": "assets/model-utils-UsxIS_8q.js"},
-  "_bad-1": {"file": "../outside-AbCdEfGh.js"},
-  "_bad-2": {"file": "/assets/abs-AbCdEfGh.js"},
-  "_bad-3": {"file": "https://cdn.example.com/x-AbCdEfGh.js"},
-  "_bad-4": {"file": "assets/../assets/settings-AbCdEfGh.js"}
-}`
-
-func cacheControlOf(t *testing.T, ws *WebServer, p string) string {
-	t.Helper()
-	req := httptest.NewRequest(http.MethodGet, p, nil)
-	rec := httptest.NewRecorder()
-	ws.Handler().ServeHTTP(rec, req)
-	resp := rec.Result()
-	defer func() { _ = resp.Body.Close() }()
-	require.Equal(t, http.StatusOK, resp.StatusCode, p)
-	return resp.Header.Get("Cache-Control")
-}
-
-// TestStaticAssetFingerprintedCaching pins ptone/scion#3789: the files Vite
-// fingerprinted, read from its build manifest, get the long cache lifetime,
-// from the disk and the embedded asset source alike; the entry, source maps,
-// public files and unlisted names stay no-cache; hex names keep working.
-func TestStaticAssetFingerprintedCaching(t *testing.T) {
-	const long = "public, max-age=86400"
-	want := map[string]string{
-		"/assets/shoelace-B3-XBhED.js":              long,       // chunk
-		"/assets/project-detail-CeCkJL--.js":        long,       // dynamic entry chunk, hash ends in --
-		"/assets/model-utils-UsxIS_8q.js":           long,       // hash contains _
-		"/assets/shoelace-BZzytDYN.css":             long,       // css listed by a chunk
-		"/assets/chunk-abc12345.js":                 long,       // hex name, not in the manifest
-		"/assets/main.js":                           "no-cache", // the unhashed entry
-		"/assets/settings-AbCdEfGh.js":              "no-cache", // looks hashed, not in the manifest
-		"/assets/shoelace-B3-XBhED.js.map":          "no-cache", // source map
-		"/favicon.ico":                              "no-cache", // public file
-		"/shoelace/assets/icons/cloud-download.svg": "no-cache",
-	}
-	dir := writeFingerprintFixture(t, fingerprintManifest)
-
-	t.Run("disk", func(t *testing.T) {
-		ws := newTestWebServer(t, WebServerConfig{AssetsDir: dir})
-		assert.Len(t, ws.fingerprintedAssets, 4, "the four clean manifest paths, nothing else")
-		for p, cc := range want {
-			assert.Equal(t, cc, cacheControlOf(t, ws, p), p)
-		}
-	})
-
-	t.Run("embedded", func(t *testing.T) {
-		ws := newTestWebServer(t, WebServerConfig{})
-		ws.assets = os.DirFS(dir)
-		ws.assetsDisk = ""
-		ws.hasAssets = ws.detectWebAssets()
-		ws.fingerprintedAssets = ws.loadFingerprintedAssets()
-		assert.Len(t, ws.fingerprintedAssets, 4)
-		for p, cc := range want {
-			assert.Equal(t, cc, cacheControlOf(t, ws, p), p)
-		}
-	})
-
-	t.Run("manifest paths outside the build are ignored", func(t *testing.T) {
-		ws := newTestWebServer(t, WebServerConfig{AssetsDir: dir})
-		for _, p := range []string{"/../outside-AbCdEfGh.js", "/outside-AbCdEfGh.js", "//assets/abs-AbCdEfGh.js", "/assets/abs-AbCdEfGh.js", "/assets/settings-AbCdEfGh.js"} {
-			assert.False(t, ws.fingerprintedAssets[p], p)
-		}
-	})
-}
-
-// TestStaticAssetFingerprintedCaching_NoUsableManifest pins the fallback: with
-// no manifest, or one that does not parse, only hex names get the long
-// lifetime and Vite names stay no-cache.
-func TestStaticAssetFingerprintedCaching_NoUsableManifest(t *testing.T) {
-	for name, manifest := range map[string]string{"missing": "", "malformed": `{"src/client/main.ts": {"file": `} {
-		t.Run(name, func(t *testing.T) {
-			ws := newTestWebServer(t, WebServerConfig{AssetsDir: writeFingerprintFixture(t, manifest)})
-			assert.Nil(t, ws.fingerprintedAssets)
-			assert.Equal(t, "public, max-age=86400", cacheControlOf(t, ws, "/assets/chunk-abc12345.js"))
-			assert.Equal(t, "no-cache", cacheControlOf(t, ws, "/assets/shoelace-B3-XBhED.js"))
-			assert.Equal(t, "no-cache", cacheControlOf(t, ws, "/assets/main.js"))
-		})
-	}
-}
-
-func TestFingerprintedRequestPath(t *testing.T) {
-	for p, want := range map[string]string{
-		"assets/shoelace-B3-XBhED.js":       "/assets/shoelace-B3-XBhED.js",
-		"assets/project-detail-CeCkJL--.js": "/assets/project-detail-CeCkJL--.js",
-		"assets/main.js":                    "", // no hash segment
-		"../assets/x-AbCdEfGh.js":           "",
-		"assets/../x-AbCdEfGh.js":           "",
-		"/assets/x-AbCdEfGh.js":             "",
-		"https://h/x-AbCdEfGh.js":           "",
-		`assets\x-AbCdEfGh.js`:              "",
-		"":                                  "",
-	} {
-		got, ok := fingerprintedRequestPath(p)
-		assert.Equal(t, want, got, p)
-		assert.Equal(t, want != "", ok, p)
-	}
 }
