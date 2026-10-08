@@ -817,7 +817,13 @@ func (a *AuthzService) evaluateUserDelegatorAuthority(
 		}
 	}
 
-	return a.userRelationshipAuthority(ctx, user, resource, action, permissionID)
+	allowed, reason, err := a.userRelationshipAuthority(ctx, user, resource, action, permissionID)
+	if err != nil || !allowed || !relationshipExecutionClass(resource, permissionID) {
+		return allowed, reason, err
+	}
+	// An execution-class permission held through a relationship grant also
+	// requires the delegator's admission to the agent's project.
+	return a.delegatorExecutionAdmission(ctx, user, scopeType, scopeID, permissionID, reason)
 }
 
 // errCeilingProjectAccessFault is returned by userRelationshipAuthority when

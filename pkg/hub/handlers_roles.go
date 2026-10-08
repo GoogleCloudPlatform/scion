@@ -1419,6 +1419,7 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 
 	// CanDelegate check: security invariant — the actor must hold all
 	// permissions granted by the target role.
+	canDelegateResult, canDelegateReason := "", ""
 	if s.authzService != nil {
 		decision := s.authzService.CanDelegate(r.Context(), user, GrantDescriptor{
 			Type:             GrantTypeRoleBinding,
@@ -1430,6 +1431,7 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 			writeForbiddenStructured(w, "cannot create binding: "+decision.Reason, "role_binding", Action("create"))
 			return
 		}
+		canDelegateResult, canDelegateReason = "allow", decision.Reason
 	}
 
 	// Same principal-address check as members PUT: a user must be an email
@@ -1456,7 +1458,23 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 		CreatedBy:        user.ID(),
 	}
 
-	created, err := s.store.CreateRoleBinding(r.Context(), rb)
+	// The binding and its audit record commit or roll back together.
+	var created *store.RoleBinding
+	err := s.store.WithTx(r.Context(), func(tx store.Store) error {
+		c, err := tx.CreateRoleBinding(r.Context(), rb)
+		if err != nil {
+			return err
+		}
+		created = c
+		return s.writeRoleBindingAuditTx(r.Context(), tx, &store.MutationAuditRecord{
+			MutationType:      "role_binding_create",
+			TargetType:        "role_binding",
+			TargetID:          c.ID,
+			AfterSummary:      roleBindingSummary(c),
+			CanDelegateResult: canDelegateResult,
+			CanDelegateReason: canDelegateReason,
+		})
+	})
 	if err != nil {
 		if errors.Is(err, store.ErrAlreadyExists) {
 			Conflict(w, "this role binding already exists")
@@ -1558,7 +1576,19 @@ func (s *Server) deleteRoleBinding(w http.ResponseWriter, r *http.Request, id st
 		return
 	}
 
-	if err := s.store.DeleteRoleBinding(ctx, id); err != nil {
+	// The deletion and its audit record commit or roll back together.
+	if err := s.store.WithTx(ctx, func(tx store.Store) error {
+		if err := tx.DeleteRoleBinding(ctx, id); err != nil {
+			return err
+		}
+		return s.writeRoleBindingAuditTx(ctx, tx, &store.MutationAuditRecord{
+			MutationType:  "role_binding_delete",
+			TargetType:    "role_binding",
+			TargetID:      binding.ID,
+			BeforeSummary: roleBindingSummary(binding),
+			AfterSummary:  `{"deleted":true}`,
+		})
+	}); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			NotFound(w, "Role Binding")
 			return
@@ -1571,6 +1601,36 @@ func (s *Server) deleteRoleBinding(w http.ResponseWriter, r *http.Request, id st
 		"binding_id", id, "actor", user.Email())
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// roleBindingSummary is the audit summary of b, a JSON object with its
+// principal, role definition and scope.
+func roleBindingSummary(b *store.RoleBinding) string {
+	out, err := json.Marshal(struct {
+		PrincipalType    string `json:"principal_type"`
+		PrincipalID      string `json:"principal_id"`
+		RoleDefinitionID string `json:"role_definition_id"`
+		ScopeType        string `json:"scope_type"`
+		ScopeID          string `json:"scope_id"`
+	}{b.PrincipalType, b.PrincipalID, b.RoleDefinitionID, b.ScopeType, b.ScopeID})
+	// json.Marshal cannot fail for a struct of string fields (invalid UTF-8
+	// is replaced, not rejected), so this fallback is defensive only.
+	if err != nil {
+		return "{}"
+	}
+	return string(out)
+}
+
+// writeRoleBindingAuditTx stamps record, attributes it to the request actor
+// and writes it on tx.
+func (s *Server) writeRoleBindingAuditTx(ctx context.Context, tx store.Store, record *store.MutationAuditRecord) error {
+	record.Timestamp = time.Now()
+	s.buildAuditActorFromContext(ctx).ApplyActor(record)
+	applyHubActorFallback(record)
+	if err := tx.CreateMutationAudit(ctx, record); err != nil {
+		return fmt.Errorf("audit %s: %w", record.MutationType, err)
+	}
+	return nil
 }
 
 // deleteSystemSuperAdminBinding handles deletion of a system-scoped
