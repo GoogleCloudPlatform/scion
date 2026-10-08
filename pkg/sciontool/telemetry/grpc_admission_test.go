@@ -282,15 +282,7 @@ func TestBoundedGRPCAdapterCancellationDuringDecodeRetainsSlot(t *testing.T) {
 	for range maxConcurrentIntake - 1 {
 		<-slots
 	}
-	deadline := time.After(time.Second)
-	for len(slots) != 0 {
-		select {
-		case <-deadline:
-			t.Fatal("completed decoder retained slot")
-		default:
-			time.Sleep(time.Millisecond)
-		}
-	}
+	waitSlotsDrained(t, slots, "completed decoder")
 }
 
 func TestBoundedGRPCAdapterRejectsExtraMessageBeforeExport(t *testing.T) {
@@ -428,15 +420,7 @@ func TestBoundedGRPCAdapterRetainsCanceledWorkAndRejectsSeventeenth(t *testing.T
 		cancel()
 	}
 	wg.Wait()
-	deadline := time.After(time.Second)
-	for len(r.decodeSlots) != 0 {
-		select {
-		case <-deadline:
-			t.Fatal("completed handlers retained capacity")
-		default:
-			time.Sleep(time.Millisecond)
-		}
-	}
+	waitSlotsDrained(t, r.decodeSlots, "completed handlers")
 	if highWater.Load() > maxConcurrentIntake {
 		t.Fatalf("high-water processing stacks = %d", highWater.Load())
 	}
@@ -513,15 +497,7 @@ func TestBoundedGRPCAdapterStopKeepsLiveHandlerOwnership(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("handler did not complete")
 	}
-	deadline := time.After(time.Second)
-	for len(r.decodeSlots) != 0 {
-		select {
-		case <-deadline:
-			t.Fatal("handler return leaked slot")
-		default:
-			time.Sleep(time.Millisecond)
-		}
-	}
+	waitSlotsDrained(t, r.decodeSlots, "handler return")
 	for _, done := range []<-chan struct{}{gracefulDone, forceDone} {
 		select {
 		case <-done:
