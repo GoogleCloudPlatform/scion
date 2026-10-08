@@ -257,6 +257,7 @@ func updateAllTemplates(ctx context.Context, svc hubclient.TemplateService, scop
 	}
 
 	var updated, skipped, failed int
+	failures := []map[string]string{}
 	jsonOut := isJSONOutput()
 	for _, t := range templates {
 		if !templateSourceRefreshable(t.SourceURL) {
@@ -273,6 +274,9 @@ func updateAllTemplates(ctx context.Context, svc hubclient.TemplateService, scop
 			if !jsonOut {
 				fmt.Printf("  Failed: %s\n", err)
 			}
+			failures = append(failures, map[string]string{
+				"id": t.ID, "name": t.Name, "scope": t.Scope, "reason": err.Error(),
+			})
 			failed++
 			continue
 		}
@@ -292,7 +296,9 @@ func updateAllTemplates(ctx context.Context, svc hubclient.TemplateService, scop
 			Status:  status,
 			Command: "templates update --all",
 			Message: msg,
-			Details: map[string]interface{}{"updated": updated, "skipped": skipped, "failed": failed},
+			Details: map[string]interface{}{
+				"updated": updated, "skipped": skipped, "failed": failed, "failures": failures,
+			},
 		}); err != nil {
 			return err
 		}

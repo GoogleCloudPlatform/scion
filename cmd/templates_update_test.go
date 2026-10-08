@@ -16,6 +16,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"testing"
@@ -337,9 +338,22 @@ func TestUpdateAllTemplates_JSONFailureExitsNonZero(t *testing.T) {
 		templates:   []hubclient.Template{{ID: "a", Name: "a", Scope: "global", SourceURL: ghSource}},
 		reimportErr: map[string]error{"a": errors.New("boom")},
 	}
-	err := updateAllTemplates(context.Background(), svc, "", "", time.Minute)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "1 template(s) failed")
+	out := captureStdout(t, func() {
+		err := updateAllTemplates(context.Background(), svc, "", "", time.Minute)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "1 template(s) failed")
+	})
+	var res ActionResult
+	require.NoError(t, json.Unmarshal([]byte(out), &res), out)
+	assert.Equal(t, float64(1), res.Details["failed"])
+	failures, isList := res.Details["failures"].([]interface{})
+	require.True(t, isList, "failures detail: %v", res.Details["failures"])
+	require.Len(t, failures, 1)
+	f := failures[0].(map[string]interface{})
+	assert.Equal(t, "a", f["id"])
+	assert.Equal(t, "a", f["name"])
+	assert.Equal(t, "global", f["scope"])
+	assert.Equal(t, "boom", f["reason"])
 
 	ok := &fakeTemplateUpdateService{
 		templates: []hubclient.Template{{ID: "a", Name: "a", Scope: "global", SourceURL: ghSource}},
