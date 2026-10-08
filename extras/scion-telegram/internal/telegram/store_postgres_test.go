@@ -18,7 +18,9 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"net/url"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -730,4 +732,56 @@ func TestPostgres_AdvisoryLock_SecondInstanceBlocked(t *testing.T) {
 	assert.True(t, acquired2, "second instance should acquire after first releases")
 	require.NotNil(t, handle2)
 	require.NoError(t, handle2.Release())
+}
+
+// TestPostgres_CreateSchema_Concurrent starts several stores against an
+// empty schema at the same time, as replicas sharing one database do on
+// first start, and expects every one of them to succeed.
+func TestPostgres_CreateSchema_Concurrent(t *testing.T) {
+	dbURL := os.Getenv("TELEGRAM_TEST_POSTGRES_URL")
+	if dbURL == "" {
+		t.Skip("TELEGRAM_TEST_POSTGRES_URL not set, skipping Postgres store tests")
+	}
+
+	admin, err := sql.Open("pgx", dbURL)
+	require.NoError(t, err)
+	t.Cleanup(func() { admin.Close() })
+
+	const rounds = 5
+	const replicas = 8
+	for round := 0; round < rounds; round++ {
+		schema := fmt.Sprintf("tg_schema_concurrent_%d_%d", time.Now().UnixNano(), round)
+		_, err := admin.Exec("CREATE SCHEMA " + schema)
+		require.NoError(t, err)
+		t.Cleanup(func() { admin.Exec("DROP SCHEMA " + schema + " CASCADE") })
+
+		u, err := url.Parse(dbURL)
+		require.NoError(t, err)
+		q := u.Query()
+		q.Set("search_path", schema)
+		u.RawQuery = q.Encode()
+		schemaURL := u.String()
+
+		start := make(chan struct{})
+		errs := make([]error, replicas)
+		var wg sync.WaitGroup
+		for i := 0; i < replicas; i++ {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				<-start
+				s, err := NewPostgresStore(schemaURL)
+				if err != nil {
+					errs[i] = err
+					return
+				}
+				errs[i] = s.Close()
+			}(i)
+		}
+		close(start)
+		wg.Wait()
+		for i, err := range errs {
+			assert.NoError(t, err, "round %d replica %d", round, i)
+		}
+	}
 }

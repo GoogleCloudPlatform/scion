@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/integration/lockloop"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
@@ -142,8 +143,33 @@ CREATE TABLE IF NOT EXISTS telegram_processed_updates (
 	processed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 `
-	_, err := s.db.Exec(ddl)
-	return err
+	return withSchemaLock(context.Background(), s.db, func(conn *sql.Conn) error {
+		_, err := conn.ExecContext(context.Background(), ddl)
+		return err
+	})
+}
+
+// withSchemaLock runs fn on a pinned connection while holding the Telegram
+// schema advisory lock. Replicas that start together against one database
+// would otherwise run the CREATE IF NOT EXISTS statements concurrently,
+// which Postgres can reject with a unique violation on its catalog. The
+// lock is session-scoped, so acquire, work and release share a connection.
+func withSchemaLock(ctx context.Context, db *sql.DB, fn func(conn *sql.Conn) error) error {
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire schema connection: %w", err)
+	}
+	defer conn.Close()
+
+	key := int64(store.LockTelegramSchema)
+	if _, err := conn.ExecContext(ctx, "SELECT pg_advisory_lock($1)", key); err != nil {
+		return fmt.Errorf("acquire schema lock: %w", err)
+	}
+	fnErr := fn(conn)
+	if _, err := conn.ExecContext(context.Background(), "SELECT pg_advisory_unlock($1)", key); err != nil && fnErr == nil {
+		return fmt.Errorf("release schema lock: %w", err)
+	}
+	return fnErr
 }
 
 func (s *postgresStore) Close() error {
