@@ -45,6 +45,7 @@ import { customElement, property, state, query } from 'lit/decorators.js';
 import type { PageData, Agent } from '../../shared/types.js';
 import { apiFetch, parseApiError } from '../../client/api.js';
 import { navigateTo, pushRoute, replaceRoute, stateManager } from '../../client/main.js';
+import { browserPath, stripBasePath } from '../../client/navigation.js';
 import { agentStore } from '../../client/agent-store.js';
 import type { AgentListSnapshot } from '../../client/agent-store.js';
 import type { SeedEpochToken } from '../../client/state.js';
@@ -79,6 +80,7 @@ import { hasOpenModalDescendant, isOpenModalElement } from '../shared/open-modal
 import { deepActiveElement } from '../shared/deep-active-element.js';
 import { PaletteTypeahead } from '../shared/palette/palette-typeahead.js';
 import '../shared/chat/chat-thread.js';
+import { ChatPanelHistory, type ChatPanel } from './chat-panel-history.js';
 import '../shared/chat/chat-action-sheet.js';
 import type { ActionSheetItem, ActionSheetSelectDetail } from '../shared/chat/chat-action-sheet.js';
 import '../shared/chat/chat-file-preview.js';
@@ -200,6 +202,14 @@ const SWIPE_DRAG_PX = 100;
 
 /** A gesture is horizontal once it moves this many px sideways. */
 const SWIPE_AXIS_LOCK_PX = 10;
+
+/**
+ * A rightward swipe that starts this close to the left edge is left to the
+ * browser: on iOS Safari that is the edge-swipe Back gesture (Android's
+ * system back gesture claims the same strip). A panel swipe back now steps
+ * back through history too, so both firing would go back twice.
+ */
+const BACK_EDGE_PX = 20;
 
 /**
  * Fold a mention slug onto the form the composer inserts: lowercased, with
@@ -817,8 +827,11 @@ export class ScionPageChat extends LitElement {
   private _onPaletteAfterHide = this._handlePaletteAfterHide.bind(this);
   /** Bound handler: close the open palette if some other dialog/drawer opens while it's open. */
   private _onDocumentModalShow = this._handleDocumentModalShow.bind(this);
-  /** Bound handler: close the open palette if a route change navigates away from /chat. */
-  private _onPopState = this._handlePopStateForPalette.bind(this);
+  /**
+   * Bound handler: close the open palette if a route change navigates away
+   * from /chat, and show the mobile panel a history entry records.
+   */
+  private _onPopState = this._handlePopState.bind(this);
 
   /** The title segments this page last announced (see pushChatPath). */
   private _lastPageTitle: string[] | null = null;
@@ -872,7 +885,17 @@ export class ScionPageChat extends LitElement {
    * an empty state, and the rail is the only way to pick a conversation.
    * Anything that opens a conversation switches this to 'center'.
    */
-  @state() private mobilePanel: 'left' | 'center' | 'right' = 'left';
+  @state() private mobilePanel: ChatPanel = 'left';
+  /** Browser history entries for mobile panel changes (see chat-panel-history). */
+  private _panelHistory = new ChatPanelHistory();
+  /**
+   * The panel the history entry this page was created on records (a reload,
+   * or Back/Forward to it), until the conversation its URL names opens. Read
+   * at connect, before this page writes to the entry.
+   */
+  private _restoredPanel: ChatPanel | null = null;
+  /** The space whose mobile rail view this page last opened from the URL. */
+  private _spaceOpenedSlug: string | null = null;
   private _touchStartX = 0;
   private _touchStartY = 0;
   private _touchStartTime = 0;
@@ -1521,6 +1544,15 @@ export class ScionPageChat extends LitElement {
     this._mobileLayoutQuery = window.matchMedia(`(max-width: ${MOBILE_BREAKPOINT_PX}px)`);
     this.isMobileLayout = this._mobileLayoutQuery.matches;
     this._mobileLayoutQuery.addEventListener('change', this._onMobileLayoutChange);
+    // A reload or Back/Forward to an entry shows the panel it recorded.
+    this._restoredPanel = this.isMobileLayout
+      ? (this._panelHistory.current()?.panel ?? null)
+      : null;
+    if (this._restoredPanel) this.mobilePanel = this._restoredPanel;
+    this._panelHistory.observe();
+    // Created wide on top of entries made in the mobile layout: drop back to
+    // the first of them (see ChatPanelHistory.toBase).
+    if (!this.isMobileLayout && this._isOnChatRoute()) this._panelHistory.toBase();
     this.restoreMembersWidth();
     // Restore persisted layout density preference.
     try {
@@ -1567,6 +1599,7 @@ export class ScionPageChat extends LitElement {
     this._projectMembersAbort = null;
     this._mobileLayoutQuery?.removeEventListener('change', this._onMobileLayoutChange);
     this._mobileLayoutQuery = null;
+    this._panelHistory.dispose();
     document.removeEventListener('keydown', this._onKeydown);
     document.removeEventListener(CHAT_PALETTE_OPEN_REQUEST_EVENT, this._onPaletteOpenRequest);
     document.removeEventListener('sl-show', this._onDocumentModalShow);
@@ -1704,6 +1737,14 @@ export class ScionPageChat extends LitElement {
 
   override updated(changedProperties: Map<string, unknown>): void {
     this.observeConversationHeader();
+    // Panel changes this page makes itself (opening the conversation the URL
+    // names, say) are recorded on the current entry, without adding one.
+    if (
+      (changedProperties.has('mobilePanel') || changedProperties.has('isMobileLayout')) &&
+      this.ownsPanelHistory()
+    ) {
+      this._panelHistory.sync(this.mobilePanel);
+    }
     if (changedProperties.has('pageData') && this.pageData) {
       this.parseV2Route();
     }
@@ -1994,7 +2035,7 @@ export class ScionPageChat extends LitElement {
         peerId: '',
         peerKind: 'user',
       };
-      this.mobilePanel = 'center';
+      this.mobilePanel = this.takeRouteOpenPanel('center');
       void this.loadV2Members(projectId);
       this.applyThreadMeta(topicId, known);
       return;
@@ -2038,7 +2079,7 @@ export class ScionPageChat extends LitElement {
       }
 
       if (segment.startsWith('dm:')) {
-        this.mobilePanel = 'center';
+        this.mobilePanel = this.takeRouteOpenPanel('center');
         dispatchPageTitle(this, 'DM', 'Chat');
         // Legacy DM key format (e.g. dm:agent:UUID:user:UUID) — use directly
         this.v2Conversation = {
@@ -2073,7 +2114,7 @@ export class ScionPageChat extends LitElement {
           // place and leave the mobile panel where the user put it.
           const samePeer = !!this.v2Conversation?.isDM && this.v2Conversation.peerId === segment;
           if (!samePeer) {
-            this.mobilePanel = 'center';
+            this.mobilePanel = this.takeRouteOpenPanel('center');
             dispatchPageTitle(this, 'DM', 'Chat');
           }
 
@@ -2131,7 +2172,7 @@ export class ScionPageChat extends LitElement {
           peerId: '',
           peerKind: 'user',
         };
-        this.mobilePanel = 'center';
+        this.mobilePanel = this.takeRouteOpenPanel('center');
         void this.loadV2Members(projectId);
         this.applyThreadMeta(threadId, known);
       } else {
@@ -2166,10 +2207,12 @@ export class ScionPageChat extends LitElement {
     }
 
     // /chat — no conversation selected, show hub-level members
+    // A conversation closing puts the mobile view back on the rail. With none
+    // open the panel stays put: this runs again on every rail reload, and the
+    // page starts on the rail, or on the panel its history entry recorded.
+    if (this.v2Conversation) this.mobilePanel = 'left';
     this.v2Conversation = null;
     this.v2MembersExpanded = true; // Always show tray in base view (no header toggle available)
-    // No conversation to show — put the mobile view back on the rail.
-    this.mobilePanel = 'left';
     void this.loadHubMembers();
   }
 
@@ -2203,7 +2246,7 @@ export class ScionPageChat extends LitElement {
       peerId: '',
       peerKind: 'user',
     };
-    this.mobilePanel = 'center';
+    this.mobilePanel = this.takeRouteOpenPanel('center');
     void this.loadV2Members(projectId);
     this.applyThreadMeta(threadId, known);
   }
@@ -2271,7 +2314,12 @@ export class ScionPageChat extends LitElement {
     // thread list they came to choose from — off-screen.
     if (this.isMobileViewport()) {
       rail.expandSpace(projectId);
-      this.mobilePanel = 'left';
+      // Once per space: this runs again on every rail reload, which must not
+      // pull the view back from a panel the user has moved to since.
+      if (this._spaceOpenedSlug !== slug) {
+        this._spaceOpenedSlug = slug;
+        this.mobilePanel = this.takeRouteOpenPanel('left');
+      }
       void this.loadV2Members(projectId);
       dispatchPageTitle(this, slug, 'Chat');
       return;
@@ -3000,7 +3048,7 @@ export class ScionPageChat extends LitElement {
             peerKind: dm.peerKind,
             muted: dm.muted === true,
           };
-          this.mobilePanel = 'center';
+          this.mobilePanel = opts?.fromRoute ? this.takeRouteOpenPanel('center') : 'center';
           pushIfOpenedByUser(dm.conversationKey);
           dispatchPageTitle(this, peerName, 'Chat');
           return;
@@ -3049,7 +3097,7 @@ export class ScionPageChat extends LitElement {
         peerId,
         peerKind,
       };
-      this.mobilePanel = 'center';
+      this.mobilePanel = opts?.fromRoute ? this.takeRouteOpenPanel('center') : 'center';
       pushIfOpenedByUser(key);
       dispatchPageTitle(this, displayName || 'DM', 'Chat');
       return;
@@ -3790,6 +3838,7 @@ export class ScionPageChat extends LitElement {
 
     const dx = touch.clientX - startX;
     if (scrollerTakesDrag(this._touchScrollRoom, dx)) return;
+    if (dx > 0 && startX < BACK_EDGE_PX) return;
     const isSwipe =
       (Math.abs(dx) > SWIPE_FLICK_PX && elapsed < SWIPE_FLICK_MS) || Math.abs(dx) > SWIPE_DRAG_PX;
     if (!isSwipe) return;
@@ -3840,9 +3889,9 @@ export class ScionPageChat extends LitElement {
       // Leaving the composer behind: the keyboard would otherwise stay up and
       // cover the panel being swiped in.
       this.dismissKeyboard();
-      this.mobilePanel = 'left';
+      this.goToPanel('left');
     } else if (this.mobilePanel === 'right') {
-      this.mobilePanel = 'center';
+      this.goToPanel('center');
     }
   }
 
@@ -3850,9 +3899,9 @@ export class ScionPageChat extends LitElement {
   private handleSwipeLeft(): void {
     if (this.mobilePanel === 'center') {
       this.dismissKeyboard();
-      this.mobilePanel = 'right';
+      this.goToPanel('right');
     } else if (this.mobilePanel === 'left') {
-      this.mobilePanel = 'center';
+      this.goToPanel('center');
     }
   }
 
@@ -3863,6 +3912,81 @@ export class ScionPageChat extends LitElement {
 
   private _handleMobileLayoutChange(e: MediaQueryListEvent): void {
     this.isMobileLayout = e.matches;
+    // Back in the mobile layout on an entry made there earlier: show the
+    // panel it records, so it and the entries around it hold again.
+    if (e.matches && this.ownsPanelHistory()) {
+      const entry = this._panelHistory.current();
+      if (entry) this.mobilePanel = entry.panel;
+      this._panelHistory.observe();
+    }
+  }
+
+  /**
+   * The user moved to another mobile panel on the same conversation (a
+   * swipe, the back control, the members button). Moving deeper adds a
+   * history entry, so Back returns; moving back goes back through history
+   * when an entry beneath shows the target, and the panel follows on
+   * `popstate`. See chat-panel-history.
+   */
+  private goToPanel(target: ChatPanel): void {
+    this._restoredPanel = null;
+    if (target === this.mobilePanel) return;
+    const move =
+      this.isMobileViewport() && this.ownsPanelHistory()
+        ? this._panelHistory.move(this.mobilePanel, target)
+        : 'set';
+    if (move === 'set') this.mobilePanel = target;
+  }
+
+  /**
+   * The panel to show for a conversation opened from the URL: the one the
+   * history entry recorded, the first time, otherwise `fallback`.
+   */
+  private takeRouteOpenPanel(fallback: ChatPanel): ChatPanel {
+    const panel = this._restoredPanel ?? fallback;
+    this._restoredPanel = null;
+    return panel;
+  }
+
+  /**
+   * Is the current URL (path and query) the one the router last recorded
+   * for this page's shell? The same check the router makes before leaving a
+   * `popstate` to the page; on any other URL the router replaces the page.
+   */
+  private routeShowsCurrentUrl(): boolean {
+    const shell = this.parentElement as (HTMLElement & { currentPath?: unknown }) | null;
+    if (typeof shell?.currentPath !== 'string') return false;
+    const appPath = stripBasePath(window.location.pathname) + window.location.search;
+    return shell.currentPath.split('#')[0] === appPath;
+  }
+
+  /**
+   * May this page write panel entries to browser history? Only while its
+   * route is the current one (not hidden behind the terminal workspace,
+   * which has its own URL) and in the mobile layout.
+   */
+  private ownsPanelHistory(): boolean {
+    return this.isConnected && this.isMobileLayout && this._isOnChatRoute();
+  }
+
+  /**
+   * Back/Forward. Closes the palette if the route left chat, and, for an
+   * entry of the URL this page shows, shows the panel the entry records (in
+   * the wide layout, steps over it: see ChatPanelHistory.popped). A
+   * different URL is left alone: the router renders it afresh.
+   */
+  private _handlePopState(e: PopStateEvent): void {
+    this._handlePopStateForPalette();
+    if (!this._isOnChatRoute() || !this.routeShowsCurrentUrl()) {
+      this._panelHistory.settle();
+      return;
+    }
+    const panel = this._panelHistory.popped(e.state, !this.isMobileLayout);
+    if (!panel) return;
+    this._restoredPanel = null;
+    if (panel === this.mobilePanel) return;
+    if (this.mobilePanel === 'center') this.dismissKeyboard();
+    this.mobilePanel = panel;
   }
 
   /**
@@ -3927,7 +4051,33 @@ export class ScionPageChat extends LitElement {
    */
   private pushChatPath(path: string): void {
     const seq = this._userNavSeq;
-    void pushRoute(path).then(() => {
+    this._restoredPanel = null;
+    // Reopening what the URL already names (the open thread picked again,
+    // the open DM's peer clicked) adds no entry: Back would only land on the
+    // same conversation. In the mobile layout the panel change it makes is
+    // an ordinary panel move.
+    if (path === stripBasePath(window.location.pathname)) {
+      const entry = this.ownsPanelHistory() ? this._panelHistory.current() : null;
+      if (entry && entry.panel !== this.mobilePanel) {
+        this._panelHistory.move(entry.panel, this.mobilePanel);
+      }
+      return;
+    }
+    // In the mobile layout the entry also records its panel; leaving the
+    // rail for a conversation moves the rail's entry to the new URL first,
+    // so Back from the conversation slides back to the rail.
+    const pushed = this.ownsPanelHistory()
+      ? pushRoute(
+          path,
+          this._panelHistory.stateForPush(
+            this.mobilePanel,
+            // A legacy thread URL is rewritten to the readable one later,
+            // in place; a rail entry moved to it would be left behind on it.
+            path.startsWith('/chat/space/') ? null : browserPath(path)
+          )
+        )
+      : pushRoute(path);
+    void pushed.then(() => {
       if (!this.isConnected || seq !== this._userNavSeq || !this._lastPageTitle) return;
       dispatchPageTitle(this, ...this._lastPageTitle);
     });
@@ -5501,7 +5651,7 @@ export class ScionPageChat extends LitElement {
         label="Back"
         @click=${() => {
           this.dismissKeyboard();
-          this.mobilePanel = target;
+          this.goToPanel(target);
         }}
       ></sl-icon-button>
     `;
@@ -5529,7 +5679,7 @@ export class ScionPageChat extends LitElement {
         label="Members"
         @click=${() => {
           this.dismissKeyboard();
-          this.mobilePanel = 'right';
+          this.goToPanel('right');
         }}
       ></sl-icon-button>
     `;
