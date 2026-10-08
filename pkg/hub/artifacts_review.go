@@ -47,6 +47,14 @@ func (s *Server) notifyArtifactReview(ctx context.Context, n artifacts.ReviewNot
 		return
 	}
 	go func() {
+		// A notice is best effort: a panic while sending it must not take
+		// the hub down.
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("artifacts: review notice panicked",
+					"artifact_id", n.ArtifactID, "seq", n.Seq, "agent_id", n.OwnerRef, "panic", fmt.Sprint(r))
+			}
+		}()
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), artifactReviewNoticeTimeout)
 		defer cancel()
 		if err := s.deliverArtifactReview(ctx, n); err != nil {
