@@ -367,7 +367,8 @@ func TestConduitAuthzMatchForEvent(t *testing.T) {
 // before a sweep runs, so a slow sweep does not push later ticks back; a
 // tick that finds the previous sweep still running is skipped and logged.
 func TestConduitStreamAuthz_SweepFixedPeriod(t *testing.T) {
-	f := newAuthzTrackerFixture(t, 60*time.Second)
+	// No stream deadline: the only pending timer is the sweep's.
+	f := newDeadlineFixture(t, 60*time.Second, -1)
 	f.track("u1", "agent-x", "p1", grant.StreamKindPTY, 1)
 	entered := make(chan struct{}, 4)
 	release := make(chan struct{})
