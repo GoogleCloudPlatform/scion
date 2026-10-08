@@ -275,3 +275,37 @@ func TestStoreSweepRechecksExpiry(t *testing.T) {
 		}
 	})
 }
+
+// TestStoreCandidatesSharedWithScope: HomeScope keeps rows homed in the
+// scope or shared with it; SharedOnly keeps the shared ones.
+func TestStoreCandidatesSharedWithScope(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, db *sql.DB, st Store, _ func() *sql.DB) {
+		ctx := context.Background()
+		home, _, _, _ := seedArtifactIn(t, st, "", "p1")
+		away, _, _, _ := seedArtifactIn(t, st, "", "p2")
+		alone, _, _, _ := seedArtifactIn(t, st, "", "p3")
+		if _, err := st.PutGrant(ctx, scopeGrant(away.ID, "p1", GrantRead), 10); err != nil {
+			t.Fatal(err)
+		}
+		_ = alone
+		q := CandidateQuery{PrincipalKind: PrincipalKindAgent, PrincipalRef: "agent-1", HomeScope: "p1", Limit: 10, Now: time.Now()}
+		ids := func(q CandidateQuery) map[string]bool {
+			rows, err := st.ListCandidates(ctx, q)
+			if err != nil {
+				t.Fatal(err)
+			}
+			out := map[string]bool{}
+			for _, r := range rows {
+				out[r.ID] = true
+			}
+			return out
+		}
+		if got := ids(q); len(got) != 2 || !got[home.ID] || !got[away.ID] {
+			t.Errorf("HomeScope: %v", got)
+		}
+		q.SharedOnly = true
+		if got := ids(q); len(got) != 1 || !got[away.ID] {
+			t.Errorf("SharedOnly: %v", got)
+		}
+	})
+}

@@ -894,8 +894,18 @@ func (s *sqlStore) writeCandidateFilters(b *strings.Builder, args *[]any, q Cand
 		*args = append(*args, VersionKindReview)
 	}
 	if q.HomeScope != "" {
-		b.WriteString(" AND a.scope_kind = ? AND a.scope_ref = ?")
+		// Shared with the project: an unexpired scope grant to it, found
+		// through the (artifact_id, subject_kind, subject_ref) unique index.
+		shared := `EXISTS (SELECT 1 FROM artifact_grant sg WHERE sg.artifact_id = a.id AND sg.subject_kind = ?
+			AND sg.subject_ref = ? AND (sg.expires_at IS NULL OR sg.expires_at > ?) AND sg.permission IN (?, ?, ?))`
+		sharedArgs := []any{SubjectScope, q.HomeScope, now, GrantRead, GrantWrite, GrantAdmin}
+		if q.SharedOnly {
+			b.WriteString(" AND a.scope_kind = ? AND a.scope_ref <> ? AND " + shared)
+		} else {
+			b.WriteString(" AND a.scope_kind = ? AND (a.scope_ref = ? OR " + shared + ")")
+		}
 		*args = append(*args, ScopeKindProject, q.HomeScope)
+		*args = append(*args, sharedArgs...)
 	}
 	if q.After != nil {
 		at := s.timeArg(q.After.UpdatedAt)

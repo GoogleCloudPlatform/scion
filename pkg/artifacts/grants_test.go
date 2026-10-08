@@ -373,3 +373,55 @@ func TestGrantDeleteMalformedIDSkipsStore(t *testing.T) {
 		}
 	}
 }
+
+// TestListAccessAndProjectShares: list rows say why the caller sees them,
+// and a list narrowed to a project includes artifacts shared with it,
+// marked, with shared=1 keeping only those.
+func TestListAccessAndProjectShares(t *testing.T) {
+	f, own := newLinkFixture(t)                                      // userU owns, homed in project-1
+	proj := f.publish(agentA, "p.md", []byte("p"), "").Artifact.ID   // homed in project-1, userU reads via role
+	other := f.publish(agentX, "x.md", []byte("x"), "").Artifact.ID  // homed in project-2
+	f.insertScopeGrant(other, "project-1")                           // shared with project-1
+	direct := f.publish(agentX, "d.md", []byte("d"), "").Artifact.ID // homed in project-2
+	f.grantPrincipal(direct, userU)                                  // shared with userU directly
+	access := map[string]string{}
+	shared := map[string]bool{}
+	for _, it := range f.list(&userU, listPath).Artifacts {
+		access[it.ID] = it.Access
+		shared[it.ID] = it.SharedWithScope
+	}
+	want := map[string]string{own: AccessOwned, proj: AccessProject, other: AccessShared, direct: AccessShared}
+	for id, a := range want {
+		if access[id] != a {
+			t.Errorf("%s: access %q, want %q", id, access[id], a)
+		}
+		if shared[id] {
+			t.Errorf("%s: sharedWithScope without scope=", id)
+		}
+	}
+	ids := func(target string) map[string]bool {
+		out := map[string]bool{}
+		for _, it := range f.list(&userU, target).Artifacts {
+			out[it.ID] = it.SharedWithScope
+		}
+		return out
+	}
+	got := ids(listPath + "&scope=project-1")
+	if len(got) != 3 || got[own] || got[proj] || !got[other] {
+		t.Errorf("scope=project-1: %v", got)
+	}
+	got = ids(listPath + "&scope=project-1&shared=1")
+	if len(got) != 1 || !got[other] {
+		t.Errorf("scope=project-1&shared=1: %v", got)
+	}
+	// An expired scope grant does not count.
+	f.exec(t, `UPDATE artifact_grant SET expires_at = ? WHERE artifact_id = ? AND subject_kind = 'scope' AND subject_ref = 'project-1'`, linkPast(), other)
+	if got := ids(listPath + "&scope=project-1&shared=1"); len(got) != 0 {
+		t.Errorf("expired scope grant listed: %v", got)
+	}
+	for _, q := range []string{"&shared=1", "&scope=project-1&shared=maybe"} {
+		if rec := f.do(&userU, http.MethodGet, listPath+q, nil, nil); rec.Code != http.StatusBadRequest {
+			t.Errorf("%s: %d", q, rec.Code)
+		}
+	}
+}

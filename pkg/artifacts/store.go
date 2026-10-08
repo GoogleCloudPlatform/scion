@@ -370,9 +370,12 @@ type CandidateQuery struct {
 	Search string
 	// ReviewPending keeps only rows whose current version is a review.
 	ReviewPending bool
-	// HomeScope, when set, keeps only rows whose home scope is this
-	// project. It narrows the other conditions and never adds rows.
+	// HomeScope, when set, keeps only rows homed in this project or
+	// carrying an unexpired read, write or admin scope grant to it. It
+	// narrows the other conditions and never adds rows.
 	HomeScope string
+	// SharedOnly, with HomeScope, keeps only the rows homed elsewhere.
+	SharedOnly bool
 	// After, when set, keeps rows strictly after this position in the
 	// result order.
 	After *Position
