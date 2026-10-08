@@ -28,6 +28,10 @@
  *   the marks (resetReadinessMarks).
  * - A mark carries timing only: its name, its startTime and a detail with
  *   the view it was taken in. No agent names, ids or row data.
+ * - A rows-grid, rows-list or graph mark also fires when the view first
+ *   shows an empty state or a load-failure placeholder (for example
+ *   "Could not load every agent for this view"), so check that the load
+ *   succeeded before trusting a timing.
  */
 
 /** Prefix shared by every readiness mark name. */
@@ -37,11 +41,11 @@ export const READINESS_MARK_PREFIX = 'scion:ready:';
 export const READINESS_MARKS = {
   /** The first agent result for the current scope was adopted. */
   agentsData: 'scion:ready:agents-data',
-  /** The grid showed its first page of cards (or its empty state). */
+  /** The grid showed its first page of cards (or its empty or failed state). */
   rowsGrid: 'scion:ready:rows-grid',
-  /** The list showed its first page of rows (or its empty state). */
+  /** The list showed its first page of rows (or its empty or failed state). */
   rowsList: 'scion:ready:rows-list',
-  /** The agent graph was laid out and fitted to the viewport. */
+  /** The agent graph was laid out and fitted to the viewport (or showed its empty or failed state). */
   graph: 'scion:ready:graph',
 } as const;
 

@@ -219,6 +219,7 @@ func TestShellReadinessMarks_Hydration(t *testing.T) {
 	var adminAPI map[string]json.RawMessage
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &adminAPI))
 	require.Equal(t, string(adminAPI["readinessMarks"]), string(adminHydrated))
+	require.Equal(t, "true", string(adminHydrated))
 
 	// Turned off again (an explicit false row, not an absent one): every
 	// shell is byte-identical to its baseline once more.
