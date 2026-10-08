@@ -37,7 +37,7 @@ import (
 )
 
 // insertScheduled stores a pending row for user in the fixture topic,
-// bypassing the create endpoint's time window.
+// without the create endpoint's time window.
 func (f *scheduledSendFixture) insertScheduled(t *testing.T, user *store.User, name string, fireAt time.Time) *ScheduledChatMessage {
 	t.Helper()
 	m := newTestScheduledRow(name, user.ID, fireAt)

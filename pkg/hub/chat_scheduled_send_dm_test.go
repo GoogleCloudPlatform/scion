@@ -369,7 +369,7 @@ func TestScheduledSend_DM_PeerLookupError_Released(t *testing.T) {
 			sm := f.scheduleIn(t, f.bob, key, "peer lookup fails "+peerKind)
 			fault.Arm()
 
-			f.srv.sweepScheduledMessages(ctx, time.Now().UTC())
+			assert.Equal(t, 1, f.srv.sweepScheduledMessages(ctx, time.Now().UTC()))
 			row := f.row(t, f.bob, sm.ID)
 			assert.Equal(t, ScheduledMessagePending, row.Status)
 			assert.Nil(t, row.ClaimedAt)

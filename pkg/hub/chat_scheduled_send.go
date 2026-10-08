@@ -400,10 +400,14 @@ func (s *Server) handleScheduledList(w http.ResponseWriter, r *http.Request, key
 	var sms ScheduledMessageStore
 	if strings.HasPrefix(key, "dm:") {
 		// A DM lists for its participants with the first two steps of
-		// authorizeChatSend (the same helper, so the same responses), not
-		// the peer check: a message that failed because the peer changed
-		// stays visible to its sender so it can be dismissed or copied.
-		// The rows are the caller's own, as for cancel and dismiss.
+		// authorizeChatSend (the same helper), so the responses for an
+		// invalid key or a caller who is not a participant match a live
+		// send. The peer check is not run: a message that failed because
+		// the peer changed stays visible to its sender so it can be
+		// dismissed or copied. A well-formed but non-canonical key lists
+		// nothing, since rows exist only under canonical keys (create runs
+		// the full check), and the rows are the caller's own, as for
+		// cancel and dismiss.
 		if serr := authorizeDMKeyParticipant(key, user.ID()); serr != nil {
 			serr.write(w)
 			return
