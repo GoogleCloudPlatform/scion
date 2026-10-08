@@ -1629,17 +1629,20 @@ func TestDispatchAgentEventHandler_ErroredRowWithoutMarker(t *testing.T) {
 	}
 }
 
-// A one-shot event (no schedule) gets the one-shot remedy.
+// A one-shot event (no schedule) records the actionable error and creates no
+// notification (lead ruling on ptone/scion#3701).
 func TestDispatchAgentEventHandler_ErroredRowOneShot(t *testing.T) {
 	f := newBlockedFireFixture(t, "user-owner")
 	f.evt.ScheduleID = ""
 	err := f.fire()
-	if err == nil || !strings.Contains(err.Error(), "delete the agent and recreate the scheduled event") {
+	if err == nil || !strings.Contains(err.Error(), `agent "worker-1" already exists in project in phase error`) {
 		t.Fatalf("error = %v", err)
 	}
-	notifs := f.ms.getNotifications()
-	if len(notifs) != 1 || !strings.Contains(notifs[0].Message, "recreate the scheduled event") {
-		t.Fatalf("notifications = %+v", notifs)
+	if n := f.ms.getNotifications(); len(n) != 0 {
+		t.Fatalf("one-shot fire created %d notifications, want 0", len(n))
+	}
+	if evts := f.published(); len(evts) != 0 {
+		t.Fatalf("one-shot fire published %d events, want 0", len(evts))
 	}
 }
 

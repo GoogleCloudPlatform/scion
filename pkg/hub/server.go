@@ -4821,7 +4821,7 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 				// Only deleting the errored row unblocks the name
 				// (ptone/scion#3701): say so, and tell the owner.
 				s.notifyScheduleBlocked(ctx, evt, existingAgent)
-				return scheduleBlockedError(evt, existingAgent)
+				return scheduleBlockedError(existingAgent)
 			}
 			return fmt.Errorf("agent %q already exists in project", slug)
 		}

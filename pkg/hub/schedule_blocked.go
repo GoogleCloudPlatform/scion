@@ -34,29 +34,27 @@ const NotificationScheduleBlocked = "SCHEDULE_BLOCKED"
 // scheduleBlockedError is a dispatch_agent fire's error when an agent row in
 // phase error already holds the name. Deleting the row is the only remedy:
 // the hub neither retries nor removes it. A row left by a refused
-// create-failure cleanup has its message quoted.
-func scheduleBlockedError(evt store.ScheduledEvent, existing *store.Agent) error {
+// create-failure cleanup has its message quoted. One-shot events get the same
+// text (lead ruling on ptone/scion#3701).
+func scheduleBlockedError(existing *store.Agent) error {
 	detail := ""
 	if isCreateCleanupRefusedRow(existing) {
 		detail = " (" + existing.Message + ")"
 	}
-	return fmt.Errorf("agent %q already exists in project in phase error%s; %s",
-		existing.Slug, detail, scheduleBlockedRemedy(evt))
-}
-
-// scheduleBlockedRemedy is the action that unblocks evt.
-func scheduleBlockedRemedy(evt store.ScheduledEvent) string {
-	if evt.ScheduleID == "" {
-		return "delete the agent and recreate the scheduled event"
-	}
-	return "delete the agent to resume this schedule"
+	return fmt.Errorf("agent %q already exists in project in phase error%s; delete the agent to resume this schedule",
+		existing.Slug, detail)
 }
 
 // notifyScheduleBlocked creates a SCHEDULE_BLOCKED notification for the
 // owner of evt (scheduleNotificationRecipient) and publishes it on that
-// user's subject only. Every failure is logged and skipped: it never changes
+// user's subject only. Only recurring-schedule fires notify; a one-shot
+// event (no ScheduleID) records its error and nothing else (lead ruling on
+// ptone/scion#3701). Every failure is logged and skipped: it never changes
 // the fire's result.
 func (s *Server) notifyScheduleBlocked(ctx context.Context, evt store.ScheduledEvent, existing *store.Agent) {
+	if evt.ScheduleID == "" {
+		return
+	}
 	log := slog.With("subsystem", "scheduler", "eventID", evt.ID,
 		"scheduleID", evt.ScheduleID, "projectID", evt.ProjectID, "agentID", existing.ID)
 	recipient := s.scheduleNotificationRecipient(ctx, evt.CreatedBy)
@@ -66,18 +64,12 @@ func (s *Server) notifyScheduleBlocked(ctx context.Context, evt store.ScheduledE
 		return
 	}
 
-	var message string
-	if evt.ScheduleID != "" {
-		name := evt.ScheduleID
-		if sched, err := s.store.GetSchedule(ctx, evt.ScheduleID); err == nil && sched.Name != "" {
-			name = sched.Name
-		}
-		message = fmt.Sprintf("Schedule %q is blocked: agent %q is in phase error. Delete the agent to resume this schedule.",
-			name, existing.Slug)
-	} else {
-		message = fmt.Sprintf("A scheduled event could not run: agent %q is in phase error. Delete the agent and recreate the scheduled event.",
-			existing.Slug)
+	name := evt.ScheduleID
+	if sched, err := s.store.GetSchedule(ctx, evt.ScheduleID); err == nil && sched.Name != "" {
+		name = sched.Name
 	}
+	message := fmt.Sprintf("Schedule %q is blocked: agent %q is in phase error. Delete the agent to resume this schedule.",
+		name, existing.Slug)
 
 	projectID := evt.ProjectID
 	if projectID == "" {
