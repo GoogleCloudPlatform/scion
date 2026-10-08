@@ -20,6 +20,7 @@ import { elementStyleRules } from './__fixtures__/css-rules.js';
 
 type ProjectsPage = HTMLElement & {
   renderProjectCard(project: Record<string, unknown>): TemplateResult;
+  renderProjectRow(project: Record<string, unknown>): TemplateResult;
 };
 
 describe('project card layout', () => {
@@ -83,6 +84,23 @@ describe('project card layout', () => {
     const icon = tooltip?.querySelector('sl-icon.workspace-mode-icon');
     expect(icon?.getAttribute('name')).toBe('folder-plus');
     expect(icon?.getAttribute('label')).toBe('Empty directory per agent');
+  });
+
+  it('shows the workspace mode icon in the table row too', () => {
+    const container = document.createElement('table');
+    render(
+      page.renderProjectRow({
+        id: 'p4',
+        name: 'git_project',
+        slug: 'git_project',
+        agentCount: 0,
+        gitRemote: 'https://git.example.com/org/git_project.git',
+      }),
+      container
+    );
+    expect(container.querySelector('.name-cell > sl-tooltip')?.getAttribute('content')).toBe(
+      'Git repository, shared workspace'
+    );
   });
 
   it('lets a long unbroken name and git remote wrap instead of spilling past the card', () => {
