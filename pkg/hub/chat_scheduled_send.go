@@ -593,8 +593,8 @@ func (s *Server) startScheduledSendSweeper(ctx context.Context) {
 // then cuts them short: a dispatch in progress returns, the message is
 // recorded as it would be after any dispatch error, and the row is
 // finalized sent or failed on its own context. Stopping therefore takes at
-// most scheduledStopGrace + scheduledFinalizeTimeout (about 25 s). The
-// runtime cannot be started again afterwards.
+// most scheduledStopGrace + scheduledFinalizeTimeout (about 25 s), and never
+// longer than ctx allows. The runtime cannot be started again afterwards.
 func (s *Server) stopScheduledSendSweeper(ctx context.Context) {
 	rt := s.scheduledRuntime()
 	rt.mu.Lock()
@@ -623,6 +623,8 @@ func (s *Server) stopScheduledSendSweeper(ctx context.Context) {
 	defer final.Stop()
 	select {
 	case <-done:
+	case <-ctx.Done():
+		scheduledSendLog().Warn("scheduled send: shutdown deadline reached while deliveries were finishing")
 	case <-final.C:
 		scheduledSendLog().Warn("scheduled send: deliveries did not finish after being cut short")
 	}

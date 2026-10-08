@@ -1235,8 +1235,12 @@ func TestScheduledSend_StopHonoursShutdownDeadline(t *testing.T) {
 	defer cancel()
 	start := time.Now()
 	f.srv.stopScheduledSendSweeper(ctx)
-	assert.Less(t, time.Since(start), 100*time.Millisecond+scheduledFinalizeTimeout)
-	assert.Contains(t, []string{ScheduledMessageSent, ScheduledMessageFailed}, f.row(t, f.bob, sm.ID).Status)
+	assert.Less(t, time.Since(start), 2*time.Second, "returned at the caller's deadline")
+	// The cut-short delivery still finalizes the row on its own context.
+	assert.Eventually(t, func() bool {
+		st := f.row(t, f.bob, sm.ID).Status
+		return st == ScheduledMessageSent || st == ScheduledMessageFailed
+	}, scheduledFinalizeTimeout, 20*time.Millisecond, "never left in sending")
 }
 
 // selectiveDispatcher blocks dispatches to one agent until release is
@@ -2040,4 +2044,21 @@ func TestScheduledSend_TwoServersOneSQLiteFile_SecondServerTakesTheRest(t *testi
 	close(dispA.release)
 	assert.Equal(t, 1, <-resultA, "server a finishes its one message and claims nothing more")
 	f.assertAllDeliveredOnce(t, n, len(dispA.getMessages())+len(dispB.getMessages()))
+}
+
+// Stopping honours the caller's deadline in the wait after the abort too:
+// a delivery that does not finish after being cut short does not hold the
+// stop for the full finalize timeout.
+func TestScheduledSend_StopHonoursDeadlineAfterAbort(t *testing.T) {
+	f := newScheduledSendFixture(t)
+	rt := f.srv.scheduledRuntime()
+	rt.running.Add(1) // stands in for a delivery that never finishes
+	t.Cleanup(rt.running.Done)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	f.srv.stopScheduledSendSweeper(ctx)
+	assert.Less(t, time.Since(start), scheduledFinalizeTimeout/2, "returned at the caller's deadline, not after the finalize timeout")
+	assert.Error(t, rt.abortCtx.Err(), "deliveries were cut short")
 }
