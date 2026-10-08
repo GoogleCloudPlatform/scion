@@ -340,6 +340,7 @@ type mockScheduledEventStore struct {
 	audits          []*store.MutationAuditRecord
 	schedules       map[string]*store.Schedule
 	notifications   []*store.Notification
+	getUserErr      error // when set, GetUser fails with it
 }
 
 func (m *mockScheduledEventStore) GetSchedule(_ context.Context, id string) (*store.Schedule, error) {
@@ -495,6 +496,9 @@ func (m *mockScheduledEventStore) GetAgent(_ context.Context, id string) (*store
 func (m *mockScheduledEventStore) GetUser(_ context.Context, id string) (*store.User, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.getUserErr != nil {
+		return nil, m.getUserErr
+	}
 	if u, ok := m.users[id]; ok {
 		cp := *u
 		return &cp, nil
@@ -1481,6 +1485,7 @@ func TestDispatchAgentEventHandler_AgentAlreadyExists(t *testing.T) {
 	// have a recipient and be visible below.
 	ms.users["user-owner"] = &store.User{ID: "user-owner"}
 	ms.agents[creatorID].Ancestry = []string{"user-owner", creatorID}
+	ms.schedules = map[string]*store.Schedule{"sched-1": {ID: "sched-1", Name: "nightly", ProjectID: "project-1"}}
 	ms.agents["existing-1"] = &store.Agent{
 		ID:        "existing-1",
 		Slug:      "worker-1",
@@ -1499,6 +1504,9 @@ func TestDispatchAgentEventHandler_AgentAlreadyExists(t *testing.T) {
 		EventType: "dispatch_agent",
 		Payload:   `{"agentName":"worker-1"}`,
 		CreatedBy: creatorID,
+		// A recurring fire, so the one-shot guard cannot hide a stray
+		// notification.
+		ScheduleID: "sched-1",
 	}, creatorID)
 
 	err := handler(ctx, evt)
@@ -1672,6 +1680,36 @@ func TestDispatchAgentEventHandler_ErroredRowAgentCreatorFallback(t *testing.T) 
 	}
 	if evts := g.published(); len(evts) != 0 {
 		t.Errorf("published %d events, want 0", len(evts))
+	}
+
+	// No ancestry: the agent's owner, when it is a user, is the recipient.
+	h := newBlockedFireFixture(t, "")
+	h.ms.agents["creator-agent"].OwnerID = "user-owner"
+	if err := h.fire(); err == nil || !strings.Contains(err.Error(), "phase error") {
+		t.Fatalf("error = %v", err)
+	}
+	notifs = h.ms.getNotifications()
+	if len(notifs) != 1 || notifs[0].SubscriberID != "user-owner" {
+		t.Fatalf("notifications = %+v, want one to user-owner via OwnerID", notifs)
+	}
+}
+
+// A store failure looking up the creator is logged with its error, then the
+// notification is skipped as for no owning user; the fire's error is
+// unchanged.
+func TestDispatchAgentEventHandler_ErroredRowRecipientLookupErrorLogged(t *testing.T) {
+	f := newBlockedFireFixture(t, "user-owner")
+	logs := authzHelperCaptureLogs(t)
+	f.ms.getUserErr = errors.New("store unavailable")
+	if err := f.fire(); err == nil || !strings.Contains(err.Error(), "delete the agent to resume this schedule") {
+		t.Fatalf("error = %v", err)
+	}
+	if n := f.ms.getNotifications(); len(n) != 0 {
+		t.Errorf("got %d notifications, want 0", len(n))
+	}
+	out := logs.String()
+	if !strings.Contains(out, "looking up the schedule creator as a user failed") || !strings.Contains(out, "store unavailable") {
+		t.Errorf("lookup error not logged:\n%s", out)
 	}
 }
 

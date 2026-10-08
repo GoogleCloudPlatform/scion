@@ -112,6 +112,10 @@ func (s *Server) scheduleNotificationRecipient(ctx context.Context, createdBy st
 	if _, err := s.store.GetUser(ctx, createdBy); err == nil {
 		return createdBy
 	} else if !errors.Is(err, store.ErrNotFound) {
+		// A store failure, not a missing user: say so, then skip as for
+		// no owning user.
+		slog.Warn("Scheduler: looking up the schedule creator as a user failed; skipping notification",
+			"subsystem", "scheduler", "createdBy", createdBy, "error", err)
 		return ""
 	}
 	agent, err := s.store.GetAgent(ctx, createdBy)

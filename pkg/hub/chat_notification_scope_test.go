@@ -251,6 +251,8 @@ func TestUserNotification_ScopedToSubscriber(t *testing.T) {
 	defer unsubOwner()
 	eve, unsubEve := pub.Subscribe(bystanderSubjects, "project."+projectID+".notification", "user.user-eve.notification")
 	defer unsubEve()
+	everything, unsubAll := pub.Subscribe(">")
+	defer unsubAll()
 
 	notif := newChatNotificationForTest("user-alice", projectID, `Schedule "nightly" is blocked`)
 	notif.Status = NotificationScheduleBlocked
@@ -278,4 +280,17 @@ func TestUserNotification_ScopedToSubscriber(t *testing.T) {
 		t.Fatalf("user notification leaked to a bystander on %q: %s", evt.Subject, evt.Data)
 	case <-time.After(250 * time.Millisecond):
 	}
+	// Exactly one event anywhere: the unaddressed notification went nowhere.
+	var all []Event
+	for {
+		select {
+		case evt := <-everything:
+			all = append(all, evt)
+			continue
+		default:
+		}
+		break
+	}
+	require.Len(t, all, 1, "events: %+v", all)
+	assert.Equal(t, "user.user-alice.notification", all[0].Subject)
 }
