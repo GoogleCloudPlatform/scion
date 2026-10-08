@@ -8888,3 +8888,124 @@ describe('scion-chat-thread jump during the initial load', () => {
     expect(bottom).toHaveBeenCalledTimes(expected === 'bottom' ? 1 : 0);
   });
 });
+
+describe('scion-chat-thread older-page loads and message jumps', () => {
+  type Internals = {
+    loadOlderMessagesV2(scrollEl: HTMLElement): Promise<void>;
+    messages: Array<{ id: string }>;
+    nextCursor: string | null;
+    _jumpSeq: number;
+    _jumpScrollCleanup: (() => void) | null;
+    pinnedToBottom: boolean;
+  };
+
+  /** The next request answers at once, but its body waits for `release`. */
+  function holdNextBody(): { release: (body: unknown) => void } {
+    const held = { release: (_body: unknown): void => {} };
+    apiFetch.mockImplementationOnce(() =>
+      Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () =>
+          new Promise((resolve) => {
+            held.release = resolve;
+          }),
+      } as unknown as Response)
+    );
+    return held;
+  }
+
+  function olderPage(id: string): unknown {
+    return {
+      items: [
+        {
+          id,
+          projectId: '',
+          sender: 'agent:coder',
+          senderId: 'agent-1',
+          recipient: '',
+          recipientId: '',
+          msg: 'older message',
+          type: 'chat',
+          agentId: '',
+          createdAt: '2026-01-01T00:00:00Z',
+        },
+      ],
+    };
+  }
+
+  /** A scroller whose content height grows from 100 to 400 once the page lands. */
+  function fakeScroller(): { scrollEl: HTMLElement; grow: () => void } {
+    let height = 100;
+    const scrollEl = {
+      scrollTop: 50,
+      get scrollHeight(): number {
+        return height;
+      },
+    } as unknown as HTMLElement;
+    return { scrollEl, grow: (): void => void (height = 400) };
+  }
+
+  async function startOlderLoad(): Promise<{
+    internals: Internals;
+    scrollEl: HTMLElement;
+    grow: () => void;
+    held: { release: (body: unknown) => void };
+    loading: Promise<void>;
+  }> {
+    const el = await mount();
+    const internals = el as unknown as Internals;
+    internals.nextCursor = 'older-cursor';
+    const held = holdNextBody();
+    const { scrollEl, grow } = fakeScroller();
+    const loading = internals.loadOlderMessagesV2(scrollEl);
+    await vi.waitFor(() => expect(apiFetch).toHaveBeenCalled());
+    return { internals, scrollEl, grow, held, loading };
+  }
+
+  beforeEach(() => {
+    apiFetch.mockReset();
+    apiFetch.mockResolvedValue(emptyHistory());
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  it('merges the older page and keeps the reader in place with no jump', async () => {
+    const { internals, scrollEl, grow, held, loading } = await startOlderLoad();
+    grow();
+    held.release(olderPage('older-1'));
+    await loading;
+
+    expect(internals.messages.some((m) => m.id === 'older-1')).toBe(true);
+    expect(scrollEl.scrollTop).toBe(350);
+  });
+
+  it('drops an older page whose load started before a jump', async () => {
+    const { internals, scrollEl, grow, held, loading } = await startOlderLoad();
+    // A jump starts while the older page is in flight.
+    internals._jumpSeq++;
+    grow();
+    held.release(olderPage('older-1'));
+    await loading;
+
+    expect(internals.messages.some((m) => m.id === 'older-1')).toBe(false);
+    expect(scrollEl.scrollTop).toBe(50);
+  });
+
+  it('does not write scrollTop while a jump scroll is settling', async () => {
+    const { internals, scrollEl, grow, held, loading } = await startOlderLoad();
+    // The jump's smooth scroll is in flight (its settle watcher is armed),
+    // and the reader is no longer at the bottom.
+    internals.pinnedToBottom = false;
+    internals._jumpScrollCleanup = (): void => {};
+    grow();
+    held.release(olderPage('older-1'));
+    await loading;
+
+    expect(internals.messages.some((m) => m.id === 'older-1')).toBe(true);
+    expect(scrollEl.scrollTop).toBe(50);
+    internals._jumpScrollCleanup = null;
+  });
+});
