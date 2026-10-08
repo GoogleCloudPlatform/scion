@@ -24,39 +24,39 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
-// claudeLikeAuth mirrors the auth block of harnesses/claude/config.yaml.
-func claudeLikeAuth() *config.HarnessAuthMetadata {
-	return &config.HarnessAuthMetadata{
-		DefaultType: "api-key",
-		Types: map[string]config.HarnessAuthTypeMetadata{
-			"api-key":     {RequiredEnv: []config.HarnessAuthEnvRequirement{{AnyOf: []string{"ANTHROPIC_API_KEY"}}}},
-			"oauth-token": {RequiredEnv: []config.HarnessAuthEnvRequirement{{AnyOf: []string{"CLAUDE_CODE_OAUTH_TOKEN"}}}},
-			"auth-file": {RequiredFiles: []config.HarnessAuthFileRequirement{
-				{Name: "CLAUDE_AUTH", Type: "file", TargetSuffix: "/.claude/.credentials.json"},
-			}},
-			"vertex-ai": {
-				RequiredEnv: []config.HarnessAuthEnvRequirement{
-					{AnyOf: []string{"GOOGLE_CLOUD_PROJECT"}},
-					{AnyOf: []string{"GOOGLE_CLOUD_REGION", "CLOUD_ML_REGION", "GOOGLE_CLOUD_LOCATION"}},
-				},
-				RequiredFiles: []config.HarnessAuthFileRequirement{
-					{Name: "gcloud-adc", Type: "file", AlternativeEnvKeys: []string{"GOOGLE_APPLICATION_CREDENTIALS"}, SkippedWhenGCPServiceAccountAssigned: true, Required: true},
-				},
-			},
-		},
-	}
-}
-
 type restartFixture struct {
 	t         *testing.T
 	h         *ContainerScriptHarness
 	agentHome string
 }
 
+// newRestartFixture uses the real harnesses/claude config.yaml (auth block
+// included), so the auth types the merge decision checks are the shipped
+// ones.
 func newRestartFixture(t *testing.T) *restartFixture {
 	t.Helper()
-	h, _ := newTestContainerScriptHarness(t)
-	h.entry.Auth = claudeLikeAuth()
+	return newBundledHarnessFixture(t, "claude")
+}
+
+// newBundledHarnessFixture builds a ContainerScriptHarness from the real
+// harnesses/<name> harness-config.
+func newBundledHarnessFixture(t *testing.T, name string) *restartFixture {
+	t.Helper()
+	dir, err := filepath.Abs(filepath.Join("..", "..", "harnesses", name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	hc, err := config.LoadHarnessConfigDir(dir)
+	if err != nil {
+		t.Fatalf("load %s: %v", dir, err)
+	}
+	h, err := NewContainerScriptHarness(dir, hc.Config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.entry.Auth == nil || len(h.entry.Auth.Types["vertex-ai"].RequiredFiles) == 0 {
+		t.Fatalf("fixture: %s has no vertex-ai required_files", name)
+	}
 	return &restartFixture{t: t, h: h, agentHome: t.TempDir()}
 }
 
@@ -177,21 +177,37 @@ func TestApplyAuthSettings_RestartWithPartialVertexEnvCarriesRecordedCredential(
 // An explicitly selected type that the new resolution does not satisfy
 // carries the recorded credential even when another type is satisfied.
 func TestApplyAuthSettings_RestartExplicitTypeUnsatisfiedCarriesRecordedCredential(t *testing.T) {
+	// vertex-ai fully resolved: project, region and the ADC file mapping
+	// ResolveAuth produces.
+	vertex := func(selected string) *api.ResolvedAuth {
+		env := map[string]string{"GOOGLE_CLOUD_PROJECT": "p", "GOOGLE_CLOUD_REGION": "us-central1"}
+		if selected != "" {
+			env["SCION_HARNESS_SELECTED_AUTH"] = selected
+		}
+		return &api.ResolvedAuth{Method: "container-script", EnvVars: env,
+			Files: []api.FileMapping{{ContainerPath: adcContainerPath}}}
+	}
+
+	// Control: with no explicit type, the fully resolved vertex-ai satisfies
+	// an auth type, so the recorded key is not carried.
 	f := newRestartFixture(t)
 	rec := f.firstStart(map[string]string{"ANTHROPIC_API_KEY": "sk-ant-first-0123456789"})
-	// vertex-ai is fully resolved (project, region and the ADC file mapping
-	// ResolveAuth produces), but the explicitly selected type is api-key.
-	got := f.restartResolved(rec, &api.ResolvedAuth{
-		Method: "container-script",
-		EnvVars: map[string]string{
-			"SCION_HARNESS_SELECTED_AUTH": "api-key",
-			"GOOGLE_CLOUD_PROJECT":        "p",
-			"GOOGLE_CLOUD_REGION":         "us-central1",
-		},
-		Files: []api.FileMapping{{ContainerPath: adcContainerPath}},
-	})
-	if _, ok := got["ANTHROPIC_API_KEY"]; !ok {
+	if got := f.restartResolved(rec, vertex("")); got["ANTHROPIC_API_KEY"] != "" {
+		t.Fatalf("fixture: fully resolved vertex-ai should not carry the key without an explicit type: %v", got)
+	}
+
+	// Explicit api-key, which the new resolution does not satisfy: carried.
+	f = newRestartFixture(t)
+	rec = f.firstStart(map[string]string{"ANTHROPIC_API_KEY": "sk-ant-first-0123456789"})
+	if got := f.restartResolved(rec, vertex("api-key")); got["ANTHROPIC_API_KEY"] == "" {
 		t.Fatalf("recorded ANTHROPIC_API_KEY not carried for explicit api-key: %v", got)
+	}
+
+	// Explicit vertex-ai, satisfied: not carried.
+	f = newRestartFixture(t)
+	rec = f.firstStart(map[string]string{"ANTHROPIC_API_KEY": "sk-ant-first-0123456789"})
+	if got := f.restartResolved(rec, vertex("vertex-ai")); got["ANTHROPIC_API_KEY"] != "" {
+		t.Fatalf("recorded key carried although the explicit vertex-ai is satisfied: %v", got)
 	}
 }
 
@@ -247,24 +263,7 @@ func TestApplyAuthSettings_RestartVertexSwitchThroughResolveAuth(t *testing.T) {
 		{"grok-build", "XAI_API_KEY"},
 	} {
 		t.Run(tc.harness, func(t *testing.T) {
-			newFixture := func() *restartFixture {
-				dir, err := filepath.Abs(filepath.Join("..", "..", "harnesses", tc.harness))
-				if err != nil {
-					t.Fatal(err)
-				}
-				hc, err := config.LoadHarnessConfigDir(dir)
-				if err != nil {
-					t.Fatalf("load %s: %v", dir, err)
-				}
-				h, err := NewContainerScriptHarness(dir, hc.Config)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if h.entry.Auth == nil || h.entry.Auth.Types["vertex-ai"].RequiredFiles == nil {
-					t.Fatalf("fixture: %s has no vertex-ai required_files", tc.harness)
-				}
-				return &restartFixture{t: t, h: h, agentHome: t.TempDir()}
-			}
+			newFixture := func() *restartFixture { return newBundledHarnessFixture(t, tc.harness) }
 			resolve := func(f *restartFixture, auth api.AuthConfig) *api.ResolvedAuth {
 				r, err := f.h.ResolveAuth(auth)
 				if err != nil {
