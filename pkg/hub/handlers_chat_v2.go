@@ -1281,6 +1281,13 @@ func chatWakeWriteBudget(recipients int) time.Duration {
 	return chatWakeResumeBudget + time.Duration(recipients)*chatWakeDeliveryBudget + chatWakeWriteSlack
 }
 
+// chatWakeSendBudget is the overall deadline of a wake send once it is
+// detached from the request: the wake, persistence, every dispatch and
+// the store and event calls in between. It matches the write deadline,
+// so the send ends no later than the connection can still answer.
+// A variable so tests can shorten it.
+var chatWakeSendBudget = chatWakeWriteBudget
+
 // extendWriteDeadlineForWake moves the connection's write deadline past
 // the server-wide WriteTimeout to chatWakeWriteBudget(recipients) from
 // now. A ResponseWriter without deadline support is logged and ignored.
@@ -1614,12 +1621,15 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 		// abort a wake in progress, nor the persist and dispatch after it.
 		// The send then runs to its end with its idempotency key in flight
 		// (a retry is told send_in_progress), so the client's retry finds
-		// the finished outcome. Only some steps carry a deadline: the wake
-		// (chatWakeResumeBudget), each dispatch (30s) and markFailed (its
-		// finalization timeout). The store and event calls after the wake
-		// have none, as on the request context, which had no deadline
-		// either.
-		ctx = context.WithoutCancel(ctx)
+		// the finished outcome. The detached context carries one overall
+		// deadline (chatWakeSendBudget), so a stalled store or event call
+		// ends the send instead of keeping the key in flight forever.
+		// Within it the wake (chatWakeResumeBudget) and each dispatch
+		// (30s) have their own bounds; markFailed uses its finalization
+		// timeout and still runs after the deadline.
+		var cancelSend context.CancelFunc
+		ctx, cancelSend = context.WithTimeout(context.WithoutCancel(ctx), chatWakeSendBudget(len(agents)))
+		defer cancelSend()
 		wakeCtx, cancelWake := context.WithTimeout(ctx, chatWakeResumeBudget)
 		// wakeAgentForDM reports managed runtimes, a missing broker, the
 		// start gate and readiness failures as typed errors.
