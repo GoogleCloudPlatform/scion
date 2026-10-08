@@ -1531,12 +1531,15 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 		}
 	}
 
-	// Fallback: unaddressed text → default agent (if configured).
-	// Skip if the message @-mentions a non-bot Discord user — those are
-	// directed at humans, not the bot's default agent.
+	// Fallback: unaddressed text or attachment-only message → default
+	// agent (if configured). Skip if the message @-mentions a non-bot
+	// Discord user — those are directed at humans, not the bot's default
+	// agent.
 	if len(targets) == 0 && effectiveDefault != "" && !hasNonBotMentions(m.Message, botUserID) {
 		text := strings.TrimSpace(m.Content)
-		if text != "" && !strings.HasPrefix(text, "/") {
+		hasText := text != "" && !strings.HasPrefix(text, "/")
+		attachmentOnly := text == "" && len(m.Attachments) > 0
+		if hasText || attachmentOnly {
 			targets = []string{effectiveDefault}
 		}
 	}
