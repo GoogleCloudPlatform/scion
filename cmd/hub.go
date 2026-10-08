@@ -145,14 +145,15 @@ Examples:
 
 // hubProjectsDeleteCmd deletes a project from the Hub
 var hubProjectsDeleteCmd = &cobra.Command{
-	Use:   "delete [project-name]",
+	Use:   "delete [project-name-or-id]",
 	Short: "Delete a project from the Hub",
 	Long: `Delete a project from the Hub.
 
 This will remove the project and all associated broker provider relationships.
 All agents within the project will be stopped and deleted.
 
-If no project name is provided, the current project is used.
+The project can be given by name or by project ID (UUID). If no project
+is provided, the current project is used.
 
 Examples:
   # Delete the current project (with confirmation)
@@ -160,6 +161,9 @@ Examples:
 
   # Delete a project by name (with confirmation)
   scion hub projects delete my-project
+
+  # Delete a project by ID (with confirmation)
+  scion hub projects delete 0b9a4c1e-2f3d-4e5a-8b6c-7d8e9f0a1b2c
 
   # Delete without confirmation
   scion hub projects delete my-project -y`,
@@ -1332,7 +1336,7 @@ func runHubProjectsInfo(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	project, err := resolveProjectForInfo(ctx, client, projectName)
+	project, err := resolveProjectNameOrID(ctx, client, projectName)
 	if err != nil {
 		return err
 	}
@@ -1507,8 +1511,8 @@ func runHubProjectsDelete(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Find the project by name
-	project, err := findProjectByName(ctx, client, projectName)
+	// Find the project by name or ID, exactly as `hub projects info` does.
+	project, err := resolveProjectNameOrID(ctx, client, projectName)
 	if err != nil {
 		return err
 	}
@@ -1882,12 +1886,14 @@ func findProjectByName(ctx context.Context, client hubclient.Client, name string
 	return &resp.Projects[0], nil
 }
 
-// resolveProjectForInfo resolves the argument of `scion hub projects info`.
-// A UUID-shaped value (as returned by the REST API) goes through the shared
-// ID-first resolver, which looks the project up by ID and falls back to
-// slug and name (ptone/scion#3772). Any other value keeps the existing
-// name lookup unchanged.
-func resolveProjectForInfo(ctx context.Context, client hubclient.Client, arg string) (*hubclient.Project, error) {
+// resolveProjectNameOrID resolves the project argument of `scion hub
+// projects info` and `scion hub projects delete`, so both commands pick the
+// same project for the same argument. A UUID-shaped value (as returned by
+// the REST API) goes through the shared ID-first resolver, which looks the
+// project up by ID and falls back to an exact slug or case-insensitive name
+// match of the same string (ptone/scion#3772, ptone/scion#3792). Any other
+// value keeps the existing name lookup unchanged.
+func resolveProjectNameOrID(ctx context.Context, client hubclient.Client, arg string) (*hubclient.Project, error) {
 	if isUUIDLike(arg) {
 		return resolveProjectByNameOrID(ctx, client, arg)
 	}

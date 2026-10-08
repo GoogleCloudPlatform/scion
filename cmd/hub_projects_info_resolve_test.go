@@ -38,6 +38,7 @@ type fakeProjectsHub struct {
 
 	mu       sync.Mutex
 	requests []string
+	deletes  []string
 }
 
 func (f *fakeProjectsHub) record(r *http.Request) {
@@ -73,6 +74,13 @@ func (f *fakeProjectsHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if id, ok := strings.CutPrefix(r.URL.Path, "/api/v1/projects/"); ok {
 		for _, p := range f.projects {
 			if p.ID == id {
+				if r.Method == http.MethodDelete {
+					f.mu.Lock()
+					f.deletes = append(f.deletes, id)
+					f.mu.Unlock()
+					w.WriteHeader(http.StatusNoContent)
+					return
+				}
 				_ = json.NewEncoder(w).Encode(p)
 				return
 			}
@@ -149,7 +157,7 @@ func TestResolveProjectForInfo(t *testing.T) {
 			client, err := hubclient.New(srv.URL)
 			require.NoError(t, err)
 
-			got, err := resolveProjectForInfo(context.Background(), client, tt.arg)
+			got, err := resolveProjectNameOrID(context.Background(), client, tt.arg)
 			if tt.wantErr != "" {
 				require.Error(t, err)
 				assert.Equal(t, tt.wantErr, err.Error())
