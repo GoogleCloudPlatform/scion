@@ -109,7 +109,7 @@ func healthSummaryIntegrationFromStatus(name string, st *IntegrationStatus) Heal
 }
 
 // healthSummaryPluginRecordNames returns the plugin names of the plugin
-// records (label scion.io/plugin) in the runtime broker table. On a store
+// records (the plugin label) in the runtime broker table. On a store
 // error it logs and returns what it has, so managed plugins still show.
 func (s *Server) healthSummaryPluginRecordNames(ctx context.Context) []string {
 	var names []string
