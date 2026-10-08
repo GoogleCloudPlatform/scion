@@ -181,7 +181,7 @@ func TestRunHarnessProvision_FailureStatusMasksLinesAndShortValues(t *testing.T)
 			}
 			raw, _ := os.ReadFile(statusPath)
 			if strings.Contains(string(raw), tc.echo) {
-				t.Fatalf("status file leaks the staged value: %s", raw)
+				t.Fatalf("status file contains the staged value: %s", raw)
 			}
 			_, msg := readStatus(t, statusPath)
 			if !strings.Contains(msg, "harness provisioner failed") || !strings.Contains(msg, tc.want) {
