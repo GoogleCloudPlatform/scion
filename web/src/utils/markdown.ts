@@ -43,6 +43,8 @@ export interface MarkdownRenderOptions {
    * sanitized like any other.
    */
   criticMarks?: boolean;
+  /** With criticMarks, the author shown in each comment's note header. */
+  criticAuthor?: string;
 }
 
 /** Result of the lazy-loaded renderer. */
@@ -115,7 +117,7 @@ export async function getMarkdownRenderer(): Promise<MarkdownRenderer> {
         render(markdown: string, options?: MarkdownRenderOptions): string {
           const source = options?.criticMarks ? criticToSentinels(markdown) : markdown;
           let rawHtml = marked.parse(source, { async: false }) as string;
-          if (options?.criticMarks) rawHtml = renderCriticSentinels(rawHtml);
+          if (options?.criticMarks) rawHtml = renderCriticSentinels(rawHtml, options.criticAuthor);
           const clean = purify.sanitize(rawHtml);
           return options?.sameOriginImagesOnly
             ? dropOffOriginImages(clean, window.location.origin)

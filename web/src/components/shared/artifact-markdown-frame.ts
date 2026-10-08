@@ -51,6 +51,14 @@ export class ScionArtifactMarkdownFrame extends LitElement {
   @property({ type: String }) entryPath = '';
   @property({ attribute: false }) files: ArtifactFile[] = [];
   @property({ type: String }) critic: CriticView = 'off';
+  /** Lay comment notes out in a margin (the page decides from its width). */
+  @property({ type: Boolean }) marginNotes = false;
+  /** Author shown in each comment's note header. */
+  @property({ type: String }) noteAuthor = '';
+  /** A short note shown first in the margin. */
+  @property({ type: String }) sideNote = '';
+  /** Style the side note as an empty-state placeholder. */
+  @property({ type: Boolean }) sideNoteEmpty = false;
 
   @state() private srcdoc = '';
   @state() private error: string | null = null;
@@ -90,7 +98,11 @@ export class ScionArtifactMarkdownFrame extends LitElement {
       changed.has('seq') ||
       changed.has('entryPath') ||
       changed.has('artifactId') ||
-      changed.has('critic')
+      changed.has('critic') ||
+      changed.has('marginNotes') ||
+      changed.has('noteAuthor') ||
+      changed.has('sideNote') ||
+      changed.has('sideNoteEmpty')
     ) {
       void this.build();
     }
@@ -117,14 +129,21 @@ export class ScionArtifactMarkdownFrame extends LitElement {
         this.critic === 'clean' || this.critic === 'accept'
           ? projectCritic(this.content, this.critic)
           : this.content;
-      const clean = renderer.render(source, { criticMarks: this.critic === 'marks' });
+      const clean = renderer.render(source, {
+        criticMarks: this.critic === 'marks',
+        criticAuthor: this.noteAuthor,
+      });
       const body = rewriteImages(clean, {
         id: this.artifactId,
         seq: this.seq,
         entryPath: this.entryPath,
         files: this.files,
       });
-      this.srcdoc = previewDocument(body, this.theme());
+      this.srcdoc = previewDocument(body, this.theme(), {
+        marginNotes: this.marginNotes && this.critic !== 'off',
+        sideNote: this.critic === 'off' ? '' : this.sideNote,
+        sideNoteEmpty: this.sideNoteEmpty,
+      });
       this.error = null;
     } catch (err) {
       console.error('Failed to render markdown:', err);

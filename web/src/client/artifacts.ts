@@ -328,7 +328,9 @@ export interface PendingPublish {
 export class PublishError extends Error {
   constructor(
     message: string,
-    readonly pending: PendingPublish | null
+    readonly pending: PendingPublish | null,
+    /** The hub's error code, when it answered with one. */
+    readonly code = ''
   ) {
     super(message);
     this.name = 'PublishError';
@@ -402,12 +404,13 @@ export async function publishFiles(req: PublishRequest): Promise<ArtifactRespons
     const code = body.error?.code ?? '';
     // A review the hub refused is discarded: say why in this page's terms.
     if (code === 'unmarked_changes') {
-      throw new PublishError(reviewRejectedMessage(body), null);
+      throw new PublishError(reviewRejectedMessage(body), null, code);
     }
     if (code === 'stale_review') {
       throw new PublishError(
-        'The version you reviewed is no longer the latest; your review was not saved. Review the current version.',
-        null
+        'Your review was not saved: a newer version was published, or is being published. The page now shows the current version; your text is kept so you can redo your marks.',
+        null,
+        code
       );
     }
     const message = prefix + (await extractApiError(res, `HTTP ${res.status}`));
@@ -415,7 +418,7 @@ export async function publishFiles(req: PublishRequest): Promise<ArtifactRespons
     // the caller's (403): another attempt must start a new version.
     const gone =
       res.status === 404 || res.status === 403 || (res.status === 409 && code === 'conflict');
-    if (gone) throw new PublishError(message, null);
+    if (gone) throw new PublishError(message, null, code);
     // Finalize found files missing: upload those next time. The hub lists
     // at most a few; when it lists fewer than are missing, upload them all.
     const missing = body.error?.details?.missing;
@@ -426,7 +429,7 @@ export async function publishFiles(req: PublishRequest): Promise<ArtifactRespons
           : pending.all;
       remaining = all.filter((p) => byPath.has(p));
     }
-    throw new PublishError(message, left());
+    throw new PublishError(message, left(), code);
   };
   let done = 0;
   for (const path of required) {

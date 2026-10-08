@@ -74,6 +74,7 @@ import type { ScionCodeEditor } from '../shared/code-editor.js';
 import type { CriticView } from '../shared/artifact-markdown-frame.js';
 import {
   countCritic,
+  criticToolBlocked,
   criticToolEdit,
   onlyMarksChanged,
   projectCritic,
@@ -85,6 +86,12 @@ import '../shared/code-editor.js';
 import './not-found.js';
 
 type Tab = 'preview' | 'files' | 'history';
+
+/** Viewports at least this wide show comment notes in a margin. */
+export const WIDE_NOTES_QUERY = '(min-width: 1100px)';
+
+/** How long the Review preview waits after typing before it re-renders. */
+export const REVIEW_PREVIEW_DELAY_MS = 250;
 
 /** Longest delay setTimeout honours. */
 const MAX_TIMER_MS = 2 ** 31 - 1;
@@ -138,6 +145,17 @@ export class ScionPageArtifactDetail extends LitElement {
   /** How a review's marks are shown in its preview. */
   @state() private criticView: Exclude<CriticView, 'off'> = 'marks';
   private reviewPending: PendingPublish | null = null;
+  /** Review text shown in the live preview, updated after typing pauses. */
+  @state() private reviewPreview = '';
+  private previewTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Why the last toolbar action did not apply; cleared by the next edit. */
+  @state() private reviewHint: string | null = null;
+  /** The viewport is wide enough for comment notes in a margin. */
+  @state() private wideViewport = false;
+  private wideQuery: MediaQueryList | null = null;
+  private onWideChange = (e: MediaQueryListEvent): void => {
+    this.wideViewport = e.matches;
+  };
 
   @query('.untrusted') private untrustedFrame?: HTMLElement;
   @query('scion-code-editor.review-editor') private reviewEditor?: ScionCodeEditor;
@@ -378,10 +396,23 @@ export class ScionPageArtifactDetail extends LitElement {
         grid-template-columns: minmax(0, 1fr);
       }
     }
-    .review-empty {
+    .review-toolbar .hint {
+      color: var(--sl-color-warning-700, #b45309);
+    }
+    sl-badge.kind-review::part(base) {
+      background: #ede9fe;
+      color: #6d28d9;
+      border-color: #ddd6fe;
+    }
+    sl-badge.kind-publish::part(base) {
+      background: #e0f2fe;
+      color: #075985;
+      border-color: #bae6fd;
+    }
+    .history-note {
       font-size: 0.8125rem;
       color: var(--sl-color-neutral-600);
-      margin: 0.25rem 0 0.5rem;
+      margin: 0.5rem 0;
     }
     .help-panel {
       max-width: 24rem;
@@ -417,6 +448,13 @@ export class ScionPageArtifactDetail extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
+    // Comment notes go in a margin when the viewport is at least 1100px
+    // wide, under their reference otherwise (approved mock).
+    if (typeof window.matchMedia === 'function') {
+      this.wideQuery = window.matchMedia(WIDE_NOTES_QUERY);
+      this.wideViewport = this.wideQuery.matches;
+      this.wideQuery.addEventListener?.('change', this.onWideChange);
+    }
     const parsed = parseArtifactPagePath(this.pageData?.path || window.location.pathname);
     if (parsed) {
       this.projectId = parsed.projectId;
@@ -527,6 +565,10 @@ export class ScionPageArtifactDetail extends LitElement {
     super.disconnectedCallback();
     if (this.viewTimer) clearTimeout(this.viewTimer);
     this.viewTimer = null;
+    if (this.previewTimer) clearTimeout(this.previewTimer);
+    this.previewTimer = null;
+    this.wideQuery?.removeEventListener?.('change', this.onWideChange);
+    this.wideQuery = null;
   }
 
   private async loadVersions(before = 0, gen = this.loadGen): Promise<void> {
@@ -638,6 +680,8 @@ export class ScionPageArtifactDetail extends LitElement {
 
   private startReview = (): void => {
     this.reviewText = this.text ?? '';
+    this.reviewPreview = this.reviewText;
+    this.reviewHint = null;
     this.reviewNote = '';
     this.reviewError = null;
     this.criticView = 'marks';
@@ -648,6 +692,11 @@ export class ScionPageArtifactDetail extends LitElement {
     const editor = this.reviewEditor;
     const sel = editor?.getSelection();
     if (!editor || !sel) return;
+    const blocked = criticToolBlocked(tool, sel, this.reviewText);
+    if (blocked) {
+      this.reviewHint = blocked;
+      return;
+    }
     const edit = criticToolEdit(tool, sel);
     if (!edit) return;
     editor.replaceRange(edit.from, edit.to, edit.insert, edit.selectFrom, edit.selectTo);
@@ -682,9 +731,47 @@ export class ScionPageArtifactDetail extends LitElement {
     } catch (err) {
       this.reviewError = publishErrorMessage(err);
       this.reviewPending = err instanceof PublishError ? err.pending : null;
+      if (err instanceof PublishError && err.code === 'stale_review') {
+        // The review was discarded: show the current version and keep the
+        // reviewer's text so the marks can be redone against it.
+        this.reviewPending = null;
+        void this.reloadForReview();
+      }
     } finally {
       this.reviewBusy = false;
     }
+  }
+
+  /** Reloads the artifact while keeping Review mode and its text. */
+  private async reloadForReview(): Promise<void> {
+    this.seq = 0;
+    this.versions = [];
+    this.versionsNext = 0;
+    await this.load();
+  }
+
+  /** Records an edit of the review text; the preview follows after a pause. */
+  private onReviewInput(text: string): void {
+    this.reviewText = text;
+    this.reviewHint = null;
+    if (this.previewTimer) clearTimeout(this.previewTimer);
+    this.previewTimer = setTimeout(() => {
+      this.previewTimer = null;
+      this.reviewPreview = this.reviewText;
+    }, REVIEW_PREVIEW_DELAY_MS);
+  }
+
+  /** The version a review shown on the page was made against, when known. */
+  private get reviewedSeq(): number | null {
+    const v = this.data?.version;
+    if (!v || v.kind !== 'review') return null;
+    return this.versions.find((x) => x.seq < v.seq)?.seq ?? null;
+  }
+
+  /** The margin note of a preview in view mode, for the version reviewed as base. */
+  private criticSideNote(base: number | null): string {
+    if (this.criticView !== 'clean' || base === null) return '';
+    return `Clean: all marks rejected. Matches the version under review (v${base}).`;
   }
 
   private startEdit = (): void => {
@@ -932,7 +1019,14 @@ export class ScionPageArtifactDetail extends LitElement {
     const showMarks = this.isReview && (kind === 'markdown' || kind === 'text');
     const bar = html`
       <div class="entry-bar">
-        <span>${f.path} · ${formatBytes(f.size)}${this.isReview ? ' · review' : ''}</span>
+        <span
+          >${f.path} ·
+          ${formatBytes(f.size)}${this.isReview
+            ? this.reviewedSeq !== null
+              ? ` · review of v${this.reviewedSeq}`
+              : ' · review'
+            : ''}</span
+        >
         <span class="buttons">
           ${showMarks ? this.renderCriticToggle() : nothing} ${this.entryAction(f, v.seq)}
         </span>
@@ -951,6 +1045,9 @@ export class ScionPageArtifactDetail extends LitElement {
               .entryPath=${f.path}
               .files=${v.files}
               .critic=${showMarks ? this.criticView : 'off'}
+              .marginNotes=${this.wideViewport}
+              .noteAuthor=${showMarks ? this.createdBy(v) : ''}
+              .sideNote=${showMarks ? this.criticSideNote(this.reviewedSeq) : ''}
             ></scion-artifact-markdown-frame>`
         : html`${bar}<scion-code-editor
               .content=${showMarks && this.criticView !== 'marks'
@@ -1130,6 +1227,7 @@ export class ScionPageArtifactDetail extends LitElement {
         <thead>
           <tr>
             <th>Version</th>
+            <th>Kind</th>
             <th>Published by</th>
             <th>When</th>
             <th>Note</th>
@@ -1146,9 +1244,9 @@ export class ScionPageArtifactDetail extends LitElement {
                   ${x.seq === this.data!.artifact.currentSeq
                     ? html`<sl-badge pill variant="success">current</sl-badge>`
                     : nothing}
-                  ${x.kind !== 'publish'
-                    ? html`<sl-badge pill variant="neutral">${x.kind}</sl-badge>`
-                    : nothing}
+                </td>
+                <td>
+                  <sl-badge pill class=${`kind-${x.kind}`} variant="primary">${x.kind}</sl-badge>
                 </td>
                 <td>${this.createdBy(x)}</td>
                 <td class="muted">${formatInstant(x.createdAt)}</td>
@@ -1176,6 +1274,12 @@ export class ScionPageArtifactDetail extends LitElement {
           )}
         </tbody>
       </table>
+      ${this.versions.some((x) => x.kind === 'review')
+        ? html`<div class="history-note">
+            A review is a version with marks. Publishing after a review resolves it and clears the
+            badge.
+          </div>`
+        : nothing}
       ${this.versionsNext > 0
         ? html`<div class="more">
             <sl-button size="small" @click=${(): void => void this.loadVersions(this.versionsNext)}
@@ -1250,12 +1354,15 @@ export class ScionPageArtifactDetail extends LitElement {
       ? `${counts.comments} ${counts.comments === 1 ? 'comment' : 'comments'} and ${counts.suggestions} ${counts.suggestions === 1 ? 'suggestion' : 'suggestions'}`
       : 'marks';
     const owner = this.label(a.ownerKind, a.ownerRef);
+    // The hub tells an agent owner about reviews by others only.
+    const notified =
+      a.ownerKind === 'agent' &&
+      !(v.createdByKind === a.ownerKind && v.createdByRef === a.ownerRef);
     return html`<sl-alert class="review-banner" variant="warning" open>
       <sl-icon slot="icon" name="chat-dots"></sl-icon>
       <strong>Review pending.</strong>
       ${this.createdBy(v) || 'A reviewer'} left ${what}${base ? ` on v${base.seq}` : ''}.
-      ${a.ownerKind === 'agent' ? `${owner} was notified; ` : ''}the badge clears when a new version
-      is published.
+      ${notified ? `${owner} was notified; ` : ''}the badge clears when a new version is published.
     </sl-alert>`;
   }
 
@@ -1297,8 +1404,13 @@ export class ScionPageArtifactDetail extends LitElement {
           </sl-button>
         </sl-tooltip>
         <span class="counts">
-          ${counts.suggestions} ${counts.suggestions === 1 ? 'suggestion' : 'suggestions'} ·
-          ${counts.comments} ${counts.comments === 1 ? 'comment' : 'comments'}
+          ${this.reviewHint
+            ? html`<span class="hint">${this.reviewHint}</span>`
+            : marks === 0
+              ? 'Select text and choose Comment or Suggest.'
+              : html`${counts.suggestions}
+                ${counts.suggestions === 1 ? 'suggestion' : 'suggestions'} · ${counts.comments}
+                ${counts.comments === 1 ? 'comment' : 'comments'}`}
         </span>
         <span class="spacer"></span>
         <span class="label">Preview</span>
@@ -1323,9 +1435,6 @@ export class ScionPageArtifactDetail extends LitElement {
           </div>
         </sl-dropdown>
       </div>
-      ${marks === 0
-        ? html`<div class="review-empty">Select text and choose Comment or Suggest.</div>`
-        : nothing}
       ${!marksOnly
         ? html`<sl-alert variant="warning" open>
             <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
@@ -1343,17 +1452,22 @@ export class ScionPageArtifactDetail extends LitElement {
           class="review-editor"
           .content=${this.reviewText}
           .language=${getLanguageFromPath(f.path)}
-          @content-changed=${(e: CustomEvent<{ content: string }>): void => {
-            this.reviewText = e.detail.content;
-          }}
+          @content-changed=${(e: CustomEvent<{ content: string }>): void =>
+            this.onReviewInput(e.detail.content)}
         ></scion-code-editor>
         <scion-artifact-markdown-frame
-          .content=${this.reviewText}
+          .content=${this.reviewPreview}
           .artifactId=${this.artifactId}
           .seq=${v.seq}
           .entryPath=${f.path}
           .files=${v.files}
           .critic=${this.criticView}
+          .marginNotes=${this.wideViewport}
+          noteAuthor="You"
+          .sideNote=${this.criticView === 'marks' && countCritic(this.reviewPreview).comments === 0
+            ? 'No comments or suggestions yet.'
+            : this.criticSideNote(v.seq)}
+          .sideNoteEmpty=${this.criticView === 'marks'}
         ></scion-artifact-markdown-frame>
       </div>
       <div class="edit-footer">

@@ -251,36 +251,70 @@ export function criticToSentinels(src: string): string {
   return out;
 }
 
+/** Escapes text for HTML element content. */
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 /**
  * Turns the sentinels of rendered HTML into elements: insertions as <ins>,
  * deletions as <del>, highlights as <mark>, and each comment as a numbered
- * reference followed by its note. Attribute values are unquoted so that a
- * sentinel inside an attribute cannot end it. The result must be
- * sanitized afterwards.
+ * reference followed by its note, headed "n · author" when author is set.
+ * A sentinel inside a tag (in an attribute such as a link's href or an
+ * image's alt, raw or percent-encoded) is dropped, so marks never turn into markup inside an
+ * attribute; the renderer escapes "<" and ">" in text and attribute
+ * values, so "<" always starts a tag. Attribute values are unquoted. The
+ * result must be sanitized afterwards.
  */
-export function renderCriticSentinels(html: string): string {
+export function renderCriticSentinels(html: string, author = ''): string {
+  const who = author ? ` · ${escapeHtml(author)}` : '';
+  // A URL attribute carries sentinels percent-encoded; drop those too.
+  html = html.replace(/<[^>]*>/g, (tag) => tag.replace(/%EE%80%8[0-7]/gi, ''));
   let n = 0;
-  return html.replace(SENTINEL_RE, (ch) => {
+  let out = '';
+  let inTag = false;
+  for (const ch of html) {
+    if (ch === '<') inTag = true;
+    else if (ch === '>') inTag = false;
+    const code = ch.charCodeAt(0);
+    if (code < 0xe000 || code > 0xe007) {
+      out += ch;
+      continue;
+    }
+    if (inTag) continue;
     switch (ch) {
       case CRITIC_SENTINELS.insOpen:
-        return '<ins class=critic-ins>';
+        out += '<ins class=critic-ins>';
+        break;
       case CRITIC_SENTINELS.insClose:
-        return '</ins>';
+        out += '</ins>';
+        break;
       case CRITIC_SENTINELS.delOpen:
-        return '<del class=critic-del>';
+        out += '<del class=critic-del>';
+        break;
       case CRITIC_SENTINELS.delClose:
-        return '</del>';
+        out += '</del>';
+        break;
       case CRITIC_SENTINELS.hlOpen:
-        return '<mark class=critic-hl>';
+        out += '<mark class=critic-hl>';
+        break;
       case CRITIC_SENTINELS.hlClose:
-        return '</mark>';
+        out += '</mark>';
+        break;
       case CRITIC_SENTINELS.noteOpen:
         n++;
-        return `<sup class=critic-ref>${n}</sup><span class=critic-note><span class=critic-note-n>${n}</span> `;
+        out += `<sup class=critic-ref>${n}</sup><span class=critic-note><span class=critic-note-n>${n}${who}</span> `;
+        break;
       default:
-        return '</span>';
+        out += '</span>';
     }
-  });
+  }
+  return out;
 }
 
 /** The Review toolbar's actions. */
@@ -343,4 +377,35 @@ export function criticToolEdit(
       return { from, to, insert, selectFrom: from + insert.length, selectTo: from + insert.length };
     }
   }
+}
+
+/** The CriticMarkup tokens a toolbar selection may not contain. */
+const MARK_TOKENS = ['{++', '++}', '{--', '--}', '{~~', '~>', '~~}', '{>>', '<<}', '{==', '==}'];
+
+/**
+ * Explains why a toolbar action cannot apply to a selection of doc, or
+ * returns null when it can. Marks do not nest, so the selection (or the
+ * insertion point) must not touch an existing mark, and the selected text
+ * must not contain mark tokens; otherwise the result would read as
+ * different marks than intended.
+ */
+export function criticToolBlocked(
+  tool: CriticTool,
+  sel: { from: number; to: number; text: string },
+  doc: string
+): string | null {
+  if (tool === 'delete' && sel.text === '') return 'Select the text to delete.';
+  if (MARK_TOKENS.some((t) => sel.text.includes(t))) {
+    return 'The selection contains CriticMarkup. Select plain text.';
+  }
+  const at = tool === 'insert' ? { from: sel.to, to: sel.to } : sel;
+  for (const seg of parseCritic(doc)) {
+    if (seg.kind === 'text') continue;
+    const empty = at.from === at.to;
+    const touches = empty
+      ? at.from > seg.start && at.from < seg.end
+      : at.from < seg.end && at.to > seg.start;
+    if (touches) return 'The selection is inside or across a mark. Select text outside marks.';
+  }
+  return null;
 }

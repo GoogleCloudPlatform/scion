@@ -20,16 +20,21 @@ import type { ScionArtifactMarkdownFrame } from './artifact-markdown-frame.js';
 
 /** The body of a frame document, without the styles. */
 function body(doc: string): string {
-  return doc.slice(doc.indexOf('<body>'));
+  return doc.slice(doc.indexOf('<body'));
 }
 
-async function frameDoc(content: string, critic: string): Promise<string> {
+async function frameDoc(
+  content: string,
+  critic: string,
+  props: Partial<ScionArtifactMarkdownFrame> = {}
+): Promise<string> {
   const el = document.createElement('scion-artifact-markdown-frame') as ScionArtifactMarkdownFrame;
   el.content = content;
   el.artifactId = 'a';
   el.seq = 1;
   el.entryPath = 'plan.md';
   el.critic = critic as ScionArtifactMarkdownFrame['critic'];
+  Object.assign(el, props);
   document.body.appendChild(el);
   for (let i = 0; i < 20; i++) {
     await new Promise((r) => setTimeout(r, 0));
@@ -82,5 +87,42 @@ describe('artifact markdown frame: CriticMarkup', () => {
     const doc = await frameDoc('{++<img src=x onerror=alert(1)>++}', 'marks');
     expect(doc).toContain('<ins class="critic-ins">&lt;img src=x onerror=alert(1)&gt;</ins>');
     expect(doc).not.toContain('<img');
+  });
+
+  it('keeps marks in link targets, titles and image alt text out of the markup', async () => {
+    const doc = body(
+      await frameDoc(
+        '[li{++nk++}](https://example.com/a{++b++} "t{>>c<<}") ![al{--t--}](img.png)',
+        'marks'
+      )
+    );
+    // No element is opened inside an attribute value, and no sentinel
+    // character is left in one.
+    for (const m of doc.matchAll(/="([^"]*)"/g)) {
+      expect(m[1]).not.toMatch(/<|[\uE000-\uE007]/);
+    }
+    expect(doc).toContain('href="https://example.com/ab"');
+    expect(doc).toContain('li<ins class="critic-ins">nk</ins>');
+  });
+
+  it('shows notes with their author, a side note, and the margin layout when asked', async () => {
+    const wide = body(
+      await frameDoc('a{>>c<<}', 'marks', {
+        noteAuthor: 'Alex <R>',
+        sideNote: 'Side & note',
+        marginNotes: true,
+      })
+    );
+    expect(wide).toContain('<body class="notes-margin">');
+    expect(wide).toContain('<aside class="critic-side">Side &amp; note</aside>');
+    expect(wide).toContain('1 · Alex &lt;R&gt;');
+    const narrow = body(
+      await frameDoc('a{>>c<<}', 'marks', { sideNote: 'x', sideNoteEmpty: true })
+    );
+    expect(narrow).toContain('<body><aside class="critic-side empty">x</aside>');
+    // Published versions (critic off) show neither.
+    const off = body(await frameDoc('a', 'off', { sideNote: 'x', marginNotes: true }));
+    expect(off).not.toContain('critic-side');
+    expect(off).not.toContain('notes-margin');
   });
 });

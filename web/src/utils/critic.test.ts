@@ -20,6 +20,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   countCritic,
+  criticToolBlocked,
   criticToolEdit,
   criticToSentinels,
   normalizeCritic,
@@ -160,5 +161,53 @@ describe('criticToolEdit', () => {
       const [out] = apply(src, criticToolEdit(tool, sel));
       expect(onlyMarksChanged(out, src)).toBe(true);
     }
+  });
+});
+
+describe('criticToolBlocked', () => {
+  const doc = 'We {~~ship~>launch~~} in Q3. Owners: docs.';
+  const at = (from: number, to: number) => ({ from, to, text: doc.slice(from, to) });
+  const owners = doc.indexOf('Owners');
+  it('allows plain text outside marks', () => {
+    for (const tool of ['comment', 'suggest', 'insert', 'delete'] as const) {
+      expect(criticToolBlocked(tool, at(owners, owners + 6), doc)).toBeNull();
+    }
+  });
+  it('refuses a selection containing mark tokens', () => {
+    for (const text of ['a--}b', 'x~>y', 'x~~}', 'a==}', '{++a', 'b<<}']) {
+      expect(criticToolBlocked('comment', { from: 0, to: 0, text }, text)).toMatch(/CriticMarkup/);
+    }
+  });
+  it('refuses a selection inside or across a mark, and an insertion point inside one', () => {
+    const inMark = doc.indexOf('ship');
+    expect(criticToolBlocked('comment', at(inMark, inMark + 4), doc)).toMatch(/inside or across/);
+    // 'We {~' crosses the mark's start without holding a whole token.
+    expect(criticToolBlocked('delete', at(0, doc.indexOf('{') + 2), doc)).toMatch(
+      /inside or across/
+    );
+    expect(criticToolBlocked('insert', at(inMark, inMark), doc)).toMatch(/inside or across/);
+    expect(criticToolBlocked('comment', at(inMark, inMark), doc)).toMatch(/inside or across/);
+    // Right after a mark is outside it.
+    const after = doc.indexOf(' in Q3');
+    expect(criticToolBlocked('insert', at(after, after), doc)).toBeNull();
+  });
+  it('asks for a selection to delete', () => {
+    expect(criticToolBlocked('delete', at(owners, owners), doc)).toMatch(/Select the text/);
+  });
+});
+
+describe('renderCriticSentinels in attributes and note headers', () => {
+  it('drops sentinels inside tags', () => {
+    const html = renderCriticSentinels(
+      '<a href="http://a\uE000b\uE001" title="t\uE006c\uE007">x\uE000y\uE001</a><img alt="p\uE002q\uE003">'
+    );
+    expect(html).toBe(
+      '<a href="http://ab" title="tc">x<ins class=critic-ins>y</ins></a><img alt="pq">'
+    );
+  });
+  it('heads notes with the escaped author', () => {
+    expect(renderCriticSentinels('\uE006c\uE007', '<Al & "B">')).toContain(
+      '<span class=critic-note-n>1 · &lt;Al &amp; &quot;B&quot;&gt;</span> c</span>'
+    );
   });
 });
