@@ -117,8 +117,15 @@ func (s *fakeSpawner) next(t *testing.T) *fakePTY {
 // minted by key for grantKind and grantParams against the session info.
 func mintOpen(t *testing.T, key testKey, info core.SessionInfo, kind conduitv1.StreamKind, params map[string]string, grantKind string, grantParams map[string]string) *conduitv1.StreamOpen {
 	t.Helper()
+	return mintOpenJTI(t, key, info, kind, params, grantKind, grantParams, "")
+}
+
+// mintOpenJTI is mintOpen with the grant's jti ("" for a random one).
+func mintOpenJTI(t *testing.T, key testKey, info core.SessionInfo, kind conduitv1.StreamKind, params map[string]string, grantKind string, grantParams map[string]string, jti string) *conduitv1.StreamOpen {
+	t.Helper()
 	now := time.Now().Truncate(time.Second)
 	tok, err := grant.Mint(&key.signer, grant.Claims{
+		JTI:       jti,
 		Issuer:    "scion-hub",
 		Subject:   "user:u1",
 		ProjectID: testProjectID,
@@ -207,21 +214,17 @@ func TestAgentPTYUnsupportedKind(t *testing.T) {
 }
 
 // TestAgentPTYRefusesGrantWithoutPTYCapability: the target refuses, with
-// 4403 grant_invalid and without spawning anything, a PTY stream whose
-// grant is not a valid pty grant for this session: a port-only (tcp)
-// grant, a tampered or foreign grant, or a replayed one.
+// 4403 grant_invalid and without spawning anything, a PTY stream with
+// valid params whose grant is not a valid pty grant for this session: a
+// port-only (tcp) grant, a tampered or foreign grant, or none.
 func TestAgentPTYRefusesGrantWithoutPTYCapability(t *testing.T) {
 	key := newTestKey(t, "k1")
 	other := newTestKey(t, "k2")
-	tcpParams := map[string]string{grant.ParamHost: loopbackHost, grant.ParamPort: "8080"}
 	pty := conduitv1.StreamKind_STREAM_KIND_PTY
 	tests := []struct {
 		name string
 		open func(t *testing.T, info core.SessionInfo) *conduitv1.StreamOpen
 	}{
-		{"port-only grant, tcp params", func(t *testing.T, info core.SessionInfo) *conduitv1.StreamOpen {
-			return mintOpen(t, key, info, pty, tcpParams, grant.StreamKindTCP, tcpParams)
-		}},
 		{"port-only grant, pty params", func(t *testing.T, info core.SessionInfo) *conduitv1.StreamOpen {
 			return mintOpen(t, key, info, pty, ptyParams(), grant.StreamKindTCP, ptyParams())
 		}},
@@ -305,27 +308,62 @@ func TestRequirePTYGrant(t *testing.T) {
 	}
 }
 
-// TestAgentPTYForbiddenParams: a validly granted PTY stream whose params
-// break the local policy is refused with 4403 forbidden, unspawned.
-func TestAgentPTYForbiddenParams(t *testing.T) {
+// TestAgentPTYParamRefusals: PTY params are checked before the grant.
+// A malformed or unknown param is refused with 4400 bad_frame, a session
+// other than scion with 4403 forbidden, and params that differ from the
+// grant with 4403 grant_invalid; in every case nothing is spawned and
+// the grant's jti is not consumed.
+func TestAgentPTYParamRefusals(t *testing.T) {
 	key := newTestKey(t, "k1")
+	pty := conduitv1.StreamKind_STREAM_KIND_PTY
+	with := func(k, v string) map[string]string {
+		p := ptyParams()
+		if v == "" {
+			delete(p, k)
+		} else {
+			p[k] = v
+		}
+		return p
+	}
 	tests := []struct {
-		name   string
-		params map[string]string
+		name    string
+		params  map[string]string // sent; also granted unless granted is set
+		granted map[string]string
+		code    uint32
+		reason  string
 	}{
-		{"other tmux session", map[string]string{grant.ParamCols: "80", grant.ParamRows: "24", grant.ParamSession: "other"}},
-		{"tmux target syntax", map[string]string{grant.ParamSession: "scion:0"}},
-		{"zero cols", map[string]string{grant.ParamCols: "0", grant.ParamRows: "24"}},
-		{"extra param", map[string]string{grant.ParamSession: "scion", grant.ParamPort: "22"}},
+		{"cols zero", with(grant.ParamCols, "0"), nil, core.CloseProtocolError, reasonBadFrame},
+		{"cols above 4096", with(grant.ParamCols, "4097"), nil, core.CloseProtocolError, reasonBadFrame},
+		{"rows leading zero", with(grant.ParamRows, "030"), nil, core.CloseProtocolError, reasonBadFrame},
+		{"rows signed", with(grant.ParamRows, "+30"), nil, core.CloseProtocolError, reasonBadFrame},
+		{"rows not a number", with(grant.ParamRows, "x"), nil, core.CloseProtocolError, reasonBadFrame},
+		{"session absent", with(grant.ParamSession, ""), nil, core.CloseProtocolError, reasonBadFrame},
+		{"unknown key", with("command", "sh"), nil, core.CloseProtocolError, reasonBadFrame},
+		{"tcp params", map[string]string{grant.ParamHost: loopbackHost, grant.ParamPort: "8080"}, nil, core.CloseProtocolError, reasonBadFrame},
+		{"other tmux session", with(grant.ParamSession, "other"), nil, core.CloseForbidden, reasonForbidden},
+		{"tmux target syntax", with(grant.ParamSession, "scion:0"), nil, core.CloseForbidden, reasonForbidden},
+		{"params differ from grant", with(grant.ParamCols, "101"), ptyParams(), core.CloseForbidden, reasonGrantInvalid},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			sp := newFakeSpawner()
-			s := startPTYAgent(t, key, sp, nil)
-			_, err := s.OpenStream(context.Background(), ptyOpen(t, key, s.Info(), tt.params))
-			wantRefusal(t, err, core.CloseForbidden, reasonForbidden)
+			h := newFakeHub(t, key.public)
+			a, _ := startAgent(t, h, func(o *Options) { o.SpawnPTY = sp.spawn })
+			s := h.nextSession(t)
+			granted := tt.granted
+			if granted == nil {
+				granted = tt.params
+			}
+			jti := "jti-" + t.Name()
+			open := mintOpenJTI(t, key, s.Info(), pty, tt.params, grant.StreamKindPTY, granted, jti)
+			_, err := s.OpenStream(context.Background(), open)
+			wantRefusal(t, err, tt.code, tt.reason)
 			if n := sp.calls.Load(); n != 0 {
 				t.Fatalf("spawner called %d times", n)
+			}
+			fresh, err := a.replay.Consume(context.Background(), jti, time.Now().Add(time.Minute))
+			if err != nil || !fresh {
+				t.Fatalf("jti consumed by a refused stream (fresh=%v, err=%v)", fresh, err)
 			}
 		})
 	}
@@ -348,25 +386,32 @@ func TestPTYTarget(t *testing.T) {
 		name    string
 		params  map[string]string
 		want    PTYRequest
-		wantErr bool
+		wantErr error
 	}{
-		{"full", map[string]string{"cols": "120", "rows": "40", "session": "scion"}, PTYRequest{120, 40, "scion"}, false},
-		{"defaults", nil, PTYRequest{80, 24, "scion"}, false},
-		{"max size", map[string]string{"cols": "65535", "rows": "65535"}, PTYRequest{65535, 65535, "scion"}, false},
-		{"too large", map[string]string{"cols": "65536"}, PTYRequest{}, true},
-		{"negative", map[string]string{"rows": "-1"}, PTYRequest{}, true},
-		{"non-canonical", map[string]string{"cols": "080"}, PTYRequest{}, true},
-		{"not a number", map[string]string{"rows": "x"}, PTYRequest{}, true},
-		{"other session", map[string]string{"session": "main"}, PTYRequest{}, true},
-		{"empty session", map[string]string{"session": ""}, PTYRequest{}, true},
-		{"unknown param", map[string]string{"command": "sh"}, PTYRequest{}, true},
-		{"agent_id", map[string]string{"agent_id": "a"}, PTYRequest{}, true},
+		{"full", map[string]string{"cols": "120", "rows": "40", "session": "scion"}, PTYRequest{120, 40, "scion"}, nil},
+		{"defaults", map[string]string{"session": "scion"}, PTYRequest{80, 24, "scion"}, nil},
+		{"max size", map[string]string{"cols": "4096", "rows": "4096", "session": "scion"}, PTYRequest{4096, 4096, "scion"}, nil},
+		{"min size", map[string]string{"cols": "1", "rows": "1", "session": "scion"}, PTYRequest{1, 1, "scion"}, nil},
+		{"too large", map[string]string{"cols": "4097", "session": "scion"}, PTYRequest{}, errPTYBadParams},
+		{"way too large", map[string]string{"cols": "65536", "session": "scion"}, PTYRequest{}, errPTYBadParams},
+		{"zero", map[string]string{"rows": "0", "session": "scion"}, PTYRequest{}, errPTYBadParams},
+		{"negative", map[string]string{"rows": "-1", "session": "scion"}, PTYRequest{}, errPTYBadParams},
+		{"leading zero", map[string]string{"cols": "080", "session": "scion"}, PTYRequest{}, errPTYBadParams},
+		{"empty value", map[string]string{"cols": "", "session": "scion"}, PTYRequest{}, errPTYBadParams},
+		{"not a number", map[string]string{"rows": "x", "session": "scion"}, PTYRequest{}, errPTYBadParams},
+		{"no session", map[string]string{"cols": "80", "rows": "24"}, PTYRequest{}, errPTYBadParams},
+		{"nil params", nil, PTYRequest{}, errPTYBadParams},
+		{"unknown param", map[string]string{"command": "sh", "session": "scion"}, PTYRequest{}, errPTYBadParams},
+		{"agent_id", map[string]string{"agent_id": "a", "session": "scion"}, PTYRequest{}, errPTYBadParams},
+		{"unknown param and other session", map[string]string{"command": "sh", "session": "main"}, PTYRequest{}, errPTYBadParams},
+		{"other session", map[string]string{"session": "main"}, PTYRequest{}, errPTYSession},
+		{"empty session", map[string]string{"session": ""}, PTYRequest{}, errPTYSession},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := PTYTarget(tt.params)
-			if (err != nil) != tt.wantErr || got != tt.want {
-				t.Fatalf("PTYTarget = %+v, %v; want %+v (err %v)", got, err, tt.want, tt.wantErr)
+			if got != tt.want || (tt.wantErr == nil) != (err == nil) || (tt.wantErr != nil && !errors.Is(err, tt.wantErr)) {
+				t.Fatalf("PTYTarget = %+v, %v; want %+v, %v", got, err, tt.want, tt.wantErr)
 			}
 		})
 	}
@@ -475,5 +520,64 @@ func TestAgentPTYCancelDuringOpening(t *testing.T) {
 			}
 			sp.next(t).waitClosed(t)
 		})
+	}
+}
+
+// TestAgentPTYResizeOutOfRangeDropped: a resize outside 1..4096 is
+// dropped (the pty keeps its size) and the stream stays open.
+func TestAgentPTYResizeOutOfRangeDropped(t *testing.T) {
+	key := newTestKey(t, "k1")
+	sp := newFakeSpawner()
+	s := startPTYAgent(t, key, sp, nil)
+	st, err := s.OpenStream(context.Background(), ptyOpen(t, key, s.Info(), ptyParams()))
+	if err != nil {
+		t.Fatalf("OpenStream: %v", err)
+	}
+	defer func() { _ = st.Close() }()
+	p := sp.next(t)
+	for _, bad := range []core.WindowSize{{Cols: 0, Rows: 24}, {Cols: 80, Rows: 0}, {Cols: 4097, Rows: 24}, {Cols: 80, Rows: 65535}} {
+		if err := st.Resize(bad.Cols, bad.Rows); err != nil {
+			t.Fatal(err)
+		}
+		// Resizes are delivered in order, latest wins; a valid resize after
+		// each bad one is the first the pty sees.
+		if err := st.Resize(4096, 1); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case got := <-p.resizes:
+			if got != (core.WindowSize{Cols: 4096, Rows: 1}) {
+				t.Fatalf("pty resized to %+v after out-of-range %+v", got, bad)
+			}
+		case <-time.After(waitTimeout):
+			t.Fatal("valid resize not applied")
+		}
+	}
+	if _, err := st.Write([]byte("ok")); err != nil {
+		t.Fatalf("stream closed after out-of-range resize: %v", err)
+	}
+	buf := make([]byte, 2)
+	if _, err := io.ReadFull(st, buf); err != nil || string(buf) != "ok" {
+		t.Fatalf("echo after out-of-range resize = %q, %v", buf, err)
+	}
+}
+
+// TestValidPTYSize pins the resize bounds (1..4096 each way).
+func TestValidPTYSize(t *testing.T) {
+	tests := []struct {
+		sz core.WindowSize
+		ok bool
+	}{
+		{core.WindowSize{Cols: 1, Rows: 1}, true},
+		{core.WindowSize{Cols: 4096, Rows: 4096}, true},
+		{core.WindowSize{Cols: 0, Rows: 24}, false},
+		{core.WindowSize{Cols: 80, Rows: 0}, false},
+		{core.WindowSize{Cols: 4097, Rows: 24}, false},
+		{core.WindowSize{Cols: 80, Rows: 65535}, false},
+	}
+	for _, tt := range tests {
+		if got := validPTYSize(tt.sz); got != tt.ok {
+			t.Errorf("validPTYSize(%+v) = %v, want %v", tt.sz, got, tt.ok)
+		}
 	}
 }

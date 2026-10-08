@@ -19,7 +19,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"strconv"
 	"sync"
 
 	core "github.com/GoogleCloudPlatform/scion/pkg/conduit"
@@ -32,10 +31,23 @@ import (
 // the only session the target serves.
 const DefaultPTYSession = "scion"
 
-// Default terminal size when a PTY grant names none.
+// Terminal size bounds: the default when a PTY stream names none, and
+// the largest cols/rows accepted in params and resizes.
 const (
 	defaultPTYCols = 80
 	defaultPTYRows = 24
+	maxPTYDim      = 4096
+)
+
+// reasonBadFrame refuses a PTY stream whose params are malformed.
+const reasonBadFrame = "bad_frame"
+
+// PTY param errors: errPTYBadParams is a malformed or unknown param
+// (4400 bad_frame), errPTYSession a session this target does not serve
+// (4403 forbidden).
+var (
+	errPTYBadParams = errors.New("malformed pty params")
+	errPTYSession   = errors.New("pty session not served")
 )
 
 // PTYRequest is a validated PTY stream target.
@@ -93,13 +105,21 @@ func requirePTYGrant(claims *grant.Claims) error {
 	return nil
 }
 
-// handlePTY serves a PTY stream. The order is fixed: verify the grant
-// (consuming its jti) and require the pty capability, check the params
-// against the local policy, spawn the tmux client, and only then accept.
-// If the stream left the opening state meanwhile (cancel, open timeout,
-// session loss), the spawned client and its pty are torn down before
-// returning.
+// handlePTY serves a PTY stream. The order is fixed: check the params
+// against the local policy (before the grant, so a refusal does not
+// consume its jti), verify the grant (consuming its jti) and require the
+// pty capability, spawn the tmux client, and only then accept. If the
+// stream left the opening state meanwhile (cancel, open timeout, session
+// loss), the spawned client and its pty are torn down before returning.
 func (a *Agent) handlePTY(ctx context.Context, open *conduitv1.StreamOpen, ps core.PendingStream) error {
+	req, err := PTYTarget(open.GetParams())
+	if err != nil {
+		log.Warn("Conduit: refused PTY stream %d: %v", ps.ID(), err)
+		if errors.Is(err, errPTYSession) {
+			return ps.Reject(core.CloseForbidden, reasonForbidden)
+		}
+		return ps.Reject(core.CloseProtocolError, reasonBadFrame)
+	}
 	claims, reason, err := a.verifyGrant(ctx, open)
 	if err == nil {
 		if err = requirePTYGrant(claims); err != nil {
@@ -109,11 +129,6 @@ func (a *Agent) handlePTY(ctx context.Context, open *conduitv1.StreamOpen, ps co
 	if err != nil {
 		log.Warn("Conduit: refused PTY stream %d: grant: %v", ps.ID(), err)
 		return ps.Reject(core.CloseForbidden, reason)
-	}
-	req, err := PTYTarget(open.GetParams())
-	if err != nil {
-		log.Warn("Conduit: refused PTY stream %d: %v", ps.ID(), err)
-		return ps.Reject(core.CloseForbidden, reasonForbidden)
 	}
 	p, err := a.opts.SpawnPTY(ctx, req)
 	if err != nil {
@@ -133,33 +148,64 @@ func (a *Agent) handlePTY(ctx context.Context, open *conduitv1.StreamOpen, ps co
 	return nil
 }
 
-// PTYTarget validates the (already grant-verified) PTY params: only
-// cols, rows and session are allowed; cols and rows, when present, are
-// canonical integers in 1..65535 (default 80x24); session, when present,
-// must be DefaultPTYSession.
+// PTYTarget validates PTY params (contracts §2). The keys must be
+// exactly cols, rows and session, except that cols and rows may be
+// absent (default 80x24); cols and rows are canonical base-10 integers
+// in 1..4096 (errPTYBadParams otherwise); session must be
+// DefaultPTYSession (errPTYSession otherwise). The grant compares the
+// params as sent; the defaults never take part in that.
 func PTYTarget(params map[string]string) (PTYRequest, error) {
-	req := PTYRequest{Cols: defaultPTYCols, Rows: defaultPTYRows, Session: DefaultPTYSession}
+	req := PTYRequest{Cols: defaultPTYCols, Rows: defaultPTYRows}
+	session, ok := params[grant.ParamSession]
+	if !ok {
+		return PTYRequest{}, fmt.Errorf("%w: no session", errPTYBadParams)
+	}
 	for k, v := range params {
 		switch k {
 		case grant.ParamCols, grant.ParamRows:
-			n, err := strconv.Atoi(v)
-			if err != nil || n < 1 || n > 0xFFFF || strconv.Itoa(n) != v {
-				return PTYRequest{}, fmt.Errorf("invalid pty %s %q", k, v)
+			n, ok := ptyDim(v)
+			if !ok {
+				return PTYRequest{}, fmt.Errorf("%w: %s %q", errPTYBadParams, k, v)
 			}
 			if k == grant.ParamCols {
-				req.Cols = uint16(n)
+				req.Cols = n
 			} else {
-				req.Rows = uint16(n)
+				req.Rows = n
 			}
 		case grant.ParamSession:
-			if v != DefaultPTYSession {
-				return PTYRequest{}, fmt.Errorf("pty session %q is not served", v)
-			}
 		default:
-			return PTYRequest{}, fmt.Errorf("unexpected pty param %q", k)
+			return PTYRequest{}, fmt.Errorf("%w: unexpected param %q", errPTYBadParams, k)
 		}
 	}
+	if session != DefaultPTYSession {
+		return PTYRequest{}, fmt.Errorf("%w: %q", errPTYSession, session)
+	}
+	req.Session = session
 	return req, nil
+}
+
+// ptyDim parses a cols or rows value: base-10 digits, no sign or
+// leading zero, in 1..maxPTYDim.
+func ptyDim(v string) (uint16, bool) {
+	if v == "" || len(v) > 4 || v[0] == '0' {
+		return 0, false
+	}
+	n := 0
+	for _, c := range v {
+		if c < '0' || c > '9' {
+			return 0, false
+		}
+		n = n*10 + int(c-'0')
+	}
+	if n > maxPTYDim {
+		return 0, false
+	}
+	return uint16(n), true
+}
+
+// validPTYSize reports whether a resize is within 1..maxPTYDim.
+func validPTYSize(sz core.WindowSize) bool {
+	return sz.Cols >= 1 && sz.Cols <= maxPTYDim && sz.Rows >= 1 && sz.Rows <= maxPTYDim
 }
 
 // servePTY copies between the stream and the pty and applies resizes,
@@ -185,6 +231,10 @@ func servePTY(ctx context.Context, st core.Stream, p PTYProcess) {
 		go func() {
 			defer wg.Done()
 			for sz := range rs.Resizes() {
+				if !validPTYSize(sz) {
+					log.Warn("Conduit: dropped out-of-range PTY resize %dx%d", sz.Cols, sz.Rows)
+					continue
+				}
 				if err := p.Resize(sz.Cols, sz.Rows); err != nil && !errors.Is(err, errPTYClosed) {
 					log.Debug("Conduit: PTY resize: %v", err)
 				}
