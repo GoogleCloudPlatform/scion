@@ -210,6 +210,11 @@ func (s *Server) applyGCPIAMSettingsLocked(next gcpIAMSettings) bool {
 	}
 	s.saAssignCheckMode = next.CheckMode
 	s.hookIdentityCheckMode = next.CheckMode
+	if next.CheckMode != SAAssignCheckEnforce {
+		// The diagnostic describes the enforced check only; drop it so an
+		// old record does not reappear if enforcement is turned back on.
+		s.saAssignCheckDiag.Store(nil)
+	}
 	s.denyUnknownFailOpen.Store(next.DenyUnknownFailOpen)
 	slog.Info("GCP caller-permission settings applied",
 		"check_mode", next.CheckMode, "deny_unknown_policy", next.denyUnknownPolicy(),

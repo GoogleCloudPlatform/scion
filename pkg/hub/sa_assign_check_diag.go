@@ -17,10 +17,9 @@ package hub
 import (
 	"time"
 
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-
-	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // saAssignCheckDiagCause is the cause recorded when the service account
@@ -59,23 +58,55 @@ type HealthSummarySACheck struct {
 	LastSeen time.Time `json:"last_seen"`
 }
 
-// noteSAAssignCheckResult updates the admin diagnostic from one run of the
-// assignment check. A permission-denied error from the check's API call
-// records the diagnostic; a verdict from the checker clears it. Any other
-// outcome leaves it as it was. This only reports; the assignment decision is
-// made by the caller and is unaffected.
-func (s *Server) noteSAAssignCheckResult(result store.ActAsResult, err error) {
+// NoteSAAssignCheckCall updates the admin diagnostic from one Policy
+// Troubleshooter API call the checker actually made; register it with
+// PolicyTroubleshooterChecker.SetCallObserver below any result cache, so
+// cached answers neither record nor clear. A permission-denied error records
+// the diagnostic, unless it says the API is disabled for the project, where
+// granting the hub's identity access would not help. A successful call clears
+// it. Any other error leaves it as it was. Nothing is recorded while the
+// check is not enforced. This only reports; the assignment decision is made
+// elsewhere and is unaffected.
+func (s *Server) NoteSAAssignCheckCall(err error) {
 	switch {
-	case err != nil && status.Code(err) == codes.PermissionDenied:
-		now := time.Now().UTC()
-		next := &saAssignCheckDiagnostic{since: now, last: now}
-		if prev := s.saAssignCheckDiag.Load(); prev != nil {
-			next.since = prev.since
-		}
-		s.saAssignCheckDiag.Store(next)
-	case err == nil && result.Mechanism == MechanismPolicyTroubleshooter:
+	case err == nil:
 		s.saAssignCheckDiag.Store(nil)
+	case status.Code(err) == codes.PermissionDenied && !apiServiceDisabled(err):
+		// Hold the read lock so a mode change, which clears the diagnostic
+		// under the write lock, cannot interleave with this record.
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+		if s.saAssignCheckMode != SAAssignCheckEnforce {
+			return
+		}
+		now := time.Now().UTC()
+		for {
+			prev := s.saAssignCheckDiag.Load()
+			next := &saAssignCheckDiagnostic{since: now, last: now}
+			if prev != nil {
+				next.since = prev.since
+			}
+			if s.saAssignCheckDiag.CompareAndSwap(prev, next) {
+				return
+			}
+		}
 	}
+}
+
+// apiServiceDisabled reports whether err says the called API is disabled for
+// the project, which Google APIs signal with an ErrorInfo detail whose
+// reason is SERVICE_DISABLED.
+func apiServiceDisabled(err error) bool {
+	st, ok := status.FromError(err)
+	if !ok {
+		return false
+	}
+	for _, d := range st.Details() {
+		if info, ok := d.(*errdetails.ErrorInfo); ok && info.GetReason() == "SERVICE_DISABLED" {
+			return true
+		}
+	}
+	return false
 }
 
 // healthSummarySACheck returns the diagnostic section for the admin health

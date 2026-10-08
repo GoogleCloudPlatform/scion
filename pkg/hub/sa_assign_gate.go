@@ -466,7 +466,6 @@ func (s *Server) evaluateSAAssignment(ctx context.Context, r *http.Request, sa *
 		Surface: surface,
 		Audit:   s.GetAuditLogger(),
 	}, sa)
-	s.noteSAAssignCheckResult(result, err)
 	if err != nil {
 		// Per the interface contract an error is a transport or programming
 		// failure and carries no verdict; EvaluateActAs has already forced the

@@ -22,11 +22,15 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	policytroubleshooterpb "cloud.google.com/go/policytroubleshooter/iam/apiv3/iampb"
+	"github.com/googleapis/gax-go/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -40,15 +44,40 @@ import (
 const saCheckEndUserMsg = "Could not verify your permission to use this GCP service " +
 	"account because the check did not complete; try again"
 
+// countingPTClient counts the Policy Troubleshooter calls that reach pt.
+type countingPTClient struct {
+	*fakePTClient
+	calls int
+}
+
+func (c *countingPTClient) TroubleshootIamPolicy(
+	ctx context.Context,
+	req *policytroubleshooterpb.TroubleshootIamPolicyRequest,
+	opts ...gax.CallOption,
+) (*policytroubleshooterpb.TroubleshootIamPolicyResponse, error) {
+	c.calls++
+	return c.fakePTClient.TroubleshootIamPolicy(ctx, req, opts...)
+}
+
 // saCheckDiagServer returns a create-ready server enforcing the assignment
-// check through a Policy Troubleshooter checker backed by pt.
+// check through a cached Policy Troubleshooter checker backed by pt, wired
+// to the diagnostic the same way the server command wires it.
 func saCheckDiagServer(t *testing.T, pt *fakePTClient) (*Server, *store.GCPServiceAccount, string) {
+	t.Helper()
+	srv, sa, projectID, _ := saCheckDiagServerCounting(t, pt)
+	return srv, sa, projectID
+}
+
+func saCheckDiagServerCounting(t *testing.T, pt *fakePTClient) (*Server, *store.GCPServiceAccount, string, *countingPTClient) {
 	t.Helper()
 	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
 	srv, s, project := setupCreateAgentServer(t, disp)
-	enforceSAAssign(srv, NewPolicyTroubleshooterChecker(pt, "hub@test.iam.gserviceaccount.com", false))
+	counting := &countingPTClient{fakePTClient: pt}
+	checker := NewPolicyTroubleshooterChecker(counting, "hub@test.iam.gserviceaccount.com", false)
+	checker.SetCallObserver(srv.NoteSAAssignCheckCall)
+	enforceSAAssign(srv, NewCachedCallerPermissionChecker(checker, time.Minute, time.Minute))
 	sa := wiringSA(t, s, store.ScopeProject, project.ID, "diag-target@p.iam.gserviceaccount.com")
-	return srv, sa, project.ID
+	return srv, sa, project.ID, counting
 }
 
 func createWithSA(t *testing.T, srv *Server, projectID, name string, sa *store.GCPServiceAccount) *httptest.ResponseRecorder {
@@ -183,4 +212,108 @@ func TestSACheckDiag_HiddenWhenCheckNotEnforced(t *testing.T) {
 	srv.saAssignCheckMode = SAAssignCheckOff
 	srv.mu.Unlock()
 	assert.Nil(t, adminHealthSummary(t, srv).ServiceAccountCheck)
+}
+
+func TestSACheckDiag_CachedResultNeitherClearsNorRecords(t *testing.T) {
+	pt := &fakePTClient{resp: &policytroubleshooterpb.TroubleshootIamPolicyResponse{
+		OverallAccessState: policytroubleshooterpb.TroubleshootIamPolicyResponse_CAN_ACCESS,
+	}}
+	srv, sa, projectID, counting := saCheckDiagServerCounting(t, pt)
+	other := wiringSA(t, srv.store, store.ScopeProject, projectID, "diag-other@p.iam.gserviceaccount.com")
+
+	require.Equal(t, http.StatusCreated, createWithSA(t, srv, projectID, "diag-cache-1", sa).Code)
+	require.Equal(t, 1, counting.calls)
+
+	// The API now refuses the hub, but the allow for sa is cached: no call,
+	// so nothing is recorded.
+	pt.resp = nil
+	pt.err = status.Error(codes.PermissionDenied, "caller lacks access")
+	require.Equal(t, http.StatusCreated, createWithSA(t, srv, projectID, "diag-cache-2", sa).Code)
+	require.Equal(t, 1, counting.calls, "expected a cache hit")
+	assert.Nil(t, adminHealthSummary(t, srv).ServiceAccountCheck, "a cache hit must not record")
+
+	// A real call for another account records the diagnostic.
+	require.Equal(t, http.StatusForbidden, createWithSA(t, srv, projectID, "diag-cache-3", other).Code)
+	require.Equal(t, 2, counting.calls)
+	require.NotNil(t, adminHealthSummary(t, srv).ServiceAccountCheck)
+
+	// Another cache hit for sa must leave it in place.
+	require.Equal(t, http.StatusCreated, createWithSA(t, srv, projectID, "diag-cache-4", sa).Code)
+	require.Equal(t, 2, counting.calls, "expected a cache hit")
+	assert.NotNil(t, adminHealthSummary(t, srv).ServiceAccountCheck, "a cache hit must not clear")
+}
+
+func TestSACheckDiag_APIDisabledDoesNotRecord(t *testing.T) {
+	st, err := status.New(codes.PermissionDenied, "API has not been used or is disabled").
+		WithDetails(&errdetails.ErrorInfo{Reason: "SERVICE_DISABLED", Domain: "googleapis.com"})
+	require.NoError(t, err)
+	pt := &fakePTClient{err: st.Err()}
+	srv, sa, projectID := saCheckDiagServer(t, pt)
+
+	rec := createWithSA(t, srv, projectID, "diag-disabled", sa)
+	require.Equal(t, http.StatusForbidden, rec.Code, "assignment is still denied")
+	assert.Equal(t, saCheckEndUserMsg, saCheckErrorMessage(t, rec))
+	assert.Nil(t, adminHealthSummary(t, srv).ServiceAccountCheck)
+}
+
+func TestSACheckDiag_ClearedWhenModeLeavesEnforce(t *testing.T) {
+	pt := &fakePTClient{err: status.Error(codes.PermissionDenied, "caller lacks access")}
+	srv, sa, projectID := saCheckDiagServer(t, pt)
+
+	require.Equal(t, http.StatusForbidden, createWithSA(t, srv, projectID, "diag-reenable", sa).Code)
+	require.NotNil(t, adminHealthSummary(t, srv).ServiceAccountCheck)
+
+	srv.mu.Lock()
+	srv.applyGCPIAMSettingsLocked(gcpIAMSettings{CheckMode: SAAssignCheckOff})
+	srv.mu.Unlock()
+	srv.mu.Lock()
+	srv.applyGCPIAMSettingsLocked(gcpIAMSettings{CheckMode: SAAssignCheckEnforce})
+	srv.mu.Unlock()
+
+	assert.Nil(t, adminHealthSummary(t, srv).ServiceAccountCheck,
+		"an old record must not reappear when enforcement is turned back on")
+}
+
+func TestSACheckDiag_NotRecordedWhenNotEnforced(t *testing.T) {
+	pt := &fakePTClient{}
+	srv, _, _ := saCheckDiagServer(t, pt)
+	srv.mu.Lock()
+	srv.saAssignCheckMode = SAAssignCheckOff
+	srv.mu.Unlock()
+
+	srv.NoteSAAssignCheckCall(status.Error(codes.PermissionDenied, "caller lacks access"))
+	assert.Nil(t, srv.saAssignCheckDiag.Load())
+}
+
+// Concurrent records must agree on one first-seen time: a record that
+// raced another must not replace the time the first one set.
+func TestSACheckDiag_ConcurrentRecordsKeepFirstSeen(t *testing.T) {
+	pt := &fakePTClient{}
+	srv, _, _ := saCheckDiagServer(t, pt)
+	denied := status.Error(codes.PermissionDenied, "caller lacks access")
+
+	const rounds, workers = 2000, 8
+	for round := 0; round < rounds; round++ {
+		srv.saAssignCheckDiag.Store(nil)
+		seen := make([]time.Time, workers)
+		var start, done sync.WaitGroup
+		start.Add(1)
+		for w := 0; w < workers; w++ {
+			done.Add(1)
+			go func(w int) {
+				defer done.Done()
+				start.Wait()
+				srv.NoteSAAssignCheckCall(denied)
+				seen[w] = srv.saAssignCheckDiag.Load().since
+			}(w)
+		}
+		start.Done()
+		done.Wait()
+		final := srv.saAssignCheckDiag.Load().since
+		for w, got := range seen {
+			if !got.Equal(final) {
+				t.Fatalf("round %d worker %d saw first-seen %v, final is %v", round, w, got, final)
+			}
+		}
+	}
 }

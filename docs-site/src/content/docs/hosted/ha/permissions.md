@@ -152,9 +152,9 @@ For Policy Troubleshooter to evaluate a caller's IAM permission across the organ
 
 ### Hub Identity Access for the Assignment Check
 
-With `gcp_iam_check_mode: enforce`, the Hub calls the Policy Troubleshooter API as its own identity for every assignment check. The Hub's identity needs access to run that call against the project or organization that holds each target service account. Grant it the access described in [IAM Prerequisites for Enforcement](#iam-prerequisites-for-enforcement) (and step 2e of the [GCP setup guide](/scion/hosted/ha/setup-gcp/)). Until it has that access, service account assignment is denied.
+The Hub's identity needs access to run the Policy Troubleshooter check against the project or organization that holds each target service account. Until it has that access, service account assignment is denied.
 
-When the check cannot run because the Hub's identity was refused, the admin health summary (`GET /api/v1/admin/health/summary`) includes a `service_account_check` section that names the cause, the remedy, and a link to this section. The section clears once the check runs again. Users requesting an assignment see the usual message that the check did not complete.
+If the check cannot run because of the Hub's identity, the admin health summary (`GET /api/v1/admin/health/summary`) reports it in a `service_account_check` section.
 
 ### Start-Time Admissibility Check
 
