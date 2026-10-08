@@ -187,6 +187,15 @@ export class ScionPageAgentCreate extends LitElement {
    * must say so rather than just naming "the project's own default".
    */
   @state() private projectGCPIdentityDefaultMode = '';
+  /**
+   * True when loadGCPServiceAccounts actually applied this project's default
+   * to defaultGcpMetadataMode (a block or passthrough default, or an assign
+   * default whose account is in the verified list). False when there is no
+   * project default, or when one exists but the form cannot apply it (for
+   * example an assign default naming an account the form did not load): the
+   * displayed mode is then only this page's placeholder, not the outcome.
+   */
+  @state() private projectGCPIdentityDefaultApplied = false;
 
   // ── Additional Options > Prompts Tab ────────────────────────────────
   @state() private systemPrompt = '';
@@ -268,17 +277,17 @@ export class ScionPageAgentCreate extends LitElement {
   }
 
   /**
-   * True when the user has not chosen a GCP identity mode and this project
-   * has no default of its own, on any target runtime. The request then omits
-   * gcp_identity and the server resolves the mode from the hub default, so
-   * the page has no value it can show as the outcome: the picker renders
-   * blank instead of this page's own placeholder. That also makes any pick,
-   * including the placeholder's value, a real sl-change that sets
+   * True when the user has not chosen a GCP identity mode and no project
+   * default was applied to the display (projectGCPIdentityDefaultApplied),
+   * on any target runtime. The request then omits gcp_identity, and the
+   * hint reads: "No mode chosen: the server applies this project's per-profile or project default, then the hub-wide default, then the runtime default." The page cannot show that outcome, so the picker
+   * renders blank instead of this page's own placeholder. That also makes
+   * any pick, including the placeholder's value, a real sl-change that sets
    * gcpIdentityUserSet. Unlike blockDefaultNeedsExplicitChoice this does not
    * block submit: creating with nothing chosen is allowed.
    */
   private get noIdentityModeChosen(): boolean {
-    return !this.gcpIdentityUserSet && !this.projectGCPIdentityDefaultMode;
+    return !this.gcpIdentityUserSet && !this.projectGCPIdentityDefaultApplied;
   }
 
   /**
@@ -1047,6 +1056,7 @@ export class ScionPageAgentCreate extends LitElement {
     this.gcpIdentityUserSet = false;
     this.gcpUserBlockSuspended = false;
     this.projectGCPIdentityDefaultMode = '';
+    this.projectGCPIdentityDefaultApplied = false;
 
     if (projectId) {
       let accounts: GCPServiceAccount[] = [];
@@ -1085,6 +1095,7 @@ export class ScionPageAgentCreate extends LitElement {
           if (match) {
             this.defaultGcpMetadataMode = 'assign';
             this.defaultGcpServiceAccountId = match.id;
+            this.projectGCPIdentityDefaultApplied = true;
             if (applyToCurrent) {
               this.gcpMetadataMode = 'assign';
               this.gcpServiceAccountId = match.id;
@@ -1092,6 +1103,7 @@ export class ScionPageAgentCreate extends LitElement {
           }
         } else if (mode === 'passthrough' || mode === 'block') {
           this.defaultGcpMetadataMode = mode;
+          this.projectGCPIdentityDefaultApplied = true;
           if (applyToCurrent) {
             this.gcpMetadataMode = mode;
           }
@@ -1360,8 +1372,8 @@ export class ScionPageAgentCreate extends LitElement {
       // request omits gcp_identity, so the server resolves it from its own
       // precedence (per-profile and project defaults, then hub default, then
       // unset) instead of the form pinning the identity mode client-side.
-      // The displayed mode is the project default for context, or blank when
-      // there is none (noIdentityModeChosen), not a user choice.
+      // The displayed mode is the applied project default for context, or
+      // blank when none was applied (noIdentityModeChosen), not a user choice.
       if (!this.gcpIdentityUserSet) {
         // omit body.gcp_identity
       } else if (this.gcpMetadataMode === 'assign' && this.gcpServiceAccountId) {
@@ -2103,9 +2115,7 @@ export class ScionPageAgentCreate extends LitElement {
           ${this.blockDefaultNeedsExplicitChoice
             ? 'No GCP identity is selected yet.'
             : this.noIdentityModeChosen
-              ? this.targetRuntimeIsKubernetesOnly
-                ? '' // kubernetesIdentityHintSuffix below explains the untouched case
-                : 'No mode chosen: the hub-wide default applies, or Block if none is configured.'
+              ? "No mode chosen: the server applies this project's per-profile or project default, then the hub-wide default, then the runtime default."
               : this.gcpMetadataMode === 'block'
                 ? 'Prevents the agent from accessing any GCP identity. Token requests are denied.'
                 : this.gcpMetadataMode === 'assign'

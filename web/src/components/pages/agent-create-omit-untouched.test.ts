@@ -54,6 +54,8 @@ interface CreatePrivate extends HTMLElement {
 }
 
 let projectDefaultMode = '';
+/** The account an assign project default names; 'sa-a' is the verified one. */
+let projectDefaultAccount = 'sa-a';
 let hubTelemetry = false;
 let bodies: Array<Record<string, unknown>> = [];
 
@@ -97,7 +99,10 @@ function stubFetch(): void {
         body = !projectDefaultMode
           ? {}
           : projectDefaultMode === 'assign'
-            ? { defaultGCPIdentityMode: 'assign', defaultGCPIdentityServiceAccountID: 'sa-a' }
+            ? {
+                defaultGCPIdentityMode: 'assign',
+                defaultGCPIdentityServiceAccountID: projectDefaultAccount,
+              }
             : { defaultGCPIdentityMode: projectDefaultMode };
       } else if (url.includes('/gcp-service-accounts')) {
         body = { items: [verifiedServiceAccount] };
@@ -115,6 +120,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
   document.body.innerHTML = '';
   projectDefaultMode = '';
+  projectDefaultAccount = 'sa-a';
   hubTelemetry = false;
 });
 
@@ -298,20 +304,28 @@ describe('Create Agent: gcp_identity is sent only when the user chose it', () =>
     });
   }
 
-  it('names the hub-wide default in the hint with no project default on a docker broker', async () => {
-    const c = await mount();
-    await selectTarget(c, dockerTarget);
-    expect(gcpIdentityHint(c)).toBe(
-      'No mode chosen: the hub-wide default applies, or Block if none is configured.'
-    );
-  });
+  const noModeHint =
+    "No mode chosen: the server applies this project's per-profile or project default, " +
+    'then the hub-wide default, then the runtime default.';
 
-  // The picker is blank, so picking Block (this page's own internal
-  // placeholder value) is a real change and is sent explicitly.
+  for (const t of targets) {
+    it(`shows the same no-mode hint with no project default, on ${t.label}`, async () => {
+      const c = await mount();
+      await selectTarget(c, t);
+      // Kubernetes-only targets append their own suffix after it.
+      expect(gcpIdentityHint(c).startsWith(noModeHint)).toBe(true);
+      expect(gcpIdentityHint(c)).not.toContain('Prevents the agent');
+    });
+  }
+
+  // Asserting the blank picker first is what pins the fix: under happy-dom
+  // Shoelace is not registered, so sl-change fires even for an unchanged
+  // value, and the pick alone would pass with Block already shown.
   it('sends Block when the user picks it with no project default on a docker broker', async () => {
     const c = await mount();
     await selectTarget(c, dockerTarget);
     expect(c.gcpMetadataMode).toBe('block');
+    expect(gcpIdentitySelect(c).value).toBe('');
 
     await chooseIdentity(c, 'block');
     expect(c.gcpIdentityUserSet).toBe(true);
@@ -325,11 +339,32 @@ describe('Create Agent: gcp_identity is sent only when the user chose it', () =>
     const c = await mount();
     await selectTarget(c, k8sTarget);
     expect(c.gcpMetadataMode).toBe('passthrough');
+    expect(gcpIdentitySelect(c).value).toBe('');
 
     await chooseIdentity(c, 'passthrough');
 
     const body = await submit(c);
     expect(body.gcp_identity).toEqual({ metadata_mode: 'passthrough' });
+  });
+
+  // An assign default naming an account the form did not load is not
+  // applied: the page's own Block placeholder is not the outcome, so the
+  // picker renders blank with the no-mode hint, and picking Block sends it.
+  it('renders the picker blank for an assign default the form cannot apply, and sends a picked Block, on a docker broker', async () => {
+    projectDefaultMode = 'assign';
+    projectDefaultAccount = 'sa-missing';
+    const c = await mount();
+    await selectTarget(c, dockerTarget);
+    expect(c.gcpMetadataMode).toBe('block');
+    expect(c.gcpIdentityUserSet).toBe(false);
+    expect(gcpIdentitySelect(c).value).toBe('');
+    expect(gcpIdentityHint(c)).toBe(noModeHint);
+
+    await chooseIdentity(c, 'block');
+    expect(gcpIdentitySelect(c).value).toBe('block');
+
+    const body = await submit(c);
+    expect(body.gcp_identity).toEqual({ metadata_mode: 'block' });
   });
 
   for (const mode of ['block', 'passthrough']) {

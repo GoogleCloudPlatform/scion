@@ -1537,10 +1537,11 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
   });
 
   // The display-only Kubernetes substitution (block -> passthrough) must be
-  // reversed when the target later becomes non-Kubernetes again — otherwise
-  // the picker keeps showing a "passthrough" nobody chose instead of the
-  // component's own "block" placeholder (there is no project default
-  // configured). Untouched, submit omits gcp_identity either way.
+  // reversed when the target later becomes non-Kubernetes again: the
+  // internal mode must return to the component's own "block" placeholder
+  // (there is no project default configured, so the picker itself renders
+  // blank: noIdentityModeChosen). Untouched, submit omits gcp_identity
+  // either way.
   it('restores block after switching from a Kubernetes broker back to docker, with no project default', async () => {
     const tracker = stubFetchCapturingCreateRequests();
     const el = await mountAgentCreate();
@@ -1573,6 +1574,7 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
     await el.updateComplete;
 
     expect(page.gcpMetadataMode).toBe('block');
+    expect((gcpIdentitySelect(el) as HTMLElement & { value: string }).value).toBe('');
 
     await page.handleSubmit(new Event('submit'));
     expect(tracker.bodies).toHaveLength(1);
@@ -1611,7 +1613,8 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
 
   // Profile-only variant: the same restoration must happen when only the
   // profile changes on a mixed broker (Kubernetes profile -> docker
-  // profile), not just on a broker switch.
+  // profile), not just on a broker switch. The picker renders blank here
+  // too, so the assertions are on the internal mode.
   it('restores block when only the profile changes back to a non-Kubernetes one on a mixed broker', async () => {
     const tracker = stubFetchCapturingCreateRequests();
     const el = await mountAgentCreate();
@@ -1642,6 +1645,7 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
     await el.updateComplete;
 
     expect(page.gcpMetadataMode).toBe('block');
+    expect((gcpIdentitySelect(el) as HTMLElement & { value: string }).value).toBe('');
 
     await page.handleSubmit(new Event('submit'));
     expect(tracker.bodies).toHaveLength(1);
