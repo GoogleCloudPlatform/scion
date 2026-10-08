@@ -2069,13 +2069,6 @@ export class TerminalWorkspaceRoot {
       .terminal-bulk-action-wrap {
         display: inline-flex;
       }
-      /* Shoelace's default tooltip colours resolve to the same neutral in
-         the dark theme, so set them from the theme's text and background;
-         see ptone/scion#3715. */
-      .terminal-bulk-tooltip {
-        --sl-tooltip-background-color: var(--scion-text, #1e293b);
-        --sl-tooltip-color: var(--scion-bg, #f8fafc);
-      }
       .terminal-rail-list {
         flex: 1;
         min-height: 0;
