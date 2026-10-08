@@ -99,7 +99,14 @@ func TestQueuedStop_SupersedingStartClearSkipsDeleteWonRow(t *testing.T) {
 			f.srv.store = ws
 
 			code, body := lifecycle(t, f, a.ID, "start")
-			require.Equal(t, 200, code, body)
+			if tc.cleared {
+				require.Equal(t, 200, code, body)
+			} else {
+				// The start's final read sees the delete that won the row.
+				require.Equal(t, 409, code, body)
+				errCode, _ := errorDetails(body)
+				require.Equal(t, "delete_in_progress", errCode)
+			}
 			if tc.delete != nil {
 				require.True(t, ws.fired, "the delete ran between the start's release and the clear")
 				require.NotNil(t, afterDelete)
