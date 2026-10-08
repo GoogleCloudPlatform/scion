@@ -694,7 +694,10 @@ func TestScheduledEvent_FederatedUserAllowed(t *testing.T) {
 		assert.Equal(t, http.StatusOK, rec.Code)
 	})
 
-	t.Run("create allowed", func(t *testing.T) {
+	// The create passes the access check and reaches the revision ceiling,
+	// which a federated credential cannot supply: the write is refused by
+	// the delegation ceiling, not by the access check, and nothing is stored.
+	t.Run("create reaches the revision ceiling", func(t *testing.T) {
 		req := CreateScheduledEventRequest{
 			EventType: "message",
 			FireIn:    "30m",
@@ -702,7 +705,11 @@ func TestScheduledEvent_FederatedUserAllowed(t *testing.T) {
 			Message:   "Hello from federated user",
 		}
 		rec := doScheduledEventUserRequest(t, srv, fedUser, http.MethodPost, projectID, "", req)
-		assert.Equal(t, http.StatusCreated, rec.Code)
+		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), string(DeniedByDelegationCeiling))
+		res, err := s.ListScheduledEvents(ctx, store.ScheduledEventFilter{ProjectID: projectID}, store.ListOptions{})
+		require.NoError(t, err)
+		assert.Empty(t, res.Items)
 	})
 }
 

@@ -4362,18 +4362,33 @@ type MessageEventPayload struct {
 	Plain     bool   `json:"plain,omitempty"`
 }
 
-// errScheduledMessageRefused is the one public refusal a scheduled message
-// records when its target cannot be resolved or fire-time authorization
-// refuses it. The specific cause is logged, never stored on the event.
+// errScheduledMessageRefused is the public refusal a scheduled message
+// records when its authority is denied, its target cannot be resolved or
+// fire-time authorization refuses it. The specific cause is logged, never
+// stored on the event. scheduledMessageRefusal names the one exception.
 var errScheduledMessageRefused = errors.New("scheduled_message_denied: message delivery refused")
+
+// scheduledMessageRefusal returns the error a refused scheduled message
+// records on the event for the authority error err: the remedy text of
+// errScheduledAuthorityUnrecorded when the event carries no recorded
+// authority (a property of the event alone, decided before the target is
+// looked up), otherwise errScheduledMessageRefused.
+func scheduledMessageRefusal(err error) error {
+	if errors.Is(err, errScheduledAuthorityUnrecorded) {
+		return errScheduledAuthorityUnrecorded
+	}
+	return errScheduledMessageRefused
+}
 
 // messageEventHandler returns an EventHandler that dispatches scheduled messages
 // to agents via the AgentDispatcher.
 //
-// C1 containment: this handler now performs fire-time authorization via
-// authorizeScheduledMessageFire before any dispatch. Scheduled messages are
-// request-derived (not system-plane) and must pass the production
-// authorizeAgentMessage choke point with isSystemPlane=false.
+// Each fire runs under the event's authorization revision: the authority
+// is resolved (resolveScheduledAuthority) before the target is looked up,
+// and authorizeScheduledMessageFire then decides the send for the resolved
+// identity before any dispatch. Scheduled messages are request-derived (not
+// system-plane) and pass the production authorizeAgentMessage choke point
+// with isSystemPlane=false. CreatedBy is never read for authority.
 func (s *Server) messageEventHandler() EventHandler {
 	return func(ctx context.Context, evt store.ScheduledEvent) error {
 		var payload MessageEventPayload
@@ -4401,16 +4416,30 @@ func (s *Server) messageEventHandler() EventHandler {
 		if targetName == "" {
 			targetName = payload.AgentID
 		}
+		if payload.AgentID == "" && (payload.AgentName == "" || evt.ProjectID == "") {
+			return fmt.Errorf("message payload must include agentId or agentName")
+		}
+
+		// Resolve the authority of the event's authorization revision. A
+		// denial fails the fire before the target is looked up, so its
+		// outcome does not depend on the target.
+		auth, identity, err := s.resolveScheduledAuthority(ctx, evt)
+		if err != nil {
+			slog.Warn("Scheduler: scheduled message authority denied at fire time",
+				"eventID", evt.ID,
+				"scheduleID", evt.ScheduleID,
+				"projectID", evt.ProjectID,
+				"authorization_revision", evt.AuthorizationRevision,
+				"error", err)
+			return scheduledMessageRefusal(err)
+		}
 
 		// Resolve the agent
 		var agent *store.Agent
-		var err error
 		if payload.AgentID != "" {
 			agent, err = s.store.GetAgent(ctx, payload.AgentID)
-		} else if payload.AgentName != "" && evt.ProjectID != "" {
-			agent, err = s.store.GetAgentBySlug(ctx, evt.ProjectID, payload.AgentName)
 		} else {
-			return fmt.Errorf("message payload must include agentId or agentName")
+			agent, err = s.store.GetAgentBySlug(ctx, evt.ProjectID, payload.AgentName)
 		}
 		if err != nil {
 			// The returned error is persisted as ScheduledEvent.Error, which
@@ -4435,18 +4464,20 @@ func (s *Server) messageEventHandler() EventHandler {
 			return errScheduledMessageRefused
 		}
 
-		// ---- C1 containment: fire-time authorization ----
-		// Re-resolve the creator identity and authorize the message through
-		// the production choke point (authorizeAgentMessage, isSystemPlane=false).
-		// Denial returns an error — the enclosing scheduler wrapper owns
-		// status recording. No external effect occurs on denial.
-		_, authErr := s.authorizeScheduledMessageFire(ctx, evt, agent)
-		if authErr != nil {
+		// ---- Fire-time authorization ----
+		// Authorize the send for the revision's identity through the
+		// production choke point (authorizeAgentMessage,
+		// isSystemPlane=false). Denial returns an error — the enclosing
+		// scheduler wrapper owns status recording. No external effect
+		// occurs on denial.
+		if authErr := s.authorizeScheduledMessageFire(ctx, evt, auth, identity, agent); authErr != nil {
 			slog.Warn("Scheduler: scheduled message refused at fire time",
 				"eventID", evt.ID,
 				"agent_id", agent.ID,
 				"projectID", evt.ProjectID,
-				"creator", evt.CreatedBy,
+				"principal_kind", auth.PrincipalKind,
+				"principal_id", auth.PrincipalID,
+				"authorization_revision", auth.Revision,
 				"error", authErr)
 			return errScheduledMessageRefused
 		}
@@ -4501,17 +4532,16 @@ func (s *Server) messageEventHandler() EventHandler {
 		if err := dispatchWithBrokerRetry(retryCtx, dispatcher, agent, payload.Message, payload.Interrupt, structuredMsg); err != nil {
 			return fmt.Errorf("failed to dispatch message to agent %s: %w", agent.Name, err)
 		}
-		// Log the recorded initiator alongside the executor context set by
-		// the caller (fireEvent / executeSchedule), so a scheduled message is
-		// distinguishable in logs from a live send without changing the live
-		// authorization identity above (cutover rule).
-		initiator := s.scheduledInitiator(evt.InitiatorAttribution)
+		// Log the revision authority the send ran under alongside the
+		// executor context set by the caller (fireEvent / executeSchedule),
+		// so a scheduled message is distinguishable in logs from a live send.
 		executor, _ := ExecutorContextFromContext(ctx)
 		slog.Info("Scheduler: message delivered to agent",
 			"eventID", evt.ID, "agent_id", agent.ID, "agentName", agent.Name,
-			"initiator_principal_kind", initiator.PrincipalKind,
-			"initiator_credential_kind", initiator.CredentialKind,
-			"initiator_credential_id", initiator.CredentialID,
+			"initiator_principal_kind", auth.PrincipalKind,
+			"initiator_credential_kind", auth.CredentialKind,
+			"initiator_credential_id", auth.CredentialID,
+			"authorization_revision", auth.Revision,
 			"executor_kind", executor.Kind,
 			"executor_id", executor.ID)
 		return nil

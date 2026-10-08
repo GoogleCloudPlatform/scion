@@ -459,10 +459,10 @@ func TestMessageEventHandler_R3_MigratingTargetFailsLoudly(t *testing.T) {
 
 	payload, err := json.Marshal(MessageEventPayload{AgentID: target.ID, Message: "wake up"})
 	require.NoError(t, err)
-	evt := store.ScheduledEvent{
-		ID: tid("r3-sched-event"), ProjectID: project.ID, Payload: string(payload),
+	evt := withAgentRevision(t, srv, store.ScheduledEvent{
+		ID: tid("r3-sched-event"), ProjectID: project.ID, EventType: "message", Payload: string(payload),
 		CreatedBy: creator.ID,
-	}
+	}, creator.ID)
 
 	handler := srv.messageEventHandler()
 	err = handler(ctx, evt)
@@ -507,10 +507,10 @@ func TestMessageEventHandler_OA_AuthzDenialPrecedesReincarnationCheck(t *testing
 
 	payload, err := json.Marshal(MessageEventPayload{AgentID: target.ID, Message: "wake up"})
 	require.NoError(t, err)
-	evt := store.ScheduledEvent{
-		ID: tid("oa-sched-event"), ProjectID: project.ID, Payload: string(payload),
+	evt := withAgentRevision(t, srv, store.ScheduledEvent{
+		ID: tid("oa-sched-event"), ProjectID: project.ID, EventType: "message", Payload: string(payload),
 		CreatedBy: creator.ID,
-	}
+	}, creator.ID)
 
 	handler := srv.messageEventHandler()
 	err = handler(ctx, evt)

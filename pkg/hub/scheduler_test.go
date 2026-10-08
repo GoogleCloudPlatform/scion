@@ -1288,6 +1288,24 @@ func TestExpiredEventsFromDowntimeStillFire(t *testing.T) {
 	s.Stop()
 }
 
+// seedEventHandlerMessageUser stores an active user bound to a project role
+// carrying agent.message in projectID and returns its ID, for a scheduled
+// message revision that passes resolveScheduledAuthority.
+func seedEventHandlerMessageUser(ms *mockScheduledEventStore, projectID string) string {
+	ms.mu.Lock()
+	defer ms.mu.Unlock()
+	const userID = "event-handler-user"
+	ms.users[userID] = &store.User{ID: userID, Email: "eh@test.com", Status: store.UserStatusActive, Role: "member"}
+	ms.roleDefinitions["eh-message-role"] = &store.RoleDefinition{
+		ID: "eh-message-role", Name: "Message", Permissions: []string{"agent.message"}, ScopeType: "project",
+	}
+	ms.roleBindings = append(ms.roleBindings, &store.RoleBinding{
+		ID: "eh-binding-" + projectID, RoleDefinitionID: "eh-message-role",
+		PrincipalType: "user", PrincipalID: userID, ScopeType: "project", ScopeID: projectID,
+	})
+	return userID
+}
+
 func TestMessageEventHandler_AgentNotFound(t *testing.T) {
 	// When a message event fires for an agent that has been deleted,
 	// the handler returns an error so the enclosing scheduler wrapper
@@ -1304,6 +1322,7 @@ func TestMessageEventHandler_AgentNotFound(t *testing.T) {
 		Payload:   `{"agentName":"deleted-agent","message":"hello?"}`,
 		Status:    store.ScheduledEventPending,
 	}
+	evt = withSessionRevision(evt, seedEventHandlerMessageUser(ms, "project-1"))
 	_ = ms.CreateScheduledEvent(ctx, &evt)
 
 	// Create a Server with the mock store — no agents registered
@@ -1332,6 +1351,7 @@ func TestMessageEventHandler_AgentNotFoundByID(t *testing.T) {
 		Payload:   `{"agentId":"nonexistent-id","message":"hello?"}`,
 		Status:    store.ScheduledEventPending,
 	}
+	evt = withSessionRevision(evt, seedEventHandlerMessageUser(ms, "project-1"))
 	_ = ms.CreateScheduledEvent(ctx, &evt)
 
 	srv := newEventHandlerTestServer(ms)
