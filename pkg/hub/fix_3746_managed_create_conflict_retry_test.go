@@ -19,9 +19,12 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -399,17 +402,19 @@ const (
 // stopped before the post-create write. The retry keeps that phase and
 // activity (newer than the create's assumed running, as
 // mergeDispatchedAgent does), but still records the managed Runtime and the
-// interaction ID, so a later stop or delete can find the interaction. A
-// non-terminal phase is moved on to running.
+// interaction ID, and the create stops the interaction (that writer's stop
+// could not find it). A non-terminal phase is moved on to running and the
+// interaction is left running.
 func TestManagedCreateConflictRetry_ConcurrentPhase(t *testing.T) {
 	cases := []struct {
 		phase, activity string
 		wantPhase       string
 		wantActivity    string
+		wantCancel      bool
 	}{
-		{string(state.PhaseError), "", string(state.PhaseError), ""},
-		{string(state.PhaseStopped), "", string(state.PhaseStopped), ""},
-		{string(state.PhaseProvisioning), "", string(state.PhaseRunning), "working"},
+		{string(state.PhaseError), "", string(state.PhaseError), "", true},
+		{string(state.PhaseStopped), "", string(state.PhaseStopped), "", true},
+		{string(state.PhaseProvisioning), "", string(state.PhaseRunning), "working", false},
 	}
 	for i, tc := range cases {
 		t.Run(tc.phase, func(t *testing.T) {
@@ -446,9 +451,79 @@ func TestManagedCreateConflictRetry_ConcurrentPhase(t *testing.T) {
 			var resp CreateAgentResponse
 			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 			assert.Equal(t, tc.wantPhase, resp.Agent.Phase, "the 201 answers the stored row")
-			assert.Empty(t, backend.cancels())
+			if tc.wantCancel {
+				assert.Equal(t, []string{"interaction-1"}, backend.cancels(), "a terminal phase stops the interaction, once")
+				assert.Empty(t, backend.inProgress())
+			} else {
+				assert.Empty(t, backend.cancels(), "a live phase leaves the interaction running")
+			}
 			updates, _ := fs.counts()
 			assert.Equal(t, 2, updates, "the conflicting write and one retry")
 		})
 	}
+}
+
+// A stop lands before the post-create write records the interaction
+// (ptone/scion#3746, review NB3): the stop's own managedAgentStop finds no
+// interaction ID, so the create stops it after the retried write. 201 with
+// the stopped row, which names the interaction; exactly one cancel; no
+// warning in the response.
+func TestManagedCreateConflictRetry_StopBeforeRecord_CancelsOnce(t *testing.T) {
+	srv, s, project := setupCreateAgentServer(t, &createRaceDispatcher{})
+	backend := newInteractionLedgerBackend()
+	useManagedBackend(t, backend)
+	fs := &managedConflictStore{Store: s, beforeFirst: func(id string) {
+		bumpPhase(t, s, id, string(state.PhaseStopped), "")
+	}}
+	srv.store = fs
+
+	rec := managedCreate(t, srv, project.ID, "mgd-retry-stop-race")
+	row := requireManagedCreated(t, rec, s)
+	assert.Equal(t, string(state.PhaseStopped), row.Phase)
+	assert.True(t, isManagedAgentRuntime(row.Runtime), "the managed Runtime is persisted")
+	assert.Equal(t, "interaction-1", row.Annotations[annotationInteractionID])
+	assert.Equal(t, []string{"interaction-1"}, backend.cancels(), "exactly one CancelInteraction")
+	assert.Empty(t, backend.inProgress(), "nothing is left running")
+	var resp CreateAgentResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Empty(t, resp.Warnings, "no warning in the response")
+	updates, _ := fs.counts()
+	assert.Equal(t, 2, updates, "the conflicting write and one retry")
+}
+
+// The stop of that interaction fails: it is logged (Warn, naming the agent
+// and the interaction) and the create still answers 201 with no warning in
+// the response. The row names the interaction, so a later stop or delete
+// can retry the cancel.
+func TestManagedCreateConflictRetry_StopBeforeRecord_CancelFails_Logs(t *testing.T) {
+	srv, s, project := setupCreateAgentServer(t, &createRaceDispatcher{})
+	logs := &syncBuffer{}
+	srv.agentLifecycleLog = slog.New(slog.NewTextHandler(logs, nil))
+	backend := newInteractionLedgerBackend()
+	backend.cancelErr = errors.New("backend unavailable")
+	useManagedBackend(t, backend)
+	srv.store = &managedConflictStore{Store: s, beforeFirst: func(id string) {
+		bumpPhase(t, s, id, string(state.PhaseStopped), "")
+	}}
+
+	rec := managedCreate(t, srv, project.ID, "mgd-retry-stop-cancelfail")
+	row := requireManagedCreated(t, rec, s)
+	var raw map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &raw))
+	assert.NotContains(t, raw, "warnings", "a failed cancel adds no warning to the 201")
+	assert.Equal(t, string(state.PhaseStopped), row.Phase)
+	assert.Equal(t, "interaction-1", row.Annotations[annotationInteractionID], "the row names the interaction for a later stop")
+	assert.Equal(t, []string{"interaction-1"}, backend.cancels(), "the cancel was tried once")
+	assert.Equal(t, []string{"interaction-1"}, backend.inProgress(), "the failed cancel left it running")
+
+	var line string
+	for _, l := range strings.Split(logs.String(), "\n") {
+		if strings.Contains(l, "interaction_id=interaction-1") && strings.Contains(l, "backend unavailable") {
+			line = l
+			break
+		}
+	}
+	require.NotEmpty(t, line, "the failed cancel is logged: %s", logs.String())
+	assert.Contains(t, line, "level=WARN")
+	assert.Contains(t, line, "agent_id="+row.ID)
 }

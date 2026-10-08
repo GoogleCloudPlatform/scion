@@ -2554,6 +2554,16 @@ func (s *Server) createAgentInProject(
 			writeDeletedDuringCreate(w, agent.ID, s.compensateManagedCreate(ctx, agent, true))
 			return
 		}
+		// A concurrent stop or error landed before the post-create write
+		// recorded the interaction, so its own stop could not find it:
+		// only a retried write keeps such a terminal phase (mergeManagedCreate).
+		// Stop the interaction here, after the write, so a failed stop
+		// still leaves a row that names it (ptone/scion#3746).
+		if isTerminalAgentPhase(agent.Phase) {
+			s.agentLifecycleLog.Info("Hub: managed agent was stopped while it was being created; stopping its interaction",
+				"agent_id", agent.ID, "agent", agent.Name, "phase", agent.Phase)
+			s.stopManagedCreateInteraction(ctx, agent, false)
+		}
 		s.enrichAgent(ctx, agent, project, nil)
 
 		writeJSON(w, http.StatusCreated, CreateAgentResponse{
@@ -3026,7 +3036,8 @@ func (s *Server) updateManagedAgentAfterCreate(ctx context.Context, agent *store
 // activity. A phase a concurrent writer moved to error or stopped is newer
 // than the create's assumed running and is kept, as mergeDispatchedAgent
 // does; the Runtime and annotations are still written, so a later stop or
-// delete can find the interaction.
+// delete can find the interaction, and the create then stops the
+// interaction itself, since that writer's stop could not find it.
 func mergeManagedCreate(dst, src *store.Agent) {
 	dst.Runtime = src.Runtime
 	for _, key := range []string{annotationCloudProvider, annotationInteractionID, annotationEnvironmentID} {
