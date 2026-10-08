@@ -88,6 +88,9 @@ interface Server {
   grants: ArtifactGrant[];
   cross: boolean;
   clamped: boolean;
+  /** When set, link creation waits until the test calls release(). */
+  holdCreate?: boolean;
+  release?: () => void;
 }
 
 function json(body: unknown, status = 200): Promise<Response> {
@@ -118,14 +121,21 @@ function mockServer(init: Partial<Server> = {}): Server {
       if (url === `${BASE}/links` && method === 'GET') return json({ links: s.links });
       if (url === `${BASE}/links` && method === 'POST') {
         const l = link('l-new', (body as { ttlHours: number }).ttlHours / 24);
-        return json(
-          {
-            link: l,
-            url: '/api/v1/artifacts/shared/TOKEN123',
-            clampedToArtifactExpiry: s.clamped,
-          },
-          201
-        );
+        const answer = (): Promise<Response> =>
+          json(
+            {
+              link: l,
+              url: '/api/v1/artifacts/shared/TOKEN123',
+              clampedToArtifactExpiry: s.clamped,
+            },
+            201
+          );
+        if (s.holdCreate) {
+          return new Promise<Response>((resolve) => {
+            s.release = (): void => void answer().then(resolve);
+          });
+        }
+        return answer();
       }
       if (url.startsWith(`${BASE}/links/`) && method === 'DELETE') {
         return Promise.resolve(new Response(null, { status: 204 }));
@@ -325,6 +335,30 @@ describe('share dialog', () => {
     expect(el.open).toBe(true);
     expect(showsToken(el)).toBe(false);
   });
+
+  for (const how of ['closed', 'closed and reopened', 'removed'] as const) {
+    it(`never shows a link whose creation answers after the dialog was ${how}`, async () => {
+      const s = mockServer({ holdCreate: true });
+      const el = await mount();
+      button(el, 'Create link').click();
+      await settle(el);
+      expect(s.release).toBeDefined();
+      if (how === 'removed') {
+        el.remove();
+      } else {
+        el.open = false;
+        await settle(el);
+        if (how === 'closed and reopened') {
+          el.open = true;
+          await settle(el);
+        }
+      }
+      s.release!();
+      await settle(el);
+      expect(showsToken(el)).toBe(false);
+      expect((el as unknown as { created: unknown }).created).toBeNull();
+    });
+  }
 
   it('says when a link is cut to the artifact’s expiry', async () => {
     mockServer({ clamped: true });

@@ -131,6 +131,11 @@ export class ScionArtifactShareDialog extends LitElement {
   private searchTimer: ReturnType<typeof setTimeout> | null = null;
   private searchGen = 0;
   private loadGen = 0;
+  /**
+   * Bumped whenever a created link is forgotten, so a link whose creation
+   * answers after the dialog closed or reopened is never shown.
+   */
+  private createGen = 0;
 
   static override styles = css`
     sl-dialog::part(panel) {
@@ -297,6 +302,7 @@ export class ScionArtifactShareDialog extends LitElement {
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     if (this.searchTimer) clearTimeout(this.searchTimer);
+    this.forgetCreated();
   }
 
   override updated(changed: Map<string, unknown>): void {
@@ -312,14 +318,14 @@ export class ScionArtifactShareDialog extends LitElement {
   }
 
   private forgetCreated(): void {
+    this.createGen++;
     this.created = null;
     this.copied = false;
   }
 
   private reset(): void {
     this.error = null;
-    this.created = null;
-    this.copied = false;
+    this.forgetCreated();
     this.ttlHours = DEFAULT_LINK_HOURS;
     this.query = '';
     this.suggestions = [];
@@ -390,8 +396,12 @@ export class ScionArtifactShareDialog extends LitElement {
     this.creating = true;
     this.error = null;
     this.copied = false;
+    const gen = this.createGen;
     try {
       const created = await createLink(a.id, this.ttlHours);
+      // Closed (or closed and reopened) meanwhile: the link is not shown.
+      // It is listed, and revocable, the next time the dialog opens.
+      if (gen !== this.createGen || !this.open) return;
       this.created = created;
       this.links = [created.link, ...this.links.filter((l) => l.id !== created.link.id)];
       this.resolveNames();
