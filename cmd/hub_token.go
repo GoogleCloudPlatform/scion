@@ -551,8 +551,12 @@ func parseExpiryAt(s string, now time.Time) (time.Time, error) {
 		// number cannot overflow into a negative duration (an expiry in
 		// the past).
 		n, err := strconv.Atoi(numStr)
-		if err != nil || n <= 0 || int64(n) > int64(store.UATMaxExpiry/step) {
+		if err != nil || n <= 0 {
 			return time.Time{}, invalid
+		}
+		if int64(n) > int64(store.UATMaxExpiry/step) {
+			return time.Time{}, fmt.Errorf("%q exceeds the maximum expiry of 1 year (%dh or %dm)",
+				s, int64(store.UATMaxExpiry/time.Hour), int64(store.UATMaxExpiry/time.Minute))
 		}
 		return now.Add(time.Duration(n) * step), nil
 	}

@@ -1894,7 +1894,8 @@ func findProjectByName(ctx context.Context, client hubclient.Client, name string
 // match of the same string (ptone/scion#3772, ptone/scion#3792). Any other
 // value keeps the existing name lookup unchanged.
 func resolveProjectNameOrID(ctx context.Context, client hubclient.Client, arg string) (*hubclient.Project, error) {
-	// An empty name would list every project instead of looking one up.
+	// An empty or blank argument is never a valid project; an empty one
+	// would also list every project instead of looking one up.
 	if strings.TrimSpace(arg) == "" {
 		return nil, fmt.Errorf("project name or ID must not be empty")
 	}

@@ -15,6 +15,7 @@
 package cmd
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -112,14 +113,7 @@ func TestParseExpiry_Invalid(t *testing.T) {
 		"1.5h",
 		"1.5m",
 		"90mm",
-		// Hour and minute values above the hub's 1-year maximum are
-		// rejected before multiplying, so huge values cannot overflow
-		// into an expiry in the past.
-		"8761h",
-		"525601m",
-		"99999999999999h",
-		"99999999999999m",
-		"9223372036854775807h",
+		// A number too large to parse at all gets the generic error.
 		"99999999999999999999h",
 	}
 
@@ -134,6 +128,31 @@ func TestParseExpiry_Invalid(t *testing.T) {
 			if !strings.Contains(err.Error(), form) {
 				t.Errorf("error for %q does not list accepted form %q: %v", input, form, err)
 			}
+		}
+	}
+}
+
+// TestParseExpiry_OverLimit checks that hour and minute values above the
+// hub's 1-year maximum are rejected before multiplying, so huge values cannot
+// overflow into an expiry in the past, and that the error names the limit.
+func TestParseExpiry_OverLimit(t *testing.T) {
+	tests := []string{
+		"8761h",
+		"525601m",
+		"99999999999999h",
+		"99999999999999m",
+		"9223372036854775807h",
+	}
+
+	for _, input := range tests {
+		_, err := parseExpiry(input)
+		if err == nil {
+			t.Errorf("expected error for input %q, got nil", input)
+			continue
+		}
+		want := fmt.Sprintf("%q exceeds the maximum expiry of 1 year (8760h or 525600m)", input)
+		if err.Error() != want {
+			t.Errorf("error for %q = %q, want %q", input, err.Error(), want)
 		}
 	}
 }
