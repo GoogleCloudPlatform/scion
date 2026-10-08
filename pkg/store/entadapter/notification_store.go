@@ -622,39 +622,48 @@ func (s *NotificationStore) UnmarkNotificationDispatched(ctx context.Context, id
 	return mapError(err)
 }
 
-// undispatchedGracePeriod is the minimum age of an undispatched notification
-// before the sweep picks it up. This prevents racing with an in-flight primary
-// dispatch (whose 30s retry + margin is well within this window).
-const undispatchedGracePeriod = 60 * time.Second
+// orphanPurgeBatchSize caps how many rows one purge statement deletes so a
+// large backlog is removed in short statements instead of one long one.
+var orphanPurgeBatchSize = 1000
 
-// undispatchedBatchLimit caps the number of undispatched notifications returned
-// per query to avoid loading unbounded rows into memory.
-const undispatchedBatchLimit = 100
-
-// GetUndispatchedAgentNotifications returns agent-targeted notifications with
-// dispatched=false, ordered oldest-first, limited to 100 rows.
-//
-// When brokerID is empty (sweep mode), a 60s grace period is applied so the
-// sweep does not race with an in-flight primary dispatch. When brokerID is
-// non-empty (broker-connect hook), no grace period is applied — the hook fires
-// precisely because the broker just came online, so even very recent
-// notifications should be drained immediately.
 // PurgeOrphanedNotifications deletes acknowledged notifications whose agent
 // and subscription rows are both gone (for example DELETED notifications
 // persisted after an agent's hard delete), and returns how many it deleted.
-// Unacknowledged notifications are kept until acknowledged.
+// Unacknowledged notifications are kept until acknowledged. Rows are deleted
+// in batches of orphanPurgeBatchSize until a batch comes back short.
 func (s *NotificationStore) PurgeOrphanedNotifications(ctx context.Context) (int, error) {
-	return s.client.Notification.Delete().
-		Where(
-			notification.AcknowledgedEQ(true),
-			func(sel *entsql.Selector) {
-				sel.Where(entsql.And(
-					noRowWithID(sel, agent.Table, agent.FieldID, notification.FieldAgentID),
-					noRowWithID(sel, notificationsubscription.Table, notificationsubscription.FieldID, notification.FieldSubscriptionID),
-				))
-			},
-		).
-		Exec(ctx)
+	total := 0
+	for {
+		ids, err := s.client.Notification.Query().
+			Where(
+				notification.AcknowledgedEQ(true),
+				func(sel *entsql.Selector) {
+					sel.Where(entsql.And(
+						noRowWithID(sel, agent.Table, agent.FieldID, notification.FieldAgentID),
+						noRowWithID(sel, notificationsubscription.Table, notificationsubscription.FieldID, notification.FieldSubscriptionID),
+					))
+				},
+			).
+			Order(ent.Asc(notification.FieldID)).
+			Limit(orphanPurgeBatchSize).
+			IDs(ctx)
+		if err != nil {
+			return total, mapError(err)
+		}
+		if len(ids) == 0 {
+			return total, nil
+		}
+		n, err := s.client.Notification.Delete().
+			Where(notification.IDIn(ids...)).
+			Exec(ctx)
+		total += n
+		if err != nil {
+			return total, mapError(err)
+		}
+		if len(ids) < orphanPurgeBatchSize {
+			return total, nil
+		}
+	}
 }
 
 // noRowWithID builds "NOT EXISTS (SELECT 1 FROM table WHERE table.idCol =
@@ -674,6 +683,23 @@ func noRowWithID(sel *entsql.Selector, table, idCol, refCol string) *entsql.Pred
 	})
 }
 
+// undispatchedGracePeriod is the minimum age of an undispatched notification
+// before the sweep picks it up. This prevents racing with an in-flight primary
+// dispatch (whose 30s retry + margin is well within this window).
+const undispatchedGracePeriod = 60 * time.Second
+
+// undispatchedBatchLimit caps the number of undispatched notifications returned
+// per query to avoid loading unbounded rows into memory.
+const undispatchedBatchLimit = 100
+
+// GetUndispatchedAgentNotifications returns agent-targeted notifications with
+// dispatched=false, ordered oldest-first, limited to 100 rows.
+//
+// When brokerID is empty (sweep mode), a 60s grace period is applied so the
+// sweep does not race with an in-flight primary dispatch. When brokerID is
+// non-empty (broker-connect hook), no grace period is applied — the hook fires
+// precisely because the broker just came online, so even very recent
+// notifications should be drained immediately.
 func (s *NotificationStore) GetUndispatchedAgentNotifications(ctx context.Context, brokerID string) ([]store.Notification, error) {
 	query := s.client.Notification.Query().
 		Where(

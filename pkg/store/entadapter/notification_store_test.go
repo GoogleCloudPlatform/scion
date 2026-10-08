@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/google/uuid"
@@ -643,4 +644,47 @@ func TestPurgeOrphanedNotifications(t *testing.T) {
 	purged, err = s.PurgeOrphanedNotifications(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, 0, purged, "a second run removes nothing")
+}
+
+func TestPurgeOrphanedNotifications_DeletesInBatches(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	s := NewNotificationStore(client)
+
+	prev := orphanPurgeBatchSize
+	orphanPurgeBatchSize = 2
+	t.Cleanup(func() { orphanPurgeBatchSize = prev })
+
+	var deletes int
+	client.Notification.Use(func(next ent.Mutator) ent.Mutator {
+		return ent.MutateFunc(func(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+			if m.Op().Is(ent.OpDelete) {
+				deletes++
+			}
+			return next.Mutate(ctx, m)
+		})
+	})
+
+	projectID := uuid.New()
+	_, err := client.Project.Create().SetID(projectID).SetName("Batch Project").SetSlug("batch-project").Save(ctx)
+	require.NoError(t, err)
+	const orphans = 5
+	for i := 0; i < orphans; i++ {
+		id := uuid.NewString()
+		require.NoError(t, s.CreateNotification(ctx, &store.Notification{
+			ID: id, SubscriptionID: uuid.NewString(), AgentID: uuid.NewString(),
+			ProjectID: projectID.String(), SubscriberType: "user", SubscriberID: "user-1",
+			Status: "DELETED", Message: "deleted",
+		}))
+		require.NoError(t, s.AcknowledgeNotification(ctx, id))
+	}
+
+	purged, err := s.PurgeOrphanedNotifications(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, orphans, purged, "every orphan is removed across batches")
+	assert.Equal(t, 3, deletes, "5 rows in batches of 2 take 3 delete statements")
+
+	purged, err = s.PurgeOrphanedNotifications(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 0, purged)
 }
