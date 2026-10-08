@@ -120,6 +120,20 @@ func TestServerEnvToOpsettingsKey(t *testing.T) {
 		{"PROJECTDEFAULTS_DEFAULTSCRATCHPAD", "project_defaults.default_scratchpad"},
 		{"HARNESSCONFIGS", "harness_configs"},
 		{"HARNESSCONFIGS_CLAUDE_IMAGE", "harness_configs.claude.image"},
+		{"HARNESSCONFIGS_CLAUDE_IMAGEPULLPOLICY", "harness_configs.claude.image_pull_policy"},
+		{"HARNESSCONFIGS_CLAUDE_TASKFLAG", "harness_configs.claude.task_flag"},
+		{"HARNESSCONFIGS_CLAUDE_AUTHSELECTEDTYPE", "harness_configs.claude.auth_selected_type"},
+		{"HARNESSCONFIGS_CLAUDE_MODELALIASES", "harness_configs.claude.model_aliases"},
+		{"HARNESSCONFIGS_CLAUDE_CONFIGDIR", "harness_configs.claude.config_dir"},
+		{"HARNESSCONFIGS_CLAUDE_SKILLSDIR", "harness_configs.claude.skills_dir"},
+		{"HARNESSCONFIGS_CLAUDE_INTERRUPTKEY", "harness_configs.claude.interrupt_key"},
+		{"HARNESSCONFIGS_CLAUDE_INTERRUPTSEQUENCE", "harness_configs.claude.interrupt_sequence"},
+		{"HARNESSCONFIGS_CLAUDE_INTERRUPTSIGNAL", "harness_configs.claude.interrupt_signal"},
+		{"HARNESSCONFIGS_CLAUDE_INSTRUCTIONSFILE", "harness_configs.claude.instructions_file"},
+		{"HARNESSCONFIGS_CLAUDE_SYSTEMPROMPTFILE", "harness_configs.claude.system_prompt_file"},
+		{"HARNESSCONFIGS_CLAUDE_SYSTEMPROMPTMODE", "harness_configs.claude.system_prompt_mode"},
+		{"HARNESSCONFIGS_CLAUDE_ENVTEMPLATE", "harness_configs.claude.env_template"},
+		{"HARNESSCONFIGS_CLAUDE_NOAUTH", "harness_configs.claude.no_auth"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.envKey, func(t *testing.T) {
@@ -131,17 +145,18 @@ func TestServerEnvToOpsettingsKey(t *testing.T) {
 	}
 }
 
-// TestSeedEnvToOpsettingsKey_Issue3836 verifies the SCION_SEED_* spellings
-// of the federation, project_defaults and harness_configs keys
-// (ptone/scion#3836), which go through envKeyToOpsettingsKey with an explicit
-// SERVER_ segment for server keys.
-func TestSeedEnvToOpsettingsKey_Issue3836(t *testing.T) {
+// TestSeedEnvToOpsettingsKey_FederationProjectDefaultsHarnessConfigs verifies
+// the SCION_SEED_* spellings of the federation, project_defaults and
+// harness_configs keys, which go through envKeyToOpsettingsKey with an
+// explicit SERVER_ segment for server keys (ptone/scion#3836).
+func TestSeedEnvToOpsettingsKey_FederationProjectDefaultsHarnessConfigs(t *testing.T) {
 	for envKey, want := range map[string]string{
-		"SERVER_FEDERATION_ENABLED":         "server.federation.enabled",
-		"SERVER_FEDERATION_TRUSTEDISSUERS":  "server.federation.trusted_issuers",
-		"SERVER_FEDERATION_REFRESHINTERVAL": "server.federation.refresh_interval",
-		"PROJECTDEFAULTS_DEFAULTSCRATCHPAD": "project_defaults.default_scratchpad",
-		"HARNESSCONFIGS_CLAUDE_IMAGE":       "harness_configs.claude.image",
+		"SERVER_FEDERATION_ENABLED":             "server.federation.enabled",
+		"SERVER_FEDERATION_TRUSTEDISSUERS":      "server.federation.trusted_issuers",
+		"SERVER_FEDERATION_REFRESHINTERVAL":     "server.federation.refresh_interval",
+		"PROJECTDEFAULTS_DEFAULTSCRATCHPAD":     "project_defaults.default_scratchpad",
+		"HARNESSCONFIGS_CLAUDE_IMAGE":           "harness_configs.claude.image",
+		"HARNESSCONFIGS_CLAUDE_IMAGEPULLPOLICY": "harness_configs.claude.image_pull_policy",
 		// Unchanged existing mappings.
 		"SERVER_HUB_ADMINEMAILS":     "server.hub.admin_emails",
 		"AUTOEXPOSEPORTS_ENABLED":    "auto_expose_ports.enabled",

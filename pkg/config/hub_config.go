@@ -1521,6 +1521,22 @@ var snakeCaseFields = map[string]string{
 	"readtimeout":             "read_timeout",
 	"workspacestorage":        "workspace_storage",
 	"writetimeout":            "write_timeout",
+	// harness_configs.<name>.* leaves (HarnessConfigEntry koanf tags,
+	// ptone/scion#3836)
+	"imagepullpolicy":   "image_pull_policy",
+	"taskflag":          "task_flag",
+	"authselectedtype":  "auth_selected_type",
+	"modelaliases":      "model_aliases",
+	"configdir":         "config_dir",
+	"skillsdir":         "skills_dir",
+	"interruptkey":      "interrupt_key",
+	"interruptsequence": "interrupt_sequence",
+	"interruptsignal":   "interrupt_signal",
+	"instructionsfile":  "instructions_file",
+	"systempromptfile":  "system_prompt_file",
+	"systempromptmode":  "system_prompt_mode",
+	"envtemplate":       "env_template",
+	"noauth":            "no_auth",
 	// Maintenance (runtime-only, no yaml, but env detection still needs it)
 	"maintenancemessage": "maintenance_message",
 }
