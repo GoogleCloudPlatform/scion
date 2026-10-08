@@ -100,7 +100,11 @@ func (f *storeFaultSwitch) Active() bool { return f == nil || f.armed.Load() }
 // wrapper as srv.store, and returns it together with its (disarmed) switch.
 // Call it right after constructing srv and before any setup that can reach
 // emitMutationAudit or otherwise start goroutines reading srv.store; never
-// call it on a server whose setup has already run.
+// call it on a server whose setup has already run. New() itself starts the
+// startup sweep of user-scope data, which reads srv.store in the
+// background; testServer, testServerWithStore and bypassAgentsServer wait
+// for it to end before they return. For a server built by calling New()
+// directly, call waitUserScopedDataSweep first.
 func installStoreFault[W store.Store](t testing.TB, srv *Server, wrap func(inner store.Store, fault *storeFaultSwitch) W) (W, *storeFaultSwitch) {
 	t.Helper()
 	fault := &storeFaultSwitch{}

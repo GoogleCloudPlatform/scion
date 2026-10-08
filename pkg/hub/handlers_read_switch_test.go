@@ -252,6 +252,13 @@ func (s *rsWebChatStore) DeleteDM(context.Context, string) error                
 func (s *rsWebChatStore) MigrateReadState(context.Context, string, string) error      { return nil }
 func (s *rsWebChatStore) CountPendingMessages(context.Context, string) (int, error)   { return 0, nil }
 func (s *rsWebChatStore) CountMessages(context.Context, string) (int, error)          { return 0, nil }
+func (s *rsWebChatStore) RecordMentions(context.Context, string, string, []string) error {
+	return nil
+}
+func (s *rsWebChatStore) UnreadMentionKeys(context.Context, string, []string) (map[string]bool, error) {
+	return nil, nil
+}
+func (s *rsWebChatStore) PurgeOrphanMentions(context.Context) (int, error) { return 0, nil }
 
 // ==========================================================================
 // S1 — handleConversationHistory

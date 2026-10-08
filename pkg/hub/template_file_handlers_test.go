@@ -88,7 +88,7 @@ func (m *contentMockStorage) Exists(_ context.Context, objectPath string) (bool,
 // testTemplateFileServer creates a Server with content-aware mock storage.
 func testTemplateFileServer(t *testing.T) (*Server, store.Store, *contentMockStorage) {
 	t.Helper()
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		if strings.Contains(err.Error(), "sqlite driver not registered") {
 			t.Skip("Skipping: sqlite driver not registered")
@@ -101,11 +101,10 @@ func testTemplateFileServer(t *testing.T) (*Server, store.Store, *contentMockSto
 
 	cfg := DefaultServerConfig()
 	cfg.DevAuthToken = testDevToken
-	srv, err := New(cfg, s)
+	srv, err := newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
-	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 
 	stor := newContentMockStorage("test-bucket")
 	srv.SetStorage(stor)

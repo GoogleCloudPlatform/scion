@@ -8880,10 +8880,10 @@ profiles:
 		t.Fatal("expected a non-nil AgentInfo")
 	}
 	joinedWarnings := strings.Join(agentInfo.Warnings, "\n")
-	if !strings.Contains(joinedWarnings, "using the pull policy recorded") {
+	if !strings.Contains(joinedWarnings, "using the template's pull policy recorded") {
 		t.Errorf("expected a warning naming only the pull policy as recorded, got warnings=%v", agentInfo.Warnings)
 	}
-	if strings.Contains(joinedWarnings, "image and pull policy") || strings.Contains(joinedWarnings, "using the image") {
+	if strings.Contains(joinedWarnings, "image and pull policy") || strings.Contains(joinedWarnings, "using the template's image") {
 		t.Errorf("did not expect the warning to name image (it came from dispatch --image, not the snapshot), got warnings=%v", agentInfo.Warnings)
 	}
 }

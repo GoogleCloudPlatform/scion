@@ -130,6 +130,7 @@ func (hc *HubConnection) Start(ctx context.Context, server *Server) error {
 			)
 			hb.auxiliaryManagers = server.getAuxiliaryManagers
 			hb.workspaceStorage = server.workspaceStorageDescriptor
+			hb.health = server.heartbeatHealthReport
 			hb.profileAttach = server.heartbeatProfileAttach
 			hb.profileSAMappings = server.heartbeatProfileSAMappings
 			hb.startsInFlight = server.startsInFlightSnapshot

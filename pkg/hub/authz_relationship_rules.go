@@ -153,11 +153,13 @@ type relationshipOutcome struct {
 }
 
 // relationshipProjectAccess enables the project-access stage (2c) for one
-// evaluation and carries the request-scoped admission memo. A nil
-// *relationshipProjectAccess disables the stage: only Decide's step 9
-// (interactive and UAT requests) enables it. The delegation-ceiling walk
-// (userRelationshipAuthority) evaluates a delegator's relationships with the
-// stage disabled; that path is not covered by this decision.
+// evaluation and carries the admission memo. A nil
+// *relationshipProjectAccess disables the stage. Decide's step 9
+// (interactive and UAT requests) enables it with the request-scoped memo.
+// The delegation-ceiling walk (userRelationshipAuthority) enables it for a
+// user delegator with a fresh memo and no requestCtx (the delegator is not
+// the requester): a delegator's relationship grants are honoured only while
+// the delegator is admitted to the target's project (ptone/scion#3433).
 type relationshipProjectAccess struct {
 	memo *ProjectAdmissionCache
 	// requestCtx, when set, is the request's own context, used for the
@@ -170,9 +172,10 @@ type relationshipProjectAccess struct {
 }
 
 // isHubScopedServiceAccount reports whether the resource is a hub-scoped
-// GCP service account (no parent).
+// GCP service account: no project parent, either with no parent or with an
+// explicit system parent (isHubScopedResource).
 func isHubScopedServiceAccount(resource Resource) bool {
-	return resource.Type == "gcp_service_account" && resource.ParentType == "" && resource.ParentID == ""
+	return resource.Type == "gcp_service_account" && isHubScopedResource(resource)
 }
 
 // relationshipCandidates lists, in a stable order (ancestor, launcher,
@@ -469,10 +472,13 @@ func projectAccessRelationshipRule(rule RelationshipRuleID) bool {
 // an empty kind when the candidate passes or the stage does not apply, and
 // otherwise the rejection kind and detail.
 //
-// Covered principals: local user principals (PrincipalKindUser and
-// PrincipalKindDev), which includes interactive session users and UAT
-// holders (a *ScopedUserIdentity is PrincipalKindUser). Agents, federated
-// users and every other principal kind are unchanged.
+// Covered principals: user principals (isUserPrincipal). That is local
+// users (PrincipalKindUser and PrincipalKindDev), which includes
+// session users and UAT holders (a *ScopedUserIdentity is
+// PrincipalKindUser), and federated users (PrincipalKindFederatedUser,
+// ptone/scion#3427), whose access comes only from hub-recorded bindings
+// keyed to user:<issuer>:<sub>. Agents, federated agents, federated
+// services and every other principal kind are unchanged.
 //
 // Covered rules: owner and ancestor (projectAccessRelationshipRule).
 // Progeny and hub-member service-account assign are unchanged.
@@ -502,7 +508,7 @@ func (a *AuthzService) relationshipProjectAccessStage(
 	rule RelationshipRuleID,
 	memo *ProjectAdmissionCache,
 ) (string, string) {
-	if principal.Kind != PrincipalKindUser && principal.Kind != PrincipalKindDev {
+	if !isUserPrincipal(principal.Kind) {
 		return "", ""
 	}
 	if !projectAccessRelationshipRule(rule) {

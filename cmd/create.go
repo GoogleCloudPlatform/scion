@@ -414,6 +414,7 @@ func createAgentViaHub(hubCtx *HubContext, agentName string, task string) error 
 
 	resp, err := createAgentWithBrokerResolution(ctx, hubCtx, projectID, req)
 	if err != nil {
+		printDeleteInProgressWarnings(os.Stderr, err)
 		return wrapHubError(fmt.Errorf("failed to create agent via Hub: %w", err))
 	}
 

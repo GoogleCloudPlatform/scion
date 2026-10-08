@@ -51,6 +51,13 @@ CHART_DIR="${CHART_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 # nothing for the scan to find - a vacuous pass, and vacuous for a legitimate
 # reason. Naming them here means the vacuity is declared: if a fixture that
 # SHOULD carry material stops carrying it, it will not quietly join this set.
+#
+# terraform-hub-gke is NOT in this list, although its session secret is also
+# bring-your-own (the Secret Terraform creates, auth.existingSecret). Its
+# database.password renders inside the settings Secret's database url, and the
+# scanner harvests the password out of that url (see "URL USERINFO" below), so
+# the fixture carries exactly one needle and the scan asserts the password
+# appears in no arg, ConfigMap or annotation.
 NO_MATERIAL=(existing-secret session-existing)
 
 # Fixtures that FAIL TO RENDER BY DESIGN (schema rejection, negative control).
@@ -89,6 +96,7 @@ declare -A EXPECTED_NEEDLES=(
   [session-existing]=0   # bring-your-own session Secret; nothing rendered
   [settings]=1           # session secret; settings.yaml carries no credential
   [settings-oauth]=2     # session secret + the OAuth web client_secret
+  [terraform-hub-gke]=1  # database.password, from the settings Secret's database url (session Secret is Terraform's)
   [varied]=1             # session secret
 )
 
@@ -103,7 +111,8 @@ declare -A EXPECTED_NEEDLES=(
 # subject is this chart's own output, and the self-test pins the shapes.
 # ---------------------------------------------------------------------------
 read -r -d '' SCANNER <<'PYEOF' || true
-import sys, re
+import os, sys, re
+from urllib.parse import urlsplit, unquote
 
 text = sys.stdin.read()
 needles_env = sys.argv[1] if len(sys.argv) > 1 else ""
@@ -223,10 +232,44 @@ for doc in docs:
                     if not im:
                         continue
                     ikey, ival = im.group(1).strip(), im.group(2).strip()
-                    if not re.search(r'(?i)secret|token|password|passwd|credential|api[_-]?key|private[_-]?key', ikey):
-                        continue
                     if len(ival) >= 2 and ival[0] == ival[-1] and ival[0] in "\"'":
                         ival = ival[1:-1]
+                    # URL USERINFO IS A CREDENTIAL WHATEVER ITS KEY IS CALLED.
+                    # The database url (postgres://user:password@host/db) sits
+                    # under a key named "url", which the vocabulary below rightly
+                    # skips, so the password inside it was invisible: the
+                    # terraform-hub-gke fixture renders one and was declared
+                    # vacuous. Only the password is taken - not the whole url
+                    # (host and db name are configuration) and not the user.
+                    #
+                    # THE AUTHORITY IS FOUND BY urlsplit, NOT BY A REGEX. The
+                    # password ends at the last "@" OF THE AUTHORITY, which ends
+                    # at the first "/", "?" or "#". A regex that ran to the last
+                    # "@" of the WHOLE string turned
+                    #   postgres://u:secretpass1@host/db?x=a@b
+                    # into the needle "secretpass1@host/db?x=a", which no raw
+                    # leak of "secretpass1" contains. urlsplit takes the netloc
+                    # first and splits userinfo at its last "@", so a raw "@" in
+                    # the password still works.
+                    #
+                    # BOTH FORMS ARE NEEDLES. The chart percent-encodes the
+                    # password into the url (_helpers.tpl), so "p@ss/word" is
+                    # rendered "p%40ss%2Fword". Harvesting only that form would
+                    # miss a leak of the password as the operator wrote it, so
+                    # the unquote()d form is added too. Each needs len >= 8, and
+                    # the set deduplicates a password with nothing to decode.
+                    if re.match(r'^[A-Za-z][A-Za-z0-9+.-]*://', ival):
+                        try:
+                            pw = urlsplit(ival).password
+                        except ValueError:
+                            pw = None
+                        if pw:
+                            for cand in (pw, unquote(pw)):
+                                if len(cand) >= 8:
+                                    needles.add(cand)
+                            continue
+                    if not re.search(r'(?i)secret|token|password|passwd|credential|api[_-]?key|private[_-]?key', ikey):
+                        continue
                     if len(ival) >= 8:
                         needles.add(ival)
                 continue
@@ -270,6 +313,11 @@ for doc in docs:
                     findings.append("%s: %s" % (label, b.strip()))
 
 print("NEEDLES=%d" % len(needles))
+# The values themselves are printed ONLY for --self-test, whose needles are
+# synthetic. A real run must never echo secret material into a CI log.
+if os.environ.get("SCAN_LIST_NEEDLES") == "1":
+    for n in sorted(needles):
+        print("NEEDLE=%s" % n)
 for f in findings:
     print("FINDING=%s" % f)
 PYEOF
@@ -319,6 +367,20 @@ stringData:
       oauth:
         client_secret: selftest-embedded-credential-7c21
       extra_setting: not-a-secret-just-config
+    database:
+      # A NEEDLE, under a key ("url") the credential vocabulary skips: only the
+      # password (urlsplit's userinfo password) is harvested, not the user.
+      url: postgres://selftest-db-user:selftest-db-password-41e8@127.0.0.1:5432/selftest
+    cache:
+      # A NEEDLE, and only the password: the "@" in the QUERY is not the end of
+      # the userinfo. Split at the last "@" of the whole string, this harvested
+      # "selftest-qry-pass-55d2@127.0.0.2:6379/0?opt=a", which a raw leak of the
+      # password does not contain.
+      url: redis://selftest-cache-user:selftest-qry-pass-55d2@127.0.0.2:6379/0?opt=a@b
+    queue:
+      # TWO NEEDLES from one password: the percent-encoded form as rendered and
+      # the decoded form the operator wrote ("selftest@enc/pass-0b7e").
+      url: amqp://selftest-queue-user:selftest%40enc%2Fpass-0b7e@127.0.0.3/vhost
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -332,7 +394,15 @@ data:
   # this ConfigMap on purpose. A scanner that harvested every line of an embedded
   # document would flag this, and the flag would be wrong.
   SCION_SERVER_BASE_URL: "https://selftest.example.invalid"
+  # NOT A FINDING. The database user is configuration, not credential material.
+  SCION_DB_USER: "selftest-db-user"
   LEAK_IN_CONFIGMAP: "selftest-sentinel-value-9f3a"
+  # A FINDING. The database password, lifted out of the url in settings.yaml.
+  LEAK_DB_PASSWORD: "selftest-db-password-41e8"
+  # A FINDING. The cache url password, whose url has an "@" in its query.
+  LEAK_QUERY_URL_PASSWORD: "selftest-qry-pass-55d2"
+  # A FINDING. The queue url password DECODED - not the bytes in the url.
+  LEAK_DECODED_PASSWORD: "selftest@enc/pass-0b7e"
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -362,23 +432,45 @@ spec:
                   key: SCION_SERVER_SESSION_SECRET
 FIXEOF
 
-  out="$(scan <"$fixture")" || {
+  out="$(SCAN_LIST_NEEDLES=1 scan <"$fixture")" || {
     echo "check-secret-placement self-test: the scanner itself failed to run." >&2
     exit 2
   }
   n_needles="$(sed -n 's/^NEEDLES=//p' <<<"$out")"
   mapfile -t found < <(sed -n 's/^FINDING=//p' <<<"$out")
 
-  # The needle must have been harvested from the Secret, not supplied. If this
-  # is 0 the three findings below could only come from a hardcoded string.
-  # EXACTLY TWO, AND THE NUMBER IS THE ASSERTION. One plain stringData value and
-  # one credential leaf from inside the embedded settings document. THREE would
-  # mean base_url was harvested too - the over-harvest that made this scan report
-  # four false leaks before the block-scalar branch existed. ONE would mean the
-  # embedded credential is invisible and a real secret could cross into a
-  # ConfigMap unseen. Both directions are wrong and both are caught here.
-  if [[ "$n_needles" -ne 2 ]]; then
-    echo "check-secret-placement self-test: FAIL - harvested ${n_needles} needles, expected exactly 2 (one scalar, one credential leaf inside settings.yaml; base_url must NOT be one)." >&2
+  # The needles must have been harvested from the Secrets, not supplied. If this
+  # is 0 the findings below could only come from a hardcoded string.
+  # EXACTLY SIX, AND THE NUMBER IS THE ASSERTION. One plain stringData value,
+  # one credential leaf from inside the embedded settings document, the database
+  # url password, the cache url password, and the queue url password in both its
+  # encoded and decoded forms. MORE would mean base_url or a url user was
+  # harvested too - the over-harvest that made this scan report four false leaks
+  # before the block-scalar branch existed. FEWER would mean an embedded
+  # credential is invisible and a real secret could cross into a ConfigMap
+  # unseen. Both directions are wrong and both are caught here.
+  if [[ "$n_needles" -ne 6 ]]; then
+    echo "check-secret-placement self-test: FAIL - harvested ${n_needles} needles, expected exactly 6 (one scalar, one credential leaf, three url passwords inside settings.yaml with the encoded one in both forms; base_url and the url users must NOT be one)." >&2
+    exit 2
+  fi
+
+  # AND THE VALUES, NOT JUST THEIR NUMBER. A url password split at the wrong
+  # "@" is still one needle, so the count alone cannot see the query-string
+  # defect; only the exact set can.
+  mapfile -t got_needles < <(sed -n 's/^NEEDLE=//p' <<<"$out" | LC_ALL=C sort)
+  mapfile -t want_needles < <(LC_ALL=C sort <<'NEEDLEEOF'
+selftest-sentinel-value-9f3a
+selftest-embedded-credential-7c21
+selftest-db-password-41e8
+selftest-qry-pass-55d2
+selftest%40enc%2Fpass-0b7e
+selftest@enc/pass-0b7e
+NEEDLEEOF
+)
+  if [[ "${got_needles[*]}" != "${want_needles[*]}" ]]; then
+    echo "check-secret-placement self-test: FAIL - harvested the wrong needle set." >&2
+    printf '  want: %s\n' "${want_needles[@]}" >&2
+    printf '  got:  %s\n' "${got_needles[@]}" >&2
     exit 2
   fi
 
@@ -389,8 +481,8 @@ FIXEOF
   # NOTE the fourth: the ConfigMap's own annotation block is scanned too, and the
   # fixture's checksum annotation does NOT contain the sentinel, so ConfigMap/
   # annotation appears only because... it must not. Asserted exactly, both ways.
-  if [[ "${#found[@]}" -ne 4 ]]; then
-    echo "check-secret-placement self-test: FAIL - ${#found[@]} findings, expected exactly 4 (args, ConfigMap data, two annotations)." >&2
+  if [[ "${#found[@]}" -ne 7 ]]; then
+    echo "check-secret-placement self-test: FAIL - ${#found[@]} findings, expected exactly 7 (args, four ConfigMap data lines, two annotations)." >&2
     printf '  %s\n' "${found[@]}" >&2
     exit 2
   fi
@@ -403,10 +495,25 @@ FIXEOF
     fi
   done
 
+  # The url password must be among the findings by VALUE: the count above could
+  # also be met by some other line, and this is the needle the url branch exists for.
+  if ! printf '%s\n' "${found[@]}" | grep -qF -- "LEAK_DB_PASSWORD"; then
+    echo "check-secret-placement self-test: FAIL - the database url password leaking into a ConfigMap was not flagged." >&2
+    printf '  %s\n' "${found[@]}" >&2
+    exit 2
+  fi
+  for want in LEAK_QUERY_URL_PASSWORD LEAK_DECODED_PASSWORD; do
+    if ! printf '%s\n' "${found[@]}" | grep -qF -- "$want"; then
+      echo "check-secret-placement self-test: FAIL - ${want} leaking into a ConfigMap was not flagged." >&2
+      printf '  %s\n' "${found[@]}" >&2
+      exit 2
+    fi
+  done
+
   # THE OVER-FIRING TWIN. The same value appears four more times in the fixture
   # legitimately - the Secret's own stringData, the envFrom secretRef, the
   # secretKeyRef name and its key. A scanner that flagged those would have
-  # reported more than 3 and failed above, but state it explicitly so the
+  # reported more than 7 and failed above, but state it explicitly so the
   # property is named rather than implied by a number.
   if printf '%s\n' "${found[@]}" | grep -qE 'Secret/stringData|secretRef|secretKeyRef'; then
     echo "check-secret-placement self-test: FAIL - flagged a legitimate secret reference." >&2
@@ -414,7 +521,7 @@ FIXEOF
     exit 2
   fi
 
-  echo "check-secret-placement self-test: PASS (2 needles harvested, 4 leaks found, base_url and 4 legitimate references ignored)"
+  echo "check-secret-placement self-test: PASS (6 needles harvested, 7 leaks found, base_url, the url users and 4 legitimate references ignored)"
   exit 0
 fi
 

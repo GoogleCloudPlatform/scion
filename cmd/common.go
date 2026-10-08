@@ -328,6 +328,14 @@ func CheckHubAvailabilityForAgents(projectPath string, excludedAgents []string, 
 		ExplicitProject:  explicitProjectTargetFor(projectPath),
 	}
 
+	// A hub project reference needs hub mode: offer to enable it (when
+	// logged in, interactively) or name 'scion hub enable' (#3533).
+	if !noHub && projectPath != "" && hubsync.IsHubProjectRef(projectPath) {
+		if err := ensureHubModeForHubProjectRefForInvocation(projectPath); err != nil {
+			return nil, err
+		}
+	}
+
 	hubCtx, err := hubsync.EnsureHubReady(projectPath, opts)
 	if err != nil {
 		return nil, err
@@ -421,6 +429,11 @@ func PrintUsingHub(endpoint string) {
 // is a plausible remedy (the hub is unreachable or failing).
 const localOnlyHint = "\n\nTo use local-only mode, run: scion hub disable"
 
+// emptyResponseNote replaces localOnlyHint when the hub answered a call that
+// needs a body with an empty response (apiclient.ErrNoContent). The hub was
+// reachable, so suggesting local-only mode would be misleading.
+const emptyResponseNote = "\n\nThe hub returned an empty response where a result was expected."
+
 // hubError marks an error that has been through wrapHubError. Error() is the
 // fully rendered message (including any hint); Unwrap exposes the original
 // cause so callers can still use errors.Is / errors.As on it. Execute uses the
@@ -460,13 +473,17 @@ func isHubFailure(err error) bool {
 //
 //   - 401: replaced with a "login with scion hub auth login" hint (or, inside a
 //     hub-managed agent, a credentials-rejected message that keeps the cause).
-//   - Connectivity failures (anything that is not an *apiclient.APIError, e.g.
-//     a transport error or timeout) and 5xx responses: the "scion hub disable"
-//     local-only hint is appended, since the hub being down is the case where
-//     falling back to local mode can help.
+//   - Connectivity failures (anything that is not an *apiclient.APIError,
+//     other than the empty-response case below, e.g. a transport error or
+//     timeout) and 5xx responses: the "scion hub disable" local-only hint is
+//     appended, since the hub being down is the case where falling back to
+//     local mode can help.
 //   - Other API errors (4xx such as 400/403/404/409/422): returned as-is. The
 //     hub answered and the message is about the request, so suggesting that
 //     the user disable the hub would be misleading noise.
+//   - An empty response from a call that needs a body (an error wrapping
+//     apiclient.ErrNoContent): the hub answered, so it gets a note saying so
+//     instead of the local-only hint.
 //
 // Inside a hub-managed agent the local-only hint is never added, because
 // disabling the Hub would break orchestration connectivity.
@@ -479,6 +496,9 @@ func wrapHubError(err error) error {
 		// Already annotated further down the call chain; don't add a
 		// second hint.
 		return err
+	}
+	if errors.Is(err, apiclient.ErrNoContent) {
+		return &hubError{msg: err.Error() + emptyResponseNote, err: err}
 	}
 	if apiclient.IsUnauthorizedError(err) {
 		// `scion hub` is filtered out of the command tree in agent mode, so a
@@ -493,6 +513,31 @@ func wrapHubError(err error) error {
 		return &hubError{msg: err.Error(), err: err}
 	}
 	return &hubError{msg: err.Error() + localOnlyHint, err: err}
+}
+
+// printDeleteInProgressWarnings writes each string in details.warnings of a
+// 409 delete_in_progress hub error to w as a "Warning: ..." line. A 409
+// delete_in_progress may carry details.warnings (set today on a synchronous
+// create that lost to a delete; ptone/scion#3255 adds it to the start,
+// restart and existing-agent answers) reporting the outcome of removing a
+// container the broker had already started, so a failed removal must reach
+// the user. The helper runs on every hub create and start error path, so
+// it needs no change as the hub adds warnings to more answers. Any other
+// error, a missing or malformed warnings list, and non-string entries print
+// nothing. The error itself is left to the caller. Warnings go to w even in JSON output mode:
+// a failed command prints no JSON result, and its error line also goes to
+// stderr, so stdout stays clean.
+func printDeleteInProgressWarnings(w io.Writer, err error) {
+	var apiErr *apiclient.APIError
+	if !errors.As(err, &apiErr) || apiErr.Code != apiclient.ErrCodeDeleteInProgress {
+		return
+	}
+	warnings, _ := apiErr.Details["warnings"].([]interface{})
+	for _, raw := range warnings {
+		if msg, ok := raw.(string); ok {
+			_, _ = fmt.Fprintf(w, "Warning: %s\n", msg)
+		}
+	}
 }
 
 // shouldSuggestLocalOnly reports whether the local-only hint is relevant for
@@ -1331,6 +1376,7 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 		if apiErr, ok := asIncompleteCreate(err); ok {
 			return incompleteCreateError(agentName, apiErr)
 		}
+		printDeleteInProgressWarnings(os.Stderr, err)
 		return wrapHubError(fmt.Errorf("failed to start agent via Hub: %w", err))
 	}
 	if reusesExisting {
@@ -1506,11 +1552,21 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume, res
 		if workspaceFinalized {
 			budgetFrom = nil
 		}
+		// The start was accepted when the create answer shows an active
+		// launch or a finalize dispatched it. Only the former names the
+		// launch: the create answer predates a finalize's start, and an
+		// ended launch is an earlier one.
+		launchID := ""
+		if launchActive(resp.Agent) && !workspaceFinalized {
+			launchID = resp.Agent.Launch.ID
+		}
 		// Ctrl-C (or SIGTERM) stops waiting only; the launch continues on
 		// the Hub.
 		waited, err := waitForAgentLaunchWithSignals(launchWaitOptions{
 			AgentName:  agentName,
 			BudgetFrom: budgetFrom,
+			Accepted:   launchActive(resp.Agent) || workspaceFinalized,
+			LaunchID:   launchID,
 			Get: func(ctx context.Context) (*hubclient.Agent, error) {
 				return hubCtx.Client.ProjectAgents(projectID).Get(ctx, agentName)
 			},

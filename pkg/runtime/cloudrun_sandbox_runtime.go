@@ -1116,18 +1116,23 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 	return slug, nil
 }
 
-// TODO(ptone/scion#2550 P2/P4): enforce ref.RunID. The sandbox name is
-// reused across runs, so this is still name-scoped today.
+// Stop removes the sandbox ref.ID: there is no stop/pause verb, so Stop
+// is Delete, including its run check (sandboxRunCheck).
 func (r *CloudRunSandboxRuntime) Stop(ctx context.Context, ref RunRef) error {
 	// sandbox delete requires --force for running sandboxes.
 	// There is no stop/pause verb; Stop == Delete.
-	return r.deleteOrWorkaround(ctx, ref.ID)
+	return r.Delete(ctx, ref)
 }
 
-// P2/P4: enforce ref.RunID (ptone/scion#2550). The sandbox name is reused
-// across runs, so this is still name-scoped today.
+// Delete removes the sandbox ref.ID. The sandbox name is reused across
+// runs, so when ref.RunID is set the state entry is checked first
+// (sandboxRunCheck) and a sandbox of another run is left untouched
+// (ptone/scion#2550).
 func (r *CloudRunSandboxRuntime) Delete(ctx context.Context, ref RunRef) error {
 	id := ref.ID
+	if proceed, err := r.sandboxRunCheck(ref); !proceed {
+		return err
+	}
 	// Always use --force: sandbox delete without it silently fails for
 	// running sandboxes. NEVER fall back to plain delete (without --force) --
 	// it refuses AND kills the sandbox anyway, leaving orphaned
@@ -1135,6 +1140,35 @@ func (r *CloudRunSandboxRuntime) Delete(ctx context.Context, ref RunRef) error {
 	// running". This is the more dangerous defect. See
 	// defect-sandbox-delete-hang.md.
 	return r.deleteOrWorkaround(ctx, id)
+}
+
+// sandboxRunCheck enforces ref.RunID before a Stop or Delete, from the
+// state store (the only record of sandboxes: the CLI has no list). It
+// reports whether the delete may proceed:
+//   - no run ID: proceed by name, as before run IDs existed;
+//   - an entry of ref.RunID, or a legacy entry with no run label (the rule
+//     k8s and the broker apply): proceed;
+//   - an entry of another run: do not proceed; ErrRunMismatch;
+//   - no entry: do not proceed; nil. The run's sandbox is already gone
+//     (deleted, or pruned by reconcile), as k8s treats a missing pod, and a
+//     sandbox of a newer run still starting (run, before its entry is
+//     recorded) is not deleted by name.
+func (r *CloudRunSandboxRuntime) sandboxRunCheck(ref RunRef) (bool, error) {
+	if ref.RunID == "" {
+		return true, nil
+	}
+	entry := r.state.get(ref.ID)
+	if entry == nil {
+		runtimeLog.Info("Run-scoped sandbox delete: no state entry; treating the run's sandbox as gone",
+			"sandbox", ref.ID, "run_id", ref.RunID)
+		return false, nil
+	}
+	if run := entry.Labels[api.LabelRunID]; run != "" && run != ref.RunID {
+		runtimeLog.Info("Left a sandbox of another run untouched",
+			"sandbox", ref.ID, "run_id", ref.RunID, "sandbox_run_id", run)
+		return false, fmt.Errorf("sandbox %s belongs to run %q, not %q: %w", ref.ID, run, ref.RunID, ErrRunMismatch)
+	}
+	return true, nil
 }
 
 // deleteOrWorkaround dispatches to the workaround or the plain path based

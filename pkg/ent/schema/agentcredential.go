@@ -41,6 +41,11 @@ func (AgentCredential) Fields() []ent.Field {
 			NotEmpty(),
 		field.String("token_jti_hash").
 			NotEmpty(),
+		// run_id is the agent run the token was issued for; empty for a
+		// token issued without one.
+		field.String("run_id").
+			Optional().
+			Default(""),
 		field.Time("issued_at").
 			Default(time.Now).
 			Immutable(),

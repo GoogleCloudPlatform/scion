@@ -13,6 +13,7 @@ import (
 	"entgo.io/ent/dialect/sql/sqlgraph"
 	"entgo.io/ent/schema/field"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agenthold"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/groupmembership"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/policybinding"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/project"
@@ -1133,6 +1134,21 @@ func (_c *AgentCreate) AddPolicyBindings(v ...*PolicyBinding) *AgentCreate {
 	return _c.AddPolicyBindingIDs(ids...)
 }
 
+// AddHoldIDs adds the "holds" edge to the AgentHold entity by IDs.
+func (_c *AgentCreate) AddHoldIDs(ids ...uuid.UUID) *AgentCreate {
+	_c.mutation.AddHoldIDs(ids...)
+	return _c
+}
+
+// AddHolds adds the "holds" edges to the AgentHold entity.
+func (_c *AgentCreate) AddHolds(v ...*AgentHold) *AgentCreate {
+	ids := make([]uuid.UUID, len(v))
+	for i := range v {
+		ids[i] = v[i].ID
+	}
+	return _c.AddHoldIDs(ids...)
+}
+
 // Mutation returns the AgentMutation object of the builder.
 func (_c *AgentCreate) Mutation() *AgentMutation {
 	return _c.mutation
@@ -1780,6 +1796,22 @@ func (_c *AgentCreate) createSpec() (*Agent, *sqlgraph.CreateSpec) {
 			Bidi:    false,
 			Target: &sqlgraph.EdgeTarget{
 				IDSpec: sqlgraph.NewFieldSpec(policybinding.FieldID, field.TypeUUID),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges = append(_spec.Edges, edge)
+	}
+	if nodes := _c.mutation.HoldsIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   agent.HoldsTable,
+			Columns: []string{agent.HoldsColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(agenthold.FieldID, field.TypeUUID),
 			},
 		}
 		for _, k := range nodes {

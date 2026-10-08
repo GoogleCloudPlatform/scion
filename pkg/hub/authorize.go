@@ -16,11 +16,14 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
+	"strconv"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
@@ -46,9 +49,7 @@ func logAuthzDenial(r *http.Request, identity Identity, resource Resource, actio
 	var path string
 	ctx := context.Background()
 	if r != nil {
-		if r.URL != nil {
-			path = r.URL.Path
-		}
+		path = logging.RequestPath(r)
 		ctx = r.Context()
 	}
 	// E.2a (plan §3.1(5)): every one of this function's ~56 call sites now
@@ -91,6 +92,40 @@ func writeForbiddenStructured(w http.ResponseWriter, msg string, resourceType st
 // with a known deciding stage. A delegation-ceiling denial adds
 // details.denied_by; no other stage adds anything.
 func writeForbiddenStructuredDenial(w http.ResponseWriter, msg string, resourceType string, action Action, deniedBy DeniedBy) {
+	writeForbiddenStructuredDenialCause(w, msg, resourceType, action, deniedBy, "")
+}
+
+// Additive details on a ceiling_unrecorded denial. They name the recovery
+// route only; no edge or ancestor ID is returned to the caller. The message
+// text is unchanged.
+const (
+	detailDenyCause       = "deny_cause"
+	detailRemediation     = "remediation"
+	detailRemediationPath = "remediation_path"
+
+	remediationDelegationProvenanceAdoption = "delegation_provenance_adoption"
+)
+
+// addCeilingUnrecordedDetails adds the delegation-provenance adoption keys
+// to details when cause is DenyCauseCeilingUnrecorded, allocating details
+// when needed. Any other cause returns details unchanged.
+func addCeilingUnrecordedDetails(details map[string]interface{}, cause DenyCause) map[string]interface{} {
+	if cause != DenyCauseCeilingUnrecorded {
+		return details
+	}
+	if details == nil {
+		details = make(map[string]interface{}, 3)
+	}
+	details[detailDenyCause] = string(DenyCauseCeilingUnrecorded)
+	details[detailRemediation] = remediationDelegationProvenanceAdoption
+	details[detailRemediationPath] = delegationAdoptionPath
+	return details
+}
+
+// writeForbiddenStructuredDenialCause is writeForbiddenStructuredDenial
+// with the decision's DenyCause; a ceiling_unrecorded cause adds the
+// delegation-provenance adoption details.
+func writeForbiddenStructuredDenialCause(w http.ResponseWriter, msg string, resourceType string, action Action, deniedBy DeniedBy, cause DenyCause) {
 	if msg == "" {
 		msg = "Insufficient permissions"
 	}
@@ -107,6 +142,7 @@ func writeForbiddenStructuredDenial(w http.ResponseWriter, msg string, resourceT
 			details["denied_by"] = string(DeniedByDelegationCeiling)
 		}
 	}
+	details = addCeilingUnrecordedDetails(details, cause)
 	writeError(w, http.StatusForbidden, ErrCodeForbidden, msg, details)
 }
 
@@ -145,7 +181,27 @@ func (s *Server) authorizeWithMessage(w http.ResponseWriter, r *http.Request, re
 	decision := s.authzService.CheckAccess(ctx, identity, resource, action)
 	if !decision.Allowed {
 		logAuthzDenial(r, identity, resource, action, decision.Reason)
-		writeForbiddenStructuredDenial(w, msg, resource.Type, action, decision.DeniedBy)
+		writeForbiddenStructuredDenialCause(w, msg, resource.Type, action, decision.DeniedBy, decision.adoptionDetailsCause())
+		return false
+	}
+	return true
+}
+
+// authorizeWithEvidence is authorize with server-built target evidence for
+// a collection-level request (CheckAccessWithEvidence). evidence must come
+// from hubCollectionEvidence or projectCollectionEvidence in the handler
+// that knows which operation it runs, never from a request field.
+func (s *Server) authorizeWithEvidence(w http.ResponseWriter, r *http.Request, resource Resource, action Action, evidence TargetScopeEvidence) bool {
+	ctx := r.Context()
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		Unauthorized(w)
+		return false
+	}
+	decision := s.authzService.CheckAccessWithEvidence(ctx, identity, resource, action, evidence)
+	if !decision.Allowed {
+		logAuthzDenial(r, identity, resource, action, decision.Reason)
+		writeForbiddenStructuredDenial(w, "", resource.Type, action, decision.DeniedBy)
 		return false
 	}
 	return true
@@ -302,8 +358,21 @@ func (s *Server) authorizeAgentCreate(w http.ResponseWriter, r *http.Request, pr
 	decision := s.agentCreateDecision(ctx, identity, projectID)
 	if !decision.Allowed {
 		logAuthzDenial(r, identity, resource, ActionCreate, decision.Reason)
-		writeForbiddenDenial(w, agentCreateDenyMessage, decision.DeniedBy)
+		writeForbiddenDenialCause(w, agentCreateDenyMessage, decision.DeniedBy, decision.adoptionDetailsCause())
 		return false
+	}
+	// A creating agent must also be in good standing (ptone/scion#3433):
+	// not held, its chain live and not held, and its root user active and
+	// admitted to the project. Refused with the same generic response as
+	// any other create denial; a lookup fault refuses.
+	if agentIdent, ok := identity.(AgentIdentity); ok {
+		if err := s.agentStanding(ctx, agentIdent.ID()); err != nil {
+			logAuthzDenial(r, identity, resource, ActionCreate, "creating agent not in good standing: "+standingReason(err))
+			// The agent's authority comes from its chain, like a delegation
+			// ceiling refusal, and is answered the same way.
+			writeForbiddenDenial(w, agentCreateDenyMessage, DeniedByDelegationCeiling)
+			return false
+		}
 	}
 	return true
 }
@@ -337,6 +406,12 @@ type agentTargetDenial struct {
 	reason string
 	// deniedBy is the decision stage that denied, when attributed.
 	deniedBy DeniedBy
+	// cause is the decision's adoptionDetailsCause: ceiling_unrecorded when
+	// delegation-provenance adoption can address the denial, else empty.
+	cause DenyCause
+	// indeterminate is set when the decision could not be evaluated (see
+	// Decision.IsIndeterminate) rather than denied by policy.
+	indeterminate bool
 }
 
 // authorizeAgentTargetAction decides whether identity may perform action on
@@ -400,10 +475,12 @@ func (s *Server) authorizeAgentTargetAction(ctx context.Context, identity Identi
 	})
 	if !decision.Allowed {
 		return &agentTargetDenial{
-			status:   http.StatusForbidden,
-			message:  agentTargetDenyMessage,
-			reason:   decision.Reason,
-			deniedBy: decision.DeniedBy,
+			status:        http.StatusForbidden,
+			message:       agentTargetDenyMessage,
+			reason:        decision.Reason,
+			deniedBy:      decision.DeniedBy,
+			cause:         decision.adoptionDetailsCause(),
+			indeterminate: decision.IsIndeterminate(),
 		}
 	}
 	return nil
@@ -422,21 +499,32 @@ func writeAgentTargetDenial(w http.ResponseWriter, r *http.Request, identity Ide
 		resource = agentResource(target)
 	}
 	logAuthzDenial(r, identity, resource, action, denial.reason)
-	writeForbiddenDenial(w, denial.message, denial.deniedBy)
+	writeForbiddenDenialCause(w, denial.message, denial.deniedBy, denial.cause)
 }
 
 // writeForbiddenDenial writes a 403 with message (default text when empty).
 // A delegation-ceiling denial adds details.denied_by and no other detail.
 func writeForbiddenDenial(w http.ResponseWriter, message string, deniedBy DeniedBy) {
-	if deniedBy != DeniedByDelegationCeiling {
+	writeForbiddenDenialCause(w, message, deniedBy, "")
+}
+
+// writeForbiddenDenialCause is writeForbiddenDenial with the decision's
+// DenyCause; a ceiling_unrecorded cause adds the delegation-provenance
+// adoption details.
+func writeForbiddenDenialCause(w http.ResponseWriter, message string, deniedBy DeniedBy, cause DenyCause) {
+	var details map[string]interface{}
+	if deniedBy == DeniedByDelegationCeiling {
+		details = map[string]interface{}{"denied_by": string(DeniedByDelegationCeiling)}
+	}
+	details = addCeilingUnrecordedDetails(details, cause)
+	if details == nil {
 		writeForbidden(w, message)
 		return
 	}
 	if message == "" {
 		message = "Insufficient permissions"
 	}
-	writeError(w, http.StatusForbidden, ErrCodeForbidden, message,
-		map[string]interface{}{"denied_by": string(DeniedByDelegationCeiling)})
+	writeError(w, http.StatusForbidden, ErrCodeForbidden, message, details)
 }
 
 // authorizeAgentLifecycle gates operations on an existing agent, for every
@@ -549,7 +637,9 @@ func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) (UserIdent
 func (s *Server) requireAdminFor(w http.ResponseWriter, r *http.Request, reason authzop.SessionOnlyReason) (UserIdentity, bool) {
 	// Synthetic resource: requireAdmin is a role check on the hub itself
 	// rather than a policy check on an addressable resource.
-	resource := Resource{Type: "hub", ID: r.URL.Path}
+	// The path is only a label (it reaches the denial log), so it is the
+	// logged form.
+	resource := Resource{Type: "hub", ID: logging.RequestPath(r)}
 
 	identity := GetIdentityFromContext(r.Context())
 	if identity == nil {
@@ -584,4 +674,211 @@ func (s *Server) requireAdminFor(w http.ResponseWriter, r *http.Request, reason 
 		return nil, false
 	}
 	return user, true
+}
+
+// Self-scoped authorization.
+//
+// A self permission (permissions.IsSelfPermission) acts only on the
+// holder's own records: inbox items, direct messages, user-scope skill
+// injections. Those records have no project or hub target that a role
+// binding could authorize, so these checks replace Decide for them. The
+// caller has already confirmed that the record belongs to the holder.
+
+// Self-scope deny reasons.
+const (
+	selfScopeReasonNotSelfPermission = "permission is not a self-scoped permission"
+	selfScopeReasonCredential        = "credential cannot act on self-scoped records"
+	selfScopeReasonCeiling           = "token does not have scope for this self-scoped permission"
+	selfScopeReasonBoundary          = bearerReasonBoundaryIneligible
+	selfScopeReasonOutsideProject    = bearerReasonOutsideProject
+)
+
+// selfScopedDecision applies the self-scope rule for one record:
+//
+//   - permissionID must be a self permission;
+//   - an interactive session or a dev credential passes;
+//   - a user access token passes only if its ceiling allows permissionID,
+//     permissionID is eligible for the token's boundary kind, and, for a
+//     project boundary, rowProjectID equals the boundary project. A record
+//     with no project (rowProjectID empty) needs a hub boundary;
+//   - every other credential is denied.
+//
+// ok is false with a stable reason on denial.
+func selfScopedDecision(identity Identity, permissionID, rowProjectID string) (ok bool, reason string) {
+	if !permissions.IsSelfPermission(permissionID) {
+		return false, selfScopeReasonNotSelfPermission
+	}
+	switch v := identity.(type) {
+	case *AuthenticatedUser:
+		if v == nil {
+			return false, selfScopeReasonCredential
+		}
+		return true, ""
+	case *DevUser:
+		if v == nil {
+			return false, selfScopeReasonCredential
+		}
+		return true, ""
+	case *ScopedUserIdentity:
+		if v == nil {
+			return false, selfScopeReasonCredential
+		}
+		if !v.Ceiling().Allows(permissionID) {
+			return false, selfScopeReasonCeiling
+		}
+		boundary := v.Boundary()
+		if !boundary.Valid() {
+			return false, bearerReasonBoundaryInvalid
+		}
+		if !permissionEligibleForBoundary(permissionID, boundary.Kind) {
+			return false, selfScopeReasonBoundary
+		}
+		if boundary.Kind == BoundaryKindProject && (rowProjectID == "" || rowProjectID != boundary.ProjectID) {
+			return false, selfScopeReasonOutsideProject
+		}
+		return true, ""
+	default:
+		return false, selfScopeReasonCredential
+	}
+}
+
+// selfScopeReasonProjectAccess is the deny reason when a project-boundary
+// token's holder is not a current member of the record's project.
+const selfScopeReasonProjectAccess = bearerReasonProjectAccessDenied
+
+// selfScopeCheck applies the self-scope rule to the records of one request.
+// It adds a live check to selfScopedDecision: for a project-boundary token,
+// the holder must currently be a member of the record's project
+// (ProjectMembershipEvidence), checked on every request, as the bearer gate
+// checks current project access for a project target. A lookup error
+// denies. The membership result is remembered per project for the request.
+type selfScopeCheck struct {
+	ctx          context.Context
+	authz        *AuthzService
+	identity     Identity
+	permissionID string
+	member       map[string]bool
+}
+
+func (s *Server) newSelfScopeCheck(ctx context.Context, identity Identity, permissionID string) *selfScopeCheck {
+	return &selfScopeCheck{ctx: ctx, authz: s.authzService, identity: identity, permissionID: permissionID, member: map[string]bool{}}
+}
+
+// decide returns whether the caller may apply the permission to a record of
+// rowProjectID, with a stable reason on denial.
+func (c *selfScopeCheck) decide(rowProjectID string) (bool, string) {
+	ok, reason := selfScopedDecision(c.identity, c.permissionID, rowProjectID)
+	if !ok {
+		return false, reason
+	}
+	token, isToken := c.identity.(*ScopedUserIdentity)
+	if !isToken || token.Boundary().Kind != BoundaryKindProject {
+		return true, ""
+	}
+	// selfScopedDecision admitted a project-boundary token only for a
+	// record of its boundary project, so rowProjectID is that project.
+	member, seen := c.member[rowProjectID]
+	if !seen {
+		member = false
+		if c.authz != nil {
+			var err error
+			member, _, err = c.authz.ProjectMembershipEvidence(c.ctx, principalContextForIdentity(token), rowProjectID)
+			if err != nil {
+				member = false
+			}
+		}
+		c.member[rowProjectID] = member
+	}
+	if !member {
+		return false, selfScopeReasonProjectAccess
+	}
+	return true, ""
+}
+
+// allows reports whether the caller may apply the permission to a record
+// of rowProjectID.
+func (c *selfScopeCheck) allows(rowProjectID string) bool {
+	ok, _ := c.decide(rowProjectID)
+	return ok
+}
+
+// authorizeSelfScoped authorizes the caller to apply permissionID to one of
+// its own records whose project is rowProjectID (empty for a record with no
+// project, such as a direct message between two users). It writes 401 when
+// no identity is present and 403 on denial; see selfScopedDecision for the
+// static rule and selfScopeCheck for the live membership check that applies
+// to a project-boundary token.
+func (s *Server) authorizeSelfScoped(w http.ResponseWriter, r *http.Request, permissionID string, rowProjectID string) bool {
+	identity := GetIdentityFromContext(r.Context())
+	if identity == nil {
+		Unauthorized(w)
+		return false
+	}
+	ok, reason := s.newSelfScopeCheck(r.Context(), identity, permissionID).decide(rowProjectID)
+	if ok {
+		return true
+	}
+	resourceType, action := selfPermissionResourceAction(permissionID)
+	logAuthzDenial(r, identity, Resource{Type: resourceType}, action, reason)
+	writeForbiddenStructured(w, "", resourceType, action)
+	return false
+}
+
+// selfPermissionResourceAction returns the registry resource type and
+// action of permissionID, or empty values for an unknown ID.
+func selfPermissionResourceAction(permissionID string) (string, Action) {
+	for _, p := range permissions.Registry {
+		if p.ID == permissionID {
+			return p.Resource, Action(p.Action)
+		}
+	}
+	return "", ""
+}
+
+// filterSelfScopedRows keeps the rows of the caller's own records that the
+// caller may see: projectOf returns a row's project (empty for a row with no
+// project), and check decides each row with the authorizeSelfScoped rule,
+// including the live membership check for a project-boundary token. A
+// caller that may not use the permission at all gets no rows. List handlers
+// filter the full result first and compute totals and cursors from the
+// filtered rows (pageSelfScopedRows), so neither counts a row the caller
+// cannot see.
+func filterSelfScopedRows[T any](check *selfScopeCheck, rows []T, projectOf func(T) string) []T {
+	out := make([]T, 0, len(rows))
+	for _, row := range rows {
+		if check.allows(projectOf(row)) {
+			out = append(out, row)
+		}
+	}
+	return out
+}
+
+// errInvalidSelfScopedCursor reports a cursor pageSelfScopedRows did not
+// issue.
+var errInvalidSelfScopedCursor = errors.New("invalid cursor")
+
+// pageSelfScopedRows filters rows with filterSelfScopedRows and then pages
+// the filtered rows: totalCount is the number of visible rows, and cursor
+// and nextCursor are offsets into the visible rows. An empty cursor starts
+// at the first row; nextCursor is empty on the last page. limit must be
+// positive.
+func pageSelfScopedRows[T any](check *selfScopeCheck, rows []T, projectOf func(T) string, cursor string, limit int) (items []T, totalCount int, nextCursor string, err error) {
+	if limit <= 0 {
+		return nil, 0, "", errors.New("limit must be positive")
+	}
+	visible := filterSelfScopedRows(check, rows, projectOf)
+	start := 0
+	if cursor != "" {
+		start, err = strconv.Atoi(cursor)
+		if err != nil || start < 0 || start > len(visible) {
+			return nil, 0, "", errInvalidSelfScopedCursor
+		}
+	}
+	end := start + limit
+	if end >= len(visible) {
+		end = len(visible)
+	} else {
+		nextCursor = strconv.Itoa(end)
+	}
+	return visible[start:end], len(visible), nextCursor, nil
 }

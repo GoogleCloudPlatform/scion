@@ -16,9 +16,15 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
+	"slices"
+	"strconv"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
@@ -512,6 +518,107 @@ func TestParseDefaultBranch_NoMatch(t *testing.T) {
 func TestParseDefaultBranch_EmptyOutput(t *testing.T) {
 	result := parseDefaultBranch("")
 	assert.Equal(t, "", result)
+}
+
+// TestDefaultBranchProbeCmd_DisablesTerminalPrompt guards ptone/scion#3411:
+// the `hub project create` default-branch probe must never block on an
+// interactive git credential prompt, mirroring the sciontool init probe
+// (configureGitCommand).
+func TestDefaultBranchProbeCmd_DisablesTerminalPrompt(t *testing.T) {
+	cmd := defaultBranchProbeCmd(context.Background(), "https://example.com/org/repo.git")
+
+	if !slices.Contains(cmd.Env, "GIT_TERMINAL_PROMPT=0") {
+		t.Fatal("expected GIT_TERMINAL_PROMPT=0 to be set")
+	}
+	assert.Equal(t, []string{"git", "ls-remote", "--symref", "https://example.com/org/repo.git", "HEAD"}, cmd.Args)
+}
+
+// TestDefaultBranchProbeCmd_PreservesEnvironment proves the probe keeps the
+// caller's environment (credential helpers, CA bundles) rather than replacing it.
+func TestDefaultBranchProbeCmd_PreservesEnvironment(t *testing.T) {
+	t.Setenv("GIT_SSL_CAINFO", "/tmp/trust-bundle.pem")
+
+	cmd := defaultBranchProbeCmd(context.Background(), "https://example.com/org/repo.git")
+
+	if !slices.Contains(cmd.Env, "GIT_SSL_CAINFO=/tmp/trust-bundle.pem") {
+		t.Errorf("cmd.Env = %v, want it to contain GIT_SSL_CAINFO=/tmp/trust-bundle.pem", cmd.Env)
+	}
+}
+
+// TestDefaultBranchProbeCmd_HardBound proves the probe is tied to its context
+// and sets WaitDelay, so a killed git cannot leave Output() waiting on a pipe
+// still held by a git-remote-https child.
+func TestDefaultBranchProbeCmd_HardBound(t *testing.T) {
+	cmd := defaultBranchProbeCmd(context.Background(), "https://example.com/org/repo.git")
+	require.NotNil(t, cmd.Cancel, "probe must be built with exec.CommandContext")
+	assert.Positive(t, cmd.WaitDelay, "probe must set WaitDelay so the timeout is a hard bound")
+}
+
+// installFakeGit puts an executable `git` shell script with the given body
+// first on PATH for the duration of the test.
+func installFakeGit(t *testing.T, body string) {
+	t.Helper()
+	if goruntime.GOOS == "windows" {
+		t.Skip("fake git script requires a POSIX shell")
+	}
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "git"), []byte("#!/bin/sh\n"+body), 0o755))
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// TestDetectDefaultBranch_UsesNoPromptEnv runs detectDefaultBranch end to end
+// against a fake git and proves it reaches git with GIT_TERMINAL_PROMPT=0,
+// even when the caller exported GIT_TERMINAL_PROMPT=1 (ptone/scion#3411).
+func TestDetectDefaultBranch_UsesNoPromptEnv(t *testing.T) {
+	envFile := filepath.Join(t.TempDir(), "env")
+	t.Setenv("FAKE_GIT_ENV_FILE", envFile)
+	t.Setenv("GIT_TERMINAL_PROMPT", "1")
+	installFakeGit(t, `printf '%s' "$GIT_TERMINAL_PROMPT" > "$FAKE_GIT_ENV_FILE"
+printf 'ref: refs/heads/develop\tHEAD\n0000000000000000000000000000000000000000\tHEAD\n'
+`)
+
+	assert.Equal(t, "develop", detectDefaultBranch("https://example.com/org/repo.git"))
+
+	got, err := os.ReadFile(envFile)
+	require.NoError(t, err)
+	assert.Equal(t, "0", string(got))
+}
+
+// TestDetectDefaultBranch_TimesOutWithStalledChild proves detectDefaultBranch
+// applies its timeout and that the bound holds when git leaves a child (like
+// git-remote-https stalled on the network) holding the output pipes.
+// Without WaitDelay this blocks until the child exits (30s here).
+func TestDetectDefaultBranch_TimesOutWithStalledChild(t *testing.T) {
+	pidFile := filepath.Join(t.TempDir(), "child.pid")
+	t.Setenv("FAKE_GIT_PID_FILE", pidFile)
+	installFakeGit(t, `sleep 30 &
+echo $! > "$FAKE_GIT_PID_FILE"
+wait
+`)
+	t.Cleanup(func() {
+		if b, err := os.ReadFile(pidFile); err == nil {
+			if pid, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil {
+				if p, err := os.FindProcess(pid); err == nil {
+					_ = p.Kill()
+				}
+			}
+		}
+	})
+
+	// Long enough that a slow /bin/sh start on a loaded machine still spawns
+	// the child before the timeout kills git; the FileExists check below
+	// fails the test if it did not, rather than passing without a stall.
+	orig := defaultBranchProbeTimeout
+	defaultBranchProbeTimeout = 1 * time.Second
+	t.Cleanup(func() { defaultBranchProbeTimeout = orig })
+
+	start := time.Now()
+	got := detectDefaultBranch("https://example.com/org/repo.git")
+	elapsed := time.Since(start)
+
+	require.FileExists(t, pidFile, "fake git must spawn the pipe-holding child before the timeout, or the stall is not exercised")
+	assert.Equal(t, "", got)
+	assert.Less(t, elapsed, 10*time.Second, "probe must not wait for the stalled child to exit")
 }
 
 // TestHubUnknownSubcommand_RejectsRemovedGroveAlias is a regression test for

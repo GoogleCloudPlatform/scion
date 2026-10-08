@@ -80,6 +80,44 @@ To verify which projects your broker is currently serving:
 scion runtime-broker status
 ```
 
+## Headless Registration with a Join Token
+
+`scion runtime-broker register` needs a Hub credential on the broker host: a sign-in, or a [hub token](#headless-registration-with-a-hub-token). For a host where you do not want to place any Hub user credential, such as a build machine or a VM provisioned by a script, split registration in two: create a join token on your own machine, then redeem it on the host. The host never holds a Hub user credential; it ends up with the same broker credentials `register` would have saved.
+
+**1. On your machine**, signed in to the Hub, create the broker and a token for it:
+
+```bash
+scion hub brokers join-token create build-host-3 --ttl 30m
+```
+
+The token is printed on stdout and the instructions, including the broker ID, on stderr. `--json` prints `brokerId`, `brokerName`, `joinToken`, `expiresAt`, `hubEndpoint` and `reissued` as one JSON object.
+
+- You need the `broker.create` permission (see [Broker Registration Permission](/scion/hosted/ha/runtime-broker/#broker-registration-permission)), and you become the broker's owner. Sign in with `scion hub auth login`, or use a hub-boundary [user access token](/scion/hosted/user/personal-access-tokens/) that carries `broker:create`; the broker then belongs to the token's user.
+- `--ttl` sets how long the token is valid, from `5m` to `24h`. The default is `1h`.
+- The token is single use.
+- Running the command again for the same broker issues a new token, and the previous unused one stops working. Only the broker's owner, or a super-admin with a sign-in, can do this; a token does this only for a broker its user created.
+- The command never changes an existing broker's settings (auto-provide, labels, GCP host identity) and does not add the broker to any project.
+
+**2. Move the token to the host** through a channel you already trust for secrets, for example `scp` to a file readable only by the broker's user, or your secret manager.
+
+**3. On the host**, redeem it:
+
+```bash
+export SCION_HUB_ENDPOINT=https://hub.example.com
+scion runtime-broker join --broker-id <broker-id> --token-file /path/to/token
+```
+
+- The token is read from `--token-file` (`-` reads it from stdin), or else from the `SCION_BROKER_JOIN_TOKEN` environment variable. There is no flag that takes the token on the command line. If the file has any group or other permissions, `join` prints a warning and still uses it.
+- `--broker-id` can also come from `SCION_BROKER_ID`.
+- The broker server does not have to be running yet; `join` only warns if it is not.
+- `join` saves the credentials to `~/.scion/hub-credentials/<name>.json` and records the Hub endpoint and broker ID in global settings, as `register` does.
+- If the host already has credentials for this Hub connection, or its settings name a different broker ID, `join` stops. Pass `--force` to replace them.
+- `--name`, `--transport-mode` and `--transport-audience` work as for `register`.
+
+Redeeming a token replaces the broker's credentials. If another host has already joined as this broker, it is disconnected.
+
+**4. Start the broker** with `scion runtime-broker start`, then [provide it to a project](/scion/hosted/ha/runtime-broker/#3-provide-compute-for-a-project). Joining does not provide the broker to any project.
+
 ## Transport Auth for IAP-Protected Hubs
 
 When the Hub is behind [Google IAP](/scion/hosted/ha/auth-proxy-iap/), the broker must carry a transport-layer OIDC token on every request. Transport auth is configured either during registration or via environment variables.
@@ -125,7 +163,7 @@ When you register your machine as a broker:
 
 ## Broker Registration Permission
 
-Registering a Runtime Broker, or re-minting its join token, requires the `broker.create` permission. This covers `POST /api/v1/brokers` and the embedded Runtime Broker path of `POST /api/v1/projects/register`. `broker.create` is granted through the built-in `hub-member` role, so users with the **member** or **admin** [hub role](/scion/hosted/ha/permissions/#hub-roles) can register Runtime Brokers. Users with the **viewer** hub role cannot. A request authenticated with a [user access token](/scion/hosted/user/personal-access-tokens/) is admitted only when the token has a hub boundary and carries `broker:create`; any other user access token is denied with `403`. See [Headless registration with a hub token](#headless-registration-with-a-hub-token).
+Registering a Runtime Broker, or re-minting its join token, requires the `broker.create` permission. This covers `POST /api/v1/brokers` and the embedded Runtime Broker path of `POST /api/v1/projects/register`. `broker.create` is granted through the built-in `hub-member` role, so users with the **member** or **admin** [hub role](/scion/hosted/ha/permissions/#hub-roles) can register Runtime Brokers. Users with the **viewer** hub role cannot. A request authenticated with a [user access token](/scion/hosted/user/personal-access-tokens/) is admitted only when the token has a hub boundary and carries `broker:create`; any other user access token is denied with `403`. See [Headless registration with a hub token](#headless-registration-with-a-hub-token). Registration, re-registration, and secret rotation also refuse agent, delivery, federation, and on-behalf-of credentials: only a user credential (or, for rotation, the Runtime Broker's own credential) is accepted.
 
 :::caution[Breaking change]
 Viewer-role users could previously register brokers; they now receive a 403. The `hub-member` role is reconciled to revision 3 on Hub start to add `broker.create`, so no manual migration is needed for members.
@@ -133,13 +171,13 @@ Viewer-role users could previously register brokers; they now receive a 403. The
 
 ## Broker Ownership
 
-The user who registers a broker becomes its owner. Registration admits a CLI or Web UI sign-in, or a hub-boundary [user access token](/scion/hosted/user/personal-access-tokens/) that carries `broker:create`; a Runtime Broker request acting on behalf of a user is not admitted. A broker registered with a token belongs to the token's user.
+The user who registers a Runtime Broker becomes its owner. Registration admits a CLI or Web UI sign-in, or a hub-boundary [user access token](/scion/hosted/user/personal-access-tokens/) that carries `broker:create`; a Runtime Broker request acting on behalf of a user is not admitted. A broker registered with a token belongs to the token's user.
 
 | Operation | Who may perform it |
 |---|---|
 | Register a new broker | A user who holds `broker.create` (sign-in, or hub token with `broker:create`). |
 | Re-register a broker (new join token) | The same credentials, and the user must be the broker's owner, or a super-admin with a sign-in. This includes the embedded broker's registration path. |
-| Rotate the broker's HMAC secret | The broker itself (HMAC), or its owner or a super-admin with a sign-in. No user access token can rotate a secret. |
+| Rotate the broker's HMAC secret | The broker itself (HMAC, and only for its own secret), or its owner or a super-admin with a sign-in. No user access token can rotate a secret. |
 | Turn on auto-provide | Additionally requires `broker.auto_provide`, held by super-admins. |
 
 Registering a broker never associates it with a project. Brokers registered before ownership was recorded get an owner assigned automatically when the Hub boots.
@@ -201,6 +239,8 @@ Related rules:
 - **Auto-provide:** an auto-provide broker is linked to every new project and is usable by every user. Turning it on requires `broker.auto_provide`.
 
 ## Broker Health Monitoring
+
+A Runtime Broker whose default runtime failed to resolve at startup reports itself `degraded` on `/healthz` (still HTTP `200`), and its `/readyz` returns `503`, so point readiness probes at `/readyz`. Starting or restarting an existing agent whose saved profile the Runtime Broker cannot resolve returns a retryable `503 runtime_unavailable` (with `Retry-After`) before anything is stopped, instead of falling back to the default runtime. The one exception is an agent that last ran on a plain Docker or Podman default runtime, which falls back to it.
 
 The Hub monitors broker health via a recurring heartbeat timeout scheduler. If a broker's WebSocket control channel disconnects and the disconnect event is not received (for example, due to a Hub crash or network partition), the Hub automatically marks the broker as **offline** after approximately five minutes of missed heartbeats. This mirrors the existing agent heartbeat timeout pattern and ensures the broker selection cascade does not dispatch work to unreachable brokers.
 

@@ -48,6 +48,7 @@ import { isTargetKubernetesOnly } from '../../shared/runtime-kind.js';
 import { KNOWN_HARNESS_NAMES, harnessDisplayName } from '../../shared/harness-utils.js';
 import { normalizeModelAlias } from '../../shared/model-utils.js';
 import { MESSAGE_MODE_DISPLAY } from '../../shared/message-mode.js';
+import { defaultTriggersHint } from '../../shared/notification-triggers.js';
 import { apiFetch, apiFetchAllPages, parseApiError } from '../../client/api.js';
 import { navigateTo } from '../../client/navigation.js';
 import type { EnvEntry } from '../shared/env-editor.js';
@@ -60,6 +61,8 @@ export class ScionPageAgentCreate extends LitElement {
   @state() private projects: Project[] = [];
   @state() private brokers: RuntimeBroker[] = [];
   @state() private templates: Template[] = [];
+  /** The template list failed to load; the rest of the form still loads. */
+  @state() private templatesLoadFailed = false;
   @state() private harnessConfigs: HarnessConfigEntry[] = [];
   @state() private gcpServiceAccounts: GCPServiceAccount[] = [];
 
@@ -697,7 +700,19 @@ export class ScionPageAgentCreate extends LitElement {
           // The unfiltered list is already scoped to what the caller may read.
           apiFetch('/api/v1/projects?limit=100'),
           fetch('/api/v1/runtime-brokers?limit=100', { credentials: 'include' }),
-          apiFetchAllPages<Template>(tmplUrl, 'templates'),
+          // Caught on its own: a failed template page leaves the template
+          // list empty with an inline error instead of failing the form.
+          apiFetchAllPages<Template>(tmplUrl, 'templates').then(
+            (list) => {
+              this.templatesLoadFailed = false;
+              return list;
+            },
+            (err: unknown) => {
+              console.error('Failed to load templates:', err);
+              this.templatesLoadFailed = true;
+              return [] as Template[];
+            }
+          ),
           fetch('/api/v1/settings/public', { credentials: 'include' }),
           apiFetch('/api/v1/harness-configs?status=active&limit=100'),
         ]);
@@ -782,6 +797,7 @@ export class ScionPageAgentCreate extends LitElement {
    *  Resets all project-defaultable fields first so that switching projects
    *  does not leak the previous project's defaults into the new one. */
   private async applyProjectDefaults(): Promise<void> {
+    const isStale = this.projectLoadGuard();
     // Reset to base defaults before applying new project settings
     this.maxTurns = 0;
     this.maxModelCalls = 0;
@@ -790,6 +806,7 @@ export class ScionPageAgentCreate extends LitElement {
     this.customModelId = '';
 
     const settings = await this.fetchProjectSettings(this.projectId);
+    if (isStale()) return;
 
     if (settings) {
       if (settings.defaultMaxTurns) this.maxTurns = settings.defaultMaxTurns;
@@ -890,10 +907,13 @@ export class ScionPageAgentCreate extends LitElement {
    * Select the default template and harness config for the current project.
    */
   private async selectDefaultTemplate(): Promise<void> {
+    const isStale = this.projectLoadGuard();
     const visible = this.filteredTemplates;
 
     const settings = this.projectId ? await this.fetchProjectSettings(this.projectId) : null;
-    const harnessDefault = settings?.defaultHarnessConfig || this.hubDefaultHarnessConfig || 'claude';
+    if (isStale()) return;
+    const harnessDefault =
+      settings?.defaultHarnessConfig || this.hubDefaultHarnessConfig || 'claude';
 
     const harnessFor = (t: { defaultHarnessConfig?: string; harness?: string }) =>
       t.defaultHarnessConfig || t.harness || harnessDefault;
@@ -946,7 +966,24 @@ export class ScionPageAgentCreate extends LitElement {
     }
   }
 
+  /**
+   * Incremented on every project switch. Project-scoped loaders capture it
+   * (with the project id) through projectLoadGuard and drop their results
+   * when a switch happened while they were waiting, so a slow response for
+   * the previous project cannot overwrite the current project's template,
+   * limits or harness configs.
+   */
+  private projectLoadSeq = 0;
+
+  /** Returns a check that is true once the project changed since the call. */
+  private projectLoadGuard(): () => boolean {
+    const seq = this.projectLoadSeq;
+    const projectId = this.projectId;
+    return () => seq !== this.projectLoadSeq || this.projectId !== projectId;
+  }
+
   private async loadHarnessConfigs(): Promise<void> {
+    const isStale = this.projectLoadGuard();
     try {
       const url = this.projectId
         ? `/api/v1/harness-configs?status=active&projectId=${encodeURIComponent(this.projectId)}&limit=100`
@@ -954,6 +991,7 @@ export class ScionPageAgentCreate extends LitElement {
       const res = await apiFetch(url);
       if (res.ok) {
         const data = (await res.json()) as { harnessConfigs?: HarnessConfigEntry[] };
+        if (isStale()) return;
         this.harnessConfigs = (data.harnessConfigs || []).sort((a, b) =>
           (a.displayName || a.name).localeCompare(b.displayName || b.name)
         );
@@ -1533,6 +1571,7 @@ export class ScionPageAgentCreate extends LitElement {
                 .value=${this.projectId}
                 @sl-change=${(e: Event) => {
                   this.projectId = (e.target as HTMLElement & { value: string }).value;
+                  this.projectLoadSeq++;
                   this.selectBrokerForProject();
                   void this.selectDefaultTemplate();
                   void this.loadHarnessConfigs();
@@ -1573,7 +1612,11 @@ export class ScionPageAgentCreate extends LitElement {
               >`
           )}
         </sl-select>
-        <div class="hint">Agent configuration template.</div>
+        ${this.templatesLoadFailed
+          ? html`<div class="hint" style="color: var(--sl-color-danger-600);">
+              Could not load templates. Reload the page to try again.
+            </div>`
+          : html`<div class="hint">Agent configuration template.</div>`}
       </div>
 
       <!-- Harness Config -->
@@ -1702,10 +1745,7 @@ export class ScionPageAgentCreate extends LitElement {
         >
           Notify me on important agent state changes
         </sl-checkbox>
-        <sl-tooltip
-          content="You will be notified when this agent reaches: Completed, Waiting for Input, or Limits Exceeded."
-          hoist
-        >
+        <sl-tooltip content=${defaultTriggersHint()} hoist>
           <span class="help-badge">?</span>
         </sl-tooltip>
       </div>
@@ -2070,9 +2110,10 @@ export class ScionPageAgentCreate extends LitElement {
                       ${this.verifiedGCPServiceAccounts.map(
                         (sa) =>
                           html`<sl-option value=${sa.id}>
-                            ${sa.email}${sa.displayName ? ` (${sa.displayName})` : ''}${
-                              sa.scope === 'hub' ? ' (Hub)' : ''
-                            }
+                            ${sa.email}${sa.displayName ? ` (${sa.displayName})` : ''}${sa.scope ===
+                            'hub'
+                              ? ' (Hub)'
+                              : ''}
                           </sl-option>`
                       )}
                     </sl-select>

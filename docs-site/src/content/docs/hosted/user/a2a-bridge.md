@@ -436,6 +436,8 @@ Standard A2A JSON-RPC methods supported at the `/jsonrpc` endpoint:
 | `GetTaskPushNotificationConfig` | Retrieve registered webhooks for a specific task. |
 | `DeleteTaskPushNotificationConfig` | Remove a webhook callback subscription. |
 
+**Input-required replies.** When the agent asks for input (an `input-needed` reply, for example after `sciontool status ask_user`), the bridge returns the reply as a task artifact with the task in the `input-required` state, on every path: blocking `SendMessage`, SSE streams, push notifications, and `SubscribeToTask` replays. Plain replies keep the `working` and `completed` states. The bridge derives task state from the agent's structured status, and falls back to the message text only when no status is set.
+
 ---
 
 ## 10. Troubleshooting & Operations

@@ -606,7 +606,12 @@ type AgentInfo struct {
 	// audit flows so operators can correlate an agent with the exact bundle
 	// it ran.
 	HarnessConfigRevision string `json:"harnessConfigRevision,omitempty"`
-	HarnessAuth           string `json:"harnessAuth,omitempty"` // Resolved harness auth method (api-key, oauth-token, auth-file, vertex-ai)
+	// HarnessConfigSource records which resolution branch supplied the
+	// harness-config (config.HarnessConfigSource: hub-hydrated,
+	// template-bundled, broker-local, builtin, unresolved). Provenance only;
+	// Start always sets it, so empty means an older broker (ptone/scion#620).
+	HarnessConfigSource string `json:"harnessConfigSource,omitempty"`
+	HarnessAuth         string `json:"harnessAuth,omitempty"` // Resolved harness auth method (api-key, oauth-token, auth-file, vertex-ai)
 
 	// Project association
 	Project     string `json:"project"`               // Project name (standard field)
@@ -908,6 +913,26 @@ func IsSharedWorkspaceFromContext(ctx context.Context) bool {
 	return v
 }
 
+type hubProjectIDContextKey struct{}
+
+// ContextWithHubProjectID attaches the Hub-supplied project ID of a broker
+// dispatch. Agent-dir resolution uses it, not the project-id marker inside
+// the project directory, to locate a
+// shared-workspace project's broker-side external agents root.
+func ContextWithHubProjectID(ctx context.Context, projectID string) context.Context {
+	if projectID == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, hubProjectIDContextKey{}, projectID)
+}
+
+// HubProjectIDFromContext returns the Hub-supplied project ID attached by
+// ContextWithHubProjectID, or "" (e.g. a local CLI start).
+func HubProjectIDFromContext(ctx context.Context) string {
+	v, _ := ctx.Value(hubProjectIDContextKey{}).(string)
+	return v
+}
+
 type emptyPerAgentWorkspaceContextKey struct{}
 
 // ContextWithEmptyPerAgentWorkspace returns a new context marking the agent's
@@ -971,22 +996,44 @@ func IsReprovisionFromContext(ctx context.Context) bool {
 }
 
 // ReincarnateEligible implements the eligibility predicate of design §3.4
-// Amendment A23: a `scion reincarnate` reprovision is safe to attempt for a
-// workspace that is either clone-per-agent (a real GitClone) or an explicit
-// mount (no GitClone, but a non-empty Workspace). Both the Hub (deciding
-// whether to accept a reincarnate request, using AppliedConfig.GitClone and
-// AppliedConfig.Workspace) and the broker (deciding whether Manager.Reprovision
-// may run, using the equivalent StartOptions fields) call this one helper so
-// the two gates cannot drift apart.
+// Amendment A23, extended for empty-per-agent (miller79/scion#167): a
+// `scion reincarnate` reprovision is safe to attempt for a workspace that is
+// clone-per-agent (a real GitClone), an explicit mount (no GitClone, but a
+// non-empty Workspace), or empty-per-agent (the agent's private
+// <agentDir>/workspace directory, reused in place). Both the Hub (deciding
+// whether to accept a reincarnate request, using AppliedConfig.GitClone,
+// AppliedConfig.Workspace and the project's empty-per-agent mode) and the
+// broker (deciding whether Manager.Reprovision may run, using the equivalent
+// StartOptions fields) call this one helper so the two gates cannot drift
+// apart.
 //
 // Neither side treats this as sufficient on its own: the Hub additionally
 // excludes worktree-per-agent projects (which it can detect from the project
 // record but this helper cannot, since GitClone is also set for
-// worktree-per-agent agents — see design §3.4 Amendment A4), and the broker
-// additionally requires the workspace to already exist on disk — Reprovision
-// never creates, clones, pulls, resets, or removes a workspace.
-func ReincarnateEligible(hasGitClone bool, workspace string) bool {
-	return hasGitClone || workspace != ""
+// worktree-per-agent agents — see design §3.4 Amendment A4) and gates
+// empty-per-agent on a local-disk runtime and the broker's
+// ReprovisionEmptyPerAgent capability; the broker additionally requires the
+// workspace to already exist on disk — Reprovision never creates, clones,
+// pulls, resets, or removes a workspace.
+func ReincarnateEligible(hasGitClone bool, workspace string, emptyPerAgent bool) bool {
+	return hasGitClone || workspace != "" || emptyPerAgent
+}
+
+// IsLocalDiskRuntime reports whether a runtime keeps an empty-per-agent
+// workspace as a directory on the broker's own disk, so same-broker
+// reincarnation can reuse it in place (miller79/scion#167). It is the one
+// allow-list behind both the Hub's reincarnate gate and the broker's
+// Manager.Reprovision guard. The values are runtime Name()s ("docker",
+// "podman", "container"), plus "apple", which some brokers record as a
+// profile Type for the Apple container runtime. Kubernetes, cloud runtimes,
+// and empty or unknown values are refused (fail closed).
+func IsLocalDiskRuntime(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "docker", "podman", "container", "apple":
+		return true
+	default:
+		return false
+	}
 }
 
 type provisionedWorktreeRepoRootContextKey struct{}
@@ -1163,6 +1210,7 @@ type StartOptions struct {
 	Profile           string
 	HarnessConfig     string
 	HarnessConfigPath string // Resolved local dir for the harness-config (set when hydrated from the Hub); bypasses on-disk FindHarnessConfigDir lookup
+	HarnessConfigID   string // Hub harness-config record ID of the hydrated HarnessConfigPath (set with it by the broker); empty otherwise
 	HarnessAuth       string // Late-binding override for auth_selected_type (api-key, oauth-token, auth-file, vertex-ai)
 	Image             string
 	ProjectPath       string
@@ -1187,6 +1235,11 @@ type StartOptions struct {
 	Workspace          string
 	GitClone           *GitCloneConfig // When set, skip workspace creation; sciontool clones inside container
 	SharedWorkspace    bool            // When true, workspace is a shared git clone (git-workspace hybrid); skip worktree, configure credential helper
+	// HubProjectID is the Hub-supplied project ID of a broker dispatch (set
+	// by the broker from the request, never from agent or workspace state).
+	// It locates a shared-workspace project's broker-side external agents
+	// root; see config.AgentsRootForProject. Empty for local CLI starts.
+	HubProjectID string `json:"-"`
 	// SharedWorkspaceClone holds the clone settings of a shared-plain git
 	// project's workspace. Set only with SharedWorkspace and without
 	// GitClone. It does not change how the workspace is mounted or created:
@@ -1203,7 +1256,16 @@ type StartOptions struct {
 	TelemetryOverride *bool        // Explicit telemetry override from CLI flags (--enable-telemetry / --disable-telemetry)
 	InlineConfig      *ScionConfig // Inline config from --config flag, merged over template config
 	SharedDirs        []SharedDir  // Project-level shared directories (from Hub, merged with settings)
-	ExtraHosts        []string     // Extra --add-host entries for container networking (e.g. "example.com:host-gateway")
+	// SharedDirBackendChanges asks a Reprovision to change the recorded
+	// shared-dir storage backend of the named shared dirs (dir name to
+	// backend, "nfs" or "local"). Only the agent's record changes;
+	// no data is copied, moved or deleted. Ignored outside Reprovision.
+	SharedDirBackendChanges map[string]string
+	// AllowEmptySharedDir, with SharedDirBackendChanges, skips the start
+	// check that refuses an empty directory on the new backend while the
+	// dir's directory on its previous backend is not empty.
+	AllowEmptySharedDir bool
+	ExtraHosts          []string // Extra --add-host entries for container networking (e.g. "example.com:host-gateway")
 
 	// EmptyPerAgentWorkspace gives the agent a private, initially empty,
 	// non-git workspace at <projectDir>/agents/<slug>/workspace (design
@@ -1292,11 +1354,14 @@ const (
 	BrokerErrorDetailCurrentRunID = "currentRunId"
 )
 
-// BrokerErrorCodeRunMismatch is the broker error code of the 404 a stop
-// naming a run gets when another run holds the agent's name
+// BrokerErrorCodeRunMismatch is the broker error code of the 404 a stop or
+// delete naming a run gets when another run holds the agent's name
 // (ptone/scion#2550). Its details carry BrokerErrorDetailRunID (the run the
-// stop named) and, when known, BrokerErrorDetailCurrentRunID (the run that
-// holds the name: the runtime entry's, or an in-flight launch's).
+// stop or delete named) and, when known, BrokerErrorDetailCurrentRunID (the
+// run that holds the name: the runtime entry's, or an in-flight launch's).
+// On a delete, a non-empty currentRunId that differs from runId means the
+// hub must not finalize the agent's row: that run is still on the broker
+// (ptone/scion#3080). Without one, the delete's 404 is "not found" as before.
 const BrokerErrorCodeRunMismatch = "run_mismatch"
 
 // ResourceHandle.Kind values.

@@ -44,7 +44,7 @@ type runSwapStopDispatcher struct {
 
 func (d *runSwapStopDispatcher) DispatchAgentStop(ctx context.Context, agent *store.Agent) error {
 	d.stopCount.Add(1)
-	if _, err := d.s.SetAgentRunID(ctx, agent.ID, "run-new"); err != nil {
+	if _, err := d.s.SetAgentRunID(ctx, agent.ID, "run-new", nil); err != nil {
 		return err
 	}
 	return d.s.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{Phase: string(state.PhaseRunning), ContainerStatus: "running"})
@@ -59,7 +59,7 @@ func runSwapQuotaAgent(t *testing.T, name string) (*Server, store.Store, *store.
 	broker, project := newQuotaTestBrokerAndProject(t, s, name)
 	a := newQuotaTestAgent(t, s, broker, project, name, state.PhaseRunning)
 	reserveBrokerSlot(t, s, broker, a.ID)
-	if _, err := s.SetAgentRunID(context.Background(), a.ID, "run-old"); err != nil {
+	if _, err := s.SetAgentRunID(context.Background(), a.ID, "run-old", nil); err != nil {
 		t.Fatal(err)
 	}
 	a.RunID = "run-old"
@@ -173,7 +173,7 @@ type runLandingStartClient struct {
 
 func (c runLandingStartClient) StartAgent(ctx context.Context, _, _, _, _, _, _, _, _, _, _ string, _ map[string]string, _ []ResolvedSecret, _ *api.ScionConfig, _ []api.SharedDir, _, _ bool, _ StartExtras) (*RemoteAgentResponse, error) {
 	c.startCalled = true
-	if _, err := c.s.SetAgentRunID(ctx, c.agentID, "run-other"); err != nil {
+	if _, err := c.s.SetAgentRunID(ctx, c.agentID, "run-other", nil); err != nil {
 		return nil, err
 	}
 	return nil, errors.New("connection reset by peer")
@@ -192,7 +192,7 @@ func restartQuotaAgent(t *testing.T, name string) (*Server, store.Store, *store.
 		t.Fatal(err)
 	}
 	reserveBrokerSlot(t, s, broker, agent.ID)
-	if _, err := s.SetAgentRunID(ctx, agent.ID, "run-x"); err != nil {
+	if _, err := s.SetAgentRunID(ctx, agent.ID, "run-x", nil); err != nil {
 		t.Fatal(err)
 	}
 	return srv, s, agent
@@ -275,7 +275,7 @@ type failSuspendWriteStore struct {
 func (f *failSuspendWriteStore) UpdateAgentStatus(ctx context.Context, id string, upd store.AgentStatusUpdate) error {
 	if upd.Phase == string(state.PhaseSuspended) {
 		if f.swapRun {
-			if _, err := f.SetAgentRunID(ctx, id, "run-new"); err != nil {
+			if _, err := f.SetAgentRunID(ctx, id, "run-new", nil); err != nil {
 				return err
 			}
 		}

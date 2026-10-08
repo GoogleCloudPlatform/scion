@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"go.opentelemetry.io/otel/attribute"
@@ -47,7 +48,63 @@ func NewProviders(ctx context.Context, config *Config, batch bool) (*Providers, 
 		return nil, err
 	}
 
-	return newLoopbackProviders(ctx, config, res, batch)
+	return newLoopbackProviders(ctx, config, res, batch, loopbackExportBounds{})
+}
+
+// Bounds for the per-invocation `sciontool hook` providers.
+//
+// A hook runs synchronously inside the harness's tool loop, and some harnesses
+// kill a hook (and fail the tool call) after a short timeout: antigravity uses
+// 10s, grok-build 5s. The hook exports only to the loopback receiver in the
+// same container, which answers a healthy export in a few milliseconds, so the
+// OTLP defaults (10s per export, retries on Unavailable) only matter when the
+// receiver is missing or wedged. In that case the export cannot succeed and
+// waiting just stalls the harness. These bounds keep a hook with no receiver
+// well under one second end to end while leaving a wide margin for a live
+// receiver on a loaded host.
+const (
+	// HookExportTimeout bounds a single OTLP export (one span, one log
+	// record, or the final metric collection). About 50x a typical loopback
+	// round trip, including the first connection's HTTP/2 handshake.
+	HookExportTimeout = 250 * time.Millisecond
+
+	// HookShutdownTimeout bounds the provider shutdown that flushes the hook's
+	// metrics. A hook performs at most a span export and a log export before
+	// shutdown, so with a receiver that accepts connections but never answers
+	// the worst case is about 2*HookExportTimeout + HookShutdownTimeout
+	// (0.75s). With nothing listening the exports fail immediately because
+	// retries are disabled.
+	HookShutdownTimeout = 250 * time.Millisecond
+)
+
+// NewHookProviders creates synchronous loopback providers for a short-lived
+// `sciontool hook` invocation. They behave like NewProviders(ctx, config,
+// false), except that every exporter uses HookExportTimeout and does not
+// retry, so a missing receiver costs milliseconds instead of the OTLP default
+// 10s per export. Callers should shut the providers down with a context bounded
+// by HookShutdownTimeout. A failed export is reported to the OTel global error
+// handler only; it is never retried.
+func NewHookProviders(ctx context.Context, config *Config) (*Providers, error) {
+	if config == nil || !config.Enabled {
+		return nil, nil
+	}
+
+	res, err := buildResource(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	return newLoopbackProviders(ctx, config, res, false, loopbackExportBounds{
+		timeout:      HookExportTimeout,
+		disableRetry: true,
+	})
+}
+
+// loopbackExportBounds overrides the OTLP exporter timeout and retry
+// behaviour. The zero value keeps the OTLP defaults.
+type loopbackExportBounds struct {
+	timeout      time.Duration
+	disableRetry bool
 }
 
 // buildResource creates the OTel resource with service name and agent identifiers.
@@ -98,13 +155,19 @@ func buildResource(ctx context.Context) (*resource.Resource, error) {
 }
 
 // newLoopbackProviders creates standard OTLP gRPC exporters fixed to loopback.
-func newLoopbackProviders(ctx context.Context, config *Config, res *resource.Resource, batch bool) (*Providers, error) {
+func newLoopbackProviders(ctx context.Context, config *Config, res *resource.Resource, batch bool, bounds loopbackExportBounds) (*Providers, error) {
 	endpoint := loopbackEndpoint(config)
 	pinResource := loopbackResourceDialOption(res)
 	traceOpts := []otlptracegrpc.Option{
 		otlptracegrpc.WithEndpoint(endpoint),
 		otlptracegrpc.WithInsecure(),
 		otlptracegrpc.WithDialOption(pinResource),
+	}
+	if bounds.timeout > 0 {
+		traceOpts = append(traceOpts, otlptracegrpc.WithTimeout(bounds.timeout))
+	}
+	if bounds.disableRetry {
+		traceOpts = append(traceOpts, otlptracegrpc.WithRetry(otlptracegrpc.RetryConfig{Enabled: false}))
 	}
 	traceExporter, err := otlptracegrpc.New(ctx, traceOpts...)
 	if err != nil {
@@ -117,6 +180,12 @@ func newLoopbackProviders(ctx context.Context, config *Config, res *resource.Res
 		otlploggrpc.WithInsecure(),
 		otlploggrpc.WithDialOption(pinResource),
 	}
+	if bounds.timeout > 0 {
+		logOpts = append(logOpts, otlploggrpc.WithTimeout(bounds.timeout))
+	}
+	if bounds.disableRetry {
+		logOpts = append(logOpts, otlploggrpc.WithRetry(otlploggrpc.RetryConfig{Enabled: false}))
+	}
 	logExporter, err := otlploggrpc.New(ctx, logOpts...)
 	if err != nil {
 		_ = traceExporter.Shutdown(ctx)
@@ -128,6 +197,12 @@ func newLoopbackProviders(ctx context.Context, config *Config, res *resource.Res
 		otlpmetricgrpc.WithEndpoint(endpoint),
 		otlpmetricgrpc.WithInsecure(),
 		otlpmetricgrpc.WithDialOption(pinResource),
+	}
+	if bounds.timeout > 0 {
+		metricOpts = append(metricOpts, otlpmetricgrpc.WithTimeout(bounds.timeout))
+	}
+	if bounds.disableRetry {
+		metricOpts = append(metricOpts, otlpmetricgrpc.WithRetry(otlpmetricgrpc.RetryConfig{Enabled: false}))
 	}
 	// Hook commands are short lived independent writers. Export their counter
 	// additions as deltas so the receiver can accumulate them once.

@@ -51,16 +51,28 @@ const (
 	reasonUnsupportedKind     = "unsupported_kind"
 )
 
-// handleStream implements core.StreamHandler. The order is fixed: verify
-// the grant against this session's Welcome, check the target against the
-// local policy, dial loopback, and only then accept.
+// handleStream implements core.StreamHandler: it dispatches on the
+// stream kind. A kind this agent does not serve is refused with
+// unsupported_kind before anything else is looked at.
 func (a *Agent) handleStream(ctx context.Context, open *conduitv1.StreamOpen, ps core.PendingStream) error {
-	if open.GetKind() != conduitv1.StreamKind_STREAM_KIND_TCP {
-		return ps.Reject(core.CloseProtocolError, reasonUnsupportedKind)
+	switch open.GetKind() {
+	case conduitv1.StreamKind_STREAM_KIND_TCP:
+		return a.handleTCP(ctx, open, ps)
+	case conduitv1.StreamKind_STREAM_KIND_PTY:
+		if a.opts.SpawnPTY != nil {
+			return a.handlePTY(ctx, open, ps)
+		}
 	}
+	return ps.Reject(core.CloseProtocolError, reasonUnsupportedKind)
+}
+
+// verifyGrant verifies open's grant against this session's Welcome and
+// consumes its jti. It returns the grant's claims, or a refusal reason
+// (the caller rejects with 4403) and the error to log.
+func (a *Agent) verifyGrant(ctx context.Context, open *conduitv1.StreamOpen) (*grant.Claims, string, error) {
 	w := core.WelcomeFromContext(ctx)
 	if w == nil {
-		return ps.Reject(core.CloseForbidden, reasonGrantInvalid+": no session binding")
+		return nil, reasonGrantInvalid + ": no session binding", errors.New("no session binding")
 	}
 	a.applyWelcomeKeys(w)
 	v := &target.Verifier{
@@ -69,9 +81,20 @@ func (a *Agent) handleStream(ctx context.Context, open *conduitv1.StreamOpen, ps
 		Replay:   a.replay,
 		Now:      a.clk.Now,
 	}
-	if _, err := v.VerifyStreamOpen(ctx, target.BindingFromWelcome(w), open, target.Acting{}); err != nil {
+	claims, err := v.VerifyStreamOpen(ctx, target.BindingFromWelcome(w), open, target.Acting{})
+	if err != nil {
+		return nil, reasonGrantInvalid, err
+	}
+	return claims, "", nil
+}
+
+// handleTCP serves a TCP stream. The order is fixed: verify the grant
+// against this session's Welcome, check the target against the local
+// policy, dial loopback, and only then accept.
+func (a *Agent) handleTCP(ctx context.Context, open *conduitv1.StreamOpen, ps core.PendingStream) error {
+	if _, reason, err := a.verifyGrant(ctx, open); err != nil {
 		log.Warn("Conduit: refused TCP stream %d: grant: %v", ps.ID(), err)
-		return ps.Reject(core.CloseForbidden, reasonGrantInvalid)
+		return ps.Reject(core.CloseForbidden, reason)
 	}
 	port, err := TCPTarget(open.GetParams())
 	if err != nil {

@@ -44,15 +44,19 @@
 // pkg/hub/web.go's WebServer.Start), some attempts failing is itself part
 // of the measurement, not noise to discard.
 //
-// When the hub under test was built from the perf/2392-agent-list-
-// instrumentation branch (not yet merged; see that branch's pkg/hub/
-// perftrace*.go) AND started with SCION_HUB_PERF_TRACE=1, passing
-// --want-perf-trace additionally sets the opt-in X-Scion-Perf-Trace request
-// header and records whatever trace fields come back in the response
-// headers. On a plain baseline run against unmodified main there is no such
-// data, and the report's perfTraceAvailable field is false rather than
-// silently omitted (only true when at least one attempt actually returned
-// trace headers).
+// When the hub under test has request performance tracing on
+// (server.hub.perf_trace, env SCION_SERVER_HUB_PERFTRACE=true; see
+// pkg/hub/perftrace.go), passing --want-perf-trace additionally sets the
+// opt-in X-Scion-Perf-Trace request header and records the X-Scion-Perf-*
+// response headers (endpoint class, phase times and counts, authorization
+// store calls and times, decision-audit counts, DB pool waits). The hub
+// sends those headers only to an unscoped local platform admin; for any
+// other caller, --hub-perf-log joins the hub's perf_trace log lines
+// instead. Durations in those headers are microseconds; counts are
+// host-independent and suit a CI budget. On a plain baseline run against
+// unmodified main there is no such data, and the report's
+// perfTraceAvailable field is false rather than silently omitted (only
+// true when at least one attempt actually returned trace data).
 package main
 
 import (
@@ -179,14 +183,28 @@ func fetchHubVersion(client *http.Client, hubURL string) (scionVersion string) {
 
 const perfTraceRequestHeader = "X-Scion-Perf-Trace"
 
+// perfTraceResponseHeaders are the response headers a tracing hub sets on
+// an opted-in request (pkg/hub/perftrace.go). Kept as literals so this tool
+// does not import pkg/hub.
+var perfTraceResponseHeaders = []string{
+	"X-Scion-Perf-Endpoint",
+	"X-Scion-Perf-Phases",
+	"X-Scion-Perf-Phase-Counts",
+	"X-Scion-Perf-Store-Calls",
+	"X-Scion-Perf-Store-Us",
+	"X-Scion-Perf-Decisions",
+	"X-Scion-Perf-DB",
+}
+
 func main() {
 	hubURL := flag.String("hub", "http://127.0.0.1:19810", "hub base URL")
 	seedPath := flag.String("seed", "", "path to seed metadata JSON produced by perf/bench/seed (required)")
 	runs := flag.Int("runs", 5, "number of timed trials per scenario (median/spread reported over these)")
 	warmup := flag.Int("warmup", 1, "number of untimed warmup requests per scenario before the timed runs (warmup results are discarded, not recorded in the report, and a warmup failure is not fatal)")
 	outPath := flag.String("out", "", "path to write the JSON report (required)")
-	wantPerfTrace := flag.Bool("want-perf-trace", false, "set the opt-in X-Scion-Perf-Trace header and record any perf-trace response data (only meaningful on a #2392-instrumented hub build)")
+	wantPerfTrace := flag.Bool("want-perf-trace", false, "set the opt-in X-Scion-Perf-Trace header and record any perf-trace response data (headers come back only for an unscoped local platform admin on a hub with server.hub.perf_trace on; see --hub-perf-log)")
 	notes := flag.String("notes", "", "free-form note about machine/CPU conditions for this run, copied into the report")
+	hubPerfLog := flag.String("hub-perf-log", "", "path to the hub's JSON log; after the run, its perf_trace lines are joined to attempts by request ID (for callers that do not receive the admin-only perf headers)")
 	timeoutSeconds := flag.Int("timeout-seconds", 60, "per-request client timeout; the unmodified-main baseline at 500 agents can exceed the 60s default, per ptone/scion#2367's superlinear-scaling diagnosis")
 	flag.Parse()
 
@@ -293,6 +311,14 @@ func main() {
 		}
 	}
 
+	if *hubPerfLog != "" {
+		n, err := mergeHubPerfLog(&report, *hubPerfLog)
+		if err != nil {
+			log.Fatalf("read hub perf log: %v", err)
+		}
+		fmt.Printf("joined %d attempts to hub perf_trace lines\n", n)
+	}
+
 	// Sample again at the end, not just the start.
 	report.Machine.LoadAvg1AtEnd, report.Machine.LoadAvg5AtEnd, report.Machine.LoadAvg15AtEnd = readLoadAvg()
 
@@ -366,9 +392,10 @@ func runScenario(client *http.Client, hubURL, name, endpoint, token string, agen
 			a.Error = fmt.Sprintf("non-2xx status %d", a.Status)
 		}
 
+		a.RequestID = resp.Header.Get("X-Request-ID")
 		if wantPerfTrace {
 			trace := map[string]string{}
-			for _, k := range []string{"X-Scion-Perf-Phases", "X-Scion-Perf-Store-Calls", "X-Scion-Perf-Decisions"} {
+			for _, k := range perfTraceResponseHeaders {
 				if v := resp.Header.Get(k); v != "" {
 					trace[k] = v
 				}
@@ -378,6 +405,7 @@ func runScenario(client *http.Client, hubURL, name, endpoint, token string, agen
 			// hitting an unmodified-main hub with the flag on).
 			if len(trace) > 0 {
 				a.PerfTrace = trace
+				a.PerfTraceSource = "headers"
 			}
 		}
 		return a

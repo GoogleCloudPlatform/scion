@@ -98,6 +98,9 @@ const SCHEMA_RESPONSE = {
     agent_secrets: {
       koanf_paths: ['agent_secrets.user_scope_only'],
     },
+    gcp_iam: {
+      koanf_paths: ['server.hub.gcp_iam_check_mode', 'server.hub.gcp_iam_deny_unknown_policy'],
+    },
   },
 };
 
@@ -730,11 +733,86 @@ describe('scion-page-admin-server-config', () => {
       expect(server.native_chat).toEqual({ enabled: false });
     });
 
-    it('a hosted save never sends the file-only gcp_iam keys', async () => {
-      const payload = await capturePut(makeBaseConfig({ settings_tier: 'db' }), () => {});
+    it('a hosted save leaves out unchanged gcp_iam keys', async () => {
+      const base = makeBaseConfig({ settings_tier: 'db' }) as any;
+      base.server.hub.gcp_iam_check_mode = 'enforce';
+      base.server.hub.gcp_iam_deny_unknown_policy = 'fail-closed';
+      const payload = await capturePut(base, () => {});
       const hub = (payload.server as Record<string, Record<string, unknown>> | undefined)?.hub;
       expect(hub ?? {}).not.toHaveProperty('gcp_iam_check_mode');
       expect(hub ?? {}).not.toHaveProperty('gcp_iam_deny_unknown_policy');
+    });
+
+    it('a hosted save sends a changed gcp_iam key in the Layer-1 payload', async () => {
+      const base = makeBaseConfig({ settings_tier: 'db' }) as any;
+      base.server.hub.gcp_iam_check_mode = 'enforce';
+      const payload = await capturePut(base, (el) => {
+        el.hubGcpIamDenyUnknownPolicy = 'fail-closed';
+      });
+      const hub = (payload.server as Record<string, Record<string, unknown>>).hub;
+      expect(hub.gcp_iam_deny_unknown_policy).toBe('fail-closed');
+      expect(hub).not.toHaveProperty('gcp_iam_check_mode');
+    });
+
+    it('gcp_iam selects show the reported value and an env badge when env-pinned', async () => {
+      const base = makeBaseConfig({
+        settings_tier: 'db',
+        env_overrides: ['server.hub.gcp_iam_check_mode'],
+      }) as any;
+      base.server.hub.gcp_iam_check_mode = 'enforce';
+      element = await createComponent(createFetchHandler(base));
+      const label = queryAll(element, 'label').find(
+        (l) => l.textContent?.trim() === 'IAM Check Mode'
+      );
+      const field = label!.closest('.form-field')!;
+      expect(field.querySelector('sl-select')?.getAttribute('value')).toBe('enforce');
+      expect(field.querySelector('.env-badge')).not.toBeNull();
+    });
+
+    it('gcp_iam selects are read-only on a hosted hub without the gcp_iam section', async () => {
+      const base = makeBaseConfig({ settings_tier: 'db' }) as any;
+      base.server.hub.gcp_iam_check_mode = 'enforce';
+      const schema = JSON.parse(JSON.stringify(SCHEMA_RESPONSE));
+      delete schema.sections.gcp_iam;
+      element = await createComponent(createFetchHandler(base, { schemaResponse: schema }));
+      const labels = queryAll(element, 'label').filter((l) =>
+        ['IAM Check Mode', 'Deny Policy Fallback'].includes(l.textContent?.trim() ?? '')
+      );
+      expect(labels).toHaveLength(2);
+      for (const label of labels) {
+        const field = label.closest('.form-field')!;
+        expect(field.querySelector('sl-select')).toBeNull();
+        expect(field.querySelector('.read-only-badge')?.textContent).toContain(
+          'deployment configuration'
+        );
+      }
+    });
+
+    it('GCP replication locations are read-only on a hosted hub', async () => {
+      const base = makeBaseConfig({ settings_tier: 'db' }) as any;
+      base.server.secrets = { backend: 'gcpsm', gcp_replication_locations: ['us-east1'] };
+      element = await createComponent(createFetchHandler(base));
+      const label = queryAll(element, 'label').find(
+        (l) => l.textContent?.trim() === 'GCP Replication Locations'
+      );
+      expect(label).toBeDefined();
+      const field = label!.closest('.form-field')!;
+      expect(field.querySelector('sl-input')).toBeNull();
+      expect(field.querySelector('.read-only-badge')?.textContent).toContain(
+        'deployment configuration'
+      );
+      expect(field.querySelector('.read-only-value')?.textContent).toContain('us-east1');
+    });
+
+    it('GCP replication locations stay editable on a workstation hub', async () => {
+      const base = makeBaseConfig({ settings_tier: 'db', layer0_editable: true }) as any;
+      base.server.secrets = { backend: 'gcpsm', gcp_replication_locations: ['us-east1'] };
+      element = await createComponent(createFetchHandler(base));
+      const label = queryAll(element, 'label').find(
+        (l) => l.textContent?.trim() === 'GCP Replication Locations'
+      );
+      const field = label!.closest('.form-field')!;
+      expect(field.querySelector('sl-input')).not.toBeNull();
     });
 
     it('flag-managed workstation fields are read-only and not sent', async () => {
@@ -1432,9 +1510,188 @@ describe('scion-page-admin-server-config', () => {
       expect(payload).not.toHaveProperty('default_gcp_identity_mode');
       expect(payload).toHaveProperty('default_gcp_identity_service_account_id', 'sa-123');
     });
+
+    // ptone/scion#2720: with the mode env-pinned, the form mode holds the
+    // settings-file value, not the effective one, so it must not drive
+    // clearing of the account. An unchanged account is left out of the
+    // payload, so the server neither clears nor re-checks it.
+    const pinnedFileConfig = (formMode: string, said: string) =>
+      makeBaseConfig({
+        settings_tier: 'file',
+        env_overrides: ['default_gcp_identity_mode'],
+        default_gcp_identity_mode: formMode,
+        default_gcp_identity_service_account_id: said,
+      });
+
+    it.each(['', 'block', 'passthrough', 'assign'])(
+      'buildFilePayload omits an unchanged GCP service account when the mode is env-pinned (form mode=%j)',
+      async (formMode) => {
+        element = await createComponent(createFetchHandler(pinnedFileConfig(formMode, 'sa-123')));
+        const el = element as any;
+        expect(el.defaultGCPIdentitySAID).toBe('sa-123');
+
+        const payload = el.buildFilePayload() as Record<string, unknown>;
+        expect(payload).not.toHaveProperty('default_gcp_identity_mode');
+        expect(payload).not.toHaveProperty('default_gcp_identity_service_account_id');
+      }
+    );
+
+    it.each([
+      ['changed', 'sa-456'],
+      ['cleared', ''],
+    ])(
+      'buildFilePayload sends an edited GCP service account when the mode is env-pinned (%s)',
+      async (_label, edited) => {
+        element = await createComponent(createFetchHandler(pinnedFileConfig('assign', 'sa-123')));
+        const el = element as any;
+        el.defaultGCPIdentitySAID = edited;
+
+        const payload = el.buildFilePayload() as Record<string, unknown>;
+        expect(payload).not.toHaveProperty('default_gcp_identity_mode');
+        expect(payload).toHaveProperty('default_gcp_identity_service_account_id', edited);
+      }
+    );
+
+    it('buildFilePayload compares the GCP service account with the latest load when the mode is env-pinned', async () => {
+      element = await createComponent(createFetchHandler(pinnedFileConfig('assign', 'sa-123')));
+      const el = element as any;
+      expect(el.defaultGCPIdentitySAID).toBe('sa-123');
+
+      // Reload (as after a save) with a different stored account.
+      vi.stubGlobal('fetch', vi.fn(createFetchHandler(pinnedFileConfig('assign', 'sa-789'))));
+      await el.loadConfig();
+      await el.updateComplete;
+      expect(el.defaultGCPIdentitySAID).toBe('sa-789');
+      expect(el.readOnlyReason('default_gcp_identity_mode')).not.toBeNull();
+
+      // Unchanged since the reload: omitted.
+      let payload = el.buildFilePayload() as Record<string, unknown>;
+      expect(payload).not.toHaveProperty('default_gcp_identity_mode');
+      expect(payload).not.toHaveProperty('default_gcp_identity_service_account_id');
+
+      // Back to the first-load value: now an edit, so it is sent.
+      el.defaultGCPIdentitySAID = 'sa-123';
+      payload = el.buildFilePayload() as Record<string, unknown>;
+      expect(payload).not.toHaveProperty('default_gcp_identity_mode');
+      expect(payload).toHaveProperty('default_gcp_identity_service_account_id', 'sa-123');
+    });
+
+    it.each([
+      ['assign', 'sa-123'],
+      ['block', ''],
+    ])(
+      'buildFilePayload sends the loaded GCP service account when the mode is editable (mode=%j)',
+      async (mode, expected) => {
+        element = await createComponent(
+          createFetchHandler(
+            makeBaseConfig({
+              settings_tier: 'file',
+              default_gcp_identity_mode: mode,
+              default_gcp_identity_service_account_id: 'sa-123',
+            })
+          )
+        );
+        const el = element as any;
+
+        const payload = el.buildFilePayload() as Record<string, unknown>;
+        expect(payload).toHaveProperty('default_gcp_identity_mode', mode);
+        expect(payload).toHaveProperty('default_gcp_identity_service_account_id', expected);
+      }
+    );
+
+    // The db-tier test schema does not list the GCP identity keys, so the
+    // tests set the Layer-1 key set the page uses to decide editability.
+    const GCP_KEYS = ['default_gcp_identity_mode', 'default_gcp_identity_service_account_id'];
+
+    it('buildLayer1Payload sends the GCP service account in assign mode', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig({ settings_tier: 'db' })));
+      const el = element as any;
+      el.layer1Keys = new Set(GCP_KEYS);
+      el.defaultGCPIdentityMode = 'assign';
+      el.defaultGCPIdentitySAID = 'sa-123';
+
+      const payload = el.buildLayer1Payload() as Record<string, unknown>;
+      expect(payload).toHaveProperty('default_gcp_identity_mode', 'assign');
+      expect(payload).toHaveProperty('default_gcp_identity_service_account_id', 'sa-123');
+    });
+
+    it('buildLayer1Payload clears the GCP service account when mode is not assign', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig({ settings_tier: 'db' })));
+      const el = element as any;
+      el.layer1Keys = new Set(GCP_KEYS);
+      el.defaultGCPIdentityMode = 'block';
+      el.defaultGCPIdentitySAID = 'stale-sa';
+
+      const payload = el.buildLayer1Payload() as Record<string, unknown>;
+      expect(payload).toHaveProperty('default_gcp_identity_mode', 'block');
+      expect(payload).toHaveProperty('default_gcp_identity_service_account_id', '');
+    });
+
+    // In the db tier env vars do not lock Layer-1 fields. Both GCP keys
+    // are in one settings section, so they are Layer-1 together or
+    // deployment-managed together; the page never reaches the read-only
+    // mode branch of the account helper there. When both are locked,
+    // neither key is sent.
+    it('buildLayer1Payload omits both GCP keys when they are not Layer-1', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig({ settings_tier: 'db' })));
+      const el = element as any;
+      el.layer1Keys = new Set();
+      el.defaultGCPIdentityMode = 'assign';
+      el.defaultGCPIdentitySAID = 'sa-123';
+
+      const payload = el.buildLayer1Payload() as Record<string, unknown>;
+      expect(payload).not.toHaveProperty('default_gcp_identity_mode');
+      expect(payload).not.toHaveProperty('default_gcp_identity_service_account_id');
+    });
   });
 
   // ── Cross-project messaging (D1) ──
+
+  describe('File mode server sections keep omitted fields (ptone/scion#2938)', () => {
+    // The file-mode PUT deep-merges each server section, so an omitted
+    // field keeps its stored value; a field the form shows must be sent as
+    // an explicit empty value to be cleared.
+    it('buildFilePayload sends cleared server fields as explicit empties', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ settings_tier: 'file' }))
+      );
+      const el = element as any;
+      el.logLevel = '';
+      el.hubPort = 0;
+      el.hubHost = '';
+      el.hubPublicUrl = '';
+      el.brokerHost = '';
+      el.brokerPort = 0;
+      el.dbDriver = '';
+      el.dbUrl = '';
+      el.authDevToken = '';
+      el.storageBucket = '';
+      el.secretsBackend = '';
+      el.secretsGCPProjectId = '';
+
+      const server = (el.buildFilePayload() as Record<string, any>).server;
+      expect(server.log_level).toBe('');
+      expect(server.hub).toMatchObject({ port: 0, host: '', public_url: '' });
+      expect(server.broker).toMatchObject({ port: 0, host: '' });
+      expect(server.database).toEqual({ driver: '', url: '' });
+      expect(server.auth).toHaveProperty('dev_token', '');
+      expect(server.storage).toHaveProperty('bucket', '');
+      expect(server.secrets).toMatchObject({ backend: '', gcp_project_id: '' });
+    });
+
+    it('buildFilePayload leaves out masked credentials so the stored values are kept', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ settings_tier: 'file' }))
+      );
+      const el = element as any;
+      el.dbUrl = '********';
+      el.authDevToken = '********';
+
+      const server = (el.buildFilePayload() as Record<string, any>).server;
+      expect(server.database).not.toHaveProperty('url');
+      expect(server.auth).not.toHaveProperty('dev_token');
+    });
+  });
 
   describe('Cross-project messaging section', () => {
     it('renders cross-project messaging section in hub server tab', async () => {

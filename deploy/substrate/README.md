@@ -464,8 +464,9 @@ rather than following it.
 ## Verification commands (once applied to a real cluster)
 
 ```sh
-# Broker pod is up and READY (the readinessProbe already hits /healthz;
-# the broker image has no wget/curl, so don't exec a check into it).
+# Broker pod is up and READY (the readinessProbe hits /readyz, which
+# returns 503 while the default runtime is degraded; the broker image has
+# no wget/curl, so don't exec a check into it).
 kubectl -n "${BROKER_NAMESPACE}" get pods -l app=scion-substrate-broker
 
 # Or hit /healthz from your own workstation:

@@ -19,7 +19,6 @@ package hub
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -70,9 +69,7 @@ func def168Setup(t *testing.T) (
 	ctx := context.Background()
 
 	// WebChatStore — also sets up ChatNotifier.
-	db, err := sql.Open("sqlite3", ":memory:")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = db.Close() })
+	db := openTestMemorySQLite(t, "sqlite3")
 
 	wcs = NewWebChatStore(db, "sqlite3")
 	require.NoError(t, wcs.Init())
@@ -103,7 +100,7 @@ func def168Setup(t *testing.T) (
 	proxy.subscribeProjectUserMessages(project.ID)
 
 	// Create the DM conversation with surface="native".
-	dmKey, err = messages.DMConversationKey("agent", agent.ID, "user", user.ID)
+	dmKey, err := messages.DMConversationKey("agent", agent.ID, "user", user.ID)
 	require.NoError(t, err)
 
 	dmConv, err = s.UpsertConversationByExternalRef(ctx, &store.Conversation{

@@ -18,9 +18,14 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
+	"mime"
 	"net/http"
+	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -100,6 +105,42 @@ func (s *Server) handleHarnessConfigFileRead(w http.ResponseWriter, r *http.Requ
 	}
 	if found == nil {
 		NotFound(w, "Harness config file")
+		return
+	}
+
+	// Raw binary download for the local storage proxy flow (the URLs
+	// handleHarnessConfigDownload rewrites file:// to). Serves exactly the
+	// file the lookup above resolved; it only skips the JSON envelope and
+	// the inline size limit. Mirrors handleTemplateFileRead.
+	if r.URL.Query().Get("raw") != "" || strings.Contains(r.Header.Get("Accept"), "application/octet-stream") {
+		stor := s.GetStorage()
+		if stor == nil {
+			RuntimeError(w, "Storage not configured")
+			return
+		}
+
+		objectPath := hc.StoragePath + "/" + filePath
+		reader, _, err := stor.Download(ctx, objectPath)
+		if err != nil {
+			if errors.Is(err, storage.ErrNotFound) {
+				NotFound(w, "Harness config file")
+				return
+			}
+			RuntimeError(w, "Failed to read file from storage")
+			return
+		}
+		defer func() { _ = reader.Close() }()
+
+		safeName := filepath.Base(filePath)
+		contentDisposition := mime.FormatMediaType("attachment", map[string]string{"filename": safeName})
+
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Disposition", contentDisposition)
+		w.Header().Set("Content-Length", strconv.FormatInt(found.Size, 10))
+		w.WriteHeader(http.StatusOK)
+		if _, err := io.Copy(w, reader); err != nil {
+			slog.Error("Error streaming file to client", "path", objectPath, "error", err)
+		}
 		return
 	}
 

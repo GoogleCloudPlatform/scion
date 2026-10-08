@@ -69,6 +69,18 @@ func (f AgentCredentialFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Va
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.AgentCredentialMutation", m)
 }
 
+// The AgentHoldFunc type is an adapter to allow the use of ordinary
+// function as AgentHold mutator.
+type AgentHoldFunc func(context.Context, *ent.AgentHoldMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f AgentHoldFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.AgentHoldMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.AgentHoldMutation", m)
+}
+
 // The AgentIdentityKeyFunc type is an adapter to allow the use of ordinary
 // function as AgentIdentityKey mutator.
 type AgentIdentityKeyFunc func(context.Context, *ent.AgentIdentityKeyMutation) (ent.Value, error)
@@ -271,6 +283,18 @@ func (f DecisionAuditFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Valu
 		return f(ctx, mv)
 	}
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.DecisionAuditMutation", m)
+}
+
+// The DelegationAdoptionFunc type is an adapter to allow the use of ordinary
+// function as DelegationAdoption mutator.
+type DelegationAdoptionFunc func(context.Context, *ent.DelegationAdoptionMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f DelegationAdoptionFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.DelegationAdoptionMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.DelegationAdoptionMutation", m)
 }
 
 // The DelegationEdgeFunc type is an adapter to allow the use of ordinary
@@ -511,6 +535,18 @@ func (f MaintenanceOperationRunFunc) Mutate(ctx context.Context, m ent.Mutation)
 		return f(ctx, mv)
 	}
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.MaintenanceOperationRunMutation", m)
+}
+
+// The MembershipLossCheckFunc type is an adapter to allow the use of ordinary
+// function as MembershipLossCheck mutator.
+type MembershipLossCheckFunc func(context.Context, *ent.MembershipLossCheckMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f MembershipLossCheckFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.MembershipLossCheckMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.MembershipLossCheckMutation", m)
 }
 
 // The MessageFunc type is an adapter to allow the use of ordinary

@@ -98,7 +98,7 @@ func (s *Server) handleDiagnosticsLogs(w http.ResponseWriter, r *http.Request) {
 	resp := DiagnosticsLogResponse{
 		Entries:      diagEntries,
 		HasMore:      result.HasMore,
-		GCPProjectID: s.logQueryService.projectID,
+		GCPProjectID: s.logQueryService.GCPProjectID(),
 	}
 
 	writeJSON(w, http.StatusOK, resp)

@@ -148,9 +148,9 @@ func TestHeartbeatSupersededStopsServing(t *testing.T) {
 // sent. With no open streams the session ends right after GoAway, so the
 // row is observed at its delete: it must already be draining.
 //
-// Dial returns on the Welcome, before Serve registers the session, and
-// GoAway only addresses registered sessions. Serve is held in that window
-// until Local is waiting for it, so the test always waits through it.
+// Dial returns on the Welcome, before Serve registers the session. Serve is
+// held in that window until GoAway is waiting for it, so GoAway always
+// waits through it.
 func TestGoAwayMarksSessionDraining(t *testing.T) {
 	w := relaytest.NewWorld(t)
 	n := w.StartNode("relay-a", nil)
@@ -164,9 +164,6 @@ func TestGoAwayMarksSessionDraining(t *testing.T) {
 	sess, wel := n.MustDial("a", relaytest.AgentHello(agentID, "L1", "", "pty"), conduit.Config{})
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if _, _, ok := n.Relay.Local(ctx, wel.GetSessionId()); !ok {
-		t.Fatal("session was not registered after its Welcome")
-	}
 	var log opLog
 	drainingAtDelete := make(chan bool, 1)
 	w.SetFault(func(op string) error {
@@ -180,7 +177,7 @@ func TestGoAwayMarksSessionDraining(t *testing.T) {
 		}
 		return nil
 	})
-	if err := n.Relay.GoAway(wel.GetSessionId(), conduit.GoAwayOptions{Reason: "test"}); err != nil {
+	if err := n.Relay.GoAway(ctx, wel.GetSessionId(), conduit.GoAwayOptions{Reason: "test"}); err != nil {
 		t.Fatal(err)
 	}
 	relaytest.WaitClosed(t, sess.GoAwayReceived(), "GoAway")
@@ -190,9 +187,167 @@ func TestGoAwayMarksSessionDraining(t *testing.T) {
 	if sd, del := log.index(registry.OpSetSessionDraining), log.index(registry.OpDeleteSessionCAS); sd < 0 || del < sd {
 		t.Fatalf("ops %v: want SetSessionDraining before DeleteSessionCAS", log.ops)
 	}
-	if err := n.Relay.GoAway("no-such-session", conduit.GoAwayOptions{}); !errors.Is(err, registry.ErrSessionNotFound) {
+	if err := n.Relay.GoAway(ctx, "no-such-session", conduit.GoAwayOptions{}); !errors.Is(err, registry.ErrSessionNotFound) {
 		t.Fatalf("GoAway(unknown) = %v", err)
 	}
+}
+
+// TestGoAwayPendingSession: GoAway on a session that is admitted but not yet
+// registered (Serve held before ready) waits for it, bounded by ctx; an
+// unknown session fails at once.
+func TestGoAwayPendingSession(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// onWait runs when GoAway starts waiting; it gets the release and
+		// cancel functions.
+		onWait  func(release, cancel func())
+		wantErr error
+	}{
+		{name: "session registers", onWait: func(release, _ func()) { release() }},
+		{name: "context cancelled", onWait: func(_, cancel func()) { cancel() }, wantErr: context.Canceled},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := relaytest.NewWorld(t)
+			n := w.StartNode("relay-a", nil)
+			w.SetPrincipal("a", agentPrincipal("L1", 1))
+			release := make(chan struct{})
+			var releaseOnce sync.Once
+			unblock := func() { releaseOnce.Do(func() { close(release) }) }
+			t.Cleanup(unblock)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			n.Relay.SetBeforeReadyHookForTest(func() { <-release })
+			var waits atomic.Int32
+			timersWhileWaiting := -1
+			n.Relay.SetPendingWaitHookForTest(func() {
+				waits.Add(1)
+				timersWhileWaiting = n.Clock.Pending()
+				tc.onWait(unblock, cancel)
+			})
+			sess, wel := n.MustDial("a", relaytest.AgentHello(agentID, "L1", "", "pty"), conduit.Config{})
+
+			err := n.Relay.GoAway(ctx, wel.GetSessionId(), conduit.GoAwayOptions{Reason: "test"})
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("GoAway = %v, want %v", err, tc.wantErr)
+			}
+			if got := waits.Load(); got != 1 {
+				t.Fatalf("GoAway waited %d times, want 1", got)
+			}
+			if tc.wantErr == nil {
+				relaytest.WaitClosed(t, sess.GoAwayReceived(), "GoAway")
+				return
+			}
+			// The cancelled wait released its handshake timer and left no
+			// waiter: the session still registers and is served normally.
+			if got := n.Clock.Pending(); got != timersWhileWaiting-1 {
+				t.Fatalf("armed timers after the cancelled GoAway = %d, want %d", got, timersWhileWaiting-1)
+			}
+			select {
+			case <-sess.GoAwayReceived():
+				t.Fatal("a cancelled GoAway reached the session")
+			default:
+			}
+			n.Relay.SetPendingWaitHookForTest(nil)
+			unblock()
+			lctx, lcancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer lcancel()
+			if _, _, ok := n.Relay.Local(lctx, wel.GetSessionId()); !ok {
+				t.Fatal("session did not register after the cancelled GoAway")
+			}
+			if err := n.Relay.GoAway(lctx, wel.GetSessionId(), conduit.GoAwayOptions{Reason: "test"}); err != nil {
+				t.Fatal(err)
+			}
+			relaytest.WaitClosed(t, sess.GoAwayReceived(), "GoAway after registration")
+		})
+	}
+
+	t.Run("admission fails while pending", func(t *testing.T) {
+		// The Welcome write fails after admission recorded the session as
+		// pending: the waiting GoAway wakes with session not found.
+		pendingID := make(chan string, 1)
+		release := make(chan struct{})
+		var releaseOnce sync.Once
+		unblock := func() { releaseOnce.Do(func() { close(release) }) }
+		t.Cleanup(unblock)
+		w := relaytest.NewWorld(t)
+		n := w.StartNode("relay-a", func(c *relay.Config) {
+			c.Session.Interceptor = func(dir conduit.Direction, f *conduitv1.Frame) []*conduitv1.Frame {
+				if dir != conduit.Outbound || conduit.FrameType(f) != "welcome" {
+					return []*conduitv1.Frame{f}
+				}
+				pendingID <- f.GetWelcome().GetSessionId()
+				<-release
+				// Invalid UTF-8 in a proto3 string: the Welcome cannot be
+				// encoded, so the write fails.
+				return []*conduitv1.Frame{{Body: &conduitv1.Frame_Welcome{Welcome: &conduitv1.Welcome{SessionId: "\xff"}}}}
+			}
+		})
+		w.SetPrincipal("a", agentPrincipal("L1", 1))
+		dialed := make(chan error, 1)
+		go func() {
+			dctx, dcancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer dcancel()
+			_, _, err := n.Dial(dctx, "a", relaytest.AgentHello(agentID, "L1", "", "pty"), conduit.Config{})
+			dialed <- err
+		}()
+		id := relaytest.Wait(t, pendingID, "the Welcome write")
+		var waits atomic.Int32
+		n.Relay.SetPendingWaitHookForTest(func() { waits.Add(1); unblock() })
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := n.Relay.GoAway(ctx, id, conduit.GoAwayOptions{Reason: "test"}); !errors.Is(err, registry.ErrSessionNotFound) {
+			t.Fatalf("GoAway = %v, want session not found", err)
+		}
+		if got := waits.Load(); got != 1 {
+			t.Fatalf("GoAway waited %d times, want 1", got)
+		}
+		if err := relaytest.Wait(t, dialed, "the dial to fail"); err == nil {
+			t.Fatal("the dial succeeded without a Welcome")
+		}
+	})
+
+	t.Run("handshake timeout while pending", func(t *testing.T) {
+		const handshake = time.Second
+		w := relaytest.NewWorld(t)
+		n := w.StartNode("relay-a", func(c *relay.Config) { c.Session.HandshakeTimeout = handshake })
+		w.SetPrincipal("a", agentPrincipal("L1", 1))
+		release := make(chan struct{})
+		var releaseOnce sync.Once
+		unblock := func() { releaseOnce.Do(func() { close(release) }) }
+		t.Cleanup(unblock)
+		n.Relay.SetBeforeReadyHookForTest(func() { <-release })
+		var waits atomic.Int32
+		n.Relay.SetPendingWaitHookForTest(func() {
+			waits.Add(1)
+			n.Clock.Advance(handshake)
+		})
+		_, wel := n.MustDial("a", relaytest.AgentHello(agentID, "L1", "", "pty"), conduit.Config{})
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := n.Relay.GoAway(ctx, wel.GetSessionId(), conduit.GoAwayOptions{Reason: "test"}); !errors.Is(err, registry.ErrSessionNotFound) {
+			t.Fatalf("GoAway = %v, want session not found", err)
+		}
+		if got := waits.Load(); got != 1 {
+			t.Fatalf("GoAway waited %d times, want 1", got)
+		}
+	})
+
+	t.Run("unknown session fails fast", func(t *testing.T) {
+		w := relaytest.NewWorld(t)
+		n := w.StartNode("relay-a", nil)
+		var waits atomic.Int32
+		n.Relay.SetPendingWaitHookForTest(func() { waits.Add(1) })
+		// An already-cancelled ctx: session not found (not Canceled)
+		// shows GoAway answered before any wait.
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if err := n.Relay.GoAway(ctx, "no-such-session", conduit.GoAwayOptions{}); !errors.Is(err, registry.ErrSessionNotFound) {
+			t.Fatalf("GoAway(unknown) = %v, want session not found", err)
+		}
+		if got := waits.Load(); got != 0 {
+			t.Fatalf("GoAway(unknown) waited %d times, want 0", got)
+		}
+	})
 }
 
 func TestShutdownDrains(t *testing.T) {

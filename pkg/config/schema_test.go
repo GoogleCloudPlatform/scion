@@ -411,6 +411,46 @@ server:
 	assert.Empty(t, errors, "valid server section should produce no errors")
 }
 
+// The schema bounds for nfs.uid and nfs.gid must match fsutil.MaxOwnerID
+// and the runtime check: negative values and the all-ones uid_t value
+// 4294967295 are rejected, 0 and 4294967294 are accepted.
+func TestValidateSettings_WorkspaceStorageNFSOwnerIDBounds(t *testing.T) {
+	tests := []struct {
+		value  int64
+		wantOK bool
+	}{
+		{-1, false},
+		{0, true},
+		{4294967294, true},
+		{4294967295, false},
+	}
+	for _, field := range []string{"uid", "gid"} {
+		for _, tt := range tests {
+			t.Run(fmt.Sprintf("%s %d", field, tt.value), func(t *testing.T) {
+				data := []byte(fmt.Sprintf(`
+schema_version: "1"
+server:
+  workspace_storage:
+    backend: nfs
+    nfs:
+      %s: %d
+      shares:
+        - id: ws1
+          server: 10.0.0.2
+          export: /scion-workspaces
+`, field, tt.value))
+				errors, err := ValidateSettings(data, "1")
+				require.NoError(t, err)
+				if tt.wantOK {
+					assert.Empty(t, errors, "nfs.%s %d should validate", field, tt.value)
+					return
+				}
+				assert.NotEmpty(t, errors, "nfs.%s %d should be rejected", field, tt.value)
+			})
+		}
+	}
+}
+
 func TestValidateSettings_WorkspaceStorageNFSAutoMount(t *testing.T) {
 	data := []byte(`
 schema_version: "1"

@@ -78,17 +78,16 @@ func TestExternalBearerRateLimiter_CleanupAdmitsNewIPAfterMaxAge(t *testing.T) {
 // observable within the test's lifetime, instead of waiting on the
 // production 5-minute interval.
 func TestServer_ExternalBearerRateLimiter_CleanupRunsInBackground(t *testing.T) {
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
 
 	cfg := DefaultServerConfig()
-	srv, err := New(cfg, s)
+	srv, err := newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
-	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 
 	if srv.externalBearerRateLimiter == nil {
 		t.Fatal("expected srv.externalBearerRateLimiter to be set")

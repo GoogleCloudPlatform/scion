@@ -17,6 +17,8 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"syscall"
@@ -25,6 +27,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 )
 
 // transportErr builds an error shaped like the one apiclient.Transport
@@ -35,6 +38,12 @@ func transportErr() error {
 		URL: "https://hub.invalid.example/api/v1/agents",
 		Err: syscall.ECONNREFUSED,
 	})
+}
+
+// noContentErr builds an error shaped like the one a hubclient call that
+// needs a body returns when the hub answers 204 (apiclient.DecodeRequired).
+func noContentErr() error {
+	return fmt.Errorf("failed to list agents via Hub: %w", fmt.Errorf("%w (status: 204)", apiclient.ErrNoContent))
 }
 
 func apiErr(status int, code, msg string) error {
@@ -64,6 +73,8 @@ func TestWrapHubError_StatusTable(t *testing.T) {
 		{name: "401 agent keeps cause", err: apiErr(401, "unauthorized", "token expired"), agent: true, wantContain: "hub rejected this agent's credentials"},
 		{name: "500 agent omits hint", err: apiErr(500, "internal_error", "boom"), agent: true, wantContain: "boom"},
 		{name: "transport agent omits hint", err: transportErr(), agent: true, wantContain: "connection refused"},
+		{name: "empty response gets note, not hint", err: noContentErr(), wantContain: "failed to list agents via Hub: server returned no content (status: 204)" + emptyResponseNote},
+		{name: "empty response agent gets note", err: noContentErr(), agent: true, wantContain: emptyResponseNote},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -165,5 +176,54 @@ func TestShowUsageForError_HubFailuresSuppressUsage(t *testing.T) {
 				t.Errorf("showUsageForError = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestWrapHubError_EmptyResponseFromHubclient drives a real hubclient call
+// against a hub that answers 204 where a body is required, and checks the
+// exact rendered message: the empty-response note and no local-only hint.
+// A transport failure and an API error from the same client keep their
+// existing rendering.
+func TestWrapHubError_EmptyResponseFromHubclient(t *testing.T) {
+	t.Setenv("SCION_AGENT_ID", "")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/env":
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(`{"error":{"code":"conflict","message":"already exists"}}`))
+		}
+	}))
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	if err != nil {
+		t.Fatalf("hubclient.New: %v", err)
+	}
+
+	_, err = client.Env().List(t.Context(), nil)
+	got := wrapHubError(fmt.Errorf("failed to list environment variables: %w", err))
+	want := "failed to list environment variables: server returned no content (status: 204)" +
+		"\n\nThe hub returned an empty response where a result was expected."
+	if got.Error() != want {
+		t.Errorf("empty response:\n got %q\nwant %q", got.Error(), want)
+	}
+
+	_, err = client.Env().Set(t.Context(), "K", &hubclient.SetEnvRequest{Value: "v"})
+	got = wrapHubError(err)
+	if got.Error() != err.Error() {
+		t.Errorf("API error should be unchanged: got %q, want %q", got.Error(), err.Error())
+	}
+
+	server.Close()
+	_, err = client.Env().List(t.Context(), nil)
+	got = wrapHubError(err)
+	if got.Error() != err.Error()+localOnlyHint {
+		t.Errorf("connectivity failure should keep the local-only hint: got %q", got.Error())
+	}
+	if strings.Contains(got.Error(), emptyResponseNote) {
+		t.Errorf("connectivity failure must not get the empty-response note: %q", got.Error())
 	}
 }

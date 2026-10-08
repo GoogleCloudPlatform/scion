@@ -18,122 +18,122 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
-// TestApplyAuthSettings_RestagePreservesExistingSecretFiles is a regression test for #723.
-//
-// On agent restart, ApplyAuthSettings is called again. If the resolved auth has
-// empty EnvVars (because the auth gathering on the restart path didn't find
-// credentials), the newly written auth-candidates.json has empty
-// env_secret_files: {}. But the secret files from the original creation still
-// exist on disk.
-//
-// Expected behavior: the auth-candidates.json should reference any existing
-// secret files on disk if the new resolution produces empty env vars.
-//
-// This test demonstrates the bug: after a successful first provision that wrote
-// secret files and auth-candidates.json with proper references, a second call
-// to ApplyAuthSettings with empty env vars produces auth-candidates.json with
-// empty env_secret_files, even though the secret files still exist on disk.
-func TestApplyAuthSettings_RestagePreservesExistingSecretFiles(t *testing.T) {
+// TestApplyAuthSettings_CarriesOnlyRecordedSecrets covers the restart path:
+// the control plane restores exactly the secret files it recorded from the
+// previous ApplyAuthSettings (StagedSecretNames) and passes their names via
+// SetRecordedSecrets. A safe-named file written into the secrets directory by
+// anything else is never referenced, neither as an env secret (when the new
+// resolution has none) nor as a file secret (a name matching required_files).
+func TestApplyAuthSettings_CarriesOnlyRecordedSecrets(t *testing.T) {
 	h, _ := newTestContainerScriptHarness(t)
 	agentHome := t.TempDir()
-
-	// ---- First call: simulate initial creation with valid Vertex AI auth ----
-	firstResolved := &api.ResolvedAuth{
-		Method: "vertex-ai",
-		EnvVars: map[string]string{
-			"SCION_HARNESS_SELECTED_AUTH": "vertex-ai",
-			"GOOGLE_CLOUD_PROJECT":        "my-project",
-			"GOOGLE_CLOUD_REGION":         "us-central1",
-			"GOOGLE_CLOUD_LOCATION":       "us-central1",
+	h.entry.Auth = &config.HarnessAuthMetadata{
+		Types: map[string]config.HarnessAuthTypeMetadata{
+			"claude": {RequiredFiles: []config.HarnessAuthFileRequirement{{Name: "CLAUDE_AUTH", TargetSuffix: ".claude/.credentials.json"}}},
 		},
 	}
-	if err := h.ApplyAuthSettings(agentHome, firstResolved); err != nil {
+	credSrc := filepath.Join(t.TempDir(), "creds.json")
+	if err := os.WriteFile(credSrc, []byte(`{"token":"t"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// First start: env secrets and a file secret staged from the resolution.
+	first := &api.ResolvedAuth{
+		Method:  "vertex-ai",
+		EnvVars: map[string]string{"GOOGLE_CLOUD_PROJECT": "my-project", "GOOGLE_CLOUD_REGION": "us-central1"},
+		Files:   []api.FileMapping{{SourcePath: credSrc, ContainerPath: "~/.claude/.credentials.json"}},
+	}
+	if err := h.ApplyAuthSettings(agentHome, first); err != nil {
 		t.Fatalf("first ApplyAuthSettings: %v", err)
 	}
-
-	// Verify first call produced correct auth-candidates.json
-	firstData, err := os.ReadFile(filepath.Join(agentHome, ".scion", "harness", "inputs", "auth-candidates.json"))
-	if err != nil {
-		t.Fatalf("read first auth-candidates.json: %v", err)
+	recorded := h.StagedSecretNames()
+	want := []string{"CLAUDE_AUTH", "GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_REGION"}
+	if strings.Join(recorded, ",") != strings.Join(want, ",") {
+		t.Fatalf("StagedSecretNames = %v, want %v", recorded, want)
 	}
-	var firstPayload map[string]interface{}
-	if err := json.Unmarshal(firstData, &firstPayload); err != nil {
-		t.Fatalf("unmarshal first auth-candidates.json: %v", err)
-	}
-
-	// Verify secret files were staged
 	secretDir := filepath.Join(agentHome, ".scion", "harness", "secrets")
-	for _, name := range []string{"GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_REGION", "GOOGLE_CLOUD_LOCATION"} {
+	contents := map[string][]byte{}
+	for _, name := range recorded {
 		data, err := os.ReadFile(filepath.Join(secretDir, name))
 		if err != nil {
-			t.Fatalf("secret file %s not staged: %v", name, err)
+			t.Fatal(err)
 		}
-		if len(data) == 0 {
-			t.Fatalf("secret file %s is empty", name)
-		}
+		contents[name] = data
 	}
 
-	// Verify env_secret_files references the staged files
-	firstEnvSecrets, ok := firstPayload["env_secret_files"].(map[string]interface{})
-	if !ok {
-		t.Fatal("first auth-candidates.json missing env_secret_files map")
+	// Restart: the secrets directory starts empty, the control plane restores
+	// the recorded files, and safe-named files that were not recorded exist for
+	// both merge paths.
+	if err := os.RemoveAll(secretDir); err != nil {
+		t.Fatal(err)
 	}
-	if len(firstEnvSecrets) == 0 {
-		t.Fatal("first auth-candidates.json has empty env_secret_files; expected references to staged secrets")
+	if err := os.MkdirAll(secretDir, 0700); err != nil {
+		t.Fatal(err)
 	}
-	if _, ok := firstEnvSecrets["GOOGLE_CLOUD_PROJECT"]; !ok {
-		t.Error("first auth-candidates.json missing GOOGLE_CLOUD_PROJECT in env_secret_files")
+	for name, data := range contents {
+		if name == "CLAUDE_AUTH" {
+			continue // not recorded in this pass, see below
+		}
+		if err := os.WriteFile(filepath.Join(secretDir, name), data, 0600); err != nil {
+			t.Fatal(err)
+		}
 	}
-
-	// ---- Second call: simulate restart with empty auth (the bug) ----
-	// On restart, GatherAuthWithEnv returns empty credentials because
-	// GOOGLE_CLOUD_PROJECT doesn't reach the auth overlay.
-	restartResolved := &api.ResolvedAuth{
-		Method:  "container-script",
-		EnvVars: map[string]string{},
+	for name, body := range map[string]string{"UNRECORDED_TOKEN": "unrecorded", "CLAUDE_AUTH": "unrecorded"} {
+		if err := os.WriteFile(filepath.Join(secretDir, name), []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if err := h.ApplyAuthSettings(agentHome, restartResolved); err != nil {
+	h.SetRecordedSecrets([]string{"GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_REGION"})
+	if err := h.ApplyAuthSettings(agentHome, &api.ResolvedAuth{Method: "container-script", EnvVars: map[string]string{}}); err != nil {
 		t.Fatalf("restart ApplyAuthSettings: %v", err)
 	}
-
-	// Read the re-staged auth-candidates.json
-	restartData, err := os.ReadFile(filepath.Join(agentHome, ".scion", "harness", "inputs", "auth-candidates.json"))
+	data, err := os.ReadFile(filepath.Join(agentHome, ".scion", "harness", "inputs", "auth-candidates.json"))
 	if err != nil {
-		t.Fatalf("read restart auth-candidates.json: %v", err)
+		t.Fatal(err)
 	}
-	var restartPayload map[string]interface{}
-	if err := json.Unmarshal(restartData, &restartPayload); err != nil {
-		t.Fatalf("unmarshal restart auth-candidates.json: %v", err)
+	var payload struct {
+		EnvSecretFiles  map[string]string `json:"env_secret_files"`
+		FileSecretFiles map[string]string `json:"file_secret_files"`
 	}
-
-	// Verify secret files still exist on disk (they do — they're never deleted)
-	for _, name := range []string{"GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_REGION", "GOOGLE_CLOUD_LOCATION"} {
-		if _, err := os.Stat(filepath.Join(secretDir, name)); err != nil {
-			t.Fatalf("secret file %s was removed during restage: %v", name, err)
+	if err := json.Unmarshal(data, &payload); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_REGION"} {
+		if _, ok := payload.EnvSecretFiles[name]; !ok {
+			t.Errorf("recorded env secret %s not carried: %v", name, payload.EnvSecretFiles)
 		}
 	}
-
-	// BUG: The re-staged auth-candidates.json has empty env_secret_files
-	// because the restart resolved auth had empty EnvVars, so
-	// stageEnvSecretFiles returns an empty map. The existing secret files
-	// are ignored.
-	//
-	// The test asserts the DESIRED behavior: auth-candidates.json should
-	// still reference the existing secret files on disk.
-	restartEnvSecrets, ok := restartPayload["env_secret_files"].(map[string]interface{})
-	if !ok {
-		t.Fatal("restart auth-candidates.json missing env_secret_files map")
+	if _, ok := payload.EnvSecretFiles["UNRECORDED_TOKEN"]; ok {
+		t.Error("an unrecorded file was referenced as an env secret")
 	}
-	if len(restartEnvSecrets) == 0 {
-		t.Error("restart auth-candidates.json has empty env_secret_files — " +
-			"existing secret files from creation are not referenced. " +
-			"Bug #723: ApplyAuthSettings should preserve references to " +
-			"existing secret files when new resolution has empty env vars")
+	if _, ok := payload.FileSecretFiles["CLAUDE_AUTH"]; ok {
+		t.Error("an unrecorded file matching a required_files name was referenced as a file secret")
+	}
+	if got := strings.Join(h.StagedSecretNames(), ","); got != "GOOGLE_CLOUD_PROJECT,GOOGLE_CLOUD_REGION" {
+		t.Errorf("StagedSecretNames after restart = %q", got)
+	}
+
+	// A recorded file-type secret is carried when the resolution does not
+	// re-supply it.
+	if err := os.WriteFile(filepath.Join(secretDir, "CLAUDE_AUTH"), contents["CLAUDE_AUTH"], 0600); err != nil {
+		t.Fatal(err)
+	}
+	h.SetRecordedSecrets([]string{"CLAUDE_AUTH"})
+	if err := h.ApplyAuthSettings(agentHome, &api.ResolvedAuth{Method: "container-script", EnvVars: map[string]string{"GOOGLE_CLOUD_PROJECT": "p"}}); err != nil {
+		t.Fatal(err)
+	}
+	data, _ = os.ReadFile(filepath.Join(agentHome, ".scion", "harness", "inputs", "auth-candidates.json"))
+	payload.FileSecretFiles = nil
+	_ = json.Unmarshal(data, &payload)
+	if payload.FileSecretFiles["CLAUDE_AUTH"] != "$HOME/.scion/harness/secrets/CLAUDE_AUTH" {
+		t.Errorf("recorded file secret not carried: %v", payload.FileSecretFiles)
 	}
 }
 
@@ -197,5 +197,42 @@ func TestApplyAuthSettings_RestageOverwritesExistingCandidates(t *testing.T) {
 	}
 	if _, ok := envSecrets["ANTHROPIC_API_KEY"]; ok {
 		t.Error("ANTHROPIC_API_KEY should not be in env_secret_files after re-staging with vertex-ai")
+	}
+}
+
+// StagedSecretNames lists only secret files staged under
+// $HOME/.scion/harness/secrets/. A broker-mode file secret (no host source)
+// is referenced at its harness-native container path and is not listed.
+func TestApplyAuthSettings_StagedSecretNamesOnlySecretsDir(t *testing.T) {
+	h, _ := newTestContainerScriptHarness(t)
+	agentHome := t.TempDir()
+	h.entry.Auth = &config.HarnessAuthMetadata{
+		Types: map[string]config.HarnessAuthTypeMetadata{
+			"claude": {RequiredFiles: []config.HarnessAuthFileRequirement{{Name: "CLAUDE_AUTH", TargetSuffix: ".claude/.credentials.json"}}},
+		},
+	}
+	resolved := &api.ResolvedAuth{
+		Method:  "container-script",
+		EnvVars: map[string]string{"GOOGLE_CLOUD_PROJECT": "p"},
+		Files:   []api.FileMapping{{SourcePath: "", ContainerPath: "~/.claude/.credentials.json"}},
+	}
+	if err := h.ApplyAuthSettings(agentHome, resolved); err != nil {
+		t.Fatalf("ApplyAuthSettings: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(agentHome, ".scion", "harness", "inputs", "auth-candidates.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		FileSecretFiles map[string]string `json:"file_secret_files"`
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.FileSecretFiles["CLAUDE_AUTH"] != "$HOME/.claude/.credentials.json" {
+		t.Fatalf("fixture: expected the native-path file secret reference, got %v", payload.FileSecretFiles)
+	}
+	if got := strings.Join(h.StagedSecretNames(), ","); got != "GOOGLE_CLOUD_PROJECT" {
+		t.Errorf("StagedSecretNames = %q, want only the secrets-dir file GOOGLE_CLOUD_PROJECT", got)
 	}
 }

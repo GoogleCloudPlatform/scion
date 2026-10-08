@@ -33,6 +33,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/require"
 )
@@ -58,6 +59,58 @@ var bearerMatrixExclusions = map[liveInventoryKey]bearerMatrixExclusion{
 	{OperationID: "harnessconfig.read", Method: "GET", Pattern: "/api/v1/harness-configs"}: {
 		Reason: "the collection list filters each row by harness_config.read instead of refusing the request, so a token without the selector gets 200 with no rows rather than 403; the list gets its own harness_config.list disposition in a later batch",
 		Pin:    "TestScopedAdminListEndpointsFilterCrossProjectRowsAndCountAuthorizedMatches",
+	},
+	{OperationID: "inbox.message.read", Method: "GET", Pattern: "/api/v1/messages"}: {
+		Reason: "the message list filters rows to the token boundary instead of refusing the request, so a project token for another project gets 200 with no rows",
+		Pin:    "TestInboxToken_ProjectBoundaryFiltersMessages",
+	},
+	{OperationID: "inbox.message.write", Method: "POST", Pattern: "/api/v1/messages/read-all"}: {
+		Reason: "mark-all-read touches only rows inside the token boundary instead of refusing the request, so a project token for another project gets 200 and marks nothing of the fixture project",
+		Pin:    "TestInboxToken_MarkAllReadTouchesOnlyVisibleRows",
+	},
+	{OperationID: "inbox.conversation.list", Method: "GET", Pattern: "/api/v1/conversations"}: {
+		Reason: "the conversation list filters rows to the token boundary instead of refusing the request, so a project token for another project gets 200 with no rows",
+		Pin:    "TestConversationListToken_FilteredToBoundary",
+	},
+	{OperationID: "agent.message.target.resolve", Method: "GET", Pattern: "/api/v1/messaging/targets/resolve"}: {
+		Reason: "target resolution answers 404 for every caller while cross-project messaging is off, which it is in the matrix server; the pin enables it",
+		Pin:    "TestMessagingTargetsResolve_TokenNeedsAgentMessage",
+	},
+	{OperationID: "inbox.notification.read", Method: "GET", Pattern: "/api/v1/notifications"}: {
+		Reason: "the notification list filters rows to the token boundary instead of refusing the request, so a project token for another project gets 200 with no rows",
+		Pin:    "TestNotificationToken_RowsFilteredToBoundary",
+	},
+	{OperationID: "inbox.notification.ack", Method: "POST", Pattern: "/api/v1/notifications/ack-all"}: {
+		Reason: "ack-all touches only rows inside the token boundary instead of refusing the request, so a project token for another project gets 200",
+		Pin:    "TestNotificationToken_RowsFilteredToBoundary",
+	},
+	{OperationID: "inbox.notification.subscription.create", Method: "POST", Pattern: "/api/v1/notifications/subscriptions/bulk"}: {
+		Reason: "bulk create takes a JSON array, which the matrix body overrides cannot express; with an object body every token gets 400 after the selector check",
+		Pin:    "TestNotificationSubscription_RequiresProjectAndAgentRead",
+	},
+	{OperationID: "inbox.notification.subscription.read", Method: "GET", Pattern: "/api/v1/notifications/subscriptions"}: {
+		Reason: "the subscription list filters rows to the token boundary instead of refusing the request, so a project token for another project gets 200 with no rows",
+		Pin:    "TestNotificationToken_RowsFilteredToBoundary",
+	},
+	{OperationID: "inbox.notification.subscription.write", Method: "POST", Pattern: "/api/v1/notifications/subscriptions/bulk-delete"}: {
+		Reason: "bulk delete skips rows outside the token boundary instead of refusing the request, so a project token for another project gets 200 with nothing deleted",
+		Pin:    "TestNotificationToken_RowsFilteredToBoundary",
+	},
+	{OperationID: "inbox.notification.template.read", Method: "GET", Pattern: "/api/v1/notifications/templates"}: {
+		Reason: "the template list filters rows to readable projects inside the token boundary instead of refusing the request, so a project token for another project gets 200 with no rows",
+		Pin:    "TestNotificationTemplates_ListedOnlyForReadableProjects",
+	},
+	{OperationID: "project.messagingpolicy.update", Method: "PUT", Pattern: "/api/v1/projects/{id}/messaging-policy"}: {
+		Reason: "the owner rule admits only an active direct project owner, and the matrix's super-admin is not one on the fixture project, so the admitting token is refused by the owner rule after the selector check",
+		Pin:    "TestProjectMessagingPolicyPut_RequiresSetMessagingPolicySelector",
+	},
+	{OperationID: "project.template.set", Method: "POST", Pattern: "/api/v1/projects/{id}/set-template"}: {
+		Reason: "the operation needs project:update and project:clone, and a token passes project.clone on a project only when its holder is a member of it; the matrix's super-admin token carries one selector and is not a member of the fixture project",
+		Pin:    "TestSetTemplate_RequiresUpdateAndCloneOnTheProject",
+	},
+	{OperationID: "artifact.list", Method: "GET", Pattern: "/api/v1/artifacts"}: {
+		Reason: "the artifact list filters each row by the artifact.read check instead of refusing the request, so a token without the selector, or bounded to another project, gets 200 with no rows rather than 403 or 404 (no existence oracle)",
+		Pin:    "TestArtifactsListUserAccessTokensAreBounded",
 	},
 }
 
@@ -122,6 +175,9 @@ type bearerMatrixFixture struct {
 	adminID      string
 	otherProject string
 	tokens       map[string]string
+	// tokenIDs are the tokens mint and tryMint created since the last
+	// releaseTokens.
+	tokenIDs []string
 }
 
 func newBearerMatrixFixture(t *testing.T) *bearerMatrixFixture {
@@ -129,6 +185,14 @@ func newBearerMatrixFixture(t *testing.T) *bearerMatrixFixture {
 	srv, s := testServer(t)
 	ctx := context.Background()
 	ids := seedLiveInventoryFixtures(t, ctx, srv, s)
+	// Project secret routes read and write through the secret backend.
+	backend := secret.NewLocalBackend(s, "bdm-hub-id", "bdm-secret")
+	srv.SetSecretBackend(backend)
+	_, _, err := backend.Set(ctx, &secret.SetSecretInput{
+		Name: ids.projectSecretKey, Value: "1", SecretType: secret.TypeEnvironment,
+		Scope: secret.ScopeProject, ScopeID: ids.project,
+	})
+	require.NoError(t, err)
 
 	adminID := tid("bdm-super-admin")
 	createTestUserWithRole(t, s, adminID, adminID+"@test.com", "admin", store.SystemRoleSuperAdmin)
@@ -139,6 +203,9 @@ func newBearerMatrixFixture(t *testing.T) *bearerMatrixFixture {
 	// Membership in the other project lets the super-admin mint tokens
 	// bound to it.
 	createTestUserWithProjectRole(t, s, adminID, adminID+"@test.com", other, store.ProjectRoleOwner)
+	// The inbox routes act on the caller's own records, so the matrix
+	// addresses the super-admin's records in the fixture project.
+	ids.inbox = seedInboxRecords(t, ctx, s, adminID, ids.project, ids.agent)
 
 	return &bearerMatrixFixture{srv: srv, store: s, ids: ids, adminID: adminID, otherProject: other, tokens: map[string]string{}}
 }
@@ -152,11 +219,12 @@ func (m *bearerMatrixFixture) mint(t *testing.T, boundary TokenBoundary, scopes 
 	if key, ok := m.tokens[cacheKey]; ok {
 		return key
 	}
-	key, _, err := m.srv.uatService.CreateTokenWithParams(rs4MintContext(m.adminID), CreateTokenParams{
+	key, tok, err := m.srv.uatService.CreateTokenWithParams(rs4MintContext(m.adminID), CreateTokenParams{
 		UserID: m.adminID, Name: "bdm-" + tid("tok"), Boundary: boundary, Scopes: scopes,
 	})
 	require.NoError(t, err, "mint %s token with %v", boundary.Kind, scopes)
 	m.tokens[cacheKey] = key
+	m.tokenIDs = append(m.tokenIDs, tok.ID)
 	return key
 }
 
@@ -167,14 +235,30 @@ func (m *bearerMatrixFixture) tryMint(boundary TokenBoundary, scopes []string) s
 	if key, ok := m.tokens[cacheKey]; ok {
 		return key
 	}
-	key, _, err := m.srv.uatService.CreateTokenWithParams(rs4MintContext(m.adminID), CreateTokenParams{
+	key, tok, err := m.srv.uatService.CreateTokenWithParams(rs4MintContext(m.adminID), CreateTokenParams{
 		UserID: m.adminID, Name: "bdm-" + tid("try"), Boundary: boundary, Scopes: scopes,
 	})
 	if err != nil {
 		key = ""
+	} else {
+		m.tokenIDs = append(m.tokenIDs, tok.ID)
 	}
 	m.tokens[cacheKey] = key
 	return key
+}
+
+// releaseTokens deletes the tokens mint and tryMint created and empties
+// their cache. The matrix calls it before each admit row, so the tokens
+// one row holds stay under the per-user token limit
+// (store.UATMaxPerUser) however many rows the catalog has.
+func (m *bearerMatrixFixture) releaseTokens(t *testing.T) {
+	t.Helper()
+	ctx := rs4MintContext(m.adminID)
+	for _, id := range m.tokenIDs {
+		require.NoError(t, m.srv.uatService.DeleteToken(ctx, m.adminID, id))
+	}
+	m.tokenIDs = nil
+	clear(m.tokens)
 }
 
 // canMint reports whether the super-admin can mint a token for the
@@ -211,7 +295,12 @@ func (m *bearerMatrixFixture) everySelectorHubToken(t *testing.T) (string, []str
 	}
 	sort.Strings(selectors)
 	require.NotEmpty(t, selectors, "the super-admin can mint at least one hub selector")
-	return m.mint(t, hubBoundary(), selectors), selectors
+	// Minted outside the mint cache, so releaseTokens keeps it.
+	key, _, err := m.srv.uatService.CreateTokenWithParams(rs4MintContext(m.adminID), CreateTokenParams{
+		UserID: m.adminID, Name: "bdm-" + tid("all"), Boundary: hubBoundary(), Scopes: selectors,
+	})
+	require.NoError(t, err, "mint hub token with every selector")
+	return key, selectors
 }
 
 // request sends method to the entry point's live path with a real token.
@@ -265,6 +354,40 @@ func bearerMatrixPatternOverrides(f idFixtures) map[string]map[string]string {
 	}
 }
 
+// bearerMatrixGuardSelector returns the selector of the permission the
+// hub-admin route guard checks on the entry point's route, or "" when the
+// route has no such guard. A write behind a guard on a read permission
+// needs both selectors, so the admitting token carries this one too.
+func bearerMatrixGuardSelector(ep authzop.EntryPoint) string {
+	best := ""
+	var guard RouteMetadata
+	for key, meta := range routeMetadataTable {
+		_, path := splitRouteKey(key)
+		if path == ep.Pattern || (strings.HasSuffix(path, "/") && strings.HasPrefix(ep.Pattern, path)) {
+			if len(path) > len(best) {
+				best, guard = path, meta
+			}
+		}
+	}
+	if best == "" || guard.Classification != RouteHubAdmin || guard.Permission == "" {
+		return ""
+	}
+	return bearerMatrixSelector(guard.Permission)
+}
+
+// bearerMatrixCompanionSelectors lists, per operation, the selectors an
+// admitting token carries besides the operation's own: the operation also
+// checks project:read or agent:read on a target the record names.
+var bearerMatrixCompanionSelectors = map[authzop.OperationID][]string{
+	"inbox.conversation.create":              {"project:read"},
+	"inbox.conversation.direct.read":         {"agent:read"},
+	"inbox.conversation.defaultagent.set":    {"project:read"},
+	"inbox.conversation.participant.add":     {"project:read"},
+	"inbox.conversation.resolve":             {"project:read"},
+	"inbox.notification.subscription.create": {"project:read"},
+	"inbox.notification.template.create":     {"project:read"},
+}
+
 // bearerMatrixBodyOverrides holds request bodies the matrix sends in place
 // of the live-inventory bodies, for handlers that validate the body before
 // they reach the credential check the matrix observes.
@@ -278,6 +401,18 @@ func bearerMatrixBodyOverrides(f idFixtures) map[overrideKey]map[string]interfac
 		// a token carrying only agent:create covers no usable role, so the
 		// probe asks for agentRole "none", which every creator may grant.
 		{"agent.lifecycle.create", "/api/v1/agents"}: {"name": "bdm-created", "projectId": f.project, "agentRole": "none"},
+		// Inbox writes name the fixture project and agent.
+		{"inbox.conversation.create", "/api/v1/conversations"}:                              {"displayName": f.inbox.createConversations + "-a", "projectId": f.project},
+		{"inbox.conversation.create", "/api/v1/conversations/"}:                             {"displayName": f.inbox.createConversations + "-b", "projectId": f.project},
+		{"inbox.conversation.defaultagent.set", "/api/v1/conversations/{id}/default-agent"}: {"agentId": f.agent},
+		{"inbox.conversation.participant.add", "/api/v1/conversations/{id}/participants"}:   {"principalKind": "agent", "principalId": f.agent},
+		{"inbox.notification.subscription.create", "/api/v1/notifications/subscriptions"}: {
+			"projectId": f.project, "scope": "project", "triggerActivities": []string{"COMPLETED"},
+		},
+		{"inbox.notification.subscription.write", "/api/v1/notifications/subscriptions/{id}"}: {"triggerActivities": []string{"FAILED"}},
+		{"inbox.notification.template.create", "/api/v1/notifications/templates"}: {
+			"name": f.inbox.createConversations + "-template", "triggerActivities": []string{"COMPLETED"}, "projectId": f.project,
+		},
 	}
 }
 
@@ -296,8 +431,9 @@ func sessionOnlyDetailsOf(rec *httptest.ResponseRecorder) (reason, credential st
 // TestBearerDispositionMatrix_CatalogEntryPoints drives real tokens through
 // every catalogued HTTP, SSE and WebSocket entry point and checks the
 // result against the operation's recorded bearer disposition:
-//   - admit: a hub token with the selector and live authority is not
-//     refused and reaches the seeded target (no 401, 403 or 404; a 5xx
+//   - admit: a hub token with the selector (plus the route guard's
+//     selector when the hub-admin guard checks a different permission, and
+//     the operation's bearerMatrixCompanionSelectors) and live authority is not refused and reaches the seeded target (no 401, 403 or 404; a 5xx
 //     only on a row listed in bearerMatrixPositiveServerErrors); a token
 //     of the same user with an unrelated selector, and a project token for
 //     another project, are refused (403, or 404 on a GET, where read
@@ -353,6 +489,7 @@ func TestBearerDispositionMatrix_CatalogEntryPoints(t *testing.T) {
 			counts["session_only"]++
 
 		case authzop.BearerAdmit:
+			m.releaseTokens(t)
 			sel := bearerMatrixSelector(e.Spec.BasePermission)
 			if sel == "" {
 				t.Errorf("%s: admit needs a selector for %s", label, e.Spec.BasePermission)
@@ -400,8 +537,14 @@ func TestBearerDispositionMatrix_CatalogEntryPoints(t *testing.T) {
 			if !bearerMatrixHasBoundary(d, authzop.BearerBoundaryHub) {
 				boundary = projectBoundary(m.ids.project)
 			}
-			rec := m.request(t, e, m.mint(t, boundary, []string{sel}))
-			t.Logf("admit row %s: ceiling=%d boundary=%s positive=%d", label, ceilingRec.Code, boundaryStatus, rec.Code)
+			positive := []string{sel}
+			if guardSel := bearerMatrixGuardSelector(ep); guardSel != "" && guardSel != sel {
+				positive = append(positive, guardSel)
+			}
+			positive = append(positive, bearerMatrixCompanionSelectors[e.Spec.ID]...)
+			sort.Strings(positive)
+			rec := m.request(t, e, m.mint(t, boundary, positive))
+			t.Logf("admit row %s: ceiling=%d boundary=%s positive=%d with %v", label, ceilingRec.Code, boundaryStatus, rec.Code, positive)
 			if rec.Code == http.StatusUnauthorized || rec.Code == http.StatusForbidden {
 				t.Errorf("%s: a %s token with %s got %d, want neither 401 nor 403: %s", label, boundary.Kind, sel, rec.Code, rec.Body.String())
 			}
@@ -490,6 +633,24 @@ var bearerMatrixPositiveServerErrors = map[liveInventoryKey]bearerMatrixPositive
 		http.StatusInternalServerError, "the empty update body fails at the store write"},
 	{"harnessconfig.update", http.MethodPut, "/api/v1/harness-configs/{id}"}: {
 		http.StatusInternalServerError, "the empty update body fails at the store write"},
+	{"project.messagelogs.read", http.MethodGet, "/api/v1/projects/{id}/message-logs"}: {
+		http.StatusNotImplemented, "the test server configures no log query service"},
+	{"project.metrics.read", http.MethodGet, "/api/v1/projects/{id}/metrics"}: {
+		http.StatusServiceUnavailable, "the test server configures no telemetry project for the metrics dashboard"},
+	{"hub.messaging.update", http.MethodPut, "/api/v1/admin/messaging"}: {
+		http.StatusNotImplemented, "the test server configures no operational settings"},
+	{"hub.experiments.update", http.MethodGet, "/api/v1/admin/experiments"}: {
+		http.StatusServiceUnavailable, "the test server configures no operational settings"},
+	{"hub.experiments.update", http.MethodPut, "/api/v1/admin/experiments"}: {
+		http.StatusServiceUnavailable, "the test server configures no operational settings"},
+	{"hub.experiments.update", http.MethodDelete, "/api/v1/admin/experiments"}: {
+		http.StatusServiceUnavailable, "the test server configures no operational settings"},
+	{"hub.projectdefaults.update", http.MethodPut, "/api/v1/admin/project-defaults"}: {
+		http.StatusNotImplemented, "the test server configures no operational settings"},
+	{"hub.projectdefaults.update", http.MethodPatch, "/api/v1/admin/project-defaults"}: {
+		http.StatusNotImplemented, "the test server configures no operational settings"},
+	{"hub.projectdefaults.update", http.MethodPost, "/api/v1/admin/project-defaults"}: {
+		http.StatusNotImplemented, "the test server configures no operational settings"},
 }
 
 // bearerMatrixAuthzErrorCodes are error codes that report an authorization

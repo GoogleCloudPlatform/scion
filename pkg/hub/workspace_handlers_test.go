@@ -37,7 +37,7 @@ const testWorkspaceDevToken = "scion_dev_workspace_test_token_1234567890"
 // testWorkspaceServer creates a test server for workspace handler tests.
 func testWorkspaceServer(t *testing.T) (*Server, store.Store) {
 	t.Helper()
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
@@ -48,11 +48,10 @@ func testWorkspaceServer(t *testing.T) (*Server, store.Store) {
 
 	cfg := DefaultServerConfig()
 	cfg.DevAuthToken = testWorkspaceDevToken
-	srv, err := New(cfg, s)
+	srv, err := newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
-	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 	return srv, s
 }
 

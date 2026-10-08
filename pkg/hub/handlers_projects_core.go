@@ -29,7 +29,6 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
-	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/labels"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
@@ -379,6 +378,8 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 	} else if isReservedProjectSlug(baseSlug) {
 		ValidationError(w, reservedProjectSlugMessage, map[string]interface{}{"field": "slug"})
 		return
+	} else if !requireProjectSlugFormat(w, baseSlug) {
+		return
 	}
 
 	slug, err := s.nextAvailableUnreservedSlug(ctx, baseSlug)
@@ -432,6 +433,12 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// The creator becomes the project owner: the request credential must
+	// cover the owner role before anything is written.
+	if !s.authorizeProjectOwnerGrant(w, ctx) {
+		return
+	}
+
 	// Quota enforcement: check projects-per-user limit before creation.
 	if s.quotaService != nil && project.CreatedBy != "" {
 		if err := s.quotaService.CheckAndReserve(ctx, "max_projects_per_user", project.CreatedBy, "system", "system", project.ID); err != nil {
@@ -450,33 +457,24 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if err := s.store.CreateProject(ctx, project); err != nil {
+	// Create the project and canonical project membership as a role binding
+	// (PM1) in one transaction. The creator gets the project-owner role
+	// binding, which is the sole source of truth for project membership. A
+	// project without an owner binding is unusable, so a binding or audit
+	// failure rolls back the project creation.
+	if err := s.createProjectWithOwner(ctx, project, project.CreatedBy); err != nil {
 		if s.quotaService != nil && project.CreatedBy != "" {
 			s.quotaService.Release(ctx, "max_projects_per_user", project.ID)
 		}
-		writeErrorFromErr(w, err, "")
-		return
-	}
-
-	// Create canonical project membership as role binding (PM1).
-	// The creator gets the project-owner role binding, which is the sole
-	// source of truth for project membership. A project without an owner
-	// binding is unusable, so failure rolls back the project creation.
-	if project.CreatedBy != "" {
-		if rbErr := s.createProjectOwnerRoleBinding(ctx, project.ID, project.CreatedBy); rbErr != nil {
-			s.projectsLogger().Error("CRITICAL: failed to create project owner role binding — rolling back project",
-				"project_id", project.ID, "user_id", project.CreatedBy, "error", rbErr)
-			if delErr := s.store.DeleteProject(ctx, project.ID); delErr != nil {
-				s.projectsLogger().Warn("failed to roll back project after owner binding failure",
-					"project_id", project.ID, "error", delErr)
-			}
-			if s.quotaService != nil && project.CreatedBy != "" {
-				s.quotaService.Release(ctx, "max_projects_per_user", project.ID)
-			}
+		if errors.Is(err, errProjectOwnerBinding) {
+			s.projectsLogger().Error("CRITICAL: failed to create project owner role binding — project creation rolled back",
+				"project_id", project.ID, "user_id", project.CreatedBy, "error", err)
 			writeError(w, http.StatusInternalServerError, "ROLE_BINDING_FAILED",
 				"Failed to create project owner binding; project creation rolled back", nil)
 			return
 		}
+		writeErrorFromErr(w, err, "")
+		return
 	}
 
 	// Create the associated project_agents group (best-effort)
@@ -666,8 +664,13 @@ func (s *Server) createProjectGroup(ctx context.Context, project *store.Project)
 
 // ensureProjectGeneralTopic creates the #general chat topic for a project if
 // the webchat store is configured. Best-effort: failures are logged but do not
-// block project creation.
+// block project creation. It is idempotent, so every creation path (create,
+// register, clone, from-template) and the lazy backfill can call it. Project
+// templates are not chat spaces and never get a #general topic.
 func (s *Server) ensureProjectGeneralTopic(ctx context.Context, project *store.Project) {
+	if project == nil || project.IsTemplate() {
+		return
+	}
 	s.mu.RLock()
 	wcs := s.webChatStore
 	s.mu.RUnlock()
@@ -681,10 +684,28 @@ func (s *Server) ensureProjectGeneralTopic(ctx context.Context, project *store.P
 	}
 	topicID, created, err := wcs.EnsureGeneralTopic(ctx, project.ID, createdBy)
 	if err != nil {
-		s.projectsLogger().Warn("failed to create #general topic for project",
-			"project_id", project.ID, "error", err)
+		// A cancelled or timed-out request is not a store failure: log it
+		// at Debug and leave the Warn throttle alone.
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			s.projectsLogger().Debug("#general topic ensure interrupted",
+				"project_id", project.ID, "error", err)
+			return
+		}
+		// Warn once per project per process; the lazy backfill retries on
+		// every open of an empty space, so later failures log at Debug.
+		// A failure racing a concurrent success can leave a stale entry
+		// (Delete runs before LoadOrStore); that only downgrades the next
+		// failure for this project to Debug, which is benign.
+		if _, warned := s.generalTopicWarned.LoadOrStore(project.ID, struct{}{}); warned {
+			s.projectsLogger().Debug("failed to create #general topic for project",
+				"project_id", project.ID, "error", err)
+		} else {
+			s.projectsLogger().Warn("failed to create #general topic for project",
+				"project_id", project.ID, "error", err)
+		}
 		return
 	}
+	s.generalTopicWarned.Delete(project.ID)
 
 	// Only publish the created event when a new topic was actually inserted.
 	// EnsureGeneralTopic is idempotent (ON CONFLICT DO NOTHING), so
@@ -699,16 +720,46 @@ func (s *Server) ensureProjectGeneralTopic(ctx context.Context, project *store.P
 	s.events.PublishChatTopicEvent(ctx, project.ID, "created", *topic)
 }
 
+// errProjectOwnerBinding marks a failure of the project-owner binding or its
+// audit record inside a project-create transaction.
+var errProjectOwnerBinding = errors.New("project owner binding")
+
+// createProjectWithOwner creates project and, when ownerID is set, the
+// project-owner role binding for ownerID and its audit record, in one
+// transaction. A failure of the binding or its audit record rolls back the
+// project row and is returned wrapping errProjectOwnerBinding.
+func (s *Server) createProjectWithOwner(ctx context.Context, project *store.Project, ownerID string) error {
+	return s.store.WithTx(ctx, func(tx store.Store) error {
+		if err := tx.CreateProject(ctx, project); err != nil {
+			return err
+		}
+		if ownerID == "" {
+			return nil
+		}
+		if err := s.createProjectOwnerRoleBindingTx(ctx, tx, project.ID, ownerID); err != nil {
+			return fmt.Errorf("%w: %w", errProjectOwnerBinding, err)
+		}
+		return nil
+	})
+}
+
 // createProjectOwnerRoleBinding creates a project-owner role binding for the
-// given user in the given project. This is the canonical project membership
-// source (Phase 1E). The role binding is scoped to the project ID, not the
-// project slug, so it survives project renames.
+// user on the project, with its audit record, in one transaction.
 func (s *Server) createProjectOwnerRoleBinding(ctx context.Context, projectID, userID string) error {
-	ownerRoleDef, err := s.store.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
+	return s.store.WithTx(ctx, func(tx store.Store) error {
+		return s.createProjectOwnerRoleBindingTx(ctx, tx, projectID, userID)
+	})
+}
+
+// createProjectOwnerRoleBindingTx writes the project-owner role binding for
+// userID on projectID and its project_member_add audit record on tx. A
+// binding that already exists is left as is and writes no record.
+func (s *Server) createProjectOwnerRoleBindingTx(ctx context.Context, tx store.Store, projectID, userID string) error {
+	ownerRoleDef, err := tx.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
 	if err != nil {
 		return fmt.Errorf("lookup project-owner role definition: %w", err)
 	}
-	_, err = s.store.CreateRoleBinding(ctx, &store.RoleBinding{
+	_, err = tx.CreateRoleBinding(ctx, &store.RoleBinding{
 		RoleDefinitionID: ownerRoleDef.ID,
 		PrincipalType:    store.RoleBindingPrincipalUser,
 		PrincipalID:      userID,
@@ -723,14 +774,66 @@ func (s *Server) createProjectOwnerRoleBinding(ctx context.Context, projectID, u
 		return fmt.Errorf("create project-owner role binding: %w", err)
 	}
 
-	s.emitMutationAudit(ctx, &store.MutationAuditRecord{
+	record := &store.MutationAuditRecord{
 		MutationType: "project_member_add",
 		TargetType:   "project_membership",
 		TargetID:     projectID,
 		AfterSummary: `{"userId":"` + userID + `","role":"owner"}`,
-	})
-
+		Timestamp:    time.Now(),
+	}
+	s.buildAuditActorFromContext(ctx).ApplyActor(record)
+	applyHubActorFallback(record)
+	if err := tx.CreateMutationAudit(ctx, record); err != nil {
+		return fmt.Errorf("audit project-owner role binding: %w", err)
+	}
 	return nil
+}
+
+// projectOwnerGrantDenial returns a reason when the request credential may
+// not be granted the project-owner role of a project it creates, and "" when
+// it may. A credential with a permission ceiling (a scoped user identity)
+// must keep every permission of the project-owner role through the
+// credential caveat intersection CanDelegate applies
+// (intersectCredentialCaveats). Every other identity is unchanged: project
+// create authorization gates it.
+func (s *Server) projectOwnerGrantDenial(ctx context.Context) (string, error) {
+	scoped, ok := GetIdentityFromContext(ctx).(*ScopedUserIdentity)
+	if !ok || scoped == nil {
+		return "", nil
+	}
+	rd, err := s.store.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
+	if err != nil {
+		return "", fmt.Errorf("lookup project-owner role definition: %w", err)
+	}
+	if s.authzService == nil {
+		return "cannot create binding: authorization is not available", nil
+	}
+	kept := make(map[string]bool, len(rd.Permissions))
+	for _, p := range s.authzService.intersectCredentialCaveats(scoped, rd.Permissions) {
+		kept[p] = true
+	}
+	for _, p := range rd.Permissions {
+		if !kept[p] {
+			return "cannot create binding: the request credential does not cover permission " + p + " of the project owner role", nil
+		}
+	}
+	return "", nil
+}
+
+// authorizeProjectOwnerGrant applies projectOwnerGrantDenial before any
+// write of a project create, register or clone. It writes the response and
+// returns false when the request may not continue.
+func (s *Server) authorizeProjectOwnerGrant(w http.ResponseWriter, ctx context.Context) bool {
+	reason, err := s.projectOwnerGrantDenial(ctx)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return false
+	}
+	if reason != "" {
+		writeForbiddenStructured(w, reason, "role_binding", Action("create"))
+		return false
+	}
+	return true
 }
 
 func projectMembersGroupSlug(projectSlug string) string {
@@ -937,14 +1040,19 @@ func hubManagedProjectPath(slug string) (string, error) {
 	return localProjectPath(slug)
 }
 
-// validateProjectSlug rejects empty slugs and slugs containing path-traversal
-// characters (/, \, ..) to prevent directory-traversal attacks.
+// validateProjectSlug accepts only slugs that name a single directory directly
+// under a projects root: non-empty, free of path separators, ":" and "..",
+// not ".", and unchanged by path cleaning. The character rules apply the same
+// way on every platform.
 func validateProjectSlug(slug string) error {
 	if slug == "" {
 		return fmt.Errorf("project slug must not be empty")
 	}
-	if strings.Contains(slug, "/") || strings.Contains(slug, "\\") || strings.Contains(slug, "..") {
+	if strings.ContainsAny(slug, "/\\:") || strings.Contains(slug, "..") {
 		return fmt.Errorf("project slug contains invalid characters")
+	}
+	if slug == "." || filepath.Clean(slug) != slug || filepath.Base(slug) != slug {
+		return fmt.Errorf("project slug must name a single directory directly under the projects root")
 	}
 	return nil
 }
@@ -1061,7 +1169,7 @@ func probeWorkspaceContent(dir string) (bool, error) {
 func (s *Server) resolveDurableOrLegacyPath(slug, durablePath string, warnEphemeral bool) (string, error) {
 	has, err := probeWorkspaceContent(durablePath)
 	if err != nil {
-		return "", s.workspaceProbeError(slug, durablePath, err)
+		return "", s.workspaceProbeError(slug, err)
 	}
 	if has {
 		return durablePath, nil
@@ -1070,11 +1178,11 @@ func (s *Server) resolveDurableOrLegacyPath(slug, durablePath string, warnEpheme
 	if localPath, lerr := localProjectPath(slug); lerr == nil {
 		has, err := probeWorkspaceContent(localPath)
 		if err != nil {
-			return "", s.workspaceProbeError(slug, localPath, err)
+			return "", s.workspaceProbeError(slug, err)
 		}
 		if has {
 			if warnEphemeral {
-				s.warnEphemeralProjectPath(slug, localPath, durablePath)
+				s.warnEphemeralProjectPath(slug)
 			}
 			return localPath, nil
 		}
@@ -1083,13 +1191,17 @@ func (s *Server) resolveDurableOrLegacyPath(slug, durablePath string, warnEpheme
 	return durablePath, nil
 }
 
-// workspaceProbeError logs a timed-out workspace probe (with the path) and
-// wraps err with the project slug only. The error text can reach stored,
-// API-visible fields (e.g. a scheduled event's error), so it must not carry
-// the filesystem path. It still matches errWorkspaceContentTimeout.
-func (s *Server) workspaceProbeError(slug, path string, err error) error {
+// workspaceProbeError logs a timed-out workspace probe and wraps err with the
+// project slug only. The error text can reach stored, API-visible fields
+// (e.g. a scheduled event's error), so it must not carry the filesystem path.
+// It still matches errWorkspaceContentTimeout.
+//
+// The log line carries the probe timeout and a fixed error class only: no
+// project ID is in scope here (callers resolve by slug), and the slug, path
+// and error text are left out of the log.
+func (s *Server) workspaceProbeError(slug string, err error) error {
 	s.projectsLogger().Warn("Workspace storage did not respond; not resolving project path",
-		"slug", slug, "path", path, "timeout", workspaceContentTimeout, "error", err)
+		"error_class", fsErrorClass(err), "timeout", workspaceContentTimeout)
 	return fmt.Errorf("workspace content check for project %q: %w", slug, err)
 }
 
@@ -1122,6 +1234,10 @@ func (s *Server) initHubManagedProject(project *store.Project) error {
 	scionDir := filepath.Join(workspacePath, ".scion")
 	if err := os.MkdirAll(scionDir, 0755); err != nil {
 		return fmt.Errorf("failed to create .scion directory: %w", err)
+	}
+	if _, err := s.recordHubWorkspace(project); err != nil {
+		s.projectsLogger().Warn("failed to write hub workspace record",
+			append([]any{"project_id", project.ID}, alignErrorAttrs(err)...)...)
 	}
 
 	// Seed default settings.yaml directly in scionDir. Hub-native projects
@@ -1185,11 +1301,17 @@ func (s *Server) cloneSharedWorkspaceProject(ctx context.Context, project *store
 		return fmt.Errorf("shared workspace clone failed: %w", err)
 	}
 
-	// Seed the .scion project on top of the cloned workspace
+	// Seed the .scion project on top of the cloned workspace, with the hub
+	// project ID as the workspace project identity (replacing any identity
+	// the repository carries).
 	scionDir := filepath.Join(workspacePath, ".scion")
-	if err := config.InitProject(scionDir, nil, config.InitProjectOpts{SkipRuntimeCheck: true}); err != nil {
+	if err := config.InitProject(scionDir, nil, config.InitProjectOpts{SkipRuntimeCheck: true, ProjectID: project.ID}); err != nil {
 		s.projectsLogger().Warn("failed to initialize .scion in cloned workspace",
 			"project_id", project.ID, "error", err.Error())
+	}
+	if _, err := s.recordHubWorkspace(project); err != nil {
+		s.projectsLogger().Warn("failed to write hub workspace record for cloned workspace",
+			append([]any{"project_id", project.ID}, alignErrorAttrs(err)...)...)
 	}
 
 	// Write hub connection settings
@@ -1346,7 +1468,7 @@ func (s *Server) syncWorkspaceOnStop(ctx context.Context, agent *store.Agent) {
 		return
 	}
 
-	if err := gcp.SyncFromGCS(ctx, stor.Bucket(), storagePath+"/files", workspacePath); err != nil {
+	if err := s.syncHubWorkspaceFromGCS(ctx, stor.Bucket(), storagePath+"/files", workspacePath); err != nil {
 		s.agentLifecycleLog.Warn("syncWorkspaceOnStop: GCS download failed",
 			"agent_id", agent.ID,
 			"project_id", project.ID, "error", err)
@@ -1704,6 +1826,12 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		// The creator becomes the project owner: the request credential
+		// must cover the owner role before anything is written.
+		if !s.authorizeProjectOwnerGrant(w, ctx) {
+			return
+		}
+
 		// Quota enforcement: check projects-per-user limit before creation.
 		if s.quotaService != nil && project.CreatedBy != "" {
 			if err := s.quotaService.CheckAndReserve(ctx, "max_projects_per_user", project.CreatedBy, "system", "system", project.ID); err != nil {
@@ -1722,32 +1850,23 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		if err := s.store.CreateProject(ctx, project); err != nil {
+		// Create the project and its owner role binding (PM1) in one
+		// transaction.
+		if err := s.createProjectWithOwner(ctx, project, project.CreatedBy); err != nil {
 			if s.quotaService != nil && project.CreatedBy != "" {
 				s.quotaService.Release(ctx, "max_projects_per_user", project.ID)
+			}
+			if errors.Is(err, errProjectOwnerBinding) {
+				s.projectsLogger().Error("CRITICAL: failed to create project owner role binding during register — project creation rolled back",
+					"project_id", project.ID, "user_id", project.CreatedBy, "error", err)
+				writeError(w, http.StatusInternalServerError, "ROLE_BINDING_FAILED",
+					"Failed to create project owner binding; project creation rolled back", nil)
+				return
 			}
 			writeErrorFromErr(w, err, "")
 			return
 		}
 		created = true
-
-		// Create owner role binding (PM1: atomic with project creation).
-		if project.CreatedBy != "" {
-			if rbErr := s.createProjectOwnerRoleBinding(ctx, project.ID, project.CreatedBy); rbErr != nil {
-				s.projectsLogger().Error("CRITICAL: failed to create project owner role binding during register — rolling back",
-					"project_id", project.ID, "user_id", project.CreatedBy, "error", rbErr)
-				if delErr := s.store.DeleteProject(ctx, project.ID); delErr != nil {
-					s.projectsLogger().Warn("failed to roll back project after owner binding failure",
-						"project_id", project.ID, "error", delErr)
-				}
-				if s.quotaService != nil {
-					s.quotaService.Release(ctx, "max_projects_per_user", project.ID)
-				}
-				writeError(w, http.StatusInternalServerError, "ROLE_BINDING_FAILED",
-					"Failed to create project owner binding; project creation rolled back", nil)
-				return
-			}
-		}
 
 		// Create the associated project_agents group (best-effort)
 		s.createProjectGroup(ctx, project)
@@ -2392,6 +2511,11 @@ var projectAgentRouteActions = map[AgentSubRouteID]string{
 
 // listProjectAgents lists agents within a specific project
 func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, projectID string) {
+	// The ids= format check runs before any authorization or store call
+	// this handler makes (see parseAgentListIDs).
+	if q := r.URL.Query(); !validateAgentListIDs(w, q, agentListLimit(q), isSortedModeRequest(q)) {
+		return
+	}
 	if !checkAgentReadScope(w, r) {
 		return
 	}
@@ -2403,6 +2527,14 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, proje
 	agentIdent := GetAgentIdentityFromContext(ctx)
 	query := r.URL.Query()
 	sorted := isSortedModeRequest(query)
+	switch {
+	case !sorted:
+		perfSetEndpoint(ctx, perfEndpointAgentsProjectLegacy)
+	case agentIdent != nil:
+		perfSetEndpoint(ctx, perfEndpointAgentsProjectSortedAg)
+	default:
+		perfSetEndpoint(ctx, perfEndpointAgentsProjectSorted)
+	}
 
 	if agentIdent != nil {
 		// checkAgentReadScope only checks that the token carries the
@@ -2423,7 +2555,10 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, proje
 		// every agent record in the project. Require agent.list on the
 		// project, matching what listAgents (handlers_agents_core.go) already
 		// enforces for the global list.
-		if !s.authorize(w, r, Resource{Type: "agent", ParentType: "project", ParentID: projectID}, ActionList) {
+		gateDone := perfPhaseStart(ctx, perfPhaseListScopeAuthz)
+		allowed := s.authorize(w, r, Resource{Type: "agent", ParentType: "project", ParentID: projectID}, ActionList)
+		gateDone()
+		if !allowed {
 			return
 		}
 	}
@@ -2483,11 +2618,14 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, proje
 		}
 	}
 
-	result, err := s.store.ListAgents(ctx, filter, store.ListOptions{
-		Limit:         limit,
-		Cursor:        cursor,
-		CursorBinding: cursorBinding,
-	})
+	// Agent-list rule (ptone/scion#3346): for a user caller, an agent appears
+	// in an agent list, its pages and its totalCount only if the caller can
+	// read that agent. listAgents and listProjectAgents both apply it, so the
+	// two endpoints return the same set for the same project. Passing the
+	// project-level agent.list gate above does not by itself make every
+	// agent in the project readable. Agent callers are outside this rule and
+	// keep the unfiltered sibling listing (listAgentsLegacyPage).
+	result, err := s.listAgentsLegacyPage(ctx, identity, filter, cursor, cursorBinding, limit)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
@@ -2496,58 +2634,38 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, proje
 	// Enrich agents with project and broker names
 	s.enrichAgents(ctx, result.Items)
 
-	// Compute per-item and scope capabilities
-	agents := make([]AgentWithCapabilities, 0, len(result.Items))
-	switch {
-	case agentIdent != nil:
-		// Already confirmed above to be scoped to this project. Render every
-		// item, gating only per-item env visibility, exactly as before --
-		// this is the existing sibling-agent-listing use case agent tokens
-		// rely on this endpoint for.
-		resources := make([]Resource, len(result.Items))
-		for i := range result.Items {
-			resources[i] = agentResource(&result.Items[i])
-		}
-		caps := s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "agent")
-		for i := range result.Items {
-			item := result.Items[i]
-			item.AppliedConfig = redactAppliedConfigEnvForResponse(item.AppliedConfig, s.envViewAllowed(ctx, identity, &item, caps[i]))
-			agents = append(agents, AgentWithCapabilities{Agent: item, Cap: caps[i]})
-		}
-	case identity != nil:
-		// Per-item ActionRead filter: defense in depth so that passing the
-		// project-level agent.list gate above is not by itself treated as
-		// license to read every item the store returned, matching listAgents'
-		// pattern (handlers_agents_core.go) of computing and checking
-		// per-item capabilities rather than trusting the coarse scope alone.
-		resources := make([]Resource, len(result.Items))
-		for i := range result.Items {
-			resources[i] = agentResource(&result.Items[i])
-		}
-		caps := s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "agent")
-		for i := range result.Items {
-			if !capabilityAllows(caps[i], ActionRead) {
-				continue
-			}
-			item := result.Items[i]
-			item.AppliedConfig = redactAppliedConfigEnvForResponse(item.AppliedConfig, s.envViewAllowed(ctx, identity, &item, caps[i]))
-			agents = append(agents, AgentWithCapabilities{Agent: item, Cap: caps[i]})
-		}
+	// Compute per-item and scope capabilities. Every item is rendered: the
+	// user path above already holds only readable agents.
+	capsDone := perfPhaseStart(ctx, perfPhaseCapabilities)
+	resources := make([]Resource, len(result.Items))
+	for i := range result.Items {
+		resources[i] = agentResource(&result.Items[i])
 	}
+	caps := s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "agent")
+	agents := make([]AgentWithCapabilities, 0, len(result.Items))
+	for i := range result.Items {
+		item := result.Items[i]
+		item.AppliedConfig = redactAppliedConfigEnvForResponse(item.AppliedConfig, s.envViewAllowed(ctx, identity, &item, caps[i]))
+		agents = append(agents, AgentWithCapabilities{Agent: item, Cap: caps[i]})
+	}
+	capsDone()
 	// identity == nil is unreachable here: the authorize call above already
 	// writes 401 for an unauthenticated non-agent caller before this point.
 
 	var scopeCap *Capabilities
 	if identity != nil {
+		scopeCapDone := perfPhaseStart(ctx, perfPhaseScopeCapabilities)
 		scopeCap = s.authzService.ComputeScopeCapabilities(ctx, identity, "project", projectID, "agent")
+		scopeCapDone()
 	}
 
 	writeAgentList(w, legacyAgentListView(query), ListAgentsResponse{
-		Agents:       agents,
-		NextCursor:   result.NextCursor,
-		TotalCount:   result.TotalCount,
-		ServerTime:   time.Now().UTC(),
-		Capabilities: scopeCap,
+		Agents:                agents,
+		NextCursor:            result.NextCursor,
+		TotalCount:            result.TotalCount,
+		TotalCountApproximate: result.TotalCountApproximate,
+		ServerTime:            time.Now().UTC(),
+		Capabilities:          scopeCap,
 	})
 }
 
@@ -2995,16 +3113,15 @@ func (s *Server) updateProject(w http.ResponseWriter, r *http.Request, id string
 		project.Name = updates.Name
 	}
 	if updates.Slug != "" {
-		newSlug := api.Slugify(updates.Slug)
-		if newSlug == "" {
-			BadRequest(w, "Invalid slug: must contain at least one alphanumeric character")
-			return
-		}
-		if newSlug != oldSlug && isReservedProjectSlug(newSlug) {
-			ValidationError(w, reservedProjectSlugMessage, map[string]interface{}{"field": "slug"})
-			return
-		}
+		newSlug := updates.Slug
 		if newSlug != oldSlug {
+			if isReservedProjectSlug(newSlug) {
+				ValidationError(w, reservedProjectSlugMessage, map[string]interface{}{"field": "slug"})
+				return
+			}
+			if !requireProjectSlugFormat(w, newSlug) {
+				return
+			}
 			existing, err := s.store.GetProjectBySlug(ctx, newSlug)
 			if err != nil && err != store.ErrNotFound {
 				writeErrorFromErr(w, err, "")
@@ -3326,15 +3443,8 @@ func (s *Server) executePostDeletionEffects(ctx context.Context, projectID strin
 
 	// Effect 5: Filesystem cleanup (hub-managed projects).
 	if (project.GitRemote == "" || project.IsSharedWorkspace()) && project.Slug != "" {
-		if projectPath, err := s.hubManagedProjectPath(project.Slug); err == nil {
-			if err := util.RemoveAllSafe(projectPath); err != nil {
-				s.projectsLogger().Warn("failed to remove hub-managed project directory",
-					"project_id", projectID, "slug", project.Slug, "path", projectPath, "error", err)
-			}
-		} else {
-			s.projectsLogger().Warn("could not resolve hub-managed project directory; skipping removal, the directory may be left behind",
-				"project_id", projectID, "slug", project.Slug, "error", err)
-		}
+		projectPath := s.removeHubManagedProjectDir(projectID, project.Slug)
+		s.removeEmbeddedBrokerProjectDir(project.Slug, projectPath)
 	}
 	s.webdavLocks.Delete(projectID)
 
@@ -3351,13 +3461,144 @@ func (s *Server) executePostDeletionEffects(ctx context.Context, projectID strin
 			projectConfigDir := filepath.Dir(configPath)
 			if err := config.RemoveProjectConfig(projectConfigDir); err != nil && !os.IsNotExist(err) {
 				s.projectsLogger().Warn("failed to remove project config directory",
-					"project_id", projectID, "slug", project.Slug, "path", projectConfigDir, "error", err)
+					"project_id", projectID, "error_class", fsErrorClass(err))
 			}
 		}
 	}
 
 	// Effect 8: Publish project-deleted event.
 	s.events.PublishProjectDeleted(ctx, projectID)
+}
+
+// removeHubManagedProjectDir removes the hub-managed workspace directory of a
+// deleted project, subject to removeProjectDirUnderProjectsRoot. When the slug
+// does not name a direct child of a projects root, or the directory cannot be
+// resolved, nothing is removed and a warning is logged.
+//
+// It returns the resolved hub-managed path, or "" when the slug fails the slug
+// rule or the path cannot be resolved.
+func (s *Server) removeHubManagedProjectDir(projectID, slug string) string {
+	if err := validateProjectSlug(slug); err != nil {
+		s.projectsLogger().Warn("hub-managed project directory not removed: it is not a direct child of a projects root",
+			"project_id", projectID, "error", err)
+		return ""
+	}
+	projectPath, err := s.hubManagedProjectPath(slug)
+	if err != nil {
+		s.projectsLogger().Warn("could not resolve hub-managed project directory; skipping removal, the directory may be left behind",
+			"project_id", projectID)
+		return ""
+	}
+	s.removeProjectDirUnderProjectsRoot(projectID, projectPath)
+	return projectPath
+}
+
+// removeProjectDirUnderProjectsRoot removes projectPath only when it is a
+// direct child of one of the projects roots the server resolves hub-managed
+// project directories under. Any other path is left in place and a warning is
+// logged; no other path is tried instead.
+func (s *Server) removeProjectDirUnderProjectsRoot(projectID, projectPath string) {
+	if !isDirectChildOfAny(projectPath, s.hubManagedProjectsRoots()) {
+		s.projectsLogger().Warn("hub-managed project directory not removed: it is not a direct child of a projects root",
+			"project_id", projectID)
+		return
+	}
+	if err := util.RemoveAllSafe(projectPath); err != nil {
+		s.projectsLogger().Warn("failed to remove hub-managed project directory",
+			"project_id", projectID, "error_class", fsErrorClass(err))
+	}
+}
+
+// hubManagedProjectsRoots returns the projects roots that hubManagedProjectPath
+// resolves hub-managed project directories under for the current workspace
+// storage configuration: the local ~/.scion/projects root, which is always a
+// possible result (directly or as a fallback), and the configured backend's
+// hub-projects root, if any.
+func (s *Server) hubManagedProjectsRoots() []string {
+	var roots []string
+	if globalDir, err := config.GetGlobalDir(); err == nil {
+		roots = append(roots, filepath.Join(globalDir, "projects"))
+	}
+
+	wsCfg := s.config.WorkspaceStorageConfig
+	if wsCfg == nil {
+		return roots
+	}
+	switch {
+	case wsCfg.Backend == "nfs" && wsCfg.NFS != nil && len(wsCfg.NFS.Shares) > 0:
+		if mountRoot := workspaceMountRoot(wsCfg); mountRoot != "" {
+			roots = append(roots, filepath.Join(mountRoot, "hub-projects"))
+		}
+	case wsCfg.Backend == "cloudrun-volume" && wsCfg.CloudRunVolume != nil:
+		if mountRoot := workspaceMountRoot(wsCfg); mountRoot != "" {
+			subPathRoot := config.SubPathRootOrDefault(wsCfg.CloudRunVolume.SubPathRoot)
+			roots = append(roots, filepath.Join(mountRoot, subPathRoot, "hub-projects"))
+		}
+	case wsCfg.Backend == "gke-shared-volume" && wsCfg.GKESharedVolume != nil:
+		if mountRoot := workspaceMountRoot(wsCfg); mountRoot != "" {
+			subPathRoot := config.SubPathRootOrDefault(wsCfg.GKESharedVolume.SubPathRoot)
+			roots = append(roots, filepath.Join(mountRoot, subPathRoot, "hub-projects"))
+		}
+	}
+	return roots
+}
+
+// isDirectChildOfAny reports whether target, once cleaned, is a direct child
+// of one of roots: its parent is the cleaned root and it is not the root
+// itself. Only absolute paths qualify: a target that is not absolute never
+// matches, and a root that is empty or not absolute is never matched against.
+func isDirectChildOfAny(target string, roots []string) bool {
+	if !filepath.IsAbs(target) {
+		return false
+	}
+	cleaned := filepath.Clean(target)
+	for _, root := range roots {
+		if root == "" || !filepath.IsAbs(root) {
+			continue
+		}
+		cleanedRoot := filepath.Clean(root)
+		if cleaned != cleanedRoot && filepath.Dir(cleaned) == cleanedRoot {
+			return true
+		}
+	}
+	return false
+}
+
+// removeEmbeddedBrokerProjectDir removes the co-located broker's local
+// project directory, ~/.scion/projects/<slug>, after a project is deleted.
+//
+// The embedded broker shares this process's filesystem and materializes
+// hub-native projects at that path whatever workspace storage backend the hub
+// uses, and the broker cleanup step leaves this directory to the hub. With the
+// default local backend the hub-managed path is that same directory, so it has
+// already been removed (removedPath) and nothing more is done. With a
+// configured backend the hub-managed path may be on the backend mount, and
+// this removes the local directory as well. Only a single direct child of the
+// projects root is removed. An absent directory is not an error.
+func (s *Server) removeEmbeddedBrokerProjectDir(slug, removedPath string) {
+	if s.GetEmbeddedBrokerID() == "" {
+		return
+	}
+	if err := validateProjectSlug(slug); err != nil {
+		return
+	}
+	globalDir, err := config.GetGlobalDir()
+	if err != nil {
+		return
+	}
+	projectsRoot := filepath.Join(globalDir, "projects")
+	localPath := filepath.Join(projectsRoot, slug)
+	if filepath.Dir(localPath) != projectsRoot {
+		return
+	}
+	// An empty removedPath means no hub-managed path was removed, so the
+	// local directory is still to be removed.
+	if removedPath != "" && localPath == filepath.Clean(removedPath) {
+		return
+	}
+	if err := util.RemoveAllSafe(localPath); err != nil {
+		s.projectsLogger().Warn("embedded broker project directory removal did not complete")
+	}
 }
 
 // dispatchAgentDeletions dispatches agent deletion to runtime brokers

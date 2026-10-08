@@ -617,9 +617,9 @@ func TestConduitGrantKeySet_EphemeralWithoutEncryption(t *testing.T) {
 		require.True(t, ok, "no encryption key: ring must be held in memory")
 		signer, err := k.signer(ctx)
 		require.NoError(t, err)
-		kid, err := srv.RotateConduitGrantKey(ctx)
+		rot, err := srv.RotateConduitGrantKey(ctx)
 		require.NoError(t, err)
-		assert.NotEqual(t, signer.KeyID, kid)
+		assert.NotEqual(t, signer.KeyID, rot.KeyID)
 		pubs, err := srv.ConduitGrantPublicKeys(ctx)
 		require.NoError(t, err)
 		assert.Len(t, pubs, 2, "rotation works in memory")
@@ -757,8 +757,9 @@ func TestConduitGrantKeys_Rotation(t *testing.T) {
 	require.Error(t, err, "activation shorter than the refresh interval")
 
 	activate := 10 * time.Minute
-	kid, err := nodeA.rotate(ctx, activate, time.Hour)
+	rot, err := nodeA.rotate(ctx, activate, time.Hour)
 	require.NoError(t, err)
+	kid := rot.KeyID
 	require.NotEqual(t, first.KeyID, kid)
 
 	// Node B picks up the new ring after its refresh interval and publishes
@@ -811,12 +812,12 @@ func TestConduitGrantKeys_ConcurrentRotationsLoseNoKey(t *testing.T) {
 				go func() {
 					defer wg.Done()
 					<-start
-					kid, err := node.rotate(ctx, conduitGrantKeyDefaultActivation, time.Hour)
+					rot, err := node.rotate(ctx, conduitGrantKeyDefaultActivation, time.Hour)
 					if err != nil {
 						t.Errorf("rotation %d: %v", i, err)
 						return
 					}
-					kids[i] = kid
+					kids[i] = rot.KeyID
 				}()
 			}
 			close(start)

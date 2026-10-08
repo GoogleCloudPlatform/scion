@@ -28,7 +28,7 @@ type cleanerRuntime struct {
 	err                  error
 }
 
-func (c *cleanerRuntime) CleanupAgentResources(_ context.Context, agentName, projectID string) error {
+func (c *cleanerRuntime) CleanupAgentResources(_ context.Context, agentName, projectID, _ string) error {
 	c.agentName, c.projectID = agentName, projectID
 	return c.err
 }
@@ -37,7 +37,7 @@ func TestAgentManager_CleanupAgentResources_Delegates(t *testing.T) {
 	want := errors.New("list failed")
 	rt := &cleanerRuntime{err: want}
 	m := &AgentManager{Runtime: rt}
-	if err := m.CleanupAgentResources(context.Background(), "dev", "p1"); !errors.Is(err, want) {
+	if err := m.CleanupAgentResources(context.Background(), "dev", "p1", ""); !errors.Is(err, want) {
 		t.Fatalf("error = %v, want %v", err, want)
 	}
 	if rt.agentName != "dev" || rt.projectID != "p1" {
@@ -47,7 +47,7 @@ func TestAgentManager_CleanupAgentResources_Delegates(t *testing.T) {
 
 func TestAgentManager_CleanupAgentResources_UnsupportedRuntimeNoOp(t *testing.T) {
 	m := &AgentManager{Runtime: &runtime.MockRuntime{}}
-	if err := m.CleanupAgentResources(context.Background(), "dev", "p1"); err != nil {
+	if err := m.CleanupAgentResources(context.Background(), "dev", "p1", ""); err != nil {
 		t.Fatalf("unsupported runtime should be a no-op, got %v", err)
 	}
 }

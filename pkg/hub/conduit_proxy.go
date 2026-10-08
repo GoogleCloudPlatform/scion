@@ -16,7 +16,9 @@ package hub
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -24,6 +26,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
@@ -60,6 +63,11 @@ func (s *Server) openConduitPort(ctx context.Context, identity Identity, agent *
 	if rt == nil || rt.router == nil {
 		return nil, errConduitNoRoute
 	}
+	if _, isUser := identity.(UserIdentity); isUser && s.conduitAuthz.Load() == nil {
+		// A user stream must be re-checked for its lifetime; without a
+		// running re-check it is not opened.
+		return nil, errConduitNoRoute
+	}
 	params := map[string]string{grant.ParamHost: conduitProxyHost, grant.ParamPort: strconv.Itoa(port)}
 	req := router.Request{
 		Op:    router.OpStream,
@@ -93,7 +101,18 @@ func (s *Server) openConduitPort(ctx context.Context, identity Identity, agent *
 		if err != nil {
 			return err
 		}
-		conn = newStreamConn(st, agent.ID, port)
+		sc := newStreamConn(st, agent.ID, port)
+		sc.untrack = s.trackConduitUserStream(&conduitUserStream{
+			Kind:      grant.StreamKindTCP,
+			Identity:  identity,
+			AgentID:   agent.ID,
+			ProjectID: agent.ProjectID,
+			Port:      port,
+			SessionID: res.Record.SessionID,
+			StreamID:  st.ID(),
+			Close:     sc.closeWithCode,
+		})
+		conn = sc
 		return nil
 	})
 	if err != nil {
@@ -155,6 +174,7 @@ func (s *Server) serveConduitProxy(w http.ResponseWriter, r *http.Request, agent
 		FlushInterval: -1,
 		ModifyResponse: func(resp *http.Response) error {
 			status = resp.StatusCode
+			wrapWebSocketUpstream(resp)
 			for k := range resp.Header {
 				if stripFromProxyResponse(k) {
 					resp.Header.Del(k)
@@ -164,6 +184,10 @@ func (s *Server) serveConduitProxy(w http.ResponseWriter, r *http.Request, agent
 			resp.Header.Set("X-Content-Type-Options", "nosniff")
 			return nil
 		},
+		// The ErrorHandler runs only before the response is committed (the
+		// round trip failed). A failure after that, while the body streams,
+		// makes ReverseProxy panic with http.ErrAbortHandler: the client
+		// sees a truncated response, never an error body appended to it.
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			status = http.StatusBadGateway
 			if r.Context().Err() == nil {
@@ -181,18 +205,171 @@ func (s *Server) serveConduitProxy(w http.ResponseWriter, r *http.Request, agent
 	if err := errors.Join(rc.SetReadDeadline(time.Time{}), rc.SetWriteDeadline(time.Time{})); err != nil {
 		slog.Debug("Conduit proxy: cannot lift the connection deadlines", "agent_id", agent.ID, "error", err)
 	}
+	// Logged on the way out, so an aborted response is logged too.
+	defer func() {
+		slog.Debug("Proxy request",
+			"agent_id", agent.ID,
+			"port", port,
+			"caller", identityStringFromContext(r.Context()),
+			"method", r.Method,
+			"path", reqPath,
+			"status", status,
+			"transport", "conduit",
+			"duration", time.Since(start),
+		)
+	}()
 	rp.ServeHTTP(w, r)
-	slog.Debug("Proxy request",
-		"agent_id", agent.ID,
-		"port", port,
-		"caller", identityStringFromContext(r.Context()),
-		"method", r.Method,
-		"path", reqPath,
-		"status", status,
-		"transport", "conduit",
-		"duration", time.Since(start),
-	)
 }
+
+// WebSocket close codes the proxy sends to the client when the upstream
+// side of a proxied WebSocket ends without a close frame of its own.
+const (
+	// wsCloseUpstreamUnreachable: the conduit stream or the session
+	// carrying it was lost (owner hub gone, agent disconnected).
+	wsCloseUpstreamUnreachable = 4504
+	// wsCloseInternalError: this hub ended the stream (a local limit).
+	wsCloseInternalError = 1011
+)
+
+// wrapWebSocketUpstream wraps the body of a 101 WebSocket response (the
+// upstream half of the hijacked exchange) in a wsUpstreamBody.
+func wrapWebSocketUpstream(resp *http.Response) {
+	if resp.StatusCode != http.StatusSwitchingProtocols || !strings.EqualFold(resp.Header.Get("Upgrade"), "websocket") {
+		return
+	}
+	if rwc, ok := resp.Body.(io.ReadWriteCloser); ok {
+		resp.Body = &wsUpstreamBody{ReadWriteCloser: rwc}
+	}
+}
+
+// wsUpstreamBody is the upstream side of a proxied WebSocket, read only by
+// ReverseProxy's upstream-to-client copy. It follows the server-to-client
+// frames and, when the upstream ends without having sent a close frame,
+// appends one (wsCloseUpstreamUnreachable, or wsCloseInternalError for a
+// local failure) to what the client receives, so the client sees why the
+// connection ended instead of a bare TCP close (1006). The frame is only
+// added at a frame boundary: an upstream lost mid-frame is cut as is.
+// Writes, Close and CloseWrite pass through; nothing else writes to the
+// client.
+type wsUpstreamBody struct {
+	io.ReadWriteCloser
+	frames wsFrameTracker
+	end    error  // the upstream's terminal read error, once seen
+	tail   []byte // the close frame still to deliver after end
+}
+
+func (b *wsUpstreamBody) Read(p []byte) (int, error) {
+	if b.end == nil {
+		n, err := b.ReadWriteCloser.Read(p)
+		b.frames.feed(p[:n])
+		if err == nil {
+			return n, nil
+		}
+		b.end = err
+		if !b.frames.sawClose && b.frames.atBoundary() {
+			code, reason := wsCloseCodeFor(err)
+			b.tail = wsCloseFrame(code, reason)
+		}
+		if n > 0 {
+			return n, nil
+		}
+	}
+	if len(b.tail) > 0 {
+		n := copy(p, b.tail)
+		b.tail = b.tail[n:]
+		return n, nil
+	}
+	return 0, b.end
+}
+
+// CloseWrite passes a client half-close through to the upstream when it
+// supports one. ReverseProxy's client-to-upstream copy looks for this
+// method on the backend: without it, a client half-close would tear down
+// both directions and drop upstream data still in flight to the client.
+func (b *wsUpstreamBody) CloseWrite() error {
+	if hc, ok := b.ReadWriteCloser.(interface{ CloseWrite() error }); ok {
+		return hc.CloseWrite()
+	}
+	return nil
+}
+
+// wsCloseCodeFor maps the error that ended the upstream to the close code
+// and reason sent to the client. A stream this hub closed because its
+// authorization ended carries its §3.3.1 code and reason through
+// (4401 authz_expired, 4404 target_not_found).
+func wsCloseCodeFor(err error) (uint16, string) {
+	if errors.Is(err, conduit.ErrBufferBudget) {
+		return wsCloseInternalError, "internal_error"
+	}
+	var ce *conduitAuthzCloseError
+	if errors.As(err, &ce) {
+		return uint16(ce.Code), ce.Reason
+	}
+	return wsCloseUpstreamUnreachable, "upstream_unreachable"
+}
+
+// wsCloseFrame is an unmasked (server-to-client) WebSocket close frame.
+// reason must be at most 123 bytes.
+func wsCloseFrame(code uint16, reason string) []byte {
+	f := make([]byte, 0, 4+len(reason))
+	f = append(f, 0x88, byte(2+len(reason)), byte(code>>8), byte(code))
+	return append(f, reason...)
+}
+
+// wsFrameTracker follows WebSocket frame boundaries in a byte stream. It
+// parses frame headers only; payloads are skipped by length.
+type wsFrameTracker struct {
+	hdr       [14]byte // the frame header being read
+	hdrLen    int      // header bytes read so far
+	hdrNeed   int      // header size, known once two bytes are in
+	remaining uint64   // payload bytes left in the current frame
+	sawClose  bool     // a close frame was seen; tracking stops
+}
+
+func (t *wsFrameTracker) feed(p []byte) {
+	for len(p) > 0 && !t.sawClose {
+		if t.remaining > 0 {
+			k := uint64(len(p))
+			if k > t.remaining {
+				k = t.remaining
+			}
+			t.remaining -= k
+			p = p[k:]
+			continue
+		}
+		t.hdr[t.hdrLen] = p[0]
+		t.hdrLen++
+		p = p[1:]
+		if t.hdrLen == 2 {
+			t.hdrNeed = 2
+			switch t.hdr[1] & 0x7f {
+			case 126:
+				t.hdrNeed += 2
+			case 127:
+				t.hdrNeed += 8
+			}
+			if t.hdr[1]&0x80 != 0 {
+				t.hdrNeed += 4
+			}
+		}
+		if t.hdrLen < 2 || t.hdrLen < t.hdrNeed {
+			continue
+		}
+		switch n := t.hdr[1] & 0x7f; n {
+		case 126:
+			t.remaining = uint64(binary.BigEndian.Uint16(t.hdr[2:4]))
+		case 127:
+			t.remaining = binary.BigEndian.Uint64(t.hdr[2:10])
+		default:
+			t.remaining = uint64(n)
+		}
+		t.sawClose = t.hdr[0]&0x0f == 0x8
+		t.hdrLen, t.hdrNeed = 0, 0
+	}
+}
+
+// atBoundary reports whether the stream so far ends on a frame boundary.
+func (t *wsFrameTracker) atBoundary() bool { return t.hdrLen == 0 && t.remaining == 0 }
 
 // writeConduitProxyError maps an openConduitPort failure (other than "no
 // session") to a response.
@@ -231,6 +408,62 @@ func writeAgentOffline(w http.ResponseWriter, r *http.Request) {
 type streamConn struct {
 	conduit.Stream
 	local, remote net.Addr
+
+	// untrack ends the stream's authorization re-checks (set once, before
+	// the conn is used).
+	untrack func()
+	// authzClose is set when the hub closed the stream because its
+	// authorization ended; reads then fail with it.
+	authzClose atomic.Pointer[conduitAuthzCloseError]
+}
+
+// conduitAuthzCloseError is the read error of a stream the hub closed
+// because its authorization ended (code 4401 or 4404).
+type conduitAuthzCloseError struct {
+	conduit.CloseError
+}
+
+func (e *conduitAuthzCloseError) Unwrap() error { return &e.CloseError }
+
+// closeWithCode closes the stream on both legs because its authorization
+// ended: the target receives StreamClose{code, reason}, and the proxy's
+// reads fail with the same code and reason, so a proxied WebSocket client
+// receives them in its close frame.
+func (c *streamConn) closeWithCode(code uint32, reason string) {
+	c.authzClose.CompareAndSwap(nil, &conduitAuthzCloseError{CloseError: conduit.CloseError{Code: code, Reason: reason}})
+	_ = c.CloseWithCode(code, reason)
+}
+
+// Read reads from the stream; once the hub closed it for authorization,
+// the read error is that close.
+func (c *streamConn) Read(p []byte) (int, error) {
+	n, err := c.Stream.Read(p)
+	if err != nil {
+		if ce := c.authzClose.Load(); ce != nil {
+			return n, ce
+		}
+	}
+	return n, err
+}
+
+// Write writes to the stream; once the hub closed it for authorization,
+// the write error is that close.
+func (c *streamConn) Write(p []byte) (int, error) {
+	n, err := c.Stream.Write(p)
+	if err != nil {
+		if ce := c.authzClose.Load(); ce != nil {
+			return n, ce
+		}
+	}
+	return n, err
+}
+
+// Close ends the stream and its re-checks.
+func (c *streamConn) Close() error {
+	if c.untrack != nil {
+		c.untrack()
+	}
+	return c.Stream.Close()
 }
 
 func newStreamConn(st conduit.Stream, agentID string, port int) *streamConn {

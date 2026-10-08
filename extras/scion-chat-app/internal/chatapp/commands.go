@@ -1143,7 +1143,7 @@ func (r *CommandRouter) cmdSubscribe(ctx context.Context, event *ChatEvent, args
 						ActionID: filterID,
 						Options: []SelectOption{
 							{Label: "Completed", Value: "COMPLETED"},
-							{Label: "Waiting for Input", Value: "WAITING_FOR_INPUT"},
+							{Label: "Waiting on Parent", Value: "WAITING_FOR_INPUT"},
 							{Label: "Error", Value: "ERROR"},
 							{Label: "Stalled", Value: "STALLED"},
 							{Label: "Limits Exceeded", Value: "LIMITS_EXCEEDED"},

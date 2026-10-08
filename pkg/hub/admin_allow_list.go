@@ -142,6 +142,12 @@ func (s *Server) handleAdminAllowListByEmail(w http.ResponseWriter, r *http.Requ
 	// DELETE /api/v1/users/{id} (ptone/scion#2598): an invited user may hold
 	// bindings if they were pre-added to a project.
 	err = s.store.WithTx(r.Context(), func(tx store.Store) error {
+		if err := checkUserOwnsNoAgentsTx(r.Context(), tx, existingUser.ID); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return errAllowListUserNotFound
+			}
+			return err
+		}
 		if err := guardAndCascadeUserRoleBindingsTx(r.Context(), tx, existingUser.ID, s.membershipNow()); err != nil {
 			return err
 		}
@@ -160,13 +166,17 @@ func (s *Server) handleAdminAllowListByEmail(w http.ResponseWriter, r *http.Requ
 	})
 	if err != nil {
 		var lastOwnerErr *lastProjectOwnerDeleteError
+		var ownsAgentsErr *userOwnsAgentsDeleteError
 		switch {
 		case errors.As(err, &lastOwnerErr):
 			writeLastProjectOwnerDeleteError(w, lastOwnerErr)
+		case errors.As(err, &ownsAgentsErr):
+			writeUserOwnsAgentsDeleteError(w, ownsAgentsErr)
 		case errors.Is(err, errUserRoleBindingsChanged):
 			writeUserRoleBindingsChangedError(w)
 		case errors.Is(err, errAllowListUserNotFound):
-			// Only a not-found from DeleteUser itself is a client 404; a
+			// Only a not-found for the user itself (from DeleteUser or the
+			// user-row lock in checkUserOwnsNoAgentsTx) is a client 404; a
 			// not-found inside the guard (e.g. a missing role definition)
 			// is a server error and falls through to 500.
 			writeError(w, http.StatusNotFound, ErrCodeNotFound, "email not found in allow list", nil)
@@ -176,6 +186,9 @@ func (s *Server) handleAdminAllowListByEmail(w http.ResponseWriter, r *http.Requ
 		}
 		return
 	}
+
+	// Best effort, after commit (ptone/scion#2769).
+	s.removeUserScopedData(r.Context(), existingUser.ID)
 
 	slog.Info("allow list entry removed (deprecated: deleted invited user)",
 		"email", email,

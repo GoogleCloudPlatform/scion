@@ -689,3 +689,71 @@ func TestAgentStore_RuntimeTarget_RowLock(t *testing.T) {
 		}
 	}
 }
+
+// TestAgentStore_MarkAgentContainerMissingIfUnchanged pins the extra guards
+// of the observed-state variant (ptone/scion#3470): it marks an unchanged
+// running agent, and writes nothing once the row's state_version or run_id
+// moved or a start claim is held.
+func TestAgentStore_MarkAgentContainerMissingIfUnchanged(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	cutoff := time.Now().Add(-5 * time.Minute)
+
+	// create returns the agent as a caller would have read it.
+	create := func(slug, runID string) *store.Agent {
+		a := makeAgent(projectID, slug)
+		a.RuntimeBrokerID = "broker-1"
+		a.LastSeen = time.Now().Add(-time.Hour)
+		require.NoError(t, s.CreateAgent(ctx, a))
+		if runID != "" {
+			_, err := s.SetAgentRunID(ctx, a.ID, runID, nil)
+			require.NoError(t, err)
+		}
+		got, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		return got
+	}
+	pre := func(a *store.Agent) store.ContainerMissingPrecondition {
+		return store.ContainerMissingPrecondition{StateVersion: a.StateVersion, RunID: a.RunID}
+	}
+
+	for _, runID := range []string{"", "run-1"} {
+		t.Run("marks unchanged agent run="+runID, func(t *testing.T) {
+			a := create("unchanged"+runID, runID)
+			got, err := s.MarkAgentContainerMissingIfUnchanged(ctx, a.ID, "broker-1", cutoff, pre(a), "gone")
+			require.NoError(t, err)
+			require.NotNil(t, got)
+			assert.Equal(t, "error", got.Phase)
+			assert.Equal(t, "container_missing", got.ExitReason)
+		})
+	}
+
+	changes := map[string]func(t *testing.T, a *store.Agent){
+		"state_version moved": func(t *testing.T, a *store.Agent) {
+			cp := *a
+			cp.Message = "touched"
+			require.NoError(t, s.UpdateAgent(ctx, &cp))
+		},
+		"run_id moved": func(t *testing.T, a *store.Agent) {
+			_, err := s.SetAgentRunID(ctx, a.ID, "run-2", nil)
+			require.NoError(t, err)
+		},
+		"start claim held": func(t *testing.T, a *store.Agent) {
+			_, err := s.ClaimAgentStart(ctx, a.ID, "hub-a", store.StartClaimRestart, "", time.Minute)
+			require.NoError(t, err)
+		},
+	}
+	for name, change := range changes {
+		t.Run(name, func(t *testing.T) {
+			a := create(strings.ReplaceAll(name, " ", "-"), "run-1")
+			change(t, a)
+			got, err := s.MarkAgentContainerMissingIfUnchanged(ctx, a.ID, "broker-1", cutoff, pre(a), "gone")
+			require.NoError(t, err)
+			assert.Nil(t, got)
+			stored, err := s.GetAgent(ctx, a.ID)
+			require.NoError(t, err)
+			assert.Equal(t, "running", stored.Phase)
+			assert.Empty(t, stored.ExitReason)
+		})
+	}
+}

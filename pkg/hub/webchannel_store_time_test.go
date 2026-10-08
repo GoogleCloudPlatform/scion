@@ -42,10 +42,7 @@ import (
 // database without the ent schema.
 func newModerncWebChatStore(t *testing.T) (*sqliteWebChatStore, *sql.DB) {
 	t.Helper()
-	db, err := sql.Open("sqlite", ":memory:")
-	require.NoError(t, err)
-	db.SetMaxOpenConns(1) // one connection, so every query sees the same in-memory database
-	t.Cleanup(func() { _ = db.Close() })
+	db := openTestMemorySQLite(t, "sqlite")
 	wcs := NewWebChatStore(db, "sqlite").(*sqliteWebChatStore)
 	require.NoError(t, wcs.Init())
 	return wcs, db

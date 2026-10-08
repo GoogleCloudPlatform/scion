@@ -277,7 +277,9 @@ func (s *Supervisor) Run(ctx context.Context, args []string) (int, error) {
 	// the runtime-provided value is a placeholder (P3 writes empty values
 	// in SCION_SECRET_KEYS), so the fetched value must win. This is
 	// deliberately separate from mergeEnvOverlay, which is additive-only.
-	// (#127, P2d)
+	// (#127, P2d) The telemetry receiver never sees these values, so a
+	// secret named SCION_USAGE_SOURCE is unsupported: the child would get
+	// it while the receiver's usage gating would not.
 	if len(s.config.SecretOverrides) > 0 {
 		for k, v := range s.config.SecretOverrides {
 			s.cmd.Env = setEnvVar(s.cmd.Env, k, v)

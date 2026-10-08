@@ -33,7 +33,7 @@ var configGlobal bool
 var configCmd = &cobra.Command{
 	Use:   "config",
 	Short: "Manage scion configuration settings",
-	Long:  `View and modify settings for scion-agent. Settings are resolved from project (.scion/settings.json) and global (~/.scion/settings.json) locations.`,
+	Long:  `View and modify settings for scion-agent. Settings are resolved from project (.scion/settings.yaml) and global (~/.scion/settings.yaml) locations.`,
 	// Args/Run make this command Runnable so cobra validates subcommand
 	// names: an unrecognized subcommand (e.g. a removed alias) returns an
 	// "unknown command" error instead of silently falling through to this
@@ -628,7 +628,7 @@ func init() {
 	configCmd.AddCommand(configCdConfigCmd)
 	configCmd.AddCommand(configCdProjectCmd)
 
-	configSetCmd.Flags().BoolVar(&configGlobal, "global", false, "Set configuration globally (~/.scion/settings.json)")
+	configSetCmd.Flags().BoolVar(&configGlobal, "global", false, "Set configuration globally (~/.scion/settings.yaml)")
 	configMigrateCmd.Flags().BoolVar(&configMigrateDryRun, "dry-run", false, "Preview changes without writing files")
 	configMigrateCmd.Flags().BoolVar(&configMigrateGlobal, "global", false, "Migrate only the global settings file")
 }

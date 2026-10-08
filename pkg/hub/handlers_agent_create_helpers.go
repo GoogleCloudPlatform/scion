@@ -122,19 +122,49 @@ func (s *Server) authorizeResolvedTemplate(ctx context.Context, identity Identit
 	return s.authzService.CheckAccess(ctx, identity, templateResource(tmpl), ActionRead).Allowed
 }
 
-// getHarnessConfigFromTemplate returns the harness config name from a resolved template,
-// or the fallback value if no template was resolved. Prefers the template's
-// DefaultHarnessConfig (e.g. "claude-web") over the generic Harness type (e.g. "claude").
-func (s *Server) getHarnessConfigFromTemplate(template *store.Template, fallback string) string {
-	if template != nil {
-		if template.DefaultHarnessConfig != "" {
-			return template.DefaultHarnessConfig
-		}
-		if template.Harness != "" {
-			return template.Harness
-		}
+// templateHarnessConfigName is the single source of the template rung's
+// harness-config name: the template's declared harness_config /
+// default_harness_config (both land in Template.DefaultHarnessConfig), or ""
+// when it declares none. Both template rungs (deriveAgentConfig and
+// resolveDerivedConfig's own fallback) use it so they cannot drift.
+//
+// It deliberately does NOT fall back to Template.Harness (ptone/scion#601
+// item 2, product decision (a)). That field is a harness *type* — and for any
+// template whose name merely contains claude/gemini/opencode/codex it is
+// inferred from the name (inferHarnessFromName) — not a harness-config slug.
+// Using it as one filled the slot before applyHubAgentDefaults, so a hub
+// operator's agent_defaults.default_harness_config silently lost to a
+// name-inferred type, and it diverged from the broker resolver
+// (pkg/config.ResolveHarnessConfigName), which never treats a template's
+// harness type as a config name. With no declared name, the hub default and
+// then broker-side resolution (profile / settings defaults) decide.
+func templateHarnessConfigName(template *store.Template) string {
+	if template == nil {
+		return ""
 	}
-	return fallback
+	return template.DefaultHarnessConfig
+}
+
+type templateDefaultHarnessConfigCtxKey struct{}
+
+// withTemplateDefaultHarnessConfig records on ctx that the template rung of
+// deriveAgentConfig supplied the agent's harness-config name from the
+// template's explicit default_harness_config (not its bare Harness type), so
+// resolveDerivedConfig can WARN when that name does not resolve
+// (ptone/scion#620). Carried rather than inferred, like
+// withHubDefaultHarnessConfig.
+func withTemplateDefaultHarnessConfig(ctx context.Context) context.Context {
+	return context.WithValue(ctx, templateDefaultHarnessConfigCtxKey{}, true)
+}
+
+// templateDefaultHarnessConfigFromContext reports whether the agent's
+// harness-config name came from the template's default_harness_config.
+func templateDefaultHarnessConfigFromContext(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	v, _ := ctx.Value(templateDefaultHarnessConfigCtxKey{}).(bool)
+	return v
 }
 
 // buildAppliedConfig constructs an AgentAppliedConfig from a CreateAgentRequest.
@@ -378,6 +408,10 @@ func sharedWorkspaceCloneConfig(project *store.Project) *api.GitCloneConfig {
 //     default only fills a slot that request, project, AND template all
 //     left empty (design §5.2 risk (b);
 //     TestCreateAgent_HubDefaultHarnessConfig_LosesToTemplate pins this).
+//     "Template" means only the template's declared harness_config/
+//     default_harness_config, never its harness type (ptone/scion#601
+//     item 2), so a harness-type-only template leaves the slot to the hub
+//     default.
 //
 // It returns populateAgentConfig's error: non-nil only on a workspace storage
 // timeout (errWorkspaceContentTimeout). Callers must not create the agent then.
@@ -388,7 +422,10 @@ func (s *Server) deriveAgentConfig(ctx context.Context, agent *store.Agent, proj
 		agent.AppliedConfig.HarnessConfig = project.Annotations[projectSettingDefaultHarnessConfig]
 	}
 	if agent.AppliedConfig.HarnessConfig == "" {
-		agent.AppliedConfig.HarnessConfig = s.getHarnessConfigFromTemplate(resolvedTemplate, "")
+		if name := templateHarnessConfigName(resolvedTemplate); name != "" {
+			agent.AppliedConfig.HarnessConfig = name
+			ctx = withTemplateDefaultHarnessConfig(ctx)
+		}
 	}
 
 	// Project-level defaults: limits, resources, and any of HarnessConfig/
@@ -578,8 +615,8 @@ func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, p
 	// Record where the name came from, for the not-found log level below. A
 	// name that arrived from the project's default-harness-config annotation
 	// is operator-supplied and displaced the template, so failing to resolve
-	// it is worth a warning. Anything else — most often the template's bare
-	// Harness type — is the pre-existing normal case.
+	// it is worth a warning. Other provenances are classified below; a name
+	// supplied on the request stays at DEBUG (see the level table).
 	hcFromProjectAnnotation := hcName != "" && project != nil && project.Annotations != nil &&
 		project.Annotations[projectSettingDefaultHarnessConfig] == hcName
 	// A third provenance: the hub operational default_harness_config, applied
@@ -594,8 +631,19 @@ func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, p
 	// depth, not a live case. Kept so the two provenances stay mutually
 	// exclusive by construction rather than by that reasoning holding.
 	hcFromHubDefault := hcName != "" && !hcFromProjectAnnotation && hubDefaultHarnessConfigFromContext(ctx)
+	// A fourth provenance (ptone/scion#620): the template's declared
+	// harness_config/default_harness_config. It names a harness-config slug
+	// on purpose, so failing to resolve it means the template author's choice
+	// is silently replaced by whatever the broker finds on disk. Carried on
+	// the context by deriveAgentConfig's template rung (same reason as the
+	// hub default: a request naming the same slug is request provenance, not
+	// template provenance), or set directly below when this function's own
+	// template fallback fills it.
+	hcFromTemplateDefault := hcName != "" && !hcFromProjectAnnotation && !hcFromHubDefault &&
+		templateDefaultHarnessConfigFromContext(ctx)
 	if hcName == "" && resolvedTemplate != nil {
-		hcName = s.getHarnessConfigFromTemplate(resolvedTemplate, "")
+		hcName = templateHarnessConfigName(resolvedTemplate)
+		hcFromTemplateDefault = hcName != ""
 	}
 	// resolvedHC is the hub harness config resolved below, if any; the
 	// timezone capture at the end of this function reads its env.
@@ -659,20 +707,25 @@ func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, p
 			//           hash. The two are distinguished in the log attributes
 			//           so an operator knows which knob to turn.
 			//
-			//   DEBUG — anything else. Most often hcName is the template's bare
-			//           Harness type ("claude") rather than a stored
-			//           harness-config slug, via getHarnessConfigFromTemplate's
-			//           second branch. Harness configs are created through the
-			//           API rather than seeded, so "no HarnessConfig row whose
-			//           slug matches the harness type" is the default state of a
-			//           fresh deployment. Warning there would fire on every
-			//           single agent create and train operators to ignore it.
+			//   WARN  — the name is the template's explicit
+			//           default_harness_config (ptone/scion#620). The template
+			//           author named a specific harness-config; if the hub has
+			//           no record of it the agent silently runs on whatever
+			//           the broker has on disk. Observability only — dispatch
+			//           still proceeds (product decision on #620).
+			//
+			//   DEBUG — anything else: in practice a name supplied explicitly
+			//           on the request (or carried over from an existing
+			//           agent's config). The template's bare Harness type used
+			//           to land here as the common case; since
+			//           ptone/scion#601 item 2 it is never used as a
+			//           harness-config name (see templateHarnessConfigName).
 			projectID := ""
 			if project != nil {
 				projectID = project.ID
 			}
 			level := slog.LevelDebug
-			if hcFromProjectAnnotation || hcFromHubDefault {
+			if hcFromProjectAnnotation || hcFromHubDefault || hcFromTemplateDefault {
 				level = slog.LevelWarn
 			}
 			s.agentLifecycleLog.Log(ctx, level,
@@ -680,7 +733,8 @@ func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, p
 					"agent will be dispatched without a config ID/hash and the broker must resolve it locally",
 				"slug", hcName, "agent_id", agent.ID, "project_id", projectID,
 				"from_project_annotation", hcFromProjectAnnotation,
-				"from_hub_default", hcFromHubDefault)
+				"from_hub_default", hcFromHubDefault,
+				"from_template_default", hcFromTemplateDefault)
 		}
 	}
 
@@ -1142,8 +1196,9 @@ func resumeInPlaceDecision(phase string, resume, force bool) (resumeInPlace, for
 // (beginStartDispatchHTTP, branches 1 and 2: the quota reservation, the
 // starting-phase write, or a delete claim taking the row) or run-intent
 // bookkeeping, or get a dispatch error, or find, after a start dispatch that
-// landed, that a delete won (409 delete_in_progress; existingAgentDeleteWon,
-// existingAgentGoneAfterLanding). The one exception is a
+// landed, that a delete won, in the post-start step or at the final check
+// before the answer (409 delete_in_progress; existingAgentDeleteWon,
+// existingAgentDeleteWonBeforeAnswer). The one exception is a
 // dispatch-time start-guard refusal reporting a launch already in flight,
 // which is answered like the start gate above → existingAgentStarted.
 // Branch 3 writes an error → existingAgentErrored when recording run intent,
@@ -1281,6 +1336,9 @@ func (s *Server) handleExistingAgent(
 			if answered {
 				return existingAgentErrored
 			}
+			if writeAgentTokenRecordError(w, err) {
+				return existingAgentErrored
+			}
 			if s.writeStartClaimError(ctx, w, err, existingAgent.ID) || writeStartQuotaError(w, err) {
 				return existingAgentErrored
 			}
@@ -1304,7 +1362,7 @@ func (s *Server) handleExistingAgent(
 			return existingAgentErrored
 		}
 
-		if afterErr != nil && s.existingAgentGoneAfterLanding(ctx, w, existingAgent.ID, afterErr) {
+		if s.existingAgentDeleteWonBeforeAnswer(ctx, w, existingAgent.ID, afterErr) {
 			return existingAgentErrored
 		}
 
@@ -1407,6 +1465,9 @@ func (s *Server) handleExistingAgent(
 				if answered {
 					return existingAgentErrored
 				}
+				if writeAgentTokenRecordError(w, err) {
+					return existingAgentErrored
+				}
 				if s.writeStartClaimError(ctx, w, err, existingAgent.ID) || writeStartQuotaError(w, err) {
 					return existingAgentErrored
 				}
@@ -1430,7 +1491,7 @@ func (s *Server) handleExistingAgent(
 				return existingAgentErrored
 			}
 
-			if afterErr != nil && s.existingAgentGoneAfterLanding(ctx, w, existingAgent.ID, afterErr) {
+			if s.existingAgentDeleteWonBeforeAnswer(ctx, w, existingAgent.ID, afterErr) {
 				return existingAgentErrored
 			}
 
@@ -1458,6 +1519,19 @@ func (s *Server) handleExistingAgent(
 		dispatcher := s.GetDispatcher()
 		if dispatcher != nil && existingAgent.RuntimeBrokerID != "" {
 			if err := dispatcher.DispatchAgentDelete(ctx, existingAgent, false, false, false, time.Time{}); err != nil {
+				// The broker holds a different run of the agent than the
+				// row records and deleted nothing (ptone/scion#3080):
+				// removing the row would leave that run with no row.
+				// Whether force overrides it is decided in one place,
+				// refuseDeleteRunMismatch.
+				var refused *DeleteRunMismatchError
+				if errors.As(err, &refused) && refuseDeleteRunMismatch(cleanupMode == "force", false) {
+					s.agentLifecycleLog.Warn("Env-gather recreate: broker holds a different run than the hub recorded; not removing the agent",
+						"agent_id", existingAgent.ID, "hub_run_id", refused.RequestedRunID,
+						"broker_run_id", refused.CurrentRunID, "cleanup_mode", cleanupMode)
+					Conflict(w, "Failed to clean up existing provisioning agent before env-gather recreate: "+deleteRunMismatchMessage(refused))
+					return existingAgentErrored
+				}
 				if cleanupMode != "force" {
 					RuntimeError(w, "Failed to clean up existing provisioning agent before env-gather recreate: "+err.Error())
 					return existingAgentErrored
@@ -1578,6 +1652,9 @@ func (s *Server) handleExistingAgent(
 			if answered {
 				return existingAgentErrored
 			}
+			if writeAgentTokenRecordError(w, err) {
+				return existingAgentErrored
+			}
 			if s.writeStartClaimError(ctx, w, err, existingAgent.ID) || writeStartQuotaError(w, err) {
 				return existingAgentErrored
 			}
@@ -1601,7 +1678,7 @@ func (s *Server) handleExistingAgent(
 			return existingAgentErrored
 		}
 
-		if afterErr != nil && s.existingAgentGoneAfterLanding(ctx, w, existingAgent.ID, afterErr) {
+		if s.existingAgentDeleteWonBeforeAnswer(ctx, w, existingAgent.ID, afterErr) {
 			return existingAgentErrored
 		}
 
@@ -2420,14 +2497,41 @@ func (s *Server) hasAnyKey(ctx context.Context, agent *store.Agent, keys []strin
 // (ptone/scion#3255). The dispatch has already tried to remove the landed run
 // (compensateLandedRun); its outcome is in the dispatch warnings. The delete
 // engine owns the row and its reservation. Called from the post-start step,
-// before the full-row write, so nothing is written for a delete that won.
-// It reports whether it answered.
+// before the full-row write, so nothing is written for a delete that won,
+// and again before the answer (existingAgentDeleteWonBeforeAnswer). It
+// reports whether it answered.
 func (s *Server) existingAgentDeleteWon(ctx context.Context, w http.ResponseWriter, agentID string) bool {
 	if !s.deleteWonAfterLanding(ctx, agentID) {
 		return false
 	}
 	writeDeleteWon(w, agentID, deletedWhileStartingMessage, dispatchWarningsFromContext(ctx))
 	return true
+}
+
+// existingAgentDeleteWonBeforeAnswer is the final check of a start of an
+// existing agent, run after startAgentCore returned and before the 200
+// answer (and before any notify subscription): it answers 409
+// delete_in_progress, with no agent body and nothing published, when the
+// post-start write found the row gone (afterErr, existingAgentGoneAfterLanding)
+// or when a re-read of the row finds it gone or delete-won
+// (existingAgentDeleteWon, deleteWonOnRead's rule), as the lifecycle start
+// does after its final write (ptone/scion#3546, ptone/scion#3711). A delete
+// that claimed the row after the post-start step's re-read is caught here; a
+// failed delete, or a deleting row whose lease expired, is a live agent and
+// still answers 200, as does a re-read that fails for another reason. A
+// delete that claims the row after this check can still see a 200: a start
+// that completed and then a delete is a valid order. It reports whether it
+// answered.
+func (s *Server) existingAgentDeleteWonBeforeAnswer(ctx context.Context, w http.ResponseWriter, agentID string, afterErr error) bool {
+	// The post-start write already found the row gone: answer from that
+	// rather than rely on the re-read below, which could fail transiently
+	// (any read error other than "row gone" reports no delete) and answer
+	// 200 for an agent whose delete won.
+	// TestCreateExisting_DeleteWinsAfterReRead_HardDelete409 pins this.
+	if afterErr != nil && s.existingAgentGoneAfterLanding(ctx, w, agentID, afterErr) {
+		return true
+	}
+	return s.existingAgentDeleteWon(ctx, w, agentID)
 }
 
 // existingAgentGoneAfterLanding is the same answer when the post-start write

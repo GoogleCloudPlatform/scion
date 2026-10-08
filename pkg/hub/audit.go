@@ -100,6 +100,9 @@ const (
 	InviteAuditUserActivated    InviteAuditEventType = "user_activated"
 	InviteAuditUserInvited      InviteAuditEventType = "user_invited"
 	InviteAuditUserInvitedBulk  InviteAuditEventType = "user_invited_bulk"
+	// InviteAuditUserProvisioned records a pending user created through
+	// POST /api/v1/users (post-commit, best-effort).
+	InviteAuditUserProvisioned InviteAuditEventType = "user_provisioned"
 )
 
 // InviteAuditEvent represents an auditable event for the invite/allow-list system.
@@ -809,9 +812,10 @@ func mergeBrokerAuditDetails(details map[string]string, kv ...string) map[string
 }
 
 // LogRegistrationEvent logs a broker registration or re-registration event.
-// details carries the credential attribution and operation
-// (brokerAuditCredentialDetails plus "operation"); it must not hold secret
-// material.
+// details carries the credential attribution, the operation and the issued
+// join token's details (brokerAuditCredentialDetails, "operation" and
+// joinTokenAuditDetails); it must not hold secret material, the join token
+// or its hash.
 func LogRegistrationEvent(ctx context.Context, logger AuditLogger, brokerID, brokerName, actorID, ipAddress string, details map[string]string) {
 	if logger == nil {
 		return

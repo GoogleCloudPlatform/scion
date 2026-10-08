@@ -215,7 +215,9 @@ func TestGoldenCLITimes_JSONPassthrough(t *testing.T) {
 		{"messages --format json", []string{"--format", "json", "messages", "--all"}, []string{`"createdAt": "` + goldenCreatedAt + `"`}},
 		{"messages --format json --tz", []string{"--tz", "America/New_York", "--format", "json", "messages", "--all"}, []string{`"createdAt": "` + goldenCreatedAt + `"`}},
 		{"messages --json --utc", []string{"--utc", "messages", "--all", "--json"}, []string{`"createdAt": "` + goldenCreatedAt + `"`}},
-		{"hub secret list --json --tz", []string{"--tz", "America/New_York", "hub", "secret", "list", "--json"}, []string{`"created": "` + goldenCreatedAt + `"`, `"updated": "` + goldenUpdatedAt + `"`}},
+		// "hub secret list" JSON carries the table's metadata only, so "updated" is the one timestamp.
+		{"hub secret list --json --tz", []string{"--tz", "America/New_York", "hub", "secret", "list", "--json"}, []string{`"updated": "` + goldenUpdatedAt + `"`}},
+		{"hub secret list --format json --tz", []string{"--tz", "America/New_York", "--format", "json", "hub", "secret", "list"}, []string{`"updated": "` + goldenUpdatedAt + `"`}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

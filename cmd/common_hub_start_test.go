@@ -34,15 +34,16 @@ import (
 // agent create POST (whose raw JSON body it captures, even when the create
 // fails).
 type hubStartStub struct {
-	server        *httptest.Server
-	createBody    map[string]interface{}
-	createCalls   int
-	existingPhase string // "" → existing-agent GET returns 404
-	project       map[string]interface{}
-	createStatus  int      // non-zero → the create POST fails with this status
-	createErrCode string   // error code for a failed create ("" → "conflict")
-	createErrMsg  string   // error message for a failed create ("" → "refused by hub")
-	afterCreate   []string // "METHOD path" of every request after the first create
+	server           *httptest.Server
+	createBody       map[string]interface{}
+	createCalls      int
+	existingPhase    string // "" → existing-agent GET returns 404
+	project          map[string]interface{}
+	createStatus     int                    // non-zero → the create POST fails with this status
+	createErrCode    string                 // error code for a failed create ("" → "conflict")
+	createErrMsg     string                 // error message for a failed create ("" → "refused by hub")
+	createErrDetails map[string]interface{} // error details for a failed create (nil → none)
+	afterCreate      []string               // "METHOD path" of every request after the first create
 }
 
 func newHubStartStub(t *testing.T, projectID, agentName, existingPhase string) *hubStartStub {
@@ -95,10 +96,12 @@ func newHubStartStub(t *testing.T, projectID, agentName, existingPhase string) *
 				if msg == "" {
 					msg = "refused by hub"
 				}
+				errBody := map[string]interface{}{"code": code, "message": msg}
+				if stub.createErrDetails != nil {
+					errBody["details"] = stub.createErrDetails
+				}
 				w.WriteHeader(stub.createStatus)
-				_ = json.NewEncoder(w).Encode(map[string]interface{}{
-					"error": map[string]interface{}{"code": code, "message": msg},
-				})
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{"error": errBody})
 				return
 			}
 			_ = json.NewEncoder(w).Encode(&hubclient.CreateAgentResponse{

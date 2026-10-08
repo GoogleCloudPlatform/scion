@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -126,8 +127,12 @@ func (g staticTokenGenerator) GenerateAgentToken(string, string, []string, Agent
 	return g.token, nil
 }
 
-func (g staticTokenGenerator) GenerateAgentTokenForAgent(context.Context, *store.Agent) (string, error) {
-	return g.token, nil
+func (g staticTokenGenerator) AuthorizeAgentToken(_ context.Context, agent *store.Agent) (AgentTokenGrant, error) {
+	return AgentTokenGrant{AgentID: agent.ID, ProjectID: agent.ProjectID}, nil
+}
+
+func (g staticTokenGenerator) SignAgentToken(grant AgentTokenGrant, runID string) (string, *store.AgentCredential, error) {
+	return g.token, &store.AgentCredential{AgentID: grant.AgentID, ProjectID: grant.ProjectID, TokenJTIHash: hashJTI(uuid.NewString()), RunID: runID}, nil
 }
 
 func newResetAuthDispatcher(t *testing.T) (*HTTPAgentDispatcher, *mockRuntimeBrokerClient, *store.Agent) {

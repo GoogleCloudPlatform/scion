@@ -67,14 +67,14 @@ var dbFileOnlyRequestPaths = [][]string{
 	{"server", "oidc_login"},
 	{"server", "oidc"},
 	{"server", "hub", "agent_endpoint"},
-	{"server", "hub", "gcp_iam_check_mode"},
-	{"server", "hub", "gcp_iam_deny_unknown_policy"},
 	{"server", "hub", "missing_agent_grace"},
 	{"server", "hub", "conduit"},
 	{"server", "hub", "disable_legacy_storage_fallback"},
 	{"server", "auth", "username"},
 	{"server", "auth", "display_name"},
 	{"server", "auth", "email"},
+	{"server", "auth", "agent_run_scope"},
+	{"server", "auth", "agent_run_scope_legacy_until"},
 }
 
 // dbUnpersistedRequestPaths is every request path the DB-backed PUT does not

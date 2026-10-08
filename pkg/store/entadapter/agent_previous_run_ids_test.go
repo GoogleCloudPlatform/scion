@@ -36,15 +36,15 @@ func TestPreviousRunIDs_SetAppendsAndCASClears(t *testing.T) {
 	a := makeAgent(projectID, "prev-runs")
 	require.NoError(t, s.CreateAgent(ctx, a))
 
-	_, err := s.SetAgentRunID(ctx, a.ID, "run-1")
+	_, err := s.SetAgentRunID(ctx, a.ID, "run-1", nil)
 	require.NoError(t, err)
 	got, err := s.GetAgent(ctx, a.ID)
 	require.NoError(t, err)
 	assert.Empty(t, got.PreviousRunIDs, "an empty run is never listed")
 
-	_, err = s.SetAgentRunID(ctx, a.ID, "run-2")
+	_, err = s.SetAgentRunID(ctx, a.ID, "run-2", nil)
 	require.NoError(t, err)
-	_, err = s.SetAgentRunID(ctx, a.ID, "run-3")
+	_, err = s.SetAgentRunID(ctx, a.ID, "run-3", nil)
 	require.NoError(t, err)
 	got, err = s.GetAgent(ctx, a.ID)
 	require.NoError(t, err)
@@ -88,10 +88,10 @@ func TestPreviousRunIDs_RevertKeepsList(t *testing.T) {
 	a := makeAgent(projectID, "prev-revert")
 	require.NoError(t, s.CreateAgent(ctx, a))
 	for _, r := range []string{"run-1", "run-2"} {
-		_, err := s.SetAgentRunID(ctx, a.ID, r)
+		_, err := s.SetAgentRunID(ctx, a.ID, r, nil)
 		require.NoError(t, err)
 	}
-	prev, err := s.SetAgentRunID(ctx, a.ID, "run-3")
+	prev, err := s.SetAgentRunID(ctx, a.ID, "run-3", nil)
 	require.NoError(t, err)
 	require.Equal(t, "run-2", prev)
 
@@ -108,7 +108,7 @@ func TestPreviousRunIDs_RevertKeepsList(t *testing.T) {
 	assert.Equal(t, "run-2", got.RunID)
 	assert.Equal(t, []string{"run-1", "run-2"}, got.PreviousRunIDs, "the earlier unsettled run is kept")
 
-	_, err = s.SetAgentRunID(ctx, a.ID, "run-4")
+	_, err = s.SetAgentRunID(ctx, a.ID, "run-4", nil)
 	require.NoError(t, err)
 	got, err = s.GetAgent(ctx, a.ID)
 	require.NoError(t, err)
@@ -124,7 +124,7 @@ func TestPreviousRunIDs_Dedupe(t *testing.T) {
 	a := makeAgent(projectID, "prev-dedupe")
 	require.NoError(t, s.CreateAgent(ctx, a))
 	for _, r := range []string{"run-1", "run-2", "run-1", "run-2"} {
-		_, err := s.SetAgentRunID(ctx, a.ID, r)
+		_, err := s.SetAgentRunID(ctx, a.ID, r, nil)
 		require.NoError(t, err)
 	}
 	got, err := s.GetAgent(ctx, a.ID)
@@ -141,7 +141,7 @@ func TestPreviousRunIDs_Cap(t *testing.T) {
 	require.NoError(t, s.CreateAgent(ctx, a))
 	n := store.MaxPreviousRunIDs + 2
 	for i := 0; i <= n; i++ {
-		_, err := s.SetAgentRunID(ctx, a.ID, fmt.Sprintf("run-%02d", i))
+		_, err := s.SetAgentRunID(ctx, a.ID, fmt.Sprintf("run-%02d", i), nil)
 		require.NoError(t, err)
 	}
 	got, err := s.GetAgent(ctx, a.ID)

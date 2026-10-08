@@ -143,7 +143,7 @@ func newFenceE2E(t *testing.T) *fenceE2E {
 		Phase: string(state.PhaseRunning), AppliedConfig: &store.AgentAppliedConfig{HarnessConfig: "claude"},
 	}
 	require.NoError(t, s.CreateAgent(ctx, a))
-	_, err := s.SetAgentRunID(ctx, a.ID, "run-a")
+	_, err := s.SetAgentRunID(ctx, a.ID, "run-a", nil)
 	require.NoError(t, err)
 	mgr.run(name, "cid-a", projectID, scionDir, "run-a")
 

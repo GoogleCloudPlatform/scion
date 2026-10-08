@@ -28,6 +28,11 @@ import {
   displayStatusLabel,
   computePreStaleIds,
   resolveBatchTickSettled,
+  expectedFirstPageCount,
+  pageCountFor,
+  summarizePageChanges,
+  walkEndReason,
+  mapWithConcurrency,
   summarizeBurstScenario,
   BURST_TARGET_ROTATION,
 } from './lib.mjs';
@@ -502,4 +507,163 @@ test('summarizeBurstScenario handles an all-invalid scenario without crashing', 
   assert.equal(s.perAgentMaxSettleMs, null);
   assert.equal(s.runMedianMinMs, null);
   assert.equal(s.runMedianMaxMs, null);
+});
+
+test('expectedFirstPageCount: one full page, or every agent when fewer', () => {
+  assert.equal(expectedFirstPageCount(25, 100, 100), 25);
+  assert.equal(expectedFirstPageCount(25, 10, 10), 10);
+  assert.equal(expectedFirstPageCount(50, 500, 500), 50);
+  // The pager total wins over the seeded count when known.
+  assert.equal(expectedFirstPageCount(25, 100, 12), 12);
+  // Unknown total falls back to the seeded count.
+  assert.equal(expectedFirstPageCount(25, 100, null), 25);
+  assert.equal(expectedFirstPageCount(25, 7, undefined), 7);
+  // No agents: nothing to render.
+  assert.equal(expectedFirstPageCount(25, 0, 0), 0);
+});
+
+test('expectedFirstPageCount: no pager (no page size) expects every agent', () => {
+  assert.equal(expectedFirstPageCount(null, 100, null), 100);
+  assert.equal(expectedFirstPageCount(0, 100, 100), 100);
+  assert.equal(expectedFirstPageCount(undefined, 25, 25), 25);
+});
+
+test('pageCountFor', () => {
+  assert.equal(pageCountFor(25, 100), 4);
+  assert.equal(pageCountFor(25, 101), 5);
+  assert.equal(pageCountFor(25, 25), 1);
+  assert.equal(pageCountFor(25, 0), 1);
+  assert.equal(pageCountFor(null, 100), null);
+  assert.equal(pageCountFor(25, null), null);
+});
+
+test('summarizePageChanges: completed changes of populated runs only', () => {
+  const results = [
+    {
+      outcome: 'populated',
+      pageSize: 25,
+      pageCount: 4,
+      pageChanges: [
+        { toPageIndex: 1, ok: true, ms: 100 },
+        { toPageIndex: 2, ok: true, ms: 300 },
+        { toPageIndex: 3, ok: false, ms: null },
+      ],
+    },
+    {
+      outcome: 'populated',
+      pageSize: 25,
+      pageCount: 4,
+      pageChanges: [{ toPageIndex: 1, ok: true, ms: 200 }],
+    },
+    // A run that never populated contributes no page changes.
+    { outcome: 'loaded-not-rendered', pageSize: 25, pageCount: 4, pageChanges: [] },
+  ];
+  const s = summarizePageChanges(results);
+  assert.equal(s.pageSize, 25);
+  assert.equal(s.pageCount, 4);
+  assert.equal(s.pageChangeAttemptCount, 4);
+  assert.equal(s.pageChangeSuccessCount, 3);
+  assert.equal(s.pageChangeFailureCount, 1);
+  assert.equal(s.medianPageChangeMs, 200);
+  assert.equal(s.minPageChangeMs, 100);
+  assert.equal(s.maxPageChangeMs, 300);
+});
+
+test('summarizePageChanges: a single page, no pager, or mixed page sizes', () => {
+  const single = summarizePageChanges([
+    { outcome: 'populated', pageSize: 25, pageCount: 1, pageChanges: [] },
+  ]);
+  assert.equal(single.pageChangeAttemptCount, 0);
+  assert.equal(single.medianPageChangeMs, null);
+  assert.equal(single.pageCount, 1);
+
+  const none = summarizePageChanges([{ outcome: 'populated', pageSize: null, pageCount: null }]);
+  assert.equal(none.pageSize, null);
+  assert.equal(none.pageCount, null);
+
+  const mixed = summarizePageChanges([
+    { outcome: 'populated', pageSize: 25, pageCount: 4, pageChanges: [] },
+    { outcome: 'populated', pageSize: 50, pageCount: 2, pageChanges: [] },
+  ]);
+  assert.deepEqual(mixed.pageSize, [25, 50]);
+  assert.deepEqual(mixed.pageCount, [4, 2]);
+});
+
+test('summarizePageChanges: counts walks that stopped before the last page', () => {
+  const results = [
+    {
+      outcome: 'populated',
+      pageSize: 25,
+      pageCount: 4,
+      pageChangesStopReason: 'completed',
+      pageChanges: [
+        { toPageIndex: 1, ok: true, ms: 100 },
+        { toPageIndex: 2, ok: true, ms: 100 },
+        { toPageIndex: 3, ok: true, ms: 100 },
+      ],
+    },
+    {
+      outcome: 'populated',
+      pageSize: 25,
+      pageCount: 4,
+      pageChangesStopReason: 'next-unavailable-before-last-page',
+      pageChanges: [
+        { toPageIndex: 1, ok: true, ms: 100 },
+        { toPageIndex: 2, ok: true, ms: 100 },
+      ],
+    },
+    // A legitimately short view ends with no-next-page and is not counted.
+    {
+      outcome: 'populated',
+      pageSize: 25,
+      pageCount: 1,
+      pageChangesStopReason: 'no-next-page',
+      pageChanges: [],
+    },
+  ];
+  const s = summarizePageChanges(results);
+  assert.equal(s.pageWalkEarlyStopCount, 1);
+  assert.equal(s.pageChangeAttemptCount, 5);
+  assert.equal(s.pageChangeFailureCount, 0);
+  assert.equal(summarizePageChanges([]).pageWalkEarlyStopCount, 0);
+});
+
+test('walkEndReason: how a walk with Next disabled ended', () => {
+  const pager = (o) => ({ pageSize: 25, pageIndex: 0, total: 100, hasNext: false, ...o });
+  // Last page of 4: the normal end.
+  assert.equal(walkEndReason(pager({ pageIndex: 3 })), 'no-next-page');
+  // Page index 2 of 4 with Next disabled: an early stop.
+  assert.equal(walkEndReason(pager({ pageIndex: 2 })), 'next-unavailable-before-last-page');
+  // Unknown or capped total: no later page can be shown to exist.
+  assert.equal(walkEndReason(pager({ pageIndex: 1, total: null })), 'no-next-page');
+  assert.equal(
+    walkEndReason(pager({ pageIndex: 1, total: { loaded: 2000, capped: true } })),
+    'no-next-page'
+  );
+  // Total 0.
+  assert.equal(walkEndReason(pager({ total: 0 })), 'no-next-page');
+  // A one-page view.
+  assert.equal(walkEndReason(pager({ total: 20 })), 'no-next-page');
+  // Next still available, or no pager: not an end.
+  assert.equal(walkEndReason(pager({ hasNext: true })), null);
+  assert.equal(walkEndReason(null), null);
+});
+
+test('mapWithConcurrency: bounded in-flight calls, results in input order', async () => {
+  let inFlight = 0;
+  let peak = 0;
+  const items = Array.from({ length: 25 }, (_, i) => i);
+  const out = await mapWithConcurrency(items, 4, async (n) => {
+    inFlight++;
+    peak = Math.max(peak, inFlight);
+    await new Promise((r) => setTimeout(r, 1 + (n % 3)));
+    inFlight--;
+    return n * 2;
+  });
+  assert.equal(peak, 4);
+  assert.deepEqual(
+    out,
+    items.map((n) => n * 2)
+  );
+  assert.deepEqual(await mapWithConcurrency([], 4, async (n) => n), []);
 });

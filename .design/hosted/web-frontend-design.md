@@ -3288,7 +3288,7 @@ export function security(config: AppConfig) {
       "script-src 'self' 'unsafe-inline' https://cdn.webawesome.com",
       "style-src 'self' 'unsafe-inline' https://cdn.webawesome.com",
       "font-src 'self' https://cdn.webawesome.com",
-      "img-src 'self' data: https:",
+      "img-src 'self' data: blob: https:",
       "connect-src 'self' wss: https:",
       "frame-ancestors 'none'"
     ].join('; '));

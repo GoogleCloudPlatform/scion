@@ -55,6 +55,25 @@ func TestConfineLeaf(t *testing.T) {
 		err := ConfineLeaf(hostPath, hostBase, "projects", "pid-1", "scratchpad")
 		require.Error(t, err)
 	})
+
+	// The cases runtime.ValidateNotExportRoot refuses on the agent side.
+	// The plugin resolver (runtime.ResolveSharedDirHostPath) does not call
+	// it and relies on ConfineLeaf to refuse them.
+	for _, tc := range []struct {
+		name     string
+		hostPath string
+	}{
+		{"leaf equal to the host base (empty server-relative path)", filepath.Join(hostBase, "")},
+		{"leaf equal to the host base with a trailing slash", hostBase + "/"},
+		{"leaf above the host base", filepath.Dir(hostBase)},
+		{"leaf outside the host base", "/srv/other-export/projects/pid-1/shared-dirs/scratchpad"},
+	} {
+		t.Run(tc.name+" fails", func(t *testing.T) {
+			err := ConfineLeaf(tc.hostPath, hostBase, "projects", "pid-1", "scratchpad")
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "resolved outside its project subtree")
+		})
+	}
 }
 
 // TestValidProjectID_RejectsTraversal directly pins the format rules

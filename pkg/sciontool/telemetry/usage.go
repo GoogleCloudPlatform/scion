@@ -632,12 +632,24 @@ type usageRuleDiagnostics interface {
 	baselinedAfterCapCount() int64
 }
 
+// UsageSourceNative is the only SCION_USAGE_SOURCE value that enables the
+// native UsageDeriver.
+const UsageSourceNative = "native"
+
 // NewUsageDeriver constructs the deriver for the current process's
 // environment. It never fails on a harness with no rule, or when usage
 // derivation is not the active source (D10): both return a nil-safe no-op
 // deriver rather than an error.
 func NewUsageDeriver(ctx context.Context, config *Config) (*UsageDeriver, error) {
-	if os.Getenv("SCION_USAGE_SOURCE") != "native" {
+	return newUsageDeriverForSource(ctx, config, os.Getenv("SCION_USAGE_SOURCE"))
+}
+
+// newUsageDeriverForSource is NewUsageDeriver with the usage source passed
+// explicitly rather than read from this process's environment, so a source
+// selected after Pipeline.Start (see Pipeline.ActivateUsageSource) can be
+// honored. Any value other than UsageSourceNative yields a no-op deriver.
+func newUsageDeriverForSource(ctx context.Context, config *Config, source string) (*UsageDeriver, error) {
+	if source != UsageSourceNative {
 		return &UsageDeriver{}, nil
 	}
 	rules := rulesForHarness(os.Getenv("SCION_HARNESS"))

@@ -196,7 +196,9 @@ func TestOwnerRefusesStaleRoute(t *testing.T) {
 // TestOwnerAdmissionReadErrorFailsClosed: a registry read error at the
 // owner is 503 (unavailable) at the HTTP layer, which the caller maps to
 // 4504 upstream_unreachable (a transient failure, design v2.5 §3.3.1): not
-// a stale route, not served and never a planned 4503.
+// a stale route, not served and never a planned 4503. The owner names its
+// reason (registry_unavailable), so the caller may try another relay
+// (design §3.5).
 func TestOwnerAdmissionReadErrorFailsClosed(t *testing.T) {
 	p := newPair(t, echoConfig())
 	p.w.SetFault(func(op string) error {
@@ -212,6 +214,9 @@ func TestOwnerAdmissionReadErrorFailsClosed(t *testing.T) {
 		t.Fatalf("Call = %v, want 4504, not a stale route", err)
 	}
 	assertClose(t, err, conduit.CloseRelayTimeout, relay.ReasonUpstreamUnreachable)
+	if !errors.Is(err, relay.ErrOwnerUnreachable) {
+		t.Fatalf("Call = %v, want ErrOwnerUnreachable (the owner refused before admission)", err)
+	}
 }
 
 // --- C7: relay-peer identity and user sessions ---
@@ -545,7 +550,7 @@ func TestBridgeCloseWaitAfterDrainDeadline(t *testing.T) {
 	if f := readHopFrame(t, c); f.GetStreamAccept() == nil {
 		t.Fatalf("first frame %v, want stream_accept", f)
 	}
-	if err := p.a.Relay.GoAway(p.rec.SessionID, conduit.GoAwayOptions{Reason: "test", DrainDeadline: drain}); err != nil {
+	if err := p.a.Relay.GoAway(context.Background(), p.rec.SessionID, conduit.GoAwayOptions{Reason: "test", DrainDeadline: drain}); err != nil {
 		t.Fatal(err)
 	}
 	p.a.Clock.Advance(drain)
@@ -775,9 +780,9 @@ func TestBridgeLateAcceptCleanedUp(t *testing.T) {
 	if n := p.a.Relay.ActiveBridges(); n != 0 {
 		t.Fatalf("%d active bridges", n)
 	}
-	if n := p.target.Stats().OpenStreams; n != 0 {
-		t.Fatalf("target has %d open streams after late accept", n)
-	}
+	// remoteClose wakes the target's readers before it removes the stream
+	// from the session table, so ReadAll can return before the removal.
+	settle(t, "target stream removal after late accept", func() bool { return p.target.Stats().OpenStreams == 0 })
 }
 
 // TestBridgeNoLeakAfterManyStreams (T8): streams that end normally, by

@@ -319,7 +319,7 @@ func (h *CallbackHandler) handleAskOption(s *discordgo.Session, i *discordgo.Int
 	pending, err := h.store.GetPendingAskUser(ctx, requestID)
 	if err != nil {
 		h.log.Error("Failed to get pending ask-user", "request_id", requestID, "error", err)
-		h.respondUpdate(s, i, "Error looking up request. Please try again.", nil)
+		respondEphemeral(s, i, "Error looking up request. Please try again.")
 		return
 	}
 	if pending == nil {
@@ -344,7 +344,7 @@ func (h *CallbackHandler) handleAskOption(s *discordgo.Session, i *discordgo.Int
 
 	// Deliver the response to the hub.
 	if he := h.deliverAskUserResponse(ctx, i, pending, choice); he != nil {
-		h.respondUpdate(s, i, deliveryErrorText(ctx, s, h.store, h.log, he, interactionUserID(i), pending.ChannelID, pending.ProjectID), nil)
+		respondEphemeral(s, i, deliveryErrorText(ctx, s, h.store, h.log, he, interactionUserID(i), pending.ChannelID, pending.ProjectID))
 		return
 	}
 
@@ -354,7 +354,7 @@ func (h *CallbackHandler) handleAskOption(s *discordgo.Session, i *discordgo.Int
 	}
 
 	// Update the original message to show the selection and disable buttons.
-	h.respondUpdate(s, i, fmt.Sprintf("✅ Responded: **%s**", choice), nil)
+	h.respondUpdate(s, i, formatAskResponded(choice), nil)
 
 	h.log.Info("Ask-user option selected",
 		"request_id", requestID,

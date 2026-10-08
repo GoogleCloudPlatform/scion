@@ -42,7 +42,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth/adcsource"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
-	"github.com/GoogleCloudPlatform/scion/pkg/version"
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
@@ -56,6 +55,7 @@ var (
 
 	// broker deregister flags
 	brokerDeregisterBrokerOnly bool
+	brokerDeregisterPurgeLocal bool
 	brokerDeregisterName       string // --name flag for deregister
 
 	// broker start flags
@@ -178,7 +178,19 @@ This command will:
 1. Remove this broker from all projects it provides for
 2. Clear the stored broker token
 
-Use --broker-only to only remove the broker record without affecting project providers.`,
+Use --broker-only to only remove the broker record without affecting project providers.
+
+Local state: deregister removes this hub's credentials file, its
+hub_connections entry and (when no connections remain) the empty
+hub-credentials/ directory. Broker-local state stays: the broker daemon log
+(broker.log), the broker's state directory (runtime-broker-state/<broker-id>)
+and the broker template cache (cache/templates). Pass --purge-local to remove
+them as well once the last hub connection is gone and the broker is stopped;
+it also works on a host that is no longer registered. When the purge cannot
+run, the command exits non-zero (after a successful deregister) and says why.
+Only the default locations are cleaned: a broker run with a custom state or
+template cache directory keeps those. Settings files, the hub-id file (it
+belongs to a local hub) and other hubs' credentials are never removed.`,
 	RunE: runBrokerDeregister,
 }
 
@@ -402,6 +414,7 @@ func init() {
 	// Deregister flags
 	brokerDeregisterCmd.Flags().BoolVar(&brokerDeregisterBrokerOnly, "broker-only", false, "Only remove broker record, not project providers")
 	brokerDeregisterCmd.Flags().StringVar(&brokerDeregisterName, "name", "", "Name of the hub connection to deregister")
+	brokerDeregisterCmd.Flags().BoolVar(&brokerDeregisterPurgeLocal, "purge-local", false, "After deregistering the last hub connection, also remove broker-local state (broker.log, runtime-broker-state/<broker-id>, cache/templates); never settings, the hub-id file or other hubs' credentials. Skipped while the broker is running")
 
 	// Hubs flags
 	brokerHubsCmd.Flags().BoolVar(&brokerHubsJSON, "json", false, "Output in JSON format")
@@ -493,7 +506,9 @@ func runBrokerRegister(cmd *cobra.Command, args []string) error {
 		projectLinked, _ = isProjectLinked(ctx, client, projectID)
 	}
 
-	if !projectLinked && !settings.IsHubEnabled() {
+	// The global directory is a local pseudo-project: never offer to link
+	// it, which would create a hub project named "global" (ptone/scion#3534).
+	if !projectLinked && !settings.IsHubEnabled() && !isGlobal {
 		// Project not linked - offer to link first
 		if hubsync.ShowLinkBeforeRegisterPrompt(projectName, autoConfirm) {
 			// Run the link flow
@@ -581,13 +596,12 @@ func runBrokerRegister(cmd *cobra.Command, args []string) error {
 	// Phase 1 & 2: Create broker and complete join if needed
 	if needsJoin || brokerID == "" {
 		brokerID, err = registerBrokerWithHub(ctx, client, multiStore, brokerHubRegistration{
-			BrokerID:       stableBrokerID,
-			Name:           brokerName,
-			AutoProvide:    brokerAutoProvide,
-			Profiles:       buildBrokerProfiles(settings),
-			DefaultProfile: brokerRegistrationDefaultProfile(settings),
-			HubName:        hubName,
-			Endpoint:       endpoint,
+			BrokerID:    stableBrokerID,
+			Name:        brokerName,
+			AutoProvide: brokerAutoProvide,
+			Settings:    settings,
+			HubName:     hubName,
+			Endpoint:    endpoint,
 		})
 		if err != nil {
 			return err
@@ -598,31 +612,22 @@ func runBrokerRegister(cmd *cobra.Command, args []string) error {
 	if globalDirErr != nil {
 		fmt.Printf("Warning: failed to get global directory: %v\n", globalDirErr)
 	} else {
-		if endpoint != "" {
-			if err := config.UpdateSetting(globalDir, "hub.endpoint", endpoint, true); err != nil {
-				fmt.Printf("Warning: failed to save hub endpoint to global settings: %v\n", err)
-			}
-		}
-		if err := config.UpdateSetting(globalDir, "hub.brokerId", brokerID, true); err != nil {
-			fmt.Printf("Warning: failed to save broker ID: %v\n", err)
-		}
-		// Write hub_connections entry for this registration
-		if err := config.UpdateSetting(globalDir, "hub_connections."+hubName+".endpoint", endpoint, true); err != nil {
-			fmt.Printf("Warning: failed to save hub connection to settings: %v\n", err)
-		}
+		persistBrokerHubSettings(os.Stdout, globalDir, endpoint, brokerID, hubName)
 	}
 
-	// If project is linked, offer to add this broker as a provider
-	if projectID != "" && settings.IsHubEnabled() {
+	// If project is linked, offer to add this broker as a provider. The
+	// global directory is a local pseudo-project, never a hub project, so a
+	// --global register (or one resolved to the global directory) skips this
+	// step instead of offering, and creating, a hub project named "global"
+	// (ptone/scion#3534).
+	if shouldOfferProjectProvider(projectID, settings.IsHubEnabled(), isGlobal) {
 		if hubsync.ShowProjectProviderPrompt(projectName, autoConfirm) {
 			req := &hubclient.RegisterProjectRequest{
-				ID:       projectID,
-				Name:     projectName,
-				Path:     resolvedPath,
-				BrokerID: brokerID,
-			}
-			if !isGlobal {
-				req.GitRemote = util.NormalizeGitRemote(util.GetGitRemote())
+				ID:        projectID,
+				Name:      projectName,
+				Path:      resolvedPath,
+				BrokerID:  brokerID,
+				GitRemote: util.NormalizeGitRemote(util.GetGitRemote()),
 			}
 
 			resp, err := client.Projects().Register(ctx, req)
@@ -632,6 +637,9 @@ func runBrokerRegister(cmd *cobra.Command, args []string) error {
 				fmt.Printf("Broker added as provider to project '%s'\n", resp.Project.Name)
 			}
 		}
+	} else if isGlobal {
+		fmt.Println("Skipped project linking: the global directory is a local pseudo-project, not a hub project.")
+		fmt.Println("Use 'scion runtime-broker provide --project <name>' to add this broker as a provider for a hub project.")
 	}
 
 	fmt.Println()
@@ -651,10 +659,9 @@ type brokerHubRegistration struct {
 	BrokerID    string
 	Name        string
 	AutoProvide bool
-	Profiles    []hubclient.BrokerProfile
-	// DefaultProfile is the broker's default profile name reported at
-	// join, or nil to leave the hub's value as it is.
-	DefaultProfile *string
+	// Settings supply the broker profiles and default profile reported at
+	// join; nil reports none and leaves the hub's default profile as it is.
+	Settings *config.Settings
 	// HubName names the hub connection the credentials are saved under.
 	HubName  string
 	Endpoint string
@@ -662,10 +669,10 @@ type brokerHubRegistration struct {
 
 // registerBrokerWithHub runs the two-phase broker registration against the
 // hub: POST /api/v1/brokers for a join token, then POST /api/v1/brokers/join
-// for the broker's HMAC secret, which it saves to multiStore under
-// reg.HubName. It returns the joined broker's ID. client carries whichever
-// credential getHubClient selected, for example a hub user access token
-// from SCION_HUB_TOKEN.
+// (completeJoinAndPersist) for the broker's HMAC secret, which it saves to
+// multiStore under reg.HubName. It returns the joined broker's ID. client
+// carries whichever credential getHubClient selected, for example a hub
+// user access token from SCION_HUB_TOKEN.
 func registerBrokerWithHub(ctx context.Context, client hubclient.Client, multiStore *brokercredentials.MultiStore, reg brokerHubRegistration) (string, error) {
 	fmt.Printf("Registering broker with Hub...\n")
 
@@ -695,49 +702,26 @@ func registerBrokerWithHub(ctx context.Context, client hubclient.Client, multiSt
 	}
 
 	// Phase 2: Complete broker join with join token
-	joinReq := &hubclient.JoinBrokerRequest{
-		BrokerID:         createResp.BrokerID,
-		JoinToken:        createResp.JoinToken,
-		Hostname:         reg.Name,
-		Version:          version.Version,
-		Capabilities:     brokerRegistrationCapabilities(),
-		Profiles:         reg.Profiles,
-		WorkspaceStorage: loadBrokerRegistrationWorkspaceStorage(),
-		DefaultProfile:   reg.DefaultProfile,
-	}
-
-	joinResp, err := client.RuntimeBrokers().Join(ctx, joinReq)
+	joined, err := completeJoinAndPersist(ctx, client, brokerJoinParams{
+		Settings:          reg.Settings,
+		Endpoint:          reg.Endpoint,
+		HubName:           reg.HubName,
+		BrokerID:          createResp.BrokerID,
+		JoinToken:         createResp.JoinToken,
+		Hostname:          reg.Name,
+		TransportMode:     brokerTransportMode,
+		TransportAudience: brokerTransportAudience,
+		CredStore:         multiStore,
+	})
 	if err != nil {
-		return "", fmt.Errorf("failed to complete broker join: %w", err)
+		return "", err
 	}
-
-	// Resolve transport config from flags, then env
-	transportMode := brokerTransportMode
-	if transportMode == "" {
-		transportMode = os.Getenv(transportauth.EnvTransportMode)
-	}
-	transportAudience := brokerTransportAudience
-	if transportAudience == "" {
-		transportAudience = os.Getenv(transportauth.EnvTransportAudience)
-	}
-
-	// Save credentials to MultiStore
-	newCreds := &brokercredentials.BrokerCredentials{
-		Name:              reg.HubName,
-		BrokerID:          joinResp.BrokerID,
-		SecretKey:         joinResp.SecretKey,
-		HubEndpoint:       reg.Endpoint,
-		AuthMode:          brokercredentials.AuthModeHMAC,
-		RegisteredAt:      time.Now(),
-		TransportMode:     transportMode,
-		TransportAudience: transportAudience,
-	}
-	if err := multiStore.Save(newCreds); err != nil {
-		fmt.Printf("Warning: failed to save broker credentials: %v\n", err)
+	if joined.SaveErr != nil {
+		fmt.Printf("Warning: failed to save broker credentials: %v\n", joined.SaveErr)
 	} else {
 		fmt.Printf("Broker credentials saved to %s\n", multiStore.Dir())
 	}
-	return joinResp.BrokerID, nil
+	return joined.BrokerID, nil
 }
 
 func runBrokerDeregister(cmd *cobra.Command, args []string) error {
@@ -779,6 +763,9 @@ func runBrokerDeregister(cmd *cobra.Command, args []string) error {
 				}
 			}
 			if creds == nil {
+				if brokerDeregisterPurgeLocal {
+					return purgeLocalBrokerStateOnly(cmd, "")
+				}
 				return fmt.Errorf("no broker registration found, this host is not registered as a Runtime Broker with the Hub")
 			}
 		case 1:
@@ -795,6 +782,9 @@ func runBrokerDeregister(cmd *cobra.Command, args []string) error {
 
 	brokerID := creds.BrokerID
 	if brokerID == "" {
+		if brokerDeregisterPurgeLocal {
+			return purgeLocalBrokerStateOnly(cmd, hubName)
+		}
 		return fmt.Errorf("no broker registration found, this host is not registered as a runtime broker with the hub")
 	}
 
@@ -809,6 +799,7 @@ func runBrokerDeregister(cmd *cobra.Command, args []string) error {
 	// Check local broker-server health (warning only)
 	port := resolveBrokerPort(cmd)
 	health, err := checkLocalBrokerServer(port)
+	brokerRunning := err == nil
 	if err != nil {
 		fmt.Printf("Note: Broker server is not running (port %d)\n", port)
 	} else {
@@ -853,7 +844,7 @@ func runBrokerDeregister(cmd *cobra.Command, args []string) error {
 	}
 
 	// Only clear global settings if no connections remain
-	remaining, _ := multiStore.List()
+	remaining, listErr := multiStore.List()
 	if globalErr == nil && len(remaining) == 0 {
 		_ = config.UpdateSetting(globalDir, "hub.brokerToken", "", true)
 		_ = config.UpdateSetting(globalDir, "hub.brokerId", "", true)
@@ -866,7 +857,71 @@ func runBrokerDeregister(cmd *cobra.Command, args []string) error {
 		fmt.Printf("The broker has been removed from %d project(s).\n", len(projectNames))
 	}
 
+	// Local broker state: remove the credentials directory once empty, and
+	// with --purge-local the broker's log, state and caches (ptone/scion#3538).
+	if globalErr == nil {
+		if daemonRunning, _, _ := daemon.Status(globalDir); daemonRunning {
+			brokerRunning = true
+		}
+		if err := cleanupAfterDeregister(os.Stdout, multiStore.Dir(), remaining, listErr, brokerRunning,
+			brokerDeregisterPurgeLocal, brokerLocalStatePaths(globalDir, brokerScionHome(globalDir), brokerID)); err != nil {
+			return fmt.Errorf("broker '%s' was deregistered, but %w", brokerID, err)
+		}
+	}
 	return nil
+}
+
+// brokerScionHome is the directory the runtime broker keeps its state and
+// template cache under by default: ~/.scion (see pkg/runtimebroker), falling
+// back to globalDir when the home directory is unknown.
+func brokerScionHome(globalDir string) string {
+	if home, err := os.UserHomeDir(); err == nil {
+		return filepath.Join(home, ".scion")
+	}
+	return globalDir
+}
+
+// purgeLocalBrokerStateOnly runs 'deregister --purge-local' when there is
+// no broker registration to remove: no credentials at all, or the selected
+// connection's credentials have no broker ID. It removes broker-local state
+// only, for the broker ID recorded on this host. The selected connection
+// (selected, "" for none) is the one being deregistered, so it does not
+// count as remaining; its credentials file is left in place and named, as
+// it is not a registration deregister can remove. Like the purge after a
+// deregister, it refuses while any other hub connection remains, or when
+// the store cannot be listed.
+func purgeLocalBrokerStateOnly(cmd *cobra.Command, selected string) error {
+	globalDir, err := config.GetGlobalDir()
+	if err != nil {
+		return fmt.Errorf("failed to get global directory: %w", err)
+	}
+	_, healthErr := checkLocalBrokerServer(resolveBrokerPort(cmd))
+	running := healthErr == nil
+	if daemonRunning, _, _ := daemon.Status(globalDir); daemonRunning {
+		running = true
+	}
+	credsDir, conns, listErr := brokerConnectionsLeft()
+	fmt.Println("No broker registration found; removing local broker state only.")
+	if selected != "" {
+		fmt.Printf("The credentials file of hub connection '%s' has no broker ID and is left in place; remove it by hand if it is no longer needed: %s\n",
+			selected, filepath.Join(credsDir, selected+".json"))
+	}
+	return cleanupAfterDeregister(os.Stdout, credsDir, excludeConnection(conns, selected), listErr, running, true,
+		brokerLocalStatePaths(globalDir, brokerScionHome(globalDir), getLocalBrokerID()))
+}
+
+// brokerConnectionsLeft returns the credentials store directory and the hub
+// connections in it.
+func brokerConnectionsLeft() (dir string, conns []brokercredentials.BrokerCredentials, err error) {
+	ms, _, err := initializeBrokerCredentialStore()
+	if ms != nil {
+		dir = ms.Dir()
+	}
+	if err != nil {
+		return dir, nil, err
+	}
+	conns, err = ms.List()
+	return dir, conns, err
 }
 
 // isServerDaemonManagingBroker checks if the combined server daemon is running
@@ -1261,7 +1316,11 @@ func runBrokerProvide(cmd *cobra.Command, args []string) error {
 	}
 
 	// Show confirmation prompt
-	if !hubsync.ShowProvidePrompt(projectName, brokerName, autoConfirm) {
+	confirmed, confirmErr := confirmProvide(os.Stdin, os.Stdout, projectName, brokerName, autoConfirm, util.IsTerminal())
+	if confirmErr != nil {
+		return confirmErr
+	}
+	if !confirmed {
 		return fmt.Errorf("operation cancelled")
 	}
 
@@ -1547,12 +1606,28 @@ func runBrokerStatus(cmd *cobra.Command, args []string) error {
 
 	// Check if broker server is responding (could be foreground or daemon)
 	port := resolveBrokerPort(cmd)
-	health, err := checkLocalBrokerServer(port)
+	// One budget (brokerStatusPollTimeout) for all post-start waits below.
+	waitBudget := newStatusWaitBudget()
+	var health *BrokerHealthResponse
+	if status.DaemonRunning && brokerFileRecent(status.PIDFile) {
+		// A daemon started moments ago may not be serving yet (status runs
+		// right after start and restart): probe within the budget, first
+		// probe included, until it answers.
+		err = errBrokerNotProbed
+		waitBudget.poll(func(timeout time.Duration) bool {
+			health, err = checkLocalBrokerServerTimeout(port, timeout)
+			return err == nil
+		}, brokerStatusPollInterval)
+	} else {
+		health, err = checkLocalBrokerServer(port)
+	}
+	brokerUptime := ""
 	if err == nil {
 		status.ServerRunning = true
 		status.ServerPort = port
 		status.ServerStatus = health.Status
 		status.ServerVersion = health.Version
+		brokerUptime = health.Uptime
 	}
 
 	// Load hub connections from MultiStore, migrating legacy credentials first.
@@ -1678,8 +1753,21 @@ func runBrokerStatus(cmd *cobra.Command, args []string) error {
 
 	// Hub Connections
 	if len(status.HubConnections) > 0 {
-		// Try to get live status from running broker server
-		liveStatus := queryBrokerHubConnections(port)
+		// Try to get live status from running broker server. Right after a
+		// (re)start the broker has not connected yet, so wait briefly
+		// (bounded) for its first heartbeat instead of printing "unknown".
+		var liveStatus *BrokerHubConnectionsResponse
+		if status.ServerRunning && brokerRecentlyStarted(brokerUptime) {
+			names := make([]string, 0, len(status.HubConnections))
+			for _, conn := range status.HubConnections {
+				names = append(names, conn.Name)
+			}
+			liveStatus = pollBrokerHubConnections(waitBudget, func(timeout time.Duration) *BrokerHubConnectionsResponse {
+				return queryBrokerHubConnectionsTimeout(port, timeout)
+			}, names, brokerStatusPollInterval)
+		} else {
+			liveStatus = queryBrokerHubConnections(port)
+		}
 		liveStatusMap := make(map[string]string)
 		if liveStatus != nil {
 			for _, conn := range liveStatus.Connections {
@@ -1697,10 +1785,7 @@ func runBrokerStatus(cmd *cobra.Command, args []string) error {
 		}
 		fmt.Println()
 		for _, conn := range status.HubConnections {
-			connStatus := "unknown"
-			if s, ok := liveStatusMap[conn.Name]; ok {
-				connStatus = s
-			}
+			connStatus := brokerHubConnectionDisplayStatus(liveStatusMap, conn.Name, status.ServerRunning)
 			fmt.Printf("  %s\n", conn.Name)
 			fmt.Printf("    Hub:         %s\n", conn.HubEndpoint)
 			fmt.Printf("    Auth:        %s\n", conn.AuthMode)
@@ -2112,9 +2197,11 @@ func getLocalBrokerID() string {
 // and registers/heartbeats with a live instance in hand (see
 // buildStoreBrokerProfiles and HeartbeatService.buildHeartbeat).
 // "agentMove" is a property of this broker binary (localOnly delete and the
-// moved-workspace check), like "reprovision".
+// moved-workspace check), like "reprovision". So is
+// "reprovisionEmptyPerAgent" (in-place empty-per-agent reprovision,
+// miller79/scion#167); the hub checks runtime suitability separately.
 func brokerRegistrationCapabilities() []string {
-	return []string{"sync", "attach", "reprovision", "emptyPerAgentWorkspace", "agentMove"}
+	return []string{"sync", "attach", "reprovision", "emptyPerAgentWorkspace", "agentMove", "reprovisionEmptyPerAgent"}
 }
 
 // buildBrokerProfiles builds BrokerProfile objects from settings.Profiles.
@@ -2286,13 +2373,19 @@ type BrokerHubConnectionInfo struct {
 // queryBrokerHubConnections queries the local broker server for live hub connection status.
 // Returns nil if the server is not running or the endpoint is not available.
 func queryBrokerHubConnections(port int) *BrokerHubConnectionsResponse {
+	return queryBrokerHubConnectionsTimeout(port, 5*time.Second)
+}
+
+// queryBrokerHubConnectionsTimeout is queryBrokerHubConnections with the
+// given HTTP timeout.
+func queryBrokerHubConnectionsTimeout(port int, timeout time.Duration) *BrokerHubConnectionsResponse {
 	if port <= 0 {
 		port = DefaultBrokerPort
 	}
 
 	url := fmt.Sprintf("http://localhost:%d/api/v1/hub-connections", port)
 
-	httpClient := &http.Client{Timeout: 5 * time.Second}
+	httpClient := &http.Client{Timeout: timeout}
 	resp, err := httpClient.Get(url)
 	if err != nil {
 		return nil

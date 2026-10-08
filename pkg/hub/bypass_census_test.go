@@ -70,6 +70,7 @@ func TestBypassCensus(t *testing.T) {
 		// ─── Authorization infrastructure (permanent or deprecating) ─────
 		{file: "authorize.go", lineSubstr: "func (s *Server) requireAdmin(", description: "requireAdmin helper definition (DEPRECATED — fallback only)"},
 		{file: "authorize.go", lineSubstr: "IsUnscopedLocalPlatformAdmin(user)", description: "requireAdmin implementation"},
+		{file: "admin_delegation_adoption.go", lineSubstr: "IsUnscopedLocalPlatformAdmin(user)", description: "delegation-provenance adoption admin check: system admin only, no registered permission exists for it"},
 		{file: "route_metadata.go", lineSubstr: "requireAdmin(w, r)", description: "routeGuard fallback for unconverted routes (temporary)"},
 		{file: "identity.go", lineSubstr: "IsUnscopedLocalPlatformAdmin", description: "IsUnscopedLocalPlatformAdmin definition"},
 		{file: "identity.go", lineSubstr: `user.Role() != "admin"`, description: "IsUnscopedLocalPlatformAdmin implementation"},
@@ -87,6 +88,12 @@ func TestBypassCensus(t *testing.T) {
 		{file: "handlers_auth.go", lineSubstr: "IsUnscopedLocalPlatformAdmin", description: "admin reconciliation comment reference"},
 		{file: "handlers_auth.go", lineSubstr: "IsUnscopedLocalPlatformAdmin", description: "admin reconciliation helper"},
 		{file: "authz_candelegate.go", lineSubstr: "requireAdmin", description: "comment reference in CanDelegate"},
+
+		// ─── Deletion detail visibility (ptone/scion#3122) ───────────────
+		{file: "deletion_redact.go", lineSubstr: "IsUnscopedLocalPlatformAdmin(user)", description: "callerSeesDeletionDetail: decides whether response bodies carry deletion code, error and claim (presentation only, grants no access)"},
+
+		// ─── Perf trace response headers ─────────────────────────────────
+		{file: "perftrace_middleware.go", lineSubstr: "IsUnscopedLocalPlatformAdmin(GetUserIdentityFromContext(r.Context()))", description: "perfHeadersAllowed: decides whether opt-in perf trace response headers are written (presentation only, grants no access)"},
 
 		// ─── Passthrough gate ───────────────────────────────────────────
 		{file: "passthrough_gate.go", lineSubstr: "IsUnscopedLocalPlatformAdmin(userIdent)", description: "the embedded broker counts as owned by an unscoped local platform administrator"},

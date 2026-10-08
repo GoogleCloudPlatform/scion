@@ -43,10 +43,11 @@ func resetMessageFlags() func() {
 		channel   string
 		threadID  string
 		cc        []string
+		artifacts []string
 	}{
 		msgInterrupt, msgIn, msgAt, msgPlain,
 		msgAttach, msgNotify, msgWake, msgChannel, msgThreadID,
-		msgCC,
+		msgCC, msgArtifacts,
 	}
 
 	// Save cobra Changed state for removed flags (broadcast/all are registered
@@ -67,6 +68,8 @@ func resetMessageFlags() func() {
 	msgChannel = ""
 	msgThreadID = ""
 	msgCC = nil
+	msgArtifacts = nil
+	msgArtifactRefs = nil
 	messageCmd.Flags().Lookup("broadcast").Changed = false
 	messageCmd.Flags().Lookup("all").Changed = false
 	_ = rawFlag.Value.Set("false")
@@ -83,6 +86,8 @@ func resetMessageFlags() func() {
 		msgChannel = orig.channel
 		msgThreadID = orig.threadID
 		msgCC = orig.cc
+		msgArtifacts = orig.artifacts
+		msgArtifactRefs = nil
 		messageCmd.Flags().Lookup("broadcast").Changed = bcastChanged
 		messageCmd.Flags().Lookup("all").Changed = allChanged
 		_ = rawFlag.Value.Set(rawValue)

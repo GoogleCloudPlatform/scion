@@ -59,14 +59,6 @@ func (s *Server) handleMessagingTargetsResolve(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	// Check Hub feature enabled first, before target lookup.
-	ops := s.GetOperationalSettings()
-	if ops == nil || !ops.CrossProjectMessagingEnabled() {
-		writeError(w, http.StatusNotFound, "cross_project_disabled",
-			"Cross-project messaging is not enabled", nil)
-		return
-	}
-
 	ctx := r.Context()
 	q := r.URL.Query()
 	projectRef := q.Get("project")
@@ -74,6 +66,14 @@ func (s *Server) handleMessagingTargetsResolve(w http.ResponseWriter, r *http.Re
 
 	if projectRef == "" || agentRef == "" {
 		BadRequest(w, "Both 'project' and 'agent' query parameters are required")
+		return
+	}
+
+	// Check Hub feature enabled before target lookup.
+	ops := s.GetOperationalSettings()
+	if ops == nil || !ops.CrossProjectMessagingEnabled() {
+		writeError(w, http.StatusNotFound, "cross_project_disabled",
+			"Cross-project messaging is not enabled", nil)
 		return
 	}
 

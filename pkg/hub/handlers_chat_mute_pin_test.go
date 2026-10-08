@@ -18,7 +18,6 @@ package hub
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -45,11 +44,7 @@ func setupMutePinTest(t *testing.T) (*Server, store.Store, WebChatStore, *store.
 		t.Fatalf("CreateProject: %v", err)
 	}
 
-	db, err := sql.Open("sqlite3", ":memory:")
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
+	db := openTestMemorySQLite(t, "sqlite3")
 	wcs := NewWebChatStore(db, "sqlite3")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
@@ -77,11 +72,7 @@ func setupChatAuthzTest(t *testing.T) (*Server, store.Store, WebChatStore, *stor
 	t.Helper()
 	srv, s, _, _, project := setupDemoPolicyTest(t)
 
-	db, err := sql.Open("sqlite3", ":memory:")
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
+	db := openTestMemorySQLite(t, "sqlite3")
 	wcs := NewWebChatStore(db, "sqlite3")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init: %v", err)

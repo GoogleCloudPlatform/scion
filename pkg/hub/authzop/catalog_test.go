@@ -53,12 +53,13 @@ func TestCatalogNoDuplicateIDs(t *testing.T) {
 }
 
 // TestCatalogNoDuplicateEntryPoints ensures no two operations claim the same
-// entry point.
+// entry point. Entry points that share a kind, method and pattern are
+// distinct only when their Variant differs.
 func TestCatalogNoDuplicateEntryPoints(t *testing.T) {
 	seen := make(map[string]OperationID)
 	for _, spec := range Catalog {
 		for _, ep := range spec.EntryPoints {
-			key := string(ep.Kind) + ":" + ep.Method + ":" + ep.Pattern
+			key := string(ep.Kind) + ":" + ep.Method + ":" + ep.Pattern + "#" + ep.Variant
 			if owner, ok := seen[key]; ok {
 				t.Errorf("entry point %s claimed by both %q and %q", key, owner, spec.ID)
 			}
@@ -259,17 +260,14 @@ func TestRegisteredPermissionsConsumed(t *testing.T) {
 		"broker.auto_provide": "Broker registration handler check, no route declaration",
 
 		// Hub admin permissions — NonRouteUse only (no route declaration)
-		"hub.settings.read":           "NonRouteUse only, no route declaration",
-		"hub.settings.update":         "NonRouteUse only, no route declaration",
-		"hub.admin_mode.read":         "NonRouteUse only, no route declaration",
-		"hub.integrations.update":     "NonRouteUse only, no route declaration",
-		"hub.lifecycle_hooks.update":  "NonRouteUse only, no route declaration",
-		"hub.allow_list.read":         "NonRouteUse only, no route declaration",
-		"hub.project_defaults.update": "NonRouteUse only, no route declaration",
-		"hub.scheduler.update":        "NonRouteUse only, no route declaration",
-		"hub.federation.read":         "NonRouteUse only, no route declaration",
-		"hub.federation.update":       "NonRouteUse only, no route declaration",
-		"hub.teams_manifest.update":   "NonRouteUse only, no route declaration",
+		"hub.settings.read":         "NonRouteUse only, no route declaration",
+		"hub.admin_mode.read":       "NonRouteUse only, no route declaration",
+		"hub.integrations.update":   "NonRouteUse only, no route declaration",
+		"hub.allow_list.read":       "NonRouteUse only, no route declaration",
+		"hub.scheduler.update":      "NonRouteUse only, no route declaration",
+		"hub.federation.read":       "NonRouteUse only, no route declaration",
+		"hub.federation.update":     "NonRouteUse only, no route declaration",
+		"hub.teams_manifest.update": "NonRouteUse only, no route declaration",
 		// hub.github_app.read and hub.github_app.update: now route-enforced via route_metadata.go
 		"hub.audit.read": "Super-admin audit explain, NonRouteUse only",
 
@@ -306,6 +304,10 @@ func TestRegisteredPermissionsConsumed(t *testing.T) {
 		"skill_injection.deliver": "Material delivery grant evaluation, NonRouteUse only (ptone/scion#2129)",
 		"secret.use":              "Agent runtime secret retrieval, enforced in material_runtime.go, not route-enforced",
 		"gcp_service_account.use": "Agent GCP token-mint request, NonRouteUse only (ptone/scion#2129)",
+
+		// Self-scoped permissions — checked by Server.authorizeSelfScoped;
+		// their operations are catalogued by the batches that admit them.
+		"user_skill_injection.update": "Self-scoped, checked by authorizeSelfScoped; no route uses it yet",
 	}
 
 	var unconsumed []string
@@ -1254,6 +1256,7 @@ var domainResourceCompatibility = map[string][]string{
 	"chat":               {"ResourceProject"},
 	"env":                {"ResourceProject"},
 	"artifact":           {"ResourceArtifact"},
+	"inbox":              {"ResourceInbox"},
 }
 
 // TestCatalogBasePermissionSemanticsAssertive validates that each operation's

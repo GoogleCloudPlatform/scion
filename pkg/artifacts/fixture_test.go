@@ -21,12 +21,15 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -51,6 +54,8 @@ type fakeHost struct {
 	// denied lists "principalRef scope permission" triples the credential
 	// does not permit (Permits); everything else is permitted.
 	denied map[string]bool
+	// memberErr, when set, makes MemberScopes fail.
+	memberErr error
 }
 
 func newFakeHost() *fakeHost {
@@ -107,6 +112,52 @@ func (h *fakeHost) Authorize(ctx context.Context, scope, perm string) bool {
 	defer h.mu.Unlock()
 	h.calls = append(h.calls, scope+" "+perm)
 	return h.perms[PrincipalRef(kind, ref)][scope][perm]
+}
+
+// MemberScopes reports the scopes the principal has any permission in,
+// plus its home scope.
+func (h *fakeHost) MemberScopes(ctx context.Context) ([]string, error) {
+	kind, ref, home, ok := h.Principal(ctx)
+	if !ok {
+		return nil, nil
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.memberErr != nil {
+		return nil, h.memberErr
+	}
+	var out []string
+	if home != "" {
+		out = append(out, home)
+	}
+	for scope := range h.perms[PrincipalRef(kind, ref)] {
+		out = append(out, scope)
+	}
+	return out, nil
+}
+
+// SealCursor "seals" by base64-encoding the principal, binding and
+// position; OpenCursor refuses any mismatch. Enough to test binding.
+func (h *fakeHost) SealCursor(ctx context.Context, position, binding string) (string, error) {
+	kind, ref, _, _ := h.Principal(ctx)
+	return "fake." + base64.RawURLEncoding.EncodeToString([]byte(PrincipalRef(kind, ref)+"\n"+binding+"\n"+position)), nil
+}
+
+func (h *fakeHost) OpenCursor(ctx context.Context, cursor, binding string) (string, error) {
+	kind, ref, _, _ := h.Principal(ctx)
+	body, ok := strings.CutPrefix(cursor, "fake.")
+	if !ok {
+		return "", errors.New("bad cursor")
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(body)
+	if err != nil {
+		return "", err
+	}
+	parts := strings.SplitN(string(raw), "\n", 3)
+	if len(parts) != 3 || parts[0] != PrincipalRef(kind, ref) || parts[1] != binding {
+		return "", errors.New("bad cursor")
+	}
+	return parts[2], nil
 }
 
 // --- object storage double that behaves like GCS for signed URLs ---

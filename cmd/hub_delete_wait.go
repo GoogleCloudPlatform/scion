@@ -128,12 +128,18 @@ func hubDeleteFailure(agentName string, o hubDeleteOutcome, what string) error {
 	}
 	switch o.Wait.Outcome {
 	case hubclient.DeletionFailed:
-		code, msg := "unknown", ""
+		code, msg := "", ""
 		if d := o.Wait.Deletion; d != nil {
-			if d.Code != "" {
-				code = d.Code
-			}
+			code = d.Code
 			msg = d.Error
+		}
+		if code == "" {
+			// The hub sends the failure code and error text to platform
+			// admins only (ptone/scion#3122). Without them the outcome is
+			// still a failure, but which kind is unknown, so start may be
+			// blocked.
+			return fmt.Errorf("delete failed on the Hub; %s. Retry with 'scion delete %s', or force-delete it from the web UI. Starting the agent may stay blocked until a retry succeeds or force is used",
+				what, agentName)
 		}
 		if msg != "" {
 			msg = ": " + msg
@@ -143,13 +149,13 @@ func hubDeleteFailure(agentName string, o hubDeleteOutcome, what string) error {
 		case "in_doubt", "revoke_failed", "finalize_failed":
 			// in_doubt: a cross-node teardown is still outstanding;
 			// revoke_failed/finalize_failed: the row is stuck in finalizing.
-			blocked = " Starting the agent stays blocked until a retry succeeds or force is used."
+			blocked = ". Starting the agent stays blocked until a retry succeeds or force is used"
 		case "abandoned":
 			// A lease-expired finalizing row with no stored code also reads
 			// as abandoned and blocks start; the client cannot tell.
-			blocked = " Starting the agent may stay blocked until a retry succeeds or force is used."
+			blocked = ". Starting the agent may stay blocked until a retry succeeds or force is used"
 		}
-		return fmt.Errorf("delete failed on the Hub (%s)%s; %s. Retry with 'scion delete %s', or force it with 'scion delete --force %s'.%s",
+		return fmt.Errorf("delete failed on the Hub (%s)%s; %s. Retry with 'scion delete %s', or force it with 'scion delete --force %s'%s",
 			code, msg, what, agentName, agentName, blocked)
 	case hubclient.DeletionNotTaken:
 		return fmt.Errorf("delete did not take effect (the agent is still live and no delete is running); %s. Retry with 'scion delete %s'",

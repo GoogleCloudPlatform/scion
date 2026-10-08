@@ -6,6 +6,7 @@ package handlers
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"strings"
@@ -64,9 +65,14 @@ type TelemetryHandler struct {
 	aggregator *telemetry.Aggregator
 
 	// OnSessionEnd is called with the finalized session summary when a
-	// session-end event is processed. Set by the daemon to wire up Hub
-	// reporting without creating a circular dependency.
+	// session-end event is processed. Set by the hook command to wire up
+	// Hub reporting without creating a circular dependency.
 	OnSessionEnd func(summary telemetry.SessionSummary)
+
+	// SessionState, if set, persists the aggregator's state between hook
+	// invocations. Each `sciontool hook` run is a new process with a new
+	// handler, so without it a session's counts are lost between events.
+	SessionState SessionStateStore
 
 	// Metric instruments
 	usageTokens  metric.Int64Counter // scion.usage.tokens{token_type} (design §3.5; replaces scion.hook.tokens.*)
@@ -505,7 +511,7 @@ func usageHookRecordingEnabled() bool {
 	// typo (e.g. "HOOKS" or a trailing space) rather than a deliberate choice.
 	// The safe D10 default (no usage) still applies either way; this only
 	// makes an unrecognized value visible for debugging.
-	if v != "" && v != "native" {
+	if v != "" && v != telemetry.UsageSourceNative {
 		log.Debug("SCION_USAGE_SOURCE=%q is not a recognized usage source (want \"hooks\" or \"native\"); hook usage stays suppressed", v)
 	}
 	return false
@@ -723,43 +729,109 @@ func (h *TelemetryHandler) Flush() {
 	})
 }
 
-// updateAggregator feeds event data into the in-memory aggregator that
-// accumulates session-level metrics for Hub reporting.
+// updateAggregator feeds event data into the aggregator that accumulates
+// session-level metrics for Hub reporting, and calls OnSessionEnd when a
+// session ends.
+//
+// With SessionState set, the aggregator's state is loaded before the event
+// is applied and saved after it, under the store's lock, so that the
+// per-invocation hook processes share one session's counts. OnSessionEnd is
+// called after the lock is released.
 func (h *TelemetryHandler) updateAggregator(event *hooks.Event) {
 	if h.aggregator == nil {
 		return
 	}
 
-	switch event.Name {
-	case hooks.EventSessionStart:
-		h.aggregator.StartSession(event.Data.SessionID)
+	update, ok := aggregatorUpdates[event.Name]
+	if !ok {
+		return
+	}
 
-	case hooks.EventToolEnd:
-		h.aggregator.RecordToolEnd(event.Data.ToolName, event.Data.Error)
+	var summary telemetry.SessionSummary
+	var ended bool
+	apply := func() bool {
+		summary, ended = update(h.aggregator, event)
+		return ended
+	}
+	if h.SessionState != nil {
+		if err := h.SessionState.Update(h.aggregator, event, apply); err != nil {
+			log.Error("Session metrics state: %v", err)
+			if ended && errors.Is(err, ErrSessionStateUnavailable) {
+				// The summary was built without the session's persisted
+				// counts; reporting it would send a near-empty summary.
+				log.Error("Session metrics for session %s not reported: state unavailable", event.Data.SessionID)
+				return
+			}
+		}
+	} else {
+		apply()
+	}
 
-	case hooks.EventModelEnd:
-		h.aggregator.RecordModelEnd(
+	if ended && h.OnSessionEnd != nil {
+		h.OnSessionEnd(summary)
+	}
+}
+
+// aggregatorUpdate applies one event to the aggregator. For session-end it
+// returns the finalized summary and true.
+type aggregatorUpdate func(a *telemetry.Aggregator, event *hooks.Event) (telemetry.SessionSummary, bool)
+
+// observed wraps an update for an event that feeds the summary. Such events
+// also carry the session ID; observing it first means a missed session-start
+// does not leave the summary without an ID or start time (the session-end
+// event itself usually has the ID). Session-start, lifecycle and other
+// events are not observed, so they cannot open a session ahead of the real
+// session-start.
+//
+// ObserveSession and the Record*/Finalize call that follows take the
+// aggregator's lock separately. That is safe only because events reach a
+// handler one at a time: HarnessProcessor.dispatchEvent and
+// LifecycleManager.runHooks both dispatch serially. Across hook processes,
+// SessionState's file lock covers the whole load, update and save.
+func observed(update aggregatorUpdate) aggregatorUpdate {
+	return func(a *telemetry.Aggregator, event *hooks.Event) (telemetry.SessionSummary, bool) {
+		a.ObserveSession(event.Data.SessionID)
+		return update(a, event)
+	}
+}
+
+// noSummary is the result of an update that does not end the session.
+func noSummary() (telemetry.SessionSummary, bool) { return telemetry.SessionSummary{}, false }
+
+// aggregatorUpdates is the single list of events that change the
+// aggregator, and how each does. updateAggregator persists state only for
+// events in it.
+var aggregatorUpdates = map[string]aggregatorUpdate{
+	hooks.EventSessionStart: func(a *telemetry.Aggregator, event *hooks.Event) (telemetry.SessionSummary, bool) {
+		a.StartSession(event.Data.SessionID)
+		return noSummary()
+	},
+	hooks.EventToolEnd: observed(func(a *telemetry.Aggregator, event *hooks.Event) (telemetry.SessionSummary, bool) {
+		a.RecordToolEnd(event.Data.ToolName, event.Data.Error)
+		return noSummary()
+	}),
+	hooks.EventModelEnd: observed(func(a *telemetry.Aggregator, event *hooks.Event) (telemetry.SessionSummary, bool) {
+		a.RecordModelEnd(
 			event.Data.InputTokens,
 			event.Data.OutputTokens,
 			event.Data.CachedTokens,
 			event.Data.ReasoningTokens,
 		)
-
-	case hooks.EventAgentEnd:
-		h.aggregator.RecordTurn()
-
-	case hooks.EventSessionEnd:
-		summary := h.aggregator.Finalize(
+		return noSummary()
+	}),
+	hooks.EventAgentEnd: observed(func(a *telemetry.Aggregator, _ *hooks.Event) (telemetry.SessionSummary, bool) {
+		a.RecordTurn()
+		return noSummary()
+	}),
+	hooks.EventSessionEnd: observed(func(a *telemetry.Aggregator, event *hooks.Event) (telemetry.SessionSummary, bool) {
+		return a.Finalize(
 			event.Data.InputTokens,
 			event.Data.OutputTokens,
 			event.Data.CachedTokens,
 			event.Data.ReasoningTokens,
 			event.Data.Error,
-		)
-		if h.OnSessionEnd != nil {
-			h.OnSessionEnd(summary)
-		}
-	}
+		), true
+	}),
 }
 
 func isMetricRelevantEvent(name string) bool {

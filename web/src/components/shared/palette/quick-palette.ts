@@ -160,6 +160,15 @@ export class ScionQuickPalette extends LitElement {
         width: min(560px, 92vw);
       }
 
+      /* Two result columns get a wider panel, so each column has room for
+         file paths; a single-group palette keeps the narrower panel. Scoped
+         above the narrow breakpoint, which sets its own width below. */
+      @media (min-width: 769px) {
+        .palette-dialog.multi-group::part(panel) {
+          width: min(720px, 92vw);
+        }
+      }
+
       .palette-dialog::part(body) {
         padding: 0;
       }
@@ -203,6 +212,14 @@ export class ScionQuickPalette extends LitElement {
         display: grid;
         grid-template-columns: 1fr 1fr;
         gap: 0 0.75rem;
+        /* Break long unbreakable text (file paths, slugs, IDs in an error
+           message) anywhere, in every cell. A grid track sized 1fr cannot
+           shrink below its content's min-content width, so without this one
+           long token would widen its column, squeeze the other one and
+           overflow the panel. "anywhere" (unlike "break-word") also lowers
+           that min-content width, which is what keeps the two columns
+           equal. */
+        overflow-wrap: anywhere;
       }
 
       /* A single group (e.g. an agents-only host) gets the full width
@@ -1000,7 +1017,7 @@ export class ScionQuickPalette extends LitElement {
 
     return html`
       <sl-dialog
-        class="palette-dialog"
+        class="palette-dialog ${singleGroup ? '' : 'multi-group'}"
         label=${this.label}
         ?open=${this.open}
         @sl-initial-focus=${this.handlePaletteInitialFocus}

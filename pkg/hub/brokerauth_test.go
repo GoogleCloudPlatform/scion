@@ -22,6 +22,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -31,6 +32,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
@@ -38,7 +40,7 @@ import (
 func setupTestBrokerAuthService(t *testing.T) (*BrokerAuthService, store.Store) {
 	t.Helper()
 
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create store: %v", err)
 	}
@@ -243,6 +245,36 @@ func TestCapabilitiesFromStrings_EmptyPerAgentWorkspace(t *testing.T) {
 	}
 }
 
+// TestCapabilitiesFromStrings_ReprovisionEmptyPerAgent covers the
+// "reprovisionEmptyPerAgent" capability (miller79/scion#167): the join-time
+// string in its case-folded and snake_case forms, that neither Reprovision
+// nor EmptyPerAgentWorkspace implies it, and the heartbeat's JSON round trip
+// from the broker's hubclient struct into the hub's store struct.
+func TestCapabilitiesFromStrings_ReprovisionEmptyPerAgent(t *testing.T) {
+	for _, name := range []string{"reprovisionEmptyPerAgent", "reprovisionemptyperagent", "reprovision_empty_per_agent", " REPROVISION_EMPTY_PER_AGENT "} {
+		if !capabilitiesFromStrings([]string{name}).ReprovisionEmptyPerAgent {
+			t.Errorf("capabilitiesFromStrings([%q]).ReprovisionEmptyPerAgent = false, want true", name)
+		}
+	}
+	if capabilitiesFromStrings([]string{"sync", "attach", "reprovision", "emptyPerAgentWorkspace"}).ReprovisionEmptyPerAgent {
+		t.Error("expected ReprovisionEmptyPerAgent false when not reported")
+	}
+
+	for _, want := range []bool{true, false} {
+		raw, err := json.Marshal(hubclient.BrokerCapabilities{Reprovision: true, ReprovisionEmptyPerAgent: want})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got store.BrokerCapabilities
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatal(err)
+		}
+		if got.ReprovisionEmptyPerAgent != want {
+			t.Errorf("heartbeat round trip: ReprovisionEmptyPerAgent = %v, want %v (json %s)", got.ReprovisionEmptyPerAgent, want, raw)
+		}
+	}
+}
+
 // TestCompleteBrokerJoin_NoCapabilitiesLeavesExisting verifies an empty
 // capabilities list on join (e.g. an old CLI that predates the field) does
 // not wipe out a capability set recorded by a previous join.
@@ -324,7 +356,7 @@ func TestJoinWithInvalidToken(t *testing.T) {
 
 func TestJoinWithExpiredToken(t *testing.T) {
 	// Create service with short token expiry
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create store: %v", err)
 	}
@@ -504,7 +536,7 @@ func TestValidateBrokerSignature_InvalidSignature(t *testing.T) {
 
 func TestValidateBrokerSignature_ClockSkew(t *testing.T) {
 	// Create service with short clock skew tolerance
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create store: %v", err)
 	}

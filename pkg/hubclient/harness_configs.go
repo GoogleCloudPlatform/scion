@@ -189,7 +189,7 @@ func (s *harnessConfigService) List(ctx context.Context, opts *ListHarnessConfig
 		TotalCount     int             `json:"totalCount,omitempty"`
 	}
 
-	result, err := apiclient.DecodeResponse[listResponse](resp)
+	result, err := apiclient.DecodeRequired[listResponse](resp)
 	if err != nil {
 		return nil, err
 	}
@@ -209,7 +209,7 @@ func (s *harnessConfigService) Get(ctx context.Context, id string) (*HarnessConf
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[HarnessConfig](resp)
+	return apiclient.DecodeRequired[HarnessConfig](resp)
 }
 
 // Create creates a new harness config.
@@ -218,7 +218,7 @@ func (s *harnessConfigService) Create(ctx context.Context, req *CreateHarnessCon
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[CreateHarnessConfigResponse](resp)
+	return apiclient.DecodeRequired[CreateHarnessConfigResponse](resp)
 }
 
 // Update updates a harness config.
@@ -227,7 +227,7 @@ func (s *harnessConfigService) Update(ctx context.Context, id string, req *Updat
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[HarnessConfig](resp)
+	return apiclient.DecodeRequired[HarnessConfig](resp)
 }
 
 // Delete removes a harness config.
@@ -250,7 +250,7 @@ func (s *harnessConfigService) RequestUploadURLs(ctx context.Context, id string,
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[UploadResponse](resp)
+	return apiclient.DecodeRequired[UploadResponse](resp)
 }
 
 // Finalize finalizes a harness config after file upload.
@@ -262,7 +262,7 @@ func (s *harnessConfigService) Finalize(ctx context.Context, id string, manifest
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[HarnessConfig](resp)
+	return apiclient.DecodeRequired[HarnessConfig](resp)
 }
 
 // RequestDownloadURLs requests signed URLs for downloading harness config files.
@@ -271,7 +271,7 @@ func (s *harnessConfigService) RequestDownloadURLs(ctx context.Context, id strin
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[DownloadResponse](resp)
+	return apiclient.DecodeRequired[DownloadResponse](resp)
 }
 
 // UploadFile uploads a file to the given signed URL.
@@ -323,7 +323,7 @@ func (s *harnessConfigService) ReadFile(ctx context.Context, id, filePath string
 		return nil, err
 	}
 
-	result, err := apiclient.DecodeResponse[harnessConfigFileContentResponse](resp)
+	result, err := apiclient.DecodeRequired[harnessConfigFileContentResponse](resp)
 	if err != nil {
 		return nil, err
 	}
@@ -337,7 +337,7 @@ func (s *harnessConfigService) Reimport(ctx context.Context, id string, sourceUR
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[ReimportHarnessConfigResponse](resp)
+	return apiclient.DecodeRequired[ReimportHarnessConfigResponse](resp)
 }
 
 // Validate checks storage consistency for a harness config.
@@ -346,7 +346,7 @@ func (s *harnessConfigService) Validate(ctx context.Context, id string) (*Valida
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[ValidationReport](resp)
+	return apiclient.DecodeRequired[ValidationReport](resp)
 }
 
 func (s *harnessConfigService) getTransferClient() *transfer.Client {

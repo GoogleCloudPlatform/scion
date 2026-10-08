@@ -17,10 +17,15 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"reflect"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/knadh/koanf/providers/confmap"
 	"github.com/knadh/koanf/v2"
@@ -1295,6 +1300,723 @@ func TestApplySnapshot_DefaultUserRoleNormalized(t *testing.T) {
 			if got := srv.DefaultUserRole(); got != tt.wantRole {
 				t.Errorf("DefaultUserRole() = %q, want %q", got, tt.wantRole)
 			}
+		})
+	}
+}
+
+// The authoritative-read fixture is bounded/cooperative before delegating to
+// the existing in-memory store. Closed modes execute finite virtual read steps;
+// none accepts a callback or an unbounded data graph.
+type auditFixtureSettingStore struct {
+	*fakeHubSettingStore
+	clock          *auditFixtureClock
+	mode           string
+	ops            *OperationalSettings
+	nested         bool
+	calls          int
+	router         *decisionAuditRouter
+	caller         *auditFixtureCaller
+	readObserved   bool
+	readViolation  bool
+	attachmentRead *auditFixtureAttachmentRead
+}
+
+func (s *auditFixtureSettingStore) ListHubSettings(ctx context.Context) ([]store.HubSetting, error) {
+	s.calls++
+	if s.calls > 8 {
+		return nil, fmt.Errorf("finite read invocation cap")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	switch s.mode {
+	case "panic-read":
+		// Release this read's finite pending token before the injected panic.
+		// Otherwise an abandoned slot masks lifecycle resurrection with overlap.
+		// This closed test step isolates wrapper recovery; it does not claim
+		// ordinary production panics clean up a pending token.
+		s.router.gate.Lock()
+		pending := s.router.refreshSlots
+		s.router.gate.Unlock()
+		for _, token := range pending {
+			if token.tracked {
+				s.router.finishRefresh(token, ExperimentsSnapshot{}, fmt.Errorf("finite pre-panic token release"))
+			}
+		}
+		panic("finite recovered subscription read failure")
+	case "attachment-handoff-success", "attachment-handoff-error":
+		read := s.attachmentRead
+		if read == nil || read.entered {
+			return nil, fmt.Errorf("finite attachment controller missing or replayed")
+		}
+		read.entered = true
+		s.router.gate.Lock()
+		for _, pending := range s.router.refreshSlots {
+			if pending.tracked && pending.source == s.ops && pending.attachment == read.a.attachment {
+				read.token = pending
+			}
+		}
+		s.router.gate.Unlock()
+		if !read.token.tracked {
+			return nil, fmt.Errorf("captured A read must start tracked")
+		}
+		s.router.server.SetOperationalSettings(s.ops)
+		read.b = s.ops.decisionAuditPropagationAttachment()
+		// Old pending bookkeeping conservatively blocks a fresh B read. Release
+		// only A's owned slot as finite setup, without publishing copied Ops proof.
+		// The original A Refresh still completes through the real Ops seam below.
+		s.router.finishRefresh(read.token, ExperimentsSnapshot{}, fmt.Errorf("finite old read bookkeeping release"))
+		s.mode = ""
+		if _, err := s.ops.refreshForDecisionAuditAttachment(ctx, &read.b); err != nil {
+			return nil, err
+		}
+		read.snapshot, read.copied = s.ops.decisionAuditSnapshot()
+		read.router = s.router.inspect().observation
+		if read.fail {
+			return nil, fmt.Errorf("finite delayed A store error")
+		}
+	case "stop-during-read":
+		s.ops.StopPropagation()
+	case "budget-at":
+		s.clock.advance(s.clock.tick + decisionAuditRefreshBudget)
+	case "budget-plus-one":
+		s.clock.advance(s.clock.tick + decisionAuditRefreshBudget + time.Nanosecond)
+	case "older-revision":
+		s.router.gate.Lock()
+		for _, token := range s.router.refreshSlots {
+			if token.tracked && token.source == s.ops && token.attachment == s.router.attachment && token.sequence == s.router.sequence {
+				s.readObserved = true
+			}
+		}
+		s.router.gate.Unlock()
+	case "sequence-exhausted-emit":
+		r := s.router
+		// The copied cache proof is the prior otherwise-eligible baseline.
+		// The router proof must ALREADY be cleared by the poison transition.
+		snapshot, cached := s.ops.decisionAuditSnapshot()
+		r.gate.Lock()
+		current := r.state.observation
+		cleared := !current.successful && !current.tracked && current.source == nil && current.sequence == 0 && current.attachment == 0 && current.generation == 0 && current.epoch == 0 && current.q0 == 0 && current.deadline == 0 && !current.snapshot.Present && !current.snapshot.Malformed && current.snapshot.Revision == 0 && len(current.snapshot.Overrides) == 0
+		s.readObserved = r.refreshPoison && r.sequence == ^uint64(0) && cleared &&
+			!r.state.closed && !r.state.fault && r.state.active == 0 && r.mutations == 0 && !r.propagationLost && !r.clockInvalid && r.sourceMatchesLocked(s.ops) &&
+			cached.successful && !cached.tracked && cached.source == s.ops && cached.attachment == r.attachment && cached.sequence == r.sequence && cached.generation == r.admission.manifest.generation && cached.epoch == s.clock.epoch &&
+			s.clock.valid && s.clock.epoch == r.admission.manifest.clockEpoch && s.clock.tick >= cached.q0 && s.clock.tick < cached.deadline && s.clock.tick < r.admission.manifest.expires && s.clock.tick <= time.Duration(1<<63-1)-decisionAuditLease-decisionAuditCompleteBudget &&
+			sameDecisionAuditSnapshot(snapshot, cached.snapshot) && cached.snapshot.Overrides[experiments.AuthorizationDecisionAuditV2] && r.server.experimentEnabledIn(cached.snapshot, experiments.AuthorizationDecisionAuditV2) &&
+			sameDecisionAuditReference(s.caller, r.admission.manifest.binding.caller) && s.caller.Err() == nil
+		r.gate.Unlock()
+		before := s.router.inspect().active
+		r.EmitDecisionAudit(s.caller, &store.DecisionAuditRecord{Result: "allow", ResourceType: "project"})
+		s.readViolation = before != 0 || r.inspect().active != 0
+	case "failure":
+		return nil, fmt.Errorf("finite read failure")
+	case "blocked", "late":
+		s.clock.advance(s.clock.tick + 2*time.Second)
+	case "overlap":
+		if !s.nested {
+			s.nested = true
+			_, err := s.ops.Refresh(ctx)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	rows, err := s.fakeHubSettingStore.ListHubSettings(ctx)
+	if err != nil {
+		return nil, err
+	}
+	size := 0
+	for _, row := range rows {
+		size += len(row.Value) + len(row.Section) + len(row.UpdatedBy) + len(row.Origin)
+	}
+	if len(rows) > decisionAuditSettingsMaxRows+1 || size > decisionAuditSettingsMaxBytes+1 {
+		return nil, fmt.Errorf("finite read input cap")
+	}
+	return rows, nil
+}
+
+// Closed read controller: two fixed outcomes and one explicit A-to-B handoff.
+// It accepts no arbitrary callback and starts no goroutine or wall-clock wait.
+type auditFixtureAttachmentRead struct {
+	a, b     decisionAuditPropagationAttachment
+	token    decisionAuditRefreshObservation
+	entered  bool
+	fail     bool
+	snapshot ExperimentsSnapshot
+	copied   decisionAuditRefreshObservation
+	router   decisionAuditRefreshObservation
+}
+
+func auditRequireEmptyProofs(t *testing.T, f *auditFixture, label string) {
+	t.Helper()
+	_, copied := f.ops.decisionAuditSnapshot()
+	router := f.router.inspect().observation
+	if !reflect.DeepEqual(copied, decisionAuditRefreshObservation{}) || !reflect.DeepEqual(router, decisionAuditRefreshObservation{}) {
+		t.Errorf("%s: copied and router proofs must both be wholly empty", label)
+	}
+}
+
+func auditRequireCapturedLoss(t *testing.T, f *auditFixture, label string) {
+	t.Helper()
+	f.router.gate.Lock()
+	lost := f.router.propagationLost
+	f.router.gate.Unlock()
+	if !lost {
+		t.Errorf("%s: current attachment lifecycle loss must be latched", label)
+	}
+	auditRequireEmptyProofs(t, f, label+" before refresh")
+	if _, err := f.ops.Refresh(context.Background()); err != nil {
+		t.Fatal("healthy same-attachment store read required", err)
+	}
+	f.router.gate.Lock()
+	stillLost := f.router.propagationLost
+	f.router.gate.Unlock()
+	if !stillLost {
+		t.Errorf("%s: healthy read must not release lifecycle loss", label)
+	}
+	auditRequireEmptyProofs(t, f, label+" after healthy refresh")
+	auditRequireLegacyOnly(t, f, label)
+}
+
+func auditRequireAttachmentProof(t *testing.T, f *auditFixture, attachment decisionAuditPropagationAttachment, snapshot ExperimentsSnapshot, copied, router decisionAuditRefreshObservation, label string) {
+	t.Helper()
+	currentSnapshot, currentCopied := f.ops.decisionAuditSnapshot()
+	currentRouter := f.router.inspect().observation
+	f.router.gate.Lock()
+	live := f.router.attachment == attachment.attachment && !f.router.propagationLost && !f.router.refreshPoison
+	f.router.gate.Unlock()
+	if attachment.observer != f.router || !live || !copied.successful || !router.successful || copied.attachment != attachment.attachment || router.attachment != attachment.attachment ||
+		!reflect.DeepEqual(currentSnapshot, snapshot) || !reflect.DeepEqual(currentCopied, copied) || !reflect.DeepEqual(currentRouter, router) {
+		t.Fatalf("%s: stale callback must preserve exact fresh attachment copied/router proof", label)
+	}
+	newBefore, legacyBefore := f.handler.calls, len(f.legacy.records)
+	f.emit()
+	if f.handler.calls != newBefore+1 || len(f.legacy.records) != legacyBefore {
+		t.Errorf("%s: exactly one NEW and zero legacy owners required", label)
+	}
+	auditRequireReleased(t, f, nil)
+}
+
+func newAuditFixtureSettings(t *testing.T, f *auditFixture) (*OperationalSettings, *auditFixtureSettingStore) {
+	t.Helper()
+	st := &auditFixtureSettingStore{fakeHubSettingStore: newFakeHubSettingStore(), clock: f.clock, router: f.router, caller: f.caller}
+	st.seed("experiments", json.RawMessage(`{"overrides":{"hub.authorization_decision_audit_v2":true}}`))
+	ops := NewOperationalSettings(st, emptyKoanf(), emptyKoanf())
+	st.ops = ops
+	f.router.server.SetOperationalSettings(ops)
+	return ops, st
+}
+
+// This publisher owns one buffered event and one unsubscribe completion signal.
+// It invokes no user callback; embedding supplies the inert publisher methods.
+type auditFixturePublisher struct {
+	noopEventPublisher
+	events chan Event
+	exited chan struct{}
+}
+
+func (p *auditFixturePublisher) Subscribe(...string) (<-chan Event, func()) {
+	return p.events, func() { close(p.exited) }
+}
+
+func auditRequireLegacyOnly(t *testing.T, f *auditFixture, label string) {
+	t.Helper()
+	before := len(f.legacy.records)
+	newBefore := f.handler.calls
+	f.emit()
+	if f.handler.calls != newBefore || len(f.legacy.records) != before+1 {
+		t.Errorf("%s: must select legacy once and NEW zero", label)
+	}
+	auditRequireReleased(t, f, nil)
+}
+
+func TestDecisionAuditRefresh_ObservationAndUnchangedRenewal(t *testing.T) {
+	f := newAuditFixture(t, auditFixtureAccept)
+	f.requireAdmission(t)
+	ops, st := f.ops, f.settings
+	for i := 0; i < 2; i++ {
+		f.clock.advance(time.Duration(i) * time.Second)
+		q0 := f.clock.tick
+		changed, err := ops.Refresh(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		snap, obs := ops.decisionAuditSnapshot()
+		if i == 1 && len(changed) != 0 {
+			t.Fatal("unchanged authoritative refresh must retain generic changed-list semantics")
+		}
+		if !obs.successful || obs.q0 != q0 || obs.deadline != q0+decisionAuditLease || obs.snapshot.Revision != snap.Revision || !snap.Overrides[experiments.AuthorizationDecisionAuditV2] {
+			t.Fatal("successful unchanged read must renew matching observation from read start")
+		}
+		snap.Overrides[experiments.AuthorizationDecisionAuditV2] = false
+		copied, _ := ops.decisionAuditSnapshot()
+		if !copied.Overrides[experiments.AuthorizationDecisionAuditV2] {
+			t.Fatal("consumer snapshot must not alias cache")
+		}
+	}
+	if st.calls != 2 {
+		t.Fatal("observer must not add an authoritative read")
+	}
+	revision, err := ops.Update(context.Background(), "experiments", json.RawMessage(`{"overrides":{"hub.authorization_decision_audit_v2":true}}`), "fixture", 1, "test")
+	if err != nil || revision != 2 {
+		t.Fatalf("fixture Update: %d/%v", revision, err)
+	}
+	_, obs := ops.decisionAuditSnapshot()
+	if obs.successful || f.router.inspect().observation.successful {
+		t.Fatal("true Update/cache publication must not renew a lease")
+	}
+	for _, extra := range []int{0, 1} {
+		t.Run(fmt.Sprintf("authoritative-row-cap-plus-%d", extra), func(t *testing.T) {
+			g := newAuditFixture(t, auditFixtureAccept)
+			g.requireAdmission(t)
+			n := decisionAuditSettingsMaxRows + extra
+			for i := 1; i < n; i++ {
+				g.settings.seed(fmt.Sprintf("finite-%03d", i), json.RawMessage(`{}`))
+			}
+			changed, err := g.ops.Refresh(context.Background())
+			if err != nil || len(changed) != n {
+				t.Fatal("audit cap must not alter generic row ingestion")
+			}
+			_, obs := g.ops.decisionAuditSnapshot()
+			if obs.successful != (extra == 0) || g.router.inspect().observation.successful != (extra == 0) {
+				t.Fatal("isolated row cap publication mismatch")
+			}
+			g.emit()
+			want := 1 - extra
+			if g.handler.calls != want || len(g.legacy.records) != extra {
+				t.Fatal("row cap ownership mismatch")
+			}
+		})
+		t.Run(fmt.Sprintf("authoritative-metadata-byte-cap-plus-%d", extra), func(t *testing.T) {
+			g := newAuditFixture(t, auditFixtureAccept)
+			g.requireAdmission(t)
+			row := g.settings.settings["experiments"]
+			row.UpdatedBy = strings.Repeat("m", decisionAuditSettingsMaxBytes-len(row.Value)-len(row.Section)+extra)
+			changed, err := g.ops.Refresh(context.Background())
+			if err != nil || len(changed) != 1 || g.ops.ExperimentsSnapshot().UpdatedBy != row.UpdatedBy {
+				t.Fatal("generic metadata ingestion changed")
+			}
+			_, obs := g.ops.decisionAuditSnapshot()
+			if obs.successful != (extra == 0) {
+				t.Fatal("isolated metadata aggregate boundary mismatch")
+			}
+			g.emit()
+			if g.handler.calls != 1-extra || len(g.legacy.records) != extra {
+				t.Fatal("metadata cap ownership mismatch")
+			}
+		})
+		for _, kind := range []string{"name-bytes", "name-count", "raw-bytes"} {
+			t.Run(fmt.Sprintf("defensive-cache-%s-plus-%d", kind, extra), func(t *testing.T) {
+				g := newAuditFixture(t, auditFixtureAccept)
+				g.requireAdmission(t)
+				g.observe(1, 1, true)
+				// Getter defense is isolated from raw JSON parsing and registry validation.
+				// This is defensive cache coverage, not a claim of admitted unknown names.
+				g.ops.mu.Lock()
+				state := g.ops.cache["experiments"]
+				switch kind {
+				case "name-bytes":
+					state.ExperimentsOverrides = map[string]bool{strings.Repeat("n", decisionAuditSettingsMaxBytes+extra): true}
+				case "name-count":
+					state.ExperimentsOverrides = map[string]bool{}
+					for i := 0; i < decisionAuditSettingsMaxRows+extra; i++ {
+						state.ExperimentsOverrides[fmt.Sprintf("n%d", i)] = true
+					}
+				case "raw-bytes":
+					state.Value = json.RawMessage(strings.Repeat(" ", decisionAuditSettingsMaxBytes+extra))
+				}
+				g.ops.cache["experiments"] = state
+				g.ops.mu.Unlock()
+				private, obs := g.ops.decisionAuditSnapshot()
+				public := g.ops.ExperimentsSnapshot()
+				if private.Present != (extra == 0) || obs.successful != (extra == 0) {
+					t.Fatal("isolated defensive cache cap mismatch")
+				}
+				if !public.Present || len(public.Overrides) != len(state.ExperimentsOverrides) {
+					t.Fatal("generic snapshot semantics changed by private cap")
+				}
+			})
+		}
+	}
+	for _, mode := range []string{"budget-at", "budget-plus-one"} {
+		t.Run(mode, func(t *testing.T) {
+			g := newAuditFixture(t, auditFixtureAccept)
+			g.requireAdmission(t)
+			g.settings.mode = mode
+			_, err := g.ops.Refresh(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, obs := g.ops.decisionAuditSnapshot()
+			want := mode == "budget-at"
+			if obs.successful != want || g.router.inspect().observation.successful != want {
+				t.Fatal("read duration boundary must be inclusive at 1s")
+			}
+			g.emit()
+			if (g.handler.calls == 1) != want || len(g.legacy.records) != map[bool]int{true: 0, false: 1}[want] {
+				t.Fatal("read budget ownership mismatch")
+			}
+		})
+	}
+	t.Run("sequence-exhaustion-read-handoff", func(t *testing.T) {
+		g := newAuditFixture(t, auditFixtureAccept)
+		g.requireAdmission(t)
+		g.router.gate.Lock()
+		g.router.sequence = ^uint64(0) - 1
+		g.router.gate.Unlock()
+		old := g.observe(1, 1, true)
+		if !old.successful || old.sequence != ^uint64(0) {
+			t.Fatal("last representable sequence must publish valid proof")
+		}
+		g.settings.mode = "sequence-exhausted-emit"
+		_, err := g.ops.Refresh(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !g.settings.readObserved || g.settings.readViolation {
+			t.Fatal("exhaustion oracle did not run during poisoned otherwise-eligible read")
+		}
+		if g.handler.calls != 0 || len(g.legacy.records) != 1 || g.clock.cancel != nil || g.clock.timerStarts != 0 {
+			t.Errorf("INTENDED RED sequence poison must bar old-proof read handoff: NEW=%d legacy=%d", g.handler.calls, len(g.legacy.records))
+		}
+		auditRequireReleased(t, g, nil)
+		g.settings.mode = ""
+		_, _ = g.ops.Refresh(context.Background())
+		if !g.router.refreshPoison || g.router.inspect().observation.successful {
+			t.Fatal("sequence exhaustion cannot recover")
+		}
+		auditRequireLegacyOnly(t, g, "sequence exhaustion remains poisoned")
+	})
+	t.Run("attachment-exhaustion", func(t *testing.T) {
+		g := newAuditFixture(t, auditFixtureAccept)
+		g.requireAdmission(t)
+		g.router.gate.Lock()
+		g.router.attachment = ^uint64(0) - 1
+		g.router.gate.Unlock()
+		g.router.server.SetOperationalSettings(g.ops)
+		if !g.observe(1, 1, true).successful || g.router.attachment != ^uint64(0) {
+			t.Fatal("last representable attachment must remain usable")
+		}
+		g.router.server.SetOperationalSettings(g.ops)
+		_, _ = g.ops.Refresh(context.Background())
+		if !g.router.refreshPoison || g.router.inspect().observation.successful {
+			t.Fatal("attachment exhaustion must fail off without wrap")
+		}
+		auditRequireLegacyOnly(t, g, "attachment exhaustion")
+	})
+	for _, extra := range []time.Duration{0, time.Nanosecond} {
+		t.Run(fmt.Sprintf("duration-reserve-plus-%d", extra), func(t *testing.T) {
+			g := newAuditFixture(t, auditFixtureAccept)
+			g.contract.expected.expires = time.Duration(1<<63 - 1)
+			g.contract.actual.expires = g.contract.expected.expires
+			g.router.contract = g.contract
+			g.router.admission, _ = validateDecisionAuditManifest(g.contract)
+			g.requireAdmission(t)
+			g.clock.tick = time.Duration(1<<63-1) - decisionAuditLease - decisionAuditCompleteBudget + extra
+			obs := g.observe(1, 1, true)
+			if obs.successful != (extra == 0) || g.router.clockInvalid != (extra != 0) {
+				t.Fatal("duration reserve guard boundary mismatch")
+			}
+			g.emit()
+			if g.handler.calls != map[bool]int{true: 1, false: 0}[extra == 0] || len(g.legacy.records) != map[bool]int{true: 0, false: 1}[extra == 0] {
+				t.Fatal("duration reserve ownership mismatch")
+			}
+		})
+	}
+	for _, count := range []int{2, 3} {
+		t.Run(fmt.Sprintf("refresh-slots-%d", count), func(t *testing.T) {
+			g := newAuditFixture(t, auditFixtureAccept)
+			g.requireAdmission(t)
+			base := g.observe(1, 1, true)
+			pending := make([]decisionAuditRefreshObservation, 0, count)
+			for i := 0; i < count; i++ {
+				pending = append(pending, g.router.beginRefresh(g.ops))
+			}
+			if !pending[0].tracked || !pending[1].tracked || (count == 3 && pending[2].tracked) || g.router.refreshPoison != (count == 3) {
+				t.Fatal("fixed refresh-slot boundary mismatch")
+			}
+			for _, token := range pending {
+				g.router.finishRefresh(token, base.snapshot, nil)
+			}
+			for _, token := range g.router.refreshSlots {
+				if token.tracked {
+					t.Fatal("pending slot retained after finish")
+				}
+			}
+			obs := g.observe(2, 1, true)
+			if obs.successful != (count == 2) {
+				t.Fatal("third refresh slot must poison, two completed overlaps may recover")
+			}
+		})
+		t.Run(fmt.Sprintf("mutation-saturation-%d", count), func(t *testing.T) {
+			g := newAuditFixture(t, auditFixtureAccept)
+			g.requireAdmission(t)
+			g.observe(1, 1, true)
+			for i := 0; i < count; i++ {
+				g.ops.beginDecisionAuditMutation()
+			}
+			if g.router.mutations != 2 || g.router.refreshPoison != (count == 3) {
+				t.Fatal("mutation saturation must not wrap")
+			}
+			auditRequireLegacyOnly(t, g, "active mutation")
+			for i := 0; i < count; i++ {
+				g.ops.endDecisionAuditMutation()
+			}
+			obs := g.observe(2, 1, true)
+			if obs.successful != (count == 2) || g.router.mutations != 0 {
+				t.Fatal("two mutations may recover; saturation poison cannot")
+			}
+		})
+	}
+	for _, kind := range []string{"unknown", "epoch", "regression"} {
+		t.Run("clock-anomaly-persistent-"+kind, func(t *testing.T) {
+			g := newAuditFixture(t, auditFixtureAccept)
+			g.requireAdmission(t)
+			g.clock.tick = time.Second
+			g.observe(1, 1, true)
+			switch kind {
+			case "unknown":
+				g.clock.valid = false
+			case "epoch":
+				g.clock.epoch++
+			case "regression":
+				g.clock.tick = 0
+			}
+			auditRequireLegacyOnly(t, g, "clock anomaly")
+			g.clock.valid = true
+			g.clock.epoch = 1
+			g.clock.tick = 2 * time.Second
+			_, _ = g.ops.Refresh(context.Background())
+			if !g.router.clockInvalid || g.router.inspect().observation.successful {
+				t.Fatal("clock anomaly cannot recover in same generation")
+			}
+			auditRequireLegacyOnly(t, g, "restored clock cannot rearm")
+		})
+	}
+
+}
+
+func TestDecisionAuditRefresh_FailureBlockedAndOutOfOrder(t *testing.T) {
+	for _, mode := range []string{"failure", "blocked", "late", "overlap", "canceled", "obsolete", "older-revision", "completed-token-replay", "pending-out-of-order", "old-attachment-callback"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newAuditFixture(t, auditFixtureAccept)
+			f.requireAdmission(t)
+			ops, st := f.ops, f.settings
+			if mode == "older-revision" {
+				st.settings["experiments"].Revision = 2
+			}
+			if _, err := ops.Refresh(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			_, old := ops.decisionAuditSnapshot()
+			if !old.successful {
+				t.Fatal("positive authoritative baseline required")
+			}
+			if mode == "older-revision" && old.snapshot.Revision != 2 {
+				t.Fatal("revision N baseline must be published through real Refresh")
+			}
+			st.mode = mode
+			if mode == "older-revision" {
+				st.settings["experiments"].Revision = 1
+			}
+			ctx := context.Background()
+			if mode == "canceled" {
+				c, cancel := context.WithCancel(ctx)
+				cancel()
+				ctx = c
+			}
+			_, _ = ops.Refresh(ctx)
+			if mode == "obsolete" {
+				f.router.server.SetOperationalSettings(nil)
+				f.router.finishRefresh(old, old.snapshot, nil)
+			}
+			if mode == "older-revision" {
+				snap, obs := ops.decisionAuditSnapshot()
+				if snap.Revision != 1 || obs.successful || f.router.maxRevision != 2 || !st.readObserved {
+					t.Fatal("fresh otherwise-valid N-1 read must invalidate private proof, preserve generic cache")
+				}
+			}
+			if mode == "completed-token-replay" {
+				f.router.finishRefresh(old, old.snapshot, nil)
+			}
+			if mode == "pending-out-of-order" {
+				first, second := f.router.beginRefresh(ops), f.router.beginRefresh(ops)
+				if !first.tracked || !second.tracked || first.sequence >= second.sequence {
+					t.Fatal("valid pending order required")
+				}
+				f.router.finishRefresh(second, old.snapshot, nil)
+				f.router.finishRefresh(first, old.snapshot, nil)
+			}
+			if mode == "old-attachment-callback" {
+				pending := f.router.beginRefresh(ops)
+				f.router.server.SetOperationalSettings(ops)
+				f.router.finishRefresh(pending, old.snapshot, nil) // release old bookkeeping
+				fresh := f.observe(3, 1, true)
+				f.router.finishRefresh(pending, old.snapshot, nil)
+				if !fresh.successful || !f.router.inspect().observation.successful {
+					t.Fatal("old attachment callback must not invalidate current attachment")
+				}
+				f.emit()
+				if f.handler.calls != 1 || len(f.legacy.records) != 0 {
+					t.Fatal("new attachment must own one NEW")
+				}
+				return
+			}
+			f.emit()
+			if f.handler.calls != 0 || len(f.legacy.records) != 1 {
+				t.Fatal("failure/blocked/overlap/obsolete read cannot retain or mint NEW ownership")
+			}
+			if f.router.inspect().observation.successful {
+				t.Fatal("invalid read must leave NEW observation invalid")
+			}
+		})
+	}
+
+	for _, mode := range []string{"captured-A-loss", "captured-A-success", "captured-A-error", "captured-A-rejected-untracked"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newAuditFixture(t, auditFixtureAccept)
+			f.requireAdmission(t)
+			ops, st := f.ops, f.settings
+			if _, err := ops.Refresh(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			a := ops.decisionAuditPropagationAttachment()
+			var b decisionAuditPropagationAttachment
+			var snapshot ExperimentsSnapshot
+			var copied, router decisionAuditRefreshObservation
+			if mode == "captured-A-success" || mode == "captured-A-error" {
+				read := &auditFixtureAttachmentRead{a: a, fail: mode == "captured-A-error"}
+				st.attachmentRead = read
+				st.mode = "attachment-handoff-success"
+				if read.fail {
+					st.mode = "attachment-handoff-error"
+				}
+				_, err := ops.refreshForDecisionAuditAttachment(context.Background(), &a)
+				if (err != nil) != read.fail || !read.entered || !read.token.tracked || read.token.attachment != a.attachment {
+					t.Fatal("original captured A read must take the selected real success/error completion branch", err)
+				}
+				b, snapshot, copied, router = read.b, read.snapshot, read.copied, read.router
+			} else {
+				f.router.server.SetOperationalSettings(ops)
+				b = ops.decisionAuditPropagationAttachment()
+				if _, err := ops.refreshForDecisionAuditAttachment(context.Background(), &b); err != nil {
+					t.Fatal(err)
+				}
+				snapshot, copied = ops.decisionAuditSnapshot()
+				router = f.router.inspect().observation
+				if mode == "captured-A-loss" {
+					ops.loseDecisionAuditPropagation(a)
+				} else {
+					// The actual Ops seam must retain captured A on a rejected read,
+					// rather than borrowing whichever attachment is currently live.
+					if _, err := ops.refreshForDecisionAuditAttachment(context.Background(), &a); err != nil {
+						t.Fatal("stale untracked read still preserves generic store success", err)
+					}
+				}
+			}
+			if a.observer != f.router || b.observer != f.router || b.attachment == a.attachment {
+				t.Fatal("same-source explicit handoff must capture distinct A and B identities")
+			}
+			auditRequireAttachmentProof(t, f, b, snapshot, copied, router, mode)
+			ops.loseDecisionAuditPropagation(b)
+			auditRequireCapturedLoss(t, f, mode+" current B loss")
+			f.router.server.SetOperationalSettings(ops)
+			c := ops.decisionAuditPropagationAttachment()
+			if c.attachment == b.attachment {
+				t.Fatal("only explicit handoff may release B lifecycle loss")
+			}
+			if _, err := ops.refreshForDecisionAuditAttachment(context.Background(), &c); err != nil {
+				t.Fatal(err)
+			}
+			freshSnapshot, freshCopied := ops.decisionAuditSnapshot()
+			auditRequireAttachmentProof(t, f, c, freshSnapshot, freshCopied, f.router.inspect().observation, mode+" explicit recovery")
+		})
+	}
+}
+
+func TestDecisionAuditRefresh_WritesDetachAndDisconnectInvalidate(t *testing.T) {
+	for _, mode := range []string{"false", "delete", "detach", "replace", "stop", "channel-close", "recovered-loop", "stop-during-read"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newAuditFixture(t, auditFixtureAccept)
+			f.requireAdmission(t)
+			ops := f.ops
+			if _, err := ops.Refresh(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			_, old := ops.decisionAuditSnapshot()
+			switch mode {
+			case "false":
+				if _, err := ops.Update(context.Background(), "experiments", json.RawMessage(`{"overrides":{"hub.authorization_decision_audit_v2":false}}`), "fixture", 1, "test"); err != nil {
+					t.Fatal(err)
+				}
+			case "delete":
+				if err := ops.DeleteSection(context.Background(), "experiments"); err != nil {
+					t.Fatal(err)
+				}
+			case "detach":
+				f.router.server.SetOperationalSettings(nil)
+			case "replace":
+				f.router.server.SetOperationalSettings(NewOperationalSettings(newFakeHubSettingStore(), emptyKoanf(), emptyKoanf()))
+			case "stop":
+				ops.StopPropagation()
+			case "channel-close":
+				ch := make(chan Event)
+				close(ch)
+				ops.runSubscriptionLoop(context.Background(), ch, f.router.server)
+			case "recovered-loop":
+				publisher := &auditFixturePublisher{events: make(chan Event, 1), exited: make(chan struct{})}
+				ops.SetEventPublisher(publisher)
+				ops.PollInterval = time.Hour
+				f.settings.mode = "panic-read"
+				ops.StartPropagation(context.Background(), f.router.server)
+				publisher.events <- Event{Subject: settingsUpdatedSubject, Data: []byte(`{}`)}
+				auditFixtureWait(publisher.exited) // after real wrapper recovery/invalidation
+				f.settings.mode = ""
+				// Unsubscribe completed after the real exit/recovery loss hooks.
+				// Assert before the independent stop closure can latch loss itself.
+				auditRequireCapturedLoss(t, f, "recovered subscription before stop cleanup")
+				ops.stopPropagation() // cleanup itself also latches loss; never an oracle source
+				ops.propagationWg.Wait()
+			case "stop-during-read":
+				f.settings.mode = "stop-during-read"
+				_, _ = ops.Refresh(context.Background())
+				f.settings.mode = ""
+
+			}
+			f.router.finishRefresh(old, old.snapshot, nil)
+			legacyWant := 1
+			if mode == "recovered-loop" {
+				legacyWant++ // one earlier record proved rejection before cleanup
+			}
+			f.emit()
+			if f.handler.calls != 0 || len(f.legacy.records) != legacyWant || f.router.inspect().observation.successful {
+				t.Fatal("mutation/disconnect/detach invalidation must reject old callbacks before later handoff")
+			}
+			if mode == "stop" || mode == "channel-close" || mode == "recovered-loop" || mode == "stop-during-read" {
+				_, err := ops.Refresh(context.Background())
+				if err != nil {
+					t.Fatal("healthy same-source authoritative read required", err)
+				}
+				_, fresh := ops.decisionAuditSnapshot()
+				if fresh.successful || f.router.inspect().observation.successful {
+					t.Errorf("INTENDED RED %s lifecycle loss must remain persistent on same attachment", mode)
+				}
+				auditRequireLegacyOnly(t, f, "INTENDED RED same-attachment resurrection after "+mode)
+				// Even after the intentionally failing resurrection check, explicit handoff
+				// must issue a new attachment; old callbacks cannot invalidate fresh proof.
+				previous := f.router.attachment
+				f.router.server.SetOperationalSettings(ops)
+				renewed := f.observe(3, 1, true)
+				f.router.finishRefresh(old, old.snapshot, nil)
+				if f.router.attachment == previous || !renewed.successful || !f.router.inspect().observation.successful {
+					t.Fatal("explicit handoff must establish independent fresh attachment")
+				}
+				before := f.handler.calls
+				f.emit()
+				if f.handler.calls != before+1 {
+					t.Fatal("new healthy attachment must admit NEW")
+				}
+			}
+
 		})
 	}
 }

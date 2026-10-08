@@ -97,12 +97,13 @@ var hubStatusCmd = &cobra.Command{
 
 // hubProjectsCmd lists projects on the Hub
 var hubProjectsCmd = &cobra.Command{
-	Use:     "projects [project-name]",
+	Use:     "projects [project-name-or-id]",
 	Aliases: []string{"project"},
 	Short:   "List projects on the Hub",
 	Long: `List projects registered on the Hub that you have access to.
 
-If a project name is provided, shows detailed information for that project.
+If a project name or ID is provided, shows detailed information for that
+project.
 
 Examples:
   # List all projects
@@ -116,14 +117,15 @@ Examples:
 
 // hubProjectsInfoCmd shows detailed information about a project
 var hubProjectsInfoCmd = &cobra.Command{
-	Use:   "info [project-name]",
+	Use:   "info [project-name-or-id]",
 	Short: "Show detailed information about a project",
 	Long: `Show detailed information about a project on the Hub.
 
 Displays project metadata including creation date, broker providers,
 and agent count.
 
-If no project name is provided, the current project is used.
+The project can be given by name or by project ID (UUID). If no project
+is provided, the current project is used.
 
 Examples:
   # Show info for the current project
@@ -131,6 +133,9 @@ Examples:
 
   # Show info for a project by name
   scion hub projects info my-project
+
+  # Show info for a project by ID
+  scion hub projects info 0b9a4c1e-2f3d-4e5a-8b6c-7d8e9f0a1b2c
 
   # Output as JSON
   scion hub projects info my-project --json`,
@@ -140,14 +145,15 @@ Examples:
 
 // hubProjectsDeleteCmd deletes a project from the Hub
 var hubProjectsDeleteCmd = &cobra.Command{
-	Use:   "delete [project-name]",
+	Use:   "delete [project-name-or-id]",
 	Short: "Delete a project from the Hub",
 	Long: `Delete a project from the Hub.
 
 This will remove the project and all associated broker provider relationships.
 All agents within the project will be stopped and deleted.
 
-If no project name is provided, the current project is used.
+The project can be given by name or by project ID (UUID). If no project
+is provided, the current project is used.
 
 Examples:
   # Delete the current project (with confirmation)
@@ -155,6 +161,9 @@ Examples:
 
   # Delete a project by name (with confirmation)
   scion hub projects delete my-project
+
+  # Delete a project by ID (with confirmation)
+  scion hub projects delete 0b9a4c1e-2f3d-4e5a-8b6c-7d8e9f0a1b2c
 
   # Delete without confirmation
   scion hub projects delete my-project -y`,
@@ -1327,8 +1336,7 @@ func runHubProjectsInfo(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Find the project by name
-	project, err := findProjectByName(ctx, client, projectName)
+	project, err := resolveProjectNameOrID(ctx, client, projectName)
 	if err != nil {
 		return err
 	}
@@ -1503,8 +1511,8 @@ func runHubProjectsDelete(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Find the project by name
-	project, err := findProjectByName(ctx, client, projectName)
+	// Find the project by name or ID, exactly as `hub projects info` does.
+	project, err := resolveProjectNameOrID(ctx, client, projectName)
 	if err != nil {
 		return err
 	}
@@ -1806,11 +1814,33 @@ func runHubProjectCreateHubManaged() error {
 	return nil
 }
 
+// defaultBranchProbeTimeout bounds the default-branch probe so an
+// unreachable remote falls back to the default instead of hanging. It is a
+// variable only so tests can shorten it.
+var defaultBranchProbeTimeout = 10 * time.Second
+
+// defaultBranchProbeWaitDelay bounds how long the probe waits for its output
+// pipes to close after the context kills git. Without it, a stalled
+// git-remote-https child that inherited stderr keeps the pipe open and
+// Output() blocks until that child exits, defeating the timeout.
+const defaultBranchProbeWaitDelay = 1 * time.Second
+
+// defaultBranchProbeCmd builds the `git ls-remote --symref` command used by
+// detectDefaultBranch. GIT_TERMINAL_PROMPT=0 stops git from blocking on an
+// interactive credential prompt when no credential helper can answer.
+func defaultBranchProbeCmd(ctx context.Context, cloneURL string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "git", "ls-remote", "--symref", cloneURL, "HEAD")
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	cmd.WaitDelay = defaultBranchProbeWaitDelay
+	return cmd
+}
+
 // detectDefaultBranch probes a git remote to detect its default branch.
 // Returns the branch name or empty string on failure.
 func detectDefaultBranch(cloneURL string) string {
-	cmd := exec.Command("git", "ls-remote", "--symref", cloneURL, "HEAD")
-	output, err := cmd.Output()
+	ctx, cancel := context.WithTimeout(context.Background(), defaultBranchProbeTimeout)
+	defer cancel()
+	output, err := defaultBranchProbeCmd(ctx, cloneURL).Output()
 	if err != nil {
 		return ""
 	}
@@ -1854,6 +1884,25 @@ func findProjectByName(ctx context.Context, client hubclient.Client, name string
 	}
 
 	return &resp.Projects[0], nil
+}
+
+// resolveProjectNameOrID resolves the project argument of `scion hub
+// projects info` and `scion hub projects delete`, so both commands pick the
+// same project for the same argument. A UUID-shaped value (as returned by
+// the REST API) goes through the shared ID-first resolver, which looks the
+// project up by ID and falls back to an exact slug or case-insensitive name
+// match of the same string (ptone/scion#3772, ptone/scion#3792). Any other
+// value keeps the existing name lookup unchanged.
+func resolveProjectNameOrID(ctx context.Context, client hubclient.Client, arg string) (*hubclient.Project, error) {
+	// An empty or blank argument is never a valid project; an empty one
+	// would also list every project instead of looking one up.
+	if strings.TrimSpace(arg) == "" {
+		return nil, fmt.Errorf("project name or ID must not be empty")
+	}
+	if isUUIDLike(arg) {
+		return resolveProjectByNameOrID(ctx, client, arg)
+	}
+	return findProjectByName(ctx, client, arg)
 }
 
 // valueOrDefault returns value if non-empty, otherwise returns the default.
@@ -2773,6 +2822,12 @@ type BrokerHealthResponse struct {
 // checkLocalBrokerServer checks if the local broker server is running and healthy.
 // Returns the health response if healthy, or an error if not accessible.
 func checkLocalBrokerServer(port int) (*BrokerHealthResponse, error) {
+	return checkLocalBrokerServerTimeout(port, 5*time.Second)
+}
+
+// checkLocalBrokerServerTimeout is checkLocalBrokerServer with the given
+// HTTP timeout.
+func checkLocalBrokerServerTimeout(port int, timeout time.Duration) (*BrokerHealthResponse, error) {
 	if port <= 0 {
 		port = DefaultBrokerPort
 	}
@@ -2780,7 +2835,7 @@ func checkLocalBrokerServer(port int) (*BrokerHealthResponse, error) {
 	url := fmt.Sprintf("http://localhost:%d/healthz", port)
 
 	client := &http.Client{
-		Timeout: 5 * time.Second,
+		Timeout: timeout,
 	}
 
 	resp, err := client.Get(url)

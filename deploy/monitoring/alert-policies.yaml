@@ -21,8 +21,14 @@
 # values as configuration inputs. The gcloud CLI requires manual conversion
 # (see README.md for details).
 #
-# Metrics use the custom.googleapis.com/scion.* namespace and are emitted via
-# the OTLP pipeline (see .design/hosted/metrics-system.md).
+# Metric types: the Hub (and sciontool's telemetry pipeline) export their
+# OpenTelemetry metrics through the Google Cloud metric exporter, which writes
+# each one as workload.googleapis.com/<otel metric name> (dots kept). The Hub
+# sets service.name and service.instance.id, so its series land on the
+# generic_task monitored resource, one per Hub replica. Histogram metrics are
+# recorded in milliseconds, so latency thresholds below are in ms.
+# pkg/observability/hubmetrics/alert_policies_test.go checks every metric type
+# here against the metrics the Hub defines.
 #
 # Severity labels:
 #   WARNING  - investigate during business hours; may self-resolve
@@ -41,19 +47,19 @@ alertPolicies:
         85% for 5 minutes. Investigate query load and consider increasing the
         pool size or optimizing long-running queries.
     severity: WARNING
-    metric: "custom.googleapis.com/scion.db.pool.connections.active"
+    metric: "workload.googleapis.com/scion.db.pool.connections.active"
     # Condition: active / max > 0.85
     # The ratio is computed by dividing the active gauge by the max gauge.
     conditionType: THRESHOLD
     comparison: COMPARISON_GT
     threshold: 0.85
     # MQL equivalent:
-    #   fetch generic_node
-    #   | metric 'custom.googleapis.com/scion.db.pool.connections.active'
-    #   | div (metric 'custom.googleapis.com/scion.db.pool.connections.max')
+    #   fetch generic_task
+    #   | metric 'workload.googleapis.com/scion.db.pool.connections.active'
+    #   | div (metric 'workload.googleapis.com/scion.db.pool.connections.max')
     #   | every 1m
     #   | condition val() > 0.85 '1'
-    denominatorMetric: "custom.googleapis.com/scion.db.pool.connections.max"
+    denominatorMetric: "workload.googleapis.com/scion.db.pool.connections.max"
     aggregation:
       alignmentPeriod: "60s"
       perSeriesAligner: ALIGN_MEAN
@@ -69,11 +75,11 @@ alertPolicies:
         95% for 2 minutes. The application is at risk of connection starvation.
         Immediate action required.
     severity: CRITICAL
-    metric: "custom.googleapis.com/scion.db.pool.connections.active"
+    metric: "workload.googleapis.com/scion.db.pool.connections.active"
     conditionType: THRESHOLD
     comparison: COMPARISON_GT
     threshold: 0.95
-    denominatorMetric: "custom.googleapis.com/scion.db.pool.connections.max"
+    denominatorMetric: "workload.googleapis.com/scion.db.pool.connections.max"
     aggregation:
       alignmentPeriod: "60s"
       perSeriesAligner: ALIGN_MEAN
@@ -90,7 +96,7 @@ alertPolicies:
         in a 5-minute window. This may indicate network instability between the
         application and the database, or the database is cycling connections.
     severity: WARNING
-    metric: "custom.googleapis.com/scion.db.notify.listener.reconnects"
+    metric: "workload.googleapis.com/scion.db.notify.listener.reconnects"
     conditionType: THRESHOLD
     comparison: COMPARISON_GT
     threshold: 3
@@ -110,7 +116,7 @@ alertPolicies:
         subscriber could not keep up. Investigate subscriber health and
         notification volume.
     severity: CRITICAL
-    metric: "custom.googleapis.com/scion.db.notify.dropped"
+    metric: "workload.googleapis.com/scion.db.notify.dropped"
     conditionType: THRESHOLD
     comparison: COMPARISON_GT
     threshold: 0
@@ -126,14 +132,17 @@ alertPolicies:
   - displayName: "DB Subscriber Lag Elevated"
     documentation:
       content: |
-        The P95 subscriber lag for database LISTEN/NOTIFY delivery has exceeded
-        5 seconds for 10 minutes. Subscribers are falling behind on processing
-        notifications. Check subscriber throughput and system load.
+        The P95 publish-to-deliver latency for database LISTEN/NOTIFY delivery
+        has exceeded 5 seconds for 10 minutes. Subscribers are falling behind on
+        processing notifications. Check subscriber throughput and system load.
     severity: WARNING
-    metric: "custom.googleapis.com/scion.db.notify.subscriber.lag"
+    # A latency histogram (ms). scion.db.notify.subscriber.lag is a gauge of
+    # notifications queued per subscriber, not a latency, so it can't carry a
+    # seconds threshold or a percentile aligner.
+    metric: "workload.googleapis.com/scion.db.notify.publish_to_deliver.duration"
     conditionType: THRESHOLD
     comparison: COMPARISON_GT
-    threshold: 5.0             # 5 seconds
+    threshold: 5000            # 5 seconds, in ms
     aggregation:
       alignmentPeriod: "60s"
       perSeriesAligner: ALIGN_PERCENTILE_95
@@ -154,7 +163,7 @@ alertPolicies:
         deadlock, a crashed worker, or a message that cannot be routed.
         Investigate the dispatch queue immediately.
     severity: CRITICAL
-    metric: "custom.googleapis.com/scion.dispatch.message.stuck"
+    metric: "workload.googleapis.com/scion.dispatch.message.stuck"
     conditionType: THRESHOLD
     comparison: COMPARISON_GT
     threshold: 0
@@ -174,7 +183,7 @@ alertPolicies:
         burst of failures may indicate a downstream service degradation or a
         misconfigured message route.
     severity: WARNING
-    metric: "custom.googleapis.com/scion.dispatch.failed"
+    metric: "workload.googleapis.com/scion.dispatch.failed"
     conditionType: THRESHOLD
     comparison: COMPARISON_GT
     threshold: 5
@@ -194,7 +203,7 @@ alertPolicies:
         not self-resolve. Investigate the dispatch pipeline, downstream services,
         and message routing configuration.
     severity: CRITICAL
-    metric: "custom.googleapis.com/scion.dispatch.failed"
+    metric: "workload.googleapis.com/scion.dispatch.failed"
     conditionType: THRESHOLD
     comparison: COMPARISON_GT
     threshold: 0
@@ -214,10 +223,10 @@ alertPolicies:
         seconds for 10 minutes. Messages are taking longer than expected to
         process. Check worker capacity, downstream latency, and queue depth.
     severity: WARNING
-    metric: "custom.googleapis.com/scion.dispatch.intent_to_done.duration"
+    metric: "workload.googleapis.com/scion.dispatch.intent_to_done.duration"
     conditionType: THRESHOLD
     comparison: COMPARISON_GT
-    threshold: 30.0            # 30 seconds
+    threshold: 30000           # 30 seconds, in ms
     aggregation:
       alignmentPeriod: "60s"
       perSeriesAligner: ALIGN_PERCENTILE_95
@@ -233,10 +242,10 @@ alertPolicies:
         minutes. The dispatch pipeline is severely degraded. Users will
         experience significant delays. Immediate investigation required.
     severity: CRITICAL
-    metric: "custom.googleapis.com/scion.dispatch.intent_to_done.duration"
+    metric: "workload.googleapis.com/scion.dispatch.intent_to_done.duration"
     conditionType: THRESHOLD
     comparison: COMPARISON_GT
-    threshold: 120.0           # 120 seconds
+    threshold: 120000          # 120 seconds, in ms
     aggregation:
       alignmentPeriod: "60s"
       perSeriesAligner: ALIGN_PERCENTILE_95
@@ -254,7 +263,7 @@ alertPolicies:
         reconnections cause message delivery delays and potential duplicates.
         Investigate network stability and command bus server health.
     severity: WARNING
-    metric: "custom.googleapis.com/scion.dispatch.cmdbus.reconnects"
+    metric: "workload.googleapis.com/scion.dispatch.cmdbus.reconnects"
     conditionType: THRESHOLD
     comparison: COMPARISON_GT
     threshold: 5
@@ -278,7 +287,7 @@ alertPolicies:
         Verify the collector is running and reachable from application pods.
     # Design §2.3 specifies WARNING severity for pipeline-down.
     severity: WARNING
-    metric: "custom.googleapis.com/scion.telemetry.pipeline.status"
+    metric: "workload.googleapis.com/scion.telemetry.pipeline.status"
     conditionType: ABSENCE
     aggregation:
       alignmentPeriod: "300s"    # 5-minute buckets per design — avoids noise during agent lifecycle events
@@ -295,7 +304,7 @@ alertPolicies:
         window. Metrics may be lost or delayed. Investigate the collector
         configuration, backend connectivity, and error logs.
     severity: WARNING
-    metric: "custom.googleapis.com/scion.telemetry.export.errors"
+    metric: "workload.googleapis.com/scion.telemetry.export.errors"
     conditionType: THRESHOLD
     comparison: COMPARISON_GT
     threshold: 10
@@ -322,7 +331,7 @@ alertPolicies:
         misconfigured broker, a key rotation issue, or an unauthorized party
         attempting to connect.
     severity: WARNING
-    metric: "custom.googleapis.com/scion.hub.auth.broker.verify.failures"
+    metric: "workload.googleapis.com/scion.hub.auth.broker.verify.failures"
     conditionType: THRESHOLD
     comparison: COMPARISON_GT
     threshold: 5
@@ -342,7 +351,7 @@ alertPolicies:
         suggest a persistent misconfiguration or an ongoing attack. Rotate keys
         if compromise is suspected.
     severity: CRITICAL
-    metric: "custom.googleapis.com/scion.hub.auth.broker.verify.failures"
+    metric: "workload.googleapis.com/scion.hub.auth.broker.verify.failures"
     conditionType: THRESHOLD
     comparison: COMPARISON_GT
     threshold: 0

@@ -34,13 +34,13 @@ func fireScheduledDispatchAsOwner(t *testing.T, f *bypassAgentsFixture, agentNam
 	ctx := context.Background()
 	f.srv.seedProjectCreatorMembership(ctx, f.proj)
 	require.NoError(t, f.srv.createProjectOwnerRoleBinding(ctx, f.proj.ID, f.owner.ID))
-	return f.srv.dispatchAgentEventHandler()(ctx, store.ScheduledEvent{
+	return f.srv.dispatchAgentEventHandler()(ctx, withSessionRevision(store.ScheduledEvent{
 		ID:        "evt-" + agentName,
 		ProjectID: f.proj.ID,
 		EventType: "dispatch_agent",
 		Payload:   `{"agentName":"` + agentName + `","task":"scheduled work"}`,
 		CreatedBy: f.owner.ID,
-	})
+	}, f.owner.ID))
 }
 
 func setProjectDefaultSAAnnotations(t *testing.T, f *bypassAgentsFixture, saID string) {

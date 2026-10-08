@@ -193,6 +193,15 @@ hub:
   # ends in a credential word - SESSION_SECRET, ADMIN_TOKEN, DB_PASSWORD. The
   # rule is on the trailing word, so TOKEN_TTL_SECONDS and MAX_TOKENS are fine.
   # Use valueFrom.secretKeyRef, which neither check touches.
+  #
+  # POD_NAME is set by the chart from the pod's own name. An entry named
+  # POD_NAME here replaces the chart's instead of being refused, so releases
+  # that already set it this way keep upgrading. If you set it, the value must
+  # be unique per pod: use valueFrom.fieldRef.fieldPath: metadata.name rather
+  # than a literal "value". The hub treats POD_NAME as the pod's identity. With
+  # one static value shared by several replicas, a restart of one replica
+  # demotes the other replicas' live start claims, and all replicas share one
+  # conduit relay id, each taking it over from the others.
   extraEnv: []
 
   # Extra arguments appended to the hub command. The chart always renders

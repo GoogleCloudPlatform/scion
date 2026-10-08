@@ -554,6 +554,12 @@ func extractHarnessConfigEntryFromStorage(ctx context.Context, stor storage.Stor
 func (s *Server) updateHarnessConfig(w http.ResponseWriter, r *http.Request, existing *store.HarnessConfig) {
 	ctx := r.Context()
 
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
+		return
+	}
+
 	var hc store.HarnessConfig
 	if err := readJSON(r, &hc); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
@@ -570,6 +576,17 @@ func (s *Server) updateHarnessConfig(w http.ResponseWriter, r *http.Request, exi
 	hc.StoragePath = existing.StoragePath
 	hc.StorageURI = existing.StorageURI
 	hc.StorageBucket = existing.StorageBucket
+	// Content state is computed by the server during upload/finalize and
+	// is carried over from the existing record.
+	hc.ContentHash = existing.ContentHash
+	hc.Files = existing.Files
+	// Lifecycle and image-check state are managed by the server and are
+	// carried over from the existing record.
+	hc.Status = existing.Status
+	hc.ImageStatus = existing.ImageStatus
+	hc.ImageStatusCheckedAt = existing.ImageStatusCheckedAt
+	// The updater is the authenticated caller.
+	hc.UpdatedBy = identity.ID()
 	if hc.Slug == "" {
 		hc.Slug = api.Slugify(hc.Name)
 	}
@@ -859,7 +876,7 @@ func (s *Server) handleHarnessConfigCheckImage(w http.ResponseWriter, r *http.Re
 				var mu sync.Mutex
 				for i := range brokerResult.Items {
 					b := &brokerResult.Items[i]
-					if _, isPlugin := b.Labels["scion.io/plugin"]; isPlugin {
+					if isPluginBroker(b) {
 						continue
 					}
 					if !s.canDispatchToBroker(ctx, b) {
@@ -956,6 +973,12 @@ func (s *Server) handleHarnessConfigDownload(w http.ResponseWriter, r *http.Requ
 	if err != nil {
 		RuntimeError(w, fmt.Sprintf("harness-config %q: %s — run 'scion harness-config validate %s' to diagnose", hc.Name, err, hc.Name))
 		return
+	}
+
+	// For local storage, rewrite file:// URLs to HTTP proxy URLs: a file://
+	// URL names a hub-host path a remote broker cannot read.
+	if stor.Provider() == storage.ProviderLocal {
+		downloadURLs = rewriteLocalDownloadURLs(downloadURLs, requestBaseURL(r), "harness-configs", hc.ID)
 	}
 
 	writeJSON(w, http.StatusOK, DownloadResponse{
@@ -1318,7 +1341,7 @@ func (s *Server) handleHarnessConfigImageStatus(w http.ResponseWriter, r *http.R
 	var proxyEntries []ProxyBrokerEntry
 	for i := range brokerResult.Items {
 		b := &brokerResult.Items[i]
-		if _, isPlugin := b.Labels["scion.io/plugin"]; isPlugin {
+		if isPluginBroker(b) {
 			continue
 		}
 		if !s.canDispatchToBroker(ctx, b) {

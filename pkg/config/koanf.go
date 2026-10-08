@@ -162,6 +162,11 @@ func loadSettingsKoanf(projectPath string, ignoreEnvProjectID bool) (*Settings, 
 	//       SCION_HUB_BROKER_ID -> hub.brokerId
 	//       SCION_HUB_BROKER_TOKEN -> hub.brokerToken
 	_ = k.Load(env.Provider("SCION_", ".", func(s string) string {
+		if os.Getenv(s) == "" {
+			// An exported but empty variable is treated as unset, so it
+			// never blanks a value from the settings files.
+			return ""
+		}
 		if mapped, ok := projectkeys.EnvProjectIDConfigKey(s, true); ok {
 			if ignoreEnvProjectID {
 				return ""
@@ -169,11 +174,10 @@ func loadSettingsKoanf(projectPath string, ignoreEnvProjectID bool) (*Settings, 
 			return mapped
 		}
 		if isSettingsExcludedEnv(s) {
-			// SCION_AUTO_EXPOSE_PORTS and SCION_AUTO_EXPOSE_PORTS_LIST are
-			// sciontool-only (see settings_v1.go's versionedEnvKeyMapper,
-			// which drops them for the same reason). The legacy Settings
-			// struct has no colliding field today, but dropping them here
-			// too keeps both mappers' exclusions in sync.
+			// See settingsExcludedEnvVars for every excluded name and the
+			// reason. Dropping them here too keeps this legacy mapper in
+			// sync with settings_v1.go's versionedEnvKeyMapper (a bare
+			// SCION_HUB, for one, collides with Settings.Hub).
 			return ""
 		}
 		if isRemovedLegacyEnv(s) {
@@ -182,7 +186,7 @@ func loadSettingsKoanf(projectPath string, ignoreEnvProjectID bool) (*Settings, 
 			// below and land on the unrecognised key hub.grove_id.
 			// Returning "" makes the env provider drop the variable
 			// entirely (env.go's Provider skips a "" key), the same idiom
-			// settings_v1.go already uses for SCION_OTEL_INSECURE.
+			// this callback uses above for an empty value.
 			// WarnRemovedLegacyEnv reports it separately.
 			return ""
 		}

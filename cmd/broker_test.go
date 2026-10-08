@@ -118,6 +118,17 @@ func TestBrokerRegistrationCapabilities_IncludesEmptyPerAgentWorkspace(t *testin
 	}
 }
 
+// TestBrokerRegistrationCapabilities_IncludesReprovisionEmptyPerAgent pins
+// that the broker CLI reports reprovisionEmptyPerAgent at join
+// (miller79/scion#167). The join replaces the stored capabilities, so
+// without it a same-broker empty-per-agent reincarnate would get a spurious
+// 412 until the next heartbeat.
+func TestBrokerRegistrationCapabilities_IncludesReprovisionEmptyPerAgent(t *testing.T) {
+	if !slices.Contains(brokerRegistrationCapabilities(), "reprovisionEmptyPerAgent") {
+		t.Errorf("brokerRegistrationCapabilities() = %v, want it to include reprovisionEmptyPerAgent", brokerRegistrationCapabilities())
+	}
+}
+
 // TestBrokerRegistrationCapabilities_IncludesAgentMove pins that the broker
 // CLI reports agentMove at join (ptone/scion#2727); the hub refuses a move
 // unless both brokers report it.

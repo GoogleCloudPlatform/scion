@@ -102,6 +102,11 @@ type HeartbeatService struct {
 	// health changes. Nil omits the field.
 	workspaceStorage func() *api.BrokerWorkspaceStorage
 
+	// health, when set, returns the broker's self-reported health
+	// (Server.heartbeatHealthReport), sent on every heartbeat so the hub
+	// shows a degraded runtime or NFS mount. Nil omits the field.
+	health func(ctx context.Context) *api.BrokerHealthReport
+
 	// profileAttach, when set, returns the attach capability of each
 	// profile whose attach support the broker currently knows, reported on
 	// every heartbeat so the hub's stored per-profile Attach follows
@@ -385,10 +390,16 @@ func (s *HeartbeatService) buildHeartbeat(ctx context.Context) *hubclient.Broker
 			// This broker honours localOnly deletes and confirms a moved
 			// agent's NFS workspace before provisioning it (agent move).
 			AgentMove: true,
+			// This broker's reprovision reuses an empty-per-agent
+			// workspace in place (miller79/scion#167).
+			ReprovisionEmptyPerAgent: true,
 		},
 	}
 	if s.workspaceStorage != nil {
 		heartbeat.WorkspaceStorage = s.workspaceStorage()
+	}
+	if s.health != nil {
+		heartbeat.Health = s.health(ctx)
 	}
 	if s.profileAttach != nil {
 		heartbeat.ProfileAttach = s.profileAttach()

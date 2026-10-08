@@ -478,17 +478,39 @@ func TestM1_UATDeniedForHubLevelResources(t *testing.T) {
 	})
 }
 
-// TestM2_HubPermissionsNoUATScope verifies that all hub permissions have
-// empty UATScope values (M2 fix). Hub operations should not be accessible
-// via project-scoped UATs.
-func TestM2_HubPermissionsNoUATScope(t *testing.T) {
+// TestHubPermissionSelectors_MatchApprovedSet pins the exact set of hub
+// permissions that carry a token selector, and requires each to be
+// selectable on the hub boundary only. A hub permission gains a selector
+// only by being added here.
+func TestHubPermissionSelectors_MatchApprovedSet(t *testing.T) {
+	approved := map[string]string{
+		"hub.config.read":             "hub_config:read",
+		"hub.config.update":           "hub_config:update",
+		"hub.project_defaults.read":   "hub_project_defaults:read",
+		"hub.project_defaults.update": "hub_project_defaults:update",
+		"hub.messaging.update":        "hub_messaging:update",
+		"hub.experiments.update":      "hub_experiments:update",
+		"hub.lifecycle_hooks.read":    "hub_lifecycle_hooks:read",
+		"hub.lifecycle_hooks.update":  "hub_lifecycle_hooks:update",
+		"hub.settings.update":         "hub_settings:update",
+	}
+	got := map[string]string{}
 	for _, perm := range permissions.Registry {
-		if perm.Resource != permissions.ResourceHub {
+		if perm.Resource != permissions.ResourceHub || perm.UATScope == "" {
 			continue
 		}
-		if perm.UATScope != "" {
-			t.Errorf("hub permission %s has non-empty UATScope %q; hub permissions must not be accessible via project-scoped UATs",
-				perm.ID, perm.UATScope)
+		got[perm.ID] = perm.UATScope
+		kinds, listed := permissions.SelectorAllowedBoundaries(perm.ID)
+		if !listed || len(kinds) != 1 || kinds[0] != permissions.BoundaryKindHub {
+			t.Errorf("hub permission %s: selector boundaries = %v (listed=%v), want hub only", perm.ID, kinds, listed)
+		}
+	}
+	if len(got) != len(approved) {
+		t.Errorf("hub permissions with a selector = %v, want %v", got, approved)
+	}
+	for id, sel := range approved {
+		if got[id] != sel {
+			t.Errorf("hub permission %s has selector %q, want %q", id, got[id], sel)
 		}
 	}
 }

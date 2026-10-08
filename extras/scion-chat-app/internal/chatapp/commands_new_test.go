@@ -751,3 +751,31 @@ func TestHandleAdminCommand_DispatchesNewCommands(t *testing.T) {
 		})
 	}
 }
+
+func TestCmdSubscribe_WaitingForInputOptionLabel(t *testing.T) {
+	router, _, _ := newTestRouterWithHub(t, newStubClient())
+
+	resp, err := router.cmdSubscribe(context.Background(), testEvent(), []string{"my-agent"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.Message == nil || resp.Message.Card == nil {
+		t.Fatal("expected card response with activity filter")
+	}
+	var found bool
+	for _, section := range resp.Message.Card.Sections {
+		for _, w := range section.Widgets {
+			for _, opt := range w.Options {
+				if opt.Value == "WAITING_FOR_INPUT" {
+					found = true
+					if opt.Label != "Waiting on Parent" {
+						t.Errorf("WAITING_FOR_INPUT label = %q, want %q", opt.Label, "Waiting on Parent")
+					}
+				}
+			}
+		}
+	}
+	if !found {
+		t.Fatal("expected a WAITING_FOR_INPUT option in the subscribe card")
+	}
+}

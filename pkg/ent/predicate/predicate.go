@@ -21,6 +21,9 @@ type Agent func(*sql.Selector)
 // AgentCredential is the predicate function for agentcredential builders.
 type AgentCredential func(*sql.Selector)
 
+// AgentHold is the predicate function for agenthold builders.
+type AgentHold func(*sql.Selector)
+
 // AgentIdentityKey is the predicate function for agentidentitykey builders.
 type AgentIdentityKey func(*sql.Selector)
 
@@ -71,6 +74,9 @@ type ConversationParticipant func(*sql.Selector)
 
 // DecisionAudit is the predicate function for decisionaudit builders.
 type DecisionAudit func(*sql.Selector)
+
+// DelegationAdoption is the predicate function for delegationadoption builders.
+type DelegationAdoption func(*sql.Selector)
 
 // DelegationEdge is the predicate function for delegationedge builders.
 type DelegationEdge func(*sql.Selector)
@@ -131,6 +137,9 @@ type MaintenanceOperation func(*sql.Selector)
 
 // MaintenanceOperationRun is the predicate function for maintenanceoperationrun builders.
 type MaintenanceOperationRun func(*sql.Selector)
+
+// MembershipLossCheck is the predicate function for membershiplosscheck builders.
+type MembershipLossCheck func(*sql.Selector)
 
 // Message is the predicate function for message builders.
 type Message func(*sql.Selector)
