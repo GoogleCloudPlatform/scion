@@ -56,7 +56,8 @@ const navigateToMock = vi.fn();
 
 const extractApiErrorMock = vi.fn((_res: unknown, _fallback: string) => Promise.resolve('error'));
 
-vi.mock('../../../client/main.js', () => ({
+vi.mock('../../../client/main.js', async () => ({
+  ...(await import('../../../client/__fixtures__/main-stub.js')),
   get navigateTo() {
     return navigateToMock;
   },

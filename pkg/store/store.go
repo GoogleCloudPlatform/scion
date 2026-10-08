@@ -159,6 +159,13 @@ type Store interface {
 	// Must not be called from inside WithTx.
 	FinalizeAgentDeletion(ctx context.Context, id string, pred DeletionPredicate, mode DeletionFinalizeMode, set DeletionFields, hook DeletionFinalizeHook) (affected int, err error)
 
+	// PurgeDeletedAgents permanently removes soft-deleted agents older than
+	// cutoff, together with the rows that reference them (group memberships,
+	// identity keys), in one transaction. Returns the number of agents
+	// purged. It is a Store method rather than an AgentStore one because the
+	// cascade spans several sub-stores.
+	PurgeDeletedAgents(ctx context.Context, cutoff time.Time) (int, error)
+
 	// Agent operations
 	AgentStore
 
@@ -460,10 +467,6 @@ type AgentStore interface {
 
 	// UpdateAgentExposedPorts updates only exposed port registrations.
 	UpdateAgentExposedPorts(ctx context.Context, id string, ports []ExposedPort) error
-
-	// PurgeDeletedAgents permanently removes soft-deleted agents older than cutoff.
-	// Returns the number of agents purged.
-	PurgeDeletedAgents(ctx context.Context, cutoff time.Time) (int, error)
 
 	// MarkStaleAgentsOffline marks agents whose last heartbeat is older
 	// than threshold as offline. Only affects agents with phase=running whose
