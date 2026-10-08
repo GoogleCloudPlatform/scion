@@ -1480,6 +1480,9 @@ func getIntegrationStatus(mgr IntegrationManager, name string) *IntegrationStatu
 		status.Message = "failed to query health"
 		return status
 	}
+	// Normalise casing once here, so the Integrations page, the health
+	// summary and the hub all compare the same words.
+	health = strings.ToLower(strings.TrimSpace(health))
 	status.Health = health
 	status.Message = message
 	status.Details = details

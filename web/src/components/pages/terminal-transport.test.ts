@@ -33,6 +33,10 @@ vi.mock('@xterm/addon-fit', () => ({
 }));
 vi.mock('@xterm/addon-web-links', () => ({ WebLinksAddon: class {} }));
 vi.mock('@xterm/addon-clipboard', () => ({ ClipboardAddon: class {} }));
+// initTerminal() awaits this inline CSS import before constructing the
+// Terminal. Unmocked, it can stall under full-suite worker contention so the
+// first RAF never arrives before mountToFrame() times out (ptone/scion#1727).
+vi.mock('@xterm/xterm/css/xterm.css?inline', () => ({ default: '' }));
 
 class FakeSocket {
   static OPEN = 1;
@@ -115,7 +119,15 @@ function pane() {
 
 async function mountToFrame() {
   document.body.append(page);
-  await vi.waitFor(() => expect(frames).toHaveLength(1));
+  // Wait for initTerminal to complete through its RAF push.
+  // terminal.instances tracks mocked Terminal constructors; once length is 1,
+  // initTerminal has set this.terminal and all synchronous operations through
+  // the RAF push have completed (no async gaps between constructor and RAF).
+  // Use >= 1 because reveal() may also push a RAF if it wins the race.
+  await vi.waitFor(() => {
+    expect(terminal.instances).toHaveLength(1);
+    expect(frames.length).toBeGreaterThanOrEqual(1);
+  });
 }
 async function mountConnected() {
   await mountToFrame();
