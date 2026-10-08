@@ -27,6 +27,29 @@
 // @vitest-environment happy-dom
 
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
+
+// The module under test imports from the app entry. Loading the real
+// main.ts registers every Shoelace component and runs the app bootstrap,
+// so happy-dom tries to fetch from 127.0.0.1:3000 and logs ECONNREFUSED on
+// stderr. These tests only need a stub; it matches the one in
+// chat-members.test.ts (ptone/scion#3392).
+vi.mock('../../../client/main.js', () => ({
+  navigateTo: vi.fn(),
+  pushRoute: vi.fn((path: string) => {
+    window.history.pushState({}, '', path);
+    return Promise.resolve();
+  }),
+  replaceRoute: vi.fn((path: string) => {
+    window.history.replaceState(
+      window.history.state,
+      '',
+      path + window.location.search + window.location.hash
+    );
+    return Promise.resolve();
+  }),
+  stateManager: new EventTarget(),
+}));
+
 import { apiFetch } from '../../../client/api.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
