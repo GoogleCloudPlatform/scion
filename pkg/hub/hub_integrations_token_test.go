@@ -370,7 +370,7 @@ func TestDiagnosticsLogStream_EndsWhenTokenStopsValidating(t *testing.T) {
 		t.Helper()
 		select {
 		case <-done:
-			t.Fatal("stream ended while the token still validates")
+			t.Fatal("stream ended while the credential still validates")
 		case <-time.After(10 * streamCredentialRecheckInterval):
 		}
 	}
