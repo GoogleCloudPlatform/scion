@@ -1094,6 +1094,53 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 	}
 }
 
+// stageChatAttachments returns the agent-visible file paths of a message's
+// attachments (same pattern as the Discord plugin — agents receive []string
+// of paths). The attachment store lives on the hub host, which agent
+// containers cannot read, so each file is staged into the project's
+// scratchpad shared dir first. Staging is best-effort: when it is
+// unavailable the hub-local path is sent, which host-process agents can
+// still read. Call it only after the message is authorized and stored.
+func (s *Server) stageChatAttachments(ctx context.Context, projectID string, attachmentRefs []AttachmentRef) []string {
+	if len(attachmentRefs) == 0 {
+		return nil
+	}
+	s.mu.RLock()
+	as := s.attachmentStore
+	wcs := s.webChatStore
+	s.mu.RUnlock()
+	localAS, ok := as.(*LocalDiskAttachmentStore)
+	if !ok {
+		return nil
+	}
+	var paths []string
+	staging := s.resolveAttachmentStaging(ctx, projectID)
+	for _, ref := range attachmentRefs {
+		// A file lives under the project it was uploaded to, which is not
+		// this message's project when it was uploaded from a DM — those
+		// uploads carry no project at all.
+		storedIn := projectID
+		if wcs != nil {
+			if meta, err := wcs.GetAttachment(ctx, ref.ID); err == nil && meta != nil {
+				storedIn = meta.ProjectID
+			}
+		}
+		hostPath := localAS.FilePath(storedIn, ref.ID, ref.Name)
+		agentPath := hostPath
+		if staging != nil {
+			staged, err := staging.stage(hostPath, ref.ID, ref.Name)
+			if err != nil {
+				s.messageLog.Error("Failed to stage attachment for agent",
+					"attachment", ref.ID, "error", err)
+			} else {
+				agentPath = staged
+			}
+		}
+		paths = append(paths, agentPath)
+	}
+	return paths
+}
+
 // resolveReplyTarget resolves the reply-to agent override (nc-reply-recipient)
 // for handleConversationSend. When replying to a message, the primary
 // recipient should be the original sender agent, not the thread default. The
@@ -1399,43 +1446,8 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 		}
 		refsJSON, _ := json.Marshal(attachmentRefs)
 		msg.Metadata[attachmentsMetadataKey] = string(refsJSON)
-
-		// For agent dispatch: pass container-visible file paths in Attachments
-		// (same pattern as Discord plugin — agents receive []string of paths).
-		// The attachment store lives on the hub host, which agent containers
-		// cannot read, so each file is staged into the project's scratchpad
-		// shared dir first. Staging is best-effort: when it is unavailable the
-		// hub-local path is sent, which host-process agents can still read.
-		s.mu.RLock()
-		as := s.attachmentStore
-		wcs := s.webChatStore
-		s.mu.RUnlock()
-		if localAS, ok := as.(*LocalDiskAttachmentStore); ok {
-			staging := s.resolveAttachmentStaging(ctx, projectID)
-			for _, ref := range attachmentRefs {
-				// A file lives under the project it was uploaded to, which is not
-				// this message's project when it was uploaded from a DM — those
-				// uploads carry no project at all.
-				storedIn := projectID
-				if wcs != nil {
-					if meta, err := wcs.GetAttachment(ctx, ref.ID); err == nil && meta != nil {
-						storedIn = meta.ProjectID
-					}
-				}
-				hostPath := localAS.FilePath(storedIn, ref.ID, ref.Name)
-				agentPath := hostPath
-				if staging != nil {
-					staged, err := staging.stage(hostPath, ref.ID, ref.Name)
-					if err != nil {
-						s.messageLog.Error("Failed to stage attachment for agent",
-							"attachment", ref.ID, "error", err)
-					} else {
-						agentPath = staged
-					}
-				}
-				msg.Attachments = append(msg.Attachments, agentPath)
-			}
-		}
+		// The files themselves are staged for the agent only once the
+		// message is authorized and stored (stageChatAttachments below).
 	}
 
 	// Phase 3 msg-authz: Check message authorization on the primary agent.
@@ -1670,6 +1682,11 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 		opts.OnPersisted(storeMsg.ID)
 	}
 	s.recordMessageArtifacts(ctx, storeMsg.ID, artifactRefs)
+
+	// Attachment files are copied to the agent's scratchpad only now: every
+	// check that can refuse the send (authorization, validation, wake,
+	// conversation resolution, persistence) has passed.
+	msg.Attachments = append(msg.Attachments, s.stageChatAttachments(ctx, projectID, attachmentRefs)...)
 
 	// The row was stored with the optimistic "dispatched" state, which the
 	// primary dispatch below confirms or replaces. If the function exits

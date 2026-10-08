@@ -21,6 +21,8 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -29,6 +31,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -471,4 +475,49 @@ func TestChatSend_TopicAttachmentFromOtherProjectNotAccepted(t *testing.T) {
 	ok := f.send(t, f.ua, f.topicA, map[string]interface{}{"content": "mine", "attachments": []string{ownFile}})
 	require.Equal(t, http.StatusCreated, ok.status, ok.body)
 	assert.Equal(t, before+1, f.threadMessageCount(t, f.topicA))
+}
+
+// enableScratchpad gives project A a scratchpad shared dir backed by a
+// directory on this host and returns the directory chat attachments are
+// staged into.
+func (f *refFixture) enableScratchpad(t *testing.T) string {
+	t.Helper()
+	ctx := context.Background()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	proj, err := f.st.GetProject(ctx, f.projA.ID)
+	require.NoError(t, err)
+	proj.SharedDirs = []api.SharedDir{{Name: attachmentSharedDirName}}
+	require.NoError(t, f.st.UpdateProject(ctx, proj))
+	sharedDir := config.SharedDirHostPath(home, proj.Slug, proj.ID, attachmentSharedDirName)
+	require.NoError(t, os.MkdirAll(sharedDir, 0o755))
+	staging := f.srv.resolveAttachmentStaging(ctx, proj.ID)
+	require.NotNil(t, staging, "staging must resolve for the test to mean anything")
+	return staging.hostDir()
+}
+
+func TestChatSend_RefusedSendStagesNoFile(t *testing.T) {
+	f := newRefFixture(t)
+	ctx := context.Background()
+	stagingDir := f.enableScratchpad(t)
+
+	// The topic's default agent accepts no messages.
+	sealed := &store.Agent{ID: tid("ref-agent-sealed"), ProjectID: f.projA.ID, Name: "sealed", Slug: "sealed",
+		Phase: "running", OwnerID: f.ua.ID, CreatedBy: f.ua.ID, MessageMode: store.MessageModeNone}
+	require.NoError(t, f.st.CreateAgent(ctx, sealed))
+	require.NoError(t, f.wcs.UpdateTopic(ctx, f.topicA, TopicUpdate{DefaultAgent: &sealed.Slug}))
+
+	file := f.attach(t, f.projA.ID, f.ua.ID, "a.txt")
+	got := f.send(t, f.ua, f.topicA, map[string]interface{}{"content": "see file", "attachments": []string{file}})
+	require.Equal(t, http.StatusForbidden, got.status, got.body)
+	assert.Contains(t, got.body, ErrCodeMessageDenied)
+	_, err := os.Stat(filepath.Join(stagingDir, file))
+	assert.True(t, os.IsNotExist(err), "a refused send must not stage its attachment (stat err: %v)", err)
+
+	// The same send to an agent that accepts it stages the file.
+	require.NoError(t, f.wcs.UpdateTopic(ctx, f.topicA, TopicUpdate{DefaultAgent: &f.aa.Slug}))
+	ok := f.send(t, f.ua, f.topicA, map[string]interface{}{"content": "see file", "attachments": []string{file}})
+	require.Equal(t, http.StatusCreated, ok.status, ok.body)
+	_, err = os.Stat(filepath.Join(stagingDir, file))
+	assert.NoError(t, err, "an accepted send stages its attachment")
 }
