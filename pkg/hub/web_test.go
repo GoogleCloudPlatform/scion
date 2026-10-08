@@ -418,6 +418,8 @@ func writeFingerprintFixture(t *testing.T, manifest string) string {
 		"assets/shoelace-B3-XBhED.js":              "// chunk",
 		"assets/project-detail-CeCkJL--.js":        "// chunk",
 		"assets/model-utils-UsxIS_8q.js":           "// chunk",
+		"assets/entry-AbCdEfGh.js":                 "// a hashed-looking entry",
+		"assets/font-Xy_z9-Ab.woff2":               "font",
 		"assets/shoelace-BZzytDYN.css":             "/* css */",
 		"assets/settings-AbCdEfGh.js":              "// not in the manifest",
 		"assets/chunk-abc12345.js":                 "// hex name",
@@ -440,7 +442,8 @@ const fingerprintManifest = `{
   "src/client/main.ts": {"file": "assets/main.js", "isEntry": true, "imports": ["_shoelace-B3-XBhED.js"]},
   "_shoelace-B3-XBhED.js": {"file": "assets/shoelace-B3-XBhED.js", "css": ["assets/shoelace-BZzytDYN.css"]},
   "src/components/pages/project-detail.ts": {"file": "assets/project-detail-CeCkJL--.js", "isDynamicEntry": true},
-  "_model-utils-UsxIS_8q.js": {"file": "assets/model-utils-UsxIS_8q.js"},
+  "_model-utils-UsxIS_8q.js": {"file": "assets/model-utils-UsxIS_8q.js", "assets": ["assets/font-Xy_z9-Ab.woff2"]},
+  "src/other-entry.ts": {"file": "assets/entry-AbCdEfGh.js", "isEntry": true},
   "_bad-1": {"file": "../outside-AbCdEfGh.js"},
   "_bad-2": {"file": "/assets/abs-AbCdEfGh.js"},
   "_bad-3": {"file": "https://cdn.example.com/x-AbCdEfGh.js"},
@@ -470,7 +473,9 @@ func TestStaticAssetFingerprintedCaching(t *testing.T) {
 		"/assets/model-utils-UsxIS_8q.js":           long,       // hash contains _
 		"/assets/shoelace-BZzytDYN.css":             long,       // css listed by a chunk
 		"/assets/chunk-abc12345.js":                 long,       // hex name, not in the manifest
+		"/assets/font-Xy_z9-Ab.woff2":               long,       // listed in a chunk's assets
 		"/assets/main.js":                           "no-cache", // the unhashed entry
+		"/assets/entry-AbCdEfGh.js":                 "no-cache", // an entry, even with a hash-like name
 		"/assets/settings-AbCdEfGh.js":              "no-cache", // looks hashed, not in the manifest
 		"/assets/shoelace-B3-XBhED.js.map":          "no-cache", // source map
 		"/favicon.ico":                              "no-cache", // public file
@@ -480,7 +485,7 @@ func TestStaticAssetFingerprintedCaching(t *testing.T) {
 
 	t.Run("disk", func(t *testing.T) {
 		ws := newTestWebServer(t, WebServerConfig{AssetsDir: dir})
-		assert.Len(t, ws.fingerprintedAssets, 4, "the four clean manifest paths, nothing else")
+		assert.Len(t, ws.fingerprintedAssets, 5, "the five clean, non-entry manifest paths, nothing else")
 		for p, cc := range want {
 			assert.Equal(t, cc, cacheControlOf(t, ws, p), p)
 		}
@@ -492,7 +497,7 @@ func TestStaticAssetFingerprintedCaching(t *testing.T) {
 		ws.assetsDisk = ""
 		ws.hasAssets = ws.detectWebAssets()
 		ws.fingerprintedAssets = ws.loadFingerprintedAssets()
-		assert.Len(t, ws.fingerprintedAssets, 4)
+		assert.Len(t, ws.fingerprintedAssets, 5)
 		for p, cc := range want {
 			assert.Equal(t, cc, cacheControlOf(t, ws, p), p)
 		}
@@ -510,10 +515,19 @@ func TestStaticAssetFingerprintedCaching(t *testing.T) {
 // no manifest, or one that does not parse, only hex names get the long
 // lifetime and Vite names stay no-cache.
 func TestStaticAssetFingerprintedCaching_NoUsableManifest(t *testing.T) {
-	for name, manifest := range map[string]string{"missing": "", "malformed": `{"src/client/main.ts": {"file": `} {
+	for name, manifest := range map[string]string{
+		"missing":       "",
+		"malformed":     `{"src/client/main.ts": {"file": `,
+		"empty":         `{}`,
+		"null":          `null`,
+		"type mismatch": `{"a": {"file": 1}, "b": {"file": "assets/shoelace-B3-XBhED.js"}}`,
+	} {
 		t.Run(name, func(t *testing.T) {
 			ws := newTestWebServer(t, WebServerConfig{AssetsDir: writeFingerprintFixture(t, manifest)})
-			assert.Nil(t, ws.fingerprintedAssets)
+			assert.Empty(t, ws.fingerprintedAssets)
+			if name == "missing" || name == "malformed" || name == "type mismatch" {
+				assert.Nil(t, ws.fingerprintedAssets, "no partial set")
+			}
 			assert.Equal(t, "public, max-age=86400", cacheControlOf(t, ws, "/assets/chunk-abc12345.js"))
 			assert.Equal(t, "no-cache", cacheControlOf(t, ws, "/assets/shoelace-B3-XBhED.js"))
 			assert.Equal(t, "no-cache", cacheControlOf(t, ws, "/assets/main.js"))

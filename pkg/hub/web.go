@@ -1086,8 +1086,10 @@ type viteManifestChunk struct {
 	IsEntry bool     `json:"isEntry"`
 }
 
-// fingerprintSegment matches a Vite content hash at the end of a file name:
-// name-<8 or more URL-safe base64 characters>.ext.
+// fingerprintSegment is a sanity check on the names the Vite manifest
+// lists: the name must end in -<8 or more URL-safe base64 characters>.ext.
+// It is not a strict hash match; the manifest is what says a file is
+// fingerprinted.
 var fingerprintSegment = regexp.MustCompile(`-[A-Za-z0-9_-]{8,}\.[A-Za-z0-9]+$`)
 
 // loadFingerprintedAssets reads the Vite build manifest from the asset
@@ -1119,7 +1121,7 @@ func (ws *WebServer) loadFingerprintedAssets() map[string]bool {
 		return nil
 	}
 	if err != nil {
-		ws.logger().Debug("No Vite build manifest; only hex-named assets get the long cache lifetime", "source", source)
+		ws.logger().Info("No Vite build manifest; only hex-named assets get the long cache lifetime", "source", source)
 		return nil
 	}
 	var manifest map[string]viteManifestChunk
