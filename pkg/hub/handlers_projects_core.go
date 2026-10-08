@@ -687,10 +687,18 @@ func (s *Server) ensureProjectGeneralTopic(ctx context.Context, project *store.P
 	}
 	topicID, created, err := wcs.EnsureGeneralTopic(ctx, project.ID, createdBy)
 	if err != nil {
-		s.projectsLogger().Warn("failed to create #general topic for project",
-			"project_id", project.ID, "error", err)
+		// Warn once per project per process; the lazy backfill retries on
+		// every open of an empty space, so later failures log at Debug.
+		if _, warned := s.generalTopicWarned.LoadOrStore(project.ID, struct{}{}); warned {
+			s.projectsLogger().Debug("failed to create #general topic for project",
+				"project_id", project.ID, "error", err)
+		} else {
+			s.projectsLogger().Warn("failed to create #general topic for project",
+				"project_id", project.ID, "error", err)
+		}
 		return
 	}
+	s.generalTopicWarned.Delete(project.ID)
 
 	// Only publish the created event when a new topic was actually inserted.
 	// EnsureGeneralTopic is idempotent (ON CONFLICT DO NOTHING), so

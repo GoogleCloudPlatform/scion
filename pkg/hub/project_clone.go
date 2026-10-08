@@ -414,18 +414,18 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 		}
 	}
 
-	// ── Step 14: Auto-link providers (best-effort) ───────────────────────
+	// ── Step 15: Auto-link providers (best-effort) ───────────────────────
 
 	s.autoLinkProviders(ctx, clone)
 
-	// ── Step 15: Ensure the #general chat topic (best-effort) ────────────
+	// ── Step 16: Ensure the #general chat topic (best-effort) ────────────
 	// Runs after every step that can fail and roll the clone back, so a
 	// rolled-back clone never leaves an orphaned topic behind. Skipped for
 	// template clones (asTemplate), which are not chat spaces.
 
 	s.ensureProjectGeneralTopic(ctx, clone)
 
-	// ── Step 16: Publish event (best-effort) ─────────────────────────────
+	// ── Step 17: Publish event (best-effort) ─────────────────────────────
 
 	s.events.PublishProjectCreated(ctx, clone)
 

@@ -15,9 +15,15 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"log/slog"
 	"net/http"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -244,4 +250,124 @@ func TestChatSpaces_ExcludesTemplates(t *testing.T) {
 	}
 	assert.True(t, ids[regular.ID], "regular project must be a space")
 	assert.False(t, ids[tmpl.ID], "template must not be a space")
+}
+
+// failingGeneralStore fails EnsureGeneralTopic and, when failRelist is set,
+// every ListTopics call after the first.
+type failingGeneralStore struct {
+	WebChatStore
+	failEnsure bool
+	failRelist bool
+	lists      atomic.Int32
+}
+
+func (f *failingGeneralStore) EnsureGeneralTopic(ctx context.Context, projectID, createdBy string) (string, bool, error) {
+	if f.failEnsure {
+		return "", false, errors.New("injected ensure failure")
+	}
+	return f.WebChatStore.EnsureGeneralTopic(ctx, projectID, createdBy)
+}
+
+func (f *failingGeneralStore) ListTopics(ctx context.Context, projectID string) ([]WebChatTopic, error) {
+	if f.lists.Add(1) > 1 && f.failRelist {
+		return nil, errors.New("injected list failure")
+	}
+	return f.WebChatStore.ListTopics(ctx, projectID)
+}
+
+func getThreadsExpectEmpty(t *testing.T, srv *Server, projectID string) {
+	t.Helper()
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/chat/spaces/"+projectID+"/threads", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp chatTopicListResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.NotNil(t, resp.Threads)
+	assert.Empty(t, resp.Threads)
+}
+
+func TestGeneralTopic_ListThreads_EnsureFailure_EmptyAndWarnsOnce(t *testing.T) {
+	srv, s, wcs := generalTopicServer(t)
+	ctx := context.Background()
+	srv.SetWebChatStore(&failingGeneralStore{WebChatStore: wcs, failEnsure: true})
+	var logBuf bytes.Buffer
+	srv.projectsLog = slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	p := &store.Project{ID: api.NewUUID(), Name: "Failing", Slug: "failing-ensure",
+		OwnerID: DevUserID, CreatedBy: DevUserID}
+	require.NoError(t, s.CreateProject(ctx, p))
+
+	for range 3 {
+		getThreadsExpectEmpty(t, srv, p.ID)
+	}
+	logs := logBuf.String()
+	assert.Equal(t, 1, strings.Count(logs, "level=WARN"), logs)
+	assert.Equal(t, 2, strings.Count(logs, "level=DEBUG"), logs)
+}
+
+func TestGeneralTopic_ListThreads_RelistFailure_ReturnsEmpty(t *testing.T) {
+	srv, s, wcs := generalTopicServer(t)
+	ctx := context.Background()
+	srv.SetWebChatStore(&failingGeneralStore{WebChatStore: wcs, failRelist: true})
+
+	p := &store.Project{ID: api.NewUUID(), Name: "Relist", Slug: "relist-fail",
+		OwnerID: DevUserID, CreatedBy: DevUserID}
+	require.NoError(t, s.CreateProject(ctx, p))
+
+	getThreadsExpectEmpty(t, srv, p.ID)
+	// The backfill itself still happened.
+	_, general := countGeneral(t, wcs, p.ID)
+	assert.Equal(t, 1, general)
+}
+
+// generalTopicEventSpy counts "created" chat topic events per project.
+type generalTopicEventSpy struct {
+	noopEventPublisher
+	mu      sync.Mutex
+	created map[string]int
+}
+
+func (e *generalTopicEventSpy) PublishChatTopicEvent(_ context.Context, projectID, action string, _ WebChatTopic) {
+	if action != "created" {
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.created[projectID]++
+}
+
+func TestGeneralTopic_ListThreads_ParallelFirstOpen(t *testing.T) {
+	srv, s, wcs := generalTopicServer(t)
+	ctx := context.Background()
+	spy := &generalTopicEventSpy{created: map[string]int{}}
+	srv.SetEventPublisher(spy)
+
+	p := &store.Project{ID: api.NewUUID(), Name: "Parallel", Slug: "parallel-open",
+		OwnerID: DevUserID, CreatedBy: DevUserID}
+	require.NoError(t, s.CreateProject(ctx, p))
+
+	const n = 8
+	codes := make([]int, n)
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			rec := doRequest(t, srv, http.MethodGet, "/api/v1/chat/spaces/"+p.ID+"/threads", nil)
+			codes[i] = rec.Code
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	for i, c := range codes {
+		assert.Equal(t, http.StatusOK, c, "request %d", i)
+	}
+	total, general := countGeneral(t, wcs, p.ID)
+	assert.Equal(t, 1, total)
+	assert.Equal(t, 1, general)
+	spy.mu.Lock()
+	defer spy.mu.Unlock()
+	assert.Equal(t, 1, spy.created[p.ID])
 }

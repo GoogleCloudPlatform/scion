@@ -1380,6 +1380,11 @@ type RemoteAgentInfo struct {
 
 // Server is the Hub API HTTP server.
 type Server struct {
+	// generalTopicWarned records project IDs whose #general ensure already
+	// logged a Warn, so a space that keeps failing (it is retried on every
+	// open) logs later failures at Debug. Cleared on success.
+	generalTopicWarned sync.Map
+
 	config ServerConfig
 	// startupHubName is the name resolved at startup (ServerConfig.HubName,
 	// from LoadGlobalConfig(serverConfigPath), else the hostname).

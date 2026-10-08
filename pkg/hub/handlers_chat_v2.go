@@ -454,11 +454,15 @@ func (s *Server) handleListThreads(w http.ResponseWriter, r *http.Request, proje
 	// The last thread of a space cannot be deleted, so zero threads never
 	// means a user removed them, and a #general a user deleted while other
 	// threads remain is not resurrected. Templates are not chat spaces.
+	// Best-effort: if the re-list fails, answer with the original (empty)
+	// list rather than failing the open; the next open retries.
 	if len(topics) == 0 && !project.IsTemplate() {
 		s.ensureProjectGeneralTopic(r.Context(), project)
-		if topics, err = wcs.ListTopics(r.Context(), projectID); err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list threads", nil)
-			return
+		if relisted, relistErr := wcs.ListTopics(r.Context(), projectID); relistErr != nil {
+			slog.Debug("chat threads: re-list after #general backfill failed",
+				"project_id", projectID, "error", relistErr)
+		} else {
+			topics = relisted
 		}
 	}
 
