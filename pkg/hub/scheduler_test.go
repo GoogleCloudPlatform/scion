@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -1699,7 +1700,11 @@ func TestDispatchAgentEventHandler_ErroredRowAgentCreatorFallback(t *testing.T) 
 // unchanged.
 func TestDispatchAgentEventHandler_ErroredRowRecipientLookupErrorLogged(t *testing.T) {
 	f := newBlockedFireFixture(t, "user-owner")
-	logs := authzHelperCaptureLogs(t)
+	// Local capture: authzHelperCaptureLogs is behind !no_sqlite.
+	logs := &bytes.Buffer{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
 	f.ms.getUserErr = errors.New("store unavailable")
 	if err := f.fire(); err == nil || !strings.Contains(err.Error(), "delete the agent to resume this schedule") {
 		t.Fatalf("error = %v", err)
