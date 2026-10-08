@@ -2805,6 +2805,22 @@ export class ScionPageAdminServerConfig extends LitElement {
   }
 
   /**
+   * Renders the env-override badge for a map-valued section (runtimes,
+   * profiles) whose env_overrides entries are leaf keys under the section
+   * (e.g. profiles.local.runtime from SCION_SERVER_PROFILES_LOCAL_RUNTIME).
+   */
+  private renderEnvBadgeUnder(prefix: string): typeof nothing | ReturnType<typeof html> {
+    const overridden = this.envOverrides.some((k) => k === prefix || k.startsWith(`${prefix}.`));
+    if (!overridden) return nothing;
+    return html`
+      <span class="env-badge">
+        <sl-icon name="exclamation-triangle"></sl-icon>
+        Overridden by environment on this node
+      </span>
+    `;
+  }
+
+  /**
    * Renders per-section origin caption. Seeded sections show a tracking message;
    * managed sections show source/revision/updated_by/updated_at metadata.
    */
@@ -4329,6 +4345,7 @@ export class ScionPageAdminServerConfig extends LitElement {
       <div class="section">
         ${this.renderSectionHeader('Runtimes', 'runtimes')} ${this.renderSectionMeta('runtimes')}
         ${runtimeReadOnly ? html`${this.renderReadOnlyBadge(runtimeReadOnly)}` : nothing}
+        ${this.renderEnvBadgeUnder('runtimes')}
         ${runtimeNames.length === 0
           ? html`<p class="hint">No runtimes configured.</p>`
           : runtimeNames.map((name) => this.renderRuntimeEntry(name, !!runtimeReadOnly))}
@@ -4765,6 +4782,7 @@ export class ScionPageAdminServerConfig extends LitElement {
       <div class="section">
         ${this.renderSectionHeader('Profiles', 'profiles')} ${this.renderSectionMeta('profiles')}
         ${profileReadOnly ? html`${this.renderReadOnlyBadge(profileReadOnly)}` : nothing}
+        ${this.renderEnvBadgeUnder('profiles')}
         ${profileNames.length === 0
           ? html`<p class="hint">No profiles configured.</p>`
           : profileNames.map((name) =>
@@ -5906,7 +5924,7 @@ export class ScionPageAdminServerConfig extends LitElement {
         <div class="form-grid">
           <div class="form-field">
             <label>IAM Check Mode</label>
-            <sl-select
+            ${this.renderEnvBadge('server.hub.gcp_iam_check_mode')}<sl-select
               value=${this.hubGcpIamCheckMode}
               @sl-change=${(e: Event) => {
                 this.hubGcpIamCheckMode = (e.target as HTMLSelectElement).value;
@@ -5923,7 +5941,7 @@ export class ScionPageAdminServerConfig extends LitElement {
           </div>
           <div class="form-field">
             <label>Deny Policy Fallback</label>
-            <sl-select
+            ${this.renderEnvBadge('server.hub.gcp_iam_deny_unknown_policy')}<sl-select
               value=${this.hubGcpIamDenyUnknownPolicy}
               @sl-change=${(e: Event) => {
                 this.hubGcpIamDenyUnknownPolicy = (e.target as HTMLSelectElement).value;

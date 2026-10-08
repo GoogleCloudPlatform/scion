@@ -1856,6 +1856,55 @@ describe('scion-page-admin-server-config', () => {
     });
   });
 
+  // ── Per-field env badges on map sections and the GCP IAM tab (ptone/scion#389) ──
+
+  describe('env badges on runtimes, profiles and GCP IAM fields', () => {
+    function envBadgeCount(el: HTMLElement): number {
+      return queryAll(el, '.env-badge').length;
+    }
+
+    it('renders no env badge when nothing is overridden', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig({ settings_tier: 'db' })));
+      expect(envBadgeCount(element)).toBe(0);
+    });
+
+    it('badges the runtimes and profiles sections from leaf env keys under them', async () => {
+      element = await createComponent(
+        createFetchHandler(
+          makeBaseConfig({
+            settings_tier: 'db',
+            env_overrides: ['runtimes.docker.host', 'profiles.local.runtime'],
+          })
+        )
+      );
+      expect(envBadgeCount(element)).toBe(2);
+    });
+
+    it('does not badge a section from a key that only shares its name prefix', async () => {
+      element = await createComponent(
+        createFetchHandler(
+          makeBaseConfig({ settings_tier: 'db', env_overrides: ['profilesx.local.runtime'] })
+        )
+      );
+      expect(envBadgeCount(element)).toBe(0);
+    });
+
+    it('badges the GCP IAM check mode and deny policy fields', async () => {
+      element = await createComponent(
+        createFetchHandler(
+          makeBaseConfig({
+            env_overrides: [
+              'server.hub.gcp_iam_check_mode',
+              'server.hub.gcp_iam_deny_unknown_policy',
+            ],
+          })
+        )
+      );
+      const panel = query(element, 'sl-tab-panel[name="gcp-identity"]');
+      expect(panel?.querySelectorAll('.env-badge').length).toBe(2);
+    });
+  });
+
   // ── Experiments tab (ptone/scion#2217) ──
 
   describe('Experiments tab', () => {
