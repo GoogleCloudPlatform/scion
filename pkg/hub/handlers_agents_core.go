@@ -2580,7 +2580,7 @@ func (s *Server) createAgentInProject(
 	// broker accepts the create for asynchronous launch; that response is
 	// written promptly, so the longer deadline is harmless there.
 	if s.GetDispatcher() != nil {
-		extendWriteDeadlineForSyncDispatch(r.Context(), w, s.config.WriteTimeout)
+		extendWriteDeadlineForSyncDispatch(ctx, w, s.config.WriteTimeout)
 	}
 	// acceptedLaunch is set when the broker accepted the create for
 	// asynchronous launch; the launch then reports back to the hub, which
