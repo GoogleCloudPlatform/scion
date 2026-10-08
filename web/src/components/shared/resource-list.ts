@@ -35,6 +35,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { apiFetch, apiFetchAllPages, extractApiError } from '../../client/api.js';
 import { showToast } from '../../utils/toast.js';
 import { navigateTo } from '../../client/navigation.js';
+import { isTemplateSourceRefreshable } from '../../shared/source-url.js';
 
 export type ResourceKind = 'template' | 'harness-config';
 
@@ -573,9 +574,19 @@ export class ScionResourceList extends LitElement {
     }
   }
 
+  /**
+   * Whether an item can be refreshed from its source. Templates need a GitHub
+   * source URL (built-in templates and templates without a source are not
+   * refreshable); harness configs need any stored source URL.
+   */
+  private isRefreshable(item: ResourceItem): boolean {
+    if (this.kind === 'template') return isTemplateSourceRefreshable(item.sourceUrl);
+    return !!item.sourceUrl;
+  }
+
   private async _handleRefreshAll(): Promise<void> {
     if (this._refreshAllRunning) return;
-    const refreshable = this.items.filter((item) => item.sourceUrl);
+    const refreshable = this.items.filter((item) => this.isRefreshable(item));
     if (refreshable.length === 0) return;
 
     // Clear any pending status-clear timer from a previous run
@@ -624,9 +635,10 @@ export class ScionResourceList extends LitElement {
     // Show summary toast
     const succeeded = results.filter((r) => r.status === 'fulfilled' && r.value.success).length;
     const failed = refreshable.length - succeeded;
+    const noun = this.kindLabel;
     if (failed === 0) {
       showToast(
-        `Refreshed ${succeeded} harness config${succeeded !== 1 ? 's' : ''} successfully`,
+        `Refreshed ${succeeded} ${noun}${succeeded !== 1 ? 's' : ''} successfully`,
         'success'
       );
     } else {
@@ -656,8 +668,7 @@ export class ScionResourceList extends LitElement {
 
     const hasActions = this.canClone || this.canDelete || this.canRename;
 
-    const showRefreshAll =
-      this.kind === 'harness-config' && this.items.some((item) => item.sourceUrl);
+    const showRefreshAll = this.items.some((item) => this.isRefreshable(item));
 
     const hasListHeader =
       (this.cloneFromGlobal && this.canClone) || showRefreshAll || this.canCreate;

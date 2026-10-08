@@ -736,6 +736,8 @@ export interface Template {
   scope: string;
   scopeId?: string;
   contentHash?: string;
+  /** URL the template was imported from, when it was imported. */
+  sourceUrl?: string;
   files?: TemplateFileInfo[];
   config?: TemplateConfig;
   /** Creation and last-update times, as the hub sends them. */
