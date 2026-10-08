@@ -185,6 +185,7 @@ func TestProvisionCmd_Clone_Idempotent(t *testing.T) {
 	t.Setenv("SCION_CLONE_BRANCH", "main")
 	t.Setenv("SCION_WORKSPACE_MODE", "")
 	t.Setenv("SCION_PROJECT_ID", "test-proj")
+	t.Setenv(provision.GitTokenEnv, "") // no ambient git token
 
 	if err := runProvision(context.Background()); err != nil {
 		t.Fatalf("idempotent provision (sentinel exists) should succeed, got: %v", err)
@@ -222,6 +223,7 @@ func TestProvisionCmd_SharedDirPaths_ParsedAndProvisioned(t *testing.T) {
 	t.Setenv("SCION_CLONE_URL", "")
 	t.Setenv("SCION_WORKSPACE_MODE", "")
 	t.Setenv("SCION_PROJECT_ID", "test-proj-shared-dirs")
+	t.Setenv(provision.GitTokenEnv, "") // no ambient git token
 	t.Setenv("SCION_SHARED_DIR_PATHS", "scratchpad="+sharedRootA+",other-scratchpad="+sharedRootB)
 
 	if err := runProvision(context.Background()); err != nil {
@@ -261,6 +263,7 @@ func TestProvisionCmd_Clone_NoURL(t *testing.T) {
 	t.Setenv("SCION_CLONE_BRANCH", "")
 	t.Setenv("SCION_WORKSPACE_MODE", "")
 	t.Setenv("SCION_PROJECT_ID", "test-proj-no-url")
+	t.Setenv(provision.GitTokenEnv, "") // no ambient git token
 
 	if err := runProvision(context.Background()); err != nil {
 		t.Fatalf("provision without clone URL should succeed (non-git project), got: %v", err)
@@ -286,6 +289,7 @@ func runProvisionWithFailingChown(t *testing.T, bestEffortValue *string) (error,
 	t.Setenv("SCION_SHARED_DIR_PATHS", "")
 	t.Setenv("SCION_WORKSPACE_MODE", "")
 	t.Setenv("SCION_PROJECT_ID", "proj-chown")
+	t.Setenv(provision.GitTokenEnv, "") // no ambient git token
 	if bestEffortValue != nil {
 		t.Setenv(provision.ChownBestEffortEnv, *bestEffortValue)
 	} else {
@@ -401,6 +405,7 @@ func TestRunProvision_RejectsInvalidOwnerBeforeChanges(t *testing.T) {
 			t.Setenv("SCION_WORKSPACE_MODE", "")
 			t.Setenv("SCION_PROVISION_STATE_DIR", "")
 			t.Setenv("SCION_PROJECT_ID", "proj-owner-check")
+			t.Setenv(provision.GitTokenEnv, "") // no ambient git token
 
 			oldWorkspace, oldMode, oldUID, oldGID := provisionWorkspace, provisionMode, provisionUID, provisionGID
 			t.Cleanup(func() {

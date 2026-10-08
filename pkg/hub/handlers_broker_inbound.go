@@ -219,6 +219,17 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// A held agent (ptone/scion#3433) is refused like a suspended one,
+	// whatever its phase; a lookup fault refuses.
+	if held, holdErr := s.agentHeld(r.Context(), agent.ID); holdErr != nil {
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "could not verify the agent's status", nil)
+		return
+	} else if held {
+		writeError(w, http.StatusConflict, ErrCodeAgentNotRunning,
+			fmt.Sprintf("Agent %q is suspended.", agent.Slug), nil)
+		return
+	}
+
 	// Reject messages to non-running agents.
 	if phase := state.Phase(agent.Phase); phase != state.PhaseRunning {
 		var msg string
