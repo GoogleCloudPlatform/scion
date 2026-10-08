@@ -244,7 +244,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				}
 				log.Debug("Auth check",
 					slog.String("method", r.Method),
-					slog.String("path", logging.RedactPath(r.URL.Path)),
+					slog.String("path", logging.RequestPath(r)),
 					slog.Bool("has_auth", hasAuth),
 					slog.String("auth_prefix", authPrefix),
 				)
@@ -253,7 +253,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 			// Skip auth for unauthenticated endpoints (health checks, CLI OAuth)
 			if isUnauthenticatedEndpoint(r.URL.Path) {
 				if cfg.Debug {
-					log.Debug("Skipping auth for unauthenticated endpoint", "path", logging.RedactPath(r.URL.Path))
+					log.Debug("Skipping auth for unauthenticated endpoint", "path", logging.RequestPath(r))
 				}
 				serveAfterAuth(w, next, r)
 				return
@@ -386,7 +386,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				if !brokerAuthActive(cfg.BrokerAuthSvc) {
 					log.Warn("Rejecting broker-authenticated request: broker authentication is not available",
 						slog.String("broker_id", brokerID),
-						slog.String("path", logging.RedactPath(r.URL.Path)),
+						slog.String("path", logging.RequestPath(r)),
 					)
 					writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
 						"broker authentication is not enabled", nil)

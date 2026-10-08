@@ -157,7 +157,7 @@ $ scion message @reviewer "Design ready for review." --artifact scion://artifact
 
 ## API
 
-All routes are under `/api/v1/artifacts` and use the hub's usual authentication (session, user access token or agent token). Errors use the hub's JSON error envelope.
+All routes are under `/api/v1/artifacts` and use the hub's usual authentication (session, user access token or agent token). Errors use the hub's JSON error envelope. The hub's request logs record every artifact request path as `/api/v1/artifacts/REDACTED` (paths that contain the word `artifacts` anywhere are treated the same way), and artifact requests are not traced, because some artifact URLs carry share-link tokens or view capabilities.
 
 | Method and path | Purpose |
 | :--- | :--- |
