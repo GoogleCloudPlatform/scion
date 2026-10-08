@@ -26,18 +26,26 @@ import (
 	"testing"
 )
 
-// Request path uses in the hub and in this package are classified from the
-// syntax tree. Every read of a request URL's path (X.URL.Path,
-// X.URL.RawPath, X.URL.EscapedPath(), X.URL.String(), X.URL.RequestURI(),
-// X.RequestURI) and every use of X.URL as a whole value must be listed in
-// requestPathSites, per file and function with its exact count and a
-// reason, so a path copied into a struct field (or anywhere else) is a
-// classified use: a new copy fails as unclassified or over the count.
-// Logging a request path goes through RequestPath(r), which reads r itself
-// and so is not such a use. Independently of the list, no log call may
-// receive a path read, or a local variable that holds one (through
-// assignments and path-keeping transforms such as strings.TrimPrefix),
-// however it is spelled or split over lines.
+// Request path uses in the hub, the artifact service and this package are
+// classified from the syntax tree. Every read of a request URL's path
+// (X.URL.Path, X.URL.RawPath, X.URL.EscapedPath(), X.URL.String(),
+// X.URL.RequestURI(), X.RequestURI) and every use of X.URL as a whole value
+// must be listed in requestPathSites, per file and function with its exact
+// count and a reason, so a path copied anywhere is a classified use: a new
+// copy fails as unclassified or over the count. Logging a request path goes
+// through RequestPath(r), which reads r itself and so is not such a use.
+// Independently of the list, no log call may receive a path read, a local
+// variable that holds one (through assignments, indexing, conversions and
+// calls, except the id extractors in idExtractors), a struct field listed in
+// requestPathFields, or a whole *http.Request.
+//
+// The scan is syntactic and intraprocedural. It does not follow a path
+// passed into a helper's parameters and logged there, into a variable
+// named err or ok (taken to be a call's error or flag result), values stored in a
+// context or a map (index assignment), span attributes, or fmt.Fprint* to
+// writers that are not log calls; it resolves the types of locals only from
+// parameters, receivers, composite literals and var declarations. Code
+// review covers those.
 
 // requestPathSite is one allowed (file, function, kind) with its count.
 type requestPathSite struct {
@@ -47,6 +55,8 @@ type requestPathSite struct {
 }
 
 var requestPathSites = []requestPathSite{
+	{"service.go", "Service.ServeHTTP", "URL.EscapedPath", 1, "routing: the artifact service splits the escaped path into route segments"},
+	{"read.go", "serveFile", "URL(bare)", 1, "not a request URL: the signed object-store URL a file read redirects to"},
 	{"admin_allow_list.go", "Server.handleAdminAllowListByEmail", "URL.Path", 1, "routing: extracts ids and sub-routes"},
 	{"admin_invites.go", "Server.handleAdminInviteByID", "URL.Path", 1, "routing: extracts ids and sub-routes"},
 	{"admin_maintenance.go", "Server.handleAdminMaintenanceMigrations", "URL.Path", 1, "routing: extracts ids and sub-routes"},
@@ -140,10 +150,12 @@ var requestPathSites = []requestPathSite{
 var requestPathSinks = []requestPathSite{
 	{"admin_settings.go", "Server.handleAdminServerConfigSectionReset", "sink", 2,
 		"logs the segment after the fixed prefix /api/v1/admin/server-config/sections/ (the settings section name); the handler is mounted only on that admin prefix, so artifact share-link and view URLs, the only paths that carry a token or capability, never reach it"},
+	{"admin_allow_list.go", "Server.handleAdminAllowListByEmail", "sink", 1,
+		"logs the email after the fixed prefix /api/v1/admin/allow-list/; the handler is mounted only on that admin prefix, so artifact share-link and view URLs never reach it"},
 	{"web.go", "WebServer.handleOAuthLogin", "sink", 2,
-		"logs the segment after the fixed prefix /auth/login/ (the OAuth provider name, checked against the configured providers); the handler is mounted only on that web prefix, so artifact share-link and view URLs never reach it"},
-	{"web.go", "WebServer.handleOAuthCallback", "sink", 3,
-		"logs the segment after the fixed prefix /auth/callback/ (the OAuth provider name); the handler is mounted only on that web prefix, so artifact share-link and view URLs never reach it"},
+		"logs the segment after the fixed prefix /auth/login/ (the OAuth provider name, checked against the configured providers) and values derived from it; the handler is mounted only on that web prefix, so artifact share-link and view URLs never reach it"},
+	{"web.go", "WebServer.handleOAuthCallback", "sink", 12,
+		"logs the segment after the fixed prefix /auth/callback/ (the OAuth provider name, checked by IsKnownOAuthProvider first) and the user info the provider returns for it; the handler is mounted only on that web prefix, so artifact share-link and view URLs never reach it"},
 }
 
 // requestPathFields are the struct fields ("Type.field") that are given a
@@ -189,12 +201,27 @@ var (
 		"Log": true, "LogAttrs": true, "With": true, "Printf": true, "Println": true, "Print": true,
 	}
 	logAttrFuncs = map[string]bool{"String": true, "Any": true, "Group": true, "Attr": true}
-	// pathTransforms keep a path a path.
-	pathTransforms = map[string]bool{
-		"TrimPrefix": true, "TrimSuffix": true, "Trim": true, "TrimLeft": true, "TrimRight": true,
-		"ToLower": true, "Clean": true, "Join": true, "Sprintf": true, "Sprint": true,
+	// idExtractors return one route segment (an id) of the path they are
+	// given; their result is not the path.
+	idExtractors = map[string]bool{
+		"extractID": true, "extractAction": true, "extractIDsFromPath": true, "parseInstallationIDFromPath": true,
+		"extractAgentIDFromPTYPath": true, "runScopeRouteClass": true,
+		"HasPrefix": true, "HasSuffix": true, "Contains": true, "EqualFold": true, "Count": true, "Index": true, "len": true,
 	}
 )
+
+// calleeName is the name a call's function is spelled with.
+func calleeName(fun ast.Expr) string {
+	switch f := fun.(type) {
+	case *ast.Ident:
+		return f.Name
+	case *ast.SelectorExpr:
+		return f.Sel.Name
+	case *ast.IndexExpr:
+		return calleeName(f.X)
+	}
+	return ""
+}
 
 // isLogCall reports whether c is a logging call.
 func isLogCall(c *ast.CallExpr) bool {
@@ -362,19 +389,11 @@ func scanSources(t *testing.T, files []string) siteScan {
 					}
 				}
 			case *ast.CallExpr:
-				// Only path-keeping transforms carry a path through a call;
-				// the result of any other call (an id parsed from the path)
-				// is not the path.
-				switch f := x.Fun.(type) {
-				case *ast.SelectorExpr:
-					if _, isSrc := pathSource(f, x); isSrc {
-						found = true
-						return false
-					}
-					if !pathTransforms[f.Sel.Name] {
-						return false
-					}
-				default:
+				// A call carries the path in its arguments into its result
+				// (conversions, strings.Split(...)[i], fmt.Sprintf,
+				// fmt.Errorf, ...), except the id extractors, whose result
+				// is one route segment.
+				if idExtractors[calleeName(x.Fun)] {
 					return false
 				}
 			}
@@ -440,7 +459,9 @@ func scanSources(t *testing.T, files []string) siteScan {
 					case *ast.AssignStmt:
 						for i, lhs := range x.Lhs {
 							id, ok := lhs.(*ast.Ident)
-							if !ok {
+							// An error or ok result of a call is not the path
+							// its arguments carried.
+							if !ok || id.Name == "err" || id.Name == "ok" || id.Name == "_" {
 								continue
 							}
 							rhs := x.Rhs[min(i, len(x.Rhs)-1)]
@@ -464,6 +485,12 @@ func scanSources(t *testing.T, files []string) siteScan {
 					return true
 				}
 				for _, a := range c.Args {
+					// A whole request passed to a log call prints its URL.
+					if id, ok := a.(*ast.Ident); ok && curTypes[id.Name] == "Request" {
+						scan.sinks = append(scan.sinks, fmt.Sprintf("%s:%d (%s)", p.name, fset.Position(c.Pos()).Line, fn))
+						scan.sinkCount[p.name+"\t"+fn]++
+						break
+					}
 					if containsPath(a, tainted) {
 						scan.sinks = append(scan.sinks, fmt.Sprintf("%s:%d (%s)", p.name, fset.Position(c.Pos()).Line, fn))
 						scan.sinkCount[p.name+"\t"+fn]++
@@ -498,7 +525,7 @@ func goFiles(t *testing.T, dirs ...string) []string {
 // is classified, and no log call receives a request path except through
 // RequestPath.
 func TestRequestPathSites(t *testing.T) {
-	files := goFiles(t, ".", "../../hub")
+	files := goFiles(t, ".", "../../hub", "../../artifacts")
 	if len(files) < 50 {
 		t.Fatalf("scanned only %d files; is the hub package where this test expects it?", len(files))
 	}
@@ -565,6 +592,7 @@ func TestRequestPathSitesCatchIndirection(t *testing.T) {
 	src := `package x
 
 import (
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -599,11 +627,32 @@ func viaAttr(r *http.Request) {
 }
 
 func clean(r *http.Request) {
-	id := extract(r.URL.Path)
+	id := extractID(r.URL.Path)
 	slog.Info("x", "id", id)
 }
 
-func extract(string) string { return "" }
+func extractID(string) string { return "" }
+
+func viaErrorf(r *http.Request) {
+	err := fmt.Errorf("bad %s", r.URL.Path)
+	slog.Info("x", "detail", err.Error())
+	e2 := fmt.Errorf("bad %s", r.URL.Path)
+	slog.Info("x", "detail", e2)
+}
+
+func viaSplit(r *http.Request) {
+	seg := strings.Split(r.URL.EscapedPath(), "/")[3]
+	slog.Info("x", "seg", seg)
+}
+
+func viaConversion(r *http.Request) {
+	b := []byte(r.URL.Path)
+	slog.Info("x", "path", string(b))
+}
+
+func viaRequest(r *http.Request) {
+	slog.Info("x", "req", r)
+}
 `
 	name := filepath.Join(dir, "x.go")
 	if err := os.WriteFile(name, []byte(src), 0o644); err != nil {
@@ -614,7 +663,7 @@ func extract(string) string { return "" }
 	for _, s := range scan.sinks {
 		got[s[strings.Index(s, "(")+1:len(s)-1]] = true
 	}
-	for _, fn := range []string{"viaVar", "viaTransform", "split", "viaAttr"} {
+	for _, fn := range []string{"viaVar", "viaTransform", "split", "viaAttr", "viaErrorf", "viaSplit", "viaConversion", "viaRequest"} {
 		if !got[fn] {
 			t.Errorf("sink in %s not caught (sinks %v)", fn, scan.sinks)
 		}
