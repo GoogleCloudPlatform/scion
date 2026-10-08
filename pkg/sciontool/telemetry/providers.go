@@ -21,6 +21,8 @@ import (
 	"go.opentelemetry.io/otel/sdk/resource"
 	"go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/encoding"
 )
 
 // Providers holds SDK TracerProvider, LoggerProvider, and MeterProvider for OTel export.
@@ -100,11 +102,39 @@ func NewHookProviders(ctx context.Context, config *Config) (*Providers, error) {
 	})
 }
 
+// LoopbackExportTimeout bounds a single OTLP export from the long-lived and
+// non-hook loopback providers. It equals the OTLP default, but it is set
+// explicitly so OTEL_EXPORTER_OTLP_*TIMEOUT in sciontool's environment cannot
+// change it (ptone/scion#2992).
+const LoopbackExportTimeout = 10 * time.Second
+
 // loopbackExportBounds overrides the OTLP exporter timeout and retry
-// behaviour. The zero value keeps the OTLP defaults.
+// behaviour. The zero value keeps LoopbackExportTimeout and the OTLP retry
+// default.
 type loopbackExportBounds struct {
 	timeout      time.Duration
 	disableRetry bool
+}
+
+func (b loopbackExportBounds) exportTimeout() time.Duration {
+	if b.timeout > 0 {
+		return b.timeout
+	}
+	return LoopbackExportTimeout
+}
+
+// loopbackCompressionDialOption sends every loopback export uncompressed.
+//
+// The OTLP exporters read OTEL_EXPORTER_OTLP_*COMPRESSION from the
+// environment. The trace and metric exporters only accept "gzip" through
+// WithCompressor and report any other value to the OTel error handler, so
+// there is no clean option for "no compression". The exporter applies gzip
+// as a default call option; a per-call option appended here is applied after
+// the defaults and wins.
+func loopbackCompressionDialOption() grpc.DialOption {
+	return grpc.WithChainUnaryInterceptor(func(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+		return invoker(ctx, method, req, reply, cc, append(opts, grpc.UseCompressor(encoding.Identity))...)
+	})
 }
 
 // buildResource creates the OTel resource with service name and agent identifiers.
@@ -155,16 +185,24 @@ func buildResource(ctx context.Context) (*resource.Resource, error) {
 }
 
 // newLoopbackProviders creates standard OTLP gRPC exporters fixed to loopback.
+//
+// Every exporter setting that the OTLP SDK would otherwise read from
+// OTEL_EXPORTER_OTLP_* in sciontool's environment is pinned here: endpoint,
+// transport security, resource (ptone/scion#2249), headers, compression and
+// timeout (ptone/scion#2992). A harness's OTEL environment is meant for the
+// harness, not for sciontool's loopback export.
 func newLoopbackProviders(ctx context.Context, config *Config, res *resource.Resource, batch bool, bounds loopbackExportBounds) (*Providers, error) {
 	endpoint := loopbackEndpoint(config)
 	pinResource := loopbackResourceDialOption(res)
+	pinCompression := loopbackCompressionDialOption()
+	noHeaders := map[string]string{}
+	timeout := bounds.exportTimeout()
 	traceOpts := []otlptracegrpc.Option{
 		otlptracegrpc.WithEndpoint(endpoint),
 		otlptracegrpc.WithInsecure(),
-		otlptracegrpc.WithDialOption(pinResource),
-	}
-	if bounds.timeout > 0 {
-		traceOpts = append(traceOpts, otlptracegrpc.WithTimeout(bounds.timeout))
+		otlptracegrpc.WithDialOption(pinResource, pinCompression),
+		otlptracegrpc.WithHeaders(noHeaders),
+		otlptracegrpc.WithTimeout(timeout),
 	}
 	if bounds.disableRetry {
 		traceOpts = append(traceOpts, otlptracegrpc.WithRetry(otlptracegrpc.RetryConfig{Enabled: false}))
@@ -178,10 +216,9 @@ func newLoopbackProviders(ctx context.Context, config *Config, res *resource.Res
 	logOpts := []otlploggrpc.Option{
 		otlploggrpc.WithEndpoint(endpoint),
 		otlploggrpc.WithInsecure(),
-		otlploggrpc.WithDialOption(pinResource),
-	}
-	if bounds.timeout > 0 {
-		logOpts = append(logOpts, otlploggrpc.WithTimeout(bounds.timeout))
+		otlploggrpc.WithDialOption(pinResource, pinCompression),
+		otlploggrpc.WithHeaders(noHeaders),
+		otlploggrpc.WithTimeout(timeout),
 	}
 	if bounds.disableRetry {
 		logOpts = append(logOpts, otlploggrpc.WithRetry(otlploggrpc.RetryConfig{Enabled: false}))
@@ -196,10 +233,9 @@ func newLoopbackProviders(ctx context.Context, config *Config, res *resource.Res
 	metricOpts := []otlpmetricgrpc.Option{
 		otlpmetricgrpc.WithEndpoint(endpoint),
 		otlpmetricgrpc.WithInsecure(),
-		otlpmetricgrpc.WithDialOption(pinResource),
-	}
-	if bounds.timeout > 0 {
-		metricOpts = append(metricOpts, otlpmetricgrpc.WithTimeout(bounds.timeout))
+		otlpmetricgrpc.WithDialOption(pinResource, pinCompression),
+		otlpmetricgrpc.WithHeaders(noHeaders),
+		otlpmetricgrpc.WithTimeout(timeout),
 	}
 	if bounds.disableRetry {
 		metricOpts = append(metricOpts, otlpmetricgrpc.WithRetry(otlpmetricgrpc.RetryConfig{Enabled: false}))
