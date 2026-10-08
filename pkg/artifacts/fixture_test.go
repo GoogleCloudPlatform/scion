@@ -56,6 +56,14 @@ type fakeHost struct {
 	denied map[string]bool
 	// memberErr, when set, makes MemberScopes fail.
 	memberErr error
+	// crossScope is the answer of CrossScopeSharingAllowed.
+	crossScope bool
+}
+
+func (h *fakeHost) CrossScopeSharingAllowed(context.Context) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.crossScope
 }
 
 func newFakeHost() *fakeHost {

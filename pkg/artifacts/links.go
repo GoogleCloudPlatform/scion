@@ -160,17 +160,17 @@ func (l Limits) linkLifetimes() (def, maxTTL time.Duration) {
 	return min(def, maxTTL), maxTTL
 }
 
-// canManageLinks reports whether the caller may create, list and revoke
-// the share links of a, an artifact it can read (so a is live and
-// unexpired: readableArtifact checked it). It must be a user (link
-// creation is user-only, design D15) whose credential permits
-// artifact.manage in the home scope, and it must own the artifact or hold
-// an unexpired admin grant (a principal grant for it, or a scope grant for
-// a scope the host authorizes it to manage in).
+// canAdminister reports whether the caller may administer a, an artifact
+// it can read (so a is live and unexpired: readableArtifact checked it):
+// manage its share links and grants, and change its expiry or home. It
+// must be a user (sharing is user-only, design D15) whose credential
+// permits artifact.manage in the home scope, and it must own the artifact
+// or hold an unexpired admin grant (a principal grant for it, or a scope
+// grant for a scope the host authorizes it to manage in).
 //
 // A failed grant read is an error, never a refusal, so the caller answers
 // 500 rather than a 403 that a working read would not give.
-func (s *Service) canManageLinks(r *http.Request, b backend, a *Artifact) (bool, error) {
+func (s *Service) canAdminister(r *http.Request, b backend, a *Artifact) (bool, error) {
 	ctx := r.Context()
 	kind, ref, _, ok := s.host.Principal(ctx)
 	if !ok || kind != PrincipalKindUser {
@@ -205,22 +205,23 @@ func (s *Service) canManageLinks(r *http.Request, b backend, a *Artifact) (bool,
 	return false, nil
 }
 
-// linkAdminArtifact loads an artifact whose links the caller may manage.
-// An artifact the caller cannot read answers 404 like a missing one (the
-// read check runs first); one it can read but not manage answers 403.
-func (s *Service) linkAdminArtifact(w http.ResponseWriter, r *http.Request, id string) (backend, *Artifact, bool) {
+// adminArtifact loads an artifact the caller may administer (see
+// canAdminister). An artifact the caller cannot read answers 404 like a
+// missing one (the read check runs first); one it can read but not
+// administer answers 403.
+func (s *Service) adminArtifact(w http.ResponseWriter, r *http.Request, id string) (backend, *Artifact, bool) {
 	b, a, ok := s.readableArtifact(w, r, id)
 	if !ok {
 		return b, nil, false
 	}
-	allowed, err := s.canManageLinks(r, b, a)
+	allowed, err := s.canAdminister(r, b, a)
 	if err != nil {
 		slog.ErrorContext(r.Context(), "artifacts: list grants failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal", "could not read the artifact's grants")
 		return b, nil, false
 	}
 	if !allowed {
-		writeError(w, http.StatusForbidden, "forbidden", "only the artifact's owner or an admin user may manage its share links")
+		writeError(w, http.StatusForbidden, "forbidden", "only the artifact's owner or an admin user may share or change it")
 		return b, nil, false
 	}
 	return b, a, true
@@ -228,7 +229,7 @@ func (s *Service) linkAdminArtifact(w http.ResponseWriter, r *http.Request, id s
 
 // handleCreateLink implements POST /{id}/links.
 func (s *Service) handleCreateLink(w http.ResponseWriter, r *http.Request, id string) {
-	b, a, ok := s.linkAdminArtifact(w, r, id)
+	b, a, ok := s.adminArtifact(w, r, id)
 	if !ok {
 		return
 	}
@@ -318,7 +319,7 @@ func decodeLinkRequest(w http.ResponseWriter, r *http.Request) (*CreateLinkReque
 // handleListLinks implements GET /{id}/links: the unexpired links, oldest
 // first.
 func (s *Service) handleListLinks(w http.ResponseWriter, r *http.Request, id string) {
-	b, a, ok := s.linkAdminArtifact(w, r, id)
+	b, a, ok := s.adminArtifact(w, r, id)
 	if !ok {
 		return
 	}
@@ -347,7 +348,7 @@ func (s *Service) handleRevokeLink(w http.ResponseWriter, r *http.Request, id, l
 		writeNotFound(w)
 		return
 	}
-	b, a, ok := s.linkAdminArtifact(w, r, id)
+	b, a, ok := s.adminArtifact(w, r, id)
 	if !ok {
 		return
 	}

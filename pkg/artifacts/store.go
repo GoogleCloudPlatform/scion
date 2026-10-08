@@ -33,6 +33,10 @@ var ErrConflict = errors.New("artifacts: conflict")
 // the maximum number of unexpired share links.
 var ErrTooManyLinks = errors.New("artifacts: too many share links")
 
+// ErrTooManyGrants is returned by PutGrant when an artifact already has
+// the maximum number of principal and scope grants.
+var ErrTooManyGrants = errors.New("artifacts: too many grants")
+
 // ErrTooManyPending is returned by CreateVersion when an artifact already
 // has the maximum number of pending versions.
 var ErrTooManyPending = errors.New("artifacts: too many pending versions")
@@ -287,6 +291,36 @@ type Store interface {
 	// RevokeLink deletes link grant linkID of artifact artifactID. It
 	// returns ErrNotFound when no such link grant exists.
 	RevokeLink(ctx context.Context, artifactID, linkID string) error
+
+	// PutGrant adds the principal or scope grant g to its artifact, or,
+	// when the artifact already has a grant for the same subject, sets
+	// that grant's permission to g's (g.ID and g.CreatedAt then take the
+	// stored grant's). created reports which. It refuses with
+	// ErrTooManyGrants when adding would exceed maxGrants principal and
+	// scope grants, and returns ErrNotFound when the artifact is absent or
+	// deleted.
+	PutGrant(ctx context.Context, g *Grant, maxGrants int) (created bool, err error)
+
+	// DeleteGrant deletes principal or scope grant grantID of artifact
+	// artifactID, or returns ErrNotFound.
+	DeleteGrant(ctx context.Context, artifactID, grantID string) error
+
+	// SetExpiry sets (or, with nil, clears) a live artifact's expiry and
+	// returns the updated artifact, or ErrNotFound.
+	SetExpiry(ctx context.Context, artifactID string, expiresAt *time.Time) (*Artifact, error)
+
+	// Rehome moves a live artifact to the home scope homeGrant.SubjectRef
+	// and, unless the artifact already has a scope grant for that scope,
+	// adds homeGrant (its read grant). Existing grants are kept. It
+	// returns ErrConflict when the owner already has a live artifact with
+	// the same key in the new scope, and ErrNotFound when the artifact is
+	// absent or deleted.
+	Rehome(ctx context.Context, artifactID string, homeGrant *Grant) (*Artifact, error)
+
+	// SweepExpired soft-deletes up to limit live artifacts whose expiry is
+	// at or before now, deleting their grants and share links in the same
+	// transaction, and returns how many it deleted.
+	SweepExpired(ctx context.Context, now time.Time, limit int) (int, error)
 
 	// AddMessageRefs records that message messageID references refs, in the
 	// artifact_message_ref link table. A reference already recorded for the

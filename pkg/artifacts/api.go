@@ -123,17 +123,20 @@ type VersionListResponse struct {
 
 // ArtifactInfo describes an artifact.
 type ArtifactInfo struct {
-	ID         string    `json:"id"`
-	Ref        string    `json:"ref"`
-	ScopeKind  string    `json:"scopeKind"`
-	ScopeRef   string    `json:"scopeRef"`
-	OwnerKind  string    `json:"ownerKind"`
-	OwnerRef   string    `json:"ownerRef"`
-	Key        string    `json:"key,omitempty"`
-	Title      string    `json:"title"`
-	CurrentSeq int       `json:"currentSeq"`
-	CreatedAt  time.Time `json:"createdAt"`
-	UpdatedAt  time.Time `json:"updatedAt"`
+	ID         string `json:"id"`
+	Ref        string `json:"ref"`
+	ScopeKind  string `json:"scopeKind"`
+	ScopeRef   string `json:"scopeRef"`
+	OwnerKind  string `json:"ownerKind"`
+	OwnerRef   string `json:"ownerRef"`
+	Key        string `json:"key,omitempty"`
+	Title      string `json:"title"`
+	CurrentSeq int    `json:"currentSeq"`
+	// ExpiresAt is when the artifact expires and is deleted, or absent
+	// when it is kept until deleted.
+	ExpiresAt *time.Time `json:"expiresAt,omitempty"`
+	CreatedAt time.Time  `json:"createdAt"`
+	UpdatedAt time.Time  `json:"updatedAt"`
 }
 
 // VersionInfo describes one version and its files.
@@ -170,7 +173,7 @@ func artifactInfo(a *Artifact) ArtifactInfo {
 	return ArtifactInfo{
 		ID: a.ID, Ref: FormatRef(a.ID, 0), ScopeKind: a.ScopeKind, ScopeRef: a.ScopeRef,
 		OwnerKind: a.OwnerKind, OwnerRef: a.OwnerRef, Key: a.Key, Title: a.Title,
-		CurrentSeq: a.CurrentSeq, CreatedAt: a.CreatedAt, UpdatedAt: a.UpdatedAt,
+		CurrentSeq: a.CurrentSeq, ExpiresAt: a.ExpiresAt, CreatedAt: a.CreatedAt, UpdatedAt: a.UpdatedAt,
 	}
 }
 

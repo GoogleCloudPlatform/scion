@@ -133,6 +133,7 @@ func (s *Service) handleCreate(w http.ResponseWriter, r *http.Request) {
 	a := &Artifact{
 		ID: uuid.NewString(), ScopeKind: ScopeKindProject, ScopeRef: scope,
 		OwnerKind: kind, OwnerRef: ref, Key: key, Title: title, CreatedAt: now, UpdatedAt: now,
+		ExpiresAt: retentionExpiry(b.currentLimits(ctx), now),
 	}
 	v, files := pendingVersion(a.ID, req, kind, ref, now, nil)
 	v.Seq = 1

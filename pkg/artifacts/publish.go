@@ -181,7 +181,7 @@ func (s *Service) handlePublish(w http.ResponseWriter, r *http.Request) {
 	a := &Artifact{
 		ID: uuid.NewString(), ScopeKind: ScopeKindProject, ScopeRef: scope,
 		OwnerKind: kind, OwnerRef: ref, Title: title, CurrentSeq: 1,
-		CreatedAt: now, UpdatedAt: now,
+		CreatedAt: now, UpdatedAt: now, ExpiresAt: retentionExpiry(b.currentLimits(ctx), now),
 	}
 	v := &Version{
 		ID: versionID, ArtifactID: a.ID, Seq: 1, Kind: VersionKindPublish, EntryPath: name,
