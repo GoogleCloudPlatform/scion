@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/stretchr/testify/assert"
@@ -33,6 +34,10 @@ type fakeTemplateUpdateService struct {
 	reimported  []string
 	overrides   []string
 	reimportErr map[string]error
+	// deadlines records, per reimport, the time left until its deadline.
+	deadlines []time.Duration
+	// delay is how long each reimport takes.
+	delay time.Duration
 }
 
 func (f *fakeTemplateUpdateService) List(_ context.Context, opts *hubclient.ListTemplatesOptions) (*hubclient.ListTemplatesResponse, error) {
@@ -50,8 +55,20 @@ func (f *fakeTemplateUpdateService) List(_ context.Context, opts *hubclient.List
 	return &hubclient.ListTemplatesResponse{Templates: out}, nil
 }
 
-func (f *fakeTemplateUpdateService) Reimport(_ context.Context, id, sourceURL string) (*hubclient.ReimportTemplateResponse, error) {
+func (f *fakeTemplateUpdateService) Reimport(ctx context.Context, id, sourceURL string) (*hubclient.ReimportTemplateResponse, error) {
 	f.reimported = append(f.reimported, id)
+	if dl, ok := ctx.Deadline(); ok {
+		f.deadlines = append(f.deadlines, time.Until(dl))
+	} else {
+		f.deadlines = append(f.deadlines, -1)
+	}
+	if f.delay > 0 {
+		select {
+		case <-time.After(f.delay):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 	f.overrides = append(f.overrides, sourceURL)
 	if err := f.reimportErr[id]; err != nil {
 		return nil, err
@@ -144,7 +161,7 @@ func TestUpdateAllTemplates(t *testing.T) {
 		},
 		reimportErr: map[string]error{"bad": errors.New("boom")},
 	}
-	err := updateAllTemplates(context.Background(), svc, "")
+	err := updateAllTemplates(context.Background(), svc, "", time.Minute)
 	require.Error(t, err, "a failed reimport makes the command fail")
 	assert.Equal(t, []string{"a", "b", "bad"}, svc.reimported, "templates without an https source are skipped")
 	for _, o := range svc.overrides {
@@ -155,6 +172,15 @@ func TestUpdateAllTemplates(t *testing.T) {
 func TestDisplaySourceURL_DropsCredentials(t *testing.T) {
 	assert.Equal(t, "https://github.com/acme/repo", displaySourceURL("https://user:secret@github.com/acme/repo"))
 	assert.Equal(t, ghSource, displaySourceURL(ghSource))
+	assert.Equal(t, "builtin://scion/1.0/template/default", displaySourceURL("builtin://scion/1.0/template/default"))
+	for _, raw := range []string{
+		":s3,access_key_id=AKIA,secret_access_key=secret:bucket/path",
+		"s3://key:secret@bucket/path",
+		"mailto:secret",
+		"not a url secret",
+	} {
+		assert.NotContains(t, displaySourceURL(raw), "secret", raw)
+	}
 }
 
 func TestTemplatesUpdate_Usage(t *testing.T) {
@@ -174,5 +200,27 @@ func TestTemplatesUpdate_Usage(t *testing.T) {
 			err := runTemplatesUpdate(cmd, cmd.Flags().Args())
 			require.Error(t, err)
 		})
+	}
+}
+
+// TestUpdateAllTemplates_PerTemplateDeadline: each template's refresh gets
+// its own deadline, so a slow template does not shorten the next one's.
+func TestUpdateAllTemplates_PerTemplateDeadline(t *testing.T) {
+	svc := &fakeTemplateUpdateService{
+		templates: []hubclient.Template{
+			{ID: "a", Name: "a", Scope: "global", SourceURL: ghSource},
+			{ID: "b", Name: "b", Scope: "global", SourceURL: ghSource},
+			{ID: "c", Name: "c", Scope: "global", SourceURL: ghSource},
+		},
+		delay: 150 * time.Millisecond,
+	}
+	per := 200 * time.Millisecond
+	require.NoError(t, updateAllTemplates(context.Background(), svc, "", per))
+	require.Len(t, svc.deadlines, 3)
+	for i, left := range svc.deadlines {
+		// With one shared deadline the third call would start with almost
+		// nothing left (3 x 150ms > 200ms) and fail.
+		assert.Greater(t, left, per/2, "reimport %d started with only %s left", i, left)
+		assert.LessOrEqual(t, left, per)
 	}
 }

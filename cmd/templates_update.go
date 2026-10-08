@@ -87,14 +87,22 @@ func runTemplatesUpdate(cmd *cobra.Command, args []string) error {
 
 	PrintUsingHub(hubCtx.Endpoint)
 
-	ctx, cancel := context.WithTimeout(cmd.Context(), 5*time.Minute)
-	defer cancel()
-
 	if all {
-		return updateAllTemplates(ctx, hubCtx.Client.Templates(), scope)
+		// Each template gets its own deadline, so one slow source does not
+		// use up the time of the templates after it.
+		return updateAllTemplates(cmd.Context(), hubCtx.Client.Templates(), scope, templateUpdateTimeout)
 	}
+	ctx, cancel := context.WithTimeout(cmd.Context(), templateUpdateTimeout)
+	defer cancel()
 	return updateSingleTemplate(ctx, hubCtx.Client.Templates(), args[0], urlOverride, scope)
 }
+
+// templateUpdateTimeout bounds one template refresh (and, with --all, each
+// template's refresh separately).
+const templateUpdateTimeout = 5 * time.Minute
+
+// templateListTimeout bounds each page of the template list.
+const templateListTimeout = time.Minute
 
 // templateSourceRefreshable reports whether a stored template source URL is
 // one the Hub can refresh from (an https URL; the Hub applies the full check).
@@ -102,12 +110,19 @@ func templateSourceRefreshable(sourceURL string) bool {
 	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(sourceURL)), "https://")
 }
 
-// displaySourceURL returns sourceURL without any username or password, for
-// printing.
+// displaySourceURL returns sourceURL for printing. The display never shows
+// credentials embedded in a source string: http(s) and builtin:// URLs are
+// shown without any username or password, and any other source is shown as
+// a fixed label.
 func displaySourceURL(sourceURL string) string {
-	u, err := url.Parse(sourceURL)
-	if err != nil {
-		return "(unparseable URL)"
+	u, err := url.Parse(strings.TrimSpace(sourceURL))
+	if err != nil || u.Opaque != "" || u.Host == "" {
+		return "(non-web source)"
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "http", "https", "builtin":
+	default:
+		return "(non-web source)"
 	}
 	u.User = nil
 	return u.String()
@@ -182,11 +197,13 @@ func updateSingleTemplate(ctx context.Context, svc hubclient.TemplateService, na
 	return nil
 }
 
-func updateAllTemplates(ctx context.Context, svc hubclient.TemplateService, scope string) error {
+func updateAllTemplates(ctx context.Context, svc hubclient.TemplateService, scope string, perTemplate time.Duration) error {
 	var templates []hubclient.Template
 	opts := &hubclient.ListTemplatesOptions{Scope: scope, Status: "active"}
 	for {
-		resp, err := svc.List(ctx, opts)
+		listCtx, cancel := context.WithTimeout(ctx, templateListTimeout)
+		resp, err := svc.List(listCtx, opts)
+		cancel()
 		if err != nil {
 			return fmt.Errorf("failed to list templates: %w", err)
 		}
@@ -207,7 +224,10 @@ func updateAllTemplates(ctx context.Context, svc hubclient.TemplateService, scop
 		if !jsonOut {
 			fmt.Printf("Updating %q (%s) from %s...\n", t.Name, t.Scope, displaySourceURL(t.SourceURL))
 		}
-		if _, err := svc.Reimport(ctx, t.ID, ""); err != nil {
+		tctx, cancel := context.WithTimeout(ctx, perTemplate)
+		_, err := svc.Reimport(tctx, t.ID, "")
+		cancel()
+		if err != nil {
 			if !jsonOut {
 				fmt.Printf("  Failed: %s\n", err)
 			}
