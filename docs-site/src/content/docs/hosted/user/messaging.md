@@ -429,6 +429,8 @@ Write a unit test for the auth package.
 ---END SCION MESSAGE---
 ```
 
+In Hub mode the message is a JSON object between those delimiters. Its `timestamp` is when the message was created, and its `message_id` is the ID of the message the Hub stored for this delivery, so an agent can name the exact message it received (for example to `scion conversation get-message` it, or to tell the sender which message it is answering). `message_id` is omitted when the Hub stored no message for the delivery: scheduled messages, status notifications, artifact review notices, and plain (`--plain`) deliveries, which carry only the text. In a reply, `reply_to` still names the message being replied to; `message_id` names the reply itself.
+
 **Always check the `type` field before acting or replying:**
 
 | Type | Meaning | Action Required |
