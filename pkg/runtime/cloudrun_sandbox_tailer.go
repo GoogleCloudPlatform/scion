@@ -85,6 +85,18 @@ func (r *CloudRunSandboxRuntime) tailEntrypointLog(ctx context.Context, slug, ag
 // doTailEntrypointLog is the testable core. The output destination is
 // injected so tests can capture structured JSON without touching stdout.
 func doTailEntrypointLog(ctx context.Context, logPath, slug, agentID, project string, offset int64, w io.Writer) {
+	tailEntrypointLogWithHooks(ctx, logPath, slug, agentID, project, offset, w, tailerHooks{})
+}
+
+// tailerHooks are synchronisation points for tests. Nil hooks are skipped.
+type tailerHooks struct {
+	// afterEOF runs after a read returns EOF, before the poll sleep.
+	afterEOF func()
+	// afterDrainRead runs after each read of the final drain.
+	afterDrainRead func()
+}
+
+func tailEntrypointLogWithHooks(ctx context.Context, logPath, slug, agentID, project string, offset int64, w io.Writer, hooks tailerHooks) {
 	labels := map[string]string{
 		"component":  "entrypoint-log-tailer",
 		"agent_id":   agentID,
@@ -146,21 +158,44 @@ func doTailEntrypointLog(ctx context.Context, logPath, slug, agentID, project st
 	)
 	eofCount := 0
 
-	// drainAndFlush reads to EOF before the final flush. On cancellation
-	// (Delete) the bytes written since the last poll are usually the lines
-	// naming the cause of death; without the drain they were dropped.
+	// drainAndFlush reads to the file size seen at cancellation before the
+	// final flush. On cancellation (Delete) the bytes written since the
+	// last poll are usually the lines naming the cause of death; without
+	// the drain they were dropped. Bytes written after the cancel are not
+	// read, so a sandbox that keeps writing cannot stall the drain.
 	drainAndFlush := func() {
-		for len(lineBuf) <= tailerBufferCap {
-			n, err := f.Read(readBuf)
+		defer func() { flushPartial(lineBuf, emit) }()
+		info, err := f.Stat()
+		if err != nil {
+			return
+		}
+		cur, err := f.Seek(0, io.SeekCurrent)
+		if err != nil {
+			return
+		}
+		for remaining := info.Size() - cur; remaining > 0; {
+			buf := readBuf
+			if int64(len(buf)) > remaining {
+				buf = buf[:remaining]
+			}
+			n, err := f.Read(buf)
+			if hooks.afterDrainRead != nil {
+				hooks.afterDrainRead()
+			}
 			if n > 0 {
-				lineBuf = append(lineBuf, readBuf[:n]...)
+				remaining -= int64(n)
+				lineBuf = append(lineBuf, buf[:n]...)
 				lineBuf = emitCompleteLines(lineBuf, emit)
+				if len(lineBuf) > tailerBufferCap {
+					emit("INFO", string(lineBuf)+" [...line truncated at 64KB, no newline found]",
+						map[string]string{"truncated_line": "true"})
+					lineBuf = lineBuf[:0]
+				}
 			}
 			if err != nil || n == 0 {
-				break
+				return
 			}
 		}
-		flushPartial(lineBuf, emit)
 	}
 
 	for {
@@ -201,6 +236,9 @@ func doTailEntrypointLog(ctx context.Context, logPath, slug, agentID, project st
 
 		if readErr == io.EOF {
 			eofCount++
+			if hooks.afterEOF != nil {
+				hooks.afterEOF()
+			}
 
 			// Determine backoff sleep duration.
 			var sleep time.Duration

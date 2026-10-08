@@ -1479,11 +1479,16 @@ func (r *CloudRunSandboxRuntime) watchSandbox(ctx context.Context, name string) 
 
 	// A non-zero or unknown exit (e.g. death during provisioning) is logged
 	// with this run's entrypoint output: once Delete drops the state entry,
-	// GetLogs can no longer reach it.
+	// GetLogs can no longer reach it. A non-zero code is an error; an
+	// unknown code (nil) is treated as normal (C5) and logged at warn.
 	if exitCode == nil || *exitCode != 0 {
 		if entry := r.state.get(name); entry != nil && entry.AgentHome != "" {
 			logPath := filepath.Join(entry.AgentHome, entrypointLogFile)
-			runtimeLog.Error("sandbox exited abnormally",
+			logFn, msg := runtimeLog.Error, "sandbox exited abnormally"
+			if exitCode == nil {
+				logFn, msg = runtimeLog.Warn, "sandbox exited with unknown exit code"
+			}
+			logFn(msg,
 				"name", name, "agentID", entry.AgentID, "exitCode", exitCode,
 				"waitOutput", strings.TrimSpace(string(out)),
 				"entrypointLog", entrypointLogTail(logPath, entry.EntrypointLogOffset, entrypointLogTailMax))
@@ -1506,19 +1511,39 @@ const entrypointLogTailMax = 2000
 // entrypointLogTail returns the last max bytes of the entrypoint log
 // written at or after offset (this run's output), or "" when there is
 // none or the file cannot be read. A file shorter than offset was
-// truncated and is read from the start.
+// truncated and is read from the start. At most max bytes are read, so
+// a large append-mode log is never loaded whole.
 func entrypointLogTail(path string, offset int64, max int) string {
-	data, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
 		return ""
 	}
-	if offset > 0 && offset <= int64(len(data)) {
-		data = data[offset:]
+	defer func() { _ = f.Close() }()
+	info, err := f.Stat()
+	if err != nil {
+		return ""
 	}
-	if len(data) > max {
-		return "...(truncated)\n" + string(data[len(data)-max:])
+	size := info.Size()
+	if offset < 0 || size < offset {
+		offset = 0
 	}
-	return string(data)
+	start := offset
+	if size-int64(max) > start {
+		start = size - int64(max)
+	}
+	if size <= start {
+		return ""
+	}
+	buf := make([]byte, size-start)
+	n, err := f.ReadAt(buf, start)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return ""
+	}
+	tail := string(buf[:n])
+	if start > offset {
+		return "...(truncated)\n" + tail
+	}
+	return tail
 }
 
 // labelValue safely retrieves a label value, returning "" if the map is
