@@ -289,7 +289,7 @@ func TestRedactCloneURL_Shapes(t *testing.T) {
 	for in, want := range cases {
 		assert.Equal(t, want, redactCloneURL(in), in)
 	}
-	err := cloneError("git@github.com:org/private.git", "git@github.com: Permission denied (publickey).\nfatal: Could not read from remote repository.\n", nil, false)
+	err := cloneError("git@github.com:org/private.git", "git@github.com: Permission denied (publickey).\nfatal: Could not read from remote repository.\n", nil, false, "")
 	assert.Contains(t, err.Error(), "git clone github.com:org/private.git")
 }
 

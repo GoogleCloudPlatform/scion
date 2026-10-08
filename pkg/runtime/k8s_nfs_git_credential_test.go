@@ -15,14 +15,22 @@
 package runtime
 
 import (
+	"context"
 	"encoding/json"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	k8sruntime "k8s.io/apimachinery/pkg/runtime"
+	k8stesting "k8s.io/client-go/testing"
 )
 
 // testGitToken is a test value standing in for a project's git token.
@@ -247,4 +255,64 @@ func TestDivertGitCredential(t *testing.T) {
 		assert.Equal(t, envCopy, env)
 		assert.Equal(t, secretsCopy, secrets)
 	})
+}
+
+// A plain GITHUB_TOKEN with no resolved secrets at all: the per-agent
+// Secret is created for it alone, and the agent container and the cloning
+// init container both read it via secretKeyRef.
+func TestRun_NFSGitToken_PlainEnvOnlyCreatesSecret(t *testing.T) {
+	rt, clientset := newTransportTestRuntime(false)
+	cfg := nfsBaseConfig("gt-run-only")
+	cfg.Labels = map[string]string{"scion.agent": "true", "scion.name": "gt-run-only"}
+	cfg.Env = []string{"GITHUB_TOKEN=" + testGitToken}
+
+	pod, secret := runUntilPodCreated(t, rt, clientset, cfg)
+	require.NotNil(t, secret, "the per-agent Secret is created for the git token")
+	assert.Equal(t, map[string][]byte{gitCredentialSecretKey: []byte(testGitToken)}, secret.Data)
+	assertInitGitTokenLikeAgent(t, pod, gitCredentialSecretKey)
+}
+
+// GKE mode with a Secret Manager reference (the CSI path): the diverted
+// token is stored in the per-agent Kubernetes Secret, both containers read
+// it from there, and the SecretProviderClass does not reference it.
+func TestRun_NFSGitToken_GKEPathDiverted(t *testing.T) {
+	rt, clientset := newTransportTestRuntime(true)
+	cfg := nfsBaseConfig("gt-run-gke")
+	cfg.Labels = map[string]string{"scion.agent": "true", "scion.name": "gt-run-gke"}
+	cfg.Env = []string{"GITHUB_TOKEN=" + testGitToken}
+	cfg.ResolvedSecrets = []api.ResolvedSecret{
+		{Name: "API_KEY", Type: "environment", Target: "API_KEY", Value: "test-api-value", Source: "user", Ref: "projects/p/secrets/api-key"},
+	}
+
+	var (
+		mu     sync.Mutex
+		spc    *unstructured.Unstructured
+		spcErr error
+	)
+	clientset.PrependReactor("create", "pods", func(k8stesting.Action) (bool, k8sruntime.Object, error) {
+		got, err := rt.Client.Dynamic().Resource(k8s.SecretProviderClassGVR).Namespace("default").Get(context.Background(), "scion-agent-gt-run-gke", metav1.GetOptions{})
+		mu.Lock()
+		spc, spcErr = got, err
+		mu.Unlock()
+		return false, nil, nil
+	})
+
+	pod, secret := runUntilPodCreated(t, rt, clientset, cfg)
+	hasCSI := false
+	for _, v := range pod.Spec.Volumes {
+		if v.CSI != nil {
+			hasCSI = true
+		}
+	}
+	require.True(t, hasCSI, "expected the GKE CSI path")
+	require.NotNil(t, secret)
+	assert.Equal(t, testGitToken, string(secret.Data[gitCredentialSecretKey]))
+	assertInitGitTokenLikeAgent(t, pod, gitCredentialSecretKey)
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.NoError(t, spcErr)
+	params, _, _ := unstructured.NestedString(spc.Object, "spec", "parameters", "secrets")
+	assert.False(t, strings.Contains(params, gitCredentialSecretKey) || strings.Contains(params, testGitToken),
+		"the SecretProviderClass must not reference the git token")
 }

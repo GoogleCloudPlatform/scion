@@ -2902,8 +2902,11 @@ func runGitClone(ctx context.Context, in ProvisionInput) error {
 	if err == nil {
 		return nil
 	}
-	return cloneError(gc.URL, string(output), err, in.CloneWithToken)
+	return cloneError(gc.URL, string(output), err, in.CloneWithToken, os.Getenv(GitTokenEnv))
 }
+
+// redactedCredential replaces a credential value in clone error output.
+const redactedCredential = "[REDACTED]"
 
 // GitTokenEnv is the environment variable holding the project's git token,
 // the same variable the agent container's clone uses.
@@ -2944,11 +2947,17 @@ func TokenCredentialHelperEnv(env []string) []string {
 // cloneError builds the error for a failed clone of rawURL. git's output is
 // stripped of the URL's credentials before it is included.
 // withToken reports whether the clone was given the project's git token.
-func cloneError(rawURL, output string, runErr error, withToken bool) error {
+// token is the value of GitTokenEnv in the clone's environment; when it is
+// non-empty, any occurrence of it in the included output is replaced with
+// redactedCredential.
+func cloneError(rawURL, output string, runErr error, withToken bool, token string) error {
 	safeURL := redactCloneURL(rawURL)
 	detail := strings.TrimSpace(sanitizeCloneOutput(output, rawURL))
 	if detail == "" && runErr != nil {
 		detail = runErr.Error()
+	}
+	if token != "" {
+		detail = strings.ReplaceAll(detail, token, redactedCredential)
 	}
 	kind := util.ClassifyGitError(detail).Kind
 	if withToken {

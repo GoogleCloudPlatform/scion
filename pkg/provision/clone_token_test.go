@@ -15,6 +15,7 @@
 package provision
 
 import (
+	"errors"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
@@ -111,6 +112,39 @@ func TestProvisionShared_CloneWithToken_PrivateRepo(t *testing.T) {
 	assertTokenAbsent(t, ws)
 	assertTokenAbsent(t, stateDir)
 	assert.NoFileExists(t, store, "a credential helper from git's config must not store the token")
+	assertNoGitConfigEnv(t)
+}
+
+// assertNoGitConfigEnv fails if this process's environment has any
+// GIT_CONFIG_COUNT/KEY/VALUE entry: the credential helper entries belong
+// to the clone command only, so later steps never inherit them.
+func assertNoGitConfigEnv(t *testing.T) {
+	t.Helper()
+	assert.Empty(t, os.Getenv("GIT_CONFIG_COUNT"), "GIT_CONFIG_COUNT set in the process env")
+	for _, e := range os.Environ() {
+		name, _, _ := strings.Cut(e, "=")
+		if strings.HasPrefix(name, "GIT_CONFIG_KEY_") || strings.HasPrefix(name, "GIT_CONFIG_VALUE_") {
+			t.Errorf("%s set in the process env", name)
+		}
+	}
+}
+
+// Defensive redaction: the token value never appears in the error, even if
+// git prints it.
+func TestCloneError_RedactsCredentialValue(t *testing.T) {
+	output := "fatal: unexpected response containing " + testCloneToken + " from server\n"
+	for _, withToken := range []bool{false, true} {
+		err := cloneError("https://github.com/org/repo.git", output, nil, withToken, testCloneToken)
+		assert.NotContains(t, err.Error(), testCloneToken)
+		assert.Contains(t, err.Error(), redactedCredential)
+	}
+	// An empty token redacts nothing.
+	err := cloneError("https://github.com/org/repo.git", "fatal: something else\n", nil, true, "")
+	assert.Equal(t, "git clone https://github.com/org/repo.git: fatal: something else", err.Error())
+	assert.NotContains(t, err.Error(), redactedCredential)
+	// The run error is redacted too when git printed nothing.
+	err = cloneError("https://github.com/org/repo.git", "", errors.New("exit "+testCloneToken), false, testCloneToken)
+	assert.NotContains(t, err.Error(), testCloneToken)
 }
 
 // Without CloneWithToken the clone runs as before: no credential, and a
@@ -186,10 +220,10 @@ func TestTokenCredentialHelperEnv(t *testing.T) {
 
 func TestCloneError_WithToken(t *testing.T) {
 	auth := cloneError("https://github.com/org/private.git",
-		"fatal: Authentication failed for 'https://github.com/org/private.git/'\n", nil, true)
+		"fatal: Authentication failed for 'https://github.com/org/private.git/'\n", nil, true, "")
 	assert.Contains(t, auth.Error(), "did not accept the project's git credential")
 	assert.NotContains(t, auth.Error(), "without a git token")
 
-	notFound := cloneError("https://github.com/org/gone.git", "remote: Repository not found.\n", nil, true)
+	notFound := cloneError("https://github.com/org/gone.git", "remote: Repository not found.\n", nil, true, "")
 	assert.Contains(t, notFound.Error(), "has no access to it")
 }
