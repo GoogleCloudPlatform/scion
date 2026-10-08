@@ -99,11 +99,9 @@ func RedactURL(u *url.URL) string {
 	}
 	c := *u
 	c.RawQuery = RedactQuery(u.RawQuery)
-	prefix := credentialPathPrefix(u.Path)
-	if prefix == "" {
-		prefix = credentialPathPrefix(u.EscapedPath())
-	}
-	if prefix != "" {
+	// u.Path is the decoded path, so an escaped spelling of a credential
+	// route is caught too.
+	if prefix := credentialPathPrefix(u.Path); prefix != "" {
 		c.Path, c.RawPath = prefix+redactedValue, ""
 	}
 	return c.String()
