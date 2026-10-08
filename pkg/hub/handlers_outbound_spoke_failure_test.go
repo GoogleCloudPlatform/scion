@@ -304,3 +304,26 @@ func TestHandleAgentOutboundMessage_PluginSpokeFailureSubscribeErrorFails(t *tes
 
 	f.requireDeliveryFailedNoRow(t, f.send(t, "hello with a failed subscribe"))
 }
+
+// Channel validation matches the key FanOutEventBus routes on: a spoke
+// registered as Name "chat-app" with ChannelID "gchat" accepts "gchat"
+// and rejects "chat-app", which Publish could not deliver to.
+func TestValidateChannelRegistered_UsesRoutingKey(t *testing.T) {
+	srv, s := testServer(t)
+	fanout := eventbus.NewFanOutEventBus([]eventbus.NamedEventBus{
+		{Name: eventbus.InProcessBusName, Bus: eventbus.NewInProcessEventBus(slog.Default())},
+		{Name: "chat-app", ChannelID: "gchat", Bus: nullSpokeEventBus{}},
+	}, slog.Default())
+	events := NewChannelEventPublisher()
+	t.Cleanup(events.Close)
+	srv.SetMessageBrokerProxy(NewMessageBrokerProxy(fanout, s, events,
+		func() AgentDispatcher { return noopDispatcher{} }, slog.Default()))
+
+	rr := httptest.NewRecorder()
+	require.True(t, srv.validateChannelRegistered(rr, "gchat"), "routing key must pass: %s", rr.Body.String())
+
+	rr = httptest.NewRecorder()
+	require.False(t, srv.validateChannelRegistered(rr, "chat-app"))
+	require.Equal(t, http.StatusBadRequest, rr.Code, "body: %s", rr.Body.String())
+	require.Contains(t, rr.Body.String(), "available channels: gchat")
+}

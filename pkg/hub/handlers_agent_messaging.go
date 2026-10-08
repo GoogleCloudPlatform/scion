@@ -1378,6 +1378,14 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 			// lifecycle events.
 			persisting := bp.subscribeProjectUserMessages(agent.ProjectID)
 			err := bp.PublishUserMessage(ctx, agent.ProjectID, result.RecipientID, structuredMsg)
+			if errors.Is(err, eventbus.ErrReservedChannel) {
+				// Nothing was published or stored: the request named a
+				// channel the hub keeps for itself.
+				s.messageLog.Warn("Outbound message names a reserved channel",
+					"agent_id", agent.ID, "channel", structuredMsg.Channel)
+				ValidationError(w, fmt.Sprintf("channel %q is reserved for internal use", structuredMsg.Channel), nil)
+				return
+			}
 			if err != nil && persisting && !errors.Is(err, eventbus.ErrSubscriberBufferFull) && !inProcessPublishFailed(err) {
 				// The inprocess spoke queued the persisting deliverToUser, so
 				// the message is stored; only channel spoke delivery failed (a
@@ -4092,15 +4100,17 @@ func (s *Server) validateChannelRegistered(w http.ResponseWriter, channel string
 			"cannot validate channel: message broker is not available", nil)
 		return false
 	}
+	// Match on the routing key FanOutEventBus.Publish uses (ChannelID,
+	// else Name), so a channel that passes here has a spoke to reach.
 	channels := bp.ListChannels()
 	for _, ch := range channels {
-		if ch.Name == channel {
+		if ch.RoutingKey() == channel {
 			return true
 		}
 	}
 	available := make([]string, len(channels))
 	for i, ch := range channels {
-		available[i] = ch.Name
+		available[i] = ch.RoutingKey()
 	}
 	if len(available) == 0 {
 		ValidationError(w, fmt.Sprintf("channel %q is not registered; no channels are currently available", channel), nil)
