@@ -117,16 +117,16 @@ func init() {
 	hubAuthCmd.AddCommand(hubAuthLogoutCmd)
 
 	// Flags for login command
-	hubAuthLoginCmd.Flags().StringVar(&hubAuthHubURL, "hub-url", "", "Hub server URL; takes precedence over --hub, hub.endpoint in settings and the SCION_HUB_ENDPOINT/SCION_HUB_URL environment variables")
+	hubAuthLoginCmd.Flags().StringVar(&hubAuthHubURL, "hub-url", "", "Hub server URL; takes precedence over --hub, SCION_HUB_ENDPOINT, hub.endpoint in settings and SCION_HUB_URL")
 	hubAuthLoginCmd.Flags().BoolVar(&hubAuthNoBrowser, "no-browser", false, "Use device flow instead of opening a browser")
 	hubAuthLoginCmd.Flags().String("provider", "", "OAuth provider to use (google or github)")
 }
 
 func runHubAuthLogin(cmd *cobra.Command, args []string) error {
-	// Resolve hub URL: --hub-url, --hub, settings, SCION_HUB_ENDPOINT, SCION_HUB_URL.
-	hubURL, _ := resolveHubAuthURL(hubAuthHubURL, hubEndpoint, os.Getenv, settingsHubEndpoint)
+	// Resolve hub URL: --hub-url, --hub, SCION_HUB_ENDPOINT, settings, SCION_HUB_URL.
+	hubURL := resolveHubAuthURL(hubAuthHubURL, hubEndpoint, os.Getenv, settingsHubEndpoint)
 	if hubURL == "" {
-		return fmt.Errorf("hub URL not specified, use --hub-url, --hub, hub.endpoint in settings or SCION_HUB_ENDPOINT")
+		return fmt.Errorf("hub URL not specified, use --hub-url, --hub, SCION_HUB_ENDPOINT, hub.endpoint in settings or SCION_HUB_URL")
 	}
 
 	fmt.Printf("Authenticating with Hub at %s\n", hubURL)
@@ -276,11 +276,10 @@ func runHubAuthLogout(cmd *cobra.Command, args []string) error {
 }
 
 // getDefaultHubURL returns the hub URL logout uses: the root --hub flag,
-// then settings, then SCION_HUB_ENDPOINT and SCION_HUB_URL (see
+// then SCION_HUB_ENDPOINT, then settings, then SCION_HUB_URL (see
 // resolveHubAuthURL).
 func getDefaultHubURL() string {
-	hubURL, _ := resolveHubAuthURL("", hubEndpoint, os.Getenv, settingsHubEndpoint)
-	return hubURL
+	return resolveHubAuthURL("", hubEndpoint, os.Getenv, settingsHubEndpoint)
 }
 
 func resolveHubAuthProvider(ctx context.Context, authSvc hubclient.AuthService, clientType hubclient.OAuthClientType, requestedProvider string) (string, error) {

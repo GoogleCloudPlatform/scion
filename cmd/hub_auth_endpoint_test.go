@@ -65,52 +65,76 @@ func allHubURLSources() []hubURLSources {
 	return out
 }
 
-// TestResolveHubAuthURL_Precedence pins the hub URL order of hub auth login
-// (ptone/scion#3627): --hub-url > --hub > settings > SCION_HUB_ENDPOINT >
-// SCION_HUB_URL.
+// TestResolveHubAuthURL_Precedence pins the resolver order of hub auth login
+// (ptone/scion#3627): --hub-url > --hub > loaded settings endpoint >
+// SCION_HUB_ENDPOINT > SCION_HUB_URL. The settings func here stands in for
+// loaded settings; with real loading, SCION_HUB_ENDPOINT already overrides
+// hub.endpoint (see TestResolveHubAuthURL_EnvOverridesSettingsFile).
 func TestResolveHubAuthURL_Precedence(t *testing.T) {
 	tests := []struct {
-		name                string
-		in                  hubURLSources
-		wantURL, wantSource string
+		name    string
+		in      hubURLSources
+		wantURL string
 	}{
-		{"hub-url wins", hubURLSources{"https://a", "https://b", "https://c", "https://d", "https://e"}, "https://a", "--hub-url"},
-		{"root --hub next", hubURLSources{"", "https://b", "https://c", "https://d", "https://e"}, "https://b", "--hub"},
-		{"settings beat env", hubURLSources{"", "", "https://c", "https://d", "https://e"}, "https://c", "settings"},
-		{"SCION_HUB_ENDPOINT next", hubURLSources{"", "", "", "https://d", "https://e"}, "https://d", "env"},
-		{"SCION_HUB_URL last", hubURLSources{"", "", "", "", "https://e"}, "https://e", "env"},
-		{"none", hubURLSources{}, "", ""},
+		{"hub-url wins", hubURLSources{"https://a", "https://b", "https://c", "https://d", "https://e"}, "https://a"},
+		{"root --hub next", hubURLSources{"", "https://b", "https://c", "https://d", "https://e"}, "https://b"},
+		{"loaded settings endpoint next", hubURLSources{"", "", "https://c", "https://d", "https://e"}, "https://c"},
+		{"SCION_HUB_ENDPOINT when settings yield none", hubURLSources{"", "", "", "https://d", "https://e"}, "https://d"},
+		{"SCION_HUB_URL last", hubURLSources{"", "", "", "", "https://e"}, "https://e"},
+		{"none", hubURLSources{}, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			url, src := resolveHubAuthURL(tt.in.hubURL, tt.in.rootHub, tt.in.getenv, tt.in.settingsEndpoint)
-			assert.Equal(t, tt.wantURL, url)
-			assert.Equal(t, tt.wantSource, src)
+			assert.Equal(t, tt.wantURL, resolveHubAuthURL(tt.in.hubURL, tt.in.rootHub, tt.in.getenv, tt.in.settingsEndpoint))
 		})
 	}
 }
 
 // TestResolveHubAuthURL_AllCombinations checks every combination of flags,
-// settings and environment: the first set input in precedence order wins.
+// settings func and environment: the first set input in resolver order wins.
 func TestResolveHubAuthURL_AllCombinations(t *testing.T) {
 	for _, c := range allHubURLSources() {
-		want, wantSource := "", ""
-		for _, cand := range []struct{ v, src string }{
-			{c.hubURL, "--hub-url"},
-			{c.rootHub, "--hub"},
-			{c.settings, "settings"},
-			{c.envEndpoint, "env"},
-			{c.envURL, "env"},
-		} {
-			if cand.v != "" {
-				want, wantSource = cand.v, cand.src
+		want := ""
+		for _, v := range []string{c.hubURL, c.rootHub, c.settings, c.envEndpoint, c.envURL} {
+			if v != "" {
+				want = v
 				break
 			}
 		}
-		url, src := resolveHubAuthURL(c.hubURL, c.rootHub, c.getenv, c.settingsEndpoint)
-		assert.Equal(t, want, url, "inputs %+v", c)
-		assert.Equal(t, wantSource, src, "inputs %+v", c)
+		assert.Equal(t, want, resolveHubAuthURL(c.hubURL, c.rootHub, c.getenv, c.settingsEndpoint), "inputs %+v", c)
 	}
+}
+
+// TestResolveHubAuthURL_EnvOverridesSettingsFile goes through real settings
+// loading: with hub.endpoint in a settings file and SCION_HUB_ENDPOINT set,
+// the environment value wins for hub auth login and for GetHubEndpoint
+// alike, matching the documented effective order.
+func TestResolveHubAuthURL_EnvOverridesSettingsFile(t *testing.T) {
+	loginEndpointHome(t, "hub:\n  endpoint: https://from-file\n")
+	t.Chdir(t.TempDir())
+	t.Setenv("SCION_PROJECT", "")
+	t.Setenv("SCION_HUB_ENDPOINT", "https://from-env")
+
+	origHub, origNoHub := hubEndpoint, noHub
+	t.Cleanup(func() { hubEndpoint, noHub = origHub, origNoHub })
+	hubEndpoint, noHub = "", false
+
+	assert.Equal(t, "https://from-env", resolveHubAuthURL("", "", os.Getenv, settingsHubEndpoint))
+
+	resolvedPath, _, err := config.ResolveProjectPath("")
+	require.NoError(t, err)
+	settings, err := config.LoadSettings(resolvedPath)
+	require.NoError(t, err)
+	assert.Equal(t, "https://from-env", GetHubEndpoint(settings))
+
+	// Without the env override, the settings file is used by both. Unset
+	// rather than empty: settings loading applies an exported empty value.
+	require.NoError(t, os.Unsetenv("SCION_HUB_ENDPOINT"))
+	require.NoError(t, os.Unsetenv("SCION_HUB_URL"))
+	assert.Equal(t, "https://from-file", resolveHubAuthURL("", "", os.Getenv, settingsHubEndpoint))
+	settings, err = config.LoadSettings(resolvedPath)
+	require.NoError(t, err)
+	assert.Equal(t, "https://from-file", GetHubEndpoint(settings))
 }
 
 type fakeHubSettings string
@@ -134,7 +158,7 @@ func TestResolveHubAuthURL_AgreesWithGetHubEndpoint(t *testing.T) {
 		t.Setenv("SCION_HUB_URL", c.envURL)
 
 		want := GetHubEndpoint(fakeHubSettings(c.settings))
-		got, _ := resolveHubAuthURL("", hubEndpoint, os.Getenv, c.settingsEndpoint)
+		got := resolveHubAuthURL("", hubEndpoint, os.Getenv, c.settingsEndpoint)
 		assert.Equal(t, want, got, "inputs %+v", c)
 	}
 }
@@ -142,8 +166,8 @@ func TestResolveHubAuthURL_AgreesWithGetHubEndpoint(t *testing.T) {
 func TestHubAuthLoginHelpDocumentsPrecedence(t *testing.T) {
 	assert.Contains(t, hubAuthLoginCmd.Long, "1. --hub-url")
 	assert.Contains(t, hubAuthLoginCmd.Long, "2. the root --hub flag")
-	assert.Contains(t, hubAuthLoginCmd.Long, "3. hub.endpoint in settings")
-	assert.Contains(t, hubAuthLoginCmd.Long, "4. the SCION_HUB_ENDPOINT")
+	assert.Contains(t, hubAuthLoginCmd.Long, "3. the SCION_HUB_ENDPOINT")
+	assert.Contains(t, hubAuthLoginCmd.Long, "4. hub.endpoint in settings")
 	assert.Contains(t, hubAuthLoginCmd.Long, "5. the SCION_HUB_URL")
 }
 
