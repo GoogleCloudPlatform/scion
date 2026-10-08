@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net/http"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
@@ -264,4 +265,32 @@ func stripClientAttachmentRefs(md map[string]string) map[string]string {
 		}
 	}
 	return out
+}
+
+// writeConversationIDNotFound answers a caller-supplied conversation_id the
+// caller may not use exactly as an unknown one (400 "caller-supplied
+// conversation_id does not exist") and logs the reason.
+func writeConversationIDNotFound(ctx context.Context, w http.ResponseWriter, route, reason, callerKind, callerID string) {
+	slog.InfoContext(ctx, "reference refused",
+		"route", route,
+		"reason", reason,
+		"caller_type", callerKind,
+		"caller", callerID,
+	)
+	writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+		"caller-supplied conversation_id does not exist", nil)
+}
+
+// senderCanReadGroup reports whether the authenticated sender may read a
+// group conversation of projectID: an agent only within its own project (the
+// strict rule for agents), a user with read access to the project. Any other
+// caller, and any lookup error, answers false.
+func (s *Server) senderCanReadGroup(ctx context.Context, projectID string) bool {
+	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
+		return agentIdent.ProjectID() != "" && agentIdent.ProjectID() == projectID
+	}
+	if user := GetUserIdentityFromContext(ctx); user != nil {
+		return s.canReadProject(ctx, user, projectID)
+	}
+	return false
 }

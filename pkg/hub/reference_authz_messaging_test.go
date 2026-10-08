@@ -29,6 +29,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -178,4 +179,83 @@ func TestAgentOutbound_ThreadIDOfOtherProjectTopicMatchesMissing(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, len(partsBefore), len(partsAfter), "no participant row is added to the other project's conversation")
 	assertOnlyControlMessage(t, srv, s, project, agent, user)
+}
+
+func seedGroupConversation(t *testing.T, s store.Store, projectID, name string) string {
+	t.Helper()
+	pid := projectID
+	conv, err := s.UpsertConversationByExternalRef(context.Background(), &store.Conversation{
+		Kind: "group", Surface: "native", ExternalRef: "group:" + projectID + ":" + name,
+		ProjectID: &pid, DriftState: "active",
+	})
+	require.NoError(t, err)
+	return conv.ID
+}
+
+func participantCount(t *testing.T, s store.Store, convID string) int {
+	t.Helper()
+	parts, err := s.ListParticipants(context.Background(), convID)
+	require.NoError(t, err)
+	return len(parts)
+}
+
+func postMessageWithConv(t *testing.T, srv *Server, sender Identity, target *store.Agent, convID string) refAnswer {
+	t.Helper()
+	body, err := json.Marshal(MessageRequest{StructuredMessage: &messages.StructuredMessage{
+		Version: messages.Version, Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Sender: "x:" + sender.ID(), SenderID: sender.ID(),
+		Recipient: "agent:" + target.Slug, RecipientID: target.ID,
+		Msg: "into a group", Type: messages.TypeInstruction, ConversationID: convID,
+	}})
+	require.NoError(t, err)
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+target.ID+"/message", bytes.NewReader(body))
+	r.Header.Set("Content-Type", "application/json")
+	r = r.WithContext(contextWithIdentity(r.Context(), sender))
+	rr := httptest.NewRecorder()
+	srv.handleAgentMessage(rr, r, target.ID)
+	return refAnswer{status: rr.Code, body: rr.Body.String()}
+}
+
+func TestAgentMessage_GroupConversationRequiresSenderReadAccess(t *testing.T) {
+	f := acceptanceSetup(t)
+	groupB := seedGroupConversation(t, f.store, f.projectB, "general")
+	before := participantCount(t, f.store, groupB)
+
+	// An agent of project A whose message project B's inbound policy admits.
+	senderA := accAgentIdentity(f.hubAgentA.ID, f.projectA, f.hubAgentA.Ancestry)
+	missing := postMessageWithConv(t, f.srv, senderA, f.hubAgentB, tid("group-ref-unknown-conv"))
+	require.Equal(t, http.StatusBadRequest, missing.status, missing.body)
+	requireSameAnswer(t, missing, postMessageWithConv(t, f.srv, senderA, f.hubAgentB, groupB))
+	assert.Equal(t, before, participantCount(t, f.store, groupB), "no participant row is written")
+
+	// A user with no role in project B gets the same answer.
+	userA := NewAuthenticatedUser(f.ownerA.ID, f.ownerA.Email, f.ownerA.DisplayName, f.ownerA.Role, string(ClientTypeWeb))
+	missingForUser := postMessageWithConv(t, f.srv, userA, f.hubAgentB, tid("group-ref-unknown-conv"))
+	requireSameAnswer(t, missingForUser, postMessageWithConv(t, f.srv, userA, f.hubAgentB, groupB))
+	assert.Equal(t, before, participantCount(t, f.store, groupB), "no participant row is written")
+
+	// Project B's owner can post into it.
+	userB := NewAuthenticatedUser(f.ownerB.ID, f.ownerB.Email, f.ownerB.DisplayName, f.ownerB.Role, string(ClientTypeWeb))
+	ok := postMessageWithConv(t, f.srv, userB, f.hubAgentB, groupB)
+	require.Equal(t, http.StatusOK, ok.status, ok.body)
+	assert.Greater(t, participantCount(t, f.store, groupB), before)
+}
+
+func TestAgentOutbound_GroupConversationOfOtherProjectMatchesMissing(t *testing.T) {
+	srv, s, project, agent, user := def138Setup(t)
+	ctx := context.Background()
+	other := &store.Project{ID: tid("group-out-other-project"), Name: "Other", Slug: "group-out-other",
+		Created: time.Now(), Updated: time.Now()}
+	require.NoError(t, s.CreateProject(ctx, other))
+	groupOther := seedGroupConversation(t, s, other.ID, "general")
+	before := participantCount(t, s, groupOther)
+
+	send := func(convID string) refAnswer {
+		rr := postOutboundWithConv(t, srv, project.ID, agent.ID, user.Email, "into a group", convID)
+		return refAnswer{status: rr.Code, body: rr.Body.String()}
+	}
+	missing := send(tid("group-out-unknown-conv"))
+	require.Equal(t, http.StatusBadRequest, missing.status, missing.body)
+	requireSameAnswer(t, missing, send(groupOther))
+	assert.Equal(t, before, participantCount(t, s, groupOther), "no participant row is written")
 }

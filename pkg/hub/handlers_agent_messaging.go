@@ -542,8 +542,7 @@ func (s *Server) resolveOutboundRouting(
 					"auth_id", authID,
 					"error", err,
 				)
-				writeError(w, http.StatusForbidden, ErrCodeForbidden,
-					"authenticated sender is not a participant in the direct conversation", nil)
+				writeConversationIDNotFound(ctx, w, "/api/v1/agents/"+agent.ID+"/outbound-message", "sender is not a participant of the direct conversation", authKind, authID)
 				return nil, err
 			}
 		case "group":
@@ -557,8 +556,7 @@ func (s *Server) resolveOutboundRouting(
 					"conv_project_id", conv.ProjectID,
 					"agent_project_id", agent.ProjectID,
 				)
-				writeError(w, http.StatusForbidden, ErrCodeForbidden,
-					"conversation does not belong to the agent's project", nil)
+				writeConversationIDNotFound(ctx, w, "/api/v1/agents/"+agent.ID+"/outbound-message", "group conversation is not in the sending agent's project", authKind, authID)
 				return nil, fmt.Errorf("project mismatch")
 			}
 
@@ -585,8 +583,7 @@ func (s *Server) resolveOutboundRouting(
 				"conversation_id", conv.ID,
 				"kind", conv.Kind,
 			)
-			writeError(w, http.StatusForbidden, ErrCodeForbidden,
-				"unsupported conversation kind", nil)
+			writeConversationIDNotFound(ctx, w, "/api/v1/agents/"+agent.ID+"/outbound-message", "unsupported conversation kind", authKind, authID)
 			return nil, fmt.Errorf("unknown kind")
 		}
 
@@ -2293,8 +2290,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 						"auth_kind", authKind,
 						"error", err,
 					)
-					writeError(w, http.StatusForbidden, ErrCodeForbidden,
-						"authenticated sender is not a participant in the direct conversation", nil)
+					writeConversationIDNotFound(ctx, w, r.URL.Path, "sender is not a participant of the direct conversation", authKind, authID)
 					return
 				}
 			case "group":
@@ -2311,8 +2307,14 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 						"conv_project_id", conv.ProjectID,
 						"agent_project_id", agent.ProjectID,
 					)
-					writeError(w, http.StatusForbidden, ErrCodeForbidden,
-						"conversation does not belong to the agent's project", nil)
+					writeConversationIDNotFound(ctx, w, r.URL.Path, "group conversation is not in the recipient agent's project", authKind, authID)
+					return
+				}
+				// The sender must be able to read the group conversation
+				// (an agent only within its own project), checked before
+				// any participant row is written.
+				if !s.senderCanReadGroup(ctx, *conv.ProjectID) {
+					writeConversationIDNotFound(ctx, w, r.URL.Path, "sender cannot read the group conversation's project", authKind, authID)
 					return
 				}
 
@@ -2351,8 +2353,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 					"conversation_id", conv.ID,
 					"kind", conv.Kind,
 				)
-				writeError(w, http.StatusForbidden, ErrCodeForbidden,
-					"unsupported conversation kind", nil)
+				writeConversationIDNotFound(ctx, w, r.URL.Path, "unsupported conversation kind", authKind, authID)
 				return
 			}
 

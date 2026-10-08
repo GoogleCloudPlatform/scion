@@ -644,3 +644,24 @@ func TestAttachmentDownload_AgentDMFileReadableAfterProjectAccessEnds(t *testing
 	unlinked := f.attach(t, f.projA.ID, f.aa.ID, "other.txt")
 	requireSameAnswer(t, missing, f.download(t, f.ub, unlinked))
 }
+
+func TestCheckAccessError_DeniesGroupPost(t *testing.T) {
+	f := newRefFixture(t)
+	f.srv.SetDispatcher(&recordingDispatcher{})
+	alice := NewAuthenticatedUser(f.ua.ID, f.ua.Email, f.ua.DisplayName, f.ua.Role, string(ClientTypeWeb))
+
+	// While the store works the owner passes the check: the participant
+	// rows are written (delivery itself may fail later in this fixture).
+	okConv := seedGroupConversation(t, f.st, f.projA.ID, "works")
+	ok := postMessageWithConv(t, f.srv, alice, f.aa, okConv)
+	require.NotContains(t, ok.body, "caller-supplied conversation_id does not exist", "the owner passes the check: %s", ok.body)
+	require.Greater(t, participantCount(t, f.st, okConv), 0, "participant rows are written for an allowed post")
+
+	groupA := seedGroupConversation(t, f.st, f.projA.ID, "general")
+	before := participantCount(t, f.st, groupA)
+	f.faults.failGetProject = true
+	f.fault.Arm()
+	got := postMessageWithConv(t, f.srv, alice, f.aa, groupA)
+	assert.NotEqual(t, http.StatusOK, got.status, "a project lookup error refuses the post: %s", got.body)
+	assert.Equal(t, before, participantCount(t, f.st, groupA), "no participant row is written")
+}
