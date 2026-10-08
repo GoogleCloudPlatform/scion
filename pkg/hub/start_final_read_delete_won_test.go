@@ -211,13 +211,15 @@ func TestManagedStart_DeleteWonAtFinalRead(t *testing.T) {
 // path's final status write (the running write of a start or restart).
 type deleteBeforeStartWriteStore struct {
 	store.Store
+	// phase is the phase of the final status write to delete before.
+	phase         state.Phase
 	pub           *deleteRecordingPublisher
 	applied       atomic.Bool
 	eventsAtApply atomic.Int64
 }
 
 func (p *deleteBeforeStartWriteStore) UpdateAgentStatus(ctx context.Context, id string, u store.AgentStatusUpdate) error {
-	if u.Phase == string(state.PhaseRunning) && p.applied.CompareAndSwap(false, true) {
+	if u.Phase == string(p.phase) && p.applied.CompareAndSwap(false, true) {
 		p.eventsAtApply.Store(int64(len(p.pub.snapshot())))
 		if err := p.DeleteAgent(ctx, id); err != nil {
 			return err
@@ -228,16 +230,38 @@ func (p *deleteBeforeStartWriteStore) UpdateAgentStatus(ctx context.Context, id 
 
 // ptone/scion#3705: a managed-runtime start or restart whose row is
 // hard-deleted before its final write answers 409 delete_in_progress, not
-// 404.
+// 404. A stop is unchanged: the same write error answers 404, not
+// delete_in_progress.
 func TestManagedStart_HardDeleteBeforeFinalWrite_Answers409(t *testing.T) {
-	for _, action := range []string{api.AgentActionStart, api.AgentActionRestart} {
-		t.Run(action, func(t *testing.T) {
+	for _, tc := range []struct {
+		action string
+		from   state.Phase // the agent's phase before the action
+		write  state.Phase // the phase of the final status write
+	}{
+		{api.AgentActionStart, state.PhaseStopped, state.PhaseRunning},
+		{api.AgentActionRestart, state.PhaseStopped, state.PhaseRunning},
+		{api.AgentActionStop, state.PhaseRunning, state.PhaseStopped},
+	} {
+		t.Run(tc.action, func(t *testing.T) {
 			srv, s, agent := newManagedStartServer(t)
-			p := &deleteBeforeStartWriteStore{Store: s, pub: recordAgentEvents(t, srv)}
+			if tc.from != state.PhaseStopped {
+				a, err := s.GetAgent(context.Background(), agent.ID)
+				require.NoError(t, err)
+				a.Phase = string(tc.from)
+				require.NoError(t, s.UpdateAgent(context.Background(), a))
+			}
+			p := &deleteBeforeStartWriteStore{Store: s, phase: tc.write, pub: recordAgentEvents(t, srv)}
 			srv.store = p
 
-			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/"+action, nil)
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/"+tc.action, nil)
 			require.True(t, p.applied.Load(), "the row was deleted before the final write")
+			if tc.action == api.AgentActionStop {
+				require.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+				var body ErrorResponse
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+				assert.NotEqual(t, ErrCodeDeleteInProgress, body.Error.Code)
+				return
+			}
 			requireDeleteWonAnswer(t, rec, agent.ID)
 			for _, e := range p.pub.snapshot()[p.eventsAtApply.Load():] {
 				assert.NotEqual(t, "status", e.kind, "no status publish after a delete won")
@@ -358,10 +382,10 @@ func TestCreateExisting_DeleteWonAtFinalRead(t *testing.T) {
 	}
 }
 
-// claimAfterPostStartWriteStore claims the row for a delete right after the
-// post-start step's agent update of handleExistingAgent landed (after that
-// step's own re-read), independently of where the handler reads the row
-// next.
+// claimAfterPostStartWriteStore applies a delete (apply, on the raw store)
+// right after the post-start step's agent update of handleExistingAgent
+// landed (after that step's own re-read), independently of where the
+// handler reads the row next.
 type claimAfterPostStartWriteStore struct {
 	store.Store
 	apply   func()
@@ -377,10 +401,13 @@ func (p *claimAfterPostStartWriteStore) UpdateAgent(ctx context.Context, a *stor
 	return err
 }
 
-// ptone/scion#3711: a delete that claims the row right after the post-start
-// write, while the start's claim is still held, is caught by the final read
-// before the answer: 409 delete_in_progress, no agent body, no subscription.
-func TestCreateExisting_DeleteClaimAfterPostStartWrite_Answers409(t *testing.T) {
+// ptone/scion#3711: a delete that holds or removes the row right after the
+// post-start write, while the start's claim is still held, is caught by the
+// final read before the answer, whatever reads the handler makes after that
+// write: 409 delete_in_progress, no agent body, no status publish and no
+// notify subscription for every delete-won row of the table, 200 with the
+// agent for a live row.
+func TestCreateExisting_DeleteAfterPostStartWrite(t *testing.T) {
 	branches := []struct {
 		name  string
 		phase state.Phase
@@ -391,27 +418,46 @@ func TestCreateExisting_DeleteClaimAfterPostStartWrite_Answers409(t *testing.T) 
 		{"start-created", state.PhaseCreated, nil},
 	}
 	for _, br := range branches {
-		t.Run(br.name, func(t *testing.T) {
-			f := handleExistingAgentAuthzSetup(t)
-			agent := f.agent(t, "cx-poststart", string(br.phase))
-			client := &landingClient{mockRuntimeBrokerClient: &mockRuntimeBrokerClient{}, reportRunID: true}
-			f.srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(f.store, client, false, slog.Default()))
-			p := &claimAfterPostStartWriteStore{Store: f.store, apply: func() {
-				claimForTest(t, f.store, agent.ID, store.DeletionStateDeleting, time.Minute)
-			}}
-			f.srv.store = p
+		for _, del := range finalReadDeletes {
+			t.Run(br.name+"/"+del.name, func(t *testing.T) {
+				f := handleExistingAgentAuthzSetup(t)
+				agent := f.agent(t, "cx-poststart", string(br.phase))
+				client := &landingClient{mockRuntimeBrokerClient: &mockRuntimeBrokerClient{}, reportRunID: true}
+				f.srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(f.store, client, false, slog.Default()))
+				pub := recordAgentEvents(t, f.srv)
+				var eventsAtApply int
+				p := &claimAfterPostStartWriteStore{Store: f.store, apply: func() {
+					eventsAtApply = len(pub.snapshot())
+					del.apply(t, f.store, agent.ID)
+				}}
+				f.srv.store = p
 
-			req := map[string]interface{}{"name": agent.Slug, "projectId": f.project.ID, "notify": true}
-			for k, v := range br.body {
-				req[k] = v
-			}
-			rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPost, "/api/v1/agents", req)
-			require.NotEmpty(t, client.lastStartExtras.RunID, "the start reached the broker: %s", rec.Body.String())
-			require.True(t, p.applied.Load(), "the delete claimed the row after the post-start write")
-			requireDeleteWonAnswer(t, rec, agent.ID)
-			subs, err := f.store.GetNotificationSubscriptions(context.Background(), agent.ID)
-			require.NoError(t, err)
-			assert.Empty(t, subs, "no notify subscription after a delete won")
-		})
+				req := map[string]interface{}{"name": agent.Slug, "projectId": f.project.ID, "notify": true}
+				for k, v := range br.body {
+					req[k] = v
+				}
+				rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPost, "/api/v1/agents", req)
+				require.NotEmpty(t, client.lastStartExtras.RunID, "the start reached the broker: %s", rec.Body.String())
+				require.True(t, p.applied.Load(), "the delete was applied after the post-start write")
+				subs, err := f.store.GetNotificationSubscriptions(context.Background(), agent.ID)
+				require.NoError(t, err)
+
+				if !del.deleteWon {
+					require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+					var resp CreateAgentResponse
+					require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+					require.NotNil(t, resp.Agent)
+					assert.Equal(t, agent.ID, resp.Agent.ID)
+					assert.Equal(t, string(state.PhaseRunning), resp.Agent.Phase)
+					assert.NotEmpty(t, subs, "notify subscribes on a successful start")
+					return
+				}
+				requireDeleteWonAnswer(t, rec, agent.ID)
+				for _, e := range pub.snapshot()[eventsAtApply:] {
+					assert.NotEqual(t, "status", e.kind, "no status publish after a delete won")
+				}
+				assert.Empty(t, subs, "no notify subscription after a delete won")
+			})
+		}
 	}
 }

@@ -383,9 +383,9 @@ func (s *Server) handleManagedAgentLifecycle(w http.ResponseWriter, r *http.Requ
 	// paths do. A stop whose action fails keeps intent stopped.
 	var intent store.RunIntent
 	switch action {
-	case "start", "restart":
+	case api.AgentActionStart, api.AgentActionRestart:
 		intent = store.RunIntentRunning
-	case "stop":
+	case api.AgentActionStop:
 		intent = store.RunIntentStopped
 	}
 	if intent != "" {
@@ -396,17 +396,17 @@ func (s *Server) handleManagedAgentLifecycle(w http.ResponseWriter, r *http.Requ
 	}
 
 	switch action {
-	case "start":
+	case api.AgentActionStart:
 		newPhase = string("running")
-	case "stop":
+	case api.AgentActionStop:
 		newPhase = string("stopped")
 		// Clear exposed ports — agent is stopping, ports are unreachable
 		s.clearExposedPortsForAgent(ctx, agent.ID)
 		actionErr = s.managedAgentStop(ctx, agent)
-	case "restart":
+	case api.AgentActionRestart:
 		_ = s.managedAgentStop(ctx, agent)
 		newPhase = string("running")
-	case "suspend":
+	case api.AgentActionSuspend:
 		writeError(w, http.StatusBadRequest, ErrCodeValidationError,
 			"Suspend is not supported for managed agents — use stop instead.", nil)
 		return
@@ -424,7 +424,7 @@ func (s *Server) handleManagedAgentLifecycle(w http.ResponseWriter, r *http.Requ
 	statusUpdate := store.AgentStatusUpdate{
 		Phase: newPhase,
 	}
-	if action == "stop" {
+	if action == api.AgentActionStop {
 		statusUpdate.Activity = ""
 	}
 	starting := action == api.AgentActionStart || action == api.AgentActionRestart

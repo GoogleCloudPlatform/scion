@@ -2438,6 +2438,11 @@ func (s *Server) existingAgentDeleteWon(ctx context.Context, w http.ResponseWrit
 // that completed and then a delete is a valid order. It reports whether it
 // answered.
 func (s *Server) existingAgentDeleteWonBeforeAnswer(ctx context.Context, w http.ResponseWriter, agentID string, afterErr error) bool {
+	// The post-start write already found the row gone: answer from that
+	// rather than rely on the re-read below, which could fail transiently
+	// (any read error other than "row gone" reports no delete) and answer
+	// 200 for an agent whose delete won.
+	// TestCreateExisting_DeleteWinsAfterReRead_HardDelete409 pins this.
 	if afterErr != nil && s.existingAgentGoneAfterLanding(ctx, w, agentID, afterErr) {
 		return true
 	}

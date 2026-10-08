@@ -456,11 +456,9 @@ func TestLifecycleStopNotRecorded_DeletionAdminVsNonAdmin(t *testing.T) {
 	}
 }
 
-// claimAfterStatusStore seeds a live delete claim right after the first
+// claimAfterStatusStore seeds a delete claim right after the first
 // successful UpdateAgentStatus, so a managed lifecycle action answers from
-// the claimed row. Only a stop does: a managed start or restart whose row
-// a delete holds by its final read answers 409 delete_in_progress with no
-// agent body (ptone/scion#3705).
+// the claimed row.
 type claimAfterStatusStore struct {
 	store.Store
 	once  sync.Once
@@ -475,35 +473,56 @@ func (c *claimAfterStatusStore) UpdateAgentStatus(ctx context.Context, id string
 	return nil
 }
 
+// A managed lifecycle action that answers 200 from a row a delete claimed
+// after its status write carries the deletion view, with the detail for
+// the admin only. A stop answers from a live deleting claim. A start or
+// restart whose row a delete holds by its final read answers 409 instead
+// (ptone/scion#3705), so the start case seeds a failed claim, which leaves
+// the agent live. The failed claim keeps an outstanding broker delete
+// intent: without one, the start's settle step clears a failed marker
+// (clearFailedDeletion) and the answer carries no view.
 func TestManagedLifecycle_DeletionAdminVsNonAdmin(t *testing.T) {
 	prev := managedBackendInst
 	managedBackendInst = stubManagedAgentBackend{}
 	t.Cleanup(func() { managedBackendInst = prev })
-	views := map[string]map[string]json.RawMessage{}
-	for _, c := range []struct {
-		name     string
-		identity Identity
+	for _, tc := range []struct {
+		action    string
+		phase     state.Phase
+		seed      deleteSeed
+		wantState string
 	}{
-		{"admin", NewAuthenticatedUser("u-admin", "admin@test.com", "Admin", "admin", "web")},
-		{"member", NewAuthenticatedUser("u-m", "m@test.com", "M", "member", "web")},
+		{"stop", state.PhaseRunning, seedLiveDeleting, store.DeletionStateDeleting},
+		{"start", state.PhaseStopped, seedFailedIntent, store.DeletionStateFailed},
 	} {
-		srv, s := testServer(t)
-		agent := setupBrokerAgentInPhase(t, s, "redact-managed-"+c.name, state.PhaseRunning)
-		agent.Runtime = ManagedRuntimePrefix + "test"
-		require.NoError(t, s.UpdateAgent(context.Background(), agent))
-		srv.store = &claimAfterStatusStore{Store: s, claim: func() {
-			seedDeletionWithError(t, s, agent.ID, seedLiveDeleting, "managed claim detail")
-		}}
-		views[c.name] = lifecycleAs(t, srv, c.identity, agent.ID, "stop")
+		t.Run(tc.action, func(t *testing.T) {
+			views := map[string]map[string]json.RawMessage{}
+			for _, c := range []struct {
+				name     string
+				identity Identity
+			}{
+				{"admin", NewAuthenticatedUser("u-admin", "admin@test.com", "Admin", "admin", "web")},
+				{"member", NewAuthenticatedUser("u-m", "m@test.com", "M", "member", "web")},
+			} {
+				srv, s := testServer(t)
+				agent := setupBrokerAgentInPhase(t, s, "redact-managed-"+tc.action+"-"+c.name, tc.phase)
+				agent.Runtime = ManagedRuntimePrefix + "test"
+				require.NoError(t, s.UpdateAgent(context.Background(), agent))
+				srv.store = &claimAfterStatusStore{Store: s, claim: func() {
+					seedDeletionWithError(t, s, agent.ID, tc.seed, "managed claim detail")
+				}}
+				views[c.name] = lifecycleAs(t, srv, c.identity, agent.ID, tc.action)
+			}
+			require.NotNil(t, views["admin"])
+			assert.JSONEq(t, `"`+tc.wantState+`"`, string(views["admin"]["state"]))
+			assert.JSONEq(t, `"managed claim detail"`, string(views["admin"]["error"]))
+			assert.Contains(t, views["admin"], "claim")
+			require.NotNil(t, views["member"])
+			for _, k := range deletionDetailKeys {
+				assert.NotContains(t, views["member"], k)
+			}
+			assert.JSONEq(t, string(views["admin"]["state"]), string(views["member"]["state"]))
+		})
 	}
-	require.NotNil(t, views["admin"])
-	assert.JSONEq(t, `"managed claim detail"`, string(views["admin"]["error"]))
-	assert.Contains(t, views["admin"], "claim")
-	require.NotNil(t, views["member"])
-	for _, k := range deletionDetailKeys {
-		assert.NotContains(t, views["member"], k)
-	}
-	assert.JSONEq(t, string(views["admin"]["state"]), string(views["member"]["state"]))
 }
 
 // --- delete 202 and failure bodies ---
