@@ -2397,8 +2397,7 @@ func (s *Server) createAgentInProject(
 		}
 
 		if !hasLocalPath && !s.isEmbeddedBroker(runtimeBrokerID) {
-			stor := s.GetStorage()
-			if stor != nil {
+			if stor := s.GetStorage(); stor != nil {
 				resolvedWorkspace, workspaceErr := s.resolveHubManagedWorkspaceForUpload(agent.AppliedConfig.Workspace, project.Slug)
 				if errors.Is(workspaceErr, errWorkspaceContentTimeout) {
 					// Workspace storage did not respond. Dispatching without
@@ -2420,6 +2419,29 @@ func (s *Server) createAgentInProject(
 					s.agentLifecycleLog.Warn("Skipping GCS upload of invalid hub-managed project workspace",
 						"agent_id", agent.ID,
 						"project_id", project.ID, "error", workspaceErr)
+				} else if stor.Provider() != storage.ProviderGCS && project.GitRemote != "" {
+					// The upload below is always a GCS sync (gcp.SyncToGCS),
+					// so a hub on any other storage provider cannot run it
+					// (ptone/scion#3765). A shared-workspace project with a
+					// git remote needs no upload: the broker builds the
+					// shared workspace from the remote, so dispatch it with
+					// the hub-managed workspace and skip only the sync.
+				} else if stor.Provider() != storage.ProviderGCS {
+					// A project without a git remote: the remote broker has
+					// no other way to get the workspace, and this hub cannot
+					// upload it (ptone/scion#3765). Fail the create before
+					// dispatch: the agent row and quotas exist, nothing has
+					// been dispatched and no credential has been minted.
+					msg := remoteBrokerNeedsGCSMessage(stor.Provider())
+					s.agentLifecycleLog.Warn("Hub storage cannot carry the workspace upload to a remote broker; failing agent create",
+						"storage_provider", string(stor.Provider()), "agent_id", agent.ID,
+						"project_id", project.ID, "broker_id", runtimeBrokerID)
+					ucancel()
+					corrID := cleanup(createRollback{Stage: createStageWorkspaceStorage, Cause: errors.New(msg)})
+					writeCreateFailure(w, corrID, func() {
+						writeError(w, http.StatusPreconditionFailed, ErrCodeUnsupportedCapability, msg, nil)
+					})
+					return
 				} else {
 					storagePath := storage.ProjectWorkspaceStoragePath(s.HubID(), project.ID)
 					if err := syncToGCSForWorkspaceUpload(uctx, resolvedWorkspace, stor.Bucket(), storagePath+"/files"); err != nil {
@@ -2440,9 +2462,9 @@ func (s *Server) createAgentInProject(
 						// Swap workspace to storage path for remote broker
 						agent.AppliedConfig.Workspace = ""
 						agent.AppliedConfig.WorkspaceStoragePath = storagePath
-						// The upload above is always GCS (gcp.SyncToGCS), so
-						// stor.Bucket() names the GCS bucket whatever stor's
-						// provider; no workspaceDownloadBucket check is needed.
+						// The upload above is a GCS sync (gcp.SyncToGCS), and
+						// the provider check before it means stor is GCS, so
+						// stor.Bucket() names the bucket uploaded to.
 						agent.AppliedConfig.WorkspaceStorageBucket = stor.Bucket()
 						if err := s.store.UpdateAgent(detachLaunchFromClient(ctx), agent); err != nil {
 							s.agentLifecycleLog.Warn("Failed to update agent with workspace storage path", "agent_id", agent.ID, "error", err)
