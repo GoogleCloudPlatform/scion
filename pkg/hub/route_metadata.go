@@ -1167,8 +1167,11 @@ type routePermissionDecisionResult struct {
 	outcome  routePermissionOutcome
 	message  string   // for routePermissionMisconfigured
 	identity Identity // for the denial log
-	target   Resource // for the denial log
+	target   Resource // for the denial log; unset when nonUser
 	reason   string   // for the denial log
+	// nonUser is set when the caller is not a user identity, so no target
+	// was resolved.
+	nonUser bool
 }
 
 // routePermissionDecision makes the permission decision for a
@@ -1201,7 +1204,7 @@ func (s *Server) routePermissionDecision(r *http.Request, meta RouteMetadata) ro
 	user, ok := identity.(UserIdentity)
 	if !ok {
 		return routePermissionDecisionResult{outcome: routePermissionForbidden, identity: identity,
-			target: Resource{Type: meta.Resource}, reason: "non-user identity"}
+			nonUser: true, reason: "non-user identity"}
 	}
 	target, evidence, targetOK := routeGuardTarget(meta)
 	if !targetOK {
@@ -1292,7 +1295,13 @@ func (s *Server) routeGuard(meta RouteMetadata, next http.HandlerFunc) http.Hand
 					writeSessionOnlyDenial(w, ErrCodeForbidden, "Insufficient permissions", meta.SessionOnly)
 					return
 				default:
-					logAuthzDenial(r, d.identity, d.target, Action(meta.Action), d.reason)
+					if d.nonUser {
+						// No target was resolved; label the log with the
+						// route's resource type only.
+						logAuthzDenial(r, d.identity, Resource{Type: meta.Resource}, Action(meta.Action), d.reason)
+					} else {
+						logAuthzDenial(r, d.identity, d.target, Action(meta.Action), d.reason)
+					}
 					writeForbiddenStructured(w, "", meta.Resource, Action(meta.Action))
 					return
 				}
