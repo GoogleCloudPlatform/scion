@@ -1375,7 +1375,7 @@ func TestBroker_Publish_ConversationContextForLinkedUser(t *testing.T) {
 		sentPaths = append(sentPaths, r.URL.Path)
 		mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(ActivityResponse{ID: "out-act"})
+		_ = json.NewEncoder(w).Encode(ActivityResponse{ID: "out-act"})
 	}))
 	defer apiServer.Close()
 
