@@ -518,17 +518,19 @@ func (r *rootLookupStore) GetUser(ctx context.Context, id string) (*store.User, 
 	return r.Store.GetUser(ctx, id)
 }
 
-// A hold whose root user is not found (deleted) or comes back nil is not
-// admitted: the lift is refused with 409 and the hold stays. Any other root
+// A hold whose root user is not found (deleted), comes back nil or is not
+// active is not admitted: the lift is refused with 409 and the hold stays. Any other root
 // lookup error refuses the lift as a fault.
 func TestAgentHoldLift_RootUserMissingNotAdmitted(t *testing.T) {
 	cases := []struct {
 		name     string
 		user     *store.User
+		status   string // when set, the served user is the fixture user with this status
 		err      error
 		wantCode int
 	}{
 		{name: "not_found", err: store.ErrNotFound, wantCode: http.StatusConflict},
+		{name: "inactive_user", status: store.UserStatusSuspended, wantCode: http.StatusConflict},
 		{name: "wrapped_not_found", err: fmt.Errorf("get user: %w", store.ErrNotFound), wantCode: http.StatusConflict},
 		{name: "nil_user", wantCode: http.StatusConflict},
 		{name: "lookup_fault", err: errors.New("injected user lookup fault"), wantCode: http.StatusInternalServerError},
@@ -537,8 +539,16 @@ func TestAgentHoldLift_RootUserMissingNotAdmitted(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newMSFixture(t, "lift-root-"+tc.name)
 			f.hold(f.agentA.ID, f.userID)
+			served := tc.user
+			if tc.status != "" {
+				u, err := f.s.GetUser(context.Background(), f.userID)
+				require.NoError(t, err)
+				cp := *u
+				cp.Status = tc.status
+				served = &cp
+			}
 			orig := f.srv.store
-			f.srv.store = &rootLookupStore{Store: orig, userID: f.userID, user: tc.user, err: tc.err}
+			f.srv.store = &rootLookupStore{Store: orig, userID: f.userID, user: served, err: tc.err}
 			rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+f.agentA.ID+"/hold/lift", nil)
 			f.srv.store = orig
 			assert.Equal(t, tc.wantCode, rec.Code, rec.Body.String())
