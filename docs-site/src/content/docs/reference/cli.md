@@ -882,7 +882,7 @@ Manages connection to and interaction with a Scion Hub. Authentication lives und
         - `--json`: Print `brokerId`, `brokerName`, `joinToken`, `expiresAt`, `hubEndpoint` and `reissued` as JSON.
 - `scion hub secret`: Manage write-only secrets on the Hub.
     - `set <key> <value>`: Set a secret (supports `--allow-progeny` for user-scoped secrets).
-    - `get [key]`: Get secret metadata. Honours `--format json` (as well as `--json`).
+    - `get [key]`: Get secret metadata. Honors `--format json` (as well as `--json`).
     - `clear <key>`: Remove a secret.
     - `migrate`: Move existing secrets from the Hub database to GCP Secret Manager.
         - Flags: `--gcp-project <id>` (required, the GCP project ID), `--credentials <path>` (GCP credentials JSON), `--dry-run`, `--force` (re-migrate secrets that already reference Secret Manager), `--hub-id <id>` (Hub instance ID used to namespace secrets). Works from any directory; no project is required.
@@ -893,7 +893,7 @@ Manages connection to and interaction with a Scion Hub. Authentication lives und
         - Flags: `--display-name <string>`, `--note <string>`, `--json`.
 - `scion hub env`: Manage environment variables on the Hub.
     - `set <key>=<value>`: Set a variable.
-    - `get [key]`: Get variable values. `get` and `list` honour `--format json` (as well as `--json`).
+    - `get [key]`: Get variable values. `get` and `list` honor `--format json` (as well as `--json`).
     - `clear <key>`: Remove a variable.
 - `scion hub hook` (alias `psh`): Manage hub-scoped (baseline) pre-start hooks. Requires administrator privileges.
     - `list` (alias `ls`): List hub-scoped pre-start hooks.
