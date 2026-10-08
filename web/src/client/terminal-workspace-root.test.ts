@@ -18,6 +18,7 @@ import { TerminalSessionRegistry } from './terminal-sessions.js';
 import type { Agent } from '../shared/types.js';
 import { _appFrameRefCountForTests } from '../components/shared/app-frame.js';
 import {
+  TERMINAL_DRAG_MIME,
   TERMINAL_PALETTE_NEW_AGENT_EVENT,
   type TerminalPaletteNewAgentDetail,
 } from './terminal-workspace-events.js';
@@ -273,6 +274,117 @@ describe('data-effective-layout attribute (#1716)', () => {
   });
 });
 
+describe('empty multi-pane slots show drop targets (ptone/scion#3778)', () => {
+  let root: TerminalWorkspaceRoot;
+  const AGENT_ID = '11111111-1111-4111-8111-111111111111';
+
+  beforeEach(() => {
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      cb(0);
+      return 0;
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve(
+          new Response(JSON.stringify({ id: AGENT_ID, name: 'test', phase: 'running' }), {
+            status: 200,
+          })
+        )
+      )
+    );
+    vi.stubGlobal(
+      'WebSocket',
+      class {
+        onopen = null;
+        onclose = null;
+        send = vi.fn();
+        close = vi.fn();
+        readyState = 0;
+      }
+    );
+    root = new WorkspaceRoot();
+    document.body.append(root.element);
+  });
+
+  afterEach(() => {
+    root.dispose();
+    root.element.remove();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  function placeholders(): HTMLElement[] {
+    return [
+      ...getPaneHost(root).querySelectorAll<HTMLElement>('.terminal-slot-placeholder'),
+    ].filter((ph) => !ph.hidden);
+  }
+
+  /** Overlays that cover the whole pane host when shown. */
+  function visibleOverlays(): HTMLElement[] {
+    return [
+      ...getPaneHost(root).querySelectorAll<HTMLElement>('.terminal-empty, .terminal-status'),
+    ].filter((el) => !el.hidden);
+  }
+
+  function dropOn(el: HTMLElement, sessionKey: string): void {
+    const data = new Map<string, string>([[TERMINAL_DRAG_MIME, sessionKey]]);
+    const event = new Event('drop', { bubbles: true, cancelable: true }) as DragEvent;
+    Object.defineProperty(event, 'dataTransfer', {
+      value: {
+        types: [...data.keys()],
+        getData: (type: string): string => data.get(type) ?? '',
+      },
+    });
+    el.dispatchEvent(event);
+  }
+
+  const presets = [
+    ['two-columns', 2],
+    ['two-rows', 2],
+    ['four', 4],
+  ] as const;
+
+  it.each(presets)('shows %s placeholders with no terminals open', async (preset, count) => {
+    root.layoutManager.setLayout(preset);
+    await flush();
+    expect(placeholders()).toHaveLength(count);
+    expect(visibleOverlays()).toEqual([]);
+  });
+
+  it.each(presets)(
+    'shows %s placeholders that accept a drop when no slot is filled',
+    async (preset, count) => {
+      const registry = new TerminalSessionRegistry({
+        hubUrl: window.location.origin,
+        accountId: 'test',
+      });
+      const session = root.create(registry, AGENT_ID);
+      root.layoutManager.setLayout(preset);
+      await flush();
+
+      expect(root.layoutManager.getVisibleSlots().every((s) => s === null)).toBe(true);
+      const slots = placeholders();
+      expect(slots).toHaveLength(count);
+      expect(slots.map((ph) => ph.dataset.slotIndex)).toEqual(
+        Array.from({ length: count }, (_, i) => String(i))
+      );
+      expect(visibleOverlays()).toEqual([]);
+
+      for (let i = 0; i < count; i++) {
+        const target = getPaneHost(root).querySelector<HTMLElement>(
+          `.terminal-slot-placeholder[data-slot-index="${i}"]`
+        );
+        expect(target).not.toBeNull();
+        dropOn(target!, session.state.key);
+        await flush();
+        const visible = root.layoutManager.getVisibleSlots();
+        expect(visible[i]).toBe(session.state.key);
+        expect(visible.filter((s) => s !== null)).toHaveLength(1);
+      }
+    }
+  );
+});
 describe('focus outline suppression in single-pane mode (#1716)', () => {
   let root: TerminalWorkspaceRoot;
 

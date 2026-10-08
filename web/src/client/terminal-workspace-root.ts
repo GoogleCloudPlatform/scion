@@ -1147,12 +1147,19 @@ export class TerminalWorkspaceRoot {
     const visibleSlots = this.layoutManager.getVisibleSlots();
     const hasSelected = visibleSlots.some((s) => s !== null);
 
-    // In multi-pane layouts with zero agents, show dotted placeholders instead
-    // of the "No terminals are open." message. This gives the user clear drop
-    // targets even before any session has been created.
+    // Multi-pane layouts show a dotted placeholder in every empty slot, so
+    // neither full-size overlay is shown there: both would cover the
+    // placeholders and hide the drop targets, whether or not any terminal
+    // is open yet. Narrow and zoomed views render a single slot with no
+    // placeholder and keep the status message.
     const isMultiPane = layoutState.active !== 'single';
+    const showsPlaceholders =
+      isMultiPane &&
+      !(this.narrowQuery?.matches ?? false) &&
+      this.layoutManager.getZoomed() === null;
     this.empty.hidden = total > 0 || isMultiPane;
-    this.status.hidden = (total > 0 && hasSelected) || (total === 0 && isMultiPane);
+    this.status.hidden =
+      (total > 0 && hasSelected) || (total === 0 && isMultiPane) || showsPlaceholders;
 
     // Rail rendering
     this.railList.replaceChildren(...entries.map((entry) => this.renderRailEntry(entry)));
