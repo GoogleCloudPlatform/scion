@@ -180,6 +180,9 @@ export class ScionPageAdminGroups extends LitElement {
       border: 1px solid var(--scion-border, #e2e8f0);
       border-radius: var(--scion-radius-lg, 0.75rem);
       overflow: hidden;
+      /* Size the table to this container, not the viewport: the app shell's
+         sidebar leaves ~509px here at an 820px-wide viewport. */
+      container-type: inline-size;
     }
 
     table {
@@ -263,9 +266,9 @@ export class ScionPageAdminGroups extends LitElement {
 
     .group-name-link {
       font-weight: 500;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
+      /* Wrap long names instead of letting a nowrap run set the table's
+         minimum width (which clipped the Type column and beyond). */
+      overflow-wrap: anywhere;
       color: var(--scion-text, #1e293b);
       text-decoration: none;
     }
@@ -285,9 +288,7 @@ export class ScionPageAdminGroups extends LitElement {
       font-size: 0.75rem;
       font-family: var(--scion-font-mono, monospace);
       color: var(--scion-text-muted, #64748b);
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
+      overflow-wrap: anywhere;
     }
 
     .type-badge {
@@ -310,6 +311,8 @@ export class ScionPageAdminGroups extends LitElement {
     }
 
     .description-text {
+      /* block so max-width + ellipsis actually apply (no-ops on an inline span) */
+      display: block;
       font-size: 0.8125rem;
       color: var(--scion-text-muted, #64748b);
       max-width: 300px;
@@ -521,6 +524,14 @@ export class ScionPageAdminGroups extends LitElement {
     .permission-denied-state p {
       color: var(--scion-text-muted, #64748b);
       margin: 0;
+    }
+
+    /* Drop the secondary columns when the table's container is narrow,
+       whatever the viewport width (sidebar visible at tablet widths). */
+    @container (max-width: 719px) {
+      .hide-mobile {
+        display: none;
+      }
     }
 
     @media (max-width: 768px) {
@@ -1224,7 +1235,9 @@ export class ScionPageAdminGroups extends LitElement {
           </span>
         </td>
         <td class="hide-mobile">
-          <span class="description-text">${group.description || '—'}</span>
+          <span class="description-text" title=${group.description || nothing}
+            >${group.description || '—'}</span
+          >
         </td>
         <td class="hide-mobile">
           ${labels.length > 0
