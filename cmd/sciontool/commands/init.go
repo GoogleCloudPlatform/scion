@@ -949,6 +949,10 @@ func RunInit(args []string, opts InitRunOptions) int {
 		}
 	}
 
+	// Before the harness starts, drop the session-metrics tombstone the
+	// previous shutdown may have left, so a resumed session is counted.
+	clearSessionTombstoneAtStartup(agentHome)
+
 	// Create supervisor with configuration
 	config := harnessSupervisorConfig(opts, gracePeriod, targetUID, targetGID, rootless, harnessEnvOverlay, nativeTelemetryPolicy, secretOverrides)
 	sup := supervisor.New(config)
@@ -1346,9 +1350,13 @@ waitLoop:
 		log.Debug("Heartbeat loop stopped")
 	}
 
-	// The harness has exited by now. Determine the final exit code and
-	// whether this was a crash; the session-metrics backstop below needs
-	// it, and it is a local read only. Also recognize ExitCodeLimitsExceeded from the child process itself
+	// The supervised child has exited. On a natural exit the harness has
+	// too. On a stop it may not have: the child is the tmux client, which
+	// alone receives the SIGTERM, and the harness keeps running under the
+	// tmux server (its own session) until this process exits, so its hooks
+	// may still fire. Determine the final exit code and whether this was a
+	// crash; the session-metrics backstop below needs it, and it is a local
+	// read only. Also recognize ExitCodeLimitsExceeded from the child process itself
 	// (e.g., the harness detected limits before the supervisor signal).
 	if !limitsExceeded && result.code == handlers.ExitCodeLimitsExceeded {
 		limitsExceeded = true
@@ -1368,10 +1376,15 @@ waitLoop:
 	finalCode := outcome.exitCode
 	limitsExceeded = outcome.limitsExceeded
 
-	// Report a session whose session-end hook never ran (the stop killed
-	// the harness, or the harness has no session-end hook). This runs
+	// Report a session whose session-end hook has not run (the agent is
+	// being stopped, or the harness has no session-end hook). The session
+	// is tombstoned, so hook events that still arrive from a running
+	// harness, a late session-end included, are ignored rather than
+	// reported again; the report may miss those last events. This runs
 	// first in the shutdown sequence, before the slower steps below, so it
-	// fits inside the runtime's stop grace period. It is bounded.
+	// fits inside the runtime's stop grace period. It is bounded (2s lock
+	// wait plus shutdownSessionReportTimeout) and deliberately runs ahead
+	// of the stopping and final status reports.
 	reportOpenSessionAtShutdown(agentHome, outcome, hub.NewClient)
 
 	// Clean up the GitHub token file on exit

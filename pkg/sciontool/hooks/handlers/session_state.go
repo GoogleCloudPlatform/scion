@@ -70,8 +70,10 @@ type sessionStateFile struct {
 	// Closed marks a tombstone: the session in Aggregator (only its ID and
 	// start time are kept) was finalized and reported by the init daemon
 	// at shutdown, because its session-end was never handled. Hook events
-	// for that session that arrive afterwards are ignored, so a session-end
-	// hook still in flight at shutdown cannot report it a second time.
+	// for that session that arrive afterwards are ignored, so a hook still
+	// running during the shutdown (the harness can outlive the backstop)
+	// cannot reopen or report it a second time. The init daemon removes a
+	// leftover tombstone at its next start (ClearSessionTombstone).
 	Closed bool `json:"closed,omitempty"`
 }
 
@@ -144,10 +146,11 @@ func (s *FileSessionState) Update(agg *telemetry.Aggregator, event *hooks.Event,
 }
 
 // closedSessionOwnsEvent reports whether event belongs to the session that a
-// tombstone closed. A session-start always begins a new session (a resumed
-// harness session may reuse the ID; it is counted as a new segment). Any
-// other event belongs to the closed session unless it carries a different
-// session ID.
+// tombstone closed. A session-start always begins a new session. Any other
+// event belongs to the closed session unless it carries a different session
+// ID. Tombstones are never written for a session without an ID, and do not
+// survive a restart (init clears them before the harness starts), so a
+// resumed session that reuses the ID is counted again.
 func closedSessionOwnsEvent(closedID string, event *hooks.Event) bool {
 	if event.Name == hooks.EventSessionStart {
 		return false

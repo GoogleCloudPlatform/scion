@@ -30,9 +30,9 @@ var shutdownSessionReportTimeout = 3 * time.Second
 
 // reportOpenSessionAtShutdown is the init daemon's backstop for session
 // metrics. Hook processes report a session when the harness's session-end
-// event arrives; when it never does (the agent was stopped and the harness
-// killed, or the harness has no session-end hook) the session's counts are
-// still in the agent's state file. This finalizes such a session, marks it
+// event arrives; when it never does (the agent was stopped, or the harness
+// has no session-end hook) the session's counts are still in the agent's
+// state file. This finalizes such a session, marks it
 // closed, and reports it once. The session's status comes from the
 // harness's exit outcome: "error" for a crash, otherwise "completed".
 //
@@ -71,4 +71,25 @@ func reportOpenSessionAtShutdown(agentHome string, outcome exitOutcome, newClien
 	}
 	log.Info("Session metrics reported to hub at shutdown for session %s (status %s, %d turns)",
 		summary.SessionID, summary.Status, summary.TurnCount)
+}
+
+// clearSessionTombstoneAtStartup removes the closed-session tombstone that
+// reportOpenSessionAtShutdown left during the previous shutdown. It must run
+// before the harness starts: the tombstone exists only to stop hooks that
+// are still running during that shutdown from reporting the session again,
+// and a leftover one would make the hooks ignore a resumed session that
+// reuses the ID. Failures are logged; startup continues.
+func clearSessionTombstoneAtStartup(agentHome string) {
+	if agentHome == "" {
+		return
+	}
+	store := handlers.NewFileSessionState(agentHome)
+	cleared, err := store.ClearSessionTombstone()
+	if err != nil {
+		log.Error("Session metrics: cannot clear the previous shutdown's tombstone in %s: %v", store.Path, err)
+		return
+	}
+	if cleared {
+		log.Debug("Session metrics: cleared the previous shutdown's tombstone")
+	}
 }

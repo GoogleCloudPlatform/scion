@@ -395,3 +395,106 @@ func mustWrite(t *testing.T, path, content string) {
 		t.Fatal(err)
 	}
 }
+
+// A harness with no session-start (for example one resumed by conversation
+// ID) reuses the session ID after a restart. Once init clears the previous
+// shutdown's tombstone at startup, the resumed segment is counted and
+// reported at the next shutdown, with only its own counts.
+func TestClearSessionTombstone_ResumeWithSameIDReportedAgain(t *testing.T) {
+	store := NewFileSessionState(t.TempDir())
+	hookRun(t, store, toolEvent("c1", "Bash"))
+	hookRun(t, store, sessionEvent(hooks.EventAgentEnd, "c1"))
+	if s, ok := closeOpen(t, store, ""); !ok || s.SessionID != "c1" {
+		t.Fatalf("first segment: ok=%v summary=%+v", ok, s)
+	}
+
+	// Restart: init clears the tombstone before the harness starts.
+	cleared, err := store.ClearSessionTombstone()
+	if err != nil || !cleared {
+		t.Fatalf("ClearSessionTombstone = %v, %v; want true, nil", cleared, err)
+	}
+	if _, err := os.Lstat(store.Path); !os.IsNotExist(err) {
+		t.Errorf("tombstone still present: %v", err)
+	}
+
+	hookRun(t, store, toolEvent("c1", "Read"))
+	hookRun(t, store, sessionEvent(hooks.EventAgentEnd, "c1"))
+	s, ok := closeOpen(t, store, "")
+	if !ok {
+		t.Fatal("resumed segment with the same ID not reported")
+	}
+	if s.SessionID != "c1" || s.TurnCount != 1 || s.ToolCalls["Read"].Calls != 1 || s.ToolCalls["Bash"].Calls != 0 {
+		t.Errorf("resumed segment summary = %+v, want only its own counts", s)
+	}
+}
+
+// ClearSessionTombstone touches only a tombstone.
+func TestClearSessionTombstone_LeavesOtherStateAlone(t *testing.T) {
+	t.Run("no state", func(t *testing.T) {
+		store := NewFileSessionState(filepath.Join(t.TempDir(), "missing"))
+		if cleared, err := store.ClearSessionTombstone(); cleared || err != nil {
+			t.Errorf("= %v, %v; want false, nil", cleared, err)
+		}
+	})
+	t.Run("open session", func(t *testing.T) {
+		store := NewFileSessionState(t.TempDir())
+		openSession(t, store)
+		before, _ := os.ReadFile(store.Path)
+		if cleared, err := store.ClearSessionTombstone(); cleared || err != nil {
+			t.Errorf("= %v, %v; want false, nil", cleared, err)
+		}
+		if after, _ := os.ReadFile(store.Path); string(after) != string(before) {
+			t.Error("open session state changed")
+		}
+	})
+	t.Run("symlinked state file", func(t *testing.T) {
+		src := NewFileSessionState(t.TempDir())
+		openSession(t, src)
+		if _, ok := closeOpen(t, src, ""); !ok {
+			t.Fatal("setup: no session closed")
+		}
+		store := NewFileSessionState(t.TempDir())
+		mustMkdir(t, filepath.Dir(store.Path))
+		mustWrite(t, store.Path+".lock", "")
+		if err := os.Symlink(src.Path, store.Path); err != nil {
+			t.Fatal(err)
+		}
+		cleared, err := store.ClearSessionTombstone()
+		if cleared || !errors.Is(err, ErrSessionStateRefused) {
+			t.Errorf("= %v, %v; want false, ErrSessionStateRefused", cleared, err)
+		}
+		if _, err := os.Lstat(store.Path); err != nil {
+			t.Errorf("symlink removed: %v", err)
+		}
+		if _, err := os.Stat(src.Path); err != nil {
+			t.Errorf("symlink target removed: %v", err)
+		}
+	})
+}
+
+// A session without an ID is never tombstoned: nothing is returned (the
+// Hub would refuse it), its state is removed as on the hook path, and later
+// ID-less events open and count a new session.
+func TestCloseOpenSession_EmptySessionIDNotTombstoned(t *testing.T) {
+	store := NewFileSessionState(t.TempDir())
+	hookRun(t, store, toolEvent("", "Bash"))
+	if s, ok := closeOpen(t, store, ""); ok {
+		t.Fatalf("empty-ID session returned: %+v", s)
+	}
+	if _, err := os.Lstat(store.Path); !os.IsNotExist(err) {
+		t.Fatalf("empty-ID state left behind: %v", err)
+	}
+
+	hookRun(t, store, toolEvent("", "Read"))
+	data, err := os.ReadFile(store.Path)
+	if err != nil {
+		t.Fatalf("later ID-less event not recorded: %v", err)
+	}
+	file, err := decodeSessionState(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if file.Closed || !file.Aggregator.Open || file.Aggregator.ToolCalls["Read"].Calls != 1 || file.Aggregator.ToolCalls["Bash"].Calls != 0 {
+		t.Errorf("state after later ID-less event = %+v", file)
+	}
+}

@@ -33,18 +33,29 @@ import (
 var ErrSessionStateRefused = errors.New("session metrics state refused")
 
 // CloseOpenSession is the init daemon's shutdown backstop for sessions whose
-// session-end was never handled: the container was stopped, the harness was
-// killed, or the harness has no session-end hook.
+// session-end was never handled: the container was stopped, or the harness
+// has no session-end hook.
 //
 // Under the same lock the hook processes use, it reads the state file. If
 // it holds an open session, CloseOpenSession finalizes it with errMsg (empty
 // for a clean exit, which yields status "completed"; otherwise "error"),
 // replaces the file's content with a closed tombstone, and returns the
-// summary with ok=true. The caller then reports it. The tombstone makes
-// Update ignore later hook events for that session, so a session-end hook
-// still in flight cannot report the session again. If the hook process
+// summary with ok=true. The caller then reports it. If the hook process
 // finished the session first, the file is gone and ok is false: a session
 // is reported once, by whichever side finalizes it.
+//
+// The tombstone makes Update ignore later hook events for that session. On
+// a stop, init's supervised child is only the tmux client: the harness runs
+// under the tmux server and can still be running, and firing hooks, after
+// this check. Such late events (including a real session-end) are dropped,
+// so the reported counts can miss the session's last few events, but the
+// session cannot be reported twice. The tombstone only has to last for this
+// container's shutdown; ClearSessionTombstone removes it at the next start
+// so a resumed session with the same ID is counted again.
+//
+// A session without an ID cannot be reported (the Hub requires one), so it
+// is not tombstoned: its state is removed, as the hook path does on
+// session-end, and ok is false.
 //
 // The caller runs as root and the state directory belongs to the workload,
 // so nothing here follows a symlink: every directory component is opened
@@ -56,73 +67,125 @@ var ErrSessionStateRefused = errors.New("session metrics state refused")
 // is written in place through the already-checked descriptor, so the file
 // keeps its workload ownership. A missing file is ok=false with a nil error.
 func (s *FileSessionState) CloseOpenSession(errMsg string) (telemetry.SessionSummary, bool, error) {
+	var summary telemetry.SessionSummary
+	var ok bool
+	err := s.withLockedStateNoFollow(syscall.O_RDWR, func(dirFd int, leaf string, f *os.File, file sessionStateFile) error {
+		if file.Closed || !file.Aggregator.Open {
+			return nil
+		}
+		if file.Aggregator.SessionID == "" {
+			if err := dirfd.UnlinkAt(dirFd, leaf); err != nil {
+				return fmt.Errorf("removing state of a session without an ID: %w", err)
+			}
+			return nil
+		}
+
+		agg := telemetry.NewAggregator()
+		agg.RestoreState(file.Aggregator)
+		summary = agg.Finalize(0, 0, 0, 0, errMsg)
+
+		tombstone, err := json.Marshal(sessionStateFile{
+			Version: sessionStateVersion,
+			Aggregator: telemetry.AggregatorState{
+				SessionID: summary.SessionID,
+				StartedAt: summary.StartedAt,
+			},
+			Closed: true,
+		})
+		if err != nil {
+			return fmt.Errorf("encoding tombstone: %w", err)
+		}
+		if err := writeInPlace(f, tombstone); err != nil {
+			// Without the tombstone, remove the state so at least this
+			// file cannot be reported twice. If that fails too, do not
+			// report.
+			if uerr := dirfd.UnlinkAt(dirFd, leaf); uerr != nil {
+				return fmt.Errorf("closing: %v; removing: %v", err, uerr)
+			}
+		}
+		ok = true
+		return nil
+	})
+	if err != nil || !ok {
+		return telemetry.SessionSummary{}, false, err
+	}
+	return summary, true, nil
+}
+
+// ClearSessionTombstone removes a closed tombstone left by CloseOpenSession
+// during the previous shutdown. The init daemon calls it at startup, before
+// the harness starts, so the tombstone cannot outlive the shutdown it was
+// written for: a resumed session that reuses the ID and sends no
+// session-start (for example a harness resumed with its conversation ID)
+// must be counted again. An open session's state is left alone. It reports
+// whether a tombstone was removed, and follows the same no-follow and lock
+// rules as CloseOpenSession.
+func (s *FileSessionState) ClearSessionTombstone() (bool, error) {
+	cleared := false
+	err := s.withLockedStateNoFollow(syscall.O_RDONLY, func(dirFd int, leaf string, _ *os.File, file sessionStateFile) error {
+		if !file.Closed {
+			return nil
+		}
+		if err := dirfd.UnlinkAt(dirFd, leaf); err != nil {
+			return fmt.Errorf("removing tombstone: %w", err)
+		}
+		cleared = true
+		return nil
+	})
+	return cleared, err
+}
+
+// withLockedStateNoFollow opens the state directory, lock file and state
+// file without following symlinks, takes the hooks' lock, decodes the state
+// and calls fn with the open state file (opened with access) while the lock
+// is held. A missing directory, lock file or state file means there is no
+// state: fn is not called and the result is nil. Refused or undecodable
+// files are errors, and fn is not called.
+func (s *FileSessionState) withLockedStateNoFollow(access int, fn func(dirFd int, leaf string, f *os.File, file sessionStateFile) error) error {
 	dirFd, leaf, err := dirfd.OpenParentNoFollow(s.Path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return telemetry.SessionSummary{}, false, nil
+			return nil
 		}
-		return telemetry.SessionSummary{}, false, refusedIfLoop(err)
+		return refusedIfLoop(err)
 	}
 	defer func() { _ = syscall.Close(dirFd) }()
 
 	lockFile, err := openRegularNoFollowAt(dirFd, leaf+".lock", syscall.O_RDONLY)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return telemetry.SessionSummary{}, false, nil
+			return nil
 		}
-		return telemetry.SessionSummary{}, false, err
+		return err
 	}
 	unlock, err := flockWait(lockFile, s.lockWait())
 	if err != nil {
-		return telemetry.SessionSummary{}, false, err
+		return err
 	}
 	defer unlock()
 
-	f, err := openRegularNoFollowAt(dirFd, leaf, syscall.O_RDWR)
+	f, err := openRegularNoFollowAt(dirFd, leaf, access)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			// Already finalized and reported by the session-end hook.
-			return telemetry.SessionSummary{}, false, nil
+			// No state, or already finalized by the session-end hook.
+			return nil
 		}
-		return telemetry.SessionSummary{}, false, err
+		return err
 	}
 	defer func() { _ = f.Close() }()
 
 	data, err := io.ReadAll(io.LimitReader(f, sessionStateMaxBytes+1))
 	if err != nil {
-		return telemetry.SessionSummary{}, false, fmt.Errorf("reading %s: %w", s.Path, err)
+		return fmt.Errorf("reading %s: %w", s.Path, err)
 	}
 	file, err := decodeSessionState(data)
 	if err != nil {
-		return telemetry.SessionSummary{}, false, fmt.Errorf("%s %v", s.Path, err)
+		return fmt.Errorf("%s %v", s.Path, err)
 	}
-	if file.Closed || !file.Aggregator.Open {
-		return telemetry.SessionSummary{}, false, nil
+	if err := fn(dirFd, leaf, f, file); err != nil {
+		return fmt.Errorf("%s: %w", s.Path, err)
 	}
-
-	agg := telemetry.NewAggregator()
-	agg.RestoreState(file.Aggregator)
-	summary := agg.Finalize(0, 0, 0, 0, errMsg)
-
-	tombstone, err := json.Marshal(sessionStateFile{
-		Version: sessionStateVersion,
-		Aggregator: telemetry.AggregatorState{
-			SessionID: summary.SessionID,
-			StartedAt: summary.StartedAt,
-		},
-		Closed: true,
-	})
-	if err != nil {
-		return telemetry.SessionSummary{}, false, fmt.Errorf("encoding tombstone: %w", err)
-	}
-	if err := writeInPlace(f, tombstone); err != nil {
-		// Without the tombstone, remove the state so at least this file
-		// cannot be reported twice. If that fails too, do not report.
-		if uerr := dirfd.UnlinkAt(dirFd, leaf); uerr != nil {
-			return telemetry.SessionSummary{}, false, fmt.Errorf("closing %s: %v; removing it: %v", s.Path, err, uerr)
-		}
-	}
-	return summary, true, nil
+	return nil
 }
 
 // openRegularNoFollowAt opens name under dirFd without following a symlink

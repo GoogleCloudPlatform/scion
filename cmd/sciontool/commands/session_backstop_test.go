@@ -215,3 +215,30 @@ func TestReportOpenSessionAtShutdown_BoundedWhenHubHangs(t *testing.T) {
 		t.Errorf("backstop took %s with a hung Hub, want about %s", elapsed, shutdownSessionReportTimeout)
 	}
 }
+
+// After a restart, init clears the previous shutdown's tombstone, so a
+// resumed session that reuses the ID without a SessionStart is reported
+// again at the next stop, with only the resumed segment's counts.
+func TestReportOpenSessionAtShutdown_RestartResumeReportedAgain(t *testing.T) {
+	home, fake, newClient := backstopEnv(t)
+	segment := []map[string]interface{}{
+		{"hook_event_name": "PostToolUse", "session_id": "sess-resume-1", "tool_name": "Bash"},
+		{"hook_event_name": "Stop", "session_id": "sess-resume-1"},
+	}
+	runHooks(t, segment...)
+	reportOpenSessionAtShutdown(home, stopOutcome(), newClient)
+
+	clearSessionTombstoneAtStartup(home)
+	runHooks(t, segment...)
+	reportOpenSessionAtShutdown(home, stopOutcome(), newClient)
+
+	reports := fake.Reports()
+	if len(reports) != 2 {
+		t.Fatalf("got %d reports, want 2 (one per segment): %+v", len(reports), reports)
+	}
+	for i, p := range reports {
+		if p.Session.ID != "sess-resume-1" || p.Session.TurnCount != 1 || p.Tools["Bash"].Calls != 1 {
+			t.Errorf("report %d = %+v, want one segment's counts", i, p)
+		}
+	}
+}
