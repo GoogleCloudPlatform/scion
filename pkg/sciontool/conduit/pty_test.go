@@ -581,3 +581,19 @@ func TestValidPTYSize(t *testing.T) {
 		}
 	}
 }
+
+// TestAgentPTYSessionEndTearsDown: when the session ends under an active
+// PTY stream, the tmux client and its pty are torn down.
+func TestAgentPTYSessionEndTearsDown(t *testing.T) {
+	key := newTestKey(t, "k1")
+	sp := newFakeSpawner()
+	s := startPTYAgent(t, key, sp, nil)
+	if _, err := s.OpenStream(context.Background(), ptyOpen(t, key, s.Info(), ptyParams())); err != nil {
+		t.Fatalf("OpenStream: %v", err)
+	}
+	p := sp.next(t)
+	if err := s.CloseWithCode(core.CloseRelayRestart, "relay_restart"); err != nil {
+		t.Fatal(err)
+	}
+	p.waitClosed(t)
+}

@@ -34,8 +34,9 @@ import (
 )
 
 // ptyHangupGrace is how long Close waits for the tmux client to exit on
-// the pty hangup before it kills the client's process group.
-const ptyHangupGrace = 2 * time.Second
+// the pty hangup before it kills the client's process group (a var so
+// tests can shorten it).
+var ptyHangupGrace = 2 * time.Second
 
 // ptyPassEnv are the variables of this process passed to the tmux client
 // as they are: what it needs to find the server socket and to render.
@@ -106,7 +107,10 @@ func startLocalPTY(user PTYUser, req PTYRequest, name string, args ...string) (*
 	}
 	if drop {
 		// The client must own its terminal, as with a login.
-		_ = tty.Chown(user.UID, user.GID)
+		if err := tty.Chown(user.UID, user.GID); err != nil {
+			_ = master.Close()
+			return nil, fmt.Errorf("pty: chown tty to %d:%d: %w", user.UID, user.GID, err)
+		}
 	}
 	cmd := exec.Command(name, args...)
 	cmd.Env = ptyEnv(user)
