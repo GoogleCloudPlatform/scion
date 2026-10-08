@@ -191,6 +191,10 @@ export async function apiFetch(path: string, options?: ApiFetchOptions): Promise
  * array and discards per-page metadata (totalCount, capabilities, …).
  * This makes it suitable for "fetch everything" use-cases like dropdowns and
  * selector lists.
+ *
+ * It never returns a partial list: a failed or malformed page, at any
+ * position, rejects, and so does a walk that still has a cursor after
+ * {@link MAX_PAGES} pages.
  */
 /** Safety bound to prevent infinite pagination loops (e.g. server returning the same cursor). */
 const MAX_PAGES = 50;
@@ -209,34 +213,21 @@ export async function apiFetchAllPages<T>(
     const url = cursor ? `${baseUrl}${sep}cursor=${encodeURIComponent(cursor)}` : baseUrl;
     const res = await apiFetch(url, options);
     if (!res.ok) {
-      if (allItems.length === 0) {
-        // First page failed — throw so callers can show error
-        throw new Error(`Failed to fetch: ${res.status} ${res.statusText}`);
-      }
-      // Subsequent page failed — log warning, return what we have
-      console.warn(
-        `apiFetchAllPages: page ${page + 1} failed (${res.status}), returning ${allItems.length} items from previous pages`
+      throw new Error(
+        page === 0
+          ? `Failed to fetch: ${res.status} ${res.statusText}`
+          : `Failed to fetch page ${page + 1}: ${res.status} ${res.statusText}`
       );
-      break;
     }
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let data: Record<string, any>;
     try {
       data = (await res.json()) as Record<string, any>;
     } catch {
-      if (allItems.length === 0) {
-        throw new Error(`Failed to parse response from ${baseUrl}`);
-      }
-      console.warn(
-        `apiFetchAllPages: failed to parse page ${page + 1} response, returning ${allItems.length} items from previous pages`
-      );
-      break;
+      throw new Error(`Failed to parse page ${page + 1} response from ${baseUrl}`);
     }
     if (!data || typeof data !== 'object') {
-      if (allItems.length === 0) {
-        throw new Error(`Invalid response format from ${baseUrl}`);
-      }
-      break;
+      throw new Error(`Invalid page ${page + 1} response format from ${baseUrl}`);
     }
     const items = data[key];
     if (Array.isArray(items)) {
@@ -246,6 +237,9 @@ export async function apiFetchAllPages<T>(
     page++;
   } while (cursor && page < MAX_PAGES);
 
+  if (cursor) {
+    throw new Error(`Stopped after ${MAX_PAGES} pages from ${baseUrl}: more pages remain`);
+  }
   return allItems;
 }
 
