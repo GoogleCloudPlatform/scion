@@ -131,6 +131,10 @@ type ServerConfig struct {
 	// hub's ring refresh interval (1m). Only used behind the hub.conduit
 	// experiment.
 	ConduitGrantKeyActivation time.Duration
+	// ConduitAuthzRecheckInterval is the period of the re-check sweep of
+	// open user streams (conduit.authz_recheck_interval; 0 = 60s). Only
+	// used behind the hub.conduit experiment.
+	ConduitAuthzRecheckInterval time.Duration
 	// AuthMode is the exclusive human auth mode: "oauth" (default), "proxy", "dev".
 	AuthMode string
 	// ProxyAuthenticator is the configured proxy authenticator (when AuthMode == "proxy").
@@ -1410,7 +1414,15 @@ type Server struct {
 	conduitGrants     *conduitGrantKeys
 	// conduit is the in-process conduit relay (conduit_relay.go); nil
 	// unless hub.conduit was on at startup.
-	conduit                atomic.Pointer[conduitRuntime]
+	conduit atomic.Pointer[conduitRuntime]
+	// conduitAuthz re-checks the user streams this node owns (nil while
+	// no relay runs); conduitAuthzMetrics is its counter.
+	conduitAuthz        atomic.Pointer[conduitStreamAuthz]
+	conduitAuthzMetrics atomic.Pointer[conduitStreamAuthzMetrics]
+	// conduitAuthzBindMu guards conduitAuthzUnbind, which releases the
+	// re-check's binding to the current event publisher.
+	conduitAuthzBindMu     sync.Mutex
+	conduitAuthzUnbind     func()
 	listCursorSealer       *listCursorSealer       // AEAD sealer for authorizedList's opaque pagination cursors (ptone/scion#2124)
 	uatService             *UserAccessTokenService // User access token service
 	inviteService          *InviteService          // Invite code service
@@ -3867,8 +3879,10 @@ func (s *Server) SetGCPProjectID(projectID string) {
 
 func (s *Server) SetEventPublisher(ep EventPublisher) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.events = ep
+	s.mu.Unlock()
+	// A running conduit stream re-check follows the new publisher.
+	s.bindConduitAuthzEvents()
 }
 
 // SetCommandBus sets the inter-node dispatch signal bus. Nil is safe (treated

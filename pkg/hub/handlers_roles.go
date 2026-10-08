@@ -585,6 +585,7 @@ func (s *Server) updateRoleDefinition(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
+	s.publishConduitAuthzChanged(conduitAuthzMatch{})
 	slog.Info("role definition updated",
 		"role_id", updated.ID, "name", updated.Name, "actor", user.Email())
 
@@ -621,6 +622,7 @@ func (s *Server) deleteRoleDefinition(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
+	s.publishConduitAuthzChanged(conduitAuthzMatch{})
 	slog.Info("role definition deleted",
 		"role_id", def.ID, "name", def.Name, "actor", user.Email())
 
@@ -1555,6 +1557,7 @@ func (s *Server) deleteRoleBinding(w http.ResponseWriter, r *http.Request, id st
 			writeError(w, denial.HTTPStatus, denial.DenialCode, denial.Reason, details)
 			return
 		}
+		s.publishConduitAuthzChanged(conduitAuthzMatchForRoleBinding(binding))
 		slog.Info("role binding deleted (via membership service)",
 			"binding_id", id, "actor", user.Email())
 		w.WriteHeader(http.StatusNoContent)
@@ -1597,6 +1600,7 @@ func (s *Server) deleteRoleBinding(w http.ResponseWriter, r *http.Request, id st
 		return
 	}
 
+	s.publishConduitAuthzChanged(conduitAuthzMatchForRoleBinding(binding))
 	slog.Info("role binding deleted",
 		"binding_id", id, "actor", user.Email())
 
@@ -1720,6 +1724,7 @@ func (s *Server) deleteSystemSuperAdminBinding(
 		return
 	}
 
+	s.publishConduitAuthzChanged(conduitAuthzMatchForRoleBinding(binding))
 	slog.Info("deleted super-admin binding via generic delete endpoint",
 		"binding_id", binding.ID, "principal_id", binding.PrincipalID,
 		"actor", actor.Email())

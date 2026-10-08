@@ -171,6 +171,7 @@ func (s *Server) revokeUserSessions(w http.ResponseWriter, r *http.Request, id s
 		return
 	}
 
+	s.publishConduitAuthzChanged(conduitAuthzMatch{UserID: id})
 	slog.Info("Admin revoked all sessions for user",
 		"user_id", id,
 		"admin_id", admin.ID(),
@@ -696,6 +697,10 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 				"user update failed: "+err.Error(), nil)
 		}
 		return
+	}
+
+	if needsPromote || needsSuspend {
+		s.publishConduitAuthzChanged(conduitAuthzMatch{UserID: user.ID})
 	}
 
 	// This response applies the same per-viewer preferences visibility rule
@@ -1227,6 +1232,8 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
 		}
 		return
 	}
+
+	s.publishConduitAuthzChanged(conduitAuthzMatch{UserID: id})
 
 	// Best effort, after commit: remove the user's user-scope secrets and
 	// env vars (ptone/scion#2769). Failures are logged, not returned.

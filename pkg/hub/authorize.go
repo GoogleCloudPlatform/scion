@@ -411,6 +411,9 @@ type agentTargetDenial struct {
 	// cause is the decision's adoptionDetailsCause: ceiling_unrecorded when
 	// delegation-provenance adoption can address the denial, else empty.
 	cause DenyCause
+	// indeterminate is set when the decision could not be evaluated (see
+	// Decision.IsIndeterminate) rather than denied by policy.
+	indeterminate bool
 }
 
 // authorizeAgentTargetAction decides whether identity may perform action on
@@ -474,11 +477,12 @@ func (s *Server) authorizeAgentTargetAction(ctx context.Context, identity Identi
 	})
 	if !decision.Allowed {
 		return &agentTargetDenial{
-			status:   http.StatusForbidden,
-			message:  agentTargetDenyMessage,
-			reason:   decision.Reason,
-			deniedBy: decision.DeniedBy,
-			cause:    decision.adoptionDetailsCause(),
+			status:        http.StatusForbidden,
+			message:       agentTargetDenyMessage,
+			reason:        decision.Reason,
+			deniedBy:      decision.DeniedBy,
+			cause:         decision.adoptionDetailsCause(),
+			indeterminate: decision.IsIndeterminate(),
 		}
 	}
 	return nil

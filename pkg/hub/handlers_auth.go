@@ -528,6 +528,7 @@ func (s *Server) handleAuthRefresh(w http.ResponseWriter, r *http.Request) {
 					slog.Warn("failed to sync hub role grants on token refresh",
 						"email", claims.Email, "user_id", user.ID, "role", role, "error", err)
 				}
+				s.publishConduitAuthzChanged(conduitAuthzMatch{UserID: user.ID})
 			}
 		}
 	}
@@ -958,6 +959,7 @@ func (s *Server) handleRevokeToken(w http.ResponseWriter, r *http.Request, id st
 		NotFound(w, "access token")
 		return
 	}
+	s.publishConduitAuthzChanged(conduitAuthzMatch{UserID: user.ID()})
 
 	// Audit is now atomic inside the service (B3/G4).
 	w.WriteHeader(http.StatusNoContent)
@@ -981,6 +983,7 @@ func (s *Server) handleDeleteToken(w http.ResponseWriter, r *http.Request, id st
 		NotFound(w, "access token")
 		return
 	}
+	s.publishConduitAuthzChanged(conduitAuthzMatch{UserID: user.ID()})
 
 	// Audit is now atomic inside the service (B3/G4).
 	w.WriteHeader(http.StatusNoContent)

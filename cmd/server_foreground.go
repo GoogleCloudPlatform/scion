@@ -1937,6 +1937,7 @@ func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken st
 		LaunchKeepaliveSeconds:       cfg.Hub.LaunchKeepaliveSeconds,
 		ConduitTCPAllowedPorts:       append([]int(nil), cfg.Hub.Conduit.TCPAllowedPorts...),
 		ConduitGrantKeyActivation:    conduitGrantKeyActivationSetting(cfg),
+		ConduitAuthzRecheckInterval:  conduitAuthzRecheckIntervalSetting(cfg),
 		AgentRunScope:                agentRunScopeSetting(cfg),
 		AdminMode:                    adminMode,
 		MaintenanceMessage:           maintenanceMessage,
@@ -2078,6 +2079,12 @@ func wireHubCoreMetrics(hubSrv *hub.Server, mp metric.MeterProvider) dbmetrics.R
 		log.Printf("WARNING: hub decision audit metrics disabled: %v", auditErr)
 	} else {
 		hubSrv.SetDecisionAuditMetrics(auditRec)
+	}
+
+	if authzRec, err := hub.NewOTelConduitStreamAuthzMetrics(mp); err != nil {
+		log.Printf("WARNING: hub conduit stream authz metrics disabled: %v", err)
+	} else {
+		hubSrv.SetConduitStreamAuthzMetrics(authzRec)
 	}
 
 	runScopeRec, runScopeErr := hub.NewOTelAgentRunScopeMetrics(mp)
