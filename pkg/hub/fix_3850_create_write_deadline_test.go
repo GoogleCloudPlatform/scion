@@ -52,55 +52,82 @@ func (d *slowCreateDispatcher) DispatchAgentCreateWithGather(ctx context.Context
 }
 
 func TestCreateAgent_LaunchAfterWriteTimeoutWithinDispatchWait_Succeeds(t *testing.T) {
-	const (
-		writeTimeout = 200 * time.Millisecond
-		launch       = 600 * time.Millisecond
-	)
-	shortenSyncDispatchTimeout(t, 3*time.Second)
-	require.Greater(t, launch, writeTimeout)
-	require.Less(t, launch, syncDispatchTimeout)
-
+	const writeTimeout = 200 * time.Millisecond
 	for _, gather := range []bool{false, true} {
 		name := "plain"
 		if gather {
 			name = "gather-env"
 		}
 		t.Run(name, func(t *testing.T) {
-			disp := &slowCreateDispatcher{delay: launch}
-			srv, s, project := setupCreateAgentServer(t, disp)
 			// The hub serves with a short WriteTimeout, configured and
 			// applied by the HTTP server, as in production.
-			srv.config.WriteTimeout = writeTimeout
-			hs := httptest.NewUnstartedServer(srv.Handler())
-			hs.Config.WriteTimeout = writeTimeout
-			hs.Start()
-			t.Cleanup(hs.Close)
-
-			body, err := json.Marshal(CreateAgentRequest{
-				Name: "slow-launch-" + name, ProjectID: project.ID, Task: "work", GatherEnv: gather,
-			})
-			require.NoError(t, err)
-			req, err := http.NewRequest(http.MethodPost, hs.URL+"/api/v1/agents", bytes.NewReader(body))
-			require.NoError(t, err)
-			req.Header.Set("Content-Type", "application/json")
-			req.Header.Set("Authorization", "Bearer "+testDevToken)
-
-			start := time.Now()
-			resp, err := hs.Client().Do(req)
-			require.NoError(t, err, "the response must not be dropped at the server WriteTimeout")
-			defer func() { _ = resp.Body.Close() }()
-			assert.GreaterOrEqual(t, time.Since(start), launch, "the launch must outlast the WriteTimeout")
-
-			var got CreateAgentResponse
-			require.NoError(t, json.NewDecoder(resp.Body).Decode(&got), "the response body must arrive in full")
-			assert.Equal(t, http.StatusCreated, resp.StatusCode)
-			require.NotNil(t, got.Agent)
-			assert.Equal(t, "slow-launch-"+name, got.Agent.Name)
-
-			_, err = s.GetAgent(context.Background(), got.Agent.ID)
-			assert.NoError(t, err, "the agent row is kept")
+			runSlowCreateThroughListener(t, "slow-launch-"+name, gather, writeTimeout, writeTimeout)
 		})
 	}
+}
+
+// In combo mode the hub handler is served by the web listener, whose
+// WriteTimeout (60s) is not the hub's configured one. The deadline must
+// follow the listener actually serving the request: here the configured hub
+// WriteTimeout is unbounded or longer than the budget, which alone would
+// skip the extension, while the serving listener cuts at 200ms.
+func TestCreateAgent_LaunchAfterServingListenerWriteTimeout_Succeeds(t *testing.T) {
+	const listenerWriteTimeout = 200 * time.Millisecond
+	for _, tc := range []struct {
+		name       string
+		configured time.Duration
+	}{
+		{"configured-unbounded", 0},
+		{"configured-longer", time.Hour},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runSlowCreateThroughListener(t, "combo-"+tc.name, false, tc.configured, listenerWriteTimeout)
+		})
+	}
+}
+
+// runSlowCreateThroughListener serves the create handler through a real
+// http.Server with listenerWriteTimeout, configures the hub with
+// configuredWriteTimeout, and checks that a create whose launch outlasts the
+// listener's WriteTimeout (but not the dispatch wait) gets its response.
+func runSlowCreateThroughListener(t *testing.T, agentName string, gather bool, configuredWriteTimeout, listenerWriteTimeout time.Duration) {
+	t.Helper()
+	const launch = 600 * time.Millisecond
+	shortenSyncDispatchTimeout(t, 3*time.Second)
+	require.Greater(t, launch, listenerWriteTimeout)
+	require.Less(t, launch, syncDispatchTimeout)
+
+	disp := &slowCreateDispatcher{delay: launch}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	srv.config.WriteTimeout = configuredWriteTimeout
+	hs := httptest.NewUnstartedServer(srv.Handler())
+	hs.Config.WriteTimeout = listenerWriteTimeout
+	hs.Start()
+	t.Cleanup(hs.Close)
+
+	body, err := json.Marshal(CreateAgentRequest{
+		Name: agentName, ProjectID: project.ID, Task: "work", GatherEnv: gather,
+	})
+	require.NoError(t, err)
+	req, err := http.NewRequest(http.MethodPost, hs.URL+"/api/v1/agents", bytes.NewReader(body))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+testDevToken)
+
+	start := time.Now()
+	resp, err := hs.Client().Do(req)
+	require.NoError(t, err, "the response must not be dropped at the listener's WriteTimeout")
+	defer func() { _ = resp.Body.Close() }()
+	assert.GreaterOrEqual(t, time.Since(start), launch, "the launch must outlast the WriteTimeout")
+
+	var got CreateAgentResponse
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&got), "the response body must arrive in full")
+	assert.Equal(t, http.StatusCreated, resp.StatusCode)
+	require.NotNil(t, got.Agent)
+	assert.Equal(t, agentName, got.Agent.Name)
+
+	_, err = s.GetAgent(context.Background(), got.Agent.ID)
+	assert.NoError(t, err, "the agent row is kept")
 }
 
 // The create's write deadline covers the dispatch wait plus slack, and is
@@ -110,21 +137,32 @@ func TestExtendWriteDeadlineForSyncDispatch(t *testing.T) {
 	assert.Equal(t, syncDispatchTimeout+syncDispatchWriteSlack, budget)
 	assert.Greater(t, budget, DefaultServerConfig().WriteTimeout, "must outlast the default WriteTimeout")
 
+	withListener := func(wt time.Duration) context.Context {
+		return context.WithValue(context.Background(), http.ServerContextKey, &http.Server{WriteTimeout: wt})
+	}
 	for _, tc := range []struct {
-		name   string
-		server time.Duration
-		want   bool
+		name       string
+		ctx        context.Context
+		configured time.Duration
+		want       bool
 	}{
-		{"default", DefaultServerConfig().WriteTimeout, true},
-		{"unbounded", 0, false},
-		{"already longer", budget + time.Minute, false},
+		{"default", context.Background(), DefaultServerConfig().WriteTimeout, true},
+		{"unbounded", context.Background(), 0, false},
+		{"already longer", context.Background(), budget + time.Minute, false},
+		// The serving listener's WriteTimeout wins over the configured one.
+		{"listener shorter than unbounded config", withListener(time.Minute), 0, true},
+		{"listener shorter than longer config", withListener(time.Minute), budget + time.Minute, true},
+		{"listener unbounded", withListener(0), DefaultServerConfig().WriteTimeout, false},
+		{"listener already longer", withListener(budget + time.Minute), DefaultServerConfig().WriteTimeout, false},
+		// context.WithoutCancel (detachLaunchFromClient) keeps the server.
+		{"listener through detached ctx", detachLaunchFromClient(withListener(time.Minute)), 0, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := &deadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
 			start := time.Now()
 			// Wrapped as the hub's request logger wraps it: the deadline
 			// must reach the writer through Unwrap.
-			extendWriteDeadlineForSyncDispatch(context.Background(), &responseWriter{ResponseWriter: rec}, tc.server)
+			extendWriteDeadlineForSyncDispatch(tc.ctx, &responseWriter{ResponseWriter: rec}, tc.configured)
 			rec.mu.Lock()
 			defer rec.mu.Unlock()
 			if !tc.want {

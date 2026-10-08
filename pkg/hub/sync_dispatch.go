@@ -92,17 +92,34 @@ func syncDispatchWriteBudget() time.Duration {
 	return syncDispatchTimeout + syncDispatchWriteSlack
 }
 
+// servingWriteTimeout is the WriteTimeout of the http.Server serving the
+// request, read from ctx (http.ServerContextKey, which the server sets on
+// every request context and context.WithoutCancel keeps). In combo mode the
+// hub handler is served by the web listener, whose WriteTimeout differs from
+// the hub's configured one, so the configured value is only the fallback for
+// a context without a server (a handler driven without net/http).
+func servingWriteTimeout(ctx context.Context, configured time.Duration) time.Duration {
+	if hs, ok := ctx.Value(http.ServerContextKey).(*http.Server); ok && hs != nil {
+		return hs.WriteTimeout
+	}
+	return configured
+}
+
 // extendWriteDeadlineForSyncDispatch moves the connection's write deadline
 // to syncDispatchWriteBudget from now, so a launch that finishes within
 // syncDispatchTimeout still gets its response written instead of being cut
-// at the server-wide WriteTimeout (ptone/scion#3850). serverWriteTimeout is
-// the server's configured WriteTimeout: when it is unbounded (0) or already
-// at least the budget, the deadline is left alone, so this never shortens
-// it. http.NewResponseController reaches the connection through the
-// middleware wrappers that implement Unwrap; a ResponseWriter without
-// deadline support is logged at debug and otherwise ignored.
-func extendWriteDeadlineForSyncDispatch(ctx context.Context, w http.ResponseWriter, serverWriteTimeout time.Duration) {
+// at the serving listener's WriteTimeout (ptone/scion#3850). The timeout
+// compared is that of the server actually serving the request (see
+// servingWriteTimeout), with configuredWriteTimeout as the fallback: the
+// deadline is extended whenever that timeout is positive and shorter than
+// the budget, and left alone when it is unbounded (0) or already at least
+// the budget, so this never shortens it. http.NewResponseController reaches
+// the connection through the middleware wrappers that implement Unwrap; a
+// ResponseWriter without deadline support is logged at debug and otherwise
+// ignored.
+func extendWriteDeadlineForSyncDispatch(ctx context.Context, w http.ResponseWriter, configuredWriteTimeout time.Duration) {
 	budget := syncDispatchWriteBudget()
+	serverWriteTimeout := servingWriteTimeout(ctx, configuredWriteTimeout)
 	if serverWriteTimeout <= 0 || serverWriteTimeout >= budget {
 		return
 	}
