@@ -537,41 +537,37 @@ func parseExpiryAt(s string, now time.Time) (time.Time, error) {
 	unit := s[len(s)-1]
 	numStr := s[:len(s)-1]
 
-	// The minute and hour units parse the number strictly, so Go-style or
-	// fractional inputs such as 1h30m or 1.5h are rejected rather than read
-	// as a shorter duration. The day and year units keep their original,
-	// laxer parse so existing inputs behave exactly as before.
-	if unit == 'm' || unit == 'h' {
-		step := time.Hour
-		if unit == 'm' {
-			step = time.Minute
-		}
-		// Values above the hub's maximum token lifetime (8760h, or
-		// 525600m) are rejected here, before multiplying, so a huge
-		// number cannot overflow into a negative duration (an expiry in
-		// the past).
-		n, err := strconv.Atoi(numStr)
-		if err != nil || n <= 0 {
-			return time.Time{}, invalid
-		}
-		if int64(n) > int64(store.UATMaxExpiry/step) {
-			return time.Time{}, fmt.Errorf("%q exceeds the maximum expiry of 1 year (%dh or %dm)",
-				s, int64(store.UATMaxExpiry/time.Hour), int64(store.UATMaxExpiry/time.Minute))
-		}
-		return now.Add(time.Duration(n) * step), nil
-	}
-
-	var n int
-	if _, err := fmt.Sscanf(numStr, "%d", &n); err != nil || n <= 0 {
-		return time.Time{}, invalid
-	}
-
+	// Every unit parses its number strictly, so Go-style or fractional
+	// inputs such as 1h30m, 1.5h, 1.5d or 3xd are rejected rather than read
+	// as a shorter duration.
+	var step time.Duration
 	switch unit {
+	case 'm':
+		step = time.Minute
+	case 'h':
+		step = time.Hour
 	case 'd':
-		return now.Add(time.Duration(n) * 24 * time.Hour), nil
+		step = 24 * time.Hour
 	case 'y':
-		return now.AddDate(n, 0, 0), nil
+		// A year is measured in calendar years below; for the limit check
+		// it counts as the hub's 1-year maximum.
+		step = store.UATMaxExpiry
 	default:
 		return time.Time{}, invalid
 	}
+	n, err := strconv.Atoi(numStr)
+	if err != nil || n <= 0 {
+		return time.Time{}, invalid
+	}
+	// Values above the hub's maximum token lifetime (1y, 365d, 8760h or
+	// 525600m) are rejected here, before multiplying, so a huge number
+	// cannot overflow into a negative duration (an expiry in the past).
+	if int64(n) > int64(store.UATMaxExpiry/step) {
+		return time.Time{}, fmt.Errorf("%q exceeds the maximum expiry of 1 year (%dh or %dm)",
+			s, int64(store.UATMaxExpiry/time.Hour), int64(store.UATMaxExpiry/time.Minute))
+	}
+	if unit == 'y' {
+		return now.AddDate(n, 0, 0), nil
+	}
+	return now.Add(time.Duration(n) * step), nil
 }
