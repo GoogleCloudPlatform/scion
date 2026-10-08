@@ -516,21 +516,23 @@ jobs:
       # make test-hub-sqlite. pkg/conduit's relay/router tests run against
       # the SQLite-backed conduit registry store and are included too.
       #
-      # It is scoped to pkg/hub, perf/bench/seed, pkg/conduit and
-      # pkg/store/entadapter (not the whole module) and runs as its own
-      # parallel job so it doesn't add to the wall-clock time of Build &
-      # Test. The pkg/hub test binary alone took ~2360-2390s on green main
-      # runs in October 2026 and had grown by roughly 200s a day over the
-      # previous three days, so it reached the old 40m (2400s) go test
-      # timeout and main went intermittently red with "test timed out after
-      # 40m0s" in unrelated tests (ptone/scion#2732 raised the limit from 25m
-      # to 40m; GoogleCloudPlatform/scion#2031 hit the 15m limit before
-      # that). The 60m go test timeout gives ~50% headroom over that. The
-      # 70m job timeout stays far enough above it (the step runs ~4-5m
-      # longer than the pkg/hub binary, mostly compile and link, and setup
-      # plus the fixture coverage step add under a minute) that a real hang
-      # still produces go's goroutine dump instead of a bare job kill. The longer-term fix is splitting pkg/hub into
-      # smaller suites (ptone/scion#1847).
+      # It is scoped to pkg/hub, perf/bench/seed, pkg/conduit,
+      # pkg/store/entadapter and pkg/artifacts (not the whole module) and
+      # runs as its own parallel job so it doesn't add to the wall-clock
+      # time of Build & Test. The pkg/hub test binary alone took
+      # ~2360-2390s on green main runs in October 2026 and had grown by
+      # roughly 200s a day over the previous three days, so it reached the
+      # old 40m (2400s) go test timeout and main went intermittently red
+      # with "test timed out after 40m0s" in unrelated tests
+      # (ptone/scion#2732 raised the limit from 25m to 40m;
+      # GoogleCloudPlatform/scion#2031 hit the 15m limit before that). The
+      # 60m go test timeout gives ~50% headroom over that. The 70m job
+      # timeout stays far enough above it (the step runs ~4-5m longer than
+      # the pkg/hub binary, mostly compile and link, and setup plus the
+      # fixture coverage step add under a minute) that a real hang still
+      # produces go's goroutine dump instead of a bare job kill. The
+      # longer-term fix is splitting pkg/hub into smaller suites
+      # (ptone/scion#1847).
       #
       # Four tests are skipped: they have known, pre-existing failures
       # unrelated to this job (ptone/scion#1847) that already reproduce on
