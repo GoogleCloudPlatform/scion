@@ -278,10 +278,11 @@ func activeProfileName() string {
 	return "default"
 }
 
-// putRuntimeProfileToDB sets profile active's runtime in the DB-owned
-// profiles section. The base is the current row, or with no row the
-// effective profiles (bootstrap material), so other profiles and the active
-// profile's other fields are kept. The write is CAS on the base revision.
+// putRuntimeProfileToDB sets the runtime of the profile named by active in
+// the DB-owned profiles section. The base is the current row, or with no row
+// the effective profiles (bootstrap material), so other profiles and the
+// active profile's other fields are kept. The write is CAS on the base
+// revision.
 func (s *Server) putRuntimeProfileToDB(ctx context.Context, ops *OperationalSettings, active, rt, updatedBy string) error {
 	profiles := map[string]config.V1ProfileConfig{}
 	var baseRev int64 // 0 = create-only when there is no row yet

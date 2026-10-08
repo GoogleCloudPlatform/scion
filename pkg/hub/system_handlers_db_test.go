@@ -179,7 +179,7 @@ func (c *sectionRaceStore) GetHubSetting(ctx context.Context, section string) (*
 	raced := false
 	c.once.Do(func() {
 		raced = true
-		if _, uerr := c.HubSettingStore.UpsertHubSetting(ctx, section,
+		if _, uerr := c.UpsertHubSetting(ctx, section,
 			json.RawMessage(c.doc), "other@example.com", -1, "managed"); uerr != nil {
 			panic(uerr)
 		}
