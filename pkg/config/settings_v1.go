@@ -3198,13 +3198,13 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		}
 		if c := v1.Hub.Conduit; c != nil {
 			gc.Hub.Conduit = HubConduitConfig{
-				GrantKeyActivation:  c.GrantKeyActivation,
-				TCPAllowedPorts:     append([]int(nil), c.TCPAllowedPorts...),
-				InternalListen:      c.InternalListen,
-				InternalAdvertise:   c.InternalAdvertise,
-				PeerAuth:            c.PeerAuth,
-				PeerServiceAccounts: append([]string(nil), c.PeerServiceAccounts...),
-				PeerAudience:        c.PeerAudience,
+				GrantKeyActivation:   c.GrantKeyActivation,
+				TCPAllowedPorts:      append([]int(nil), c.TCPAllowedPorts...),
+				InternalListen:       c.InternalListen,
+				InternalAdvertise:    c.InternalAdvertise,
+				PeerAuth:             c.PeerAuth,
+				PeerServiceAccounts:  append([]string(nil), c.PeerServiceAccounts...),
+				PeerAudience:         c.PeerAudience,
 				ReconnectWindow:      c.ReconnectWindow,
 				InstanceID:           c.InstanceID,
 				AuthzRecheckInterval: c.AuthzRecheckInterval,
@@ -3536,13 +3536,13 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	}
 	if c := gc.Hub.Conduit; !c.IsZero() {
 		v1Hub.Conduit = &V1ServerHubConduitConfig{
-			GrantKeyActivation:  c.GrantKeyActivation,
-			TCPAllowedPorts:     append([]int(nil), c.TCPAllowedPorts...),
-			InternalListen:      c.InternalListen,
-			InternalAdvertise:   c.InternalAdvertise,
-			PeerAuth:            c.PeerAuth,
-			PeerServiceAccounts: append([]string(nil), c.PeerServiceAccounts...),
-			PeerAudience:        c.PeerAudience,
+			GrantKeyActivation:   c.GrantKeyActivation,
+			TCPAllowedPorts:      append([]int(nil), c.TCPAllowedPorts...),
+			InternalListen:       c.InternalListen,
+			InternalAdvertise:    c.InternalAdvertise,
+			PeerAuth:             c.PeerAuth,
+			PeerServiceAccounts:  append([]string(nil), c.PeerServiceAccounts...),
+			PeerAudience:         c.PeerAudience,
 			ReconnectWindow:      c.ReconnectWindow,
 			InstanceID:           c.InstanceID,
 			AuthzRecheckInterval: c.AuthzRecheckInterval,

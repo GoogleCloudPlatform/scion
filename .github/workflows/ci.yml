@@ -601,6 +601,15 @@ jobs:
           SCION_TEST_POSTGRES_DSN: postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable
         run: make test-webchat-postgres
 
+      # Conduit user-stream re-check across two hub nodes on one database
+      # (LISTEN/NOTIFY, resync after a dropped listener). Each test uses its
+      # own schema. See the Makefile target's comment.
+      - name: Run conduit stream re-check tests (Postgres)
+        if: ${{ !cancelled() }}
+        env:
+          SCION_TEST_POSTGRES_DSN: postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable
+        run: make test-conduit-authz-postgres
+
       # The pkg/artifacts store is likewise not an Ent store (it creates its
       # own artifact_* tables at Init), so it has its own Postgres SQL. Its
       # store tests run once per dialect; this step adds the Postgres pass.

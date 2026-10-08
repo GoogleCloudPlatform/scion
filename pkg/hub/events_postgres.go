@@ -97,6 +97,11 @@ type PostgresEventPublisher struct {
 	// onListen holds the AddOnListen callbacks, each run once per
 	// listener connection after its channels are LISTENed.
 	onListen map[*listenHook]struct{}
+
+	// testHookBeforeConnect, when set, runs before every listener
+	// connection attempt. Tests only (it lets a test hold the listener
+	// down).
+	testHookBeforeConnect func()
 }
 
 // listenHook is one AddOnListen registration.
@@ -453,6 +458,12 @@ func (p *PostgresEventPublisher) runListener() {
 			return
 		}
 
+		p.mu.RLock()
+		hook := p.testHookBeforeConnect
+		p.mu.RUnlock()
+		if hook != nil {
+			hook()
+		}
 		conn, err := p.connectListener(p.ctx)
 		if err != nil {
 			if p.ctx.Err() != nil {

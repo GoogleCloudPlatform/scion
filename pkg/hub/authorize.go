@@ -464,8 +464,8 @@ func (s *Server) authorizeAgentTargetAction(ctx context.Context, identity Identi
 	})
 	if !decision.Allowed {
 		return &agentTargetDenial{
-			status:   http.StatusForbidden,
-			message:  agentTargetDenyMessage,
+			status:        http.StatusForbidden,
+			message:       agentTargetDenyMessage,
 			reason:        decision.Reason,
 			deniedBy:      decision.DeniedBy,
 			cause:         decision.adoptionDetailsCause(),

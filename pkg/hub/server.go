@@ -1414,11 +1414,11 @@ type Server struct {
 	conduitGrants     *conduitGrantKeys
 	// conduit is the in-process conduit relay (conduit_relay.go); nil
 	// unless hub.conduit was on at startup.
-	conduit                atomic.Pointer[conduitRuntime]
+	conduit atomic.Pointer[conduitRuntime]
 	// conduitAuthz re-checks the user streams this node owns (nil while
 	// no relay runs); conduitAuthzMetrics is its counter.
-	conduitAuthz        atomic.Pointer[conduitStreamAuthz]
-	conduitAuthzMetrics atomic.Pointer[conduitStreamAuthzMetrics]
+	conduitAuthz           atomic.Pointer[conduitStreamAuthz]
+	conduitAuthzMetrics    atomic.Pointer[conduitStreamAuthzMetrics]
 	listCursorSealer       *listCursorSealer       // AEAD sealer for authorizedList's opaque pagination cursors (ptone/scion#2124)
 	uatService             *UserAccessTokenService // User access token service
 	inviteService          *InviteService          // Invite code service
