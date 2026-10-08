@@ -86,9 +86,9 @@ func grantAgentLifecycleAtProject(t *testing.T, s store.Store, userID, projectID
 }
 
 // grantAgentDelegationAtProject grants userID agent.create at project scope.
-// A reincarnation requested by another principal re-records the agent's
-// authority under the requester, which requires delegation authority
-// (CanDelegate) in addition to agent.lifecycle.
+// A reincarnation requested by another principal requires delegation
+// authority for the agent's role (CanDelegate) in addition to
+// agent.lifecycle, whether or not it re-records the agent's edge.
 func grantAgentDelegationAtProject(t *testing.T, s store.Store, userID, projectID string) {
 	t.Helper()
 	grantPermissionViaRoleBinding(t, s, userID, "agent.create", store.RoleScopeProject, projectID)

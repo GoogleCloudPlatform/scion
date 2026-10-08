@@ -164,12 +164,29 @@ func runHookWithEvent(eventName string) {
 	}
 }
 
+// hookHubBudget bounds the total time one hook process spends on Hub
+// calls: the status update, the limits count report, and the session-end
+// metrics report all share it. Each call is also capped on its own, but the
+// caps used to add up (10-15s with a black-holed Hub) past harness hook
+// timeouts (antigravity 10s; opencode and grok-build 5s). Together with
+// telemetry's own bound (about 0.75s) this keeps a hook under 5s.
+// The calls run in order, so a slow earlier call (the status update) can use
+// up the budget and the later ones (limits counts, session-end metrics) are
+// then dropped. That is acceptable: those are informational, and
+// limits_exceeded and the final stop status are reported by sciontool init.
+const hookHubBudget = 3 * time.Second
+
 // processHookData parses and handles hook event data.
 func processHookData(data []byte) error {
 	var rawData map[string]interface{}
 	if err := json.Unmarshal(data, &rawData); err != nil {
 		return fmt.Errorf("parsing JSON: %w", err)
 	}
+
+	// One Hub client and one deadline for every Hub call this process makes.
+	hubBudget, cancelHubBudget := context.WithTimeout(context.Background(), hookHubBudget)
+	defer cancelHubBudget()
+	hubClient := hub.NewClient()
 
 	// Create processor with handlers
 	processor := hooks.NewHarnessProcessor()
@@ -187,8 +204,8 @@ func processHookData(data []byte) error {
 	statusHandler := handlers.NewStatusHandler()
 	loggingHandler := handlers.NewLoggingHandler()
 	promptHandler := handlers.NewPromptHandler()
-	hubHandler := handlers.NewHubHandler()
-	limitsHandler := handlers.NewLimitsHandler()
+	hubHandler := handlers.NewHubHandlerForClient(hubClient).WithBudget(hubBudget)
+	limitsHandler := handlers.NewLimitsHandler(hubHandler)
 
 	processor.AddHandler(statusHandler.Handle)
 	processor.AddHandler(loggingHandler.Handle)
@@ -220,7 +237,7 @@ func processHookData(data []byte) error {
 		return err
 	}
 
-	runHookTelemetry(event)
+	runHookTelemetry(hubBudget, event, hubClient)
 	return nil
 }
 
@@ -262,8 +279,9 @@ var hookOTelErrorHandler = otel.ErrorHandlerFunc(func(err error) {
 // debug level only. It never writes to stdout and never fails the hook.
 // When the Hub client is configured it also persists session counts and, on
 // session-end, reports the session summary to the Hub (bounded by
-// sessionMetricsReportTimeout).
-func runHookTelemetry(event *hooks.Event) {
+// sessionMetricsReportTimeout and by hubBudget, the hook's shared Hub
+// deadline).
+func runHookTelemetry(hubBudget context.Context, event *hooks.Event, hubClient *hub.Client) {
 	cfg := telemetry.LoadConfig()
 	if cfg == nil || !cfg.Enabled {
 		return
@@ -308,7 +326,7 @@ func runHookTelemetry(event *hooks.Event) {
 	}
 
 	telemetryHandler := handlers.NewTelemetryHandler(tp, lp, redactor, mp)
-	wireSessionMetrics(telemetryHandler, hub.NewClient(), hookHomeDir())
+	wireSessionMetrics(hubBudget, telemetryHandler, hubClient, hookHomeDir())
 	if err := telemetryHandler.Handle(event); err != nil {
 		log.Debug("Hook telemetry handler: %v", err)
 	}
@@ -376,15 +394,16 @@ const sessionMetricsReportTimeout = 5 * time.Second
 // session-metrics reporting. Each hook event runs in a new process, so the
 // session's counts are kept in a state file under home between events (see
 // handlers.FileSessionState), and the process that handles session-end
-// reports the summary. Nothing is wired when the Hub client is not
+// reports the summary. The report's deadline is derived from parent (the
+// hook's shared Hub budget). Nothing is wired when the Hub client is not
 // configured or no home directory is known.
-func wireSessionMetrics(h *handlers.TelemetryHandler, client *hub.Client, home string) {
+func wireSessionMetrics(parent context.Context, h *handlers.TelemetryHandler, client *hub.Client, home string) {
 	if h == nil || client == nil || !client.IsConfigured() || home == "" {
 		return
 	}
 	h.SessionState = handlers.NewFileSessionState(home)
 	h.OnSessionEnd = func(summary telemetry.SessionSummary) {
-		ctx, cancel := context.WithTimeout(context.Background(), sessionMetricsReportTimeout)
+		ctx, cancel := context.WithTimeout(parent, sessionMetricsReportTimeout)
 		defer cancel()
 		if err := client.ReportMetrics(ctx, hub.SummaryToMetricsPayload(summary)); err != nil {
 			log.Error("Failed to report session metrics to hub: %v", err)

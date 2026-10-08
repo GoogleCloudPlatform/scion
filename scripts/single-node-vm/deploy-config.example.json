@@ -11,6 +11,7 @@
     "force_rebuild": false
   },
   "admin_email": "",
+  "hub_sa_minting": true,
   "update_policy": "auto",
   "release_channel": "",
   "gke_target": {

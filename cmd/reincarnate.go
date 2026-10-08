@@ -162,6 +162,10 @@ get the same access checks as create. --dry-run shows the old and new
 value of each patched setting. An agent that patches itself needs the
 agent lifecycle permission, and can lower its own role but not raise it.
 
+To reincarnate another agent you must be able to delegate its role. The
+agent keeps its existing delegator unless you change its role with --role;
+then you become its recorded delegator.
+
 Use --broker <name|id> to move the agent to another runtime broker. Both
 brokers must mount the same NFS export, the agent's workspace must be on
 that export, and both brokers must support agent move and be online. The

@@ -175,6 +175,12 @@ func (s *Server) handleScheduledEvents(w http.ResponseWriter, r *http.Request, p
 		}
 	}
 
+	// Creating a scheduled event authors future work: the credential gate
+	// runs before the permission check and before the body is read.
+	if action == ActionCreate && !authorizeScheduleAuthoringCredential(w, r) {
+		return
+	}
+
 	// Authorize access — fail closed for all identity types.
 	if !s.authorizeScheduledEventAccess(w, r, projectID, action) {
 		return
@@ -328,7 +334,7 @@ func (s *Server) createScheduledEvent(w http.ResponseWriter, r *http.Request, pr
 	}
 
 	// The revision's frozen ceiling is computed before any write.
-	ceiling, ok := s.revisionAuthorityCeiling(w, r, projectID, req.EventType, ActionCreate)
+	ceiling, ok := s.revisionAuthorityCeiling(w, r, projectID, ActionCreate)
 	if !ok {
 		return
 	}
