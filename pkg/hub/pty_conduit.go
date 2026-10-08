@@ -77,17 +77,14 @@ const (
 	ptyCloseReasonForbidden           = "forbidden"
 )
 
-// ptySessionName is the tmux session a conduit PTY stream attaches to
-// (contracts §2: session = scion).
-const ptySessionName = "scion"
-
-// PTY terminal size bounds (contracts §2): the default size, and the range
-// of cols and rows a conduit PTY stream carries.
+// PTY terminal size (contracts §2): the default size, and the smallest
+// cols and rows a conduit PTY stream carries. The largest is
+// conduitPTYMaxDim and the tmux session is conduitPTYSession, the values
+// the grant check enforces.
 const (
 	ptyDefaultCols = 80
 	ptyDefaultRows = 24
 	ptyMinDim      = 1
-	ptyMaxDim      = 4096
 )
 
 // ptyPathDecision is resolvePTYPath's answer.
@@ -229,15 +226,27 @@ func (s *Server) ptyStreamTrackable(identity Identity) bool {
 // treats a missing capability. Capabilities.Attach describes the broker's
 // default runtime only, so it decides only when no profile resolves or the
 // resolved profile is the default one and reports nothing itself. An
-// unreadable broker row is supported: the broker path is today's
-// behaviour, and the broker refuses an unsupported attach with 4501.
+// unreadable broker row is supported, and logged: the broker path is
+// today's behaviour, and the broker refuses an unsupported attach with
+// 4501, which reaches the client unchanged.
 func (s *Server) brokerAttachUnsupported(ctx context.Context, agent *store.Agent) bool {
 	b, err := s.store.GetRuntimeBroker(ctx, agent.RuntimeBrokerID)
 	if err != nil || b == nil {
+		class := "read_error"
+		if (b == nil && err == nil) || errors.Is(err, store.ErrNotFound) {
+			class = "not_found"
+		}
+		slog.Warn("PTY path: broker row unreadable, treating attach as supported",
+			"agent_id", agent.ID, "broker_id", agent.RuntimeBrokerID,
+			"attach_source", ptyAttachSourceUnreadableRow, "error_class", class)
 		return false
 	}
 	return brokerRowAttachUnsupported(b, agent)
 }
+
+// ptyAttachSourceUnreadableRow is the attach_source logged when the
+// broker row could not be read and attach is assumed supported.
+const ptyAttachSourceUnreadableRow = "unreadable_row"
 
 // brokerRowAttachUnsupported is brokerAttachUnsupported's rule over a
 // broker row.
@@ -347,7 +356,7 @@ func ptyInitialSize(q url.Values) (cols, rows int) {
 		if err != nil {
 			return def
 		}
-		return min(max(n, ptyMinDim), ptyMaxDim)
+		return min(max(n, ptyMinDim), conduitPTYMaxDim)
 	}
 	return dim(q.Get("cols"), ptyDefaultCols), dim(q.Get("rows"), ptyDefaultRows)
 }
@@ -358,7 +367,7 @@ func ptyStreamParams(cols, rows int) map[string]string {
 	return map[string]string{
 		grant.ParamCols:    strconv.Itoa(cols),
 		grant.ParamRows:    strconv.Itoa(rows),
-		grant.ParamSession: ptySessionName,
+		grant.ParamSession: conduitPTYSession,
 	}
 }
 
@@ -480,7 +489,7 @@ func (u *agentPTYUpstream) Write(data []byte) error {
 // Resize forwards a resize within 1..4096; an out-of-range one is dropped
 // (contracts §2), and the stream stays open.
 func (u *agentPTYUpstream) Resize(cols, rows int) error {
-	if cols < ptyMinDim || cols > ptyMaxDim || rows < ptyMinDim || rows > ptyMaxDim {
+	if cols < ptyMinDim || cols > conduitPTYMaxDim || rows < ptyMinDim || rows > conduitPTYMaxDim {
 		slog.Debug("PTY resize out of range dropped", "agent_id", u.agent.ID, "cols", cols, "rows", rows)
 		return nil
 	}

@@ -17,11 +17,13 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -89,6 +91,9 @@ type ptyConduitFixture struct {
 	userToken  string
 	peerSecret []byte
 	spawned    chan *fakePTY
+	// regFault, while set, fails every conduit registry operation on this
+	// hub node (the relay's and the router's).
+	regFault atomic.Bool
 }
 
 func newPTYConduitFixture(t *testing.T) *ptyConduitFixture {
@@ -99,6 +104,14 @@ func newPTYConduitFixture(t *testing.T) *ptyConduitFixture {
 		auth, err := relay.NewHMACPeerAuthFromSecret(relay.HMACPeerAuthConfig{Secret: f.peerSecret, SelfID: "hub-a"})
 		require.NoError(t, err)
 		o.PeerAuth = auth
+		faulty := &registry.FaultStore{Inner: o.Store, Fault: func(context.Context, string) error {
+			if f.regFault.Load() {
+				return errors.New("injected registry fault")
+			}
+			return nil
+		}}
+		o.Store = faulty
+		o.Registry = registry.New(faulty, registry.Config{})
 	})
 	require.True(t, f.srv.conduitServing())
 	// Broker ids are UUIDs in the store: register the agent's broker under
@@ -770,4 +783,158 @@ func TestPTYLeafCloseCode_Mapping(t *testing.T) {
 		ptyLeafCloseForStream(errors.New("session lost")))
 	assert.Equal(t, &StreamClosedError{Code: 4403, Reason: ptyCloseReasonForbidden},
 		ptyAgentOpenError(errConduitForbidden))
+}
+
+// setAgentBroker points the launched agent at brokerID (which may have no
+// row, or not be a valid broker id at all).
+func (f *ptyConduitFixture) setAgentBroker(t *testing.T, brokerID string) {
+	t.Helper()
+	ctx := context.Background()
+	f.launched.RuntimeBrokerID = brokerID
+	require.NoError(t, f.store.UpdateAgent(ctx, f.launched))
+	got, err := f.store.GetAgent(ctx, f.launched.ID)
+	require.NoError(t, err)
+	require.Equal(t, brokerID, got.RuntimeBrokerID)
+	f.launched = got
+}
+
+// lockedLogBuffer collects JSON log lines written concurrently.
+type lockedLogBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedLogBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+// records returns the parsed log lines whose msg is msg.
+func (b *lockedLogBuffer) records(t *testing.T, msg string) []map[string]any {
+	t.Helper()
+	b.mu.Lock()
+	lines := strings.Split(b.buf.String(), "\n")
+	b.mu.Unlock()
+	var out []map[string]any
+	for _, line := range lines {
+		var rec map[string]any
+		if json.Unmarshal([]byte(line), &rec) == nil && rec["msg"] == msg {
+			out = append(out, rec)
+		}
+	}
+	return out
+}
+
+// capturePTYLogs routes the default logger to a buffer for the test. Call
+// it after startPTYAgent (sciontool's log setup replaces the default).
+func capturePTYLogs(t *testing.T) *lockedLogBuffer {
+	t.Helper()
+	b := &lockedLogBuffer{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(b, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return b
+}
+
+// TestPTYPath_UnreadableBrokerRowTakesBrokerPath: a broker row that cannot
+// be read (no row, or an id the store rejects) is treated as supporting
+// attach, and logged as such. Even with a pty-capable agent session
+// running, the preflight names the broker path, the open goes to the
+// broker, and the broker's 4501 attach_unsupported reaches the client
+// unchanged; the agent path is not used.
+func TestPTYPath_UnreadableBrokerRowTakesBrokerPath(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		brokerID  string
+		wantClass string
+	}{
+		{"row missing", uuid.NewString(), "not_found"},
+		{"id the store rejects", "not-a-uuid-broker", "read_error"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newPTYConduitFixture(t)
+			f.setAgentBroker(t, tc.brokerID)
+			b := connectFakeBroker(t, f.srv, tc.brokerID)
+			f.startPTYAgent(t, f.public.URL)
+			logs := capturePTYLogs(t)
+
+			status, path, _ := f.preflight(t)
+			require.Equal(t, http.StatusOK, status)
+			require.Equal(t, string(ptyPathBroker), path)
+
+			c, _, err := f.dialPTY(t, "")
+			require.NoError(t, err)
+			require.NoError(t, b.ws.SetReadDeadline(time.Now().Add(10*time.Second)))
+			var open wsprotocol.StreamOpenMessage
+			require.NoError(t, b.ws.ReadJSON(&open))
+			assert.Equal(t, wsprotocol.StreamTypePTY, open.StreamType)
+			require.NoError(t, b.ws.WriteJSON(wsprotocol.NewStreamCloseMessage(open.StreamID,
+				wsprotocol.CloseReasonAttachUnsupported, wsprotocol.ClosePTYAttachUnsupported)))
+			ce := readUntilClose(t, c)
+			assert.Equal(t, wsprotocol.ClosePTYAttachUnsupported, ce.Code)
+			assert.Equal(t, wsprotocol.CloseReasonAttachUnsupported, ce.Text)
+			assert.Empty(t, f.spawned, "the agent path was not used")
+
+			recs := logs.records(t, "PTY path: broker row unreadable, treating attach as supported")
+			require.Len(t, recs, 2, "logged once for the preflight and once for the open")
+			for _, rec := range recs {
+				assert.Equal(t, "WARN", rec["level"])
+				assert.Equal(t, f.launched.ID, rec["agent_id"])
+				assert.Equal(t, tc.brokerID, rec["broker_id"])
+				assert.Equal(t, ptyAttachSourceUnreadableRow, rec["attach_source"])
+				assert.Equal(t, tc.wantClass, rec["error_class"])
+			}
+		})
+	}
+}
+
+// TestAgentPTY_FailClosedRefusals: with the broker reporting no attach and
+// a pty-capable agent session running, the agent path is refused (503 with
+// the reason, on the preflight and the handshake, nothing upgraded or
+// spawned) when this node cannot open or police the stream: the user
+// stream re-check is not running, conduit is not serving on this node, or
+// the registry cannot be read.
+func TestAgentPTY_FailClosedRefusals(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		apply      func(t *testing.T, f *ptyConduitFixture)
+		wantReason string
+	}{
+		{"stream re-check not running", func(t *testing.T, f *ptyConduitFixture) {
+			a := f.srv.conduitAuthz.Swap(nil)
+			require.NotNil(t, a)
+			t.Cleanup(func() { f.srv.conduitAuthz.CompareAndSwap(nil, a) })
+		}, ptyReasonStreamAuthzDown},
+		{"conduit not serving on this node", func(t *testing.T, f *ptyConduitFixture) {
+			rt := f.srv.conduit.Swap(nil)
+			require.NotNil(t, rt)
+			t.Cleanup(func() { f.srv.conduit.CompareAndSwap(nil, rt) })
+		}, ptyReasonConduitNotServing},
+		{"registry unavailable", func(t *testing.T, f *ptyConduitFixture) {
+			f.regFault.Store(true)
+			t.Cleanup(func() { f.regFault.Store(false) })
+		}, ptyReasonRegistryUnavailable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newPTYConduitFixture(t)
+			f.setBrokerRow(t, attachCaps(false), "")
+			f.startPTYAgent(t, f.public.URL)
+			tc.apply(t, f)
+
+			status, _, reason := f.preflight(t)
+			assert.Equal(t, http.StatusServiceUnavailable, status)
+			assert.Equal(t, tc.wantReason, reason)
+
+			_, resp, err := f.dialPTY(t, "")
+			require.ErrorIs(t, err, websocket.ErrBadHandshake, "no WebSocket is upgraded")
+			require.NotNil(t, resp)
+			assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+			var er ErrorResponse
+			require.NoError(t, json.NewDecoder(resp.Body).Decode(&er))
+			assert.Equal(t, ErrCodeUnavailable, er.Error.Code)
+			assert.Equal(t, tc.wantReason, er.Error.Details["reason"])
+			assert.Empty(t, f.spawned)
+		})
+	}
 }
