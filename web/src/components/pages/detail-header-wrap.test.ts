@@ -25,7 +25,7 @@
 import { describe, it, expect, beforeAll, vi } from 'vitest';
 import { render, type CSSResult, type TemplateResult } from 'lit';
 
-import { styleRules } from './__fixtures__/card-layout.js';
+import { styleRules } from './__fixtures__/css-rules.js';
 
 // Some page module graphs reach the app entry point, which bootstraps the
 // SPA on load; stub it as the agent page tests do.

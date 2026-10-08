@@ -16,19 +16,41 @@
 
 /** Helpers for the layout tests: read a component's style rules. */
 
-/** Leaf style rules from Lit cssText, keyed by selector. */
+/**
+ * Leaf style rules from Lit cssText.
+ *
+ * A top-level rule is keyed by its selector alone, for example `.card`. A
+ * rule nested in at-rules (`@media`, `@supports`, `@container`, ...) is keyed
+ * by its at-rule preludes followed by the selector, separated by single
+ * spaces, for example `@media (max-width: 600px) .card`. So a top-level
+ * rule and an `@media` rule with the same selector never overwrite each
+ * other. Whitespace in keys is collapsed to single spaces.
+ *
+ * A selector list such as `.a, .b` yields one entry per selector. If a key
+ * appears twice, the second rule would silently mask the first, so this
+ * throws instead and names the key.
+ */
 export function styleRules(cssText: string): Map<string, string> {
   const rules = new Map<string, string>();
   const stack: string[] = [];
   let buf = '';
   for (const ch of cssText.replace(/\/\*[\s\S]*?\*\//g, '')) {
     if (ch === '{') {
-      stack.push(buf.trim());
+      stack.push(normalize(buf));
       buf = '';
     } else if (ch === '}') {
       const selector = stack.pop() ?? '';
       if (!selector.startsWith('@')) {
-        for (const part of selector.split(',')) rules.set(part.trim(), buf);
+        const context = stack.filter((s) => s.startsWith('@'));
+        for (const part of selector.split(',')) {
+          const key = [...context, part.trim()].join(' ');
+          if (rules.has(key)) {
+            throw new Error(
+              `styleRules: duplicate rule for "${key}"; the later rule would mask the earlier one`
+            );
+          }
+          rules.set(key, buf);
+        }
       }
       buf = '';
     } else {
@@ -36,6 +58,10 @@ export function styleRules(cssText: string): Map<string, string> {
     }
   }
   return rules;
+}
+
+function normalize(text: string): string {
+  return text.trim().replace(/\s+/g, ' ');
 }
 
 type CssLike = { cssText?: string } | undefined;

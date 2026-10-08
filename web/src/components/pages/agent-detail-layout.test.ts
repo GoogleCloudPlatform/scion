@@ -19,7 +19,7 @@ import { render, type TemplateResult } from 'lit';
 
 import type { Agent } from '../../shared/types.js';
 import { PROVISIONED_ONLY_LABEL } from '../../shared/agent-state-display.js';
-import { styleRules } from './__fixtures__/card-layout.js';
+import { styleRules } from './__fixtures__/css-rules.js';
 
 // chat-thread (imported by agent-detail) pulls in the app entry point,
 // which bootstraps the SPA on load; stub it as the header tests do.
