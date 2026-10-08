@@ -590,3 +590,65 @@ func TestLoadBootstrapKoanfWithConfigPath_LegacyFile(t *testing.T) {
 		t.Errorf("image_registry = %q, want file.example.com", got)
 	}
 }
+
+// When the --config settings.yaml wins, LoadGlobalConfig takes the keys it
+// models (here quotas and default_timezone) only from that file, so a value
+// set only in the global settings.yaml must not reach bootstrap either. Keys
+// LoadGlobalConfig does not model (here image_registry) still come from the
+// global file, as the file-mode settings load reads them (ptone/scion#3070).
+func TestLoadBootstrapKoanfWithConfigPath_ConfigWinsDropsGlobalModelledKeys(t *testing.T) {
+	_, cfgDir := writeConfigPathFixture(t,
+		"schema_version: \"1\"\nimage_registry: global.example.com\ndefault_timezone: Europe/Paris\nquotas:\n  enforce_broker_quotas: false\n",
+		"schema_version: \"1\"\nserver:\n  hub:\n    stalled_threshold: 9m\n")
+
+	gc, err := LoadGlobalConfig(cfgDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	k := LoadBootstrapKoanfWithConfigPath(cfgDir)
+
+	if gc.EnforceBrokerQuotas != nil {
+		t.Errorf("LoadGlobalConfig: quotas.enforce_broker_quotas = %v, want unset", *gc.EnforceBrokerQuotas)
+	}
+	if k.Exists("quotas.enforce_broker_quotas") {
+		t.Errorf("bootstrap: quotas.enforce_broker_quotas = %v, want unset like LoadGlobalConfig", k.Get("quotas.enforce_broker_quotas"))
+	}
+	if gc.DefaultTimezone != "" || k.String("default_timezone") != "" {
+		t.Errorf("default_timezone: LoadGlobalConfig %q, bootstrap %q; want both unset", gc.DefaultTimezone, k.String("default_timezone"))
+	}
+
+	t.Chdir(filepath.Dir(cfgDir)) // no project settings from the working directory
+	vs, _, err := LoadEffectiveSettings("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := k.String("image_registry"); got != "global.example.com" || vs.ImageRegistry != got {
+		t.Errorf("image_registry: bootstrap %q, effective settings %q; want both global.example.com", got, vs.ImageRegistry)
+	}
+	assertStalledThresholdAgrees(t, cfgDir, "9m0s")
+}
+
+// topLevelSettingsSectionKeys must cover every key applyTopLevelSettingsSections
+// reads; it only sees listed keys, so a missing entry drops that setting.
+func TestApplyTopLevelSettingsSections_ReadsListedKeys(t *testing.T) {
+	raw := map[string]interface{}{
+		"telemetry":                 map[string]interface{}{"enabled": true},
+		"project_defaults":          map[string]interface{}{"default_scratchpad": false},
+		"quotas":                    map[string]interface{}{"enforce_broker_quotas": false},
+		"agent_secrets":             map[string]interface{}{"user_scope_only": true},
+		"default_harness_config":    "hc",
+		"default_timezone":          "Europe/Paris",
+		"default_gcp_identity_mode": "block",
+		"default_gcp_identity_service_account_id": "sa-1",
+	}
+	if len(raw) != len(topLevelSettingsSectionKeys) {
+		t.Fatalf("fixture covers %d keys, list has %d", len(raw), len(topLevelSettingsSectionKeys))
+	}
+	gc := &GlobalConfig{}
+	applyTopLevelSettingsSections(gc, raw)
+	if gc.TelemetryEnabled == nil || gc.DefaultScratchpad == nil || gc.EnforceBrokerQuotas == nil ||
+		gc.AgentSecretsUserScopeOnly == nil || gc.DefaultHarnessConfig != "hc" || gc.DefaultTimezone != "Europe/Paris" ||
+		gc.DefaultGCPIdentityMode != "block" || gc.DefaultGCPIdentityServiceAccountID != "sa-1" {
+		t.Errorf("applyTopLevelSettingsSections dropped a listed key: %+v", gc)
+	}
+}

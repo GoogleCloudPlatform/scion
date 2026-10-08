@@ -1101,8 +1101,9 @@ func loadGlobalConfigFromSettings(configPath string) (*GlobalConfig, bool) {
 // serverSettingsSource is where the server's settings come from for a given
 // --config path. resolveServerSettingsSource is the single rule shared by
 // LoadGlobalConfig (startup and file-mode reload) and
-// LoadBootstrapKoanfWithConfigPath (DB-tier bootstrap), so both read the
-// same file (ptone/scion#3070).
+// LoadBootstrapKoanfWithConfigPath (DB-tier bootstrap), so both take the
+// server block and the top-level hub sections from the same settings.yaml
+// (ptone/scion#3070).
 type serverSettingsSource struct {
 	globalDir string // "" when the global dir cannot be resolved
 	configDir string // directory of configPath ("" when unset or missing)
@@ -1728,12 +1729,15 @@ func LoadBootstrapKoanf() *koanf.Koanf {
 }
 
 // LoadBootstrapKoanfWithConfigPath is LoadBootstrapKoanf for a server started
-// with --config. The --config location is resolved with the same rule as
-// LoadGlobalConfig (see loadConfigPathFiles) and layered over the global
-// files, below SCION_SERVER_*, so the DB-tier bootstrap reads the same file
-// for Layer-1 keys as startup and the file-mode reload (ptone/scion#3070).
-// An empty configPath, or one that resolves to the global directory, adds
-// nothing.
+// with --config. The --config location is resolved with LoadGlobalConfig's
+// rule (resolveServerSettingsSource), so the DB-tier bootstrap takes the keys
+// LoadGlobalConfig models from the same file as startup and the file-mode
+// reload (ptone/scion#3070). When the --config settings.yaml wins, the server
+// block and the top-level sections applyTopLevelSettingsSections reads
+// (topLevelSettingsSectionKeys) come only from it; other global keys that
+// LoadGlobalConfig does not model (image_registry, runtimes, profiles) still
+// come from the global settings.yaml, as they do in file mode. An empty
+// configPath, or one that resolves to the global directory, changes nothing.
 func LoadBootstrapKoanfWithConfigPath(configPath string) *koanf.Koanf {
 	k := koanf.New(".")
 
@@ -1778,13 +1782,23 @@ func LoadBootstrapKoanfWithConfigPath(configPath string) *koanf.Koanf {
 	if err != nil {
 		slog.Warn("LoadBootstrapKoanf: failed to resolve global settings directory", "error", err)
 	}
+	src := resolveServerSettingsSource(configPath)
 	if globalDir != "" {
-		if _, err := loadSettingsFile(k, globalDir); err != nil {
+		globalK := koanf.New(".")
+		if _, err := loadSettingsFile(globalK, globalDir); err != nil {
 			slog.Warn("LoadBootstrapKoanf: failed to load settings file", "dir", globalDir, "error", err)
 		}
+		if configSettingsWin(src, globalDir) {
+			// LoadGlobalConfig reads these only from the --config file.
+			globalK.Delete("server")
+			for _, key := range topLevelSettingsSectionKeys {
+				globalK.Delete(key)
+			}
+		}
+		_ = k.Merge(globalK)
 		loadServerConfigFile(k, globalDir)
 	}
-	loadConfigPathFiles(k, configPath, globalDir)
+	loadConfigPathFiles(k, src, globalDir)
 
 	// 4. SCION_SERVER_* environment variables (highest precedence in bootstrap).
 	// Uses serverEnvToOpsettingsKey which re-adds the "server." prefix for keys
@@ -1804,11 +1818,14 @@ func LoadBootstrapKoanfWithConfigPath(configPath string) *koanf.Koanf {
 
 // loadConfigPathFiles layers the --config location over k using the same
 // resolution rule as LoadGlobalConfig (resolveServerSettingsSource), so the
-// DB-tier bootstrap and the startup/file-mode load read the same file:
+// DB-tier bootstrap takes the server block and topLevelSettingsSectionKeys
+// from the same settings.yaml as the startup/file-mode load:
 //   - The global settings.yaml has a server key: it wins, and the --config
 //     location adds nothing.
-//   - Only the --config directory's settings.yaml has a server key: that
-//     file is layered over the global one.
+//   - The global settings.yaml has no server key and the --config
+//     directory's has one: that file is layered over the global one, from
+//     which the caller has removed the server block and the
+//     topLevelSettingsSectionKeys (see configSettingsWin).
 //   - Neither has a server key (legacy server.yaml): the --config
 //     directory's settings.yaml is layered only when there is no global
 //     settings.yaml (as findTopLevelSettingsRaw picks it), then the --config
@@ -1816,8 +1833,7 @@ func LoadBootstrapKoanfWithConfigPath(configPath string) *koanf.Koanf {
 //     layers it over the global server.yaml.
 //
 // A --config location equal to globalDir (already loaded) adds nothing.
-func loadConfigPathFiles(k *koanf.Koanf, configPath, globalDir string) {
-	src := resolveServerSettingsSource(configPath)
+func loadConfigPathFiles(k *koanf.Koanf, src serverSettingsSource, globalDir string) {
 	if src.configDir == "" || (globalDir != "" && sameDir(src.configDir, globalDir)) {
 		return
 	}
@@ -1847,6 +1863,14 @@ func loadConfigPathFiles(k *koanf.Koanf, configPath, globalDir string) {
 			slog.Warn("LoadBootstrapKoanf: failed to load config file", "path", src.configFile, "error", err)
 		}
 	}
+}
+
+// configSettingsWin reports whether the --config directory's settings.yaml
+// supplies the server block and top-level hub sections instead of the global
+// one: the global file has no server key and the --config file has one.
+func configSettingsWin(src serverSettingsSource, globalDir string) bool {
+	return !src.legacy && src.configDir != "" && src.settingsDir == src.configDir &&
+		(globalDir == "" || !sameDir(src.configDir, globalDir))
 }
 
 // sameDir reports whether a and b name the same directory after cleaning
@@ -2240,13 +2264,35 @@ func topLevelTelemetryEnabled(raw map[string]interface{}) *bool {
 	return tel.Enabled
 }
 
+// topLevelSettingsSectionKeys are the top-level settings.yaml keys (outside
+// "server") that applyTopLevelSettingsSections reads. It sees only these keys,
+// so a key it reads must be listed here; LoadBootstrapKoanfWithConfigPath
+// uses the same list to take them from the --config file when that file wins.
+var topLevelSettingsSectionKeys = []string{
+	"telemetry",
+	"project_defaults",
+	"quotas",
+	"agent_secrets",
+	"default_harness_config",
+	"default_timezone",
+	"default_gcp_identity_mode",
+	"default_gcp_identity_service_account_id",
+}
+
 // applyTopLevelSettingsSections copies the hub-level settings that live at
-// the top level of settings.yaml (outside "server") onto gc: telemetry,
-// project_defaults, quotas, agent_secrets, default_harness_config,
-// default_timezone and default_gcp_identity_*. It runs whether or not the
-// file has a "server" key, so LoadGlobalConfig agrees with
-// LoadBootstrapKoanf, which loads the whole file.
+// the top level of settings.yaml (outside "server") onto gc: the keys in
+// topLevelSettingsSectionKeys. It runs whether or not the file has a
+// "server" key, so LoadGlobalConfig agrees with LoadBootstrapKoanf, which
+// loads the whole file.
 func applyTopLevelSettingsSections(gc *GlobalConfig, raw map[string]interface{}) {
+	listed := make(map[string]interface{}, len(topLevelSettingsSectionKeys))
+	for _, key := range topLevelSettingsSectionKeys {
+		if v, ok := raw[key]; ok {
+			listed[key] = v
+		}
+	}
+	raw = listed
+
 	// Also check for top-level "telemetry" section — it lives outside "server"
 	// in settings.yaml but controls the default telemetry opt-in for the Hub.
 	if telRaw, ok := raw["telemetry"]; ok && telRaw != nil {
