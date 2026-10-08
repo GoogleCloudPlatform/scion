@@ -65,15 +65,22 @@ export function clearAdminStatus(): void {
   generation++;
 }
 
+/** A non-null, non-array JSON object; its fields are checked when read. */
+function isAdminStatusBody(
+  value: unknown
+): value is { isAdmin?: unknown; isSuperAdmin?: unknown; permissions?: unknown } {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
 async function fetchAdminStatus(): Promise<{ ok: boolean; status: AdminStatus | null }> {
   try {
     const res = await fetch('/api/v1/auth/admin-status', { credentials: 'include' });
     if (!res.ok) return { ok: false, status: null };
-    const data = (await res.json()) as {
-      isAdmin?: unknown;
-      isSuperAdmin?: unknown;
-      permissions?: unknown;
-    };
+    const body: unknown = await res.json();
+    // Anything but a JSON object (null, a number, a string, an array) is a
+    // failed check: not admin, and not kept.
+    if (!isAdminStatusBody(body)) return { ok: false, status: null };
+    const data = body;
     return {
       ok: true,
       status: {

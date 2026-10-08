@@ -222,6 +222,33 @@ describe('loadAdminStatus', () => {
     expect(await loadAdminStatus('u1')).toEqual(v2);
   });
 
+  for (const [label, body] of [
+    ['null', null],
+    ['a number', 42],
+    ['a string', 'admin'],
+    ['an array', [ADMIN]],
+  ] as const) {
+    it(`a body of ${label} is not admin and is not kept`, async () => {
+      const f = stubFetch();
+      f.respondWith(() => Promise.resolve(json(body)));
+      expect(await loadAdminStatus('u1')).toBeNull();
+      // Not kept as a result: the next caller asks again.
+      f.respondWith(() => Promise.resolve(json(ADMIN)));
+      expect(await loadAdminStatus('u1')).toEqual(ADMIN);
+      expect(f.calls()).toBe(2);
+    });
+  }
+
+  it('a fresh request with a non-object body clears a cached admin value', async () => {
+    const f = stubFetch();
+    expect(await loadAdminStatus('u1')).toEqual(ADMIN);
+    f.respondWith(() => Promise.resolve(json('admin')));
+    expect(await loadAdminStatus('u1', { fresh: true })).toBeNull();
+    f.respondWith(() => Promise.reject(new TypeError('offline')));
+    expect(await loadAdminStatus('u1')).toBeNull(); // the admin value is gone
+    expect(f.calls()).toBe(3);
+  });
+
   it('no user id: null and no request', async () => {
     const f = stubFetch();
     expect(await loadAdminStatus('')).toBeNull();
