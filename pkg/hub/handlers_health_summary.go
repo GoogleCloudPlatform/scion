@@ -51,6 +51,10 @@ type HealthSummaryResponse struct {
 	// Integrations lists chat and messaging plugins; never nil. See
 	// health_summary_integrations.go.
 	Integrations []HealthSummaryIntegration `json:"integrations"`
+
+	// ServiceAccountCheck is set while the service account assignment check
+	// cannot run because the hub's identity lacks the access it needs.
+	ServiceAccountCheck *HealthSummarySACheck `json:"service_account_check,omitempty"`
 }
 
 // HealthSummaryHub contains hub-level health information.
@@ -324,6 +328,11 @@ func (s *Server) handleHealthSummary(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	saCheck := s.healthSummarySACheck()
+	if saCheck != nil {
+		degrade()
+	}
+
 	resp := HealthSummaryResponse{
 		Status:   overallStatus,
 		Hub:      hubSummary,
@@ -334,6 +343,8 @@ func (s *Server) handleHealthSummary(w http.ResponseWriter, r *http.Request) {
 
 		// See health_summary_integrations.go.
 		Integrations: s.healthSummaryIntegrations(ctx),
+
+		ServiceAccountCheck: saCheck,
 	}
 
 	writeJSON(w, http.StatusOK, resp)
