@@ -295,7 +295,7 @@ func (s *Service) waitFetchFloor(budget context.Context, start time.Time) {
 	}
 }
 
-// putBlobBytes stores body at its content address unless that blob exists.
+// putBlobBytes stores body at its content address (see storeBlob).
 func putBlobBytes(ctx context.Context, b backend, digest string, body []byte, mediaType string) error {
 	return storeBlob(ctx, b, digest, mediaType, func() (io.Reader, error) { return bytes.NewReader(body), nil })
 }

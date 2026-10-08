@@ -25,7 +25,6 @@ import (
 	"time"
 
 	"cloud.google.com/go/storage"
-	gax "github.com/googleapis/gax-go/v2"
 	"google.golang.org/api/googleapi"
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
@@ -37,18 +36,6 @@ type GCSStorage struct {
 	bucket *storage.BucketHandle
 	config Config
 }
-
-// gcsIdempotentAttempts bounds the attempts of an idempotent upload.
-const gcsIdempotentAttempts = 5
-
-// gcsIdempotentRetryDeadline bounds an idempotent upload, retries
-// included (a blob is at most a few tens of MiB). A variable so tests can
-// shorten it.
-var gcsIdempotentRetryDeadline = 5 * time.Minute
-
-// gcsIdempotentBackoff is the backoff between attempts of an idempotent
-// upload. A variable so tests can shorten it.
-var gcsIdempotentBackoff = gax.Backoff{Initial: 500 * time.Millisecond, Max: 8 * time.Second, Multiplier: 2}
 
 // NewGCS creates a new GCS storage client.
 func NewGCS(ctx context.Context, cfg Config) (*GCSStorage, error) {
@@ -163,24 +150,17 @@ func (s *GCSStorage) Upload(ctx context.Context, objectPath string, reader io.Re
 
 	objectPath = strings.TrimPrefix(objectPath, "/")
 	obj := s.bucket.Object(objectPath)
+	// Cancelling ctx aborts the upload, so a failed copy never finalizes a
+	// partial object.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	if opts.Idempotent {
-		// The bytes are the same on every attempt, so retrying without a
-		// precondition is safe. The retrying is bounded in attempts and,
-		// because the writer keeps retrying a request until its context
-		// ends, in time; the last error is returned.
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, gcsIdempotentRetryDeadline)
-		defer cancel()
-		obj = obj.Retryer(
-			storage.WithPolicy(storage.RetryAlways),
-			storage.WithMaxAttempts(gcsIdempotentAttempts),
-			storage.WithBackoff(gcsIdempotentBackoff),
-		)
+		// The caller retries an idempotent write itself, with a bounded
+		// number of attempts (the client's writer does not honour an
+		// attempt cap); each call is one request.
+		obj = obj.Retryer(storage.WithPolicy(storage.RetryNever))
 	}
 	writer := obj.NewWriter(ctx)
-	if opts.Idempotent {
-		writer.ChunkRetryDeadline = gcsIdempotentRetryDeadline
-	}
 
 	// Set content type
 	if opts.ContentType != "" {
@@ -205,6 +185,7 @@ func (s *GCSStorage) Upload(ctx context.Context, objectPath string, reader io.Re
 	// Copy data
 	size, err := io.Copy(writer, reader)
 	if err != nil {
+		cancel()
 		_ = writer.Close()
 		return nil, fmt.Errorf("failed to upload data: %w", err)
 	}

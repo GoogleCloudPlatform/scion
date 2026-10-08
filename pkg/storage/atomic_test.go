@@ -28,7 +28,6 @@ import (
 	"testing"
 	"time"
 
-	gax "github.com/googleapis/gax-go/v2"
 	"google.golang.org/api/option"
 )
 
@@ -204,10 +203,6 @@ func fakeGCS(t *testing.T, failFirst int) (*httptest.Server, *int32) {
 
 func newFakeGCS(t *testing.T, srv *httptest.Server) *GCSStorage {
 	t.Helper()
-	old, oldDeadline := gcsIdempotentBackoff, gcsIdempotentRetryDeadline
-	gcsIdempotentBackoff = gax.Backoff{Initial: time.Millisecond, Max: 2 * time.Millisecond, Multiplier: 1}
-	gcsIdempotentRetryDeadline = 300 * time.Millisecond
-	t.Cleanup(func() { gcsIdempotentBackoff, gcsIdempotentRetryDeadline = old, oldDeadline })
 	s, err := newGCS(context.Background(), Config{Bucket: "b"},
 		option.WithEndpoint(srv.URL+"/storage/v1/"), option.WithoutAuthentication())
 	if err != nil {
@@ -216,30 +211,99 @@ func newFakeGCS(t *testing.T, srv *httptest.Server) *GCSStorage {
 	return s
 }
 
-// TestGCSIdempotentUploadRetries: an idempotent upload is retried through
-// rate limiting, a bounded number of times, and its last error is
-// returned.
-func TestGCSIdempotentUploadRetries(t *testing.T) {
-	ctx := context.Background()
-	srv, uploads := fakeGCS(t, 2)
+// TestGCSIdempotentUploadIsOneAttempt: an idempotent upload makes one
+// request per call, however the store answers (its caller bounds the
+// retries), and returns the store's error.
+func TestGCSIdempotentUploadIsOneAttempt(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	srv, uploads := fakeGCS(t, -1)
 	s := newFakeGCS(t, srv)
-	if _, err := s.Upload(ctx, "obj", strings.NewReader("abc"), UploadOptions{Idempotent: true}); err != nil {
-		t.Fatalf("idempotent upload through two 429s: %v", err)
-	}
-	if n := atomic.LoadInt32(uploads); n != 3 {
-		t.Errorf("%d upload requests, want 3", n)
-	}
-
-	srv, uploads = fakeGCS(t, -1)
-	s = newFakeGCS(t, srv)
-	start := time.Now()
 	if _, err := s.Upload(ctx, "obj", strings.NewReader("abc"), UploadOptions{Idempotent: true}); err == nil {
-		t.Errorf("an always-limited idempotent upload succeeded")
+		t.Fatal("a rate-limited idempotent upload succeeded")
 	}
-	if took := time.Since(start); took > 10*time.Second {
-		t.Errorf("the bounded retry took %v", took)
+	if n := atomic.LoadInt32(uploads); n != 1 {
+		t.Errorf("%d requests for one idempotent upload, want 1", n)
 	}
-	if n := atomic.LoadInt32(uploads); n < 2 {
-		t.Errorf("always limited: %d requests, want retries", n)
+	srv, uploads = fakeGCS(t, 0)
+	s = newFakeGCS(t, srv)
+	if _, err := s.Upload(ctx, "obj", strings.NewReader("abc"), UploadOptions{Idempotent: true}); err != nil {
+		t.Fatalf("upload: %v", err)
+	}
+	if n := atomic.LoadInt32(uploads); n != 1 {
+		t.Errorf("%d requests, want 1", n)
+	}
+}
+
+// TestGCSUploadCopyErrorAborts: when reading the source fails part way,
+// the upload is aborted rather than finalized with partial content.
+func TestGCSUploadCopyErrorAborts(t *testing.T) {
+	var completed int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/upload/") {
+			if _, err := io.ReadAll(r.Body); err == nil {
+				atomic.AddInt32(&completed, 1)
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"bucket":"b","name":"obj","generation":"7","size":"3"}`))
+	}))
+	t.Cleanup(srv.Close)
+	s := newFakeGCS(t, srv)
+	big := strings.Repeat("x", 64<<10)
+	r := io.MultiReader(strings.NewReader(big), &failingReader{sent: true})
+	if _, err := s.Upload(context.Background(), "obj", r, UploadOptions{Idempotent: true}); err == nil {
+		t.Fatal("upload with a failing source succeeded")
+	}
+	time.Sleep(100 * time.Millisecond)
+	if n := atomic.LoadInt32(&completed); n != 0 {
+		t.Errorf("%d uploads were finalized with partial content", n)
+	}
+}
+
+// TestLocalUploadMode: an uploaded file gets the mode os.Create gives
+// (0666 less the umask), not a temporary file's 0600.
+func TestLocalUploadMode(t *testing.T) {
+	s, _ := newTestLocal(t)
+	if _, err := s.Upload(context.Background(), "m/obj", strings.NewReader("x"), UploadOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	ref := filepath.Join(filepath.Dir(s.fullPath("m/obj")), "reference")
+	f, err := os.Create(ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Close()
+	got, _ := os.Stat(s.fullPath("m/obj"))
+	want, _ := os.Stat(ref)
+	if got.Mode().Perm() != want.Mode().Perm() {
+		t.Errorf("mode %v, want %v", got.Mode().Perm(), want.Mode().Perm())
+	}
+}
+
+// TestLocalUploadSyncsDirectories: an upload syncs the directory it
+// renames into, and the parents of directories it creates.
+func TestLocalUploadSyncsDirectories(t *testing.T) {
+	s, _ := newTestLocal(t)
+	var synced []string
+	syncDirHook = func(d string) { synced = append(synced, d) }
+	t.Cleanup(func() { syncDirHook = nil })
+	if _, err := s.Upload(context.Background(), "x/y/z/obj", strings.NewReader("x"), UploadOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Dir(s.fullPath("x/y/z/obj"))
+	want := map[string]bool{dir: false, filepath.Dir(dir): false, filepath.Dir(filepath.Dir(dir)): false}
+	for _, d := range synced {
+		if _, ok := want[d]; ok {
+			want[d] = true
+		}
+	}
+	for d, ok := range want {
+		if !ok {
+			t.Errorf("directory %s not synced (synced %v)", d, synced)
+		}
+	}
+	if synced[len(synced)-1] != dir {
+		t.Errorf("the last sync is not the rename's directory: %v", synced)
 	}
 }

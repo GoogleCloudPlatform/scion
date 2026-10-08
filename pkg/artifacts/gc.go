@@ -17,6 +17,7 @@ package artifacts
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -144,8 +145,9 @@ func (g *BlobSweeper) Sweep(ctx context.Context, st Store, blobs storage.Storage
 		// At the start of each walk, remove temporary upload files a
 		// crash left behind (local storage writes through one).
 		if tc, ok := blobs.(storage.TempCleaner); ok {
+			// A directory that cannot be read must not stop the sweep.
 			if _, err := tc.RemoveStaleTemps(ctx, prefix, staleUploadTempAge); err != nil {
-				return 0, 0, err
+				slog.WarnContext(ctx, "artifacts: removing stale upload temporary files failed", "error", err)
 			}
 		}
 	}

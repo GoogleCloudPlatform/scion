@@ -208,13 +208,14 @@ type Store interface {
 	// and scope, or ErrNotFound.
 	GetArtifactByKey(ctx context.Context, scopeKind, scopeRef, ownerKind, ownerRef, key string) (*Artifact, error)
 
-	// MarkReceived records that the bytes of file path of the pending
-	// version versionID have arrived, with their media type, and that the
-	// other files of the version with the same digest (which share the
-	// stored object) have arrived too. It returns
-	// ErrNotFound when the file is not in the manifest and ErrConflict when
-	// the version is no longer pending.
-	MarkReceived(ctx context.Context, versionID, path, mediaType string) error
+	// MarkReceived records, in one transaction, that the bytes of file path
+	// of the pending version versionID have arrived, with their media type,
+	// and that the files named in siblings (path -> media type), which have
+	// the same digest and share the stored object, have arrived too.
+	// Siblings that are not pending files of the version with that digest
+	// are left alone. It returns ErrNotFound when path is not in the
+	// manifest and ErrConflict when the version is no longer pending.
+	MarkReceived(ctx context.Context, versionID, path, mediaType string, siblings map[string]string) error
 
 	// ClaimFinalize moves the pending version seq of an artifact to
 	// finalizing, so that exactly one finalize request completes it. A
