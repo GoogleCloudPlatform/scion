@@ -44,6 +44,10 @@ type TemplateService interface {
 	// Clone creates a copy of a template.
 	Clone(ctx context.Context, templateID string, req *CloneTemplateRequest) (*Template, error)
 
+	// Reimport refreshes a template from its stored source URL, or from
+	// sourceURL when it is non-empty (which then becomes the stored source).
+	Reimport(ctx context.Context, templateID string, sourceURL string) (*ReimportTemplateResponse, error)
+
 	// RequestUploadURLs requests signed URLs for uploading template files.
 	RequestUploadURLs(ctx context.Context, templateID string, files []FileUploadRequest) (*UploadResponse, error)
 
@@ -99,6 +103,24 @@ type CreateTemplateRequest struct {
 type UpdateTemplateRequest struct {
 	Name   string          `json:"name,omitempty"`
 	Config *TemplateConfig `json:"config,omitempty"`
+}
+
+// ReimportTemplateRequest is the request body for reimporting a template.
+type ReimportTemplateRequest struct {
+	SourceURL string `json:"sourceUrl,omitempty"`
+}
+
+// ReimportTemplateFailure names a template that failed to reimport and why.
+type ReimportTemplateFailure struct {
+	Name   string `json:"name"`
+	Reason string `json:"reason"`
+}
+
+// ReimportTemplateResponse is the response from reimporting a template.
+type ReimportTemplateResponse struct {
+	Templates []string                  `json:"templates"`
+	Count     int                       `json:"count"`
+	Failed    []ReimportTemplateFailure `json:"failed,omitempty"`
 }
 
 // CloneTemplateRequest is the request for cloning a template.
@@ -272,6 +294,17 @@ func (s *templateService) Clone(ctx context.Context, templateID string, req *Clo
 		return nil, err
 	}
 	return apiclient.DecodeRequired[Template](resp)
+}
+
+// Reimport refreshes a template from its stored source URL, or from sourceURL
+// when it is non-empty.
+func (s *templateService) Reimport(ctx context.Context, templateID string, sourceURL string) (*ReimportTemplateResponse, error) {
+	req := ReimportTemplateRequest{SourceURL: sourceURL}
+	resp, err := s.c.post(ctx, "/api/v1/templates/"+templateID+"/reimport", req, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[ReimportTemplateResponse](resp)
 }
 
 // RequestUploadURLs requests signed URLs for uploading template files.
