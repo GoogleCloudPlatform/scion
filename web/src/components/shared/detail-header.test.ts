@@ -26,7 +26,8 @@ import './detail-header.js';
 import type { ScionDetailHeader } from './detail-header.js';
 import { elementStyleRules } from '../pages/__fixtures__/card-layout.js';
 
-const LONG_NAME = 'broker-01.a-very-long-unbroken-hostname-that-cannot-fit-beside-its-badges.internal';
+const LONG_NAME =
+  'broker-01.a-very-long-unbroken-hostname-that-cannot-fit-beside-its-badges.internal';
 
 let rules: Map<string, string>;
 
@@ -109,9 +110,9 @@ describe('scion-detail-header structure', () => {
   it('puts the icon beside the wrapping row, not inside it', async () => {
     const el = await mount();
     const title = el.shadowRoot!.querySelector('.header-title')!;
-    expect(Array.from(title.children).map((n) => n.tagName.toLowerCase() + '.' + n.className)).toEqual(
-      ['slot.', 'div.header-title-text']
-    );
+    expect(
+      Array.from(title.children).map((n) => n.tagName.toLowerCase() + '.' + n.className)
+    ).toEqual(['slot.', 'div.header-title-text']);
     expect(assigned(slot(el, 'icon'))).toEqual(['sl-icon']);
   });
 

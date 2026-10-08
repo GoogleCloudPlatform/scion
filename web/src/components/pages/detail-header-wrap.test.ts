@@ -52,6 +52,8 @@ interface PageCase {
   badges: string[];
   /** Classes of the meta slot's elements, in order. */
   meta: string[];
+  /** Whether the page has header actions (the template page has none). */
+  actions?: false;
 }
 
 const CAPS = { _capabilities: { actions: ['read', 'update', 'delete'] } };
@@ -153,6 +155,7 @@ const cases: Array<[string, PageCase]> = [
       icon: 'sl-icon.[file-earmark-code]',
       badges: ['span'],
       meta: ['template-description', 'template-meta-row'],
+      actions: false,
     },
   ],
   [
@@ -256,11 +259,15 @@ describe.each(cases)('%s detail header', (_label, c) => {
     ).toEqual(c.badges);
     expect(inSlot('meta').map((n) => n.className)).toEqual(c.meta);
     const actions = inSlot('actions');
-    expect(actions.map((n) => n.className)).toEqual(['header-actions']);
-    expect(actions[0].querySelector('sl-button')).not.toBeNull();
-    expect(children.every((n) => ['icon', 'meta', 'actions', null].includes(n.getAttribute('slot')))).toBe(
-      true
-    );
+    if (c.actions === false) {
+      expect(actions).toEqual([]);
+    } else {
+      expect(actions.map((n) => n.className)).toEqual(['header-actions']);
+      expect(actions[0].querySelector('sl-button')).not.toBeNull();
+    }
+    expect(
+      children.every((n) => ['icon', 'meta', 'actions', null].includes(n.getAttribute('slot')))
+    ).toBe(true);
   });
 
   it('keeps no copy of the header layout CSS', () => {
@@ -282,9 +289,7 @@ describe('project detail linked badge', () => {
   const c = cases.find(([label]) => label === 'project')![1];
 
   it('shows the linked marker as a badge in the primary colour', () => {
-    expect(rulesOf(c).get('.linked-badge') ?? '').toMatch(
-      /(^|;)\s*color:\s*var\(--scion-primary/
-    );
+    expect(rulesOf(c).get('.linked-badge') ?? '').toMatch(/(^|;)\s*color:\s*var\(--scion-primary/);
     const icon = renderHeader(c).querySelector(':scope > sl-tooltip > sl-icon.linked-badge');
     expect(icon?.getAttribute('name')).toBe('link-45deg');
     expect(icon?.hasAttribute('style')).toBe(false);

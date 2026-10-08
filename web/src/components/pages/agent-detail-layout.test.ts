@@ -156,29 +156,31 @@ describe('agent detail layout', () => {
     return { header, badges: Array.from(header.children).filter((c) => !c.hasAttribute('slot')) };
   }
 
-  it.each(states)('puts every badge in the wrapping row after the name (%s)', (_label, overrides) => {
-    const agent = makeAgent(overrides);
-    const { header, badges } = headerParts(agent);
-    expect((header as HTMLElement & { heading: string }).heading).toBe(agent.name);
-    // Unslotted children go to the default slot, the wrapping row after the
-    // h1, so no badge can float beside a multi-line name.
-    expect(badges.map((c) => c.tagName.toLowerCase())).toEqual([
-      'scion-status-badge',
-      'scion-deletion-badge',
-      'scion-message-mode-badge',
-    ]);
-    expect(header.querySelector(':scope > sl-icon[slot="icon"]')?.getAttribute('name')).toBe(
-      'cpu'
-    );
-    expect(header.querySelector(':scope > .header-meta')?.getAttribute('slot')).toBe('meta');
-    expect(header.querySelector(':scope > .header-actions')?.getAttribute('slot')).toBe(
-      'actions'
-    );
-  });
+  it.each(states)(
+    'puts every badge in the wrapping row after the name (%s)',
+    (_label, overrides) => {
+      const agent = makeAgent(overrides);
+      const { header, badges } = headerParts(agent);
+      expect((header as HTMLElement & { heading: string }).heading).toBe(agent.name);
+      // Unslotted children go to the default slot, the wrapping row after the
+      // h1, so no badge can float beside a multi-line name.
+      expect(badges.map((c) => c.tagName.toLowerCase())).toEqual([
+        'scion-status-badge',
+        'scion-deletion-badge',
+        'scion-message-mode-badge',
+      ]);
+      expect(header.querySelector(':scope > sl-icon[slot="icon"]')?.getAttribute('name')).toBe(
+        'cpu'
+      );
+      expect(header.querySelector(':scope > .header-meta')?.getAttribute('slot')).toBe('meta');
+      expect(header.querySelector(':scope > .header-actions')?.getAttribute('slot')).toBe(
+        'actions'
+      );
+    }
+  );
 
   it('keeps the provisioned-not-started label in the wrapping row', () => {
     const { badges } = headerParts(makeAgent({ phase: 'created', provisionedOnly: true }));
     expect(badges[0].getAttribute('label')).toBe(PROVISIONED_ONLY_LABEL);
   });
-});
 });
