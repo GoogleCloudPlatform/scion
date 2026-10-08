@@ -284,13 +284,19 @@ func writeAgentTokenIssueError(w http.ResponseWriter, err error) bool {
 }
 
 // agentTokenDenialMessage is the neutral response message for a mint that
-// the agent's delegation chain does not allow.
+// the agent's delegation chain does not allow. The remedy matches the
+// SA-assign gate's ceiling_unrecorded message (saAssignForbiddenMessage): a
+// user's reincarnate re-records the agent's edge with the user as delegator
+// when a chain edge is missing or unrecorded (reincarnateAuthorityFor,
+// ptone/scion#3948), and a user's direct recreate writes a new recorded
+// edge.
 func agentTokenDenialMessage(cause DenyCause) string {
 	switch cause {
 	case DenyCauseCeilingSourceNotAllowed:
 		return "The agent's delegation record names a source that is not accepted on this server"
 	default:
-		return "The agent's delegation record is missing or inconsistent; recreate the agent"
+		return "The agent's delegation record is missing or inconsistent; " +
+			"have an authorized user reincarnate this agent, or recreate it directly (not from another agent)"
 	}
 }
 
