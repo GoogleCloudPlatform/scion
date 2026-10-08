@@ -33,7 +33,10 @@ import (
 // It also starts the memory guard (mem_guard_helpers_test.go), which aborts
 // the binary with goroutine stacks if process memory runs away, and clears
 // the ambient GCP project env (clearAmbientGCPProjectEnv) so New() never
-// builds real Cloud Logging clients from it (ptone/scion#3188).
+// builds real Cloud Logging clients from it (ptone/scion#3188), and replaces
+// pkg/config's git ls-remote runner with a hermetic one so remote-import
+// tests never exec a real `git ls-remote` against github.com
+// (installHermeticGitLsRemote, ptone/scion#3670).
 //
 // After the tests, the leak guard (leak_guard_helpers_test.go) fails the
 // package if unclosed test stores or never-shut-down servers are still
@@ -42,8 +45,10 @@ func TestMain(m *testing.M) {
 	stopMemGuard := startMemGuard()
 	teardown := testutil.IsolateHome("scion-hub-test-home-*")
 	clearAmbientGCPProjectEnv()
+	restoreLsRemote := installHermeticGitLsRemote()
 	code := m.Run()
 	code = runLeakGuard(code)
+	restoreLsRemote()
 	teardown()
 	stopMemGuard()
 	os.Exit(code)

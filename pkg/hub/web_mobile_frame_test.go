@@ -55,7 +55,7 @@ func renderSPAShell(t *testing.T) string {
 	ws := NewWebServer(WebServerConfig{})
 	require.NotNil(t, ws.shellTmpl, "spaShellTemplate must parse")
 	var buf bytes.Buffer
-	require.NoError(t, ws.shellTmpl.Execute(&buf, spaShellData{ShoelaceVersion: "0.0.0-test"}))
+	require.NoError(t, ws.shellTmpl.Execute(&buf, spaShellData{}))
 	return buf.String()
 }
 

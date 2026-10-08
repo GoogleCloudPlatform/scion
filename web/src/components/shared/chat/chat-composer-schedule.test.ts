@@ -167,6 +167,18 @@ describe('composer — schedule send', () => {
     expect(dialog().open).toBe(false);
   });
 
+  it('is disabled while artifact references are staged', async () => {
+    el.scheduleSendEnabled = true;
+    el.pendingArtifacts = [{ id: 'art-1' }];
+    await el.updateComplete;
+    await openMenu();
+    expect(scheduleItem()?.getAttribute('aria-disabled')).toBe('true');
+    expect(scheduleItem()?.getAttribute('title')).toBe('Artifact references cannot be scheduled');
+    scheduleItem()!.click();
+    await el.updateComplete;
+    expect(dialog().open).toBe(false);
+  });
+
   it('is disabled while attachments are staged', async () => {
     el.scheduleSendEnabled = true;
     el.pendingFiles = [{ id: 'a1', name: 'f.txt', mime: 'text/plain', size: 1, url: '' }];
