@@ -196,6 +196,14 @@ type WebChatStore interface {
 	GetAttachmentsByMessages(ctx context.Context, messageIDs []string) (map[string][]AttachmentMeta, error)
 
 	// LinkAttachmentToMessage associates an attachment with a message.
+	//
+	// A linked file downloads for every reader of the message
+	// (canReadAttachment), so a caller may link only a file that either
+	// passed send validation for that message (attachmentUsableIn: the
+	// sender's own direct-message upload, or a file of the topic's project)
+	// or belongs to the sending agent (hub ingest from its own project, or
+	// attachmentOwnedBySender). Do not add a caller without one of these
+	// checks.
 	LinkAttachmentToMessage(ctx context.Context, messageID, attachmentID string) error
 	// ListMessageIDsForAttachment returns up to limit IDs of messages the
 	// attachment is linked to.

@@ -243,3 +243,25 @@ func (s *Server) canReadNativeMessage(ctx context.Context, user UserIdentity, ms
 	}
 	return s.canReadProject(ctx, user, topic.ProjectID)
 }
+
+// stripClientAttachmentRefs returns md without the hub's attachments
+// metadata key. An agent names its files in the request's attachments
+// field; the hub sets the metadata key itself, only for files it ingested
+// for the message, so a caller-supplied value is never kept. md itself is
+// never changed: a copy is returned when the key is present.
+//
+// This is separate from messaging.StripReservedMetadata, which removes a
+// different set of keys; chat sends set the attachments key before that
+// strip runs, so the two are not merged.
+func stripClientAttachmentRefs(md map[string]string) map[string]string {
+	if _, ok := md[attachmentsMetadataKey]; !ok {
+		return md
+	}
+	out := make(map[string]string, len(md)-1)
+	for k, v := range md {
+		if k != attachmentsMetadataKey {
+			out[k] = v
+		}
+	}
+	return out
+}

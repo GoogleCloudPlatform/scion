@@ -425,7 +425,7 @@ func (s *Server) resolveOutboundRouting(
 		Attachments:    req.Attachments,
 		Channel:        req.Channel,
 		ThreadID:       req.ThreadID,
-		Metadata:       req.Metadata,
+		Metadata:       stripClientAttachmentRefs(req.Metadata),
 		ConversationID: req.ConversationID,
 	}
 	if err := messaging.ValidateLegacyMessage(validationMsg); err != nil {
@@ -1178,7 +1178,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 			Type:           req.Type,
 			Urgent:         req.Urgent,
 			Attachments:    req.Attachments,
-			Metadata:       req.Metadata,
+			Metadata:       stripClientAttachmentRefs(req.Metadata),
 			ConversationID: result.ConversationID,
 			ConvResult:     result.ConvResult,
 			Asserted:       result.Asserted,
@@ -1279,7 +1279,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		Attachments:          req.Attachments,
 		Channel:              result.Channel,
 		ThreadID:             result.ThreadID,
-		Metadata:             req.Metadata,
+		Metadata:             stripClientAttachmentRefs(req.Metadata),
 		ConversationID:       result.ConversationID,
 		ConversationAsserted: result.Asserted,
 		Recipients:           result.Recipients,
