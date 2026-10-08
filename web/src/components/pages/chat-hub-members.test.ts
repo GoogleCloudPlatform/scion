@@ -48,6 +48,10 @@ const globalMap = vi.hoisted(() => {
         agents.delete(id);
       },
       setScope: (): void => {},
+      // Seed epochs record nothing here.
+      scopeGeneration: 0,
+      beginSeedEpoch: (): symbol => Symbol('seed-epoch'),
+      endSeedEpoch: (): void => {},
     }),
   };
 });

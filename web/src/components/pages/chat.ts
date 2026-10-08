@@ -230,6 +230,25 @@ function agentMemberToAgent(m: import('../shared/chat/chat-members.js').ChatAgen
 }
 
 /**
+ * `member` with the status fields of `agent`, the store's object after a
+ * seed that re-applied live changes. Returns `member` unchanged when the
+ * store does not hold the agent.
+ */
+function withLiveAgentStatus(
+  member: import('../shared/chat/chat-members.js').ChatAgentMember,
+  agent: Agent | undefined
+): import('../shared/chat/chat-members.js').ChatAgentMember {
+  if (!agent) return member;
+  return {
+    ...member,
+    phase: agent.phase || '',
+    activity: agent.activity || '',
+    detailMessage: agentDetailMessage(agent) || member.detailMessage || '',
+    lastActivityEvent: realTimestamp(agent.lastActivityEvent) || member.lastActivityEvent || '',
+  };
+}
+
+/**
  * The status detail an agent last reported. SSE deltas carry it nested under
  * `detail`; the REST list endpoints carry it flattened as `message`.
  */
@@ -3402,6 +3421,10 @@ export class ScionPageChat extends LitElement {
     this._projectMembersAbort?.abort();
     const controller = new AbortController();
     this._projectMembersAbort = controller;
+    // A live status change that lands while the members request is in
+    // flight is re-applied over the (older) response when it is seeded.
+    const seedToken = stateManager.beginSeedEpoch();
+    const seedGeneration = stateManager.scopeGeneration;
     try {
       const res = await apiFetch(`/api/v1/chat/spaces/${encodeURIComponent(projectId)}/members`, {
         signal: controller.signal,
@@ -3488,8 +3511,18 @@ export class ScionPageChat extends LitElement {
           this._serverOmittedAgentIds.add(id);
         }
         // Seed the shared agent map so SSE status deltas have a baseline to
-        // merge onto — otherwise they are buffered and never notify.
-        stateManager.seedAgents(this.v2AgentMembers.map(agentMemberToAgent));
+        // merge onto — otherwise they are buffered and never notify. A scope
+        // change since the request started discards the seed epoch; the
+        // response is then seeded as it is.
+        const memberAgents = this.v2AgentMembers.map(agentMemberToAgent);
+        if (stateManager.scopeGeneration === seedGeneration) {
+          stateManager.seedAgents(memberAgents, { token: seedToken });
+          this.v2AgentMembers = this.v2AgentMembers.map((m) =>
+            withLiveAgentStatus(m, stateManager.getAgent(m.id))
+          );
+        } else {
+          stateManager.seedAgents(memberAgents);
+        }
         // Also populate the legacy v2Members for the thread component
         this.v2Members = [
           ...(data.humans || []).map((h) => ({
@@ -3512,6 +3545,7 @@ export class ScionPageChat extends LitElement {
     } catch {
       // Non-critical (an abort lands here too: a newer view took over)
     } finally {
+      stateManager.endSeedEpoch(seedToken);
       if (this._projectMembersAbort === controller) this._projectMembersAbort = null;
     }
   }
