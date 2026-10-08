@@ -169,6 +169,10 @@ export class ScionPageProjectSettings extends LitElement {
   @state()
   private dropdownTemplates: Template[] = [];
 
+  /** The Default Template list failed to load (the saved value is kept). */
+  @state()
+  private dropdownTemplatesLoadFailed = false;
+
   @state()
   private harnessConfigs: HarnessConfigEntry[] = [];
 
@@ -599,6 +603,10 @@ export class ScionPageProjectSettings extends LitElement {
       color: var(--scion-text-muted, #64748b);
     }
 
+    .config-field .field-help-error {
+      color: var(--sl-color-danger-600, #dc2626);
+    }
+
     .config-actions {
       display: flex;
       align-items: center;
@@ -954,9 +962,7 @@ export class ScionPageProjectSettings extends LitElement {
     this.messagingPolicyLoading = true;
     this.messagingPolicyError = null;
     try {
-      const res = await apiFetch(
-        `/api/v1/projects/${this.projectId}/messaging-policy`
-      );
+      const res = await apiFetch(`/api/v1/projects/${this.projectId}/messaging-policy`);
       if (res.ok) {
         this.messagingPolicy = (await res.json()) as ProjectMessagingPolicy;
       }
@@ -975,17 +981,14 @@ export class ScionPageProjectSettings extends LitElement {
     this.messagingPolicyError = null;
     this.messagingPolicySuccess = null;
     try {
-      const res = await apiFetch(
-        `/api/v1/projects/${this.projectId}/messaging-policy`,
-        {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            crossProjectInbound: value,
-            expectedRevision: this.messagingPolicy.revision,
-          }),
-        }
-      );
+      const res = await apiFetch(`/api/v1/projects/${this.projectId}/messaging-policy`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          crossProjectInbound: value,
+          expectedRevision: this.messagingPolicy.revision,
+        }),
+      });
       if (res.status === 409) {
         this.messagingPolicy = { ...this.messagingPolicy, crossProjectInbound: previous }; // revert
         await this.loadMessagingPolicy();
@@ -993,15 +996,12 @@ export class ScionPageProjectSettings extends LitElement {
         return;
       }
       if (!res.ok) {
-        throw new Error(
-          await extractApiError(res, 'Failed to save')
-        );
+        throw new Error(await extractApiError(res, 'Failed to save'));
       }
       this.messagingPolicy = (await res.json()) as ProjectMessagingPolicy;
       this.messagingPolicySuccess = 'Messaging policy saved.';
     } catch (err) {
-      this.messagingPolicyError =
-        err instanceof Error ? err.message : 'Failed to save policy';
+      this.messagingPolicyError = err instanceof Error ? err.message : 'Failed to save policy';
       this.messagingPolicy = { ...this.messagingPolicy, crossProjectInbound: previous }; // revert
     } finally {
       this.messagingPolicySaving = false;
@@ -1053,9 +1053,9 @@ export class ScionPageProjectSettings extends LitElement {
           ? html`
               <sl-alert variant="warning" open>
                 <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
-                <strong>Disabled by Hub administrator.</strong> Cross-project messaging is turned off
-                at the Hub level. Your configured selection below is preserved and will take effect
-                when the Hub administrator enables cross-project messaging.
+                <strong>Disabled by Hub administrator.</strong> Cross-project messaging is turned
+                off at the Hub level. Your configured selection below is preserved and will take
+                effect when the Hub administrator enables cross-project messaging.
               </sl-alert>
             `
           : ''}
@@ -1115,8 +1115,9 @@ export class ScionPageProjectSettings extends LitElement {
                 style="margin-top: 0.5rem; font-size: 0.8125rem; color: var(--scion-text-muted, #64748b);"
               >
                 Choosing &ldquo;${policyLabels[currentValue]}&rdquo; can admit external messages to
-                existing project-mode agents. It does not grant those agents external send authority.
-                Replying requires their own Hub mode and the peer project&rsquo;s consent.
+                existing project-mode agents. It does not grant those agents external send
+                authority. Replying requires their own Hub mode and the peer project&rsquo;s
+                consent.
               </p>
             `
           : ''}
@@ -1196,8 +1197,10 @@ export class ScionPageProjectSettings extends LitElement {
         `/api/v1/templates?${params.toString()}`,
         'templates'
       );
+      this.dropdownTemplatesLoadFailed = false;
     } catch (err) {
       console.error('Failed to load dropdown templates:', err);
+      this.dropdownTemplatesLoadFailed = true;
     }
   }
 
@@ -1679,8 +1682,7 @@ export class ScionPageProjectSettings extends LitElement {
         sectionTitle="Members"
         sectionDescription="Users and groups with access to this project. Each member holds at most one built-in tier (owner, admin or member) and may also hold custom project roles."
       ></scion-project-members-editor>
-      ${this.renderResourcesSection()}
-      ${this.renderMessagingPolicySection()}
+      ${this.renderResourcesSection()} ${this.renderMessagingPolicySection()}
       ${this.renderGitHubAppSection()}
       <scion-boundary-summary-notice
         label="Access constraints affecting this project"
@@ -2130,9 +2132,17 @@ export class ScionPageProjectSettings extends LitElement {
                     (t) => html` <sl-option value=${t.name}>${t.displayName || t.name}</sl-option> `
                   )}
                 </sl-select>
-                <span class="field-help"
-                  >Template used when creating agents without specifying one.</span
-                >
+                ${this.dropdownTemplatesLoadFailed
+                  ? html`<span class="field-help field-help-error"
+                      >Could not load
+                      templates.${this.configDefaultTemplate
+                        ? ` The saved default (${this.configDefaultTemplate}) is kept.`
+                        : ''}
+                      Reload the page to try again.</span
+                    >`
+                  : html`<span class="field-help"
+                      >Template used when creating agents without specifying one.</span
+                    >`}
               </div>
 
               <div
@@ -2547,8 +2557,9 @@ export class ScionPageProjectSettings extends LitElement {
                                 (sa) => html`
                                   <sl-option value=${sa.id}>
                                     ${sa.displayName || sa.email}
-                                    <small>(${sa.email})</small
-                                    >${sa.scope === 'hub' ? ' (Hub)' : ''}
+                                    <small>(${sa.email})</small>${sa.scope === 'hub'
+                                      ? ' (Hub)'
+                                      : ''}
                                   </sl-option>
                                 `
                               )

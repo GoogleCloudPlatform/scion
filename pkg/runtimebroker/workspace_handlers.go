@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
@@ -379,9 +380,19 @@ func (s *Server) getAgentWorkspacePath(ctx context.Context, agentID string) (str
 	return "", fmt.Errorf("could not resolve workspace path for agent %s", agentID)
 }
 
+// workspaceIdentityManifestExclude keeps the root .scion identity entry out
+// of workspace manifests, matching what gcp.SyncToGCS uploads.
+const workspaceIdentityManifestExclude = config.DotScion + "/**"
+
 // buildWorkspaceManifest builds a manifest from the workspace directory.
 func (s *Server) buildWorkspaceManifest(workspacePath string, excludePatterns []string) (*transfer.Manifest, error) {
 	builder := transfer.NewManifestBuilder(workspacePath)
+
+	// gcp.SyncToGCS never uploads the root .scion identity entry (marker
+	// file or directory), so leave it out of the manifest too. In
+	// transfer's matcher this pattern is anchored to the root and matches
+	// both forms.
+	builder.WithExcludePatterns([]string{workspaceIdentityManifestExclude})
 
 	// Add custom exclude patterns
 	if len(excludePatterns) > 0 {

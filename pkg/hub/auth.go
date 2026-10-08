@@ -28,6 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
+	"github.com/google/uuid"
 )
 
 // AuthConfig holds authentication configuration.
@@ -101,6 +102,10 @@ type AuthConfig struct {
 	// CredentialStore handles agent credential validation (Phase 1H).
 	// When non-nil, agent tokens are validated against persistent credential state.
 	CredentialStore store.AgentCredentialStore
+	// HoldStore enables the per-request agent hold check (ptone/scion#3433):
+	// a token whose agent has an active hold is refused exactly like a
+	// revoked credential, whether or not the token has a credential row.
+	HoldStore store.AgentHoldStore
 	// UserStore enables per-request user-status checks (e.g. suspension
 	// enforcement) for self-contained credentials like JWTs that do not
 	// themselves hit the database.
@@ -244,7 +249,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				}
 				log.Debug("Auth check",
 					slog.String("method", r.Method),
-					slog.String("path", r.URL.Path),
+					slog.String("path", logging.RequestPath(r)),
 					slog.Bool("has_auth", hasAuth),
 					slog.String("auth_prefix", authPrefix),
 				)
@@ -253,7 +258,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 			// Skip auth for unauthenticated endpoints (health checks, CLI OAuth)
 			if isUnauthenticatedEndpoint(r.URL.Path) {
 				if cfg.Debug {
-					log.Debug("Skipping auth for unauthenticated endpoint", "path", r.URL.Path)
+					log.Debug("Skipping auth for unauthenticated endpoint", "path", logging.RequestPath(r))
 				}
 				serveAfterAuth(w, next, r)
 				return
@@ -305,7 +310,35 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 							}
 						}
 
-						// Step 1b: the token's run, only when
+						// Step 1b: a held agent's token is refused on every
+						// request, including tokens on the legacy path above
+						// (ptone/scion#3433). Same response as a revoked
+						// credential; a lookup fault is the same 503.
+						if cfg.HoldStore != nil {
+							// A subject that is not an agent UUID names no agent:
+							// an authentication failure, refused before the hold
+							// lookup.
+							if _, perr := uuid.Parse(claims.Subject); perr != nil {
+								writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
+									"invalid agent token", nil)
+								return
+							}
+							held, holdErr := cfg.HoldStore.HasActiveAgentHold(ctx, claims.Subject)
+							if holdErr != nil {
+								log.Error("Agent hold lookup failed",
+									"agent_id", claims.Subject, "error", holdErr)
+								writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
+									"unable to verify credential status", nil)
+								return
+							}
+							if held {
+								writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
+									"token has been revoked", nil)
+								return
+							}
+						}
+
+						// Step 1c: the token's run, only when
 						// server.auth.agent_run_scope is not off.
 						if rs := cfg.AgentRunScope; rs != nil {
 							switch rs.check(ctx, claims, credState, runScopeRequestFrom(r), runScopeSourceHTTP) {
@@ -320,6 +353,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 						}
 
 						ctx = context.WithValue(ctx, agentContextKey{}, claims)
+						ctx = withStandingMemo(ctx)
 						identity := &agentIdentityWrapper{claims}
 						ctx = contextWithIdentity(ctx, identity)
 						ctx = contextWithCredentialContext(ctx, credentialContextForIdentity(identity))
@@ -386,7 +420,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				if !brokerAuthActive(cfg.BrokerAuthSvc) {
 					log.Warn("Rejecting broker-authenticated request: broker authentication is not available",
 						slog.String("broker_id", brokerID),
-						slog.String("path", r.URL.Path),
+						slog.String("path", logging.RequestPath(r)),
 					)
 					writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
 						"broker authentication is not enabled", nil)
@@ -484,6 +518,17 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				// in the path on every request and serves nothing without
 				// one, and the route never uses an identity.
 				if isArtifactViewRequest(r) {
+					ctx = contextWithAuthType(ctx, AuthTypeSignedURL)
+					serveAfterAuth(w, next, r.WithContext(ctx))
+					return
+				}
+
+				// Step 3e: Artifact share link. A credential-less GET or HEAD
+				// under /api/v1/artifacts/shared/ is passed through WITHOUT an
+				// identity, like the view route: the artifact service resolves
+				// the link token in the path on every request, serves nothing
+				// without a live link, and never uses an identity on the route.
+				if isArtifactSharedRequest(r) {
 					ctx = contextWithAuthType(ctx, AuthTypeSignedURL)
 					serveAfterAuth(w, next, r.WithContext(ctx))
 					return

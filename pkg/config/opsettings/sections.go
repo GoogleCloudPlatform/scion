@@ -397,6 +397,23 @@ type QuotaSettings struct {
 	EnforceBrokerQuotas *bool `json:"enforce_broker_quotas,omitempty" koanf:"enforce_broker_quotas"`
 }
 
+// GCPIAMSettings holds the Layer-1 GCP service-account permission-check
+// settings. Both keys are reloadable: a saved value is applied on every hub
+// replica without a restart. Values are validated on save; a stored value
+// that is absent or cannot be used resolves to the deploy-time value.
+type GCPIAMSettings struct {
+	// CheckMode is "off" or "enforce".
+	CheckMode string `json:"gcp_iam_check_mode,omitempty"`
+	// DenyUnknownPolicy is "fail-open" or "fail-closed".
+	DenyUnknownPolicy string `json:"gcp_iam_deny_unknown_policy,omitempty"`
+}
+
+// Recognised GCPIAMSettings values.
+var (
+	GCPIAMCheckModes          = []string{"off", "enforce"}
+	GCPIAMDenyUnknownPolicies = []string{"fail-open", "fail-closed"}
+)
+
 // AgentSecretsSettings holds Layer-1 hub policy for secrets written by
 // agents. UserScopeOnly is nil when unset, meaning agents may write project
 // scope as they do today (default false/permissive).

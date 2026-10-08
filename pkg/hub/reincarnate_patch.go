@@ -106,7 +106,8 @@ func validateReincarnatePatchRequest(w http.ResponseWriter, req ReincarnateAgent
 // and an agent requester may not grant a role above its own stored role
 // (for a self request that means a role can be lowered but never raised).
 // CanDelegate and the effect ceiling for the role run in
-// reincarnateAuthorityFor. Unlike create, which silently caps an agent
+// reincarnateAuthorityFor (except for a self request that keeps the stored
+// role, which is not a role change). Unlike create, which silently caps an agent
 // caller's request at the project maximum, a reincarnate over-request is
 // always refused: the requester named the role explicitly. On a refusal it
 // writes a 403 and returns false.

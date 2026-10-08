@@ -2015,7 +2015,7 @@ func TestChatV2_Send_UserDM_HumanToHuman(t *testing.T) {
 	srv, s, _, proj, _ := setupSendTest(t)
 
 	// Build a user-to-user DM key (canonical order via DMConversationKey).
-	peerID := tid("dm-peer-user")
+	peerID := mustCreateActiveUser(t, s, "dm-peer-user")
 	dmKey, err := messages.DMConversationKey("user", DevUserID, "user", peerID)
 	if err != nil {
 		t.Fatalf("DMConversationKey: %v", err)

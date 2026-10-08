@@ -1381,6 +1381,93 @@ func TestImportHarnessConfigsFromRemote_WithProjectGithubToken(t *testing.T) {
 	}
 }
 
+// TestImportTemplatesFromRemote_SparseCheckoutFallback_WithProjectGithubToken
+// covers the git fallback taken when the GitHub tarball download fails: the
+// import must go through pkg/config's sparse-checkout seam (stubbed here, so
+// no real `git fetch` runs against github.com, ptone/scion#3750) with the
+// project GITHUB_TOKEN and the parsed ref, and import what it checked out.
+func TestImportTemplatesFromRemote_SparseCheckoutFallback_WithProjectGithubToken(t *testing.T) {
+	srv, s, stor := testTemplateBootstrapServer(t)
+	ctx := context.Background()
+
+	projectID := tid("test-project-id")
+	if err := s.CreateProject(ctx, &store.Project{
+		ID:        projectID,
+		Name:      "test-project",
+		Slug:      "test-project",
+		GitRemote: "https://github.com/chiefkarlin/scion-experiments",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	srv.SetSecretBackend(secret.NewLocalBackend(s, "", "test-secret"))
+	if _, _, err := srv.GetSecretBackend().Set(ctx, &secret.SetSecretInput{
+		Name:       "GITHUB_TOKEN",
+		Value:      "my-secret-token-12345",
+		SecretType: secret.TypeEnvironment,
+		Scope:      secret.ScopeProject,
+		ScopeID:    projectID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	lsRemote := stubGitLsRemote(t, testLsRemoteHeads)
+	checkout := stubGitSparseCheckout(t, map[string]string{
+		"my-template/scion-agent.yaml": "schema_version: \"1\"\ndescription: \"From sparse checkout\"\nagent_instructions: agents.md\n",
+		"my-template/agents.md":        "# Agents instructions",
+	})
+
+	// Make the tarball download fail so FetchRemoteTemplate falls back to the
+	// sparse checkout. NOTE: mutates http.DefaultClient.Transport globally;
+	// MUST NOT run in parallel.
+	oldTransport := http.DefaultClient.Transport
+	defer func() { http.DefaultClient.Transport = oldTransport }()
+	tarballRequests := 0
+	http.DefaultClient.Transport = &mockRoundTripper{
+		roundTrip: func(req *http.Request) (*http.Response, error) {
+			if req.URL.Host != "github.com" {
+				return nil, fmt.Errorf("unexpected request to host: %s", req.URL.Host)
+			}
+			tarballRequests++
+			return &http.Response{StatusCode: http.StatusNotFound, Body: io.NopCloser(bytes.NewReader(nil)), Request: req}, nil
+		},
+	}
+
+	imported, err := srv.importTemplatesFromRemote(ctx, projectID, "https://github.com/chiefkarlin/scion-experiments/tree/main/templates")
+	if err != nil {
+		t.Fatalf("importTemplatesFromRemote failed: %v", err)
+	}
+	if len(imported) != 1 || imported[0] != "my-template" {
+		t.Errorf("expected imported templates [my-template], got %v", imported)
+	}
+	if tarballRequests != 1 {
+		t.Errorf("expected exactly one tarball request before the fallback, got %d", tarballRequests)
+	}
+	assertLsRemoteCalledWithToken(t, lsRemote)
+
+	calls := checkout.Calls()
+	if len(calls) != 1 {
+		t.Fatalf("expected exactly one stubbed sparse checkout, got %d", len(calls))
+	}
+	wantParts := config.GitHubURLParts{Owner: "chiefkarlin", Repo: "scion-experiments", Branch: "main", Path: "templates"}
+	if calls[0].Parts != wantParts {
+		t.Errorf("sparse checkout parts = %+v, want %+v", calls[0].Parts, wantParts)
+	}
+	if calls[0].Token != "my-secret-token-12345" {
+		t.Errorf("expected sparse checkout to receive the project GITHUB_TOKEN")
+	}
+
+	result, err := s.ListTemplates(ctx, store.TemplateFilter{ProjectID: projectID}, store.ListOptions{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.TotalCount != 1 || result.Items[0].Name != "my-template" {
+		t.Fatalf("expected [my-template] in project store, got %+v", result.Items)
+	}
+	if len(stor.objects) != 2 {
+		t.Errorf("expected 2 files uploaded to storage, got %d", len(stor.objects))
+	}
+}
+
 // testLsRemoteHeads is canned `git ls-remote --heads` output for
 // chiefkarlin/scion-experiments. It models a remote that can exist in real
 // git (no ref is both a branch and a directory of branches); only "main" is a
