@@ -127,7 +127,8 @@ scion hub token create \
 - `--name` (required) — a human-readable label.
 - `--scopes` (required) — a comma-separated list of the scopes above.
 - `--expires` — a duration (`90m`, `2h`, `30d`, `1y`) or an RFC 3339 date
-  (`2026-12-31T00:00:00Z`). Defaults to 90 days; maximum 1 year.
+  (`2026-12-31T00:00:00Z`). Defaults to 90 days; maximum 1 year. `m` means minutes; there is
+  no month unit (use `30d` or `1y` for longer).
 - `--purpose` — an optional description of what the token is for (up to 128 bytes).
 - `--label` — an optional `key=value` label; repeat the flag for more (up to 8). Keys are
   lowercase, start with a letter and may contain digits, `_`, `.` and `-` (up to 32 bytes).
