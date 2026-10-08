@@ -29,6 +29,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -1149,11 +1150,9 @@ func TestC1_AuthorizeScheduledMessageAuthoring_CrossProjectByAgentID(t *testing.
 
 func TestC1_ScheduledMessageCreate_ScopedUATDeniedAtRoute(t *testing.T) {
 	// T-B1-07: a project-scoped UAT cannot create a scheduled message event
-	// through handleScheduledEvents. The refusal comes from the
-	// scheduled_event.create check (the permission has no token scope, so the
-	// bearer boundary is not eligible), not from scheduled-message authoring:
-	// the target slug has no stored row, so authoring admits the request and
-	// the route check alone can produce this refusal body.
+	// through handleScheduledEvents. The authoring credential gate refuses it
+	// with the session-only GOV_PENDING refusal before the scheduled_event
+	// access check and before the target is resolved.
 	srv, s := testServer(t)
 	ctx := context.Background()
 	// A scheduler is attached so that a request admitted past every check
@@ -1192,20 +1191,16 @@ func TestC1_ScheduledMessageCreate_ScopedUATDeniedAtRoute(t *testing.T) {
 	rec := httptest.NewRecorder()
 	srv.handleScheduledEvents(rec, req, project.ID, "")
 	require.Equal(t, http.StatusForbidden, rec.Code, "expected 403 for UAT-scoped authoring: %s", rec.Body.String())
-	assert.Contains(t, rec.Body.String(), scheduledEventRouteDenial, "the refusal comes from the scheduled_event.create check")
+	requireSessionOnlyRefusal(t, rec, authzop.ReasonGovernancePending, "project-scoped token message create")
+	assert.Contains(t, rec.Body.String(), scheduleAuthoringCredentialRefusedMessage, "the refusal comes from the authoring credential gate")
 	res, err := s.ListScheduledEvents(ctx, store.ScheduledEventFilter{ProjectID: project.ID}, store.ListOptions{})
 	require.NoError(t, err)
 	assert.Empty(t, res.Items, "nothing is written")
 }
 
-// scheduledEventRouteDenial is the response text of the scheduled_event
-// access check in handleScheduledEvents.
-const scheduledEventRouteDenial = "You don't have permission to access scheduled events in this project"
-
-// A hub-scoped UAT is refused by the same scheduled_event.create check: the
-// project-scoped access check does not admit a hub-wide token boundary. The
-// target slug has no stored row, so scheduled-message authoring admits the
-// request and the route check alone can produce this refusal body.
+// A hub-scoped UAT is refused by the same authoring credential gate, with
+// the session-only GOV_PENDING refusal, before the scheduled_event access
+// check and before the target is resolved.
 func TestC1_ScheduledMessageCreate_HubScopedUATDeniedAtRoute(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -1245,7 +1240,8 @@ func TestC1_ScheduledMessageCreate_HubScopedUATDeniedAtRoute(t *testing.T) {
 	rec := httptest.NewRecorder()
 	srv.handleScheduledEvents(rec, req, project.ID, "")
 	require.Equal(t, http.StatusForbidden, rec.Code, "expected 403 for hub-scoped UAT authoring: %s", rec.Body.String())
-	assert.Contains(t, rec.Body.String(), scheduledEventRouteDenial, "the refusal comes from the scheduled_event.create check")
+	requireSessionOnlyRefusal(t, rec, authzop.ReasonGovernancePending, "hub-scoped token message create")
+	assert.Contains(t, rec.Body.String(), scheduleAuthoringCredentialRefusedMessage, "the refusal comes from the authoring credential gate")
 	res, err := s.ListScheduledEvents(ctx, store.ScheduledEventFilter{ProjectID: project.ID}, store.ListOptions{})
 	require.NoError(t, err)
 	assert.Empty(t, res.Items, "nothing is written")
