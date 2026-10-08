@@ -53,7 +53,16 @@ import { FakeEventSource } from '../../client/__fixtures__/agent-store-harness.j
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-vi.mock('../../client/main.js', () => import('../../client/__fixtures__/main-stub.js'));
+// The shared stub's stateManager is a bare event bus; this page also reaches
+// the seed-epoch surface through AgentSeedEpoch, so add a no-op one here.
+vi.mock('../../client/main.js', async () => ({
+  ...(await import('../../client/__fixtures__/main-stub.js')),
+  stateManager: Object.assign(new EventTarget(), {
+    scopeGeneration: 0,
+    beginSeedEpoch: () => Symbol('seed-epoch'),
+    endSeedEpoch: () => {},
+  }),
+}));
 
 vi.mock('../../client/api.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../client/api.js')>();

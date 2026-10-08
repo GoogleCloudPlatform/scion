@@ -519,6 +519,7 @@ func (s *Server) updateGroup(w http.ResponseWriter, r *http.Request, id string) 
 	if req.Annotations != nil {
 		group.Annotations = req.Annotations
 	}
+	ownerChanged := req.OwnerID != "" && req.OwnerID != group.OwnerID
 	if req.OwnerID != "" {
 		group.OwnerID = req.OwnerID
 	}
@@ -526,6 +527,9 @@ func (s *Server) updateGroup(w http.ResponseWriter, r *http.Request, id string) 
 	if err := s.store.UpdateGroup(ctx, group); err != nil {
 		writeErrorFromErr(w, err, "")
 		return
+	}
+	if ownerChanged {
+		s.publishConduitAuthzChanged(conduitAuthzMatch{})
 	}
 
 	s.groupsLogger().Info("group updated",
@@ -587,6 +591,7 @@ func (s *Server) deleteGroup(w http.ResponseWriter, r *http.Request, id string) 
 	}
 	s.enqueueGroupChangeLoss(ctx, lossUsers)
 
+	s.publishConduitAuthzChanged(conduitAuthzMatch{})
 	s.groupsLogger().Info("group deleted",
 		"group_id", group.ID,
 		"slug", group.Slug)
@@ -1163,6 +1168,11 @@ func (s *Server) removeGroupMember(w http.ResponseWriter, r *http.Request, group
 		BeforeSummary: `{"groupId":"` + group.ID + `","memberType":"` + memberType + `","memberId":"` + memberID + `"}`,
 	})
 
+	if memberType == store.GroupMemberTypeUser {
+		s.publishConduitAuthzChanged(conduitAuthzMatch{UserID: memberID})
+	} else {
+		s.publishConduitAuthzChanged(conduitAuthzMatch{})
+	}
 	s.groupsLogger().Info("group member removed",
 		"group_id", group.ID,
 		"member_type", memberType,

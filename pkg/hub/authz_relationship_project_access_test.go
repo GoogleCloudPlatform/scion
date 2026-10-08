@@ -996,10 +996,10 @@ func TestRelationshipProjectAccess_RefusalSurfaces(t *testing.T) {
 			fire := func(creatorID, agentID string) string {
 				t.Helper()
 				payload := `{"agentId":"` + agentID + `","message":"hello"}`
-				err := handler(ctx, store.ScheduledEvent{
+				err := handler(ctx, withSessionRevision(store.ScheduledEvent{
 					ID: tid("rpa-surfaces-evt-" + creatorID + agentID), ProjectID: f.projectID,
 					EventType: "message", Payload: payload, CreatedBy: creatorID,
-				})
+				}, creatorID))
 				require.Error(t, err, "scheduled message from %s must be refused", creatorID)
 				return err.Error()
 			}
@@ -1017,7 +1017,7 @@ func TestRelationshipProjectAccess_RefusalSurfaces(t *testing.T) {
 			assert.Equal(t, want, fire(formerID, agent.ID), "scheduled: former member")
 			assert.Equal(t, want, fire(userFaultID, agent.ID), "scheduled: user lookup fault")
 			assert.Equal(t, want, fire(bindingFaultID, agent.ID), "scheduled: binding lookup fault")
-			assert.Equal(t, want, fire(outsiderID, tid("rpa-surfaces-missing-"+mode)), "scheduled: missing target")
+			assert.Equal(t, want, fire(f.ownerID, tid("rpa-surfaces-missing-"+mode)), "scheduled: missing target")
 
 			outsiderRouted := routed(outsiderID)
 			assert.Equal(t, routedDeliveryResult{AgentSlug: agent.Slug, Type: "mention", Status: "unauthorized", Error: routedRefusalError}, outsiderRouted)
@@ -1056,10 +1056,10 @@ func TestRelationshipProjectAccess_ScheduledTargetLookupFault(t *testing.T) {
 	t.Cleanup(func() { f.srv.store = orig })
 	logs := installSentinelLogCapture(t)
 
-	err := f.srv.messageEventHandler()(ctx, store.ScheduledEvent{
+	err := f.srv.messageEventHandler()(ctx, withSessionRevision(store.ScheduledEvent{
 		ID: tid("rpa-schedfault-evt"), ProjectID: f.projectID, EventType: "message",
 		Payload: `{"agentId":"` + agent.ID + `","message":"hello"}`, CreatedBy: f.ownerID,
-	})
+	}, f.ownerID))
 	require.Error(t, err)
 	assert.Equal(t, errScheduledMessageRefused.Error(), err.Error())
 	assert.NotContains(t, err.Error(), "injected")

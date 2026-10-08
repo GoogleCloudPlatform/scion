@@ -46,6 +46,12 @@ class FakeStateManager extends EventTarget {
     for (const a of agents) this.agentsById.set(a.id, a);
   }
   seedProjects(): void {}
+  /** Seed-epoch surface used through AgentSeedEpoch; epochs record nothing here. */
+  readonly scopeGeneration = 0;
+  beginSeedEpoch(): symbol {
+    return Symbol('seed-epoch');
+  }
+  endSeedEpoch(): void {}
   reset(): void {
     this.agentsById.clear();
     this.deletedIds.clear();

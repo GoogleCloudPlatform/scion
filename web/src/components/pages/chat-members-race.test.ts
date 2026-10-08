@@ -67,6 +67,10 @@ vi.mock('../../client/main.js', async () => ({
     getDeletedAgentIds: () => new Set<string>(),
     seedAgents: () => {},
     removeAgent: () => {},
+    getAgent: () => undefined,
+    scopeGeneration: 0,
+    beginSeedEpoch: () => Symbol('seed-epoch'),
+    endSeedEpoch: () => {},
   },
 }));
 
