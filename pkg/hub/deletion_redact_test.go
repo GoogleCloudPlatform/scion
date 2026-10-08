@@ -458,7 +458,9 @@ func TestLifecycleStopNotRecorded_DeletionAdminVsNonAdmin(t *testing.T) {
 
 // claimAfterStatusStore seeds a live delete claim right after the first
 // successful UpdateAgentStatus, so a managed lifecycle action answers from
-// the claimed row.
+// the claimed row. Only a stop does: a managed start or restart whose row
+// a delete holds by its final read answers 409 delete_in_progress with no
+// agent body (ptone/scion#3705).
 type claimAfterStatusStore struct {
 	store.Store
 	once  sync.Once
@@ -474,6 +476,9 @@ func (c *claimAfterStatusStore) UpdateAgentStatus(ctx context.Context, id string
 }
 
 func TestManagedLifecycle_DeletionAdminVsNonAdmin(t *testing.T) {
+	prev := managedBackendInst
+	managedBackendInst = stubManagedAgentBackend{}
+	t.Cleanup(func() { managedBackendInst = prev })
 	views := map[string]map[string]json.RawMessage{}
 	for _, c := range []struct {
 		name     string
@@ -483,13 +488,13 @@ func TestManagedLifecycle_DeletionAdminVsNonAdmin(t *testing.T) {
 		{"member", NewAuthenticatedUser("u-m", "m@test.com", "M", "member", "web")},
 	} {
 		srv, s := testServer(t)
-		agent := setupBrokerAgentInPhase(t, s, "redact-managed-"+c.name, state.PhaseStopped)
+		agent := setupBrokerAgentInPhase(t, s, "redact-managed-"+c.name, state.PhaseRunning)
 		agent.Runtime = ManagedRuntimePrefix + "test"
 		require.NoError(t, s.UpdateAgent(context.Background(), agent))
 		srv.store = &claimAfterStatusStore{Store: s, claim: func() {
 			seedDeletionWithError(t, s, agent.ID, seedLiveDeleting, "managed claim detail")
 		}}
-		views[c.name] = lifecycleAs(t, srv, c.identity, agent.ID, "start")
+		views[c.name] = lifecycleAs(t, srv, c.identity, agent.ID, "stop")
 	}
 	require.NotNil(t, views["admin"])
 	assert.JSONEq(t, `"managed claim detail"`, string(views["admin"]["error"]))
