@@ -455,7 +455,7 @@ func TestStoreFinalizeBaseAndDiscard(t *testing.T) {
 	forEachBackend(t, func(t *testing.T, db *sql.DB, st Store, _ func() *sql.DB) {
 		ctx := context.Background()
 		a, v1 := pendingArtifact(t, st, "k", "a.md")
-		if err := st.MarkReceived(ctx, v1.ID, "a.md", "text/markdown"); err != nil {
+		if err := st.MarkReceived(ctx, v1.ID, "a.md", "text/markdown", nil); err != nil {
 			t.Fatal(err)
 		}
 		if err := claimFin(ctx, st, a.ID, 1); err != nil {
