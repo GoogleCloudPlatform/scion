@@ -26,7 +26,9 @@
  * rule and an `@media` rule with the same selector never overwrite each
  * other. Whitespace in keys is collapsed to single spaces.
  *
- * A selector list such as `.a, .b` yields one entry per selector. If a key
+ * A selector list such as `.a, .b` yields one entry per selector. Only
+ * top-level commas separate selectors, so `:is(.a, .b) .c` or
+ * `[data-x="a,b"]` stays a single selector. If a key
  * appears more than once (for example `.a, .b { ... }` followed by
  * `.a { ... }`, which is ordinary cascade CSS), the bodies are joined with
  * `;` in source order rather than the later one replacing the earlier. The
@@ -46,7 +48,7 @@ export function styleRules(cssText: string): Map<string, string> {
       const selector = stack.pop() ?? '';
       if (!selector.startsWith('@')) {
         const context = stack.filter((s) => s.startsWith('@'));
-        for (const part of selector.split(',')) {
+        for (const part of splitSelectorList(selector)) {
           const key = [...context, part.trim()].join(' ');
           const prev = rules.get(key);
           rules.set(key, prev === undefined ? buf : prev + ';' + buf);
@@ -58,6 +60,30 @@ export function styleRules(cssText: string): Map<string, string> {
     }
   }
   return rules;
+}
+
+/**
+ * Split a selector list on top-level commas only. Commas inside parentheses
+ * (`:is(...)`, `:not(...)`, `:where(...)`, nested to any depth) or attribute
+ * brackets belong to a single selector.
+ */
+export function splitSelectorList(selector: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let start = 0;
+  for (let i = 0; i < selector.length; i++) {
+    const ch = selector[i];
+    if (ch === '(' || ch === '[') {
+      depth++;
+    } else if ((ch === ')' || ch === ']') && depth > 0) {
+      depth--;
+    } else if (ch === ',' && depth === 0) {
+      parts.push(selector.slice(start, i));
+      start = i + 1;
+    }
+  }
+  parts.push(selector.slice(start));
+  return parts;
 }
 
 function normalize(text: string): string {

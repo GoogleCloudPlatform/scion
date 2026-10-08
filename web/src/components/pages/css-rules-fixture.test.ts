@@ -15,7 +15,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { styleRules } from './__fixtures__/css-rules.js';
+import { splitSelectorList, styleRules } from './__fixtures__/css-rules.js';
 
 describe('styleRules fixture', () => {
   it('keys @media rules separately from top-level rules with the same selector', () => {
@@ -43,6 +43,23 @@ describe('styleRules fixture', () => {
     const rules = styleRules('.a,\n  .b { gap: 4px; }');
     expect(rules.get('.a')).toContain('gap: 4px');
     expect(rules.get('.b')).toContain('gap: 4px');
+  });
+
+  it('does not split on commas inside :is(...)', () => {
+    const rules = styleRules(':is(.a, .b) .c { gap: 4px; }');
+    expect(rules.get(':is(.a, .b) .c')).toContain('gap: 4px');
+    expect([...rules.keys()]).toEqual([':is(.a, .b) .c']);
+  });
+
+  it('does not split on commas inside nested functional pseudo-classes', () => {
+    const rules = styleRules(':is(.a, :not(.b, .c)) .d, .e { gap: 4px; }');
+    expect([...rules.keys()]).toEqual([':is(.a, :not(.b, .c)) .d', '.e']);
+  });
+
+  it('splits only top-level commas in a mixed selector list', () => {
+    expect(
+      splitSelectorList('.a, :where(.b, .c), [data-x="1,2"], .d').map((s) => s.trim())
+    ).toEqual(['.a', ':where(.b, .c)', '[data-x="1,2"]', '.d']);
   });
 
   it('merges a repeated top-level selector in source order', () => {
