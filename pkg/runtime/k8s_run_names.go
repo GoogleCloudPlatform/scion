@@ -367,7 +367,7 @@ func (r *KubernetesRuntime) previousPodGone(ctx context.Context, namespace, podN
 	case k8serrors.IsNotFound(err):
 		return true
 	case err != nil:
-		runtimeLog.Info("Cannot confirm the previous pod is gone; keeping its run's per-run objects",
+		runtimeLog.Warn("Cannot confirm the previous pod is gone; keeping its run's per-run objects",
 			"pod", podName, "namespace", namespace, "pod_uid", uid, "object_run_id", podRun, "error", err)
 		return false
 	case p.UID != uid && p.Labels[api.LabelRunID] != podRun:
@@ -377,7 +377,7 @@ func (r *KubernetesRuntime) previousPodGone(ctx context.Context, namespace, podN
 			"pod", podName, "namespace", namespace, "pod_uid", uid, "replacement_pod_uid", p.UID, "object_run_id", podRun)
 		return false
 	}
-	runtimeLog.Info("Previous pod still present; keeping its run's per-run objects",
+	runtimeLog.Warn("Previous pod still present; keeping its run's per-run objects",
 		"pod", podName, "namespace", namespace, "pod_uid", uid, "object_run_id", podRun)
 	return false
 }

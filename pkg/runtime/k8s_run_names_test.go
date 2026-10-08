@@ -1536,9 +1536,13 @@ func TestK8sRun_NoRunID_NFSHome_LivePodGone_RemovesItsRunsObjects(t *testing.T) 
 	x := prSeedNFSRunObjects(t, rt, rsRunA)
 	cfg := nfsHomeTestConfig(true)
 	cfg.Name = "a"
-	// Run fails later (it cannot read the test auth file); its pre-clean,
-	// which removes the previous pod, has run by then.
-	_, _ = rt.Run(context.Background(), cfg)
+	// The error is expected and otherwise ignored: Run fails after its
+	// pre-clean, when it creates the auth Secret from a test auth file that
+	// does not exist. Asserting that failure keeps a failure that moves
+	// before the pre-clean explicit.
+	if _, err := rt.Run(context.Background(), cfg); err == nil || !strings.Contains(err.Error(), "failed to read auth file") {
+		t.Fatalf("Run error = %v, want the auth-file failure after the pre-clean", err)
+	}
 	if _, err := cs.CoreV1().Pods("default").Get(context.Background(), "a", metav1.GetOptions{}); !k8serrors.IsNotFound(err) {
 		t.Fatalf("previous pod still present (err %v)", err)
 	}
