@@ -647,6 +647,11 @@ func TestConduitStreamAuthz_UnavailableNeverExtends(t *testing.T) {
 	assert.Contains(t, f.rec.metricList(), "interval/expired_unavailable/pty")
 	assert.Zero(t, r.count())
 	assert.Zero(t, f.a.Len())
+	for _, l := range f.rec.lines(t) {
+		if l["outcome"] == "expired_unavailable" {
+			assert.Equal(t, "WARN", l["level"])
+		}
+	}
 }
 
 // TestConduitStreamAuthz_NonIntervalPassDoesNotRenew: notify, resync and
@@ -686,4 +691,160 @@ func TestConduitStreamAuthz_DeadlineDisabled(t *testing.T) {
 	assert.True(t, st.Deadline().IsZero())
 	f.clk.Advance(48 * time.Hour)
 	assert.Zero(t, f.check.callCount())
+}
+
+// TestConduitStreamAuthz_IntervalCheckBeforeDeadlineIsNoop: an interval
+// check that runs before the stream's deadline (a stale or replaced
+// timer) evaluates nothing, sends no notice, records no metric and leaves
+// the deadline where it was.
+func TestConduitStreamAuthz_IntervalCheckBeforeDeadlineIsNoop(t *testing.T) {
+	for name, v := range map[string]conduitAuthzVerdict{
+		"allowed": conduitAuthzAllowed, "denied": conduitAuthzDenied, "unavailable": conduitAuthzUnavailable,
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newDeadlineFixture(t, -1, time.Hour)
+			st, c, r := f.trackRenewable("u1", 1)
+			f.check.set("u1", v)
+			d0 := st.Deadline()
+			f.clk.Advance(30 * time.Minute)
+			f.a.check(context.Background(), conduitAuthzTriggerInterval, st)
+			assert.Zero(t, f.check.callCount(), "the check was evaluated before the deadline")
+			assert.Zero(t, r.count())
+			assert.Empty(t, c.list())
+			assert.Empty(t, f.rec.metricList())
+			assert.Equal(t, d0, st.Deadline())
+		})
+	}
+}
+
+// TestConduitStreamAuthz_IntervalCheckTwiceRenewsOnce: a second interval
+// check at the same reached deadline (a duplicate timer firing) finds the
+// deadline already moved and renews nothing: one renewal, deadline
+// d0+interval.
+func TestConduitStreamAuthz_IntervalCheckTwiceRenewsOnce(t *testing.T) {
+	f := newDeadlineFixture(t, -1, time.Hour)
+	st, _, r := f.trackRenewable("u1", 1)
+	d0 := st.Deadline()
+	f.clk.Advance(time.Hour) // the deadline timer runs the first check
+	f.a.check(context.Background(), conduitAuthzTriggerInterval, st)
+	assert.Equal(t, 1, f.check.callCount())
+	assert.Equal(t, 1, r.count())
+	assert.Equal(t, d0.Add(time.Hour), st.Deadline())
+	assert.Equal(t, []string{"interval/renewed/pty"}, f.rec.metricList())
+}
+
+// TestConduitStreamAuthz_IntervalRenewsEachInterval: across three
+// intervals in one clock step the stream is renewed exactly three times,
+// each by one interval.
+func TestConduitStreamAuthz_IntervalRenewsEachInterval(t *testing.T) {
+	f := newDeadlineFixture(t, -1, time.Hour)
+	st, c, r := f.trackRenewable("u1", 1)
+	d0 := st.Deadline()
+	f.clk.Advance(3 * time.Hour)
+	assert.Equal(t, 3, r.count())
+	assert.Equal(t, d0.Add(3*time.Hour), st.Deadline())
+	assert.Empty(t, c.list())
+}
+
+// TestConduitStreamAuthz_RenewRefusals: renew itself refuses a deadline
+// that has not been reached, and a stream with no deadline or one that
+// was untracked, so nothing but a reached deadline is ever extended.
+func TestConduitStreamAuthz_RenewRefusals(t *testing.T) {
+	f := newDeadlineFixture(t, -1, time.Hour)
+	st, _, _ := f.trackRenewable("u1", 1)
+	d0 := st.Deadline()
+
+	ok, detail := f.a.renew(st, "")
+	assert.False(t, ok)
+	assert.Equal(t, "deadline not reached", detail)
+	assert.Equal(t, d0, st.Deadline())
+
+	st.stopDeadline()
+	f.clk.Advance(2 * time.Hour)
+	ok, detail = f.a.renew(st, "x")
+	assert.False(t, ok)
+	assert.Equal(t, "x; no deadline to renew", detail)
+	assert.Equal(t, d0, st.Deadline())
+
+	none := &conduitUserStream{}
+	ok, _ = f.a.renew(none, "")
+	assert.False(t, ok)
+	assert.True(t, none.Deadline().IsZero())
+}
+
+// TestConduitStreamAuthz_RunContextEndedExpiresAtDeadline: after the
+// tracker's run context ends (Stop), a check that honours its context is
+// unavailable. The stream is not closed early and never renewed; at its
+// deadline it is closed with 4401 authz_expired, logged at WARN.
+func TestConduitStreamAuthz_RunContextEndedExpiresAtDeadline(t *testing.T) {
+	rec, logger := newAuthzRecorder()
+	clk := clock.NewFake(time.Date(2026, 10, 8, 1, 0, 0, 0, time.UTC))
+	var calls int
+	var mu sync.Mutex
+	a := newConduitStreamAuthz(conduitStreamAuthzConfig{
+		Check: func(ctx context.Context, st *conduitUserStream) (conduitAuthzVerdict, string) {
+			mu.Lock()
+			calls++
+			mu.Unlock()
+			if ctx.Err() != nil {
+				return conduitAuthzUnavailable, "context ended"
+			}
+			return conduitAuthzAllowed, ""
+		},
+		Clock: clk, RecheckInterval: -1, UserStreamAuthzMax: time.Hour, Metrics: rec, Logger: logger,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	a.Start(ctx)
+	c, r := &closeRecorder{}, &renewRecorder{}
+	a.Track(&conduitUserStream{
+		Kind: grant.StreamKindPTY, Identity: NewAuthenticatedUser("u1", "u1@x", "u1", "member", "api"),
+		UserID: "u1", Admitted: clk.Now(), Close: c.close, Renew: r.renew,
+	})
+	cancel()
+
+	clk.Advance(time.Hour - time.Second)
+	assert.Empty(t, c.list(), "closed before the deadline")
+	clk.Advance(time.Second)
+	assert.Equal(t, []string{"4401 authz_expired"}, c.list())
+	assert.Zero(t, r.count(), "renewed after the run context ended")
+	assert.Equal(t, []string{"interval/expired_unavailable/pty"}, rec.metricList())
+	lines := rec.lines(t)
+	require.Len(t, lines, 1)
+	assert.Equal(t, "WARN", lines[0]["level"])
+	mu.Lock()
+	assert.Equal(t, 1, calls)
+	mu.Unlock()
+}
+
+// TestConduitStreamAuthz_NoticeSentOutsideStreamLock: the renewal notice
+// is sent after the stream's check lock is released, so a slow notice
+// does not hold up another check of the same stream.
+func TestConduitStreamAuthz_NoticeSentOutsideStreamLock(t *testing.T) {
+	f := newDeadlineFixture(t, -1, time.Hour)
+	st, _, _ := f.trackRenewable("u1", 1)
+	entered, release := make(chan struct{}), make(chan struct{})
+	st.Renew = func() error {
+		close(entered)
+		<-release
+		return nil
+	}
+	advanced := make(chan struct{})
+	go func() {
+		defer close(advanced)
+		f.clk.Advance(time.Hour) // renews, then blocks in the notice
+	}()
+	<-entered
+	checked := make(chan struct{})
+	go func() {
+		defer close(checked)
+		f.a.Recheck(context.Background(), conduitAuthzTriggerNotify, conduitAuthzMatch{})
+	}()
+	select {
+	case <-checked:
+	case <-time.After(trackerWait):
+		t.Fatal("a check of the stream waited on the renewal notice")
+	}
+	close(release)
+	<-advanced
+	assert.Equal(t, 2, f.check.callCount())
 }

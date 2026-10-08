@@ -276,3 +276,28 @@ func TestConduitProxyDialerRenewalChangesNoDeadline(t *testing.T) {
 	echo(t, c, "still-open")
 	assert.Equal(t, 1, f.authz.Len())
 }
+
+// TestConduitStreamAuthzMaxWiring: the hub's re-check takes the user
+// stream interval from ServerConfig.ConduitUserStreamAuthzMax (8h when
+// unset), and a tracked user stream's deadline uses it.
+func TestConduitStreamAuthzMaxWiring(t *testing.T) {
+	for name, tc := range map[string]struct {
+		configured, want time.Duration
+	}{"unset": {0, 8 * time.Hour}, "configured": {90 * time.Minute, 90 * time.Minute}} {
+		t.Run(name, func(t *testing.T) {
+			f := newConduitFixture(t)
+			f.srv.config.ConduitUserStreamAuthzMax = tc.configured
+			clk := clock.NewFake(time.Date(2026, 10, 8, 1, 0, 0, 0, time.UTC))
+			a, stop, err := f.srv.startConduitStreamAuthz(context.Background(), clk, -1)
+			require.NoError(t, err)
+			t.Cleanup(stop)
+			assert.Equal(t, tc.want, a.cfg.UserStreamAuthzMax)
+
+			ident := NewAuthenticatedUser("u1", "u1@conduit.test", "u1", store.UserRoleMember, "api")
+			st := &conduitUserStream{Kind: "pty", Identity: ident, AgentID: f.agent.ID, ProjectID: f.agent.ProjectID, Close: func(uint32, string) {}}
+			untrack := f.srv.trackConduitUserStream(st)
+			t.Cleanup(untrack)
+			assert.Equal(t, clk.Now().Add(tc.want), st.Deadline())
+		})
+	}
+}

@@ -346,3 +346,62 @@ func TestAuthRefreshStreamIDFromRelayIsAccepted(t *testing.T) {
 		t.Fatalf("Admitter.Refresh called %d times for a relay-sent notice", n)
 	}
 }
+
+// TestAuthRefreshStreamIDAfterStreamClosed: a hub renewal notice that
+// reaches the target after the stream it names has closed is ignored;
+// both sessions stay up and keep serving new streams.
+func TestAuthRefreshStreamIDAfterStreamClosed(t *testing.T) {
+	in := make(chan Stream, 2)
+	var mu sync.Mutex
+	var notices int
+	p := newPair(t, Config{
+		StreamHandler: acceptAll(in),
+		Interceptor: func(dir Direction, f *conduitv1.Frame) []*conduitv1.Frame {
+			if dir == Inbound && f.GetAuthRefresh() != nil {
+				mu.Lock()
+				notices++
+				mu.Unlock()
+			}
+			return []*conduitv1.Frame{f}
+		},
+	}, Config{})
+	rs, err := p.relay.OpenStream(context.Background(), tcpOpen())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ds := recvStream(t, in)
+	id := rs.ID()
+	if err := rs.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadAll(ds); err != nil {
+		t.Fatalf("target read after close: %v", err)
+	}
+	_ = ds.Close()
+	eventually(t, "stream removed on both sides", func() bool {
+		return p.dialer.Stats().OpenStreams == 0 && p.relay.Stats().OpenStreams == 0
+	})
+
+	if err := p.relay.RefreshAuth(nil, id); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the target received the notice", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return notices == 1
+	})
+	// The sessions still serve a new stream.
+	rs2, err := p.relay.OpenStream(context.Background(), tcpOpen())
+	if err != nil {
+		t.Fatalf("open after a late notice: %v", err)
+	}
+	ds2 := recvStream(t, in)
+	go func() { _, _ = rs2.Write([]byte("ok")) }()
+	buf := make([]byte, 2)
+	if _, err := io.ReadFull(ds2, buf); err != nil || string(buf) != "ok" {
+		t.Fatalf("target read %q, %v", buf, err)
+	}
+	if p.dialer.isDone() || p.relay.isDone() {
+		t.Fatalf("a session ended after a late renewal notice: dialer %v, relay %v", p.dialer.Err(), p.relay.Err())
+	}
+}

@@ -302,7 +302,10 @@ func (a *conduitStreamAuthz) runContext() context.Context {
 
 // Stop disarms the sweep. Tracked streams are left as they are, and their
 // deadlines stay armed: a deadline is a bound, enforced even while no
-// other re-check runs.
+// other re-check runs. Once the run context has ended, an interval check
+// runs with that ended context, so its verdict cannot be trusted
+// (unavailable): the stream is never renewed, and is closed at its
+// deadline with 4401 authz_expired.
 func (a *conduitStreamAuthz) Stop() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -431,16 +434,20 @@ func (a *conduitStreamAuthz) Recheck(ctx context.Context, trigger string, m cond
 	wg.Wait()
 }
 
-// check evaluates one stream and acts on the verdict.
+// check evaluates one stream and acts on the verdict. The decision and
+// its state change (close, deadline move) happen under st.mu; the renewal
+// notice, metric and log line follow once st.mu is released, so a slow
+// notice send never holds up other checks of the stream.
 func (a *conduitStreamAuthz) check(ctx context.Context, trigger string, st *conduitUserStream) {
 	st.mu.Lock()
-	defer st.mu.Unlock()
 	if st.closed {
+		st.mu.Unlock()
 		return
 	}
 	if trigger == conduitAuthzTriggerInterval && !a.deadlineReached(st) {
 		// A timer outlived the deadline it was armed for (the stream was
 		// renewed or untracked meanwhile): there is nothing to enforce.
+		st.mu.Unlock()
 		return
 	}
 	start := a.cfg.Clock.Now()
@@ -454,7 +461,7 @@ func (a *conduitStreamAuthz) check(ctx context.Context, trigger string, st *cond
 	end := a.cfg.Clock.Now()
 
 	interval := trigger == conduitAuthzTriggerInterval
-	var outcome, notice string
+	var outcome string
 	switch {
 	case interval && verdict == conduitAuthzAllowed:
 		outcome = conduitAuthzOutcomeRenewed
@@ -462,15 +469,6 @@ func (a *conduitStreamAuthz) check(ctx context.Context, trigger string, st *cond
 		renewed, detail = a.renew(st, detail)
 		if !renewed {
 			outcome = conduitAuthzOutcomePassed
-			break
-		}
-		notice = conduitAuthzNoticeNotDelivered
-		if st.Renew != nil {
-			if err := st.Renew(); err != nil {
-				detail = joinDetail(detail, "renewal notice: "+err.Error())
-			} else {
-				notice = conduitAuthzNoticeLocal
-			}
 		}
 	case interval && verdict == conduitAuthzUnavailable:
 		// The stream reached its deadline unrenewed.
@@ -499,12 +497,28 @@ func (a *conduitStreamAuthz) check(ctx context.Context, trigger string, st *cond
 		delete(a.streams, st)
 		a.mu.Unlock()
 	}
+	st.mu.Unlock()
+
+	// The renewal notice is advisory (the deadline is enforced here), so
+	// it is sent outside st.mu. A notice that reaches a stream closed
+	// meanwhile is ignored by the target.
+	var notice string
+	if outcome == conduitAuthzOutcomeRenewed {
+		notice = conduitAuthzNoticeNotDelivered
+		if st.Renew != nil {
+			if err := st.Renew(); err != nil {
+				detail = joinDetail(detail, "renewal notice: "+err.Error())
+			} else {
+				notice = conduitAuthzNoticeLocal
+			}
+		}
+	}
 	if a.cfg.Metrics != nil {
 		a.cfg.Metrics.RecordConduitStreamAuthz(trigger, outcome, st.Kind)
 	}
 	level := slog.LevelInfo
 	switch {
-	case outcome == conduitAuthzOutcomeDeferred:
+	case outcome == conduitAuthzOutcomeDeferred, outcome == conduitAuthzOutcomeExpired:
 		level = slog.LevelWarn
 	case outcome == conduitAuthzOutcomePassed && trigger == conduitAuthzTriggerSweep:
 		level = slog.LevelDebug
