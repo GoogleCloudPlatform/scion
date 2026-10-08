@@ -31,8 +31,9 @@ import (
 
 // Tests for the hub-managed workspace upload on agent create running only
 // on a GCS-backed hub (ptone/scion#3765): the upload is a GCS sync, so a hub
-// on any other storage provider fails the create with a clear error instead
-// of syncing to a GCS bucket named after its local storage.
+// on any other storage provider never runs it. For a project without a git
+// remote it fails the create with a clear error; a shared-workspace project
+// with a git remote is dispatched without the upload.
 
 // newGCSContentMockStorage is a content mock storage that reports the GCS
 // provider, for tests that exercise the workspace upload.
@@ -90,7 +91,8 @@ func TestCreateAgent_LocalStorageRemoteBrokerFailsWithoutSync(t *testing.T) {
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 	require.Equal(t, ErrCodeUnsupportedCapability, resp.Error.Code)
 	require.Equal(t, `cannot send the project workspace to a remote runtime broker: `+
-		`the hub's storage provider is "local", and a remote broker needs GCS hub storage or a project git remote`,
+		`hub storage is "local"; use GCS hub storage, add a git remote to the project, `+
+		`or link the project at a local path on that broker`,
 		resp.Error.Message)
 
 	require.Empty(t, *uploads, "no workspace sync may run on a hub without GCS storage")
@@ -161,4 +163,53 @@ func TestCreateAgent_LocalStorageBrokerLocalPathUnaffected(t *testing.T) {
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
 	require.Empty(t, *uploads)
 	require.NotNil(t, disp.capturedAgent, "the agent must be dispatched")
+}
+
+// TestCreateAgent_LocalStorageSharedWorkspaceGitRemoteDispatchesWithoutSync
+// covers a shared-workspace project with a git remote on a hub on local
+// storage and a remote broker with no local path: the broker builds the
+// shared workspace from the git remote, so the create dispatches as a hub
+// with no storage does, without running the sync.
+func TestCreateAgent_LocalStorageSharedWorkspaceGitRemoteDispatchesWithoutSync(t *testing.T) {
+	srv, s, project, disp := setupWorkspaceUploadServer(t, newContentMockStorage("local"))
+	project.GitRemote = "github.com/example/repo"
+	if project.Labels == nil {
+		project.Labels = map[string]string{}
+	}
+	project.Labels[store.LabelWorkspaceMode] = store.WorkspaceModeShared
+	require.NoError(t, s.UpdateProject(context.Background(), project))
+	require.True(t, project.IsSharedWorkspace(), "fixture check: shared-workspace project")
+	uploads := uploadRecorder(t)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name:      "shared-git-agent",
+		ProjectID: project.ID,
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+	require.Empty(t, *uploads, "no workspace sync may run on a hub without GCS storage")
+	require.NotNil(t, disp.capturedAgent, "the agent must be dispatched")
+	require.NotNil(t, disp.capturedAgent.AppliedConfig)
+	require.NotEmpty(t, disp.capturedAgent.AppliedConfig.Workspace, "the hub-managed workspace path is dispatched as with no storage")
+	require.Empty(t, disp.capturedAgent.AppliedConfig.WorkspaceStoragePath)
+	require.Empty(t, disp.capturedAgent.AppliedConfig.WorkspaceStorageBucket)
+}
+
+// TestCreateAgent_LocalStorageUnrelatedCallerWorkspaceDispatches covers a
+// caller-supplied workspace outside the project's managed path on a hub on
+// local storage: the upload is skipped for it whatever the storage, so the
+// create dispatches as before instead of failing with the storage error.
+func TestCreateAgent_LocalStorageUnrelatedCallerWorkspaceDispatches(t *testing.T) {
+	srv, _, project, disp := setupWorkspaceUploadServer(t, newContentMockStorage("local"))
+	uploads := uploadRecorder(t)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name:      "unrelated-workspace-agent",
+		ProjectID: project.ID,
+		Workspace: t.TempDir(),
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+	require.Empty(t, *uploads)
+	require.NotNil(t, disp.capturedAgent, "the agent must be dispatched")
+	require.NotNil(t, disp.capturedAgent.AppliedConfig)
+	require.Empty(t, disp.capturedAgent.AppliedConfig.WorkspaceStoragePath)
 }

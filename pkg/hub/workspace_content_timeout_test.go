@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -485,7 +486,9 @@ func TestCreateAgent_CallerWorkspace_HungStorageReturns503NoAgentNoDispatch(t *t
 	ctx := context.Background()
 	disp := &mockDispatcher{}
 	srv.SetDispatcher(disp)
-	srv.SetStorage(newGCSContentMockStorage("hung-storage-bucket"))
+	hungStor := newMockStorage("hung-storage-bucket")
+	hungStor.provider = storage.ProviderGCS
+	srv.SetStorage(hungStor)
 
 	broker := &store.RuntimeBroker{
 		ID: tid("broker-hung-caller-ws"), Slug: "hung-caller-ws-broker",

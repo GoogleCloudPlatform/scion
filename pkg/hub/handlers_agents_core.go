@@ -2383,22 +2383,14 @@ func (s *Server) createAgentInProject(
 
 		if !hasLocalPath && !s.isEmbeddedBroker(runtimeBrokerID) {
 			stor := s.GetStorage()
-			if stor != nil && stor.Provider() != storage.ProviderGCS {
+			if stor != nil && stor.Provider() != storage.ProviderGCS && project.GitRemote != "" {
 				// The upload below is always a GCS sync (gcp.SyncToGCS), so a
-				// hub on any other storage provider cannot ship the workspace
-				// to a remote broker (ptone/scion#3765). Fail the create
-				// before dispatch: the agent row and quotas exist, nothing
-				// has been dispatched and no credential has been minted.
-				msg := remoteBrokerNeedsGCSMessage(stor.Provider())
-				s.agentLifecycleLog.Warn(msg,
-					"agent_id", agent.ID, "project_id", project.ID,
-					"broker_id", runtimeBrokerID, "storage_provider", string(stor.Provider()))
-				ucancel()
-				corrID := cleanup(createRollback{Stage: createStageWorkspaceStorage, Cause: errors.New(msg)})
-				writeCreateFailure(w, corrID, func() {
-					writeError(w, http.StatusPreconditionFailed, ErrCodeUnsupportedCapability, msg, nil)
-				})
-				return
+				// hub on any other storage provider cannot run it
+				// (ptone/scion#3765). A shared-workspace project with a git
+				// remote needs no upload: the broker builds the shared
+				// workspace from the remote, so dispatch it as a hub with no
+				// storage does.
+				stor = nil
 			}
 			if stor != nil {
 				resolvedWorkspace, workspaceErr := s.resolveHubManagedWorkspaceForUpload(agent.AppliedConfig.Workspace, project.Slug)
@@ -2422,6 +2414,23 @@ func (s *Server) createAgentInProject(
 					s.agentLifecycleLog.Warn("Skipping GCS upload of invalid hub-managed project workspace",
 						"agent_id", agent.ID,
 						"project_id", project.ID, "error", workspaceErr)
+				} else if stor.Provider() != storage.ProviderGCS {
+					// Only a project without a git remote gets here (see
+					// above): the remote broker has no other way to get the
+					// workspace, and this hub cannot upload it
+					// (ptone/scion#3765). Fail the create before dispatch:
+					// the agent row and quotas exist, nothing has been
+					// dispatched and no credential has been minted.
+					msg := remoteBrokerNeedsGCSMessage(stor.Provider())
+					s.agentLifecycleLog.Warn("Hub storage cannot carry the workspace upload to a remote broker; failing agent create",
+						"storage_provider", string(stor.Provider()), "agent_id", agent.ID,
+						"project_id", project.ID, "broker_id", runtimeBrokerID)
+					ucancel()
+					corrID := cleanup(createRollback{Stage: createStageWorkspaceStorage, Cause: errors.New(msg)})
+					writeCreateFailure(w, corrID, func() {
+						writeError(w, http.StatusPreconditionFailed, ErrCodeUnsupportedCapability, msg, nil)
+					})
+					return
 				} else {
 					storagePath := storage.ProjectWorkspaceStoragePath(s.HubID(), project.ID)
 					if err := syncToGCSForWorkspaceUpload(uctx, resolvedWorkspace, stor.Bucket(), storagePath+"/files"); err != nil {
