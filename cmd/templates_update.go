@@ -206,9 +206,11 @@ func updateSingleTemplate(ctx context.Context, svc hubclient.TemplateService, na
 	}
 
 	if !isJSONOutput() {
-		shown := urlOverride
-		if shown == "" {
-			shown = match.SourceURL
+		shown := match.SourceURL
+		if urlOverride != "" {
+			// Show the override the way the Hub will read it (a URL without
+			// a scheme gets https://); the display still drops credentials.
+			shown = config.NormalizeTemplateSourceURL(urlOverride)
 		}
 		fmt.Printf("Updating %q from %s...\n", name, displaySourceURL(shown))
 	}

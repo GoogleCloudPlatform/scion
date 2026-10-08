@@ -388,3 +388,26 @@ func TestUpdateSingleTemplate_AmbiguityMessageIsScopeCorrect(t *testing.T) {
 	assert.NotContains(t, err.Error(), "--project")
 	assert.Empty(t, svc.reimported)
 }
+
+func TestUpdateSingleTemplate_DisplaysSchemelessOverride(t *testing.T) {
+	newSvc := func() *fakeTemplateUpdateService {
+		return &fakeTemplateUpdateService{templates: []hubclient.Template{
+			{ID: "t1", Name: "my-template", Scope: "global", SourceURL: ghSource},
+		}}
+	}
+
+	svc := newSvc()
+	out := captureStdout(t, func() {
+		require.NoError(t, updateSingleTemplate(context.Background(), svc, "my-template", "github.com/acme/repo/tree/main/t", "", ""))
+	})
+	assert.Contains(t, out, "from https://github.com/acme/repo/tree/main/t...")
+	assert.NotContains(t, out, "non-web source")
+	assert.Equal(t, []string{"github.com/acme/repo/tree/main/t"}, svc.overrides, "the override is sent as given")
+
+	svc = newSvc()
+	out = captureStdout(t, func() {
+		require.NoError(t, updateSingleTemplate(context.Background(), svc, "my-template", "user:secret@github.com/acme/repo/tree/main/t", "", ""))
+	})
+	assert.Contains(t, out, "from https://github.com/acme/repo/tree/main/t...")
+	assert.NotContains(t, out, "secret")
+}
