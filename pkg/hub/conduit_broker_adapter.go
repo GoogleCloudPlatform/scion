@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay"
@@ -81,6 +82,9 @@ func (a *legacyBrokerResolver) ResolveBroker(_ context.Context, req router.Reque
 type legacyBrokerSession struct {
 	cc   *ControlChannelManager
 	conn *BrokerConnection
+	// beforeOpen, when set (tests only), runs between the usability check
+	// and the open.
+	beforeOpen func()
 }
 
 var _ router.LegacySession = (*legacyBrokerSession)(nil)
@@ -96,18 +100,29 @@ func (s *legacyBrokerSession) BrokerID() string { return s.conn.GetBrokerID() }
 // SessionID returns the control channel session id.
 func (s *legacyBrokerSession) SessionID() string { return s.conn.GetSessionID() }
 
-// current reports whether the resolved connection is still the broker's
-// live control channel on this process.
-func (s *legacyBrokerSession) current() bool {
+// usable reports whether the resolved connection is still the broker's
+// live control channel on this process and has not been closed.
+func (s *legacyBrokerSession) usable() bool {
+	if s.conn.ctx != nil && s.conn.ctx.Err() != nil {
+		return false
+	}
 	return s.cc.GetConnection(s.conn.GetBrokerID()) == s.conn
 }
 
 // OpenStream opens a multiplexed control channel stream on the resolved
 // connection, exactly as ControlChannelManager.OpenStream does for the
-// broker's current connection.
+// broker's current connection. When the connection was replaced or
+// closed, before or during the open, the error is relay.ErrStaleRoute.
 func (s *legacyBrokerSession) OpenStream(ctx context.Context, streamType, agentSlug, projectID string, cols, rows int) (*StreamProxy, error) {
-	if !s.current() {
+	if !s.usable() {
 		return nil, &relay.StaleRouteError{Reason: "broker control channel replaced or closed"}
 	}
-	return s.conn.OpenStream(ctx, streamType, agentSlug, projectID, cols, rows)
+	if s.beforeOpen != nil {
+		s.beforeOpen()
+	}
+	st, err := s.conn.OpenStream(ctx, streamType, agentSlug, projectID, cols, rows)
+	if err != nil && !s.usable() {
+		return nil, fmt.Errorf("%w: %w", &relay.StaleRouteError{Reason: "broker control channel replaced or closed during open"}, err)
+	}
+	return st, err
 }

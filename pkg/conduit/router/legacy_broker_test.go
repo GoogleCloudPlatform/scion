@@ -19,6 +19,7 @@ package router_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
@@ -33,23 +34,30 @@ type fakeLegacy struct{ id string }
 
 func (f fakeLegacy) LegacyTarget() (string, string) { return registry.PrincipalBroker, f.id }
 
+// stubSession is a non-nil conduit.Session that is never used.
+type stubSession struct{ conduit.Session }
+
 // fakeBrokers is an owner-only BrokerResolver: it resolves the brokers in
 // owned (broker id -> control channel session id) and answers
 // ErrNoSession for any other.
 type fakeBrokers struct {
 	owned map[string]string
 	calls int
-	bad   router.Resolved // when non-zero Record, returned as is
+	bad   *router.Resolved // when set, returned as is
+	fresh bool             // a new session id on every call (the broker keeps reconnecting)
 }
 
 func (f *fakeBrokers) ResolveBroker(_ context.Context, req router.Request) (router.Resolved, error) {
 	f.calls++
-	if f.bad.Record.SessionID != "" {
-		return f.bad, nil
+	if f.bad != nil {
+		return *f.bad, nil
 	}
 	sid, ok := f.owned[req.ID]
 	if !ok {
 		return router.Resolved{}, router.ErrNoSession
+	}
+	if f.fresh {
+		sid = fmt.Sprintf("%s-%d", sid, f.calls)
 	}
 	return router.Resolved{
 		Legacy: fakeLegacy{id: req.ID},
@@ -142,22 +150,38 @@ func TestLegacyBrokerResolve_AgentsUnaffected(t *testing.T) {
 }
 
 // TestLegacyBrokerResolve_ReResolveBudget: a stale legacy route is
-// excluded like any other, so Do re-resolves within the shared budget and
-// then reports ErrNoSession.
+// excluded like any other, and re-resolution stays within the shared
+// MaxReResolves budget, ending in ErrNoSession.
 func TestLegacyBrokerResolve_ReResolveBudget(t *testing.T) {
-	w := relaytest.NewWorld(t)
-	a := w.StartNode("relay-a", nil)
-	b := &fakeBrokers{owned: map[string]string{brokerID: "cc-1"}}
-	calls := 0
-	err := newLegacyRouter(t, a, b).Do(context.Background(), legacyBrokerReq(), func(context.Context, router.Resolved) error {
-		calls++
-		return &relay.StaleRouteError{Reason: "test"}
-	})
-	if calls != 1 || !errors.Is(err, router.ErrNoSession) {
-		t.Fatalf("calls = %d, err = %v; want one call (the same session is excluded) then ErrNoSession", calls, err)
-	}
-	if b.calls > router.MaxReResolves+1 {
-		t.Fatalf("resolver called %d times, over the budget", b.calls)
+	for _, tc := range []struct {
+		name         string
+		fresh        bool
+		wantCalls    int
+		wantResolves int
+	}{
+		// The same session comes back: it is excluded, so the second
+		// resolution is ErrNoSession without calling fn again.
+		{name: "same session excluded", fresh: false, wantCalls: 1, wantResolves: 2},
+		// A new session on every resolution: fn runs until the budget is
+		// spent.
+		{name: "fresh session each time", fresh: true, wantCalls: router.MaxReResolves + 1, wantResolves: router.MaxReResolves + 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := relaytest.NewWorld(t)
+			a := w.StartNode("relay-a", nil)
+			b := &fakeBrokers{owned: map[string]string{brokerID: "cc"}, fresh: tc.fresh}
+			calls := 0
+			err := newLegacyRouter(t, a, b).Do(context.Background(), legacyBrokerReq(), func(context.Context, router.Resolved) error {
+				calls++
+				return &relay.StaleRouteError{Reason: "test"}
+			})
+			if !errors.Is(err, router.ErrNoSession) {
+				t.Fatalf("err = %v, want ErrNoSession", err)
+			}
+			if calls != tc.wantCalls || b.calls != tc.wantResolves {
+				t.Fatalf("fn calls = %d, resolver calls = %d; want %d and %d", calls, b.calls, tc.wantCalls, tc.wantResolves)
+			}
+		})
 	}
 }
 
@@ -194,8 +218,19 @@ func TestLegacyBrokerResolve_InvalidRequest(t *testing.T) {
 func TestLegacyBrokerResolve_MalformedResolution(t *testing.T) {
 	w := relaytest.NewWorld(t)
 	a := w.StartNode("relay-a", nil)
-	b := &fakeBrokers{bad: router.Resolved{Record: registry.SessionRecord{SessionID: "cc-1"}}}
-	if _, err := newLegacyRouter(t, a, b).Resolve(context.Background(), legacyBrokerReq(), nil); err == nil {
-		t.Fatal("a resolution without a legacy session was accepted")
+	rec := registry.SessionRecord{SessionID: "cc-1"}
+	for _, tc := range []struct {
+		name string
+		res  router.Resolved
+	}{
+		{name: "neither Session nor Legacy", res: router.Resolved{Record: rec}},
+		{name: "both Session and Legacy", res: router.Resolved{Session: stubSession{}, Legacy: fakeLegacy{id: brokerID}, Record: rec}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := &fakeBrokers{bad: &tc.res}
+			if _, err := newLegacyRouter(t, a, b).Resolve(context.Background(), legacyBrokerReq(), nil); err == nil {
+				t.Fatal("a malformed resolution was accepted")
+			}
+		})
 	}
 }

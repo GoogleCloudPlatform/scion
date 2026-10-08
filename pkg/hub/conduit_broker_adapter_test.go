@@ -105,6 +105,48 @@ func TestLegacyBrokerAdapter_OnOwnerResolvesLocalSession(t *testing.T) {
 	kind, id := ls.LegacyTarget()
 	assert.Equal(t, registry.PrincipalBroker, kind)
 	assert.Equal(t, "broker-1", id)
+
+	// The session opens streams on the broker's control channel.
+	st, err := ls.OpenStream(context.Background(), wsprotocol.StreamTypePTY, "slug", "proj", 80, 24)
+	require.NoError(t, err)
+	require.NotNil(t, st)
+	require.NoError(t, b.ws.SetReadDeadline(time.Now().Add(5*time.Second)))
+	var open wsprotocol.StreamOpenMessage
+	require.NoError(t, b.ws.ReadJSON(&open))
+	assert.Equal(t, wsprotocol.TypeStreamOpen, open.Type)
+	assert.Equal(t, wsprotocol.StreamTypePTY, open.StreamType)
+	assert.Equal(t, "slug", open.Slug)
+	assert.Equal(t, "proj", open.ProjectID)
+	assert.Equal(t, 80, open.Cols)
+	assert.Equal(t, 24, open.Rows)
+}
+
+// TestLegacyBrokerAdapter_ClosedChannelIsStale: a resolved connection
+// that is closed while it is still registered, before or during the
+// open, is a stale route (so router.Do re-resolves), not a plain error.
+func TestLegacyBrokerAdapter_ClosedChannelIsStale(t *testing.T) {
+	t.Run("closed before open", func(t *testing.T) {
+		f := newRelayFixture(t, nil)
+		hc := installBrokerConnection(t, f.srv.controlChannel, "broker-1", "cc-1")
+		ctx, cancel := context.WithCancel(context.Background())
+		hc.ctx, hc.cancel = ctx, cancel
+		res, err := f.srv.conduit.Load().router.Resolve(context.Background(), brokerRequest("broker-1"), nil)
+		require.NoError(t, err)
+		hc.Close()
+		require.Same(t, hc, f.srv.controlChannel.GetConnection("broker-1"), "the closed connection stays registered")
+		_, err = res.Legacy.(*legacyBrokerSession).OpenStream(context.Background(), wsprotocol.StreamTypePTY, "slug", "proj", 80, 24)
+		require.ErrorIs(t, err, relay.ErrStaleRoute)
+	})
+	t.Run("closed during open", func(t *testing.T) {
+		f := newRelayFixture(t, nil)
+		_ = connectFakeBroker(t, f.srv, "broker-1")
+		res, err := f.srv.conduit.Load().router.Resolve(context.Background(), brokerRequest("broker-1"), nil)
+		require.NoError(t, err)
+		ls := res.Legacy.(*legacyBrokerSession)
+		ls.beforeOpen = func() { ls.conn.Close() }
+		_, err = ls.OpenStream(context.Background(), wsprotocol.StreamTypePTY, "slug", "proj", 80, 24)
+		require.ErrorIs(t, err, relay.ErrStaleRoute)
+	})
 }
 
 // TestLegacyBrokerAdapter_OffOwnerNoSession: a node that does not hold
