@@ -417,19 +417,28 @@ Scion does not forward an agent's end-of-turn text to anyone. A user, an agent o
 
 ### 3. Inbound Message Type Discrimination
 
-When an agent receives an inbound message, it arrives wrapped in standard delimiters and includes metadata:
+When an agent receives an inbound message in Hub mode, it arrives as a JSON object wrapped in standard delimiters:
 
 ```text
+You are receiving a message from the orchestration system:
+
 ---BEGIN SCION MESSAGE---
-sender: agent:tech-lead
-type: instruction
-thread_id: 1234
----
-Write a unit test for the auth package.
+{
+  "timestamp": "2026-10-08T21:00:41Z",
+  "message_id": "5d0c8a2e-7f41-4b8e-9c1a-2f6e0b3d9a17",
+  "conversation": {
+    "id": "af3cd254-0489-408f-a876-a749ec6e7f98",
+    "kind": "direct",
+    "surface": "native"
+  },
+  "from": "agent:tech-lead",
+  "type": "message",
+  "msg": "Write a unit test for the auth package."
+}
 ---END SCION MESSAGE---
 ```
 
-In Hub mode the message is a JSON object between those delimiters. Its `timestamp` is when the message was created, and its `message_id` is the ID of the message the Hub stored for this delivery, so an agent can name the exact message it received (for example to `scion conversation get-message` it, or to tell the sender which message it is answering). `message_id` is omitted when the Hub stored no message for the delivery: scheduled messages, status notifications, artifact review notices, and plain (`--plain`) deliveries, which carry only the text. In a reply, `reply_to` still names the message being replied to; `message_id` names the reply itself.
+The `timestamp` is when the message was created, and `message_id` is the ID of the message the Hub stored for this delivery, so an agent can name the exact message it received (for example to `scion conversation get-message` it, or to tell the sender which message it is answering). `message_id` is omitted when the Hub stored no message for the delivery: scheduled messages, status notifications, artifact review notices, and plain (`--plain`) deliveries, which carry only the text. In a reply, `reply_to` still names the message being replied to; `message_id` names the reply itself.
 
 **Always check the `type` field before acting or replying:**
 
