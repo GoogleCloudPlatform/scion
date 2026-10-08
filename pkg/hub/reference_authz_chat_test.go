@@ -31,12 +31,12 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// refFixture is two projects with one member each, a topic in each, and a
-// third user who belongs to neither project.
+// refFixture is two projects with one owner each, a topic in each, and a
+// third user who belongs to neither project. All three are hub members.
 //
-//	ua (alice): member of A only
-//	ub (bob):   member of B only
-//	uc (carol): hub member, no project
+//	ua (alice): owner of A, no role in B
+//	ub (bob):   owner of B, no role in A
+//	uc (carol): no role in A or B
 type refFixture struct {
 	srv          *Server
 	st           store.Store
@@ -223,4 +223,58 @@ func (f *refFixture) history(t *testing.T, user *store.User, key string) chatHis
 	var resp chatHistoryResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	return resp
+}
+
+func TestChatSendRefusal_ReasonLoggedNotReturned(t *testing.T) {
+	logs := captureSlog(t)
+	f := newRefFixture(t)
+
+	unknown := f.send(t, f.ub, uuid.NewString(), map[string]interface{}{"content": "hi"})
+	require.Equal(t, http.StatusNotFound, unknown.status, unknown.body)
+
+	// bob is a hub member with no role in project A.
+	logs.Reset()
+	got := f.send(t, f.ub, f.topicA, map[string]interface{}{"content": "hi"})
+	requireSameAnswer(t, unknown, got)
+	logged := logs.String()
+	assert.Contains(t, logged, "authorization denied", "the denial must be logged")
+	assert.Contains(t, logged, "chat send refused as not found")
+	assert.Contains(t, logged, f.ub.ID, "the log names the caller")
+	for _, word := range []string{"denied", "permission", "resource_type", "reason"} {
+		assert.NotContains(t, got.body, word, "the response carries no reason")
+	}
+
+	// carol is not a participant of the alice/bob DM.
+	logs.Reset()
+	dm := dmKeyFor(t, "user", f.ua.ID, "user", f.ub.ID)
+	got = f.send(t, f.uc, dm, map[string]interface{}{"content": "hi"})
+	requireSameAnswer(t, unknown, got)
+	assert.Contains(t, logs.String(), "not a participant of this DM")
+
+	// History answers the same way.
+	getAnswer := func(key string) refAnswer {
+		rec := doRequestAsUser(t, f.srv, f.ub, http.MethodGet, "/api/v1/chat/conversations/"+key+"/messages", nil)
+		return refAnswer{status: rec.Code, body: rec.Body.String()}
+	}
+	missingHist := getAnswer(uuid.NewString())
+	require.Equal(t, http.StatusNotFound, missingHist.status, missingHist.body)
+	requireSameAnswer(t, missingHist, getAnswer(f.topicA))
+	requireSameAnswer(t, missingHist, getAnswer(dmKeyFor(t, "user", f.ua.ID, "user", f.uc.ID)))
+}
+
+func TestChatDMHistory_StaysReadableAfterProjectAccessEnds(t *testing.T) {
+	f := newRefFixture(t)
+	ctx := context.Background()
+
+	// An agent of project B, which carol cannot read (any more).
+	agent := &store.Agent{ID: tid("ref-agent-b"), ProjectID: f.projB.ID, Name: "ab", Slug: "ab",
+		Phase: "running", OwnerID: f.ub.ID, CreatedBy: f.ub.ID}
+	require.NoError(t, f.st.CreateAgent(ctx, agent))
+	require.False(t, f.srv.canReadProject(ctx, NewAuthenticatedUser(f.uc.ID, f.uc.Email, f.uc.DisplayName, f.uc.Role, string(ClientTypeWeb)), f.projB.ID))
+
+	dm := dmKeyFor(t, "agent", agent.ID, "user", f.uc.ID)
+	f.seedMessage(t, f.projB.ID, dm, "", "earlier DM message")
+
+	hist := f.history(t, f.uc, dm)
+	assert.NotEmpty(t, hist.Messages, "the user's own DM history with the agent stays readable")
 }

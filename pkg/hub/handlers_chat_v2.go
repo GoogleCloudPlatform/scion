@@ -2588,7 +2588,9 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		if !isDMParticipant(key, user.ID()) {
-			Forbidden(w)
+			// Answered as a missing thread; the reason is logged.
+			logReferenceRefused(ctx, r.URL.Path, "caller is not a participant of this DM", user)
+			NotFound(w, "Thread")
 			return
 		}
 	} else {
@@ -2608,10 +2610,13 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 		}
 		project, err := s.store.GetProject(ctx, topic.ProjectID)
 		if err != nil {
-			NotFound(w, "Project")
+			logReferenceRefused(ctx, r.URL.Path, "topic project lookup failed: "+err.Error(), user)
+			NotFound(w, "Thread")
 			return
 		}
-		if !s.authorize(w, r, projectResource(project), ActionRead) {
+		// A caller who may not read the project gets the same answer as
+		// for a missing thread; authorizeRead logs the denial.
+		if !s.authorizeRead(w, r, projectResource(project), "Thread") {
 			return
 		}
 	}
@@ -3391,7 +3396,8 @@ func (s *Server) authorizeConversationAccess(
 			return false
 		}
 		if !isDMParticipant(key, userID) {
-			Forbidden(w)
+			logReferenceRefused(r.Context(), r.URL.Path, "caller is not a participant of this DM", GetIdentityFromContext(r.Context()))
+			NotFound(w, "Thread")
 			return false
 		}
 		return true
@@ -3405,10 +3411,14 @@ func (s *Server) authorizeConversationAccess(
 	}
 	project, err := s.store.GetProject(ctx, topic.ProjectID)
 	if err != nil {
-		NotFound(w, "Project")
+		logReferenceRefused(ctx, r.URL.Path, "topic project lookup failed: "+err.Error(), GetIdentityFromContext(ctx))
+		NotFound(w, "Thread")
 		return false
 	}
-	return s.authorize(w, r, projectResource(project), ActionRead)
+	// Mute, pin and read state are per-user settings on a conversation the
+	// caller can read, so read access is the check; a caller without it gets
+	// the same answer as for a missing thread.
+	return s.authorizeRead(w, r, projectResource(project), "Thread")
 }
 
 // handleConversationMute handles PUT /api/v1/chat/conversations/{key}/mute.

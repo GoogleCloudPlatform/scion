@@ -132,6 +132,10 @@ func chatSendPath(key string) string {
 // topic, an existing topic whose current project exists and grants the
 // sender read access. It needs no request, so every caller of
 // sendChatMessage runs the same checks.
+//
+// A sender who may not use the conversation gets the same answer as for a
+// conversation that does not exist ("Thread not found"); the reason is
+// written to the server log only.
 func (s *Server) authorizeChatSend(ctx context.Context, user UserIdentity, key string) (*chatSendTarget, *chatSendError) {
 	if user == nil {
 		return nil, chatSendForbidden()
@@ -152,7 +156,8 @@ func (s *Server) authorizeChatSend(ctx context.Context, user UserIdentity, key s
 		}
 		// DM key: verify the caller is one of the two participants.
 		if !isDMParticipant(key, user.ID()) {
-			return nil, chatSendForbidden()
+			logReferenceRefused(ctx, chatSendPath(key), "sender is not a participant of this DM", user)
+			return nil, chatSendNotFound("Thread")
 		}
 		// The other participant must be a principal the caller may message.
 		if serr := s.authorizeDMPeer(ctx, user, key); serr != nil {
@@ -170,22 +175,24 @@ func (s *Server) authorizeChatSend(ctx context.Context, user UserIdentity, key s
 	}
 	project, err := s.store.GetProject(ctx, topic.ProjectID)
 	if err != nil {
-		return nil, chatSendNotFound("Project")
+		logReferenceRefused(ctx, chatSendPath(key), "topic project lookup failed: "+err.Error(), user)
+		return nil, chatSendNotFound("Thread")
 	}
 	resource := projectResource(project)
 	decision := s.authzService.CheckAccess(ctx, user, resource, ActionRead)
 	if !decision.Allowed {
 		logReq := (&http.Request{URL: &url.URL{Path: chatSendPath(key)}}).WithContext(ctx)
 		logAuthzDenial(logReq, user, resource, ActionRead, decision.Reason)
-		details := map[string]interface{}{
-			"resource_type": resource.Type,
-			"denied_action": string(ActionRead),
-		}
+		// The details a 403 used to carry stay in the log only.
+		logAttrs := []any{"route", chatSendPath(key), "resource_type", resource.Type, "denied_action", string(ActionRead)}
 		if decision.DeniedBy == DeniedByDelegationCeiling {
-			details["denied_by"] = string(DeniedByDelegationCeiling)
+			logAttrs = append(logAttrs, "denied_by", string(DeniedByDelegationCeiling))
 		}
-		details = addCeilingUnrecordedDetails(details, decision.adoptionDetailsCause())
-		return nil, newChatSendError(http.StatusForbidden, ErrCodeForbidden, "Insufficient permissions", details)
+		if cause := decision.adoptionDetailsCause(); cause != "" {
+			logAttrs = append(logAttrs, "ceiling_cause", cause)
+		}
+		slog.InfoContext(ctx, "chat send refused as not found", logAttrs...)
+		return nil, chatSendNotFound("Thread")
 	}
 	target.ProjectID = topic.ProjectID
 	target.Topic = topic
@@ -215,10 +222,10 @@ func chatSendMessageDenied(reason string, agent *store.Agent) *chatSendError {
 //     caller to message it. A refusal for an agent the caller can read is
 //     the usual MESSAGE_DENIED response.
 //
-// Every other outcome is chatSendForbidden, the same response as for a
-// caller who is not a participant, so the response does not depend on
-// which check failed. A store error other than not found fails closed
-// with 503.
+// Every other outcome is "Thread not found", the same response as for a
+// caller who is not a participant or a DM that does not exist, so the
+// response does not depend on which check failed; the reason is logged. A
+// store error other than not found fails closed with 503.
 func (s *Server) authorizeDMPeer(ctx context.Context, user UserIdentity, key string) *chatSendError {
 	kindA, idA, kindB, idB, err := messages.ParseDMKey(key)
 	if err != nil {
@@ -236,19 +243,19 @@ func (s *Server) authorizeDMPeer(ctx context.Context, user UserIdentity, key str
 	case "user":
 		peer, err := s.store.GetUser(ctx, peerID)
 		if err != nil || peer == nil {
-			return s.dmPeerLookupFailure(err)
+			return s.dmPeerLookupFailure(ctx, user, key, err)
 		}
 		if peer.Status == store.UserStatusSuspended {
-			return chatSendForbidden()
+			return dmPeerRefused(ctx, user, key, "DM peer user is suspended")
 		}
 		if !s.authzService.CheckAccess(ctx, user, userResource(peer), ActionRead).Allowed {
-			return chatSendForbidden()
+			return dmPeerRefused(ctx, user, key, "sender may not read the DM peer user")
 		}
 		return nil
 	case "agent":
 		agent, err := s.store.GetAgent(ctx, peerID)
 		if err != nil || agent == nil {
-			return s.dmPeerLookupFailure(err)
+			return s.dmPeerLookupFailure(ctx, user, key, err)
 		}
 		allowed, reason, _ := s.authorizeAgentMessage(ctx, user, agent, false)
 		if allowed {
@@ -262,17 +269,24 @@ func (s *Server) authorizeDMPeer(ctx context.Context, user UserIdentity, key str
 			)
 			return chatSendMessageDenied(reason, agent)
 		}
-		return chatSendForbidden()
+		return dmPeerRefused(ctx, user, key, "sender may not read or message the DM peer agent: "+reason)
 	default:
-		return chatSendForbidden()
+		return dmPeerRefused(ctx, user, key, "unknown DM peer kind")
 	}
+}
+
+// dmPeerRefused is the uniform DM peer refusal: answered as a missing
+// thread, with the reason in the server log.
+func dmPeerRefused(ctx context.Context, user UserIdentity, key, reason string) *chatSendError {
+	logReferenceRefused(ctx, chatSendPath(key), reason, user)
+	return chatSendNotFound("Thread")
 }
 
 // dmPeerLookupFailure maps a failed DM peer lookup: not found is the
 // uniform refusal, any other store error fails closed.
-func (s *Server) dmPeerLookupFailure(err error) *chatSendError {
+func (s *Server) dmPeerLookupFailure(ctx context.Context, user UserIdentity, key string, err error) *chatSendError {
 	if err == nil || errors.Is(err, store.ErrNotFound) {
-		return chatSendForbidden()
+		return dmPeerRefused(ctx, user, key, "DM peer does not exist")
 	}
 	slog.Warn("chat v2 DM peer lookup failed", "error", err)
 	return newChatSendError(http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Chat not available", nil)
@@ -351,7 +365,7 @@ func (s *Server) sendChatMessage(ctx context.Context, user UserIdentity, key str
 	// check sits in the function that sends user-to-user messages
 	// (sendHumanToHuman), as hack/checksecuritymarkergates requires.
 	if target.IsDM && !isDMParticipant(key, user.ID()) {
-		return nil, chatSendForbidden()
+		return nil, chatSendNotFound("Thread")
 	}
 
 	// --- Validate ---

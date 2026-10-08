@@ -507,7 +507,7 @@ func TestScheduledSend_SenderLosesProjectRead_FailsNoAccess(t *testing.T) {
 	_, err = f.store.DeleteRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, f.bob.ID)
 	require.NoError(t, err)
 	rec := doRequestAsUser(t, f.srv, f.bob, http.MethodGet, f.scheduledPath(), nil)
-	require.Equal(t, http.StatusForbidden, rec.Code, "bob has lost read access")
+	require.Equal(t, http.StatusNotFound, rec.Code, "bob has lost read access: answered as a missing thread")
 
 	assert.Equal(t, 1, f.srv.sweepScheduledMessages(ctx, fireAt.Add(time.Second)))
 	row := f.row(t, f.bob, sm.ID)
@@ -677,9 +677,9 @@ func TestScheduledSend_OutsiderRefused(t *testing.T) {
 	rec := doRequestAsUser(t, f.srv, outsider, http.MethodPost, f.scheduledPath(), map[string]interface{}{
 		"content": "x", "fire_at": time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
 	})
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusNotFound, rec.Code, "an outsider gets the missing-thread answer")
 	rec = doRequestAsUser(t, f.srv, outsider, http.MethodGet, f.scheduledPath(), nil)
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusNotFound, rec.Code, "an outsider gets the missing-thread answer")
 }
 
 func TestScheduledSend_ScopedTokenRefused(t *testing.T) {

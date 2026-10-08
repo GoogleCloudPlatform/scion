@@ -278,8 +278,8 @@ func TestNoRecipient_AgentDMMissingAgentRefused(t *testing.T) {
 	setDMConversationID(t, s, key, "")
 
 	code, resp, m := unreachableSend(t, srv, s, key, "hello")
-	if code != http.StatusForbidden {
-		t.Fatalf("expected 403, got %d (body=%v)", code, resp)
+	if code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d (body=%v)", code, resp)
 	}
 	if m != nil {
 		t.Fatalf("expected no persisted row, got %+v", m)
