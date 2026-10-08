@@ -23,6 +23,14 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 )
 
+// RunInit calls the startup clear and the shutdown backstop through these
+// seams, so a test can pin where in the startup and shutdown sequence they
+// run.
+var (
+	runClearSessionTombstoneAtStartup = clearSessionTombstoneAtStartup
+	runReportOpenSessionAtShutdown    = reportOpenSessionAtShutdown
+)
+
 // shutdownSessionReportTimeout bounds the Hub call that reports a still-open
 // session at shutdown. Together with the state lock wait (2s) it keeps the
 // backstop well inside the runtime's default 10s stop grace period.

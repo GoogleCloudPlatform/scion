@@ -951,7 +951,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 
 	// Before the harness starts, drop the session-metrics tombstone the
 	// previous shutdown may have left, so a resumed session is counted.
-	clearSessionTombstoneAtStartup(agentHome)
+	runClearSessionTombstoneAtStartup(agentHome)
 
 	// Create supervisor with configuration
 	config := harnessSupervisorConfig(opts, gracePeriod, targetUID, targetGID, rootless, harnessEnvOverlay, nativeTelemetryPolicy, secretOverrides)
@@ -1385,7 +1385,7 @@ waitLoop:
 	// fits inside the runtime's stop grace period. It is bounded (2s lock
 	// wait plus shutdownSessionReportTimeout) and deliberately runs ahead
 	// of the stopping and final status reports.
-	reportOpenSessionAtShutdown(agentHome, outcome, hub.NewClient)
+	runReportOpenSessionAtShutdown(agentHome, outcome, hub.NewClient)
 
 	// Clean up the GitHub token file on exit
 	if hub.IsGitHubAppEnabled() {

@@ -96,9 +96,12 @@ func (s *FileSessionState) CloseOpenSession(errMsg string) (telemetry.SessionSum
 			return fmt.Errorf("encoding tombstone: %w", err)
 		}
 		if err := writeInPlace(f, tombstone); err != nil {
-			// Without the tombstone, remove the state so at least this
-			// file cannot be reported twice. If that fails too, do not
-			// report.
+			// Without the tombstone, remove the state instead, so another
+			// shutdown check cannot return this session again. This is
+			// best effort: a late hook event from a still-running harness
+			// can then start a fresh state, and a late session-end can
+			// report that partial segment. If the removal fails too, the
+			// session is not returned.
 			if uerr := dirfd.UnlinkAt(dirFd, leaf); uerr != nil {
 				return fmt.Errorf("closing: %v; removing: %v", err, uerr)
 			}
