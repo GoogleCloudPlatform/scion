@@ -26,7 +26,9 @@ import (
 
 // Tests for ptone/scion#3602: stop --all and suspend --all via the Hub keep
 // at most maxFanOutConcurrency agents in flight, and still report every
-// agent's result and the same exit error as before.
+// agent's result and the same exit error as before. The local
+// stopAllAgents/suspendAllAgents paths use the same boundedFanOut call but
+// are not cap-tested here because they need a real runtime.
 
 const lifecycleFanOutTotal = 40
 
