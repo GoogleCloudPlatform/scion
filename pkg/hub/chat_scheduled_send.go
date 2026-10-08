@@ -35,14 +35,15 @@ import (
 
 // Scheduled send in native web chat (ptone/scion#3666).
 //
-// A user schedules a message in a topic; the hub keeps it in
+// A user schedules a message in a topic or direct message; the hub keeps it in
 // webchat_scheduled_message (visible only to that user) and a sweeper on
 // every hub replica sends it at fire time through sendChatMessage, the same
 // function the live send handler uses, as an ordinary message from the
 // user. A compare-and-set claim (pending -> sending) makes exactly one
 // replica deliver each row. Nothing is decided from what was true at
-// schedule time: the sender, the topic, its project and the sender's access
-// are all checked again at fire time.
+// schedule time: the sender, the conversation (a topic and its project, or
+// a DM and its peer) and the sender's access are all checked again at fire
+// time.
 //
 // Everything here is gated by the web.chat_scheduled_send experiment: while
 // it is off the routes answer 404 and the sweeper holds pending rows.
@@ -242,20 +243,10 @@ func scheduledSendCaller(w http.ResponseWriter, r *http.Request, action Action) 
 	return user
 }
 
-// scheduledSendRejectDM refuses direct-message keys: scheduled send is
-// available in topics only for now.
-func scheduledSendRejectDM(w http.ResponseWriter, key string) bool {
-	if strings.HasPrefix(key, "dm:") {
-		BadRequest(w, "scheduled send is not available in direct messages")
-		return true
-	}
-	return false
-}
-
 // handleScheduledCreate implements POST …/{key}/scheduled.
 func (s *Server) handleScheduledCreate(w http.ResponseWriter, r *http.Request, key string) {
 	user := scheduledSendCaller(w, r, ActionCreate)
-	if user == nil || scheduledSendRejectDM(w, key) {
+	if user == nil {
 		return
 	}
 	ctx := r.Context()
@@ -351,11 +342,17 @@ func (s *Server) handleScheduledCreate(w http.ResponseWriter, r *http.Request, k
 		return
 	}
 
+	// The stored project is for cleanup and filtering only: the topic's
+	// project, or an agent DM's agent's project (user DMs have none).
+	projectID := target.ProjectID
+	if target.IsDM {
+		projectID = resolveProjectFromDMKey(ctx, s, key)
+	}
 	row, existed, err := sms.CreateScheduledMessage(ctx, &ScheduledChatMessage{
 		ID:              api.NewUUID(),
 		SenderUserID:    user.ID(),
 		ConversationKey: key,
-		ProjectID:       target.ProjectID,
+		ProjectID:       projectID,
 		Content:         content,
 		ReplyToID:       body.ReplyToID,
 		IdempotencyKey:  idemKey,
@@ -396,7 +393,7 @@ func (s *Server) writeScheduledReplay(w http.ResponseWriter, row *ScheduledChatM
 // caller can still access it.
 func (s *Server) handleScheduledList(w http.ResponseWriter, r *http.Request, key string) {
 	user := scheduledSendCaller(w, r, ActionRead)
-	if user == nil || scheduledSendRejectDM(w, key) {
+	if user == nil {
 		return
 	}
 	ctx := r.Context()
@@ -428,7 +425,7 @@ func (s *Server) handleScheduledList(w http.ResponseWriter, r *http.Request, key
 // sent or was sent answers 409.
 func (s *Server) handleScheduledCancel(w http.ResponseWriter, r *http.Request, key, id string) {
 	user := scheduledSendCaller(w, r, ActionDelete)
-	if user == nil || scheduledSendRejectDM(w, key) {
+	if user == nil {
 		return
 	}
 	ctx := r.Context()
@@ -494,7 +491,7 @@ func scheduledRowID(rest, suffix string) string {
 // runs the full set of fire-time checks before sending it.
 func (s *Server) handleScheduledSendNow(w http.ResponseWriter, r *http.Request, key, id string) {
 	user := scheduledSendCaller(w, r, ActionUpdate)
-	if user == nil || scheduledSendRejectDM(w, key) {
+	if user == nil {
 		return
 	}
 	ctx := r.Context()
@@ -583,7 +580,7 @@ func scheduledSendNowAllowed(m *ScheduledChatMessage) bool {
 // access can still be dismissed.
 func (s *Server) handleScheduledDismiss(w http.ResponseWriter, r *http.Request, key, id string) {
 	user := scheduledSendCaller(w, r, ActionUpdate)
-	if user == nil || scheduledSendRejectDM(w, key) {
+	if user == nil {
 		return
 	}
 	ctx := r.Context()
@@ -1022,10 +1019,10 @@ type scheduledFireCheck struct {
 
 // checkScheduledFire runs the fire-time checks of a claimed row, in order:
 // the row is not more than scheduledLateCutoff late; the sender exists and
-// is active; the topic exists and its current
-// project exists and grants the sender read access; and the reply-to
-// message is still in the same conversation (if not, the message is sent
-// without it). Nothing stored at schedule time is used to grant access.
+// is active; the conversation checks (checkScheduledDMFire for a direct
+// message, checkScheduledTopicFire for a topic); and the reply-to message
+// is still in the same conversation (if not, the message is sent without
+// it). Nothing stored at schedule time is used to grant access.
 func (s *Server) checkScheduledFire(ctx context.Context, m *ScheduledChatMessage) scheduledFireCheck {
 	// Too late: sending now could surprise everyone in the conversation,
 	// so it is not sent; the sender can still ask to send it now.
@@ -1048,32 +1045,11 @@ func (s *Server) checkScheduledFire(ctx context.Context, m *ScheduledChatMessage
 	user := NewAuthenticatedUser(u.ID, u.Email, u.DisplayName, u.Role, scheduledSendClientType)
 
 	if strings.HasPrefix(m.ConversationKey, "dm:") {
-		// Not schedulable in this version; never sent.
-		return scheduledFireCheck{reason: ScheduledFailureNoAccess}
-	}
-
-	s.mu.RLock()
-	wcs := s.webChatStore
-	s.mu.RUnlock()
-	if wcs == nil {
-		return scheduledFireCheck{transient: true}
-	}
-	topic, err := wcs.GetTopic(ctx, m.ConversationKey)
-	if err != nil {
-		return scheduledFireCheck{transient: true}
-	}
-	if topic == nil {
-		return scheduledFireCheck{reason: ScheduledFailureConversationGone}
-	}
-	project, err := s.store.GetProject(ctx, topic.ProjectID)
-	if errors.Is(err, store.ErrNotFound) {
-		return scheduledFireCheck{reason: ScheduledFailureConversationGone}
-	}
-	if err != nil || project == nil {
-		return scheduledFireCheck{transient: true}
-	}
-	if !s.authzService.CheckAccess(ctx, user, projectResource(project), ActionRead).Allowed {
-		return scheduledFireCheck{reason: ScheduledFailureNoAccess}
+		if check, done := s.checkScheduledDMFire(ctx, user, m); done {
+			return check
+		}
+	} else if check, done := s.checkScheduledTopicFire(ctx, user, m); done {
+		return check
 	}
 
 	replyToID := m.ReplyToID
@@ -1087,6 +1063,69 @@ func (s *Server) checkScheduledFire(ctx context.Context, m *ScheduledChatMessage
 		}
 	}
 	return scheduledFireCheck{user: user, replyToID: replyToID}
+}
+
+// checkScheduledTopicFire runs the topic checks of a claimed row: the
+// topic exists, and its current project exists and grants the sender read
+// access. done is false when every check passed.
+func (s *Server) checkScheduledTopicFire(ctx context.Context, user UserIdentity, m *ScheduledChatMessage) (scheduledFireCheck, bool) {
+	s.mu.RLock()
+	wcs := s.webChatStore
+	s.mu.RUnlock()
+	if wcs == nil {
+		return scheduledFireCheck{transient: true}, true
+	}
+	topic, err := wcs.GetTopic(ctx, m.ConversationKey)
+	if err != nil {
+		return scheduledFireCheck{transient: true}, true
+	}
+	if topic == nil {
+		return scheduledFireCheck{reason: ScheduledFailureConversationGone}, true
+	}
+	project, err := s.store.GetProject(ctx, topic.ProjectID)
+	if errors.Is(err, store.ErrNotFound) {
+		return scheduledFireCheck{reason: ScheduledFailureConversationGone}, true
+	}
+	if err != nil || project == nil {
+		return scheduledFireCheck{transient: true}, true
+	}
+	if !s.authzService.CheckAccess(ctx, user, projectResource(project), ActionRead).Allowed {
+		return scheduledFireCheck{reason: ScheduledFailureNoAccess}, true
+	}
+	return scheduledFireCheck{}, false
+}
+
+// checkScheduledDMFire runs the direct-message checks of a claimed row
+// with the same conversation access check as a live send
+// (authorizeChatSend): a well-formed key naming the sender, and a peer
+// that still exists and that the sender may still message. A refusal is
+// no_access, whichever check refused it, as on the live path. An agent
+// peer that was deleted but can still be addressed is recipient_gone:
+// nothing is sent to it. done is false when every check passed.
+func (s *Server) checkScheduledDMFire(ctx context.Context, user UserIdentity, m *ScheduledChatMessage) (scheduledFireCheck, bool) {
+	if _, serr := s.authorizeChatSend(ctx, user, m.ConversationKey); serr != nil {
+		switch serr.Status {
+		case http.StatusServiceUnavailable:
+			return scheduledFireCheck{transient: true}, true
+		case http.StatusForbidden:
+			return scheduledFireCheck{reason: ScheduledFailureNoAccess}, true
+		default:
+			return scheduledFireCheck{reason: ScheduledFailureConversationGone}, true
+		}
+	}
+	if agentID := parseAgentDMKey(m.ConversationKey); agentID != "" {
+		agent, err := s.store.GetAgent(ctx, agentID)
+		if errors.Is(err, store.ErrNotFound) || (err == nil && agent == nil) {
+			return scheduledFireCheck{reason: ScheduledFailureNoAccess}, true
+		}
+		if err != nil {
+			return scheduledFireCheck{transient: true}, true
+		}
+		if !agent.DeletedAt.IsZero() {
+			return scheduledFireCheck{reason: ScheduledFailureRecipientGone}, true
+		}
+	}
+	return scheduledFireCheck{}, false
 }
 
 // scheduledFailureFromSendError maps a sendChatMessage error at fire time

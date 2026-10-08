@@ -2602,14 +2602,10 @@ export class ScionChatThread extends LitElement {
 
   /**
    * Whether scheduled send is offered in this conversation: the experiment
-   * is on and the conversation is a topic (not a DM).
+   * is on and the conversation supports it (topics and DMs).
    */
   private get scheduleSendAvailable(): boolean {
-    return (
-      !this.isDM &&
-      conversationSupportsScheduledSend(this.conversationKey) &&
-      scheduledSendEnabled()
-    );
+    return conversationSupportsScheduledSend(this.conversationKey) && scheduledSendEnabled();
   }
 
   /**

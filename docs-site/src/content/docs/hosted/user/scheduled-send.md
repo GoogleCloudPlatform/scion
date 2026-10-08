@@ -11,7 +11,7 @@ Scheduled send is behind the `web.chat_scheduled_send` [experiment](/scion/refer
 
 ## Scheduling a message
 
-1. Type your message in a topic.
+1. Type your message in a topic or a direct message (with an agent or another user).
 2. Right-click **Send** (on a touch screen, press and hold it) and choose **Schedule send…**.
 3. Pick a preset (**In 1 hour**, **Tomorrow 09:00**, **Monday 09:00**) or enter a date and time. Times are in your display time zone, shown under the field.
 4. Confirm. The composer clears and the message appears at the bottom of the thread, dimmed, with the time it will be sent.
@@ -31,10 +31,11 @@ Click **Cancel** on the message's banner. If the composer is empty, the text goe
 The Hub checks for due messages every 10 seconds, so a message is sent within about 10 seconds of its time. Nothing is decided from what was true when you scheduled it. When it sends, the Hub checks again that:
 
 - your account still exists and is active;
-- the topic still exists, and you can still read its project;
+- in a topic: the topic still exists, and you can still read its project;
+- in a direct message: the other participant still exists and you may still message them (an agent still accepts messages from you; a user has not been suspended or removed);
 - each agent the message is routed to will accept a message from you.
 
-Routing is worked out at that moment too: the topic's current default agent, the agents you @-mention, and the message you replied to (if it was deleted, the message is sent without the reply link). A scheduled message never interrupts an agent and never wakes a suspended one.
+Routing is worked out at that moment too: the topic's current default agent (or, in a direct message, the agent you are talking to), the agents you @-mention, and the message you replied to (if it was deleted, the message is sent without the reply link). A scheduled message never interrupts an agent and never wakes a suspended one.
 
 Each scheduled message is sent at most once.
 
@@ -44,8 +45,9 @@ If a check fails, the message is not sent and its banner turns red with the reas
 
 | Reason | Meaning |
 | :--- | :--- |
-| You no longer have access | You can no longer post in this conversation, or an agent it is routed to no longer accepts messages from you. |
+| You no longer have access | You can no longer post in this conversation: for example you lost access to the topic's project, the other participant of a direct message was removed or suspended, or an agent it is routed to no longer accepts messages from you. |
 | This conversation no longer exists | The topic was deleted. |
+| The recipient no longer exists | The agent of a direct message was deleted. |
 | Your account is not active | Your account was suspended. |
 | The scheduled time passed while the Hub was unavailable | The Hub found the message more than 60 minutes after its time, for example after downtime or while the experiment was off. It is not sent that late without asking you. |
 | Delivery was interrupted | The Hub stopped while it was sending the message. It may or may not have reached the thread; check the thread before sending it again. The Hub never sends it again on its own. |
@@ -59,7 +61,7 @@ A failed message offers:
 
 ## Retention
 
-The Hub keeps sent and cancelled scheduled messages for 7 days and failed ones for 30 days, then deletes them. Scheduled messages are also deleted when their topic is deleted or when your user account is deleted.
+The Hub keeps sent and cancelled scheduled messages for 7 days and failed ones for 30 days, then deletes them. Scheduled messages are also deleted when their topic or direct message is deleted, or when your user account is deleted.
 
 ## Audit
 

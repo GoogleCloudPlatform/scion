@@ -64,9 +64,10 @@ beforeEach(() => {
 });
 
 describe('conversationSupportsScheduledSend', () => {
-  it('allows topics only', () => {
+  it('allows topics and direct messages', () => {
     expect(conversationSupportsScheduledSend('3f2b9c1e-0000-0000-0000-000000000000')).toBe(true);
-    expect(conversationSupportsScheduledSend('dm:agent:a:user:u')).toBe(false);
+    expect(conversationSupportsScheduledSend('dm:agent:a:user:u')).toBe(true);
+    expect(conversationSupportsScheduledSend('dm:user:a:user:b')).toBe(true);
     expect(conversationSupportsScheduledSend('')).toBe(false);
   });
 });

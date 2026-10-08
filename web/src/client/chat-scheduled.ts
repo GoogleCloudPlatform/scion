@@ -32,11 +32,11 @@ export function scheduledSendEnabled(): boolean {
 }
 
 /**
- * Whether a conversation supports scheduled send. Topics only for now;
- * direct messages are refused by the hub.
+ * Whether a conversation supports scheduled send: topics and direct
+ * messages (with an agent or another user).
  */
 export function conversationSupportsScheduledSend(conversationKey: string): boolean {
-  return conversationKey !== '' && !conversationKey.startsWith('dm:');
+  return conversationKey !== '';
 }
 
 export type ScheduledMessageStatus = 'pending' | 'sending' | 'sent' | 'cancelled' | 'failed';

@@ -655,18 +655,6 @@ func TestScheduledSend_FireAtWithOffsetStoredUTC(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), fireAt.UTC().Format("2006-01-02T15:04:05")+"Z")
 }
 
-func TestScheduledSend_DMRejected(t *testing.T) {
-	f := newScheduledSendFixture(t)
-	dmKey := "dm:agent:" + f.agent.ID + ":user:" + f.bob.ID
-	path := "/api/v1/chat/conversations/" + dmKey + "/scheduled"
-	rec := doRequestAsUser(t, f.srv, f.bob, http.MethodPost, path, map[string]interface{}{
-		"content": "dm later", "fire_at": time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
-	})
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
-	rec = doRequestAsUser(t, f.srv, f.bob, http.MethodGet, path, nil)
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
-}
-
 func TestScheduledSend_OutsiderRefused(t *testing.T) {
 	f := newScheduledSendFixture(t)
 	outsider := &store.User{
@@ -898,6 +886,7 @@ func TestScheduledStore_Postgres(t *testing.T) {
 	}
 	testScheduledStoreTransitions(t, sms[0])
 	testScheduledStorePhase2Transitions(t, sms[0])
+	testScheduledDMDeleteRemovesScheduled(t, sms[0])
 	testScheduledStoreDuePerSender(t, sms[0])
 	testCancelClaimRace(t, sms[0], sms[1], "pg-race")
 	testOneSenderTwoReplicas(t, sms[0], sms[1], "pg-one-sender", 30)
