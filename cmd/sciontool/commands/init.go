@@ -1279,7 +1279,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 			log.Info("Limits initialized: max_turns=%d, max_model_calls=%d", maxTurns, maxModelCalls)
 		}
 		// Remove stale trigger file from a previous run
-		_ = os.Remove(handlers.LimitsTriggerFile)
+		_ = os.Remove(limitsTriggerPath)
 	}
 
 	// Watch for limits-exceeded trigger file (works across UID boundaries).
@@ -1317,7 +1317,7 @@ waitLoop:
 			if err := sup.Signal(syscall.SIGTERM); err != nil {
 				log.Error("Failed to send SIGTERM to child: %v", err)
 			}
-			reportHookLimitsExceeded(handlers.NewHubHandler(), handlers.LimitsTriggerFile)
+			runReportHookLimitsExceeded(handlers.NewHubHandler(), limitsTriggerPath)
 			result = <-exitChan
 			break waitLoop
 		case <-usr2Chan:
@@ -1331,7 +1331,7 @@ waitLoop:
 			if err := sup.Signal(syscall.SIGTERM); err != nil {
 				log.Error("Failed to send SIGTERM to child: %v", err)
 			}
-			reportHookLimitsExceeded(handlers.NewHubHandler(), handlers.LimitsTriggerFile)
+			runReportHookLimitsExceeded(handlers.NewHubHandler(), limitsTriggerPath)
 			result = <-exitChan
 			break waitLoop
 		}
@@ -1755,6 +1755,17 @@ func handleLimitsExceeded(sup *supervisor.Supervisor, limitType, message string)
 	}
 }
 
+// limitsTriggerPath is the trigger file init watches for, removes at startup
+// and passes to reportHookLimitsExceeded: handlers.LimitsTriggerFile, the
+// path the hook processes write. It and runReportHookLimitsExceeded are
+// variables only so a RunInit test can use a temp file (a fixed /tmp path
+// could be acted on by a real init on the same host) and record the
+// report; production never reassigns them.
+var (
+	limitsTriggerPath           = handlers.LimitsTriggerFile
+	runReportHookLimitsExceeded = reportHookLimitsExceeded
+)
+
 // reportHookLimitsExceeded reports to the Hub a limit that a hook process
 // detected and signalled (trigger file or SIGUSR1). The hook no longer makes
 // this call itself: it runs under the harness's hook timeout, while init is
@@ -1966,7 +1977,7 @@ func watchLimitsTriggerFile(ctx context.Context, ch chan<- struct{}) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if _, err := os.Stat(handlers.LimitsTriggerFile); err == nil {
+			if _, err := os.Stat(limitsTriggerPath); err == nil {
 				ch <- struct{}{}
 				return
 			}

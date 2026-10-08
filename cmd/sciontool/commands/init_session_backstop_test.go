@@ -39,9 +39,10 @@ type backstopPinResult struct {
 }
 
 // pinBackstopCallSites runs the real RunInit with child as the harness
-// (child gets the marker path as $1 and must create it first), with every
+// (child gets the marker path as $1 and must create it first, and the
+// limits trigger file path as $2), with every
 // shutdown step of interest recorded through its seam.
-func pinBackstopCallSites(t *testing.T, child string) backstopPinResult {
+func pinBackstopCallSites(t *testing.T, child string, setup func(t *testing.T, order *[]string)) backstopPinResult {
 	t.Helper()
 	agentHome := t.TempDir()
 	setupRunInitAsRootlessScion(t, agentHome)
@@ -89,6 +90,12 @@ func pinBackstopCallSites(t *testing.T, child string) backstopPinResult {
 	t.Cleanup(func() { runReportStoppingToHub = origStopping })
 
 	mark := filepath.Join(t.TempDir(), "child-ran")
+	// A temp limits trigger file, never the fixed /tmp path, which a real
+	// init on this host could act on. The child gets it as $2.
+	trigger := filepath.Join(t.TempDir(), "limits-exceeded")
+	origTrigger := limitsTriggerPath
+	limitsTriggerPath = trigger
+	t.Cleanup(func() { limitsTriggerPath = origTrigger })
 	markExists := func() bool { _, err := os.Stat(mark); return err == nil }
 
 	origClear := runClearSessionTombstoneAtStartup
@@ -111,7 +118,11 @@ func pinBackstopCallSites(t *testing.T, child string) backstopPinResult {
 	}
 	t.Cleanup(func() { runReportOpenSessionAtShutdown = origBackstop })
 
-	_ = RunInit([]string{"sh", "-c", child, "harness", mark}, InitRunOptions{DisableTermSignalForwarding: true})
+	if setup != nil {
+		setup(t, &r.order)
+	}
+
+	_ = RunInit([]string{"sh", "-c", child, "harness", mark, trigger}, InitRunOptions{DisableTermSignalForwarding: true})
 
 	if len(r.clearHomes) != 1 || r.clearHomes[0] != agentHome {
 		t.Errorf("clear calls = %q, want one with %q", r.clearHomes, agentHome)
@@ -129,19 +140,23 @@ func pinBackstopCallSites(t *testing.T, child string) backstopPinResult {
 }
 
 // TestRunInit_PinsSessionMetricsBackstopCallSites pins where RunInit calls
-// the session-metrics seams, for a crash and for a limits-exceeded exit:
+// the session-metrics seams, for a crash, a harness exiting with the
+// limits-exceeded code, and a limit signalled through the trigger file:
 //   - the tombstone clear runs once, with agentHome, before the harness
 //     starts (the child has not created its marker yet);
 //   - the shutdown backstop runs once, with agentHome, after the child has
 //     exited, with the classified exit outcome, and before the stopping
-//     report, the sidecar shutdown and the lifecycle session-end hooks.
+//     report, the sidecar shutdown and the lifecycle session-end hooks (and,
+//     on the trigger-file path, after the limits_exceeded report).
 func TestRunInit_PinsSessionMetricsBackstopCallSites(t *testing.T) {
 	// The children outlive RunInit's 100ms immediate-exit check, so RunInit
 	// takes the normal shutdown path.
 	for _, tc := range []struct {
-		name  string
-		child string
-		want  exitOutcome
+		name      string
+		child     string
+		setup     func(t *testing.T, order *[]string)
+		want      exitOutcome
+		wantOrder []string
 	}{
 		{
 			name:  "crash",
@@ -154,15 +169,41 @@ func TestRunInit_PinsSessionMetricsBackstopCallSites(t *testing.T) {
 			child: `touch "$1"; sleep 0.5; exit ` + strconv.Itoa(handlers.ExitCodeLimitsExceeded),
 			want:  exitOutcome{exitCode: handlers.ExitCodeLimitsExceeded, limitsExceeded: true},
 		},
+		{
+			// A hook process detects a limit and writes the trigger file;
+			// init reports limits_exceeded, stops the harness, then runs
+			// the backstop.
+			name: "limits trigger file",
+			// The trigger is rewritten until init stops the child, because
+			// RunInit removes a stale trigger file after the child starts.
+			child: `touch "$1"; while :; do sleep 0.2; touch "$2"; done`,
+			setup: func(t *testing.T, order *[]string) {
+				t.Setenv("SCION_MAX_TURNS", "1")
+				trigger := limitsTriggerPath
+				origReport := runReportHookLimitsExceeded
+				runReportHookLimitsExceeded = func(_ *handlers.HubHandler, path string) {
+					if path != trigger {
+						t.Errorf("limits report read %q, want %q", path, trigger)
+					}
+					*order = append(*order, "limits report")
+				}
+				t.Cleanup(func() { runReportHookLimitsExceeded = origReport })
+			},
+			want:      exitOutcome{exitCode: handlers.ExitCodeLimitsExceeded, limitsExceeded: true},
+			wantOrder: []string{"clear", "limits report", "backstop", "stopping report", "sidecar shutdown", "session-end hooks"},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			r := pinBackstopCallSites(t, tc.child)
+			r := pinBackstopCallSites(t, tc.child, tc.setup)
 			if r.backstopOutcome != tc.want {
 				t.Errorf("backstop outcome = %+v, want %+v", r.backstopOutcome, tc.want)
 			}
 			// The backstop must come before the slow shutdown steps, which
 			// can use up the runtime's stop window.
-			wantOrder := []string{"clear", "backstop", "stopping report", "sidecar shutdown", "session-end hooks"}
+			wantOrder := tc.wantOrder
+			if wantOrder == nil {
+				wantOrder = []string{"clear", "backstop", "stopping report", "sidecar shutdown", "session-end hooks"}
+			}
 			if !reflect.DeepEqual(r.order, wantOrder) {
 				t.Errorf("call order = %q, want %q", r.order, wantOrder)
 			}
