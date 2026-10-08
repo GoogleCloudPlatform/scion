@@ -459,7 +459,7 @@ func (s *Server) handleListThreads(w http.ResponseWriter, r *http.Request, proje
 	if len(topics) == 0 && !project.IsTemplate() {
 		s.ensureProjectGeneralTopic(r.Context(), project)
 		if relisted, relistErr := wcs.ListTopics(r.Context(), projectID); relistErr != nil {
-			slog.Debug("chat threads: re-list after #general backfill failed",
+			slog.Warn("chat threads: re-list after #general backfill failed",
 				"project_id", projectID, "error", relistErr)
 		} else {
 			topics = relisted

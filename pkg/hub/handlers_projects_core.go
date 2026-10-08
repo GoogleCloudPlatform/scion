@@ -687,8 +687,18 @@ func (s *Server) ensureProjectGeneralTopic(ctx context.Context, project *store.P
 	}
 	topicID, created, err := wcs.EnsureGeneralTopic(ctx, project.ID, createdBy)
 	if err != nil {
+		// A cancelled or timed-out request is not a store failure: log it
+		// at Debug and leave the Warn throttle alone.
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			s.projectsLogger().Debug("#general topic ensure interrupted",
+				"project_id", project.ID, "error", err)
+			return
+		}
 		// Warn once per project per process; the lazy backfill retries on
 		// every open of an empty space, so later failures log at Debug.
+		// A failure racing a concurrent success can leave a stale entry
+		// (Delete runs before LoadOrStore); that only downgrades the next
+		// failure for this project to Debug, which is benign.
 		if _, warned := s.generalTopicWarned.LoadOrStore(project.ID, struct{}{}); warned {
 			s.projectsLogger().Debug("failed to create #general topic for project",
 				"project_id", project.ID, "error", err)
