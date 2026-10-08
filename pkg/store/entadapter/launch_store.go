@@ -97,13 +97,6 @@ func newTxClient(dialectName string, tx *sql.Tx) *ent.Client {
 // *ent.Client so raw statements and ent builders share one connection,
 // reused here for every launch writer — see the file comment above.
 func (s *AgentStore) beginLaunchTx(ctx context.Context) (*launchTx, error) {
-	// Prime dialect detection BEFORE checking out the connection below: the
-	// detection probe runs a query on the ambient s.client pool, which on
-	// single-connection SQLite would contend forever with the transaction's
-	// own connection held immediately after (same gotcha as
-	// AgentStore.UpdateAgentStatus's identical comment). dialectOnce makes
-	// every call after this one a cheap cached read, including the
-	// s.dialect(ctx) call below.
 	dialectName := s.dialect(ctx)
 
 	db := s.sqlDB()
@@ -129,13 +122,9 @@ func (s *AgentStore) beginLaunchTx(ctx context.Context) (*launchTx, error) {
 	}, nil
 }
 
-// dialect returns the detected dialect name, for use as entsql.NewDriver's
-// dialect argument. It reuses usesRowLocks' sync.Once-cached probe (rather
-// than reading s.client.Driver().Dialect() directly) so the launch store and
-// AgentStore's row-lock gating share one cached detection instead of two:
-// usesRowLocks is already called on every row-locking launch-store method
-// (beginLaunchTx primes it before checkout), so by the time dialect() runs
-// here the probe has already happened, at no extra cost.
+// dialect returns the store's dialect name, for use as entsql.NewDriver's
+// dialect argument. It is derived from usesRowLocks so the launch store and
+// AgentStore's row-lock gating agree on one source: the driver's dialect.
 func (s *AgentStore) dialect(ctx context.Context) string {
 	if s.usesRowLocks(ctx) {
 		return dialect.Postgres

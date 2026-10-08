@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
-	"sync"
 	"time"
 
 	"entgo.io/ent/dialect"
@@ -64,12 +63,6 @@ type AgentStore struct {
 	client *ent.Client
 	inTx   bool // true when client wraps an ambient WithTx transaction
 
-	// dialect is detected lazily on first use of a lock-taking path and
-	// memoized. SELECT ... FOR UPDATE is only emitted on Postgres; the SQLite
-	// driver rejects the clause outright, so it must be elided there.
-	dialectOnce sync.Once
-	dialectName string
-
 	// afterRunIDRead, when set (tests only), runs between SetAgentRunID's
 	// read and its swap, to simulate a concurrent writer.
 	afterRunIDRead func(agentID string)
@@ -81,14 +74,13 @@ func NewAgentStore(client *ent.Client) *AgentStore {
 }
 
 // usesRowLocks reports whether the backend supports SELECT ... FOR UPDATE.
-// The dialect is captured from a no-op selector the first time it is needed.
-func (s *AgentStore) usesRowLocks(ctx context.Context) bool {
-	s.dialectOnce.Do(func() {
-		_, _ = s.client.Agent.Query().
-			Where(func(sel *entsql.Selector) { s.dialectName = sel.Dialect() }).
-			Exist(ctx)
-	})
-	return s.dialectName == dialect.Postgres
+// SELECT ... FOR UPDATE is only emitted on Postgres; the SQLite driver
+// rejects the clause outright, so it must be elided there. The dialect is
+// read from the driver (a construction-time property) with no query, so it
+// cannot be lost to a failed or cancelled probe and never contends for a
+// connection -- the same idiom as BrokerSettingStore.usesRowLocks.
+func (s *AgentStore) usesRowLocks(context.Context) bool {
+	return s.client.Driver().Dialect() == dialect.Postgres
 }
 
 // Compile-time assertion that AgentStore satisfies the store.AgentStore
@@ -1439,9 +1431,6 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 		return err
 	}
 
-	// Prime dialect detection before opening the transaction: the detection
-	// probe runs on s.client, which would contend with the open transaction on
-	// single-connection SQLite.
 	useLock := s.usesRowLocks(ctx)
 
 	tx, err := s.client.Tx(ctx)
@@ -1674,17 +1663,6 @@ func utcExposedPorts(ports []store.ExposedPort) []store.ExposedPort {
 	return out
 }
 
-// PurgeDeletedAgents permanently removes soft-deleted agents older than cutoff.
-func (s *AgentStore) PurgeDeletedAgents(ctx context.Context, cutoff time.Time) (int, error) {
-	deleted, err := s.client.Agent.Delete().
-		Where(agent.DeletedAtNotNil(), agent.DeletedAtLT(cutoff)).
-		Exec(ctx)
-	if err != nil {
-		return 0, err
-	}
-	return deleted, nil
-}
-
 // staleOfflineExcluded lists the terminal/sticky activities that must not be
 // overwritten when sweeping stale agents to "offline".
 var staleOfflineExcluded = []string{"completed", "limits_exceeded", "blocked", "offline"}
@@ -1881,8 +1859,6 @@ func (s *AgentStore) ClearAgentRuntimeTarget(ctx context.Context, id string) (bo
 	if err != nil {
 		return false, 0, err
 	}
-	// Prime dialect detection before opening a transaction (see
-	// UpdateAgentStatus).
 	useLock := s.usesRowLocks(ctx)
 	for i := 0; i < clearRuntimeTargetAttempts; i++ {
 		res, err := s.clearRuntimeTargetOnce(ctx, uid, id, useLock)
@@ -2000,8 +1976,6 @@ func (s *AgentStore) SetAgentRuntimeTarget(ctx context.Context, id string, expec
 	if err != nil {
 		return false, err
 	}
-	// Prime dialect detection before opening a transaction (see
-	// UpdateAgentStatus).
 	useLock := s.usesRowLocks(ctx)
 	tx, err := s.client.Tx(ctx)
 	if err != nil {

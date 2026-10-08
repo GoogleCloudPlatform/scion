@@ -449,15 +449,15 @@ var purgeDeletedAgentsBatchSize = 500
 var purgeDeletedAgentsTestHook func(tx *ent.Tx, batchCandidateIDs []uuid.UUID)
 
 // PurgeDeletedAgents permanently removes soft-deleted agents older than
-// cutoff, and their identity-key rows, in one transaction. This overrides
-// the embedded AgentStore's implementation, which bulk-deletes agent rows
-// directly with no re-applied eligibility check and no transaction --
-// splitting the original single-predicate DELETE into a separate select and
-// delete reopened a window where an agent restored in between the two would
-// be hard-deleted anyway, taking its keys with it. That is closed here two
-// ways: the whole purge runs in one transaction, and the eligibility
-// predicate (deleted_at IS NOT NULL AND deleted_at < cutoff) is re-applied
-// directly on the agent delete itself, not just the initial candidate query
+// cutoff, and their identity-key rows, in one transaction. It exists only
+// here: the embedded AgentStore has no purge of its own, because a bare bulk
+// delete of agent rows would skip this cascade. Splitting the original
+// single-predicate DELETE into a separate select and delete reopened a
+// window where an agent restored in between the two would be hard-deleted
+// anyway, taking its keys with it. That is closed here two ways: the whole
+// purge runs in one transaction, and the eligibility predicate
+// (deleted_at IS NOT NULL AND deleted_at < cutoff) is re-applied directly
+// on the agent delete itself, not just the initial candidate query
 // -- a candidate restored in between no longer matches it at delete time and
 // is excluded, regardless of how stale the candidate list has become.
 // Because a bulk delete reports only a count, not which rows it removed,
@@ -471,9 +471,6 @@ var purgeDeletedAgentsTestHook func(tx *ent.Tx, batchCandidateIDs []uuid.UUID)
 // own slug -- stay reserved forever, blocking any later agent from taking
 // them.
 func (c *CompositeStore) PurgeDeletedAgents(ctx context.Context, cutoff time.Time) (int, error) {
-	// Resolved before the transaction opens: the first call probes the
-	// dialect through the non-tx client, which would block behind this
-	// transaction on a single-connection SQLite pool.
 	useLock := c.AgentStore.usesRowLocks(ctx)
 	tx, err := c.client.Tx(ctx)
 	if err != nil {
