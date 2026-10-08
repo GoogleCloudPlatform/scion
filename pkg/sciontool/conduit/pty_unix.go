@@ -30,6 +30,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/procreap"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/suppgroups"
 )
 
@@ -119,13 +120,25 @@ func startLocalPTY(user PTYUser, req PTYRequest, name string, args ...string) (*
 	if drop {
 		cmd.SysProcAttr.Credential = suppgroups.Credential(uint32(user.UID), uint32(user.GID))
 	}
-	if err := cmd.Start(); err != nil {
+	// sciontool init is PID 1 and reaps orphans; registering the client
+	// (inside the gate, so no reap pass sees it unregistered) leaves its
+	// exit status to cmd.Wait.
+	var tok *procreap.Token
+	err = procreap.Gated(func() error {
+		if err := cmd.Start(); err != nil {
+			return err
+		}
+		tok = procreap.RegisterManagedPID(cmd.Process.Pid)
+		return nil
+	})
+	if err != nil {
 		_ = master.Close()
 		return nil, fmt.Errorf("pty: start %s: %w", name, err)
 	}
 	p := &localPTY{cmd: cmd, master: master, exited: make(chan struct{}), grace: ptyHangupGrace}
 	go func() {
 		_ = cmd.Wait()
+		procreap.UnregisterManagedPID(cmd.Process.Pid, tok)
 		close(p.exited)
 	}()
 	return p, nil
