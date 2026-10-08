@@ -103,6 +103,9 @@ import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
 import { formatNumber } from '../../utils/format-number.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 import { navigateTo } from '../../client/navigation.js';
+import { isFeatureEnabled } from '../../utils/feature-flags.js';
+import { ARTIFACTS_FLAG } from '../../client/artifacts.js';
+import '../shared/artifact-list.js';
 
 /** A request/refresh trigger; every one funnels into `loadAgentsForView`, which asks the window's planner for the one request it needs. */
 type AgentsViewTrigger = AgentListTrigger;
@@ -127,6 +130,27 @@ function listViewOf(mode: ViewMode): AgentListView {
 // User-level (not per-project) sticky preference for the agents section height.
 const AGENTS_EXPANDED_STORAGE_KEY = 'scion-project-agents-expanded';
 const PAGER_PAGE_SIZE_STORAGE_KEY = 'scion-pagesize-project-agents';
+
+/**
+ * The server-prefetched project in `pageData.data`, when it is the project
+ * this page shows; otherwise null and the page fetches it. The router only
+ * hands over a payload prefetched for this path and the current user, on
+ * the first render (see client/ssr-page-data.ts); this checks that the
+ * payload is a single project with the requested id.
+ */
+export function hydratedProjectFor(pageData: PageData | null, projectId: string): Project | null {
+  const data: unknown = pageData?.data;
+  if (!isProjectShaped(data)) return null;
+  if (!projectId || data.id !== projectId) return null;
+  return data as unknown as Project;
+}
+
+/** A non-null, non-array object with a string id and a string name. */
+function isProjectShaped(value: unknown): value is { id: string; name: string } {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  const record = value as { id?: unknown; name?: unknown };
+  return typeof record.id === 'string' && typeof record.name === 'string';
+}
 
 @customElement('scion-page-project-detail')
 export class ScionPageProjectDetail extends LitElement {
@@ -156,6 +180,32 @@ export class ScionPageProjectDetail extends LitElement {
    */
   @state()
   private project: Project | null = null;
+
+  /**
+   * Whether the server-prefetched project in `pageData` was already offered
+   * to a load. It is offered to the first load only: a retry, or a
+   * reconnect of this element, always fetches.
+   */
+  private hydrationOffered = false;
+
+  /**
+   * Whether any agents request has adopted a result since this element was
+   * created. Derived from outcomes, not from one request's lifetime: a
+   * superseded first request (a view change while it is in flight) leaves
+   * it false, so the agents section keeps showing its loading row (or the
+   * error, if the request that replaced it fails) instead of the empty
+   * state. The project header renders regardless.
+   */
+  @state()
+  private hasAgentsResult = false;
+
+  /**
+   * Error shown in the agents section, with an agents-only Retry: set when
+   * the page-load request fails, or when any request fails before a result
+   * was ever adopted. Cleared by Retry and by any adopted result.
+   */
+  @state()
+  private agentsLoadError: string | null = null;
 
   /**
    * Agents in this project
@@ -194,6 +244,14 @@ export class ScionPageProjectDetail extends LitElement {
    */
   @state()
   private activeFileTab = 'workspace';
+
+  /**
+   * Segment of the Files area shown when artifacts are on (experiment
+   * hub.artifacts): the project's artifacts, its shared dirs, or its
+   * workspace. Artifacts is first and the default.
+   */
+  @state()
+  private filesSegment: 'artifacts' | 'shared' | 'workspace' = 'artifacts';
 
   /**
    * Per-tab file browser data sources keyed by tab name
@@ -1477,17 +1535,32 @@ export class ScionPageProjectDetail extends LitElement {
     this.hubProjectCapabilities = caps;
   }
 
+  /**
+   * Loads the project and, independently, the agents window's first
+   * request. The project header renders as soon as the project is known,
+   * without waiting for the agents: a cold load with a matching
+   * server-prefetched project uses it and sends no project request, while
+   * client-side navigation, a retry or a mismatched payload fetches it.
+   * Resolves when both have finished.
+   */
   private async loadData(): Promise<void> {
-    this.loading = true;
     this.error = null;
+    const agentsLoad = this.loadPageAgents();
 
+    const offered = this.hydrationOffered
+      ? null
+      : hydratedProjectFor(this.pageData, this.projectId);
+    this.hydrationOffered = true;
+    if (offered) {
+      this.applyLoadedProject(offered);
+      this.loading = false;
+      await agentsLoad;
+      return;
+    }
+
+    this.loading = true;
     try {
-      // Load the project and the agents window's one first request in
-      // parallel.
-      const [projectResponse] = await Promise.all([
-        apiFetch(`/api/v1/projects/${this.projectId}`),
-        this.loadAgentsForView('page-load'),
-      ]);
+      const projectResponse = await apiFetch(`/api/v1/projects/${this.projectId}`);
 
       if (!projectResponse.ok) {
         throw new Error(
@@ -1498,42 +1571,60 @@ export class ScionPageProjectDetail extends LitElement {
         );
       }
 
-      this.project = (await projectResponse.json()) as Project;
-      dispatchPageTitle(this, this.project.name || this.projectId, 'Projects');
-
-      if (this.project) {
-        stateManager.seedProjects([this.project]);
-      }
-
-      // Pre-create data sources for file tabs (the component loads files on connect)
-      if (this.hasProjectWorkspace()) {
-        this.getTabDataSource('workspace');
-      }
-      // Without a project workspace (per-agent git, empty per agent), activate
-      // the first shared dir
-      if (this.project && !this.hasProjectWorkspace() && this.project.sharedDirs?.length) {
-        this.activeFileTab = this.project.sharedDirs[0].name;
-        this.getTabDataSource(this.project.sharedDirs[0].name);
-      }
-
-      // Fetch metrics summary (non-blocking, gracefully degrades)
-      void this.loadMetricsSummary();
-      void this.loadSessionMetricsSummary();
-
-      // Auto-discover GitHub App installation if project has a GitHub remote but no installation
-      if (
-        this.project &&
-        this.project.gitRemote &&
-        /github\.com[/:]/.test(this.project.gitRemote) &&
-        this.project.githubInstallationId == null
-      ) {
-        void this.autoDiscoverGitHubApp();
-      }
+      this.applyLoadedProject((await projectResponse.json()) as Project);
     } catch (err) {
       console.error('Failed to load project:', err);
       this.error = err instanceof Error ? err.message : 'Failed to load project';
     } finally {
       this.loading = false;
+    }
+    await agentsLoad;
+  }
+
+  /**
+   * The agents window's page-load request, tracked separately from the
+   * project: its loading and failure states belong to the agents section,
+   * never to the page as a whole.
+   */
+  private async loadPageAgents(): Promise<void> {
+    this.agentsLoadError = null;
+    await this.loadAgentsForView('page-load');
+  }
+
+  /** The agents section's Retry after a failed page-load request. */
+  private retryAgentsLoad(): void {
+    if (this.agentsLoading || this.agentWindow.loading) return;
+    void this.loadPageAgents();
+  }
+
+  private applyLoadedProject(project: Project): void {
+    this.project = project;
+    dispatchPageTitle(this, this.project.name || this.projectId, 'Projects');
+
+    stateManager.seedProjects([this.project]);
+
+    // Pre-create data sources for file tabs (the component loads files on connect)
+    if (this.hasProjectWorkspace()) {
+      this.getTabDataSource('workspace');
+    }
+    // Without a project workspace (per-agent git, empty per agent), activate
+    // the first shared dir
+    if (!this.hasProjectWorkspace() && this.project.sharedDirs?.length) {
+      this.activeFileTab = this.project.sharedDirs[0].name;
+      this.getTabDataSource(this.project.sharedDirs[0].name);
+    }
+
+    // Fetch metrics summary (non-blocking, gracefully degrades)
+    void this.loadMetricsSummary();
+    void this.loadSessionMetricsSummary();
+
+    // Auto-discover GitHub App installation if project has a GitHub remote but no installation
+    if (
+      this.project.gitRemote &&
+      /github\.com[/:]/.test(this.project.gitRemote) &&
+      this.project.githubInstallationId == null
+    ) {
+      void this.autoDiscoverGitHubApp();
     }
   }
 
@@ -1634,7 +1725,11 @@ export class ScionPageProjectDetail extends LitElement {
    * client label filter applied to it.
    */
   private onAgentsLoadFailed(trigger: AgentsViewTrigger): void {
+    if (trigger === 'page-load' || !this.hasAgentsResult) {
+      this.agentsLoadError = 'Could not load agents.';
+    }
     if (trigger === 'page-load') {
+      this.hasAgentsResult = false;
       this.agents = [];
       this.agentScopeCapabilities = undefined;
       this.agentWindow.setSmall();
@@ -1673,6 +1768,10 @@ export class ScionPageProjectDetail extends LitElement {
           : await this.drainProjectAgents(trigger, label);
     } finally {
       this.endLoadingIndicator();
+    }
+    if (adopted) {
+      this.hasAgentsResult = true;
+      this.agentsLoadError = null;
     }
     if (
       adopted &&
@@ -1856,6 +1955,13 @@ export class ScionPageProjectDetail extends LitElement {
     const superseded = this.agentWindow.supersededRequest(this.committedLabel);
     if (superseded) {
       this.cancelAgentsLoad();
+      // Before any result, whatever was superseded is re-sent as the page
+      // load: a view change alone plans nothing in the small state, which
+      // would leave the loading row with nothing in flight.
+      if (!this.hasAgentsResult) {
+        this.backgroundRefresh('page-load');
+        return;
+      }
       if (superseded === 'page-load' || superseded === 'label-commit') {
         this.backgroundRefresh(superseded);
         return;
@@ -1931,6 +2037,7 @@ export class ScionPageProjectDetail extends LitElement {
     qs.set('dir', this.sortDir);
     qs.set('limit', String(params.limit));
     if (params.cursor) qs.set('cursor', params.cursor);
+    if (params.ids?.length) qs.set('ids', params.ids.join(','));
     if (params.wantStats) qs.set('stats', '1');
     if (label) qs.set('label', label);
     if (this.phaseFilter) qs.set('phase', this.phaseFilter);
@@ -2863,11 +2970,16 @@ export class ScionPageProjectDetail extends LitElement {
         </div>
       </div>
 
-      ${this.agentStats.total === 0
-        ? html`${this.renderAgentWindowBanner()}${this.renderEmptyAgents()}`
-        : html`
-            ${this.renderFilterBar()} ${this.renderAgentWindowBanner()} ${this.renderAgentRows()}
-          `}
+      ${this.agentsLoadError
+        ? this.renderAgentsLoadError()
+        : !this.hasAgentsResult
+          ? html`<div class="empty-filter-state agents-initial-loading">Loading agents…</div>`
+          : this.agentStats.total === 0
+            ? html`${this.renderAgentWindowBanner()}${this.renderEmptyAgents()}`
+            : html`
+                ${this.renderFilterBar()} ${this.renderAgentWindowBanner()}
+                ${this.renderAgentRows()}
+              `}
       ${this.project?.cloudLogging ? this.renderMessagesSection() : nothing}
       ${this.shouldShowFilesSection()
         ? this.filesSectionVisible
@@ -2935,8 +3047,13 @@ export class ScionPageProjectDetail extends LitElement {
     return !this.project.gitRemote || isSharedWorkspace(this.project);
   }
 
+  private artifactsOn(): boolean {
+    return isFeatureEnabled(ARTIFACTS_FLAG);
+  }
+
   private shouldShowFilesSection(): boolean {
     if (!this.project) return false;
+    if (this.artifactsOn()) return true;
     if (this.hasProjectWorkspace()) return true;
     // Otherwise show files only when shared dirs exist
     return (this.project.sharedDirs?.length ?? 0) > 0;
@@ -2970,6 +3087,45 @@ export class ScionPageProjectDetail extends LitElement {
     this.markFileTabVisited(panel);
   }
 
+  /** The file tabs of the segment shown, or all of them when artifacts are off. */
+  private segmentFileTabs(): Array<{ key: string; label: string }> {
+    const tabs = this.getFileTabs();
+    if (!this.artifactsOn()) return tabs;
+    if (this.filesSegment === 'workspace') return tabs.filter((t) => t.key === 'workspace');
+    if (this.filesSegment === 'shared') return tabs.filter((t) => t.key !== 'workspace');
+    return [];
+  }
+
+  private onFilesSegmentChange(e: Event): void {
+    const segment = (e.target as HTMLInputElement).value as 'artifacts' | 'shared' | 'workspace';
+    this.filesSegment = segment;
+    if (segment === 'artifacts') return;
+    const tabs = this.segmentFileTabs();
+    if (tabs.length > 0 && !tabs.some((t) => t.key === this.activeFileTab)) {
+      this.activeFileTab = tabs[0].key;
+    }
+    this.markFileTabVisited(this.activeFileTab);
+  }
+
+  private renderFilesSegments(): TemplateResult | typeof nothing {
+    if (!this.artifactsOn()) return nothing;
+    const hasShared = (this.project?.sharedDirs?.length ?? 0) > 0;
+    return html`
+      <sl-radio-group
+        class="files-segments"
+        size="small"
+        value=${this.filesSegment}
+        @sl-change=${(e: Event): void => this.onFilesSegmentChange(e)}
+      >
+        <sl-radio-button value="artifacts">Artifacts</sl-radio-button>
+        ${hasShared ? html`<sl-radio-button value="shared">Shared dirs</sl-radio-button>` : nothing}
+        ${this.hasProjectWorkspace()
+          ? html`<sl-radio-button value="workspace">Workspace</sl-radio-button>`
+          : nothing}
+      </sl-radio-group>
+    `;
+  }
+
   private renderFilesSectionPlaceholder() {
     return html`
       <div class="workspace-section files-section-placeholder">
@@ -2993,8 +3149,6 @@ export class ScionPageProjectDetail extends LitElement {
   }
 
   private renderFilesSection() {
-    const tabs = this.getFileTabs();
-    const isEditable = can(this.project?._capabilities, 'update');
     const isEditorOpen = this.editingFilePath !== null;
 
     return html`
@@ -3002,60 +3156,77 @@ export class ScionPageProjectDetail extends LitElement {
         <div class="workspace-header">
           <div class="workspace-header-left">
             <h2>Files</h2>
+            ${isEditorOpen ? nothing : this.renderFilesSegments()}
           </div>
         </div>
 
-        ${isEditorOpen
-          ? html`
-              <div class="editor-back-row">
-                <sl-button size="small" variant="text" @click=${this.handleEditorClosed}>
-                  <sl-icon slot="prefix" name="arrow-left"></sl-icon>
-                  Back to files
-                </sl-button>
-              </div>
-              <scion-file-editor
-                .filePath=${this.editingFilePath || ''}
-                .dataSource=${this.getEditorDataSource(this.activeFileTab)}
-                ?readonly=${!isEditable}
-                ?initialPreview=${this.editorInitialPreview}
-                @file-saved=${this.handleFileSaved}
-                @editor-closed=${this.handleEditorClosed}
-              ></scion-file-editor>
+        ${this.renderFilesBody()}
+      </div>
+    `;
+  }
+
+  /** The Files area below its header: artifacts, the file editor, or the file tabs. */
+  private renderFilesBody(): TemplateResult {
+    const tabs = this.segmentFileTabs();
+    const isEditable = can(this.project?._capabilities, 'update');
+    const isEditorOpen = this.editingFilePath !== null;
+
+    if (isEditorOpen) {
+      return html`
+        <div class="editor-back-row">
+          <sl-button size="small" variant="text" @click=${this.handleEditorClosed}>
+            <sl-icon slot="prefix" name="arrow-left"></sl-icon>
+            Back to files
+          </sl-button>
+        </div>
+        <scion-file-editor
+          .filePath=${this.editingFilePath || ''}
+          .dataSource=${this.getEditorDataSource(this.activeFileTab)}
+          ?readonly=${!isEditable}
+          ?initialPreview=${this.editorInitialPreview}
+          @file-saved=${this.handleFileSaved}
+          @editor-closed=${this.handleEditorClosed}
+        ></scion-file-editor>
+      `;
+    }
+    if (this.artifactsOn() && this.filesSegment === 'artifacts') {
+      return html`<scion-artifact-list
+        .projectId=${this.projectId}
+        .currentUserId=${this.pageData?.user?.id ?? ''}
+      ></scion-artifact-list>`;
+    }
+    return html`
+      <div class="files-tab-header">
+        <sl-tab-group class="files-tab-group" @sl-tab-show=${this.onFileTabChange}>
+          ${tabs.map(
+            (tab) => html`
+              <sl-tab slot="nav" panel=${tab.key} ?active=${tab.key === this.activeFileTab}>
+                <span class="tab-label-truncated" title=${tab.label}
+                  >${this.truncateTabLabel(tab.label)}</span
+                >
+              </sl-tab>
             `
-          : html`
-              <div class="files-tab-header">
-                <sl-tab-group class="files-tab-group" @sl-tab-show=${this.onFileTabChange}>
-                  ${tabs.map(
-                    (tab) => html`
-                      <sl-tab slot="nav" panel=${tab.key} ?active=${tab.key === this.activeFileTab}>
-                        <span class="tab-label-truncated" title=${tab.label}
-                          >${this.truncateTabLabel(tab.label)}</span
-                        >
-                      </sl-tab>
+          )}
+          ${tabs.map(
+            (tab) => html`
+              <sl-tab-panel name=${tab.key}>
+                ${this.visitedFileTabs.has(tab.key)
+                  ? html`
+                      <scion-file-browser
+                        data-tab=${tab.key}
+                        .dataSource=${this.getTabDataSource(tab.key)}
+                        ?editable=${isEditable}
+                        ?showArchive=${true}
+                        @file-edit-requested=${this.handleFileEditRequested}
+                        @file-preview-requested=${this.handleFilePreviewRequested}
+                        @file-create-requested=${this.handleFileCreateRequested}
+                      ></scion-file-browser>
                     `
-                  )}
-                  ${tabs.map(
-                    (tab) => html`
-                      <sl-tab-panel name=${tab.key}>
-                        ${this.visitedFileTabs.has(tab.key)
-                          ? html`
-                              <scion-file-browser
-                                data-tab=${tab.key}
-                                .dataSource=${this.getTabDataSource(tab.key)}
-                                ?editable=${isEditable}
-                                ?showArchive=${true}
-                                @file-edit-requested=${this.handleFileEditRequested}
-                                @file-preview-requested=${this.handleFilePreviewRequested}
-                                @file-create-requested=${this.handleFileCreateRequested}
-                              ></scion-file-browser>
-                            `
-                          : nothing}
-                      </sl-tab-panel>
-                    `
-                  )}
-                </sl-tab-group>
-              </div>
-            `}
+                  : nothing}
+              </sl-tab-panel>
+            `
+          )}
+        </sl-tab-group>
       </div>
     `;
   }
@@ -3087,6 +3258,24 @@ export class ScionPageProjectDetail extends LitElement {
         </sl-button>
       </div>
     `;
+  }
+
+  /**
+   * The agents section when the page-load agents request failed: the
+   * project stays on screen, with a Retry for the agents only.
+   */
+  private renderAgentsLoadError(): TemplateResult {
+    return html`<div class="empty-filter-state agents-load-error">
+      ${this.agentsLoadError}
+      <sl-button
+        size="small"
+        ?disabled=${this.agentsLoading || this.agentWindow.loading}
+        @click=${(): void => this.retryAgentsLoad()}
+      >
+        <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
+        Retry
+      </sl-button>
+    </div>`;
   }
 
   private renderEmptyAgents() {

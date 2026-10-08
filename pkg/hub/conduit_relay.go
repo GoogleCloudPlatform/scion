@@ -83,6 +83,9 @@ type ConduitRelayOptions struct {
 	// ReconnectWindow is GoAway.reconnect_after_ms, the jitter window
 	// targets draw their redial delay from (0 = the relay default, 5s).
 	ReconnectWindow time.Duration
+	// AuthzRecheckInterval overrides ServerConfig.ConduitAuthzRecheckInterval
+	// (0 = use it; negative disables the sweep, for tests).
+	AuthzRecheckInterval time.Duration
 
 	// Test seams. RegistryNow is the clock of the registry maintenance
 	// singleton (nil = time.Now).
@@ -197,18 +200,31 @@ func (s *Server) StartConduitRelay(ctx context.Context, opts ConduitRelayOptions
 		Store:    st,
 		Peers:    &relay.PeerClient{HTTP: opts.HTTPClient, Auth: opts.PeerAuth},
 		Now:      now,
+		Brokers:  newLegacyBrokerResolver(s.controlChannel, id),
 	})
 	if err != nil {
 		return fmt.Errorf("conduit router: %w", err)
 	}
 	rt := &conduitRuntime{relay: r, registry: reg, router: rtr, store: st, now: now}
+	// The stream re-check starts before the relay is published, so every
+	// user stream opened through it is tracked.
+	interval := opts.AuthzRecheckInterval
+	if interval == 0 {
+		interval = s.config.ConduitAuthzRecheckInterval
+	}
+	_, stopAuthz, err := s.startConduitStreamAuthz(ctx, opts.Clock, interval)
+	if err != nil {
+		return err
+	}
 	// Published before Start: the internal listener is already serving and
 	// the self-check probe must reach this relay's internal handler.
 	if !s.conduit.CompareAndSwap(nil, rt) {
+		stopAuthz()
 		return errors.New("conduit relay already started")
 	}
 	if err := r.Start(ctx); err != nil {
 		s.conduit.Store(nil)
+		stopAuthz()
 		return err
 	}
 	if r.InternalEndpoint() == "" && !opts.RequireHA {

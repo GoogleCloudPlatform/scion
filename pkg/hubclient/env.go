@@ -22,6 +22,15 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 )
 
+// noContentError is shared by envService.Get and secretService.Get (see
+// secrets.go): both return it when the hub answers with no body. It keeps the
+// key-specific message and wraps apiclient.ErrNoContent, so callers can tell
+// an empty response apart from a connectivity failure.
+type noContentError struct{ key string }
+
+func (e *noContentError) Error() string { return fmt.Sprintf("hub returned no content for %q", e.key) }
+func (e *noContentError) Unwrap() error { return apiclient.ErrNoContent }
+
 // EnvService handles environment variable operations.
 type EnvService interface {
 	// List returns environment variables for the specified scope.
@@ -123,7 +132,7 @@ func (s *envService) Get(ctx context.Context, key string, opts *EnvScopeOptions)
 	}
 	if envVar == nil {
 		// A 204 No Content response decodes to nil, nil.
-		return nil, fmt.Errorf("hub returned no content for %q", key)
+		return nil, &noContentError{key: key}
 	}
 	return envVar, nil
 }

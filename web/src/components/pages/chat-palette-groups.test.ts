@@ -62,15 +62,16 @@ const fakeState = vi.hoisted(() => {
   t.seedAgents = (list: any[]) => list.forEach((a: any) => t.agents.set(a.id, a));
   t.removeAgent = (id: string) => t.agents.delete(id);
   t.setScope = () => {};
+  t.getAgent = (id: string) => t.agents.get(id);
+  // Seed epochs record nothing here.
+  t.scopeGeneration = 0;
+  t.beginSeedEpoch = () => Symbol('seed-epoch');
+  t.endSeedEpoch = () => {};
   return t;
 });
 
-vi.mock('../../client/main.js', () => ({
-  navigateTo: vi.fn(),
-  pushRoute: vi.fn((path: string) => {
-    window.history.pushState({}, '', path);
-    return Promise.resolve();
-  }),
+vi.mock('../../client/main.js', async () => ({
+  ...(await import('../../client/__fixtures__/main-stub.js')),
   replaceRoute: vi.fn((path: string) => {
     window.history.replaceState(window.history.state, '', path);
     return Promise.resolve();

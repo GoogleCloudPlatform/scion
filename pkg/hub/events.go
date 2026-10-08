@@ -52,6 +52,10 @@ type EventPublisher interface {
 	// authorization only gates project.* and user.* subjects, and project
 	// membership is not the same set as "people in this conversation".
 	PublishChatNotification(ctx context.Context, notif *store.Notification, msg ChatMessageContext)
+	// PublishUserNotification emits a non-chat notification addressed to one
+	// user (for example SCHEDULE_BLOCKED) on user.<subscriberID>.notification
+	// and nowhere else. A notification with no SubscriberID is dropped.
+	PublishUserNotification(ctx context.Context, notif *store.Notification)
 	PublishUserMessage(ctx context.Context, msg *store.Message, attachments []AttachmentRef)
 	PublishAgentPorts(ctx context.Context, agent *store.Agent)
 	PublishAllowListChanged(ctx context.Context, action string, email string)
@@ -89,6 +93,10 @@ type EventPublisher interface {
 	// participant of the DM on user.<id>.chat.dm.promoted so the client
 	// can close the DM view and navigate to the new thread.
 	PublishDMPromotedEvent(ctx context.Context, dmKey string, topic WebChatTopic)
+	// PublishChatScheduledEvent publishes a change to one of a user's
+	// scheduled chat messages on user.<id>.chat.scheduled. Only the
+	// sender is ever told about a scheduled message.
+	PublishChatScheduledEvent(ctx context.Context, userID string, evt ChatScheduledEvent)
 	// Subscribe returns a channel that receives events matching the given
 	// subject patterns, along with an unsubscribe function. Patterns use
 	// NATS-style wildcards: '*' matches a single token, '>' matches the
@@ -116,6 +124,7 @@ func (noopEventPublisher) PublishBrokerStatus(_ context.Context, _, _ string)   
 func (noopEventPublisher) PublishNotification(_ context.Context, _ *store.Notification)        {}
 func (noopEventPublisher) PublishChatNotification(_ context.Context, _ *store.Notification, _ ChatMessageContext) {
 }
+func (noopEventPublisher) PublishUserNotification(_ context.Context, _ *store.Notification) {}
 func (noopEventPublisher) PublishUserMessage(_ context.Context, _ *store.Message, _ []AttachmentRef) {
 }
 func (noopEventPublisher) PublishAgentPorts(_ context.Context, _ *store.Agent)    {}
@@ -133,6 +142,9 @@ func (noopEventPublisher) PublishChatMessageDeleted(_ context.Context, _ string,
 func (noopEventPublisher) PublishDMPromotedEvent(_ context.Context, _ string, _ WebChatTopic) {}
 func (noopEventPublisher) PublishRaw(_ string, _ interface{})                                 {}
 func (noopEventPublisher) Close()                                                             {}
+
+func (noopEventPublisher) PublishChatScheduledEvent(_ context.Context, _ string, _ ChatScheduledEvent) {
+}
 
 // Subscribe on the no-op publisher returns a nil channel (which blocks forever
 // on receive) and a no-op unsubscribe. Callers that need real subscriptions
@@ -303,6 +315,14 @@ type NotificationCreatedEvent struct {
 	Status    string `json:"status"`
 	Message   string `json:"message"`
 	CreatedAt string `json:"createdAt"`
+}
+
+// UserNotificationEvent is the payload for a non-chat notification addressed
+// to a single user (PublishUserNotification). SubscriberID is the client's
+// second gate; the subject already scopes delivery.
+type UserNotificationEvent struct {
+	NotificationCreatedEvent
+	SubscriberID string `json:"subscriberId"`
 }
 
 // ChatNotificationEvent is the payload for a chat notification (mention, DM
@@ -728,6 +748,29 @@ func (p *eventBuilder) PublishChatNotification(_ context.Context, notif *store.N
 	p.sink("user."+notif.SubscriberID+".notification", evt)
 }
 
+// PublishUserNotification publishes a non-chat notification addressed to one
+// user on user.<subscriberID>.notification and on no other subject. Like
+// PublishChatNotification it never uses notification.* or project.*: the
+// message names the user's agents and schedules, and those subjects reach
+// other sessions. A notification with no SubscriberID is dropped.
+func (p *eventBuilder) PublishUserNotification(_ context.Context, notif *store.Notification) {
+	if notif == nil || notif.SubscriberID == "" {
+		return
+	}
+	evt := UserNotificationEvent{
+		NotificationCreatedEvent: NotificationCreatedEvent{
+			ID:        notif.ID,
+			AgentID:   notif.AgentID,
+			ProjectID: notif.ProjectID,
+			Status:    notif.Status,
+			Message:   notif.Message,
+			CreatedAt: notif.CreatedAt.UTC().Format("2006-01-02T15:04:05.000Z"),
+		},
+		SubscriberID: notif.SubscriberID,
+	}
+	p.sink("user."+notif.SubscriberID+".notification", evt)
+}
+
 // PublishAllowListChanged publishes an allow list change event.
 // Email is intentionally omitted from the event to avoid PII leak via SSE.
 func (p *eventBuilder) PublishAllowListChanged(_ context.Context, action, _ string) {
@@ -924,6 +967,15 @@ func (p *eventBuilder) PublishDMPromotedEvent(_ context.Context, dmKey string, t
 	for _, userID := range dmUserParticipants(dmKey) {
 		p.sink("user."+userID+".chat.dm.promoted", evt)
 	}
+}
+
+// PublishChatScheduledEvent publishes a scheduled chat message change to its
+// sender only, on user.<userID>.chat.scheduled.
+func (p *eventBuilder) PublishChatScheduledEvent(_ context.Context, userID string, evt ChatScheduledEvent) {
+	if userID == "" {
+		return
+	}
+	p.sink("user."+userID+".chat.scheduled", evt)
 }
 
 // PublishDispatchDone emits a slim completion event when a broker_dispatch row

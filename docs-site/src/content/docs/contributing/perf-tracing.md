@@ -207,7 +207,7 @@ node e2e-perf/large-project-bench.mjs \
   --runs 5
 ```
 
-It runs the `project-grid`, `project-list`, `project-graph-embedded` and `standalone-graph` scenarios, then an SSE burst-update scenario. Other options are `--burst-runs`, `--burst-count` (default `15`), `--burst-only`, `--nav-timeout-ms` and `--populate-timeout-ms` (default `120000` each), `--settle-timeout-ms` (default `30000`) and `--notes`. With tracing on, the same Hub log holds the `perf_trace` lines for the page's API requests and the `sse.events` connect and close lines. The README explains how each run is classified and what each reported statistic means.
+It runs the `project-grid`, `project-list`, `project-graph-embedded` and `standalone-graph` scenarios, then an SSE burst-update scenario. The project grid and list are paged, so those two scenarios time the first page rendered (one page of cards or rows, with the page size read from the pager) and then the latency of a few Next-page clicks; the report records the page size, page count and page-change times. The burst scenario picks its agents from the grid's first page. Other options are `--page-changes` (default `3`), `--burst-runs`, `--burst-count` (default `15`), `--burst-only`, `--nav-timeout-ms` and `--populate-timeout-ms` (default `120000` each), `--settle-timeout-ms` (default `30000`) and `--notes`. With tracing on, the same Hub log holds the `perf_trace` lines for the page's API requests and the `sse.events` connect and close lines. The README explains how each run is classified and what each reported statistic means.
 
 ### Reading the API report
 

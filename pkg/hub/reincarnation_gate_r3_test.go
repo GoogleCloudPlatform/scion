@@ -107,8 +107,8 @@ func TestSendAgentRouted_R1_MigratingSecondaryPersistFailureIsErrorNotDeferred(t
 	req = req.WithContext(contextWithIdentity(req.Context(), owner))
 	rr := httptest.NewRecorder()
 	mentionResults := []messages.MentionResult{{Slug: "r1-second", Status: "delivered"}}
-	msgID := srv.sendAgentRouted(rr, req, "topic:"+project.ID, project.ID, owner,
-		"hello @r1-second", "Owner", []*store.Agent{primary, second}, []string{"r1-second"}, mentionResults, nil, time.Now(), "", nil, chatSendOptions{})
+	msgID := writeChatSendOutcome(rr)(srv.sendAgentRouted(req.Context(), "topic:"+project.ID, project.ID, owner,
+		"hello @r1-second", "Owner", []*store.Agent{primary, second}, []string{"r1-second"}, mentionResults, nil, time.Now(), "", nil, chatSendOptions{}))
 
 	require.NotEmpty(t, msgID, "the primary's own message must still be persisted; response: %d %s", rr.Code, rr.Body.String())
 

@@ -92,6 +92,19 @@ type CreateConversationRequest struct {
 type ConversationDetail struct {
 	store.Conversation
 	Participants []store.ConversationParticipant `json:"participants,omitempty"`
+	// DMPeer is the other party of a direct conversation, relative to the
+	// caller. Set by the hub on list responses only.
+	DMPeer *ConversationPeer `json:"dmPeer,omitempty"`
+	// ThreadName is the linked webchat topic name of a native group
+	// conversation without a display name. Set on list responses only.
+	ThreadName string `json:"threadName,omitempty"`
+}
+
+// ConversationPeer identifies the other principal of a direct conversation.
+type ConversationPeer struct {
+	Kind string `json:"kind"`           // user | agent
+	ID   string `json:"id"`             // principal UUID
+	Name string `json:"name,omitempty"` // empty if the hub could not resolve it
 }
 
 // AddParticipantRequest is the request to add a participant to a conversation.

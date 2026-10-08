@@ -196,14 +196,13 @@ func stopAllAgents() error {
 
 	var (
 		mu      sync.Mutex
-		wg      sync.WaitGroup
 		results []agentResult
 	)
 
-	for _, ra := range running {
-		wg.Add(1)
-		go func(name string) {
-			defer wg.Done()
+	// ptone/scion#3602: at most maxFanOutConcurrency agents in flight at once.
+	boundedFanOut(context.Background(), len(running), maxFanOutConcurrency, lifecycleFanOutQueuedHook,
+		func(i int) {
+			name := running[i].Name
 
 			res := agentResult{Name: name, Status: "success"}
 
@@ -236,10 +235,7 @@ func stopAllAgents() error {
 			mu.Lock()
 			results = append(results, res)
 			mu.Unlock()
-		}(ra.Name)
-	}
-
-	wg.Wait()
+		}, func(int) {})
 
 	if isJSONOutput() {
 		jsonResults := make([]map[string]interface{}, len(results))
@@ -351,14 +347,13 @@ func stopAllAgentsViaHub(hubCtx *HubContext) error {
 
 	var (
 		mu      sync.Mutex
-		wg      sync.WaitGroup
 		results []agentResult
 	)
 
-	for _, a := range running {
-		wg.Add(1)
-		go func(ag hubclient.Agent) {
-			defer wg.Done()
+	// ptone/scion#3602: at most maxFanOutConcurrency agents in flight at once.
+	boundedFanOut(context.Background(), len(running), maxFanOutConcurrency, lifecycleFanOutQueuedHook,
+		func(i int) {
+			ag := running[i]
 
 			res := agentResult{Name: ag.Name, Status: "success"}
 
@@ -411,10 +406,7 @@ func stopAllAgentsViaHub(hubCtx *HubContext) error {
 			mu.Lock()
 			results = append(results, res)
 			mu.Unlock()
-		}(a)
-	}
-
-	wg.Wait()
+		}, func(int) {})
 
 	if stopRm {
 		// Confirmed removals get the same local cleanup as scion delete

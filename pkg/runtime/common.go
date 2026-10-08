@@ -1071,40 +1071,102 @@ func runSimpleCommandWithStdin(ctx context.Context, stdin io.Reader, command str
 // (already cancelled) caller context, since the caller has already given up
 // and this cleanup must still be allowed to run.
 //
+// runID is the cancelled create's scion.run_id label. When it is set, only
+// containers carrying that label are removed, found by listing; the name is
+// not used, so a container another run has since created under the same
+// name is left alone (ptone/scion#2550). If the listing fails or finds
+// nothing, nothing is removed. Without a run ID (a RunConfig built outside
+// pkg/agent) the container is removed by name, as before run IDs existed.
+//
 // The Apple "container" CLI's "rm" does not support "-f" and fails if the
 // container is still running (see AppleContainerRuntime.Delete), so for that
 // runtime we kill first, then retry a plain "rm" a few times — kill is
 // asynchronous and the container may not be immediately ready for removal.
 // Docker/Podman support "rm -f" directly.
-func rollbackCancelledCreate(command, containerName string) {
-	if containerName == "" {
+func rollbackCancelledCreate(command, containerName, runID string) {
+	if containerName == "" && runID == "" {
 		return
 	}
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if filepath.Base(command) == "container" {
-		_, _ = runSimpleCommand(cleanupCtx, command, "kill", containerName)
+	apple := filepath.Base(command) == "container"
 
-		var out string
-		var err error
-		for attempt := 0; attempt < 5; attempt++ {
-			out, err = runSimpleCommand(cleanupCtx, command, "rm", containerName)
-			if err == nil {
-				return
-			}
-			select {
-			case <-cleanupCtx.Done():
-				runtimeLog.Warn("Failed to roll back cancelled create", "cmd", command, "container", containerName, "error", cleanupCtx.Err(), "output", strings.TrimSpace(out))
-				return
-			case <-time.After(100 * time.Millisecond):
+	targets := []string{containerName}
+	if runID != "" {
+		ids, err := containersWithRunID(cleanupCtx, command, apple, runID)
+		if err != nil {
+			runtimeLog.Warn("Failed to roll back cancelled create: could not list the run's containers; nothing removed",
+				"cmd", command, "container", containerName, "run_id", runID, "error", err)
+			return
+		}
+		if len(ids) == 0 {
+			runtimeLog.Debug("Cancelled create left no container of its run", "cmd", command, "container", containerName, "run_id", runID)
+			return
+		}
+		targets = ids
+	}
+
+	for _, target := range targets {
+		if apple {
+			appleKillAndRemove(cleanupCtx, command, target)
+			continue
+		}
+		if out, err := runSimpleCommand(cleanupCtx, command, "rm", "-f", target); err != nil {
+			runtimeLog.Warn("Failed to roll back cancelled create", "cmd", command, "container", target, "run_id", runID, "error", err, "output", strings.TrimSpace(out))
+		}
+	}
+}
+
+// containersWithRunID lists every container (running or not) labelled with
+// scion.run_id=runID and returns their IDs: engine IDs on Docker and Podman,
+// container names on Apple.
+func containersWithRunID(ctx context.Context, command string, apple bool, runID string) ([]string, error) {
+	if apple {
+		raw, err := appleListContainers(ctx, command)
+		if err != nil {
+			return nil, err
+		}
+		var ids []string
+		for _, c := range raw {
+			if c.Configuration.Labels[api.LabelRunID] == runID && c.Configuration.ID != "" {
+				ids = append(ids, c.Configuration.ID)
 			}
 		}
-		runtimeLog.Warn("Failed to roll back cancelled create", "cmd", command, "container", containerName, "error", err, "output", strings.TrimSpace(out))
-		return
+		return ids, nil
 	}
-	if out, err := runSimpleCommand(cleanupCtx, command, "rm", "-f", containerName); err != nil {
-		runtimeLog.Warn("Failed to roll back cancelled create", "cmd", command, "container", containerName, "error", err, "output", strings.TrimSpace(out))
+	out, err := runSimpleCommand(ctx, command, "ps", "-a", "-q", "--no-trunc", "--filter", "label="+api.LabelRunID+"="+runID)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %s", err, strings.TrimSpace(out))
 	}
+	var ids []string
+	for _, line := range strings.Split(out, "\n") {
+		if id := strings.TrimSpace(line); id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids, nil
+}
+
+// appleKillAndRemove kills and removes the Apple container id, retrying the
+// rm a few times since kill is asynchronous. Failures are logged.
+func appleKillAndRemove(ctx context.Context, command, id string) {
+	_, _ = runSimpleCommand(ctx, command, "kill", id)
+
+	var out string
+	var err error
+	for attempt := 0; attempt < 5; attempt++ {
+		out, err = runSimpleCommand(ctx, command, "rm", id)
+		if err == nil {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			runtimeLog.Warn("Failed to roll back cancelled create", "cmd", command, "container", id, "error", ctx.Err(), "output", strings.TrimSpace(out))
+			return
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	runtimeLog.Warn("Failed to roll back cancelled create", "cmd", command, "container", id, "error", err, "output", strings.TrimSpace(out))
 }
 
 func runInteractiveCommand(command string, args ...string) error {

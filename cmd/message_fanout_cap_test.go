@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path"
 	"runtime"
 	"strings"
 	"sync"
@@ -46,6 +47,11 @@ type gateHub struct {
 	srv      *httptest.Server
 	agents   []string           // returned by the agent list
 	arrivals chan chan struct{} // one release channel per send that arrives
+	// gatedAction is the POST path suffix that is held and counted
+	// ("/message" unless a test sets it, e.g. "/stop" or "/suspend").
+	gatedAction string
+	// failAgents answer the gated request with a 500 once released.
+	failAgents map[string]bool
 
 	mu       sync.Mutex
 	inFlight int
@@ -76,7 +82,7 @@ func (h *gateHub) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{"agents": agents})
 		return
-	case r.Method != http.MethodPost || !strings.HasSuffix(r.URL.Path, "/message"):
+	case r.Method != http.MethodPost || !strings.HasSuffix(r.URL.Path, h.gated()):
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
@@ -103,7 +109,20 @@ func (h *gateHub) serve(w http.ResponseWriter, r *http.Request) {
 	if cancelled {
 		return
 	}
+	agentName := path.Base(strings.TrimSuffix(r.URL.Path, h.gated()))
+	if h.failAgents[agentName] {
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"error": map[string]string{"code": "internal", "message": "boom"}})
+		return
+	}
 	_ = json.NewEncoder(w).Encode(map[string]string{"message_id": "m", "status": "delivered"})
+}
+
+func (h *gateHub) gated() string {
+	if h.gatedAction == "" {
+		return "/message"
+	}
+	return h.gatedAction
 }
 
 func (h *gateHub) peakInFlight() int {

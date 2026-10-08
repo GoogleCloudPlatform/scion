@@ -304,8 +304,8 @@ func TestSendAgentRouted_R3_MigratingPrimaryDuringProvisioningDeferred(t *testin
 	req = req.WithContext(contextWithIdentity(req.Context(), owner))
 	rr := httptest.NewRecorder()
 
-	msgID := srv.sendAgentRouted(rr, req, "topic:"+project.ID, project.ID, owner,
-		"hello", "Owner", []*store.Agent{primary}, nil, nil, nil, time.Now(), "", nil, chatSendOptions{})
+	msgID := writeChatSendOutcome(rr)(srv.sendAgentRouted(req.Context(), "topic:"+project.ID, project.ID, owner,
+		"hello", "Owner", []*store.Agent{primary}, nil, nil, nil, time.Now(), "", nil, chatSendOptions{}))
 
 	require.NotEmpty(t, msgID, "the message must still be persisted; response: %d %s", rr.Code, rr.Body.String())
 	require.Empty(t, dispatcher.getMessages(), "a migrating primary during provisioning must not be dispatched to")
@@ -459,10 +459,10 @@ func TestMessageEventHandler_R3_MigratingTargetFailsLoudly(t *testing.T) {
 
 	payload, err := json.Marshal(MessageEventPayload{AgentID: target.ID, Message: "wake up"})
 	require.NoError(t, err)
-	evt := store.ScheduledEvent{
-		ID: tid("r3-sched-event"), ProjectID: project.ID, Payload: string(payload),
+	evt := withAgentRevision(t, srv, store.ScheduledEvent{
+		ID: tid("r3-sched-event"), ProjectID: project.ID, EventType: "message", Payload: string(payload),
 		CreatedBy: creator.ID,
-	}
+	}, creator.ID)
 
 	handler := srv.messageEventHandler()
 	err = handler(ctx, evt)
@@ -507,10 +507,10 @@ func TestMessageEventHandler_OA_AuthzDenialPrecedesReincarnationCheck(t *testing
 
 	payload, err := json.Marshal(MessageEventPayload{AgentID: target.ID, Message: "wake up"})
 	require.NoError(t, err)
-	evt := store.ScheduledEvent{
-		ID: tid("oa-sched-event"), ProjectID: project.ID, Payload: string(payload),
+	evt := withAgentRevision(t, srv, store.ScheduledEvent{
+		ID: tid("oa-sched-event"), ProjectID: project.ID, EventType: "message", Payload: string(payload),
 		CreatedBy: creator.ID,
-	}
+	}, creator.ID)
 
 	handler := srv.messageEventHandler()
 	err = handler(ctx, evt)

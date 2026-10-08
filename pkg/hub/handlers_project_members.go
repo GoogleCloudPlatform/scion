@@ -515,6 +515,7 @@ func (s *Server) updateProjectMemberRole(w http.ResponseWriter, r *http.Request,
 		writeError(w, decision.HTTPStatus, decision.DenialCode, decision.Reason, legacyMembershipDenialDetails(decision))
 		return
 	}
+	s.publishConduitAuthzChanged(conduitAuthzMatch{ProjectID: projectID})
 
 	// Enrich response.
 	var roleName string
@@ -577,6 +578,7 @@ func (s *Server) removeProjectMember(w http.ResponseWriter, r *http.Request, pro
 		writeError(w, decision.HTTPStatus, decision.DenialCode, decision.Reason, legacyMembershipDenialDetails(decision))
 		return
 	}
+	s.publishConduitAuthzChanged(conduitAuthzMatch{ProjectID: projectID})
 
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -654,6 +656,7 @@ func (s *Server) handleTransferOwnership(w http.ResponseWriter, r *http.Request,
 		writeError(w, decision.HTTPStatus, decision.DenialCode, decision.Reason, legacyMembershipDenialDetails(decision))
 		return
 	}
+	s.publishConduitAuthzChanged(conduitAuthzMatch{ProjectID: projectID})
 
 	// Build response.
 	type transferResponse struct {
@@ -904,6 +907,9 @@ func (s *Server) putProjectMemberPrincipal(w http.ResponseWriter, r *http.Reques
 		writeError(w, decision.HTTPStatus, decision.DenialCode, decision.Reason, decision.Details)
 		return
 	}
+	if result.Changed {
+		s.publishConduitAuthzChanged(conduitAuthzMatch{ProjectID: projectID})
+	}
 
 	group := newProjectMemberEnricher(s).group(ctx, principalType, resolvedPrincipalID, result.After)
 
@@ -971,6 +977,7 @@ func (s *Server) deleteProjectMemberPrincipal(w http.ResponseWriter, r *http.Req
 		writeError(w, decision.HTTPStatus, decision.DenialCode, decision.Reason, decision.Details)
 		return
 	}
+	s.publishConduitAuthzChanged(conduitAuthzMatch{ProjectID: projectID})
 
 	w.WriteHeader(http.StatusNoContent)
 }

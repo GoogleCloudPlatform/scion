@@ -20,8 +20,10 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -29,6 +31,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/sync"
@@ -247,12 +250,46 @@ type GitLsRemoteFunc func(ctx context.Context, repoURL string) ([]byte, error)
 // SetGitLsRemoteForTest); production code never reassigns it.
 var gitLsRemote GitLsRemoteFunc = execGitLsRemote
 
+// gitLsRemoteTimeout bounds a single production `git ls-remote` invocation so
+// a stalled connection to the remote cannot hang a template import forever
+// (ptone/scion#3749). It is a variable only so tests can shorten it.
+var gitLsRemoteTimeout = 30 * time.Second
+
+// gitLsRemoteWaitDelay bounds how long execGitLsRemote waits for the git
+// process's output pipes to close after the timeout kills git. Without it, a
+// helper child (e.g. git-remote-https) that inherited the pipes could keep
+// cmd.Output blocked after git itself was killed.
+var gitLsRemoteWaitDelay = 5 * time.Second
+
 // execGitLsRemote is the production ls-remote runner: it shells out to the
-// git binary with terminal prompts disabled.
+// git binary with terminal prompts disabled. The invocation is bounded by
+// gitLsRemoteTimeout (a shorter deadline on ctx still wins); if that bound
+// fires, a descriptive timeout error naming owner/repo is returned.
 func execGitLsRemote(ctx context.Context, repoURL string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, "git", "ls-remote", "--heads", repoURL)
+	tctx, cancel := context.WithTimeout(ctx, gitLsRemoteTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(tctx, "git", "ls-remote", "--heads", repoURL)
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=echo")
-	return cmd.Output()
+	cmd.WaitDelay = gitLsRemoteWaitDelay
+	out, err := cmd.Output()
+	if err != nil && ctx.Err() == nil && errors.Is(tctx.Err(), context.DeadlineExceeded) {
+		// Our own bound fired (not the caller's ctx). Never include repoURL
+		// here: it may embed an access token.
+		return out, fmt.Errorf("git ls-remote for %s timed out after %s: %w",
+			redactedRepoName(repoURL), gitLsRemoteTimeout, context.DeadlineExceeded)
+	}
+	return out, err
+}
+
+// redactedRepoName returns the "owner/repo" portion of a git remote URL with
+// any credentials stripped, for use in logs and error messages.
+func redactedRepoName(repoURL string) string {
+	u, err := url.Parse(repoURL)
+	if err != nil || u.Path == "" {
+		return "<unknown repository>"
+	}
+	return strings.TrimSuffix(strings.TrimPrefix(u.Path, "/"), ".git")
 }
 
 // SetGitLsRemoteForTest replaces the git ls-remote runner used when resolving
@@ -271,7 +308,8 @@ func SetGitLsRemoteForTest(fn GitLsRemoteFunc) (restore func()) {
 
 // resolveGitHubRef uses git ls-remote to disambiguate branch names that may
 // contain slashes. It updates parts.Branch and parts.Path in place.
-// Falls back silently to the naive parse if git is unavailable.
+// Falls back to the naive parse if git is unavailable or fails (silently),
+// or if ls-remote times out (with one warning log line).
 func resolveGitHubRef(ctx context.Context, parts *GitHubURLParts, token string) {
 	afterTree := parts.Branch
 	if parts.Path != "" {
@@ -291,6 +329,12 @@ func resolveGitHubRef(ctx context.Context, parts *GitHubURLParts, token string) 
 
 	output, err := gitLsRemote(ctx, repoURL)
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			// Keep the naive parse, but make the stall visible. The error text
+			// names owner/repo only, never the (possibly tokenized) repoURL.
+			slog.Warn("git ls-remote timed out; using naive branch/path parse",
+				"repo", parts.Owner+"/"+parts.Repo, "error", err)
+		}
 		return
 	}
 
@@ -462,9 +506,36 @@ func parseGitHubURL(uri string) (*GitHubURLParts, error) {
 	return result, nil
 }
 
-// sparseGitCheckout performs a sparse git checkout to get only the needed folder.
+// GitSparseCheckoutFunc performs a sparse checkout of parts (a GitHub repo,
+// branch and optional sub-path) into destPath, authenticating with token when
+// it is non-empty. It is the signature of the sparse-checkout seam used by
+// fetchGitHubFolder.
+type GitSparseCheckoutFunc func(ctx context.Context, parts *GitHubURLParts, destPath string, token string) error
+
+// sparseGitCheckout is the sparse-checkout runner used by fetchGitHubFolder
+// when the tarball download fails. It is a package-level variable only so
+// tests can replace it (see SetGitSparseCheckoutForTest); production code
+// never reassigns it.
+var sparseGitCheckout GitSparseCheckoutFunc = execSparseGitCheckout
+
+// SetGitSparseCheckoutForTest replaces the sparse git checkout runner used as
+// the fallback when a GitHub tarball download fails, and returns a func that
+// restores the previous runner. It exists so tests in other packages (e.g.
+// pkg/hub) can keep remote-import paths hermetic instead of shelling out to a
+// real `git fetch` against github.com (ptone/scion#3750).
+//
+// TEST-ONLY: never call this from production code. It mutates package-global
+// state and is not safe for use from parallel tests.
+func SetGitSparseCheckoutForTest(fn GitSparseCheckoutFunc) (restore func()) {
+	prev := sparseGitCheckout
+	sparseGitCheckout = fn
+	return func() { sparseGitCheckout = prev }
+}
+
+// execSparseGitCheckout is the production sparse-checkout runner: it performs
+// a sparse git checkout to get only the needed folder.
 // When token is non-empty it is embedded in the remote URL for authentication.
-func sparseGitCheckout(ctx context.Context, parts *GitHubURLParts, destPath string, token string) error {
+func execSparseGitCheckout(ctx context.Context, parts *GitHubURLParts, destPath string, token string) error {
 	// Create a temporary directory for the git clone
 	tmpDir, err := os.MkdirTemp("", "scion-git-sparse-*")
 	if err != nil {

@@ -237,3 +237,60 @@ func TestAuthorizeSSESubjects_AdminCannotSubscribeOtherUser(t *testing.T) {
 	assert.Equal(t, []string{"user.user-alice.notification"}, denied,
 		"admin must not be able to subscribe to another user's notification subject")
 }
+
+// TestUserNotification_ScopedToSubscriber pins PublishUserNotification
+// (SCHEDULE_BLOCKED, ptone/scion#3701) to the recipient's subject: a
+// bystander subscribed to the broadcast, project and another user's
+// subjects receives nothing, and an unaddressed notification is dropped.
+func TestUserNotification_ScopedToSubscriber(t *testing.T) {
+	pub := NewChannelEventPublisher()
+	t.Cleanup(pub.Close)
+
+	const projectID = "proj-1"
+	owner, unsubOwner := pub.Subscribe("user.user-alice.notification")
+	defer unsubOwner()
+	eve, unsubEve := pub.Subscribe(bystanderSubjects, "project."+projectID+".notification", "user.user-eve.notification")
+	defer unsubEve()
+	everything, unsubAll := pub.Subscribe(">")
+	defer unsubAll()
+
+	notif := newChatNotificationForTest("user-alice", projectID, `Schedule "nightly" is blocked`)
+	notif.Status = NotificationScheduleBlocked
+	notif.AgentID = "agent-1"
+	pub.PublishUserNotification(context.Background(), notif)
+	unaddressed := *notif
+	unaddressed.SubscriberID = ""
+	pub.PublishUserNotification(context.Background(), &unaddressed)
+
+	select {
+	case evt := <-owner:
+		assert.Equal(t, "user.user-alice.notification", evt.Subject)
+		var payload UserNotificationEvent
+		require.NoError(t, json.Unmarshal(evt.Data, &payload))
+		assert.Equal(t, NotificationScheduleBlocked, payload.Status)
+		assert.Equal(t, "agent-1", payload.AgentID)
+		assert.Equal(t, "user-alice", payload.SubscriberID)
+	case <-time.After(2 * time.Second):
+		t.Fatal("recipient did not receive the notification")
+	}
+	select {
+	case evt := <-owner:
+		t.Fatalf("unexpected second event on %q", evt.Subject)
+	case evt := <-eve:
+		t.Fatalf("user notification leaked to a bystander on %q: %s", evt.Subject, evt.Data)
+	case <-time.After(250 * time.Millisecond):
+	}
+	// Exactly one event anywhere: the unaddressed notification went nowhere.
+	var all []Event
+	for {
+		select {
+		case evt := <-everything:
+			all = append(all, evt)
+			continue
+		default:
+		}
+		break
+	}
+	require.Len(t, all, 1, "events: %+v", all)
+	assert.Equal(t, "user.user-alice.notification", all[0].Subject)
+}

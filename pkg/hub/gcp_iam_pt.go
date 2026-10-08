@@ -61,6 +61,25 @@ type PolicyTroubleshooterChecker struct {
 	// When true (default): if allow=GRANTED and deny=UNKNOWN (not DENIED),
 	// treat as allowed. When false: treat as indeterminate (fail-closed).
 	denyUnknownFailOpen bool
+
+	// denyUnknownFailOpenFn, when set, is read on every check instead of
+	// denyUnknownFailOpen, so the checker follows a reloaded setting.
+	denyUnknownFailOpenFn func() bool
+}
+
+// SetDenyUnknownPolicySource makes the checker read the deny-unknown
+// fallback policy from fn on every check (true: fail-open) instead of the
+// value it was constructed with. Call before the checker is shared.
+func (c *PolicyTroubleshooterChecker) SetDenyUnknownPolicySource(fn func() bool) {
+	c.denyUnknownFailOpenFn = fn
+}
+
+// failOpen returns the deny-unknown fallback policy in effect.
+func (c *PolicyTroubleshooterChecker) failOpen() bool {
+	if c.denyUnknownFailOpenFn != nil {
+		return c.denyUnknownFailOpenFn()
+	}
+	return c.denyUnknownFailOpen
 }
 
 // NewPolicyTroubleshooterChecker creates a new PolicyTroubleshooterChecker.
@@ -164,7 +183,7 @@ func (c *PolicyTroubleshooterChecker) mapResponse(
 		// Check if the allow sub-explanation shows GRANTED.
 		// When deny is UNKNOWN (not DENIED) and allow is GRANTED,
 		// the configurable fallback policy determines the outcome.
-		if c.denyUnknownFailOpen {
+		if c.failOpen() {
 			if allowGranted, denyNotDenied := c.checkSubExplanations(resp); allowGranted && denyNotDenied {
 				return store.ActAsResult{
 					Outcome:   store.ActAsAllowed,

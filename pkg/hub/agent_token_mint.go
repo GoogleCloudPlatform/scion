@@ -53,6 +53,7 @@ const (
 // Error classes recorded for a mint error that carries no DenyCause.
 const (
 	mintErrorClassLookup       = "lookup_error"
+	mintErrorClassStanding     = "not_in_standing"
 	mintErrorClassTokenService = "token_service_error"
 )
 
@@ -65,7 +66,10 @@ type agentTokenIssueError struct {
 	Cause DenyCause
 	// Lookup is set for a store or lookup fault (503).
 	Lookup bool
-	Err    error
+	// Standing is set when the agent is held or not in good standing
+	// (ptone/scion#3433): 409 with the suspended message.
+	Standing bool
+	Err      error
 }
 
 func (e *agentTokenIssueError) Error() string {
@@ -78,6 +82,8 @@ func (e *agentTokenIssueError) Unwrap() error { return e.Err }
 // the lookup or token-service error class.
 func (e *agentTokenIssueError) errorClass() string {
 	switch {
+	case e.Standing:
+		return mintErrorClassStanding
 	case e.Cause != "":
 		return string(e.Cause)
 	case e.Lookup:
@@ -117,6 +123,14 @@ func (s *Server) AuthorizeAgentToken(ctx context.Context, agent *store.Agent) (A
 		}
 		return AgentTokenGrant{}, fmt.Errorf("%w: %w", errMintLookup, err)
 	}
+	// No grant for an agent that is held or not in good standing
+	// (ptone/scion#3433). A lookup fault grants nothing either.
+	if err := s.agentStanding(ctx, agent.ID); err != nil {
+		if errors.Is(err, errAgentNotInStanding) {
+			return AgentTokenGrant{}, err
+		}
+		return AgentTokenGrant{}, fmt.Errorf("%w: %w", errMintLookup, err)
+	}
 	return AgentTokenGrant{AgentID: agent.ID, ProjectID: agent.ProjectID, Scopes: scopes, Ancestry: agent.Ancestry}, nil
 }
 
@@ -142,7 +156,9 @@ func authorizeAgentTokenAt(ctx context.Context, gen AgentTokenGenerator, st stor
 		return &grant, nil
 	}
 	issueErr := &agentTokenIssueError{Site: site, Err: err}
-	if cause, structural := ceilingDenyCauseForError(err); structural {
+	if errors.Is(err, errAgentNotInStanding) {
+		issueErr.Standing = true
+	} else if cause, structural := ceilingDenyCauseForError(err); structural {
 		issueErr.Cause = cause
 	} else if errors.Is(err, errMintLookup) {
 		issueErr.Lookup = true
@@ -247,6 +263,14 @@ func writeAgentTokenIssueError(w http.ResponseWriter, err error) bool {
 		return false
 	}
 	switch {
+	case e.Standing && e.Site == mintSiteRefresh:
+		// The agent refreshing its own token gets the generic refusal,
+		// the same answer an agent with no access gets.
+		Forbidden(w)
+		return true
+	case e.Standing:
+		writeError(w, http.StatusConflict, ErrCodeConflict, agentSuspendedConflictMessage, nil)
+		return true
 	case e.Cause != "":
 		writeForbiddenDenial(w, agentTokenDenialMessage(e.Cause), DeniedByDelegationCeiling)
 		return true

@@ -208,7 +208,7 @@ var execSiteAllowlist = map[execSite]string{
 	// to exec it (root, on a runtime with no privilege boundary to enforce).
 	{
 		File: "cmd/sciontool/commands/harness.go",
-		Func: "runHarnessProvision",
+		Func: "runHarnessProvisionSteps",
 		Call: `exec.CommandContext(runCtx, prov.Command[0], prov.Command[1:]...)`,
 	}: "runs as the workload uid under RequirePrivilegeDrop (buildDroppedProvisionCmd drops or refuses); inherits the pre-start hook runner's credentials otherwise",
 

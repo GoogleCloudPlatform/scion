@@ -83,6 +83,7 @@ module.exports = {
                 'src/components/pages/onboarding.test.ts',
                 'src/components/pages/chat-hub-members.test.ts',
                 'src/components/shared/chat/chat-thread-peer-project.test.ts',
+                'src/components/pages/agent-detail-reincarnate.test.ts',
             ],
             parserOptions: { project: './src/components/tsconfig.component-tests.json' },
         },
