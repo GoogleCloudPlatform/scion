@@ -297,6 +297,7 @@ var PendingBearerOperations = []OperationID{
 	"agent.update",
 	"broker.read",
 	"chat.access",
+	"env.hub.list",
 	"env.read",
 	"gcp.identity.assign",
 	"gcp.identity.create",
