@@ -315,6 +315,28 @@ scion templates status
 
 Beyond the CLI, project templates are a **fully managed Hub-level resource** with full CRUD, SDK, and Web UI support. A connected Hub can import a whole repository of templates server-side via the **Load Templates** action in the Web UI, and imported templates can be browsed, edited, and deleted directly within the dashboard.
 
+### Refreshing a Hub template from its source
+
+A template the Hub imported from a GitHub folder URL remembers that **source URL**, and can be refreshed from it later. A refresh replaces the template's files with the current content of the source folder (a full overwrite, no merge):
+
+```bash
+# Refresh one Hub template from its stored source URL
+scion templates update code-reviewer
+
+# Refresh from a different GitHub folder, and store it as the new source URL
+scion templates update code-reviewer --url https://github.com/myorg/templates/tree/main/code-reviewer
+
+# Refresh every Hub template that has a GitHub source URL
+scion templates update --all
+
+# Choose a scope when the same name exists in several
+scion templates update code-reviewer --scope project
+```
+
+Refreshing works only for sources that are folders in a public GitHub repository (`https://github.com/<owner>/<repo>/tree/<branch>/<path>`). Built-in templates and templates created without a source URL cannot be refreshed: `--all` skips them, and the Web UI does not offer a refresh for them. The Hub checks the source URL each time, refuses URLs that include a username or password, and limits how large the download and the extracted folder may be. A refresh updates only the named template, even when the source folder holds several. It needs the same permission as importing a template into that scope.
+
+The Web UI offers the same action as **Refresh from Source** on a template's detail page, and **Refresh All from Source** on the templates list.
+
 For the condensed command list, see the [CLI reference](/scion/reference/cli/#template-management).
 
 ## Harness-configs
