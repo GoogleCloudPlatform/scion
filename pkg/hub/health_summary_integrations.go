@@ -117,23 +117,60 @@ func (s *Server) healthSummaryIntegrations(ctx context.Context, pluginRecordName
 	return out
 }
 
-// queryHealthSummaryIntegrations queries the named plugins concurrently and
-// waits at most healthIntegrationQueryTimeout (or until ctx ends) for all
-// of them. Queries are shared per plugin (healthIntegrationFlight): a
-// caller that arrives while a query for the same plugin is running waits
-// for that query's result, with its own deadline, instead of starting
-// another. The plugin manager calls take no context, so a hung plugin keeps
-// its one query running; every caller meanwhile reports it as not
-// reported when its own deadline passes. The result has one row per name,
-// in name order.
-func (s *Server) queryHealthSummaryIntegrations(ctx context.Context, mgr IntegrationManager, names []string) []HealthSummaryIntegration {
-	type result struct {
-		i   int
-		row HealthSummaryIntegration
+// integrationHealthFlight is one running health query for a plugin. row
+// is set before done is closed.
+type integrationHealthFlight struct {
+	done chan struct{}
+	row  HealthSummaryIntegration
+}
+
+// integrationHealthQuery returns the running health query for the named
+// plugin, starting one if none is running. The query runs in one goroutine
+// that ends when the plugin answers; it then drops itself from
+// healthIntegrationFlights, so the next caller starts a fresh query.
+// Callers only wait on done, so a caller that gives up leaves nothing
+// behind.
+func (s *Server) integrationHealthQuery(mgr IntegrationManager, name string) *integrationHealthFlight {
+	s.healthIntegrationMu.Lock()
+	defer s.healthIntegrationMu.Unlock()
+	if f, ok := s.healthIntegrationFlights[name]; ok {
+		return f
 	}
+	if s.healthIntegrationFlights == nil {
+		s.healthIntegrationFlights = map[string]*integrationHealthFlight{}
+	}
+	f := &integrationHealthFlight{done: make(chan struct{})}
+	s.healthIntegrationFlights[name] = f
+	go func() {
+		defer func() {
+			// A panicking plugin call must not take the hub down or
+			// leave the flight open: report the plugin as unknown.
+			if r := recover(); r != nil {
+				slog.Error("health summary: integration health query panicked", "integration", name, "panic", r)
+				f.row = healthSummaryIntegrationFromStatus(name, nil)
+			}
+			s.healthIntegrationMu.Lock()
+			delete(s.healthIntegrationFlights, name)
+			s.healthIntegrationMu.Unlock()
+			close(f.done)
+		}()
+		f.row = healthSummaryIntegrationFromStatus(name, getIntegrationStatus(mgr, name))
+	}()
+	return f
+}
+
+// queryHealthSummaryIntegrations reads the health of the named plugins,
+// waiting at most healthIntegrationQueryTimeout (or until ctx ends) in
+// total. Queries are shared per plugin (integrationHealthQuery): a caller
+// that arrives while a query for the same plugin is running waits for that
+// query's result, with its own deadline, instead of starting another. The
+// plugin manager calls take no context, so a hung plugin keeps its one
+// query running; every caller meanwhile reports it as not reported when
+// its own deadline passes. The caller starts no goroutine of its own. The
+// result has one row per name, in name order.
+func (s *Server) queryHealthSummaryIntegrations(ctx context.Context, mgr IntegrationManager, names []string) []HealthSummaryIntegration {
 	rows := make([]HealthSummaryIntegration, len(names))
-	done := make([]bool, len(names))
-	results := make(chan result, len(names))
+	flights := make([]*integrationHealthFlight, len(names))
 	for i, name := range names {
 		rows[i] = HealthSummaryIntegration{
 			Name:     name,
@@ -141,39 +178,32 @@ func (s *Server) queryHealthSummaryIntegrations(ctx context.Context, mgr Integra
 			Health:   healthIntegrationUnknown,
 			Reason:   healthIntegrationTimedOutReason,
 		}
-		ch := s.healthIntegrationFlight.DoChan(name, func() (interface{}, error) {
-			return healthSummaryIntegrationFromStatus(name, getIntegrationStatus(mgr, name)), nil
-		})
-		go func(i int) {
-			// The shared call always delivers one result on ch, so this
-			// goroutine ends when the plugin's query returns.
-			r := <-ch
-			if row, ok := r.Val.(HealthSummaryIntegration); ok {
-				results <- result{i: i, row: row}
-			}
-		}(i)
+		flights[i] = s.integrationHealthQuery(mgr, name)
 	}
-	pending := len(names)
-	if pending > 0 {
-		timer := time.NewTimer(healthIntegrationQueryTimeout)
-		defer timer.Stop()
-	wait:
-		for pending > 0 {
+	if len(names) == 0 {
+		return rows
+	}
+	timer := time.NewTimer(healthIntegrationQueryTimeout)
+	defer timer.Stop()
+	expired := false
+	for i, f := range flights {
+		if !expired {
 			select {
-			case r := <-results:
-				rows[r.i] = r.row
-				done[r.i] = true
-				pending--
+			case <-f.done:
+				rows[i] = f.row
+				continue
 			case <-timer.C:
-				break wait
+				expired = true
 			case <-ctx.Done():
-				break wait
+				expired = true
 			}
 		}
-	}
-	for i, name := range names {
-		if !done[i] {
-			slog.Warn("health summary: integration health not reported in time", "integration", name)
+		// Past the deadline: take only results that are already in.
+		select {
+		case <-f.done:
+			rows[i] = f.row
+		default:
+			slog.Warn("health summary: integration health not reported in time", "integration", names[i])
 		}
 	}
 	return rows

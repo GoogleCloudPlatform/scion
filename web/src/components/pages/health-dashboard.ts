@@ -95,7 +95,7 @@ interface HealthSummary {
    * Chat and messaging plugins; empty when none are configured, or when the
    * caller lacks hub.integrations.read (integrations_detail false).
    */
-  integrations?: HealthSummaryIntegration[];
+  integrations: HealthSummaryIntegration[];
   /** True when integrations and integration attention items carry identity. */
   integrations_detail: boolean;
   integration_counts: HealthSummaryIntegrationCounts;

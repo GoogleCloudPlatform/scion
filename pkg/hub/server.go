@@ -1501,10 +1501,12 @@ type Server struct {
 
 	// Plugin manager for broker integration admin API (nil = no integrations)
 	pluginManager IntegrationManager
-	// healthIntegrationFlight shares one health summary query per plugin
-	// among concurrent summaries (see queryHealthSummaryIntegrations), so
-	// a hung plugin has at most one query running.
-	healthIntegrationFlight singleflight.Group
+	// healthIntegrationFlights holds the running health summary query of
+	// each plugin, shared by concurrent summaries (see
+	// integrationHealthQuery), so a hung plugin has at most one query
+	// running. Guarded by healthIntegrationMu.
+	healthIntegrationMu      sync.Mutex
+	healthIntegrationFlights map[string]*integrationHealthFlight
 
 	// Web chat store for webchat_* tables (thread prefs, chat threads, etc.) — nil = disabled.
 	webChatStore WebChatStore

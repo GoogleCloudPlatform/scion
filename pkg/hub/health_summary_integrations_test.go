@@ -22,6 +22,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -457,6 +458,50 @@ func TestHandleHealthSummary_SlowIntegrationNotReported(t *testing.T) {
 	assert.Equal(t, int32(2), mgr.calls.Load())
 }
 
+// TestHandleHealthSummary_HungIntegrationNoGoroutineGrowth: summaries
+// polling a hung plugin leave no goroutine behind; only the plugin's single
+// running query remains until it returns.
+func TestHandleHealthSummary_HungIntegrationNoGoroutineGrowth(t *testing.T) {
+	orig := healthIntegrationQueryTimeout
+	healthIntegrationQueryTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { healthIntegrationQueryTimeout = orig })
+
+	srv, _ := testServer(t)
+	mgr := &slowHealthSummaryPluginDouble{
+		healthSummaryPluginDouble: newHealthSummaryPluginDouble("hung"),
+		slow:                      "hung",
+		release:                   make(chan struct{}),
+	}
+	t.Cleanup(func() { close(mgr.release) })
+	srv.SetPluginManager(mgr)
+
+	settled := func() int {
+		// Let request-scoped goroutines finish; take the lowest reading.
+		low := runtime.NumGoroutine()
+		for i := 0; i < 20; i++ {
+			time.Sleep(10 * time.Millisecond)
+			if n := runtime.NumGoroutine(); n < low {
+				low = n
+			}
+		}
+		return low
+	}
+
+	// The first summary starts the plugin's one query, which then hangs.
+	getHealthSummaryIntegrations(t, srv)
+	require.Equal(t, int32(1), mgr.calls.Load())
+	base := settled()
+
+	for i := 0; i < 10; i++ {
+		list, _ := getHealthSummaryIntegrations(t, srv)
+		assert.Equal(t, healthIntegrationTimedOutReason, findHealthSummaryIntegration(t, list, "hung").Reason)
+	}
+	// A per-request waiter would add 10; allow a little slack for
+	// unrelated background goroutines.
+	assert.LessOrEqual(t, settled(), base+3, "summaries against a hung plugin must not leave goroutines behind")
+	assert.Equal(t, int32(1), mgr.calls.Load(), "still one query for the hung plugin")
+}
+
 // gatedHealthSummaryPluginDouble holds every info query for the named
 // plugin until gate is closed, and counts the queries.
 type gatedHealthSummaryPluginDouble struct {
@@ -552,6 +597,9 @@ func TestHealthSummaryCanReadIntegrations_AgreesWithRouteGuard(t *testing.T) {
 		{"custom role with integrations.read", identity(withRead), nil, true},
 		{"custom role without integrations.read", identity(without), nil, false},
 		{"no identity", nil, nil, false},
+		{"broker identity (non-user)", NewBrokerIdentity(tid("hs-agree-broker")), nil, false},
+		{"custom role with integrations.read, user access token", identity(withRead), credKind(CredentialKindUAT), true},
+		{"custom role without integrations.read, user access token", identity(without), credKind(CredentialKindUAT), false},
 	}
 	meta := routeMetadataTable[healthSummaryIntegrationsRoute]
 	for _, tc := range cases {
