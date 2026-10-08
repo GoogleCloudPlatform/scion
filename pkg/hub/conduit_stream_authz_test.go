@@ -848,3 +848,29 @@ func TestConduitStreamAuthz_NoticeSentOutsideStreamLock(t *testing.T) {
 	<-advanced
 	assert.Equal(t, 2, f.check.callCount())
 }
+
+// TestConduitStreamAuthz_EarlyIntervalCheckRearms: an interval check that
+// fires before the deadline of a still-tracked stream whose timer is gone
+// re-arms it, idempotently: after repeated early checks exactly one timer
+// is pending, and the deadline still fires once, renewing by one interval.
+func TestConduitStreamAuthz_EarlyIntervalCheckRearms(t *testing.T) {
+	f := newDeadlineFixture(t, -1, time.Hour)
+	st, _, r := f.trackRenewable("u1", 1)
+	d0 := st.Deadline()
+	st.dmu.Lock()
+	st.timer.Stop()
+	st.dmu.Unlock()
+	require.True(t, f.clk.WaitFor(trackerWait, func(pending int) bool { return pending == 0 }))
+
+	f.clk.Advance(30 * time.Minute)
+	f.a.check(context.Background(), conduitAuthzTriggerInterval, st)
+	f.a.check(context.Background(), conduitAuthzTriggerInterval, st)
+	assert.Zero(t, f.check.callCount(), "an early interval check was evaluated")
+	assert.Equal(t, d0, st.Deadline())
+	require.True(t, f.clk.WaitFor(trackerWait, func(pending int) bool { return pending == 1 }),
+		"the early check did not re-arm exactly one timer")
+
+	f.clk.Advance(30 * time.Minute)
+	assert.Equal(t, 1, r.count(), "the deadline did not fire once")
+	assert.Equal(t, d0.Add(time.Hour), st.Deadline())
+}

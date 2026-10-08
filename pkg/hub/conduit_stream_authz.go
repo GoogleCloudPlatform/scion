@@ -444,9 +444,10 @@ func (a *conduitStreamAuthz) check(ctx context.Context, trigger string, st *cond
 		st.mu.Unlock()
 		return
 	}
-	if trigger == conduitAuthzTriggerInterval && !a.deadlineReached(st) {
+	if trigger == conduitAuthzTriggerInterval && !a.deadlineDue(st) {
 		// A timer outlived the deadline it was armed for (the stream was
-		// renewed or untracked meanwhile): there is nothing to enforce.
+		// renewed or untracked meanwhile), or fired early: there is
+		// nothing to enforce yet.
 		st.mu.Unlock()
 		return
 	}
@@ -560,12 +561,22 @@ func (a *conduitStreamAuthz) renew(st *conduitUserStream, detail string) (bool, 
 	return true, detail
 }
 
-// deadlineReached reports whether st is tracked with a deadline that has
-// been reached.
-func (a *conduitStreamAuthz) deadlineReached(st *conduitUserStream) bool {
+// deadlineDue reports whether st is tracked with a deadline that has been
+// reached. A tracked stream whose deadline is still ahead has its timer
+// (re)armed for that deadline, so an interval check that fires early
+// never leaves the stream without one; re-arming replaces any pending
+// timer, so it is idempotent.
+func (a *conduitStreamAuthz) deadlineDue(st *conduitUserStream) bool {
 	st.dmu.Lock()
 	defer st.dmu.Unlock()
-	return st.interval > 0 && !st.untracked && !a.cfg.Clock.Now().Before(st.deadline)
+	if st.interval <= 0 || st.untracked {
+		return false
+	}
+	if a.cfg.Clock.Now().Before(st.deadline) {
+		a.armDeadlineLocked(st)
+		return false
+	}
+	return true
 }
 
 func joinDetail(a, b string) string {
