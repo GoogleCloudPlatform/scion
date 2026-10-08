@@ -359,12 +359,30 @@ func TestGitHubSkillResolver_Parallel_DeadlineKeepsSerialOutcomes(t *testing.T) 
 	if err != nil {
 		t.Fatalf("NewGitHubResolutionCache: %v", err)
 	}
-	ft := &fakeSkillTransport{delay: func(name string) time.Duration {
-		if name == "slow" {
-			return time.Minute
-		}
-		return 0
-	}}
+	// A cold ref's fetch runs in a shared flight detached from the caller's
+	// ctx (see coalesceFetchAccept), and the caller returns on whichever of
+	// the flight's result or its own ctx.Done is ready first. A cold ref
+	// reaches the transport only after the deadline, so its listing is held
+	// until Resolve returns: otherwise a zero-delay fetch can finish before
+	// the caller looks, and the caller's select then picks between the two
+	// at random, serving cold-a instead of timing it out.
+	releaseCold := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseCold) }) }
+	defer release()
+	ft := &fakeSkillTransport{
+		delay: func(name string) time.Duration {
+			if name == "slow" {
+				return time.Minute
+			}
+			return 0
+		},
+		onList: func(name string) {
+			if strings.HasPrefix(name, "cold-") {
+				<-releaseCold
+			}
+		},
+	}
 	r := newFakeTransportResolver(ft)
 	r.resolutionCache = cache
 	r.maxConcurrent = 1
@@ -382,6 +400,7 @@ func TestGitHubSkillResolver_Parallel_DeadlineKeepsSerialOutcomes(t *testing.T) 
 	res, err := r.Resolve(ctx, []api.SkillReference{
 		skillRef("slow"), skillRef("cold-a"), skillRef("warm"), skillRef("cold-b"),
 	}, ResolveOpts{})
+	release()
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
