@@ -416,6 +416,9 @@ func (s *sqlStore) FinalizeVersion(ctx context.Context, artifactID string, seq i
 		return nil, ErrConflict
 	}
 	if base > 0 {
+		if base >= seq {
+			return nil, ErrStaleBase
+		}
 		var current sql.NullInt64
 		if err := tx.QueryRowContext(ctx, s.rebind(`SELECT current_seq FROM artifact WHERE id = ?`), artifactID).Scan(&current); err != nil {
 			return nil, fmt.Errorf("artifacts: read current version: %w", err)
@@ -425,12 +428,12 @@ func (s *sqlStore) FinalizeVersion(ctx context.Context, artifactID string, seq i
 		}
 		var between int
 		if err := tx.QueryRowContext(ctx, s.rebind(`SELECT COUNT(*) FROM artifact_version
-			WHERE artifact_id = ? AND seq > ? AND seq < ? AND state IN (?, ?)`),
-			artifactID, base, seq, VersionStatePending, VersionStateFinalizing).Scan(&between); err != nil {
+			WHERE artifact_id = ? AND seq > ? AND seq < ? AND kind = ? AND state IN (?, ?)`),
+			artifactID, base, seq, VersionKindPublish, VersionStatePending, VersionStateFinalizing).Scan(&between); err != nil {
 			return nil, fmt.Errorf("artifacts: read pending versions: %w", err)
 		}
 		if between > 0 {
-			return nil, ErrStaleBase
+			return nil, ErrPendingNewer
 		}
 	}
 	if err := s.insertFiles(ctx, tx, versionID, extra); err != nil {

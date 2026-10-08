@@ -615,7 +615,8 @@ func TestReviewBase(t *testing.T) {
 			t.Fatalf("seqs %d %d", pend.Version.Seq, seq)
 		}
 		r := f.result(f.finalizeReview(userU, seq, 1))
-		if r.code != http.StatusConflict || !strings.Contains(r.body, CodeStaleReview) {
+		if r.code != http.StatusConflict || !strings.Contains(r.body, CodeStaleReview) ||
+			!strings.Contains(r.body, "a newer version of the artifact is being published") {
 			t.Fatalf("pending newer version: %d %s", r.code, r.body)
 		}
 		if f.current() != 1 || f.state(seq) != VersionStateFailed {
@@ -632,6 +633,48 @@ func TestReviewBase(t *testing.T) {
 		}
 		if f.current() != 2 {
 			t.Fatalf("current %d, want 2", f.current())
+		}
+	})
+	t.Run("an abandoned review does not block another", func(t *testing.T) {
+		f := newReviewFixture(t)
+		// A review of v1 is left pending (an upload that never finished).
+		abandoned := f.startReview(userU, with(f.v1, "plan.md", reviewMarked), "plan.md")
+		seq, r := f.review(userU, with(f.v1, "plan.md", reviewMarked), "plan.md")
+		if r.code != http.StatusOK {
+			t.Fatalf("second review: %d %s", r.code, r.body)
+		}
+		if f.current() != seq || f.state(abandoned) != VersionStatePending {
+			t.Fatalf("current %d, abandoned %q", f.current(), f.state(abandoned))
+		}
+	})
+	t.Run("base at or above the review's own seq", func(t *testing.T) {
+		f := newReviewFixture(t)
+		v2 := with(f.v1, "plan.md", reviewParent)
+		v2["chart.png"] = []byte("\x89PNG\r\n\x1a\nother")
+		f.publishBundle(agentA, "/api/v1/artifacts/"+f.id+"/versions", v2.manifest("plan.md"), v2)
+		// Reviews seq 3 (marks only) and seq 4 (with an unmarked edit) are
+		// made against v2; then v5, with the same text as v2, is published.
+		seq := f.startReview(userU, with(v2, "plan.md", reviewMarked), "plan.md")
+		edited := strings.Replace(reviewMarked, "Owners", "Owner", 1)
+		seqEdited := f.startReview(userU, with(v2, "plan.md", edited), "plan.md")
+		f.publishBundle(agentA, "/api/v1/artifacts/"+f.id+"/versions", v2.manifest("plan.md"), bundle{})
+		if seq != 3 || seqEdited != 4 || f.current() != 5 {
+			t.Fatalf("seqs %d %d current %d", seq, seqEdited, f.current())
+		}
+		// Naming v5 as the base would pass the text check, but the review
+		// could only become a ready, non-current version under v5.
+		r := f.result(f.finalizeReview(userU, seq, 5))
+		if r.code != http.StatusConflict || !strings.Contains(r.body, CodeStaleReview) {
+			t.Fatalf("base above the review: %d %s", r.code, r.body)
+		}
+		if f.current() != 5 || f.state(seq) != VersionStateFailed || len(f.notices) != 0 {
+			t.Fatalf("current %d state %q notices %d", f.current(), f.state(seq), len(f.notices))
+		}
+		// The handler refuses it before comparing text: with an unmarked
+		// edit it is still a 409, not a 422.
+		r = f.result(f.finalizeReview(userU, seqEdited, 5))
+		if r.code != http.StatusConflict || !strings.Contains(r.body, CodeStaleReview) {
+			t.Fatalf("base above the review with an unmarked edit: %d %s", r.code, r.body)
 		}
 	})
 	t.Run("invalid body answers the same for every id", func(t *testing.T) {

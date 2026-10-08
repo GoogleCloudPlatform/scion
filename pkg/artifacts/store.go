@@ -37,6 +37,10 @@ var ErrTooManyPending = errors.New("artifacts: too many pending versions")
 // version is no longer the base version the caller checked against.
 var ErrStaleBase = errors.New("artifacts: current version changed")
 
+// ErrPendingNewer is returned by FinalizeVersion when a publish version
+// newer than the base is still pending or finalizing.
+var ErrPendingNewer = errors.New("artifacts: a newer version is being published")
+
 // Version kinds.
 const (
 	VersionKindPublish = "publish"
@@ -221,11 +225,13 @@ type Store interface {
 	// fetched remote images) and advances the artifact's current version to
 	// seq unless a later one is already current. It returns ErrConflict when
 	// the version is not finalizing under the given claim, and the updated
-	// artifact otherwise. When base is above 0, the artifact's current
-	// version must still be base and no version between base and seq may
-	// be pending or finalizing, both checked under the same lock that
-	// advances the current version; otherwise it returns ErrStaleBase and
-	// changes nothing.
+	// artifact otherwise. When base is above 0, base must be below seq and
+	// still the artifact's current version (otherwise ErrStaleBase), and no
+	// publish version between base and seq may be pending or finalizing
+	// (otherwise ErrPendingNewer), all checked under the same lock that
+	// advances the current version; on either error nothing changes.
+	// Pending review versions do not count: a review never shadows another
+	// version, because its own base check refuses it.
 	FinalizeVersion(ctx context.Context, artifactID string, seq int, claim time.Time, extra []File, base int) (*Artifact, error)
 
 	// DiscardFinalize fails the claimed (finalizing) version seq of an
