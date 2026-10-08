@@ -109,7 +109,8 @@ type PendingVersionResponse struct {
 type UploadInfo struct {
 	// Required lists the manifest paths whose bytes must be uploaded with
 	// PUT .../versions/{seq}/files/{path}. A file identical to one of the
-	// artifact's current version needs no upload.
+	// artifact's current version needs no upload, and of several files with
+	// the same bytes only one is listed (uploading it covers the others).
 	Required []string `json:"required"`
 }
 

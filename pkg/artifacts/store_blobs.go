@@ -154,9 +154,8 @@ func (s *sqlStore) ReclaimBlobs(ctx context.Context, cutoff time.Time, limit int
 }
 
 // reclaimOne deletes one blob if, under its state row's lock, it is still
-// marked unreferenced since at or before cutoff and untouched since cutoff
-// (a writer touches before it relies on the blob and keeps the mark until
-// it has stored the bytes again).
+// marked unreferenced since at or before cutoff, untouched since cutoff (a
+// writer touches before it uploads) and unreferenced.
 func (s *sqlStore) reclaimOne(ctx context.Context, digest string, cutoff any, del func(string, int64) error) (bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {

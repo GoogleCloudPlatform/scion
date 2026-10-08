@@ -24,6 +24,8 @@ import (
 	"io"
 	"math/rand"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -156,8 +158,8 @@ func TestBlobSweepTouchProtects(t *testing.T) {
 		if n, err := st.ReclaimBlobs(ctx, t0.Add(time.Minute), 10, del); err != nil || n != 0 {
 			t.Fatalf("touched blob reclaimed: %d %v", n, err)
 		}
-		// The touch keeps the mark; the blob is spared until the touch is
-		// older than the cutoff, then reclaimable.
+		// The blob is spared until the touch is older than the cutoff,
+		// then reclaimable.
 		if n, _ := st.ReclaimBlobs(ctx, t0.Add(59*time.Minute), 10, del); n != 0 {
 			t.Fatalf("reclaimed within the touch's grace")
 		}
@@ -548,6 +550,8 @@ type versionedStorage struct {
 	failUploads int
 	// beforeUpload, when set, runs at the start of every upload.
 	beforeUpload func()
+	// lastOpts are the options of the last upload.
+	lastOpts storage.UploadOptions
 	// queued are late deletes: path and generation.
 	queued []struct {
 		path string
@@ -567,10 +571,18 @@ func (v *versionedStorage) Upload(ctx context.Context, p string, r io.Reader, o 
 		hook()
 	}
 	v.mu.Lock()
+	v.lastOpts = o
 	if v.failUploads > 0 {
 		v.failUploads--
 		v.mu.Unlock()
-		return nil, errors.New("upload failed")
+		// The write fails part way, through the real local write path:
+		// half the bytes, then an error.
+		data, _ := io.ReadAll(r)
+		_, err := v.LocalStorage.Upload(ctx, p, io.MultiReader(bytes.NewReader(data[:len(data)/2]), errReader{}), o)
+		if err == nil {
+			err = errors.New("upload failed")
+		}
+		return nil, err
 	}
 	v.mu.Unlock()
 	obj, err := v.LocalStorage.Upload(ctx, p, r, o)
@@ -745,14 +757,28 @@ func TestGCDeleteTimeoutDefault(t *testing.T) {
 	}
 }
 
-// blobReadable reports whether vs holds digest's blob.
+// errReader fails every read.
+type errReader struct{}
+
+func (errReader) Read([]byte) (int, error) { return 0, errors.New("connection reset") }
+
+// blobReadable reports whether vs holds digest's blob with exactly the
+// bytes the digest names (not a partial or torn object).
 func blobReadable(t *testing.T, vs *versionedStorage, d string) bool {
 	t.Helper()
-	ok, err := vs.Exists(context.Background(), BlobPath("hub-1", d))
+	rc, _, err := vs.Download(context.Background(), BlobPath("hub-1", d))
+	if errors.Is(err, storage.ErrNotFound) {
+		return false
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
-	return ok
+	defer func() { _ = rc.Close() }()
+	b, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sha(b) == d
 }
 
 // liveDigests returns the digests referenced by ready, pending or
@@ -790,17 +816,18 @@ func staleOrphan(t *testing.T, f *fixture, vs *versionedStorage, g *BlobSweeper,
 	}
 }
 
-// TestBlobLateDeleteAfterFailedRestore: a publish that finds the blob
-// marked but fails to store it again leaves the mark, so the next publish
-// stores it again too, and the late delete of the old generation does not
-// remove the bytes it relies on.
-func TestBlobLateDeleteAfterFailedRestore(t *testing.T) {
+// TestBlobLateDeleteAfterFailedUpload: after a sweep's delete that reaches
+// the object store late, a publish whose upload fails and a later publish
+// of the same bytes: the later publish uploads (every write does), so the
+// late delete of the old generation does not remove the bytes it relies
+// on.
+func TestBlobLateDeleteAfterFailedUpload(t *testing.T) {
 	f := newFixture(t, false)
 	ctx := context.Background()
 	vs := newVersionedStorage(f.local)
 	f.svc.SetBlobStorage(vs, "hub-1")
 	g := &BlobSweeper{}
-	body := []byte("bytes swept late, re-stored after a failure")
+	body := []byte("bytes swept late, uploaded again after a failure")
 	staleOrphan(t, f, vs, g, body)
 	vs.late = true
 	if _, _, err := g.Sweep(ctx, f.store, vs, "hub-1", DefaultGCGrace, time.Now()); err == nil {
@@ -822,10 +849,9 @@ func TestBlobLateDeleteAfterFailedRestore(t *testing.T) {
 	}
 }
 
-// TestBlobLateDeleteTwoPublishers: while one publisher that found the blob
-// marked is storing it again (and fails), another publishes the same
-// bytes; the second also stores them again, so the late delete of the old
-// generation leaves them.
+// TestBlobLateDeleteTwoPublishers: while one publisher's upload is in
+// progress (and then fails), another publishes the same bytes and uploads
+// them too, so the late delete of the old generation leaves them.
 func TestBlobLateDeleteTwoPublishers(t *testing.T) {
 	f := newFixture(t, false)
 	ctx := context.Background()
@@ -980,6 +1006,11 @@ func TestBlobGCInterleavings(t *testing.T) {
 			case 12, 13: // a two-step publish: create, maybe a sweep, PUT (ok or failing), finalize
 				body := content()
 				files := bundle{"m.md": body}
+				if op == 13 {
+					// The same bytes under two paths in one manifest.
+					files["copy/m.md"] = body
+					files["n.md"] = content()
+				}
 				req := files.manifest("m.md")
 				req.Scope = "project-1"
 				rec := f.postJSON(&userU, "/api/v1/artifacts", req)
@@ -1022,6 +1053,15 @@ func TestBlobGCInterleavings(t *testing.T) {
 				}
 				cf := cur.Version.Files[0]
 				req := CreateVersionRequest{Entry: cf.Path, Files: []ManifestFile{{Path: cf.Path, Size: cf.Size, SHA256: cf.SHA256}}}
+				var extra []byte
+				if rng.Intn(2) == 0 {
+					// A new path with the carried file's bytes, uploaded.
+					rc := f.do(&userU, http.MethodGet, "/api/v1/artifacts/"+id+"/files/"+cf.Path, nil, nil)
+					if rc.Code == http.StatusOK {
+						extra = rc.Body.Bytes()
+						req.Files = append(req.Files, ManifestFile{Path: "extra-" + strconv.Itoa(step) + ".md", Size: int64(len(extra)), SHA256: sha(extra)})
+					}
+				}
 				rec := f.postJSON(&userU, "/api/v1/artifacts/"+id+"/versions", req)
 				if rec.Code != http.StatusCreated {
 					break
@@ -1029,6 +1069,9 @@ func TestBlobGCInterleavings(t *testing.T) {
 				pend := decodeInto[PendingVersionResponse](t, rec)
 				if rng.Intn(2) == 0 {
 					pass([]int{0, 1, 1, 2}[rng.Intn(4)])
+				}
+				for _, p := range pend.Upload.Required {
+					f.put(userU, id, pend.Version.Seq, p, extra)
 				}
 				f.finalize(userU, id, pend.Version.Seq)
 			}
@@ -1136,5 +1179,138 @@ func TestBlobCarryForwardSharesObjectAndSurvivesSweeps(t *testing.T) {
 		if !blobReadable(t, vs, d) {
 			t.Errorf("blob %s of the new version is not readable", d)
 		}
+	}
+}
+
+// TestBlobWriteIsIdempotentAndFailuresSurface: blob writes are marked
+// idempotent (so a provider may retry them), and a write that still fails
+// fails its request: the file stays missing and the version cannot be
+// finalized, so no version becomes ready without its bytes.
+func TestBlobWriteIsIdempotentAndFailuresSurface(t *testing.T) {
+	f := newFixture(t, false)
+	vs := newVersionedStorage(f.local)
+	f.svc.SetBlobStorage(vs, "hub-1")
+	f.publish(userU, "a.md", []byte("idempotent"), "scope=project-1")
+	if !vs.lastOpts.Idempotent {
+		t.Errorf("blob write not marked idempotent: %+v", vs.lastOpts)
+	}
+	files := bundle{"b.md": []byte("upload that fails")}
+	req := files.manifest("b.md")
+	req.Scope = "project-1"
+	pend := f.createPending(userU, "/api/v1/artifacts", req)
+	vs.failUploads = 1
+	if rec := f.put(userU, pend.Artifact.ID, 1, "b.md", files["b.md"]); rec.Code != http.StatusInternalServerError {
+		t.Fatalf("PUT with a failing write: %d", rec.Code)
+	}
+	rec := f.finalize(userU, pend.Artifact.ID, 1)
+	if rec.Code != http.StatusConflict || errCode(t, rec) != "incomplete" {
+		t.Fatalf("finalize after a failed write: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := f.put(userU, pend.Artifact.ID, 1, "b.md", files["b.md"]); rec.Code != http.StatusNoContent {
+		t.Fatalf("retried PUT: %d", rec.Code)
+	}
+	if rec := f.finalize(userU, pend.Artifact.ID, 1); rec.Code != http.StatusOK {
+		t.Fatalf("finalize: %d", rec.Code)
+	}
+	if !blobReadable(t, vs, sha(files["b.md"])) {
+		t.Errorf("finalized file not readable")
+	}
+}
+
+// TestManifestSameDigestUploadsOnce: files with the same bytes in one
+// manifest are listed once in upload.required, and uploading that one
+// covers the others.
+func TestManifestSameDigestUploadsOnce(t *testing.T) {
+	f := newFixture(t, false)
+	vs := newVersionedStorage(f.local)
+	f.svc.SetBlobStorage(vs, "hub-1")
+	same := []byte("shared bytes")
+	files := bundle{"a.md": same, "copy/a.md": same, "b.md": []byte("other")}
+	req := files.manifest("a.md")
+	req.Scope = "project-1"
+	pend := f.createPending(userU, "/api/v1/artifacts", req)
+	if len(pend.Upload.Required) != 2 {
+		t.Fatalf("required = %v, want one path per digest", pend.Upload.Required)
+	}
+	for _, p := range pend.Upload.Required {
+		if rec := f.put(userU, pend.Artifact.ID, 1, p, files[p]); rec.Code != http.StatusNoContent {
+			t.Fatalf("PUT %s: %d", p, rec.Code)
+		}
+	}
+	if rec := f.finalize(userU, pend.Artifact.ID, 1); rec.Code != http.StatusOK {
+		t.Fatalf("finalize: %d %s", rec.Code, rec.Body.String())
+	}
+	if vs.next != 2 {
+		t.Errorf("%d uploads, want 2 (one per digest)", vs.next)
+	}
+	for _, p := range []string{"a.md", "copy/a.md", "b.md"} {
+		rec := f.do(&userU, http.MethodGet, "/api/v1/artifacts/"+pend.Artifact.ID+"/files/"+p, nil, nil)
+		if rec.Code != http.StatusOK || rec.Body.String() != string(files[p]) {
+			t.Errorf("GET %s: %d", p, rec.Code)
+		}
+	}
+}
+
+// TestCarryForwardWithSameDigestUpload: a new version carrying a file
+// forward and adding another path with the same bytes uploads that path
+// and both are readable.
+func TestCarryForwardWithSameDigestUpload(t *testing.T) {
+	f := newFixture(t, false)
+	vs := newVersionedStorage(f.local)
+	f.svc.SetBlobStorage(vs, "hub-1")
+	same := []byte("bytes carried and added again")
+	v1 := bundle{"a.md": same}
+	req := v1.manifest("a.md")
+	req.Scope = "project-1"
+	id := f.publishBundle(userU, "/api/v1/artifacts", req, v1).Artifact.ID
+	v2 := bundle{"a.md": same, "b.md": same}
+	pend := f.createPending(userU, "/api/v1/artifacts/"+id+"/versions", v2.manifest("a.md"))
+	if len(pend.Upload.Required) != 1 || pend.Upload.Required[0] != "b.md" {
+		t.Fatalf("required = %v, want b.md", pend.Upload.Required)
+	}
+	if rec := f.put(userU, id, 2, "b.md", same); rec.Code != http.StatusNoContent {
+		t.Fatalf("PUT: %d", rec.Code)
+	}
+	if rec := f.finalize(userU, id, 2); rec.Code != http.StatusOK {
+		t.Fatalf("finalize: %d", rec.Code)
+	}
+	for _, p := range []string{"a.md", "b.md"} {
+		if rec := f.do(&userU, http.MethodGet, "/api/v1/artifacts/"+id+"/versions/2/files/"+p, nil, nil); rec.Code != http.StatusOK || rec.Body.String() != string(same) {
+			t.Errorf("GET %s: %d", p, rec.Code)
+		}
+	}
+}
+
+// TestBlobSweepRemovesStaleUploadTemps: at the start of each walk the
+// sweep removes temporary upload files a crash left in the blob
+// directories, and leaves fresh ones (an upload in progress).
+func TestBlobSweepRemovesStaleUploadTemps(t *testing.T) {
+	f := newFixture(t, false)
+	ctx := context.Background()
+	d := sha([]byte("x"))
+	dir := filepath.Dir(f.local.ObjectFSPath(BlobPath("hub-1", d)))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stale := filepath.Join(dir, storage.UploadTempPrefix+d+"-1")
+	fresh := filepath.Join(dir, storage.UploadTempPrefix+d+"-2")
+	for _, p := range []string{stale, fresh} {
+		if err := os.WriteFile(p, []byte("partial"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := time.Now().Add(-2 * staleUploadTempAge)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatal(err)
+	}
+	g := &BlobSweeper{}
+	if _, _, err := g.Sweep(ctx, f.store, f.local, "hub-1", DefaultGCGrace, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Errorf("stale temporary upload file kept")
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Errorf("fresh temporary upload file removed: %v", err)
 	}
 }

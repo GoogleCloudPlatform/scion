@@ -40,7 +40,7 @@ func pendingArtifact(t *testing.T, st Store, key string, paths ...string) (*Arti
 		FileCount: len(paths), TotalBytes: int64(len(paths)), CreatedAt: now, State: VersionStatePending}
 	var files []File
 	for _, p := range paths {
-		files = append(files, File{VersionID: v.ID, Path: p, Size: 1, SHA256: strings.Repeat("ab", 32), MediaType: "text/plain", Pending: true})
+		files = append(files, File{VersionID: v.ID, Path: p, Size: 1, SHA256: sha([]byte(p)), MediaType: "text/plain", Pending: true})
 	}
 	if err := st.CreatePending(context.Background(), a, v, files, nil); err != nil {
 		t.Fatalf("CreatePending: %v", err)

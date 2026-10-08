@@ -260,7 +260,10 @@ func storeBlob(ctx context.Context, b backend, digest, mediaType string, open fu
 	if err != nil {
 		return err
 	}
-	if _, err := b.blobs.Upload(ctx, BlobPath(b.hubID, digest), body, storage.UploadOptions{ContentType: mediaType}); err != nil {
+	// Idempotent: the object always gets the same bytes, so the provider
+	// may retry a transient failure (on GCS, a write rate limit on the one
+	// object) a bounded number of times; the last error is returned.
+	if _, err := b.blobs.Upload(ctx, BlobPath(b.hubID, digest), body, storage.UploadOptions{ContentType: mediaType, Idempotent: true}); err != nil {
 		return fmt.Errorf("upload blob: %w", err)
 	}
 	return nil

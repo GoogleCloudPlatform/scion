@@ -118,26 +118,13 @@ func (s *LocalStorage) Upload(ctx context.Context, objectPath string, reader io.
 		return nil, fmt.Errorf("failed to create directory: %w", err)
 	}
 
-	// Create the file
-	file, err := os.Create(fullPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create file: %w", err)
-	}
-	defer func() { _ = file.Close() }()
-
-	// Copy data and compute hash
+	// Write to a temporary file beside the target and rename it over the
+	// target once complete, so a reader never sees a partial file and a
+	// failed or interrupted write leaves the old content in place.
 	hash := sha256.New()
-	tee := io.TeeReader(reader, hash)
-
-	size, err := io.Copy(file, tee)
+	size, info, err := writeFileAtomic(fullPath, io.TeeReader(reader, hash))
 	if err != nil {
-		return nil, fmt.Errorf("failed to write data: %w", err)
-	}
-
-	// Get file info
-	info, err := file.Stat()
-	if err != nil {
-		return nil, fmt.Errorf("failed to stat file: %w", err)
+		return nil, err
 	}
 
 	etag := hex.EncodeToString(hash.Sum(nil))
@@ -250,8 +237,9 @@ func (s *LocalStorage) List(ctx context.Context, opts ListOptions) (*ListResult,
 			return filepath.SkipDir
 		}
 
-		// Skip directories
-		if info.IsDir() {
+		// Skip directories, and temporary files of uploads in progress
+		// (or stranded by a crash).
+		if info.IsDir() || strings.HasPrefix(info.Name(), UploadTempPrefix) {
 			return nil
 		}
 
@@ -351,20 +339,11 @@ func (s *LocalStorage) Copy(ctx context.Context, srcPath, dstPath string) (*Obje
 		return nil, fmt.Errorf("failed to create destination directory: %w", err)
 	}
 
-	// Create destination file
-	dst, err := os.Create(dstFullPath)
+	// Copy through a temporary file and rename it over the destination.
+	size, info, err := writeFileAtomic(dstFullPath, src)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create destination file: %w", err)
+		return nil, err
 	}
-	defer func() { _ = dst.Close() }()
-
-	// Copy content
-	size, err := io.Copy(dst, src)
-	if err != nil {
-		return nil, fmt.Errorf("failed to copy data: %w", err)
-	}
-
-	info, _ := dst.Stat()
 
 	return &Object{
 		Name:    dstPath,
@@ -382,3 +361,84 @@ func (s *LocalStorage) Close() error {
 
 // Ensure LocalStorage implements Storage interface.
 var _ Storage = (*LocalStorage)(nil)
+
+// UploadTempPrefix starts the name of the temporary file an upload writes
+// before renaming it over its target. Such files are never listed, and
+// RemoveStaleTemps deletes the ones a crash left behind.
+const UploadTempPrefix = ".scion-upload-"
+
+// writeFileAtomic writes r to a temporary file in path's directory, syncs
+// it and renames it over path. On any error the temporary file is removed
+// and path is left as it was.
+func writeFileAtomic(path string, r io.Reader) (int64, os.FileInfo, error) {
+	tmp, err := os.CreateTemp(filepath.Dir(path), UploadTempPrefix+filepath.Base(path)+"-*")
+	if err != nil {
+		return 0, nil, fmt.Errorf("failed to create file: %w", err)
+	}
+	tmpName := tmp.Name()
+	done := false
+	defer func() {
+		if !done {
+			_ = tmp.Close()
+			_ = os.Remove(tmpName)
+		}
+	}()
+	size, err := io.Copy(tmp, r)
+	if err != nil {
+		return 0, nil, fmt.Errorf("failed to write data: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		return 0, nil, fmt.Errorf("failed to sync file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return 0, nil, fmt.Errorf("failed to close file: %w", err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		_ = os.Remove(tmpName)
+		done = true
+		return 0, nil, fmt.Errorf("failed to move file into place: %w", err)
+	}
+	done = true
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0, nil, fmt.Errorf("failed to stat file: %w", err)
+	}
+	return size, info, nil
+}
+
+// TempCleaner is implemented by providers whose writes leave temporary
+// files a crash can strand (local storage).
+type TempCleaner interface {
+	// RemoveStaleTemps deletes the temporary upload files under prefix
+	// last modified before olderThan ago, and returns how many it deleted.
+	RemoveStaleTemps(ctx context.Context, prefix string, olderThan time.Duration) (int, error)
+}
+
+// RemoveStaleTemps implements TempCleaner.
+func (s *LocalStorage) RemoveStaleTemps(ctx context.Context, prefix string, olderThan time.Duration) (int, error) {
+	root := s.fullPath(prefix)
+	cutoff := time.Now().Add(-olderThan)
+	n := 0
+	err := filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return err
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if info.IsDir() || !strings.HasPrefix(info.Name(), UploadTempPrefix) || !info.ModTime().Before(cutoff) {
+			return nil
+		}
+		if err := os.Remove(p); err == nil {
+			n++
+		}
+		return nil
+	})
+	if err != nil && !os.IsNotExist(err) {
+		return n, fmt.Errorf("failed to remove stale temporary files: %w", err)
+	}
+	return n, nil
+}

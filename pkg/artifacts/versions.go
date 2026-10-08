@@ -255,8 +255,12 @@ func pendingVersion(artifactID string, req *CreateVersionRequest, kind, ref stri
 
 func writePending(w http.ResponseWriter, a *Artifact, v *Version, files []File) {
 	resp := PendingVersionResponse{Artifact: artifactInfo(a), Version: versionInfo(v, files), Upload: UploadInfo{Required: []string{}}}
+	// One upload per digest: files with the same bytes share the stored
+	// object, and uploading one marks the others received.
+	seen := map[string]bool{}
 	for _, f := range files {
-		if f.Pending {
+		if f.Pending && !seen[f.SHA256] {
+			seen[f.SHA256] = true
 			resp.Upload.Required = append(resp.Upload.Required, f.Path)
 		}
 	}

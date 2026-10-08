@@ -83,6 +83,10 @@ const (
 	gcReclaimBatch = 200
 )
 
+// staleUploadTempAge is how old a temporary upload file must be before the
+// sweep removes it; an upload in progress is far younger.
+const staleUploadTempAge = time.Hour
+
 // gcDeleteTimeout bounds one blob delete. The delete runs inside the store
 // transaction holding the blob's state, so it stays below SQLite's busy
 // timeout (5s in the hub's DSN) and a slow object store cannot make other
@@ -136,6 +140,15 @@ func (g *BlobSweeper) Sweep(ctx context.Context, st Store, blobs storage.Storage
 	}
 	grace = max(grace, MinGCGrace)
 	prefix := "hubs/" + hubID + "/artifacts/blobs/sha256/"
+	if g.cursor == "" {
+		// At the start of each walk, remove temporary upload files a
+		// crash left behind (local storage writes through one).
+		if tc, ok := blobs.(storage.TempCleaner); ok {
+			if _, err := tc.RemoveStaleTemps(ctx, prefix, staleUploadTempAge); err != nil {
+				return 0, 0, err
+			}
+		}
+	}
 	res, err := blobs.List(ctx, storage.ListOptions{Prefix: prefix, MaxResults: gcListBatch, StartOffset: g.cursor})
 	if err != nil {
 		return 0, 0, err

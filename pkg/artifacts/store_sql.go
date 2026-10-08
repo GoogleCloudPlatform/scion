@@ -368,22 +368,38 @@ func (s *sqlStore) GetArtifactByKey(ctx context.Context, scopeKind, scopeRef, ow
 
 // MarkReceived implements Store.
 func (s *sqlStore) MarkReceived(ctx context.Context, versionID, path, mediaType string) error {
-	res, err := s.db.ExecContext(ctx, s.rebind(`UPDATE artifact_file SET received = ?, media_type = ?
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("artifacts: begin mark received: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.ExecContext(ctx, s.rebind(`UPDATE artifact_file SET received = ?, media_type = ?
 		WHERE version_id = ? AND path = ? AND origin = ?
 		AND EXISTS (SELECT 1 FROM artifact_version WHERE id = ? AND state = ?)`),
 		true, mediaType, versionID, path, FileOriginUpload, versionID, VersionStatePending)
 	if err != nil {
 		return fmt.Errorf("artifacts: mark received: %w", err)
 	}
-	if n, err := res.RowsAffected(); err != nil {
+	n, err := res.RowsAffected()
+	if err != nil {
 		return fmt.Errorf("artifacts: mark received: %w", err)
-	} else if n == 1 {
-		return nil
 	}
-	if _, err := s.GetFile(ctx, versionID, path); err != nil {
-		return err
+	if n != 1 {
+		_ = tx.Rollback()
+		if _, err := s.GetFile(ctx, versionID, path); err != nil {
+			return err
+		}
+		return ErrConflict
 	}
-	return ErrConflict
+	// Files of the same version with the same digest share the one stored
+	// object, so they arrive together (one upload per digest).
+	if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE artifact_file SET received = ?
+		WHERE version_id = ? AND origin = ? AND received = ?
+		AND sha256 = (SELECT sha256 FROM artifact_file WHERE version_id = ? AND path = ?)`),
+		true, versionID, FileOriginUpload, false, versionID, path); err != nil {
+		return fmt.Errorf("artifacts: mark same-digest files received: %w", err)
+	}
+	return commit(tx)
 }
 
 // FinalizeVersion implements Store.
