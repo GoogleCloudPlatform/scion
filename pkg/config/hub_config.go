@@ -1451,6 +1451,7 @@ func parseCommaSeparatedList(s string) []string {
 var snakeCaseFields = map[string]string{
 	// Layer-1 compound segments (from opsettings registry)
 	"adminemails":                "admin_emails",
+	"agentsecrets":               "agent_secrets",
 	"agentendpoint":              "agent_endpoint",
 	"agentrunscope":              "agent_run_scope",
 	"agentrunscopelegacyuntil":   "agent_run_scope_legacy_until",
@@ -1465,10 +1466,15 @@ var snakeCaseFields = map[string]string{
 	"defaultuserrole":            "default_user_role",
 	"defaultmaxmodelcalls":       "default_max_model_calls",
 	"defaultmaxturns":            "default_max_turns",
+	"enforcebrokerquotas":        "enforce_broker_quotas",
 	"defaultscratchpad":          "default_scratchpad",
 	"defaultresources":           "default_resources",
 	"defaulttemplate":            "default_template",
 	"githubapp":                  "github_app",
+	"homestorage":                "home_storage",
+	"oidclogin":                  "oidc_login",
+	"shareddirstorage":           "shared_dir_storage",
+	"userscopeonly":              "user_scope_only",
 	"harnessconfigs":             "harness_configs",
 	"hubname":                    "hub_name",
 	"imageregistry":              "image_registry",
@@ -1660,6 +1666,8 @@ var serverSubKeys = map[string]bool{
 	"notification_channels": true, "message_broker": true,
 	"native_chat": true, "plugins": true, "github_app": true,
 	"mode": true, "env": true, "federation": true,
+	"shared_dir_storage": true, "home_storage": true, "maintenance": true,
+	"scheduler": true, "oidc_login": true, "oidc": true,
 }
 
 // serverEnvToOpsettingsKey maps a SCION_SERVER_* env var key (after prefix

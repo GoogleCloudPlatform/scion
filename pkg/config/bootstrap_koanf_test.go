@@ -17,6 +17,8 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -134,6 +136,15 @@ func TestServerEnvToOpsettingsKey(t *testing.T) {
 		{"HARNESSCONFIGS_CLAUDE_SYSTEMPROMPTMODE", "harness_configs.claude.system_prompt_mode"},
 		{"HARNESSCONFIGS_CLAUDE_ENVTEMPLATE", "harness_configs.claude.env_template"},
 		{"HARNESSCONFIGS_CLAUDE_NOAUTH", "harness_configs.claude.no_auth"},
+		// ptone/scion#3859: keys now mapped.
+		{"AGENTSECRETS_USERSCOPEONLY", "agent_secrets.user_scope_only"},
+		{"QUOTAS_ENFORCEBROKERQUOTAS", "quotas.enforce_broker_quotas"},
+		{"SHAREDDIRSTORAGE", "server.shared_dir_storage"},
+		{"HOMESTORAGE", "server.home_storage"},
+		{"MAINTENANCE", "server.maintenance"},
+		{"SCHEDULER", "server.scheduler"},
+		{"OIDCLOGIN_ENABLED", "server.oidc_login.enabled"},
+		{"OIDC", "server.oidc"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.envKey, func(t *testing.T) {
@@ -157,6 +168,12 @@ func TestSeedEnvToOpsettingsKey_FederationProjectDefaultsHarnessConfigs(t *testi
 		"PROJECTDEFAULTS_DEFAULTSCRATCHPAD":     "project_defaults.default_scratchpad",
 		"HARNESSCONFIGS_CLAUDE_IMAGE":           "harness_configs.claude.image",
 		"HARNESSCONFIGS_CLAUDE_IMAGEPULLPOLICY": "harness_configs.claude.image_pull_policy",
+		// ptone/scion#3859: keys now mapped.
+		"AGENTSECRETS_USERSCOPEONLY": "agent_secrets.user_scope_only",
+		"QUOTAS_ENFORCEBROKERQUOTAS": "quotas.enforce_broker_quotas",
+		"SERVER_SHAREDDIRSTORAGE":    "server.shared_dir_storage",
+		"SERVER_HOMESTORAGE":         "server.home_storage",
+		"SERVER_OIDCLOGIN_ENABLED":   "server.oidc_login.enabled",
 		// Unchanged existing mappings.
 		"SERVER_HUB_ADMINEMAILS":     "server.hub.admin_emails",
 		"AUTOEXPOSEPORTS_ENABLED":    "auto_expose_ports.enabled",
@@ -164,6 +181,28 @@ func TestSeedEnvToOpsettingsKey_FederationProjectDefaultsHarnessConfigs(t *testi
 	} {
 		if got := envKeyToOpsettingsKey(envKey); got != want {
 			t.Errorf("envKeyToOpsettingsKey(%q) = %q, want %q", envKey, got, want)
+		}
+	}
+}
+
+// TestServerEnvToOpsettingsKey_CoversEveryServerConfigKey checks that every
+// top-level V1ServerConfig koanf tag is a server sub-key and that its
+// flat-lowercased env segment maps back to it, so SCION_SERVER_<KEY>_* lands
+// under server.<key>.* (ptone/scion#3859).
+func TestServerEnvToOpsettingsKey_CoversEveryServerConfigKey(t *testing.T) {
+	typ := reflect.TypeOf(V1ServerConfig{})
+	for i := 0; i < typ.NumField(); i++ {
+		tag, _, _ := strings.Cut(typ.Field(i).Tag.Get("koanf"), ",")
+		if tag == "" || tag == "-" {
+			continue
+		}
+		if !serverSubKeys[tag] {
+			t.Errorf("V1ServerConfig key %q is missing from serverSubKeys", tag)
+			continue
+		}
+		segment := strings.ToUpper(strings.ReplaceAll(tag, "_", ""))
+		if got, want := serverEnvToOpsettingsKey(segment+"_X"), "server."+tag+".x"; got != want {
+			t.Errorf("serverEnvToOpsettingsKey(%q) = %q, want %q", segment+"_X", got, want)
 		}
 	}
 }
