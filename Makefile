@@ -98,6 +98,19 @@ test-fixture-coverage:
 	@echo "Running fixture coverage gate (SQLite-enabled)..."
 	@go test -count=1 ./internal/fixturegen/...
 
+# MEMBERSHIP_LOSS_POSTGRES_TESTS are the pkg/hub membership loss
+# concurrency tests (ptone/scion#3433) run by test-launch-store-postgres.
+MEMBERSHIP_LOSS_POSTGRES_TESTS := TestMembershipLossProcessor_vs_ProjectDelete_Postgres \
+	TestMembershipLossProcessor_vs_AgentHardDelete_Postgres \
+	TestMembershipLossProcessor_vs_ReAdd_Postgres \
+	TestMembershipLossProcessor_vs_CredentialMint_Postgres \
+	TestMembershipLossProcessor_vs_ChildCreate_Postgres \
+	TestMembershipLossProcessor_TwoInstances_Postgres \
+	TestMembershipLossProcessor_vs_UserDelete_Postgres \
+	TestMembershipReconciler_LocksCoexist_Postgres
+empty :=
+space := $(empty) $(empty)
+
 ## test-launch-store-postgres: Run the T1 async-create launch store/reaper
 # suite against a real Postgres server (design t1-async-create-v11.md §6,
 # "Postgres in CI"). Requires -tags integration and SCION_TEST_POSTGRES_URL;
@@ -254,7 +267,7 @@ test-launch-store-postgres:
 		exit 1; \
 	fi
 	@go test -tags integration -count=1 -timeout 20m -v \
-		-run '^(TestProjectDeletionService_LockOrderNoDeadlock|TestScheduledSend_TwoHubReplicasPostgres_OneDelivery)$$' \
+		-run '^(TestProjectDeletionService_LockOrderNoDeadlock|TestScheduledSend_TwoHubReplicasPostgres_OneDelivery|$(subst $(space),|,$(strip $(MEMBERSHIP_LOSS_POSTGRES_TESTS))))$$' \
 		./pkg/hub/ > /tmp/test-launch-store-postgres-hub.log 2>&1; \
 	status=$$?; \
 	cat /tmp/test-launch-store-postgres-hub.log; \
@@ -265,6 +278,16 @@ test-launch-store-postgres:
 	fi; \
 	if ! grep -qE '^[[:space:]]*--- PASS: TestScheduledSend_TwoHubReplicasPostgres_OneDelivery' /tmp/test-launch-store-postgres-hub.log; then \
 		echo "ERROR: the pkg/hub two-replica scheduled send test did not run." >&2; \
+		exit 1; \
+	fi; \
+	for t in $(MEMBERSHIP_LOSS_POSTGRES_TESTS); do \
+		if ! grep -qE "^[[:space:]]*--- PASS: $$t\b" /tmp/test-launch-store-postgres-hub.log; then \
+			echo "ERROR: the pkg/hub membership loss Postgres test $$t did not pass." >&2; \
+			exit 1; \
+		fi; \
+	done; \
+	if grep -qE '^[[:space:]]*--- SKIP' /tmp/test-launch-store-postgres-hub.log; then \
+		echo "ERROR: one or more pkg/hub Postgres tests were skipped -- see '--- SKIP' lines above." >&2; \
 		exit 1; \
 	fi
 

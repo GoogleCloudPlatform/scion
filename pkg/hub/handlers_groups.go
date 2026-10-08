@@ -573,10 +573,19 @@ func (s *Server) deleteGroup(w http.ResponseWriter, r *http.Request, id string) 
 		return
 	}
 
+	// Users who may lose project access through this group are found
+	// before the delete and re-evaluated after it (ptone/scion#3433).
+	lossUsers, lossErr := transitiveGroupMemberUsers(ctx, s.store, group.ID)
+	if lossErr != nil {
+		writeErrorFromErr(w, lossErr, "")
+		return
+	}
+
 	if err := s.store.DeleteGroup(ctx, group.ID); err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}
+	s.enqueueGroupChangeLoss(ctx, lossUsers)
 
 	s.groupsLogger().Info("group deleted",
 		"group_id", group.ID,
@@ -1099,10 +1108,25 @@ func (s *Server) removeGroupMember(w http.ResponseWriter, r *http.Request, group
 		}
 	}
 
+	// Users who may lose project access through this membership are
+	// re-evaluated after the removal (ptone/scion#3433).
+	var lossUsers []string
+	switch memberType {
+	case store.GroupMemberTypeUser:
+		lossUsers = []string{memberID}
+	case store.GroupMemberTypeGroup:
+		var lossErr error
+		if lossUsers, lossErr = transitiveGroupMemberUsers(ctx, s.store, memberID); lossErr != nil {
+			writeErrorFromErr(w, lossErr, "")
+			return
+		}
+	}
+
 	if err := s.store.RemoveGroupMember(ctx, group.ID, memberType, memberID); err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}
+	s.enqueueGroupChangeLoss(ctx, lossUsers)
 
 	// Release quota reservation for the removed member (best-effort).
 	s.releaseGroupMemberSlot(ctx, group.ID, memberType, memberID)

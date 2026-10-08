@@ -994,6 +994,11 @@ func (s *Server) deleteSuperAdminBindingTx(
 			}
 			slog.Info("deleted super-admin binding via admin role mutation",
 				"user_id", userID, "binding_id", b.ID)
+			// The user's system authority ended: re-evaluate the user's
+			// project standing (ptone/scion#3433).
+			if err := enqueueMembershipLossTx(ctx, tx, userID, "", store.MembershipLossTriggerSystemScopeChange, auditActorFromContext(ctx)); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

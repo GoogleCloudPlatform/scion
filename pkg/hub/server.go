@@ -2261,6 +2261,9 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 		s, srv.authzService,
 		logging.Subsystem("hub.membership"),
 	)
+	// Process membership loss checks right after the removal commits
+	// (ptone/scion#3433).
+	srv.membershipService.onMembershipLoss = srv.kickMembershipLossChecks
 
 	// RS3: Initialize the project deletion domain service.
 	srv.deletionService = NewProjectDeletionService(
@@ -2495,6 +2498,7 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 		ProxyAuthenticator: cfg.ProxyAuth,
 		FederationAuth:     &srv.federationAuth,
 		CredentialStore:    s,
+		HoldStore:          s,
 		UserStore:          s,
 		AuthMode:           cfg.AuthMode,
 		Debug:              cfg.Debug,
@@ -2512,6 +2516,10 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 		}
 		slog.Info("Agent token run scope enabled", "mode", cfg.AgentRunScope.String())
 	}
+	// A restored agent whose root user is no longer admitted to its project
+	// comes back held (ptone/scion#3433).
+	srv.registerMembershipRestoreHook()
+
 	// Wire the proxy user provisioner (wraps provisionUser with 60s cache)
 	if cfg.ProxyAuth != nil {
 		srv.authConfig.ProxyUserProvisioner = MakeProxyUserProvisioner(srv)
@@ -3057,7 +3065,14 @@ func signingKeySecretID(keyName, hubID string) string {
 }
 
 // SetDispatcher sets the agent dispatcher for co-located runtime broker operations.
+//
+// An HTTPAgentDispatcher attached here always gets the hub's required
+// standing check (ptone/scion#3433), so no attached dispatcher can start or
+// restart an agent that is held or not in good standing.
 func (s *Server) SetDispatcher(d AgentDispatcher) {
+	if hd, ok := d.(*HTTPAgentDispatcher); ok && hd != nil {
+		hd.SetRequiredStandingCheck(s.dispatchStandingCheck)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.dispatcher = d
@@ -4112,6 +4127,11 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	// (ptone/scion#1994).
 	dispatcher.SetCreatorSkillPreResolver(s.preResolveAgentSkillsAsCreator)
 
+	// Refuse a start or restart of an agent that is held or not in good
+	// standing before any broker call (ptone/scion#3433). SetDispatcher
+	// installs it too, for every dispatcher attached to the server.
+	dispatcher.SetRequiredStandingCheck(s.dispatchStandingCheck)
+
 	// Wire the hub's operational agent_defaults so dispatch can carry the
 	// limit/resource ones to the broker's low-precedence tier. The accessor
 	// takes s.mu; it returns the zero value in file mode, where the wire field
@@ -4429,6 +4449,9 @@ func (s *Server) messageEventHandler() EventHandler {
 				"creator", evt.CreatedBy,
 				"error", authErr)
 			return errScheduledMessageRefused
+		}
+		if err := s.scheduledFireStanding(ctx, evt, agent); err != nil {
+			return err
 		}
 
 		// Migration gate (design agent-reincarnate §3.7, R3 p2a-r1 review).
@@ -4778,6 +4801,9 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 		// revision (scheduledEffectCeiling), never from the fire identity.
 		edgeCeiling, edgeProvenance, err := s.scheduledEffectCeiling(ctx, creator.Authority, evt)
 		if err != nil {
+			return err
+		}
+		if err := s.scheduledFireStanding(ctx, evt, nil); err != nil {
 			return err
 		}
 
@@ -5311,6 +5337,10 @@ func (s *Server) registerSchedulerHandlers() {
 	// registerLaunchReaper's doc comment for its per-tick cost with the
 	// feature off.
 	s.registerLaunchReaper()
+
+	// Membership standing (ptone/scion#3433): outbox drain and stop
+	// retry, expiry scan and full sweep. Not gated by any setting.
+	s.registerMembershipStandingReconciler()
 
 	s.scheduler.RegisterRecurringSingleton("agent-heartbeat-timeout", 5, store.LockAgentHeartbeatTimeout, s.agentHeartbeatTimeoutHandler())
 	s.scheduler.RegisterRecurringSingleton("agent-stalled-detection", 5, store.LockAgentStalledDetection, s.agentStalledDetectionHandler())

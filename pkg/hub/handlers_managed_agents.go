@@ -378,6 +378,16 @@ func (s *Server) handleManagedAgentLifecycle(w http.ResponseWriter, r *http.Requ
 	var newPhase string
 	var actionErr error
 
+	// A managed start or restart requires good standing (ptone/scion#3433).
+	// startGate already refused it on the shared path; this keeps the
+	// managed branch closed on its own.
+	if action == "start" || action == "restart" {
+		if refusal := standingStartRefusal(agent.ID, s.agentStanding(ctx, agent.ID)); refusal != nil {
+			refusal.write(w)
+			return
+		}
+	}
+
 	// Record the run intent before acting, as the broker-backed lifecycle
 	// paths do. A stop whose action fails keeps intent stopped.
 	var intent store.RunIntent

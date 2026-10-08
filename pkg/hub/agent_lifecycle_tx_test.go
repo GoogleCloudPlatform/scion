@@ -40,6 +40,9 @@ import (
 func seedAgentEdge(t *testing.T, s store.Store, delegatorID string, agent *store.Agent) *store.DelegationEdge {
 	t.Helper()
 	ensureActiveUser(t, s, delegatorID)
+	// The delegator is a project member, so the agent is in good standing
+	// (ptone/scion#3433).
+	ensureStandingRoot(t, s, agent.ProjectID, delegatorID)
 	e := &store.DelegationEdge{
 		DelegatorType: store.DelegationPrincipalUser,
 		DelegatorID:   delegatorID,

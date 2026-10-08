@@ -472,6 +472,8 @@ var MutationClassifications = []MutationClassification{
 	// -----------------------------------------------------------------------
 	// pkg/hub/agent_credential_revoke.go — shared best-effort revoke helper
 	// -----------------------------------------------------------------------
+	{File: "pkg/hub/membership_loss.go", Function: "holdAgentsTx", Symbol: "RevokeAgentCredentialsByAgent", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Hub-internal membership loss processor: revokes the credentials of agents it holds after their root user's project access ended, in the same transaction as the hold; reached only from the outbox processor and reconciler, never from a request handler", Scope: "pkg/hub/membership_loss.go"}},
+	{File: "pkg/hub/membership_loss.go", Function: "membershipRestoreHook", Symbol: "RevokeAgentCredentialsByAgent", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Restore transaction hook: revokes the credentials of a restored agent it holds because its root user is not admitted to the project; runs inside the already route-guarded restore transaction", Scope: "pkg/hub/membership_loss.go"}},
 	{File: "pkg/hub/agent_credential_revoke.go", Function: "revokeAgentCredentials", Symbol: "RevokeAgentCredentialsByAgent", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Shared revoke helper (reached via revokeAgentCredentialsBestEffort) called from create/launch dispatch and handler cleanup paths that are themselves already route-guarded, and from the broker-HMAC-authenticated launch report endpoint; mirrors the existing delete and suspend revoke exemptions", Scope: "pkg/hub/agent_credential_revoke.go"}},
 
 	// -----------------------------------------------------------------------

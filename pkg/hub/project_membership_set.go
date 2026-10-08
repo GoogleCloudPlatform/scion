@@ -950,7 +950,9 @@ func (svc *ProjectMembershipService) SetMemberRoles(ctx context.Context, req Set
 	// --- Phase T: inside the transaction -----------------------------------
 
 	result := SetMemberRolesResult{Created: len(current0) == 0}
+	lossEnqueued := false
 	txErr := svc.store.WithTx(ctx, func(tx store.Store) error {
+		lossEnqueued = false
 		if err := tx.LockProjectForMembership(ctx, req.ProjectID); err != nil {
 			return fmt.Errorf("lock project: %w", err)
 		}
@@ -1075,6 +1077,18 @@ func (svc *ProjectMembershipService) SetMemberRoles(ctx context.Context, req Set
 		created, err := svc.applyRolePlanTx(ctx, tx, plan1, req.PrincipalType, req.PrincipalID, req.ProjectID, req.Actor.ID(), req.NotBefore, req.ExpiresAt)
 		if err != nil {
 			return err
+		}
+		// A plan that deletes a binding can end the principal's access:
+		// re-evaluate it (ptone/scion#3433). A no-op when access continues.
+		if len(plan1.Remove) > 0 {
+			lossTrigger := store.MembershipLossTriggerMemberRoleChange
+			if req.RemoveAll {
+				lossTrigger = store.MembershipLossTriggerMemberPrincipalDelete
+			}
+			if err := enqueueMembershipLossForPrincipalTx(ctx, tx, req.PrincipalType, req.PrincipalID, req.ProjectID, lossTrigger, auditActorFromContext(ctx)); err != nil {
+				return err
+			}
+			lossEnqueued = true
 		}
 
 		var builtInNewBindingID string
@@ -1211,6 +1225,10 @@ func (svc *ProjectMembershipService) SetMemberRoles(ctx context.Context, req Set
 			return nil, d
 		}
 		return nil, &MembershipDecision{Allowed: false, DenialCode: "internal_error", Reason: txErr.Error(), HTTPStatus: 500}
+	}
+
+	if lossEnqueued {
+		svc.notifyMembershipLoss()
 	}
 
 	svc.logger.Info("project member roles set via service",
