@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"testing"
 	"time"
@@ -45,11 +46,59 @@ type refFixture struct {
 	projA, projB *store.Project
 	topicA       string
 	topicB       string
+	// faults is the server's store; armed with fault.Arm(), it fails the
+	// calls named in its fields.
+	faults *refFaultStore
+	fault  *storeFaultSwitch
+}
+
+var errRefStoreFault = errors.New("injected store fault")
+
+// refFaultStore fails selected store calls once its switch is armed. Set
+// the fields before arming.
+type refFaultStore struct {
+	store.Store
+	fault               *storeFaultSwitch
+	failGetMessage      bool
+	failConvByExtRef    bool
+	failGetProject      bool
+	failGetConversation bool
+}
+
+func (r *refFaultStore) GetMessage(ctx context.Context, id string) (*store.Message, error) {
+	if r.failGetMessage && r.fault.Active() {
+		return nil, errRefStoreFault
+	}
+	return r.Store.GetMessage(ctx, id)
+}
+
+func (r *refFaultStore) GetConversationByExternalRef(ctx context.Context, surface, ref string) (*store.Conversation, error) {
+	if r.failConvByExtRef && r.fault.Active() {
+		return nil, errRefStoreFault
+	}
+	return r.Store.GetConversationByExternalRef(ctx, surface, ref)
+}
+
+func (r *refFaultStore) GetProject(ctx context.Context, id string) (*store.Project, error) {
+	if r.failGetProject && r.fault.Active() {
+		return nil, errRefStoreFault
+	}
+	return r.Store.GetProject(ctx, id)
+}
+
+func (r *refFaultStore) GetConversation(ctx context.Context, id string) (*store.Conversation, error) {
+	if r.failGetConversation && r.fault.Active() {
+		return nil, errRefStoreFault
+	}
+	return r.Store.GetConversation(ctx, id)
 }
 
 func newRefFixture(t *testing.T) *refFixture {
 	t.Helper()
-	srv, st, _, _, projA := setupDemoPolicyTest(t)
+	srv, st, _, _, projA, faults, fault := setupDemoPolicyTestWithFault(t,
+		func(inner store.Store, fault *storeFaultSwitch) *refFaultStore {
+			return &refFaultStore{Store: inner, fault: fault}
+		})
 	db := openTestMemorySQLite(t, "sqlite3")
 	wcs := NewWebChatStore(db, "sqlite3")
 	require.NoError(t, wcs.Init())
@@ -90,6 +139,7 @@ func newRefFixture(t *testing.T) *refFixture {
 		projA: projA, projB: projB,
 		topicA: tid("ref-topic-a"),
 		topicB: tid("ref-topic-b"),
+		faults: faults, fault: fault,
 	}
 	for _, tp := range []struct {
 		id, project, by string
@@ -277,4 +327,36 @@ func TestChatDMHistory_StaysReadableAfterProjectAccessEnds(t *testing.T) {
 
 	hist := f.history(t, f.uc, dm)
 	assert.NotEmpty(t, hist.Messages, "the user's own DM history with the agent stays readable")
+}
+
+// A store error while checking a reply target refuses the send with the
+// route's retryable answer; nothing is stored.
+func TestChatReply_TargetLookupErrorRefusesSend(t *testing.T) {
+	t.Run("message lookup", func(t *testing.T) {
+		f := newRefFixture(t)
+		target := f.seedMessage(t, f.projA.ID, f.topicA, "", "in topic A")
+		before := f.threadMessageCount(t, f.topicA)
+
+		f.faults.failGetMessage = true
+		f.fault.Arm()
+		got := f.send(t, f.ua, f.topicA, map[string]interface{}{"content": "re", "reply_to_id": target})
+		require.Equal(t, http.StatusServiceUnavailable, got.status, got.body)
+		assert.Contains(t, got.body, "SERVICE_UNAVAILABLE")
+		assert.Equal(t, before, f.threadMessageCount(t, f.topicA), "nothing is stored")
+	})
+
+	t.Run("conversation lookup", func(t *testing.T) {
+		f := newRefFixture(t)
+		dm := dmKeyFor(t, "user", f.ua.ID, "user", f.uc.ID)
+		// Stored under another thread key with a conversation ID, so the
+		// check has to resolve the DM's conversation.
+		target := f.seedMessage(t, f.projA.ID, "legacy-thread-key", uuid.NewString(), "elsewhere")
+		before := f.threadMessageCount(t, dm)
+
+		f.faults.failConvByExtRef = true
+		f.fault.Arm()
+		got := f.send(t, f.ua, dm, map[string]interface{}{"content": "re", "reply_to_id": target})
+		require.Equal(t, http.StatusServiceUnavailable, got.status, got.body)
+		assert.Equal(t, before, f.threadMessageCount(t, dm), "nothing is stored")
+	})
 }
