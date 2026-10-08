@@ -42,8 +42,13 @@ func TestMarkAgentContainerMissing_Phases_Postgres(t *testing.T) {
 		a.Phase = phase
 		a.RuntimeBrokerID = "broker-1"
 		a.LastSeen = time.Now().Add(-time.Hour)
-		a.ExitReason = reason
 		require.NoError(t, cs.CreateAgent(ctx, a))
+		if reason != "" {
+			// CreateAgent does not persist an exit reason; record it the
+			// way a broker report would, after the row exists.
+			a.ExitReason = reason
+			require.NoError(t, cs.UpdateAgent(ctx, a))
+		}
 		return a.ID
 	}
 

@@ -375,8 +375,10 @@ func TestList_ExitReason_GracefulPreemption_ExitZero(t *testing.T) {
 	// so the agent container usually exits 0 — the pod reaches PodSucceeded,
 	// not PodFailed. List must still report "preempted" here: a guard that
 	// only checked for PhaseError (and not PhaseStopped) would miss this,
-	// the exact symptom in #2528.
-	pod := newPodForDisruptionTest("agent-graceful-preemption", corev1.PodSucceeded)
+	// the exact symptom in #2528. The workspace is persistent, so the phase
+	// is stopped (an emptyDir workspace gives error; see
+	// TestList_DisruptionPhase).
+	pod := withDisruptionStorage(newPodForDisruptionTest("agent-graceful-preemption", corev1.PodSucceeded), true, false)
 	pod.Status.Conditions = []corev1.PodCondition{
 		{
 			Type:   corev1.DisruptionTarget,
