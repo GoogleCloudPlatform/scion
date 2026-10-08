@@ -90,8 +90,24 @@ describe('ctrlCode', () => {
     expect(ctrlCode('?')).toBe('\x7f');
   });
 
-  it('has no code for digits, other punctuation or non-ASCII letters', () => {
-    for (const char of ['1', '/', '|', '~', 'é', '\r']) expect(ctrlCode(char)).toBeNull();
+  it('maps the digits 2-8 like xterm.js: NUL, ESC, FS, GS, RS, US, DEL', () => {
+    expect(['2', '3', '4', '5', '6', '7', '8'].map(ctrlCode)).toEqual([
+      '\x00',
+      '\x1b',
+      '\x1c',
+      '\x1d',
+      '\x1e',
+      '\x1f',
+      '\x7f',
+    ]);
+  });
+
+  it('maps Backspace (DEL) to BS, like xterm.js', () => {
+    expect(ctrlCode('\x7f')).toBe('\b');
+  });
+
+  it('has no code for 0, 1, 9, other punctuation or non-ASCII letters', () => {
+    for (const char of ['0', '1', '9', '/', '|', '~', 'é', '\r']) expect(ctrlCode(char)).toBeNull();
   });
 });
 
@@ -101,6 +117,8 @@ describe('applyModifiers', () => {
     expect(applyModifiers('b', ALT)).toEqual({ data: '\x1bb', consumed: true });
     expect(applyModifiers('x', CTRL_ALT)).toEqual({ data: '\x1b\x18', consumed: true });
     expect(applyModifiers('\r', ALT)).toEqual({ data: '\x1b\r', consumed: true });
+    expect(applyModifiers('\x7f', CTRL)).toEqual({ data: '\b', consumed: true });
+    expect(applyModifiers('\x7f', ALT)).toEqual({ data: '\x1b\x7f', consumed: true });
   });
 
   it('sends a character with no control code as itself, still consuming Ctrl', () => {
