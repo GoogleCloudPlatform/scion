@@ -2100,6 +2100,11 @@ type NotificationStore interface {
 	// Results are ordered by created_at ASC (oldest first), limited to 100.
 	GetUndispatchedAgentNotifications(ctx context.Context, brokerID string) ([]Notification, error)
 
+	// PurgeOrphanedNotifications deletes acknowledged notifications whose
+	// agent and subscription rows are both gone, and returns how many it
+	// deleted. Unacknowledged notifications are kept.
+	PurgeOrphanedNotifications(ctx context.Context) (int, error)
+
 	// CreateSubscriptionTemplate creates a new subscription template.
 	CreateSubscriptionTemplate(ctx context.Context, tmpl *SubscriptionTemplate) error
 

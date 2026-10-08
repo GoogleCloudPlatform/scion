@@ -587,3 +587,60 @@ func TestGetUndispatchedAgentNotifications_BrokerFilter(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, all, 2)
 }
+
+func TestPurgeOrphanedNotifications(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	s := NewNotificationStore(client)
+
+	projectID := uuid.New()
+	_, err := client.Project.Create().SetID(projectID).SetName("GC Project").SetSlug("gc-project").Save(ctx)
+	require.NoError(t, err)
+	liveAgentID := uuid.New()
+	_, err = client.Agent.Create().SetID(liveAgentID).SetSlug("live").SetName("Live").
+		SetProjectID(projectID).Save(ctx)
+	require.NoError(t, err)
+	liveSub := &store.NotificationSubscription{
+		ID: uuid.NewString(), Scope: store.SubscriptionScopeAgent, AgentID: liveAgentID.String(),
+		SubscriberType: "user", SubscriberID: "user-1", ProjectID: projectID.String(),
+		TriggerActivities: []string{"DELETED"}, CreatedBy: "tester",
+	}
+	require.NoError(t, s.CreateNotificationSubscription(ctx, liveSub))
+
+	newNotif := func(agentID, subID string, acked bool) string {
+		t.Helper()
+		id := uuid.NewString()
+		require.NoError(t, s.CreateNotification(ctx, &store.Notification{
+			ID: id, SubscriptionID: subID, AgentID: agentID, ProjectID: projectID.String(),
+			SubscriberType: "user", SubscriberID: "user-1", Status: "DELETED", Message: "deleted",
+		}))
+		if acked {
+			require.NoError(t, s.AcknowledgeNotification(ctx, id))
+		}
+		return id
+	}
+	goneAgent, goneSub := uuid.NewString(), uuid.NewString()
+	orphanAcked := newNotif(goneAgent, goneSub, true)
+	orphanUnacked := newNotif(goneAgent, goneSub, false)
+	agentLive := newNotif(liveAgentID.String(), goneSub, true)
+	subLive := newNotif(goneAgent, liveSub.ID, true)
+
+	purged, err := s.PurgeOrphanedNotifications(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 1, purged)
+
+	_, err = s.GetNotification(ctx, orphanAcked)
+	assert.ErrorIs(t, err, store.ErrNotFound, "acknowledged orphan is removed")
+	for name, id := range map[string]string{
+		"unacknowledged orphan": orphanUnacked,
+		"agent still present":   agentLive,
+		"subscription present":  subLive,
+	} {
+		_, err := s.GetNotification(ctx, id)
+		assert.NoError(t, err, "%s must be kept", name)
+	}
+
+	purged, err = s.PurgeOrphanedNotifications(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 0, purged, "a second run removes nothing")
+}

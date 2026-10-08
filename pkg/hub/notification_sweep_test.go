@@ -395,3 +395,32 @@ func TestDrainUndispatchedNotifications_PicksUpRecentNotifications(t *testing.T)
 	assert.Equal(t, env.subscriber.ID, calls[0].Agent.ID)
 	assert.Contains(t, calls[0].Message, "watched-agent has reached a state of COMPLETED")
 }
+
+// The orphan GC handler removes an acknowledged notification whose agent
+// and subscription are gone and keeps an unacknowledged one.
+func TestNotificationOrphanGCHandler(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	project := &store.Project{ID: api.NewUUID(), Name: "orphan-gc", Slug: "orphan-gc"}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	create := func(acked bool) string {
+		id := api.NewUUID()
+		require.NoError(t, s.CreateNotification(ctx, &store.Notification{
+			ID: id, SubscriptionID: api.NewUUID(), AgentID: api.NewUUID(), ProjectID: project.ID,
+			SubscriberType: "user", SubscriberID: "user-1", Status: "DELETED", Message: "deleted",
+		}))
+		if acked {
+			require.NoError(t, s.AcknowledgeNotification(ctx, id))
+		}
+		return id
+	}
+	acked, unacked := create(true), create(false)
+
+	srv.notificationOrphanGCHandler()(ctx)
+
+	_, err := s.GetNotification(ctx, acked)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+	_, err = s.GetNotification(ctx, unacked)
+	assert.NoError(t, err)
+}

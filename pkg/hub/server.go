@@ -5333,6 +5333,7 @@ func (s *Server) registerSchedulerHandlers() {
 	s.scheduler.RegisterRecurringSingleton("failed-message-retention", 60, store.LockFailedMessageRetention, s.failedMessageRetentionHandler())
 	s.scheduler.RegisterRecurringSingleton("exposed-ports-sweep", 5, store.LockExposedPortsSweep, s.exposedPortsSweepHandler())
 	s.scheduler.RegisterRecurringSingleton("notification-dispatch-sweep", 5, store.LockNotificationDispatchSweep, s.notificationDispatchSweepHandler())
+	s.scheduler.RegisterRecurringSingleton("notification-orphan-gc", 60, store.LockNotificationOrphanGC, s.notificationOrphanGCHandler())
 	// Reconcile stale max_agents_per_broker reservations (ptone/scion#1963):
 	// runs immediately at tick 0 (startup) and then hourly, fixing rows left
 	// with released_at IS NULL by the pre-fix stop/suspend paths (or any

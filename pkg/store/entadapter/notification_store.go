@@ -639,6 +639,41 @@ const undispatchedBatchLimit = 100
 // non-empty (broker-connect hook), no grace period is applied — the hook fires
 // precisely because the broker just came online, so even very recent
 // notifications should be drained immediately.
+// PurgeOrphanedNotifications deletes acknowledged notifications whose agent
+// and subscription rows are both gone (for example DELETED notifications
+// persisted after an agent's hard delete), and returns how many it deleted.
+// Unacknowledged notifications are kept until acknowledged.
+func (s *NotificationStore) PurgeOrphanedNotifications(ctx context.Context) (int, error) {
+	return s.client.Notification.Delete().
+		Where(
+			notification.AcknowledgedEQ(true),
+			func(sel *entsql.Selector) {
+				sel.Where(entsql.And(
+					noRowWithID(sel, agent.Table, agent.FieldID, notification.FieldAgentID),
+					noRowWithID(sel, notificationsubscription.Table, notificationsubscription.FieldID, notification.FieldSubscriptionID),
+				))
+			},
+		).
+		Exec(ctx)
+}
+
+// noRowWithID builds "NOT EXISTS (SELECT 1 FROM table WHERE table.idCol =
+// <sel>.refCol)".
+func noRowWithID(sel *entsql.Selector, table, idCol, refCol string) *entsql.Predicate {
+	ref := sel.C(refCol)
+	return entsql.P(func(b *entsql.Builder) {
+		b.WriteString("NOT EXISTS (SELECT 1 FROM ")
+		b.Ident(table)
+		b.WriteString(" WHERE ")
+		b.Ident(table)
+		b.WriteString(".")
+		b.Ident(idCol)
+		b.WriteString(" = ")
+		b.WriteString(ref)
+		b.WriteString(")")
+	})
+}
+
 func (s *NotificationStore) GetUndispatchedAgentNotifications(ctx context.Context, brokerID string) ([]store.Notification, error) {
 	query := s.client.Notification.Query().
 		Where(

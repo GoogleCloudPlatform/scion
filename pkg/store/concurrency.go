@@ -221,6 +221,10 @@ const (
 	// LockBrokerJoinTokenCleanup guards the periodic removal of expired
 	// broker join tokens.
 	LockBrokerJoinTokenCleanup AdvisoryLockKey = 0x5C100025
+
+	// LockNotificationOrphanGC guards the periodic removal of acknowledged
+	// notifications whose agent and subscription are both gone.
+	LockNotificationOrphanGC AdvisoryLockKey = 0x5C100026
 )
 
 // AdvisoryLocker is implemented by backends that can take a cluster-wide
