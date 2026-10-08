@@ -48,6 +48,15 @@ var schemaDriftAllowList = map[string]string{
 	// the key is tracked separately.
 	"schema-only: default_harness_auth": "no VersionedSettings field yet; tracked in ptone/scion#3023",
 
+	// Keys a legacy (unversioned) settings file holds that the conversion
+	// to v1 carries over unchanged (ptone/scion#3885). VersionedSettings
+	// has no field for them, but the legacy settings loader (LoadSettings)
+	// reads them from a v1 file, so the schema accepts them.
+	"schema-only: project_id":      "legacy top-level project ID, read by LoadSettings; ptone/scion#3885",
+	"schema-only: hub_connections": "multi-hub broker connections, read by LoadSettings; ptone/scion#3885",
+	"schema-only: hub.transport":   "hub transport auth, read by LoadSettings; ptone/scion#3885",
+	"schema-only: cli.mode":        "CLI mode, read by LoadSettings; ptone/scion#3885",
+
 	// Type unions: the schema accepts more than one JSON type for these
 	// keys because the loader does.
 	//

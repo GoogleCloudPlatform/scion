@@ -157,6 +157,24 @@
           "description": "Operate in local-only mode even when Hub is configured.",
           "x-env-var": "SCION_HUB_LOCAL_ONLY",
           "x-since": "1"
+        },
+        "transport": {
+          "type": "object",
+          "description": "Transport-layer auth for reaching a Hub behind a platform guard (IAP, Cloud Run invoker IAM). Kept when a legacy settings file is migrated.",
+          "x-since": "1",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "description": "Transport auth mode: iap or cloudrun_invoker.",
+              "x-since": "1"
+            },
+            "audience": {
+              "type": "string",
+              "description": "OIDC audience (typically the IAP OAuth client ID).",
+              "x-since": "1"
+            }
+          },
+          "additionalProperties": false
         }
       },
       "additionalProperties": false
@@ -179,6 +197,11 @@
           "default": false,
           "description": "Disable interactive prompts (useful for CI/scripts).",
           "x-env-var": "SCION_CLI_INTERACTIVE_DISABLED",
+          "x-since": "1"
+        },
+        "mode": {
+          "type": "string",
+          "description": "CLI mode (human, assistant or agent); SCION_CLI_MODE takes precedence. Kept when a legacy settings file is migrated.",
           "x-since": "1"
         }
       },
@@ -363,6 +386,29 @@
       "description": "Workspace directory for a project whose .scion directory lives outside the workspace (external projects).",
       "x-scope": "any",
       "x-since": "1"
+    },
+    "project_id": {
+      "type": "string",
+      "description": "Local project identifier from a legacy settings file, kept when it is migrated. hub.project_id takes precedence when set.",
+      "x-scope": "any",
+      "x-since": "1"
+    },
+    "hub_connections": {
+      "type": "object",
+      "description": "Named Hub connections for a Runtime Broker, keyed by connection name. Kept when a legacy settings file is migrated.",
+      "x-scope": "any",
+      "x-since": "1",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "endpoint": {
+            "type": "string",
+            "description": "Hub API endpoint URL for this connection.",
+            "x-since": "1"
+          }
+        },
+        "additionalProperties": false
+      }
     },
     "shared_dirs": {
       "type": "array",
