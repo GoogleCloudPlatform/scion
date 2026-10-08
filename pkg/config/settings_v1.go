@@ -5292,8 +5292,10 @@ func writeVersionedSettingsFile(dir, targetPath string, vs *VersionedSettings) e
 // If a server.yaml exists in the same directory, it is also merged into the settings
 // under the "server" key and backed up.
 // Top-level keys the legacy Settings struct does not decode (v1-only keys such
-// as server and image_registry, or any unknown key) are carried into the
-// migrated file unchanged; see legacyCarriedTopLevelKeys.
+// as server and image_registry, or any unknown key), and legacy keys the
+// conversion does not produce (such as workspace_path, hub_connections and
+// cli.mode), are carried into the migrated file unchanged; see
+// legacyCarriedTopLevelKeys.
 // If dryRun is true, no files are written.
 // Returns MigrationResult describing what was (or would be) done.
 func MigrateSettingsFile(dir string, dryRun bool) (*MigrationResult, error) {
@@ -5352,8 +5354,9 @@ func MigrateSettingsFile(dir string, dryRun bool) (*MigrationResult, error) {
 	result.Warnings = warnings
 
 	// 4a. Top-level keys the legacy struct does not decode (v1-only keys
-	// such as server and image_registry) are carried through unchanged
-	// (ptone/scion#3497).
+	// such as server and image_registry, ptone/scion#3497) and legacy keys
+	// AdaptLegacySettings does not convert (ptone/scion#3885) are carried
+	// through unchanged.
 	carried, err := legacyCarriedTopLevelKeys(data, result.WasJSON)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse settings: %w", err)
