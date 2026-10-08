@@ -46,6 +46,10 @@ type statefulInstances struct {
 	// applied (after the runtime's read), to model a concurrent change.
 	beforeWrite func(s *statefulInstances, name string)
 
+	// beforeCreate, if set, runs before each Create is applied (after the
+	// runtime's read), to model a concurrent start.
+	beforeCreate func(s *statefulInstances, name string)
+
 	// failWrite, if set, is returned by every Stop, Start or Delete
 	// without changing the instance (a refusal that is not a change).
 	failWrite error
@@ -92,6 +96,9 @@ func (s *statefulInstances) GetInstance(_ context.Context, req *runpb.GetInstanc
 func (s *statefulInstances) CreateInstance(_ context.Context, req *runpb.CreateInstanceRequest, _ ...gax.CallOption) (cloudrun.InstanceOperation, error) {
 	s.creates++
 	name := req.Parent + "/instances/" + req.InstanceId
+	if s.beforeCreate != nil {
+		s.beforeCreate(s, name)
+	}
 	if _, ok := s.instances[name]; ok {
 		return nil, status.Error(codes.AlreadyExists, "instance exists")
 	}
@@ -554,4 +561,50 @@ func TestCloudRunRunScoped_NilInstanceOnRereadRefused(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Two overlapping same-name Runs (ptone/scion#3738): the older run's Run
+// must not take over the newer run's instance across its Get-then-Start or
+// Get-then-Create window.
+func TestCloudRunRun_OverlappingRunsDoNotTakeOver(t *testing.T) {
+	t.Run("newer run created after the read: create refused", func(t *testing.T) {
+		s := newStatefulInstances()
+		s.beforeCreate = func(s *statefulInstances, name string) {
+			s.beforeCreate = nil
+			s.put(name, "run-b") // run B's start lands between A's Get and Create
+		}
+		rt := newStatefulCloudRunRuntime(t, s)
+		if _, err := rt.Run(context.Background(), runCfgForRun("run-a")); err == nil {
+			t.Fatal("Run A succeeded over run B's instance, want an error")
+		}
+		if run, ok := s.runOf(crAgentName); !ok || run != "run-b" {
+			t.Errorf("instance: present=%v run=%q, want run B's untouched", ok, run)
+		}
+		if s.starts != 0 {
+			t.Errorf("starts = %d, want 0", s.starts)
+		}
+	})
+	t.Run("own instance replaced by newer run after the read: start refused", func(t *testing.T) {
+		s := newStatefulInstances()
+		s.put(crAgentName, "run-a") // run A's stopped instance
+		s.beforeWrite = func(s *statefulInstances, name string) {
+			s.beforeWrite = nil
+			// Run B's pre-clean deletes it and run B creates its own.
+			s.put(name, "run-b")
+		}
+		rt := newStatefulCloudRunRuntime(t, s)
+		_, err := rt.Run(context.Background(), runCfgForRun("run-a"))
+		if !strings.Contains(fmt.Sprint(err), "etag mismatch") {
+			t.Fatalf("Run A = %v, want the start refused by its etag", err)
+		}
+		if run, ok := s.runOf(crAgentName); !ok || run != "run-b" {
+			t.Errorf("instance: present=%v run=%q, want run B's", ok, run)
+		}
+		if s.lastEtag == "" {
+			t.Errorf("start carried no etag")
+		}
+		if s.instances[crAgentName].Etag != "etag-2" {
+			t.Errorf("run B's instance etag = %q, want etag-2 (not started by run A)", s.instances[crAgentName].Etag)
+		}
+	})
 }

@@ -909,6 +909,54 @@ func applySecretEnvOverrides(env map[string]string, cfgEnv []string, secretKeys 
 	}
 }
 
+// sandboxNameLocks serializes Run per sandbox name (ptone/scion#3738). The
+// sandbox name is derived from the agent name and reused across runs, and
+// the sandbox CLI keeps no labels, so two overlapping Runs of one agent
+// could otherwise interleave: an older Run's dead-on-arrival cleanup
+// deleting the newer Run's sandbox by name, or an older Run's probe passing
+// on the newer sandbox and recording it as its own. Holding the name's lock
+// from the launch through the probe and the state record or cleanup closes
+// that window.
+//
+// The lock is package-level so it covers every CloudRunSandboxRuntime in
+// the process (the factory builds one per call, ptone/scion#3951), but it
+// is in-process only: one broker per host is the deployment model, and a
+// second process on the same host is not fenced by it. The state-store
+// checks in Run (sandboxHeldByOtherRun) are the remaining guard there.
+var sandboxNameLocks sync.Map // sandbox name -> *sync.Mutex
+
+// lockSandboxName takes the Run lock for a sandbox name and returns its
+// unlock.
+func lockSandboxName(name string) func() {
+	v, _ := sandboxNameLocks.LoadOrStore(name, &sync.Mutex{})
+	mu := v.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
+}
+
+// sandboxHeldByOtherRun returns the run ID of a live (not stopped) state
+// entry for name that belongs to a run other than runID, or "" if there is
+// none. An entry with no run label, or a Run with no run ID, never
+// conflicts (the legacy rule sandboxRunCheck applies).
+func (r *CloudRunSandboxRuntime) sandboxHeldByOtherRun(name, runID string) string {
+	if runID == "" {
+		return ""
+	}
+	entry := r.state.get(name)
+	if entry == nil || entry.Stopped {
+		return ""
+	}
+	if run := entry.Labels[api.LabelRunID]; run != "" && run != runID {
+		return run
+	}
+	return ""
+}
+
+// sandboxAfterLaunchHook, if set, runs after `sandbox run` returns and
+// before the liveness probe. Nil in production; tests use it to model a
+// concurrent start inside that window.
+var sandboxAfterLaunchHook func(name string)
+
 func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string, error) {
 	// Fold resolved secrets into cfg.Env before anything is created and
 	// before envFor reads it, so they reach the sandbox as --env values and
@@ -920,6 +968,23 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 	}
 
 	slug := sanitizeSandboxName(cfg.Name)
+	runID := cfg.Labels[api.LabelRunID]
+
+	// Serialize same-name Runs from launch to state record or cleanup
+	// (sandboxNameLocks).
+	unlock := lockSandboxName(slug)
+	defer unlock()
+
+	// The sandbox name is held by a live sandbox of another run: reusing
+	// the name would take that sandbox over (its probe passes and this
+	// run's entry replaces the other's), so refuse, as the Cloud Run and
+	// Kubernetes runtimes do. Start's pre-clean normally removes it
+	// first; this is reached after a failed listing or a race.
+	if other := r.sandboxHeldByOtherRun(slug, runID); other != "" {
+		runtimeLog.Info("Sandbox of another run holds the agent's sandbox name; not reusing it",
+			"sandbox", slug, "run_id", runID, "sandbox_run_id", other)
+		return "", fmt.Errorf("cloudrun-sandbox: sandbox %s belongs to run %q, not %q: %w", slug, other, runID, ErrRunConflict)
+	}
 
 	// OQ-14 (§11.12) proved that Vertex AI and gcloud-adc auth modes work
 	// on this runtime via the metadata emulator. The emulator runs INSIDE
@@ -1073,6 +1138,10 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 		return "", fmt.Errorf("cloudrun-sandbox: run failed: %w (output: %s)", err, safeOut)
 	}
 
+	if sandboxAfterLaunchHook != nil {
+		sandboxAfterLaunchHook(slug)
+	}
+
 	// Post-run liveness probe: `sandbox run --detach` returns rc=0 even for
 	// sandboxes that die immediately (e.g. because the entrypoint binary
 	// cannot be resolved — see R1 absolute-path fix above). The exit code
@@ -1120,10 +1189,19 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 
 		runtimeLog.Error("sandbox dead on arrival: all liveness probes failed",
 			"name", slug, "agentID", cfg.Name, "error", probeErr, "diagnostics", diagInfo)
-		// Attempt cleanup — sandbox may be in a broken state.
-		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		_, _ = runSimpleCommand(cleanupCtx, r.bin, "delete", "--force", slug)
-		cleanupCancel()
+		// Attempt cleanup — sandbox may be in a broken state. The delete
+		// is by name, so it is skipped when the state shows a live
+		// sandbox of another run under this name (one recorded outside
+		// this process's Run lock): that sandbox is not this run's to
+		// remove.
+		if other := r.sandboxHeldByOtherRun(slug, runID); other != "" {
+			runtimeLog.Warn("Dead-on-arrival cleanup skipped: the sandbox name is held by another run",
+				"sandbox", slug, "run_id", runID, "sandbox_run_id", other)
+		} else {
+			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			_, _ = runSimpleCommand(cleanupCtx, r.bin, "delete", "--force", slug)
+			cleanupCancel()
+		}
 
 		errMsg := fmt.Sprintf("cloudrun-sandbox: sandbox dead on arrival after run returned rc=0 — "+
 			"all liveness probes failed: %v", probeErr)
@@ -1131,6 +1209,15 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 			errMsg += diagInfo
 		}
 		return "", errors.New(errMsg)
+	}
+
+	// A live sandbox of another run recorded under this name during the
+	// launch (outside this process's Run lock) means the probe may have
+	// passed on that sandbox: do not record it as this run's.
+	if other := r.sandboxHeldByOtherRun(slug, runID); other != "" {
+		runtimeLog.Warn("Sandbox name taken by another run during launch; not recording it",
+			"sandbox", slug, "run_id", runID, "sandbox_run_id", other)
+		return "", fmt.Errorf("cloudrun-sandbox: sandbox %s belongs to run %q, not %q: %w", slug, other, runID, ErrRunConflict)
 	}
 
 	// Record in state store.
