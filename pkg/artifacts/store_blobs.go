@@ -47,7 +47,8 @@ func (s *sqlStore) TouchBlob(ctx context.Context, digest string, now time.Time) 
 	}
 	defer func() { _ = tx.Rollback() }()
 	// The write comes first: it waits for a sweep holding the row, and
-	// the read after it sees what that sweep left.
+	// the read after it sees what that sweep left. The mark is kept: only
+	// ClearBlobMark, after the bytes are stored again, removes it.
 	if _, err := tx.ExecContext(ctx, s.rebind(`INSERT INTO artifact_blob (sha256, touched_at) VALUES (?, ?)
 		ON CONFLICT (sha256) DO UPDATE SET touched_at = excluded.touched_at`), digest, s.timeArg(now)); err != nil {
 		return false, fmt.Errorf("artifacts: touch blob: %w", err)
@@ -56,13 +57,18 @@ func (s *sqlStore) TouchBlob(ctx context.Context, digest string, now time.Time) 
 	if err := tx.QueryRowContext(ctx, s.rebind(`SELECT unreferenced_since FROM artifact_blob WHERE sha256 = ?`), digest).Scan(&since); err != nil {
 		return false, fmt.Errorf("artifacts: read blob state: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE artifact_blob SET unreferenced_since = NULL WHERE sha256 = ?`), digest); err != nil {
-		return false, fmt.Errorf("artifacts: clear blob mark: %w", err)
-	}
 	if err := tx.Commit(); err != nil {
 		return false, fmt.Errorf("artifacts: commit touch: %w", err)
 	}
 	return since.Valid, nil
+}
+
+// ClearBlobMark implements Store.
+func (s *sqlStore) ClearBlobMark(ctx context.Context, digest string) error {
+	if _, err := s.db.ExecContext(ctx, s.rebind(`UPDATE artifact_blob SET unreferenced_since = NULL, generation = NULL WHERE sha256 = ?`), digest); err != nil {
+		return fmt.Errorf("artifacts: clear blob mark: %w", err)
+	}
+	return nil
 }
 
 // MarkBlobs implements Store.
@@ -169,9 +175,9 @@ func (s *sqlStore) ReclaimBlobs(ctx context.Context, cutoff time.Time, limit int
 }
 
 // reclaimOne deletes one blob if, under its state row's lock, it is still
-// unreferenced since at or before cutoff. A touch clears the mark
-// (TouchBlob) and a later mark is never older than the touch, so a blob
-// touched after cutoff never qualifies: the mark is the one condition.
+// marked unreferenced since at or before cutoff and untouched since cutoff
+// (a writer touches before it relies on the blob and keeps the mark until
+// it has stored the bytes again).
 func (s *sqlStore) reclaimOne(ctx context.Context, digest string, cutoff any, del func(string, int64) error) (bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -181,7 +187,8 @@ func (s *sqlStore) reclaimOne(ctx context.Context, digest string, cutoff any, de
 	// The write takes the row's lock (Postgres) or the write lock
 	// (SQLite) and re-checks the state in one statement.
 	res, err := tx.ExecContext(ctx, s.rebind(`UPDATE artifact_blob SET sha256 = sha256
-		WHERE sha256 = ? AND unreferenced_since IS NOT NULL AND unreferenced_since <= ?`), digest, cutoff)
+		WHERE sha256 = ? AND unreferenced_since IS NOT NULL AND unreferenced_since <= ?
+		AND (touched_at IS NULL OR touched_at <= ?)`), digest, cutoff, cutoff)
 	if err != nil {
 		return false, fmt.Errorf("artifacts: lock blob: %w", err)
 	}
