@@ -233,6 +233,9 @@ func suspendAllAgents() error {
 	if isJSONOutput() {
 		jsonResults := make([]map[string]interface{}, len(results))
 		hasErrors := false
+		// failed matches the text-mode exit: skipped agents mark the
+		// document "partial" but, as in text mode, do not fail the command.
+		failed := false
 		for i, r := range results {
 			entry := map[string]interface{}{
 				"agent":  r.Name,
@@ -242,17 +245,20 @@ func suspendAllAgents() error {
 				entry["error"] = r.Error
 				hasErrors = true
 			}
+			if r.Status == "error" {
+				failed = true
+			}
 			jsonResults[i] = entry
 		}
 		overallStatus := "success"
 		if hasErrors {
 			overallStatus = "partial"
 		}
-		return outputJSON(map[string]interface{}{
+		return outputJSONResult(map[string]interface{}{
 			"status":  overallStatus,
 			"command": "suspend",
 			"results": jsonResults,
-		})
+		}, failed, "failed to suspend some agents")
 	}
 
 	var errs []string
@@ -364,11 +370,11 @@ func suspendAllAgentsViaHub(hubCtx *HubContext) error {
 		if hasErrors {
 			overallStatus = "partial"
 		}
-		return outputJSON(map[string]interface{}{
+		return outputJSONResult(map[string]interface{}{
 			"status":  overallStatus,
 			"command": "suspend",
 			"results": jsonResults,
-		})
+		}, hasErrors, "failed to suspend some agents via Hub")
 	}
 
 	var errs []string
