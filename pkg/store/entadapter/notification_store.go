@@ -660,7 +660,9 @@ func (s *NotificationStore) PurgeOrphanedNotifications(ctx context.Context) (int
 		if err != nil {
 			return total, mapError(err)
 		}
-		if len(ids) < orphanPurgeBatchSize {
+		if n == 0 || len(ids) < orphanPurgeBatchSize {
+			// A short batch is the last one. A batch that removed nothing
+			// would select the same rows again, so stop there as well.
 			return total, nil
 		}
 	}

@@ -18,6 +18,7 @@ package entadapter
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -687,4 +688,50 @@ func TestPurgeOrphanedNotifications_DeletesInBatches(t *testing.T) {
 	purged, err = s.PurgeOrphanedNotifications(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, 0, purged)
+}
+
+// A full batch whose delete removes no rows ends the purge instead of
+// selecting the same rows again.
+func TestPurgeOrphanedNotifications_StopsWhenDeleteRemovesNothing(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	s := NewNotificationStore(client)
+
+	prev := orphanPurgeBatchSize
+	orphanPurgeBatchSize = 2
+	t.Cleanup(func() { orphanPurgeBatchSize = prev })
+
+	projectID := uuid.New()
+	_, err := client.Project.Create().SetID(projectID).SetName("Stuck Project").SetSlug("stuck-project").Save(ctx)
+	require.NoError(t, err)
+	for i := 0; i < orphanPurgeBatchSize; i++ {
+		id := uuid.NewString()
+		require.NoError(t, s.CreateNotification(ctx, &store.Notification{
+			ID: id, SubscriptionID: uuid.NewString(), AgentID: uuid.NewString(),
+			ProjectID: projectID.String(), SubscriberType: "user", SubscriberID: "user-1",
+			Status: "DELETED", Message: "deleted",
+		}))
+		require.NoError(t, s.AcknowledgeNotification(ctx, id))
+	}
+
+	// Every delete removes nothing. Past a few attempts, fail the delete
+	// so a looping purge returns an error instead of hanging the test.
+	var deletes int
+	client.Notification.Use(func(next ent.Mutator) ent.Mutator {
+		return ent.MutateFunc(func(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+			if !m.Op().Is(ent.OpDelete) {
+				return next.Mutate(ctx, m)
+			}
+			deletes++
+			if deletes > 5 {
+				return nil, errors.New("purge kept deleting the same rows")
+			}
+			return 0, nil
+		})
+	})
+
+	purged, err := s.PurgeOrphanedNotifications(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 0, purged)
+	assert.Equal(t, 1, deletes, "the purge stops after one delete that removes nothing")
 }
