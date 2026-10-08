@@ -414,7 +414,9 @@ func (aggregateFailStore) AggregateAgentHealth(context.Context) (*store.AgentHea
 
 // TestHandleHealthSummary_AgentsNullWhenAggregateFails: a failed aggregate is
 // reported as agents: null (not reported), never as a zero-agent section that
-// would read as "nothing needs attention", and it degrades the status.
+// would read as "nothing needs attention". The agent error rule is skipped,
+// so the status does not change, and an "Agent data not available" warning
+// explains the missing section.
 func TestHandleHealthSummary_AgentsNullWhenAggregateFails(t *testing.T) {
 	srv, _ := testServer(t)
 	srv.store = aggregateFailStore{srv.store}
@@ -428,7 +430,13 @@ func TestHandleHealthSummary_AgentsNullWhenAggregateFails(t *testing.T) {
 	var resp HealthSummaryResponse
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
 	assert.Nil(t, resp.Agents)
-	assert.Equal(t, "degraded", resp.Status)
+	assert.Equal(t, "healthy", resp.Status)
+	assert.Contains(t, resp.Attention, HealthAttentionItem{
+		Severity: HealthAttentionWarning, Kind: HealthAttentionAgents,
+		Subject: HealthAttentionSubject{Type: HealthSubjectAgents},
+		Message: "Agent data not available",
+	})
+	assert.NotContains(t, rr.Body.String(), "aggregate failed", "raw store errors must not reach the response")
 }
 
 func TestOrderedPhaseCounts(t *testing.T) {

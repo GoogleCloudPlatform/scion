@@ -1501,6 +1501,10 @@ type Server struct {
 
 	// Plugin manager for broker integration admin API (nil = no integrations)
 	pluginManager IntegrationManager
+	// healthIntegrationInflight holds the names of plugins whose health
+	// summary query has not returned yet (see healthSummaryIntegrations),
+	// so a hung plugin is not queried again on every poll.
+	healthIntegrationInflight sync.Map
 
 	// Web chat store for webchat_* tables (thread prefs, chat threads, etc.) — nil = disabled.
 	webChatStore WebChatStore

@@ -33,29 +33,48 @@ import (
 // that the list was truncated. A variable so tests can lower it.
 var healthSummaryBrokerLimit = 100
 
-// healthSummaryBrokerPageSize is the store page size used while counting
-// runtime broker records for the health summary.
-const healthSummaryBrokerPageSize = 500
+// healthSummaryBrokerPageSize is the store page size used while listing
+// runtime broker records for the health summary. A variable so tests can
+// lower it.
+var healthSummaryBrokerPageSize = 500
 
 // HealthSummaryResponse is the composite health summary returned by
 // GET /api/v1/admin/health/summary. It aggregates all subsystem health
 // into a single response for the health dashboard.
 type HealthSummaryResponse struct {
-	Status   string                 `json:"status"`
-	Hub      HealthSummaryHub       `json:"hub"`
-	Database HealthSummaryDB        `json:"database"`
-	Brokers  HealthSummaryBrokers   `json:"runtime_brokers"`
-	Agents   *HealthSummaryAgents   `json:"agents"`   // nil when the agent aggregate is unavailable
-	Dispatch *HealthSummaryDispatch `json:"dispatch"` // nil when a dispatch store count failed
+	// Status is healthy, degraded or unhealthy; see deriveHealthSummaryStatus.
+	Status string `json:"status"`
+	// GeneratedAt is when this hub instance built the summary (UTC).
+	GeneratedAt time.Time `json:"generated_at"`
+	// Attention is the ranked "Needs attention" list; never nil. See
+	// deriveHealthSummaryStatus.
+	Attention []HealthAttentionItem `json:"attention"`
+	Hub       HealthSummaryHub      `json:"hub"`
+	Database  HealthSummaryDB       `json:"database"`
+	Brokers   HealthSummaryBrokers  `json:"runtime_brokers"`
+	Agents    *HealthSummaryAgents  `json:"agents"` // nil when the agent aggregate is unavailable
+	// Dispatch is nil when a dispatch store count failed.
+	Dispatch *HealthSummaryDispatch `json:"dispatch"`
 
-	// Integrations lists chat and messaging plugins; never nil. See
+	// Integrations lists chat and messaging plugins; never nil. It is
+	// empty unless IntegrationsDetail is true. See
 	// health_summary_integrations.go.
 	Integrations []HealthSummaryIntegration `json:"integrations"`
+	// IntegrationsDetail is true when the caller holds
+	// hub.integrations.read, so Integrations and the integration attention
+	// items carry integration identity. Without it they are aggregate only.
+	IntegrationsDetail bool `json:"integrations_detail"`
+	// IntegrationCounts is the non-identifying aggregate of the
+	// integrations, returned to every caller.
+	IntegrationCounts HealthSummaryIntegrationCounts `json:"integration_counts"`
 }
 
 // HealthSummaryHub contains hub-level health information.
 type HealthSummaryHub struct {
-	Status           string `json:"status"`
+	Status string `json:"status"`
+	// InstanceID identifies the hub instance (process) that served this
+	// summary. The hub figures and checks are this instance's own.
+	InstanceID       string `json:"instance_id"`
 	Version          string `json:"version"`
 	Uptime           string `json:"uptime"`
 	ConnectedBrokers int    `json:"connected_brokers"`
@@ -93,6 +112,9 @@ type HealthSummaryBrokers struct {
 	Total int `json:"total"`
 	// Truncated is true when Total exceeds len(Items).
 	Truncated bool `json:"truncated"`
+	// NotReported is true when the runtime brokers could not be listed;
+	// Items is then empty and Total zero.
+	NotReported bool `json:"not_reported,omitempty"`
 }
 
 // HealthSummaryBroker contains per-broker health information.
@@ -235,22 +257,13 @@ func (s *Server) handleHealthSummary(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
+	now := time.Now().UTC()
 
-	// Get base health info
 	healthInfo := s.GetHealthInfo(ctx)
 
-	// Determine overall status early so DB-error branches can degrade it.
-	// Later signals only ever raise severity (worseHealthStatus): an
-	// unhealthy hub must not be reported as merely degraded.
-	overallStatus := HealthStatusHealthy
-	if healthInfo.Status != "" {
-		overallStatus = worseHealthStatus(overallStatus, healthInfo.Status)
-	}
-	degrade := func() { overallStatus = worseHealthStatus(overallStatus, HealthStatusDegraded) }
-
-	// Build hub section
 	hubSummary := HealthSummaryHub{
 		Status:          healthInfo.Status,
+		InstanceID:      s.InstanceID(),
 		Version:         healthInfo.ScionVersion,
 		Uptime:          healthInfo.Uptime,
 		Checks:          healthInfo.Checks,
@@ -291,49 +304,44 @@ func (s *Server) handleHealthSummary(w http.ResponseWriter, r *http.Request) {
 	agentAgg, err := s.store.AggregateAgentHealth(ctx)
 	if err != nil {
 		slog.Error("health summary: failed to aggregate agent health", "error", err)
-		degrade()
 	} else {
 		summary := s.healthSummaryAgents(ctx, agentAgg)
 		agentsSummary = &summary
 	}
 
-	// Build brokers section using pre-computed agent buckets from the aggregate.
-	brokerList, err := s.healthSummaryBrokers(ctx, agentAgg)
+	// One pass over the runtime broker table gives both the runtime broker
+	// rows and the plugin record names for the integrations section.
+	brokerList, pluginRecordNames, err := s.healthSummaryBrokers(ctx, agentAgg)
 	if err != nil {
 		slog.Error("health summary: failed to list runtime brokers", "error", err)
-		degrade()
 	}
 
 	// Dispatch section, from the store. A failed count leaves it nil ("not
 	// reported") rather than reading as zero.
-	dispatchSummary, err := s.healthSummaryDispatch(ctx, time.Now().UTC())
+	dispatchSummary, err := s.healthSummaryDispatch(ctx, now)
 	if err != nil {
 		slog.Error("health summary: failed to count dispatch health", "error", err)
-		degrade()
 	}
 
-	// Propagate unhealthy agent/broker signals into overall status.
-	// Stalled agents never count.
-	if agentsSummary != nil && agentsSummary.Errored > 0 {
-		degrade()
-	}
-	for _, b := range brokerList.Items {
-		if healthSummaryBrokerStatusIsProblem(b.Status) {
-			degrade()
-			break
-		}
-	}
+	integrations := s.healthSummaryIntegrations(ctx, pluginRecordNames)
 
 	resp := HealthSummaryResponse{
-		Status:   overallStatus,
-		Hub:      hubSummary,
-		Database: dbSummary,
-		Brokers:  brokerList,
-		Agents:   agentsSummary,
-		Dispatch: dispatchSummary,
-
-		// See health_summary_integrations.go.
-		Integrations: s.healthSummaryIntegrations(ctx),
+		GeneratedAt:        now,
+		Hub:                hubSummary,
+		Database:           dbSummary,
+		Brokers:            brokerList,
+		Agents:             agentsSummary,
+		Dispatch:           dispatchSummary,
+		Integrations:       integrations,
+		IntegrationsDetail: true,
+		IntegrationCounts:  healthSummaryIntegrationCounts(integrations),
+	}
+	// The policy sees the full integration list, so the status does not
+	// depend on who asks. Identity is removed afterwards for callers
+	// without hub.integrations.read.
+	resp.Status, resp.Attention = deriveHealthSummaryStatus(&resp)
+	if !s.healthSummaryCanReadIntegrations(r) {
+		omitHealthSummaryIntegrationDetail(&resp)
 	}
 
 	writeJSON(w, http.StatusOK, resp)
@@ -456,18 +464,24 @@ func orderedPhaseCounts(byPhase map[string]int) []HealthPhaseCount {
 // are stably sorted ahead of the rest, so capping at
 // healthSummaryBrokerLimit never hides a problem broker behind healthy ones;
 // within each group store order is kept. Total is the full runtime broker
-// count. On a store error it returns an empty, non-nil list with the error.
-func (s *Server) healthSummaryBrokers(ctx context.Context, agentAgg *store.AgentHealthAggregate) (HealthSummaryBrokers, error) {
+// count. The same pass returns the plugin names of the plugin records, for
+// the integrations section. On a store error it returns an empty, non-nil
+// list marked NotReported, the plugin names read so far, and the error.
+func (s *Server) healthSummaryBrokers(ctx context.Context, agentAgg *store.AgentHealthAggregate) (HealthSummaryBrokers, []string, error) {
 	list := HealthSummaryBrokers{Items: []HealthSummaryBroker{}}
+	var pluginNames []string
 	opts := store.ListOptions{Limit: healthSummaryBrokerPageSize}
 	for {
 		page, err := s.store.ListRuntimeBrokers(ctx, store.RuntimeBrokerFilter{}, opts)
 		if err != nil {
-			return HealthSummaryBrokers{Items: []HealthSummaryBroker{}}, err
+			return HealthSummaryBrokers{Items: []HealthSummaryBroker{}, NotReported: true}, pluginNames, err
 		}
 		for i := range page.Items {
 			b := &page.Items[i]
 			if isPluginBroker(b) {
+				if name := pluginRecordName(b); name != "" {
+					pluginNames = append(pluginNames, name)
+				}
 				continue
 			}
 			list.Items = append(list.Items, healthSummaryBroker(b, agentAgg))
@@ -485,7 +499,7 @@ func (s *Server) healthSummaryBrokers(ctx context.Context, agentAgg *store.Agent
 		list.Items = list.Items[:healthSummaryBrokerLimit]
 		list.Truncated = true
 	}
-	return list, nil
+	return list, pluginNames, nil
 }
 
 // healthSummaryBrokerHasProblem reports whether a runtime broker row needs
