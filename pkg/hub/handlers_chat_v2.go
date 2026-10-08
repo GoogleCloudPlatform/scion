@@ -1423,11 +1423,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 			"target_agent", primaryAgent.ID,
 			"reason", reason,
 		)
-		return nil, newChatSendError(http.StatusForbidden, ErrCodeMessageDenied, "Message delivery denied", map[string]interface{}{
-			"reason":        mapReasonToCode(reason),
-			"senderMode":    "user",
-			"recipientMode": primaryAgent.MessageMode,
-		})
+		return nil, chatSendMessageDenied(reason, primaryAgent)
 	}
 
 	// #2257 P2 (design auto-offload-large-dm §4.2 item 1): strip hub-reserved
