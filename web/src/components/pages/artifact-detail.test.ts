@@ -1448,4 +1448,30 @@ describe('artifact page', () => {
       true
     );
   });
+
+  it('describes the marks of a pending review by kind, leaving out kinds it has none of', async () => {
+    const { describeMarks } = await import('./artifact-detail.js');
+    expect(describeMarks({ comments: 2, suggestions: 3, highlights: 0 })).toBe(
+      '2 comments and 3 suggestions'
+    );
+    expect(describeMarks({ comments: 0, suggestions: 0, highlights: 1 })).toBe('1 highlight');
+    expect(describeMarks({ comments: 1, suggestions: 1, highlights: 2 })).toBe(
+      '1 comment, 1 suggestion and 2 highlights'
+    );
+    expect(describeMarks({ comments: 0, suggestions: 0, highlights: 0 })).toBe('marks');
+    // In the banner: a review with only a highlight.
+    const meta = reviewMeta();
+    mockFetch(meta, 'We {==ship==} in Q3.\n', {
+      versions: [
+        { ...meta.version!, files: [] },
+        { ...meta.version!, seq: 1, kind: 'publish', files: [] },
+      ],
+    });
+    const el = await mount(true);
+    const banner = el
+      .shadowRoot!.querySelector('sl-alert.review-banner')!
+      .textContent!.replace(/\s+/g, ' ');
+    expect(banner).toContain('left 1 highlight on v1');
+    expect(banner).not.toContain('0 comments');
+  });
 });

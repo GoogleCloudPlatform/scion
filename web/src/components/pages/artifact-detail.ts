@@ -79,7 +79,7 @@ import {
   onlyMarksChanged,
   projectCritic,
 } from '../../utils/critic.js';
-import type { CriticTool } from '../../utils/critic.js';
+import type { CriticCounts, CriticTool } from '../../utils/critic.js';
 import '../shared/artifact-markdown-frame.js';
 import '../shared/artifact-publish-dialog.js';
 import '../shared/code-editor.js';
@@ -94,6 +94,26 @@ type Tab = 'preview' | 'files' | 'history';
  */
 function lfText(text: string | null): string {
   return (text ?? '').replace(/\r\n?/g, '\n');
+}
+
+/**
+ * Describes a review's marks for the banner: comments, suggestions and
+ * highlights, leaving out the kinds it has none of ("2 comments and 3
+ * suggestions", "1 highlight"), or "marks" when it has none.
+ */
+export function describeMarks(c: CriticCounts): string {
+  const parts = (
+    [
+      [c.comments, 'comment'],
+      [c.suggestions, 'suggestion'],
+      [c.highlights, 'highlight'],
+    ] as const
+  )
+    .filter(([n]) => n > 0)
+    .map(([n, word]) => `${n} ${word}${n === 1 ? '' : 's'}`);
+  if (parts.length === 0) return 'marks';
+  if (parts.length === 1) return parts[0];
+  return `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`;
 }
 
 /** Viewports at least this wide show comment notes in a margin. */
@@ -1452,9 +1472,7 @@ export class ScionPageArtifactDetail extends LitElement {
     const a = this.data!.artifact;
     const counts = this.text !== null ? countCritic(this.text) : null;
     const base = this.versions.find((x) => x.seq < v.seq);
-    const what = counts
-      ? `${counts.comments} ${counts.comments === 1 ? 'comment' : 'comments'} and ${counts.suggestions} ${counts.suggestions === 1 ? 'suggestion' : 'suggestions'}`
-      : 'marks';
+    const what = counts ? describeMarks(counts) : 'marks';
     const owner = this.label(a.ownerKind, a.ownerRef);
     // The hub tells an agent owner about reviews by others only.
     const notified =
@@ -1591,7 +1609,7 @@ export class ScionPageArtifactDetail extends LitElement {
           .files=${v.files}
           .critic=${this.criticView}
           .marginNotes=${this.wideReviewViewport}
-          noteAuthor="You"
+          .noteAuthor=${'You'}
           .sideNote=${this.criticView === 'marks' && previewMarks === 0
             ? 'No comments or suggestions yet.'
             : this.criticSideNote(v.seq)}
