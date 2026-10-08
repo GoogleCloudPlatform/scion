@@ -223,3 +223,32 @@ func TestEnvVar_HubScope_NonAdminsListForbidden(t *testing.T) {
 		assert.Equal(t, http.StatusForbidden, rec.Code, "%s: %s", name, rec.Body.String())
 	}
 }
+
+// A hub-level row stored with Secret set (as written by paths other than
+// the env PUT handler) is left out of the read-only list, while the plain
+// rows next to it are still returned.
+func TestEnvVar_HubScope_HubAdminListOmitsSecretRows(t *testing.T) {
+	srv, s := testServer(t)
+	seedHubEnvFixtures(t, srv, s)
+	hubAdmin := newHubAdminRoleUser(t, s, "hub-env-read-secret-row")
+
+	require.NoError(t, s.CreateEnvVar(context.Background(), &store.EnvVar{
+		ID:          tid("hub-env-secret-row"),
+		Key:         "HUB_SECRET_ROW",
+		Value:       "secret-row-value",
+		Scope:       store.ScopeHub,
+		ScopeID:     "test-hub-id",
+		Description: "secret row description",
+		Secret:      true,
+	}))
+
+	rec := doRequestAsUser(t, srv, hubAdmin, http.MethodGet, "/api/v1/env?scope=hub", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	_, keys := listHubEnvKeys(t, rec.Body.Bytes())
+	assert.ElementsMatch(t, []string{"HUB_PLAIN", "HUB_SENSITIVE"}, keys)
+	body := rec.Body.String()
+	assert.NotContains(t, body, "HUB_SECRET_ROW")
+	assert.NotContains(t, body, "secret row description")
+	assert.NotContains(t, body, "secret-row-value")
+}
