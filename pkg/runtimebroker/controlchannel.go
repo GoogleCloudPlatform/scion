@@ -980,6 +980,12 @@ func (c *ControlChannelClient) handleStreamData(data []byte) error {
 		return nil
 	}
 
+	if handler.isClosed() {
+		// Already closed with a reported code (e.g. input overflow) and
+		// waiting for the Hub's close; late input is not delivered.
+		return nil
+	}
+
 	if handler.input == nil {
 		// Only handlers built outside handleStreamOpen (tests, with a
 		// buffered dataCh) lack an input queue. Hand off without blocking
@@ -988,7 +994,7 @@ func (c *ControlChannelClient) handleStreamData(data []byte) error {
 		select {
 		case handler.dataCh <- frame.Data:
 		default:
-			c.closeStreamAsync(frame.StreamID, closeReasonInputOverflow, closeCodeInputOverflow)
+			c.closeStreamAsync(handler, closeReasonInputOverflow, closeCodeInputOverflow)
 		}
 		return nil
 	}
@@ -996,41 +1002,51 @@ func (c *ControlChannelClient) handleStreamData(data []byte) error {
 	if !handler.input.push(frame.Data) {
 		c.log.Warn("Stream input exceeded the buffer limit; closing stream",
 			"streamID", frame.StreamID, "limitBytes", StreamInputLimit)
-		c.closeStreamAsync(frame.StreamID, closeReasonInputOverflow, closeCodeInputOverflow)
+		c.closeStreamAsync(handler, closeReasonInputOverflow, closeCodeInputOverflow)
 	}
 
 	return nil
 }
 
-// closeStreamAsync closes a stream locally at once and reports the close to
-// the Hub from a separate goroutine, so the read loop never waits on the
-// write. The handler is marked closed before the report is sent, so the PTY
-// goroutine treats the stream as closed and does not send its own close code
-// ahead of this one.
-func (c *ControlChannelClient) closeStreamAsync(streamID, reason string, code int) {
-	c.streamMu.Lock()
-	handler, ok := c.streams[streamID]
-	if ok {
-		delete(c.streams, streamID)
+// isClosed reports whether the stream has been closed.
+func (h *StreamHandler) isClosed() bool {
+	h.closeMu.Lock()
+	defer h.closeMu.Unlock()
+	return h.closed
+}
+
+// claimClose closes the stream locally and reports whether this call did
+// it. Exactly one path claims each stream, and only a claiming path that is
+// responsible for telling the Hub (closeStreamAsync, CloseStream) sends a
+// StreamClose, so the Hub sees one close code per stream.
+func (h *StreamHandler) claimClose() bool {
+	h.closeMu.Lock()
+	defer h.closeMu.Unlock()
+	if h.closed {
+		return false
 	}
-	c.streamMu.Unlock()
-	if !ok {
+	h.closed = true
+	close(h.closeCh)
+	return true
+}
+
+// closeStreamAsync closes handler's stream locally at once and, if this call
+// claimed the close, reports it to the Hub from a separate goroutine so the
+// read loop never waits on the write. The handler stays registered, marked
+// closed, until the Hub's StreamClose or a CloseStream call removes it; a
+// CloseStream that finds it already claimed sends nothing, so a PTY
+// goroutine finishing at the same time cannot report a second code.
+func (c *ControlChannelClient) closeStreamAsync(handler *StreamHandler, reason string, code int) {
+	if !handler.claimClose() {
 		return
 	}
-
-	handler.closeMu.Lock()
-	if !handler.closed {
-		handler.closed = true
-		close(handler.closeCh)
-	}
-	handler.closeMu.Unlock()
-
-	closeMsg := wsprotocol.NewStreamCloseMessage(streamID, reason, code)
+	conn := c.conn
+	closeMsg := wsprotocol.NewStreamCloseMessage(handler.streamID, reason, code)
 	c.wg.Add(1)
 	go func() {
 		defer c.wg.Done()
-		if err := c.conn.WriteJSON(closeMsg); err != nil {
-			c.log.Warn("Failed to report stream close to Hub", "streamID", streamID, "code", code, "error", err)
+		if err := conn.WriteJSON(closeMsg); err != nil {
+			c.log.Warn("Failed to report stream close to Hub", "streamID", handler.streamID, "code", code, "error", err)
 		}
 	}()
 }
@@ -1201,7 +1217,10 @@ func (c *ControlChannelClient) SendStreamData(streamID string, data []byte) erro
 	return c.conn.WriteJSON(frame)
 }
 
-// CloseStream closes a stream.
+// CloseStream closes a stream and reports code and reason to the Hub. If the
+// stream is still registered but another path already closed it with a
+// reported code (input overflow), CloseStream only unregisters it and sends
+// nothing, so the Hub sees a single close code.
 func (c *ControlChannelClient) CloseStream(streamID, reason string, code int) error {
 	c.streamMu.Lock()
 	handler, ok := c.streams[streamID]
@@ -1210,13 +1229,10 @@ func (c *ControlChannelClient) CloseStream(streamID, reason string, code int) er
 	}
 	c.streamMu.Unlock()
 
-	if handler != nil {
-		handler.closeMu.Lock()
-		if !handler.closed {
-			handler.closed = true
-			close(handler.closeCh)
-		}
-		handler.closeMu.Unlock()
+	if handler != nil && !handler.claimClose() {
+		// Another path (input overflow) already closed the stream and
+		// reported its code to the Hub; do not send a second one.
+		return nil
 	}
 
 	closeMsg := wsprotocol.NewStreamCloseMessage(streamID, reason, code)

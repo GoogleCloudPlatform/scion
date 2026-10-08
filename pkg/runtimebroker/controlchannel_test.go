@@ -936,27 +936,16 @@ func TestStreamInput_PasteOverLimitClosesWithCode(t *testing.T) {
 	if !isClosed(handler) {
 		t.Fatal("input over the limit must close the stream")
 	}
-	client.streamMu.RLock()
-	_, registered := client.streams["paste-big"]
-	client.streamMu.RUnlock()
-	if registered {
-		t.Fatal("the overflowed stream must be released")
-	}
-
-	if err := hubConn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
-		t.Fatal(err)
-	}
-	var closeMsg wsprotocol.StreamCloseMessage
-	if err := hubConn.ReadJSON(&closeMsg); err != nil {
-		t.Fatalf("read stream close: %v", err)
-	}
-	if closeMsg.Type != wsprotocol.TypeStreamClose || closeMsg.StreamID != "paste-big" ||
-		closeMsg.Code != closeCodeInputOverflow || closeMsg.Reason != closeReasonInputOverflow {
-		t.Fatalf("got close %+v, want stream_close paste-big %d %s", closeMsg, closeCodeInputOverflow, closeReasonInputOverflow)
-	}
+	expectStreamClose(t, hubConn, "paste-big", closeCodeInputOverflow, closeReasonInputOverflow)
 
 	// Later frames for the closed stream are ignored without blocking.
 	feed(t, client, wsprotocol.NewStreamFrame("paste-big", []byte("late")))
+
+	// The Hub's answering StreamClose releases the stream.
+	feed(t, client, wsprotocol.NewStreamCloseMessage("paste-big", "session closed", 0))
+	if isRegistered(client, "paste-big") {
+		t.Fatal("the overflowed stream must be released by the Hub's close")
+	}
 
 	sent := pasteFrames(t, client, "other", 1024)
 	if got := readInput(t, other, len(sent)); !bytes.Equal(sent, got) {
@@ -978,5 +967,92 @@ func TestStreamInput_OverflowCodeIsTerminalAndPassesThrough(t *testing.T) {
 	}
 	if closeCodeInputOverflow != websocket.CloseMessageTooBig {
 		t.Fatalf("closeCodeInputOverflow = %d, want RFC 6455 1009", closeCodeInputOverflow)
+	}
+}
+
+// expectStreamClose reads the next control-channel message on the Hub side
+// and checks it is a StreamClose for streamID with code and reason.
+func expectStreamClose(t *testing.T, hubConn *wsprotocol.Connection, streamID string, code int, reason string) {
+	t.Helper()
+	if err := hubConn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	var msg wsprotocol.StreamCloseMessage
+	if err := hubConn.ReadJSON(&msg); err != nil {
+		t.Fatalf("read stream close: %v", err)
+	}
+	if msg.Type != wsprotocol.TypeStreamClose || msg.StreamID != streamID || msg.Code != code || msg.Reason != reason {
+		t.Fatalf("got %+v, want stream_close %s %d %q", msg, streamID, code, reason)
+	}
+}
+
+func isRegistered(client *ControlChannelClient, streamID string) bool {
+	client.streamMu.RLock()
+	defer client.streamMu.RUnlock()
+	_, ok := client.streams[streamID]
+	return ok
+}
+
+// Exactly one StreamClose goes to the Hub per stream when an input overflow
+// and the PTY goroutine's own CloseStream (sent after its attach ends) race.
+// Whichever closes the stream first reports its code; the other sends
+// nothing. A sentinel close for another stream, written after both, must be
+// the next message, which proves no second close was sent.
+func TestStreamInput_OverflowAndCloseStreamReportOnce(t *testing.T) {
+	const sentinel = "sentinel"
+	t.Run("overflow first", func(t *testing.T) {
+		client, hubConn := newCancelTestClient(t, http.NotFoundHandler(), 1)
+		openInputTestStream(t, client, "s") // nobody consumes: the PTY has stopped
+		pasteFrames(t, client, "s", StreamInputLimit+1)
+		// The PTY goroutine finishes classifying and reports its own code.
+		if err := client.CloseStream("s", wsprotocol.CloseReasonSessionEnded, wsprotocol.ClosePTYSessionGone); err != nil {
+			t.Fatalf("CloseStream: %v", err)
+		}
+		waitWG(t, client) // the async overflow report has been written
+		if isRegistered(client, "s") {
+			t.Fatal("CloseStream must still unregister the stream")
+		}
+		if err := client.CloseStream(sentinel, "sentinel", 0); err != nil {
+			t.Fatal(err)
+		}
+		expectStreamClose(t, hubConn, "s", closeCodeInputOverflow, closeReasonInputOverflow)
+		expectStreamClose(t, hubConn, sentinel, 0, "sentinel")
+	})
+	t.Run("CloseStream first", func(t *testing.T) {
+		client, hubConn := newCancelTestClient(t, http.NotFoundHandler(), 1)
+		openInputTestStream(t, client, "s")
+		if err := client.CloseStream("s", wsprotocol.CloseReasonSessionEnded, wsprotocol.ClosePTYSessionGone); err != nil {
+			t.Fatalf("CloseStream: %v", err)
+		}
+		pasteFrames(t, client, "s", StreamInputLimit+1) // ignored: stream gone
+		waitWG(t, client)
+		if err := client.CloseStream(sentinel, "sentinel", 0); err != nil {
+			t.Fatal(err)
+		}
+		expectStreamClose(t, hubConn, "s", wsprotocol.ClosePTYSessionGone, wsprotocol.CloseReasonSessionEnded)
+		expectStreamClose(t, hubConn, sentinel, 0, "sentinel")
+	})
+}
+
+// A handler built without an input queue (as PTY tests build them) also
+// closes with 1009 instead of dropping input when its dataCh is full.
+func TestStreamInput_NoQueueHandlerOverflowClosesWithCode(t *testing.T) {
+	client, hubConn := newCancelTestClient(t, http.NotFoundHandler(), 1)
+	handler := &StreamHandler{streamID: "literal", dataCh: make(chan []byte, 1), resizeCh: make(chan [2]int, 1), closeCh: make(chan struct{})}
+	client.streamMu.Lock()
+	client.streams["literal"] = handler
+	client.streamMu.Unlock()
+
+	feed(t, client, wsprotocol.NewStreamFrame("literal", []byte("first")))
+	if isClosed(handler) {
+		t.Fatal("a frame that fits must not close the stream")
+	}
+	feed(t, client, wsprotocol.NewStreamFrame("literal", []byte("second")))
+	if !isClosed(handler) {
+		t.Fatal("a frame that does not fit must close the stream")
+	}
+	expectStreamClose(t, hubConn, "literal", closeCodeInputOverflow, closeReasonInputOverflow)
+	if got := string(<-handler.dataCh); got != "first" {
+		t.Fatalf("delivered frame = %q, want %q", got, "first")
 	}
 }
