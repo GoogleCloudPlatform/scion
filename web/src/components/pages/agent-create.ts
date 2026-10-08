@@ -783,6 +783,7 @@ export class ScionPageAgentCreate extends LitElement {
    *  Resets all project-defaultable fields first so that switching projects
    *  does not leak the previous project's defaults into the new one. */
   private async applyProjectDefaults(): Promise<void> {
+    const isStale = this.projectLoadGuard();
     // Reset to base defaults before applying new project settings
     this.maxTurns = 0;
     this.maxModelCalls = 0;
@@ -791,6 +792,7 @@ export class ScionPageAgentCreate extends LitElement {
     this.customModelId = '';
 
     const settings = await this.fetchProjectSettings(this.projectId);
+    if (isStale()) return;
 
     if (settings) {
       if (settings.defaultMaxTurns) this.maxTurns = settings.defaultMaxTurns;
@@ -891,9 +893,11 @@ export class ScionPageAgentCreate extends LitElement {
    * Select the default template and harness config for the current project.
    */
   private async selectDefaultTemplate(): Promise<void> {
+    const isStale = this.projectLoadGuard();
     const visible = this.filteredTemplates;
 
     const settings = this.projectId ? await this.fetchProjectSettings(this.projectId) : null;
+    if (isStale()) return;
     const harnessDefault = settings?.defaultHarnessConfig || this.hubDefaultHarnessConfig || 'claude';
 
     const harnessFor = (t: { defaultHarnessConfig?: string; harness?: string }) =>
@@ -947,7 +951,24 @@ export class ScionPageAgentCreate extends LitElement {
     }
   }
 
+  /**
+   * Incremented on every project switch. Project-scoped loaders capture it
+   * (with the project id) through projectLoadGuard and drop their results
+   * when a switch happened while they were waiting, so a slow response for
+   * the previous project cannot overwrite the current project's template,
+   * limits or harness configs.
+   */
+  private projectLoadSeq = 0;
+
+  /** Returns a check that is true once the project changed since the call. */
+  private projectLoadGuard(): () => boolean {
+    const seq = this.projectLoadSeq;
+    const projectId = this.projectId;
+    return () => seq !== this.projectLoadSeq || this.projectId !== projectId;
+  }
+
   private async loadHarnessConfigs(): Promise<void> {
+    const isStale = this.projectLoadGuard();
     try {
       const url = this.projectId
         ? `/api/v1/harness-configs?status=active&projectId=${encodeURIComponent(this.projectId)}&limit=100`
@@ -955,6 +976,7 @@ export class ScionPageAgentCreate extends LitElement {
       const res = await apiFetch(url);
       if (res.ok) {
         const data = (await res.json()) as { harnessConfigs?: HarnessConfigEntry[] };
+        if (isStale()) return;
         this.harnessConfigs = (data.harnessConfigs || []).sort((a, b) =>
           (a.displayName || a.name).localeCompare(b.displayName || b.name)
         );
@@ -1534,6 +1556,7 @@ export class ScionPageAgentCreate extends LitElement {
                 .value=${this.projectId}
                 @sl-change=${(e: Event) => {
                   this.projectId = (e.target as HTMLElement & { value: string }).value;
+                  this.projectLoadSeq++;
                   this.selectBrokerForProject();
                   void this.selectDefaultTemplate();
                   void this.loadHarnessConfigs();
