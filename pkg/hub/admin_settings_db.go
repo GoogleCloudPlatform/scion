@@ -907,6 +907,21 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		lifecycleBaseRev = rev
 	}
 
+	// Sections merged on the current row by mergeSectionOnCurrent: only the
+	// keys the body sends change, and the row revision read is the CAS base
+	// (ptone/scion#3718).
+	mergedBaseRevs := map[string]int64{}
+	if doc, ok := sectionDocs["github_app"]; ok {
+		merged, rev, err := mergeSectionOnCurrent(r.Context(), ops, "github_app", doc, githubAppPresence(rawBody))
+		if err != nil {
+			slog.Error("PUT server-config: failed to build github_app document", "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to build section documents", nil)
+			return
+		}
+		sectionDocs["github_app"] = merged
+		mergedBaseRevs["github_app"] = rev
+	}
+
 	// GCP permission-check section: carry an omitted key forward from the
 	// current row, skip the write when the applied values would not
 	// change, and refuse a change the transition rules do not allow.
@@ -1150,6 +1165,8 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			expectedRev = lifecycleBaseRev
 		} else if secName == gcpIAMSection && gcpIAMBaseRev >= 0 {
 			expectedRev = gcpIAMBaseRev
+		} else if rev, ok := mergedBaseRevs[secName]; ok {
+			expectedRev = rev
 		}
 
 		// A GCP permission-check change is recorded before it is written;
@@ -1875,24 +1892,39 @@ func dropEnvOverriddenAccessFields(base *opsettings.AccessSettings, envKeys []st
 }
 
 // buildSingleSectionDoc extracts the fields for a single section from the
-// update request and marshals them into a section document.
+// update request and marshals them into a section document. The document
+// holds the request's values only; how it is written is decided by the
+// DB-backed PUT (handlePutServerConfigDB).
 //
-// N6/N7 presence-aware clearing (DB-backed path only):
+// Contract for a DB-backed save (ptone/scion#3718): a save changes only the
+// keys the request body sends.
+//   - OMITTED key → keeps its stored value.
+//   - EXPLICIT empty ("", 0, [], null) → clears the stored value, so the
+//     bootstrap value applies again, if there is one.
+//   - Sent value → replaces the stored value.
+//   - A stored key the section struct does not model is kept when the
+//     section schema allows it, and otherwise dropped with a warning.
+//   - The write is a CAS against the row revision the merge read, so a
+//     concurrent write to the section yields a 409, not a lost update.
 //
-// The fp (fieldPresence) parameter carries the raw JSON structure so we can
-// distinguish OMITTED fields from EXPLICITLY-SENT empty values:
-//   - OMITTED → field not in raw JSON → do NOT include in section doc.
-//     The write replaces the whole row, so for most sections an omitted
-//     field is dropped from the DB. The access, endpoints and lifecycle
-//     sections are the exception: handlePutServerConfigDB rebuilds them on
-//     the current row (buildAccessDocOnCurrent, buildEndpointsDocOnCurrent,
-//     carryForwardLifecycleSettings), so their omitted fields are kept.
-//   - EXPLICIT empty ("", [], null) → field IS in raw JSON → include the
-//     zero value in the section doc, which CLEARS it in the DB
+// This doc carries the presence needed for that: an omitted field is
+// absent from it, and an explicitly sent empty value is included as its
+// zero value where omitempty would otherwise hide it (fp, the raw JSON
+// presence, distinguishes the two; N6/N7).
 //
-// This applies to: admin_emails, user_access_mode, default_user_role,
-// notification_channels, public_url. The file-mode handler (hub without
-// OperationalSettings) does not use this.
+// Sections meet the contract in one of two ways:
+//   - github_app goes through the shared helper mergeSectionOnCurrent,
+//     which applies the request's sent keys to the current row's raw JSON.
+//     New sections should use it.
+//   - access, endpoints and lifecycle use their own carry-forward builders
+//     (buildAccessDocOnCurrent, buildEndpointsDocOnCurrent,
+//     carryForwardLifecycleSettings), and gcp_iam uses buildGCPIAMDoc.
+//
+// The other sections still replace the whole row with this doc, so their
+// omitted fields are dropped from the DB.
+//
+// The file-mode handler (hub without OperationalSettings) does not use
+// this.
 func buildSingleSectionDoc(req *ServerConfigUpdateRequest, secName string, fp *fieldPresence) (json.RawMessage, error) {
 	var doc interface{}
 
