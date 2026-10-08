@@ -1272,4 +1272,131 @@ describe('artifact page', () => {
       'inside or across a mark'
     );
   });
+
+  /** The Review editor with its selection and replace stubbed. */
+  function stubEditor(el: ScionPageArtifactDetail): {
+    editor: HTMLElement & { content: string };
+    replaced: unknown[][];
+    select: (from: number, to: number) => void;
+  } {
+    const editor = el.shadowRoot!.querySelector(
+      'scion-code-editor.review-editor'
+    ) as HTMLElement & {
+      content: string;
+      getSelection: () => { from: number; to: number; text: string };
+      replaceRange: (...args: unknown[]) => void;
+      getContent: () => string;
+    };
+    const replaced: unknown[][] = [];
+    editor.replaceRange = (...args: unknown[]): void => {
+      replaced.push(args);
+    };
+    const select = (from: number, to: number): void => {
+      editor.getSelection = () => ({ from, to, text: editor.getContent().slice(from, to) });
+    };
+    return { editor, replaced, select };
+  }
+
+  it('reviews a CRLF file in LF form, so toolbar offsets match the editor', async () => {
+    mockFetch(artifact('plan.md', 'text/markdown'), 'We ship.\r\nLine two Q3.\r\n');
+    const el = await mount(true);
+    button(el, '.actions sl-button', 'Review')!.click();
+    await el.updateComplete;
+    const { editor, replaced, select } = stubEditor(el);
+    expect(editor.content).toBe('We ship.\nLine two Q3.\n');
+    expect(button(el, '.edit-footer sl-button', 'Save review')!.hasAttribute('disabled')).toBe(
+      true
+    );
+    const at = editor.content.indexOf('Q3');
+    select(at, at + 2);
+    button(el, '.review-toolbar sl-button', 'Comment')!.click();
+    await el.updateComplete;
+    expect(replaced).toHaveLength(1);
+  });
+
+  it('refuses a mark an opener would swallow in a CRLF file', async () => {
+    mockFetch(artifact('plan.md', 'text/markdown'), '{\r\n{\r\n{++-');
+    const el = await mount(true);
+    button(el, '.actions sl-button', 'Review')!.click();
+    await el.updateComplete;
+    const { editor, replaced, select } = stubEditor(el);
+    const at = editor.content.indexOf('++');
+    select(at, at + 2);
+    button(el, '.review-toolbar sl-button', 'Insert')!.click();
+    await el.updateComplete;
+    expect(replaced).toHaveLength(0);
+    expect(el.shadowRoot!.querySelector('.review-toolbar .hint')!.textContent).toContain(
+      'unclosed'
+    );
+  });
+
+  it("checks toolbar actions against the editor's content", async () => {
+    mockFetch(artifact('plan.md', 'text/markdown'), 'We ship in Q3.\n');
+    const el = await mount(true);
+    button(el, '.actions sl-button', 'Review')!.click();
+    await el.updateComplete;
+    const { editor, replaced, select } = stubEditor(el);
+    // The editor holds text whose change event has not reached the page.
+    editor.content = '{\n{\n{++-';
+    select(5, 7);
+    button(el, '.review-toolbar sl-button', 'Insert')!.click();
+    await el.updateComplete;
+    expect(replaced).toHaveLength(0);
+  });
+
+  it('keeps the discarded text and Copy above the not-found page when the reload after a stale review answers 404', async () => {
+    const meta = artifact('plan.md', 'text/markdown');
+    const creates: string[] = [];
+    let gone = false;
+    mockFetch(meta, 'We ship in Q3.\n', {
+      write: reviewWrites(
+        meta,
+        () => {
+          gone = true;
+          return new Response(
+            JSON.stringify({ error: { code: 'stale_review', message: 'stale' } }),
+            {
+              status: 409,
+            }
+          );
+        },
+        creates
+      ),
+    });
+    const inner = globalThis.fetch;
+    vi.stubGlobal('fetch', (input: RequestInfo | URL, init?: RequestInit) =>
+      gone && String(input) === `/api/v1/artifacts/${ID}` && (init?.method ?? 'GET') === 'GET'
+        ? Promise.resolve(
+            new Response('{"error":{"code":"not_found","message":"not found"}}', { status: 404 })
+          )
+        : inner(input, init)
+    );
+    const el = await mount(true);
+    button(el, '.actions sl-button', 'Review')!.click();
+    await el.updateComplete;
+    el.shadowRoot!.querySelector('scion-code-editor.review-editor')!.dispatchEvent(
+      new CustomEvent('content-changed', { detail: { content: MARKED } })
+    );
+    await el.updateComplete;
+    button(el, '.edit-footer sl-button', 'Save review')!.click();
+    await settle(el);
+    expect(el.shadowRoot!.querySelector('scion-page-404')).not.toBeNull();
+    expect(el.shadowRoot!.querySelector('sl-alert.review-notice')!.textContent).toContain(
+      'could not be loaded'
+    );
+    expect(el.shadowRoot!.querySelector('.discarded-review pre')!.textContent).toBe(MARKED);
+    expect(button(el, '.discarded-review sl-button', 'Copy')).toBeDefined();
+  });
+
+  it('does not offer to save an unchanged review of a CRLF review version', async () => {
+    mockFetch(reviewMeta(), MARKED.replace(/\n/g, '\r\n'));
+    const el = await mount(true);
+    button(el, '.actions sl-button', 'Review')!.click();
+    await el.updateComplete;
+    // The marks are there and only marks differ from the baseline, but
+    // nothing was changed: Save stays disabled.
+    expect(button(el, '.edit-footer sl-button', 'Save review')!.hasAttribute('disabled')).toBe(
+      true
+    );
+  });
 });

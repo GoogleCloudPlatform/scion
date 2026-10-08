@@ -87,6 +87,15 @@ import './not-found.js';
 
 type Tab = 'preview' | 'files' | 'history';
 
+/**
+ * text with CRLF and lone CR line endings as LF: the form the editor works
+ * in (its selection offsets count one character per line break), and the
+ * one the hub compares reviews in.
+ */
+function lfText(text: string | null): string {
+  return (text ?? '').replace(/\r\n?/g, '\n');
+}
+
 /** Viewports at least this wide show comment notes in a margin. */
 export const WIDE_NOTES_QUERY = '(min-width: 1100px)';
 
@@ -723,7 +732,7 @@ export class ScionPageArtifactDetail extends LitElement {
   }
 
   private startReview = (): void => {
-    this.reviewText = this.text ?? '';
+    this.reviewText = lfText(this.text);
     this.reviewPreview = this.reviewText;
     this.reviewHint = null;
     this.reviewNotice = null;
@@ -738,7 +747,8 @@ export class ScionPageArtifactDetail extends LitElement {
     const editor = this.reviewEditor;
     const sel = editor?.getSelection();
     if (!editor || !sel) return;
-    const blocked = criticToolBlocked(tool, sel, this.reviewText);
+    // Selection offsets are into the editor's content: check against it.
+    const blocked = criticToolBlocked(tool, sel, editor.getContent());
     if (blocked) {
       this.reviewHint = blocked;
       return;
@@ -808,13 +818,14 @@ export class ScionPageArtifactDetail extends LitElement {
     // A failed reload leaves no text, so canReview is false then too.
     if (!this.canReview) {
       this.reviewing = false;
-      this.reviewNotice = this.error
-        ? 'Your review was not saved and the current version could not be loaded; your text is below.'
-        : 'Your review was not saved: a newer version was published, and it cannot be reviewed here. Your text is below.';
+      this.reviewNotice =
+        this.error || this.notFound
+          ? 'Your review was not saved and the current version could not be loaded; your text is below.'
+          : 'Your review was not saved: a newer version was published, and it cannot be reviewed here. Your text is below.';
       this.discardedReview = discarded;
       return;
     }
-    this.reviewText = this.text ?? '';
+    this.reviewText = lfText(this.text);
     this.reviewPreview = this.reviewText;
     this.discardedReview = discarded;
   }
@@ -932,7 +943,7 @@ export class ScionPageArtifactDetail extends LitElement {
       return html`<div class="loading-state"><sl-spinner></sl-spinner></div>`;
     }
     if (this.notFound) {
-      return html`<scion-page-404></scion-page-404>`;
+      return html`${this.renderReviewNotice()}<scion-page-404></scion-page-404>`;
     }
     if (this.error) {
       return html`
@@ -1603,7 +1614,7 @@ export class ScionPageArtifactDetail extends LitElement {
           size="small"
           variant="primary"
           ?loading=${this.reviewBusy}
-          ?disabled=${marks === 0 || !marksOnly || this.reviewText === this.text}
+          ?disabled=${marks === 0 || !marksOnly || this.reviewText === lfText(this.text)}
           @click=${(): void => void this.saveReview()}
         >
           <sl-icon slot="prefix" name="floppy"></sl-icon>
