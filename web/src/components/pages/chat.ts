@@ -4030,7 +4030,7 @@ export class ScionPageChat extends LitElement {
    * nothing else has, and give a DM opened from its URL the agent's project
    * and that project's members (see `takesPeerProject`).
    */
-  private handlePeerAgentResolved(e: CustomEvent<PeerAgentResolvedDetail>): void {
+  private handlePeerAgentResolved = (e: CustomEvent<PeerAgentResolvedDetail>): void => {
     const detail = e.detail;
     const conv = this.v2Conversation;
     if (!detail || !conv?.isDM || conv.conversationKey !== detail.conversationKey) return;
@@ -4046,7 +4046,7 @@ export class ScionPageChat extends LitElement {
     };
     if (peerName !== conv.peerName) dispatchPageTitle(this, peerName, 'Chat');
     if (takeProject) void this.loadV2Members(detail.projectId);
-  }
+  };
 
   /**
    * The project a DM inherits: the one the user was already looking at when
