@@ -106,6 +106,7 @@ type tarEntry struct {
 	body     string
 	typeflag byte
 	linkname string
+	mode     int64 // tar header mode; 0 means 0644
 }
 
 // buildTarGz builds a gzip tarball from entries, in order.
@@ -125,7 +126,11 @@ func buildTarGz(t *testing.T, entries []tarEntry) []byte {
 			}))
 			continue
 		}
-		hdr := &tar.Header{Name: e.name, Mode: 0o644, Typeflag: tf, Linkname: e.linkname}
+		mode := e.mode
+		if mode == 0 {
+			mode = 0o644
+		}
+		hdr := &tar.Header{Name: e.name, Mode: mode, Typeflag: tf, Linkname: e.linkname}
 		if tf == tar.TypeReg {
 			hdr.Size = int64(len(e.body))
 		}
@@ -892,4 +897,64 @@ func TestTemplateReimport_OverrideNotStoredOnFailure(t *testing.T) {
 			assert.Equal(t, "sha256:old", got.Files[0].Hash)
 		})
 	}
+}
+
+func TestExtractTemplateSource_FileModes(t *testing.T) {
+	dest := t.TempDir()
+	archive := buildTarGz(t, []tarEntry{
+		{name: "repo-main/t/plain.txt", body: "a"},
+		{name: "repo-main/t/hook.sh", body: "#!/bin/sh\n", mode: 0o755},
+		{name: "repo-main/t/owner-exec.sh", body: "x", mode: 0o700},
+		{name: "repo-main/t/wide.sh", body: "x", mode: 0o777},
+		{name: "repo-main/t/setuid.sh", body: "x", mode: 0o4755},
+		{name: "repo-main/t/group-write.txt", body: "x", mode: 0o664},
+	})
+	lim := templateSourceLimits{MaxUnpacked: 1 << 20, MaxExtract: 1 << 20, MaxFiles: 100}
+	require.NoError(t, extractTemplateSource(archive, "t", dest, lim))
+
+	for name, want := range map[string]os.FileMode{
+		"plain.txt":       0o644,
+		"hook.sh":         0o755,
+		"owner-exec.sh":   0o755,
+		"wide.sh":         0o755,
+		"setuid.sh":       0o755,
+		"group-write.txt": 0o644,
+	} {
+		info, err := os.Stat(filepath.Join(dest, name))
+		require.NoError(t, err, name)
+		assert.Equal(t, want, info.Mode(), name)
+	}
+}
+
+// TestTemplateReimport_UnchangedSourceKeepsHash: refreshing twice from the same
+// source, which includes an executable file, stores the executable mode and
+// leaves the content hash unchanged on the second refresh.
+func TestTemplateReimport_UnchangedSourceKeepsHash(t *testing.T) {
+	srv, s, _ := testTemplateBootstrapServer(t)
+	ctx := context.Background()
+	admin := newReimportAdmin(t, s)
+	tmpl := createReimportTemplate(t, s, "tmpl-modes", "my-template", store.TemplateScopeGlobal, "", reimportTestSource)
+
+	srv.templateSourceFetcher = &fakeTemplateSourceFetcher{body: buildTarGz(t, []tarEntry{
+		{name: "repo-main/templates/my-template/scion-agent.yaml", body: "schema_version: \"1\"\nharness: claude\n"},
+		{name: "repo-main/templates/my-template/hooks/start.sh", body: "#!/bin/sh\necho hi\n", mode: 0o755},
+	})}
+	path := "/api/v1/templates/" + tmpl.ID + "/reimport"
+
+	rec := doRequestAsUser(t, srv, admin, http.MethodPost, path, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	first, err := s.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+	modes := map[string]string{}
+	for _, f := range first.Files {
+		modes[f.Path] = f.Mode
+	}
+	assert.Equal(t, "0755", modes["hooks/start.sh"])
+	assert.Equal(t, "0644", modes["scion-agent.yaml"])
+
+	rec = doRequestAsUser(t, srv, admin, http.MethodPost, path, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	second, err := s.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+	assert.Equal(t, first.ContentHash, second.ContentHash, "an unchanged source must keep the content hash")
 }

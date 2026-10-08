@@ -204,7 +204,8 @@ func (c *cappedReader) Read(p []byte) (int, error) {
 
 // extractTemplateSource extracts the files under subPath from a GitHub
 // archive (a gzip tarball with one top-level directory) into dest. Only
-// regular files and directories are written; links and other entry types
+// regular files and directories are written, files with mode 0755 or 0644
+// (see extractFileMode); links and other entry types
 // are skipped, as are entries whose names would leave dest. It fails when
 // the archive exceeds the unpacked, extracted-size or file-count limits, or
 // when nothing exists at subPath.
@@ -279,8 +280,14 @@ func extractTemplateSource(archive []byte, subPath, dest string, lim templateSou
 		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 			return err
 		}
-		f, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+		mode := extractFileMode(hdr.Mode)
+		f, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)
 		if err != nil {
+			return err
+		}
+		// Apply the mode exactly, independent of the process umask.
+		if err := f.Chmod(mode); err != nil {
+			_ = f.Close()
 			return err
 		}
 		n, copyErr := io.Copy(f, io.LimitReader(tr, lim.MaxExtract-written+1))
@@ -303,6 +310,16 @@ func extractTemplateSource(archive []byte, subPath, dest string, lim templateSou
 		return errors.New("the source folder was not found in the repository")
 	}
 	return nil
+}
+
+// extractFileMode returns the mode a regular file from the archive is written
+// with: 0755 when the entry has any execute bit, otherwise 0644. Other bits
+// (group/world write, setuid, setgid, sticky) are never applied.
+func extractFileMode(archiveMode int64) os.FileMode {
+	if archiveMode&0o111 != 0 {
+		return 0o755
+	}
+	return 0o644
 }
 
 // extractTarget joins the archive-relative name rel onto dest and reports
