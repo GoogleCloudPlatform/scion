@@ -525,7 +525,8 @@ type scheduledSendRuntime struct {
 	abortCtx context.Context
 	abort    context.CancelFunc
 	// afterAbort registers the cut-short of one delivery on abortCtx; nil
-	// means context.AfterFunc. Tests replace it to stall that propagation.
+	// means context.AfterFunc. Test-only: tests set it to stall that
+	// propagation; it is never set in production.
 	afterAbort func(ctx context.Context, f func()) (stop func() bool)
 }
 
@@ -965,12 +966,7 @@ func (s *Server) fireScheduledMessage(ctx context.Context, sms ScheduledMessageS
 	defer stopAbort()
 	cutShort := func() bool { return ctx.Err() != nil || rt.aborted() }
 
-	// Already aborted: run no checks and send nothing; the row goes back
-	// to pending.
-	check := scheduledFireCheck{transient: true}
-	if !rt.aborted() {
-		check = s.checkScheduledFire(ctx, m)
-	}
+	check := s.checkScheduledFire(ctx, m)
 	// Cut short (shutdown) during or right after the checks: nothing was
 	// sent, and a check may have failed only because of that, so the row
 	// goes back to pending rather than failing.
@@ -1017,6 +1013,8 @@ func (s *Server) fireScheduledMessage(ctx context.Context, sms ScheduledMessageS
 	}()
 	if serr != nil {
 		scheduledSendLog().Info("scheduled send: delivery refused", "id", m.ID, "status", serr.Status, "code", serr.Code)
+		// A refusal observed after an abort is a delivery error: an aborted
+		// delivery says nothing about access.
 		s.failScheduledMessage(base, sms, m, scheduledRefusalReason(cutShort(), serr))
 		return false
 	}

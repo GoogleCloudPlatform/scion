@@ -1691,9 +1691,9 @@ func stallAbortPropagation(srv *Server) {
 	rt.mu.Unlock()
 }
 
-// A delivery started after the runtime was aborted runs no checks, sends
-// nothing and goes back to pending, even when the abort has not reached
-// its context (ptone/scion#3827).
+// A delivery started after the runtime was aborted sends nothing and its
+// row goes back to pending (released), even when the abort has not
+// reached its context (ptone/scion#3827).
 func TestScheduledSend_AbortBeforeFire_PropagationStalled_Released(t *testing.T) {
 	f := newScheduledSendFixture(t)
 	fireAt := time.Now().Add(2 * time.Minute)
