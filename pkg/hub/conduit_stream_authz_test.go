@@ -33,7 +33,12 @@ import (
 )
 
 // Unit tests of the user-stream re-check tracker (conduit_stream_authz.go)
-// with a stub check and a fake clock.
+// with a stub check and a fake clock. This file builds without SQLite
+// (go vet -tags no_sqlite), so it uses nothing from the SQLite-tagged
+// test files.
+
+// trackerWait bounds a real-time wait in these tests.
+const trackerWait = 10 * time.Second
 
 // authzRecorder collects re-check log lines and metric increments.
 type authzRecorder struct {
@@ -379,7 +384,7 @@ func TestConduitStreamAuthz_SweepFixedPeriod(t *testing.T) {
 		f.clk.Advance(60 * time.Second) // runs the first, slow sweep
 	}()
 	<-entered
-	require.True(t, f.clk.WaitFor(recheckWait, func(pending int) bool { return pending == 1 }),
+	require.True(t, f.clk.WaitFor(trackerWait, func(pending int) bool { return pending == 1 }),
 		"the next tick was not armed before the sweep ran")
 
 	f.clk.Advance(60 * time.Second) // the next tick, while the first sweep runs
