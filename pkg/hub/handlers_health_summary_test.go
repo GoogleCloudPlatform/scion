@@ -89,8 +89,9 @@ func TestHandleHealthSummary_ResponseShape(t *testing.T) {
 	assert.NotNil(t, resp.Agents.ByPhase)
 	assert.NotNil(t, resp.Agents.Problems)
 
-	// Verify dispatch is nil (no dispatch metrics available yet)
-	assert.Nil(t, resp.Dispatch)
+	// Dispatch is counted from the store; an empty store reports zeros.
+	require.NotNil(t, resp.Dispatch)
+	assert.Equal(t, HealthSummaryDispatch{}, *resp.Dispatch)
 
 	// Stall settings are configuration, not health: they are edited on the
 	// Server Config page and are not part of the health summary.
@@ -531,18 +532,6 @@ func TestHandleHealthSummary_BrokerMixedStatus(t *testing.T) {
 	assert.Equal(t, HealthBrokerAgents{}, offlineBroker.Agents)
 	require.NotNil(t, offlineBroker.Runtime)
 	assert.Equal(t, "kubernetes", offlineBroker.Runtime.Type)
-}
-
-func TestHandleHealthSummary_DispatchNullWhenUnavailable(t *testing.T) {
-	srv, _ := testServer(t)
-
-	rr := doRequest(t, srv, http.MethodGet, "/api/v1/admin/health/summary", nil)
-	require.Equal(t, http.StatusOK, rr.Code)
-
-	// Verify the raw JSON has dispatch: null
-	var raw map[string]json.RawMessage
-	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &raw))
-	assert.Equal(t, "null", string(raw["dispatch"]))
 }
 
 func TestHandleHealthSummary_DatabaseHealthy(t *testing.T) {
