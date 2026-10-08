@@ -190,6 +190,7 @@ var CollectionTargetClasses = map[string][]TargetClassKind{
 	"hub.teams_manifest.update": {TargetClassKindHubResource}, "hub.validate.execute": {TargetClassKindHubResource},
 	"hub.github_app.read": {TargetClassKindHubResource}, "hub.github_app.update": {TargetClassKindHubResource},
 	"hub.metrics.read": {TargetClassKindHubResource}, "hub.audit.read": {},
+	"hub.env_vars.read": {TargetClassKindHubResource},
 
 	// quota.* — every entry is CapabilityScope.
 	"quota.read": {TargetClassKindHubResource}, "quota.create": {TargetClassKindHubResource},

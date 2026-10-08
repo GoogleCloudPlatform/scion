@@ -100,7 +100,7 @@ func BuiltInRoles() []BuiltInRole {
 			Name:        store.SystemRoleHubAdmin,
 			Description: "Hub administrator with scopeable admin permissions",
 			ScopeType:   store.RoleScopeSystem,
-			Revision:    4,
+			Revision:    5, // R5: hub.env_vars.read
 			Permissions: hubAdminPermissionIDs(),
 		},
 		{
@@ -797,6 +797,9 @@ func hubAdminPermissionIDs() []string {
 		"hub.github_app.update":     true,
 		"hub.metrics.read":          true,
 		"hub.validate.execute":      true,
+		// Hub-level environment variables: list only. Writes and every
+		// secret surface stay with the legacy admin check.
+		"hub.env_vars.read": true,
 		// Quota management
 		"quota.read":   true,
 		"quota.create": true,
