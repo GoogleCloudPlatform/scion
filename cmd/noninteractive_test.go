@@ -17,7 +17,6 @@ package cmd
 import (
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -111,25 +110,6 @@ func setupLinkTest(t *testing.T, hub *linkTestHub) {
 
 	t.Chdir(home)
 	projectPath, globalMode, autoConfirm, nonInteractive, outputFormat = "", true, true, false, ""
-}
-
-// captureStdout runs fn and returns what it wrote to os.Stdout.
-func captureStdout(t *testing.T, fn func()) string {
-	t.Helper()
-	r, w, err := os.Pipe()
-	require.NoError(t, err)
-	orig := os.Stdout
-	os.Stdout = w
-	defer func() { os.Stdout = orig }()
-	done := make(chan string)
-	go func() {
-		b, _ := io.ReadAll(r)
-		done <- string(b)
-	}()
-	fn()
-	_ = w.Close()
-	os.Stdout = orig
-	return <-done
 }
 
 // A user access token without project:read gets 404 on the project lookup.

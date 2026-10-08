@@ -2737,9 +2737,9 @@ func registerProjectOnHub(ctx context.Context, client hubclient.Client, projectI
 	}
 
 	if resp.Created {
-		fmt.Printf("Created new project: %s (ID: %s)\n", resp.Project.Name, resp.Project.ID)
+		fmt.Fprintf(os.Stderr, "Created new project: %s (ID: %s)\n", resp.Project.Name, resp.Project.ID)
 	} else {
-		fmt.Printf("Linked to existing project: %s (ID: %s)\n", resp.Project.Name, resp.Project.ID)
+		fmt.Fprintf(os.Stderr, "Linked to existing project: %s (ID: %s)\n", resp.Project.Name, resp.Project.ID)
 	}
 
 	return resp.Project.ID, nil
