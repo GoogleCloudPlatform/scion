@@ -606,7 +606,15 @@ func runBrokerRegister(cmd *cobra.Command, args []string) error {
 		}
 
 		if createResp.Reregistered {
+			// The hub matches a re-registration by name, then by broker
+			// ID, and keeps the existing name on an ID match. Read back
+			// the name it kept so that is what gets reported (and saved
+			// when --broker-name was given).
+			if b, err := client.RuntimeBrokers().Get(ctx, createResp.BrokerID); err == nil && b != nil && b.Name != "" {
+				brokerName = keepHubBrokerName(os.Stdout, brokerName, b.Name, brokerNameSet)
+			}
 			fmt.Printf("Found existing broker registration for '%s' (ID: %s), re-registering...\n", brokerName, createResp.BrokerID)
+			warnBrokerIdentityTakeover(os.Stdout, brokerName, createResp.BrokerID, stableBrokerID)
 		} else {
 			fmt.Printf("Broker created (ID: %s), completing join...\n", createResp.BrokerID)
 		}
@@ -630,14 +638,6 @@ func runBrokerRegister(cmd *cobra.Command, args []string) error {
 			fmt.Printf("Warning: failed to save broker credentials: %v\n", joined.SaveErr)
 		} else {
 			fmt.Printf("Broker credentials saved to %s\n", multiStore.Dir())
-		}
-		// The hub matches a re-registration by name, then by broker ID, and
-		// keeps the existing name on an ID match. Read back the name it
-		// kept so that is what gets saved and reported.
-		if brokerNameSet && createResp.Reregistered {
-			if b, err := client.RuntimeBrokers().Get(ctx, brokerID); err == nil && b != nil && b.Name != "" {
-				brokerName = keepHubBrokerName(os.Stdout, brokerName, b.Name, brokerNameSet)
-			}
 		}
 	}
 
@@ -714,11 +714,22 @@ func keepHubBrokerName(w io.Writer, requested, onHub string, requestedByFlag boo
 	return onHub
 }
 
+// warnBrokerIdentityTakeover warns when a re-registration matched an
+// existing broker other than the one this host's broker ID names: the hub
+// matched it by name, and this host now uses that broker's identity. It
+// only warns; checking before registering is a separate concern.
+func warnBrokerIdentityTakeover(w io.Writer, name, matchedID, localID string) {
+	if matchedID == "" || matchedID == localID {
+		return
+	}
+	_, _ = fmt.Fprintf(w, "Warning: the name '%s' matched an existing broker on the hub (ID: %s), not this host's broker ID (%s); this host now uses that broker's identity. If another broker uses that name, register with a different --broker-name.\n", name, matchedID, localID)
+}
+
 // persistBrokerName saves name as this host's broker name in the global
 // settings, where later commands and 'server start' read it, so they do not
 // fall back to the hostname and match another broker on the hub.
 func persistBrokerName(w io.Writer, globalDir, name string) {
-	previous := config.ConfiguredBrokerName(globalDir)
+	previous := config.ConfiguredBrokerName()
 	if previous == name {
 		return
 	}
@@ -726,7 +737,7 @@ func persistBrokerName(w io.Writer, globalDir, name string) {
 		_, _ = fmt.Fprintf(w, "Warning: failed to save broker name to global settings: %v\n", err)
 		return
 	}
-	_, _ = fmt.Fprintf(w, "Broker name '%s' saved to global settings. Restart the broker (scion runtime-broker restart) so it uses the new name locally.\n", name)
+	_, _ = fmt.Fprintf(w, "Broker name '%s' saved to global settings. Restart the broker (scion runtime-broker restart, or scion server restart if the server runs the broker) so it uses the new name locally.\n", name)
 }
 
 func runBrokerDeregister(cmd *cobra.Command, args []string) error {
@@ -1664,7 +1675,7 @@ func runBrokerStatus(cmd *cobra.Command, args []string) error {
 	// Get the hostname, and the configured broker name until the hub
 	// reports the name it has.
 	status.Hostname, _ = os.Hostname()
-	status.BrokerName = config.ConfiguredBrokerName(globalDir)
+	status.BrokerName = config.ConfiguredBrokerName()
 
 	// If registered, try to get Hub status and project list
 	if status.Registered && status.HubEndpoint != "" {

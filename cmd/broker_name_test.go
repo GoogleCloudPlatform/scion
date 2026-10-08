@@ -19,6 +19,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -44,6 +45,9 @@ type registerHub struct {
 	// means the name of the last creation.
 	hubName      string
 	reregistered bool
+	// matchedID, when set, is the broker ID creation returns instead of
+	// the requested one (the hub matched another broker by name).
+	matchedID string
 }
 
 func newRegisterHub(t *testing.T) *registerHub {
@@ -61,9 +65,13 @@ func newRegisterHub(t *testing.T) *registerHub {
 		case r.URL.Path == "/api/v1/brokers" && r.Method == http.MethodPost:
 			name, _ := body["name"].(string)
 			h.createNames = append(h.createNames, name)
+			id := body["brokerId"]
+			if h.matchedID != "" {
+				id = h.matchedID
+			}
 			w.WriteHeader(http.StatusCreated)
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"brokerId":     body["brokerId"],
+				"brokerId":     id,
 				"joinToken":    "scion_join_minted",
 				"expiresAt":    "2026-10-06T16:00:00Z",
 				"reregistered": h.reregistered,
@@ -139,7 +147,7 @@ func TestBrokerRegister_BrokerNameFlagIsNotName(t *testing.T) {
 // uses the hostname and saves no broker name.
 func TestBrokerRegister_DefaultNameIsHostname(t *testing.T) {
 	hub := newRegisterHub(t)
-	globalDir := setupRegisterTest(t, hub)
+	setupRegisterTest(t, hub)
 
 	out := runRegisterForTest(t)
 
@@ -148,7 +156,7 @@ func TestBrokerRegister_DefaultNameIsHostname(t *testing.T) {
 	assert.Equal(t, []string{host}, create)
 	assert.Equal(t, []string{host}, join)
 	assert.Contains(t, out, fmt.Sprintf("Broker '%s' registered successfully", host))
-	assert.Empty(t, config.ConfiguredBrokerName(globalDir), "the hostname default is not saved")
+	assert.Empty(t, config.ConfiguredBrokerName(), "the hostname default is not saved")
 }
 
 // TestBrokerRegister_BrokerNameFlag: --broker-name is sent to the hub and
@@ -156,7 +164,7 @@ func TestBrokerRegister_DefaultNameIsHostname(t *testing.T) {
 // back to the hostname (which would match another broker on the hub).
 func TestBrokerRegister_BrokerNameFlag(t *testing.T) {
 	hub := newRegisterHub(t)
-	globalDir := setupRegisterTest(t, hub)
+	setupRegisterTest(t, hub)
 
 	setBrokerFlagForTest(t, brokerRegisterCmd, "broker-name", "rig-broker-2")
 	out := runRegisterForTest(t)
@@ -166,7 +174,7 @@ func TestBrokerRegister_BrokerNameFlag(t *testing.T) {
 	assert.Equal(t, []string{"rig-broker-2"}, join)
 	assert.Contains(t, out, "Broker 'rig-broker-2' registered successfully")
 	assert.Contains(t, out, "Broker name 'rig-broker-2' saved to global settings")
-	assert.Equal(t, "rig-broker-2", config.ConfiguredBrokerName(globalDir))
+	assert.Equal(t, "rig-broker-2", config.ConfiguredBrokerName())
 	assert.Equal(t, "rig-broker-2", config.LocalBrokerName("x"))
 
 	// Re-register without the flag (--force so the hub is asked again).
@@ -186,14 +194,92 @@ func TestBrokerRegister_BrokerNameKeptByHub(t *testing.T) {
 	hub := newRegisterHub(t)
 	hub.hubName = "old-name"
 	hub.reregistered = true
-	globalDir := setupRegisterTest(t, hub)
+	setupRegisterTest(t, hub)
 
 	setBrokerFlagForTest(t, brokerRegisterCmd, "broker-name", "new-name")
 	out := runRegisterForTest(t)
 
 	assert.Contains(t, out, "already registered on the hub as 'old-name'")
+	assert.Contains(t, out, "Found existing broker registration for 'old-name'", "the found line uses the hub's name")
 	assert.Contains(t, out, "Broker 'old-name' registered successfully")
-	assert.Equal(t, "old-name", config.ConfiguredBrokerName(globalDir))
+	assert.NotContains(t, out, "matched an existing broker", "an ID match keeps this host's identity")
+	assert.Equal(t, "old-name", config.ConfiguredBrokerName())
+	_, join := hub.names()
+	assert.Equal(t, []string{"old-name"}, join)
+}
+
+// TestBrokerRegister_ReregisterReadbackWithoutFlag: without --broker-name,
+// a re-registration still reports the name the hub kept, without a warning
+// and without saving it.
+func TestBrokerRegister_ReregisterReadbackWithoutFlag(t *testing.T) {
+	hub := newRegisterHub(t)
+	hub.hubName = "old-name"
+	hub.reregistered = true
+	setupRegisterTest(t, hub)
+
+	out := runRegisterForTest(t)
+
+	assert.Contains(t, out, "Found existing broker registration for 'old-name'")
+	assert.Contains(t, out, "Broker 'old-name' registered successfully")
+	assert.NotContains(t, out, "was not applied")
+	assert.NotContains(t, out, "saved to global settings")
+	assert.Empty(t, config.ConfiguredBrokerName(), "nothing is saved without --broker-name")
+}
+
+// TestBrokerRegister_NameMatchesOtherBroker: when the hub matches the name
+// to a broker other than this host's broker ID, register warns that this
+// host takes over that broker's identity (it still registers).
+func TestBrokerRegister_NameMatchesOtherBroker(t *testing.T) {
+	hub := newRegisterHub(t)
+	hub.reregistered = true
+	hub.matchedID = "99999999-8888-7777-6666-555555555555"
+	setupRegisterTest(t, hub)
+
+	setBrokerFlagForTest(t, brokerRegisterCmd, "broker-name", "taken-name")
+	out := runRegisterForTest(t)
+
+	assert.Contains(t, out, "Warning: the name 'taken-name' matched an existing broker on the hub (ID: 99999999-8888-7777-6666-555555555555)")
+	assert.Contains(t, out, "this host now uses that broker's identity")
+	assert.Contains(t, out, "registered successfully (ID: 99999999-8888-7777-6666-555555555555)")
+}
+
+func TestWarnBrokerIdentityTakeover(t *testing.T) {
+	var buf bytes.Buffer
+	warnBrokerIdentityTakeover(&buf, "n", "id-1", "id-1")
+	assert.Empty(t, buf.String(), "same broker ID: no warning")
+	warnBrokerIdentityTakeover(&buf, "n", "", "id-1")
+	assert.Empty(t, buf.String())
+	warnBrokerIdentityTakeover(&buf, "n", "id-2", "id-1")
+	assert.Contains(t, buf.String(), "matched an existing broker on the hub (ID: id-2), not this host's broker ID (id-1)")
+}
+
+// TestPersistBrokerName_ServerStartReadsIt: the name register saves is the
+// name 'server start' gives the broker (resolveBrokerName), so the hub
+// record and the running broker agree.
+func TestPersistBrokerName_ServerStartReadsIt(t *testing.T) {
+	cases := map[string]string{
+		"no settings file": "",
+		"versioned file":   "schema_version: \"1\"\nserver:\n  broker:\n    port: 9800\n",
+		"legacy file":      "hub:\n  endpoint: http://hub.example\n",
+	}
+	for name, content := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, globalDir := brokerTestHome(t)
+			if content != "" {
+				writeGlobalSettings(t, globalDir, content)
+			}
+			persistBrokerName(io.Discard, globalDir, "rig-c")
+
+			cfg, err := config.LoadGlobalConfig("")
+			require.NoError(t, err)
+			settings, _ := loadServerSettings(globalDir)
+			var vsBroker *config.V1BrokerConfig
+			if vs, _, err := config.LoadEffectiveSettings(""); err == nil && vs != nil && vs.Server != nil {
+				vsBroker = vs.Server.Broker
+			}
+			assert.Equal(t, "rig-c", resolveBrokerName(cfg, settings, vsBroker))
+		})
+	}
 }
 
 func TestBrokerRegister_EmptyBrokerName(t *testing.T) {
@@ -235,7 +321,7 @@ func TestPersistBrokerName(t *testing.T) {
 	var buf bytes.Buffer
 	persistBrokerName(&buf, globalDir, "rig-a")
 	assert.Contains(t, buf.String(), "saved to global settings")
-	assert.Equal(t, "rig-a", config.ConfiguredBrokerName(globalDir))
+	assert.Equal(t, "rig-a", config.ConfiguredBrokerName())
 
 	buf.Reset()
 	persistBrokerName(&buf, globalDir, "rig-a")

@@ -42,14 +42,14 @@ func TestConfiguredBrokerName(t *testing.T) {
 	host, err := os.Hostname()
 	require.NoError(t, err)
 
-	assert.Empty(t, ConfiguredBrokerName(globalDir), "nothing configured")
+	assert.Empty(t, ConfiguredBrokerName(), "nothing configured")
 	assert.Equal(t, host, LocalBrokerName("fallback"), "hostname by default")
 
 	writeBrokerNameSettings(t, globalDir, "schema_version: \"1\"\nserver:\n  broker:\n    broker_name: named\n")
-	assert.Equal(t, "named", ConfiguredBrokerName(globalDir))
+	assert.Equal(t, "named", ConfiguredBrokerName())
 
 	writeBrokerNameSettings(t, globalDir, "schema_version: \"1\"\nserver:\n  broker:\n    broker_name: named\n    broker_nickname: nick\n")
-	assert.Equal(t, "nick", ConfiguredBrokerName(globalDir), "broker_nickname wins, as in 'server start'")
+	assert.Equal(t, "nick", ConfiguredBrokerName(), "broker_nickname wins, as in 'server start'")
 	assert.Equal(t, "nick", LocalBrokerName("fallback"))
 }
 
@@ -60,7 +60,7 @@ func TestBrokerNameSettingKey_RoundTrip(t *testing.T) {
 		globalDir := brokerNameTestHome(t)
 		writeBrokerNameSettings(t, globalDir, "schema_version: \"1\"\n")
 		require.NoError(t, UpdateSetting(globalDir, BrokerNameSettingKey, "rig-1", true))
-		assert.Equal(t, "rig-1", ConfiguredBrokerName(globalDir))
+		assert.Equal(t, "rig-1", ConfiguredBrokerName())
 		data, err := os.ReadFile(filepath.Join(globalDir, "settings.yaml"))
 		require.NoError(t, err)
 		assert.Contains(t, string(data), "broker_nickname: rig-1")
@@ -68,6 +68,6 @@ func TestBrokerNameSettingKey_RoundTrip(t *testing.T) {
 	t.Run("no settings file", func(t *testing.T) {
 		globalDir := brokerNameTestHome(t)
 		require.NoError(t, UpdateSetting(globalDir, BrokerNameSettingKey, "rig-2", true))
-		assert.Equal(t, "rig-2", ConfiguredBrokerName(globalDir))
+		assert.Equal(t, "rig-2", ConfiguredBrokerName())
 	})
 }

@@ -26,18 +26,23 @@ import (
 const BrokerNameSettingKey = "hub.brokerNickname"
 
 // ConfiguredBrokerName returns the runtime broker name set in the global
-// settings in globalDir: server.broker.broker_nickname (hub.brokerNickname),
-// else server.broker.broker_name. It returns "" when neither is set, in
-// which case the broker is named after the OS hostname. The order matches
-// how 'server start' names the broker.
-func ConfiguredBrokerName(globalDir string) string {
-	if globalDir != "" {
-		if s, err := LoadSettings(globalDir); err == nil && s != nil && s.Hub != nil {
-			if n := strings.TrimSpace(s.Hub.BrokerNickname); n != "" {
-				return n
-			}
+// settings: server.broker.broker_nickname (hub.brokerNickname), else
+// server.broker.broker_name. It returns "" when neither is set, in which
+// case the broker is named after the OS hostname. The order matches how
+// 'server start' names the broker. Both lookups use the global directory
+// resolved by GetGlobalDir.
+func ConfiguredBrokerName() string {
+	globalDir, err := GetGlobalDir()
+	if err != nil || globalDir == "" {
+		return ""
+	}
+	if s, err := LoadSettings(globalDir); err == nil && s != nil && s.Hub != nil {
+		if n := strings.TrimSpace(s.Hub.BrokerNickname); n != "" {
+			return n
 		}
 	}
+	// LoadGlobalConfig("") reads the settings in GetGlobalDir, the same
+	// directory as above (server.broker.broker_name).
 	if cfg, err := LoadGlobalConfig(""); err == nil && cfg != nil {
 		if n := strings.TrimSpace(cfg.RuntimeBroker.BrokerName); n != "" {
 			return n
@@ -53,8 +58,7 @@ func ConfiguredBrokerName(globalDir string) string {
 // broker by name: re-deriving the hostname would merge a broker registered
 // under a custom name into another broker on the same host.
 func LocalBrokerName(fallback string) string {
-	globalDir, _ := GetGlobalDir()
-	if n := ConfiguredBrokerName(globalDir); n != "" {
+	if n := ConfiguredBrokerName(); n != "" {
 		return n
 	}
 	if h, err := os.Hostname(); err == nil && h != "" {
