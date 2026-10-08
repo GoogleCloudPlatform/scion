@@ -1487,6 +1487,9 @@ type V1ServerHubConduitConfig struct {
 	// live hub processes (default: POD_NAME, else the host name plus a
 	// random per-process suffix).
 	InstanceID string `json:"instance_id,omitempty" yaml:"instance_id,omitempty" koanf:"instance_id"`
+	// AuthzRecheckInterval is the period of the re-check sweep of open
+	// user streams (e.g. "60s"; default "60s", 1s-10m).
+	AuthzRecheckInterval string `json:"authz_recheck_interval,omitempty" yaml:"authz_recheck_interval,omitempty" koanf:"authz_recheck_interval"`
 }
 
 // V1BrokerConfig holds Runtime Broker configuration.
@@ -2845,6 +2848,7 @@ var knownCompoundFields = []string{
 	"require_trusted_proxy_ip",
 	"soft_delete_retain_files",
 	"start_unconfirmed_hold",
+	"authz_recheck_interval",
 	"start_claim_lease_ttl",
 	"soft_delete_retention",
 	"peer_service_accounts",
@@ -3201,8 +3205,9 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 				PeerAuth:            c.PeerAuth,
 				PeerServiceAccounts: append([]string(nil), c.PeerServiceAccounts...),
 				PeerAudience:        c.PeerAudience,
-				ReconnectWindow:     c.ReconnectWindow,
-				InstanceID:          c.InstanceID,
+				ReconnectWindow:      c.ReconnectWindow,
+				InstanceID:           c.InstanceID,
+				AuthzRecheckInterval: c.AuthzRecheckInterval,
 			}
 		}
 	}
@@ -3538,8 +3543,9 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 			PeerAuth:            c.PeerAuth,
 			PeerServiceAccounts: append([]string(nil), c.PeerServiceAccounts...),
 			PeerAudience:        c.PeerAudience,
-			ReconnectWindow:     c.ReconnectWindow,
-			InstanceID:          c.InstanceID,
+			ReconnectWindow:      c.ReconnectWindow,
+			InstanceID:           c.InstanceID,
+			AuthzRecheckInterval: c.AuthzRecheckInterval,
 		}
 	}
 	if gc.Hub.StartClaimLeaseTTL > 0 {

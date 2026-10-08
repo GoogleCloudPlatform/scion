@@ -83,6 +83,9 @@ type ConduitRelayOptions struct {
 	// ReconnectWindow is GoAway.reconnect_after_ms, the jitter window
 	// targets draw their redial delay from (0 = the relay default, 5s).
 	ReconnectWindow time.Duration
+	// AuthzRecheckInterval overrides ServerConfig.ConduitAuthzRecheckInterval
+	// (0 = use it; negative disables the sweep, for tests).
+	AuthzRecheckInterval time.Duration
 
 	// Test seams. RegistryNow is the clock of the registry maintenance
 	// singleton (nil = time.Now).
@@ -211,6 +214,11 @@ func (s *Server) StartConduitRelay(ctx context.Context, opts ConduitRelayOptions
 		s.conduit.Store(nil)
 		return err
 	}
+	interval := opts.AuthzRecheckInterval
+	if interval == 0 {
+		interval = s.config.ConduitAuthzRecheckInterval
+	}
+	s.startConduitStreamAuthz(ctx, opts.Clock, interval)
 	if r.InternalEndpoint() == "" && !opts.RequireHA {
 		slog.Warn("Conduit relay is unaddressable (no internal endpoint); this is only correct for a single-node hub")
 	}

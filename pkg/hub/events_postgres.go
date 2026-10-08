@@ -93,7 +93,14 @@ type PostgresEventPublisher struct {
 	// connection loss. Used by settings propagation (Phase 4) to trigger
 	// an unconditional Refresh that covers notifications missed during the gap.
 	onReconnect func()
+
+	// onListen holds the AddOnListen callbacks, each run once per
+	// listener connection after its channels are LISTENed.
+	onListen map[*listenHook]struct{}
 }
+
+// listenHook is one AddOnListen registration.
+type listenHook struct{ fn func() }
 
 // pgSubscription is a single Subscribe registration.
 type pgSubscription struct {
@@ -387,6 +394,47 @@ func (p *PostgresEventPublisher) SetOnReconnect(fn func()) {
 	p.onReconnect = fn
 }
 
+// AddOnListen registers fn to run each time the listener connection is
+// established (first connect and every reconnect) once it is LISTENing on
+// every desired channel, so an event committed after fn starts is
+// delivered. Subscribers use it to re-read state that may have changed
+// while no connection was listening. fn runs on its own goroutine. The
+// returned function removes the registration.
+func (p *PostgresEventPublisher) AddOnListen(fn func()) (remove func()) {
+	h := &listenHook{fn: fn}
+	p.mu.Lock()
+	if p.onListen == nil {
+		p.onListen = make(map[*listenHook]struct{})
+	}
+	p.onListen[h] = struct{}{}
+	p.mu.Unlock()
+	return func() {
+		p.mu.Lock()
+		delete(p.onListen, h)
+		p.mu.Unlock()
+	}
+}
+
+// runOnListen starts every AddOnListen callback.
+func (p *PostgresEventPublisher) runOnListen() {
+	p.mu.RLock()
+	hooks := make([]func(), 0, len(p.onListen))
+	for h := range p.onListen {
+		hooks = append(hooks, h.fn)
+	}
+	p.mu.RUnlock()
+	for _, fn := range hooks {
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					p.log.Error("Listen callback panicked", "panic", r)
+				}
+			}()
+			fn()
+		}()
+	}
+}
+
 // runListener maintains a dedicated connection that LISTENs on the desired
 // channels and dispatches received notifications. It reconnects with backoff and
 // re-LISTENs (resubscribes) after any connection loss.
@@ -491,6 +539,7 @@ func (p *PostgresEventPublisher) connectListener(ctx context.Context) (*pgx.Conn
 // conn until the context is canceled or the connection fails. A returned error
 // other than context cancellation signals the caller to reconnect.
 func (p *PostgresEventPublisher) listenLoop(conn *pgx.Conn, active map[string]bool) error {
+	listening := false
 	for {
 		if p.ctx.Err() != nil {
 			return p.ctx.Err()
@@ -512,6 +561,11 @@ func (p *PostgresEventPublisher) listenLoop(conn *pgx.Conn, active map[string]bo
 				}
 				delete(active, channel)
 			}
+		}
+		if !listening {
+			// Every desired channel is LISTENed on this connection.
+			listening = true
+			p.runOnListen()
 		}
 
 		waitCtx, cancel := context.WithTimeout(p.ctx, listenPollInterval)
