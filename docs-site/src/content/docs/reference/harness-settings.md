@@ -64,8 +64,10 @@ are separate configs, so check the printed scope to see which one you changed.
 
 ### Source-URL tracking and "Refresh from Source"
 
-When a config is installed from a remote source, the Hub records the **`sourceUrl`** it came
-from. You can later re-import (refresh) the config from that source:
+When a config is installed from a remote source (a URL or rclone URI), the Hub records the
+**`sourceUrl`** it came from as metadata. This includes `scion harness-config install`, in
+whichever scope it installs to. A config installed from a local path or `file://` URL records no
+source URL. You can later re-import (refresh) the config from that source:
 
 ```bash
 # Re-import a single config from its stored source URL
