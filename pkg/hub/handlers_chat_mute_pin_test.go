@@ -218,9 +218,7 @@ func TestChatV2_MutePin_ForbiddenForNonMember(t *testing.T) {
 		t.Fatalf("CreateTopic: %v", err)
 	}
 
-	// Deliberately not a hub member: the seeded hub-member-read-all policy
-	// grants project read to every hub member, so an outsider is the user the
-	// project's read authorization actually turns away.
+	// A user with no role in the project.
 	outsider := &store.User{
 		ID:          tid("chat-outsider"),
 		Email:       "outsider@test.com",
