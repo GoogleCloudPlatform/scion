@@ -32,6 +32,9 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 // anonymous serves an unauthenticated request through the full hub
@@ -197,4 +200,21 @@ func TestCredentialPathsAreNotTraced(t *testing.T) {
 	} {
 		assert.Equal(t, want, traceableRequest(httptest.NewRequest(http.MethodGet, target, nil)), target)
 	}
+}
+
+// TestHubHandlerDoesNotTraceCredentialPaths: the hub's handler records a
+// span for an ordinary request and none for a share-link or view request.
+func TestHubHandlerDoesNotTraceCredentialPaths(t *testing.T) {
+	rec := tracetest.NewSpanRecorder()
+	old := otel.GetTracerProvider()
+	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec)))
+	t.Cleanup(func() { otel.SetTracerProvider(old) })
+	srv, _ := testServer(t)
+	h := srv.Handler()
+	for _, target := range []string{"/api/v1/artifacts/shared/" + strings.Repeat("A", 43), "/api/v1/artifacts/view/cap/index.html"} {
+		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, target, nil))
+	}
+	assert.Empty(t, rec.Ended(), "credential paths were traced")
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/v1/agents", nil))
+	assert.Len(t, rec.Ended(), 1, "an ordinary request is traced")
 }
