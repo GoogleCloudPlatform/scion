@@ -189,10 +189,10 @@ func outboundThreadGateApplies(channel string) bool {
 // ResolveOrCreateConversationByKey would reuse rather than mint, and whether
 // that conversation is still visible:
 //
-//   - a live webchat topic for threadID (when tl is set): exists. A topic that
+//   - a live webchat topic for threadID in projectID (when tl is set): exists. A topic that
 //     has no conversation_id yet also counts; the resolver refuses to mint
 //     for it and reports its own error.
-//   - a soft-deleted webchat topic for threadID: deleted. This is stricter
+//   - a soft-deleted webchat topic for threadID in projectID: deleted. This is stricter
 //     than the resolver, which reuses a deleted topic's conversation.
 //   - otherwise, a native conversation whose external_ref is extRef: exists.
 //   - otherwise: missing.
@@ -206,17 +206,19 @@ func outboundThreadConversationState(
 	ctx context.Context,
 	cr messaging.ConversationReader,
 	tl messaging.TopicConversationLookup,
-	extRef, threadID string,
+	projectID, extRef, threadID string,
 ) (outboundThreadState, error) {
 	if tl != nil {
-		_, err := tl.GetTopicConversationID(ctx, threadID)
+		// Topics are looked up within the sender's project: a topic of
+		// another project is answered exactly like a missing one.
+		_, err := tl.GetTopicConversationIDInProject(ctx, projectID, threadID)
 		if err == nil {
 			return outboundThreadExists, nil
 		}
 		if !errors.Is(err, store.ErrNotFound) {
 			return outboundThreadMissing, fmt.Errorf("topic lookup: %w", err)
 		}
-		_, err = tl.GetTopicConversationIDIncludingDeleted(ctx, threadID)
+		_, err = tl.GetTopicConversationIDIncludingDeletedInProject(ctx, projectID, threadID)
 		if err == nil {
 			return outboundThreadDeleted, nil
 		}
@@ -633,7 +635,7 @@ func (s *Server) resolveOutboundRouting(
 				if wcs != nil {
 					tl = wcs
 				}
-				state, stateErr := outboundThreadConversationState(ctx, s.store, tl, extRef, req.ThreadID)
+				state, stateErr := outboundThreadConversationState(ctx, s.store, tl, agent.ProjectID, extRef, req.ThreadID)
 				if stateErr != nil {
 					s.messageLog.Error("thread conversation lookup failed",
 						"thread_id", req.ThreadID, "agent_id", agent.ID, "error", stateErr)

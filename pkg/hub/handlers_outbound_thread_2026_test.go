@@ -305,11 +305,11 @@ type topicLookupFailingStore struct {
 	WebChatStore
 }
 
-func (topicLookupFailingStore) GetTopicConversationID(context.Context, string) (string, error) {
+func (topicLookupFailingStore) GetTopicConversationIDInProject(context.Context, string, string) (string, error) {
 	return "", errors.New("injected topic lookup failure: secret-detail")
 }
 
-func (topicLookupFailingStore) GetTopicConversationIDIncludingDeleted(context.Context, string) (string, error) {
+func (topicLookupFailingStore) GetTopicConversationIDIncludingDeletedInProject(context.Context, string, string) (string, error) {
 	return "", errors.New("injected topic lookup failure: secret-detail")
 }
 
@@ -386,11 +386,11 @@ type fakeTopicLookup struct {
 	liveErr, allErr error
 }
 
-func (f fakeTopicLookup) GetTopicConversationID(context.Context, string) (string, error) {
+func (f fakeTopicLookup) GetTopicConversationIDInProject(context.Context, string, string) (string, error) {
 	return f.liveID, f.liveErr
 }
 
-func (f fakeTopicLookup) GetTopicConversationIDIncludingDeleted(context.Context, string) (string, error) {
+func (f fakeTopicLookup) GetTopicConversationIDIncludingDeletedInProject(context.Context, string, string) (string, error) {
 	return f.allID, f.allErr
 }
 
@@ -430,7 +430,7 @@ func TestOutboundThreadConversationState(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := outboundThreadConversationState(context.Background(), tc.cr, tc.tl, "thread:p:t", "t")
+			got, err := outboundThreadConversationState(context.Background(), tc.cr, tc.tl, "p", "thread:p:t", "t")
 			if tc.wantErr {
 				require.Error(t, err)
 				return

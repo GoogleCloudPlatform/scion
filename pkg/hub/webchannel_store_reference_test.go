@@ -20,9 +20,12 @@ import (
 	"context"
 	"database/sql"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 func assertListMessageIDsForAttachment(t *testing.T, wcs WebChatStore) {
@@ -68,4 +71,49 @@ func TestListMessageIDsForAttachment_Postgres(t *testing.T) {
 	require.NoError(t, wcs.Init())
 	assertListMessageIDsForAttachment(t, wcs)
 	assert.True(t, pgIndexExists(db, "idx_webchat_message_attachment_attachment"))
+}
+
+func assertTopicLookupInProject(t *testing.T, wcs WebChatStore) {
+	t.Helper()
+	ctx := context.Background()
+	projA, projB := tid("ref-store-proj-a"), tid("ref-store-proj-b")
+	keep, live, gone := tid("ref-store-topic-keep"), tid("ref-store-topic-live"), tid("ref-store-topic-gone")
+	for _, id := range []string{keep, live, gone} {
+		require.NoError(t, wcs.CreateTopic(ctx, WebChatTopic{ID: id, ProjectID: projB, Name: "t-" + id[:8], CreatedBy: "u", CreatedAt: time.Now().UTC()}))
+	}
+	require.NoError(t, wcs.DeleteTopic(ctx, gone))
+
+	_, err := wcs.GetTopicConversationIDInProject(ctx, projB, live)
+	require.NoError(t, err, "a live topic of the project is found")
+	_, err = wcs.GetTopicConversationIDIncludingDeletedInProject(ctx, projB, gone)
+	require.NoError(t, err, "a deleted topic of the project is found by the including-deleted lookup")
+	_, err = wcs.GetTopicConversationIDInProject(ctx, projB, gone)
+	assert.ErrorIs(t, err, store.ErrNotFound, "a deleted topic is not live")
+
+	for _, id := range []string{live, gone} {
+		_, err = wcs.GetTopicConversationIDInProject(ctx, projA, id)
+		assert.ErrorIs(t, err, store.ErrNotFound, "a topic of another project is not found")
+		_, err = wcs.GetTopicConversationIDIncludingDeletedInProject(ctx, projA, id)
+		assert.ErrorIs(t, err, store.ErrNotFound, "a topic of another project is not found")
+	}
+}
+
+func TestTopicConversationLookupInProject_OtherProjectNotFound(t *testing.T) {
+	t.Run("sqlite", func(t *testing.T) {
+		db := openTestMemorySQLite(t, "sqlite3")
+		wcs := NewWebChatStore(db, "sqlite3")
+		require.NoError(t, wcs.Init())
+		assertTopicLookupInProject(t, wcs)
+	})
+	t.Run("postgres", func(t *testing.T) {
+		dsn := requirePostgresDSN(t)
+		db, err := sql.Open("pgx", dsn)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = db.Close() })
+		pgDropWebchatTables(t, db)
+		t.Cleanup(func() { pgDropWebchatTables(t, db) })
+		wcs := NewWebChatStore(db, "postgres")
+		require.NoError(t, wcs.Init())
+		assertTopicLookupInProject(t, wcs)
+	})
 }

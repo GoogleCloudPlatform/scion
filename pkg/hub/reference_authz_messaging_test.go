@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -137,4 +138,44 @@ func TestAgentMessage_ClientAttachmentMetadataRemoved(t *testing.T) {
 	require.Len(t, calls, 1)
 	assert.NotContains(t, calls[0].StructuredMessage.Metadata, attachmentsMetadataKey)
 	assert.Equal(t, "me", calls[0].StructuredMessage.Metadata["keep"])
+}
+
+func TestAgentOutbound_ThreadIDOfOtherProjectTopicMatchesMissing(t *testing.T) {
+	srv, s, project, agent, user := def138Setup(t)
+	ctx := context.Background()
+	wcs := attachWebChatStore(t, srv, s)
+	setupThreadTestChannels(t, srv, s, project, "web")
+
+	other := &store.Project{ID: tid("outbound-ref-other-project"), Name: "Other", Slug: "outbound-ref-other",
+		Created: time.Now(), Updated: time.Now()}
+	require.NoError(t, s.CreateProject(ctx, other))
+	otherTopic := tid("outbound-ref-other-topic")
+	require.NoError(t, wcs.CreateTopic(ctx, WebChatTopic{
+		ID: otherTopic, ProjectID: other.ID, Name: "elsewhere", CreatedBy: user.ID, CreatedAt: time.Now(),
+	}))
+	otherConvID, err := wcs.GetTopicConversationIDInProject(ctx, other.ID, otherTopic)
+	require.NoError(t, err)
+	require.NotEmpty(t, otherConvID)
+	partsBefore, err := s.ListParticipants(ctx, otherConvID)
+	require.NoError(t, err)
+	before := countProjectConversations(t, s, project.ID)
+
+	send := func(threadID string) refAnswer {
+		rr := postOutboundRequest(t, srv, project.ID, agent.ID, OutboundMessageRequest{
+			Recipient: "user:" + user.Email,
+			Msg:       "to a thread",
+			ThreadID:  threadID,
+			Channel:   "web",
+		})
+		return refAnswer{status: rr.Code, body: strings.ReplaceAll(rr.Body.String(), threadID, "<thread>")}
+	}
+	missing := send(tid("outbound-ref-unknown-thread"))
+	require.Equal(t, http.StatusUnprocessableEntity, missing.status, missing.body)
+	requireSameAnswer(t, missing, send(otherTopic))
+
+	assert.Equal(t, before, countProjectConversations(t, s, project.ID), "no conversation row is created")
+	partsAfter, err := s.ListParticipants(ctx, otherConvID)
+	require.NoError(t, err)
+	assert.Equal(t, len(partsBefore), len(partsAfter), "no participant row is added to the other project's conversation")
+	assertOnlyControlMessage(t, srv, s, project, agent, user)
 }

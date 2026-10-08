@@ -181,6 +181,20 @@ func (s *rsWebChatStore) GetTopicConversationIDIncludingDeleted(_ context.Contex
 	}
 	return t.ConversationID, nil
 }
+func (s *rsWebChatStore) GetTopicConversationIDInProject(_ context.Context, projectID, topicID string) (string, error) {
+	t, ok := s.topics[topicID]
+	if !ok || t.DeletedAt != nil || t.ProjectID != projectID {
+		return "", fmt.Errorf("topic not found: %s: %w", topicID, store.ErrNotFound)
+	}
+	return t.ConversationID, nil
+}
+func (s *rsWebChatStore) GetTopicConversationIDIncludingDeletedInProject(_ context.Context, projectID, topicID string) (string, error) {
+	t, ok := s.topics[topicID]
+	if !ok || t.ProjectID != projectID {
+		return "", fmt.Errorf("topic not found: %s: %w", topicID, store.ErrNotFound)
+	}
+	return t.ConversationID, nil
+}
 func (s *rsWebChatStore) CreateTopic(context.Context, WebChatTopic) error { return nil }
 func (s *rsWebChatStore) ListTopics(context.Context, string) ([]WebChatTopic, error) {
 	return nil, nil

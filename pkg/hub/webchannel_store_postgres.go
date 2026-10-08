@@ -1204,6 +1204,37 @@ func (s *pgWebChatStore) GetTopicConversationID(ctx context.Context, topicID str
 	return convID, nil
 }
 
+// GetTopicConversationIDInProject is GetTopicConversationID for a topic of
+// projectID only: a topic of another project answers store.ErrNotFound.
+func (s *pgWebChatStore) GetTopicConversationIDInProject(ctx context.Context, projectID, topicID string) (string, error) {
+	const query = `SELECT COALESCE(conversation_id, '') FROM webchat_topic WHERE id = $1 AND project_id = $2 AND deleted_at IS NULL`
+	var convID string
+	err := s.db.QueryRowContext(ctx, query, topicID, projectID).Scan(&convID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return "", fmt.Errorf("topic not found %s: %w", topicID, store.ErrNotFound)
+		}
+		return "", fmt.Errorf("webchat store: get topic conversation_id in project: %w", err)
+	}
+	return convID, nil
+}
+
+// GetTopicConversationIDIncludingDeletedInProject is
+// GetTopicConversationIDIncludingDeleted for a topic of projectID only: a
+// topic of another project answers store.ErrNotFound.
+func (s *pgWebChatStore) GetTopicConversationIDIncludingDeletedInProject(ctx context.Context, projectID, topicID string) (string, error) {
+	const query = `SELECT COALESCE(conversation_id, '') FROM webchat_topic WHERE id = $1 AND project_id = $2`
+	var convID string
+	err := s.db.QueryRowContext(ctx, query, topicID, projectID).Scan(&convID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return "", fmt.Errorf("topic not found %s: %w", topicID, store.ErrNotFound)
+		}
+		return "", fmt.Errorf("webchat store: get topic conversation_id in project (including deleted): %w", err)
+	}
+	return convID, nil
+}
+
 // GetTopicConversationIDIncludingDeleted returns the conversation_id for a
 // webchat topic regardless of its deletion state.
 //

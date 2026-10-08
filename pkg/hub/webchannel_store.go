@@ -88,6 +88,12 @@ type WebChatStore interface {
 	// webchat topic regardless of its deletion state.
 	GetTopicConversationIDIncludingDeleted(ctx context.Context, topicID string) (string, error)
 
+	// GetTopicConversationIDInProject and
+	// GetTopicConversationIDIncludingDeletedInProject are the same lookups
+	// for a topic of projectID only (messaging.TopicConversationLookup).
+	GetTopicConversationIDInProject(ctx context.Context, projectID, topicID string) (string, error)
+	GetTopicConversationIDIncludingDeletedInProject(ctx context.Context, projectID, topicID string) (string, error)
+
 	// CreateTopic inserts a new topic. Returns an error on name conflict
 	// within the same project.
 	CreateTopic(ctx context.Context, topic WebChatTopic) error
@@ -1694,6 +1700,37 @@ func (s *sqliteWebChatStore) GetTopicConversationID(ctx context.Context, topicID
 			return "", fmt.Errorf("topic not found %s: %w", topicID, store.ErrNotFound)
 		}
 		return "", fmt.Errorf("webchat store: get topic conversation_id: %w", err)
+	}
+	return convID, nil
+}
+
+// GetTopicConversationIDInProject is GetTopicConversationID for a topic of
+// projectID only: a topic of another project answers store.ErrNotFound.
+func (s *sqliteWebChatStore) GetTopicConversationIDInProject(ctx context.Context, projectID, topicID string) (string, error) {
+	const query = `SELECT COALESCE(conversation_id, '') FROM webchat_topic WHERE id = ? AND project_id = ? AND deleted_at IS NULL`
+	var convID string
+	err := s.db.QueryRowContext(ctx, query, topicID, projectID).Scan(&convID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return "", fmt.Errorf("topic not found %s: %w", topicID, store.ErrNotFound)
+		}
+		return "", fmt.Errorf("webchat store: get topic conversation_id in project: %w", err)
+	}
+	return convID, nil
+}
+
+// GetTopicConversationIDIncludingDeletedInProject is
+// GetTopicConversationIDIncludingDeleted for a topic of projectID only: a
+// topic of another project answers store.ErrNotFound.
+func (s *sqliteWebChatStore) GetTopicConversationIDIncludingDeletedInProject(ctx context.Context, projectID, topicID string) (string, error) {
+	const query = `SELECT COALESCE(conversation_id, '') FROM webchat_topic WHERE id = ? AND project_id = ?`
+	var convID string
+	err := s.db.QueryRowContext(ctx, query, topicID, projectID).Scan(&convID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return "", fmt.Errorf("topic not found %s: %w", topicID, store.ErrNotFound)
+		}
+		return "", fmt.Errorf("webchat store: get topic conversation_id in project (including deleted): %w", err)
 	}
 	return convID, nil
 }
