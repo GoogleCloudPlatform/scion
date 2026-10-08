@@ -33,7 +33,7 @@ For both Web and CLI access, Scion relies on standard OAuth 2.0 providers (Googl
 Agents running inside containers must report status back to the Hub without possessing user-level credentials.
 
 - **Hub-Issued JWT**: During provisioning, the Hub generates a short-lived JWT scoped specifically to that agent instance.
-- **Claims**: The token includes the `agent_id` (sub), `project_id`, and `scopes`.
+- **Claims**: The token includes the `agent_id` (sub), `project_id`, `scopes`, and the `run_id` of the agent run it was issued for. With [`server.auth.agent_run_scope`](/scion/reference/server-config/#authentication-serverauth) set to `observe`, the Hub compares `run_id` with the agent's current run and logs mismatches, such as a token from an earlier run; it does not refuse requests on this basis yet.
 
   :::caution[Scopes Field Plurality]
   The agent token JWT strictly uses `"scopes"` (plural, array of strings like `["project:read", "agent:status:update"]`), **NOT** `"scope"` (singular string, which is the standard OAuth 2.0 convention). 
@@ -108,6 +108,7 @@ Key security attributes of the GCP IAM check include:
 To guarantee that no API endpoints or handlers can be accessed without explicit authorization, the Scion Hub enforces a strict **fail-closed** authorization design:
 
 - **Explicit Fail-Closed Handlers (`s.authorize()`)**: All API handlers route through fail-closed authorization checks (`s.authorize()`). This eliminates legacy fail-open bypass vectors (such as functions relying on `GetUserIdentityFromContext` which could return `nil` for agent or broker callers and silently bypass authorization). Under the fail-closed model, any context lacking a valid user identity, agent token, or broker credentials is automatically denied.
+- **No Fallback When Authorization Is Unavailable**: The Hub refuses to start if the route metadata for session-only routes is incomplete. A Hub-admin route that declares a permission is evaluated only through the authorization service; if none is configured, the route answers `500` "authorization unavailable" instead of falling back to a plain admin-role check.
 - **Fail-Closed Dispatch Access**: The `checkBrokerDispatchAccess` guard is strictly fail-closed, ensuring that no agent execution can be triggered on a runtime broker unless dispatch permissions have been verified.
 - **Role Boundary Enforcement (`addGroupMember`)**: Non-user callers (such as automated agents or system services) are strictly capped at the plain `member` role when executing `addGroupMember` operations, preventing elevation of privileges across organizational boundaries.
 - **Strict Isolation Ordering (404-before-403)**: To prevent unauthorized users or agents from discovering the existence of sensitive resources via API probe responses, Scion enforces strict **resource isolation ordering**. If a caller requests a resource they are not authorized to view, the Hub performs resource existence checks and tenant bounds validation first. This ensures the Hub responds with a `404 Not Found` rather than a `403 Forbidden` if the resource does not exist or belongs to another tenant/project, preventing side-channel resource enumeration.
@@ -201,6 +202,7 @@ For headless environments (CI/CD, automation), Scion supports **user access toke
 - Tokens can be minted with an explicit hub boundary (`"boundary": {"kind": "hub"}` on `POST /api/v1/auth/tokens`), which reaches hub-level resources and every project; a request naming no boundary is rejected rather than read as hub-bound. Hub-only selectors such as `broker:create` are mintable only on hub-bound tokens, and broker creation itself still refuses every UAT.
 - Every bearer request passes one gate: the boundary is valid, the target's scope is inside the boundary, the permission is inside the stored ceiling, the holder still has active access to a project target, and the holder's live authority allows the action. Any evaluation error denies.
 - At mint time, each requested scope is checked against the caller's live authority before the token is written; an ineligible scope is refused with `403 scope_violation`.
+- Operation-specific checks: inbox, conversation and notification operations check the token's inbox selectors and boundary; project messaging policy, template and project configuration operations each require their own permission; Hub configuration operations admit only hub-bound tokens with the matching selector; and hub pre-start hook scripts are redacted for every credential other than an interactive session. See [User Access Tokens](/scion/hosted/user/personal-access-tokens/#hub-bound-tokens-api-only).
 - A token's selected scopes are a ceiling, not a grant: minting a token with a scope records it as
   a restriction on what the token may do, and grants no access by itself. Every request the token
   later makes is independently authorized against the holder's *current* authority on the specific

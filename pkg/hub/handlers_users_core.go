@@ -171,6 +171,7 @@ func (s *Server) revokeUserSessions(w http.ResponseWriter, r *http.Request, id s
 		return
 	}
 
+	s.publishConduitAuthzChanged(conduitAuthzMatch{UserID: id})
 	slog.Info("Admin revoked all sessions for user",
 		"user_id", id,
 		"admin_id", admin.ID(),
@@ -698,6 +699,10 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 
+	if needsPromote || needsSuspend {
+		s.publishConduitAuthzChanged(conduitAuthzMatch{UserID: user.ID})
+	}
+
 	// This response applies the same per-viewer preferences visibility rule
 	// as GET (stripPreferencesForViewer; used by getUser and listUsers).
 	cap := s.authzService.ComputeCapabilities(ctx, actor, userResource(user))
@@ -994,6 +999,11 @@ func (s *Server) deleteSuperAdminBindingTx(
 			}
 			slog.Info("deleted super-admin binding via admin role mutation",
 				"user_id", userID, "binding_id", b.ID)
+			// The user's system authority ended: re-evaluate the user's
+			// project standing (ptone/scion#3433).
+			if err := enqueueMembershipLossTx(ctx, tx, userID, "", store.MembershipLossTriggerSystemScopeChange, auditActorFromContext(ctx)); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -1222,6 +1232,8 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
 		}
 		return
 	}
+
+	s.publishConduitAuthzChanged(conduitAuthzMatch{UserID: id})
 
 	// Best effort, after commit: remove the user's user-scope secrets and
 	// env vars (ptone/scion#2769). Failures are logged, not returned.

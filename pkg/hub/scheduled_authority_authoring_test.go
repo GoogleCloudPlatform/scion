@@ -30,10 +30,11 @@ import (
 
 // The revision ceiling of a scoped UAT is the token's frozen ceiling, with
 // its project boundary. revisionAuthorityCeiling is called directly: the
-// schedule routes refuse a project-scoped UAT at the bearer gate's boundary
-// eligibility stage before any schedule handler logic runs
-// (TestSchedUATAuthoringRefusedAtBoundary). Recording through the routes is
-// covered by session-authored schedules (TestScheduleAuthoringRecordsSessionCeiling,
+// schedule routes refuse every UAT at the authoring credential gate before
+// any schedule handler logic runs
+// (TestSchedUATAuthoringRefusedAtBoundary). Recording through the routes
+// is covered by session-authored schedules
+// (TestScheduleAuthoringRecordsSessionCeiling,
 // TestSchedSessionReauthoringRecordsCeiling).
 func TestSchedUATRevisionCeilingIsTokenCeiling(t *testing.T) {
 	srv, s, projectID := setupScheduleTest(t)
@@ -41,7 +42,7 @@ func TestSchedUATRevisionCeilingIsTokenCeiling(t *testing.T) {
 	uat := NewScopedUserIdentity(owner, projectID, []string{"scheduled_event:create", "agent:create"})
 	want := uat.Ceiling()
 
-	c, ok, rec := fireRevisionCeiling(srv, uat, projectID, "dispatch_agent")
+	c, ok, rec := fireRevisionCeiling(srv, uat, projectID)
 	require.True(t, ok, rec.Body.String())
 	assert.Equal(t, store.EffectCeilingBounded, c.Kind)
 	assert.Equal(t, want.Version, c.Version)
@@ -50,9 +51,10 @@ func TestSchedUATRevisionCeilingIsTokenCeiling(t *testing.T) {
 }
 
 // A project-scoped UAT cannot author a schedule or a one-shot event of any
-// type: no scheduled_event permission is eligible for a project boundary, so
-// the route refuses it and nothing is written. The scheduled-message rule
-// for scoped UATs is checked directly in TestSessionOnlyGate_ReasonIsReported.
+// type: the authoring credential gate refuses it and nothing is written, and
+// scheduled_event.create is not eligible for a project boundary either. The
+// scheduled-message rule for scoped UATs is checked directly in
+// TestSessionOnlyGate_ReasonIsReported.
 func TestSchedUATAuthoringRefusedAtBoundary(t *testing.T) {
 	srv, s, projectID := setupScheduleTest(t)
 	owner := setupScopedDispatchAgentOwner(t, srv, s, projectID, tid("sched-uat-boundary-owner"))
@@ -122,9 +124,9 @@ func TestSchedSessionReauthoringRecordsCeiling(t *testing.T) {
 }
 
 // An update that changes a schedule's type to dispatch_agent is held to the
-// dispatch_agent ceiling rule: a credential whose ceiling cannot be recorded
-// is refused with 403 and nothing changes, while the same credential's
-// change to a message schedule records the unrecorded ceiling.
+// ceiling rule: a credential whose ceiling cannot be recorded is refused
+// with 403 and nothing changes. The same credential's change to the message
+// schedule is refused the same way.
 func TestScheduleTypeChangeToDispatchAgentUsesDispatchRule(t *testing.T) {
 	srv, s, projectID := setupScheduleTest(t)
 	owner := setupScopedDispatchAgentOwner(t, srv, s, projectID, tid("sched-typechange-owner"))
@@ -154,13 +156,14 @@ func TestScheduleTypeChangeToDispatchAgentUsesDispatchRule(t *testing.T) {
 	assert.Equal(t, before.InitiatorAttribution, after.InitiatorAttribution)
 	assert.Equal(t, before.AuthorityCeiling, after.AuthorityCeiling)
 
-	// The same credential re-targeting the message schedule records the
-	// unrecorded ceiling (scheduled-message authority is its own rule).
+	// The same credential re-targeting the message schedule is refused too.
 	rec = doAuthoredScheduleRequest(t, srv, unrecordable, projectID, created.ID, http.MethodPatch,
 		UpdateScheduleRequest{Payload: `{"agentName":"ghost-target-2","message":"hi"}`})
-	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), string(DeniedByDelegationCeiling))
 	after, err = s.GetSchedule(context.Background(), created.ID)
 	require.NoError(t, err)
-	assert.Equal(t, store.EffectCeiling{}, after.AuthorityCeiling)
-	assert.Equal(t, before.AuthorizationRevision+1, after.AuthorizationRevision)
+	assert.Equal(t, before.Payload, after.Payload)
+	assert.Equal(t, before.InitiatorAttribution, after.InitiatorAttribution)
+	assert.Equal(t, before.AuthorityCeiling, after.AuthorityCeiling)
 }

@@ -420,6 +420,7 @@ $HOME/.scion/harness/
   outputs/             # your script writes here
     resolved-auth.json
     env.json
+    status.json        # written by sciontool, not your script (see below)
   secrets/             # 0600 files, one per credential
     <ENV_VAR_NAME>
     <FILE_SECRET_NAME>
@@ -432,6 +433,13 @@ which executes your `provisioner.command` on every agent start/resume. Secret
 env vars are stripped from the script's process environment — read secret
 *values* from the staged files in `secrets/` (via the `ProvisionContext`
 helpers), never from `os.environ`.
+
+`outputs/status.json` is owned by `sciontool harness provision`; do not write
+it from your script. It holds the last run's outcome (`running`, `ok`, or
+`failed` with the error). On failure that error (secret-scrubbed, single
+line, capped at 1 KiB) is appended to the agent's "pre-start hook failed"
+status message, so make your `ProvisionError` messages say what is missing
+and never include credential values.
 
 `manifest.json` gives you: `schema_version`, `command` (`"provision"`),
 `agent_name`, `agent_home`, `agent_workspace`, `harness_bundle_dir`,

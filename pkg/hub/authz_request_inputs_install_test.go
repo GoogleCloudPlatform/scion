@@ -377,7 +377,11 @@ func TestMemoInstall_RelationshipCandidatesNeverObserveMemo(t *testing.T) {
 		ceiling := stackHas(rec.stack, "checkDelegationCeiling")
 		// The project-access stage is the one relationship stage that reads
 		// the requester's memo: it evaluates the requester's own access.
-		projectAccessStage := candidate && stackHas(rec.stack, "relationshipProjectAccessStage")
+		// The delegation ceiling's user hop (userRelationshipAuthority)
+		// also runs the stage, for the delegator rather than the requester
+		// (ptone/scion#3433): it reads no memo, like every other stage.
+		ceilingHopStage := stackHas(rec.stack, "userRelationshipAuthority")
+		projectAccessStage := candidate && stackHas(rec.stack, "relationshipProjectAccessStage") && !ceilingHopStage
 		if projectAccessStage {
 			// The request context carries both keys; the stage must never
 			// reach the edges memo's only consumer, the delegation-edge

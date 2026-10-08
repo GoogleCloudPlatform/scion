@@ -49,7 +49,9 @@ const (
 	// ClosePTYServiceRestart (1012): reserved for a future graceful drain.
 	// Retry.
 	ClosePTYServiceRestart = 1012
-	// ClosePTYTryAgainLater (1013): overload. Not emitted today. Retry.
+	// ClosePTYTryAgainLater (1013): overload. The Hub emits it, with reason
+	// "slow_consumer", when an attach client reads output too slowly and the
+	// stream's output buffer fills (pkg/hub StreamOutputLimit). Retry.
 	ClosePTYTryAgainLater = 1013
 
 	// ClosePTYAuthRequired (4401): credentials no longer valid. Reserved;

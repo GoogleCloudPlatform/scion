@@ -27,12 +27,17 @@ This gives users a zero-setup path to GCP identity for their agents while preser
 
 ### Hub Prerequisites
 
-The Hub's operating service account needs two IAM roles on the Hub's GCP project:
+The Hub's operating service account needs `roles/iam.serviceAccountAdmin` on the Hub's GCP project (or a custom role with the same permissions):
 
-| Role | Purpose |
-|------|---------|
-| `roles/iam.serviceAccountCreator` | Create service accounts in the Hub project |
-| `roles/iam.serviceAccountTokenCreator` | Generate tokens for minted SAs (already required for BYOSA flow) |
+| Permission | Used for |
+|------------|----------|
+| `iam.serviceAccounts.create` | Create the minted SA |
+| `iam.serviceAccounts.getIamPolicy`, `iam.serviceAccounts.setIamPolicy` | Grant the Hub SA `roles/iam.serviceAccountTokenCreator` on the minted SA, and the minted SA `roles/iam.serviceAccountUser` on itself (`allow_self_act_as`) |
+| `iam.serviceAccounts.delete` | Delete the minted SA again if a follow-up grant fails |
+
+`roles/iam.serviceAccountCreator` alone is not enough: GCP gives the creator no role on the SA it creates, so the policy grants after create fail and the cleanup delete fails too, leaving an orphaned SA. No project-level `roles/iam.serviceAccountTokenCreator` is needed for minted SAs, because the per-SA grant made during minting covers token generation. Token generation goes through `iamcredentials.googleapis.com`, which must be enabled in the Hub project.
+
+The single-node VM deploy script (`scripts/single-node-vm/deploy.sh`) grants `roles/iam.serviceAccountAdmin` to the hub VM's SA by default (config key `hub_sa_minting`). On that tier the hub SA is the VM SA, so agents in `passthrough` identity mode share this role; passthrough is intended for getting started only.
 
 The Hub must also know its own GCP project ID. This is either:
 - Auto-detected from the metadata server (when running on GCE/Cloud Run).

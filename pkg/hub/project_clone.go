@@ -274,9 +274,25 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 		}
 	}()
 
-	// ── Step 4: Create project row ───────────────────────────────────────
+	// The caller becomes the clone's owner: the request credential must
+	// cover the owner role before anything is written.
+	if !s.authorizeProjectOwnerGrant(w, ctx) {
+		return
+	}
 
-	if err := s.store.CreateProject(ctx, clone); err != nil {
+	// ── Steps 4 and 5: Create project row and owner role binding ─────────
+	// The clone creator becomes the project owner via a direct role binding
+	// (PM1), written with the project row and its audit record in one
+	// transaction. This is the canonical project membership source.
+
+	if err := s.createProjectWithOwner(ctx, clone, callerID); err != nil {
+		if errors.Is(err, errProjectOwnerBinding) {
+			slog.Error("project clone: failed to create owner role binding",
+				"clone_id", clone.ID, "user_id", callerID, "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+				"Failed to create owner role binding: "+err.Error(), nil)
+			return
+		}
 		writeErrorFromErr(w, err, "")
 		return
 	}
@@ -292,20 +308,6 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 				"clone_id", clone.ID, "error", delErr)
 		}
 	})
-
-	// ── Step 5: Create owner role binding (PM1: atomic with project) ─────
-	// The clone creator becomes the project owner via a direct role binding.
-	// This is the canonical project membership source. The step 4 rollback
-	// already cascade-deletes all project-scoped bindings.
-	if callerID != "" {
-		if rbErr := s.createProjectOwnerRoleBinding(ctx, clone.ID, callerID); rbErr != nil {
-			slog.Error("project clone: failed to create owner role binding",
-				"clone_id", clone.ID, "user_id", callerID, "error", rbErr)
-			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
-				"Failed to create owner role binding: "+rbErr.Error(), nil)
-			return
-		}
-	}
 
 	// ── Step 6: Create groups ────────────────────────────────────────────
 
@@ -414,11 +416,18 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 		}
 	}
 
-	// ── Step 14: Auto-link providers (best-effort) ───────────────────────
+	// ── Step 15: Auto-link providers (best-effort) ───────────────────────
 
 	s.autoLinkProviders(ctx, clone)
 
-	// ── Step 15: Publish event (best-effort) ─────────────────────────────
+	// ── Step 16: Ensure the #general chat topic (best-effort) ────────────
+	// Runs after every step that can fail and roll the clone back, so a
+	// rolled-back clone never leaves an orphaned topic behind. Skipped for
+	// template clones (asTemplate), which are not chat spaces.
+
+	s.ensureProjectGeneralTopic(ctx, clone)
+
+	// ── Step 17: Publish event (best-effort) ─────────────────────────────
 
 	s.events.PublishProjectCreated(ctx, clone)
 

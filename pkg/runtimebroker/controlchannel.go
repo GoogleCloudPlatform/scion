@@ -191,6 +191,108 @@ type StreamHandler struct {
 	closeCh    chan struct{}
 	closed     bool
 	closeMu    sync.Mutex
+
+	// input holds client input not yet taken from dataCh. It is set by
+	// handleStreamOpen; handlers built directly (tests) feed dataCh instead.
+	input *streamInputQueue
+}
+
+// StreamInputLimit is the most client input, in bytes, the broker holds for
+// one stream before the PTY consumes it. Input is queued only while the
+// write into the agent's terminal is blocked (the program in the session is
+// not reading stdin fast enough), so the limit is sized well above any
+// realistic paste: 4 MiB is about 200 times the 20 KB paste that already
+// worked, more than a large source file, and four times the 1 MiB
+// control-channel message cap. Exceeding it closes the stream with
+// closeCodeInputOverflow; input is never dropped silently.
+const StreamInputLimit = 4 << 20
+
+// closeCodeInputOverflow (1009, "message too big") is the close code for a
+// stream whose input exceeded StreamInputLimit. The Hub passes it through
+// unchanged and clients classify it as terminal, so the client reports it
+// instead of reconnecting and pasting again.
+const closeCodeInputOverflow = 1009
+
+// closeReasonInputOverflow is the close reason sent with
+// closeCodeInputOverflow.
+const closeReasonInputOverflow = "input_overflow"
+
+// streamInputQueue is a byte-bounded FIFO of input frames for one stream.
+// The control-channel read loop pushes without blocking; run moves frames
+// into the stream's dataCh in order. A frame counts against the limit until
+// the consumer has taken it from dataCh.
+type streamInputQueue struct {
+	mu     sync.Mutex
+	frames [][]byte
+	queued int
+	limit  int
+	notify chan struct{} // capacity 1
+}
+
+func newStreamInputQueue(limit int) *streamInputQueue {
+	return &streamInputQueue{limit: limit, notify: make(chan struct{}, 1)}
+}
+
+// push queues data. It reports false, queueing nothing, if data would take
+// the queue over its limit.
+func (q *streamInputQueue) push(data []byte) bool {
+	if len(data) == 0 {
+		return true
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.queued+len(data) > q.limit {
+		return false
+	}
+	q.frames = append(q.frames, data)
+	q.queued += len(data)
+	select {
+	case q.notify <- struct{}{}:
+	default:
+	}
+	return true
+}
+
+// run delivers queued frames to out, in order, until closeCh is closed.
+func (q *streamInputQueue) run(out chan<- []byte, closeCh <-chan struct{}) {
+	for {
+		q.mu.Lock()
+		var data []byte
+		if len(q.frames) > 0 {
+			data = q.frames[0]
+		}
+		q.mu.Unlock()
+
+		if data == nil {
+			select {
+			case <-q.notify:
+				continue
+			case <-closeCh:
+				q.discard()
+				return
+			}
+		}
+
+		select {
+		case out <- data:
+			q.mu.Lock()
+			q.frames[0] = nil
+			q.frames = q.frames[1:]
+			q.queued -= len(data)
+			q.mu.Unlock()
+		case <-closeCh:
+			q.discard()
+			return
+		}
+	}
+}
+
+// discard drops any queued frames once the stream has closed.
+func (q *streamInputQueue) discard() {
+	q.mu.Lock()
+	q.frames = nil
+	q.queued = 0
+	q.mu.Unlock()
 }
 
 // NewControlChannelClient creates a new control channel client.
@@ -836,14 +938,18 @@ func (c *ControlChannelClient) handleStreamOpen(data []byte) error {
 		streamType: open.StreamType,
 		slug:       open.Slug,
 		projectID:  open.ProjectID,
-		dataCh:     make(chan []byte, 256),
-		resizeCh:   make(chan [2]int, 8),
-		closeCh:    make(chan struct{}),
+		// Unbuffered: input waits in the byte-bounded input queue instead.
+		dataCh:   make(chan []byte),
+		resizeCh: make(chan [2]int, 8),
+		closeCh:  make(chan struct{}),
+		input:    newStreamInputQueue(StreamInputLimit),
 	}
 
 	c.streamMu.Lock()
 	c.streams[open.StreamID] = handler
 	c.streamMu.Unlock()
+
+	go handler.input.run(handler.dataCh, handler.closeCh)
 
 	// Start stream handler based on type
 	switch open.StreamType {
@@ -874,13 +980,97 @@ func (c *ControlChannelClient) handleStreamData(data []byte) error {
 		return nil
 	}
 
-	select {
-	case handler.dataCh <- frame.Data:
-	default:
-		c.log.Warn("Stream buffer full", "streamID", frame.StreamID)
+	if handler.isClosed() {
+		// Already closed with a reported code (e.g. input overflow) and
+		// waiting for the Hub's close; late input is not delivered.
+		return nil
+	}
+
+	if handler.input == nil {
+		// Only handlers built outside handleStreamOpen (tests, with a
+		// buffered dataCh) lack an input queue. Hand off without blocking
+		// the read loop; on a full channel, close with the overflow code
+		// rather than dropping the frame.
+		select {
+		case handler.dataCh <- frame.Data:
+		default:
+			c.closeStreamAsync(handler, closeReasonInputOverflow, closeCodeInputOverflow)
+		}
+		return nil
+	}
+
+	if !handler.input.push(frame.Data) {
+		c.log.Warn("Stream input exceeded the buffer limit; closing stream",
+			"streamID", frame.StreamID, "limitBytes", StreamInputLimit)
+		c.closeStreamAsync(handler, closeReasonInputOverflow, closeCodeInputOverflow)
 	}
 
 	return nil
+}
+
+// isClosed reports whether the stream has been closed.
+func (h *StreamHandler) isClosed() bool {
+	h.closeMu.Lock()
+	defer h.closeMu.Unlock()
+	return h.closed
+}
+
+// claimClose closes the stream locally and reports whether this call did
+// it. Exactly one path claims each stream, and only a claiming path that is
+// responsible for telling the Hub (closeStreamAsync, CloseStream) sends a
+// StreamClose, so the Hub sees one close code per stream.
+func (h *StreamHandler) claimClose() bool {
+	h.closeMu.Lock()
+	defer h.closeMu.Unlock()
+	if h.closed {
+		return false
+	}
+	h.closed = true
+	close(h.closeCh)
+	return true
+}
+
+// closeStreamAsync closes handler's stream locally at once and, if this call
+// claimed the close, reports it to the Hub from a separate goroutine so the
+// read loop never waits on the write. The handler stays registered, marked
+// closed, until the Hub's StreamClose or a CloseStream call removes it; a
+// CloseStream that finds it already claimed sends nothing, so a PTY
+// goroutine finishing at the same time cannot report a second code.
+//
+// It reports whether a report was started: false if another path already
+// closed the stream, or if the client is closing.
+func (c *ControlChannelClient) closeStreamAsync(handler *StreamHandler, reason string, code int) bool {
+	if !handler.claimClose() {
+		return false
+	}
+	conn := c.conn
+	closeMsg := wsprotocol.NewStreamCloseMessage(handler.streamID, reason, code)
+	return c.goTracked(func() {
+		if err := conn.WriteJSON(closeMsg); err != nil {
+			c.log.Warn("Failed to report stream close to Hub", "streamID", handler.streamID, "code", code, "error", err)
+		}
+	})
+}
+
+// goTracked runs f in a goroutine counted by c.wg, unless Close has started.
+// The read loop is not itself tracked and can still be handling a frame
+// after Close cancels c.ctx, so an unguarded c.wg.Add there could run
+// concurrently with Close's c.wg.Wait at a zero count, which WaitGroup does
+// not allow. Checking c.ctx and adding under c.mu, which Close holds while
+// cancelling, orders every Add either before Close's Wait or not at all.
+func (c *ControlChannelClient) goTracked(f func()) bool {
+	c.mu.Lock()
+	if c.ctx != nil && c.ctx.Err() != nil {
+		c.mu.Unlock()
+		return false
+	}
+	c.wg.Add(1)
+	c.mu.Unlock()
+	go func() {
+		defer c.wg.Done()
+		f()
+	}()
+	return true
 }
 
 // handleStreamClose processes a stream close message.
@@ -1049,7 +1239,10 @@ func (c *ControlChannelClient) SendStreamData(streamID string, data []byte) erro
 	return c.conn.WriteJSON(frame)
 }
 
-// CloseStream closes a stream.
+// CloseStream closes a stream and reports code and reason to the Hub. If the
+// stream is still registered but another path already closed it with a
+// reported code (input overflow), CloseStream only unregisters it and sends
+// nothing, so the Hub sees a single close code.
 func (c *ControlChannelClient) CloseStream(streamID, reason string, code int) error {
 	c.streamMu.Lock()
 	handler, ok := c.streams[streamID]
@@ -1058,13 +1251,10 @@ func (c *ControlChannelClient) CloseStream(streamID, reason string, code int) er
 	}
 	c.streamMu.Unlock()
 
-	if handler != nil {
-		handler.closeMu.Lock()
-		if !handler.closed {
-			handler.closed = true
-			close(handler.closeCh)
-		}
-		handler.closeMu.Unlock()
+	if handler != nil && !handler.claimClose() {
+		// Another path (input overflow) already closed the stream and
+		// reported its code to the Hub; do not send a second one.
+		return nil
 	}
 
 	closeMsg := wsprotocol.NewStreamCloseMessage(streamID, reason, code)

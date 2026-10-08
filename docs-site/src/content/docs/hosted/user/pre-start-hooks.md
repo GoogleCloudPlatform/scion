@@ -88,6 +88,8 @@ scion hub hook activate baseline-tools
 scion hub hook delete baseline-tools
 ```
 
+Changing a hub hook requires the `hub.lifecycle_hooks.update` permission, which hub administrators hold. A [user access token](/scion/hosted/user/personal-access-tokens/) can change one only if it is hub-bound and carries the `hub_lifecycle_hooks:update` scope. Any signed-in user can list hub hooks, but the script body is returned only to an interactive sign-in with `hub.lifecycle_hooks.read`; other callers, user access tokens included, see the hook without its script.
+
 ---
 
 ## Managing Hooks via the Web UI

@@ -126,8 +126,9 @@ scion hub token create \
 - `--project` (required) — the project name or ID the token is scoped to.
 - `--name` (required) — a human-readable label.
 - `--scopes` (required) — a comma-separated list of the scopes above.
-- `--expires` — a duration (`30d`, `90d`, `1y`) or an RFC 3339 date
-  (`2026-12-31T00:00:00Z`). Defaults to 90 days; maximum 1 year.
+- `--expires` — a duration (`90m`, `2h`, `30d`, `1y`) or an RFC 3339 date
+  (`2026-12-31T00:00:00Z`). Defaults to 90 days; maximum 1 year. `m` means minutes; there is
+  no month unit (use `30d` or `1y` for longer).
 - `--purpose` — an optional description of what the token is for (up to 128 bytes).
 - `--label` — an optional `key=value` label; repeat the flag for more (up to 8). Keys are
   lowercase, start with a letter and may contain digits, `_`, `.` and `-` (up to 32 bytes).
@@ -177,6 +178,15 @@ The same per-request checks apply, with these limits:
   the grant's project.
 - **Messages.** A message sent to an agent with a token passes the same boundary, ceiling, and
   live project-access checks before any other rule can allow it.
+- **Inbox and conversations.** Inbox, conversation and notification operations check the token's
+  inbox selectors and its boundary.
+- **Project configuration.** Setting the project messaging policy, and template and project
+  configuration operations, each require their own permission; project owners hold
+  `project.set_messaging_policy`.
+- **Hub configuration.** Hub configuration operations admit only a hub token carrying the
+  matching selector, for example `hub_lifecycle_hooks:update` to change hub pre-start hooks.
+  Hub pre-start hook scripts are redacted in read responses for every credential other than an
+  interactive sign-in, so a token sees hub hook metadata but not the script.
 - **Runtime Broker registration.** The `broker:create` scope can be selected only on a hub token,
   but creating a Runtime Broker still does not admit any UAT (see
   [What scoped tokens cannot do](#what-scoped-tokens-cannot-do)).
