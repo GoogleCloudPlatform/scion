@@ -853,3 +853,43 @@ func TestTargetTemplatePersistence_HashMatchWritesNothing(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, res.Items, "no harness-config may be created")
 }
+
+// TestTemplateReimport_OverrideNotStoredOnFailure: a valid sourceUrl override
+// is stored only after a successful refresh. When the download fails, or the
+// source has no folder for the template, the stored source URL, files and
+// content hash are unchanged.
+func TestTemplateReimport_OverrideNotStoredOnFailure(t *testing.T) {
+	const stored = "https://github.com/acme/old/tree/main/templates/my-template"
+	const override = "https://github.com/acme/repo/tree/main/templates"
+
+	for name, fetcher := range map[string]*fakeTemplateSourceFetcher{
+		"download fails": {err: &remotefetch.Error{Reason: remotefetch.ReasonStatus, Detail: "status 404"}},
+		"no matching folder": {body: buildTarGz(t, []tarEntry{
+			{name: "repo-main/templates/unrelated/scion-agent.yaml", body: "harness: claude\n"},
+		})},
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv, s, _ := testTemplateBootstrapServer(t)
+			ctx := context.Background()
+			admin := newReimportAdmin(t, s)
+			tmpl := createReimportTemplate(t, s, "tmpl-override-fail", "my-template", store.TemplateScopeGlobal, "", stored)
+			tmpl.Files = []store.TemplateFile{{Path: "scion-agent.yaml", Size: 5, Hash: "sha256:old"}}
+			tmpl.ContentHash = "sha256:oldhash"
+			require.NoError(t, s.UpdateTemplate(ctx, tmpl))
+
+			srv.templateSourceFetcher = fetcher
+			rec := doRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/templates/"+tmpl.ID+"/reimport",
+				ReimportTemplateRequest{SourceURL: override})
+			require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+			assert.Contains(t, rec.Body.String(), "reimport_failed")
+			assert.Len(t, fetcher.urls, 1, "the override passed validation and was fetched")
+
+			got, err := s.GetTemplate(ctx, tmpl.ID)
+			require.NoError(t, err)
+			assert.Equal(t, stored, got.SourceURL, "override must not be stored after a failed refresh")
+			assert.Equal(t, "sha256:oldhash", got.ContentHash)
+			require.Len(t, got.Files, 1)
+			assert.Equal(t, "sha256:old", got.Files[0].Hash)
+		})
+	}
+}
