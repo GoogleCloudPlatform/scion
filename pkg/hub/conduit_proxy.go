@@ -111,6 +111,7 @@ func (s *Server) openConduitPort(ctx context.Context, identity Identity, agent *
 			SessionID: res.Record.SessionID,
 			StreamID:  st.ID(),
 			Close:     sc.closeWithCode,
+			Renew:     conduitStreamRenewal(res, st.ID()),
 		})
 		conn = sc
 		return nil
@@ -119,6 +120,18 @@ func (s *Server) openConduitPort(ctx context.Context, identity Identity, agent *
 		return nil, err
 	}
 	return conn, nil
+}
+
+// conduitStreamRenewal returns the sender of the hub-originated
+// AuthRefresh{stream_id} renewal notice for a stream opened on res, or nil
+// when this node does not hold the target's session (the notice is not
+// forwarded across nodes; the deadline is enforced here regardless).
+func conduitStreamRenewal(res router.Resolved, streamID uint32) func() error {
+	ls, ok := res.Session.(conduit.LocalSession)
+	if !res.Local || !ok {
+		return nil
+	}
+	return func() error { return ls.RefreshAuth(nil, streamID) }
 }
 
 // conduitProxyTransport returns a transport whose only connection is

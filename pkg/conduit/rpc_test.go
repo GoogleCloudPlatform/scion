@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"log/slog"
 	"strings"
 	"sync"
@@ -274,4 +275,74 @@ func (b *syncBuffer) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.buf.String()
+}
+
+// TestAuthRefreshStreamIDFromRelayIsAccepted: the hub-originated renewal
+// notice AuthRefresh{stream_id} (relay → target) is accepted on the
+// target side. Neither the session nor the stream it names is closed, the
+// stream carries data in both directions afterwards, and a notice naming
+// a stream that already ended is ignored. (The dialer-sent case is
+// TestAuthRefreshStreamIDFromDialerIsBadFrame.)
+func TestAuthRefreshStreamIDFromRelayIsAccepted(t *testing.T) {
+	in := make(chan Stream, 1)
+	var mu sync.Mutex
+	var notices []uint32
+	p := newPair(t, Config{
+		StreamHandler: acceptAll(in),
+		Interceptor: func(dir Direction, f *conduitv1.Frame) []*conduitv1.Frame {
+			if ar := f.GetAuthRefresh(); dir == Inbound && ar != nil {
+				mu.Lock()
+				notices = append(notices, ar.GetStreamId())
+				mu.Unlock()
+			}
+			return []*conduitv1.Frame{f}
+		},
+	}, Config{})
+	rs, err := p.relay.OpenStream(context.Background(), tcpOpen())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ds := recvStream(t, in)
+
+	if err := p.relay.RefreshAuth(nil, rs.ID()); err != nil {
+		t.Fatal(err)
+	}
+	const ended = 1000 // an even (relay-owned) id with no stream
+	if err := p.relay.RefreshAuth(nil, ended); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the target received both notices", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(notices) == 2
+	})
+	mu.Lock()
+	got := append([]uint32(nil), notices...)
+	mu.Unlock()
+	if got[0] != rs.ID() || got[1] != ended {
+		t.Fatalf("notices %v, want [%d %d]", got, rs.ID(), ended)
+	}
+
+	// The stream is still open both ways after the notices.
+	go func() { _, _ = rs.Write([]byte("ping")) }()
+	buf := make([]byte, 4)
+	if _, err := io.ReadFull(ds, buf); err != nil || string(buf) != "ping" {
+		t.Fatalf("target read %q, %v", buf, err)
+	}
+	go func() { _, _ = ds.Write([]byte("pong")) }()
+	if _, err := io.ReadFull(rs, buf); err != nil || string(buf) != "pong" {
+		t.Fatalf("relay read %q, %v", buf, err)
+	}
+	if p.dialer.isDone() || p.relay.isDone() {
+		t.Fatalf("a session ended after a relay-sent renewal notice: dialer %v, relay %v", p.dialer.Err(), p.relay.Err())
+	}
+	if st := ds.(*stream).State(); st != StateActive {
+		t.Fatalf("target stream state %v, want active", st)
+	}
+	p.adm.mu.Lock()
+	n := len(p.adm.refreshes)
+	p.adm.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("Admitter.Refresh called %d times for a relay-sent notice", n)
+	}
 }
