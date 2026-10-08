@@ -41,6 +41,12 @@ var sectionSchemaDiffAllowList = map[string]string{
 	// V1ProfileConfig has no env field, so a PUT carrying it gets a 200 and
 	// the value is dropped when the doc decodes. Tracked in ptone/scion#3048.
 	"profiles.*.env: missing from root schema": "section-only key with no Go field; ptone/scion#3048",
+
+	// The gcp_iam keys have no definition in settings-v1.schema.json; the
+	// section schema is hand-written with the recognised values. Adding
+	// them to the root schema would also change settings.yaml validation.
+	"gcp_iam.gcp_iam_check_mode: missing from root schema at server.hub.gcp_iam_check_mode":                   "hand-written section schema; root schema has no definition",
+	"gcp_iam.gcp_iam_deny_unknown_policy: missing from root schema at server.hub.gcp_iam_deny_unknown_policy": "hand-written section schema; root schema has no definition",
 }
 
 // TestSectionSchemas_MatchRootSchema checks every Layer-1 section schema

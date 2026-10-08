@@ -183,10 +183,10 @@ func TestLimitsHandler_NoLimitsConfigured(t *testing.T) {
 }
 
 func TestLimitsHandler_TurnLimitDetection(t *testing.T) {
+	signals := stubSignalInit(t)
 	scrubHubEnv(t)
-	// Test that the handler detects when the turn limit is reached.
-	// We can't test the SIGUSR1 signal in unit tests (it would kill the test process),
-	// so we verify the status file is updated and the limits file has the right count.
+	// Test that the handler detects when the turn limit is reached. The
+	// SIGUSR1 to PID 1 is stubbed (stubSignalInit) and only recorded.
 	tmpDir := t.TempDir()
 	limitsPath := filepath.Join(tmpDir, "agent-limits.json")
 	statusPath := filepath.Join(tmpDir, "agent-info.json")
@@ -212,13 +212,14 @@ func TestLimitsHandler_TurnLimitDetection(t *testing.T) {
 	ls := readLimitsFile(t, limitsPath)
 	assert.Equal(t, 2, ls.TurnCount)
 
-	// The 3rd turn hits the limit - this will attempt SIGUSR1 to PID 1
-	// which won't work in tests (PID 1 is the test runner's init), but
-	// the status update and file write should succeed.
+	assert.Empty(t, signals.get(), "no signal under the limit")
+
+	// The 3rd turn hits the limit.
 	_ = h.Handle(&hooks.Event{Name: hooks.EventAgentEnd})
 
 	ls = readLimitsFile(t, limitsPath)
 	assert.Equal(t, 3, ls.TurnCount)
+	assert.Equal(t, []syscall.Signal{syscall.SIGUSR1}, signals.get())
 
 	// Verify the agent-info.json was updated to limits_exceeded
 	info := readAgentInfo(t, statusPath)
@@ -226,6 +227,7 @@ func TestLimitsHandler_TurnLimitDetection(t *testing.T) {
 }
 
 func TestLimitsHandler_ModelCallLimitDetection(t *testing.T) {
+	signals := stubSignalInit(t)
 	scrubHubEnv(t)
 	tmpDir := t.TempDir()
 	limitsPath := filepath.Join(tmpDir, "agent-limits.json")
@@ -255,6 +257,7 @@ func TestLimitsHandler_ModelCallLimitDetection(t *testing.T) {
 
 	ls = readLimitsFile(t, limitsPath)
 	assert.Equal(t, 2, ls.ModelCallCount)
+	assert.Equal(t, []syscall.Signal{syscall.SIGUSR1}, signals.get())
 
 	info := readAgentInfo(t, statusPath)
 	assert.Equal(t, "limits_exceeded", info.Activity)
@@ -463,6 +466,7 @@ func TestLimitsTriggerFileConstant(t *testing.T) {
 }
 
 func TestSignalLimitsExceeded_CreatesTriggerFile(t *testing.T) {
+	signals := stubSignalInit(t)
 	scrubHubEnv(t)
 	tmpDir := t.TempDir()
 	triggerPath := filepath.Join(tmpDir, "scion-limits-exceeded")
@@ -471,12 +475,15 @@ func TestSignalLimitsExceeded_CreatesTriggerFile(t *testing.T) {
 		triggerFilePath: triggerPath,
 	}
 
-	err := h.signalLimitsExceeded()
+	err := h.signalLimitsExceeded("max_turns of 1 exceeded (completed 1)")
 	assert.NoError(t, err)
 
-	// Verify the trigger file was created
-	_, err = os.Stat(triggerPath)
+	// Verify the trigger file was created with the message, and PID 1 was
+	// (stub-)signalled.
+	content, err := os.ReadFile(triggerPath)
 	assert.NoError(t, err, "trigger file should exist after signalLimitsExceeded")
+	assert.Equal(t, "max_turns of 1 exceeded (completed 1)", string(content))
+	assert.Equal(t, []syscall.Signal{syscall.SIGUSR1}, signals.get())
 }
 
 // TestLimitsHandler_ReadLimitsStateNormalRead proves the hardened read
