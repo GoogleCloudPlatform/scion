@@ -29,7 +29,8 @@ import (
 
 // Review versions (design D11, D18, D20). A review is a version of kind
 // review: a complete copy of the bundle whose text files carry CriticMarkup.
-// Its base is the artifact's current version when the review is finalized.
+// Its base is the version the reviewer started from, which the client names
+// when it finalizes the review; it must still be the current version.
 // Finalize accepts a review only if it changes nothing outside marks:
 // for every text file, clean(review file) equals the base's baseline text
 // after NFC and LF normalisation. The baseline text of a publish version is
@@ -47,6 +48,10 @@ const CodeUnmarkedChanges = "unmarked_changes"
 // CodeStaleReview is the error code of a review finalize refused because a
 // newer version was published while the review was in progress.
 const CodeStaleReview = "stale_review"
+
+// CodeBaseRequired is the error code of a review finalize that does not
+// name the version the review was started from.
+const CodeBaseRequired = "base_required"
 
 // CodeNothingToReview is the error code of a review started on an artifact
 // with no ready version.
@@ -183,12 +188,17 @@ func (s *Service) readBlob(ctx context.Context, b backend, f *File) ([]byte, err
 // against, or done=true when it has written the response: the review was
 // rejected and discarded (422 or 409), or the check could not run (500,
 // claim released so the publisher may retry).
-func (s *Service) finalizeReviewCheck(w http.ResponseWriter, r *http.Request, b backend, a *Artifact, v *Version, files []File, claim time.Time) (int, bool) {
+//
+// base is the version the reviewer started from. A review is checked only
+// against that version, and only while it is still current: if another
+// version became current since, or (checked again under the lock that
+// advances the current version, see Store.FinalizeVersion) another version
+// newer than base is pending, the review is discarded with 409
+// stale_review, so it can neither be compared with text its reviewer never
+// saw nor end up current over someone else's newer version.
+func (s *Service) finalizeReviewCheck(w http.ResponseWriter, r *http.Request, b backend, a *Artifact, v *Version, files []File, claim time.Time, base int) (int, bool) {
 	ctx := r.Context()
-	base := a.CurrentSeq
-	if base == 0 || base >= v.Seq {
-		// A version newer than the review is current (or none is): the
-		// review can never be finalized against what it started from.
+	if base != a.CurrentSeq || base >= v.Seq {
 		s.discardStaleReview(w, r, b, a.ID, v.Seq, claim)
 		return 0, true
 	}
@@ -209,8 +219,8 @@ func (s *Service) finalizeReviewCheck(w http.ResponseWriter, r *http.Request, b 
 	}
 	writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: errorBody{
 		Code: CodeUnmarkedChanges,
-		Message: fmt.Sprintf("the review changes %d file(s) outside CriticMarkup; it was discarded. "+
-			"Publish without --review for a plain edit", len(check.files)),
+		Message: fmt.Sprintf("the review changes %d file(s) outside CriticMarkup marks; it was discarded. "+
+			"A review may only add marks", len(check.files)),
 		Details: map[string]any{"files": check.files, "truncated": check.truncated, "base": base},
 	}})
 	return 0, true
@@ -223,7 +233,7 @@ func (s *Service) discardStaleReview(w http.ResponseWriter, r *http.Request, b b
 		return
 	}
 	writeError(w, http.StatusConflict, CodeStaleReview,
-		"a newer version was published while the review was in progress; the review was discarded. Review the current version")
+		"the version the review was started from is no longer the latest; the review was discarded. Review the current version")
 }
 
 // discard fails a claimed version. ok=false means the response was written.

@@ -92,7 +92,8 @@ func TestArtifactsReviewOnRoutes(t *testing.T) {
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &p))
 		base := fmt.Sprintf("/api/v1/artifacts/%s/versions/%d", id, p.Version.Seq)
 		require.Equal(t, http.StatusNoContent, userArtifactRequest(t, srv, reviewer, http.MethodPut, base+"/files/plan.md", []byte(body)).Code)
-		fin := userArtifactRequest(t, srv, reviewer, http.MethodPost, base+"/finalize", nil)
+		// Both reviews are made against v1, the current version.
+		fin := userArtifactRequest(t, srv, reviewer, http.MethodPost, base+"/finalize", []byte(`{"base":1}`))
 		return &httpRecorder{code: fin.Code, body: fin.Body.String()}
 	}
 
@@ -122,6 +123,7 @@ func TestArtifactsReviewOnRoutes(t *testing.T) {
 	assert.Equal(t, messages.SystemCategoryArtifactReview, m.Metadata["system_category"])
 	assert.Empty(t, m.Metadata[artifacts.MessageMetadataKey], "the reference travels in the body, not the admitted metadata key")
 	ref := artifacts.FormatRef(id, 3)
+	assert.Contains(t, m.Msg, "A review (v3, by a user) was published")
 	assert.Contains(t, m.Msg, "Artifact: v3 - scion artifact get "+ref)
 	assert.Contains(t, m.Msg, ref+" --clean")
 	assert.Contains(t, m.Msg, "scion artifact publish <file> --version-of "+artifacts.FormatRef(id, 0))

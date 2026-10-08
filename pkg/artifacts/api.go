@@ -87,6 +87,13 @@ type CreateVersionRequest struct {
 	Files []ManifestFile `json:"files"`
 }
 
+// FinalizeRequest is the optional JSON body of a finalize request.
+type FinalizeRequest struct {
+	// Base is the version a review was started from. It is required to
+	// finalize a review and ignored otherwise.
+	Base int `json:"base,omitempty"`
+}
+
 // ManifestFile is one file of a version manifest.
 type ManifestFile struct {
 	Path   string `json:"path"`

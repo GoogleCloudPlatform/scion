@@ -623,14 +623,27 @@ func (s *Service) handlePutFile(w http.ResponseWriter, r *http.Request, id strin
 // handleFinalize implements POST /{id}/versions/{seq}/finalize: it checks
 // every manifest file has arrived, flips the version to ready and makes it
 // the artifact's current version (unless a later version already is).
+//
+// A review names the version it was started from in the body
+// ({"base": <seq>}); see finalizeReviewCheck. The body is decoded before
+// the artifact is looked up, so its errors are the same for every id.
 func (s *Service) handleFinalize(w http.ResponseWriter, r *http.Request, id string, seq int) {
 	ctx := r.Context()
+	freq, ok := decodeFinalize(w, r)
+	if !ok {
+		return
+	}
 	b, a, ok := s.writableArtifact(w, r, id)
 	if !ok {
 		return
 	}
 	v, ok := s.pendingVersionOf(w, r, b, a, seq, true)
 	if !ok {
+		return
+	}
+	if v.Kind == VersionKindReview && freq.Base <= 0 {
+		writeError(w, http.StatusBadRequest, CodeBaseRequired,
+			`finalizing a review needs the version it was started from: send {"base": <seq>}`)
 		return
 	}
 	files, err := b.store.ListFiles(ctx, v.ID)
@@ -695,7 +708,7 @@ func (s *Service) handleFinalize(w http.ResponseWriter, r *http.Request, id stri
 	base := 0
 	if v.Kind == VersionKindReview {
 		var done bool
-		if base, done = s.finalizeReviewCheck(w, r.WithContext(work), b, a, v, files, claim); done {
+		if base, done = s.finalizeReviewCheck(w, r.WithContext(work), b, a, v, files, claim, freq.Base); done {
 			return
 		}
 	}
@@ -738,6 +751,28 @@ func (s *Service) handleFinalize(w http.ResponseWriter, r *http.Request, id stri
 		s.notifyReview(ctx, updated, ready)
 	}
 	writeJSON(w, http.StatusOK, ArtifactResponse{Artifact: artifactInfo(updated), Version: versionInfo(ready, files), Warnings: warnings})
+}
+
+// maxFinalizeBodyBytes caps the JSON body of a finalize request.
+const maxFinalizeBodyBytes = 4 << 10
+
+// decodeFinalize reads the optional finalize body. An empty body is an
+// empty request. ok=false means the response was written.
+func decodeFinalize(w http.ResponseWriter, r *http.Request) (FinalizeRequest, bool) {
+	var req FinalizeRequest
+	raw, err := io.ReadAll(io.LimitReader(r.Body, maxFinalizeBodyBytes+1))
+	if err != nil || len(raw) > maxFinalizeBodyBytes {
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid finalize body")
+		return req, false
+	}
+	if len(strings.TrimSpace(string(raw))) == 0 {
+		return req, true
+	}
+	if err := json.Unmarshal(raw, &req); err != nil || req.Base < 0 {
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid finalize body")
+		return req, false
+	}
+	return req, true
 }
 
 // finalizeExtras returns the manifest rows the hub adds to a version at
