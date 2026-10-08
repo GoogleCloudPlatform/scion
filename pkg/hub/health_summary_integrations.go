@@ -50,8 +50,9 @@ type HealthSummaryIntegration struct {
 	Reason string `json:"reason,omitempty"`
 }
 
-// healthIntegrationQueryTimeout bounds how long the health summary waits
-// for one plugin's health. A variable so tests can lower it.
+// healthIntegrationQueryTimeout bounds how long one health summary waits
+// for all managed plugins' health, in total. A variable so tests can lower
+// it.
 var healthIntegrationQueryTimeout = 2 * time.Second
 
 // healthIntegrationTimedOutReason is the fixed reason given for a managed
@@ -73,10 +74,10 @@ type HealthSummaryIntegrationCounts struct {
 // healthSummaryIntegrations builds the integrations section of the health
 // summary. Plugins run by this hub instance's plugin manager are queried
 // with getIntegrationStatus, the same live check the Integrations admin
-// page uses, all at once, each bounded by healthIntegrationQueryTimeout: a
-// plugin that does not answer in time is listed with health "unknown" (not
-// reported) and a fixed reason; concurrent summaries share one query per
-// plugin. pluginRecordNames are the plugin names of the plugin
+// page uses, all at once, waiting at most healthIntegrationQueryTimeout in
+// total: a plugin that does not answer in time is listed with health
+// "unknown" (not reported) and a fixed reason; concurrent summaries share
+// one query per plugin. pluginRecordNames are the plugin names of the plugin
 // records in the runtime broker table (from the handler's broker pass);
 // those this instance does not run are listed with health "unknown" and a
 // fixed reason. The list is sorted by name and is never nil.

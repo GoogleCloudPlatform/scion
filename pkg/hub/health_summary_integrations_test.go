@@ -403,7 +403,7 @@ func (d *slowHealthSummaryPluginDouble) BrokerInfo(name string) (string, string,
 }
 
 // TestHandleHealthSummary_SlowIntegrationNotReported: a plugin that does
-// not answer within the per-plugin timeout is reported as not reported
+// not answer within the summary's timeout is reported as not reported
 // (unknown, neutral), the summary does not wait for it, the other plugins
 // are unaffected, and the hung plugin is not queried again until its first
 // query returns.
@@ -500,6 +500,48 @@ func TestHandleHealthSummary_HungIntegrationNoGoroutineGrowth(t *testing.T) {
 	// unrelated background goroutines.
 	assert.LessOrEqual(t, settled(), base+3, "summaries against a hung plugin must not leave goroutines behind")
 	assert.Equal(t, int32(1), mgr.calls.Load(), "still one query for the hung plugin")
+}
+
+// panickingHealthSummaryPluginDouble panics on the first info query for
+// the named plugin and answers normally afterwards.
+type panickingHealthSummaryPluginDouble struct {
+	*healthSummaryPluginDouble
+	name  string
+	calls atomic.Int32
+}
+
+func (d *panickingHealthSummaryPluginDouble) BrokerInfo(name string) (string, string, []string, error) {
+	if name == d.name && d.calls.Add(1) == 1 {
+		panic("plugin RPC blew up")
+	}
+	return d.healthSummaryPluginDouble.BrokerInfo(name)
+}
+
+// TestHandleHealthSummary_PanickingIntegrationRecovered: a plugin call
+// that panics does not take the hub down. The plugin is reported as
+// unknown, its query is closed and removed, and a later summary starts a
+// fresh query that reports the real health.
+func TestHandleHealthSummary_PanickingIntegrationRecovered(t *testing.T) {
+	srv, _ := testServer(t)
+	mgr := &panickingHealthSummaryPluginDouble{
+		healthSummaryPluginDouble: newHealthSummaryPluginDouble("boom"),
+		name:                      "boom",
+	}
+	srv.SetPluginManager(mgr)
+
+	list, body := getHealthSummaryIntegrations(t, srv)
+	assert.Equal(t, HealthSummaryIntegration{Name: "boom", Platform: "boom", Health: "unknown"},
+		findHealthSummaryIntegration(t, list, "boom"))
+	assert.NotContains(t, string(body), "blew up", "the panic value must not reach the response")
+	require.Eventually(t, func() bool {
+		srv.healthIntegrationMu.Lock()
+		defer srv.healthIntegrationMu.Unlock()
+		return len(srv.healthIntegrationFlights) == 0
+	}, 5*time.Second, 5*time.Millisecond, "the panicked query must be removed")
+
+	list, _ = getHealthSummaryIntegrations(t, srv)
+	assert.Equal(t, "healthy", findHealthSummaryIntegration(t, list, "boom").Health)
+	assert.Equal(t, int32(2), mgr.calls.Load(), "the later summary starts a fresh query")
 }
 
 // gatedHealthSummaryPluginDouble holds every info query for the named
