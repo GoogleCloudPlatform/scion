@@ -524,6 +524,27 @@ type scheduledSendRuntime struct {
 	// progress are cut short, then finalized on their own contexts.
 	abortCtx context.Context
 	abort    context.CancelFunc
+	// afterAbort registers the cut-short of one delivery on abortCtx; nil
+	// means context.AfterFunc. Tests replace it to stall that propagation.
+	afterAbort func(ctx context.Context, f func()) (stop func() bool)
+}
+
+// aborted reports whether stopping has cut deliveries short. It reads
+// abortCtx directly: the cancel that context.AfterFunc propagates to a
+// delivery context runs on its own goroutine and may land later.
+func (rt *scheduledSendRuntime) aborted() bool {
+	return rt.abortCtx.Err() != nil
+}
+
+// onAbort runs f once abortCtx is cancelled (see afterAbort).
+func (rt *scheduledSendRuntime) onAbort(f func()) (stop func() bool) {
+	rt.mu.Lock()
+	register := rt.afterAbort
+	rt.mu.Unlock()
+	if register == nil {
+		register = context.AfterFunc
+	}
+	return register(rt.abortCtx, f)
 }
 
 // scheduledRuntime returns the replica's sweeper state, creating it once.
@@ -905,11 +926,11 @@ func scheduledFailureFromSendError(serr *chatSendError) string {
 }
 
 // scheduledRefusalReason is the failure reason for a send refused at fire
-// time. A refusal on a delivery that was cut short (ctx done) says nothing
-// about access, so it is a delivery error; the send may have started, so
-// it is not retried.
-func scheduledRefusalReason(ctx context.Context, serr *chatSendError) string {
-	if ctx.Err() != nil {
+// time. A refusal on a delivery that was cut short (its context done, or
+// the runtime aborted) says nothing about access, so it is a delivery
+// error; the send may have started, so it is not retried.
+func scheduledRefusalReason(cutShort bool, serr *chatSendError) string {
+	if cutShort {
 		return ScheduledFailureDeliveryError
 	}
 	return scheduledFailureFromSendError(serr)
@@ -936,14 +957,24 @@ func (s *Server) fireScheduledMessage(ctx context.Context, sms ScheduledMessageS
 	ctx, cancel := context.WithTimeout(base, scheduledDeliveryBudget)
 	defer cancel()
 	// Stopping the sweeper cuts a delivery short after its grace period.
-	stopAbort := context.AfterFunc(s.scheduledRuntime().abortCtx, cancel)
+	// The propagated cancel runs on its own goroutine, so every decision
+	// below also reads the abort directly (rt.aborted) and never depends on
+	// when that cancel lands.
+	rt := s.scheduledRuntime()
+	stopAbort := rt.onAbort(cancel)
 	defer stopAbort()
+	cutShort := func() bool { return ctx.Err() != nil || rt.aborted() }
 
-	check := s.checkScheduledFire(ctx, m)
+	// Already aborted: run no checks and send nothing; the row goes back
+	// to pending.
+	check := scheduledFireCheck{transient: true}
+	if !rt.aborted() {
+		check = s.checkScheduledFire(ctx, m)
+	}
 	// Cut short (shutdown) during or right after the checks: nothing was
 	// sent, and a check may have failed only because of that, so the row
 	// goes back to pending rather than failing.
-	if ctx.Err() != nil {
+	if cutShort() {
 		check.transient = true
 	}
 	if check.transient {
@@ -986,7 +1017,7 @@ func (s *Server) fireScheduledMessage(ctx context.Context, sms ScheduledMessageS
 	}()
 	if serr != nil {
 		scheduledSendLog().Info("scheduled send: delivery refused", "id", m.ID, "status", serr.Status, "code", serr.Code)
-		s.failScheduledMessage(base, sms, m, scheduledRefusalReason(ctx, serr))
+		s.failScheduledMessage(base, sms, m, scheduledRefusalReason(cutShort(), serr))
 		return false
 	}
 

@@ -1673,12 +1673,123 @@ func testScheduledStoreDuePerSender(t *testing.T, sms ScheduledMessageStore) {
 // A refusal on a delivery that was cut short is a delivery error; the same
 // refusal on a live delivery keeps its meaning.
 func TestScheduledSend_RefusalReason(t *testing.T) {
-	live := context.Background()
-	cut, cancel := context.WithCancel(context.Background())
-	cancel()
+	live, cut := false, true
 	assert.Equal(t, ScheduledFailureNoAccess, scheduledRefusalReason(live, chatSendForbidden()))
 	assert.Equal(t, ScheduledFailureDeliveryError, scheduledRefusalReason(cut, chatSendForbidden()))
 	assert.Equal(t, ScheduledFailureDeliveryError, scheduledRefusalReason(cut, chatSendNotFound("Thread")))
+}
+
+// stallAbortPropagation makes the runtime's abort never reach a delivery
+// context, standing in for the context.AfterFunc goroutine not having run
+// yet. Only a direct read of the abort can then cut the delivery short.
+func stallAbortPropagation(srv *Server) {
+	rt := srv.scheduledRuntime()
+	rt.mu.Lock()
+	rt.afterAbort = func(context.Context, func()) func() bool {
+		return func() bool { return true }
+	}
+	rt.mu.Unlock()
+}
+
+// A delivery started after the runtime was aborted runs no checks, sends
+// nothing and goes back to pending, even when the abort has not reached
+// its context (ptone/scion#3827).
+func TestScheduledSend_AbortBeforeFire_PropagationStalled_Released(t *testing.T) {
+	f := newScheduledSendFixture(t)
+	fireAt := time.Now().Add(2 * time.Minute)
+	sm := f.schedule(t, f.bob, "aborted, cancel not landed", fireAt)
+	events, unsub := f.srv.events.Subscribe("user." + f.bob.ID + ".chat.scheduled")
+	defer unsub()
+
+	stallAbortPropagation(f.srv)
+	f.srv.scheduledRuntime().abort()
+	ok, err := f.sms.ClaimScheduledMessage(context.Background(), sm.ID, time.Now())
+	require.NoError(t, err)
+	require.True(t, ok)
+	released := f.srv.fireScheduledMessage(context.Background(), f.sms, f.row(t, f.bob, sm.ID))
+
+	assert.True(t, released)
+	assert.Equal(t, ScheduledMessagePending, f.row(t, f.bob, sm.ID).Status)
+	assert.Empty(t, f.topicMessages(t))
+	assert.Equal(t, []string{"released"}, scheduledEventActions(t, collectEvents(events)))
+}
+
+// abortOnProjectCallStore aborts the scheduled-send runtime during the
+// at-th GetProject made by a scheduled delivery while armed, without
+// waiting for the abort to reach the delivery context. Call 1 is the
+// fire-time check; call 2 is the send's own authorization. With foreign
+// set, that call answers a project the sender has no access to.
+type abortOnProjectCallStore struct {
+	store.Store
+	fault   *storeFaultSwitch
+	srv     atomic.Pointer[Server]
+	at      int32
+	foreign bool
+	calls   atomic.Int32
+}
+
+func (w *abortOnProjectCallStore) GetProject(ctx context.Context, id string) (*store.Project, error) {
+	exec, _ := ExecutorContextFromContext(ctx)
+	if !w.fault.Active() || exec.Kind != scheduledSendClientType || w.calls.Add(1) != w.at {
+		return w.Store.GetProject(ctx, id)
+	}
+	w.srv.Load().scheduledRuntime().abort()
+	p, err := w.Store.GetProject(ctx, id)
+	if err != nil || !w.foreign {
+		return p, err
+	}
+	other := *p
+	other.ID = tid("foreign-project")
+	other.OwnerID = tid("someone-else")
+	return &other, nil
+}
+
+func newAbortOnProjectCallFixture(t *testing.T, at int32, foreign bool) (*scheduledSendFixture, *abortOnProjectCallStore, *storeFaultSwitch) {
+	t.Helper()
+	srv, s, alice, bob, project, wrapped, fault := setupDemoPolicyTestWithFault(t,
+		func(inner store.Store, fault *storeFaultSwitch) *abortOnProjectCallStore {
+			return &abortOnProjectCallStore{Store: inner, fault: fault, at: at, foreign: foreign}
+		})
+	wrapped.srv.Store(srv)
+	return newScheduledSendFixtureOn(t, srv, s, alice, bob, project), wrapped, fault
+}
+
+// An abort during the fire-time checks releases the row even when it has
+// not reached the delivery context by the time the checks finish: the
+// gate after the checks reads the abort itself (ptone/scion#3827).
+func TestScheduledSend_AbortDuringChecks_PropagationStalled_Released(t *testing.T) {
+	f, wrapped, fault := newAbortOnProjectCallFixture(t, 1, false)
+	fireAt := time.Now().Add(2 * time.Minute)
+	sm := f.schedule(t, f.bob, "aborted in checks", fireAt)
+	events, unsub := f.srv.events.Subscribe("user." + f.bob.ID + ".chat.scheduled")
+	defer unsub()
+
+	stallAbortPropagation(f.srv)
+	fault.Arm()
+	assert.Equal(t, 1, f.srv.sweepScheduledMessages(context.Background(), fireAt.Add(time.Second)))
+	assert.Equal(t, int32(1), wrapped.calls.Load(), "aborted inside the checks' GetProject, no send")
+	got := f.row(t, f.bob, sm.ID)
+	assert.Equal(t, ScheduledMessagePending, got.Status)
+	assert.Empty(t, got.FailureReason)
+	assert.Empty(t, f.topicMessages(t))
+	assert.Equal(t, []string{"sending", "released"}, scheduledEventActions(t, collectEvents(events)))
+}
+
+// A send refused after an abort that has not reached the delivery context
+// is still recorded as a delivery error, not as an access problem.
+func TestScheduledSend_AbortDuringSend_PropagationStalled_DeliveryError(t *testing.T) {
+	f, wrapped, fault := newAbortOnProjectCallFixture(t, 2, true)
+	fireAt := time.Now().Add(2 * time.Minute)
+	sm := f.schedule(t, f.bob, "aborted in send", fireAt)
+
+	stallAbortPropagation(f.srv)
+	fault.Arm()
+	assert.Equal(t, 1, f.srv.sweepScheduledMessages(context.Background(), fireAt.Add(time.Second)))
+	assert.GreaterOrEqual(t, wrapped.calls.Load(), int32(2), "aborted inside the send's GetProject")
+	got := f.row(t, f.bob, sm.ID)
+	assert.Equal(t, ScheduledMessageFailed, got.Status)
+	assert.Equal(t, ScheduledFailureDeliveryError, got.FailureReason)
+	assert.Empty(t, f.topicMessages(t))
 }
 
 // abortOnProjectStore aborts the scheduled-send runtime during the first
