@@ -38,14 +38,7 @@ import { PALETTE_TYPEAHEAD_MAX_MS } from '../shared/palette/palette-typeahead.js
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-vi.mock('../../client/main.js', () => ({
-  navigateTo: vi.fn(),
-  pushRoute: vi.fn((path: string) => {
-    window.history.pushState({}, '', path);
-    return Promise.resolve();
-  }),
-  stateManager: new EventTarget(),
-}));
+vi.mock('../../client/main.js', () => import('../../client/__fixtures__/main-stub.js'));
 
 // The platform the shortcut handler sees; false (not a Mac) unless a test
 // sets it.

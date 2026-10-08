@@ -99,7 +99,9 @@ func (s *AgentIdentityKeyStore) ReplaceAgentIdentityKeys(ctx context.Context, ag
 			SetAgentID(agentUID).
 			Save(ctx)
 		if err != nil {
-			if ent.IsConstraintError(err) {
+			// Only a unique violation means another agent holds the key;
+			// any other constraint failure is a different error.
+			if isUniqueViolation(err) {
 				return store.ErrIdentityKeyConflict
 			}
 			return mapError(err)
