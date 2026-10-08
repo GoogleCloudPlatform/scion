@@ -83,7 +83,7 @@ func TestUpdateSingleTemplate(t *testing.T) {
 		svc := &fakeTemplateUpdateService{templates: []hubclient.Template{
 			{ID: "t1", Name: "my-template", Slug: "my-template", Scope: "global", SourceURL: ghSource},
 		}}
-		require.NoError(t, updateSingleTemplate(context.Background(), svc, "my-template", "", ""))
+		require.NoError(t, updateSingleTemplate(context.Background(), svc, "my-template", "", "", ""))
 		assert.Equal(t, []string{"t1"}, svc.reimported)
 		assert.Equal(t, []string{""}, svc.overrides)
 		assert.Equal(t, "active", svc.listOpts[0].Status)
@@ -93,13 +93,13 @@ func TestUpdateSingleTemplate(t *testing.T) {
 		svc := &fakeTemplateUpdateService{templates: []hubclient.Template{
 			{ID: "t1", Name: "my-template", Scope: "global"},
 		}}
-		require.NoError(t, updateSingleTemplate(context.Background(), svc, "my-template", ghSource, ""))
+		require.NoError(t, updateSingleTemplate(context.Background(), svc, "my-template", ghSource, "", ""))
 		assert.Equal(t, []string{ghSource}, svc.overrides)
 	})
 
 	t.Run("not found", func(t *testing.T) {
 		svc := &fakeTemplateUpdateService{}
-		err := updateSingleTemplate(context.Background(), svc, "missing", "", "")
+		err := updateSingleTemplate(context.Background(), svc, "missing", "", "", "")
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "not found")
 		assert.Empty(t, svc.reimported)
@@ -109,7 +109,7 @@ func TestUpdateSingleTemplate(t *testing.T) {
 		svc := &fakeTemplateUpdateService{templates: []hubclient.Template{
 			{ID: "t1", Name: "my-template", Scope: "global"},
 		}}
-		err := updateSingleTemplate(context.Background(), svc, "my-template", "", "")
+		err := updateSingleTemplate(context.Background(), svc, "my-template", "", "", "")
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "no stored source URL")
 		assert.Empty(t, svc.reimported)
@@ -119,7 +119,7 @@ func TestUpdateSingleTemplate(t *testing.T) {
 		svc := &fakeTemplateUpdateService{templates: []hubclient.Template{
 			{ID: "t1", Name: "default", Scope: "global", SourceURL: "builtin://scion/1.0/template/default"},
 		}}
-		err := updateSingleTemplate(context.Background(), svc, "default", "", "")
+		err := updateSingleTemplate(context.Background(), svc, "default", "", "", "")
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "cannot be refreshed")
 		assert.Empty(t, svc.reimported)
@@ -130,12 +130,12 @@ func TestUpdateSingleTemplate(t *testing.T) {
 			{ID: "g", Name: "my-template", Scope: "global", SourceURL: ghSource},
 			{ID: "p", Name: "my-template", Scope: "project", SourceURL: ghSource},
 		}}
-		err := updateSingleTemplate(context.Background(), svc, "my-template", "", "")
+		err := updateSingleTemplate(context.Background(), svc, "my-template", "", "", "")
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "--scope")
 		assert.Empty(t, svc.reimported)
 
-		require.NoError(t, updateSingleTemplate(context.Background(), svc, "my-template", "", "project"))
+		require.NoError(t, updateSingleTemplate(context.Background(), svc, "my-template", "", "project", ""))
 		assert.Equal(t, []string{"p"}, svc.reimported)
 	})
 
@@ -144,7 +144,7 @@ func TestUpdateSingleTemplate(t *testing.T) {
 			templates:   []hubclient.Template{{ID: "t1", Name: "my-template", Scope: "global", SourceURL: ghSource}},
 			reimportErr: map[string]error{"t1": errors.New("unsupported_source")},
 		}
-		err := updateSingleTemplate(context.Background(), svc, "my-template", "", "")
+		err := updateSingleTemplate(context.Background(), svc, "my-template", "", "", "")
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "reimport failed")
 	})
@@ -163,7 +163,7 @@ func TestUpdateAllTemplates(t *testing.T) {
 		},
 		reimportErr: map[string]error{"bad": errors.New("boom")},
 	}
-	err := updateAllTemplates(context.Background(), svc, "", time.Minute)
+	err := updateAllTemplates(context.Background(), svc, "", "", time.Minute)
 	require.Error(t, err, "a failed reimport makes the command fail")
 	assert.Equal(t, []string{"a", "b", "bad"}, svc.reimported, "templates without a GitHub source URL are skipped, not attempted")
 	for _, o := range svc.overrides {
@@ -219,7 +219,7 @@ func TestUpdateAllTemplates_PerTemplateDeadline(t *testing.T) {
 		delay: 150 * time.Millisecond,
 	}
 	per := 200 * time.Millisecond
-	require.NoError(t, updateAllTemplates(context.Background(), svc, "", per))
+	require.NoError(t, updateAllTemplates(context.Background(), svc, "", "", per))
 	require.Len(t, svc.deadlines, 3)
 	for i, left := range svc.deadlines {
 		// With one shared deadline the third call would start with almost
@@ -243,4 +243,73 @@ func TestTemplateSourceRefreshable(t *testing.T) {
 	} {
 		assert.Equal(t, want, templateSourceRefreshable(raw), raw)
 	}
+}
+
+func TestUpdateTemplates_CurrentProject(t *testing.T) {
+	templates := []hubclient.Template{
+		{ID: "g", Name: "shared", Scope: "global", SourceURL: ghSource},
+		{ID: "u", Name: "mine", Scope: "user", ScopeID: "user-1", SourceURL: ghSource},
+		{ID: "p1", Name: "proj", Scope: "project", ScopeID: "project-1", SourceURL: ghSource},
+		{ID: "p2", Name: "proj", Scope: "project", ScopeID: "project-2", SourceURL: ghSource},
+	}
+
+	t.Run("single name resolves within the current project", func(t *testing.T) {
+		svc := &fakeTemplateUpdateService{templates: templates}
+		require.NoError(t, updateSingleTemplate(context.Background(), svc, "proj", "", "", "project-2"))
+		assert.Equal(t, []string{"p2"}, svc.reimported)
+	})
+
+	t.Run("global and user templates stay visible inside a project", func(t *testing.T) {
+		svc := &fakeTemplateUpdateService{templates: templates}
+		require.NoError(t, updateSingleTemplate(context.Background(), svc, "shared", "", "", "project-1"))
+		require.NoError(t, updateSingleTemplate(context.Background(), svc, "mine", "", "", "project-1"))
+		assert.Equal(t, []string{"g", "u"}, svc.reimported)
+	})
+
+	t.Run("another project's template is not found", func(t *testing.T) {
+		svc := &fakeTemplateUpdateService{templates: templates[:3]}
+		err := updateSingleTemplate(context.Background(), svc, "proj", "", "", "project-2")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not found")
+		assert.Empty(t, svc.reimported)
+	})
+
+	t.Run("without a project the same name in two projects is ambiguous", func(t *testing.T) {
+		svc := &fakeTemplateUpdateService{templates: templates}
+		err := updateSingleTemplate(context.Background(), svc, "proj", "", "", "")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "several project scopes, use --project")
+		assert.Empty(t, svc.reimported)
+	})
+
+	t.Run("--all covers global, user and the current project only", func(t *testing.T) {
+		svc := &fakeTemplateUpdateService{templates: templates}
+		require.NoError(t, updateAllTemplates(context.Background(), svc, "", "project-1", time.Minute))
+		assert.Equal(t, []string{"g", "u", "p1"}, svc.reimported)
+	})
+
+	t.Run("--all without a project covers every visible template", func(t *testing.T) {
+		svc := &fakeTemplateUpdateService{templates: templates}
+		require.NoError(t, updateAllTemplates(context.Background(), svc, "", "", time.Minute))
+		assert.Equal(t, []string{"g", "u", "p1", "p2"}, svc.reimported)
+	})
+}
+
+func TestUpdateAllTemplates_JSONFailureExitsNonZero(t *testing.T) {
+	prev := outputFormat
+	outputFormat = "json"
+	defer func() { outputFormat = prev }()
+
+	svc := &fakeTemplateUpdateService{
+		templates:   []hubclient.Template{{ID: "a", Name: "a", Scope: "global", SourceURL: ghSource}},
+		reimportErr: map[string]error{"a": errors.New("boom")},
+	}
+	err := updateAllTemplates(context.Background(), svc, "", "", time.Minute)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "1 template(s) failed")
+
+	ok := &fakeTemplateUpdateService{
+		templates: []hubclient.Template{{ID: "a", Name: "a", Scope: "global", SourceURL: ghSource}},
+	}
+	require.NoError(t, updateAllTemplates(context.Background(), ok, "", "", time.Minute))
 }

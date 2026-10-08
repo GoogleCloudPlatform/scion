@@ -87,14 +87,20 @@ func runTemplatesUpdate(cmd *cobra.Command, args []string) error {
 
 	PrintUsingHub(hubCtx.Endpoint)
 
+	// Project templates are limited to the current project when one is
+	// resolved (from --project or the working directory). Without a project
+	// context, project templates from every project the caller can see are
+	// considered.
+	currentProject, _ := GetProjectID(hubCtx)
+
 	if all {
 		// Each template gets its own deadline, so one slow source does not
 		// use up the time of the templates after it.
-		return updateAllTemplates(cmd.Context(), hubCtx.Client.Templates(), scope, templateUpdateTimeout)
+		return updateAllTemplates(cmd.Context(), hubCtx.Client.Templates(), scope, currentProject, templateUpdateTimeout)
 	}
 	ctx, cancel := context.WithTimeout(cmd.Context(), templateUpdateTimeout)
 	defer cancel()
-	return updateSingleTemplate(ctx, hubCtx.Client.Templates(), args[0], urlOverride, scope)
+	return updateSingleTemplate(ctx, hubCtx.Client.Templates(), args[0], urlOverride, scope, currentProject)
 }
 
 // templateUpdateTimeout bounds one template refresh (and, with --all, each
@@ -137,7 +143,17 @@ func displaySourceURL(sourceURL string) string {
 	return u.String()
 }
 
-func updateSingleTemplate(ctx context.Context, svc hubclient.TemplateService, name, urlOverride, scope string) error {
+// inCurrentProject reports whether t should be considered for the current
+// project: global and user templates always are; project templates only when
+// they belong to currentProject (or when no project context is resolved).
+func inCurrentProject(t *hubclient.Template, currentProject string) bool {
+	if t.Scope != "project" || currentProject == "" {
+		return true
+	}
+	return t.ScopeID == currentProject || t.ProjectID == currentProject
+}
+
+func updateSingleTemplate(ctx context.Context, svc hubclient.TemplateService, name, urlOverride, scope, currentProject string) error {
 	resp, err := svc.List(ctx, &hubclient.ListTemplatesOptions{
 		Name:   name,
 		Scope:  scope,
@@ -150,7 +166,7 @@ func updateSingleTemplate(ctx context.Context, svc hubclient.TemplateService, na
 	var matches []*hubclient.Template
 	for i := range resp.Templates {
 		t := &resp.Templates[i]
-		if t.Name == name || t.Slug == name {
+		if (t.Name == name || t.Slug == name) && inCurrentProject(t, currentProject) {
 			matches = append(matches, t)
 		}
 	}
@@ -159,8 +175,16 @@ func updateSingleTemplate(ctx context.Context, svc hubclient.TemplateService, na
 	}
 	if len(matches) > 1 {
 		scopes := make([]string, len(matches))
+		sameScope := true
 		for i, m := range matches {
 			scopes[i] = m.Scope
+			if m.Scope != matches[0].Scope {
+				sameScope = false
+			}
+		}
+		if sameScope {
+			return fmt.Errorf("template %q exists in several %s scopes, use --project to choose one",
+				name, matches[0].Scope)
 		}
 		return fmt.Errorf("template %q exists in several scopes (%s), use --scope to choose one",
 			name, strings.Join(scopes, ", "))
@@ -206,7 +230,7 @@ func updateSingleTemplate(ctx context.Context, svc hubclient.TemplateService, na
 	return nil
 }
 
-func updateAllTemplates(ctx context.Context, svc hubclient.TemplateService, scope string, perTemplate time.Duration) error {
+func updateAllTemplates(ctx context.Context, svc hubclient.TemplateService, scope, currentProject string, perTemplate time.Duration) error {
 	var templates []hubclient.Template
 	opts := &hubclient.ListTemplatesOptions{Scope: scope, Status: "active"}
 	for {
@@ -216,7 +240,11 @@ func updateAllTemplates(ctx context.Context, svc hubclient.TemplateService, scop
 		if err != nil {
 			return fmt.Errorf("failed to list templates: %w", err)
 		}
-		templates = append(templates, resp.Templates...)
+		for i := range resp.Templates {
+			if inCurrentProject(&resp.Templates[i], currentProject) {
+				templates = append(templates, resp.Templates[i])
+			}
+		}
 		if resp.Page.NextCursor == "" {
 			break
 		}
@@ -255,12 +283,18 @@ func updateAllTemplates(ctx context.Context, svc hubclient.TemplateService, scop
 		if failed > 0 {
 			status = "warn"
 		}
-		return outputJSON(ActionResult{
+		if err := outputJSON(ActionResult{
 			Status:  status,
 			Command: "templates update --all",
 			Message: msg,
 			Details: map[string]interface{}{"updated": updated, "skipped": skipped, "failed": failed},
-		})
+		}); err != nil {
+			return err
+		}
+		if failed > 0 {
+			return fmt.Errorf("%d template(s) failed to update", failed)
+		}
+		return nil
 	}
 
 	fmt.Printf("\n%s\n", msg)
