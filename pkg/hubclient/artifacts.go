@@ -62,6 +62,33 @@ type ArtifactService interface {
 
 	// GetVersion returns an artifact with version seq and its files.
 	GetVersion(ctx context.Context, id string, seq int) (*ArtifactResponse, error)
+
+	// CreateLink creates a share link for an artifact, lasting ttlHours
+	// (0 = the hub's default). Only users may create links.
+	CreateLink(ctx context.Context, id string, ttlHours int) (*ArtifactLinkCreated, error)
+
+	// ListLinks returns an artifact's unexpired share links (without
+	// their tokens).
+	ListLinks(ctx context.Context, id string) ([]ArtifactLink, error)
+
+	// RevokeLink revokes one share link.
+	RevokeLink(ctx context.Context, id, linkID string) error
+}
+
+// ArtifactLink describes a share link. It never carries the token.
+type ArtifactLink struct {
+	ID        string    `json:"id"`
+	CreatedAt time.Time `json:"createdAt"`
+	ExpiresAt time.Time `json:"expiresAt"`
+	CreatedBy string    `json:"createdBy,omitempty"`
+}
+
+// ArtifactLinkCreated answers CreateLink. URL is the hub-relative path of
+// the link, the only place its token appears.
+type ArtifactLinkCreated struct {
+	Link                    ArtifactLink `json:"link"`
+	URL                     string       `json:"url"`
+	ClampedToArtifactExpiry bool         `json:"clampedToArtifactExpiry,omitempty"`
 }
 
 // CreateVersionRequest mirrors the hub's version manifest.
@@ -421,4 +448,42 @@ func (s *artifactService) GetVersion(ctx context.Context, id string, seq int) (*
 		return nil, err
 	}
 	return apiclient.DecodeRequired[ArtifactResponse](resp)
+}
+
+// CreateLink implements ArtifactService. It is sent once, never retried,
+// because a replay would create a second link.
+func (s *artifactService) CreateLink(ctx context.Context, id string, ttlHours int) (*ArtifactLinkCreated, error) {
+	body := map[string]int{}
+	if ttlHours > 0 {
+		body["ttlHours"] = ttlHours
+	}
+	resp, err := s.c.postNoRetry(ctx, artifactPath(id)+"/links", body, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[ArtifactLinkCreated](resp)
+}
+
+// ListLinks implements ArtifactService.
+func (s *artifactService) ListLinks(ctx context.Context, id string) ([]ArtifactLink, error) {
+	resp, err := s.c.get(ctx, artifactPath(id)+"/links", nil)
+	if err != nil {
+		return nil, err
+	}
+	out, err := apiclient.DecodeRequired[struct {
+		Links []ArtifactLink `json:"links"`
+	}](resp)
+	if err != nil {
+		return nil, err
+	}
+	return out.Links, nil
+}
+
+// RevokeLink implements ArtifactService.
+func (s *artifactService) RevokeLink(ctx context.Context, id, linkID string) error {
+	resp, err := s.c.delete(ctx, artifactPath(id)+"/links/"+url.PathEscape(linkID), nil)
+	if err != nil {
+		return err
+	}
+	return apiclient.CheckResponse(resp)
 }

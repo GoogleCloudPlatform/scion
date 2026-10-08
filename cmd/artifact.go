@@ -61,7 +61,8 @@ Artifacts require Hub mode and the hub.artifacts experiment.
 Commands:
   scion artifact publish <file|dir> [--title] [--key] [--note] [--entry]
   scion artifact get <ref> [--out <path>]      Fetch an artifact
-  scion artifact versions <ref>                List an artifact's versions`,
+  scion artifact versions <ref>                List an artifact's versions
+  scion artifact share <ref> [--ttl 7d]        Create a share link (users only)`,
 }
 
 var artifactPublishCmd = &cobra.Command{
