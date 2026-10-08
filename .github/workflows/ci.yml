@@ -492,7 +492,7 @@ jobs:
   hub-sqlite-tests:
     name: pkg/hub SQLite Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 50
+    timeout-minutes: 70
     steps:
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -516,16 +516,21 @@ jobs:
       # make test-hub-sqlite. pkg/conduit's relay/router tests run against
       # the SQLite-backed conduit registry store and are included too.
       #
-      # It is scoped to pkg/hub, perf/bench/seed, pkg/conduit and
-      # pkg/store/entadapter (not the whole module) and runs as its own
-      # parallel job so it doesn't add to the wall-clock time of Build &
-      # Test. Clean CI runs range from ~770s to ~1480s, close to the old 25m
-      # (1500s) go test timeout (ptone/scion#2732;
-      # GoogleCloudPlatform/scion#2031 hit the earlier 15m limit). The 40m go
-      # test timeout / 50m job timeout give headroom above that, with the job
-      # limit kept far enough above the go test timeout (~3m of build and
-      # setup overhead) that a real hang still produces go's goroutine dump
-      # instead of a bare job kill. The
+      # It is scoped to pkg/hub, perf/bench/seed, pkg/conduit,
+      # pkg/store/entadapter and pkg/artifacts (not the whole module) and
+      # runs as its own parallel job so it doesn't add to the wall-clock
+      # time of Build & Test. The pkg/hub test binary alone took
+      # ~2360-2390s on green main runs in October 2026 and had grown by
+      # roughly 200s a day over the previous three days, so it reached the
+      # old 40m (2400s) go test timeout and main went intermittently red
+      # with "test timed out after 40m0s" in unrelated tests
+      # (ptone/scion#2732 raised the limit from 25m to 40m;
+      # GoogleCloudPlatform/scion#2031 hit the 15m limit before that). The
+      # 60m go test timeout gives ~50% headroom over that. The 70m job
+      # timeout stays far enough above it (the step runs ~4-5m longer than
+      # the pkg/hub binary, mostly compile and link, and setup plus the
+      # fixture coverage step add under a minute) that a real hang still
+      # produces go's goroutine dump instead of a bare job kill. The
       # longer-term fix is splitting pkg/hub into smaller suites
       # (ptone/scion#1847).
       - name: Run SQLite-enabled tests (make test-hub-sqlite)
@@ -595,6 +600,15 @@ jobs:
         env:
           SCION_TEST_POSTGRES_DSN: postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable
         run: make test-webchat-postgres
+
+      # Conduit user-stream re-check across two hub nodes on one database
+      # (LISTEN/NOTIFY, resync after a dropped listener). Each test uses its
+      # own schema. See the Makefile target's comment.
+      - name: Run conduit stream re-check tests (Postgres)
+        if: ${{ !cancelled() }}
+        env:
+          SCION_TEST_POSTGRES_DSN: postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable
+        run: make test-conduit-authz-postgres
 
       # The pkg/artifacts store is likewise not an Ent store (it creates its
       # own artifact_* tables at Init), so it has its own Postgres SQL. Its

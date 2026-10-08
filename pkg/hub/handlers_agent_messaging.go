@@ -1552,6 +1552,12 @@ func (s *Server) handleAgentGitHubTokenRefresh(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	// No external token for an agent that is not in good standing
+	// (ptone/scion#3433); a lookup fault refuses.
+	if s.agentStandingForbidden(ctx, w, agent.ID) {
+		return
+	}
+
 	project, err := s.store.GetProject(ctx, agent.ProjectID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")

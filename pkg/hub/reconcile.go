@@ -520,6 +520,13 @@ func (s *Server) deliverMessage(ctx context.Context, m *store.Message) error {
 	if agent.RuntimeBrokerID == "" {
 		return fmt.Errorf("agent %s has no runtime broker", m.AgentID)
 	}
+	// A held agent (ptone/scion#3433) is never delivered to; the message
+	// stays stored. A lookup fault does not deliver either.
+	if held, err := s.agentHeld(ctx, agent.ID); err != nil {
+		return fmt.Errorf("agent %s hold lookup: %w", agent.ID, err)
+	} else if held {
+		return fmt.Errorf("agent %s is suspended", agent.ID)
+	}
 	dispatcher := s.GetDispatcher()
 	if dispatcher == nil {
 		return fmt.Errorf("no dispatcher available for message delivery")

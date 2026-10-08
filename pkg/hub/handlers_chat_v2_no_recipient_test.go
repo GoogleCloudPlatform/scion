@@ -259,7 +259,7 @@ func TestNoRecipient_UserDMStaysDispatched(t *testing.T) {
 	if err := s.CreateUser(t.Context(), peer); err != nil {
 		t.Fatal(err)
 	}
-	key := "dm:user:" + peer.ID + ":user:" + DevUserID
+	key := userDMKey(t, peer.ID, DevUserID)
 	setDMConversationID(t, s, key, "")
 
 	code, resp, m := unreachableSend(t, srv, s, key, "hello there")
@@ -269,23 +269,20 @@ func TestNoRecipient_UserDMStaysDispatched(t *testing.T) {
 	requireDispatchedNotNoRecipient(t, "user DM", resp, m)
 }
 
-// An agent DM whose agent no longer exists falls through to the
-// human-to-human path as a DM; the DM guard keeps it out of no_recipient.
-func TestNoRecipient_AgentDMFallthroughNotNoRecipient(t *testing.T) {
+// An agent DM whose agent does not exist is refused before routing, so
+// nothing is persisted (and so nothing can be no_recipient).
+func TestNoRecipient_AgentDMMissingAgentRefused(t *testing.T) {
 	srv, s, _, _, _ := setupSendTest(t)
 	srv.SetDispatcher(&brokerMockDispatcher{})
 	key := "dm:agent:" + api.NewUUID() + ":user:" + DevUserID
 	setDMConversationID(t, s, key, "")
 
 	code, resp, m := unreachableSend(t, srv, s, key, "hello")
-	if code != 201 {
-		t.Fatalf("expected 201, got %d (body=%v)", code, resp)
+	if code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d (body=%v)", code, resp)
 	}
-	if m == nil || m.DispatchState == store.MessageDispatchNoRecipient {
-		t.Fatalf("expected a persisted row that is not no_recipient, got %+v", m)
-	}
-	if resp["dispatchState"] == store.MessageDispatchNoRecipient {
-		t.Fatalf("expected no no_recipient in response, got %v", resp)
+	if m != nil {
+		t.Fatalf("expected no persisted row, got %+v", m)
 	}
 }
 

@@ -109,6 +109,12 @@ var expectedSelectorRegistry = map[string][]string{
 
 	// Project messaging policy (owner rule applies on top of the selector).
 	"project:set_messaging_policy": {"project.set_messaging_policy"},
+
+	// scheduled_event selectors (reads, cancellation and pause).
+	"scheduled_event:delete": {"scheduled_event.delete"},
+	"scheduled_event:list":   {"scheduled_event.list"},
+	"scheduled_event:read":   {"scheduled_event.read"},
+	"scheduled_event:update": {"scheduled_event.update"},
 }
 
 func TestValidateSelectorRegistry_PinnedSnapshot(t *testing.T) {

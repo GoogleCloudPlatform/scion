@@ -150,10 +150,26 @@ To ensure platform security and isolate team activities, schedules and scheduled
 
 - **Owner-Based Access Control**: Only the creator (the owner) of a schedule or scheduled event, or a system-wide administrator, has the authority to retrieve, update, pause, resume, cancel, or delete a schedule/event. If another user or agent attempts to modify or view a schedule they do not own, the Hub API denies access immediately.
 - **Scheduled Agent Identity**: An agent created by a schedule is attributed to the schedule's creator: `CreatorName` is set to the creator's agent name or user email, as with manual creation. It also receives the project's default GCP identity. The same service-account authorization checks as manual agent creation run against the creator, and agent creation fails if they do not pass.
-- **Unscoped Credential Required**: Creating, updating, re-targeting or resuming a scheduled message or a scheduled `dispatch_agent` event or schedule requires an unscoped credential, such as a CLI or Web UI sign-in. A scoped [user access token](/scion/hosted/user/personal-access-tokens/) is denied with a 403, because the scheduler stores only the creator's identity and cannot re-apply the token's scopes when the event fires.
+- **Unscoped Credential Required**: Creating, updating, re-targeting or resuming a scheduled message or a scheduled `dispatch_agent` event or schedule requires an unscoped credential, such as a CLI or Web UI sign-in. A scoped [user access token](/scion/hosted/user/personal-access-tokens/) is denied with a 403, because the `scheduled_event` permissions have no token scope.
+- **Authority recorded per revision (`dispatch_agent`)**: Creating a `dispatch_agent` event or schedule, and any update, re-target or resume that changes what a future dispatch does, records an *authorization revision*: who made the request, which credential they used, and that credential's permission ceiling at the time. Each fire runs under the latest revision. When the event fires, the creator's principal must still be valid: a user principal must still be active and hold `agent.create` in the project, or an agent principal must still exist in the project. If any check fails, that fire is recorded as failed. Pausing, deleting and edits that change only metadata write no revision.
+- **Scheduled Message Authority**: A scheduled message is sent under the authority recorded by the last request that created the event or schedule, changed what, where or when it sends, or resumed or re-enabled it — not under the original creator's identity. When the message fires, that principal must be active and admitted to the project, an access token it was recorded with must be live, and the send must pass the same messaging rules as a direct send. A request to create, change or resume a message event or schedule with a credential whose authority cannot be recorded is denied with a 403, as for an agent-dispatch schedule, and nothing is written. A message event or schedule without recorded authority (written before authority was recorded) does not fire, and its event records `schedule authority not recorded; pause and resume the schedule, or recreate the event`. Pausing and resuming the schedule, or recreating the event, records the caller's authority.
 - **Project-Scoped Role Permissions**: Scheduled event permissions come from project-scoped roles. The built-in `project-member` role carries `scheduled_event.create`, `scheduled_event.list` and `scheduled_event.read`, and `project-admin` also carries `scheduled_event.update`.
 - **Required Permissions**: To perform scheduler actions, the caller's token must have the appropriate permission in the project scope:
   - **Creating/Scheduling**: Requires `scheduled_event.create`
   - **Listing/Viewing**: Requires `scheduled_event.list` and `scheduled_event.read`
   - **Modifying/Pausing**: Requires `scheduled_event.update`
   - **Deleting/Cancelling**: Requires `scheduled_event.delete`
+
+:::caution[Schedules created before authorization revisions]
+A `dispatch_agent` event or schedule created before the Hub recorded authorization revisions has none, so each fire fails with `schedule authority not recorded; pause and resume the schedule, or recreate the event`. Resuming a paused schedule records a new revision for the caller who resumes it:
+
+```bash
+scion schedule pause <id-or-name>
+```
+
+```bash
+scion schedule resume <id-or-name>
+```
+
+Recreate a one-shot event instead.
+:::

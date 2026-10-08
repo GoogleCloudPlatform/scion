@@ -387,6 +387,23 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 				// Another start is in progress: keep the message, deferred.
 				deferred = true
 			}
+		} else if held, holdErr := s.agentHeld(ctx, input.TargetAgent.ID); holdErr != nil || held {
+			// A held target (ptone/scion#3433) is never dispatched to: a
+			// mention is kept, undispatched, like a migrating target; any
+			// other send is refused like a suspended target. A lookup
+			// fault refuses.
+			if holdErr != nil {
+				return nil, &AgentDMError{
+					Code:       ErrCodeInternalError,
+					Message:    "could not verify the target agent's status",
+					HTTPStatus: http.StatusInternalServerError,
+				}
+			}
+			if input.SkipPhaseGate && input.Type == messages.TypeMention {
+				deferred = true
+			} else {
+				return nil, heldTargetDMError(input.TargetAgent)
+			}
 		} else if !input.SkipPhaseGate || input.Type != messages.TypeMention {
 			// SkipPhaseGate applies only to mention deliveries — a non-mention
 			// send always gets the phase gate, regardless of the flag, so a

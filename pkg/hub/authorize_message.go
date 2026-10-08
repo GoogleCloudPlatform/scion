@@ -190,6 +190,11 @@ func (s *Server) CheckEffectiveMembership(ctx context.Context, userID, projectID
 	return EffectiveMembershipResult{IsMember: true, Role: bestRole}
 }
 
+// messageReasonSenderNotPermitted is the message denial reason for an agent
+// sender that is held or not in good standing. It is the same reason
+// whatever the cause.
+const messageReasonSenderNotPermitted = "sender agent is not permitted to send messages"
+
 // authorizeAgentMessage is the single choke point for ALL messaging
 // authorization. It implements the decision logic from design doc Section 5
 // (D1-D10). Every ingress (direct API, chat v2, broadcast, broker inbound)
@@ -244,8 +249,13 @@ func (s *Server) authorizeAgentMessage(
 
 	// Agent self-message: allow an agent to deliver to itself regardless of mode.
 	// This is NOT system-plane (D8); it is a self-access exemption for harness
-	// integration (sciontool port-expose, etc.).
+	// integration (sciontool port-expose, etc.). The agent must still be in
+	// good standing (ptone/scion#3433); a lookup fault denies. Every other
+	// agent send is checked in EvaluateAgentMessage.
 	if agentIdent, ok := senderIdentity.(AgentIdentity); ok && agentIdent.ID() == targetAgent.ID {
+		if err := s.agentStanding(ctx, agentIdent.ID()); err != nil {
+			return false, messageReasonSenderNotPermitted, nil
+		}
 		return true, "agent self-message", nil
 	}
 
@@ -407,7 +417,22 @@ func (s *Server) EvaluateAgentMessage(
 	if senderAgent == nil {
 		return MessageDecision{Reason: "sender agent record is nil"}
 	}
+	decision := s.evaluateAgentMessageModes(ctx, agentIdent, senderAgent, targetAgent)
+	if !decision.Allowed {
+		return decision
+	}
+	// An allowed send also requires the sender to be in good standing
+	// (ptone/scion#3433), on the same-project and cross-project paths
+	// alike. Lookup faults deny.
+	if err := s.agentStanding(ctx, senderAgent.ID); err != nil {
+		return MessageDecision{Reason: messageReasonSenderNotPermitted}
+	}
+	return decision
+}
 
+// evaluateAgentMessageModes is EvaluateAgentMessage's mode and project-policy
+// evaluation, before the sender's standing check.
+func (s *Server) evaluateAgentMessageModes(ctx context.Context, agentIdent AgentIdentity, senderAgent, targetAgent *store.Agent) MessageDecision {
 	// Either side mode == none → DENY
 	if senderAgent.MessageMode == store.MessageModeNone {
 		return MessageDecision{Reason: "sender agent message_mode is none"}

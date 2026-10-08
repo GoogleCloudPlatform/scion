@@ -206,8 +206,9 @@ func TestHandleNotifications_FilterByAgent(t *testing.T) {
 	ctx := context.Background()
 
 	// The setup already created tid("agent-watched") with user notifications for DevUserID.
-	// Create a second agent that watches tid("agent-watched"), so tid("agent-watched") is the
-	// subscriber (simulating notifications sent TO the watched agent).
+	// Create a second agent, and a subscription in which the watched agent,
+	// keyed by its slug "watched-agent", is the subscriber (simulating
+	// notifications sent TO the watched agent).
 	agent2 := &store.Agent{
 		ID:        tid("agent-other"),
 		Slug:      tid("other-agent"),
@@ -217,13 +218,14 @@ func TestHandleNotifications_FilterByAgent(t *testing.T) {
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent2))
 
-	// Create subscription: agent-watched subscribes to agent-other
+	// Create subscription: agent-watched subscribes to agent-other. Agent
+	// subscribers are keyed by slug.
 	sub2 := &store.NotificationSubscription{
 		ID:                api.NewUUID(),
 		Scope:             store.SubscriptionScopeAgent,
 		AgentID:           tid("agent-other"),
 		SubscriberType:    store.SubscriberTypeAgent,
-		SubscriberID:      tid("agent-watched"),
+		SubscriberID:      "watched-agent",
 		ProjectID:         tid("project-notif-handler"),
 		TriggerActivities: []string{"COMPLETED"},
 		CreatedAt:         time.Now(),
@@ -238,7 +240,7 @@ func TestHandleNotifications_FilterByAgent(t *testing.T) {
 		AgentID:        tid("agent-other"),
 		ProjectID:      tid("project-notif-handler"),
 		SubscriberType: store.SubscriberTypeAgent,
-		SubscriberID:   tid("agent-watched"),
+		SubscriberID:   "watched-agent",
 		Status:         "COMPLETED",
 		Message:        "agent-other completed (to agent-watched)",
 		Dispatched:     true,
@@ -263,7 +265,7 @@ func TestHandleNotifications_FilterByAgent(t *testing.T) {
 
 	// Agent notifications: notifications sent TO agent-watched
 	require.Len(t, resp.AgentNotifications, 1)
-	assert.Equal(t, tid("agent-watched"), resp.AgentNotifications[0].SubscriberID)
+	assert.Equal(t, "watched-agent", resp.AgentNotifications[0].SubscriberID)
 }
 
 func TestHandleNotifications_FilterByAgent_NoResults(t *testing.T) {
@@ -885,7 +887,9 @@ func TestHandleSubscriptionTemplates_RejectsAgents(t *testing.T) {
 // store.SubscriptionScope*, and rejects anything else — including the
 // removed legacy "grove" scope — with 400, echoing the rejected value.
 func TestCreateNotificationSubscriptionTemplate_ScopeValidation(t *testing.T) {
-	srv, _ := testServer(t)
+	srv, s := testServer(t)
+	// A template filed under a project needs read access to it.
+	require.NoError(t, s.CreateProject(context.Background(), &store.Project{ID: tid("project-notif-handler"), Name: "Notif Handler", Slug: "notif-handler"}))
 
 	valid := []struct {
 		name  string

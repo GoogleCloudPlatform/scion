@@ -407,7 +407,7 @@ export interface AppState {
   connected: boolean;
   scope: ViewScope | null;
   /**
-   * Scope-level capabilities from the SSR-prefetched list response, keyed by
+   * Scope-level capabilities from the list page's REST response, keyed by
    * the resource they were computed for.
    *
    * Keyed rather than a single slot because agent-scope and project-scope
@@ -441,6 +441,7 @@ export type StateEventType =
   | 'chat-message-edited'
   | 'chat-message-deleted'
   | 'chat-dm-promoted'
+  | 'chat-scheduled-updated'
   | 'agent-created';
 
 /**
@@ -611,45 +612,6 @@ export class StateManager extends EventTarget {
       this.sawDisconnectThisGeneration = true;
       this.notify('disconnected');
     });
-  }
-
-  /**
-   * Initialize state from server-rendered data.
-   * Called once on page load with the __SCION_DATA__ payload.
-   *
-   * @param initialData - Agents and/or projects from the prefetched API response.
-   * @param scopeCapabilities - Scope-level capabilities from the API response's
-   *   top-level `_capabilities` field (if present). The payload is prefetched
-   *   for one page, so these belong to whichever list it carries; they are
-   *   attributed to that resource. When the payload carries both lists the
-   *   owner is ambiguous, so they are dropped rather than guessed — the page
-   *   then fetches its own, which is correct if slower.
-   */
-  hydrate(
-    initialData: { agents?: Agent[]; projects?: Project[] },
-    scopeCapabilities?: import('../shared/types.js').Capabilities
-  ): void {
-    if (initialData.agents) {
-      for (const agent of initialData.agents) {
-        this.state.agents.set(agent.id, agent);
-      }
-    }
-
-    if (initialData.projects) {
-      for (const project of initialData.projects) {
-        this.state.projects.set(project.id, project);
-      }
-    }
-
-    if (scopeCapabilities) {
-      const hasAgents = Array.isArray(initialData.agents);
-      const hasProjects = Array.isArray(initialData.projects);
-      if (hasAgents && !hasProjects) {
-        this.state.scopeCapabilities.set('agent', scopeCapabilities);
-      } else if (hasProjects && !hasAgents) {
-        this.state.scopeCapabilities.set('project', scopeCapabilities);
-      }
-    }
   }
 
   /** The signed-in user's id, or '' before it is known. */
@@ -833,12 +795,15 @@ export class StateManager extends EventTarget {
       return;
     }
 
-    // User-scoped chat events: user.{userId}.chat.{dm|typing|message.edited|message.deleted}
+    // User-scoped chat events: user.{userId}.chat.{dm|typing|scheduled|message.edited|message.deleted}
     if (parts[0] === 'user' && parts.length >= 4 && parts[2] === 'chat') {
       // Human-to-human DMs have no project, so their typing events arrive on
       // the user-scoped subject rather than project.{id}.chat.typing.
       if (parts[3] === 'dm' && parts.length >= 5 && parts[4] === 'promoted') {
         this.notifyWithData('chat-dm-promoted', data);
+      } else if (parts[3] === 'scheduled') {
+        // The user's own scheduled messages (sender-only; never a message).
+        this.notifyWithData('chat-scheduled-updated', data);
       } else if (parts[3] === 'typing') {
         this.notifyWithData('chat-typing-received', data);
       } else if (parts[3] === 'read-state') {

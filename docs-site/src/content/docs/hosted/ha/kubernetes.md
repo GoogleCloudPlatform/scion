@@ -591,6 +591,8 @@ Worktree-per-agent needs git 2.48 or later in the provisioning init container, i
 
 The provisioning init container runs as root, while the shared checkout and the worktrees belong to the agents' user (uid 1000, the Pod's user). Its git commands list exactly the shared checkout and the agent's worktree in git's `safe.directory` setting, for those commands only, so git works in them. Afterwards it sets the ownership of what it added or changed in this step (the agent's new worktree, its entry and branch under `.git`, `.git/config` and the agent's entry in the sharing registry) to that user and the group the provisioning step chowns to. A worktree that already exists is left as it is.
 
+In shared-plain and worktree-per-agent modes, the provisioning init container clones private repositories with the project's git credential (`GITHUB_TOKEN`), the same one the agent container uses. It reads the credential from the agent's per-agent Secret (`scion-agent-<agent>`), and only the init container that clones gets it; a container that only waits for another Pod's clone does not. The credential is given to the clone command alone through a credential helper. It is not written to the clone URL, the remote in `.git/config`, the workspace or the provisioning state directory. For every Kubernetes agent, not only NFS ones, the agent container's `GITHUB_TOKEN` comes from that Secret; see [Git Credential](#git-credential). Without a configured git credential, the init container clones without one, as before.
+
 Starting an agent in worktree-per-agent mode stops with an error that says what to do when:
 
 - the branch name is not a valid git branch name.
@@ -657,18 +659,28 @@ With [`server.home_storage`](/scion/reference/server-config/#agent-home-storage-
 
 Secrets are composable: `ResolvedAuth` and `ResolvedSecrets` are applied independently (not mutually exclusive).
 
+**Object names.** A start from the Hub carries a run ID, and the runtime names the agent's Secrets and SecretProviderClass after that run: `scion-run-secret-<pod>-<token>` for the env/file Secret and the SecretProviderClass, and `scion-run-auth-<pod>-<token>` for the `ResolvedAuth` Secret, where `<token>` is derived from the run ID (and a very long pod name is truncated and hashed to fit Kubernetes limits). Two runs of the same agent therefore never share object names, and a new run's start does not delete an earlier run's objects; those are removed by that run's own cleanup or delete, or by an age-based sweep once stale. A start without a run ID (for example a local CLI start) keeps the fixed names `scion-agent-<pod>` and `scion-auth-<pod>`.
+
+:::caution[Upgrade Runtime Brokers with the Hub]
+Runtime Brokers older than the Hub ignore per-run objects. Upgrade your Kubernetes Runtime Brokers together with the Hub.
+:::
+
 File-type secrets, harness auth files, and `secrets.json` whose targets are inside the agent home are not mounted there directly. Their volumes are mounted under `/run/scion/` (`secrets-store`, `agent-secrets`, `auth-files`), and after the home sync each file is copied to its target in the home as the Pod user, with mode `0600`. This keeps the home writable for non-root Pods: a direct `subPath` mount would make the container runtime create missing parent directories owned by root, and the home sync would then fail with "Permission denied". Targets outside the agent home keep their direct `subPath` mounts.
 
 ### Hub Transport Credential
 
 When the Hub uses transport auth (see [Auth Proxy (IAP)](/scion/hosted/ha/auth-proxy-iap/)), it sends the initial transport credential as `SCION_TRANSPORT_TOKEN` with each start, resume, and restart. On Kubernetes, the runtime does not write this value into the Pod spec as a plain environment value. Instead it:
 
-- stores it in the agent's per-agent Secret (`scion-agent-<agent>`) under the key `scion-transport-credential`, and
+- stores it in the agent's per-agent Secret (`scion-run-secret-…` for a Hub start, see [Secret Modes](#secret-modes); `scion-agent-<agent>` otherwise) under the key `scion-transport-credential`, and
 - sets `SCION_TRANSPORT_TOKEN` in the container with `valueFrom.secretKeyRef` pointing at that key.
 
 The per-agent Secret is created even when the agent has no other secrets. It is rebuilt on every start, resume, and restart, so the new Pod always reads the value the Hub sent for that dispatch. In GKE mode the value is stored in this Kubernetes Secret, not in the SecretProviderClass. If a user or project secret also targets `SCION_TRANSPORT_TOKEN`, the value from the Hub is used and the other secret is skipped, with a warning in the broker log. A secret named `scion-transport-credential` is also skipped, because that key is reserved. `SCION_TRANSPORT_TOKEN_EXPIRY` and `SCION_TRANSPORT_AUDIENCE` stay plain environment values. Docker and the other runtimes are unchanged.
 
 No extra RBAC is needed: this uses the same `secrets` create, list, and delete permissions the runtime already needs for agent Secrets (see [Required Permissions](#required-permissions)).
+
+### Git Credential
+
+On every Kubernetes agent, not only those with NFS workspace storage, the agent container reads `GITHUB_TOKEN` from the agent's per-agent Secret (`scion-agent-<agent>`) through `valueFrom.secretKeyRef`. A token from a project or user secret is stored under its secret name. A token the Hub sends as a plain value, such as a GitHub App token minted at dispatch, is stored under the key `scion-git-credential`, and a project or user secret that also targets `GITHUB_TOKEN` is then skipped, as before. In GKE mode the value is stored in this Kubernetes Secret, not in the SecretProviderClass. Without a configured git token nothing changes. Docker and the other runtimes are unchanged. With NFS workspace storage, the provisioning init container that clones reads the same Secret key (see [Sharing Modes on the NFS Workspace](#sharing-modes-on-the-nfs-workspace)).
 
 ### Sync Modes
 

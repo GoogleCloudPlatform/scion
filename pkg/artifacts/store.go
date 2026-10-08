@@ -289,6 +289,9 @@ type CandidateQuery struct {
 	Search string
 	// ReviewPending keeps only rows whose current version is a review.
 	ReviewPending bool
+	// HomeScope, when set, keeps only rows whose home scope is this
+	// project. It narrows the other conditions and never adds rows.
+	HomeScope string
 	// After, when set, keeps rows strictly after this position in the
 	// result order.
 	After *Position

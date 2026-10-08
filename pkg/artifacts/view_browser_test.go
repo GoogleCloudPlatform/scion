@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"html"
 	"image"
 	"image/color"
@@ -63,6 +64,37 @@ func chromiumPath(t *testing.T) string {
 // sandbox and CSP checks are made by the browser either way.
 func dumpDOM(t *testing.T, chromium, url, ready string) string {
 	t.Helper()
+	// One overall limit per subtest, covering a retried browser start.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	dom, err := browserDOM(ctx, t.Logf, func(ctx context.Context) (string, error) {
+		return runBrowser(ctx, chromium, url, ready)
+	})
+	if err != nil {
+		t.Fatalf("chromium: %v (DOM so far:\n%s)", err, dom)
+	}
+	return dom
+}
+
+// browserStartTimeout is the error chromedp returns when the browser does
+// not report its DevTools address in time (chromedp does not export it).
+const browserStartTimeout = "websocket url timeout reached"
+
+// browserDOM runs run, and runs it once more only if the browser did not
+// start in time, as happens on a loaded CI runner. Any other error, such
+// as a page that never reports its result, is returned as it is.
+func browserDOM(ctx context.Context, logf func(string, ...any), run func(context.Context) (string, error)) (string, error) {
+	dom, err := run(ctx)
+	if err != nil && strings.Contains(err.Error(), browserStartTimeout) {
+		logf("browser did not start in time; starting it once more")
+		dom, err = run(ctx)
+	}
+	return dom, err
+}
+
+// runBrowser starts a browser of its own, loads url and returns the DOM
+// once ready is true.
+func runBrowser(ctx context.Context, chromium, url, ready string) (string, error) {
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
 		chromedp.ExecPath(chromium),
 		chromedp.Flag("headless", true),
@@ -74,22 +106,53 @@ func dumpDOM(t *testing.T, chromium, url, ready string) string {
 		// CI runners can be slow to start a browser.
 		chromedp.WSURLReadTimeout(60*time.Second),
 	)
-	allocCtx, allocCancel := chromedp.NewExecAllocator(context.Background(), opts...)
+	allocCtx, allocCancel := chromedp.NewExecAllocator(ctx, opts...)
 	defer allocCancel()
-	ctx, cancel := chromedp.NewContext(allocCtx)
-	defer cancel()
-	ctx, cancel = context.WithTimeout(ctx, 90*time.Second)
+	bctx, cancel := chromedp.NewContext(allocCtx)
 	defer cancel()
 	var dom string
-	err := chromedp.Run(ctx,
+	err := chromedp.Run(bctx,
 		chromedp.Navigate(url),
 		chromedp.Poll(ready, nil, chromedp.WithPollingInterval(100*time.Millisecond)),
 		chromedp.OuterHTML("html", &dom, chromedp.ByQuery),
 	)
-	if err != nil {
-		t.Fatalf("chromium: %v (DOM so far:\n%s)", err, dom)
+	return dom, err
+}
+
+// TestBrowserDOMRetriesStartOnce: a browser that did not start in time is
+// started once more; other errors and a second start timeout are returned.
+func TestBrowserDOMRetriesStartOnce(t *testing.T) {
+	startTimeout := errors.New(browserStartTimeout)
+	cases := []struct {
+		name    string
+		results []error
+		calls   int
+		wantErr bool
+	}{
+		{"start timeout then success", []error{startTimeout, nil}, 2, false},
+		{"start timeout twice", []error{startTimeout, startTimeout}, 2, true},
+		{"other error is not retried", []error{errors.New("context deadline exceeded"), nil}, 1, true},
+		{"success", []error{nil}, 1, false},
 	}
-	return dom
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			dom, err := browserDOM(context.Background(), t.Logf, func(context.Context) (string, error) {
+				e := tc.results[calls]
+				calls++
+				if e != nil {
+					return "", e
+				}
+				return "<html></html>", nil
+			})
+			if calls != tc.calls {
+				t.Errorf("run called %d times, want %d", calls, tc.calls)
+			}
+			if (err != nil) != tc.wantErr || (err == nil && dom != "<html></html>") {
+				t.Errorf("got (%q, %v), want error %v", dom, err, tc.wantErr)
+			}
+		})
+	}
 }
 
 func onePixelPNG(t *testing.T) []byte {
