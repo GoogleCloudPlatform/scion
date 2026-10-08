@@ -498,3 +498,25 @@ func TestCloseOpenSession_EmptySessionIDNotTombstoned(t *testing.T) {
 		t.Errorf("state after later ID-less event = %+v", file)
 	}
 }
+
+// If the tombstone cannot be written, the session is not returned, so the
+// shutdown report cannot add to a report from a late hook; the state is
+// removed so a later check cannot return it either.
+func TestCloseOpenSession_TombstoneWriteFailureSkipsReport(t *testing.T) {
+	store := NewFileSessionState(t.TempDir())
+	openSession(t, store)
+
+	orig := writeSessionStateInPlace
+	writeSessionStateInPlace = func(*os.File, []byte) error { return syscall.ENOSPC }
+	t.Cleanup(func() { writeSessionStateInPlace = orig })
+
+	if s, ok := closeOpen(t, store, ""); ok {
+		t.Fatalf("session returned without a tombstone: %+v", s)
+	}
+	if _, err := os.Lstat(store.Path); !os.IsNotExist(err) {
+		t.Errorf("state left behind: %v", err)
+	}
+	if s, ok := closeOpen(t, store, ""); ok {
+		t.Errorf("a second check returned the session: %+v", s)
+	}
+}

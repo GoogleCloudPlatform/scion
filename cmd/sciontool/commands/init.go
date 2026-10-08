@@ -1369,7 +1369,7 @@ waitLoop:
 	// or OOM-killed before the harness could write), fall back to result.code.
 	harnessCode := readHarnessExitCode()
 	if harnessCode != nil {
-		log.Info("Recovered harness exit code %d from %s", *harnessCode, state.HarnessExitCodeFile)
+		log.Info("Recovered harness exit code %d from %s", *harnessCode, harnessExitCodePath)
 	}
 
 	outcome := classifyExit(result.code, result.err, harnessCode, limitsExceeded, requestedShutdown.Load())
@@ -1593,6 +1593,11 @@ func registerLifecycleTelemetryHandler(manager *hooks.LifecycleManager, provider
 	return handler
 }
 
+// harnessExitCodePath is the harness exit-code file readHarnessExitCode
+// reads. It is a variable only so a RunInit test can point it at a temp
+// file instead of the host's fixed path; production never changes it.
+var harnessExitCodePath = state.HarnessExitCodeFile
+
 // harnessExitCodeMaxBytes bounds the read in readHarnessExitCode: the file
 // only ever holds a small decimal exit code, so any read this long has
 // already found something other than what the harness wrapper writes.
@@ -1610,7 +1615,7 @@ const harnessExitCodeMaxBytes = 32
 // unrelated file's contents as an exit code. O_NONBLOCK is what keeps a
 // FIFO's open() itself from blocking on a reader when there is no writer.
 func readHarnessExitCode() *int {
-	dirFd, leaf, err := dirfd.OpenParentNoFollow(state.HarnessExitCodeFile)
+	dirFd, leaf, err := dirfd.OpenParentNoFollow(harnessExitCodePath)
 	if err != nil {
 		return nil
 	}

@@ -23,6 +23,7 @@ import (
 	"syscall"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/telemetry"
 	"golang.org/x/sys/unix"
 )
@@ -52,6 +53,10 @@ var ErrSessionStateRefused = errors.New("session metrics state refused")
 // session cannot be reported twice. The tombstone only has to last for this
 // container's shutdown; ClearSessionTombstone removes it at the next start
 // so a resumed session with the same ID is counted again.
+//
+// If the tombstone cannot be written, the session is not returned (and its
+// state is removed): without the tombstone a late hook could report it too,
+// and losing one report is preferred to reporting twice.
 //
 // A session without an ID cannot be reported (the Hub requires one), so it
 // is not tombstoned: its state is removed, as the hook path does on
@@ -95,16 +100,17 @@ func (s *FileSessionState) CloseOpenSession(errMsg string) (telemetry.SessionSum
 		if err != nil {
 			return fmt.Errorf("encoding tombstone: %w", err)
 		}
-		if err := writeInPlace(f, tombstone); err != nil {
-			// Without the tombstone, remove the state instead, so another
-			// shutdown check cannot return this session again. This is
-			// best effort: a late hook event from a still-running harness
-			// can then start a fresh state, and a late session-end can
-			// report that partial segment. If the removal fails too, the
-			// session is not returned.
+		if err := writeSessionStateInPlace(f, tombstone); err != nil {
+			// Without the tombstone, a late hook event from a still-running
+			// harness could report the session again, so it is not
+			// returned: one lost report is better than two. The state is
+			// removed so a later check cannot return it either.
+			log.Error("Session metrics: session %s not reported at shutdown: cannot write the closed marker, so a second report could not be ruled out: %v",
+				summary.SessionID, err)
 			if uerr := dirfd.UnlinkAt(dirFd, leaf); uerr != nil {
 				return fmt.Errorf("closing: %v; removing: %v", err, uerr)
 			}
+			return nil
 		}
 		ok = true
 		return nil
@@ -224,6 +230,10 @@ func refusedIfLoop(err error) error {
 	}
 	return err
 }
+
+// writeSessionStateInPlace is writeInPlace; a test replaces it to make the
+// tombstone write fail.
+var writeSessionStateInPlace = writeInPlace
 
 // writeInPlace replaces f's whole content with data.
 func writeInPlace(f *os.File, data []byte) error {

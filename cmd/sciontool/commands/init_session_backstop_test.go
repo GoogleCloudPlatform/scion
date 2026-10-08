@@ -19,7 +19,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 )
@@ -53,6 +52,12 @@ func TestRunInit_PinsSessionMetricsBackstopCallSites(t *testing.T) {
 		return m, false
 	}
 	t.Cleanup(func() { runNewLifecycleManager = origNewLifecycleManager })
+
+	// No harness exit-code file: the outcome comes from the child's own
+	// exit code, whatever the host's fixed path holds.
+	origExitCodePath := harnessExitCodePath
+	harnessExitCodePath = filepath.Join(t.TempDir(), "no-harness-exit-code")
+	t.Cleanup(func() { harnessExitCodePath = origExitCodePath })
 
 	mark := filepath.Join(t.TempDir(), "child-ran")
 	markExists := func() bool { _, err := os.Stat(mark); return err == nil }
@@ -98,12 +103,9 @@ func TestRunInit_PinsSessionMetricsBackstopCallSites(t *testing.T) {
 	if !backstopSawMark {
 		t.Error("backstop ran before the child ran")
 	}
-	want := classifyExit(3, nil, readHarnessExitCode(), false, false)
+	want := exitOutcome{exitCode: 3, isCrash: true, message: "Agent crashed with exit code 3"}
 	if backstopOutcome != want {
 		t.Errorf("backstop outcome = %+v, want %+v", backstopOutcome, want)
-	}
-	if _, err := os.Stat(state.HarnessExitCodeFile); os.IsNotExist(err) && !backstopOutcome.isCrash {
-		t.Errorf("backstop outcome %+v is not a crash for exit 3", backstopOutcome)
 	}
 	if got := len(order); got != 3 || order[0] != "clear" || order[1] != "backstop" || order[2] != "session-end hooks" {
 		t.Errorf("call order = %q, want [clear backstop session-end hooks]", order)
