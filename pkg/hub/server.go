@@ -1507,6 +1507,9 @@ type Server struct {
 
 	// Artifact store for the artifact_* tables (pkg/artifacts) — nil = artifacts unavailable.
 	artifactStore artifacts.Store
+	// artifactBlobSweeper keeps the blob sweep's position between passes
+	// of the artifact maintenance loop (its only user).
+	artifactBlobSweeper artifacts.BlobSweeper
 
 	// Chat notifier for human mention + DM received notifications (W6). Nil-safe.
 	chatNotifier *ChatNotifier

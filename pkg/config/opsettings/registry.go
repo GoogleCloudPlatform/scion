@@ -460,6 +460,7 @@ func compileSchemas() {
 				"default_retention_days":       map[string]interface{}{"type": "integer", "minimum": 0},
 				"link_default_ttl_hours":       map[string]interface{}{"type": "integer", "minimum": 1},
 				"link_max_ttl_hours":           map[string]interface{}{"type": "integer", "minimum": 1},
+				"gc_grace_hours":               map[string]interface{}{"type": "integer", "minimum": ArtifactsMinGCGraceHours},
 				"remote_images_enabled":        map[string]interface{}{"type": "boolean"},
 				"remote_image_max_count":       map[string]interface{}{"type": "integer", "minimum": 1},
 				"remote_image_max_bytes":       map[string]interface{}{"type": "integer", "minimum": 1},

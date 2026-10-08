@@ -253,6 +253,20 @@ func (h *artifactHost) OpenCursor(ctx context.Context, cursor, binding string) (
 	return position, nil
 }
 
+var _ artifacts.CrossScopeSharing = (*artifactHost)(nil)
+
+// CrossScopeSharingAllowed implements artifacts.CrossScopeSharing:
+// sharing an artifact with another project follows the hub's
+// messaging.cross_project_messaging_enabled setting, and is off when the
+// hub has no operational settings (fail closed).
+func (h *artifactHost) CrossScopeSharingAllowed(context.Context) bool {
+	if h.server == nil {
+		return false
+	}
+	ops := h.server.GetOperationalSettings()
+	return ops != nil && ops.CrossProjectMessagingEnabled()
+}
+
 var _ artifacts.ScopeExplainer = (*artifactHost)(nil)
 
 // MissingScope implements artifacts.ScopeExplainer. Only an agent that
