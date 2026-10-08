@@ -316,3 +316,55 @@ func TestRun_NFSGitToken_GKEPathDiverted(t *testing.T) {
 	assert.False(t, strings.Contains(params, gitCredentialSecretKey) || strings.Contains(params, testGitToken),
 		"the SecretProviderClass must not reference the git token")
 }
+
+// With a run ID, the per-agent Secret has a run-scoped name. The diverted
+// git token is stored in that Secret, and both the agent container and the
+// cloning init container reference it by the run-scoped name, not the
+// fixed one.
+func TestRun_NFSGitToken_RunScopedSecretName(t *testing.T) {
+	const runID = "33333333-3333-4333-8333-333333333333"
+	rt, clientset := newTransportTestRuntime(false)
+	cfg := nfsBaseConfig("gt-run-scoped")
+	cfg.Labels = map[string]string{"scion.agent": "true", "scion.name": "gt-run-scoped", api.LabelRunID: runID}
+	cfg.Env = []string{"GITHUB_TOKEN=" + testGitToken}
+	runSecret := k8sAgentObjectNames(cfg.Name, runID).Secret
+	require.NotEqual(t, "scion-agent-"+cfg.Name, runSecret, "the run-scoped name differs from the fixed one")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var (
+		mu     sync.Mutex
+		pod    *corev1.Pod
+		secret *corev1.Secret
+	)
+	clientset.PrependReactor("create", "pods", func(action k8stesting.Action) (bool, k8sruntime.Object, error) {
+		p := action.(k8stesting.CreateAction).GetObject().(*corev1.Pod)
+		mu.Lock()
+		pod = p.DeepCopy()
+		if s, err := clientset.Tracker().Get(corev1.SchemeGroupVersion.WithResource("secrets"), p.Namespace, runSecret); err == nil {
+			secret = s.(*corev1.Secret).DeepCopy()
+		}
+		mu.Unlock()
+		cancel()
+		return false, nil, nil
+	})
+	_, _ = rt.Run(ctx, cfg)
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.NotNil(t, pod, "Run did not submit a pod")
+	require.NotNil(t, secret, "the run-scoped Secret exists when the pod is created")
+	assert.Equal(t, testGitToken, string(secret.Data[gitCredentialSecretKey]))
+
+	require.Len(t, pod.Spec.InitContainers, 1)
+	for _, env := range [][]corev1.EnvVar{pod.Spec.Containers[0].Env, pod.Spec.InitContainers[0].Env} {
+		e := envEntry(env, provision.GitTokenEnv)
+		require.NotNil(t, e)
+		assert.Empty(t, e.Value)
+		require.NotNil(t, e.ValueFrom)
+		require.NotNil(t, e.ValueFrom.SecretKeyRef)
+		assert.Equal(t, runSecret, e.ValueFrom.SecretKeyRef.Name)
+		assert.Equal(t, gitCredentialSecretKey, e.ValueFrom.SecretKeyRef.Key)
+	}
+	assertTokenNotInPodSpec(t, pod)
+}
