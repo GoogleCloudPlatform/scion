@@ -88,6 +88,23 @@ type Object struct {
 	Updated time.Time `json:"updated,omitempty"`
 	// Metadata is custom metadata attached to the object.
 	Metadata map[string]string `json:"metadata,omitempty"`
+	// Generation identifies this version of the object's content, for
+	// providers that version objects (GCS); 0 when the provider does not.
+	Generation int64 `json:"generation,omitempty"`
+}
+
+// ErrPreconditionFailed is returned by DeleteIfGeneration when the object
+// no longer has the given generation.
+var ErrPreconditionFailed = errors.New("object generation does not match")
+
+// GenerationDeleter is implemented by providers that can delete an object
+// only while it still has a given generation (GCS), so a delete that
+// reaches the provider late does not remove content written since.
+type GenerationDeleter interface {
+	// DeleteIfGeneration deletes the object at objectPath if its
+	// generation is generation. It returns ErrNotFound when there is no
+	// object and ErrPreconditionFailed when its generation differs.
+	DeleteIfGeneration(ctx context.Context, objectPath string, generation int64) error
 }
 
 // SignedURLOptions configures signed URL generation.

@@ -19,11 +19,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
 	"cloud.google.com/go/storage"
+	"google.golang.org/api/googleapi"
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
 )
@@ -250,6 +252,25 @@ func (s *GCSStorage) Delete(ctx context.Context, objectPath string) error {
 	return nil
 }
 
+// DeleteIfGeneration implements GenerationDeleter.
+func (s *GCSStorage) DeleteIfGeneration(ctx context.Context, objectPath string, generation int64) error {
+	if objectPath == "" || generation == 0 {
+		return ErrInvalidPath
+	}
+	obj := s.bucket.Object(strings.TrimPrefix(objectPath, "/")).If(storage.Conditions{GenerationMatch: generation})
+	if err := obj.Delete(ctx); err != nil {
+		if errors.Is(err, storage.ErrObjectNotExist) {
+			return ErrNotFound
+		}
+		var apiErr *googleapi.Error
+		if errors.As(err, &apiErr) && apiErr.Code == http.StatusPreconditionFailed {
+			return ErrPreconditionFailed
+		}
+		return fmt.Errorf("failed to delete object: %w", err)
+	}
+	return nil
+}
+
 // DeletePrefix deletes all objects with the given prefix.
 func (s *GCSStorage) DeletePrefix(ctx context.Context, prefix string) error {
 	if prefix == "" {
@@ -337,6 +358,7 @@ func (s *GCSStorage) List(ctx context.Context, opts ListOptions) (*ListResult, e
 			Created:     attrs.Created,
 			Updated:     attrs.Updated,
 			Metadata:    attrs.Metadata,
+			Generation:  attrs.Generation,
 		})
 		count++
 	}

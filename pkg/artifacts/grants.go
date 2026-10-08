@@ -271,8 +271,18 @@ func (s *Service) handlePutGrant(w http.ResponseWriter, r *http.Request, id stri
 		ID: uuid.NewString(), ArtifactID: a.ID, SubjectKind: req.SubjectKind, SubjectRef: req.SubjectRef,
 		Permission: req.Permission, CreatedByRef: PrincipalRef(kind, ref), CreatedAt: time.Now().UTC(),
 	}
-	created, err := b.store.PutGrant(r.Context(), g, MaxGrantsPerArtifact)
+	// The store decides the home and cross-project rules again under the
+	// artifact's lock, against the home scope as it is then (a concurrent
+	// move may have changed it); the checks above answer early.
+	created, err := b.store.PutGrant(r.Context(), g, MaxGrantsPerArtifact, s.crossScopeAllowed(r.Context()))
 	switch {
+	case errors.Is(err, ErrHomeGrantAdmin):
+		writeError(w, http.StatusBadRequest, "bad_request", "the home project's grant may be read or write")
+		return
+	case errors.Is(err, ErrCrossScopeDisabled):
+		writeError(w, http.StatusForbidden, "cross_project_sharing_disabled",
+			"sharing artifacts with other projects is turned off on this hub")
+		return
 	case errors.Is(err, ErrTooManyGrants):
 		writeError(w, http.StatusConflict, "too_many_grants",
 			"the artifact already has "+strconv.Itoa(MaxGrantsPerArtifact)+" grants; remove one first")
@@ -349,7 +359,7 @@ func (s *Service) handlePatchArtifact(w http.ResponseWriter, r *http.Request, id
 		writeError(w, http.StatusBadRequest, "bad_request", "expiresAt must be in the future")
 		return
 	}
-	if req.ScopeRef != nil {
+	if req.ScopeRef != nil && *req.ScopeRef != a.ScopeRef {
 		scope := *req.ScopeRef
 		if !validSubjectID(scope) {
 			writeError(w, http.StatusBadRequest, "bad_request", "scopeRef must be a project id")
@@ -414,6 +424,9 @@ func (s *Service) patchStored(w http.ResponseWriter, r *http.Request, err error)
 	case errors.Is(err, ErrTooManyGrants):
 		writeError(w, http.StatusConflict, "too_many_grants",
 			"the artifact already has "+strconv.Itoa(MaxGrantsPerArtifact)+" grants; remove one first")
+	case errors.Is(err, ErrHomeGrantAdmin):
+		writeError(w, http.StatusConflict, "home_admin_grant",
+			"the target project holds an admin grant on this artifact; lower it to read or write before moving")
 	case errors.Is(err, ErrNotFound):
 		writeNotFound(w)
 	default:

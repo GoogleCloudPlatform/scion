@@ -46,8 +46,35 @@ const (
 	gcReclaimBatch = 200
 )
 
-// gcDeleteTimeout bounds one blob delete. A variable so tests can lower it.
-var gcDeleteTimeout = 30 * time.Second
+// gcDeleteTimeout bounds one blob delete. The delete runs inside the store
+// transaction holding the blob's state, so it stays below SQLite's busy
+// timeout (5s in the hub's DSN) and a slow object store cannot make other
+// writers time out. A variable so tests can lower it.
+var gcDeleteTimeout = 4 * time.Second
+
+// deleteBlob deletes the blob at p within gcDeleteTimeout. A timeout rolls
+// the sweep's transaction back and the blob's mark stays. A delete the
+// object store applies after that (it cannot always be called back) is
+// made harmless two ways: when the store versions objects, the delete
+// carries the generation the sweep saw, so content stored since survives;
+// and a writer that touches a still-marked blob stores its bytes again
+// (Store.TouchBlob) instead of relying on the existing object. A missing
+// object or a changed generation counts as done: the bytes the sweep meant
+// to delete are gone or were replaced.
+func deleteBlob(ctx context.Context, blobs storage.Storage, p string, generation int64) error {
+	dctx, cancel := context.WithTimeout(ctx, gcDeleteTimeout)
+	defer cancel()
+	var err error
+	if gd, ok := blobs.(storage.GenerationDeleter); ok && generation != 0 {
+		err = gd.DeleteIfGeneration(dctx, p, generation)
+	} else {
+		err = blobs.Delete(dctx, p)
+	}
+	if errors.Is(err, storage.ErrNotFound) || errors.Is(err, storage.ErrPreconditionFailed) {
+		return nil
+	}
+	return err
+}
 
 // BlobSweeper sweeps the blobs of one hub, a page of the blob listing per
 // pass. It is not safe for concurrent use; run one per hub.
@@ -70,32 +97,22 @@ func (g *BlobSweeper) Sweep(ctx context.Context, st Store, blobs storage.Storage
 	if err != nil {
 		return 0, 0, err
 	}
-	var digests []string
+	var marks []BlobMark
 	for _, o := range res.Objects {
 		if d, ok := blobDigest(hubID, o.Name); ok {
-			digests = append(digests, d)
+			marks = append(marks, BlobMark{Digest: d, Generation: o.Generation})
 		}
 	}
-	for start := 0; start < len(digests); start += MaxBlobBatch {
-		if err := st.MarkBlobs(ctx, digests[start:min(start+MaxBlobBatch, len(digests))], now); err != nil {
-			return len(digests), 0, err
+	for start := 0; start < len(marks); start += MaxBlobBatch {
+		if err := st.MarkBlobs(ctx, marks[start:min(start+MaxBlobBatch, len(marks))], now); err != nil {
+			return len(marks), 0, err
 		}
 	}
 	g.cursor = res.NextOffset
-	deleted, err = st.ReclaimBlobs(ctx, now.Add(-grace), gcReclaimBatch, func(d string) error {
-		// The delete runs inside the store transaction that holds the
-		// blob's state; a deadline keeps a stuck object store from holding
-		// it (and, on SQLite, the database) indefinitely. A timeout rolls
-		// the transaction back and the blob stays.
-		dctx, cancel := context.WithTimeout(ctx, gcDeleteTimeout)
-		defer cancel()
-		err := blobs.Delete(dctx, BlobPath(hubID, d))
-		if errors.Is(err, storage.ErrNotFound) {
-			return nil
-		}
-		return err
+	deleted, err = st.ReclaimBlobs(ctx, now.Add(-grace), gcReclaimBatch, func(d string, generation int64) error {
+		return deleteBlob(ctx, blobs, BlobPath(hubID, d), generation)
 	})
-	return len(digests), deleted, err
+	return len(marks), deleted, err
 }
 
 // blobDigest returns the digest of the blob stored at name, which must be

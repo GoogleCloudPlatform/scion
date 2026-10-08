@@ -40,28 +40,44 @@ const blobReferencedFrom = `artifact_file f
 var blobReferencedStates = []any{VersionStateReady, VersionStatePending, VersionStateFinalizing}
 
 // TouchBlob implements Store.
-func (s *sqlStore) TouchBlob(ctx context.Context, digest string, now time.Time) error {
-	if _, err := s.db.ExecContext(ctx, s.rebind(`INSERT INTO artifact_blob (sha256, touched_at) VALUES (?, ?)
-		ON CONFLICT (sha256) DO UPDATE SET touched_at = excluded.touched_at, unreferenced_since = NULL`),
-		digest, s.timeArg(now)); err != nil {
-		return fmt.Errorf("artifacts: touch blob: %w", err)
+func (s *sqlStore) TouchBlob(ctx context.Context, digest string, now time.Time) (bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("artifacts: begin touch: %w", err)
 	}
-	return nil
+	defer func() { _ = tx.Rollback() }()
+	// The write comes first: it waits for a sweep holding the row, and
+	// the read after it sees what that sweep left.
+	if _, err := tx.ExecContext(ctx, s.rebind(`INSERT INTO artifact_blob (sha256, touched_at) VALUES (?, ?)
+		ON CONFLICT (sha256) DO UPDATE SET touched_at = excluded.touched_at`), digest, s.timeArg(now)); err != nil {
+		return false, fmt.Errorf("artifacts: touch blob: %w", err)
+	}
+	var since dbTime
+	if err := tx.QueryRowContext(ctx, s.rebind(`SELECT unreferenced_since FROM artifact_blob WHERE sha256 = ?`), digest).Scan(&since); err != nil {
+		return false, fmt.Errorf("artifacts: read blob state: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE artifact_blob SET unreferenced_since = NULL WHERE sha256 = ?`), digest); err != nil {
+		return false, fmt.Errorf("artifacts: clear blob mark: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("artifacts: commit touch: %w", err)
+	}
+	return since.Valid, nil
 }
 
 // MarkBlobs implements Store.
-func (s *sqlStore) MarkBlobs(ctx context.Context, digests []string, now time.Time) error {
-	if len(digests) == 0 {
+func (s *sqlStore) MarkBlobs(ctx context.Context, blobs []BlobMark, now time.Time) error {
+	if len(blobs) == 0 {
 		return nil
 	}
-	if len(digests) > MaxBlobBatch {
+	if len(blobs) > MaxBlobBatch {
 		return fmt.Errorf("artifacts: MarkBlobs accepts at most %d digests", MaxBlobBatch)
 	}
 	args := append([]any{}, blobReferencedStates...)
-	for _, d := range digests {
-		args = append(args, d)
+	for _, b := range blobs {
+		args = append(args, b.Digest)
 	}
-	in := strings.TrimSuffix(strings.Repeat("?, ", len(digests)), ", ")
+	in := strings.TrimSuffix(strings.Repeat("?, ", len(blobs)), ", ")
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("artifacts: begin mark: %w", err)
@@ -86,16 +102,17 @@ func (s *sqlStore) MarkBlobs(ctx context.Context, digests []string, now time.Tim
 		return fmt.Errorf("artifacts: find referenced blobs: %w", err)
 	}
 	at := s.timeArg(now)
-	for _, d := range digests {
-		if referenced[d] {
-			if _, err := tx.ExecContext(ctx, s.rebind(`DELETE FROM artifact_blob WHERE sha256 = ?`), d); err != nil {
+	for _, b := range blobs {
+		if referenced[b.Digest] {
+			if _, err := tx.ExecContext(ctx, s.rebind(`DELETE FROM artifact_blob WHERE sha256 = ?`), b.Digest); err != nil {
 				return fmt.Errorf("artifacts: clear blob state: %w", err)
 			}
 			continue
 		}
-		if _, err := tx.ExecContext(ctx, s.rebind(`INSERT INTO artifact_blob (sha256, unreferenced_since) VALUES (?, ?)
-			ON CONFLICT (sha256) DO UPDATE SET unreferenced_since = COALESCE(artifact_blob.unreferenced_since, excluded.unreferenced_since)`),
-			d, at); err != nil {
+		if _, err := tx.ExecContext(ctx, s.rebind(`INSERT INTO artifact_blob (sha256, unreferenced_since, generation) VALUES (?, ?, ?)
+			ON CONFLICT (sha256) DO UPDATE SET unreferenced_since = COALESCE(artifact_blob.unreferenced_since, excluded.unreferenced_since),
+			generation = excluded.generation`),
+			b.Digest, at, b.Generation); err != nil {
 			return fmt.Errorf("artifacts: mark blob: %w", err)
 		}
 	}
@@ -111,7 +128,7 @@ func (s *sqlStore) MarkBlobs(ctx context.Context, digests []string, now time.Tim
 var reclaimCandidateHook func(digest string)
 
 // ReclaimBlobs implements Store.
-func (s *sqlStore) ReclaimBlobs(ctx context.Context, cutoff time.Time, limit int, del func(string) error) (int, error) {
+func (s *sqlStore) ReclaimBlobs(ctx context.Context, cutoff time.Time, limit int, del func(string, int64) error) (int, error) {
 	if limit <= 0 {
 		return 0, nil
 	}
@@ -155,7 +172,7 @@ func (s *sqlStore) ReclaimBlobs(ctx context.Context, cutoff time.Time, limit int
 // unreferenced since at or before cutoff. A touch clears the mark
 // (TouchBlob) and a later mark is never older than the touch, so a blob
 // touched after cutoff never qualifies: the mark is the one condition.
-func (s *sqlStore) reclaimOne(ctx context.Context, digest string, cutoff any, del func(string) error) (bool, error) {
+func (s *sqlStore) reclaimOne(ctx context.Context, digest string, cutoff any, del func(string, int64) error) (bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return false, fmt.Errorf("artifacts: begin reclaim: %w", err)
@@ -182,7 +199,11 @@ func (s *sqlStore) reclaimOne(ctx context.Context, digest string, cutoff any, de
 		}
 		return false, commit(tx)
 	}
-	if err := del(digest); err != nil {
+	var gen sql.NullInt64
+	if err := tx.QueryRowContext(ctx, s.rebind(`SELECT generation FROM artifact_blob WHERE sha256 = ?`), digest).Scan(&gen); err != nil {
+		return false, fmt.Errorf("artifacts: read blob generation: %w", err)
+	}
+	if err := del(digest, gen.Int64); err != nil {
 		return false, fmt.Errorf("artifacts: delete blob: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, s.rebind(`DELETE FROM artifact_blob WHERE sha256 = ?`), digest); err != nil {
