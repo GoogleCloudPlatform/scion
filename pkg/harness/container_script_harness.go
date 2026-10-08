@@ -586,12 +586,19 @@ func (c *ContainerScriptHarness) ApplyAuthSettings(agentHome string, resolved *a
 	// (SetRecordedSecrets); no other file in the secrets directory is
 	// considered. Recorded file-type secrets (names matching the harness
 	// config's required_files) are merged when not overridden by the new
-	// resolution; recorded env-type secrets are merged only when the new
-	// resolution produced none, so a rotated credential is not shadowed.
+	// resolution. Recorded env-type secrets are merged per key (never
+	// overriding a key the new resolution supplied), unless the new
+	// resolution on its own already satisfies an auth type: then a
+	// credential rotated or switched on the control plane is not shadowed by
+	// a stale recorded one. Ambient, non-credential env (e.g. a region var)
+	// in the new resolution therefore no longer drops a recorded credential
+	// on restart (ptone/scion#3810).
 	existingEnvSecrets, existingFileSecrets := c.recordedSecretFiles(agentHome)
-	if len(envSecretFiles) == 0 {
+	if !c.resolutionSatisfiesAuthType(selectedAuthType(c.entry.AuthSelectedType, resolved), resolved.EnvVars, envSecretFiles, fileSecretFiles) {
 		for k, v := range existingEnvSecrets {
-			envSecretFiles[k] = v
+			if _, exists := envSecretFiles[k]; !exists {
+				envSecretFiles[k] = v
+			}
 		}
 	}
 	for k, v := range existingFileSecrets {
@@ -632,13 +639,7 @@ func (c *ContainerScriptHarness) ApplyAuthSettings(agentHome string, resolved *a
 	//
 	// The no-auth sentinel "none" is rejected from both sources for the
 	// same reason: the provisioner does not accept it as an auth type.
-	explicitType := c.entry.AuthSelectedType
-	if IsNoAuthType(explicitType) {
-		explicitType = ""
-	}
-	if st := resolved.EnvVars["SCION_HARNESS_SELECTED_AUTH"]; st != "" && !IsHarnessImplementationName(st) && !IsNoAuthType(st) {
-		explicitType = st
-	}
+	explicitType := selectedAuthType(c.entry.AuthSelectedType, resolved)
 
 	payload := map[string]interface{}{
 		"schema_version":    1,
@@ -654,6 +655,91 @@ func (c *ContainerScriptHarness) ApplyAuthSettings(agentHome string, resolved *a
 		return fmt.Errorf("marshal auth candidates: %w", err)
 	}
 	return c.stageInputFile(agentHome, "auth-candidates.json", data)
+}
+
+// selectedAuthType returns the explicitly selected auth type for
+// auth-candidates.json: SCION_HARNESS_SELECTED_AUTH from the resolution when
+// it is a real auth type, else the harness-config's AuthSelectedType, else "".
+// Harness implementation names and the no-auth sentinel are never returned.
+func selectedAuthType(configured string, resolved *api.ResolvedAuth) string {
+	explicitType := configured
+	if IsNoAuthType(explicitType) || IsHarnessImplementationName(explicitType) {
+		explicitType = ""
+	}
+	if resolved != nil {
+		if st := resolved.EnvVars["SCION_HARNESS_SELECTED_AUTH"]; st != "" && !IsHarnessImplementationName(st) && !IsNoAuthType(st) {
+			explicitType = st
+		}
+	}
+	return explicitType
+}
+
+// resolutionSatisfiesAuthType reports whether the current resolution alone
+// (its env vars and the env/file secrets staged from it, before anything is
+// carried from the control plane's record) satisfies an auth type declared
+// in the harness-config: the explicitly selected type when there is one,
+// else any declared type.
+//
+// A type is satisfied when it declares at least one requirement, every
+// required_env group has a non-empty key in the resolution, and every
+// required_files entry is staged or covered by one of its
+// alternative_env_keys. skipped_when_gcp_service_account_assigned is not
+// honoured here: the resolution does not say whether a service account is
+// attached, and treating such a type as unsatisfied only means recorded
+// credentials are carried, which is the restart-safe direction.
+func (c *ContainerScriptHarness) resolutionSatisfiesAuthType(selected string, envVars map[string]string, envSecretFiles, fileSecretFiles map[string]string) bool {
+	if c.entry.Auth == nil || len(c.entry.Auth.Types) == 0 {
+		return false
+	}
+	hasEnv := func(k string) bool {
+		if _, ok := envSecretFiles[k]; ok {
+			return true
+		}
+		return envVars[k] != ""
+	}
+	satisfied := func(t api.HarnessAuthTypeMetadata) bool {
+		if len(t.RequiredEnv) == 0 && len(t.RequiredFiles) == 0 {
+			return false
+		}
+		for _, group := range t.RequiredEnv {
+			ok := false
+			for _, k := range group.AnyOf {
+				if hasEnv(k) {
+					ok = true
+					break
+				}
+			}
+			if !ok {
+				return false
+			}
+		}
+		for _, rf := range t.RequiredFiles {
+			if _, ok := fileSecretFiles[rf.Name]; ok {
+				continue
+			}
+			ok := false
+			for _, k := range rf.AlternativeEnvKeys {
+				if hasEnv(k) {
+					ok = true
+					break
+				}
+			}
+			if !ok {
+				return false
+			}
+		}
+		return true
+	}
+	if selected != "" {
+		t, ok := c.entry.Auth.Types[selected]
+		return ok && satisfied(t)
+	}
+	for _, t := range c.entry.Auth.Types {
+		if satisfied(t) {
+			return true
+		}
+	}
+	return false
 }
 
 // IsHarnessImplementationName returns true if s is a known harness
