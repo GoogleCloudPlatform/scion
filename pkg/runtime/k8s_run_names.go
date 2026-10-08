@@ -27,6 +27,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
 	corev1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/types"
@@ -350,6 +351,29 @@ func (r *KubernetesRuntime) deletePodRunObjects(ctx context.Context, namespace, 
 			runtimeLog.Info(reason, "kind", kind, "name", name, "namespace", namespace,
 				"agent", podName, "object_run_id", podRun)
 		})
+}
+
+// previousPodGone re-reads pod podName after cleanupStalePod and reports
+// whether the pod with UID uid (live, of run podRun, before the cleanup) is
+// gone: NotFound, or a pod of another UID holds the name. A pod still
+// present with that UID (its delete failed or it is still terminating), or
+// a failed read, reports false and is logged, so the run's per-run objects
+// are left (ptone/scion#3753).
+func (r *KubernetesRuntime) previousPodGone(ctx context.Context, namespace, podName, podRun string, uid types.UID) bool {
+	p, err := r.Client.Clientset.CoreV1().Pods(namespace).Get(ctx, podName, metav1.GetOptions{})
+	switch {
+	case k8serrors.IsNotFound(err):
+		return true
+	case err != nil:
+		runtimeLog.Info("Cannot confirm the previous pod is gone; keeping its run's per-run objects",
+			"pod", podName, "namespace", namespace, "pod_uid", uid, "object_run_id", podRun, "error", err)
+		return false
+	case p.UID != uid:
+		return true
+	}
+	runtimeLog.Info("Previous pod still present; keeping its run's per-run objects",
+		"pod", podName, "namespace", namespace, "pod_uid", uid, "object_run_id", podRun)
+	return false
 }
 
 // podReferencesObject reports whether pod's spec references the Secret
