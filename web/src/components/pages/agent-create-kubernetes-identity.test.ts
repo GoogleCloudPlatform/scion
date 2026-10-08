@@ -640,10 +640,11 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
   });
 
   // blockDefaultNeedsExplicitChoice must require a known-Kubernetes target,
-  // not just a project default of block: Block is a valid, sendable choice
-  // on a docker target, so the picker must show it selected (not blank) and
-  // submit must send it, exactly as it would without this PR's changes.
-  it('shows Block selected and sends it when the project default is block on a non-Kubernetes target', async () => {
+  // not just a project default of block: Block is a valid choice on a docker
+  // target, so the picker must show it selected (not blank) and submit must
+  // proceed. Untouched, the request omits gcp_identity and the server
+  // resolves the same project default (ptone/scion#3902).
+  it('shows Block selected and submits without gcp_identity when the project default is block on a non-Kubernetes target', async () => {
     const { bodies } = stubFetchForKubernetesProjectDefault('block', [], 'docker');
     const el = await mountAgentCreate();
     const page = internals(el) as AgentCreateInternals & {
@@ -659,7 +660,7 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
     await page.handleSubmit(new Event('submit'));
 
     expect(bodies).toHaveLength(1);
-    expect(bodies[0].gcp_identity).toEqual({ metadata_mode: 'block' });
+    expect(bodies[0]).not.toHaveProperty('gcp_identity');
   });
 
   // A project default of "passthrough" or "assign" is a real, sendable
@@ -667,8 +668,9 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
   // substitution). defaultGcpMetadataMode must track it faithfully so a
   // later switch to a non-Kubernetes target sends that real default,
   // instead of a "block" that was never the applicable default in the
-  // first place.
-  it('sends the project default of passthrough after switching from a Kubernetes broker to docker', async () => {
+  // first place. Untouched, submit omits gcp_identity so the server resolves
+  // that project default (ptone/scion#3902).
+  it('displays the project default of passthrough after switching from a Kubernetes broker to docker, and omits it on submit', async () => {
     const { bodies } = stubFetchForKubernetesProjectDefault('passthrough');
     const el = await mountAgentCreate();
     const page = internals(el) as AgentCreateInternals & {
@@ -694,10 +696,10 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
 
     await page.handleSubmit(new Event('submit'));
     expect(bodies).toHaveLength(1);
-    expect(bodies[0].gcp_identity).toEqual({ metadata_mode: 'passthrough' });
+    expect(bodies[0]).not.toHaveProperty('gcp_identity');
   });
 
-  it('sends the project default of assign (with its service account) after switching from a Kubernetes broker to docker', async () => {
+  it('displays the project default of assign (with its service account) after switching from a Kubernetes broker to docker, and omits it on submit', async () => {
     const { bodies } = stubFetchForKubernetesProjectDefault(
       'assign',
       [makeServiceAccount('sa-a')],
@@ -730,7 +732,7 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
 
     await page.handleSubmit(new Event('submit'));
     expect(bodies).toHaveLength(1);
-    expect(bodies[0].gcp_identity).toEqual({ metadata_mode: 'assign', service_account_id: 'sa-a' });
+    expect(bodies[0]).not.toHaveProperty('gcp_identity');
   });
 
   // The restore logic must never touch an explicit user choice: once the
@@ -1149,7 +1151,7 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
 
     await page.handleSubmit(new Event('submit'));
     expect(bodies).toHaveLength(1);
-    expect(bodies[0].gcp_identity).toEqual({ metadata_mode: 'passthrough' });
+    expect(bodies[0]).not.toHaveProperty('gcp_identity');
   });
 
   // The project default mode is only ever assigned inside the
@@ -1248,7 +1250,7 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
 
     await page.handleSubmit(new Event('submit'));
     expect(bodies).toHaveLength(1);
-    expect(bodies[0].gcp_identity).toEqual({ metadata_mode: 'block' });
+    expect(bodies[0]).not.toHaveProperty('gcp_identity');
   });
 
   it('says the hub-wide or Kubernetes default applies when this project has no default configured', async () => {
@@ -1394,10 +1396,10 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
     expect(tracker.bodies[0].gcp_identity).toEqual({ metadata_mode: 'passthrough' });
   });
 
-  it('still sends gcp_identity for a non-Kubernetes target even when untouched', async () => {
-    // Scope check: the omission is specific to known-Kubernetes targets. A
-    // docker target's existing default behavior (send the displayed mode
-    // explicitly) must be unaffected.
+  it('omits gcp_identity for a non-Kubernetes target too when untouched', async () => {
+    // The omission applies to every target runtime, not only known-
+    // Kubernetes ones: the form does not pin the displayed mode client-side
+    // (ptone/scion#3902).
     const tracker = stubFetchCapturingCreateRequests();
     const el = await mountAgentCreate();
     const page = internals(el) as AgentCreateInternals & {
@@ -1424,7 +1426,7 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
     await page.handleSubmit(new Event('submit'));
 
     expect(tracker.bodies).toHaveLength(1);
-    expect(tracker.bodies[0].gcp_identity).toEqual({ metadata_mode: 'block' });
+    expect(tracker.bodies[0]).not.toHaveProperty('gcp_identity');
   });
 
   // Drives the real picker, rather than setting gcpIdentityUserSet directly,
@@ -1536,9 +1538,9 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
 
   // The display-only Kubernetes substitution (block -> passthrough) must be
   // reversed when the target later becomes non-Kubernetes again — otherwise
-  // submit sends an explicit "passthrough" nobody chose, where main would
-  // have sent "block" (the component's own placeholder default here, since
-  // there is no project default configured).
+  // the picker keeps showing a "passthrough" nobody chose instead of the
+  // component's own "block" placeholder (there is no project default
+  // configured). Untouched, submit omits gcp_identity either way.
   it('restores block after switching from a Kubernetes broker back to docker, with no project default', async () => {
     const tracker = stubFetchCapturingCreateRequests();
     const el = await mountAgentCreate();
@@ -1574,7 +1576,7 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
 
     await page.handleSubmit(new Event('submit'));
     expect(tracker.bodies).toHaveLength(1);
-    expect(tracker.bodies[0].gcp_identity).toEqual({ metadata_mode: 'block' });
+    expect(tracker.bodies[0]).not.toHaveProperty('gcp_identity');
   });
 
   it('restores the project default of block after switching from a Kubernetes broker back to docker', async () => {
@@ -1604,7 +1606,7 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
 
     await page.handleSubmit(new Event('submit'));
     expect(bodies).toHaveLength(1);
-    expect(bodies[0].gcp_identity).toEqual({ metadata_mode: 'block' });
+    expect(bodies[0]).not.toHaveProperty('gcp_identity');
   });
 
   // Profile-only variant: the same restoration must happen when only the
@@ -1643,7 +1645,7 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
 
     await page.handleSubmit(new Event('submit'));
     expect(tracker.bodies).toHaveLength(1);
-    expect(tracker.bodies[0].gcp_identity).toEqual({ metadata_mode: 'block' });
+    expect(tracker.bodies[0]).not.toHaveProperty('gcp_identity');
   });
 }, 15_000);
 

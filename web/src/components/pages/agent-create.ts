@@ -92,6 +92,10 @@ export class ScionPageAgentCreate extends LitElement {
   @state() private image = '';
   @state() private containerUser = '';
   @state() private telemetryEnabled = false;
+  // Set once the user toggles the telemetry checkbox. Only then does
+  // buildConfig send config.telemetry; until then the checkbox shows the hub
+  // default and the server resolves the value.
+  @state() private telemetryUserSet = false;
   @state() private autoExposePortsEnabled = false;
   @state() private hubDefaultRuntimeBroker = '';
   @state() private hubDefaultHarnessConfig = '';
@@ -123,14 +127,11 @@ export class ScionPageAgentCreate extends LitElement {
    * the user chose for the new target, so it must not be treated as a user
    * choice either.
    *
-   * Gates whether gcp_identity is sent at all on submit: on a known-Kubernetes
-   * target with no explicit user choice, the request omits gcp_identity
-   * entirely so the Hub's own project/hub-default ladder — and, if nothing is
-   * configured anywhere, Phase 1's unset fallback — resolves it. Substituting
-   * an explicit "passthrough" there instead would route the request through
-   * the Hub's passthrough ownership gate (broker owner/admin + registered
-   * host service account), which a request that never asked for passthrough
-   * should not have to pass.
+   * Gates whether gcp_identity is sent at all on submit: with no explicit
+   * user choice, on any target runtime, the request omits gcp_identity so
+   * the server resolves it from its own precedence (project default, then
+   * hub default, then unset) rather than the form pinning the identity mode
+   * client-side.
    */
   @state() private gcpIdentityUserSet = false;
   /**
@@ -739,7 +740,9 @@ export class ScionPageAgentCreate extends LitElement {
           defaultTemplate?: string;
           defaultModel?: string;
         };
-        this.telemetryEnabled = data.telemetryEnabled ?? false;
+        if (!this.telemetryUserSet) {
+          this.telemetryEnabled = data.telemetryEnabled ?? false;
+        }
         if (!this.autoExposeTouched) {
           this.autoExposePortsEnabled = data.autoExposePortsEnabled ?? false;
         }
@@ -1241,8 +1244,12 @@ export class ScionPageAgentCreate extends LitElement {
       }
     }
 
-    // Telemetry (use structured config property, matching agent-configure.ts)
-    config.telemetry = { enabled: this.telemetryEnabled };
+    // Telemetry (structured config property, matching agent-configure.ts):
+    // sent only when the user toggled it. Otherwise the server resolves it
+    // from the project or template, then the hub default.
+    if (this.telemetryUserSet) {
+      config.telemetry = { enabled: this.telemetryEnabled };
+    }
 
     // Auto-expose ports: sent, as explicit values, only when the user operated
     // the control. Otherwise the hub resolves the project, then template,
@@ -1335,15 +1342,12 @@ export class ScionPageAgentCreate extends LitElement {
       const builtLabels = this.buildLabels();
       if (builtLabels) body.labels = builtLabels;
 
-      // GCP identity. On a known-Kubernetes target with no explicit user
-      // choice, omit gcp_identity entirely rather than send the displayed
-      // "passthrough" default: an explicit passthrough request routes through
-      // the Hub's passthrough ownership gate (broker owner/admin + a
-      // registered host service account), which a request that never asked
-      // for passthrough should not have to pass. Omitting it lets the Hub's
-      // own project/hub-default ladder resolve it — including Phase 1's
-      // unset-on-Kubernetes fallback when nothing is configured anywhere.
-      if (this.targetRuntimeIsKubernetesOnly && !this.gcpIdentityUserSet) {
+      // GCP identity: sent only when the user chose it here. Otherwise the
+      // request omits gcp_identity, so the server resolves it from its own
+      // precedence (project default, then hub default, then unset) instead
+      // of the form pinning the identity mode client-side. The displayed
+      // mode is that default for context, not a user choice.
+      if (!this.gcpIdentityUserSet) {
         // omit body.gcp_identity
       } else if (this.gcpMetadataMode === 'assign' && this.gcpServiceAccountId) {
         body.gcp_identity = {
@@ -1879,6 +1883,7 @@ export class ScionPageAgentCreate extends LitElement {
           ?checked=${this.telemetryEnabled}
           @sl-change=${(e: Event) => {
             this.telemetryEnabled = (e.target as HTMLInputElement).checked;
+            this.telemetryUserSet = true;
           }}
         >
           Enable Telemetry
