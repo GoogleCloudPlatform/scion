@@ -216,6 +216,11 @@ type UploadOptions struct {
 	CacheControl string
 	// Metadata is custom metadata to attach to the object.
 	Metadata map[string]string
+	// Idempotent says that writing these bytes again is harmless (a
+	// content-addressed object always gets the same bytes), so a provider
+	// may retry transient failures, including rate limiting, a bounded
+	// number of times. The final error is still returned.
+	Idempotent bool
 }
 
 // New creates a new storage client based on the configuration.

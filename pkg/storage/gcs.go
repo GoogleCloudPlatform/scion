@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"cloud.google.com/go/storage"
+	gax "github.com/googleapis/gax-go/v2"
 	"google.golang.org/api/googleapi"
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
@@ -37,13 +38,31 @@ type GCSStorage struct {
 	config Config
 }
 
+// gcsIdempotentAttempts bounds the attempts of an idempotent upload.
+const gcsIdempotentAttempts = 5
+
+// gcsIdempotentRetryDeadline bounds an idempotent upload, retries
+// included (a blob is at most a few tens of MiB). A variable so tests can
+// shorten it.
+var gcsIdempotentRetryDeadline = 5 * time.Minute
+
+// gcsIdempotentBackoff is the backoff between attempts of an idempotent
+// upload. A variable so tests can shorten it.
+var gcsIdempotentBackoff = gax.Backoff{Initial: 500 * time.Millisecond, Max: 8 * time.Second, Multiplier: 2}
+
 // NewGCS creates a new GCS storage client.
 func NewGCS(ctx context.Context, cfg Config) (*GCSStorage, error) {
+	return newGCS(ctx, cfg)
+}
+
+// newGCS is NewGCS with extra client options (tests point it at a fake
+// endpoint).
+func newGCS(ctx context.Context, cfg Config, extra ...option.ClientOption) (*GCSStorage, error) {
 	if cfg.Bucket == "" {
 		return nil, errors.New("bucket name is required for GCS storage")
 	}
 
-	var opts []option.ClientOption
+	opts := append([]option.ClientOption{}, extra...)
 
 	// Use service account credentials if provided
 	if cfg.Credentials != nil && cfg.Credentials.ServiceAccountJSON != "" {
@@ -144,7 +163,24 @@ func (s *GCSStorage) Upload(ctx context.Context, objectPath string, reader io.Re
 
 	objectPath = strings.TrimPrefix(objectPath, "/")
 	obj := s.bucket.Object(objectPath)
+	if opts.Idempotent {
+		// The bytes are the same on every attempt, so retrying without a
+		// precondition is safe. The retrying is bounded in attempts and,
+		// because the writer keeps retrying a request until its context
+		// ends, in time; the last error is returned.
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, gcsIdempotentRetryDeadline)
+		defer cancel()
+		obj = obj.Retryer(
+			storage.WithPolicy(storage.RetryAlways),
+			storage.WithMaxAttempts(gcsIdempotentAttempts),
+			storage.WithBackoff(gcsIdempotentBackoff),
+		)
+	}
 	writer := obj.NewWriter(ctx)
+	if opts.Idempotent {
+		writer.ChunkRetryDeadline = gcsIdempotentRetryDeadline
+	}
 
 	// Set content type
 	if opts.ContentType != "" {

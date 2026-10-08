@@ -209,7 +209,9 @@ type Store interface {
 	GetArtifactByKey(ctx context.Context, scopeKind, scopeRef, ownerKind, ownerRef, key string) (*Artifact, error)
 
 	// MarkReceived records that the bytes of file path of the pending
-	// version versionID have arrived, with their media type. It returns
+	// version versionID have arrived, with their media type, and that the
+	// other files of the version with the same digest (which share the
+	// stored object) have arrived too. It returns
 	// ErrNotFound when the file is not in the manifest and ErrConflict when
 	// the version is no longer pending.
 	MarkReceived(ctx context.Context, versionID, path, mediaType string) error
