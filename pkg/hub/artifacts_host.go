@@ -17,7 +17,6 @@ package hub
 import (
 	"context"
 	"encoding/base64"
-	"errors"
 	"net/http"
 	"path"
 	"slices"
@@ -272,22 +271,25 @@ var _ artifacts.ScopeChecker = (*artifactHost)(nil)
 
 // ScopesExist implements artifacts.ScopeChecker: a project exists while the
 // store has it. The hub deletes projects outright, so a missing one is
-// gone; any other store error fails the call.
+// gone. One store query covers the page: refs holds at most one id per
+// row of a list page (artifacts.MaxListLimit), well under the store's
+// project list limit. A store error fails the call.
 func (h *artifactHost) ScopesExist(ctx context.Context, refs []string) (map[string]bool, error) {
 	out := make(map[string]bool, len(refs))
-	if h.server == nil {
+	if h.server == nil || len(refs) == 0 {
 		return out, nil
 	}
+	res, err := h.server.store.ListProjectSummaries(ctx, store.ProjectFilter{MemberProjectIDs: refs},
+		store.ListOptions{Limit: len(refs), SkipTotalCount: true})
+	if err != nil {
+		return nil, err
+	}
+	found := make(map[string]bool, len(res.Items))
+	for _, p := range res.Items {
+		found[strings.ToLower(p.ID)] = true
+	}
 	for _, ref := range refs {
-		_, err := h.server.store.GetProject(ctx, ref)
-		switch {
-		case err == nil:
-			out[ref] = true
-		case errors.Is(err, store.ErrNotFound):
-			out[ref] = false
-		default:
-			return nil, err
-		}
+		out[ref] = found[strings.ToLower(ref)]
 	}
 	return out, nil
 }

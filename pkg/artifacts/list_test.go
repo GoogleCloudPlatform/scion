@@ -764,9 +764,19 @@ func TestListMarksDeletedProjects(t *testing.T) {
 
 	h := &scopeCheckHost{fakeHost: f.host, gone: map[string]bool{"project-1": true}}
 	f.svc.host = h
+	// While cross-project sharing is off no move can succeed: rows are
+	// marked but no move is offered.
+	for _, a := range f.list(&userU, listPath).Artifacts {
+		if a.CanManage {
+			t.Errorf("%s: canManage while moves are off", a.ID)
+		}
+	}
+	f.host.mu.Lock()
+	f.host.crossScope = true
+	f.host.mu.Unlock()
 	got := f.list(&userU, listPath)
-	if h.calls != 1 {
-		t.Errorf("ScopesExist called %d times for one page", h.calls)
+	if h.calls != 2 {
+		t.Errorf("ScopesExist called %d times for two pages", h.calls)
 	}
 	for id, want := range map[string][2]bool{
 		own:     {true, true},

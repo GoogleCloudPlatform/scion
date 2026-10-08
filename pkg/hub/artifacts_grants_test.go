@@ -162,14 +162,25 @@ func TestArtifactsListMarksDeletedProject(t *testing.T) {
 	gone, live := publish(p1.ID), publish(p2.ID)
 	require.NoError(t, s.DeleteProject(ctx, p1.ID))
 
-	rec := userArtifactRequest(t, srv, owner, http.MethodGet, "/api/v1/artifacts?mine=1", nil)
-	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	var list artifacts.ArtifactListResponse
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &list))
-	byID := map[string]artifacts.ArtifactListItem{}
-	for _, a := range list.Artifacts {
-		byID[a.ID] = a
+	list := func() map[string]artifacts.ArtifactListItem {
+		rec := userArtifactRequest(t, srv, owner, http.MethodGet, "/api/v1/artifacts?mine=1", nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var resp artifacts.ArtifactListResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		out := map[string]artifacts.ArtifactListItem{}
+		for _, a := range resp.Artifacts {
+			out[a.ID] = a
+		}
+		return out
 	}
+	// Moves need cross-project sharing: while it is off, no move is offered.
+	byID := list()
+	require.Contains(t, byID, gone)
+	assert.True(t, byID[gone].ScopeDeleted)
+	assert.False(t, byID[gone].CanManage)
+
+	srv.SetOperationalSettings(artifactsOpsWith(t, "", `{"cross_project_messaging_enabled": true}`))
+	byID = list()
 	require.Contains(t, byID, gone)
 	require.Contains(t, byID, live)
 	assert.True(t, byID[gone].ScopeDeleted)

@@ -201,6 +201,17 @@ function button(el: ScionArtifactShareDialog, text: string, root?: HTMLElement):
   return b as HTMLElement;
 }
 
+/** Whether the token appears anywhere in the dialog: markup or a field's value. */
+function showsToken(el: ScionArtifactShareDialog): boolean {
+  const inputs = Array.from(el.shadowRoot!.querySelectorAll('sl-input')) as Array<
+    HTMLElement & { value: unknown }
+  >;
+  return (
+    el.shadowRoot!.innerHTML.includes('TOKEN123') ||
+    inputs.some((i) => String(i.value ?? '').includes('TOKEN123'))
+  );
+}
+
 function choose(sel: HTMLElement, value: string): void {
   (sel as HTMLElement & { value: string }).value = value;
   sel.dispatchEvent(new Event('sl-change'));
@@ -288,13 +299,31 @@ describe('share dialog', () => {
     expect($(el, '.created')!.textContent).toContain('the link is shown only once');
     expect($$(el, 'tbody tr')).toHaveLength(1);
 
-    // Reopening forgets the link: it is never shown again.
+    // Closing forgets the link at once, before any reopening.
     el.open = false;
     await settle(el);
+    expect($(el, '.created')).toBeNull();
+    expect(showsToken(el)).toBe(false);
     el.open = true;
     await settle(el);
     expect($(el, '.created')).toBeNull();
-    expect(el.shadowRoot!.innerHTML).not.toContain('TOKEN123');
+    expect(showsToken(el)).toBe(false);
+  });
+
+  it('forgets a created link when Done closes the dialog', async () => {
+    mockServer();
+    const el = await mount();
+    const closed: Event[] = [];
+    el.addEventListener('artifact-share-closed', (e) => closed.push(e));
+    button(el, 'Create link').click();
+    await settle(el);
+    expect(showsToken(el)).toBe(true);
+    button(el, 'Done').click();
+    await settle(el);
+    expect(closed).toHaveLength(1);
+    // The parent has not set open=false yet; the link is already gone.
+    expect(el.open).toBe(true);
+    expect(showsToken(el)).toBe(false);
   });
 
   it('says when a link is cut to the artifact’s expiry', async () => {

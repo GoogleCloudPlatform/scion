@@ -64,7 +64,8 @@ type ArtifactListItem struct {
 	// exists (deleting a project never deletes its artifacts).
 	ScopeDeleted bool `json:"scopeDeleted,omitempty"`
 	// CanManage is set only on rows with ScopeDeleted: true when the
-	// caller may move the artifact to another project (see canAdminister).
+	// caller may move the artifact to another project (see canAdminister)
+	// and moves are turned on (cross-project sharing).
 	CanManage bool `json:"canManage,omitempty"`
 
 	// src is the stored artifact of the row.
@@ -210,9 +211,18 @@ func (s *Service) handleList(w http.ResponseWriter, r *http.Request) {
 		scopes = candidateScopes(ctx, scopes)
 	}
 
+	// What is shared with a project is shown only to a caller that may read
+	// in it. Otherwise scope= narrows to artifacts homed there, and asking
+	// for only the shared ones gives an empty list.
+	scopeShares := p.scope != "" && host.Authorize(ctx, p.scope, PermissionRead)
+	if p.scope != "" && p.sharedOnly && !scopeShares {
+		writeJSON(w, http.StatusOK, ArtifactListResponse{Artifacts: []ArtifactListItem{}})
+		return
+	}
 	items, next, err := s.collect(ctx, host, b, CandidateQuery{
 		PrincipalKind: kind, PrincipalRef: ref, ScopeRefs: scopes, OwnedOnly: p.ownedOnly,
-		Search: p.search, ReviewPending: p.reviewPending, HomeScope: p.scope, SharedOnly: p.sharedOnly, After: after,
+		Search: p.search, ReviewPending: p.reviewPending, HomeScope: p.scope, ScopeShares: scopeShares,
+		SharedOnly: p.sharedOnly, After: after,
 	}, p.limit)
 	if err != nil {
 		slog.ErrorContext(ctx, "artifacts: list failed", "error", err)
@@ -446,7 +456,8 @@ func listAccess(ctx context.Context, host Host, a *Artifact) string {
 
 // markDeletedScopes sets ScopeDeleted on the items whose home project no
 // longer exists, when the host can tell (ScopeChecker), and CanManage on
-// those the caller may move. It asks the host once per page and reads the
+// those the caller may move. While cross-project sharing is off no move
+// can succeed, so CanManage stays false rather than offer one. It asks the host once per page and reads the
 // grants of deleted-project rows not owned by the caller, at most one page.
 func (s *Service) markDeletedScopes(ctx context.Context, b backend, items []ArtifactListItem) error {
 	checker, ok := s.host.(ScopeChecker)
@@ -465,6 +476,7 @@ func (s *Service) markDeletedScopes(ctx context.Context, b backend, items []Arti
 	if err != nil {
 		return err
 	}
+	movable := s.crossScopeAllowed(ctx)
 	for i := range items {
 		it := &items[i]
 		if it.ScopeKind != ScopeKindProject {
@@ -474,6 +486,9 @@ func (s *Service) markDeletedScopes(ctx context.Context, b backend, items []Arti
 			continue
 		}
 		it.ScopeDeleted = true
+		if !movable {
+			continue
+		}
 		if it.CanManage, err = s.canAdminister(ctx, b, it.src); err != nil {
 			return err
 		}

@@ -626,3 +626,32 @@ func TestGrantListReportsCrossProjectSharing(t *testing.T) {
 		}
 	}
 }
+
+// TestList_SharedScopeRequiresScopeReadAuth: the artifacts shared with a
+// project are listed only to a caller that may read in that project. For
+// any other caller, scope= narrows to artifacts homed there, and shared=1
+// lists nothing, even when the caller can read the shared artifact itself.
+func TestList_SharedScopeRequiresScopeReadAuth(t *testing.T) {
+	f := newFixture(t, false)
+	a := f.publish(agentX, "a.md", []byte("a"), "").Artifact.ID // homed in project-2
+	f.grantPrincipal(a, userU)                                  // userU may read it directly
+	f.insertScopeGrant(a, "project-3")                          // and it is shared with project-3
+	ids := func(target string) []string { return listIDs(f.list(&userU, target)) }
+
+	if got := ids(listPath + "&scope=project-3&shared=1"); len(got) != 0 {
+		t.Errorf("shared=1 for a project the caller may not read in: %v", got)
+	}
+	if got := ids(listPath + "&scope=project-3"); len(got) != 0 {
+		t.Errorf("scope= for a project the caller may not read in: %v", got)
+	}
+	// The artifact itself stays listed and readable.
+	if got := ids(listPath); len(got) != 1 || got[0] != a {
+		t.Errorf("unnarrowed list: %v", got)
+	}
+
+	// Once the caller may read in project-3, the shared artifact is listed.
+	f.host.allow(userU, "project-3", PermissionRead)
+	if got := ids(listPath + "&scope=project-3&shared=1"); len(got) != 1 || got[0] != a {
+		t.Errorf("shared=1 for a project the caller may read in: %v", got)
+	}
+}

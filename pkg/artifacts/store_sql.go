@@ -976,13 +976,19 @@ func (s *sqlStore) writeCandidateFilters(b *strings.Builder, args *[]any, q Cand
 		shared := `EXISTS (SELECT 1 FROM artifact_grant sg WHERE sg.artifact_id = a.id AND sg.subject_kind = ?
 			AND sg.subject_ref = ? AND (sg.expires_at IS NULL OR sg.expires_at > ?) AND sg.permission IN (?, ?, ?))`
 		sharedArgs := []any{SubjectScope, q.HomeScope, now, GrantRead, GrantWrite, GrantAdmin}
-		if q.SharedOnly {
+		switch {
+		case q.ScopeShares && q.SharedOnly:
 			b.WriteString(" AND a.scope_kind = ? AND a.scope_ref <> ? AND " + shared)
-		} else {
+			*args = append(*args, ScopeKindProject, q.HomeScope)
+			*args = append(*args, sharedArgs...)
+		case q.ScopeShares:
 			b.WriteString(" AND a.scope_kind = ? AND (a.scope_ref = ? OR " + shared + ")")
+			*args = append(*args, ScopeKindProject, q.HomeScope)
+			*args = append(*args, sharedArgs...)
+		default:
+			b.WriteString(" AND a.scope_kind = ? AND a.scope_ref = ?")
+			*args = append(*args, ScopeKindProject, q.HomeScope)
 		}
-		*args = append(*args, ScopeKindProject, q.HomeScope)
-		*args = append(*args, sharedArgs...)
 	}
 	if q.After != nil {
 		at := s.timeArg(q.After.UpdatedAt)

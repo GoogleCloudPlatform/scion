@@ -300,10 +300,20 @@ export class ScionArtifactShareDialog extends LitElement {
   }
 
   override updated(changed: Map<string, unknown>): void {
-    if (changed.has('open') && this.open) {
+    if (!changed.has('open')) return;
+    if (this.open) {
       this.reset();
       void this.load();
+    } else {
+      // A created link is shown once: forget it as soon as the dialog
+      // closes, so it stays neither in memory nor in the hidden dialog.
+      this.forgetCreated();
     }
+  }
+
+  private forgetCreated(): void {
+    this.created = null;
+    this.copied = false;
   }
 
   private reset(): void {
@@ -364,6 +374,7 @@ export class ScionArtifactShareDialog extends LitElement {
   }
 
   private close(): void {
+    this.forgetCreated();
     this.dispatchEvent(new CustomEvent('artifact-share-closed', { bubbles: true, composed: true }));
   }
 

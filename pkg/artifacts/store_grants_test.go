@@ -359,8 +359,9 @@ func TestStoreGrantHomeRules(t *testing.T) {
 	})
 }
 
-// TestStoreCandidatesSharedWithScope: HomeScope keeps rows homed in the
-// scope or shared with it; SharedOnly keeps the shared ones.
+// TestStoreCandidatesSharedWithScope: HomeScope alone keeps rows homed in
+// the scope; with ScopeShares also those shared with it; SharedOnly keeps
+// the shared ones, and only with ScopeShares.
 func TestStoreCandidatesSharedWithScope(t *testing.T) {
 	forEachBackend(t, func(t *testing.T, db *sql.DB, st Store, _ func() *sql.DB) {
 		ctx := context.Background()
@@ -383,12 +384,20 @@ func TestStoreCandidatesSharedWithScope(t *testing.T) {
 			}
 			return out
 		}
+		if got := ids(q); len(got) != 1 || !got[home.ID] {
+			t.Errorf("HomeScope without ScopeShares: %v", got)
+		}
+		q.ScopeShares = true
 		if got := ids(q); len(got) != 2 || !got[home.ID] || !got[away.ID] {
-			t.Errorf("HomeScope: %v", got)
+			t.Errorf("HomeScope with ScopeShares: %v", got)
 		}
 		q.SharedOnly = true
 		if got := ids(q); len(got) != 1 || !got[away.ID] {
 			t.Errorf("SharedOnly: %v", got)
+		}
+		q.ScopeShares = false
+		if got := ids(q); len(got) != 1 || !got[home.ID] {
+			t.Errorf("SharedOnly without ScopeShares: %v", got)
 		}
 	})
 }
