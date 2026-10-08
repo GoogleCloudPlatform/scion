@@ -153,10 +153,11 @@ export class ScionAgentPager extends LitElement {
   }
 
   private renderRange() {
-    if (typeof this.total === 'object' && this.total.capped) {
-      return html`<span class="capped-banner">${cappedTotalText(this.total.loaded)}</span>`;
+    const value = this.total;
+    if (typeof value === 'object') {
+      return html`<span class="capped-banner">${cappedTotalText(value.loaded)}</span>`;
     }
-    const total = this.approximate ? `${this.total}+` : `${this.total}`;
+    const total = this.approximate ? `${value}+` : `${value}`;
     if (this.rowsOnPage === 0) {
       return html`<span class="range">0 of ${total}</span>`;
     }
