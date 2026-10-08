@@ -17,6 +17,7 @@ package cmd
 import (
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
@@ -187,4 +188,29 @@ func TestRunHubProjectsDelete_ConfirmationUnchanged(t *testing.T) {
 func TestHubProjectsDeleteHelpMentionsID(t *testing.T) {
 	assert.Contains(t, hubProjectsDeleteCmd.Use, "project-name-or-id")
 	assert.Contains(t, hubProjectsDeleteCmd.Long, "project ID (UUID)")
+}
+
+// TestRunHubProjectsInfoDelete_EmptyArg checks that an empty or
+// whitespace-only project argument is rejected before any hub request, so
+// neither `hub projects info ""` nor `hub projects delete ""` falls through
+// to an unfiltered project list (which could match a single project).
+func TestRunHubProjectsInfoDelete_EmptyArg(t *testing.T) {
+	const wantErr = "project name or ID must not be empty"
+	for _, arg := range []string{"", "   ", "\t"} {
+		t.Run("info "+strconv.Quote(arg), func(t *testing.T) {
+			hub := setupProjectsDeleteTest(t, true)
+			err := runHubProjectsInfo(hubProjectsInfoCmd, []string{arg})
+			require.Error(t, err)
+			assert.Equal(t, wantErr, err.Error())
+			assert.Empty(t, hub.recorded(), "hub requests")
+		})
+		t.Run("delete "+strconv.Quote(arg), func(t *testing.T) {
+			hub := setupProjectsDeleteTest(t, true)
+			err := runHubProjectsDelete(hubProjectsDeleteCmd, []string{arg})
+			require.Error(t, err)
+			assert.Equal(t, wantErr, err.Error())
+			assert.Empty(t, hub.recorded(), "hub requests")
+			assert.Empty(t, hub.deletes, "delete calls")
+		})
+	}
 }

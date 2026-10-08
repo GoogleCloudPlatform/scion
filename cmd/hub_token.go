@@ -27,6 +27,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/spf13/cobra"
 )
 
@@ -541,14 +542,19 @@ func parseExpiryAt(s string, now time.Time) (time.Time, error) {
 	// as a shorter duration. The day and year units keep their original,
 	// laxer parse so existing inputs behave exactly as before.
 	if unit == 'm' || unit == 'h' {
+		step := time.Hour
+		if unit == 'm' {
+			step = time.Minute
+		}
+		// Values above the hub's maximum token lifetime (8760h, or
+		// 525600m) are rejected here, before multiplying, so a huge
+		// number cannot overflow into a negative duration (an expiry in
+		// the past).
 		n, err := strconv.Atoi(numStr)
-		if err != nil || n <= 0 {
+		if err != nil || n <= 0 || int64(n) > int64(store.UATMaxExpiry/step) {
 			return time.Time{}, invalid
 		}
-		if unit == 'm' {
-			return now.Add(time.Duration(n) * time.Minute), nil
-		}
-		return now.Add(time.Duration(n) * time.Hour), nil
+		return now.Add(time.Duration(n) * step), nil
 	}
 
 	var n int

@@ -112,6 +112,15 @@ func TestParseExpiry_Invalid(t *testing.T) {
 		"1.5h",
 		"1.5m",
 		"90mm",
+		// Hour and minute values above the hub's 1-year maximum are
+		// rejected before multiplying, so huge values cannot overflow
+		// into an expiry in the past.
+		"8761h",
+		"525601m",
+		"99999999999999h",
+		"99999999999999m",
+		"9223372036854775807h",
+		"99999999999999999999h",
 	}
 
 	for _, input := range tests {
@@ -158,6 +167,10 @@ func TestParseExpiryAt_Table(t *testing.T) {
 		{"90m", now.Add(90 * time.Minute)},
 		{"1m", now.Add(time.Minute)},
 		{" 45m ", now.Add(45 * time.Minute)},
+		// The largest hour and minute values accepted: the hub's 1-year
+		// maximum token lifetime.
+		{"8760h", now.Add(8760 * time.Hour)},
+		{"525600m", now.Add(525600 * time.Minute)},
 	}
 	for _, tt := range tests {
 		got, err := parseExpiryAt(tt.in, now)
