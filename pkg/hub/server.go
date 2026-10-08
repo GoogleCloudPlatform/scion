@@ -1384,6 +1384,11 @@ type RemoteAgentInfo struct {
 
 // Server is the Hub API HTTP server.
 type Server struct {
+	// generalTopicWarned records project IDs whose #general ensure already
+	// logged a Warn, so a space that keeps failing (it is retried on every
+	// open) logs later failures at Debug. Cleared on success.
+	generalTopicWarned sync.Map
+
 	config ServerConfig
 	// startupHubName is the name resolved at startup (ServerConfig.HubName,
 	// from LoadGlobalConfig(serverConfigPath), else the hostname).
@@ -6277,9 +6282,20 @@ func (s *Server) applyMiddleware(h http.Handler) http.Handler {
 	}
 
 	// OTel HTTP tracing (outermost - wraps all middleware for full request lifecycle)
-	h = otelhttp.NewHandler(h, "hub")
+	// Requests whose path carries a bearer credential (artifact share-link
+	// tokens, artifact view capabilities) are not traced, so the path
+	// never reaches a span attribute.
+	h = otelhttp.NewHandler(h, "hub", otelhttp.WithFilter(traceableRequest))
 
 	return h
+}
+
+// traceableRequest reports whether r may be traced: not when its path may
+// carry a bearer credential (logging.IsCredentialURL, the predicate the
+// request logs redact with, which checks the decoded and the escaped
+// path).
+func traceableRequest(r *http.Request) bool {
+	return !logging.IsCredentialURL(r.URL)
 }
 
 // corsMiddleware adds CORS headers.
@@ -6353,7 +6369,7 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 
 		attrs := []slog.Attr{
 			slog.String("method", r.Method),
-			slog.String("path", r.URL.Path),
+			slog.String("path", logging.RequestPath(r)),
 			slog.String("remote_addr", r.RemoteAddr),
 		}
 		if traceID != "" {
@@ -6363,7 +6379,7 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 		if s.config.Debug {
 			slog.Debug("Incoming request",
 				slog.String("method", r.Method),
-				slog.String("path", r.URL.Path),
+				slog.String("path", logging.RequestPath(r)),
 				slog.String("remote_addr", r.RemoteAddr),
 				slog.String("query", logging.RedactQuery(r.URL.RawQuery)),
 			)
@@ -6390,7 +6406,7 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 		if !isStreaming && !isUpgrade && duration > slowThreshold {
 			slog.Info("Slow request",
 				slog.String("method", r.Method),
-				slog.String("path", r.URL.Path),
+				slog.String("path", logging.RequestPath(r)),
 				slog.Duration("elapsed", duration),
 				slog.Int("status", wrapped.statusCode),
 			)
@@ -6424,7 +6440,7 @@ func (s *Server) recoveryMiddleware(next http.Handler) http.Handler {
 				}
 				slog.Error("Panic recovered",
 					slog.Any("error", err),
-					slog.String("path", r.URL.Path),
+					slog.String("path", logging.RequestPath(r)),
 				)
 				InternalError(w)
 			}

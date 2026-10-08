@@ -432,11 +432,11 @@ func TestResumeScopedUATDenied_DispatchAgent(t *testing.T) {
 	pauseSchedule(t, srv, owner, projectID, id)
 	before := loadScheduleRevision(t, s, id)
 
-	// The bearer boundary stage (3b) refuses a project-scoped UAT on the
-	// resume route before the handler runs, so the revision is unchanged.
+	// The authoring credential gate refuses a UAT on the resume route
+	// before the schedule is read, so the revision stays as it was.
 	scoped := NewScopedUserIdentity(owner, projectID, []string{"scheduled_event:update"})
 	rec := doAuthoredScheduleRequest(t, srv, scoped, projectID, id+"/resume", http.MethodPost, nil)
-	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assertScheduleAuthoringRefused(t, rec)
 	assert.Equal(t, before, loadScheduleRevision(t, s, id))
 }
 
@@ -447,10 +447,10 @@ func TestResumeScopedUATDenied_Message(t *testing.T) {
 	pauseSchedule(t, srv, owner, projectID, id)
 	before := loadScheduleRevision(t, s, id)
 
-	// Refused at the bearer boundary stage (3b), as above.
+	// Refused by the authoring credential gate, as above.
 	scoped := NewScopedUserIdentity(owner, projectID, []string{"scheduled_event:update", "agent:message"})
 	rec := doAuthoredScheduleRequest(t, srv, scoped, projectID, id+"/resume", http.MethodPost, nil)
-	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assertScheduleAuthoringRefused(t, rec)
 	assert.Equal(t, before, loadScheduleRevision(t, s, id))
 	sc, err := s.GetSchedule(context.Background(), id)
 	require.NoError(t, err)

@@ -89,6 +89,13 @@ func TestMapLegacyType_AllOldTypes(t *testing.T) {
 			wantEventType:  ptrEventType(EventPortExposed),
 		},
 		{
+			name:           "system (artifact-review) → event/artifact.review",
+			oldType:        messages.TypeSystem,
+			systemCategory: messages.SystemCategoryArtifactReview,
+			wantKind:       KindEvent,
+			wantEventType:  ptrEventType(EventArtifactReview),
+		},
+		{
 			name:           "system (delivery-failed) → event/delivery.failed",
 			oldType:        messages.TypeSystem,
 			systemCategory: messages.SystemCategoryDeliveryFailed,
@@ -837,6 +844,7 @@ func TestNewEnvelopeToLegacy_EventSystem(t *testing.T) {
 	}{
 		{"schedule.fired", EventScheduleFired, "", messages.SystemCategoryScheduler, ""},
 		{"port.exposed", EventPortExposed, "", messages.SystemCategoryPortForward, ""},
+		{"artifact.review", EventArtifactReview, "", messages.SystemCategoryArtifactReview, ""},
 		{"delivery.failed", EventDeliveryFailed, "", messages.SystemCategoryDeliveryFailed, ""},
 		// O-c (p2a-r2 review): the deferred notice (design agent-reincarnate
 		// §3.7) reuses EventDeliveryFailed's type with a distinct Status —

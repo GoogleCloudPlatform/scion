@@ -191,6 +191,14 @@ Persistence settings for the Hub.
 | `driver` | string | `"sqlite"` | Database driver: `sqlite` or `postgres`. |
 | `url` | string | `"hub.db"` | Connection string or file path. |
 
+:::caution[Postgres: `broker_dispatch` index on upgrade]
+On Postgres, auto-migrate creates the `brokerdispatch_state_updated_at` index on `broker_dispatch (state, updated_at)` with a plain `CREATE INDEX`, which blocks writes to the table while it builds. On a large deployment, create the index before upgrading so auto-migrate finds it already in place:
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS brokerdispatch_state_updated_at ON broker_dispatch (state, updated_at);
+```
+:::
+
 ### Authentication (`server.auth`)
 
 | Field | Type | Default | Description |
@@ -201,6 +209,8 @@ Persistence settings for the Hub.
 | `authorized_domains` | list | `[]` | Limit access to specific email domains. |
 | `user_access_mode` | string | `"open"` | Who may sign in: `"open"` (any verified email, subject to `authorized_domains` if set), `"domain_restricted"` (email domain must be in `authorized_domains`), or `"invite_only"` (the email must belong to an invited, allow-listed or existing user). Users in `admin_emails` are always allowed. |
 | `default_user_role` | string | `"member"` | Hub role given to a user when their account is first created or activated: first sign-in, including the first sign-in of an invited or allow-listed user. Values: `"member"` or `"viewer"` (`"admin"` is rejected; use `admin_emails`). Users in `admin_emails` are always admins. Changing it does not affect existing users. It is also the role given to an admin who is removed from `admin_emails`. See [Hub roles](/scion/hosted/ha/permissions/#hub-roles). Environment: `SCION_SEED_SERVER_AUTH_DEFAULTUSERROLE` (recommended) or `SCION_SERVER_AUTH_DEFAULTUSERROLE` (per-node, deprecated for Layer-1 keys). |
+| `agent_run_scope` | string | `"off"` | How the Hub treats the run an agent token was issued for. Agent tokens carry a `run_id` claim. `"off"` ignores it; `"observe"` compares it with the agent's current run and logs and counts mismatches (metric `scion.hub.agent_token.run_scope`) without refusing any request. Enforcement cannot be selected yet. Read at startup, so a change needs a Hub restart. Environment: `SCION_SERVER_AUTH_AGENTRUNSCOPE`. |
+| `agent_run_scope_legacy_until` | string | | RFC 3339 time after which agent tokens issued without a `run_id` claim are no longer accepted by the run check (in `observe` mode, counted as mismatches). Empty means no cut-off. Environment: `SCION_SERVER_AUTH_AGENTRUNSCOPELEGACYUNTIL`. |
 
 ### Proxy Auth (`server.auth.proxy`)
 

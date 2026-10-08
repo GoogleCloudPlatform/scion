@@ -104,7 +104,11 @@ func (s *Server) handleChatSpaces(w http.ResponseWriter, r *http.Request) {
 	// List every project as a summary: the rail needs only identity, naming,
 	// the emoji annotation and the authorization inputs, not the agent,
 	// contributor and broker counts ListProjects computes per project.
-	allProjects, err := s.store.ListProjectSummaries(ctx, store.ProjectFilter{}, store.ListOptions{Limit: 1000})
+	// Project templates are blueprints, not chat spaces: exclude them here
+	// so no client lists them in the rail.
+	allProjects, err := s.store.ListProjectSummaries(ctx, store.ProjectFilter{
+		IsTemplate: new(bool), // exclude templates
+	}, store.ListOptions{Limit: 1000})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list projects", nil)
 		return
@@ -446,6 +450,23 @@ func (s *Server) handleListThreads(w http.ResponseWriter, r *http.Request, proje
 		return
 	}
 
+	// Lazy backfill: a project with no threads at all never got its
+	// #general topic (created before every creation path ensured one).
+	// The last thread of a space cannot be deleted, so zero threads never
+	// means a user removed them, and a #general a user deleted while other
+	// threads remain is not resurrected. Templates are not chat spaces.
+	// Best-effort: if the re-list fails, answer with the original (empty)
+	// list rather than failing the open; the next open retries.
+	if len(topics) == 0 && !project.IsTemplate() {
+		s.ensureProjectGeneralTopic(r.Context(), project)
+		if relisted, relistErr := wcs.ListTopics(r.Context(), projectID); relistErr != nil {
+			slog.Warn("chat threads: re-list after #general backfill failed",
+				"project_id", projectID, "error", relistErr)
+		} else {
+			topics = relisted
+		}
+	}
+
 	// Batch-fetch read states.
 	convKeys := make([]string, 0, len(topics))
 	for _, t := range topics {
@@ -535,6 +556,13 @@ func (s *Server) handleCreateThread(w http.ResponseWriter, r *http.Request, proj
 		return
 	}
 	if !s.authorize(w, r, projectResource(project), ActionRead) {
+		return
+	}
+
+	// Templates are not chat spaces, mirroring the agent-create rejection.
+	if project.IsTemplate() {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+			"cannot create threads in a template project", nil)
 		return
 	}
 
