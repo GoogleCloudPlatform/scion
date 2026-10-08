@@ -67,7 +67,11 @@ vi.mock('../../client/main.js', () => ({
     );
     return Promise.resolve();
   }),
-  stateManager: new EventTarget(),
+  stateManager: Object.assign(new EventTarget(), {
+    scopeGeneration: 0,
+    beginSeedEpoch: () => Symbol('seed-epoch'),
+    endSeedEpoch: () => {},
+  }),
 }));
 
 vi.mock('../../client/api.js', async (importOriginal) => {
