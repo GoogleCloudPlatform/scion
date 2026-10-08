@@ -98,7 +98,6 @@ type containerOutputs struct {
 	Status       string `json:"status,omitempty"`
 }
 
-// runHarnessProvision implements the sciontool harness provision flow.
 // provisionStatusRecorder records the outcome of one runHarnessProvision in
 // the bundle's status file (see hooks.WriteHarnessProvisionStatus), so a
 // pre-start failure can be surfaced with its reason. Recording is
@@ -135,6 +134,8 @@ func (r *provisionStatusRecorder) finish(err error) {
 	r.write(hooks.ProvisionStatusFailed, msg)
 }
 
+// runHarnessProvision implements the sciontool harness provision flow and
+// records its outcome in the bundle's status file.
 func runHarnessProvision(ctx context.Context, manifestPath string) error {
 	rec := &provisionStatusRecorder{}
 	err := runHarnessProvisionSteps(ctx, manifestPath, rec)
