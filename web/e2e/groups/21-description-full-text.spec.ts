@@ -129,48 +129,62 @@ test.describe('Groups list — full description text (F-1)', () => {
     });
   }
 
-  for (const vp of [
-    { width: 1440, height: 900 },
-    { width: 820, height: 1180 },
-  ]) {
-    test(`renders descriptions in full at ${vp.width}x${vp.height}`, async ({ page }) => {
-      await page.setViewportSize(vp);
-      await openList(page);
+  test('renders descriptions in full at 1440x900', async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await openList(page);
 
-      const header = page.locator('th', { hasText: 'Description' });
-      if (!(await header.isVisible())) {
-        // Column is hidden at this container width (pre-existing responsive
-        // behaviour): nothing to read, and nothing should leak into view.
-        await expect(page.locator('.description-text').first()).toBeHidden();
-        await expectTableFitsContainer(page);
-        return;
-      }
+    // The column must be shown at this width; no fallback branch.
+    await expect(page.locator('th', { hasText: 'Description' })).toBeVisible();
+    // Exactly the four seeded rows are listed.
+    await expect(page.locator('tbody tr')).toHaveCount(4);
 
-      const short = await measureRow(page, slugs.short);
-      const long = await measureRow(page, slugs.long);
-      const unbroken = await measureRow(page, slugs.unbroken);
-      const empty = await measureRow(page, slugs.empty);
+    const short = await measureRow(page, slugs.short);
+    const long = await measureRow(page, slugs.long);
+    const unbroken = await measureRow(page, slugs.unbroken);
+    const empty = await measureRow(page, slugs.empty);
 
-      expect(short.text.trim()).toBe(SHORT);
-      expect(long.text.trim()).toBe(LONG_PROSE);
-      expect(unbroken.text.trim()).toBe(UNBROKEN);
-      expect(empty.text.trim()).toBe('—');
+    expect(short.text.trim()).toBe(SHORT);
+    expect(long.text.trim()).toBe(LONG_PROSE);
+    expect(unbroken.text.trim()).toBe(UNBROKEN);
+    expect(empty.text.trim()).toBe('—');
 
-      for (const g of [short, long, unbroken, empty]) {
-        // Readable without hover: no title fallback, nothing clipped.
-        expect(g.hasTitle).toBe(false);
-        expect(g.scrollWidth).toBeLessThanOrEqual(g.clientWidth + 1);
-        expect(g.scrollHeight).toBeLessThanOrEqual(g.clientHeight + 1);
-        expect(g.spanRight).toBeLessThanOrEqual(g.cellRight + 1);
-      }
+    // Geometry first, so a negative control that keeps the title removal
+    // still exercises clipping/wrapping detection.
+    for (const g of [short, long, unbroken, empty]) {
+      // Nothing clipped and nothing spilling out of the cell.
+      expect(g.scrollWidth).toBeLessThanOrEqual(g.clientWidth + 1);
+      expect(g.scrollHeight).toBeLessThanOrEqual(g.clientHeight + 1);
+      expect(g.spanRight).toBeLessThanOrEqual(g.cellRight + 1);
+    }
 
-      // Long text and the unbroken token wrap onto multiple lines.
-      expect(long.clientHeight).toBeGreaterThan(long.lineHeight * 1.5);
-      expect(unbroken.clientHeight).toBeGreaterThan(unbroken.lineHeight * 1.5);
+    // Long text and the unbroken token wrap onto multiple lines.
+    expect(long.clientHeight).toBeGreaterThan(long.lineHeight * 1.5);
+    expect(unbroken.clientHeight).toBeGreaterThan(unbroken.lineHeight * 1.5);
 
-      await expectTableFitsContainer(page);
-    });
-  }
+    await expectTableFitsContainer(page);
+
+    // Readable without hover: no title fallback.
+    for (const g of [short, long, unbroken, empty]) {
+      expect(g.hasTitle).toBe(false);
+    }
+  });
+
+  test('hides the Description column at 820x1180 (container rule)', async ({ page }) => {
+    // At 820 the app shell sidebar leaves the table container below the
+    // 719px @container threshold, so the column is hidden (pre-existing
+    // responsive behaviour). This case covers the hidden state only.
+    await page.setViewportSize({ width: 820, height: 1180 });
+    await openList(page);
+
+    await expect(page.locator('tbody tr')).toHaveCount(4);
+    await expect(page.locator('th', { hasText: 'Description' })).toBeHidden();
+    const descriptions = page.locator('.description-text');
+    await expect(descriptions).toHaveCount(4);
+    for (let i = 0; i < 4; i++) {
+      await expect(descriptions.nth(i)).toBeHidden();
+    }
+    await expectTableFitsContainer(page);
+  });
 
   test('hides the Description column at 390x844 and keeps name/type/navigation', async ({
     page,
