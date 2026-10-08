@@ -288,8 +288,8 @@ func TestList_ExitReason_CommittedDisruption_RunningWithDeletionTimestamp(t *tes
 	// observes a terminal phase (List() polls, it does not watch). Once the
 	// pod has a deletionTimestamp and a live DisruptionTarget condition, it
 	// is already committed to that termination, so List must report the
-	// reason ahead of the pod actually stopping — without claiming the
-	// agent has stopped.
+	// reason, and the phase it ends in (error for this emptyDir-workspace
+	// pod, see k8sDisruptionPhase), ahead of the pod actually stopping.
 	now := metav1.Now()
 	pod := newPodForDisruptionTest("agent-committed-disruption", corev1.PodRunning)
 	pod.DeletionTimestamp = &now
@@ -305,8 +305,8 @@ func TestList_ExitReason_CommittedDisruption_RunningWithDeletionTimestamp(t *tes
 	if info.ExitReason != string(state.ExitReasonPreempted) {
 		t.Errorf("expected ExitReason %q, got %q", state.ExitReasonPreempted, info.ExitReason)
 	}
-	if info.Phase != "" {
-		t.Errorf("expected no Phase (agent has not stopped), got %q", info.Phase)
+	if info.Phase != string(state.PhaseError) {
+		t.Errorf("expected Phase %q for a committed disruption, got %q", state.PhaseError, info.Phase)
 	}
 }
 

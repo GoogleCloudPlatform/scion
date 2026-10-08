@@ -61,9 +61,11 @@ import (
 //     (multi-hub) heartbeat claims none.
 //   - The broker must be online and its previous heartbeat must be recent; a
 //     broker returning from an offline or stale period restarts every clock.
-//   - Only phase running is considered. created/provisioning/cloning/starting
-//     are dispatch phases in which the container may legitimately not exist
-//     yet; suspended/stopping/stopped/error are not running.
+//   - Only phases running and stopping are considered (stopping: the agent's
+//     shutdown report arrived but its final stopped report never did).
+//     created/provisioning/cloning/starting are dispatch phases in which the
+//     container may legitimately not exist yet; suspended/stopped/error are
+//     already settled.
 //   - Agents with a reincarnation, a queued lifecycle dispatch, or a lifecycle
 //     dispatch in flight on this Hub are skipped.
 //   - The agent must be absent from complete inventories for the whole grace
@@ -72,7 +74,8 @@ import (
 //     must be older than the grace period. last_seen, not the row's updated
 //     timestamp, is used because unrelated writes bump updated.
 //   - The final write is a single conditional UPDATE whose WHERE clause
-//     re-checks deleted_at, broker, phase, reincarnation state and last_seen.
+//     re-checks deleted_at, broker, phase (running or stopping), reincarnation
+//     state and last_seen.
 
 // DefaultMissingAgentGrace is the default time an agent must be continuously
 // absent from its broker's complete heartbeat inventory before the Hub marks
@@ -479,7 +482,7 @@ func (s *Server) reconcileMissingAgents(ctx context.Context, brokerID string, pr
 	var missing []store.Agent
 	for i := range agents {
 		a := &agents[i]
-		if a.Phase != string(state.PhaseRunning) {
+		if !missingReconcilePhase(a.Phase) {
 			continue
 		}
 		if report.present[a.ID] || report.unresolvedSlugs[a.Slug] {
@@ -539,9 +542,20 @@ func (s *Server) reconcileMissingAgents(ctx context.Context, brokerID string, pr
 			"broker_id", brokerID, "agent_id", a.ID, "agent", a.Slug, "project_id", a.ProjectID,
 			"previous_activity", a.Activity, "missing_since", firstSeen[a.ID], "last_seen", a.LastSeen,
 			"exit_reason", updated.ExitReason)
-		s.reconcileBrokerQuotaOnPhaseChange(ctx, updated, string(state.PhaseRunning), updated.Phase)
+		s.reconcileBrokerQuotaOnPhaseChange(ctx, updated, a.Phase, updated.Phase)
 		s.events.PublishAgentStatus(ctx, updated)
 	}
+}
+
+// missingReconcilePhase reports whether an agent in phase may be reconciled
+// as having no container: running, or stopping. An agent is left in stopping
+// when its container's shutdown report reached the Hub but the final stopped
+// report did not, for example when a preempted pod is removed before the
+// agent finishes shutting down (ptone/scion#2669). A Hub-driven stop or
+// suspend holds a lifecycle operation while its container goes away, so it
+// is skipped like any other lifecycle dispatch.
+func missingReconcilePhase(phase string) bool {
+	return phase == string(state.PhaseRunning) || phase == string(state.PhaseStopping)
 }
 
 // execMissingAgentMessage is the status message recorded on an agent marked

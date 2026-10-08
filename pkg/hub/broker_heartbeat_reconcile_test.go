@@ -280,7 +280,7 @@ func TestReconcileMissing_RecentLastSeenNotReconciled(t *testing.T) {
 // (container may not exist yet) and phases whose container is intentionally
 // absent.
 func TestReconcileMissing_NonRunningPhasesNotReconciled(t *testing.T) {
-	phases := []string{"created", "provisioning", "cloning", "starting", "suspended", "stopping", "stopped"}
+	phases := []string{"created", "provisioning", "cloning", "starting", "suspended", "stopped", "error"}
 	f := newReconcileFixture(t)
 	ids := map[string]string{}
 	for _, p := range phases {
@@ -295,6 +295,39 @@ func TestReconcileMissing_NonRunningPhasesNotReconciled(t *testing.T) {
 	for _, p := range phases {
 		f.assertUntouched(ids[p], p)
 	}
+}
+
+// TestReconcileMissing_StoppingAgent (ptone/scion#2669): an agent left in
+// stopping (its container's shutdown report arrived, its final stopped
+// report never did, for example a preempted pod removed before the agent
+// finished shutting down) is reconciled like a running one. A preempted or
+// evicted reason already recorded is kept; a lifecycle operation in flight
+// still skips it.
+func TestReconcileMissing_StoppingAgent(t *testing.T) {
+	f := newReconcileFixture(t)
+	plain := f.addAgent("stopping-plain", "stopping", "")
+	preempted := f.addAgent("stopping-preempted", "stopping", "", func(a *store.Agent) {
+		a.ExitReason = string(state.ExitReasonPreempted)
+		a.Message = "Agent pod was preempted"
+	})
+	busy := f.addAgent("stopping-busy", "stopping", "")
+
+	f.heartbeat(completeInventory())
+	require.True(t, f.hasClock(plain.ID), "a stopping agent absent from a complete inventory starts a missing clock")
+	require.True(t, f.hasClock(preempted.ID))
+	f.expireClock(plain.ID)
+	f.expireClock(preempted.ID)
+	f.expireClock(busy.ID)
+	end := f.srv.beginLifecycleOp(busy.ID)
+	defer end()
+	f.heartbeat(completeInventory())
+
+	f.assertReconciled(plain.ID)
+	got := f.get(preempted.ID)
+	assert.Equal(t, string(state.PhaseError), got.Phase)
+	assert.Equal(t, string(state.ExitReasonPreempted), got.ExitReason, "a recorded preempted reason is kept")
+	assert.Equal(t, "Agent pod was preempted", got.Message)
+	f.assertUntouched(busy.ID, "stopping")
 }
 
 // reconcileBlockedCase runs a scenario in which the agent's clock would have

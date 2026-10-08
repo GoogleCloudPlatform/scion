@@ -1801,7 +1801,9 @@ func (s *AgentStore) markAgentContainerMissing(ctx context.Context, id, brokerID
 				agent.IDEQ(uid),
 				agent.DeletedAtIsNil(),
 				agent.RuntimeBrokerIDEQ(brokerID),
-				agent.PhaseEQ("running"),
+				// stopping: the container's own shutdown report arrived
+				// but its final stopped report never did (ptone/scion#2669).
+				agent.PhaseIn(string(state.PhaseRunning), string(state.PhaseStopping)),
 				agent.Or(
 					agent.ReincarnationStateIsNil(),
 					agent.ReincarnationStateIn(store.ReincarnationStateNone, store.ReincarnationStateFailed),

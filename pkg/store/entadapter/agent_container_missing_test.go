@@ -94,6 +94,29 @@ func TestAgentStore_MarkAgentContainerMissing(t *testing.T) {
 		})
 	}
 
+	// ptone/scion#2669: an agent left in stopping (its final stopped report
+	// never arrived) is reconciled like a running one.
+	t.Run("marks stopping agent", func(t *testing.T) {
+		a := create("stopping", func(a *store.Agent) { a.Phase = "stopping"; a.Activity = "" })
+		got, err := s.MarkAgentContainerMissing(ctx, a.ID, "broker-1", cutoff, "gone")
+		require.NoError(t, err)
+		require.NotNil(t, got)
+		assert.Equal(t, "error", got.Phase)
+		assert.Equal(t, "container_missing", got.ExitReason)
+		assert.Equal(t, "gone", got.Message)
+	})
+
+	t.Run("keeps a preempted exit reason on a stopping agent", func(t *testing.T) {
+		a := create("stopping-preempted", func(a *store.Agent) { a.Phase = "stopping"; a.Activity = "" })
+		setExit(t, a.ID, "preempted", 143, "Agent pod was preempted")
+		got, err := s.MarkAgentContainerMissing(ctx, a.ID, "broker-1", cutoff, "gone")
+		require.NoError(t, err)
+		require.NotNil(t, got)
+		assert.Equal(t, "error", got.Phase)
+		assert.Equal(t, "preempted", got.ExitReason)
+		assert.Equal(t, "Agent pod was preempted", got.Message)
+	})
+
 	t.Run("replaces another exit reason", func(t *testing.T) {
 		a := create("replaced-reason", nil)
 		setExit(t, a.ID, "crashed", 1, "earlier crash")
@@ -116,6 +139,7 @@ func TestAgentStore_MarkAgentContainerMissing(t *testing.T) {
 	}{
 		{name: "other broker", broker: "broker-2"},
 		{name: "not running", broker: "broker-1", mutate: func(a *store.Agent) { a.Phase = "provisioning" }},
+		{name: "stopped", broker: "broker-1", mutate: func(a *store.Agent) { a.Phase = "stopped" }},
 		{name: "seen after cutoff", broker: "broker-1", mutate: func(a *store.Agent) { a.LastSeen = time.Now() }},
 		{name: "reincarnating", broker: "broker-1", after: func(t *testing.T, a *store.Agent) {
 			a.ReincarnationState = store.ReincarnationStatePending
