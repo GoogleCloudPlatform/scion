@@ -704,3 +704,22 @@ func TestReviewOfDocumentWithMarks(t *testing.T) {
 		t.Fatalf("deletion-wrapped review: %d %s", r.code, r.body)
 	}
 }
+
+// TestReviewFinalizeWithFilesMissing: a review whose files have not all
+// been uploaded answers 409 incomplete before any review check reads them.
+func TestReviewFinalizeWithFilesMissing(t *testing.T) {
+	f := newReviewFixture(t)
+	req := with(f.v1, "plan.md", reviewMarked).manifest("plan.md")
+	req.Kind = VersionKindReview
+	pend := f.createPending(userU, "/api/v1/artifacts/"+f.id+"/versions", req)
+	if len(pend.Upload.Required) == 0 {
+		t.Fatal("nothing to upload")
+	}
+	rec := f.finalizeReview(userU, pend.Version.Seq, 1)
+	if rec.Code != http.StatusConflict || errCode(t, rec) != CodeIncomplete {
+		t.Fatalf("finalize with files missing: %d %s", rec.Code, rec.Body.String())
+	}
+	if f.state(pend.Version.Seq) != VersionStatePending || f.current() != 1 {
+		t.Fatalf("state %q current %d", f.state(pend.Version.Seq), f.current())
+	}
+}

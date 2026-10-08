@@ -134,3 +134,37 @@ type httpRecorder struct {
 	code int
 	body string
 }
+
+// reviewNoticePanicDispatcher panics when asked to deliver a message, after saying
+// it was asked.
+type reviewNoticePanicDispatcher struct {
+	recordingDispatcher
+	asked chan struct{}
+}
+
+func (d *reviewNoticePanicDispatcher) DispatchAgentMessage(context.Context, *store.Agent, string, bool, *messages.StructuredMessage) error {
+	close(d.asked)
+	panic("dispatch failed")
+}
+
+// TestArtifactReviewNoticeRecoversPanic: a panic while sending a review
+// notice is recovered in its goroutine instead of crashing the hub (an
+// unrecovered panic in a goroutine ends the test binary).
+func TestArtifactReviewNoticeRecoversPanic(t *testing.T) {
+	srv, s := testServer(t)
+	p := artifactProject(t, s, "notice-panic")
+	owner, _ := artifactAgent(t, srv, s, p.ID, "notice-owner", AgentRoleBaseline)
+	d := &reviewNoticePanicDispatcher{asked: make(chan struct{})}
+	srv.SetDispatcher(d)
+	srv.notifyArtifactReview(context.Background(), artifacts.ReviewNotice{
+		ArtifactID: "a", Seq: 2, OwnerKind: artifacts.PrincipalKindAgent, OwnerRef: owner.ID,
+		ReviewerKind: artifacts.PrincipalKindUser, ReviewerRef: "u",
+	})
+	select {
+	case <-d.asked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the notice was not dispatched")
+	}
+	// Give the goroutine time to unwind; reaching the end is the test.
+	time.Sleep(200 * time.Millisecond)
+}
