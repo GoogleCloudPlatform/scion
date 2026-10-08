@@ -17,7 +17,6 @@ package entadapter
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	entsql "entgo.io/ent/dialect/sql"
@@ -398,11 +397,13 @@ func (s *ConversationStore) GetConversationByExternalRef(ctx context.Context, su
 // (surface, external_ref). The partial unique index in the schema is the guard
 // for concurrency safety.
 //
-// Implementation note: SQLite does not support ON CONFLICT with partial unique
-// indexes, so we implement this as a query-then-create/update pattern. The
-// partial unique index still prevents concurrent inserts from creating
-// duplicates; a constraint-violation on insert triggers a bounded retry that
-// updates the existing row instead.
+// Implementation note: the guard is a partial unique index, and the update
+// branch only overwrites the optional fields the caller supplied, so this is
+// a query-then-create/update pattern rather than one ON CONFLICT statement.
+// The partial unique index still prevents concurrent inserts from creating
+// duplicates; a unique violation on insert (classified from the driver's
+// error code by isUniqueViolation) triggers a bounded retry that updates the
+// existing row instead. Any other constraint failure is returned.
 func (s *ConversationStore) UpsertConversationByExternalRef(ctx context.Context, conv *store.Conversation) (*store.Conversation, error) {
 	if conv == nil {
 		return nil, fmt.Errorf("conversation is nil: %w", store.ErrInvalidInput)
@@ -508,7 +509,7 @@ func (s *ConversationStore) UpsertConversationByExternalRef(ctx context.Context,
 		if cErr != nil {
 			// If we hit a unique constraint violation (race with a concurrent insert),
 			// retry by looping back to query the now-existing row.
-			if isUniqueConstraintError(cErr) {
+			if isUniqueViolation(cErr) {
 				lastErr = cErr
 				continue
 			}
@@ -518,19 +519,6 @@ func (s *ConversationStore) UpsertConversationByExternalRef(ctx context.Context,
 	}
 
 	return nil, fmt.Errorf("upsert failed after %d retries: %w", maxRetries, lastErr)
-}
-
-// isUniqueConstraintError checks if the error is a unique constraint violation.
-func isUniqueConstraintError(err error) bool {
-	if err == nil {
-		return false
-	}
-	// ent wraps constraint errors — check the error message for both SQLite
-	// and Postgres constraint violation patterns.
-	errStr := err.Error()
-	return strings.Contains(errStr, "UNIQUE constraint failed") ||
-		strings.Contains(errStr, "duplicate key value violates unique constraint") ||
-		strings.Contains(errStr, "unique_violation")
 }
 
 // ---------------------------------------------------------------------------
@@ -647,7 +635,9 @@ func (s *ConversationStore) AddParticipant(ctx context.Context, p *store.Convers
 //
 // Semantics: after a successful call the participant row exists. Already-existing
 // rows (whether active or soft-removed) are not modified and return nil, not an
-// error. A race-induced unique-constraint violation on insert also returns nil.
+// error. A concurrent insert of the same participant is absorbed by ON CONFLICT
+// DO NOTHING and also returns nil. On success p.ID and p.JoinedAt hold the
+// stored row's values.
 func (s *ConversationStore) EnsureParticipant(ctx context.Context, p *store.ConversationParticipant) error {
 	if p.ConversationID == "" || p.PrincipalID == "" {
 		return fmt.Errorf("conversationID and principalID are required: %w", store.ErrInvalidInput)
@@ -666,27 +656,17 @@ func (s *ConversationStore) EnsureParticipant(ctx context.Context, p *store.Conv
 		return err
 	}
 
-	// Check for ANY existing row (active or soft-removed).
-	existing, err := s.client.ConversationParticipant.Query().
-		Where(
-			conversationparticipant.ConversationIDEQ(convUID),
-			conversationparticipant.PrincipalKindEQ(conversationparticipant.PrincipalKind(p.PrincipalKind)),
-			conversationparticipant.PrincipalIDEQ(p.PrincipalID),
-		).
-		Only(ctx)
-	if err != nil && !ent.IsNotFound(err) {
-		return err
-	}
-	if existing != nil {
-		// Row exists — leave it untouched (including left_at).
-		// Read back ID and JoinedAt so the caller's struct matches
-		// AddParticipant's post-condition on both paths.
-		p.ID = existing.ID.String()
-		p.JoinedAt = existing.JoinedAt
-		return nil
-	}
-
-	// No row exists — create it.
+	// Insert unless a row for (conversation, principal) already exists,
+	// active or soft-removed. ON CONFLICT DO NOTHING on the unique
+	// (conversation_id, principal_kind, principal_id) index leaves an
+	// existing row untouched (including left_at), and also covers a
+	// concurrent insert racing this one. Any other constraint failure (for
+	// example a primary-key clash on a caller-supplied ID) still surfaces.
+	//
+	// CreateBulk, not Create: ent's single-row Create+OnConflict reads the
+	// row back via RETURNING and fails with sql.ErrNoRows when DO NOTHING
+	// skips the insert; the bulk path tolerates zero returned rows. Must stay
+	// Exec, never Save, for the same reason (see CreateGitHubInstallation).
 	create := s.client.ConversationParticipant.Create().
 		SetConversationID(convUID).
 		SetPrincipalKind(conversationparticipant.PrincipalKind(p.PrincipalKind)).
@@ -707,17 +687,33 @@ func (s *ConversationStore) EnsureParticipant(ctx context.Context, p *store.Conv
 		create.SetRole(conversationparticipant.RoleMember)
 	}
 
-	created, err := create.Save(ctx)
+	err = s.client.ConversationParticipant.CreateBulk(create).
+		OnConflictColumns(
+			conversationparticipant.FieldConversationID,
+			conversationparticipant.FieldPrincipalKind,
+			conversationparticipant.FieldPrincipalID,
+		).
+		DoNothing().
+		Exec(ctx)
 	if err != nil {
-		// Race-safe: a concurrent insert may have created the row between
-		// our query and this insert. Treat that as success.
-		if isUniqueConstraintError(err) {
-			return nil
-		}
 		return mapError(err)
 	}
-	p.ID = created.ID.String()
-	p.JoinedAt = created.JoinedAt
+
+	// Read back the row that now exists, whether this call inserted it or it
+	// was already there, so the caller's struct matches AddParticipant's
+	// post-condition on every path.
+	row, err := s.client.ConversationParticipant.Query().
+		Where(
+			conversationparticipant.ConversationIDEQ(convUID),
+			conversationparticipant.PrincipalKindEQ(conversationparticipant.PrincipalKind(p.PrincipalKind)),
+			conversationparticipant.PrincipalIDEQ(p.PrincipalID),
+		).
+		Only(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+	p.ID = row.ID.String()
+	p.JoinedAt = row.JoinedAt
 	return nil
 }
 

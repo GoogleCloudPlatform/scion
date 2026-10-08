@@ -1606,3 +1606,113 @@ func TestEnsureParticipant_PopulatesCallerStruct(t *testing.T) {
 		"p.JoinedAt must be populated from existing row: expected=%v, got=%v",
 		dbRow.JoinedAt, ensureP.JoinedAt)
 }
+
+// TestConversationUniqueIndexViolation_IsUniqueViolation pins the error
+// UpsertConversationByExternalRef's retry depends on: a second active row
+// for the same (surface, external_ref) violates the partial unique index,
+// and isUniqueViolation recognizes it from the driver's error code on the
+// test backend (SQLite by default, Postgres under -tags integration)
+// (ptone/scion#3036).
+func TestConversationUniqueIndexViolation_IsUniqueViolation(t *testing.T) {
+	s := newTestConversationStore(t)
+	ctx := context.Background()
+
+	create := func() error {
+		return s.client.Conversation.Create().
+			SetID(uuid.New()).
+			SetKind(conversation.KindGroup).
+			SetSurface(conversation.SurfaceTelegram).
+			SetExternalRef("unique-idx-ref").
+			SetDriftState(conversation.DriftStateActive).
+			Exec(ctx)
+	}
+	require.NoError(t, create())
+	err := create()
+	require.Error(t, err)
+	assert.True(t, isUniqueViolation(err), "duplicate (surface, external_ref) must be a unique violation: %v", err)
+}
+
+// TestEnsureParticipant_ConcurrentInsertConverges races several
+// EnsureParticipant calls for the same principal: every call succeeds,
+// exactly one row exists, and every caller's struct carries that row's ID
+// (ptone/scion#3036).
+func TestEnsureParticipant_ConcurrentInsertConverges(t *testing.T) {
+	s := newTestConversationStore(t)
+	ctx := context.Background()
+
+	conv := newTestConversation()
+	require.NoError(t, s.CreateConversation(ctx, conv))
+	principal := uuid.NewString()
+
+	const goroutines = 8
+	parts := make([]*store.ConversationParticipant, goroutines)
+	errs := make([]error, goroutines)
+	var wg sync.WaitGroup
+	for i := 0; i < goroutines; i++ {
+		parts[i] = &store.ConversationParticipant{
+			ConversationID: conv.ID, PrincipalKind: "user", PrincipalID: principal,
+		}
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			errs[i] = s.EnsureParticipant(ctx, parts[i])
+		}(i)
+	}
+	wg.Wait()
+
+	participants, err := s.ListParticipants(ctx, conv.ID)
+	require.NoError(t, err)
+	require.Len(t, participants, 1)
+	for i := range parts {
+		require.NoError(t, errs[i], "goroutine %d", i)
+		assert.Equal(t, participants[0].ID, parts[i].ID, "goroutine %d: caller struct must carry the stored row's ID", i)
+		assert.False(t, parts[i].JoinedAt.IsZero(), "goroutine %d: JoinedAt must be populated", i)
+	}
+}
+
+// TestEnsureParticipant_ExistingRowIgnoresCallerID pins that a caller-supplied
+// ID does not replace an existing participant row: the call succeeds and
+// reports the stored row's ID.
+func TestEnsureParticipant_ExistingRowIgnoresCallerID(t *testing.T) {
+	s := newTestConversationStore(t)
+	ctx := context.Background()
+
+	conv := newTestConversation()
+	require.NoError(t, s.CreateConversation(ctx, conv))
+	principal := uuid.NewString()
+
+	first := &store.ConversationParticipant{ConversationID: conv.ID, PrincipalKind: "user", PrincipalID: principal}
+	require.NoError(t, s.EnsureParticipant(ctx, first))
+	require.NotEmpty(t, first.ID)
+
+	second := &store.ConversationParticipant{
+		ID: uuid.NewString(), ConversationID: conv.ID, PrincipalKind: "user", PrincipalID: principal,
+	}
+	require.NoError(t, s.EnsureParticipant(ctx, second))
+	assert.Equal(t, first.ID, second.ID)
+	assert.True(t, first.JoinedAt.Equal(second.JoinedAt))
+}
+
+// TestEnsureParticipant_PrimaryKeyClashSurfaces pins that only the
+// (conversation, principal) conflict is idempotent: reusing another
+// participant's ID for a different principal is a constraint failure that
+// must be returned, not reported as success (ptone/scion#3036).
+func TestEnsureParticipant_PrimaryKeyClashSurfaces(t *testing.T) {
+	s := newTestConversationStore(t)
+	ctx := context.Background()
+
+	conv := newTestConversation()
+	require.NoError(t, s.CreateConversation(ctx, conv))
+
+	first := &store.ConversationParticipant{ConversationID: conv.ID, PrincipalKind: "user", PrincipalID: uuid.NewString()}
+	require.NoError(t, s.EnsureParticipant(ctx, first))
+
+	clash := &store.ConversationParticipant{
+		ID: first.ID, ConversationID: conv.ID, PrincipalKind: "user", PrincipalID: uuid.NewString(),
+	}
+	require.Error(t, s.EnsureParticipant(ctx, clash))
+
+	participants, err := s.ListParticipants(ctx, conv.ID)
+	require.NoError(t, err)
+	assert.Len(t, participants, 1)
+}
