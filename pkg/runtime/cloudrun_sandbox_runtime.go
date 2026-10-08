@@ -251,9 +251,51 @@ func (s *sandboxStateStore) load() {
 	s.entries = entries
 }
 
-// reconcile checks each entry for liveness and removes confirmed-dead
-// entries. Called once at startup. If the file is stale from a previous
-// Instance, all entries are dead and will be pruned.
+// sandboxReconcileProbeTimeout bounds each start-up liveness probe. A
+// variable so tests can shorten it.
+var sandboxReconcileProbeTimeout = 5 * time.Second
+
+// sandboxGoneOutputs are the output fragments (lower case) that make a
+// failed probe a definitive "this sandbox does not exist" answer.
+//
+// UNVERIFIED: the sandbox CLI's wording for an unknown sandbox is not
+// documented and these fragments have not been checked against the real
+// binary. They err on the side of keeping entries: a dead sandbox whose
+// output matches none of them keeps its entry, which Delete still removes,
+// whereas a dropped entry of a live sandbox cannot be recovered.
+var sandboxGoneOutputs = []string{"not found", "no such", "does not exist"}
+
+// sandboxProbeSaysGone reports whether a failed `sandbox exec <name> --
+// /bin/true` probe (out, err, run under probeCtx) shows that the sandbox
+// is gone. Only a CLI that exited non-zero on its own, before the probe's
+// deadline, with not-found output qualifies. A timeout, a cancelled
+// context, a CLI killed by a signal or one that could not start, and any
+// other output are ambiguous: a slow but live sandbox can produce them.
+func sandboxProbeSaysGone(probeCtx context.Context, out string, err error) bool {
+	if err == nil || probeCtx.Err() != nil {
+		return false
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || !exitErr.Exited() {
+		return false
+	}
+	lower := strings.ToLower(out)
+	for _, frag := range sandboxGoneOutputs {
+		if strings.Contains(lower, frag) {
+			return true
+		}
+	}
+	return false
+}
+
+// reconcile checks each entry for liveness and removes entries whose
+// sandbox is confirmed gone. Called once at startup. Stopped entries are
+// removed. A running entry is removed only when its probe gives a
+// definitive not-found answer (sandboxProbeSaysGone); on a timeout or any
+// other failure the entry is kept and a warning logged. List reads only
+// the state and the sandbox CLI has no list command, so dropping the entry
+// of a slow but live sandbox would leave it running with no way to stop or
+// delete it through scion (ptone/scion#3738).
 func (s *sandboxStateStore) reconcile(bin string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -269,16 +311,21 @@ func (s *sandboxStateStore) reconcile(bin string) {
 			continue
 		}
 		// Probe liveness: try to exec 'true' in the sandbox.
-		// If it fails, the sandbox is dead.
 		// R1: absolute path required — the sandbox launcher resolves argv[0]
 		// before the sandbox environment (including PATH) is in effect.
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		_, err := runSimpleCommand(ctx, bin, "exec", name, "--", "/bin/true")
+		ctx, cancel := context.WithTimeout(context.Background(), sandboxReconcileProbeTimeout)
+		out, err := runSimpleCommand(ctx, bin, "exec", name, "--", "/bin/true")
+		gone := sandboxProbeSaysGone(ctx, out, err)
 		cancel()
-		if err != nil {
-			runtimeLog.Info("sandbox state reconcile: sandbox not alive, removing",
+		switch {
+		case err == nil:
+		case gone:
+			runtimeLog.Info("sandbox state reconcile: sandbox not found, removing",
 				"name", name, "agentID", entry.AgentID)
 			toRemove = append(toRemove, name)
+		default:
+			runtimeLog.Warn("sandbox state reconcile: liveness probe failed without a not-found answer; keeping the entry",
+				"name", name, "agentID", entry.AgentID, "error", err)
 		}
 	}
 
