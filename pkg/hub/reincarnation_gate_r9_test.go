@@ -34,6 +34,10 @@ package hub
 // still created (201, exactly as at base) but with zero participant rows —
 // not just a missing phantom, no rows at all, matching the base behaviour
 // this delta must not regress.
+//
+// Since authorizeDMPeer (authorizeChatSend), these sends are refused
+// before anything is persisted: 403 for a peer that does not resolve with
+// its kind, 503 for a store error. The no-row assertions still hold.
 
 import (
 	"context"
@@ -78,7 +82,7 @@ func TestChatV2_A2511_R1_UserUser_AgentUUIDAsPeer_NoPhantomRow(t *testing.T) {
 	require.NoError(t, err)
 
 	code, parts := sendChatV2AndSnapshot(t, srv, s, key)
-	require.Equal(t, http.StatusCreated, code, "the send itself must succeed exactly as at base")
+	require.Equal(t, http.StatusForbidden, code, "authorizeDMPeer refuses a peer that is not a user")
 	assert.Empty(t, parts, "no participant rows may be written when the peer slot names an agent, not a user")
 
 	// Also confirm agent Z gains no listing from this: it must not appear in
@@ -98,7 +102,7 @@ func TestChatV2_A2511_R1_UserUser_GhostUUIDAsPeer_NoPhantomRow(t *testing.T) {
 	require.NoError(t, err)
 
 	code, parts := sendChatV2AndSnapshot(t, srv, s, key)
-	require.Equal(t, http.StatusCreated, code)
+	require.Equal(t, http.StatusForbidden, code)
 	assert.Empty(t, parts, "no participant rows may be written when the peer slot resolves to nothing")
 }
 
@@ -113,7 +117,7 @@ func TestChatV2_A2511_R1_AgentUser_GhostAgentAsPeer_NoPhantomRow(t *testing.T) {
 	key := "dm:agent:" + tid("a2511-ghost-agent") + ":user:" + DevUserID
 
 	code, parts := sendChatV2AndSnapshot(t, srv, s, key)
-	require.Equal(t, http.StatusCreated, code)
+	require.Equal(t, http.StatusForbidden, code)
 	assert.Empty(t, parts, "no participant rows may be written when the peer slot names a nonexistent agent")
 }
 
@@ -135,7 +139,7 @@ func TestChatV2_A2511_R1_AgentUser_UserUUIDInAgentSlot_NoPhantomRow(t *testing.T
 	require.NoError(t, s.CreateUser(ctx, u))
 	key := "dm:agent:" + u.ID + ":user:" + DevUserID
 	code, parts := sendChatV2AndSnapshot(t, srv, s, key)
-	require.Equal(t, http.StatusCreated, code)
+	require.Equal(t, http.StatusForbidden, code)
 	assert.Empty(t, parts)
 }
 
@@ -187,7 +191,7 @@ func TestChatV2_A2511_O1_UserSlot_StoreError_NoPhantomRow(t *testing.T) {
 	require.NoError(t, err)
 
 	code, parts := sendChatV2AndSnapshot(t, srv, s, key)
-	require.Equal(t, http.StatusCreated, code)
+	require.Equal(t, http.StatusServiceUnavailable, code, "authorizeDMPeer fails closed on a store error")
 	assert.Empty(t, parts, "a store error on the peer lookup must not write a participant row")
 }
 
@@ -202,7 +206,7 @@ func TestChatV2_A2511_O1_AgentSlot_StoreError_NoPhantomRow(t *testing.T) {
 	key := "dm:agent:" + agentID + ":user:" + DevUserID
 
 	code, parts := sendChatV2AndSnapshot(t, srv, s, key)
-	require.Equal(t, http.StatusCreated, code)
+	require.Equal(t, http.StatusServiceUnavailable, code, "authorizeDMPeer fails closed on a store error")
 	assert.Empty(t, parts, "a store error on the peer lookup must not write a participant row")
 }
 
