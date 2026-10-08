@@ -216,7 +216,8 @@ func (s *Server) handleProjectCacheNotify(w http.ResponseWriter, r *http.Request
 
 	storagePath := storage.ProjectWorkspaceStoragePath(s.HubID(), project.ID)
 	if err := s.syncHubWorkspaceFromGCS(ctx, stor.Bucket(), storagePath+"/files", cachePath); err != nil {
-		RuntimeError(w, "Failed to download workspace from GCS: "+err.Error())
+		s.workspaceLog.Error("failed to download workspace from GCS into cache", "project_id", project.ID, "error", err)
+		RuntimeError(w, "Failed to download workspace from GCS")
 		return
 	}
 

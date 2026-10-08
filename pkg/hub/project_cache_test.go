@@ -17,9 +17,12 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -311,6 +314,44 @@ func TestProjectCacheRefresh_MethodNotAllowed(t *testing.T) {
 	rec := doRequest(t, srv, http.MethodGet,
 		fmt.Sprintf("/api/v1/projects/%s/workspace/cache/refresh", project.ID), nil)
 	assert.Equal(t, http.StatusMethodNotAllowed, rec.Code)
+}
+
+// TestHandleProjectCacheNotify_DownloadFailure_FixedText checks that a failed
+// GCS download into the hub cache sends the client a fixed message, and that
+// the download error detail is logged at the hub with the project ID and not
+// sent to the client (ptone/scion#3572).
+func TestHandleProjectCacheNotify_DownloadFailure_FixedText(t *testing.T) {
+	identityTestHome(t)
+	srv, st := testServer(t)
+	ctx := context.Background()
+	srv.SetStorage(newMockStorage("bucket"))
+
+	const detail = "sync detail /internal/cache/path gs://bucket/prefix 403"
+	orig := syncFromGCSIntoHubWorkspace
+	t.Cleanup(func() { syncFromGCSIntoHubWorkspace = orig })
+	syncFromGCSIntoHubWorkspace = func(context.Context, string, string, string) error {
+		return errors.New(detail)
+	}
+
+	var logs bytes.Buffer
+	srv.workspaceLog = slog.New(slog.NewTextHandler(&logs, nil))
+
+	project := sharedWorkspaceProject("cache-notify-fail")
+	require.NoError(t, st.CreateProject(ctx, project))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/projects/"+project.ID+"/workspace/cache/notify", nil)
+	rec := httptest.NewRecorder()
+	srv.handleProjectCacheNotify(rec, req, project)
+
+	require.Equal(t, http.StatusBadGateway, rec.Code, rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), detail)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, ErrCodeRuntimeError, errResp.Error.Code)
+	assert.Equal(t, "Failed to download workspace from GCS", errResp.Error.Message)
+
+	assert.Contains(t, logs.String(), detail)
+	assert.Contains(t, logs.String(), "project_id="+project.ID)
 }
 
 // ============================================================================
