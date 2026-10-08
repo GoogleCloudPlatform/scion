@@ -235,6 +235,19 @@ const (
 // success, a 2xx stream cut before response.completed, and a transport
 // error with no status code.
 //
+// codex.websocket_request (record_websocket_request, one per request sent
+// over the Responses websocket transport) is deliberately not matched,
+// even when it reports success=false with error.message (ptone/scion#2995).
+// Unlike the HTTP transport, the websocket transport's stream_request
+// (codex-api/src/endpoint/responses_websocket.rs) returns the response
+// stream before the request is sent, and a failed send is delivered as an
+// Err on that stream. core/src/client.rs wraps websocket and HTTP streams
+// in the same map_response_events, so that Err reaches
+// see_event_completed_failed and is already counted once above. Matching
+// websocket_request as well would count every failed websocket request
+// twice. A successful websocket_request is ignored for the same reason a
+// successful api_request is. Verified against codex rust-v0.161.0.
+//
 // Token mapping (design §5, §3.2), for the success case only: input =
 // input_token_count − cached_token_count − cache_write_token_count; output
 // = output_token_count; cache_read = cached_token_count; cache_write =
