@@ -1735,7 +1735,7 @@ func (w *abortOnProjectCallStore) GetProject(ctx context.Context, id string) (*s
 	}
 	w.srv.Load().scheduledRuntime().abort()
 	p, err := w.Store.GetProject(ctx, id)
-	if err != nil || !w.foreign {
+	if err != nil || p == nil || !w.foreign {
 		return p, err
 	}
 	other := *p
