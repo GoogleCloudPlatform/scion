@@ -73,6 +73,23 @@ describe('scion-action-sheet', () => {
     expect(el.shadowRoot!.querySelector('.cancel')?.textContent?.trim()).toBe('Cancel');
   });
 
+  it('closes on Back/Forward, and only listens while open', async () => {
+    const el = await mount();
+    const closed = vi.fn();
+    el.addEventListener('action-sheet-close', closed);
+    // Closed: a popstate leaves it alone.
+    window.dispatchEvent(new PopStateEvent('popstate', { state: null }));
+    await el.updateComplete;
+    expect(closed).not.toHaveBeenCalled();
+
+    const dialog = await openSheet(el);
+    window.dispatchEvent(new PopStateEvent('popstate', { state: null }));
+    await el.updateComplete;
+    expect(el.open).toBe(false);
+    expect(dialog.open).toBe(false);
+    expect(closed).toHaveBeenCalledTimes(1);
+  });
+
   it('marks destructive and disabled rows', async () => {
     const el = await mount();
     expect(item(el, 'delete').classList.contains('destructive')).toBe(true);
