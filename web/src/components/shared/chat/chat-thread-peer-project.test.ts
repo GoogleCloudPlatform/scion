@@ -52,8 +52,8 @@ const store = vi.hoisted(() => ({
 
 const apiFetch = vi.hoisted(() => vi.fn<(path: string, init?: unknown) => Promise<Response>>());
 
-vi.mock('../../../client/main.js', () => ({
-  navigateTo: vi.fn(),
+vi.mock('../../../client/main.js', async () => ({
+  ...(await import('../../../client/__fixtures__/main-stub.js')),
   stateManager: globalMap.stateManager,
 }));
 

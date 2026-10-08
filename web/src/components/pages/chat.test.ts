@@ -53,22 +53,7 @@ import { FakeEventSource } from '../../client/__fixtures__/agent-store-harness.j
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-vi.mock('../../client/main.js', () => ({
-  navigateTo: vi.fn(),
-  pushRoute: vi.fn((path: string) => {
-    window.history.pushState({}, '', path);
-    return Promise.resolve();
-  }),
-  replaceRoute: vi.fn((path: string) => {
-    window.history.replaceState(
-      window.history.state,
-      '',
-      path + window.location.search + window.location.hash
-    );
-    return Promise.resolve();
-  }),
-  stateManager: new EventTarget(),
-}));
+vi.mock('../../client/main.js', () => import('../../client/__fixtures__/main-stub.js'));
 
 vi.mock('../../client/api.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../client/api.js')>();

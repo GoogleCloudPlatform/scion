@@ -52,9 +52,7 @@ vi.mock('../../client/api.js', () => ({
   ),
 }));
 
-vi.mock('../../client/state.js', () => ({
-  stateManager: new EventTarget(),
-}));
+vi.mock('../../client/state.js', () => import('../../client/__fixtures__/state-stub.js'));
 
 const { stateManager } = await import('../../client/state.js');
 

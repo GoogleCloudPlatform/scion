@@ -65,12 +65,8 @@ const fakeState = vi.hoisted(() => {
   return t;
 });
 
-vi.mock('../../client/main.js', () => ({
-  navigateTo: vi.fn(),
-  pushRoute: vi.fn((path: string) => {
-    window.history.pushState({}, '', path);
-    return Promise.resolve();
-  }),
+vi.mock('../../client/main.js', async () => ({
+  ...(await import('../../client/__fixtures__/main-stub.js')),
   replaceRoute: vi.fn((path: string) => {
     window.history.replaceState(window.history.state, '', path);
     return Promise.resolve();
