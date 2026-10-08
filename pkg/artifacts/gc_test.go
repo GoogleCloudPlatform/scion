@@ -474,3 +474,51 @@ func TestBlobMarkClearsReferenced(t *testing.T) {
 		}
 	})
 }
+
+// hangingDeleteStorage is local storage whose Delete waits for its
+// context to end.
+type hangingDeleteStorage struct{ *storage.LocalStorage }
+
+func (hangingDeleteStorage) Delete(ctx context.Context, _ string) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+// TestBlobSweepDeleteHasDeadline: a delete that hangs is cut off, the
+// pass reports it, and the blob and its state stay for the next pass.
+func TestBlobSweepDeleteHasDeadline(t *testing.T) {
+	old := gcDeleteTimeout
+	gcDeleteTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { gcDeleteTimeout = old })
+	f := newFixture(t, false)
+	ctx := context.Background()
+	body := []byte("stuck")
+	d := sha(body)
+	if _, err := f.local.Upload(ctx, BlobPath("hub-1", d), bytes.NewReader(body), storage.UploadOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	t0 := time.Now()
+	if err := f.store.MarkBlobs(ctx, []string{d}, t0.Add(-2*DefaultGCGrace)); err != nil {
+		t.Fatal(err)
+	}
+	g := &BlobSweeper{}
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := g.Sweep(ctx, f.store, hangingDeleteStorage{f.local}, "hub-1", DefaultGCGrace, t0)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("sweep with a hanging delete: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the sweep hung on a delete")
+	}
+	if !f.blobExists(d) {
+		t.Errorf("blob gone after a failed delete")
+	}
+	if n, err := f.store.ReclaimBlobs(ctx, t0.Add(-DefaultGCGrace), 10, func(string) error { return nil }); err != nil || n != 1 {
+		t.Errorf("state lost after a failed delete: %d %v", n, err)
+	}
+}

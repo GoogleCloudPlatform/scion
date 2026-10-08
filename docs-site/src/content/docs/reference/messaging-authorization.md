@@ -65,6 +65,8 @@ for delivery to succeed.
 | Agent outbound reach | Agent `messageMode` set to `hub` | `project` | Existing managers, subject to the [grant guard](#hub-mode-grant-guard) below |
 | Receiving project | `crossProjectInbound` on the destination project | `none` | Active direct project owner or local, unscoped Hub administrator |
 
+`cross_project_messaging_enabled` also decides whether artifacts can be shared with, or moved to, another project (see [Grants](/scion/reference/artifacts/#grants)). Turning it off stops new cross-project artifact grants and moves; it does not revoke grants that already exist, which have to be removed one by one.
+
 The **receiving project's inbound policy** is directional:
 
 | Policy | Meaning |

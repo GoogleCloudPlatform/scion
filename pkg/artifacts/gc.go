@@ -46,6 +46,9 @@ const (
 	gcReclaimBatch = 200
 )
 
+// gcDeleteTimeout bounds one blob delete. A variable so tests can lower it.
+var gcDeleteTimeout = 30 * time.Second
+
 // BlobSweeper sweeps the blobs of one hub, a page of the blob listing per
 // pass. It is not safe for concurrent use; run one per hub.
 type BlobSweeper struct {
@@ -80,7 +83,13 @@ func (g *BlobSweeper) Sweep(ctx context.Context, st Store, blobs storage.Storage
 	}
 	g.cursor = res.NextOffset
 	deleted, err = st.ReclaimBlobs(ctx, now.Add(-grace), gcReclaimBatch, func(d string) error {
-		err := blobs.Delete(ctx, BlobPath(hubID, d))
+		// The delete runs inside the store transaction that holds the
+		// blob's state; a deadline keeps a stuck object store from holding
+		// it (and, on SQLite, the database) indefinitely. A timeout rolls
+		// the transaction back and the blob stays.
+		dctx, cancel := context.WithTimeout(ctx, gcDeleteTimeout)
+		defer cancel()
+		err := blobs.Delete(dctx, BlobPath(hubID, d))
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil
 		}

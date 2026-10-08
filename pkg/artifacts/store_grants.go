@@ -104,7 +104,24 @@ func (s *sqlStore) insertGrant(ctx context.Context, tx *sql.Tx, g *Grant) error 
 
 // DeleteGrant implements Store.
 func (s *sqlStore) DeleteGrant(ctx context.Context, artifactID, grantID string) error {
-	res, err := s.db.ExecContext(ctx, s.rebind(`DELETE FROM artifact_grant
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("artifacts: begin delete grant: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := s.lockLiveArtifact(ctx, tx, artifactID); err != nil {
+		return err
+	}
+	var home int
+	if err := tx.QueryRowContext(ctx, s.rebind(`SELECT COUNT(*) FROM artifact_grant g JOIN artifact a ON a.id = g.artifact_id
+		WHERE g.id = ? AND g.artifact_id = ? AND g.subject_kind = ? AND g.subject_ref = a.scope_ref`),
+		grantID, artifactID, SubjectScope).Scan(&home); err != nil {
+		return fmt.Errorf("artifacts: check home grant: %w", err)
+	}
+	if home > 0 {
+		return ErrConflict
+	}
+	res, err := tx.ExecContext(ctx, s.rebind(`DELETE FROM artifact_grant
 		WHERE id = ? AND artifact_id = ? AND subject_kind IN (?, ?)`), grantID, artifactID, SubjectPrincipal, SubjectScope)
 	if err != nil {
 		return fmt.Errorf("artifacts: delete grant: %w", err)
@@ -116,68 +133,88 @@ func (s *sqlStore) DeleteGrant(ctx context.Context, artifactID, grantID string) 
 	if n == 0 {
 		return ErrNotFound
 	}
-	return nil
+	return commit(tx)
 }
 
 // SetExpiry implements Store.
 func (s *sqlStore) SetExpiry(ctx context.Context, artifactID string, expiresAt *time.Time) (*Artifact, error) {
-	res, err := s.db.ExecContext(ctx, s.rebind(`UPDATE artifact SET expires_at = ? WHERE id = ? AND deleted_at IS NULL`),
-		s.nullTimeArg(expiresAt), artifactID)
-	if err != nil {
-		return nil, fmt.Errorf("artifacts: set expiry: %w", err)
-	}
-	if n, err := res.RowsAffected(); err != nil || n != 1 {
-		if err != nil {
-			return nil, fmt.Errorf("artifacts: set expiry: %w", err)
-		}
-		return nil, ErrNotFound
-	}
-	return s.GetArtifact(ctx, artifactID)
+	return s.UpdateArtifact(ctx, artifactID, ArtifactUpdate{SetExpiry: true, ExpiresAt: expiresAt})
 }
 
-// Rehome implements Store.
-func (s *sqlStore) Rehome(ctx context.Context, artifactID string, homeGrant *Grant) (*Artifact, error) {
-	if homeGrant == nil || homeGrant.SubjectKind != SubjectScope || homeGrant.SubjectRef == "" ||
-		homeGrant.Permission != GrantRead || homeGrant.ArtifactID != artifactID {
-		return nil, errors.New("artifacts: Rehome needs the new home scope's read grant")
+// UpdateArtifact implements Store.
+func (s *sqlStore) UpdateArtifact(ctx context.Context, artifactID string, u ArtifactUpdate) (*Artifact, error) {
+	if g := u.HomeGrant; g != nil && (g.SubjectKind != SubjectScope || g.SubjectRef == "" ||
+		g.Permission != GrantRead || g.ArtifactID != artifactID || u.MaxGrants <= 0) {
+		return nil, errors.New("artifacts: a move needs the new home scope's read grant and a grant cap")
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return nil, fmt.Errorf("artifacts: begin rehome: %w", err)
+		return nil, fmt.Errorf("artifacts: begin update: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 	if err := s.lockLiveArtifact(ctx, tx, artifactID); err != nil {
 		return nil, err
+	}
+	if u.HomeGrant != nil {
+		if err := s.moveArtifact(ctx, tx, artifactID, u.HomeGrant, u.MaxGrants); err != nil {
+			return nil, err
+		}
+	}
+	if u.SetExpiry {
+		if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE artifact SET expires_at = ? WHERE id = ?`),
+			s.nullTimeArg(u.ExpiresAt), artifactID); err != nil {
+			return nil, fmt.Errorf("artifacts: set expiry: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("artifacts: commit update: %w", err)
+	}
+	return s.GetArtifact(ctx, artifactID)
+}
+
+// moveArtifact moves a locked artifact to homeGrant's scope inside tx.
+func (s *sqlStore) moveArtifact(ctx context.Context, tx *sql.Tx, artifactID string, homeGrant *Grant, maxGrants int) error {
+	var old string
+	if err := tx.QueryRowContext(ctx, s.rebind(`SELECT scope_ref FROM artifact WHERE id = ?`), artifactID).Scan(&old); err != nil {
+		return fmt.Errorf("artifacts: read home: %w", err)
+	}
+	scope := homeGrant.SubjectRef
+	if scope == old {
+		return nil
 	}
 	// The key stays unique per owner and scope among live artifacts.
 	var clash int
 	if err := tx.QueryRowContext(ctx, s.rebind(`SELECT COUNT(*) FROM artifact a JOIN artifact b
 		ON b.owner_kind = a.owner_kind AND b.owner_ref = a.owner_ref AND b."key" = a."key"
 		WHERE a.id = ? AND a."key" IS NOT NULL AND b.id <> a.id AND b.deleted_at IS NULL
-		AND b.scope_kind = a.scope_kind AND b.scope_ref = ?`), artifactID, homeGrant.SubjectRef).Scan(&clash); err != nil {
-		return nil, fmt.Errorf("artifacts: check key: %w", err)
+		AND b.scope_kind = a.scope_kind AND b.scope_ref = ?`), artifactID, scope).Scan(&clash); err != nil {
+		return fmt.Errorf("artifacts: check key: %w", err)
 	}
 	if clash > 0 {
-		return nil, ErrConflict
+		return ErrConflict
 	}
-	if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE artifact SET scope_ref = ? WHERE id = ?`),
-		homeGrant.SubjectRef, artifactID); err != nil {
-		return nil, fmt.Errorf("artifacts: rehome: %w", err)
+	if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE artifact SET scope_ref = ? WHERE id = ?`), scope, artifactID); err != nil {
+		return fmt.Errorf("artifacts: move: %w", err)
 	}
-	var n int
-	if err := tx.QueryRowContext(ctx, s.rebind(`SELECT COUNT(*) FROM artifact_grant
-		WHERE artifact_id = ? AND subject_kind = ? AND subject_ref = ?`), artifactID, SubjectScope, homeGrant.SubjectRef).Scan(&n); err != nil {
-		return nil, fmt.Errorf("artifacts: find home grant: %w", err)
+	// The old home loses its grant: a move is not a share.
+	if _, err := tx.ExecContext(ctx, s.rebind(`DELETE FROM artifact_grant
+		WHERE artifact_id = ? AND subject_kind = ? AND subject_ref = ?`), artifactID, SubjectScope, old); err != nil {
+		return fmt.Errorf("artifacts: drop old home grant: %w", err)
 	}
-	if n == 0 {
-		if err := s.insertGrant(ctx, tx, homeGrant); err != nil {
-			return nil, err
-		}
+	var have, total int
+	if err := tx.QueryRowContext(ctx, s.rebind(`SELECT
+		COALESCE(SUM(CASE WHEN subject_kind = ? AND subject_ref = ? THEN 1 ELSE 0 END), 0), COUNT(*)
+		FROM artifact_grant WHERE artifact_id = ? AND subject_kind IN (?, ?)`),
+		SubjectScope, scope, artifactID, SubjectPrincipal, SubjectScope).Scan(&have, &total); err != nil {
+		return fmt.Errorf("artifacts: count grants: %w", err)
 	}
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("artifacts: commit rehome: %w", err)
+	if have > 0 {
+		return nil
 	}
-	return s.GetArtifact(ctx, artifactID)
+	if total >= maxGrants {
+		return ErrTooManyGrants
+	}
+	return s.insertGrant(ctx, tx, homeGrant)
 }
 
 // SweepExpired implements Store.

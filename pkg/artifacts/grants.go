@@ -302,19 +302,9 @@ func (s *Service) handleDeleteGrant(w http.ResponseWriter, r *http.Request, id, 
 	if !ok {
 		return
 	}
-	grants, err := b.store.ListGrants(r.Context(), a.ID)
-	if err != nil {
-		slog.ErrorContext(r.Context(), "artifacts: list grants failed", "error", err)
-		writeError(w, http.StatusInternalServerError, "internal", "could not read the artifact's grants")
-		return
-	}
-	for _, g := range grants {
-		if g.ID == grantID && g.SubjectKind == SubjectScope && g.SubjectRef == a.ScopeRef {
-			writeError(w, http.StatusConflict, "home_grant", "the home project's grant cannot be removed; move the artifact instead")
-			return
-		}
-	}
 	switch err := b.store.DeleteGrant(r.Context(), a.ID, grantID); {
+	case errors.Is(err, ErrConflict):
+		writeError(w, http.StatusConflict, "home_grant", "the home project's grant cannot be removed; move the artifact instead")
 	case errors.Is(err, ErrNotFound):
 		writeNotFound(w)
 	case err != nil:
@@ -333,10 +323,13 @@ func (s *Service) handleDeleteGrant(w http.ResponseWriter, r *http.Request, id, 
 // links cut short and the grants that will be removed (design A1, A2).
 //
 // scopeRef moves the artifact to another home project (D16). It needs, on
-// top of canAdminister, the gate publishing into that project has:
-// Permits(artifact.create) there, and Authorize(artifact.create) there or
-// ownership. Existing grants, the old home project's included, are kept;
-// the new home project gets a read grant unless it already has one.
+// top of canAdminister, exactly the gate publishing into that project has
+// (Permits and Authorize for artifact.create there, for every caller), and
+// because it gives that project's members access, the host's switch for
+// sharing across projects. The old home project's grant is removed (a
+// move is not a share; keeping access takes an explicit grant); the new
+// home project gets a read grant unless it already has a scope grant.
+// Both changes happen in one store transaction.
 func (s *Service) handlePatchArtifact(w http.ResponseWriter, r *http.Request, id string) {
 	b, a, ok := s.adminArtifact(w, r, id)
 	if !ok {
@@ -362,29 +355,28 @@ func (s *Service) handlePatchArtifact(w http.ResponseWriter, r *http.Request, id
 			writeError(w, http.StatusBadRequest, "bad_request", "scopeRef must be a project id")
 			return
 		}
-		kind, ref, _, _ := s.host.Principal(ctx)
-		owner := kind == a.OwnerKind && ref == a.OwnerRef
-		if !s.host.Permits(ctx, scope, PermissionCreate) || !(owner || s.host.Authorize(ctx, scope, PermissionCreate)) {
+		if !s.host.Permits(ctx, scope, PermissionCreate) || !s.host.Authorize(ctx, scope, PermissionCreate) {
 			writeError(w, http.StatusForbidden, "forbidden", "not allowed to publish into that project")
 			return
 		}
-	}
-	updated := a
-	if req.ScopeRef != nil && *req.ScopeRef != a.ScopeRef {
-		kind, ref, _, _ := s.host.Principal(ctx)
-		g := &Grant{
-			ID: uuid.NewString(), ArtifactID: a.ID, SubjectKind: SubjectScope, SubjectRef: *req.ScopeRef,
-			Permission: GrantRead, CreatedByRef: PrincipalRef(kind, ref), CreatedAt: now.UTC(),
-		}
-		var err error
-		updated, err = b.store.Rehome(ctx, a.ID, g)
-		if !s.patchStored(w, r, err) {
+		if scope != a.ScopeRef && !s.crossScopeAllowed(ctx) {
+			writeError(w, http.StatusForbidden, "cross_project_sharing_disabled",
+				"moving artifacts to other projects is turned off on this hub")
 			return
 		}
 	}
-	if req.ExpiresAt.Set {
+	u := ArtifactUpdate{SetExpiry: req.ExpiresAt.Set, ExpiresAt: req.ExpiresAt.Value, MaxGrants: MaxGrantsPerArtifact}
+	if req.ScopeRef != nil && *req.ScopeRef != a.ScopeRef {
+		kind, ref, _, _ := s.host.Principal(ctx)
+		u.HomeGrant = &Grant{
+			ID: uuid.NewString(), ArtifactID: a.ID, SubjectKind: SubjectScope, SubjectRef: *req.ScopeRef,
+			Permission: GrantRead, CreatedByRef: PrincipalRef(kind, ref), CreatedAt: now.UTC(),
+		}
+	}
+	updated := a
+	if u.HomeGrant != nil || u.SetExpiry {
 		var err error
-		updated, err = b.store.SetExpiry(ctx, a.ID, req.ExpiresAt.Value)
+		updated, err = b.store.UpdateArtifact(ctx, a.ID, u)
 		if !s.patchStored(w, r, err) {
 			return
 		}
@@ -419,6 +411,9 @@ func (s *Service) patchStored(w http.ResponseWriter, r *http.Request, err error)
 		return true
 	case errors.Is(err, ErrConflict):
 		writeError(w, http.StatusConflict, "conflict", "the owner already has an artifact with this key in that project")
+	case errors.Is(err, ErrTooManyGrants):
+		writeError(w, http.StatusConflict, "too_many_grants",
+			"the artifact already has "+strconv.Itoa(MaxGrantsPerArtifact)+" grants; remove one first")
 	case errors.Is(err, ErrNotFound):
 		writeNotFound(w)
 	default:

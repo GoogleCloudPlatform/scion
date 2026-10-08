@@ -302,20 +302,23 @@ type Store interface {
 	PutGrant(ctx context.Context, g *Grant, maxGrants int) (created bool, err error)
 
 	// DeleteGrant deletes principal or scope grant grantID of artifact
-	// artifactID, or returns ErrNotFound.
+	// artifactID. It returns ErrNotFound when there is no such grant, and
+	// ErrConflict, deleting nothing, when the grant is the scope grant of
+	// the artifact's current home scope (checked under the artifact's
+	// lock, so a concurrent move cannot slip between check and delete).
 	DeleteGrant(ctx context.Context, artifactID, grantID string) error
 
 	// SetExpiry sets (or, with nil, clears) a live artifact's expiry and
 	// returns the updated artifact, or ErrNotFound.
 	SetExpiry(ctx context.Context, artifactID string, expiresAt *time.Time) (*Artifact, error)
 
-	// Rehome moves a live artifact to the home scope homeGrant.SubjectRef
-	// and, unless the artifact already has a scope grant for that scope,
-	// adds homeGrant (its read grant). Existing grants are kept. It
-	// returns ErrConflict when the owner already has a live artifact with
-	// the same key in the new scope, and ErrNotFound when the artifact is
-	// absent or deleted.
-	Rehome(ctx context.Context, artifactID string, homeGrant *Grant) (*Artifact, error)
+	// UpdateArtifact applies u to a live artifact in one transaction under
+	// the artifact's lock and returns the updated artifact. It returns
+	// ErrNotFound when the artifact is absent or deleted, ErrConflict when
+	// a move would give the owner two live artifacts with the same key in
+	// the new scope, and ErrTooManyGrants when a move would exceed
+	// u.MaxGrants principal and scope grants.
+	UpdateArtifact(ctx context.Context, artifactID string, u ArtifactUpdate) (*Artifact, error)
 
 	// SweepExpired soft-deletes up to limit live artifacts whose expiry is
 	// at or before now, deleting their grants and share links in the same
@@ -352,6 +355,21 @@ type Store interface {
 	// messageIDs, keyed by message id and ordered by artifact id. Messages
 	// without references are absent from the map.
 	ListMessageRefs(ctx context.Context, messageIDs []string) (map[string][]MessageRef, error)
+}
+
+// ArtifactUpdate is a change UpdateArtifact applies.
+type ArtifactUpdate struct {
+	// HomeGrant, when set, moves the artifact to the scope it names
+	// (HomeGrant.SubjectRef). The old home scope's grant is removed; the
+	// new scope gets HomeGrant (a read grant) unless it already has a scope
+	// grant, which is kept as it is.
+	HomeGrant *Grant
+	// MaxGrants bounds the artifact's principal and scope grants after a
+	// move.
+	MaxGrants int
+	// SetExpiry applies ExpiresAt, which nil clears.
+	SetExpiry bool
+	ExpiresAt *time.Time
 }
 
 // CandidateQuery selects rows for ListCandidates.
