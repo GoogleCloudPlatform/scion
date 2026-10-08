@@ -48,26 +48,32 @@ import (
 //   - firstErr, when set, is returned by the first running write instead.
 //   - beforeReread runs once before the first GetAgent after the first
 //     running write failed.
+//   - rereadErr, when set, is returned by the first GetAgent after the first
+//     running write failed (a failed re-read), instead of reading the row.
 //   - beforeSecond runs just before the next UpdateAgent; secondErr, when
 //     set, is returned by it instead.
 //
-// It counts every UpdateAgent call (updates) and the GetAgent calls made
-// after the first running write failed and before the rollback's first
-// FinalizeAgentDeletion (rereads).
+// It counts every UpdateAgent call (updates), the GetAgent calls made after
+// the first running write failed and before the rollback's first
+// FinalizeAgentDeletion (rereads), and the GetAgent calls made after the
+// first running write failed and before the retry write (rereadsBeforeRetry).
 type managedConflictStore struct {
 	store.Store
 	mu           sync.Mutex
 	beforeFirst  func(agentID string)
 	firstErr     error
 	beforeReread func(agentID string)
+	rereadErr    error
 	beforeSecond func(agentID string)
 	secondErr    error
 
-	updates     int
-	rereads     int
-	firstDone   bool
-	firstFailed bool
-	finalized   bool
+	updates            int
+	rereads            int
+	rereadsBeforeRetry int
+	firstDone          bool
+	firstFailed        bool
+	retried            bool
+	finalized          bool
 }
 
 func (s *managedConflictStore) UpdateAgent(ctx context.Context, a *store.Agent) error {
@@ -82,6 +88,7 @@ func (s *managedConflictStore) UpdateAgent(ctx context.Context, a *store.Agent) 
 		s.firstDone = true
 		hook, injected = s.beforeFirst, s.firstErr
 	case second:
+		s.retried = true
 		hook, injected = s.beforeSecond, s.secondErr
 	}
 	s.mu.Unlock()
@@ -103,13 +110,21 @@ func (s *managedConflictStore) UpdateAgent(ctx context.Context, a *store.Agent) 
 func (s *managedConflictStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
 	s.mu.Lock()
 	var hook func(string)
+	var injected error
 	if s.firstFailed && !s.finalized {
 		s.rereads++
 		hook, s.beforeReread = s.beforeReread, nil
+		injected, s.rereadErr = s.rereadErr, nil
+	}
+	if s.firstFailed && !s.retried {
+		s.rereadsBeforeRetry++
 	}
 	s.mu.Unlock()
 	if hook != nil {
 		hook(id)
+	}
+	if injected != nil {
+		return nil, injected
 	}
 	return s.Store.GetAgent(ctx, id)
 }
@@ -125,6 +140,12 @@ func (s *managedConflictStore) counts() (updates, rereads int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.updates, s.rereads
+}
+
+func (s *managedConflictStore) rereadsBeforeRetryCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.rereadsBeforeRetry
 }
 
 // bumpPhase moves the stored row to phase and activity with a plain
@@ -199,9 +220,12 @@ func TestManagedCreateConflictRetry_DeleteGaveUp_Answers201(t *testing.T) {
 			assert.Empty(t, backend.cancels(), "no CancelInteraction")
 			assert.Equal(t, []string{"interaction-1"}, backend.inProgress())
 			assert.Equal(t, 1, pub.count("created"), "created is published: %v", pub.kinds())
-			updates, rereads := fs.counts()
+			updates, _ := fs.counts()
 			assert.Equal(t, 2, updates, "the conflicting write and one retry")
-			assert.GreaterOrEqual(t, rereads, 1, "the row was re-read")
+			// Exactly one read between the conflicting write and the retry:
+			// the re-read. (Reads after the retry, such as the created
+			// publish's own re-read, are not part of the retry.)
+			assert.Equal(t, 1, fs.rereadsBeforeRetryCount(), "one re-read before the retry")
 		})
 	}
 }
@@ -326,6 +350,28 @@ func TestManagedCreateConflictRetry_NonConflict_NoReread(t *testing.T) {
 	assert.Zero(t, rereads, "no re-read")
 }
 
+// The re-read after a conflict fails (not ErrNotFound): no retry. The
+// create takes the ptone/scion#3557 rollback with the first write's
+// conflict, as before: 500, rolled back, the interaction stopped once.
+func TestManagedCreateConflictRetry_RereadFails_RollsBack(t *testing.T) {
+	srv, s, project := setupCreateAgentServer(t, &createRaceDispatcher{})
+	backend := newInteractionLedgerBackend()
+	useManagedBackend(t, backend)
+	fs := &managedConflictStore{
+		Store:       s,
+		beforeFirst: func(id string) { claimForTest(t, s, id, store.DeletionStateFailed, time.Minute) },
+		rereadErr:   errManagedRecordWrite,
+	}
+	srv.store = fs
+
+	agentID, warnings := requireManagedCreateUnrecorded(t, managedCreate(t, srv, project.ID, "mgd-retry-rereadfail"))
+	assert.Equal(t, []string{managedCreateUnrecordedStoppedWarning + " (agent " + agentID + ", interaction interaction-1)"}, warnings)
+	assert.Equal(t, []string{"interaction-1"}, backend.cancels(), "exactly one cancel")
+	assertManagedConflictRolledBack(t, s, project, agentID, store.ErrVersionConflict.Error())
+	updates, _ := fs.counts()
+	assert.Equal(t, 1, updates, "no retry after a failed re-read")
+}
+
 // T5 (regression): the first write lands: 201 with one write.
 func TestManagedCreateConflictRetry_FirstWriteLands_OneWrite(t *testing.T) {
 	srv, s, project := setupCreateAgentServer(t, &createRaceDispatcher{})
@@ -343,6 +389,11 @@ func TestManagedCreateConflictRetry_FirstWriteLands_OneWrite(t *testing.T) {
 	updates, _ := fs.counts()
 	assert.Equal(t, 1, updates, "one write")
 }
+
+const (
+	foreignAnnotationKey = "test.scion.dev/concurrent-writer"
+	concurrentMessage    = "set by a concurrent writer"
+)
 
 // T6 (phase): a concurrent status write moved the live row to error or
 // stopped before the post-create write. The retry keeps that phase and
@@ -366,7 +417,20 @@ func TestManagedCreateConflictRetry_ConcurrentPhase(t *testing.T) {
 			backend := newInteractionLedgerBackend()
 			useManagedBackend(t, backend)
 			fs := &managedConflictStore{Store: s, beforeFirst: func(id string) {
-				bumpPhase(t, s, id, tc.phase, tc.activity)
+				// The concurrent writer also sets a Message and an
+				// annotation key the create does not own: the retry keeps
+				// both (it merges its annotation keys, it does not replace
+				// the map).
+				row, err := s.GetAgent(context.Background(), id)
+				require.NoError(t, err)
+				row.Phase = tc.phase
+				row.Activity = tc.activity
+				row.Message = concurrentMessage
+				if row.Annotations == nil {
+					row.Annotations = map[string]string{}
+				}
+				row.Annotations[foreignAnnotationKey] = "kept"
+				require.NoError(t, s.UpdateAgent(context.Background(), row))
 			}}
 			srv.store = fs
 
@@ -376,6 +440,8 @@ func TestManagedCreateConflictRetry_ConcurrentPhase(t *testing.T) {
 			assert.Equal(t, tc.wantActivity, row.Activity)
 			assert.True(t, isManagedAgentRuntime(row.Runtime), "the managed Runtime is persisted")
 			assert.Equal(t, "interaction-1", row.Annotations[annotationInteractionID])
+			assert.Equal(t, "kept", row.Annotations[foreignAnnotationKey], "the concurrent writer's annotation is kept")
+			assert.Equal(t, concurrentMessage, row.Message, "the concurrent writer's Message is kept")
 
 			var resp CreateAgentResponse
 			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
