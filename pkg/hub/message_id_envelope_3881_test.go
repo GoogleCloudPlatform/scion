@@ -23,6 +23,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -240,4 +241,75 @@ func TestMessageID3881_NotificationOmitsMessageID(t *testing.T) {
 	calls := env.dispatcher.getCalls()
 	_, ok := envelopeMessageID3881(t, calls[0].StructuredMessage.DeliveryText)
 	assert.False(t, ok, "a notification has no stored message, so message_id is omitted")
+}
+
+// An agent sending to another agent goes through ExecuteAgentDM. The
+// envelope's message_id, the response's message_id and the stored row agree.
+func TestMessageID3881_AgentSenderDirect(t *testing.T) {
+	srv, s, _, sender, target, _, dispatcher := deliverySetup(t)
+	enableReadSwitch(t, srv)
+
+	rr := sendViaStructured(t, srv, sender, target, "agent to agent")
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	var resp struct {
+		MessageID string `json:"message_id"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	require.NotEmpty(t, resp.MessageID)
+
+	calls := dispatcher.getCalls()
+	require.Len(t, calls, 1)
+	id, ok := envelopeMessageID3881(t, calls[0].StructuredMessage.DeliveryText)
+	require.True(t, ok, "agent-sender envelope must carry message_id")
+	assert.Equal(t, resp.MessageID, id, "envelope message_id must match the ID the send returned")
+	requireStoredFor3881(t, s, id, target.Slug)
+}
+
+// A broadcast recipient whose row could not be stored gets no message_id;
+// the other recipient's envelope names its stored row.
+func TestMessageID3881_BroadcastOmitsMessageIDWhenRowNotStored(t *testing.T) {
+	srv, s, failing, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *failCreateMessageForAgentStore {
+		return &failCreateMessageForAgentStore{Store: inner, fault: f}
+	})
+	ctx := context.Background()
+	projectID := tid("msgid3881-bcast-project")
+	require.NoError(t, s.CreateProject(ctx, &store.Project{ID: projectID, Name: "msgid3881-bcast", Slug: "msgid3881-bcast"}))
+	stored := store.Agent{ID: tid("msgid3881-bcast-ok"), Name: "msgid3881-bcast-ok", Slug: "msgid3881-bcast-ok", ProjectID: projectID, Phase: "running"}
+	unstored := store.Agent{ID: tid("msgid3881-bcast-fail"), Name: "msgid3881-bcast-fail", Slug: "msgid3881-bcast-fail", ProjectID: projectID, Phase: "running"}
+	for _, a := range []store.Agent{stored, unstored} {
+		a := a
+		require.NoError(t, s.CreateAgent(ctx, &a))
+	}
+	dispatcher := &recordingDispatcher{}
+	srv.SetDispatcher(dispatcher)
+	enableReadSwitch(t, srv)
+
+	failing.agentID = unstored.ID
+	fault.Arm()
+
+	msg := &messages.StructuredMessage{
+		Version: messages.Version, Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Sender: "user:dev", SenderID: DevUserID, Msg: "broadcast", Type: messages.TypeInstruction, Broadcasted: true,
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/projects/"+projectID+"/broadcast", nil)
+	rr := httptest.NewRecorder()
+	require.True(t, srv.broadcastDirect(rr, req, projectID, msg, false, []store.Agent{stored, unstored}))
+
+	calls := dispatcher.getCalls()
+	require.Len(t, calls, 2, "both recipients are still dispatched")
+	for _, c := range calls {
+		id, ok := envelopeMessageID3881(t, c.StructuredMessage.DeliveryText)
+		switch c.StructuredMessage.Recipient {
+		case "agent:" + stored.Slug:
+			require.True(t, ok, "stored broadcast row must be named in the envelope")
+			requireStoredFor3881(t, s, id, stored.Slug)
+		case "agent:" + unstored.Slug:
+			assert.False(t, ok, "no row was stored, so message_id must be absent (got %q)", id)
+		default:
+			t.Errorf("unexpected recipient %q", c.StructuredMessage.Recipient)
+		}
+	}
+	rows, err := s.ListMessages(ctx, store.MessageFilter{AgentID: unstored.ID}, store.ListOptions{})
+	require.NoError(t, err)
+	assert.Empty(t, rows.Items, "the injected failure must leave no row for that recipient")
 }

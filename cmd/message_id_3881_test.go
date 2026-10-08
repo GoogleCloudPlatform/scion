@@ -258,3 +258,19 @@ func TestMessageID3881_GroupSendJSONCarriesMessageID(t *testing.T) {
 	assert.Equal(t, "m-agent-a", got.Results[0].MessageID)
 	assert.Empty(t, got.Results[1].MessageID, "a failed send has no message ID")
 }
+
+// An ambiguous (unknown) group result keeps the stored message's ID in
+// message_id, so a JSON consumer can look it up without parsing the error.
+func TestMessageID3881_GroupAmbiguousJSONCarriesMessageID(t *testing.T) {
+	groupTestState(t, "json")
+	h := newGroupFakeHub(t, map[string]groupOutcome{
+		"agent-a":   ok(),
+		"agent-amb": ambiguous(),
+	})
+
+	got, sendErr := runGroupJSON(t, h, agentRecipients("agent-a", "agent-amb"))
+	require.Error(t, sendErr)
+	require.Len(t, got.Results, 2)
+	assert.Equal(t, "unknown", got.Results[1].Status)
+	assert.Equal(t, "m-agent-amb", got.Results[1].MessageID)
+}

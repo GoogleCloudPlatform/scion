@@ -1043,8 +1043,8 @@ type groupRecipientResult struct {
 	Status    string `json:"status"`
 	Error     string `json:"error,omitempty"`
 	// MessageID is the ID of the message the hub stored for this recipient
-	// (ptone/scion#3881). Empty when the send failed or the hub did not
-	// report one.
+	// (ptone/scion#3881), for delivered, deferred and ambiguous (unknown)
+	// sends. Empty when the send failed or the hub did not report one.
 	MessageID string `json:"message_id,omitempty"`
 	// AttachmentWarnings lists attachments the hub could not record on this
 	// recipient's copy of the message (ptone/scion#3667).
@@ -1276,6 +1276,7 @@ func sendGroupMessageViaHubCtx(hubCtx *HubContext, recipients []messages.GroupRe
 	recordAmbiguous := func(idx int, recipStr, messageID string, warnings []hubclient.AttachmentWarning) {
 		record(idx, groupRecipientResult{Recipient: recipStr, Status: groupStatusUnknown,
 			Error:              fmt.Sprintf("Hub reported delivery as ambiguous (message %s); it may have been delivered", messageID),
+			MessageID:          messageID,
 			AttachmentWarnings: warnings})
 	}
 
