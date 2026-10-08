@@ -489,3 +489,67 @@ func indexOf(s string, c byte) int {
 	}
 	return -1
 }
+
+// TestLoadBootstrapKoanfWithConfigPath_LayersConfigFile verifies that the
+// --config location is part of bootstrap material: its keys override the
+// global settings.yaml, keys it does not set still come from the global
+// file, and SCION_SERVER_* stays on top (ptone/scion#3070).
+func TestLoadBootstrapKoanfWithConfigPath_LayersConfigFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	scionDir := filepath.Join(tmpDir, ".scion")
+	if err := os.MkdirAll(scionDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	global := "schema_version: \"1\"\nimage_registry: global.example.com\nserver:\n  hub:\n    public_url: https://global.example.com\n    stalled_threshold: 5m\n"
+	if err := os.WriteFile(filepath.Join(scionDir, "settings.yaml"), []byte(global), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfgDir := filepath.Join(tmpDir, "cfg")
+	if err := os.MkdirAll(cfgDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := "schema_version: \"1\"\nimage_registry: cfg.example.com\nserver:\n  hub:\n    public_url: https://cfg.example.com\n"
+	if err := os.WriteFile(filepath.Join(cfgDir, "settings.yaml"), []byte(cfg), 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SCION_SERVER_HUB_PUBLICURL", "https://env.example.com")
+
+	for _, path := range []string{cfgDir, filepath.Join(cfgDir, "settings.yaml")} {
+		k := LoadBootstrapKoanfWithConfigPath(path)
+		if got := k.String("image_registry"); got != "cfg.example.com" {
+			t.Errorf("%s: image_registry = %q, want cfg.example.com from the --config file", path, got)
+		}
+		if got := k.String("server.hub.stalled_threshold"); got != "5m" {
+			t.Errorf("%s: stalled_threshold = %q, want 5m from the global file", path, got)
+		}
+		if got := k.String("server.hub.public_url"); got != "https://env.example.com" {
+			t.Errorf("%s: public_url = %q, want SCION_SERVER_* on top", path, got)
+		}
+	}
+
+	// No --config path, or one naming the global directory: global only.
+	for _, path := range []string{"", scionDir} {
+		if got := LoadBootstrapKoanfWithConfigPath(path).String("image_registry"); got != "global.example.com" {
+			t.Errorf("%q: image_registry = %q, want global.example.com", path, got)
+		}
+	}
+}
+
+// TestLoadBootstrapKoanfWithConfigPath_LegacyFile verifies that a --config
+// path naming a non-settings file is read as-is, as the legacy server
+// config loader reads it.
+func TestLoadBootstrapKoanfWithConfigPath_LegacyFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".scion"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	cfgFile := filepath.Join(tmpDir, "hub-config.yaml")
+	if err := os.WriteFile(cfgFile, []byte("image_registry: file.example.com\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if got := LoadBootstrapKoanfWithConfigPath(cfgFile).String("image_registry"); got != "file.example.com" {
+		t.Errorf("image_registry = %q, want file.example.com", got)
+	}
+}

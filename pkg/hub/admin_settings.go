@@ -709,7 +709,7 @@ func (s *Server) reloadSettings() map[string]interface{} {
 		"requires_restart": []string{},
 	}
 
-	gc, err := config.LoadGlobalConfig("")
+	gc, err := config.LoadGlobalConfig(s.config.ConfigPath)
 	if err != nil {
 		slog.Error("Failed to reload global config", "error", err)
 		results["error"] = err.Error()

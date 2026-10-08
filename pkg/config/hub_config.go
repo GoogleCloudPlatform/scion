@@ -1674,6 +1674,17 @@ func LoadSeedEnvKoanf() *koanf.Koanf {
 // (e.g. server.hub.admin_emails, not hub.adminEmails). This ensures
 // ExtractSectionFromKoanf can find values from any layer.
 func LoadBootstrapKoanf() *koanf.Koanf {
+	return LoadBootstrapKoanfWithConfigPath("")
+}
+
+// LoadBootstrapKoanfWithConfigPath is LoadBootstrapKoanf for a server started
+// with --config: the settings.yaml and legacy server.yaml in the configPath
+// directory (or configPath itself when it names a file) are layered over the
+// global ones, below SCION_SERVER_*, so Layer-1 keys set only in the --config
+// file are part of bootstrap material instead of being replaced by the
+// global settings at the first snapshot apply (ptone/scion#3070). An empty
+// configPath, or one that resolves to the global directory, adds nothing.
+func LoadBootstrapKoanfWithConfigPath(configPath string) *koanf.Koanf {
 	k := koanf.New(".")
 
 	// 1. Coded defaults in the opsettings keyspace (server.* snake_case).
@@ -1723,6 +1734,7 @@ func LoadBootstrapKoanf() *koanf.Koanf {
 		}
 		loadServerConfigFile(k, globalDir)
 	}
+	loadConfigPathFiles(k, configPath, globalDir)
 
 	// 4. SCION_SERVER_* environment variables (highest precedence in bootstrap).
 	// Uses serverEnvToOpsettingsKey which re-adds the "server." prefix for keys
@@ -1738,6 +1750,55 @@ func LoadBootstrapKoanf() *koanf.Koanf {
 	splitCommaSeparatedKoanfKeys(k)
 
 	return k
+}
+
+// loadConfigPathFiles layers the --config location over k: for a directory,
+// its settings.yaml then server.yaml; for a file named settings.yaml/.yml/
+// .json, that directory's settings file; for any other file, the file itself
+// as a legacy server config (as loadGlobalConfigLegacy reads it). A missing
+// path, or a directory equal to globalDir (already loaded), adds nothing.
+func loadConfigPathFiles(k *koanf.Koanf, configPath, globalDir string) {
+	if configPath == "" {
+		return
+	}
+	info, err := os.Stat(configPath)
+	if err != nil {
+		return
+	}
+	dir := configPath
+	if !info.IsDir() {
+		dir = filepath.Dir(configPath)
+	}
+	if globalDir != "" && sameDir(dir, globalDir) {
+		return
+	}
+	if !info.IsDir() {
+		switch filepath.Base(configPath) {
+		case "settings.yaml", "settings.yml", "settings.json":
+		default:
+			if err := k.Load(file.Provider(configPath), yaml.Parser()); err != nil {
+				slog.Warn("LoadBootstrapKoanf: failed to load config file", "path", configPath, "error", err)
+			}
+			return
+		}
+	}
+	if _, err := loadSettingsFile(k, dir); err != nil {
+		slog.Warn("LoadBootstrapKoanf: failed to load settings file", "dir", dir, "error", err)
+	}
+	if info.IsDir() {
+		loadServerConfigFile(k, dir)
+	}
+}
+
+// sameDir reports whether a and b name the same directory after cleaning
+// and resolving to absolute paths.
+func sameDir(a, b string) bool {
+	absA, errA := filepath.Abs(a)
+	absB, errB := filepath.Abs(b)
+	if errA != nil || errB != nil {
+		return filepath.Clean(a) == filepath.Clean(b)
+	}
+	return absA == absB
 }
 
 // embeddedAgentDefaultsKoanfMap extracts default_template and
