@@ -192,7 +192,7 @@ func (s *Service) readBlob(ctx context.Context, b backend, f *File) ([]byte, err
 // base is the version the reviewer started from. A review is checked only
 // against that version, and only while it is still current: if another
 // version became current since, or (checked again under the lock that
-// advances the current version, see Store.FinalizeVersion) another version
+// advances the current version, see Store.FinalizeVersion) another publish version
 // newer than base is pending, the review is discarded with 409
 // stale_review, so it can neither be compared with text its reviewer never
 // saw nor end up current over someone else's newer version.
@@ -229,11 +229,17 @@ func (s *Service) finalizeReviewCheck(w http.ResponseWriter, r *http.Request, b 
 // discardStaleReview discards a review overtaken by a newer version and
 // answers 409.
 func (s *Service) discardStaleReview(w http.ResponseWriter, r *http.Request, b backend, id string, seq int, claim time.Time) {
+	s.discardReview(w, r, b, id, seq, claim,
+		"the version the review was started from is no longer the latest; the review was discarded. Review the current version")
+}
+
+// discardReview discards a claimed review and answers 409 stale_review
+// with message.
+func (s *Service) discardReview(w http.ResponseWriter, r *http.Request, b backend, id string, seq int, claim time.Time, message string) {
 	if !s.discard(w, r, b, id, seq, claim) {
 		return
 	}
-	writeError(w, http.StatusConflict, CodeStaleReview,
-		"the version the review was started from is no longer the latest; the review was discarded. Review the current version")
+	writeError(w, http.StatusConflict, CodeStaleReview, message)
 }
 
 // discard fails a claimed version. ok=false means the response was written.

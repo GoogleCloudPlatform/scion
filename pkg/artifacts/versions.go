@@ -719,6 +719,11 @@ func (s *Service) handleFinalize(w http.ResponseWriter, r *http.Request, id stri
 		s.discardStaleReview(w, r, b, a.ID, seq, claim)
 		return
 	}
+	if errors.Is(err, ErrPendingNewer) {
+		s.discardReview(w, r, b, a.ID, seq, claim,
+			"a newer version of the artifact is being published; the review was discarded. Review that version once it is finalized")
+		return
+	}
 	if err != nil && !errors.Is(err, ErrConflict) && !errors.Is(err, ErrNotFound) {
 		// Let the publisher try again, unless another request has claimed
 		// the version since.

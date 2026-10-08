@@ -476,10 +476,28 @@ func TestStoreFinalizeBaseAndDiscard(t *testing.T) {
 			}
 			return v
 		}
-		// Wrong base: refused, version still claimed, current unchanged.
+		pendingVersion := func(kind string) *Version {
+			v := &Version{ID: uuid.NewString(), ArtifactID: a.ID, Kind: kind, EntryPath: "a.md",
+				CreatedAt: time.Now(), State: VersionStatePending}
+			if err := st.CreateVersion(ctx, v, nil, 4); err != nil {
+				t.Fatal(err)
+			}
+			return v
+		}
+		// A pending review takes seq 2; the review under test is seq 3.
+		abandoned := pendingVersion(VersionKindReview)
 		r2 := review()
-		if _, err := st.FinalizeVersion(ctx, a.ID, r2.Seq, claimOf(a.ID, r2.Seq), nil, 7); !errors.Is(err, ErrStaleBase) {
+		if abandoned.Seq != 2 || r2.Seq != 3 {
+			t.Fatalf("seqs %d %d", abandoned.Seq, r2.Seq)
+		}
+		// A base below the review that is not the current version: refused,
+		// version still claimed, current unchanged.
+		if _, err := st.FinalizeVersion(ctx, a.ID, r2.Seq, claimOf(a.ID, r2.Seq), nil, 2); !errors.Is(err, ErrStaleBase) {
 			t.Fatalf("stale base: %v, want ErrStaleBase", err)
+		}
+		// A base at or above the review's own seq: refused.
+		if _, err := st.FinalizeVersion(ctx, a.ID, r2.Seq, claimOf(a.ID, r2.Seq), nil, r2.Seq); !errors.Is(err, ErrStaleBase) {
+			t.Fatalf("base at the review's seq: %v, want ErrStaleBase", err)
 		}
 		if got, _ := st.GetVersion(ctx, a.ID, r2.Seq); got.State != VersionStateFinalizing {
 			t.Fatalf("state after stale base: %q", got.State)
@@ -487,20 +505,34 @@ func TestStoreFinalizeBaseAndDiscard(t *testing.T) {
 		if got, _ := st.GetArtifact(ctx, a.ID); got.CurrentSeq != 1 {
 			t.Fatalf("current after stale base: %d", got.CurrentSeq)
 		}
-		// Right base: finalized and current.
+		// Right base: finalized and current, although the abandoned review
+		// between them is still pending (pending reviews do not count).
 		if got, err := st.FinalizeVersion(ctx, a.ID, r2.Seq, claimOf(a.ID, r2.Seq), nil, 1); err != nil || got.CurrentSeq != r2.Seq {
 			t.Fatalf("finalize on base: %+v, %v", got, err)
 		}
-		// A version between the base and the review that is still pending
-		// refuses the review too.
-		between := &Version{ID: uuid.NewString(), ArtifactID: a.ID, Kind: VersionKindPublish, EntryPath: "a.md",
-			CreatedAt: time.Now(), State: VersionStatePending}
-		if err := st.CreateVersion(ctx, between, nil, 4); err != nil {
+		// A base that is the current version but at or above the review's
+		// own seq: refused.
+		low := review()
+		later := pendingVersion(VersionKindPublish)
+		if err := claimFin(ctx, st, a.ID, later.Seq); err != nil {
 			t.Fatal(err)
 		}
+		if _, err := st.FinalizeVersion(ctx, a.ID, later.Seq, claimOf(a.ID, later.Seq), nil, 0); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.FinalizeVersion(ctx, a.ID, low.Seq, claimOf(a.ID, low.Seq), nil, later.Seq); !errors.Is(err, ErrStaleBase) {
+			t.Fatalf("current base above the review: %v, want ErrStaleBase", err)
+		}
+		if err := st.DiscardFinalize(ctx, a.ID, low.Seq, claimOf(a.ID, low.Seq)); err != nil {
+			t.Fatal(err)
+		}
+		r2 = later
+		// A publish version between the base and the review that is still
+		// pending refuses the review.
+		pendingVersion(VersionKindPublish)
 		late := review()
-		if _, err := st.FinalizeVersion(ctx, a.ID, late.Seq, claimOf(a.ID, late.Seq), nil, r2.Seq); !errors.Is(err, ErrStaleBase) {
-			t.Fatalf("pending version between base and review: %v, want ErrStaleBase", err)
+		if _, err := st.FinalizeVersion(ctx, a.ID, late.Seq, claimOf(a.ID, late.Seq), nil, r2.Seq); !errors.Is(err, ErrPendingNewer) {
+			t.Fatalf("pending publish between base and review: %v, want ErrPendingNewer", err)
 		}
 		if err := st.DiscardFinalize(ctx, a.ID, late.Seq, claimOf(a.ID, late.Seq)); err != nil {
 			t.Fatal(err)
