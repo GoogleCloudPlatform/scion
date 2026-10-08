@@ -417,9 +417,20 @@ func (b *TeamsBroker) Publish(ctx context.Context, topic string, msg *messages.S
 			ccSlug = strings.TrimPrefix(msg.Sender, "agent:")
 		}
 
+		// Inbound messages save the context under the Teams user ID. Agent
+		// replies address the linked hub user (user:<email>), so resolve
+		// that to the linked Teams user before the lookup.
 		recipientID := msg.RecipientID
 		if recipientID == "" {
 			recipientID = msg.Recipient
+		}
+		if email, ok := strings.CutPrefix(msg.Recipient, "user:"); ok && email != "" {
+			mapping, err := store.GetUserMappingByEmail(ctx, email)
+			if err != nil {
+				b.log.Warn("Error looking up user mapping for conversation context", "error", err)
+			} else if mapping != nil && mapping.TeamsUserID != "" {
+				recipientID = mapping.TeamsUserID
+			}
 		}
 
 		cc, err := store.GetConversationContext(ctx, recipientID, projectID, ccSlug)

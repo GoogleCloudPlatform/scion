@@ -1353,3 +1353,86 @@ func TestLinkedUserByTeamsID_NilStoreIsLinkCheckFailure(t *testing.T) {
 	require.Len(t, ms.sent, 1)
 	assert.Equal(t, linkCheckFailedText, ms.sent[0].Text)
 }
+
+// TestBroker_Publish_ConversationContextForLinkedUser sends an inbound
+// message from a linked Teams user, then publishes an agent reply addressed
+// to that user's hub identity. The reply must go back to the saved
+// conversation as a reply to the inbound activity (priority 3).
+func TestBroker_Publish_ConversationContextForLinkedUser(t *testing.T) {
+	hubServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer hubServer.Close()
+
+	var mu sync.Mutex
+	var sent []Activity
+	var sentPaths []string
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var a Activity
+		_ = json.NewDecoder(r.Body).Decode(&a)
+		mu.Lock()
+		sent = append(sent, a)
+		sentPaths = append(sentPaths, r.URL.Path)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(ActivityResponse{ID: "out-act"})
+	}))
+	defer apiServer.Close()
+
+	broker := NewBroker(slog.Default())
+	configureBrokerWithAPI(t, broker, apiServer.URL)
+	broker.mu.Lock()
+	broker.hubClient = NewHubClient(hubServer.URL, "dGVzdC1rZXk=", "teams-broker-1", slog.Default())
+	broker.mu.Unlock()
+
+	ctx := context.Background()
+	require.NoError(t, broker.store.CreateChannelLink(ctx, &ChannelLink{
+		ConversationID: "conv-linked",
+		ProjectID:      "proj-1",
+		ProjectSlug:    "my-project",
+		DefaultAgent:   "builder",
+		LinkedAt:       time.Now(),
+		Active:         true,
+	}))
+	require.NoError(t, broker.store.CreateUserMapping(ctx, &TeamsUserMapping{
+		TeamsUserID: "aad-alice",
+		ScionUserID: "hub-user-alice",
+		ScionEmail:  "alice@example.com",
+		LinkedAt:    time.Now(),
+	}))
+
+	_, err := broker.HandleActivity(ctx, &Activity{
+		Type:         "message",
+		ID:           "inbound-act",
+		Text:         "builder please build",
+		From:         ChannelAccount{ID: "29:alice", Name: "Alice", AadObjectID: "aad-alice"},
+		Conversation: ConversationAccount{ID: "conv-linked"},
+		ServiceURL:   apiServer.URL,
+	})
+	require.NoError(t, err)
+
+	mu.Lock()
+	sent, sentPaths = nil, nil
+	mu.Unlock()
+
+	err = broker.Publish(ctx, "scion.project.proj-1.agent.builder.messages", &messages.StructuredMessage{
+		Version:     messages.Version,
+		Sender:      "agent:builder",
+		Recipient:   "user:alice@example.com",
+		RecipientID: "hub-user-alice",
+		Msg:         "build done",
+		Type:        messages.TypeInstruction,
+	})
+	require.NoError(t, err)
+
+	broker.mu.Lock()
+	sq := broker.sendQueue
+	broker.mu.Unlock()
+	sq.Close()
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, sent, 1, "paths: %v", sentPaths)
+	assert.Contains(t, sentPaths[0], "conv-linked")
+	assert.Equal(t, "inbound-act", sent[0].ReplyToID)
+}
