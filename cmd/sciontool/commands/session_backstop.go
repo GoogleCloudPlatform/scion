@@ -16,7 +16,6 @@ package commands
 
 import (
 	"context"
-	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/handlers"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
@@ -31,11 +30,6 @@ var (
 	runReportOpenSessionAtShutdown    = reportOpenSessionAtShutdown
 )
 
-// shutdownSessionReportTimeout bounds the Hub call that reports a still-open
-// session at shutdown. Together with the state lock wait (2s) it keeps the
-// backstop well inside the runtime's default 10s stop grace period.
-var shutdownSessionReportTimeout = 3 * time.Second
-
 // reportOpenSessionAtShutdown is the init daemon's backstop for session
 // metrics. Hook processes report a session when the harness's session-end
 // event arrives; when it never does (the agent was stopped, or the harness
@@ -45,7 +39,8 @@ var shutdownSessionReportTimeout = 3 * time.Second
 // harness's exit outcome: "error" for a crash, otherwise "completed".
 //
 // It is best-effort: failures are logged and dropped, and the Hub call is
-// bounded by shutdownSessionReportTimeout. Nothing is read or changed when
+// bounded by shutdownSessionReportTimeout (defined in hook.go, next to the
+// hook processes' hookHubBudget). Nothing is read or changed when
 // the Hub is not configured.
 func reportOpenSessionAtShutdown(agentHome string, outcome exitOutcome, newClient func() *hub.Client) {
 	if agentHome == "" {
