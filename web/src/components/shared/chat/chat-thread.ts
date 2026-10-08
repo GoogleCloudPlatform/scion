@@ -4712,10 +4712,39 @@ export class ScionChatThread extends LitElement {
 
   /** The peer's project from the global agent map, then the store's hub list. */
   private knownPeerAgentProjectId(peerAgentId: string): string {
-    const fromView = stateManager.getAgent(peerAgentId)?.projectId;
-    if (fromView) return fromView;
+    return this.knownPeerAgent(peerAgentId)?.projectId || '';
+  }
+
+  /**
+   * The peer's row that carries a project: the global agent map's, then the
+   * store's hub list's. Undefined when neither has one.
+   */
+  private knownPeerAgent(peerAgentId: string): Agent | undefined {
+    const fromView = stateManager.getAgent(peerAgentId);
+    if (fromView?.projectId) return fromView;
     const hub = agentStore.peek({ scope: 'hub' });
-    return (hub && agentIndexOf(hub).get(peerAgentId)?.projectId) || '';
+    const fromHub = hub ? agentIndexOf(hub).get(peerAgentId) : undefined;
+    return fromHub?.projectId ? fromHub : undefined;
+  }
+
+  /**
+   * Tell the page who the open agent DM's peer is. The page names the peer
+   * and fills the members sidebar from it when it had no row for the agent
+   * of its own when the DM opened (a DM opened by URL).
+   */
+  private reportPeerAgent(
+    conversationKey: string,
+    agentId: string,
+    agent: Partial<Agent>,
+    projectId: string
+  ): void {
+    this.dispatchEvent(
+      new CustomEvent<PeerAgentResolvedDetail>('peer-agent-resolved', {
+        detail: { conversationKey, agentId, name: agent.name || agent.slug || '', projectId },
+        bubbles: true,
+        composed: true,
+      })
+    );
   }
 
   /**
@@ -4724,12 +4753,18 @@ export class ScionChatThread extends LitElement {
    * thread opened directly, say, with no hub list loaded. The hub list is
    * not loaded for this: on a large hub that would walk every agent for one
    * id. A failed read is not cached, so the next open of the conversation
-   * reads again.
+   * reads again. Either way the peer is reported to the page: from the row
+   * already held, with no request, or from the read.
    */
   private async resolvePeerAgentProject(): Promise<void> {
     const conversationKey = this.conversationKey;
     const peerAgentId = this.peerAgentId();
-    if (!peerAgentId || this.knownPeerAgentProjectId(peerAgentId)) return;
+    if (!peerAgentId) return;
+    const known = this.knownPeerAgent(peerAgentId);
+    if (known) {
+      this.reportPeerAgent(conversationKey, peerAgentId, known, known.projectId || '');
+      return;
+    }
     if (this._peerAgentProject?.conversationKey === conversationKey) return;
     const read = { conversationKey, projectId: '' };
     this._peerAgentProject = read;
@@ -4740,21 +4775,8 @@ export class ScionChatThread extends LitElement {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const agent = (await res.json()) as Partial<Agent>;
       read.projectId = agent.projectId || '';
-      // The page names the peer and fills the members sidebar from this read
-      // when it has no row for the agent of its own (a DM opened by URL).
       if (this._peerAgentProject === read && this.conversationKey === conversationKey) {
-        this.dispatchEvent(
-          new CustomEvent<PeerAgentResolvedDetail>('peer-agent-resolved', {
-            detail: {
-              conversationKey,
-              agentId: peerAgentId,
-              name: agent.name || agent.slug || '',
-              projectId: read.projectId,
-            },
-            bubbles: true,
-            composed: true,
-          })
-        );
+        this.reportPeerAgent(conversationKey, peerAgentId, agent, read.projectId);
       }
     } catch {
       // Non-critical: path links in this DM fall back to the message's own project.

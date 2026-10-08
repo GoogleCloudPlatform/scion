@@ -345,13 +345,63 @@ describe('peer-agent-resolved', () => {
     expect(seen.map((d) => d.name)).toEqual(['coder-one']);
   });
 
-  it('is not reported without a read, or for a failed read', async () => {
+  it('is reported from the hub list row, with no read', async () => {
     const seen = listen();
-    store.hub = hubSnapshot([row('coder', 'proj-hub')]);
+    store.hub = hubSnapshot([{ ...row('coder', 'proj-hub'), name: 'Coder One' }]);
     await openDM('coder');
-    store.hub = undefined;
+
+    expect(seen).toEqual([
+      {
+        conversationKey: 'dm:agent:coder:user:u1',
+        agentId: 'coder',
+        name: 'Coder One',
+        projectId: 'proj-hub',
+      },
+    ]);
+    expect(singleAgentReads()).toBe(0);
+  });
+
+  it('is reported from the global agent map row, with no read', async () => {
+    const seen = listen();
+    globalMap.agents.set('coder', { ...row('coder', 'proj-detail'), name: 'Coder One' });
+    await openDM('coder');
+
+    expect(seen.map((d) => [d.name, d.projectId])).toEqual([['Coder One', 'proj-detail']]);
+    expect(singleAgentReads()).toBe(0);
+  });
+
+  it('is reported when the hub list lands after the DM opened and before its read', async () => {
+    let releaseHistory = (): void => {};
+    const base = apiFetch.getMockImplementation()!;
+    apiFetch.mockImplementation((path, init) => {
+      if (path.includes('/messages')) {
+        return new Promise<Response>((resolve) => {
+          releaseHistory = (): void => resolve(json({ items: [] }));
+        });
+      }
+      return base(path, init);
+    });
+    const seen = listen();
+    const el = document.createElement('scion-chat-thread');
+    el.conversationKey = 'dm:agent:coder:user:u1';
+    el.isDM = true;
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await vi.waitFor(() => expect(apiFetch).toHaveBeenCalled());
+
+    // Another view's hub list load finishes while the history is in flight.
+    store.hub = hubSnapshot([{ ...row('coder', 'proj-hub'), name: 'Coder One' }]);
+    releaseHistory();
+    for (let i = 0; i < 10; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(seen.map((d) => [d.name, d.projectId])).toEqual([['Coder One', 'proj-hub']]);
+    expect(singleAgentReads()).toBe(0);
+  });
+
+  it('is not reported for a failed read', async () => {
+    const seen = listen();
     peerStatus = 500;
-    await openDM('coder', document.createElement('scion-chat-thread'));
+    await openDM('coder');
     expect(seen).toEqual([]);
   });
 
