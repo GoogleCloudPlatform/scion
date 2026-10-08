@@ -120,12 +120,19 @@ func publishToArtifact(ctx context.Context, svc hubclient.ArtifactService, out, 
 	if err := uploadRequired(ctx, svc, id, pend.Version.Seq, pend.Upload.Required, byPath); err != nil {
 		return err
 	}
-	resp, err := svc.FinalizeVersion(ctx, id, pend.Version.Seq)
+	var resp *hubclient.ArtifactResponse
+	if kind == artifacts.VersionKindReview {
+		// The review was made against current: the hub checks it against
+		// that version only, and refuses it if another became current.
+		resp, err = svc.FinalizeReview(ctx, id, pend.Version.Seq, current.Seq)
+	} else {
+		resp, err = svc.FinalizeVersion(ctx, id, pend.Version.Seq)
+	}
 	if err != nil {
 		if rejected := unmarkedChangesReport(err); rejected != "" {
 			_, _ = fmt.Fprint(errOut, rejected)
-			return errors.New("review rejected: it changes text outside CriticMarkup marks. " +
-				"Mark every change, or publish without --review for a plain edit")
+			return errors.New("review rejected: it changes text outside CriticMarkup marks, and a review may only add marks. " +
+				"Mark every change and publish the review again")
 		}
 		return fmt.Errorf("%s failed: %w%s", verb, err, artifactErrorHint(err, true))
 	}

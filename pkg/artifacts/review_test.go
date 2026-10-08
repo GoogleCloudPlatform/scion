@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"sync"
@@ -43,6 +44,8 @@ type reviewFixture struct {
 	v1      bundle
 	notices []ReviewNotice
 	mu      sync.Mutex
+	// base is the current version when the last review was started.
+	base int
 }
 
 func newReviewFixture(t *testing.T) *reviewFixture {
@@ -67,9 +70,19 @@ func (f *reviewFixture) grant(p principal, perm string) {
 	}
 }
 
-// startReview creates a pending review version and uploads its files.
+// finalizeReview finalizes review version seq naming base as the version it
+// was started from.
+func (f *reviewFixture) finalizeReview(p principal, seq, base int) *httptest.ResponseRecorder {
+	f.t.Helper()
+	body := []byte(fmt.Sprintf(`{"base":%d}`, base))
+	return f.do(&p, http.MethodPost, fmt.Sprintf("/api/v1/artifacts/%s/versions/%d/finalize", f.id, seq), body, nil)
+}
+
+// startReview creates a pending review version and uploads its files. It
+// records the current version as the review's base.
 func (f *reviewFixture) startReview(p principal, files bundle, entry string) int {
 	f.t.Helper()
+	f.base = f.current()
 	req := files.manifest(entry)
 	req.Kind = VersionKindReview
 	pend := f.createPending(p, "/api/v1/artifacts/"+f.id+"/versions", req)
@@ -86,7 +99,7 @@ func (f *reviewFixture) startReview(p principal, files bundle, entry string) int
 
 func (f *reviewFixture) review(p principal, files bundle, entry string) (int, *httpResult) {
 	seq := f.startReview(p, files, entry)
-	return seq, f.result(f.finalize(p, f.id, seq))
+	return seq, f.result(f.finalizeReview(p, seq, f.base))
 }
 
 type httpResult struct {
@@ -323,7 +336,7 @@ func TestReviewStale(t *testing.T) {
 	// The owner publishes v3 while the review is pending.
 	v3 := with(f.v1, "plan.md", reviewParent+"More.\n")
 	f.publishBundle(agentA, "/api/v1/artifacts/"+f.id+"/versions", v3.manifest("plan.md"), v3)
-	r := f.result(f.finalize(userU, f.id, seq))
+	r := f.result(f.finalizeReview(userU, seq, 1))
 	if r.code != http.StatusConflict || !strings.Contains(r.body, CodeStaleReview) {
 		t.Fatalf("stale review: %d %s", r.code, r.body)
 	}
@@ -377,7 +390,7 @@ func TestReviewCheckReadFailure(t *testing.T) {
 	if err := os.WriteFile(blob, saved, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if r := f.result(f.finalize(userU, f.id, seq)); r.code != http.StatusOK {
+	if r := f.result(f.finalizeReview(userU, seq, 1)); r.code != http.StatusOK {
 		t.Fatalf("retry: %d %s", r.code, r.body)
 	}
 }
@@ -438,7 +451,7 @@ func TestReviewReadBeforeWrite(t *testing.T) {
 	delete(f.host.denied, PrincipalRef(agentX.kind, agentX.ref)+" project-1 "+PermissionRead)
 	seq := f.startReview(agentX, with(f.v1, "plan.md", "edited\n"), "plan.md")
 	f.host.deny(agentX, "project-1", PermissionRead)
-	rec = f.finalize(agentX, f.id, seq)
+	rec = f.finalizeReview(agentX, seq, 1)
 	if rec.Code != http.StatusNotFound || rec.Body.String() != missing.Body.String() {
 		t.Fatalf("finalize: %d %q", rec.Code, rec.Body.String())
 	}
@@ -551,4 +564,82 @@ func TestResolveBlobSizeMismatch(t *testing.T) {
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("size mismatch: %d %q", rec.Code, rec.Body.String())
 	}
+}
+
+// TestReviewBase covers the base a review names at finalize: it is
+// required, it must be the current version, and no version newer than it
+// may be pending, so a review is checked only against the version its
+// reviewer started from and never becomes current over a newer version.
+func TestReviewBase(t *testing.T) {
+	t.Run("required", func(t *testing.T) {
+		f := newReviewFixture(t)
+		seq := f.startReview(userU, with(f.v1, "plan.md", reviewMarked), "plan.md")
+		rec := f.finalize(userU, f.id, seq)
+		if rec.Code != http.StatusBadRequest || errCode(t, rec) != CodeBaseRequired {
+			t.Fatalf("no base: %d %s", rec.Code, rec.Body.String())
+		}
+		if f.state(seq) != VersionStatePending {
+			t.Fatalf("state %q, want pending (nothing claimed)", f.state(seq))
+		}
+	})
+	t.Run("not the version it started from", func(t *testing.T) {
+		f := newReviewFixture(t)
+		v2 := with(f.v1, "plan.md", reviewParent+"More.\n")
+		f.publishBundle(agentA, "/api/v1/artifacts/"+f.id+"/versions", v2.manifest("plan.md"), v2)
+		// The reviewer marked up v1 but v2 is current now.
+		seq := f.startReview(userU, with(f.v1, "plan.md", reviewMarked), "plan.md")
+		r := f.result(f.finalizeReview(userU, seq, 1))
+		if r.code != http.StatusConflict || !strings.Contains(r.body, CodeStaleReview) {
+			t.Fatalf("wrong base: %d %s", r.code, r.body)
+		}
+		if f.current() != 2 || f.state(seq) != VersionStateFailed {
+			t.Fatalf("current %d state %q", f.current(), f.state(seq))
+		}
+		// A stale review is refused as stale before its text is compared:
+		// an unmarked edit in it does not turn the answer into a 422.
+		edited := strings.Replace(reviewMarked, "Owners", "Owner", 1)
+		seq = f.startReview(userU, with(f.v1, "plan.md", edited), "plan.md")
+		r = f.result(f.finalizeReview(userU, seq, 1))
+		if r.code != http.StatusConflict || !strings.Contains(r.body, CodeStaleReview) {
+			t.Fatalf("stale review with an unmarked edit: %d %s", r.code, r.body)
+		}
+	})
+	t.Run("a newer version is pending", func(t *testing.T) {
+		f := newReviewFixture(t)
+		// The owner starts v2 and has not finalized it when the review of
+		// v1 (seq 3) is finalized.
+		v2 := with(f.v1, "plan.md", reviewParent+"More.\n")
+		pend := f.createPending(agentA, "/api/v1/artifacts/"+f.id+"/versions", v2.manifest("plan.md"))
+		seq := f.startReview(userU, with(f.v1, "plan.md", reviewMarked), "plan.md")
+		if pend.Version.Seq != 2 || seq != 3 {
+			t.Fatalf("seqs %d %d", pend.Version.Seq, seq)
+		}
+		r := f.result(f.finalizeReview(userU, seq, 1))
+		if r.code != http.StatusConflict || !strings.Contains(r.body, CodeStaleReview) {
+			t.Fatalf("pending newer version: %d %s", r.code, r.body)
+		}
+		if f.current() != 1 || f.state(seq) != VersionStateFailed {
+			t.Fatalf("current %d state %q", f.current(), f.state(seq))
+		}
+		// Once v2 is published, it is current; the review never shadowed it.
+		for _, p := range pend.Upload.Required {
+			if rec := f.put(agentA, f.id, 2, p, v2[p]); rec.Code != http.StatusNoContent {
+				t.Fatalf("PUT: %d", rec.Code)
+			}
+		}
+		if rec := f.finalize(agentA, f.id, 2); rec.Code != http.StatusOK {
+			t.Fatalf("finalize v2: %d %s", rec.Code, rec.Body.String())
+		}
+		if f.current() != 2 {
+			t.Fatalf("current %d, want 2", f.current())
+		}
+	})
+	t.Run("invalid body answers the same for every id", func(t *testing.T) {
+		f := newReviewFixture(t)
+		missing := f.do(&agentX, http.MethodPost, "/api/v1/artifacts/00000000-0000-4000-8000-000000000000/versions/2/finalize", []byte(`{"base":-1}`), nil)
+		hidden := f.do(&agentX, http.MethodPost, "/api/v1/artifacts/"+f.id+"/versions/2/finalize", []byte(`{"base":-1}`), nil)
+		if missing.Code != http.StatusBadRequest || missing.Body.String() != hidden.Body.String() {
+			t.Fatalf("missing %d %q vs unreadable %d %q", missing.Code, missing.Body.String(), hidden.Code, hidden.Body.String())
+		}
+	})
 }

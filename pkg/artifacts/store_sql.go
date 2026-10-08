@@ -423,6 +423,15 @@ func (s *sqlStore) FinalizeVersion(ctx context.Context, artifactID string, seq i
 		if !current.Valid || int(current.Int64) != base {
 			return nil, ErrStaleBase
 		}
+		var between int
+		if err := tx.QueryRowContext(ctx, s.rebind(`SELECT COUNT(*) FROM artifact_version
+			WHERE artifact_id = ? AND seq > ? AND seq < ? AND state IN (?, ?)`),
+			artifactID, base, seq, VersionStatePending, VersionStateFinalizing).Scan(&between); err != nil {
+			return nil, fmt.Errorf("artifacts: read pending versions: %w", err)
+		}
+		if between > 0 {
+			return nil, ErrStaleBase
+		}
 	}
 	if err := s.insertFiles(ctx, tx, versionID, extra); err != nil {
 		return nil, err

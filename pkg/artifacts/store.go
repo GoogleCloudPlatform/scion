@@ -222,8 +222,10 @@ type Store interface {
 	// seq unless a later one is already current. It returns ErrConflict when
 	// the version is not finalizing under the given claim, and the updated
 	// artifact otherwise. When base is above 0, the artifact's current
-	// version must still be base, checked under the same lock that advances
-	// it; otherwise it returns ErrStaleBase and changes nothing.
+	// version must still be base and no version between base and seq may
+	// be pending or finalizing, both checked under the same lock that
+	// advances the current version; otherwise it returns ErrStaleBase and
+	// changes nothing.
 	FinalizeVersion(ctx context.Context, artifactID string, seq int, claim time.Time, extra []File, base int) (*Artifact, error)
 
 	// DiscardFinalize fails the claimed (finalizing) version seq of an

@@ -96,7 +96,8 @@ func TestArtifactReviewUnmarkedChanges(t *testing.T) {
 	errOut.Reset()
 	err := publishReview(ctx, svc, &out, &errOut, "", edited, ref, bundlePublishOptions{})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "publish without --review")
+	assert.Contains(t, err.Error(), "a review may only add marks")
+	assert.NotContains(t, err.Error(), "without --review")
 	report := errOut.String()
 	for _, want := range []string{"plan.md (modified)", "line 4:", "- Owners: docs.", "+ Owner: docs."} {
 		assert.Contains(t, report, want)

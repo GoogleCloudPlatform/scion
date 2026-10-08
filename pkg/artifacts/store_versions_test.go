@@ -491,6 +491,23 @@ func TestStoreFinalizeBaseAndDiscard(t *testing.T) {
 		if got, err := st.FinalizeVersion(ctx, a.ID, r2.Seq, claimOf(a.ID, r2.Seq), nil, 1); err != nil || got.CurrentSeq != r2.Seq {
 			t.Fatalf("finalize on base: %+v, %v", got, err)
 		}
+		// A version between the base and the review that is still pending
+		// refuses the review too.
+		between := &Version{ID: uuid.NewString(), ArtifactID: a.ID, Kind: VersionKindPublish, EntryPath: "a.md",
+			CreatedAt: time.Now(), State: VersionStatePending}
+		if err := st.CreateVersion(ctx, between, nil, 4); err != nil {
+			t.Fatal(err)
+		}
+		late := review()
+		if _, err := st.FinalizeVersion(ctx, a.ID, late.Seq, claimOf(a.ID, late.Seq), nil, r2.Seq); !errors.Is(err, ErrStaleBase) {
+			t.Fatalf("pending version between base and review: %v, want ErrStaleBase", err)
+		}
+		if err := st.DiscardFinalize(ctx, a.ID, late.Seq, claimOf(a.ID, late.Seq)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.ReapPending(ctx, time.Now().Add(time.Hour), 10); err != nil {
+			t.Fatal(err)
+		}
 		// Discard: under another claim it conflicts; under its claim it
 		// fails the version and drops the manifest.
 		r3 := review()
