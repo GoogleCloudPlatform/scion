@@ -97,12 +97,13 @@ var hubStatusCmd = &cobra.Command{
 
 // hubProjectsCmd lists projects on the Hub
 var hubProjectsCmd = &cobra.Command{
-	Use:     "projects [project-name]",
+	Use:     "projects [project-name-or-id]",
 	Aliases: []string{"project"},
 	Short:   "List projects on the Hub",
 	Long: `List projects registered on the Hub that you have access to.
 
-If a project name is provided, shows detailed information for that project.
+If a project name or ID is provided, shows detailed information for that
+project.
 
 Examples:
   # List all projects
@@ -116,14 +117,15 @@ Examples:
 
 // hubProjectsInfoCmd shows detailed information about a project
 var hubProjectsInfoCmd = &cobra.Command{
-	Use:   "info [project-name]",
+	Use:   "info [project-name-or-id]",
 	Short: "Show detailed information about a project",
 	Long: `Show detailed information about a project on the Hub.
 
 Displays project metadata including creation date, broker providers,
 and agent count.
 
-If no project name is provided, the current project is used.
+The project can be given by name or by project ID (UUID). If no project
+is provided, the current project is used.
 
 Examples:
   # Show info for the current project
@@ -131,6 +133,9 @@ Examples:
 
   # Show info for a project by name
   scion hub projects info my-project
+
+  # Show info for a project by ID
+  scion hub projects info 0b9a4c1e-2f3d-4e5a-8b6c-7d8e9f0a1b2c
 
   # Output as JSON
   scion hub projects info my-project --json`,
@@ -1327,8 +1332,7 @@ func runHubProjectsInfo(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Find the project by name
-	project, err := findProjectByName(ctx, client, projectName)
+	project, err := resolveProjectForInfo(ctx, client, projectName)
 	if err != nil {
 		return err
 	}
@@ -1876,6 +1880,18 @@ func findProjectByName(ctx context.Context, client hubclient.Client, name string
 	}
 
 	return &resp.Projects[0], nil
+}
+
+// resolveProjectForInfo resolves the argument of `scion hub projects info`.
+// A UUID-shaped value (as returned by the REST API) goes through the shared
+// ID-first resolver, which looks the project up by ID and falls back to
+// slug and name (ptone/scion#3772). Any other value keeps the existing
+// name lookup unchanged.
+func resolveProjectForInfo(ctx context.Context, client hubclient.Client, arg string) (*hubclient.Project, error) {
+	if isUUIDLike(arg) {
+		return resolveProjectByNameOrID(ctx, client, arg)
+	}
+	return findProjectByName(ctx, client, arg)
 }
 
 // valueOrDefault returns value if non-empty, otherwise returns the default.
