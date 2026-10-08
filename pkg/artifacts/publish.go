@@ -244,38 +244,24 @@ func (s *Service) putBlob(ctx context.Context, b backend, sp *spooled, mediaType
 // can run publishes and sweeps on one simulated clock.
 var blobClock = time.Now
 
-// storeBlob stores the bytes open yields at digest's content address
-// unless a blob with that digest already exists. It is the only way bytes
-// are written, so every write touches the blob first: the blob sweep then
-// spares a blob this publish relies on, and a sweep deleting it finishes
-// before the existence check below.
+// storeBlob stores the bytes open yields at digest's content address. It
+// is the only way bytes are written. It touches the blob first (waiting
+// for a sweep that holds the blob's state, and keeping the sweep off the
+// blob for the grace period), then always uploads, overwriting any object
+// already there: the write never relies on an existing object, so a
+// delete the sweep issued earlier (which names the generation it saw) can
+// never remove the bytes this write stores. There is still one object per
+// digest.
 func storeBlob(ctx context.Context, b backend, digest, mediaType string, open func() (io.Reader, error)) error {
-	marked, err := b.store.TouchBlob(ctx, digest, blobClock())
-	if err != nil {
+	if err := b.store.TouchBlob(ctx, digest, blobClock()); err != nil {
 		return err
-	}
-	p := BlobPath(b.hubID, digest)
-	// A blob that is marked may have a delete on its way to the object
-	// store; store it again so this publish does not depend on the old
-	// object (see deleteBlob), and clear the mark only once that worked.
-	if !marked {
-		exists, err := b.blobs.Exists(ctx, p)
-		if err != nil {
-			return fmt.Errorf("check blob: %w", err)
-		}
-		if exists {
-			return nil
-		}
 	}
 	body, err := open()
 	if err != nil {
 		return err
 	}
-	if _, err := b.blobs.Upload(ctx, p, body, storage.UploadOptions{ContentType: mediaType}); err != nil {
+	if _, err := b.blobs.Upload(ctx, BlobPath(b.hubID, digest), body, storage.UploadOptions{ContentType: mediaType}); err != nil {
 		return fmt.Errorf("upload blob: %w", err)
-	}
-	if marked {
-		return b.store.ClearBlobMark(ctx, digest)
 	}
 	return nil
 }

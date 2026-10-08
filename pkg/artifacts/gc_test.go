@@ -148,7 +148,7 @@ func TestBlobSweepTouchProtects(t *testing.T) {
 		if err := st.MarkBlobs(ctx, marks(d), t0); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := st.TouchBlob(ctx, d, t0.Add(time.Hour)); err != nil {
+		if err := st.TouchBlob(ctx, d, t0.Add(time.Hour)); err != nil {
 			t.Fatal(err)
 		}
 		var deleted []string
@@ -163,17 +163,6 @@ func TestBlobSweepTouchProtects(t *testing.T) {
 		}
 		if n, _ := st.ReclaimBlobs(ctx, t0.Add(time.Hour), 10, del); n != 1 || len(deleted) != 1 || deleted[0] != d {
 			t.Fatalf("not reclaimed once the touch aged: %d %v", n, deleted)
-		}
-		// Clearing the mark (after a re-store) takes the blob out of the
-		// sweep until a later mark.
-		if err := st.MarkBlobs(ctx, marks(d), t0); err != nil {
-			t.Fatal(err)
-		}
-		if err := st.ClearBlobMark(ctx, d); err != nil {
-			t.Fatal(err)
-		}
-		if n, _ := st.ReclaimBlobs(ctx, t0.Add(10*time.Hour), 10, del); n != 0 {
-			t.Fatalf("a cleared blob was reclaimed")
 		}
 		// A failing delete keeps the state row and ends the pass.
 		if err := st.MarkBlobs(ctx, marks(d), t0); err != nil {
@@ -236,7 +225,7 @@ func TestBlobSweepTouchWaitsForDelete(t *testing.T) {
 			touched.Add(1)
 			go func() {
 				defer touched.Done()
-				if _, err := writer.TouchBlob(ctx, d, time.Now()); err != nil {
+				if err := writer.TouchBlob(ctx, d, time.Now()); err != nil {
 					t.Errorf("touch: %v", err)
 				}
 				touchedAt <- time.Now()
@@ -450,7 +439,7 @@ func TestBlobSweepRechecksUnderLock(t *testing.T) {
 		}
 		reclaimCandidateHook = func(x string) {
 			// A publish touches it, and a mark pass runs again.
-			if _, err := st.TouchBlob(ctx, x, t0); err != nil {
+			if err := st.TouchBlob(ctx, x, t0); err != nil {
 				t.Errorf("touch: %v", err)
 			}
 			if err := st.MarkBlobs(ctx, marks(x), t0); err != nil {
@@ -471,7 +460,7 @@ func TestBlobMarkClearsReferenced(t *testing.T) {
 	forEachBackend(t, func(t *testing.T, db *sql.DB, st Store, _ func() *sql.DB) {
 		ctx := context.Background()
 		_, _, f, _ := seedArtifact(t, st, "")
-		if _, err := st.TouchBlob(ctx, f.SHA256, time.Now()); err != nil {
+		if err := st.TouchBlob(ctx, f.SHA256, time.Now()); err != nil {
 			t.Fatal(err)
 		}
 		if err := st.MarkBlobs(ctx, marks(f.SHA256), time.Now()); err != nil {
@@ -686,35 +675,21 @@ func TestBlobSweepLateDeleteSparesRepublishedBlob(t *testing.T) {
 	}
 }
 
-// TestBlobTouchReportsMark: TouchBlob says whether the blob was marked.
-func TestBlobTouchReportsMark(t *testing.T) {
+// TestBlobMarkRecordsGeneration: the generation recorded at marking
+// reaches the delete, and the latest listing's generation wins.
+func TestBlobMarkRecordsGeneration(t *testing.T) {
 	forEachBackend(t, func(t *testing.T, db *sql.DB, st Store, _ func() *sql.DB) {
 		ctx := context.Background()
 		d := sha([]byte("mark"))
-		if marked, err := st.TouchBlob(ctx, d, time.Now()); err != nil || marked {
-			t.Fatalf("first touch: %v %v", marked, err)
-		}
-		if err := st.MarkBlobs(ctx, []BlobMark{{Digest: d, Generation: 7}}, time.Now()); err != nil {
+		old := time.Now().Add(-time.Hour)
+		if err := st.MarkBlobs(ctx, []BlobMark{{Digest: d, Generation: 7}}, old); err != nil {
 			t.Fatal(err)
 		}
-		if marked, err := st.TouchBlob(ctx, d, time.Now()); err != nil || !marked {
-			t.Fatalf("touch of a marked blob: %v %v", marked, err)
-		}
-		if marked, _ := st.TouchBlob(ctx, d, time.Now()); !marked {
-			t.Errorf("a touch cleared the mark")
-		}
-		if err := st.ClearBlobMark(ctx, d); err != nil {
-			t.Fatal(err)
-		}
-		if marked, _ := st.TouchBlob(ctx, d, time.Now()); marked {
-			t.Errorf("ClearBlobMark did not clear the mark")
-		}
-		// The generation recorded at marking reaches the delete.
-		if err := st.MarkBlobs(ctx, []BlobMark{{Digest: d, Generation: 9}}, time.Now().Add(-time.Hour)); err != nil {
+		if err := st.MarkBlobs(ctx, []BlobMark{{Digest: d, Generation: 9}}, time.Now()); err != nil {
 			t.Fatal(err)
 		}
 		var gotGen int64
-		if n, err := st.ReclaimBlobs(ctx, time.Now().Add(time.Minute), 10, func(_ string, g int64) error { gotGen = g; return nil }); err != nil || n != 1 || gotGen != 9 {
+		if n, err := st.ReclaimBlobs(ctx, time.Now().Add(-time.Minute), 10, func(_ string, g int64) error { gotGen = g; return nil }); err != nil || n != 1 || gotGen != 9 {
 			t.Errorf("reclaim: %d %v generation %d", n, err, gotGen)
 		}
 	})
@@ -845,10 +820,6 @@ func TestBlobLateDeleteAfterFailedRestore(t *testing.T) {
 	if rec := f.do(&userU, http.MethodGet, "/api/v1/artifacts/"+id+"/files/b.md", nil, nil); rec.Code != http.StatusOK {
 		t.Errorf("read: %d", rec.Code)
 	}
-	// The successful re-store cleared the mark.
-	if marked, err := f.store.TouchBlob(ctx, sha(body), time.Now()); err != nil || marked {
-		t.Errorf("mark after a successful re-store: %v %v", marked, err)
-	}
 }
 
 // TestBlobLateDeleteTwoPublishers: while one publisher that found the blob
@@ -946,7 +917,7 @@ func TestBlobGCInterleavings(t *testing.T) {
 		publish := func(name string) { publishBody(name, content()) }
 		for step := range 150 {
 			name := "f" + strconv.Itoa(step) + ".md"
-			switch op := rng.Intn(12); op {
+			switch op := rng.Intn(15); op {
 			case 0: // publish, maybe with a failing upload
 				if rng.Intn(2) == 0 {
 					vs.mu.Lock()
@@ -1005,7 +976,61 @@ func TestBlobGCInterleavings(t *testing.T) {
 			case 8: // time passes
 				clock = clock.Add(time.Duration(rng.Intn(3*int(DefaultGCGrace/time.Hour))) * time.Hour)
 			case 9: // a touch without a publish (a writer that went away)
-				_, _ = f.store.TouchBlob(ctx, sha(content()), clock)
+				_ = f.store.TouchBlob(ctx, sha(content()), clock)
+			case 12, 13: // a two-step publish: create, maybe a sweep, PUT (ok or failing), finalize
+				body := content()
+				files := bundle{"m.md": body}
+				req := files.manifest("m.md")
+				req.Scope = "project-1"
+				rec := f.postJSON(&userU, "/api/v1/artifacts", req)
+				if rec.Code != http.StatusCreated {
+					break
+				}
+				pend := decodeInto[PendingVersionResponse](t, rec)
+				if rng.Intn(2) == 0 {
+					pass([]int{0, 1, 1, 2}[rng.Intn(4)])
+				}
+				if rng.Intn(3) == 0 {
+					vs.mu.Lock()
+					vs.failUploads = 1
+					vs.mu.Unlock()
+				}
+				for _, p := range pend.Upload.Required {
+					f.put(userU, pend.Artifact.ID, 1, p, files[p])
+				}
+				vs.mu.Lock()
+				vs.failUploads = 0
+				vs.mu.Unlock()
+				if rng.Intn(2) == 0 {
+					pass([]int{0, 1, 1, 2}[rng.Intn(4)])
+				}
+				if f.finalize(userU, pend.Artifact.ID, 1).Code == http.StatusOK {
+					ids = append(ids, pend.Artifact.ID)
+				}
+			case 14: // append a version to an artifact, carrying its file forward
+				if len(ids) == 0 {
+					break
+				}
+				id := ids[rng.Intn(len(ids))]
+				got := f.do(&userU, http.MethodGet, "/api/v1/artifacts/"+id, nil, nil)
+				if got.Code != http.StatusOK {
+					break
+				}
+				cur := decodeInto[ArtifactResponse](t, got)
+				if cur.Version == nil || len(cur.Version.Files) == 0 {
+					break
+				}
+				cf := cur.Version.Files[0]
+				req := CreateVersionRequest{Entry: cf.Path, Files: []ManifestFile{{Path: cf.Path, Size: cf.Size, SHA256: cf.SHA256}}}
+				rec := f.postJSON(&userU, "/api/v1/artifacts/"+id+"/versions", req)
+				if rec.Code != http.StatusCreated {
+					break
+				}
+				pend := decodeInto[PendingVersionResponse](t, rec)
+				if rng.Intn(2) == 0 {
+					pass([]int{0, 1, 1, 2}[rng.Intn(4)])
+				}
+				f.finalize(userU, id, pend.Version.Seq)
 			}
 			for _, d := range liveDigests(t, f) {
 				if !blobReadable(t, vs, d) {
@@ -1022,5 +1047,94 @@ func TestBlobGCInterleavings(t *testing.T) {
 	}
 	if reclaimed == 0 {
 		t.Fatalf("no blob was ever reclaimed; the sequences do not exercise the sweep")
+	}
+}
+
+// TestBlobLateDeleteManifestReference: a two-step publish whose manifest
+// names a digest the sweep is deleting (the delete times out and reaches
+// the object store later): the manifest row is a reference from the start,
+// the PUT stores the bytes again, and the late delete of the old generation
+// leaves them.
+func TestBlobLateDeleteManifestReference(t *testing.T) {
+	f := newFixture(t, false)
+	ctx := context.Background()
+	vs := newVersionedStorage(f.local)
+	f.svc.SetBlobStorage(vs, "hub-1")
+	g := &BlobSweeper{}
+	body := []byte("bytes named by a manifest while a delete is in flight")
+	staleOrphan(t, f, vs, g, body)
+	vs.late = true
+	if _, _, err := g.Sweep(ctx, f.store, vs, "hub-1", DefaultGCGrace, time.Now()); err == nil {
+		t.Fatal("the late delete did not fail the pass")
+	}
+	vs.late = false
+	files := bundle{"m.md": body}
+	req := files.manifest("m.md")
+	req.Scope = "project-1"
+	pend := f.createPending(userU, "/api/v1/artifacts", req)
+	// A mark pass now sees the manifest row as a reference.
+	if _, _, err := g.Sweep(ctx, f.store, vs, "hub-1", DefaultGCGrace, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if rec := f.put(userU, pend.Artifact.ID, 1, "m.md", body); rec.Code != http.StatusNoContent {
+		t.Fatalf("PUT: %d", rec.Code)
+	}
+	if rec := f.finalize(userU, pend.Artifact.ID, 1); rec.Code != http.StatusOK {
+		t.Fatalf("finalize: %d %s", rec.Code, rec.Body.String())
+	}
+	vs.applyLate(ctx)
+	if !blobReadable(t, vs, sha(body)) {
+		t.Fatal("a late delete removed bytes a finalized version references")
+	}
+	if rec := f.do(&userU, http.MethodGet, "/api/v1/artifacts/"+pend.Artifact.ID+"/files/m.md", nil, nil); rec.Code != http.StatusOK {
+		t.Errorf("read: %d", rec.Code)
+	}
+}
+
+// TestBlobCarryForwardSharesObjectAndSurvivesSweeps: a new version whose
+// file is unchanged needs no upload (one stored object per digest), and
+// the carried file stays readable through sweeps, because the current
+// version keeps referencing it.
+func TestBlobCarryForwardSharesObjectAndSurvivesSweeps(t *testing.T) {
+	f := newFixture(t, false)
+	ctx := context.Background()
+	vs := newVersionedStorage(f.local)
+	f.svc.SetBlobStorage(vs, "hub-1")
+	g := &BlobSweeper{}
+	same, other := []byte("unchanged file"), []byte("changed file v1")
+	files := bundle{"a.md": same, "b.md": other}
+	req := files.manifest("a.md")
+	req.Scope = "project-1"
+	id := f.publishBundle(userU, "/api/v1/artifacts", req, files).Artifact.ID
+	uploads := func() int64 {
+		vs.mu.Lock()
+		defer vs.mu.Unlock()
+		return vs.next
+	}
+	before := uploads()
+	v2 := bundle{"a.md": same, "b.md": []byte("changed file v2")}
+	pend := f.createPending(userU, "/api/v1/artifacts/"+id+"/versions", v2.manifest("a.md"))
+	if len(pend.Upload.Required) != 1 || pend.Upload.Required[0] != "b.md" {
+		t.Fatalf("required = %v, want only the changed file", pend.Upload.Required)
+	}
+	// Sweeps (marks long ago, then reclaim now) between create and finalize.
+	for _, at := range []time.Time{time.Now().Add(-2 * DefaultGCGrace), time.Now()} {
+		if _, _, err := g.Sweep(ctx, f.store, vs, "hub-1", DefaultGCGrace, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if rec := f.put(userU, id, 2, "b.md", v2["b.md"]); rec.Code != http.StatusNoContent {
+		t.Fatalf("PUT: %d", rec.Code)
+	}
+	if rec := f.finalize(userU, id, 2); rec.Code != http.StatusOK {
+		t.Fatalf("finalize: %d", rec.Code)
+	}
+	if got := uploads() - before; got != 1 {
+		t.Errorf("%d uploads for one changed file", got)
+	}
+	for _, d := range []string{sha(same), sha(v2["b.md"])} {
+		if !blobReadable(t, vs, d) {
+			t.Errorf("blob %s of the new version is not readable", d)
+		}
 	}
 }

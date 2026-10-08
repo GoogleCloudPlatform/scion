@@ -339,21 +339,10 @@ type Store interface {
 	// transaction, and returns how many it deleted.
 	SweepExpired(ctx context.Context, now time.Time, limit int) (int, error)
 
-	// TouchBlob records that a publish is about to rely on blob digest at
-	// now: a writer calls it before checking whether the blob exists, so
-	// the blob sweep spares the blob for the grace period, and it waits
-	// for a sweep that is deleting the blob to finish. marked reports that
-	// the blob is marked unreferenced: a sweep may have tried to delete it,
-	// and such a delete can still reach the object store late, so the
-	// writer must store the bytes again (a new object generation) and then
-	// call ClearBlobMark, rather than rely on the existing object. The
-	// mark stays until then, so a writer whose upload fails leaves it for
-	// the next writer.
-	TouchBlob(ctx context.Context, digest string, now time.Time) (marked bool, err error)
-
-	// ClearBlobMark removes the mark (and the recorded generation) of
-	// blob digest, once its bytes have been stored again.
-	ClearBlobMark(ctx context.Context, digest string) error
+	// TouchBlob records that a write is about to store blob digest at now,
+	// so the blob sweep leaves the blob alone for the grace period. It
+	// waits for a sweep that holds the blob's state to finish.
+	TouchBlob(ctx context.Context, digest string, now time.Time) error
 
 	// MarkBlobs records, for each blob (at most MaxBlobBatch), whether a
 	// live artifact references it: a referenced blob's state is dropped;
