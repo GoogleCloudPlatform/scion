@@ -90,7 +90,7 @@ describe('ctrlCode', () => {
     expect(ctrlCode('?')).toBe('\x7f');
   });
 
-  it('maps the digits 2-8 like xterm.js: NUL, ESC, FS, GS, RS, US, DEL', () => {
+  it('maps the digits 2-8 to NUL, ESC, FS, GS, RS, US, DEL (3-8 as xterm.js, 2 by xterm/VT convention)', () => {
     expect(['2', '3', '4', '5', '6', '7', '8'].map(ctrlCode)).toEqual([
       '\x00',
       '\x1b',
@@ -102,12 +102,16 @@ describe('ctrlCode', () => {
     ]);
   });
 
+  it('maps / to US (0x1f), as xterm, gnome-terminal and iTerm2 do', () => {
+    expect(ctrlCode('/')).toBe('\x1f');
+  });
+
   it('maps Backspace (DEL) to BS, like xterm.js', () => {
     expect(ctrlCode('\x7f')).toBe('\b');
   });
 
   it('has no code for 0, 1, 9, other punctuation or non-ASCII letters', () => {
-    for (const char of ['0', '1', '9', '/', '|', '~', 'é', '\r']) expect(ctrlCode(char)).toBeNull();
+    for (const char of ['0', '1', '9', '|', '~', 'é', '\r']) expect(ctrlCode(char)).toBeNull();
   });
 });
 
@@ -129,9 +133,14 @@ describe('applyModifiers', () => {
     expect(applyModifiers('🙂', ALT)).toEqual({ data: '\x1b🙂', consumed: true });
   });
 
-  it('leaves multi-character data and unmodified input alone', () => {
-    expect(applyModifiers('hello', CTRL)).toEqual({ data: 'hello', consumed: false });
+  it('passes multi-character user input unchanged and uses up the modifier', () => {
+    expect(applyModifiers('ls', CTRL)).toEqual({ data: 'ls', consumed: true });
+    expect(applyModifiers('pasted text', ALT)).toEqual({ data: 'pasted text', consumed: true });
+  });
+
+  it('leaves ESC-led data (xterm replies, bar sequences) and unmodified input alone', () => {
     expect(applyModifiers('\x1b[12;5R', CTRL)).toEqual({ data: '\x1b[12;5R', consumed: false });
+    expect(applyModifiers('\x1b[I', ALT)).toEqual({ data: '\x1b[I', consumed: false });
     expect(applyModifiers('c', { ctrl: false, alt: false })).toEqual({
       data: 'c',
       consumed: false,

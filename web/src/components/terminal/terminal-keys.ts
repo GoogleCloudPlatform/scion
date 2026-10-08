@@ -19,13 +19,16 @@
  *
  * A phone's on-screen keyboard has no Esc, Tab, Ctrl, Alt or arrow keys.
  * The key bar sends them, and its sticky Ctrl/Alt modifiers apply to the
- * next character typed on the on-screen keyboard. Unmodified keys and the
- * Ctrl map follow xterm.js (src/common/input/Keyboard.ts). Modified cursor
- * and page keys use the standard xterm CSI form, CSI 1 ; mod X, with mod =
- * 1 + Alt 2 + Ctrl 4. xterm.js differs in two places: it remaps Alt+Left and
- * Alt+Right to word movement (ESC b / ESC f on macOS, CSI 1 ; 5 D / C
- * elsewhere), and it ignores Alt on PgUp/PgDn and Tab. The bar sends the
- * plain CSI form, which tmux and readline also understand.
+ * next character typed on the on-screen keyboard. Unmodified keys follow
+ * xterm.js (src/common/input/Keyboard.ts); see ctrlCode for the Ctrl map.
+ * Modified cursor and page keys use the standard xterm CSI form,
+ * CSI 1 ; mod X, with mod = 1 + Alt 2 + Ctrl 4. xterm.js differs here:
+ * - it remaps Alt+arrows: Alt+Left/Right to word movement (ESC b / ESC f on
+ *   macOS, CSI 1 ; 5 D / C elsewhere), and Alt+Up/Down to CSI 1 ; 5 A / B
+ *   outside macOS;
+ * - it ignores Alt on PgUp/PgDn, Tab and Shift+Tab.
+ * The bar sends the plain forms (CSI 1 ; 3 X for Alt, ESC prefix for Alt+Tab
+ * and Alt+Shift+Tab), which tmux and readline also understand.
  */
 
 /** A key the bar sends as a fixed sequence (not a typed character). */
@@ -101,15 +104,19 @@ export function barKeySequence(
     return modified ? `\x1b[${tildeCode};${modifierParam(mods)}~` : `\x1b[${tildeCode}~`;
   }
   // Esc, Tab and Shift+Tab: Alt prefixes ESC, Ctrl does not change them.
+  // (xterm.js ignores Alt on Tab and Shift+Tab; ESC ESC [ Z is the plain
+  // meta-sends-escape form.)
   const base = key === 'escape' ? '\x1b' : key === 'tab' ? '\t' : '\x1b[Z';
   return mods.alt ? `\x1b${base}` : base;
 }
 
 /**
  * The control code for Ctrl plus a typed character, or null if the
- * character has none, as xterm.js maps them: a-z and A-Z → 0x01-0x1a,
- * @, space and 2 → NUL, [ \ ] ^ _ → 0x1b-0x1f, 3-7 → 0x1b-0x1f, 8 and
- * ? → DEL, and Backspace (DEL) → BS.
+ * character has none. xterm.js 5.5 maps a-z, space, 3-7, 8, [ \ ] and
+ * Backspace; the rest is xterm/VT convention (also gnome-terminal and
+ * iTerm2): a-z and A-Z → 0x01-0x1a, @, space and 2 → NUL, [ \ ] ^ _ →
+ * 0x1b-0x1f, 3-7 → 0x1b-0x1f, / → 0x1f, 8 and ? → DEL, Backspace (DEL)
+ * → BS.
  */
 export function ctrlCode(char: string): string | null {
   if (/^[a-zA-Z]$/.test(char)) return String.fromCharCode(char.toUpperCase().charCodeAt(0) - 64);
@@ -117,20 +124,26 @@ export function ctrlCode(char: string): string | null {
   const index = '[\\]^_'.indexOf(char);
   if (char.length === 1 && index >= 0) return String.fromCharCode(0x1b + index);
   if (/^[3-7]$/.test(char)) return String.fromCharCode(0x1b + Number(char) - 3);
+  if (char === '/') return '\x1f';
   if (char === '8' || char === '?') return '\x7f';
   if (char === '\x7f') return '\b';
   return null;
 }
 
 /**
- * Applies sticky modifiers to data typed on the on-screen keyboard. Only a
- * single character is modified: anything longer (a paste, a predictive-text
- * word, a terminal's reply to a status query) is returned unchanged and
- * `consumed` is false, so the modifier stays armed for the next key. A
- * character with no control code keeps its plain value under Ctrl.
+ * Applies sticky modifiers to data on its way from xterm to the PTY. Only a
+ * single character is modified; a character with no control code keeps its
+ * plain value under Ctrl. Longer data is returned unchanged:
+ * - user input (a paste, dictation, a predictive-text or IME word) counts
+ *   as the key the modifier was for, so `consumed` is true and an armed
+ *   modifier clears rather than hitting the next keystroke;
+ * - data that starts with ESC is xterm's own reply (status reports, focus
+ *   and mouse reports) or a bar key's sequence, so `consumed` is false and
+ *   the modifier stays armed. xterm never replies with a single character.
  */
 export function applyModifiers(data: string, mods: Modifiers): { data: string; consumed: boolean } {
-  if ((!mods.ctrl && !mods.alt) || [...data].length !== 1) return { data, consumed: false };
+  if (!mods.ctrl && !mods.alt) return { data, consumed: false };
+  if ([...data].length !== 1) return { data, consumed: !data.startsWith('\x1b') };
   const base = mods.ctrl ? (ctrlCode(data) ?? data) : data;
   return { data: mods.alt ? `\x1b${base}` : base, consumed: true };
 }

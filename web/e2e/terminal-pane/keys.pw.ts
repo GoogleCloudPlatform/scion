@@ -95,15 +95,38 @@ test.describe('phone', () => {
     await expect.poll(() => peer.input).toEqual(['\x1b', '\x03']);
     expect(await focusedClass(page)).toContain('xterm-helper-textarea');
 
-    // With focus outside the pane, a key tap brings it to this terminal.
+    // Nothing focused (the user closed the keyboard): a tap sends the key
+    // and leaves focus alone, so the keyboard stays closed.
     await page.evaluate(() => {
       const pane = window.paneFixture.pane;
       (pane.shadowRoot?.activeElement as HTMLElement | null)?.blur();
     });
     expect(await focusedClass(page)).not.toContain('xterm-helper-textarea');
     await bar.getByRole('button', { name: 'Tab', exact: true }).tap();
+    expect(await focusedClass(page)).not.toContain('xterm-helper-textarea');
+
+    // Focus in another element (another pane, an input): a tap brings it here.
+    await page.evaluate(() => {
+      const input = document.createElement('input');
+      input.className = 'outside';
+      document.body.prepend(input);
+      input.focus();
+    });
+    expect(await focusedClass(page)).toBe('outside');
+    await bar.getByRole('button', { name: 'Tab', exact: true }).tap();
     expect(await focusedClass(page)).toContain('xterm-helper-textarea');
-    await expect.poll(() => peer.input).toEqual(['\x1b', '\x03', '\t']);
+    await expect.poll(() => peer.input).toEqual(['\x1b', '\x03', '\t', '\t']);
+  });
+
+  test('a multi-character input after Ctrl uses it up instead of hitting the next key', async ({
+    page,
+  }) => {
+    const peer = await setup(page);
+    await page.locator('.xterm-helper-textarea').focus();
+    await page.getByRole('button', { name: 'Ctrl (Control)', exact: true }).tap();
+    await page.keyboard.insertText('ls');
+    await page.keyboard.type(' ');
+    await expect.poll(() => peer.input).toEqual(['ls', ' ']);
   });
 
   test('arrows follow the application cursor mode set by the remote program', async ({ page }) => {

@@ -1398,12 +1398,20 @@ describe('touch key bar', () => {
     }
   });
 
-  it("moves focus into this pane's terminal when a key is tapped while focus is elsewhere", async () => {
+  it("moves focus into this pane's terminal when another pane or an input has focus", async () => {
     await mountTouch();
     const xt = terminal.instances[0];
-    xt.focus.mockClear();
-    await press('Ctrl');
-    expect(xt.focus).toHaveBeenCalledTimes(1);
+    // Another pane's terminal (split layout) or any input outside this pane.
+    const other = document.createElement('input');
+    document.body.append(other);
+    try {
+      other.focus();
+      xt.focus.mockClear();
+      await press('Ctrl');
+      expect(xt.focus).toHaveBeenCalledTimes(1);
+    } finally {
+      other.remove();
+    }
 
     // Already focused in this pane: no focus call.
     const textarea = document.createElement('textarea');
@@ -1414,6 +1422,41 @@ describe('touch key bar', () => {
     xt.focus.mockClear();
     await press('Esc');
     expect(xt.focus).not.toHaveBeenCalled();
+  });
+
+  it('leaves the keyboard closed: no focus move when nothing has focus', async () => {
+    await mountTouch();
+    (document.activeElement as HTMLElement | null)?.blur();
+    expect([null, document.body]).toContain(document.activeElement);
+    const xt = terminal.instances[0];
+    xt.focus.mockClear();
+    await press('PgUp');
+    await press('Ctrl');
+    expect(xt.focus).not.toHaveBeenCalled();
+    expect(sent()).toEqual(['\x1b[5~']);
+  });
+
+  it('clears an armed modifier on reconnect, keeps a locked one', async () => {
+    await mountTouch();
+    const reconnect = async (): Promise<void> => {
+      const socket = FakeSocket.instances.at(-1)!;
+      socket.readyState = 3;
+      socket.onclose?.({ code: 1006 });
+      await page.updateComplete;
+      const count = FakeSocket.instances.length;
+      void page.session!.connect();
+      await vi.waitFor(() => expect(FakeSocket.instances).toHaveLength(count + 1));
+      FakeSocket.instances.at(-1)!.open();
+      FakeSocket.instances.at(-1)!.data();
+      await page.updateComplete;
+    };
+    await press('Ctrl');
+    await reconnect();
+    expect(key('Ctrl').getAttribute('aria-pressed')).toBe('false');
+    await press('Ctrl');
+    await press('Ctrl');
+    await reconnect();
+    expect(key('Ctrl').classList.contains('locked')).toBe(true);
   });
 
   it('Ctrl with the on-screen Backspace sends BS (0x08)', async () => {
@@ -1498,14 +1541,26 @@ describe('touch key bar', () => {
     expect(key('Ctrl').getAttribute('aria-pressed')).toBe('false');
   });
 
-  it('sticky Alt prefixes ESC; a paste or a terminal reply leaves the modifier armed', async () => {
+  it('sticky Alt prefixes ESC; a terminal reply (ESC first) leaves it armed', async () => {
     await mountTouch();
     await press('Alt');
-    type('pasted text');
     type('\x1b[1;1R');
     type('b');
     type('b');
-    expect(sent()).toEqual(['pasted text', '\x1b[1;1R', '\x1bb', 'b']);
+    expect(sent()).toEqual(['\x1b[1;1R', '\x1bb', 'b']);
+  });
+
+  it('a multi-character input (paste, dictation, IME word) uses up an armed Ctrl', async () => {
+    await mountTouch();
+    await press('Ctrl');
+    type('ls');
+    type(' ');
+    // Locked stays locked across it.
+    await press('Ctrl');
+    await press('Ctrl');
+    type('ls');
+    type('c');
+    expect(sent()).toEqual(['ls', ' ', 'ls', '\x03']);
   });
 
   it('clears an armed modifier when the touch query stops matching', async () => {
