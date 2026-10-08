@@ -188,19 +188,24 @@ func TestReincarnateByOtherAgentThenRequesterDeleted(t *testing.T) {
 // A requester that descends from T may not change T's role: it would become
 // T's delegator and close a loop in the delegation chain. Refused with 403,
 // on a dry run and a real run, with nothing written. Descent is found
-// through the ancestry (X created by T) and through the delegation chain
-// alone (X's edge re-pointed to T by an earlier role change).
+// through the ancestry alone (X created by T, its edge since re-pointed to
+// U: refused conservatively) and through the delegation chain alone (X's
+// edge re-pointed to T by an earlier role change).
 func TestReincarnateRoleChangeByDescendantRefused(t *testing.T) {
 	for name, link := range map[string]func(t *testing.T, f *keepEdgeFixture){
 		"ancestry": func(t *testing.T, f *keepEdgeFixture) {
-			ctx := context.Background()
-			x := mustGetAgent(t, f.s, f.other.ID)
-			x.Ancestry = []string{f.userID, f.target.ID}
-			require.NoError(t, f.s.UpdateAgent(ctx, x))
-			_, err := f.s.DeactivateDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, x.ID,
-				store.Deactivation{Cause: store.EdgeDeactivationReincarnateReplaced, OpID: "fixture"})
-			require.NoError(t, err)
-			seedFullAgentEdge(t, f.s, store.DelegationPrincipalAgent, f.target.ID, x)
+			// Ancestry is immutable after creation, so X is created with T
+			// in it. Its edge points at U: only the ancestry links X to T.
+			f.other = newReincarnateTestAgent(t, f.s, f.project, &store.RuntimeBroker{ID: f.target.RuntimeBrokerID}, func(a *store.Agent) {
+				a.ID = tid("keep-edge-child-" + t.Name())
+				a.Slug = "keep-edge-child-" + tidSlugSafe(t.Name())
+				a.CreatedBy = f.target.ID
+				a.OwnerID = f.userID
+				a.Ancestry = []string{f.userID, f.target.ID}
+				a.AppliedConfig.AgentRole = string(AgentRoleFull)
+				a.Phase = "stopped"
+			})
+			seedFullAgentEdge(t, f.s, store.DelegationPrincipalUser, f.userID, f.other)
 		},
 		"chain": func(t *testing.T, f *keepEdgeFixture) {
 			ctx := context.Background()

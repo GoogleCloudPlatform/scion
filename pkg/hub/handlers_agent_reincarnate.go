@@ -555,7 +555,8 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 }
 
 // startReincarnation claims the agent, records the reincarnation (with the
-// authority re-record auth, nil for a self-reincarnation) and starts the
+// authority re-record auth, nil when the edge is kept: a self-reincarnation
+// or one that keeps the role) and starts the
 // detached worker, answering 202. sourceBrokerID and targetBrokerID are
 // echoed in the response (both empty unless the request named a target);
 // move is non-nil for a cross-broker move.
@@ -1026,12 +1027,13 @@ func (s *Server) reincarnateAuthorityFor(w http.ResponseWriter, r *http.Request,
 }
 
 // requesterDescendsFrom reports whether the requesting agent descends from
-// agent: agent is in the requester's stored ancestry, or on the requester's
-// active delegation chain in agent's project. The chain is walked as well
-// because a role-changing reincarnation re-points an edge without touching
-// the (immutable) ancestry. Recording agent -> requester in either case
-// would close a loop that chainEffectCeiling later rejects
-// (ErrProvenanceChain). The walk stops at a user delegator, a migration
+// agent: agent is in the requester's stored ancestry (a lineage descendant,
+// refused conservatively even if its edge has since been re-pointed), or on
+// the requester's active delegation chain in agent's project, where
+// recording agent -> requester would close a loop that chainEffectCeiling
+// rejects (ErrProvenanceChain). The chain is walked as well because a
+// role-changing reincarnation re-points an edge without touching the
+// (immutable) ancestry. The walk stops at a user delegator, a migration
 // sentinel, a missing or ambiguous edge, a repeat, or maxDelegationDepth:
 // those are not loops through agent, and the requester's own ceiling check
 // has already judged its chain. Only a lookup fault is an error.
