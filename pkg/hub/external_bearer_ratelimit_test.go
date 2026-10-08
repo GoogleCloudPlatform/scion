@@ -84,11 +84,10 @@ func TestServer_ExternalBearerRateLimiter_CleanupRunsInBackground(t *testing.T) 
 	}
 
 	cfg := DefaultServerConfig()
-	srv, err := New(cfg, s)
+	srv, err := newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
-	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 
 	if srv.externalBearerRateLimiter == nil {
 		t.Fatal("expected srv.externalBearerRateLimiter to be set")

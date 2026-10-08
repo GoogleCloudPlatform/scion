@@ -2322,6 +2322,13 @@ it is a fieldRef in the container's env list, which cannot be rendered from here
 without the Deployment rendering itself. hack/verify.sh closes that by reading
 the shadowable names back out of the rendered manifest, ConfigMap keys and
 container env entries alike, and asserting this guard refuses every one of them.
+
+POD_NAME is the deliberate exception. The chart sets it from metadata.name only
+when hub.extraEnv does not (templates/deployment.yaml), because hub.extraEnv was
+the documented way to provide it before the chart did, and refusing it here
+would fail the upgrade of every release that followed that advice. Nothing is
+shadowed: the operator's entry replaces the chart's rather than duplicating it.
+hack/verify.sh pins both cases.
 */}}
 {{- $envDoc := fromYaml (include (print .Template.BasePath "/configmap-env.yaml") .) }}
 {{- $shadowable := concat (keys (default dict $envDoc.data)) (list "POD_NAMESPACE") }}

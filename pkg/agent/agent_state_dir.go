@@ -19,7 +19,8 @@ package agent
 // use. It returns the directory and the effective shared-workspace flag (true
 // also when the request does not say so but the agent's state is stored in
 // the external agents root). strict is broker mode or a Hub-supplied project
-// ID, as for withAgentStateDir.
+// ID, as for withAgentStateDir. See effectiveSharedWorkspace for the
+// exception when the external root is the project's own agents root.
 //
 // Callers that read the agent's state outside GetAgent — the broker's runtime
 // classification (ProvisionedProfile) and Start's provenance pre-check — use

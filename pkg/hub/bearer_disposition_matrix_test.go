@@ -33,6 +33,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/require"
 )
@@ -98,6 +99,14 @@ var bearerMatrixExclusions = map[liveInventoryKey]bearerMatrixExclusion{
 	{OperationID: "inbox.notification.template.read", Method: "GET", Pattern: "/api/v1/notifications/templates"}: {
 		Reason: "the template list filters rows to readable projects inside the token boundary instead of refusing the request, so a project token for another project gets 200 with no rows",
 		Pin:    "TestNotificationTemplates_ListedOnlyForReadableProjects",
+	},
+	{OperationID: "project.messagingpolicy.update", Method: "PUT", Pattern: "/api/v1/projects/{id}/messaging-policy"}: {
+		Reason: "the owner rule admits only an active direct project owner, and the matrix's super-admin is not one on the fixture project, so the admitting token is refused by the owner rule after the selector check",
+		Pin:    "TestProjectMessagingPolicyPut_RequiresSetMessagingPolicySelector",
+	},
+	{OperationID: "project.template.set", Method: "POST", Pattern: "/api/v1/projects/{id}/set-template"}: {
+		Reason: "the operation needs project:update and project:clone, and a token passes project.clone on a project only when its holder is a member of it; the matrix's super-admin token carries one selector and is not a member of the fixture project",
+		Pin:    "TestSetTemplate_RequiresUpdateAndCloneOnTheProject",
 	},
 	{OperationID: "artifact.list", Method: "GET", Pattern: "/api/v1/artifacts"}: {
 		Reason: "the artifact list filters each row by the artifact.read check instead of refusing the request, so a token without the selector, or bounded to another project, gets 200 with no rows rather than 403 or 404 (no existence oracle)",
@@ -173,6 +182,14 @@ func newBearerMatrixFixture(t *testing.T) *bearerMatrixFixture {
 	srv, s := testServer(t)
 	ctx := context.Background()
 	ids := seedLiveInventoryFixtures(t, ctx, srv, s)
+	// Project secret routes read and write through the secret backend.
+	backend := secret.NewLocalBackend(s, "bdm-hub-id", "bdm-secret")
+	srv.SetSecretBackend(backend)
+	_, _, err := backend.Set(ctx, &secret.SetSecretInput{
+		Name: ids.projectSecretKey, Value: "1", SecretType: secret.TypeEnvironment,
+		Scope: secret.ScopeProject, ScopeID: ids.project,
+	})
+	require.NoError(t, err)
 
 	adminID := tid("bdm-super-admin")
 	createTestUserWithRole(t, s, adminID, adminID+"@test.com", "admin", store.SystemRoleSuperAdmin)
@@ -590,12 +607,10 @@ var bearerMatrixPositiveServerErrors = map[liveInventoryKey]bearerMatrixPositive
 		http.StatusInternalServerError, "the empty update body fails at the store write"},
 	{"harnessconfig.update", http.MethodPut, "/api/v1/harness-configs/{id}"}: {
 		http.StatusInternalServerError, "the empty update body fails at the store write"},
-	{"hub.config.update", http.MethodPut, "/api/v1/admin/server-config"}: {
-		http.StatusInternalServerError, "the test server has no writable settings file"},
-	{"hub.config.update", http.MethodPatch, "/api/v1/admin/server-config"}: {
-		http.StatusInternalServerError, "the test server has no writable settings file"},
-	{"hub.config.update", http.MethodPost, "/api/v1/admin/server-config"}: {
-		http.StatusInternalServerError, "the test server has no writable settings file"},
+	{"project.messagelogs.read", http.MethodGet, "/api/v1/projects/{id}/message-logs"}: {
+		http.StatusNotImplemented, "the test server configures no log query service"},
+	{"project.metrics.read", http.MethodGet, "/api/v1/projects/{id}/metrics"}: {
+		http.StatusServiceUnavailable, "the test server configures no telemetry project for the metrics dashboard"},
 	{"hub.messaging.update", http.MethodPut, "/api/v1/admin/messaging"}: {
 		http.StatusNotImplemented, "the test server configures no operational settings"},
 	{"hub.experiments.update", http.MethodGet, "/api/v1/admin/experiments"}: {

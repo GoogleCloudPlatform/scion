@@ -82,6 +82,11 @@ func TestUnifiedAuthMiddleware_BrokerHeaderWithoutBrokerAuth(t *testing.T) {
 	}
 
 	for _, tc := range tests {
+		if tc.svc != nil {
+			// Stops the service's nonce-cache cleanup goroutine
+			// (ptone/scion#3641 leak guard).
+			t.Cleanup(tc.svc.Close)
+		}
 		t.Run(tc.name, func(t *testing.T) {
 			var reached bool
 			var gotIdentity Identity

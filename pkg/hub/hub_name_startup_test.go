@@ -38,9 +38,8 @@ func newStartupNamedServer(t *testing.T, hubName string) *Server {
 	require.NoError(t, s.Migrate(context.Background()))
 	cfg := DefaultServerConfig()
 	cfg.HubName = hubName
-	srv, err := New(cfg, s)
+	srv, err := newTestHubServer(t, cfg, s)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 	return srv
 }
 
