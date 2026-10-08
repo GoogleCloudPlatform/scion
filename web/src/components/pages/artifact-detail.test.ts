@@ -613,36 +613,61 @@ describe('artifact page', () => {
   it('keeps the newer result when an earlier load answers last', async () => {
     mockFetch(artifact('a.png', 'image/png'));
     const el = await mount(true);
-    const priv = el as unknown as { load(): Promise<void>; loadView(seq: number): Promise<void> };
-    const older = artifact('a.png', 'image/png');
-    older.artifact.title = 'Older';
-    const newer = artifact('a.png', 'image/png');
-    newer.artifact.title = 'Newer';
-    let releaseOlder: (() => void) | null = null;
-    let calls = 0;
+    const priv = el as unknown as { load(): Promise<void>; loading: boolean };
+    const meta = (title: string): ArtifactResponse => {
+      const m = artifact('a.png', 'image/png');
+      m.artifact.title = title;
+      return m;
+    };
+    // Each GET of the artifact waits until the test releases it.
+    const release: ((m: ArtifactResponse) => void)[] = [];
     vi.stubGlobal(
       'fetch',
       vi.fn((input: RequestInfo | URL) => {
-        const url = String(input);
-        if (url === `/api/v1/artifacts/${ID}`) {
-          calls++;
-          if (calls === 1) {
-            return new Promise<Response>((resolve) => {
-              releaseOlder = (): void =>
-                resolve(new Response(JSON.stringify(older), { status: 200 }));
-            });
-          }
-          return Promise.resolve(new Response(JSON.stringify(newer), { status: 200 }));
+        if (String(input) === `/api/v1/artifacts/${ID}`) {
+          return new Promise<Response>((resolve) => {
+            release.push((m) => resolve(new Response(JSON.stringify(m), { status: 200 })));
+          });
         }
         return Promise.resolve(new Response(JSON.stringify({ versions: [] }), { status: 200 }));
       })
     );
-    const first = priv.load();
-    await priv.load();
-    releaseOlder!();
-    await first;
-    await el.updateComplete;
+    const settle = async (): Promise<void> => {
+      for (let i = 0; i < 10; i++) {
+        await new Promise((r) => setTimeout(r, 0));
+        await el.updateComplete;
+      }
+    };
+
+    // The earlier load answers first, while the newer one is still waiting:
+    // it must not end the loading state or show its data.
+    const olderFirst = priv.load();
+    const newerSecond = priv.load();
+    await settle();
+    release[0](meta('Older'));
+    await olderFirst;
+    await settle();
+    expect(priv.loading).toBe(true);
+    release[1](meta('Newer'));
+    await newerSecond;
+    await settle();
+    expect(priv.loading).toBe(false);
     expect(el.shadowRoot!.querySelector('h1')!.textContent).toBe('Newer');
+
+    // The earlier load answers last: the newer result and state stay.
+    const olderLast = priv.load();
+    const newerFirst = priv.load();
+    await settle();
+    release[3](meta('Newest'));
+    await newerFirst;
+    await settle();
+    expect(priv.loading).toBe(false);
+    expect(el.shadowRoot!.querySelector('h1')!.textContent).toBe('Newest');
+    release[2](meta('Stale'));
+    await olderLast;
+    await settle();
+    expect(priv.loading).toBe(false);
+    expect(el.shadowRoot!.querySelector('h1')!.textContent).toBe('Newest');
   });
 
   it('keeps the newer view when an earlier mint answers last', async () => {
