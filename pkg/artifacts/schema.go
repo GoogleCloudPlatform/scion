@@ -261,3 +261,17 @@ ALTER TABLE artifact_version ADD COLUMN claimed_at TEXT;
 const postgresFinalizeClaims = `
 ALTER TABLE artifact_version ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ;
 `
+
+// migrationLinkTokens makes a share link token hash name at most one link
+// grant across the hub, so resolving a token finds one row or none.
+const migrationLinkTokens = "0005_link_tokens"
+
+const sqliteLinkTokens = `
+CREATE UNIQUE INDEX IF NOT EXISTS idx_artifact_grant_link
+    ON artifact_grant (subject_ref) WHERE subject_kind = 'link';
+`
+
+const postgresLinkTokens = `
+CREATE UNIQUE INDEX IF NOT EXISTS idx_artifact_grant_link
+    ON artifact_grant (subject_ref) WHERE subject_kind = 'link';
+`
