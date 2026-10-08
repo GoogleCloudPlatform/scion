@@ -35,6 +35,7 @@
     "pages/chat-unread-dms.test.ts",
     "pages/graph-palette-hosts.test.ts",
     "terminal/terminal-pane.test.ts",
+    "terminal/terminal-keys.test.ts",
     "shared/header.test.ts",
     "shared/notification-tray-manage-link.test.ts",
     "shared/notification-tray-decisions.test.ts",
