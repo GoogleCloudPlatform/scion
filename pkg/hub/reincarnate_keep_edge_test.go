@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -246,4 +247,90 @@ func TestReincarnateSameRoleKeepsEdge(t *testing.T) {
 	f := newKeepEdgeFixture(t)
 	f.reincarnate(t, ReincarnateAgentRequest{Handoff: "h", Role: string(AgentRoleFull)})
 	assertEdgeKept(t, f.s, f.target.ID, f.edge, f.targetEdge(t))
+}
+
+// requesterGetAgentErrStore fails GetAgent for one agent ID.
+type requesterGetAgentErrStore struct {
+	store.Store
+	failID string
+}
+
+func (s *requesterGetAgentErrStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
+	if id == s.failID {
+		return nil, errors.New("injected requester agent lookup fault")
+	}
+	return s.Store.GetAgent(ctx, id)
+}
+
+// A lookup fault in the cycle check answers 503 on a dry run and a real run,
+// with nothing written. The fault is on the requester's row in the server
+// store: an edge read fault on the chain surfaces earlier, in the
+// requester's own authority checks, which read the same edges.
+func TestReincarnateCycleCheckLookupFault503(t *testing.T) {
+	f := newKeepEdgeFixture(t)
+	f.srv.store = &requesterGetAgentErrStore{Store: f.srv.store, failID: f.other.ID}
+	target := mustGetAgent(t, f.s, f.target.ID)
+	for _, dryRun := range []bool{true, false} {
+		rec := httptest.NewRecorder()
+		body := ReincarnateAgentRequest{Handoff: "h", DryRun: dryRun, Role: string(AgentRoleBaseline)}
+		f.srv.handleReincarnateAgent(rec, reincarnateRequest(t, f.target.ID, fullRequesterFor(f.other.ID, f.project.ID), body), f.target.ID)
+		require.Equal(t, http.StatusServiceUnavailable, rec.Code, "dryRun=%v: %s", dryRun, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "delegation chain", "dryRun=%v: the cycle check's 503", dryRun)
+	}
+	assertNothingClaimed(t, f.s, target, f.edge)
+}
+
+// A self --role naming the stored role is not a role change: it is accepted
+// and keeps the edge even when the agent's token scopes would fail
+// CanDelegate for that role, as a plain self-reincarnate is. The role
+// lattice and the lifecycle check still run on it, and a self --role that
+// does change the role still runs CanDelegate.
+func TestReincarnateSelfSameRole(t *testing.T) {
+	selfReincarnate := func(t *testing.T, f *keepEdgeFixture, identity AgentIdentity, role AgentRole) *httptest.ResponseRecorder {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		f.srv.handleReincarnateAgent(rec, reincarnateRequest(t, f.target.ID, identity, ReincarnateAgentRequest{Handoff: "h", Role: string(role)}), f.target.ID)
+		return rec
+	}
+	lifecycleOnly := func(f *keepEdgeFixture) AgentIdentity {
+		return agentIdentityFor(f.target.ID, f.project.ID, ScopeAgentLifecycle)
+	}
+
+	t.Run("accepted without CanDelegate, edge kept", func(t *testing.T) {
+		f := newKeepEdgeFixture(t)
+		rec := selfReincarnate(t, f, lifecycleOnly(f), AgentRoleFull)
+		require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+		waitForReincarnationSettled(t, f.s, f.target.ID)
+		assertEdgeKept(t, f.s, f.target.ID, f.edge, f.targetEdge(t))
+		assert.Equal(t, string(AgentRoleFull), mustGetAgent(t, f.s, f.target.ID).AppliedConfig.AgentRole)
+	})
+
+	t.Run("a real role change still runs CanDelegate", func(t *testing.T) {
+		f := newKeepEdgeFixture(t)
+		target := mustGetAgent(t, f.s, f.target.ID)
+		rec := selfReincarnate(t, f, lifecycleOnly(f), AgentRoleBaseline)
+		require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "Cannot delegate agent authority")
+		assertNothingClaimed(t, f.s, target, f.edge)
+	})
+
+	t.Run("the role lattice still runs", func(t *testing.T) {
+		f := newKeepEdgeFixture(t)
+		f.project.Annotations = map[string]string{projectSettingMaxAgentRole: string(AgentRoleBaseline)}
+		require.NoError(t, f.s.UpdateProject(context.Background(), f.project))
+		target := mustGetAgent(t, f.s, f.target.ID)
+		rec := selfReincarnate(t, f, lifecycleOnly(f), AgentRoleFull)
+		require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "project maximum")
+		assertNothingClaimed(t, f.s, target, f.edge)
+	})
+
+	t.Run("the lifecycle check still runs", func(t *testing.T) {
+		f := newKeepEdgeFixture(t)
+		target := mustGetAgent(t, f.s, f.target.ID)
+		noLifecycle := agentIdentityFor(f.target.ID, f.project.ID) // no scopes
+		rec := selfReincarnate(t, f, noLifecycle, AgentRoleFull)
+		require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		assertNothingClaimed(t, f.s, target, f.edge)
+	})
 }

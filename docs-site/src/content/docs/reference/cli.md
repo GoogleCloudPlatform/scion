@@ -596,7 +596,8 @@ account.
 To reincarnate another principal's agent you must be able to delegate the agent's role. The agent
 keeps its existing delegator unless you change its role with `--role`; then you become its recorded
 delegator (refused with `403` if you descend from the agent, since that would close a delegation
-loop). A caller who cannot delegate the role, for example a non-admin reincarnating an agent with a
+loop). If you are an agent, the agent then depends on your delegation chain, so prefer a user for role
+changes on long-lived agents. A caller who cannot delegate the role, for example a non-admin reincarnating an agent with a
 privileged role, gets `403` from this authority check. It runs before the workspace and capability
 checks (`400`, `412`), so expect the `403` first.
 
