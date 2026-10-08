@@ -55,10 +55,9 @@ import (
 
 // Re-check triggers (the trigger attribute of the log line and metric).
 const (
-	conduitAuthzTriggerInterval = "interval"
-	conduitAuthzTriggerNotify   = "notify"
-	conduitAuthzTriggerResync   = "resync"
-	conduitAuthzTriggerSweep    = "sweep"
+	conduitAuthzTriggerNotify = "notify"
+	conduitAuthzTriggerResync = "resync"
+	conduitAuthzTriggerSweep  = "sweep"
 )
 
 // Re-check outcomes (the outcome attribute of the log line and metric).
@@ -66,9 +65,6 @@ const (
 	// conduitAuthzOutcomePassed: the check succeeded and no deadline
 	// moved.
 	conduitAuthzOutcomePassed = "passed"
-	// conduitAuthzOutcomeRenewed: the check succeeded and the stream's
-	// authorization deadline advanced.
-	conduitAuthzOutcomeRenewed = "renewed"
 	// conduitAuthzOutcomeClosed: permission no longer holds; the stream
 	// was closed with 4401 authz_expired.
 	conduitAuthzOutcomeClosed = "closed"

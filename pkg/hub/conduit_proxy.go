@@ -426,7 +426,7 @@ func (e *conduitAuthzCloseError) Unwrap() error { return &e.CloseError }
 // receives them in its close frame.
 func (c *streamConn) closeWithCode(code uint32, reason string) {
 	c.authzClose.CompareAndSwap(nil, &conduitAuthzCloseError{CloseError: conduit.CloseError{Code: code, Reason: reason}})
-	_ = c.Stream.CloseWithCode(code, reason)
+	_ = c.CloseWithCode(code, reason)
 }
 
 // Read reads from the stream; once the hub closed it for authorization,
