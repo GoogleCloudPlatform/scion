@@ -446,6 +446,19 @@ func (s *Server) handleListThreads(w http.ResponseWriter, r *http.Request, proje
 		return
 	}
 
+	// Lazy backfill: a project with no threads at all never got its
+	// #general topic (created before every creation path ensured one).
+	// The last thread of a space cannot be deleted, so zero threads never
+	// means a user removed them, and a #general a user deleted while other
+	// threads remain is not resurrected. Templates are not chat spaces.
+	if len(topics) == 0 && !project.IsTemplate() {
+		s.ensureProjectGeneralTopic(r.Context(), project)
+		if topics, err = wcs.ListTopics(r.Context(), projectID); err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list threads", nil)
+			return
+		}
+	}
+
 	// Batch-fetch read states.
 	convKeys := make([]string, 0, len(topics))
 	for _, t := range topics {

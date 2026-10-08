@@ -667,8 +667,13 @@ func (s *Server) createProjectGroup(ctx context.Context, project *store.Project)
 
 // ensureProjectGeneralTopic creates the #general chat topic for a project if
 // the webchat store is configured. Best-effort: failures are logged but do not
-// block project creation.
+// block project creation. It is idempotent, so every creation path (create,
+// register, clone, from-template) and the lazy backfill can call it. Project
+// templates are not chat spaces and never get a #general topic.
 func (s *Server) ensureProjectGeneralTopic(ctx context.Context, project *store.Project) {
+	if project == nil || project.IsTemplate() {
+		return
+	}
 	s.mu.RLock()
 	wcs := s.webChatStore
 	s.mu.RUnlock()
