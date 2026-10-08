@@ -1615,7 +1615,7 @@ func (s *AgentStore) SetAgentAnnotation(ctx context.Context, agentID, key, value
 	if err != nil {
 		return err
 	}
-	useLock := s.usesRowLocks(ctx)
+	useLock := s.usesRowLocks()
 	tx, err := s.client.Tx(ctx)
 	if err != nil {
 		return err
