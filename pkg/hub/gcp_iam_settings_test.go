@@ -307,7 +307,7 @@ func TestGCPIAMReload_UnusableStoredValueKeepsAppliedValue(t *testing.T) {
 func TestGCPIAMReload_VanishedRowKeepsAppliedValueAndIsRecorded(t *testing.T) {
 	f := newIAMFixture(t, iamEnforceClosed)
 	require.Equal(t, http.StatusOK, f.put(t, iamBody("off", "fail-open")).Code)
-	require.NoError(t, f.hs.fakeHubSettingStore.DeleteHubSetting(context.Background(), gcpIAMSection))
+	require.NoError(t, f.hs.DeleteHubSetting(context.Background(), gcpIAMSection))
 	f.ops.mu.Lock()
 	delete(f.ops.cache, gcpIAMSection)
 	f.ops.mu.Unlock()
