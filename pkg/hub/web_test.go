@@ -2814,9 +2814,12 @@ func TestSPAShellHandler_ListPagesHaveNoPrefetch(t *testing.T) {
 			html := string(body)
 			require.Equal(t, http.StatusOK, resp.StatusCode)
 
-			dataStart := strings.Index(html, `type="application/json">`) + len(`type="application/json">`)
+			const dataMarker = `type="application/json">`
+			markerAt := strings.Index(html, dataMarker)
+			require.GreaterOrEqual(t, markerAt, 0, "should find the __SCION_DATA__ script tag")
+			dataStart := markerAt + len(dataMarker)
 			dataEnd := strings.Index(html[dataStart:], `</script>`)
-			require.True(t, dataStart > 0 && dataEnd > 0, "should find __SCION_DATA__ boundaries")
+			require.Greater(t, dataEnd, 0, "should find the end of the __SCION_DATA__ script tag")
 			var pageData map[string]interface{}
 			require.NoError(t, json.Unmarshal([]byte(html[dataStart:dataStart+dataEnd]), &pageData))
 
