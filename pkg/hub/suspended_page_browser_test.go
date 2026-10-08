@@ -242,9 +242,17 @@ func startHeadlessBrowser(t *testing.T) context.Context {
 		// its first tab.
 		start := time.Now()
 		err := chromedp.Run(ctx)
-		if !timer.Stop() && err == nil {
-			// The timer fired as Run returned, so ctx is already canceled.
-			err = fmt.Errorf("launch did not finish within %s", browserLaunchTimeout+browserAttachGrace)
+		if !timer.Stop() {
+			// The timer fired, so ctx is canceled. Report that as the cause:
+			// Run's own error is then usually just "context canceled". If
+			// Run returned before the cancel reached it, the attempt still
+			// fails, since the returned context is no longer usable.
+			bound := browserLaunchTimeout + browserAttachGrace
+			if err != nil {
+				err = fmt.Errorf("launch did not finish within %s: %w", bound, err)
+			} else {
+				err = fmt.Errorf("launch did not finish within %s", bound)
+			}
 		}
 		if err == nil {
 			t.Logf("headless browser started in %s (attempt %d)", time.Since(start).Round(time.Millisecond), attempt)
