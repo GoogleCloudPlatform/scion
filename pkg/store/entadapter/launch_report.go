@@ -58,7 +58,7 @@ func (s *AgentStore) ApplyLaunchReport(ctx context.Context, agentID, brokerID st
 		return store.LaunchReportAnswer{}, store.Agent{}, err
 	}
 	defer ltx.cleanup()
-	isPG := s.dialect(ctx) == dialect.Postgres
+	isPG := s.dialect() == dialect.Postgres
 	committed := false
 	defer func() {
 		if !committed {

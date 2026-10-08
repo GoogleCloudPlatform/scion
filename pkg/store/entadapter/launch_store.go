@@ -97,7 +97,7 @@ func newTxClient(dialectName string, tx *sql.Tx) *ent.Client {
 // *ent.Client so raw statements and ent builders share one connection,
 // reused here for every launch writer — see the file comment above.
 func (s *AgentStore) beginLaunchTx(ctx context.Context) (*launchTx, error) {
-	dialectName := s.dialect(ctx)
+	dialectName := s.dialect()
 
 	db := s.sqlDB()
 	if db == nil {
@@ -125,8 +125,8 @@ func (s *AgentStore) beginLaunchTx(ctx context.Context) (*launchTx, error) {
 // dialect returns the store's dialect name, for use as entsql.NewDriver's
 // dialect argument. It is derived from usesRowLocks so the launch store and
 // AgentStore's row-lock gating agree on one source: the driver's dialect.
-func (s *AgentStore) dialect(ctx context.Context) string {
-	if s.usesRowLocks(ctx) {
+func (s *AgentStore) dialect() string {
+	if s.usesRowLocks() {
 		return dialect.Postgres
 	}
 	return dialect.SQLite
@@ -168,7 +168,7 @@ func (s *AgentStore) BeginLaunch(ctx context.Context, agentID, kind string, time
 		return "", err
 	}
 	defer ltx.cleanup()
-	isPG := s.dialect(ctx) == dialect.Postgres
+	isPG := s.dialect() == dialect.Postgres
 	committed := false
 	defer func() {
 		if !committed {
@@ -240,7 +240,7 @@ func (s *AgentStore) MarkLaunchAccepted(ctx context.Context, agentID, launchID, 
 		return store.Agent{}, err
 	}
 	defer ltx.cleanup()
-	isPG := s.dialect(ctx) == dialect.Postgres
+	isPG := s.dialect() == dialect.Postgres
 	committed := false
 	defer func() {
 		if !committed {
@@ -299,7 +299,7 @@ func (s *AgentStore) EndLaunch(ctx context.Context, agentID, launchID, reason st
 		return err
 	}
 	defer ltx.cleanup()
-	isPG := s.dialect(ctx) == dialect.Postgres
+	isPG := s.dialect() == dialect.Postgres
 	committed := false
 	defer func() {
 		if !committed {

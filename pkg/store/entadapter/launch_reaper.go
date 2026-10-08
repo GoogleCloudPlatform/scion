@@ -108,7 +108,7 @@ func (s *AgentStore) RunLaunchReaperTick(ctx context.Context, p store.ReaperPara
 	tickCtx, cancel := context.WithTimeout(ctx, launchReaperTickTimeout)
 	defer cancel()
 
-	dialectName := s.dialect(ctx)
+	dialectName := s.dialect()
 
 	db := s.sqlDB()
 	if db == nil {
@@ -178,7 +178,7 @@ func (s *AgentStore) RunLaunchReaperTick(ctx context.Context, p store.ReaperPara
 		_ = tx.Rollback()
 		committed = true
 		_ = conn.Close()
-		s.bestEffortDisarm(ctx)
+		s.bestEffortDisarm()
 		slog.Warn("launch reaper: tick failed", "error", err)
 		return store.ReaperTickResult{Outcome: store.ReaperTickFailed}, nil
 	}
@@ -192,7 +192,7 @@ func (s *AgentStore) RunLaunchReaperTick(ctx context.Context, p store.ReaperPara
 	if err != nil {
 		committed = true
 		_ = conn.Close()
-		s.bestEffortDisarm(ctx)
+		s.bestEffortDisarm()
 		slog.Warn("launch reaper: tick commit failed", "error", err)
 		return store.ReaperTickResult{Outcome: store.ReaperTickFailed}, nil
 	}
@@ -534,13 +534,11 @@ func isWindDownPhase(phase string) bool {
 // the next completed tick (on any replica) disarms in its own arm check
 // instead, per the design's "if no replica completes a tick within 20s"
 // argument.
-func (s *AgentStore) bestEffortDisarm(ctx context.Context) {
+func (s *AgentStore) bestEffortDisarm() {
 	disarmCtx, cancel := context.WithTimeout(context.Background(), launchReaperDisarmTimeout)
 	defer cancel()
 
-	// s.dialect reads the driver's dialect and issues no query, so ctx
-	// being already cancelled or expired here does not matter.
-	dialectName := s.dialect(ctx)
+	dialectName := s.dialect()
 
 	db := s.sqlDB()
 	if db == nil {

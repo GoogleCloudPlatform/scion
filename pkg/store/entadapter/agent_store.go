@@ -79,7 +79,7 @@ func NewAgentStore(client *ent.Client) *AgentStore {
 // read from the driver (a construction-time property) with no query, so it
 // cannot be lost to a failed or cancelled probe and never contends for a
 // connection -- the same idiom as BrokerSettingStore.usesRowLocks.
-func (s *AgentStore) usesRowLocks(context.Context) bool {
+func (s *AgentStore) usesRowLocks() bool {
 	return s.client.Driver().Dialect() == dialect.Postgres
 }
 
@@ -1431,7 +1431,7 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 		return err
 	}
 
-	useLock := s.usesRowLocks(ctx)
+	useLock := s.usesRowLocks()
 
 	tx, err := s.client.Tx(ctx)
 	if err != nil {
@@ -1670,7 +1670,7 @@ var staleOfflineExcluded = []string{"completed", "limits_exceeded", "blocked", "
 // MarkStaleAgentsOffline marks running agents whose last heartbeat predates
 // threshold as offline, returning the updated records for event publishing.
 func (s *AgentStore) MarkStaleAgentsOffline(ctx context.Context, threshold time.Time) ([]store.Agent, error) {
-	useLock := s.usesRowLocks(ctx)
+	useLock := s.usesRowLocks()
 
 	tx, err := s.client.Tx(ctx)
 	if err != nil {
@@ -1859,7 +1859,7 @@ func (s *AgentStore) ClearAgentRuntimeTarget(ctx context.Context, id string) (bo
 	if err != nil {
 		return false, 0, err
 	}
-	useLock := s.usesRowLocks(ctx)
+	useLock := s.usesRowLocks()
 	for i := 0; i < clearRuntimeTargetAttempts; i++ {
 		res, err := s.clearRuntimeTargetOnce(ctx, uid, id, useLock)
 		if err != nil {
@@ -1976,7 +1976,7 @@ func (s *AgentStore) SetAgentRuntimeTarget(ctx context.Context, id string, expec
 	if err != nil {
 		return false, err
 	}
-	useLock := s.usesRowLocks(ctx)
+	useLock := s.usesRowLocks()
 	tx, err := s.client.Tx(ctx)
 	if err != nil {
 		return false, err
@@ -2053,7 +2053,7 @@ var stalledExcluded = []string{"completed", "limits_exceeded", "blocked", "stall
 // activityThreshold but whose heartbeat is still recent (>= heartbeatRecency)
 // as stalled, preserving the prior activity in stalled_from_activity.
 func (s *AgentStore) MarkStalledAgents(ctx context.Context, activityThreshold, heartbeatRecency time.Time) ([]store.Agent, error) {
-	useLock := s.usesRowLocks(ctx)
+	useLock := s.usesRowLocks()
 
 	tx, err := s.client.Tx(ctx)
 	if err != nil {

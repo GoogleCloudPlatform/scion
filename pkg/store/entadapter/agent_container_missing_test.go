@@ -643,14 +643,11 @@ func (d *captureDriver) Close() error                           { return nil }
 func (d *captureDriver) Dialect() string                        { return d.dialectName }
 
 // TestAgentStore_UsesRowLocks_ReadsDriverDialect pins that usesRowLocks
-// comes from the driver's dialect with no query: an already cancelled
-// context on the first call, and a driver that fails every statement, still
-// give the right answer, and nothing is sent to the driver
-// (ptone/scion#3105). A probe query that failed used to be able to leave
+// and dialect come from the driver's dialect with no query: a driver that
+// fails every statement still gives the right answer, and nothing is sent to
+// it (ptone/scion#3105). A probe query that failed used to be able to leave
 // Postgres without row locks for the life of the process.
 func TestAgentStore_UsesRowLocks_ReadsDriverDialect(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
 	for _, tc := range []struct {
 		dialect string
 		want    bool
@@ -661,8 +658,8 @@ func TestAgentStore_UsesRowLocks_ReadsDriverDialect(t *testing.T) {
 		t.Run(tc.dialect, func(t *testing.T) {
 			drv := &captureDriver{dialectName: tc.dialect}
 			s := NewAgentStore(ent.NewClient(ent.Driver(drv)))
-			assert.Equal(t, tc.want, s.usesRowLocks(ctx))
-			assert.Equal(t, tc.dialect, s.dialect(ctx))
+			assert.Equal(t, tc.want, s.usesRowLocks())
+			assert.Equal(t, tc.dialect, s.dialect())
 
 			drv.mu.Lock()
 			defer drv.mu.Unlock()

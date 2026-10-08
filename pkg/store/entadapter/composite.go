@@ -471,7 +471,7 @@ var purgeDeletedAgentsTestHook func(tx *ent.Tx, batchCandidateIDs []uuid.UUID)
 // own slug -- stay reserved forever, blocking any later agent from taking
 // them.
 func (c *CompositeStore) PurgeDeletedAgents(ctx context.Context, cutoff time.Time) (int, error) {
-	useLock := c.AgentStore.usesRowLocks(ctx)
+	useLock := c.AgentStore.usesRowLocks()
 	tx, err := c.client.Tx(ctx)
 	if err != nil {
 		return 0, err
