@@ -197,6 +197,9 @@ func TestListBadRequests(t *testing.T) {
 		listPath + "&owner=bob",
 		listPath + "&q=%00",
 		listPath + "&q=" + url.QueryEscape(string(slices.Repeat([]rune("é"), maxSearchLength+1))),
+		listPath + "&scope=%00",
+		listPath + "&scope=%ff",
+		listPath + "&scope=" + strings.Repeat("p", maxScopeLength+1),
 	} {
 		rec := f.do(&userU, http.MethodGet, target, nil, nil)
 		if rec.Code != http.StatusBadRequest || errCode(t, rec) != "bad_request" {
@@ -585,5 +588,94 @@ func TestListHidesPendingArtifactFromNonOwners(t *testing.T) {
 	}
 	if got := listIDs(f.list(&userU, listPath)); !slices.Equal(got, []string{id}) {
 		t.Errorf("member list after finalize: %v, want [%s]", got, id)
+	}
+}
+
+// TestListScopeNarrows: scope= keeps only the rows whose home scope is that
+// project, out of what the same caller's list shows without it. It never
+// adds a row the caller could not list (and so could not read) otherwise.
+func TestListScopeNarrows(t *testing.T) {
+	f := newFixture(t, false)
+	a1 := f.publish(agentA, "a1.md", []byte("1"), "").Artifact.ID
+	x1 := f.publish(agentX, "x1.md", []byte("2"), "").Artifact.ID
+	f.grantPrincipal(x1, userU)
+
+	if got := listIDs(f.list(&userU, listPath)); len(got) != 2 {
+		t.Fatalf("without scope: %v, want both", got)
+	}
+	for scope, want := range map[string][]string{
+		"project-1": {a1},
+		"project-2": {x1},
+		"project-3": {},
+	} {
+		if got := listIDs(f.list(&userU, listPath+"&scope="+scope)); !slices.Equal(got, want) {
+			t.Errorf("user, scope=%s: %v, want %v", scope, got, want)
+		}
+	}
+	// Narrowing cannot widen: callers who cannot read a project's rows
+	// still get none of them when they name that project.
+	for name, p := range map[string]principal{"outsider": outside, "other project agent": agentX} {
+		if got := listIDs(f.list(&p, listPath+"&scope=project-1")); len(got) != 0 {
+			t.Errorf("%s, scope=project-1: %v, want none", name, got)
+		}
+	}
+	if got := listIDs(f.list(nil, listPath+"&scope=project-1")); len(got) != 0 {
+		t.Errorf("unauthenticated, scope=project-1: %v, want none", got)
+	}
+	// Every row listed under a scope is readable by GET for the same caller.
+	for _, p := range []principal{agentA, agentB, agentX, userU, outside} {
+		for _, scope := range []string{"project-1", "project-2"} {
+			for _, id := range listIDs(f.list(&p, listPath+"&scope="+scope)) {
+				if rec := f.do(&p, http.MethodGet, "/api/v1/artifacts/"+id, nil, nil); rec.Code != http.StatusOK {
+					t.Errorf("%s lists %s under %s but GET answers %d", p.ref, id, scope, rec.Code)
+				}
+			}
+		}
+	}
+}
+
+// TestListScopeBoundIntoCursor: a cursor from a scoped walk resumes only
+// that walk.
+func TestListScopeBoundIntoCursor(t *testing.T) {
+	f := newFixture(t, false)
+	for i := range 3 {
+		f.publish(agentA, "f"+strconv.Itoa(i)+".md", []byte{byte(i)}, "")
+	}
+	first := f.list(&userU, listPath+"&scope=project-1&limit=1")
+	if first.NextCursor == "" {
+		t.Fatal("no cursor on a short page")
+	}
+	cursor := url.QueryEscape(first.NextCursor)
+	if rec := f.do(&userU, http.MethodGet, listPath+"&scope=project-1&limit=1&cursor="+cursor, nil, nil); rec.Code != http.StatusOK {
+		t.Fatalf("same scope: %d, want 200", rec.Code)
+	}
+	for name, target := range map[string]string{
+		"another scope": listPath + "&scope=project-2&cursor=" + cursor,
+		"no scope":      listPath + "&cursor=" + cursor,
+	} {
+		rec := f.do(&userU, http.MethodGet, target, nil, nil)
+		if rec.Code != http.StatusBadRequest || errCode(t, rec) != "invalid_cursor" {
+			t.Errorf("%s: %d %s, want 400 invalid_cursor", name, rec.Code, rec.Body.String())
+		}
+	}
+	unscoped := url.QueryEscape(f.list(&userU, listPath+"&limit=1").NextCursor)
+	rec := f.do(&userU, http.MethodGet, listPath+"&scope=project-1&cursor="+unscoped, nil, nil)
+	if rec.Code != http.StatusBadRequest || errCode(t, rec) != "invalid_cursor" {
+		t.Errorf("unscoped cursor on a scoped walk: %d, want 400 invalid_cursor", rec.Code)
+	}
+}
+
+// TestListScopeHidesPendingFromNonOwners: the pending owner-only rule holds
+// under scope= as well.
+func TestListScopeHidesPendingFromNonOwners(t *testing.T) {
+	f := newFixture(t, false)
+	f.createPending(agentA, "/api/v1/artifacts", CreateVersionRequest{
+		Title: "pending", Entry: "a.md", Files: []ManifestFile{{Path: "a.md", Size: 1, SHA256: sha([]byte("x"))}},
+	})
+	if got := listIDs(f.list(&agentB, listPath+"&scope=project-1")); len(got) != 0 {
+		t.Errorf("non-owner sees a pending artifact under scope: %v", got)
+	}
+	if got := listIDs(f.list(&agentA, listPath+"&scope=project-1")); len(got) != 1 {
+		t.Errorf("owner, scope=project-1: %v, want its pending artifact", got)
 	}
 }

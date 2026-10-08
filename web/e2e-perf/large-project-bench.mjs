@@ -104,6 +104,11 @@ import {
   computePreStaleIds,
   resolveBatchTickSettled,
   summarizeBurstScenario,
+  expectedFirstPageCount,
+  pageCountFor,
+  summarizePageChanges,
+  walkEndReason,
+  mapWithConcurrency,
 } from './lib.mjs';
 
 // ---- CLI args --------------------------------------------------------
@@ -144,6 +149,11 @@ const populateTimeoutMs = parseInt(args['populate-timeout-ms'] || '120000', 10);
 const burstCount = parseInt(args['burst-count'] || '15', 10);
 const burstRuns = parseInt(args['burst-runs'] || String(runs), 10);
 const settleTimeoutMs = parseInt(args['settle-timeout-ms'] || '30000', 10);
+// How many Next clicks each populated paged-view run times (fewer when the
+// view has fewer pages).
+const pageChanges = parseInt(args['page-changes'] || '3', 10);
+// At most this many burst-target state lookups in flight at once.
+const TARGET_LOOKUP_CONCURRENCY = 4;
 const notes = args.notes || '';
 // Lets a targeted re-measurement (e.g. re-running only the SSE burst after
 // a burst-logic-only change) skip the four view scenarios, which can take
@@ -372,6 +382,190 @@ async function waitForCount(page, selector, expected, timeoutMs) {
   return { count: last, timedOut: true };
 }
 
+// readPagerDeep returns the first scion-agent-pager's state (piercing
+// shadow roots), or null when none is rendered. The page size is read from
+// the pager itself rather than assumed, so a persisted or future default
+// page size is measured as the user would see it.
+async function readPagerDeep(page) {
+  return page.evaluate(() => {
+    function find(root) {
+      const el = root.querySelector('scion-agent-pager');
+      if (el) return el;
+      for (const n of root.querySelectorAll('*')) {
+        if (n.shadowRoot) {
+          const f = find(n.shadowRoot);
+          if (f) return f;
+        }
+      }
+      return null;
+    }
+    const p = find(document);
+    if (!p) return null;
+    const total = typeof p.total === 'number' ? p.total : null;
+    return {
+      pageSize: p.pageSize,
+      pageIndex: p.pageIndex,
+      rowsOnPage: p.rowsOnPage,
+      total,
+      hasNext: p.hasNext,
+      loading: p.loading,
+    };
+  });
+}
+
+// clickPagerNextDeep clicks the first pager's Next button; returns whether
+// an enabled Next button was found.
+async function clickPagerNextDeep(page) {
+  return page.evaluate(() => {
+    function find(root) {
+      const el = root.querySelector('scion-agent-pager');
+      if (el) return el;
+      for (const n of root.querySelectorAll('*')) {
+        if (n.shadowRoot) {
+          const f = find(n.shadowRoot);
+          if (f) return f;
+        }
+      }
+      return null;
+    }
+    const p = find(document);
+    const buttons = p?.shadowRoot ? [...p.shadowRoot.querySelectorAll('sl-button')] : [];
+    const next = buttons.find((b) => /next/i.test(b.textContent || ''));
+    if (!next || next.disabled) return false;
+    next.click();
+    return true;
+  });
+}
+
+// firstItemKeyDeep identifies the first rendered card or row (its agent
+// link), so a page change is only counted once different items render.
+async function firstItemKeyDeep(page, selector) {
+  return page.evaluate((sel) => {
+    function walk(root) {
+      const el = root.querySelector(sel);
+      if (el) return el;
+      for (const n of root.querySelectorAll('*')) {
+        if (n.shadowRoot) {
+          const f = walk(n.shadowRoot);
+          if (f) return f;
+        }
+      }
+      return null;
+    }
+    const el = walk(document);
+    if (!el) return null;
+    const a = el.querySelector('a[href^="/agents/"]') || el.closest('a[href^="/agents/"]');
+    return a ? a.getAttribute('href') : (el.textContent || '').trim().slice(0, 80);
+  }, selector);
+}
+
+// waitForFirstPage waits until a paged grid or list renders its first page:
+// min(page size, total) items, with the pager idle. Falls back to every
+// agent when no pager renders (an unpaged view).
+async function waitForFirstPage(page, selector, agentCount, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  let last = { count: 0, pager: null, expected: agentCount };
+  while (Date.now() < deadline) {
+    const [count, pager] = await Promise.all([
+      countSelectorDeep(page, selector),
+      readPagerDeep(page),
+    ]);
+    // A pager can render briefly with total 0 before the first response;
+    // trust its total only once it is positive.
+    const total = pager && pager.total > 0 ? pager.total : agentCount;
+    const expected = expectedFirstPageCount(pager ? pager.pageSize : null, agentCount, total);
+    last = { count, pager, expected };
+    if (count >= 1 && count >= expected && !(pager && pager.loading)) {
+      return { ...last, timedOut: false };
+    }
+    // A seed with no agents renders the project's empty state, not a
+    // pager: populated once that empty state is on screen (not while the
+    // page is still loading).
+    if (agentCount === 0 && !pager && (await countSelectorDeep(page, '.empty-state')) > 0) {
+      return { ...last, timedOut: false };
+    }
+    await page.waitForTimeout(100);
+  }
+  return { ...last, timedOut: true };
+}
+
+// measurePageChanges clicks Next up to `maxChanges` times and times each
+// change: from the click until the pager shows the next page index, is
+// idle, and the rendered items match its rowsOnPage with a different first
+// item than before.
+async function measurePageChanges(page, selector, maxChanges, timeoutMs) {
+  const out = [];
+  let stopReason = maxChanges > 0 ? null : 'none-requested';
+  for (let i = 0; i < maxChanges; i++) {
+    // Start each change from an idle pager.
+    let before = await readPagerDeep(page);
+    const idleDeadline = Date.now() + timeoutMs;
+    while (before && before.loading && Date.now() < idleDeadline) {
+      await page.waitForTimeout(50);
+      before = await readPagerDeep(page);
+    }
+    if (!before) {
+      stopReason = 'no-pager';
+      break;
+    }
+    if (before.loading) {
+      stopReason = 'pager-busy';
+      break;
+    }
+    if (!before.hasNext) {
+      // Next is disabled. On the last page that is the normal end of the
+      // view; before it (the pager's own total says more pages exist) the
+      // walk ended early, which is a product behaviour worth surfacing.
+      stopReason = walkEndReason(before);
+      break;
+    }
+    const beforeKey = await firstItemKeyDeep(page, selector);
+    const toPageIndex = before.pageIndex + 1;
+    const t0 = Date.now();
+    if (!(await clickPagerNextDeep(page))) {
+      stopReason = 'next-disabled';
+      break;
+    }
+    const deadline = t0 + timeoutMs;
+    let ok = false;
+    let rows = null;
+    while (Date.now() < deadline) {
+      const [pager, count, key] = await Promise.all([
+        readPagerDeep(page),
+        countSelectorDeep(page, selector),
+        firstItemKeyDeep(page, selector),
+      ]);
+      if (
+        pager &&
+        pager.pageIndex === toPageIndex &&
+        !pager.loading &&
+        pager.rowsOnPage > 0 &&
+        count === pager.rowsOnPage &&
+        key !== beforeKey
+      ) {
+        ok = true;
+        rows = count;
+        break;
+      }
+      await page.waitForTimeout(20);
+    }
+    out.push({ toPageIndex, ok, ms: ok ? Date.now() - t0 : null, rows });
+    if (!ok) {
+      stopReason = 'timed-out';
+      break;
+    }
+  }
+  // The pager as it stood when the run stopped, so an early stop (for
+  // example no Next on a short page) can be told apart from a short view.
+  const stopPager = await readPagerDeep(page);
+  if (stopReason === null && walkEndReason(stopPager) === 'next-unavailable-before-last-page') {
+    // Every requested change completed, but the last one landed on a page
+    // with Next disabled before the last page: still an early stop.
+    stopReason = 'next-unavailable-before-last-page';
+  }
+  return { changes: out, stopReason: stopReason ?? 'completed', stopPager };
+}
+
 function attachNetworkWatch(page, matches, navStart) {
   const state = { status: null, failed: null, url: null, atMs: null };
   const onResponse = (resp) => {
@@ -413,6 +607,9 @@ const scenarios = [
     viewMode: 'grid',
     selector: '.agent-card',
     isGraph: false,
+    // The project grid and list render one page of agents at a time:
+    // populated means the first page rendered, and page changes are timed.
+    paged: true,
   },
   {
     key: 'project-list',
@@ -420,6 +617,7 @@ const scenarios = [
     viewMode: 'list',
     selector: '.agent-table-container tbody tr',
     isGraph: false,
+    paged: true,
   },
   {
     key: 'project-graph-embedded',
@@ -535,8 +733,15 @@ async function runOneScenarioAttempt(page, scenario, expectedCount, runIndex, co
 
   let populated = { count: 0, timedOut: true };
   let elapsedMs = Date.now() - navStart;
+  let pager = null;
   if (!navError) {
-    populated = await waitForCount(page, scenario.selector, expectedCount, populateTimeoutMs);
+    if (scenario.paged) {
+      populated = await waitForFirstPage(page, scenario.selector, expectedCount, populateTimeoutMs);
+      pager = populated.pager;
+      expectedCount = populated.expected;
+    } else {
+      populated = await waitForCount(page, scenario.selector, expectedCount, populateTimeoutMs);
+    }
     elapsedMs = Date.now() - navStart;
   }
 
@@ -553,7 +758,36 @@ async function runOneScenarioAttempt(page, scenario, expectedCount, runIndex, co
     graphInteraction = await performGraphInteraction(page);
   }
 
+  // Stop watching the load-bearing request before any page change: Next
+  // fetches hit the same endpoint and would otherwise overwrite the first
+  // load's networkStatus, networkFailed and networkObservedAtMs.
   netWatch.detach();
+
+  // Paged views: the page size and page count as the pager reports them,
+  // and the Next-click latency for a few pages.
+  let pagedFields = {};
+  if (scenario.paged) {
+    const pageSize = pager ? pager.pageSize : null;
+    const pageTotal = pager && pager.total > 0 ? pager.total : null;
+    const measured =
+      isPopulated && pager
+        ? await measurePageChanges(page, scenario.selector, pageChanges, populateTimeoutMs)
+        : { changes: [], stopReason: 'not-populated', stopPager: null };
+    pagedFields = {
+      agentCount: seed.agentCount,
+      pageSize,
+      pageTotal,
+      pageCount: pageCountFor(pageSize, pageTotal),
+      pageChanges: measured.changes,
+      // Why the run timed fewer than pageChangesPerRun changes, if it did:
+      // completed, none-requested (--page-changes 0), no-next-page (the
+      // last page was reached), next-unavailable-before-last-page (Next
+      // disabled although the pager's total says more pages exist),
+      // next-disabled, pager-busy, timed-out, no-pager or not-populated.
+      pageChangesStopReason: measured.stopReason,
+      pageChangesStopPager: measured.stopPager,
+    };
+  }
 
   return {
     run: runIndex,
@@ -577,6 +811,7 @@ async function runOneScenarioAttempt(page, scenario, expectedCount, runIndex, co
     networkObservedAtMs: netWatch.state.atMs,
     consoleErrorCount: consoleErrors.length,
     consoleErrorsSample: consoleErrors.slice(0, 5),
+    ...pagedFields,
   };
 }
 
@@ -776,17 +1011,28 @@ async function waitForBadgeValue(page, id, expectedValue, timeoutMs) {
 }
 
 async function runBurstOnce(page, runIndex, targetHistory, invalidateDueToPriorRestore) {
-  // Over-fetch beyond burstCount so there is room to skip already-suspended
-  // agents without running out of candidates.
-  const listResp = await fetch(
-    `${hubBase}/api/v1/projects/${seed.projectId}/agents?limit=${burstCount * 3}`,
-    { headers: { Authorization: `Bearer ${seed.ownerToken}` } }
-  );
-  if (!listResp.ok) {
-    throw new Error(`fetching agents for burst failed: ${listResp.status}`);
-  }
-  const listData = await listResp.json();
-  const candidates = (listData.agents || []).filter((a) => a.phase !== 'suspended');
+  // Targets must be agents whose cards are on screen: the grid is paged, so
+  // an agent on another page has no badge to settle. Read the agent links
+  // of the rendered cards, then their current state from the API.
+  const visibleIds = await page.evaluate(() => {
+    const ids = [];
+    function walk(root) {
+      for (const card of root.querySelectorAll('.agent-card')) {
+        const a = card.querySelector('a[href^="/agents/"]');
+        const m = a && a.getAttribute('href').match(/^\/agents\/([^/?#]+)$/);
+        if (m && !ids.includes(m[1])) ids.push(m[1]);
+      }
+      for (const n of root.querySelectorAll('*')) if (n.shadowRoot) walk(n.shadowRoot);
+    }
+    walk(document);
+    return ids;
+  });
+  // Read their state a few at a time (before anything is timed), so this
+  // lookup does not put a burst of up to a page of requests on the hub.
+  const visibleAgents = (
+    await mapWithConcurrency(visibleIds, TARGET_LOOKUP_CONCURRENCY, (id) => getAgent(id))
+  ).filter(Boolean);
+  const candidates = visibleAgents.filter((a) => a.phase !== 'suspended');
   const targets = candidates.slice(0, burstCount);
   if (targets.length < burstCount) {
     console.warn(`  warning: only ${targets.length}/${burstCount} non-suspended agents available`);
@@ -1002,7 +1248,9 @@ async function runBurstScenario(browser) {
   const apiMatches = apiMatcherFor('project-grid', seed.projectId);
   const netWatch = attachNetworkWatch(page, apiMatches, navStart);
   await page.goto(hubBase + projectPath, { waitUntil: 'domcontentloaded', timeout: navTimeoutMs });
-  const populated = await waitForCount(page, '.agent-card', seed.agentCount, populateTimeoutMs);
+  // The grid is paged: the burst only needs its first page on screen, and
+  // its targets are taken from the agents shown there (see runBurstOnce).
+  const populated = await waitForFirstPage(page, '.agent-card', seed.agentCount, populateTimeoutMs);
   netWatch.detach();
 
   if (populated.timedOut) {
@@ -1077,6 +1325,7 @@ async function main() {
     runs,
     burstRuns,
     effectiveTimeouts: { navTimeoutMs, populateTimeoutMs, settleTimeoutMs, burstCount },
+    pageChangesPerRun: pageChanges,
     notes,
     machine: { loadAvg1, loadAvg5, loadAvg15 },
     scenarios: {},
@@ -1092,13 +1341,24 @@ async function main() {
           `running scenario ${scenario.key} (${runs} runs: 1 cold + ${runs - 1} warm)...`
         );
         const results = await runScenario(browser, scenario, seed.agentCount);
-        report.scenarios[scenario.key] = summarizeScenario(scenario, results);
+        report.scenarios[scenario.key] = {
+          ...summarizeScenario(scenario, results),
+          ...(scenario.paged ? { paged: true, ...summarizePageChanges(results) } : {}),
+        };
         const s = report.scenarios[scenario.key];
         console.log(
           `  ${s.successCount}/${results.length} populated; outcomes=${JSON.stringify(s.outcomeCounts)}; ` +
             `median nav->populated: ${s.medianNavToPopulatedMs}ms (cold=${s.medianNavToPopulatedMsCold}ms, warm=${s.medianNavToPopulatedMsWarm}ms); ` +
             `median DOM count: ${s.medianDomElementCount} [${s.minDomElementCount}, ${s.maxDomElementCount}]`
         );
+        if (scenario.paged) {
+          console.log(
+            `  paged: page size ${JSON.stringify(s.pageSize)}, pages ${JSON.stringify(s.pageCount)}; ` +
+              `page changes ${s.pageChangeSuccessCount}/${s.pageChangeAttemptCount} completed, ` +
+              `${s.pageWalkEarlyStopCount} walk(s) stopped before the last page, ` +
+              `median ${s.medianPageChangeMs}ms [${s.minPageChangeMs}, ${s.maxPageChangeMs}]`
+          );
+        }
         writeReportSoFar(report);
       }
     }
