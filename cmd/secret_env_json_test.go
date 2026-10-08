@@ -429,6 +429,8 @@ func TestRunSecretGet_NoContent(t *testing.T) {
 }
 
 // The agent secret get command has no JSON flag; only --format json.
+// Unlike the hub env/secret get commands, it passes the error through
+// wrapHubError, so the user-visible text is checked in full here.
 func TestRunAgentSecretGet_NoContent(t *testing.T) {
 	for _, mode := range []struct {
 		name   string
@@ -442,6 +444,9 @@ func TestRunAgentSecretGet_NoContent(t *testing.T) {
 			t.Cleanup(func() { agentSecretGetCmd.SetContext(origCtx) })
 			agentSecretGetCmd.SetContext(t.Context())
 			outputFormat = mode.format
+			// Outside an agent, so a connectivity failure would get the
+			// local-only hint; an empty response must not.
+			t.Setenv("SCION_AGENT_ID", "")
 
 			var runErr error
 			out := captureStdout(t, func() {
@@ -449,6 +454,12 @@ func TestRunAgentSecretGet_NoContent(t *testing.T) {
 			})
 			require.Error(t, runErr)
 			assert.Contains(t, runErr.Error(), `no content for "GONE"`)
+			// This command passes the error through wrapHubError, so a 204
+			// shows the empty-response note and not the local-only hint.
+			assert.Equal(t,
+				`failed to get secret: hub returned no content for "GONE"`+emptyResponseNote,
+				runErr.Error())
+			assert.NotContains(t, runErr.Error(), localOnlyHint)
 			assert.NotContains(t, out, "null")
 			assert.Empty(t, out)
 		})
