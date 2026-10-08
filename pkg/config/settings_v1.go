@@ -1121,6 +1121,13 @@ type VersionedSettings struct {
 
 	// AgentSecrets controls hub-level policy for secrets written by agents.
 	AgentSecrets *AgentSecretsSettings `json:"agent_secrets,omitempty" yaml:"agent_secrets,omitempty" koanf:"agent_secrets"`
+
+	// ProjectID is the top-level project ID of a migrated legacy settings
+	// file, kept verbatim. hub.project_id is the canonical v1 key and takes
+	// precedence when set.
+	ProjectID string `json:"project_id,omitempty" yaml:"project_id,omitempty" koanf:"project_id"`
+	// HubConnections holds named Hub connections for a Runtime Broker.
+	HubConnections map[string]V1HubConnectionConfig `json:"hub_connections,omitempty" yaml:"hub_connections,omitempty" koanf:"hub_connections"`
 }
 
 // AutoExposePortsSettings holds the auto-expose ports configuration.
@@ -2087,12 +2094,29 @@ type V1HubClientConfig struct {
 	Endpoint  string `json:"endpoint,omitempty" yaml:"endpoint,omitempty" koanf:"endpoint"`
 	ProjectID string `json:"project_id,omitempty" yaml:"project_id,omitempty" koanf:"project_id"`
 	LocalOnly *bool  `json:"local_only,omitempty" yaml:"local_only,omitempty" koanf:"local_only"`
+	// Transport is the transport-layer auth for reaching a Hub behind a
+	// platform guard (IAP, Cloud Run invoker IAM).
+	Transport *V1HubTransportConfig `json:"transport,omitempty" yaml:"transport,omitempty" koanf:"transport"`
+}
+
+// V1HubTransportConfig is hub.transport in versioned settings (the legacy
+// HubTransportConfig).
+type V1HubTransportConfig struct {
+	Mode     string `json:"mode,omitempty" yaml:"mode,omitempty" koanf:"mode"`
+	Audience string `json:"audience,omitempty" yaml:"audience,omitempty" koanf:"audience"`
+}
+
+// V1HubConnectionConfig is one entry of hub_connections in versioned
+// settings (the legacy HubConnectionConfig).
+type V1HubConnectionConfig struct {
+	Endpoint string `json:"endpoint,omitempty" yaml:"endpoint,omitempty" koanf:"endpoint"`
 }
 
 // V1CLIConfig defines CLI behavior settings for versioned config.
 type V1CLIConfig struct {
-	AutoHelp            *bool `json:"autohelp,omitempty" yaml:"autohelp,omitempty" koanf:"autohelp"`
-	InteractiveDisabled *bool `json:"interactive_disabled,omitempty" yaml:"interactive_disabled,omitempty" koanf:"interactive_disabled"`
+	AutoHelp            *bool  `json:"autohelp,omitempty" yaml:"autohelp,omitempty" koanf:"autohelp"`
+	InteractiveDisabled *bool  `json:"interactive_disabled,omitempty" yaml:"interactive_disabled,omitempty" koanf:"interactive_disabled"`
+	Mode                string `json:"mode,omitempty" yaml:"mode,omitempty" koanf:"mode"`
 }
 
 // V1TelemetryConfig holds telemetry/observability settings.
@@ -3776,6 +3800,14 @@ func AdaptLegacySettings(legacy *Settings) (*VersionedSettings, []string) {
 		SchemaVersion:   "1",
 		ActiveProfile:   legacy.ActiveProfile,
 		DefaultTemplate: legacy.DefaultTemplate,
+		WorkspacePath:   legacy.WorkspacePath,
+		ProjectID:       legacy.ProjectID,
+	}
+	if legacy.HubConnections != nil {
+		vs.HubConnections = make(map[string]V1HubConnectionConfig, len(legacy.HubConnections))
+		for name, hc := range legacy.HubConnections {
+			vs.HubConnections[name] = V1HubConnectionConfig(hc)
+		}
 	}
 
 	// Adapt Hub config
@@ -3786,6 +3818,12 @@ func AdaptLegacySettings(legacy *Settings) (*VersionedSettings, []string) {
 			Endpoint:  legacy.Hub.Endpoint,
 			ProjectID: legacy.Hub.ProjectID,
 			LocalOnly: legacy.Hub.LocalOnly,
+		}
+		if legacy.Hub.Transport != nil {
+			vs.Hub.Transport = &V1HubTransportConfig{
+				Mode:     legacy.Hub.Transport.Mode,
+				Audience: legacy.Hub.Transport.Audience,
+			}
 		}
 		if legacy.Hub.Token != "" {
 			warnings = append(warnings, "hub.token is deprecated; use server.auth.dev_token for dev mode authentication")
@@ -3822,6 +3860,7 @@ func AdaptLegacySettings(legacy *Settings) (*VersionedSettings, []string) {
 	if legacy.CLI != nil {
 		vs.CLI = &V1CLIConfig{
 			AutoHelp: legacy.CLI.AutoHelp,
+			Mode:     legacy.CLI.Mode,
 		}
 	}
 
@@ -5292,9 +5331,9 @@ func writeVersionedSettingsFile(dir, targetPath string, vs *VersionedSettings) e
 // If a server.yaml exists in the same directory, it is also merged into the settings
 // under the "server" key and backed up.
 // Top-level keys the legacy Settings struct does not decode (v1-only keys such
-// as server and image_registry, or any unknown key), and legacy keys the
-// conversion does not produce (such as workspace_path, hub_connections and
-// cli.mode), are carried into the migrated file unchanged; see
+// as server and image_registry, or any unknown key), and legacy keys whose
+// v1 key has the same name and shape (such as workspace_path, hub_connections
+// and cli.mode), are carried into the migrated file unchanged; see
 // legacyCarriedTopLevelKeys.
 // If dryRun is true, no files are written.
 // Returns MigrationResult describing what was (or would be) done.
@@ -5355,7 +5394,7 @@ func MigrateSettingsFile(dir string, dryRun bool) (*MigrationResult, error) {
 
 	// 4a. Top-level keys the legacy struct does not decode (v1-only keys
 	// such as server and image_registry, ptone/scion#3497) and legacy keys
-	// AdaptLegacySettings does not convert (ptone/scion#3885) are carried
+	// with the same v1 name and shape (ptone/scion#3885) are carried
 	// through unchanged.
 	carried, err := legacyCarriedTopLevelKeys(data, result.WasJSON)
 	if err != nil {

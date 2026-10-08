@@ -57,9 +57,10 @@ const (
 	legacyKeyConverted legacyKeyHandling = iota + 1
 	// legacyKeyDropped: deprecated and not kept; AdaptLegacySettings warns.
 	legacyKeyDropped
-	// legacyKeyCarried: AdaptLegacySettings does not convert the value, so
-	// it is carried into the migrated file unchanged. The settings loaders
-	// read it under the same name from a v1 file.
+	// legacyKeyCarried: the v1 key has the same name and shape, so the raw
+	// value is carried into the migrated file unchanged. AdaptLegacySettings
+	// may convert it as well; the converted value wins on a clash, and the
+	// carry keeps anything the conversion does not model.
 	legacyKeyCarried
 )
 
@@ -105,9 +106,9 @@ var legacySubKeyHandling = map[string]map[string]legacyKeyHandling{
 }
 
 // legacyCarriedTopLevelKeys returns the entries of an unversioned settings
-// file that the legacy conversion (AdaptLegacySettings) does not produce, so
-// MigrateSettingsFile carries them into the migrated file unchanged instead
-// of dropping them:
+// file that MigrateSettingsFile carries into the migrated file unchanged,
+// merged with the output of the legacy conversion (AdaptLegacySettings), so
+// that they are not dropped:
 //   - top-level keys the legacy Settings struct does not decode, such as the
 //     v1-only server and image_registry keys (ptone/scion#3497);
 //   - legacy keys and fields marked legacyKeyCarried, such as

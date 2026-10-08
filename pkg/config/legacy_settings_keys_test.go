@@ -357,3 +357,133 @@ func TestMigrateSettingsFile_JSONCarriedLegacyKeyCanonicalName(t *testing.T) {
 		}
 	}
 }
+
+// After migration, the carried keys survive every later settings write:
+// the in-place YAML edit (UpdateSetting) and the struct round-trip writers
+// (LoadModifySaveVersionedSettings, SaveVersionedSettings and the
+// updateVersionedSettingStruct fallback), and the settings loader still
+// reads them.
+func TestMigratedLegacyKeys_SurviveLaterWrites(t *testing.T) {
+	carried := []string{"workspace_path", "project_id", "hub_connections", "hub.transport", "cli.mode"}
+	dir := carryTestDir(t, "settings.yaml", legacyEveryKeyYAML)
+	path := filepath.Join(dir, "settings.yaml")
+	var in map[string]interface{}
+	if err := yamlv3.Unmarshal([]byte(legacyEveryKeyYAML), &in); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, w := range []struct {
+		name  string
+		write func() error
+	}{
+		{"UpdateSetting migrating", func() error { return UpdateSetting(dir, "default_template", "other", false) }},
+		{"UpdateSetting in place", func() error { return UpdateSetting(dir, "active_profile", "remote", false) }},
+		{"LoadModifySaveVersionedSettings", func() error {
+			return LoadModifySaveVersionedSettings(dir, func(vs *VersionedSettings) error {
+				vs.DefaultTemplate = "third"
+				return nil
+			})
+		}},
+		{"SaveVersionedSettings", func() error {
+			vs, err := LoadSingleFileVersioned(dir)
+			if err != nil {
+				return err
+			}
+			vs.DefaultTemplate = "fourth"
+			return SaveVersionedSettings(dir, vs)
+		}},
+		{"updateVersionedSettingStruct", func() error { return updateVersionedSettingStruct(dir, "default_template", "fifth") }},
+	} {
+		if err := w.write(); err != nil {
+			t.Fatalf("%s: %v", w.name, err)
+		}
+		m := readSettingsMap(t, path)
+		for _, k := range carried {
+			carriedUnchanged(strings.Split(k, ".")...)(t, in, m, dir)
+		}
+		if t.Failed() {
+			t.Fatalf("carried keys lost after %s", w.name)
+		}
+	}
+
+	s, err := LoadSettingsFromDir(dir)
+	if err != nil {
+		t.Fatalf("LoadSettingsFromDir: %v", err)
+	}
+	if s.DefaultTemplate != "fifth" {
+		t.Errorf("default_template = %q, want fifth", s.DefaultTemplate)
+	}
+	if s.CLI == nil || s.CLI.Mode != "assistant" {
+		t.Errorf("cli = %+v, want mode assistant", s.CLI)
+	}
+	if s.Hub == nil || s.Hub.Transport == nil || s.Hub.Transport.Mode != "iap" {
+		t.Errorf("hub = %+v, want transport mode iap", s.Hub)
+	}
+	if got := s.HubConnections["hub-prod"].Endpoint; got != "https://hub.prod.example.com" {
+		t.Errorf("hub_connections.hub-prod.endpoint = %q", got)
+	}
+	if s.WorkspacePath != "/work/space" {
+		t.Errorf("workspace_path = %q, want /work/space", s.WorkspacePath)
+	}
+}
+
+// AdaptLegacySettings (also used to load a legacy file in memory) maps the
+// legacy keys that have a v1 field. The top-level project_id is kept as is;
+// hub.project_id stays the hub value.
+func TestAdaptLegacySettings_KeysWithV1Fields(t *testing.T) {
+	var legacy Settings
+	if err := yamlv3.Unmarshal([]byte(legacyEveryKeyYAML), &legacy); err != nil {
+		t.Fatal(err)
+	}
+	vs, _ := AdaptLegacySettings(&legacy)
+	if vs.WorkspacePath != "/work/space" {
+		t.Errorf("WorkspacePath = %q, want /work/space", vs.WorkspacePath)
+	}
+	if vs.ProjectID != "proj-top-123" {
+		t.Errorf("ProjectID = %q, want proj-top-123", vs.ProjectID)
+	}
+	if vs.Hub == nil || vs.Hub.ProjectID != "proj-hub-456" {
+		t.Errorf("Hub = %+v, want project_id proj-hub-456", vs.Hub)
+	}
+	if vs.Hub == nil || !reflect.DeepEqual(vs.Hub.Transport, &V1HubTransportConfig{Mode: "iap", Audience: "client-id.apps.example.com"}) {
+		t.Errorf("Hub.Transport = %+v, want iap with its audience", vs.Hub)
+	}
+	if vs.CLI == nil || vs.CLI.Mode != "assistant" {
+		t.Errorf("CLI = %+v, want mode assistant", vs.CLI)
+	}
+	want := map[string]V1HubConnectionConfig{"hub-prod": {Endpoint: "https://hub.prod.example.com"}}
+	if !reflect.DeepEqual(vs.HubConnections, want) {
+		t.Errorf("HubConnections = %+v, want %+v", vs.HubConnections, want)
+	}
+}
+
+// The raw carry keeps what the v1 types do not model, such as an extra
+// field in a carried hub connection or transport, alongside the converted
+// values.
+func TestMigrateSettingsFile_CarryKeepsUnmodelledFields(t *testing.T) {
+	dir := carryTestDir(t, "settings.yaml", `hub:
+  endpoint: https://hub.example.com
+  transport:
+    mode: iap
+    extra: kept-transport
+hub_connections:
+  prod:
+    endpoint: https://hub.prod.example.com
+    extra: kept-connection
+`)
+	if _, err := MigrateSettingsFile(dir, false); err != nil {
+		t.Fatalf("MigrateSettingsFile: %v", err)
+	}
+	m := readSettingsMap(t, filepath.Join(dir, "settings.yaml"))
+	for path, want := range map[string]string{
+		"hub.transport.mode":            "iap",
+		"hub.transport.extra":           "kept-transport",
+		"hub_connections.prod.endpoint": "https://hub.prod.example.com",
+		"hub_connections.prod.extra":    "kept-connection",
+		"hub.endpoint":                  "https://hub.example.com",
+	} {
+		if got, _ := lookupPath(m, strings.Split(path, ".")...); got != want {
+			t.Errorf("%s = %v, want %q", path, got, want)
+		}
+	}
+}
