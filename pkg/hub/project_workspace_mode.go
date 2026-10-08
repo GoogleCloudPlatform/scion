@@ -21,6 +21,7 @@ import (
 	"maps"
 	"net/http"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -261,4 +262,13 @@ func (s *Server) requireEmptyPerAgentBrokerCapabilityForAgent(ctx context.Contex
 		return false
 	}
 	return s.requireEmptyPerAgentBrokerCapability(ctx, w, project, agent.RuntimeBrokerID)
+}
+
+// remoteBrokerNeedsGCSMessage is the create error, and the matching hub log
+// message, for a project without a git remote dispatched to a remote broker
+// on a hub whose storage provider cannot carry the workspace upload
+// (ptone/scion#3765).
+func remoteBrokerNeedsGCSMessage(provider storage.Provider) string {
+	return fmt.Sprintf("cannot send the project workspace to a remote runtime broker: "+
+		"the hub's storage provider is %q, and a remote broker needs GCS hub storage or a project git remote", provider)
 }

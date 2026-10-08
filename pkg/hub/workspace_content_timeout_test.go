@@ -485,7 +485,7 @@ func TestCreateAgent_CallerWorkspace_HungStorageReturns503NoAgentNoDispatch(t *t
 	ctx := context.Background()
 	disp := &mockDispatcher{}
 	srv.SetDispatcher(disp)
-	srv.SetStorage(newMockStorage("hung-storage-bucket"))
+	srv.SetStorage(newGCSContentMockStorage("hung-storage-bucket"))
 
 	broker := &store.RuntimeBroker{
 		ID: tid("broker-hung-caller-ws"), Slug: "hung-caller-ws-broker",

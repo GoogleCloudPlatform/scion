@@ -2317,6 +2317,23 @@ func (s *Server) createAgentInProject(
 
 		if !hasLocalPath && !s.isEmbeddedBroker(runtimeBrokerID) {
 			stor := s.GetStorage()
+			if stor != nil && stor.Provider() != storage.ProviderGCS {
+				// The upload below is always a GCS sync (gcp.SyncToGCS), so a
+				// hub on any other storage provider cannot ship the workspace
+				// to a remote broker (ptone/scion#3765). Fail the create
+				// before dispatch: the agent row and quotas exist, nothing
+				// has been dispatched and no credential has been minted.
+				msg := remoteBrokerNeedsGCSMessage(stor.Provider())
+				s.agentLifecycleLog.Warn(msg,
+					"agent_id", agent.ID, "project_id", project.ID,
+					"broker_id", runtimeBrokerID, "storage_provider", string(stor.Provider()))
+				ucancel()
+				corrID := cleanup(createRollback{Stage: createStageWorkspaceStorage, Cause: errors.New(msg)})
+				writeCreateFailure(w, corrID, func() {
+					writeError(w, http.StatusPreconditionFailed, ErrCodeUnsupportedCapability, msg, nil)
+				})
+				return
+			}
 			if stor != nil {
 				resolvedWorkspace, workspaceErr := s.resolveHubManagedWorkspaceForUpload(agent.AppliedConfig.Workspace, project.Slug)
 				if errors.Is(workspaceErr, errWorkspaceContentTimeout) {
@@ -2359,9 +2376,9 @@ func (s *Server) createAgentInProject(
 						// Swap workspace to storage path for remote broker
 						agent.AppliedConfig.Workspace = ""
 						agent.AppliedConfig.WorkspaceStoragePath = storagePath
-						// The upload above is always GCS (gcp.SyncToGCS), so
-						// stor.Bucket() names the GCS bucket whatever stor's
-						// provider; no workspaceDownloadBucket check is needed.
+						// The upload above is a GCS sync (gcp.SyncToGCS), and
+						// the provider check before it means stor is GCS, so
+						// stor.Bucket() names the bucket uploaded to.
 						agent.AppliedConfig.WorkspaceStorageBucket = stor.Bucket()
 						if err := s.store.UpdateAgent(detachLaunchFromClient(ctx), agent); err != nil {
 							s.agentLifecycleLog.Warn("Failed to update agent with workspace storage path", "agent_id", agent.ID, "error", err)
