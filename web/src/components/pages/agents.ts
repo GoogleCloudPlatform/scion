@@ -1050,6 +1050,7 @@ export class ScionPageAgents extends LitElement {
     qs.set('dir', this.sortDir);
     qs.set('limit', String(params.limit));
     if (params.cursor) qs.set('cursor', params.cursor);
+    if (params.ids?.length) qs.set('ids', params.ids.join(','));
     if (params.wantStats) qs.set('stats', '1');
     if (this.loadedScope !== 'all') qs.set('scope', this.loadedScope);
     if (label.includes('=')) qs.set('label', label);

@@ -2026,6 +2026,7 @@ export class ScionPageProjectDetail extends LitElement {
     qs.set('dir', this.sortDir);
     qs.set('limit', String(params.limit));
     if (params.cursor) qs.set('cursor', params.cursor);
+    if (params.ids?.length) qs.set('ids', params.ids.join(','));
     if (params.wantStats) qs.set('stats', '1');
     if (label) qs.set('label', label);
     if (this.phaseFilter) qs.set('phase', this.phaseFilter);
