@@ -30,14 +30,10 @@ package hub
 //
 // Fix (A25.11 R1, the reviewer's option 2, narrower): sendHumanToHuman now
 // registers participants only when the peer (non-caller) slot resolves in
-// the store with its matching kind. When it doesn't, the conversation is
-// still created (201, exactly as at base) but with zero participant rows —
-// not just a missing phantom, no rows at all, matching the base behaviour
-// this delta must not regress.
-//
-// Since authorizeDMPeer (authorizeChatSend), these sends are refused
-// before anything is persisted: 403 for a peer that does not resolve with
-// its kind, 503 for a store error. The no-row assertions still hold.
+// the store with its matching kind. authorizeDMPeer (authorizeChatSend)
+// also checks that slot before anything is persisted: a send whose peer
+// does not resolve with its kind is refused with 403, a store error on the
+// lookup with 503, and no participant rows are written.
 
 import (
 	"context"
@@ -108,9 +104,8 @@ func TestChatV2_A2511_R1_UserUser_GhostUUIDAsPeer_NoPhantomRow(t *testing.T) {
 
 // TestChatV2_A2511_R1_AgentUser_GhostAgentAsPeer_NoPhantomRow is the third
 // shape: dm:agent:<ghost-agent>:user:<self> — the peer is an agent slot
-// naming an agent that doesn't exist. The unresolved agent means
-// resolveRoutingAgents' default-agent lookup fails and the request falls
-// through to sendHumanToHuman, exactly as the review traced.
+// naming an agent that doesn't exist. authorizeDMPeer refuses it before
+// routing, so nothing is persisted.
 func TestChatV2_A2511_R1_AgentUser_GhostAgentAsPeer_NoPhantomRow(t *testing.T) {
 	srv, s, _, _, _ := setupSendTest(t)
 
@@ -179,8 +174,9 @@ func (s *getAgentErrStore) GetAgent(ctx context.Context, id string) (*store.Agen
 	return s.Store.GetAgent(ctx, id)
 }
 
-// TestChatV2_A2511_O1_UserSlot_StoreError_NoPhantomRow pins the WARN-and-skip
-// (G2 non-fatal) behavior for a store error on the user-slot peer lookup.
+// TestChatV2_A2511_O1_UserSlot_StoreError_NoPhantomRow pins the fail-closed
+// 503 for a store error on the user-slot peer lookup: the send is refused
+// and no participant row is written.
 func TestChatV2_A2511_O1_UserSlot_StoreError_NoPhantomRow(t *testing.T) {
 	srv, s, _, _, _ := setupSendTest(t)
 
@@ -195,8 +191,9 @@ func TestChatV2_A2511_O1_UserSlot_StoreError_NoPhantomRow(t *testing.T) {
 	assert.Empty(t, parts, "a store error on the peer lookup must not write a participant row")
 }
 
-// TestChatV2_A2511_O1_AgentSlot_StoreError_NoPhantomRow is the matching
-// GetAgent store-error case (A25.12 O1, optional but included).
+// TestChatV2_A2511_O1_AgentSlot_StoreError_NoPhantomRow pins the same
+// fail-closed 503 for a store error on the agent-slot (GetAgent) peer
+// lookup (A25.12 O1).
 func TestChatV2_A2511_O1_AgentSlot_StoreError_NoPhantomRow(t *testing.T) {
 	srv, s, _, _, _ := setupSendTest(t)
 
