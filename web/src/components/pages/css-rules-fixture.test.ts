@@ -45,16 +45,22 @@ describe('styleRules fixture', () => {
     expect(rules.get('.b')).toContain('gap: 4px');
   });
 
-  it('throws on a duplicate top-level selector', () => {
-    expect(() => styleRules('.a { color: red; } .b, .a { color: blue; }')).toThrow(
-      'duplicate rule for ".a"'
-    );
+  it('merges a repeated top-level selector in source order', () => {
+    const rule = styleRules('.a { color: red; } .b, .a { color: blue; }').get('.a') ?? '';
+    expect(rule).toContain('red');
+    expect(rule).toContain('blue');
+    expect(rule.indexOf('red')).toBeLessThan(rule.indexOf('blue'));
   });
 
-  it('throws on a duplicate selector inside the same at-rule', () => {
-    expect(() =>
-      styleRules('@media (x) { .a { color: red; } } @media (x) { .a { color: blue; } }')
-    ).toThrow('duplicate rule for "@media (x) .a"');
+  it('merges a repeated selector inside the same at-rule in source order', () => {
+    const rules = styleRules(
+      '.a { color: green; } @media (x) { .a { color: red; } } @media (x) { .a { color: blue; } }'
+    );
+    const rule = rules.get('@media (x) .a') ?? '';
+    expect(rule.indexOf('red')).toBeGreaterThanOrEqual(0);
+    expect(rule.indexOf('red')).toBeLessThan(rule.indexOf('blue'));
+    expect(rule).not.toContain('green');
+    expect(rules.get('.a')).not.toContain('red');
   });
 
   it('ignores comments', () => {

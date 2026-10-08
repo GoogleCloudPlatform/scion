@@ -27,8 +27,11 @@
  * other. Whitespace in keys is collapsed to single spaces.
  *
  * A selector list such as `.a, .b` yields one entry per selector. If a key
- * appears twice, the second rule would silently mask the first, so this
- * throws instead and names the key.
+ * appears more than once (for example `.a, .b { ... }` followed by
+ * `.a { ... }`, which is ordinary cascade CSS), the bodies are concatenated
+ * in source order rather than the later one replacing the earlier. Every
+ * declaration stays visible, and later declarations come last, as in the
+ * cascade.
  */
 export function styleRules(cssText: string): Map<string, string> {
   const rules = new Map<string, string>();
@@ -44,12 +47,7 @@ export function styleRules(cssText: string): Map<string, string> {
         const context = stack.filter((s) => s.startsWith('@'));
         for (const part of selector.split(',')) {
           const key = [...context, part.trim()].join(' ');
-          if (rules.has(key)) {
-            throw new Error(
-              `styleRules: duplicate rule for "${key}"; the later rule would mask the earlier one`
-            );
-          }
-          rules.set(key, buf);
+          rules.set(key, (rules.get(key) ?? '') + buf);
         }
       }
       buf = '';
