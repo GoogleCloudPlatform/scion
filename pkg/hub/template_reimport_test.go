@@ -757,3 +757,99 @@ func TestTemplateReimport_SeveralMatchingFolders(t *testing.T) {
 	assert.Empty(t, got.Files, "nothing is written")
 	assert.Equal(t, 1, countTemplates(t, s, store.TemplateScopeGlobal, ""))
 }
+
+// TestTemplateReimport_LeavesHarnessConfigsUnchanged: a source template folder
+// that bundles harness-configs/ is refreshed without creating or updating any
+// harness-config record, in every template scope.
+func TestTemplateReimport_LeavesHarnessConfigsUnchanged(t *testing.T) {
+	for _, scope := range []string{store.TemplateScopeGlobal, store.TemplateScopeUser, store.TemplateScopeProject} {
+		t.Run(scope, func(t *testing.T) {
+			srv, s, project, _ := setupWorkspaceProject(t, "reimport-hc-"+scope)
+			ctx := context.Background()
+			admin := newReimportAdmin(t, s)
+
+			scopeID := ""
+			hcScope, hcScopeID := store.HarnessConfigScopeGlobal, ""
+			switch scope {
+			case store.TemplateScopeUser:
+				scopeID = admin.ID
+			case store.TemplateScopeProject:
+				scopeID = project.ID
+				hcScope, hcScopeID = store.HarnessConfigScopeProject, project.ID
+			}
+			tmpl := createReimportTemplate(t, s, "tmpl-hc-"+scope, "my-template", scope, scopeID, reimportTestSource)
+			if scope == store.TemplateScopeUser {
+				tmpl.OwnerID = admin.ID
+				require.NoError(t, s.UpdateTemplate(ctx, tmpl))
+			}
+
+			// An existing harness-config whose slug matches a bundled one.
+			existing := &store.HarnessConfig{
+				ID:          tid("hc-existing-" + scope),
+				Name:        "probe-hc",
+				Slug:        "probe-hc",
+				Harness:     "claude",
+				Scope:       hcScope,
+				ScopeID:     hcScopeID,
+				Status:      store.HarnessConfigStatusActive,
+				ContentHash: "sha256:original",
+			}
+			require.NoError(t, s.CreateHarnessConfig(ctx, existing))
+			countHC := func() int {
+				res, err := s.ListHarnessConfigs(ctx, store.HarnessConfigFilter{}, store.ListOptions{Limit: 1000})
+				require.NoError(t, err)
+				return len(res.Items)
+			}
+			before := countHC()
+
+			srv.templateSourceFetcher = &fakeTemplateSourceFetcher{body: buildTarGz(t, []tarEntry{
+				{name: "repo-main/templates/my-template/scion-agent.yaml", body: "schema_version: \"1\"\nharness: claude\n"},
+				{name: "repo-main/templates/my-template/harness-configs/probe-hc/config.yaml", body: "harness: claude\nimage: example/probe:latest\n"},
+				{name: "repo-main/templates/my-template/harness-configs/new-hc/config.yaml", body: "harness: claude\nimage: example/new:latest\n"},
+			})}
+			rec := doRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/templates/"+tmpl.ID+"/reimport", nil)
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+			got, err := s.GetTemplate(ctx, tmpl.ID)
+			require.NoError(t, err)
+			assert.NotEmpty(t, got.Files, "the template itself is refreshed")
+
+			assert.Equal(t, before, countHC(), "no harness-config may be created")
+			after, err := s.GetHarnessConfig(ctx, existing.ID)
+			require.NoError(t, err)
+			assert.Equal(t, "sha256:original", after.ContentHash, "existing harness-config must be unchanged")
+			assert.Empty(t, after.Files)
+		})
+	}
+}
+
+// TestTargetTemplatePersistence_HashMatchWritesNothing: the unchanged-content
+// path of the refresh persistence writes nothing, neither the template nor any
+// harness-config bundled in the source folder.
+func TestTargetTemplatePersistence_HashMatchWritesNothing(t *testing.T) {
+	srv, s, _ := testTemplateBootstrapServer(t)
+	ctx := context.Background()
+	tmpl := createReimportTemplate(t, s, "tmpl-hashmatch", "hashmatch", store.TemplateScopeGlobal, "", reimportTestSource)
+
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "scion-agent.yaml"),
+		[]byte("schema_version: \"1\"\nharness_config: probe-hc\n"), 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "harness-configs", "probe-hc"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "harness-configs", "probe-hc", "config.yaml"),
+		[]byte("harness: claude\n"), 0o644))
+
+	p := srv.targetTemplateStore(tmpl.ID).pers
+	rec, err := p.GetBySlug(ctx, "hashmatch", store.TemplateScopeGlobal, "")
+	require.NoError(t, err)
+	changed, err := p.OnHashMatch(ctx, rec, dir)
+	require.NoError(t, err)
+	assert.False(t, changed)
+	p.PostFinalize(ctx, rec, dir)
+
+	got, err := s.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+	assert.Empty(t, got.DefaultHarnessConfig, "template must not be updated")
+	res, err := s.ListHarnessConfigs(ctx, store.HarnessConfigFilter{}, store.ListOptions{Limit: 1000})
+	require.NoError(t, err)
+	assert.Empty(t, res.Items, "no harness-config may be created")
+}

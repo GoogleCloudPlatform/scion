@@ -340,8 +340,9 @@ func templateSourceFetchError(err error) error {
 
 // targetTemplatePersistence is the template persistence used by reimport. It
 // always resolves the record to update by the target template's ID, never by
-// the slug of the source folder name, and it never creates a template: a
-// refresh writes only into the template it was asked to refresh.
+// the slug of the source folder name, it never creates a template, and it
+// does not import bundled harness-configs: a refresh writes only into the
+// template it was asked to refresh.
 type targetTemplatePersistence struct {
 	*templatePersistence
 	id string
@@ -361,6 +362,17 @@ func (p *targetTemplatePersistence) GetBySlug(ctx context.Context, _, scope, sco
 
 func (p *targetTemplatePersistence) Create(context.Context, *ResourceRecord, string) error {
 	return errors.New("refreshing a template never creates a new template")
+}
+
+// PostFinalize does nothing: a refresh writes only the target template, so
+// harness-configs bundled in the source (a harness-configs/ folder) are not
+// created or updated.
+func (p *targetTemplatePersistence) PostFinalize(context.Context, *ResourceRecord, string) {}
+
+// OnHashMatch does nothing for the same reason. (Reimport always forces a
+// sync, so this path is not reached today.)
+func (p *targetTemplatePersistence) OnHashMatch(context.Context, *ResourceRecord, string) (bool, error) {
+	return false, nil
 }
 
 // targetTemplateStore returns a ResourceStore that writes only into the
