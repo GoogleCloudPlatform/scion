@@ -17,6 +17,7 @@ package telegram
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -159,17 +160,37 @@ func withSchemaLock(ctx context.Context, db *sql.DB, fn func(conn *sql.Conn) err
 	if err != nil {
 		return fmt.Errorf("acquire schema connection: %w", err)
 	}
-	defer conn.Close()
+	var unlockErr error
+	defer func() { releaseSchemaConn(conn, unlockErr) }()
 
 	key := int64(store.LockTelegramSchema)
 	if _, err := conn.ExecContext(ctx, "SELECT pg_advisory_lock($1)", key); err != nil {
 		return fmt.Errorf("acquire schema lock: %w", err)
 	}
 	fnErr := fn(conn)
-	if _, err := conn.ExecContext(context.Background(), "SELECT pg_advisory_unlock($1)", key); err != nil && fnErr == nil {
-		return fmt.Errorf("release schema lock: %w", err)
+	_, unlockErr = conn.ExecContext(context.Background(), "SELECT pg_advisory_unlock($1)", key)
+	if unlockErr != nil {
+		slog.Warn("Failed to release Telegram schema lock; discarding connection", "error", unlockErr)
+		if fnErr == nil {
+			return fmt.Errorf("release schema lock: %w", unlockErr)
+		}
 	}
 	return fnErr
+}
+
+// releaseSchemaConn returns conn to the pool, or closes it when the
+// schema lock could not be released. A pooled connection would keep the
+// session-scoped lock and block later schema setup. Returning
+// driver.ErrBadConn from Raw makes database/sql close the underlying
+// connection instead of pooling it.
+func releaseSchemaConn(conn *sql.Conn, unlockErr error) {
+	if unlockErr != nil {
+		_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+		return
+	}
+	if err := conn.Close(); err != nil {
+		slog.Warn("Failed to return Telegram schema connection", "error", err)
+	}
 }
 
 func (s *postgresStore) Close() error {

@@ -745,7 +745,7 @@ func TestPostgres_CreateSchema_Concurrent(t *testing.T) {
 
 	admin, err := sql.Open("pgx", dbURL)
 	require.NoError(t, err)
-	t.Cleanup(func() { admin.Close() })
+	t.Cleanup(func() { _ = admin.Close() })
 
 	const rounds = 5
 	const replicas = 8
@@ -753,7 +753,7 @@ func TestPostgres_CreateSchema_Concurrent(t *testing.T) {
 		schema := fmt.Sprintf("tg_schema_concurrent_%d_%d", time.Now().UnixNano(), round)
 		_, err := admin.Exec("CREATE SCHEMA " + schema)
 		require.NoError(t, err)
-		t.Cleanup(func() { admin.Exec("DROP SCHEMA " + schema + " CASCADE") })
+		t.Cleanup(func() { _, _ = admin.Exec("DROP SCHEMA " + schema + " CASCADE") })
 
 		u, err := url.Parse(dbURL)
 		require.NoError(t, err)
