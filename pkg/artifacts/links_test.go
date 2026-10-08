@@ -898,7 +898,11 @@ func TestRateLimiter(t *testing.T) {
 	u.allow("tracked")
 	u.allow("tracked")
 	waitTracked, okTracked := u.allow("tracked")
+	globalBefore := u.global.tokens
 	waitUntracked, okUntracked := u.allow("newcomer")
+	if u.global.tokens != globalBefore {
+		t.Errorf("a refused newcomer was charged: global %v -> %v", globalBefore, u.global.tokens)
+	}
 	if okTracked || okUntracked || waitTracked != waitUntracked {
 		t.Errorf("tracked refusal (%v, %d) and untracked refusal (%v, %d) differ", okTracked, waitTracked, okUntracked, waitUntracked)
 	}
