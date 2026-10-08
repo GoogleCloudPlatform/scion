@@ -107,6 +107,9 @@ const (
 	// deferred their message instead of dispatching it — distinct from
 	// SystemCategoryDeliveryFailed: the message was saved, not dropped.
 	SystemCategoryDeliveryDeferred = "delivery-deferred"
+	// SystemCategoryArtifactReview marks the notice sent to an artifact's
+	// owner when a review version of the artifact was published.
+	SystemCategoryArtifactReview = "artifact-review"
 )
 
 // validTypes is the set of valid message types.
