@@ -74,12 +74,32 @@ def _also_strip_sections_damaging(header: str):
         yield
 
 
+# A scratch workspace for _make_ctx, so a context never falls back to the
+# real /workspace (ptone/scion#2993). Created in setUpModule and removed in
+# tearDownModule.
+_scratch_workspace: tempfile.TemporaryDirectory[str] | None = None
+
+
+def setUpModule() -> None:
+    global _scratch_workspace
+    _scratch_workspace = tempfile.TemporaryDirectory(prefix="grok-build-provision-test-")
+
+
+def tearDownModule() -> None:
+    global _scratch_workspace
+    if _scratch_workspace is not None:
+        _scratch_workspace.cleanup()
+        _scratch_workspace = None
+
+
 def _make_ctx(
     manifest: dict[str, Any] | None = None,
 ) -> scion_harness.ProvisionContext:
     """Build a ProvisionContext with sensible defaults for testing."""
+    assert _scratch_workspace is not None, "setUpModule did not run"
     m: dict[str, Any] = {
         "command": "provision",
+        "agent_workspace": os.path.join(_scratch_workspace.name, "workspace"),
         "harness_config": {
             "no_auth": {"behavior": "drop-to-shell"},
             "instructions_file": "AGENTS.md",

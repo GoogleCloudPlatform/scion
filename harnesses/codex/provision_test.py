@@ -40,10 +40,31 @@ LEGACY_BEGIN = "<!-- BEGIN SCION MANAGED CODEX INSTRUCTIONS -->"
 LEGACY_END = "<!-- END SCION MANAGED CODEX INSTRUCTIONS -->"
 
 
+# A scratch workspace for _test_ctx, so a context never falls back to the
+# real /workspace (ptone/scion#2993). Created in setUpModule and removed in
+# tearDownModule.
+_scratch_workspace: "tempfile.TemporaryDirectory[str] | None" = None
+
+
+def setUpModule() -> None:
+    global _scratch_workspace
+    _scratch_workspace = tempfile.TemporaryDirectory(prefix="codex-provision-test-")
+
+
+def tearDownModule() -> None:
+    global _scratch_workspace
+    if _scratch_workspace is not None:
+        _scratch_workspace.cleanup()
+        _scratch_workspace = None
+
+
 def _test_ctx() -> "scion_harness.ProvisionContext":
     """A minimal ProvisionContext for calling _reconcile_codex_toml directly
     in tests that don't otherwise need a full provision() manifest."""
-    return scion_harness.ProvisionContext("codex", {})
+    assert _scratch_workspace is not None, "setUpModule did not run"
+    return scion_harness.ProvisionContext("codex", {
+        "agent_workspace": os.path.join(_scratch_workspace.name, "workspace"),
+    })
 
 
 @contextmanager
@@ -119,6 +140,7 @@ def _invoke_provision(
             ctx = scion_harness.ProvisionContext("codex", {
                 "harness_bundle_dir": bundle,
                 "harness_config": harness_config,
+                "agent_workspace": os.path.join(tmp, "workspace"),
             })
             ctx.select_auth = lambda _: scion_harness.ResolvedAuth("none")
             ctx.warn = warnings.append  # type: ignore[method-assign]
@@ -214,6 +236,7 @@ class CodexProvisionTest(unittest.TestCase):
 
             manifest = {
                 "harness_bundle_dir": bundle,
+                "agent_workspace": os.path.join(tmp, "workspace"),
                 "harness_config": {
                     "instructions_file": ".codex/AGENTS.md",
                     "skills_dir": ".codex/skills",
@@ -258,6 +281,7 @@ class CodexProvisionTest(unittest.TestCase):
 
             manifest = {
                 "harness_bundle_dir": bundle,
+                "agent_workspace": os.path.join(tmp, "workspace"),
                 "harness_config": {
                     "instructions_file": ".codex/AGENTS.md",
                     "skills_dir": ".codex/skills",
@@ -293,6 +317,7 @@ class CodexProvisionTest(unittest.TestCase):
 
             manifest = {
                 "harness_bundle_dir": bundle,
+                "agent_workspace": os.path.join(tmp, "workspace"),
                 "harness_config": {
                     "instructions_file": ".codex/AGENTS.md",
                     "skills_dir": ".codex/skills",

@@ -79,6 +79,8 @@ def env_vars(**values: str | None):
 def make_ctx(home: str):
     manifest = {
         "harness_bundle_dir": os.path.join(home, ".scion", "harness"),
+        # Never fall back to the real /workspace (ptone/scion#2993).
+        "agent_workspace": os.path.join(home, "workspace"),
         "harness_config": {
             "model_aliases": dict(MODEL_ALIASES),
             "instructions_file": ".claude/CLAUDE.md",
@@ -129,6 +131,7 @@ class ModelResolutionTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
             manifest = {
                 "harness_bundle_dir": os.path.join(tmp, ".scion", "harness"),
+                "agent_workspace": os.path.join(tmp, "workspace"),
                 "harness_config": {"model_aliases": {"small": "haiku"}},
             }
             ctx = scion_harness.ProvisionContext("claude", manifest)
@@ -146,6 +149,7 @@ class ModelResolutionTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
             manifest = {
                 "harness_bundle_dir": os.path.join(tmp, ".scion", "harness"),
+                "agent_workspace": os.path.join(tmp, "workspace"),
             }
             ctx = scion_harness.ProvisionContext("claude", manifest)
             with env_vars(SCION_MODEL="large", ANTHROPIC_MODEL=None):
@@ -158,6 +162,7 @@ class ModelResolutionTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
             manifest = {
                 "harness_bundle_dir": os.path.join(tmp, ".scion", "harness"),
+                "agent_workspace": os.path.join(tmp, "workspace"),
                 "harness_config": {"model_aliases": {"fast": "haiku"}},
             }
             ctx = scion_harness.ProvisionContext("claude", manifest)

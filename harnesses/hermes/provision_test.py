@@ -96,6 +96,8 @@ def _make_ctx(
     manifest = {
         "harness_bundle_dir": bundle_dir,
         "harness_config": harness_config or {},
+        # Never fall back to the real /workspace (ptone/scion#2993).
+        "agent_workspace": os.path.join(bundle_dir, "workspace"),
     }
     return scion_harness.ProvisionContext("hermes", manifest)
 
@@ -224,6 +226,7 @@ class VertexAIProvisionTest(unittest.TestCase):
 
             manifest = {
                 "harness_bundle_dir": bundle,
+                "agent_workspace": os.path.join(tmp, "workspace"),
                 "harness_config": {
                     "instructions_file": "AGENTS.md",
                     "skills_dir": ".hermes/skills",
@@ -381,6 +384,7 @@ class InstructionProjectionTest(unittest.TestCase):
 
             manifest = {
                 "harness_bundle_dir": bundle,
+                "agent_workspace": os.path.join(tmp, "workspace"),
                 "harness_config": {
                     "instructions_file": "AGENTS.md",
                     "skills_dir": ".hermes/skills",
@@ -424,6 +428,7 @@ class InstructionProjectionTest(unittest.TestCase):
 
             manifest = {
                 "harness_bundle_dir": bundle,
+                "agent_workspace": os.path.join(tmp, "workspace"),
                 "harness_config": {
                     "instructions_file": "AGENTS.md",
                     "skills_dir": ".hermes/skills",
@@ -461,6 +466,7 @@ class InstructionProjectionTest(unittest.TestCase):
 
             manifest = {
                 "harness_bundle_dir": bundle,
+                "agent_workspace": os.path.join(tmp, "workspace"),
                 "harness_config": {
                     "instructions_file": "AGENTS.md",
                     "skills_dir": ".hermes/skills",
@@ -556,7 +562,7 @@ class MCPEntryBuildingTest(unittest.TestCase):
                 json.dump({"mcpServers": {"old": {"command": "old-server"}}}, f)
             self.assertTrue(os.path.isfile(mcp_path))
 
-            manifest = {"harness_bundle_dir": bundle}
+            manifest = {"harness_bundle_dir": bundle, "agent_workspace": os.path.join(tmp, "workspace")}
             ctx = scion_harness.ProvisionContext("hermes", manifest)
             with temporary_home(home):
                 count = provision._apply_mcp_servers(ctx)

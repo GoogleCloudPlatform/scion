@@ -85,6 +85,8 @@ def make_ctx(home: str, *, model: str | None = None) -> Any:
     manifest = {
         "harness_bundle_dir": os.path.join(home, ".scion", "harness"),
         "harness_config": harness_config,
+        # Never fall back to the real /workspace (ptone/scion#2993).
+        "agent_workspace": os.path.join(home, "workspace"),
     }
     return scion_harness.ProvisionContext("antigravity", manifest)
 
@@ -113,7 +115,7 @@ def _invoke(
     ws = os.path.join(home, "workspace")
     os.makedirs(ws, exist_ok=True)
 
-    manifest = {"harness_bundle_dir": bundle, "harness_config": harness_config or {}}
+    manifest = {"harness_bundle_dir": bundle, "harness_config": harness_config or {}, "agent_workspace": ws}
     with temporary_home(home), unittest.mock.patch.dict(os.environ, {"SCION_WORKSPACE_PATH": ws}):
         ctx = scion_harness.ProvisionContext("antigravity", manifest)
         provision.provision(ctx)

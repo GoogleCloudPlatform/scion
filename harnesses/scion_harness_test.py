@@ -62,7 +62,8 @@ def _make_ctx(
 
     manifest: dict[str, Any] = {
         "harness_bundle_dir": bundle,
-        "agent_workspace": "/workspace",
+        # A scratch path, never the real /workspace (ptone/scion#2993).
+        "agent_workspace": os.path.join(bundle, "workspace"),
         "harness_config": harness_config or {},
     }
     return sh.ProvisionContext(harness, manifest)
@@ -1720,7 +1721,9 @@ class TestRunScaffold(unittest.TestCase):
 
 class TestProvisionContext(unittest.TestCase):
     def test_workspace_default(self):
-        ctx = _make_ctx()
+        # No agent_workspace in the manifest: the product default applies.
+        # Only the string is checked; nothing is written there.
+        ctx = sh.ProvisionContext("test", {"harness_bundle_dir": "/tmp"})
         self.assertEqual(ctx.workspace, "/workspace")
 
     def test_workspace_from_manifest(self):
