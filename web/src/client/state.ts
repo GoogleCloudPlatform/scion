@@ -28,6 +28,7 @@
 import { SSEClient } from './sse-client.js';
 import type { SSEUpdateEvent } from './sse-client.js';
 import { shouldApplyAcceptedDeletion } from '../shared/agent-deletion.js';
+import { resetReadinessMarks } from './readiness-marks.js';
 import type {
   Agent,
   AgentActivity,
@@ -690,6 +691,8 @@ export class StateManager extends EventTarget {
     }
 
     this.state.scope = scope;
+    // A scope change starts a new load for the readiness marks.
+    resetReadinessMarks();
 
     // Clear state from previous scope
     this.state.agents.clear();

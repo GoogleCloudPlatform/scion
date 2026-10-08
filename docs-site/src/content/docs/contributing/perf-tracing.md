@@ -250,4 +250,43 @@ Keep the limits in mind. Only request-path reads are counted (see the reference'
 
 ## Readiness marks
 
-In-app readiness marks (for example "data arrived" or "rows visible" in the web client) have not landed yet.
+The web client can write [User Timing](https://developer.mozilla.org/en-US/docs/Web/API/Performance/mark) marks that time when a page became usable, measured in the browser rather than from the outside. They are **off by default** and are controlled by the hub's `profiling.readiness_marks` operational setting (see the [setting reference](/scion/reference/admin-settings/#profiling)). Off, the client makes no `performance.mark` calls and the page shell is unchanged.
+
+### Turning them on
+
+The setting lives in the Hub database and changes without a restart. As a hub administrator, on a signed-in browser session (user access tokens are refused), send:
+
+```
+PUT /api/v1/admin/profiling
+{"readiness_marks": true}
+```
+
+Then load the page again: the client reads the setting once per full page load, from the shell's initial data (`readinessMarks`, present only for a signed-in user while the setting is on). `GET /api/v1/profiling` returns the same value to any signed-in caller. Send `{"readiness_marks": false}` to turn them off again.
+
+### The marks
+
+| Name | Written when | Pages |
+| :--- | :--- | :--- |
+| `scion:ready:agents-data` | the first agent result for the current scope is adopted | project detail (grid, list, graph), standalone graph |
+| `scion:ready:rows-grid` | the first frame that shows the grid's first page of cards, or its empty state | project detail, grid view |
+| `scion:ready:rows-list` | the first frame that shows the list's first page of rows, or its empty state | project detail, list view |
+| `scion:ready:graph` | the graph is laid out and fitted to the viewport | project detail graph view, standalone graph |
+
+- A mark's `startTime` is milliseconds since the document's navigation start. Its `detail` is only `{"view": "grid" | "list" | "graph"}`: marks carry no agent names, ids or row data.
+- Each mark is written **at most once per load**. A load ends on a client-side navigation, on a change of the view scope (for example opening another project) and on a project filter change on the standalone graph; the marks are then cleared so the next load writes them again. Switching between grid, list and graph inside one load does not clear them.
+- The graph mark needs at least one agent: an empty graph view shows the empty state instead of a graph.
+
+Read them in the browser console, or from a Playwright script, with:
+
+```js
+performance.getEntriesByType('mark').filter((m) => m.name.startsWith('scion:ready:'))
+```
+
+### In the browser benchmark
+
+`web/e2e-perf/large-project-bench.mjs` reads the marks of every populated run, before any interaction or page change. Each run records `readinessMarks` (name to ms), and each scenario reports `readinessMarks` with the count and median/min/max per mark, split cold and warm.
+
+- With `--expect-readiness-marks` (the setting is on), each run waits up to 3 seconds for its scenario's two marks: `agents-data` plus `rows-grid`, `rows-list` or `graph`. `readinessMarksMissingRunCount` counts populated runs that still lack one.
+- Without the flag, the setting is expected off. `readinessMarksUnexpectedRunCount` counts populated runs that found any readiness mark. Run once without the flag against a hub with the setting off to check that off writes nothing.
+
+The bench signs in as the seeded member, which is enough to receive the setting.

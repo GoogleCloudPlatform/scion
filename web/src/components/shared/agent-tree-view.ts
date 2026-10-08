@@ -70,6 +70,7 @@ import { getMessageModeDisplay, getDenialMessage } from '../../shared/message-mo
 import type { MessageMode } from '../../shared/types.js';
 import './quick-message-dialog.js';
 import { terminalHref } from '../../client/open-terminal.js';
+import { READINESS_MARKS, markReady } from '../../client/readiness-marks.js';
 
 /**
  * Determine edge visual style based on parent/child message mode compatibility.
@@ -1274,6 +1275,8 @@ export class ScionAgentTreeView extends LitElement {
         } else {
           this.fitToView(capturedW, capturedH);
         }
+        // Laid out and fitted: the graph readiness mark (once per load).
+        markReady(READINESS_MARKS.graph, 'graph');
       });
     }
 

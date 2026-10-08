@@ -249,6 +249,15 @@ func init() {
 			KoanfPaths: nil,
 			New:        func() any { return &ArtifactsSettings{} },
 		},
+		{
+			// profiling is durable via DB but has no settings.yaml
+			// representation; it is written through PUT
+			// /api/v1/admin/profiling. Absent DB row = everything off.
+			// Seeding skips this section (KoanfPaths nil).
+			Name:       "profiling",
+			KoanfPaths: nil,
+			New:        func() any { return &ProfilingSettings{} },
+		},
 	}
 
 	ensureIndexes()
@@ -450,6 +459,15 @@ func compileSchemas() {
 		// stored document that breaks them is handled by Resolve (an invalid
 		// remote image value turns remote images off; any other invalid
 		// value disables the service).
+		// profiling schema is hand-written -- it is runtime/API-owned state
+		// with no $defs in settings-v1.schema.json (like messaging).
+		"profiling": {
+			"type": "object",
+			"properties": map[string]interface{}{
+				"readiness_marks": map[string]interface{}{"type": "boolean"},
+			},
+			"additionalProperties": false,
+		},
 		"artifacts": {
 			"type": "object",
 			"properties": map[string]interface{}{

@@ -442,6 +442,16 @@ type MessagingSettings struct {
 	ConversationWriteDenySwitch *bool `json:"conversation_write_deny_switch,omitempty"`
 }
 
+// ProfilingSettings holds the operational switches for in-app profiling.
+// DB-only (runtime state), no settings.yaml representation, written through
+// PUT /api/v1/admin/profiling. Absent row = everything off.
+type ProfilingSettings struct {
+	// ReadinessMarks turns on the web client's readiness marks
+	// (performance.mark timings for agent data arrival, first visible rows
+	// and graph ready). Default false (off).
+	ReadinessMarks *bool `json:"readiness_marks,omitempty"`
+}
+
 // ExperimentsSettings stores only explicit admin overrides for the
 // pkg/experiments registry. An absent key means "use the registry default".
 // Absent row = no overrides.

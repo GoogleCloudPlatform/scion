@@ -188,6 +188,9 @@ The stored MIME type is derived from the file's content plus its extension; the 
 #### Experiments (`/api/v1/experiments`)
 - `GET /`: Return the resolved hub-wide experiment map, `{"experiments": {"<name>": true|false}}`. Available to any authenticated identity (user, agent, or Runtime Broker token). The web client fetches it at boot. Admins change values through [`/api/v1/admin/experiments`](#admin-apiv1admin).
 
+#### Profiling (`/api/v1/profiling`)
+- `GET /`: Return the profiling switches the web client acts on, `{"readinessMarks": true|false}`, and nothing else. Available to any authenticated identity; a request without credentials gets `401`. Admins change the value through [`/api/v1/admin/profiling`](#admin-apiv1admin). See [Profiling](/scion/reference/admin-settings/#profiling).
+
 #### Templates (`/api/v1/templates`)
 - `GET /`: List available agent templates. The authorized list validator caps list requests at a maximum limit of **100** templates per page (default is 50). Requests specifying a `limit` query parameter greater than 100 will fail with HTTP 400 Bad Request.
 - `POST /`: Upload a new template or version.
@@ -214,6 +217,7 @@ The stored MIME type is derived from the file's content plus its extension; the 
 - `GET /limits/:id`, `PUT /limits/:id`: Inspect or update a Limit Definition.
 - `GET /entitlements/:id`: Inspect an Entitlement Binding.
 - `GET /gcp-quota`: View GCP quota status.
+- `GET /profiling`, `PUT /profiling`: Read and change the profiling switches (requires `hub.config.update`, on an interactive session only: every user access token is refused with `403`). Response: `{"readiness_marks": true|false, "revision": N}`. `PUT` body: `{"readiness_marks": true|false|null}`; `null` resets the key to its default (off) and an omitted key is unchanged. See [Profiling](/scion/reference/admin-settings/#profiling).
 - `GET /experiments`, `PUT /experiments`, `DELETE /experiments`: Manage hub-wide experiment overrides (requires `hub.experiments.update`). `GET` lists every registered experiment with its `default`, stored `override`, and resolved `enabled` value, plus the section `revision`. `PUT` body: `{"overrides": {"<name>": true|false|null}, "expected_revision": N}`. `null` removes an override, omitted names are unchanged, and unregistered names return `400`. A stale revision returns `409` (`revision_conflict`). `DELETE` resets all overrides to registry defaults (body: `expected_revision`, or `confirm_reset_malformed: true` if the stored section is malformed). There is no admin UI yet.
 - `GET /messaging/divergence`: View a read-only snapshot of migration divergence counters and metadata for the conversation model transition (requires `hub.diagnostics.read` permission).
 

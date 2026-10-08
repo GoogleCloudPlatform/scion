@@ -2430,6 +2430,7 @@ var serverConfigTokenSections = map[string]settingsTokenClass{
 	"maintenance":       settingsTokenRefused,       // admin mode, a session-only host operation
 	"messaging":         settingsTokenRefused,       // written through PUT /api/v1/admin/messaging
 	"experiments":       settingsTokenRefused,       // written through /api/v1/admin/experiments
+	"profiling":         settingsTokenRefused,       // written through PUT /api/v1/admin/profiling
 	"agent_defaults":    settingsTokenPerKey,        // see serverConfigTokenKeys
 	"endpoints":         settingsTokenPerKey,        // see serverConfigTokenKeys
 	"lifecycle":         settingsTokenConfiguration, // stall, retention and start timing

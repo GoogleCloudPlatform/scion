@@ -127,6 +127,14 @@ func getWebSessionUser(ctx context.Context) *webSessionUser {
 	return nil
 }
 
+// ProfilingSettingsProvider supplies the live profiling switches the web
+// shell hands to the client. *Server implements it.
+type ProfilingSettingsProvider interface {
+	// ReadinessMarksEnabled reports the profiling readiness_marks setting,
+	// the same value GET /api/v1/profiling returns.
+	ReadinessMarksEnabled() bool
+}
+
 // AccessSettingsProvider supplies the operational access settings that can
 // change at runtime (e.g. via the admin UI or ApplySnapshot). WebServer
 // reads these through the provider instead of holding its own snapshot.
@@ -199,7 +207,8 @@ type WebServerConfig struct {
 // WebServer serves the web frontend SPA shell and static assets.
 type WebServer struct {
 	config         WebServerConfig
-	accessSettings AccessSettingsProvider // live operational settings (nil-safe: falls back to zero values)
+	accessSettings AccessSettingsProvider    // live operational settings (nil-safe: falls back to zero values)
+	profiling      ProfilingSettingsProvider // live profiling switches (nil: everything off)
 	httpServer     *http.Server
 	mux            *http.ServeMux
 	assets         fs.FS  // embedded or nil
@@ -737,6 +746,12 @@ func (ws *WebServer) SetAccessSettingsProvider(p AccessSettingsProvider) {
 	ws.accessSettings = p
 }
 
+// SetProfilingSettingsProvider sets the source of the profiling switches the
+// shell's initial data carries for a signed-in user.
+func (ws *WebServer) SetProfilingSettingsProvider(p ProfilingSettingsProvider) {
+	ws.profiling = p
+}
+
 // SetAuthzService sets the authorization service for SSE subject-level checks.
 func (ws *WebServer) SetAuthzService(a *AuthzService) {
 	ws.authzService = a
@@ -1135,6 +1150,10 @@ func (ws *WebServer) prefetchPageData(r *http.Request) template.JS {
 		Title string      `json:"title"`
 		User  *pageUser   `json:"user,omitempty"`
 		Data  interface{} `json:"data,omitempty"`
+		// ReadinessMarks is written only when it is on and the page has a
+		// signed-in user, who can read the same value from GET
+		// /api/v1/profiling. Otherwise it is omitted.
+		ReadinessMarks bool `json:"readinessMarks,omitempty"`
 	}
 
 	envelope := pageDataEnvelope{
@@ -1150,6 +1169,9 @@ func (ws *WebServer) prefetchPageData(r *http.Request) template.JS {
 			Name:      u.Name,
 			AvatarURL: u.AvatarURL,
 			Role:      u.Role,
+		}
+		if ws.profiling != nil {
+			envelope.ReadinessMarks = ws.profiling.ReadinessMarksEnabled()
 		}
 	}
 

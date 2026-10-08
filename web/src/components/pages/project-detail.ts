@@ -48,6 +48,7 @@ import {
 import { agentStatusBadge } from '../../shared/agent-state-display.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
+import { READINESS_MARKS, markReady, readinessMarkPending } from '../../client/readiness-marks.js';
 import { stateManager } from '../../client/state.js';
 import type { AgentsChangedDetail } from '../../client/state.js';
 import { fetchHubProjectCapabilities } from '../../client/hub-capabilities.js';
@@ -1362,6 +1363,25 @@ export class ScionPageProjectDetail extends LitElement {
   override updated(changed: Map<string, unknown>): void {
     super.updated(changed);
     this.observeFilesSection();
+    this.noteRowsReady();
+  }
+
+  /**
+   * Writes the grid or list readiness mark (client/readiness-marks.ts) on
+   * the first frame that shows the first page of cards or rows, or the
+   * empty state, for the adopted agent result. Does nothing when marks are
+   * off or the mark was already written in this load.
+   */
+  private noteRowsReady(): void {
+    if (this.viewMode === 'graph') return;
+    const view = this.viewMode;
+    const name = view === 'grid' ? READINESS_MARKS.rowsGrid : READINESS_MARKS.rowsList;
+    if (!readinessMarkPending(name)) return;
+    if (!this.hasAgentsResult || this.agentsLoadError) return;
+    if (this.agentsLoading || this.agentWindow.loading) return;
+    const rows = view === 'grid' ? '.agent-card' : '.agent-table-container tbody tr';
+    if (!this.renderRoot.querySelector(`${rows}, .empty-state, .empty-filter-state`)) return;
+    requestAnimationFrame(() => markReady(name, view));
   }
 
   /**
@@ -1772,6 +1792,7 @@ export class ScionPageProjectDetail extends LitElement {
     if (adopted) {
       this.hasAgentsResult = true;
       this.agentsLoadError = null;
+      markReady(READINESS_MARKS.agentsData, this.viewMode);
     }
     if (
       adopted &&

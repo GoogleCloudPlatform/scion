@@ -29,6 +29,7 @@ import { stateManager } from './state.js';
 import { debugLog } from './debug-log.js';
 import { setDocumentTitle } from './page-title.js';
 import { setInitialPageData, takeInitialPageData } from './ssr-page-data.js';
+import { configureReadinessMarks, readinessNavigationStarted } from './readiness-marks.js';
 import { CHAT_DM_ROUTE, CHAT_SPACE_ROUTE, CHAT_THREAD_ROUTE } from './chat-routes.js';
 import { chatNotifications } from './chat-notifications.js';
 import { chatUnread, startChatUnreadIfEligible } from './chat-unread.js';
@@ -787,6 +788,8 @@ async function init(): Promise<void> {
 
   // Get initial data from SSR and hydrate state manager
   const initialData = getInitialData();
+  // Fixed for this document: a change of the setting applies on the next full load.
+  configureReadinessMarks(initialData?.readinessMarks === true);
   if (initialData) {
     console.info('[Scion] Initial page data:', initialData.path);
     if (initialData.user) {
@@ -1025,6 +1028,7 @@ async function renderRoute(path: string): Promise<void> {
   const appContainer = ensureRoots();
   if (!appContainer) return;
   const thisNav = ++navigationId;
+  readinessNavigationStarted(thisNav);
 
   // The SSR payload belongs to this document and is offered to the first
   // render only, whichever route it is; it is cleared here whether or not it

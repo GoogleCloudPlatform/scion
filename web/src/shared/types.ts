@@ -117,6 +117,8 @@ export interface PageData {
   user?: User | undefined;
   /** Additional page-specific data */
   data?: Record<string, unknown> | undefined;
+  /** Hub profiling readiness_marks setting; present (true) only when on, for a signed-in user */
+  readinessMarks?: boolean | undefined;
 }
 
 /**

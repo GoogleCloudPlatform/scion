@@ -507,3 +507,102 @@ export function summarizeBurstScenario(results) {
     fullyRestoredRunCount: results.filter((r) => r.restoreFullyConfirmed).length,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Readiness marks (web/src/client/readiness-marks.ts). The web client writes
+// these User Timing marks only when the hub's profiling readiness_marks
+// setting is on. Keep the names in step with READINESS_MARKS there.
+
+export const READINESS_MARK_PREFIX = 'scion:ready:';
+
+export const READINESS_MARK_NAMES = {
+  agentsData: 'scion:ready:agents-data',
+  rowsGrid: 'scion:ready:rows-grid',
+  rowsList: 'scion:ready:rows-list',
+  graph: 'scion:ready:graph',
+};
+
+/**
+ * The marks a populated run of a scenario must have written when the
+ * setting is on: the data mark plus the view's own mark. An unknown
+ * scenario expects none.
+ */
+export function expectedReadinessMarks(scenarioKey) {
+  const { agentsData, rowsGrid, rowsList, graph } = READINESS_MARK_NAMES;
+  switch (scenarioKey) {
+    case 'project-grid':
+      return [agentsData, rowsGrid];
+    case 'project-list':
+      return [agentsData, rowsList];
+    case 'project-graph-embedded':
+    case 'standalone-graph':
+      return [agentsData, graph];
+    default:
+      return [];
+  }
+}
+
+/**
+ * Reduces User Timing entries ({name, startTime}) to the readiness marks,
+ * as name -> ms since navigation start (one decimal). Other marks are
+ * ignored; a repeated name keeps its first entry.
+ */
+export function readinessMarksFrom(entries) {
+  const out = {};
+  for (const e of entries || []) {
+    if (typeof e?.name !== 'string' || !e.name.startsWith(READINESS_MARK_PREFIX)) continue;
+    if (e.name in out) continue;
+    out[e.name] = Math.round(e.startTime * 10) / 10;
+  }
+  return out;
+}
+
+/**
+ * Checks a run's marks. With the setting expected on, `missing` lists the
+ * expected marks not found. With it expected off, `unexpected` lists every
+ * readiness mark found, since off must write none.
+ */
+export function checkReadinessMarks(found, expected, expectOn) {
+  const names = Object.keys(found || {});
+  return expectOn
+    ? { missing: expected.filter((n) => !names.includes(n)), unexpected: [] }
+    : { missing: [], unexpected: names };
+}
+
+/**
+ * Summarizes the readiness marks of a scenario's populated runs: per mark,
+ * how many runs wrote it and median/min/max ms (overall, cold and warm),
+ * plus how many populated runs missed an expected mark or wrote one while
+ * the setting was expected off.
+ */
+export function summarizeReadinessMarks(results) {
+  const populated = results.filter((r) => r.outcome === 'populated');
+  const byName = {};
+  for (const r of populated) {
+    for (const [name, ms] of Object.entries(r.readinessMarks || {})) {
+      (byName[name] ||= []).push({ ms, cold: r.cold });
+    }
+  }
+  const marks = {};
+  for (const name of Object.keys(byName).sort()) {
+    const all = byName[name].map((x) => x.ms);
+    const mm = minMax(all);
+    marks[name] = {
+      count: all.length,
+      medianMs: median(all),
+      minMs: mm.min,
+      maxMs: mm.max,
+      medianMsCold: median(byName[name].filter((x) => x.cold).map((x) => x.ms)),
+      medianMsWarm: median(byName[name].filter((x) => !x.cold).map((x) => x.ms)),
+    };
+  }
+  return {
+    readinessMarks: marks,
+    readinessMarksMissingRunCount: populated.filter(
+      (r) => (r.readinessMarksMissing || []).length > 0
+    ).length,
+    readinessMarksUnexpectedRunCount: populated.filter(
+      (r) => (r.readinessMarksUnexpected || []).length > 0
+    ).length,
+  };
+}

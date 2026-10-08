@@ -1673,6 +1673,26 @@ func (o *OperationalSettings) CrossProjectMessagingEnabled() bool {
 	return false // field omitted → compiled default → OFF
 }
 
+// ReadinessMarks returns whether the web client writes readiness marks
+// (the "profiling" section's readiness_marks key). It is false when the
+// section is absent, the document is malformed or the key is unset.
+//
+// Hot-reloadable: reads from the DB-backed cache.
+func (o *OperationalSettings) ReadinessMarks() bool {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+
+	state, ok := o.cache["profiling"]
+	if !ok || state.Malformed {
+		return false
+	}
+	var ps opsettings.ProfilingSettings
+	if err := json.Unmarshal(state.Value, &ps); err != nil {
+		return false
+	}
+	return ps.ReadinessMarks != nil && *ps.ReadinessMarks
+}
+
 // Artifacts returns the resolved artifact service settings (the
 // "artifacts" section). It returns opsettings.DefaultArtifactsConfig when
 // the section is absent, and fails closed (opsettings.MalformedArtifactsConfig:
