@@ -22,6 +22,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -649,10 +650,40 @@ func TestSecurityHeaders(t *testing.T) {
 				t.Errorf("CSP missing %q", check)
 			}
 		}
-		// Nothing is loaded from jsDelivr any more, so the CSP must not allow it.
-		if strings.Contains(csp, "cdn.jsdelivr.net") {
-			t.Errorf("CSP still allows cdn.jsdelivr.net: %q", csp)
+		// Nothing is loaded from jsDelivr or Web Awesome, so the CSP must not
+		// allow either.
+		for _, host := range []string{"cdn.jsdelivr.net", "cdn.webawesome.com"} {
+			if strings.Contains(csp, host) {
+				t.Errorf("CSP still allows %s: %q", host, csp)
+			}
 		}
+
+		// The external hosts, per directive, are exactly these. A source is a
+		// host when it starts with https:// ; the bare https: scheme source in
+		// img-src (any HTTPS image) is not a host and is not counted.
+		wantHosts := map[string][]string{
+			"style-src":   {"fonts.googleapis.com"},
+			"font-src":    {"fonts.gstatic.com"},
+			"connect-src": {"storage.googleapis.com"},
+		}
+		gotHosts := map[string][]string{}
+		var allHosts []string
+		for _, directive := range strings.Split(csp, ";") {
+			fields := strings.Fields(directive)
+			if len(fields) == 0 {
+				continue
+			}
+			for _, src := range fields[1:] {
+				if host, ok := strings.CutPrefix(src, "https://"); ok {
+					gotHosts[fields[0]] = append(gotHosts[fields[0]], host)
+					allHosts = append(allHosts, host)
+				}
+			}
+		}
+		assert.Equal(t, wantHosts, gotHosts, "external hosts per directive")
+		sort.Strings(allHosts)
+		assert.Equal(t, []string{"fonts.googleapis.com", "fonts.gstatic.com", "storage.googleapis.com"}, allHosts,
+			"the policy's external hosts")
 	}
 
 	// Verify Permissions-Policy is set

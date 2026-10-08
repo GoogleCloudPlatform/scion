@@ -2921,7 +2921,10 @@ func sessionString(session *sessions.Session, key string) string {
 	return ""
 }
 
-// webContentSecurityPolicy is the CSP sent with every web response.
+// webContentSecurityPolicy is the CSP sent with every web response. The
+// client bundles its scripts, styles and Shoelace assets, so the only
+// external hosts are Google Fonts (stylesheet and font files) and Cloud
+// Storage (signed upload and download URLs).
 //
 // img-src allows blob: because the chat file preview fetches image bytes
 // with credentials and renders them through URL.createObjectURL (gs://
@@ -2930,9 +2933,9 @@ func sessionString(session *sessions.Session, key string) string {
 // shows a broken image. blob: is allowed for images only, never for
 // scripts or frames.
 const webContentSecurityPolicy = "default-src 'self'; " +
-	"script-src 'self' 'unsafe-inline' https://cdn.webawesome.com; " +
-	"style-src 'self' 'unsafe-inline' https://cdn.webawesome.com https://fonts.googleapis.com; " +
-	"font-src 'self' https://fonts.gstatic.com https://cdn.webawesome.com; " +
+	"script-src 'self' 'unsafe-inline'; " +
+	"style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; " +
+	"font-src 'self' https://fonts.gstatic.com; " +
 	"img-src 'self' data: blob: https:; " +
 	"connect-src 'self' data: ws: wss: http://localhost:* http://127.0.0.1:* https://storage.googleapis.com"
 
