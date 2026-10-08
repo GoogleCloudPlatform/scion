@@ -327,9 +327,7 @@ func TestHandleProjectCacheNotify_DownloadFailure_FixedText(t *testing.T) {
 	srv.SetStorage(newMockStorage("bucket"))
 
 	const detail = "sync detail /internal/cache/path gs://bucket/prefix 403"
-	orig := syncFromGCSIntoHubWorkspace
-	t.Cleanup(func() { syncFromGCSIntoHubWorkspace = orig })
-	syncFromGCSIntoHubWorkspace = func(context.Context, string, string, string) error {
+	srv.hubWorkspaceDownload = func(context.Context, string, string, string) error {
 		return errors.New(detail)
 	}
 

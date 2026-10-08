@@ -549,11 +549,9 @@ func TestAlignWorkspaceProjectIdentity_CompletesAfterMovedDir(t *testing.T) {
 // stubHubWorkspaceDownload replaces the GCS download with one that writes
 // a file and a different project identity into the hub workspace, in the
 // form the workspace already has.
-func stubHubWorkspaceDownload(t *testing.T) {
+func stubHubWorkspaceDownload(t *testing.T, srv *Server) {
 	t.Helper()
-	orig := syncFromGCSIntoHubWorkspace
-	t.Cleanup(func() { syncFromGCSIntoHubWorkspace = orig })
-	syncFromGCSIntoHubWorkspace = func(_ context.Context, _, _, workspacePath string) error {
+	srv.hubWorkspaceDownload = func(_ context.Context, _, _, workspacePath string) error {
 		if err := os.WriteFile(filepath.Join(workspacePath, "synced.txt"), []byte("synced"), 0644); err != nil {
 			return err
 		}
@@ -619,7 +617,7 @@ func TestSyncHubWorkspaceFromGCS_KeepsHubWorkspaceIdentity(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			identityTestHome(t)
 			srv, _ := testServer(t)
-			stubHubWorkspaceDownload(t)
+			stubHubWorkspaceDownload(t, srv)
 			workspacePath := t.TempDir()
 			tc.seed(t, filepath.Join(workspacePath, config.DotScion))
 			before := identitySnapshot(t, workspacePath)
@@ -637,7 +635,7 @@ func TestSyncHubManagedWorkspaceBack_KeepsHubWorkspaceIdentity(t *testing.T) {
 		identityTestHome(t)
 		srv, st := testServer(t)
 		ctx := context.Background()
-		stubHubWorkspaceDownload(t)
+		stubHubWorkspaceDownload(t, srv)
 		srv.SetStorage(newMockStorage("bucket"))
 
 		project := sharedWorkspaceProject("sync-back")
@@ -656,7 +654,7 @@ func TestHandleProjectCacheNotify_KeepsHubWorkspaceIdentity(t *testing.T) {
 	identityTestHome(t)
 	srv, st := testServer(t)
 	ctx := context.Background()
-	stubHubWorkspaceDownload(t)
+	stubHubWorkspaceDownload(t, srv)
 	srv.SetStorage(newMockStorage("bucket"))
 
 	project := sharedWorkspaceProject("cache-notify")
@@ -674,10 +672,10 @@ func TestHandleProjectCacheNotify_KeepsHubWorkspaceIdentity(t *testing.T) {
 
 // TestHubWorkspaceDownloads_UseIdentityKeepingHelper checks that every hub
 // download of a workspace upload goes through syncHubWorkspaceFromGCS:
-//   - the only reference to gcp.SyncFromGCS in the hub package is the
-//     declaration of syncFromGCSIntoHubWorkspace;
-//   - syncFromGCSIntoHubWorkspace is used only inside
-//     syncHubWorkspaceFromGCS;
+//   - the only reference to gcp.SyncFromGCS in the hub package is in
+//     Server.hubWorkspaceDownloader, which is also the only reader of the
+//     hubWorkspaceDownload field;
+//   - hubWorkspaceDownloader is used only inside syncHubWorkspaceFromGCS;
 //   - syncHubWorkspaceFromGCS is called once from each of the four
 //     functions that download a broker workspace upload into a hub
 //     workspace, and from nowhere else.
@@ -726,16 +724,19 @@ func TestHubWorkspaceDownloads_UseIdentityKeepingHelper(t *testing.T) {
 						helperCalls[fn.Name.Name]++
 					}
 				case *ast.Ident:
-					if x.Name == "syncFromGCSIntoHubWorkspace" {
-						varUses[fn.Name.Name]++
+					if x.Name == "hubWorkspaceDownloader" || x.Name == "hubWorkspaceDownload" {
+						varUses[fn.Name.Name+"."+x.Name]++
 					}
 				}
 				return true
 			})
 		}
 	}
-	assert.Equal(t, []string{"decl"}, gcpRefs, "gcp.SyncFromGCS references")
-	assert.Equal(t, map[string]int{"syncHubWorkspaceFromGCS": 1}, varUses, "syncFromGCSIntoHubWorkspace uses")
+	assert.Equal(t, []string{"hubWorkspaceDownloader"}, gcpRefs, "gcp.SyncFromGCS references")
+	assert.Equal(t, map[string]int{
+		"syncHubWorkspaceFromGCS.hubWorkspaceDownloader": 1,
+		"hubWorkspaceDownloader.hubWorkspaceDownload":    2,
+	}, varUses, "hub workspace downloader uses")
 	assert.Equal(t, map[string]int{
 		"syncWorkspaceOnStop":           1,
 		"syncHubManagedWorkspaceBack":   1,
@@ -859,9 +860,7 @@ func TestSyncHubWorkspaceFromGCS_KeepsIdentityFormWhenDownloadChangesIt(t *testi
 		t.Run(tc.name, func(t *testing.T) {
 			identityTestHome(t)
 			srv, _ := testServer(t)
-			orig := syncFromGCSIntoHubWorkspace
-			t.Cleanup(func() { syncFromGCSIntoHubWorkspace = orig })
-			syncFromGCSIntoHubWorkspace = func(_ context.Context, _, _, workspacePath string) error {
+			srv.hubWorkspaceDownload = func(_ context.Context, _, _, workspacePath string) error {
 				if err := os.WriteFile(filepath.Join(workspacePath, "synced.txt"), []byte("synced"), 0644); err != nil {
 					return err
 				}
@@ -893,12 +892,8 @@ func TestSyncHubWorkspaceFromGCS_ReportsIdentityNotKept(t *testing.T) {
 
 	// The download leaves a .scion directory that cannot be removed.
 	locked := filepath.Join(scionPath, "locked")
-	orig := syncFromGCSIntoHubWorkspace
-	t.Cleanup(func() {
-		syncFromGCSIntoHubWorkspace = orig
-		_ = os.Chmod(locked, 0755)
-	})
-	syncFromGCSIntoHubWorkspace = func(_ context.Context, _, _, _ string) error {
+	t.Cleanup(func() { _ = os.Chmod(locked, 0755) })
+	srv.hubWorkspaceDownload = func(_ context.Context, _, _, _ string) error {
 		if err := os.Remove(scionPath); err != nil {
 			return err
 		}

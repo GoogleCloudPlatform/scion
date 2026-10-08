@@ -661,9 +661,7 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	// temporary home so the probes never touch the real one. The workspace
 	// download from object storage (cache notify) is replaced by a no-op.
 	t.Setenv("HOME", t.TempDir())
-	origSync := syncFromGCSIntoHubWorkspace
-	t.Cleanup(func() { syncFromGCSIntoHubWorkspace = origSync })
-	syncFromGCSIntoHubWorkspace = func(context.Context, string, string, string) error { return nil }
+	srv.hubWorkspaceDownload = func(context.Context, string, string, string) error { return nil }
 	liProject, err := s.GetProject(ctx, f.project)
 	require.NoError(t, err)
 	wsPath, err := srv.hubManagedProjectPath(liProject.Slug)
