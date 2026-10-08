@@ -193,10 +193,17 @@ func TestOwnerGrantCoverageCheck(t *testing.T) {
 // to the check. So the call sites are pinned structurally. In each of
 // createProject, handleProjectRegister and handleProjectClone, a statement
 // "if !s.authorizeProjectOwnerGrant(w, ctx) { return }" must come before every
-// createProjectWithOwner call, in a block that encloses that call.
+// createProjectWithOwner call, in a block that encloses that call. These
+// three functions are the only production callers of createProjectWithOwner.
 func TestOwnerGrantCheckPrecedesOwnerWrite(t *testing.T) {
 	fset, files := parseHubProduction(t)
-	for _, fn := range []string{"Server.createProject", "Server.handleProjectRegister", "Server.handleProjectClone"} {
+	callers := []string{"Server.createProject", "Server.handleProjectRegister", "Server.handleProjectClone"}
+	var got []string
+	for fn := range callsIn(files, "createProjectWithOwner") {
+		got = append(got, fn)
+	}
+	assert.ElementsMatch(t, callers, got, "a new createProjectWithOwner caller must be added to this pin")
+	for _, fn := range callers {
 		decl := findHubFuncDecl(files, fn)
 		require.NotNil(t, decl, fn)
 		guards, writes := ownerGrantGuardsAndWrites(decl)

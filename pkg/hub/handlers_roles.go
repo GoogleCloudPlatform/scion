@@ -1612,6 +1612,8 @@ func roleBindingSummary(b *store.RoleBinding) string {
 		ScopeType        string `json:"scope_type"`
 		ScopeID          string `json:"scope_id"`
 	}{b.PrincipalType, b.PrincipalID, b.RoleDefinitionID, b.ScopeType, b.ScopeID})
+	// json.Marshal cannot fail for a struct of string fields (invalid UTF-8
+	// is replaced, not rejected), so this fallback is defensive only.
 	if err != nil {
 		return "{}"
 	}
