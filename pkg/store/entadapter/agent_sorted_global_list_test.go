@@ -336,7 +336,7 @@ func setRawCreatedUpdatedText(t *testing.T, s *AgentStore, id, createdText, upda
 
 // TestListAgents_SortedSurvivesMonotonicSuffixAndVariableFractions is the
 // regression test for the read-side normalization fix in
-// agentTimeColumnExpr/agentTimeArg: rows whose stored
+// timeColumnExpr/timeArg: rows whose stored
 // created/updated TEXT carries a monotonic-clock suffix (as every row
 // written via time.Now() before any future write-side fix does), rows
 // without one, and rows with different fractional-second digit counts must

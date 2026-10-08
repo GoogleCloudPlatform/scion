@@ -24,6 +24,7 @@ import (
 	entsql "entgo.io/ent/dialect/sql"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/message"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
@@ -315,6 +316,33 @@ func decodeListCursor(cursor, binding string) (time.Time, uuid.UUID, error) {
 	return ts, id, nil
 }
 
+// messageCreatedCmp returns the predicate "created <op> t" (op is one of <,
+// >, =), with created normalized by timeColumnExpr and t bound by timeArg so
+// both sides compare in the same form on SQLite. On Postgres this is a plain
+// timestamptz comparison, as ent's generated predicates would produce.
+func messageCreatedCmp(op string, t time.Time) predicate.Message {
+	return func(s *entsql.Selector) {
+		col := timeColumnExpr(s, message.FieldCreated)
+		arg := timeArg(s.Dialect(), t)
+		s.Where(entsql.P(func(b *entsql.Builder) {
+			b.WriteString(col).WriteString(" " + op + " ").Arg(arg)
+		}))
+	}
+}
+
+// messageCreatedIDOrder orders by (created, id), both ascending or both
+// descending, with created normalized by timeColumnExpr so the order agrees
+// with messageCreatedCmp's keyset comparisons on ties.
+func messageCreatedIDOrder(ascending bool) message.OrderOption {
+	dir := "DESC"
+	if ascending {
+		dir = "ASC"
+	}
+	return func(s *entsql.Selector) {
+		s.OrderExpr(entsql.Raw(fmt.Sprintf("%s %s, %s %s", timeColumnExpr(s, message.FieldCreated), dir, s.C(message.FieldID), dir)))
+	}
+}
+
 // ListMessages returns messages matching the given filter, ordered by
 // created_at descending unless opts.SortDir is "asc".
 func (s *MessageStore) ListMessages(ctx context.Context, filter store.MessageFilter, opts store.ListOptions) (*store.ListResult[store.Message], error) {
@@ -367,11 +395,16 @@ func (s *MessageStore) ListMessages(ctx context.Context, filter store.MessageFil
 		}
 		query.Where(message.ConversationIDEQ(cid))
 	}
+	// created is compared and ordered through timeColumnExpr/timeArg (see
+	// messageCreatedCmp), not ent's generated Created* predicates: on SQLite a
+	// row may still carry a monotonic-clock suffix in its stored text, and a
+	// raw comparison would misjudge ties with a suffix-free bound value
+	// (ptone/scion#2553).
 	if !filter.Before.IsZero() {
-		query.Where(message.CreatedLT(filter.Before))
+		query.Where(messageCreatedCmp("<", filter.Before))
 	}
 	if !filter.After.IsZero() {
-		query.Where(message.CreatedGT(filter.After))
+		query.Where(messageCreatedCmp(">", filter.After))
 	}
 
 	// totalCount represents the total number of messages matching the base
@@ -398,17 +431,17 @@ func (s *MessageStore) ListMessages(ctx context.Context, filter store.MessageFil
 		}
 		if ascending {
 			query.Where(message.Or(
-				message.CreatedGT(cursorCreated),
+				messageCreatedCmp(">", cursorCreated),
 				message.And(
-					message.CreatedEQ(cursorCreated),
+					messageCreatedCmp("=", cursorCreated),
 					message.IDGT(cursorID),
 				),
 			))
 		} else {
 			query.Where(message.Or(
-				message.CreatedLT(cursorCreated),
+				messageCreatedCmp("<", cursorCreated),
 				message.And(
-					message.CreatedEQ(cursorCreated),
+					messageCreatedCmp("=", cursorCreated),
 					message.IDLT(cursorID),
 				),
 			))
@@ -416,15 +449,8 @@ func (s *MessageStore) ListMessages(ctx context.Context, filter store.MessageFil
 	}
 
 	limit := clampLimit(opts.Limit)
-	createdOrder := entsql.OrderDesc()
-	idOrder := entsql.OrderDesc()
-	if ascending {
-		createdOrder = entsql.OrderAsc()
-		idOrder = entsql.OrderAsc()
-	}
 	entities, err := query.
-		Order(message.ByCreated(createdOrder)).
-		Order(message.ByID(idOrder)).
+		Order(messageCreatedIDOrder(ascending)).
 		Limit(limit + 1).
 		All(ctx)
 	if err != nil {
