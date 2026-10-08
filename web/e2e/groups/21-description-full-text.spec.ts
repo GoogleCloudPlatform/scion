@@ -25,7 +25,7 @@
  */
 
 import { test, expect, type Page } from '@playwright/test';
-import { getE2EEnv, createGroup, uniqueSlug } from './groups-setup.js';
+import { getE2EEnv, createGroup, uniqueSlug, deleteGroupAPI, apiRequest } from './groups-setup.js';
 
 const LONG_PROSE =
   'This group owns the release pipeline for the hosted web frontend, ' +
@@ -98,26 +98,44 @@ test.describe('Groups list — full description text (F-1)', () => {
 
   test.use({ storageState: env.adminStorageState, baseURL: env.baseURL });
 
+  // IDs of groups actually created, recorded as each create succeeds so a
+  // partial beforeAll failure still cleans up what it made.
+  const createdGroupIds: string[] = [];
+
   test.beforeAll(async () => {
-    await createGroup(env.baseURL, env.devToken, {
-      name: 'Desc Short',
-      slug: slugs.short,
-      description: SHORT,
-    });
-    await createGroup(env.baseURL, env.devToken, {
-      name: 'Desc Long',
-      slug: slugs.long,
-      description: LONG_PROSE,
-    });
-    await createGroup(env.baseURL, env.devToken, {
-      name: 'Desc Unbroken',
-      slug: slugs.unbroken,
-      description: UNBROKEN,
-    });
-    await createGroup(env.baseURL, env.devToken, {
-      name: 'Desc Empty',
-      slug: slugs.empty,
-    });
+    const seeds = [
+      { name: 'Desc Short', slug: slugs.short, description: SHORT },
+      { name: 'Desc Long', slug: slugs.long, description: LONG_PROSE },
+      { name: 'Desc Unbroken', slug: slugs.unbroken, description: UNBROKEN },
+      { name: 'Desc Empty', slug: slugs.empty },
+    ];
+    for (const seed of seeds) {
+      const group = await createGroup(env.baseURL, env.devToken, seed);
+      createdGroupIds.push(group.id);
+    }
+  });
+
+  test.afterAll(async () => {
+    // Attempt every deletion, then report all failures together.
+    // deleteGroupAPI does not check the response status, so confirm each
+    // deletion with a follow-up GET that must return 404.
+    const failures: string[] = [];
+    for (const id of createdGroupIds) {
+      try {
+        await deleteGroupAPI(env.baseURL, env.devToken, id);
+        const res = await apiRequest(env.baseURL, env.devToken, 'GET', `/api/v1/groups/${id}`);
+        if (res.status !== 404) {
+          failures.push(`${id}: still present after delete (GET ${res.status})`);
+        }
+      } catch (err) {
+        failures.push(`${id}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    if (failures.length > 0) {
+      throw new Error(
+        `spec 21 cleanup failed for ${failures.length} group(s):\n${failures.join('\n')}`
+      );
+    }
   });
 
   async function openList(page: Page): Promise<void> {
