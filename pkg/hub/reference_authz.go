@@ -156,3 +156,90 @@ func (s *Server) messageInChatConversation(ctx context.Context, wcs WebChatStore
 	}
 	return sameConversation(msg, key, convID), nil
 }
+
+// attachmentLinkScanLimit bounds how many linked messages the download check
+// looks at for a file uploaded in a direct message.
+const attachmentLinkScanLimit = 20
+
+// canReadAttachment decides whether user may download an attachment. The
+// first rule that matches wins:
+//
+//  1. user uploaded it
+//  2. it is a project file and user can read the project
+//  3. user can read at least one message it is attached to (first
+//     attachmentLinkScanLimit links), whatever the file's project: a reader
+//     of the message already sees what the message carries
+//
+// Rule 3 depends on how files get attached to messages: only through send
+// validation (attachmentUsableIn) or hub ingest from the sending agent's own
+// project (see LinkAttachmentToMessage). Any store or authorization error
+// answers false.
+func (s *Server) canReadAttachment(ctx context.Context, user UserIdentity, meta *AttachmentMeta) bool {
+	if user == nil || meta == nil {
+		return false
+	}
+	if meta.UploadedBy != "" && meta.UploadedBy == user.ID() {
+		return true
+	}
+	if meta.ProjectID != "" && s.canReadProject(ctx, user, meta.ProjectID) {
+		return true
+	}
+	s.mu.RLock()
+	wcs := s.webChatStore
+	s.mu.RUnlock()
+	if wcs == nil {
+		return false
+	}
+	ids, err := wcs.ListMessageIDsForAttachment(ctx, meta.ID, attachmentLinkScanLimit)
+	if err != nil {
+		slog.WarnContext(ctx, "canReadAttachment: listing linked messages failed", "attachment", meta.ID, "error", err)
+		return false
+	}
+	for _, id := range ids {
+		msg, err := s.store.GetMessage(ctx, id)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				continue
+			}
+			slog.WarnContext(ctx, "canReadAttachment: message lookup failed", "attachment", meta.ID, "message", id, "error", err)
+			return false
+		}
+		if s.canReadNativeMessage(ctx, user, msg) {
+			return true
+		}
+	}
+	return false
+}
+
+// canReadNativeMessage reports whether user may read a native chat message:
+// through its conversation when it has one (canUserReadMessage), otherwise
+// by its thread key — a DM key by its user slot, a topic by read access to
+// the topic's project. Any store or authorization error answers false.
+func (s *Server) canReadNativeMessage(ctx context.Context, user UserIdentity, msg *store.Message) bool {
+	if user == nil || msg == nil {
+		return false
+	}
+	if msg.ConversationID != "" {
+		return s.canUserReadMessage(ctx, user, msg)
+	}
+	if msg.ThreadID == "" {
+		return false
+	}
+	if strings.HasPrefix(msg.ThreadID, "dm:") {
+		return isDMParticipant(msg.ThreadID, user.ID())
+	}
+	s.mu.RLock()
+	wcs := s.webChatStore
+	s.mu.RUnlock()
+	if wcs == nil {
+		return false
+	}
+	topic, err := wcs.GetTopic(ctx, msg.ThreadID)
+	if err != nil || topic == nil {
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			slog.WarnContext(ctx, "canReadNativeMessage: topic lookup failed", "message", msg.ID, "error", err)
+		}
+		return false
+	}
+	return s.canReadProject(ctx, user, topic.ProjectID)
+}

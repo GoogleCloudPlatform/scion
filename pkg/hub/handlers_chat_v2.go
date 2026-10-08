@@ -5572,19 +5572,14 @@ func (s *Server) handleAttachmentDownload(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Authorize: user must have read access to the project. An attachment
-	// uploaded from a DM has no project (see handleAttachmentUpload); the
-	// authenticated identity plus the unguessable attachment ID is all there is
-	// to check, so the download proceeds.
-	if meta.ProjectID != "" {
-		project, err := s.store.GetProject(ctx, meta.ProjectID)
-		if err != nil {
-			NotFound(w, "Project")
-			return
-		}
-		if !s.authorize(w, r, projectResource(project), ActionRead) {
-			return
-		}
+	// Authorize (canReadAttachment): a file downloads for its uploader, for
+	// readers of its project, and for anyone who can read a message it is
+	// attached to. Anyone else gets the same answer as for an unknown
+	// attachment; the reason is logged.
+	if !s.canReadAttachment(ctx, user, meta) {
+		logReferenceRefused(ctx, r.URL.Path, "caller may not read this attachment", user)
+		NotFound(w, "Attachment")
+		return
 	}
 
 	// Get file from storage.

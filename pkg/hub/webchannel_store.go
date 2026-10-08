@@ -197,6 +197,9 @@ type WebChatStore interface {
 
 	// LinkAttachmentToMessage associates an attachment with a message.
 	LinkAttachmentToMessage(ctx context.Context, messageID, attachmentID string) error
+	// ListMessageIDsForAttachment returns up to limit IDs of messages the
+	// attachment is linked to.
+	ListMessageIDsForAttachment(ctx context.Context, attachmentID string, limit int) ([]string, error)
 
 	// --- Phase-3 Message extension methods ---
 
@@ -591,6 +594,9 @@ CREATE TABLE IF NOT EXISTS webchat_message_attachment (
 
 CREATE INDEX IF NOT EXISTS idx_webchat_message_attachment_message
     ON webchat_message_attachment (message_id);
+
+CREATE INDEX IF NOT EXISTS idx_webchat_message_attachment_attachment
+    ON webchat_message_attachment (attachment_id);
 
 -- Phase-3: message extension data (reply-to, edit, delete)
 CREATE TABLE IF NOT EXISTS webchat_message_ext (
@@ -2119,6 +2125,34 @@ VALUES (?, ?)
 		return fmt.Errorf("webchat store: link attachment: %w", err)
 	}
 	return nil
+}
+
+// ListMessageIDsForAttachment returns up to limit IDs of messages the
+// attachment is linked to, in ID order.
+func (s *sqliteWebChatStore) ListMessageIDsForAttachment(ctx context.Context, attachmentID string, limit int) ([]string, error) {
+	const query = `
+SELECT message_id FROM webchat_message_attachment
+WHERE attachment_id = ?
+ORDER BY message_id
+LIMIT ?
+`
+	rows, err := s.db.QueryContext(ctx, query, attachmentID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("webchat store: list messages for attachment: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("webchat store: scan message for attachment: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("webchat store: list messages for attachment: %w", err)
+	}
+	return ids, nil
 }
 
 // GetAttachmentsByMessage returns all attachments linked to a message.

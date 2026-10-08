@@ -230,7 +230,10 @@ func (s *rsWebChatStore) GetAttachmentsByMessages(context.Context, []string) (ma
 	return nil, nil
 }
 func (s *rsWebChatStore) LinkAttachmentToMessage(context.Context, string, string) error { return nil }
-func (s *rsWebChatStore) SetMessageReplyTo(context.Context, string, string) error       { return nil }
+func (s *rsWebChatStore) ListMessageIDsForAttachment(context.Context, string, int) ([]string, error) {
+	return nil, nil
+}
+func (s *rsWebChatStore) SetMessageReplyTo(context.Context, string, string) error { return nil }
 func (s *rsWebChatStore) GetMessageExt(context.Context, string) (*WebChatMessageExt, error) {
 	return nil, nil
 }

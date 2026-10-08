@@ -521,3 +521,126 @@ func TestChatSend_RefusedSendStagesNoFile(t *testing.T) {
 	_, err = os.Stat(filepath.Join(stagingDir, file))
 	assert.NoError(t, err, "an accepted send stages its attachment")
 }
+
+func (f *refFixture) download(t *testing.T, user *store.User, id string) refAnswer {
+	t.Helper()
+	rec := doRequestAsUser(t, f.srv, user, http.MethodGet, "/api/v1/chat/attachments/"+id, nil)
+	return refAnswer{status: rec.Code, body: rec.Body.String()}
+}
+
+// dmUploadSent has alice upload a file in her DM with carol and send it
+// there, and returns the attachment ID.
+func (f *refFixture) dmUploadSent(t *testing.T) string {
+	t.Helper()
+	dm := dmKeyFor(t, "user", f.ua.ID, "user", f.uc.ID)
+	file := f.attach(t, "", f.ua.ID, "shared.txt")
+	got := f.send(t, f.ua, dm, map[string]interface{}{"content": "file", "attachments": []string{file}})
+	require.Equal(t, http.StatusCreated, got.status, got.body)
+	return file
+}
+
+func TestAttachmentDownload_DMUploadReadableByUploaderAndPeer(t *testing.T) {
+	f := newRefFixture(t)
+	file := f.dmUploadSent(t)
+	for _, u := range []*store.User{f.ua, f.uc} {
+		got := f.download(t, u, file)
+		require.Equal(t, http.StatusOK, got.status, "%s: %s", u.DisplayName, got.body)
+		assert.Equal(t, "content of shared.txt", got.body)
+	}
+	// An upload not sent anywhere yet downloads for its uploader.
+	unsent := f.attach(t, "", f.ub.ID, "draft.txt")
+	assert.Equal(t, http.StatusOK, f.download(t, f.ub, unsent).status)
+}
+
+func TestAttachmentDownload_DMUploadMatchesUnknownForOtherUser(t *testing.T) {
+	f := newRefFixture(t)
+	file := f.dmUploadSent(t)
+	missing := f.download(t, f.ub, uuid.NewString())
+	require.Equal(t, http.StatusNotFound, missing.status, missing.body)
+	requireSameAnswer(t, missing, f.download(t, f.ub, file))
+	unsent := f.attach(t, "", f.ua.ID, "draft.txt")
+	requireSameAnswer(t, missing, f.download(t, f.ub, unsent))
+}
+
+func TestAttachmentDownload_ProjectFileMatchesUnknownForNonMember(t *testing.T) {
+	f := newRefFixture(t)
+	file := f.attach(t, f.projA.ID, f.ua.ID, "a.txt")
+	require.Equal(t, http.StatusOK, f.download(t, f.ua, file).status, "a project reader downloads it")
+	missing := f.download(t, f.ub, uuid.NewString())
+	requireSameAnswer(t, missing, f.download(t, f.ub, file))
+}
+
+// listLinksFaultWCS fails ListMessageIDsForAttachment.
+type listLinksFaultWCS struct {
+	WebChatStore
+}
+
+func (listLinksFaultWCS) ListMessageIDsForAttachment(context.Context, string, int) ([]string, error) {
+	return nil, errRefStoreFault
+}
+
+func TestAttachmentDownload_StoreErrorAnswersAsUnknown(t *testing.T) {
+	f := newRefFixture(t)
+	file := f.dmUploadSent(t)
+	require.Equal(t, http.StatusOK, f.download(t, f.uc, file).status, "the peer can download it while the store works")
+
+	missing := f.download(t, f.uc, uuid.NewString())
+	f.srv.SetWebChatStore(listLinksFaultWCS{WebChatStore: f.wcs})
+	requireSameAnswer(t, missing, f.download(t, f.uc, file))
+}
+
+func TestCanReadNativeMessage_StoreErrorDenies(t *testing.T) {
+	f := newRefFixture(t)
+	ctx := context.Background()
+	alice := NewAuthenticatedUser(f.ua.ID, f.ua.Email, f.ua.DisplayName, f.ua.Role, string(ClientTypeWeb))
+
+	convID, err := f.srv.conversationIDForKey(ctx, f.wcs, f.topicA)
+	require.NoError(t, err)
+	require.NotEmpty(t, convID)
+	inConversation, err := f.st.GetMessage(ctx, f.seedMessage(t, f.projA.ID, f.topicA, convID, "with conversation"))
+	require.NoError(t, err)
+	byTopic, err := f.st.GetMessage(ctx, f.seedMessage(t, f.projA.ID, f.topicA, "", "by topic"))
+	require.NoError(t, err)
+
+	require.True(t, f.srv.canReadNativeMessage(ctx, alice, inConversation), "readable while the store works")
+	require.True(t, f.srv.canReadNativeMessage(ctx, alice, byTopic), "readable while the store works")
+
+	f.faults.failGetConversation = true
+	f.faults.failGetProject = true
+	f.fault.Arm()
+	assert.False(t, f.srv.canReadNativeMessage(ctx, alice, inConversation), "a conversation lookup error denies")
+	assert.False(t, f.srv.canReadNativeMessage(ctx, alice, byTopic), "a project lookup error denies")
+}
+
+func TestAttachmentDownload_AgentDMFileReadableAfterProjectAccessEnds(t *testing.T) {
+	f := newRefFixture(t)
+	ctx := context.Background()
+
+	// A file agent aa sent in its DM with alice: a file of project A,
+	// uploaded by the agent, linked to the DM message.
+	dm := dmKeyFor(t, "agent", f.aa.ID, "user", f.ua.ID)
+	file := f.attach(t, f.projA.ID, f.aa.ID, "report.txt")
+	msgID := f.seedMessage(t, f.projA.ID, dm, "", "here is the report")
+	require.NoError(t, f.wcs.LinkAttachmentToMessage(ctx, msgID, file))
+
+	require.Equal(t, http.StatusOK, f.download(t, f.ua, file).status)
+
+	// alice loses access to project A.
+	membersGroup, err := f.st.GetGroupBySlug(ctx, "project:"+f.projA.Slug+":members")
+	require.NoError(t, err)
+	_ = f.st.RemoveGroupMember(ctx, membersGroup.ID, store.GroupMemberTypeUser, f.ua.ID)
+	_, err = f.st.DeleteRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, f.ua.ID)
+	require.NoError(t, err)
+	alice := NewAuthenticatedUser(f.ua.ID, f.ua.Email, f.ua.DisplayName, f.ua.Role, string(ClientTypeWeb))
+	require.False(t, f.srv.canReadProject(ctx, alice, f.projA.ID), "precondition: alice no longer reads project A")
+
+	got := f.download(t, f.ua, file)
+	require.Equal(t, http.StatusOK, got.status, "the DM's file stays readable with the DM: %s", got.body)
+
+	// bob is a hub member outside the DM with no role in project A.
+	missing := f.download(t, f.ub, uuid.NewString())
+	requireSameAnswer(t, missing, f.download(t, f.ub, file))
+	// A file of project A linked to no message bob can read stays unknown.
+	unlinked := f.attach(t, f.projA.ID, f.aa.ID, "other.txt")
+	requireSameAnswer(t, missing, f.download(t, f.ub, unlinked))
+}
