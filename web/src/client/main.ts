@@ -84,12 +84,18 @@ const TZ_LOAD_BUDGET_MS = 1500;
 import { setBasePath } from '@shoelace-style/shoelace/dist/utilities/base-path.js';
 setBasePath('/shoelace');
 
-// Explicitly import all Shoelace components used in the app.
-// The autoloader cannot detect sl-* elements inside LitElement shadow roots,
-// so each component must be registered via direct import.
+// Explicitly import all Shoelace components used in the app. This is the
+// only place Shoelace components are registered: the SPA shell loads no CDN
+// autoloader (it could not see sl-* elements inside LitElement shadow roots
+// anyway, and loaded a second Shoelace copy for light-DOM ones). Every sl-*
+// tag used in src/ must be imported here; shoelace-registration.test.ts
+// enforces it.
+import '@shoelace-style/shoelace/dist/components/badge/badge.js';
 import '@shoelace-style/shoelace/dist/components/breadcrumb/breadcrumb.js';
 import '@shoelace-style/shoelace/dist/components/breadcrumb-item/breadcrumb-item.js';
 import '@shoelace-style/shoelace/dist/components/button/button.js';
+import '@shoelace-style/shoelace/dist/components/button-group/button-group.js';
+import '@shoelace-style/shoelace/dist/components/card/card.js';
 import '@shoelace-style/shoelace/dist/components/checkbox/checkbox.js';
 import '@shoelace-style/shoelace/dist/components/drawer/drawer.js';
 import '@shoelace-style/shoelace/dist/components/icon/icon.js';
@@ -106,6 +112,7 @@ import '@shoelace-style/shoelace/dist/components/divider/divider.js';
 import '@shoelace-style/shoelace/dist/components/dropdown/dropdown.js';
 import '@shoelace-style/shoelace/dist/components/menu/menu.js';
 import '@shoelace-style/shoelace/dist/components/menu-item/menu-item.js';
+import '@shoelace-style/shoelace/dist/components/menu-label/menu-label.js';
 import '@shoelace-style/shoelace/dist/components/alert/alert.js';
 import '@shoelace-style/shoelace/dist/components/radio-group/radio-group.js';
 import '@shoelace-style/shoelace/dist/components/radio-button/radio-button.js';
@@ -116,6 +123,7 @@ import '@shoelace-style/shoelace/dist/components/details/details.js';
 import '@shoelace-style/shoelace/dist/components/tab-group/tab-group.js';
 import '@shoelace-style/shoelace/dist/components/tab/tab.js';
 import '@shoelace-style/shoelace/dist/components/tab-panel/tab-panel.js';
+import '@shoelace-style/shoelace/dist/components/tag/tag.js';
 
 // Import app shell and core shared components (always needed)
 import '../components/app-shell.js';
