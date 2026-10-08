@@ -24,7 +24,7 @@
  */
 
 import { test, expect, type Page } from '@playwright/test';
-import { currentPanel } from './fixture.js';
+import { currentPanel, openChatRail } from './fixture.js';
 import { touchSwipe } from './helpers.js';
 import { setupChatMobileMocks, PROJECT_A, GENERAL_THREAD_ID } from './mock-api.js';
 
@@ -255,6 +255,25 @@ test.describe('Back and Forward step through the mobile chat panels', () => {
     expect(new URL(page.url()).pathname, 'Back stays on the rail of the open thread').toBe(
       otherUrl
     );
+  });
+
+  test('Back from the rail after a legacy space link leaves, instead of redirecting forward again', async ({
+    page,
+  }) => {
+    // The legacy /chat/space/{id} link is rewritten to the readable URL in
+    // place. A pushed redirect left the legacy URL beneath the rail, and
+    // Back to it redirected straight back to the rail.
+    const before = await historyLength(page);
+    await openChatRail(page);
+    await expectPanel(page, 'left');
+    expect(new URL(page.url()).pathname).toBe(SPACE_URL);
+    expect(await historyLength(page), 'the rewrite added no entry').toBe(before + 1);
+
+    await page.goBack();
+    await expect.poll(() => page.url()).not.toContain('/chat');
+    // Give a redirect time to fire: the page must stay where Back went.
+    await page.waitForTimeout(1500);
+    expect(page.url()).not.toContain('/chat');
   });
 
   test('a deep link opens on the conversation; the back control leads to the rail, and Back returns to it', async ({

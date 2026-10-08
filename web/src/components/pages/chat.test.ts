@@ -780,6 +780,28 @@ describe('chat page — mobile panel default and header navigation', () => {
     expect(el.mobilePanel).toBe('left');
   });
 
+  it('rewrites a legacy space URL in place instead of pushing a redirect', () => {
+    // A push would leave the legacy URL beneath the rail, and Back to it
+    // would redirect forward again.
+    const el = createPage();
+    window.history.replaceState({}, '', '/chat/space/p1?x=1');
+    el._slugToProjectId.set('alpha', 'p1');
+    el._projectIdToSlug.set('p1', 'alpha');
+    vi.mocked(navigateTo).mockClear();
+    const selectSpace = vi.spyOn(el, 'selectSpaceBySlug').mockResolvedValue(undefined);
+    const historyLength = window.history.length;
+
+    el.parseV2Route();
+
+    expect(replaceRoute).toHaveBeenCalledWith('/chat/alpha');
+    expect(navigateTo).not.toHaveBeenCalled();
+    expect(window.location.pathname).toBe('/chat/alpha');
+    expect(window.location.search).toBe('?x=1');
+    expect(window.history.length).toBe(historyLength);
+    // The readable URL is then parsed on the same page: the space opens.
+    expect(selectSpace).toHaveBeenCalledWith('alpha', 'p1');
+  });
+
   it('re-titles the thread once the router has caught up with the rewrite', async () => {
     const el = createPage();
     window.history.replaceState({}, '', '/chat/space/p1/thread/topic-1');

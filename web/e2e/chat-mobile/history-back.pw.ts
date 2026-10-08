@@ -102,7 +102,7 @@ test.describe('horizontal drags never navigate browser history', () => {
   test('a rightward drag across the rail leaves the page and the panel alone', async ({ page }) => {
     await openChatRail(page);
     await expandSpace(page);
-    // The redirect from the legacy space URL left an entry to go back to.
+    // The page before chat left an entry to go back to.
     expect(await page.evaluate(() => history.length)).toBeGreaterThan(1);
     await watchForNavigation(page);
 

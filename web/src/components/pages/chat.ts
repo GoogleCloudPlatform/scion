@@ -2047,7 +2047,17 @@ export class ScionPageChat extends LitElement {
       const projectId = decodeURIComponent(legacySpaceMatch[1]);
       const slug = this._projectIdToSlug.get(projectId);
       if (slug) {
-        navigateTo(`/chat/${encodeURIComponent(slug)}`);
+        // Rewrite to the readable URL in place, as for a legacy thread link,
+        // then parse that. navigateTo would push: Back from the rail would
+        // land on the legacy URL, only to be redirected forward again.
+        void replaceRoute(`/chat/${encodeURIComponent(slug)}`).then(() => {
+          // The shell titles itself from the path it now records; put the
+          // page's own title back on top.
+          if (this.isConnected && this._lastPageTitle) {
+            dispatchPageTitle(this, ...this._lastPageTitle);
+          }
+        });
+        this.parseV2Route();
         return;
       }
       return;
