@@ -306,10 +306,12 @@ func TestReconcileMissing_NonRunningPhasesNotReconciled(t *testing.T) {
 func TestReconcileMissing_StoppingAgent(t *testing.T) {
 	f := newReconcileFixture(t)
 	plain := f.addAgent("stopping-plain", "stopping", "")
-	preempted := f.addAgent("stopping-preempted", "stopping", "", func(a *store.Agent) {
-		a.ExitReason = string(state.ExitReasonPreempted)
-		a.Message = "Agent pod was preempted"
-	})
+	preempted := f.addAgent("stopping-preempted", "stopping", "")
+	// Recorded by an earlier heartbeat while the pod was terminating.
+	rec := f.get(preempted.ID)
+	rec.ExitReason = string(state.ExitReasonPreempted)
+	rec.Message = "Agent pod was preempted"
+	require.NoError(t, f.s.UpdateAgent(context.Background(), rec))
 	busy := f.addAgent("stopping-busy", "stopping", "")
 
 	f.heartbeat(completeInventory())
