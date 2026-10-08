@@ -1617,6 +1617,54 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 	return tx.Commit()
 }
 
+// SetAgentAnnotation implements store.AgentStore.SetAgentAnnotation. The
+// annotations are read and written back in one transaction (with a row lock
+// where the dialect has one), so two narrow writes of different keys do not
+// drop each other.
+func (s *AgentStore) SetAgentAnnotation(ctx context.Context, agentID, key, value string) error {
+	uid, err := parseUUID(agentID)
+	if err != nil {
+		return err
+	}
+	useLock := s.usesRowLocks(ctx)
+	tx, err := s.client.Tx(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	q := tx.Agent.Query().Where(agent.IDEQ(uid), agent.DeletedAtIsNil())
+	if useLock {
+		q = q.ForUpdate()
+	}
+	current, err := q.Only(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+	annotations := make(map[string]string, len(current.Annotations)+1)
+	for k, v := range current.Annotations {
+		annotations[k] = v
+	}
+	if value == "" {
+		if _, ok := annotations[key]; !ok {
+			return tx.Commit()
+		}
+		delete(annotations, key)
+	} else {
+		annotations[key] = value
+	}
+	upd := tx.Agent.UpdateOneID(uid)
+	if len(annotations) == 0 {
+		upd.ClearAnnotations()
+	} else {
+		upd.SetAnnotations(annotations)
+	}
+	if err := upd.Exec(ctx); err != nil {
+		return mapError(err)
+	}
+	return tx.Commit()
+}
+
 // SetAgentWorkspacePlacement implements store.AgentStore.SetAgentWorkspacePlacement.
 func (s *AgentStore) SetAgentWorkspacePlacement(ctx context.Context, agentID, placement string) error {
 	uid, err := parseUUID(agentID)

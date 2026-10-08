@@ -631,6 +631,21 @@ With NFS workspace storage, an Empty-per-agent agent's workspace is on the expor
 
 On clusters without NFS workspace storage (including `gke-shared-volume`), an agent in an Empty-per-agent project (a Hub-managed project without git created with workspace mode `per-agent`; see [Workspaces & Sharing Modes](/scion/local/workspaces-and-sharing/)) gets its own EmptyDir workspace volume. It starts empty, as intended, but **its contents are lost when the agent stops or its Pod is replaced**, so suspend/resume does not keep them either. Git clone-per-agent workspaces on EmptyDir behave the same way. Have agents write anything that must survive to a [shared directory](#shared-directory-pvcs).
 
+#### Unpushed work warning
+
+A git clone-per-agent workspace on EmptyDir is cloned again from the remote when the agent next starts, so commits that were not pushed and uncommitted or untracked files are lost on stop, suspend and restart. The Hub warns about this but does not block the operation:
+
+- **Before a stop, suspend or restart**, the Hub runs a short git check inside the running agent container (as the agent user, with a 5-second limit). It counts the commits not on the branch's upstream (or, without an upstream, not on any remote branch) and the changed and untracked files. If it finds any, the stop or suspend response carries a warning, which `scion stop` and `scion suspend` print:
+
+  ```
+  Warning: Workspace is ephemeral and will be re-cloned on next start; 2 unpushed commits and 3 changed files will be lost. Push first to keep them.
+  ```
+
+  If the check cannot run (for example the container has already exited, or it times out), there is no warning and the stop goes ahead as usual.
+- **When the agent next starts** (`scion start`, `scion resume`, or a restart), the response repeats the result recorded at the stop, for example `Workspace is ephemeral and was re-cloned; 2 unpushed commits and 3 changed files from the previous run were lost.` When there is no record (the Pod went away without a Hub stop, or the check did not complete), it says `Workspace is ephemeral and is re-cloned on start; local changes from the previous run are not kept.` A clean workspace gives no warning.
+
+To keep the work, push it before stopping the agent, or use [NFS workspace storage](#sharing-modes-on-the-nfs-workspace). Agents on NFS workspace storage and agents on other runtimes, such as Docker, are not checked and get no warning. The check runs only for agents managed through a Hub; local mode with the Kubernetes runtime does not warn.
+
 ### Persistent Agent Home (NFS)
 
 With [`server.home_storage`](/scion/reference/server-config/#agent-home-storage-serverhome_storage) (or a profile's `home_storage_backend: nfs`) and the `hub.k8s_nfs_home` experiment, a Kubernetes agent keeps its home directory on the NFS export of its profile's shared-dir storage. Files, harness sessions and credentials the harness writes into the home then survive stops, restarts and pod replacements. The feature is in development and also needs `server.home_storage.allow_incomplete_phases`.

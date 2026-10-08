@@ -393,6 +393,9 @@ func (s *Server) suspendAgent(ctx context.Context, agent *store.Agent) error {
 	stopRunID := agent.RunID
 	if dispatcher != nil && agent.RuntimeBrokerID != "" {
 		s.syncWorkspaceOnStop(ctx, agent)
+		// As for stop: warn about, and record, work in an ephemeral
+		// workspace that the suspend discards (ptone/scion#3819).
+		s.checkEphemeralWorkspaceBeforeStop(ctx, dispatcher, agent, true)
 		if err := dispatcher.DispatchAgentStop(ctx, agent); err != nil {
 			s.logStopRunMismatch(agent, "suspend", err)
 			return err
@@ -664,6 +667,9 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			// Before stopping, sync workspace back for hub-managed projects on remote brokers.
 			// This is best-effort: failures are logged but don't block the stop.
 			s.syncWorkspaceOnStop(ctx, agent)
+			// Warn (never block) when an ephemeral workspace holds work
+			// the stop is about to discard (ptone/scion#3819).
+			s.checkEphemeralWorkspaceBeforeStop(ctx, dispatcher, agent, true)
 			dispatchErr = dispatcher.DispatchAgentStop(ctx, agent)
 			s.logStopRunMismatch(agent, "stop", dispatchErr)
 		}
@@ -709,7 +715,7 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		}
 		respAgent := *agent
 		respAgent.AppliedConfig = redactAppliedConfigEnvForResponse(agent.AppliedConfig, canViewAgentEnv(ctx, s, agent))
-		writeJSON(w, http.StatusOK, respAgent)
+		writeJSON(w, http.StatusOK, agentLifecycleResponse{Agent: &respAgent, Warnings: dispatchWarns.Warnings()})
 		return
 	case api.AgentActionRestart:
 		newPhase = string(state.PhaseRunning)
@@ -783,6 +789,11 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			// container with success (runtimebroker stopAgent), so the
 			// start leg only runs once the old instance is known to be
 			// down (ptone/scion#2710).
+			//
+			// The stop leg records the ephemeral workspace check without
+			// warning; the start leg reports the result once
+			// (ptone/scion#3819).
+			s.checkEphemeralWorkspaceBeforeStop(ctx, dispatcher, agent, false)
 			stopErr := syncDispatch(ctx, func(dctx context.Context) error {
 				return dispatcher.DispatchAgentStop(dctx, agent)
 			})

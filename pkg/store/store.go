@@ -458,6 +458,13 @@ type AgentStore interface {
 	// soft-deleted (a soft-deleted row is never written).
 	SetAgentWorkspacePlacement(ctx context.Context, agentID, placement string) error
 
+	// SetAgentAnnotation sets one annotation on the agent, or removes it
+	// when value is empty, leaving every other annotation as it is. Like
+	// SetAgentWorkspacePlacement it is a narrow write that neither checks
+	// nor bumps state_version. Returns ErrNotFound if the agent doesn't
+	// exist or is soft-deleted.
+	SetAgentAnnotation(ctx context.Context, agentID, key, value string) error
+
 	// UpdateAgentExposedPorts updates only exposed port registrations.
 	UpdateAgentExposedPorts(ctx context.Context, id string, ports []ExposedPort) error
 
