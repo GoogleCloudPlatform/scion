@@ -15,12 +15,15 @@
 package commands
 
 import (
+	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/services"
 )
 
 // TestRunInit_PinsSessionMetricsBackstopCallSites pins where RunInit calls
@@ -28,8 +31,8 @@ import (
 //   - the tombstone clear runs once, with agentHome, before the harness
 //     starts (the child has not created its marker yet);
 //   - the shutdown backstop runs once, with agentHome, after the child has
-//     exited, with the classified exit outcome, and before the lifecycle
-//     session-end hooks.
+//     exited, with the classified exit outcome, and before the stopping
+//     report, the sidecar shutdown and the lifecycle session-end hooks.
 func TestRunInit_PinsSessionMetricsBackstopCallSites(t *testing.T) {
 	agentHome := t.TempDir()
 	setupRunInitAsRootlessScion(t, agentHome)
@@ -58,6 +61,23 @@ func TestRunInit_PinsSessionMetricsBackstopCallSites(t *testing.T) {
 	origExitCodePath := harnessExitCodePath
 	harnessExitCodePath = filepath.Join(t.TempDir(), "no-harness-exit-code")
 	t.Cleanup(func() { harnessExitCodePath = origExitCodePath })
+
+	// One valid sidecar, so RunInit creates a services manager and its
+	// shutdown step runs; starting and stopping it are stubbed.
+	origReadYAML := runReadServicesYAML
+	runReadServicesYAML = func(string, bool) ([]byte, error) {
+		return []byte("- name: order-probe\n  command: [\"true\"]\n"), nil
+	}
+	t.Cleanup(func() { runReadServicesYAML = origReadYAML })
+	origServicesShutdown := runServicesShutdown
+	runServicesShutdown = func(context.Context, *services.Manager) error {
+		order = append(order, "sidecar shutdown")
+		return nil
+	}
+	t.Cleanup(func() { runServicesShutdown = origServicesShutdown })
+	origStopping := runReportStoppingToHub
+	runReportStoppingToHub = func() { order = append(order, "stopping report") }
+	t.Cleanup(func() { runReportStoppingToHub = origStopping })
 
 	mark := filepath.Join(t.TempDir(), "child-ran")
 	markExists := func() bool { _, err := os.Stat(mark); return err == nil }
@@ -107,7 +127,10 @@ func TestRunInit_PinsSessionMetricsBackstopCallSites(t *testing.T) {
 	if backstopOutcome != want {
 		t.Errorf("backstop outcome = %+v, want %+v", backstopOutcome, want)
 	}
-	if got := len(order); got != 3 || order[0] != "clear" || order[1] != "backstop" || order[2] != "session-end hooks" {
-		t.Errorf("call order = %q, want [clear backstop session-end hooks]", order)
+	// The backstop must come before the slow shutdown steps, which can use
+	// up the runtime's stop window.
+	wantOrder := []string{"clear", "backstop", "stopping report", "sidecar shutdown", "session-end hooks"}
+	if !reflect.DeepEqual(order, wantOrder) {
+		t.Errorf("call order = %q, want %q", order, wantOrder)
 	}
 }

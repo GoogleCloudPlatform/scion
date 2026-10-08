@@ -1398,13 +1398,7 @@ waitLoop:
 	}
 
 	// Report shutting down to Hub if in hosted mode
-	if hubClient := hub.NewClient(); hubClient != nil && hubClient.IsConfigured() {
-		hubCtx, hubCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		if err := hubClient.ReportState(hubCtx, state.PhaseStopping, "", "Agent shutting down"); err != nil {
-			log.Error("Failed to report shutdown status to Hub: %v", err)
-		}
-		hubCancel()
-	}
+	runReportStoppingToHub()
 
 	// Stop metadata server
 	if metadataServer != nil {
@@ -1416,7 +1410,7 @@ waitLoop:
 	if svcManager != nil {
 		log.Info("Stopping sidecar services...")
 		svcShutdownCtx, svcShutdownCancel := context.WithTimeout(context.Background(), gracePeriod)
-		if err := svcManager.Shutdown(svcShutdownCtx); err != nil {
+		if err := runServicesShutdown(svcShutdownCtx, svcManager); err != nil {
 			log.Error("Failed to stop services: %v", err)
 		}
 		svcShutdownCancel()
@@ -1592,6 +1586,26 @@ func registerLifecycleTelemetryHandler(manager *hooks.LifecycleManager, provider
 	}
 	return handler
 }
+
+// reportStoppingToHub reports the stopping phase to the Hub, if one is
+// configured, with a 5s bound.
+func reportStoppingToHub() {
+	if hubClient := hub.NewClient(); hubClient != nil && hubClient.IsConfigured() {
+		hubCtx, hubCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := hubClient.ReportState(hubCtx, state.PhaseStopping, "", "Agent shutting down"); err != nil {
+			log.Error("Failed to report shutdown status to Hub: %v", err)
+		}
+		hubCancel()
+	}
+}
+
+// RunInit's shutdown sequence calls the stopping report and the sidecar
+// shutdown through these seams so a test can pin the order of the shutdown
+// steps; production never reassigns them.
+var (
+	runReportStoppingToHub = reportStoppingToHub
+	runServicesShutdown    = func(ctx context.Context, m *services.Manager) error { return m.Shutdown(ctx) }
+)
 
 // harnessExitCodePath is the harness exit-code file readHarnessExitCode
 // reads. It is a variable only so a RunInit test can point it at a temp
