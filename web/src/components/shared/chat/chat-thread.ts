@@ -43,7 +43,14 @@ import { guard } from 'lit/directives/guard.js';
 import { repeat } from 'lit/directives/repeat.js';
 import { apiFetch, extractApiError } from '../../../client/api.js';
 import type { Agent, Message } from '../../../shared/types.js';
-import type { ChatSendDetail } from './chat-composer.js';
+import type { ChatScheduleDetail, ChatSendDetail } from './chat-composer.js';
+import {
+  conversationSupportsScheduledSend,
+  createScheduledMessage,
+  scheduledSendEnabled,
+} from '../../../client/chat-scheduled.js';
+import type { ScionChatScheduledList } from './chat-scheduled-list.js';
+import './chat-scheduled-list.js';
 import { navigateTo, stateManager } from '../../../client/main.js';
 import { agentIndexOf, agentStore } from '../../../client/agent-store.js';
 import { openTerminal, agentGraphHref } from '../../../client/open-terminal.js';
@@ -2592,6 +2599,49 @@ export class ScionChatThread extends LitElement {
 
     await this.sendV2(e.detail, false);
   }
+
+  /**
+   * Whether scheduled send is offered in this conversation: the experiment
+   * is on and the conversation is a topic (not a DM).
+   */
+  private get scheduleSendAvailable(): boolean {
+    return (
+      !this.isDM &&
+      conversationSupportsScheduledSend(this.conversationKey) &&
+      scheduledSendEnabled()
+    );
+  }
+
+  /**
+   * Schedule the composer's message (chat-schedule). Only the sender sees
+   * the pending message, in the scheduled list at the bottom of the thread.
+   * On failure the composer gets its draft (and reply) back.
+   */
+  private readonly handleChatScheduleV2 = async (
+    e: CustomEvent<ChatScheduleDetail>
+  ): Promise<void> => {
+    const { text, fireAt, replyToId, onSuccess, onError } = e.detail;
+    const key = this.conversationKey;
+    const savedReplyTo = this.composerReplyTo;
+    this.composerReplyTo = null;
+    try {
+      const scheduled = await createScheduledMessage(key, {
+        content: text,
+        fireAt,
+        idempotencyKey: crypto.randomUUID(),
+        ...(replyToId ? { replyToId } : {}),
+      });
+      this.renderRoot
+        .querySelector<ScionChatScheduledList>('scion-chat-scheduled-list')
+        ?.add(scheduled);
+      onSuccess();
+    } catch (err) {
+      if (key === this.conversationKey) this.composerReplyTo = savedReplyTo;
+      const msg = err instanceof Error ? err.message : 'Failed to schedule message';
+      onError?.(msg);
+      showToast(msg, 'danger');
+    }
+  };
 
   /**
    * POST one v2 send. With `wake` false the request carries `offer_wake`, so
@@ -5164,7 +5214,12 @@ export class ScionChatThread extends LitElement {
   private renderV2() {
     return html`
       <div class="thread-container">
-        ${this.renderInteragentToggle()} ${this.renderContentAndTyping()} ${this.renderSendError()}
+        ${this.renderInteragentToggle()} ${this.renderContentAndTyping()}
+        <scion-chat-scheduled-list
+          .conversationKey=${this.conversationKey}
+          ?enabled=${this.scheduleSendAvailable}
+        ></scion-chat-scheduled-list>
+        ${this.renderSendError()}
         <scion-chat-composer
           .agents=${this.agents}
           .members=${this.members}
@@ -5175,11 +5230,13 @@ export class ScionChatThread extends LitElement {
           .conversationKey=${this.conversationKey}
           .replyTo=${this.composerReplyTo}
           .editMessage=${this.composerEditMessage}
+          ?scheduleSendEnabled=${this.scheduleSendAvailable}
           ?disabled=${this.wakingConversationKey !== '' &&
           this.wakingConversationKey === this.conversationKey}
           @chat-cancel-reply=${this.handleComposerCancelReply}
           @chat-cancel-edit=${this.handleComposerCancelEdit}
           @chat-send=${this.handleChatSendV2}
+          @chat-schedule=${this.handleChatScheduleV2}
           @chat-edit=${this.handleChatEditV2}
           @chat-typing=${() => this.sendTypingEvent()}
           @default-agent-change=${this.handleDefaultAgentChange}

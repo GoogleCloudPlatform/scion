@@ -26,7 +26,8 @@
  * - The composer knows nothing about the network
  * - Send on Enter (Shift+Enter for newline); on touch-primary devices Enter
  *   inserts a newline instead, since there is no Shift+Enter combo
- * - Right-click send button for "Send with interruption"
+ * - Right-click send button for "Send with interruption" and, when
+ *   `scheduleSendEnabled` is set, "Schedule send…" (`chat-schedule` event)
  */
 
 import { LitElement, html, css, nothing } from 'lit';
@@ -44,6 +45,8 @@ import { showToast } from '../../../utils/toast.js';
 import { LongPressController } from './long-press.js';
 import type { ActionSheetItem, ActionSheetSelectDetail } from './chat-action-sheet.js';
 import './chat-action-sheet.js';
+import type { ScheduleConfirmDetail } from './chat-schedule-dialog.js';
+import './chat-schedule-dialog.js';
 import { TOUCH_PRIMARY_QUERY } from '../../../utils/input-modality.js';
 import { chatDraftStorageKey } from '../../../client/chat-drafts.js';
 import { ARTIFACTS_FLAG, MAX_MESSAGE_ARTIFACTS } from '../../../client/artifacts.js';
@@ -116,6 +119,30 @@ export interface ChatSendDetail {
   replyToId?: string;
   /** Reply-to content for RE_msg_starting metadata. */
   replyToContent?: string;
+}
+
+/**
+ * Event detail for the chat-schedule custom event: send `text` at `fireAt`
+ * (a UTC ISO instant) instead of now.
+ */
+export interface ChatScheduleDetail {
+  text: string;
+  fireAt: string;
+  replyToId?: string;
+  onSuccess: () => void;
+  /** Restore composer state when scheduling fails. */
+  onError?: (errorMsg: string) => void;
+}
+
+/** Composer draft state saved before an optimistic clear. */
+interface ComposerSnapshot {
+  text: string;
+  runeCount: number;
+  acceptedMentions: Set<string>;
+  mentionRanges: MentionRange[];
+  pendingFiles: UploadedAttachment[];
+  pendingArtifacts: PendingArtifact[];
+  replyTo: { messageId: string; senderName: string; content: string } | null;
 }
 
 /** Event detail for the chat-edit custom event (Phase 3). */
@@ -227,6 +254,16 @@ export class ScionChatComposer extends LitElement {
 
   /** Whether the right-click send context menu is visible. */
   @state() private showSendContextMenu = false;
+
+  /**
+   * Whether the send menu offers "Schedule send…". The parent sets it when
+   * the scheduled-send experiment is on and the conversation supports it.
+   */
+  @property({ type: Boolean })
+  scheduleSendEnabled = false;
+
+  /** Whether the Schedule send dialog is open. */
+  @state() private showScheduleDialog = false;
 
   /** Whether the send menu is open as an action sheet (a long-press on Send). */
   @state() private showSendSheet = false;
@@ -552,6 +589,15 @@ export class ScionChatComposer extends LitElement {
 
     .send-context-item:hover {
       background: var(--scion-bg-subtle, #f1f5f9);
+    }
+
+    .send-context-item.disabled {
+      cursor: default;
+      opacity: 0.5;
+    }
+
+    .send-context-item.disabled:hover {
+      background: none;
     }
 
     .composer-context {
@@ -1207,8 +1253,16 @@ export class ScionChatComposer extends LitElement {
                         <sl-icon name="lightning-charge"></sl-icon>
                         Send with interruption
                       </div>
+                      ${this.scheduleSendEnabled ? this.renderScheduleMenuItem() : nothing}
                     </div>
                   `
+                : nothing}
+              ${this.scheduleSendEnabled
+                ? html`<scion-chat-schedule-dialog
+                    .open=${this.showScheduleDialog}
+                    @schedule-confirm=${this.handleScheduleConfirm}
+                    @schedule-cancel=${this.handleScheduleCancel}
+                  ></scion-chat-schedule-dialog>`
                 : nothing}
               <scion-action-sheet
                 heading="Send options"
@@ -2025,13 +2079,7 @@ export class ScionChatComposer extends LitElement {
     const artifactRefs = this.pendingArtifacts.map((a) => a.ref);
 
     // Save state for error recovery before clearing.
-    const savedText = this.text;
-    const savedRuneCount = this.runeCount;
-    const savedMentions = new Set(this.acceptedMentions);
-    const savedMentionRanges = [...this.mentionRanges];
-    const savedPendingFiles = [...this.pendingFiles];
-    const savedPendingArtifacts = [...this.pendingArtifacts];
-    const savedReplyTo = this.replyTo;
+    const saved = this.snapshotComposer();
 
     // Phase-3: Build detail with optional replyToId.
     const detail: ChatSendDetail = {
@@ -2046,18 +2094,7 @@ export class ScionChatComposer extends LitElement {
       },
       onError: () => {
         // Restore composer state so the user can retry.
-        this.text = savedText;
-        this.runeCount = savedRuneCount;
-        this.acceptedMentions = savedMentions;
-        this.mentionRanges = savedMentionRanges;
-        this.pendingFiles = savedPendingFiles;
-        this.pendingArtifacts = savedPendingArtifacts;
-        if (savedReplyTo) {
-          this.replyTo = savedReplyTo;
-        }
-        // A failed send must not pop the keyboard back up on touch; the
-        // user taps to retry or edit instead.
-        this.settleFocusAfterSend();
+        this.restoreComposer(saved);
       },
     };
     if (this.replyTo) {
@@ -2088,6 +2125,38 @@ export class ScionChatComposer extends LitElement {
         composed: true,
       })
     );
+  }
+
+  /**
+   * The draft state a send or schedule clears optimistically, so a failure
+   * can put it back (restoreComposer).
+   */
+  private snapshotComposer(): ComposerSnapshot {
+    return {
+      text: this.text,
+      runeCount: this.runeCount,
+      acceptedMentions: new Set(this.acceptedMentions),
+      mentionRanges: [...this.mentionRanges],
+      pendingFiles: [...this.pendingFiles],
+      pendingArtifacts: [...this.pendingArtifacts],
+      replyTo: this.replyTo,
+    };
+  }
+
+  /** Restore a snapshot after a failed send or schedule. */
+  private restoreComposer(saved: ComposerSnapshot): void {
+    this.text = saved.text;
+    this.runeCount = saved.runeCount;
+    this.acceptedMentions = saved.acceptedMentions;
+    this.mentionRanges = saved.mentionRanges;
+    this.pendingFiles = saved.pendingFiles;
+    this.pendingArtifacts = saved.pendingArtifacts;
+    if (saved.replyTo) {
+      this.replyTo = saved.replyTo;
+    }
+    // A failed send must not pop the keyboard back up on touch; the user
+    // taps to retry or edit instead.
+    this.settleFocusAfterSend();
   }
 
   /**
@@ -2259,6 +2328,93 @@ export class ScionChatComposer extends LitElement {
   /** Close the send context menu. */
   private closeSendContextMenu(): void {
     this.showSendContextMenu = false;
+  }
+
+  /**
+   * Why "Schedule send…" is unavailable right now, or '' when it is
+   * available: there must be text to schedule, not an edit in progress,
+   * and no staged attachments or artifact references (they cannot be
+   * scheduled).
+   */
+  private scheduleBlockedReason(): string {
+    if (this.editMessage) return 'Finish or cancel the edit first';
+    if (this.pendingFiles.length > 0) return 'Attachments cannot be scheduled';
+    if (this.pendingArtifacts.length > 0) return 'Artifact references cannot be scheduled';
+    if (!this.text.trim()) return 'Type a message to schedule';
+    return '';
+  }
+
+  /** The "Schedule send…" menu item, disabled with a reason when unavailable. */
+  private renderScheduleMenuItem(): TemplateResult {
+    const reason = this.scheduleBlockedReason();
+    const blocked = reason !== '';
+    return html`
+      <div
+        class="send-context-item schedule-send-item ${blocked ? 'disabled' : ''}"
+        aria-disabled=${blocked ? 'true' : 'false'}
+        title=${reason}
+        @click=${this.handleScheduleMenuItem}
+      >
+        <sl-icon name="clock"></sl-icon>
+        Schedule send…
+      </div>
+    `;
+  }
+
+  private readonly handleScheduleMenuItem = (): void => {
+    if (this.scheduleBlockedReason()) return;
+    this.showSendContextMenu = false;
+    this.showScheduleDialog = true;
+  };
+
+  private readonly handleScheduleCancel = (): void => {
+    this.showScheduleDialog = false;
+  };
+
+  private readonly handleScheduleConfirm = (e: CustomEvent<ScheduleConfirmDetail>): void => {
+    this.showScheduleDialog = false;
+    this.doSchedule(e.detail.fireAt);
+  };
+
+  /**
+   * Schedule the current text for `fireAt`: clears the composer like a send
+   * and dispatches `chat-schedule`; the parent restores it via onError.
+   */
+  private doSchedule(fireAt: string): void {
+    if (this.editMessage || this.pendingFiles.length > 0 || this.pendingArtifacts.length > 0)
+      return;
+    const trimmed = this.text.trim();
+    if (!trimmed) return;
+
+    const saved = this.snapshotComposer();
+
+    const detail: ChatScheduleDetail = {
+      text: trimmed,
+      fireAt,
+      onSuccess: () => {
+        // Input already cleared — nothing to do.
+      },
+      onError: () => {
+        this.restoreComposer(saved);
+      },
+    };
+    if (this.replyTo) {
+      detail.replyToId = this.replyTo.messageId;
+    }
+
+    this.text = '';
+    this.runeCount = 0;
+    this.resetMentionTracking();
+    this.clearDraft();
+    this.settleFocusAfterSend();
+
+    this.dispatchEvent(
+      new CustomEvent<ChatScheduleDetail>('chat-schedule', {
+        detail,
+        bubbles: true,
+        composed: true,
+      })
+    );
   }
 
   /**

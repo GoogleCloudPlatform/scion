@@ -131,7 +131,7 @@ func TestPortForwardingConduitGate(t *testing.T) {
 				envProjectID:              "project-1",
 				conduit.EnvLaunchID:       "launch-1",
 			}
-			p := newPortForwarding(client, tt.disableConduit, func(k string) string { return env[k] })
+			p := newPortForwarding(client, tt.disableConduit, conduit.PTYUser{}, func(k string) string { return env[k] })
 			ctx, cancel := context.WithCancel(context.Background())
 			done := make(chan struct{})
 			go func() { p.run(ctx); close(done) }()
@@ -152,6 +152,27 @@ func TestPortForwardingConduitGate(t *testing.T) {
 			}
 			if !tt.wantTunnel && h.tunnelHits.Load() != 0 {
 				t.Fatalf("legacy tunnel dialed %d times while conduit was up", h.tunnelHits.Load())
+			}
+		})
+	}
+}
+
+// TestConduitPTYUser: PTY tmux clients run as the harness identity.
+func TestConduitPTYUser(t *testing.T) {
+	tests := []struct {
+		name               string
+		uid, gid           int
+		rootless, required bool
+		want               conduit.PTYUser
+	}{
+		{"privilege drop", 1000, 1000, false, true, conduit.PTYUser{UID: 1000, GID: 1000, Username: "scion", RequirePrivilegeDrop: true}},
+		{"rootless", 0, 0, true, false, conduit.PTYUser{Username: "scion"}},
+		{"plain root", 0, 0, false, false, conduit.PTYUser{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := conduitPTYUser(tt.uid, tt.gid, tt.rootless, tt.required); got != tt.want {
+				t.Fatalf("conduitPTYUser = %+v, want %+v", got, tt.want)
 			}
 		})
 	}

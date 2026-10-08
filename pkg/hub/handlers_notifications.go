@@ -38,6 +38,9 @@ type notificationSubscriber struct {
 	Type      string // store.SubscriberTypeUser or store.SubscriberTypeAgent
 	ID        string // user ID, or agent slug
 	ProjectID string // agent callers only; empty for users
+	// Token is the caller's user access token, or nil. A token acts only
+	// on rows inside its boundary, with inbox:read or inbox:write.
+	Token *ScopedUserIdentity
 }
 
 // isAgent reports whether the caller is an agent.
@@ -194,6 +197,10 @@ func (s *Server) agentTargetInProject(w http.ResponseWriter, r *http.Request, ca
 // resolveNotificationCaller resolves the caller and writes the failure response
 // itself. Returns nil when the request should not proceed.
 func (s *Server) resolveNotificationCaller(w http.ResponseWriter, r *http.Request) *notificationSubscriber {
+	cls, token, ok := requireInboxCredential(w, r)
+	if !ok {
+		return nil
+	}
 	caller, err := s.notificationCaller(r.Context())
 	if err != nil {
 		slog.Error("Failed to resolve notification caller identity", "error", err)
@@ -204,7 +211,98 @@ func (s *Server) resolveNotificationCaller(w http.ResponseWriter, r *http.Reques
 		Forbidden(w)
 		return nil
 	}
+	if cls == inboxCredentialToken {
+		if caller.isAgent() {
+			Forbidden(w)
+			return nil
+		}
+		caller.Token = token
+	}
 	return caller
+}
+
+// notificationPermission returns the self permission a request needs: a
+// GET reads (inbox:read), every other method writes (inbox:write).
+func notificationPermission(r *http.Request) string {
+	if r.Method == http.MethodGet {
+		return permInboxRead
+	}
+	return permInboxWrite
+}
+
+// tokenRowCheck returns the self-scope row check for a token caller and
+// permissionID, or nil for any other caller.
+func (s *Server) tokenRowCheck(ctx context.Context, caller *notificationSubscriber, permissionID string) *selfScopeCheck {
+	if caller.Token == nil {
+		return nil
+	}
+	return s.newSelfScopeCheck(ctx, caller.Token, permissionID)
+}
+
+// scopeNotificationsForToken keeps the notifications a token caller may
+// see; other callers get every row.
+func scopeNotificationsForToken(check *selfScopeCheck, notifs []store.Notification) []store.Notification {
+	if check == nil {
+		return notifs
+	}
+	return filterSelfScopedRows(check, notifs, func(n store.Notification) string { return n.ProjectID })
+}
+
+// scopeSubscriptionsForToken keeps the subscriptions a token caller may
+// see; other callers get every row.
+func scopeSubscriptionsForToken(check *selfScopeCheck, subs []store.NotificationSubscription) []store.NotificationSubscription {
+	if check == nil {
+		return subs
+	}
+	return filterSelfScopedRows(check, subs, func(n store.NotificationSubscription) string { return n.ProjectID })
+}
+
+// userMaySubscribe applies the target checks of a subscription request by
+// a user caller: read access to the project the subscription is filed
+// under and, for an agent subscription, read access to the watched agent.
+// A token also needs inbox:write for that project. A project or agent that
+// does not exist draws the same 403 as one the caller may not read. Agent
+// callers are checked by agentMaySubscribe instead.
+//
+// Returns false when a response has already been written.
+func (s *Server) userMaySubscribe(w http.ResponseWriter, r *http.Request, caller *notificationSubscriber, req *createSubscriptionRequest) bool {
+	if caller.isAgent() {
+		return true
+	}
+	ctx := r.Context()
+	identity := GetIdentityFromContext(ctx)
+	if caller.Token != nil && !s.authorizeSelfScoped(w, r, permInboxWrite, req.ProjectID) {
+		return false
+	}
+	project, err := s.store.GetProject(ctx, req.ProjectID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			Forbidden(w)
+			return false
+		}
+		writeErrorFromErr(w, err, "")
+		return false
+	}
+	if !s.authorize(w, r, projectResource(project), ActionRead) {
+		return false
+	}
+	if req.Scope != store.SubscriptionScopeAgent || req.AgentID == "" {
+		return true
+	}
+	agent, err := s.store.GetAgent(ctx, req.AgentID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			Forbidden(w)
+			return false
+		}
+		writeErrorFromErr(w, err, "")
+		return false
+	}
+	if !s.authzService.CheckAccess(ctx, identity, agentResource(agent), ActionRead).Allowed {
+		writeForbiddenStructured(w, "", "agent", ActionRead)
+		return false
+	}
+	return true
 }
 
 // checkAgentNotifyScope verifies that agent callers may modify notification
@@ -244,6 +342,10 @@ func (s *Server) handleNotifications(w http.ResponseWriter, r *http.Request) {
 	if !checkAgentReadScope(w, r) {
 		return
 	}
+	if caller.Token != nil && !s.authorizeInboxToken(w, r, caller.Token, permInboxRead) {
+		return
+	}
+	rows := s.tokenRowCheck(r.Context(), caller, permInboxRead)
 
 	acknowledged := r.URL.Query().Get("acknowledged")
 	onlyUnacknowledged := acknowledged != "true"
@@ -268,7 +370,7 @@ func (s *Server) handleNotifications(w http.ResponseWriter, r *http.Request) {
 			writeErrorFromErr(w, err, "")
 			return
 		}
-		writeJSON(w, http.StatusOK, caller.scopeNotifications(notifs))
+		writeJSON(w, http.StatusOK, scopeNotificationsForToken(rows, caller.scopeNotifications(notifs)))
 		return
 	}
 
@@ -279,16 +381,52 @@ func (s *Server) handleNotifications(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	agentNotifs, err := s.store.GetNotifications(r.Context(), "agent", agentID, false)
+	// Rows addressed to the agent subscriber are another subscriber's
+	// rows: they are returned only to a caller with agent:read on that
+	// agent, and only for the agent's project (agent subscriber IDs are
+	// slugs, which other projects reuse).
+	agentNotifs, err := s.readableAgentNotifications(r.Context(), agentID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}
 
 	writeJSON(w, http.StatusOK, agentNotificationsResponse{
-		UserNotifications:  userNotifs,
-		AgentNotifications: agentNotifs,
+		UserNotifications:  scopeNotificationsForToken(rows, userNotifs),
+		AgentNotifications: scopeNotificationsForToken(rows, agentNotifs),
 	})
+}
+
+// readableAgentNotifications returns the notifications addressed to the
+// agent named by agentID that the caller may read: none unless agentID
+// names an agent the caller passes agent:read on. Agent subscriber rows are
+// keyed by the agent's slug, which other projects reuse, so the rows are
+// looked up by the agent's slug and only rows of the agent's project are
+// kept. A store error other than not-found is returned.
+func (s *Server) readableAgentNotifications(ctx context.Context, agentID string) ([]store.Notification, error) {
+	none := []store.Notification{}
+	agent, err := s.store.GetAgent(ctx, agentID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return none, nil
+		}
+		return nil, err
+	}
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil || !s.authzService.CheckAccess(ctx, identity, agentResource(agent), ActionRead).Allowed {
+		return none, nil
+	}
+	notifs, err := s.store.GetNotifications(ctx, store.SubscriberTypeAgent, agent.Slug, false)
+	if err != nil {
+		return nil, err
+	}
+	scoped := make([]store.Notification, 0, len(notifs))
+	for _, n := range notifs {
+		if n.ProjectID == agent.ProjectID {
+			scoped = append(scoped, n)
+		}
+	}
+	return scoped, nil
 }
 
 // agentNotificationsResponse is returned when ?agentId= is provided.
@@ -321,17 +459,39 @@ func (s *Server) handleNotificationRoutes(w http.ResponseWriter, r *http.Request
 	} else if !checkAgentNotifyScope(w, r) {
 		return
 	}
+	// A token needs the inbox selector for the request's direction; rows
+	// are then checked against its boundary one by one.
+	if caller.Token != nil && !s.authorizeInboxToken(w, r, caller.Token, notificationPermission(r)) {
+		return
+	}
 
 	id, action := extractAction(r, "/api/v1/notifications")
 
 	// POST /api/v1/notifications/ack-all
-	if id == "ack-all" && r.Method == http.MethodPost {
+	if id == "ack-all" && action == "" && r.Method == http.MethodPost {
 		// AcknowledgeAllNotifications keys on the subscriber ID alone, which
 		// for an agent would span every project that reuses its slug. There is
 		// no project-scoped variant, so agents ack individually instead.
 		if caller.isAgent() {
 			writeError(w, http.StatusNotImplemented, "not_implemented",
 				"agent tokens must acknowledge notifications individually", nil)
+			return
+		}
+		if caller.Token != nil && tokenBoundaryProject(caller.Token) != "" {
+			// A project token acknowledges only the notifications it may
+			// see: those of its boundary project.
+			notifs, err := s.store.GetNotifications(r.Context(), caller.Type, caller.ID, true)
+			if err != nil {
+				writeErrorFromErr(w, err, "")
+				return
+			}
+			for _, n := range scopeNotificationsForToken(s.tokenRowCheck(r.Context(), caller, permInboxWrite), notifs) {
+				if err := s.store.AcknowledgeNotification(r.Context(), n.ID); err != nil {
+					writeErrorFromErr(w, err, "Notification")
+					return
+				}
+			}
+			writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 			return
 		}
 		if err := s.store.AcknowledgeAllNotifications(r.Context(), caller.Type, caller.ID); err != nil {
@@ -364,6 +524,9 @@ func (s *Server) handleNotificationRoutes(w http.ResponseWriter, r *http.Request
 		}
 		if !caller.ownsNotification(notif) {
 			Forbidden(w)
+			return
+		}
+		if caller.Token != nil && !s.authorizeSelfScoped(w, r, permInboxWrite, notif.ProjectID) {
 			return
 		}
 		if err := s.store.AcknowledgeNotification(r.Context(), id); err != nil {
@@ -435,6 +598,11 @@ func (s *Server) handleSubscriptionRoutes(w http.ResponseWriter, r *http.Request
 		if !s.agentMaySubscribe(w, r, caller, &req, nil) {
 			return
 		}
+		// User callers need read access to the project and the watched
+		// agent.
+		if !s.userMaySubscribe(w, r, caller, &req) {
+			return
+		}
 
 		// Enforce subscription limit if configured
 		if s.config.MaxSubscriptionsPerUser > 0 {
@@ -491,7 +659,7 @@ func (s *Server) handleSubscriptionRoutes(w http.ResponseWriter, r *http.Request
 			writeErrorFromErr(w, err, "")
 			return
 		}
-		subs = caller.scopeSubscriptions(subs)
+		subs = scopeSubscriptionsForToken(s.tokenRowCheck(ctx, caller, permInboxRead), caller.scopeSubscriptions(subs))
 
 		// Apply optional filters
 		projectID := r.URL.Query().Get("projectId")
@@ -536,6 +704,9 @@ func (s *Server) handleSubscriptionRoutes(w http.ResponseWriter, r *http.Request
 			Forbidden(w)
 			return
 		}
+		if caller.Token != nil && !s.authorizeSelfScoped(w, r, permInboxWrite, sub.ProjectID) {
+			return
+		}
 
 		var req updateSubscriptionRequest
 		if err := readJSON(r, &req); err != nil {
@@ -568,6 +739,9 @@ func (s *Server) handleSubscriptionRoutes(w http.ResponseWriter, r *http.Request
 		}
 		if !caller.ownsSubscription(sub) {
 			Forbidden(w)
+			return
+		}
+		if caller.Token != nil && !s.authorizeSelfScoped(w, r, permInboxWrite, sub.ProjectID) {
 			return
 		}
 
@@ -617,23 +791,18 @@ func (s *Server) handleSubscriptionRoutes(w http.ResponseWriter, r *http.Request
 				return
 			}
 		}
+		// User callers need read access to the project and the watched
+		// agent of every entry that would be created; a denial fails the
+		// whole request.
+		for i := range reqs {
+			if subscriptionRequestWellFormed(&reqs[i]) && !s.userMaySubscribe(w, r, caller, &reqs[i]) {
+				return
+			}
+		}
 
 		var results []store.NotificationSubscription
 		for _, req := range reqs {
-			if req.Scope != store.SubscriptionScopeAgent && req.Scope != store.SubscriptionScopeProject {
-				continue
-			}
-			if req.ProjectID == "" || len(req.TriggerActivities) == 0 {
-				continue
-			}
-			if req.Scope == store.SubscriptionScopeAgent && req.AgentID == "" {
-				continue
-			}
-			// A project-scoped entry carrying an agentId is malformed the same
-			// way single create treats it; skipping keeps the stored row
-			// unambiguous rather than filing a project subscription that also
-			// names an agent.
-			if req.Scope == store.SubscriptionScopeProject && req.AgentID != "" {
+			if !subscriptionRequestWellFormed(&req) {
 				continue
 			}
 			sub := &store.NotificationSubscription{
@@ -686,6 +855,7 @@ func (s *Server) handleSubscriptionRoutes(w http.ResponseWriter, r *http.Request
 			return
 		}
 
+		rows := s.tokenRowCheck(ctx, caller, permInboxWrite)
 		deleted := 0
 		for _, id := range req.IDs {
 			sub, err := s.store.GetNotificationSubscription(ctx, id)
@@ -693,6 +863,9 @@ func (s *Server) handleSubscriptionRoutes(w http.ResponseWriter, r *http.Request
 				continue
 			}
 			if !caller.ownsSubscription(sub) {
+				continue
+			}
+			if rows != nil && !rows.allows(sub.ProjectID) {
 				continue
 			}
 			if err := s.store.DeleteNotificationSubscription(ctx, id); err != nil {
@@ -715,6 +888,28 @@ func (s *Server) handleSubscriptionRoutes(w http.ResponseWriter, r *http.Request
 			MethodNotAllowed(w, http.MethodPatch, http.MethodDelete)
 		}
 	}
+}
+
+// subscriptionRequestWellFormed reports whether a bulk create entry is one
+// bulk create files; malformed entries are skipped.
+func subscriptionRequestWellFormed(req *createSubscriptionRequest) bool {
+	if req.Scope != store.SubscriptionScopeAgent && req.Scope != store.SubscriptionScopeProject {
+		return false
+	}
+	if req.ProjectID == "" || len(req.TriggerActivities) == 0 {
+		return false
+	}
+	if req.Scope == store.SubscriptionScopeAgent && req.AgentID == "" {
+		return false
+	}
+	// A project-scoped entry carrying an agentId is malformed the same
+	// way single create treats it; skipping keeps the stored row
+	// unambiguous rather than filing a project subscription that also
+	// names an agent.
+	if req.Scope == store.SubscriptionScopeProject && req.AgentID != "" {
+		return false
+	}
+	return true
 }
 
 // createTemplateRequest is the request body for POST /api/v1/notifications/templates.
@@ -764,6 +959,27 @@ func (s *Server) handleSubscriptionTemplateRoutes(w http.ResponseWriter, r *http
 			return
 		}
 
+		// A template filed under a project needs read access to it; a
+		// token also needs inbox:write for it (a template with no project
+		// needs a hub boundary).
+		if caller.Token != nil && !s.authorizeSelfScoped(w, r, permInboxWrite, req.ProjectID) {
+			return
+		}
+		if req.ProjectID != "" {
+			project, err := s.store.GetProject(ctx, req.ProjectID)
+			if err != nil {
+				if errors.Is(err, store.ErrNotFound) {
+					Forbidden(w)
+					return
+				}
+				writeErrorFromErr(w, err, "")
+				return
+			}
+			if !s.authorize(w, r, projectResource(project), ActionRead) {
+				return
+			}
+		}
+
 		tmpl := &store.SubscriptionTemplate{
 			ID:                api.NewUUID(),
 			Name:              req.Name,
@@ -794,7 +1010,12 @@ func (s *Server) handleSubscriptionTemplateRoutes(w http.ResponseWriter, r *http
 			writeErrorFromErr(w, err, "")
 			return
 		}
-		writeJSON(w, http.StatusOK, templates)
+		visible, err := s.readableSubscriptionTemplates(ctx, caller, templates)
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		writeJSON(w, http.StatusOK, visible)
 
 	// DELETE /api/v1/notifications/templates/{id} — Delete
 	case templateID != "" && r.Method == http.MethodDelete:
@@ -805,6 +1026,9 @@ func (s *Server) handleSubscriptionTemplateRoutes(w http.ResponseWriter, r *http
 		}
 		if tmpl.CreatedBy != caller.ID {
 			Forbidden(w)
+			return
+		}
+		if caller.Token != nil && !s.authorizeSelfScoped(w, r, permInboxWrite, tmpl.ProjectID) {
 			return
 		}
 		if err := s.store.DeleteSubscriptionTemplate(ctx, templateID); err != nil {
@@ -822,4 +1046,41 @@ func (s *Server) handleSubscriptionTemplateRoutes(w http.ResponseWriter, r *http
 			MethodNotAllowed(w, http.MethodDelete)
 		}
 	}
+}
+
+// readableSubscriptionTemplates keeps the templates the caller may see: a
+// template filed under a project only when the caller may read that
+// project, and for a token only templates inside its boundary
+// (inbox:read). A template with no project is visible to every user caller
+// and to hub tokens.
+func (s *Server) readableSubscriptionTemplates(ctx context.Context, caller *notificationSubscriber, templates []store.SubscriptionTemplate) ([]store.SubscriptionTemplate, error) {
+	identity := GetIdentityFromContext(ctx)
+	rows := s.tokenRowCheck(ctx, caller, permInboxRead)
+	readable := map[string]bool{}
+	out := make([]store.SubscriptionTemplate, 0, len(templates))
+	for _, tmpl := range templates {
+		if rows != nil && !rows.allows(tmpl.ProjectID) {
+			continue
+		}
+		if tmpl.ProjectID != "" {
+			ok, seen := readable[tmpl.ProjectID]
+			if !seen {
+				project, err := s.store.GetProject(ctx, tmpl.ProjectID)
+				switch {
+				case errors.Is(err, store.ErrNotFound):
+					ok = false
+				case err != nil:
+					return nil, err
+				default:
+					ok = identity != nil && s.authzService.CheckAccess(ctx, identity, projectResource(project), ActionRead).Allowed
+				}
+				readable[tmpl.ProjectID] = ok
+			}
+			if !ok {
+				continue
+			}
+		}
+		out = append(out, tmpl)
+	}
+	return out, nil
 }

@@ -69,8 +69,9 @@ func (p portForwarding) run(ctx context.Context) {
 }
 
 // newPortForwarding wires portForwarding to the hub client; getenv reads
-// the agent environment (os.Getenv outside tests).
-func newPortForwarding(c *hub.Client, disableConduit bool, getenv func(string) string) portForwarding {
+// the agent environment (os.Getenv outside tests). ptyUser is the agent
+// user that PTY streams' tmux clients run as.
+func newPortForwarding(c *hub.Client, disableConduit bool, ptyUser conduit.PTYUser, getenv func(string) string) portForwarding {
 	return portForwarding{
 		getenv:         getenv,
 		disableConduit: disableConduit,
@@ -83,6 +84,7 @@ func newPortForwarding(c *hub.Client, disableConduit bool, getenv func(string) s
 				Token:                 c.AuthToken,
 				ApplyTransportHeaders: c.ApplyTransportHeaders,
 				HTTPClient:            c.HTTPClient(),
+				PTYUser:               ptyUser,
 				RefreshCredential: func(ctx context.Context) error {
 					_, _, err := c.RefreshToken(ctx)
 					return err
@@ -94,4 +96,14 @@ func newPortForwarding(c *hub.Client, disableConduit bool, getenv func(string) s
 			scionportforward.NewManager(c).Run(ctx)
 		},
 	}
+}
+
+// conduitPTYUser is the identity PTY streams' tmux clients run as: the
+// harness's (see harnessSupervisorConfig), which owns the tmux server.
+func conduitPTYUser(targetUID, targetGID int, rootless, requirePrivilegeDrop bool) conduit.PTYUser {
+	u := conduit.PTYUser{UID: targetUID, GID: targetGID, RequirePrivilegeDrop: requirePrivilegeDrop}
+	if targetUID > 0 || rootless {
+		u.Username = "scion"
+	}
+	return u
 }
