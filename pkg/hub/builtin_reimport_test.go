@@ -48,9 +48,11 @@ import (
 // release note) must change with them.
 //
 // No network: the import runs the real global import path
-// (NormalizeTemplateSourceURL, then importResourceDirs, as
-// handleResourcesImport and importFromRemote do) with the remote fetch
-// replaced by a local copy of the embedded built-in.
+// (NormalizeTemplateSourceURL, discoverResourceDirs, then importResourceDirs,
+// as handleResourcesImport and importFromRemote do) with the remote fetch
+// replaced by a local copy of the embedded built-in. The harness-config
+// reimport route ('scion harness-config update <name> --url <url>') runs the
+// same importFromRemote path.
 
 const (
 	reimportCanonicalClaudeURL = "https://github.com/GoogleCloudPlatform/scion/harnesses/claude"
@@ -192,9 +194,15 @@ func reimportFromURL(t *testing.T, srv *Server, tc reimportCase) {
 	sourceURL := config.NormalizeTemplateSourceURL(tc.url)
 	require.Equal(t, tc.url, sourceURL, "the import handler must store the URL unchanged")
 	dir := copyEmbeddedBuiltin(t, tc.kind, tc.slug)
-	imported := srv.importResourceDirs(context.Background(),
-		[]resourceDir{{name: tc.slug, path: dir, sourceURL: sourceURL}}, nil,
-		"global", "", kind, nil)
+	// discoverResourceDirs decides the stored name and source URL for a
+	// fetched directory, as importFromRemote does after the fetch.
+	dirs, skipped, err := discoverResourceDirs(dir, sourceURL, kind)
+	require.NoError(t, err)
+	require.Empty(t, skipped)
+	require.Len(t, dirs, 1)
+	require.Equal(t, tc.slug, dirs[0].name)
+	require.Equal(t, tc.url, dirs[0].sourceURL)
+	imported := srv.importResourceDirs(context.Background(), dirs, skipped, "global", "", kind, nil)
 	require.Equal(t, []string{tc.slug}, imported)
 }
 
@@ -296,6 +304,41 @@ func TestReimportBuiltinFromURL_Hosted_DeleteAndCanonicalReimportRestoresUpdates
 	require.True(t, ok)
 	assert.Equal(t, row.id, after.id)
 	assert.NotEqual(t, "stale", after.contentHash, "bootstrap must update the canonical re-import")
+}
+
+// TestReimportBuiltinFromURL_Hosted_CanonicalReimportOverPinnedRowRestoresUpdates
+// covers the in-place way back: re-importing the canonical URL over an
+// existing user-managed (tag-pinned) row, with no delete, keeps the same row,
+// re-points its source URL so it is built-in-managed again, and bootstrap
+// then updates it. This is what the web import of the canonical URL and
+// 'scion harness-config update <name> --url <canonical URL>' do.
+func TestReimportBuiltinFromURL_Hosted_CanonicalReimportOverPinnedRowRestoresUpdates(t *testing.T) {
+	srv, s := testServer(t)
+	srv.SetStorage(newMockStorage("test-bucket"))
+	hostedBootstrap(t, srv)
+	deleteReimportRow(t, s, storage.ResourceKindHarnessConfig, "claude")
+
+	pinned := reimportCases[2]
+	require.False(t, pinned.builtinManaged)
+	reimportFromURL(t, srv, pinned)
+	pinnedRow, ok := getReimportRow(t, s, pinned.kind, pinned.slug)
+	require.True(t, ok)
+	require.False(t, IsBuiltinManaged(pinnedRow.sourceURL))
+
+	// Canonical re-import over the existing row, no delete.
+	reimportFromURL(t, srv, reimportCases[0])
+	row, ok := getReimportRow(t, s, pinned.kind, pinned.slug)
+	require.True(t, ok)
+	assert.Equal(t, pinnedRow.id, row.id, "the canonical re-import must update the existing row in place")
+	assert.Equal(t, reimportCanonicalClaudeURL, row.sourceURL)
+	assert.True(t, IsBuiltinManaged(row.sourceURL), "the canonical re-import must make the row built-in-managed again")
+
+	markReimportRowStale(t, s, pinned.kind, row.id)
+	hostedBootstrap(t, srv)
+	after, ok := getReimportRow(t, s, pinned.kind, pinned.slug)
+	require.True(t, ok)
+	assert.Equal(t, row.id, after.id)
+	assert.NotEqual(t, "stale", after.contentHash, "bootstrap must update the row after the canonical re-import")
 }
 
 // TestReimportBuiltinFromURL_Workstation locks in that a workstation hub
