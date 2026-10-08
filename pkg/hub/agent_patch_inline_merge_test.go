@@ -34,9 +34,12 @@ import (
 
 // createdInlineConfig is a --config-shaped InlineConfig carrying the fields
 // the configure page never renders, plus a thinking level and max turns.
+// The claude harness is named so that PATCH validation accepts max_turns
+// (the generic harness does not support it).
 func createdInlineConfig() *api.ScionConfig {
 	tl := 40
 	return &api.ScionConfig{
+		Harness:       "claude",
 		Volumes:       []api.VolumeMount{{Source: "/host/data", Target: "/data"}},
 		Skills:        []api.SkillReference{{URI: "https://example.com/skills/review"}},
 		MCPServers:    map[string]api.MCPServerConfig{"docs": {Transport: "stdio", Command: "docs-mcp"}},
