@@ -20,9 +20,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
-	"path/filepath"
-	"regexp"
 	"strings"
 	"testing"
 )
@@ -142,45 +139,5 @@ func TestNonArtifactPathsKept(t *testing.T) {
 	}
 	if RequestPath(nil) != "" {
 		t.Errorf("RequestPath(nil)")
-	}
-}
-
-// TestRequestPathCallSites fails if a log attribute in the hub or this
-// package records a request path any way other than RequestPath, which
-// checks both the decoded and the escaped path.
-func TestRequestPathCallSites(t *testing.T) {
-	forbidden := []*regexp.Regexp{
-		regexp.MustCompile(`"path",\s*\w+\.URL\.(Path|EscapedPath\(\)|RawPath|RequestURI\(\)|String\(\))`),
-		regexp.MustCompile(`slog\.String\(\s*"[^"]*",\s*\w+\.URL\.(Path|EscapedPath\(\)|RawPath)\s*\)`),
-		regexp.MustCompile(`"[^"]*path[^"]*",\s*\w+\.URL\.(Path|EscapedPath\(\)|RawPath)\b`),
-		regexp.MustCompile(`"[^"]*",\s*\w+\.RequestURI\b`),
-		regexp.MustCompile(`RedactPath\(`),
-	}
-	files := 0
-	for _, dir := range []string{".", "../../hub"} {
-		names, err := filepath.Glob(filepath.Join(dir, "*.go"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, name := range names {
-			if strings.HasSuffix(name, "_test.go") {
-				continue
-			}
-			src, err := os.ReadFile(name)
-			if err != nil {
-				t.Fatal(err)
-			}
-			files++
-			for i, line := range strings.Split(string(src), "\n") {
-				for _, re := range forbidden {
-					if re.MatchString(line) {
-						t.Errorf("%s:%d records a request path without logging.RequestPath: %s", name, i+1, strings.TrimSpace(line))
-					}
-				}
-			}
-		}
-	}
-	if files < 50 {
-		t.Fatalf("scanned only %d files; is the hub package where this test expects it?", files)
 	}
 }

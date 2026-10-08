@@ -27,6 +27,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 )
@@ -142,9 +143,13 @@ type agentRunScopeMetrics interface {
 // decision (header) and the log.
 type runScopeRequest struct {
 	// header is the AgentRunIDHeader value ("" when absent).
-	header     string
-	method     string
+	header string
+	method string
+	// path is the request path as logged (logging.RequestPath); classPath
+	// is the decoded path, used only to pick the route class and never
+	// logged.
 	path       string
+	classPath  string
 	remoteAddr string
 	// route is the matched route pattern. When empty it is resolved from
 	// raw, only for a request that is logged.
@@ -159,7 +164,8 @@ func runScopeRequestFrom(r *http.Request) runScopeRequest {
 	return runScopeRequest{
 		header:     r.Header.Get(AgentRunIDHeader),
 		method:     r.Method,
-		path:       r.URL.Path,
+		path:       logging.RequestPath(r),
+		classPath:  r.URL.Path,
 		remoteAddr: r.RemoteAddr,
 		raw:        r,
 	}
@@ -320,12 +326,12 @@ func (c *agentRunScopeChecker) outcome(ctx context.Context, claims *AgentTokenCl
 // record logs and counts an outcome. A token without a run is logged at
 // Info, any other refusable outcome at Warn, each at most once per agent,
 // token run and outcome within the dedup window; a summary of the counts
-// is logged once a minute. The log carries ids only, never the token or
-// its scopes.
+// is logged once a minute. The log carries ids and the request path as
+// logging.RequestPath gives it, never the token or its scopes.
 func (c *agentRunScopeChecker) record(ctx context.Context, claims *AgentTokenClaims, source, outcome, currentRunID string, req runScopeRequest) {
 	routeClass := runScopeRouteConduit
 	if source != runScopeSourceConduit {
-		routeClass = runScopeRouteClass(req.path)
+		routeClass = runScopeRouteClass(req.classPath)
 	}
 	if m := c.metrics.Load(); m != nil {
 		(*m).RecordAgentRunScope(source, outcome, c.mode.String(), routeClass)
