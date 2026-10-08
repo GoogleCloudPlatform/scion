@@ -275,3 +275,29 @@ const postgresLinkTokens = `
 CREATE UNIQUE INDEX IF NOT EXISTS idx_artifact_grant_link
     ON artifact_grant (subject_ref) WHERE subject_kind = 'link';
 `
+
+// migrationBlobGC adds the table the blob sweep keeps its state in: for
+// each blob digest, when a publish last touched it (writers record this
+// before they check whether the blob exists) and since when no live
+// artifact references it.
+const migrationBlobGC = "0006_blob_gc"
+
+const sqliteBlobGC = `
+CREATE TABLE IF NOT EXISTS artifact_blob (
+    sha256             TEXT PRIMARY KEY,
+    touched_at         TEXT,
+    unreferenced_since TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_artifact_blob_unreferenced
+    ON artifact_blob (unreferenced_since);
+`
+
+const postgresBlobGC = `
+CREATE TABLE IF NOT EXISTS artifact_blob (
+    sha256             TEXT PRIMARY KEY,
+    touched_at         TIMESTAMPTZ,
+    unreferenced_since TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_artifact_blob_unreferenced
+    ON artifact_blob (unreferenced_since);
+`

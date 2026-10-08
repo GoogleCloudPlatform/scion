@@ -14,7 +14,11 @@
 
 package storage
 
-import "testing"
+import (
+	"context"
+	"strings"
+	"testing"
+)
 
 func TestTemplateStoragePath(t *testing.T) {
 	tests := []struct {
@@ -330,5 +334,39 @@ func TestDirPrefix(t *testing.T) {
 		if got := DirPrefix(tc.in); got != tc.want {
 			t.Errorf("DirPrefix(%q) = %q, want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+// TestLocalListPages: MaxResults and StartOffset page through a prefix in
+// order, each object once.
+func TestLocalListPages(t *testing.T) {
+	s, err := NewLocal(Config{Provider: ProviderLocal, Bucket: "b", LocalPath: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	want := []string{"p/a/1", "p/a/2", "p/b/1", "p/c", "p/d/e/f"}
+	for _, name := range append([]string{"q/x"}, want...) {
+		if _, err := s.Upload(ctx, name, strings.NewReader(name), UploadOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var got []string
+	offset := ""
+	for range 10 {
+		res, err := s.List(ctx, ListOptions{Prefix: "p/", MaxResults: 2, StartOffset: offset})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, o := range res.Objects {
+			got = append(got, o.Name)
+		}
+		if res.NextOffset == "" {
+			break
+		}
+		offset = res.NextOffset
+	}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("pages = %v, want %v", got, want)
 	}
 }

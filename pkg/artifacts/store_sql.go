@@ -58,6 +58,7 @@ var migrations = []migration{
 	{name: migrationVersionUploads, sqlite: sqliteVersionUploads, postgres: postgresVersionUploads},
 	{name: migrationFinalizeClaims, sqlite: sqliteFinalizeClaims, postgres: postgresFinalizeClaims},
 	{name: migrationLinkTokens, sqlite: sqliteLinkTokens, postgres: postgresLinkTokens},
+	{name: migrationBlobGC, sqlite: sqliteBlobGC, postgres: postgresBlobGC},
 }
 
 const ledgerSQLite = `CREATE TABLE IF NOT EXISTS artifact_migrations (

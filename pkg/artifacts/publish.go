@@ -233,6 +233,11 @@ func (s *Service) writeMissingScope(w http.ResponseWriter, r *http.Request) bool
 // with that digest already exists.
 func (s *Service) putBlob(ctx context.Context, b backend, sp *spooled, mediaType string) error {
 	p := BlobPath(b.hubID, sp.digest)
+	// Touch first, so the blob sweep spares a blob this publish relies on
+	// (and a sweep deleting it finishes before the check below).
+	if err := b.store.TouchBlob(ctx, sp.digest, time.Now()); err != nil {
+		return err
+	}
 	exists, err := b.blobs.Exists(ctx, p)
 	if err != nil {
 		return fmt.Errorf("check blob: %w", err)

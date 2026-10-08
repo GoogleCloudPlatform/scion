@@ -66,7 +66,23 @@ const fileCSP = "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inl
 // version is not finalized yet (CurrentSeq 0) is readable only by its
 // owner, on every route and in the list, because both use this check.
 func (s *Service) canRead(ctx context.Context, b backend, a *Artifact) bool {
-	return canReadWith(ctx, s.host, a, func() ([]Grant, error) { return b.store.ListGrants(ctx, a.ID) })
+	ok, _ := s.canReadErr(ctx, b, a)
+	return ok
+}
+
+// canReadErr is canRead that also reports a failed grant read, so a route
+// can answer 500 instead of the 404 a working read might not give.
+func (s *Service) canReadErr(ctx context.Context, b backend, a *Artifact) (bool, error) {
+	var loadErr error
+	ok := canReadWith(ctx, s.host, a, func() ([]Grant, error) {
+		gs, err := b.store.ListGrants(ctx, a.ID)
+		loadErr = err
+		return gs, err
+	})
+	if loadErr != nil {
+		return false, loadErr
+	}
+	return ok, nil
 }
 
 // canReadWith is canRead asking host, with grants loading a's grants (all
@@ -145,7 +161,13 @@ func (s *Service) readableArtifact(w http.ResponseWriter, r *http.Request, id st
 		writeError(w, http.StatusInternalServerError, "internal", "could not read the artifact")
 		return b, nil, false
 	}
-	if !s.canRead(r.Context(), b, a) {
+	readable, err := s.canReadErr(r.Context(), b, a)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "artifacts: list grants failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal", "could not read the artifact")
+		return b, nil, false
+	}
+	if !readable {
 		writeNotFound(w)
 		return b, nil, false
 	}

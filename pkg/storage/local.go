@@ -255,6 +255,11 @@ func (s *LocalStorage) List(ctx context.Context, opts ListOptions) (*ListResult,
 			return nil
 		}
 
+		// Objects before StartOffset were returned by an earlier page.
+		if opts.StartOffset != "" && relPath < opts.StartOffset {
+			return nil
+		}
+
 		// Apply max results
 		if opts.MaxResults > 0 && count >= opts.MaxResults {
 			result.NextOffset = relPath

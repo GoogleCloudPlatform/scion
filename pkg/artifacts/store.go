@@ -322,6 +322,26 @@ type Store interface {
 	// transaction, and returns how many it deleted.
 	SweepExpired(ctx context.Context, now time.Time, limit int) (int, error)
 
+	// TouchBlob records that a publish is about to rely on blob digest at
+	// now: a writer calls it before checking whether the blob exists, so
+	// the blob sweep spares the blob for the grace period, and waits for
+	// a sweep that is deleting it to finish.
+	TouchBlob(ctx context.Context, digest string, now time.Time) error
+
+	// MarkBlobs records, for each digest (at most MaxBlobBatch), whether a
+	// live artifact references it: a referenced digest's state is dropped;
+	// an unreferenced one is marked unreferenced since now unless it
+	// already is.
+	MarkBlobs(ctx context.Context, digests []string, now time.Time) error
+
+	// ReclaimBlobs deletes up to limit blobs unreferenced and untouched
+	// since at or before cutoff. For each, in one transaction holding the
+	// blob's state row, it checks again that the blob is unreferenced and
+	// untouched, calls del (which removes the bytes), and drops the row;
+	// a writer touching the blob meanwhile waits for that transaction. It
+	// returns how many blobs it deleted; an error from del ends the pass.
+	ReclaimBlobs(ctx context.Context, cutoff time.Time, limit int, del func(digest string) error) (int, error)
+
 	// AddMessageRefs records that message messageID references refs, in the
 	// artifact_message_ref link table. A reference already recorded for the
 	// message and artifact is left as it is. The caller has already checked

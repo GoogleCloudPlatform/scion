@@ -312,3 +312,26 @@ func TestRetentionAtCreation(t *testing.T) {
 		t.Errorf("no retention: expiry %v", pub.Artifact.ExpiresAt)
 	}
 }
+
+// TestGrantDocumentedValues pins the values the reference documentation
+// states.
+func TestGrantDocumentedValues(t *testing.T) {
+	if MaxGrantsPerArtifact != 100 || DefaultGCGrace != 168*time.Hour || MinGCGrace != 24*time.Hour {
+		t.Errorf("documented grant or sweep values changed: update docs-site reference/artifacts.md")
+	}
+}
+
+// TestGrantReadFailureIsLoud: when reading an artifact needs its grants
+// and they cannot be read, the answer is 500, not 404.
+func TestGrantReadFailureIsLoud(t *testing.T) {
+	f, id := newLinkFixture(t)
+	f.putGrant(userU, id, SubjectPrincipal, PrincipalRef(outside.kind, outside.ref), GrantRead)
+	f.svc.SetStore(failGrantsStore{f.store})
+	if rec := f.do(&outside, http.MethodGet, "/api/v1/artifacts/"+id, nil, nil); rec.Code != http.StatusInternalServerError {
+		t.Errorf("grantee GET with grants unreadable: %d, want 500", rec.Code)
+	}
+	// The owner and home-project readers never need the grants.
+	if rec := f.do(&userU, http.MethodGet, "/api/v1/artifacts/"+id, nil, nil); rec.Code != http.StatusOK {
+		t.Errorf("owner GET: %d", rec.Code)
+	}
+}

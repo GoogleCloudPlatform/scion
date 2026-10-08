@@ -298,6 +298,10 @@ func (s *Service) waitFetchFloor(budget context.Context, start time.Time) {
 // putBlobBytes stores body at its content address unless that blob exists.
 func putBlobBytes(ctx context.Context, b backend, digest string, body []byte, mediaType string) error {
 	p := BlobPath(b.hubID, digest)
+	// Touch first, as putBlob does.
+	if err := b.store.TouchBlob(ctx, digest, time.Now()); err != nil {
+		return err
+	}
 	exists, err := b.blobs.Exists(ctx, p)
 	if err != nil {
 		return fmt.Errorf("check blob: %w", err)
