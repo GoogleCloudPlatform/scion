@@ -196,7 +196,7 @@ func TestDeriveHealthSummaryStatus_Rules(t *testing.T) {
 			wantStatus: HealthStatusHealthy,
 			wantItems: []HealthAttentionItem{{
 				Severity: HealthAttentionWarning, Kind: HealthAttentionHubCheck,
-				Subject: HealthAttentionSubject{Type: HealthSubjectBroker},
+				Subject: HealthAttentionSubject{Type: HealthSubjectHub, ID: "inst-1"},
 				Message: "Runtime broker data not available",
 			}},
 		},

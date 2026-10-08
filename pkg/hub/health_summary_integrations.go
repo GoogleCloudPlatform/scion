@@ -75,8 +75,8 @@ type HealthSummaryIntegrationCounts struct {
 // with getIntegrationStatus, the same live check the Integrations admin
 // page uses, all at once, each bounded by healthIntegrationQueryTimeout: a
 // plugin that does not answer in time is listed with health "unknown" (not
-// reported) and a fixed reason, and is not queried again until its earlier
-// query returns. pluginRecordNames are the plugin names of the plugin
+// reported) and a fixed reason; concurrent summaries share one query per
+// plugin. pluginRecordNames are the plugin names of the plugin
 // records in the runtime broker table (from the handler's broker pass);
 // those this instance does not run are listed with health "unknown" and a
 // fixed reason. The list is sorted by name and is never nil.
@@ -119,11 +119,13 @@ func (s *Server) healthSummaryIntegrations(ctx context.Context, pluginRecordName
 
 // queryHealthSummaryIntegrations queries the named plugins concurrently and
 // waits at most healthIntegrationQueryTimeout (or until ctx ends) for all
-// of them. The plugin manager calls take no context, so a query that
-// overruns keeps running in its goroutine; healthIntegrationInflight marks
-// the plugin until it returns, and later polls report it as not reported
-// without starting another query. The result has one row per name, in
-// name order.
+// of them. Queries are shared per plugin (healthIntegrationFlight): a
+// caller that arrives while a query for the same plugin is running waits
+// for that query's result, with its own deadline, instead of starting
+// another. The plugin manager calls take no context, so a hung plugin keeps
+// its one query running; every caller meanwhile reports it as not
+// reported when its own deadline passes. The result has one row per name,
+// in name order.
 func (s *Server) queryHealthSummaryIntegrations(ctx context.Context, mgr IntegrationManager, names []string) []HealthSummaryIntegration {
 	type result struct {
 		i   int
@@ -132,7 +134,6 @@ func (s *Server) queryHealthSummaryIntegrations(ctx context.Context, mgr Integra
 	rows := make([]HealthSummaryIntegration, len(names))
 	done := make([]bool, len(names))
 	results := make(chan result, len(names))
-	pending := 0
 	for i, name := range names {
 		rows[i] = HealthSummaryIntegration{
 			Name:     name,
@@ -140,15 +141,19 @@ func (s *Server) queryHealthSummaryIntegrations(ctx context.Context, mgr Integra
 			Health:   healthIntegrationUnknown,
 			Reason:   healthIntegrationTimedOutReason,
 		}
-		if _, busy := s.healthIntegrationInflight.LoadOrStore(name, struct{}{}); busy {
-			continue
-		}
-		pending++
-		go func(i int, name string) {
-			defer s.healthIntegrationInflight.Delete(name)
-			results <- result{i: i, row: healthSummaryIntegrationFromStatus(name, getIntegrationStatus(mgr, name))}
-		}(i, name)
+		ch := s.healthIntegrationFlight.DoChan(name, func() (interface{}, error) {
+			return healthSummaryIntegrationFromStatus(name, getIntegrationStatus(mgr, name)), nil
+		})
+		go func(i int) {
+			// The shared call always delivers one result on ch, so this
+			// goroutine ends when the plugin's query returns.
+			r := <-ch
+			if row, ok := r.Val.(HealthSummaryIntegration); ok {
+				results <- result{i: i, row: row}
+			}
+		}(i)
 	}
+	pending := len(names)
 	if pending > 0 {
 		timer := time.NewTimer(healthIntegrationQueryTimeout)
 		defer timer.Stop()
@@ -269,33 +274,14 @@ const healthSummaryIntegrationsRoute = "/api/v1/admin/integrations"
 
 // healthSummaryCanReadIntegrations reports whether the caller may see
 // integration identity (names, platforms, versions) in the health summary:
-// it runs the same decision the route guard runs for the Integrations admin
-// route, from that route's metadata. It fails closed: no authorization
-// service, no user identity, or a misconfigured route means false.
+// whether the route guard would allow the caller on the Integrations admin
+// route. It uses the guard's own decision (routePermissionDecision) with
+// that route's metadata, so the two cannot disagree, and fails closed when
+// the route is missing.
 func (s *Server) healthSummaryCanReadIntegrations(r *http.Request) bool {
 	meta, ok := routeMetadataTable[healthSummaryIntegrationsRoute]
-	if !ok || meta.Permission == "" || meta.Resource == "" || meta.Action == "" || s.authzService == nil {
+	if !ok || meta.Classification != RouteHubAdmin || meta.Permission == "" {
 		return false
 	}
-	ctx := r.Context()
-	user, ok := GetIdentityFromContext(ctx).(UserIdentity)
-	if !ok || user == nil {
-		return false
-	}
-	if meta.SessionOnly != "" && !sessionCredentialAllowed(ctx) {
-		return false
-	}
-	target, evidence, ok := routeGuardTarget(meta)
-	if !ok {
-		return false
-	}
-	decision := s.authzService.Decide(ctx, AuthzRequest{
-		Principal:      principalContextForIdentity(user),
-		Credential:     credentialContextForIdentity(user),
-		Resource:       target,
-		Action:         Action(meta.Action),
-		Permission:     meta.Permission,
-		TargetEvidence: evidence,
-	})
-	return decision.Allowed
+	return s.routePermissionDecision(r, meta).outcome == routePermissionAllowed
 }

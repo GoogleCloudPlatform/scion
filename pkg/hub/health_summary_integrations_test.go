@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -446,16 +447,135 @@ func TestHandleHealthSummary_SlowIntegrationNotReported(t *testing.T) {
 	}
 	assert.Equal(t, int32(1), mgr.calls.Load(), "a plugin whose query is still running is not queried again")
 
-	// Once the hung query returns, the next poll queries the plugin again.
+	// Once the hung query returns, a later poll queries the plugin again
+	// and reports its real health.
 	release()
 	require.Eventually(t, func() bool {
-		_, busy := srv.healthIntegrationInflight.Load("slow")
-		return !busy
-	}, 5*time.Second, 10*time.Millisecond)
-	list, _ := getHealthSummaryIntegrations(t, srv)
-	assert.Equal(t, "healthy", findHealthSummaryIntegration(t, list, "slow").Health)
+		list, _ := getHealthSummaryIntegrations(t, srv)
+		return findHealthSummaryIntegration(t, list, "slow").Health == "healthy"
+	}, 5*time.Second, 20*time.Millisecond)
 	assert.Equal(t, int32(2), mgr.calls.Load())
 }
+
+// gatedHealthSummaryPluginDouble holds every info query for the named
+// plugin until gate is closed, and counts the queries.
+type gatedHealthSummaryPluginDouble struct {
+	*healthSummaryPluginDouble
+	name  string
+	gate  chan struct{}
+	calls atomic.Int32
+}
+
+func (d *gatedHealthSummaryPluginDouble) BrokerInfo(name string) (string, string, []string, error) {
+	if name == d.name {
+		d.calls.Add(1)
+		<-d.gate
+	}
+	return d.healthSummaryPluginDouble.BrokerInfo(name)
+}
+
+// TestHandleHealthSummary_OverlappingSummariesShareIntegrationHealth: two
+// summaries that overlap while an unhealthy plugin's query is running both
+// get its real health (and so both read degraded), from one shared query.
+func TestHandleHealthSummary_OverlappingSummariesShareIntegrationHealth(t *testing.T) {
+	srv, _ := testServer(t)
+	mgr := &gatedHealthSummaryPluginDouble{
+		healthSummaryPluginDouble: newHealthSummaryPluginDouble("slack"),
+		name:                      "slack",
+		gate:                      make(chan struct{}),
+	}
+	mgr.health["slack"] = "unhealthy"
+	srv.SetPluginManager(mgr)
+
+	type out struct {
+		resp HealthSummaryResponse
+		code int
+	}
+	results := make(chan out, 2)
+	fetch := func() {
+		rr := doRequest(t, srv, http.MethodGet, "/api/v1/admin/health/summary", nil)
+		var resp HealthSummaryResponse
+		_ = json.Unmarshal(rr.Body.Bytes(), &resp)
+		results <- out{resp: resp, code: rr.Code}
+	}
+	go fetch()
+	require.Eventually(t, func() bool { return mgr.calls.Load() == 1 }, 5*time.Second, 5*time.Millisecond,
+		"the first summary's query must be running")
+	go fetch()
+	time.Sleep(100 * time.Millisecond) // let the second summary join the running query
+	close(mgr.gate)
+
+	for i := 0; i < 2; i++ {
+		select {
+		case o := <-results:
+			require.Equal(t, http.StatusOK, o.code)
+			require.Len(t, o.resp.Integrations, 1)
+			assert.Equal(t, "unhealthy", o.resp.Integrations[0].Health, "summary %d", i)
+			assert.Empty(t, o.resp.Integrations[0].Reason)
+			assert.Equal(t, HealthStatusDegraded, o.resp.Status, "summary %d", i)
+		case <-time.After(10 * time.Second):
+			t.Fatal("summary did not return")
+		}
+	}
+	assert.Equal(t, int32(1), mgr.calls.Load(), "overlapping summaries share one query")
+}
+
+// TestHealthSummaryCanReadIntegrations_AgreesWithRouteGuard: the summary's
+// integration-detail check gives the same answer as the route guard on
+// GET /api/v1/admin/integrations, for every kind of caller.
+func TestHealthSummaryCanReadIntegrations_AgreesWithRouteGuard(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	seedRoleDefinitions(ctx, s)
+	superRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	require.NoError(t, err)
+	super := &store.User{ID: tid("hs-agree-super"), Email: "hs-agree-super@test.com", DisplayName: "s", Role: "admin", Status: "active"}
+	require.NoError(t, s.CreateUser(ctx, super))
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: superRD.ID, PrincipalType: "user", PrincipalID: super.ID,
+		ScopeType: store.RoleScopeSystem, CreatedBy: store.SystemReconcileCreatedBy,
+	})
+	require.NoError(t, err)
+	withRead := healthSummaryRoleUser(t, s, "hs-agree-with", []string{"hub.health.read", "hub.integrations.read"})
+	without := healthSummaryRoleUser(t, s, "hs-agree-without", []string{"hub.health.read"})
+
+	identity := func(u *store.User) Identity {
+		return NewAuthenticatedUser(u.ID, u.Email, u.DisplayName, u.Role, "web")
+	}
+	cases := []struct {
+		name string
+		id   Identity
+		cred *CredentialKind
+		want bool
+	}{
+		{"super-admin session", identity(super), credKind(CredentialKindInteractive), true},
+		{"custom role with integrations.read", identity(withRead), nil, true},
+		{"custom role without integrations.read", identity(without), nil, false},
+		{"no identity", nil, nil, false},
+	}
+	meta := routeMetadataTable[healthSummaryIntegrationsRoute]
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reqCtx := ctx
+			if tc.id != nil {
+				reqCtx = contextWithIdentity(reqCtx, tc.id)
+			}
+			if tc.cred != nil {
+				reqCtx = contextWithCredentialContext(reqCtx, CredentialContext{Kind: *tc.cred})
+			}
+			req := httptest.NewRequest(http.MethodGet, healthSummaryIntegrationsRoute, nil).WithContext(reqCtx)
+			rr := httptest.NewRecorder()
+			srv.routeGuard(meta, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })(rr, req)
+			guardAllowed := rr.Code == http.StatusOK
+
+			got := srv.healthSummaryCanReadIntegrations(req)
+			assert.Equal(t, tc.want, got)
+			assert.Equal(t, guardAllowed, got, "summary check and route guard disagree (guard status %d)", rr.Code)
+		})
+	}
+}
+
+func credKind(k CredentialKind) *CredentialKind { return &k }
 
 // healthSummaryListCountingStore counts ListRuntimeBrokers calls made with
 // the health summary's page size.
@@ -535,7 +655,7 @@ func TestHandleHealthSummary_BrokerListFailure(t *testing.T) {
 	assert.Equal(t, []HealthSummaryBroker{}, resp.Brokers.Items)
 	assert.Contains(t, resp.Attention, HealthAttentionItem{
 		Severity: HealthAttentionWarning, Kind: HealthAttentionHubCheck,
-		Subject: HealthAttentionSubject{Type: HealthSubjectBroker},
+		Subject: HealthAttentionSubject{Type: HealthSubjectHub, ID: srv.InstanceID()},
 		Message: "Runtime broker data not available",
 	})
 	assert.NotContains(t, rr.Body.String(), "broker list exploded")

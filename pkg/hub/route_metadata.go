@@ -1150,6 +1150,84 @@ var routeMetadataTable = map[string]RouteMetadata{
 	},
 }
 
+// routePermissionOutcome is the result of routePermissionDecision.
+type routePermissionOutcome int
+
+const (
+	routePermissionForbidden routePermissionOutcome = iota
+	routePermissionAllowed
+	routePermissionMisconfigured
+	routePermissionUnauthenticated
+	routePermissionSessionOnly
+)
+
+// routePermissionDecisionResult carries what the route guard needs to
+// answer a refused request.
+type routePermissionDecisionResult struct {
+	outcome  routePermissionOutcome
+	message  string   // for routePermissionMisconfigured
+	identity Identity // for the denial log
+	target   Resource // for the denial log
+	reason   string   // for the denial log
+}
+
+// routePermissionDecision makes the permission decision for a
+// RouteHubAdmin route that declares a Permission: the route guard uses it,
+// and so does any handler that needs to know whether the caller would be
+// allowed on another route (for example the health summary, for the
+// Integrations admin route). It has no side effects other than the
+// decision audit Decide records. Anything but routePermissionAllowed is a
+// refusal; the zero outcome is forbidden.
+func (s *Server) routePermissionDecision(r *http.Request, meta RouteMetadata) routePermissionDecisionResult {
+	// A route that declares a Permission is only ever evaluated through
+	// the authorization service; without one it is refused rather than
+	// served via requireAdmin.
+	if s.authzService == nil {
+		return routePermissionDecisionResult{outcome: routePermissionMisconfigured, message: "authorization unavailable"}
+	}
+	// Validate route metadata completeness
+	if meta.Permission == "" || meta.Resource == "" || meta.Action == "" {
+		return routePermissionDecisionResult{outcome: routePermissionMisconfigured,
+			message: "route misconfigured: Resource and Action must be set when Permission is set"}
+	}
+	// D4 conversion: permission-based check via Decide. Routes that
+	// declare a Permission in their metadata are evaluated through the
+	// authorization pipeline, which preserves the super-admin bypass and
+	// enables scoped admin access through role bindings.
+	identity := GetIdentityFromContext(r.Context())
+	if identity == nil {
+		return routePermissionDecisionResult{outcome: routePermissionUnauthenticated}
+	}
+	user, ok := identity.(UserIdentity)
+	if !ok {
+		return routePermissionDecisionResult{outcome: routePermissionForbidden, identity: identity,
+			target: Resource{Type: meta.Resource}, reason: "non-user identity"}
+	}
+	target, evidence, targetOK := routeGuardTarget(meta)
+	if !targetOK {
+		return routePermissionDecisionResult{outcome: routePermissionMisconfigured, message: "route misconfigured: unknown bearer target"}
+	}
+	// Session-only: a route-level refusal of every non-session credential,
+	// before the permission decision. Decide still runs for a session.
+	if meta.SessionOnly != "" && !sessionCredentialAllowed(r.Context()) {
+		return routePermissionDecisionResult{outcome: routePermissionSessionOnly, identity: identity,
+			target: target, reason: "session-only operation"}
+	}
+	decision := s.authzService.Decide(r.Context(), AuthzRequest{
+		Principal:      principalContextForIdentity(user),
+		Credential:     credentialContextForIdentity(user),
+		Resource:       target,
+		Action:         Action(meta.Action),
+		Permission:     meta.Permission,
+		TargetEvidence: evidence,
+	})
+	if !decision.Allowed {
+		return routePermissionDecisionResult{outcome: routePermissionForbidden, identity: identity,
+			target: target, reason: decision.Reason}
+	}
+	return routePermissionDecisionResult{outcome: routePermissionAllowed, identity: identity, target: target}
+}
+
 // guarded looks up the route metadata for a pattern and wraps the handler with
 // the declarative route guard. If the pattern has no entry in routeMetadataTable,
 // it returns a handler that fails closed with 500.
@@ -1200,60 +1278,21 @@ func (s *Server) routeGuard(meta RouteMetadata, next http.HandlerFunc) http.Hand
 			next(w, r)
 		case RouteHubAdmin:
 			if meta.Permission != "" {
-				// A route that declares a Permission is only ever
-				// evaluated through the authorization service; without
-				// one it is refused rather than served via requireAdmin.
-				if s.authzService == nil {
-					writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError,
-						"authorization unavailable", nil)
+				d := s.routePermissionDecision(r, meta)
+				switch d.outcome {
+				case routePermissionAllowed:
+				case routePermissionMisconfigured:
+					writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, d.message, nil)
 					return
-				}
-				// Validate route metadata completeness
-				if meta.Resource == "" || meta.Action == "" {
-					writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError,
-						"route misconfigured: Resource and Action must be set when Permission is set", nil)
-					return
-				}
-				// D4 conversion: permission-based check via Decide.
-				// Routes that declare a Permission in their metadata are
-				// evaluated through the authorization pipeline, which
-				// preserves the super-admin bypass and enables scoped
-				// admin access through role bindings.
-				identity := GetIdentityFromContext(r.Context())
-				if identity == nil {
+				case routePermissionUnauthenticated:
 					writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "authentication required", nil)
 					return
-				}
-				user, ok := identity.(UserIdentity)
-				if !ok {
-					logAuthzDenial(r, identity, Resource{Type: meta.Resource}, Action(meta.Action), "non-user identity")
-					writeForbiddenStructured(w, "", meta.Resource, Action(meta.Action))
-					return
-				}
-				target, evidence, targetOK := routeGuardTarget(meta)
-				if !targetOK {
-					writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError,
-						"route misconfigured: unknown bearer target", nil)
-					return
-				}
-				// Session-only: a route-level refusal of every non-session
-				// credential, before the permission decision. Decide still
-				// runs for a session.
-				if meta.SessionOnly != "" && !sessionCredentialAllowed(r.Context()) {
-					logAuthzDenial(r, identity, target, Action(meta.Action), "session-only operation")
+				case routePermissionSessionOnly:
+					logAuthzDenial(r, d.identity, d.target, Action(meta.Action), d.reason)
 					writeSessionOnlyDenial(w, ErrCodeForbidden, "Insufficient permissions", meta.SessionOnly)
 					return
-				}
-				decision := s.authzService.Decide(r.Context(), AuthzRequest{
-					Principal:      principalContextForIdentity(user),
-					Credential:     credentialContextForIdentity(user),
-					Resource:       target,
-					Action:         Action(meta.Action),
-					Permission:     meta.Permission,
-					TargetEvidence: evidence,
-				})
-				if !decision.Allowed {
-					logAuthzDenial(r, identity, target, Action(meta.Action), decision.Reason)
+				default:
+					logAuthzDenial(r, d.identity, d.target, Action(meta.Action), d.reason)
 					writeForbiddenStructured(w, "", meta.Resource, Action(meta.Action))
 					return
 				}

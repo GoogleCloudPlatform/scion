@@ -122,9 +122,10 @@ func deriveHealthSummaryStatus(resp *HealthSummaryResponse) (string, []HealthAtt
 	if resp.Brokers.NotReported {
 		items = append(items, HealthAttentionItem{
 			// The broker list could not be read from the store: a hub
-			// problem, not a broker state, so it is a hub_check item.
+			// problem, not a broker state, so it is a hub_check item
+			// about this hub instance (it links nowhere broker-specific).
 			Severity: HealthAttentionWarning, Kind: HealthAttentionHubCheck,
-			Subject: HealthAttentionSubject{Type: HealthSubjectBroker},
+			Subject: HealthAttentionSubject{Type: HealthSubjectHub, ID: resp.Hub.InstanceID},
 			Message: "Runtime broker data not available",
 		})
 	}

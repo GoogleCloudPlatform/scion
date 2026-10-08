@@ -66,13 +66,13 @@ export interface HealthSummaryIntegrationCounts {
 interface HealthSummary {
   status: string;
   /** When the serving hub instance built the summary (RFC 3339). */
-  generated_at?: string;
+  generated_at: string;
   /** Ranked attention items; see deriveHealthSummaryStatus on the server. */
-  attention?: HealthAttentionItem[];
+  attention: HealthAttentionItem[];
   hub: {
     status: string;
     /** The hub instance that served this summary ("this instance"). */
-    instance_id?: string;
+    instance_id: string;
     version: string;
     uptime: string;
     connected_brokers: number;
@@ -97,8 +97,8 @@ interface HealthSummary {
    */
   integrations?: HealthSummaryIntegration[];
   /** True when integrations and integration attention items carry identity. */
-  integrations_detail?: boolean;
-  integration_counts?: HealthSummaryIntegrationCounts;
+  integrations_detail: boolean;
+  integration_counts: HealthSummaryIntegrationCounts;
   /** Null when the hub could not aggregate agents (not reported). */
   agents: HealthSummaryAgents | null;
   /** Null when the hub could not count dispatch health (not reported). */
