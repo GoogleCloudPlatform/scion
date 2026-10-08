@@ -109,7 +109,7 @@ func (s *Server) handleDiagnosticsLogs(w http.ResponseWriter, r *http.Request) {
 // Authorization: enforced by routeGuard via hub.diagnostics.read permission.
 // The stream re-checks its credential every streamCredentialRecheckInterval
 // (streamCredentialStillAuthorized) and ends with streamCredentialEndedEvent
-// once the credential no longer authorizes hub.diagnostics.read.
+// once the credential stops authorizing hub.diagnostics.read.
 func (s *Server) handleDiagnosticsLogsStream(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w, http.MethodGet)

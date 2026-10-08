@@ -247,7 +247,7 @@ var hubOperations = []OperationSpec{
 	{
 		ID:          "hub.diagnostics.read",
 		Domain:      "hub",
-		Description: "Read diagnostic logs, the diagnostic log stream and messaging divergence data. The log stream re-checks a token credential on every heartbeat and ends once the token no longer validates or no longer holds hub.diagnostics.read",
+		Description: "Read diagnostic logs, the diagnostic log stream and messaging divergence data. The log stream re-checks a token credential on every heartbeat and ends once the token stops validating or loses hub.diagnostics.read",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/diagnostics/logs", Method: "GET"},
 			// The live handler (handleDiagnosticsLogsStream,

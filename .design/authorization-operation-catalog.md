@@ -133,7 +133,7 @@
 - [hub.adminmode.update](#hubadminmodeupdate) — Toggle admin/maintenance mode
 - [hub.allowlist.update](#huballowlistupdate) — Manage the platform email allow list
 - [hub.health.read](#hubhealthread) — Read platform health summary and GCP quota status
-- [hub.diagnostics.read](#hubdiagnosticsread) — Read diagnostic logs, the diagnostic log stream and messaging divergence data. The log stream re-checks a token credential on every heartbeat and ends once the token no longer validates or no longer holds hub.diagnostics.read
+- [hub.diagnostics.read](#hubdiagnosticsread) — Read diagnostic logs, the diagnostic log stream and messaging divergence data. The log stream re-checks a token credential on every heartbeat and ends once the token stops validating or loses hub.diagnostics.read
 - [hub.scheduler.read](#hubschedulerread) — Read scheduler status and configuration
 - [hub.projectdefaults.read](#hubprojectdefaultsread) — Read project default settings
 - [hub.lifecyclehooks.read](#hublifecyclehooksread) — Read lifecycle hook definitions
@@ -4849,7 +4849,7 @@
 
 **Domain:** hub
 
-**Description:** Read diagnostic logs, the diagnostic log stream and messaging divergence data. The log stream re-checks a token credential on every heartbeat and ends once the token no longer validates or no longer holds hub.diagnostics.read
+**Description:** Read diagnostic logs, the diagnostic log stream and messaging divergence data. The log stream re-checks a token credential on every heartbeat and ends once the token stops validating or loses hub.diagnostics.read
 
 ### Entry Points
 

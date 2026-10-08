@@ -42,15 +42,6 @@ var hubIntegrationSelectors = []string{
 	"hub_diagnostics:read", "hub_metrics:read", "hub_github_app:read", "hub_github_app:update",
 }
 
-// requireSessionOnlyRefusal asserts a session-only refusal with reason.
-func requireSessionOnlyRefusal(t *testing.T, rec *httptest.ResponseRecorder, reason authzop.SessionOnlyReason) {
-	t.Helper()
-	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-	r, credential := sessionOnlyDetailsOf(rec)
-	assert.Equal(t, string(reason), r, rec.Body.String())
-	assert.Equal(t, sessionRequiredCredential, credential, rec.Body.String())
-}
-
 // requireNoSessionOnlyRefusal asserts the response is not a session-only
 // refusal.
 func requireNoSessionOnlyRefusal(t *testing.T, rec *httptest.ResponseRecorder) {
@@ -64,7 +55,7 @@ func requireNoSessionOnlyRefusal(t *testing.T, rec *httptest.ResponseRecorder) {
 // want.
 func requireTokenRefusedIntegrationKeys(t *testing.T, rec *httptest.ResponseRecorder, want ...string) {
 	t.Helper()
-	requireSessionOnlyRefusal(t, rec, authzop.ReasonCredentialManagement)
+	requireSessionOnlyRefusal(t, rec, authzop.ReasonCredentialManagement, "integration config keys")
 	var resp ErrorResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp), rec.Body.String())
 	var got []string
@@ -127,7 +118,7 @@ func TestIntegrationInstall_SessionOnlyForTokens(t *testing.T) {
 		"/api/v1/admin/integrations/telegram/update/latest",
 	} {
 		rec := doRequestWithToken(t, srv, key, http.MethodPost, path, nil)
-		requireSessionOnlyRefusal(t, rec, authzop.ReasonHostOperations)
+		requireSessionOnlyRefusal(t, rec, authzop.ReasonHostOperations, path)
 
 		rec = doRequest(t, srv, http.MethodPost, path, nil)
 		requireNoSessionOnlyRefusal(t, rec)
@@ -151,7 +142,7 @@ func TestGitHubAppConfigUpdate_SessionOnlyForTokens(t *testing.T) {
 	key := mintHubConfigToken(t, srv, super, hubBoundary(), "hub_github_app:read", "hub_github_app:update")
 
 	rec := doRequestWithToken(t, srv, key, http.MethodPut, "/api/v1/github-app", map[string]interface{}{"app_id": 1})
-	requireSessionOnlyRefusal(t, rec, authzop.ReasonCredentialManagement)
+	requireSessionOnlyRefusal(t, rec, authzop.ReasonCredentialManagement, "PUT /api/v1/github-app")
 
 	rec = doRequest(t, srv, http.MethodPut, "/api/v1/github-app", map[string]interface{}{})
 	requireNoSessionOnlyRefusal(t, rec)
@@ -332,7 +323,7 @@ func (b *blockingLogQuerier) Tail(ctx context.Context, _ LogQueryOptions) (<-cha
 // TestDiagnosticsLogStream_EndsWhenTokenStopsValidating requires the
 // diagnostics log stream opened by a token to end, with the same event for
 // every cause, once the token is revoked, expires, belongs to a suspended
-// user or no longer holds hub.diagnostics.read; a token that still
+// user or loses hub.diagnostics.read; a token that still
 // validates keeps the stream open.
 func TestDiagnosticsLogStream_EndsWhenTokenStopsValidating(t *testing.T) {
 	prev := streamCredentialRecheckInterval
@@ -414,7 +405,7 @@ func TestDiagnosticsLogStream_EndsWhenTokenStopsValidating(t *testing.T) {
 				UserID: userID, Name: "hit-" + tid("diag"), Boundary: hubBoundary(), Scopes: []string{"hub_diagnostics:read"},
 			}
 			if tc.expiry > 0 {
-				exp := time.Now().Add(tc.expiry)
+				exp := time.Unix(0, 0).Add(time.Since(time.Unix(0, 0)) + tc.expiry)
 				params.ExpiresAt = &exp
 			}
 			key, token, err := srv.uatService.CreateTokenWithParams(rs4MintContext(userID), params)

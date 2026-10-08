@@ -27,7 +27,7 @@ import (
 // authorization was decided. A stream that admits user access tokens
 // re-checks the request's credential on a fixed interval and ends when the
 // check fails, so a token that is revoked, expires, belongs to a suspended
-// user or no longer holds the permission stops receiving data within one
+// user or loses the permission stops receiving data within one
 // interval.
 
 // streamCredentialRecheckInterval is how often a long-lived stream
@@ -35,9 +35,9 @@ import (
 var streamCredentialRecheckInterval = 15 * time.Second
 
 // streamCredentialEndedEvent is the SSE event a stream writes before it
-// ends because its credential no longer authorizes it. It is the same for
+// ends because its credential stops authorizing it. It is the same for
 // every cause.
-const streamCredentialEndedEvent = "event: error\ndata: {\"message\":\"stream ended: the credential no longer authorizes this stream\"}\n\n"
+const streamCredentialEndedEvent = "event: error\ndata: {\"message\":\"stream ended: the credential does not authorize this stream\"}\n\n"
 
 // streamCredentialStillAuthorized reports whether the credential of the
 // stream request in ctx still authorizes the stream: the authorization
@@ -63,7 +63,7 @@ func (s *Server) streamCredentialStillAuthorized(ctx context.Context, resource R
 		if err != nil || token == nil || token.Revoked || token.UserID != user.ID() {
 			return false
 		}
-		if token.ExpiresAt != nil && time.Now().After(*token.ExpiresAt) {
+		if token.ExpiresAt != nil && time.Until(*token.ExpiresAt) <= 0 {
 			return false
 		}
 		if token.ValidateBoundary() != nil {
