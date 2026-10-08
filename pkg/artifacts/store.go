@@ -343,11 +343,17 @@ type Store interface {
 	// now: a writer calls it before checking whether the blob exists, so
 	// the blob sweep spares the blob for the grace period, and it waits
 	// for a sweep that is deleting the blob to finish. marked reports that
-	// the blob was marked unreferenced until this touch: a sweep may have
-	// tried to delete it, and such a delete can still reach the object
-	// store late, so the writer must store the bytes again (a new object
-	// generation) rather than rely on the existing object.
+	// the blob is marked unreferenced: a sweep may have tried to delete it,
+	// and such a delete can still reach the object store late, so the
+	// writer must store the bytes again (a new object generation) and then
+	// call ClearBlobMark, rather than rely on the existing object. The
+	// mark stays until then, so a writer whose upload fails leaves it for
+	// the next writer.
 	TouchBlob(ctx context.Context, digest string, now time.Time) (marked bool, err error)
+
+	// ClearBlobMark removes the mark (and the recorded generation) of
+	// blob digest, once its bytes have been stored again.
+	ClearBlobMark(ctx context.Context, digest string) error
 
 	// MarkBlobs records, for each blob (at most MaxBlobBatch), whether a
 	// live artifact references it: a referenced blob's state is dropped;
@@ -356,9 +362,9 @@ type Store interface {
 	MarkBlobs(ctx context.Context, blobs []BlobMark, now time.Time) error
 
 	// ReclaimBlobs deletes up to limit blobs marked unreferenced since at
-	// or before cutoff (a touch clears the mark, so such a blob is also
-	// untouched since). For each, in one transaction holding the blob's
-	// state row, it checks the mark and the references again, calls del
+	// or before cutoff and not touched since cutoff. For each, in one
+	// transaction holding the blob's state row, it checks the mark, the
+	// touch and the references again, calls del
 	// with the digest and the generation recorded at marking (0 when
 	// unknown), which removes the bytes, and drops the row; a writer
 	// touching the blob meanwhile waits for that transaction. It returns

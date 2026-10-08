@@ -369,7 +369,7 @@ func (s *Service) handlePatchArtifact(w http.ResponseWriter, r *http.Request, id
 			writeError(w, http.StatusForbidden, "forbidden", "not allowed to publish into that project")
 			return
 		}
-		if scope != a.ScopeRef && !s.crossScopeAllowed(ctx) {
+		if !s.crossScopeAllowed(ctx) {
 			writeError(w, http.StatusForbidden, "cross_project_sharing_disabled",
 				"moving artifacts to other projects is turned off on this hub")
 			return

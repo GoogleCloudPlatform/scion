@@ -100,6 +100,10 @@ var ErrPreconditionFailed = errors.New("object generation does not match")
 // GenerationDeleter is implemented by providers that can delete an object
 // only while it still has a given generation (GCS), so a delete that
 // reaches the provider late does not remove content written since.
+// Callers that must not lose content written after a delete was issued use
+// it for such providers; an unconditional Delete is only safe on providers
+// whose delete is synchronous (it never applies after the call returns),
+// such as local storage, which does not implement this interface.
 type GenerationDeleter interface {
 	// DeleteIfGeneration deletes the object at objectPath if its
 	// generation is generation. It returns ErrNotFound when there is no

@@ -23,6 +23,12 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 )
 
+// INVARIANT: every digest referenced by a ready, pending or finalizing
+// version of a live artifact is readable from blob storage, at every point
+// of any interleaving of publishes, marks and sweeps (including deletes
+// that fail and still reach the object store later). TestBlobGCInterleavings
+// checks it over random sequences.
+//
 // Blob garbage collection (design §6). Blobs are shared by content across
 // versions and artifacts, so a blob is deleted only when no live artifact
 // references it (Store.MarkBlobs: a file of a ready, pending or finalizing
@@ -52,6 +58,8 @@ const (
 // writers time out. A variable so tests can lower it.
 var gcDeleteTimeout = 4 * time.Second
 
+var errUnknownGeneration = errors.New("artifacts: blob generation unknown; not deleted")
+
 // deleteBlob deletes the blob at p within gcDeleteTimeout. A timeout rolls
 // the sweep's transaction back and the blob's mark stays. A delete the
 // object store applies after that (it cannot always be called back) is
@@ -60,12 +68,19 @@ var gcDeleteTimeout = 4 * time.Second
 // and a writer that touches a still-marked blob stores its bytes again
 // (Store.TouchBlob) instead of relying on the existing object. A missing
 // object or a changed generation counts as done: the bytes the sweep meant
-// to delete are gone or were replaced.
+// to delete are gone or were replaced. A provider that versions objects
+// but gives no generation for this blob gets no delete at all: the blob
+// and its mark stay.
 func deleteBlob(ctx context.Context, blobs storage.Storage, p string, generation int64) error {
 	dctx, cancel := context.WithTimeout(ctx, gcDeleteTimeout)
 	defer cancel()
 	var err error
-	if gd, ok := blobs.(storage.GenerationDeleter); ok && generation != 0 {
+	if gd, ok := blobs.(storage.GenerationDeleter); ok {
+		if generation == 0 {
+			// Without the generation the delete could not be made safe
+			// against arriving late; keep the blob and its mark.
+			return errUnknownGeneration
+		}
 		err = gd.DeleteIfGeneration(dctx, p, generation)
 	} else {
 		err = blobs.Delete(dctx, p)
