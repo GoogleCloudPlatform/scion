@@ -15,7 +15,11 @@ coded defaults → SCION_SEED_* → settings.yaml → SCION_SERVER_*
 
 Each layer overrides the one before it. The final merged result is the **bootstrap configuration** — the starting point for a hub instance.
 
-`settings.yaml` is the global `~/.scion/settings.yaml`. When the Hub is started with `scion server start --config <path>`, the `settings.yaml` in that location is layered over the global one only when the global file has no `server` key, the same rule the server applies when it loads its configuration at startup.
+`settings.yaml` is the global `~/.scion/settings.yaml`. With `scion server start --config <path>`, the merge picks its settings file with the same rule the server uses to load its configuration at startup:
+
+- If the global file has a `server` key, it is used and the `--config` `settings.yaml` is not read.
+- If the global file has no `server` key and the `--config` `settings.yaml` has one, the `server` block and the top-level hub sections (`telemetry`, `quotas`, `agent_secrets`, `project_defaults`, `default_harness_config`, `default_timezone` and `default_gcp_identity_*`) come only from the `--config` file. Other keys it does not set, such as `image_registry`, `runtimes` and `profiles`, still come from the global file.
+- If neither file has a `server` key, the `--config` `settings.yaml` is used only when there is no global `settings.yaml`, and the legacy `server.yaml` in the `--config` location, or the named file, is layered as at startup.
 
 ### Layer-0 vs Layer-1 Keys
 

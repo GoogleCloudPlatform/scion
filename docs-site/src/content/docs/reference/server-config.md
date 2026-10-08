@@ -1072,7 +1072,7 @@ Settings that can be changed at runtime and are shared across all replicas. Stor
 On every driver, the effective value for any Layer-1 key is resolved in this order (highest priority first):
 
 1. **`hub_settings` DB row** — cluster-shared, set via admin API. A row fully owns its section.
-2. **Bootstrap merge** — used only when the section has no row: `SCION_SERVER_*`, then `settings.yaml`, then `SCION_SEED_*`, then compiled defaults. `settings.yaml` is the global `~/.scion/settings.yaml`. With `scion server start --config <path>`, the `settings.yaml` in that location is layered over the global one only when the global file has no `server` key, the same rule the server uses to load its configuration at startup; otherwise the `--config` file is not read for these keys.
+2. **Bootstrap merge** — used only when the section has no row: `SCION_SERVER_*`, then `settings.yaml`, then `SCION_SEED_*`, then compiled defaults. `settings.yaml` is the global `~/.scion/settings.yaml`; see [`--config` and the bootstrap merge](/scion/reference/admin-settings/#configuration-precedence) for how a `--config` location takes part.
 
 A `SCION_SERVER_*` variable on a Layer-1 key therefore does not override a row an admin has saved. It only changes the seed (re-synced into seeded rows at restart) and the fallback, and it is deprecated for Layer-1 keys in favour of `SCION_SEED_*`.
 
