@@ -837,9 +837,18 @@ func capturePTYLogs(t *testing.T) *lockedLogBuffer {
 	return b
 }
 
+// brokerReadFaultStore fails every GetRuntimeBroker.
+type brokerReadFaultStore struct {
+	store.Store
+}
+
+func (s brokerReadFaultStore) GetRuntimeBroker(context.Context, string) (*store.RuntimeBroker, error) {
+	return nil, errors.New("injected broker read fault")
+}
+
 // TestPTYPath_UnreadableBrokerRowTakesBrokerPath: a broker row that cannot
-// be read (no row, or an id the store rejects) is treated as supporting
-// attach, and logged as such. Even with a pty-capable agent session
+// be read (no row, an id the store does not know, or a failing read) is
+// treated as supporting attach, and logged as such. Even with a pty-capable agent session
 // running, the preflight names the broker path, the open goes to the
 // broker, and the broker's 4501 attach_unsupported reaches the client
 // unchanged; the agent path is not used.
@@ -847,16 +856,24 @@ func TestPTYPath_UnreadableBrokerRowTakesBrokerPath(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		brokerID  string
+		readFault bool
 		wantClass string
 	}{
-		{"row missing", uuid.NewString(), "not_found"},
-		{"id the store rejects", "not-a-uuid-broker", "read_error"},
+		{"row missing", uuid.NewString(), false, "not_found"},
+		// The store reports an id it cannot parse as not found.
+		{"non-UUID id", "not-a-uuid-broker", false, "not_found"},
+		{"broker read fails", uuid.NewString(), true, "read_error"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newPTYConduitFixture(t)
 			f.setAgentBroker(t, tc.brokerID)
 			b := connectFakeBroker(t, f.srv, tc.brokerID)
 			f.startPTYAgent(t, f.public.URL)
+			if tc.readFault {
+				prev := f.srv.store
+				f.srv.store = brokerReadFaultStore{Store: prev}
+				t.Cleanup(func() { f.srv.store = prev })
+			}
 			logs := capturePTYLogs(t)
 
 			status, path, _ := f.preflight(t)
