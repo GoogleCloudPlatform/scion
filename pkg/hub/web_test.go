@@ -4376,6 +4376,7 @@ func TestSPAShellCacheControl(t *testing.T) {
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, req)
 		resp := rec.Result()
+		defer func() { _ = resp.Body.Close() }()
 		body, _ := io.ReadAll(resp.Body)
 		return resp, string(body)
 	}
@@ -4409,6 +4410,8 @@ func TestSPAShellCacheControl(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	rec := httptest.NewRecorder()
 	bare.Handler().ServeHTTP(rec, req)
-	assert.Equal(t, "no-cache", rec.Result().Header.Get("Cache-Control"))
+	bareResp := rec.Result()
+	defer func() { _ = bareResp.Body.Close() }()
+	assert.Equal(t, "no-cache", bareResp.Header.Get("Cache-Control"))
 	assert.NotContains(t, rec.Body.String(), "__SCION_DATA__")
 }
