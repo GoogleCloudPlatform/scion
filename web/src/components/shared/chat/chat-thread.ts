@@ -3460,11 +3460,15 @@ export class ScionChatThread extends LitElement {
 
   private async loadOlderMessagesV2(scrollEl: HTMLElement): Promise<void> {
     const loadId = this.fetchId;
+    const jumpSeq = this._jumpSeq;
+    // A jump that started after this load replaced the view with the page
+    // around its target: this older page is not contiguous with it.
+    const jumpedSince = (): boolean => jumpSeq !== this._jumpSeq;
     this.loadingOlder = true;
     const prevScrollHeight = scrollEl.scrollHeight;
 
     try {
-      await this.fetchHistoryV2(this.nextCursor || undefined);
+      await this.fetchHistoryV2(this.nextCursor || undefined, () => !jumpedSince());
     } catch {
       // Silently fail for older messages
     } finally {
@@ -3473,8 +3477,13 @@ export class ScionChatThread extends LitElement {
       if (loadId === this.fetchId) {
         this.loadingOlder = false;
         await this.updateComplete;
-        const newScrollHeight = scrollEl.scrollHeight;
-        scrollEl.scrollTop += newScrollHeight - prevScrollHeight;
+        // No scroll correction after a jump took over the view, or while a
+        // jump's smooth scroll is still settling: a scrollTop write would
+        // cancel that scroll, and its settle check corrects the landing.
+        if (!jumpedSince() && this._jumpScrollCleanup === null) {
+          const newScrollHeight = scrollEl.scrollHeight;
+          scrollEl.scrollTop += newScrollHeight - prevScrollHeight;
+        }
       }
     }
   }
