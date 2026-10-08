@@ -238,19 +238,39 @@ func TestBrokerRegister_NameMatchesOtherBroker(t *testing.T) {
 	setBrokerFlagForTest(t, brokerRegisterCmd, "broker-name", "taken-name")
 	out := runRegisterForTest(t)
 
-	assert.Contains(t, out, "Warning: the name 'taken-name' matched an existing broker on the hub (ID: 99999999-8888-7777-6666-555555555555)")
-	assert.Contains(t, out, "this host now uses that broker's identity")
+	assert.Contains(t, out, "Warning: the name 'taken-name' matched an existing broker on the hub (ID: 99999999-8888-7777-6666-555555555555); this host had no saved broker ID.")
+	assert.Contains(t, out, "This host now uses that broker's identity")
 	assert.Contains(t, out, "registered successfully (ID: 99999999-8888-7777-6666-555555555555)")
+}
+
+// TestBrokerRegister_NameMatchesOtherBroker_SavedID: with a saved broker ID,
+// the takeover warning names it.
+func TestBrokerRegister_NameMatchesOtherBroker_SavedID(t *testing.T) {
+	hub := newRegisterHub(t)
+	hub.reregistered = true
+	hub.matchedID = "99999999-8888-7777-6666-555555555555"
+	globalDir := setupRegisterTest(t, hub)
+	const savedID = "11111111-2222-3333-4444-555555555555"
+	writeGlobalSettings(t, globalDir, "schema_version: \"1\"\nserver:\n  broker:\n    broker_id: "+savedID+"\n")
+
+	setBrokerFlagForTest(t, brokerRegisterCmd, "broker-name", "taken-name")
+	out := runRegisterForTest(t)
+
+	assert.Contains(t, out, "matched an existing broker on the hub (ID: 99999999-8888-7777-6666-555555555555); not this host's broker ID ("+savedID+").")
 }
 
 func TestWarnBrokerIdentityTakeover(t *testing.T) {
 	var buf bytes.Buffer
-	warnBrokerIdentityTakeover(&buf, "n", "id-1", "id-1")
+	warnBrokerIdentityTakeover(&buf, "n", "id-1", "id-1", true)
 	assert.Empty(t, buf.String(), "same broker ID: no warning")
-	warnBrokerIdentityTakeover(&buf, "n", "", "id-1")
+	warnBrokerIdentityTakeover(&buf, "n", "", "id-1", true)
 	assert.Empty(t, buf.String())
-	warnBrokerIdentityTakeover(&buf, "n", "id-2", "id-1")
-	assert.Contains(t, buf.String(), "matched an existing broker on the hub (ID: id-2), not this host's broker ID (id-1)")
+	warnBrokerIdentityTakeover(&buf, "n", "id-2", "id-1", true)
+	assert.Contains(t, buf.String(), "matched an existing broker on the hub (ID: id-2); not this host's broker ID (id-1).")
+	buf.Reset()
+	warnBrokerIdentityTakeover(&buf, "n", "id-2", "generated", false)
+	assert.Contains(t, buf.String(), "matched an existing broker on the hub (ID: id-2); this host had no saved broker ID.")
+	assert.NotContains(t, buf.String(), "generated", "an ID that was never saved is not printed")
 }
 
 // TestPersistBrokerName_ServerStartReadsIt: the name register saves is the
@@ -268,7 +288,7 @@ func TestPersistBrokerName_ServerStartReadsIt(t *testing.T) {
 			if content != "" {
 				writeGlobalSettings(t, globalDir, content)
 			}
-			persistBrokerName(io.Discard, globalDir, "rig-c")
+			persistBrokerName(io.Discard, "rig-c")
 
 			cfg, err := config.LoadGlobalConfig("")
 			require.NoError(t, err)
@@ -316,15 +336,15 @@ func TestResolveRegisterBrokerName(t *testing.T) {
 }
 
 func TestPersistBrokerName(t *testing.T) {
-	_, globalDir := brokerTestHome(t)
+	brokerTestHome(t)
 
 	var buf bytes.Buffer
-	persistBrokerName(&buf, globalDir, "rig-a")
+	persistBrokerName(&buf, "rig-a")
 	assert.Contains(t, buf.String(), "saved to global settings")
 	assert.Equal(t, "rig-a", config.ConfiguredBrokerName())
 
 	buf.Reset()
-	persistBrokerName(&buf, globalDir, "rig-a")
+	persistBrokerName(&buf, "rig-a")
 	assert.Empty(t, buf.String(), "saving the same name again is silent")
 }
 

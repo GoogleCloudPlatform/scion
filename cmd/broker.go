@@ -552,10 +552,12 @@ func runBrokerRegister(cmd *cobra.Command, args []string) error {
 
 	// Get or generate a stable broker UUID
 	var stableBrokerID string
+	stableBrokerIDSaved := false
 	if globalDirErr == nil {
 		globalSettings, gsErr := config.LoadSettings(globalDir)
 		if gsErr == nil && globalSettings.Hub != nil && globalSettings.Hub.BrokerID != "" {
 			stableBrokerID = globalSettings.Hub.BrokerID
+			stableBrokerIDSaved = true
 		}
 	}
 	if stableBrokerID == "" {
@@ -614,7 +616,7 @@ func runBrokerRegister(cmd *cobra.Command, args []string) error {
 				brokerName = keepHubBrokerName(os.Stdout, brokerName, b.Name, brokerNameSet)
 			}
 			fmt.Printf("Found existing broker registration for '%s' (ID: %s), re-registering...\n", brokerName, createResp.BrokerID)
-			warnBrokerIdentityTakeover(os.Stdout, brokerName, createResp.BrokerID, stableBrokerID)
+			warnBrokerIdentityTakeover(os.Stdout, brokerName, createResp.BrokerID, stableBrokerID, stableBrokerIDSaved)
 		} else {
 			fmt.Printf("Broker created (ID: %s), completing join...\n", createResp.BrokerID)
 		}
@@ -647,7 +649,7 @@ func runBrokerRegister(cmd *cobra.Command, args []string) error {
 	} else {
 		persistBrokerHubSettings(os.Stdout, globalDir, endpoint, brokerID, hubName)
 		if brokerNameSet {
-			persistBrokerName(os.Stdout, globalDir, brokerName)
+			persistBrokerName(os.Stdout, brokerName)
 		}
 	}
 
@@ -717,20 +719,33 @@ func keepHubBrokerName(w io.Writer, requested, onHub string, requestedByFlag boo
 // warnBrokerIdentityTakeover warns when a re-registration matched an
 // existing broker other than the one this host's broker ID names: the hub
 // matched it by name, and this host now uses that broker's identity. It
-// only warns; checking before registering is a separate concern.
-func warnBrokerIdentityTakeover(w io.Writer, name, matchedID, localID string) {
+// only warns; checking before registering is a separate concern. localSaved
+// is false when localID was generated for this registration because the
+// host had no saved broker ID; the warning then does not print it, as it
+// is recorded nowhere.
+func warnBrokerIdentityTakeover(w io.Writer, name, matchedID, localID string, localSaved bool) {
 	if matchedID == "" || matchedID == localID {
 		return
 	}
-	_, _ = fmt.Fprintf(w, "Warning: the name '%s' matched an existing broker on the hub (ID: %s), not this host's broker ID (%s); this host now uses that broker's identity. If another broker uses that name, register with a different --broker-name.\n", name, matchedID, localID)
+	local := "this host had no saved broker ID"
+	if localSaved {
+		local = fmt.Sprintf("not this host's broker ID (%s)", localID)
+	}
+	_, _ = fmt.Fprintf(w, "Warning: the name '%s' matched an existing broker on the hub (ID: %s); %s. This host now uses that broker's identity. If another broker uses that name, register with a different --broker-name.\n", name, matchedID, local)
 }
 
 // persistBrokerName saves name as this host's broker name in the global
 // settings, where later commands and 'server start' read it, so they do not
-// fall back to the hostname and match another broker on the hub.
-func persistBrokerName(w io.Writer, globalDir, name string) {
-	previous := config.ConfiguredBrokerName()
-	if previous == name {
+// fall back to the hostname and match another broker on the hub. It reads
+// and writes the global directory resolved by config.GetGlobalDir, the
+// same one config.ConfiguredBrokerName reads.
+func persistBrokerName(w io.Writer, name string) {
+	if config.ConfiguredBrokerName() == name {
+		return
+	}
+	globalDir, err := config.GetGlobalDir()
+	if err != nil {
+		_, _ = fmt.Fprintf(w, "Warning: failed to save broker name to global settings: %v\n", err)
 		return
 	}
 	if err := config.UpdateSetting(globalDir, config.BrokerNameSettingKey, name, true); err != nil {
