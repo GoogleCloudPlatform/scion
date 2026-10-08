@@ -3194,6 +3194,15 @@ func (s *Server) submitAgentEnv(w http.ResponseWriter, r *http.Request, projectI
 		if writeAgentTokenRecordError(w, err) {
 			return
 		}
+		// The hub can refuse the finalize itself, before or instead of the
+		// broker: answer with the hub's own classification, as create does
+		// (ptone/scion#3452).
+		if writeAgentTokenIssueError(w, err) {
+			return
+		}
+		if writeEmptyPerAgentCapabilityError(w, err) {
+			return
+		}
 		var stillMissing *ErrEnvStillMissing
 		if errors.As(err, &stillMissing) {
 			MissingEnvVars(w, stillMissing.Requirements.Needs,
