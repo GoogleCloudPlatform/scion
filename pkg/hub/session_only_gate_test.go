@@ -129,7 +129,7 @@ func TestSessionOnlyGate_ReasonIsReported(t *testing.T) {
 	rec = httptest.NewRecorder()
 	payload := `{"agentId":"` + f.agent + `","message":"x"}`
 	m.srv.authorizeScheduledMessageAuthoring(rec, requestWithContext(ctx, http.MethodPost, "/api/v1/projects/"+f.project+"/scheduled-events", nil), f.project, payload, "", "")
-	_, credential = sessionOnlyDetailsOf(rec)
+	_, credential := sessionOnlyDetailsOf(rec)
 	assert.NotEqual(t, sessionRequiredCredential, credential, "scheduled message authoring: refused as session-only: %s", rec.Body.String())
 
 	bindings, err := m.store.ListRoleBindingsForPrincipal(context.Background(), store.RoleBindingPrincipalUser, m.adminID)

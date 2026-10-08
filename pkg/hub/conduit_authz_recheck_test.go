@@ -446,8 +446,8 @@ func TestConduitAuthzRecheck_ResyncAfterListenGap(t *testing.T) {
 	assert.NotContains(t, f.metrics.list(), "notify/closed/pty")
 }
 
-// faultStore makes selected reads fail.
-type faultStore struct {
+// conduitFaultStore makes selected reads fail.
+type conduitFaultStore struct {
 	store.Store
 	failGetAgent     atomic.Bool
 	getAgentOKCalls  atomic.Int32 // GetAgent calls that still succeed when failGetAgent is set
@@ -457,7 +457,7 @@ type faultStore struct {
 
 var errInjectedStoreFault = errors.New("injected store fault")
 
-func (s *faultStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
+func (s *conduitFaultStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
 	if s.failGetAgent.Load() {
 		if s.getAgentOKCalls.Add(-1) < 0 {
 			return nil, errInjectedStoreFault
@@ -466,14 +466,14 @@ func (s *faultStore) GetAgent(ctx context.Context, id string) (*store.Agent, err
 	return s.Store.GetAgent(ctx, id)
 }
 
-func (s *faultStore) GetUser(ctx context.Context, id string) (*store.User, error) {
+func (s *conduitFaultStore) GetUser(ctx context.Context, id string) (*store.User, error) {
 	if s.failGetUser.Load() {
 		return nil, errInjectedStoreFault
 	}
 	return s.Store.GetUser(ctx, id)
 }
 
-func (s *faultStore) ListRoleBindingsForPrincipals(ctx context.Context, principals []store.PrincipalRef, scopeTypes []string, scopeIDs []string) ([]*store.RoleBinding, error) {
+func (s *conduitFaultStore) ListRoleBindingsForPrincipals(ctx context.Context, principals []store.PrincipalRef, scopeTypes []string, scopeIDs []string) ([]*store.RoleBinding, error) {
 	if s.failBindingsList.Load() {
 		return nil, errInjectedStoreFault
 	}
@@ -488,16 +488,16 @@ func (s *faultStore) ListRoleBindingsForPrincipals(ctx context.Context, principa
 func TestConduitAuthzRecheck_StoreFaultDefers(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
-		fault func(*faultStore)
+		fault func(*conduitFaultStore)
 	}{
-		{"agent read fails", func(s *faultStore) { s.failGetAgent.Store(true) }},
-		{"user read fails", func(s *faultStore) { s.failGetUser.Store(true) }},
+		{"agent read fails", func(s *conduitFaultStore) { s.failGetAgent.Store(true) }},
+		{"user read fails", func(s *conduitFaultStore) { s.failGetUser.Store(true) }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newRecheckFixture(t, nil, 60*time.Second)
 			w := f.open(t, f.u1, grant.StreamKindPTY, 1)
 			require.NoError(t, f.store.DeleteRoleBinding(context.Background(), f.attachBind[f.u1.ID()]))
-			fs := &faultStore{Store: f.srv.store}
+			fs := &conduitFaultStore{Store: f.srv.store}
 			tc.fault(fs)
 			f.srv.store = fs
 
@@ -521,7 +521,7 @@ func TestConduitAuthzRecheck_StoreFaultDefers(t *testing.T) {
 func TestConduitAuthzRecheck_AuthzLookupFaultDefers(t *testing.T) {
 	f := newRecheckFixture(t, nil, -1)
 	w := f.open(t, f.u1, grant.StreamKindPTY, 1)
-	fs := &faultStore{Store: f.srv.authzService.store}
+	fs := &conduitFaultStore{Store: f.srv.authzService.store}
 	fs.failBindingsList.Store(true)
 	f.srv.authzService.store = fs
 	t.Cleanup(func() { f.srv.authzService.store = fs.Store })
@@ -538,7 +538,7 @@ func TestConduitAuthzRecheck_DenyWithStoreProbeFailureDefers(t *testing.T) {
 	f := newRecheckFixture(t, nil, -1)
 	w := f.open(t, f.u1, grant.StreamKindPTY, 1)
 	require.NoError(t, f.store.DeleteRoleBinding(context.Background(), f.attachBind[f.u1.ID()]))
-	fs := &faultStore{Store: f.srv.store}
+	fs := &conduitFaultStore{Store: f.srv.store}
 	fs.getAgentOKCalls.Store(1) // the check's agent read succeeds, the probe after the deny fails
 	fs.failGetAgent.Store(true)
 	f.srv.store = fs
