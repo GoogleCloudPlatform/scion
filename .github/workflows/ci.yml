@@ -558,7 +558,14 @@ jobs:
   launch-store-postgres-tests:
     name: T1 Launch Store PostgreSQL Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # 80m: the job took ~27m on main, but ~55m on a runner 2-4x slower than
+    # usual (GoogleCloudPlatform/scion#2855), where pkg/store/entadapter hit
+    # its old 40m go test timeout. make test-launch-store-postgres now gives
+    # entadapter 60m. The rest of that slow job took ~15m (plus the
+    # storetest and pkg/hub runs the timeout skipped), so 80m keeps the job
+    # limit above the go test limit and a real hang still produces go's
+    # goroutine dump instead of a bare job kill (ptone/scion#3945).
+    timeout-minutes: 80
     services:
       postgres:
         image: postgres:16
