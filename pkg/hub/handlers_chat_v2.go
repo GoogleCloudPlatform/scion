@@ -106,8 +106,9 @@ func (s *Server) handleChatSpaces(w http.ResponseWriter, r *http.Request) {
 	// contributor and broker counts ListProjects computes per project.
 	// Project templates are blueprints, not chat spaces: exclude them here
 	// so no client lists them in the rail.
-	notTemplate := false
-	allProjects, err := s.store.ListProjectSummaries(ctx, store.ProjectFilter{IsTemplate: &notTemplate}, store.ListOptions{Limit: 1000})
+	allProjects, err := s.store.ListProjectSummaries(ctx, store.ProjectFilter{
+		IsTemplate: new(bool), // exclude templates
+	}, store.ListOptions{Limit: 1000})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list projects", nil)
 		return
