@@ -241,6 +241,13 @@ func (s *Server) sendChatMessage(ctx context.Context, user UserIdentity, key str
 	if serr != nil {
 		return nil, serr
 	}
+	// A DM may only be sent by one of its two participants.
+	// authorizeChatSend has checked this; it is checked again here so the
+	// check sits in the function that sends user-to-user messages
+	// (sendHumanToHuman), as hack/checksecuritymarkergates requires.
+	if target.IsDM && !isDMParticipant(key, user.ID()) {
+		return nil, chatSendForbidden()
+	}
 
 	// --- Validate ---
 	content, attachmentRefs, serr := s.validateChatSendInput(ctx, target, in)
