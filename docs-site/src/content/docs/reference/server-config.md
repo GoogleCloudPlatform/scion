@@ -175,8 +175,8 @@ Controls the Runtime Broker service.
 | `enabled` | bool | `false` | Whether to start the broker service. |
 | `port` | int | `9800` | HTTP port to listen on. |
 | `broker_id` | string | | Unique UUID for this broker. |
-| `broker_name` | string | | Human-readable name. |
-| `broker_nickname` | string | | Short display name. |
+| `broker_name` | string | | Name the broker registers under on the Hub. Default: the hostname (`Hosted Broker` for a broker run with a co-located Hub). |
+| `broker_nickname` | string | | Same as `broker_name`, and takes precedence over it. Set by `scion runtime-broker register --broker-name`. |
 | `hub_endpoint` | string | | The Hub URL this broker connects to. |
 | `container_hub_endpoint` | string | | Overrides `hub_endpoint` when injecting the Hub URL into agent containers. Use when containers cannot reach the Hub at the broker's address (e.g. `http://host.containers.internal:8080` for local development). |
 | `broker_token` | string | | Authentication token for the Hub. |
