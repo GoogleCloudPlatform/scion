@@ -64,8 +64,12 @@ are separate configs, so check the printed scope to see which one you changed.
 
 ### Source-URL tracking and "Refresh from Source"
 
-When a config is installed from a remote source, the Hub records the **`sourceUrl`** it came
-from. You can later re-import (refresh) the config from that source:
+When a config is imported from a URL through the Hub (the import box in the web UI, or
+`POST /api/v1/resources/import`), the Hub records the **`sourceUrl`** it came from.
+`scion harness-config install` is different: it fetches the source on your machine, uploads the
+files, and records no source URL. To attach one, run
+`scion harness-config update <name> --url <url>`. You can re-import (refresh) a config from its
+stored source:
 
 ```bash
 # Re-import a single config from its stored source URL
@@ -210,8 +214,11 @@ Use exactly that URL form. On a **hosted** Hub, these give a usable copy that th
 - `scion harness-config install --global <url>`, which uploads the files without recording
   where they came from.
 
-To turn such a copy back into an updating built-in, delete it and re-import it from the
-canonical URL. **Workstation** Hubs re-sync built-ins from `~/.scion/harness-configs` at every
+To turn such a copy back into an updating built-in, re-import the canonical URL over it, either
+through the web UI or API import above, or with
+`scion harness-config update <name> --url https://github.com/GoogleCloudPlatform/scion/harnesses/<name>`.
+This updates the existing config in place and records the canonical source URL, so later
+upgrades update it again. You do not need to delete it first. **Workstation** Hubs re-sync built-ins from `~/.scion/harness-configs` at every
 start, so a re-imported config is updated whichever way you imported it.
 
 The same applies to the built-in `default` template: you can re-import it as a global template
