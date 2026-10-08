@@ -87,7 +87,14 @@ func (s *Server) deliverArtifactReview(ctx context.Context, n artifacts.ReviewNo
 func artifactReviewNoticeText(n artifacts.ReviewNotice) string {
 	ref := n.Ref()
 	var b strings.Builder
-	fmt.Fprintf(&b, "A review (v%d, by a %s) was published on your artifact; it is now the current version.\n", n.Seq, n.ReviewerKind)
+	by := "someone else"
+	switch n.ReviewerKind {
+	case artifacts.PrincipalKindAgent:
+		by = "an agent"
+	case artifacts.PrincipalKindUser:
+		by = "a user"
+	}
+	fmt.Fprintf(&b, "A review (v%d, by %s) was published on your artifact; it is now the current version.\n", n.Seq, by)
 	fmt.Fprintf(&b, "Artifact: v%d - scion artifact get %s\n", n.Seq, ref)
 	fmt.Fprintf(&b, "Without the marks: scion artifact get %s --clean\n", ref)
 	fmt.Fprintf(&b, "Apply or answer the marks, then publish the result as the next version: scion artifact publish <file> --version-of %s",

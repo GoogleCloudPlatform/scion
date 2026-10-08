@@ -103,9 +103,12 @@ marks ({>>comment<<}, {~~old~>new~~}, {++insert++}, {--delete--},
 {==highlight==}). It becomes the artifact's current version and the
 artifact's owner is notified. A review may change nothing outside marks:
 the hub rejects it, listing the changed lines, when its text with every
-mark rejected differs from the current version. For a plain edit, publish
-without --review. A single file reviews the entry file of the current
-version; the other files of a bundle are carried over unchanged.
+mark rejected differs from the version it was made against. That version
+is the current one when the review starts; if another version is
+published before the review is saved, the review is refused and must be
+made again against the new version. A single file reviews the entry file
+of the current version; the other files of a bundle are carried over
+unchanged.
 
 Examples:
   scion artifact publish design.md
@@ -197,9 +200,10 @@ kind publish (at or before <ref>'s version), skipping reviews.
 
 Every file is checked against the size and sha256 recorded at publish
 time before it is written (before --clean or --accept is applied); a
-mismatch writes nothing for that file and fails. With --out, only plain relative names are written (none starting
-with "."), never through a symbolic link below the --out directory, and a
-file that already exists is replaced only with --force.
+mismatch writes nothing for that file and fails. With --out, only plain
+relative names are written (none starting with "."), never through a
+symbolic link below the --out directory, and a file that already exists
+is replaced only with --force.
 
 Examples:
   scion artifact get scion://artifact/5f1c2d3e-...
