@@ -2693,9 +2693,10 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 
 	// 4. Load environment variables (SCION_ prefix)
 	_ = k.Load(env.ProviderWithValue("SCION_", ".", func(key, value string) (string, interface{}) {
-		// An empty plaintext switch is unset, not a request to disable TLS.
-		// Skip it before koanf maps the empty value onto tls.enabled.
-		if key == "SCION_OTEL_INSECURE" && value == "" {
+		// An exported but empty variable is treated as unset, so it never
+		// blanks a value from the settings files. This also keeps an empty
+		// SCION_OTEL_INSECURE from being mapped onto tls.enabled.
+		if value == "" {
 			return "", nil
 		}
 		return versionedEnvKeyMapper(key), value
@@ -2790,16 +2791,16 @@ func versionedEnvKeyMapper(s string) string {
 		// set (e.g. a broker started inside an agent container, which the
 		// hub sets it in). Returning "" makes the env provider drop the
 		// variable entirely, the same idiom used below for a removed
-		// legacy env var and for SCION_OTEL_INSECURE's empty-value case.
+		// legacy env var and by the env callback for an empty value.
 		return ""
 	}
 	if isRemovedLegacyEnv(s) {
 		// SCION_HUB_GROVE_ID is no longer read, not even via the generic
 		// "hub_" mapping below, which would otherwise land on the
 		// unrecognised key hub.grove_id. Returning "" makes the env
-		// provider drop the variable entirely, the same idiom used for
-		// SCION_OTEL_INSECURE above. WarnRemovedLegacyEnv reports it
-		// separately.
+		// provider drop the variable entirely, the same idiom the env
+		// callback uses for an empty value. WarnRemovedLegacyEnv reports
+		// it separately.
 		return ""
 	}
 	key := strings.ToLower(strings.TrimPrefix(s, "SCION_"))
