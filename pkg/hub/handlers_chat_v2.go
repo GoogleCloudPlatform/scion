@@ -1290,6 +1290,10 @@ func (s *Server) suspendedPrimaryWakeable(ctx context.Context, user UserIdentity
 	if isManagedAgentRuntime(agent.Runtime) || agent.RuntimeBrokerID == "" {
 		return false
 	}
+	// A held agent is not offered a wake (ptone/scion#3433).
+	if held, err := s.agentHeld(ctx, agent.ID); err != nil || held {
+		return false
+	}
 	return s.agentLifecycleAllowed(ctx, user, agent)
 }
 
@@ -1419,11 +1423,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 			"target_agent", primaryAgent.ID,
 			"reason", reason,
 		)
-		return nil, newChatSendError(http.StatusForbidden, ErrCodeMessageDenied, "Message delivery denied", map[string]interface{}{
-			"reason":        mapReasonToCode(reason),
-			"senderMode":    "user",
-			"recipientMode": primaryAgent.MessageMode,
-		})
+		return nil, chatSendMessageDenied(reason, primaryAgent)
 	}
 
 	// #2257 P2 (design auto-offload-large-dm §4.2 item 1): strip hub-reserved
@@ -1450,6 +1450,13 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 	// land once the agent comes up. Modeled on the phase check in
 	// dispatchRoutedRecipient (handlers_broker_inbound_routed.go).
 	primaryUnreachable, primaryUnreachableReason := isAgentUnreachable(primaryAgent)
+	// A held primary (ptone/scion#3433) is unreachable whatever its phase:
+	// the row is kept, never dispatched. A lookup fault is treated the same.
+	if !primaryUnreachable && primaryAgent != nil {
+		if held, holdErr := s.agentHeld(ctx, primaryAgent.ID); holdErr != nil || held {
+			primaryUnreachable, primaryUnreachableReason = true, string(state.PhaseSuspended)
+		}
+	}
 	var dispatchFailureCode string
 
 	// Migration gate (design agent-reincarnate §3.7, R3 p2a-r1 review):
@@ -1938,6 +1945,21 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 			}
 
 			mentionDispatchOK := true
+			// A held secondary (ptone/scion#3433) keeps its row but is
+			// never dispatched to; a lookup fault is treated the same.
+			if held, holdErr := s.agentHeld(ctx, mentionAgent.ID); holdErr != nil || held {
+				if mentionPersisted {
+					_ = s.markFailed(ctx, mentionStoreMsg.ID, "Agent unreachable (suspended)")
+				}
+				for i, mr := range mentionResults {
+					if strings.EqualFold(mr.Slug, mentionAgent.Slug) {
+						mentionResults[i].Status = "error"
+						mentionResults[i].Error = "Agent unreachable (suspended)"
+						break
+					}
+				}
+				continue
+			}
 			if dispatcher != nil {
 				// withDispatchMessageID: same rationale as the primary dispatch
 				// above, so a buffered-delivery failure on this mention row can

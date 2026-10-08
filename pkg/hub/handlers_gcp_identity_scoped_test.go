@@ -27,6 +27,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/api/googleapi"
 )
 
 // Coverage for the top-level /api/v1/gcp-service-accounts route (P4 item C).
@@ -416,4 +417,21 @@ func TestGCPSA_HubScopeList_IncludesMintQuota(t *testing.T) {
 	// Project fields should be zero-omitted
 	assert.Equal(t, 0, resp.MintQuota.ProjectMinted, "project_minted should be zero at hub scope")
 	assert.Equal(t, 0, resp.MintQuota.ProjectCap, "project_cap should be zero at hub scope")
+}
+
+func TestGCPSA_HubMint_CreatePermissionDenied_NamesRole(t *testing.T) {
+	srv, _, mock, admin, _ := setupHubMintTest(t)
+	mock.createErr = fmt.Errorf("creating service account: %w", &googleapi.Error{
+		Code:    http.StatusForbidden,
+		Message: "Permission 'iam.serviceAccounts.create' denied on resource (or it may not exist).",
+	})
+
+	rec := doRequestAsUser(t, srv, admin, http.MethodPost,
+		"/api/v1/gcp-service-accounts/mint?scope=hub", map[string]string{})
+	require.Equal(t, http.StatusBadGateway, rec.Code, "body: %s", rec.Body.String())
+
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Contains(t, errResp.Error.Message, "the hub's own GCP service account")
+	assert.Contains(t, errResp.Error.Message, "roles/iam.serviceAccountAdmin on project test-hub-project")
 }

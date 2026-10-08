@@ -334,7 +334,7 @@ func (s *Server) createScheduledEvent(w http.ResponseWriter, r *http.Request, pr
 	}
 
 	// The revision's frozen ceiling is computed before any write.
-	ceiling, ok := s.revisionAuthorityCeiling(w, r, projectID, req.EventType, ActionCreate)
+	ceiling, ok := s.revisionAuthorityCeiling(w, r, projectID, ActionCreate)
 	if !ok {
 		return
 	}

@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 173
+**Operations:** 174
 
 ## Table of Contents
 
@@ -13,6 +13,7 @@
 - [agent.lifecycle.exec](#agentlifecycleexec) — Run a command in an agent's container
 - [agent.lifecycle.env](#agentlifecycleenv) — Submit environment values to an agent
 - [agent.lifecycle.resetauth](#agentlifecycleresetauth) — Reset an agent's harness authentication
+- [agent.hold.lift](#agentholdlift) — Lift the holds of a suspended agent whose owners are admitted to its project again (hub admin)
 - [agent.lifecycle.reincarnate](#agentlifecyclereincarnate) — Reincarnate an agent
 - [agent.read](#agentread) — Read a single agent's metadata by ID
 - [agent.list](#agentlist) — List agents within the caller's authorized project scope
@@ -428,6 +429,39 @@
 ### Tests
 
 - `pkg/hub:TestAgentSubRoute_CatalogDrift`
+
+---
+
+## agent.hold.lift
+
+**Domain:** agent
+
+**Description:** Lift the holds of a suspended agent whose owners are admitted to its project again (hub admin)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/agents/{id}/hold/lift` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `GOV_PENDING`)
+
+**Base Permission:** `agent.update`
+
+**Resource Resolver:** agent-from-url
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestAgentSubRoute_CatalogDrift`
+- `pkg/hub:TestAgentHoldLift`
 
 ---
 

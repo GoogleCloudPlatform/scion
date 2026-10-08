@@ -1059,6 +1059,9 @@ func TestEvaluateAgentMessage_CrossProject_GroupDerivedMember(t *testing.T) {
 	}
 
 	// Verify cross-project messaging is allowed with members policy.
+	// The sender's origin is a member of the sender's own project, so the
+	// sender is in good standing (ptone/scion#3433).
+	ensureStandingRoot(t, f.store, f.projectA, groupUser.ID)
 	sender := msgAuthzAgent(t, f.store, "cp-grp-sender", f.projectA, store.MessageModeHub,
 		[]string{groupUser.ID})
 	target := msgAuthzAgent(t, f.store, "cp-grp-target", f.projectB, store.MessageModeProject,
@@ -1147,6 +1150,9 @@ func TestEvaluateAgentMessage_CrossProject_NestedGroupMembership(t *testing.T) {
 	}
 
 	// Verify cross-project messaging.
+	// The sender's origin is a member of the sender's own project, so the
+	// sender is in good standing (ptone/scion#3433).
+	ensureStandingRoot(t, f.store, f.projectA, nestedUser.ID)
 	sender := msgAuthzAgent(t, f.store, "cp-nested-sender", f.projectA, store.MessageModeHub,
 		[]string{nestedUser.ID})
 	target := msgAuthzAgent(t, f.store, "cp-nested-target", f.projectB, store.MessageModeProject,
@@ -1297,6 +1303,9 @@ func TestEvaluateAgentMessage_CrossProject_CustomRoleIsMember(t *testing.T) {
 	}
 
 	// Verify cross-project messaging is allowed under the "members" policy.
+	// The sender's origin is a member of the sender's own project, so the
+	// sender is in good standing (ptone/scion#3433).
+	ensureStandingRoot(t, f.store, f.projectA, customUser.ID)
 	sender := msgAuthzAgent(t, f.store, "cp-cust-sender", f.projectA, store.MessageModeHub,
 		[]string{customUser.ID})
 	target := msgAuthzAgent(t, f.store, "cp-cust-target", f.projectB, store.MessageModeProject,

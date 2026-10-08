@@ -153,11 +153,13 @@ type relationshipOutcome struct {
 }
 
 // relationshipProjectAccess enables the project-access stage (2c) for one
-// evaluation and carries the request-scoped admission memo. A nil
-// *relationshipProjectAccess disables the stage: only Decide's step 9
-// (interactive and UAT requests) enables it. The delegation-ceiling walk
-// (userRelationshipAuthority) evaluates a delegator's relationships with the
-// stage disabled; that path is not covered by this decision.
+// evaluation and carries the admission memo. A nil
+// *relationshipProjectAccess disables the stage. Decide's step 9
+// (interactive and UAT requests) enables it with the request-scoped memo.
+// The delegation-ceiling walk (userRelationshipAuthority) enables it for a
+// user delegator with a fresh memo and no requestCtx (the delegator is not
+// the requester): a delegator's relationship grants are honoured only while
+// the delegator is admitted to the target's project (ptone/scion#3433).
 type relationshipProjectAccess struct {
 	memo *ProjectAdmissionCache
 	// requestCtx, when set, is the request's own context, used for the

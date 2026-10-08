@@ -295,7 +295,7 @@ func (s *Server) createSchedule(w http.ResponseWriter, r *http.Request, projectI
 	}
 
 	// The revision's frozen ceiling is computed before any write.
-	ceiling, ok := s.revisionAuthorityCeiling(w, r, projectID, req.EventType, ActionCreate)
+	ceiling, ok := s.revisionAuthorityCeiling(w, r, projectID, ActionCreate)
 	if !ok {
 		return
 	}
@@ -549,7 +549,7 @@ func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request, projectI
 	if changesFutureDispatch {
 		// The store writes this ceiling in the same conditional update as
 		// the attribution and the revision bump.
-		ceiling, ok := s.revisionAuthorityCeiling(w, r, projectID, schedule.EventType, ActionUpdate)
+		ceiling, ok := s.revisionAuthorityCeiling(w, r, projectID, ActionUpdate)
 		if !ok {
 			return
 		}
@@ -682,7 +682,7 @@ func (s *Server) resumeSchedule(w http.ResponseWriter, r *http.Request, projectI
 	}
 	nextRunAt := cronSchedule.Next(time.Now().UTC())
 
-	ceiling, ok := s.revisionAuthorityCeiling(w, r, projectID, schedule.EventType, ActionUpdate)
+	ceiling, ok := s.revisionAuthorityCeiling(w, r, projectID, ActionUpdate)
 	if !ok {
 		return
 	}

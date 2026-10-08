@@ -694,6 +694,82 @@ test('preset rendering shows correct number of pane slots for each preset', asyn
   expect(singleVisible + singlePH).toBe(1);
 });
 
+/**
+ * Drop a session on whatever element is topmost at the centre of a slot's
+ * placeholder, the way a real drag would hit it. Returns false without
+ * dropping when the placeholder is missing or something else covers it.
+ */
+async function dropAtPlaceholderCentre(
+  page: Page,
+  sessionKey: string,
+  slotIndex: number
+): Promise<boolean> {
+  return page.evaluate(
+    ({ key, slot }) => {
+      const ph = document.querySelector<HTMLElement>(
+        `#terminal-workspace .terminal-slot-placeholder[data-slot-index="${slot}"]`
+      );
+      if (!ph || ph.hidden) return false;
+      const rect = ph.getBoundingClientRect();
+      const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+      if (!(hit instanceof HTMLElement) || !ph.contains(hit)) return false;
+      const dt = new DataTransfer();
+      dt.setData('application/x-scion-terminal', key);
+      const drop = new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: dt });
+      Object.defineProperty(drop, 'dataTransfer', { value: dt });
+      hit.dispatchEvent(drop);
+      return true;
+    },
+    { key: sessionKey, slot: slotIndex }
+  );
+}
+
+/** The slot index of a session's pane when it is shown, else null. */
+async function paneSlotIndex(page: Page, sessionKey: string): Promise<string | null> {
+  return page.evaluate((key) => {
+    const panes = document.querySelectorAll<
+      HTMLElement & { session: { state: { key: string } } | null }
+    >('#terminal-workspace scion-terminal-pane');
+    for (const p of panes) {
+      if (p.session?.state.key === key && p.style.display !== 'none') {
+        return p.dataset.slotIndex ?? null;
+      }
+    }
+    return null;
+  }, sessionKey);
+}
+
+test('multi-pane placeholders are visible drop targets before any slot is filled', async ({
+  page,
+}) => {
+  const socket = await setup(page);
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+  const [sessionKey] = await getPaneSessionKeys(page);
+  expect(sessionKey).toBeTruthy();
+
+  for (const [preset, count] of [
+    ['two-columns', 2],
+    ['two-rows', 2],
+    ['four', 4],
+  ] as const) {
+    await clickPreset(page, preset);
+    await expect.poll(() => activePreset(page)).toBe(preset);
+    await expect.poll(() => visiblePaneCount(page)).toBe(0);
+    await expect.poll(() => placeholderCount(page)).toBe(count);
+    await expect(page.locator('#terminal-workspace .terminal-status')).toBeHidden();
+    await expect(page.locator('#terminal-workspace .terminal-empty')).toBeHidden();
+
+    // Moving the one session through the slots leaves every other slot
+    // empty, so each slot is tested as a placeholder in turn.
+    for (let slot = 0; slot < count; slot++) {
+      expect(await dropAtPlaceholderCentre(page, sessionKey, slot)).toBe(true);
+      await expect.poll(() => paneSlotIndex(page, sessionKey)).toBe(String(slot));
+      await expect.poll(() => placeholderCount(page)).toBe(count - 1);
+    }
+  }
+});
+
 test('fifth-agent open overflows to single when four-pane at capacity; four restores grid', async ({
   page,
 }) => {

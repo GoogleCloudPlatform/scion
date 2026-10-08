@@ -98,6 +98,9 @@ func createWakeDMFixtures(t *testing.T, targetPhase string) (
 		Created: time.Now(),
 	}
 	require.NoError(t, s.CreateUser(ctx, owner))
+	// The owner is a project member, so the fixture agents are in good
+	// standing (ptone/scion#3433).
+	ensureStandingRoot(t, s, project.ID, owner.ID)
 
 	senderAgent = &store.Agent{
 		ID:              tid("sender-wake-dm-" + targetPhase),
