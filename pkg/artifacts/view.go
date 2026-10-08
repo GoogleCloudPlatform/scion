@@ -58,6 +58,11 @@ const (
 	// viewSigDomain separates view capability signatures from any other
 	// use of the key.
 	viewSigDomain = "artifact-view"
+
+	// viewLinkSigDomain separates the signatures of capabilities bound to
+	// a share link from those of capabilities minted for a session, so
+	// neither form can be turned into the other.
+	viewLinkSigDomain = "artifact-view-link"
 )
 
 // viewCSP returns the Content-Security-Policy of a view response served
@@ -122,9 +127,15 @@ type ViewResponse struct {
 	RemoteImages bool `json:"remoteImages,omitempty"`
 }
 
-func viewMAC(key []byte, id string, seq int, exp int64) []byte {
+// viewMAC signs a capability. linkID is "" for a capability minted for a
+// session and the link grant's id for one bound to a share link.
+func viewMAC(key []byte, id string, seq int, exp int64, linkID string) []byte {
 	mac := hmac.New(sha256.New, key)
-	mac.Write([]byte(viewSigDomain + "\n" + id + "\n" + strconv.Itoa(seq) + "\n" + strconv.FormatInt(exp, 10)))
+	if linkID == "" {
+		mac.Write([]byte(viewSigDomain + "\n" + id + "\n" + strconv.Itoa(seq) + "\n" + strconv.FormatInt(exp, 10)))
+	} else {
+		mac.Write([]byte(viewLinkSigDomain + "\n" + id + "\n" + strconv.Itoa(seq) + "\n" + strconv.FormatInt(exp, 10) + "\n" + linkID))
+	}
 	return mac.Sum(nil)
 }
 
@@ -133,38 +144,62 @@ func viewMAC(key []byte, id string, seq int, exp int64) []byte {
 func mintViewCapability(key []byte, id string, seq int, exp time.Time) string {
 	e := exp.Unix()
 	return id + "." + strconv.Itoa(seq) + "." + strconv.FormatInt(e, 10) + "." +
-		base64.RawURLEncoding.EncodeToString(viewMAC(key, id, seq, e))
+		base64.RawURLEncoding.EncodeToString(viewMAC(key, id, seq, e, ""))
+}
+
+// mintLinkViewCapability returns the capability for version seq of
+// artifact id until exp, bound to the share link linkID:
+// "<id>.<seq>.<exp>.<linkID>.<signature>". The view route serves it only
+// while that link is unexpired and unrevoked.
+func mintLinkViewCapability(key []byte, id string, seq int, exp time.Time, linkID string) string {
+	e := exp.Unix()
+	return id + "." + strconv.Itoa(seq) + "." + strconv.FormatInt(e, 10) + "." + linkID + "." +
+		base64.RawURLEncoding.EncodeToString(viewMAC(key, id, seq, e, linkID))
 }
 
 var errBadCapability = errors.New("invalid view capability")
 
-// parseViewCapability checks a capability and returns the artifact and
-// version it names.
-func parseViewCapability(key []byte, capability string, now time.Time) (string, int, error) {
+// viewGrant is what a valid view capability names.
+type viewGrant struct {
+	id  string
+	seq int
+	// linkID is the share link the capability is bound to, or "".
+	linkID string
+}
+
+// parseViewCapability checks a capability and returns what it names.
+func parseViewCapability(key []byte, capability string, now time.Time) (viewGrant, error) {
 	if len(key) == 0 {
-		return "", 0, errBadCapability
+		return viewGrant{}, errBadCapability
 	}
 	parts := strings.Split(capability, ".")
-	if len(parts) != 4 || !canonicalID(parts[0]) {
-		return "", 0, errBadCapability
+	if (len(parts) != 4 && len(parts) != 5) || !canonicalID(parts[0]) {
+		return viewGrant{}, errBadCapability
+	}
+	linkID := ""
+	if len(parts) == 5 {
+		linkID = parts[3]
+		if !canonicalID(linkID) {
+			return viewGrant{}, errBadCapability
+		}
 	}
 	seq, ok := parseSeq(parts[1])
 	if !ok {
-		return "", 0, errBadCapability
+		return viewGrant{}, errBadCapability
 	}
 	exp, err := strconv.ParseInt(parts[2], 10, 64)
 	if err != nil || strconv.FormatInt(exp, 10) != parts[2] {
-		return "", 0, errBadCapability
+		return viewGrant{}, errBadCapability
 	}
-	sig, err := base64.RawURLEncoding.DecodeString(parts[3])
-	if err != nil || !hmac.Equal(sig, viewMAC(key, parts[0], seq, exp)) {
-		return "", 0, errBadCapability
+	sig, err := base64.RawURLEncoding.DecodeString(parts[len(parts)-1])
+	if err != nil || !hmac.Equal(sig, viewMAC(key, parts[0], seq, exp, linkID)) {
+		return viewGrant{}, errBadCapability
 	}
 	t := time.Unix(exp, 0)
 	if !now.Before(t) || t.After(now.Add(ViewTTL+viewMaxSkew)) {
-		return "", 0, errBadCapability
+		return viewGrant{}, errBadCapability
 	}
-	return parts[0], seq, nil
+	return viewGrant{id: parts[0], seq: seq, linkID: linkID}, nil
 }
 
 // handleMintView implements POST /{id}/versions/{seq}/view: a view
@@ -215,7 +250,8 @@ func (s *Service) handleView(w http.ResponseWriter, r *http.Request, segs []stri
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "artifact storage is not configured")
 		return
 	}
-	id, seq, err := parseViewCapability(b.viewKey, segs[0], time.Now())
+	now := time.Now()
+	vg, err := parseViewCapability(b.viewKey, segs[0], now)
 	if err != nil {
 		writeNotFound(w)
 		return
@@ -226,12 +262,25 @@ func (s *Service) handleView(w http.ResponseWriter, r *http.Request, segs []stri
 		return
 	}
 	ctx := r.Context()
-	a, err := b.store.GetArtifact(ctx, id)
-	if err != nil || (a.ExpiresAt != nil && !time.Now().Before(*a.ExpiresAt)) {
+	a, err := b.store.GetArtifact(ctx, vg.id)
+	if err != nil || (a.ExpiresAt != nil && !now.Before(*a.ExpiresAt)) {
 		writeNotFound(w)
 		return
 	}
-	v, err := b.store.GetVersion(ctx, a.ID, seq)
+	if vg.linkID != "" {
+		// A capability from a share link lasts only as long as the link.
+		active, err := b.store.LinkActive(ctx, a.ID, vg.linkID, now)
+		if err != nil {
+			slog.ErrorContext(ctx, "artifacts: check link failed", "error", err)
+			writeError(w, http.StatusInternalServerError, "internal", "could not read the file")
+			return
+		}
+		if !active {
+			writeNotFound(w)
+			return
+		}
+	}
+	v, err := b.store.GetVersion(ctx, a.ID, vg.seq)
 	if err != nil || v.State != VersionStateReady {
 		writeNotFound(w)
 		return

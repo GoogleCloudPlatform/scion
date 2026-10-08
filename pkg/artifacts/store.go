@@ -29,6 +29,10 @@ var ErrNotFound = errors.New("artifacts: not found")
 // whose files have not all arrived.
 var ErrConflict = errors.New("artifacts: conflict")
 
+// ErrTooManyLinks is returned by CreateLink when an artifact already has
+// the maximum number of unexpired share links.
+var ErrTooManyLinks = errors.New("artifacts: too many share links")
+
 // ErrTooManyPending is returned by CreateVersion when an artifact already
 // has the maximum number of pending versions.
 var ErrTooManyPending = errors.New("artifacts: too many pending versions")
@@ -260,6 +264,29 @@ type Store interface {
 	// query only: it decides nothing about access, and every row must
 	// still pass the service's read check before it is shown.
 	ListCandidates(ctx context.Context, q CandidateQuery) ([]Candidate, error)
+
+	// CreateLink adds the share link g (SubjectLink, GrantRead, a non-nil
+	// ExpiresAt, SubjectRef the token hash) to its artifact. In the same
+	// transaction it drops the artifact's link grants that expired at or
+	// before now, and it refuses with ErrTooManyLinks when maxLinks
+	// unexpired links remain. It returns ErrNotFound when the artifact is
+	// absent or deleted.
+	CreateLink(ctx context.Context, g *Grant, maxLinks int, now time.Time) error
+
+	// ResolveLink returns the link grant whose subject ref is tokenHash
+	// together with its artifact, in one query, provided that at now the
+	// link is unexpired and the artifact is live (not deleted, not
+	// expired) with a current version. Every other case, a hash no link
+	// has included, returns ErrNotFound.
+	ResolveLink(ctx context.Context, tokenHash string, now time.Time) (*Artifact, *Grant, error)
+
+	// LinkActive reports whether link grant linkID of artifact artifactID
+	// exists and is unexpired at now.
+	LinkActive(ctx context.Context, artifactID, linkID string, now time.Time) (bool, error)
+
+	// RevokeLink deletes link grant linkID of artifact artifactID. It
+	// returns ErrNotFound when no such link grant exists.
+	RevokeLink(ctx context.Context, artifactID, linkID string) error
 
 	// AddMessageRefs records that message messageID references refs, in the
 	// artifact_message_ref link table. A reference already recorded for the

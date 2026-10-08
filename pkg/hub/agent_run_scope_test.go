@@ -684,7 +684,7 @@ func TestAgentRunScopeLogDedup(t *testing.T) {
 		claims.ID = "jti-" + run
 		return claims, agentTokenCredentialState{evaluated: true, cred: &store.AgentCredential{RunID: run}}
 	}
-	req := runScopeRequest{header: "", method: http.MethodPost, path: "/api/v1/agents/agent-1/status",
+	req := runScopeRequest{header: "", method: http.MethodPost, path: "/api/v1/agents/agent-1/status", classPath: "/api/v1/agents/agent-1/status",
 		route: "/api/v1/agents/", remoteAddr: "192.0.2.10:4000"}
 
 	t.Run("fields", func(t *testing.T) {

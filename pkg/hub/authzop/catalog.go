@@ -223,10 +223,11 @@ var EntryPointExemptions = []EntryPointExemption{
 	{Pattern: "/api/v1/users/me/templates/", Kind: ExemptionAuthenticationOnly, Reason: "Manage own template by ID, self-service", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/gcs/object", Kind: ExemptionAuthenticationOnly, Reason: "gs:// link fetch, inline message-visibility-based authorization", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/conduit/grant-keys", Kind: ExemptionAuthenticationOnly, Reason: "Conduit grant public keys, authenticated read-only, experiment-gated", Owner: "route_metadata.go"},
-	// Artifact share links (hub.artifacts experiment): no handler behaviour
-	// yet, the route answers 404; a catalog operation replaces this
-	// exemption when share links land (ptone/scion#3202).
-	{Pattern: "/api/v1/artifacts/shared/", Kind: ExemptionPublicEndpoint, Reason: "Artifact share links (token-only by design; still behind the auth middleware until token access ships), experiment-gated, answers 404 with no handler behaviour yet; replaced by a catalog operation when the handler lands (ptone/scion#3202)", Owner: "route_metadata.go"},
+	// Artifact share links (hub.artifacts experiment): reads authenticated
+	// by a link token in the path only, like the view route below; the
+	// artifact service resolves the token on every request and never uses
+	// a session here.
+	{Pattern: "/api/v1/artifacts/shared/", Kind: ExemptionPublicEndpoint, Reason: "Artifact share link (token-only by design: the link token in the path is hashed and resolved by the artifact service on every GET/HEAD; a live link answers 303 to the view route under a view capability bound to the link, every refusal is the same 404; rate limited per client), experiment-gated", Owner: "route_metadata.go"},
 	// Artifact views (hub.artifacts experiment): reads of one version's
 	// files under a short-lived view capability minted after the caller's
 	// read access was checked; the artifact service verifies the

@@ -82,6 +82,12 @@ type Service struct {
 	noticeMu   sync.Mutex
 	htmlNotice map[string]bool
 
+	// limiter rate-limits the share-link route; clientKeyFn names the
+	// client a shared read is charged to (remoteHost when nil).
+	limiterOnce sync.Once
+	limiter     *rateLimiter
+	clientKeyFn func(*http.Request) string
+
 	fetcherFactory func(RemoteImageLimits) ImageFetcher
 	// fetchFloor overrides the fetch floor in tests; zero means the
 	// fetcher's connect timeout.
@@ -108,6 +114,12 @@ type Limits struct {
 	MaxBundleBytes int64
 	// MaxFiles caps the number of files of one version.
 	MaxFiles int
+	// LinkDefaultTTL is the lifetime of a share link created without one,
+	// and LinkMaxTTL the longest one may be given (design D19). Zero or
+	// negative values take DefaultLinkTTL and DefaultLinkMaxTTL; a default
+	// above the maximum is lowered to it.
+	LinkDefaultTTL time.Duration
+	LinkMaxTTL     time.Duration
 	// RemoteImages bound the remote images fetched at publish time. A host
 	// that sets a limits getter must fill them in: incomplete or invalid
 	// values turn remote images off.
@@ -161,6 +173,37 @@ func (s *Service) SetViewKey(key []byte) {
 	s.mu.Lock()
 	s.viewKey = key
 	s.mu.Unlock()
+}
+
+// SetClientKey sets the function that names the client a share-link read
+// is charged to for rate limiting, such as the client address as the
+// host's trusted proxies report it. The default is the host part of the
+// request's RemoteAddr. It must be set before the service serves.
+func (s *Service) SetClientKey(fn func(*http.Request) string) {
+	s.mu.Lock()
+	s.clientKeyFn = fn
+	s.mu.Unlock()
+}
+
+func (s *Service) clientKey(r *http.Request) string {
+	s.mu.RLock()
+	fn := s.clientKeyFn
+	s.mu.RUnlock()
+	if fn == nil {
+		return remoteHost(r)
+	}
+	return fn(r)
+}
+
+// sharedLimiter returns the share-link route's rate limiter.
+func (s *Service) sharedLimiter() *rateLimiter {
+	s.limiterOnce.Do(func() {
+		if s.limiter == nil {
+			s.limiter = newRateLimiter(time.Now, SharedClientPerMinute, SharedClientBurst,
+				SharedGlobalPerMinute, SharedGlobalBurst, sharedMaxClients)
+		}
+	})
+	return s.limiter
 }
 
 // SetLimits sets the function that yields the current limits. It is called
@@ -247,8 +290,12 @@ func (s *Service) RegisterRoutes(mux Mux, guard Guard) {
 //	GET  /api/v1/artifacts/view/{capability}/{path}         a file of the version a capability names
 //	GET  /api/v1/artifacts/{id}/versions/{seq}/files/{path} a file of version seq
 //	PUT  /api/v1/artifacts/{id}/versions/{seq}/files/{path} upload a file of a pending version
+//	POST /api/v1/artifacts/{id}/links                       create a share link
+//	GET  /api/v1/artifacts/{id}/links                       the unexpired share links
+//	DELETE /api/v1/artifacts/{id}/links/{linkId}            revoke a share link
+//	GET  /api/v1/artifacts/shared/{token}[/files/{path}]    a share-link read (303 to the view route)
 //
-// Everything else, including share links (a later phase), answers 404.
+// Everything else answers 404.
 func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	rest, ok := strings.CutPrefix(r.URL.EscapedPath(), RouteCollection)
 	if !ok || (rest != "" && rest[0] != '/') {
@@ -270,8 +317,16 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	segs, ok := splitEscapedPath(rest)
-	if !ok || segs[0] == "shared" {
+	if !ok {
 		writeNotFound(w)
+		return
+	}
+	if segs[0] == "shared" {
+		if !isRead(r.Method) {
+			writeMethodNotAllowed(w, http.MethodGet, http.MethodHead)
+			return
+		}
+		s.handleShared(w, r, segs[1:])
 		return
 	}
 	if segs[0] == "view" {
@@ -300,6 +355,21 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handleGetFile(w, r, id, 0, strings.Join(segs[2:], "/"))
+	case len(segs) == 2 && segs[1] == "links":
+		switch {
+		case isRead(r.Method):
+			s.handleListLinks(w, r, id)
+		case r.Method == http.MethodPost:
+			s.handleCreateLink(w, r, id)
+		default:
+			writeMethodNotAllowed(w, http.MethodGet, http.MethodHead, http.MethodPost)
+		}
+	case len(segs) == 3 && segs[1] == "links":
+		if r.Method != http.MethodDelete {
+			writeMethodNotAllowed(w, http.MethodDelete)
+			return
+		}
+		s.handleRevokeLink(w, r, id, segs[2])
 	case len(segs) == 2 && segs[1] == "versions":
 		switch {
 		case isRead(r.Method):

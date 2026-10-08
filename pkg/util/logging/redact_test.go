@@ -80,3 +80,64 @@ func TestRequestLogMiddleware_RedactsSignature(t *testing.T) {
 		t.Fatalf("request log missing redacted URL: %s", out)
 	}
 }
+
+// artifactPathCases are spellings of artifact credential paths (and a few
+// other artifact paths); every one must be redacted on every sink.
+var artifactPathCases = []string{
+	"/api/v1/artifacts/shared/TOKEN",
+	"/api/v1/artifacts/shared/TOKEN/files/a/b.png",
+	"/api/v1/artifacts/view/TOKEN/index.html",
+	"/api/v1/artifacts/shared/../shared/TOKEN",
+	"/api/v1//artifacts/shared/TOKEN",
+	"/api/v1/artifacts/x/../shared/TOKEN",
+	"/api/v1/artifacts/%73hared/TOKEN",
+	"/api/v1/artifacts/a%2Fb/../shared/TOKEN",
+	"/api/v1/artifacts/a%2fb/..%2fview%2fTOKEN",
+	"/api/v1/artifacts/%2e%2e/../shared/TOKEN",
+	"/api/v1/artifacts/%2E%2E/../shared/TOKEN",
+	"/api/v1/artifacts/.%2e/../shared/TOKEN",
+	"/api/v1/%61rtifacts/shared/TOKEN",
+	"/api/v1/%2561rtifacts/shared/TOKEN",
+	"/API/V1/ARTIFACTS/SHARED/TOKEN",
+	"/api/v1/artifacts/00000000-0000-4000-8000-000000000001/files/TOKEN.md",
+}
+
+// TestArtifactPathsRedactedOnEverySink: for every spelling, no part of the
+// token survives in RequestPath, RedactURL or the trace predicate, whether
+// the request arrives with the spelling as its raw path or parsed.
+func TestArtifactPathsRedactedOnEverySink(t *testing.T) {
+	const tok = "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789-_AbCd"
+	for _, c := range artifactPathCases {
+		raw := strings.ReplaceAll(c, "TOKEN", tok)
+		u, err := url.Parse("https://hub.example" + raw)
+		if err != nil {
+			t.Fatalf("%s: %v", raw, err)
+		}
+		r := httptest.NewRequest(http.MethodGet, raw, nil)
+		if got := RequestPath(r); strings.Contains(got, tok) || got != RedactedArtifactPath {
+			t.Errorf("RequestPath(%s) = %q", raw, got)
+		}
+		if got := RedactURL(u); strings.Contains(got, tok) {
+			t.Errorf("RedactURL(%s) = %q", raw, got)
+		}
+		if !IsCredentialURL(u) || !IsCredentialURL(r.URL) {
+			t.Errorf("IsCredentialURL(%s) = false", raw)
+		}
+	}
+}
+
+// TestNonArtifactPathsKept: other request paths are logged as they are.
+func TestNonArtifactPathsKept(t *testing.T) {
+	for _, p := range []string{"/api/v1/agents/a1", "/api/v1/projects/p/shared-dirs", "/", "/healthz"} {
+		r := httptest.NewRequest(http.MethodGet, p, nil)
+		if got := RequestPath(r); got != p {
+			t.Errorf("RequestPath(%s) = %q", p, got)
+		}
+		if IsCredentialURL(r.URL) {
+			t.Errorf("IsCredentialURL(%s) = true", p)
+		}
+	}
+	if RequestPath(nil) != "" {
+		t.Errorf("RequestPath(nil)")
+	}
+}
