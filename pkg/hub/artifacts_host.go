@@ -324,19 +324,32 @@ func (s *Server) artifactsGuard(pattern string, handler http.Handler) http.Handl
 }
 
 // isArtifactViewRequest reports whether r is a read of the artifact view
-// route (artifacts.RouteView). Both the decoded and the escaped path must
-// be clean and under the route, the escaped path may not encode a slash,
-// dot, backslash or NUL (in any letter case), and the capability segment
-// may not be escaped at all,
-// so the request this check admits is the one the mux routes to the view.
+// route (artifacts.RouteView); see isArtifactCapabilityRequest.
+func isArtifactViewRequest(r *http.Request) bool {
+	return isArtifactCapabilityRequest(r, artifacts.RouteView)
+}
+
+// isArtifactSharedRequest reports whether r is a read of the share-link
+// route (artifacts.RouteShared); see isArtifactCapabilityRequest.
+func isArtifactSharedRequest(r *http.Request) bool {
+	return isArtifactCapabilityRequest(r, artifacts.RouteShared)
+}
+
+// isArtifactCapabilityRequest reports whether r is a read under route, an
+// artifact route that authenticates by a capability (a view capability or
+// a share-link token) in the path segment after route. Both the decoded and
+// the escaped path must be clean and under the route, the escaped path may
+// not encode a slash, dot, backslash or NUL (in any letter case), and the
+// capability segment may not be escaped at all,
+// so the request this check admits is the one the mux routes to the route.
 // Only the request shape is checked here; the artifact service verifies
 // the capability.
-func isArtifactViewRequest(r *http.Request) bool {
+func isArtifactCapabilityRequest(r *http.Request, route string) bool {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		return false
 	}
 	esc := r.URL.EscapedPath()
-	if !strings.HasPrefix(r.URL.Path, artifacts.RouteView) || !strings.HasPrefix(esc, artifacts.RouteView) {
+	if !strings.HasPrefix(r.URL.Path, route) || !strings.HasPrefix(esc, route) {
 		return false
 	}
 	if path.Clean(r.URL.Path) != r.URL.Path || path.Clean(esc) != esc {
@@ -347,6 +360,6 @@ func isArtifactViewRequest(r *http.Request) bool {
 		strings.Contains(lower, "%00") || strings.IndexByte(r.URL.Path, 0) >= 0 {
 		return false
 	}
-	capability, _, _ := strings.Cut(esc[len(artifacts.RouteView):], "/")
+	capability, _, _ := strings.Cut(esc[len(route):], "/")
 	return capability != "" && !strings.Contains(capability, "%")
 }
