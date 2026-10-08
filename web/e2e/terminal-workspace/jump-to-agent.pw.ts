@@ -28,7 +28,11 @@
 
 import { test, expect, type Locator, type Page } from '@playwright/test';
 import { DENSE_PALETTE_FONT_SIZES, paletteFontSizes } from '../palette-typography.js';
-import { paletteInputHasFocus, slowPaletteModule } from '../palette-focus.js';
+import {
+  expectTapHoldsKeyboard,
+  paletteInputHasFocus,
+  slowPaletteModule,
+} from '../palette-focus.js';
 
 const agentA = '11111111-1111-4111-8111-111111111111';
 const agentB = '22222222-2222-4222-8222-222222222222';
@@ -351,6 +355,29 @@ test('a reload after picking a new agent restores that agent', async ({ page }) 
   await page.reload();
   await expect(page).toHaveURL(new RegExp(`/terminals/${agentB}$`));
   await expect.poll(() => paneIsVisible(page, agentB)).toBe(true);
+});
+
+test.describe('on a touch-primary device', () => {
+  test.use({ hasTouch: true, isMobile: true });
+
+  test('a tap on the footer button holds the keyboard until the query input has focus', async ({
+    page,
+  }) => {
+    await slowPaletteModule(page);
+    await setup(page, { [agentA]: fixture(agentA, 'Alice-bot') });
+    await page.goto(`/terminals/${agentA}`);
+    await expect(page.locator('.xterm-helper-textarea').first()).toBeAttached();
+    expect(
+      await page.evaluate(() => matchMedia('(hover: none) and (pointer: coarse)').matches)
+    ).toBe(true);
+
+    await expectTapHoldsKeyboard(page, () => paletteButton(page).tap());
+    await expect(paletteDialog(page)).toBeVisible();
+
+    await page.keyboard.press('Escape');
+    await expect(paletteDialog(page)).toBeHidden();
+    await expectTapHoldsKeyboard(page, () => paletteButton(page).tap());
+  });
 });
 
 test.describe('on a narrow viewport', () => {

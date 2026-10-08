@@ -1478,6 +1478,7 @@ type Server struct {
 	// the HTTP drain, and requests still being served then emit records.
 	// Shutdown closes it after the HTTP drain, unless
 	// DeferDecisionAuditClose moved that to the caller.
+	decisionAuditRouter        *decisionAuditRouter
 	decisionAuditWriter        *StoreDecisionAuditEmitter
 	decisionAuditCloseDeferred atomic.Bool
 
@@ -1868,6 +1869,9 @@ func cloudLogQueryProjectID(cfg ServerConfig) string {
 
 // New creates a new Hub API server.
 func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
+	if err := validateSessionOnlyRoutes(startupRouteMetadata()); err != nil {
+		return nil, err
+	}
 	// Apply defaults for zero-value fields that have meaningful defaults.
 	defaults := DefaultServerConfig()
 	if cfg.StalledThreshold == 0 || cfg.StalledThreshold < 2*time.Minute {
@@ -2236,9 +2240,10 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	// Wire decision audit emitter
 	auditEmitter := NewStoreDecisionAuditEmitter(s, logging.Subsystem("hub.decision-audit"))
 	srv.decisionAuditWriter = auditEmitter
+	srv.decisionAuditRouter = newDecisionAuditRouter(auditEmitter, srv)
 	// With server.hub.perf_trace on, records pass through a counting
 	// decorator on their way to the same emitter (perftrace_audit.go).
-	srv.authzService.SetDecisionAuditEmitter(wrapAuditEmitterForPerfTrace(auditEmitter, cfg.PerfTrace))
+	srv.authzService.SetDecisionAuditEmitter(wrapAuditEmitterForPerfTrace(srv.decisionAuditRouter, cfg.PerfTrace))
 	if cfg.PerfTrace {
 		srv.perfTraceLog = perfTraceLogger()
 		slog.Warn("Request performance tracing is on (server.hub.perf_trace); per-request perf_trace lines are logged")
@@ -3398,6 +3403,10 @@ func (s *Server) IsPostgres() bool {
 // server. This is called during hub startup (any DB driver) after seeding and
 // initial refresh (settings-db §3.5/§3.9). Safe for concurrent use.
 func (s *Server) SetOperationalSettings(ops *OperationalSettings) {
+	if s.decisionAuditRouter != nil {
+		s.decisionAuditRouter.setSource(ops)
+		return
+	}
 	s.operationalSettings.Store(ops)
 }
 
@@ -3652,6 +3661,9 @@ func (s *Server) DeferDecisionAuditClose() {
 // after the HTTP servers that serve this Server have drained and before
 // the store is closed. Safe to call more than once.
 func (s *Server) CloseDecisionAudit(ctx context.Context) {
+	if s.decisionAuditRouter != nil {
+		_ = s.decisionAuditRouter.CloseNew(ctx)
+	}
 	if s.decisionAuditWriter != nil {
 		s.decisionAuditWriter.Close(ctx)
 	}
@@ -3970,6 +3982,7 @@ func (s *Server) StartMessageBroker(b eventbus.EventBus) {
 		decision := s.EvaluateAgentMessage(ctx, agentIdent, targetAgent)
 		return &decision
 	}
+	proxy.recordArtifactRefs = s.recordMessageArtifacts
 	s.messageBrokerProxy = proxy
 	proxy.Start()
 
@@ -5567,6 +5580,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 // CloseDecisionAudit after the WebServer's HTTP drain.
 func (s *Server) CleanupResources(ctx context.Context) error {
 	s.cleanupOnce.Do(func() {
+		if s.decisionAuditRouter != nil {
+			_ = s.decisionAuditRouter.CloseNew(ctx)
+		}
 		s.mu.RLock()
 		cc := s.controlChannel
 		stopPoolSampler := s.stopPoolSampler

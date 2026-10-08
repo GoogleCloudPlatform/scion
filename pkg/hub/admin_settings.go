@@ -594,8 +594,19 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Apply updates by marshaling the request fields and merging
-	applySettingsUpdates(raw, &req)
+	// Apply updates by marshaling the request fields and merging. The raw
+	// server object tells the merge which server fields were sent.
+	rawServer := rawServerObject(rawBody)
+	applySettingsUpdatesFromBody(raw, &req, rawServer)
+
+	// The server section is deep-merged, so a section the request changes
+	// only in part is validated again as merged with the stored fields.
+	if req.Server != nil {
+		if err := validateMergedServerSections(raw, rawServer); err != nil {
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
+			return
+		}
+	}
 
 	// Validate the effective hub default GCP identity (the merged result, so
 	// a PUT that changes only one of the pair is checked against the other's
@@ -750,7 +761,23 @@ func setOrDeleteString(raw map[string]interface{}, key string, v *string) {
 }
 
 // applySettingsUpdates merges the update request into the raw settings map.
+// It is used only by tests of the non-server settings; the PUT handler
+// uses applySettingsUpdatesFromBody. The two differ for the server
+// section: here it is deep-merged from the typed request alone, so a zero
+// value in req.Server cannot be told apart from an omitted field and keeps
+// the stored value, while the PUT handler passes the request body so that
+// an explicit null, or the zero value of a non-pointer field, clears a
+// server field (see mergeServerSettings). Tests that
+// assert on server fields must use applySettingsUpdatesFromBody with a
+// real body.
 func applySettingsUpdates(raw map[string]interface{}, req *ServerConfigUpdateRequest) {
+	applySettingsUpdatesFromBody(raw, req, nil)
+}
+
+// applySettingsUpdatesFromBody is applySettingsUpdates with the request's
+// raw "server" JSON object, which tells mergeServerSettings which server
+// fields the client sent. A nil rawServer derives that from req.Server.
+func applySettingsUpdatesFromBody(raw map[string]interface{}, req *ServerConfigUpdateRequest, rawServer json.RawMessage) {
 	if req.SchemaVersion != nil {
 		raw["schema_version"] = *req.SchemaVersion
 	}
@@ -763,20 +790,7 @@ func applySettingsUpdates(raw map[string]interface{}, req *ServerConfigUpdateReq
 	setOrDeleteString(raw, "workspace_path", req.WorkspacePath)
 
 	if req.Server != nil {
-		newServer := marshalToMap(req.Server)
-		// Merge into existing server section to preserve keys not present in the
-		// update (e.g. github_app managed via its own endpoint).
-		if existing, ok := raw["server"]; ok {
-			if existingMap, ok := existing.(map[string]interface{}); ok {
-				if newMap, ok := newServer.(map[string]interface{}); ok {
-					for k, v := range newMap {
-						existingMap[k] = v
-					}
-					newServer = existingMap
-				}
-			}
-		}
-		raw["server"] = newServer
+		mergeServerSettings(raw, req.Server, rawServer)
 	}
 	if req.Telemetry != nil {
 		raw["telemetry"] = marshalToMap(req.Telemetry)

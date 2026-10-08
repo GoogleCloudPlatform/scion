@@ -903,3 +903,76 @@ func escapeLike(v string) string {
 	r := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
 	return r.Replace(v)
 }
+
+// AddMessageRefs implements Store.
+func (s *sqlStore) AddMessageRefs(ctx context.Context, messageID string, refs []MessageRef) error {
+	if messageID == "" || len(refs) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("artifacts: begin message refs: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	for _, r := range refs {
+		if _, err := tx.ExecContext(ctx, s.rebind(`INSERT INTO artifact_message_ref
+			(message_id, artifact_id, seq) VALUES (?, ?, ?)
+			ON CONFLICT (message_id, artifact_id) DO NOTHING`),
+			messageID, r.ArtifactID, nullInt(r.Seq)); err != nil {
+			return fmt.Errorf("artifacts: insert message ref: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("artifacts: commit message refs: %w", err)
+	}
+	return nil
+}
+
+// maxMessageRefQueryIDs bounds the message ids in one ListMessageRefs
+// query, well under SQLite's bound-parameter limit.
+const maxMessageRefQueryIDs = 500
+
+// ListMessageRefs implements Store.
+func (s *sqlStore) ListMessageRefs(ctx context.Context, messageIDs []string) (map[string][]MessageRef, error) {
+	out := make(map[string][]MessageRef)
+	for start := 0; start < len(messageIDs); start += maxMessageRefQueryIDs {
+		end := min(start+maxMessageRefQueryIDs, len(messageIDs))
+		if err := s.listMessageRefsChunk(ctx, messageIDs[start:end], out); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+// listMessageRefsChunk adds the references of one chunk of message ids to
+// out, in one query.
+func (s *sqlStore) listMessageRefsChunk(ctx context.Context, chunk []string, out map[string][]MessageRef) error {
+	args := make([]any, len(chunk))
+	for i, id := range chunk {
+		args[i] = id
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?, ", len(chunk)), ", ")
+	rows, err := s.db.QueryContext(ctx, s.rebind(`SELECT message_id, artifact_id, seq
+		FROM artifact_message_ref WHERE message_id IN (`+placeholders+`)
+		ORDER BY message_id, artifact_id`), args...)
+	if err != nil {
+		return fmt.Errorf("artifacts: list message refs: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var (
+			msgID string
+			r     MessageRef
+			seq   sql.NullInt64
+		)
+		if err := rows.Scan(&msgID, &r.ArtifactID, &seq); err != nil {
+			return fmt.Errorf("artifacts: scan message ref: %w", err)
+		}
+		r.Seq = int(seq.Int64)
+		out[msgID] = append(out[msgID], r)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("artifacts: list message refs: %w", err)
+	}
+	return nil
+}

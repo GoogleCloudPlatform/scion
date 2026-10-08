@@ -16,7 +16,18 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { artifactFileUrl, baseName, formatBytes, isInlineType, rendererFor } from './artifacts.js';
+import {
+  artifactFileUrl,
+  artifactListUrl,
+  artifactPagePath,
+  baseName,
+  formatArtifactRef,
+  formatBytes,
+  isInlineType,
+  orderArtifactRefs,
+  rendererFor,
+  type MessageArtifactRef,
+} from './artifacts.js';
 
 describe('rendererFor', () => {
   it('maps media types to renderers', () => {
@@ -83,5 +94,54 @@ describe('isInlineType and baseName', () => {
   it('takes the last path segment', () => {
     expect(baseName('dir/sub/page.html')).toBe('page.html');
     expect(baseName('page.html')).toBe('page.html');
+  });
+});
+
+describe('message artifact helpers', () => {
+  const A = '5f1c2d3e-0000-4000-8000-0000000000aa';
+  const B = '5f1c2d3e-0000-4000-8000-0000000000bb';
+  const ref = (id: string): MessageArtifactRef => ({
+    ref: `scion://artifact/${id}`,
+    id,
+    available: false,
+  });
+
+  it('formats references', () => {
+    expect(formatArtifactRef(A)).toBe(`scion://artifact/${A}`);
+    expect(formatArtifactRef(A, 0)).toBe(`scion://artifact/${A}`);
+    expect(formatArtifactRef(A, 4)).toBe(`scion://artifact/${A}@4`);
+  });
+
+  it('orders refs by first appearance in the body, case-insensitively, others last in input order', () => {
+    const body = `see scion://artifact/${B.toUpperCase()} and scion://artifact/${A}@2`;
+    const c = { ...ref('5f1c2d3e-0000-4000-8000-0000000000cc') };
+    const d = { ...ref('5f1c2d3e-0000-4000-8000-0000000000dd') };
+    expect(orderArtifactRefs([c, ref(A), d, ref(B)], body).map((r) => r.id)).toEqual([
+      B,
+      A,
+      c.id,
+      d.id,
+    ]);
+  });
+});
+
+describe('artifactListUrl and artifactPagePath', () => {
+  const A = '5f1c2d3e-0000-4000-8000-0000000000aa';
+
+  it('builds the list URL with mine=1 and only the set filters', () => {
+    expect(artifactListUrl({})).toBe('/api/v1/artifacts?mine=1');
+    expect(artifactListUrl({ q: '  design ', ownedOnly: true, reviewPending: true }, 'c1')).toBe(
+      '/api/v1/artifacts?mine=1&q=design&review_pending=1&owner=me&cursor=c1'
+    );
+  });
+
+  it('drops a whitespace-only search', () => {
+    expect(artifactListUrl({ q: '   ' })).toBe('/api/v1/artifacts?mine=1');
+  });
+
+  it('percent-encodes the page path', () => {
+    expect(artifactPagePath({ id: A, scopeRef: 'proj 1' })).toBe(
+      `/projects/proj%201/artifacts/${A}`
+    );
   });
 });

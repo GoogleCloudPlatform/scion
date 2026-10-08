@@ -96,6 +96,7 @@ Right-clicking a message (on desktop) or tapping it (on touch devices without ho
 
 The web composer features a security-hardened, developer-friendly file upload system:
 - **Executable Deny-List Strategy**: To maximize flexibility for developers, attachment uploads use a security-first deny-list rather than a restrictive mime-type allow-list. It blocks executable binaries/scripts but permits **34+ developer file types** (including configuration files, source code, and data structures).
+- **Artifact References**: With the `hub.artifacts` experiment on, the paperclip also offers **Attach artifact…**, which picks published artifacts to reference in the message. Artifact chips and `scion://artifact/` links in messages open a preview in place; see [Artifacts](/scion/reference/artifacts/#artifacts-in-messages).
 - **Paste-to-Upload**: Paste images or file content directly from your clipboard into the composer for instant attachment.
 - **Markdown Attachment Rendering**: Markdown files uploaded as attachments render directly within the chat bubble, featuring a source/preview toggle and a one-click clipboard copy.
 - **Partial Success Reporting**: When uploading multiple files simultaneously, the system supports partial success—successful uploads are staged instantly while failed individual files report explicit inline errors.
@@ -161,6 +162,9 @@ scion message agent:tech-lead "Please review the auth module."
 
 # Attach a file
 scion message @tech-lead "See the test results." --attach ./results.json
+
+# Point at a published artifact (see Artifacts); the recipient is told how to fetch it
+scion message @tech-lead "Design ready for review." --artifact scion://artifact/5f1c2d3e-6b1a-4c55-9f3e-0d6e7a1b2c3d
 
 # Read message body from a file (useful for long messages or scripted workflows)
 scion message @tech-lead --body-file ./review-notes.md

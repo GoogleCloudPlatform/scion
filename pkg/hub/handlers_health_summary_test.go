@@ -89,8 +89,9 @@ func TestHandleHealthSummary_ResponseShape(t *testing.T) {
 	assert.NotNil(t, resp.Agents.ByPhase)
 	assert.NotNil(t, resp.Agents.Problems)
 
-	// Verify dispatch is nil (no dispatch metrics available yet)
-	assert.Nil(t, resp.Dispatch)
+	// Dispatch is counted from the store; an empty store reports zeros.
+	require.NotNil(t, resp.Dispatch)
+	assert.Equal(t, HealthSummaryDispatch{}, *resp.Dispatch)
 
 	// Stall settings are configuration, not health: they are edited on the
 	// Server Config page and are not part of the health summary.
@@ -533,18 +534,6 @@ func TestHandleHealthSummary_BrokerMixedStatus(t *testing.T) {
 	assert.Equal(t, "kubernetes", offlineBroker.Runtime.Type)
 }
 
-func TestHandleHealthSummary_DispatchNullWhenUnavailable(t *testing.T) {
-	srv, _ := testServer(t)
-
-	rr := doRequest(t, srv, http.MethodGet, "/api/v1/admin/health/summary", nil)
-	require.Equal(t, http.StatusOK, rr.Code)
-
-	// Verify the raw JSON has dispatch: null
-	var raw map[string]json.RawMessage
-	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &raw))
-	assert.Equal(t, "null", string(raw["dispatch"]))
-}
-
 func TestHandleHealthSummary_DatabaseHealthy(t *testing.T) {
 	srv, _ := testServer(t)
 
@@ -631,6 +620,34 @@ func TestHandleHealthSummary_UnhealthyNotDowngraded(t *testing.T) {
 	assert.Equal(t, "unhealthy", resp.Status)
 	assert.Equal(t, "unhealthy", resp.Database.Status)
 	assert.Contains(t, resp.Hub.UnhealthyChecks, "database: unhealthy")
+}
+
+func TestHealthSummary_DecisionAuditWarningDegradesWithoutUnavailability(t *testing.T) {
+	srv, _ := testServer(t)
+	f := newAuditFixture(t, auditFixtureError)
+	f.requireAdmission(t)
+	f.observe(1, 1, true)
+	f.emit()
+	// Only this test attaches the finite fixture router for the summary projection.
+	srv.decisionAuditRouter = f.router
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/admin/health/summary", nil)
+	require.Equal(t, http.StatusOK, rr.Code)
+	var summary HealthSummaryResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &summary))
+	assert.Equal(t, HealthStatusDegraded, summary.Status)
+	assert.Equal(t, decisionAuditFaultWarning, summary.Hub.Checks[decisionAuditNewHealthKey])
+	assert.Contains(t, summary.Hub.UnhealthyChecks, decisionAuditNewHealthKey+": "+decisionAuditFaultWarning)
+	assert.Equal(t, "healthy", summary.Database.Status)
+	// Serving health stays HTTP 200; database-critical unavailability still wins.
+	health := httptest.NewRecorder()
+	srv.handleHealthz(health, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	assert.Equal(t, http.StatusOK, health.Code)
+	ready := httptest.NewRecorder()
+	srv.handleReadyz(ready, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	assert.Equal(t, http.StatusOK, ready.Code)
+	srv.store = pingFailStore{srv.store}
+	info := srv.GetHealthInfo(context.Background())
+	assert.Equal(t, HealthStatusUnhealthy, info.Status)
 }
 
 // Chat plugin broker records are always marked online; the connected broker
