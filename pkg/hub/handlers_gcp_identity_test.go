@@ -19,14 +19,17 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/api/googleapi"
 )
 
 func createTestProjectForSA(t *testing.T, srv *Server, s store.Store) string {
@@ -1237,4 +1240,77 @@ func TestGCPServiceAccount_VerifyClearsPreviousFailure(t *testing.T) {
 	assert.True(t, stored.Verified)
 	assert.Equal(t, store.GCPVerificationVerified, stored.VerificationStatus)
 	assert.Empty(t, stored.VerificationError, "the stale failure message must not outlive the failure")
+}
+
+func TestMintCreateErrorMessage(t *testing.T) {
+	const hint = "the hub's own GCP service account (the identity the hub runs as, not the signed-in user) needs roles/iam.serviceAccountAdmin on project test-hub-project"
+	wrap := func(err error) error {
+		return fmt.Errorf("creating service account scion-abc in project test-hub-project: %w", err)
+	}
+	tests := []struct {
+		name     string
+		err      error
+		wantHint bool
+	}{
+		{
+			name: "IAM permission denied names the role",
+			err: wrap(&googleapi.Error{Code: http.StatusForbidden,
+				Message: "Permission 'iam.serviceAccounts.create' denied on resource (or it may not exist).",
+				Body:    `{"error":{"status":"PERMISSION_DENIED","details":[{"reason":"IAM_PERMISSION_DENIED"}]}}`}),
+			wantHint: true,
+		},
+		{
+			name: "disabled API gets no role hint",
+			err: wrap(&googleapi.Error{Code: http.StatusForbidden,
+				Message: "Identity and Access Management (IAM) API has not been used in project 123 before or it is disabled.",
+				Body:    `{"error":{"details":[{"reason":"SERVICE_DISABLED"}]}}`}),
+		},
+		{
+			name: "insufficient scopes get no role hint",
+			err: wrap(&googleapi.Error{Code: http.StatusForbidden,
+				Message: "Request had insufficient authentication scopes.",
+				Body:    `{"error":{"details":[{"reason":"ACCESS_TOKEN_SCOPE_INSUFFICIENT"}]}}`}),
+		},
+		{
+			name: "non-403 API error gets no role hint",
+			err:  wrap(&googleapi.Error{Code: http.StatusInternalServerError, Message: "internal"}),
+		},
+		{
+			name: "non-API error gets no role hint",
+			err:  errors.New("dial tcp: connection refused"),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := mintCreateErrorMessage(tt.err, "test-hub-project")
+			assert.True(t, strings.HasPrefix(got, "failed to create GCP service account: "+tt.err.Error()),
+				"message must keep the underlying error: %s", got)
+			if tt.wantHint {
+				assert.Contains(t, got, hint)
+			} else {
+				assert.NotContains(t, got, "roles/iam.serviceAccountAdmin")
+			}
+		})
+	}
+}
+
+func TestMintGCPServiceAccount_CreatePermissionDenied_NamesRole(t *testing.T) {
+	srv, _, mock := testServerWithMinting(t)
+	mock.createErr = fmt.Errorf("creating service account: %w", &googleapi.Error{
+		Code:    http.StatusForbidden,
+		Message: "Permission 'iam.serviceAccounts.create' denied on resource (or it may not exist).",
+	})
+	projectID := createTestProjectForSA(t, srv, nil)
+
+	rec := doRequest(t, srv, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts/mint", projectID),
+		map[string]string{})
+	require.Equal(t, http.StatusBadGateway, rec.Code, "body: %s", rec.Body.String())
+
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Contains(t, errResp.Error.Message, "iam.serviceAccounts.create")
+	assert.Contains(t, errResp.Error.Message, "the hub's own GCP service account")
+	assert.Contains(t, errResp.Error.Message, "roles/iam.serviceAccountAdmin on project test-hub-project")
+	assert.Empty(t, mock.createdSAs)
 }
