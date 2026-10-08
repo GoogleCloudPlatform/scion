@@ -718,6 +718,46 @@ func TestBuildWorkspaceManifestWithExcludes(t *testing.T) {
 	}
 }
 
+// TestBuildWorkspaceManifestExcludesRootDotScion checks that the workspace
+// manifest (used for sync-from and project-cache uploads) leaves out the
+// workspace-root .scion entry in both layouts and keeps nested ones.
+func TestBuildWorkspaceManifestExcludesRootDotScion(t *testing.T) {
+	srv := &Server{}
+	for _, tc := range []struct {
+		name string
+		root []string
+	}{
+		{"marker file", []string{".scion"}},
+		{"directory", []string{".scion/project-id", ".scion/settings.yaml"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			for _, p := range append(tc.root, "file1.txt", "sub/.scion", "deep/.scion/x") {
+				full := filepath.Join(dir, filepath.FromSlash(p))
+				if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(full, []byte(p), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			manifest, err := srv.buildWorkspaceManifest(dir, nil)
+			if err != nil {
+				t.Fatalf("buildWorkspaceManifest: %v", err)
+			}
+			var got []string
+			for _, f := range manifest.Files {
+				got = append(got, f.Path)
+			}
+			want := []string{"deep/.scion/x", "file1.txt", "sub/.scion"}
+			if strings.Join(got, ",") != strings.Join(want, ",") {
+				t.Errorf("manifest files = %v, want %v", got, want)
+			}
+		})
+	}
+}
+
 func TestCountWorkspaceFiles(t *testing.T) {
 	cfg := DefaultServerConfig()
 	mgr := &mockAgentManager{}

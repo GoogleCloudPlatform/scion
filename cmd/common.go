@@ -1308,7 +1308,7 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 				util.Debugf("[workspace-scan] non-git project detected at %s, collecting files...", projectDir)
 			}
 			scanStart := time.Now()
-			files, err := transfer.CollectFiles(projectDir, transfer.DefaultExcludePatterns)
+			files, err := collectWorkspaceFiles(projectDir, nil)
 			if debugMode {
 				util.Debugf("[workspace-scan] collected %d files in %s", len(files), time.Since(scanStart))
 			}
