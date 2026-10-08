@@ -180,7 +180,17 @@ export interface PagedPageResult {
   agents: Agent[];
   nextCursor?: string | undefined;
   totalCount: number;
-  stats?: { total: number; running: number; agents?: Array<[string, string]> } | undefined;
+  /** The response's `totalCountApproximate`: `totalCount` is a lower bound. */
+  totalCountApproximate?: boolean | undefined;
+  stats?:
+    | {
+        total: number;
+        running: number;
+        agents?: Array<[string, string]>;
+        /** `total` and `running` are lower bounds. */
+        totalApproximate?: boolean | undefined;
+      }
+    | undefined;
   /**
    * IDs upserted live (creates included) while this request was in flight,
    * already applied to the state store. After adopting the response the
@@ -270,6 +280,8 @@ export class AgentListWindow extends EventTarget {
   private pageOffsets: number[] = [0];
   private _pageIndex = 0;
   private _totalCount = 0;
+  /** Whether `_totalCount` is a lower bound (the response's `totalCountApproximate`). */
+  private _totalApproximate = false;
   private _hasNext = false;
   /**
    * The walk order frozen from page 0's stats population (ptone/scion#3744):
@@ -627,6 +639,7 @@ export class AgentListWindow extends EventTarget {
     this._stale = false;
     this.pageItems = result.agents;
     this._totalCount = result.totalCount;
+    this._totalApproximate = !!result.totalCountApproximate;
     this._hasNext = !!result.nextCursor;
     this.cursors = [undefined, result.nextCursor];
     this.pageOffsets = [0, result.agents.length];
@@ -699,7 +712,7 @@ export class AgentListWindow extends EventTarget {
     if (stats.agents) {
       this.memberIndex.seed(stats.agents);
     } else {
-      this.memberIndex.seedCounts(stats.total, stats.running);
+      this.memberIndex.seedCounts(stats.total, stats.running, !!stats.totalApproximate);
     }
   }
 
@@ -781,6 +794,11 @@ export class AgentListWindow extends EventTarget {
       return { loaded: this.getHeldAgents().length, capped: true };
     }
     return this.display.length;
+  }
+
+  /** Whether the paged {@link total} is a lower bound (rendered as "N+"). */
+  get totalApproximate(): boolean {
+    return this._state === 'paged' && this._totalApproximate;
   }
 
   /**
@@ -936,11 +954,18 @@ export class AgentListWindow extends EventTarget {
             // next page.
             this._hasNext = false;
             this._totalCount = total;
+            this._totalApproximate = false;
           }
           return;
         }
         this.frozenStarts[index + 1] = nextStart;
-        result = { ...fetched, agents, totalCount: total, nextCursor: undefined };
+        result = {
+          ...fetched,
+          agents,
+          totalCount: total,
+          totalCountApproximate: false,
+          nextCursor: undefined,
+        };
         this._hasNext = nextStart < frozen.length;
       }
       if (result.agents.length === 0 && index > 0) {
@@ -950,6 +975,7 @@ export class AgentListWindow extends EventTarget {
       }
       this.pageItems = result.agents;
       this._totalCount = result.totalCount;
+      this._totalApproximate = !!result.totalCountApproximate;
       this._pageIndex = index;
       this.cursors[index + 1] = result.nextCursor;
       this.pageOffsets[index + 1] =

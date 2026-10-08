@@ -55,6 +55,10 @@ export class ScionAgentPager extends LitElement {
   @property({ attribute: false })
   total: AgentPagerTotal = 0;
 
+  /** The numeric total is a lower bound: rendered as "N+". */
+  @property({ type: Boolean })
+  approximate = false;
+
   @property({ type: Number })
   pageSize: AgentPagerPageSize = 25;
 
@@ -149,15 +153,17 @@ export class ScionAgentPager extends LitElement {
   }
 
   private renderRange() {
-    if (typeof this.total === 'object' && this.total.capped) {
-      return html`<span class="capped-banner">${cappedTotalText(this.total.loaded)}</span>`;
+    const value = this.total;
+    if (typeof value === 'object') {
+      return html`<span class="capped-banner">${cappedTotalText(value.loaded)}</span>`;
     }
+    const total = this.approximate ? `${value}+` : `${value}`;
     if (this.rowsOnPage === 0) {
-      return html`<span class="range">0 of ${this.total}</span>`;
+      return html`<span class="range">0 of ${total}</span>`;
     }
     const a = this.rangeStart + 1;
     const b = a + this.rowsOnPage - 1;
-    return html`<span class="range">${a}-${b} of ${this.total}</span>`;
+    return html`<span class="range">${a}-${b} of ${total}</span>`;
   }
 
   override render() {

@@ -143,10 +143,15 @@ function setView(el: TestEl, view: string): void {
     ?.dispatchEvent(new CustomEvent('view-change', { detail: { view } }));
 }
 
-function pager(el: TestEl): HTMLElement & { showChip: boolean; chipText: string } {
+function pager(el: TestEl): HTMLElement & {
+  showChip: boolean;
+  chipText: string;
+  updateComplete: Promise<unknown>;
+} {
   return el.shadowRoot?.querySelector('scion-agent-pager') as HTMLElement & {
     showChip: boolean;
     chipText: string;
+    updateComplete: Promise<unknown>;
   };
 }
 
@@ -1185,6 +1190,28 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
       expect(win.memberIndex.countOnly).toBe(true);
       expect(text(el)).toContain('2,002 agents · 2,002 running, as of last refresh');
       expect(pager(el).showChip).toBe(true);
+    });
+
+    it('count-only: approximate counts and pager total show as lower bounds (ptone/scion#3426)', async () => {
+      const { fake } = heldFake(2002);
+      fake.approximate = true;
+      const el = await mount();
+      const win = internals(el).agentWindow;
+      expect(win.memberIndex.countOnly).toBe(true);
+      expect(win.totalApproximate).toBe(true);
+      expect(text(el)).toContain('2,002+ agents · 2,002+ running, as of last refresh');
+      await pager(el).updateComplete;
+      expect(pager(el).shadowRoot?.textContent).toContain('of 2002+');
+    });
+
+    it('count-only: exact counts and pager total have no marker', async () => {
+      heldFake(2002);
+      const el = await mount();
+      expect(internals(el).agentWindow.totalApproximate).toBe(false);
+      expect(text(el)).toContain('2,002 agents · 2,002 running, as of last refresh');
+      await pager(el).updateComplete;
+      expect(pager(el).shadowRoot?.textContent).toContain('of 2002');
+      expect(pager(el).shadowRoot?.textContent).not.toContain('of 2002+');
     });
 
     it('count-only: with no live change the chip stays hidden', async () => {

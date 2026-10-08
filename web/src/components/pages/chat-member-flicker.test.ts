@@ -48,6 +48,11 @@ const fakeState = vi.hoisted(() => {
   t.getDeletedAgentIds = () => new Set<string>();
   t.seedAgents = (list: any[]) => list.forEach((a) => t.agents.set(a.id, a)); // additive, like the real one
   t.removeAgent = (id: string) => t.agents.delete(id); // matches real stateManager.removeAgent: no notify
+  t.getAgent = (id: string) => t.agents.get(id);
+  // Seed epochs record nothing here.
+  t.scopeGeneration = 0;
+  t.beginSeedEpoch = () => Symbol('seed-epoch');
+  t.endSeedEpoch = () => {};
   return t;
 });
 
