@@ -1056,3 +1056,37 @@ func TestStreamInput_NoQueueHandlerOverflowClosesWithCode(t *testing.T) {
 		t.Fatalf("delivered frame = %q, want %q", got, "first")
 	}
 }
+
+// Once Close has cancelled the client, an input overflow still closes the
+// stream locally but starts no tracked goroutine, so its c.wg.Add can never
+// run concurrently with Close's c.wg.Wait. Close is held inside Wait by a
+// tracked task, so the overflow deterministically lands mid-shutdown.
+func TestStreamInput_OverflowDuringCloseStartsNoTrackedWork(t *testing.T) {
+	client, _ := newCancelTestClient(t, http.NotFoundHandler(), 1)
+	handler := openInputTestStream(t, client, "s")
+
+	release := make(chan struct{})
+	if !client.goTracked(func() { <-release }) {
+		t.Fatal("goTracked refused work before Close")
+	}
+	closed := make(chan error, 1)
+	go func() { closed <- client.Close() }()
+	<-client.ctx.Done() // Close has cancelled and is (or will be) in Wait
+
+	if client.closeStreamAsync(handler, closeReasonInputOverflow, closeCodeInputOverflow) {
+		t.Fatal("an overflow during Close must not start a tracked report")
+	}
+	if !isClosed(handler) {
+		t.Fatal("the stream must still be closed locally")
+	}
+	if client.goTracked(func() { t.Error("refused work ran") }) {
+		t.Fatal("goTracked must refuse work once Close has started")
+	}
+
+	close(release)
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not return")
+	}
+}

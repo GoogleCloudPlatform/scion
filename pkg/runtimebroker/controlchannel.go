@@ -1036,19 +1036,41 @@ func (h *StreamHandler) claimClose() bool {
 // closed, until the Hub's StreamClose or a CloseStream call removes it; a
 // CloseStream that finds it already claimed sends nothing, so a PTY
 // goroutine finishing at the same time cannot report a second code.
-func (c *ControlChannelClient) closeStreamAsync(handler *StreamHandler, reason string, code int) {
+//
+// It reports whether a report was started: false if another path already
+// closed the stream, or if the client is closing.
+func (c *ControlChannelClient) closeStreamAsync(handler *StreamHandler, reason string, code int) bool {
 	if !handler.claimClose() {
-		return
+		return false
 	}
 	conn := c.conn
 	closeMsg := wsprotocol.NewStreamCloseMessage(handler.streamID, reason, code)
-	c.wg.Add(1)
-	go func() {
-		defer c.wg.Done()
+	return c.goTracked(func() {
 		if err := conn.WriteJSON(closeMsg); err != nil {
 			c.log.Warn("Failed to report stream close to Hub", "streamID", handler.streamID, "code", code, "error", err)
 		}
+	})
+}
+
+// goTracked runs f in a goroutine counted by c.wg, unless Close has started.
+// The read loop is not itself tracked and can still be handling a frame
+// after Close cancels c.ctx, so an unguarded c.wg.Add there could run
+// concurrently with Close's c.wg.Wait at a zero count, which WaitGroup does
+// not allow. Checking c.ctx and adding under c.mu, which Close holds while
+// cancelling, orders every Add either before Close's Wait or not at all.
+func (c *ControlChannelClient) goTracked(f func()) bool {
+	c.mu.Lock()
+	if c.ctx != nil && c.ctx.Err() != nil {
+		c.mu.Unlock()
+		return false
+	}
+	c.wg.Add(1)
+	c.mu.Unlock()
+	go func() {
+		defer c.wg.Done()
+		f()
 	}()
+	return true
 }
 
 // handleStreamClose processes a stream close message.
