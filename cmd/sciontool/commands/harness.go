@@ -505,7 +505,9 @@ func stagedMaskValues(vals []string) []string {
 		if !strings.ContainsAny(val, "\r\n") {
 			continue
 		}
-		for _, line := range strings.Split(val, "\n") {
+		// Split on CRLF, lone CR and LF alike.
+		lines := strings.ReplaceAll(strings.ReplaceAll(val, "\r\n", "\n"), "\r", "\n")
+		for _, line := range strings.Split(lines, "\n") {
 			if line = strings.TrimSpace(line); hasLetterOrDigit(line) {
 				out = append(out, line)
 			}

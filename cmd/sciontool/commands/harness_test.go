@@ -571,3 +571,16 @@ func TestScrubSecrets_StagedValuesAreTrimmed(t *testing.T) {
 		t.Errorf("got %q", got)
 	}
 }
+
+// A staged file whose lines are separated by lone CRs is masked line by
+// line too.
+func TestScrubSecrets_CROnlyStagedFileMasksEachLine(t *testing.T) {
+	t.Setenv("SCION_HARNESS_SECRETS_DIR", "")
+	bundle := filepath.Join(t.TempDir(), ".scion", "harness")
+	writeTestFile(t, filepath.Join(bundle, "secrets", "A"), "placeholder-line-one-value\rplaceholder-line-two-value\r")
+	m := &containerProvisionManifest{HarnessBundleDir: bundle}
+
+	if got := scrubSecrets("saw placeholder-line-one-value and placeholder-line-two-value", m); got != "saw [REDACTED] and [REDACTED]" {
+		t.Errorf("got %q", got)
+	}
+}
