@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 119
+**Operations:** 171
 
 ## Table of Contents
 
@@ -41,8 +41,57 @@
 - [schedule.event.update](#scheduleeventupdate) — Update a recurring schedule
 - [schedule.event.delete](#scheduleeventdelete) — Cancel a scheduled event or delete a recurring schedule
 - [artifact.read](#artifactread) — Read an artifact's metadata or file bytes (owner, home-project readers via the scope grant, or principal grants); unreadable artifacts answer 404
+- [artifact.list](#artifactlist) — List the artifacts the caller owns, holds a grant on, or that are shared to a project it is a member of (?mine=1); each row passes the artifact.read check, so an artifact the caller cannot read is omitted, never denied
 - [artifact.create](#artifactcreate) — Publish a single file as a new artifact homed in a project (the caller's own, or ?scope=)
+- [project.env.read](#projectenvread) — Read a project's environment variables (list or one key)
+- [project.env.write](#projectenvwrite) — Set or delete a project environment variable
+- [project.secret.read](#projectsecretread) — Read a project's secret metadata (list or one key)
+- [project.secret.write](#projectsecretwrite) — Set, patch or delete a project secret
+- [project.providers.list](#projectproviderslist) — List the runtime brokers that provide for a project
+- [project.shareddir.read](#projectshareddirread) — List a project's shared directories and read their files and archives
+- [project.shareddir.write](#projectshareddirwrite) — Create or delete a project shared directory, and upload, write or delete its files
+- [project.injectedskills.read](#projectinjectedskillsread) — List the skills injected into a project's agents
+- [project.injectedskills.write](#projectinjectedskillswrite) — Add, replace or remove skills injected into a project's agents
+- [project.gcpsa.create](#projectgcpsacreate) — Register a project-scoped GCP service account. Project-route service account writes use project.manage
+- [project.messagelogs.read](#projectmessagelogsread) — Read a project's message log
+- [project.broadcast](#projectbroadcast) — Broadcast a message to a project's agents. Each recipient is then filtered by agent.message
+- [project.metrics.read](#projectmetricsread) — Read a project's metrics summary, session metrics summary and metrics dashboard
+- [project.prestarthooks.read](#projectprestarthooksread) — List or read a project's pre-start hooks
+- [project.prestarthooks.write](#projectprestarthookswrite) — Create, update, delete or activate a project pre-start hook
+- [project.settings.read](#projectsettingsread) — Read a project's settings and its resolved settings
+- [project.settings.update](#projectsettingsupdate) — Replace a project's settings
+- [project.messagingpolicy.read](#projectmessagingpolicyread) — Read a project's cross-project inbound messaging policy
+- [project.messagingpolicy.update](#projectmessagingpolicyupdate) — Set a project's cross-project inbound messaging policy. The caller also must be an active direct project owner or a local unscoped hub admin
+- [project.template.set](#projecttemplateset) — Mark or unmark a project as a template. The caller needs project.update and project.clone on the project
+- [template.project.import](#templateprojectimport) — Discover or import templates into a project
+- [harnessconfig.project.import](#harnessconfigprojectimport) — Discover or import harness configs into a project
+- [project.workspace.read](#projectworkspaceread) — Read a project's workspace: WebDAV reads, sync status, cache status, archive and file reads
+- [project.workspace.write](#projectworkspacewrite) — Change a project's workspace: WebDAV writes, cache refresh and notify, file upload, write and delete, and git pull
+- [project.github.read](#projectgithubread) — Read a project's GitHub status, GitHub permissions and git identity
+- [project.github.write](#projectgithubwrite) — Change a project's GitHub installation, status check, GitHub permissions and git identity
+- [project.members.assignableroles](#projectmembersassignableroles) — List the roles the caller may assign in a project
 - [agent.message.send](#agentmessagesend) — Send a message to an agent
+- [inbox.message.read](#inboxmessageread) — List and read the caller's own inbox messages. A project token lists only messages of its boundary project
+- [inbox.message.write](#inboxmessagewrite) — Mark the caller's own inbox messages read. Mark-all by a project token touches only messages of its boundary project
+- [inbox.channels.list](#inboxchannelslist) — List the registered message channels: static capability metadata with no records
+- [inbox.capabilities.read](#inboxcapabilitiesread) — Read the hub messaging capabilities: static capability metadata with no records
+- [inbox.conversation.list](#inboxconversationlist) — List the caller's conversations. A token lists only conversations inside its boundary, and a direct conversation with an agent only with agent:read on that agent; the project group union also needs project:read
+- [inbox.conversation.create](#inboxconversationcreate) — Create a group conversation in a project. Needs project:read on the project; a token also needs inbox:write for it
+- [project.conversation.read](#projectconversationread) — Read a group conversation, its messages and one message. Needs project:read on the conversation's project; a group with no project needs participation, and a token needs inbox:read on a hub boundary for it
+- [inbox.conversation.direct.read](#inboxconversationdirectread) — Read a direct conversation, its messages and one message. A token needs inbox:read for the peer agent's project and agent:read on the peer agent; a direct conversation between users needs a hub boundary
+- [inbox.conversation.defaultagent.set](#inboxconversationdefaultagentset) — Set the default agent of a group conversation. Needs project:read on the conversation's project; a token also needs inbox:write for it
+- [inbox.conversation.participant.add](#inboxconversationparticipantadd) — Add a participant to a group conversation. Every caller needs project:read on the conversation's project; an added agent must be in that project and an added user must be a member of it; a token also needs inbox:write for it
+- [inbox.conversation.leave](#inboxconversationleave) — Leave a conversation the caller takes part in. A token needs inbox:write for the conversation
+- [inbox.conversation.resolve](#inboxconversationresolve) — Resolve a conversation reference. A group reference needs project:read on its project and an agent reference needs agent:read on the agent, for every user caller; a token also needs inbox:read for the result
+- [agent.message.target.resolve](#agentmessagetargetresolve) — Resolve a cross-project messaging target through the agent message authorization
+- [inbox.notification.read](#inboxnotificationread) — List the caller's notifications. A token lists only rows inside its boundary; with agentId, rows addressed to the agent subscriber need agent:read on that agent, for every user caller
+- [inbox.notification.ack](#inboxnotificationack) — Acknowledge the caller's notifications. Ack-all by a project token touches only rows of its boundary project
+- [inbox.notification.subscription.create](#inboxnotificationsubscriptioncreate) — Create notification subscriptions. A user caller needs project:read on the project and agent:read on a watched agent; a token also needs inbox:write for the project
+- [inbox.notification.subscription.read](#inboxnotificationsubscriptionread) — List the caller's notification subscriptions. A token lists only rows inside its boundary
+- [inbox.notification.subscription.write](#inboxnotificationsubscriptionwrite) — Update and delete the caller's notification subscriptions. A token changes only rows inside its boundary
+- [inbox.notification.template.create](#inboxnotificationtemplatecreate) — Create a subscription template. A template filed under a project needs project:read on it; a token also needs inbox:write for it
+- [inbox.notification.template.read](#inboxnotificationtemplateread) — List subscription templates: only templates of projects the caller may read, and for a token only templates inside its boundary
+- [inbox.notification.template.delete](#inboxnotificationtemplatedelete) — Delete a subscription template the caller created. A token needs inbox:write for the template's project
 - [chat.access](#chataccess) — Access chat threads, spaces, topics, and messages within a project
 - [role.definition.create](#roledefinitioncreate) — Create a custom role definition
 - [role.definition.update](#roledefinitionupdate) — Update a custom role definition
@@ -60,6 +109,7 @@
 - [credential.token.revoke](#credentialtokenrevoke) — Revoke or delete a user access token
 - [user.admin.suspend](#useradminsuspend) — Suspend or reactivate a user account (dispatched from PATCH /api/v1/users/{id} when status field is present)
 - [user.admin.invite](#useradmininvite) — Invite a user to the platform
+- [user.admin.provision](#useradminprovision) — Pre-register a user (status invited) through POST /api/v1/users; invitation-equivalent, shares the invite creation core; no role, no grants
 - [user.admin.promote](#useradminpromote) — Promote or demote a user's administrative level (dispatched from PATCH /api/v1/users/{id} when role field is present)
 - [user.admin.delete](#useradmindelete) — Delete a user account
 - [group.read](#groupread) — Read group details or list groups
@@ -70,13 +120,12 @@
 - [role.read](#roleread) — Read role definitions and permission registry
 - [role.binding.read](#rolebindingread) — Read role binding assignments
 - [access.constraint.read](#accessconstraintread) — Read access constraint definitions
-- [user.provision](#userprovision) — Create a user directly through the API; refused for every caller, because sign-in flows create users
 - [user.session.logout](#usersessionlogout) — Sign-in flow logout step; the hub holds no server-side session state for it to change
 - [user.session.revoke](#usersessionrevoke) — Revoke every cookie session of a user (platform admin only)
 - [user.terminalworkspace](#userterminalworkspace) — Read or replace the caller's own terminal workspace
 - [hub.authreset](#hubauthreset) — Reset all agent authentication credentials (emergency action)
 - [hub.config.read](#hubconfigread) — Read server configuration and schema
-- [hub.config.update](#hubconfigupdate) — Update server configuration sections
+- [hub.config.update](#hubconfigupdate) — Update server configuration sections. The route guard checks hub.config.read, so a token needs hub_config:read and hub_config:update, and writes configuration keys only
 - [hub.messaging.update](#hubmessagingupdate) — Read and update messaging configuration switches
 - [hub.experiments.update](#hubexperimentsupdate) — Read and update hub-wide experiment overrides
 - [hub.conduitgrantkeys.rotate](#hubconduitgrantkeysrotate) — Rotate the conduit grant signing key (kids and timestamps only in the response)
@@ -88,6 +137,9 @@
 - [hub.scheduler.read](#hubschedulerread) — Read scheduler status and configuration
 - [hub.projectdefaults.read](#hubprojectdefaultsread) — Read project default settings
 - [hub.lifecyclehooks.read](#hublifecyclehooksread) — Read lifecycle hook definitions
+- [hub.projectdefaults.update](#hubprojectdefaultsupdate) — Update project default settings. The route guard checks hub.project_defaults.read, so a token needs hub_project_defaults:read and hub_project_defaults:update, and writes configuration keys only
+- [hub.lifecyclehooks.update](#hublifecyclehooksupdate) — Create, update, delete and activate hub lifecycle hooks and hub pre-start hooks. The admin lifecycle-hook route guard checks hub.lifecycle_hooks.read, so a token writing there needs hub_lifecycle_hooks:read and hub_lifecycle_hooks:update
+- [hub.settings.update](#hubsettingsupdate) — Set the user-defined hub injected skills; system entries are preserved
 - [hub.validate.execute](#hubvalidateexecute) — Validate resource definitions against schema
 - [hub.integrations.read](#hubintegrationsread) — Read integration configurations
 - [hub.teamsmanifest.read](#hubteamsmanifestread) — Read Teams integration manifest
@@ -1466,6 +1518,38 @@
 
 ---
 
+## artifact.list
+
+**Domain:** artifact
+
+**Description:** List the artifacts the caller owns, holds a grant on, or that are shared to a project it is a member of (?mine=1); each row passes the artifact.read check, so an artifact the caller cannot read is omitted, never denied
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/artifacts` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `artifact_record`; boundaries `project`, `hub`; pinned by `TestArtifactsListUserAccessTokensAreBounded`)
+
+**Base Permission:** `artifact.read`
+
+**Resource Resolver:** artifact-home-project
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `not_found`
+
+### Tests
+
+- `pkg/hub:TestArtifactsListMine`
+
+---
+
 ## artifact.create
 
 **Domain:** artifact
@@ -1495,6 +1579,972 @@
 ### Tests
 
 - `pkg/hub:TestArtifactsTwoAgentsSameProject`
+
+---
+
+## project.env.read
+
+**Domain:** project
+
+**Description:** Read a project's environment variables (list or one key)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/projects/{id}/env` |
+| http_route | GET | `/api/v1/projects/{id}/env/{key}` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
+
+**Base Permission:** `project.read`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `read-one`, `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
+## project.env.write
+
+**Domain:** project
+
+**Description:** Set or delete a project environment variable
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/projects/{id}/env/{key}` |
+| http_route | DELETE | `/api/v1/projects/{id}/env/{key}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
+
+**Base Permission:** `project.update`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `create-resource`, `update-resource`, `delete-resource`
+
+### Audit
+
+- **Event Type:** `project.env.write`
+- **Context Fields:** actor_id, project_id
+- **Before Fields:** env_key
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
+## project.secret.read
+
+**Domain:** project
+
+**Description:** Read a project's secret metadata (list or one key)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/projects/{id}/secrets` |
+| http_route | GET | `/api/v1/projects/{id}/secrets/{key}` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
+
+**Base Permission:** `project.read`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `read-one`, `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
+## project.secret.write
+
+**Domain:** project
+
+**Description:** Set, patch or delete a project secret
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/projects/{id}/secrets/{key}` |
+| http_route | PATCH | `/api/v1/projects/{id}/secrets/{key}` |
+| http_route | DELETE | `/api/v1/projects/{id}/secrets/{key}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
+
+**Base Permission:** `project.update`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `create-resource`, `update-resource`, `delete-resource`
+
+### Audit
+
+- **Event Type:** `project.secret.write`
+- **Context Fields:** actor_id, project_id
+- **Before Fields:** secret_key
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
+## project.providers.list
+
+**Domain:** project
+
+**Description:** List the runtime brokers that provide for a project
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/projects/{id}/providers` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
+
+**Base Permission:** `project.read`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
+## project.shareddir.read
+
+**Domain:** project
+
+**Description:** List a project's shared directories and read their files and archives
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/projects/{id}/shared-dirs` |
+| http_route | GET | `/api/v1/projects/{id}/shared-dirs/{name}/archive` |
+| http_route | GET | `/api/v1/projects/{id}/shared-dirs/{name}/files` |
+| http_route | GET | `/api/v1/projects/{id}/shared-dirs/{name}/files/{path}` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
+
+**Base Permission:** `project.read`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `read-one`, `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
+## project.shareddir.write
+
+**Domain:** project
+
+**Description:** Create or delete a project shared directory, and upload, write or delete its files
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/projects/{id}/shared-dirs` |
+| http_route | POST | `/api/v1/projects/{id}/shared-dirs/{name}/files` |
+| http_route | PUT | `/api/v1/projects/{id}/shared-dirs/{name}/files/{path}` |
+| http_route | DELETE | `/api/v1/projects/{id}/shared-dirs/{name}/files/{path}` |
+| http_route | DELETE | `/api/v1/projects/{id}/shared-dirs/{name}` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
+
+**Base Permission:** `project.update`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `create-resource`, `update-resource`, `delete-resource`
+
+### Audit
+
+- **Event Type:** `project.shareddir.write`
+- **Context Fields:** actor_id, project_id
+- **Before Fields:** shared_dir_name
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
+## project.injectedskills.read
+
+**Domain:** project
+
+**Description:** List the skills injected into a project's agents
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/projects/{id}/injected-skills` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
+
+**Base Permission:** `project.read`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
+## project.injectedskills.write
+
+**Domain:** project
+
+**Description:** Add, replace or remove skills injected into a project's agents
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/projects/{id}/injected-skills` |
+| http_route | DELETE | `/api/v1/projects/{id}/injected-skills/{entryId}` |
+| http_route | PUT | `/api/v1/projects/{id}/injected-skills` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
+
+**Base Permission:** `project.update`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `create-resource`, `update-resource`, `delete-resource`
+
+### Audit
+
+- **Event Type:** `project.injectedskills.write`
+- **Context Fields:** actor_id, project_id
+- **Before Fields:** entry_id
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
+## project.gcpsa.create
+
+**Domain:** project
+
+**Description:** Register a project-scoped GCP service account. Project-route service account writes use project.manage
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/projects/{id}/gcp-service-accounts` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
+
+**Base Permission:** `project.manage`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
+## project.messagelogs.read
+
+**Domain:** project
+
+**Description:** Read a project's message log
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/projects/{id}/message-logs` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
+
+**Base Permission:** `project.read`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
+## project.broadcast
+
+**Domain:** project
+
+**Description:** Broadcast a message to a project's agents. Each recipient is then filtered by agent.message
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/projects/{id}/broadcast` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
+
+**Base Permission:** `project.read`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
+## project.metrics.read
+
+**Domain:** project
+
+**Description:** Read a project's metrics summary, session metrics summary and metrics dashboard
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/projects/{id}/metrics-summary` |
+| http_route | GET | `/api/v1/projects/{id}/metrics/summary` |
+| http_route | GET | `/api/v1/projects/{id}/metrics` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
+
+**Base Permission:** `project.read`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
+## project.prestarthooks.read
+
+**Domain:** project
+
+**Description:** List or read a project's pre-start hooks
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/projects/{id}/pre-start-hooks` |
+| http_route | GET | `/api/v1/projects/{id}/pre-start-hooks/{hookId}` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
+
+**Base Permission:** `project.read`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `read-one`, `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
+## project.prestarthooks.write
+
+**Domain:** project
+
+**Description:** Create, update, delete or activate a project pre-start hook
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/projects/{id}/pre-start-hooks` |
+| http_route | PUT | `/api/v1/projects/{id}/pre-start-hooks/{hookId}` |
+| http_route | POST | `/api/v1/projects/{id}/pre-start-hooks/{hookId}/activate` |
+| http_route | DELETE | `/api/v1/projects/{id}/pre-start-hooks/{hookId}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
+
+**Base Permission:** `project.update`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `create-resource`, `update-resource`, `delete-resource`
+
+### Audit
+
+- **Event Type:** `project.prestarthooks.write`
+- **Context Fields:** actor_id, project_id
+- **Before Fields:** hook_id
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
+## project.settings.read
+
+**Domain:** project
+
+**Description:** Read a project's settings and its resolved settings
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/projects/{id}/settings` |
+| http_route | GET | `/api/v1/projects/{id}/settings/resolved` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
+
+**Base Permission:** `project.read`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
+## project.settings.update
+
+**Domain:** project
+
+**Description:** Replace a project's settings
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/projects/{id}/settings` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
+
+**Base Permission:** `project.update`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
+## project.messagingpolicy.read
+
+**Domain:** project
+
+**Description:** Read a project's cross-project inbound messaging policy
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/projects/{id}/messaging-policy` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
+
+**Base Permission:** `project.read`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
+## project.messagingpolicy.update
+
+**Domain:** project
+
+**Description:** Set a project's cross-project inbound messaging policy. The caller also must be an active direct project owner or a local unscoped hub admin
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/projects/{id}/messaging-policy` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`; pinned by `TestProjectMessagingPolicyPut_RequiresSetMessagingPolicySelector`)
+
+**Base Permission:** `project.set_messaging_policy`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestProjectMessagingPolicyPut_RequiresSetMessagingPolicySelector`
+
+---
+
+## project.template.set
+
+**Domain:** project
+
+**Description:** Mark or unmark a project as a template. The caller needs project.update and project.clone on the project
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/projects/{id}/set-template` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`; pinned by `TestSetTemplate_RequiresUpdateAndCloneOnTheProject`)
+
+**Base Permission:** `project.update`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestSetTemplate_RequiresUpdateAndCloneOnTheProject`
+
+---
+
+## template.project.import
+
+**Domain:** template
+
+**Description:** Discover or import templates into a project
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/projects/{id}/discover-templates` |
+| http_route | POST | `/api/v1/projects/{id}/import-templates` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `project_collection`; boundaries `project`, `hub`)
+
+**Base Permission:** `template.create`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
+## harnessconfig.project.import
+
+**Domain:** harnessconfig
+
+**Description:** Discover or import harness configs into a project
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/projects/{id}/discover-harness-configs` |
+| http_route | POST | `/api/v1/projects/{id}/import-harness-configs` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `project_collection`; boundaries `project`, `hub`)
+
+**Base Permission:** `harness_config.create`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
+## project.workspace.read
+
+**Domain:** project
+
+**Description:** Read a project's workspace: WebDAV reads, sync status, cache status, archive and file reads
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/projects/{id}/dav/{path}` |
+| http_route | HEAD | `/api/v1/projects/{id}/dav/{path}` |
+| http_route | OPTIONS | `/api/v1/projects/{id}/dav/{path}` |
+| http_route | GET | `/api/v1/projects/{id}/sync/status` |
+| http_route | GET | `/api/v1/projects/{id}/workspace/archive` |
+| http_route | GET | `/api/v1/projects/{id}/workspace/cache/status` |
+| http_route | GET | `/api/v1/projects/{id}/workspace/files` |
+| http_route | GET | `/api/v1/projects/{id}/workspace/files/{path}` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
+
+**Base Permission:** `project.read`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `read-one`, `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
+## project.workspace.write
+
+**Domain:** project
+
+**Description:** Change a project's workspace: WebDAV writes, cache refresh and notify, file upload, write and delete, and git pull
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/projects/{id}/dav/{path}` |
+| http_route | PROPPATCH | `/api/v1/projects/{id}/dav/{path}` |
+| http_route | LOCK | `/api/v1/projects/{id}/dav/{path}` |
+| http_route | UNLOCK | `/api/v1/projects/{id}/dav/{path}` |
+| http_route | COPY | `/api/v1/projects/{id}/dav/{path}` |
+| http_route | MOVE | `/api/v1/projects/{id}/dav/{path}` |
+| http_route | POST | `/api/v1/projects/{id}/dav/{path}` |
+| http_route | PROPFIND | `/api/v1/projects/{id}/dav/{path}` |
+| http_route | DELETE | `/api/v1/projects/{id}/dav/{path}` |
+| http_route | MKCOL | `/api/v1/projects/{id}/dav/{path}` |
+| http_route | POST | `/api/v1/projects/{id}/workspace/cache/notify` |
+| http_route | POST | `/api/v1/projects/{id}/workspace/cache/refresh` |
+| http_route | POST | `/api/v1/projects/{id}/workspace/files` |
+| http_route | PUT | `/api/v1/projects/{id}/workspace/files/{path}` |
+| http_route | DELETE | `/api/v1/projects/{id}/workspace/files/{path}` |
+| http_route | POST | `/api/v1/projects/{id}/workspace/pull` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
+
+**Base Permission:** `project.update`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `create-resource`, `update-resource`, `delete-resource`
+
+### Audit
+
+- **Event Type:** `project.workspace.write`
+- **Context Fields:** actor_id, project_id
+- **Before Fields:** path
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
+## project.github.read
+
+**Domain:** project
+
+**Description:** Read a project's GitHub status, GitHub permissions and git identity
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/projects/{id}/github-status` |
+| http_route | GET | `/api/v1/projects/{id}/github-permissions` |
+| http_route | GET | `/api/v1/projects/{id}/git-identity` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
+
+**Base Permission:** `project.read`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
+## project.github.write
+
+**Domain:** project
+
+**Description:** Change a project's GitHub installation, status check, GitHub permissions and git identity
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/projects/{id}/github-installation` |
+| http_route | DELETE | `/api/v1/projects/{id}/github-installation` |
+| http_route | POST | `/api/v1/projects/{id}/github-status` |
+| http_route | PUT | `/api/v1/projects/{id}/github-permissions` |
+| http_route | DELETE | `/api/v1/projects/{id}/github-permissions` |
+| http_route | PUT | `/api/v1/projects/{id}/git-identity` |
+| http_route | DELETE | `/api/v1/projects/{id}/git-identity` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
+
+**Base Permission:** `project.update`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `create-resource`, `update-resource`, `delete-resource`
+
+### Audit
+
+- **Event Type:** `project.github.write`
+- **Context Fields:** actor_id, project_id
+- **Before Fields:** setting
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
+## project.members.assignableroles
+
+**Domain:** project
+
+**Description:** List the roles the caller may assign in a project
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/projects/{id}/members/assignable-roles` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
+
+**Base Permission:** `project.manage`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
 
 ---
 
@@ -1541,6 +2591,711 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## inbox.message.read
+
+**Domain:** inbox
+
+**Description:** List and read the caller's own inbox messages. A project token lists only messages of its boundary project
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/messages` |
+| http_route | GET | `/api/v1/messages/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `self_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.read`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `list-scoped`, `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestInboxToken_ProjectBoundaryFiltersMessages`
+- `pkg/hub:TestInboxToken_ProjectMembershipRecheckedOnEveryRequest`
+
+---
+
+## inbox.message.write
+
+**Domain:** inbox
+
+**Description:** Mark the caller's own inbox messages read. Mark-all by a project token touches only messages of its boundary project
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/messages/{id}/read` |
+| http_route | POST | `/api/v1/messages/read-all` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `self_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestInboxToken_MarkAllReadTouchesOnlyVisibleRows`
+- `pkg/hub:TestInboxToken_RefusedCredentialKinds`
+
+---
+
+## inbox.channels.list
+
+**Domain:** inbox
+
+**Description:** List the registered message channels: static capability metadata with no records
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/message-channels` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit_self` (self filter `none`; pinned by `TestMessagingStaticMetadata_AnyTokenReads`)
+
+**Resource Resolver:** none
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestMessagingStaticMetadata_AnyTokenReads`
+
+### Exemptions
+
+- **authentication_only:** Static channel metadata; carries no user records (scope: static messaging metadata only) — waives: `base_permission`
+
+---
+
+## inbox.capabilities.read
+
+**Domain:** inbox
+
+**Description:** Read the hub messaging capabilities: static capability metadata with no records
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/messaging/capabilities` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit_self` (self filter `none`; pinned by `TestMessagingStaticMetadata_AnyTokenReads`)
+
+**Resource Resolver:** none
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestMessagingStaticMetadata_AnyTokenReads`
+
+### Exemptions
+
+- **authentication_only:** Static capability metadata; carries no user records (scope: static messaging metadata only) — waives: `base_permission`
+
+---
+
+## inbox.conversation.list
+
+**Domain:** inbox
+
+**Description:** List the caller's conversations. A token lists only conversations inside its boundary, and a direct conversation with an agent only with agent:read on that agent; the project group union also needs project:read
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/conversations` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `self_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.read`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestConversationListToken_FilteredToBoundary`
+
+---
+
+## inbox.conversation.create
+
+**Domain:** inbox
+
+**Description:** Create a group conversation in a project. Needs project:read on the project; a token also needs inbox:write for it
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/conversations` |
+| http_route | POST | `/api/v1/conversations/` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `project_body`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** project-from-body
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestConversationCreateToken_RequiresInboxWriteAndProjectRead`
+
+---
+
+## project.conversation.read
+
+**Domain:** project
+
+**Description:** Read a group conversation, its messages and one message. Needs project:read on the conversation's project; a group with no project needs participation, and a token needs inbox:read on a hub boundary for it
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/conversations/{id}` |
+| http_route | GET | `/api/v1/conversations/{id}/messages` |
+| http_route | GET | `/api/v1/conversations/{id}/messages/{messageId}` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `conversation_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `project.read`
+
+**Resource Resolver:** conversation-project
+
+**Effects:** `read-one`, `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestGroupConversationToken_ProjectlessGroupRequiresHubBoundary`
+
+---
+
+## inbox.conversation.direct.read
+
+**Domain:** inbox
+
+**Description:** Read a direct conversation, its messages and one message. A token needs inbox:read for the peer agent's project and agent:read on the peer agent; a direct conversation between users needs a hub boundary
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/conversations/{id}` |
+| http_route | GET | `/api/v1/conversations/{id}/messages` |
+| http_route | GET | `/api/v1/conversations/{id}/messages/{messageId}` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `self_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.read`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `read-one`, `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestDirectConversationToken_PeerAgentMustBeInsideBoundary`
+
+---
+
+## inbox.conversation.defaultagent.set
+
+**Domain:** inbox
+
+**Description:** Set the default agent of a group conversation. Needs project:read on the conversation's project; a token also needs inbox:write for it
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/conversations/{id}/default-agent` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `conversation_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** conversation-project
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestConversationCreateToken_RequiresInboxWriteAndProjectRead`
+
+---
+
+## inbox.conversation.participant.add
+
+**Domain:** inbox
+
+**Description:** Add a participant to a group conversation. Every caller needs project:read on the conversation's project; an added agent must be in that project and an added user must be a member of it; a token also needs inbox:write for it
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/conversations/{id}/participants` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `conversation_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** conversation-project
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestConversationAddParticipant_RequiresProjectReadAndMemberPrincipals`
+
+---
+
+## inbox.conversation.leave
+
+**Domain:** inbox
+
+**Description:** Leave a conversation the caller takes part in. A token needs inbox:write for the conversation
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/conversations/{id}/leave` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `self_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestConversationLeaveToken_RequiresInboxWrite`
+
+---
+
+## inbox.conversation.resolve
+
+**Domain:** inbox
+
+**Description:** Resolve a conversation reference. A group reference needs project:read on its project and an agent reference needs agent:read on the agent, for every user caller; a token also needs inbox:read for the result
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/conversations/resolve` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `self_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.read`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestConversationResolve_GroupReferenceRequiresProjectRead`
+- `pkg/hub:TestConversationResolve_AgentReferenceRequiresAgentRead`
+
+---
+
+## agent.message.target.resolve
+
+**Domain:** agent.message
+
+**Description:** Resolve a cross-project messaging target through the agent message authorization
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/messaging/targets/resolve` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `agent_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `agent.message`
+
+**Resource Resolver:** agent-from-query
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestMessagingTargetsResolve_TokenNeedsAgentMessage`
+
+---
+
+## inbox.notification.read
+
+**Domain:** inbox
+
+**Description:** List the caller's notifications. A token lists only rows inside its boundary; with agentId, rows addressed to the agent subscriber need agent:read on that agent, for every user caller
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/notifications` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `self_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.read`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestNotificationToken_RowsFilteredToBoundary`
+- `pkg/hub:TestNotificationsByAgent_OtherSubscriberRowsRequireAgentRead`
+
+---
+
+## inbox.notification.ack
+
+**Domain:** inbox
+
+**Description:** Acknowledge the caller's notifications. Ack-all by a project token touches only rows of its boundary project
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/notifications/ack-all` |
+| http_route | POST | `/api/v1/notifications/{id}/ack` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `self_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestNotificationToken_RowsFilteredToBoundary`
+
+---
+
+## inbox.notification.subscription.create
+
+**Domain:** inbox
+
+**Description:** Create notification subscriptions. A user caller needs project:read on the project and agent:read on a watched agent; a token also needs inbox:write for the project
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/notifications/subscriptions` |
+| http_route | POST | `/api/v1/notifications/subscriptions/bulk` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `project_body`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** project-from-body
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestNotificationSubscription_RequiresProjectAndAgentRead`
+
+---
+
+## inbox.notification.subscription.read
+
+**Domain:** inbox
+
+**Description:** List the caller's notification subscriptions. A token lists only rows inside its boundary
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/notifications/subscriptions` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `self_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.read`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestNotificationToken_RowsFilteredToBoundary`
+
+---
+
+## inbox.notification.subscription.write
+
+**Domain:** inbox
+
+**Description:** Update and delete the caller's notification subscriptions. A token changes only rows inside its boundary
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PATCH | `/api/v1/notifications/subscriptions/{id}` |
+| http_route | DELETE | `/api/v1/notifications/subscriptions/{id}` |
+| http_route | POST | `/api/v1/notifications/subscriptions/bulk-delete` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `self_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `update-resource`, `delete-resource`
+
+### Audit
+
+- **Event Type:** `inbox.notification.subscription.write`
+- **Context Fields:** actor_id
+- **Before Fields:** subscription_id
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestNotificationToken_RowsFilteredToBoundary`
+
+---
+
+## inbox.notification.template.create
+
+**Domain:** inbox
+
+**Description:** Create a subscription template. A template filed under a project needs project:read on it; a token also needs inbox:write for it
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/notifications/templates` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `project_body`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** project-from-body
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestNotificationTemplates_ListedOnlyForReadableProjects`
+
+---
+
+## inbox.notification.template.read
+
+**Domain:** inbox
+
+**Description:** List subscription templates: only templates of projects the caller may read, and for a token only templates inside its boundary
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/notifications/templates` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `self_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.read`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestNotificationTemplates_ListedOnlyForReadableProjects`
+
+---
+
+## inbox.notification.template.delete
+
+**Domain:** inbox
+
+**Description:** Delete a subscription template the caller created. A token needs inbox:write for the template's project
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | DELETE | `/api/v1/notifications/templates/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `self_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `delete-resource`
+
+### Audit
+
+- **Event Type:** `inbox.notification.template.delete`
+- **Context Fields:** actor_id
+- **Before Fields:** template_id
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestNotificationTemplates_ListedOnlyForReadableProjects`
 
 ---
 
@@ -2259,6 +4014,51 @@
 
 ---
 
+## user.admin.provision
+
+**Domain:** user.admin
+
+**Description:** Pre-register a user (status invited) through POST /api/v1/users; invitation-equivalent, shares the invite creation core; no role, no grants
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/users` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `GOV_PENDING`)
+
+**Base Permission:** `user.invite`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `create-resource`, `issue-credential`
+
+### Governance
+
+- **Kind:** issuer_credential
+- Pre-registration admits sign-in under invite_only, identical to user.admin.invite
+
+### Audit
+
+- **Event Type:** `user.admin.provision`
+- **Context Fields:** actor_id, credential_id, credential_kind
+- **After Fields:** target_user_id, email, status, display_name
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`, `user_suspended`, `conflict`, `role_assignment_forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestHandleProvisionUser`
+
+---
+
 ## user.admin.promote
 
 **Domain:** user.admin
@@ -2593,40 +4393,6 @@
 
 ---
 
-## user.provision
-
-**Domain:** user
-
-**Description:** Create a user directly through the API; refused for every caller, because sign-in flows create users
-
-### Entry Points
-
-| Kind | Method | Pattern |
-|------|--------|---------|
-| http_route | POST | `/api/v1/users` |
-
-**Principals:** `user`
-
-**Credentials:** `session_jwt`
-
-**Bearer:** `out_of_scope` (owner `user-provisioning`)
-
-**Resource Resolver:** none
-
-**Effects:** `create-resource`
-
-**Denial Codes:** `forbidden`
-
-### Tests
-
-- `pkg/hub:TestBearerDisposition_EveryRoutePatternCovered`
-
-### Exemptions
-
-- **internal_only:** Direct user creation is refused for every caller; user records come from sign-in flows (scope: direct user creation) — waives: `base_permission`
-
----
-
 ## user.session.logout
 
 **Domain:** user
@@ -2792,7 +4558,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
 
 **Base Permission:** `hub.config.read`
 
@@ -2804,7 +4572,7 @@
 
 ### Tests
 
-- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestHubConfigToken_ProjectBoundaryDenied`
 
 ---
 
@@ -2812,18 +4580,22 @@
 
 **Domain:** hub
 
-**Description:** Update server configuration sections
+**Description:** Update server configuration sections. The route guard checks hub.config.read, so a token needs hub_config:read and hub_config:update, and writes configuration keys only
 
 ### Entry Points
 
 | Kind | Method | Pattern |
 |------|--------|---------|
 | http_route | PUT | `/api/v1/admin/server-config` |
+| http_route | PATCH | `/api/v1/admin/server-config` |
+| http_route | POST | `/api/v1/admin/server-config` |
 | http_route | DELETE | `/api/v1/admin/server-config/sections/{id}` |
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
 
 **Base Permission:** `hub.config.update`
 
@@ -2835,7 +4607,7 @@
 
 ### Tests
 
-- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestServerConfigUpdate_AuthorityKeysRefuseTokens`
 
 ---
 
@@ -2854,7 +4626,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
 
 **Base Permission:** `hub.messaging.update`
 
@@ -2866,7 +4640,7 @@
 
 ### Tests
 
-- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
 
 ---
 
@@ -2886,7 +4660,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
 
 **Base Permission:** `hub.experiments.update`
 
@@ -2898,7 +4674,7 @@
 
 ### Tests
 
-- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
 
 ---
 
@@ -3140,7 +4916,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
 
 **Base Permission:** `hub.project_defaults.read`
 
@@ -3152,7 +4930,7 @@
 
 ### Tests
 
-- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
 
 ---
 
@@ -3171,7 +4949,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
 
 **Base Permission:** `hub.lifecycle_hooks.read`
 
@@ -3183,7 +4963,111 @@
 
 ### Tests
 
-- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
+## hub.projectdefaults.update
+
+**Domain:** hub
+
+**Description:** Update project default settings. The route guard checks hub.project_defaults.read, so a token needs hub_project_defaults:read and hub_project_defaults:update, and writes configuration keys only
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/admin/project-defaults` |
+| http_route | PATCH | `/api/v1/admin/project-defaults` |
+| http_route | POST | `/api/v1/admin/project-defaults` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
+
+**Base Permission:** `hub.project_defaults.update`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestProjectDefaultsUpdate_EveryKeyClassifiedForTokens`
+
+---
+
+## hub.lifecyclehooks.update
+
+**Domain:** hub
+
+**Description:** Create, update, delete and activate hub lifecycle hooks and hub pre-start hooks. The admin lifecycle-hook route guard checks hub.lifecycle_hooks.read, so a token writing there needs hub_lifecycle_hooks:read and hub_lifecycle_hooks:update
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/admin/lifecycle-hooks` |
+| http_route | PUT | `/api/v1/admin/lifecycle-hooks/{id}` |
+| http_route | DELETE | `/api/v1/admin/lifecycle-hooks/{id}` |
+| http_route | POST | `/api/v1/pre-start-hooks` |
+| http_route | PUT | `/api/v1/pre-start-hooks/{id}` |
+| http_route | POST | `/api/v1/pre-start-hooks/{id}/activate` |
+| http_route | DELETE | `/api/v1/pre-start-hooks/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
+
+**Base Permission:** `hub.lifecycle_hooks.update`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
+## hub.settings.update
+
+**Domain:** hub
+
+**Description:** Set the user-defined hub injected skills; system entries are preserved
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/hub/settings/injected-skills` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
+
+**Base Permission:** `hub.settings.update`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
 
 ---
 

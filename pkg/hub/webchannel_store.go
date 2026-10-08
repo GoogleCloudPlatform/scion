@@ -249,6 +249,32 @@ type WebChatStore interface {
 	// CountMessages returns the number of messages for the given thread_id.
 	// Used for idempotency checks during DM promotion.
 	CountMessages(ctx context.Context, threadID string) (int, error)
+
+	// --- Per-recipient mention records ---
+
+	// RecordMentions stores one webchat_mention row per user in userIDs,
+	// recording that messageID in conversationKey mentioned that user.
+	// Re-recording an existing (user, message) pair is a no-op.
+	RecordMentions(ctx context.Context, conversationKey, messageID string, userIDs []string) error
+
+	// UnreadMentionKeys returns the subset of conversationKeys in which
+	// userID has at least one recorded mention newer than userID's own
+	// read watermark for that conversation, by the messages table's
+	// (created, id) order. Only userID's own mention and read-state rows
+	// are consulted.
+	//
+	// A watermark that does not resolve to a stored message (no read-state
+	// row, an empty watermark left by mark-unread on a single-message
+	// thread, or an ID with no messages row) counts every recorded mention
+	// in that conversation as unread. Callers bound this with their own
+	// unread check: handleListThreads only reports hasUnreadMention when
+	// hasUnread is also true.
+	UnreadMentionKeys(ctx context.Context, userID string, conversationKeys []string) (map[string]bool, error)
+
+	// PurgeOrphanMentions deletes mention rows whose message no longer
+	// exists in the messages table (hard-deleted by a retention purge).
+	// Returns the number of rows removed.
+	PurgeOrphanMentions(ctx context.Context) (int, error)
 }
 
 // ThreadPrefs holds per-thread display preferences from webchat_thread_prefs.
@@ -573,6 +599,22 @@ CREATE TABLE IF NOT EXISTS webchat_message_ext (
     edited_at TEXT,
     deleted_at TEXT
 );
+
+-- Per-recipient mention records: one row per (message, mentioned user).
+-- The primary key serves deletes by message; the (user_id,
+-- conversation_key) index serves the thread list's unread-mention read.
+CREATE TABLE IF NOT EXISTS webchat_mention (
+    user_id          TEXT NOT NULL,
+    conversation_key TEXT NOT NULL,
+    message_id       TEXT NOT NULL,
+    PRIMARY KEY (message_id, user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_webchat_mention_user_conversation
+    ON webchat_mention (user_id, conversation_key);
+
+CREATE INDEX IF NOT EXISTS idx_webchat_mention_conversation
+    ON webchat_mention (conversation_key);
 `
 	_, err := s.db.Exec(ddl)
 	if err != nil {
@@ -598,6 +640,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_webchat_topic_project_name
 `
 	if _, err := s.db.Exec(nameIdx); err != nil {
 		return fmt.Errorf("webchat store: create name uniqueness index: %w", err)
+	}
+
+	// Scheduled chat messages (webchat_scheduled_store*.go).
+	if err := s.initScheduledMessages(); err != nil {
+		return err
 	}
 
 	// Run idempotent migrations.
@@ -1082,6 +1129,10 @@ func (s *sqliteWebChatStore) DeleteTopic(ctx context.Context, topicID string) er
 		time.Now().UTC().Format(time.RFC3339Nano), topicID)
 	if err != nil {
 		return fmt.Errorf("webchat store: delete topic: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		"DELETE FROM webchat_mention WHERE conversation_key = ?", topicID); err != nil {
+		return fmt.Errorf("webchat store: delete topic mentions: %w", err)
 	}
 
 	return tx.Commit()
@@ -2333,11 +2384,22 @@ VALUES (?, ?)
 ON CONFLICT (message_id)
 DO UPDATE SET deleted_at = excluded.deleted_at
 `
-	_, err := s.db.ExecContext(ctx, query, messageID, deletedAt.UTC().Format(time.RFC3339Nano))
+	// One transaction: the soft delete and its mention cleanup land
+	// together, so a deleted message never keeps lighting a mention dot.
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
+		return fmt.Errorf("webchat store: set message deleted begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+	if _, err := tx.ExecContext(ctx, query, messageID, deletedAt.UTC().Format(time.RFC3339Nano)); err != nil {
 		return fmt.Errorf("webchat store: set message deleted: %w", err)
 	}
-	return nil
+	// A deleted message no longer mentions anyone.
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM webchat_mention WHERE message_id = ?`, messageID); err != nil {
+		return fmt.Errorf("webchat store: delete message mentions: %w", err)
+	}
+	return tx.Commit()
 }
 
 // UpdateMessageContent updates the content (msg column) of a message in the
@@ -2580,4 +2642,90 @@ func truncateSnippet(s string, maxLen int) string {
 		return s
 	}
 	return string(runes[:maxLen]) + "..."
+}
+
+// RecordMentions stores one mention row per user for messageID.
+func (s *sqliteWebChatStore) RecordMentions(ctx context.Context, conversationKey, messageID string, userIDs []string) error {
+	if conversationKey == "" || messageID == "" || len(userIDs) == 0 {
+		return nil
+	}
+	const query = `
+INSERT INTO webchat_mention (user_id, conversation_key, message_id)
+VALUES (?, ?, ?)
+ON CONFLICT (message_id, user_id) DO NOTHING
+`
+	// One transaction for the whole batch: a single commit instead of an
+	// implicit one per row, and the batch lands atomically.
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("webchat store: record mentions begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+	for _, userID := range userIDs {
+		if userID == "" {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, query, userID, conversationKey, messageID); err != nil {
+			return fmt.Errorf("webchat store: record mention: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("webchat store: record mentions commit: %w", err)
+	}
+	return nil
+}
+
+// UnreadMentionKeys returns the conversations in conversationKeys where
+// userID has a recorded mention after its own read watermark, in one query.
+func (s *sqliteWebChatStore) UnreadMentionKeys(ctx context.Context, userID string, conversationKeys []string) (map[string]bool, error) {
+	out := make(map[string]bool)
+	if userID == "" || len(conversationKeys) == 0 {
+		return out, nil
+	}
+	placeholders := make([]string, len(conversationKeys))
+	args := make([]interface{}, 0, len(conversationKeys)+1)
+	args = append(args, userID)
+	for i, key := range conversationKeys {
+		placeholders[i] = "?"
+		args = append(args, key)
+	}
+	// The watermark row and message are joined on the caller's own user_id,
+	// so another user's read state can never satisfy the comparison.
+	query := fmt.Sprintf(`
+SELECT DISTINCT wm.conversation_key
+  FROM webchat_mention wm
+  JOIN messages m ON m.id = wm.message_id
+  LEFT JOIN webchat_read_state rs
+         ON rs.user_id = wm.user_id AND rs.conversation_key = wm.conversation_key
+  LEFT JOIN messages lr ON lr.id = rs.last_read_message_id
+ WHERE wm.user_id = ? AND wm.conversation_key IN (%s)
+   AND (lr.id IS NULL OR m.created > lr.created
+        OR (m.created = lr.created AND m.id > lr.id))
+`, strings.Join(placeholders, ","))
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("webchat store: unread mentions: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			return nil, fmt.Errorf("webchat store: scan unread mention: %w", err)
+		}
+		out[key] = true
+	}
+	return out, rows.Err()
+}
+
+// PurgeOrphanMentions deletes mention rows whose message row is gone.
+func (s *sqliteWebChatStore) PurgeOrphanMentions(ctx context.Context) (int, error) {
+	res, err := s.db.ExecContext(ctx, `
+DELETE FROM webchat_mention
+ WHERE NOT EXISTS (SELECT 1 FROM messages m WHERE m.id = webchat_mention.message_id)
+`)
+	if err != nil {
+		return 0, fmt.Errorf("webchat store: purge orphan mentions: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
 }

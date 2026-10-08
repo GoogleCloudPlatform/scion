@@ -81,6 +81,9 @@ func (m *Manager) runOnce(ctx context.Context) error {
 	}
 	header := http.Header{}
 	header.Set("X-Scion-Agent-Token", m.client.AuthToken())
+	if runID := m.client.RunID(); runID != "" {
+		header.Set(scionhub.RunIDHeader, runID)
+	}
 	// Behind an identity-aware proxy the upgrade request needs the same
 	// transport credential as every other hub request.
 	if err := m.client.ApplyTransportHeaders(header); err != nil {

@@ -24,6 +24,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -206,6 +207,15 @@ type AgentDMResult struct {
 	// captures the dispatch failure reason for logging/diagnostics.
 	// Callers should NOT expose this to end users.
 	DispatchErr error
+
+	// ArtifactWarning is set when artifact references the request named
+	// were not attached (admitMessageArtifacts).
+	ArtifactWarning string
+
+	// AttachmentWarnings lists the attachments the hub could not record
+	// (ptone/scion#3667). The message was still sent; adapters return these
+	// to the sender as an additive response field.
+	AttachmentWarnings []AttachmentWarning
 }
 
 // AgentDMError is a typed error from the shared DM operation. It carries
@@ -390,7 +400,7 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 	// ── Phase 2: Side effects ───────────────────────────────────────────
 
 	// 6. Attachment ingestion.
-	attachmentRefs := s.ingestAgentAttachments(ctx, input.ProjectID, input.SenderAgent.ID, input.Attachments)
+	attachmentRefs, attachmentWarnings := s.ingestAgentAttachments(ctx, input.ProjectID, input.SenderAgent.ID, input.Attachments)
 
 	// 7. Build store message.
 	// DispatchState is set to "pending" — the message row is its own
@@ -457,7 +467,14 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 	// endpoint, the handleAgentMessage agent fork, and #2083's agent mention
 	// fan-out (fanOutAgentMentions builds fresh metadata anyway, so this is
 	// a no-op on that path).
-	structuredMsg.Metadata = messaging.StripReservedMetadata(structuredMsg.Metadata)
+	//
+	// admitMessageArtifacts performs that strip and then re-adds only the
+	// artifact references the sender can read under its own request
+	// credential (ptone/scion#3222).
+	var artifactRefs []artifacts.MessageRef
+	var artifactWarning string
+	structuredMsg.Metadata, artifactRefs, artifactWarning = s.admitMessageArtifacts(ctx, structuredMsg.Metadata)
+	structuredMsg.ArtifactRefsAdmitted = len(artifactRefs) > 0
 
 	// Stamp attachment metadata onto the structured message.
 	if encoded, ok := attachmentRefsMetadata(attachmentRefs); ok {
@@ -476,6 +493,9 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 			HTTPStatus: http.StatusInternalServerError,
 		}
 	}
+
+	// 8. (cont.) Record the admitted artifact references for the web chat.
+	s.recordMessageArtifacts(ctx, msgID, artifactRefs)
 
 	// 8a. Audit: body-free admission allow record (#1690).
 	// Logged after persistence so the message ID is available as correlation.
@@ -522,10 +542,12 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 	if deferred {
 		LogDMDispatchOutcome(input.SenderAgent, input.TargetAgent, msgID, DispatchDeferred, nil)
 		return &AgentDMResult{
-			Outcome:     AgentDMDeferred,
-			MessageID:   msgID,
-			Recipient:   storeMsg.Recipient,
-			RecipientID: storeMsg.RecipientID,
+			Outcome:            AgentDMDeferred,
+			MessageID:          msgID,
+			Recipient:          storeMsg.Recipient,
+			RecipientID:        storeMsg.RecipientID,
+			AttachmentWarnings: attachmentWarnings,
+			ArtifactWarning:    artifactWarning,
 		}, nil
 	}
 
@@ -600,11 +622,13 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 			// Audit: dispatch outcome (#1690).
 			LogDMDispatchOutcome(input.SenderAgent, input.TargetAgent, msgID, DispatchFailed, dispatchErr)
 			return &AgentDMResult{
-				Outcome:     AgentDMAmbiguous,
-				MessageID:   msgID,
-				Recipient:   storeMsg.Recipient,
-				RecipientID: storeMsg.RecipientID,
-				DispatchErr: dispatchErr,
+				Outcome:            AgentDMAmbiguous,
+				MessageID:          msgID,
+				Recipient:          storeMsg.Recipient,
+				RecipientID:        storeMsg.RecipientID,
+				DispatchErr:        dispatchErr,
+				AttachmentWarnings: attachmentWarnings,
+				ArtifactWarning:    artifactWarning,
 			}, nil
 		}
 
@@ -639,11 +663,13 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 		// Audit: dispatch outcome (#1690) — dispatch succeeded but state tracking failed.
 		LogDMDispatchOutcome(input.SenderAgent, input.TargetAgent, msgID, DispatchSucceeded, casErr)
 		return &AgentDMResult{
-			Outcome:     AgentDMAmbiguous,
-			MessageID:   msgID,
-			Recipient:   storeMsg.Recipient,
-			RecipientID: storeMsg.RecipientID,
-			DispatchErr: fmt.Errorf("dispatch succeeded but state transition failed: %w", casErr),
+			Outcome:            AgentDMAmbiguous,
+			MessageID:          msgID,
+			Recipient:          storeMsg.Recipient,
+			RecipientID:        storeMsg.RecipientID,
+			DispatchErr:        fmt.Errorf("dispatch succeeded but state transition failed: %w", casErr),
+			AttachmentWarnings: attachmentWarnings,
+			ArtifactWarning:    artifactWarning,
 		}, nil
 	}
 	if !dispatched {
@@ -689,10 +715,12 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 
 	// Return accepted result.
 	return &AgentDMResult{
-		Outcome:     AgentDMAccepted,
-		MessageID:   msgID,
-		Recipient:   storeMsg.Recipient,
-		RecipientID: storeMsg.RecipientID,
+		Outcome:            AgentDMAccepted,
+		MessageID:          msgID,
+		Recipient:          storeMsg.Recipient,
+		RecipientID:        storeMsg.RecipientID,
+		AttachmentWarnings: attachmentWarnings,
+		ArtifactWarning:    artifactWarning,
 	}, nil
 }
 
@@ -765,6 +793,12 @@ func WriteAgentDMResult(w http.ResponseWriter, result *AgentDMResult, mentionRes
 	}
 	if len(mentionResults) > 0 {
 		body["mention_results"] = mentionResults
+	}
+	if len(result.AttachmentWarnings) > 0 {
+		body["attachment_warnings"] = result.AttachmentWarnings
+	}
+	if result.ArtifactWarning != "" {
+		body["artifact_warning"] = result.ArtifactWarning
 	}
 	writeJSON(w, httpStatus, body)
 }

@@ -1256,7 +1256,16 @@ type StartOptions struct {
 	TelemetryOverride *bool        // Explicit telemetry override from CLI flags (--enable-telemetry / --disable-telemetry)
 	InlineConfig      *ScionConfig // Inline config from --config flag, merged over template config
 	SharedDirs        []SharedDir  // Project-level shared directories (from Hub, merged with settings)
-	ExtraHosts        []string     // Extra --add-host entries for container networking (e.g. "example.com:host-gateway")
+	// SharedDirBackendChanges asks a Reprovision to change the recorded
+	// shared-dir storage backend of the named shared dirs (dir name to
+	// backend, "nfs" or "local"). Only the agent's record changes;
+	// no data is copied, moved or deleted. Ignored outside Reprovision.
+	SharedDirBackendChanges map[string]string
+	// AllowEmptySharedDir, with SharedDirBackendChanges, skips the start
+	// check that refuses an empty directory on the new backend while the
+	// dir's directory on its previous backend is not empty.
+	AllowEmptySharedDir bool
+	ExtraHosts          []string // Extra --add-host entries for container networking (e.g. "example.com:host-gateway")
 
 	// EmptyPerAgentWorkspace gives the agent a private, initially empty,
 	// non-git workspace at <projectDir>/agents/<slug>/workspace (design
@@ -1345,11 +1354,14 @@ const (
 	BrokerErrorDetailCurrentRunID = "currentRunId"
 )
 
-// BrokerErrorCodeRunMismatch is the broker error code of the 404 a stop
-// naming a run gets when another run holds the agent's name
+// BrokerErrorCodeRunMismatch is the broker error code of the 404 a stop or
+// delete naming a run gets when another run holds the agent's name
 // (ptone/scion#2550). Its details carry BrokerErrorDetailRunID (the run the
-// stop named) and, when known, BrokerErrorDetailCurrentRunID (the run that
-// holds the name: the runtime entry's, or an in-flight launch's).
+// stop or delete named) and, when known, BrokerErrorDetailCurrentRunID (the
+// run that holds the name: the runtime entry's, or an in-flight launch's).
+// On a delete, a non-empty currentRunId that differs from runId means the
+// hub must not finalize the agent's row: that run is still on the broker
+// (ptone/scion#3080). Without one, the delete's 404 is "not found" as before.
 const BrokerErrorCodeRunMismatch = "run_mismatch"
 
 // ResourceHandle.Kind values.

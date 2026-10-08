@@ -119,7 +119,18 @@ func (d *HTTPAgentDispatcher) compensateLandedRun(ctx context.Context, agent *st
 	target.PreviousRunIDs = nil
 	d.log.Info("Dispatcher: agent was deleted while the broker started it; deleting the run it started",
 		"agent_id", agent.ID, "agent", agent.Slug, "broker_id", agent.RuntimeBrokerID, "run_id", runID)
-	if err := d.DispatchAgentDelete(delCtx, &target, false, false, false, time.Time{}); err != nil {
+	err = d.DispatchAgentDelete(delCtx, &target, false, false, false, time.Time{})
+	if errors.Is(err, ErrDeleteRunMismatch) {
+		// The landed run's entry is already gone and another run holds the
+		// name (a same-name successor): nothing of this run is left to
+		// remove, and the successor is left alone (ptone/scion#3080).
+		d.log.Info("Dispatcher: the run started for a deleted agent is already gone; another run holds the name",
+			"agent_id", agent.ID, "agent", agent.Slug, "broker_id", agent.RuntimeBrokerID, "run_id", runID, "error", err)
+		d.recordCompensation(ctx, true)
+		addDispatchWarnings(ctx, "agent was deleted while it was starting; its container was already replaced by another run")
+		return
+	}
+	if err != nil {
 		d.log.Warn("Dispatcher: compensating delete of a run started for a deleted agent failed",
 			"agent_id", agent.ID, "agent", agent.Slug, "broker_id", agent.RuntimeBrokerID, "run_id", runID, "error", err)
 		d.recordCompensation(ctx, false)

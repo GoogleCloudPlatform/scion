@@ -17,11 +17,14 @@
     "shared/agent-tree-view.test.ts",
     "shared/deep-active-element.test.ts",
     "pages/chat-palette-shortcut.test.ts",
+    "pages/chat-hub-members.test.ts",
+    "shared/chat/chat-thread-peer-project.test.ts",
     "pages/graph-palette-hosts.test.ts",
     "terminal/terminal-pane.test.ts",
     "shared/header.test.ts",
     "shared/group-member-editor-membership.test.ts",
-    "pages/onboarding.test.ts"
+    "pages/onboarding.test.ts",
+    "pages/agent-detail-reincarnate.test.ts"
   ],
   "exclude": []
 }

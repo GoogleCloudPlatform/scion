@@ -29,6 +29,7 @@ import type { PaletteCandidate } from './chat-palette-types.js';
 import {
   QuickPaletteHost,
   isQuickPaletteShortcut,
+  type QuickPaletteLoadContext,
 } from '../components/shared/palette/quick-palette-host.js';
 import '../components/shared/header.js';
 import { isMacPlatform } from '../utils/platform.js';
@@ -64,28 +65,60 @@ export function canReconnectEntry(entry: RailEntryStatus): boolean {
 }
 
 /**
- * Whether "Reconnect all" acts on an entry: the per-row Reconnect applies
- * and the agent still exists.
+ * Whether "Reconnect all" acts on an entry: the agent still exists and the
+ * entry is not connected. That is every entry the per-row Reconnect
+ * applies to, plus idle entries restored from the saved list, which the
+ * rail shows as "Not connected" (one at a time they connect through
+ * selection, but "Reconnect all" is how a user connects them in bulk).
  */
 export function isBulkReconnectEligible(entry: RailEntryStatus): boolean {
-  return canReconnectEntry(entry) && entry.metadata.availability !== 'deleted';
+  if (entry.metadata.availability === 'deleted') return false;
+  return canReconnectEntry(entry) || entry.state.connection === 'idle';
 }
 
 /**
- * Whether "Remove all inactive" removes an entry: its agent was deleted,
- * or its session has dropped (disconnected or unavailable). Connected
- * entries stay, as do entries still connecting and idle entries restored
- * from a saved list, which have not tried to connect yet.
+ * Whether metadata says an entry's agent is gone: deleted, or in the stopped
+ * or error phase. Availability "unavailable" does not count: it is also set
+ * for transient failures (a failed metadata stream handshake, a 401, a 5xx
+ * or a network error), so a brief hub outage after a reload must not make
+ * restored rows for running agents removable.
+ */
+export function isAgentGone(metadata: TerminalAgentMetadata): boolean {
+  if (metadata.availability === 'deleted') return true;
+  const phase = metadata.agent?.phase;
+  return phase === 'stopped' || phase === 'error';
+}
+
+/**
+ * Whether "Remove all inactive" removes an entry: its agent was deleted, its
+ * session dropped (disconnected or unavailable), or it is idle (restored
+ * from the saved list and shown as "Not connected") and metadata says its
+ * agent is gone. After a page load every row but the frontmost is idle, so
+ * an idle row for an agent that is still running stays. Connected entries
+ * stay, as do entries that are still connecting.
  */
 export function isInactiveEntry(entry: RailEntryStatus): boolean {
   const { connection, disconnectReason } = entry.state;
   if (connection === 'closed') return false;
+  if (connection === 'idle') return isAgentGone(entry.metadata);
   return (
     entry.metadata.availability === 'deleted' ||
     disconnectReason === 'agent-deleted' ||
     connection === 'disconnected' ||
     connection === 'unavailable'
   );
+}
+
+/** Tooltip and described-by text for a bulk button with nothing to act on. */
+export const BULK_RECONNECT_DISABLED_REASON = 'No disconnected terminals to reconnect';
+export const BULK_REMOVE_DISABLED_REASON = 'No inactive terminals to remove';
+
+/** Gives each workspace root unique ids for its described-by targets. */
+let nextInstanceId = 0;
+
+/** Whether a bulk button is in its disabled (nothing to act on) state. */
+function isBulkActionDisabled(button: HTMLButtonElement): boolean {
+  return button.getAttribute('aria-disabled') === 'true';
 }
 
 // TERMINAL_DRAG_MIME imported from ./terminal-workspace-events.js
@@ -143,6 +176,10 @@ export class TerminalWorkspaceRoot {
   private readonly railBulk = document.createElement('div');
   private readonly bulkReconnect = document.createElement('button');
   private readonly bulkRemove = document.createElement('button');
+  /** Disabled-reason tooltips around each bulk button (see buildRailBulkActions). */
+  private readonly bulkReconnectTip = document.createElement('sl-tooltip');
+  private readonly bulkRemoveTip = document.createElement('sl-tooltip');
+  private readonly instanceId = nextInstanceId++;
   private readonly empty = document.createElement('div');
   private readonly layoutBar = document.createElement('div');
   private readonly paneHost = document.createElement('section');
@@ -161,8 +198,13 @@ export class TerminalWorkspaceRoot {
     label: 'Jump to agent',
     placeholder: 'Search agents…',
     load: async (context): Promise<PaletteCandidate[]> => {
-      const { loadTerminalPaletteAgents } = await import('./terminal-palette-data.js');
-      return loadTerminalPaletteAgents(context);
+      this.paletteLoad = context;
+      try {
+        const { loadTerminalPaletteAgents } = await import('./terminal-palette-data.js');
+        return await loadTerminalPaletteAgents(context);
+      } finally {
+        if (this.paletteLoad === context) this.paletteLoad = null;
+      }
     },
     onSelect: (target): void => {
       this.paletteFocusAgentId = target.agentId;
@@ -182,6 +224,15 @@ export class TerminalWorkspaceRoot {
    * that session closes ({@link syncSessions}).
    */
   private lastFocusedPaneSessionKey: string | null = null;
+  /** The palette's Agents load in flight, if any; its result supersedes a live update. */
+  private paletteLoad: QuickPaletteLoadContext | null = null;
+  /**
+   * Releases the agent store's hub entry, which the workspace retains while
+   * it is shown, so the palette opens from memory and stays current. Set
+   * as soon as the retain is requested: the store module loads on first
+   * show, outside the main bundle.
+   */
+  private paletteAgentsRelease: (() => void) | null = null;
   /**
    * The agent picked from the palette, whose pane takes focus once it is
    * visible and the palette's close has settled — see
@@ -634,8 +685,56 @@ export class TerminalWorkspaceRoot {
   dispose(): void {
     document.removeEventListener('keydown', this.handleGlobalKeydown);
     document.removeEventListener('focusin', this.handleGlobalFocusIn);
+    this.releasePaletteAgents();
     this.touchQuery?.removeEventListener?.('change', this.handleTouchQueryChange);
     this.paletteHost.dispose();
+  }
+
+  /**
+   * Retains the agent store's hub entry while the workspace is shown. The
+   * store module is imported here, so it stays out of the main bundle; a
+   * release before the import settles retains nothing.
+   */
+  private retainPaletteAgents(): void {
+    if (this.paletteAgentsRelease) return;
+    let release: (() => void) | null = null;
+    let released = false;
+    const handle = (): void => {
+      released = true;
+      release?.();
+      release = null;
+    };
+    this.paletteAgentsRelease = handle;
+    import('./terminal-palette-data.js')
+      .then(({ retainTerminalPaletteAgents }) => {
+        if (released) return;
+        release = retainTerminalPaletteAgents((candidates) =>
+          this.handlePaletteAgentsChange(candidates)
+        );
+      })
+      .catch((err: unknown) => {
+        if (this.paletteAgentsRelease === handle) this.paletteAgentsRelease = null;
+        console.error('[Terminal] agent list unavailable for the palette:', err);
+      });
+  }
+
+  private releasePaletteAgents(): void {
+    const release = this.paletteAgentsRelease;
+    this.paletteAgentsRelease = null;
+    release?.();
+  }
+
+  /**
+   * Keeps the open palette's Agents group current with the store, with no
+   * request. Nothing is published while the palette is closed (the next
+   * open reads the store) or while a load is in flight: its result
+   * supersedes this one, and `setCandidates` would abort it. A load is
+   * tracked from its start until it settles (a superseded load's settling
+   * leaves the newer one tracked), so this needs no check of its own.
+   */
+  private handlePaletteAgentsChange(candidates: PaletteCandidate[]): void {
+    if (!this.paletteHost.isOpen || this.paletteLoad) return;
+    this.paletteHost.setCandidates(candidates);
   }
 
   /**
@@ -792,20 +891,25 @@ export class TerminalWorkspaceRoot {
   }
 
   // ── Keyboard shortcut: Cmd+K everywhere, Ctrl+K outside a pane ──────────
+  // (and, on macOS, outside any editable text field)
 
   /**
    * Cmd+K (Meta+K) opens the palette everywhere, including with a terminal
    * pane focused: xterm never cancels or stops-propagating a plain Meta+K
    * (it has no C0/C1 mapping for it), so this plain bubble-phase listener
    * already sees it from inside a pane with no capture-phase trick needed.
-   * Ctrl+K opens the palette only when focus is outside a pane: xterm DOES
+   * Ctrl+K opens the palette only when focus is outside a pane and, on
+   * macOS, outside any editable text field (see isQuickPaletteShortcut);
+   * xterm's input textarea is one, so the two rules agree. xterm DOES
    * send Ctrl+K to the PTY (kill-line, `\x0b`) and then stops its own
    * propagation, so a pane-focused Ctrl+K never reaches here at all — the
    * explicit `eventFromTerminalPane` check below is belt-and-suspenders, not
    * what does the work. Only `ctrlKey` skips that check; `metaKey` must still
    * open the palette from inside a pane, so it is deliberately exempted.
    *
-   * While the palette is open, the same shortcut closes it, as in chat.
+   * While the palette is open, the same shortcut closes it, as in chat. On
+   * macOS, Ctrl+K in the palette's own search field edits the query, so
+   * Cmd+K is what closes it from there.
    */
   private readonly handleGlobalKeydown = (e: KeyboardEvent): void => {
     if (this.element.hidden) return;
@@ -844,9 +948,12 @@ export class TerminalWorkspaceRoot {
   }
 
   show(visible: boolean): void {
-    if (!visible) {
+    if (visible) {
+      this.retainPaletteAgents();
+    } else {
       this.paletteHost.hide();
       this.railFocusAgentId = null;
+      this.releasePaletteAgents();
     }
     this.element.hidden = !visible;
     this.element.style.display = visible ? 'flex' : 'none';
@@ -1276,6 +1383,12 @@ export class TerminalWorkspaceRoot {
   /**
    * Builds the bulk-action bar between the rail header and the list. Each
    * button sits above the row column it acts on (Reconnect, then Close).
+   *
+   * A button with nothing to act on is marked aria-disabled rather than
+   * disabled, so it stays focusable and keyboard users can reach the
+   * reason; its click handler checks the same flag. The reason shows in a
+   * tooltip on a wrapper span (disabled controls do not get pointer events
+   * in every browser) and is linked to the button with aria-describedby.
    */
   private buildRailBulkActions(): void {
     this.railBulk.className = 'terminal-rail-bulk';
@@ -1289,14 +1402,85 @@ export class TerminalWorkspaceRoot {
     this.bulkReconnect.type = 'button';
     this.bulkReconnect.className = 'terminal-bulk-action terminal-bulk-reconnect';
     this.bulkReconnect.innerHTML = '<sl-icon name="arrow-repeat"></sl-icon>';
-    this.bulkReconnect.addEventListener('click', () => this.reconnectAll());
+    this.bulkReconnect.addEventListener('click', () => {
+      if (!isBulkActionDisabled(this.bulkReconnect)) this.reconnectAll();
+    });
 
     this.bulkRemove.type = 'button';
     this.bulkRemove.className = 'terminal-bulk-action terminal-bulk-remove';
     this.bulkRemove.innerHTML = '<sl-icon name="trash"></sl-icon>';
-    this.bulkRemove.addEventListener('click', () => void this.removeAllInactive());
+    this.bulkRemove.addEventListener('click', () => {
+      if (!isBulkActionDisabled(this.bulkRemove)) void this.removeAllInactive();
+    });
 
-    this.railBulk.append(label, this.bulkReconnect, this.bulkRemove);
+    this.railBulk.append(
+      label,
+      this.wrapBulkAction(
+        this.bulkReconnect,
+        this.bulkReconnectTip,
+        'terminal-bulk-reconnect-reason'
+      ),
+      this.wrapBulkAction(this.bulkRemove, this.bulkRemoveTip, 'terminal-bulk-remove-reason')
+    );
+  }
+
+  /**
+   * Wraps a bulk button as sl-tooltip > span > button, plus a visually
+   * hidden reason element the button's aria-describedby points at.
+   */
+  private wrapBulkAction(
+    button: HTMLButtonElement,
+    tip: HTMLElement,
+    reasonId: string
+  ): HTMLElement {
+    tip.className = 'terminal-bulk-tooltip';
+    tip.setAttribute('placement', 'bottom');
+    tip.setAttribute('hoist', '');
+    tip.setAttribute('disabled', '');
+    const wrap = document.createElement('span');
+    wrap.className = 'terminal-bulk-action-wrap';
+    const reason = document.createElement('span');
+    reason.className = 'terminal-bulk-reason terminal-aria-live';
+    reason.id = `${reasonId}-${this.instanceId}`;
+    reason.hidden = true;
+    button.setAttribute('aria-describedby', reason.id);
+    wrap.append(button, reason);
+    tip.append(wrap);
+    return tip;
+  }
+
+  /**
+   * Sets a bulk button's enabled state. Disabled: aria-disabled, the
+   * reason in the tooltip and the described-by text, no native title (it
+   * would show a second tooltip). Enabled: the tooltip is off and the
+   * native title carries the usual hover help.
+   */
+  private setBulkActionState(
+    button: HTMLButtonElement,
+    tip: HTMLElement,
+    disabledReason: string | null,
+    enabledHelp: string
+  ): void {
+    const reason = button.parentElement?.querySelector<HTMLElement>('.terminal-bulk-reason');
+    if (disabledReason) {
+      button.setAttribute('aria-disabled', 'true');
+      button.removeAttribute('title');
+      tip.setAttribute('content', disabledReason);
+      tip.removeAttribute('disabled');
+      if (reason) {
+        reason.textContent = disabledReason;
+        reason.hidden = false;
+      }
+    } else {
+      button.removeAttribute('aria-disabled');
+      button.title = enabledHelp;
+      tip.removeAttribute('content');
+      tip.setAttribute('disabled', '');
+      if (reason) {
+        reason.textContent = '';
+        reason.hidden = true;
+      }
+    }
   }
 
   /** Syncs the bulk buttons' enabled state and hover help with the entries. */
@@ -1305,22 +1489,22 @@ export class TerminalWorkspaceRoot {
     const reconnectable = entries.filter(isBulkReconnectEligible).length;
     const inactive = entries.filter(isInactiveEntry).length;
 
-    this.bulkReconnect.disabled = reconnectable === 0;
-    this.bulkReconnect.title =
-      reconnectable === 0
-        ? 'Reconnect all: no disconnected terminals for existing agents'
-        : `Reconnect all: reconnect ${countLabel(reconnectable)} that ${
-            reconnectable === 1 ? 'is' : 'are'
-          } disconnected and whose agent still exists. Connected terminals and terminals for deleted agents are left alone.`;
+    this.setBulkActionState(
+      this.bulkReconnect,
+      this.bulkReconnectTip,
+      reconnectable === 0 ? BULK_RECONNECT_DISABLED_REASON : null,
+      `Reconnect all: reconnect ${countLabel(reconnectable)} that ${
+        reconnectable === 1 ? 'is' : 'are'
+      } not connected and whose agent still exists. Connected terminals and terminals for deleted agents are left alone.`
+    );
     this.bulkReconnect.setAttribute('aria-label', `Reconnect all (${reconnectable} eligible)`);
 
-    this.bulkRemove.disabled = inactive === 0;
-    this.bulkRemove.title =
-      inactive === 0
-        ? 'Remove all inactive: no deleted or disconnected terminals'
-        : `Remove all inactive: remove ${countLabel(inactive)} whose agent was deleted or that ${
-            inactive === 1 ? 'is' : 'are'
-          } disconnected. Connected terminals stay open.`;
+    this.setBulkActionState(
+      this.bulkRemove,
+      this.bulkRemoveTip,
+      inactive === 0 ? BULK_REMOVE_DISABLED_REASON : null,
+      `Remove all inactive: remove ${countLabel(inactive)} whose connection dropped or whose agent is stopped, errored or deleted. Connected terminals and not yet opened terminals for running agents stay.`
+    );
     this.bulkRemove.setAttribute('aria-label', `Remove all inactive (${inactive} eligible)`);
   }
 
@@ -1346,7 +1530,7 @@ export class TerminalWorkspaceRoot {
     const count = confirmedKeys.size;
     if (count === 0) return 0;
     const confirmed = await showConfirm(
-      `Remove ${countLabel(count)} from the list? This removes terminals whose agent was deleted and terminals that are disconnected. Connected terminals stay open.`,
+      `Remove ${countLabel(count)} from the list? This removes terminals whose connection dropped and terminals whose agent is stopped, errored or deleted. Connected terminals and not yet opened terminals for running agents stay.`,
       { title: 'Remove inactive terminals', confirmText: `Remove ${count}` }
     );
     if (!confirmed) return 0;
@@ -1363,15 +1547,15 @@ export class TerminalWorkspaceRoot {
   }
 
   /**
-   * The dialog returns focus to "Remove all inactive", which is now
-   * disabled, so focus would drop to the page. Move it to "Reconnect all"
+   * The dialog returns focus to "Remove all inactive", which now has
+   * nothing to act on. Move it to "Reconnect all"
    * when that is still enabled, else the first remaining row, else the
    * rail itself. Focus the user moved elsewhere is left alone.
    */
   private focusAfterBulkRemove(): void {
     const active = document.activeElement;
     if (active && active !== document.body && active !== this.bulkRemove) return;
-    if (!this.railBulk.hidden && !this.bulkReconnect.disabled) {
+    if (!this.railBulk.hidden && !isBulkActionDisabled(this.bulkReconnect)) {
       this.bulkReconnect.focus();
       return;
     }
@@ -1388,7 +1572,9 @@ export class TerminalWorkspaceRoot {
     const metadata = entry.metadata;
     const agent = metadata.agent ?? entry.state.agent;
     const agentName = agent?.name || entry.state.agentId;
-    const projectId = agent?.projectId || 'Unknown project';
+    // Prefer the hub-resolved project name; fall back to the project id
+    // when the name is not known yet, and omit the line when neither is.
+    const projectLabel = agent?.project || agent?.projectId || '';
     const item = document.createElement('div');
     item.className = 'terminal-rail-item';
     item.setAttribute('role', 'listitem');
@@ -1399,32 +1585,49 @@ export class TerminalWorkspaceRoot {
     item.dataset.availability = metadata.availability;
     if (entry.state.disconnectReason) item.dataset.disconnectReason = entry.state.disconnectReason;
 
+    // One list of status parts feeds both forms: the visible titles join them
+    // with a middle dot, the accessible label with a comma so screen readers
+    // pause between them instead of announcing or skipping the dot.
+    const statusParts = [
+      disconnectLabel(entry.state.connection, entry.state.disconnectReason),
+      availabilityLabel(metadata.availability),
+    ];
+    const statusLabel = statusParts.join(' · ');
+    const spokenStatus = statusParts.join(', ');
+
     const select = document.createElement('button');
     select.type = 'button';
     select.className = 'terminal-rail-select';
-    select.setAttribute('aria-label', `Show terminal for ${agentName} in ${projectId}`);
+    // The status dot is small and aria-hidden, so surface its status text on
+    // the whole row: as the hover title and in the accessible label.
+    select.title = statusLabel;
+    select.setAttribute(
+      'aria-label',
+      projectLabel
+        ? `Show terminal for ${agentName} in ${projectLabel}, ${spokenStatus}`
+        : `Show terminal for ${agentName}, ${spokenStatus}`
+    );
     if (visibleSlots.includes(entry.state.key)) select.setAttribute('aria-current', 'page');
     select.dataset.railFocusId = `${entry.state.key}:select`;
     select.addEventListener('click', () => this.openSessionRoute(entry));
 
     const connection = document.createElement('span');
     connection.className = 'terminal-connection-dot';
-    connection.title = connectionLabel(entry.state.connection);
+    connection.title = statusLabel;
     connection.setAttribute('aria-hidden', 'true');
     const text = document.createElement('span');
     text.className = 'terminal-rail-text';
     const name = document.createElement('span');
     name.className = 'terminal-agent-name';
     name.textContent = agentName;
-    const project = document.createElement('span');
-    project.className = 'terminal-project-name';
-    project.textContent = projectId;
-    const details = document.createElement('span');
-    details.className = 'terminal-state-label';
-    details.textContent = `${disconnectLabel(entry.state.connection, entry.state.disconnectReason)} · ${availabilityLabel(
-      metadata.availability
-    )}`;
-    text.append(name, project, details);
+    text.append(name);
+    if (projectLabel) {
+      const project = document.createElement('span');
+      project.className = 'terminal-project-name';
+      project.textContent = projectLabel;
+      project.title = projectLabel;
+      text.append(project);
+    }
     select.append(connection, text);
 
     const actions = document.createElement('span');
@@ -1836,15 +2039,35 @@ export class TerminalWorkspaceRoot {
       .terminal-bulk-remove {
         color: var(--scion-status-danger, #ef4444);
       }
-      .terminal-bulk-action:hover:not(:disabled),
+      .terminal-bulk-action:hover:not([aria-disabled='true']),
       .terminal-bulk-action:focus-visible {
         border-color: currentColor;
         outline: none;
       }
-      .terminal-bulk-action:disabled {
-        cursor: default;
+      /* Nothing to act on: dimmed, dashed and flat, so it does not read as
+         a live control in either theme. Still focusable (see
+         buildRailBulkActions), so focus keeps a visible ring. */
+      .terminal-bulk-action[aria-disabled='true'] {
+        cursor: not-allowed;
         color: var(--scion-text-muted, #64748b);
-        opacity: 0.45;
+        background: transparent;
+        border-style: dashed;
+        border-color: var(--scion-text-muted, #64748b);
+        opacity: 0.5;
+      }
+      .terminal-bulk-action[aria-disabled='true']:focus-visible {
+        outline: 2px solid var(--scion-text-muted, #64748b);
+        outline-offset: 1px;
+      }
+      .terminal-bulk-action-wrap {
+        display: inline-flex;
+      }
+      /* Shoelace's default tooltip colours resolve to the same neutral in
+         the dark theme, so set them from the theme's text and background;
+         see ptone/scion#3715. */
+      .terminal-bulk-tooltip {
+        --sl-tooltip-background-color: var(--scion-text, #1e293b);
+        --sl-tooltip-color: var(--scion-bg, #f8fafc);
       }
       .terminal-rail-list {
         flex: 1;
@@ -1984,8 +2207,7 @@ export class TerminalWorkspaceRoot {
         gap: 0.125rem;
       }
       .terminal-agent-name,
-      .terminal-project-name,
-      .terminal-state-label {
+      .terminal-project-name {
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
@@ -1994,8 +2216,7 @@ export class TerminalWorkspaceRoot {
         font-size: 0.875rem;
         font-weight: 600;
       }
-      .terminal-project-name,
-      .terminal-state-label {
+      .terminal-project-name {
         font-size: 0.75rem;
         color: var(--scion-text-muted, #64748b);
       }

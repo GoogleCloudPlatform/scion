@@ -46,5 +46,5 @@ func (c *client) DiscoverSkillsDirectory(ctx context.Context, req DiscoverSkills
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[DiscoverSkillsDirectoryResponse](resp)
+	return apiclient.DecodeRequired[DiscoverSkillsDirectoryResponse](resp)
 }

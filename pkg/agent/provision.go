@@ -767,6 +767,17 @@ func (m *AgentManager) Reprovision(ctx context.Context, opts api.StartOptions) (
 		return nil, fmt.Errorf("%w: agent %q container is still running; stop it first", ErrReprovisionRefused, opts.Name)
 	}
 
+	// An explicit shared-dir backend change is checked before anything is
+	// provisioned, and recorded only after provisioning succeeds.
+	var sdChange *pendingSharedDirBackendChange
+	if len(opts.SharedDirBackendChanges) > 0 || opts.AllowEmptySharedDir {
+		c, err := prepareSharedDirBackendChange(projectDir, agentDir, opts)
+		if err != nil {
+			return nil, err
+		}
+		sdChange = c
+	}
+
 	ctx, inlineCfg := buildProvisionContext(ctx, opts)
 	ctx = api.ContextWithReprovision(ctx)
 
@@ -777,6 +788,12 @@ func (m *AgentManager) Reprovision(ctx context.Context, opts api.StartOptions) (
 
 	if err := m.finishProvision(opts, agentDir, agentHome, cfg); err != nil {
 		return cfg, err
+	}
+
+	if sdChange != nil {
+		if err := sdChange.record(opts, cfg); err != nil {
+			return cfg, err
+		}
 	}
 
 	// Deliberately no prompt.md write here: the new generation's first task
@@ -1128,7 +1145,9 @@ func checkAgentDirContained(projectDir, agentName string, sharedWorkspace bool) 
 //     shared-workspace agent whatever sharedWorkspace says (in worktree mode
 //     only home/ is external, never scion-agent.json), so its in-project
 //     <project>/agents/<name>, which a shared workspace mount exposes to
-//     containers, is never used;
+//     containers, is never used (except when the external root is the
+//     project's own agents root, as in a hub-native project; see
+//     effectiveSharedWorkspace);
 //   - with strict set (broker mode, or a hub-supplied project ID), a
 //     shared-workspace agent whose external root cannot be determined is an
 //     error (config.ErrAgentStateDirUnavailable), never the in-project root.
@@ -1155,6 +1174,11 @@ func agentStateDir(projectDir, agentName string, sharedWorkspace bool, hubProjec
 // broker-side (external) agents directory: sharedWorkspace, or an external
 // agent directory (located from hubProjectID when set) holding a regular
 // scion-agent.json.
+//
+// When the external agents root is the project's own agents root (a
+// hub-native project, whose resolved project dir is the external
+// project-config dir), an existing scion-agent.json there says nothing about
+// the workspace mode, so only sharedWorkspace counts.
 func effectiveSharedWorkspace(projectDir, agentName string, sharedWorkspace bool, hubProjectID string) bool {
 	if sharedWorkspace {
 		return true
@@ -1163,8 +1187,28 @@ func effectiveSharedWorkspace(projectDir, agentName string, sharedWorkspace bool
 	if err != nil {
 		return false
 	}
+	if sameDir(filepath.Dir(ext), filepath.Join(projectDir, "agents")) {
+		return false
+	}
 	info, err := os.Stat(filepath.Join(ext, "scion-agent.json"))
 	return err == nil && info.Mode().IsRegular()
+}
+
+// sameDir reports whether a and b name the same directory: equal cleaned
+// paths, or both exist and are the same file (e.g. via a symlink).
+func sameDir(a, b string) bool {
+	if filepath.Clean(a) == filepath.Clean(b) {
+		return true
+	}
+	ai, err := os.Stat(a)
+	if err != nil {
+		return false
+	}
+	bi, err := os.Stat(b)
+	if err != nil {
+		return false
+	}
+	return os.SameFile(ai, bi)
 }
 
 // withAgentStateDir resolves agentName's state directory with agentStateDir

@@ -93,7 +93,7 @@ type bypassAgentsFixture struct {
 // reach a handler.
 func bypassAgentsServer(t *testing.T) (*Server, store.Store) {
 	t.Helper()
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Skipf("skipping: test store unavailable (%v)", err)
 	}
@@ -109,10 +109,9 @@ func bypassAgentsServer(t *testing.T) (*Server, store.Store) {
 		Email:       "dev@localhost",
 	}
 	cfg.BrokerAuthConfig = DefaultBrokerAuthConfig()
-	srv, err := New(cfg, s)
+	srv, err := newTestHubServer(t, cfg, s)
 	require.NoError(t, err)
 	srv.SetHubID("test-hub-id")
-	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 	waitUserScopedDataSweep(t, srv)
 	return srv, s
 }

@@ -40,6 +40,7 @@ func entAgentCredentialToStore(ac *ent.AgentCredential) *store.AgentCredential {
 		AgentID:      ac.AgentID,
 		ProjectID:    ac.ProjectID,
 		TokenJTIHash: ac.TokenJtiHash,
+		RunID:        ac.RunID,
 		IssuedAt:     ac.IssuedAt,
 		ExpiresAt:    ac.ExpiresAt,
 		RevokedAt:    ac.RevokedAt,
@@ -51,10 +52,17 @@ func entAgentCredentialToStore(ac *ent.AgentCredential) *store.AgentCredential {
 
 // CreateAgentCredential records a newly issued agent token.
 func (s *AgentCredentialStore) CreateAgentCredential(ctx context.Context, cred *store.AgentCredential) error {
-	builder := s.client.AgentCredential.Create().
+	return createAgentCredential(ctx, s.client.AgentCredential, cred)
+}
+
+// createAgentCredential creates cred with c, which may belong to a
+// transaction, and sets cred.ID.
+func createAgentCredential(ctx context.Context, c *ent.AgentCredentialClient, cred *store.AgentCredential) error {
+	builder := c.Create().
 		SetAgentID(cred.AgentID).
 		SetProjectID(cred.ProjectID).
 		SetTokenJtiHash(cred.TokenJTIHash).
+		SetRunID(cred.RunID).
 		SetIssuedAt(cred.IssuedAt).
 		SetExpiresAt(cred.ExpiresAt)
 

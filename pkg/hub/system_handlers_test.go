@@ -36,7 +36,7 @@ import (
 // testWorkstationServer creates a test server with workstation mode enabled.
 func testWorkstationServer(t *testing.T) (*Server, store.Store) {
 	t.Helper()
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
@@ -44,12 +44,11 @@ func testWorkstationServer(t *testing.T) (*Server, store.Store) {
 	cfg := DefaultServerConfig()
 	cfg.DevAuthToken = testDevToken
 	cfg.Workstation = true
-	srv, err := New(cfg, s)
+	srv, err := newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
 	srv.SetHubID("test-hub-id")
-	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 	return srv, s
 }
 

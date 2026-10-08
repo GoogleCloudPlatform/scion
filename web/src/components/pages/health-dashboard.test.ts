@@ -59,7 +59,7 @@ describe('scion-page-health-dashboard cards', () => {
             pool_idle: 0,
           },
           brokers: [],
-          agents: { total: 0, by_phase: {}, stalled: [], crashed: [], errored: [] },
+          agents: { total: 0, active: 0, errored: 0, considered: 0, by_phase: [], problems: [] },
           dispatch: null,
         });
       }
@@ -76,7 +76,7 @@ describe('scion-page-health-dashboard cards', () => {
 
   async function rendered(): Promise<string> {
     await vi.waitFor(() => {
-      expect(el.shadowRoot?.textContent ?? '').toContain('Dispatch Pipeline');
+      expect(el.shadowRoot?.querySelector('scion-health-dispatch-card')).not.toBeNull();
     });
     await el.updateComplete;
     return el.shadowRoot?.textContent ?? '';
@@ -140,3 +140,172 @@ describe('formatHeartbeatAge', () => {
     expect(formatHeartbeatAge('not-a-date')).toBe('unknown');
   });
 });
+
+describe('scion-page-health-dashboard runtime brokers (ptone/scion#3582)', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+    vi.mocked(apiFetch).mockReset();
+  });
+
+  it('renders runtime_brokers as one table row per broker', async () => {
+    vi.mocked(apiFetch).mockImplementation(async () =>
+      json({
+        status: 'healthy',
+        hub: { status: 'healthy', version: 'v1', uptime: '1h', connected_brokers: 2 },
+        database: { status: 'healthy', pool_active: 1, pool_max: 10, pool_idle: 1 },
+        runtime_brokers: {
+          items: [
+            {
+              id: 'b1',
+              name: 'zulu',
+              version: '1.0.0',
+              status: 'online',
+              last_heartbeat: null,
+              runtime: null,
+              workspace_storage: { backend: 'nfs', nfs_healthy: true },
+              agents: { running: 0, attention: 0 },
+            },
+            {
+              id: 'b2',
+              name: 'alpha',
+              version: '1.0.0',
+              status: 'offline',
+              last_heartbeat: null,
+              runtime: { type: 'docker', profile: 'docker' },
+              workspace_storage: { backend: 'local' },
+              agents: { running: 0, attention: 0 },
+            },
+          ],
+          total: 5,
+          truncated: true,
+        },
+        agents: { total: 0, active: 0, errored: 0, considered: 0, by_phase: [], problems: [] },
+        dispatch: null,
+        stall_config: { threshold_seconds: 300, auto_suspend: false },
+      })
+    );
+    const page = document.createElement('scion-page-health-dashboard') as ScionPageHealthDashboard;
+    document.body.appendChild(page);
+    await (page as unknown as { fetchData(): Promise<void> }).fetchData();
+    await page.updateComplete;
+
+    const table = page.shadowRoot?.querySelector('scion-health-broker-table');
+    expect(table).not.toBeNull();
+    await (table as LitLike).updateComplete;
+    const rows = [...(table!.shadowRoot?.querySelectorAll('tbody tr') ?? [])];
+    expect(rows.map((r) => (r as HTMLElement).dataset.brokerId)).toEqual(['b2', 'b1']);
+    expect(table!.shadowRoot?.querySelector('.note')?.textContent?.trim()).toBe('Showing 2 of 5');
+    expect(page.shadowRoot?.querySelector('.broker-card')).toBeNull();
+  });
+});
+
+describe('scion-page-health-dashboard agents (ptone/scion#3587)', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+    vi.mocked(apiFetch).mockReset();
+  });
+
+  it('hands the agents block to the agents card and shows no stall data', async () => {
+    vi.mocked(apiFetch).mockImplementation(async () =>
+      json({
+        status: 'degraded',
+        hub: { status: 'healthy', version: 'v1', uptime: '1h', connected_brokers: 0 },
+        database: { status: 'healthy', pool_active: 0, pool_max: 10, pool_idle: 0 },
+        runtime_brokers: { items: [], total: 0, truncated: false },
+        agents: {
+          total: 3,
+          active: 2,
+          errored: 1,
+          considered: 3,
+          by_phase: [
+            { phase: 'running', count: 2 },
+            { phase: 'error', count: 1 },
+          ],
+          problems: [
+            {
+              kind: 'errored',
+              count: 1,
+              items: [
+                { id: 'ag1', name: 'w', project_id: 'p', project_slug: 'proj', broker_id: '' },
+              ],
+            },
+          ],
+        },
+        dispatch: null,
+      })
+    );
+    const page = document.createElement('scion-page-health-dashboard') as ScionPageHealthDashboard;
+    document.body.appendChild(page);
+    await (page as unknown as { fetchData(): Promise<void> }).fetchData();
+    await page.updateComplete;
+
+    const card = page.shadowRoot?.querySelector('scion-health-agents-card');
+    expect(card).not.toBeNull();
+    await (card as LitLike).updateComplete;
+    const link = card!.shadowRoot?.querySelector('.group a');
+    expect(link?.getAttribute('href')).toBe('/agents/ag1');
+    expect(link?.textContent?.trim()).toBe('proj / w');
+    expect(page.shadowRoot?.textContent ?? '').not.toMatch(/stall/i);
+    expect(card!.shadowRoot?.textContent ?? '').not.toMatch(/stall/i);
+  });
+
+  it('shows agents as not reported, not as all clear, when agents is null', async () => {
+    vi.mocked(apiFetch).mockImplementation(async () =>
+      json({
+        status: 'degraded',
+        hub: { status: 'healthy', version: 'v1', uptime: '1h', connected_brokers: 0 },
+        database: { status: 'healthy', pool_active: 0, pool_max: 10, pool_idle: 0 },
+        runtime_brokers: { items: [], total: 0, truncated: false },
+        agents: null,
+        dispatch: null,
+      })
+    );
+    const page = document.createElement('scion-page-health-dashboard') as ScionPageHealthDashboard;
+    document.body.appendChild(page);
+    await (page as unknown as { fetchData(): Promise<void> }).fetchData();
+    await page.updateComplete;
+
+    const card = page.shadowRoot?.querySelector('scion-health-agents-card');
+    expect(card).not.toBeNull();
+    await (card as LitLike).updateComplete;
+    const text = card!.shadowRoot?.textContent ?? '';
+    expect(text).toContain('Agent data not available');
+    expect(text).not.toContain('No agents need attention');
+  });
+});
+
+describe('scion-page-health-dashboard dispatch (ptone/scion#3589)', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+    vi.mocked(apiFetch).mockReset();
+  });
+
+  it('hands the dispatch block to the dispatch card, with no placeholder prose', async () => {
+    vi.mocked(apiFetch).mockImplementation(async () =>
+      json({
+        status: 'degraded',
+        hub: { status: 'healthy', version: 'v1', uptime: '1h', connected_brokers: 0 },
+        database: { status: 'healthy', pool_active: 0, pool_max: 10, pool_idle: 0 },
+        runtime_brokers: { items: [], total: 0, truncated: false },
+        agents: null,
+        dispatch: { stuck_messages: 2, stuck_broker_dispatch: 1, failed_broker_dispatch_1h: 4 },
+      })
+    );
+    const page = document.createElement('scion-page-health-dashboard') as ScionPageHealthDashboard;
+    document.body.appendChild(page);
+    await (page as unknown as { fetchData(): Promise<void> }).fetchData();
+    await page.updateComplete;
+
+    const card = page.shadowRoot?.querySelector('scion-health-dispatch-card');
+    expect(card).not.toBeNull();
+    await (card as LitLike).updateComplete;
+    const values = [...(card!.shadowRoot?.querySelectorAll('li .value') ?? [])].map((v) =>
+      v.textContent?.trim()
+    );
+    expect(values).toEqual(['2', '1', '4']);
+    const text = `${page.shadowRoot?.textContent ?? ''} ${card!.shadowRoot?.textContent ?? ''}`;
+    expect(text).not.toMatch(/not yet available|future update/i);
+  });
+});
+
+type LitLike = Element & { updateComplete: Promise<unknown> };

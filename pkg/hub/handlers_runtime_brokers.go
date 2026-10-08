@@ -86,11 +86,11 @@ func (s *Server) listRuntimeBrokers(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Exclude message broker plugins (e.g. Discord, Telegram) — they carry
-	// the "scion.io/plugin" label and are not runtime brokers.
+	// the plugin label (see isPluginBroker) and are not runtime brokers.
 	filtered := result.Items[:0]
-	for _, b := range result.Items {
-		if _, isPlugin := b.Labels["scion.io/plugin"]; !isPlugin {
-			filtered = append(filtered, b)
+	for i := range result.Items {
+		if !isPluginBroker(&result.Items[i]) {
+			filtered = append(filtered, result.Items[i])
 		}
 	}
 	result.Items = filtered
@@ -669,6 +669,13 @@ type brokerHeartbeatRequest struct {
 	// (see hubclient.BrokerHeartbeat.DefaultProfile). Omitted by an older
 	// broker, in which case the stored value is left unchanged.
 	DefaultProfile *string `json:"defaultProfile,omitempty"`
+	// Health is the broker's report of its own health (see
+	// hubclient.BrokerHeartbeat.Health). It is stored normalised to fixed
+	// values (api.NormalizeBrokerHealthReport) and never changes the
+	// broker's status.
+	// Omitted by an older broker, in which case the stored value is left
+	// unchanged.
+	Health *api.BrokerHealthReport `json:"health,omitempty"`
 }
 
 // brokerStartInFlight mirrors hubclient.StartInFlight.
@@ -882,8 +889,10 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 	// and the target health check also probes live reachability.
 	// ProfileAttach follows the same rule: only profiles the heartbeat
 	// names are updated, and only when their stored Attach differs.
-	// ProfileSAMappings likewise.
-	if heartbeat.Capabilities != nil || heartbeat.WorkspaceStorage != nil || heartbeat.DefaultProfile != nil || len(heartbeat.ProfileAttach) > 0 || len(heartbeat.ProfileSAMappings) > 0 {
+	// ProfileSAMappings likewise. Health (the broker's self-reported
+	// health) follows the same rule; it is stored next to Status and never
+	// changes it, so a degraded broker stays online and keeps reconciling.
+	if heartbeat.Capabilities != nil || heartbeat.WorkspaceStorage != nil || heartbeat.DefaultProfile != nil || heartbeat.Health != nil || len(heartbeat.ProfileAttach) > 0 || len(heartbeat.ProfileSAMappings) > 0 {
 		if broker, err := loadHeartbeatBroker(); err != nil {
 			s.agentLifecycleLog.Warn("heartbeat: failed to load broker to refresh broker state",
 				"broker_id", id, "error", err)
@@ -900,6 +909,21 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 			if heartbeat.DefaultProfile != nil && broker.DefaultProfile != *heartbeat.DefaultProfile {
 				broker.DefaultProfile = *heartbeat.DefaultProfile
 				changed = true
+			}
+			if heartbeat.Health != nil {
+				if health := api.NormalizeBrokerHealthReport(heartbeat.Health); !reflect.DeepEqual(broker.Health, health) {
+					// Logged only when the stored report changes, so at
+					// most once per distinct report, with counts only.
+					if n := countBrokerHealthNormalization(heartbeat.Health, health); n.any() {
+						s.agentLifecycleLog.Info("heartbeat: broker health report normalised",
+							"broker_id", id,
+							"dropped_checks", n.DroppedChecks,
+							"unrecognised_values", n.UnrecognisedValues,
+							"unrecognised_status", n.UnrecognisedStatus)
+					}
+					broker.Health = health
+					changed = true
+				}
 			}
 			if applyProfileAttach(broker.Profiles, heartbeat.ProfileAttach) {
 				changed = true

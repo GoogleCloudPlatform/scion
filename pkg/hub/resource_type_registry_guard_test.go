@@ -392,8 +392,6 @@ var unresolvedResourceTypeValues = []string{
 	"authz_hub_target.go: resourceType",
 	"authz_relationship_rules.go: kind",
 	"capabilities.go: resourceType",
-	"handlers_resource_import.go: authzResourceType",
-	"handlers_resource_import.go: authzResourceType",
 	"handlers_resource_import.go: authzType",
 	"handlers_resource_import.go: authzType",
 }

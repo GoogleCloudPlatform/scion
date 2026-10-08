@@ -29,7 +29,7 @@ import (
 func newShutdownTestServer(t *testing.T) *Server {
 	t.Helper()
 
-	st, err := newTestStore(":memory:")
+	st, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
@@ -37,7 +37,7 @@ func newShutdownTestServer(t *testing.T) *Server {
 		t.Fatalf("failed to migrate test store: %v", err)
 	}
 
-	srv, err := New(DefaultServerConfig(), st)
+	srv, err := newTestHubServer(t, DefaultServerConfig(), st)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}

@@ -279,6 +279,26 @@ func (_u *RuntimeBrokerUpdate) ClearWorkspaceStorage() *RuntimeBrokerUpdate {
 	return _u
 }
 
+// SetHealth sets the "health" field.
+func (_u *RuntimeBrokerUpdate) SetHealth(v string) *RuntimeBrokerUpdate {
+	_u.mutation.SetHealth(v)
+	return _u
+}
+
+// SetNillableHealth sets the "health" field if the given value is not nil.
+func (_u *RuntimeBrokerUpdate) SetNillableHealth(v *string) *RuntimeBrokerUpdate {
+	if v != nil {
+		_u.SetHealth(*v)
+	}
+	return _u
+}
+
+// ClearHealth clears the value of the "health" field.
+func (_u *RuntimeBrokerUpdate) ClearHealth() *RuntimeBrokerUpdate {
+	_u.mutation.ClearHealth()
+	return _u
+}
+
 // SetLabels sets the "labels" field.
 func (_u *RuntimeBrokerUpdate) SetLabels(v map[string]string) *RuntimeBrokerUpdate {
 	_u.mutation.SetLabels(v)
@@ -599,6 +619,12 @@ func (_u *RuntimeBrokerUpdate) sqlSave(ctx context.Context) (_node int, err erro
 	}
 	if _u.mutation.WorkspaceStorageCleared() {
 		_spec.ClearField(runtimebroker.FieldWorkspaceStorage, field.TypeString)
+	}
+	if value, ok := _u.mutation.Health(); ok {
+		_spec.SetField(runtimebroker.FieldHealth, field.TypeString, value)
+	}
+	if _u.mutation.HealthCleared() {
+		_spec.ClearField(runtimebroker.FieldHealth, field.TypeString)
 	}
 	if value, ok := _u.mutation.Labels(); ok {
 		_spec.SetField(runtimebroker.FieldLabels, field.TypeJSON, value)
@@ -928,6 +954,26 @@ func (_u *RuntimeBrokerUpdateOne) SetNillableWorkspaceStorage(v *string) *Runtim
 // ClearWorkspaceStorage clears the value of the "workspace_storage" field.
 func (_u *RuntimeBrokerUpdateOne) ClearWorkspaceStorage() *RuntimeBrokerUpdateOne {
 	_u.mutation.ClearWorkspaceStorage()
+	return _u
+}
+
+// SetHealth sets the "health" field.
+func (_u *RuntimeBrokerUpdateOne) SetHealth(v string) *RuntimeBrokerUpdateOne {
+	_u.mutation.SetHealth(v)
+	return _u
+}
+
+// SetNillableHealth sets the "health" field if the given value is not nil.
+func (_u *RuntimeBrokerUpdateOne) SetNillableHealth(v *string) *RuntimeBrokerUpdateOne {
+	if v != nil {
+		_u.SetHealth(*v)
+	}
+	return _u
+}
+
+// ClearHealth clears the value of the "health" field.
+func (_u *RuntimeBrokerUpdateOne) ClearHealth() *RuntimeBrokerUpdateOne {
+	_u.mutation.ClearHealth()
 	return _u
 }
 
@@ -1281,6 +1327,12 @@ func (_u *RuntimeBrokerUpdateOne) sqlSave(ctx context.Context) (_node *RuntimeBr
 	}
 	if _u.mutation.WorkspaceStorageCleared() {
 		_spec.ClearField(runtimebroker.FieldWorkspaceStorage, field.TypeString)
+	}
+	if value, ok := _u.mutation.Health(); ok {
+		_spec.SetField(runtimebroker.FieldHealth, field.TypeString, value)
+	}
+	if _u.mutation.HealthCleared() {
+		_spec.ClearField(runtimebroker.FieldHealth, field.TypeString)
 	}
 	if value, ok := _u.mutation.Labels(); ok {
 		_spec.SetField(runtimebroker.FieldLabels, field.TypeJSON, value)

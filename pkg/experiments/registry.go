@@ -126,10 +126,31 @@ const K8sNFSHome = "hub.k8s_nfs_home"
 // every artifact surface.
 const Artifacts = "hub.artifacts"
 
+// ChatScheduledSend gates scheduled send in native web chat: the Schedule
+// send menu item and pending-message banners in the web UI, the hub's
+// /api/v1/chat/conversations/{key}/scheduled routes (404 while off), and
+// the delivery sweeper, which holds pending messages while it is off.
+const ChatScheduledSend = "web.chat_scheduled_send"
+
+// AuthorizationDecisionAuditV2 identifies the default-off decision-audit slice.
+// Registration alone never grants production admission.
+const AuthorizationDecisionAuditV2 = "hub.authorization_decision_audit_v2"
+
 // compiled is the production experiment list. It is reachable only through
 // Default(); there is no package-level Lookup/All, so hub code cannot bypass
 // the Registry instance it was given (ptone/scion#2217).
 var compiled = []Experiment{
+	{
+		Name:        AuthorizationDecisionAuditV2,
+		Title:       "Authorization decision audit v2",
+		Description: "Routes admitted authorization decisions to the typed structured log sink; defaults to the retained legacy writer when admission, freshness or logging health fails.",
+		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#2379",
+		Owner:       "audit-update",
+		ReviewBy:    "2026-11-30",
+	},
 	{
 		Name:        "web.terminal_workspace",
 		Title:       "Persistent terminal workspace",
@@ -184,6 +205,17 @@ var compiled = []Experiment{
 		Issue:       "ptone/scion#2774",
 		Owner:       "conduit",
 		ReviewBy:    "2027-03-31",
+	},
+	{
+		Name:        ChatScheduledSend,
+		Title:       "Scheduled send in chat",
+		Description: "Adds Schedule send to the chat Send button menu: the message is held by the hub and sent as the user at the chosen time; until then only the sender sees it, with a Cancel button. Gates the menu item and banners (LayerWeb), the hub's scheduled-message routes, which answer 404 while it is off, and delivery (LayerServer): while it is off, pending messages are held, neither sent nor failed. Known limitation of this first version: messages held while it is off are sent when it is turned back on however late they are (a late cutoff follows), so keep it to developers until then.",
+		Default:     false,
+		Layers:      []Layer{LayerWeb, LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#3666",
+		Owner:       "native-chat",
+		ReviewBy:    "2027-01-31",
 	},
 }
 

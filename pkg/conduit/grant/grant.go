@@ -89,6 +89,15 @@ const (
 	ParamAgentID = "agent_id"
 )
 
+// PTY stream params: the initial terminal size and the tmux session to
+// attach to. All three are part of the signed stream header like any
+// other param.
+const (
+	ParamCols    = "cols"
+	ParamRows    = "rows"
+	ParamSession = "session"
+)
+
 // IsStreamKind reports whether kind is one of the canonical stream kinds.
 func IsStreamKind(kind string) bool {
 	switch kind {

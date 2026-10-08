@@ -14,13 +14,13 @@
 
 /**
  * Chromium, real xterm: the terminal workspace's "Jump to agent" palette —
- * the header button opens it with the chat palette's type scale, its
- * options spanning the full width of the results; in a multi-pane grid a
- * pick adds a pane, or replaces the focused pane when the grid is full; in
- * a single-pane view (the single preset, or any preset on
- * a narrow viewport) a pick navigates to the agent's URL like the rail; the
- * picked pane takes keyboard focus; Meta+K opens it from inside a pane, but
- * not over a pane's own open dialog, and Ctrl+K keeps reaching the PTY from
+ * the terminal list footer's button opens it with the chat palette's type
+ * scale, its options spanning the full width of the results; in a multi-pane
+ * grid a pick adds a pane, or replaces the focused pane when the grid is
+ * full; in a single-pane view (the single preset, or any preset on a narrow
+ * viewport) a pick navigates to the agent's URL like the rail; the picked
+ * pane takes keyboard focus; Meta+K opens it from inside a pane, but not
+ * over a pane's own open dialog, and Ctrl+K keeps reaching the PTY from
  * inside a pane while still opening the palette from outside one; leaving
  * /terminals with the palette open closes it, so the destination page keeps
  * keyboard focus and scrolling.
@@ -28,7 +28,11 @@
 
 import { test, expect, type Locator, type Page } from '@playwright/test';
 import { DENSE_PALETTE_FONT_SIZES, paletteFontSizes } from '../palette-typography.js';
-import { paletteInputHasFocus, slowPaletteModule } from '../palette-focus.js';
+import {
+  expectTapHoldsKeyboard,
+  paletteInputHasFocus,
+  slowPaletteModule,
+} from '../palette-focus.js';
 
 const agentA = '11111111-1111-4111-8111-111111111111';
 const agentB = '22222222-2222-4222-8222-222222222222';
@@ -73,10 +77,11 @@ async function setup(
       json: Object.values(agents).map((a) => ({ ...a, _capabilities: { actions: ['attach'] } })),
     });
   });
-  // The palette's own paginated fetch (fetchAllPaletteAgents): registered
-  // after the generic route above, so Playwright tries it first — a more
-  // specific override wins over an earlier, broader registration.
-  await page.route(/\/api\/v1\/agents\?limit=100(&|$)/, (route) => {
+  // The agent store's paginated list walk (`limit` set), which the palette
+  // reads: registered after the generic route above, so Playwright tries it
+  // first — a more specific override wins over an earlier, broader
+  // registration.
+  await page.route(/\/api\/v1\/agents\?(?:[^#]*&)?limit=/, (route) => {
     void route.fulfill({
       json: {
         agents: Object.values(agents).map((a) => ({
@@ -145,8 +150,9 @@ function fixture(id: string, name: string): AgentFixture {
   return { id, name, phase: 'running', projectId: 'fixture-project' };
 }
 
+/** The "Jump to agent" button pinned in the terminal list footer. */
 function paletteButton(page: Page): Locator {
-  return page.locator('#terminal-workspace scion-header .palette-button');
+  return page.locator('#terminal-workspace .terminal-rail-footer .terminal-jump-btn');
 }
 
 function paletteDialog(page: Page): Locator {
@@ -215,7 +221,7 @@ async function pick(page: Page, name: string): Promise<void> {
   await expect(paletteDialog(page)).toBeHidden();
 }
 
-test('the header button opens the palette, labeled "Jump to agent"', async ({ page }) => {
+test('the footer button opens the palette, labeled "Jump to agent"', async ({ page }) => {
   await setup(page, { [agentA]: fixture(agentA, 'Alice-bot') });
   await page.goto(`/terminals/${agentA}`);
   await expect(page.locator('.xterm-helper-textarea').first()).toBeAttached();
@@ -230,7 +236,7 @@ test('the header button opens the palette, labeled "Jump to agent"', async ({ pa
   );
 });
 
-test('a dismiss refocuses the header button that opened the palette', async ({ page }) => {
+test('a dismiss refocuses the footer button that opened the palette', async ({ page }) => {
   await setup(page, { [agentA]: fixture(agentA, 'Alice-bot') });
   await page.goto(`/terminals/${agentA}`);
   await expect(page.locator('.xterm-helper-textarea').first()).toBeAttached();
@@ -245,7 +251,7 @@ test('a dismiss refocuses the header button that opened the palette', async ({ p
       page.evaluate(() => {
         let el: Element | null = document.activeElement;
         while (el?.shadowRoot?.activeElement) el = el.shadowRoot.activeElement;
-        return el?.classList.contains('palette-button') ?? false;
+        return el?.classList.contains('terminal-jump-btn') ?? false;
       })
     )
     .toBe(true);
@@ -284,6 +290,29 @@ test('the agents-only palette lists its options across the full width of the res
     return option.getBoundingClientRect().width / results.getBoundingClientRect().width;
   });
   expect(ratio).toBeGreaterThan(0.9);
+});
+
+test('the agents-only palette keeps the single-group panel width', async ({ page }) => {
+  await setup(page, {
+    [agentA]: fixture(agentA, 'Alice-bot'),
+    [agentB]: fixture(agentB, 'Bob-bot'),
+  });
+  await page.goto(`/terminals/${agentA}`);
+  await expect(page.locator('.xterm-helper-textarea').first()).toBeAttached();
+  // Open from outside the pane, so the shortcut does not go to the PTY.
+  await page.locator('.terminal-layout-btn').first().focus();
+  await page.keyboard.press('Control+k');
+  await expect(paletteOption(page, 'Bob-bot')).toBeVisible();
+
+  // Read the settled panel, not a frame of the dialog's open animation.
+  const panelWidth = (): Promise<number> =>
+    paletteDialog(page).evaluate((dialog) => {
+      const panel = dialog.shadowRoot!.querySelector('[part~="panel"]')!;
+      return panel.getAnimations().length === 0 ? panel.getBoundingClientRect().width : -1;
+    });
+  // The suite's 1100px viewport: min(560px, 92vw) resolves to 560px. Only
+  // a palette with more than one group uses the wider panel.
+  await expect.poll(panelWidth).toBeCloseTo(560, 0);
 });
 
 test('in a single-pane view, picks navigate to the agent URL for new and open agents', async ({
@@ -326,6 +355,29 @@ test('a reload after picking a new agent restores that agent', async ({ page }) 
   await page.reload();
   await expect(page).toHaveURL(new RegExp(`/terminals/${agentB}$`));
   await expect.poll(() => paneIsVisible(page, agentB)).toBe(true);
+});
+
+test.describe('on a touch-primary device', () => {
+  test.use({ hasTouch: true, isMobile: true });
+
+  test('a tap on the footer button holds the keyboard until the query input has focus', async ({
+    page,
+  }) => {
+    await slowPaletteModule(page);
+    await setup(page, { [agentA]: fixture(agentA, 'Alice-bot') });
+    await page.goto(`/terminals/${agentA}`);
+    await expect(page.locator('.xterm-helper-textarea').first()).toBeAttached();
+    expect(
+      await page.evaluate(() => matchMedia('(hover: none) and (pointer: coarse)').matches)
+    ).toBe(true);
+
+    await expectTapHoldsKeyboard(page, () => paletteButton(page).tap());
+    await expect(paletteDialog(page)).toBeVisible();
+
+    await page.keyboard.press('Escape');
+    await expect(paletteDialog(page)).toBeHidden();
+    await expectTapHoldsKeyboard(page, () => paletteButton(page).tap());
+  });
 });
 
 test.describe('on a narrow viewport', () => {
@@ -481,11 +533,7 @@ test('typing straight after the rail footer button becomes the query, while the 
   await page.goto(`/terminals/${agentA}`);
   await expect.poll(() => attaches()).toBeGreaterThan(0);
 
-  await expectTypingRightAfterOpenFilters(
-    page,
-    () => page.locator('#terminal-workspace .terminal-jump-btn').click(),
-    ptyInput
-  );
+  await expectTypingRightAfterOpenFilters(page, () => paletteButton(page).click(), ptyInput);
 });
 
 test('typing straight after a reopen from a pane becomes the new query', async ({ page }) => {
@@ -609,7 +657,7 @@ test('a reopen during the close animation shows a focused palette, and keeps the
       page.evaluate(() => {
         let el: Element | null = document.activeElement;
         while (el?.shadowRoot?.activeElement) el = el.shadowRoot.activeElement;
-        return el?.classList.contains('palette-button') ?? false;
+        return el?.classList.contains('terminal-jump-btn') ?? false;
       })
     )
     .toBe(true);
@@ -630,7 +678,7 @@ test('an Escape during a reopen in the close animation leaves it closed, and ref
   await page.evaluate(() => {
     const w = window as unknown as { hideSettled?: Promise<void> };
     w.hideSettled = new Promise((resolve) => {
-      // Only the palette's own dialog: the header button's tooltip fires one too.
+      // Only the palette's own dialog: other Shoelace popups fire one too.
       const listener = (e: Event): void => {
         const dialog = document
           .querySelector('scion-quick-palette')
@@ -659,7 +707,7 @@ test('an Escape during a reopen in the close animation leaves it closed, and ref
       page.evaluate(() => {
         let el: Element | null = document.activeElement;
         while (el?.shadowRoot?.activeElement) el = el.shadowRoot.activeElement;
-        return el?.classList.contains('palette-button') ?? false;
+        return el?.classList.contains('terminal-jump-btn') ?? false;
       })
     )
     .toBe(true);

@@ -31,6 +31,9 @@ import (
 // buildGlobalAgentPage as the legacy branch.
 func (s *Server) listAgentsSorted(w http.ResponseWriter, r *http.Request, filter store.AgentFilter, p agentListParams, identity Identity) {
 	ctx := r.Context()
+	// ids= narrows every store read below (stats, fit probe, page) as one
+	// more ANDed filter; the per-row read pass is unchanged.
+	narrowFilterByIDs(&filter, p.ids)
 
 	binding := scopedCursorBinding(sortSuffix("agents", p.sort, p.dir), filter, identity)
 
@@ -70,9 +73,11 @@ func (s *Server) listAgentsSorted(w http.ResponseWriter, r *http.Request, filter
 	if p.hasFit {
 		// fit (race-free): the store's own limit+1 probe says whether
 		// more rows exist. No decision is made on any row yet.
+		fitDone := perfPhaseStart(ctx, perfPhaseListDBRead)
 		result, err := s.store.ListAgents(ctx, statsFilter, store.ListOptions{
 			Limit: p.fit, SortBy: p.sort, SortDir: p.dir, SkipTotalCount: true,
 		})
+		fitDone()
 		if err != nil {
 			writeErrorFromErr(w, err, "")
 			return
@@ -138,6 +143,7 @@ func (s *Server) listAgentsSorted(w http.ResponseWriter, r *http.Request, filter
 func (s *Server) buildGlobalAgentPage(ctx context.Context, identity Identity, items []store.Agent) ([]AgentWithCapabilities, *Capabilities) {
 	s.enrichAgents(ctx, items)
 
+	capsDone := perfPhaseStart(ctx, perfPhaseCapabilities)
 	agents := make([]AgentWithCapabilities, 0, len(items))
 	resources := make([]Resource, len(items))
 	for i := range items {
@@ -148,14 +154,17 @@ func (s *Server) buildGlobalAgentPage(ctx context.Context, identity Identity, it
 		item.AppliedConfig = redactAppliedConfigEnvForResponse(item.AppliedConfig, s.envViewAllowed(ctx, identity, &item, cap))
 		agents = append(agents, AgentWithCapabilities{Agent: item, Cap: cap})
 	}
+	capsDone()
 
 	// Messageability for each agent relative to the viewer.
 	for i := range agents {
 		agents[i].Messageability = s.ComputeMessageability(ctx, identity, &agents[i].Agent)
 	}
 
+	scopeCapDone := perfPhaseStart(ctx, perfPhaseScopeCapabilities)
 	scopeCap := s.authzService.ComputeScopeCapabilities(ctx, identity, "", "", "agent")
 	s.addAgentCreateIfAnyProjectAllows(ctx, identity, scopeCap)
+	scopeCapDone()
 	return agents, scopeCap
 }
 
@@ -176,7 +185,9 @@ func (s *Server) buildGlobalAgentStats(ctx context.Context, identity Identity, s
 	if !agentListAppliesReadRule(ctx) {
 		return buildUnfilteredGlobalAgentStats(ctx, s, statsFilter)
 	}
+	membersDone := perfPhaseStart(ctx, perfPhaseListDBRead)
 	members, err := s.store.ListAgentMembers(ctx, statsFilter, p.sort, p.dir, authorizedListMaxCandidates+1)
+	membersDone()
 	if err != nil {
 		return nil, err
 	}
@@ -208,7 +219,9 @@ func (s *Server) buildGlobalAgentStats(ctx context.Context, identity Identity, s
 // agent-list rule does not apply to (an agent): every candidate of
 // statsFilter, read via CountAgentsByPhaseIDs with no decision made.
 func buildUnfilteredGlobalAgentStats(ctx context.Context, s *Server, statsFilter store.AgentFilter) (*ListAgentsStats, error) {
+	countDone := perfPhaseStart(ctx, perfPhaseListDBRead)
 	idPhases, err := s.store.CountAgentsByPhaseIDs(ctx, statsFilter)
+	countDone()
 	if err != nil {
 		return nil, err
 	}

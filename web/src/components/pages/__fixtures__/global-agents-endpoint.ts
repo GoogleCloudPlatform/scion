@@ -93,7 +93,7 @@ export interface Fake {
 
 /**
  * A fake global agents endpoint: sorted fit requests (complete when the set
- * fits), sorted cursor pages, `stats` (IDs omitted above 2,000), scope,
+ * fits), sorted cursor pages, ids= pages, `stats` (IDs omitted above 2,000), scope,
  * projectId, k=v label and phase; legacy (unsorted) cursor pages of `limit` rows
  * (500 by default).
  */
@@ -197,6 +197,21 @@ export function fakeFetch(fake: Fake) {
           totalCount: sorted.length,
           complete: true,
           stats: statsOf(),
+          _capabilities: SCOPE_CAPS,
+        })
+      );
+    }
+    // ids= (a page of the window's frozen walk order): exactly the named
+    // agents that still match, with the other filters applied.
+    const ids = u.searchParams.get('ids');
+    if (ids !== null) {
+      const wanted = new Set(ids.split(','));
+      const page = phased.filter((a) => wanted.has(a.id));
+      return Promise.resolve(
+        jsonResponse({
+          agents: page,
+          totalCount: page.length,
+          complete: false,
           _capabilities: SCOPE_CAPS,
         })
       );

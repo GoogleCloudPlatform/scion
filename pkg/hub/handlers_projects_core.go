@@ -1067,7 +1067,7 @@ func probeWorkspaceContent(dir string) (bool, error) {
 func (s *Server) resolveDurableOrLegacyPath(slug, durablePath string, warnEphemeral bool) (string, error) {
 	has, err := probeWorkspaceContent(durablePath)
 	if err != nil {
-		return "", s.workspaceProbeError(slug, durablePath, err)
+		return "", s.workspaceProbeError(slug, err)
 	}
 	if has {
 		return durablePath, nil
@@ -1076,11 +1076,11 @@ func (s *Server) resolveDurableOrLegacyPath(slug, durablePath string, warnEpheme
 	if localPath, lerr := localProjectPath(slug); lerr == nil {
 		has, err := probeWorkspaceContent(localPath)
 		if err != nil {
-			return "", s.workspaceProbeError(slug, localPath, err)
+			return "", s.workspaceProbeError(slug, err)
 		}
 		if has {
 			if warnEphemeral {
-				s.warnEphemeralProjectPath(slug, localPath, durablePath)
+				s.warnEphemeralProjectPath(slug)
 			}
 			return localPath, nil
 		}
@@ -1089,13 +1089,17 @@ func (s *Server) resolveDurableOrLegacyPath(slug, durablePath string, warnEpheme
 	return durablePath, nil
 }
 
-// workspaceProbeError logs a timed-out workspace probe (with the path) and
-// wraps err with the project slug only. The error text can reach stored,
-// API-visible fields (e.g. a scheduled event's error), so it must not carry
-// the filesystem path. It still matches errWorkspaceContentTimeout.
-func (s *Server) workspaceProbeError(slug, path string, err error) error {
+// workspaceProbeError logs a timed-out workspace probe and wraps err with the
+// project slug only. The error text can reach stored, API-visible fields
+// (e.g. a scheduled event's error), so it must not carry the filesystem path.
+// It still matches errWorkspaceContentTimeout.
+//
+// The log line carries the probe timeout and a fixed error class only: no
+// project ID is in scope here (callers resolve by slug), and the slug, path
+// and error text are left out of the log.
+func (s *Server) workspaceProbeError(slug string, err error) error {
 	s.projectsLogger().Warn("Workspace storage did not respond; not resolving project path",
-		"slug", slug, "path", path, "timeout", workspaceContentTimeout, "error", err)
+		"error_class", fsErrorClass(err), "timeout", workspaceContentTimeout)
 	return fmt.Errorf("workspace content check for project %q: %w", slug, err)
 }
 
@@ -2363,6 +2367,11 @@ var projectAgentRouteActions = map[AgentSubRouteID]string{
 
 // listProjectAgents lists agents within a specific project
 func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, projectID string) {
+	// The ids= format check runs before any authorization or store call
+	// this handler makes (see parseAgentListIDs).
+	if q := r.URL.Query(); !validateAgentListIDs(w, q, agentListLimit(q), isSortedModeRequest(q)) {
+		return
+	}
 	if !checkAgentReadScope(w, r) {
 		return
 	}
@@ -2374,6 +2383,14 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, proje
 	agentIdent := GetAgentIdentityFromContext(ctx)
 	query := r.URL.Query()
 	sorted := isSortedModeRequest(query)
+	switch {
+	case !sorted:
+		perfSetEndpoint(ctx, perfEndpointAgentsProjectLegacy)
+	case agentIdent != nil:
+		perfSetEndpoint(ctx, perfEndpointAgentsProjectSortedAg)
+	default:
+		perfSetEndpoint(ctx, perfEndpointAgentsProjectSorted)
+	}
 
 	if agentIdent != nil {
 		// checkAgentReadScope only checks that the token carries the
@@ -2394,7 +2411,10 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, proje
 		// every agent record in the project. Require agent.list on the
 		// project, matching what listAgents (handlers_agents_core.go) already
 		// enforces for the global list.
-		if !s.authorize(w, r, Resource{Type: "agent", ParentType: "project", ParentID: projectID}, ActionList) {
+		gateDone := perfPhaseStart(ctx, perfPhaseListScopeAuthz)
+		allowed := s.authorize(w, r, Resource{Type: "agent", ParentType: "project", ParentID: projectID}, ActionList)
+		gateDone()
+		if !allowed {
 			return
 		}
 	}
@@ -2472,6 +2492,7 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, proje
 
 	// Compute per-item and scope capabilities. Every item is rendered: the
 	// user path above already holds only readable agents.
+	capsDone := perfPhaseStart(ctx, perfPhaseCapabilities)
 	resources := make([]Resource, len(result.Items))
 	for i := range result.Items {
 		resources[i] = agentResource(&result.Items[i])
@@ -2483,12 +2504,15 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, proje
 		item.AppliedConfig = redactAppliedConfigEnvForResponse(item.AppliedConfig, s.envViewAllowed(ctx, identity, &item, caps[i]))
 		agents = append(agents, AgentWithCapabilities{Agent: item, Cap: caps[i]})
 	}
+	capsDone()
 	// identity == nil is unreachable here: the authorize call above already
 	// writes 401 for an unauthenticated non-agent caller before this point.
 
 	var scopeCap *Capabilities
 	if identity != nil {
+		scopeCapDone := perfPhaseStart(ctx, perfPhaseScopeCapabilities)
 		scopeCap = s.authzService.ComputeScopeCapabilities(ctx, identity, "project", projectID, "agent")
+		scopeCapDone()
 	}
 
 	writeAgentList(w, legacyAgentListView(query), ListAgentsResponse{
@@ -3275,7 +3299,7 @@ func (s *Server) executePostDeletionEffects(ctx context.Context, projectID strin
 			projectConfigDir := filepath.Dir(configPath)
 			if err := config.RemoveProjectConfig(projectConfigDir); err != nil && !os.IsNotExist(err) {
 				s.projectsLogger().Warn("failed to remove project config directory",
-					"project_id", projectID, "slug", project.Slug, "path", projectConfigDir, "error", err)
+					"project_id", projectID, "error_class", fsErrorClass(err))
 			}
 		}
 	}
@@ -3319,7 +3343,7 @@ func (s *Server) removeProjectDirUnderProjectsRoot(projectID, projectPath string
 	}
 	if err := util.RemoveAllSafe(projectPath); err != nil {
 		s.projectsLogger().Warn("failed to remove hub-managed project directory",
-			"project_id", projectID, "path", projectPath, "error", err)
+			"project_id", projectID, "error_class", fsErrorClass(err))
 	}
 }
 

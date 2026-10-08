@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"errors"
 	"log/slog"
 	"net/http"
 
@@ -41,7 +42,8 @@ func (s *Server) handleAdminResetAuthAll(w http.ResponseWriter, r *http.Request)
 		Name  string `json:"name"`
 		Error string `json:"error,omitempty"`
 		// Code is set to runtime_unavailable when the agent's broker does
-		// not have the agent's runtime available; the reset can be retried.
+		// not have the agent's runtime available, and to internal_error
+		// when the agent token could not be issued; both can be retried.
 		Code string `json:"code,omitempty"`
 	}
 
@@ -60,7 +62,10 @@ func (s *Server) handleAdminResetAuthAll(w http.ResponseWriter, r *http.Request)
 			if err := disp.DispatchAgentResetAuth(ctx, &a); err != nil {
 				slog.Error("Bulk reset-auth failed for agent", "agent_id", a.ID, "error", err)
 				res.Error = err.Error()
-				if isBrokerRuntimeUnavailable(err) {
+				if errors.Is(err, errAgentTokenRecord) {
+					res.Error = agentTokenRecordFailedMessage
+					res.Code = ErrCodeInternalError
+				} else if isBrokerRuntimeUnavailable(err) {
 					res.Code = brokerCodeRuntimeUnavailable
 				}
 			}

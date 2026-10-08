@@ -1,6 +1,6 @@
 # Artifact system
 
-Status: design accepted (decisions D1–D20); implementation in phases tracked by ptone/scion#3202. Phase P0 (scaffolding) is ptone/scion#3203, phase P1 (vertical slice) is ptone/scion#3208. This document carries the proposed design, data model, API and UX of the artifact system so the design travels with the code. Prior art: ptone/scion#874 ("Praxis"), ptone/scion#518.
+Status: design accepted (decisions D1–D21); implementation in phases tracked by ptone/scion#3202. Phase P0 (scaffolding) is ptone/scion#3203, phase P1 (vertical slice) is ptone/scion#3208. This document carries the proposed design, data model, API and UX of the artifact system so the design travels with the code. Prior art: ptone/scion#874 ("Praxis"), ptone/scion#518.
 
 The feature is behind the `hub.artifacts` experiment (default off).
 
@@ -17,7 +17,7 @@ The feature is behind the `hub.artifacts` experiment (default off).
 | D7 | Principal-owned, home scope, ACL (scope / principal / link grants) with a neutral scope column. |
 | D8 | HTML renders in a sandboxed iframe (strict CSP, no same-origin) served by the hub; a separate artifact origin when public links ship. |
 | D9 | Publish uploads through the service, with a two-step `create version → upload files → finalize` contract so direct-to-object-store upload is additive later. |
-| D10 | Message refs: structured ref in message metadata plus the `scion://artifact/<id>[@<seq>]` URL in the body; access is checked at read time. |
+| D10 | Message refs: structured ref in message metadata plus the `scion://artifact/<id>[@<seq>]` URL in the body; refs carry ids only, never a title; access is checked at read time, per reader. |
 | D11 | A review is a new version (`kind: review`) carrying CriticMarkup; no overlay object. |
 | D12 | Retention: hub setting `artifacts.default_retention_days` (0 = never) plus a per-artifact override; share links always expire. |
 | D13 | Standalone auth seam: v1 defines only the Go `Host` interface, constrained to be remotable (strings in, strings and bools out). |
@@ -28,6 +28,8 @@ The feature is behind the `hub.artifacts` experiment (default off).
 | D18 | `current_seq` is the latest version of any kind. |
 | D19 | Default limits: 32 MiB/file, 256 MiB/bundle, 200 files/bundle, share-link TTL 7 days (max 30). |
 | D20 | A review version that changes text outside CriticMarkup is rejected at finalize (`422 unmarked_changes`). |
+| D21 | A hub-level *Artifacts* item in the management sidebar, beside *Skills*, ships as phase P1c and lists the artifacts the user owns or holds grants on; the project *Artifacts* tab stays in P2. Artifacts are principal-owned (D7), so the primary list is per user. |
+| D23 | Artifact chips and linkified `scion://artifact/` URLs in chat open an in-place preview dialog (as chat attachments do) with an *Open in artifact viewer* button; no side panel. |
 
 ## 5. Proposed design
 
@@ -73,9 +75,14 @@ Chat attachments (`AttachmentStore`) keep working unchanged in v1 (D14). Shared 
 | **Cross-project** | Setting `messaging.cross_project_messaging_enabled` (default false, fail closed). | Granting an artifact to another project (`subject_kind: scope`) is allowed only when that setting is on; the grant check at read time does not depend on messaging. |
 | **Settings** | Operational settings sections (`pkg/config/opsettings`). | Section `artifacts`: `enabled` (hub-level switch on top of the experiment; a malformed section fails closed), `max_file_bytes` (32 MiB), `max_bundle_bytes` (256 MiB), `max_files` (200), `default_retention_days` (0), `link_default_ttl_hours` (168), `link_max_ttl_hours` (720). |
 | **Experiment** | `pkg/experiments/registry.go`. | `hub.artifacts`, web and server layers, default off. Checked on every request (no restart needed): while the experiment is off, or the `artifacts` settings section is disabled or malformed, every artifact route answers 404. The web checks `isFeatureEnabled("hub.artifacts")`. |
-| **Message refs (D10)** | Message metadata and the server-built chat attachment map. | Refs travel in metadata key `artifacts` (JSON array of `{id, seq?, title}`) and are persisted in `artifact_message_ref(message_id, artifact_id, seq)` so chat history can render chips. |
+| **Message refs (D10)** | Message metadata and the server-built chat attachment map. | Refs travel in the hub-owned metadata key `artifacts`: a JSON array of canonical reference strings `scion://artifact/<id>[@<seq>]`, ids only, at most 10, never a title. The hub admits only refs the sender can read at send time (other send paths strip the key) and persists them in `artifact_message_ref(message_id, artifact_id, seq)` so chat history can render chips. Titles, versions and owners are resolved per reader, under the reader's own credential; an unreadable ref shows the same content as a missing one (see 5.5). |
 | **CLI** | `cmd/cli_mode.go` `agentAllowed` (dotted paths, parents not implicit). | `scion artifact publish|get|list|versions|share`; all but `share` agent-callable (D15). |
 | **Web** | The pluggable file browser / editor and `markdown-preview.ts`, `code-editor.ts`. | An artifact page hosts the entry file (markdown via `markdown-preview.ts`, HTML in a sandboxed iframe per D8); a bundle data source renders a version's manifest in the file browser. |
+
+### 5.5 Security notes
+
+- **Response equivalence covers content.** For a reader who may not read an artifact, the artifact routes, message reference views and send-time warnings return the same content as for an artifact that does not exist. Response time may differ between an existing but unreadable artifact and a missing one; that can reveal existence only to someone who already holds the artifact id, and `GET /api/v1/artifacts/{id}` behaves the same way. Timing equivalence is not a goal in v1.
+- **Artifact references resolve only for request-authenticated callers.** The hub resolves message references (send-time admission, chat views) through the artifact service in process, but only when the identity in the request context is the one the authentication middleware derived from the request's credentials. A context the hub builds for its own decisions resolves nothing, so the service's `Host` only ever sees request-derived identities.
 
 ## 6. Data model
 
@@ -119,9 +126,9 @@ artifact_grant (
   expires_at timestamptz NULL, created_by_ref text, created_at,
   UNIQUE (artifact_id, subject_kind, subject_ref)
 )
-artifact_message_ref (                   -- D10
-  message_id text, artifact_id FK, seq int NULL,
-  PRIMARY KEY (message_id, artifact_id)
+artifact_message_ref (                   -- D10: refs only, no title
+  message_id text, artifact_id FK, seq int NULL,   -- seq NULL = current version
+  PRIMARY KEY (message_id, artifact_id)            -- one ref per artifact per message
 )
 artifact_migrations (name text PK, applied_at)   -- ledger, as webchat_migrations
 ```
@@ -181,7 +188,7 @@ scion message @someone "Design ready" --artifact scion://artifact/5f1c…
 
 `publish` streams the file(s) to the hub (D9); the hub reads nothing from shared directories. `get` works from any broker and any project the caller has a grant in (D5, D10). Agent-callable verbs are listed in `cmd/cli_mode.go` `agentAllowed`; `artifact.share` is not (D15). Phase P1 ships `publish <file> [--title]` and `get <ref> [--out]`.
 
-**Delivery envelope.** A message with an artifact ref renders to the agent as today's envelope plus an `artifacts` metadata entry and a one-line fetch hint in the body footer, e.g. `Artifact: "Artifact system design" v2 — scion artifact get scion://artifact/5f1c…`. This keeps the agent's path to the bytes one command long and visible in the envelope.
+**Delivery envelope.** A message with an artifact ref renders to the agent as today's envelope plus the `artifacts` metadata entry and one fetch hint per ref in the body footer, built from the ref alone: `Artifact: v2 - scion artifact get scion://artifact/5f1c…@2`, or `Artifact: current - scion artifact get scion://artifact/5f1c…` for an unpinned ref. The hint carries no title and involves no lookup at delivery; whether the recipient may read the artifact is decided when it runs `get`. This keeps the agent's path to the bytes one command long and visible in the envelope.
 
 ### 8.2 Review flow (D4, D11)
 
@@ -207,8 +214,16 @@ Rule (D18): **`current_seq` is the latest version of any kind.** `get --clean` o
 
 ### 8.3 Web
 
-- **Artifact page** `/projects/<project-id>/artifacts/<id>[/v/<seq>]`: title, owner, version selector, rendered entry, *Files* (file browser over the version manifest), *Edit* (saves a `kind: publish` version by the user, D17), *Review* (D11), *Share* (links and grants, user-only), *History*. The project *Artifacts* tab has *New artifact* (upload through the two-step API). A hub-level `/artifacts` view lists artifacts the user owns or has grants on, including those whose home project is gone (D16).
+- **Artifact page** `/projects/<project-id>/artifacts/<id>[/v/<seq>]`: title, owner, version selector, rendered entry, *Files* (file browser over the version manifest), *Edit* (saves a `kind: publish` version by the user, D17), *Review* (D11), *Share* (links and grants, user-only), *History*. The project *Artifacts* tab has *New artifact* (upload through the two-step API). A hub-level `/artifacts` view (management sidebar item beside *Skills*, phase P1c, D21) lists artifacts the user owns, holds a principal grant on, or that are homed in or shared to a project the user is a member of, including owned ones whose home project is gone (D16); an "Owned by me" filter narrows it to owned artifacts. It is backed by `GET /api/v1/artifacts?mine=1` (cursor paginated, `q`, `review_pending`, `owner=me`). Membership only bounds the candidate set; every row passes the same read check as `GET /api/v1/artifacts/{id}`.
 - **Renderers** by entry media type: markdown → `markdown-preview.ts` (later with a CriticMarkup extension); text/code → `code-editor.ts` read-only; raster images → `<img>`; HTML bundles → sandboxed iframe whose `src` is the hub file route with a per-view capability so relative sub-resources resolve (D8); CSV/JSON → code view in v1. Phase P1 ships the page with the markdown, text and image renderers; other types are offered as a download.
-- **Chat**: an `artifacts` ref on a message renders a chip (title · vN · owner); clicking opens a side panel hosting the same renderer. Composer: *Attach artifact* picker; drag-drop in the composer still creates a chat attachment in v1 (D14).
+- **Chat**: chat history and send responses carry each message's refs resolved for the viewer (`messageArtifacts`); a readable ref renders a chip (title · vN · owner), an unreadable or missing one only as unavailable, with no title. Clicking a chip or a linkified `scion://artifact/` URL opens an in-place preview dialog with the same renderer and an *Open in artifact viewer* button (D23; no side panel). Composer: *Attach artifact* picker; drag-drop in the composer still creates a chat attachment in v1 (D14).
 - **Project → Artifacts tab**: list with search, owner, updated, review-pending filter.
 - Everything is behind experiment `hub.artifacts`.
+
+### 8.4 Images in markdown
+
+- **Fetched at publish, never on open.** When a version whose entry is markdown is published (single-file publish, or finalize of a two-step publish), the hub fetches the absolute https images the entry references inline (`![alt](url)` and `<img src>`) once (an `http` image gets a failed row), through `pkg/artifacts/remotefetch`, under the `remote_image_*` settings (on by default; count cap, per-image size, per-image timeout, total budget). Each becomes a manifest row at `_remote/<sha256(url)>` with `origin = remote`, `source_url` and `fetch_status`; a fetched image is a normal content-addressed blob stored with its detected type. A fetch that fails leaves a `failed` row with a generic error and never fails the publish; the response and the CLI list one generic warning per such image. A later version fetches again. `_remote/` is reserved: uploads may not use it.
+- **Finding the images.** Image URLs are taken from the first 2 MiB of the entry, a fixed window; an entry larger than that gets one warning, and images past the window get no rows. Extraction is bounded in time and memory by construction. It reads the window in one forward pass in which each byte is examined a fixed, small number of times. It treats each candidate URL as a substring of the window, accepted only if a byte-level check passes, and stops once it holds four times the per-version image cap of distinct candidates. Only those candidates are copied, decoded and normalized, and only the URLs the fetcher fetches are parsed. Tests check the work per byte and that allocation besides the window depends on the number of candidates kept, not on the size of the entry. Candidates are decoded as the browser reads them: an `<img src>` with HTML attribute rules for character references, then tabs and line breaks removed, slashes after the scheme read as `//` and a backslash before the query read as `/`; a markdown destination with `&amp;` decoded. A URL is kept only in a plain form both the browser and Go's URL parser read the same way (http or https, a host name of letters, digits, `.` and `-`, an optional port, no userinfo, no parentheses or spaces); anything else shows the "not fetched" placeholder. Reference-style images (`![alt][label]`, with a definition elsewhere) are not fetched yet (ptone/scion#3678); they show the "not fetched" placeholder. Image URLs written in code are fetched too; they are not shown.
+- **Served like any file.** `_remote/` files use the existing file route and the same evaluation order (credential check, then owner or host policy, then grants). A fetched image streams with a long-lived private cache header when requested by an explicit version, and `private, no-cache` through the current-version URL; a failed one answers `404` with `X-Artifact-Remote-Status: failed`. The manifest exposes `origin`, `sourceUrl` and `fetchStatus`.
+- **Fetcher.** `https` on port 443 only, no userinfo, every redirect hop checked the same way (at most three); every resolved address must be public, and the connection goes to the checked address; no proxy, cookies or credentials; connect, per-fetch and total time limits; a streaming size cap; only PNG, JPEG, GIF and WebP, decided from the bytes. Failure reasons are logged on the server only. Refused and unresolvable image fetches complete no sooner than a fixed floor tied to the connect timeout, once per publish, within the fetch budget.
+- **Preview.** The artifact page renders markdown in a sandboxed `srcdoc` frame with `allow-same-origin` (plus `allow-popups` and `allow-popups-to-escape-sandbox`, so links open in a new tab) and never `allow-scripts`, whose document carries `default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'`. Relative image paths resolve against the entry's folder in the version's files; absolute http(s) URLs load their `_remote/` copy, matched through the manifest: the renderer compares the browser's parsed form (`new URL(...).href`) of each remote row's `sourceUrl` with that of the image's `src`, so it does not reproduce the hub's normalization (the accepted forms and their normalized URLs are listed in `pkg/artifacts/testdata/remote_image_urls.json`, shared by the Go and web tests); anything else becomes a placeholder ("not fetched" without a row, "could not be fetched" for a failed row). Every image request uses `?stream=1`. A relative link to a file of the version opens that file; other relative links are made plain text.

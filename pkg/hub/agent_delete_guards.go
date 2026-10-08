@@ -170,6 +170,13 @@ func (r *startRefusal) dmError() *AgentDMError {
 func (s *Server) startGate(ctx context.Context, a *store.Agent, entry startEntry) *startRefusal {
 	// Step 1: delete in progress.
 	blocked, err := s.deleteBlocksStart(ctx, a)
+	if err != nil && requestEnded(ctx, err) {
+		// The caller's own request ended (cancelled, or its time budget ran
+		// out): an ordinary outcome, not a store failure.
+		s.agentLifecycleLog.Info("start gate: the request ended before the delete check",
+			"agent_id", a.ID, "entry", string(entry), "error", err)
+		return requestEndedRefusal()
+	}
 	if err != nil {
 		// Fail closed: without the dispatch table we cannot rule out an
 		// outstanding cross-node delete intent.
@@ -208,6 +215,23 @@ func agentDeletedRefusal(agentID string) *startRefusal {
 		Details: map[string]interface{}{
 			"agentId": agentID,
 		},
+	}
+}
+
+// requestEnded reports whether err is ctx's own end: ctx was cancelled or
+// its deadline passed, and err carries that cause.
+func requestEnded(ctx context.Context, err error) bool {
+	return ctx.Err() != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded))
+}
+
+// requestEndedRefusal is the answer to a start whose request ended
+// (cancelled, or its time budget ran out) before the start began. Nothing
+// was claimed, dispatched or written.
+func requestEndedRefusal() *startRefusal {
+	return &startRefusal{
+		HTTPStatus: http.StatusServiceUnavailable,
+		Code:       ErrCodeRuntimeError,
+		Message:    "not started: the request ended or its time budget ran out before the start",
 	}
 }
 
@@ -281,15 +305,26 @@ func deleteClaimedDuringDispatch(err error, agentID string) *startRefusal {
 // whose lease expired, leaves the agent live, so it reports false too.
 func (s *Server) deleteWonAfterLanding(ctx context.Context, agentID string) bool {
 	fresh, err := s.store.GetAgent(ctx, agentID)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		s.agentLifecycleLog.Warn("failed to re-read agent after the broker started it; cannot check for a delete",
+			"agent_id", agentID, "error", err)
+	}
+	return deleteWonOnRead(fresh, err)
+}
+
+// deleteWonOnRead is deleteWonAfterLanding's rule applied to the result of
+// a read of the agent's row: the row is gone (store.ErrNotFound), or it is
+// deletedOrDeleteHeld. Any other read error reports false, so the caller
+// answers as before. A failed delete, or a deleting row whose lease
+// expired, leaves the agent live and reports false.
+func deleteWonOnRead(a *store.Agent, err error) bool {
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		return true
 	case err != nil:
-		s.agentLifecycleLog.Warn("failed to re-read agent after the broker started it; cannot check for a delete",
-			"agent_id", agentID, "error", err)
 		return false
 	default:
-		return deletedOrDeleteHeld(fresh)
+		return deletedOrDeleteHeld(a)
 	}
 }
 
@@ -393,16 +428,16 @@ func (s *Server) clearFailedDeletionAtClaim(ctx context.Context, a *store.Agent,
 // Only the columns the in-tx guard and the clear can change are carried over
 // from the re-read; in-memory fields the dispatch set are kept. If the re-read
 // fails, a falls back to the requested phase (the pre-guard behaviour) and
-// reloaded is false.
-func (s *Server) settleLifecycleWrite(ctx context.Context, a *store.Agent, newPhase string) (reloaded bool) {
+// the re-read's error is returned (nil when the re-read succeeded).
+func (s *Server) settleLifecycleWrite(ctx context.Context, a *store.Agent, newPhase string) (reloadErr error) {
 	a.Phase = newPhase
 	s.clearFailedDeletion(ctx, a)
 	if err := s.reloadGuardedColumns(ctx, a); err != nil {
 		s.agentLifecycleLog.Warn("failed to re-read agent after lifecycle write",
 			"agent_id", a.ID, "error", err)
-		return false
+		return err
 	}
-	return true
+	return nil
 }
 
 // reloadGuardedColumns re-reads a's row and copies the columns a concurrent

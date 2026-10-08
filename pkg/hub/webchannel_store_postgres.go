@@ -153,6 +153,22 @@ CREATE TABLE IF NOT EXISTS webchat_message_ext (
     edited_at TIMESTAMPTZ,
     deleted_at TIMESTAMPTZ
 );
+
+-- Per-recipient mention records: one row per (message, mentioned user).
+-- The primary key serves deletes by message; the (user_id,
+-- conversation_key) index serves the thread list's unread-mention read.
+CREATE TABLE IF NOT EXISTS webchat_mention (
+    user_id          TEXT NOT NULL,
+    conversation_key TEXT NOT NULL,
+    message_id       TEXT NOT NULL,
+    PRIMARY KEY (message_id, user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_webchat_mention_user_conversation
+    ON webchat_mention (user_id, conversation_key);
+
+CREATE INDEX IF NOT EXISTS idx_webchat_mention_conversation
+    ON webchat_mention (conversation_key);
 `
 	_, err := s.db.Exec(ddl)
 	if err != nil {
@@ -176,6 +192,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_webchat_topic_project_name
 `
 	if _, err := s.db.Exec(nameIdx); err != nil {
 		return fmt.Errorf("webchat store: create name uniqueness index: %w", err)
+	}
+
+	// Scheduled chat messages (webchat_scheduled_store*.go).
+	if err := s.initScheduledMessages(); err != nil {
+		return err
 	}
 
 	// Run idempotent migrations.
@@ -649,6 +670,10 @@ func (s *pgWebChatStore) DeleteTopic(ctx context.Context, topicID string) error 
 		topicID)
 	if err != nil {
 		return fmt.Errorf("webchat store: delete topic: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		"DELETE FROM webchat_mention WHERE conversation_key = $1", topicID); err != nil {
+		return fmt.Errorf("webchat store: delete topic mentions: %w", err)
 	}
 
 	return tx.Commit()
@@ -1785,11 +1810,22 @@ VALUES ($1, $2)
 ON CONFLICT (message_id)
 DO UPDATE SET deleted_at = EXCLUDED.deleted_at
 `
-	_, err := s.db.ExecContext(ctx, query, messageID, deletedAt)
+	// One transaction: the soft delete and its mention cleanup land
+	// together, so a deleted message never keeps lighting a mention dot.
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
+		return fmt.Errorf("webchat store: set message deleted begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+	if _, err := tx.ExecContext(ctx, query, messageID, deletedAt); err != nil {
 		return fmt.Errorf("webchat store: set message deleted: %w", err)
 	}
-	return nil
+	// A deleted message no longer mentions anyone.
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM webchat_mention WHERE message_id = $1`, messageID); err != nil {
+		return fmt.Errorf("webchat store: delete message mentions: %w", err)
+	}
+	return tx.Commit()
 }
 
 // UpdateMessageContent updates the content (msg column) of a message in the
@@ -2022,4 +2058,113 @@ func (s *pgWebChatStore) addThreadIDIndex() error {
 		return fmt.Errorf("create thread_id index: %w", err)
 	}
 	return s.markMigrationCompleted("thread_id_index")
+}
+
+// pgUUIDShapeRegex is a quoted SQL literal for the case-insensitive (~*)
+// UUID shape test. Every text-to-uuid cast on webchat columns runs only
+// inside a CASE on this test, so a non-UUID value maps to NULL instead of
+// failing the query.
+const pgUUIDShapeRegex = `'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'`
+
+// RecordMentions stores one mention row per user for messageID.
+func (s *pgWebChatStore) RecordMentions(ctx context.Context, conversationKey, messageID string, userIDs []string) error {
+	if conversationKey == "" || messageID == "" || len(userIDs) == 0 {
+		return nil
+	}
+	const query = `
+INSERT INTO webchat_mention (user_id, conversation_key, message_id)
+VALUES ($1, $2, $3)
+ON CONFLICT (message_id, user_id) DO NOTHING
+`
+	// One transaction for the whole batch: a single commit instead of an
+	// implicit one per row, and the batch lands atomically.
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("webchat store: record mentions begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+	for _, userID := range userIDs {
+		if userID == "" {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, query, userID, conversationKey, messageID); err != nil {
+			return fmt.Errorf("webchat store: record mention: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("webchat store: record mentions commit: %w", err)
+	}
+	return nil
+}
+
+// UnreadMentionKeys returns the conversations in conversationKeys where
+// userID has a recorded mention after its own read watermark, in one query.
+//
+// messages.id is a UUID column while the webchat tables hold text. Both
+// casts sit inside a CASE on the UUID shape (Postgres does not promise OR
+// evaluation order), and the join can still use the messages primary key.
+// A non-UUID mention message_id maps to NULL and joins nothing, so the row
+// is ignored instead of failing the caller's thread list. Mark-unread may
+// leave the watermark empty, and an empty or malformed watermark must read
+// as "no watermark", not fail the query.
+func (s *pgWebChatStore) UnreadMentionKeys(ctx context.Context, userID string, conversationKeys []string) (map[string]bool, error) {
+	out := make(map[string]bool)
+	if userID == "" || len(conversationKeys) == 0 {
+		return out, nil
+	}
+	placeholders := make([]string, len(conversationKeys))
+	args := make([]interface{}, 0, len(conversationKeys)+1)
+	args = append(args, userID)
+	for i, key := range conversationKeys {
+		placeholders[i] = fmt.Sprintf("$%d", i+2)
+		args = append(args, key)
+	}
+	query := fmt.Sprintf(`
+SELECT DISTINCT wm.conversation_key
+  FROM webchat_mention wm
+  JOIN messages m ON m.id = (CASE
+        WHEN wm.message_id ~* `+pgUUIDShapeRegex+`
+        THEN wm.message_id::uuid END)
+  LEFT JOIN webchat_read_state rs
+         ON rs.user_id = wm.user_id AND rs.conversation_key = wm.conversation_key
+  LEFT JOIN messages lr ON lr.id = (CASE
+        WHEN rs.last_read_message_id ~* `+pgUUIDShapeRegex+`
+        THEN rs.last_read_message_id::uuid END)
+ WHERE wm.user_id = $1 AND wm.conversation_key IN (%s)
+   AND (lr.id IS NULL OR m.created > lr.created
+        OR (m.created = lr.created AND m.id > lr.id))
+`, strings.Join(placeholders, ","))
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("webchat store: unread mentions: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			return nil, fmt.Errorf("webchat store: scan unread mention: %w", err)
+		}
+		out[key] = true
+	}
+	return out, rows.Err()
+}
+
+// PurgeOrphanMentions deletes mention rows whose message row is gone.
+// message_id is a hub-minted UUID, so the cast lets the lookup use the
+// messages primary key. The cast sits inside a CASE so it only runs on
+// UUID-shaped values (Postgres does not promise OR evaluation order). A
+// non-UUID message_id maps to NULL, matches no message, and is deleted as
+// an orphan instead of failing the whole sweep.
+func (s *pgWebChatStore) PurgeOrphanMentions(ctx context.Context) (int, error) {
+	res, err := s.db.ExecContext(ctx, `
+DELETE FROM webchat_mention wm
+ WHERE NOT EXISTS (SELECT 1 FROM messages m WHERE m.id = (CASE
+        WHEN wm.message_id ~* `+pgUUIDShapeRegex+`
+        THEN wm.message_id::uuid END))
+`)
+	if err != nil {
+		return 0, fmt.Errorf("webchat store: purge orphan mentions: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
 }

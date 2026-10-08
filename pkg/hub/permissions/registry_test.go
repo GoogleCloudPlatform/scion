@@ -74,6 +74,15 @@ var expectedSelectorRegistry = map[string][]string{
 	"harness_config:manage":       {"harness_config.create", "harness_config.delete", "harness_config.list", "harness_config.read", "harness_config.update"},
 	"harness_config:read":         {"harness_config.read"},
 	"harness_config:update":       {"harness_config.update"},
+	"hub_config:read":             {"hub.config.read"},
+	"hub_config:update":           {"hub.config.update"},
+	"hub_experiments:update":      {"hub.experiments.update"},
+	"hub_lifecycle_hooks:read":    {"hub.lifecycle_hooks.read"},
+	"hub_lifecycle_hooks:update":  {"hub.lifecycle_hooks.update"},
+	"hub_messaging:update":        {"hub.messaging.update"},
+	"hub_project_defaults:read":   {"hub.project_defaults.read"},
+	"hub_project_defaults:update": {"hub.project_defaults.update"},
+	"hub_settings:update":         {"hub.settings.update"},
 	"inbox:read":                  {"inbox.read"},
 	"inbox:write":                 {"inbox.write"},
 	"project:clone":               {"project.clone"},
@@ -97,6 +106,9 @@ var expectedSelectorRegistry = map[string][]string{
 	"user:list":                   {"user.list"},
 	"user:read":                   {"user.read"},
 	"user_skill_injection:update": {"user_skill_injection.update"},
+
+	// Project messaging policy (owner rule applies on top of the selector).
+	"project:set_messaging_policy": {"project.set_messaging_policy"},
 }
 
 func TestValidateSelectorRegistry_PinnedSnapshot(t *testing.T) {
@@ -163,9 +175,10 @@ func TestResolveSelector_SharedResourceActionCannotCollapse(t *testing.T) {
 		t.Fatalf("expected the naive resource:action reconstruction to collide on %q, got %v", scopeKey, naiveMatches)
 	}
 
-	// ResolveSelector must not reproduce that collision: neither permission
-	// has a UATScope today, so the selector string built the same way
-	// resolves to nothing, not to an ambiguous pair.
+	// ResolveSelector must not reproduce that collision: selectors are
+	// literal UATScope values (hub.config.read's is hub_config:read), so the
+	// selector string built the same way resolves to nothing, not to an
+	// ambiguous pair.
 	if _, ok := ResolveSelector(scopeKey); ok {
 		t.Fatalf("ResolveSelector(%q) unexpectedly resolved; it must never derive from resource:action", scopeKey)
 	}

@@ -29,6 +29,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/templatecache"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 	"go.opentelemetry.io/otel/codes"
@@ -201,6 +202,19 @@ func (s *Server) currentRunID(ctx context.Context, mgr agent.Manager, id, projec
 	return current, found
 }
 
+// isRunNameConflict reports whether a start (create, start, restart or an
+// async launch) failed because another run holds the agent's name
+// (ptone/scion#2550): scionrt.ErrRunConflict from a runtime's Run
+// pre-clean, or scionrt.ErrRunMismatch from Manager.Start's removal of the
+// existing entry, when that entry was replaced by another run between its
+// listing and the run-checked Delete (the runtime then deleted nothing of
+// the other run). Both answer 409 with ErrRunConflict's fixed text: the
+// wrapped errors name the namespace, object and the other run's ID, which
+// must not reach clients (see runtimeOpError).
+func isRunNameConflict(err error) bool {
+	return errors.Is(err, scionrt.ErrRunConflict) || errors.Is(err, scionrt.ErrRunMismatch)
+}
+
 // NotFound writes a 404 Not Found response.
 func NotFound(w http.ResponseWriter, resource string) {
 	code := ErrCodeNotFound
@@ -210,13 +224,15 @@ func NotFound(w http.ResponseWriter, resource string) {
 	writeError(w, http.StatusNotFound, code, resource+" not found", nil)
 }
 
-// StopRunMismatch writes the 404 for a stop naming run runID when another
-// run holds the agent's name (ptone/scion#2550). The code
+// RunMismatch writes the 404 for a stop or delete naming run runID when
+// another run holds the agent's name (ptone/scion#2550). The code
 // (api.BrokerErrorCodeRunMismatch) lets the hub tell it apart from any
 // other 404; the details name the requested run and the run that holds
-// the name (current, omitted when unknown), so a hub/broker run drift is
-// diagnosable.
-func StopRunMismatch(w http.ResponseWriter, runID, current string) {
+// the name (current, omitted when unknown). On a stop it makes a hub/broker
+// run drift diagnosable; on a delete, a non-empty current tells the hub not
+// to finalize its row (ptone/scion#3080), since that run is still on this
+// broker.
+func RunMismatch(w http.ResponseWriter, runID, current string) {
 	details := map[string]interface{}{api.BrokerErrorDetailRunID: runID}
 	if current != "" {
 		details[api.BrokerErrorDetailCurrentRunID] = current

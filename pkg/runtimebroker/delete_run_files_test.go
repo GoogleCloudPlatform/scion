@@ -200,7 +200,7 @@ func TestDeleteAgent_NotFoundWithOtherRunInFlight_SkipsLeftoverCleanup(t *testin
 				t.Fatalf("expected 404, got %d: %s", rec.Code, rec.Body.String())
 			}
 			if tc.wantCleanup {
-				assertCleanupCalls(t, mgr.cleanupCalls(), cleanupCall{"dev", scopeProjB})
+				assertCleanupCalls(t, mgr.cleanupCalls(), cleanupCall{"dev", scopeProjB, "run-old"})
 			} else {
 				assertCleanupCalls(t, mgr.cleanupCalls())
 			}

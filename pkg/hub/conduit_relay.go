@@ -197,6 +197,7 @@ func (s *Server) StartConduitRelay(ctx context.Context, opts ConduitRelayOptions
 		Store:    st,
 		Peers:    &relay.PeerClient{HTTP: opts.HTTPClient, Auth: opts.PeerAuth},
 		Now:      now,
+		Brokers:  newLegacyBrokerResolver(s.controlChannel, id),
 	})
 	if err != nil {
 		return fmt.Errorf("conduit router: %w", err)
@@ -432,6 +433,11 @@ func (s *Server) handleConduit(w http.ResponseWriter, r *http.Request) {
 		ID:        agent.ID,
 		ProjectID: agent.ProjectID,
 		Agent:     agentIncarnationFacts(agent),
+	}
+	if rs := s.authConfig.AgentRunScope; rs != nil {
+		if claims := GetAgentFromContext(r.Context()); claims != nil {
+			p.TokenRun = rs.conduitBinding(context.WithoutCancel(r.Context()), claims, runScopeRequestFrom(r))
+		}
 	}
 	// The session outlives no request deadline: it ends when the
 	// connection closes or the relay drains.

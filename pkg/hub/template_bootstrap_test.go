@@ -50,7 +50,7 @@ func (s *Server) importTemplatesFromWorkspace(ctx context.Context, project *stor
 // SQLite store and a mock storage, suitable for template bootstrap tests.
 func testTemplateBootstrapServer(t *testing.T) (*Server, store.Store, *mockStorage) {
 	t.Helper()
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		if strings.Contains(err.Error(), "sqlite driver not registered") {
 			t.Skip("Skipping: sqlite driver not registered")
@@ -62,11 +62,10 @@ func testTemplateBootstrapServer(t *testing.T) (*Server, store.Store, *mockStora
 	}
 
 	cfg := DefaultServerConfig()
-	srv, err := New(cfg, s)
+	srv, err := newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
-	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 
 	stor := newMockStorage("test-bucket")
 	srv.SetStorage(stor)
@@ -257,7 +256,7 @@ func TestBootstrapTemplatesFromDir_SkipsUnchangedTemplate(t *testing.T) {
 
 func TestBootstrapTemplatesFromDir_NoopWhenNoStorage(t *testing.T) {
 	// Create server without storage
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		if strings.Contains(err.Error(), "sqlite driver not registered") {
 			t.Skip("Skipping: sqlite driver not registered")
@@ -269,11 +268,10 @@ func TestBootstrapTemplatesFromDir_NoopWhenNoStorage(t *testing.T) {
 	}
 
 	cfg := DefaultServerConfig()
-	srv, err := New(cfg, s)
+	srv, err := newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
-	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 	// Deliberately not calling srv.SetStorage()
 
 	ctx := context.Background()
@@ -1187,6 +1185,13 @@ func TestImportTemplatesFromRemote_WithProjectGithubToken(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Stub git ls-remote so branch disambiguation never execs real git against
+	// github.com (ptone/scion#3670). The stub pins that resolution goes through
+	// the seam with the project token URL; the resolved ref ("main" +
+	// "templates") is the same as the naive parse. Matcher coverage lives in
+	// pkg/config's TestResolveGitHubRef_UsesLsRemoteSeam.
+	lsRemote := stubGitLsRemote(t, testLsRemoteHeads)
+
 	// Hijack the HTTP client's Transport to mock the tarball fetch.
 	// NOTE: This test mutates http.DefaultClient.Transport globally and MUST NOT be run in parallel (t.Parallel()).
 	oldTransport := http.DefaultClient.Transport
@@ -1258,6 +1263,7 @@ system_prompt: system-prompt.md
 	if capturedAuthHeader != "Bearer my-secret-token-12345" {
 		t.Errorf("expected Authorization header 'Bearer my-secret-token-12345', got %q", capturedAuthHeader)
 	}
+	assertLsRemoteCalledWithToken(t, lsRemote)
 
 	// Verify template was saved to store
 	result, err := s.ListTemplates(ctx, store.TemplateFilter{ProjectID: projectID}, store.ListOptions{Limit: 10})
@@ -1309,6 +1315,9 @@ func TestImportHarnessConfigsFromRemote_WithProjectGithubToken(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Stub git ls-remote (see TestImportTemplatesFromRemote_WithProjectGithubToken).
+	lsRemote := stubGitLsRemote(t, testLsRemoteHeads)
+
 	// Hijack the HTTP client's Transport to mock the tarball fetch.
 	// NOTE: mutates http.DefaultClient.Transport globally; MUST NOT run in parallel.
 	oldTransport := http.DefaultClient.Transport
@@ -1358,6 +1367,7 @@ func TestImportHarnessConfigsFromRemote_WithProjectGithubToken(t *testing.T) {
 	if capturedAuthHeader != "Bearer my-secret-token-12345" {
 		t.Errorf("expected Authorization header 'Bearer my-secret-token-12345', got %q", capturedAuthHeader)
 	}
+	assertLsRemoteCalledWithToken(t, lsRemote)
 
 	existing, err := s.GetHarnessConfigBySlug(ctx, "my-config", store.HarnessConfigScopeProject, projectID)
 	if err != nil {
@@ -1368,6 +1378,25 @@ func TestImportHarnessConfigsFromRemote_WithProjectGithubToken(t *testing.T) {
 	}
 	if len(stor.objects) != 2 {
 		t.Errorf("expected 2 files uploaded to storage, got %d", len(stor.objects))
+	}
+}
+
+// testLsRemoteHeads is canned `git ls-remote --heads` output for
+// chiefkarlin/scion-experiments. It models a remote that can exist in real
+// git (no ref is both a branch and a directory of branches); only "main" is a
+// prefix of "main/templates" and "main/harness-configs".
+const testLsRemoteHeads = "1111111111111111111111111111111111111111\trefs/heads/main\n" +
+	"2222222222222222222222222222222222222222\trefs/heads/release/1.0\n" +
+	"3333333333333333333333333333333333333333\trefs/heads/feature/x\n"
+
+// assertLsRemoteCalledWithToken checks that branch resolution went through the
+// stubbed ls-remote seam exactly once, authenticated with the project token.
+// If a regression bypassed the seam, real git would run and this fails.
+func assertLsRemoteCalledWithToken(t *testing.T, stub *gitLsRemoteStub) {
+	t.Helper()
+	want := "https://x-access-token:my-secret-token-12345@github.com/chiefkarlin/scion-experiments.git"
+	if got := stub.URLs(); len(got) != 1 || got[0] != want {
+		t.Errorf("expected exactly one stubbed ls-remote call for %q, got %q", want, got)
 	}
 }
 

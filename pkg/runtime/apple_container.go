@@ -113,7 +113,7 @@ func (r *AppleContainerRuntime) Run(ctx context.Context, config RunConfig) (stri
 			// The caller gave up while the daemon may still have been
 			// creating/starting the container. Clean up any partial result
 			// instead of leaking it. See ptone/scion#1886.
-			rollbackCancelledCreate(r.Command, config.Name)
+			rollbackCancelledCreate(r.Command, config.Name, config.Labels[api.LabelRunID])
 			return "", ctx.Err()
 		}
 		return "", fmt.Errorf("container run failed: %w (output: %s)", err, out)
@@ -125,21 +125,28 @@ func (r *AppleContainerRuntime) Run(ctx context.Context, config RunConfig) (stri
 	return id, nil
 }
 
-// Stop stops the container ref.ID and ignores ref.RunID, with the same
-// caveat as Delete: Apple's ID is the container name, so the caller's
-// run_id filter narrows but does not close the List-to-Stop window.
-// P4: enforce ref.RunID (ptone/scion#2550).
+// Stop stops the container ref.ID. Apple's CLI uses the container name as
+// its ID, so a container recreated under the same name by another run would
+// be hit by name; when ref.RunID is set the container is first checked
+// against it (appleCheckRun) and one of another run is left running with
+// ErrRunMismatch (ptone/scion#2550).
 func (r *AppleContainerRuntime) Stop(ctx context.Context, ref RunRef) error {
+	if err := r.appleCheckRun(ctx, ref); err != nil {
+		return err
+	}
 	_, err := runSimpleCommand(ctx, r.Command, "stop", ref.ID)
 	return err
 }
 
-// Delete removes the container ref.ID and ignores ref.RunID. Apple's CLI
-// uses the container name as its ID, so between the caller's List and this
-// call a recreated container of the same name could be hit; the caller's
-// run_id filter narrows but does not close that window.
-// P4: enforce ref.RunID (ptone/scion#2550).
+// Delete removes the container ref.ID. As for Stop, when ref.RunID is set
+// the container is checked against it first, and one of another run is
+// left untouched with ErrRunMismatch. The check is a listing, not a CLI
+// precondition: a container recreated between the listing and the kill is
+// still hit (a window of one CLI call).
 func (r *AppleContainerRuntime) Delete(ctx context.Context, ref RunRef) error {
+	if err := r.appleCheckRun(ctx, ref); err != nil {
+		return err
+	}
 	id := ref.ID
 	// Apple's `container rm` doesn't support -f and fails on running containers,
 	// so kill first (ignoring errors if already stopped) then remove.
@@ -200,10 +207,9 @@ type containerListOutput struct {
 	} `json:"configuration"`
 }
 
-func (r *AppleContainerRuntime) List(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
-	args := []string{"list", "-a", "--format", "json"}
-
-	cmd := exec.CommandContext(ctx, r.Command, args...)
+// appleListContainers returns the parsed "container list -a" output.
+func appleListContainers(ctx context.Context, command string) ([]containerListOutput, error) {
+	cmd := exec.CommandContext(ctx, command, "list", "-a", "--format", "json")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("container list failed: %w (output: %s)", err, string(out))
@@ -212,6 +218,43 @@ func (r *AppleContainerRuntime) List(ctx context.Context, labelFilter map[string
 	var raw []containerListOutput
 	if err := json.Unmarshal(out, &raw); err != nil {
 		return nil, fmt.Errorf("failed to parse container list output: %w (output: %s)", err, string(out))
+	}
+	return raw, nil
+}
+
+// appleCheckRun enforces ref.RunID before Stop or Delete act on the
+// container named ref.ID. With no run ID it does nothing (name semantics,
+// as before run IDs existed). Otherwise the container is looked up in the
+// listing: one labelled with another run yields ErrRunMismatch; one of
+// ref.RunID, a legacy container with no run label (the rule k8s and the
+// broker apply), or a name the listing does not show passes, and the caller
+// proceeds as before. A listing failure is returned, and nothing is done.
+func (r *AppleContainerRuntime) appleCheckRun(ctx context.Context, ref RunRef) error {
+	if ref.RunID == "" {
+		return nil
+	}
+	raw, err := appleListContainers(ctx, r.Command)
+	if err != nil {
+		return fmt.Errorf("could not check the run of container %s: %w", ref.ID, err)
+	}
+	for _, c := range raw {
+		if c.Configuration.ID != ref.ID {
+			continue
+		}
+		if run := c.Configuration.Labels[api.LabelRunID]; run != "" && run != ref.RunID {
+			runtimeLog.Info("Left a container of another run untouched",
+				"container", ref.ID, "run_id", ref.RunID, "container_run_id", run)
+			return fmt.Errorf("container %s belongs to run %q, not %q: %w", ref.ID, run, ref.RunID, ErrRunMismatch)
+		}
+		return nil
+	}
+	return nil
+}
+
+func (r *AppleContainerRuntime) List(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+	raw, err := appleListContainers(ctx, r.Command)
+	if err != nil {
+		return nil, err
 	}
 
 	var agents []api.AgentInfo
@@ -342,7 +385,10 @@ func (r *AppleContainerRuntime) Exec(ctx context.Context, id string, cmd []strin
 		id = resolveContainerID(agents, id)
 	}
 	args := append([]string{"exec", "--user", "scion", id}, cmd...)
-	return runSimpleCommand(ctx, r.Command, args...)
+	out, err := runSimpleCommand(ctx, r.Command, args...)
+	// A container removed after the lookup above must surface as
+	// ErrContainerNotFound, not as the command's exit (ptone/scion#3655).
+	return out, appleExecNotFound.classifyExecErr(ctx, err, out, id, r.List)
 }
 
 // ExecWithStdin runs cmd inside the container with stdin piped from the

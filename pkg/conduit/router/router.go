@@ -31,7 +31,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay"
 )
 
-// MaxReResolves bounds re-resolution after a stale route (design §3.5).
+// MaxReResolves bounds re-resolution after a stale route or an
+// unreachable owner relay (design §3.5).
 const MaxReResolves = 2
 
 // Errors.
@@ -101,6 +102,30 @@ type Config struct {
 	Peers *relay.PeerClient
 	// Now defaults to time.Now.
 	Now func() time.Time
+	// Brokers, when set, is the only source of broker resolutions; the
+	// conduit registry is not consulted for brokers. Brokers are not on
+	// conduit before Phase 3, so the hub sets it to its legacy owner-only
+	// adapter over the broker control channel (design §7 "Phase 2").
+	Brokers BrokerResolver
+}
+
+// BrokerResolver resolves a broker target outside the conduit registry.
+// ResolveBroker returns a Resolved whose Legacy is set (Session is nil)
+// when this node can serve the broker, and ErrNoSession otherwise, in
+// which case the caller falls back to its pre-conduit behaviour.
+// Implementations must not depend on the router's exclusions: the router
+// applies them to the returned Record.
+type BrokerResolver interface {
+	ResolveBroker(ctx context.Context, req Request) (Resolved, error)
+}
+
+// LegacySession is a session to a target that is not on conduit (Phase
+// 2: a broker's control channel held by this hub process). It is opaque
+// to the router; the caller asserts the concrete type its resolver
+// returns.
+type LegacySession interface {
+	// LegacyTarget names the principal the session reaches.
+	LegacyTarget() (kind, id string)
 }
 
 // Router resolves targets to sessions.
@@ -117,10 +142,14 @@ func New(cfg Config) (*Router, error) {
 	return &Router{cfg: cfg}, nil
 }
 
-// Resolved is a resolution result.
+// Resolved is a resolution result. Exactly one of Session and Legacy is
+// set.
 type Resolved struct {
 	Session conduit.Session
-	Record  registry.SessionRecord
+	// Legacy is set instead of Session when a BrokerResolver resolved the
+	// target outside conduit. No grant is minted for a legacy session.
+	Legacy LegacySession
+	Record registry.SessionRecord
 	// Want is the exact expectation the session was resolved with
 	// (including the derived incarnation); grants are minted against it.
 	Want registry.Want
@@ -128,13 +157,22 @@ type Resolved struct {
 	Local bool
 }
 
-// wants returns the request's Wants in policy order.
-func (r *Router) wants(req Request) ([]registry.Want, error) {
+// validateShape checks the parts of a request every resolution path
+// shares.
+func validateShape(req Request) error {
 	if req.Want.Incarnation != "" {
-		return nil, fmt.Errorf("%w: Want.Incarnation is derived by the incarnation policy; pass the agent/broker facts instead", ErrInvalidRequest)
+		return fmt.Errorf("%w: Want.Incarnation is derived by the incarnation policy; pass the agent/broker facts instead", ErrInvalidRequest)
 	}
 	if req.Want.AnyExecScope && req.Op != OpStatelessRPC {
-		return nil, fmt.Errorf("%w: AnyExecScope is only allowed for stateless RPCs (op %s)", ErrInvalidRequest, req.Op)
+		return fmt.Errorf("%w: AnyExecScope is only allowed for stateless RPCs (op %s)", ErrInvalidRequest, req.Op)
+	}
+	return nil
+}
+
+// wants returns the request's Wants in policy order.
+func (r *Router) wants(req Request) ([]registry.Want, error) {
+	if err := validateShape(req); err != nil {
+		return nil, err
 	}
 	var incs []relay.Incarnation
 	switch req.Kind {
@@ -163,8 +201,28 @@ func (r *Router) wants(req Request) ([]registry.Want, error) {
 // registry's ranking. A candidate this relay owns is returned as the live
 // local session; any other is reached through its owner's registered
 // internal endpoint, provided the owner row is of the session's
-// generation and addressable.
+// generation and addressable. A broker target is resolved by
+// Config.Brokers instead when it is set.
 func (r *Router) Resolve(ctx context.Context, req Request, exclude map[string]bool) (Resolved, error) {
+	return r.resolve(ctx, req, exclusions{sessions: exclude})
+}
+
+// exclusions are the candidates a resolution has ruled out: session ids
+// (stale routes) and relay instance ids (an unreachable owner, which
+// rules out every session it holds).
+type exclusions struct {
+	sessions map[string]bool
+	relays   map[string]bool
+}
+
+func (x exclusions) excluded(rec registry.SessionRecord) bool {
+	return x.sessions[rec.SessionID] || x.relays[rec.RelayInstanceID]
+}
+
+func (r *Router) resolve(ctx context.Context, req Request, exclude exclusions) (Resolved, error) {
+	if req.Kind == registry.PrincipalBroker && r.cfg.Brokers != nil {
+		return r.resolveLegacyBroker(ctx, req, exclude)
+	}
 	wants, err := r.wants(req)
 	if err != nil {
 		return Resolved{}, err
@@ -179,7 +237,7 @@ func (r *Router) Resolve(ctx context.Context, req Request, exclude map[string]bo
 			return Resolved{}, fmt.Errorf("%w: %w", ErrRegistryUnavailable, err)
 		}
 		for _, rec := range recs {
-			if exclude[rec.SessionID] {
+			if exclude.excluded(rec) {
 				continue
 			}
 			if rec.RelayInstanceID == self {
@@ -200,6 +258,34 @@ func (r *Router) Resolve(ctx context.Context, req Request, exclude map[string]bo
 		}
 	}
 	return Resolved{}, ErrNoSession
+}
+
+// resolveLegacyBroker resolves a broker through the configured
+// BrokerResolver. The request shape is validated as for conduit
+// resolution, except that no incarnation is derived: the legacy channel
+// has none. An excluded resolution is ErrNoSession, so the shared
+// re-resolution budget in Do applies unchanged.
+func (r *Router) resolveLegacyBroker(ctx context.Context, req Request, exclude exclusions) (Resolved, error) {
+	if err := validateShape(req); err != nil {
+		return Resolved{}, err
+	}
+	if req.ID == "" {
+		return Resolved{}, fmt.Errorf("%w: empty broker id", ErrInvalidRequest)
+	}
+	if req.Want.ProjectID != "" {
+		return Resolved{}, fmt.Errorf("%w: broker lookups carry no project", ErrInvalidRequest)
+	}
+	res, err := r.cfg.Brokers.ResolveBroker(ctx, req)
+	if err != nil {
+		return Resolved{}, err
+	}
+	if res.Legacy == nil || res.Session != nil {
+		return Resolved{}, fmt.Errorf("conduit router: broker resolver returned a resolution without exactly one legacy session")
+	}
+	if exclude.excluded(res.Record) {
+		return Resolved{}, ErrNoSession
+	}
+	return res, nil
 }
 
 // ownerEndpoint returns the owning relay's internal endpoint, or "" when
@@ -224,26 +310,47 @@ func (r *Router) ownerEndpoint(ctx context.Context, rec registry.SessionRecord) 
 	return "", nil
 }
 
-// Do resolves req and runs fn on the session. If fn reports a stale route
-// (relay.ErrStaleRoute: the owner no longer holds the session or it is no
-// longer admissible), the session is excluded and req re-resolved, at most
-// MaxReResolves times; then ErrNoSession. fn receives the resolution so it
-// can mint a grant for exactly that session (session id, epoch,
-// incarnation) on every attempt.
+// Do resolves req and runs fn on the session, re-resolving at most
+// MaxReResolves times when fn's error shows another session may serve:
+//
+//   - relay.ErrStaleRoute (the owner no longer holds the session or it is
+//     no longer admissible): that session is excluded. When the bound is
+//     reached the result is ErrNoSession.
+//   - relay.ErrOwnerUnreachable (the internal dial failed, or the owner
+//     refused before admission with an explicit reason): that relay
+//     instance, and so every session it holds, is excluded for the rest
+//     of the resolution. When the bound is reached, or no other session
+//     is eligible, fn's error is returned unchanged.
+//
+// fn receives the resolution so it can mint a grant for exactly that
+// session (session id, epoch, incarnation) on every attempt.
 func (r *Router) Do(ctx context.Context, req Request, fn func(context.Context, Resolved) error) error {
-	exclude := map[string]bool{}
+	exclude := exclusions{sessions: map[string]bool{}, relays: map[string]bool{}}
+	var unreachable error // fn's error when the last attempt's owner was unreachable
 	for attempt := 0; ; attempt++ {
-		res, err := r.Resolve(ctx, req, exclude)
+		res, err := r.resolve(ctx, req, exclude)
 		if err != nil {
+			if unreachable != nil && errors.Is(err, ErrNoSession) {
+				return unreachable
+			}
 			return err
 		}
 		err = fn(ctx, res)
-		if !errors.Is(err, relay.ErrStaleRoute) {
+		unreachable = nil
+		switch {
+		case errors.Is(err, relay.ErrStaleRoute):
+			if attempt >= MaxReResolves {
+				return fmt.Errorf("%w (after %d re-resolutions): %w", ErrNoSession, attempt, err)
+			}
+			exclude.sessions[res.Record.SessionID] = true
+		case errors.Is(err, relay.ErrOwnerUnreachable):
+			if attempt >= MaxReResolves {
+				return err
+			}
+			exclude.relays[res.Record.RelayInstanceID] = true
+			unreachable = err
+		default:
 			return err
 		}
-		if attempt >= MaxReResolves {
-			return fmt.Errorf("%w (after %d re-resolutions): %w", ErrNoSession, attempt, err)
-		}
-		exclude[res.Record.SessionID] = true
 	}
 }

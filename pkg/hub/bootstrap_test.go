@@ -226,7 +226,7 @@ func (d *mockDispatcher) DispatchFinalizeEnv(_ context.Context, _ *store.Agent, 
 // testBootstrapServer creates a test server with storage and dispatcher configured.
 func testBootstrapServer(t *testing.T) (*Server, store.Store, *mockStorage, *mockDispatcher) {
 	t.Helper()
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
@@ -237,11 +237,10 @@ func testBootstrapServer(t *testing.T) (*Server, store.Store, *mockStorage, *moc
 
 	cfg := DefaultServerConfig()
 	cfg.DevAuthToken = testBootstrapDevToken
-	srv, err := New(cfg, s)
+	srv, err := newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
-	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 
 	stor := newMockStorage("test-bucket")
 	srv.SetStorage(stor)
@@ -452,7 +451,7 @@ func TestCreateAgentWithWorkspaceBootstrap_ExistingFiles(t *testing.T) {
 
 func TestCreateAgentWithWorkspaceBootstrap_NoStorage(t *testing.T) {
 	// Create server without storage
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
@@ -462,7 +461,7 @@ func TestCreateAgentWithWorkspaceBootstrap_NoStorage(t *testing.T) {
 
 	cfg := DefaultServerConfig()
 	cfg.DevAuthToken = testBootstrapDevToken
-	srv, err := New(cfg, s)
+	srv, err := newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
@@ -963,7 +962,7 @@ func TestSyncToFinalize_RejectsStoppedAgent(t *testing.T) {
 
 func TestSyncToFinalize_BootstrapMode_NoDispatcher(t *testing.T) {
 	// Create server without dispatcher
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
@@ -973,7 +972,7 @@ func TestSyncToFinalize_BootstrapMode_NoDispatcher(t *testing.T) {
 
 	cfg := DefaultServerConfig()
 	cfg.DevAuthToken = testBootstrapDevToken
-	srv, err := New(cfg, s)
+	srv, err := newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}

@@ -20,8 +20,9 @@
  * Displays a centralized health view of the Scion system including:
  * - Hub status and version
  * - Database pool health
- * - Broker status (per-broker cards)
- * - Agent health summary
+ * - Runtime brokers (compact table, see health-broker-table.ts)
+ * - Integrations (chat plugins, see health-integrations.ts)
+ * - Agents (phase counts and problem groups, see health-agents-card.ts)
  * - Dispatch pipeline status
  *
  * Auto-refreshes every 30 seconds via polling.
@@ -31,7 +32,16 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
-import { formatRelative } from '../../utils/time.js';
+import type { HealthSummaryBrokerList } from './health-broker-table.js';
+import './health-broker-table.js';
+import type { HealthSummaryAgents } from './health-agents-card.js';
+import './health-agents-card.js';
+import type { HealthSummaryIntegration } from './health-integrations.js';
+import './health-integrations.js';
+import type { HealthSummaryDispatch } from './health-dispatch-card.js';
+import './health-dispatch-card.js';
+
+export { formatHeartbeatAge } from './health-broker-table.js';
 
 interface HealthSummary {
   status: string;
@@ -54,28 +64,13 @@ interface HealthSummary {
     pool_wait_count_total: number;
     pool_idle: number;
   };
-  brokers: Array<{
-    id: string;
-    name: string;
-    status: string;
-    runtime: string;
-    runtime_available: boolean;
-    agent_count: number;
-    agent_healthy: number;
-    /** Null or the Go zero time (`0001-01-01T00:00:00Z`) when never reported. */
-    last_heartbeat: string | null;
-  }>;
-  agents: {
-    total: number;
-    by_phase: Record<string, number>;
-    stalled: string[];
-    crashed: string[];
-    errored: string[];
-  };
-  dispatch: {
-    stuck_messages: number;
-    failed_1h: number;
-  } | null;
+  runtime_brokers: HealthSummaryBrokerList;
+  /** Chat and messaging plugins; empty when none are configured. */
+  integrations?: HealthSummaryIntegration[];
+  /** Null when the hub could not aggregate agents (not reported). */
+  agents: HealthSummaryAgents | null;
+  /** Null when the hub could not count dispatch health (not reported). */
+  dispatch: HealthSummaryDispatch | null;
 }
 
 @customElement('scion-page-health-dashboard')
@@ -291,62 +286,6 @@ export class ScionPageHealthDashboard extends LitElement {
       word-break: break-word;
     }
 
-    .broker-grid {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 1rem;
-    }
-
-    .broker-card {
-      background: var(--scion-bg-subtle, #f1f5f9);
-      color: var(--scion-text, #1e293b);
-      border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: 0.5rem;
-      padding: 1rem;
-      min-width: 200px;
-      flex: 1;
-    }
-
-    .broker-name {
-      font-weight: 600;
-      color: var(--scion-text, #1e293b);
-      margin-bottom: 0.5rem;
-    }
-
-    .broker-stat {
-      font-size: 0.8125rem;
-      color: var(--scion-text-muted, #64748b);
-      padding: 0.125rem 0;
-    }
-
-    .agent-summary {
-      display: flex;
-      gap: 1.5rem;
-      flex-wrap: wrap;
-      margin-bottom: 0.75rem;
-      font-size: 0.9375rem;
-    }
-
-    .agent-summary .stat {
-      font-weight: 600;
-    }
-
-    .agent-alert {
-      display: flex;
-      align-items: center;
-      gap: 0.375rem;
-      font-size: 0.875rem;
-      padding: 0.25rem 0;
-    }
-
-    .alert-warn {
-      color: var(--scion-warning, #f59e0b);
-    }
-
-    .alert-error {
-      color: var(--scion-error, #ef4444);
-    }
-
     .loading,
     .error-msg {
       text-align: center;
@@ -442,6 +381,9 @@ export class ScionPageHealthDashboard extends LitElement {
       <!-- Brokers -->
       ${this.renderBrokersCard(d)}
 
+      <!-- Integrations (hidden when there are no plugins) -->
+      ${this.renderIntegrationsCard(d)}
+
       <!-- Agents -->
       ${this.renderAgentsCard(d)}
 
@@ -511,47 +453,19 @@ export class ScionPageHealthDashboard extends LitElement {
   }
 
   private renderBrokersCard(d: HealthSummary) {
-    if (d.brokers.length === 0) {
-      return html`
-        <div class="grid-full">
-          <div class="card">
-            <div class="card-title">Brokers</div>
-            <div style="font-size:0.875rem;color:var(--scion-text-muted,#64748b)">
-              No brokers registered
-            </div>
-          </div>
-        </div>
-      `;
-    }
-
     return html`
       <div class="grid-full">
-        <div class="card">
-          <div class="card-title">Brokers</div>
-          <div class="broker-grid">
-            ${d.brokers.map(
-              (b) => html`
-                <div class="broker-card">
-                  <div class="broker-name">${b.name || b.id}</div>
-                  <div class="status-line" style="font-size:0.875rem">
-                    <span style="color: ${this.statusColor(b.status)}"
-                      >${this.statusIcon(b.status)}</span
-                    >
-                    ${b.status}
-                  </div>
-                  <div class="broker-stat">Agents: ${b.agent_healthy}/${b.agent_count} healthy</div>
-                  <div class="broker-stat">
-                    Runtime: ${b.runtime} ${b.runtime_available ? '✓' : '✗'}
-                  </div>
-                  <div class="broker-stat" style="color:var(--scion-text-muted,#64748b)">
-                    NFS: not reported
-                  </div>
-                  <div class="broker-stat">Heartbeat: ${formatHeartbeatAge(b.last_heartbeat)}</div>
-                </div>
-              `
-            )}
-          </div>
-        </div>
+        <scion-health-broker-table .brokers=${d.runtime_brokers}></scion-health-broker-table>
+      </div>
+    `;
+  }
+
+  private renderIntegrationsCard(d: HealthSummary) {
+    const items = d.integrations ?? [];
+    if (items.length === 0) return nothing;
+    return html`
+      <div class="grid-full">
+        <scion-health-integrations .integrations=${items}></scion-health-integrations>
       </div>
     `;
   }
@@ -559,93 +473,14 @@ export class ScionPageHealthDashboard extends LitElement {
   private renderAgentsCard(d: HealthSummary) {
     return html`
       <div class="grid-full">
-        <div class="card">
-          <div class="card-title">Agents</div>
-          <div class="agent-summary">
-            <div><span class="stat">${d.agents.total}</span> Total</div>
-            ${Object.entries(d.agents.by_phase).map(
-              ([phase, count]) => html`<div><span class="stat">${count}</span> ${phase}</div>`
-            )}
-          </div>
-          ${d.agents.stalled.length > 0
-            ? html`
-                <div class="agent-alert alert-warn">
-                  ⚠ ${d.agents.stalled.length} stalled: ${d.agents.stalled.join(', ')}
-                </div>
-              `
-            : nothing}
-          ${d.agents.crashed.length > 0
-            ? html`
-                <div class="agent-alert alert-error">
-                  ✗ ${d.agents.crashed.length} crashed: ${d.agents.crashed.join(', ')}
-                </div>
-              `
-            : nothing}
-          ${d.agents.errored.length > 0
-            ? html`
-                <div class="agent-alert alert-error">
-                  ✗ ${d.agents.errored.length} errored: ${d.agents.errored.join(', ')}
-                </div>
-              `
-            : nothing}
-          ${d.agents.stalled.length === 0 &&
-          d.agents.crashed.length === 0 &&
-          d.agents.errored.length === 0
-            ? html`<div style="font-size:0.875rem;color:var(--scion-success,#22c55e)">
-                All agents healthy
-              </div>`
-            : nothing}
-        </div>
+        <scion-health-agents-card .agents=${d.agents ?? null}></scion-health-agents-card>
       </div>
     `;
   }
 
   private renderDispatchCard(d: HealthSummary) {
-    if (!d.dispatch) {
-      return html`
-        <div class="card">
-          <div class="card-title">Dispatch Pipeline</div>
-          <div style="font-size:0.875rem;color:var(--scion-text-muted,#64748b)">
-            Dispatch metrics not yet available. A future update will expose dispatch pipeline stats
-            via the health summary API.
-          </div>
-        </div>
-      `;
-    }
     return html`
-      <div class="card">
-        <div class="card-title">Dispatch Pipeline</div>
-        <div class="stat-row">
-          <span class="label">Stuck Messages</span>
-          <span
-            style="color: ${d.dispatch.stuck_messages > 0
-              ? 'var(--scion-error,#ef4444)'
-              : 'inherit'}; font-weight: ${d.dispatch.stuck_messages > 0 ? '600' : 'normal'}"
-          >
-            ${d.dispatch.stuck_messages}
-          </span>
-        </div>
-        <div class="stat-row">
-          <span class="label">Failed (1h)</span><span>${d.dispatch.failed_1h}</span>
-        </div>
-      </div>
+      <scion-health-dispatch-card .dispatch=${d.dispatch ?? null}></scion-health-dispatch-card>
     `;
   }
-}
-
-/**
- * Formats a broker heartbeat as a relative age. A null, undefined or
- * empty value, the Go zero time (`0001-01-01T00:00:00Z`), or any other
- * non-positive instant (the Unix epoch itself or any earlier time) means
- * the heartbeat was never reported and renders as "never". An unparsable
- * value renders as "unknown" and a future instant as "just now".
- */
-export function formatHeartbeatAge(isoDate: string | null | undefined): string {
-  if (!isoDate) return 'never';
-  const ms = new Date(isoDate).getTime();
-  if (Number.isNaN(ms)) return 'unknown';
-  if (ms <= 0) return 'never';
-  // A future instant is clock skew between hub and browser.
-  if (ms > Date.now()) return 'just now';
-  return formatRelative(isoDate, { style: 'narrow' });
 }

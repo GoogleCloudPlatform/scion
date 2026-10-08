@@ -23,6 +23,7 @@ Scion features an interactive, top-level **Native Web Chat** interface in the We
 ### Core Layout & Navigation
 
 - **Project-Scoped Spaces & Shared Threads**: Chat is organized into distinct spaces scoped to specific Projects. Within a project-scoped space, users and agents participate in shared discussion threads, creating focused hubs of collaboration.
+  - **Un-mentioned thread replies**: In a thread with no default agent, a reply with no mention and no target would reach nobody. When the latest message from someone else in that thread came from an agent, Scion appends a short note to the reply that mentions the most recent other human poster (or the thread creator) and names that agent, so that human receives a mention notification. Otherwise the reply is still delivered to no one.
 - **Project Context Preservation (Dashboard ↔ Chat Toggle)**: When you switch between dashboard and chat modes using the navigation icons in the header, Scion automatically maintains your active project context to avoid losing your work state:
   - **Dashboard → Chat**: Clicking the **Chat** icon while on a project-scoped dashboard page (e.g., `/projects/:id/...` or inside an agent view) takes you straight to that project's chat space (`/chat/space/:id`).
   - **Chat → Dashboard**: Clicking the **Dashboard** icon while in a project chat space (`/chat/space/:id/...` or `/chat/:slug/...`) takes you directly back to that project's detail page (`/projects/:id`).
@@ -95,6 +96,7 @@ Right-clicking a message (on desktop) or tapping it (on touch devices without ho
 
 The web composer features a security-hardened, developer-friendly file upload system:
 - **Executable Deny-List Strategy**: To maximize flexibility for developers, attachment uploads use a security-first deny-list rather than a restrictive mime-type allow-list. It blocks executable binaries/scripts but permits **34+ developer file types** (including configuration files, source code, and data structures).
+- **Artifact References**: With the `hub.artifacts` experiment on, the paperclip also offers **Attach artifact…**, which picks published artifacts to reference in the message. Artifact chips and `scion://artifact/` links in messages open a preview in place; see [Artifacts](/scion/reference/artifacts/#artifacts-in-messages).
 - **Paste-to-Upload**: Paste images or file content directly from your clipboard into the composer for instant attachment.
 - **Markdown Attachment Rendering**: Markdown files uploaded as attachments render directly within the chat bubble, featuring a source/preview toggle and a one-click clipboard copy.
 - **Partial Success Reporting**: When uploading multiple files simultaneously, the system supports partial success—successful uploads are staged instantly while failed individual files report explicit inline errors.
@@ -160,6 +162,9 @@ scion message agent:tech-lead "Please review the auth module."
 
 # Attach a file
 scion message @tech-lead "See the test results." --attach ./results.json
+
+# Point at a published artifact (see Artifacts); the recipient is told how to fetch it
+scion message @tech-lead "Design ready for review." --artifact scion://artifact/5f1c2d3e-6b1a-4c55-9f3e-0d6e7a1b2c3d
 
 # Read message body from a file (useful for long messages or scripted workflows)
 scion message @tech-lead --body-file ./review-notes.md

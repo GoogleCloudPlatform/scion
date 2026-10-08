@@ -205,7 +205,7 @@ var PermissionAllowedBoundaries = map[string][]BoundaryKind{
 	"agent.attach": {BoundaryKindProject, BoundaryKindHub}, "agent.lifecycle": {BoundaryKindProject, BoundaryKindHub},
 	"agent.port_access": {BoundaryKindProject, BoundaryKindHub}, "agent.message": {BoundaryKindProject, BoundaryKindHub},
 	"project.read": {BoundaryKindProject, BoundaryKindHub}, "project.update": {BoundaryKindProject, BoundaryKindHub},
-	"project.manage": {BoundaryKindProject, BoundaryKindHub}, "project.clone": {BoundaryKindProject, BoundaryKindHub},
+	"project.manage": {BoundaryKindProject, BoundaryKindHub}, "project.clone": {BoundaryKindProject, BoundaryKindHub}, "project.set_messaging_policy": {BoundaryKindProject, BoundaryKindHub},
 	"skill.create": {BoundaryKindProject, BoundaryKindHub}, "skill.read": {BoundaryKindProject, BoundaryKindHub},
 	"skill.update": {BoundaryKindProject, BoundaryKindHub}, "skill.delete": {BoundaryKindProject, BoundaryKindHub},
 	"skill.list": {BoundaryKindProject, BoundaryKindHub}, "skill.register": {BoundaryKindHub},
@@ -236,6 +236,14 @@ var PermissionAllowedBoundaries = map[string][]BoundaryKind{
 	// skills reach agents in every project.
 	"inbox.read": {BoundaryKindProject, BoundaryKindHub}, "inbox.write": {BoundaryKindProject, BoundaryKindHub},
 	"user_skill_injection.update": {BoundaryKindHub},
+
+	// hub.* configuration permissions act on the hub itself, so their
+	// selectors are hub-only.
+	"hub.config.read": {BoundaryKindHub}, "hub.config.update": {BoundaryKindHub},
+	"hub.project_defaults.read": {BoundaryKindHub}, "hub.project_defaults.update": {BoundaryKindHub},
+	"hub.messaging.update": {BoundaryKindHub}, "hub.experiments.update": {BoundaryKindHub},
+	"hub.lifecycle_hooks.read": {BoundaryKindHub}, "hub.lifecycle_hooks.update": {BoundaryKindHub},
+	"hub.settings.update": {BoundaryKindHub},
 }
 
 // SelectorAllowedBoundaries returns the reviewed boundary kinds for a single
@@ -318,11 +326,11 @@ var SupportedTargetClasses = map[string][]TargetClassKind{
 	"agent.attach": {TargetClassKindProjectScoped}, "agent.lifecycle": {TargetClassKindProjectScoped},
 	"agent.port_access": {TargetClassKindProjectScoped}, "agent.message": {TargetClassKindProjectScoped},
 
-	// project.* — read/update/manage target an existing project; clone is a
-	// hub-level collection action (reviewed false in ProjectTargetApplicability)
-	// even though it is mintable.
+	// project.* — read/update/manage/set_messaging_policy target an existing
+	// project; clone is a hub-level collection action (false in
+	// ProjectTargetApplicability) even though it is mintable.
 	"project.read": {TargetClassKindProjectScoped}, "project.update": {TargetClassKindProjectScoped},
-	"project.manage": {TargetClassKindProjectScoped}, "project.clone": {TargetClassKindHubResource},
+	"project.manage": {TargetClassKindProjectScoped}, "project.clone": {TargetClassKindHubResource}, "project.set_messaging_policy": {TargetClassKindProjectScoped},
 
 	// artifact.* — project-homed, no scope-kind split and no global catalog.
 	"artifact.read": {TargetClassKindProjectScoped}, "artifact.create": {TargetClassKindProjectScoped},
@@ -394,6 +402,13 @@ var SupportedTargetClasses = map[string][]TargetClassKind{
 	// Self-scoped permissions.
 	"inbox.read": {TargetClassKindSelf}, "inbox.write": {TargetClassKindSelf},
 	"user_skill_injection.update": {TargetClassKindSelf},
+
+	// hub.* configuration permissions target the hub instance.
+	"hub.config.read": {TargetClassKindHubResource}, "hub.config.update": {TargetClassKindHubResource},
+	"hub.project_defaults.read": {TargetClassKindHubResource}, "hub.project_defaults.update": {TargetClassKindHubResource},
+	"hub.messaging.update": {TargetClassKindHubResource}, "hub.experiments.update": {TargetClassKindHubResource},
+	"hub.lifecycle_hooks.read": {TargetClassKindHubResource}, "hub.lifecycle_hooks.update": {TargetClassKindHubResource},
+	"hub.settings.update": {TargetClassKindHubResource},
 }
 
 // SupportedTargetClassesFor returns the reviewed classes for permissionID.

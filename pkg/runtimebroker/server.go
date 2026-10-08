@@ -77,10 +77,17 @@ type ServerConfig struct {
 	ContainerHubEndpoint string
 	// ColocatedPublicHubEndpoint is the co-located hub's public URL when this
 	// host does not serve it, so containers cannot reach it (e.g. a Cloud Run
-	// URL derived from the IAP audience on a single-node VM). An agent hub
-	// endpoint equal to it is replaced by ContainerHubEndpoint, except on
-	// Kubernetes runtimes. Empty disables the rewrite.
+	// URL derived from the IAP audience on a single-node VM). On the docker
+	// and podman runtimes, an agent hub endpoint equal to it is replaced by
+	// that runtime's ColocatedRuntimeHubEndpoints entry. Empty disables the
+	// rewrite.
 	ColocatedPublicHubEndpoint string
+	// ColocatedRuntimeHubEndpoints maps a dispatch runtime ("docker",
+	// "podman") to the URL that replaces ColocatedPublicHubEndpoint for its
+	// agents. It is independent of the broker's default runtime, so a
+	// kubernetes-default broker still rewrites agents dispatched through a
+	// docker profile. A runtime without an entry keeps the public URL.
+	ColocatedRuntimeHubEndpoints map[string]string
 	// HubListenPort is the port the co-located hub HTTP server is listening
 	// on (e.g. 8080 for the combined web+API server). Used by cloudrun-sandbox
 	// to construct the link-local hub endpoint for sandboxes. Zero means the
@@ -1648,16 +1655,6 @@ type agentMatch struct {
 // path reads them from the same entry it acts on. Resolution order and
 // errors are exactly lookupAgentTarget's.
 func (s *Server) lookupAgentMatch(ctx context.Context, slug, projectID string) (agentMatch, error) {
-	return s.lookupAgentMatchForRun(ctx, slug, projectID, "")
-}
-
-// lookupAgentMatchForRun is lookupAgentMatch for a run-scoped operation:
-// among the entries the runtime lists for slug, those of run runID are
-// preferred (see preferRunEntries) before the match must be unique, so a
-// pod of the requested run is found even when a same-named pod of another
-// run is listed beside it (for example in another namespace). With an
-// empty runID it is exactly lookupAgentMatch.
-func (s *Server) lookupAgentMatchForRun(ctx context.Context, slug, projectID, runID string) (agentMatch, error) {
 	if s.manager == nil {
 		return agentMatch{}, fmt.Errorf("agent manager not available")
 	}
@@ -1673,7 +1670,7 @@ func (s *Server) lookupAgentMatchForRun(ctx context.Context, slug, projectID, ru
 		if err != nil {
 			return agentMatch{}, err
 		}
-		return runAgentMatchFrom(slug, runID, agents, own.mgr, own.rt)
+		return agentMatchFrom(slug, agents, own.mgr, own.rt)
 	}
 
 	// A recorded runtime type (ptone/scion#2748) can exclude the default
@@ -1728,27 +1725,67 @@ func (s *Server) lookupAgentMatchForRun(ctx context.Context, slug, projectID, ru
 		}
 	}
 
-	return runAgentMatchFrom(slug, runID, agents, matchManager, matchRuntime)
+	return agentMatchFrom(slug, agents, matchManager, matchRuntime)
 }
 
-// allOtherRuns reports whether every entry is labelled with a run other
-// than runID (none is the requested run's, and none is a legacy entry).
-func allOtherRuns(agents []api.AgentInfo, runID string) bool {
-	for _, a := range agents {
-		if a.RunID == "" || a.RunID == runID {
-			return false
-		}
+// lookupAgentMatchForRun is the lookup of a run-scoped stop
+// (ptone/scion#2550). With a run it resolves exactly as a run-scoped
+// delete does (resolveDeleteTarget): the same candidates
+// (collectTargetCandidates: every runtime allManagers lists, the project
+// scoping and legacy-path check of collectAgentCandidates, and the walk of
+// the other runtimes when the agent's own runtime holds no container) and
+// the same run filter (selectDeleteCandidates). So for the same project,
+// name, run and runtime state, stop and delete pick the same entry, or
+// both answer that another run holds the name:
+//   - an entry labelled runID is the match;
+//   - entries labelled with other runs are never the match; when only
+//     they hold the name, the result is otherRunsHoldNameError naming their
+//     run ("" for several), the run-mismatch answer;
+//   - without an entry of runID, a legacy container with no run label
+//     matches by name, and a file-only entry only while no other run holds
+//     the name;
+//   - nothing left is ErrAgentNotFound; more than one entry left is an
+//     ambiguity error (fail closed);
+//   - a runtime that could not be listed, with no single match found,
+//     wraps ErrAgentListUnavailable rather than answering not found or
+//     mismatch, as a delete answers errDeleteTargetUnknown.
+//
+// With an empty runID it is exactly lookupAgentMatch, so a stop naming no
+// run (an older hub, or an agent with no run ID) behaves as before.
+func (s *Server) lookupAgentMatchForRun(ctx context.Context, slug, projectID, runID string) (agentMatch, error) {
+	if runID == "" {
+		return s.lookupAgentMatch(ctx, slug, projectID)
 	}
-	return true
+	if s.manager == nil {
+		return agentMatch{}, fmt.Errorf("agent manager not available")
+	}
+	slug = strings.ToLower(slug)
+	cands, listErr := s.collectTargetCandidates(ctx, slug, projectID, "Agent stop")
+	targets, mismatch, current := selectDeleteCandidates(cands, runID)
+	// The order of the cases is resolveDeleteTarget's.
+	switch {
+	case mismatch && listErr != nil:
+		return agentMatch{}, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, listErr)
+	case mismatch:
+		return agentMatch{}, &otherRunsHoldNameError{slug: slug, currentRunID: current}
+	case len(targets) > 1:
+		return agentMatch{}, fmt.Errorf("agent '%s' is ambiguous: %d agents match in project %q", slug, len(targets), projectID)
+	case len(targets) == 1:
+		c := targets[0]
+		return agentMatchFrom(slug, []api.AgentInfo{c.entry}, c.mgr, s.runtimeOfManager(c.mgr))
+	case listErr != nil:
+		return agentMatch{}, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, listErr)
+	default:
+		return agentMatch{}, &agentNotFoundError{slug: slug}
+	}
 }
 
-// otherRunsHoldNameError is a run-scoped lookup's result when every entry
-// listed for the slug is labelled with a run other than the requested one
-// and more than one distinct entry is listed (for example same-named pods
-// of two other runs in two namespaces). Nothing of the requested run
-// exists, so this is a run mismatch, as for a run-scoped delete
-// (filterDeleteCandidatesByRun), not an ambiguity. currentRunID is the run
-// holding the name when all those entries share one, else empty.
+// otherRunsHoldNameError is a run-scoped stop lookup's result when only
+// entries labelled with runs other than the requested one hold the name
+// (lookupAgentMatchForRun). Nothing of the requested run exists, so this is
+// a run mismatch, as for a run-scoped delete. currentRunID is the run
+// holding the name when all those container entries share one, else empty
+// (otherRunContainerID).
 type otherRunsHoldNameError struct {
 	slug         string
 	currentRunID string
@@ -1756,54 +1793,6 @@ type otherRunsHoldNameError struct {
 
 func (e *otherRunsHoldNameError) Error() string {
 	return fmt.Sprintf("agent '%s': every listed entry belongs to another run", e.slug)
-}
-
-// runAgentMatchFrom is agentMatchFrom for a lookup naming run runID (empty:
-// exactly agentMatchFrom): the entries are narrowed by preferRunEntries,
-// and when only distinct entries of other runs remain, the result is an
-// otherRunsHoldNameError rather than an ambiguity error.
-func runAgentMatchFrom(slug, runID string, agents []api.AgentInfo, matchManager agent.Manager, matchRuntime scionrt.Runtime) (agentMatch, error) {
-	agents = preferRunEntries(agents, runID)
-	if runID != "" && len(dedupeAgentEntries(agents)) > 1 && allOtherRuns(agents, runID) {
-		current := agents[0].RunID
-		for _, a := range agents[1:] {
-			if a.RunID != current {
-				current = ""
-				break
-			}
-		}
-		return agentMatch{}, &otherRunsHoldNameError{slug: slug, currentRunID: current}
-	}
-	return agentMatchFrom(slug, agents, matchManager, matchRuntime)
-}
-
-// preferRunEntries narrows the entries listed for a run-scoped lookup with
-// the rule a run-scoped delete applies (filterDeleteCandidatesByRun):
-// entries labelled runID win; without one, legacy entries carrying no run
-// label match by name. When neither exists, every entry is kept, so the
-// caller still sees another run holding the name (and refuses with the
-// run-mismatch 404, or fails closed when that is ambiguous). An empty runID
-// keeps agents unchanged.
-func preferRunEntries(agents []api.AgentInfo, runID string) []api.AgentInfo {
-	if runID == "" || len(agents) < 2 {
-		return agents
-	}
-	var exact, legacy []api.AgentInfo
-	for _, a := range agents {
-		switch a.RunID {
-		case runID:
-			exact = append(exact, a)
-		case "":
-			legacy = append(legacy, a)
-		}
-	}
-	if len(exact) > 0 {
-		return exact
-	}
-	if len(legacy) > 0 {
-		return legacy
-	}
-	return agents
 }
 
 // listInOwnRuntime lists agent slug in the agent's own runtime with the
