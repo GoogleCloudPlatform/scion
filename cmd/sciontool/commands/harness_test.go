@@ -584,3 +584,32 @@ func TestScrubSecrets_CROnlyStagedFileMasksEachLine(t *testing.T) {
 		t.Errorf("got %q", got)
 	}
 }
+
+// A staged value that mixes CRLF, lone CR and LF, including the \r\r\n and
+// \n\r edges, is split into each of its lines, none lost or merged, and is
+// also masked whole.
+func TestScrubSecrets_MixedLineEndingsStagedFileMasksEachLine(t *testing.T) {
+	t.Setenv("SCION_HARNESS_SECRETS_DIR", "")
+	bundle := filepath.Join(t.TempDir(), ".scion", "harness")
+	lines := []string{
+		"placeholder-line-one-value",
+		"placeholder-line-two-value",
+		"placeholder-line-three-value",
+		"placeholder-line-four-value",
+		"placeholder-line-five-value",
+		"placeholder-line-six-value",
+	}
+	value := lines[0] + "\r\n" + lines[1] + "\r" + lines[2] + "\n" + lines[3] + "\r\r\n" +
+		lines[4] + "\n\r" + "  },\r\n" + lines[5] + "\n"
+	writeTestFile(t, filepath.Join(bundle, "secrets", "A"), value)
+	m := &containerProvisionManifest{HarnessBundleDir: bundle}
+
+	in := "saw " + strings.Join(lines, " | ") + " | },"
+	want := "saw " + strings.TrimSuffix(strings.Repeat("[REDACTED] | ", len(lines)), " | ") + " | },"
+	if got := scrubSecrets(in, m); got != want {
+		t.Errorf("lines: got %q, want %q", got, want)
+	}
+	if got := scrubSecrets("dump: "+strings.TrimSpace(value)+" end", m); got != "dump: [REDACTED] end" {
+		t.Errorf("whole value: %q", got)
+	}
+}
