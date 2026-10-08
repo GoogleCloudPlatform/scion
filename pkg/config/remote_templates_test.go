@@ -16,8 +16,14 @@ package config
 
 import (
 	"context"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -531,27 +537,118 @@ func TestFetchGitHubTarball_AuthToken(t *testing.T) {
 	_ = receivedAuth
 }
 
+// installFakeGit puts a fake `git` first (and only) on PATH for the rest of
+// the test. It appends each invocation's argv to a log file, succeeds for
+// every subcommand except `fetch`, which fails with an auth-style error, so
+// execSparseGitCheckout runs end to end without touching the network
+// (ptone/scion#3750). It returns a func that reads the logged invocations.
+func installFakeGit(t *testing.T) (calls func() []string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("fake git shell script requires a POSIX shell")
+	}
+	binDir := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "git-calls.log")
+	script := `#!/bin/sh
+printf '%s\n' "$*" >> "$SCION_FAKE_GIT_LOG"
+if [ "$1" = "fetch" ]; then
+  echo "fatal: Authentication failed (fake git)" >&2
+  exit 128
+fi
+exit 0
+`
+	require.NoError(t, os.WriteFile(filepath.Join(binDir, "git"), []byte(script), 0o755))
+	t.Setenv("PATH", binDir)
+	t.Setenv("SCION_FAKE_GIT_LOG", logPath)
+	return func() []string {
+		data, err := os.ReadFile(logPath)
+		if os.IsNotExist(err) {
+			return nil
+		}
+		require.NoError(t, err)
+		return strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	}
+}
+
 func TestSparseGitCheckout_AuthTokenInURL(t *testing.T) {
-	// sparseGitCheckout embeds the token in the remote URL when provided.
-	// With a token, GitHub responds with "Authentication failed" rather than
-	// "could not read Username" — confirming the token was sent.
-	parts := &GitHubURLParts{Owner: "test", Repo: "nonexistent-repo-12345", Branch: "main"}
+	// execSparseGitCheckout embeds the token in the remote URL when provided.
+	// A fake git on PATH records the remote URL so this runs offline.
+	parts := &GitHubURLParts{Owner: "test", Repo: "nonexistent-repo-12345", Branch: "main", Path: "templates"}
 
-	t.Run("without token prompts for credentials", func(t *testing.T) {
-		dest := t.TempDir()
-		err := sparseGitCheckout(context.Background(), parts, dest, "")
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "git fetch failed")
+	tests := []struct {
+		name       string
+		token      string
+		wantRemote string
+	}{
+		{"without token uses anonymous URL", "", "remote add origin https://github.com/test/nonexistent-repo-12345.git"},
+		{"with token embeds it in the remote URL", "ghs_test_token", "remote add origin https://x-access-token:ghs_test_token@github.com/test/nonexistent-repo-12345.git"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			calls := installFakeGit(t)
+			err := execSparseGitCheckout(context.Background(), parts, t.TempDir(), tt.token)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "git fetch failed")
+			assert.Contains(t, err.Error(), "Authentication failed")
+			if tt.token != "" {
+				assert.NotContains(t, err.Error(), tt.token, "token must never appear in error text")
+			}
+			assert.Equal(t, []string{
+				"init",
+				tt.wantRemote,
+				"config core.sparseCheckout true",
+				"fetch --depth=1 origin main",
+			}, calls())
+		})
+	}
+}
+
+type remoteTemplatesRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f remoteTemplatesRoundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
+// TestFetchGitHubFolder_FallsBackToSparseCheckoutSeam pins that the git
+// fallback goes through the sparseGitCheckout seam (so tests in other
+// packages can stub it via SetGitSparseCheckoutForTest) with the parsed ref
+// and the auth token, and that its result is returned as-is.
+func TestFetchGitHubFolder_FallsBackToSparseCheckoutSeam(t *testing.T) {
+	calls := installFakeGit(t) // any real git exec would be recorded here
+	t.Cleanup(SetGitLsRemoteForTest(func(context.Context, string) ([]byte, error) {
+		return nil, errors.New("ls-remote disabled in test")
+	}))
+
+	oldTransport := http.DefaultClient.Transport
+	t.Cleanup(func() { http.DefaultClient.Transport = oldTransport })
+	http.DefaultClient.Transport = remoteTemplatesRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusNotFound, Body: io.NopCloser(strings.NewReader("")), Request: r}, nil
 	})
 
-	t.Run("with token attempts authentication", func(t *testing.T) {
-		dest := t.TempDir()
-		err := sparseGitCheckout(context.Background(), parts, dest, "ghs_test_token")
-		require.Error(t, err)
-		// With a token embedded in the URL, git attempts auth and gets
-		// "Authentication failed" instead of "could not read Username"
-		assert.Contains(t, err.Error(), "Authentication failed")
-	})
+	var gotParts GitHubURLParts
+	var gotDest, gotToken string
+	n := 0
+	t.Cleanup(SetGitSparseCheckoutForTest(func(_ context.Context, parts *GitHubURLParts, destPath, token string) error {
+		n++
+		gotParts, gotDest, gotToken = *parts, destPath, token
+		return os.WriteFile(filepath.Join(destPath, "scion-agent.yaml"), []byte("schema_version: \"1\"\n"), 0o644)
+	}))
+
+	dest := t.TempDir()
+	err := fetchGitHubFolder(context.Background(), "https://github.com/acme/repo/tree/main/templates/foo", dest, "ghs_tok")
+	require.NoError(t, err)
+	assert.Equal(t, 1, n)
+	assert.Equal(t, GitHubURLParts{Owner: "acme", Repo: "repo", Branch: "main", Path: "templates/foo"}, gotParts)
+	assert.Equal(t, dest, gotDest)
+	assert.Equal(t, "ghs_tok", gotToken)
+	assert.FileExists(t, filepath.Join(dest, "scion-agent.yaml"))
+	assert.Empty(t, calls(), "no real git may be executed")
+
+	// Errors from the seam propagate unchanged.
+	wantErr := errors.New("stub checkout failed")
+	t.Cleanup(SetGitSparseCheckoutForTest(func(context.Context, *GitHubURLParts, string, string) error { return wantErr }))
+	err = fetchGitHubFolder(context.Background(), "https://github.com/acme/repo/tree/main/templates/foo", t.TempDir(), "")
+	assert.ErrorIs(t, err, wantErr)
 }
 
 func TestIsArchiveURL(t *testing.T) {
