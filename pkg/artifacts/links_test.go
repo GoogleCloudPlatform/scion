@@ -19,6 +19,8 @@ package artifacts
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -493,6 +495,16 @@ func TestLinkViewCapabilityBounds(t *testing.T) {
 	forged := strings.Join([]string{sp[0], sp[1], sp[2], link.Link.ID, sp[3]}, ".")
 	if _, err := parseViewCapability(testViewKey, forged, time.Now()); err == nil {
 		t.Errorf("a session capability with a link id was accepted")
+	}
+	// A 5-part capability signed under the session domain over the same
+	// fields (link id included) is refused: link capabilities have their
+	// own domain.
+	mac := hmac.New(sha256.New, testViewKey)
+	mac.Write([]byte(viewSigDomain + "\n" + parts[0] + "\n" + parts[1] + "\n" + parts[2] + "\n" + parts[3]))
+	crossDomain := strings.Join([]string{parts[0], parts[1], parts[2], parts[3],
+		base64.RawURLEncoding.EncodeToString(mac.Sum(nil))}, ".")
+	if _, err := parseViewCapability(testViewKey, crossDomain, time.Now()); err == nil {
+		t.Errorf("a link capability signed under the session domain was accepted")
 	}
 	// A link id that is not a canonical id is refused, even correctly
 	// signed, so it never reaches the store.

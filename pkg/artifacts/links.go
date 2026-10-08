@@ -186,23 +186,7 @@ func (s *Service) canManageLinks(r *http.Request, b backend, a *Artifact) (bool,
 	if err != nil {
 		return false, err
 	}
-	now := time.Now()
-	for _, g := range grants {
-		if g.Permission != GrantAdmin || (g.ExpiresAt != nil && !now.Before(*g.ExpiresAt)) {
-			continue
-		}
-		switch g.SubjectKind {
-		case SubjectPrincipal:
-			if g.SubjectRef == PrincipalRef(kind, ref) {
-				return true, nil
-			}
-		case SubjectScope:
-			if g.SubjectRef != "" && s.host.Authorize(ctx, g.SubjectRef, PermissionManage) {
-				return true, nil
-			}
-		}
-	}
-	return false, nil
+	return grantAllows(ctx, s.host, a, grants, time.Now(), kind, ref, grantsForAdmin, PermissionManage, false), nil
 }
 
 // linkAdminArtifact loads an artifact whose links the caller may manage.
