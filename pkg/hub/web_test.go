@@ -4397,3 +4397,75 @@ func TestNewWebServer_DevAuth_NonLoopback_Rejected(t *testing.T) {
 	})
 	assert.NotNil(t, ws4)
 }
+
+// TestSPAShellCacheControl pins ptone/scion#3732: every HTML document that
+// renders the __SCION_DATA__ object (the session user and the API data
+// prefetched as that user) is served with Cache-Control no-store, while
+// static assets keep their own headers.
+func TestSPAShellCacheControl(t *testing.T) {
+	tmpDir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(tmpDir, "assets"), 0o755))
+	for name, data := range map[string]string{
+		"assets/app-entry.js":      "// entry",
+		"assets/chunk-abc12345.js": "// chunk",
+		"favicon.ico":              "icon",
+	} {
+		require.NoError(t, os.WriteFile(filepath.Join(tmpDir, filepath.FromSlash(name)), []byte(data), 0o644))
+	}
+
+	ws := newDevAuthWebServer(t, func(cfg *WebServerConfig) { cfg.AssetsDir = tmpDir })
+	tokenSvc, err := NewUserTokenService(UserTokenConfig{})
+	require.NoError(t, err)
+	ws.SetUserTokenService(tokenSvc)
+	agentID := tid("cache-agent")
+	ws.MountHubAPI(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"id": agentID, "name": "cache-agent"})
+	}), func(ctx context.Context) error { return nil })
+	handler := ws.Handler()
+
+	get := func(path string) (*http.Response, string) {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Header.Set("Accept", "text/html")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		resp := rec.Result()
+		defer func() { _ = resp.Body.Close() }()
+		body, _ := io.ReadAll(resp.Body)
+		return resp, string(body)
+	}
+
+	cases := []struct {
+		name, path, cacheControl, bodyContains string
+	}{
+		{"shell, signed-in user", "/", "no-store", DevUserID},
+		{"shell with prefetched agent data", "/agents/" + agentID, "no-store", `"cache-agent"`},
+		{"shell, projects list", "/projects", "no-store", DevUserID},
+		{"login shell", "/login", "no-store", "__SCION_DATA__"},
+		{"invite shell", "/invite", "no-store", "__SCION_DATA__"},
+		{"hashed asset", "/assets/chunk-abc12345.js", "public, max-age=86400", "// chunk"},
+		{"non-hashed asset", "/assets/app-entry.js", "no-cache", "// entry"},
+		{"root static file", "/favicon.ico", "no-cache", "icon"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resp, body := get(tc.path)
+			require.Equal(t, http.StatusOK, resp.StatusCode, body)
+			assert.Equal(t, tc.cacheControl, resp.Header.Get("Cache-Control"))
+			assert.Contains(t, body, tc.bodyContains)
+		})
+	}
+
+	// The no-assets page carries no per-user data and keeps no-cache.
+	bare := newDevAuthWebServer(t)
+	bare.assets = nil
+	bare.assetsDisk = ""
+	bare.hasAssets = false
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	bare.Handler().ServeHTTP(rec, req)
+	bareResp := rec.Result()
+	defer func() { _ = bareResp.Body.Close() }()
+	assert.Equal(t, "no-cache", bareResp.Header.Get("Cache-Control"))
+	assert.NotContains(t, rec.Body.String(), "__SCION_DATA__")
+}
