@@ -22,6 +22,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -649,6 +650,23 @@ func TestFetchGitHubFolder_FallsBackToSparseCheckoutSeam(t *testing.T) {
 	t.Cleanup(SetGitSparseCheckoutForTest(func(context.Context, *GitHubURLParts, string, string) error { return wantErr }))
 	err = fetchGitHubFolder(context.Background(), "https://github.com/acme/repo/tree/main/templates/foo", t.TempDir(), "")
 	assert.ErrorIs(t, err, wantErr)
+}
+
+// TestSetGitSparseCheckoutForTest_Restores pins that the sparse-checkout seam
+// defaults to the production runner, installs the given stub, and that the
+// returned restore func puts the production runner back (ptone/scion#3750).
+func TestSetGitSparseCheckoutForTest_Restores(t *testing.T) {
+	before := sparseGitCheckout
+	// The default runner must be the production implementation.
+	assert.Equal(t, reflect.ValueOf(execSparseGitCheckout).Pointer(), reflect.ValueOf(before).Pointer())
+	stub := GitSparseCheckoutFunc(func(context.Context, *GitHubURLParts, string, string) error { return nil })
+	restore := SetGitSparseCheckoutForTest(stub)
+	// The stub must be the runner actually installed.
+	assert.Equal(t, reflect.ValueOf(stub).Pointer(), reflect.ValueOf(sparseGitCheckout).Pointer())
+	restore()
+	// The production runner must be back in place.
+	assert.Equal(t, reflect.ValueOf(before).Pointer(), reflect.ValueOf(sparseGitCheckout).Pointer())
+	assert.Equal(t, reflect.ValueOf(execSparseGitCheckout).Pointer(), reflect.ValueOf(sparseGitCheckout).Pointer())
 }
 
 func TestIsArchiveURL(t *testing.T) {
