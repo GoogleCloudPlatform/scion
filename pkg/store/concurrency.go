@@ -239,7 +239,7 @@ const (
 	// LockTelegramSchema serializes the Telegram plugin's Postgres schema
 	// creation so replicas starting together against one database do not
 	// run the CREATE IF NOT EXISTS statements concurrently.
-	LockTelegramSchema AdvisoryLockKey = 0x5C100026
+	LockTelegramSchema AdvisoryLockKey = 0x5C100029
 )
 
 // AdvisoryLocker is implemented by backends that can take a cluster-wide
