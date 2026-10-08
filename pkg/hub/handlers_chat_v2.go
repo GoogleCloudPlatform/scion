@@ -3165,22 +3165,40 @@ func (s *Server) handleConversationRead(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	// Reject IDs that aren't persisted messages: clients must never set a
-	// client-local placeholder as the watermark. Existence only, not also
-	// same-conversation membership — history lists by ConversationID, and a
-	// visible row's ThreadID may differ from key.
+	// The watermark must be a persisted message of this conversation:
+	// clients must never set a client-local placeholder, and a message of
+	// another conversation gets the same answer as a missing one. History
+	// lists by ConversationID when the envelope switch is on, and a visible
+	// row's ThreadID may then differ from key, so a match on either counts
+	// (sameConversation).
+	const watermarkNotInConversation = "messageId does not refer to a message in this conversation"
 	targetMsg, err := s.store.GetMessage(ctx, body.MessageID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			ValidationError(w, "messageId does not refer to a known message", nil)
+			ValidationError(w, watermarkNotInConversation, nil)
 		} else {
 			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to look up message", nil)
 		}
 		return
 	}
 	if targetMsg == nil {
-		ValidationError(w, "messageId does not refer to a known message", nil)
+		ValidationError(w, watermarkNotInConversation, nil)
 		return
+	}
+	if !sameConversation(targetMsg, key, "") {
+		convID := ""
+		if targetMsg.ConversationID != "" {
+			convID, err = s.conversationIDForKey(ctx, wcs, key)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to look up message", nil)
+				return
+			}
+		}
+		if !sameConversation(targetMsg, key, convID) {
+			logReferenceRefused(ctx, r.URL.Path, "read marker is not a message of this conversation", user)
+			ValidationError(w, watermarkNotInConversation, nil)
+			return
+		}
 	}
 	// Monotonic: a stale advance must never roll the watermark backward;
 	// ties break by ID, matching ListMessages' (CreatedAt, ID) ordering.

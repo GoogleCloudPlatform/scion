@@ -329,6 +329,32 @@ func TestChatDMHistory_StaysReadableAfterProjectAccessEnds(t *testing.T) {
 	assert.NotEmpty(t, hist.Messages, "the user's own DM history with the agent stays readable")
 }
 
+func TestChatRead_WatermarkMustBeInConversation(t *testing.T) {
+	f := newRefFixture(t)
+	other := f.seedMessage(t, f.projB.ID, f.topicB, "", "in project B")
+	local := f.seedMessage(t, f.projA.ID, f.topicA, "", "in topic A")
+
+	mark := func(id string) refAnswer {
+		rec := doRequestAsUser(t, f.srv, f.ua, http.MethodPost,
+			"/api/v1/chat/conversations/"+f.topicA+"/read", map[string]string{"messageId": id})
+		return refAnswer{status: rec.Code, body: rec.Body.String()}
+	}
+
+	missing := mark(uuid.NewString())
+	require.Equal(t, http.StatusBadRequest, missing.status, missing.body)
+	assert.Contains(t, missing.body, "messageId does not refer to a message in this conversation")
+	requireSameAnswer(t, missing, mark(other))
+
+	rs, err := f.wcs.GetReadState(context.Background(), f.ua.ID, f.topicA)
+	require.NoError(t, err)
+	if rs != nil {
+		assert.Empty(t, rs.LastReadMessageID, "a refused read marker is not stored")
+	}
+
+	ok := mark(local)
+	require.Equal(t, http.StatusOK, ok.status, ok.body)
+}
+
 // A store error while checking a reply target refuses the send with the
 // route's retryable answer; nothing is stored.
 func TestChatReply_TargetLookupErrorRefusesSend(t *testing.T) {
