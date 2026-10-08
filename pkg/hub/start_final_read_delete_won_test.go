@@ -153,6 +153,9 @@ func newManagedStartServer(t *testing.T) (*Server, store.Store, *store.Agent) {
 		Slug: "managed-final-project-" + tidSlugSafe(t.Name()),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
+	// The owner is a project member, so the agent is in good standing
+	// (ptone/scion#3433).
+	ensureStandingRoot(t, s, project.ID, tid("managed-final-user"))
 	agent := &store.Agent{
 		ID:            tid("managed-final-agent-" + t.Name()),
 		Name:          "managed-final-agent",
