@@ -254,16 +254,36 @@ func (*countingSpokeBus) Close() error { return nil }
 
 // With no persisting subscriber (no inprocess spoke) and a plugin spoke
 // that accepts the message, the handler stores the row itself, once,
-// and does not publish to the plugin spoke a second time.
+// emits the user message event, and does not publish to the plugin spoke
+// a second time.
 func TestHandleAgentOutboundMessage_NoPersistingSubscriberStoresRow(t *testing.T) {
 	plugin := &countingSpokeBus{}
 	f := newOutboundSpokeFixtureWithPlugin(t, nil, plugin)
+	ep := NewChannelEventPublisher()
+	t.Cleanup(ep.Close)
+	f.srv.SetEventPublisher(ep)
+	userEvents, unsub := ep.Subscribe("user." + f.user.ID + ".message")
+	t.Cleanup(unsub)
 	f.proxy.Start()
 	t.Cleanup(f.proxy.Stop)
 
 	rr := f.send(t, "hello with only a plugin spoke")
 	f.requireSentOnce(t, rr)
 	require.Equal(t, int32(1), plugin.n.Load(), "the plugin spoke gets the message once")
+
+	var resp struct {
+		MessageID string `json:"message_id"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	select {
+	case evt := <-userEvents:
+		var got UserMessageEvent
+		require.NoError(t, json.Unmarshal(evt.Data, &got))
+		require.Equal(t, resp.MessageID, got.ID, "the event names the stored message")
+		require.Equal(t, "hello with only a plugin spoke", got.Msg)
+	case <-time.After(3 * time.Second):
+		t.Fatal("expected a user message event for the stored row")
+	}
 }
 
 // TestHandleAgentOutboundMessage_InProcessFailureStillFails pins that a
