@@ -2648,7 +2648,12 @@ export class ScionChatThread extends LitElement {
     if (!composer) return;
     const placed = composer.restoreText(e.detail.text, { onlyIfEmpty: e.detail.onlyIfEmpty });
     if (!placed && !e.detail.onlyIfEmpty) {
-      showToast('Finish the message being edited first', 'warning');
+      showToast(
+        composer.editMessage
+          ? 'Finish the message being edited first'
+          : 'The message could not be copied into the composer',
+        'warning'
+      );
     }
   };
 

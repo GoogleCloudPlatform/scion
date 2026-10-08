@@ -86,7 +86,7 @@ export function scheduledFailureText(reason: string | undefined): string {
     case 'recipient_gone':
       return 'Not sent: the recipient no longer exists.';
     case 'missed':
-      return 'Not sent: the scheduled time passed while the hub was unavailable.';
+      return 'Not sent: it was found more than an hour after its time.';
     case 'interrupted':
       return 'Delivery was interrupted. Check the thread before sending it again.';
     default:
@@ -95,8 +95,9 @@ export function scheduledFailureText(reason: string | undefined): string {
 }
 
 /**
- * Whether a failed message can be sent now: only one that was missed (the
- * hub was unavailable at its time) or whose delivery was interrupted.
+ * Whether a failed message can be sent now: only one that was missed
+ * (found more than an hour after its time) or whose delivery was
+ * interrupted.
  */
 export function scheduledSendNowAllowed(m: ScheduledMessage): boolean {
   return (

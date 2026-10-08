@@ -170,7 +170,9 @@ describe('scion-chat-scheduled-list', () => {
     emit(sm('a', { status: 'failed', failureReason: 'missed' }), 'failed');
     await flush(el);
     const row = items()[0]!;
-    expect(row.querySelector('.banner.failed')!.textContent).toContain('scheduled time passed');
+    expect(row.querySelector('.banner.failed')!.textContent).toContain(
+      'more than an hour after its time'
+    );
     expect(row.querySelector('.send-now-btn')).not.toBeNull();
     expect(row.querySelector('.copy-btn')).not.toBeNull();
     expect(row.querySelector('.dismiss-btn')).not.toBeNull();

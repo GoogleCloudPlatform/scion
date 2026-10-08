@@ -244,11 +244,12 @@ const userScopedDataCleanupTimeout = 30 * time.Second
 // fails the request. Anything left behind is retried by the startup sweep
 // (sweepOrphanedUserScopedData). It reports whether everything was removed.
 func (s *Server) removeUserScopedData(ctx context.Context, userID string) bool {
+	// The user's scheduled chat messages go too, on their own bounded
+	// context (best effort; one left behind fails at fire time and is
+	// purged later).
+	defer s.deleteScheduledMessagesOfSender(ctx, userID)
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), userScopedDataCleanupTimeout)
 	defer cancel()
-	// The user's scheduled chat messages go too (best effort; one left
-	// behind fails at fire time and is purged later).
-	s.deleteScheduledMessagesOfSender(ctx, userID)
 	return s.removeUserScopedDataCtx(ctx, userID)
 }
 

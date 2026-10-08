@@ -989,7 +989,8 @@ func (s *Server) claimAndFire(ctx context.Context, sms ScheduledMessageStore, ro
 	// The claim, once started, is not cut short by shutdown either: a
 	// claim that commits must be followed by delivery or release.
 	claimCtx, cancelClaim := context.WithTimeout(context.WithoutCancel(ctx), scheduledClaimTimeout)
-	ok, err := sms.ClaimScheduledMessage(claimCtx, row.ID, time.Now().UTC())
+	claimedAt := time.Now().UTC()
+	ok, err := sms.ClaimScheduledMessage(claimCtx, row.ID, claimedAt)
 	cancelClaim()
 	if err != nil {
 		scheduledSendLog().Warn("scheduled send: claim failed", "id", row.ID, "error", err)
@@ -999,6 +1000,7 @@ func (s *Server) claimAndFire(ctx context.Context, sms ScheduledMessageStore, ro
 		return false, scheduledNotClaimed
 	}
 	row.Status = ScheduledMessageSending
+	row.ClaimedAt = &claimedAt
 	s.publishScheduledMessage(ctx, "sending", row)
 	if s.fireScheduledMessage(ctx, sms, row) {
 		return true, scheduledReleased
@@ -1191,8 +1193,13 @@ func (s *Server) fireScheduledMessage(ctx context.Context, sms ScheduledMessageS
 		fctx, fcancel := finalizeContext(base)
 		defer fcancel()
 		now := time.Now().UTC()
-		if err := sms.ReleaseScheduledMessage(fctx, m.ID, now); err != nil {
+		ok, err := sms.ReleaseScheduledMessage(fctx, m.ID, scheduledClaimOf(m), now)
+		if err != nil {
 			scheduledSendLog().Warn("scheduled send: release failed", "id", m.ID, "error", err)
+			return
+		}
+		if !ok {
+			scheduledSendLog().Warn("scheduled send: row changed before release; not released", "id", m.ID)
 			return
 		}
 		m.Status = ScheduledMessagePending
@@ -1236,8 +1243,15 @@ func (s *Server) fireScheduledMessage(ctx context.Context, sms ScheduledMessageS
 	now := time.Now().UTC()
 	fctx, fcancel := finalizeContext(base)
 	defer fcancel()
-	if err := sms.MarkScheduledMessageSent(fctx, m.ID, resp.ID, now); err != nil {
+	ok, err := sms.MarkScheduledMessageSent(fctx, m.ID, resp.ID, scheduledClaimOf(m), now)
+	if err != nil {
 		scheduledSendLog().Error("scheduled send: recording sent state failed", "id", m.ID, "message_id", resp.ID, "error", err)
+	} else if !ok {
+		// The row is no longer this delivery's (marked interrupted,
+		// deleted or claimed again): leave it as it is.
+		scheduledSendLog().Warn("scheduled send: row changed during delivery; sent state not recorded",
+			"id", m.ID, "message_id", resp.ID)
+		return false
 	}
 	m.Status = ScheduledMessageSent
 	m.MessageID = resp.ID
@@ -1247,14 +1261,28 @@ func (s *Server) fireScheduledMessage(ctx context.Context, sms ScheduledMessageS
 	return false
 }
 
+// scheduledClaimOf returns the claim a final write of m is fenced by (the
+// zero time, which matches no row, if m carries none).
+func scheduledClaimOf(m *ScheduledChatMessage) time.Time {
+	if m.ClaimedAt == nil {
+		return time.Time{}
+	}
+	return *m.ClaimedAt
+}
+
 // failScheduledMessage records a claimed row as failed, on a fresh context
 // derived from base (see finalizeContext).
 func (s *Server) failScheduledMessage(base context.Context, sms ScheduledMessageStore, m *ScheduledChatMessage, reason string) {
 	ctx, cancel := finalizeContext(base)
 	defer cancel()
 	now := time.Now().UTC()
-	if err := sms.MarkScheduledMessageFailed(ctx, m.ID, reason, now); err != nil {
+	ok, err := sms.MarkScheduledMessageFailed(ctx, m.ID, reason, scheduledClaimOf(m), now)
+	if err != nil {
 		scheduledSendLog().Error("scheduled send: recording failed state failed", "id", m.ID, "error", err)
+	} else if !ok {
+		scheduledSendLog().Warn("scheduled send: row changed during delivery; failed state not recorded",
+			"id", m.ID, "failure_reason", reason)
+		return
 	}
 	m.Status = ScheduledMessageFailed
 	m.FailureReason = reason

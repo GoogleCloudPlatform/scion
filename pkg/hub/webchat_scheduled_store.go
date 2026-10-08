@@ -111,14 +111,20 @@ type ScheduledMessageStore interface {
 	// ClaimScheduledMessage moves a row from pending to sending. Exactly
 	// one concurrent caller gets true; only that caller may deliver it.
 	ClaimScheduledMessage(ctx context.Context, id string, now time.Time) (bool, error)
+	// The final writes of a claimed row (release, sent, failed) are fenced
+	// by the claim: claimedAt is the time passed to ClaimScheduledMessage,
+	// and the write applies only while the row is still sending under that
+	// claim. Each reports whether it applied; false means the row changed
+	// since (marked interrupted, deleted, or claimed again).
+
 	// ReleaseScheduledMessage moves a claimed row back from sending to
 	// pending. Only valid before delivery has started.
-	ReleaseScheduledMessage(ctx context.Context, id string, now time.Time) error
+	ReleaseScheduledMessage(ctx context.Context, id string, claimedAt, now time.Time) (bool, error)
 	// MarkScheduledMessageSent moves a claimed row to sent, recording the
 	// ID of the delivered message.
-	MarkScheduledMessageSent(ctx context.Context, id, messageID string, now time.Time) error
+	MarkScheduledMessageSent(ctx context.Context, id, messageID string, claimedAt, now time.Time) (bool, error)
 	// MarkScheduledMessageFailed moves a claimed row to failed with reason.
-	MarkScheduledMessageFailed(ctx context.Context, id, reason string, now time.Time) error
+	MarkScheduledMessageFailed(ctx context.Context, id, reason string, claimedAt, now time.Time) (bool, error)
 
 	// SendNowScheduledMessage moves the sender's row from failed with
 	// reason missed or interrupted back to pending, due at fireAt. It
@@ -219,6 +225,9 @@ CREATE INDEX IF NOT EXISTS idx_webchat_scheduled_message_sender_conversation
 
 CREATE INDEX IF NOT EXISTS idx_webchat_scheduled_message_sender_status
     ON webchat_scheduled_message (sender_user_id, status);
+
+CREATE INDEX IF NOT EXISTS idx_webchat_scheduled_message_conversation
+    ON webchat_scheduled_message (conversation_key);
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_webchat_scheduled_message_idempotency
     ON webchat_scheduled_message (sender_user_id, idempotency_key);
@@ -409,37 +418,25 @@ func (s *sqliteWebChatStore) ClaimScheduledMessage(ctx context.Context, id strin
 		ScheduledMessageSending, ts, ts, id, ScheduledMessagePending))
 }
 
-func (s *sqliteWebChatStore) ReleaseScheduledMessage(ctx context.Context, id string, now time.Time) error {
-	_, err := s.db.ExecContext(ctx,
+func (s *sqliteWebChatStore) ReleaseScheduledMessage(ctx context.Context, id string, claimedAt, now time.Time) (bool, error) {
+	return execOneRow(s.db.ExecContext(ctx,
 		`UPDATE webchat_scheduled_message SET status = ?, claimed_at = NULL, updated_at = ?
-		  WHERE id = ? AND status = ?`,
-		ScheduledMessagePending, sqliteScheduledTime(now), id, ScheduledMessageSending)
-	if err != nil {
-		return fmt.Errorf("webchat store: release scheduled message: %w", err)
-	}
-	return nil
+		  WHERE id = ? AND status = ? AND claimed_at = ?`,
+		ScheduledMessagePending, sqliteScheduledTime(now), id, ScheduledMessageSending, sqliteScheduledTime(claimedAt)))
 }
 
-func (s *sqliteWebChatStore) MarkScheduledMessageSent(ctx context.Context, id, messageID string, now time.Time) error {
-	_, err := s.db.ExecContext(ctx,
+func (s *sqliteWebChatStore) MarkScheduledMessageSent(ctx context.Context, id, messageID string, claimedAt, now time.Time) (bool, error) {
+	return execOneRow(s.db.ExecContext(ctx,
 		`UPDATE webchat_scheduled_message SET status = ?, message_id = ?, updated_at = ?
-		  WHERE id = ? AND status = ?`,
-		ScheduledMessageSent, messageID, sqliteScheduledTime(now), id, ScheduledMessageSending)
-	if err != nil {
-		return fmt.Errorf("webchat store: mark scheduled message sent: %w", err)
-	}
-	return nil
+		  WHERE id = ? AND status = ? AND claimed_at = ?`,
+		ScheduledMessageSent, messageID, sqliteScheduledTime(now), id, ScheduledMessageSending, sqliteScheduledTime(claimedAt)))
 }
 
-func (s *sqliteWebChatStore) MarkScheduledMessageFailed(ctx context.Context, id, reason string, now time.Time) error {
-	_, err := s.db.ExecContext(ctx,
+func (s *sqliteWebChatStore) MarkScheduledMessageFailed(ctx context.Context, id, reason string, claimedAt, now time.Time) (bool, error) {
+	return execOneRow(s.db.ExecContext(ctx,
 		`UPDATE webchat_scheduled_message SET status = ?, failure_reason = ?, updated_at = ?
-		  WHERE id = ? AND status = ?`,
-		ScheduledMessageFailed, reason, sqliteScheduledTime(now), id, ScheduledMessageSending)
-	if err != nil {
-		return fmt.Errorf("webchat store: mark scheduled message failed: %w", err)
-	}
-	return nil
+		  WHERE id = ? AND status = ? AND claimed_at = ?`,
+		ScheduledMessageFailed, reason, sqliteScheduledTime(now), id, ScheduledMessageSending, sqliteScheduledTime(claimedAt)))
 }
 
 func (s *sqliteWebChatStore) SendNowScheduledMessage(ctx context.Context, senderUserID, id string, fireAt, now time.Time) (bool, error) {

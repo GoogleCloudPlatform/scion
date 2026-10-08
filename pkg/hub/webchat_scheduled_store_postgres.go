@@ -52,6 +52,9 @@ CREATE INDEX IF NOT EXISTS idx_webchat_scheduled_message_sender_conversation
 CREATE INDEX IF NOT EXISTS idx_webchat_scheduled_message_sender_status
     ON webchat_scheduled_message (sender_user_id, status);
 
+CREATE INDEX IF NOT EXISTS idx_webchat_scheduled_message_conversation
+    ON webchat_scheduled_message (conversation_key);
+
 CREATE UNIQUE INDEX IF NOT EXISTS idx_webchat_scheduled_message_idempotency
     ON webchat_scheduled_message (sender_user_id, idempotency_key);
 `
@@ -230,37 +233,25 @@ func (s *pgWebChatStore) ClaimScheduledMessage(ctx context.Context, id string, n
 		ScheduledMessageSending, now.UTC(), id, ScheduledMessagePending))
 }
 
-func (s *pgWebChatStore) ReleaseScheduledMessage(ctx context.Context, id string, now time.Time) error {
-	_, err := s.db.ExecContext(ctx,
+func (s *pgWebChatStore) ReleaseScheduledMessage(ctx context.Context, id string, claimedAt, now time.Time) (bool, error) {
+	return execOneRow(s.db.ExecContext(ctx,
 		`UPDATE webchat_scheduled_message SET status = $1, claimed_at = NULL, updated_at = $2
-		  WHERE id = $3 AND status = $4`,
-		ScheduledMessagePending, now.UTC(), id, ScheduledMessageSending)
-	if err != nil {
-		return fmt.Errorf("webchat store: release scheduled message: %w", err)
-	}
-	return nil
+		  WHERE id = $3 AND status = $4 AND claimed_at = $5`,
+		ScheduledMessagePending, now.UTC(), id, ScheduledMessageSending, claimedAt.UTC()))
 }
 
-func (s *pgWebChatStore) MarkScheduledMessageSent(ctx context.Context, id, messageID string, now time.Time) error {
-	_, err := s.db.ExecContext(ctx,
+func (s *pgWebChatStore) MarkScheduledMessageSent(ctx context.Context, id, messageID string, claimedAt, now time.Time) (bool, error) {
+	return execOneRow(s.db.ExecContext(ctx,
 		`UPDATE webchat_scheduled_message SET status = $1, message_id = $2, updated_at = $3
-		  WHERE id = $4 AND status = $5`,
-		ScheduledMessageSent, messageID, now.UTC(), id, ScheduledMessageSending)
-	if err != nil {
-		return fmt.Errorf("webchat store: mark scheduled message sent: %w", err)
-	}
-	return nil
+		  WHERE id = $4 AND status = $5 AND claimed_at = $6`,
+		ScheduledMessageSent, messageID, now.UTC(), id, ScheduledMessageSending, claimedAt.UTC()))
 }
 
-func (s *pgWebChatStore) MarkScheduledMessageFailed(ctx context.Context, id, reason string, now time.Time) error {
-	_, err := s.db.ExecContext(ctx,
+func (s *pgWebChatStore) MarkScheduledMessageFailed(ctx context.Context, id, reason string, claimedAt, now time.Time) (bool, error) {
+	return execOneRow(s.db.ExecContext(ctx,
 		`UPDATE webchat_scheduled_message SET status = $1, failure_reason = $2, updated_at = $3
-		  WHERE id = $4 AND status = $5`,
-		ScheduledMessageFailed, reason, now.UTC(), id, ScheduledMessageSending)
-	if err != nil {
-		return fmt.Errorf("webchat store: mark scheduled message failed: %w", err)
-	}
-	return nil
+		  WHERE id = $4 AND status = $5 AND claimed_at = $6`,
+		ScheduledMessageFailed, reason, now.UTC(), id, ScheduledMessageSending, claimedAt.UTC()))
 }
 
 func (s *pgWebChatStore) SendNowScheduledMessage(ctx context.Context, senderUserID, id string, fireAt, now time.Time) (bool, error) {

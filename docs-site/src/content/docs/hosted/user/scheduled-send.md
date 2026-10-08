@@ -49,7 +49,7 @@ If a check fails, the message is not sent and its banner turns red with the reas
 | This conversation no longer exists | The topic was deleted. |
 | The recipient no longer exists | The agent of a direct message was deleted. |
 | Your account is not active | Your account was suspended. |
-| The scheduled time passed while the Hub was unavailable | The Hub found the message more than 60 minutes after its time, for example after downtime or while the experiment was off. It is not sent that late without asking you. |
+| It was found more than an hour after its time | The Hub found the message more than 60 minutes after its time, for example after downtime or while the experiment was off. It is not sent that late without asking you. |
 | Delivery was interrupted | The Hub stopped while it was sending the message. It may or may not have reached the thread; check the thread before sending it again. The Hub never sends it again on its own. |
 | Delivery failed | Any other error. |
 

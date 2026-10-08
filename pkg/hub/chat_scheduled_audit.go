@@ -95,6 +95,9 @@ func chatScheduledAuditAttrs(e *ChatScheduledMessageEvent) []slog.Attr {
 	if e.RequestID != "" {
 		attrs = append(attrs, slog.String("request_id", e.RequestID))
 	}
+	if !e.Timestamp.IsZero() {
+		attrs = append(attrs, slog.Time("event_time", e.Timestamp.UTC()))
+	}
 	return attrs
 }
 

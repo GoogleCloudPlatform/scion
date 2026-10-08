@@ -22,6 +22,7 @@ package hub
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -53,6 +54,16 @@ func (f *scheduledSendFixture) rowPath(id, suffix string) string {
 	return f.scheduledPath() + "/" + id + suffix
 }
 
+// mustApply returns a check that a fenced store write applied.
+func mustApply(t *testing.T) func(bool, error) {
+	t.Helper()
+	return func(ok bool, err error) {
+		t.Helper()
+		require.NoError(t, err)
+		require.True(t, ok, "the write did not apply")
+	}
+}
+
 // failRow claims a pending row and records it failed with reason.
 func failRow(t *testing.T, sms ScheduledMessageStore, id, reason string, at time.Time) {
 	t.Helper()
@@ -60,7 +71,7 @@ func failRow(t *testing.T, sms ScheduledMessageStore, id, reason string, at time
 	ok, err := sms.ClaimScheduledMessage(ctx, id, at)
 	require.NoError(t, err)
 	require.True(t, ok)
-	require.NoError(t, sms.MarkScheduledMessageFailed(ctx, id, reason, at))
+	mustApply(t)(sms.MarkScheduledMessageFailed(ctx, id, reason, at, at))
 }
 
 // ---------------------------------------------------------------------------
@@ -184,7 +195,7 @@ func testScheduledStorePhase2Transitions(t *testing.T, sms ScheduledMessageStore
 		}
 	}
 	require.NotNil(t, againRow)
-	require.NoError(t, sms.ReleaseScheduledMessage(ctx, again.ID, base))
+	mustApply(t)(sms.ReleaseScheduledMessage(ctx, again.ID, oldClaim, base))
 	ok, err = sms.ClaimScheduledMessage(ctx, again.ID, base)
 	require.NoError(t, err)
 	require.True(t, ok)
@@ -192,8 +203,35 @@ func testScheduledStorePhase2Transitions(t *testing.T, sms ScheduledMessageStore
 	require.NoError(t, err)
 	assert.False(t, ok, "the new claim is not marked")
 	assert.Equal(t, ScheduledMessageSending, get("p2-d", again.ID).Status)
-	require.NoError(t, sms.MarkScheduledMessageSent(ctx, again.ID, "msg-again", base))
-	require.NoError(t, sms.MarkScheduledMessageSent(ctx, fresh.ID, "msg-fresh", base))
+	mustApply(t)(sms.MarkScheduledMessageSent(ctx, again.ID, "msg-again", base, base))
+	mustApply(t)(sms.MarkScheduledMessageSent(ctx, fresh.ID, "msg-fresh", base, base))
+
+	// Final writes are fenced by the claim: a delivery whose row was marked
+	// interrupted and claimed again (Send now) cannot finalize the new claim.
+	fenced := create("fenced", "p2-g")
+	firstClaim := base.Add(-time.Hour).Add(7 * time.Microsecond)
+	ok, err = sms.ClaimScheduledMessage(ctx, fenced.ID, firstClaim)
+	require.NoError(t, err)
+	require.True(t, ok)
+	mustApply(t)(sms.MarkScheduledMessageInterrupted(ctx, fenced.ID, firstClaim, base))
+	mustApply(t)(sms.SendNowScheduledMessage(ctx, "p2-g", fenced.ID, base, base))
+	ok, err = sms.ClaimScheduledMessage(ctx, fenced.ID, base)
+	require.NoError(t, err)
+	require.True(t, ok)
+	for name, write := range map[string]func() (bool, error){
+		"sent":    func() (bool, error) { return sms.MarkScheduledMessageSent(ctx, fenced.ID, "stale", firstClaim, base) },
+		"failed":  func() (bool, error) { return sms.MarkScheduledMessageFailed(ctx, fenced.ID, "x", firstClaim, base) },
+		"release": func() (bool, error) { return sms.ReleaseScheduledMessage(ctx, fenced.ID, firstClaim, base) },
+	} {
+		ok, err := write()
+		require.NoError(t, err)
+		assert.False(t, ok, "a stale %s write does not apply to the new claim", name)
+	}
+	got = get("p2-g", fenced.ID)
+	assert.Equal(t, ScheduledMessageSending, got.Status)
+	assert.Empty(t, got.MessageID)
+	mustApply(t)(sms.MarkScheduledMessageSent(ctx, fenced.ID, "current", base, base))
+	assert.Equal(t, "current", get("p2-g", fenced.ID).MessageID)
 
 	// Purge: sent and cancelled after 7 days, failed after 30; pending and
 	// sending kept whatever their age.
@@ -204,7 +242,7 @@ func testScheduledStorePhase2Transitions(t *testing.T, sms ScheduledMessageStore
 	ok, err = sms.ClaimScheduledMessage(ctx, oldSent.ID, old)
 	require.NoError(t, err)
 	require.True(t, ok)
-	require.NoError(t, sms.MarkScheduledMessageSent(ctx, oldSent.ID, "m1", old))
+	mustApply(t)(sms.MarkScheduledMessageSent(ctx, oldSent.ID, "m1", old, old))
 	oldCancelled := create("old-cancelled", "p2-e")
 	ok, err = sms.CancelScheduledMessage(ctx, "p2-e", oldCancelled.ID, old)
 	require.NoError(t, err)
@@ -217,7 +255,7 @@ func testScheduledStorePhase2Transitions(t *testing.T, sms ScheduledMessageStore
 	ok, err = sms.ClaimScheduledMessage(ctx, recentSent.ID, base.Add(-6*day))
 	require.NoError(t, err)
 	require.True(t, ok)
-	require.NoError(t, sms.MarkScheduledMessageSent(ctx, recentSent.ID, "m2", base.Add(-6*day)))
+	mustApply(t)(sms.MarkScheduledMessageSent(ctx, recentSent.ID, "m2", base.Add(-6*day), base.Add(-6*day)))
 	oldPending := newTestScheduledRow("p2-old-pending", "p2-e", ancient)
 	oldPending.ConversationKey = "p2-conv"
 	oldPending.CreatedAt, oldPending.UpdatedAt = ancient, ancient
@@ -390,7 +428,38 @@ func TestScheduledSend_KillMidSend_InterruptedNotResent(t *testing.T) {
 // No delivery still in progress can be marked interrupted: the threshold
 // is longer than the delivery bound plus the final state write.
 func TestScheduledSend_StuckThresholdExceedsDelivery(t *testing.T) {
-	assert.Greater(t, scheduledStuckAfter(), scheduledDeliveryBudget+scheduledFinalizeTimeout)
+	assert.Greater(t, scheduledStuckAfter(), scheduledClaimTimeout+scheduledDeliveryBudget+scheduledFinalizeTimeout)
+}
+
+// A delivery that outlived the stuck threshold (its row was marked
+// interrupted, then sent now and claimed again) cannot finalize the new
+// claim: the row keeps the new claim and no sent outcome is recorded or
+// published for it.
+func TestScheduledSend_StaleDeliveryDoesNotFinalizeNewClaim(t *testing.T) {
+	f := newScheduledSendFixture(t)
+	ctx := context.Background()
+	rec := &recordingScheduledAuditor{}
+	f.srv.SetAuditLogger(rec)
+	now := time.Now().UTC()
+	m := f.insertScheduled(t, f.bob, "stale", now.Add(-time.Minute))
+	firstClaim := now.Add(-scheduledStuckAfter() - time.Second)
+	mustApply(t)(f.sms.ClaimScheduledMessage(ctx, m.ID, firstClaim))
+	stale := f.row(t, f.bob, m.ID) // what the slow delivery holds
+
+	f.srv.scheduledUpkeep(ctx, now)
+	require.Equal(t, ScheduledFailureInterrupted, f.row(t, f.bob, m.ID).FailureReason)
+	r := doRequestAsUser(t, f.srv, f.bob, http.MethodPost, f.rowPath(m.ID, "/send-now"), nil)
+	require.Equal(t, http.StatusOK, r.Code, r.Body.String())
+	mustApply(t)(f.sms.ClaimScheduledMessage(ctx, m.ID, now))
+
+	events, unsub := f.srv.events.Subscribe("user." + f.bob.ID + ".chat.scheduled")
+	defer unsub()
+	f.srv.fireScheduledMessage(ctx, f.sms, stale)
+	row := f.row(t, f.bob, m.ID)
+	assert.Equal(t, ScheduledMessageSending, row.Status, "the new claim is untouched")
+	assert.Empty(t, row.MessageID)
+	assert.NotContains(t, scheduledEventActions(t, collectEvents(events)), "sent")
+	assert.NotContains(t, rec.actions(), "fire:sent:")
 }
 
 // ---------------------------------------------------------------------------
@@ -535,7 +604,7 @@ func TestScheduledSend_UpkeepPurgesOldRows(t *testing.T) {
 	ok, err := f.sms.ClaimScheduledMessage(ctx, old.ID, now.Add(-8*24*time.Hour))
 	require.NoError(t, err)
 	require.True(t, ok)
-	require.NoError(t, f.sms.MarkScheduledMessageSent(ctx, old.ID, "m-old", now.Add(-8*24*time.Hour)))
+	mustApply(t)(f.sms.MarkScheduledMessageSent(ctx, old.ID, "m-old", now.Add(-8*24*time.Hour), now.Add(-8*24*time.Hour)))
 
 	f.srv.scheduledUpkeep(ctx, now)
 	got, err := f.sms.GetScheduledMessage(ctx, f.bob.ID, old.ID)
@@ -671,4 +740,50 @@ func TestScheduledSend_AuditThroughAuditLogger(t *testing.T) {
 		assert.False(t, strings.Contains(fmt.Sprintf("%+v", e), "secret-text"), "no message text in the audit record")
 	}
 	assert.NotEmpty(t, rec.events[0].CredentialKind, "request-driven actions carry the credential kind")
+}
+
+// Without an audit logger that records scheduled-message events, the
+// record goes to the structured log with the same fields and no text.
+func TestScheduledSend_AuditFallbackToStructuredLog(t *testing.T) {
+	f := newScheduledSendFixture(t)
+	f.srv.SetAuditLogger(plainAuditLogger{})
+	logs := captureSlogDefault(t)
+	sm := f.schedule(t, f.bob, "fallback secret-text", time.Now().Add(time.Hour))
+	out := logs.String()
+	assert.Contains(t, out, "audit_action=chat.scheduled.create")
+	assert.Contains(t, out, "principal_id="+f.bob.ID)
+	assert.Contains(t, out, "scheduled_message_id="+sm.ID)
+	assert.Contains(t, out, "executor=scheduled-send")
+	assert.NotContains(t, out, "secret-text")
+}
+
+// Send now spends the sender's chat send allowance like a new schedule.
+func TestScheduledSend_SendNowRateLimited(t *testing.T) {
+	f := newScheduledSendFixture(t)
+	now := time.Now().UTC()
+	m := f.insertScheduled(t, f.bob, "rl", now.Add(-2*time.Hour))
+	failRow(t, f.sms, m.ID, ScheduledFailureMissed, now)
+	fakeNow := time.Now()
+	f.srv.chatSendLimiter = newChatSendLimiterWithRates(map[chatSenderClass]float64{
+		chatSenderHuman: 1,
+		chatSenderAgent: chatSendAgentRatePerMinute,
+	}, func() time.Time { return fakeNow })
+	require.True(t, f.srv.chatSendLimiter.Allow(f.bob.ID, chatSenderHuman).Allowed, "spend the only send")
+
+	rec := doRequestAsUser(t, f.srv, f.bob, http.MethodPost, f.rowPath(m.ID, "/send-now"), nil)
+	assert.Equal(t, http.StatusTooManyRequests, rec.Code, rec.Body.String())
+	row := f.row(t, f.bob, m.ID)
+	assert.Equal(t, ScheduledMessageFailed, row.Status)
+	assert.Equal(t, ScheduledFailureMissed, row.FailureReason)
+}
+
+func TestScheduledStore_SQLite_ConversationIndex(t *testing.T) {
+	_, dsn := openScheduledStorePair(t)
+	db, err := sql.Open("sqlite3", dsn)
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	var n int
+	require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?`,
+		"idx_webchat_scheduled_message_conversation").Scan(&n))
+	assert.Equal(t, 1, n)
 }

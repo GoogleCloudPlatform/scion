@@ -40,12 +40,18 @@ const (
 )
 
 // scheduledStuckAfter is how long after its claim a row still in sending
-// is treated as interrupted: longer than any delivery can run (the
-// delivery bound plus the final state write) plus a margin, so a delivery
-// still in progress is never marked. Such a row is the trace of a replica
-// that stopped mid-delivery; the message may or may not have been sent.
+// is treated as interrupted: longer than any delivery can run plus a
+// margin, so a delivery still in progress is never marked. claimed_at is
+// taken just before the claim write (bounded by scheduledClaimTimeout),
+// then the checks and send run under scheduledDeliveryBudget and the final
+// write under scheduledFinalizeTimeout. The margin also absorbs clock skew
+// between replicas: claimed_at is stamped by the claiming replica and
+// compared with the clock of whichever replica runs upkeep. Such a row is
+// the trace of a replica that stopped mid-delivery; the message may or may
+// not have been sent. The final writes are also fenced by the claim, so a
+// delivery that outlived this bound cannot overwrite a later claim.
 func scheduledStuckAfter() time.Duration {
-	return scheduledDeliveryBudget + scheduledFinalizeTimeout + scheduledStuckMargin
+	return scheduledClaimTimeout + scheduledDeliveryBudget + scheduledFinalizeTimeout + scheduledStuckMargin
 }
 
 // scheduledUpkeep runs one upkeep pass at now: rows stuck in sending are
@@ -156,6 +162,8 @@ func (s *Server) deleteScheduledMessagesOfSender(ctx context.Context, userID str
 	if sms == nil {
 		return
 	}
+	ctx, cancel := finalizeContext(ctx)
+	defer cancel()
 	n, err := sms.DeleteScheduledMessagesForSender(ctx, userID)
 	if err != nil {
 		scheduledSendLog().Warn("scheduled send: deleting scheduled messages of a deleted user failed",
