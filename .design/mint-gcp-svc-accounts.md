@@ -33,7 +33,7 @@ The Hub's operating service account needs `roles/iam.serviceAccountAdmin` on the
 |------------|----------|
 | `iam.serviceAccounts.create` | Create the minted SA |
 | `iam.serviceAccounts.getIamPolicy`, `iam.serviceAccounts.setIamPolicy` | Grant the Hub SA `roles/iam.serviceAccountTokenCreator` on the minted SA, and the minted SA `roles/iam.serviceAccountUser` on itself (`allow_self_act_as`) |
-| `iam.serviceAccounts.get`, `iam.serviceAccounts.delete` | Read the SA and delete it again if a follow-up grant fails |
+| `iam.serviceAccounts.delete` | Delete the minted SA again if a follow-up grant fails |
 
 `roles/iam.serviceAccountCreator` alone is not enough: GCP gives the creator no role on the SA it creates, so the policy grants after create fail and the cleanup delete fails too, leaving an orphaned SA. No project-level `roles/iam.serviceAccountTokenCreator` is needed for minted SAs, because the per-SA grant made during minting covers token generation. Token generation goes through `iamcredentials.googleapis.com`, which must be enabled in the Hub project.
 

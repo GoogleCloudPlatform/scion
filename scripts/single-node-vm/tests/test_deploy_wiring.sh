@@ -2625,8 +2625,8 @@ test_deploy_create_api_check_enables_iamcredentials_when_missing() {
 }
 
 # deploy.sh never removes the hub SA's project role bindings one by one:
-# --delete deletes the hub SA itself, which takes every binding it holds
-# (serviceAccountAdmin included) with it. Asserts that path, against the
+# --delete deletes the hub SA itself, so every binding it holds
+# (serviceAccountAdmin included) no longer applies. Asserts that path, against the
 # exact state a default create left behind.
 test_deploy_delete_after_create_deletes_hub_sa_holding_service_account_admin() {
   fresh_gcloud_state
@@ -2636,7 +2636,7 @@ test_deploy_delete_after_create_deletes_hub_sa_holding_service_account_admin() {
   run_deploy_delete "$(base_config_json "$HUB")"
   assert_eq "0" "$DEPLOY_RC" "teardown after a default create must exit 0"
   assert_eq "1" "$(gcloud_log | grep -c -- "^iam service-accounts delete scion-hub-${HUB}@demo-project.iam.gserviceaccount.com " || true)" \
-    "teardown must delete the hub SA, which removes its serviceAccountAdmin binding"
+    "teardown must delete the hub SA, so its serviceAccountAdmin binding no longer applies"
   assert_contains "$DEPLOY_LOG" "Deleted: scion-hub-${HUB}@demo-project.iam.gserviceaccount.com" \
     "teardown must report the hub SA as deleted"
 }

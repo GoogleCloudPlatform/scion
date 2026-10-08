@@ -114,7 +114,7 @@ The Scion Hub can manage and provision Google Cloud Platform (GCP) Service Accou
 
 To enable GCP identity management, the Hub itself must run with a GCP identity (e.g., attached to its GCE instance or GKE pod) that has the `iam.serviceAccounts.getAccessToken` permission for the target Service Accounts.
 
-Minting new Service Accounts needs more than that. The Hub creates each account with its own identity, sets IAM policy on it, and deletes it again if a follow-up grant fails, so the Hub's identity needs `roles/iam.serviceAccountAdmin` on the Hub's GCP project (`roles/iam.serviceAccountCreator` alone is not enough). The Hub also needs `iamcredentials.googleapis.com` enabled to issue tokens for the accounts it mints. The single-node VM deploy script (`scripts/single-node-vm/deploy.sh`) grants the role to the hub VM's service account and enables the API by default. On other deployments, grant them yourself:
+Minting new Service Accounts needs more than that. The Hub creates each account with its own identity, sets IAM policy on it, and deletes it again if a follow-up grant fails, so the Hub's identity needs `roles/iam.serviceAccountAdmin` on the Hub's GCP project (`roles/iam.serviceAccountCreator` alone is not enough). The Hub also needs `iamcredentials.googleapis.com` enabled to issue tokens for the accounts it mints. The single-node VM deploy script (`scripts/single-node-vm/deploy.sh`) enables the API, and grants the role to the hub VM's service account by default (config key `hub_sa_minting`). On other deployments, grant them yourself:
 
 ```bash
 gcloud projects add-iam-policy-binding PROJECT_ID \

@@ -206,7 +206,7 @@ Ask the user each question below in natural conversation. Use the defaults when
 the user does not have a preference. Validate each answer before moving on.
 
 > **Agent optimization:** Rather than prompting the user for each question
-> individually (up to 11 round trips), detect defaults from the ambient GCP environment
+> individually (up to 12 round trips), detect defaults from the ambient GCP environment
 > first, then present the full candidate configuration as a single table and ask
 > for confirmation or targeted overrides in one prompt:
 >
@@ -229,7 +229,8 @@ the user does not have a preference. Validate each answer before moving on.
 | 8 | Update policy | `auto` | Must be `auto`, `notify`, or `disabled`. Explain: **auto** = install updates automatically (recommended). **notify** = check for updates, show banner in admin UI. **disabled** = no automatic checking. | `update_policy` |
 | 9 | Release channel | `nightly` | Must be `stable`, `preview`, or `nightly`. Defaults to nightly — only ask if the user wants to override. **stable** = GA releases. **preview** = pre-releases (rc, alpha, beta). **nightly** = nightly builds. | `release_channel` |
 | 10 | Chat plugins | none (empty list) | Each must be one of: `telegram`, `discord`, `slack`, `teams`. Multiple allowed. | `chat_plugins` |
-| 11 | Attach a GKE cluster (hybrid tier)? | No | Only ask if the user mentions running agents on Kubernetes. If yes: cluster name, location (zone or region), and project (default: same as `project_id`; a different project is not supported yet); the Kubernetes namespace (default `scion-hub-<hub_name>`) and PersistentVolumeClaim name (default `scion-hub-<hub_name>-shared`) for the shared tree. The cluster must already exist and be on the same VPC network as the hub VM (`default`, today) — this script never creates or deletes a cluster. **Also requires `container_images.source: registry`** (Question 6) — GKE nodes cannot pull from the VM's local Docker store that `source: build` uses, and the node service account needs `roles/artifactregistry.reader` (or equivalent read access) on that registry. | `gke_target.name`, `gke_target.location`, `gke_target.project`, `gke_target.namespace`, `gke_target.pvc_name` |
+| 11 | Let the hub mint service accounts for agents? | `true` | Optional; only ask if the user raises it. Must be `true` or `false`. `true` grants the hub VM's service account `roles/iam.serviceAccountAdmin` on the project; `false` skips the grant, and the hub cannot mint service accounts. Explain the trade-off in §6.3c before deploying. | `hub_sa_minting` |
+| 12 | Attach a GKE cluster (hybrid tier)? | No | Only ask if the user mentions running agents on Kubernetes. If yes: cluster name, location (zone or region), and project (default: same as `project_id`; a different project is not supported yet); the Kubernetes namespace (default `scion-hub-<hub_name>`) and PersistentVolumeClaim name (default `scion-hub-<hub_name>-shared`) for the shared tree. The cluster must already exist and be on the same VPC network as the hub VM (`default`, today) — this script never creates or deletes a cluster. **Also requires `container_images.source: registry`** (Question 6) — GKE nodes cannot pull from the VM's local Docker store that `source: build` uses, and the node service account needs `roles/artifactregistry.reader` (or equivalent read access) on that registry. | `gke_target.name`, `gke_target.location`, `gke_target.project`, `gke_target.namespace`, `gke_target.pvc_name` |
 
 ---
 
@@ -257,6 +258,7 @@ Write the file to `/tmp/scion-deploy-config.json`.
   "admin_email": "ADMIN_EMAIL",
   "update_policy": "UPDATE_POLICY",
   "release_channel": "RELEASE_CHANNEL",
+  "hub_sa_minting": HUB_SA_MINTING,
   "gke_target": {
     "name": "GKE_NAME",
     "location": "GKE_LOCATION",
@@ -280,9 +282,10 @@ Replace each placeholder with the gathered value:
 | `ADMIN_EMAIL` | Question 7 answer |
 | `UPDATE_POLICY` | Question 8 answer |
 | `RELEASE_CHANNEL` | Question 9 answer if the user explicitly chose a channel, otherwise `""` (defaults to nightly) |
-| `GKE_NAME` | Question 11 answer, or `""` if the hybrid tier was declined (omit the whole `gke_target` block in that case) |
-| `GKE_LOCATION` | Question 11 answer |
-| `GKE_PROJECT` | Question 11 answer, or `""` to default to `PROJECT_ID` |
+| `HUB_SA_MINTING` | Question 11 answer as a bare JSON boolean (`true` or `false`, no quotes); `true` if not asked |
+| `GKE_NAME` | Question 12 answer, or `""` if the hybrid tier was declined (omit the whole `gke_target` block in that case) |
+| `GKE_LOCATION` | Question 12 answer |
+| `GKE_PROJECT` | Question 12 answer, or `""` to default to `PROJECT_ID` |
 
 Write the file (substituting the gathered values into the template above,
 in place of `# (insert populated JSON here)`):
@@ -969,9 +972,9 @@ Things to know:
 - **Minted accounts start with no roles.** Grant a minted account whatever
   its agents need (for example `roles/aiplatform.user` for Vertex AI) before
   assigning it.
-- **Teardown does not delete minted accounts.** `deploy.sh --delete` removes
-  the hub VM's service account, and with it that account's role bindings,
-  but leaves any service accounts the hub minted.
+- **Teardown does not delete minted accounts.** `deploy.sh --delete` deletes
+  the hub VM's service account, so its role bindings no longer apply, but
+  leaves any service accounts the hub minted.
 
 ### 6.4 Container images (if built locally)
 
@@ -1302,8 +1305,9 @@ stops if either finds an unmarked resource or cannot complete.
 - **The NFS export's own data**, since it has no separate teardown: it's
   deleted along with the VM's boot disk, not by an explicit step.
 - **Service accounts the hub minted for agents** (§6.3c). The hub VM's own
-  service account is deleted, which removes its project role bindings
-  (`roles/iam.serviceAccountAdmin` included), but minted accounts stay.
+  service account is deleted, so its project role bindings
+  (`roles/iam.serviceAccountAdmin` included) no longer apply, but minted
+  accounts stay.
 
 To remove it manually:
 
