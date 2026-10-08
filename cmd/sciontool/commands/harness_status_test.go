@@ -113,7 +113,7 @@ func TestRunHarnessProvision_FailureStatusIsBounded(t *testing.T) {
 	if detail == "" {
 		t.Fatal("no failure detail recorded")
 	}
-	if len(detail) > 1100 {
+	if len(detail) > 1024 {
 		t.Errorf("detail is %d bytes, want it bounded", len(detail))
 	}
 	if strings.ContainsAny(detail, "\n\r\t") {

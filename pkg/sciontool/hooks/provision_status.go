@@ -19,7 +19,7 @@ import (
 // The harness provision status file records the outcome of the most recent
 // `sciontool harness provision` run, so a pre-start failure of the
 // 20-harness-provision hook can be reported with its reason instead of a
-// bare "exit status 1" (ptone/scion#3810). It lives in the bundle's outputs
+// bare "exit status 1". It lives in the bundle's outputs
 // directory (outputs/status.json, the manifest's outputs.status), mapped by
 // SCION_HARNESS_OUTPUTS_DIR when that is set.
 //
@@ -72,7 +72,9 @@ func WriteHarnessProvisionStatus(path, state, errMsg string) error {
 	// a directory created by a root-run provisioner in the workload's home
 	// could outlive a failed start that skips the post-hook ownership
 	// fixup. A missing directory makes the write fail, which callers treat
-	// as best-effort.
+	// as best-effort. The status file itself may be left root-owned after
+	// such a start; it sits in the workload-owned outputs directory, so it
+	// stays removable, and the host clears the bundle on the next start.
 	return dirfd.WriteFileNoFollow(path, append(data, '\n'), 0o600, 0, 0, dirfd.ReplaceLeaf)
 }
 
@@ -128,8 +130,9 @@ func (e *provisionHookError) Error() string { return e.err.Error() + ": " + e.de
 func (e *provisionHookError) Unwrap() error { return e.err }
 
 // sanitizeProvisionError collapses control characters (including newlines)
-// to single spaces and truncates to provisionStatusMaxError bytes on a rune
-// boundary.
+// to single spaces and truncates on a rune boundary so the result, including
+// the trailing ellipsis that marks a cut, is at most provisionStatusMaxError
+// bytes.
 func sanitizeProvisionError(s string) string {
 	var b strings.Builder
 	space := false
@@ -148,9 +151,10 @@ func sanitizeProvisionError(s string) string {
 	if len(out) <= provisionStatusMaxError {
 		return out
 	}
-	cut := provisionStatusMaxError
+	const ellipsis = "…"
+	cut := provisionStatusMaxError - len(ellipsis)
 	for cut > 0 && !utf8.RuneStart(out[cut]) {
 		cut--
 	}
-	return out[:cut] + "…"
+	return out[:cut] + ellipsis
 }

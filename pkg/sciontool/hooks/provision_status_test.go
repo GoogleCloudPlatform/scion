@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func provisionStatusFixture(t *testing.T, hookName, state, msg string) (*LifecycleManager, string) {
@@ -96,12 +97,22 @@ func TestSanitizeProvisionError(t *testing.T) {
 	if got := sanitizeProvisionError("a\nb\t\x1b[31mc\r\n"); got != "a b [31mc" {
 		t.Errorf("got %q", got)
 	}
-	long := strings.Repeat("é", 1000)
-	got := sanitizeProvisionError(long)
-	if len(got) > provisionStatusMaxError+len("…") || !strings.HasSuffix(got, "…") {
-		t.Errorf("len %d", len(got))
+	// The cap includes the ellipsis: ASCII fills it exactly.
+	ascii := sanitizeProvisionError(strings.Repeat("a", 5000))
+	if len(ascii) != provisionStatusMaxError || !strings.HasSuffix(ascii, "…") {
+		t.Errorf("ascii: len %d, want exactly %d ending in an ellipsis", len(ascii), provisionStatusMaxError)
 	}
-	if strings.ContainsRune(strings.TrimSuffix(got, "…"), '�') {
+	// Exactly at the cap: not cut.
+	exact := strings.Repeat("b", provisionStatusMaxError)
+	if got := sanitizeProvisionError(exact); got != exact {
+		t.Errorf("input of exactly %d bytes was changed (len %d)", provisionStatusMaxError, len(got))
+	}
+	// Multi-byte runes are never split and the total stays within the cap.
+	got := sanitizeProvisionError(strings.Repeat("é", 1000))
+	if len(got) > provisionStatusMaxError || !strings.HasSuffix(got, "…") {
+		t.Errorf("multibyte: len %d", len(got))
+	}
+	if !utf8.ValidString(got) {
 		t.Error("cut inside a rune")
 	}
 }
