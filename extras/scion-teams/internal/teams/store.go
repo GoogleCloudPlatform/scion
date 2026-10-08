@@ -61,7 +61,6 @@ type Store interface {
 	GetLatestConversationContext(ctx context.Context, teamsUserID, projectID string) (*ConversationContext, error)
 
 	// Agent cache
-	SetProjectAgents(ctx context.Context, pa *ProjectAgents) error
 
 	// Pending ask-user requests
 	// CreatePendingAskUser stores req unless a request with the same ID
@@ -195,11 +194,8 @@ CREATE TABLE IF NOT EXISTS conversation_context (
 	PRIMARY KEY (teams_user_id, project_id, agent_slug)
 );
 
-CREATE TABLE IF NOT EXISTS project_agents (
-	project_id TEXT PRIMARY KEY,
-	agent_slugs TEXT NOT NULL DEFAULT '[]',
-	refreshed_at TEXT NOT NULL
-);
+-- The per-project agent list was never read; drop the old table.
+DROP TABLE IF EXISTS project_agents;
 
 CREATE TABLE IF NOT EXISTS pending_ask_users (
 	request_id TEXT PRIMARY KEY,
@@ -449,22 +445,6 @@ ORDER BY last_message_at DESC LIMIT 1`
 		return nil, fmt.Errorf("parse last_message_at: %w", err)
 	}
 	return &cc, nil
-}
-
-// --- ProjectAgents ---
-
-func (s *sqliteStore) SetProjectAgents(ctx context.Context, pa *ProjectAgents) error {
-	slugsJSON, err := json.Marshal(pa.AgentSlugs)
-	if err != nil {
-		return fmt.Errorf("marshal agent_slugs: %w", err)
-	}
-	const q = `
-INSERT INTO project_agents (project_id, agent_slugs, refreshed_at)
-VALUES (?, ?, ?)
-ON CONFLICT(project_id) DO UPDATE SET
-	agent_slugs=excluded.agent_slugs, refreshed_at=excluded.refreshed_at`
-	_, err = s.db.ExecContext(ctx, q, pa.ProjectID, string(slugsJSON), pa.RefreshedAt.UTC().Format(time.RFC3339))
-	return err
 }
 
 // --- PendingAskUser ---

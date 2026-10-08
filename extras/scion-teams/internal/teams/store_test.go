@@ -17,7 +17,6 @@ package teams
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"sync"
@@ -592,97 +591,6 @@ func TestConversationContext(t *testing.T) {
 	})
 }
 
-// --- ProjectAgents ---
-
-// readCachedProjectAgents reads the cached agent list of projectID straight
-// from the sqlite table, or nil when there is none.
-func readCachedProjectAgents(t *testing.T, store Store, projectID string) (*ProjectAgents, error) {
-	t.Helper()
-	s, ok := store.(*sqliteStore)
-	require.True(t, ok, "unsupported store %T", store)
-	row := s.db.QueryRow(`SELECT project_id, agent_slugs, refreshed_at FROM project_agents WHERE project_id = ?`, projectID)
-	var pa ProjectAgents
-	var slugsJSON, refreshedAt string
-	err := row.Scan(&pa.ProjectID, &slugsJSON, &refreshedAt)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	require.NoError(t, json.Unmarshal([]byte(slugsJSON), &pa.AgentSlugs))
-	pa.RefreshedAt, err = time.Parse(time.RFC3339, refreshedAt)
-	require.NoError(t, err)
-	return &pa, nil
-}
-
-func TestProjectAgents(t *testing.T) {
-	t.Run("Set", func(t *testing.T) {
-		store := newTestStore(t)
-		ctx := context.Background()
-
-		pa := &ProjectAgents{
-			ProjectID:   "proj-1",
-			AgentSlugs:  []string{"coder", "reviewer", "tester"},
-			RefreshedAt: time.Date(2026, 5, 10, 8, 0, 0, 0, time.UTC),
-		}
-		require.NoError(t, store.SetProjectAgents(ctx, pa))
-
-		got, err := readCachedProjectAgents(t, store, "proj-1")
-		require.NoError(t, err)
-		require.NotNil(t, got)
-		assert.Equal(t, "proj-1", got.ProjectID)
-		assert.Equal(t, []string{"coder", "reviewer", "tester"}, got.AgentSlugs)
-		assert.Equal(t, 2026, got.RefreshedAt.Year())
-	})
-
-	t.Run("NotCached", func(t *testing.T) {
-		store := newTestStore(t)
-
-		got, err := readCachedProjectAgents(t, store, "nonexistent")
-		require.NoError(t, err)
-		assert.Nil(t, got)
-	})
-
-	t.Run("Upsert", func(t *testing.T) {
-		store := newTestStore(t)
-		ctx := context.Background()
-
-		pa := &ProjectAgents{
-			ProjectID:   "proj-1",
-			AgentSlugs:  []string{"coder"},
-			RefreshedAt: time.Now().UTC(),
-		}
-		require.NoError(t, store.SetProjectAgents(ctx, pa))
-
-		pa.AgentSlugs = []string{"coder", "reviewer"}
-		pa.RefreshedAt = time.Now().UTC().Add(time.Hour)
-		require.NoError(t, store.SetProjectAgents(ctx, pa))
-
-		got, err := readCachedProjectAgents(t, store, "proj-1")
-		require.NoError(t, err)
-		require.NotNil(t, got)
-		assert.Equal(t, []string{"coder", "reviewer"}, got.AgentSlugs)
-	})
-
-	t.Run("EmptySlice", func(t *testing.T) {
-		store := newTestStore(t)
-		ctx := context.Background()
-
-		pa := &ProjectAgents{
-			ProjectID:   "proj-1",
-			AgentSlugs:  []string{},
-			RefreshedAt: time.Now().UTC(),
-		}
-		require.NoError(t, store.SetProjectAgents(ctx, pa))
-
-		got, err := readCachedProjectAgents(t, store, "proj-1")
-		require.NoError(t, err)
-		require.NotNil(t, got)
-		assert.Equal(t, []string{}, got.AgentSlugs)
-	})
-}
-
 // --- PendingAskUser ---
 
 func TestPendingAskUser(t *testing.T) {
@@ -964,6 +872,34 @@ func TestAdvisoryLock_SQLiteAlwaysAcquired(t *testing.T) {
 func TestStore_OpenInvalidPath(t *testing.T) {
 	_, err := NewSQLiteStore("/nonexistent/dir/test.db")
 	assert.Error(t, err)
+}
+
+// A database created before the per-project agent list was removed still
+// has the project_agents table. Opening the store drops it.
+func TestSQLiteStore_DropsProjectAgentsTable(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "old.db")
+
+	old, err := sql.Open("sqlite", dbPath)
+	require.NoError(t, err)
+	_, err = old.Exec(`
+CREATE TABLE project_agents (
+	project_id TEXT PRIMARY KEY,
+	agent_slugs TEXT NOT NULL DEFAULT '[]',
+	refreshed_at TEXT NOT NULL
+);
+INSERT INTO project_agents (project_id, agent_slugs, refreshed_at)
+VALUES ('proj-old', '["coder"]', '2026-01-01T00:00:00Z');`)
+	require.NoError(t, err)
+	require.NoError(t, old.Close())
+
+	s, err := NewSQLiteStore(dbPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
+
+	var n int
+	require.NoError(t, s.(*sqliteStore).db.QueryRow(
+		`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'project_agents'`).Scan(&n))
+	assert.Zero(t, n, "project_agents table should be dropped")
 }
 
 // A database created before ShowAssistantReply was retired still has the

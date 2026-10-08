@@ -148,13 +148,6 @@ type TeamsUserMapping struct {
 	AutoLinked       bool
 }
 
-// ProjectAgents caches the list of agents for a project.
-type ProjectAgents struct {
-	ProjectID   string
-	AgentSlugs  []string
-	RefreshedAt time.Time
-}
-
 // PendingAskUser represents an ask-user callback awaiting a Teams user response.
 type PendingAskUser struct {
 	RequestID      string

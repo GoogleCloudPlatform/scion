@@ -107,11 +107,8 @@ CREATE TABLE IF NOT EXISTS teams_conversation_context (
 	PRIMARY KEY (teams_user_id, project_id, agent_slug)
 );
 
-CREATE TABLE IF NOT EXISTS teams_project_agents (
-	project_id TEXT PRIMARY KEY,
-	agent_slugs TEXT NOT NULL DEFAULT '[]',
-	refreshed_at TIMESTAMPTZ NOT NULL
-);
+-- The per-project agent list was never read; drop the old table.
+DROP TABLE IF EXISTS teams_project_agents;
 
 CREATE TABLE IF NOT EXISTS teams_pending_ask_users (
 	request_id TEXT PRIMARY KEY,
@@ -340,22 +337,6 @@ ORDER BY last_message_at DESC LIMIT 1`
 		return nil, err
 	}
 	return &cc, nil
-}
-
-// --- ProjectAgents ---
-
-func (s *postgresStore) SetProjectAgents(ctx context.Context, pa *ProjectAgents) error {
-	slugsJSON, err := json.Marshal(pa.AgentSlugs)
-	if err != nil {
-		return fmt.Errorf("marshal agent_slugs: %w", err)
-	}
-	const q = `
-INSERT INTO teams_project_agents (project_id, agent_slugs, refreshed_at)
-VALUES ($1, $2, $3)
-ON CONFLICT(project_id) DO UPDATE SET
-	agent_slugs=EXCLUDED.agent_slugs, refreshed_at=EXCLUDED.refreshed_at`
-	_, err = s.db.ExecContext(ctx, q, pa.ProjectID, string(slugsJSON), pa.RefreshedAt.UTC())
-	return err
 }
 
 // --- PendingAskUser ---
