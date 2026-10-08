@@ -290,3 +290,23 @@ func TestCredentialPathWithEscapedSlashNotLogged(t *testing.T) {
 	require.NotEmpty(t, logs.String())
 	assert.NotContains(t, logs.String(), token)
 }
+
+// TestAgentTokenShareLinkRequestNotLogged: an agent that sends its token
+// with a share-link or view read goes through agent-token authentication,
+// whose run-scope check logs the request; the credential in the path never
+// reaches that log.
+func TestAgentTokenShareLinkRequestNotLogged(t *testing.T) {
+	srv, s, _, project := setupCredentialTestServer(t)
+	agent := runScopeAgent(t, s, project.ID, "share-log", "run-current")
+	tok := signRunToken(t, srv, s, agent, "run-old", recordRun("run-old"))
+	var logs bytes.Buffer
+	srv.authConfig.AgentRunScope = newAgentRunScopeChecker(AgentRunScope{mode: agentRunScopeObserve}, s,
+		slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	token := strings.Repeat("C", 43)
+	for _, target := range []string{artifacts.RouteShared + token, artifacts.RouteView + token + "/index.html"} {
+		agentRequest(t, srv.Handler(), http.MethodGet, target, tok, "")
+	}
+	require.Contains(t, logs.String(), "agent_token_run_superseded", "the run-scope check did not log the request")
+	assert.NotContains(t, logs.String(), token)
+	assert.Contains(t, logs.String(), logging.RedactedArtifactPath)
+}

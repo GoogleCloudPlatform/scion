@@ -49,9 +49,7 @@ func logAuthzDenial(r *http.Request, identity Identity, resource Resource, actio
 	var path string
 	ctx := context.Background()
 	if r != nil {
-		if r.URL != nil {
-			path = r.URL.Path
-		}
+		path = logging.RequestPath(r)
 		ctx = r.Context()
 	}
 	// E.2a (plan §3.1(5)): every one of this function's ~56 call sites now
@@ -622,7 +620,9 @@ func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) (UserIdent
 func (s *Server) requireAdminFor(w http.ResponseWriter, r *http.Request, reason authzop.SessionOnlyReason) (UserIdentity, bool) {
 	// Synthetic resource: requireAdmin is a role check on the hub itself
 	// rather than a policy check on an addressable resource.
-	resource := Resource{Type: "hub", ID: r.URL.Path}
+	// The path is only a label (it reaches the denial log), so it is the
+	// logged form.
+	resource := Resource{Type: "hub", ID: logging.RequestPath(r)}
 
 	identity := GetIdentityFromContext(r.Context())
 	if identity == nil {
