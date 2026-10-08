@@ -752,6 +752,25 @@ func TestAgentStore_MarkAgentContainerMissingIfUnchanged(t *testing.T) {
 		})
 	}
 
+	// Unlike MarkAgentContainerMissing, the exec path concludes only for a
+	// running agent: a stopping agent is left alone.
+	t.Run("stopping agent not marked", func(t *testing.T) {
+		a := makeAgent(projectID, "stopping-exec")
+		a.Phase = "stopping"
+		a.RuntimeBrokerID = "broker-1"
+		a.LastSeen = time.Now().Add(-time.Hour)
+		require.NoError(t, s.CreateAgent(ctx, a))
+		read, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		got, err := s.MarkAgentContainerMissingIfUnchanged(ctx, read.ID, "broker-1", cutoff, pre(read), "gone")
+		require.NoError(t, err)
+		assert.Nil(t, got)
+		row, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		assert.Equal(t, "stopping", row.Phase)
+		assert.Empty(t, row.ExitReason)
+	})
+
 	changes := map[string]func(t *testing.T, a *store.Agent){
 		"state_version moved": func(t *testing.T, a *store.Agent) {
 			cp := *a

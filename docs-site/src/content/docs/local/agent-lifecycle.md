@@ -115,9 +115,10 @@ non-zero container exit reported in the broker heartbeat — which covers cases
 where the container died before `sciontool` could report.
 
 A third path covers a container that vanishes without reporting an exit (for
-example, removed outside Scion). In Hub-connected setups, a `running` agent
-(or a `stopping` agent whose final stop report never arrived) that is missing from its online Runtime Broker's complete runtime inventory for longer
-than `missing_agent_grace` (default **3 minutes**, see
+example, removed outside Scion). In Hub-connected setups, a `running` agent (or
+a `stopping` agent whose final stop report never arrived) that is missing from
+its online Runtime Broker's complete runtime inventory for longer than
+`missing_agent_grace` (default **3 minutes**, see
 [server configuration](/scion/reference/server-config/)) moves to `error` with
 exit reason `container_missing`, instead of staying `running` while messages
 to it are buffered. It can then be restarted like any other `error`-phase agent.

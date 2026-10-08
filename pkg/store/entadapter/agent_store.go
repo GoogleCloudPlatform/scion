@@ -1774,6 +1774,9 @@ func (s *AgentStore) MarkAgentContainerMissingIfUnchanged(ctx context.Context, i
 		runID = agent.Or(agent.RunIDIsNil(), agent.RunIDEQ(""))
 	}
 	return s.markAgentContainerMissing(ctx, id, brokerID, cutoff, message,
+		// The exec agent_not_found path concludes only for an agent that
+		// was running; the heartbeat reconcile also settles stopping.
+		agent.PhaseEQ(string(state.PhaseRunning)),
 		agent.StateVersionEQ(pre.StateVersion),
 		runID,
 		agent.StartClaimIDIsNil(),

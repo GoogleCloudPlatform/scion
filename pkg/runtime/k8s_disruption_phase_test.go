@@ -25,10 +25,24 @@ import (
 // withDisruptionStorage sets the pod's workspace volume and home storage
 // annotation the way buildPod does for each backend.
 func withDisruptionStorage(pod *corev1.Pod, pvcWorkspace, nfsHome bool) *corev1.Pod {
-	ws := corev1.Volume{Name: "workspace"}
+	kind := "emptydir"
 	if pvcWorkspace {
+		kind = "pvc"
+	}
+	return withWorkspaceVolume(pod, kind, nfsHome)
+}
+
+// withWorkspaceVolume sets a "workspace" volume of the given kind ("pvc",
+// "nfs" for an inline NFS volume, or "emptydir") and the home storage
+// annotation.
+func withWorkspaceVolume(pod *corev1.Pod, kind string, nfsHome bool) *corev1.Pod {
+	ws := corev1.Volume{Name: "workspace"}
+	switch kind {
+	case "pvc":
 		ws.PersistentVolumeClaim = &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "scion-nfs"}
-	} else {
+	case "nfs":
+		ws.NFS = &corev1.NFSVolumeSource{Server: "nfs.example.internal", Path: "/exports/scion"}
+	default:
 		ws.EmptyDir = &corev1.EmptyDirVolumeSource{}
 	}
 	pod.Spec.Volumes = append(pod.Spec.Volumes, ws)
@@ -38,19 +52,20 @@ func withDisruptionStorage(pod *corev1.Pod, pvcWorkspace, nfsHome bool) *corev1.
 
 func TestK8sDisruptionPhase_StorageCombinations(t *testing.T) {
 	tests := []struct {
-		name         string
-		pvcWorkspace bool
-		nfsHome      bool
-		want         state.Phase
+		name      string
+		workspace string
+		nfsHome   bool
+		want      state.Phase
 	}{
-		{"pvc-workspace-nfs-home", true, true, state.PhaseStopped},
-		{"pvc-workspace-local-home", true, false, state.PhaseStopped},
-		{"emptydir-workspace-nfs-home", false, true, state.PhaseError},
-		{"emptydir-workspace-local-home", false, false, state.PhaseError},
+		{"pvc-workspace-nfs-home", "pvc", true, state.PhaseStopped},
+		{"pvc-workspace-local-home", "pvc", false, state.PhaseStopped},
+		{"inline-nfs-workspace-local-home", "nfs", false, state.PhaseStopped},
+		{"emptydir-workspace-nfs-home", "emptydir", true, state.PhaseError},
+		{"emptydir-workspace-local-home", "emptydir", false, state.PhaseError},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			pod := withDisruptionStorage(newPodForDisruptionTest("agent-"+tt.name, corev1.PodFailed), tt.pvcWorkspace, tt.nfsHome)
+			pod := withWorkspaceVolume(newPodForDisruptionTest("agent-"+tt.name, corev1.PodFailed), tt.workspace, tt.nfsHome)
 			if got := k8sDisruptionPhase(pod); got != tt.want {
 				t.Errorf("k8sDisruptionPhase = %q, want %q", got, tt.want)
 			}

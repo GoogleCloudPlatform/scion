@@ -17,6 +17,7 @@
 package hub
 
 import (
+	"context"
 	"net/http"
 	"testing"
 
@@ -114,4 +115,31 @@ func TestHeartbeatDisruption_UserStopRaceStaysStopped(t *testing.T) {
 
 	got := getAgentState(t, s, agentSlug, projectID)
 	assert.Equal(t, "stopped", got.Phase, "a user stop must not be turned into an error by a racing disruption")
+}
+
+// TestHeartbeatDisruption_ErrorAfterRunIntentBeforeStopStatus: a user stop
+// has recorded run intent stopped but not yet written its stopped status
+// when a heartbeat reports a non-recoverable disruption as error. The agent
+// ends stopped, keeping the disruption reason.
+func TestHeartbeatDisruption_ErrorAfterRunIntentBeforeStopStatus(t *testing.T) {
+	srv, s, brokerID, projectID, agentSlug := setupHeartbeatExitCodeTest(t)
+	agent := getAgentState(t, s, agentSlug, projectID)
+	_, err := srv.recordRunIntent(context.Background(), agent, store.RunIntentStopped)
+	require.NoError(t, err)
+	mid := getAgentState(t, s, agentSlug, projectID)
+	require.Equal(t, "running", mid.Phase, "the stop status is not written yet")
+	require.Equal(t, store.RunIntentStopped, mid.RunIntent)
+
+	ec := 137
+	require.Equal(t, http.StatusOK, sendHeartbeat(t, srv, brokerID, projectID, brokerAgentHeartbeat{
+		Slug:       agentSlug,
+		Phase:      "error",
+		ExitCode:   &ec,
+		ExitReason: "preempted",
+	}))
+
+	got := getAgentState(t, s, agentSlug, projectID)
+	assert.Equal(t, "stopped", got.Phase, "a user stop racing a disruption ends stopped")
+	assert.Equal(t, "preempted", got.ExitReason)
+	assert.Equal(t, "Agent pod was preempted, exit code 137", got.Message)
 }

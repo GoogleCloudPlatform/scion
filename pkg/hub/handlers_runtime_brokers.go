@@ -1127,6 +1127,13 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 						// pkg/runtime); the broker's phase is authoritative then.
 						hbReason := state.ExitReason(agentHB.ExitReason)
 						hbDisruption := hbReason == state.ExitReasonPreempted || hbReason == state.ExitReasonEvicted
+						// A stop the user asked for (run intent stopped, its
+						// stopped status not yet written) that races a
+						// disruption ends stopped, keeping the reason.
+						if hbDisruption && hbPhase == state.PhaseError && agent.RunIntent == store.RunIntentStopped {
+							hbPhase = state.PhaseStopped
+							agentHB.Phase = string(state.PhaseStopped)
+						}
 						if agentHB.ExitCode != nil && *agentHB.ExitCode != 0 {
 							// crash path
 							if hbPhase == state.PhaseStopped && !hbDisruption {
