@@ -468,17 +468,35 @@ func (s *Server) writeGCPIAMAudit(ctx context.Context, mutation, surface string,
 }
 
 // auditGCPIAMNotApplied records that a change recorded by
-// auditGCPIAMChange was not written (the section write failed).
+// auditGCPIAMChange was not written (the section write failed). The
+// record is written through the store before it returns, like
+// writeGCPIAMAudit, so a reload on any replica that reads the audit
+// table after the handler responds sees it. A failed write is logged and
+// does not change the response.
 func (s *Server) auditGCPIAMNotApplied(ctx context.Context, cur, next gcpIAMSettings, cause error) {
 	slog.Error("GCP permission-check setting change was recorded but not written",
 		"check_mode", next.CheckMode, "deny_unknown_policy", next.denyUnknownPolicy(), "error", cause)
-	s.emitMutationAudit(ctx, &store.MutationAuditRecord{
+	rec := &store.MutationAuditRecord{
 		MutationType:  gcpIAMNotAppliedMutation,
 		TargetType:    gcpIAMAuditTarget,
 		TargetID:      gcpIAMSection,
 		BeforeSummary: cur.CheckMode + "," + cur.denyUnknownPolicy(),
 		AfterSummary:  next.CheckMode + "," + next.denyUnknownPolicy(),
-	})
+	}
+	auditActorFromContext(ctx).ApplyActor(rec)
+	rec.Timestamp = time.Now()
+	if s.store == nil {
+		slog.Warn("failed to emit mutation audit record",
+			"mutation_type", rec.MutationType, "error", "no store")
+		return
+	}
+	// Detached from request cancellation, bounded like emitMutationAudit.
+	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), auditWriteTimeout)
+	defer cancel()
+	if err := s.store.CreateMutationAudit(writeCtx, rec); err != nil {
+		slog.Warn("failed to emit mutation audit record",
+			"mutation_type", rec.MutationType, "error", err)
+	}
 }
 
 // approveGCPIAMTransition admits t for the next ApplySnapshot on this

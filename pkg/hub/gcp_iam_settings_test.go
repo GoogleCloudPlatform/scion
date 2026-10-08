@@ -936,6 +936,52 @@ func TestGCPIAMReload_NotAppliedWriteIsNotAttributable(t *testing.T) {
 	assert.Contains(t, recs[0].AfterSummary, "not attributable to an audited write")
 }
 
+func TestGCPIAMNotAppliedRecordWrittenBeforeHandlerReturns(t *testing.T) {
+	f := newIAMFixture(t, iamEnforceClosed)
+	// A slow store write: the record is only present when the handler
+	// returns if the handler waited for the write.
+	var writes atomic.Int32
+	f.st.onAudit = func(rec *store.MutationAuditRecord) {
+		if rec.MutationType == gcpIAMNotAppliedMutation {
+			time.Sleep(200 * time.Millisecond)
+			writes.Add(1)
+		}
+	}
+	f.hs.onUpsert = func() error { return errors.New("injected write failure") }
+	require.Equal(t, http.StatusInternalServerError, f.put(t, iamBody("off", "")).Code)
+	f.hs.onUpsert = nil
+
+	require.Equal(t, int32(1), writes.Load(), "write completed before the handler returned")
+	recs, _, err := f.st.ListMutationAudits(context.Background(),
+		store.MutationAuditFilter{MutationType: gcpIAMNotAppliedMutation})
+	require.NoError(t, err)
+	require.Len(t, recs, 1)
+	r := recs[0]
+	assert.Equal(t, gcpIAMAuditTarget, r.TargetType)
+	assert.Equal(t, gcpIAMSection, r.TargetID)
+	assert.Equal(t, "enforce,fail-closed", r.BeforeSummary)
+	assert.Equal(t, "off,fail-closed", r.AfterSummary)
+	assert.NotEmpty(t, r.ActorPrincipalID)
+}
+
+func TestGCPIAMNotAppliedRecordStoreFailureKeepsResponse(t *testing.T) {
+	f := newIAMFixture(t, iamEnforceClosed)
+	f.st.onAudit = func(rec *store.MutationAuditRecord) {
+		if rec.MutationType == gcpIAMNotAppliedMutation {
+			f.st.failAudit.Store(true)
+		}
+	}
+	f.hs.onUpsert = func() error { return errors.New("injected write failure") }
+	require.Equal(t, http.StatusInternalServerError, f.put(t, iamBody("off", "")).Code)
+	f.hs.onUpsert = nil
+	f.st.failAudit.Store(false)
+	recs, _, err := f.st.ListMutationAudits(context.Background(),
+		store.MutationAuditFilter{MutationType: gcpIAMNotAppliedMutation})
+	require.NoError(t, err)
+	assert.Empty(t, recs)
+	assert.Equal(t, iamEnforceClosed, f.applied(t))
+}
+
 func TestGCPIAMReload_NotAppliedRecordForOtherKeyKeepsAttribution(t *testing.T) {
 	f := newIAMFixture(t, iamEnforceClosed)
 	g := newIAMFixture(t, iamEnforceClosed)
