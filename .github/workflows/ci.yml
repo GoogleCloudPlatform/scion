@@ -528,11 +528,6 @@ jobs:
       # instead of a bare job kill. The
       # longer-term fix is splitting pkg/hub into smaller suites
       # (ptone/scion#1847).
-      #
-      # Four tests are skipped: they have known, pre-existing failures
-      # unrelated to this job (ptone/scion#1847) that already reproduce on
-      # main today under `go test ./pkg/hub/...`. They are not new failures
-      # caused by newly-compiled tests. Remove the -skip once #1847 is fixed.
       - name: Run SQLite-enabled tests (make test-hub-sqlite)
         run: make test-hub-sqlite
 

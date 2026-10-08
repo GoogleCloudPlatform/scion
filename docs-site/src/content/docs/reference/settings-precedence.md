@@ -1138,17 +1138,12 @@ go test ./pkg/hub -count=1 -timeout 40m   # slow (see below); do not add -race, 
 :::caution[A whole-repo `go test ./...` is not a usable baseline]
 Outside `pkg/hub`, the repository passes: CI runs `go test -tags no_sqlite ./...` and the
 fixture coverage gate (`make test-fixture-coverage`) green on `main`. `pkg/hub` with SQLite
-enabled is the exception:
+enabled is the exception: a full `pkg/hub` run takes far longer than `go test`'s default
+10-minute timeout. CI gives it 40 minutes (`make test-hub-sqlite`) and still sometimes times out
+(ptone/scion#1847), so a default-timeout `go test ./...` fails in `pkg/hub` even when no test is
+broken.
 
-- A full `pkg/hub` run takes far longer than `go test`'s default 10-minute timeout. CI gives it
-  40 minutes (`make test-hub-sqlite`) and still sometimes times out (ptone/scion#1847). A
-  default-timeout `go test ./...` therefore fails in `pkg/hub` even when no test is broken.
-- `make test-hub-sqlite` skips four tests with known failures in a full-package run:
-  `TestDEF164_AtAgentSlug_DeliversToAgent`, `TestDEF164_AtAgentSlug_DMConversationCreated`,
-  `TestDEF152_AgentToAgentDM_DeliversViaOutbound` and `TestCreateTemplateV2_ScopeIDInjectionBlocked`.
-  The `Makefile` skip list is authoritative if this list drifts.
-
-None of these is related to settings precedence. Do not "fix" them as part of a settings change.
+This is unrelated to settings precedence. Do not try to fix it as part of a settings change.
 :::
 
 ## See also
