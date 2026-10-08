@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -50,6 +51,8 @@ type refFixture struct {
 	// calls named in its fields.
 	faults *refFaultStore
 	fault  *storeFaultSwitch
+	as     *LocalDiskAttachmentStore
+	aa     *store.Agent // agent of project A, owned by ua
 }
 
 var errRefStoreFault = errors.New("injected store fault")
@@ -103,6 +106,9 @@ func newRefFixture(t *testing.T) *refFixture {
 	wcs := NewWebChatStore(db, "sqlite3")
 	require.NoError(t, wcs.Init())
 	srv.SetWebChatStore(wcs)
+	as, err := NewLocalDiskAttachmentStore(t.TempDir())
+	require.NoError(t, err)
+	srv.SetAttachmentStore(as)
 	ctx := context.Background()
 
 	ua, err := st.GetUser(ctx, tid("user-alice"))
@@ -140,7 +146,11 @@ func newRefFixture(t *testing.T) *refFixture {
 		topicA: tid("ref-topic-a"),
 		topicB: tid("ref-topic-b"),
 		faults: faults, fault: fault,
+		as: as,
 	}
+	f.aa = &store.Agent{ID: tid("ref-agent-a"), ProjectID: projA.ID, Name: "aa", Slug: "aa",
+		Phase: "running", OwnerID: ua.ID, CreatedBy: ua.ID}
+	require.NoError(t, st.CreateAgent(ctx, f.aa))
 	for _, tp := range []struct {
 		id, project, by string
 	}{{f.topicA, projA.ID, ua.ID}, {f.topicB, projB.ID, ub.ID}} {
@@ -151,6 +161,20 @@ func newRefFixture(t *testing.T) *refFixture {
 		setTopicConversationID(t, db, st, tp.id, tp.project)
 	}
 	return f
+}
+
+// attach stores a file as uploaded by uploader into projectID ("" for a
+// direct-message upload) and returns its ID.
+func (f *refFixture) attach(t *testing.T, projectID, uploader, name string) string {
+	t.Helper()
+	ctx := context.Background()
+	content := "content of " + name
+	meta, err := f.as.Save(ctx, projectID, name, strings.NewReader(content), int64(len(content)), "text/plain")
+	require.NoError(t, err)
+	meta.ProjectID = projectID
+	meta.UploadedBy = uploader
+	require.NoError(t, f.wcs.CreateAttachment(ctx, meta))
+	return meta.ID
 }
 
 // seedMessage stores a web chat message on thread directly.
@@ -385,4 +409,66 @@ func TestChatReply_TargetLookupErrorRefusesSend(t *testing.T) {
 		require.Equal(t, http.StatusServiceUnavailable, got.status, got.body)
 		assert.Equal(t, before, f.threadMessageCount(t, dm), "nothing is stored")
 	})
+}
+
+// attachmentRefusal sends one attachment and returns the answer with the
+// attachment ID replaced by a placeholder, so answers for different IDs
+// can be compared.
+func (f *refFixture) attachmentRefusal(t *testing.T, user *store.User, key, attachmentID string) refAnswer {
+	t.Helper()
+	got := f.send(t, user, key, map[string]interface{}{"content": "see file", "attachments": []string{attachmentID}})
+	return refAnswer{status: got.status, body: strings.ReplaceAll(got.body, attachmentID, "<id>")}
+}
+
+func (f *refFixture) unknownAttachmentAnswer(t *testing.T, user *store.User, key string) refAnswer {
+	t.Helper()
+	missing := f.attachmentRefusal(t, user, key, uuid.NewString())
+	require.Equal(t, http.StatusBadRequest, missing.status, missing.body)
+	assert.Contains(t, missing.body, `attachment \"<id>\" is not available in this conversation`)
+	return missing
+}
+
+func TestChatSend_DMAttachmentUploadedByOtherUserNotAccepted(t *testing.T) {
+	f := newRefFixture(t)
+	agentDM := dmKeyFor(t, "agent", f.aa.ID, "user", f.ua.ID)
+	missing := f.unknownAttachmentAnswer(t, f.ua, agentDM)
+
+	carolsUpload := f.attach(t, "", f.uc.ID, "carol.txt")
+	requireSameAnswer(t, missing, f.attachmentRefusal(t, f.ua, agentDM, carolsUpload))
+
+	// The sender's own direct-message upload is accepted.
+	userDM := dmKeyFor(t, "user", f.ua.ID, "user", f.uc.ID)
+	own := f.attach(t, "", f.ua.ID, "alice.txt")
+	ok := f.send(t, f.ua, userDM, map[string]interface{}{"content": "mine", "attachments": []string{own}})
+	require.Equal(t, http.StatusCreated, ok.status, ok.body)
+}
+
+func TestChatSend_ProjectAttachmentInDMNotAccepted(t *testing.T) {
+	f := newRefFixture(t)
+	agentDM := dmKeyFor(t, "agent", f.aa.ID, "user", f.ua.ID)
+	userDM := dmKeyFor(t, "user", f.ua.ID, "user", f.uc.ID)
+	ownProjectFile := f.attach(t, f.projA.ID, f.ua.ID, "a.txt")
+	otherProjectFile := f.attach(t, f.projB.ID, f.ub.ID, "b.txt")
+
+	for _, key := range []string{agentDM, userDM} {
+		missing := f.unknownAttachmentAnswer(t, f.ua, key)
+		requireSameAnswer(t, missing, f.attachmentRefusal(t, f.ua, key, ownProjectFile))
+		requireSameAnswer(t, missing, f.attachmentRefusal(t, f.ua, key, otherProjectFile))
+	}
+}
+
+func TestChatSend_TopicAttachmentFromOtherProjectNotAccepted(t *testing.T) {
+	f := newRefFixture(t)
+	missing := f.unknownAttachmentAnswer(t, f.ua, f.topicA)
+
+	otherProjectFile := f.attach(t, f.projB.ID, f.ub.ID, "b.txt")
+	requireSameAnswer(t, missing, f.attachmentRefusal(t, f.ua, f.topicA, otherProjectFile))
+	dmUpload := f.attach(t, "", f.ua.ID, "dm.txt")
+	requireSameAnswer(t, missing, f.attachmentRefusal(t, f.ua, f.topicA, dmUpload))
+
+	before := f.threadMessageCount(t, f.topicA)
+	ownFile := f.attach(t, f.projA.ID, f.ua.ID, "a.txt")
+	ok := f.send(t, f.ua, f.topicA, map[string]interface{}{"content": "mine", "attachments": []string{ownFile}})
+	require.Equal(t, http.StatusCreated, ok.status, ok.body)
+	assert.Equal(t, before+1, f.threadMessageCount(t, f.topicA))
 }

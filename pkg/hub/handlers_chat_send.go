@@ -321,17 +321,27 @@ func (s *Server) validateChatSendInput(ctx context.Context, user UserIdentity, t
 		}
 	}
 
-	// W7: Validate attachment IDs and collect metadata.
+	// W7: Validate attachment IDs and collect metadata. An attachment must
+	// be usable in this conversation (attachmentUsableIn); a missing one and
+	// one that is not usable here get the same answer, and the reason is
+	// logged.
 	var attachmentRefs []AttachmentRef
 	if len(in.Attachments) > 0 && target.wcs != nil {
 		for _, aid := range in.Attachments {
 			meta, err := target.wcs.GetAttachment(ctx, aid)
-			if err != nil || meta == nil {
-				return "", nil, chatSendValidationError(fmt.Sprintf("attachment %q not found", aid))
+			reason := ""
+			switch {
+			case err != nil || meta == nil:
+				reason = "attachment lookup found no attachment"
+				if err != nil && !errors.Is(err, store.ErrNotFound) {
+					reason = "attachment lookup failed: " + err.Error()
+				}
+			case !attachmentUsableIn(meta, target.IsDM, target.ProjectID, user.ID()):
+				reason = "attachment is not usable in this conversation"
 			}
-			// Verify the attachment belongs to the correct project.
-			if target.ProjectID != "" && meta.ProjectID != target.ProjectID {
-				return "", nil, chatSendValidationError(fmt.Sprintf("attachment %q does not belong to this project", aid))
+			if reason != "" {
+				logReferenceRefused(ctx, chatSendPath(target.Key), reason, user)
+				return "", nil, chatSendValidationError(fmt.Sprintf("attachment %q is not available in this conversation", aid))
 			}
 			attachmentRefs = append(attachmentRefs, AttachmentRef{
 				ID:       meta.ID,

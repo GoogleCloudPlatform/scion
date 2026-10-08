@@ -68,6 +68,26 @@ func sameConversation(msg *store.Message, threadKey, convID string) bool {
 	return convID != "" && msg.ConversationID == convID
 }
 
+// attachmentUsableIn reports whether an attachment may be sent in a
+// conversation. The rule follows the conversation kind, not a resolved
+// project (an agent DM resolves to the agent's project, but files uploaded
+// in a direct message carry no project):
+//
+//   - direct message: a file the sender uploaded in a direct message
+//     (no project, uploaded by userID)
+//   - topic: a file of the topic's project
+//
+// Pure; no store access.
+func attachmentUsableIn(meta *AttachmentMeta, isDM bool, topicProjectID, userID string) bool {
+	if meta == nil {
+		return false
+	}
+	if isDM {
+		return meta.ProjectID == "" && userID != "" && meta.UploadedBy == userID
+	}
+	return topicProjectID != "" && meta.ProjectID == topicProjectID
+}
+
 // conversationIDForKey returns the conversation ID of a chat key using the
 // read-only resolvers history uses, or "" when none exists. A topic key is
 // resolved within the topic's own project. A store error from the DM lookup
