@@ -15,6 +15,8 @@ coded defaults → SCION_SEED_* → settings.yaml → SCION_SERVER_*
 
 Each layer overrides the one before it. The final merged result is the **bootstrap configuration** — the starting point for a hub instance.
 
+`settings.yaml` is the global `~/.scion/settings.yaml`. When the Hub is started with `scion server start --config <path>`, the `settings.yaml` in that location is layered over the global one only when the global file has no `server` key, the same rule the server applies when it loads its configuration at startup.
+
 ### Layer-0 vs Layer-1 Keys
 
 Settings are classified into two layers:
@@ -243,7 +245,7 @@ Furthermore, these database-backed settings are wired directly into the runtime 
 |-----------|---------|
 | 🔒 *Managed via deployment configuration* | Layer-0 field on a hosted Hub — not editable |
 | 🔒 *Set via environment variable* | Field pinned by `SCION_SERVER_*` on a workstation Hub |
-| ⚠ *Overridden by environment on this node* | Per-field badge: a `SCION_SERVER_*` variable sets this key on the node that served the page (listed in `env_overrides`). On a Layer-1 key the variable only changes the bootstrap seed and fallback, not a saved database value. |
+| ⚠ *Overridden by environment on this node* | Badge on a field, or on the section for the `runtimes` and `profiles` maps: a `SCION_SERVER_*` variable sets this key on the node that served the page (listed in `env_overrides`). On a Layer-1 key the variable only changes the bootstrap seed and fallback, not a saved database value. |
 | ⚠ *Some settings are overridden by environment variables on this node* | Banner listing every key in `env_overrides` |
 | 🔒 *Set by workstation startup defaults / server flags* | Workstation field that `scion server start` overrides at every start |
 | *Tracking deployment configuration* | Seeded section — re-syncs on restart |
