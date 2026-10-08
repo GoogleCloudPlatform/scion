@@ -112,7 +112,7 @@ func (r *DockerRuntime) Run(ctx context.Context, config RunConfig) (string, erro
 			// The caller gave up while the daemon may still have been
 			// creating/starting the container. Clean up any partial result
 			// instead of leaking it. See ptone/scion#1886.
-			rollbackCancelledCreate(r.Command, config.Name)
+			rollbackCancelledCreate(r.Command, config.Name, config.Labels[api.LabelRunID])
 			return "", ctx.Err()
 		}
 		return "", fmt.Errorf("container run failed: %w (output: %s)", err, out)

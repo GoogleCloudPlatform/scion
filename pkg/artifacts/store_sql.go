@@ -921,7 +921,8 @@ const candidateColumns = `a.id, a.scope_kind, a.scope_ref, a.owner_kind, a.owner
 		a.current_seq, a.expires_at, a.created_at, a.updated_at, v.kind AS current_kind`
 
 // writeCandidateFilters appends the conditions every candidate arm shares:
-// live, not expired, the search, the review filter and the keyset position.
+// live, not expired, the search, the review filter, the home scope and the
+// keyset position.
 //
 // Search folds case the way the database folds it, so a pattern and a
 // column are always compared under the same rules: SQLite's LIKE ignores
@@ -944,6 +945,10 @@ func (s *sqlStore) writeCandidateFilters(b *strings.Builder, args *[]any, q Cand
 	if q.ReviewPending {
 		b.WriteString(" AND v.kind = ?")
 		*args = append(*args, VersionKindReview)
+	}
+	if q.HomeScope != "" {
+		b.WriteString(" AND a.scope_kind = ? AND a.scope_ref = ?")
+		*args = append(*args, ScopeKindProject, q.HomeScope)
 	}
 	if q.After != nil {
 		at := s.timeArg(q.After.UpdatedAt)

@@ -65,6 +65,22 @@ describe('StateManager user-scoped chat subjects', () => {
     expect(typing).not.toHaveBeenCalled();
     expect(message).toHaveBeenCalledTimes(1);
   });
+
+  it('routes user.{id}.chat.scheduled to chat-scheduled-updated, never as a message', () => {
+    const sm = new StateManager();
+    const scheduled = vi.fn();
+    const message = vi.fn();
+    sm.addEventListener('chat-scheduled-updated', scheduled);
+    sm.addEventListener('chat-message-received', message);
+
+    const data = { action: 'created', scheduledMessage: { id: 's1', conversationKey: 't1' } };
+    emit(sm, 'user.b.chat.scheduled', data);
+
+    expect(message).not.toHaveBeenCalled();
+    expect(scheduled).toHaveBeenCalledTimes(1);
+    const detail = (scheduled.mock.calls[0]?.[0] as CustomEvent).detail as { data: unknown };
+    expect(detail.data).toEqual(data);
+  });
 });
 
 /**
