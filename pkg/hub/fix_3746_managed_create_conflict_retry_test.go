@@ -273,7 +273,7 @@ func TestManagedCreateConflictRetry_RetryFails_RollsBack(t *testing.T) {
 			pub := recordCreatedEvents(t, srv)
 			backend := newInteractionLedgerBackend()
 			useManagedBackend(t, backend)
-			var inner store.Store = s
+			inner := s
 			if tc.compFails {
 				inner = &createTxFaultStore{Store: s, auditErrFor: mutationTypeAgentCreateDispatchFailed}
 			}
