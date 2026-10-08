@@ -39,7 +39,6 @@ import (
 
 	"cloud.google.com/go/compute/metadata"
 	"cloud.google.com/go/run/apiv2/runpb"
-	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime/cloudrun"
@@ -880,7 +879,6 @@ func (r *CloudRunRuntime) List(ctx context.Context, labelFilter map[string]strin
 		if inst.TerminalCondition != nil {
 			status = inst.TerminalCondition.State.String()
 		}
-		phase := cloudRunInstancePhase(inst)
 
 		agents = append(agents, api.AgentInfo{
 			ID:              inst.Labels["agent_id"],
@@ -888,39 +886,11 @@ func (r *CloudRunRuntime) List(ctx context.Context, labelFilter map[string]strin
 			RunID:           inst.Labels[sanitizeGCPLabelKey(api.LabelRunID)], // Run stored scion.run_id under its GCP-sanitized key
 			Name:            inst.Name,
 			ContainerStatus: status,
-			Phase:           phase,
 			Labels:          inst.Labels,
 		})
 	}
 
 	return agents, nil
-}
-
-// cloudRunInstancePhase maps a Cloud Run instance to the agent phase List
-// reports (ptone/scion#3738). The broker heartbeat writes any non-empty
-// phase onto the hub's agent, and an empty phase leaves it unchanged
-// (pkg/hub/handlers_runtime_brokers.go), so a phase is reported only for a
-// state that cannot be undone. Otherwise a later "" could never correct it.
-//   - DeleteTime set: stopping. The instance is being deleted. The
-//     Instances API has no undelete, so it only disappears from List.
-//   - Everything else: "", as before. That covers a terminal condition
-//     SUCCEEDED, FAILED, PENDING or RECONCILING, an unspecified one, none
-//     at all, and reconciling. The terminal condition is the outcome of the
-//     last reconcile, not a run state. A stopped instance is not known to
-//     read differently from a running one, so SUCCEEDED must not read as
-//     running: Start would return a stopped agent as running. FAILED can
-//     recover on a retried reconcile, and reconciling also covers a stop.
-//     Mapped to error or provisioning, either could stay on the hub once
-//     the instance settles. Pending a live check of how a stopped instance
-//     reads.
-//
-// "" rather than "unknown": "unknown" is not an agent phase, and reporting
-// it would overwrite the hub's phase for every running instance.
-func cloudRunInstancePhase(inst *runpb.Instance) string {
-	if inst.GetDeleteTime() != nil {
-		return string(state.PhaseStopping)
-	}
-	return ""
 }
 
 func (r *CloudRunRuntime) GetLogs(ctx context.Context, id string) (string, error) {
