@@ -667,16 +667,17 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 		// A previous pod started with a run ID mounts its run's per-run
 		// objects (ptone/scion#3101), which the fixed-name cleanup does not
 		// reach. When that pod is not live they are removed too, after it
-		// is. When it is live (and this is not an NFS-home start), they are
-		// removed only once a re-read shows that pod (its UID) gone after
-		// cleanupStalePod, which swallows delete failures; otherwise they
-		// are left, for the sweep or a delete of that run (ptone/scion#3753).
+		// is. When it is live, they are removed only once a re-read shows
+		// that pod (its UID) gone after cleanupStalePod, which swallows
+		// non-NFS delete failures (for an NFS-home pod it has already
+		// waited for the stop or failed the start); otherwise they are
+		// left, for the sweep or a delete of that run (ptone/scion#3753).
 		prevPodRun := ""
 		livePodRun, livePodUID := "", types.UID("")
 		if p, gerr := r.Client.Clientset.CoreV1().Pods(namespace).Get(ctx, config.Name, metav1.GetOptions{}); gerr == nil {
 			if !k8sPodIsLive(p) {
 				prevPodRun = p.Labels[api.LabelRunID]
-			} else if !nfsHomeStart {
+			} else {
 				livePodRun, livePodUID = p.Labels[api.LabelRunID], p.UID
 			}
 		}

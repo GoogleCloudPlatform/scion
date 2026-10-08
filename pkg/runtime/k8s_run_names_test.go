@@ -1500,10 +1500,10 @@ func TestDeleteAgentSecretsBySelector_OnDeleteSeesConflict(t *testing.T) {
 	}
 }
 
-// An NFS-home start without a run ID over a live run-ID pod keeps today's
-// behaviour (ptone/scion#3753 changes only the non-NFS path): the previous
-// run's per-run objects are left even once the pod is gone.
-func TestK8sRun_NoRunID_NFSHome_LivePodsRunObjectsKept(t *testing.T) {
+// An NFS-home start without a run ID over a live run-ID pod removes the
+// previous run's per-run objects once the pod is gone (ptone/scion#3753),
+// as the non-NFS path does.
+func TestK8sRun_NoRunID_NFSHome_LivePodGone_RemovesItsRunsObjects(t *testing.T) {
 	rt, cs, _ := newTestK8sRuntime()
 	seedNFSPod(t, rt, rsRunA, corev1.PodRunning, nil)
 	x := prSeedNFSRunObjects(t, rt, rsRunA)
@@ -1516,8 +1516,8 @@ func TestK8sRun_NoRunID_NFSHome_LivePodsRunObjectsKept(t *testing.T) {
 		t.Fatalf("previous pod still present (err %v)", err)
 	}
 	for _, name := range []string{x.Secret, x.Auth} {
-		if !secretExists(t, rt, "default", name) {
-			t.Errorf("previous live run's per-run Secret %s removed by an NFS-home start", name)
+		if secretExists(t, rt, "default", name) {
+			t.Errorf("previous live run's per-run Secret %s not removed after its pod was gone", name)
 		}
 	}
 }
