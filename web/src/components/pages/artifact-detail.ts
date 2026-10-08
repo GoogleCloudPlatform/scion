@@ -802,11 +802,16 @@ export class ScionPageArtifactDetail extends LitElement {
     this.clearPreviewTimer();
     await this.load();
     if (!this.reviewing) return;
+    // discarded is the buffer of the review just refused. After a second
+    // stale review it replaces the first: it holds the reviewer's latest
+    // work, which already started from the text of the earlier one.
+    // A failed reload leaves no text, so canReview is false then too.
     if (!this.canReview) {
       this.reviewing = false;
-      this.reviewNotice =
-        'Your review was not saved: a newer version was published, and it cannot be reviewed here.';
-      this.discardedReview = null;
+      this.reviewNotice = this.error
+        ? 'Your review was not saved and the current version could not be loaded; your text is below.'
+        : 'Your review was not saved: a newer version was published, and it cannot be reviewed here. Your text is below.';
+      this.discardedReview = discarded;
       return;
     }
     this.reviewText = this.text ?? '';
@@ -931,6 +936,7 @@ export class ScionPageArtifactDetail extends LitElement {
     }
     if (this.error) {
       return html`
+        ${this.renderReviewNotice()}
         <div class="error-state">
           <sl-icon name="exclamation-triangle"></sl-icon>
           <p>${this.error}</p>
@@ -949,12 +955,7 @@ export class ScionPageArtifactDetail extends LitElement {
         ? this.renderEditor()
         : this.reviewing
           ? this.renderReview()
-          : html`${this.reviewNotice
-              ? html`<sl-alert class="review-notice" variant="warning" open>
-                  <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
-                  ${this.reviewNotice}
-                </sl-alert>`
-              : nothing}${this.renderReviewBanner()}${this.renderTabs()}`}
+          : html`${this.renderReviewNotice()}${this.renderReviewBanner()}${this.renderTabs()}`}
       <scion-artifact-publish-dialog
         .artifactId=${this.artifactId}
         ?open=${this.publishOpen}
@@ -1456,6 +1457,28 @@ export class ScionPageArtifactDetail extends LitElement {
     </sl-alert>`;
   }
 
+  /** The reviewer's discarded text, read-only with Copy. */
+  private renderDiscarded(): TemplateResult | typeof nothing {
+    if (this.discardedReview === null) return nothing;
+    return html`<sl-details class="discarded-review" summary="Your discarded review (read-only)">
+      <pre>${this.discardedReview}</pre>
+      <sl-button size="small" @click=${(): void => void this.copyDiscarded()}>
+        <sl-icon slot="prefix" name="clipboard"></sl-icon>
+        Copy
+      </sl-button>
+    </sl-details>`;
+  }
+
+  /** Why Review mode closed, with the discarded text, outside Review mode. */
+  private renderReviewNotice(): TemplateResult | typeof nothing {
+    if (!this.reviewNotice) return nothing;
+    return html`<sl-alert class="review-notice" variant="warning" open>
+        <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+        ${this.reviewNotice}
+      </sl-alert>
+      ${this.renderDiscarded()}`;
+  }
+
   private renderReview(): TemplateResult | typeof nothing {
     const v = this.data?.version;
     const f = this.entry;
@@ -1540,15 +1563,7 @@ export class ScionPageArtifactDetail extends LitElement {
             ${this.reviewError}
           </sl-alert>`
         : nothing}
-      ${this.discardedReview !== null
-        ? html`<sl-details class="discarded-review" summary="Your discarded review (read-only)">
-            <pre>${this.discardedReview}</pre>
-            <sl-button size="small" @click=${(): void => void this.copyDiscarded()}>
-              <sl-icon slot="prefix" name="clipboard"></sl-icon>
-              Copy
-            </sl-button>
-          </sl-details>`
-        : nothing}
+      ${this.renderDiscarded()}
       <div class="review-panes">
         <scion-code-editor
           class="review-editor"

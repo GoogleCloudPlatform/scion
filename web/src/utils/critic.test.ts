@@ -246,3 +246,31 @@ describe('criticToolBlocked with an unclosed opener earlier in the text', () => 
     }
   });
 });
+
+describe('criticToolBlocked with an unclosed opener directly before the selection', () => {
+  // The opener becomes the new mark's opener and its text moves inside the
+  // mark; the clean text is unchanged, so only the structural check sees it.
+  const cases: [string, string, CriticTool][] = [
+    ['{--abc', 'abc', 'delete'],
+    ['{~~abc', 'abc', 'suggest'],
+    ['{==abc', 'abc', 'comment'],
+    ['x {--{--abc', 'abc', 'delete'],
+  ];
+  for (const [doc, word, tool] of cases) {
+    it(`refuses ${tool} on '${word}' in '${doc}'`, () => {
+      const from = doc.lastIndexOf(word);
+      const sel = { from, to: from + word.length, text: word };
+      const edit = criticToolEdit(tool, sel)!;
+      const result = doc.slice(0, edit.from) + edit.insert + doc.slice(edit.to);
+      expect(onlyMarksChanged(result, projectCritic(doc, 'clean'))).toBe(true);
+      expect(criticToolBlocked(tool, sel, doc)).toMatch(/unclosed/);
+    });
+  }
+  it('still allows marks next to existing complete marks', () => {
+    const doc = 'A {++b++} c {>>d<<} e';
+    const at = doc.indexOf(' c ') + 1;
+    for (const tool of ['comment', 'suggest', 'insert', 'delete'] as const) {
+      expect(criticToolBlocked(tool, { from: at, to: at + 1, text: 'c' }, doc), tool).toBeNull();
+    }
+  });
+});

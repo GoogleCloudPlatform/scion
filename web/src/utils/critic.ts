@@ -407,18 +407,48 @@ export function criticToolBlocked(
       : at.from < seg.end && at.to > seg.start;
     if (touches) return INSIDE_MARK_HINT;
   }
-  // The new mark must read as intended in the whole document: an earlier
-  // opener with no closer would otherwise be closed by the new mark's
-  // token. Apply the edit and require that the text with every mark
-  // rejected is unchanged. (Marks outside the edit cannot change without
-  // changing that text: the selection does not touch a mark, and the tool
-  // inserts a balanced mark, so only an unclosed opener can pair with its
-  // tokens.)
+  // The new mark must read as intended in the whole document. Apply the
+  // edit, then require (1) that the text with every mark rejected is
+  // unchanged, and (2) that the result parses with the inserted mark(s)
+  // exactly over the inserted text and every other mark as it was (moved
+  // by the length change). An unclosed opener elsewhere could otherwise
+  // pair with the new tokens: one earlier in the text can be closed by the
+  // new closer (changing the clean text), and one directly before the
+  // selection can become the new mark's opener (swallowing its own text
+  // into the mark while the clean text stays the same).
   const edit = criticToolEdit(tool, sel);
   if (!edit) return null;
   const result = doc.slice(0, edit.from) + edit.insert + doc.slice(edit.to);
   if (!onlyMarksChanged(result, projectCritic(doc, 'clean'))) return UNCLOSED_MARK_HINT;
+  if (!marksAsIntended(doc, result, edit, tool === 'comment' && sel.text !== '' ? 2 : 1)) {
+    return UNCLOSED_MARK_HINT;
+  }
   return null;
+}
+
+/**
+ * Reports whether result (doc with edit applied) holds exactly `inserted`
+ * new marks, tiling the inserted text, and otherwise the marks of doc,
+ * those after the edit moved by the length change.
+ */
+function marksAsIntended(doc: string, result: string, edit: CriticEdit, inserted: number): boolean {
+  const start = edit.from;
+  const end = edit.from + edit.insert.length;
+  const shift = edit.insert.length - (edit.to - edit.from);
+  const marks = parseCritic(result).filter((x) => x.kind !== 'text');
+  const fresh = marks.filter((x) => x.start < end && x.end > start);
+  if (fresh.length !== inserted) return false;
+  if (fresh[0].start !== start || fresh[fresh.length - 1].end !== end) return false;
+  for (let i = 1; i < fresh.length; i++) {
+    if (fresh[i].start !== fresh[i - 1].end) return false;
+  }
+  const key = (x: CriticSegment, d: number): string =>
+    `${x.kind}:${x.start + d}:${x.end + d}:${x.text}:${x.next ?? ''}`;
+  const old = parseCritic(doc)
+    .filter((x) => x.kind !== 'text')
+    .map((x) => key(x, x.start >= edit.to ? shift : 0));
+  const rest = marks.filter((x) => !fresh.includes(x)).map((x) => key(x, 0));
+  return rest.length === old.length && rest.every((k, i) => k === old[i]);
 }
 
 const INSIDE_MARK_HINT = 'The selection is inside or across a mark. Select text outside marks.';

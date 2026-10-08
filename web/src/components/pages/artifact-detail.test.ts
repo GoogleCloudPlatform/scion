@@ -1027,6 +1027,54 @@ describe('artifact page', () => {
     expect(el.shadowRoot!.querySelector('sl-alert.review-notice')!.textContent).toContain(
       'cannot be reviewed here'
     );
+    // The discarded text stays readable, with Copy, outside Review mode.
+    expect(el.shadowRoot!.querySelector('.discarded-review pre')!.textContent).toBe(MARKED);
+    expect(button(el, '.discarded-review sl-button', 'Copy')).toBeDefined();
+  });
+
+  it('keeps the discarded text and says so when the reload after a stale review fails', async () => {
+    const meta = artifact('plan.md', 'text/markdown');
+    const creates: string[] = [];
+    let fileStatus = 200;
+    const urls = mockFetch(meta, 'We ship in Q3.\n', {
+      write: reviewWrites(
+        meta,
+        () => {
+          fileStatus = 500;
+          return new Response(
+            JSON.stringify({ error: { code: 'stale_review', message: 'stale' } }),
+            {
+              status: 409,
+            }
+          );
+        },
+        creates
+      ),
+    });
+    const inner = globalThis.fetch;
+    vi.stubGlobal('fetch', (input: RequestInfo | URL, init?: RequestInit) =>
+      fileStatus !== 200 && String(input).includes('/files/')
+        ? Promise.resolve(
+            new Response('{"error":{"code":"internal","message":"boom"}}', { status: 500 })
+          )
+        : inner(input, init)
+    );
+    const el = await mount(true);
+    button(el, '.actions sl-button', 'Review')!.click();
+    await el.updateComplete;
+    el.shadowRoot!.querySelector('scion-code-editor.review-editor')!.dispatchEvent(
+      new CustomEvent('content-changed', { detail: { content: MARKED } })
+    );
+    await el.updateComplete;
+    button(el, '.edit-footer sl-button', 'Save review')!.click();
+    await settle(el);
+    expect(urls.length).toBeGreaterThan(0);
+    expect(el.shadowRoot!.querySelector('.review-editor')).toBeNull();
+    const notice = el.shadowRoot!.querySelector('sl-alert.review-notice')!;
+    expect(notice.textContent).toContain('could not be loaded');
+    expect(notice.textContent).not.toContain('newer version was published');
+    expect(el.shadowRoot!.querySelector('.discarded-review pre')!.textContent).toBe(MARKED);
+    expect(el.shadowRoot!.querySelector('.error-state')).not.toBeNull();
   });
 
   it('shows the margin placeholder only while the review has no marks at all', async () => {
