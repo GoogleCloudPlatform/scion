@@ -699,4 +699,194 @@ describe('artifact page', () => {
     await first;
     expect(priv.view!.url).toBe('/newer/');
   });
+  /** A review version (current) of a markdown artifact owned by an agent. */
+  function reviewMeta(): ArtifactResponse {
+    const meta = artifact('plan.md', 'text/markdown');
+    meta.artifact.ownerKind = 'agent';
+    meta.artifact.ownerRef = 'agent-1';
+    meta.artifact.currentSeq = 2;
+    meta.version = {
+      ...meta.version!,
+      seq: 2,
+      ref: `scion://artifact/${ID}@2`,
+      kind: 'review',
+      createdByKind: 'user',
+      createdByRef: 'u-2',
+    };
+    return meta;
+  }
+  const MARKED = 'We {~~ship~>launch~~} in Q3.{>>date?<<}\n';
+
+  function buttons(el: ScionPageArtifactDetail, sel: string): HTMLElement[] {
+    return Array.from(el.shadowRoot!.querySelectorAll(sel));
+  }
+  function button(el: ScionPageArtifactDetail, sel: string, text: string): HTMLElement | undefined {
+    return buttons(el, sel).find((b) => b.textContent!.includes(text));
+  }
+  async function settle(el: ScionPageArtifactDetail, n = 30): Promise<void> {
+    for (let i = 0; i < n; i++) {
+      await new Promise((r) => setTimeout(r, 0));
+      await el.updateComplete;
+    }
+  }
+
+  it('shows a current review as pending, with its marks and a Marks / Clean / Accepted switch', async () => {
+    const meta = reviewMeta();
+    mockFetch(meta, MARKED, {
+      versions: [
+        { ...meta.version!, files: [] },
+        { ...meta.version!, seq: 1, kind: 'publish', files: [] },
+      ],
+    });
+    const el = await mount(true);
+    const badge = el.shadowRoot!.querySelector('.title sl-badge');
+    expect(badge?.textContent).toContain('Review pending');
+    const banner = el.shadowRoot!.querySelector('sl-alert.review-banner');
+    expect(banner?.textContent).toContain('1 comment and 1 suggestion on v1');
+    expect(banner?.textContent).toContain('was notified');
+    const frame = el.shadowRoot!.querySelector('scion-artifact-markdown-frame') as HTMLElement & {
+      critic: string;
+    };
+    expect(frame.critic).toBe('marks');
+    const toggle = el.shadowRoot!.querySelector('sl-radio-group.critic-toggle') as HTMLElement & {
+      value: string;
+    };
+    expect(toggle).not.toBeNull();
+    toggle.value = 'clean';
+    toggle.dispatchEvent(new Event('sl-change'));
+    await el.updateComplete;
+    expect(frame.critic).toBe('clean');
+  });
+
+  it('shows no review state for a published version and offers Review for markdown only', async () => {
+    mockFetch(artifact('plan.md', 'text/markdown'), 'We ship in Q3.\n');
+    const el = await mount(true);
+    expect(el.shadowRoot!.querySelector('.title sl-badge')).toBeNull();
+    expect(el.shadowRoot!.querySelector('sl-alert.review-banner')).toBeNull();
+    expect(el.shadowRoot!.querySelector('sl-radio-group.critic-toggle')).toBeNull();
+    const frame = el.shadowRoot!.querySelector('scion-artifact-markdown-frame') as HTMLElement & {
+      critic: string;
+    };
+    expect(frame.critic).toBe('off');
+    expect(button(el, '.actions sl-button', 'Review')).toBeDefined();
+    document.body.innerHTML = '';
+    vi.unstubAllGlobals();
+    mockFetch(artifact('notes.txt', 'text/plain'), 'hello');
+    const txt = await mount(true);
+    expect(button(txt, '.actions sl-button', 'Edit')).toBeDefined();
+    expect(button(txt, '.actions sl-button', 'Review')).toBeUndefined();
+  });
+
+  it('saves a review of marks only as a version of kind review', async () => {
+    window.history.replaceState({}, '', `/projects/p-1/artifacts/${ID}`);
+    const meta = artifact('plan.md', 'text/markdown');
+    const bodies: string[] = [];
+    const urls = mockFetch(meta, 'We ship in Q3.\n', {
+      write: (method, url) => {
+        if (url.endsWith('/finalize')) {
+          meta.artifact.currentSeq = 2;
+          meta.version = {
+            ...meta.version!,
+            seq: 2,
+            kind: 'review',
+            ref: `scion://artifact/${ID}@2`,
+          };
+          return new Response(JSON.stringify(meta), { status: 200 });
+        }
+        if (method === 'PUT') return new Response(null, { status: 204 });
+        return new Response(
+          JSON.stringify({
+            artifact: meta.artifact,
+            version: { seq: 2 },
+            upload: { required: ['plan.md'] },
+          }),
+          { status: 201 }
+        );
+      },
+    });
+    const realFetch = globalThis.fetch;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        if (init?.method === 'POST' && String(input).endsWith('/versions'))
+          bodies.push(String(init.body));
+        return realFetch(input, init);
+      })
+    );
+    const el = await mount(true);
+    button(el, '.actions sl-button', 'Review')!.click();
+    await el.updateComplete;
+    // While reviewing, Edit and Review are hidden.
+    expect(button(el, '.actions sl-button', 'Edit')).toBeUndefined();
+    const save = (): HTMLElement & { disabled: boolean } =>
+      button(el, '.edit-footer sl-button', 'Save review') as HTMLElement & { disabled: boolean };
+    expect(save().hasAttribute('disabled')).toBe(true);
+    expect(el.shadowRoot!.querySelector('.review-empty')).not.toBeNull();
+    const editor = el.shadowRoot!.querySelector('scion-code-editor.review-editor')!;
+    // An edit outside marks is flagged and cannot be saved.
+    editor.dispatchEvent(
+      new CustomEvent('content-changed', { detail: { content: 'We ship in Q4.{>>x<<}\n' } })
+    );
+    await el.updateComplete;
+    expect(save().hasAttribute('disabled')).toBe(true);
+    expect(
+      buttons(el, 'sl-alert').some((a) => a.textContent!.includes('Text outside marks has changed'))
+    ).toBe(true);
+    editor.dispatchEvent(new CustomEvent('content-changed', { detail: { content: MARKED } }));
+    await el.updateComplete;
+    expect(save().hasAttribute('disabled')).toBe(false);
+    save().click();
+    await settle(el);
+    expect(bodies).toHaveLength(1);
+    expect(JSON.parse(bodies[0]!).kind).toBe('review');
+    expect(urls.some((u) => u.startsWith('PUT ') && u.includes('/versions/2/files/plan.md'))).toBe(
+      true
+    );
+    expect(el.shadowRoot!.querySelector('.title sl-badge')?.textContent).toContain(
+      'Review pending'
+    );
+  });
+
+  it('explains a review the hub refused for unmarked changes', async () => {
+    const meta = artifact('plan.md', 'text/markdown');
+    mockFetch(meta, 'We ship in Q3.\n', {
+      write: (method, url) => {
+        if (url.endsWith('/finalize')) {
+          return new Response(
+            JSON.stringify({
+              error: {
+                code: 'unmarked_changes',
+                message: 'x',
+                details: { files: [{ path: 'plan.md', change: 'modified', hunks: [{ line: 1 }] }] },
+              },
+            }),
+            { status: 422 }
+          );
+        }
+        if (method === 'PUT') return new Response(null, { status: 204 });
+        return new Response(
+          JSON.stringify({
+            artifact: meta.artifact,
+            version: { seq: 2 },
+            upload: { required: ['plan.md'] },
+          }),
+          { status: 201 }
+        );
+      },
+    });
+    const el = await mount(true);
+    button(el, '.actions sl-button', 'Review')!.click();
+    await el.updateComplete;
+    el.shadowRoot!.querySelector('scion-code-editor.review-editor')!.dispatchEvent(
+      new CustomEvent('content-changed', { detail: { content: MARKED } })
+    );
+    await el.updateComplete;
+    button(el, '.edit-footer sl-button', 'Save review')!.click();
+    await settle(el);
+    const alert = buttons(el, 'sl-alert').find((a) =>
+      a.textContent!.includes('outside marks: plan.md (line 1)')
+    );
+    expect(alert).toBeDefined();
+    expect(alert!.textContent).not.toContain('Publish again');
+  });
 });

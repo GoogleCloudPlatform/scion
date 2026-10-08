@@ -1,0 +1,257 @@
+{
+ "comment": "Shared CriticMarkup corpus: pkg/artifacts/critic (Go) and web/src/utils/critic.ts must both produce clean and accept for every case.",
+ "cases": [
+  {
+   "name": "plain",
+   "in": "no marks here",
+   "clean": "no marks here",
+   "accept": "no marks here"
+  },
+  {
+   "name": "empty",
+   "in": "",
+   "clean": "",
+   "accept": ""
+  },
+  {
+   "name": "insertion",
+   "in": "a {++big ++}dog",
+   "clean": "a dog",
+   "accept": "a big dog"
+  },
+  {
+   "name": "deletion",
+   "in": "a {--big --}dog",
+   "clean": "a big dog",
+   "accept": "a dog"
+  },
+  {
+   "name": "substitution",
+   "in": "a {~~cat~>dog~~}!",
+   "clean": "a cat!",
+   "accept": "a dog!"
+  },
+  {
+   "name": "comment",
+   "in": "text{>>why?<<} more",
+   "clean": "text more",
+   "accept": "text more"
+  },
+  {
+   "name": "highlight",
+   "in": "{==key==} point",
+   "clean": "key point",
+   "accept": "key point"
+  },
+  {
+   "name": "highlight comment pair",
+   "in": "a {==b==}{>>note<<} c",
+   "clean": "a b c",
+   "accept": "a b c"
+  },
+  {
+   "name": "adjacent marks",
+   "in": "{++a++}{--b--}{~~c~>d~~}",
+   "clean": "bc",
+   "accept": "ad"
+  },
+  {
+   "name": "empty insertion",
+   "in": "x{++++}y",
+   "clean": "xy",
+   "accept": "xy"
+  },
+  {
+   "name": "empty deletion",
+   "in": "x{----}y",
+   "clean": "xy",
+   "accept": "xy"
+  },
+  {
+   "name": "empty comment",
+   "in": "x{>><<}y",
+   "clean": "xy",
+   "accept": "xy"
+  },
+  {
+   "name": "substitution empty old",
+   "in": "x{~~~>new~~}y",
+   "clean": "xy",
+   "accept": "xnewy"
+  },
+  {
+   "name": "substitution empty new",
+   "in": "x{~~old~>~~}y",
+   "clean": "xoldy",
+   "accept": "xy"
+  },
+  {
+   "name": "substitution both empty",
+   "in": "x{~~~>~~}y",
+   "clean": "xy",
+   "accept": "xy"
+  },
+  {
+   "name": "substitution first separator wins",
+   "in": "{~~a~>b~>c~~}",
+   "clean": "a",
+   "accept": "b~>c"
+  },
+  {
+   "name": "substitution without separator is literal",
+   "in": "{~~old~~}",
+   "clean": "{~~old~~}",
+   "accept": "{~~old~~}"
+  },
+  {
+   "name": "malformed substitution then valid one",
+   "in": "{~~a~~}{~~b~>c~~}",
+   "clean": "{~~a~~}b",
+   "accept": "{~~a~~}c"
+  },
+  {
+   "name": "opener needs doubled char",
+   "in": "{+-a++}",
+   "clean": "{+-a++}",
+   "accept": "{+-a++}"
+  },
+  {
+   "name": "substitution separator after closer is literal",
+   "in": "{~~a~~} b~>c",
+   "clean": "{~~a~~} b~>c",
+   "accept": "{~~a~~} b~>c"
+  },
+  {
+   "name": "unterminated insertion is literal",
+   "in": "a {++b c",
+   "clean": "a {++b c",
+   "accept": "a {++b c"
+  },
+  {
+   "name": "unterminated then valid",
+   "in": "{++a {--b--}",
+   "clean": "{++a b",
+   "accept": "{++a "
+  },
+  {
+   "name": "unterminated comment",
+   "in": "x {>>note",
+   "clean": "x {>>note",
+   "accept": "x {>>note"
+  },
+  {
+   "name": "wrong closer is literal",
+   "in": "{++a--}",
+   "clean": "{++a--}",
+   "accept": "{++a--}"
+  },
+  {
+   "name": "nested opener is literal content",
+   "in": "{++a {++b++} c++}",
+   "clean": " c++}",
+   "accept": "a {++b c++}"
+  },
+  {
+   "name": "other opener inside is content",
+   "in": "{++a {--b--} c++}",
+   "clean": "",
+   "accept": "a {--b--} c"
+  },
+  {
+   "name": "braces inside marks",
+   "in": "{++f(){ return {} }++}",
+   "clean": "",
+   "accept": "f(){ return {} }"
+  },
+  {
+   "name": "lone braces",
+   "in": "{ } {{ }} {+ +} {-}",
+   "clean": "{ } {{ }} {+ +} {-}",
+   "accept": "{ } {{ }} {+ +} {-}"
+  },
+  {
+   "name": "mixed opener chars",
+   "in": "{+-a-+}",
+   "clean": "{+-a-+}",
+   "accept": "{+-a-+}"
+  },
+  {
+   "name": "spans newlines",
+   "in": "a{++b\n\nc++}d",
+   "clean": "ad",
+   "accept": "ab\n\ncd"
+  },
+  {
+   "name": "deletion spans newline",
+   "in": "a{--b\nc--}d",
+   "clean": "ab\ncd",
+   "accept": "ad"
+  },
+  {
+   "name": "crlf preserved",
+   "in": "a\r\n{++b\r\n++}c\r\n",
+   "clean": "a\r\nc\r\n",
+   "accept": "a\r\nb\r\nc\r\n"
+  },
+  {
+   "name": "code span not special",
+   "in": "`{++x++}`",
+   "clean": "``",
+   "accept": "`x`"
+  },
+  {
+   "name": "fence not special",
+   "in": "```\n{--x--}\n```",
+   "clean": "```\nx\n```",
+   "accept": "```\n\n```"
+  },
+  {
+   "name": "unicode around marks",
+   "in": "café {~~naïve~>naive~~} 日本",
+   "clean": "café naïve 日本",
+   "accept": "café naive 日本"
+  },
+  {
+   "name": "trailing opener",
+   "in": "abc{++",
+   "clean": "abc{++",
+   "accept": "abc{++"
+  },
+  {
+   "name": "trailing brace",
+   "in": "abc{",
+   "clean": "abc{",
+   "accept": "abc{"
+  },
+  {
+   "name": "closer without opener",
+   "in": "a ++} b <<}",
+   "clean": "a ++} b <<}",
+   "accept": "a ++} b <<}"
+  },
+  {
+   "name": "overlapping closer chars",
+   "in": "{+++}",
+   "clean": "{+++}",
+   "accept": "{+++}"
+  },
+  {
+   "name": "four plus empty insertion",
+   "in": "{++++}",
+   "clean": "",
+   "accept": ""
+  },
+  {
+   "name": "comment contains closer of other kind",
+   "in": "{>>a ++} b<<}",
+   "clean": "",
+   "accept": ""
+  },
+  {
+   "name": "spec example",
+   "in": "Lorem {++ipsum ++}dolor{-- sit--} amet {~~is~>are~~} {==here==}{>>yes<<}.",
+   "clean": "Lorem dolor sit amet is here.",
+   "accept": "Lorem ipsum dolor amet are here."
+  }
+ ]
+}

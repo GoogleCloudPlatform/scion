@@ -24,7 +24,11 @@
  * under a short-lived view capability. Other types are offered as a
  * download. Tabs list the version's files and the artifact's versions;
  * Edit publishes a changed entry as a new version and Upload new version
- * publishes new files.
+ * publishes new files. Review opens a markdown entry with a CriticMarkup
+ * toolbar and saves the marked-up copy as a version of kind review; while
+ * the current version is a review the page shows it as pending, and a
+ * review's preview can show its marks, the text with every mark rejected
+ * (Clean) or accepted (Accepted).
  * Route: /projects/{projectId}/artifacts/{artifactId}[/v/{seq}]
  */
 
@@ -66,6 +70,15 @@ import type {
 } from '../../client/artifacts.js';
 import { principalLabel, principalName } from '../../client/principal-names.js';
 import { getLanguageFromPath } from '../shared/code-editor.js';
+import type { ScionCodeEditor } from '../shared/code-editor.js';
+import type { CriticView } from '../shared/artifact-markdown-frame.js';
+import {
+  countCritic,
+  criticToolEdit,
+  onlyMarksChanged,
+  projectCritic,
+} from '../../utils/critic.js';
+import type { CriticTool } from '../../utils/critic.js';
 import '../shared/artifact-markdown-frame.js';
 import '../shared/artifact-publish-dialog.js';
 import '../shared/code-editor.js';
@@ -117,8 +130,17 @@ export class ScionPageArtifactDetail extends LitElement {
   @state() private publishOpen = false;
   /** The version a failed Edit publish left pending; the next attempt resumes it. */
   private editPending: PendingPublish | null = null;
+  @state() private reviewing = false;
+  @state() private reviewText = '';
+  @state() private reviewNote = '';
+  @state() private reviewBusy = false;
+  @state() private reviewError: string | null = null;
+  /** How a review's marks are shown in its preview. */
+  @state() private criticView: Exclude<CriticView, 'off'> = 'marks';
+  private reviewPending: PendingPublish | null = null;
 
   @query('.untrusted') private untrustedFrame?: HTMLElement;
+  @query('scion-code-editor.review-editor') private reviewEditor?: ScionCodeEditor;
 
   static override styles = css`
     :host {
@@ -322,6 +344,59 @@ export class ScionPageArtifactDetail extends LitElement {
     }
     sl-tab-group {
       margin-bottom: 0.5rem;
+    }
+    .review-banner::part(base) {
+      align-items: center;
+    }
+    .review-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+      padding: 0.5rem 0;
+    }
+    .review-toolbar .counts {
+      font-size: 0.8125rem;
+      color: var(--sl-color-neutral-600);
+      margin-left: 0.25rem;
+    }
+    .review-toolbar .spacer {
+      flex: 1;
+    }
+    .review-toolbar .label {
+      font-size: 0.8125rem;
+      color: var(--sl-color-neutral-600);
+    }
+    .review-panes {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 0.75rem;
+      align-items: start;
+    }
+    @media (max-width: 900px) {
+      .review-panes {
+        grid-template-columns: minmax(0, 1fr);
+      }
+    }
+    .review-empty {
+      font-size: 0.8125rem;
+      color: var(--sl-color-neutral-600);
+      margin: 0.25rem 0 0.5rem;
+    }
+    .help-panel {
+      max-width: 24rem;
+      padding: 0.75rem 1rem;
+      font-size: 0.8125rem;
+      line-height: 1.5;
+      background: var(--sl-panel-background-color, #fff);
+      border: 1px solid var(--scion-border, #e2e8f0);
+      border-radius: var(--scion-radius, 0.5rem);
+      box-shadow: var(--sl-shadow-medium);
+    }
+    .help-panel code {
+      font-family: var(--scion-font-mono, monospace);
+      font-size: 0.75rem;
+      word-break: break-all;
     }
     sl-alert {
       margin-bottom: 0.75rem;
@@ -537,6 +612,80 @@ export class ScionPageArtifactDetail extends LitElement {
     return (kind === 'markdown' || kind === 'text') && f.size <= MAX_INLINE_TEXT_BYTES;
   }
 
+  /** Review is offered for a markdown entry of the current version. */
+  private get canReview(): boolean {
+    return this.canEdit && !!this.entry && rendererFor(this.entry.mediaType) === 'markdown';
+  }
+
+  /** The version shown is a review. */
+  private get isReview(): boolean {
+    return this.data?.version?.kind === 'review';
+  }
+
+  /** The current version is a review the owner has not answered yet. */
+  private get reviewPendingNow(): boolean {
+    return this.isReview && this.showsCurrent;
+  }
+
+  /**
+   * The text a review must keep outside its marks: the shown version's
+   * entry, with its own marks rejected when it is itself a review.
+   */
+  private get reviewBaseline(): string {
+    const text = this.text ?? '';
+    return this.isReview ? projectCritic(text, 'clean') : text;
+  }
+
+  private startReview = (): void => {
+    this.reviewText = this.text ?? '';
+    this.reviewNote = '';
+    this.reviewError = null;
+    this.criticView = 'marks';
+    this.reviewing = true;
+  };
+
+  private applyTool(tool: CriticTool): void {
+    const editor = this.reviewEditor;
+    const sel = editor?.getSelection();
+    if (!editor || !sel) return;
+    const edit = criticToolEdit(tool, sel);
+    if (!edit) return;
+    editor.replaceRange(edit.from, edit.to, edit.insert, edit.selectFrom, edit.selectTo);
+  }
+
+  private async saveReview(): Promise<void> {
+    const v = this.data?.version;
+    const f = this.entry;
+    if (!v || !f) return;
+    this.reviewBusy = true;
+    this.reviewError = null;
+    try {
+      const files: PublishFile[] = v.files
+        .filter((x) => !isRemoteFile(x))
+        .map((x) =>
+          x.path === f.path
+            ? { path: x.path, data: new Blob([this.reviewText], { type: f.mediaType }) }
+            : { path: x.path, size: x.size, sha256: x.sha256 }
+        );
+      await publishFiles({
+        artifactId: this.artifactId,
+        kind: 'review',
+        entry: v.entryPath,
+        note: this.reviewNote.trim() || undefined,
+        files,
+        resume: this.reviewPending,
+      });
+      this.reviewPending = null;
+      this.reviewing = false;
+      this.showCurrentVersion();
+    } catch (err) {
+      this.reviewError = publishErrorMessage(err);
+      this.reviewPending = err instanceof PublishError ? err.pending : null;
+    } finally {
+      this.reviewBusy = false;
+    }
+  }
+
   private startEdit = (): void => {
     this.editText = this.text ?? '';
     this.editNote = '';
@@ -588,6 +737,7 @@ export class ScionPageArtifactDetail extends LitElement {
   private showCurrentVersion(): void {
     const target = artifactPagePath({ id: this.artifactId, scopeRef: this.homeProject });
     this.editing = false;
+    this.reviewing = false;
     if (stripBasePath(window.location.pathname) !== target) {
       navigateTo(target);
       return;
@@ -621,7 +771,12 @@ export class ScionPageArtifactDetail extends LitElement {
         <sl-icon name="arrow-left"></sl-icon>
         Project
       </a>
-      ${this.renderHeader()} ${this.editing ? this.renderEditor() : this.renderTabs()}
+      ${this.renderHeader()}
+      ${this.editing
+        ? this.renderEditor()
+        : this.reviewing
+          ? this.renderReview()
+          : html`${this.renderReviewBanner()}${this.renderTabs()}`}
       <scion-artifact-publish-dialog
         .artifactId=${this.artifactId}
         ?open=${this.publishOpen}
@@ -673,6 +828,11 @@ export class ScionPageArtifactDetail extends LitElement {
           <div class="title">
             <sl-icon name="file-earmark-richtext"></sl-icon>
             <h1>${a.title}</h1>
+            ${v?.kind === 'review' && v.seq === a.currentSeq
+              ? html`<sl-badge variant="warning" pill>
+                  <sl-icon name="chat-dots"></sl-icon>&nbsp;Review pending
+                </sl-badge>`
+              : nothing}
           </div>
           <div class="meta">
             <span>Owner: ${owner}</span>
@@ -690,7 +850,7 @@ export class ScionPageArtifactDetail extends LitElement {
             </span>
           </div>
         </div>
-        ${this.editing
+        ${this.editing || this.reviewing
           ? nothing
           : html`
               <div class="actions">
@@ -699,6 +859,12 @@ export class ScionPageArtifactDetail extends LitElement {
                   ? html`<sl-button size="small" @click=${this.startEdit}>
                       <sl-icon slot="prefix" name="pencil"></sl-icon>
                       Edit
+                    </sl-button>`
+                  : nothing}
+                ${this.canReview
+                  ? html`<sl-button size="small" @click=${this.startReview}>
+                      <sl-icon slot="prefix" name="chat-text"></sl-icon>
+                      Review
                     </sl-button>`
                   : nothing}
                 ${v && f && ownFiles.length === 1
@@ -762,10 +928,13 @@ export class ScionPageArtifactDetail extends LitElement {
     }
     const href = artifactFileUrl(this.artifactId, v.seq, f.path);
     const inline = isInlineType(f.mediaType);
+    const showMarks = this.isReview && (kind === 'markdown' || kind === 'text');
     const bar = html`
       <div class="entry-bar">
-        <span>${f.path} · ${formatBytes(f.size)}</span>
-        ${this.entryAction(f, v.seq)}
+        <span>${f.path} · ${formatBytes(f.size)}${this.isReview ? ' · review' : ''}</span>
+        <span class="buttons">
+          ${showMarks ? this.renderCriticToggle() : nothing} ${this.entryAction(f, v.seq)}
+        </span>
       </div>
     `;
     if (kind === 'image') {
@@ -780,9 +949,12 @@ export class ScionPageArtifactDetail extends LitElement {
               .seq=${v.seq}
               .entryPath=${f.path}
               .files=${v.files}
+              .critic=${showMarks ? this.criticView : 'off'}
             ></scion-artifact-markdown-frame>`
         : html`${bar}<scion-code-editor
-              .content=${this.text}
+              .content=${showMarks && this.criticView !== 'marks'
+                ? projectCritic(this.text, this.criticView)
+                : this.text}
               .language=${getLanguageFromPath(f.path)}
               readonly
             ></scion-code-editor>`;
@@ -1043,6 +1215,174 @@ export class ScionPageArtifactDetail extends LitElement {
               Upload new version
             </sl-button>
           </div>`}
+    `;
+  }
+
+  /** The Marks / Clean / Accepted switch of a review's preview. */
+  private renderCriticToggle(): TemplateResult {
+    return html`<sl-radio-group
+      size="small"
+      label="Show marks"
+      class="critic-toggle"
+      value=${this.criticView}
+      @sl-change=${(e: Event): void => {
+        this.criticView = (e.target as HTMLElement & { value: string }).value as
+          | 'marks'
+          | 'clean'
+          | 'accept';
+      }}
+    >
+      <sl-radio-button value="marks">Marks</sl-radio-button>
+      <sl-radio-button value="clean">Clean</sl-radio-button>
+      <sl-radio-button value="accept">Accepted</sl-radio-button>
+    </sl-radio-group>`;
+  }
+
+  /** Says who reviewed and what, while the current version is a review. */
+  private renderReviewBanner(): TemplateResult | typeof nothing {
+    const v = this.data?.version;
+    if (!v || !this.reviewPendingNow) return nothing;
+    const a = this.data!.artifact;
+    const counts = this.text !== null ? countCritic(this.text) : null;
+    const base = this.versions.find((x) => x.seq < v.seq);
+    const what = counts
+      ? `${counts.comments} ${counts.comments === 1 ? 'comment' : 'comments'} and ${counts.suggestions} ${counts.suggestions === 1 ? 'suggestion' : 'suggestions'}`
+      : 'marks';
+    const owner = this.label(a.ownerKind, a.ownerRef);
+    return html`<sl-alert class="review-banner" variant="warning" open>
+      <sl-icon slot="icon" name="chat-dots"></sl-icon>
+      <strong>Review pending.</strong>
+      ${this.createdBy(v) || 'A reviewer'} left ${what}${base ? ` on v${base.seq}` : ''}.
+      ${a.ownerKind === 'agent' ? `${owner} was notified; ` : ''}the badge clears when a new version
+      is published.
+    </sl-alert>`;
+  }
+
+  private renderReview(): TemplateResult {
+    const v = this.data!.version!;
+    const f = this.entry!;
+    const counts = countCritic(this.reviewText);
+    const marks = counts.suggestions + counts.comments + counts.highlights;
+    const marksOnly = onlyMarksChanged(this.reviewText, this.reviewBaseline);
+    const ref = this.data!.artifact.ref;
+    return html`
+      <div class="edit-bar">
+        Reviewing ${f.path}, based on v${v.seq}. Save review publishes a new version as a review;
+        v${v.seq} stays as it is.
+      </div>
+      <div class="review-toolbar">
+        <sl-tooltip content="Comment on the selection">
+          <sl-button size="small" @click=${(): void => this.applyTool('comment')}>
+            <sl-icon slot="prefix" name="chat-text"></sl-icon>
+            Comment
+          </sl-button>
+        </sl-tooltip>
+        <sl-tooltip content="Suggest a replacement for the selection">
+          <sl-button size="small" @click=${(): void => this.applyTool('suggest')}>
+            <sl-icon slot="prefix" name="arrow-left-right"></sl-icon>
+            Suggest
+          </sl-button>
+        </sl-tooltip>
+        <sl-tooltip content="Suggest an insertion after the selection">
+          <sl-button size="small" @click=${(): void => this.applyTool('insert')}>
+            <sl-icon slot="prefix" name="plus-circle"></sl-icon>
+            Insert
+          </sl-button>
+        </sl-tooltip>
+        <sl-tooltip content="Suggest deleting the selection">
+          <sl-button size="small" @click=${(): void => this.applyTool('delete')}>
+            <sl-icon slot="prefix" name="dash-circle"></sl-icon>
+            Delete
+          </sl-button>
+        </sl-tooltip>
+        <span class="counts">
+          ${counts.suggestions} ${counts.suggestions === 1 ? 'suggestion' : 'suggestions'} ·
+          ${counts.comments} ${counts.comments === 1 ? 'comment' : 'comments'}
+        </span>
+        <span class="spacer"></span>
+        <span class="label">Preview</span>
+        ${this.renderCriticToggle()}
+        <sl-dropdown placement="bottom-end" distance="4">
+          <sl-icon-button
+            slot="trigger"
+            name="question-circle"
+            label="About reviews"
+          ></sl-icon-button>
+          <div class="help-panel">
+            Select text and choose a toolbar action. Marks are
+            <a
+              href="https://github.com/CriticMarkup/CriticMarkup-toolkit"
+              target="_blank"
+              rel="noopener noreferrer"
+              >CriticMarkup</a
+            >: a review may change nothing outside them. The owner reads your review next and
+            publishes the resolved text. An agent reads it with
+            <code>scion artifact get ${ref} --clean</code> (without the marks) or without
+            <code>--clean</code> (with them).
+          </div>
+        </sl-dropdown>
+      </div>
+      ${marks === 0
+        ? html`<div class="review-empty">Select text and choose Comment or Suggest.</div>`
+        : nothing}
+      ${!marksOnly
+        ? html`<sl-alert variant="warning" open>
+            <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+            Text outside marks has changed. Undo those edits, or use Edit to publish a plain edit.
+          </sl-alert>`
+        : nothing}
+      ${this.reviewError
+        ? html`<sl-alert variant="danger" open>
+            <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+            ${this.reviewError}
+          </sl-alert>`
+        : nothing}
+      <div class="review-panes">
+        <scion-code-editor
+          class="review-editor"
+          .content=${this.reviewText}
+          .language=${getLanguageFromPath(f.path)}
+          @content-changed=${(e: CustomEvent<{ content: string }>): void => {
+            this.reviewText = e.detail.content;
+          }}
+        ></scion-code-editor>
+        <scion-artifact-markdown-frame
+          .content=${this.reviewText}
+          .artifactId=${this.artifactId}
+          .seq=${v.seq}
+          .entryPath=${f.path}
+          .files=${v.files}
+          .critic=${this.criticView}
+        ></scion-artifact-markdown-frame>
+      </div>
+      <div class="edit-footer">
+        <sl-input
+          size="small"
+          placeholder="Note for this review (optional)"
+          .value=${this.reviewNote}
+          @sl-input=${(e: Event): void => {
+            this.reviewNote = (e.target as HTMLInputElement).value;
+          }}
+        ></sl-input>
+        <sl-button
+          size="small"
+          ?disabled=${this.reviewBusy}
+          @click=${(): void => {
+            this.reviewing = false;
+          }}
+          >Cancel</sl-button
+        >
+        <sl-button
+          size="small"
+          variant="primary"
+          ?loading=${this.reviewBusy}
+          ?disabled=${marks === 0 || !marksOnly || this.reviewText === this.text}
+          @click=${(): void => void this.saveReview()}
+        >
+          <sl-icon slot="prefix" name="floppy"></sl-icon>
+          Save review
+        </sl-button>
+      </div>
     `;
   }
 

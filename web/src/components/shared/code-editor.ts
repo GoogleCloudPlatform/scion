@@ -115,6 +115,20 @@ async function loadLanguageSupport(lang: string): Promise<CMModule | null> {
 // Component
 // ────────────────────────────────────────────────────────────
 
+/** The part of a CodeMirror EditorView the selection methods use. */
+interface SelectionView {
+  state: {
+    selection: { main: { from: number; to: number } };
+    sliceDoc(from: number, to: number): string;
+  };
+  dispatch(spec: {
+    changes: { from: number; to: number; insert: string };
+    selection: { anchor: number; head: number };
+    scrollIntoView: boolean;
+  }): void;
+  focus(): void;
+}
+
 @customElement('scion-code-editor')
 export class ScionCodeEditor extends LitElement {
   /** Initial content to load into the editor. */
@@ -225,6 +239,39 @@ export class ScionCodeEditor extends LitElement {
       // Rebuild the editor if readonly changes — simpler than dynamic reconfiguration
       void this.initEditor();
     }
+  }
+
+  /**
+   * The current selection as offsets into the content, with its text, or
+   * null before the editor has loaded.
+   */
+  getSelection(): { from: number; to: number; text: string } | null {
+    const view = this.editorView as SelectionView | null;
+    if (!view) return null;
+    const { from, to } = view.state.selection.main;
+    return { from, to, text: view.state.sliceDoc(from, to) };
+  }
+
+  /**
+   * Replaces the content between from and to with insert, then selects
+   * [selectFrom, selectTo) of the result (offsets into the new content)
+   * and focuses the editor. A content-changed event follows as for typing.
+   */
+  replaceRange(
+    from: number,
+    to: number,
+    insert: string,
+    selectFrom: number,
+    selectTo: number
+  ): void {
+    const view = this.editorView as SelectionView | null;
+    if (!view) return;
+    view.dispatch({
+      changes: { from, to, insert },
+      selection: { anchor: selectFrom, head: selectTo },
+      scrollIntoView: true,
+    });
+    view.focus();
   }
 
   /** Get the current editor content. */

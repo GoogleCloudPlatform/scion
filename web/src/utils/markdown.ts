@@ -25,6 +25,8 @@
  * ensures anchors open in a new tab with rel="noopener noreferrer".
  */
 
+import { criticToSentinels, renderCriticSentinels } from './critic.js';
+
 /** Options for one render call. */
 export interface MarkdownRenderOptions {
   /**
@@ -34,6 +36,13 @@ export interface MarkdownRenderOptions {
    * browser fetch nothing from elsewhere.
    */
   sameOriginImagesOnly?: boolean;
+  /**
+   * Render CriticMarkup marks (utils/critic.ts): insertions as <ins>,
+   * deletions as <del>, highlights as <mark> and comments as numbered
+   * notes. The marks become elements before sanitizing, so the output is
+   * sanitized like any other.
+   */
+  criticMarks?: boolean;
 }
 
 /** Result of the lazy-loaded renderer. */
@@ -104,7 +113,9 @@ export async function getMarkdownRenderer(): Promise<MarkdownRenderer> {
 
       return {
         render(markdown: string, options?: MarkdownRenderOptions): string {
-          const rawHtml = marked.parse(markdown, { async: false }) as string;
+          const source = options?.criticMarks ? criticToSentinels(markdown) : markdown;
+          let rawHtml = marked.parse(source, { async: false }) as string;
+          if (options?.criticMarks) rawHtml = renderCriticSentinels(rawHtml);
           const clean = purify.sanitize(rawHtml);
           return options?.sameOriginImagesOnly
             ? dropOffOriginImages(clean, window.location.origin)
