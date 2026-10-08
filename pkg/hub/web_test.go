@@ -503,6 +503,15 @@ func TestStaticAssetFingerprintedCaching(t *testing.T) {
 		}
 	})
 
+	t.Run("no manifest read without the entry", func(t *testing.T) {
+		bare := writeFingerprintFixture(t, fingerprintManifest)
+		require.NoError(t, os.Remove(filepath.Join(bare, "assets", "main.js")))
+		ws := newTestWebServer(t, WebServerConfig{AssetsDir: bare})
+		assert.False(t, ws.hasAssets)
+		assert.Nil(t, ws.fingerprintedAssets)
+		assert.Equal(t, "no-cache", cacheControlOf(t, ws, "/assets/shoelace-B3-XBhED.js"))
+	})
+
 	t.Run("manifest paths outside the build are ignored", func(t *testing.T) {
 		ws := newTestWebServer(t, WebServerConfig{AssetsDir: dir})
 		for _, p := range []string{"/../outside-AbCdEfGh.js", "/outside-AbCdEfGh.js", "//assets/abs-AbCdEfGh.js", "/assets/abs-AbCdEfGh.js", "/assets/settings-AbCdEfGh.js"} {

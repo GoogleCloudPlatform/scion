@@ -1098,14 +1098,16 @@ var fingerprintSegment = regexp.MustCompile(`-[A-Za-z0-9_-]{8,}\.[A-Za-z0-9]+$`)
 // source (embedded FS or --web-assets-dir) and returns the request paths of
 // every file Vite fingerprinted: each chunk's file (except the entry,
 // assets/main.js, which is not hashed) and the CSS and assets it lists.
-// Only clean relative paths that carry a hash segment are kept. A missing
-// manifest (an older build or the dev server) or one that does not parse
-// yields nil, so only the hex rule in isHashedAsset applies; a manifest
-// that does not parse is logged once and never used partially.
+// Only clean relative paths that carry a hash segment are kept.
 //
-// It runs once, and only when assets were detected. If --web-assets-dir is replaced
-// or rebuilt while the hub runs, the set describes the earlier build until
-// the hub restarts.
+// A missing, unreadable or unparseable manifest yields nil, so only the
+// hex rule in isHashedAsset applies. A missing manifest (an older build or
+// the dev server) is logged at Info; an unreadable or unparseable one is
+// logged at Warn and is never used partially.
+//
+// It runs once, and only when assets were detected. If --web-assets-dir is
+// replaced or rebuilt while the hub runs, the set describes the earlier
+// build until the hub restarts.
 func (ws *WebServer) loadFingerprintedAssets() map[string]bool {
 	var (
 		raw    []byte
