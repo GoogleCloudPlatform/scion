@@ -24,6 +24,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -757,6 +758,10 @@ func (s *Server) handleHarnessConfigFinalize(w http.ResponseWriter, r *http.Requ
 
 	var req struct {
 		Manifest *HarnessConfigManifest `json:"manifest"`
+		// SourceURL optionally records where the uploaded files came from
+		// (for example the URL given to 'scion harness-config install').
+		// When empty, the stored source URL is left unchanged.
+		SourceURL string `json:"sourceUrl,omitempty"`
 	}
 	if err := readJSON(r, &req); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
@@ -765,6 +770,12 @@ func (s *Server) handleHarnessConfigFinalize(w http.ResponseWriter, r *http.Requ
 
 	if req.Manifest == nil || len(req.Manifest.Files) == 0 {
 		ValidationError(w, "manifest with files is required", nil)
+		return
+	}
+
+	sourceURL := strings.TrimSpace(req.SourceURL)
+	if sourceURL != "" && (!config.IsRemoteURI(sourceURL) || strings.ContainsFunc(sourceURL, unicode.IsControl)) {
+		ValidationError(w, "sourceUrl must be a single-line remote URI (http://, https://, or rclone)", nil)
 		return
 	}
 
@@ -781,6 +792,9 @@ func (s *Server) handleHarnessConfigFinalize(w http.ResponseWriter, r *http.Requ
 	hc.Files = req.Manifest.Files
 	hc.ContentHash = contentHash
 	hc.Status = store.HarnessConfigStatusActive
+	if sourceURL != "" {
+		hc.SourceURL = sourceURL
+	}
 
 	if entry, ok := extractHarnessConfigEntryFromStorage(ctx, stor, hc.StoragePath); ok {
 		if entry.Image != "" {

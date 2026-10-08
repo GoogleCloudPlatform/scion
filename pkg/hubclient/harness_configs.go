@@ -50,8 +50,10 @@ type HarnessConfigService interface {
 	// RequestUploadURLs requests signed URLs for uploading harness config files.
 	RequestUploadURLs(ctx context.Context, id string, files []FileUploadRequest) (*UploadResponse, error)
 
-	// Finalize finalizes a harness config after file upload.
-	Finalize(ctx context.Context, id string, manifest *HarnessConfigManifest) (*HarnessConfig, error)
+	// Finalize finalizes a harness config after file upload. A non-empty
+	// sourceURL is recorded as the config's source URL; an empty one leaves
+	// the stored source URL unchanged.
+	Finalize(ctx context.Context, id string, manifest *HarnessConfigManifest, sourceURL string) (*HarnessConfig, error)
 
 	// RequestDownloadURLs requests signed URLs for downloading harness config files.
 	RequestDownloadURLs(ctx context.Context, id string) (*DownloadResponse, error)
@@ -135,6 +137,9 @@ type HarnessConfigManifest struct {
 // HarnessConfigFinalizeRequest is the request body for finalizing a harness config upload.
 type HarnessConfigFinalizeRequest struct {
 	Manifest *HarnessConfigManifest `json:"manifest"`
+	// SourceURL optionally records where the uploaded files came from. When
+	// empty, the Hub leaves the stored source URL unchanged.
+	SourceURL string `json:"sourceUrl,omitempty"`
 }
 
 // ReimportHarnessConfigRequest is the request body for reimporting a harness config.
@@ -254,9 +259,10 @@ func (s *harnessConfigService) RequestUploadURLs(ctx context.Context, id string,
 }
 
 // Finalize finalizes a harness config after file upload.
-func (s *harnessConfigService) Finalize(ctx context.Context, id string, manifest *HarnessConfigManifest) (*HarnessConfig, error) {
+func (s *harnessConfigService) Finalize(ctx context.Context, id string, manifest *HarnessConfigManifest, sourceURL string) (*HarnessConfig, error) {
 	req := HarnessConfigFinalizeRequest{
-		Manifest: manifest,
+		Manifest:  manifest,
+		SourceURL: sourceURL,
 	}
 	resp, err := s.c.post(ctx, "/api/v1/harness-configs/"+id+"/finalize", req, nil)
 	if err != nil {
