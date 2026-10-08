@@ -276,8 +276,6 @@ export class ScionTerminalPane extends LitElement {
   @state() private keyBarHidden = false;
   @state() private ctrlState: ModifierState = 'off';
   @state() private altState: ModifierState = 'off';
-  /** True while a bar key's own sequence passes through xterm, so onData leaves it as is. */
-  private sendingBarKey = false;
 
   private terminal: Terminal | null = null;
   private terminalStyle: HTMLStyleElement | null = null;
@@ -1237,6 +1235,9 @@ export class ScionTerminalPane extends LitElement {
     this.reconnectFailedManual = state.reconnectFailedManual;
     if (state.connection !== 'loading') this.loading = false;
     if (newlyConnected) {
+      // A one-shot modifier armed before a drop must not hit the first key
+      // typed into the new session; a locked one stays.
+      if (this.wasConnected) this.consumeKeyBarModifiers();
       this.wasConnected = true;
       if (this.measurable()) {
         this.fitAddon?.fit();
@@ -1575,7 +1576,7 @@ export class ScionTerminalPane extends LitElement {
     // Handle terminal input. The key bar's sticky Ctrl/Alt apply to the next
     // character typed on the on-screen keyboard.
     this.terminal.onData((data: string) => {
-      this.sendData(this.sendingBarKey ? data : this.applyKeyBarModifiers(data));
+      this.sendData(this.applyKeyBarModifiers(data));
     });
 
     this.terminal.onBinary((data: string) => {
@@ -1673,16 +1674,17 @@ export class ScionTerminalPane extends LitElement {
    * Sends a bar key through xterm's own input path (terminal.input fires
    * onData exactly as a typed key does, and scrolls to the bottom and
    * clears the selection like one). A named key carries its modifiers in
-   * its own sequence; a character key is typed and so picks them up in
-   * onData like an on-screen keyboard character.
+   * its own sequence, and they are consumed before it is sent, so onData
+   * leaves it alone (a locked Ctrl has no code for Tab or Esc, and Alt is
+   * already in the sequence); a character key is typed and so picks them
+   * up in onData like an on-screen keyboard character.
    */
   private pressBarKey(entry: (typeof KEY_BAR_KEYS)[number]): void {
-    // A bar key acts on this pane, so the next typed key must land here too
-    // (several panes can show at once). The tap is a user gesture, so iOS
-    // keeps or opens the keyboard for the focus move.
-    if (this.terminal && this.shadowRoot?.activeElement !== this.terminal.textarea) {
-      this.terminal.focus();
-    }
+    // A bar key acts on this pane, so when another pane's terminal or an
+    // input has focus, the next typed key must land here instead (several
+    // panes can show at once). When nothing has focus the user closed the
+    // keyboard, e.g. to read with the arrows or PgUp, so it stays closed.
+    if (this.terminal && this.focusIsElsewhere()) this.terminal.focus();
     if (entry.modifier === 'ctrl') {
       this.ctrlState = nextModifierState(this.ctrlState);
       return;
@@ -1703,12 +1705,13 @@ export class ScionTerminalPane extends LitElement {
       this.keyBarModifiers
     );
     this.consumeKeyBarModifiers();
-    this.sendingBarKey = true;
-    try {
-      terminal.input(sequence);
-    } finally {
-      this.sendingBarKey = false;
-    }
+    terminal.input(sequence);
+  }
+
+  /** Whether an element outside this pane has focus (not the body, not nothing). */
+  private focusIsElsewhere(): boolean {
+    const active = document.activeElement;
+    return !!active && active !== document.body && active !== this && !this.contains(active);
   }
 
   private renderKeyBar() {
