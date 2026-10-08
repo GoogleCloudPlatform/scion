@@ -66,6 +66,25 @@ describe('project card layout', () => {
     expect(container.querySelector('.resource-name > span sl-tooltip')).not.toBeNull();
   });
 
+  it('shows the workspace mode as the project icon with a label', () => {
+    const container = document.createElement('div');
+    render(
+      page.renderProjectCard({
+        id: 'p3',
+        name: 'empty_project',
+        slug: 'empty_project',
+        agentCount: 0,
+        labels: { 'scion.dev/workspace-mode': 'per-agent' },
+      }),
+      container
+    );
+    const tooltip = container.querySelector('.resource-name > sl-tooltip');
+    expect(tooltip?.getAttribute('content')).toBe('Empty directory per agent');
+    const icon = tooltip?.querySelector('sl-icon.workspace-mode-icon');
+    expect(icon?.getAttribute('name')).toBe('folder-plus');
+    expect(icon?.getAttribute('label')).toBe('Empty directory per agent');
+  });
+
   it('lets a long unbroken name and git remote wrap instead of spilling past the card', () => {
     expect(rules.get('.project-header > div') ?? '').toMatch(/min-width:\s*0/);
     expect(rules.get('.resource-name > span') ?? '').toMatch(/overflow-wrap:\s*anywhere/);

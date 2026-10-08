@@ -23,9 +23,11 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import type { Project } from './types.js';
 import {
   isEmptyPerAgentWorkspace,
   lifecycleActionRequestInit,
+  projectWorkspaceModeIcon,
   RESUME_BEST_EFFORT_CONFIRM_MESSAGE,
 } from './types.js';
 
@@ -71,5 +73,40 @@ describe('isEmptyPerAgentWorkspace', () => {
     expect(isEmptyPerAgentWorkspace({ labels: label('shared') })).toBe(false);
     expect(isEmptyPerAgentWorkspace({})).toBe(false);
     expect(isEmptyPerAgentWorkspace(undefined)).toBe(false);
+  });
+});
+
+describe('projectWorkspaceModeIcon', () => {
+  const project = (extra: Partial<Project>): Project => ({
+    id: 'p',
+    name: 'p',
+    slug: 'p',
+    agentCount: 0,
+    ...extra,
+  });
+  const mode = (m: string) => ({ 'scion.dev/workspace-mode': m });
+  const remote = 'https://github.com/org/repo.git';
+
+  it.each([
+    [{ gitRemote: remote }, 'git', 'Git repository, clone per agent'],
+    [{ gitRemote: remote, labels: mode('shared') }, 'git', 'Git repository, shared workspace'],
+    [
+      { gitRemote: remote, labels: mode('worktree-per-agent') },
+      'git',
+      'Git repository, worktree per agent',
+    ],
+    [{}, 'folder-fill', 'Shared directory'],
+    [{ labels: mode('shared') }, 'folder-fill', 'Shared directory'],
+    [{ labels: mode('per-agent') }, 'folder-plus', 'Empty directory per agent'],
+    [{ labels: mode('empty-per-agent') }, 'folder-plus', 'Empty directory per agent'],
+    [{ projectType: 'linked' }, 'folder-symlink', 'Linked project directory'],
+  ] as [Partial<Project>, string, string][])('maps %j to %s', (extra, icon, label) => {
+    expect(projectWorkspaceModeIcon(project(extra))).toEqual({ icon, label });
+  });
+
+  it('gives empty-per-agent and shared directories different icons', () => {
+    expect(projectWorkspaceModeIcon(project({ labels: mode('per-agent') })).icon).not.toBe(
+      projectWorkspaceModeIcon(project({})).icon
+    );
   });
 });
