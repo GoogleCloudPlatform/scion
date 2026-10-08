@@ -15,14 +15,17 @@
 package config
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -106,4 +109,84 @@ func TestExecGitLsRemote_Invocation(t *testing.T) {
 	out, err := execGitLsRemote(context.Background(), "https://github.com/org/repo.git")
 	require.NoError(t, err)
 	assert.Equal(t, "ls-remote|--heads|https://github.com/org/repo.git|TP=0|AP=echo", strings.TrimSpace(string(out)))
+}
+
+// writeSleepingFakeGit puts a fake `git` on PATH that blocks far longer than
+// the shortened ls-remote timeout. `exec` replaces the shell so the sleep is
+// the direct child that exec.CommandContext kills; no grandchild lingers.
+func writeSleepingFakeGit(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("fake git script requires a POSIX shell")
+	}
+	dir := t.TempDir()
+	script := "#!/bin/sh\nexec /bin/sleep 30\n"
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "git"), []byte(script), 0o755))
+	t.Setenv("PATH", dir)
+}
+
+func shortenLsRemoteTimeout(t *testing.T, d time.Duration) {
+	t.Helper()
+	prevTimeout, prevWait := gitLsRemoteTimeout, gitLsRemoteWaitDelay
+	gitLsRemoteTimeout, gitLsRemoteWaitDelay = d, time.Second
+	t.Cleanup(func() { gitLsRemoteTimeout, gitLsRemoteWaitDelay = prevTimeout, prevWait })
+}
+
+func TestExecGitLsRemote_Timeout(t *testing.T) {
+	writeSleepingFakeGit(t)
+	shortenLsRemoteTimeout(t, 200*time.Millisecond)
+
+	const token = "ghs_SECRETTOKEN123"
+	start := time.Now()
+	_, err := execGitLsRemote(context.Background(),
+		"https://x-access-token:"+token+"@github.com/org/repo.git")
+	elapsed := time.Since(start)
+
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, context.DeadlineExceeded), "want DeadlineExceeded, got %v", err)
+	assert.Equal(t, "git ls-remote for org/repo timed out after 200ms: context deadline exceeded", err.Error())
+	assert.NotContains(t, err.Error(), token)
+	assert.NotContains(t, err.Error(), "x-access-token")
+	assert.Less(t, elapsed, 5*time.Second, "ls-remote should be cut off by the timeout, not run to completion")
+}
+
+func TestExecGitLsRemote_CallerDeadlineWins(t *testing.T) {
+	writeSleepingFakeGit(t)
+	shortenLsRemoteTimeout(t, 10*time.Second)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err := execGitLsRemote(ctx, "https://github.com/org/repo.git")
+	require.Error(t, err)
+	assert.Less(t, time.Since(start), 5*time.Second)
+	// The caller's own deadline fired, so this is not reported as our bound.
+	assert.NotContains(t, err.Error(), "timed out after")
+	// Not wrapping DeadlineExceeded is what keeps resolveGitHubRef silent
+	// on caller cancellation/deadline.
+	assert.False(t, errors.Is(err, context.DeadlineExceeded), "caller deadline must not be reported as our timeout: %v", err)
+}
+
+func TestResolveGitHubRef_TimeoutKeepsNaiveParse(t *testing.T) {
+	writeSleepingFakeGit(t)
+	shortenLsRemoteTimeout(t, 200*time.Millisecond)
+
+	var buf bytes.Buffer
+	prevLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prevLogger) })
+
+	const token = "ghs_SECRETTOKEN123"
+	parts := &GitHubURLParts{Owner: "org", Repo: "repo", Branch: "feature", Path: "x/templates"}
+	start := time.Now()
+	resolveGitHubRef(context.Background(), parts, token)
+	assert.Less(t, time.Since(start), 5*time.Second)
+	assert.Equal(t, "feature", parts.Branch)
+	assert.Equal(t, "x/templates", parts.Path)
+
+	logs := buf.String()
+	assert.Equal(t, 1, strings.Count(logs, "level=WARN"), "want exactly one WARN line, got:\n%s", logs)
+	assert.Contains(t, logs, "repo=org/repo")
+	assert.NotContains(t, logs, token)
+	assert.NotContains(t, logs, "x-access-token")
 }
