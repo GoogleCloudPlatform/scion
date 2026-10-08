@@ -398,17 +398,6 @@ func entGitHubToStore(e *ent.GithubInstallation) *store.GitHubInstallation {
 // "INSERT OR IGNORE" behavior, creating an installation that already exists is a
 // no-op (idempotent) rather than an error.
 func (s *ExternalStore) CreateGitHubInstallation(ctx context.Context, installation *store.GitHubInstallation) error {
-	// Idempotency guard: if the natural key already exists, do nothing.
-	exists, err := s.client.GithubInstallation.Query().
-		Where(githubinstallation.IDEQ(installation.InstallationID)).
-		Exist(ctx)
-	if err != nil {
-		return err
-	}
-	if exists {
-		return nil
-	}
-
 	if installation.CreatedAt.IsZero() {
 		installation.CreatedAt = time.Now()
 	}
@@ -423,21 +412,29 @@ func (s *ExternalStore) CreateGitHubInstallation(ctx context.Context, installati
 		accountType = "Organization"
 	}
 
-	err = s.client.GithubInstallation.Create().
-		SetID(installation.InstallationID).
-		SetAccountLogin(installation.AccountLogin).
-		SetAccountType(accountType).
-		SetAppID(installation.AppID).
-		SetRepositories(marshalRepos(installation.Repositories)).
-		SetStatus(installation.Status).
-		SetCreated(installation.CreatedAt).
-		SetUpdated(installation.UpdatedAt).
+	// Idempotent on the natural key: an existing row with this installation
+	// ID (including one a concurrent writer just inserted) is left untouched
+	// via ON CONFLICT DO NOTHING. Any other constraint failure still surfaces.
+	//
+	// CreateBulk, not Create: ent's single-row Create+OnConflict reads the row
+	// back via RETURNING and fails with sql.ErrNoRows when DO NOTHING skips
+	// the insert; the bulk path tolerates zero returned rows. Must stay Exec,
+	// never Save, for the same reason (see SeedMaintenanceOperations).
+	err := s.client.GithubInstallation.CreateBulk(
+		s.client.GithubInstallation.Create().
+			SetID(installation.InstallationID).
+			SetAccountLogin(installation.AccountLogin).
+			SetAccountType(accountType).
+			SetAppID(installation.AppID).
+			SetRepositories(marshalRepos(installation.Repositories)).
+			SetStatus(installation.Status).
+			SetCreated(installation.CreatedAt).
+			SetUpdated(installation.UpdatedAt),
+	).
+		OnConflictColumns(githubinstallation.FieldID).
+		DoNothing().
 		Exec(ctx)
 	if err != nil {
-		// Another writer may have created it concurrently — stay idempotent.
-		if ent.IsConstraintError(err) {
-			return nil
-		}
 		return mapError(err)
 	}
 	return nil
