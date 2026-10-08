@@ -193,19 +193,27 @@ func TestSuspendedPage_HeadlessBrowser_ZeroFanOut(t *testing.T) {
 // DevTools URL within a second; several CPU-bound processes per core slow
 // that to a few seconds. CI has seen rare launches that never print it within
 // 60 s (ptone/scion#3412). The cause is unknown: Chrome's output was not
-// captured then. So the launch is bounded per attempt and retried, and each
+// captured then. So each launch attempt is bounded and retried, and each
 // failed attempt logs Chrome's output for diagnosis.
+//
+// browserLaunchTimeout bounds the wait for the DevTools URL. The whole
+// attempt (starting Chrome, reading the URL, connecting to the browser and
+// attaching to its first tab) is bounded by browserLaunchTimeout plus
+// browserAttachGrace.
 const (
 	browserLaunchAttempts = 3
 	browserLaunchTimeout  = 30 * time.Second
+	browserAttachGrace    = 10 * time.Second
 )
 
 // startHeadlessBrowser launches headless Chrome and returns a chromedp context
 // bound to it. Each attempt runs a fresh browser process with a fresh
-// profile. A hung or failed attempt is killed, its combined Chrome output is
-// logged, and the launch is retried up to browserLaunchAttempts times. Only
-// the launch is retried; navigation and assertions run once on the returned
-// context. The browser is shut down via t.Cleanup.
+// profile and is bounded as a whole (see browserAttachGrace). An attempt that
+// fails or runs out of time is killed, its combined Chrome output is logged,
+// and the launch is retried up to browserLaunchAttempts times. Only the
+// launch is retried; navigation and assertions run once on the returned
+// context, under the caller's own bound. The browser is shut down via
+// t.Cleanup.
 func startHeadlessBrowser(t *testing.T) context.Context {
 	t.Helper()
 	var lastErr error
@@ -224,10 +232,20 @@ func startHeadlessBrowser(t *testing.T) context.Context {
 		allocCtx, allocCancel := chromedp.NewExecAllocator(context.Background(), opts...)
 		ctx, cancel := chromedp.NewContext(allocCtx)
 
+		// Bound the whole attempt with a timer that cancels ctx, not with
+		// context.WithTimeout: chromedp ties the browser's lifetime to the
+		// context of the first Run, so a deadline there would also end the
+		// browser handed back to the caller.
+		timer := time.AfterFunc(browserLaunchTimeout+browserAttachGrace, cancel)
+
 		// A Run with no actions only launches the browser and attaches to
 		// its first tab.
 		start := time.Now()
 		err := chromedp.Run(ctx)
+		if !timer.Stop() && err == nil {
+			// The timer fired as Run returned, so ctx is already canceled.
+			err = fmt.Errorf("launch did not finish within %s", browserLaunchTimeout+browserAttachGrace)
+		}
 		if err == nil {
 			t.Logf("headless browser started in %s (attempt %d)", time.Since(start).Round(time.Millisecond), attempt)
 			t.Cleanup(func() {
