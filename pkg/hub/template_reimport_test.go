@@ -709,3 +709,51 @@ func TestExtractTarget(t *testing.T) {
 		})
 	}
 }
+
+func TestSelectTemplateSourceDir(t *testing.T) {
+	tmpl := &store.Template{Name: "My Template", Slug: "my-template"}
+	dir := func(name string) resourceDir { return resourceDir{name: name, path: "/x/" + name} }
+
+	got, err := selectTemplateSourceDir([]resourceDir{dir("other"), dir("My Template")}, tmpl)
+	require.NoError(t, err)
+	assert.Equal(t, "My Template", got.name, "folder named after the template's name")
+
+	got, err = selectTemplateSourceDir([]resourceDir{dir("other"), dir("my-template")}, tmpl)
+	require.NoError(t, err)
+	assert.Equal(t, "my-template", got.name, "folder named after the template's slug")
+
+	got, err = selectTemplateSourceDir([]resourceDir{dir("My_Template!")}, tmpl)
+	require.NoError(t, err)
+	assert.Equal(t, "My_Template!", got.name, "folder whose name slugifies to the slug")
+
+	_, err = selectTemplateSourceDir([]resourceDir{dir("other")}, tmpl)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "does not contain this template")
+
+	_, err = selectTemplateSourceDir([]resourceDir{dir("my-template"), dir("other"), dir("My Template")}, tmpl)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "more than one folder matching this template")
+}
+
+// TestTemplateReimport_SeveralMatchingFolders: a source with two folders
+// that both match the template is refused and nothing is written.
+func TestTemplateReimport_SeveralMatchingFolders(t *testing.T) {
+	srv, s, _ := testTemplateBootstrapServer(t)
+	ctx := context.Background()
+	admin := newReimportAdmin(t, s)
+	target := createReimportTemplateWithSlug(t, s, "tmpl-several", "My Template", "my-template",
+		store.TemplateScopeGlobal, "", reimportTestSource)
+
+	srv.templateSourceFetcher = &fakeTemplateSourceFetcher{body: buildTarGz(t, []tarEntry{
+		{name: "repo-main/templates/my-template/scion-agent.yaml", body: "harness: claude\n"},
+		{name: "repo-main/templates/My Template/scion-agent.yaml", body: "harness: claude\n"},
+	})}
+	rec := doRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/templates/"+target.ID+"/reimport", nil)
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "more than one folder matching this template")
+
+	got, err := s.GetTemplate(ctx, target.ID)
+	require.NoError(t, err)
+	assert.Empty(t, got.Files, "nothing is written")
+	assert.Equal(t, 1, countTemplates(t, s, store.TemplateScopeGlobal, ""))
+}
