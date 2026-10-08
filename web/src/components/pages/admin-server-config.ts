@@ -2795,7 +2795,11 @@ export class ScionPageAdminServerConfig extends LitElement {
    */
   private renderEnvBadge(...koanfKeys: string[]): typeof nothing | ReturnType<typeof html> {
     const overridden = koanfKeys.some((k) => this.envOverrides.includes(k));
-    if (!overridden) return nothing;
+    return overridden ? this.envBadgeTemplate() : nothing;
+  }
+
+  /** The env-override badge shared by renderEnvBadge and renderEnvBadgeUnder. */
+  private envBadgeTemplate(): ReturnType<typeof html> {
     return html`
       <span class="env-badge">
         <sl-icon name="exclamation-triangle"></sl-icon>
@@ -2811,13 +2815,7 @@ export class ScionPageAdminServerConfig extends LitElement {
    */
   private renderEnvBadgeUnder(prefix: string): typeof nothing | ReturnType<typeof html> {
     const overridden = this.envOverrides.some((k) => k === prefix || k.startsWith(`${prefix}.`));
-    if (!overridden) return nothing;
-    return html`
-      <span class="env-badge">
-        <sl-icon name="exclamation-triangle"></sl-icon>
-        Overridden by environment on this node
-      </span>
-    `;
+    return overridden ? this.envBadgeTemplate() : nothing;
   }
 
   /**
