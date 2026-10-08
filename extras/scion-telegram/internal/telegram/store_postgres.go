@@ -160,16 +160,22 @@ func withSchemaLock(ctx context.Context, db *sql.DB, fn func(conn *sql.Conn) err
 	if err != nil {
 		return fmt.Errorf("acquire schema connection: %w", err)
 	}
-	var unlockErr error
-	defer func() { releaseSchemaConn(conn, unlockErr) }()
+	// locked is set once the advisory lock is held and released only after
+	// a successful unlock, so a panic in fn or a failed unlock discards the
+	// connection instead of pooling it with the lock still held.
+	locked := false
+	defer func() { releaseSchemaConn(conn, locked) }()
 
 	key := int64(store.LockTelegramSchema)
 	if _, err := conn.ExecContext(ctx, "SELECT pg_advisory_lock($1)", key); err != nil {
 		return fmt.Errorf("acquire schema lock: %w", err)
 	}
+	locked = true
 	fnErr := fn(conn)
-	_, unlockErr = conn.ExecContext(context.Background(), "SELECT pg_advisory_unlock($1)", key)
-	if unlockErr != nil {
+	_, unlockErr := conn.ExecContext(context.Background(), "SELECT pg_advisory_unlock($1)", key)
+	if unlockErr == nil {
+		locked = false
+	} else {
 		slog.Warn("Failed to release Telegram schema lock; discarding connection", "error", unlockErr)
 		if fnErr == nil {
 			return fmt.Errorf("release schema lock: %w", unlockErr)
@@ -179,12 +185,12 @@ func withSchemaLock(ctx context.Context, db *sql.DB, fn func(conn *sql.Conn) err
 }
 
 // releaseSchemaConn returns conn to the pool, or closes it when the
-// schema lock could not be released. A pooled connection would keep the
-// session-scoped lock and block later schema setup. Returning
-// driver.ErrBadConn from Raw makes database/sql close the underlying
-// connection instead of pooling it.
-func releaseSchemaConn(conn *sql.Conn, unlockErr error) {
-	if unlockErr != nil {
+// schema lock is still held because the unlock failed or fn panicked. A
+// pooled connection would keep the session-scoped lock and block later
+// schema setup. Returning driver.ErrBadConn from Raw makes database/sql
+// close the underlying connection instead of pooling it.
+func releaseSchemaConn(conn *sql.Conn, lockHeld bool) {
+	if lockHeld {
 		_ = conn.Raw(func(any) error { return driver.ErrBadConn })
 		return
 	}

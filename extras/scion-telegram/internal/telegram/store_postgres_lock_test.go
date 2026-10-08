@@ -78,6 +78,7 @@ func TestWithSchemaLock_ConnectionRelease(t *testing.T) {
 		name       string
 		failUnlock bool
 		fnErr      error
+		fnPanics   bool
 		wantErr    string
 		wantClosed int32
 		wantIdle   int
@@ -87,6 +88,7 @@ func TestWithSchemaLock_ConnectionRelease(t *testing.T) {
 			wantErr: "release schema lock", wantClosed: 1},
 		{name: "unlock failure after fn error discards connection",
 			failUnlock: true, fnErr: fnErr, wantErr: fnErr.Error(), wantClosed: 1},
+		{name: "fn panic discards connection", fnPanics: true, wantClosed: 1},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -94,9 +96,22 @@ func TestWithSchemaLock_ConnectionRelease(t *testing.T) {
 			db := sql.OpenDB(connector)
 			t.Cleanup(func() { _ = db.Close() })
 
-			err := withSchemaLock(context.Background(), db, func(*sql.Conn) error {
-				return tt.fnErr
-			})
+			var err error
+			var recovered any
+			func() {
+				defer func() { recovered = recover() }()
+				err = withSchemaLock(context.Background(), db, func(*sql.Conn) error {
+					if tt.fnPanics {
+						panic("ddl panic")
+					}
+					return tt.fnErr
+				})
+			}()
+			if tt.fnPanics {
+				assert.Equal(t, "ddl panic", recovered, "panic propagates")
+			} else {
+				require.Nil(t, recovered)
+			}
 			if tt.wantErr == "" {
 				require.NoError(t, err)
 			} else {
