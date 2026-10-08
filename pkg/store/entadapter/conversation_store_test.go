@@ -19,10 +19,12 @@ package entadapter
 import (
 	"context"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conversation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conversationparticipant"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
@@ -370,15 +372,21 @@ func TestUpsertConversationByExternalRef_ConcurrentUpsert(t *testing.T) {
 	s := newTestConversationStore(t)
 	ctx := context.Background()
 
-	const goroutines = 5
+	// A losing insert hits the partial unique index, which
+	// isUniqueViolation must classify for the retry to take the update
+	// branch (ptone/scion#3036). The start gate releases every goroutine at
+	// once so the inserts actually race.
+	const goroutines = 8
 	var wg sync.WaitGroup
 	results := make([]*store.Conversation, goroutines)
 	errors := make([]error, goroutines)
+	start := make(chan struct{})
 
 	for i := 0; i < goroutines; i++ {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
+			<-start
 			conv := &store.Conversation{
 				Kind:        "group",
 				Surface:     "telegram",
@@ -388,6 +396,7 @@ func TestUpsertConversationByExternalRef_ConcurrentUpsert(t *testing.T) {
 			results[idx], errors[idx] = s.UpsertConversationByExternalRef(ctx, conv)
 		}(i)
 	}
+	close(start)
 	wg.Wait()
 
 	// All should succeed
@@ -401,6 +410,16 @@ func TestUpsertConversationByExternalRef_ConcurrentUpsert(t *testing.T) {
 	for _, id := range ids {
 		assert.Equal(t, ids[0], id, "concurrent upserts should converge on one conversation")
 	}
+
+	// And exactly one row exists for the external ref.
+	n, err := s.client.Conversation.Query().
+		Where(
+			conversation.SurfaceEQ(conversation.SurfaceTelegram),
+			conversation.ExternalRefEQ("concurrent-test-ref"),
+		).
+		Count(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 1, n, "exactly one row for the external ref")
 }
 
 func TestUpsertConversationByExternalRef_DifferentExternalRefsSameSurface(t *testing.T) {
@@ -1605,4 +1624,166 @@ func TestEnsureParticipant_PopulatesCallerStruct(t *testing.T) {
 	assert.True(t, dbRow.JoinedAt.Equal(ensureP.JoinedAt),
 		"p.JoinedAt must be populated from existing row: expected=%v, got=%v",
 		dbRow.JoinedAt, ensureP.JoinedAt)
+}
+
+// TestConversationUniqueIndexViolation_IsUniqueViolation pins the error
+// UpsertConversationByExternalRef's retry depends on: a second active row
+// for the same (surface, external_ref) violates the partial unique index,
+// and isUniqueViolation recognizes it from the driver's error code on the
+// test backend (SQLite by default, Postgres under -tags integration)
+// (ptone/scion#3036).
+func TestConversationUniqueIndexViolation_IsUniqueViolation(t *testing.T) {
+	s := newTestConversationStore(t)
+	ctx := context.Background()
+
+	create := func() error {
+		return s.client.Conversation.Create().
+			SetID(uuid.New()).
+			SetKind(conversation.KindGroup).
+			SetSurface(conversation.SurfaceTelegram).
+			SetExternalRef("unique-idx-ref").
+			SetDriftState(conversation.DriftStateActive).
+			Exec(ctx)
+	}
+	require.NoError(t, create())
+	err := create()
+	require.Error(t, err)
+	assert.True(t, isUniqueViolation(err), "duplicate (surface, external_ref) must be a unique violation: %v", err)
+}
+
+// TestEnsureParticipant_ConcurrentInsertConverges races several
+// EnsureParticipant calls for the same principal: every call succeeds,
+// exactly one row exists, and every caller's struct carries that row's ID
+// (ptone/scion#3036).
+func TestEnsureParticipant_ConcurrentInsertConverges(t *testing.T) {
+	s := newTestConversationStore(t)
+	ctx := context.Background()
+
+	conv := newTestConversation()
+	require.NoError(t, s.CreateConversation(ctx, conv))
+	principal := uuid.NewString()
+
+	const goroutines = 8
+	parts := make([]*store.ConversationParticipant, goroutines)
+	errs := make([]error, goroutines)
+	var wg sync.WaitGroup
+	for i := 0; i < goroutines; i++ {
+		parts[i] = &store.ConversationParticipant{
+			ConversationID: conv.ID, PrincipalKind: "user", PrincipalID: principal,
+		}
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			errs[i] = s.EnsureParticipant(ctx, parts[i])
+		}(i)
+	}
+	wg.Wait()
+
+	participants, err := s.ListParticipants(ctx, conv.ID)
+	require.NoError(t, err)
+	require.Len(t, participants, 1)
+	for i := range parts {
+		require.NoError(t, errs[i], "goroutine %d", i)
+		assert.Equal(t, participants[0].ID, parts[i].ID, "goroutine %d: caller struct must carry the stored row's ID", i)
+		assert.False(t, parts[i].JoinedAt.IsZero(), "goroutine %d: JoinedAt must be populated", i)
+	}
+}
+
+// TestEnsureParticipant_ExistingRowIgnoresCallerID pins that a caller-supplied
+// ID does not replace an existing participant row: the call succeeds and
+// reports the stored row's ID.
+func TestEnsureParticipant_ExistingRowIgnoresCallerID(t *testing.T) {
+	s := newTestConversationStore(t)
+	ctx := context.Background()
+
+	conv := newTestConversation()
+	require.NoError(t, s.CreateConversation(ctx, conv))
+	principal := uuid.NewString()
+
+	first := &store.ConversationParticipant{ConversationID: conv.ID, PrincipalKind: "user", PrincipalID: principal}
+	require.NoError(t, s.EnsureParticipant(ctx, first))
+	require.NotEmpty(t, first.ID)
+
+	second := &store.ConversationParticipant{
+		ID: uuid.NewString(), ConversationID: conv.ID, PrincipalKind: "user", PrincipalID: principal,
+	}
+	require.NoError(t, s.EnsureParticipant(ctx, second))
+	assert.Equal(t, first.ID, second.ID)
+	assert.True(t, first.JoinedAt.Equal(second.JoinedAt))
+}
+
+// TestEnsureParticipant_PrimaryKeyClashSurfaces pins that only the
+// (conversation, principal) conflict is idempotent: reusing another
+// participant's ID for a different principal is a constraint failure that
+// must be returned, not reported as success (ptone/scion#3036).
+func TestEnsureParticipant_PrimaryKeyClashSurfaces(t *testing.T) {
+	s := newTestConversationStore(t)
+	ctx := context.Background()
+
+	conv := newTestConversation()
+	require.NoError(t, s.CreateConversation(ctx, conv))
+
+	first := &store.ConversationParticipant{ConversationID: conv.ID, PrincipalKind: "user", PrincipalID: uuid.NewString()}
+	require.NoError(t, s.EnsureParticipant(ctx, first))
+
+	clash := &store.ConversationParticipant{
+		ID: first.ID, ConversationID: conv.ID, PrincipalKind: "user", PrincipalID: uuid.NewString(),
+	}
+	require.Error(t, s.EnsureParticipant(ctx, clash))
+
+	participants, err := s.ListParticipants(ctx, conv.ID)
+	require.NoError(t, err)
+	assert.Len(t, participants, 1)
+}
+
+// TestEnsureParticipant_ExistingRowIsReadOnly pins the fast path: when the
+// participant row already exists, EnsureParticipant reports it with reads
+// only and issues no INSERT (on SQLite even a no-op INSERT ... ON CONFLICT
+// takes the database write lock, and this runs on every send).
+func TestEnsureParticipant_ExistingRowIsReadOnly(t *testing.T) {
+	ctx := context.Background()
+	base := enttest.NewClient(t)
+	rec := &planRecordingDriver{Driver: base.Driver()}
+	s := NewConversationStore(ent.NewClient(ent.Driver(rec)))
+
+	conv := newTestConversation()
+	require.NoError(t, s.CreateConversation(ctx, conv))
+	first := &store.ConversationParticipant{ConversationID: conv.ID, PrincipalKind: "user", PrincipalID: uuid.NewString()}
+	require.NoError(t, s.EnsureParticipant(ctx, first))
+
+	rec.mu.Lock()
+	rec.queries = nil
+	rec.mu.Unlock()
+
+	again := &store.ConversationParticipant{ConversationID: conv.ID, PrincipalKind: "user", PrincipalID: first.PrincipalID}
+	require.NoError(t, s.EnsureParticipant(ctx, again))
+	assert.Equal(t, first.ID, again.ID)
+
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	require.NotEmpty(t, rec.queries, "the recording driver must see the reads")
+	for _, q := range rec.queries {
+		assert.NotContains(t, strings.ToUpper(q.sql), "INSERT", "existing participant must not be written: %s", q.sql)
+	}
+}
+
+// TestUpsertConversationByExternalRef_PrimaryKeyClashFails pins that a
+// caller-supplied ID already used by another conversation is an error, not
+// a silent success, and creates nothing.
+func TestUpsertConversationByExternalRef_PrimaryKeyClashFails(t *testing.T) {
+	s := newTestConversationStore(t)
+	ctx := context.Background()
+
+	first, err := s.UpsertConversationByExternalRef(ctx, &store.Conversation{
+		Kind: "group", Surface: "telegram", ExternalRef: "pk-first",
+	})
+	require.NoError(t, err)
+
+	_, err = s.UpsertConversationByExternalRef(ctx, &store.Conversation{
+		ID: first.ID, Kind: "group", Surface: "telegram", ExternalRef: "pk-second",
+	})
+	require.Error(t, err)
+
+	_, err = s.GetConversationByExternalRef(ctx, "telegram", "pk-second")
+	assert.ErrorIs(t, err, store.ErrNotFound)
 }

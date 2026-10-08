@@ -132,7 +132,7 @@ var requestPathSites = []requestPathSite{
 	{"web.go", "WebServer.handleOAuthLogin", "URL.Path", 1, "routing: extracts the OAuth provider"},
 	{"web.go", "WebServer.prefetchPageData", "URL.Path", 2, "routing: maps an SPA page path to its API prefetch"},
 	{"web.go", "WebServer.proxyAuthMiddleware", "URL.Path", 1, "comparison: skips auth for public web paths"},
-	{"web.go", "WebServer.serveStaticAsset", "URL.Path", 2, "routing: serves the static asset at the path"},
+	{"web.go", "WebServer.serveStaticAsset", "URL.Path", 3, "routing: serves the static asset at the path, and picks its Content-Type and Cache-Control from it (not logged)"},
 	{"web.go", "WebServer.sessionAuthMiddleware", "URL.Path", 2, "comparison, and the post-login redirect target stored in the session cookie (not logged)"},
 	{"web.go", "WebServer.sessionToBearerMiddleware", "URL.Path", 1, "comparison, and the post-login redirect target stored in the session cookie (not logged)"},
 	{"web.go", "WebServer.sessionToBearerMiddleware", "URL.RequestURI", 1, "comparison, and the post-login redirect target stored in the session cookie (not logged)"},
