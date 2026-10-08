@@ -31,8 +31,10 @@ import (
 // The revision ceiling of a scoped UAT is the token's frozen ceiling, with
 // its project boundary. revisionAuthorityCeiling is called directly: the
 // schedule routes refuse every UAT at the authoring credential gate before
-// any schedule handler logic runs (TestSchedUATAuthoringRefusedAtBoundary). Recording through the routes is
-// covered by session-authored schedules (TestScheduleAuthoringRecordsSessionCeiling,
+// any schedule handler logic runs
+// (TestSchedUATAuthoringRefusedAtBoundary). Recording through the routes
+// is covered by session-authored schedules
+// (TestScheduleAuthoringRecordsSessionCeiling,
 // TestSchedSessionReauthoringRecordsCeiling).
 func TestSchedUATRevisionCeilingIsTokenCeiling(t *testing.T) {
 	srv, s, projectID := setupScheduleTest(t)

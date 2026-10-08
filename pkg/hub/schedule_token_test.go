@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
@@ -368,4 +369,94 @@ func TestScheduleTokens_ReadsListsAndDeletesUseExactSelectors(t *testing.T) {
 	evt, err := f.store.GetScheduledEvent(context.Background(), event)
 	require.NoError(t, err)
 	assert.Equal(t, store.ScheduledEventCancelled, evt.Status)
+}
+
+// TestScheduleUpdateAndResume_RefuseTokensBeforeScheduleLookup requires
+// PATCH /schedules/{id} and POST /schedules/{id}/resume to refuse every
+// token with the GOV_PENDING reason before the schedule is looked up, the
+// permission is checked or the body is read: a token gets the same refusal
+// for a schedule ID that does not exist, for a schedule of another project
+// the owner can see, for a token without any scheduled_event selector, and
+// for a malformed body. Nothing changes.
+func TestScheduleUpdateAndResume_RefuseTokensBeforeScheduleLookup(t *testing.T) {
+	f := newScheduleTokenFixture(t, "sched-lookup-order")
+	ctx := context.Background()
+
+	other := tid("sched-lookup-other")
+	require.NoError(t, f.store.CreateProject(ctx, &store.Project{ID: other, Name: "lookup-other", Slug: other}))
+	require.NoError(t, f.srv.createProjectOwnerRoleBinding(ctx, other, f.owner.ID()))
+	createdAt := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
+	otherSchedule := tid("sched-lookup-other-sc")
+	require.NoError(t, f.store.CreateSchedule(ctx, &store.Schedule{
+		ID: otherSchedule, ProjectID: other, Name: "lookup-other", CronExpr: "0 * * * *",
+		EventType: "message", Payload: "{}", Status: store.ScheduleStatusPaused, CreatedAt: createdAt, UpdatedAt: createdAt,
+	}))
+
+	active := createOwnerSchedule(t, f.srv, f.owner, f.project, "lookup-active", "message")
+	paused := createOwnerSchedule(t, f.srv, f.owner, f.project, "lookup-paused", "dispatch_agent")
+	pauseSchedule(t, f.srv, f.owner, f.project, paused)
+	missing := tid("no-such-schedule")
+	rename := `{"name":"renamed"}`
+
+	type routeCase struct{ name, method, path, body string }
+	refusedFor := func(scopes []string, cases []routeCase) {
+		for label, key := range f.tokens(t, scopes...) {
+			for _, tc := range cases {
+				rec := scheduleTokenRaw(t, f.srv, key, tc.method, f.path(tc.path), tc.body)
+				t.Logf("%s, %v, %s: %d", label, scopes, tc.name, rec.Code)
+				assertScheduleAuthoringRefused(t, rec)
+			}
+		}
+	}
+
+	// (a) Every schedule selector, on a schedule that is not in this project.
+	refusedFor(scheduleTokenAllSelectors, []routeCase{
+		{"update, missing schedule", http.MethodPatch, "/schedules/" + missing, rename},
+		{"resume, missing schedule", http.MethodPost, "/schedules/" + missing + "/resume", ""},
+		{"update, other project's schedule", http.MethodPatch, "/schedules/" + otherSchedule, rename},
+		{"resume, other project's schedule", http.MethodPost, "/schedules/" + otherSchedule + "/resume", ""},
+	})
+	// (b) No scheduled_event selector, on existing schedules.
+	refusedFor([]string{"agent:read"}, []routeCase{
+		{"update without a schedule selector", http.MethodPatch, "/schedules/" + active, rename},
+		{"resume without a schedule selector", http.MethodPost, "/schedules/" + paused + "/resume", ""},
+	})
+	// (c) A malformed body on an existing schedule.
+	refusedFor(scheduleTokenAllSelectors, []routeCase{
+		{"update, malformed body", http.MethodPatch, "/schedules/" + active, `{`},
+	})
+
+	sc, err := f.store.GetSchedule(ctx, active)
+	require.NoError(t, err)
+	assert.Equal(t, "lookup-active", sc.Name)
+	assert.Equal(t, store.ScheduleStatusPaused, f.scheduleStatus(t, paused))
+	assert.Equal(t, store.ScheduleStatusPaused, f.scheduleStatus(t, otherSchedule))
+}
+
+// TestScheduleCreate_RefusesSuperAdminTokenBeforeTargetLookup requires a
+// super-admin's hub token with every schedule selector to be refused with
+// the GOV_PENDING reason on both create routes when the named target does
+// not exist, the same as for any other token. Nothing is written.
+func TestScheduleCreate_RefusesSuperAdminTokenBeforeTargetLookup(t *testing.T) {
+	f := newScheduleTokenFixture(t, "sched-superadmin")
+	adminID := tid("sched-super-admin")
+	createTestUserWithRole(t, f.store, adminID, adminID+"@test.com", "admin", store.SystemRoleSuperAdmin)
+	ensureHubMembership(context.Background(), f.store, adminID)
+	key, _, err := f.srv.uatService.CreateTokenWithParams(rs4MintContext(adminID), CreateTokenParams{
+		UserID: adminID, Name: "sched-" + tid("admin"), Boundary: hubBoundary(), Scopes: scheduleTokenAllSelectors,
+	})
+	require.NoError(t, err)
+
+	before, beforeEvents := f.scheduleCount(t), f.eventCount(t)
+	missingTarget := `{"agentId":"` + tid("no-such-agent") + `","message":"x"}`
+	for _, tc := range []struct{ name, path, body string }{
+		{"message schedule, missing target", "/schedules", `{"name":"admin-msg","cronExpr":"0 * * * *","eventType":"message","agentName":"no-such-agent","message":"x"}`},
+		{"message event, missing target", "/scheduled-events", `{"eventType":"message","fireIn":"1h","payload":` + jsonQuote(missingTarget) + `}`},
+	} {
+		rec := scheduleTokenRaw(t, f.srv, key, http.MethodPost, f.path(tc.path), tc.body)
+		t.Logf("super-admin hub token, %s: %d", tc.name, rec.Code)
+		assertScheduleAuthoringRefused(t, rec)
+	}
+	assert.Equal(t, before, f.scheduleCount(t), "no schedule written")
+	assert.Equal(t, beforeEvents, f.eventCount(t), "no event written")
 }
