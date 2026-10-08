@@ -16,6 +16,8 @@ package hub
 
 import (
 	"context"
+	"log/slog"
+	"net/http"
 	"time"
 )
 
@@ -76,4 +78,35 @@ func syncDispatch(ctx context.Context, fn func(context.Context) error) error {
 	dctx, cancel := context.WithTimeout(ctx, syncDispatchTimeout)
 	defer cancel()
 	return fn(dctx)
+}
+
+// syncDispatchWriteSlack is the time a synchronous create response may take
+// after its dispatch wait, for the post-dispatch store writes and the
+// response write itself.
+const syncDispatchWriteSlack = 30 * time.Second
+
+// syncDispatchWriteBudget is the write deadline, from the start of the
+// dispatch, of a request that waits on one synchronous dispatch: the
+// dispatch wait plus syncDispatchWriteSlack.
+func syncDispatchWriteBudget() time.Duration {
+	return syncDispatchTimeout + syncDispatchWriteSlack
+}
+
+// extendWriteDeadlineForSyncDispatch moves the connection's write deadline
+// to syncDispatchWriteBudget from now, so a launch that finishes within
+// syncDispatchTimeout still gets its response written instead of being cut
+// at the server-wide WriteTimeout (ptone/scion#3850). serverWriteTimeout is
+// the server's configured WriteTimeout: when it is unbounded (0) or already
+// at least the budget, the deadline is left alone, so this never shortens
+// it. http.NewResponseController reaches the connection through the
+// middleware wrappers that implement Unwrap; a ResponseWriter without
+// deadline support is logged at debug and otherwise ignored.
+func extendWriteDeadlineForSyncDispatch(ctx context.Context, w http.ResponseWriter, serverWriteTimeout time.Duration) {
+	budget := syncDispatchWriteBudget()
+	if serverWriteTimeout <= 0 || serverWriteTimeout >= budget {
+		return
+	}
+	if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(budget)); err != nil {
+		slog.DebugContext(ctx, "sync dispatch: SetWriteDeadline not applied", "error", err)
+	}
 }

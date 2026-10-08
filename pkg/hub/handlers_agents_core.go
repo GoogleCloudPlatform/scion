@@ -2572,6 +2572,13 @@ func (s *Server) createAgentInProject(
 	// the post-dispatch phase writes, or a real failure's rollback. Each
 	// dispatch below is bounded by syncDispatch instead.
 	ctx = detachLaunchFromClient(ctx)
+	// The response waits on that dispatch for up to syncDispatchTimeout,
+	// longer than the default server-wide WriteTimeout: extend this
+	// request's write deadline to cover it, so a slow launch that succeeds
+	// is not answered with a dropped connection (ptone/scion#3850).
+	if s.GetDispatcher() != nil {
+		extendWriteDeadlineForSyncDispatch(ctx, w, s.config.WriteTimeout)
+	}
 	// acceptedLaunch is set when the broker accepted the create for
 	// asynchronous launch; the launch then reports back to the hub, which
 	// handles a delete that won the race (see compensateLandedRun).
