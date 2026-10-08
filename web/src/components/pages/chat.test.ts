@@ -629,6 +629,45 @@ describe('chat page — a DM opened from its URL', () => {
     expect(membersRequests('p9')).toBe(1);
   });
 
+  it("replaces a raw id the DM list gave as the name with the peer's name", () => {
+    const el = createPage();
+    el.v2AgentMembers = [];
+    window.history.replaceState({}, '', '/chat/dm/dm:agent:agent-9:user:user-me');
+    el.parseV2Route();
+    // A DM list row with no name, slug or email names the peer by its id.
+    el.v2Conversation = { ...el.v2Conversation, peerName: 'agent-9' };
+
+    el.handlePeerAgentResolved(
+      peerResolved({
+        conversationKey: 'dm:agent:agent-9:user:user-me',
+        agentId: 'agent-9',
+        name: 'Nine',
+        projectId: 'p9',
+      })
+    );
+
+    expect(el.v2Conversation.peerName).toBe('Nine');
+  });
+
+  it('keeps a real name over the reported one', () => {
+    const el = createPage();
+    el.v2AgentMembers = [];
+    window.history.replaceState({}, '', '/chat/dm/dm:agent:agent-9:user:user-me');
+    el.parseV2Route();
+    el.v2Conversation = { ...el.v2Conversation, peerName: 'Nine From List' };
+
+    el.handlePeerAgentResolved(
+      peerResolved({
+        conversationKey: 'dm:agent:agent-9:user:user-me',
+        agentId: 'agent-9',
+        name: 'Nine',
+        projectId: 'p9',
+      })
+    );
+
+    expect(el.v2Conversation.peerName).toBe('Nine From List');
+  });
+
   it('a DM that inherits a project keeps it and its members when the peer read lands', () => {
     const el = createPage();
     el.v2AgentMembers = [];

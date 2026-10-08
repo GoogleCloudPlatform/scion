@@ -4026,15 +4026,18 @@ export class ScionPageChat extends LitElement {
   }
 
   /**
-   * The thread read the open agent DM's peer: name the DM after it if
-   * nothing else has, and give a DM opened from its URL the agent's project
+   * The thread reported the open agent DM's peer: name the DM after it if
+   * nothing else has (a raw id counts as no name), and give a DM opened from its URL the agent's project
    * and that project's members (see `takesPeerProject`).
    */
   private handlePeerAgentResolved = (e: CustomEvent<PeerAgentResolvedDetail>): void => {
     const detail = e.detail;
     const conv = this.v2Conversation;
     if (!detail || !conv?.isDM || conv.conversationKey !== detail.conversationKey) return;
-    const peerName = conv.peerName || detail.name;
+    // The DM list falls back to the raw id when its row has no name; a
+    // real name replaces that.
+    const named = conv.peerName !== (conv.peerId || detail.agentId) ? conv.peerName : '';
+    const peerName = named || detail.name || conv.peerName;
     const takeProject = !!conv.takesPeerProject && !!detail.projectId;
     if (peerName === conv.peerName && !takeProject) return;
     this.v2Conversation = {
