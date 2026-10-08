@@ -144,6 +144,12 @@ export interface AgentListViewState {
 /** Parameters of one paged-navigation request, passed to the host's `fetchPage`. */
 export interface PagedPageParams {
   cursor?: string | undefined;
+  /**
+   * The ids of the requested page, in the walk order frozen from page 0
+   * (sent as `ids=`; never together with `cursor`). See
+   * {@link AgentListWindow} on the frozen walk.
+   */
+  ids?: readonly string[] | undefined;
   limit: number;
   /** `stats=1`: only on page 0, a view-state change, or a refresh. */
   wantStats: boolean;
@@ -265,6 +271,29 @@ export class AgentListWindow extends EventTarget {
   private _pageIndex = 0;
   private _totalCount = 0;
   private _hasNext = false;
+  /**
+   * The walk order frozen from page 0's stats population (ptone/scion#3744):
+   * the readable ids in sort order at that moment, phase filter applied.
+   * Later pages are fetched as slices of it by id, so an agent whose sort
+   * key changes mid-walk (a heartbeat, an activity event) is neither
+   * skipped nor shown twice, as it could be by a cursor over that key.
+   * Agents created after page 0 surface through the updates chip, and an
+   * agent deleted or no longer readable simply drops out of its page.
+   * `null` when the response carried no population (the global endpoint
+   * above 2,000 agents) or its head did not match page 0's rows: the walk
+   * then follows server cursors, as before, which can still skip or repeat
+   * an agent whose sort key changes mid-walk.
+   */
+  private frozenOrder: string[] | null = null;
+  /**
+   * Where each page of the frozen walk starts in `frozenOrder`. Page i+1
+   * starts right after the ids page i asked for, so an id that drops out
+   * of a page (deleted, no longer readable, out of the phase filter) never
+   * shifts a later id onto a page already shown.
+   */
+  private frozenStarts: number[] = [0];
+  /** Ids of the frozen order the server no longer returns (they leave the pager total). */
+  private frozenDead = new Set<string>();
   /** Cleared by `invalidateCursors()`; restored by the next `setPaged()`. */
   private _cursorsValid = true;
   private _loading = false;
@@ -608,6 +637,7 @@ export class AgentListWindow extends EventTarget {
     this._loading = false;
     this.committedLabel = committedLabel;
     this.pagedParams = fetchedKey ?? this.serverParamsKey();
+    this.freezeOrder(result);
     this.seedStats(result.stats);
     this.replayLiveChanges(result);
     this.notifyChange();
@@ -635,6 +665,28 @@ export class AgentListWindow extends EventTarget {
       });
     }
     if ((result.droppedRows ?? 0) > 0 || result.liveResync) this._updatesAvailable = true;
+  }
+
+  /**
+   * Freeze the walk order from a page-0 response (see `frozenOrder`): its
+   * stats population with the phase filter applied, kept only if it agrees
+   * with the response itself (its head is page 0's rows and its length is
+   * the server's total), so the frozen walk never disagrees with what the
+   * server would page.
+   */
+  private freezeOrder(result: PagedPageResult): void {
+    this.frozenOrder = null;
+    const population = result.stats?.agents;
+    if (!population) return;
+    const phase = this.viewState.phaseFilter;
+    const order = population.filter(([, p]) => !phase || p === phase).map(([id]) => id);
+    if (order.length !== result.totalCount) return;
+    for (let i = 0; i < result.agents.length; i++) {
+      if (order[i] !== result.agents[i]?.id) return;
+    }
+    this.frozenOrder = order;
+    this.frozenStarts = [0, result.agents.length];
+    this.frozenDead = new Set();
   }
 
   /**
@@ -824,7 +876,10 @@ export class AgentListWindow extends EventTarget {
    */
   async refresh(): Promise<void> {
     if (this._state !== 'paged') return;
-    await this.fetchPageAt(this._cursorsValid ? this._pageIndex : 0, true);
+    // A frozen walk has no cursor for the current page; refreshing it
+    // means a fresh page 0 and a newly frozen order.
+    const index = this._cursorsValid && this.frozenOrder === null ? this._pageIndex : 0;
+    await this.fetchPageAt(index, true);
   }
 
   private async fetchPageAt(index: number, wantStats = index === 0): Promise<void> {
@@ -835,15 +890,59 @@ export class AgentListWindow extends EventTarget {
     this._loading = true;
     this._error = null;
     this.notifyChange();
+    const pageSize = this.viewState.pageSize;
+    const frozen = index > 0 && !wantStats ? this.frozenOrder : null;
+    const frozenStart = frozen ? this.frozenStarts[index] : undefined;
+    const frozenIds =
+      frozen && frozenStart !== undefined
+        ? frozen.slice(frozenStart, frozenStart + pageSize)
+        : null;
     try {
-      const result = await this.fetchPage({
-        cursor: this.cursors[index],
-        limit: this.viewState.pageSize,
-        wantStats,
-        signal: controller.signal,
-      });
+      const fetched = await this.fetchPage(
+        frozenIds
+          ? { ids: frozenIds, limit: pageSize, wantStats: false, signal: controller.signal }
+          : {
+              cursor: this.cursors[index],
+              limit: pageSize,
+              wantStats,
+              signal: controller.signal,
+            }
+      );
       if (gen !== this.generation) return;
       if (this.pageController === controller) this.pageController = null;
+      let result = fetched;
+      if (frozen && frozenIds && frozenStart !== undefined) {
+        // Show the page in the frozen order, keeping only the ids asked
+        // for. An id the server did not return (deleted, no longer
+        // readable, or out of the phase filter now) just leaves this page;
+        // the next page still starts after every id asked for here.
+        const byId = new Map(fetched.agents.map((a) => [a.id, a]));
+        const agents = frozenIds.map((id) => byId.get(id)).filter((a): a is Agent => !!a);
+        // An id that comes back (it re-entered the phase filter, or became
+        // readable again) counts towards the total again.
+        for (const id of frozenIds) {
+          if (byId.has(id)) this.frozenDead.delete(id);
+          else this.frozenDead.add(id);
+        }
+        const nextStart = frozenStart + frozenIds.length;
+        const total = frozen.length - this.frozenDead.size;
+        if (agents.length === 0) {
+          if (nextStart < frozen.length) {
+            // The whole slice was gone: this page takes the next slice.
+            this.frozenStarts[index] = nextStart;
+            await this.fetchPageAt(index, false);
+          } else {
+            // Nothing is left past the previous page: stay on it, with no
+            // next page.
+            this._hasNext = false;
+            this._totalCount = total;
+          }
+          return;
+        }
+        this.frozenStarts[index + 1] = nextStart;
+        result = { ...fetched, agents, totalCount: total, nextCursor: undefined };
+        this._hasNext = nextStart < frozen.length;
+      }
       if (result.agents.length === 0 && index > 0) {
         // An emptied last page: step back one page.
         await this.fetchPageAt(index - 1, wantStats);
@@ -855,12 +954,13 @@ export class AgentListWindow extends EventTarget {
       this.cursors[index + 1] = result.nextCursor;
       this.pageOffsets[index + 1] =
         (this.pageOffsets[index] ?? index * this.viewState.pageSize) + result.agents.length;
-      this._hasNext = !!result.nextCursor;
+      if (!frozenIds) this._hasNext = !!result.nextCursor;
       if (index === 0) {
         // Page 0's request is always cursor-free, so it cannot mismatch; a
         // successful fetch mints `cursors[1]` fresh under the current
         // params, which makes the whole stack valid again.
         this._cursorsValid = true;
+        if (wantStats) this.freezeOrder(result);
       }
       this._updatesAvailable = false;
       this.seedStats(result.stats);
@@ -925,6 +1025,7 @@ export class AgentListWindow extends EventTarget {
     if (this._state !== 'paged') return;
     this.cancelPageFetch();
     this._cursorsValid = false;
+    this.frozenOrder = null;
     this.generation++;
     this._loading = false;
     this.notifyChange();
