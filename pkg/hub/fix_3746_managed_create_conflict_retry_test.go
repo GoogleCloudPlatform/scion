@@ -53,8 +53,9 @@ import (
 //     running write failed.
 //   - rereadErr, when set, is returned by the first GetAgent after the first
 //     running write failed (a failed re-read), instead of reading the row.
-//   - beforeSecond runs just before the next UpdateAgent; secondErr, when
-//     set, is returned by it instead.
+//   - beforeSecond runs just before the next UpdateAgent after the first
+//     running write (the retry); secondErr, when set, is returned by it
+//     instead.
 //
 // It counts every UpdateAgent call (updates), the GetAgent calls made after
 // the first running write failed and before the rollback's first
@@ -83,7 +84,7 @@ func (s *managedConflictStore) UpdateAgent(ctx context.Context, a *store.Agent) 
 	s.mu.Lock()
 	s.updates++
 	first := !s.firstDone && a.Phase == string(state.PhaseRunning)
-	second := s.firstDone && s.updates == 2
+	second := s.firstDone && !s.retried
 	var hook func(string)
 	var injected error
 	switch {
@@ -526,4 +527,27 @@ func TestManagedCreateConflictRetry_StopBeforeRecord_CancelFails_Logs(t *testing
 	require.NotEmpty(t, line, "the failed cancel is logged: %s", logs.String())
 	assert.Contains(t, line, "level=WARN")
 	assert.Contains(t, line, "agent_id="+row.ID)
+}
+
+// A terminal phase with no interaction (a create with no task started
+// none): nothing to stop, no cancel, and the create still answers 201.
+func TestManagedCreateConflictRetry_StopBeforeRecord_NoInteraction(t *testing.T) {
+	srv, s, project := setupCreateAgentServer(t, &createRaceDispatcher{})
+	backend := newInteractionLedgerBackend()
+	useManagedBackend(t, backend)
+	fs := &managedConflictStore{Store: s, beforeFirst: func(id string) {
+		bumpPhase(t, s, id, string(state.PhaseStopped), "")
+	}}
+	srv.store = fs
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name: "mgd-retry-stop-notask", ProjectID: project.ID, Profile: ManagedAgentsProfile,
+	})
+	row := requireManagedCreated(t, rec, s)
+	assert.Equal(t, string(state.PhaseStopped), row.Phase)
+	assert.True(t, isManagedAgentRuntime(row.Runtime), "the managed Runtime is persisted")
+	assert.Empty(t, row.Annotations[annotationInteractionID], "no interaction was started")
+	assert.Empty(t, backend.cancels(), "no cancel")
+	updates, _ := fs.counts()
+	assert.Equal(t, 2, updates, "the conflicting write and one retry")
 }

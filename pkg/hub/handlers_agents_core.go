@@ -2560,8 +2560,10 @@ func (s *Server) createAgentInProject(
 		// Stop the interaction here, after the write, so a failed stop
 		// still leaves a row that names it (ptone/scion#3746).
 		if isTerminalAgentPhase(agent.Phase) {
-			s.agentLifecycleLog.Info("Hub: managed agent was stopped while it was being created; stopping its interaction",
-				"agent_id", agent.ID, "agent", agent.Name, "phase", agent.Phase)
+			if agent.Annotations[annotationInteractionID] != "" {
+				s.agentLifecycleLog.Info("Hub: managed agent was stopped while it was being created; stopping its interaction",
+					"agent_id", agent.ID, "agent", agent.Name, "phase", agent.Phase)
+			}
 			s.stopManagedCreateInteraction(ctx, agent, false)
 		}
 		s.enrichAgent(ctx, agent, project, nil)
