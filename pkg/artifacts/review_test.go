@@ -686,3 +686,21 @@ func TestReviewBase(t *testing.T) {
 		}
 	})
 }
+
+// TestReviewOfDocumentWithMarks pins the documented D20 behaviour for a
+// document whose text already holds a complete mark: a review that leaves
+// it as it is and adds a mark is refused; one that wraps it in a deletion
+// (marks do not nest, so clean keeps the literal mark) passes.
+func TestReviewOfDocumentWithMarks(t *testing.T) {
+	f := newReviewFixture(t)
+	doc := "Use {++ins++} to insert.\n"
+	v2 := with(f.v1, "plan.md", doc)
+	f.publishBundle(agentA, "/api/v1/artifacts/"+f.id+"/versions", v2.manifest("plan.md"), v2)
+	_, r := f.review(userU, with(v2, "plan.md", "Use {++ins++} to insert.{>>note<<}\n"), "plan.md")
+	if files, _ := unmarked(t, r); len(files) != 1 {
+		t.Fatalf("files %+v", files)
+	}
+	if _, r := f.review(userU, with(v2, "plan.md", "Use {--{++ins++}--} to insert.{>>note<<}\n"), "plan.md"); r.code != http.StatusOK {
+		t.Fatalf("deletion-wrapped review: %d %s", r.code, r.body)
+	}
+}
