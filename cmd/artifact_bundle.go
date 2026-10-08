@@ -28,6 +28,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts/critic"
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"golang.org/x/text/unicode/norm"
@@ -181,14 +182,8 @@ func publishBundle(ctx context.Context, svc hubclient.ArtifactService, out, errO
 		return fmt.Errorf("publish failed: the hub's reply has no version")
 	}
 	id, seq := pend.Artifact.ID, pend.Version.Seq
-	for _, p := range pend.Upload.Required {
-		f, ok := byPath[p]
-		if !ok {
-			return fmt.Errorf("the hub asked for %q, which is not in the bundle", p)
-		}
-		if err := uploadLocalFile(ctx, svc, id, seq, f); err != nil {
-			return fmt.Errorf("upload %s: %w%s", p, err, artifactErrorHint(err, true))
-		}
+	if err := uploadRequired(ctx, svc, id, seq, pend.Upload.Required, byPath); err != nil {
+		return err
 	}
 	resp, err := svc.FinalizeVersion(ctx, id, seq)
 	if err != nil {
@@ -203,6 +198,20 @@ func publishBundle(ctx context.Context, svc hubclient.ArtifactService, out, errO
 	_, _ = fmt.Fprintf(out, "%s  (v%d)\n", artifacts.FormatRef(id, 0), seq)
 	if page := artifactPageURL(hubEndpoint, resp.Artifact.ScopeRef, id); page != "" {
 		_, _ = fmt.Fprintln(out, page)
+	}
+	return nil
+}
+
+// uploadRequired uploads the files the hub asked for.
+func uploadRequired(ctx context.Context, svc hubclient.ArtifactService, id string, seq int, required []string, byPath map[string]*localFile) error {
+	for _, p := range required {
+		f, ok := byPath[p]
+		if !ok {
+			return fmt.Errorf("the hub asked for %q, which is not in the bundle", p)
+		}
+		if err := uploadLocalFile(ctx, svc, id, seq, f); err != nil {
+			return fmt.Errorf("upload %s: %w%s", p, err, artifactErrorHint(err, true))
+		}
 	}
 	return nil
 }
@@ -252,7 +261,7 @@ func checkBundleName(rel string) error {
 //
 // Files are written under dir without following a symbolic link below it,
 // and an existing file is replaced only when replace is set.
-func writeBundle(ctx context.Context, svc hubclient.ArtifactService, stderr io.Writer, id string, seq int, files []hubclient.ArtifactFile, dir string, replace bool) error {
+func writeBundle(ctx context.Context, svc hubclient.ArtifactService, stderr io.Writer, id string, seq int, files []hubclient.ArtifactFile, dir string, replace bool, mode critic.Mode) error {
 	if st, err := os.Stat(dir); err == nil && !st.IsDir() {
 		return fmt.Errorf("%s exists and is not a directory; a bundle is written into a directory", dir)
 	}
@@ -275,7 +284,7 @@ func writeBundle(ctx context.Context, svc hubclient.ArtifactService, stderr io.W
 	}
 	defer func() { _ = out.Close() }()
 	for _, f := range files {
-		if err := fetchVerified(ctx, svc, id, seq, f, out, f.Path, replace); err != nil {
+		if err := fetchVerified(ctx, svc, id, seq, f, out, f.Path, replace, mode); err != nil {
 			return err
 		}
 	}
@@ -285,14 +294,14 @@ func writeBundle(ctx context.Context, svc hubclient.ArtifactService, stderr io.W
 
 // fetchVerified fetches file f of version seq and writes it as name under
 // out, verified against its recorded size and digest before it is moved
-// into place.
-func fetchVerified(ctx context.Context, svc hubclient.ArtifactService, id string, seq int, f hubclient.ArtifactFile, out *outDir, name string, replace bool) error {
+// into place, then projected by mode if it is text.
+func fetchVerified(ctx context.Context, svc hubclient.ArtifactService, id string, seq int, f hubclient.ArtifactFile, out *outDir, name string, replace bool, mode critic.Mode) error {
 	rc, err := svc.OpenFile(ctx, id, seq, f.Path)
 	if err != nil {
 		return fmt.Errorf("fetch %s: %w%s", f.Path, err, artifactErrorHint(err, false))
 	}
 	defer func() { _ = rc.Close() }()
-	if err := out.WriteFile(name, replace, func(w io.Writer) error { return copyVerified(w, rc, f.SHA256, f.Size) }); err != nil {
+	if err := out.WriteFile(name, replace, func(w io.Writer) error { return copyArtifactFile(w, rc, f, mode) }); err != nil {
 		return fmt.Errorf("%s: %w", f.Path, err)
 	}
 	return nil

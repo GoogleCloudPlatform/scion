@@ -578,6 +578,7 @@ func TestNewSystemMessage_Categories(t *testing.T) {
 		{SystemCategoryScheduler, "scheduler"},
 		{SystemCategoryPortForward, "port-forward"},
 		{SystemCategoryDeliveryFailed, "delivery-failed"},
+		{SystemCategoryArtifactReview, "artifact-review"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.category, func(t *testing.T) {
