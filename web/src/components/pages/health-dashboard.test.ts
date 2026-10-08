@@ -76,7 +76,7 @@ describe('scion-page-health-dashboard cards', () => {
 
   async function rendered(): Promise<string> {
     await vi.waitFor(() => {
-      expect(el.shadowRoot?.textContent ?? '').toContain('Dispatch Pipeline');
+      expect(el.shadowRoot?.querySelector('scion-health-dispatch-card')).not.toBeNull();
     });
     await el.updateComplete;
     return el.shadowRoot?.textContent ?? '';
@@ -271,6 +271,40 @@ describe('scion-page-health-dashboard agents (ptone/scion#3587)', () => {
     const text = card!.shadowRoot?.textContent ?? '';
     expect(text).toContain('Agent data not available');
     expect(text).not.toContain('No agents need attention');
+  });
+});
+
+describe('scion-page-health-dashboard dispatch (ptone/scion#3589)', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+    vi.mocked(apiFetch).mockReset();
+  });
+
+  it('hands the dispatch block to the dispatch card, with no placeholder prose', async () => {
+    vi.mocked(apiFetch).mockImplementation(async () =>
+      json({
+        status: 'degraded',
+        hub: { status: 'healthy', version: 'v1', uptime: '1h', connected_brokers: 0 },
+        database: { status: 'healthy', pool_active: 0, pool_max: 10, pool_idle: 0 },
+        runtime_brokers: { items: [], total: 0, truncated: false },
+        agents: null,
+        dispatch: { stuck_messages: 2, stuck_broker_dispatch: 1, failed_broker_dispatch_1h: 4 },
+      })
+    );
+    const page = document.createElement('scion-page-health-dashboard') as ScionPageHealthDashboard;
+    document.body.appendChild(page);
+    await (page as unknown as { fetchData(): Promise<void> }).fetchData();
+    await page.updateComplete;
+
+    const card = page.shadowRoot?.querySelector('scion-health-dispatch-card');
+    expect(card).not.toBeNull();
+    await (card as LitLike).updateComplete;
+    const values = [...(card!.shadowRoot?.querySelectorAll('li .value') ?? [])].map((v) =>
+      v.textContent?.trim()
+    );
+    expect(values).toEqual(['2', '1', '4']);
+    const text = `${page.shadowRoot?.textContent ?? ''} ${card!.shadowRoot?.textContent ?? ''}`;
+    expect(text).not.toMatch(/not yet available|future update/i);
   });
 });
 

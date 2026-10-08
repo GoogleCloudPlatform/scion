@@ -70,6 +70,10 @@ type sessionStateFile struct {
 // go through a temp file and rename so a crash never leaves a partial file.
 type FileSessionState struct {
 	Path string
+
+	// lockTimeout overrides sessionStateLockTimeout when positive. It is a
+	// test seam: production code always uses the default.
+	lockTimeout time.Duration
 }
 
 // NewFileSessionState returns a store for the state file under the given
@@ -120,7 +124,15 @@ func (s *FileSessionState) Update(agg *telemetry.Aggregator, event *hooks.Event,
 	return s.save(agg.State())
 }
 
-// lock takes the exclusive lock, waiting up to sessionStateLockTimeout.
+// lockWait returns how long lock waits for another holder to release it.
+func (s *FileSessionState) lockWait() time.Duration {
+	if s.lockTimeout > 0 {
+		return s.lockTimeout
+	}
+	return sessionStateLockTimeout
+}
+
+// lock takes the exclusive lock, waiting up to lockWait.
 func (s *FileSessionState) lock() (func(), error) {
 	if err := os.MkdirAll(filepath.Dir(s.Path), 0o700); err != nil {
 		return nil, fmt.Errorf("creating state directory: %w", err)
@@ -129,7 +141,8 @@ func (s *FileSessionState) lock() (func(), error) {
 	if err != nil {
 		return nil, fmt.Errorf("opening lock file: %w", err)
 	}
-	deadline := time.Now().Add(sessionStateLockTimeout)
+	wait := s.lockWait()
+	deadline := time.Now().Add(wait)
 	for {
 		err = unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB)
 		if err == nil {
@@ -141,7 +154,7 @@ func (s *FileSessionState) lock() (func(), error) {
 		}
 		if time.Now().After(deadline) {
 			_ = f.Close()
-			return nil, fmt.Errorf("timed out after %s waiting for lock %s", sessionStateLockTimeout, f.Name())
+			return nil, fmt.Errorf("timed out after %s waiting for lock %s", wait, f.Name())
 		}
 		time.Sleep(sessionStateLockPoll)
 	}

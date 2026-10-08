@@ -46,6 +46,10 @@ import type { ActionSheetItem, ActionSheetSelectDetail } from './chat-action-she
 import './chat-action-sheet.js';
 import { TOUCH_PRIMARY_QUERY } from '../../../utils/input-modality.js';
 import { chatDraftStorageKey } from '../../../client/chat-drafts.js';
+import { ARTIFACTS_FLAG, MAX_MESSAGE_ARTIFACTS } from '../../../client/artifacts.js';
+import { isFeatureEnabled } from '../../../utils/feature-flags.js';
+import type { ArtifactPickerSelectDetail, PendingArtifact } from './artifact-picker.js';
+import './artifact-picker.js';
 
 /** The touch presentation of the send button's right-click menu. */
 const SEND_SHEET_ITEMS: ActionSheetItem[] = [
@@ -103,6 +107,11 @@ export interface ChatSendDetail {
   mentions: string[];
   /** W7: Attachment IDs to include with the message. */
   attachmentIds: string[];
+  /**
+   * Artifact references picked in the composer (scion://artifact/<id>),
+   * sent in the message metadata (ptone/scion#3224).
+   */
+  artifactRefs?: string[];
   /** Phase-3: Reply-to message ID. */
   replyToId?: string;
   /** Reply-to content for RE_msg_starting metadata. */
@@ -232,6 +241,12 @@ export class ScionChatComposer extends LitElement {
 
   /** W7: Upload in progress. */
   @state() private uploading = false;
+
+  /** Artifacts picked with "Attach artifact", sent as references. */
+  @state() private pendingArtifacts: PendingArtifact[] = [];
+
+  /** Whether the "Attach artifact" picker is open. */
+  @state() private artifactPickerOpen = false;
 
   /** Files the last upload refused, shown until dismissed or superseded. */
   @state() private uploadFailures: UploadFailure[] = [];
@@ -673,6 +688,35 @@ export class ScionChatComposer extends LitElement {
     }
 
     /* W7: File upload styles */
+    .pending-artifacts {
+      display: flex;
+      gap: 0.375rem;
+      flex-wrap: wrap;
+    }
+    .pending-artifact {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.375rem;
+      padding: 0.125rem 0.25rem 0.125rem 0.5rem;
+      border: 1px solid var(--sl-color-primary-200, #bfdbfe);
+      background: var(--sl-color-primary-50, #eff6ff);
+      border-radius: 0.5rem;
+      font-size: var(--chat-fs-sm);
+      max-width: 100%;
+    }
+    .pending-artifact .artifact-name {
+      font-weight: 600;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .pending-artifact .artifact-version {
+      color: var(--scion-text-muted, #64748b);
+      flex: none;
+    }
+    .pending-artifact .remove-artifact {
+      font-size: 0.75rem;
+    }
     .attach-btn {
       flex-shrink: 0;
     }
@@ -1070,7 +1114,10 @@ export class ScionChatComposer extends LitElement {
   override render() {
     const isOverLimit = this.runeCount > MAX_MESSAGE_LENGTH;
     const isNearLimit = this.runeCount > MAX_MESSAGE_LENGTH * 0.9;
-    const hasContent = this.text.trim().length > 0 || this.pendingFiles.length > 0;
+    const hasContent =
+      this.text.trim().length > 0 ||
+      this.pendingFiles.length > 0 ||
+      this.pendingArtifacts.length > 0;
     const inEditMode = !!this.editMessage;
     const canSend = hasContent && !isOverLimit && !this.disabled && !this.uploading;
 
@@ -1100,13 +1147,15 @@ export class ScionChatComposer extends LitElement {
           <div class="input-row">
             ${this.conversationMode && !inEditMode
               ? html`
-                  <sl-icon-button
-                    class="attach-btn"
-                    name="paperclip"
-                    label="Attach file"
-                    @click=${this.handleAttachClick}
-                    ?disabled=${this.disabled || this.uploading}
-                  ></sl-icon-button>
+                  ${isFeatureEnabled(ARTIFACTS_FLAG)
+                    ? this.renderAttachMenu()
+                    : html`<sl-icon-button
+                        class="attach-btn"
+                        name="paperclip"
+                        label="Attach file"
+                        @click=${this.handleAttachClick}
+                        ?disabled=${this.disabled || this.uploading}
+                      ></sl-icon-button>`}
                   <input
                     type="file"
                     multiple
@@ -1197,6 +1246,7 @@ export class ScionChatComposer extends LitElement {
       !this.replyTo &&
       !inEditMode &&
       this.pendingFiles.length === 0 &&
+      this.pendingArtifacts.length === 0 &&
       this.uploadFailures.length === 0 &&
       !this.uploading
     ) {
@@ -1207,6 +1257,7 @@ export class ScionChatComposer extends LitElement {
         <div class="composer-context-rows">
           ${this.replyTo ? this.renderReplyBar() : nothing}
           ${inEditMode ? this.renderEditBar() : nothing}
+          ${this.pendingArtifacts.length > 0 ? this.renderPendingArtifacts() : nothing}
           ${this.pendingFiles.length > 0 ? this.renderPendingFiles() : nothing}
           ${this.uploadFailures.length > 0 ? this.renderUploadFailures() : nothing}
           ${this.uploading ? html`<div class="upload-progress">Uploading...</div>` : nothing}
@@ -1630,6 +1681,91 @@ export class ScionChatComposer extends LitElement {
     });
   }
 
+  /**
+   * The paperclip as a menu while artifacts are enabled: Upload file, or
+   * Attach artifact (opens the picker). The picker itself is rendered here
+   * too, so it shares the composer's lifetime.
+   */
+  private renderAttachMenu() {
+    const full = this.pendingArtifacts.length >= MAX_MESSAGE_ARTIFACTS;
+    return html`
+      <sl-dropdown class="attach-menu" placement="top-start" hoist>
+        <sl-icon-button
+          slot="trigger"
+          class="attach-btn"
+          name="paperclip"
+          label="Attach"
+          ?disabled=${this.disabled || this.uploading}
+        ></sl-icon-button>
+        <sl-menu
+          @sl-select=${(e: CustomEvent<{ item: { value: string } }>) =>
+            this.handleAttachMenuSelect(e)}
+        >
+          <sl-menu-item value="file">
+            <sl-icon slot="prefix" name="upload"></sl-icon>
+            Upload file
+          </sl-menu-item>
+          <sl-menu-item value="artifact" ?disabled=${full}>
+            <sl-icon slot="prefix" name="file-earmark-richtext"></sl-icon>
+            Attach artifact…
+          </sl-menu-item>
+        </sl-menu>
+      </sl-dropdown>
+      <scion-artifact-picker
+        .open=${this.artifactPickerOpen}
+        .projectId=${this.projectId}
+        .remaining=${MAX_MESSAGE_ARTIFACTS - this.pendingArtifacts.length}
+        .attachedIds=${this.pendingArtifacts.map((a) => a.id)}
+        @artifact-picker-select=${(e: CustomEvent<ArtifactPickerSelectDetail>) =>
+          this.handleArtifactsPicked(e)}
+        @artifact-picker-close=${() => {
+          this.artifactPickerOpen = false;
+        }}
+      ></scion-artifact-picker>
+    `;
+  }
+
+  private handleAttachMenuSelect(e: CustomEvent<{ item: { value: string } }>): void {
+    if (e.detail.item.value === 'artifact') {
+      this.artifactPickerOpen = true;
+    } else {
+      this.handleAttachClick();
+    }
+  }
+
+  private handleArtifactsPicked(e: CustomEvent<ArtifactPickerSelectDetail>): void {
+    const have = new Set(this.pendingArtifacts.map((a) => a.id));
+    const added = e.detail.artifacts.filter((a) => !have.has(a.id));
+    this.pendingArtifacts = [...this.pendingArtifacts, ...added].slice(0, MAX_MESSAGE_ARTIFACTS);
+  }
+
+  private removePendingArtifact(id: string): void {
+    this.pendingArtifacts = this.pendingArtifacts.filter((a) => a.id !== id);
+  }
+
+  /** Render the picked artifacts as removable chips, next to file attachments. */
+  private renderPendingArtifacts() {
+    return html`
+      <div class="pending-artifacts">
+        ${this.pendingArtifacts.map(
+          (a) => html`
+            <div class="pending-artifact" title=${a.ref}>
+              <sl-icon name="file-earmark-richtext"></sl-icon>
+              <span class="artifact-name">${a.title}</span>
+              <span class="artifact-version">· v${a.version}</span>
+              <sl-icon-button
+                class="remove-artifact"
+                name="x-lg"
+                label="Remove ${a.title}"
+                @click=${() => this.removePendingArtifact(a.id)}
+              ></sl-icon-button>
+            </div>
+          `
+        )}
+      </div>
+    `;
+  }
+
   /** Render the pending uploaded files as previews/chips. */
   private renderPendingFiles() {
     return html`
@@ -1886,6 +2022,7 @@ export class ScionChatComposer extends LitElement {
 
     // W7: Collect attachment IDs from pending uploads.
     const attachmentIds = this.pendingFiles.map((f) => f.id);
+    const artifactRefs = this.pendingArtifacts.map((a) => a.ref);
 
     // Save state for error recovery before clearing.
     const savedText = this.text;
@@ -1893,6 +2030,7 @@ export class ScionChatComposer extends LitElement {
     const savedMentions = new Set(this.acceptedMentions);
     const savedMentionRanges = [...this.mentionRanges];
     const savedPendingFiles = [...this.pendingFiles];
+    const savedPendingArtifacts = [...this.pendingArtifacts];
     const savedReplyTo = this.replyTo;
 
     // Phase-3: Build detail with optional replyToId.
@@ -1902,6 +2040,7 @@ export class ScionChatComposer extends LitElement {
       interrupt,
       mentions,
       attachmentIds,
+      ...(artifactRefs.length > 0 ? { artifactRefs } : {}),
       onSuccess: () => {
         // Input already cleared — nothing to do.
       },
@@ -1912,6 +2051,7 @@ export class ScionChatComposer extends LitElement {
         this.acceptedMentions = savedMentions;
         this.mentionRanges = savedMentionRanges;
         this.pendingFiles = savedPendingFiles;
+        this.pendingArtifacts = savedPendingArtifacts;
         if (savedReplyTo) {
           this.replyTo = savedReplyTo;
         }
@@ -1937,6 +2077,7 @@ export class ScionChatComposer extends LitElement {
     this.runeCount = 0;
     this.resetMentionTracking();
     this.pendingFiles = [];
+    this.pendingArtifacts = [];
     this.clearDraft();
     this.settleFocusAfterSend();
 
@@ -2049,7 +2190,8 @@ export class ScionChatComposer extends LitElement {
 
   /** Text or attachments, within the length limit, while the composer is enabled. */
   private hasSendableContent(): boolean {
-    const hasContent = this.text.trim() !== '' || this.pendingFiles.length > 0;
+    const hasContent =
+      this.text.trim() !== '' || this.pendingFiles.length > 0 || this.pendingArtifacts.length > 0;
     return hasContent && this.runeCount <= MAX_MESSAGE_LENGTH && !this.disabled;
   }
 
