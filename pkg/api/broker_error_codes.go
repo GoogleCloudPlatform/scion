@@ -28,4 +28,9 @@ const (
 	// when neither the request nor the broker names the bucket to download
 	// it from (ptone/scion#3422).
 	BrokerErrCodeWorkspaceStorageUnconfigured = "workspace_storage_unconfigured"
+
+	// BrokerErrCodeHarnessConfigUnusable marks a dispatch whose
+	// harness-config provisioner cannot run (422). It is a configuration
+	// error the caller must fix (ptone/scion#3132).
+	BrokerErrCodeHarnessConfigUnusable = "harness_config_unusable"
 )

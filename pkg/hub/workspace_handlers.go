@@ -539,6 +539,9 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 			if relaySkillResolutionError(w, err) {
 				return
 			}
+			if relayHarnessConfigRefusal(w, err) {
+				return
+			}
 			if relayWorkspaceStorageUnconfigured(w, err) {
 				return
 			}

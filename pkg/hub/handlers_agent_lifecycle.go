@@ -908,6 +908,9 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		if relaySkillResolutionError(w, dispatchErr) {
 			return
 		}
+		if relayHarnessConfigRefusal(w, dispatchErr) {
+			return
+		}
 		RuntimeError(w, "Failed to dispatch to runtime broker: "+dispatchErr.Error())
 		return
 	}
