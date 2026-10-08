@@ -15,6 +15,7 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -232,6 +233,53 @@ func TestGCSIdempotentUploadIsOneAttempt(t *testing.T) {
 	}
 	if n := atomic.LoadInt32(uploads); n != 1 {
 		t.Errorf("%d requests, want 1", n)
+	}
+}
+
+// TestGCSIdempotentLargeUploadIsOneRequest: an idempotent upload larger
+// than the client's default chunk is still one request per call. The
+// store accepts a resumable session and rate-limits every data request, so
+// a resumable upload would show its session and its retried chunks.
+func TestGCSIdempotentLargeUploadIsOneRequest(t *testing.T) {
+	big := bytes.Repeat([]byte("x"), 17<<20)
+	for _, fail := range []bool{true, false} {
+		var requests int32
+		var srv *httptest.Server
+		srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if !strings.Contains(r.URL.Path, "/upload/") {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"bucket":"b","name":"obj","generation":"7","size":"17825792"}`))
+				return
+			}
+			atomic.AddInt32(&requests, 1)
+			_, _ = io.Copy(io.Discard, r.Body)
+			if r.URL.Query().Get("uploadType") == "resumable" && r.URL.Query().Get("upload_id") == "" {
+				w.Header().Set("Location", srv.URL+"/upload/storage/v1/b/b/o?uploadType=resumable&upload_id=s1")
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			if fail {
+				w.WriteHeader(http.StatusTooManyRequests)
+				_, _ = w.Write([]byte(`{"error":{"code":429,"message":"rate limited"}}`))
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"bucket":"b","name":"obj","generation":"7","size":"17825792"}`))
+		}))
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		s := newFakeGCS(t, srv)
+		_, err := s.Upload(ctx, "obj", bytes.NewReader(big), UploadOptions{Idempotent: true})
+		cancel()
+		srv.Close()
+		if fail && err == nil {
+			t.Fatal("a rate-limited large upload succeeded")
+		}
+		if !fail && err != nil {
+			t.Fatalf("large upload: %v", err)
+		}
+		if n := atomic.LoadInt32(&requests); n != 1 {
+			t.Errorf("fail=%v: %d upload requests for one large idempotent upload, want 1", fail, n)
+		}
 	}
 }
 

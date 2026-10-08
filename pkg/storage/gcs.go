@@ -157,10 +157,18 @@ func (s *GCSStorage) Upload(ctx context.Context, objectPath string, reader io.Re
 	if opts.Idempotent {
 		// The caller retries an idempotent write itself, with a bounded
 		// number of attempts (the client's writer does not honour an
-		// attempt cap); each call is one request.
+		// attempt cap), so each call must be exactly one request: no
+		// client retries, and (below) no resumable session, whose chunk
+		// uploads retry on their own whatever the retry policy.
 		obj = obj.Retryer(storage.WithPolicy(storage.RetryNever))
 	}
 	writer := obj.NewWriter(ctx)
+	if opts.Idempotent {
+		// ChunkSize 0 sends the object in one non-resumable request at any
+		// size, instead of a resumable session for bodies over the
+		// default 16 MiB chunk.
+		writer.ChunkSize = 0
+	}
 
 	// Set content type
 	if opts.ContentType != "" {
