@@ -598,10 +598,20 @@ To reincarnate another principal's agent you must be able to delegate the agent'
 keeps its existing delegator unless you change its role with `--role`; then you become its recorded
 delegator (refused with `403` if you descend from the agent, since that would close a delegation
 loop). If you are an agent, the agent then depends on your delegation chain, so prefer a user for role
-changes on long-lived agents. An agent whose delegator was changed by an earlier reincarnation by
-another agent (for example, one that now gets `403` when creating agents) is not repaired by this rule;
-recreate it. Two role changes by a signed-in user (for example to `baseline` and back) also re-point
-its edge to that user, but recreating is recommended. A caller who cannot delegate the role, for
+changes on long-lived agents.
+
+One exception repairs agents left without recorded provenance, for example after a hub upgrade. When
+a user reincarnates an agent without changing its role, and the agent's delegation chain is
+unrecorded (its own delegation edge, or one further up the chain, has no recorded provenance or is
+missing), the user becomes the agent's recorded delegator. This clears the
+`ceiling_unrecorded` denial, which blocks service-account assignment among other actions. The
+**Reincarnate** button in the web UI does the same. A reincarnation by the agent itself or by another
+agent keeps the edge, and so does a user's reincarnation of an agent whose chain is fully recorded.
+
+An agent whose delegator was changed by an earlier reincarnation by another agent (for example, one
+that now gets `403` when creating agents) is not repaired by this rule, because its chain is
+recorded; recreate it. Two role changes by a signed-in user (for example to `baseline` and back) also
+re-point its edge to that user, but recreating is recommended. A caller who cannot delegate the role, for
 example a non-admin reincarnating an agent with a privileged role, gets `403` from this authority
 check. It runs before the workspace and capability checks (`400`, `412`), so expect the `403` first.
 

@@ -148,9 +148,13 @@ adds these keys to the error `details`:
 ```
 
 On a service-account assignment, the message asks for an authorized user to
-recreate the agent directly, which clears the denial whether the unrecorded
-hop is the agent's own edge or an ancestor's. The details name the admin
-alternative: adopting the chain through the route above.
+reincarnate the agent, or to recreate it directly. Either clears the denial
+whether the unrecorded hop is the agent's own edge or an ancestor's: a user's
+reincarnation that keeps the role re-records the agent's edge with the user as
+delegator when the chain is unrecorded, as a user's create does. A
+reincarnation by the agent itself or by another agent keeps the edge and does
+not clear it. The details name the admin alternative: adopting the chain
+through the route above.
 
 No edge or ancestor ID is returned to the caller. The Hub's server log, at
 debug level, names the delegate of the unrecorded hop. A hop denied only
