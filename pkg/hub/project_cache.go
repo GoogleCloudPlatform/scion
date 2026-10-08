@@ -127,7 +127,8 @@ func (s *Server) handleProjectCacheRefresh(w http.ResponseWriter, r *http.Reques
 		if writeWorkspaceStorageUnavailable(w, err) {
 			return
 		}
-		RuntimeError(w, "Cache refresh failed: "+err.Error())
+		s.workspaceLog.Error("project cache refresh failed", "project_id", project.ID, "broker_id", brokerID, "error", err)
+		RuntimeError(w, "Cache refresh failed")
 		return
 	}
 
