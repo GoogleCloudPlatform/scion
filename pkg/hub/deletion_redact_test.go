@@ -482,9 +482,7 @@ func (c *claimAfterStatusStore) UpdateAgentStatus(ctx context.Context, id string
 // intent: without one, the start's settle step clears a failed marker
 // (clearFailedDeletion) and the answer carries no view.
 func TestManagedLifecycle_DeletionAdminVsNonAdmin(t *testing.T) {
-	prev := managedBackendInst
-	managedBackendInst = stubManagedAgentBackend{}
-	t.Cleanup(func() { managedBackendInst = prev })
+	useManagedBackend(t, stubManagedAgentBackend{})
 	for _, tc := range []struct {
 		action    string
 		phase     state.Phase

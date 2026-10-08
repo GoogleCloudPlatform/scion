@@ -164,9 +164,7 @@ func newManagedStartServer(t *testing.T) (*Server, store.Store, *store.Agent) {
 		AppliedConfig: &store.AgentAppliedConfig{HarnessConfig: "claude"},
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
-	prev := managedBackendInst
-	managedBackendInst = stubManagedAgentBackend{}
-	t.Cleanup(func() { managedBackendInst = prev })
+	useManagedBackend(t, stubManagedAgentBackend{})
 	return srv, s, agent
 }
 
