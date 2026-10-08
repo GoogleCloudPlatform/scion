@@ -175,6 +175,9 @@ type bearerMatrixFixture struct {
 	adminID      string
 	otherProject string
 	tokens       map[string]string
+	// tokenIDs are the tokens mint and tryMint created since the last
+	// releaseTokens.
+	tokenIDs []string
 }
 
 func newBearerMatrixFixture(t *testing.T) *bearerMatrixFixture {
@@ -216,11 +219,12 @@ func (m *bearerMatrixFixture) mint(t *testing.T, boundary TokenBoundary, scopes 
 	if key, ok := m.tokens[cacheKey]; ok {
 		return key
 	}
-	key, _, err := m.srv.uatService.CreateTokenWithParams(rs4MintContext(m.adminID), CreateTokenParams{
+	key, tok, err := m.srv.uatService.CreateTokenWithParams(rs4MintContext(m.adminID), CreateTokenParams{
 		UserID: m.adminID, Name: "bdm-" + tid("tok"), Boundary: boundary, Scopes: scopes,
 	})
 	require.NoError(t, err, "mint %s token with %v", boundary.Kind, scopes)
 	m.tokens[cacheKey] = key
+	m.tokenIDs = append(m.tokenIDs, tok.ID)
 	return key
 }
 
@@ -231,14 +235,30 @@ func (m *bearerMatrixFixture) tryMint(boundary TokenBoundary, scopes []string) s
 	if key, ok := m.tokens[cacheKey]; ok {
 		return key
 	}
-	key, _, err := m.srv.uatService.CreateTokenWithParams(rs4MintContext(m.adminID), CreateTokenParams{
+	key, tok, err := m.srv.uatService.CreateTokenWithParams(rs4MintContext(m.adminID), CreateTokenParams{
 		UserID: m.adminID, Name: "bdm-" + tid("try"), Boundary: boundary, Scopes: scopes,
 	})
 	if err != nil {
 		key = ""
+	} else {
+		m.tokenIDs = append(m.tokenIDs, tok.ID)
 	}
 	m.tokens[cacheKey] = key
 	return key
+}
+
+// releaseTokens deletes the tokens mint and tryMint created and empties
+// their cache. The matrix calls it before each admit row, so the tokens
+// one row holds stay under the per-user token limit
+// (store.UATMaxPerUser) however many rows the catalog has.
+func (m *bearerMatrixFixture) releaseTokens(t *testing.T) {
+	t.Helper()
+	ctx := rs4MintContext(m.adminID)
+	for _, id := range m.tokenIDs {
+		require.NoError(t, m.srv.uatService.DeleteToken(ctx, m.adminID, id))
+	}
+	m.tokenIDs = nil
+	clear(m.tokens)
 }
 
 // canMint reports whether the super-admin can mint a token for the
@@ -275,7 +295,12 @@ func (m *bearerMatrixFixture) everySelectorHubToken(t *testing.T) (string, []str
 	}
 	sort.Strings(selectors)
 	require.NotEmpty(t, selectors, "the super-admin can mint at least one hub selector")
-	return m.mint(t, hubBoundary(), selectors), selectors
+	// Minted outside the mint cache, so releaseTokens keeps it.
+	key, _, err := m.srv.uatService.CreateTokenWithParams(rs4MintContext(m.adminID), CreateTokenParams{
+		UserID: m.adminID, Name: "bdm-" + tid("all"), Boundary: hubBoundary(), Scopes: selectors,
+	})
+	require.NoError(t, err, "mint hub token with every selector")
+	return key, selectors
 }
 
 // request sends method to the entry point's live path with a real token.
@@ -464,6 +489,7 @@ func TestBearerDispositionMatrix_CatalogEntryPoints(t *testing.T) {
 			counts["session_only"]++
 
 		case authzop.BearerAdmit:
+			m.releaseTokens(t)
 			sel := bearerMatrixSelector(e.Spec.BasePermission)
 			if sel == "" {
 				t.Errorf("%s: admit needs a selector for %s", label, e.Spec.BasePermission)
