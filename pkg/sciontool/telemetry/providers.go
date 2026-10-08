@@ -22,6 +22,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/encoding"
 )
 
@@ -188,18 +189,26 @@ func buildResource(ctx context.Context) (*resource.Resource, error) {
 //
 // Every exporter setting that the OTLP SDK would otherwise read from
 // OTEL_EXPORTER_OTLP_* in sciontool's environment is pinned here: endpoint,
-// transport security, resource (ptone/scion#2249), headers, compression and
-// timeout (ptone/scion#2992). A harness's OTEL environment is meant for the
-// harness, not for sciontool's loopback export.
+// resource (ptone/scion#2249), headers, compression, timeout and transport
+// credentials (ptone/scion#2992). A harness's OTEL environment is meant for
+// the harness, not for sciontool's loopback export.
+//
+// The credentials are passed with WithTLSCredentials rather than
+// WithInsecure: the exporters turn OTEL_EXPORTER_OTLP_*CERTIFICATE and
+// *CLIENT_CERTIFICATE/*CLIENT_KEY into TLS credentials, and those take
+// priority over WithInsecure. An explicit credentials option is applied
+// after the environment and has the highest priority, so the loopback
+// connection always uses plaintext gRPC.
 func newLoopbackProviders(ctx context.Context, config *Config, res *resource.Resource, batch bool, bounds loopbackExportBounds) (*Providers, error) {
 	endpoint := loopbackEndpoint(config)
 	pinResource := loopbackResourceDialOption(res)
 	pinCompression := loopbackCompressionDialOption()
+	loopbackCredentials := insecure.NewCredentials()
 	noHeaders := map[string]string{}
 	timeout := bounds.exportTimeout()
 	traceOpts := []otlptracegrpc.Option{
 		otlptracegrpc.WithEndpoint(endpoint),
-		otlptracegrpc.WithInsecure(),
+		otlptracegrpc.WithTLSCredentials(loopbackCredentials),
 		otlptracegrpc.WithDialOption(pinResource, pinCompression),
 		otlptracegrpc.WithHeaders(noHeaders),
 		otlptracegrpc.WithTimeout(timeout),
@@ -215,7 +224,7 @@ func newLoopbackProviders(ctx context.Context, config *Config, res *resource.Res
 	// Create log exporter (gRPC)
 	logOpts := []otlploggrpc.Option{
 		otlploggrpc.WithEndpoint(endpoint),
-		otlploggrpc.WithInsecure(),
+		otlploggrpc.WithTLSCredentials(loopbackCredentials),
 		otlploggrpc.WithDialOption(pinResource, pinCompression),
 		otlploggrpc.WithHeaders(noHeaders),
 		otlploggrpc.WithTimeout(timeout),
@@ -232,7 +241,7 @@ func newLoopbackProviders(ctx context.Context, config *Config, res *resource.Res
 	// Create metric exporter (gRPC)
 	metricOpts := []otlpmetricgrpc.Option{
 		otlpmetricgrpc.WithEndpoint(endpoint),
-		otlpmetricgrpc.WithInsecure(),
+		otlpmetricgrpc.WithTLSCredentials(loopbackCredentials),
 		otlpmetricgrpc.WithDialOption(pinResource, pinCompression),
 		otlpmetricgrpc.WithHeaders(noHeaders),
 		otlpmetricgrpc.WithTimeout(timeout),

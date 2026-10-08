@@ -6,7 +6,16 @@ package telemetry
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"math/big"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -90,15 +99,82 @@ func startLoopbackCallRecorder(t *testing.T) (*loopbackCallRecorder, int) {
 }
 
 // TestLoopbackProvidersIgnoreOTLPExporterEnv pins ptone/scion#2992: the
-// OTLP headers, compression and timeout variables in sciontool's environment
-// must not change how its loopback providers export, for any signal.
+// OTLP headers, compression, timeout and TLS certificate variables in
+// sciontool's environment must not change how its loopback providers
+// export, for any signal.
 func TestLoopbackProvidersIgnoreOTLPExporterEnv(t *testing.T) {
-	for _, signal := range []string{"", "TRACES_", "METRICS_", "LOGS_"} {
-		t.Setenv("OTEL_EXPORTER_OTLP_"+signal+"HEADERS", "x-ambient-header=leak")
-		t.Setenv("OTEL_EXPORTER_OTLP_"+signal+"COMPRESSION", "gzip")
-		t.Setenv("OTEL_EXPORTER_OTLP_"+signal+"TIMEOUT", "1")
+	certFile, keyFile := writeTestCertificate(t)
+	for _, env := range []struct {
+		name string
+		vars map[string]string
+	}{
+		{
+			name: "headers compression timeout",
+			vars: map[string]string{"HEADERS": "x-ambient-header=leak", "COMPRESSION": "gzip", "TIMEOUT": "1"},
+		},
+		{
+			name: "certificate",
+			vars: map[string]string{"CERTIFICATE": certFile},
+		},
+		{
+			name: "client certificate",
+			vars: map[string]string{"CLIENT_CERTIFICATE": certFile, "CLIENT_KEY": keyFile},
+		},
+	} {
+		t.Run(env.name, func(t *testing.T) {
+			for _, signal := range []string{"", "TRACES_", "METRICS_", "LOGS_"} {
+				for key, value := range env.vars {
+					t.Setenv("OTEL_EXPORTER_OTLP_"+signal+key, value)
+				}
+			}
+			testLoopbackProvidersExportUnchanged(t)
+		})
 	}
+}
 
+// writeTestCertificate writes a self-signed certificate and its key as PEM
+// files and returns their paths.
+func writeTestCertificate(t *testing.T) (certFile, keyFile string) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "loopback-env-test"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		IsCA:                  true,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	certFile = filepath.Join(dir, "cert.pem")
+	keyFile = filepath.Join(dir, "key.pem")
+	if err := os.WriteFile(certFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyFile, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return certFile, keyFile
+}
+
+// testLoopbackProvidersExportUnchanged exports one span, log record and
+// metric through each loopback provider kind and checks that every signal
+// arrives uncompressed, with no extra headers and the pinned deadline.
+func testLoopbackProvidersExportUnchanged(t *testing.T) {
+	t.Helper()
 	for _, tc := range []struct {
 		name    string
 		new     func(context.Context, *Config) (*Providers, error)
@@ -139,7 +215,8 @@ func TestLoopbackProvidersIgnoreOTLPExporterEnv(t *testing.T) {
 			counter.Add(ctx, 1)
 			shutdownCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			defer cancel()
-			// A 1ms ambient timeout would make these exports fail.
+			// A 1ms ambient timeout, or TLS credentials from the
+			// environment, would make these exports fail.
 			if err := providers.Shutdown(shutdownCtx); err != nil {
 				t.Fatalf("Shutdown: %v", err)
 			}
