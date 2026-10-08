@@ -33,6 +33,8 @@ Key properties:
 - `gcloud`, `docker`, `python3`, and `openssl`.
 - Enabled APIs: Cloud Run, IAP, Artifact Registry, Secret Manager, IAM Credentials,
   Cloud SQL Admin, Cloud Storage, and Cloud Logging.
+- Permission for the identity running `deploy.sh` to enable services
+  (`serviceusage.services.enable`); each run enables the IAM Credentials API.
 - A Cloud SQL Postgres instance in the target region.
 - A GCS bucket for Hub artifacts.
 - Filestore/NFS details for Cloud Run Instances workspaces.
