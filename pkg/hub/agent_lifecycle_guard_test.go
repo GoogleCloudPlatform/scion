@@ -638,7 +638,7 @@ func assertEdgeKept(t *testing.T, s store.Store, agentID string, old, got *store
 	assert.Equal(t, old.DelegatorType, got.DelegatorType)
 	assert.Equal(t, old.DelegatorID, got.DelegatorID)
 	assert.Equal(t, old.AuthorityProvenance, got.AuthorityProvenance)
-	assert.Equal(t, old.EffectCeiling.Kind, got.EffectCeiling.Kind)
+	assert.Equal(t, old.Kind, got.Kind, "ceiling kind")
 	sum := auditSummary(t, s, mutationTypeAgentReincarnateClaim, agentID)
 	assert.Equal(t, false, sum["re_recorded"])
 	assert.EqualValues(t, 0, sum["edges_replaced"])
