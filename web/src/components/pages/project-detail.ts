@@ -131,6 +131,27 @@ function listViewOf(mode: ViewMode): AgentListView {
 const AGENTS_EXPANDED_STORAGE_KEY = 'scion-project-agents-expanded';
 const PAGER_PAGE_SIZE_STORAGE_KEY = 'scion-pagesize-project-agents';
 
+/**
+ * The server-prefetched project in `pageData.data`, when it is the project
+ * this page shows; otherwise null and the page fetches it. The router only
+ * hands over a payload prefetched for this path and the current user, on
+ * the first render (see client/ssr-page-data.ts); this checks that the
+ * payload is a single project with the requested id.
+ */
+export function hydratedProjectFor(pageData: PageData | null, projectId: string): Project | null {
+  const data: unknown = pageData?.data;
+  if (!isProjectShaped(data)) return null;
+  if (!projectId || data.id !== projectId) return null;
+  return data as unknown as Project;
+}
+
+/** A non-null, non-array object with a string id and a string name. */
+function isProjectShaped(value: unknown): value is { id: string; name: string } {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  const record = value as { id?: unknown; name?: unknown };
+  return typeof record.id === 'string' && typeof record.name === 'string';
+}
+
 @customElement('scion-page-project-detail')
 export class ScionPageProjectDetail extends LitElement {
   /** Re-renders absolute times when the display timezone changes. */
@@ -159,6 +180,32 @@ export class ScionPageProjectDetail extends LitElement {
    */
   @state()
   private project: Project | null = null;
+
+  /**
+   * Whether the server-prefetched project in `pageData` was already offered
+   * to a load. It is offered to the first load only: a retry, or a
+   * reconnect of this element, always fetches.
+   */
+  private hydrationOffered = false;
+
+  /**
+   * Whether any agents request has adopted a result since this element was
+   * created. Derived from outcomes, not from one request's lifetime: a
+   * superseded first request (a view change while it is in flight) leaves
+   * it false, so the agents section keeps showing its loading row (or the
+   * error, if the request that replaced it fails) instead of the empty
+   * state. The project header renders regardless.
+   */
+  @state()
+  private hasAgentsResult = false;
+
+  /**
+   * Error shown in the agents section, with an agents-only Retry: set when
+   * the page-load request fails, or when any request fails before a result
+   * was ever adopted. Cleared by Retry and by any adopted result.
+   */
+  @state()
+  private agentsLoadError: string | null = null;
 
   /**
    * Agents in this project
@@ -1488,17 +1535,32 @@ export class ScionPageProjectDetail extends LitElement {
     this.hubProjectCapabilities = caps;
   }
 
+  /**
+   * Loads the project and, independently, the agents window's first
+   * request. The project header renders as soon as the project is known,
+   * without waiting for the agents: a cold load with a matching
+   * server-prefetched project uses it and sends no project request, while
+   * client-side navigation, a retry or a mismatched payload fetches it.
+   * Resolves when both have finished.
+   */
   private async loadData(): Promise<void> {
-    this.loading = true;
     this.error = null;
+    const agentsLoad = this.loadPageAgents();
 
+    const offered = this.hydrationOffered
+      ? null
+      : hydratedProjectFor(this.pageData, this.projectId);
+    this.hydrationOffered = true;
+    if (offered) {
+      this.applyLoadedProject(offered);
+      this.loading = false;
+      await agentsLoad;
+      return;
+    }
+
+    this.loading = true;
     try {
-      // Load the project and the agents window's one first request in
-      // parallel.
-      const [projectResponse] = await Promise.all([
-        apiFetch(`/api/v1/projects/${this.projectId}`),
-        this.loadAgentsForView('page-load'),
-      ]);
+      const projectResponse = await apiFetch(`/api/v1/projects/${this.projectId}`);
 
       if (!projectResponse.ok) {
         throw new Error(
@@ -1509,42 +1571,60 @@ export class ScionPageProjectDetail extends LitElement {
         );
       }
 
-      this.project = (await projectResponse.json()) as Project;
-      dispatchPageTitle(this, this.project.name || this.projectId, 'Projects');
-
-      if (this.project) {
-        stateManager.seedProjects([this.project]);
-      }
-
-      // Pre-create data sources for file tabs (the component loads files on connect)
-      if (this.hasProjectWorkspace()) {
-        this.getTabDataSource('workspace');
-      }
-      // Without a project workspace (per-agent git, empty per agent), activate
-      // the first shared dir
-      if (this.project && !this.hasProjectWorkspace() && this.project.sharedDirs?.length) {
-        this.activeFileTab = this.project.sharedDirs[0].name;
-        this.getTabDataSource(this.project.sharedDirs[0].name);
-      }
-
-      // Fetch metrics summary (non-blocking, gracefully degrades)
-      void this.loadMetricsSummary();
-      void this.loadSessionMetricsSummary();
-
-      // Auto-discover GitHub App installation if project has a GitHub remote but no installation
-      if (
-        this.project &&
-        this.project.gitRemote &&
-        /github\.com[/:]/.test(this.project.gitRemote) &&
-        this.project.githubInstallationId == null
-      ) {
-        void this.autoDiscoverGitHubApp();
-      }
+      this.applyLoadedProject((await projectResponse.json()) as Project);
     } catch (err) {
       console.error('Failed to load project:', err);
       this.error = err instanceof Error ? err.message : 'Failed to load project';
     } finally {
       this.loading = false;
+    }
+    await agentsLoad;
+  }
+
+  /**
+   * The agents window's page-load request, tracked separately from the
+   * project: its loading and failure states belong to the agents section,
+   * never to the page as a whole.
+   */
+  private async loadPageAgents(): Promise<void> {
+    this.agentsLoadError = null;
+    await this.loadAgentsForView('page-load');
+  }
+
+  /** The agents section's Retry after a failed page-load request. */
+  private retryAgentsLoad(): void {
+    if (this.agentsLoading || this.agentWindow.loading) return;
+    void this.loadPageAgents();
+  }
+
+  private applyLoadedProject(project: Project): void {
+    this.project = project;
+    dispatchPageTitle(this, this.project.name || this.projectId, 'Projects');
+
+    stateManager.seedProjects([this.project]);
+
+    // Pre-create data sources for file tabs (the component loads files on connect)
+    if (this.hasProjectWorkspace()) {
+      this.getTabDataSource('workspace');
+    }
+    // Without a project workspace (per-agent git, empty per agent), activate
+    // the first shared dir
+    if (!this.hasProjectWorkspace() && this.project.sharedDirs?.length) {
+      this.activeFileTab = this.project.sharedDirs[0].name;
+      this.getTabDataSource(this.project.sharedDirs[0].name);
+    }
+
+    // Fetch metrics summary (non-blocking, gracefully degrades)
+    void this.loadMetricsSummary();
+    void this.loadSessionMetricsSummary();
+
+    // Auto-discover GitHub App installation if project has a GitHub remote but no installation
+    if (
+      this.project.gitRemote &&
+      /github\.com[/:]/.test(this.project.gitRemote) &&
+      this.project.githubInstallationId == null
+    ) {
+      void this.autoDiscoverGitHubApp();
     }
   }
 
@@ -1645,7 +1725,11 @@ export class ScionPageProjectDetail extends LitElement {
    * client label filter applied to it.
    */
   private onAgentsLoadFailed(trigger: AgentsViewTrigger): void {
+    if (trigger === 'page-load' || !this.hasAgentsResult) {
+      this.agentsLoadError = 'Could not load agents.';
+    }
     if (trigger === 'page-load') {
+      this.hasAgentsResult = false;
       this.agents = [];
       this.agentScopeCapabilities = undefined;
       this.agentWindow.setSmall();
@@ -1684,6 +1768,10 @@ export class ScionPageProjectDetail extends LitElement {
           : await this.drainProjectAgents(trigger, label);
     } finally {
       this.endLoadingIndicator();
+    }
+    if (adopted) {
+      this.hasAgentsResult = true;
+      this.agentsLoadError = null;
     }
     if (
       adopted &&
@@ -1867,6 +1955,13 @@ export class ScionPageProjectDetail extends LitElement {
     const superseded = this.agentWindow.supersededRequest(this.committedLabel);
     if (superseded) {
       this.cancelAgentsLoad();
+      // Before any result, whatever was superseded is re-sent as the page
+      // load: a view change alone plans nothing in the small state, which
+      // would leave the loading row with nothing in flight.
+      if (!this.hasAgentsResult) {
+        this.backgroundRefresh('page-load');
+        return;
+      }
       if (superseded === 'page-load' || superseded === 'label-commit') {
         this.backgroundRefresh(superseded);
         return;
@@ -2874,11 +2969,16 @@ export class ScionPageProjectDetail extends LitElement {
         </div>
       </div>
 
-      ${this.agentStats.total === 0
-        ? html`${this.renderAgentWindowBanner()}${this.renderEmptyAgents()}`
-        : html`
-            ${this.renderFilterBar()} ${this.renderAgentWindowBanner()} ${this.renderAgentRows()}
-          `}
+      ${this.agentsLoadError
+        ? this.renderAgentsLoadError()
+        : !this.hasAgentsResult
+          ? html`<div class="empty-filter-state agents-initial-loading">Loading agents…</div>`
+          : this.agentStats.total === 0
+            ? html`${this.renderAgentWindowBanner()}${this.renderEmptyAgents()}`
+            : html`
+                ${this.renderFilterBar()} ${this.renderAgentWindowBanner()}
+                ${this.renderAgentRows()}
+              `}
       ${this.project?.cloudLogging ? this.renderMessagesSection() : nothing}
       ${this.shouldShowFilesSection()
         ? this.filesSectionVisible
@@ -3157,6 +3257,24 @@ export class ScionPageProjectDetail extends LitElement {
         </sl-button>
       </div>
     `;
+  }
+
+  /**
+   * The agents section when the page-load agents request failed: the
+   * project stays on screen, with a Retry for the agents only.
+   */
+  private renderAgentsLoadError(): TemplateResult {
+    return html`<div class="empty-filter-state agents-load-error">
+      ${this.agentsLoadError}
+      <sl-button
+        size="small"
+        ?disabled=${this.agentsLoading || this.agentWindow.loading}
+        @click=${(): void => this.retryAgentsLoad()}
+      >
+        <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
+        Retry
+      </sl-button>
+    </div>`;
   }
 
   private renderEmptyAgents() {

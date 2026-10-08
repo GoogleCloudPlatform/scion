@@ -497,3 +497,61 @@ export function artifactPagePath(a: Pick<Artifact, 'id' | 'scopeRef'>, seq = 0):
   const base = `/projects/${encodeURIComponent(a.scopeRef)}/artifacts/${encodeURIComponent(a.id)}`;
   return seq > 0 ? `${base}/v/${seq}` : base;
 }
+
+// ---------------------------------------------------------------------------
+// Artifact references in chat messages (ptone/scion#3224)
+// ---------------------------------------------------------------------------
+
+/**
+ * Message metadata key the composer sends artifact references in: a JSON
+ * array of scion://artifact/<id>[@<seq>] strings. The hub keeps only those
+ * the sender can read.
+ */
+export const ARTIFACTS_METADATA_KEY = 'artifacts';
+
+/** Most artifact references one message may carry (hub limit). */
+export const MAX_MESSAGE_ARTIFACTS = 10;
+
+/**
+ * One artifact reference on a message, as the hub resolved it for the
+ * viewer (chat history `messageArtifacts`, send response `artifacts`).
+ * When available is false the viewer cannot read it (or it is gone) and
+ * only ref, id and seq are set.
+ */
+export interface MessageArtifactRef {
+  ref: string;
+  id: string;
+  seq?: number;
+  available: boolean;
+  title?: string;
+  version?: number;
+  ownerKind?: string;
+  ownerRef?: string;
+  ownerName?: string;
+}
+
+/** Canonical reference string of an artifact, pinned to seq when seq > 0. */
+export function formatArtifactRef(id: string, seq?: number): string {
+  return seq && seq > 0 ? `scion://artifact/${id}@${seq}` : `scion://artifact/${id}`;
+}
+
+/**
+ * Orders a message's artifact references by where each artifact first
+ * appears in the message text (the CLI adds the reference URLs to the text
+ * in send order). References whose artifact the text does not name, such
+ * as those attached in the web composer, keep their relative order after
+ * the others: send order right after sending, artifact id order in
+ * history, which is the order the hub returns them in.
+ */
+export function orderArtifactRefs(
+  refs: readonly MessageArtifactRef[],
+  body: string
+): MessageArtifactRef[] {
+  const lower = body.toLowerCase();
+  const indexed = refs.map((r, i) => {
+    const at = lower.indexOf(`scion://artifact/${r.id.toLowerCase()}`);
+    return { r, i, at: at < 0 ? Number.MAX_SAFE_INTEGER : at };
+  });
+  indexed.sort((a, b) => a.at - b.at || a.i - b.i);
+  return indexed.map((x) => x.r);
+}

@@ -177,6 +177,101 @@ export function summarizeScenario(scenario, results) {
   };
 }
 
+/**
+ * expectedFirstPageCount is how many cards or rows the first page of a
+ * paged project grid or list must render: one full page, or every agent
+ * when there are fewer. `total` is the pager's total when known (a number);
+ * otherwise the seeded agent count is used. A missing or non-positive page
+ * size (no pager rendered) means the view is not paged, so every agent is
+ * expected, as before paging existed.
+ */
+export function expectedFirstPageCount(pageSize, agentCount, total) {
+  const all = typeof total === 'number' && total >= 0 ? total : agentCount;
+  if (!(typeof pageSize === 'number' && pageSize > 0)) return all;
+  return Math.min(pageSize, all);
+}
+
+/** pageCountFor is the number of pages a paged view has for `total` items. */
+export function pageCountFor(pageSize, total) {
+  if (!(typeof pageSize === 'number' && pageSize > 0)) return null;
+  if (!(typeof total === 'number' && total >= 0)) return null;
+  return Math.max(1, Math.ceil(total / pageSize));
+}
+
+/**
+ * mapWithConcurrency maps items through fn with at most `limit` calls in
+ * flight at once, preserving input order in the result.
+ */
+export async function mapWithConcurrency(items, limit, fn) {
+  const out = new Array(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, async () => {
+    while (next < items.length) {
+      const i = next++;
+      out[i] = await fn(items[i], i);
+    }
+  });
+  await Promise.all(workers);
+  return out;
+}
+
+/**
+ * walkEndReason classifies a pager whose Next is disabled: `no-next-page`
+ * when it is on the last page its total implies (or the total is unknown,
+ * zero or capped, so no later page can be shown to exist), and
+ * `next-unavailable-before-last-page` when its own total says more pages
+ * exist, i.e. the walk ended early. Returns null while Next is available
+ * or with no pager.
+ */
+export function walkEndReason(pager) {
+  if (!pager || pager.hasNext) return null;
+  const total = typeof pager.total === 'number' && pager.total > 0 ? pager.total : null;
+  const knownPages = pageCountFor(pager.pageSize, total);
+  if (knownPages != null && pager.pageIndex + 1 < knownPages) {
+    return 'next-unavailable-before-last-page';
+  }
+  return 'no-next-page';
+}
+
+/**
+ * summarizePageChanges reports page-change latency (Next clicked to the
+ * next page rendered) over every completed change of every populated run.
+ * A change that did not complete within its timeout is counted in
+ * pageChangeFailureCount and excluded from the timing stats.
+ */
+export function summarizePageChanges(results) {
+  const changes = [];
+  let attempted = 0;
+  for (const r of results) {
+    if (r.outcome !== 'populated' || !Array.isArray(r.pageChanges)) continue;
+    for (const c of r.pageChanges) {
+      attempted++;
+      if (c.ok) changes.push(c.ms);
+    }
+  }
+  const mm = minMax(changes);
+  // Runs whose walk ended with Next disabled before the last page the
+  // pager's total implies: a product-side early stop, counted on its own so
+  // it is not hidden behind an all-completed change count.
+  const earlyStops = results.filter(
+    (r) => r.pageChangesStopReason === 'next-unavailable-before-last-page'
+  ).length;
+  const sizes = [...new Set(results.map((r) => r.pageSize).filter((n) => n != null))];
+  const counts = [...new Set(results.map((r) => r.pageCount).filter((n) => n != null))];
+  return {
+    pageSize: sizes.length === 1 ? sizes[0] : sizes.length === 0 ? null : sizes,
+    pageCount: counts.length === 1 ? counts[0] : counts.length === 0 ? null : counts,
+    pageChangeAttemptCount: attempted,
+    pageChangeSuccessCount: changes.length,
+    pageChangeFailureCount: attempted - changes.length,
+    pageWalkEarlyStopCount: earlyStops,
+    medianPageChangeMs: median(changes),
+    minPageChangeMs: mm.min,
+    maxPageChangeMs: mm.max,
+    stddevPageChangeMs: stddev(changes),
+  };
+}
+
 // ---- test-login session (mirrors web/e2e/harness/auth.ts) -----------------
 
 export const USER_TOKEN_ISSUER = 'scion-hub';
