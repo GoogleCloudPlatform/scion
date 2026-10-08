@@ -104,7 +104,10 @@ func (s *Server) handleChatSpaces(w http.ResponseWriter, r *http.Request) {
 	// List every project as a summary: the rail needs only identity, naming,
 	// the emoji annotation and the authorization inputs, not the agent,
 	// contributor and broker counts ListProjects computes per project.
-	allProjects, err := s.store.ListProjectSummaries(ctx, store.ProjectFilter{}, store.ListOptions{Limit: 1000})
+	// Project templates are blueprints, not chat spaces: exclude them here
+	// so no client lists them in the rail.
+	notTemplate := false
+	allProjects, err := s.store.ListProjectSummaries(ctx, store.ProjectFilter{IsTemplate: &notTemplate}, store.ListOptions{Limit: 1000})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list projects", nil)
 		return
@@ -548,6 +551,13 @@ func (s *Server) handleCreateThread(w http.ResponseWriter, r *http.Request, proj
 		return
 	}
 	if !s.authorize(w, r, projectResource(project), ActionRead) {
+		return
+	}
+
+	// Templates are not chat spaces, mirroring the agent-create rejection.
+	if project.IsTemplate() {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+			"cannot create threads in a template project", nil)
 		return
 	}
 

@@ -204,3 +204,44 @@ func TestGeneralTopic_ListThreads_DoesNotResurrectDeletedGeneral(t *testing.T) {
 	assert.Equal(t, 1, total)
 	assert.Equal(t, 0, general)
 }
+
+func TestGeneralTopic_Template_NoBackfillNoThreads(t *testing.T) {
+	srv, s, wcs := generalTopicServer(t)
+	ctx := context.Background()
+	tmpl := &store.Project{ID: api.NewUUID(), Name: "Tmpl", Slug: "tmpl-nothreads",
+		OwnerID: DevUserID, CreatedBy: DevUserID,
+		Labels: map[string]string{store.LabelTemplate: "true"}}
+	require.NoError(t, s.CreateProject(ctx, tmpl))
+
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/chat/spaces/"+tmpl.ID+"/threads", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/chat/spaces/"+tmpl.ID+"/threads",
+		map[string]string{"name": "nope"})
+	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+
+	total, _ := countGeneral(t, wcs, tmpl.ID)
+	assert.Equal(t, 0, total)
+}
+
+func TestChatSpaces_ExcludesTemplates(t *testing.T) {
+	srv, s, _ := generalTopicServer(t)
+	ctx := context.Background()
+	regular := &store.Project{ID: api.NewUUID(), Name: "Regular", Slug: "regular-space",
+		OwnerID: DevUserID, CreatedBy: DevUserID}
+	tmpl := &store.Project{ID: api.NewUUID(), Name: "Git Template", Slug: "git-template",
+		OwnerID: DevUserID, CreatedBy: DevUserID,
+		Labels: map[string]string{store.LabelTemplate: "true"}}
+	require.NoError(t, s.CreateProject(ctx, regular))
+	require.NoError(t, s.CreateProject(ctx, tmpl))
+
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/chat/spaces", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp chatSpacesResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	ids := map[string]bool{}
+	for _, sp := range resp.Spaces {
+		ids[sp.ProjectID] = true
+	}
+	assert.True(t, ids[regular.ID], "regular project must be a space")
+	assert.False(t, ids[tmpl.ID], "template must not be a space")
+}
