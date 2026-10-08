@@ -88,13 +88,15 @@ func TestQueuedStop_SupersedingStartClearSkipsDeleteWonRow(t *testing.T) {
 			httpOnlyBroker(t, f)
 			queueStop(t, f, a, "")
 
+			// The hook runs in every case, so each one reads the row as the
+			// clear will find it (after any delete marker).
 			var afterDelete *store.Agent
 			ws := &deleteAfterStartReleaseStore{Store: f.s}
-			if tc.delete != nil {
-				ws.afterRelease = func(_ context.Context, agentID string) {
+			ws.afterRelease = func(_ context.Context, agentID string) {
+				if tc.delete != nil {
 					tc.delete(t, f, agentID)
-					afterDelete = getAgent(t, f.s, agentID)
 				}
+				afterDelete = getAgent(t, f.s, agentID)
 			}
 			f.srv.store = ws
 
@@ -107,10 +109,12 @@ func TestQueuedStop_SupersedingStartClearSkipsDeleteWonRow(t *testing.T) {
 				errCode, _ := errorDetails(body)
 				require.Equal(t, "delete_in_progress", errCode)
 			}
-			if tc.delete != nil {
-				require.True(t, ws.fired, "the delete ran between the start's release and the clear")
-				require.NotNil(t, afterDelete)
-			}
+			require.True(t, ws.fired, "the hook ran between the start's release and the clear")
+			require.NotNil(t, afterDelete)
+			// The start's own write has already cleared the notice (its
+			// terminal-remnant clear); the stop_queued status is what the
+			// superseded-stop clear repaints, or must not repaint.
+			require.Equal(t, containerStatusStopQueued, afterDelete.ContainerStatus, "precondition: the clear has something to repaint")
 
 			got := getAgent(t, f.s, a.ID)
 			if tc.cleared {
@@ -118,10 +122,6 @@ func TestQueuedStop_SupersedingStartClearSkipsDeleteWonRow(t *testing.T) {
 				assert.Empty(t, got.Message, "the queued-stop notice is cleared")
 				return
 			}
-			// The start's own write has already cleared the notice (its
-			// terminal-remnant clear); the stop_queued status is what the
-			// superseded-stop clear would still repaint.
-			require.Equal(t, containerStatusStopQueued, afterDelete.ContainerStatus, "precondition: the clear has something to repaint")
 			assert.Equal(t, containerStatusStopQueued, got.ContainerStatus, "a delete-won row is not repainted running")
 			assert.Equal(t, afterDelete.Message, got.Message)
 			// The delete's row is untouched: the clear wrote nothing.
