@@ -979,7 +979,31 @@ func displayAgents(agents []api.AgentInfo, all bool, hubMode bool) error {
 		}
 	}
 	_ = w.Flush()
+	if hint := provisionedOnlyListHint(agents); hint != "" {
+		fmt.Println()
+		fmt.Println(hint)
+	}
 	return nil
+}
+
+// provisionedOnlyListHint returns the line scion list prints after the table
+// when agents are provisioned but not started (ptone/scion#2875), or "".
+func provisionedOnlyListHint(agents []api.AgentInfo) string {
+	var names []string
+	for _, a := range agents {
+		if a.ProvisionedOnly && a.Phase == string(state.PhaseCreated) {
+			names = append(names, a.Name)
+		}
+	}
+	switch len(names) {
+	case 0:
+		return ""
+	case 1:
+		return createNotStartedHint(names[0])
+	default:
+		return fmt.Sprintf("%d agents are provisioned but not started (%s). Run '%s' to start one.",
+			len(names), strings.Join(names, ", "), createStartCommand("NAME"))
+	}
 }
 
 // formatLastActivity formats a status and timestamp as a combined "activity, time ago" string.

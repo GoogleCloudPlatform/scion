@@ -63,12 +63,58 @@ func TestDisplayAgents_ProvisionedOnlyLabel(t *testing.T) {
 	out := captureStdout(t, func() { err = displayAgents(agents, false, true) })
 	require.NoError(t, err)
 	lines := strings.Split(strings.TrimSpace(out), "\n")
-	require.Len(t, lines, 4, out)
-	for _, l := range lines[1:] {
+	// Header, three rows, a blank line, and the start hint.
+	require.Len(t, lines, 6, out)
+	for _, l := range lines[1:4] {
 		if strings.HasPrefix(l, "po-agent") {
 			assert.Contains(t, l, "created (not started)")
 		} else {
 			assert.NotContains(t, l, "not started")
 		}
 	}
+}
+
+// scion list ends with a hint to start provision-only agents
+// (ptone/scion#2875).
+func TestProvisionedOnlyListHint(t *testing.T) {
+	po := func(name string) api.AgentInfo {
+		return api.AgentInfo{Name: name, Phase: "created", ProvisionedOnly: true}
+	}
+	for _, tc := range []struct {
+		name   string
+		agents []api.AgentInfo
+		want   string
+	}{
+		{"none", []api.AgentInfo{{Name: "a", Phase: "running"}}, ""},
+		{"stale flag after leaving created", []api.AgentInfo{{Name: "a", Phase: "running", ProvisionedOnly: true}}, ""},
+		{"one", []api.AgentInfo{po("a"), {Name: "b", Phase: "running"}},
+			"Agent 'a' is provisioned but not started. Run 'scion start a' to start it."},
+		{"several", []api.AgentInfo{po("a"), po("b")},
+			"2 agents are provisioned but not started (a, b). Run 'scion start NAME' to start one."},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, provisionedOnlyListHint(tc.agents))
+		})
+	}
+}
+
+func TestDisplayAgents_ProvisionedOnlyHint(t *testing.T) {
+	prev := outputFormat
+	outputFormat = ""
+	t.Cleanup(func() { outputFormat = prev })
+
+	var err error
+	out := captureStdout(t, func() {
+		err = displayAgents([]api.AgentInfo{{Name: "po-agent", Phase: "created", ProvisionedOnly: true}}, false, false)
+	})
+	require.NoError(t, err)
+	assert.Contains(t, out, "created (not started)")
+	assert.True(t, strings.HasSuffix(strings.TrimSpace(out), "Run 'scion start po-agent' to start it."), out)
+
+	outputFormat = "json"
+	out = captureStdout(t, func() {
+		err = displayAgents([]api.AgentInfo{{Name: "po-agent", Phase: "created", ProvisionedOnly: true}}, false, false)
+	})
+	require.NoError(t, err)
+	assert.NotContains(t, out, "scion start")
 }
