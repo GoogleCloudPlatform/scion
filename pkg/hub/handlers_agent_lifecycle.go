@@ -313,6 +313,24 @@ func guardAgentPhaseTransition(agent *store.Agent, status *store.AgentStatusUpda
 		return
 	}
 
+	// Guard 0d: a Kubernetes disruption (preempted/evicted) already recorded
+	// by a broker heartbeat settles the phase (stopped when the workspace
+	// survives the pod, error otherwise; see k8sDisruptionPhase in
+	// pkg/runtime). The dying container's own shutdown reports (stopping,
+	// then a plain stopped) often arrive after that heartbeat and must not
+	// replace it: stopping would leave the agent waiting for a final report
+	// that may never come, and stopped would hide an error. A start clears
+	// the recorded reason (ClearExit), so a new generation is not affected.
+	if disruptionSettled(agent) {
+		if p := state.Phase(status.Phase); p == state.PhaseStopping || p == state.PhaseStopped {
+			status.Phase = ""
+			status.Activity = ""
+			if isGenericStopMessage(status.Message) || status.Message == "Agent shutting down" {
+				status.Message = ""
+			}
+		}
+	}
+
 	// Guard 1: reject phase regressions within the forward-progress lifecycle.
 	if status.Phase != "" {
 		newPhase := state.Phase(status.Phase)
@@ -332,6 +350,16 @@ func guardAgentPhaseTransition(agent *store.Agent, status *store.AgentStatusUpda
 			status.Phase = string(state.PhaseRunning)
 		}
 	}
+}
+
+// disruptionSettled reports whether agent is stopped or in error with a
+// Kubernetes disruption (preempted/evicted) recorded as its exit reason.
+func disruptionSettled(agent *store.Agent) bool {
+	r := state.ExitReason(agent.ExitReason)
+	if r != state.ExitReasonPreempted && r != state.ExitReasonEvicted {
+		return false
+	}
+	return agent.Phase == string(state.PhaseStopped) || agent.Phase == string(state.PhaseError)
 }
 
 // errHarnessNoResume is returned by suspendAgent when the agent's harness does

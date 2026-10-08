@@ -1752,6 +1752,9 @@ func (s *AgentStore) MarkAgentContainerMissingIfUnchanged(ctx context.Context, i
 		runID = agent.Or(agent.RunIDIsNil(), agent.RunIDEQ(""))
 	}
 	return s.markAgentContainerMissing(ctx, id, brokerID, cutoff, message,
+		// The exec agent_not_found path concludes only for an agent that
+		// was running; the heartbeat reconcile also settles stopping.
+		agent.PhaseEQ(string(state.PhaseRunning)),
 		agent.StateVersionEQ(pre.StateVersion),
 		runID,
 		agent.StartClaimIDIsNil(),
@@ -1779,7 +1782,9 @@ func (s *AgentStore) markAgentContainerMissing(ctx context.Context, id, brokerID
 				agent.IDEQ(uid),
 				agent.DeletedAtIsNil(),
 				agent.RuntimeBrokerIDEQ(brokerID),
-				agent.PhaseEQ("running"),
+				// stopping: the container's own shutdown report arrived
+				// but its final stopped report never did (ptone/scion#2669).
+				agent.PhaseIn(string(state.PhaseRunning), string(state.PhaseStopping)),
 				agent.Or(
 					agent.ReincarnationStateIsNil(),
 					agent.ReincarnationStateIn(store.ReincarnationStateNone, store.ReincarnationStateFailed),

@@ -261,7 +261,18 @@ Scion also distinguishes a Kubernetes-initiated disruption from a plain stop or 
 | `DisruptionTarget` condition, reason `TerminationByKubelet` or `EvictionByEvictionAPI` | `evicted` |
 | `DisruptionTarget` condition, any other reason (for example a taint-manager or pod-GC removal) | `evicted` |
 
-This is reported as soon as either signal is observed: a pod still `Running` but already committed to termination (it has a `deletionTimestamp` and a live `DisruptionTarget` condition — most of what preemption and the Eviction API delete this way), or a pod that has actually reached a terminal state (`Failed`/`Succeeded`) while still carrying the signal. A `DisruptionTarget` condition with no `deletionTimestamp` yet is not reported — that pod is still finishing its grace period and has not stopped. It depends on the runtime observing one of these two states before the pod object is removed from the API server entirely; if the pod disappears between polls without either ever being observed, the agent may instead be reported through a different, more generic terminal path rather than as preempted/evicted. Docker and other non-Kubernetes runtimes are unaffected.
+This is reported as soon as either signal is observed: a pod still `Running` but already committed to termination (it has a `deletionTimestamp` and a live `DisruptionTarget` condition — most of what preemption and the Eviction API delete this way), or a pod that has actually reached a terminal state (`Failed`/`Succeeded`) while still carrying the signal. A `DisruptionTarget` condition with no `deletionTimestamp` yet is not reported — that pod is still finishing its grace period. Docker and other non-Kubernetes runtimes are unaffected.
+
+When either signal is observed, the agent leaves `running` at once, and its status message reads `Agent pod was preempted` or `Agent pod was evicted`. The phase depends on whether a later `scion start` can resume the work:
+
+| Agent workspace volume | Phase |
+|---|---|
+| Persistent (NFS workspace storage, a PersistentVolumeClaim) | `stopped` — the work survives; start the agent again to resume it |
+| `emptyDir` (the default local workspace) | `error` — the workspace was lost with the pod |
+
+The home backend does not change this: with a pod-local home the harness session is not kept across any Kubernetes restart. A `scion stop` that races a preemption stays `stopped`.
+
+If the pod disappears between polls without either signal ever being observed, the agent falls back to the missing-container reconcile: after `missing_agent_grace` it moves to `error` with exit reason `container_missing` (see [server configuration](/scion/reference/server-config/)). One known gap: an agent preempted within about two broker heartbeats of its start, before the Hub has confirmed which runtime target lists it, is not covered by that fallback.
 
 ### Safe-to-Evict
 
