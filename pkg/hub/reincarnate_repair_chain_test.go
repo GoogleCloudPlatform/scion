@@ -283,7 +283,7 @@ func TestReincarnateByUserRepairsUnrecordedOwnEdgeUnderDevLocalHop(t *testing.T)
 		EffectCeiling: store.EffectCeiling{Kind: store.EffectCeilingPrincipal},
 	}))
 	old := seedUnrecordedEdge(t, f.s, store.DelegationPrincipalAgent, parent.ID, f.target)
-	require.False(t, f.srv.authzService.devLocalAuthorityEnabled(), "fixture: dev auth is off")
+	f.srv.authzService.setDevLocalAuthorityEnabled(false)
 	_, err := f.srv.authzService.chainEffectCeiling(ctx, mustGetAgent(t, f.s, f.target.ID))
 	require.ErrorIs(t, err, errSourceNotAllowed, "fixture: the chain fold refuses the dev_local hop")
 
