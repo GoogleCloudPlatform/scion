@@ -489,11 +489,11 @@ func (e *errListAgentsStore) ListAgents(ctx context.Context, filter store.AgentF
 
 // Consider 2 (review round 2): a routing-plan error (resolveRoutingAgents
 // itself failing, not just resolving to zero agents) in a topic whose
-// default agent is soft-deleted must not be mislabelled "Agent unreachable
-// (deleted)". Before the fix, handleConversationSend gated the unreachable-
+// default agent is soft-deleted must not be mislabelled "Agent
+// unreachable". Before the fix, handleConversationSend gated the unreachable-
 // default override only on unresolvedDefaultAgent being set, so a plan error
-// in this exact topic shape reported the same "Agent unreachable (deleted)"
-// outcome as an actually-unreachable default. The fix gates that override on
+// in this exact topic shape reported the same "Agent unreachable" outcome
+// as an actually-unreachable default. The fix gates that override on
 // planErr == nil, so a plan error now keeps the pre-existing human-to-human
 // error handling instead.
 func TestUnreachableNC_RoutingPlanError_DeletedDefault_NotMislabelledUnreachable(t *testing.T) {
@@ -524,7 +524,7 @@ func TestUnreachableNC_RoutingPlanError_DeletedDefault_NotMislabelledUnreachable
 
 // Nit 1 (review round 2): a transient (non-not-found) error resolving the
 // topic's default agent must not be classified as "deleted" — that would
-// permanently persist "Agent unreachable (deleted)" for a DB hiccup. Keep the
+// permanently persist "Agent unreachable" for a DB hiccup. Keep the
 // pre-nc-delivery-unreachable behaviour: fall through to an ordinary
 // human-to-human message.
 func TestUnreachableNC_TransientDefaultLookupError_FallsThroughToHumanToHuman(t *testing.T) {

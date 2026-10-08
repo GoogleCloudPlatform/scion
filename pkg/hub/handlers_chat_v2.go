@@ -2086,8 +2086,9 @@ type unreachableAgentOverride struct {
 // publish, watermark updates, and notification firing (including
 // fireHumanMentionNotifications) are shared with the ordinary human-to-human
 // path. With isDM (an agent DM whose agent record is gone) the DM is
-// registered as usual but no DM notification is sent. It returns the response body of the persisted
-// message, or the error the send handler answers with.
+// registered as usual but no DM notification is sent. It returns the
+// response body of the persisted message, or the error the send handler
+// answers with.
 func (s *Server) sendHumanToHuman(ctx context.Context, key, projectID string, user UserIdentity,
 	content, senderLabel string, isDM, noRecipient bool, mentionNames []string, attachmentRefs []AttachmentRef, now time.Time, replyToID string,
 	unreachable *unreachableAgentOverride) (*chatMessageResponse, *chatSendError) {

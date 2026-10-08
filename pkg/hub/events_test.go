@@ -1012,7 +1012,7 @@ func TestPublishUserMessage_NoChatMessageForNonWebChannel(t *testing.T) {
 // PublishUserMessage or renaming the "Agent unreachable" prefix would leave
 // every other test green.
 func TestPublishUserMessage_DispatchFailureFields(t *testing.T) {
-	unreachableReason := "Agent unreachable (deleted)"
+	unreachableReason := "Agent unreachable"
 	// Round 4, item 5: a stale reason left over from a prior failed attempt
 	// (e.g. a retried row that later dispatched). If PublishUserMessage
 	// dropped its `DispatchState == failed` gate and instead populated the
