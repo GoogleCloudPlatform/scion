@@ -98,8 +98,64 @@ type containerOutputs struct {
 	Status       string `json:"status,omitempty"`
 }
 
-// runHarnessProvision implements the sciontool harness provision flow.
+// provisionStatusRecorder records the outcome of one runHarnessProvision in
+// the bundle's status file (see hooks.WriteHarnessProvisionStatus), so a
+// pre-start failure can be surfaced with its reason. Recording is
+// best-effort: a status write failure is logged and never changes the
+// provision result.
+type provisionStatusRecorder struct {
+	path     string
+	manifest *containerProvisionManifest
+}
+
+func (r *provisionStatusRecorder) write(state, msg string) {
+	if r.path == "" {
+		return
+	}
+	if err := hooks.WriteHarnessProvisionStatus(r.path, state, msg); err != nil {
+		log.TaggedInfo("provision", "could not record provision status: %v", err)
+	}
+}
+
+// finish records err's outcome. The message is scrubbed of staged secret
+// values whenever the manifest was loaded; errors returned before that point
+// carry no secret material (paths and parse errors only). The provisioner
+// script's own stderr reaches err only already scrubbed and truncated (see
+// runHarnessProvisionSteps).
+func (r *provisionStatusRecorder) finish(err error) {
+	if err == nil {
+		r.write(hooks.ProvisionStatusOK, "")
+		return
+	}
+	msg := err.Error()
+	if r.manifest != nil {
+		msg = scrubSecrets(msg, r.manifest)
+	}
+	r.write(hooks.ProvisionStatusFailed, msg)
+}
+
+// runHarnessProvision implements the sciontool harness provision flow and
+// records its outcome in the bundle's status file.
 func runHarnessProvision(ctx context.Context, manifestPath string) error {
+	rec := &provisionStatusRecorder{}
+	err := runHarnessProvisionSteps(ctx, manifestPath, rec)
+	rec.finish(err)
+	return err
+}
+
+func runHarnessProvisionSteps(ctx context.Context, manifestPath string, rec *provisionStatusRecorder) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("resolve $HOME: %w", err)
+	}
+	bundleRoot := filepath.Join(home, ".scion", "harness")
+	if p, perr := hooks.HarnessProvisionStatusPath(bundleRoot); perr == nil {
+		rec.path = p
+		// Replace any status left by an earlier run before doing anything
+		// that can fail, so a stale error is never surfaced for this one.
+		rec.write(hooks.ProvisionStatusRunning, "")
+	}
+
 	if manifestPath == "" {
 		return fmt.Errorf("--manifest is required")
 	}
@@ -112,16 +168,11 @@ func runHarnessProvision(ctx context.Context, manifestPath string) error {
 		return err
 	}
 
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("resolve $HOME: %w", err)
-	}
-	bundleRoot := filepath.Join(home, ".scion", "harness")
-
 	// Resolve $HOME prefixes in manifest paths. The host-side Provision()
 	// encodes paths with literal "$HOME/" for container portability; expand
 	// them now so validation and file-existence checks use absolute paths.
 	resolveManifestHomePaths(manifest, home)
+	rec.manifest = manifest
 
 	// SCION_HARNESS_OUTPUTS_DIR / SCION_HARNESS_SECRETS_DIR move the
 	// bundle's outputs/ and secrets/ out of the home; unset, nothing changes.

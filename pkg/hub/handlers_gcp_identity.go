@@ -29,6 +29,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
+	"google.golang.org/api/googleapi"
 )
 
 // handleProjectGCPServiceAccounts handles /api/v1/projects/{projectId}/gcp-service-accounts
@@ -883,7 +884,7 @@ func (s *Server) mintGCPServiceAccount(w http.ResponseWriter, r *http.Request, p
 		slog.Error("GCP SA mint: failed to create service account",
 			"hub_gcp_project_id", hubGCPProjectID, "account_id", accountID, "error", err)
 		writeError(w, http.StatusBadGateway, ErrCodeRuntimeError,
-			"failed to create GCP service account: "+err.Error(), nil)
+			mintCreateErrorMessage(err, hubGCPProjectID), nil)
 		return
 	}
 
@@ -1247,6 +1248,11 @@ func (s *Server) handleAgentGCPToken(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "agent not found", nil)
 		return
 	}
+	// No external token for an agent that is not in good standing
+	// (ptone/scion#3433); a lookup fault refuses.
+	if s.agentStandingForbidden(r.Context(), w, agentRecord.ID) {
+		return
+	}
 
 	// Recheck the agent record and assignment mode from the store, then the
 	// JWT scope, before paying for the service-account row lookup below -- a
@@ -1338,6 +1344,11 @@ func (s *Server) handleAgentGCPIdentityToken(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "agent not found", nil)
 		return
 	}
+	// No external token for an agent that is not in good standing
+	// (ptone/scion#3433); a lookup fault refuses.
+	if s.agentStandingForbidden(r.Context(), w, agentRecord.ID) {
+		return
+	}
 
 	// Recheck the agent record and assignment mode from the store, then the
 	// JWT scope, before paying for the service-account row lookup below -- a
@@ -1403,4 +1414,28 @@ type gcpTokenRequest struct {
 
 type gcpIdentityTokenRequest struct {
 	Audience string `json:"audience"`
+}
+
+// mintCreateErrorMessage renders the error body for a failed
+// CreateServiceAccount call during minting. When GCP refused the call for
+// lack of IAM permission, it adds which identity needs which role: the hub
+// creates the account with its own credentials, not the signed-in user's,
+// so the usual fix is a grant to the hub's service account. A 403 for a
+// disabled API or insufficient access scopes gets no hint, because the role
+// would not fix it.
+func mintCreateErrorMessage(err error, hubGCPProjectID string) string {
+	msg := "failed to create GCP service account: " + err.Error()
+	var gerr *googleapi.Error
+	if !errors.As(err, &gerr) || gerr.Code != http.StatusForbidden {
+		return msg
+	}
+	text := err.Error() + " " + gerr.Body
+	for _, reason := range []string{"SERVICE_DISABLED", "ACCESS_TOKEN_SCOPE_INSUFFICIENT"} {
+		if strings.Contains(text, reason) {
+			return msg
+		}
+	}
+	return msg + fmt.Sprintf(". To mint service accounts, the hub's own GCP service account "+
+		"(the identity the hub runs as, not the signed-in user) needs roles/iam.serviceAccountAdmin "+
+		"on project %s", hubGCPProjectID)
 }

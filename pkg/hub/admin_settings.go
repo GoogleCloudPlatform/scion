@@ -283,7 +283,41 @@ func (s *Server) handleAdminServerConfigSectionReset(w http.ResponseWriter, r *h
 		return
 	}
 
-	if err := ops.DeleteSection(r.Context(), sectionName); err != nil {
+	// Resetting the GCP permission-check section returns both keys to their
+	// deploy-time values: the same transition rule and audit record as a
+	// PUT apply.
+	var gcpIAMCur, gcpIAMNext gcpIAMSettings
+	gcpIAMChange := false
+	if sectionName == gcpIAMSection {
+		if !requireGCPIAMHubAdmin(w, r.Context()) {
+			return
+		}
+		gcpIAMCur = s.currentGCPIAMSettings()
+		gcpIAMNext = s.gcpIAMEffectiveFor(nil)
+		if gcpIAMChange = gcpIAMCur != gcpIAMNext; gcpIAMChange {
+			if err := s.checkGCPIAMTransition(r.Context(), gcpIAMCur, gcpIAMNext, false); err != nil {
+				writeGCPIAMTransitionError(w, err)
+				return
+			}
+			if err := s.auditGCPIAMChange(r.Context(), gcpIAMSurfaceReset, gcpIAMCur, gcpIAMNext); err != nil {
+				slog.Error("Failed to record GCP permission-check change", "error", err)
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+					"Failed to reset section", nil)
+				return
+			}
+			s.approveGCPIAMTransition(gcpIAMTransition{From: gcpIAMCur, To: gcpIAMNext})
+		}
+	}
+
+	err := ops.DeleteSection(r.Context(), sectionName)
+	if gcpIAMChange {
+		// The approval covers only this reset's own self-apply.
+		s.clearGCPIAMApproval()
+		if err != nil {
+			s.auditGCPIAMNotApplied(r.Context(), gcpIAMCur, gcpIAMNext, err)
+		}
+	}
+	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			writeError(w, http.StatusNotFound, ErrCodeNotFound,
 				"Section not found in database: "+sectionName, nil)
