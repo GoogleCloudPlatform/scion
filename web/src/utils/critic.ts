@@ -405,7 +405,22 @@ export function criticToolBlocked(
     const touches = empty
       ? at.from > seg.start && at.from < seg.end
       : at.from < seg.end && at.to > seg.start;
-    if (touches) return 'The selection is inside or across a mark. Select text outside marks.';
+    if (touches) return INSIDE_MARK_HINT;
   }
+  // The new mark must read as intended in the whole document: an earlier
+  // opener with no closer would otherwise be closed by the new mark's
+  // token. Apply the edit and require that the text with every mark
+  // rejected is unchanged. (Marks outside the edit cannot change without
+  // changing that text: the selection does not touch a mark, and the tool
+  // inserts a balanced mark, so only an unclosed opener can pair with its
+  // tokens.)
+  const edit = criticToolEdit(tool, sel);
+  if (!edit) return null;
+  const result = doc.slice(0, edit.from) + edit.insert + doc.slice(edit.to);
+  if (!onlyMarksChanged(result, projectCritic(doc, 'clean'))) return UNCLOSED_MARK_HINT;
   return null;
 }
+
+const INSIDE_MARK_HINT = 'The selection is inside or across a mark. Select text outside marks.';
+const UNCLOSED_MARK_HINT =
+  'An unclosed CriticMarkup opener earlier in the text would swallow this mark. Remove or close it first.';

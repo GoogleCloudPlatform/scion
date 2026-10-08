@@ -67,6 +67,8 @@ interface MockOptions {
   viewExpiresAt?: string;
   /** Answers POST/PUT requests other than the view mint. */
   write?: (method: string, url: string) => Response;
+  /** File body at the time of the read (overrides body). */
+  bodyFn?: () => string;
 }
 
 const VIEW_URL = `/api/v1/artifacts/view/${ID}.1.9999999999.c2lnbmF0dXJl/`;
@@ -116,7 +118,7 @@ function mockFetch(
         const status = opts.fileStatus ?? 200;
         return Promise.resolve(
           status === 200
-            ? new Response(body, { status })
+            ? new Response(opts.bodyFn ? opts.bodyFn() : body, { status })
             : new Response('{"error":{"code":"internal","message":"boom"}}', { status })
         );
       }
@@ -922,23 +924,42 @@ describe('artifact page', () => {
     };
   }
 
-  it('reloads the current version after a stale review, keeps the text and starts a new version next time', async () => {
+  it('restarts a stale review from the current text and keeps the discarded text read-only', async () => {
     const meta = artifact('plan.md', 'text/markdown');
     const creates: string[] = [];
-    const urls = mockFetch(meta, 'We ship in Q3.\n', {
+    let text = 'We ship in Q3.\n';
+    // Meanwhile another reviewer's review (v2) became current.
+    const othersReview = 'We ship in Q3.{>>someone else<<}\n';
+    const urls = mockFetch(meta, '', {
+      bodyFn: () => text,
       write: reviewWrites(
         meta,
-        () =>
-          new Response(JSON.stringify({ error: { code: 'stale_review', message: 'stale' } }), {
-            status: 409,
-          }),
+        () => {
+          meta.artifact.currentSeq = 2;
+          meta.version = {
+            ...meta.version!,
+            seq: 2,
+            kind: 'review',
+            ref: `scion://artifact/${ID}@2`,
+          };
+          text = othersReview;
+          return new Response(
+            JSON.stringify({ error: { code: 'stale_review', message: 'stale' } }),
+            {
+              status: 409,
+            }
+          );
+        },
         creates
       ),
     });
     const el = await mount(true);
     button(el, '.actions sl-button', 'Review')!.click();
     await el.updateComplete;
-    const editor = (): Element => el.shadowRoot!.querySelector('scion-code-editor.review-editor')!;
+    const editor = (): HTMLElement & { content: string } =>
+      el.shadowRoot!.querySelector('scion-code-editor.review-editor') as HTMLElement & {
+        content: string;
+      };
     editor().dispatchEvent(new CustomEvent('content-changed', { detail: { content: MARKED } }));
     await el.updateComplete;
     const metaLoads = (): number => urls.filter((u) => u === `/api/v1/artifacts/${ID}`).length;
@@ -949,13 +970,115 @@ describe('artifact page', () => {
     expect(alert).toBeDefined();
     expect(alert!.textContent).toContain('newer version');
     expect(alert!.textContent).not.toContain('Edit');
-    // The page data was reloaded; Review mode and the text stay.
     expect(metaLoads()).toBe(before + 1);
-    expect((editor() as HTMLElement & { content: string }).content).toBe(MARKED);
-    // The next Save starts a new version instead of resuming the discarded one.
-    button(el, '.edit-footer sl-button', 'Save review')!.click();
+    // The buffer is the new current text, with the other reviewer's marks;
+    // the discarded text is shown read-only.
+    expect(editor().content).toBe(othersReview);
+    expect(el.shadowRoot!.querySelector('.discarded-review pre')!.textContent).toBe(MARKED);
+    const save = (): HTMLElement => button(el, '.edit-footer sl-button', 'Save review')!;
+    expect(save().hasAttribute('disabled')).toBe(true);
+    // New marks on the current text can be saved, as a new version.
+    editor().dispatchEvent(
+      new CustomEvent('content-changed', {
+        detail: { content: 'We {~~ship~>launch~~} in Q3.{>>someone else<<}\n' },
+      })
+    );
+    await el.updateComplete;
+    expect(save().hasAttribute('disabled')).toBe(false);
+    save().click();
     await settle(el);
     expect(creates).toHaveLength(2);
+  });
+
+  it('leaves Review mode with a notice when the current version cannot be reviewed after a stale review', async () => {
+    const meta = artifact('plan.md', 'text/markdown');
+    const creates: string[] = [];
+    mockFetch(meta, 'We ship in Q3.\n', {
+      write: reviewWrites(
+        meta,
+        () => {
+          meta.artifact.currentSeq = 2;
+          meta.version = {
+            ...meta.version!,
+            seq: 2,
+            entryPath: 'plan.txt',
+            files: [{ path: 'plan.txt', size: 5, sha256: 'cd', mediaType: 'text/plain' }],
+          };
+          return new Response(
+            JSON.stringify({ error: { code: 'stale_review', message: 'stale' } }),
+            {
+              status: 409,
+            }
+          );
+        },
+        creates
+      ),
+    });
+    const el = await mount(true);
+    button(el, '.actions sl-button', 'Review')!.click();
+    await el.updateComplete;
+    el.shadowRoot!.querySelector('scion-code-editor.review-editor')!.dispatchEvent(
+      new CustomEvent('content-changed', { detail: { content: MARKED } })
+    );
+    await el.updateComplete;
+    button(el, '.edit-footer sl-button', 'Save review')!.click();
+    await settle(el);
+    expect(el.shadowRoot!.querySelector('.review-editor')).toBeNull();
+    expect(el.shadowRoot!.querySelector('sl-alert.review-notice')!.textContent).toContain(
+      'cannot be reviewed here'
+    );
+  });
+
+  it('shows the margin placeholder only while the review has no marks at all', async () => {
+    mockFetch(artifact('plan.md', 'text/markdown'), 'We ship in Q3.\n');
+    const el = await mount(true);
+    button(el, '.actions sl-button', 'Review')!.click();
+    await el.updateComplete;
+    const frame = el.shadowRoot!.querySelector(
+      '.review-panes scion-artifact-markdown-frame'
+    ) as HTMLElement & { sideNote: string };
+    expect(frame.sideNote).toBe('No comments or suggestions yet.');
+    // A suggestion without any comment: no placeholder.
+    el.shadowRoot!.querySelector('scion-code-editor.review-editor')!.dispatchEvent(
+      new CustomEvent('content-changed', { detail: { content: 'We {~~ship~>launch~~} in Q3.\n' } })
+    );
+    await new Promise((r) => setTimeout(r, 300));
+    await el.updateComplete;
+    expect(frame.sideNote).toBe('');
+  });
+
+  it('clears the pending preview update on Cancel', async () => {
+    mockFetch(artifact('plan.md', 'text/markdown'), 'We ship in Q3.\n');
+    const el = await mount(true);
+    button(el, '.actions sl-button', 'Review')!.click();
+    await el.updateComplete;
+    el.shadowRoot!.querySelector('scion-code-editor.review-editor')!.dispatchEvent(
+      new CustomEvent('content-changed', { detail: { content: MARKED } })
+    );
+    const cleared = vi.spyOn(globalThis, 'clearTimeout');
+    button(el, '.edit-footer sl-button', 'Cancel')!.click();
+    await el.updateComplete;
+    expect(cleared).toHaveBeenCalled();
+    cleared.mockRestore();
+    expect(el.shadowRoot!.querySelector('.review-editor')).toBeNull();
+  });
+
+  it('shows Review pending while the current version is a review, also on an older version', async () => {
+    const meta = reviewMeta();
+    const old = {
+      ...meta,
+      version: { ...meta.version!, seq: 1, kind: 'publish', ref: `scion://artifact/${ID}@1` },
+    };
+    mockFetch(old, 'We ship in Q3.\n', {
+      versions: [
+        { ...meta.version!, files: [] },
+        { ...meta.version!, seq: 1, kind: 'publish', files: [] },
+      ],
+    });
+    const el = await mount(true, `/projects/p-1/artifacts/${ID}/v/1`);
+    expect(el.shadowRoot!.querySelector('.title sl-badge')?.textContent).toContain(
+      'Review pending'
+    );
   });
 
   it('does not claim the owner was notified of its own review', async () => {
@@ -1016,19 +1139,25 @@ describe('artifact page', () => {
     ).toContain('Publishing after a review resolves it and clears the badge.');
   });
 
-  it('lays notes out in a margin only on a wide viewport', async () => {
-    for (const wide of [true, false]) {
+  it('lays notes out in a margin from 1100px on the page and from 1400px in the Review pane', async () => {
+    for (const width of [1000, 1200, 1500]) {
       vi.stubGlobal('matchMedia', (q: string) => ({
-        matches: wide && q === '(min-width: 1100px)',
+        matches: Number(/min-width: (\d+)px/.exec(q)?.[1] ?? Infinity) <= width,
         addEventListener: (): void => {},
         removeEventListener: (): void => {},
       }));
       mockFetch(reviewMeta(), MARKED);
       const el = await mount(true);
-      const frame = el.shadowRoot!.querySelector('scion-artifact-markdown-frame') as HTMLElement & {
+      const page = el.shadowRoot!.querySelector('scion-artifact-markdown-frame') as HTMLElement & {
         marginNotes: boolean;
       };
-      expect(frame.marginNotes).toBe(wide);
+      expect(page.marginNotes, `page at ${width}`).toBe(width >= 1100);
+      button(el, '.actions sl-button', 'Review')!.click();
+      await el.updateComplete;
+      const pane = el.shadowRoot!.querySelector(
+        '.review-panes scion-artifact-markdown-frame'
+      ) as HTMLElement & { marginNotes: boolean };
+      expect(pane.marginNotes, `review pane at ${width}`).toBe(width >= 1400);
       document.body.innerHTML = '';
       vi.unstubAllGlobals();
     }

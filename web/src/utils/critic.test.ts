@@ -29,6 +29,7 @@ import {
   projectCritic,
   renderCriticSentinels,
 } from './critic.js';
+import type { CriticTool } from './critic.js';
 
 interface Case {
   name: string;
@@ -209,5 +210,39 @@ describe('renderCriticSentinels in attributes and note headers', () => {
     expect(renderCriticSentinels('\uE006c\uE007', '<Al & "B">')).toContain(
       '<span class=critic-note-n>1 · &lt;Al &amp; &quot;B&quot;&gt;</span> c</span>'
     );
+  });
+});
+
+describe('criticToolBlocked with an unclosed opener earlier in the text', () => {
+  // Each lone opener is closed by the token of exactly one tool.
+  const breaks: Record<string, CriticTool> = {
+    '{++': 'insert',
+    '{--': 'delete',
+    '{~~': 'suggest',
+    '{>>': 'comment',
+    '{==': 'comment',
+  };
+  for (const [opener, culprit] of Object.entries(breaks)) {
+    it(`refuses ${culprit} after a lone ${opener}, allows the other tools`, () => {
+      const doc = `Write ${opener} to mark. Here is text.`;
+      const from = doc.lastIndexOf('text');
+      const sel = { from, to: from + 4, text: 'text' };
+      for (const tool of ['comment', 'suggest', 'insert', 'delete'] as const) {
+        const edit = criticToolEdit(tool, sel)!;
+        const result = doc.slice(0, edit.from) + edit.insert + doc.slice(edit.to);
+        const broken = !onlyMarksChanged(result, projectCritic(doc, 'clean'));
+        expect(broken, `${opener} ${tool} breaks`).toBe(tool === culprit);
+        const hint = criticToolBlocked(tool, sel, doc);
+        if (tool === culprit) expect(hint, `${opener} ${tool}`).toMatch(/unclosed/);
+        else expect(hint, `${opener} ${tool}`).toBeNull();
+      }
+    });
+  }
+  it('allows every tool once the opener is gone', () => {
+    const doc = 'Write to mark. Here is text.';
+    const from = doc.lastIndexOf('text');
+    for (const tool of ['comment', 'suggest', 'insert', 'delete'] as const) {
+      expect(criticToolBlocked(tool, { from, to: from + 4, text: 'text' }, doc)).toBeNull();
+    }
   });
 });

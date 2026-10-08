@@ -90,6 +90,12 @@ type Tab = 'preview' | 'files' | 'history';
 /** Viewports at least this wide show comment notes in a margin. */
 export const WIDE_NOTES_QUERY = '(min-width: 1100px)';
 
+/**
+ * Viewports at least this wide show comment notes in a margin in Review
+ * mode, where the preview takes half the page.
+ */
+export const WIDE_REVIEW_NOTES_QUERY = '(min-width: 1400px)';
+
 /** How long the Review preview waits after typing before it re-renders. */
 export const REVIEW_PREVIEW_DELAY_MS = 250;
 
@@ -152,10 +158,23 @@ export class ScionPageArtifactDetail extends LitElement {
   @state() private reviewHint: string | null = null;
   /** The viewport is wide enough for comment notes in a margin. */
   @state() private wideViewport = false;
+  /** The viewport is wide enough for margin notes in the split Review pane. */
+  @state() private wideReviewViewport = false;
   private wideQuery: MediaQueryList | null = null;
+  private wideReviewQuery: MediaQueryList | null = null;
   private onWideChange = (e: MediaQueryListEvent): void => {
     this.wideViewport = e.matches;
   };
+  private onWideReviewChange = (e: MediaQueryListEvent): void => {
+    this.wideReviewViewport = e.matches;
+  };
+  /**
+   * The reviewer's text of a review the hub discarded as stale, shown
+   * read-only so marks can be copied into a review of the current version.
+   */
+  @state() private discardedReview: string | null = null;
+  /** Why Review mode was left (shown on the page after it closes). */
+  @state() private reviewNotice: string | null = null;
 
   @query('.untrusted') private untrustedFrame?: HTMLElement;
   @query('scion-code-editor.review-editor') private reviewEditor?: ScionCodeEditor;
@@ -396,6 +415,17 @@ export class ScionPageArtifactDetail extends LitElement {
         grid-template-columns: minmax(0, 1fr);
       }
     }
+    .discarded-review {
+      margin-bottom: 0.75rem;
+    }
+    .discarded-review pre {
+      max-height: 12rem;
+      overflow: auto;
+      white-space: pre-wrap;
+      font-family: var(--scion-font-mono, monospace);
+      font-size: 0.75rem;
+      margin: 0 0 0.5rem;
+    }
     .review-toolbar .hint {
       color: var(--sl-color-warning-700, #b45309);
     }
@@ -454,6 +484,9 @@ export class ScionPageArtifactDetail extends LitElement {
       this.wideQuery = window.matchMedia(WIDE_NOTES_QUERY);
       this.wideViewport = this.wideQuery.matches;
       this.wideQuery.addEventListener?.('change', this.onWideChange);
+      this.wideReviewQuery = window.matchMedia(WIDE_REVIEW_NOTES_QUERY);
+      this.wideReviewViewport = this.wideReviewQuery.matches;
+      this.wideReviewQuery.addEventListener?.('change', this.onWideReviewChange);
     }
     const parsed = parseArtifactPagePath(this.pageData?.path || window.location.pathname);
     if (parsed) {
@@ -569,6 +602,8 @@ export class ScionPageArtifactDetail extends LitElement {
     this.previewTimer = null;
     this.wideQuery?.removeEventListener?.('change', this.onWideChange);
     this.wideQuery = null;
+    this.wideReviewQuery?.removeEventListener?.('change', this.onWideReviewChange);
+    this.wideReviewQuery = null;
   }
 
   private async loadVersions(before = 0, gen = this.loadGen): Promise<void> {
@@ -659,6 +694,15 @@ export class ScionPageArtifactDetail extends LitElement {
     return this.canEdit && !!this.entry && rendererFor(this.entry.mediaType) === 'markdown';
   }
 
+  /** The artifact's current version is a review (whichever version is shown). */
+  private get currentIsReview(): boolean {
+    const a = this.data?.artifact;
+    const v = this.data?.version;
+    if (!a || !v) return false;
+    if (v.seq === a.currentSeq) return v.kind === 'review';
+    return this.versions.find((x) => x.seq === a.currentSeq)?.kind === 'review';
+  }
+
   /** The version shown is a review. */
   private get isReview(): boolean {
     return this.data?.version?.kind === 'review';
@@ -682,6 +726,8 @@ export class ScionPageArtifactDetail extends LitElement {
     this.reviewText = this.text ?? '';
     this.reviewPreview = this.reviewText;
     this.reviewHint = null;
+    this.reviewNotice = null;
+    this.discardedReview = null;
     this.reviewNote = '';
     this.reviewError = null;
     this.criticView = 'marks';
@@ -732,22 +778,61 @@ export class ScionPageArtifactDetail extends LitElement {
       this.reviewError = publishErrorMessage(err);
       this.reviewPending = err instanceof PublishError ? err.pending : null;
       if (err instanceof PublishError && err.code === 'stale_review') {
-        // The review was discarded: show the current version and keep the
-        // reviewer's text so the marks can be redone against it.
+        // The review was discarded. Restart it from the current version's
+        // text (keeping the old buffer would let a save drop marks that
+        // others added meanwhile); the discarded text stays readable.
         this.reviewPending = null;
-        void this.reloadForReview();
+        void this.reloadForReview(this.reviewText);
       }
     } finally {
       this.reviewBusy = false;
     }
   }
 
-  /** Reloads the artifact while keeping Review mode and its text. */
-  private async reloadForReview(): Promise<void> {
+  /**
+   * Reloads the artifact after a stale review and restarts Review mode on
+   * the current version, keeping discarded (the reviewer's text) read-only.
+   * When the current version cannot be reviewed here, Review mode closes
+   * with a notice.
+   */
+  private async reloadForReview(discarded: string): Promise<void> {
     this.seq = 0;
     this.versions = [];
     this.versionsNext = 0;
+    this.clearPreviewTimer();
     await this.load();
+    if (!this.reviewing) return;
+    if (!this.canReview) {
+      this.reviewing = false;
+      this.reviewNotice =
+        'Your review was not saved: a newer version was published, and it cannot be reviewed here.';
+      this.discardedReview = null;
+      return;
+    }
+    this.reviewText = this.text ?? '';
+    this.reviewPreview = this.reviewText;
+    this.discardedReview = discarded;
+  }
+
+  private clearPreviewTimer(): void {
+    if (this.previewTimer) clearTimeout(this.previewTimer);
+    this.previewTimer = null;
+  }
+
+  /** Leaves Review mode without saving. */
+  private cancelReview = (): void => {
+    this.clearPreviewTimer();
+    this.reviewing = false;
+    this.discardedReview = null;
+  };
+
+  private async copyDiscarded(): Promise<void> {
+    if (this.discardedReview === null) return;
+    try {
+      await navigator.clipboard.writeText(this.discardedReview);
+    } catch {
+      // Clipboard unavailable; the text is visible and selectable.
+    }
   }
 
   /** Records an edit of the review text; the preview follows after a pause. */
@@ -864,7 +949,12 @@ export class ScionPageArtifactDetail extends LitElement {
         ? this.renderEditor()
         : this.reviewing
           ? this.renderReview()
-          : html`${this.renderReviewBanner()}${this.renderTabs()}`}
+          : html`${this.reviewNotice
+              ? html`<sl-alert class="review-notice" variant="warning" open>
+                  <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+                  ${this.reviewNotice}
+                </sl-alert>`
+              : nothing}${this.renderReviewBanner()}${this.renderTabs()}`}
       <scion-artifact-publish-dialog
         .artifactId=${this.artifactId}
         ?open=${this.publishOpen}
@@ -916,7 +1006,7 @@ export class ScionPageArtifactDetail extends LitElement {
           <div class="title">
             <sl-icon name="file-earmark-richtext"></sl-icon>
             <h1>${a.title}</h1>
-            ${v?.kind === 'review' && v.seq === a.currentSeq
+            ${this.currentIsReview
               ? html`<sl-badge variant="warning" pill>
                   <sl-icon name="chat-dots"></sl-icon>&nbsp;Review pending
                 </sl-badge>`
@@ -1366,12 +1456,15 @@ export class ScionPageArtifactDetail extends LitElement {
     </sl-alert>`;
   }
 
-  private renderReview(): TemplateResult {
-    const v = this.data!.version!;
-    const f = this.entry!;
+  private renderReview(): TemplateResult | typeof nothing {
+    const v = this.data?.version;
+    const f = this.entry;
+    if (!v || !f) return nothing;
     const counts = countCritic(this.reviewText);
     const marks = counts.suggestions + counts.comments + counts.highlights;
     const marksOnly = onlyMarksChanged(this.reviewText, this.reviewBaseline);
+    const p = countCritic(this.reviewPreview);
+    const previewMarks = p.suggestions + p.comments + p.highlights;
     const ref = this.data!.artifact.ref;
     return html`
       <div class="edit-bar">
@@ -1447,6 +1540,15 @@ export class ScionPageArtifactDetail extends LitElement {
             ${this.reviewError}
           </sl-alert>`
         : nothing}
+      ${this.discardedReview !== null
+        ? html`<sl-details class="discarded-review" summary="Your discarded review (read-only)">
+            <pre>${this.discardedReview}</pre>
+            <sl-button size="small" @click=${(): void => void this.copyDiscarded()}>
+              <sl-icon slot="prefix" name="clipboard"></sl-icon>
+              Copy
+            </sl-button>
+          </sl-details>`
+        : nothing}
       <div class="review-panes">
         <scion-code-editor
           class="review-editor"
@@ -1462,9 +1564,9 @@ export class ScionPageArtifactDetail extends LitElement {
           .entryPath=${f.path}
           .files=${v.files}
           .critic=${this.criticView}
-          .marginNotes=${this.wideViewport}
+          .marginNotes=${this.wideReviewViewport}
           noteAuthor="You"
-          .sideNote=${this.criticView === 'marks' && countCritic(this.reviewPreview).comments === 0
+          .sideNote=${this.criticView === 'marks' && previewMarks === 0
             ? 'No comments or suggestions yet.'
             : this.criticSideNote(v.seq)}
           .sideNoteEmpty=${this.criticView === 'marks'}
@@ -1479,12 +1581,7 @@ export class ScionPageArtifactDetail extends LitElement {
             this.reviewNote = (e.target as HTMLInputElement).value;
           }}
         ></sl-input>
-        <sl-button
-          size="small"
-          ?disabled=${this.reviewBusy}
-          @click=${(): void => {
-            this.reviewing = false;
-          }}
+        <sl-button size="small" ?disabled=${this.reviewBusy} @click=${this.cancelReview}
           >Cancel</sl-button
         >
         <sl-button

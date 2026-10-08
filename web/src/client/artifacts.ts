@@ -408,7 +408,7 @@ export async function publishFiles(req: PublishRequest): Promise<ArtifactRespons
     }
     if (code === 'stale_review') {
       throw new PublishError(
-        'Your review was not saved: a newer version was published, or is being published. The page now shows the current version; your text is kept so you can redo your marks.',
+        'Your review was not saved: a newer version was published, or is being published. The review now starts from the current version; your discarded text is kept read-only to copy from.',
         null,
         code
       );
