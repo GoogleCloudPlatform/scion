@@ -218,8 +218,10 @@ To turn such a copy back into an updating built-in, re-import the canonical URL 
 through the web UI or API import above, or with
 `scion harness-config update <name> --url https://github.com/GoogleCloudPlatform/scion/harnesses/<name>`.
 This updates the existing config in place and records the canonical source URL, so later
-upgrades update it again. You do not need to delete it first. **Workstation** Hubs re-sync built-ins from `~/.scion/harness-configs` at every
-start, so a re-imported config is updated whichever way you imported it.
+upgrades update it again. You do not need to delete it first.
+
+**Workstation** Hubs re-sync built-ins from `~/.scion/harness-configs` at every start, so a
+re-imported config is updated whichever way you imported it.
 
 The same applies to the built-in `default` template: you can re-import it as a global template
 (`"kind": "template"`, or the **Templates** tab) from

@@ -276,9 +276,11 @@ func TestReimportBuiltinFromURL_Hosted(t *testing.T) {
 }
 
 // TestReimportBuiltinFromURL_Hosted_DeleteAndCanonicalReimportRestoresUpdates
-// covers the documented way back for a harness re-imported from a
-// non-canonical URL: delete it and re-import from the canonical URL, after
-// which bootstrap updates it again.
+// covers the delete-then-re-import route for a harness re-imported from a
+// non-canonical URL: deleting it and re-importing from the canonical URL also
+// restores bundled updates, but the delete is not required. The documented
+// in-place route is covered by
+// TestReimportBuiltinFromURL_Hosted_CanonicalReimportOverPinnedRowRestoresUpdates.
 func TestReimportBuiltinFromURL_Hosted_DeleteAndCanonicalReimportRestoresUpdates(t *testing.T) {
 	srv, s := testServer(t)
 	srv.SetStorage(newMockStorage("test-bucket"))
