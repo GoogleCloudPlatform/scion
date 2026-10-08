@@ -389,8 +389,8 @@ func agentIdentityFor(agentID, projectID string, scopes ...AgentTokenScope) Agen
 
 // delegatingRequesterFor returns an agent identity for requesterID that may
 // reincarnate a baseline agent in projectID: the lifecycle scope plus every
-// scope of the baseline role, which re-recording the target's authority
-// under the requester requires (CanDelegate).
+// scope of the baseline role, which a requester other than the agent must
+// hold to delegate the role (CanDelegate).
 func delegatingRequesterFor(requesterID, projectID string) AgentIdentity {
 	return agentIdentityFor(requesterID, projectID, append(ScopesForRole(AgentRoleBaseline), ScopeAgentLifecycle)...)
 }
