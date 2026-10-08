@@ -241,6 +241,9 @@ func (e *agentKeysEventSpy) PublishNotification(_ context.Context, _ *store.Noti
 func (e *agentKeysEventSpy) PublishChatNotification(_ context.Context, _ *store.Notification, _ ChatMessageContext) {
 	e.record("PublishChatNotification")
 }
+func (e *agentKeysEventSpy) PublishUserNotification(_ context.Context, _ *store.Notification) {
+	e.record("PublishUserNotification")
+}
 func (e *agentKeysEventSpy) PublishUserMessage(_ context.Context, _ *store.Message, _ []AttachmentRef) {
 	e.record("PublishUserMessage")
 }

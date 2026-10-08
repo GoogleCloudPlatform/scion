@@ -52,6 +52,10 @@ type EventPublisher interface {
 	// authorization only gates project.* and user.* subjects, and project
 	// membership is not the same set as "people in this conversation".
 	PublishChatNotification(ctx context.Context, notif *store.Notification, msg ChatMessageContext)
+	// PublishUserNotification emits a non-chat notification addressed to one
+	// user (for example SCHEDULE_BLOCKED) on user.<subscriberID>.notification
+	// and nowhere else. A notification with no SubscriberID is dropped.
+	PublishUserNotification(ctx context.Context, notif *store.Notification)
 	PublishUserMessage(ctx context.Context, msg *store.Message, attachments []AttachmentRef)
 	PublishAgentPorts(ctx context.Context, agent *store.Agent)
 	PublishAllowListChanged(ctx context.Context, action string, email string)
@@ -116,6 +120,7 @@ func (noopEventPublisher) PublishBrokerStatus(_ context.Context, _, _ string)   
 func (noopEventPublisher) PublishNotification(_ context.Context, _ *store.Notification)        {}
 func (noopEventPublisher) PublishChatNotification(_ context.Context, _ *store.Notification, _ ChatMessageContext) {
 }
+func (noopEventPublisher) PublishUserNotification(_ context.Context, _ *store.Notification) {}
 func (noopEventPublisher) PublishUserMessage(_ context.Context, _ *store.Message, _ []AttachmentRef) {
 }
 func (noopEventPublisher) PublishAgentPorts(_ context.Context, _ *store.Agent)    {}
@@ -303,6 +308,14 @@ type NotificationCreatedEvent struct {
 	Status    string `json:"status"`
 	Message   string `json:"message"`
 	CreatedAt string `json:"createdAt"`
+}
+
+// UserNotificationEvent is the payload for a non-chat notification addressed
+// to a single user (PublishUserNotification). SubscriberID is the client's
+// second gate; the subject already scopes delivery.
+type UserNotificationEvent struct {
+	NotificationCreatedEvent
+	SubscriberID string `json:"subscriberId"`
 }
 
 // ChatNotificationEvent is the payload for a chat notification (mention, DM
@@ -724,6 +737,29 @@ func (p *eventBuilder) PublishChatNotification(_ context.Context, notif *store.N
 		ConversationKey:  msg.ConversationKey,
 		ConversationName: msg.ConversationName,
 		Preview:          truncateChatPreview(msg.Preview),
+	}
+	p.sink("user."+notif.SubscriberID+".notification", evt)
+}
+
+// PublishUserNotification publishes a non-chat notification addressed to one
+// user on user.<subscriberID>.notification and on no other subject. Like
+// PublishChatNotification it never uses notification.* or project.*: the
+// message names the user's agents and schedules, and those subjects reach
+// other sessions. A notification with no SubscriberID is dropped.
+func (p *eventBuilder) PublishUserNotification(_ context.Context, notif *store.Notification) {
+	if notif == nil || notif.SubscriberID == "" {
+		return
+	}
+	evt := UserNotificationEvent{
+		NotificationCreatedEvent: NotificationCreatedEvent{
+			ID:        notif.ID,
+			AgentID:   notif.AgentID,
+			ProjectID: notif.ProjectID,
+			Status:    notif.Status,
+			Message:   notif.Message,
+			CreatedAt: notif.CreatedAt.UTC().Format("2006-01-02T15:04:05.000Z"),
+		},
+		SubscriberID: notif.SubscriberID,
 	}
 	p.sink("user."+notif.SubscriberID+".notification", evt)
 }

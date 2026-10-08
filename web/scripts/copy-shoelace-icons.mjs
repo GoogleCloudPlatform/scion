@@ -62,6 +62,7 @@ const USED_ICONS = [
   'broadcast-pin',
   'building',
   'calendar-event',
+  'calendar-x',
   'check2',
   'check2-all',
   'chevron-down',

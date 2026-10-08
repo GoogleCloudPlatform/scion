@@ -1147,10 +1147,21 @@ func (s *Server) markCreateCleanupRefused(ctx context.Context, agentID string, r
 	}
 }
 
+// createCleanupRefusedPrefix starts every createCleanupRefusedMessage. It is
+// the stable marker isCreateCleanupRefusedRow detects; change both together.
+const createCleanupRefusedPrefix = "Create failed and its cleanup was refused: "
+
 // createCleanupRefusedMessage is the kept row's message after a refused
 // create-failure cleanup.
 func createCleanupRefusedMessage(refused *DeleteRunMismatchError) string {
-	return "Create failed and its cleanup was refused: " + deleteRunMismatchMessage(refused) + ". Delete the agent to retry."
+	return createCleanupRefusedPrefix + deleteRunMismatchMessage(refused) + ". Delete the agent to retry."
+}
+
+// isCreateCleanupRefusedRow reports whether a is a row markCreateCleanupRefused
+// left behind: phase error with a createCleanupRefusedMessage.
+func isCreateCleanupRefusedRow(a *store.Agent) bool {
+	return a != nil && a.Phase == string(state.PhaseError) &&
+		strings.HasPrefix(a.Message, createCleanupRefusedPrefix)
 }
 
 // deleteFailedCreateRow removes a failed create's agent row, trying

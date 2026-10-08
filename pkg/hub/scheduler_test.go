@@ -338,6 +338,32 @@ type mockScheduledEventStore struct {
 	roleBindings    []*store.RoleBinding
 	roleDefinitions map[string]*store.RoleDefinition
 	audits          []*store.MutationAuditRecord
+	schedules       map[string]*store.Schedule
+	notifications   []*store.Notification
+}
+
+func (m *mockScheduledEventStore) GetSchedule(_ context.Context, id string) (*store.Schedule, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if sc, ok := m.schedules[id]; ok {
+		cp := *sc
+		return &cp, nil
+	}
+	return nil, store.ErrNotFound
+}
+
+func (m *mockScheduledEventStore) CreateNotification(_ context.Context, n *store.Notification) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cp := *n
+	m.notifications = append(m.notifications, &cp)
+	return nil
+}
+
+func (m *mockScheduledEventStore) getNotifications() []*store.Notification {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]*store.Notification(nil), m.notifications...)
 }
 
 func newMockStore() *mockScheduledEventStore {
@@ -1477,6 +1503,168 @@ func TestDispatchAgentEventHandler_AgentAlreadyExists(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "already exists") {
 		t.Errorf("expected 'already exists' in error, got: %s", err)
+	}
+	// A live row is not the errored-row case (ptone/scion#3701): today's
+	// error, and no notification.
+	if strings.Contains(err.Error(), "phase error") || strings.Contains(err.Error(), "delete the agent") {
+		t.Errorf("live row got the errored-row error: %s", err)
+	}
+	if n := ms.getNotifications(); len(n) != 0 {
+		t.Errorf("live row created %d notifications, want 0", len(n))
+	}
+}
+
+// blockedFireFixture is a dispatch_agent fire whose name is held by an
+// errored row left by a refused create-failure cleanup (ptone/scion#3701).
+type blockedFireFixture struct {
+	ms      *mockScheduledEventStore
+	srv     *Server
+	pub     *ChannelEventPublisher
+	all     <-chan Event
+	evt     store.ScheduledEvent
+	refused string
+}
+
+func newBlockedFireFixture(t *testing.T, createdBy string) *blockedFireFixture {
+	t.Helper()
+	ms := newMockStore()
+	ms.projects["project-1"] = &store.Project{ID: "project-1", Name: "test-project"}
+	creatorID := seedFullRoleDispatchCreator(ms, "project-1")
+	ms.users["user-owner"] = &store.User{ID: "user-owner", Email: "owner@example.com"}
+	ms.schedules = map[string]*store.Schedule{"sched-1": {ID: "sched-1", Name: "nightly", ProjectID: "project-1"}}
+	refused := createCleanupRefusedMessage(&DeleteRunMismatchError{RequestedRunID: "run-hub", CurrentRunID: "run-broker"})
+	ms.agents["errored-1"] = &store.Agent{
+		ID: "errored-1", Slug: "worker-1", Name: "worker-1", ProjectID: "project-1",
+		Phase: "error", Message: refused,
+	}
+	srv := newEventHandlerTestServer(ms)
+	pub := NewChannelEventPublisher()
+	t.Cleanup(pub.Close)
+	all, unsub := pub.Subscribe(">")
+	t.Cleanup(unsub)
+	srv.events = pub
+	if createdBy == "" {
+		createdBy = creatorID
+	}
+	evt := withMockAgentRevision(store.ScheduledEvent{
+		ID: "dispatch-blocked-1", ProjectID: "project-1", EventType: "dispatch_agent",
+		Payload: `{"agentName":"worker-1"}`, CreatedBy: createdBy, ScheduleID: "sched-1",
+	}, creatorID)
+	return &blockedFireFixture{ms: ms, srv: srv, pub: pub, all: all, evt: evt, refused: refused}
+}
+
+func (f *blockedFireFixture) fire() error {
+	return f.srv.dispatchAgentEventHandler()(context.Background(), f.evt)
+}
+
+// published drains every event published so far.
+func (f *blockedFireFixture) published() []Event {
+	var out []Event
+	for {
+		select {
+		case e := <-f.all:
+			out = append(out, e)
+		default:
+			return out
+		}
+	}
+}
+
+// A fire blocked by a refused-cleanup row fails with an actionable error
+// quoting the row, and notifies the schedule's user owner exactly once, on
+// that user's subject only.
+func TestDispatchAgentEventHandler_ErroredRowBlocksAndNotifiesOwner(t *testing.T) {
+	f := newBlockedFireFixture(t, "user-owner")
+	err := f.fire()
+	if err == nil {
+		t.Fatal("expected error for errored row")
+	}
+	for _, want := range []string{`agent "worker-1" already exists in project in phase error`, f.refused, "delete the agent to resume this schedule"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q missing %q", err, want)
+		}
+	}
+	notifs := f.ms.getNotifications()
+	if len(notifs) != 1 {
+		t.Fatalf("got %d notifications, want 1", len(notifs))
+	}
+	n := notifs[0]
+	if n.SubscriberType != store.SubscriberTypeUser || n.SubscriberID != "user-owner" {
+		t.Errorf("recipient = %s/%s, want user/user-owner", n.SubscriberType, n.SubscriberID)
+	}
+	if n.Status != NotificationScheduleBlocked || n.AgentID != "errored-1" || n.ProjectID != "project-1" {
+		t.Errorf("notification = %+v", n)
+	}
+	if !strings.Contains(n.Message, `Schedule "nightly" is blocked`) || !strings.Contains(n.Message, "Delete the agent to resume this schedule") {
+		t.Errorf("notification message = %q", n.Message)
+	}
+	evts := f.published()
+	if len(evts) != 1 || evts[0].Subject != "user.user-owner.notification" {
+		subjects := []string{}
+		for _, e := range evts {
+			subjects = append(subjects, e.Subject)
+		}
+		t.Fatalf("published on %v, want only user.user-owner.notification", subjects)
+	}
+}
+
+// An errored row without the refused-cleanup marker still blocks with the
+// actionable error, without quoting its message.
+func TestDispatchAgentEventHandler_ErroredRowWithoutMarker(t *testing.T) {
+	f := newBlockedFireFixture(t, "user-owner")
+	f.ms.agents["errored-1"].Message = "container exited"
+	err := f.fire()
+	if err == nil || !strings.Contains(err.Error(), "in phase error; delete the agent to resume this schedule") {
+		t.Fatalf("error = %v", err)
+	}
+	if strings.Contains(err.Error(), "container exited") {
+		t.Errorf("unmarked row message quoted: %s", err)
+	}
+	if n := f.ms.getNotifications(); len(n) != 1 {
+		t.Errorf("got %d notifications, want 1", len(n))
+	}
+}
+
+// A one-shot event (no schedule) gets the one-shot remedy.
+func TestDispatchAgentEventHandler_ErroredRowOneShot(t *testing.T) {
+	f := newBlockedFireFixture(t, "user-owner")
+	f.evt.ScheduleID = ""
+	err := f.fire()
+	if err == nil || !strings.Contains(err.Error(), "delete the agent and recreate the scheduled event") {
+		t.Fatalf("error = %v", err)
+	}
+	notifs := f.ms.getNotifications()
+	if len(notifs) != 1 || !strings.Contains(notifs[0].Message, "recreate the scheduled event") {
+		t.Fatalf("notifications = %+v", notifs)
+	}
+}
+
+// An agent creator's notification goes to its owning user (ancestry root);
+// one with no owning user is logged and skipped, and the fire still fails
+// with the actionable error.
+func TestDispatchAgentEventHandler_ErroredRowAgentCreatorFallback(t *testing.T) {
+	f := newBlockedFireFixture(t, "")
+	f.ms.agents["creator-agent"].Ancestry = []string{"user-owner", "creator-agent"}
+	if err := f.fire(); err == nil || !strings.Contains(err.Error(), "phase error") {
+		t.Fatalf("error = %v", err)
+	}
+	notifs := f.ms.getNotifications()
+	if len(notifs) != 1 || notifs[0].SubscriberID != "user-owner" {
+		t.Fatalf("notifications = %+v, want one to user-owner", notifs)
+	}
+	if evts := f.published(); len(evts) != 1 || evts[0].Subject != "user.user-owner.notification" {
+		t.Fatalf("published = %+v", evts)
+	}
+
+	g := newBlockedFireFixture(t, "")
+	if err := g.fire(); err == nil || !strings.Contains(err.Error(), "delete the agent to resume this schedule") {
+		t.Fatalf("error = %v", err)
+	}
+	if n := g.ms.getNotifications(); len(n) != 0 {
+		t.Errorf("agent creator with no owning user created %d notifications, want 0", len(n))
+	}
+	if evts := g.published(); len(evts) != 0 {
+		t.Errorf("published %d events, want 0", len(evts))
 	}
 }
 
