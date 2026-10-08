@@ -1869,12 +1869,16 @@ export class ScionPageChat extends LitElement {
 
     // Populate slug ↔ projectId maps for deep-link resolution
     if (detail.spaces) {
+      let slugsChanged = false;
       for (const s of detail.spaces) {
         if (s.projectSlug) {
           this._slugToProjectId.set(s.projectSlug, s.projectId);
+          slugsChanged ||= this._projectIdToSlug.get(s.projectId) !== s.projectSlug;
           this._projectIdToSlug.set(s.projectId, s.projectSlug);
         }
       }
+      // The maps are not reactive; an agent DM's project crumb reads them.
+      if (slugsChanged) this.requestUpdate();
       // Re-resolve the route now that slug data is available (handles deep-link on first load)
       this.parseV2Route();
     }

@@ -540,6 +540,31 @@ describe('chat page — deep-linked thread header', () => {
   });
 });
 
+describe('chat page — project slugs from the rail', () => {
+  it('re-renders when the rail makes a project slug known, for the DM project crumb', () => {
+    const el = createPage();
+    window.history.replaceState({}, '', '/chat/dm/dm:agent:agent-1:user:user-me');
+    el.parseV2Route();
+    const update = vi.spyOn(el, 'requestUpdate');
+    const railLoaded = (): void =>
+      el.handleRailLoaded(
+        new CustomEvent('rail-loaded', {
+          detail: {
+            spaceIds: [],
+            spaces: [{ projectId: 'p1', projectSlug: 'alpha', projectName: 'Alpha' }],
+          },
+        })
+      );
+
+    railLoaded();
+    expect(update).toHaveBeenCalled();
+
+    update.mockClear();
+    railLoaded();
+    expect(update).not.toHaveBeenCalled();
+  });
+});
+
 describe('chat page — mobile swipe navigation', () => {
   afterEach(() => {
     // The scroller helpers attach their elements to measure them.
