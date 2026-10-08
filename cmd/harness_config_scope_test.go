@@ -58,8 +58,14 @@ func (r *hcScopeRecorder) key(scope, scopeID, name string) string {
 // exists only if rec.existingIDs has an entry for its exact scope.
 func newHarnessConfigScopeHub(t *testing.T, rec *hcScopeRecorder) *httptest.Server {
 	t.Helper()
+	return httptest.NewServer(harnessConfigScopeHubHandler(t, rec))
+}
+
+// harnessConfigScopeHubHandler is the handler behind newHarnessConfigScopeHub.
+func harnessConfigScopeHubHandler(t *testing.T, rec *hcScopeRecorder) http.HandlerFunc {
+	t.Helper()
 	const newID = "hc-new"
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		rec.mu.Lock()
 		defer rec.mu.Unlock()
@@ -132,7 +138,7 @@ func newHarnessConfigScopeHub(t *testing.T, rec *hcScopeRecorder) *httptest.Serv
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
-	}))
+	})
 }
 
 func newHCScopeTestEnv(t *testing.T, rec *hcScopeRecorder) (*HubContext, string) {

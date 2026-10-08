@@ -15,8 +15,17 @@
 package cmd
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -131,4 +140,91 @@ func TestSyncLocalHarnessConfigToHub_SendsNoSourceURL(t *testing.T) {
 
 	require.NoError(t, syncLocalHarnessConfigToHub(hubCtx, "codex", dir, "codex"))
 	assert.Equal(t, []string{""}, rec.finalizeSourceURLs)
+}
+
+// codexHarnessConfigTarGz returns a .tar.gz holding a minimal codex
+// harness-config (config.yaml at the archive root).
+func codexHarnessConfigTarGz(t *testing.T) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	content := []byte("harness: codex\n")
+	require.NoError(t, tw.WriteHeader(&tar.Header{Name: "config.yaml", Mode: 0o644, Size: int64(len(content))}))
+	_, err := tw.Write(content)
+	require.NoError(t, err)
+	require.NoError(t, tw.Close())
+	require.NoError(t, gz.Close())
+	return buf.Bytes()
+}
+
+// TestRunHarnessConfigInstall_RecordsSourceURL drives the install command
+// end to end: it fetches a .tar.gz served over HTTP and installs it to a mock
+// hub (health and project lookups plus the harness-config calls), then checks
+// the sourceUrl sent with finalize, for a project-scoped and a --global
+// install.
+func TestRunHarnessConfigInstall_RecordsSourceURL(t *testing.T) {
+	t.Setenv("SCION_AGENT_ID", "")
+	t.Setenv("SCION_HUB_ENDPOINT", "")
+	archive := codexHarnessConfigTarGz(t)
+	src := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/codex.tar.gz") {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/gzip")
+		_, _ = w.Write(archive)
+	}))
+	defer src.Close()
+	sourceURL := src.URL + "/configs/codex.tar.gz"
+
+	for _, tc := range []struct {
+		name      string
+		global    bool
+		wantScope string
+	}{
+		{"project scope", false, "project"},
+		{"global scope", true, "global"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			orig := saveTemplateTestState()
+			defer orig.restore()
+			tmpHome := t.TempDir()
+			require.NoError(t, os.Setenv("HOME", tmpHome))
+			globalMode = tc.global
+			autoConfirm = true
+			noHub = false
+
+			const projectID = "proj-3853"
+			rec := &hcScopeRecorder{}
+			scopeHub := harnessConfigScopeHubHandler(t, rec)
+			hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.URL.Path == "/healthz":
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+				case strings.HasPrefix(r.URL.Path, "/api/v1/projects/") && r.Method == http.MethodGet:
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(map[string]interface{}{"id": projectID, "name": "test-project"})
+				default:
+					scopeHub(w, r)
+				}
+			}))
+			defer hub.Close()
+			projectPath = setupHubProject(t, tmpHome, hub.URL, projectID)
+
+			cmd := &cobra.Command{}
+			cmd.Flags().String("name", "", "")
+			cmd.Flags().Bool("force", false, "")
+			require.NoError(t, runHarnessConfigInstall(cmd, []string{sourceURL}))
+
+			require.Len(t, rec.createReqs, 1)
+			assert.Equal(t, tc.wantScope, rec.createReqs[0].Scope)
+			if !tc.global {
+				assert.Equal(t, projectID, rec.createReqs[0].ScopeID)
+			}
+			assert.Equal(t, []string{sourceURL}, rec.finalizeSourceURLs,
+				"install must send the URL it fetched from with finalize")
+		})
+	}
 }
