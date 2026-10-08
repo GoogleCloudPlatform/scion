@@ -139,8 +139,8 @@ export class ScionPageHome extends LitElement {
     stateManager.addEventListener('agents-resync', this.boundOnAgentsResync);
     stateManager.addEventListener('projects-updated', this.boundOnProjectsUpdated as EventListener);
 
-    // Use hydrated data if available, avoiding unnecessary fetches on SSR load
-    // or when navigating back from a page that already populated the state.
+    // Use data already in the store, avoiding unnecessary fetches when
+    // navigating back from a page that already populated the state.
     this.agents = stateManager.getAgents();
     this.projects = stateManager.getProjects();
     this.projectScopeCapabilities = stateManager.getScopeCapabilities('project');

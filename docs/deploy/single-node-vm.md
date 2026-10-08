@@ -160,7 +160,7 @@ The deploy script creates the following GCP resources:
 | Resource | Name pattern | Purpose |
 |----------|-------------|---------|
 | GCE VM | `scion-hub-<hub-name>` | Runs the Scion Hub binary via systemd |
-| Service account | `scion-hub-<hub-name>@<project>.iam.gserviceaccount.com` | VM identity with logging/monitoring roles |
+| Service account | `scion-hub-<hub-name>@<project>.iam.gserviceaccount.com` | VM identity with logging/monitoring roles, Vertex AI access, and `roles/iam.serviceAccountAdmin` for [hub-minted service accounts](#hub-minted-service-accounts) |
 | Service account | `scion-hub-<hub-name>-proxy@<project>.iam.gserviceaccount.com` (truncated and hashed for long hub names) | Cloud Run proxy identity, with no project IAM roles |
 | Cloud Run service | `scion-hub-<hub-name>-iap-proxy` | IAP-authenticated reverse proxy to the VM |
 | Firewall rule | `scion-hub-<hub-name>-allow-proxy` | Allows the Cloud Run proxy (Direct VPC egress) to reach the VM on tcp:8080 |
@@ -280,6 +280,41 @@ The deploy only seeds these keys when they are absent. Edits made in the
 admin UI are kept across redeploys, and a deleted key is created again on the
 next deploy. If the write fails, the deploy continues and prints the command to
 run manually.
+
+### Hub-minted service accounts
+
+Project owners can have the hub mint new GCP service accounts for agents.
+The hub does this with its own credentials, which on this deployment are the
+hub VM's service account. Minting creates the account, sets IAM policy on it,
+and deletes it if a follow-up grant fails. The deploy script therefore grants
+the hub VM's service account `roles/iam.serviceAccountAdmin` on the project by
+default, and enables `iamcredentials.googleapis.com`, which the hub uses to
+issue tokens for minted accounts. To skip the role grant, set
+`"hub_sa_minting": false` in the deploy config. That does not revoke a grant
+from an earlier deploy; the deploy output prints the removal command.
+
+For a deployment made before the script granted this role, re-run the deploy
+script, or grant the role by hand (no hub restart needed; IAM changes can take
+a few minutes to apply):
+
+```bash
+gcloud projects add-iam-policy-binding PROJECT_ID \
+  --member="serviceAccount:scion-hub-HUB_NAME@PROJECT_ID.iam.gserviceaccount.com" \
+  --role="roles/iam.serviceAccountAdmin" --condition=None
+gcloud services enable iamcredentials.googleapis.com --project=PROJECT_ID
+```
+
+`roles/iam.serviceAccountAdmin` applies to every service account in the
+project. The deploy sets the hub's default agent GCP identity mode to
+`passthrough`, and passthrough agents use the VM's credentials, so they hold
+the same roles as the hub, this one included. Passthrough is meant for
+getting started only. Beyond that, set the default to `assign` or `block`
+(Admin > Server Config > Agent Defaults), and consider running the hub in a
+project that holds no other privileged service accounts.
+
+Minted accounts start with no roles: grant each one whatever its agents need
+(for example `roles/aiplatform.user` for Vertex AI) before assigning it.
+Teardown does not delete minted accounts.
 
 ## Chat Plugins
 

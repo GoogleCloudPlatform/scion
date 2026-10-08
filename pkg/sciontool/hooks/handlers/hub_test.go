@@ -741,6 +741,9 @@ func TestTruncateMessage(t *testing.T) {
 		{"exactly10!", 10, "exactly10!"},
 		{"this is a longer message", 10, "this is..."},
 		{"", 10, ""},
+		// "é" is two bytes; a byte cut at 7 would split it.
+		{"abcdefé-tail", 10, "abcdef..."},
+		{"日本語のメッセージ", 10, "日本..."},
 	}
 
 	for _, tt := range tests {

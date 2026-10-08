@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 150
+**Operations:** 172
 
 ## Table of Contents
 
@@ -13,6 +13,7 @@
 - [agent.lifecycle.exec](#agentlifecycleexec) — Run a command in an agent's container
 - [agent.lifecycle.env](#agentlifecycleenv) — Submit environment values to an agent
 - [agent.lifecycle.resetauth](#agentlifecycleresetauth) — Reset an agent's harness authentication
+- [agent.hold.lift](#agentholdlift) — Lift the holds of a suspended agent whose owners are admitted to its project again (hub admin)
 - [agent.lifecycle.reincarnate](#agentlifecyclereincarnate) — Reincarnate an agent
 - [agent.read](#agentread) — Read a single agent's metadata by ID
 - [agent.list](#agentlist) — List agents within the caller's authorized project scope
@@ -71,6 +72,27 @@
 - [project.github.write](#projectgithubwrite) — Change a project's GitHub installation, status check, GitHub permissions and git identity
 - [project.members.assignableroles](#projectmembersassignableroles) — List the roles the caller may assign in a project
 - [agent.message.send](#agentmessagesend) — Send a message to an agent
+- [inbox.message.read](#inboxmessageread) — List and read the caller's own inbox messages. A project token lists only messages of its boundary project
+- [inbox.message.write](#inboxmessagewrite) — Mark the caller's own inbox messages read. Mark-all by a project token touches only messages of its boundary project
+- [inbox.channels.list](#inboxchannelslist) — List the registered message channels: static capability metadata with no records
+- [inbox.capabilities.read](#inboxcapabilitiesread) — Read the hub messaging capabilities: static capability metadata with no records
+- [inbox.conversation.list](#inboxconversationlist) — List the caller's conversations. A token lists only conversations inside its boundary, and a direct conversation with an agent only with agent:read on that agent; the project group union also needs project:read
+- [inbox.conversation.create](#inboxconversationcreate) — Create a group conversation in a project. Needs project:read on the project; a token also needs inbox:write for it
+- [project.conversation.read](#projectconversationread) — Read a group conversation, its messages and one message. Needs project:read on the conversation's project; a group with no project needs participation, and a token needs inbox:read on a hub boundary for it
+- [inbox.conversation.direct.read](#inboxconversationdirectread) — Read a direct conversation, its messages and one message. A token needs inbox:read for the peer agent's project and agent:read on the peer agent; a direct conversation between users needs a hub boundary
+- [inbox.conversation.defaultagent.set](#inboxconversationdefaultagentset) — Set the default agent of a group conversation. Needs project:read on the conversation's project; a token also needs inbox:write for it
+- [inbox.conversation.participant.add](#inboxconversationparticipantadd) — Add a participant to a group conversation. Every caller needs project:read on the conversation's project; an added agent must be in that project and an added user must be a member of it; a token also needs inbox:write for it
+- [inbox.conversation.leave](#inboxconversationleave) — Leave a conversation the caller takes part in. A token needs inbox:write for the conversation
+- [inbox.conversation.resolve](#inboxconversationresolve) — Resolve a conversation reference. A group reference needs project:read on its project and an agent reference needs agent:read on the agent, for every user caller; a token also needs inbox:read for the result
+- [agent.message.target.resolve](#agentmessagetargetresolve) — Resolve a cross-project messaging target through the agent message authorization
+- [inbox.notification.read](#inboxnotificationread) — List the caller's notifications. A token lists only rows inside its boundary; with agentId, rows addressed to the agent subscriber need agent:read on that agent, for every user caller
+- [inbox.notification.ack](#inboxnotificationack) — Acknowledge the caller's notifications. Ack-all by a project token touches only rows of its boundary project
+- [inbox.notification.subscription.create](#inboxnotificationsubscriptioncreate) — Create notification subscriptions. A user caller needs project:read on the project and agent:read on a watched agent; a token also needs inbox:write for the project
+- [inbox.notification.subscription.read](#inboxnotificationsubscriptionread) — List the caller's notification subscriptions. A token lists only rows inside its boundary
+- [inbox.notification.subscription.write](#inboxnotificationsubscriptionwrite) — Update and delete the caller's notification subscriptions. A token changes only rows inside its boundary
+- [inbox.notification.template.create](#inboxnotificationtemplatecreate) — Create a subscription template. A template filed under a project needs project:read on it; a token also needs inbox:write for it
+- [inbox.notification.template.read](#inboxnotificationtemplateread) — List subscription templates: only templates of projects the caller may read, and for a token only templates inside its boundary
+- [inbox.notification.template.delete](#inboxnotificationtemplatedelete) — Delete a subscription template the caller created. A token needs inbox:write for the template's project
 - [chat.access](#chataccess) — Access chat threads, spaces, topics, and messages within a project
 - [role.definition.create](#roledefinitioncreate) — Create a custom role definition
 - [role.definition.update](#roledefinitionupdate) — Update a custom role definition
@@ -405,6 +427,39 @@
 ### Tests
 
 - `pkg/hub:TestAgentSubRoute_CatalogDrift`
+
+---
+
+## agent.hold.lift
+
+**Domain:** agent
+
+**Description:** Lift the holds of a suspended agent whose owners are admitted to its project again (hub admin)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/agents/{id}/hold/lift` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `GOV_PENDING`)
+
+**Base Permission:** `agent.update`
+
+**Resource Resolver:** agent-from-url
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestAgentSubRoute_CatalogDrift`
+- `pkg/hub:TestAgentHoldLift`
 
 ---
 
@@ -2570,6 +2625,711 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## inbox.message.read
+
+**Domain:** inbox
+
+**Description:** List and read the caller's own inbox messages. A project token lists only messages of its boundary project
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/messages` |
+| http_route | GET | `/api/v1/messages/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `self_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.read`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `list-scoped`, `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestInboxToken_ProjectBoundaryFiltersMessages`
+- `pkg/hub:TestInboxToken_ProjectMembershipRecheckedOnEveryRequest`
+
+---
+
+## inbox.message.write
+
+**Domain:** inbox
+
+**Description:** Mark the caller's own inbox messages read. Mark-all by a project token touches only messages of its boundary project
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/messages/{id}/read` |
+| http_route | POST | `/api/v1/messages/read-all` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `self_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestInboxToken_MarkAllReadTouchesOnlyVisibleRows`
+- `pkg/hub:TestInboxToken_RefusedCredentialKinds`
+
+---
+
+## inbox.channels.list
+
+**Domain:** inbox
+
+**Description:** List the registered message channels: static capability metadata with no records
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/message-channels` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit_self` (self filter `none`; pinned by `TestMessagingStaticMetadata_AnyTokenReads`)
+
+**Resource Resolver:** none
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestMessagingStaticMetadata_AnyTokenReads`
+
+### Exemptions
+
+- **authentication_only:** Static channel metadata; carries no user records (scope: static messaging metadata only) — waives: `base_permission`
+
+---
+
+## inbox.capabilities.read
+
+**Domain:** inbox
+
+**Description:** Read the hub messaging capabilities: static capability metadata with no records
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/messaging/capabilities` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit_self` (self filter `none`; pinned by `TestMessagingStaticMetadata_AnyTokenReads`)
+
+**Resource Resolver:** none
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestMessagingStaticMetadata_AnyTokenReads`
+
+### Exemptions
+
+- **authentication_only:** Static capability metadata; carries no user records (scope: static messaging metadata only) — waives: `base_permission`
+
+---
+
+## inbox.conversation.list
+
+**Domain:** inbox
+
+**Description:** List the caller's conversations. A token lists only conversations inside its boundary, and a direct conversation with an agent only with agent:read on that agent; the project group union also needs project:read
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/conversations` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `self_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.read`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestConversationListToken_FilteredToBoundary`
+
+---
+
+## inbox.conversation.create
+
+**Domain:** inbox
+
+**Description:** Create a group conversation in a project. Needs project:read on the project; a token also needs inbox:write for it
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/conversations` |
+| http_route | POST | `/api/v1/conversations/` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `project_body`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** project-from-body
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestConversationCreateToken_RequiresInboxWriteAndProjectRead`
+
+---
+
+## project.conversation.read
+
+**Domain:** project
+
+**Description:** Read a group conversation, its messages and one message. Needs project:read on the conversation's project; a group with no project needs participation, and a token needs inbox:read on a hub boundary for it
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/conversations/{id}` |
+| http_route | GET | `/api/v1/conversations/{id}/messages` |
+| http_route | GET | `/api/v1/conversations/{id}/messages/{messageId}` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `conversation_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `project.read`
+
+**Resource Resolver:** conversation-project
+
+**Effects:** `read-one`, `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestGroupConversationToken_ProjectlessGroupRequiresHubBoundary`
+
+---
+
+## inbox.conversation.direct.read
+
+**Domain:** inbox
+
+**Description:** Read a direct conversation, its messages and one message. A token needs inbox:read for the peer agent's project and agent:read on the peer agent; a direct conversation between users needs a hub boundary
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/conversations/{id}` |
+| http_route | GET | `/api/v1/conversations/{id}/messages` |
+| http_route | GET | `/api/v1/conversations/{id}/messages/{messageId}` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `self_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.read`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `read-one`, `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestDirectConversationToken_PeerAgentMustBeInsideBoundary`
+
+---
+
+## inbox.conversation.defaultagent.set
+
+**Domain:** inbox
+
+**Description:** Set the default agent of a group conversation. Needs project:read on the conversation's project; a token also needs inbox:write for it
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/conversations/{id}/default-agent` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `conversation_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** conversation-project
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestConversationCreateToken_RequiresInboxWriteAndProjectRead`
+
+---
+
+## inbox.conversation.participant.add
+
+**Domain:** inbox
+
+**Description:** Add a participant to a group conversation. Every caller needs project:read on the conversation's project; an added agent must be in that project and an added user must be a member of it; a token also needs inbox:write for it
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/conversations/{id}/participants` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `conversation_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** conversation-project
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestConversationAddParticipant_RequiresProjectReadAndMemberPrincipals`
+
+---
+
+## inbox.conversation.leave
+
+**Domain:** inbox
+
+**Description:** Leave a conversation the caller takes part in. A token needs inbox:write for the conversation
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/conversations/{id}/leave` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `self_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestConversationLeaveToken_RequiresInboxWrite`
+
+---
+
+## inbox.conversation.resolve
+
+**Domain:** inbox
+
+**Description:** Resolve a conversation reference. A group reference needs project:read on its project and an agent reference needs agent:read on the agent, for every user caller; a token also needs inbox:read for the result
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/conversations/resolve` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `self_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.read`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestConversationResolve_GroupReferenceRequiresProjectRead`
+- `pkg/hub:TestConversationResolve_AgentReferenceRequiresAgentRead`
+
+---
+
+## agent.message.target.resolve
+
+**Domain:** agent.message
+
+**Description:** Resolve a cross-project messaging target through the agent message authorization
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/messaging/targets/resolve` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `agent_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `agent.message`
+
+**Resource Resolver:** agent-from-query
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestMessagingTargetsResolve_TokenNeedsAgentMessage`
+
+---
+
+## inbox.notification.read
+
+**Domain:** inbox
+
+**Description:** List the caller's notifications. A token lists only rows inside its boundary; with agentId, rows addressed to the agent subscriber need agent:read on that agent, for every user caller
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/notifications` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `self_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.read`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestNotificationToken_RowsFilteredToBoundary`
+- `pkg/hub:TestNotificationsByAgent_OtherSubscriberRowsRequireAgentRead`
+
+---
+
+## inbox.notification.ack
+
+**Domain:** inbox
+
+**Description:** Acknowledge the caller's notifications. Ack-all by a project token touches only rows of its boundary project
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/notifications/ack-all` |
+| http_route | POST | `/api/v1/notifications/{id}/ack` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `self_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestNotificationToken_RowsFilteredToBoundary`
+
+---
+
+## inbox.notification.subscription.create
+
+**Domain:** inbox
+
+**Description:** Create notification subscriptions. A user caller needs project:read on the project and agent:read on a watched agent; a token also needs inbox:write for the project
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/notifications/subscriptions` |
+| http_route | POST | `/api/v1/notifications/subscriptions/bulk` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `project_body`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** project-from-body
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestNotificationSubscription_RequiresProjectAndAgentRead`
+
+---
+
+## inbox.notification.subscription.read
+
+**Domain:** inbox
+
+**Description:** List the caller's notification subscriptions. A token lists only rows inside its boundary
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/notifications/subscriptions` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `self_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.read`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestNotificationToken_RowsFilteredToBoundary`
+
+---
+
+## inbox.notification.subscription.write
+
+**Domain:** inbox
+
+**Description:** Update and delete the caller's notification subscriptions. A token changes only rows inside its boundary
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PATCH | `/api/v1/notifications/subscriptions/{id}` |
+| http_route | DELETE | `/api/v1/notifications/subscriptions/{id}` |
+| http_route | POST | `/api/v1/notifications/subscriptions/bulk-delete` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `self_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `update-resource`, `delete-resource`
+
+### Audit
+
+- **Event Type:** `inbox.notification.subscription.write`
+- **Context Fields:** actor_id
+- **Before Fields:** subscription_id
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestNotificationToken_RowsFilteredToBoundary`
+
+---
+
+## inbox.notification.template.create
+
+**Domain:** inbox
+
+**Description:** Create a subscription template. A template filed under a project needs project:read on it; a token also needs inbox:write for it
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/notifications/templates` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `project_body`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** project-from-body
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestNotificationTemplates_ListedOnlyForReadableProjects`
+
+---
+
+## inbox.notification.template.read
+
+**Domain:** inbox
+
+**Description:** List subscription templates: only templates of projects the caller may read, and for a token only templates inside its boundary
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/notifications/templates` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `self_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.read`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestNotificationTemplates_ListedOnlyForReadableProjects`
+
+---
+
+## inbox.notification.template.delete
+
+**Domain:** inbox
+
+**Description:** Delete a subscription template the caller created. A token needs inbox:write for the template's project
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | DELETE | `/api/v1/notifications/templates/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `self_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `delete-resource`
+
+### Audit
+
+- **Event Type:** `inbox.notification.template.delete`
+- **Context Fields:** actor_id
+- **Before Fields:** template_id
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestNotificationTemplates_ListedOnlyForReadableProjects`
 
 ---
 

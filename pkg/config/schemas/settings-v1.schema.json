@@ -1309,6 +1309,12 @@
               "description": "This node's relay instance id; must be unique among live hub processes. Default: POD_NAME when set, else the host name plus a random per-process suffix.",
               "x-env-var": "SCION_SERVER_HUB_CONDUIT_INSTANCEID",
               "x-since": "1"
+            },
+            "authz_recheck_interval": {
+              "type": "string",
+              "description": "Period of the re-check sweep of open user streams: a stream whose authorization was revoked is re-checked within one interval even if the revocation event is missed (e.g. '60s'; default '60s', between '1s' and '10m').",
+              "x-env-var": "SCION_SERVER_HUB_CONDUIT_AUTHZRECHECKINTERVAL",
+              "x-since": "1"
             }
           }
         }

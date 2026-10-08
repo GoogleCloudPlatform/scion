@@ -65,6 +65,7 @@ const (
 	AgentRouteActionReincarnate  AgentSubRouteID = "agents.action.reincarnate"
 	AgentRouteActionResetAuth    AgentSubRouteID = "agents.action.resetAuth"
 	AgentRouteActionKeys         AgentSubRouteID = "agents.action.keys"
+	AgentRouteHoldLift           AgentSubRouteID = "agents.hold.lift"
 )
 
 // Agent sub-routes under /api/v1/projects/{projectId}/agents.
@@ -173,6 +174,7 @@ const (
 	opAgentExec             authzop.OperationID = "agent.lifecycle.exec"
 	opAgentEnv              authzop.OperationID = "agent.lifecycle.env"
 	opAgentResetAuth        authzop.OperationID = "agent.lifecycle.resetauth"
+	opAgentHoldLift         authzop.OperationID = "agent.hold.lift"
 	opAgentReincarnate      authzop.OperationID = "agent.lifecycle.reincarnate"
 	opAgentSetMessageMode   authzop.OperationID = "agent.setmessagemode"
 	opAgentTokenRefresh     authzop.OperationID = "agent.token.refresh"
@@ -235,6 +237,8 @@ var agentSubRouteTable = []agentSubRouteRow{
 	// (authorizeAgentKeys in handleAgentAction). The keys action has no
 	// catalog operation.
 	{id: AgentRouteActionKeys, form: agentFormByID, segs: []string{"keys"}},
+	// Hub-admin lift of an agent's holds (ptone/scion#3433).
+	{id: AgentRouteHoldLift, form: agentFormByID, segs: []string{"hold", "lift"}, ops: postOp(opAgentHoldLift)},
 
 	// --- /api/v1/projects/{projectId}/agents ---
 	{id: ProjectAgentRouteCollection, form: agentFormProject, noAgent: true, trailingSlash: true},

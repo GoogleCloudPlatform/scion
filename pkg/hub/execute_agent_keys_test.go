@@ -241,6 +241,9 @@ func (e *agentKeysEventSpy) PublishNotification(_ context.Context, _ *store.Noti
 func (e *agentKeysEventSpy) PublishChatNotification(_ context.Context, _ *store.Notification, _ ChatMessageContext) {
 	e.record("PublishChatNotification")
 }
+func (e *agentKeysEventSpy) PublishUserNotification(_ context.Context, _ *store.Notification) {
+	e.record("PublishUserNotification")
+}
 func (e *agentKeysEventSpy) PublishUserMessage(_ context.Context, _ *store.Message, _ []AttachmentRef) {
 	e.record("PublishUserMessage")
 }
@@ -273,6 +276,9 @@ func (e *agentKeysEventSpy) PublishChatMessageDeleted(_ context.Context, _, _ st
 }
 func (e *agentKeysEventSpy) PublishDMPromotedEvent(_ context.Context, _ string, _ WebChatTopic) {
 	e.record("PublishDMPromotedEvent")
+}
+func (e *agentKeysEventSpy) PublishChatScheduledEvent(_ context.Context, _ string, _ ChatScheduledEvent) {
+	e.record("PublishChatScheduledEvent")
 }
 func (e *agentKeysEventSpy) PublishRaw(_ string, _ interface{}) {
 	e.record("PublishRaw")

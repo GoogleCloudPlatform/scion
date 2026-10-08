@@ -433,6 +433,12 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// The creator becomes the project owner: the request credential must
+	// cover the owner role before anything is written.
+	if !s.authorizeProjectOwnerGrant(w, ctx) {
+		return
+	}
+
 	// Quota enforcement: check projects-per-user limit before creation.
 	if s.quotaService != nil && project.CreatedBy != "" {
 		if err := s.quotaService.CheckAndReserve(ctx, "max_projects_per_user", project.CreatedBy, "system", "system", project.ID); err != nil {
@@ -451,33 +457,24 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if err := s.store.CreateProject(ctx, project); err != nil {
+	// Create the project and canonical project membership as a role binding
+	// (PM1) in one transaction. The creator gets the project-owner role
+	// binding, which is the sole source of truth for project membership. A
+	// project without an owner binding is unusable, so a binding or audit
+	// failure rolls back the project creation.
+	if err := s.createProjectWithOwner(ctx, project, project.CreatedBy); err != nil {
 		if s.quotaService != nil && project.CreatedBy != "" {
 			s.quotaService.Release(ctx, "max_projects_per_user", project.ID)
 		}
-		writeErrorFromErr(w, err, "")
-		return
-	}
-
-	// Create canonical project membership as role binding (PM1).
-	// The creator gets the project-owner role binding, which is the sole
-	// source of truth for project membership. A project without an owner
-	// binding is unusable, so failure rolls back the project creation.
-	if project.CreatedBy != "" {
-		if rbErr := s.createProjectOwnerRoleBinding(ctx, project.ID, project.CreatedBy); rbErr != nil {
-			s.projectsLogger().Error("CRITICAL: failed to create project owner role binding — rolling back project",
-				"project_id", project.ID, "user_id", project.CreatedBy, "error", rbErr)
-			if delErr := s.store.DeleteProject(ctx, project.ID); delErr != nil {
-				s.projectsLogger().Warn("failed to roll back project after owner binding failure",
-					"project_id", project.ID, "error", delErr)
-			}
-			if s.quotaService != nil && project.CreatedBy != "" {
-				s.quotaService.Release(ctx, "max_projects_per_user", project.ID)
-			}
+		if errors.Is(err, errProjectOwnerBinding) {
+			s.projectsLogger().Error("CRITICAL: failed to create project owner role binding — project creation rolled back",
+				"project_id", project.ID, "user_id", project.CreatedBy, "error", err)
 			writeError(w, http.StatusInternalServerError, "ROLE_BINDING_FAILED",
 				"Failed to create project owner binding; project creation rolled back", nil)
 			return
 		}
+		writeErrorFromErr(w, err, "")
+		return
 	}
 
 	// Create the associated project_agents group (best-effort)
@@ -700,16 +697,46 @@ func (s *Server) ensureProjectGeneralTopic(ctx context.Context, project *store.P
 	s.events.PublishChatTopicEvent(ctx, project.ID, "created", *topic)
 }
 
+// errProjectOwnerBinding marks a failure of the project-owner binding or its
+// audit record inside a project-create transaction.
+var errProjectOwnerBinding = errors.New("project owner binding")
+
+// createProjectWithOwner creates project and, when ownerID is set, the
+// project-owner role binding for ownerID and its audit record, in one
+// transaction. A failure of the binding or its audit record rolls back the
+// project row and is returned wrapping errProjectOwnerBinding.
+func (s *Server) createProjectWithOwner(ctx context.Context, project *store.Project, ownerID string) error {
+	return s.store.WithTx(ctx, func(tx store.Store) error {
+		if err := tx.CreateProject(ctx, project); err != nil {
+			return err
+		}
+		if ownerID == "" {
+			return nil
+		}
+		if err := s.createProjectOwnerRoleBindingTx(ctx, tx, project.ID, ownerID); err != nil {
+			return fmt.Errorf("%w: %w", errProjectOwnerBinding, err)
+		}
+		return nil
+	})
+}
+
 // createProjectOwnerRoleBinding creates a project-owner role binding for the
-// given user in the given project. This is the canonical project membership
-// source (Phase 1E). The role binding is scoped to the project ID, not the
-// project slug, so it survives project renames.
+// user on the project, with its audit record, in one transaction.
 func (s *Server) createProjectOwnerRoleBinding(ctx context.Context, projectID, userID string) error {
-	ownerRoleDef, err := s.store.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
+	return s.store.WithTx(ctx, func(tx store.Store) error {
+		return s.createProjectOwnerRoleBindingTx(ctx, tx, projectID, userID)
+	})
+}
+
+// createProjectOwnerRoleBindingTx writes the project-owner role binding for
+// userID on projectID and its project_member_add audit record on tx. A
+// binding that already exists is left as is and writes no record.
+func (s *Server) createProjectOwnerRoleBindingTx(ctx context.Context, tx store.Store, projectID, userID string) error {
+	ownerRoleDef, err := tx.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
 	if err != nil {
 		return fmt.Errorf("lookup project-owner role definition: %w", err)
 	}
-	_, err = s.store.CreateRoleBinding(ctx, &store.RoleBinding{
+	_, err = tx.CreateRoleBinding(ctx, &store.RoleBinding{
 		RoleDefinitionID: ownerRoleDef.ID,
 		PrincipalType:    store.RoleBindingPrincipalUser,
 		PrincipalID:      userID,
@@ -724,14 +751,66 @@ func (s *Server) createProjectOwnerRoleBinding(ctx context.Context, projectID, u
 		return fmt.Errorf("create project-owner role binding: %w", err)
 	}
 
-	s.emitMutationAudit(ctx, &store.MutationAuditRecord{
+	record := &store.MutationAuditRecord{
 		MutationType: "project_member_add",
 		TargetType:   "project_membership",
 		TargetID:     projectID,
 		AfterSummary: `{"userId":"` + userID + `","role":"owner"}`,
-	})
-
+		Timestamp:    time.Now(),
+	}
+	s.buildAuditActorFromContext(ctx).ApplyActor(record)
+	applyHubActorFallback(record)
+	if err := tx.CreateMutationAudit(ctx, record); err != nil {
+		return fmt.Errorf("audit project-owner role binding: %w", err)
+	}
 	return nil
+}
+
+// projectOwnerGrantDenial returns a reason when the request credential may
+// not be granted the project-owner role of a project it creates, and "" when
+// it may. A credential with a permission ceiling (a scoped user identity)
+// must keep every permission of the project-owner role through the
+// credential caveat intersection CanDelegate applies
+// (intersectCredentialCaveats). Every other identity is unchanged: project
+// create authorization gates it.
+func (s *Server) projectOwnerGrantDenial(ctx context.Context) (string, error) {
+	scoped, ok := GetIdentityFromContext(ctx).(*ScopedUserIdentity)
+	if !ok || scoped == nil {
+		return "", nil
+	}
+	rd, err := s.store.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
+	if err != nil {
+		return "", fmt.Errorf("lookup project-owner role definition: %w", err)
+	}
+	if s.authzService == nil {
+		return "cannot create binding: authorization is not available", nil
+	}
+	kept := make(map[string]bool, len(rd.Permissions))
+	for _, p := range s.authzService.intersectCredentialCaveats(scoped, rd.Permissions) {
+		kept[p] = true
+	}
+	for _, p := range rd.Permissions {
+		if !kept[p] {
+			return "cannot create binding: the request credential does not cover permission " + p + " of the project owner role", nil
+		}
+	}
+	return "", nil
+}
+
+// authorizeProjectOwnerGrant applies projectOwnerGrantDenial before any
+// write of a project create, register or clone. It writes the response and
+// returns false when the request may not continue.
+func (s *Server) authorizeProjectOwnerGrant(w http.ResponseWriter, ctx context.Context) bool {
+	reason, err := s.projectOwnerGrantDenial(ctx)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return false
+	}
+	if reason != "" {
+		writeForbiddenStructured(w, reason, "role_binding", Action("create"))
+		return false
+	}
+	return true
 }
 
 func projectMembersGroupSlug(projectSlug string) string {
@@ -1695,6 +1774,12 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		// The creator becomes the project owner: the request credential
+		// must cover the owner role before anything is written.
+		if !s.authorizeProjectOwnerGrant(w, ctx) {
+			return
+		}
+
 		// Quota enforcement: check projects-per-user limit before creation.
 		if s.quotaService != nil && project.CreatedBy != "" {
 			if err := s.quotaService.CheckAndReserve(ctx, "max_projects_per_user", project.CreatedBy, "system", "system", project.ID); err != nil {
@@ -1713,32 +1798,23 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		if err := s.store.CreateProject(ctx, project); err != nil {
+		// Create the project and its owner role binding (PM1) in one
+		// transaction.
+		if err := s.createProjectWithOwner(ctx, project, project.CreatedBy); err != nil {
 			if s.quotaService != nil && project.CreatedBy != "" {
 				s.quotaService.Release(ctx, "max_projects_per_user", project.ID)
+			}
+			if errors.Is(err, errProjectOwnerBinding) {
+				s.projectsLogger().Error("CRITICAL: failed to create project owner role binding during register — project creation rolled back",
+					"project_id", project.ID, "user_id", project.CreatedBy, "error", err)
+				writeError(w, http.StatusInternalServerError, "ROLE_BINDING_FAILED",
+					"Failed to create project owner binding; project creation rolled back", nil)
+				return
 			}
 			writeErrorFromErr(w, err, "")
 			return
 		}
 		created = true
-
-		// Create owner role binding (PM1: atomic with project creation).
-		if project.CreatedBy != "" {
-			if rbErr := s.createProjectOwnerRoleBinding(ctx, project.ID, project.CreatedBy); rbErr != nil {
-				s.projectsLogger().Error("CRITICAL: failed to create project owner role binding during register — rolling back",
-					"project_id", project.ID, "user_id", project.CreatedBy, "error", rbErr)
-				if delErr := s.store.DeleteProject(ctx, project.ID); delErr != nil {
-					s.projectsLogger().Warn("failed to roll back project after owner binding failure",
-						"project_id", project.ID, "error", delErr)
-				}
-				if s.quotaService != nil {
-					s.quotaService.Release(ctx, "max_projects_per_user", project.ID)
-				}
-				writeError(w, http.StatusInternalServerError, "ROLE_BINDING_FAILED",
-					"Failed to create project owner binding; project creation rolled back", nil)
-				return
-			}
-		}
 
 		// Create the associated project_agents group (best-effort)
 		s.createProjectGroup(ctx, project)
@@ -2367,6 +2443,11 @@ var projectAgentRouteActions = map[AgentSubRouteID]string{
 
 // listProjectAgents lists agents within a specific project
 func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, projectID string) {
+	// The ids= format check runs before any authorization or store call
+	// this handler makes (see parseAgentListIDs).
+	if q := r.URL.Query(); !validateAgentListIDs(w, q, agentListLimit(q), isSortedModeRequest(q)) {
+		return
+	}
 	if !checkAgentReadScope(w, r) {
 		return
 	}

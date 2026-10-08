@@ -26,6 +26,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
@@ -62,6 +63,11 @@ func (s *Server) openConduitPort(ctx context.Context, identity Identity, agent *
 	if rt == nil || rt.router == nil {
 		return nil, errConduitNoRoute
 	}
+	if _, isUser := identity.(UserIdentity); isUser && s.conduitAuthz.Load() == nil {
+		// A user stream must be re-checked for its lifetime; without a
+		// running re-check it is not opened.
+		return nil, errConduitNoRoute
+	}
 	params := map[string]string{grant.ParamHost: conduitProxyHost, grant.ParamPort: strconv.Itoa(port)}
 	req := router.Request{
 		Op:    router.OpStream,
@@ -95,7 +101,18 @@ func (s *Server) openConduitPort(ctx context.Context, identity Identity, agent *
 		if err != nil {
 			return err
 		}
-		conn = newStreamConn(st, agent.ID, port)
+		sc := newStreamConn(st, agent.ID, port)
+		sc.untrack = s.trackConduitUserStream(&conduitUserStream{
+			Kind:      grant.StreamKindTCP,
+			Identity:  identity,
+			AgentID:   agent.ID,
+			ProjectID: agent.ProjectID,
+			Port:      port,
+			SessionID: res.Record.SessionID,
+			StreamID:  st.ID(),
+			Close:     sc.closeWithCode,
+		})
+		conn = sc
 		return nil
 	})
 	if err != nil {
@@ -277,10 +294,16 @@ func (b *wsUpstreamBody) CloseWrite() error {
 }
 
 // wsCloseCodeFor maps the error that ended the upstream to the close code
-// and reason sent to the client.
+// and reason sent to the client. A stream this hub closed because its
+// authorization ended carries its §3.3.1 code and reason through
+// (4401 authz_expired, 4404 target_not_found).
 func wsCloseCodeFor(err error) (uint16, string) {
 	if errors.Is(err, conduit.ErrBufferBudget) {
 		return wsCloseInternalError, "internal_error"
+	}
+	var ce *conduitAuthzCloseError
+	if errors.As(err, &ce) {
+		return uint16(ce.Code), ce.Reason
 	}
 	return wsCloseUpstreamUnreachable, "upstream_unreachable"
 }
@@ -385,6 +408,62 @@ func writeAgentOffline(w http.ResponseWriter, r *http.Request) {
 type streamConn struct {
 	conduit.Stream
 	local, remote net.Addr
+
+	// untrack ends the stream's authorization re-checks (set once, before
+	// the conn is used).
+	untrack func()
+	// authzClose is set when the hub closed the stream because its
+	// authorization ended; reads then fail with it.
+	authzClose atomic.Pointer[conduitAuthzCloseError]
+}
+
+// conduitAuthzCloseError is the read error of a stream the hub closed
+// because its authorization ended (code 4401 or 4404).
+type conduitAuthzCloseError struct {
+	conduit.CloseError
+}
+
+func (e *conduitAuthzCloseError) Unwrap() error { return &e.CloseError }
+
+// closeWithCode closes the stream on both legs because its authorization
+// ended: the target receives StreamClose{code, reason}, and the proxy's
+// reads fail with the same code and reason, so a proxied WebSocket client
+// receives them in its close frame.
+func (c *streamConn) closeWithCode(code uint32, reason string) {
+	c.authzClose.CompareAndSwap(nil, &conduitAuthzCloseError{CloseError: conduit.CloseError{Code: code, Reason: reason}})
+	_ = c.CloseWithCode(code, reason)
+}
+
+// Read reads from the stream; once the hub closed it for authorization,
+// the read error is that close.
+func (c *streamConn) Read(p []byte) (int, error) {
+	n, err := c.Stream.Read(p)
+	if err != nil {
+		if ce := c.authzClose.Load(); ce != nil {
+			return n, ce
+		}
+	}
+	return n, err
+}
+
+// Write writes to the stream; once the hub closed it for authorization,
+// the write error is that close.
+func (c *streamConn) Write(p []byte) (int, error) {
+	n, err := c.Stream.Write(p)
+	if err != nil {
+		if ce := c.authzClose.Load(); ce != nil {
+			return n, ce
+		}
+	}
+	return n, err
+}
+
+// Close ends the stream and its re-checks.
+func (c *streamConn) Close() error {
+	if c.untrack != nil {
+		c.untrack()
+	}
+	return c.Stream.Close()
 }
 
 func newStreamConn(st conduit.Stream, agentID string, port int) *streamConn {
