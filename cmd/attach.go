@@ -586,7 +586,7 @@ var ptyCloseMessages = map[int]ptyCloseMessage{
 		Summary: "the Hub is overloaded",
 	},
 	ptyCloseInputTooLarge: {
-		Summary: "the input was too large for the session (more than the runtime broker buffers before the agent reads it)",
+		Summary: "the input was too large for the session (pasted faster than the agent could read it)",
 		Hint:    "Paste in smaller chunks, then reattach with: scion attach {agent}",
 	},
 	wsprotocol.ClosePTYAuthRequired: {

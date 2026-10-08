@@ -213,7 +213,7 @@ func TestDescribeAttachClose_InputOverflowIsActionableAndTerminal(t *testing.T) 
 	err := describeAttachClose(&wsclient.PTYCloseError{Code: ptyCloseInputTooLarge, Reason: "input_overflow"}, "a1")
 	require.Error(t, err)
 	assert.Equal(t, "attach to agent 'a1' ended: the input was too large for the session "+
-		"(more than the runtime broker buffers before the agent reads it) (close code 1009: input_overflow)\n\n"+
+		"(pasted faster than the agent could read it) (close code 1009: input_overflow)\n\n"+
 		"Paste in smaller chunks, then reattach with: scion attach a1", err.Error())
 	assert.NotContains(t, err.Error(), "does not reconnect automatically")
 }
