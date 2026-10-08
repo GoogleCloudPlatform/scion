@@ -49,6 +49,26 @@ type iamHubSettingStore struct {
 	*fakeHubSettingStore
 	failGet  atomic.Bool
 	failList atomic.Bool
+	// onUpsert and onDelete run before a write; a non-nil error from
+	// onUpsert fails it.
+	onUpsert func() error
+	onDelete func()
+}
+
+func (f *iamHubSettingStore) UpsertHubSetting(ctx context.Context, section string, value json.RawMessage, updatedBy string, expectedRevision int64, origin string) (*store.HubSetting, error) {
+	if f.onUpsert != nil {
+		if err := f.onUpsert(); err != nil {
+			return nil, err
+		}
+	}
+	return f.fakeHubSettingStore.UpsertHubSetting(ctx, section, value, updatedBy, expectedRevision, origin)
+}
+
+func (f *iamHubSettingStore) DeleteHubSetting(ctx context.Context, section string) error {
+	if f.onDelete != nil {
+		f.onDelete()
+	}
+	return f.fakeHubSettingStore.DeleteHubSetting(ctx, section)
 }
 
 var errIAMTestRead = errors.New("injected read failure")
@@ -71,9 +91,14 @@ func (f *iamHubSettingStore) ListHubSettings(ctx context.Context) ([]store.HubSe
 type iamAuditStore struct {
 	store.Store
 	failAudit atomic.Bool
+	// onAudit runs before each audit write.
+	onAudit func(*store.MutationAuditRecord)
 }
 
 func (s *iamAuditStore) CreateMutationAudit(ctx context.Context, rec *store.MutationAuditRecord) error {
+	if s.onAudit != nil {
+		s.onAudit(rec)
+	}
 	if s.failAudit.Load() {
 		return errors.New("injected audit failure")
 	}
@@ -288,38 +313,58 @@ func TestGCPIAMReload_UnusableStoredValueKeepsAppliedValue(t *testing.T) {
 			assert.Equal(t, iamOffOpen, f.applied(t), "an unusable stored value changes nothing")
 		})
 	}
-	// A row that empties or disappears without an audited reset changes
-	// nothing either (no audit record sets the deploy-time values).
-	for _, doc := range []string{`{}`, `not json`} {
-		t.Run(doc, func(t *testing.T) {
-			ApplySnapshot(f.srv, snapshotWithRow(t, f, doc))
-			assert.Equal(t, iamOffOpen, f.applied(t))
-		})
-	}
 	assert.Empty(t, f.applyAudits(t))
-	// Every distinct refusal is recorded once ({} and "not json" both
-	// leave no stored value: one refusal).
-	assert.Len(t, f.refusals(t), 4)
-	ApplySnapshot(f.srv, f.ops.Snapshot())
-	assert.Len(t, f.refusals(t), 4, "a repeated refusal is not recorded again")
+	// Every distinct refusal is recorded once.
+	assert.Len(t, f.refusals(t), 3)
+	ApplySnapshot(f.srv, snapshotWithRow(t, f, `{"gcp_iam_check_mode":7}`))
+	assert.Len(t, f.refusals(t), 3, "a repeated refusal is not recorded again")
 }
 
-func TestGCPIAMReload_VanishedRowKeepsAppliedValueAndIsRecorded(t *testing.T) {
-	f := newIAMFixture(t, iamEnforceClosed)
-	require.Equal(t, http.StatusOK, f.put(t, iamBody("off", "fail-open")).Code)
+// removeRow deletes the stored row without the guarded reset.
+func (f *iamFixture) removeRow(t *testing.T) {
+	t.Helper()
 	require.NoError(t, f.hs.DeleteHubSetting(context.Background(), gcpIAMSection))
 	f.ops.mu.Lock()
 	delete(f.ops.cache, gcpIAMSection)
 	f.ops.mu.Unlock()
-	ApplySnapshot(f.srv, f.ops.Snapshot())
-	assert.Equal(t, iamOffOpen, f.applied(t))
+}
 
+func TestGCPIAMReload_VanishedRowKeepsAppliedValueAndIsRecorded(t *testing.T) {
+	// Deploy-time off/fail-open; an admin override applied enforce/fail-closed.
+	f := newIAMFixture(t, iamOffOpen)
+	require.Equal(t, http.StatusOK, f.put(t, iamBody("enforce", "fail-closed")).Code)
+	f.removeRow(t)
+	ApplySnapshot(f.srv, f.ops.Snapshot())
+	assert.Equal(t, iamEnforceClosed, f.applied(t))
+	ApplySnapshot(f.srv, snapshotWithRow(t, f, `{}`))
+	assert.Equal(t, iamEnforceClosed, f.applied(t))
+
+	// {} and a missing row both leave no stored value: one refusal.
 	recs := f.refusals(t)
 	require.Len(t, recs, 1)
 	assert.Equal(t, gcpIAMSection, recs[0].TargetID)
-	assert.Equal(t, "off,fail-open", recs[0].BeforeSummary)
+	assert.Equal(t, "enforce,fail-closed", recs[0].BeforeSummary)
 	assert.Equal(t, gcpIAMSystemActorID, recs[0].ActorPrincipalID)
 	assert.Equal(t, gcpIAMSurfaceReload, recs[0].ExecutorID)
+}
+
+func TestGCPIAMReload_VanishedRowRevertsToStricterDeployValue(t *testing.T) {
+	for _, doc := range []string{"", `{}`, `not json`} {
+		t.Run(doc, func(t *testing.T) {
+			// Deploy-time enforce/fail-closed; an admin override applied off/fail-open.
+			f := newIAMFixture(t, iamEnforceClosed)
+			require.Equal(t, http.StatusOK, f.put(t, iamBody("off", "fail-open")).Code)
+			f.removeRow(t)
+			snap := f.ops.Snapshot()
+			if doc != "" {
+				snap = snapshotWithRow(t, f, doc)
+			}
+			ApplySnapshot(f.srv, snap)
+			assert.Equal(t, iamEnforceClosed, f.applied(t))
+			assert.Empty(t, f.refusals(t))
+			assert.Len(t, f.applyAudits(t), 2)
+		})
+	}
 }
 
 // snapshotWithRow returns the snapshot for a gcp_iam row holding doc.
@@ -780,4 +825,152 @@ func TestGCPIAMReload_UnusableValueRefusedEvenWhenAttributable(t *testing.T) {
 	ApplySnapshot(g.srv, snapshotWithRow(t, g, `{"gcp_iam_check_mode":"enfroce","gcp_iam_deny_unknown_policy":"fail-closed"}`))
 	assert.Equal(t, SAAssignCheckOff, g.applied(t).CheckMode)
 	assert.Len(t, g.refusals(t), 1)
+}
+
+// ---- Approval lifetime, attribution and apply guards ----
+
+// setApplied sets the applied pair directly, as another reload would.
+func (f *iamFixture) setApplied(p gcpIAMSettings) {
+	f.srv.mu.Lock()
+	f.srv.applyGCPIAMSettingsLocked(p)
+	f.srv.mu.Unlock()
+}
+
+func (f *iamFixture) approval() *gcpIAMTransition {
+	f.srv.mu.RLock()
+	defer f.srv.mu.RUnlock()
+	return f.srv.gcpIAMApproved
+}
+
+func TestGCPIAMPut_ApprovalClearedWhenSelfApplyDoesNotUseIt(t *testing.T) {
+	f := newIAMFixture(t, iamEnforceClosed)
+	// The applied pair moves during the write, so the self-apply decides
+	// a different transition than the one the save approved.
+	f.hs.onUpsert = func() error {
+		f.setApplied(iamOffOpen)
+		return nil
+	}
+	require.Equal(t, http.StatusOK, f.put(t, iamBody("off", "fail-open")).Code)
+	f.hs.onUpsert = nil
+	assert.Nil(t, f.approval(), "the approval does not outlive its write")
+
+	// A later reload of the same transition goes through the full rule.
+	f.setApplied(iamEnforceClosed)
+	f.addHubSA(t)
+	ApplySnapshot(f.srv, f.ops.Snapshot())
+	assert.Equal(t, iamEnforceClosed, f.applied(t))
+	assert.Empty(t, f.applyAudits(t))
+}
+
+func TestGCPIAMReset_ApprovalClearedWhenSelfApplyDoesNotUseIt(t *testing.T) {
+	f := newIAMFixture(t, iamOffOpen)
+	require.Equal(t, http.StatusOK, f.put(t, iamBody("enforce", "fail-closed")).Code)
+	require.Equal(t, iamEnforceClosed, f.applied(t))
+	f.hs.onDelete = func() { f.setApplied(iamOffOpen) }
+	require.Equal(t, http.StatusOK, f.reset(t).Code)
+	f.hs.onDelete = nil
+	assert.Nil(t, f.approval(), "the approval does not outlive its reset")
+
+	f.setApplied(iamEnforceClosed)
+	f.addHubSA(t)
+	ApplySnapshot(f.srv, f.ops.Snapshot())
+	assert.Equal(t, iamEnforceClosed, f.applied(t))
+	assert.Empty(t, f.applyAudits(t))
+}
+
+func TestGCPIAMReload_AttributionRequiredOnlyForLessStrictChange(t *testing.T) {
+	t.Run("stricter change applies without an audit record", func(t *testing.T) {
+		f := newIAMFixture(t, iamOffOpen)
+		f.hs.seed(gcpIAMSection, json.RawMessage(`{"gcp_iam_check_mode":"enforce","gcp_iam_deny_unknown_policy":"fail-closed"}`))
+		f.ops.refreshAndApply(context.Background(), f.srv)
+		assert.Equal(t, iamEnforceClosed, f.applied(t))
+		assert.Empty(t, f.refusals(t))
+		recs := f.applyAudits(t)
+		require.Len(t, recs, 2)
+		for _, r := range recs {
+			assert.Equal(t, gcpIAMSystemActorKind, r.ActorPrincipalKind)
+			assert.Equal(t, gcpIAMSystemActorID, r.ActorPrincipalID)
+		}
+	})
+	for name, tc := range map[string]struct {
+		startup gcpIAMSettings
+		row     string
+	}{
+		"less strict change": {iamEnforceClosed, `{"gcp_iam_check_mode":"off","gcp_iam_deny_unknown_policy":"fail-closed"}`},
+		"mixed change":       {gcpIAMSettings{CheckMode: SAAssignCheckOff}, `{"gcp_iam_check_mode":"enforce","gcp_iam_deny_unknown_policy":"fail-open"}`},
+	} {
+		t.Run(name+" is refused without an audit record", func(t *testing.T) {
+			f := newIAMFixture(t, tc.startup)
+			f.hs.seed(gcpIAMSection, json.RawMessage(tc.row))
+			f.ops.refreshAndApply(context.Background(), f.srv)
+			assert.Equal(t, tc.startup, f.applied(t))
+			assert.Empty(t, f.applyAudits(t))
+			recs := f.refusals(t)
+			require.Len(t, recs, 1)
+			assert.Contains(t, recs[0].AfterSummary, "not attributable to an audited write")
+		})
+	}
+}
+
+func TestGCPIAMReload_NotAppliedWriteIsNotAttributable(t *testing.T) {
+	f := newIAMFixture(t, iamEnforceClosed)
+	g := newIAMFixture(t, iamEnforceClosed)
+	g.shareStore(f)
+	f.hs.onUpsert = func() error { return errors.New("injected write failure") }
+	require.Equal(t, http.StatusInternalServerError, f.put(t, iamBody("off", "")).Code)
+	f.hs.onUpsert = nil
+	require.Len(t, f.audits(t), 1, "the change was recorded before the write")
+	require.Eventually(t, func() bool {
+		recs, _, err := f.st.ListMutationAudits(context.Background(),
+			store.MutationAuditFilter{MutationType: gcpIAMNotAppliedMutation})
+		return err == nil && len(recs) == 1
+	}, 5*time.Second, 10*time.Millisecond)
+
+	// The same value later appears without an audited write.
+	g.hs.seed(gcpIAMSection, json.RawMessage(`{"gcp_iam_check_mode":"off"}`))
+	g.ops.refreshAndApply(context.Background(), g.srv)
+	assert.Equal(t, iamEnforceClosed, g.applied(t))
+	assert.Empty(t, g.applyAudits(t))
+	recs := g.refusals(t)
+	require.Len(t, recs, 1)
+	assert.Contains(t, recs[0].AfterSummary, "not attributable to an audited write")
+}
+
+func TestGCPIAMReload_NotAppliedRecordForOtherKeyKeepsAttribution(t *testing.T) {
+	f := newIAMFixture(t, iamEnforceClosed)
+	g := newIAMFixture(t, iamEnforceClosed)
+	g.shareStore(f)
+	require.Equal(t, http.StatusOK, f.put(t, iamBody("off", "")).Code)
+	// A later failed write of the other key only.
+	f.hs.onUpsert = func() error { return errors.New("injected write failure") }
+	require.Equal(t, http.StatusInternalServerError, f.put(t, iamBody("", "fail-open")).Code)
+	f.hs.onUpsert = nil
+	require.Eventually(t, func() bool {
+		recs, _, err := f.st.ListMutationAudits(context.Background(),
+			store.MutationAuditFilter{MutationType: gcpIAMNotAppliedMutation})
+		return err == nil && len(recs) == 1
+	}, 5*time.Second, 10*time.Millisecond)
+
+	g.hs.seed(gcpIAMSection, iamStoredRow(t, f))
+	g.ops.refreshAndApply(context.Background(), g.srv)
+	assert.Equal(t, gcpIAMSettings{CheckMode: SAAssignCheckOff}, g.applied(t))
+}
+
+func TestGCPIAMReload_AppliedPairChangedDuringDecisionIsKept(t *testing.T) {
+	f := newIAMFixture(t, iamEnforceClosed)
+	g := newIAMFixture(t, iamEnforceClosed)
+	g.shareStore(f)
+	require.Equal(t, http.StatusOK, f.put(t, iamBody("off", "fail-open")).Code)
+	g.hs.seed(gcpIAMSection, iamStoredRow(t, f))
+
+	// The applied pair changes after the decision reads it and before the
+	// apply step takes the server mutex.
+	g.st.onAudit = func(rec *store.MutationAuditRecord) {
+		if rec.MutationType == gcpIAMApplyMutation {
+			g.setApplied(iamEnforceOpen)
+		}
+	}
+	g.ops.refreshAndApply(context.Background(), g.srv)
+	g.st.onAudit = nil
+	assert.Equal(t, iamEnforceOpen, g.applied(t), "the apply step does not overwrite a pair it did not decide from")
 }

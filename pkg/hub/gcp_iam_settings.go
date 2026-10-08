@@ -68,9 +68,13 @@ const (
 	// gcpIAMRefusedMutation records a reload that was refused (the applied
 	// pair stays); its actor is the hub itself.
 	gcpIAMRefusedMutation = "hub_setting_apply_refused"
-	gcpIAMSystemActorKind = "system"
-	gcpIAMSystemActorID   = "hub-settings-reload"
-	gcpIAMAuditTarget     = "hub_setting"
+	// gcpIAMNotAppliedMutation records that a write recorded as
+	// gcpIAMAuditMutation was not made; TargetID is the section and the
+	// summaries are the "check_mode,deny_unknown_policy" pairs.
+	gcpIAMNotAppliedMutation = gcpIAMAuditMutation + "_not_applied"
+	gcpIAMSystemActorKind    = "system"
+	gcpIAMSystemActorID      = "hub-settings-reload"
+	gcpIAMAuditTarget        = "hub_setting"
 	// gcpIAMSurfaceKind is the ExecutorKind of every gcp_iam audit record;
 	// ExecutorID names the surface.
 	gcpIAMSurfaceKind     = "hub_settings"
@@ -469,7 +473,7 @@ func (s *Server) auditGCPIAMNotApplied(ctx context.Context, cur, next gcpIAMSett
 	slog.Error("GCP permission-check setting change was recorded but not written",
 		"check_mode", next.CheckMode, "deny_unknown_policy", next.denyUnknownPolicy(), "error", cause)
 	s.emitMutationAudit(ctx, &store.MutationAuditRecord{
-		MutationType:  gcpIAMAuditMutation + "_not_applied",
+		MutationType:  gcpIAMNotAppliedMutation,
 		TargetType:    gcpIAMAuditTarget,
 		TargetID:      gcpIAMSection,
 		BeforeSummary: cur.CheckMode + "," + cur.denyUnknownPolicy(),
@@ -532,9 +536,18 @@ func (s *Server) decideGCPIAMReload(snap Layer1Snapshot) (gcpIAMTransition, bool
 	if err := s.checkGCPIAMTransition(ctx, cur, cand, pendingAssign); err != nil {
 		return refuse("transition rule", err)
 	}
+	// A change that makes neither key less strict is applied even when no
+	// audited write names it (for example after audit retention removed
+	// the record); the hub is then recorded as the actor.
 	actor, err := s.gcpIAMAttribution(ctx, cur, cand)
 	if err != nil {
-		return refuse("change is not attributable to an audited write", err)
+		if gcpIAMRelaxes(cur, cand) {
+			return refuse("change is not attributable to an audited write", err)
+		}
+		actor = &store.MutationAuditRecord{
+			ActorPrincipalKind: gcpIAMSystemActorKind,
+			ActorPrincipalID:   gcpIAMSystemActorID,
+		}
 	}
 	if err := s.writeGCPIAMAudit(ctx, gcpIAMApplyMutation, gcpIAMSurfaceReload, cur, cand, actor); err != nil {
 		return refuse("audit record", err)
@@ -544,15 +557,28 @@ func (s *Server) decideGCPIAMReload(snap Layer1Snapshot) (gcpIAMTransition, bool
 
 // gcpIAMAttribution returns the audited write that a reload from cur to
 // next applies: for every changed key, the latest hub_setting_update record
-// must name the new value. It returns the actor of the latest such record.
+// must name the new value, and no later not-applied record may name the
+// same change. It returns the actor of the latest such record.
 func (s *Server) gcpIAMAttribution(ctx context.Context, cur, next gcpIAMSettings) (*store.MutationAuditRecord, error) {
-	type change struct{ key, after string }
+	// idx is the key's position in a not-applied record's summaries.
+	type change struct {
+		key, after string
+		idx        int
+	}
 	var changes []change
 	if cur.CheckMode != next.CheckMode {
-		changes = append(changes, change{gcpIAMCheckModeKey, next.CheckMode})
+		changes = append(changes, change{gcpIAMCheckModeKey, next.CheckMode, 0})
 	}
 	if cur.DenyUnknownFailOpen != next.DenyUnknownFailOpen {
-		changes = append(changes, change{gcpIAMDenyUnknownKey, next.denyUnknownPolicy()})
+		changes = append(changes, change{gcpIAMDenyUnknownKey, next.denyUnknownPolicy(), 1})
+	}
+	notApplied, _, err := s.store.ListMutationAudits(ctx, store.MutationAuditFilter{
+		MutationType: gcpIAMNotAppliedMutation,
+		TargetType:   gcpIAMAuditTarget,
+		TargetID:     gcpIAMSection,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("reading not-applied audit records: %w", err)
 	}
 	var actor *store.MutationAuditRecord
 	for _, c := range changes {
@@ -582,6 +608,17 @@ func (s *Server) gcpIAMAttribution(ctx context.Context, cur, next gcpIAMSettings
 		}
 		if match == nil {
 			return nil, fmt.Errorf("no audit record sets %s to %q", c.key, c.after)
+		}
+		for _, na := range notApplied {
+			if na.Timestamp.Before(match.Timestamp) {
+				continue
+			}
+			before := strings.Split(na.BeforeSummary, ",")
+			after := strings.Split(na.AfterSummary, ",")
+			if len(before) == 2 && len(after) == 2 &&
+				before[c.idx] != after[c.idx] && after[c.idx] == c.after {
+				return nil, fmt.Errorf("the latest audit record setting %s to %q was not applied", c.key, c.after)
+			}
 		}
 		if actor == nil || match.Timestamp.After(actor.Timestamp) {
 			actor = match

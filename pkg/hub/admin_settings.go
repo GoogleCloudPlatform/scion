@@ -309,11 +309,15 @@ func (s *Server) handleAdminServerConfigSectionReset(w http.ResponseWriter, r *h
 		}
 	}
 
-	if err := ops.DeleteSection(r.Context(), sectionName); err != nil {
-		if gcpIAMChange {
-			s.clearGCPIAMApproval()
+	err := ops.DeleteSection(r.Context(), sectionName)
+	if gcpIAMChange {
+		// The approval covers only this reset's own self-apply.
+		s.clearGCPIAMApproval()
+		if err != nil {
 			s.auditGCPIAMNotApplied(r.Context(), gcpIAMCur, gcpIAMNext, err)
 		}
+	}
+	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			writeError(w, http.StatusNotFound, ErrCodeNotFound,
 				"Section not found in database: "+sectionName, nil)

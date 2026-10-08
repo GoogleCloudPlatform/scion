@@ -1166,9 +1166,12 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		}
 
 		newRev, err := ops.Update(r.Context(), secName, doc, updatedBy, expectedRev, "managed")
-		if err != nil && secName == gcpIAMSection {
+		if secName == gcpIAMSection {
+			// The approval covers only this write's own self-apply.
 			s.clearGCPIAMApproval()
-			s.auditGCPIAMNotApplied(r.Context(), gcpIAMCur, gcpIAMNext, err)
+			if err != nil {
+				s.auditGCPIAMNotApplied(r.Context(), gcpIAMCur, gcpIAMNext, err)
+			}
 		}
 		if err != nil {
 			if errors.Is(err, store.ErrRevisionConflict) {
