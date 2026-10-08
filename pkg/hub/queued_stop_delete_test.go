@@ -118,8 +118,12 @@ func TestQueuedStop_SupersedingStartClearSkipsDeleteWonRow(t *testing.T) {
 				assert.Empty(t, got.Message, "the queued-stop notice is cleared")
 				return
 			}
+			// The start's own write has already cleared the notice (its
+			// terminal-remnant clear); the stop_queued status is what the
+			// superseded-stop clear would still repaint.
+			require.Equal(t, containerStatusStopQueued, afterDelete.ContainerStatus, "precondition: the clear has something to repaint")
 			assert.Equal(t, containerStatusStopQueued, got.ContainerStatus, "a delete-won row is not repainted running")
-			assert.Equal(t, offlineStopMessage, got.Message)
+			assert.Equal(t, afterDelete.Message, got.Message)
 			// The delete's row is untouched: the clear wrote nothing.
 			assert.Equal(t, afterDelete.Phase, got.Phase)
 			assert.Equal(t, afterDelete.Activity, got.Activity)
