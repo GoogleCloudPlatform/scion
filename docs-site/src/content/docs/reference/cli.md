@@ -601,12 +601,14 @@ loop). If you are an agent, the agent then depends on your delegation chain, so 
 changes on long-lived agents.
 
 One exception repairs agents left without recorded provenance, for example after a hub upgrade. When
-a user reincarnates an agent without changing its role, and the agent's delegation chain is
-unrecorded (its own delegation edge, or one further up the chain, has no recorded provenance, or its
-own edge is missing), the user becomes the agent's recorded delegator. This clears the
+a user reincarnates an agent without changing its role, and the agent's own delegation edge is
+missing or has no recorded provenance, or an edge further up its chain has no recorded provenance,
+the user becomes the agent's recorded delegator. This clears the
 `ceiling_unrecorded` denial, which blocks service-account assignment among other actions. The
 **Reincarnate** button in the web UI does the same. A reincarnation by the agent itself or by another
 agent keeps the edge, and so does a user's reincarnation of an agent whose chain is fully recorded.
+An agent whose chain has a missing ancestor edge or a loop is suspended, and a reincarnation of it is
+refused with `409`.
 
 An agent whose delegator was changed by an earlier reincarnation by another agent (for example, one
 that now gets `403` when creating agents) is not repaired by this rule, because its chain is

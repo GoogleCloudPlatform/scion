@@ -447,8 +447,9 @@ func (a *AuthzService) devLocalHopUsable(ctx context.Context, edge *store.Delega
 // complete is exempt and folds as one unrecorded hop; the migration sentinel
 // edge folds as an unrecorded terminal hop.
 //
-// Errors: ErrProvenanceMissing, ErrProvenanceAmbiguous, ErrProvenanceChain,
-// errSourceNotAllowed, and wrapped lookup errors.
+// Errors: ErrProvenanceMissing (also wrapping errOwnEdgeMissing when the
+// agent's own edge is the missing one), ErrProvenanceAmbiguous,
+// ErrProvenanceChain, errSourceNotAllowed, and wrapped lookup errors.
 func (a *AuthzService) chainEffectCeiling(ctx context.Context, agent *store.Agent) (ChainCeiling, error) {
 	if agent == nil {
 		return ChainCeiling{}, fmt.Errorf("%w: no agent", ErrProvenanceChain)
@@ -479,6 +480,9 @@ walk:
 				unrecorded++
 				break walk
 			}
+			if depth == 0 {
+				return ChainCeiling{}, fmt.Errorf("%w: %w: agent %s", ErrProvenanceMissing, errOwnEdgeMissing, delegateID)
+			}
 			return ChainCeiling{}, fmt.Errorf("%w: agent %s", ErrProvenanceMissing, delegateID)
 		}
 		if len(active) > 1 {
@@ -490,22 +494,16 @@ walk:
 			break walk
 		}
 
-		versionKnown := knownProvenanceVersion(edge.ProvenanceVersion)
 		switch edge.Kind {
 		case store.EffectCeilingBounded:
 			frozen, _ := edge.Frozen()
 			bounded = append(bounded, frozen)
-			if !versionKnown {
-				unrecorded++
-			}
-		case store.EffectCeilingPrincipal:
-			if !versionKnown {
-				unrecorded++
-			}
-		case store.EffectCeilingUnrecorded:
-			unrecorded++
+		case store.EffectCeilingPrincipal, store.EffectCeilingUnrecorded:
 		default:
 			return ChainCeiling{}, fmt.Errorf("%w: edge %s has ceiling kind %q", ErrProvenanceChain, edge.ID, edge.Kind)
+		}
+		if hopUnrecorded(edge) {
+			unrecorded++
 		}
 
 		if hasDevLocalProvenance(edge) {
@@ -526,6 +524,22 @@ walk:
 
 	return ChainCeiling{Ceiling: foldCeilings(bounded, unrecorded), UnrecordedHops: unrecorded}, nil
 }
+
+// hopUnrecorded reports whether one active edge is an unrecorded hop as
+// chainEffectCeiling counts it: the migration sentinel, an edge with the
+// unrecorded ceiling kind, or an edge whose provenance version fails
+// knownProvenanceVersion (provenance version 0 included).
+func hopUnrecorded(edge *store.DelegationEdge) bool {
+	return isMigrationSentinel(edge) ||
+		edge.Kind == store.EffectCeilingUnrecorded ||
+		!knownProvenanceVersion(edge.ProvenanceVersion)
+}
+
+// errOwnEdgeMissing marks a chainEffectCeiling ErrProvenanceMissing that was
+// found at depth 0: the agent itself has no active edge in its project (after
+// the edge backfill completed). The returned error wraps both sentinels, so
+// errors.Is(err, ErrProvenanceMissing) still holds.
+var errOwnEdgeMissing = errors.New("provenance: the agent has no edge of its own")
 
 // foldCeilings returns the fold of the bounded hops' ceilings: bounded V1
 // over the registry permissions every bounded hop allows when there is any

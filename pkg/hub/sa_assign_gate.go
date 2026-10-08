@@ -356,9 +356,11 @@ const saAssignGenericForbiddenMsg = "You don't have permission to assign this GC
 // either clears the cause whether the unrecorded link was this agent or an
 // ancestor; the message does not need to identify which hop failed:
 //   - reincarnate by an authorized user: a user's reincarnate that keeps the
-//     role re-records the edge, with the user as delegator, when the chain
-//     has an unrecorded hop (reincarnateAuthorityFor, ptone/scion#3948), as
-//     a user's role-changing reincarnate always does;
+//     role re-records the edge, with the user as delegator, when the
+//     agent's own edge or a hop above it is unrecorded
+//     (reincarnateChainUnrecorded, ptone/scion#3948), as a user's
+//     role-changing reincarnate always does. Every hop this cause can come
+//     from is an existing edge, which the agent standing gate accepts;
 //   - recreate by an authorized user directly: a user's create writes the
 //     new agent's edge with recorded provenance (commitAgentCreate).
 //
@@ -368,7 +370,7 @@ const saAssignGenericForbiddenMsg = "You don't have permission to assign this GC
 // the role keeps the existing edge. The same cause also covers a hop whose
 // provenance version this binary does not interpret (hopEffectCeilingDeny);
 // the remedies are the same, and the reincarnate repair counts that hop as
-// unrecorded too (chainEffectCeiling). When the unrecorded hop is a row that
+// unrecorded too (hopUnrecorded). When the unrecorded hop is a row that
 // delegation-provenance adoption can address, the 403 details also name the
 // admin adoption route (addCeilingUnrecordedDetails). The message names the
 // user-side remedies and the details the admin-side one; the details add no

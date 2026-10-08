@@ -151,7 +151,8 @@ On a service-account assignment, the message asks for an authorized user to
 reincarnate the agent, or to recreate it directly. Either clears the denial
 whether the unrecorded hop is the agent's own edge or an ancestor's: a user's
 reincarnation that keeps the role re-records the agent's edge with the user as
-delegator when the chain is unrecorded, as a user's create does. A
+delegator when the agent's own edge or an edge above it is unrecorded, as a
+user's create does. A
 reincarnation by the agent itself or by another agent keeps the edge and does
 not clear it. The details name the admin alternative: adopting the chain
 through the route above.
