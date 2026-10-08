@@ -181,4 +181,62 @@ describe('agent detail seed epoch', () => {
     expect(stateManager.getAgent(AGENT_ID)?.phase).toBe('stopped');
     expect(el.agent?.phase).toBe('stopped');
   });
+
+  it('keeps a live change that lands during the agent request of a reload', async () => {
+    // A reload (Retry) in the agent's own scope: setScope is then a no-op,
+    // so the epoch opened before the agent request stays open.
+    stateManager.setScope({ type: 'agent-detail', projectId: 'p1', agentId: AGENT_ID });
+    holdUrls.add(`/api/v1/agents/${AGENT_ID}`);
+    const el = await mount();
+    await waitForHeld(`/api/v1/agents/${AGENT_ID}`);
+
+    // The agent response was read before the agent stopped.
+    handleUpdate(`project.p1.agent.${AGENT_ID}.status`, { agentId: AGENT_ID, phase: 'stopped' });
+    held.get(`/api/v1/agents/${AGENT_ID}`)?.();
+    await settle();
+    await el.updateComplete;
+
+    expect(stateManager.getAgent(AGENT_ID)?.phase).toBe('stopped');
+    expect(el.agent?.phase).toBe('stopped');
+  });
+
+  it('does not seed or show a refresh response after the user left the view', async () => {
+    const el = await mount();
+    await settle();
+    expect(el.agent?.phase).toBe('running');
+
+    holdUrls.add(`/api/v1/agents/${AGENT_ID}`);
+    agentBody = agent({ phase: 'stopped' });
+    const refresh = el.fetchAndMergeAgent();
+    await waitForHeld(`/api/v1/agents/${AGENT_ID}`);
+
+    // The user moves to another agent's page: the scope changes and the
+    // page now shows a different agent.
+    stateManager.setScope({ type: 'agent-detail', projectId: 'p1', agentId: 'agent-2' });
+    el.agentId = 'agent-2';
+    held.get(`/api/v1/agents/${AGENT_ID}`)?.();
+    await refresh;
+    await settle();
+
+    expect(stateManager.getAgent(AGENT_ID)).toBeUndefined();
+    expect(el.agent?.phase).toBe('running');
+  });
+
+  it('shows a refresh response after a scope change without seeding it', async () => {
+    const el = await mount();
+    await settle();
+
+    holdUrls.add(`/api/v1/agents/${AGENT_ID}`);
+    agentBody = agent({ phase: 'stopped' });
+    const refresh = el.fetchAndMergeAgent();
+    await waitForHeld(`/api/v1/agents/${AGENT_ID}`);
+
+    stateManager.setScope({ type: 'brokers-list' });
+    held.get(`/api/v1/agents/${AGENT_ID}`)?.();
+    await refresh;
+    await settle();
+
+    expect(stateManager.getAgent(AGENT_ID)).toBeUndefined();
+    expect(el.agent?.phase).toBe('stopped');
+  });
 });
