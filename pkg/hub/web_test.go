@@ -515,17 +515,27 @@ func TestStaticAssetFingerprintedCaching(t *testing.T) {
 // no manifest, or one that does not parse, only hex names get the long
 // lifetime and Vite names stay no-cache.
 func TestStaticAssetFingerprintedCaching_NoUsableManifest(t *testing.T) {
-	for name, manifest := range map[string]string{
-		"missing":       "",
-		"malformed":     `{"src/client/main.ts": {"file": `,
-		"empty":         `{}`,
-		"null":          `null`,
-		"type mismatch": `{"a": {"file": 1}, "b": {"file": "assets/shoelace-B3-XBhED.js"}}`,
-	} {
-		t.Run(name, func(t *testing.T) {
-			ws := newTestWebServer(t, WebServerConfig{AssetsDir: writeFingerprintFixture(t, manifest)})
+	cases := []struct {
+		name, manifest string
+		manifestIsDir  bool // a directory where the manifest file should be: unreadable
+		wantNil        bool // no set at all, so never a partial one
+	}{
+		{name: "missing", wantNil: true},
+		{name: "malformed", manifest: `{"src/client/main.ts": {"file": `, wantNil: true},
+		{name: "empty", manifest: `{}`},
+		{name: "null", manifest: `null`},
+		{name: "type mismatch", manifest: `{"a": {"file": 1}, "b": {"file": "assets/shoelace-B3-XBhED.js"}}`, wantNil: true},
+		{name: "unreadable", manifestIsDir: true, wantNil: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := writeFingerprintFixture(t, tc.manifest)
+			if tc.manifestIsDir {
+				require.NoError(t, os.MkdirAll(filepath.Join(dir, ".vite", "manifest.json"), 0o755))
+			}
+			ws := newTestWebServer(t, WebServerConfig{AssetsDir: dir})
 			assert.Empty(t, ws.fingerprintedAssets)
-			if name == "missing" || name == "malformed" || name == "type mismatch" {
+			if tc.wantNil {
 				assert.Nil(t, ws.fingerprintedAssets, "no partial set")
 			}
 			assert.Equal(t, "public, max-age=86400", cacheControlOf(t, ws, "/assets/chunk-abc12345.js"))

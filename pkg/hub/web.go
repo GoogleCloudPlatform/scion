@@ -644,7 +644,9 @@ func NewWebServer(cfg WebServerConfig) *WebServer {
 	ws.shellTmpl = tmpl
 
 	ws.hasAssets = ws.detectWebAssets()
-	ws.fingerprintedAssets = ws.loadFingerprintedAssets()
+	if ws.hasAssets {
+		ws.fingerprintedAssets = ws.loadFingerprintedAssets()
+	}
 
 	ws.registerRoutes()
 
@@ -1101,7 +1103,7 @@ var fingerprintSegment = regexp.MustCompile(`-[A-Za-z0-9_-]{8,}\.[A-Za-z0-9]+$`)
 // yields nil, so only the hex rule in isHashedAsset applies; a manifest
 // that does not parse is logged once and never used partially.
 //
-// It runs once, when assets are detected. If --web-assets-dir is replaced
+// It runs once, and only when assets were detected. If --web-assets-dir is replaced
 // or rebuilt while the hub runs, the set describes the earlier build until
 // the hub restarts.
 func (ws *WebServer) loadFingerprintedAssets() map[string]bool {
@@ -1120,8 +1122,12 @@ func (ws *WebServer) loadFingerprintedAssets() map[string]bool {
 	default:
 		return nil
 	}
-	if err != nil {
+	if errors.Is(err, fs.ErrNotExist) {
 		ws.logger().Info("No Vite build manifest; only hex-named assets get the long cache lifetime", "source", source)
+		return nil
+	}
+	if err != nil {
+		ws.logger().Warn("Vite build manifest unreadable; only hex-named assets get the long cache lifetime", "source", source, "error", err)
 		return nil
 	}
 	var manifest map[string]viteManifestChunk
