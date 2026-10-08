@@ -196,6 +196,7 @@ func TestCredentialPathsAreNotTraced(t *testing.T) {
 		"/api/v1/artifacts/shared/tok":                           false,
 		"/api/v1/artifacts/%73hared/tok":                         false,
 		"/api/v1/artifacts/view/cap/index.html":                  false,
+		"/api/v1/artifacts/a%2Fb/../shared/tok":                  false,
 		"/api/v1/artifacts/00000000-0000-4000-8000-000000000001": true,
 		"/api/v1/agents":                                         true,
 	} {
@@ -267,4 +268,22 @@ func TestArtifactsShareLinkClientsBehindProxy(t *testing.T) {
 	assert.Equal(t, http.StatusTooManyRequests, get("2001:db8:7:7::ffff"), "same /64, budget spent")
 	assert.Equal(t, http.StatusNotFound, get("2001:db8:7:8::1"), "another /64")
 	assert.Equal(t, http.StatusNotFound, get("198.51.100.9"), "another IPv4 client")
+}
+
+// TestCredentialPathWithEscapedSlashNotLogged: a request whose escaped and
+// decoded paths clean to different places keeps its token out of the
+// hub's request log.
+func TestCredentialPathWithEscapedSlashNotLogged(t *testing.T) {
+	srv, _ := testServer(t)
+	enableArtifactsForTest(t, srv)
+	var logs bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(old) })
+	token := strings.Repeat("B", 43)
+	for _, target := range []string{"/api/v1/artifacts/a%2Fb/../shared/" + token, "/api/v1/artifacts/a%2Fb/../view/" + token + "/x"} {
+		srv.Handler().ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, target, nil))
+	}
+	require.NotEmpty(t, logs.String())
+	assert.NotContains(t, logs.String(), token)
 }

@@ -110,3 +110,28 @@ func TestRedactPath(t *testing.T) {
 		t.Errorf("IsCredentialPath")
 	}
 }
+
+// TestRedactPathEscapedSlash: a path whose escaped and decoded forms clean
+// to different places is redacted whichever form a caller passes.
+func TestRedactPathEscapedSlash(t *testing.T) {
+	const tok = "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789-_AbCd"
+	raw := "/api/v1/artifacts/a%2Fb/../shared/" + tok
+	u, err := url.Parse("https://hub.example" + raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{u.Path, u.EscapedPath(), raw, "/api/v1/artifacts/a%2fb/..%2fview%2f" + tok} {
+		if got := RedactPath(p); strings.Contains(got, tok) || !IsCredentialPath(p) {
+			t.Errorf("RedactPath(%q) = %q", p, got)
+		}
+	}
+	if got := RedactURL(u); strings.Contains(got, tok) {
+		t.Errorf("RedactURL = %q", got)
+	}
+	// Paths outside the artifact routes are left alone.
+	for _, p := range []string{"/api/v1/agents/a/shared/x", "/shared/x", "/api/v1/projects/p/view/x"} {
+		if RedactPath(p) != p {
+			t.Errorf("RedactPath(%q) = %q, want it unchanged", p, RedactPath(p))
+		}
+	}
+}

@@ -1056,6 +1056,54 @@ func TestReadAsksHostOnceForHome(t *testing.T) {
 	}
 }
 
+// TestGrantKindsEachCount: each grant kind the shared matcher accepts
+// works on its own path: an admin principal grant reads and shares with
+// no role in the home project; a write grant to the home project lets its
+// publishers append; an admin grant to the home project lets its managers
+// share; a scope grant with an empty subject never counts, whatever the
+// host says about "".
+func TestGrantKindsEachCount(t *testing.T) {
+	f, id := newLinkFixture(t)
+
+	admin := principal{PrincipalKindUser, "user-5", ""}
+	f.exec(t, `INSERT INTO artifact_grant (id, artifact_id, subject_kind, subject_ref, permission, created_at)
+		VALUES ('g-admin', ?, 'principal', ?, 'admin', ?)`, id, PrincipalRef(admin.kind, admin.ref), linkNow())
+	if rec := f.do(&admin, http.MethodGet, "/api/v1/artifacts/"+id, nil, nil); rec.Code != http.StatusOK {
+		t.Errorf("admin principal grant does not read: %d", rec.Code)
+	}
+	if rec, _ := f.mintLink(admin, id, ""); rec.Code != http.StatusCreated {
+		t.Errorf("admin principal grant does not share: %d", rec.Code)
+	}
+
+	// agentB publishes in project-1 but does not own userU's artifact.
+	files := bundle{"doc.md": []byte("# v2")}
+	if rec := f.postJSON(&agentB, "/api/v1/artifacts/"+id+"/versions", files.manifest("doc.md")); rec.Code != http.StatusForbidden {
+		t.Fatalf("append before the home grant is write: %d", rec.Code)
+	}
+	f.exec(t, `UPDATE artifact_grant SET permission = 'write' WHERE artifact_id = ? AND subject_kind = 'scope' AND subject_ref = 'project-1'`, id)
+	if rec := f.postJSON(&agentB, "/api/v1/artifacts/"+id+"/versions", files.manifest("doc.md")); rec.Code != http.StatusCreated {
+		t.Errorf("home write grant does not let a publisher append: %d %s", rec.Code, rec.Body.String())
+	}
+
+	manager := principal{PrincipalKindUser, "user-6", ""}
+	f.host.allow(manager, "project-1", PermissionRead, PermissionManage)
+	if rec, _ := f.mintLink(manager, id, ""); rec.Code != http.StatusForbidden {
+		t.Fatalf("share before the home grant is admin: %d", rec.Code)
+	}
+	f.exec(t, `UPDATE artifact_grant SET permission = 'admin' WHERE artifact_id = ? AND subject_kind = 'scope' AND subject_ref = 'project-1'`, id)
+	if rec, _ := f.mintLink(manager, id, ""); rec.Code != http.StatusCreated {
+		t.Errorf("home admin grant does not let a manager share: %d", rec.Code)
+	}
+
+	empty := principal{PrincipalKindUser, "user-8", ""}
+	f.host.allow(empty, "", PermissionRead, PermissionManage, PermissionCreate)
+	f.exec(t, `INSERT INTO artifact_grant (id, artifact_id, subject_kind, subject_ref, permission, created_at)
+		VALUES ('g-empty', ?, 'scope', '', 'admin', ?)`, id, linkNow())
+	if rec := f.do(&empty, http.MethodGet, "/api/v1/artifacts/"+id, nil, nil); rec.Code != http.StatusNotFound {
+		t.Errorf("an empty scope grant gave read: %d", rec.Code)
+	}
+}
+
 func (s *recordingStore) DeleteGrant(ctx context.Context, artifactID, grantID string) error {
 	s.record("DeleteGrant")
 	return s.Store.DeleteGrant(ctx, artifactID, grantID)

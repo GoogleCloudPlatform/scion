@@ -235,38 +235,49 @@ func TestPatchExpiry(t *testing.T) {
 	}
 }
 
-// TestPatchRehome: moving needs the publish gate in the new project; the
-// old home keeps its grant; the new home gets one; the key must stay
-// unique there.
+// TestPatchRehome: a move needs the publish gate in the new project for
+// every caller (owner included) and the cross-project switch; the old home
+// loses its grant; the new home gets one; the key must stay unique there;
+// the grant cap holds. The fake host's Permits answers true everywhere
+// unless denied, as the hub's does for a session user, so Authorize is the
+// gate that decides.
 func TestPatchRehome(t *testing.T) {
 	f, id := newLinkFixture(t)
-	// userU has no role in project-3 yet.
+	// The owner has no role in project-3: refused, switch on or off.
+	f.host.crossScope = true
+	if rec := f.patch(userU, id, `{"scopeRef": "project-3"}`); rec.Code != http.StatusForbidden {
+		t.Fatalf("owner without a role in the target: %d %s", rec.Code, rec.Body.String())
+	}
+	f.host.allow(userU, "project-3", PermissionRead, PermissionCreate)
+	// With a role but the switch off: refused.
+	f.host.crossScope = false
+	rec := f.patch(userU, id, `{"scopeRef": "project-3"}`)
+	if rec.Code != http.StatusForbidden || errCode(t, rec) != "cross_project_sharing_disabled" {
+		t.Fatalf("switch off: %d %s", rec.Code, rec.Body.String())
+	}
+	f.host.crossScope = true
 	if rec := f.patch(userU, id, `{"scopeRef": "project-3"}`); rec.Code != http.StatusOK {
-		// Owner: Permits is enough without Authorize.
-		t.Fatalf("owner rehome: %d %s", rec.Code, rec.Body.String())
+		t.Fatalf("owner with a role, switch on: %d %s", rec.Code, rec.Body.String())
 	}
 	got := decodeInto[ArtifactResponse](t, f.do(&userU, http.MethodGet, "/api/v1/artifacts/"+id, nil, nil))
 	if got.Artifact.ScopeRef != "project-3" {
 		t.Fatalf("scope after move %q", got.Artifact.ScopeRef)
 	}
 	list := decodeInto[GrantListResponse](t, f.do(&userU, http.MethodGet, grantsPath(id), nil, nil))
-	refs := map[string]bool{}
-	for _, g := range list.Grants {
-		refs[g.SubjectRef+"/"+strconv.FormatBool(g.Home)] = true
+	if len(list.Grants) != 1 || list.Grants[0].SubjectRef != "project-3" || !list.Grants[0].Home {
+		t.Errorf("grants after move = %+v, want only the new home", list.Grants)
 	}
-	if !refs["project-3/true"] || !refs["project-1/false"] || len(list.Grants) != 2 {
-		t.Errorf("grants after move = %+v", list.Grants)
-	}
-	if rec := f.do(&agentB, http.MethodGet, "/api/v1/artifacts/"+id, nil, nil); rec.Code != http.StatusOK {
-		t.Errorf("old home project lost read: %d", rec.Code)
+	if rec := f.do(&agentB, http.MethodGet, "/api/v1/artifacts/"+id, nil, nil); rec.Code != http.StatusNotFound {
+		t.Errorf("old home project kept read: %d", rec.Code)
 	}
 
-	// Credential that does not permit publishing there.
+	// The credential must permit publishing there.
+	f.host.allow(userU, "project-4", PermissionCreate)
 	f.host.deny(userU, "project-4", PermissionCreate)
 	if rec := f.patch(userU, id, `{"scopeRef": "project-4"}`); rec.Code != http.StatusForbidden {
 		t.Errorf("rehome without Permits: %d", rec.Code)
 	}
-	// An admin grantee who is not the owner needs Authorize there.
+	// An admin grantee needs Authorize there too.
 	admin := principal{PrincipalKindUser, "user-7", ""}
 	f.host.allow(admin, "project-3", PermissionRead)
 	f.putGrant(userU, id, SubjectPrincipal, PrincipalRef(admin.kind, admin.ref), GrantAdmin)
@@ -278,16 +289,77 @@ func TestPatchRehome(t *testing.T) {
 		t.Errorf("admin with Authorize in the target: %d %s", rec.Code, rec.Body.String())
 	}
 
+	// The grant cap holds for the new home grant.
+	f.host.allow(userU, "project-5", PermissionRead, PermissionCreate, PermissionManage)
+	f.host.allow(userU, "project-6", PermissionCreate)
+	for i := 2; i < MaxGrantsPerArtifact; i++ { // home + admin grantee already
+		if rec, _ := f.putGrant(userU, id, SubjectPrincipal, "user:c"+strconv.Itoa(i), GrantRead); rec.Code != http.StatusCreated {
+			t.Fatalf("grant %d: %d", i, rec.Code)
+		}
+	}
+	if rec, _ := f.putGrant(userU, id, SubjectPrincipal, "user:extra", GrantRead); rec.Code != http.StatusConflict {
+		t.Fatalf("at the cap: %d", rec.Code)
+	}
+	// Moving drops the old home (one slot) and adds the new one, so a move
+	// at the cap is allowed.
+	if rec := f.patch(userU, id, `{"scopeRef": "project-6"}`); rec.Code != http.StatusOK {
+		t.Errorf("move at the cap: %d %s", rec.Code, rec.Body.String())
+	}
+
 	// Key clash in the target project.
 	files := bundle{"k.md": []byte("k")}
 	req := files.manifest("k.md")
 	req.Key, req.Scope = "k", "project-1"
 	a1 := f.publishBundle(userU, "/api/v1/artifacts", req, files).Artifact.ID
 	req.Scope = "project-3"
-	f.host.allow(userU, "project-3", PermissionRead, PermissionCreate)
 	f.publishBundle(userU, "/api/v1/artifacts", req, files)
 	if rec := f.patch(userU, a1, `{"scopeRef": "project-3"}`); rec.Code != http.StatusConflict {
 		t.Errorf("key clash: %d", rec.Code)
+	}
+}
+
+// TestPatchRehomeCap: a move that would put the artifact over the grant
+// cap answers 409 too_many_grants and changes nothing.
+func TestPatchRehomeCap(t *testing.T) {
+	f, id := newLinkFixture(t)
+	f.host.crossScope = true
+	f.host.allow(userU, "project-3", PermissionRead, PermissionCreate)
+	f.host.allow(userU, "project-4", PermissionRead, PermissionCreate)
+	// At the cap (home grant plus principal grants), a move still fits:
+	// the old home's grant goes as the new one comes.
+	for i := 1; i < MaxGrantsPerArtifact; i++ {
+		f.putGrant(userU, id, SubjectPrincipal, "user:c"+strconv.Itoa(i), GrantRead)
+	}
+	if rec := f.patch(userU, id, `{"scopeRef": "project-3"}`); rec.Code != http.StatusOK {
+		t.Fatalf("move at the cap: %d %s", rec.Code, rec.Body.String())
+	}
+	// One grant past the cap (written directly), so the next move would
+	// have to add one more.
+	f.exec(t, `INSERT INTO artifact_grant (id, artifact_id, subject_kind, subject_ref, permission, created_at)
+		VALUES ('g-over', ?, 'principal', 'user:over', 'read', ?)`, id, linkNow())
+	rec := f.patch(userU, id, `{"scopeRef": "project-4"}`)
+	if rec.Code != http.StatusConflict || errCode(t, rec) != "too_many_grants" {
+		t.Fatalf("move over the cap: %d %s", rec.Code, rec.Body.String())
+	}
+	got := decodeInto[ArtifactResponse](t, f.do(&userU, http.MethodGet, "/api/v1/artifacts/"+id, nil, nil))
+	if got.Artifact.ScopeRef != "project-3" {
+		t.Errorf("a refused move changed the home to %q", got.Artifact.ScopeRef)
+	}
+}
+
+// TestDeleteHomeGrantAfterMove: after a move, the new home's grant is the
+// protected one, decided in the store under the artifact's lock.
+func TestDeleteHomeGrantAfterMove(t *testing.T) {
+	f, id := newLinkFixture(t)
+	f.host.crossScope = true
+	f.host.allow(userU, "project-3", PermissionRead, PermissionCreate)
+	if rec := f.patch(userU, id, `{"scopeRef": "project-3"}`); rec.Code != http.StatusOK {
+		t.Fatalf("move: %d", rec.Code)
+	}
+	list := decodeInto[GrantListResponse](t, f.do(&userU, http.MethodGet, grantsPath(id), nil, nil))
+	rec := f.do(&userU, http.MethodDelete, grantsPath(id)+"/"+list.Grants[0].ID, nil, nil)
+	if rec.Code != http.StatusConflict || errCode(t, rec) != "home_grant" {
+		t.Errorf("delete the new home grant: %d %s", rec.Code, rec.Body.String())
 	}
 }
 

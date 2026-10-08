@@ -20,6 +20,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -135,7 +136,8 @@ func TestStorePutGrant(t *testing.T) {
 	})
 }
 
-// TestStoreExpiryAndRehome: SetExpiry and Rehome on both dialects.
+// TestStoreExpiryAndRehome: SetExpiry and moves through UpdateArtifact,
+// on both dialects.
 func TestStoreExpiryAndRehome(t *testing.T) {
 	forEachBackend(t, func(t *testing.T, db *sql.DB, st Store, _ func() *sql.DB) {
 		ctx := context.Background()
@@ -151,37 +153,85 @@ func TestStoreExpiryAndRehome(t *testing.T) {
 		if _, err := st.SetExpiry(ctx, uuid.NewString(), nil); !errors.Is(err, ErrNotFound) {
 			t.Errorf("SetExpiry missing: %v", err)
 		}
-		moved, err := st.Rehome(ctx, a.ID, scopeGrant(a.ID, "project-2", GrantRead))
-		if err != nil || moved.ScopeRef != "project-2" {
-			t.Fatalf("Rehome: %+v %v", moved, err)
+		move := func(id, scope string, max int) (*Artifact, error) {
+			return st.UpdateArtifact(ctx, id, ArtifactUpdate{HomeGrant: scopeGrant(id, scope, GrantRead), MaxGrants: max})
 		}
-		grants, _ := st.ListGrants(ctx, a.ID)
-		have := map[string]bool{}
-		for _, g := range grants {
-			have[g.SubjectRef] = true
+		scopes := func(id string) map[string]bool {
+			grants, err := st.ListGrants(ctx, id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			out := map[string]bool{}
+			for _, g := range grants {
+				if g.SubjectKind == SubjectScope {
+					out[g.SubjectRef] = true
+				}
+			}
+			return out
 		}
-		if !have["project-1"] || !have["project-2"] || len(grants) != 2 {
-			t.Errorf("grants after rehome %+v", grants)
+		// Move and set the expiry in one call.
+		moved, err := st.UpdateArtifact(ctx, a.ID, ArtifactUpdate{HomeGrant: scopeGrant(a.ID, "project-2", GrantRead),
+			MaxGrants: 10, SetExpiry: true, ExpiresAt: &exp})
+		if err != nil || moved.ScopeRef != "project-2" || moved.ExpiresAt == nil {
+			t.Fatalf("move with expiry: %+v %v", moved, err)
 		}
-		// Moving back keeps the existing grant rather than adding one.
-		if _, err := st.Rehome(ctx, a.ID, scopeGrant(a.ID, "project-1", GrantRead)); err != nil {
+		if got := scopes(a.ID); len(got) != 1 || !got["project-2"] {
+			t.Errorf("scope grants after a move = %v, want only the new home", got)
+		}
+		// A scope grant the new home already has is kept, not duplicated.
+		if _, err := st.PutGrant(ctx, scopeGrant(a.ID, "project-3", GrantWrite), 10); err != nil {
 			t.Fatal(err)
 		}
-		if grants, _ := st.ListGrants(ctx, a.ID); len(grants) != 2 {
-			t.Errorf("moving back added a grant: %d", len(grants))
+		if _, err := move(a.ID, "project-3", 10); err != nil {
+			t.Fatal(err)
+		}
+		grants, _ := st.ListGrants(ctx, a.ID)
+		if len(grants) != 1 || grants[0].SubjectRef != "project-3" || grants[0].Permission != GrantWrite {
+			t.Errorf("grants after moving to a granted scope = %+v", grants)
+		}
+		// The cap counts the new home grant.
+		for i := range 2 {
+			g := &Grant{ID: uuid.NewString(), ArtifactID: a.ID, SubjectKind: SubjectPrincipal,
+				SubjectRef: "user:u" + strconv.Itoa(i), Permission: GrantRead, CreatedAt: time.Now()}
+			if _, err := st.PutGrant(ctx, g, 10); err != nil {
+				t.Fatal(err)
+			}
+		}
+		// 2 principal grants + the new home = 3 after the old home goes.
+		if _, err := move(a.ID, "project-4", 2); !errors.Is(err, ErrTooManyGrants) {
+			t.Errorf("move over the cap: %v", err)
+		}
+		if got, _ := st.GetArtifact(ctx, a.ID); got.ScopeRef != "project-3" {
+			t.Errorf("a refused move changed the home to %q", got.ScopeRef)
+		}
+		if _, err := move(a.ID, "project-4", 3); err != nil {
+			t.Errorf("move at the cap: %v", err)
 		}
 		// Key clash with another live artifact of the owner in the target.
-		c, _, _, _ := seedArtifactIn(t, st, "k2", "project-3")
-		d, _, _, _ := seedArtifactIn(t, st, "k2", "project-4")
-		if _, err := st.Rehome(ctx, c.ID, scopeGrant(c.ID, "project-4", GrantRead)); !errors.Is(err, ErrConflict) {
+		c, _, _, _ := seedArtifactIn(t, st, "k2", "project-6")
+		seedArtifactIn(t, st, "k2", "project-7")
+		if _, err := move(c.ID, "project-7", 10); !errors.Is(err, ErrConflict) {
 			t.Errorf("key clash: %v", err)
 		}
-		_ = d
-		if _, err := st.Rehome(ctx, c.ID, scopeGrant(c.ID, "project-5", GrantRead)); err != nil {
+		if _, err := move(c.ID, "project-8", 10); err != nil {
 			t.Errorf("no clash: %v", err)
 		}
-		if _, err := st.Rehome(ctx, uuid.NewString(), scopeGrant("x", "p", GrantRead)); err == nil {
-			t.Errorf("Rehome with a grant of another artifact accepted")
+		if _, err := st.UpdateArtifact(ctx, uuid.NewString(), ArtifactUpdate{HomeGrant: scopeGrant("x", "p", GrantRead), MaxGrants: 1}); err == nil {
+			t.Errorf("a move with a grant of another artifact accepted")
+		}
+		if _, err := st.UpdateArtifact(ctx, c.ID, ArtifactUpdate{HomeGrant: scopeGrant(c.ID, "p", GrantRead)}); err == nil {
+			t.Errorf("a move without a cap accepted")
+		}
+		// The home grant cannot be deleted; others can.
+		home := ""
+		gs, _ := st.ListGrants(ctx, c.ID)
+		for _, g := range gs {
+			if g.SubjectRef == "project-8" {
+				home = g.ID
+			}
+		}
+		if err := st.DeleteGrant(ctx, c.ID, home); !errors.Is(err, ErrConflict) {
+			t.Errorf("delete the home grant: %v", err)
 		}
 	})
 }

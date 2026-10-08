@@ -61,13 +61,31 @@ var credentialPathPrefixes = []string{
 	"/api/v1/artifacts/view/",
 }
 
-// credentialPathPrefix returns the credential route p is under, or "". A
-// path that only reaches the route once cleaned (dot segments, doubled
-// slashes) counts, since the router cleans it the same way.
+// artifactsRoute is the route both credential routes live under.
+const artifactsRoute = "/api/v1/artifacts/"
+
+// credentialPathPrefix returns the credential route p (a decoded or an
+// escaped URL path) may be under, or "". It errs towards redacting: a path
+// counts when it reaches a route once cleaned (dot segments, doubled
+// slashes), when it contains a route anywhere, and also when it contains a
+// route's last segment ("/shared/", "/view/") anywhere while its cleaned
+// form is under artifactsRoute, because an escaped slash can make the
+// decoded and the escaped path clean to different places
+// (/api/v1/artifacts/a%2Fb/../shared/<token>).
 func credentialPathPrefix(p string) string {
 	clean := path.Clean("/" + p)
 	for _, prefix := range credentialPathPrefixes {
 		if strings.HasPrefix(clean, prefix) || strings.Contains(p, prefix) {
+			return prefix
+		}
+	}
+	if !strings.HasPrefix(clean+"/", artifactsRoute) {
+		return ""
+	}
+	// Escaped slashes count as slashes here.
+	slashed := strings.ReplaceAll(strings.ToLower(p), "%2f", "/")
+	for _, prefix := range credentialPathPrefixes {
+		if strings.Contains(slashed, "/"+strings.TrimPrefix(prefix, artifactsRoute)) { // "/shared/", "/view/"
 			return prefix
 		}
 	}
@@ -99,9 +117,13 @@ func RedactURL(u *url.URL) string {
 	}
 	c := *u
 	c.RawQuery = RedactQuery(u.RawQuery)
-	// u.Path is the decoded path, so an escaped spelling of a credential
-	// route is caught too.
-	if prefix := credentialPathPrefix(u.Path); prefix != "" {
+	// The decoded and the escaped path can clean to different places
+	// (an escaped slash), so both are checked.
+	prefix := credentialPathPrefix(u.Path)
+	if prefix == "" {
+		prefix = credentialPathPrefix(u.EscapedPath())
+	}
+	if prefix != "" {
 		c.Path, c.RawPath = prefix+redactedValue, ""
 	}
 	return c.String()
