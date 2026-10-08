@@ -519,6 +519,7 @@ func (s *Server) updateGroup(w http.ResponseWriter, r *http.Request, id string) 
 	if req.Annotations != nil {
 		group.Annotations = req.Annotations
 	}
+	ownerChanged := req.OwnerID != "" && req.OwnerID != group.OwnerID
 	if req.OwnerID != "" {
 		group.OwnerID = req.OwnerID
 	}
@@ -526,6 +527,9 @@ func (s *Server) updateGroup(w http.ResponseWriter, r *http.Request, id string) 
 	if err := s.store.UpdateGroup(ctx, group); err != nil {
 		writeErrorFromErr(w, err, "")
 		return
+	}
+	if ownerChanged {
+		s.publishConduitAuthzChanged(conduitAuthzMatch{})
 	}
 
 	s.groupsLogger().Info("group updated",

@@ -63,6 +63,11 @@ func (s *Server) openConduitPort(ctx context.Context, identity Identity, agent *
 	if rt == nil || rt.router == nil {
 		return nil, errConduitNoRoute
 	}
+	if _, isUser := identity.(UserIdentity); isUser && s.conduitAuthz.Load() == nil {
+		// A user stream must be re-checked for its lifetime; without a
+		// running re-check it is not opened.
+		return nil, errConduitNoRoute
+	}
 	params := map[string]string{grant.ParamHost: conduitProxyHost, grant.ParamPort: strconv.Itoa(port)}
 	req := router.Request{
 		Op:    router.OpStream,

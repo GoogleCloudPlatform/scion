@@ -73,6 +73,12 @@ func (r *authzRecorder) lines(t *testing.T) []map[string]any {
 	return out
 }
 
+func (r *authzRecorder) text() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.buf.String()
+}
+
 func (r *authzRecorder) metricList() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -220,10 +226,10 @@ func TestConduitStreamAuthz_TargetGoneCloses4404(t *testing.T) {
 	assert.Equal(t, []string{"notify/target_gone/pty"}, f.rec.metricList())
 }
 
-// TestConduitStreamAuthz_UnavailableNeverClosesOrRenews (O3; gate
-// conditions 1 and 2): a check that cannot be evaluated records
-// deferred_unavailable, does not close the stream, and moves no deadline;
-// once evaluation recovers the next check decides normally.
+// TestConduitStreamAuthz_UnavailableNeverClosesOrRenews (O3): a check that
+// cannot be evaluated records deferred_unavailable on every trigger and
+// neither closes nor renews the stream; once evaluation recovers the next
+// check decides normally.
 func TestConduitStreamAuthz_UnavailableNeverClosesOrRenews(t *testing.T) {
 	f := newAuthzTrackerFixture(t, 60*time.Second)
 	c := f.track("u1", "agent-x", "p1", grant.StreamKindPTY, 1)
@@ -239,10 +245,8 @@ func TestConduitStreamAuthz_UnavailableNeverClosesOrRenews(t *testing.T) {
 		assert.True(t, strings.HasSuffix(m, "/deferred_unavailable/pty"), m)
 	}
 	for _, l := range f.rec.lines(t) {
-		assert.Equal(t, "deferred_unavailable", l["outcome"])
+		assert.Equal(t, "deferred_unavailable", l["outcome"], "an unavailable check renewed or closed the stream")
 		assert.Equal(t, "WARN", l["level"])
-		assert.Equal(t, "", l["deadline_before"])
-		assert.Equal(t, "", l["deadline_after"], "an unavailable check moved the deadline")
 	}
 
 	// Recovery: the next check decides on the real state.
@@ -305,7 +309,7 @@ func TestConduitStreamAuthz_LogLine(t *testing.T) {
 	assert.Equal(t, "agent-x", l["agent_id"])
 	assert.Equal(t, "p1", l["project_id"])
 	assert.Equal(t, "user", l["principal_kind"])
-	for _, k := range []string{"check_start", "check_end", "deadline_before", "deadline_after"} {
+	for _, k := range []string{"check_start", "check_end"} {
 		assert.Contains(t, l, k)
 	}
 	assert.Equal(t, []string{"resync/closed/tcp"}, f.rec.metricList())
@@ -351,4 +355,68 @@ func TestConduitAuthzMatchForEvent(t *testing.T) {
 		assert.Equal(t, tc.ok, ok, tc.evt.Subject)
 		assert.Equal(t, tc.want, got, tc.evt.Subject)
 	}
+}
+
+// TestConduitStreamAuthz_SweepFixedPeriod: the next sweep tick is armed
+// before a sweep runs, so a slow sweep does not push later ticks back; a
+// tick that finds the previous sweep still running is skipped and logged.
+func TestConduitStreamAuthz_SweepFixedPeriod(t *testing.T) {
+	f := newAuthzTrackerFixture(t, 60*time.Second)
+	f.track("u1", "agent-x", "p1", grant.StreamKindPTY, 1)
+	entered := make(chan struct{}, 4)
+	release := make(chan struct{})
+	f.check.mu.Lock()
+	f.check.block = release
+	f.check.mu.Unlock()
+	f.a.cfg.Check = func(ctx context.Context, st *conduitUserStream) (conduitAuthzVerdict, string) {
+		entered <- struct{}{}
+		return f.check.check(ctx, st)
+	}
+
+	first := make(chan struct{})
+	go func() {
+		defer close(first)
+		f.clk.Advance(60 * time.Second) // runs the first, slow sweep
+	}()
+	<-entered
+	require.True(t, f.clk.WaitFor(recheckWait, func(pending int) bool { return pending == 1 }),
+		"the next tick was not armed before the sweep ran")
+
+	f.clk.Advance(60 * time.Second) // the next tick, while the first sweep runs
+	assert.Contains(t, f.rec.text(), "conduit_stream_authz_sweep_skipped")
+	close(release)
+	<-first
+	assert.Equal(t, 1, f.check.callCount(), "the skipped tick re-checked the stream")
+	assert.Contains(t, f.rec.text(), `"msg":"conduit_stream_authz_sweep"`)
+}
+
+// TestConduitNotifyQueue_Coalesces: notify matches recorded while a
+// re-check runs are deduplicated, a match-all absorbs the rest, and too
+// many distinct matches collapse into one re-check of every stream.
+func TestConduitNotifyQueue_Coalesces(t *testing.T) {
+	q := newConduitNotifyQueue()
+	q.add(conduitAuthzMatch{UserID: "u1"})
+	q.add(conduitAuthzMatch{UserID: "u1"})
+	q.add(conduitAuthzMatch{AgentID: "a1"})
+	all, ms := q.take()
+	assert.False(t, all)
+	assert.ElementsMatch(t, []conduitAuthzMatch{{UserID: "u1"}, {AgentID: "a1"}}, ms)
+
+	q.add(conduitAuthzMatch{UserID: "u1"})
+	q.add(conduitAuthzMatch{})
+	q.add(conduitAuthzMatch{UserID: "u2"})
+	all, ms = q.take()
+	assert.True(t, all)
+	assert.Empty(t, ms)
+
+	for i := 0; i <= conduitNotifyMaxPending; i++ {
+		q.add(conduitAuthzMatch{UserID: strconv.Itoa(i)})
+	}
+	all, ms = q.take()
+	assert.True(t, all, "the pending set was not bounded")
+	assert.Empty(t, ms)
+
+	all, ms = q.take()
+	assert.False(t, all)
+	assert.Empty(t, ms)
 }

@@ -180,11 +180,12 @@ type conduitStreamAuthzConfig struct {
 type conduitStreamAuthz struct {
 	cfg conduitStreamAuthzConfig
 
-	mu      sync.Mutex
-	streams map[*conduitUserStream]struct{}
-	sweep   clock.Timer
-	ctx     context.Context
-	stopped bool
+	mu       sync.Mutex
+	streams  map[*conduitUserStream]struct{}
+	sweep    clock.Timer
+	sweeping bool // a sweep is running
+	ctx      context.Context
+	stopped  bool
 }
 
 func newConduitStreamAuthz(cfg conduitStreamAuthzConfig) *conduitStreamAuthz {
@@ -215,6 +216,13 @@ func (a *conduitStreamAuthz) Start(ctx context.Context) {
 	}()
 }
 
+// runContext is the context Start was given (Background before Start).
+func (a *conduitStreamAuthz) runContext() context.Context {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.ctx
+}
+
 // Stop disarms the sweep. Tracked streams are left as they are.
 func (a *conduitStreamAuthz) Stop() {
 	a.mu.Lock()
@@ -235,13 +243,37 @@ func (a *conduitStreamAuthz) armSweep() {
 	if a.stopped {
 		return
 	}
-	a.sweep = a.cfg.Clock.AfterFunc(a.cfg.RecheckInterval, func() {
-		a.mu.Lock()
-		ctx := a.ctx
-		a.mu.Unlock()
-		a.Recheck(ctx, conduitAuthzTriggerSweep, conduitAuthzMatch{})
-		a.armSweep()
-	})
+	a.sweep = a.cfg.Clock.AfterFunc(a.cfg.RecheckInterval, a.runSweep)
+}
+
+// runSweep is one sweep tick. Ticks keep a fixed period: the next one is
+// armed before this sweep runs, so a long sweep does not push the
+// following ones back. A tick that finds the previous sweep still running
+// is skipped (and logged); that sweep is already re-checking every stream.
+func (a *conduitStreamAuthz) runSweep() {
+	a.armSweep()
+	a.mu.Lock()
+	ctx := a.ctx
+	busy := a.sweeping
+	a.sweeping = true
+	a.mu.Unlock()
+	if busy {
+		a.cfg.Logger.Warn("conduit_stream_authz_sweep_skipped",
+			"reason", "previous sweep still running", "interval", a.cfg.RecheckInterval)
+		return
+	}
+	start := a.cfg.Clock.Now()
+	n := a.Len()
+	a.Recheck(ctx, conduitAuthzTriggerSweep, conduitAuthzMatch{})
+	took := a.cfg.Clock.Now().Sub(start)
+	a.mu.Lock()
+	a.sweeping = false
+	a.mu.Unlock()
+	level := slog.LevelDebug
+	if took > a.cfg.RecheckInterval {
+		level = slog.LevelWarn
+	}
+	a.cfg.Logger.Log(ctx, level, "conduit_stream_authz_sweep", "streams", n, "duration", took, "interval", a.cfg.RecheckInterval)
 }
 
 // Track registers st until the returned function is called (when the
@@ -353,8 +385,6 @@ func (a *conduitStreamAuthz) check(ctx context.Context, trigger string, st *cond
 		"principal_id", st.UserID,
 		"check_start", start,
 		"check_end", end,
-		"deadline_before", "",
-		"deadline_after", "",
 		"detail", detail,
 	)
 }

@@ -168,7 +168,8 @@ func newRecheckFixture(t *testing.T, events EventPublisher, interval time.Durati
 	f.srv.conduitAuthzMetrics.Store(&m)
 	runCtx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	f.a = f.srv.startConduitStreamAuthz(runCtx, f.clk, interval)
+	f.a, _, err = f.srv.startConduitStreamAuthz(runCtx, f.clk, interval)
+	require.NoError(t, err)
 	return f
 }
 
@@ -574,5 +575,34 @@ func TestConduitAuthzChanged_NotPublishedWhenDisabled(t *testing.T) {
 		assert.True(t, strings.Contains(string(evt.Data), "marker"), "an event was published while disabled: %s", evt.Data)
 	case <-time.After(recheckWait):
 		t.Fatal("no event")
+	}
+}
+
+// TestConduitAuthzChanged_GroupOwnerChange: changing a group's owner
+// through the API publishes a re-check of every stream (group ownership
+// can carry access); an update that keeps the owner publishes nothing.
+func TestConduitAuthzChanged_GroupOwnerChange(t *testing.T) {
+	f := newRecheckFixture(t, nil, -1)
+	ctx := context.Background()
+	g := &store.Group{ID: tid("recheck-group"), Slug: "recheck-group", Name: "recheck-group", OwnerID: f.u1.ID()}
+	require.NoError(t, f.store.CreateGroup(ctx, g))
+	ch, unsubscribe := f.srv.events.Subscribe(conduitAuthzChangedSubject)
+	defer unsubscribe()
+
+	rec := doRequest(t, f.srv, http.MethodPatch, "/api/v1/groups/"+g.ID, map[string]string{"description": "same owner", "ownerId": f.u1.ID()})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	rec = doRequest(t, f.srv, http.MethodPatch, "/api/v1/groups/"+g.ID, map[string]string{"ownerId": f.u2.ID()})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	select {
+	case evt := <-ch:
+		assert.JSONEq(t, `{}`, string(evt.Data))
+	case <-time.After(recheckWait):
+		t.Fatal("no re-check published for the owner change")
+	}
+	select {
+	case evt := <-ch:
+		t.Fatalf("unexpected second event: %s", evt.Data)
+	default:
 	}
 }

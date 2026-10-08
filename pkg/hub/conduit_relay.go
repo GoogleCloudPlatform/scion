@@ -205,20 +205,27 @@ func (s *Server) StartConduitRelay(ctx context.Context, opts ConduitRelayOptions
 		return fmt.Errorf("conduit router: %w", err)
 	}
 	rt := &conduitRuntime{relay: r, registry: reg, router: rtr, store: st, now: now}
-	// Published before Start: the internal listener is already serving and
-	// the self-check probe must reach this relay's internal handler.
-	if !s.conduit.CompareAndSwap(nil, rt) {
-		return errors.New("conduit relay already started")
-	}
-	if err := r.Start(ctx); err != nil {
-		s.conduit.Store(nil)
-		return err
-	}
+	// The stream re-check starts before the relay is published, so every
+	// user stream opened through it is tracked.
 	interval := opts.AuthzRecheckInterval
 	if interval == 0 {
 		interval = s.config.ConduitAuthzRecheckInterval
 	}
-	s.startConduitStreamAuthz(ctx, opts.Clock, interval)
+	_, stopAuthz, err := s.startConduitStreamAuthz(ctx, opts.Clock, interval)
+	if err != nil {
+		return err
+	}
+	// Published before Start: the internal listener is already serving and
+	// the self-check probe must reach this relay's internal handler.
+	if !s.conduit.CompareAndSwap(nil, rt) {
+		stopAuthz()
+		return errors.New("conduit relay already started")
+	}
+	if err := r.Start(ctx); err != nil {
+		s.conduit.Store(nil)
+		stopAuthz()
+		return err
+	}
 	if r.InternalEndpoint() == "" && !opts.RequireHA {
 		slog.Warn("Conduit relay is unaddressable (no internal endpoint); this is only correct for a single-node hub")
 	}

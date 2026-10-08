@@ -20,6 +20,7 @@ import (
 	"errors"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
@@ -55,58 +56,168 @@ type conduitListenNotifier interface {
 	AddOnListen(fn func()) (remove func())
 }
 
-// startConduitStreamAuthz starts the user-stream re-check for this node.
-// It runs until ctx ends.
-func (s *Server) startConduitStreamAuthz(ctx context.Context, clk clock.Clock, interval time.Duration) *conduitStreamAuthz {
-	a := newConduitStreamAuthz(conduitStreamAuthzConfig{
+// startConduitStreamAuthz creates and starts the user-stream re-check for
+// this node and binds it to the current event publisher. It runs until
+// ctx ends or stop is called. It fails if a re-check already runs.
+//
+// The event publisher may be set later (the server sets it after the
+// relay starts): SetEventPublisher rebinds the notify subscription and the
+// LISTEN resync to the new publisher.
+func (s *Server) startConduitStreamAuthz(ctx context.Context, clk clock.Clock, interval time.Duration) (a *conduitStreamAuthz, stop func(), err error) {
+	a = newConduitStreamAuthz(conduitStreamAuthzConfig{
 		Check:           s.checkConduitUserStream,
 		Clock:           clk,
 		RecheckInterval: interval,
 		Metrics:         serverConduitAuthzMetrics{s},
 		Logger:          slog.Default().With("subsystem", "hub.conduit"),
 	})
-	s.conduitAuthz.Store(a)
-	a.Start(ctx)
+	if !s.conduitAuthz.CompareAndSwap(nil, a) {
+		return nil, nil, errors.New("conduit stream re-check already started")
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	a.Start(runCtx)
+	s.bindConduitAuthzEvents()
+	stop = func() {
+		cancel()
+		s.conduitAuthz.CompareAndSwap(a, nil)
+	}
+	return a, stop, nil
+}
 
+// bindConduitAuthzEvents (re)binds the running re-check to the current
+// event publisher: the notify subscription and, for a publisher with a
+// LISTEN connection, the resync on every (re)connect. A previous binding is
+// released first. Events published before the binding was in place were
+// not seen, so every stream is re-checked once the binding is in place.
+func (s *Server) bindConduitAuthzEvents() {
+	a := s.conduitAuthz.Load()
+	if a == nil {
+		return
+	}
 	s.mu.RLock()
 	events := s.events
 	s.mu.RUnlock()
-	if events == nil {
-		return a
+
+	s.conduitAuthzBindMu.Lock()
+	if s.conduitAuthzUnbind != nil {
+		s.conduitAuthzUnbind()
+		s.conduitAuthzUnbind = nil
 	}
+	runCtx := a.runContext()
+	if events == nil || runCtx.Err() != nil {
+		s.conduitAuthzBindMu.Unlock()
+		return
+	}
+	ctx, cancel := context.WithCancel(runCtx)
+	s.conduitAuthzUnbind = cancel
+	s.conduitAuthzBindMu.Unlock()
+
+	var removeListen func()
 	if ln, ok := events.(conduitListenNotifier); ok {
-		remove := ln.AddOnListen(func() {
+		removeListen = ln.AddOnListen(func() {
 			a.Recheck(ctx, conduitAuthzTriggerResync, conduitAuthzMatch{})
 		})
-		go func() {
-			<-ctx.Done()
-			remove()
-		}()
 	}
 	ch, unsubscribe := events.Subscribe(conduitAuthzEventPatterns...)
-	if ch == nil {
-		unsubscribe()
-		return a
-	}
 	go func() {
-		defer unsubscribe()
-		for {
-			select {
-			case <-ctx.Done():
+		<-ctx.Done()
+		if removeListen != nil {
+			removeListen()
+		}
+		unsubscribe()
+	}()
+	if ch != nil {
+		q := newConduitNotifyQueue()
+		go q.receive(ctx, ch)
+		go q.work(ctx, a)
+	}
+	a.Recheck(ctx, conduitAuthzTriggerResync, conduitAuthzMatch{})
+}
+
+// conduitNotifyMaxPending bounds the distinct pending notify matches; past
+// it the queue collapses to one re-check of every stream.
+const conduitNotifyMaxPending = 256
+
+// conduitNotifyQueue decouples receiving trigger events from re-checking:
+// the receiver only records the match, so the subscription keeps draining
+// while a re-check runs (the publishers drop events for a subscriber that
+// falls behind), and matches that pile up meanwhile are coalesced.
+type conduitNotifyQueue struct {
+	mu      sync.Mutex
+	pending map[conduitAuthzMatch]struct{}
+	all     bool
+	wake    chan struct{}
+}
+
+func newConduitNotifyQueue() *conduitNotifyQueue {
+	return &conduitNotifyQueue{pending: map[conduitAuthzMatch]struct{}{}, wake: make(chan struct{}, 1)}
+}
+
+// add records m (the zero match selects every stream).
+func (q *conduitNotifyQueue) add(m conduitAuthzMatch) {
+	q.mu.Lock()
+	switch {
+	case q.all:
+	case m == conduitAuthzMatch{} || len(q.pending) >= conduitNotifyMaxPending:
+		q.all = true
+		q.pending = map[conduitAuthzMatch]struct{}{}
+	default:
+		q.pending[m] = struct{}{}
+	}
+	q.mu.Unlock()
+	select {
+	case q.wake <- struct{}{}:
+	default:
+	}
+}
+
+// take returns and clears the pending matches.
+func (q *conduitNotifyQueue) take() (all bool, ms []conduitAuthzMatch) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	all = q.all
+	for m := range q.pending {
+		ms = append(ms, m)
+	}
+	q.all = false
+	q.pending = map[conduitAuthzMatch]struct{}{}
+	return all, ms
+}
+
+// receive records the match of every trigger event until ctx ends.
+func (q *conduitNotifyQueue) receive(ctx context.Context, ch <-chan Event) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case evt, ok := <-ch:
+			if !ok {
 				return
-			case evt, ok := <-ch:
-				if !ok {
-					return
-				}
-				m, ok := conduitAuthzMatchForEvent(evt)
-				if !ok {
-					continue
-				}
-				a.Recheck(ctx, conduitAuthzTriggerNotify, m)
+			}
+			if m, ok := conduitAuthzMatchForEvent(evt); ok {
+				q.add(m)
 			}
 		}
-	}()
-	return a
+	}
+}
+
+// work runs the notify re-checks for the pending matches until ctx ends.
+func (q *conduitNotifyQueue) work(ctx context.Context, a *conduitStreamAuthz) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-q.wake:
+		}
+		all, ms := q.take()
+		if all {
+			a.Recheck(ctx, conduitAuthzTriggerNotify, conduitAuthzMatch{})
+			continue
+		}
+		for _, m := range ms {
+			a.Recheck(ctx, conduitAuthzTriggerNotify, m)
+		}
+	}
 }
 
 // conduitAuthzMatchForEvent maps a trigger event to the streams it
@@ -163,6 +274,17 @@ func conduitAuthzMatchForRoleBinding(b *store.RoleBinding) conduitAuthzMatch {
 		m.ProjectID = b.ScopeID
 	}
 	return m
+}
+
+// publishConduitAuthzChangedVia is publishConduitAuthzChanged for callers
+// without a hub Server (the web server's login path). It publishes
+// whenever events is set; with hub.conduit off nothing subscribes to the
+// subject.
+func publishConduitAuthzChangedVia(events EventPublisher, m conduitAuthzMatch) {
+	if events == nil {
+		return
+	}
+	events.PublishRaw(conduitAuthzChangedSubject, m)
 }
 
 // trackConduitUserStream registers a user-originated stream this node

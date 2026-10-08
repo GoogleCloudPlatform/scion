@@ -114,3 +114,119 @@ func TestConduitProxyRevocationClosesWebSocket(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.EqualValues(t, 1, f.sessions.Load(), "the agent session was re-established")
 }
+
+// proxyWS opens a WebSocket through the port proxy and checks one echo.
+func proxyWS(t *testing.T, f *conduitProxyFixture) *websocket.Conn {
+	t.Helper()
+	wsURL := "ws" + strings.TrimPrefix(f.base, "http") +
+		"/api/v1/agents/" + f.launched.ID + "/ports/" + strconv.Itoa(f.app.port) + "/proxy/ws"
+	c, _, err := websocket.DefaultDialer.Dial(wsURL, http.Header{"Authorization": {"Bearer " + f.userToken}})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = c.Close() })
+	require.NoError(t, c.SetReadDeadline(time.Now().Add(10*time.Second)))
+	require.NoError(t, c.WriteMessage(websocket.TextMessage, []byte("ping")))
+	_, got, err := c.ReadMessage()
+	require.NoError(t, err)
+	require.Equal(t, "ping", string(got))
+	return c
+}
+
+// requireAuthzClose reads until the WebSocket closes and checks the code.
+func requireAuthzClose(t *testing.T, c *websocket.Conn) {
+	t.Helper()
+	require.NoError(t, c.SetReadDeadline(time.Now().Add(recheckWait)))
+	_, _, err := c.ReadMessage()
+	var ce *websocket.CloseError
+	require.ErrorAs(t, err, &ce)
+	assert.Equal(t, 4401, ce.Code)
+	assert.Equal(t, "authz_expired", ce.Text)
+}
+
+func echoApp() http.Handler {
+	up := websocket.Upgrader{}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := up.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer func() { _ = c.Close() }()
+		for {
+			mt, msg, err := c.ReadMessage()
+			if err != nil {
+				return
+			}
+			if err := c.WriteMessage(mt, msg); err != nil {
+				return
+			}
+		}
+	})
+}
+
+// TestConduitAuthzNotifyInServerStartupOrder: the server starts the relay
+// while its event publisher is still the no-op one and sets the real
+// publisher afterwards (cmd/server_foreground.go). A revocation committed
+// through the API must still close the proxied stream on the notify path.
+func TestConduitAuthzNotifyInServerStartupOrder(t *testing.T) {
+	f := newConduitProxyFixture(t, echoApp())
+	_, noop := f.srv.events.(noopEventPublisher)
+	require.True(t, noop, "the relay started before an event publisher was set")
+	metrics := newMetricWaiter()
+	var m conduitStreamAuthzMetrics = metrics
+	f.srv.conduitAuthzMetrics.Store(&m)
+	f.srv.SetEventPublisher(NewChannelEventPublisher())
+	f.startAgent(t)
+	c := proxyWS(t, f)
+
+	rec := doRequest(t, f.srv, http.MethodPatch, "/api/v1/users/"+f.launched.OwnerID, map[string]string{"status": store.UserStatusSuspended})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	requireAuthzClose(t, c)
+	metrics.wait(t, "notify/closed/tcp", 1)
+}
+
+// TestConduitAuthzResyncInServerStartupOrder: with the publisher set
+// after the relay started, a LISTEN reconnect still re-checks every
+// stream: a revocation whose event was lost while the listener was down
+// closes the proxied stream with trigger=resync.
+func TestConduitAuthzResyncInServerStartupOrder(t *testing.T) {
+	f := newConduitProxyFixture(t, echoApp())
+	metrics := newMetricWaiter()
+	var m conduitStreamAuthzMetrics = metrics
+	f.srv.conduitAuthzMetrics.Store(&m)
+	pub := newListenGapPublisher()
+	f.srv.SetEventPublisher(pub)
+	f.startAgent(t)
+	c := proxyWS(t, f)
+
+	pub.down.Store(true)
+	rec := doRequest(t, f.srv, http.MethodPatch, "/api/v1/users/"+f.launched.OwnerID, map[string]string{"status": store.UserStatusSuspended})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	pub.reconnect()
+
+	requireAuthzClose(t, c)
+	metrics.wait(t, "resync/closed/tcp", 1)
+	assert.NotContains(t, metrics.list(), "notify/closed/tcp")
+}
+
+// TestConduitAuthzRebindsOnPublisherChange: replacing the event publisher
+// moves the notify subscription to the new one.
+func TestConduitAuthzRebindsOnPublisherChange(t *testing.T) {
+	f := newConduitProxyFixture(t, echoApp())
+	metrics := newMetricWaiter()
+	var m conduitStreamAuthzMetrics = metrics
+	f.srv.conduitAuthzMetrics.Store(&m)
+	first := NewChannelEventPublisher()
+	f.srv.SetEventPublisher(first)
+	second := NewChannelEventPublisher()
+	f.srv.SetEventPublisher(second)
+	f.startAgent(t)
+	c := proxyWS(t, f)
+
+	first.PublishRaw(conduitAuthzChangedSubject, conduitAuthzMatch{})
+	second.PublishRaw(conduitAuthzChangedSubject, conduitAuthzMatch{UserID: "someone-else"})
+	rec := doRequest(t, f.srv, http.MethodPatch, "/api/v1/users/"+f.launched.OwnerID, map[string]string{"status": store.UserStatusSuspended})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	requireAuthzClose(t, c)
+	metrics.wait(t, "notify/closed/tcp", 1)
+	assert.Equal(t, []string{"notify/closed/tcp"}, metrics.list(), "the old publisher's event was acted on")
+}

@@ -121,7 +121,6 @@ func newPGTwoNodes(t *testing.T) *pgTwoNodes {
 	require.NoError(t, err)
 	t.Cleanup(f.pubB.Close)
 	f.nodeA.SetEventPublisher(f.pubA)
-	f.nodeB.SetEventPublisher(f.pubB)
 
 	f.seed(t)
 
@@ -129,7 +128,11 @@ func newPGTwoNodes(t *testing.T) *pgTwoNodes {
 	f.nodeB.conduitAuthzMetrics.Store(&m)
 	runCtx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	f.authzB = f.nodeB.startConduitStreamAuthz(runCtx, f.clk, -1)
+	f.authzB, _, err = f.nodeB.startConduitStreamAuthz(runCtx, f.clk, -1)
+	require.NoError(t, err)
+	// Server startup order: the re-check starts with the relay, before
+	// the event publisher is set (cmd/server_foreground.go).
+	f.nodeB.SetEventPublisher(f.pubB)
 	f.waitListening(t)
 	return f
 }

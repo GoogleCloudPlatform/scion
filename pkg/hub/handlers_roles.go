@@ -1538,7 +1538,7 @@ func (s *Server) deleteRoleBinding(w http.ResponseWriter, r *http.Request, id st
 			writeError(w, denial.HTTPStatus, denial.DenialCode, denial.Reason, details)
 			return
 		}
-		s.publishConduitAuthzChanged(conduitAuthzMatch{ProjectID: binding.ScopeID})
+		s.publishConduitAuthzChanged(conduitAuthzMatchForRoleBinding(binding))
 		slog.Info("role binding deleted (via membership service)",
 			"binding_id", id, "actor", user.Email())
 		w.WriteHeader(http.StatusNoContent)
