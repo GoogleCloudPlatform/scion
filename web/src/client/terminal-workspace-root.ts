@@ -77,41 +77,70 @@ export function isBulkReconnectEligible(entry: RailEntryStatus): boolean {
 }
 
 /**
- * Whether metadata says an entry's agent is gone: deleted, or in the stopped
- * or error phase. Availability "unavailable" does not count: it is also set
- * for transient failures (a failed metadata stream handshake, a 401, a 5xx
- * or a network error), so a brief hub outage after a reload must not make
- * restored rows for running agents removable.
+ * Whether "Remove all inactive" removes an entry: it is not connected. That
+ * covers every row the rail shows as "Not connected" (idle: restored from
+ * the saved list, or never opened in this tab), whatever its agent's phase
+ * or metadata state, plus every row whose session dropped (disconnected or
+ * unavailable) or whose agent was deleted. Removing a row only takes it out
+ * of the list; the agent and its tmux session keep running, and the user can
+ * open it again. Connected, connecting and pending (loading) entries always
+ * stay. Closed entries are already leaving the list (the registry drops a
+ * session as it closes), so they are never shown and never counted.
  */
-export function isAgentGone(metadata: TerminalAgentMetadata): boolean {
-  if (metadata.availability === 'deleted') return true;
-  const phase = metadata.agent?.phase;
-  return phase === 'stopped' || phase === 'error';
+export function isInactiveEntry(entry: RailEntryStatus): boolean {
+  switch (entry.state.connection) {
+    case 'idle':
+    case 'disconnected':
+    case 'unavailable':
+      return true;
+    case 'loading':
+    case 'connecting':
+    case 'connected':
+    case 'closed':
+      return false;
+  }
+}
+
+/** The colour of a rail row's status dot. */
+export type ConnectionDotColour = 'green' | 'amber' | 'red' | 'grey';
+
+/** A status dot's colour and its short meaning, shown as tooltip and spoken text. */
+export interface ConnectionDot {
+  colour: ConnectionDotColour;
+  meaning: string;
 }
 
 /**
- * Whether "Remove all inactive" removes an entry: its agent was deleted, its
- * session dropped (disconnected or unavailable), or it is idle (restored
- * from the saved list and shown as "Not connected") and metadata says its
- * agent is gone. After a page load every row but the frontmost is idle, so
- * an idle row for an agent that is still running stays. Connected entries
- * stay, as do entries that are still connecting.
+ * The status dot for a rail row. The rail styles the dot from the colour
+ * returned here (data-dot), so the colour and its meaning cannot drift.
+ * Precedence: pending or connecting is amber; a dropped session or a
+ * deleted agent, or metadata that could not be loaded, is red; connected is
+ * green; anything else (idle, or a session that is unavailable because its
+ * agent is stopped or offline) is grey, "Not connected".
  */
-export function isInactiveEntry(entry: RailEntryStatus): boolean {
+export function connectionDot(entry: RailEntryStatus): ConnectionDot {
   const { connection, disconnectReason } = entry.state;
-  if (connection === 'closed') return false;
-  if (connection === 'idle') return isAgentGone(entry.metadata);
-  return (
-    entry.metadata.availability === 'deleted' ||
-    disconnectReason === 'agent-deleted' ||
-    connection === 'disconnected' ||
-    connection === 'unavailable'
-  );
+  const { availability } = entry.metadata;
+  if (connection === 'loading' || connection === 'connecting')
+    return { colour: 'amber', meaning: 'Connecting' };
+  if (availability === 'deleted' || disconnectReason === 'agent-deleted')
+    return { colour: 'red', meaning: 'Agent deleted' };
+  if (connection === 'disconnected') return { colour: 'red', meaning: 'Disconnected' };
+  if (availability === 'unavailable') return { colour: 'red', meaning: 'Agent status unknown' };
+  if (connection === 'connected') return { colour: 'green', meaning: 'Connected' };
+  return { colour: 'grey', meaning: 'Not connected' };
+}
+
+/** The dot text used as tooltip and in the row's accessible label. */
+export function connectionDotLabel(dot: ConnectionDot): string {
+  const colour = dot.colour.charAt(0).toUpperCase() + dot.colour.slice(1);
+  return `${colour} dot: ${dot.meaning}`;
 }
 
 /** Tooltip and described-by text for a bulk button with nothing to act on. */
 export const BULK_RECONNECT_DISABLED_REASON = 'No disconnected terminals to reconnect';
-export const BULK_REMOVE_DISABLED_REASON = 'No inactive terminals to remove';
+export const BULK_REMOVE_DISABLED_REASON =
+  'No inactive terminals to remove: every terminal is connected or connecting';
 
 /** Gives each workspace root unique ids for its described-by targets. */
 let nextInstanceId = 0;
@@ -1510,7 +1539,9 @@ export class TerminalWorkspaceRoot {
       this.bulkRemove,
       this.bulkRemoveTip,
       inactive === 0 ? BULK_REMOVE_DISABLED_REASON : null,
-      `Remove all inactive: remove ${countLabel(inactive)} whose connection dropped or whose agent is stopped, errored or deleted. Connected terminals and not yet opened terminals for running agents stay.`
+      `Remove all inactive: remove ${countLabel(inactive)} that ${
+        inactive === 1 ? 'is' : 'are'
+      } not connected, including grey rows and red rows that are not connected. Connected and connecting terminals stay.`
     );
     this.bulkRemove.setAttribute('aria-label', `Remove all inactive (${inactive} eligible)`);
   }
@@ -1537,7 +1568,7 @@ export class TerminalWorkspaceRoot {
     const count = confirmedKeys.size;
     if (count === 0) return 0;
     const confirmed = await showConfirm(
-      `Remove ${countLabel(count)} from the list? This removes terminals whose connection dropped and terminals whose agent is stopped, errored or deleted. Connected terminals and not yet opened terminals for running agents stay.`,
+      `Remove ${countLabel(count)} from the list? This removes every terminal that is not connected, including grey rows and red rows that are not connected. Agents keep running. Connected and connecting terminals stay.`,
       { title: 'Remove inactive terminals', confirmText: `Remove ${count}` }
     );
     if (!confirmed) return 0;
@@ -1592,11 +1623,18 @@ export class TerminalWorkspaceRoot {
     item.dataset.availability = metadata.availability;
     if (entry.state.disconnectReason) item.dataset.disconnectReason = entry.state.disconnectReason;
 
+    const dot = connectionDot(entry);
+    item.dataset.dot = dot.colour;
+    const dotLabel = connectionDotLabel(dot);
+
     // One list of status parts feeds both forms: the visible titles join them
     // with a middle dot, the accessible label with a comma so screen readers
-    // pause between them instead of announcing or skipping the dot.
+    // pause between them instead of announcing or skipping the dot. The dot's
+    // meaning leads, and a connection label that only repeats it is dropped.
+    const connectionText = disconnectLabel(entry.state.connection, entry.state.disconnectReason);
     const statusParts = [
-      disconnectLabel(entry.state.connection, entry.state.disconnectReason),
+      dotLabel,
+      ...(connectionText === dot.meaning ? [] : [connectionText]),
       availabilityLabel(metadata.availability),
     ];
     const statusLabel = statusParts.join(' · ');
@@ -1620,7 +1658,7 @@ export class TerminalWorkspaceRoot {
 
     const connection = document.createElement('span');
     connection.className = 'terminal-connection-dot';
-    connection.title = statusLabel;
+    connection.title = dotLabel;
     connection.setAttribute('aria-hidden', 'true');
     const text = document.createElement('span');
     text.className = 'terminal-rail-text';
@@ -2188,16 +2226,13 @@ export class TerminalWorkspaceRoot {
         background: #94a3b8;
         flex: 0 0 auto;
       }
-      .terminal-rail-item[data-connection='connected'] .terminal-connection-dot {
+      .terminal-rail-item[data-dot='green'] .terminal-connection-dot {
         background: #22c55e;
       }
-      .terminal-rail-item[data-connection='disconnected'] .terminal-connection-dot,
-      .terminal-rail-item[data-availability='deleted'] .terminal-connection-dot,
-      .terminal-rail-item[data-availability='unavailable'] .terminal-connection-dot {
+      .terminal-rail-item[data-dot='red'] .terminal-connection-dot {
         background: #ef4444;
       }
-      .terminal-rail-item[data-connection='loading'] .terminal-connection-dot,
-      .terminal-rail-item[data-connection='connecting'] .terminal-connection-dot {
+      .terminal-rail-item[data-dot='amber'] .terminal-connection-dot {
         background: #f59e0b;
       }
       .terminal-rail-text {

@@ -1181,11 +1181,13 @@ describe('idle entries', () => {
     expect(item.querySelector('.terminal-state-label')).toBeNull();
     expect(item.querySelector('.terminal-connection-dot')).not.toBeNull();
     const select = item.querySelector<HTMLButtonElement>('.terminal-rail-select')!;
-    expect(select.title).toBe('Not connected · metadata pending');
+    expect(select.title).toBe('Grey dot: Not connected · metadata pending');
     expect(select.getAttribute('aria-label')).toBe(
-      'Show terminal for test in A rather long project name, Not connected, metadata pending'
+      'Show terminal for test in A rather long project name, Grey dot: Not connected, metadata pending'
     );
-    expect(item.querySelector<HTMLElement>('.terminal-connection-dot')?.title).toBe(select.title);
+    expect(item.querySelector<HTMLElement>('.terminal-connection-dot')?.title).toBe(
+      'Grey dot: Not connected'
+    );
   });
 
   it('rail row falls back to the project id when the project name is unknown', async () => {
@@ -1206,9 +1208,9 @@ describe('idle entries', () => {
     expect(project?.textContent).toBe('project-id-2');
     expect(project?.title).toBe('project-id-2');
     const select = railItem().querySelector<HTMLButtonElement>('.terminal-rail-select')!;
-    expect(select.title).toBe('Not connected · metadata pending');
+    expect(select.title).toBe('Grey dot: Not connected · metadata pending');
     expect(select.getAttribute('aria-label')).toBe(
-      'Show terminal for test in project-id-2, Not connected, metadata pending'
+      'Show terminal for test in project-id-2, Grey dot: Not connected, metadata pending'
     );
   });
 
@@ -1224,11 +1226,12 @@ describe('idle entries', () => {
     expect(item.querySelector('.terminal-project-name')).toBeNull();
     expect(item.querySelector('.terminal-rail-text')?.children).toHaveLength(1);
     const select = item.querySelector<HTMLButtonElement>('.terminal-rail-select')!;
-    const status = item.querySelector<HTMLElement>('.terminal-connection-dot')!.title;
-    expect(status).toBe('Not connected · metadata pending');
-    expect(select.title).toBe(status);
+    expect(item.querySelector<HTMLElement>('.terminal-connection-dot')!.title).toBe(
+      'Grey dot: Not connected'
+    );
+    expect(select.title).toBe('Grey dot: Not connected · metadata pending');
     expect(select.getAttribute('aria-label')).toBe(
-      `Show terminal for ${agentId}, Not connected, metadata pending`
+      `Show terminal for ${agentId}, Grey dot: Not connected, metadata pending`
     );
   });
 
