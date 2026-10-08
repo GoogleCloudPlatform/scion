@@ -31,6 +31,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
@@ -112,7 +113,7 @@ func TestArtifactsShareLinkOnRoutes(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, anonymous(srv, http.MethodGet, links).Code)
 
 	assert.NotContains(t, logs.String(), token, "the share token reached the hub log")
-	assert.Contains(t, logs.String(), "/api/v1/artifacts/shared/REDACTED")
+	assert.Contains(t, logs.String(), logging.RedactedArtifactPath)
 
 	// The list shows the link without its token.
 	rec = userArtifactRequest(t, srv, owner, http.MethodGet, links, nil)
@@ -189,15 +190,16 @@ func TestIsArtifactSharedRequest(t *testing.T) {
 	}
 }
 
-// TestCredentialPathsAreNotTraced: requests whose path carries a share
-// token or a view capability are left out of tracing.
+// TestCredentialPathsAreNotTraced: artifact requests, in any spelling,
+// are left out of tracing; others are traced.
 func TestCredentialPathsAreNotTraced(t *testing.T) {
 	for target, want := range map[string]bool{
 		"/api/v1/artifacts/shared/tok":                           false,
 		"/api/v1/artifacts/%73hared/tok":                         false,
 		"/api/v1/artifacts/view/cap/index.html":                  false,
 		"/api/v1/artifacts/a%2Fb/../shared/tok":                  false,
-		"/api/v1/artifacts/00000000-0000-4000-8000-000000000001": true,
+		"/api/v1/artifacts/%2e%2e/../shared/tok":                 false,
+		"/api/v1/artifacts/00000000-0000-4000-8000-000000000001": false,
 		"/api/v1/agents":                                         true,
 	} {
 		assert.Equal(t, want, traceableRequest(httptest.NewRequest(http.MethodGet, target, nil)), target)
@@ -281,7 +283,8 @@ func TestCredentialPathWithEscapedSlashNotLogged(t *testing.T) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	t.Cleanup(func() { slog.SetDefault(old) })
 	token := strings.Repeat("B", 43)
-	for _, target := range []string{"/api/v1/artifacts/a%2Fb/../shared/" + token, "/api/v1/artifacts/a%2Fb/../view/" + token + "/x"} {
+	for _, target := range []string{"/api/v1/artifacts/a%2Fb/../shared/" + token, "/api/v1/artifacts/a%2Fb/../view/" + token + "/x",
+		"/api/v1/artifacts/%2e%2e/../shared/" + token, "/api/v1/artifacts/.%2e/../shared/" + token, "/api/v1/%61rtifacts/shared/" + token} {
 		srv.Handler().ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, target, nil))
 	}
 	require.NotEmpty(t, logs.String())

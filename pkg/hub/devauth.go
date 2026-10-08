@@ -236,7 +236,7 @@ func DevAuthMiddlewareWithDebug(validToken string, userCfg DevUserConfig, debug 
 				if debug {
 					slog.Debug("Auth failed: missing Authorization header",
 						"method", r.Method,
-						"path", logging.RedactPath(r.URL.Path),
+						"path", logging.RequestPath(r),
 					)
 				}
 				writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,

@@ -20,6 +20,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -81,57 +84,103 @@ func TestRequestLogMiddleware_RedactsSignature(t *testing.T) {
 	}
 }
 
-func TestRedactPath(t *testing.T) {
+// artifactPathCases are spellings of artifact credential paths (and a few
+// other artifact paths); every one must be redacted on every sink.
+var artifactPathCases = []string{
+	"/api/v1/artifacts/shared/TOKEN",
+	"/api/v1/artifacts/shared/TOKEN/files/a/b.png",
+	"/api/v1/artifacts/view/TOKEN/index.html",
+	"/api/v1/artifacts/shared/../shared/TOKEN",
+	"/api/v1//artifacts/shared/TOKEN",
+	"/api/v1/artifacts/x/../shared/TOKEN",
+	"/api/v1/artifacts/%73hared/TOKEN",
+	"/api/v1/artifacts/a%2Fb/../shared/TOKEN",
+	"/api/v1/artifacts/a%2fb/..%2fview%2fTOKEN",
+	"/api/v1/artifacts/%2e%2e/../shared/TOKEN",
+	"/api/v1/artifacts/%2E%2E/../shared/TOKEN",
+	"/api/v1/artifacts/.%2e/../shared/TOKEN",
+	"/api/v1/%61rtifacts/shared/TOKEN",
+	"/api/v1/%2561rtifacts/shared/TOKEN",
+	"/API/V1/ARTIFACTS/SHARED/TOKEN",
+	"/api/v1/artifacts/00000000-0000-4000-8000-000000000001/files/TOKEN.md",
+}
+
+// TestArtifactPathsRedactedOnEverySink: for every spelling, no part of the
+// token survives in RequestPath, RedactURL or the trace predicate, whether
+// the request arrives with the spelling as its raw path or parsed.
+func TestArtifactPathsRedactedOnEverySink(t *testing.T) {
 	const tok = "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789-_AbCd"
-	for in, want := range map[string]string{
-		"/api/v1/artifacts/shared/" + tok:                        "/api/v1/artifacts/shared/REDACTED",
-		"/api/v1/artifacts/shared/" + tok + "/files/a/b.png":     "/api/v1/artifacts/shared/REDACTED",
-		"/api/v1/artifacts/shared/../shared/" + tok:              "/api/v1/artifacts/shared/REDACTED",
-		"/api/v1//artifacts/shared/" + tok:                       "/api/v1/artifacts/shared/REDACTED",
-		"/api/v1/artifacts/x/../shared/" + tok:                   "/api/v1/artifacts/shared/REDACTED",
-		"/api/v1/artifacts/view/id.1.2.sig/index.html":           "/api/v1/artifacts/view/REDACTED",
-		"/api/v1/artifacts/00000000-0000-4000-8000-000000000001": "/api/v1/artifacts/00000000-0000-4000-8000-000000000001",
-		"/api/v1/agents/a1":                                      "/api/v1/agents/a1",
-		"":                                                       "",
-	} {
-		if got := RedactPath(in); got != want {
-			t.Errorf("RedactPath(%q) = %q, want %q", in, got, want)
+	for _, c := range artifactPathCases {
+		raw := strings.ReplaceAll(c, "TOKEN", tok)
+		u, err := url.Parse("https://hub.example" + raw)
+		if err != nil {
+			t.Fatalf("%s: %v", raw, err)
 		}
-		if got := RedactPath(in); strings.Contains(got, tok) {
-			t.Errorf("RedactPath(%q) keeps the token", in)
+		r := httptest.NewRequest(http.MethodGet, raw, nil)
+		if got := RequestPath(r); strings.Contains(got, tok) || got != RedactedArtifactPath {
+			t.Errorf("RequestPath(%s) = %q", raw, got)
 		}
-	}
-	u, _ := url.Parse("https://hub.example/api/v1/artifacts/%73hared/" + tok + "?sig=x&a=1")
-	got := RedactURL(u)
-	if strings.Contains(got, tok) || strings.Contains(got, "sig=x") {
-		t.Errorf("RedactURL = %q", got)
-	}
-	if !IsCredentialPath("/api/v1/artifacts/shared/x") || IsCredentialPath("/api/v1/artifacts/abc") {
-		t.Errorf("IsCredentialPath")
+		if got := RedactURL(u); strings.Contains(got, tok) {
+			t.Errorf("RedactURL(%s) = %q", raw, got)
+		}
+		if !IsCredentialURL(u) || !IsCredentialURL(r.URL) {
+			t.Errorf("IsCredentialURL(%s) = false", raw)
+		}
 	}
 }
 
-// TestRedactPathEscapedSlash: a path whose escaped and decoded forms clean
-// to different places is redacted whichever form a caller passes.
-func TestRedactPathEscapedSlash(t *testing.T) {
-	const tok = "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789-_AbCd"
-	raw := "/api/v1/artifacts/a%2Fb/../shared/" + tok
-	u, err := url.Parse("https://hub.example" + raw)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, p := range []string{u.Path, u.EscapedPath(), raw, "/api/v1/artifacts/a%2fb/..%2fview%2f" + tok} {
-		if got := RedactPath(p); strings.Contains(got, tok) || !IsCredentialPath(p) {
-			t.Errorf("RedactPath(%q) = %q", p, got)
+// TestNonArtifactPathsKept: other request paths are logged as they are.
+func TestNonArtifactPathsKept(t *testing.T) {
+	for _, p := range []string{"/api/v1/agents/a1", "/api/v1/projects/p/shared-dirs", "/", "/healthz"} {
+		r := httptest.NewRequest(http.MethodGet, p, nil)
+		if got := RequestPath(r); got != p {
+			t.Errorf("RequestPath(%s) = %q", p, got)
+		}
+		if IsCredentialURL(r.URL) {
+			t.Errorf("IsCredentialURL(%s) = true", p)
 		}
 	}
-	if got := RedactURL(u); strings.Contains(got, tok) {
-		t.Errorf("RedactURL = %q", got)
+	if RequestPath(nil) != "" {
+		t.Errorf("RequestPath(nil)")
 	}
-	// Paths outside the artifact routes are left alone.
-	for _, p := range []string{"/api/v1/agents/a/shared/x", "/shared/x", "/api/v1/projects/p/view/x"} {
-		if RedactPath(p) != p {
-			t.Errorf("RedactPath(%q) = %q, want it unchanged", p, RedactPath(p))
+}
+
+// TestRequestPathCallSites fails if a log attribute in the hub or this
+// package records a request path any way other than RequestPath, which
+// checks both the decoded and the escaped path.
+func TestRequestPathCallSites(t *testing.T) {
+	forbidden := []*regexp.Regexp{
+		regexp.MustCompile(`"path",\s*\w+\.URL\.(Path|EscapedPath\(\)|RawPath|RequestURI\(\)|String\(\))`),
+		regexp.MustCompile(`slog\.String\(\s*"[^"]*",\s*\w+\.URL\.(Path|EscapedPath\(\)|RawPath)\s*\)`),
+		regexp.MustCompile(`"[^"]*path[^"]*",\s*\w+\.URL\.(Path|EscapedPath\(\)|RawPath)\b`),
+		regexp.MustCompile(`"[^"]*",\s*\w+\.RequestURI\b`),
+		regexp.MustCompile(`RedactPath\(`),
+	}
+	files := 0
+	for _, dir := range []string{".", "../../hub"} {
+		names, err := filepath.Glob(filepath.Join(dir, "*.go"))
+		if err != nil {
+			t.Fatal(err)
 		}
+		for _, name := range names {
+			if strings.HasSuffix(name, "_test.go") {
+				continue
+			}
+			src, err := os.ReadFile(name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			files++
+			for i, line := range strings.Split(string(src), "\n") {
+				for _, re := range forbidden {
+					if re.MatchString(line) {
+						t.Errorf("%s:%d records a request path without logging.RequestPath: %s", name, i+1, strings.TrimSpace(line))
+					}
+				}
+			}
+		}
+	}
+	if files < 50 {
+		t.Fatalf("scanned only %d files; is the hub package where this test expects it?", files)
 	}
 }
