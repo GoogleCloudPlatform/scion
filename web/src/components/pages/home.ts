@@ -53,7 +53,13 @@ interface HomeAgentsResponse {
   agents?: Agent[];
   nextCursor?: string;
   complete?: boolean;
-  stats?: { total: number; running: number; agents?: Array<[string, string]> };
+  /** `totalApproximate` marks `total` and `running` as lower bounds. */
+  stats?: {
+    total: number;
+    running: number;
+    agents?: Array<[string, string]>;
+    totalApproximate?: boolean;
+  };
 }
 
 interface InviteStats {
@@ -266,7 +272,7 @@ export class ScionPageHome extends LitElement {
       // missed some, so it shows the chip.
       this.countsMayHaveChanged = epoch.sawResync;
     } else {
-      index.seedCounts(stats.total, stats.running);
+      index.seedCounts(stats.total, stats.running, !!stats.totalApproximate);
       // The snapshot cannot be adjusted, so any change that landed while
       // the request was in flight, or a resync that may have missed some,
       // may already have changed it.
@@ -598,7 +604,7 @@ export class ScionPageHome extends LitElement {
         <div class="stat-card">
           <h3>Active Agents</h3>
           <div class="stat-value">
-            <span>${this.activeAgentCount}</span>
+            <span>${this.activeAgentCount}${this.memberIndex?.approximate ? '+' : ''}</span>
           </div>
           ${this.memberIndex?.countOnly
             ? this.renderCountOnlyNote()
@@ -722,8 +728,10 @@ export class ScionPageHome extends LitElement {
    * counts with one agents request.
    */
   private renderCountOnlyNote(): TemplateResult {
+    const mark = this.memberIndex?.approximate ? '+' : '';
+    const total = `${formatNumber(this.memberIndex?.stats.total ?? 0)}${mark}`;
     return html`<div class="stat-change counts-note">
-      <span>${formatNumber(this.memberIndex?.stats.total ?? 0)} agents, as of last refresh</span>
+      <span>${total} agents, as of last refresh</span>
       ${this.renderCountsChip()}
     </div>`;
   }

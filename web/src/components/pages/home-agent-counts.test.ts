@@ -647,6 +647,16 @@ describe('home agent counts and the shared completeness flag', { timeout: 30_000
   });
 
   describe('count-only mode above 2,000 agents', () => {
+    it('marks approximate counts as lower bounds (ptone/scion#3426)', async () => {
+      const fake = newFake(2003, 40);
+      fake.approximate = true;
+      vi.stubGlobal('fetch', vi.fn(fakeFetch(fake)));
+      const el = await mountPage('scion-page-home');
+      expect(internals(el).memberIndex?.approximate).toBe(true);
+      expect(activeCount(el)).toBe('40+');
+      expect(text(el)).toContain('2,003+ agents, as of last refresh');
+    });
+
     it('shows the count as of last refresh; a live change shows the chip; a click is one limit=1 fit request that updates the count', async () => {
       const fake = newFake(2003, 40);
       vi.stubGlobal('fetch', vi.fn(fakeFetch(fake)));
