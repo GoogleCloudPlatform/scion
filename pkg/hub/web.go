@@ -709,6 +709,24 @@ func (ws *WebServer) adminEmails() []string {
 	return ws.accessSettings.AdminEmails()
 }
 
+// conduitEnabledProvider is implemented by an access settings provider
+// that reports whether hub.conduit is on (the hub Server).
+type conduitEnabledProvider interface {
+	ConduitEnabled() bool
+}
+
+// publishConduitAuthzChanged announces a committed change that may revoke
+// conduit stream authorization (see Server.publishConduitAuthzChanged). It
+// is a no-op unless the settings provider reports hub.conduit on and an
+// event publisher is set.
+func (ws *WebServer) publishConduitAuthzChanged(m conduitAuthzMatch) {
+	p, ok := ws.accessSettings.(conduitEnabledProvider)
+	if !ok || !p.ConduitEnabled() || ws.events == nil {
+		return
+	}
+	ws.events.PublishRaw(conduitAuthzChangedSubject, m)
+}
+
 // authorizedDomains returns the live authorized domains list from the access
 // settings provider. Returns nil when no provider is configured.
 func (ws *WebServer) authorizedDomains() []string {
@@ -2305,7 +2323,7 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 			}
 		}
 		if syncGrants && roleChanged {
-			publishConduitAuthzChangedVia(ws.events, conduitAuthzMatch{UserID: user.ID})
+			ws.publishConduitAuthzChanged(conduitAuthzMatch{UserID: user.ID})
 		}
 
 		// Generate Hub JWT tokens (mirrors devAuthMiddleware / handleOAuthCallback)
@@ -2716,7 +2734,7 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 		}
 	}
 	if syncGrants && roleChanged {
-		publishConduitAuthzChangedVia(ws.events, conduitAuthzMatch{UserID: user.ID})
+		ws.publishConduitAuthzChanged(conduitAuthzMatch{UserID: user.ID})
 	}
 
 	// Generate Hub tokens if token service is available

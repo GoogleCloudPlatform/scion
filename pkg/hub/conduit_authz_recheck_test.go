@@ -606,3 +606,71 @@ func TestConduitAuthzChanged_GroupOwnerChange(t *testing.T) {
 	default:
 	}
 }
+
+// conduitAccessSettings is a web access settings provider that also
+// reports hub.conduit.
+type conduitAccessSettings struct {
+	*staticAccessSettings
+	enabled bool
+}
+
+func (c conduitAccessSettings) ConduitEnabled() bool { return c.enabled }
+
+// TestWebLogin_RoleChangePublishesConduitRecheck: a web login (proxy and
+// OAuth) that changes the user's role publishes exactly one re-check for
+// that user; nothing is published while hub.conduit is off, or when the
+// role does not change.
+func TestWebLogin_RoleChangePublishesConduitRecheck(t *testing.T) {
+	for _, p := range webLoginPaths {
+		for _, tc := range []struct {
+			name        string
+			conduitOn   bool
+			demote      bool
+			wantPublish bool
+		}{
+			{"demoted, conduit on", true, true, true},
+			{"demoted, conduit off", false, true, false},
+			{"role unchanged", true, false, false},
+		} {
+			t.Run(p.name+"/"+tc.name, func(t *testing.T) {
+				_, s := newLoginGrantServer(t, store.UserRoleViewer, nil)
+				email := "web-recheck@example.com"
+				role := store.UserRoleViewer
+				if tc.demote {
+					role = store.UserRoleAdmin
+				}
+				u := createLoginGrantUser(t, s, "web-recheck", email, role, store.UserStatusActive)
+				if tc.demote {
+					createSystemBinding(t, s, u.ID, store.SystemRoleSuperAdmin, store.SystemReconcileCreatedBy)
+				}
+				require.NoError(t, ensureHubMembershipTx(context.Background(), s, u.ID))
+				pub := NewChannelEventPublisher()
+				ch, unsubscribe := pub.Subscribe(conduitAuthzChangedSubject)
+				defer unsubscribe()
+				settings := webLoginSettings(store.UserRoleViewer, "boss@example.com")
+
+				p.login(t, s, settings, email, func(ws *WebServer) {
+					ws.SetEventPublisher(pub)
+					ws.SetAccessSettingsProvider(conduitAccessSettings{staticAccessSettings: settings, enabled: tc.conduitOn})
+				})
+
+				var got []string
+			drain:
+				for {
+					select {
+					case evt := <-ch:
+						got = append(got, string(evt.Data))
+					default:
+						break drain
+					}
+				}
+				if !tc.wantPublish {
+					assert.Empty(t, got)
+					return
+				}
+				require.Len(t, got, 1)
+				assert.JSONEq(t, `{"userId":"`+u.ID+`"}`, got[0])
+			})
+		}
+	}
+}

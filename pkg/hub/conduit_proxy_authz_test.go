@@ -219,6 +219,13 @@ func TestConduitAuthzRebindsOnPublisherChange(t *testing.T) {
 	f.srv.SetEventPublisher(first)
 	second := NewChannelEventPublisher()
 	f.srv.SetEventPublisher(second)
+	// The previous binding is released synchronously: the old publisher
+	// has no conduit subscriber left.
+	first.mu.RLock()
+	for _, pattern := range conduitAuthzEventPatterns {
+		assert.Empty(t, first.subscribers[pattern], "pattern %q is still subscribed on the old publisher", pattern)
+	}
+	first.mu.RUnlock()
 	f.startAgent(t)
 	c := proxyWS(t, f)
 

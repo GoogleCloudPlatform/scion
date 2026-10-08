@@ -94,24 +94,22 @@ func (s *Server) bindConduitAuthzEvents() {
 	if a == nil {
 		return
 	}
-	s.mu.RLock()
-	events := s.events
-	s.mu.RUnlock()
-
 	s.conduitAuthzBindMu.Lock()
 	if s.conduitAuthzUnbind != nil {
 		s.conduitAuthzUnbind()
 		s.conduitAuthzUnbind = nil
 	}
+	// Read under the bind lock, so concurrent binds install the latest
+	// publisher.
+	s.mu.RLock()
+	events := s.events
+	s.mu.RUnlock()
 	runCtx := a.runContext()
 	if events == nil || runCtx.Err() != nil {
 		s.conduitAuthzBindMu.Unlock()
 		return
 	}
 	ctx, cancel := context.WithCancel(runCtx)
-	s.conduitAuthzUnbind = cancel
-	s.conduitAuthzBindMu.Unlock()
-
 	var removeListen func()
 	if ln, ok := events.(conduitListenNotifier); ok {
 		removeListen = ln.AddOnListen(func() {
@@ -119,12 +117,22 @@ func (s *Server) bindConduitAuthzEvents() {
 		})
 	}
 	ch, unsubscribe := events.Subscribe(conduitAuthzEventPatterns...)
+	var once sync.Once
+	release := func() {
+		once.Do(func() {
+			cancel()
+			if removeListen != nil {
+				removeListen()
+			}
+			unsubscribe()
+		})
+	}
+	s.conduitAuthzUnbind = release
+	s.conduitAuthzBindMu.Unlock()
+
 	go func() {
 		<-ctx.Done()
-		if removeListen != nil {
-			removeListen()
-		}
-		unsubscribe()
+		release()
 	}()
 	if ch != nil {
 		q := newConduitNotifyQueue()
@@ -274,17 +282,6 @@ func conduitAuthzMatchForRoleBinding(b *store.RoleBinding) conduitAuthzMatch {
 		m.ProjectID = b.ScopeID
 	}
 	return m
-}
-
-// publishConduitAuthzChangedVia is publishConduitAuthzChanged for callers
-// without a hub Server (the web server's login path). It publishes
-// whenever events is set; with hub.conduit off nothing subscribes to the
-// subject.
-func publishConduitAuthzChangedVia(events EventPublisher, m conduitAuthzMatch) {
-	if events == nil {
-		return
-	}
-	events.PublishRaw(conduitAuthzChangedSubject, m)
 }
 
 // trackConduitUserStream registers a user-originated stream this node
