@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // TestLoadSeedEnvKoanf verifies that LoadSeedEnvKoanf loads SCION_SEED_*
@@ -490,38 +491,74 @@ func indexOf(s string, c byte) int {
 	return -1
 }
 
-// TestLoadBootstrapKoanfWithConfigPath_LayersConfigFile verifies that the
-// --config location is part of bootstrap material: its keys override the
-// global settings.yaml, keys it does not set still come from the global
-// file, and SCION_SERVER_* stays on top (ptone/scion#3070).
-func TestLoadBootstrapKoanfWithConfigPath_LayersConfigFile(t *testing.T) {
+// writeConfigPathFixture writes ~/.scion/settings.yaml (global) and
+// <tmp>/cfg/settings.yaml (the --config directory) and returns both dirs.
+func writeConfigPathFixture(t *testing.T, global, cfg string) (scionDir, cfgDir string) {
+	t.Helper()
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
-	scionDir := filepath.Join(tmpDir, ".scion")
-	if err := os.MkdirAll(scionDir, 0755); err != nil {
-		t.Fatal(err)
+	scionDir = filepath.Join(tmpDir, ".scion")
+	cfgDir = filepath.Join(tmpDir, "cfg")
+	for dir, content := range map[string]string{scionDir: global, cfgDir: cfg} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "settings.yaml"), []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
 	}
-	global := "schema_version: \"1\"\nimage_registry: global.example.com\nserver:\n  hub:\n    public_url: https://global.example.com\n    stalled_threshold: 5m\n"
-	if err := os.WriteFile(filepath.Join(scionDir, "settings.yaml"), []byte(global), 0644); err != nil {
-		t.Fatal(err)
+	return scionDir, cfgDir
+}
+
+// assertStalledThresholdAgrees checks that LoadGlobalConfig (startup and the
+// file-mode reload) and LoadBootstrapKoanfWithConfigPath (DB-tier bootstrap)
+// resolve the Layer-1 key server.hub.stalled_threshold to the same value.
+func assertStalledThresholdAgrees(t *testing.T, configPath, want string) {
+	t.Helper()
+	gc, err := LoadGlobalConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadGlobalConfig(%q): %v", configPath, err)
 	}
-	cfgDir := filepath.Join(tmpDir, "cfg")
-	if err := os.MkdirAll(cfgDir, 0755); err != nil {
-		t.Fatal(err)
+	if got := gc.Hub.StalledThreshold.String(); got != want {
+		t.Errorf("LoadGlobalConfig(%q): stalled_threshold = %s, want %s", configPath, got, want)
 	}
-	cfg := "schema_version: \"1\"\nimage_registry: cfg.example.com\nserver:\n  hub:\n    public_url: https://cfg.example.com\n"
-	if err := os.WriteFile(filepath.Join(cfgDir, "settings.yaml"), []byte(cfg), 0644); err != nil {
-		t.Fatal(err)
+	k := LoadBootstrapKoanfWithConfigPath(configPath)
+	d, err := time.ParseDuration(k.String("server.hub.stalled_threshold"))
+	if err != nil || d.String() != want {
+		t.Errorf("LoadBootstrapKoanfWithConfigPath(%q): stalled_threshold = %q, want %s",
+			configPath, k.String("server.hub.stalled_threshold"), want)
 	}
+}
+
+// When the global settings.yaml has a server key, LoadGlobalConfig ignores
+// the --config settings.yaml, so bootstrap must too (ptone/scion#3070).
+func TestLoadBootstrapKoanfWithConfigPath_GlobalServerKeyWins(t *testing.T) {
+	_, cfgDir := writeConfigPathFixture(t,
+		"schema_version: \"1\"\nimage_registry: global.example.com\nserver:\n  hub:\n    stalled_threshold: 5m\n",
+		"schema_version: \"1\"\nimage_registry: cfg.example.com\nserver:\n  hub:\n    stalled_threshold: 9m\n")
+
+	for _, path := range []string{cfgDir, filepath.Join(cfgDir, "settings.yaml")} {
+		assertStalledThresholdAgrees(t, path, "5m0s")
+		if got := LoadBootstrapKoanfWithConfigPath(path).String("image_registry"); got != "global.example.com" {
+			t.Errorf("%s: image_registry = %q, want global.example.com", path, got)
+		}
+	}
+}
+
+// When only the --config settings.yaml has a server key, LoadGlobalConfig
+// reads it, so bootstrap layers it over the global file; SCION_SERVER_*
+// stays on top (ptone/scion#3070).
+func TestLoadBootstrapKoanfWithConfigPath_ConfigServerKeyUsedWhenGlobalHasNone(t *testing.T) {
+	scionDir, cfgDir := writeConfigPathFixture(t,
+		"schema_version: \"1\"\nimage_registry: global.example.com\n",
+		"schema_version: \"1\"\nimage_registry: cfg.example.com\nserver:\n  hub:\n    stalled_threshold: 9m\n    public_url: https://cfg.example.com\n")
 	t.Setenv("SCION_SERVER_HUB_PUBLICURL", "https://env.example.com")
 
 	for _, path := range []string{cfgDir, filepath.Join(cfgDir, "settings.yaml")} {
+		assertStalledThresholdAgrees(t, path, "9m0s")
 		k := LoadBootstrapKoanfWithConfigPath(path)
 		if got := k.String("image_registry"); got != "cfg.example.com" {
 			t.Errorf("%s: image_registry = %q, want cfg.example.com from the --config file", path, got)
-		}
-		if got := k.String("server.hub.stalled_threshold"); got != "5m" {
-			t.Errorf("%s: stalled_threshold = %q, want 5m from the global file", path, got)
 		}
 		if got := k.String("server.hub.public_url"); got != "https://env.example.com" {
 			t.Errorf("%s: public_url = %q, want SCION_SERVER_* on top", path, got)

@@ -1068,46 +1068,19 @@ func LoadGlobalConfig(configPath string) (*GlobalConfig, error) {
 // loadGlobalConfigFromSettings attempts to load server config from settings.yaml files.
 // Returns (config, true) if settings.yaml had a server key, (nil, false) otherwise.
 func loadGlobalConfigFromSettings(configPath string) (*GlobalConfig, bool) {
-	// Check global settings.yaml
-	globalDir, err := GetGlobalDir()
-	if err != nil {
+	src := resolveServerSettingsSource(configPath)
+	if src.globalDir == "" || src.legacy {
 		return nil, false
 	}
-
-	gc, found := loadServerFromSettingsFile(globalDir)
-	if !found {
-		// Also check local path
-		if configPath != "" {
-			info, err := os.Stat(configPath)
-			if err == nil {
-				dir := configPath
-				if !info.IsDir() {
-					dir = filepath.Dir(configPath)
-				}
-				gc, found = loadServerFromSettingsFile(dir)
-			}
-		}
-	}
-
-	if !found {
-		return nil, false
-	}
+	globalDir := src.globalDir
+	gc := src.gc
 
 	// Emit deprecation warning if server.yaml also exists
 	if hasServerYAML(globalDir) {
 		fmt.Fprintf(os.Stderr, "Warning: Both settings.yaml (server key) and server.yaml exist in %s. Using settings.yaml. server.yaml is deprecated; move its contents under the server key in settings.yaml and remove it (ptone/scion#3116).\n", globalDir)
 	}
-	if configPath != "" {
-		info, err := os.Stat(configPath)
-		if err == nil {
-			dir := configPath
-			if !info.IsDir() {
-				dir = filepath.Dir(configPath)
-			}
-			if dir != globalDir && hasServerYAML(dir) {
-				fmt.Fprintf(os.Stderr, "Warning: Both settings.yaml (server key) and server.yaml exist in %s. Using settings.yaml. server.yaml is deprecated.\n", dir)
-			}
-		}
+	if dir := src.configDir; dir != "" && dir != globalDir && hasServerYAML(dir) {
+		fmt.Fprintf(os.Stderr, "Warning: Both settings.yaml (server key) and server.yaml exist in %s. Using settings.yaml. server.yaml is deprecated.\n", dir)
 	}
 
 	// Apply environment variable overrides (SCION_SERVER_ prefix).
@@ -1123,6 +1096,83 @@ func loadGlobalConfigFromSettings(configPath string) (*GlobalConfig, bool) {
 	applyDatabasePoolDefaults(&gc.Database)
 
 	return gc, true
+}
+
+// serverSettingsSource is where the server's settings come from for a given
+// --config path. resolveServerSettingsSource is the single rule shared by
+// LoadGlobalConfig (startup and file-mode reload) and
+// LoadBootstrapKoanfWithConfigPath (DB-tier bootstrap), so both read the
+// same file (ptone/scion#3070).
+type serverSettingsSource struct {
+	globalDir string // "" when the global dir cannot be resolved
+	configDir string // directory of configPath ("" when unset or missing)
+	// configFile is configPath when it names a file, else "".
+	configFile string
+	// settingsDir is the directory whose settings.yaml supplies the server
+	// block and the top-level hub sections: the global dir when its
+	// settings.yaml has a server key, else configDir when its settings.yaml
+	// has one. In legacy mode (no server key in either) it is the first of
+	// the two with a readable settings.yaml, as findTopLevelSettingsRaw
+	// reads it, or "" when neither has one.
+	settingsDir string
+	// legacy reports that neither settings.yaml has a server key, so the
+	// server block comes from server.yaml (loadGlobalConfigLegacy).
+	legacy bool
+	// gc is the server config parsed from settingsDir (nil in legacy mode).
+	gc *GlobalConfig
+}
+
+// configPathDir returns the directory of configPath (configPath itself when
+// it is a directory) and, when configPath names a file, that file. Both are
+// "" when configPath is empty or does not exist.
+func configPathDir(configPath string) (dir, file string) {
+	if configPath == "" {
+		return "", ""
+	}
+	info, err := os.Stat(configPath)
+	if err != nil {
+		return "", ""
+	}
+	if info.IsDir() {
+		return configPath, ""
+	}
+	return filepath.Dir(configPath), configPath
+}
+
+// resolveServerSettingsSource applies the --config resolution rule: the
+// global settings.yaml wins when it has a server key; the --config
+// directory's settings.yaml is used only when the global one has none.
+func resolveServerSettingsSource(configPath string) serverSettingsSource {
+	var src serverSettingsSource
+	if globalDir, err := GetGlobalDir(); err == nil {
+		src.globalDir = globalDir
+	}
+	src.configDir, src.configFile = configPathDir(configPath)
+
+	if src.globalDir != "" {
+		if gc, found := loadServerFromSettingsFile(src.globalDir); found {
+			src.settingsDir, src.gc = src.globalDir, gc
+			return src
+		}
+	}
+	if src.configDir != "" {
+		if gc, found := loadServerFromSettingsFile(src.configDir); found {
+			src.settingsDir, src.gc = src.configDir, gc
+			return src
+		}
+	}
+
+	src.legacy = true
+	for _, dir := range []string{src.globalDir, src.configDir} {
+		if dir == "" {
+			continue
+		}
+		if _, ok := readSettingsFileRaw(dir); ok {
+			src.settingsDir = dir
+			break
+		}
+	}
+	return src
 }
 
 // LegacyServerConfigSources returns the legacy server.yaml files the server
@@ -1678,12 +1728,12 @@ func LoadBootstrapKoanf() *koanf.Koanf {
 }
 
 // LoadBootstrapKoanfWithConfigPath is LoadBootstrapKoanf for a server started
-// with --config: the settings.yaml and legacy server.yaml in the configPath
-// directory (or configPath itself when it names a file) are layered over the
-// global ones, below SCION_SERVER_*, so Layer-1 keys set only in the --config
-// file are part of bootstrap material instead of being replaced by the
-// global settings at the first snapshot apply (ptone/scion#3070). An empty
-// configPath, or one that resolves to the global directory, adds nothing.
+// with --config. The --config location is resolved with the same rule as
+// LoadGlobalConfig (see loadConfigPathFiles) and layered over the global
+// files, below SCION_SERVER_*, so the DB-tier bootstrap reads the same file
+// for Layer-1 keys as startup and the file-mode reload (ptone/scion#3070).
+// An empty configPath, or one that resolves to the global directory, adds
+// nothing.
 func LoadBootstrapKoanfWithConfigPath(configPath string) *koanf.Koanf {
 	k := koanf.New(".")
 
@@ -1752,41 +1802,50 @@ func LoadBootstrapKoanfWithConfigPath(configPath string) *koanf.Koanf {
 	return k
 }
 
-// loadConfigPathFiles layers the --config location over k: for a directory,
-// its settings.yaml then server.yaml; for a file named settings.yaml/.yml/
-// .json, that directory's settings file; for any other file, the file itself
-// as a legacy server config (as loadGlobalConfigLegacy reads it). A missing
-// path, or a directory equal to globalDir (already loaded), adds nothing.
+// loadConfigPathFiles layers the --config location over k using the same
+// resolution rule as LoadGlobalConfig (resolveServerSettingsSource), so the
+// DB-tier bootstrap and the startup/file-mode load read the same file:
+//   - The global settings.yaml has a server key: it wins, and the --config
+//     location adds nothing.
+//   - Only the --config directory's settings.yaml has a server key: that
+//     file is layered over the global one.
+//   - Neither has a server key (legacy server.yaml): the --config
+//     directory's settings.yaml is layered only when there is no global
+//     settings.yaml (as findTopLevelSettingsRaw picks it), then the --config
+//     server.yaml, or the named file itself, as loadGlobalConfigLegacy
+//     layers it over the global server.yaml.
+//
+// A --config location equal to globalDir (already loaded) adds nothing.
 func loadConfigPathFiles(k *koanf.Koanf, configPath, globalDir string) {
-	if configPath == "" {
+	src := resolveServerSettingsSource(configPath)
+	if src.configDir == "" || (globalDir != "" && sameDir(src.configDir, globalDir)) {
 		return
 	}
-	info, err := os.Stat(configPath)
-	if err != nil {
-		return
-	}
-	dir := configPath
-	if !info.IsDir() {
-		dir = filepath.Dir(configPath)
-	}
-	if globalDir != "" && sameDir(dir, globalDir) {
-		return
-	}
-	if !info.IsDir() {
-		switch filepath.Base(configPath) {
-		case "settings.yaml", "settings.yml", "settings.json":
-		default:
-			if err := k.Load(file.Provider(configPath), yaml.Parser()); err != nil {
-				slog.Warn("LoadBootstrapKoanf: failed to load config file", "path", configPath, "error", err)
-			}
-			return
+	loadSettings := func() {
+		if _, err := loadSettingsFile(k, src.configDir); err != nil {
+			slog.Warn("LoadBootstrapKoanf: failed to load settings file", "dir", src.configDir, "error", err)
 		}
 	}
-	if _, err := loadSettingsFile(k, dir); err != nil {
-		slog.Warn("LoadBootstrapKoanf: failed to load settings file", "dir", dir, "error", err)
+	if !src.legacy {
+		if src.settingsDir == src.configDir {
+			loadSettings()
+		}
+		return
 	}
-	if info.IsDir() {
-		loadServerConfigFile(k, dir)
+	if src.settingsDir == src.configDir {
+		loadSettings()
+	}
+	if src.configFile == "" {
+		loadServerConfigFile(k, src.configDir)
+		return
+	}
+	switch filepath.Base(src.configFile) {
+	case "settings.yaml", "settings.yml", "settings.json":
+		// A settings file is never a legacy server config.
+	default:
+		if err := k.Load(file.Provider(src.configFile), yaml.Parser()); err != nil {
+			slog.Warn("LoadBootstrapKoanf: failed to load config file", "path", src.configFile, "error", err)
+		}
 	}
 }
 
@@ -2140,25 +2199,12 @@ func readSettingsFileRaw(dir string) (map[string]interface{}, bool) {
 // server-less settings.yaml still contributes its top-level hub sections
 // (quotas, agent_secrets, default_timezone, ...; ptone/scion#2284).
 func findTopLevelSettingsRaw(configPath string) map[string]interface{} {
-	var dirs []string
-	if globalDir, err := GetGlobalDir(); err == nil && globalDir != "" {
-		dirs = append(dirs, globalDir)
+	src := resolveServerSettingsSource(configPath)
+	if src.settingsDir == "" {
+		return nil
 	}
-	if configPath != "" {
-		if info, err := os.Stat(configPath); err == nil {
-			dir := configPath
-			if !info.IsDir() {
-				dir = filepath.Dir(configPath)
-			}
-			dirs = append(dirs, dir)
-		}
-	}
-	for _, dir := range dirs {
-		if raw, ok := readSettingsFileRaw(dir); ok {
-			return raw
-		}
-	}
-	return nil
+	raw, _ := readSettingsFileRaw(src.settingsDir)
+	return raw
 }
 
 // decodeTopLevelSection decodes raw[key] into out (a pointer to a small
