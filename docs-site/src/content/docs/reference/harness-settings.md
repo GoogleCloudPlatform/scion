@@ -176,6 +176,56 @@ your local on-disk files. In the web UI, the delete dialog offers an **"Also del
 checkbox to remove the Hub-stored files as well. To remove a local directory, delete it from the
 filesystem or reinstall with `--force`.
 
+### Recovering a deleted built-in
+
+A built-in harness config (such as `claude`) that you delete from the Hub stays deleted. A Hub
+restart or upgrade does not re-create it, and the same applies to built-ins left unselected in
+the setup wizard. To bring one back, re-import it as a **global** harness config from its
+canonical URL:
+
+```text
+https://github.com/GoogleCloudPlatform/scion/harnesses/<name>
+```
+
+In the web UI, open the Hub's **Settings** page, go to the **Harness Configs** tab, and import
+that URL. With the API, send a global import (Hub admins only):
+
+```bash
+curl -X POST "$HUB_ENDPOINT/api/v1/resources/import" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"kind": "harness-config", "scope": "global",
+       "sourceUrl": "https://github.com/GoogleCloudPlatform/scion/harnesses/claude"}'
+```
+
+The URL fetches the repository's main branch. A config re-imported this way counts as a
+built-in again: at its next start the Hub brings it to the version bundled in the Hub binary,
+and later upgrades keep updating it.
+
+Use exactly that URL form. On a **hosted** Hub, these give a usable copy that the Hub treats as
+**user-managed**, so it never receives the content bundled with later releases:
+
+- any other URL for the same config, such as a `/tree/<ref>/` URL
+  (`https://github.com/GoogleCloudPlatform/scion/tree/main/harnesses/claude`);
+- `scion harness-config install --global <url>`, which uploads the files without recording
+  where they came from.
+
+To turn such a copy back into an updating built-in, delete it and re-import it from the
+canonical URL. **Workstation** Hubs re-sync built-ins from `~/.scion/harness-configs` at every
+start, so a re-imported config is updated whichever way you imported it.
+
+The same applies to the built-in `default` template: you can re-import it as a global template
+(`"kind": "template"`, or the **Templates** tab) from
+`https://github.com/GoogleCloudPlatform/scion/resources/templates/default`. On a hosted Hub the
+result is always user-managed and does not receive later bundled updates. Workstation Hubs keep
+it updated.
+
+The Hub must be able to reach GitHub to fetch the URL. An air-gapped Hub needs another source it
+can reach, for example a mirror given as an rclone URI in `sourceUrl` (`:gcs:bucket/path`), or a
+project workspace import (`POST /api/v1/projects/{id}/import-harness-configs` with
+`workspacePath`), which creates a project-scoped config. On a hosted Hub, both give a
+user-managed copy.
+
 ## Configuration (`config.yaml`)
 
 The `config.yaml` file at the root of a harness-config bundle defines its runtime parameters. Beyond basic fields like `image`, `harness` type, and `model_aliases`, it includes capabilities and launch configurations.
