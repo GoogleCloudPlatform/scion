@@ -109,6 +109,45 @@ func TestBrokerAutoProvide_PreserveSettingsOwnerReissueLeavesSettingOff(t *testi
 	assert.False(t, getBrokerAutoProvide(t, s, broker.ID), "a preserveSettings request leaves auto-provide off")
 }
 
+// TestBrokerAutoProvide_PreserveSettingsNonOwnerDeniedForOthersBroker: a
+// preserveSettings request that also sets autoProvide is still held to the
+// re-registration target rule, so a hub member who is not the matched
+// broker's creator gets 403 and the broker and its join token stay as they
+// were.
+func TestBrokerAutoProvide_PreserveSettingsNonOwnerDeniedForOthersBroker(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	owner := newHubMemberUser(t, s, "autoprovide-preserve-owner")
+	member := newHubMemberUser(t, s, "autoprovide-preserve-nonowner")
+	broker := createReregistrationTestBroker(t, s, "autoprovide-preserve-others-broker", owner.ID)
+
+	ownerRec := mintJoinToken(t, srv, owner, broker.Name, 600)
+	require.Equal(t, http.StatusCreated, ownerRec.Code, ownerRec.Body.String())
+	minted := decodeRegistration(t, ownerRec)
+	require.Equal(t, broker.ID, minted.BrokerID)
+
+	rec := doRequestAsUser(t, srv, member, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+		Name:             broker.Name,
+		AutoProvide:      true,
+		PreserveSettings: true,
+	})
+
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"a hub member who is not the broker's creator is denied; got: %s", rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), "joinToken", "denied response must not carry a join token")
+
+	stored, err := s.GetRuntimeBroker(ctx, broker.ID)
+	require.NoError(t, err)
+	assert.False(t, stored.AutoProvide, "auto-provide stays off")
+	assert.Equal(t, "baseline", stored.Labels["env"], "labels stay as they were")
+	assert.Equal(t, owner.ID, stored.CreatedBy, "the broker keeps its creator")
+
+	token, err := s.GetJoinTokenByBrokerID(ctx, broker.ID)
+	require.NoError(t, err)
+	assert.Equal(t, sha256Hash(minted.JoinToken), token.TokenHash, "the stored join token still matches the owner's issued token")
+	assert.Equal(t, owner.ID, token.CreatedBy, "the stored join token keeps its issuer")
+}
+
 func TestBrokerAutoProvide_SuperAdminSessionAllowed(t *testing.T) {
 	srv, s := testServer(t)
 	admin := newSuperAdminUser(t, s, "autoprovide-admin-session")

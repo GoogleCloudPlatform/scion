@@ -207,9 +207,11 @@ type CreateBrokerRegistrationRequest struct {
 	// that broker's record unchanged (AutoProvide, labels and GCP host
 	// fields) and only issues a new join token. For a new broker it creates
 	// the record with AutoProvide off and no GCP host fields, whatever the
-	// request says; only Labels are applied. It changes nothing about
-	// authorization: the caller must still hold broker.create and own the
-	// matched broker.
+	// request says; only Labels are applied. It skips only the
+	// broker.auto_provide check, because AutoProvide is never stored: the
+	// caller must still hold broker.create, and for a matched broker must be
+	// its creator or a super-admin presenting an interactive session or dev
+	// credential.
 	PreserveSettings bool `json:"preserveSettings,omitempty"`
 }
 
@@ -412,7 +414,8 @@ func (s *BrokerAuthService) CreateBrokerRegistrationForAuthorizedNew(ctx context
 // admitted only to keep auto-provide on for the matched broker, so the
 // broker re-read below must still have it on. A first-time registration
 // always passes true: its caller checks broker.auto_provide whenever
-// req.AutoProvide is set.
+// req.AutoProvide is set, except for a PreserveSettings request, whose
+// AutoProvide is forced off below and by the HTTP handler.
 func (s *BrokerAuthService) createBrokerRegistration(ctx context.Context, req CreateBrokerRegistrationRequest, createdBy, expectedExistingBrokerID string, expectNoExistingMatch, autoProvideAuthorized bool) (*CreateBrokerRegistrationResponse, error) {
 	if req.Name == "" {
 		return nil, errors.New("name is required")
