@@ -126,12 +126,18 @@ func mergeSectionOnCurrent(ctx context.Context, ops *OperationalSettings, sectio
 }
 
 // dropSchemaForbiddenKeys removes from doc the top-level keys the
-// section's schema does not allow: keys that are not schema properties when
-// the schema sets additionalProperties to false. It returns the dropped key
-// paths ("<section>.<key>"), sorted. With no schema for the section, or a
-// schema that allows extra keys, nothing is dropped.
+// section's schema does not allow (see dropKeysForbiddenBySchema) and
+// returns their paths ("<section>.<key>"), sorted.
 func dropSchemaForbiddenKeys(section string, doc map[string]json.RawMessage) []string {
 	schema, _ := opsettings.SchemaInfo()[section].Schema.(map[string]interface{})
+	return dropKeysForbiddenBySchema(section, schema, doc)
+}
+
+// dropKeysForbiddenBySchema removes from doc the top-level keys that are
+// not properties of the object schema when it sets additionalProperties to
+// false, and returns their paths ("<section>.<key>"), sorted. With a nil
+// schema, or one that allows extra keys, nothing is dropped.
+func dropKeysForbiddenBySchema(section string, schema map[string]interface{}, doc map[string]json.RawMessage) []string {
 	if schema == nil {
 		return nil
 	}
