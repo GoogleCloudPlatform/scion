@@ -79,6 +79,7 @@ function handleUpdate(subject: string, data: unknown): void {
 interface ChatInternals extends HTMLElement {
   loadV2Members(projectId: string): Promise<void>;
   v2AgentMembers: Array<{ id: string; phase: string }>;
+  _onScopeChanged: () => void;
 }
 
 beforeAll(async () => {
@@ -111,5 +112,30 @@ describe('chat members seed epoch', () => {
 
     expect(stateManager.getAgent('a1')?.phase).toBe('stopped');
     expect(page.v2AgentMembers.find((m) => m.id === 'a1')?.phase).toBe('stopped');
+  });
+
+  it('keeps a live change from a scope set while the members request is in flight', async () => {
+    const page = document.createElement('scion-page-chat') as ChatInternals;
+    // The page's own scope-changed listener (connectedCallback adds it).
+    stateManager.addEventListener('scope-changed', page._onScopeChanged);
+    try {
+      const load = page.loadV2Members('p1');
+      expect(releaseMembers).not.toBeNull();
+
+      // The chat scope is set while the members load, then a status delta
+      // from the new scope lands before the response.
+      stateManager.setScope({ type: 'chat', spaceIds: ['p1'], userId: 'u1' });
+      handleUpdate('project.p1.agent.a1.status', { agentId: 'a1', phase: 'stopped' });
+      releaseMembers?.({
+        humans: [],
+        agents: [{ id: 'a1', kind: 'agent', displayName: 'a1', phase: 'running', projectId: 'p1' }],
+      });
+      await load;
+
+      expect(stateManager.getAgent('a1')?.phase).toBe('stopped');
+      expect(page.v2AgentMembers.find((m) => m.id === 'a1')?.phase).toBe('stopped');
+    } finally {
+      stateManager.removeEventListener('scope-changed', page._onScopeChanged);
+    }
   });
 });

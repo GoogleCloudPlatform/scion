@@ -47,6 +47,7 @@ import { apiFetch, parseApiError } from '../../client/api.js';
 import { navigateTo, pushRoute, replaceRoute, stateManager } from '../../client/main.js';
 import { agentStore } from '../../client/agent-store.js';
 import type { AgentListSnapshot } from '../../client/agent-store.js';
+import type { SeedEpochToken } from '../../client/state.js';
 import { dispatchPageTitle, PAGE_TITLE_EVENT } from '../../client/page-title.js';
 import type { PageTitleDetail } from '../../client/page-title.js';
 import { chatNotifications } from '../../client/chat-notifications.js';
@@ -527,6 +528,13 @@ export class ScionPageChat extends LitElement {
   private _hubUsersLoadedGeneration: number | null = null;
   /** The in-flight project members request, aborted once another view claims the sidebar. */
   private _projectMembersAbort: AbortController | null = null;
+  /**
+   * The seed epoch of the space members load in flight, or null. A scope
+   * change invalidates the store's epochs, so _handleScopeChanged replaces
+   * the token with a fresh one; the load seeds with (and ends) whatever
+   * token is current when its response lands.
+   */
+  private _membersSeed: { token: SeedEpochToken } | null = null;
   /** Newest chat message (event time) the pending debounced rail reload must reflect. */
   private _railReloadAfter = -Infinity;
   /**
@@ -2302,6 +2310,10 @@ export class ScionPageChat extends LitElement {
    * Rows from the agent store's hub list are not seeded: they may be compact.
    */
   private _handleScopeChanged(): void {
+    // A members load in flight lost its seed epoch with the scope change.
+    // Open a fresh one, so a live change from the new scope that lands
+    // before the response is re-applied over it instead of cleared by it.
+    if (this._membersSeed) this._membersSeed.token = stateManager.beginSeedEpoch();
     if (this._agentMembersSource === 'hub') return;
     if (this.v2AgentMembers.length > 0) {
       stateManager.seedAgents(this.v2AgentMembers.map(agentMemberToAgent));
@@ -3423,8 +3435,10 @@ export class ScionPageChat extends LitElement {
     this._projectMembersAbort = controller;
     // A live status change that lands while the members request is in
     // flight is re-applied over the (older) response when it is seeded.
-    const seedToken = stateManager.beginSeedEpoch();
-    const seedGeneration = stateManager.scopeGeneration;
+    // A scope change while it is in flight replaces the token (see
+    // _handleScopeChanged).
+    const seed = { token: stateManager.beginSeedEpoch() };
+    this._membersSeed = seed;
     try {
       const res = await apiFetch(`/api/v1/chat/spaces/${encodeURIComponent(projectId)}/members`, {
         signal: controller.signal,
@@ -3511,18 +3525,13 @@ export class ScionPageChat extends LitElement {
           this._serverOmittedAgentIds.add(id);
         }
         // Seed the shared agent map so SSE status deltas have a baseline to
-        // merge onto — otherwise they are buffered and never notify. A scope
-        // change since the request started discards the seed epoch; the
-        // response is then seeded as it is.
-        const memberAgents = this.v2AgentMembers.map(agentMemberToAgent);
-        if (stateManager.scopeGeneration === seedGeneration) {
-          stateManager.seedAgents(memberAgents, { token: seedToken });
-          this.v2AgentMembers = this.v2AgentMembers.map((m) =>
-            withLiveAgentStatus(m, stateManager.getAgent(m.id))
-          );
-        } else {
-          stateManager.seedAgents(memberAgents);
-        }
+        // merge onto — otherwise they are buffered and never notify.
+        stateManager.seedAgents(this.v2AgentMembers.map(agentMemberToAgent), {
+          token: seed.token,
+        });
+        this.v2AgentMembers = this.v2AgentMembers.map((m) =>
+          withLiveAgentStatus(m, stateManager.getAgent(m.id))
+        );
         // Also populate the legacy v2Members for the thread component
         this.v2Members = [
           ...(data.humans || []).map((h) => ({
@@ -3545,7 +3554,8 @@ export class ScionPageChat extends LitElement {
     } catch {
       // Non-critical (an abort lands here too: a newer view took over)
     } finally {
-      stateManager.endSeedEpoch(seedToken);
+      stateManager.endSeedEpoch(seed.token);
+      if (this._membersSeed === seed) this._membersSeed = null;
       if (this._projectMembersAbort === controller) this._projectMembersAbort = null;
     }
   }
