@@ -1132,15 +1132,23 @@ The precedence packages can be exercised directly:
 ```sh
 go build ./...
 go test ./pkg/config ./pkg/agent -count=1
-go test ./pkg/hub -count=1          # slow (~3 min); do not add -race, it hangs
+go test ./pkg/hub -count=1 -timeout 40m   # slow (see below); do not add -race, it hangs
 ```
 
-:::caution[A whole-repo `go test ./...` is not currently green]
-Some tests outside the precedence packages fail on `main` for reasons unrelated to settings
-precedence, and they are **excluded** from the checks above.
+:::caution[A whole-repo `go test ./...` is not a usable baseline]
+Outside `pkg/hub`, the repository passes: CI runs `go test -tags no_sqlite ./...` and the
+fixture coverage gate (`make test-fixture-coverage`) green on `main`. `pkg/hub` with SQLite
+enabled is the exception:
 
-Do not treat a whole-repo green as an achievable baseline right now, and do not "fix" such
-failures as part of a settings change.
+- A full `pkg/hub` run takes far longer than `go test`'s default 10-minute timeout. CI gives it
+  40 minutes (`make test-hub-sqlite`) and still sometimes times out (ptone/scion#1847). A
+  default-timeout `go test ./...` therefore fails in `pkg/hub` even when no test is broken.
+- `make test-hub-sqlite` skips four tests with known failures in a full-package run:
+  `TestDEF164_AtAgentSlug_DeliversToAgent`, `TestDEF164_AtAgentSlug_DMConversationCreated`,
+  `TestDEF152_AgentToAgentDM_DeliversViaOutbound` and `TestCreateTemplateV2_ScopeIDInjectionBlocked`.
+  The `Makefile` skip list is authoritative if this list drifts.
+
+None of these is related to settings precedence. Do not "fix" them as part of a settings change.
 :::
 
 ## See also
