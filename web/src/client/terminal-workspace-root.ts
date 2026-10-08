@@ -77,19 +77,6 @@ export function isBulkReconnectEligible(entry: RailEntryStatus): boolean {
 }
 
 /**
- * Whether metadata says an entry's agent is gone: deleted, or in the stopped
- * or error phase. Availability "unavailable" does not count: it is also set
- * for transient failures (a failed metadata stream handshake, a 401, a 5xx
- * or a network error), so a brief hub outage after a reload must not make
- * restored rows for running agents removable.
- */
-export function isAgentGone(metadata: TerminalAgentMetadata): boolean {
-  if (metadata.availability === 'deleted') return true;
-  const phase = metadata.agent?.phase;
-  return phase === 'stopped' || phase === 'error';
-}
-
-/**
  * Whether "Remove all inactive" removes an entry: it is not connected. That
  * covers every row the rail shows as "Not connected" (idle: restored from
  * the saved list, or never opened in this tab), whatever its agent's phase
@@ -1547,7 +1534,7 @@ export class TerminalWorkspaceRoot {
       inactive === 0 ? BULK_REMOVE_DISABLED_REASON : null,
       `Remove all inactive: remove ${countLabel(inactive)} that ${
         inactive === 1 ? 'is' : 'are'
-      } not connected, including grey (not connected) and red (disconnected or deleted) rows. Connected and connecting terminals stay.`
+      } not connected, including grey rows and red rows that are not connected. Connected and connecting terminals stay.`
     );
     this.bulkRemove.setAttribute('aria-label', `Remove all inactive (${inactive} eligible)`);
   }
@@ -1574,7 +1561,7 @@ export class TerminalWorkspaceRoot {
     const count = confirmedKeys.size;
     if (count === 0) return 0;
     const confirmed = await showConfirm(
-      `Remove ${countLabel(count)} from the list? This removes every terminal that is not connected, including grey (not connected) and red (disconnected or deleted) rows. Agents keep running. Connected and connecting terminals stay.`,
+      `Remove ${countLabel(count)} from the list? This removes every terminal that is not connected, including grey rows and red rows that are not connected. Agents keep running. Connected and connecting terminals stay.`,
       { title: 'Remove inactive terminals', confirmText: `Remove ${count}` }
     );
     if (!confirmed) return 0;

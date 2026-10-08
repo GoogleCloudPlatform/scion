@@ -597,7 +597,7 @@ describe('Open terminals bulk actions', () => {
     expect(confirmMock.showConfirm).toHaveBeenCalledTimes(1);
     const [message, options] = confirmMock.showConfirm.mock.calls[0];
     expect(message).toMatch(/^Remove 4 terminals from the list\?/);
-    expect(message).toContain('grey (not connected)');
+    expect(message).toContain('grey rows and red rows that are not connected');
     expect(message).toContain('Connected and connecting terminals stay');
     expect(options).toMatchObject({ confirmText: 'Remove 4' });
     expect(removed).toBe(4);

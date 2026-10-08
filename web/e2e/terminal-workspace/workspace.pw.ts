@@ -296,24 +296,24 @@ test('rail list preserves valid semantics and real browser arrow key navigation'
   await page.getByRole('button', { name: /alpha in project-a/ }).focus();
   await expect
     .poll(() => focusedRailControlLabel(page))
-    .toBe('Show terminal for alpha in project-a');
+    .toMatch(/^Show terminal for alpha in project-a(,|$)/);
 
   await page.keyboard.press('ArrowDown');
   await expect
     .poll(() => focusedRailControlLabel(page))
-    .toBe('Show terminal for beta in project-b');
+    .toMatch(/^Show terminal for beta in project-b(,|$)/);
   await page.keyboard.press('ArrowUp');
   await expect
     .poll(() => focusedRailControlLabel(page))
-    .toBe('Show terminal for alpha in project-a');
+    .toMatch(/^Show terminal for alpha in project-a(,|$)/);
   await page.keyboard.press('End');
   await expect
     .poll(() => focusedRailControlLabel(page))
-    .toBe('Show terminal for beta in project-b');
+    .toMatch(/^Show terminal for beta in project-b(,|$)/);
   await page.keyboard.press('Home');
   await expect
     .poll(() => focusedRailControlLabel(page))
-    .toBe('Show terminal for alpha in project-a');
+    .toMatch(/^Show terminal for alpha in project-a(,|$)/);
 });
 
 test('Enter and Space on a rail item focus its terminal without typing the key into it (ptone/scion#2900)', async ({
