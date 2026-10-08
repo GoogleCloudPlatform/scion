@@ -22,7 +22,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -658,32 +657,31 @@ func TestSecurityHeaders(t *testing.T) {
 			}
 		}
 
-		// The external hosts, per directive, are exactly these. A source is a
-		// host when it starts with https:// ; the bare https: scheme source in
-		// img-src (any HTTPS image) is not a host and is not counted.
+		// The host sources, per directive, are exactly these. Every source
+		// counts as a host except quoted keywords ('self', 'unsafe-inline'),
+		// bare schemes ending in a colon (data:, blob:, ws:, wss:, and the
+		// https: source in img-src that allows any HTTPS image) and the two
+		// local development origins below, matched exactly.
 		wantHosts := map[string][]string{
-			"style-src":   {"fonts.googleapis.com"},
-			"font-src":    {"fonts.gstatic.com"},
-			"connect-src": {"storage.googleapis.com"},
+			"style-src":   {"https://fonts.googleapis.com"},
+			"font-src":    {"https://fonts.gstatic.com"},
+			"connect-src": {"https://storage.googleapis.com"},
 		}
+		localDev := map[string]bool{"http://localhost:*": true, "http://127.0.0.1:*": true}
 		gotHosts := map[string][]string{}
-		var allHosts []string
 		for _, directive := range strings.Split(csp, ";") {
 			fields := strings.Fields(directive)
 			if len(fields) == 0 {
 				continue
 			}
 			for _, src := range fields[1:] {
-				if host, ok := strings.CutPrefix(src, "https://"); ok {
-					gotHosts[fields[0]] = append(gotHosts[fields[0]], host)
-					allHosts = append(allHosts, host)
+				if strings.HasPrefix(src, "'") || strings.HasSuffix(src, ":") || localDev[src] {
+					continue
 				}
+				gotHosts[fields[0]] = append(gotHosts[fields[0]], src)
 			}
 		}
-		assert.Equal(t, wantHosts, gotHosts, "external hosts per directive")
-		sort.Strings(allHosts)
-		assert.Equal(t, []string{"fonts.googleapis.com", "fonts.gstatic.com", "storage.googleapis.com"}, allHosts,
-			"the policy's external hosts")
+		assert.Equal(t, wantHosts, gotHosts, "host sources per directive")
 	}
 
 	// Verify Permissions-Policy is set

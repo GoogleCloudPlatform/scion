@@ -2922,9 +2922,10 @@ func sessionString(session *sessions.Session, key string) string {
 }
 
 // webContentSecurityPolicy is the CSP sent with every web response. The
-// client bundles its scripts, styles and Shoelace assets, so the only
+// client bundles its scripts, styles and Shoelace assets, so the only named
 // external hosts are Google Fonts (stylesheet and font files) and Cloud
-// Storage (signed upload and download URLs).
+// Storage (signed upload and download URLs); img-src also allows any HTTPS
+// image through its https: source.
 //
 // img-src allows blob: because the chat file preview fetches image bytes
 // with credentials and renders them through URL.createObjectURL (gs://
