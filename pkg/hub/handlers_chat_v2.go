@@ -1192,17 +1192,32 @@ var unreachablePhases = map[string]bool{
 	string(state.PhaseError):     true,
 }
 
+// agentGoneReason is the failure reason recorded when the primary agent no
+// longer resolves to a live agent. A soft-deleted agent and an agent whose
+// record is missing get this same reason, so the two cases read alike.
+const agentGoneReason = "Agent unreachable"
+
+// agentUnreachableReason returns the failure reason for an unreachable
+// primary given the suffix from isAgentUnreachable.
+func agentUnreachableReason(suffix string) string {
+	if suffix == "" {
+		return agentGoneReason
+	}
+	return fmt.Sprintf("Agent unreachable (%s)", suffix)
+}
+
 // isAgentUnreachable reports whether agent is unreachable for chat v2 primary
 // dispatch: soft-deleted, or in a phase whose container cannot accept a
 // buffered message (suspended, stopping, stopped, error). The returned string
-// is a short reason suffix for the "Agent unreachable (<reason>)" message
-// (e.g. "deleted" or the phase name); it is empty when reachable.
+// is a short reason suffix for agentUnreachableReason: the phase name, or
+// empty for a soft-deleted agent (reported like a missing one) and when
+// reachable.
 func isAgentUnreachable(agent *store.Agent) (bool, string) {
 	if agent == nil {
 		return false, ""
 	}
 	if !agent.DeletedAt.IsZero() {
-		return true, "deleted"
+		return true, ""
 	}
 	if unreachablePhases[agent.Phase] {
 		return true, agent.Phase
@@ -1527,7 +1542,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 		// Not a failure: the message is saved for catch-up, not dropped.
 		storeMsg.DispatchState = store.MessageDispatchDeferred
 	} else if primaryUnreachable {
-		unreachableReason := fmt.Sprintf("Agent unreachable (%s)", primaryUnreachableReason)
+		unreachableReason := agentUnreachableReason(primaryUnreachableReason)
 		storeMsg.DispatchState = store.MessageDispatchFailed
 		storeMsg.DispatchFailureReason = &unreachableReason
 		dispatchFailureCode = dispatchFailureCodeAgentUnreachable
@@ -2049,7 +2064,7 @@ func groupCoAddressees(agents []*store.Agent) []messaging.Addressee {
 type unreachableAgentOverride struct {
 	AgentSlug string // resolved or best-effort slug of the named agent
 	AgentID   string // resolved agent ID, or "" if it never resolved at all
-	Reason    string // e.g. "Agent unreachable (deleted)"
+	Reason    string // e.g. agentGoneReason
 	Code      string // dispatchFailureCode, e.g. dispatchFailureCodeAgentUnreachable
 }
 
@@ -2060,8 +2075,8 @@ type unreachableAgentOverride struct {
 // message type, and response differ, but conversation resolution, SSE
 // publish, watermark updates, and notification firing (including
 // fireHumanMentionNotifications) are shared with the ordinary human-to-human
-// path. unreachable is only ever used for the topic case (isDM is always
-// false alongside it). It returns the response body of the persisted
+// path. With isDM (an agent DM whose agent record is gone) the DM is
+// registered as usual but no DM notification is sent. It returns the response body of the persisted
 // message, or the error the send handler answers with.
 func (s *Server) sendHumanToHuman(ctx context.Context, key, projectID string, user UserIdentity,
 	content, senderLabel string, isDM, noRecipient bool, mentionNames []string, attachmentRefs []AttachmentRef, now time.Time, replyToID string,
@@ -2248,7 +2263,7 @@ func (s *Server) sendHumanToHuman(ctx context.Context, key, projectID string, us
 	// that topic.
 	if cn := s.getChatNotifier(); cn != nil {
 		// DM received notification: notify the peer when a DM is sent.
-		if isDM && recipientID != "" && recipientID != user.ID() {
+		if isDM && unreachable == nil && recipientID != "" && recipientID != user.ID() {
 			go cn.NotifyDMReceived(context.Background(), recipientID, ChatMessageContext{
 				SenderID:        user.ID(),
 				SenderName:      senderLabel,

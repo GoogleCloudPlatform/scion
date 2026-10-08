@@ -517,7 +517,7 @@ func TestUnreachableNC_RoutingPlanError_DeletedDefault_NotMislabelledUnreachable
 	if resp["dispatchFailureCode"] == "agent_unreachable" {
 		t.Fatalf("expected no agent_unreachable code on a routing-plan error, got %v", resp)
 	}
-	if want := "Agent unreachable (deleted)"; m.DispatchFailureReason != nil && *m.DispatchFailureReason == want {
+	if want := agentGoneReason; m.DispatchFailureReason != nil && *m.DispatchFailureReason == want {
 		t.Fatalf("expected the routing-plan error to NOT persist %q, got %+v", want, m)
 	}
 }
@@ -558,4 +558,91 @@ func TestUnreachableNC_TransientDefaultLookupError_FallsThroughToHumanToHuman(t 
 	if resp["dispatchFailureCode"] == "agent_unreachable" {
 		t.Fatalf("expected no agent_unreachable code on a transient lookup error, got %v", resp)
 	}
+}
+
+// dmOutcome is the sender-visible result of a DM send: response fields and
+// the persisted row's delivery state.
+type dmOutcome struct {
+	Code       int
+	State      any
+	Reason     any
+	FailCode   any
+	Type       any
+	RowState   string
+	RowReason  string
+	Dispatches int
+}
+
+func sendDMOutcome(t *testing.T, srv *Server, s store.Store, d *brokerMockDispatcher, agentID string) dmOutcome {
+	t.Helper()
+	dmKey := "dm:agent:" + agentID + ":user:" + DevUserID
+	setDMConversationID(t, s, dmKey, "")
+	before := len(d.getMessages())
+	code, resp, m := unreachableSend(t, srv, s, dmKey, "hello")
+	if m == nil {
+		t.Fatalf("expected a persisted message, got body=%v", resp)
+	}
+	out := dmOutcome{Code: code, State: resp["dispatchState"], Reason: resp["dispatchFailureReason"],
+		FailCode: resp["dispatchFailureCode"], Type: resp["type"], RowState: m.DispatchState,
+		Dispatches: len(d.getMessages()) - before}
+	if m.DispatchFailureReason != nil {
+		out.RowReason = *m.DispatchFailureReason
+	}
+	return out
+}
+
+// A DM to an agent that was deleted (soft or hard) must be recorded and
+// reported as undelivered, with the same outcome as a DM to an agent ID
+// that never existed.
+func TestUnreachableNC_DM_DeletedAndMissingAgentSameOutcome(t *testing.T) {
+	d := &brokerMockDispatcher{}
+	srv, s, _, proj, _ := setupSendTest(t)
+	srv.SetDispatcher(d)
+	ctx := t.Context()
+
+	soft := &store.Agent{ID: tid("dm-soft-gone"), ProjectID: proj.ID, Name: "Soft", Slug: "soft-gone",
+		Phase: "running", OwnerID: DevUserID, CreatedBy: DevUserID}
+	require.NoError(t, s.CreateAgent(ctx, soft))
+	soft.DeletedAt = time.Now()
+	require.NoError(t, s.UpdateAgent(ctx, soft))
+
+	hard := &store.Agent{ID: tid("dm-hard-gone"), ProjectID: proj.ID, Name: "Hard", Slug: "hard-gone",
+		Phase: "running", OwnerID: DevUserID, CreatedBy: DevUserID}
+	require.NoError(t, s.CreateAgent(ctx, hard))
+	require.NoError(t, s.DeleteAgent(ctx, hard.ID))
+
+	softOut := sendDMOutcome(t, srv, s, d, soft.ID)
+	hardOut := sendDMOutcome(t, srv, s, d, hard.ID)
+	missingOut := sendDMOutcome(t, srv, s, d, tid("dm-never-existed"))
+
+	want := dmOutcome{Code: http.StatusCreated, State: store.MessageDispatchFailed, Reason: agentGoneReason,
+		FailCode: dispatchFailureCodeAgentUnreachable, Type: messages.TypeInstruction,
+		RowState: store.MessageDispatchFailed, RowReason: agentGoneReason}
+	require.Equal(t, want, missingOut, "missing agent")
+	require.Equal(t, missingOut, hardOut, "hard-deleted agent must match missing agent")
+	require.Equal(t, missingOut, softOut, "soft-deleted agent must match missing agent")
+}
+
+// A topic whose default agent was soft-deleted and one whose default names
+// no agent at all report the same failure reason.
+func TestUnreachableNC_TopicDeletedAndMissingDefaultSameReason(t *testing.T) {
+	d := &brokerMockDispatcher{}
+	srv, s, topic, _ := unreachableTestSetup(t, "running", true, d)
+	_, deletedResp, deletedRow := unreachableSend(t, srv, s, topic, "hello")
+
+	srv2, s2, wcs2, proj2, db2 := setupSendTest(t)
+	srv2.SetDispatcher(d)
+	missingTopic := tid("missing-default-topic")
+	require.NoError(t, wcs2.CreateTopic(t.Context(), WebChatTopic{ID: missingTopic, ProjectID: proj2.ID,
+		Name: "missing-default", CreatedBy: "dev", CreatedAt: time.Now().UTC(), DefaultAgent: "never-existed"}))
+	setTopicConversationID(t, db2, s2, missingTopic, proj2.ID)
+	_, missingResp, missingRow := unreachableSend(t, srv2, s2, missingTopic, "hello")
+
+	require.NotNil(t, deletedRow)
+	require.NotNil(t, missingRow)
+	require.Equal(t, missingResp["dispatchFailureReason"], deletedResp["dispatchFailureReason"])
+	require.Equal(t, missingResp["dispatchFailureCode"], deletedResp["dispatchFailureCode"])
+	require.Equal(t, missingRow.DispatchState, deletedRow.DispatchState)
+	require.Equal(t, *missingRow.DispatchFailureReason, *deletedRow.DispatchFailureReason)
+	require.Equal(t, agentGoneReason, *deletedRow.DispatchFailureReason)
 }
