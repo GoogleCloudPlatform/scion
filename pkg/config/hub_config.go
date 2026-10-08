@@ -1406,6 +1406,7 @@ var snakeCaseFields = map[string]string{
 	"apibaseurl":                 "api_base_url",
 	"appid":                      "app_id",
 	"authorizeddomains":          "authorized_domains",
+	"autoexposeports":            "auto_expose_ports",
 	"autosuspendstalled":         "auto_suspend_stalled",
 	"cafile":                     "ca_file",
 	"defaultharnessconfig":       "default_harness_config",

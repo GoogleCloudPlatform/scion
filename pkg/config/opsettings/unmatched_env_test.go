@@ -90,8 +90,8 @@ func TestFindUnmatchedSettingsEnv_FlagsWithoutHint(t *testing.T) {
 		"SCION_SEED_SERVER_HUB_PORT", // Layer-0: seed values only seed Layer-1
 		"SCION_SERVER_ENV",           // binds in VersionedSettings, never read
 		"SCION_SERVER_LOG_FORMAT",
-		// No SEED spelling maps to auto_expose_ports.enabled (no snake-case
-		// mapping for autoexposeports); seed it from settings.yaml.
+		// Underscored spelling splits into auto.expose.ports.enabled; the
+		// accepted spelling is SCION_SEED_AUTOEXPOSEPORTS_ENABLED.
 		"SCION_SEED_AUTO_EXPOSE_PORTS_ENABLED",
 		"SCION_SEED_SERVER_HUB_IMAGEREGISTRY", // image_registry is top-level
 	}
@@ -126,6 +126,8 @@ func TestFindUnmatchedSettingsEnv_AcceptsValidNames(t *testing.T) {
 		"SCION_SEED_SERVER_AUTH_DEFAULTUSERROLE=x",
 		"SCION_SEED_TELEMETRY_ENABLED=x",
 		"SCION_SEED_IMAGEREGISTRY=x",
+		"SCION_SEED_AUTOEXPOSEPORTS_ENABLED=x",
+		"SCION_SERVER_AUTOEXPOSEPORTS_ENABLED=x",
 		// Unrelated prefixes are ignored entirely.
 		"SCION_PROJECT=x",
 		"HOME=/tmp",

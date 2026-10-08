@@ -120,6 +120,30 @@ func TestServerEnvToOpsettingsKey(t *testing.T) {
 	}
 }
 
+// TestSeedAndServerEnv_AutoExposePorts verifies that the flat-lowercased
+// AUTOEXPOSEPORTS segment maps to the Layer-1 key auto_expose_ports.enabled
+// for both SCION_SEED_* and SCION_SERVER_*, and that the seed value reaches
+// bootstrap material (ptone/scion#3052).
+func TestSeedAndServerEnv_AutoExposePorts(t *testing.T) {
+	t.Setenv("SCION_SEED_AUTOEXPOSEPORTS_ENABLED", "true")
+	if k := LoadSeedEnvKoanf(); !k.Exists("auto_expose_ports.enabled") || !k.Bool("auto_expose_ports.enabled") {
+		t.Errorf("SCION_SEED_AUTOEXPOSEPORTS_ENABLED should map to auto_expose_ports.enabled=true; keys: %v", k.Keys())
+	}
+
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	if err := os.MkdirAll(filepath.Join(tmpHome, ".scion"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if k := LoadBootstrapKoanf(); !k.Bool("auto_expose_ports.enabled") {
+		t.Errorf("bootstrap material should carry auto_expose_ports.enabled=true from SCION_SEED_*; keys: %v", k.Keys())
+	}
+
+	if got := serverEnvToOpsettingsKey("AUTOEXPOSEPORTS_ENABLED"); got != "auto_expose_ports.enabled" {
+		t.Errorf("serverEnvToOpsettingsKey(AUTOEXPOSEPORTS_ENABLED) = %q, want auto_expose_ports.enabled", got)
+	}
+}
+
 // TestLoadSeedEnvKoanf_Empty verifies that LoadSeedEnvKoanf returns an empty
 // koanf instance when no SCION_SEED_* vars are set.
 func TestLoadSeedEnvKoanf_Empty(t *testing.T) {

@@ -183,7 +183,7 @@ auto_expose_ports:
 
 * **File Mode**: Editable directly in the global config file.
 * **Database Mode**: Managed via the Hub Admin Settings API (`PUT /api/v1/admin/server-config`) or UI.
-* **Seeds**: Seeded initially from `auto_expose_ports.enabled` in `settings.yaml`. No `SCION_SEED_*` variable maps to this key.
+* **Seeds**: Seeded initially from `auto_expose_ports.enabled` in `settings.yaml`, or from `SCION_SEED_AUTOEXPOSEPORTS_ENABLED` when the file does not set it.
 
 ### Project-Level Overrides
 Project owners and admins can control the auto-expose feature for all agents within a specific project using project annotations:
