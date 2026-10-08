@@ -165,13 +165,10 @@ func TestCreateAgent_LocalStorageBrokerLocalPathUnaffected(t *testing.T) {
 	require.NotNil(t, disp.capturedAgent, "the agent must be dispatched")
 }
 
-// TestCreateAgent_LocalStorageSharedWorkspaceGitRemoteDispatchesWithoutSync
-// covers a shared-workspace project with a git remote on a hub on local
-// storage and a remote broker with no local path: the broker builds the
-// shared workspace from the git remote, so the create dispatches as a hub
-// with no storage does, without running the sync.
-func TestCreateAgent_LocalStorageSharedWorkspaceGitRemoteDispatchesWithoutSync(t *testing.T) {
-	srv, s, project, disp := setupWorkspaceUploadServer(t, newContentMockStorage("local"))
+// makeSharedGitProject turns the fixture project into a shared-workspace
+// project with a git remote.
+func makeSharedGitProject(t *testing.T, s store.Store, project *store.Project) {
+	t.Helper()
 	project.GitRemote = "github.com/example/repo"
 	if project.Labels == nil {
 		project.Labels = map[string]string{}
@@ -179,6 +176,36 @@ func TestCreateAgent_LocalStorageSharedWorkspaceGitRemoteDispatchesWithoutSync(t
 	project.Labels[store.LabelWorkspaceMode] = store.WorkspaceModeShared
 	require.NoError(t, s.UpdateProject(context.Background(), project))
 	require.True(t, project.IsSharedWorkspace(), "fixture check: shared-workspace project")
+}
+
+// sharedGitDispatch is what a shared-workspace git project's create hands
+// to the broker: the dispatched agent's AppliedConfig, the project facts the
+// dispatcher adds to it, and the hub-managed project path of that run.
+type sharedGitDispatch struct {
+	config      *store.AgentAppliedConfig
+	info        projectDispatchInfo
+	spec        WorkspaceDispatchSpec
+	projectPath string
+	uploads     []string
+}
+
+// createSharedGitAgent creates an agent in a shared-workspace git project on
+// a remote broker with no local path, with the given hub storage (nil for
+// none), and returns what was dispatched.
+func createSharedGitAgent(t *testing.T, stor storage.Storage) sharedGitDispatch {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	if stor != nil {
+		srv.SetStorage(stor)
+	}
+	t.Cleanup(func() {
+		if p, err := hubManagedProjectPath(project.Slug); err == nil {
+			_ = os.RemoveAll(p)
+		}
+	})
+	makeSharedGitProject(t, s, project)
 	uploads := uploadRecorder(t)
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
@@ -186,12 +213,71 @@ func TestCreateAgent_LocalStorageSharedWorkspaceGitRemoteDispatchesWithoutSync(t
 		ProjectID: project.ID,
 	})
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
-	require.Empty(t, *uploads, "no workspace sync may run on a hub without GCS storage")
 	require.NotNil(t, disp.capturedAgent, "the agent must be dispatched")
 	require.NotNil(t, disp.capturedAgent.AppliedConfig)
-	require.NotEmpty(t, disp.capturedAgent.AppliedConfig.Workspace, "the hub-managed workspace path is dispatched as with no storage")
-	require.Empty(t, disp.capturedAgent.AppliedConfig.WorkspaceStoragePath)
-	require.Empty(t, disp.capturedAgent.AppliedConfig.WorkspaceStorageBucket)
+
+	info, err := (&HTTPAgentDispatcher{store: s}).resolveDispatchProjectInfo(context.Background(), disp.capturedAgent)
+	require.NoError(t, err)
+	projectPath, err := hubManagedProjectPath(project.Slug)
+	require.NoError(t, err)
+	return sharedGitDispatch{
+		config:      disp.capturedAgent.AppliedConfig,
+		info:        info,
+		spec:        workspaceSpecFor(disp.capturedAgent, info),
+		projectPath: projectPath,
+		uploads:     *uploads,
+	}
+}
+
+// TestCreateAgent_LocalStorageSharedWorkspaceGitRemoteDispatchesWithoutSync
+// covers a shared-workspace project with a git remote on a hub on local
+// storage and a remote broker with no local path: the broker builds the
+// shared workspace from the git remote, so the create runs no sync and
+// dispatches exactly what a hub with no storage dispatches.
+func TestCreateAgent_LocalStorageSharedWorkspaceGitRemoteDispatchesWithoutSync(t *testing.T) {
+	want := createSharedGitAgent(t, nil)
+	got := createSharedGitAgent(t, newContentMockStorage("local"))
+
+	require.Empty(t, got.uploads, "no workspace sync may run on a hub without GCS storage")
+
+	// The hub-managed workspace path is dispatched, as with no storage.
+	require.Equal(t, want.projectPath, want.config.Workspace, "fixture check: nil storage dispatches the hub-managed path")
+	require.Equal(t, got.projectPath, got.config.Workspace)
+	require.Empty(t, got.config.WorkspaceStoragePath)
+	require.Empty(t, got.config.WorkspaceStorageBucket)
+	require.Equal(t, want.config.WorkspaceStoragePath, got.config.WorkspaceStoragePath)
+	require.Equal(t, want.config.WorkspaceStorageBucket, got.config.WorkspaceStorageBucket)
+	require.Equal(t, want.config.GitClone, got.config.GitClone)
+
+	// The shared-workspace flag and clone config travel as with no storage.
+	require.True(t, got.info.sharedWorkspace)
+	require.Equal(t, want.info.sharedWorkspace, got.info.sharedWorkspace)
+	require.Equal(t, want.info.workspaceMode, got.info.workspaceMode)
+	require.Equal(t, want.info.sharedWorkspaceClone, got.info.sharedWorkspaceClone)
+	require.Equal(t, want.spec, got.spec)
+}
+
+// TestCreateAgent_GCSStorageSharedWorkspaceGitRemoteUploads covers a
+// shared-workspace project with a git remote on a GCS-backed hub: the
+// provider check leaves it unchanged, so the upload runs and the agent is
+// pointed at the workspace storage path and bucket.
+func TestCreateAgent_GCSStorageSharedWorkspaceGitRemoteUploads(t *testing.T) {
+	srv, s, project, disp := setupWorkspaceUploadServer(t, newGCSContentMockStorage("hub-bucket"))
+	makeSharedGitProject(t, s, project)
+	uploads := uploadRecorder(t)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name:      "gcs-shared-git-agent",
+		ProjectID: project.ID,
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+
+	require.Equal(t, []string{"hub-bucket"}, *uploads)
+	require.NotNil(t, disp.capturedAgent)
+	require.NotNil(t, disp.capturedAgent.AppliedConfig)
+	require.Empty(t, disp.capturedAgent.AppliedConfig.Workspace)
+	require.Equal(t, storage.ProjectWorkspaceStoragePath(srv.HubID(), project.ID), disp.capturedAgent.AppliedConfig.WorkspaceStoragePath)
+	require.Equal(t, "hub-bucket", disp.capturedAgent.AppliedConfig.WorkspaceStorageBucket)
 }
 
 // TestCreateAgent_LocalStorageUnrelatedCallerWorkspaceDispatches covers a

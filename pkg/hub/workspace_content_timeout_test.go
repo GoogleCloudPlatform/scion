@@ -514,6 +514,45 @@ func TestCreateAgent_CallerWorkspace_HungStorageReturns503NoAgentNoDispatch(t *t
 	assert.Empty(t, disp.dispatchedAgents, "nothing may be dispatched")
 }
 
+// ptone/scion#3765: a shared-workspace project with a git remote on a hub
+// whose storage is not GCS skips only the workspace sync, not the probe
+// before it, so hung workspace storage still fails the create with 503.
+func TestCreateAgent_SharedGitNonGCS_HungStorageReturns503NoAgentNoDispatch(t *testing.T) {
+	srv, s, mountRoot := hungStorageServer(t)
+	ctx := context.Background()
+	disp := &mockDispatcher{}
+	srv.SetDispatcher(disp)
+	srv.SetStorage(newMockStorage("local"))
+
+	broker := &store.RuntimeBroker{
+		ID: tid("broker-hung-shared-git"), Slug: "hung-shared-git-broker",
+		Name: "Hung Shared Git Broker", Status: store.BrokerStatusOnline,
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+	project := &store.Project{
+		ID: tid("project-hung-shared-git"), Slug: "hung-shared-git", Name: "Hung Shared Git Project",
+		GitRemote: "github.com/example/repo",
+		Labels:    map[string]string{store.LabelWorkspaceMode: store.WorkspaceModeShared},
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+	require.True(t, project.IsSharedWorkspace(), "fixture check: shared-workspace project")
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", map[string]interface{}{
+		"name":            "hung-shared-git-agent",
+		"projectId":       project.ID,
+		"runtimeBrokerId": broker.ID,
+		"workspace":       "subdir",
+	})
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code, "body: %s", rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), mountRoot, "response must not leak the path")
+	assert.Contains(t, rec.Body.String(), "Workspace storage is not responding")
+
+	agents, err := s.ListAgents(ctx, store.AgentFilter{ProjectID: project.ID}, store.ListOptions{})
+	require.NoError(t, err)
+	assert.Empty(t, agents.Items, "the agent row must be cleaned up")
+	assert.Empty(t, disp.dispatchedAgents, "nothing may be dispatched")
+}
+
 // N1 (round 3): a rolled-back project create releases its
 // max_projects_per_user reservation, so a hung mount does not leak quota
 // slots on every retry.
