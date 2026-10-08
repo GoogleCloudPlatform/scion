@@ -2317,6 +2317,12 @@ export class TerminalWorkspaceRoot {
         grid-template-rows: 1fr;
         background: #111827;
       }
+      /* Empty slot placeholders are translucent, so the host behind them
+         follows the app theme (#3803). Layouts with no placeholder keep the
+         dark host, so fully populated panes render exactly as before. */
+      .terminal-pane-host:has(> .terminal-slot-placeholder) {
+        background: var(--scion-bg, #f8fafc);
+      }
       .terminal-pane {
         min-height: 0;
         min-width: 0;

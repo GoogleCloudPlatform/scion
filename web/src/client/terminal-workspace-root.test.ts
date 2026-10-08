@@ -499,6 +499,120 @@ describe('focus outline suppression in single-pane mode (#1716)', () => {
 });
 
 // ────────────────────────────────────────────────────────────────────────────
+// Pane host background behind empty slot placeholders (ptone/scion#3803)
+// ────────────────────────────────────────────────────────────────────────────
+
+describe('pane host background follows the theme only behind placeholders (#3803)', () => {
+  const AGENT_A = '11111111-1111-4111-8111-111111111111';
+  const AGENT_B = '22222222-2222-4222-8222-222222222222';
+  // --scion-bg values of the light and dark theme blocks in theme.css.
+  const THEMES = { light: 'rgb(248, 250, 252)', dark: 'rgb(15, 23, 42)' } as const;
+  const TERMINAL_HOST_BG = '#111827';
+  let root: TerminalWorkspaceRoot;
+  let reg: TerminalSessionRegistry;
+
+  beforeEach(() => {
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      cb(0);
+      return 0;
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve(
+          new Response(JSON.stringify({ id: AGENT_A, name: 'test', phase: 'running' }), {
+            status: 200,
+          })
+        )
+      )
+    );
+    vi.stubGlobal(
+      'WebSocket',
+      class {
+        onopen = null;
+        onclose = null;
+        send = vi.fn();
+        close = vi.fn();
+        readyState = 0;
+      }
+    );
+    vi.stubGlobal(
+      'EventSource',
+      class extends EventTarget {
+        onopen = null;
+        close = vi.fn();
+        constructor(public url: string) {
+          super();
+        }
+      }
+    );
+    reg = new TerminalSessionRegistry({ hubUrl: window.location.origin, accountId: 'test' });
+    root = new WorkspaceRoot();
+    document.body.append(root.element);
+  });
+
+  afterEach(() => {
+    root.dispose();
+    root.element.remove();
+    document.documentElement.style.removeProperty('--scion-bg');
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  function hostBackground(): string {
+    return getComputedStyle(getPaneHost(root)).backgroundColor;
+  }
+
+  function keyFor(agentId: string): string {
+    const key = root.findSessionKeyByAgentId(agentId);
+    if (!key) throw new Error(`No session for agent ${agentId}`);
+    return key;
+  }
+
+  for (const [theme, bg] of Object.entries(THEMES)) {
+    describe(`${theme} theme`, () => {
+      beforeEach(() => {
+        document.documentElement.style.setProperty('--scion-bg', bg);
+      });
+
+      it('empty multi-pane slots sit on the theme background', async () => {
+        root.layoutManager.setLayout('four');
+        await flush();
+        expect(root.element.querySelectorAll('.terminal-slot-placeholder')).toHaveLength(4);
+        expect(hostBackground()).toBe(bg);
+      });
+
+      it('a partly filled layout keeps the theme background behind its placeholders', async () => {
+        root.layoutManager.setLayout('two-columns');
+        root.create(reg, AGENT_A);
+        root.layoutManager.place(keyFor(AGENT_A), 'two-columns', 0);
+        await flush();
+        expect(root.element.querySelectorAll('.terminal-slot-placeholder')).toHaveLength(1);
+        expect(hostBackground()).toBe(bg);
+      });
+
+      it('a fully populated multi-pane layout keeps the dark terminal host', async () => {
+        root.layoutManager.setLayout('two-columns');
+        root.create(reg, AGENT_A);
+        root.create(reg, AGENT_B);
+        root.layoutManager.place(keyFor(AGENT_A), 'two-columns', 0);
+        root.layoutManager.place(keyFor(AGENT_B), 'two-columns', 1);
+        await flush();
+        expect(root.element.querySelectorAll('.terminal-slot-placeholder')).toHaveLength(0);
+        expect(hostBackground()).toBe(TERMINAL_HOST_BG);
+      });
+
+      it('a single populated pane keeps the dark terminal host', async () => {
+        root.create(reg, AGENT_A);
+        await flush();
+        expect(root.layoutManager.getState().active).toBe('single');
+        expect(hostBackground()).toBe(TERMINAL_HOST_BG);
+      });
+    });
+  }
+});
+
+// ────────────────────────────────────────────────────────────────────────────
 // URL layout sync (#1715)
 // ────────────────────────────────────────────────────────────────────────────
 
