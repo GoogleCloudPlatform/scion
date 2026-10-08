@@ -819,7 +819,11 @@ func TestRunConversationList_NameColumn(t *testing.T) {
 			{"id":"conv-thread","kind":"group","surface":"native","driftState":"active","threadName":"design-chat"},
 			{"id":"conv-named","kind":"group","surface":"native","driftState":"active","displayName":"release"},
 			{"id":"conv-dm-unknown","kind":"direct","surface":"native","driftState":"active",
-			 "dmPeer":{"kind":"agent","id":"22222222-2222-2222-2222-222222222222"}}
+			 "dmPeer":{"kind":"agent","id":"22222222-2222-2222-2222-222222222222"}},
+			{"id":"conv-both","kind":"group","surface":"native","driftState":"active",
+			 "displayName":"named-wins","threadName":"thread-loses"},
+			{"id":"conv-grp-dm","kind":"group","surface":"native","driftState":"active","threadName":"group-thread",
+			 "dmPeer":{"kind":"agent","id":"33333333-3333-3333-3333-333333333333","name":"not-a-dm"}}
 		]}`))
 	}))
 	defer server.Close()
@@ -849,6 +853,10 @@ func TestRunConversationList_NameColumn(t *testing.T) {
 		"conv-thread":  "design-chat",
 		"conv-named":   "release",
 		"conv-dm-unkn": "-",
+		// The display name takes precedence over the thread name.
+		"conv-both": "named-wins",
+		// dmPeer only labels direct conversations; a group falls through.
+		"conv-grp-dm": "group-thread",
 	}, names)
 
 	convJSON = true
@@ -856,7 +864,7 @@ func TestRunConversationList_NameColumn(t *testing.T) {
 		Conversations []map[string]any `json:"conversations"`
 	}
 	require.NoError(t, json.Unmarshal([]byte(run()), &got))
-	require.Len(t, got.Conversations, 4)
+	require.Len(t, got.Conversations, 6)
 	assert.Equal(t, "reviewer", got.Conversations[0]["dmPeer"].(map[string]any)["name"])
 	assert.Equal(t, "design-chat", got.Conversations[1]["threadName"])
 	assert.NotContains(t, got.Conversations[2], "dmPeer")

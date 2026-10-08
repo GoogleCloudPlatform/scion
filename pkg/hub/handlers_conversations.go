@@ -246,9 +246,13 @@ func (s *Server) labelListedConversations(ctx context.Context, convs []conversat
 				userIDs = append(userIDs, peer.ID)
 			}
 		case "group":
+			// The Surface check is defensive: linkedTopic already returns
+			// nil for any non-thread external_ref.
 			if c.DisplayName != "" || c.Surface != "native" {
 				continue
 			}
+			// One topic lookup per unnamed thread-backed group, bounded
+			// by the list limit when one is set; each is a primary-key read.
 			topic, err := s.linkedTopic(ctx, &c.Conversation)
 			if err != nil {
 				slog.WarnContext(ctx, "conversation list: thread name lookup failed",

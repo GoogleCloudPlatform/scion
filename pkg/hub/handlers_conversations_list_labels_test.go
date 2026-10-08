@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -62,15 +63,64 @@ func TestListConversations_LabelsNativeConversations(t *testing.T) {
 	thread := &store.Conversation{ID: api.NewUUID(), ProjectID: &project.ID, Kind: "group", Surface: "native",
 		ExternalRef: threadRef, DriftState: "active", LastActivityAt: now.Add(-time.Minute), CreatedAt: now}
 	require.NoError(t, s.CreateConversation(ctx, thread))
+	// The fresh ConversationID is deliberate: CreateTopic finds the
+	// conversation already on the thread external_ref and relinks the topic
+	// to it, which is the message-path-first scenario under test.
 	require.NoError(t, wcs.CreateTopic(ctx, WebChatTopic{
 		ID: topicID, ProjectID: project.ID, Name: "design-chat",
 		ConversationID: api.NewUUID(), CreatedBy: "dev", CreatedAt: now,
 	}))
 
-	for _, id := range []string{dm.ID, thread.ID} {
+	// A named native thread linked to a topic keeps its display name and
+	// gets no threadName.
+	namedTopicID := api.NewUUID()
+	namedRef, err := messaging.ThreadConversationExternalRef(project.ID, namedTopicID)
+	require.NoError(t, err)
+	named := &store.Conversation{ID: api.NewUUID(), ProjectID: &project.ID, Kind: "group", Surface: "native",
+		DisplayName: "release-room", ExternalRef: namedRef, DriftState: "active",
+		LastActivityAt: now.Add(-2 * time.Minute), CreatedAt: now}
+	require.NoError(t, s.CreateConversation(ctx, named))
+	require.NoError(t, wcs.CreateTopic(ctx, WebChatTopic{
+		ID: namedTopicID, ProjectID: project.ID, Name: "topic-name",
+		ConversationID: named.ID, CreatedBy: "dev", CreatedAt: now,
+	}))
+
+	for _, id := range []string{dm.ID, thread.ID, named.ID} {
 		addConvParticipant(t, s, id, "user", user.ID)
 		addConvParticipant(t, s, id, "agent", agent.ID)
 	}
+
+	// Peer name fallbacks: a user with no display name is labelled by email,
+	// and an agent with no name by its slug.
+	quietUser := &store.User{ID: api.NewUUID(), Email: "quiet@example.com", Role: "member", Status: "active"}
+	require.NoError(t, s.CreateUser(ctx, quietUser))
+	namelessAgent := &store.Agent{ID: api.NewUUID(), Name: "placeholder", Slug: "nameless-slug",
+		ProjectID: project.ID, Phase: "running"}
+	require.NoError(t, s.CreateAgent(ctx, namelessAgent))
+	// The store rejects an empty agent name on write, so blank it directly
+	// to model a row that has none.
+	rawDB := s.(interface{ DB() *sql.DB }).DB()
+	res, err := rawDB.ExecContext(ctx, `UPDATE agents SET name = '' WHERE id = ?`, namelessAgent.ID)
+	require.NoError(t, err)
+	n, err := res.RowsAffected()
+	require.NoError(t, err)
+	require.EqualValues(t, 1, n)
+
+	userDMKey, err := messages.DMConversationKey("user", user.ID, "user", quietUser.ID)
+	require.NoError(t, err)
+	userDM := &store.Conversation{ID: api.NewUUID(), Kind: "direct", Surface: "native", ExternalRef: userDMKey,
+		DriftState: "active", LastActivityAt: now.Add(-3 * time.Minute), CreatedAt: now}
+	require.NoError(t, s.CreateConversation(ctx, userDM))
+	addConvParticipant(t, s, userDM.ID, "user", user.ID)
+	addConvParticipant(t, s, userDM.ID, "user", quietUser.ID)
+
+	slugDMKey, err := messages.DMConversationKey("user", user.ID, "agent", namelessAgent.ID)
+	require.NoError(t, err)
+	slugDM := &store.Conversation{ID: api.NewUUID(), Kind: "direct", Surface: "native", ExternalRef: slugDMKey,
+		DriftState: "active", LastActivityAt: now.Add(-4 * time.Minute), CreatedAt: now}
+	require.NoError(t, s.CreateConversation(ctx, slugDM))
+	addConvParticipant(t, s, slugDM.ID, "user", user.ID)
+	addConvParticipant(t, s, slugDM.ID, "agent", namelessAgent.ID)
 
 	list := func(ctx context.Context) map[string]conversationResponse {
 		t.Helper()
@@ -95,6 +145,13 @@ func TestListConversations_LabelsNativeConversations(t *testing.T) {
 	require.Contains(t, asUser, thread.ID)
 	require.Equal(t, "design-chat", asUser[thread.ID].ThreadName)
 	require.Nil(t, asUser[thread.ID].DMPeer)
+	require.Contains(t, asUser, named.ID)
+	require.Equal(t, "release-room", asUser[named.ID].DisplayName)
+	require.Empty(t, asUser[named.ID].ThreadName)
+	require.Contains(t, asUser, userDM.ID)
+	require.Equal(t, &conversationPeer{Kind: "user", ID: quietUser.ID, Name: "quiet@example.com"}, asUser[userDM.ID].DMPeer)
+	require.Contains(t, asUser, slugDM.ID)
+	require.Equal(t, &conversationPeer{Kind: "agent", ID: namelessAgent.ID, Name: "nameless-slug"}, asUser[slugDM.ID].DMPeer)
 
 	// The agent sees the user as the DM peer.
 	asAgent := list(agentContext(agent.ID, project.ID))

@@ -761,7 +761,6 @@ func runConversationCatchUp(cmd *cobra.Command, args []string) error {
 	return tw.Flush()
 }
 
-// resolveConversationRef resolves a conversation reference string to a conversation ID.
 // conversationListName is the NAME column of conversation list
 // (ptone/scion#3499): DM:<peer> for a direct conversation whose peer the hub
 // resolved, else the display name, else the linked thread name, else "-".
@@ -778,6 +777,7 @@ func conversationListName(conv hubclient.ConversationDetail) string {
 	return "-"
 }
 
+// resolveConversationRef resolves a conversation reference string to a conversation ID.
 // Supports conv:<uuid> directly. For @agent and #thread, it first lists the caller's
 // conversations and tries to match.
 func resolveConversationRef(ctx context.Context, client hubclient.Client, refStr string) (string, error) {
