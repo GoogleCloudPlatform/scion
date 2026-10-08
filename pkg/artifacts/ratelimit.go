@@ -38,7 +38,8 @@ const (
 	SharedGlobalBurst     = 600
 	// sharedMaxClients caps the clients tracked at once. A new client
 	// arriving when every slot holds a bucket that is still refilling is
-	// refused, so the table cannot grow without bound.
+	// not tracked and is limited by the shared limit alone, so the table
+	// cannot grow without bound.
 	sharedMaxClients = 10000
 	// sharedSweepEvery spaces the sweeps a full table triggers, so a
 	// stream of new clients costs one pass over the table per interval,
@@ -62,6 +63,9 @@ func (b *tokenBucket) refill(now time.Time, perSecond, burst float64) {
 
 // wait is how many whole seconds until b holds one token.
 func (b *tokenBucket) wait(perSecond float64) int {
+	if perSecond <= 0 {
+		return 60
+	}
 	return max(1, int(math.Ceil((1-b.tokens)/perSecond)))
 }
 
@@ -81,6 +85,10 @@ type rateLimiter struct {
 }
 
 func newRateLimiter(now func() time.Time, clientPerMinute, clientBurst, globalPerMinute, globalBurst, maxClients int) *rateLimiter {
+	// Every rate, burst and size is at least 1, so a bucket always refills
+	// and wait never divides by zero.
+	clientPerMinute, clientBurst = max(clientPerMinute, 1), max(clientBurst, 1)
+	globalPerMinute, globalBurst, maxClients = max(globalPerMinute, 1), max(globalBurst, 1), max(maxClients, 1)
 	t := now()
 	return &rateLimiter{
 		now:         now,
@@ -94,9 +102,10 @@ func newRateLimiter(now func() time.Time, clientPerMinute, clientBurst, globalPe
 	}
 }
 
-// allow charges one request to client key and to the global bucket. It
-// returns false, and the seconds to wait, when either bucket is empty or
-// the client cannot be tracked; a refused request charges neither.
+// allow charges one request to client key and to the global bucket, or,
+// for a client the full table cannot track, to the global bucket alone. It
+// returns false, and the seconds to wait, when a charged bucket is empty;
+// a refused request charges nothing.
 func (l *rateLimiter) allow(key string) (int, bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -108,7 +117,15 @@ func (l *rateLimiter) allow(key string) (int, bool) {
 			l.sweep(now)
 		}
 		if len(l.clients) >= l.maxClients {
-			return 60, false
+			// The table is full of buckets that are still refilling: the
+			// newcomer is not tracked (the table stays bounded, nothing is
+			// evicted) and is limited by the shared limit alone, which
+			// bounds all clients together.
+			if l.global.tokens < 1 {
+				return l.global.wait(l.globalRate), false
+			}
+			l.global.tokens--
+			return 0, true
 		}
 		b = &tokenBucket{tokens: l.clientBurst, last: now}
 		l.clients[key] = b

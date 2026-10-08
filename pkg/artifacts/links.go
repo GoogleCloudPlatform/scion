@@ -419,6 +419,12 @@ func (s *Service) handleShared(w http.ResponseWriter, r *http.Request, segs []st
 		writeSharedNotFound(w)
 		return
 	}
+	// ResolveLink only returns unexpired links, so a link grant always has
+	// an expiry here; a row without one is refused like any other.
+	if g.ExpiresAt == nil {
+		writeSharedNotFound(w)
+		return
+	}
 	exp := now.Add(ViewTTL)
 	if g.ExpiresAt.Before(exp) {
 		exp = *g.ExpiresAt

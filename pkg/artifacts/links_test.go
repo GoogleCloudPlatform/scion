@@ -863,42 +863,70 @@ func TestRateLimiter(t *testing.T) {
 		t.Errorf("client refused by the global bucket was charged")
 	}
 
-	// Client table bound: full of refilling buckets, a new client is
-	// refused; once they refill, a sweep makes room.
+	// Client table bound: full of refilling buckets, a new client is not
+	// tracked and is charged to the global bucket alone; once the buckets
+	// refill, a sweep makes room and it is tracked.
 	m := newRateLimiter(clock, 60, 2, 6000, 6000, 3)
 	for _, k := range []string{"x", "y", "z"} {
 		m.allow(k)
 	}
-	if _, ok := m.allow("w"); ok {
-		t.Fatalf("new client admitted to a full table")
+	before := m.global.tokens
+	if _, ok := m.allow("w"); !ok {
+		t.Fatalf("untracked newcomer refused while the global bucket has tokens")
 	}
 	if len(m.clients) != 3 {
 		t.Fatalf("table grew to %d", len(m.clients))
+	}
+	if _, tracked := m.clients["w"]; tracked {
+		t.Fatalf("newcomer tracked in a full table")
+	}
+	if m.global.tokens != before-1 {
+		t.Fatalf("untracked newcomer did not consume a global token: %v -> %v", before, m.global.tokens)
 	}
 	now = now.Add(2 * time.Second)
 	if _, ok := m.allow("w"); !ok {
 		t.Fatalf("new client refused after the table refilled")
 	}
-	if len(m.clients) > 3 {
-		t.Errorf("table grew to %d", len(m.clients))
+	if _, tracked := m.clients["w"]; !tracked || len(m.clients) > 3 {
+		t.Errorf("after the sweep: tracked=%v, table %d", tracked, len(m.clients))
+	}
+
+	// An untracked newcomer refused by the global bucket gets exactly the
+	// answer a tracked client refused by it gets: nothing tells the table
+	// is full.
+	u := newRateLimiter(clock, 60, 5, 60, 2, 1)
+	u.allow("tracked")
+	u.allow("tracked")
+	waitTracked, okTracked := u.allow("tracked")
+	globalBefore := u.global.tokens
+	waitUntracked, okUntracked := u.allow("newcomer")
+	if u.global.tokens != globalBefore {
+		t.Errorf("a refused newcomer was charged: global %v -> %v", globalBefore, u.global.tokens)
+	}
+	if okTracked || okUntracked || waitTracked != waitUntracked {
+		t.Errorf("tracked refusal (%v, %d) and untracked refusal (%v, %d) differ", okTracked, waitTracked, okUntracked, waitUntracked)
+	}
+	if _, tracked := u.clients["newcomer"]; tracked {
+		t.Errorf("refused newcomer was tracked")
 	}
 
 	// Sweeps are spaced: within sharedSweepEvery of the last sweep, a full
-	// table refuses a new client even when its buckets have refilled.
+	// table does not track a new client even when its buckets have
+	// refilled.
 	sp := newRateLimiter(clock, 600, 2, 6000, 6000, 3)
 	for _, k := range []string{"x", "y", "z"} {
 		sp.allow(k)
 	}
-	if _, ok := sp.allow("w"); ok {
-		t.Fatalf("new client admitted to a full table")
-	}
+	sp.allow("w")                       // sweeps (nothing refilled), not tracked
 	now = now.Add(sharedSweepEvery / 2) // buckets refilled, sweep not due
-	if _, ok := sp.allow("w"); ok {
-		t.Errorf("admitted before the next sweep was due")
+	sp.allow("w")
+	if _, tracked := sp.clients["w"]; tracked {
+		t.Errorf("tracked before the next sweep was due")
 	}
 	now = now.Add(sharedSweepEvery / 2)
-	if _, ok := sp.allow("w"); !ok {
-		t.Errorf("refused once the sweep was due")
+	sp.allow("w")
+	if _, tracked := sp.clients["w"]; !tracked {
+		t.Errorf("not tracked once the sweep was due")
 	}
 }
 
@@ -1107,4 +1135,45 @@ func TestGrantKindsEachCount(t *testing.T) {
 func (s *recordingStore) DeleteGrant(ctx context.Context, artifactID, grantID string) error {
 	s.record("DeleteGrant")
 	return s.Store.DeleteGrant(ctx, artifactID, grantID)
+}
+
+// noExpiryStore returns resolved link grants without an expiry.
+type noExpiryStore struct{ Store }
+
+func (s noExpiryStore) ResolveLink(ctx context.Context, hash string, now time.Time) (*Artifact, *Grant, error) {
+	a, g, err := s.Store.ResolveLink(ctx, hash, now)
+	if g != nil {
+		g.ExpiresAt = nil
+	}
+	return a, g, err
+}
+
+// TestSharedLinkWithoutExpiryRefused: a resolved link grant without an
+// expiry (which ResolveLink never returns) is refused like any other.
+func TestSharedLinkWithoutExpiryRefused(t *testing.T) {
+	f, id := newLinkFixture(t)
+	tok, _ := f.mustMintLink(userU, id, "")
+	unknown, _ := newLinkToken()
+	want := response(f.shared(RouteShared+unknown, ""))
+	f.svc.SetStore(noExpiryStore{f.store})
+	if got := response(f.shared(RouteShared+tok, "")); got != want {
+		t.Errorf("link without expiry: %s, want the uniform refusal %s", got, want)
+	}
+}
+
+// TestRateLimiterZeroRates: zero or negative settings are raised to 1, so
+// buckets refill and the wait is finite.
+func TestRateLimiterZeroRates(t *testing.T) {
+	now := time.Unix(1_000_000, 0)
+	l := newRateLimiter(func() time.Time { return now }, 0, 0, 0, 0, 0)
+	if _, ok := l.allow("a"); !ok {
+		t.Fatalf("first request refused")
+	}
+	wait, ok := l.allow("a")
+	if ok || wait < 1 || wait > 60 {
+		t.Errorf("second request: ok=%v wait=%d", ok, wait)
+	}
+	if (&tokenBucket{}).wait(0) != 60 {
+		t.Errorf("wait with a zero rate")
+	}
 }
