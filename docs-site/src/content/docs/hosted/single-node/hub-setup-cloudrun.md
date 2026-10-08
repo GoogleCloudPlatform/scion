@@ -134,6 +134,18 @@ for ROLE in roles/storage.admin roles/iam.serviceAccountAdmin \
 done
 ```
 
+`roles/iam.serviceAccountAdmin` applies to every service account in the
+project, not only the ones the Hub mints. In a project shared with other
+workloads or other hubs, the Instance service account can therefore change IAM
+policy on those accounts too. Granting it this way assumes one hub per GCP
+project, in a project that holds no other privileged service accounts. If you
+run more than one hub in the same project, leave the role out and grant
+minting access separately, for example from a dedicated project; without it
+the Hub cannot mint service accounts. (The HA Cloud Run deploy in
+`scripts/cloudrun/deploy.sh` grants this role by default and skips it with
+`SCION_HUB_SA_MINTING=false`, the same semantics as the single-node VM
+deploy's `hub_sa_minting` key.)
+
 Pass the service account to the deploy command with `--service-account $SA_EMAIL`
 (see [Section 1](#1-deploy)).
 
