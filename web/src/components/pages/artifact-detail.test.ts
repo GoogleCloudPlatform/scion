@@ -1399,4 +1399,53 @@ describe('artifact page', () => {
       true
     );
   });
+
+  it('restarts a stale review on a CRLF current version in LF form, with Save disabled', async () => {
+    const meta = artifact('plan.md', 'text/markdown');
+    const creates: string[] = [];
+    let text = 'We ship in Q3.\n';
+    // Another reviewer's review, stored with CRLF line endings, became current.
+    const othersReview = 'We ship in Q3.{>>someone else<<}\r\nOwners: docs.\r\n';
+    mockFetch(meta, '', {
+      bodyFn: () => text,
+      write: reviewWrites(
+        meta,
+        () => {
+          meta.artifact.currentSeq = 2;
+          meta.version = {
+            ...meta.version!,
+            seq: 2,
+            kind: 'review',
+            ref: `scion://artifact/${ID}@2`,
+          };
+          text = othersReview;
+          return new Response(
+            JSON.stringify({ error: { code: 'stale_review', message: 'stale' } }),
+            {
+              status: 409,
+            }
+          );
+        },
+        creates
+      ),
+    });
+    const el = await mount(true);
+    button(el, '.actions sl-button', 'Review')!.click();
+    await el.updateComplete;
+    el.shadowRoot!.querySelector('scion-code-editor.review-editor')!.dispatchEvent(
+      new CustomEvent('content-changed', { detail: { content: MARKED } })
+    );
+    await el.updateComplete;
+    button(el, '.edit-footer sl-button', 'Save review')!.click();
+    await settle(el);
+    const editor = el.shadowRoot!.querySelector(
+      'scion-code-editor.review-editor'
+    ) as HTMLElement & {
+      content: string;
+    };
+    expect(editor.content).toBe(othersReview.replace(/\r\n/g, '\n'));
+    expect(button(el, '.edit-footer sl-button', 'Save review')!.hasAttribute('disabled')).toBe(
+      true
+    );
+  });
 });
