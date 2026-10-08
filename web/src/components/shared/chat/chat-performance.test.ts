@@ -20,7 +20,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-vi.mock('../../../client/main.js', () => ({ stateManager: new EventTarget() }));
+vi.mock('../../../client/main.js', () => import('../../../client/__fixtures__/main-stub.js'));
 vi.mock('../../../client/api.js', () => ({
   apiFetch: vi.fn(() => Promise.resolve(new Response('{}'))),
   extractApiError: vi.fn(),

@@ -353,6 +353,60 @@ describe('empty multi-pane slots show drop targets (ptone/scion#3778)', () => {
   });
 
   it.each(presets)(
+    'swaps the %s empty state for placeholders when a narrow viewport widens',
+    async (preset, count) => {
+      let onChange: (() => void) | null = null;
+      const query = {
+        matches: true,
+        addEventListener: vi.fn((_type: string, cb: () => void) => {
+          onChange = cb;
+        }),
+        removeEventListener: vi.fn(),
+      };
+      const realMatchMedia = window.matchMedia.bind(window);
+      vi.spyOn(window, 'matchMedia').mockImplementation((q: string) =>
+        q === '(max-width: 760px)' ? (query as unknown as MediaQueryList) : realMatchMedia(q)
+      );
+      root.dispose();
+      root.element.remove();
+      root = new WorkspaceRoot();
+      document.body.append(root.element);
+
+      root.layoutManager.setLayout(preset);
+      await flush();
+      expect(placeholders()).toEqual([]);
+      expect(visibleOverlays().map((el) => el.className)).toEqual(['terminal-empty']);
+
+      query.matches = false;
+      expect(onChange).not.toBeNull();
+      onChange!();
+      await flush();
+      expect(getPaneHost(root).dataset.effectiveLayout).toBe(preset);
+      expect(placeholders()).toHaveLength(count);
+      expect(visibleOverlays()).toEqual([]);
+    }
+  );
+
+  it.each(presets)(
+    'shows the empty state for %s on a narrow viewport with no terminals open',
+    async (preset) => {
+      mockNarrowViewport();
+      root.dispose();
+      root.element.remove();
+      root = new WorkspaceRoot();
+      document.body.append(root.element);
+
+      root.layoutManager.setLayout(preset);
+      await flush();
+      expect(getPaneHost(root).dataset.effectiveLayout).toBe('single');
+      expect(placeholders()).toEqual([]);
+      const overlays = visibleOverlays();
+      expect(overlays.map((el) => el.className)).toEqual(['terminal-empty']);
+      expect(overlays[0].textContent).toBe('No terminals are open.');
+    }
+  );
+
+  it.each(presets)(
     'shows %s placeholders that accept a drop when no slot is filled',
     async (preset, count) => {
       const registry = new TerminalSessionRegistry({
@@ -1181,11 +1235,13 @@ describe('idle entries', () => {
     expect(item.querySelector('.terminal-state-label')).toBeNull();
     expect(item.querySelector('.terminal-connection-dot')).not.toBeNull();
     const select = item.querySelector<HTMLButtonElement>('.terminal-rail-select')!;
-    expect(select.title).toBe('Not connected · metadata pending');
+    expect(select.title).toBe('Grey dot: Not connected · metadata pending');
     expect(select.getAttribute('aria-label')).toBe(
-      'Show terminal for test in A rather long project name, Not connected, metadata pending'
+      'Show terminal for test in A rather long project name, Grey dot: Not connected, metadata pending'
     );
-    expect(item.querySelector<HTMLElement>('.terminal-connection-dot')?.title).toBe(select.title);
+    expect(item.querySelector<HTMLElement>('.terminal-connection-dot')?.title).toBe(
+      'Grey dot: Not connected'
+    );
   });
 
   it('rail row falls back to the project id when the project name is unknown', async () => {
@@ -1206,9 +1262,9 @@ describe('idle entries', () => {
     expect(project?.textContent).toBe('project-id-2');
     expect(project?.title).toBe('project-id-2');
     const select = railItem().querySelector<HTMLButtonElement>('.terminal-rail-select')!;
-    expect(select.title).toBe('Not connected · metadata pending');
+    expect(select.title).toBe('Grey dot: Not connected · metadata pending');
     expect(select.getAttribute('aria-label')).toBe(
-      'Show terminal for test in project-id-2, Not connected, metadata pending'
+      'Show terminal for test in project-id-2, Grey dot: Not connected, metadata pending'
     );
   });
 
@@ -1224,11 +1280,12 @@ describe('idle entries', () => {
     expect(item.querySelector('.terminal-project-name')).toBeNull();
     expect(item.querySelector('.terminal-rail-text')?.children).toHaveLength(1);
     const select = item.querySelector<HTMLButtonElement>('.terminal-rail-select')!;
-    const status = item.querySelector<HTMLElement>('.terminal-connection-dot')!.title;
-    expect(status).toBe('Not connected · metadata pending');
-    expect(select.title).toBe(status);
+    expect(item.querySelector<HTMLElement>('.terminal-connection-dot')!.title).toBe(
+      'Grey dot: Not connected'
+    );
+    expect(select.title).toBe('Grey dot: Not connected · metadata pending');
     expect(select.getAttribute('aria-label')).toBe(
-      `Show terminal for ${agentId}, Not connected, metadata pending`
+      `Show terminal for ${agentId}, Grey dot: Not connected, metadata pending`
     );
   });
 

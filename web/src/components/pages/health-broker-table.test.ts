@@ -33,7 +33,7 @@ import {
   type HealthSummaryBroker,
   type HealthSummaryBrokerList,
 } from './health-broker-table.js';
-import { elementStyleRules } from './__fixtures__/card-layout.js';
+import { elementStyleRules } from './__fixtures__/css-rules.js';
 
 function broker(over: Partial<HealthSummaryBroker> = {}): HealthSummaryBroker {
   return {

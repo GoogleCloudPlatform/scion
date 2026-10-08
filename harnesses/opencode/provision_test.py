@@ -83,7 +83,12 @@ def _invoke(
     with open(os.path.join(bundle, "inputs", "auth-candidates.json"), "w", encoding="utf-8") as f:
         json.dump(candidates, f)
 
-    manifest = {"harness_bundle_dir": bundle, "harness_config": harness_config or {}}
+    manifest = {
+        "harness_bundle_dir": bundle,
+        "harness_config": harness_config or {},
+        # Never fall back to the real /workspace (ptone/scion#2993).
+        "agent_workspace": os.path.join(home, "workspace"),
+    }
     # Stub the models.dev prefetch so the tests make no network calls.
     with temporary_home(home), unittest.mock.patch.object(provision, "_prefetch_models_catalog"):
         ctx = scion_harness.ProvisionContext("opencode", manifest)

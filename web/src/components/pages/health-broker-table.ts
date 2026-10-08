@@ -74,6 +74,8 @@ export interface HealthSummaryBrokerList {
   /** All runtime brokers, including those past the row cap. */
   total: number;
   truncated: boolean;
+  /** True when the hub could not list runtime brokers (items is then empty). */
+  not_reported?: boolean;
 }
 
 /**
