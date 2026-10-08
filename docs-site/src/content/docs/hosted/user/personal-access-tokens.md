@@ -178,6 +178,15 @@ The same per-request checks apply, with these limits:
   the grant's project.
 - **Messages.** A message sent to an agent with a token passes the same boundary, ceiling, and
   live project-access checks before any other rule can allow it.
+- **Inbox and conversations.** Inbox, conversation and notification operations check the token's
+  inbox selectors and its boundary.
+- **Project configuration.** Setting the project messaging policy, and template and project
+  configuration operations, each require their own permission; project owners hold
+  `project.set_messaging_policy`.
+- **Hub configuration.** Hub configuration operations admit only a hub token carrying the
+  matching selector, for example `hub_lifecycle_hooks:update` to change hub pre-start hooks.
+  Hub pre-start hook scripts are redacted in read responses for every credential other than an
+  interactive sign-in, so a token sees hub hook metadata but not the script.
 - **Runtime Broker registration.** The `broker:create` scope can be selected only on a hub token,
   but creating a Runtime Broker still does not admit any UAT (see
   [What scoped tokens cannot do](#what-scoped-tokens-cannot-do)).
