@@ -1368,6 +1368,27 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		}
 	}
 
+	// storeOutboundRow persists storeMsg, records its mentions, attachments
+	// and artifacts, and emits the SSE event. It does not dispatch to
+	// channel spokes.
+	storeOutboundRow := func() error {
+		if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
+			return err
+		}
+		// Record mention rows before publish: clients refetch the thread
+		// list and its mention dots on the SSE event.
+		s.recordHumanMentions(ctx, req.ThreadID, storeMsg.ID, mentionedHumans)
+		// W7: Link before publishing so a client that refetches on the SSE
+		// event already sees the attachments.
+		s.mu.RLock()
+		wcs := s.webChatStore
+		s.mu.RUnlock()
+		linkAttachmentRefs(ctx, wcs, storeMsg.ID, attachmentRefs, s.messageLog)
+		s.recordMessageArtifacts(ctx, storeMsg.ID, outboundArtifactRefs)
+		s.events.PublishUserMessage(ctx, storeMsg, attachmentRefs)
+		return nil
+	}
+
 	// Dispatch based on delivery path.
 	switch result.DeliveryPath {
 	case deliveryUserBroker:
@@ -1417,9 +1438,24 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 						"Message delivery failed: recipient is temporarily overloaded, retry later", nil)
 					return
 				}
+				// The cause stays in the log line above: it can carry a
+				// channel spoke's own error text.
 				writeError(w, http.StatusBadGateway, ErrCodeDeliveryFailed,
-					"Message delivery failed: "+err.Error(), nil)
+					"Message delivery failed", nil)
 				return
+			}
+			if !persisting {
+				// No persisting subscriber received the publish, so only
+				// the channel spokes have the message. Store the row and
+				// emit the SSE event here, as the notification path does,
+				// without dispatching to the spokes a second time. The
+				// spokes already delivered it, so a store failure is
+				// logged rather than reported back for a retry.
+				if err := storeOutboundRow(); err != nil {
+					s.messageLog.Error("Failed to persist outbound message after broker publish",
+						"agent_id", agent.ID, "recipient_id", result.RecipientID,
+						"project_id", agent.ProjectID, "error", err)
+				}
 			}
 			s.messageLog.Info("Outbound message dispatched through broker",
 				"agent_id", agent.ID, "recipient_id", result.RecipientID, "project_id", agent.ProjectID)
@@ -1427,27 +1463,16 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 
 	case deliveryUserDirect:
 		// Direct path: persist, link attachments, publish SSE, dispatch to channels.
-		if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
+		if err := storeOutboundRow(); err != nil {
 			s.messageLog.Error("Failed to persist outbound message", "error", err)
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 				"Failed to persist message", nil)
 			return
 		}
-		// Record mention rows before publish: clients refetch the thread
-		// list and its mention dots on the SSE event. Only this path
-		// persists storeMsg under this ID; the broker path stores its own
-		// row.
-		s.recordHumanMentions(ctx, req.ThreadID, storeMsg.ID, mentionedHumans)
-		// W7: Link before publishing so a client that refetches on the SSE
-		// event already sees the attachments.
 		s.mu.RLock()
-		wcs := s.webChatStore
 		cr := s.channelRegistry
 		s.mu.RUnlock()
-		linkAttachmentRefs(ctx, wcs, storeMsg.ID, attachmentRefs, s.messageLog)
 		delete(structuredMsg.Metadata, attachmentsMetadataKey) // strip internal transport key
-		s.recordMessageArtifacts(ctx, storeMsg.ID, outboundArtifactRefs)
-		s.events.PublishUserMessage(ctx, storeMsg, attachmentRefs)
 		if cr != nil && cr.Len() > 0 {
 			cr.Dispatch(ctx, structuredMsg)
 		}

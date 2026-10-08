@@ -24,6 +24,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -65,6 +66,13 @@ type outboundSpokeFixture struct {
 // ChannelID, so the dm: backfill (Channel "web") targets it.
 func newOutboundSpokeFixture(t *testing.T, inproc eventbus.EventBus) *outboundSpokeFixture {
 	t.Helper()
+	return newOutboundSpokeFixtureWithPlugin(t, inproc, errSpokeBus{err: errPluginSpokeDown})
+}
+
+// newOutboundSpokeFixtureWithPlugin is newOutboundSpokeFixture with the
+// given bus as the "chatplugin" spoke.
+func newOutboundSpokeFixtureWithPlugin(t *testing.T, inproc, plugin eventbus.EventBus) *outboundSpokeFixture {
+	t.Helper()
 	srv, s := testServer(t)
 	ctx := context.Background()
 
@@ -87,7 +95,7 @@ func newOutboundSpokeFixture(t *testing.T, inproc eventbus.EventBus) *outboundSp
 		spokes = append(spokes, eventbus.NamedEventBus{Name: eventbus.InProcessBusName, Bus: inproc})
 	}
 	spokes = append(spokes, eventbus.NamedEventBus{
-		Name: "chatplugin", ChannelID: "web", Bus: errSpokeBus{err: errPluginSpokeDown},
+		Name: "chatplugin", ChannelID: "web", Bus: plugin,
 	})
 	fanout := eventbus.NewFanOutEventBus(spokes, slog.Default())
 	events := NewChannelEventPublisher()
@@ -224,7 +232,38 @@ func TestHandleAgentOutboundMessage_PluginSpokeFailureWithoutSubscriberFails(t *
 	var resp ErrorResponse
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
 	require.Equal(t, ErrCodeDeliveryFailed, resp.Error.Code)
+	require.NotContains(t, rr.Body.String(), errPluginSpokeDown.Error(),
+		"the spoke's error text stays in the log, not the response")
 	require.Equal(t, 0, f.storedRows(t))
+}
+
+// countingSpokeBus is a plugin spoke that accepts every publish and counts
+// them.
+type countingSpokeBus struct{ n atomic.Int32 }
+
+func (b *countingSpokeBus) Publish(context.Context, string, *messages.StructuredMessage) error {
+	b.n.Add(1)
+	return nil
+}
+
+func (*countingSpokeBus) Subscribe(string, eventbus.EventHandler) (eventbus.Subscription, error) {
+	return nullSub{}, nil
+}
+
+func (*countingSpokeBus) Close() error { return nil }
+
+// With no persisting subscriber (no inprocess spoke) and a plugin spoke
+// that accepts the message, the handler stores the row itself, once,
+// and does not publish to the plugin spoke a second time.
+func TestHandleAgentOutboundMessage_NoPersistingSubscriberStoresRow(t *testing.T) {
+	plugin := &countingSpokeBus{}
+	f := newOutboundSpokeFixtureWithPlugin(t, nil, plugin)
+	f.proxy.Start()
+	t.Cleanup(f.proxy.Stop)
+
+	rr := f.send(t, "hello with only a plugin spoke")
+	f.requireSentOnce(t, rr)
+	require.Equal(t, int32(1), plugin.n.Load(), "the plugin spoke gets the message once")
 }
 
 // TestHandleAgentOutboundMessage_InProcessFailureStillFails pins that a
