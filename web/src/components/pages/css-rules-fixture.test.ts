@@ -63,6 +63,12 @@ describe('styleRules fixture', () => {
     expect(rules.get('.a')).not.toContain('red');
   });
 
+  it('separates merged bodies when the earlier one has no trailing semicolon', () => {
+    const rule = styleRules('.a, .b { color: red } .a { min-width: 0 }').get('.a') ?? '';
+    expect(rule).toMatch(/(^|;)\s*color:\s*red\s*;/);
+    expect(rule).toMatch(/(^|;)\s*min-width:\s*0/);
+  });
+
   it('ignores comments', () => {
     const rules = styleRules('/* .a { color: red; } */ .b { color: blue; }');
     expect(rules.has('.a')).toBe(false);
