@@ -252,11 +252,16 @@ func TestChatV2Interrupt_LeadingMentionPrimary(t *testing.T) {
 
 // Human-to-human DM: interrupt is accepted and ignored — nothing is dispatched.
 func TestChatV2Interrupt_HumanDMIgnored(t *testing.T) {
-	srv, _, _, _, _ := setupSendTest(t)
+	srv, s, _, _, _ := setupSendTest(t)
 	dispatcher := &brokerMockDispatcher{}
 	srv.SetDispatcher(dispatcher)
 
-	key := "dm:user:" + DevUserID + ":user:" + tid("interrupt-peer")
+	peer := &store.User{ID: tid("interrupt-peer"), Email: "interrupt-peer@example.com", DisplayName: "Peer",
+		Role: store.UserRoleMember, Status: store.UserStatusActive, Created: time.Now()}
+	if err := s.CreateUser(t.Context(), peer); err != nil {
+		t.Fatal(err)
+	}
+	key := userDMKey(t, DevUserID, peer.ID)
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+key+"/messages",
 		map[string]interface{}{"content": "hi there", "interrupt": true})
 	if rec.Code != http.StatusCreated {

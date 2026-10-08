@@ -28,32 +28,40 @@ import (
 	"github.com/spf13/pflag"
 )
 
-// hubAuthURLPrecedence documents the hub URL order 'scion hub auth login'
-// (and logout, without --hub-url) uses; resolveHubAuthURL implements it.
+// hubAuthURLPrecedence documents the effective hub URL order 'scion hub
+// auth login' (and logout, without --hub-url) uses. resolveHubAuthURL
+// implements it; SCION_HUB_ENDPOINT ranks above the settings files because
+// settings loading applies it as an override of hub.endpoint. After
+// --hub-url it is the order every other hub command uses (GetHubEndpoint).
 const hubAuthURLPrecedence = `The hub URL is taken from, in order:
   1. --hub-url
   2. the root --hub flag
-  3. the SCION_HUB_ENDPOINT environment variable
-  4. hub.endpoint in settings (the current project's, else global)`
+  3. the SCION_HUB_ENDPOINT environment variable (applied as an override
+     of hub.endpoint when settings are loaded)
+  4. hub.endpoint in settings (the current project's, else global)
+  5. the SCION_HUB_URL environment variable
+This is the order the other hub commands use, plus --hub-url first.`
 
 // resolveHubAuthURL resolves the hub URL for hub auth login and logout:
-// --hub-url, then the root --hub flag, then SCION_HUB_ENDPOINT, then the
-// settings endpoint (ptone/scion#3537). It returns the URL and its source
-// ("--hub-url", "--hub", "env", "settings" or "" when none is set).
-func resolveHubAuthURL(hubURLFlag, rootHubFlag string, getenv func(string) string, settingsEndpoint func() string) (string, string) {
+// --hub-url, then the root --hub flag, then the loaded settings endpoint
+// (which already carries any SCION_HUB_ENDPOINT override), then
+// SCION_HUB_ENDPOINT and SCION_HUB_URL directly, for when settings loading
+// yields no endpoint. Apart from --hub-url this mirrors GetHubEndpoint in
+// root.go exactly (ptone/scion#3627); keep the two in step.
+func resolveHubAuthURL(hubURLFlag, rootHubFlag string, getenv func(string) string, settingsEndpoint func() string) string {
 	if hubURLFlag != "" {
-		return hubURLFlag, "--hub-url"
+		return hubURLFlag
 	}
 	if rootHubFlag != "" {
-		return rootHubFlag, "--hub"
-	}
-	if env := getenv("SCION_HUB_ENDPOINT"); env != "" {
-		return env, "env"
+		return rootHubFlag
 	}
 	if ep := settingsEndpoint(); ep != "" {
-		return ep, "settings"
+		return ep
 	}
-	return "", ""
+	if env := getenv("SCION_HUB_ENDPOINT"); env != "" {
+		return env
+	}
+	return getenv("SCION_HUB_URL")
 }
 
 // settingsHubEndpoint returns hub.endpoint from the settings of the current

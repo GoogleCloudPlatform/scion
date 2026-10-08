@@ -79,6 +79,7 @@ func agentRouteCases() []agentRouteCase {
 		byID(get, "/secrets", AgentRouteSecrets, "", none),
 		byID(http.MethodPut, "/secrets/MY_KEY", AgentRouteSecrets, "", AgentSubRouteSuffix{Opaque: "/MY_KEY"}),
 		byID(get, "/metrics/summary", AgentRouteMetricsSummary, "", none),
+		byID(post, "/hold/lift", AgentRouteHoldLift, opAgentHoldLift, none),
 		byID(post, "/status", AgentRouteActionStatus, "", none),
 		byID(post, "/start", AgentRouteActionStart, opAgentLifecycleControl, none),
 		byID(get, "/start", AgentRouteActionStart, "", none),

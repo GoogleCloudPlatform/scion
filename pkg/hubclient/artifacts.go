@@ -56,6 +56,11 @@ type ArtifactService interface {
 	// FinalizeVersion makes pending version seq ready and current.
 	FinalizeVersion(ctx context.Context, id string, seq int) (*ArtifactResponse, error)
 
+	// FinalizeReview finalizes pending review version seq, naming base, the
+	// version the review was started from. The hub refuses it with 409
+	// stale_review unless base is still the current version.
+	FinalizeReview(ctx context.Context, id string, seq, base int) (*ArtifactResponse, error)
+
 	// ListVersions returns the ready versions of an artifact, newest
 	// first, without their files.
 	ListVersions(ctx context.Context, id string) ([]ArtifactVersion, error)
@@ -380,6 +385,16 @@ func (s *artifactService) UploadFile(ctx context.Context, id string, seq int, fi
 // FinalizeVersion implements ArtifactService.
 func (s *artifactService) FinalizeVersion(ctx context.Context, id string, seq int) (*ArtifactResponse, error) {
 	resp, err := s.longTransport().PostNoRetry(ctx, artifactPath(id)+"/versions/"+strconv.Itoa(seq)+"/finalize", nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[ArtifactResponse](resp)
+}
+
+// FinalizeReview implements ArtifactService.
+func (s *artifactService) FinalizeReview(ctx context.Context, id string, seq, base int) (*ArtifactResponse, error) {
+	resp, err := s.longTransport().PostNoRetry(ctx, artifactPath(id)+"/versions/"+strconv.Itoa(seq)+"/finalize",
+		map[string]int{"base": base}, nil)
 	if err != nil {
 		return nil, err
 	}

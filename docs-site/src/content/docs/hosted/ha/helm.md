@@ -32,6 +32,12 @@ The chart renders:
   `config.existingSecret` is set), and a `ConfigMap` with the hub's environment.
 - A `Secret` holding the session secret, only when you set `auth.sessionSecret`.
 
+The hub container's environment includes `POD_NAME`, set from the pod's own name.
+The hub prefixes its per-replica instance ID with it, so metric and trace legends
+read as `<pod name>-<UUID>` (see the [Hub monitoring dashboard](/scion/hosted/single-node/hub-monitoring-dashboard/)),
+and it is the default conduit relay instance ID. If `hub.extraEnv` already sets
+`POD_NAME`, the chart keeps your entry instead; that value must be unique per pod.
+
 The chart does **not** create an Ingress, Gateway, load balancer, IAP
 configuration, Cloud SQL instance, GCS bucket, Secret Manager permissions, or
 any IAM binding. Provision those separately, for example with

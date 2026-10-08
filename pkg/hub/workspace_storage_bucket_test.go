@@ -197,7 +197,7 @@ func TestCreateAgent_HubManagedUploadRecordsBucket(t *testing.T) {
 
 	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
 	srv, _, project := setupCreateAgentServer(t, disp) // hub-managed: no GitRemote.
-	srv.SetStorage(newContentMockStorage("test-bucket"))
+	srv.SetStorage(newGCSContentMockStorage("test-bucket"))
 	t.Cleanup(func() {
 		if p, err := hubManagedProjectPath(project.Slug); err == nil {
 			_ = os.RemoveAll(p)
