@@ -1722,6 +1722,15 @@ const (
 	opDownloadWorkspace  = "download workspace from GCS"
 )
 
+// opValidateWorkspaceDir is the op logged when the GCS workspace bootstrap
+// directory fails validation. The client gets invalidWorkspaceDirMessage
+// (400), without the validation error, which names the broker's workspace
+// path; that error is logged at the broker (ptone/scion#3855).
+const opValidateWorkspaceDir = "validate workspace directory"
+
+// invalidWorkspaceDirMessage is the client text for errInvalidWorkspaceDir.
+const invalidWorkspaceDirMessage = "Invalid workspace directory"
+
 // workspaceBootstrapFailed logs a runtime failure of the GCS workspace
 // bootstrap step op and returns downloadWorkspaceFromGCS's error triple for
 // it: the attempt status, the fixed client text, and cause wrapped for span
@@ -1883,7 +1892,8 @@ func (s *Server) resolveGCSWorkspaceDir(req CreateAgentRequest) (resolvedDir str
 	// returns, not the original join.
 	resolvedWorkspaceDir, verr := scionrt.ValidateWorkspaceSource(workspaceDir, workspaceRoot)
 	if verr != nil {
-		return "", "invalid workspace directory", "Invalid workspace directory: " + verr.Error(),
+		s.logWorkspaceBootstrapFailure(req, opValidateWorkspaceDir, verr)
+		return "", "invalid workspace directory", invalidWorkspaceDirMessage,
 			fmt.Errorf("%w: %w", errInvalidWorkspaceDir, verr)
 	}
 	return resolvedWorkspaceDir, "", "", nil
