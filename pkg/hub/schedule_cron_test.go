@@ -23,6 +23,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -644,4 +645,62 @@ func TestPauseZonePrefixedSchedules_NoopPauseTerminates(t *testing.T) {
 	got, err := s.GetSchedule(context.Background(), row.ID)
 	require.NoError(t, err)
 	assert.Equal(t, store.ScheduleStatusActive, got.Status, "the no-op store did not write")
+}
+
+// A recurring dispatch_agent schedule whose name is held by a row left by a
+// refused create-failure cleanup (ptone/scion#3701): each fire is recorded
+// as an error with the actionable text, and each notifies the owner.
+func TestExecuteSchedule_ErroredRowBlocksEveryFire(t *testing.T) {
+	f := newSchedFire(t, "sched-blocked")
+	ctx := context.Background()
+	pub := NewChannelEventPublisher()
+	t.Cleanup(pub.Close)
+	f.srv.SetEventPublisher(pub)
+	f.srv.scheduler = NewScheduler(f.store, slog.Default())
+	f.srv.scheduler.RegisterEventHandler("dispatch_agent", f.srv.dispatchAgentEventHandler())
+
+	errored := &store.Agent{ID: api.NewUUID(), Slug: "sched-blocked-r", Name: "sched-blocked-r", ProjectID: f.proj.ID}
+	require.NoError(t, f.store.CreateAgent(ctx, errored))
+	refused := createCleanupRefusedMessage(&DeleteRunMismatchError{RequestedRunID: "run-hub", CurrentRunID: "run-broker"})
+	require.NoError(t, f.store.UpdateAgentStatus(ctx, errored.ID, store.AgentStatusUpdate{Phase: "error", Message: refused}))
+
+	revision := withSessionRevision(store.ScheduledEvent{}, f.creator.ID)
+	sched := &store.Schedule{
+		ID: api.NewUUID(), ProjectID: f.proj.ID, Name: "blocked-nightly", CronExpr: "0 * * * *",
+		EventType: "dispatch_agent", Payload: `{"agentName":"sched-blocked-r"}`,
+		Status: store.ScheduleStatusActive, CreatedBy: f.creator.ID,
+		InitiatorAttribution: revision.InitiatorAttribution,
+		AuthorityCeiling:     revision.AuthorityCeiling,
+	}
+	require.NoError(t, f.store.CreateSchedule(ctx, sched))
+
+	owner, unsub := pub.Subscribe("user." + f.creator.ID + ".notification")
+	t.Cleanup(unsub)
+	for i := 0; i < 2; i++ {
+		sc, err := f.store.GetSchedule(ctx, sched.ID)
+		require.NoError(t, err)
+		f.srv.executeSchedule(ctx, *sc, time.Now())
+	}
+
+	got, err := f.store.GetSchedule(ctx, sched.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 2, got.ErrorCount)
+	assert.Contains(t, got.LastRunError, `agent "sched-blocked-r" already exists in project in phase error`)
+	assert.Contains(t, got.LastRunError, refused)
+	assert.Contains(t, got.LastRunError, "delete the agent to resume this schedule")
+
+	notifs, err := f.store.GetNotifications(ctx, store.SubscriberTypeUser, f.creator.ID, false)
+	require.NoError(t, err)
+	require.Len(t, notifs, 2, "one notification per blocked fire")
+	for _, n := range notifs {
+		assert.Equal(t, NotificationScheduleBlocked, n.Status)
+		assert.Equal(t, errored.ID, n.AgentID)
+		assert.Contains(t, n.Message, `Schedule "blocked-nightly" is blocked`)
+	}
+	assert.Len(t, owner, 2, "each notification published to the owner")
+
+	// The row is untouched: still in phase error, not deleted or retried.
+	row, err := f.store.GetAgent(ctx, errored.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "error", row.Phase)
 }

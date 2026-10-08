@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts/critic"
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
@@ -198,7 +199,7 @@ func TestCheckBundleName(t *testing.T) {
 
 func TestWriteBundleRefusesFoldedCollisions(t *testing.T) {
 	files := []hubclient.ArtifactFile{{Path: "a.md", SHA256: "x"}, {Path: "A.md", SHA256: "y"}}
-	err := writeBundle(context.Background(), nil, &bytes.Buffer{}, "id", 1, files, t.TempDir(), false)
+	err := writeBundle(context.Background(), nil, &bytes.Buffer{}, "id", 1, files, t.TempDir(), false, critic.Raw)
 	assert.ErrorContains(t, err, "same file")
 }
 

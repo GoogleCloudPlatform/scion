@@ -39,7 +39,10 @@ var provisionCmd = &cobra.Command{
 	Long: `Provision a shared workspace in an NFS-backed init container.
 
 In default (clone) mode, reads SCION_CLONE_URL and SCION_CLONE_BRANCH from
-the environment and invokes the shared provisioning function. The sentinel
+the environment and invokes the shared provisioning function. When
+GITHUB_TOKEN is set, the clone authenticates with it through a credential
+helper given to the clone command only; the token is not written to the
+clone URL, the workspace or the state directory. The sentinel
 file (.scion-provisioned) and the provisioning lock are kept in the
 project's provisioning state directory, which the Kubernetes runtime mounts
 next to the workspace and names in SCION_PROVISION_STATE_DIR, so nothing of
@@ -222,14 +225,19 @@ func runProvision(ctx context.Context) error {
 			HostPath:   provisionWorkspace,
 			SharedDirs: sharedDirs,
 		},
-		ProjectID:   projectID,
-		Mode:        mode,
-		GitClone:    gc,
-		Locker:      nil, // no advisory locker in init container
-		NFSUID:      provisionUID,
-		NFSGID:      provisionGID,
-		SentinelDir: sentinelDir,
-		LegacyDir:   legacyDir,
+		ProjectID: projectID,
+		Mode:      mode,
+		GitClone:  gc,
+		// The Kubernetes runtime gives the cloning init container the
+		// project's git token from the agent's Secret (secretKeyRef) when
+		// one is configured. Only the clone command gets the credential
+		// helper; its value names the variable, not the token.
+		CloneWithToken: gc != nil && os.Getenv(provision.GitTokenEnv) != "",
+		Locker:         nil, // no advisory locker in init container
+		NFSUID:         provisionUID,
+		NFSGID:         provisionGID,
+		SentinelDir:    sentinelDir,
+		LegacyDir:      legacyDir,
 		// F-111: this command's entire purpose is the chown. A silent
 		// failure here would reproduce the "workspace stuck root:root" bug
 		// invisibly — the sentinel would still get written, and every future
@@ -264,6 +272,9 @@ func runProvision(ctx context.Context) error {
 
 	log.Info("Provisioning workspace at %s (mode=%s, project=%s, shared_dirs=%d)",
 		provisionWorkspace, mode, projectID, len(sharedDirs))
+	if in.CloneWithToken {
+		log.Info("Cloning with the project's git credential (%s)", provision.GitTokenEnv)
+	}
 	if worktree {
 		log.Info("Adding the worktree for agent %s at %s", agentSlug, provision.WorktreePath(provisionWorkspace, agentSlug))
 	}
@@ -275,7 +286,7 @@ func runProvision(ctx context.Context) error {
 		log.Info("Agent workspace prepared")
 		return nil
 	}
-	if err := provision.ProvisionShared(in); err != nil {
+	if err := provisionShared(in); err != nil {
 		return fmt.Errorf("provision failed: %w", err)
 	}
 	log.Info("Workspace provisioned successfully")
@@ -327,6 +338,10 @@ func worktreeSafeDirectoryEnv(getenv func(string) string, workspace, agentSlug s
 	}
 	return env
 }
+
+// provisionShared is provision.ProvisionShared; a variable so tests can
+// observe the input it is given.
+var provisionShared = provision.ProvisionShared
 
 // prepareStateDir is provision.PrepareStateDir; a variable so tests can
 // observe the owner it is given.
