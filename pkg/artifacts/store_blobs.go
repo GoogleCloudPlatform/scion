@@ -105,6 +105,11 @@ func (s *sqlStore) MarkBlobs(ctx context.Context, digests []string, now time.Tim
 	return nil
 }
 
+// reclaimCandidateHook, when set (by tests only), runs between finding a
+// reclaimable blob and locking it, where a concurrent publish could touch
+// or reference it.
+var reclaimCandidateHook func(digest string)
+
 // ReclaimBlobs implements Store.
 func (s *sqlStore) ReclaimBlobs(ctx context.Context, cutoff time.Time, limit int, del func(string) error) (int, error) {
 	if limit <= 0 {
@@ -112,8 +117,8 @@ func (s *sqlStore) ReclaimBlobs(ctx context.Context, cutoff time.Time, limit int
 	}
 	at := s.timeArg(cutoff)
 	rows, err := s.db.QueryContext(ctx, s.rebind(`SELECT sha256 FROM artifact_blob
-		WHERE unreferenced_since IS NOT NULL AND unreferenced_since <= ? AND (touched_at IS NULL OR touched_at <= ?)
-		ORDER BY unreferenced_since LIMIT `+strconv.Itoa(limit)), at, at)
+		WHERE unreferenced_since IS NOT NULL AND unreferenced_since <= ?
+		ORDER BY unreferenced_since LIMIT `+strconv.Itoa(limit)), at)
 	if err != nil {
 		return 0, fmt.Errorf("artifacts: find reclaimable blobs: %w", err)
 	}
@@ -132,6 +137,9 @@ func (s *sqlStore) ReclaimBlobs(ctx context.Context, cutoff time.Time, limit int
 	}
 	n := 0
 	for _, d := range found {
+		if reclaimCandidateHook != nil {
+			reclaimCandidateHook(d)
+		}
 		ok, err := s.reclaimOne(ctx, d, at, del)
 		if err != nil {
 			return n, err
@@ -144,7 +152,9 @@ func (s *sqlStore) ReclaimBlobs(ctx context.Context, cutoff time.Time, limit int
 }
 
 // reclaimOne deletes one blob if, under its state row's lock, it is still
-// unreferenced and untouched since at or before cutoff.
+// unreferenced since at or before cutoff. A touch clears the mark
+// (TouchBlob) and a later mark is never older than the touch, so a blob
+// touched after cutoff never qualifies: the mark is the one condition.
 func (s *sqlStore) reclaimOne(ctx context.Context, digest string, cutoff any, del func(string) error) (bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -154,8 +164,7 @@ func (s *sqlStore) reclaimOne(ctx context.Context, digest string, cutoff any, de
 	// The write takes the row's lock (Postgres) or the write lock
 	// (SQLite) and re-checks the state in one statement.
 	res, err := tx.ExecContext(ctx, s.rebind(`UPDATE artifact_blob SET sha256 = sha256
-		WHERE sha256 = ? AND unreferenced_since IS NOT NULL AND unreferenced_since <= ?
-		AND (touched_at IS NULL OR touched_at <= ?)`), digest, cutoff, cutoff)
+		WHERE sha256 = ? AND unreferenced_since IS NOT NULL AND unreferenced_since <= ?`), digest, cutoff)
 	if err != nil {
 		return false, fmt.Errorf("artifacts: lock blob: %w", err)
 	}

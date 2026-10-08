@@ -254,3 +254,24 @@ func seedArtifactIn(t *testing.T, st Store, key, scope string) (*Artifact, *Vers
 	}
 	return a, v, f, g
 }
+
+// TestStoreSweepRechecksExpiry: an artifact whose expiry moved after it
+// was found is not deleted.
+func TestStoreSweepRechecksExpiry(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, db *sql.DB, st Store, _ func() *sql.DB) {
+		ctx := context.Background()
+		a, _, _, _ := seedArtifact(t, st, "")
+		future := time.Now().Add(time.Hour)
+		if _, err := st.SetExpiry(ctx, a.ID, &future); err != nil {
+			t.Fatal(err)
+		}
+		s := st.(*sqlStore)
+		ok, err := s.sweepOne(ctx, a.ID, s.timeArg(time.Now()))
+		if err != nil || ok {
+			t.Fatalf("sweepOne on an unexpired artifact: %v %v", ok, err)
+		}
+		if _, err := st.GetArtifact(ctx, a.ID); err != nil {
+			t.Errorf("unexpired artifact deleted: %v", err)
+		}
+	})
+}

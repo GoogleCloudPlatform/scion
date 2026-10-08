@@ -232,12 +232,24 @@ func (s *Service) writeMissingScope(w http.ResponseWriter, r *http.Request) bool
 // putBlob stores the spooled body at its content address unless a blob
 // with that digest already exists.
 func (s *Service) putBlob(ctx context.Context, b backend, sp *spooled, mediaType string) error {
-	p := BlobPath(b.hubID, sp.digest)
-	// Touch first, so the blob sweep spares a blob this publish relies on
-	// (and a sweep deleting it finishes before the check below).
-	if err := b.store.TouchBlob(ctx, sp.digest, time.Now()); err != nil {
+	return storeBlob(ctx, b, sp.digest, mediaType, func() (io.Reader, error) {
+		if _, err := sp.file.Seek(0, io.SeekStart); err != nil {
+			return nil, fmt.Errorf("rewind spool: %w", err)
+		}
+		return sp.file, nil
+	})
+}
+
+// storeBlob stores the bytes open yields at digest's content address
+// unless a blob with that digest already exists. It is the only way bytes
+// are written, so every write touches the blob first: the blob sweep then
+// spares a blob this publish relies on, and a sweep deleting it finishes
+// before the existence check below.
+func storeBlob(ctx context.Context, b backend, digest, mediaType string, open func() (io.Reader, error)) error {
+	if err := b.store.TouchBlob(ctx, digest, time.Now()); err != nil {
 		return err
 	}
+	p := BlobPath(b.hubID, digest)
 	exists, err := b.blobs.Exists(ctx, p)
 	if err != nil {
 		return fmt.Errorf("check blob: %w", err)
@@ -245,10 +257,11 @@ func (s *Service) putBlob(ctx context.Context, b backend, sp *spooled, mediaType
 	if exists {
 		return nil
 	}
-	if _, err := sp.file.Seek(0, io.SeekStart); err != nil {
-		return fmt.Errorf("rewind spool: %w", err)
+	body, err := open()
+	if err != nil {
+		return err
 	}
-	if _, err := b.blobs.Upload(ctx, p, sp.file, storage.UploadOptions{ContentType: mediaType}); err != nil {
+	if _, err := b.blobs.Upload(ctx, p, body, storage.UploadOptions{ContentType: mediaType}); err != nil {
 		return fmt.Errorf("upload blob: %w", err)
 	}
 	return nil

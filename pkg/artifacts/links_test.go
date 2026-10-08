@@ -1055,3 +1055,8 @@ func TestReadAsksHostOnceForHome(t *testing.T) {
 		t.Errorf("home project asked %d times: %v", n, f.host.calls)
 	}
 }
+
+func (s *recordingStore) DeleteGrant(ctx context.Context, artifactID, grantID string) error {
+	s.record("DeleteGrant")
+	return s.Store.DeleteGrant(ctx, artifactID, grantID)
+}

@@ -385,3 +385,92 @@ func checkLiveBlobs(t *testing.T, f *fixture, step int) {
 		}
 	}
 }
+
+// TestBlobSweepSparesBlobBeingPublished: a publish that finds its blob
+// already stored relies on it before its reference is recorded; a sweep
+// running in that window spares the blob, so the published file can be
+// read.
+func TestBlobSweepSparesBlobBeingPublished(t *testing.T) {
+	f := newFixture(t, false)
+	ctx := context.Background()
+	body := []byte("orphan bytes, published again")
+	d := sha(body)
+	if _, err := f.blobs.Upload(ctx, BlobPath("hub-1", d), bytes.NewReader(body), storage.UploadOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	if err := f.store.MarkBlobs(ctx, []string{d}, now.Add(-3*DefaultGCGrace)); err != nil {
+		t.Fatal(err)
+	}
+	f.svc.SetStore(&sweepOnCreateStore{Store: f.store, sweep: func() {
+		if _, err := f.store.ReclaimBlobs(ctx, now.Add(-DefaultGCGrace), 10, func(x string) error {
+			return f.blobs.Delete(ctx, BlobPath("hub-1", x))
+		}); err != nil {
+			t.Errorf("reclaim: %v", err)
+		}
+	}})
+	id := f.publish(userU, "again.md", body, "scope=project-1").Artifact.ID
+	if !f.blobExists(d) {
+		t.Fatalf("the sweep deleted a blob a publish was relying on")
+	}
+	if rec := f.do(&userU, http.MethodGet, "/api/v1/artifacts/"+id+"/files/again.md", nil, nil); rec.Code != http.StatusOK {
+		t.Errorf("read the published file: %d", rec.Code)
+	}
+}
+
+// sweepOnCreateStore runs sweep just before the artifact is recorded.
+type sweepOnCreateStore struct {
+	Store
+	sweep func()
+}
+
+func (s *sweepOnCreateStore) CreatePublished(ctx context.Context, a *Artifact, v *Version, files []File, grants []Grant) error {
+	s.sweep()
+	return s.Store.CreatePublished(ctx, a, v, files, grants)
+}
+
+// TestBlobSweepRechecksUnderLock: a touch that lands after a blob was
+// found reclaimable but before it is locked still spares it.
+func TestBlobSweepRechecksUnderLock(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, db *sql.DB, st Store, _ func() *sql.DB) {
+		ctx := context.Background()
+		d := sha([]byte("late touch"))
+		t0 := time.Now()
+		if err := st.MarkBlobs(ctx, []string{d}, t0.Add(-2*time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+		reclaimCandidateHook = func(x string) {
+			// A publish touches it, and a mark pass runs again.
+			if err := st.TouchBlob(ctx, x, t0); err != nil {
+				t.Errorf("touch: %v", err)
+			}
+			if err := st.MarkBlobs(ctx, []string{x}, t0); err != nil {
+				t.Errorf("mark: %v", err)
+			}
+		}
+		t.Cleanup(func() { reclaimCandidateHook = nil })
+		called := false
+		if n, err := st.ReclaimBlobs(ctx, t0.Add(-time.Hour), 10, func(string) error { called = true; return nil }); err != nil || n != 0 || called {
+			t.Errorf("a blob touched before its lock was reclaimed: %d %v %v", n, err, called)
+		}
+	})
+}
+
+// TestBlobMarkClearsReferenced: marking a referenced blob leaves no state
+// for it.
+func TestBlobMarkClearsReferenced(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, db *sql.DB, st Store, _ func() *sql.DB) {
+		ctx := context.Background()
+		_, _, f, _ := seedArtifact(t, st, "")
+		if err := st.TouchBlob(ctx, f.SHA256, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.MarkBlobs(ctx, []string{f.SHA256}, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		var n int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM artifact_blob`).Scan(&n); err != nil || n != 0 {
+			t.Errorf("state rows for a referenced blob: %d %v", n, err)
+		}
+	})
+}

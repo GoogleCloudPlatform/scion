@@ -334,10 +334,10 @@ type Store interface {
 	// already is.
 	MarkBlobs(ctx context.Context, digests []string, now time.Time) error
 
-	// ReclaimBlobs deletes up to limit blobs unreferenced and untouched
-	// since at or before cutoff. For each, in one transaction holding the
-	// blob's state row, it checks again that the blob is unreferenced and
-	// untouched, calls del (which removes the bytes), and drops the row;
+	// ReclaimBlobs deletes up to limit blobs marked unreferenced since at
+	// or before cutoff (a touch clears the mark, so such a blob is also
+	// untouched since). For each, in one transaction holding the blob's
+	// state row, it checks the mark and the references again, calls del (which removes the bytes), and drops the row;
 	// a writer touching the blob meanwhile waits for that transaction. It
 	// returns how many blobs it deleted; an error from del ends the pass.
 	ReclaimBlobs(ctx context.Context, cutoff time.Time, limit int, del func(digest string) error) (int, error)

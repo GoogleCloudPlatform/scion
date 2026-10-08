@@ -335,3 +335,41 @@ func TestGrantReadFailureIsLoud(t *testing.T) {
 		t.Errorf("owner GET: %d", rec.Code)
 	}
 }
+
+// TestGrantCrossScopeNeedsHostSupport: a host without the cross-scope
+// extension never allows sharing with another project.
+func TestGrantCrossScopeNeedsHostSupport(t *testing.T) {
+	f, id := newLinkFixture(t)
+	f.host.crossScope = true
+	svc := NewService(plainHost{f.host})
+	svc.SetStore(f.store)
+	svc.SetBlobStorage(f.blobs, "hub-1")
+	r := withPrincipal(httptest.NewRequest(http.MethodPost, grantsPath(id),
+		strings.NewReader(`{"subjectKind":"scope","subjectRef":"project-2","permission":"read"}`)), userU)
+	rec := httptest.NewRecorder()
+	svc.ServeHTTP(rec, r)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("cross-project grant through a host without the extension: %d", rec.Code)
+	}
+}
+
+// plainHost hides every optional extension of the host it wraps.
+type plainHost struct{ Host }
+
+// TestGrantDeleteMalformedIDSkipsStore: a malformed grant id never reaches
+// the store.
+func TestGrantDeleteMalformedIDSkipsStore(t *testing.T) {
+	f, id := newLinkFixture(t)
+	rs := &recordingStore{Store: f.store}
+	f.svc.SetStore(rs)
+	for _, bad := range []string{"nope", "%00", strings.Repeat("a", 36)} {
+		if rec := f.do(&userU, http.MethodDelete, grantsPath(id)+"/"+bad, nil, nil); rec.Code != http.StatusNotFound {
+			t.Errorf("%q: %d", bad, rec.Code)
+		}
+	}
+	for _, c := range rs.take() {
+		if c == "DeleteGrant" {
+			t.Errorf("a malformed grant id reached the store")
+		}
+	}
+}

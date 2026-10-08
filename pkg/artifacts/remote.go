@@ -19,13 +19,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"sync"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts/remotefetch"
-	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 )
 
 // RemoteImageLimits bound the remote images fetched at publish time.
@@ -297,20 +297,5 @@ func (s *Service) waitFetchFloor(budget context.Context, start time.Time) {
 
 // putBlobBytes stores body at its content address unless that blob exists.
 func putBlobBytes(ctx context.Context, b backend, digest string, body []byte, mediaType string) error {
-	p := BlobPath(b.hubID, digest)
-	// Touch first, as putBlob does.
-	if err := b.store.TouchBlob(ctx, digest, time.Now()); err != nil {
-		return err
-	}
-	exists, err := b.blobs.Exists(ctx, p)
-	if err != nil {
-		return fmt.Errorf("check blob: %w", err)
-	}
-	if exists {
-		return nil
-	}
-	if _, err := b.blobs.Upload(ctx, p, bytes.NewReader(body), storage.UploadOptions{ContentType: mediaType}); err != nil {
-		return fmt.Errorf("upload blob: %w", err)
-	}
-	return nil
+	return storeBlob(ctx, b, digest, mediaType, func() (io.Reader, error) { return bytes.NewReader(body), nil })
 }
