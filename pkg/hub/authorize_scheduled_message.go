@@ -29,15 +29,17 @@ import (
 // authorizeScheduledMessageAuthoring validates a scheduled-message event at
 // authoring time (create / update). It resolves the target agent from
 // convenience fields or raw payload and rejects when:
-//   - the target agent cannot be resolved,
+//   - the request's credential may not author scheduled work
+//     (authorizeScheduleAuthoringCredential: every user access token is
+//     refused), checked before the target is resolved,
 //   - the target agent is in a different project from projectID and
 //     cross-project messaging is disabled, or
 //   - the caller is not currently authorized to message the target
 //     (fail-fast preview — the definitive check runs again at fire time).
 //
-// A scoped access token may author: the revision records the token's
-// ceiling, and each fire re-checks the token under
-// resolveScheduledAuthority (authorizeScheduledMessageFire).
+// An admitted revision records its author's ceiling, and each fire
+// re-checks the recorded authority under resolveScheduledAuthority
+// (authorizeScheduledMessageFire).
 //
 // Returns true when authoring is allowed; writes the HTTP error response and
 // returns false when denied.
@@ -53,6 +55,11 @@ func (s *Server) authorizeScheduledMessageAuthoring(
 	identity := GetIdentityFromContext(ctx)
 	if identity == nil {
 		Unauthorized(w)
+		return false
+	}
+	// The credential gate runs before the target is resolved, so a refused
+	// credential is refused whether or not the target exists.
+	if !authorizeScheduleAuthoringCredential(w, r) {
 		return false
 	}
 

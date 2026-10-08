@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 172
+**Operations:** 174
 
 ## Table of Contents
 
@@ -37,9 +37,11 @@
 - [project.list](#projectlist) — List projects within the caller's authorized scope
 - [project.update](#projectupdate) — Update project settings and metadata
 - [project.register](#projectregister) — Register a project from an external source
-- [schedule.event.read](#scheduleeventread) — Read scheduled events or list events in a project
-- [schedule.event.create](#scheduleeventcreate) — Create a scheduled event or recurring schedule
-- [schedule.event.update](#scheduleeventupdate) — Update a recurring schedule
+- [schedule.event.list](#scheduleeventlist) — List scheduled events or recurring schedules in a project
+- [schedule.event.read](#scheduleeventread) — Read a scheduled event, a recurring schedule or a schedule's run history
+- [schedule.event.create](#scheduleeventcreate) — Create a scheduled event or recurring schedule of any event type. Every user access token is refused before any target lookup
+- [schedule.event.update](#scheduleeventupdate) — Update or resume a recurring schedule of any event type. Every user access token is refused, including one holding scheduled_event:update
+- [schedule.event.pause](#scheduleeventpause) — Pause a recurring schedule. Pausing only stops future runs, so a token with scheduled_event:update is admitted
 - [schedule.event.delete](#scheduleeventdelete) — Cancel a scheduled event or delete a recurring schedule
 - [artifact.read](#artifactread) — Read an artifact's metadata or file bytes (owner, home-project readers via the scope grant, or principal grants); unreadable artifacts answer 404
 - [artifact.list](#artifactlist) — List the artifacts the caller owns, holds a grant on, or that are shared to a project it is a member of (?mine=1); each row passes the artifact.read check, so an artifact the caller cannot read is omitted, never denied
@@ -1386,36 +1388,70 @@
 
 ---
 
-## schedule.event.read
+## schedule.event.list
 
 **Domain:** schedule
 
-**Description:** Read scheduled events or list events in a project
+**Description:** List scheduled events or recurring schedules in a project
 
 ### Entry Points
 
 | Kind | Method | Pattern |
 |------|--------|---------|
 | http_route | GET | `/api/v1/projects/{projectId}/scheduled-events` |
-| http_route | GET | `/api/v1/projects/{projectId}/scheduled-events/{id}` |
 | http_route | GET | `/api/v1/projects/{projectId}/schedules` |
-| http_route | GET | `/api/v1/projects/{projectId}/schedules/{id}` |
 
-**Principals:** `user`
+**Principals:** `user`, `agent`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
 
-**Base Permission:** `scheduled_event.read`
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
+
+**Base Permission:** `scheduled_event.list`
 
 **Resource Resolver:** project-from-url
 
-**Effects:** `read-one`, `list-scoped`
+**Effects:** `list-scoped`
 
 **Denial Codes:** `forbidden`
 
 ### Tests
 
-- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
+## schedule.event.read
+
+**Domain:** schedule
+
+**Description:** Read a scheduled event, a recurring schedule or a schedule's run history
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/projects/{projectId}/scheduled-events/{id}` |
+| http_route | GET | `/api/v1/projects/{projectId}/schedules/{id}` |
+| http_route | GET | `/api/v1/projects/{projectId}/schedules/{id}/history` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
+
+**Base Permission:** `scheduled_event.read`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
 
 ---
 
@@ -1423,7 +1459,7 @@
 
 **Domain:** schedule
 
-**Description:** Create a scheduled event or recurring schedule
+**Description:** Create a scheduled event or recurring schedule of any event type. Every user access token is refused before any target lookup
 
 ### Entry Points
 
@@ -1432,9 +1468,11 @@
 | http_route | POST | `/api/v1/projects/{projectId}/scheduled-events` |
 | http_route | POST | `/api/v1/projects/{projectId}/schedules` |
 
-**Principals:** `user`
+**Principals:** `user`, `agent`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `agent_jwt`
+
+**Bearer:** `session_only` (reason `GOV_PENDING`)
 
 **Base Permission:** `scheduled_event.create`
 
@@ -1446,7 +1484,7 @@
 
 ### Tests
 
-- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestScheduledMessageAuthoring_RefusesTokensBeforeTargetLookup`
 
 ---
 
@@ -1454,17 +1492,20 @@
 
 **Domain:** schedule
 
-**Description:** Update a recurring schedule
+**Description:** Update or resume a recurring schedule of any event type. Every user access token is refused, including one holding scheduled_event:update
 
 ### Entry Points
 
 | Kind | Method | Pattern |
 |------|--------|---------|
 | http_route | PATCH | `/api/v1/projects/{projectId}/schedules/{id}` |
+| http_route | POST | `/api/v1/projects/{projectId}/schedules/{id}/resume` |
 
-**Principals:** `user`
+**Principals:** `user`, `agent`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `agent_jwt`
+
+**Bearer:** `session_only` (reason `GOV_PENDING`)
 
 **Base Permission:** `scheduled_event.update`
 
@@ -1476,7 +1517,39 @@
 
 ### Tests
 
-- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestScheduleUpdateSelector_DoesNotAdmitAuthoring`
+
+---
+
+## schedule.event.pause
+
+**Domain:** schedule
+
+**Description:** Pause a recurring schedule. Pausing only stops future runs, so a token with scheduled_event:update is admitted
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/projects/{projectId}/schedules/{id}/pause` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
+
+**Base Permission:** `scheduled_event.update`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestSchedulePause_AdmitsTokenWithUpdateSelector`
 
 ---
 
@@ -1493,9 +1566,11 @@
 | http_route | DELETE | `/api/v1/projects/{projectId}/scheduled-events/{id}` |
 | http_route | DELETE | `/api/v1/projects/{projectId}/schedules/{id}` |
 
-**Principals:** `user`
+**Principals:** `user`, `agent`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
 
 **Base Permission:** `scheduled_event.delete`
 
@@ -1514,7 +1589,7 @@
 
 ### Tests
 
-- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
 
 ---
 
