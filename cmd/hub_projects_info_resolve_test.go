@@ -28,11 +28,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// fakeProjectsHub serves the project lookup endpoints used by
-// `scion hub projects info`, mirroring the hub's semantics: GET by ID only,
-// the name filter is a case-insensitive name match and the slug filter is an
-// exact slug match. It records each request so tests can check which lookups
-// were made.
+// fakeProjectsHub serves the project endpoints used by `scion hub projects
+// info` and `scion hub projects delete`, mirroring the hub's semantics: GET
+// and DELETE by ID only, the name filter is a case-insensitive name match and
+// the slug filter is an exact slug match. It records each request, and each
+// DELETE separately, so tests can check which lookups and deletes were made.
 type fakeProjectsHub struct {
 	projects []hubclient.Project
 
@@ -90,10 +90,11 @@ func (f *fakeProjectsHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(`{"error":{"code":"not_found","message":"project not found"}}`))
 }
 
-// TestResolveProjectForInfo covers ptone/scion#3772: `scion hub projects
-// info` accepts a project UUID as well as a name, and keeps the existing
-// name lookup and not-found error unchanged.
-func TestResolveProjectForInfo(t *testing.T) {
+// TestResolveProjectNameOrID covers the resolver shared by `scion hub
+// projects info` and `scion hub projects delete` (ptone/scion#3772,
+// ptone/scion#3792): it accepts a project UUID as well as a name, and keeps
+// the existing name lookup and not-found error unchanged.
+func TestResolveProjectNameOrID(t *testing.T) {
 	const (
 		idA = "0b9a4c1e-2f3d-4e5a-8b6c-7d8e9f0a1b2c"
 		idB = "5f1e2d3c-4b5a-4987-8a6b-1c2d3e4f5a6b"
@@ -168,6 +169,74 @@ func TestResolveProjectForInfo(t *testing.T) {
 			if tt.wantReqs != nil {
 				assert.Equal(t, tt.wantReqs, hub.recorded())
 			}
+		})
+	}
+}
+
+// TestRunHubProjectsInfo_Resolve covers the command wiring for
+// ptone/scion#3772: runHubProjectsInfo resolves a UUID argument by ID (not
+// by the name lookup, which here would find a different project whose name
+// is that UUID), and an unknown UUID reports not found without fetching
+// providers.
+func TestRunHubProjectsInfo_Resolve(t *testing.T) {
+	tests := []struct {
+		name     string
+		arg      string
+		wantID   string
+		wantErr  string
+		wantReqs []string
+	}{
+		{
+			name:   "uuid shows the project with that ID",
+			arg:    deleteTestIDA,
+			wantID: deleteTestIDA,
+			wantReqs: []string{
+				"/api/v1/projects/" + deleteTestIDA,
+				"/api/v1/projects/" + deleteTestIDA + "/providers",
+			},
+		},
+		{
+			name:   "name shows the project via name lookup only",
+			arg:    "My Project",
+			wantID: deleteTestIDA,
+			wantReqs: []string{
+				"/api/v1/projects?name=My+Project",
+				"/api/v1/projects/" + deleteTestIDA + "/providers",
+			},
+		},
+		{
+			name:    "unknown uuid reports not found",
+			arg:     "9d8c7b6a-5f4e-4d3c-9b2a-1f0e9d8c7b6a",
+			wantErr: "project '9d8c7b6a-5f4e-4d3c-9b2a-1f0e9d8c7b6a' not found",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			hub := setupProjectsDeleteTest(t, true)
+			origJSON := hubOutputJSON
+			t.Cleanup(func() { hubOutputJSON = origJSON })
+			hubOutputJSON = true
+
+			var runErr error
+			out := captureStdout(t, func() {
+				runErr = runHubProjectsInfo(hubProjectsInfoCmd, []string{tt.arg})
+			})
+			if tt.wantErr != "" {
+				require.Error(t, runErr)
+				assert.Equal(t, tt.wantErr, runErr.Error())
+				for _, req := range hub.recorded() {
+					assert.NotContains(t, req, "/providers", "providers fetched for an unresolved project")
+				}
+				return
+			}
+			require.NoError(t, runErr)
+			var got struct {
+				ID string `json:"id"`
+			}
+			require.NoError(t, json.Unmarshal([]byte(out), &got), "output: %s", out)
+			assert.Equal(t, tt.wantID, got.ID)
+			assert.Equal(t, tt.wantReqs, hub.recorded())
 		})
 	}
 }

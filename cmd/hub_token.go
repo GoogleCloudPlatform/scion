@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -85,13 +86,13 @@ currently select and why.
 Available scopes:
 %s
 
-Expiry (--expires) accepts a duration in minutes, hours, days or years
-(e.g., 90m, 2h, 30d, 1y) or an RFC 3339 date (e.g., 2026-12-31T00:00:00Z).
+Expiry (--expires) accepts %s.
+%s.
 Default: 90 days. Maximum: 1 year.
 
 Examples:
   scion hub token create --project my-project --name ci-token --scopes agent:create,agent:read
-  scion hub token create --project my-project --name deploy --scopes agent:manage --expires 30d`, permissions.UATScopeHelp()),
+  scion hub token create --project my-project --name deploy --scopes agent:manage --expires 30d`, permissions.UATScopeHelp(), expiryAcceptedForms, expiryUnitNote),
 	Args: cobra.NoArgs,
 	RunE: runTokenCreate,
 }
@@ -175,7 +176,7 @@ func init() {
 	hubTokenCreateCmd.Flags().StringVar(&tokenCreateProject, "project", "", "Project name or ID to scope the token to (required)")
 
 	hubTokenCreateCmd.Flags().StringArrayVar(&tokenCreateScopes, "scopes", nil, "Scope to grant (required, repeatable; also accepts a comma-separated list)")
-	hubTokenCreateCmd.Flags().StringVar(&tokenCreateExpires, "expires", "", "Expiry duration (e.g., 90m, 2h, 30d, 1y) or RFC 3339 date (default: 90d)")
+	hubTokenCreateCmd.Flags().StringVar(&tokenCreateExpires, "expires", "", "Expiry: "+expiryAcceptedForms+" (default: 90d)")
 	// --json was checked in runTokenCreate but never registered here, so it
 	// silently fell back to text output. Register it explicitly.
 	hubTokenCreateCmd.Flags().BoolVar(&tokenOutputJSON, "json", false, "Output in JSON format")
@@ -502,9 +503,13 @@ func formatLabels(labels map[string]string) string {
 }
 
 // expiryAcceptedForms describes every --expires form parseExpiry accepts. It
-// is shared by the flag help, the command help and the parse error so the
-// three cannot drift apart.
+// is shared by the --expires flag usage, the command's long help and the
+// parse error so the three cannot drift apart.
 const expiryAcceptedForms = "a positive duration in minutes (90m), hours (2h), days (30d) or years (1y), or an RFC 3339 date (2026-12-31T00:00:00Z)"
+
+// expiryUnitNote spells out that "m" is minutes, since it could be read as
+// months. It is shown in the command's long help.
+const expiryUnitNote = "m means minutes; there is no month unit (use 30d or 1y for longer)"
 
 // parseExpiry parses an expiry string as either a duration shorthand
 // (90m, 2h, 30d, 1y) or an RFC 3339 timestamp.
@@ -531,16 +536,27 @@ func parseExpiryAt(s string, now time.Time) (time.Time, error) {
 	unit := s[len(s)-1]
 	numStr := s[:len(s)-1]
 
+	// The minute and hour units parse the number strictly, so Go-style or
+	// fractional inputs such as 1h30m or 1.5h are rejected rather than read
+	// as a shorter duration. The day and year units keep their original,
+	// laxer parse so existing inputs behave exactly as before.
+	if unit == 'm' || unit == 'h' {
+		n, err := strconv.Atoi(numStr)
+		if err != nil || n <= 0 {
+			return time.Time{}, invalid
+		}
+		if unit == 'm' {
+			return now.Add(time.Duration(n) * time.Minute), nil
+		}
+		return now.Add(time.Duration(n) * time.Hour), nil
+	}
+
 	var n int
 	if _, err := fmt.Sscanf(numStr, "%d", &n); err != nil || n <= 0 {
 		return time.Time{}, invalid
 	}
 
 	switch unit {
-	case 'm':
-		return now.Add(time.Duration(n) * time.Minute), nil
-	case 'h':
-		return now.Add(time.Duration(n) * time.Hour), nil
 	case 'd':
 		return now.Add(time.Duration(n) * 24 * time.Hour), nil
 	case 'y':

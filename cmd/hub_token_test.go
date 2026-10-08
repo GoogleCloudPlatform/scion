@@ -104,6 +104,14 @@ func TestParseExpiry_Invalid(t *testing.T) {
 		"2w",
 		"1.5x",
 		"2026-13-01T00:00:00Z",
+		// The minute and hour units parse their number strictly
+		// (ptone/scion#3771): Go-style and fractional inputs must not be
+		// silently read as a shorter duration.
+		"1h30m",
+		"2h30m",
+		"1.5h",
+		"1.5m",
+		"90mm",
 	}
 
 	for _, input := range tests {
@@ -139,6 +147,10 @@ func TestParseExpiryAt_Table(t *testing.T) {
 		{"1y", now.AddDate(1, 0, 0)},
 		{"2026-12-31T00:00:00Z", time.Date(2026, 12, 31, 0, 0, 0, 0, time.UTC)},
 		{"2026-12-31T10:00:00+02:00", time.Date(2026, 12, 31, 8, 0, 0, 0, time.UTC)},
+		// The day and year units keep their original lax number parse.
+		{"1.5d", now.Add(24 * time.Hour)},
+		{"3xd", now.Add(3 * 24 * time.Hour)},
+		{"2.9y", now.AddDate(2, 0, 0)},
 		// New forms.
 		{"2h", now.Add(2 * time.Hour)},
 		{"1h", now.Add(time.Hour)},
@@ -171,6 +183,15 @@ func TestHubTokenCreateHelpListsExpiryForms(t *testing.T) {
 		if !strings.Contains(hubTokenCreateCmd.Long, form) {
 			t.Errorf("hub token create help missing expiry form %q", form)
 		}
+	}
+	if !strings.Contains(usage, expiryAcceptedForms) {
+		t.Errorf("--expires usage is not built from expiryAcceptedForms: %s", usage)
+	}
+	if !strings.Contains(hubTokenCreateCmd.Long, expiryAcceptedForms) {
+		t.Error("hub token create help is not built from expiryAcceptedForms")
+	}
+	if !strings.Contains(hubTokenCreateCmd.Long, "no month unit") {
+		t.Error("hub token create help must say that m means minutes, not months")
 	}
 }
 

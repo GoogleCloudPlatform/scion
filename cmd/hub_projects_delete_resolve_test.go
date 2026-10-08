@@ -79,6 +79,9 @@ func TestRunHubProjectsDelete_Resolve(t *testing.T) {
 		wantReqs   []string
 	}{
 		{
+			// deleteTestIDA is also the name of another project
+			// (deleteTestIDC). The ID match wins: the name lookup is never
+			// made and the decoy is not touched.
 			name:       "uuid deletes that project",
 			arg:        deleteTestIDA,
 			wantDelete: []string{deleteTestIDA},
@@ -117,13 +120,6 @@ func TestRunHubProjectsDelete_Resolve(t *testing.T) {
 			name:    "unknown name reports not found and deletes nothing",
 			arg:     "missing",
 			wantErr: "project 'missing' not found",
-		},
-		{
-			// The ID match wins: the project whose name is that string is
-			// not touched.
-			name:       "uuid matching an ID and another project's name deletes the ID match only",
-			arg:        deleteTestIDA,
-			wantDelete: []string{deleteTestIDA},
 		},
 		{
 			// Same as `hub projects info` and as delete before the change:
