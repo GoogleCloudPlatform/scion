@@ -119,6 +119,10 @@ web/
 - **Terminal:** xterm.js for terminal sessions
 - **Server:** Go (`scion` binary with `--enable-web`)
 
+### Shoelace component registration
+
+Shoelace components, themes and icons ship in the client bundle; the SPA shell loads nothing from a CDN. Every `sl-*` component the app renders must be registered by an import in `src/client/main.ts` (`import '@shoelace-style/shoelace/dist/components/<name>/<name>.js';`). An unregistered tag renders as an unknown, unstyled element, in dev and production alike. `src/client/shoelace-registration.test.ts` fails when a tag used in `src/` has no such import.
+
 ## Icon Reference
 
 All icons use the Shoelace `<sl-icon>` component, which provides [Bootstrap Icons](https://icons.getbootstrap.com/). Use these consistently when building new UI features.

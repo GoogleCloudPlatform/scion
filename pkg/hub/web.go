@@ -78,9 +78,6 @@ type CompositeHealthResponse struct {
 	Broker       interface{} `json:"broker,omitempty"`
 }
 
-// shoelaceVersion is the Shoelace CDN version used by the SPA shell.
-const shoelaceVersion = "2.19.0"
-
 // webSessionName is the cookie name for web sessions.
 const webSessionName = "scion_sess"
 
@@ -258,8 +255,7 @@ var spaShellTemplate = `<!DOCTYPE html>
     <meta name="theme-color" content="#1e293b" />
     <!-- app-icons:end -->
 
-    <!-- Preconnect to CDNs for faster loading -->
-    <link rel="preconnect" href="https://cdn.jsdelivr.net">
+    <!-- Preconnect to font CDNs for faster loading -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 
@@ -267,10 +263,9 @@ var spaShellTemplate = `<!DOCTYPE html>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 
-    <!-- Shoelace Component Library -->
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@shoelace-style/shoelace@{{.ShoelaceVersion}}/cdn/themes/light.css">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@shoelace-style/shoelace@{{.ShoelaceVersion}}/cdn/themes/dark.css">
-    <script type="module" src="https://cdn.jsdelivr.net/npm/@shoelace-style/shoelace@{{.ShoelaceVersion}}/cdn/shoelace-autoloader.js"></script>
+    <!-- Shoelace components, theme CSS and icons are bundled with the client
+         (main.ts registers every component; icons are served from /shoelace/).
+         Nothing is loaded from a CDN. -->
 
     <!-- Initial state for hydration -->
     <script id="__SCION_DATA__" type="application/json">{{.InitialData}}</script>
@@ -511,9 +506,8 @@ var noAssetsPage = `<!DOCTYPE html>
 
 // spaShellData holds the template data for the SPA shell.
 type spaShellData struct {
-	ShoelaceVersion string
-	IsLoginPage     bool
-	IsInvitePage    bool
+	IsLoginPage  bool
+	IsInvitePage bool
 	// InitialData is safe-for-HTML JSON embedded in the __SCION_DATA__ script tag.
 	// It is typed as template.JS so html/template does not escape it further.
 	InitialData template.JS
@@ -1256,10 +1250,9 @@ func (ws *WebServer) spaHandler() http.HandlerFunc {
 		}
 
 		data := spaShellData{
-			ShoelaceVersion: shoelaceVersion,
-			IsLoginPage:     r.URL.Path == "/login",
-			IsInvitePage:    r.URL.Path == "/invite",
-			InitialData:     ws.prefetchPageData(r),
+			IsLoginPage:  r.URL.Path == "/login",
+			IsInvitePage: r.URL.Path == "/invite",
+			InitialData:  ws.prefetchPageData(r),
 		}
 		if err := ws.shellTmpl.Execute(w, data); err != nil {
 			ws.logger().Error("Failed to render SPA shell", "error", err)
@@ -2938,9 +2931,9 @@ func sessionString(session *sessions.Session, key string) string {
 // shows a broken image. blob: is allowed for images only, never for
 // scripts or frames.
 const webContentSecurityPolicy = "default-src 'self'; " +
-	"script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdn.webawesome.com; " +
-	"style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdn.webawesome.com https://fonts.googleapis.com; " +
-	"font-src 'self' https://fonts.gstatic.com https://cdn.jsdelivr.net https://cdn.webawesome.com; " +
+	"script-src 'self' 'unsafe-inline' https://cdn.webawesome.com; " +
+	"style-src 'self' 'unsafe-inline' https://cdn.webawesome.com https://fonts.googleapis.com; " +
+	"font-src 'self' https://fonts.gstatic.com https://cdn.webawesome.com; " +
 	"img-src 'self' data: blob: https:; " +
 	"connect-src 'self' data: ws: wss: http://localhost:* http://127.0.0.1:* https://storage.googleapis.com"
 

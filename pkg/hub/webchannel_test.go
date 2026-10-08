@@ -31,8 +31,7 @@ import (
 // for testing. The caller should close the returned *sql.DB when done.
 func newTestWebChatStore(t *testing.T) (WebChatStore, *sql.DB) {
 	t.Helper()
-	db, err := sql.Open("sqlite3", ":memory:")
-	require.NoError(t, err)
+	db := openTestMemorySQLite(t, "sqlite3")
 
 	store := NewWebChatStore(db, "sqlite3")
 	require.NoError(t, store.Init())

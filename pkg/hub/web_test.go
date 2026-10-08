@@ -286,11 +286,18 @@ func TestSPAShellHandler(t *testing.T) {
 		"main.js":         "client entry point script",
 		"--scion-primary": "critical CSS variables",
 		"scion-theme":     "theme detection script",
-		shoelaceVersion:   "Shoelace CDN version",
 	}
 	for needle, desc := range checks {
 		if !strings.Contains(html, needle) {
 			t.Errorf("SPA shell missing %s (expected %q in HTML)", desc, needle)
+		}
+	}
+
+	// Shoelace is bundled with the client: the shell must not load the CDN
+	// autoloader or CDN theme stylesheets alongside it.
+	for _, needle := range []string{"cdn.jsdelivr.net", "shoelace-autoloader", "@shoelace-style"} {
+		if strings.Contains(html, needle) {
+			t.Errorf("SPA shell still references %q; Shoelace must load only from the bundle", needle)
 		}
 	}
 }
@@ -634,7 +641,6 @@ func TestSecurityHeaders(t *testing.T) {
 		cspChecks := []string{
 			"default-src 'self'",
 			"script-src 'self'",
-			"cdn.jsdelivr.net",
 			"fonts.googleapis.com",
 			"fonts.gstatic.com",
 		}
@@ -642,6 +648,10 @@ func TestSecurityHeaders(t *testing.T) {
 			if !strings.Contains(csp, check) {
 				t.Errorf("CSP missing %q", check)
 			}
+		}
+		// Nothing is loaded from jsDelivr any more, so the CSP must not allow it.
+		if strings.Contains(csp, "cdn.jsdelivr.net") {
+			t.Errorf("CSP still allows cdn.jsdelivr.net: %q", csp)
 		}
 	}
 

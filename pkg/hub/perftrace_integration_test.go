@@ -255,21 +255,39 @@ var perfListPaths = []struct {
 }
 
 // TestPerfTrace_OffInstallsNothing pins the off path: the authorization
-// service holds the original store and emitter, no middleware runs, no
+// service holds the original store and exact stable router, whose legacy
+// binding is the original concrete writer; no middleware runs, no
 // header is added even on an opt-in request, and no logger is set.
 func TestPerfTrace_OffInstallsNothing(t *testing.T) {
 	p := newPerfPair(t, 3)
 
 	srv := newPerfServer(t, p.store, false)
 	assert.Same(t, p.store, srv.authzService.store, "off: authorization store must be the original")
-	_, isStoreEmitter := srv.authzService.decisionAuditEmitter.(*StoreDecisionAuditEmitter)
-	assert.True(t, isStoreEmitter, "off: audit emitter must be the original")
+	require.NotNil(t, srv.decisionAuditRouter)
+	require.NotNil(t, srv.decisionAuditWriter)
+	assert.Same(t, srv.decisionAuditRouter, srv.authzService.decisionAuditEmitter, "off: decorator must return the exact router")
+	_, isStoreEmitter := srv.decisionAuditRouter.legacy.(*StoreDecisionAuditEmitter)
+	assert.True(t, isStoreEmitter, "off: legacy audit emitter must be the original concrete writer")
+	assert.Same(t, srv.decisionAuditWriter, srv.decisionAuditRouter.legacy, "off: retain exact writer")
+	assert.Nil(t, srv.decisionAuditRouter.admission)
+	assert.Nil(t, srv.decisionAuditRouter.contract.handler)
+	assert.Nil(t, srv.decisionAuditRouter.contract.clock)
 	assert.Nil(t, srv.perfTraceLog)
 	assert.False(t, DefaultServerConfig().PerfTrace, "default must be off")
 
 	srvOn := newPerfServer(t, p.store, true)
 	assert.IsType(t, perfAuthzStore{}, srvOn.authzService.store)
-	assert.IsType(t, perfAuditEmitter{}, srvOn.authzService.decisionAuditEmitter)
+	require.IsType(t, perfAuditEmitter{}, srvOn.authzService.decisionAuditEmitter)
+	decorator := srvOn.authzService.decisionAuditEmitter.(perfAuditEmitter)
+	require.NotNil(t, srvOn.decisionAuditRouter)
+	require.NotNil(t, srvOn.decisionAuditWriter)
+	assert.Same(t, srvOn.decisionAuditRouter, decorator.next, "on: decorator must retain the exact router")
+	assert.IsType(t, (*StoreDecisionAuditEmitter)(nil), srvOn.decisionAuditRouter.legacy)
+	assert.Same(t, srvOn.decisionAuditWriter, srvOn.decisionAuditRouter.legacy, "on: retain exact writer")
+	assert.Nil(t, srvOn.decisionAuditRouter.admission)
+	assert.Nil(t, srvOn.decisionAuditRouter.contract.handler)
+	assert.Nil(t, srvOn.decisionAuditRouter.contract.clock)
+	assert.NotNil(t, srvOn.perfTraceLog)
 
 	// Probe the off server as the one caller that would get headers if the
 	// middleware were installed: the unscoped local admin, opting in. With a

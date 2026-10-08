@@ -54,6 +54,7 @@ import {
   SUPERADMIN_ROUTES,
 } from '../lib/admin-permissions.js';
 import { ACCOUNT_TEARDOWN_EVENT, type AccountTeardownDetail } from '../utils/auth.js';
+import { clearAdminStatus, loadAdminStatus } from './admin-status.js';
 import { chatRecentFiles } from './chat-recent-files.js';
 import { pushRouteEntry, type RouteShell } from './route-history.js';
 import { browserPath, stripBasePath } from './navigation.js';
@@ -85,12 +86,18 @@ const TZ_LOAD_BUDGET_MS = 1500;
 import { setBasePath } from '@shoelace-style/shoelace/dist/utilities/base-path.js';
 setBasePath('/shoelace');
 
-// Explicitly import all Shoelace components used in the app.
-// The autoloader cannot detect sl-* elements inside LitElement shadow roots,
-// so each component must be registered via direct import.
+// Explicitly import all Shoelace components used in the app. This is the
+// only place Shoelace components are registered: the SPA shell loads no CDN
+// autoloader (it could not see sl-* elements inside LitElement shadow roots
+// anyway, and loaded a second Shoelace copy for light-DOM ones). Every sl-*
+// tag used in src/ must be imported here; shoelace-registration.test.ts
+// enforces it.
+import '@shoelace-style/shoelace/dist/components/badge/badge.js';
 import '@shoelace-style/shoelace/dist/components/breadcrumb/breadcrumb.js';
 import '@shoelace-style/shoelace/dist/components/breadcrumb-item/breadcrumb-item.js';
 import '@shoelace-style/shoelace/dist/components/button/button.js';
+import '@shoelace-style/shoelace/dist/components/button-group/button-group.js';
+import '@shoelace-style/shoelace/dist/components/card/card.js';
 import '@shoelace-style/shoelace/dist/components/checkbox/checkbox.js';
 import '@shoelace-style/shoelace/dist/components/drawer/drawer.js';
 import '@shoelace-style/shoelace/dist/components/icon/icon.js';
@@ -107,6 +114,7 @@ import '@shoelace-style/shoelace/dist/components/divider/divider.js';
 import '@shoelace-style/shoelace/dist/components/dropdown/dropdown.js';
 import '@shoelace-style/shoelace/dist/components/menu/menu.js';
 import '@shoelace-style/shoelace/dist/components/menu-item/menu-item.js';
+import '@shoelace-style/shoelace/dist/components/menu-label/menu-label.js';
 import '@shoelace-style/shoelace/dist/components/alert/alert.js';
 import '@shoelace-style/shoelace/dist/components/radio-group/radio-group.js';
 import '@shoelace-style/shoelace/dist/components/radio-button/radio-button.js';
@@ -117,6 +125,7 @@ import '@shoelace-style/shoelace/dist/components/details/details.js';
 import '@shoelace-style/shoelace/dist/components/tab-group/tab-group.js';
 import '@shoelace-style/shoelace/dist/components/tab/tab.js';
 import '@shoelace-style/shoelace/dist/components/tab-panel/tab-panel.js';
+import '@shoelace-style/shoelace/dist/components/tag/tag.js';
 
 // Import app shell and core shared components (always needed)
 import '../components/app-shell.js';
@@ -135,10 +144,10 @@ import '../components/shared/status-badge.js';
 let currentUser: User | null = null;
 
 /**
- * Cached admin-status flags, fetched once on init from
- * GET /api/v1/auth/admin-status. Used by the route guard to allow
- * hub-admin users (not just super-admins) to access admin pages.
- * Includes the permissions array for per-route permission checks.
+ * The admin-status flags the route guard last fetched fresh on entering an
+ * admin page (see client/admin-status.ts). Used to allow hub-admin users
+ * (not just super-admins) into admin pages, with the permissions array for
+ * per-route permission checks.
  */
 let cachedAdminStatus: AdminStatus | null = null;
 let terminalWorkspaceEnabled = false;
@@ -221,26 +230,6 @@ function ensureTerminalCoordinator(): TerminalCoordinator | null {
     });
   });
   return terminalCoordinator;
-}
-
-/**
- * Fetch the current user's admin status from the backend.
- * Returns null when the user is not authenticated or the fetch fails.
- * Includes the permissions array for per-resource permission checks.
- */
-async function fetchAdminStatus(): Promise<AdminStatus | null> {
-  try {
-    const res = await fetch('/api/v1/auth/admin-status', { credentials: 'include' });
-    if (!res.ok) return null;
-    const data = await res.json();
-    return {
-      isAdmin: data.isAdmin === true,
-      isSuperAdmin: data.isSuperAdmin === true,
-      permissions: Array.isArray(data.permissions) ? data.permissions : [],
-    };
-  } catch {
-    return null;
-  }
 }
 
 /**
@@ -603,6 +592,12 @@ const ROUTES: RouteConfig[] = [
     load: () => import('../components/pages/harness-config-detail.js'),
   },
   {
+    // Artifacts list (experiment hub.artifacts; the page renders 404 when off).
+    pattern: /^\/artifacts$/,
+    tag: 'scion-page-artifacts',
+    load: () => import('../components/pages/artifacts.js'),
+  },
+  {
     // Artifact page (experiment hub.artifacts; the page renders 404 when off).
     pattern: /^\/projects\/[^/]+\/artifacts\/[^/]+$/,
     tag: 'scion-page-artifact-detail',
@@ -832,10 +827,11 @@ async function init(): Promise<void> {
     tzReady = withTimeout(loadPreferredTimeZone(), TZ_LOAD_BUDGET_MS).then(() => undefined);
   }
 
-  // Fetch admin status early so the route guard can use the cached result
-  // instead of blocking on a network call during navigation.
-  if (currentUser) {
-    cachedAdminStatus = await fetchAdminStatus();
+  // Start the shared admin-status request now, without waiting for it: the
+  // nav joins it when it renders (see client/admin-status.ts), so a cold
+  // load sends one request instead of one here plus one per nav instance.
+  if (currentUser?.id) {
+    void loadAdminStatus(currentUser.id);
   }
 
   // Chat notifications are published on user.<id>.notification, so the state
@@ -920,6 +916,8 @@ async function init(): Promise<void> {
   window.addEventListener(ACCOUNT_TEARDOWN_EVENT, (e) => {
     // A chat scroll position belongs to this account's session.
     clearChatScrollAnchor();
+    // So does its admin status: drop it and any request still in flight.
+    clearAdminStatus();
     // Explicit logout only: suspend ingestion and clear this account's
     // persisted key and memory before the logout POST runs, so nothing async
     // can race a response into a store that is no longer this identity's. An
@@ -1141,15 +1139,16 @@ async function renderRoute(path: string): Promise<void> {
   //
   // Re-fetch admin status on every admin-route navigation so that role
   // grants or revocations made mid-session take effect immediately rather
-  // than being cached for the entire SPA lifetime. The init-time fetch
-  // remains for nav.ts's initial render; this call replaces the cache so
-  // the route guard always uses a fresh result.
+  // than being cached for the entire SPA lifetime. The fresh result also
+  // replaces the shared value (client/admin-status.ts); a nav already on
+  // screen read that value once for this user, so only later nav renders
+  // see it.
   //
   // Per-route permission checks: super-admin-only routes (Diagnostics,
   // Maintenance) require isSuperAdmin; other admin routes require at least
   // one matching permission from ROUTE_PERMISSION_MAP.
   if (ADMIN_ROUTES.has(tag)) {
-    cachedAdminStatus = await fetchAdminStatus();
+    cachedAdminStatus = await loadAdminStatus(currentUser?.id, { fresh: true });
 
     if (SUPERADMIN_ROUTES.has(tag)) {
       if (!cachedAdminStatus?.isSuperAdmin) {

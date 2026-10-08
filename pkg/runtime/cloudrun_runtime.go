@@ -266,11 +266,36 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 	getReq := &runpb.GetInstanceRequest{
 		Name: fmt.Sprintf("%s/instances/%s", parent, instanceID),
 	}
-	_, err = c.GetInstance(ctx, getReq, defaultCallOpts...)
+	existing, err := c.GetInstance(ctx, getReq, defaultCallOpts...)
 	if err == nil {
-		// Instance exists. Try to start it if it's stopped.
+		if existing == nil {
+			// Not an unlabelled legacy instance with no etag: refuse
+			// rather than reuse it unchecked.
+			return "", fmt.Errorf("failed to get instance %s: GetInstance returned no instance", instanceID)
+		}
+		// Instance exists. The instance ID is deterministic per agent, so
+		// it may belong to another run (Start's pre-clean normally deletes
+		// it first; this is reached after a failed listing or a race). The
+		// Instances API (cloud.google.com/go/run v1.21.0) has no
+		// UpdateInstance, so an instance's labels change only by recreating
+		// it, and reusing another run's instance would serve this run under
+		// that run's label: refuse it with ErrRunConflict (ptone/scion#2550).
+		// An instance of this run is started. So is a legacy instance with
+		// no run label, left unstamped: it keeps reporting no run ID, and
+		// the legacy rule lets this run's stop or delete still target it.
+		// Either start carries the read's etag, so an instance replaced
+		// after the read is not started.
+		runKey := sanitizeGCPLabelKey(api.LabelRunID)
+		if want := sanitizeGCPLabelValue(cfg.Labels[api.LabelRunID]); want != "" {
+			if run := existing.GetLabels()[runKey]; run != "" && run != want {
+				runtimeLog.Info("Cloud Run instance of another run holds the agent's instance ID; not reusing it",
+					"instance", instanceID, "run_id", want, "instance_run_id", run)
+				return "", fmt.Errorf("instance %s belongs to run %q, not %q: %w", instanceID, run, want, ErrRunConflict)
+			}
+		}
 		startReq := &runpb.StartInstanceRequest{
 			Name: getReq.Name,
+			Etag: existing.GetEtag(),
 		}
 		op, err := c.StartInstance(ctx, startReq, defaultCallOpts...)
 		if err != nil {
@@ -701,42 +726,49 @@ func mkdirNFSAgentDir(dir string, uid, gid int) error {
 	return nil
 }
 
-// Stop stops the Cloud Run instance ref.ID.
-// TODO(ptone/scion#2550 P2/P4): enforce ref.RunID. The instance ID is
-// deterministic per agent name, so this is still name-scoped today.
+// Stop stops the Cloud Run instance ref.ID. The instance ID is
+// deterministic per agent, so another run can hold it; when ref.RunID is set
+// the stop is run-checked (see runScopedInstanceOp) and an instance of
+// another run is left running with ErrRunMismatch (ptone/scion#2550).
 func (r *CloudRunRuntime) Stop(ctx context.Context, ref RunRef) error {
-	id := ref.ID
-	if err := r.resolveConfig(ctx); err != nil {
-		return fmt.Errorf("failed to resolve Cloud Run config: %w", err)
-	}
-	c, err := r.client(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to create client: %w", err)
-	}
-	defer func() { _ = c.Close() }()
-
-	name := r.instanceResourceName(id)
-	req := &runpb.StopInstanceRequest{
-		Name: name,
-	}
-
-	op, err := c.StopInstance(ctx, req, defaultCallOpts...)
-	if err != nil {
-		return fmt.Errorf("failed to stop instance: %w", err)
-	}
-
-	if _, err := op.Wait(ctx); err != nil {
-		return fmt.Errorf("wait for stop operation failed: %w", err)
-	}
-
-	return nil
+	return r.instanceOp(ctx, ref, "stop", func(c cloudrun.InstancesAPI, name, etag string) (cloudrun.InstanceOperation, error) {
+		return c.StopInstance(ctx, &runpb.StopInstanceRequest{Name: name, Etag: etag}, defaultCallOpts...)
+	})
 }
 
-// Delete removes the Cloud Run instance ref.ID.
-// P2/P4: enforce ref.RunID (ptone/scion#2550). The instance ID is
-// deterministic per agent name, so this is still name-scoped today.
+// Delete removes the Cloud Run instance ref.ID. As for Stop, when ref.RunID
+// is set the delete is run-checked and an instance of another run is left
+// untouched with ErrRunMismatch.
 func (r *CloudRunRuntime) Delete(ctx context.Context, ref RunRef) error {
-	id := ref.ID
+	return r.instanceOp(ctx, ref, "delete", func(c cloudrun.InstancesAPI, name, etag string) (cloudrun.InstanceOperation, error) {
+		return c.DeleteInstance(ctx, &runpb.DeleteInstanceRequest{Name: name, Etag: etag}, defaultCallOpts...)
+	})
+}
+
+// cloudRunRunCheckAttempts bounds how often a run-checked stop or delete
+// re-reads an instance whose etag changed between the read and the call.
+const cloudRunRunCheckAttempts = 3
+
+// instanceCall issues a stop or delete for the instance resource name,
+// with etag as its precondition ("" for none), and returns the operation.
+type instanceCall func(c cloudrun.InstancesAPI, name, etag string) (cloudrun.InstanceOperation, error)
+
+// instanceOp runs a stop or delete (verb) of the instance ref.ID and waits
+// for it.
+//
+// Without ref.RunID the call is made by name with no precondition, as
+// before run IDs existed. With it, the call is run-scoped:
+//   - the instance is read; one labelled with another run is left untouched
+//     and ErrRunMismatch is returned. An instance of ref.RunID, or a legacy
+//     one with no run label (the rule k8s and the broker apply), passes;
+//   - the call carries the read's etag, so an instance replaced (or changed)
+//     after the read is refused by the API (ABORTED or FAILED_PRECONDITION).
+//     The instance is then read and checked again, at most
+//     cloudRunRunCheckAttempts times in all. If the re-read shows the etag
+//     the call carried, nothing changed and that refusal is returned;
+//   - an instance that is gone at the read gives the same NotFound error the
+//     call itself gives.
+func (r *CloudRunRuntime) instanceOp(ctx context.Context, ref RunRef, verb string, call instanceCall) error {
 	if err := r.resolveConfig(ctx); err != nil {
 		return fmt.Errorf("failed to resolve Cloud Run config: %w", err)
 	}
@@ -746,21 +778,63 @@ func (r *CloudRunRuntime) Delete(ctx context.Context, ref RunRef) error {
 	}
 	defer func() { _ = c.Close() }()
 
-	name := r.instanceResourceName(id)
-	req := &runpb.DeleteInstanceRequest{
-		Name: name,
+	name := r.instanceResourceName(ref.ID)
+	if ref.RunID == "" {
+		op, err := call(c, name, "")
+		if err != nil {
+			return fmt.Errorf("failed to %s instance: %w", verb, err)
+		}
+		if _, err := op.Wait(ctx); err != nil {
+			return fmt.Errorf("wait for %s operation failed: %w", verb, err)
+		}
+		return nil
 	}
 
-	op, err := c.DeleteInstance(ctx, req, defaultCallOpts...)
-	if err != nil {
-		return fmt.Errorf("failed to delete instance: %w", err)
+	want := sanitizeGCPLabelValue(ref.RunID)
+	runKey := sanitizeGCPLabelKey(api.LabelRunID)
+	var lastErr error
+	var sentEtag string
+	for attempt := 0; attempt < cloudRunRunCheckAttempts; attempt++ {
+		inst, err := c.GetInstance(ctx, &runpb.GetInstanceRequest{Name: name}, defaultCallOpts...)
+		if err != nil {
+			return fmt.Errorf("failed to %s instance: %w", verb, err)
+		}
+		if inst == nil {
+			// Not an unlabelled legacy instance with no etag: refuse
+			// rather than call without the run check and precondition.
+			return fmt.Errorf("failed to %s instance: GetInstance returned no instance", verb)
+		}
+		if lastErr != nil && inst.GetEtag() == sentEtag {
+			// The refusal was not a change: the instance still has the
+			// etag the call carried, so the API refused it for another
+			// reason (for example a state precondition). Report that
+			// refusal rather than retrying it.
+			return fmt.Errorf("failed to %s instance: %w", verb, lastErr)
+		}
+		if run := inst.GetLabels()[runKey]; run != "" && run != want {
+			runtimeLog.Info("Left a Cloud Run instance of another run untouched",
+				"instance", name, "verb", verb, "run_id", ref.RunID, "instance_run_id", run)
+			return fmt.Errorf("instance %s belongs to run %q, not %q: %w", cloudRunShortInstanceID(name), run, want, ErrRunMismatch)
+		}
+		sentEtag = inst.GetEtag()
+		op, err := call(c, name, sentEtag)
+		if err != nil {
+			if code := status.Code(err); code == codes.Aborted || code == codes.FailedPrecondition {
+				// The instance may have changed after the read: re-read
+				// and re-check.
+				runtimeLog.Info("Cloud Run refused a run-checked call; re-checking",
+					"instance", name, "verb", verb, "run_id", ref.RunID, "attempt", attempt+1, "error", err)
+				lastErr = err
+				continue
+			}
+			return fmt.Errorf("failed to %s instance: %w", verb, err)
+		}
+		if _, err := op.Wait(ctx); err != nil {
+			return fmt.Errorf("wait for %s operation failed: %w", verb, err)
+		}
+		return nil
 	}
-
-	if _, err := op.Wait(ctx); err != nil {
-		return fmt.Errorf("wait for delete operation failed: %w", err)
-	}
-
-	return nil
+	return fmt.Errorf("failed to %s instance: refused in each of %d run-checked attempts: %w", verb, cloudRunRunCheckAttempts, lastErr)
 }
 
 func (r *CloudRunRuntime) List(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {

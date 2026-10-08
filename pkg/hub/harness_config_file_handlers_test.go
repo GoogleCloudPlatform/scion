@@ -46,11 +46,10 @@ func testHarnessConfigFileServer(t *testing.T) (*Server, store.Store, *contentMo
 
 	cfg := DefaultServerConfig()
 	cfg.DevAuthToken = testDevToken
-	srv, err := New(cfg, s)
+	srv, err := newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
-	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 
 	stor := newContentMockStorage("test-bucket")
 	srv.SetStorage(stor)

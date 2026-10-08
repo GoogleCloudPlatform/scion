@@ -20,9 +20,11 @@ package hubtracing
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 
 	texporter "github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/trace"
+	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/propagation"
@@ -37,6 +39,7 @@ type Option func(*options)
 type options struct {
 	hubID       string
 	hubName     string
+	instanceID  string
 	serviceName string
 }
 
@@ -48,6 +51,15 @@ func WithHubID(id string) Option {
 // WithHubName sets the scion.hub.name resource attribute.
 func WithHubName(name string) Option {
 	return func(o *options) { o.hubName = name }
+}
+
+// WithInstanceID sets the service.instance.id resource attribute to the hub
+// replica's per-process instance ID, the same ID the hub metrics use
+// (hubmetrics.WithInstanceID), so spans and metrics from one replica share
+// one identity. If the ID is empty (or the option is omitted),
+// NewTracerProvider generates a random one, so replicas never share one.
+func WithInstanceID(id string) Option {
+	return func(o *options) { o.instanceID = id }
 }
 
 // WithServiceName overrides the default service name ("scion-server").
@@ -79,24 +91,9 @@ func NewTracerProvider(ctx context.Context, gcpProjectID string, opts ...Option)
 		return nil, fmt.Errorf("creating GCP trace exporter: %w", err)
 	}
 
-	resAttrs := []attribute.KeyValue{
-		semconv.ServiceName(o.serviceName),
-	}
-	if o.hubID != "" {
-		resAttrs = append(resAttrs, attribute.String("scion.hub.id", o.hubID))
-	}
-	if envHubID := os.Getenv("SCION_HUB_ID"); envHubID != "" && o.hubID == "" {
-		resAttrs = append(resAttrs, attribute.String("scion.hub.id", envHubID))
-	}
-	if o.hubName != "" {
-		resAttrs = append(resAttrs, attribute.String("scion.hub.name", o.hubName))
-	}
-
-	res, err := resource.New(ctx,
-		resource.WithAttributes(resAttrs...),
-	)
+	res, err := newResource(ctx, o)
 	if err != nil {
-		return nil, fmt.Errorf("creating OTel resource: %w", err)
+		return nil, err
 	}
 
 	tp := trace.NewTracerProvider(
@@ -112,4 +109,48 @@ func NewTracerProvider(ctx context.Context, gcpProjectID string, opts ...Option)
 	otel.SetTextMapPropagator(propagation.TraceContext{})
 
 	return tp, nil
+}
+
+// NewResource builds the OTel resource NewTracerProvider attaches to every
+// hub span from opts, without creating an exporter. Callers use it to check
+// the identity a set of options produces.
+func NewResource(ctx context.Context, opts ...Option) (*resource.Resource, error) {
+	o := &options{serviceName: "scion-server"}
+	for _, fn := range opts {
+		fn(o)
+	}
+	return newResource(ctx, o)
+}
+
+// newResource builds the OTel resource attached to every hub span.
+func newResource(ctx context.Context, o *options) (*resource.Resource, error) {
+	resAttrs := []attribute.KeyValue{
+		semconv.ServiceName(o.serviceName),
+	}
+	if o.hubID != "" {
+		resAttrs = append(resAttrs, attribute.String("scion.hub.id", o.hubID))
+	}
+	if envHubID := os.Getenv("SCION_HUB_ID"); envHubID != "" && o.hubID == "" {
+		resAttrs = append(resAttrs, attribute.String("scion.hub.id", envHubID))
+	}
+	if o.hubName != "" {
+		resAttrs = append(resAttrs, attribute.String("scion.hub.name", o.hubName))
+	}
+	instanceID := o.instanceID
+	if instanceID == "" {
+		// Without service.instance.id, spans from different replicas can't
+		// be told apart, so never export without one.
+		instanceID = uuid.NewString()
+		slog.WarnContext(ctx, "hub tracing: no hub instance ID supplied; using a generated one",
+			"service_instance_id", instanceID)
+	}
+	resAttrs = append(resAttrs, semconv.ServiceInstanceID(instanceID))
+
+	res, err := resource.New(ctx,
+		resource.WithAttributes(resAttrs...),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("creating OTel resource: %w", err)
+	}
+	return res, nil
 }
