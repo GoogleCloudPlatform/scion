@@ -492,7 +492,7 @@ func TestScrubSecrets_MultiLineStagedFileMasksEachLine(t *testing.T) {
 	if got := scrubSecrets("found placeholder-line-two-value in config", m); got != "found [REDACTED] in config" {
 		t.Errorf("single line: %q", got)
 	}
-	whole := "placeholder-line-one-value\n  placeholder-line-two-value "
+	whole := "placeholder-line-one-value\n  placeholder-line-two-value"
 	if got := scrubSecrets("dump: "+whole+" end", m); got != "dump: [REDACTED] end" {
 		t.Errorf("whole value: %q", got)
 	}
@@ -524,5 +524,50 @@ func TestScrubSecrets_ShortLineOfMultiLineFileOmitsOutput(t *testing.T) {
 
 	if got := scrubSecrets("password plv-2y rejected", m); got != provisionerOutputOmitted {
 		t.Errorf("short line present: %q", got)
+	}
+}
+
+// Punctuation-only lines of a pretty-printed JSON staged file are skipped:
+// a brace in the output does not omit it, and the lines holding the secret
+// are still masked.
+func TestScrubSecrets_JSONStagedFileSkipsPunctuationLines(t *testing.T) {
+	t.Setenv("SCION_HARNESS_SECRETS_DIR", "")
+	bundle := filepath.Join(t.TempDir(), ".scion", "harness")
+	writeTestFile(t, filepath.Join(bundle, "secrets", "AUTH"),
+		"{\n  \"tokens\": {\n    \"access_token\": \"placeholder-token-value-1\"\n  },\n  \"items\": [\n    \"placeholder-item-value-2\"\n  ]\n}\n")
+	m := &containerProvisionManifest{HarnessBundleDir: bundle}
+
+	in := `parsed {"mode": 1} and [] then saw "access_token": "placeholder-token-value-1" and "placeholder-item-value-2"`
+	want := `parsed {"mode": 1} and [] then saw [REDACTED] and [REDACTED]`
+	if got := scrubSecrets(in, m); got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// When one staged value contains another, the longer one is masked whole
+// rather than leaving the rest of it behind.
+func TestScrubSecrets_LongerStagedValueMaskedFirst(t *testing.T) {
+	t.Setenv("SCION_HARNESS_SECRETS_DIR", "")
+	bundle := filepath.Join(t.TempDir(), ".scion", "harness")
+	writeTestFile(t, filepath.Join(bundle, "secrets", "A"), "placeholder-value-1")
+	writeTestFile(t, filepath.Join(bundle, "secrets", "B"), "placeholder-value-1-extended")
+	m := &containerProvisionManifest{HarnessBundleDir: bundle}
+
+	if got := scrubSecrets("saw placeholder-value-1-extended here", m); got != "saw [REDACTED] here" {
+		t.Errorf("got %q", got)
+	}
+}
+
+// Staged values are trimmed like lines; a whitespace-only value is ignored
+// rather than omitting any output that contains a space.
+func TestScrubSecrets_StagedValuesAreTrimmed(t *testing.T) {
+	t.Setenv("SCION_HARNESS_SECRETS_DIR", "")
+	bundle := filepath.Join(t.TempDir(), ".scion", "harness")
+	writeTestFile(t, filepath.Join(bundle, "secrets", "A"), "  placeholder-value-1 \n")
+	writeTestFile(t, filepath.Join(bundle, "secrets", "B"), "   \n")
+	m := &containerProvisionManifest{HarnessBundleDir: bundle}
+
+	if got := scrubSecrets("saw placeholder-value-1.", m); got != "saw [REDACTED]." {
+		t.Errorf("got %q", got)
 	}
 }

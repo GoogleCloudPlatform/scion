@@ -7,6 +7,7 @@ package commands
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -155,9 +156,10 @@ func TestRunHarnessProvision_EarlyFailureRecorded(t *testing.T) {
 	}
 }
 
-// Both scrub passes (the provisioner output and the recorded error) apply
-// the line and short-value rules: neither a single line of a multi-line
-// staged file nor a short staged value reaches the status file.
+// The provisioner output scrub applies the line and short-value rules:
+// neither a single line of a multi-line staged file nor a short staged value
+// reaches the status file. TestProvisionStatusRecorder_FinishScrubs covers
+// the second pass over the recorded error.
 func TestRunHarnessProvision_FailureStatusMasksLinesAndShortValues(t *testing.T) {
 	const line = "placeholder-line-two-value"
 	const short = "plv-1x"
@@ -186,5 +188,26 @@ func TestRunHarnessProvision_FailureStatusMasksLinesAndShortValues(t *testing.T)
 				t.Errorf("status error = %q, want the failure and %q", msg, tc.want)
 			}
 		})
+	}
+}
+
+// finish scrubs the recorded error itself, with the same rules, whatever
+// produced it.
+func TestProvisionStatusRecorder_FinishScrubs(t *testing.T) {
+	t.Setenv("SCION_HARNESS_SECRETS_DIR", "")
+	dir := t.TempDir()
+	bundle := filepath.Join(dir, ".scion", "harness")
+	writeTestFile(t, filepath.Join(bundle, "secrets", "FILE_SECRET"), "placeholder-line-one-value\nplaceholder-line-two-value\n")
+	writeTestFile(t, filepath.Join(bundle, "secrets", "SHORT_SECRET"), "plv-1x")
+	statusPath := filepath.Join(dir, "status.json")
+	rec := &provisionStatusRecorder{path: statusPath, manifest: &containerProvisionManifest{HarnessBundleDir: bundle}}
+
+	rec.finish(errors.New("setup failed: placeholder-line-two-value"))
+	if _, msg := readStatus(t, statusPath); msg != "setup failed: [REDACTED]" {
+		t.Errorf("line: status error = %q", msg)
+	}
+	rec.finish(errors.New("setup failed: plv-1x"))
+	if _, msg := readStatus(t, statusPath); msg != provisionerOutputOmitted {
+		t.Errorf("short: status error = %q", msg)
 	}
 }

@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/spf13/cobra"
 
@@ -457,9 +458,11 @@ const provisionerOutputOmitted = "provisioner output omitted: it contains a stag
 // values mentioned in inputs/outputs/auth_candidates files and the contents of
 // staged secret files (written by ContainerScriptHarness.ApplyAuthSettings),
 // then removes their occurrences. A multi-line staged file is masked as a
-// whole and line by line. If a staged value or line shorter than minMaskLen
-// occurs in s, the whole of s is replaced by provisionerOutputOmitted. This is
-// best-effort — scripts should not echo credentials.
+// whole and line by line (see stagedMaskValues). If a staged value or line
+// shorter than minMaskLen occurs in s, the whole of s is replaced by
+// provisionerOutputOmitted. The provisioner output logged to agent.log goes
+// through the same scrub. This is best-effort — scripts should not echo
+// credentials.
 func scrubSecrets(s string, m *containerProvisionManifest) string {
 	// auth-candidates.json holds *names* (and now file paths) but not the raw
 	// secret values; the actual values live as 0600 files under
@@ -486,17 +489,24 @@ func scrubSecrets(s string, m *containerProvisionManifest) string {
 }
 
 // stagedMaskValues returns the values to mask for the staged secret values
-// vals: each value, plus each non-empty trimmed line of a multi-line value,
-// longest first so a whole value is masked before its lines.
+// vals: each trimmed, non-empty value, plus each trimmed line of a
+// multi-line value that has a letter or digit, longest first so a whole
+// value is masked before its lines. Lines of punctuation only (the braces
+// and brackets of a pretty-printed JSON file) carry no secret and are
+// skipped, so they don't force the output to be omitted.
 func stagedMaskValues(vals []string) []string {
 	var out []string
 	for _, val := range vals {
+		val = strings.TrimSpace(val)
+		if val == "" {
+			continue
+		}
 		out = append(out, val)
 		if !strings.ContainsAny(val, "\r\n") {
 			continue
 		}
 		for _, line := range strings.Split(val, "\n") {
-			if line = strings.TrimSpace(line); line != "" {
+			if line = strings.TrimSpace(line); hasLetterOrDigit(line) {
 				out = append(out, line)
 			}
 		}
@@ -547,6 +557,11 @@ func readStagedSecretDir(dir string) []string {
 		}
 	}
 	return out
+}
+
+// hasLetterOrDigit reports whether s contains a Unicode letter or digit.
+func hasLetterOrDigit(s string) bool {
+	return strings.IndexFunc(s, func(r rune) bool { return unicode.IsLetter(r) || unicode.IsDigit(r) }) >= 0
 }
 
 // expandHomePrefix resolves a leading "$HOME/" prefix to the current user's
