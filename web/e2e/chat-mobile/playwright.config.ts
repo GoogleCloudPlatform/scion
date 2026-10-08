@@ -27,6 +27,8 @@ import { defineConfig, devices, type PlaywrightTestConfig } from '@playwright/te
  * WebKit may not be installed in every sandbox.
  */
 
+const CI = !!process.env.CI;
+
 const CHROMIUM_LAUNCH_OPTIONS = {
   ...(process.env.CHROMIUM_EXECUTABLE ? { executablePath: process.env.CHROMIUM_EXECUTABLE } : {}),
   args: ['--no-sandbox', '--disable-setuid-sandbox'],
@@ -84,10 +86,28 @@ export default defineConfig({
   // click-driven test.
   timeout: 60_000,
   workers: 1,
-  forbidOnly: !!process.env.CI,
+  forbidOnly: CI,
+  // CI runners are shared and noisier than a dev machine: one retry absorbs
+  // a timing blip, and the run still reports the test as flaky.
+  retries: CI ? 1 : 0,
+  // Stop a slow or hung CI run inside Playwright, below the CI job timeout,
+  // so the HTML report and test results are still written and uploaded.
+  globalTimeout: CI ? 20 * 60_000 : 0,
   outputDir: '../../test-results/chat-mobile',
+  // In CI: inline annotations plus an HTML report, uploaded as an artifact
+  // whenever the suite ran (so flaky-test retry traces are kept too).
+  reporter: CI
+    ? [
+        ['github'],
+        ['list'],
+        ['html', { outputFolder: '../../playwright-report/chat-mobile', open: 'never' }],
+      ]
+    : 'list',
   use: {
     baseURL: 'http://127.0.0.1:4536',
+    // A trace of the retried attempt, so a CI failure is debuggable from the
+    // uploaded report.
+    trace: CI ? 'on-first-retry' : 'off',
   },
   projects,
   webServer: {
@@ -95,5 +115,8 @@ export default defineConfig({
     cwd: fileURLToPath(new URL('../../', import.meta.url)),
     url: 'http://127.0.0.1:4536/',
     reuseExistingServer: false,
+    // A cold Vite start (dependency pre-bundling) on a CI runner can take
+    // longer than Playwright's 60s default.
+    timeout: 120_000,
   },
 });

@@ -341,7 +341,8 @@ type mockScheduledEventStore struct {
 	audits          []*store.MutationAuditRecord
 	schedules       map[string]*store.Schedule
 	notifications   []*store.Notification
-	getUserErr      error // when set, GetUser fails with it
+	getUserErr      error  // when set, GetUser fails with it
+	getUserErrID    string // when set, getUserErr applies to this ID only
 }
 
 func (m *mockScheduledEventStore) GetSchedule(_ context.Context, id string) (*store.Schedule, error) {
@@ -516,7 +517,7 @@ func (m *mockScheduledEventStore) GetAgent(_ context.Context, id string) (*store
 func (m *mockScheduledEventStore) GetUser(_ context.Context, id string) (*store.User, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.getUserErr != nil {
+	if m.getUserErr != nil && (m.getUserErrID == "" || m.getUserErrID == id) {
 		return nil, m.getUserErr
 	}
 	if u, ok := m.users[id]; ok {
@@ -1711,7 +1712,12 @@ func TestDispatchAgentEventHandler_ErroredRowAgentCreatorFallback(t *testing.T) 
 		t.Fatalf("published = %+v", evts)
 	}
 
+	// The creator is owned by another agent in the project, so it has no
+	// owning user row; that agent's owner keeps it in good standing (an
+	// agent with no resolvable owner is refused at fire time).
 	g := newBlockedFireFixture(t, "")
+	g.ms.agents["parent-agent"] = &store.Agent{ID: "parent-agent", ProjectID: "project-1", OwnerID: "creator-owner"}
+	g.ms.agents["creator-agent"].OwnerID = "parent-agent"
 	if err := g.fire(); err == nil || !strings.Contains(err.Error(), "delete the agent to resume this schedule") {
 		t.Fatalf("error = %v", err)
 	}
@@ -1725,6 +1731,15 @@ func TestDispatchAgentEventHandler_ErroredRowAgentCreatorFallback(t *testing.T) 
 	// No ancestry: the agent's owner, when it is a user, is the recipient.
 	h := newBlockedFireFixture(t, "")
 	h.ms.agents["creator-agent"].OwnerID = "user-owner"
+	// user-owner is an active project member, so the creator it owns is in
+	// good standing.
+	h.ms.users["user-owner"].Role = store.UserRoleMember
+	h.ms.users["user-owner"].Status = store.UserStatusActive
+	h.ms.roleBindings = append(h.ms.roleBindings, &store.RoleBinding{
+		ID: "rb-user-owner-member", RoleDefinitionID: "rd-creator-member",
+		PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: "user-owner",
+		ScopeType: store.RoleScopeProject, ScopeID: "project-1",
+	})
 	if err := h.fire(); err == nil || !strings.Contains(err.Error(), "phase error") {
 		t.Fatalf("error = %v", err)
 	}
@@ -1744,7 +1759,10 @@ func TestDispatchAgentEventHandler_ErroredRowRecipientLookupErrorLogged(t *testi
 	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewJSONHandler(logs, nil)))
 	t.Cleanup(func() { slog.SetDefault(prev) })
+	// Only the recipient lookup fails: the authoring agent's standing check
+	// reads its owner (creator-owner), not user-owner.
 	f.ms.getUserErr = errors.New("store unavailable")
+	f.ms.getUserErrID = "user-owner"
 	if err := f.fire(); err == nil || !strings.Contains(err.Error(), "delete the agent to resume this schedule") {
 		t.Fatalf("error = %v", err)
 	}
