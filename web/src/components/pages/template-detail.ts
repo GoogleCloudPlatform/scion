@@ -26,7 +26,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 
 import type { PageData, Template } from '../../shared/types.js';
 import { can } from '../../shared/types.js';
-import { displaySourceUrl, isTemplateSourceRefreshable } from '../../shared/source-url.js';
+import { describeSourceUrl, isTemplateSourceRefreshable } from '../../shared/source-url.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import '../shared/file-browser.js';
@@ -432,14 +432,14 @@ export class ScionPageTemplateDetail extends LitElement {
   }
 
   private renderSourceUrl(sourceUrl: string | undefined): unknown {
-    if (!sourceUrl) return '';
-    const shown = displaySourceUrl(sourceUrl);
-    if (!shown) {
-      // Not an http(s) source (e.g. a built-in template): show it as text.
-      return html`<span class="source-url">Source: ${sourceUrl}</span>`;
+    const shown = describeSourceUrl(sourceUrl);
+    if (!shown) return '';
+    if (!shown.href) {
+      return html`<span class="source-url">Source: ${shown.text}</span>`;
     }
     return html`<span class="source-url"
-      >Source: <a href=${shown} target="_blank" rel="noopener noreferrer">${shown}</a></span
+      >Source:
+      <a href=${shown.href} target="_blank" rel="noopener noreferrer">${shown.text}</a></span
     >`;
   }
 

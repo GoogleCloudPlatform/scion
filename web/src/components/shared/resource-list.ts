@@ -39,6 +39,33 @@ import { isTemplateSourceRefreshable } from '../../shared/source-url.js';
 
 export type ResourceKind = 'template' | 'harness-config';
 
+/** How many refreshes "Refresh All from Source" runs at the same time. */
+export const REFRESH_ALL_CONCURRENCY = 4;
+
+/**
+ * Runs fn over items with at most limit calls in flight, and returns the
+ * results in item order.
+ */
+export async function runWithConcurrency<T, R>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T) => Promise<R>
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (next < items.length) {
+      const i = next++;
+      results[i] = await fn(items[i]);
+    }
+  };
+  const workers = Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, () =>
+    worker()
+  );
+  await Promise.all(workers);
+  return results;
+}
+
 interface ResourceItem {
   id: string;
   name: string;
@@ -604,36 +631,34 @@ export class ScionResourceList extends LitElement {
     }
     this.requestUpdate();
 
-    // Fire all in parallel
-    const results = await Promise.allSettled(
-      refreshable.map(async (item) => {
-        this._itemRefreshStatus.set(item.id, 'running');
-        this.requestUpdate();
-        try {
-          const response = await apiFetch(`/api/v1/${this.apiResource}/${item.id}/reimport`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({}),
-          });
-          if (!response.ok) {
-            const errMsg = await extractApiError(response, `HTTP ${response.status}`);
-            throw new Error(errMsg);
-          }
-          this._itemRefreshStatus.set(item.id, 'success');
-          this.requestUpdate();
-          return { id: item.id, name: item.name, success: true };
-        } catch (err) {
-          this._itemRefreshStatus.set(item.id, 'error');
-          this.requestUpdate();
-          return { id: item.id, name: item.name, success: false, error: err };
+    // Run a few at a time: each refresh downloads its whole source on the hub.
+    const results = await runWithConcurrency(refreshable, REFRESH_ALL_CONCURRENCY, async (item) => {
+      this._itemRefreshStatus.set(item.id, 'running');
+      this.requestUpdate();
+      try {
+        const response = await apiFetch(`/api/v1/${this.apiResource}/${item.id}/reimport`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({}),
+        });
+        if (!response.ok) {
+          const errMsg = await extractApiError(response, `HTTP ${response.status}`);
+          throw new Error(errMsg);
         }
-      })
-    );
+        this._itemRefreshStatus.set(item.id, 'success');
+        this.requestUpdate();
+        return { id: item.id, name: item.name, success: true };
+      } catch (err) {
+        this._itemRefreshStatus.set(item.id, 'error');
+        this.requestUpdate();
+        return { id: item.id, name: item.name, success: false, error: err };
+      }
+    });
 
     this._refreshAllRunning = false;
 
     // Show summary toast
-    const succeeded = results.filter((r) => r.status === 'fulfilled' && r.value.success).length;
+    const succeeded = results.filter((r) => r.success).length;
     const failed = refreshable.length - succeeded;
     const noun = this.kindLabel;
     if (failed === 0) {

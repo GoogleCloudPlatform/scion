@@ -40,20 +40,39 @@ export function isTemplateSourceRefreshable(sourceUrl: string | undefined | null
   }
 }
 
+/** How a stored source is shown: its text, and a link target when it is a web URL. */
+export interface SourceDisplay {
+  text: string;
+  href: string | null;
+}
+
+/** Label shown for sources that are not web or built-in URLs. */
+export const NON_WEB_SOURCE_LABEL = 'non-web source';
+
 /**
- * Returns a source URL for display and linking: the git+ prefix and any
- * username or password are removed. Returns null for anything that is not
- * an http(s) URL, so it is never used as a link target.
+ * Describes a stored source for display. The display never shows credentials
+ * embedded in a source string: http(s) URLs are shown and linked without any
+ * username or password (and without a git+ prefix), builtin:// URLs are shown
+ * as text without any username or password, and every other source is shown
+ * as a fixed label rather than its raw text. Returns null for an empty source.
  */
-export function displaySourceUrl(sourceUrl: string | undefined | null): string | null {
-  if (!sourceUrl) return null;
+export function describeSourceUrl(sourceUrl: string | undefined | null): SourceDisplay | null {
+  const raw = sourceUrl?.trim();
+  if (!raw) return null;
+  let u: URL;
   try {
-    const u = new URL(sourceUrl.trim().replace(/^git\+/, ''));
-    if (u.protocol !== 'https:' && u.protocol !== 'http:') return null;
-    u.username = '';
-    u.password = '';
-    return u.toString();
+    u = new URL(raw.replace(/^git\+/, ''));
   } catch {
-    return null;
+    return { text: NON_WEB_SOURCE_LABEL, href: null };
   }
+  if (!u.host) return { text: NON_WEB_SOURCE_LABEL, href: null };
+  u.username = '';
+  u.password = '';
+  if (u.protocol === 'https:' || u.protocol === 'http:') {
+    return { text: u.toString(), href: u.toString() };
+  }
+  if (u.protocol === 'builtin:') {
+    return { text: u.toString(), href: null };
+  }
+  return { text: NON_WEB_SOURCE_LABEL, href: null };
 }

@@ -15,7 +15,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { displaySourceUrl, isTemplateSourceRefreshable } from './source-url.js';
+import { describeSourceUrl, isTemplateSourceRefreshable } from './source-url.js';
 
 describe('isTemplateSourceRefreshable', () => {
   it.each([
@@ -35,15 +35,40 @@ describe('isTemplateSourceRefreshable', () => {
   });
 });
 
-describe('displaySourceUrl', () => {
-  it('drops credentials and the git+ prefix', () => {
-    expect(displaySourceUrl('git+https://user:secret@github.com/acme/repo')).toBe(
-      'https://github.com/acme/repo'
-    );
+describe('describeSourceUrl', () => {
+  it('links http(s) sources without credentials or the git+ prefix', () => {
+    expect(describeSourceUrl('git+https://user:secret@github.com/acme/repo')).toEqual({
+      text: 'https://github.com/acme/repo',
+      href: 'https://github.com/acme/repo',
+    });
   });
-  it('returns null for non-http sources', () => {
-    expect(displaySourceUrl('builtin://scion/1.0/template/default')).toBeNull();
-    expect(displaySourceUrl('javascript:alert(1)')).toBeNull();
-    expect(displaySourceUrl('')).toBeNull();
+
+  it('shows built-in sources as text', () => {
+    expect(describeSourceUrl('builtin://scion/1.0/template/default')).toEqual({
+      text: 'builtin://scion/1.0/template/default',
+      href: null,
+    });
+  });
+
+  it('returns null for an empty source', () => {
+    expect(describeSourceUrl('')).toBeNull();
+    expect(describeSourceUrl(undefined)).toBeNull();
+  });
+
+  // The display never shows credentials embedded in a source string.
+  it.each([
+    ':s3,access_key_id=AKIA,secret_access_key=secret:bucket/path',
+    ':gcs,service_account_credentials=secret:bucket',
+    's3://key:secret@bucket/path',
+    'builtin://user:secret@scion/1.0/template/default',
+    'mailto:secret@example.com',
+    'javascript:alert("secret")',
+    'not a url secret',
+  ])('never shows credentials embedded in %s', (raw) => {
+    const shown = describeSourceUrl(raw);
+    expect(shown).not.toBeNull();
+    expect(shown!.text).not.toContain('secret');
+    expect(shown!.href ?? '').not.toContain('secret');
+    if (shown!.href) expect(shown!.href).toMatch(/^https?:/);
   });
 });

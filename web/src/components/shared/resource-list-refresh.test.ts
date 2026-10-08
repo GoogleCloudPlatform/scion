@@ -16,6 +16,7 @@
 
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import type { ScionResourceList } from './resource-list.js';
+import { REFRESH_ALL_CONCURRENCY, runWithConcurrency } from './resource-list.js';
 
 vi.mock('../../utils/toast.js', () => ({ showToast: vi.fn() }));
 
@@ -106,6 +107,63 @@ describe('resource list: Refresh All from Source', () => {
     expect(posts).toEqual([expect.stringContaining('/api/v1/templates/a/reimport')]);
     const { showToast } = await import('../../utils/toast.js');
     expect(showToast).toHaveBeenCalledWith('Refreshed 1 template successfully', 'success');
+  });
+
+  it('runs at most a few refreshes at the same time', async () => {
+    const items = Array.from({ length: 9 }, (_, i) => ({
+      id: `t${i}`,
+      name: `t${i}`,
+      sourceUrl: GH_SOURCE,
+    }));
+    let inFlight = 0;
+    let maxInFlight = 0;
+    let posts = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((_url: string, init?: RequestInit) => {
+        if (init?.method !== 'POST') return Promise.resolve(jsonResponse({ templates: items }));
+        posts++;
+        inFlight++;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        return new Promise<Response>((resolve) =>
+          setTimeout(() => {
+            inFlight--;
+            resolve(jsonResponse({ count: 1 }));
+          }, 5)
+        );
+      })
+    );
+    const el = document.createElement('scion-resource-list') as ScionResourceList;
+    el.kind = 'template';
+    el.scope = 'global';
+    document.body.appendChild(el);
+    element = el;
+    await flush(el);
+
+    refreshAllButton(el)!.click();
+    for (let i = 0; i < 100 && (posts < 9 || inFlight > 0); i++) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    await flush(el);
+    expect(posts).toBe(9);
+    expect(REFRESH_ALL_CONCURRENCY).toBeLessThanOrEqual(4);
+    expect(maxInFlight).toBeLessThanOrEqual(4);
+    expect(maxInFlight).toBeGreaterThan(1);
+  });
+
+  it('runWithConcurrency keeps item order and the limit', async () => {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const out = await runWithConcurrency([1, 2, 3, 4, 5, 6, 7], 3, async (n) => {
+      inFlight++;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((r) => setTimeout(r, 8 - n));
+      inFlight--;
+      return n * 10;
+    });
+    expect(out).toEqual([10, 20, 30, 40, 50, 60, 70]);
+    expect(maxInFlight).toBe(3);
+    expect(await runWithConcurrency([], 4, async (n: number) => n)).toEqual([]);
   });
 
   it('still offers it for harness configs with any source', async () => {

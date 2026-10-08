@@ -120,6 +120,29 @@ describe('template detail: Refresh from Source', () => {
     expect(refreshButton(element)).toBeNull();
   });
 
+  // The display never shows credentials embedded in a source string.
+  it('never shows credentials embedded in a non-https source', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve(
+          jsonResponse(
+            makeTemplate({
+              sourceUrl: ':s3,access_key_id=AKIA,secret_access_key=secret:bucket/templates',
+            })
+          )
+        )
+      )
+    );
+    element = await createElement();
+    const text = element.shadowRoot?.textContent ?? '';
+    expect(text).not.toContain('secret');
+    expect(text).not.toContain('AKIA');
+    expect(text).toContain('non-web source');
+    expect(element.shadowRoot?.querySelector('.source-url a')).toBeNull();
+    expect(refreshButton(element)).toBeNull();
+  });
+
   it('posts to the reimport endpoint and reports success', async () => {
     const fetchMock = vi.fn((url: string, init?: RequestInit) => {
       if (url.endsWith('/reimport') && init?.method === 'POST') {
