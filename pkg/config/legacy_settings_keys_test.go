@@ -16,6 +16,7 @@ package config
 
 import (
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"reflect"
 	"sort"
@@ -26,8 +27,9 @@ import (
 )
 
 // Tests for ptone/scion#3885: every key of an unversioned settings file is
-// either converted, deliberately dropped, or carried into the v1 file, so a
-// legacy key cannot be silently lost on the first settings write.
+// either converted to its v1 form, deliberately dropped, or (when the legacy
+// struct does not decode it) carried into the v1 file unchanged, so a legacy
+// key cannot be silently lost on the first settings write.
 
 // legacyEveryKeyYAML is an unversioned settings file holding every key the
 // legacy Settings struct decodes (and every hub and cli field), plus the
@@ -85,14 +87,14 @@ server:
 // legacy file.
 type legacyKeyCheck func(t *testing.T, in, m map[string]interface{}, dir string)
 
-// carriedUnchanged checks the legacy value at path is at the same path in m.
-func carriedUnchanged(path ...string) legacyKeyCheck {
+// keptUnchanged checks the legacy value at path is at the same path in m.
+func keptUnchanged(path ...string) legacyKeyCheck {
 	return func(t *testing.T, in, m map[string]interface{}, _ string) {
 		t.Helper()
 		want, _ := lookupPath(in, path...)
 		got, ok := lookupPath(m, path...)
 		if !ok || !reflect.DeepEqual(got, want) {
-			t.Errorf("%s = %#v (present %v), want %#v carried unchanged", strings.Join(path, "."), got, ok, want)
+			t.Errorf("%s = %#v (present %v), want %#v kept unchanged", strings.Join(path, "."), got, ok, want)
 		}
 	}
 }
@@ -123,12 +125,12 @@ func absent(path ...string) legacyKeyCheck {
 // legacySubKeyHandling. TestLegacyKeyChecks_CoverHandlingTables keeps it
 // in step with those tables.
 var legacyKeyChecks = map[string]legacyKeyCheck{
-	"project_id":       carriedUnchanged("project_id"),
+	"project_id":       keptUnchanged("project_id"),
 	"active_profile":   convertedTo("local", "active_profile"),
 	"default_template": convertedTo("custom-template", "default_template"),
-	"workspace_path":   carriedUnchanged("workspace_path"),
+	"workspace_path":   keptUnchanged("workspace_path"),
 	"bucket":           absent("bucket"),
-	"hub_connections":  carriedUnchanged("hub_connections"),
+	"hub_connections":  keptUnchanged("hub_connections"),
 	"runtimes":         convertedTo(map[string]interface{}{"type": "docker", "context": "default"}, "runtimes", "docker"),
 	"harnesses": func(t *testing.T, _, m map[string]interface{}, _ string) {
 		t.Helper()
@@ -159,9 +161,9 @@ var legacyKeyChecks = map[string]legacyKeyCheck{
 			t.Errorf("state.yaml last_synced_at = %q, want it moved from hub.lastSyncedAt", state.LastSyncedAt)
 		}
 	},
-	"hub.transport": carriedUnchanged("hub", "transport"),
+	"hub.transport": keptUnchanged("hub", "transport"),
 	"cli.autohelp":  convertedTo(true, "cli", "autohelp"),
-	"cli.mode":      carriedUnchanged("cli", "mode"),
+	"cli.mode":      keptUnchanged("cli", "mode"),
 }
 
 // yamlTagNames returns the yaml tag names of the fields of struct type typ.
@@ -293,7 +295,7 @@ func TestMigrateSettingsFile_EveryLegacyKey(t *testing.T) {
 					legacyKeyChecks[k](t, in, m, dir)
 				})
 			}
-			carriedUnchanged("server", "broker", "instances")(t, in, m, dir)
+			keptUnchanged("server", "broker", "instances")(t, in, m, dir)
 		})
 	}
 }
@@ -334,8 +336,8 @@ func TestUpdateSetting_LegacyKeepsUnconvertedLegacyKeys(t *testing.T) {
 	}
 }
 
-// In a JSON file the legacy keys match case-insensitively; a carried legacy
-// key or field is written under its canonical name, once.
+// In a JSON file the legacy keys match case-insensitively; a converted
+// legacy key or field is written under its canonical name, once.
 func TestMigrateSettingsFile_JSONCarriedLegacyKeyCanonicalName(t *testing.T) {
 	dir := carryTestDir(t, "settings.json", `{"Workspace_Path": "/w", "CLI": {"Mode": "agent", "autohelp": true}}`)
 	if _, err := MigrateSettingsFile(dir, false); err != nil {
@@ -358,13 +360,13 @@ func TestMigrateSettingsFile_JSONCarriedLegacyKeyCanonicalName(t *testing.T) {
 	}
 }
 
-// After migration, the carried keys survive every later settings write:
+// After migration, the converted keys survive every later settings write:
 // the in-place YAML edit (UpdateSetting) and the struct round-trip writers
 // (LoadModifySaveVersionedSettings, SaveVersionedSettings and the
 // updateVersionedSettingStruct fallback), and the settings loader still
 // reads them.
 func TestMigratedLegacyKeys_SurviveLaterWrites(t *testing.T) {
-	carried := []string{"workspace_path", "project_id", "hub_connections", "hub.transport", "cli.mode"}
+	kept := []string{"workspace_path", "project_id", "hub_connections", "hub.transport", "cli.mode"}
 	dir := carryTestDir(t, "settings.yaml", legacyEveryKeyYAML)
 	path := filepath.Join(dir, "settings.yaml")
 	var in map[string]interface{}
@@ -398,11 +400,11 @@ func TestMigratedLegacyKeys_SurviveLaterWrites(t *testing.T) {
 			t.Fatalf("%s: %v", w.name, err)
 		}
 		m := readSettingsMap(t, path)
-		for _, k := range carried {
-			carriedUnchanged(strings.Split(k, ".")...)(t, in, m, dir)
+		for _, k := range kept {
+			keptUnchanged(strings.Split(k, ".")...)(t, in, m, dir)
 		}
 		if t.Failed() {
-			t.Fatalf("carried keys lost after %s", w.name)
+			t.Fatalf("kept keys lost after %s", w.name)
 		}
 	}
 
@@ -457,33 +459,95 @@ func TestAdaptLegacySettings_KeysWithV1Fields(t *testing.T) {
 	}
 }
 
-// The raw carry keeps what the v1 types do not model, such as an extra
-// field in a carried hub connection or transport, alongside the converted
-// values.
-func TestMigrateSettingsFile_CarryKeepsUnmodelledFields(t *testing.T) {
+// A JSON legacy file may spell nested keys in any case (json.Unmarshal
+// matches struct fields case-insensitively). Each such key is written once,
+// under its canonical name, so the migrated file passes config validate and
+// keeps every value.
+func TestMigrateSettingsFile_JSONNestedKeyCaseCanonical(t *testing.T) {
+	dir := carryTestDir(t, "settings.json", `{
+  "Project_ID": "proj-top",
+  "Hub": {"Endpoint": "https://h", "Transport": {"Mode": "iap", "Audience": "a"}},
+  "Hub_Connections": {"p": {"Endpoint": "https://p"}},
+  "CLI": {"Mode": "agent"}
+}`)
+	result, err := MigrateSettingsFile(dir, false)
+	if err != nil {
+		t.Fatalf("MigrateSettingsFile: %v", err)
+	}
+	for _, w := range result.Warnings {
+		if strings.Contains(w, "kept setting") {
+			t.Errorf("unexpected warning: %s", w)
+		}
+	}
+	path := filepath.Join(dir, "settings.yaml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verrs, err := ValidateSettings(data, "1")
+	if err != nil {
+		t.Fatalf("ValidateSettings: %v", err)
+	}
+	for _, ve := range verrs {
+		t.Errorf("migrated file fails validation: %s", ve.Error())
+	}
+	m := readSettingsMap(t, path)
+	want := map[string]interface{}{
+		"schema_version":  "1",
+		"project_id":      "proj-top",
+		"hub":             map[string]interface{}{"endpoint": "https://h", "transport": map[string]interface{}{"mode": "iap", "audience": "a"}},
+		"hub_connections": map[string]interface{}{"p": map[string]interface{}{"endpoint": "https://p"}},
+		"cli":             map[string]interface{}{"mode": "agent"},
+	}
+	if !reflect.DeepEqual(m, want) {
+		t.Errorf("migrated settings = %#v, want %#v", m, want)
+	}
+}
+
+// Legacy keys are converted through the v1 types, so a field the legacy
+// struct never read (here an extra field in hub.transport and in a hub
+// connection) is dropped by the migration, as by every later struct
+// round-trip write; the migrated file stays valid. Only top-level keys the
+// legacy struct does not decode (here the v1-only image_registry) are
+// carried unchanged.
+func TestMigrateSettingsFile_ConvertedKeysDropUnmodelledFields(t *testing.T) {
 	dir := carryTestDir(t, "settings.yaml", `hub:
   endpoint: https://hub.example.com
   transport:
     mode: iap
-    extra: kept-transport
+    extra: dropped-transport
 hub_connections:
   prod:
     endpoint: https://hub.prod.example.com
-    extra: kept-connection
+    extra: dropped-connection
+image_registry: registry.example.com/team
 `)
 	if _, err := MigrateSettingsFile(dir, false); err != nil {
 		t.Fatalf("MigrateSettingsFile: %v", err)
 	}
-	m := readSettingsMap(t, filepath.Join(dir, "settings.yaml"))
-	for path, want := range map[string]string{
+	path := filepath.Join(dir, "settings.yaml")
+	m := readSettingsMap(t, path)
+	for p, want := range map[string]string{
 		"hub.transport.mode":            "iap",
-		"hub.transport.extra":           "kept-transport",
 		"hub_connections.prod.endpoint": "https://hub.prod.example.com",
-		"hub_connections.prod.extra":    "kept-connection",
 		"hub.endpoint":                  "https://hub.example.com",
+		"image_registry":                "registry.example.com/team",
 	} {
-		if got, _ := lookupPath(m, strings.Split(path, ".")...); got != want {
-			t.Errorf("%s = %v, want %q", path, got, want)
+		if got, _ := lookupPath(m, strings.Split(p, ".")...); got != want {
+			t.Errorf("%s = %v, want %q", p, got, want)
 		}
+	}
+	absent("hub", "transport", "extra")(t, nil, m, "")
+	absent("hub_connections", "prod", "extra")(t, nil, m, "")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verrs, err := ValidateSettings(data, "1")
+	if err != nil {
+		t.Fatalf("ValidateSettings: %v", err)
+	}
+	for _, ve := range verrs {
+		t.Errorf("migrated file fails validation: %s", ve.Error())
 	}
 }

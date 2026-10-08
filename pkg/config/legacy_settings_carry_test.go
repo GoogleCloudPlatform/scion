@@ -224,11 +224,11 @@ func TestMigrateSettingsFile_KeepsV1OnlyTopLevelKeys(t *testing.T) {
 			if m["active_profile"] != "local" {
 				t.Errorf("active_profile = %v, want local", m["active_profile"])
 			}
-			// hub_connections is not converted, so it is carried
-			// (ptone/scion#3885).
+			// hub_connections is converted to the v1 key of the same
+			// name (ptone/scion#3885).
 			if tc.name == "yaml" {
 				if ep, _ := lookupPath(m, "hub_connections", "hub-prod", "endpoint"); ep != "https://hub.prod.example.com" {
-					t.Errorf("hub_connections.hub-prod.endpoint = %v, want it carried", ep)
+					t.Errorf("hub_connections.hub-prod.endpoint = %v, want it kept", ep)
 				}
 			}
 		})
