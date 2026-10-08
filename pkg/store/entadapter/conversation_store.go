@@ -656,11 +656,29 @@ func (s *ConversationStore) EnsureParticipant(ctx context.Context, p *store.Conv
 		return err
 	}
 
-	// Insert unless a row for (conversation, principal) already exists,
-	// active or soft-removed. ON CONFLICT DO NOTHING on the unique
-	// (conversation_id, principal_kind, principal_id) index leaves an
-	// existing row untouched (including left_at), and also covers a
-	// concurrent insert racing this one. Any other constraint failure (for
+	byPrincipal := s.client.ConversationParticipant.Query().
+		Where(
+			conversationparticipant.ConversationIDEQ(convUID),
+			conversationparticipant.PrincipalKindEQ(conversationparticipant.PrincipalKind(p.PrincipalKind)),
+			conversationparticipant.PrincipalIDEQ(p.PrincipalID),
+		)
+
+	// Fast path, the common case on every send: the row already exists
+	// (active or soft-removed). Leave it untouched (including left_at) and
+	// report its ID and JoinedAt, with a single read and no write.
+	existing, err := byPrincipal.Clone().Only(ctx)
+	if err != nil && !ent.IsNotFound(err) {
+		return mapError(err)
+	}
+	if existing != nil {
+		p.ID = existing.ID.String()
+		p.JoinedAt = existing.JoinedAt
+		return nil
+	}
+
+	// No row yet. ON CONFLICT DO NOTHING on the unique (conversation_id,
+	// principal_kind, principal_id) index absorbs a concurrent insert of the
+	// same participant racing this one. Any other constraint failure (for
 	// example a primary-key clash on a caller-supplied ID) still surfaces.
 	//
 	// CreateBulk, not Create: ent's single-row Create+OnConflict reads the
@@ -699,16 +717,10 @@ func (s *ConversationStore) EnsureParticipant(ctx context.Context, p *store.Conv
 		return mapError(err)
 	}
 
-	// Read back the row that now exists, whether this call inserted it or it
-	// was already there, so the caller's struct matches AddParticipant's
+	// Read back the row that now exists, whether this call inserted it or a
+	// concurrent caller did, so the caller's struct matches AddParticipant's
 	// post-condition on every path.
-	row, err := s.client.ConversationParticipant.Query().
-		Where(
-			conversationparticipant.ConversationIDEQ(convUID),
-			conversationparticipant.PrincipalKindEQ(conversationparticipant.PrincipalKind(p.PrincipalKind)),
-			conversationparticipant.PrincipalIDEQ(p.PrincipalID),
-		).
-		Only(ctx)
+	row, err := byPrincipal.Only(ctx)
 	if err != nil {
 		return mapError(err)
 	}

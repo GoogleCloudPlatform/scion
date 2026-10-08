@@ -19,10 +19,12 @@ package entadapter
 import (
 	"context"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conversation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conversationparticipant"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
@@ -1715,4 +1717,97 @@ func TestEnsureParticipant_PrimaryKeyClashSurfaces(t *testing.T) {
 	participants, err := s.ListParticipants(ctx, conv.ID)
 	require.NoError(t, err)
 	assert.Len(t, participants, 1)
+}
+
+// TestEnsureParticipant_ExistingRowIsReadOnly pins the fast path: when the
+// participant row already exists, EnsureParticipant reports it with reads
+// only and issues no INSERT (on SQLite even a no-op INSERT ... ON CONFLICT
+// takes the database write lock, and this runs on every send).
+func TestEnsureParticipant_ExistingRowIsReadOnly(t *testing.T) {
+	ctx := context.Background()
+	base := enttest.NewClient(t)
+	rec := &planRecordingDriver{Driver: base.Driver()}
+	s := NewConversationStore(ent.NewClient(ent.Driver(rec)))
+
+	conv := newTestConversation()
+	require.NoError(t, s.CreateConversation(ctx, conv))
+	first := &store.ConversationParticipant{ConversationID: conv.ID, PrincipalKind: "user", PrincipalID: uuid.NewString()}
+	require.NoError(t, s.EnsureParticipant(ctx, first))
+
+	rec.mu.Lock()
+	rec.queries = nil
+	rec.mu.Unlock()
+
+	again := &store.ConversationParticipant{ConversationID: conv.ID, PrincipalKind: "user", PrincipalID: first.PrincipalID}
+	require.NoError(t, s.EnsureParticipant(ctx, again))
+	assert.Equal(t, first.ID, again.ID)
+
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	require.NotEmpty(t, rec.queries, "the recording driver must see the reads")
+	for _, q := range rec.queries {
+		assert.NotContains(t, strings.ToUpper(q.sql), "INSERT", "existing participant must not be written: %s", q.sql)
+	}
+}
+
+// TestUpsertConversationByExternalRef_ConcurrentConvergesToOneRow races
+// several upserts for the same (surface, external_ref): every call
+// succeeds and returns the same ID, and exactly one row exists. A losing
+// insert hits the partial unique index, which isUniqueViolation must
+// classify for the retry to take the update branch (ptone/scion#3036).
+func TestUpsertConversationByExternalRef_ConcurrentConvergesToOneRow(t *testing.T) {
+	s := newTestConversationStore(t)
+	ctx := context.Background()
+
+	const goroutines = 8
+	results := make([]*store.Conversation, goroutines)
+	errs := make([]error, goroutines)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			results[i], errs[i] = s.UpsertConversationByExternalRef(ctx, &store.Conversation{
+				Kind: "group", Surface: "telegram", ExternalRef: "race-one-row", DisplayName: "race",
+			})
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	for i := range errs {
+		require.NoError(t, errs[i], "goroutine %d", i)
+		assert.Equal(t, results[0].ID, results[i].ID, "goroutine %d: upserts must converge on one conversation", i)
+	}
+	n, err := s.client.Conversation.Query().
+		Where(
+			conversation.SurfaceEQ(conversation.SurfaceTelegram),
+			conversation.ExternalRefEQ("race-one-row"),
+		).
+		Count(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 1, n, "exactly one row for the external ref")
+}
+
+// TestUpsertConversationByExternalRef_PrimaryKeyClashFails pins that a
+// caller-supplied ID already used by another conversation is an error, not
+// a silent success, and creates nothing.
+func TestUpsertConversationByExternalRef_PrimaryKeyClashFails(t *testing.T) {
+	s := newTestConversationStore(t)
+	ctx := context.Background()
+
+	first, err := s.UpsertConversationByExternalRef(ctx, &store.Conversation{
+		Kind: "group", Surface: "telegram", ExternalRef: "pk-first",
+	})
+	require.NoError(t, err)
+
+	_, err = s.UpsertConversationByExternalRef(ctx, &store.Conversation{
+		ID: first.ID, Kind: "group", Surface: "telegram", ExternalRef: "pk-second",
+	})
+	require.Error(t, err)
+
+	_, err = s.GetConversationByExternalRef(ctx, "telegram", "pk-second")
+	assert.ErrorIs(t, err, store.ErrNotFound)
 }

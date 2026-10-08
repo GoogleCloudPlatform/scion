@@ -114,8 +114,9 @@ func TestListMessages_CreatedFiltersSurviveMonotonicSuffix(t *testing.T) {
 	}
 }
 
-// planRecordingDriver records every query sent through it, so a test can
-// EXPLAIN the exact SQL a store method built.
+// planRecordingDriver records every statement sent through it (outside a
+// transaction), so a test can EXPLAIN the exact SQL a store method built or
+// check which statements it issued.
 type planRecordingDriver struct {
 	dialect.Driver
 	mu      sync.Mutex
@@ -127,12 +128,21 @@ type recordedQuery struct {
 	args []any
 }
 
-func (d *planRecordingDriver) Query(ctx context.Context, query string, args, v any) error {
+func (d *planRecordingDriver) record(query string, args any) {
 	d.mu.Lock()
+	defer d.mu.Unlock()
 	a, _ := args.([]any)
 	d.queries = append(d.queries, recordedQuery{sql: query, args: append([]any(nil), a...)})
-	d.mu.Unlock()
+}
+
+func (d *planRecordingDriver) Query(ctx context.Context, query string, args, v any) error {
+	d.record(query, args)
 	return d.Driver.Query(ctx, query, args, v)
+}
+
+func (d *planRecordingDriver) Exec(ctx context.Context, query string, args, v any) error {
+	d.record(query, args)
+	return d.Driver.Exec(ctx, query, args, v)
 }
 
 // TestListMessages_TailQueryUsesIndexOrder pins that the conversation+channel
