@@ -628,6 +628,10 @@ func (o *OperationalSettings) maintenanceFromCache(dbSections map[string]json.Ra
 	return ms.AdminMode, ms.MaintenanceMessage
 }
 
+// ErrSectionValidation is wrapped by Update when the section document fails
+// schema validation, so callers can report a client error instead of 500.
+var ErrSectionValidation = errors.New("validation failed")
+
 // Update validates the section document, upserts it via the store, and
 // refreshes the local cache. Returns the new revision.
 func (o *OperationalSettings) Update(
@@ -642,7 +646,7 @@ func (o *OperationalSettings) Update(
 	defer o.endDecisionAuditMutation()
 	// Validate via opsettings registry.
 	if errs := opsettings.Validate(section, doc); len(errs) > 0 {
-		return 0, fmt.Errorf("validation failed for section %q: %v", section, errs)
+		return 0, fmt.Errorf("%w for section %q: %v", ErrSectionValidation, section, errs)
 	}
 
 	result, err := o.store.UpsertHubSetting(ctx, section, doc, updatedBy, expectedRevision, origin)

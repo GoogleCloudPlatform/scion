@@ -190,9 +190,13 @@ func (s *Server) handlePutRuntime(w http.ResponseWriter, r *http.Request) {
 	// (merged over disk through the settings overlay) is authoritative, so a
 	// settings.yaml write would have no effect; write the section instead.
 	if ops := s.GetOperationalSettings(); ops != nil {
-		if err := s.putRuntimeProfileToDB(r.Context(), ops, req.Runtime, updatedByFromRequest(r)); err != nil {
+		if err := s.putRuntimeProfileToDB(r.Context(), ops, activeProfileName(), req.Runtime, updatedByFromRequest(r)); err != nil {
 			if errors.Is(err, store.ErrRevisionConflict) {
 				writeError(w, http.StatusConflict, ErrCodeConflict, "runtime setting changed concurrently; retry", nil)
+				return
+			}
+			if errors.Is(err, ErrSectionValidation) {
+				ValidationError(w, fmt.Sprintf("runtime setting rejected: %v", err), nil)
 				return
 			}
 			slog.Error("PUT system/runtime: failed to update profiles section", "error", err)
@@ -274,11 +278,11 @@ func activeProfileName() string {
 	return "default"
 }
 
-// putRuntimeProfileToDB sets the active profile's runtime in the DB-owned
+// putRuntimeProfileToDB sets profile active's runtime in the DB-owned
 // profiles section. The base is the current row, or with no row the
 // effective profiles (bootstrap material), so other profiles and the active
 // profile's other fields are kept. The write is CAS on the base revision.
-func (s *Server) putRuntimeProfileToDB(ctx context.Context, ops *OperationalSettings, rt, updatedBy string) error {
+func (s *Server) putRuntimeProfileToDB(ctx context.Context, ops *OperationalSettings, active, rt, updatedBy string) error {
 	profiles := map[string]config.V1ProfileConfig{}
 	var baseRev int64 // 0 = create-only when there is no row yet
 	row, err := ops.store.GetHubSetting(ctx, "profiles")
@@ -301,7 +305,6 @@ func (s *Server) putRuntimeProfileToDB(ctx context.Context, ops *OperationalSett
 		return fmt.Errorf("reading current profiles row: %w", err)
 	}
 
-	active := activeProfileName()
 	profile := profiles[active]
 	profile.Runtime = rt
 	profiles[active] = profile
@@ -370,6 +373,10 @@ func (s *Server) handleSystemRegistry(w http.ResponseWriter, r *http.Request) {
 		if _, err := ops.Update(r.Context(), "endpoints", doc, updatedByFromRequest(r), baseRev, "managed"); err != nil {
 			if errors.Is(err, store.ErrRevisionConflict) {
 				writeError(w, http.StatusConflict, ErrCodeConflict, "image registry setting changed concurrently; retry", nil)
+				return
+			}
+			if errors.Is(err, ErrSectionValidation) {
+				ValidationError(w, fmt.Sprintf("image registry setting rejected: %v", err), nil)
 				return
 			}
 			slog.Error("PUT system/registry: failed to update endpoints section", "error", err)
