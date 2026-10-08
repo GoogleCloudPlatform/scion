@@ -1076,7 +1076,7 @@ test_deploy_create_api_check_all_enabled_no_enable_call() {
   fresh_gcloud_state
   seed_enabled_apis compute.googleapis.com run.googleapis.com iap.googleapis.com \
     cloudbuild.googleapis.com artifactregistry.googleapis.com aiplatform.googleapis.com \
-    iam.googleapis.com
+    iam.googleapis.com iamcredentials.googleapis.com
   run_deploy_create "$(base_config_json "$HUB")"
   assert_eq "0" "$(gcloud_log | grep -c 'services enable' || true)" \
     "nothing missing must mean no enable call at all, not an enable call with zero APIs"
@@ -1101,7 +1101,7 @@ test_deploy_create_api_check_tier_on_adds_container() {
   fresh_gcloud_state
   seed_enabled_apis compute.googleapis.com run.googleapis.com iap.googleapis.com \
     cloudbuild.googleapis.com artifactregistry.googleapis.com aiplatform.googleapis.com \
-    iam.googleapis.com
+    iam.googleapis.com iamcredentials.googleapis.com
   seed_cluster "mycluster" "default"
   run_deploy_create "$(base_config_json "$HUB" "$(hybrid_config_fragment)" "registry" "us-docker.pkg.dev/demo-project/scion")"
   local enable_line
@@ -2506,8 +2506,8 @@ test_deploy_create_tier_off_project_bindings_pass_condition_none() {
   run_deploy_create_to_proxy_settings_yaml \
     "$(base_config_json "$HUB" "" "registry" "us-docker.pkg.dev/demo-project/scion")"
   assert_eq "true" "$DEPLOY_REACHED_SETTINGS_YAML" "a tier-off create must reach the Phase-5 proxy-mode settings.yaml write"
-  # 5 service account roles, the deployer's tunnel role, the IAP fallback.
-  _assert_project_bindings_carry_condition_none 7 "tier off"
+  # 6 service account roles, the deployer's tunnel role, the IAP fallback.
+  _assert_project_bindings_carry_condition_none 8 "tier off"
   assert_eq "1" "$(gcloud_log | grep '^projects add-iam-policy-binding ' | grep -c -- '--role=roles/iap.httpsResourceAccessor' || true)" \
     "the project-level IAP fallback must run once"
   assert_not_contains "$DEPLOY_LOG" "Updated IAM policy for project" \
@@ -2522,9 +2522,9 @@ test_deploy_create_tier_on_project_bindings_pass_condition_none() {
   run_deploy_create_to_proxy_settings_yaml \
     "$(base_config_json "$HUB" "$(hybrid_config_fragment)" "registry" "us-docker.pkg.dev/demo-project/scion")"
   assert_eq "true" "$DEPLOY_REACHED_SETTINGS_YAML" "a tier-on create must reach the Phase-5 proxy-mode settings.yaml write"
-  # 5 service account roles and the deployer's tunnel role; the
+  # 6 service account roles and the deployer's tunnel role; the
   # service-level IAP binding succeeds, so there is no fallback.
-  _assert_project_bindings_carry_condition_none 6 "tier on"
+  _assert_project_bindings_carry_condition_none 7 "tier on"
   assert_not_contains "$DEPLOY_LOG" "Updated IAM policy for project" \
     "gcloud's stderr must not be printed when a binding succeeds"
 }
@@ -2545,6 +2545,100 @@ test_deploy_create_role_binding_failure_stops_with_gcloud_error() {
     "no later role binding may run after a failure"
   assert_eq "0" "$(gcloud_log | grep -c '^compute instances create' || true)" \
     "no VM may be created after a failed role binding"
+}
+
+# =====================================================================
+# Hub-minted service accounts: the hub VM's SA gets
+# roles/iam.serviceAccountAdmin by default (hub_sa_minting), and
+# iamcredentials.googleapis.com is a required API.
+# =====================================================================
+
+HUB_SA_ADMIN_BINDING_RE="^projects add-iam-policy-binding demo-project .*--member=serviceAccount:scion-hub-${HUB}@demo-project\.iam\.gserviceaccount\.com .*--role=roles/iam\.serviceAccountAdmin( |$)"
+
+test_deploy_create_grants_hub_sa_service_account_admin_by_default() {
+  fresh_gcloud_state
+  run_deploy_create "$(base_config_json "$HUB")"
+  assert_eq "1" "$(gcloud_log | grep -cE "$HUB_SA_ADMIN_BINDING_RE" || true)" \
+    "a default deploy must grant roles/iam.serviceAccountAdmin to the hub VM's SA exactly once"
+  assert_eq "1" "$(gcloud_log | grep -E "$HUB_SA_ADMIN_BINDING_RE" | grep -cE '( |^)--condition=None( |$)' || true)" \
+    "the serviceAccountAdmin grant must pass --condition=None like the other role grants"
+  assert_contains "$DEPLOY_LOG" "aiplatform.user, iam.serviceAccountAdmin" \
+    "the roles-bound summary must list iam.serviceAccountAdmin"
+}
+
+test_deploy_create_hub_sa_minting_true_grants_service_account_admin() {
+  fresh_gcloud_state
+  run_deploy_create "$(base_config_json "$HUB" ', "hub_sa_minting": true')"
+  assert_eq "1" "$(gcloud_log | grep -cE "$HUB_SA_ADMIN_BINDING_RE" || true)" \
+    "hub_sa_minting: true must grant roles/iam.serviceAccountAdmin to the hub VM's SA"
+}
+
+test_deploy_create_hub_sa_minting_false_skips_service_account_admin() {
+  fresh_gcloud_state
+  run_deploy_create "$(base_config_json "$HUB" ', "hub_sa_minting": false')"
+  assert_eq "0" "$(gcloud_log | grep -c -- '--role=roles/iam.serviceAccountAdmin' || true)" \
+    "hub_sa_minting: false must skip the serviceAccountAdmin grant"
+  assert_eq "1" "$(gcloud_log | grep '^projects add-iam-policy-binding ' | grep -c -- '--role=roles/aiplatform.user' || true)" \
+    "hub_sa_minting: false must still grant the other hub SA roles"
+  assert_contains "$DEPLOY_LOG" "Skipped iam.serviceAccountAdmin (hub_sa_minting is false)" \
+    "the deploy must say the grant was skipped"
+  assert_contains "$DEPLOY_LOG" "gcloud projects remove-iam-policy-binding demo-project --member=serviceAccount:scion-hub-${HUB}@demo-project.iam.gserviceaccount.com --role=roles/iam.serviceAccountAdmin --condition=None" \
+    "the deploy must print how to remove a grant left by an earlier deploy"
+}
+
+test_deploy_create_hub_sa_minting_invalid_value_refused() {
+  fresh_gcloud_state
+  _run_deploy_create_expect_refusal "$(base_config_json "$HUB" ', "hub_sa_minting": "yes"')"
+  assert_true "$([[ "$DEPLOY_RC" -ne 0 && "$DEPLOY_RC" -ne 124 ]] && echo true || echo false)" \
+    "an invalid hub_sa_minting value must stop the deploy"
+  assert_contains "$DEPLOY_LOG" "Invalid hub_sa_minting in config: 'yes' (expected: true or false)" \
+    "the error must name the key and the accepted values"
+  assert_eq "0" "$(gcloud_log | grep -c '^projects add-iam-policy-binding ' || true)" \
+    "no role may be granted after an invalid hub_sa_minting value"
+}
+
+test_deploy_create_service_account_admin_binding_failure_stops_deploy() {
+  fresh_gcloud_state
+  set_project_binding_will_fail "roles/iam.serviceAccountAdmin" "$PROJECT_BINDING_ERROR"
+  _run_deploy_create_expect_refusal \
+    "$(base_config_json "$HUB" "" "registry" "us-docker.pkg.dev/demo-project/scion")"
+  assert_true "$([[ "$DEPLOY_RC" -ne 0 && "$DEPLOY_RC" -ne 124 ]] && echo true || echo false)" \
+    "a failed serviceAccountAdmin grant must stop the deploy like the other role grants"
+  assert_contains "$DEPLOY_LOG" "Failed to grant roles/iam.serviceAccountAdmin to scion-hub-${HUB}@demo-project.iam.gserviceaccount.com" \
+    "the error must name the role and the service account"
+  assert_eq "0" "$(gcloud_log | grep -c '^compute instances create' || true)" \
+    "no VM may be created after a failed serviceAccountAdmin grant"
+}
+
+test_deploy_create_api_check_enables_iamcredentials_when_missing() {
+  fresh_gcloud_state
+  seed_enabled_apis compute.googleapis.com run.googleapis.com iap.googleapis.com \
+    cloudbuild.googleapis.com artifactregistry.googleapis.com aiplatform.googleapis.com \
+    iam.googleapis.com
+  run_deploy_create "$(base_config_json "$HUB")"
+  local enable_line
+  enable_line="$(gcloud_log | grep 'services enable' | head -1)"
+  assert_eq "1" "$(gcloud_log | grep -c 'services enable' || true)" "exactly one enable call, for iamcredentials only"
+  assert_contains "$enable_line" "iamcredentials.googleapis.com" \
+    "the hub mints tokens for hub-minted service accounts through iamcredentials.googleapis.com"
+  assert_not_contains "$enable_line" "compute.googleapis.com" "an already-enabled API must not be re-enabled"
+}
+
+# deploy.sh never removes the hub SA's project role bindings one by one:
+# --delete deletes the hub SA itself, which takes every binding it holds
+# (serviceAccountAdmin included) with it. Asserts that path, against the
+# exact state a default create left behind.
+test_deploy_delete_after_create_deletes_hub_sa_holding_service_account_admin() {
+  fresh_gcloud_state
+  run_deploy_create "$(base_config_json "$HUB")"
+  assert_eq "1" "$(gcloud_log | grep -cE "$HUB_SA_ADMIN_BINDING_RE" || true)" \
+    "precondition: the create must have granted serviceAccountAdmin to the hub SA"
+  run_deploy_delete "$(base_config_json "$HUB")"
+  assert_eq "0" "$DEPLOY_RC" "teardown after a default create must exit 0"
+  assert_eq "1" "$(gcloud_log | grep -c -- "^iam service-accounts delete scion-hub-${HUB}@demo-project.iam.gserviceaccount.com " || true)" \
+    "teardown must delete the hub SA, which removes its serviceAccountAdmin binding"
+  assert_contains "$DEPLOY_LOG" "Deleted: scion-hub-${HUB}@demo-project.iam.gserviceaccount.com" \
+    "teardown must report the hub SA as deleted"
 }
 
 test_deploy_create_tunnel_binding_failure_warns_with_gcloud_error() {
