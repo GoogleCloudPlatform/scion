@@ -99,7 +99,9 @@ func TestListConversations_LabelsNativeConversations(t *testing.T) {
 	require.NoError(t, s.CreateAgent(ctx, namelessAgent))
 	// The store rejects an empty agent name on write, so blank it directly
 	// to model a row that has none.
-	rawDB := s.(interface{ DB() *sql.DB }).DB()
+	dbProvider, ok := s.(interface{ DB() *sql.DB })
+	require.True(t, ok, "store must expose DB() for this test")
+	rawDB := dbProvider.DB()
 	res, err := rawDB.ExecContext(ctx, `UPDATE agents SET name = '' WHERE id = ?`, namelessAgent.ID)
 	require.NoError(t, err)
 	n, err := res.RowsAffected()
