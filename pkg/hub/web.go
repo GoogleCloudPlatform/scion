@@ -1225,11 +1225,10 @@ func (ws *WebServer) detectWebAssets() bool {
 
 // perUserPageCacheControl is the Cache-Control of an HTML document that
 // embeds per-user data, such as the SPA shell with its __SCION_DATA__
-// payload (the session user and the API response prefetched as that user).
+// object (the session user and the API response prefetched as that user).
 // no-store keeps the browser and any shared cache from storing it, so a
-// history navigation or another user of the same browser profile never
-// gets a copy rendered for an earlier session. Static assets keep their own
-// headers (see serveStaticAsset).
+// history navigation never restores a copy rendered for an earlier
+// session. Static assets keep their own headers (see serveStaticAsset).
 const perUserPageCacheControl = "no-store"
 
 // spaHandler returns the SPA shell HTML for any route not matched by other handlers.

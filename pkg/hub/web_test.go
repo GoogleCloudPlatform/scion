@@ -4345,7 +4345,7 @@ func TestNewWebServer_DevAuth_NonLoopback_Rejected(t *testing.T) {
 }
 
 // TestSPAShellCacheControl pins ptone/scion#3732: every HTML document that
-// renders the __SCION_DATA__ payload (the session user and the API data
+// renders the __SCION_DATA__ object (the session user and the API data
 // prefetched as that user) is served with Cache-Control no-store, while
 // static assets keep their own headers.
 func TestSPAShellCacheControl(t *testing.T) {
