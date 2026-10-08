@@ -1477,6 +1477,10 @@ func TestDispatchAgentEventHandler_AgentAlreadyExists(t *testing.T) {
 	ms := newMockStore()
 	ms.projects["project-1"] = &store.Project{ID: "project-1", Name: "test-project"}
 	creatorID := seedFullRoleDispatchCreator(ms, "project-1")
+	// The creator has an owning user, so a notification on this path would
+	// have a recipient and be visible below.
+	ms.users["user-owner"] = &store.User{ID: "user-owner"}
+	ms.agents[creatorID].Ancestry = []string{"user-owner", creatorID}
 	ms.agents["existing-1"] = &store.Agent{
 		ID:        "existing-1",
 		Slug:      "worker-1",
