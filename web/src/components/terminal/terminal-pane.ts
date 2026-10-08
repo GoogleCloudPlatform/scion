@@ -73,7 +73,11 @@ type CaptureAuthScope = 'project' | 'user';
 /** localStorage key: 'true' while the user has hidden the touch key bar. */
 export const KEY_BAR_HIDDEN_STORAGE_KEY = 'scion-terminal-key-bar-hidden';
 
-/** Keys on the touch key bar, in order: the common ones first, the rest scroll. */
+/**
+ * Keys on the touch key bar, in order: the common ones first, the rest
+ * scroll. Each accessible name starts with the visible text, so a voice
+ * control user can say what they see.
+ */
 const KEY_BAR_KEYS: ReadonlyArray<{
   label: string;
   aria: string;
@@ -81,10 +85,10 @@ const KEY_BAR_KEYS: ReadonlyArray<{
   char?: string;
   modifier?: 'ctrl' | 'alt';
 }> = [
-  { label: 'Esc', aria: 'Escape', key: 'escape' },
+  { label: 'Esc', aria: 'Esc (Escape)', key: 'escape' },
   { label: 'Tab', aria: 'Tab', key: 'tab' },
   { label: '⇧Tab', aria: 'Shift Tab', key: 'backtab' },
-  { label: 'Ctrl', aria: 'Control', modifier: 'ctrl' },
+  { label: 'Ctrl', aria: 'Ctrl (Control)', modifier: 'ctrl' },
   { label: 'Alt', aria: 'Alt', modifier: 'alt' },
   { label: '←', aria: 'Left arrow', key: 'left' },
   { label: '↑', aria: 'Up arrow', key: 'up' },
@@ -92,11 +96,11 @@ const KEY_BAR_KEYS: ReadonlyArray<{
   { label: '→', aria: 'Right arrow', key: 'right' },
   { label: 'Home', aria: 'Home', key: 'home' },
   { label: 'End', aria: 'End', key: 'end' },
-  { label: 'PgUp', aria: 'Page up', key: 'pageup' },
-  { label: 'PgDn', aria: 'Page down', key: 'pagedown' },
-  { label: '|', aria: 'Pipe', char: '|' },
-  { label: '~', aria: 'Tilde', char: '~' },
-  { label: '/', aria: 'Slash', char: '/' },
+  { label: 'PgUp', aria: 'PgUp (Page up)', key: 'pageup' },
+  { label: 'PgDn', aria: 'PgDn (Page down)', key: 'pagedown' },
+  { label: '|', aria: '| (pipe)', char: '|' },
+  { label: '~', aria: '~ (tilde)', char: '~' },
+  { label: '/', aria: '/ (slash)', char: '/' },
 ];
 
 // The terminal viewport stays dark in both app themes: it renders TUI output
@@ -902,7 +906,7 @@ export class ScionTerminalPane extends LitElement {
     }
 
     .key-bar button.armed {
-      color: var(--scion-primary, #3b82f6);
+      color: var(--scion-badge-primary-text, #1e40af);
       border-color: var(--scion-primary, #3b82f6);
       background: var(--scion-badge-primary-bg, #dbeafe);
     }
@@ -918,6 +922,12 @@ export class ScionTerminalPane extends LitElement {
       cursor: default;
     }
   `;
+
+  protected override willUpdate(): void {
+    // An armed modifier must not outlive the bar, whatever hid it: the
+    // toolbar toggle, or the touch query flipping (a trackpad attached).
+    if (!this.keyBarShown) this.clearKeyBarModifiers();
+  }
 
   override connectedCallback(): void {
     super.connectedCallback();
@@ -1561,7 +1571,6 @@ export class ScionTerminalPane extends LitElement {
 
   private toggleKeyBar(): void {
     this.keyBarHidden = !this.keyBarHidden;
-    this.clearKeyBarModifiers();
     try {
       if (this.keyBarHidden) localStorage.setItem(KEY_BAR_HIDDEN_STORAGE_KEY, 'true');
       else localStorage.removeItem(KEY_BAR_HIDDEN_STORAGE_KEY);
@@ -1589,6 +1598,12 @@ export class ScionTerminalPane extends LitElement {
    * onData like an on-screen keyboard character.
    */
   private pressBarKey(entry: (typeof KEY_BAR_KEYS)[number]): void {
+    // A bar key acts on this pane, so the next typed key must land here too
+    // (several panes can show at once). The tap is a user gesture, so iOS
+    // keeps or opens the keyboard for the focus move.
+    if (this.terminal && this.shadowRoot?.activeElement !== this.terminal.textarea) {
+      this.terminal.focus();
+    }
     if (entry.modifier === 'ctrl') {
       this.ctrlState = nextModifierState(this.ctrlState);
       return;
@@ -1630,7 +1645,7 @@ export class ScionTerminalPane extends LitElement {
           return html`<button
             type="button"
             class=${state && state !== 'off' ? state : ''}
-            aria-label=${state === 'locked' ? `${entry.aria} (locked)` : entry.aria}
+            aria-label=${state === 'locked' ? `${entry.aria}, locked` : entry.aria}
             aria-pressed=${state ? String(state !== 'off') : nothing}
             ?disabled=${!entry.modifier && !this.connected}
             @click=${() => this.pressBarKey(entry)}

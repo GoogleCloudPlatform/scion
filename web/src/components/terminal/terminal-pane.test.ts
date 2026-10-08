@@ -16,6 +16,7 @@ vi.mock('../../utils/toast.js', () => ({ showToast }));
 type MockTerminal = Record<'dispose' | 'reset' | 'focus' | 'blur', ReturnType<typeof vi.fn>> & {
   input: Mock<(data: string) => void>;
   modes: { applicationCursorKeysMode: boolean };
+  textarea: HTMLTextAreaElement | undefined;
 };
 const terminal = vi.hoisted(() => ({
   instances: [] as MockTerminal[],
@@ -34,6 +35,7 @@ vi.mock('@xterm/xterm', () => ({
     loadAddon = vi.fn();
     open = vi.fn();
     modes = { applicationCursorKeysMode: false };
+    textarea: HTMLTextAreaElement | undefined = undefined;
     dataHandlers: Array<(data: string) => void> = [];
     onData = vi.fn((handler: (data: string) => void) => {
       this.dataHandlers.push(handler);
@@ -1312,22 +1314,32 @@ describe('touch key bar', () => {
     terminal.instances[0].input(data);
   };
 
-  function stubPointer(touch: boolean): void {
+  /** Stubs the touch query; returns a function that flips it later. */
+  function stubPointer(touch: boolean): (touch: boolean) => void {
+    const listeners: Array<() => void> = [];
+    const query = {
+      media: '(hover: none) and (pointer: coarse)',
+      matches: touch,
+      addEventListener: (_type: string, listener: () => void): void => {
+        listeners.push(listener);
+      },
+      removeEventListener: vi.fn(),
+    };
     vi.stubGlobal(
       'matchMedia',
-      vi.fn((query: string) => ({
-        media: query,
-        matches: touch && query === '(hover: none) and (pointer: coarse)',
-        addEventListener: vi.fn(),
-        removeEventListener: vi.fn(),
-      }))
+      vi.fn(() => query)
     );
+    return (next) => {
+      query.matches = next;
+      for (const listener of listeners) listener();
+    };
   }
 
-  async function mountTouch(): Promise<void> {
-    stubPointer(true);
+  async function mountTouch(): Promise<(touch: boolean) => void> {
+    const flip = stubPointer(true);
     await mountConnected();
     FakeSocket.instances[0].send.mockClear();
+    return flip;
   }
 
   // happy-dom's localStorage is not functional in this setup; the pane keeps
@@ -1373,20 +1385,52 @@ describe('touch key bar', () => {
     expect(localStorage.getItem('scion-terminal-key-bar-hidden')).toBeNull();
   });
 
-  it('labels every key for assistive technology', async () => {
+  it("labels every key, and a text key's name starts with its visible text", async () => {
     await mountTouch();
     const buttons = [...keyBar()!.querySelectorAll('button')];
     expect(buttons.length).toBeGreaterThanOrEqual(9);
-    for (const button of buttons) expect(button.getAttribute('aria-label')).toBeTruthy();
+    for (const button of buttons) {
+      const name = button.getAttribute('aria-label') ?? '';
+      const text = button.textContent!.trim();
+      expect(name).toBeTruthy();
+      // Arrow glyphs and the Shift glyph are symbols, named in words.
+      if (!/^[←↑↓→⇧]/.test(text)) expect(name.startsWith(text)).toBe(true);
+    }
+  });
+
+  it("moves focus into this pane's terminal when a key is tapped while focus is elsewhere", async () => {
+    await mountTouch();
+    const xt = terminal.instances[0];
+    xt.focus.mockClear();
+    await press('Ctrl');
+    expect(xt.focus).toHaveBeenCalledTimes(1);
+
+    // Already focused in this pane: no focus call.
+    const textarea = document.createElement('textarea');
+    page.shadowRoot!.querySelector('.terminal-container')!.append(textarea);
+    xt.textarea = textarea;
+    textarea.focus();
+    expect(page.shadowRoot!.activeElement).toBe(textarea);
+    xt.focus.mockClear();
+    await press('Esc');
+    expect(xt.focus).not.toHaveBeenCalled();
+  });
+
+  it('Ctrl with the on-screen Backspace sends BS (0x08)', async () => {
+    await mountTouch();
+    await press('Ctrl');
+    type('\x7f');
+    type('\x7f');
+    expect(sent()).toEqual(['\b', '\x7f']);
   });
 
   it('sends Esc, Tab, Shift+Tab and Page keys through xterm input', async () => {
     await mountTouch();
-    await press('Escape');
+    await press('Esc');
     await press('Tab');
     await press('Shift Tab');
-    await press('Page up');
-    await press('Page down');
+    await press('PgUp');
+    await press('PgDn');
     expect(sent()).toEqual(['\x1b', '\t', '\x1b[Z', '\x1b[5~', '\x1b[6~']);
     // Through xterm's own input path, so it acts like a typed key.
     expect(terminal.instances[0].input).toHaveBeenCalledWith('\x1b');
@@ -1417,14 +1461,14 @@ describe('touch key bar', () => {
 
   it('sticky Ctrl maps the next typed character to its control code, then clears', async () => {
     await mountTouch();
-    await press('Control');
-    expect(key('Control').getAttribute('aria-pressed')).toBe('true');
-    expect(key('Control').classList.contains('armed')).toBe(true);
+    await press('Ctrl');
+    expect(key('Ctrl').getAttribute('aria-pressed')).toBe('true');
+    expect(key('Ctrl').classList.contains('armed')).toBe(true);
     type('c');
     await page.updateComplete;
-    expect(key('Control').getAttribute('aria-pressed')).toBe('false');
+    expect(key('Ctrl').getAttribute('aria-pressed')).toBe('false');
     type('c');
-    await press('Control');
+    await press('Ctrl');
     type('[');
     expect(sent()).toEqual(['\x03', 'c', '\x1b']);
   });
@@ -1432,26 +1476,26 @@ describe('touch key bar', () => {
   it('sticky Ctrl applies to bar keys too: modified arrows and a bar character', async () => {
     await mountTouch();
     terminal.instances[0].modes.applicationCursorKeysMode = true;
-    await press('Control');
+    await press('Ctrl');
     await press('Up arrow');
     await press('Up arrow');
     await press('Alt');
-    await press('Slash');
+    await press('/');
     expect(sent()).toEqual(['\x1b[1;5A', '\x1bOA', '\x1b/']);
   });
 
   it('tapping Ctrl twice locks it until it is tapped again', async () => {
     await mountTouch();
-    await press('Control');
-    await press('Control');
-    expect(key('Control').classList.contains('locked')).toBe(true);
-    expect(key('Control').getAttribute('aria-label')).toBe('Control (locked)');
+    await press('Ctrl');
+    await press('Ctrl');
+    expect(key('Ctrl').classList.contains('locked')).toBe(true);
+    expect(key('Ctrl').getAttribute('aria-label')).toBe('Ctrl (Control), locked');
     type('a');
     type('e');
-    await press('Control');
+    await press('Ctrl');
     type('a');
     expect(sent()).toEqual(['\x01', '\x05', 'a']);
-    expect(key('Control').getAttribute('aria-pressed')).toBe('false');
+    expect(key('Ctrl').getAttribute('aria-pressed')).toBe('false');
   });
 
   it('sticky Alt prefixes ESC; a paste or a terminal reply leaves the modifier armed', async () => {
@@ -1464,15 +1508,28 @@ describe('touch key bar', () => {
     expect(sent()).toEqual(['pasted text', '\x1b[1;1R', '\x1bb', 'b']);
   });
 
+  it('clears an armed modifier when the touch query stops matching', async () => {
+    const flip = await mountTouch();
+    await press('Ctrl');
+    flip(false);
+    await page.updateComplete;
+    expect(keyBar()).toBeNull();
+    flip(true);
+    await page.updateComplete;
+    expect(key('Ctrl').getAttribute('aria-pressed')).toBe('false');
+    type('c');
+    expect(sent()).toEqual(['c']);
+  });
+
   it('hiding the bar or the pane clears an armed modifier', async () => {
     await mountTouch();
-    await press('Control');
+    await press('Ctrl');
     toggle()!.click();
     await page.updateComplete;
     type('c');
     toggle()!.click();
     await page.updateComplete;
-    await press('Control');
+    await press('Ctrl');
     page.setVisible(false);
     page.setVisible(true);
     type('c');
@@ -1482,14 +1539,14 @@ describe('touch key bar', () => {
   it('does not take focus: mousedown is prevented, pointerdown is not (WebKit drops the click)', async () => {
     await mountTouch();
     terminal.instances[0].blur.mockClear();
-    for (const target of [key('Escape'), key('Control'), toggle()!]) {
+    for (const target of [key('Esc'), key('Ctrl'), toggle()!]) {
       for (const type of ['mousedown', 'pointerdown']) {
         const event = new Event(type, { bubbles: true, cancelable: true, composed: true });
         target.dispatchEvent(event);
         expect(event.defaultPrevented).toBe(type === 'mousedown');
       }
     }
-    await press('Escape');
+    await press('Esc');
     expect(terminal.instances[0].blur).not.toHaveBeenCalled();
   });
 
@@ -1497,7 +1554,7 @@ describe('touch key bar', () => {
     await mountTouch();
     FakeSocket.instances[0].onclose?.({ code: 1006 });
     await page.updateComplete;
-    expect(key('Escape').disabled).toBe(true);
-    expect(key('Control').disabled).toBe(false);
+    expect(key('Esc').disabled).toBe(true);
+    expect(key('Ctrl').disabled).toBe(false);
   });
 });

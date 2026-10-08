@@ -80,7 +80,7 @@ test.describe('phone', () => {
     const barBox = (await bar.boundingBox())!;
     expect(barBox.y + barBox.height).toBeLessThanOrEqual(844);
     expect(barBox.y + barBox.height).toBeGreaterThan(800);
-    for (const name of ['Escape', 'Tab', 'Control', 'Up arrow']) {
+    for (const name of ['Esc (Escape)', 'Tab', 'Ctrl (Control)', 'Up arrow']) {
       const box = (await bar.getByRole('button', { name, exact: true }).boundingBox())!;
       expect(box.width).toBeGreaterThanOrEqual(44);
       expect(box.height).toBeGreaterThanOrEqual(44);
@@ -88,12 +88,22 @@ test.describe('phone', () => {
 
     await page.locator('.xterm-helper-textarea').focus();
     expect(await focusedClass(page)).toContain('xterm-helper-textarea');
-    await bar.getByRole('button', { name: 'Escape' }).tap();
-    await bar.getByRole('button', { name: 'Control', exact: true }).tap();
+    await bar.getByRole('button', { name: 'Esc (Escape)' }).tap();
+    await bar.getByRole('button', { name: 'Ctrl (Control)', exact: true }).tap();
     expect(await focusedClass(page)).toContain('xterm-helper-textarea');
     await page.keyboard.type('c');
     await expect.poll(() => peer.input).toEqual(['\x1b', '\x03']);
     expect(await focusedClass(page)).toContain('xterm-helper-textarea');
+
+    // With focus outside the pane, a key tap brings it to this terminal.
+    await page.evaluate(() => {
+      const pane = window.paneFixture.pane;
+      (pane.shadowRoot?.activeElement as HTMLElement | null)?.blur();
+    });
+    expect(await focusedClass(page)).not.toContain('xterm-helper-textarea');
+    await bar.getByRole('button', { name: 'Tab', exact: true }).tap();
+    expect(await focusedClass(page)).toContain('xterm-helper-textarea');
+    await expect.poll(() => peer.input).toEqual(['\x1b', '\x03', '\t']);
   });
 
   test('arrows follow the application cursor mode set by the remote program', async ({ page }) => {

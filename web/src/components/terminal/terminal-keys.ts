@@ -19,8 +19,13 @@
  *
  * A phone's on-screen keyboard has no Esc, Tab, Ctrl, Alt or arrow keys.
  * The key bar sends them, and its sticky Ctrl/Alt modifiers apply to the
- * next character typed on the on-screen keyboard. The sequences follow the
- * encodings xterm.js uses for the real keys (src/common/input/Keyboard.ts).
+ * next character typed on the on-screen keyboard. Unmodified keys and the
+ * Ctrl map follow xterm.js (src/common/input/Keyboard.ts). Modified cursor
+ * and page keys use the standard xterm CSI form, CSI 1 ; mod X, with mod =
+ * 1 + Alt 2 + Ctrl 4. xterm.js differs in two places: it remaps Alt+Left and
+ * Alt+Right to word movement (ESC b / ESC f on macOS, CSI 1 ; 5 D / C
+ * elsewhere), and it ignores Alt on PgUp/PgDn and Tab. The bar sends the
+ * plain CSI form, which tmux and readline also understand.
  */
 
 /** A key the bar sends as a fixed sequence (not a typed character). */
@@ -102,15 +107,18 @@ export function barKeySequence(
 
 /**
  * The control code for Ctrl plus a typed character, or null if the
- * character has none: a-z and A-Z → 0x01-0x1a, @ and space → NUL,
- * [ \ ] ^ _ → 0x1b-0x1f, ? → DEL.
+ * character has none, as xterm.js maps them: a-z and A-Z → 0x01-0x1a,
+ * @, space and 2 → NUL, [ \ ] ^ _ → 0x1b-0x1f, 3-7 → 0x1b-0x1f, 8 and
+ * ? → DEL, and Backspace (DEL) → BS.
  */
 export function ctrlCode(char: string): string | null {
   if (/^[a-zA-Z]$/.test(char)) return String.fromCharCode(char.toUpperCase().charCodeAt(0) - 64);
-  if (char === ' ' || char === '@') return '\x00';
+  if (char === ' ' || char === '@' || char === '2') return '\x00';
   const index = '[\\]^_'.indexOf(char);
   if (char.length === 1 && index >= 0) return String.fromCharCode(0x1b + index);
-  if (char === '?') return '\x7f';
+  if (/^[3-7]$/.test(char)) return String.fromCharCode(0x1b + Number(char) - 3);
+  if (char === '8' || char === '?') return '\x7f';
+  if (char === '\x7f') return '\b';
   return null;
 }
 
