@@ -503,7 +503,7 @@ func TestReplyRecipient_EmptyProjectID_ForeignAgent_NotDispatched(t *testing.T) 
 
 	// A user-user DM key: resolveProjectFromDMKey returns "" for this shape
 	// (it only resolves a project for the dm:agent:... shape).
-	peerID := tid("reply-empty-proj-peer")
+	peerID := mustCreateActiveUser(t, s, "reply-empty-proj-peer")
 	dmKey, err := messages.DMConversationKey("user", DevUserID, "user", peerID)
 	if err != nil {
 		t.Fatalf("DMConversationKey: %v", err)
@@ -641,7 +641,7 @@ func TestReplyRecipient_EmptyProjectID_SoftDeletedForeignSender_NotDispatched(t 
 
 	// A user-user DM key: resolveProjectFromDMKey returns "" for this shape
 	// (it only resolves a project for the dm:agent:... shape).
-	peerID := tid("reply-empty-sd-peer")
+	peerID := mustCreateActiveUser(t, s, "reply-empty-sd-peer")
 	dmKey, err := messages.DMConversationKey("user", DevUserID, "user", peerID)
 	if err != nil {
 		t.Fatalf("DMConversationKey: %v", err)

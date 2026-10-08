@@ -519,6 +519,7 @@ func (s *Server) updateGroup(w http.ResponseWriter, r *http.Request, id string) 
 	if req.Annotations != nil {
 		group.Annotations = req.Annotations
 	}
+	ownerChanged := req.OwnerID != "" && req.OwnerID != group.OwnerID
 	if req.OwnerID != "" {
 		group.OwnerID = req.OwnerID
 	}
@@ -526,6 +527,9 @@ func (s *Server) updateGroup(w http.ResponseWriter, r *http.Request, id string) 
 	if err := s.store.UpdateGroup(ctx, group); err != nil {
 		writeErrorFromErr(w, err, "")
 		return
+	}
+	if ownerChanged {
+		s.publishConduitAuthzChanged(conduitAuthzMatch{})
 	}
 
 	s.groupsLogger().Info("group updated",
@@ -573,11 +577,21 @@ func (s *Server) deleteGroup(w http.ResponseWriter, r *http.Request, id string) 
 		return
 	}
 
+	// Users who may lose project access through this group are found
+	// before the delete and re-evaluated after it (ptone/scion#3433).
+	lossUsers, lossErr := transitiveGroupMemberUsers(ctx, s.store, group.ID)
+	if lossErr != nil {
+		writeErrorFromErr(w, lossErr, "")
+		return
+	}
+
 	if err := s.store.DeleteGroup(ctx, group.ID); err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}
+	s.enqueueGroupChangeLoss(ctx, lossUsers)
 
+	s.publishConduitAuthzChanged(conduitAuthzMatch{})
 	s.groupsLogger().Info("group deleted",
 		"group_id", group.ID,
 		"slug", group.Slug)
@@ -801,17 +815,21 @@ func (s *Server) addGroupMember(w http.ResponseWriter, r *http.Request, group *s
 		return
 	}
 
-	if err := s.store.AddGroupMember(ctx, member); err != nil {
+	// The membership and its audit record commit or roll back together.
+	if err := s.store.WithTx(ctx, func(tx store.Store) error {
+		if err := tx.AddGroupMember(ctx, member); err != nil {
+			return err
+		}
+		return s.auditGroupMemberAddTx(ctx, tx, member, canDelegateResult, canDelegateReason)
+	}); err != nil {
 		s.releaseGroupMemberSlot(ctx, member.GroupID, member.MemberType, member.MemberID)
-		if err == store.ErrAlreadyExists {
+		if errors.Is(err, store.ErrAlreadyExists) {
 			Conflict(w, "Member already exists in this group")
 			return
 		}
 		writeErrorFromErr(w, err, "")
 		return
 	}
-
-	s.auditGroupMemberAdd(ctx, member, canDelegateResult, canDelegateReason)
 
 	s.groupsLogger().Info("group member added",
 		"group_id", groupID,
@@ -881,6 +899,27 @@ func (s *Server) auditGroupMemberAdd(ctx context.Context, member *store.GroupMem
 		CanDelegateResult: canDelegateResult,
 		CanDelegateReason: canDelegateReason,
 	})
+}
+
+// auditGroupMemberAddTx writes the group_member_add mutation audit record
+// for member on tx, attributed to the request actor, so it commits or rolls
+// back with the membership.
+func (s *Server) auditGroupMemberAddTx(ctx context.Context, tx store.Store, member *store.GroupMember, canDelegateResult, canDelegateReason string) error {
+	record := &store.MutationAuditRecord{
+		MutationType:      "group_member_add",
+		TargetType:        "group_membership",
+		TargetID:          member.GroupID,
+		AfterSummary:      `{"groupId":"` + member.GroupID + `","memberType":"` + member.MemberType + `","memberId":"` + member.MemberID + `","role":"` + member.Role + `"}`,
+		CanDelegateResult: canDelegateResult,
+		CanDelegateReason: canDelegateReason,
+	}
+	// The store stamps the record's time.
+	s.buildAuditActorFromContext(ctx).ApplyActor(record)
+	applyHubActorFallback(record)
+	if err := tx.CreateMutationAudit(ctx, record); err != nil {
+		return fmt.Errorf("audit group member add: %w", err)
+	}
+	return nil
 }
 
 // authorizeGroupMemberGrant runs the authorization for adding a member with
@@ -1099,10 +1138,25 @@ func (s *Server) removeGroupMember(w http.ResponseWriter, r *http.Request, group
 		}
 	}
 
+	// Users who may lose project access through this membership are
+	// re-evaluated after the removal (ptone/scion#3433).
+	var lossUsers []string
+	switch memberType {
+	case store.GroupMemberTypeUser:
+		lossUsers = []string{memberID}
+	case store.GroupMemberTypeGroup:
+		var lossErr error
+		if lossUsers, lossErr = transitiveGroupMemberUsers(ctx, s.store, memberID); lossErr != nil {
+			writeErrorFromErr(w, lossErr, "")
+			return
+		}
+	}
+
 	if err := s.store.RemoveGroupMember(ctx, group.ID, memberType, memberID); err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}
+	s.enqueueGroupChangeLoss(ctx, lossUsers)
 
 	// Release quota reservation for the removed member (best-effort).
 	s.releaseGroupMemberSlot(ctx, group.ID, memberType, memberID)
@@ -1114,6 +1168,11 @@ func (s *Server) removeGroupMember(w http.ResponseWriter, r *http.Request, group
 		BeforeSummary: `{"groupId":"` + group.ID + `","memberType":"` + memberType + `","memberId":"` + memberID + `"}`,
 	})
 
+	if memberType == store.GroupMemberTypeUser {
+		s.publishConduitAuthzChanged(conduitAuthzMatch{UserID: memberID})
+	} else {
+		s.publishConduitAuthzChanged(conduitAuthzMatch{})
+	}
 	s.groupsLogger().Info("group member removed",
 		"group_id", group.ID,
 		"member_type", memberType,

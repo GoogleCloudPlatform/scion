@@ -705,6 +705,10 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 	// The hub transport credential is delivered through the per-agent Secret
 	// (secretKeyRef) rather than as a plain pod env value.
 	config.Env, config.ResolvedSecrets = divertTransportCredential(config.Env, config.ResolvedSecrets)
+	// So is the project's git token, which the agent container and the
+	// cloning NFS workspace-provision init container then read from the
+	// same Secret key (ptone/scion#2990).
+	config.Env, config.ResolvedSecrets = divertGitCredential(config.Env, config.ResolvedSecrets)
 
 	// Create K8s Secret or SecretProviderClass before the pod
 	if len(config.ResolvedSecrets) > 0 {
@@ -1205,6 +1209,67 @@ func divertTransportCredential(env []string, secrets []api.ResolvedSecret) ([]st
 		Name:   transportCredentialSecretKey,
 		Type:   "environment",
 		Target: transportauth.EnvTransportToken,
+		Value:  value,
+		Source: "hub",
+	})
+	return outEnv, outSecrets
+}
+
+// gitCredentialSecretKey is the data key under which a git token that
+// arrived as a plain env value (a GitHub App token minted at dispatch, or
+// the NoAuth fallback) is stored in the per-agent Secret. Like
+// transportCredentialSecretKey, divertGitCredential drops any resolved
+// secret that uses it.
+const gitCredentialSecretKey = "scion-git-credential"
+
+// divertGitCredential moves a non-empty GITHUB_TOKEN (provision.GitTokenEnv)
+// out of the plain KEY=VALUE env list and into the resolved secrets as an
+// environment-type entry, so that the pod reads it via secretKeyRef from
+// the per-agent Secret, as it does for a git token from the project's or
+// the user's secrets.
+//
+// The last GITHUB_TOKEN entry in env is the one the container would get.
+// When it is empty, or env has none, both inputs are returned unchanged.
+// Otherwise every GITHUB_TOKEN entry is removed from env, and any
+// environment-type resolved secret targeting GITHUB_TOKEN, and any resolved
+// secret named gitCredentialSecretKey, is dropped: the plain value already
+// took precedence over such a secret (buildPod skips a secret whose target
+// is already in the env), so the agent container keeps the same token.
+//
+// It returns new slices and never modifies the backing arrays of its inputs.
+func divertGitCredential(env []string, secrets []api.ResolvedSecret) ([]string, []api.ResolvedSecret) {
+	const prefix = provision.GitTokenEnv + "="
+	value := ""
+	for _, e := range env {
+		if strings.HasPrefix(e, prefix) {
+			value = e[len(prefix):]
+		}
+	}
+	if value == "" {
+		return env, secrets
+	}
+
+	outEnv := make([]string, 0, len(env))
+	for _, e := range env {
+		if strings.HasPrefix(e, prefix) {
+			continue
+		}
+		outEnv = append(outEnv, e)
+	}
+
+	outSecrets := make([]api.ResolvedSecret, 0, len(secrets)+1)
+	for _, s := range secrets {
+		if (s.Type == "environment" && s.Target == provision.GitTokenEnv) || s.Name == gitCredentialSecretKey {
+			runtimeLog.Info("Using the git token from the dispatch env instead of a resolved secret with the same target",
+				"secret", s.Name, "target", s.Target, "source", s.Source)
+			continue
+		}
+		outSecrets = append(outSecrets, s)
+	}
+	outSecrets = append(outSecrets, api.ResolvedSecret{
+		Name:   gitCredentialSecretKey,
+		Type:   "environment",
+		Target: provision.GitTokenEnv,
 		Value:  value,
 		Source: "hub",
 	})
@@ -2144,6 +2209,10 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	// names stay fixed.
 	objectNames := k8sAgentObjectNames(config.Name, config.Labels[api.LabelRunID])
 
+	// gitTokenRef is the agent container's secretKeyRef for the project's
+	// git token, when it has one. The cloning workspace-provision init
+	// container below gets the same reference.
+	var gitTokenRef *corev1.SecretKeySelector
 	if len(config.ResolvedSecrets) > 0 {
 		agentSecretName := objectNames.Secret
 
@@ -2195,6 +2264,12 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 						},
 					})
 					envVarNames[s.Target] = struct{}{}
+					if s.Target == provision.GitTokenEnv {
+						gitTokenRef = &corev1.SecretKeySelector{
+							LocalObjectReference: corev1.LocalObjectReference{Name: agentSecretName},
+							Key:                  s.Name,
+						}
+					}
 				}
 			}
 		} else {
@@ -2216,6 +2291,12 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 						},
 					})
 					envVarNames[s.Target] = struct{}{}
+					if s.Target == provision.GitTokenEnv {
+						gitTokenRef = &corev1.SecretKeySelector{
+							LocalObjectReference: corev1.LocalObjectReference{Name: agentSecretName},
+							Key:                  s.Name,
+						}
+					}
 				}
 			}
 
@@ -2606,6 +2687,19 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 			Name:  "SCION_PROJECT_ID",
 			Value: config.ProjectID,
 		})
+		// ptone/scion#2990: the container that clones (shared-plain and
+		// worktree-per-agent, not a wait-only one) reads the project's git
+		// token from the same Secret key as the agent container, so it can
+		// clone a private repository. sciontool provision gives it to the
+		// clone command through a credential helper. Without a git token
+		// the env is unchanged.
+		if gitTokenRef != nil && !waitOnly && initGitClone != nil && initGitClone.URL != "" {
+			ref := *gitTokenRef
+			initEnv = append(initEnv, corev1.EnvVar{
+				Name:      provision.GitTokenEnv,
+				ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &ref},
+			})
+		}
 		if len(sharedDirPairs) > 0 {
 			initEnv = append(initEnv, corev1.EnvVar{
 				Name:  "SCION_SHARED_DIR_PATHS",

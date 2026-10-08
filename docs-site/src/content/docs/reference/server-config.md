@@ -95,6 +95,7 @@ Settings for the in-process conduit relay and its stream grants. They take effec
 | `peer_service_accounts` | list | own service account | With OIDC peer auth, the service-account emails allowed to call the internal relay API. The hub logs a warning at startup when the default resolves to a Compute Engine default service account. Env: `SCION_SERVER_HUB_CONDUIT_PEERSERVICEACCOUNTS` (comma-separated). |
 | `peer_audience` | string | `"scion-conduit-relay-peer"` | With OIDC peer auth, the ID token audience. It must be identical on every hub node. Env: `SCION_SERVER_HUB_CONDUIT_PEERAUDIENCE`. |
 | `reconnect_window` | duration | `"5s"` | Jitter window sent with a planned close: targets redial after a random delay within it. Between `"0s"` and `"5m"`. Flag: `--conduit-reconnect-window`. Env: `SCION_SERVER_HUB_CONDUIT_RECONNECTWINDOW`. |
+| `authz_recheck_interval` | duration | `"60s"` | Period of the authorization re-check sweep of open user streams (today, port proxy streams). A stream whose user lost the permission is closed with `4401 authz_expired` within one interval even if the revocation event is missed; revocations normally close it at once. Between `"1s"` and `"10m"`. Flag: `--conduit-authz-recheck-interval`. Env: `SCION_SERVER_HUB_CONDUIT_AUTHZRECHECKINTERVAL`. |
 | `instance_id` | string | see description | This node's relay instance id. It must be unique among live hub processes: a relay that starts with an id already in use takes it over from the other process. Up to 128 printable ASCII characters, no spaces. Default: `POD_NAME` when set, else the host name plus a random per-process suffix. Env: `SCION_SERVER_HUB_CONDUIT_INSTANCEID`. |
 
 **Rotating grant keys.** `POST /api/v1/admin/conduit/grant-keys/rotate` (unscoped Hub administrators only, `hub.conduit_grant_keys.execute`) prunes expired grant signing keys and rotates in a new one with an overlap window: grants signed with the outgoing key stay valid until the earlier of their own expiry and the outgoing key's `NotAfter`. The response lists only key IDs and timestamps.
@@ -190,6 +191,14 @@ Persistence settings for the Hub.
 | `driver` | string | `"sqlite"` | Database driver: `sqlite` or `postgres`. |
 | `url` | string | `"hub.db"` | Connection string or file path. |
 
+:::caution[Postgres: `broker_dispatch` index on upgrade]
+On Postgres, auto-migrate creates the `brokerdispatch_state_updated_at` index on `broker_dispatch (state, updated_at)` with a plain `CREATE INDEX`, which blocks writes to the table while it builds. On a large deployment, create the index before upgrading so auto-migrate finds it already in place:
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS brokerdispatch_state_updated_at ON broker_dispatch (state, updated_at);
+```
+:::
+
 ### Authentication (`server.auth`)
 
 | Field | Type | Default | Description |
@@ -200,6 +209,8 @@ Persistence settings for the Hub.
 | `authorized_domains` | list | `[]` | Limit access to specific email domains. |
 | `user_access_mode` | string | `"open"` | Who may sign in: `"open"` (any verified email, subject to `authorized_domains` if set), `"domain_restricted"` (email domain must be in `authorized_domains`), or `"invite_only"` (the email must belong to an invited, allow-listed or existing user). Users in `admin_emails` are always allowed. |
 | `default_user_role` | string | `"member"` | Hub role given to a user when their account is first created or activated: first sign-in, including the first sign-in of an invited or allow-listed user. Values: `"member"` or `"viewer"` (`"admin"` is rejected; use `admin_emails`). Users in `admin_emails` are always admins. Changing it does not affect existing users. It is also the role given to an admin who is removed from `admin_emails`. See [Hub roles](/scion/hosted/ha/permissions/#hub-roles). Environment: `SCION_SEED_SERVER_AUTH_DEFAULTUSERROLE` (recommended) or `SCION_SERVER_AUTH_DEFAULTUSERROLE` (per-node, deprecated for Layer-1 keys). |
+| `agent_run_scope` | string | `"off"` | How the Hub treats the run an agent token was issued for. Agent tokens carry a `run_id` claim. `"off"` ignores it; `"observe"` compares it with the agent's current run and logs and counts mismatches (metric `scion.hub.agent_token.run_scope`) without refusing any request. Enforcement cannot be selected yet. Read at startup, so a change needs a Hub restart. Environment: `SCION_SERVER_AUTH_AGENTRUNSCOPE`. |
+| `agent_run_scope_legacy_until` | string | | RFC 3339 time after which agent tokens issued without a `run_id` claim are no longer accepted by the run check (in `observe` mode, counted as mismatches). Empty means no cut-off. Environment: `SCION_SERVER_AUTH_AGENTRUNSCOPELEGACYUNTIL`. |
 
 ### Proxy Auth (`server.auth.proxy`)
 
@@ -1137,6 +1148,19 @@ Or via environment variable:
 ```bash
 export SCION_SERVER_HUB_GCPIAMCHECKMODE=enforce
 ```
+
+An unset value takes the default shown above. A value that is set but not recognised (for example a typo) takes the stricter value instead: `"enforce"` for `gcp_iam_check_mode` and `"fail-closed"` for `gcp_iam_deny_unknown_policy`, with a warning in the Hub log.
+
+### Changing the Settings from the Admin UI
+
+On a Hub with database-backed settings (every driver), `gcp_iam_check_mode` and `gcp_iam_deny_unknown_policy` are the `gcp_iam` operational settings section. A hub admin edits them on the **GCP Identity** tab of **Admin > Server Config** (or with `PUT /api/v1/admin/server-config`), and the change applies on every replica without a restart. The value in `settings.yaml` or the environment is the deploy-time value the Hub starts from; a saved value overrides it in either direction.
+
+- Only a hub admin signed in with an interactive session can change these settings or reset the section. User access tokens, federated users, agents and brokers are refused with `403`.
+- A saved value must be one of the values listed above; an empty or unrecognised value is rejected with `422` and nothing is saved.
+- A change that moves either setting to its less strict value is refused with `409` while hub-scoped service account assignment is configured: the hub default GCP identity mode is **Assign**, or any hub-scoped service account is registered. Resetting the section to its deploy-time value follows the same rule.
+- Every change is recorded in the mutation audit log (`hub_setting_update`) with the caller, time, old and new value, and the surface (`server-config` or `section-reset`) before it is written. If the record cannot be written, the change is not made.
+- Each other replica applies the change on reload only if the stored values are valid and the change passes the same rule. A change that moves either setting to its less strict value must also be named by the latest audit record for each changed key, and that write must not be recorded as not made. The replica then records `hub_setting_apply` (surface `reload`, with the original caller, or the hub itself when no audited write names the change). Otherwise the replica keeps the values it applied, logs an error and records `hub_setting_apply_refused` once. This covers a stored value that cannot be used and a less strict value that no audited write names, including one left by a row that changes or disappears. If the settings store cannot be read, the Hub keeps the values it last applied.
+- The page shows the values the Hub applies, and marks a key that an environment variable sets on this node.
 
 ### Enablement Checklist
 
