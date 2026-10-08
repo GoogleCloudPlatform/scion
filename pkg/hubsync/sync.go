@@ -1489,10 +1489,25 @@ func isLocalhostEndpoint(endpoint string) bool {
 	return host == "localhost" || host == "127.0.0.1" || host == "::1"
 }
 
-// wrapHubError wraps a Hub error with guidance to disable Hub integration.
-// When running inside a hub-managed agent, the local-only mode hint is
-// suppressed because disabling the Hub would break orchestration connectivity.
+// emptyResponseNote replaces the local-only hint when the hub answered a call
+// that needs a body with an empty response (apiclient.ErrNoContent). The hub
+// was reachable, so suggesting local-only mode would be misleading. The
+// wording matches the note used by the CLI command paths in cmd.
+const emptyResponseNote = "\n\nThe hub returned an empty response where a result was expected."
+
+// wrapHubError wraps a Hub error with guidance for the user:
+//   - An empty response from a call that needs a body (an error wrapping
+//     apiclient.ErrNoContent) gets a note saying so and no local-only hint,
+//     since the hub was reachable.
+//   - A 401 asks the user to log in again, or, inside a hub-managed agent,
+//     says the hub rejected the agent's credentials.
+//   - Any other error gets guidance to disable Hub integration. When running
+//     inside a hub-managed agent, the local-only mode hint is suppressed
+//     because disabling the Hub would break orchestration connectivity.
 func wrapHubError(err error) error {
+	if errors.Is(err, apiclient.ErrNoContent) {
+		return fmt.Errorf("%w"+emptyResponseNote, err)
+	}
 	if apiclient.IsUnauthorizedError(err) {
 		// `scion hub` is filtered out of the command tree in agent mode, so a
 		// hub-managed agent cannot run `scion hub auth login` and must not be
