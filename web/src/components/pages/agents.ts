@@ -101,10 +101,21 @@ interface GlobalAgentsResponse {
   agents?: Agent[];
   nextCursor?: string;
   totalCount?: number;
+  /** `totalCount` is a lower bound. */
+  totalCountApproximate?: boolean;
   /** Only when `fit` was sent: whether the whole set fit in this response. */
   complete?: boolean;
-  /** Only with `stats=1`. `agents` is omitted when `total` is above 2,000 (count-only). */
-  stats?: { total: number; running: number; agents?: Array<[string, string]> };
+  /**
+   * Only with `stats=1`. `agents` is omitted when `total` is above 2,000
+   * (count-only); `totalApproximate` marks `total` and `running` as lower
+   * bounds.
+   */
+  stats?: {
+    total: number;
+    running: number;
+    agents?: Array<[string, string]>;
+    totalApproximate?: boolean;
+  };
   _capabilities?: Capabilities;
 }
 
@@ -1094,6 +1105,7 @@ export class ScionPageAgents extends LitElement {
       agents: seeded.agents,
       nextCursor: data.nextCursor,
       totalCount: data.totalCount ?? seeded.agents.length,
+      totalCountApproximate: data.totalCountApproximate,
       stats,
       liveChanged: epoch.changedIds,
       liveUnknown: epoch.unknownChanges,
@@ -1661,9 +1673,9 @@ export class ScionPageAgents extends LitElement {
     const win = this.agentWindow;
     if (win.state !== 'paged' || !win.memberIndex.countOnly) return nothing;
     const { total, running } = win.stats;
-    return html`<div class="agent-counts">
-      ${formatNumber(total)} agents · ${formatNumber(running)} running, as of last refresh
-    </div>`;
+    const mark = win.memberIndex.approximate ? '+' : '';
+    const counts = `${formatNumber(total)}${mark} agents · ${formatNumber(running)}${mark} running`;
+    return html`<div class="agent-counts">${counts}, as of last refresh</div>`;
   }
 
   /** The empty state of the current scope. */
@@ -1717,6 +1729,7 @@ export class ScionPageAgents extends LitElement {
       .rangeStart=${win.rangeStart}
       .rowsOnPage=${rowsOnPage}
       .total=${win.total}
+      .approximate=${win.totalApproximate}
       .pageSize=${this.pagerPageSize}
       .hasNext=${win.hasNext}
       .hasPrev=${win.hasPrev}

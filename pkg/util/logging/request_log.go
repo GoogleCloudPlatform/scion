@@ -399,7 +399,7 @@ func RequestLogMiddleware(logger *slog.Logger, component string, patterns []Path
 			if !isStreaming && !isUpgrade && duration > slowThreshold {
 				slog.Info("Slow request",
 					slog.String("method", r.Method),
-					slog.String("path", r.URL.Path),
+					slog.String("path", RequestPath(r)),
 					slog.Duration("elapsed", duration),
 					slog.Int("status", wrapped.statusCode),
 				)
