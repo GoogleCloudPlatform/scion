@@ -19,6 +19,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 )
 
@@ -118,6 +119,36 @@ type ScheduledMessageStore interface {
 	MarkScheduledMessageSent(ctx context.Context, id, messageID string, now time.Time) error
 	// MarkScheduledMessageFailed moves a claimed row to failed with reason.
 	MarkScheduledMessageFailed(ctx context.Context, id, reason string, now time.Time) error
+
+	// SendNowScheduledMessage moves the sender's row from failed with
+	// reason missed or interrupted back to pending, due at fireAt. It
+	// reports false when the row is not in that state (or not the
+	// sender's). Only the sender's explicit request calls it; the hub never
+	// returns a row to pending on its own once delivery has started.
+	SendNowScheduledMessage(ctx context.Context, senderUserID, id string, fireAt, now time.Time) (bool, error)
+	// DismissScheduledMessage moves the sender's failed row to cancelled,
+	// so it is no longer listed. It reports false when the row is not
+	// failed (or not the sender's).
+	DismissScheduledMessage(ctx context.Context, senderUserID, id string, now time.Time) (bool, error)
+
+	// ListStuckScheduledMessages returns up to limit rows that have been
+	// sending since before claimedBefore, oldest claim first.
+	ListStuckScheduledMessages(ctx context.Context, claimedBefore time.Time, limit int) ([]ScheduledChatMessage, error)
+	// MarkScheduledMessageInterrupted moves a row that is still sending
+	// under the claim made at claimedAt to failed with reason interrupted.
+	// It reports false when the row has changed since (finalized, or
+	// claimed again).
+	MarkScheduledMessageInterrupted(ctx context.Context, id string, claimedAt, now time.Time) (bool, error)
+	// PurgeScheduledMessages deletes sent and cancelled rows last updated
+	// before finalBefore and failed rows last updated before failedBefore,
+	// and returns how many it deleted. Pending and sending rows are kept.
+	PurgeScheduledMessages(ctx context.Context, finalBefore, failedBefore time.Time) (int64, error)
+	// DeleteScheduledMessagesForConversation deletes every row of the
+	// conversation, whatever its status (the conversation was deleted).
+	DeleteScheduledMessagesForConversation(ctx context.Context, conversationKey string) (int64, error)
+	// DeleteScheduledMessagesForSender deletes every row of the sender,
+	// whatever its status (the user was deleted).
+	DeleteScheduledMessagesForSender(ctx context.Context, senderUserID string) (int64, error)
 }
 
 // scheduledMessageStoreFrom returns the scheduled-message store behind a
@@ -303,8 +334,7 @@ func (s *sqliteWebChatStore) CountActiveScheduledMessages(ctx context.Context, s
 
 func (s *sqliteWebChatStore) ListScheduledMessages(ctx context.Context, senderUserID, conversationKey string) ([]ScheduledChatMessage, error) {
 	// Sent and cancelled rows are not listed; failed rows stay until the
-	// user dismisses them. Phase 2: purge sent/cancelled after 7 days and
-	// failed after 30, and on topic, DM and user delete.
+	// user dismisses them or PurgeScheduledMessages removes them.
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT `+sqliteScheduledColumns+` FROM webchat_scheduled_message
 		  WHERE sender_user_id = ? AND conversation_key = ? AND status IN (?, ?, ?)
@@ -410,6 +440,97 @@ func (s *sqliteWebChatStore) MarkScheduledMessageFailed(ctx context.Context, id,
 		return fmt.Errorf("webchat store: mark scheduled message failed: %w", err)
 	}
 	return nil
+}
+
+func (s *sqliteWebChatStore) SendNowScheduledMessage(ctx context.Context, senderUserID, id string, fireAt, now time.Time) (bool, error) {
+	return execOneRow(s.db.ExecContext(ctx,
+		`UPDATE webchat_scheduled_message
+		    SET status = ?, fire_at = ?, failure_reason = NULL, message_id = NULL, claimed_at = NULL, updated_at = ?
+		  WHERE id = ? AND sender_user_id = ? AND status = ? AND failure_reason IN (?, ?)`,
+		ScheduledMessagePending, sqliteScheduledTime(scheduledFireTime(fireAt)), sqliteScheduledTime(now),
+		id, senderUserID, ScheduledMessageFailed, ScheduledFailureMissed, ScheduledFailureInterrupted))
+}
+
+func (s *sqliteWebChatStore) DismissScheduledMessage(ctx context.Context, senderUserID, id string, now time.Time) (bool, error) {
+	return execOneRow(s.db.ExecContext(ctx,
+		`UPDATE webchat_scheduled_message SET status = ?, updated_at = ?
+		  WHERE id = ? AND sender_user_id = ? AND status = ?`,
+		ScheduledMessageCancelled, sqliteScheduledTime(now), id, senderUserID, ScheduledMessageFailed))
+}
+
+func (s *sqliteWebChatStore) ListStuckScheduledMessages(ctx context.Context, claimedBefore time.Time, limit int) ([]ScheduledChatMessage, error) {
+	// claimed_at keeps its fractional seconds, so it does not compare
+	// correctly as text; the few sending rows are filtered here instead.
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+sqliteScheduledColumns+` FROM webchat_scheduled_message WHERE status = ?`,
+		ScheduledMessageSending)
+	if err != nil {
+		return nil, fmt.Errorf("webchat store: list stuck scheduled messages: %w", err)
+	}
+	all, err := collectSQLiteScheduled(rows)
+	if err != nil {
+		return nil, err
+	}
+	return stuckScheduledMessages(all, claimedBefore, limit), nil
+}
+
+// stuckScheduledMessages returns up to limit of rows claimed before
+// claimedBefore, oldest claim first.
+func stuckScheduledMessages(rows []ScheduledChatMessage, claimedBefore time.Time, limit int) []ScheduledChatMessage {
+	out := make([]ScheduledChatMessage, 0, len(rows))
+	for _, m := range rows {
+		if m.ClaimedAt != nil && m.ClaimedAt.Before(claimedBefore) {
+			out = append(out, m)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].ClaimedAt.Before(*out[j].ClaimedAt) })
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out
+}
+
+func (s *sqliteWebChatStore) MarkScheduledMessageInterrupted(ctx context.Context, id string, claimedAt, now time.Time) (bool, error) {
+	return execOneRow(s.db.ExecContext(ctx,
+		`UPDATE webchat_scheduled_message SET status = ?, failure_reason = ?, updated_at = ?
+		  WHERE id = ? AND status = ? AND claimed_at = ?`,
+		ScheduledMessageFailed, ScheduledFailureInterrupted, sqliteScheduledTime(now),
+		id, ScheduledMessageSending, sqliteScheduledTime(claimedAt)))
+}
+
+func (s *sqliteWebChatStore) PurgeScheduledMessages(ctx context.Context, finalBefore, failedBefore time.Time) (int64, error) {
+	// The cutoffs are whole seconds, so a row updated within the second
+	// after a cutoff may go too; retention is measured in days.
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM webchat_scheduled_message
+		  WHERE (status IN (?, ?) AND updated_at < ?) OR (status = ? AND updated_at < ?)`,
+		ScheduledMessageSent, ScheduledMessageCancelled, sqliteScheduledTime(finalBefore.UTC().Truncate(time.Second)),
+		ScheduledMessageFailed, sqliteScheduledTime(failedBefore.UTC().Truncate(time.Second)))
+	return scheduledRowsAffected(res, err, "purge scheduled messages")
+}
+
+func (s *sqliteWebChatStore) DeleteScheduledMessagesForConversation(ctx context.Context, conversationKey string) (int64, error) {
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM webchat_scheduled_message WHERE conversation_key = ?`, conversationKey)
+	return scheduledRowsAffected(res, err, "delete scheduled messages of conversation")
+}
+
+func (s *sqliteWebChatStore) DeleteScheduledMessagesForSender(ctx context.Context, senderUserID string) (int64, error) {
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM webchat_scheduled_message WHERE sender_user_id = ?`, senderUserID)
+	return scheduledRowsAffected(res, err, "delete scheduled messages of sender")
+}
+
+// scheduledRowsAffected returns the row count of a DELETE.
+func scheduledRowsAffected(res sql.Result, err error, what string) (int64, error) {
+	if err != nil {
+		return 0, fmt.Errorf("webchat store: %s: %w", what, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("webchat store: %s: %w", what, err)
+	}
+	return n, nil
 }
 
 // execOneRow reports whether an UPDATE affected exactly one row.

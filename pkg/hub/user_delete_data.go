@@ -246,6 +246,9 @@ const userScopedDataCleanupTimeout = 30 * time.Second
 func (s *Server) removeUserScopedData(ctx context.Context, userID string) bool {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), userScopedDataCleanupTimeout)
 	defer cancel()
+	// The user's scheduled chat messages go too (best effort; one left
+	// behind fails at fire time and is purged later).
+	s.deleteScheduledMessagesOfSender(ctx, userID)
 	return s.removeUserScopedDataCtx(ctx, userID)
 }
 

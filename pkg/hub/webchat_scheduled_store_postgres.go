@@ -174,7 +174,6 @@ func (s *pgWebChatStore) CountActiveScheduledMessages(ctx context.Context, sende
 }
 
 func (s *pgWebChatStore) ListScheduledMessages(ctx context.Context, senderUserID, conversationKey string) ([]ScheduledChatMessage, error) {
-	// Phase 2: purge (see the SQLite twin).
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT `+pgScheduledColumns+` FROM webchat_scheduled_message
 		  WHERE sender_user_id = $1 AND conversation_key = $2 AND status IN ($3, $4, $5)
@@ -262,4 +261,61 @@ func (s *pgWebChatStore) MarkScheduledMessageFailed(ctx context.Context, id, rea
 		return fmt.Errorf("webchat store: mark scheduled message failed: %w", err)
 	}
 	return nil
+}
+
+func (s *pgWebChatStore) SendNowScheduledMessage(ctx context.Context, senderUserID, id string, fireAt, now time.Time) (bool, error) {
+	return execOneRow(s.db.ExecContext(ctx,
+		`UPDATE webchat_scheduled_message
+		    SET status = $1, fire_at = $2, failure_reason = NULL, message_id = NULL, claimed_at = NULL, updated_at = $3
+		  WHERE id = $4 AND sender_user_id = $5 AND status = $6 AND failure_reason IN ($7, $8)`,
+		ScheduledMessagePending, scheduledFireTime(fireAt), now.UTC(),
+		id, senderUserID, ScheduledMessageFailed, ScheduledFailureMissed, ScheduledFailureInterrupted))
+}
+
+func (s *pgWebChatStore) DismissScheduledMessage(ctx context.Context, senderUserID, id string, now time.Time) (bool, error) {
+	return execOneRow(s.db.ExecContext(ctx,
+		`UPDATE webchat_scheduled_message SET status = $1, updated_at = $2
+		  WHERE id = $3 AND sender_user_id = $4 AND status = $5`,
+		ScheduledMessageCancelled, now.UTC(), id, senderUserID, ScheduledMessageFailed))
+}
+
+func (s *pgWebChatStore) ListStuckScheduledMessages(ctx context.Context, claimedBefore time.Time, limit int) ([]ScheduledChatMessage, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+pgScheduledColumns+` FROM webchat_scheduled_message
+		  WHERE status = $1 AND claimed_at < $2
+		  ORDER BY claimed_at, id LIMIT $3`,
+		ScheduledMessageSending, claimedBefore.UTC(), limit)
+	if err != nil {
+		return nil, fmt.Errorf("webchat store: list stuck scheduled messages: %w", err)
+	}
+	return collectPGScheduled(rows)
+}
+
+func (s *pgWebChatStore) MarkScheduledMessageInterrupted(ctx context.Context, id string, claimedAt, now time.Time) (bool, error) {
+	return execOneRow(s.db.ExecContext(ctx,
+		`UPDATE webchat_scheduled_message SET status = $1, failure_reason = $2, updated_at = $3
+		  WHERE id = $4 AND status = $5 AND claimed_at = $6`,
+		ScheduledMessageFailed, ScheduledFailureInterrupted, now.UTC(),
+		id, ScheduledMessageSending, claimedAt.UTC()))
+}
+
+func (s *pgWebChatStore) PurgeScheduledMessages(ctx context.Context, finalBefore, failedBefore time.Time) (int64, error) {
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM webchat_scheduled_message
+		  WHERE (status IN ($1, $2) AND updated_at < $3) OR (status = $4 AND updated_at < $5)`,
+		ScheduledMessageSent, ScheduledMessageCancelled, finalBefore.UTC(),
+		ScheduledMessageFailed, failedBefore.UTC())
+	return scheduledRowsAffected(res, err, "purge scheduled messages")
+}
+
+func (s *pgWebChatStore) DeleteScheduledMessagesForConversation(ctx context.Context, conversationKey string) (int64, error) {
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM webchat_scheduled_message WHERE conversation_key = $1`, conversationKey)
+	return scheduledRowsAffected(res, err, "delete scheduled messages of conversation")
+}
+
+func (s *pgWebChatStore) DeleteScheduledMessagesForSender(ctx context.Context, senderUserID string) (int64, error) {
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM webchat_scheduled_message WHERE sender_user_id = $1`, senderUserID)
+	return scheduledRowsAffected(res, err, "delete scheduled messages of sender")
 }

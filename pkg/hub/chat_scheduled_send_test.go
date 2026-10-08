@@ -897,6 +897,7 @@ func TestScheduledStore_Postgres(t *testing.T) {
 		sms[i] = scheduledMessageStoreFrom(wcs)
 	}
 	testScheduledStoreTransitions(t, sms[0])
+	testScheduledStorePhase2Transitions(t, sms[0])
 	testScheduledStoreDuePerSender(t, sms[0])
 	testCancelClaimRace(t, sms[0], sms[1], "pg-race")
 	testOneSenderTwoReplicas(t, sms[0], sms[1], "pg-one-sender", 30)
