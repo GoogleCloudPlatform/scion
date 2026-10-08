@@ -221,7 +221,7 @@ space := $(empty) $(empty)
 #
 # The entadapter run has a 60m go test timeout. On green main runs it took
 # ~774s and ~1259s, but GoogleCloudPlatform/scion#2855 hit the old 40m
-# (2400s) limit on a runner 2-4x slower than usual, with no failing or hung
+# (2400s) limit on a runner 2-3x slower than usual, with no failing or hung
 # test (ptone/scion#3945). A timeout there also stops the storetest and
 # pkg/hub runs below, so the headroom is kept generous.
 test-launch-store-postgres:
