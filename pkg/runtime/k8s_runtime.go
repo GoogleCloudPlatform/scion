@@ -49,6 +49,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/types"
 	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/remotecommand"
@@ -666,10 +667,19 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 		// A previous pod started with a run ID mounts its run's per-run
 		// objects (ptone/scion#3101), which the fixed-name cleanup does not
 		// reach. When that pod is not live they are removed too, after it
-		// is (a live pod's are left, for the sweep or a delete of that run).
+		// is. When it is live, they are removed only once a re-read shows
+		// that pod (its UID) gone after cleanupStalePod, which swallows
+		// non-NFS delete failures (for an NFS-home pod it has already
+		// waited for the stop or failed the start); otherwise they are
+		// left, for the sweep or a delete of that run (ptone/scion#3753).
 		prevPodRun := ""
-		if p, gerr := r.Client.Clientset.CoreV1().Pods(namespace).Get(ctx, config.Name, metav1.GetOptions{}); gerr == nil && !k8sPodIsLive(p) {
-			prevPodRun = p.Labels[api.LabelRunID]
+		livePodRun, livePodUID := "", types.UID("")
+		if p, gerr := r.Client.Clientset.CoreV1().Pods(namespace).Get(ctx, config.Name, metav1.GetOptions{}); gerr == nil {
+			if !k8sPodIsLive(p) {
+				prevPodRun = p.Labels[api.LabelRunID]
+			} else {
+				livePodRun, livePodUID = p.Labels[api.LabelRunID], p.UID
+			}
 		}
 		if !nfsHomeStart {
 			r.cleanupAgentSecrets(ctx, namespace, config.Name)
@@ -680,12 +690,17 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 		if nfsHomeStart {
 			r.cleanupAgentSecrets(ctx, namespace, config.Name)
 		}
+		if livePodRun != "" && r.previousPodGone(ctx, namespace, config.Name, livePodRun, livePodUID) {
+			prevPodRun = livePodRun
+		}
 		// Remaining case: if a start of that previous pod's run is retrying
-		// at this moment (before its pod exists), this also removes that
-		// start's objects. The no-run start wins, as a no-run delete does
-		// (see the delete-wins note in CleanupAgentResources); the retrying
-		// start then fails (verifyStartObjects, or its pod create) or its
-		// pod cannot mount them.
+		// at this moment, before its pod exists, this also removes that
+		// start's objects. (A pod of that run already holding the name
+		// keeps them: previousPodGone reports it not gone.)
+		// The no-run start wins, as a no-run delete does (see the
+		// delete-wins note in CleanupAgentResources); the retrying start
+		// then fails (verifyStartObjects, or its pod create) or its pod
+		// cannot mount them.
 		r.deletePodRunObjects(ctx, namespace, config.Name, prevPodRun, "Removing a per-run object of the previous pod's run before a start without a run ID")
 	}
 	cleanupArmed = true
