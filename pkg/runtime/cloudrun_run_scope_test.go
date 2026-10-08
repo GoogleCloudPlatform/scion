@@ -489,17 +489,68 @@ func TestCloudRunRunScoped_NilInstanceRefused(t *testing.T) {
 }
 
 // Run: GetInstance answering (nil, nil) is not reused as a legacy instance:
-// Run fails with no start or create.
+// Run fails with no start or create, whether or not the start carries a run
+// label (without one, the old path started it with an empty etag).
 func TestCloudRunRun_NilExistingInstanceRefused(t *testing.T) {
-	fake := &fakeInstancesClient{} // GetInstance returns (nil, nil)
-	rt := newFakeCloudRunRuntime(t, fake)
+	for _, tc := range []struct {
+		name string
+		cfg  RunConfig
+	}{
+		{"labelled run", runCfgForRun("run-b")},
+		{"no run label", runConfigForTest()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeInstancesClient{} // GetInstance returns (nil, nil)
+			rt := newFakeCloudRunRuntime(t, fake)
 
-	_, err := rt.Run(context.Background(), runCfgForRun("run-b"))
-	want := "failed to get instance " + cloudRunInstanceID("agent-1") + ": GetInstance returned no instance"
-	if err == nil || err.Error() != want {
-		t.Fatalf("Run = %v, want %q", err, want)
+			_, err := rt.Run(context.Background(), tc.cfg)
+			want := "failed to get instance " + cloudRunInstanceID("agent-1") + ": GetInstance returned no instance"
+			if err == nil || err.Error() != want {
+				t.Fatalf("Run = %v, want %q", err, want)
+			}
+			if n := len(fake.startReqs) + len(fake.createReqs) + len(fake.stopReqs) + len(fake.deleteReqs); n != 0 {
+				t.Errorf("write calls = %d, want 0", n)
+			}
+		})
 	}
-	if n := len(fake.startReqs) + len(fake.createReqs) + len(fake.stopReqs) + len(fake.deleteReqs); n != 0 {
-		t.Errorf("write calls = %d, want 0", n)
+}
+
+// nilOnRereadInstances is statefulInstances whose second and later
+// GetInstance answer (nil, nil).
+type nilOnRereadInstances struct {
+	*statefulInstances
+}
+
+func (n nilOnRereadInstances) GetInstance(ctx context.Context, req *runpb.GetInstanceRequest, opts ...gax.CallOption) (*runpb.Instance, error) {
+	if n.gets > 0 {
+		n.gets++
+		return nil, nil
+	}
+	return n.statefulInstances.GetInstance(ctx, req, opts...)
+}
+
+// A nil read on the re-read after a refused call is refused too, with no
+// further write call.
+func TestCloudRunRunScoped_NilInstanceOnRereadRefused(t *testing.T) {
+	for _, op := range crOps {
+		t.Run(op.name, func(t *testing.T) {
+			s := newStatefulInstances()
+			s.put(crName, "run-a")
+			s.failWrite = status.Error(codes.Aborted, "etag mismatch")
+			rt := newFakeCloudRunRuntime(t, &fakeInstancesClient{})
+			rt.newClient = func(context.Context) (cloudrun.InstancesAPI, error) { return nilOnRereadInstances{s}, nil }
+
+			err := op.call(rt, RunRef{ID: crInstanceID, RunID: "run-a"})
+			want := "failed to " + strings.ToLower(op.name) + " instance: GetInstance returned no instance"
+			if err == nil || err.Error() != want {
+				t.Fatalf("%s = %v, want %q", op.name, err, want)
+			}
+			if n := op.writes(s); n != 1 {
+				t.Errorf("%sInstance called %d times, want 1", op.name, n)
+			}
+			if s.gets != 2 {
+				t.Errorf("GetInstance called %d times, want 2", s.gets)
+			}
+		})
 	}
 }
