@@ -781,6 +781,7 @@ describe('artifact page', () => {
     window.history.replaceState({}, '', `/projects/p-1/artifacts/${ID}`);
     const meta = artifact('plan.md', 'text/markdown');
     const bodies: string[] = [];
+    const finalizeBodies: string[] = [];
     const urls = mockFetch(meta, 'We ship in Q3.\n', {
       write: (method, url) => {
         if (url.endsWith('/finalize')) {
@@ -810,6 +811,8 @@ describe('artifact page', () => {
       vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
         if (init?.method === 'POST' && String(input).endsWith('/versions'))
           bodies.push(String(init.body));
+        if (init?.method === 'POST' && String(input).endsWith('/finalize'))
+          finalizeBodies.push(String(init.body));
         return realFetch(input, init);
       })
     );
@@ -839,6 +842,8 @@ describe('artifact page', () => {
     await settle(el);
     expect(bodies).toHaveLength(1);
     expect(JSON.parse(bodies[0]!).kind).toBe('review');
+    // The review names the version it was made against.
+    expect(finalizeBodies.map((b) => JSON.parse(b) as { base: number })).toEqual([{ base: 1 }]);
     expect(urls.some((u) => u.startsWith('PUT ') && u.includes('/versions/2/files/plan.md'))).toBe(
       true
     );
@@ -888,5 +893,6 @@ describe('artifact page', () => {
     );
     expect(alert).toBeDefined();
     expect(alert!.textContent).not.toContain('Publish again');
+    expect(alert!.textContent).not.toContain('Edit');
   });
 });

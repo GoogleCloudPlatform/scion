@@ -288,8 +288,14 @@ export interface PublishRequest {
   title?: string | undefined;
   key?: string | undefined;
   note?: string | undefined;
-  /** Version kind; unset publishes. A review needs artifactId. */
+  /** Version kind; unset publishes. A review needs artifactId and base. */
   kind?: 'publish' | 'review' | undefined;
+  /**
+   * For a review, the version it was made against. The hub checks the
+   * review against that version only and refuses it (409 stale_review)
+   * unless it is still the current version.
+   */
+  base?: number | undefined;
   entry: string;
   files: PublishFile[];
   /** Called after each upload with the number of files uploaded so far. */
@@ -400,7 +406,7 @@ export async function publishFiles(req: PublishRequest): Promise<ArtifactRespons
     }
     if (code === 'stale_review') {
       throw new PublishError(
-        'A newer version was published while you were reviewing; your review was not saved. Review the current version.',
+        'The version you reviewed is no longer the latest; your review was not saved. Review the current version.',
         null
       );
     }
@@ -449,7 +455,16 @@ export async function publishFiles(req: PublishRequest): Promise<ArtifactRespons
   }
   let res: Response;
   try {
-    res = await apiFetch(`${artifactPath(id)}/versions/${seq}/finalize`, { method: 'POST' });
+    res = await apiFetch(
+      `${artifactPath(id)}/versions/${seq}/finalize`,
+      req.kind === 'review'
+        ? {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ base: req.base }),
+          }
+        : { method: 'POST' }
+    );
   } catch (err) {
     throw new PublishError(err instanceof Error ? err.message : 'finalize failed', left());
   }
@@ -483,7 +498,7 @@ export function reviewRejectedMessage(body: { error?: { details?: unknown } }): 
   return (
     'Your review changes text outside marks' +
     (where ? `: ${where}` : '') +
-    '. Mark every change with the toolbar, or use Edit to publish a plain edit. The review was not saved.'
+    '. A review may only add marks: mark every change with the toolbar. The review was not saved.'
   );
 }
 

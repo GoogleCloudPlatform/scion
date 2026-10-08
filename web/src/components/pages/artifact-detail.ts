@@ -670,6 +670,7 @@ export class ScionPageArtifactDetail extends LitElement {
       await publishFiles({
         artifactId: this.artifactId,
         kind: 'review',
+        base: v.seq,
         entry: v.entryPath,
         note: this.reviewNote.trim() || undefined,
         files,
@@ -1328,7 +1329,7 @@ export class ScionPageArtifactDetail extends LitElement {
       ${!marksOnly
         ? html`<sl-alert variant="warning" open>
             <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
-            Text outside marks has changed. Undo those edits, or use Edit to publish a plain edit.
+            Text outside marks has changed. Undo those edits: a review may only add marks.
           </sl-alert>`
         : nothing}
       ${this.reviewError
