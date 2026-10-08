@@ -94,13 +94,82 @@ func TestParseExpiry_Invalid(t *testing.T) {
 		"abc",
 		"-5d",
 		"0d",
-		"30h",
+		"0h",
+		"0m",
+		"-2h",
+		"-90m",
+		"h",
+		"m",
+		"2s",
+		"2w",
+		"1.5x",
+		"2026-13-01T00:00:00Z",
 	}
 
 	for _, input := range tests {
 		_, err := parseExpiry(input)
 		if err == nil {
 			t.Errorf("expected error for input %q, got nil", input)
+			continue
+		}
+		// The error must list every accepted form.
+		for _, form := range []string{"90m", "2h", "30d", "1y", "RFC 3339"} {
+			if !strings.Contains(err.Error(), form) {
+				t.Errorf("error for %q does not list accepted form %q: %v", input, form, err)
+			}
+		}
+	}
+}
+
+// TestParseExpiryAt_Table pins every accepted --expires form against a fixed
+// reference time: the pre-existing day, year and RFC 3339 forms must parse
+// exactly as before, and the minute and hour forms (ptone/scion#3771) must
+// resolve relative to now.
+func TestParseExpiryAt_Table(t *testing.T) {
+	now := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		in   string
+		want time.Time
+	}{
+		// Existing forms, unchanged.
+		{"30d", now.Add(30 * 24 * time.Hour)},
+		{"90d", now.Add(90 * 24 * time.Hour)},
+		{"1d", now.Add(24 * time.Hour)},
+		{" 7d ", now.Add(7 * 24 * time.Hour)},
+		{"1y", now.AddDate(1, 0, 0)},
+		{"2026-12-31T00:00:00Z", time.Date(2026, 12, 31, 0, 0, 0, 0, time.UTC)},
+		{"2026-12-31T10:00:00+02:00", time.Date(2026, 12, 31, 8, 0, 0, 0, time.UTC)},
+		// New forms.
+		{"2h", now.Add(2 * time.Hour)},
+		{"1h", now.Add(time.Hour)},
+		{"30h", now.Add(30 * time.Hour)},
+		{"90m", now.Add(90 * time.Minute)},
+		{"1m", now.Add(time.Minute)},
+		{" 45m ", now.Add(45 * time.Minute)},
+	}
+	for _, tt := range tests {
+		got, err := parseExpiryAt(tt.in, now)
+		if err != nil {
+			t.Errorf("parseExpiryAt(%q): unexpected error: %v", tt.in, err)
+			continue
+		}
+		if !got.Equal(tt.want) {
+			t.Errorf("parseExpiryAt(%q) = %v, want %v", tt.in, got, tt.want)
+		}
+	}
+}
+
+// TestHubTokenCreateHelpListsExpiryForms checks that both the flag usage and
+// the long help list the minute and hour forms alongside days, years and
+// RFC 3339.
+func TestHubTokenCreateHelpListsExpiryForms(t *testing.T) {
+	usage := hubTokenCreateCmd.Flags().Lookup("expires").Usage
+	for _, form := range []string{"90m", "2h", "30d", "1y", "RFC 3339"} {
+		if !strings.Contains(usage, form) {
+			t.Errorf("--expires usage missing %q: %s", form, usage)
+		}
+		if !strings.Contains(hubTokenCreateCmd.Long, form) {
+			t.Errorf("hub token create help missing expiry form %q", form)
 		}
 	}
 }
