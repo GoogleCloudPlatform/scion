@@ -121,6 +121,7 @@ there's no need to enable them one at a time).
 | `artifactregistry.googleapis.com` | `gcloud services list --enabled --filter="name:artifactregistry.googleapis.com" --format="value(name)" --project=PROJECT_ID` |
 | `aiplatform.googleapis.com` | `gcloud services list --enabled --filter="name:aiplatform.googleapis.com" --format="value(name)" --project=PROJECT_ID` |
 | `iam.googleapis.com` | `gcloud services list --enabled --filter="name:iam.googleapis.com" --format="value(name)" --project=PROJECT_ID` |
+| `iamcredentials.googleapis.com` | `gcloud services list --enabled --filter="name:iamcredentials.googleapis.com" --format="value(name)" --project=PROJECT_ID` |
 
 **Expected:** Each check returns the API name. If any is empty, enable all of them at once:
 
@@ -133,6 +134,7 @@ gcloud services enable \
   artifactregistry.googleapis.com \
   aiplatform.googleapis.com \
   iam.googleapis.com \
+  iamcredentials.googleapis.com \
   --project=PROJECT_ID
 ```
 
@@ -931,6 +933,46 @@ other keys that are obviously honoured (`server`, `schema_version`). This is
 pre-existing noise unrelated to this setting — the key is still read and
 applied; see the verification command above.
 
+### 6.3c Hub-minted service accounts
+
+Project owners can have the hub mint new GCP service accounts for agents
+(the hub's GCP identity settings). The hub calls the IAM API with its own
+credentials, which on this tier are the hub VM's service account,
+`scion-hub-HUB_NAME@PROJECT_ID.iam.gserviceaccount.com`. Minting creates the
+account, sets IAM policy on it, and deletes it again if a follow-up grant
+fails, so `deploy.sh` grants that service account
+`roles/iam.serviceAccountAdmin` on the project by default and enables
+`iamcredentials.googleapis.com`, which the hub uses to issue tokens for
+minted accounts. Set `hub_sa_minting: false` in the deploy config to skip
+the role grant; doing so does not revoke a grant from an earlier deploy (the
+deploy output prints the removal command).
+
+Verify:
+
+```bash
+gcloud projects get-iam-policy PROJECT_ID \
+  --flatten="bindings[].members" \
+  --filter="bindings.members:serviceAccount:scion-hub-HUB_NAME@PROJECT_ID.iam.gserviceaccount.com" \
+  --format="value(bindings.role)"
+```
+
+**Expected:** The list includes `roles/iam.serviceAccountAdmin`.
+
+Things to know:
+
+- **Passthrough is for getting started only.** `roles/iam.serviceAccountAdmin`
+  applies to every service account in the project. Agents in `passthrough`
+  mode (the default here, see §6.3b) use the VM's credentials, so they hold
+  the same roles as the hub, this one included. Beyond getting started,
+  switch the hub default to `assign` or `block` (§6.3b), and consider running
+  the hub in a project that holds no other privileged service accounts.
+- **Minted accounts start with no roles.** Grant a minted account whatever
+  its agents need (for example `roles/aiplatform.user` for Vertex AI) before
+  assigning it.
+- **Teardown does not delete minted accounts.** `deploy.sh --delete` removes
+  the hub VM's service account, and with it that account's role bindings,
+  but leaves any service accounts the hub minted.
+
 ### 6.4 Container images (if built locally)
 
 If `container_images.source` was `build`, verify images exist on the VM:
@@ -1029,7 +1071,7 @@ Only when the hybrid tier is on.
 | Hub health check fails after restart | Settings or IAP audience mismatch | SSH to VM, verify settings: `gcloud compute ssh scion-hub-HUB_NAME --zone=ZONE --project=PROJECT_ID --command='cat /home/scion/.scion/settings.yaml'`. Confirm `auth.mode` is `proxy` and the `audience` string is correct. |
 | Agents lack `GOOGLE_CLOUD_PROJECT` / `GOOGLE_CLOUD_LOCATION` | The hub env var write after the Phase 3 health check failed (a warning in the deploy output) | Run the manual `sqlite3` command from that warning, or set both as hub-scoped env vars (injection mode `always`) in the admin UI. See §6.3a. |
 | Admin's `default_gcp_identity_mode` change reverted to `passthrough` after a redeploy | `deploy.sh` rewrites the whole `settings.yaml`, not just the fields it manages | Expected — see §6.3b. Re-apply the change via the admin UI or API after redeploying. |
-| `iam.serviceAccounts.create` denied | User lacks IAM admin role | User needs `roles/iam.serviceAccountAdmin` on the project |
+| Minting a service account in the hub fails with `Permission 'iam.serviceAccounts.create' denied` | The hub mints service accounts as the hub VM's service account (`scion-hub-HUB_NAME@PROJECT_ID.iam.gserviceaccount.com`), not as the signed-in user, and that service account lacks `roles/iam.serviceAccountAdmin`. Current `deploy.sh` grants it by default; deploys made before that, or with `hub_sa_minting: false`, do not have it. | Re-run `deploy.sh`, or grant the role by hand (no hub restart; allow a few minutes for IAM to propagate): `gcloud projects add-iam-policy-binding PROJECT_ID --member=serviceAccount:scion-hub-HUB_NAME@PROJECT_ID.iam.gserviceaccount.com --role=roles/iam.serviceAccountAdmin --condition=None` and `gcloud services enable iamcredentials.googleapis.com --project=PROJECT_ID`. See §6.3c. |
 | Image build fails with `muse-code` error | Build script tried to build all images including unsupported ones | Verify the deploy script builds only `core-base`, `scion-base`, and `scion-antigravity`. If running manually, use `--target` to select individual images. |
 | SSH connection fails to VM | IAP tunnel access not granted, firewall rule missing, or VM missing the network tag the rule targets | Verify IAP tunnel role: `gcloud projects get-iam-policy PROJECT_ID --flatten="bindings[].members" --filter="bindings.role:roles/iap.tunnelResourceAccessor" --format="value(bindings.members)"`. Verify firewall rule exists and its target tags: `gcloud compute firewall-rules describe scion-hub-HUB_NAME-allow-iap-ssh --project=PROJECT_ID --format="value(targetTags)"`. Verify the VM carries a matching tag: `gcloud compute instances describe scion-hub-HUB_NAME --zone=ZONE --project=PROJECT_ID --format="value(tags.items)"`. |
 | `403 Forbidden` accessing the hub URL | User missing IAP access binding | Grant access: `gcloud iap web add-iam-policy-binding --resource-type=cloud-run --service=scion-hub-HUB_NAME-iap-proxy --region=REGION --project=PROJECT_ID --member=user:USER_EMAIL --role=roles/iap.httpsResourceAccessor` |
@@ -1259,6 +1301,9 @@ stops if either finds an unmarked resource or cannot complete.
   left alone on teardown, the same rule both ways.
 - **The NFS export's own data**, since it has no separate teardown: it's
   deleted along with the VM's boot disk, not by an explicit step.
+- **Service accounts the hub minted for agents** (§6.3c). The hub VM's own
+  service account is deleted, which removes its project role bindings
+  (`roles/iam.serviceAccountAdmin` included), but minted accounts stay.
 
 To remove it manually:
 
