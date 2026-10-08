@@ -15,8 +15,10 @@
 package config
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -160,16 +162,31 @@ func TestExecGitLsRemote_CallerDeadlineWins(t *testing.T) {
 	assert.Less(t, time.Since(start), 5*time.Second)
 	// The caller's own deadline fired, so this is not reported as our bound.
 	assert.NotContains(t, err.Error(), "timed out after")
+	// Not wrapping DeadlineExceeded is what keeps resolveGitHubRef silent
+	// on caller cancellation/deadline.
+	assert.False(t, errors.Is(err, context.DeadlineExceeded), "caller deadline must not be reported as our timeout: %v", err)
 }
 
 func TestResolveGitHubRef_TimeoutKeepsNaiveParse(t *testing.T) {
 	writeSleepingFakeGit(t)
 	shortenLsRemoteTimeout(t, 200*time.Millisecond)
 
+	var buf bytes.Buffer
+	prevLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prevLogger) })
+
+	const token = "ghs_SECRETTOKEN123"
 	parts := &GitHubURLParts{Owner: "org", Repo: "repo", Branch: "feature", Path: "x/templates"}
 	start := time.Now()
-	resolveGitHubRef(context.Background(), parts, "ghs_SECRETTOKEN123")
+	resolveGitHubRef(context.Background(), parts, token)
 	assert.Less(t, time.Since(start), 5*time.Second)
 	assert.Equal(t, "feature", parts.Branch)
 	assert.Equal(t, "x/templates", parts.Path)
+
+	logs := buf.String()
+	assert.Equal(t, 1, strings.Count(logs, "level=WARN"), "want exactly one WARN line, got:\n%s", logs)
+	assert.Contains(t, logs, "repo=org/repo")
+	assert.NotContains(t, logs, token)
+	assert.NotContains(t, logs, "x-access-token")
 }
