@@ -3960,8 +3960,11 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		if cfg.Model != "" {
 			agent.AppliedConfig.Model = cfg.Model
 		}
-		// Always apply thinking level from config (nil = explicit unset)
-		agent.AppliedConfig.ThinkingLevel = cfg.ThinkingLevel
+		// Thinking level is applied only when the request names it; an
+		// explicit null unsets it, an absent key leaves it alone.
+		if presentConfigKeys["thinking_level"] {
+			agent.AppliedConfig.ThinkingLevel = cfg.ThinkingLevel
+		}
 		if cfg.Task != "" {
 			agent.AppliedConfig.Task = cfg.Task
 		}
@@ -3980,23 +3983,13 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 			}
 			applyPatchAutoExposeEnv(agent.AppliedConfig, &old, project, cfg.Env)
 		}
-		// Narrow carve-out, ptone/scion#2493 R3-1/R4-1 -- NOT part of
-		// recordExplicitEdits/invariant E above, which has already run and
-		// correctly left CreateInputs alone for whichever of these fields
-		// were absent. This instead protects the LIVE InlineConfig value:
-		// the configure page no longer echoes an untouched telemetry
-		// control or an untouched env (R1-1, R2-1), so without this, the
-		// unconditional wholesale InlineConfig replace just below would wipe
-		// them -- an explicit telemetry opt-out, a project's env/telemetry
-		// stamp from create, or (for a legacy agent with no CreateInputs) a
-		// create-time explicit env key that `scion reincarnate` has no other
-		// record of at all. See carryForwardAbsentPageOwnedFields' doc
-		// comment for the field-by-field sweep. A present key (the user
-		// actually touched that field) always wins via cfg as already
-		// decoded; this only fills in a field the request left absent.
-		carryForwardAbsentPageOwnedFields(cfg, &old, presentConfigKeys)
 		dropEchoedInlineImage(cfg, &old, dispatchImageRegistry(s.GetDispatcher()))
-		agent.AppliedConfig.InlineConfig = cfg
+		// Start from the live InlineConfig and overlay only the keys the
+		// request names (ptone/scion#3901). The configure page does not
+		// render volumes, skills, MCP servers, services, command args or
+		// kubernetes, and sends telemetry and env only when touched, so a
+		// wholesale replace would wipe them on every Save and Start.
+		agent.AppliedConfig.InlineConfig = mergePresentInlineFields(old.InlineConfig, cfg, presentConfigKeys)
 	}
 
 	// Apply GCP identity update (only allowed for agents in 'created' phase)

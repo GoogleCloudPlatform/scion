@@ -15,7 +15,6 @@
 package hub
 
 import (
-	"encoding/json"
 	"maps"
 	"reflect"
 	"strings"
@@ -133,11 +132,11 @@ func recordExplicitEdits(ci *store.AgentCreateInputs, old *store.AgentAppliedCon
 		ensureInline().Model = cfg.Model
 	}
 
-	// ThinkingLevel: nil IS a value here (explicit-unset), not "absent" --
-	// applyAgentUpdate's own live write applies cfg.ThinkingLevel
-	// unconditionally ("Always apply thinking level from config"), so the
-	// diff must compare it unconditionally too, not skip a nil.
-	if !thinkingLevelEqual(cfg.ThinkingLevel, old.ThinkingLevel) {
+	// ThinkingLevel, present key only: applyAgentUpdate's live write applies
+	// cfg.ThinkingLevel only when "thinking_level" is in the request, so an
+	// absent key changes nothing here either. When present, nil IS a value
+	// (an explicit null unsets it), so a nil is compared, not skipped.
+	if present["thinking_level"] && !thinkingLevelEqual(cfg.ThinkingLevel, old.ThinkingLevel) {
 		ci.ThinkingLevel = cfg.ThinkingLevel
 		ensureInline().ThinkingLevel = cfg.ThinkingLevel
 	}
@@ -394,91 +393,51 @@ func recordOtherInlineFieldEdits(ensureInline func() *api.ScionConfig, oldInline
 	}
 }
 
-// carryForwardAbsentPageOwnedFields is the narrow page-owned carve-out from
-// options.md §7.2 (ptone/scion#2493 R3-1, extended by R4-1): a small,
-// explicit list of ScionConfig fields that the configure page used to send
-// UNCONDITIONALLY at base (e572e72) -- so the wholesale InlineConfig replace
-// in applyAgentUpdate was lossless for them -- but which Option C's
-// present-keys-only fixes (R1-1, R2-1) correctly made conditional, to stop
-// an untouched echo from freezing an unedited value into CreateInputs. That
-// correctness fix had a side effect this function undoes: for exactly these
-// fields, an untouched Save/Start now ALSO wipes the LIVE value via the same
-// wholesale replace, which base never did.
+// mergePresentInlineFields returns the new live AppliedConfig.InlineConfig
+// for a PATCH /api/v1/agents/{id} config edit (ptone/scion#3901): a deep copy
+// of oldInline (the pre-PATCH InlineConfig, possibly nil) with only the
+// fields whose JSON key is present in the request's raw "config" object
+// overwritten from cfg. A field the request does not mention -- volumes,
+// skills, mcp_servers, services, command_args, kubernetes, telemetry, env
+// and so on -- keeps its live value; a present field, including one sent as
+// an explicit empty value or null, replaces it.
 //
-// It must be called from applyAgentUpdate AFTER recordExplicitEdits (so
-// CreateInputs has already correctly recorded these fields as untouched)
-// and AFTER the field's own live-AppliedConfig write (e.g. the `cfg.Env !=
-// nil` block that copies cfg.Env into agent.AppliedConfig.Env), but BEFORE the wholesale
-// `agent.AppliedConfig.InlineConfig = cfg` assignment it exists to patch.
 // present is the same lower-cased, raw-JSON-derived presence set
-// recordExplicitEdits uses; old is the pre-PATCH snapshot.
+// recordExplicitEdits uses (keys are lower-cased because encoding/json
+// matches struct field names case-insensitively). A nil or empty present
+// leaves every field as it was.
 //
-// Each field's live-write guard already treats "absent" the same way this
-// does (a nil cfg.Env, or a cfg.Telemetry this function has not yet filled
-// in, changes nothing live), so adding an entry here only ever fills in a
-// value the live write itself would otherwise have left untouched -- it
-// never overrides an explicit value or a live write.
+// cfg must already carry every adjustment applyAgentUpdate makes to the
+// request before it becomes live (TZ strip, model alias resolution, the
+// auto-expose env carry in applyPatchAutoExposeEnv, dropEchoedInlineImage).
 //
-// Covered fields and why each needs it (the sweep review round 4 asked for,
-// confirmed against base e572e72's buildConfig):
-//   - Env: InlineConfig.Env holds the requester's explicit env. For a LEGACY
-//     agent (CreateInputs == nil) it is the only record of it:
-//     legacyCreateInputsFromAppliedConfig (reincarnate_config.go) reads
-//     exactly that field to reconstruct the agent's explicit inputs at
-//     reincarnate, so a nil InlineConfig.Env would silently drop every one
-//     of its env keys.
-//   - Telemetry: project/hub telemetry defaults and an explicit opt-out live
-//     only in InlineConfig.Telemetry; a nil value lets the broker's
-//     settings/template fallback silently override it (R3-1).
-//
-// Fields checked and found NOT to need this (base buildConfig already sent
-// them conditionally, or MORE is sent at head than at base -- see PR body's
-// wipe-class audit table): model, image, auth_selectedType, task (hub-side
-// "empty means unchanged" fields, excluded from recordExplicitEdits
-// entirely and never wholesale-overwritten with a meaningfully different
-// absent value); thinking_level (sent unconditionally at both base and
-// head); branch, user, agent_instructions, system_prompt, max_turns,
-// max_model_calls, max_duration (truthy-only at base, explicit-empty-always
-// at head -- strictly more is sent now, never less); resources (`if
-// hasResources` at both base and head, unchanged). harness/harness_config/
-// default_harness_config and volumes/skills/mcp_servers/services/secrets/
-// hub/kubernetes were never sent by this page at either revision, so they
-// are §7.2's general wholesale-replace problem, not this narrow carve-out's.
-func carryForwardAbsentPageOwnedFields(cfg *api.ScionConfig, old *store.AgentAppliedConfig, present map[string]bool) {
-	if old.InlineConfig == nil {
-		return
+// Like recordOtherInlineFieldEdits, this walks the JSON struct tags by
+// reflection so a new ScionConfig field is covered without a hand-written
+// list.
+func mergePresentInlineFields(oldInline, cfg *api.ScionConfig, present map[string]bool) *api.ScionConfig {
+	merged := deepCopyScionConfig(oldInline)
+	if merged == nil {
+		merged = &api.ScionConfig{}
+		if oldInline != nil {
+			// The JSON round trip failed; a shallow copy still keeps
+			// every live field rather than dropping them all.
+			*merged = *oldInline
+		}
 	}
-	if !present["telemetry"] && old.InlineConfig.Telemetry != nil {
-		cfg.Telemetry = deepCopyTelemetryConfig(old.InlineConfig.Telemetry)
+	if cfg == nil || len(present) == 0 {
+		return merged
 	}
-	if !present["env"] {
-		cfg.Env = maps.Clone(old.InlineConfig.Env)
+	dst := reflect.ValueOf(merged).Elem()
+	src := reflect.ValueOf(cfg).Elem()
+	t := src.Type()
+	for i := 0; i < t.NumField(); i++ {
+		name, _, _ := strings.Cut(t.Field(i).Tag.Get("json"), ",")
+		if name == "" || name == "-" || !present[strings.ToLower(name)] {
+			continue
+		}
+		dst.Field(i).Set(src.Field(i))
 	}
-}
-
-// deepCopyTelemetryConfig returns an independent copy of cfg via a JSON
-// marshal/unmarshal round trip (the same technique deepCopyScionConfig uses,
-// handlers_agent_create_helpers.go). Returns nil for a nil input, and nil
-// (with the error swallowed) if marshaling ever fails.
-//
-// Used by carryForwardAbsentPageOwnedFields to preserve the live
-// InlineConfig.Telemetry across a PATCH that never mentions "telemetry" --
-// a copy, not the same pointer, so the caller's subsequent wholesale
-// InlineConfig replace (agent.AppliedConfig.InlineConfig = cfg) never leaves
-// the new InlineConfig aliasing the old one's Telemetry.
-func deepCopyTelemetryConfig(cfg *api.TelemetryConfig) *api.TelemetryConfig {
-	if cfg == nil {
-		return nil
-	}
-	data, err := json.Marshal(cfg)
-	if err != nil {
-		return nil
-	}
-	var out api.TelemetryConfig
-	if err := json.Unmarshal(data, &out); err != nil {
-		return nil
-	}
-	return &out
+	return merged
 }
 
 // recordReincarnatePatchEdits records a `scion reincarnate` patch
