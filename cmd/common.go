@@ -429,6 +429,11 @@ func PrintUsingHub(endpoint string) {
 // is a plausible remedy (the hub is unreachable or failing).
 const localOnlyHint = "\n\nTo use local-only mode, run: scion hub disable"
 
+// emptyResponseNote replaces localOnlyHint when the Hub answered a call that
+// needs a body with an empty response (apiclient.ErrNoContent). The Hub was
+// reachable, so suggesting local-only mode would be misleading.
+const emptyResponseNote = "\n\nThe Hub returned an empty response where a result was expected."
+
 // hubError marks an error that has been through wrapHubError. Error() is the
 // fully rendered message (including any hint); Unwrap exposes the original
 // cause so callers can still use errors.Is / errors.As on it. Execute uses the
@@ -475,6 +480,9 @@ func isHubFailure(err error) bool {
 //   - Other API errors (4xx such as 400/403/404/409/422): returned as-is. The
 //     hub answered and the message is about the request, so suggesting that
 //     the user disable the hub would be misleading noise.
+//   - An empty response from a call that needs a body (an error wrapping
+//     apiclient.ErrNoContent): the hub answered, so it gets a note saying so
+//     instead of the local-only hint.
 //
 // Inside a hub-managed agent the local-only hint is never added, because
 // disabling the Hub would break orchestration connectivity.
@@ -487,6 +495,9 @@ func wrapHubError(err error) error {
 		// Already annotated further down the call chain; don't add a
 		// second hint.
 		return err
+	}
+	if errors.Is(err, apiclient.ErrNoContent) {
+		return &hubError{msg: err.Error() + emptyResponseNote, err: err}
 	}
 	if apiclient.IsUnauthorizedError(err) {
 		// `scion hub` is filtered out of the command tree in agent mode, so a

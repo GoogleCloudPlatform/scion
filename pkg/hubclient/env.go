@@ -102,6 +102,15 @@ func (s *envService) List(ctx context.Context, opts *ListEnvOptions) (*ListEnvRe
 }
 
 // Get returns a specific environment variable by key.
+// noContentError is returned by the env and secret Get calls when the Hub
+// answers with no body. It keeps the key-specific message and wraps
+// apiclient.ErrNoContent, so callers can tell an empty response apart from
+// a connectivity failure.
+type noContentError struct{ key string }
+
+func (e *noContentError) Error() string { return fmt.Sprintf("hub returned no content for %q", e.key) }
+func (e *noContentError) Unwrap() error { return apiclient.ErrNoContent }
+
 func (s *envService) Get(ctx context.Context, key string, opts *EnvScopeOptions) (*EnvVar, error) {
 	query := url.Values{}
 	if opts != nil {
@@ -123,7 +132,7 @@ func (s *envService) Get(ctx context.Context, key string, opts *EnvScopeOptions)
 	}
 	if envVar == nil {
 		// A 204 No Content response decodes to nil, nil.
-		return nil, fmt.Errorf("hub returned no content for %q", key)
+		return nil, &noContentError{key: key}
 	}
 	return envVar, nil
 }
