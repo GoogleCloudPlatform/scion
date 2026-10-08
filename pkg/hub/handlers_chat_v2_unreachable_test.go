@@ -591,9 +591,25 @@ func sendDMOutcome(t *testing.T, srv *Server, s store.Store, d *brokerMockDispat
 	return out
 }
 
-// A DM to an agent that was deleted (soft or hard) must be recorded and
-// reported as undelivered, with the same outcome as a DM to an agent ID
-// that never existed.
+// dmRefusal sends a DM to agentID and returns the refusal response. It
+// fails the test if the send persisted a message or dispatched anything.
+func dmRefusal(t *testing.T, srv *Server, s store.Store, d *brokerMockDispatcher, agentID string) (int, string) {
+	t.Helper()
+	dmKey := "dm:agent:" + agentID + ":user:" + DevUserID
+	before := len(d.getMessages())
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+dmKey+"/messages",
+		map[string]string{"content": "hello"})
+	res, err := s.ListMessages(t.Context(), store.MessageFilter{ThreadID: dmKey}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Empty(t, res.Items, "a refused DM must not persist a message")
+	require.Equal(t, before, len(d.getMessages()), "a refused DM must not dispatch")
+	return rec.Code, rec.Body.String()
+}
+
+// A DM to a soft-deleted agent is recorded and reported as undelivered. A
+// DM to an agent whose record is gone (hard-deleted) is refused exactly
+// like a DM to an agent ID that never existed: the DM peer check refuses
+// a missing peer with the uniform non-participant 403 and stores nothing.
 func TestUnreachableNC_DM_DeletedAndMissingAgentSameOutcome(t *testing.T) {
 	d := &brokerMockDispatcher{}
 	srv, s, _, proj, _ := setupSendTest(t)
@@ -612,15 +628,16 @@ func TestUnreachableNC_DM_DeletedAndMissingAgentSameOutcome(t *testing.T) {
 	require.NoError(t, s.DeleteAgent(ctx, hard.ID))
 
 	softOut := sendDMOutcome(t, srv, s, d, soft.ID)
-	hardOut := sendDMOutcome(t, srv, s, d, hard.ID)
-	missingOut := sendDMOutcome(t, srv, s, d, tid("dm-never-existed"))
-
 	want := dmOutcome{Code: http.StatusCreated, State: store.MessageDispatchFailed, Reason: agentGoneReason,
 		FailCode: dispatchFailureCodeAgentUnreachable, Type: messages.TypeInstruction,
 		RowState: store.MessageDispatchFailed, RowReason: agentGoneReason}
-	require.Equal(t, want, missingOut, "missing agent")
-	require.Equal(t, missingOut, hardOut, "hard-deleted agent must match missing agent")
-	require.Equal(t, missingOut, softOut, "soft-deleted agent must match missing agent")
+	require.Equal(t, want, softOut, "soft-deleted agent")
+
+	missingCode, missingBody := dmRefusal(t, srv, s, d, tid("dm-never-existed"))
+	require.Equal(t, http.StatusForbidden, missingCode, missingBody)
+	hardCode, hardBody := dmRefusal(t, srv, s, d, hard.ID)
+	require.Equal(t, missingCode, hardCode, "hard-deleted agent must match missing agent")
+	require.Equal(t, missingBody, hardBody, "hard-deleted agent must match missing agent")
 }
 
 // A topic whose default agent was soft-deleted and one whose default names
