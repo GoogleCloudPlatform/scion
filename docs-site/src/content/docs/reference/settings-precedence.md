@@ -1132,19 +1132,12 @@ The precedence packages can be exercised directly:
 ```sh
 go build ./...
 go test ./pkg/config ./pkg/agent -count=1
-go test ./pkg/hub -count=1 -timeout 40m   # slow (see below); do not add -race, it hangs
+go test ./pkg/hub -count=1 -timeout 45m   # slow (see below); -race needs far more memory and time
 ```
 
-:::caution[A whole-repo `go test ./...` is not a usable baseline]
-Outside `pkg/hub`, the repository passes: CI runs `go test -tags no_sqlite ./...` and the
-fixture coverage gate (`make test-fixture-coverage`) green on `main`. `pkg/hub` with SQLite
-enabled is the exception: a full `pkg/hub` run takes far longer than `go test`'s default
-10-minute timeout. CI gives it 40 minutes (`make test-hub-sqlite`) and still sometimes times out
-(ptone/scion#1847), so a default-timeout `go test ./...` fails in `pkg/hub` even when no test is
-broken.
-
-This is unrelated to settings precedence. Do not try to fix it as part of a settings change.
-:::
+A whole-repo `go test ./...` passes on `main` given enough time: CI's Full Test Suite runs
+`go test -timeout 45m ./...`. With the default 10-minute timeout it fails in `pkg/hub`, whose
+SQLite-enabled run takes longer than that (ptone/scion#1847), so pass `-timeout 45m`.
 
 ## See also
 
