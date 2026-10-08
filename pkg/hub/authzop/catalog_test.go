@@ -259,7 +259,6 @@ func TestRegisteredPermissionsConsumed(t *testing.T) {
 		// Hub admin permissions — NonRouteUse only (no route declaration)
 		"hub.settings.read":         "NonRouteUse only, no route declaration",
 		"hub.admin_mode.read":       "NonRouteUse only, no route declaration",
-		"hub.integrations.update":   "NonRouteUse only, no route declaration",
 		"hub.allow_list.read":       "NonRouteUse only, no route declaration",
 		"hub.scheduler.update":      "NonRouteUse only, no route declaration",
 		"hub.federation.read":       "NonRouteUse only, no route declaration",
