@@ -31,7 +31,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts/remotefetch"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // Template reimport downloads a template source with its own fetcher rather
@@ -54,7 +56,7 @@ type templateSourceLimits struct {
 	MaxUnpacked int64
 	// MaxExtract caps the total size of files written for the requested folder.
 	MaxExtract int64
-	// MaxFiles caps the number of files written.
+	// MaxFiles caps the number of files and directories written.
 	MaxFiles int
 	// Timeout bounds the download.
 	Timeout time.Duration
@@ -253,9 +255,15 @@ func extractTemplateSource(archive []byte, subPath, dest string, lim templateSou
 		if rel == "" {
 			continue
 		}
-		target := filepath.Join(dest, filepath.FromSlash(rel))
-		if r, err := filepath.Rel(dest, target); err != nil || r == ".." || strings.HasPrefix(r, ".."+string(filepath.Separator)) {
+		target, ok := extractTarget(dest, rel)
+		if !ok {
 			continue
+		}
+
+		// Directories count toward the entry limit as well as files.
+		files++
+		if files > lim.MaxFiles {
+			return errTemplateSourceTooLarge
 		}
 
 		if hdr.Typeflag == tar.TypeDir {
@@ -265,10 +273,6 @@ func extractTemplateSource(archive []byte, subPath, dest string, lim templateSou
 			continue
 		}
 
-		files++
-		if files > lim.MaxFiles {
-			return errTemplateSourceTooLarge
-		}
 		if hdr.Size < 0 || written+hdr.Size > lim.MaxExtract {
 			return errTemplateSourceTooLarge
 		}
@@ -301,6 +305,22 @@ func extractTemplateSource(archive []byte, subPath, dest string, lim templateSou
 	return nil
 }
 
+// extractTarget joins the archive-relative name rel onto dest and reports
+// whether the result stays inside dest. Names that are absolute, empty, or
+// that would resolve outside dest are refused. Extraction already cleans
+// names before calling it; this check is kept as a second, independent guard.
+func extractTarget(dest, rel string) (string, bool) {
+	if rel == "" || path.IsAbs(rel) || filepath.IsAbs(rel) || strings.Contains(rel, "\x00") {
+		return "", false
+	}
+	target := filepath.Join(dest, filepath.FromSlash(rel))
+	r, err := filepath.Rel(dest, target)
+	if err != nil || r == "." || r == ".." || strings.HasPrefix(r, ".."+string(filepath.Separator)) || filepath.IsAbs(r) {
+		return "", false
+	}
+	return target, true
+}
+
 // templateSourceFetchError turns a download failure into a message that is
 // safe to return to the caller. Details stay in the server log.
 func templateSourceFetchError(err error) error {
@@ -318,14 +338,69 @@ func templateSourceFetchError(err error) error {
 	return errors.New("could not download the template source")
 }
 
-// reimportTemplateSource downloads src, extracts it and create-or-syncs the
-// templates named in names into the given scope. sourceURL is the validated
-// source URL recorded on the refreshed template.
-func (s *Server) reimportTemplateSource(ctx context.Context, src *templateGitHubSource, sourceURL, scope, scopeID string, names []string, progress importProgressFunc) ([]string, error) {
-	return s.reimportTemplateSourceWithLimits(ctx, src, sourceURL, scope, scopeID, names, progress, defaultTemplateSourceLimits)
+// targetTemplatePersistence is the template persistence used by reimport. It
+// always resolves the record to update by the target template's ID, never by
+// the slug of the source folder name, and it never creates a template: a
+// refresh writes only into the template it was asked to refresh.
+type targetTemplatePersistence struct {
+	*templatePersistence
+	id string
 }
 
-func (s *Server) reimportTemplateSourceWithLimits(ctx context.Context, src *templateGitHubSource, sourceURL, scope, scopeID string, names []string, progress importProgressFunc, lim templateSourceLimits) ([]string, error) {
+func (p *targetTemplatePersistence) GetBySlug(ctx context.Context, _, scope, scopeID string) (*ResourceRecord, error) {
+	t, err := p.s.store.GetTemplate(ctx, p.id)
+	if err != nil {
+		return nil, fmt.Errorf("template to refresh could not be loaded: %w", err)
+	}
+	if t.Scope != scope || t.ScopeID != scopeID {
+		return nil, errors.New("template scope changed during refresh")
+	}
+	p.model = t
+	return templateToRecord(t), nil
+}
+
+func (p *targetTemplatePersistence) Create(context.Context, *ResourceRecord, string) error {
+	return errors.New("refreshing a template never creates a new template")
+}
+
+// targetTemplateStore returns a ResourceStore that writes only into the
+// template with the given ID.
+func (s *Server) targetTemplateStore(id string) *ResourceStore {
+	return &ResourceStore{
+		srv:   s,
+		pers:  &targetTemplatePersistence{templatePersistence: &templatePersistence{s: s}, id: id},
+		hubID: s.HubID(),
+	}
+}
+
+// selectTemplateSourceDir picks the one discovered folder that corresponds to
+// tmpl: a folder named after the template's name or slug, or whose name
+// slugifies to the template's slug. It fails when none or several match.
+func selectTemplateSourceDir(dirs []resourceDir, tmpl *store.Template) (resourceDir, error) {
+	var matches []resourceDir
+	for _, d := range dirs {
+		if d.name == tmpl.Name || d.name == tmpl.Slug || (tmpl.Slug != "" && api.Slugify(d.name) == tmpl.Slug) {
+			matches = append(matches, d)
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return resourceDir{}, errors.New("the source does not contain this template")
+	case 1:
+		return matches[0], nil
+	default:
+		return resourceDir{}, errors.New("the source contains more than one folder matching this template")
+	}
+}
+
+// reimportTemplateSource downloads src, extracts it and refreshes tmpl from
+// the matching folder. sourceURL is the validated source URL recorded on the
+// template. Only tmpl is written; no other template is created or changed.
+func (s *Server) reimportTemplateSource(ctx context.Context, src *templateGitHubSource, sourceURL string, tmpl *store.Template, progress importProgressFunc) ([]string, error) {
+	return s.reimportTemplateSourceWithLimits(ctx, src, sourceURL, tmpl, progress, defaultTemplateSourceLimits)
+}
+
+func (s *Server) reimportTemplateSourceWithLimits(ctx context.Context, src *templateGitHubSource, sourceURL string, tmpl *store.Template, progress importProgressFunc, lim templateSourceLimits) ([]string, error) {
 	kind := s.templateImportKind()
 	if s.GetStorage() == nil {
 		return nil, fmt.Errorf("%s storage is not configured", kind.noun)
@@ -351,16 +426,20 @@ func (s *Server) reimportTemplateSourceWithLimits(ctx context.Context, src *temp
 		return nil, err
 	}
 
-	dirs, skipped, err := discoverResourceDirs(dir, sourceURL, kind)
+	dirs, _, err := discoverResourceDirs(dir, sourceURL, kind)
 	if err != nil {
 		return nil, err
 	}
 	if len(dirs) == 0 {
 		return nil, fmt.Errorf("no scion %s found at the source", kind.noun)
 	}
-	dirs, skipped = applyNameFilter(dirs, skipped, names)
-	if len(dirs) == 0 {
-		return nil, fmt.Errorf("the source does not contain this template")
+	selected, err := selectTemplateSourceDir(dirs, tmpl)
+	if err != nil {
+		return nil, err
 	}
-	return s.importResourceDirs(ctx, dirs, skipped, scope, scopeID, kind, progress), nil
+	// Report and write under the target's own name; the store resolves the
+	// record by tmpl.ID regardless of the folder name.
+	selected.name = tmpl.Name
+	kind.newStore = func(string) (*ResourceStore, error) { return s.targetTemplateStore(tmpl.ID), nil }
+	return s.importResourceDirs(ctx, []resourceDir{selected}, nil, tmpl.Scope, tmpl.ScopeID, kind, progress), nil
 }

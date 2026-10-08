@@ -180,10 +180,15 @@ func newReimportAdmin(t *testing.T, s store.Store) *store.User {
 
 func createReimportTemplate(t *testing.T, s store.Store, id, name, scope, scopeID, sourceURL string) *store.Template {
 	t.Helper()
+	return createReimportTemplateWithSlug(t, s, id, name, name, scope, scopeID, sourceURL)
+}
+
+func createReimportTemplateWithSlug(t *testing.T, s store.Store, id, name, slug, scope, scopeID, sourceURL string) *store.Template {
+	t.Helper()
 	tmpl := &store.Template{
 		ID:        tid(id),
 		Name:      name,
-		Slug:      name,
+		Slug:      slug,
 		Harness:   "claude",
 		Scope:     scope,
 		ScopeID:   scopeID,
@@ -421,6 +426,17 @@ func TestExtractTemplateSource(t *testing.T) {
 		assert.ErrorIs(t, err, errTemplateSourceTooLarge)
 	})
 
+	t.Run("directories count toward the entry limit", func(t *testing.T) {
+		archive := buildTarGz(t, []tarEntry{
+			{name: "repo-main/t/d1/", typeflag: tar.TypeDir},
+			{name: "repo-main/t/d2/", typeflag: tar.TypeDir},
+			{name: "repo-main/t/d3/", typeflag: tar.TypeDir},
+			{name: "repo-main/t/d4/", typeflag: tar.TypeDir},
+		})
+		err := extractTemplateSource(archive, "t", t.TempDir(), lim)
+		assert.ErrorIs(t, err, errTemplateSourceTooLarge)
+	})
+
 	t.Run("refuses too many files", func(t *testing.T) {
 		archive := buildTarGz(t, []tarEntry{
 			{name: "repo-main/t/1", body: "1"},
@@ -513,4 +529,183 @@ func TestTemplateReimport_ProjectUsesTemplateCreateAuthorization(t *testing.T) {
 	grantUserActionOnResource(t, s, user.ID, "template", project.ID, ActionCreate)
 	rec = doRequestAsUser(t, srv, user, http.MethodPost, path, nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+}
+
+// countTemplates returns the number of templates in a scope.
+func countTemplates(t *testing.T, s store.Store, scope, scopeID string) int {
+	t.Helper()
+	res, err := s.ListTemplates(context.Background(), store.TemplateFilter{Scope: scope, ScopeID: scopeID}, store.ListOptions{Limit: 1000})
+	require.NoError(t, err)
+	return len(res.Items)
+}
+
+// TestTemplateReimport_NameDiffersFromSlug: a template whose name and slug
+// differ is refreshed in place, a bystander whose slug equals the target's
+// name is left untouched, and no new template is created.
+func TestTemplateReimport_NameDiffersFromSlug(t *testing.T) {
+	for _, withBystander := range []bool{true, false} {
+		name := "without bystander"
+		if withBystander {
+			name = "with bystander"
+		}
+		t.Run(name, func(t *testing.T) {
+			srv, s, _ := testTemplateBootstrapServer(t)
+			ctx := context.Background()
+			admin := newReimportAdmin(t, s)
+
+			target := createReimportTemplateWithSlug(t, s, "tmpl-slug-target", "my-template", "renamed-slug",
+				store.TemplateScopeGlobal, "", reimportTestSource)
+			var bystander *store.Template
+			if withBystander {
+				bystander = createReimportTemplate(t, s, "tmpl-slug-bystander", "my-template-other", store.TemplateScopeGlobal, "", "")
+				bystander.Slug = "my-template"
+				require.NoError(t, s.UpdateTemplate(ctx, bystander))
+			}
+			before := countTemplates(t, s, store.TemplateScopeGlobal, "")
+
+			srv.templateSourceFetcher = &fakeTemplateSourceFetcher{body: twoTemplateArchive(t, "v2")}
+			rec := doRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/templates/"+target.ID+"/reimport", nil)
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+			got, err := s.GetTemplate(ctx, target.ID)
+			require.NoError(t, err)
+			assert.Len(t, got.Files, 2, "target must be refreshed")
+			assert.NotEmpty(t, got.ContentHash)
+			assert.Equal(t, "renamed-slug", got.Slug)
+			assert.Equal(t, "my-template", got.Name)
+			assert.Equal(t, reimportTestSource+"/my-template", got.SourceURL)
+
+			if withBystander {
+				other, err := s.GetTemplate(ctx, bystander.ID)
+				require.NoError(t, err)
+				assert.Empty(t, other.Files, "bystander must be untouched")
+				assert.Empty(t, other.ContentHash)
+				assert.Empty(t, other.SourceURL)
+			}
+			assert.Equal(t, before, countTemplates(t, s, store.TemplateScopeGlobal, ""), "no template may be created")
+		})
+	}
+}
+
+// TestTemplateReimport_FolderMatchedBySlug: a folder named after the
+// template's slug (not its name) refreshes the template.
+func TestTemplateReimport_FolderMatchedBySlug(t *testing.T) {
+	srv, s, _ := testTemplateBootstrapServer(t)
+	ctx := context.Background()
+	admin := newReimportAdmin(t, s)
+	target := createReimportTemplateWithSlug(t, s, "tmpl-slug-folder", "My Template", "my-template",
+		store.TemplateScopeGlobal, "", reimportTestSource)
+
+	srv.templateSourceFetcher = &fakeTemplateSourceFetcher{body: twoTemplateArchive(t, "v2")}
+	rec := doRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/templates/"+target.ID+"/reimport", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	got, err := s.GetTemplate(ctx, target.ID)
+	require.NoError(t, err)
+	assert.Len(t, got.Files, 2)
+	assert.Equal(t, 1, countTemplates(t, s, store.TemplateScopeGlobal, ""))
+}
+
+// TestTemplateReimport_NoMatchingFolder: a source without a folder for the
+// template is refused and nothing is written.
+func TestTemplateReimport_NoMatchingFolder(t *testing.T) {
+	srv, s, _ := testTemplateBootstrapServer(t)
+	ctx := context.Background()
+	admin := newReimportAdmin(t, s)
+	target := createReimportTemplate(t, s, "tmpl-no-folder", "absent-template", store.TemplateScopeGlobal, "", reimportTestSource)
+
+	srv.templateSourceFetcher = &fakeTemplateSourceFetcher{body: twoTemplateArchive(t, "v2")}
+	rec := doRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/templates/"+target.ID+"/reimport", nil)
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "does not contain this template")
+	assert.Equal(t, 1, countTemplates(t, s, store.TemplateScopeGlobal, ""))
+	got, err := s.GetTemplate(ctx, target.ID)
+	require.NoError(t, err)
+	assert.Empty(t, got.Files)
+}
+
+func TestTargetTemplatePersistence_NeverCreates(t *testing.T) {
+	srv, s, _ := testTemplateBootstrapServer(t)
+	ctx := context.Background()
+	tmpl := createReimportTemplate(t, s, "tmpl-pinned", "pinned", store.TemplateScopeGlobal, "", reimportTestSource)
+
+	p := srv.targetTemplateStore(tmpl.ID).pers
+	rec, err := p.GetBySlug(ctx, "some-other-slug", store.TemplateScopeGlobal, "")
+	require.NoError(t, err)
+	assert.Equal(t, tmpl.ID, rec.ID, "lookup is by ID, not slug")
+
+	_, err = p.GetBySlug(ctx, "pinned", store.TemplateScopeProject, "p1")
+	assert.Error(t, err, "a scope mismatch is refused")
+
+	assert.Error(t, p.Create(ctx, &ResourceRecord{}, t.TempDir()))
+
+	missing := srv.targetTemplateStore(tid("missing")).pers
+	_, err = missing.GetBySlug(ctx, "pinned", store.TemplateScopeGlobal, "")
+	assert.Error(t, err, "a missing target is an error, not a create")
+}
+
+func TestTemplateReimport_UserScopeAuthorization(t *testing.T) {
+	srv, s, _ := testTemplateBootstrapServer(t)
+	ctx := context.Background()
+
+	owner := &store.User{ID: tid("user-reimport-owner"), Email: "reimport-owner@test.com", DisplayName: "Owner", Role: store.UserRoleMember}
+	other := &store.User{ID: tid("user-reimport-other"), Email: "reimport-other@test.com", DisplayName: "Other", Role: store.UserRoleMember}
+	for _, u := range []*store.User{owner, other} {
+		require.NoError(t, s.CreateUser(ctx, u))
+		ensureHubMembership(ctx, s, u.ID)
+	}
+	admin := newReimportAdmin(t, s)
+
+	tmpl := createReimportTemplate(t, s, "tmpl-reimport-user", "my-template", store.TemplateScopeUser, owner.ID, reimportTestSource)
+	tmpl.OwnerID = owner.ID
+	require.NoError(t, s.UpdateTemplate(ctx, tmpl))
+	path := "/api/v1/templates/" + tmpl.ID + "/reimport"
+
+	fetcher := &fakeTemplateSourceFetcher{body: twoTemplateArchive(t, "v2")}
+	srv.templateSourceFetcher = fetcher
+
+	// Another user cannot read the template: it reads as not found.
+	rec := doRequestAsUser(t, srv, other, http.MethodPost, path, nil)
+	require.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+
+	// A caller who can read it but is not the owner is refused.
+	rec = doRequestAsUser(t, srv, admin, http.MethodPost, path, nil)
+	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Empty(t, fetcher.urls, "refused callers must not trigger a fetch")
+
+	// The owner may refresh it.
+	rec = doRequestAsUser(t, srv, owner, http.MethodPost, path, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Len(t, fetcher.urls, 1)
+	got, err := s.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+	assert.Len(t, got.Files, 2)
+}
+
+func TestExtractTarget(t *testing.T) {
+	dest := filepath.Join(t.TempDir(), "out")
+	for name, tc := range map[string]struct {
+		rel string
+		ok  bool
+	}{
+		"plain file":          {"a/b.txt", true},
+		"nested dot segments": {"a/./b/../c.txt", true},
+		"empty":               {"", false},
+		"dot":                 {".", false},
+		"parent":              {"..", false},
+		"leaves dest":         {"../x", false},
+		"leaves dest deeper":  {"a/../../x", false},
+		"absolute":            {"/etc/passwd", false},
+		"nul byte":            {"a\x00b", false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			target, ok := extractTarget(dest, tc.rel)
+			assert.Equal(t, tc.ok, ok)
+			if ok {
+				r, err := filepath.Rel(dest, target)
+				require.NoError(t, err)
+				assert.False(t, strings.HasPrefix(r, ".."), "target %q is outside dest", target)
+			}
+		})
+	}
 }

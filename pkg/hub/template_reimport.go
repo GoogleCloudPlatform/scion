@@ -149,15 +149,10 @@ func (s *Server) handleTemplateReimport(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	// Only this template is refreshed, even when the source holds several.
-	// Import matches existing records by the slug of the discovered folder
-	// name, so accept a folder named after either the template's name or slug.
-	names := []string{tmpl.Name}
-	if tmpl.Slug != "" && tmpl.Slug != tmpl.Name {
-		names = append(names, tmpl.Slug)
-	}
+	// Only this template is refreshed, even when the source holds several:
+	// the write is pinned to tmpl.ID (see targetTemplatePersistence).
 	run := func(progress importProgressFunc) ([]string, error) {
-		return s.reimportTemplateSource(ctx, src, sourceURL, tmpl.Scope, tmpl.ScopeID, names, progress)
+		return s.reimportTemplateSource(ctx, src, sourceURL, tmpl, progress)
 	}
 
 	if importAcceptsNDJSON(r) {
