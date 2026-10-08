@@ -247,6 +247,11 @@ func TestInstallSourceURL_NonRemoteSourceURLRejected(t *testing.T) {
 		"https://github.com/GoogleCloudPlatform/scion/harnesses/claude\rinjected",
 		"https://github.com/GoogleCloudPlatform/scion/harnesses/\x00claude",
 		"https://github.com/GoogleCloudPlatform/scion/harnesses/\tclaude",
+		"https://github.com/GoogleCloudPlatform/scion/harnesses/\u202eclaude",
+		"https://github.com/GoogleCloudPlatform/scion/harnesses/\u2028claude",
+		"https://github.com/GoogleCloudPlatform/scion/harnesses/\u2029claude",
+		"https://github.com/GoogleCloudPlatform/scion/harnesses/\u200bclaude",
+		"https://github.com/GoogleCloudPlatform/scion/harnesses/\u2066claude\u2069",
 	} {
 		body := map[string]interface{}{
 			"manifest":  map[string]interface{}{"files": []map[string]interface{}{{"path": "config.yaml", "size": 1, "hash": "sha256:x"}}},

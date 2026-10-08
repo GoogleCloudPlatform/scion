@@ -741,6 +741,13 @@ func (s *Server) handleHarnessConfigUpload(w http.ResponseWriter, r *http.Reques
 	})
 }
 
+// isDisallowedSourceURLRune reports whether r may not appear in a recorded
+// source URL: control characters and invisible formatting or line/paragraph
+// separator characters (Unicode categories Cc, Cf, Zl, Zp).
+func isDisallowedSourceURLRune(r rune) bool {
+	return unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || unicode.Is(unicode.Zl, r) || unicode.Is(unicode.Zp, r)
+}
+
 // handleHarnessConfigFinalize finalizes a harness config after file upload.
 func (s *Server) handleHarnessConfigFinalize(w http.ResponseWriter, r *http.Request, hc *store.HarnessConfig) {
 	if r.Method != http.MethodPost {
@@ -774,7 +781,7 @@ func (s *Server) handleHarnessConfigFinalize(w http.ResponseWriter, r *http.Requ
 	}
 
 	sourceURL := strings.TrimSpace(req.SourceURL)
-	if sourceURL != "" && (!config.IsRemoteURI(sourceURL) || strings.ContainsFunc(sourceURL, unicode.IsControl)) {
+	if sourceURL != "" && (!config.IsRemoteURI(sourceURL) || strings.ContainsFunc(sourceURL, isDisallowedSourceURLRune)) {
 		ValidationError(w, "sourceUrl must be a single-line remote URI (http://, https://, or rclone)", nil)
 		return
 	}
