@@ -357,3 +357,61 @@ func TestCreateExisting_DeleteWonAtFinalRead(t *testing.T) {
 		}
 	}
 }
+
+// claimAfterPostStartWriteStore claims the row for a delete right after the
+// post-start step's agent update of handleExistingAgent landed (after that
+// step's own re-read), independently of where the handler reads the row
+// next.
+type claimAfterPostStartWriteStore struct {
+	store.Store
+	apply   func()
+	applied atomic.Bool
+}
+
+func (p *claimAfterPostStartWriteStore) UpdateAgent(ctx context.Context, a *store.Agent) error {
+	err := p.Store.UpdateAgent(ctx, a)
+	if err == nil && a.Phase == string(state.PhaseRunning) && calledFrom(".(*Server).handleExistingAgent") &&
+		p.applied.CompareAndSwap(false, true) {
+		p.apply()
+	}
+	return err
+}
+
+// ptone/scion#3711: a delete that claims the row right after the post-start
+// write, while the start's claim is still held, is caught by the final read
+// before the answer: 409 delete_in_progress, no agent body, no subscription.
+func TestCreateExisting_DeleteClaimAfterPostStartWrite_Answers409(t *testing.T) {
+	branches := []struct {
+		name  string
+		phase state.Phase
+		body  map[string]interface{}
+	}{
+		{"resume-suspended", state.PhaseSuspended, nil},
+		{"resume-stopped", state.PhaseStopped, map[string]interface{}{"resume": true}},
+		{"start-created", state.PhaseCreated, nil},
+	}
+	for _, br := range branches {
+		t.Run(br.name, func(t *testing.T) {
+			f := handleExistingAgentAuthzSetup(t)
+			agent := f.agent(t, "cx-poststart", string(br.phase))
+			client := &landingClient{mockRuntimeBrokerClient: &mockRuntimeBrokerClient{}, reportRunID: true}
+			f.srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(f.store, client, false, slog.Default()))
+			p := &claimAfterPostStartWriteStore{Store: f.store, apply: func() {
+				claimForTest(t, f.store, agent.ID, store.DeletionStateDeleting, time.Minute)
+			}}
+			f.srv.store = p
+
+			req := map[string]interface{}{"name": agent.Slug, "projectId": f.project.ID, "notify": true}
+			for k, v := range br.body {
+				req[k] = v
+			}
+			rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPost, "/api/v1/agents", req)
+			require.NotEmpty(t, client.lastStartExtras.RunID, "the start reached the broker: %s", rec.Body.String())
+			require.True(t, p.applied.Load(), "the delete claimed the row after the post-start write")
+			requireDeleteWonAnswer(t, rec, agent.ID)
+			subs, err := f.store.GetNotificationSubscriptions(context.Background(), agent.ID)
+			require.NoError(t, err)
+			assert.Empty(t, subs, "no notify subscription after a delete won")
+		})
+	}
+}
