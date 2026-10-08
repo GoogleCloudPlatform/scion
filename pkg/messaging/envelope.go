@@ -83,6 +83,7 @@ const (
 	EventDeliveryFailed    EventType = "delivery.failed"
 	EventScheduleFired     EventType = "schedule.fired"
 	EventPortExposed       EventType = "port.exposed"
+	EventArtifactReview    EventType = "artifact.review"
 )
 
 // validEventTypes enumerates all accepted EventType values.
@@ -92,12 +93,13 @@ var validEventTypes = map[EventType]bool{
 	EventDeliveryFailed:    true,
 	EventScheduleFired:     true,
 	EventPortExposed:       true,
+	EventArtifactReview:    true,
 }
 
 // ValidateEventType returns an error if t is not a recognised event type.
 func ValidateEventType(t EventType) error {
 	if !validEventTypes[t] {
-		return fmt.Errorf("invalid event type %q: must be one of: agent.state-changed, agent.input-needed, delivery.failed, schedule.fired, port.exposed", t)
+		return fmt.Errorf("invalid event type %q: must be one of: agent.state-changed, agent.input-needed, delivery.failed, schedule.fired, port.exposed, artifact.review", t)
 	}
 	return nil
 }

@@ -81,6 +81,7 @@ func (s *Server) artifactsHandler() http.Handler {
 	svc := artifacts.NewService(newArtifactHost(s))
 	svc.SetLimits(s.artifactLimits)
 	svc.SetBackendProvider(s.artifactBackend)
+	svc.SetReviewNotifier(s.notifyArtifactReview)
 	return svc.Handler()
 }
 

@@ -23,6 +23,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts/critic"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 )
 
@@ -33,6 +34,17 @@ import (
 // imply it. With the local storage provider the service always streams, so
 // the parameter changes nothing there.
 const paramStream = "stream"
+
+// paramResolve selects a CriticMarkup projection of a text file:
+// "clean" (reject every mark) or "accept" (accept every mark). It implies
+// stream, because the hub produces the bytes. Files that are not text are
+// served unchanged.
+const paramResolve = "resolve"
+
+// HeaderResolve names the projection applied to a streamed file. It is
+// absent when the bytes are the stored ones, so a client can tell whether
+// a resolve request applied.
+const HeaderResolve = "X-Artifact-Resolve"
 
 // signedURLTTL is the lifetime of the object-store URL a file read
 // redirects to. It only has to outlive the redirect.
@@ -201,9 +213,19 @@ func (s *Service) handleGetArtifact(w http.ResponseWriter, r *http.Request, id s
 
 // handleGetFile serves one file of version seq (0 = current) of an
 // artifact.
+//
+// ?resolve=clean|accept serves a text file through a CriticMarkup
+// projection. The parameter is validated before the artifact is looked up,
+// so its errors are the same for every id.
 func (s *Service) handleGetFile(w http.ResponseWriter, r *http.Request, id string, seq int, filePath string) {
 	if _, err := cleanFilePath(filePath); err != nil {
 		writeNotFound(w)
+		return
+	}
+	resolveName := r.URL.Query().Get(paramResolve)
+	mode, ok := critic.ParseMode(resolveName)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "bad_request", "resolve must be clean or accept")
 		return
 	}
 	b, a, ok := s.readableArtifact(w, r, id)
@@ -236,6 +258,10 @@ func (s *Service) handleGetFile(w http.ResponseWriter, r *http.Request, id strin
 		writeNotFound(w)
 		return
 	}
+	if mode != critic.Raw && isText(f.MediaType) {
+		serveResolved(w, r, b, f, mode, resolveName)
+		return
+	}
 	// A remote image is cached as immutable only on a versioned URL; the
 	// current-version URL can point at another version later.
 	serveFile(w, r, b, f, deliveryFor(r, b), seq > 0 && f.Origin == FileOriginRemote)
@@ -252,10 +278,70 @@ const (
 	deliverRedirect
 )
 
+// serveResolved streams text file f through the projection mode, named
+// name in the response. It always streams: the bytes are the hub's. The
+// file is read whole; its size is bounded by the file size limit it was
+// published under, and a projection is never longer than its input.
+func serveResolved(w http.ResponseWriter, r *http.Request, b backend, f *File, mode critic.Mode, name string) {
+	ctx := r.Context()
+	h := w.Header()
+	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("Content-Disposition", contentDisposition(f.MediaType, f.Path))
+	h.Set("Referrer-Policy", "no-referrer")
+	h.Set("Cache-Control", "private, no-cache")
+	h.Set("Content-Security-Policy", fileCSP)
+	etag := `"sha256:` + f.SHA256 + `;` + name + `"`
+	h.Set("ETag", etag)
+	h.Set(HeaderResolve, name)
+	if match := r.Header.Get("If-None-Match"); match != "" && match == etag {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	rc, _, err := b.blobs.Download(ctx, BlobPath(b.hubID, f.SHA256))
+	if err != nil {
+		slog.ErrorContext(ctx, "artifacts: blob read failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal", "could not read the file")
+		return
+	}
+	src, err := readExactly(rc, f.Size)
+	_ = rc.Close()
+	if err != nil {
+		slog.ErrorContext(ctx, "artifacts: blob read failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal", "could not read the file")
+		return
+	}
+	out := critic.Project(src, mode)
+	h.Set("Content-Type", responseContentType(f.MediaType))
+	h.Set("Content-Length", strconv.Itoa(len(out)))
+	w.WriteHeader(http.StatusOK)
+	if r.Method == http.MethodHead {
+		return
+	}
+	if _, err := w.Write(out); err != nil {
+		slog.WarnContext(ctx, "artifacts: resolved stream interrupted", "error", err)
+	}
+}
+
+// errBlobSize reports a blob whose length differs from its manifest size.
+var errBlobSize = errors.New("artifacts: blob size does not match the manifest")
+
+// readExactly reads a blob of the given manifest size, reading at most one
+// byte more, and fails when the blob is shorter or longer.
+func readExactly(rc io.Reader, size int64) ([]byte, error) {
+	buf, err := io.ReadAll(io.LimitReader(rc, size+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(buf)) != size {
+		return nil, errBlobSize
+	}
+	return buf, nil
+}
+
 // deliveryFor picks the delivery for a request. The local provider has no
 // URL a client could follow, so it always streams. Otherwise ?stream=1
-// streams and the default redirects. Transforms of the bytes (a later
-// phase) must also stream, and belong here.
+// streams and the default redirects. A resolve projection always streams
+// (serveResolved).
 func deliveryFor(r *http.Request, b backend) delivery {
 	if b.blobs.Provider() == storage.ProviderLocal {
 		return deliverStream
