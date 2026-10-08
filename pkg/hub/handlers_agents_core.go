@@ -1197,10 +1197,21 @@ func (s *Server) markCreateCleanupRefused(ctx context.Context, agentID string, r
 	}
 }
 
+// createCleanupRefusedPrefix starts every createCleanupRefusedMessage. It is
+// the stable marker isCreateCleanupRefusedRow detects; change both together.
+const createCleanupRefusedPrefix = "Create failed and its cleanup was refused: "
+
 // createCleanupRefusedMessage is the kept row's message after a refused
 // create-failure cleanup.
 func createCleanupRefusedMessage(refused *DeleteRunMismatchError) string {
-	return "Create failed and its cleanup was refused: " + deleteRunMismatchMessage(refused) + ". Delete the agent to retry."
+	return createCleanupRefusedPrefix + deleteRunMismatchMessage(refused) + ". Delete the agent to retry."
+}
+
+// isCreateCleanupRefusedRow reports whether a is a row markCreateCleanupRefused
+// left behind: phase error with a createCleanupRefusedMessage.
+func isCreateCleanupRefusedRow(a *store.Agent) bool {
+	return a != nil && a.Phase == string(state.PhaseError) &&
+		strings.HasPrefix(a.Message, createCleanupRefusedPrefix)
 }
 
 // deleteFailedCreateRow removes a failed create's agent row, trying
@@ -1398,7 +1409,11 @@ func (s *Server) callerAgentRoleCeiling(ctx context.Context, callerAgentID strin
 	callerAgent, err := s.store.GetAgent(ctx, callerAgentID)
 	if err != nil {
 		// Fail-closed: default to baseline on lookup failure so that
-		// transient errors do not grant maximum privileges.
+		// transient errors do not grant maximum privileges. On create, the
+		// standing check (ptone/scion#3433) already refuses a calling agent
+		// whose row is missing or unreadable, so this branch is reached
+		// there only if the row disappears between the two reads; it stays
+		// as a second fail-closed layer.
 		slog.Warn("Failed to read parent agent for role ceiling",
 			"parent_agent_id", callerAgentID, "error", err)
 		return AgentRoleBaseline, ""
@@ -3349,7 +3364,10 @@ func (s *Server) enrichAgents(ctx context.Context, agents []store.Agent) {
 	// the compact view read the items built here, so the redaction is
 	// upstream of toCompact.
 	seesDeletionDetail := callerSeesDeletionDetail(ctx)
+	// The `suspension` view (ptone/scion#3433), one hold read per project.
+	suspensions := s.agentSuspensionViews(ctx, agents)
 	for i := range agents {
+		agents[i].Suspension = suspensions[agents[i].ID]
 		// The client-facing `launch` view (design §3.2), computed fresh per response.
 		agents[i].Launch = store.ComputeAgentLaunch(&agents[i], now)
 		// The client-facing `deletion` view (design ptone/scion#2483 §2.2).
@@ -3397,6 +3415,8 @@ func (s *Server) enrichAgent(ctx context.Context, agent *store.Agent, project *s
 	// with its detail fields for platform admins only (ptone/scion#3122).
 	agent.Deletion = deletionViewForCaller(agent, now, callerSeesDeletionDetail(ctx))
 	agent.ProvisionedOnly = store.ComputeAgentProvisionedOnly(agent)
+	// The `suspension` view (ptone/scion#3433): set while the agent is held.
+	agent.Suspension = s.agentSuspensionView(ctx, agent.ID)
 
 	// Populate harness config and auth from applied config
 	if agent.AppliedConfig != nil {
@@ -3528,6 +3548,9 @@ func (s *Server) handleAgentByID(w http.ResponseWriter, r *http.Request) {
 
 	case AgentRouteMetricsSummary:
 		s.handleAgentMetricsSummary(w, r, id)
+
+	case AgentRouteHoldLift:
+		s.handleAgentHoldLift(w, r, id)
 
 	case AgentRouteActionStatus:
 		s.handleAgentAction(w, r, id, api.AgentActionStatus)

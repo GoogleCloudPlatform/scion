@@ -207,9 +207,8 @@ all communication with the Hub.
 Because a UAT is scoped, some operations that must be re-checked later, or that rely on
 owner or administrator shortcuts, require an unscoped sign-in (CLI or Web UI login) instead:
 
-- **Scheduled messages**: creating, updating, re-targeting or resuming scheduled messages.
-  Scheduled `dispatch_agent` events and schedules are different: a token can author them, and
-  each fire requires the token to still be valid and is bounded by its scopes. See
+- **Scheduled work**: creating, updating, re-targeting or resuming scheduled messages and
+  scheduled `dispatch_agent` events or schedules. See
   [Scheduling](/scion/hosted/user/scheduling/#security--authorization).
 - **Runtime Broker registration**: Runtime Broker creation (`POST /api/v1/brokers` and the
   embedded Runtime Broker path of project registration) does not admit any UAT, whatever its

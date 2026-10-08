@@ -18,6 +18,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"log/slog"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -220,4 +223,55 @@ func TestAuthRefresh(t *testing.T) {
 			t.Fatalf("relay err = %v, want 4401", err)
 		}
 	})
+}
+
+// TestAuthRefreshStreamIDFromDialerIsBadFrame: stream renewal
+// (AuthRefresh{stream_id}) only travels relay → target. One sent by a
+// dialer ends the session with 4400 bad_frame, is logged, and never
+// reaches the Admitter.
+func TestAuthRefreshStreamIDFromDialerIsBadFrame(t *testing.T) {
+	var logBuf syncBuffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	p := newPair(t, Config{}, Config{Logger: logger})
+	if err := p.dialer.RefreshAuth([]byte("credential"), 5); err != nil {
+		t.Fatal(err)
+	}
+	err := waitDone(t, p.relay)
+	var ce *CloseError
+	if !errors.As(err, &ce) || ce.Code != CloseProtocolError || !strings.HasPrefix(ce.Reason, "bad_frame") {
+		t.Fatalf("relay err = %v, want 4400 bad_frame", err)
+	}
+	if err := waitDone(t, p.dialer); CodeOf(err, 0) != CloseProtocolError {
+		t.Fatalf("dialer err = %v, want 4400", err)
+	}
+	p.adm.mu.Lock()
+	n := len(p.adm.refreshes)
+	p.adm.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("Admitter.Refresh called %d times for a dialer stream refresh", n)
+	}
+	logged := logBuf.String()
+	for _, want := range []string{"AuthRefresh with a stream id", "stream_id=5", "principal_id=agent-1"} {
+		if !strings.Contains(logged, want) {
+			t.Errorf("log %q does not contain %q", logged, want)
+		}
+	}
+}
+
+// syncBuffer is a bytes.Buffer safe for concurrent writes and reads.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }

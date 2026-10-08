@@ -82,10 +82,11 @@ func paritySetup(t *testing.T) (
 		CreatedBy: owner.ID,
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	// The owner messages its agents through the ancestry allow, which
-	// requires active project access (ptone/scion#2141); the binding grants
-	// no permission itself.
-	grantProjectAccessOnly(t, s, owner.ID, project.ID)
+	// The agents' ancestry root is a member of the project, so they are
+	// in good standing (ptone/scion#3433). The member binding also gives the
+	// owner the active project access that the ancestry allow requires when
+	// the owner messages its agents (ptone/scion#2141).
+	ensureStandingRoot(t, s, project.ID, owner.ID)
 
 	brokerID := tid("parity-broker")
 	require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{

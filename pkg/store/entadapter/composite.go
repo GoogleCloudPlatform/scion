@@ -866,7 +866,7 @@ func (c *CompositeStore) BackfillDelegationEdges(ctx context.Context) error {
 			// edges, which is a security gap.
 			_, err := c.client.DelegationEdge.Create().
 				SetDelegatorType(delegationedge.DelegatorType(delegatorType)).
-				SetDelegatorID(delegatorID).
+				SetDelegatorID(canonicalPrincipalID(delegatorID)).
 				SetDelegateType(delegationedge.DelegateTypeAgent).
 				SetDelegateID(a.ID.String()).
 				SetScopeType(delegationedge.ScopeTypeProject).

@@ -1938,7 +1938,7 @@ func webLoginSettings(defaultRole string, adminEmails ...string) *staticAccessSe
 
 // webProxyLogin performs one proxy-auth request for email against a
 // WebServer backed by s.
-func webProxyLogin(t *testing.T, s store.Store, settings *staticAccessSettings, email string) {
+func webProxyLogin(t *testing.T, s store.Store, settings *staticAccessSettings, email string, opts ...func(*WebServer)) {
 	t.Helper()
 	ws := newTestWebServer(t, WebServerConfig{
 		AuthMode: "proxy",
@@ -1953,6 +1953,9 @@ func webProxyLogin(t *testing.T, s store.Store, settings *staticAccessSettings, 
 	var safe atomic.Bool
 	safe.Store(true)
 	ws.SetDemotionSafe(&safe)
+	for _, o := range opts {
+		o(ws)
+	}
 
 	req := httptest.NewRequest(http.MethodGet, "/projects", nil)
 	req.Header.Set("Accept", "text/html")
@@ -1963,7 +1966,7 @@ func webProxyLogin(t *testing.T, s store.Store, settings *staticAccessSettings, 
 
 // webOAuthLogin runs the web OAuth callback for email against a WebServer
 // backed by s.
-func webOAuthLogin(t *testing.T, s store.Store, settings *staticAccessSettings, email string) {
+func webOAuthLogin(t *testing.T, s store.Store, settings *staticAccessSettings, email string, opts ...func(*WebServer)) {
 	t.Helper()
 	const secret = "test-session-secret-for-login-grant-tests-1234567890"
 	ws := newTestWebServer(t, WebServerConfig{
@@ -1989,6 +1992,9 @@ func webOAuthLogin(t *testing.T, s store.Store, settings *staticAccessSettings, 
 	var safe atomic.Bool
 	safe.Store(true)
 	ws.SetDemotionSafe(&safe)
+	for _, o := range opts {
+		o(ws)
+	}
 
 	reqSetup := httptest.NewRequest(http.MethodGet, "/auth/login/google", nil)
 	recSetup := httptest.NewRecorder()
@@ -2013,7 +2019,7 @@ func webOAuthLogin(t *testing.T, s store.Store, settings *staticAccessSettings, 
 // webLoginPaths runs each web login test against both web login paths.
 var webLoginPaths = []struct {
 	name  string
-	login func(t *testing.T, s store.Store, settings *staticAccessSettings, email string)
+	login func(t *testing.T, s store.Store, settings *staticAccessSettings, email string, opts ...func(*WebServer))
 }{
 	{"proxy", webProxyLogin},
 	{"oauth", webOAuthLogin},

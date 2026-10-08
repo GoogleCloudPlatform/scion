@@ -198,6 +198,11 @@ func (s *Server) buildServerConfigDBResponse(ctx context.Context, ops *Operation
 	// hub_name: the effective value (DB, else bootstrap), so a client that
 	// echoes this body back sends an unchanged hub_name (ptone/scion#2073).
 	resp.Server.Hub.HubName = effectiveHubName(ops)
+	// GCP permission-check settings: the values this hub applies, which
+	// differ from the stored or file value when that value cannot be used.
+	iam := s.currentGCPIAMSettings()
+	resp.Server.Hub.GCPIAMCheckMode = iam.CheckMode
+	resp.Server.Hub.GCPIAMDenyUnknownPolicy = iam.denyUnknownPolicy()
 
 	// Build section metadata from the cache.
 	resp.SectionMeta = s.buildSectionMetadata(ctx, ops)
@@ -684,6 +689,10 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	if writeTokenRefusedSettingsKeys(w, r.Context(), tokenRefusedServerConfigKeys(rawBody)) {
 		return
 	}
+	// GCP permission-check keys: a sent key must carry a recognised value.
+	if !validateGCPIAMRequest(w, rawBody) {
+		return
+	}
 
 	caller := GetUserIdentityFromContext(r.Context())
 	updatedBy := ""
@@ -898,6 +907,47 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		lifecycleBaseRev = rev
 	}
 
+	// GCP permission-check section: carry an omitted key forward from the
+	// current row, skip the write when the applied values would not
+	// change, and refuse a change the transition rules do not allow.
+	gcpIAMBaseRev := int64(-1)
+	var gcpIAMCur, gcpIAMNext gcpIAMSettings
+	if _, ok := sectionDocs[gcpIAMSection]; ok {
+		doc, rev, err := buildGCPIAMDoc(r.Context(), ops, &req.ServerConfigUpdateRequest, rawBody)
+		if err != nil {
+			slog.Error("PUT server-config: failed to build gcp_iam document", "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to build section documents", nil)
+			return
+		}
+		gcpIAMCur = s.currentGCPIAMSettings()
+		gcpIAMNext = s.gcpIAMEffectiveFor(&doc)
+		if gcpIAMNext == gcpIAMCur {
+			delete(sectionDocs, gcpIAMSection)
+		} else {
+			if !requireGCPIAMHubAdmin(w, r.Context()) {
+				return
+			}
+			pendingAssign := false
+			if adDoc, ok := sectionDocs["agent_defaults"]; ok {
+				var ad opsettings.AgentDefaultsSettings
+				if json.Unmarshal(adDoc, &ad) == nil && ad.DefaultGCPIdentityMode == store.GCPMetadataModeAssign {
+					pendingAssign = true
+				}
+			}
+			if err := s.checkGCPIAMTransition(r.Context(), gcpIAMCur, gcpIAMNext, pendingAssign); err != nil {
+				writeGCPIAMTransitionError(w, err)
+				return
+			}
+			b, err := json.Marshal(doc)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to build section documents", nil)
+				return
+			}
+			sectionDocs[gcpIAMSection] = b
+			gcpIAMBaseRev = rev
+		}
+	}
+
 	// Validate federation semantics (beyond JSON schema).
 	if doc, ok := sectionDocs["federation"]; ok {
 		var fedSettings opsettings.FederationSettings
@@ -1098,9 +1148,31 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			expectedRev = endpointsBaseRev
 		} else if secName == "lifecycle" && lifecycleBaseRev >= 0 {
 			expectedRev = lifecycleBaseRev
+		} else if secName == gcpIAMSection && gcpIAMBaseRev >= 0 {
+			expectedRev = gcpIAMBaseRev
+		}
+
+		// A GCP permission-check change is recorded before it is written;
+		// if the record cannot be written, the change is not made.
+		if secName == gcpIAMSection {
+			if err := s.auditGCPIAMChange(r.Context(), gcpIAMSurfaceSave, gcpIAMCur, gcpIAMNext); err != nil {
+				slog.Error("PUT server-config: failed to record GCP permission-check change", "error", err)
+				fileTxn.abort()
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+					fmt.Sprintf("Failed to update section %q", secName), map[string]interface{}{"applied": applied})
+				return
+			}
+			s.approveGCPIAMTransition(gcpIAMTransition{From: gcpIAMCur, To: gcpIAMNext})
 		}
 
 		newRev, err := ops.Update(r.Context(), secName, doc, updatedBy, expectedRev, "managed")
+		if secName == gcpIAMSection {
+			// The approval covers only this write's own self-apply.
+			s.clearGCPIAMApproval()
+			if err != nil {
+				s.auditGCPIAMNotApplied(r.Context(), gcpIAMCur, gcpIAMNext, err)
+			}
+		}
 		if err != nil {
 			if errors.Is(err, store.ErrRevisionConflict) {
 				// Report the conflict with current revision.
@@ -1418,6 +1490,12 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 			}
 			if hub.StartClaimLeaseTTL != "" {
 				keys = append(keys, "server.hub.start_claim_lease_ttl")
+			}
+			if hub.GCPIAMCheckMode != "" {
+				keys = append(keys, gcpIAMCheckModeKey)
+			}
+			if hub.GCPIAMDenyUnknownPolicy != "" {
+				keys = append(keys, gcpIAMDenyUnknownKey)
 			}
 			if hub.StartMaxDuration != "" {
 				keys = append(keys, "server.hub.start_max_duration")
@@ -1830,6 +1908,16 @@ func buildSingleSectionDoc(req *ServerConfigUpdateRequest, secName string, fp *f
 		// doc on top of the current row via buildAccessDocOnCurrent.
 		d := &opsettings.AccessSettings{}
 		overlayAccessRequest(d, req, fp)
+		doc = d
+
+	case gcpIAMSection:
+		// handlePutServerConfigDB rebuilds this doc on the current row
+		// (buildGCPIAMDoc).
+		d := &opsettings.GCPIAMSettings{}
+		if req.Server != nil && req.Server.Hub != nil {
+			d.CheckMode = req.Server.Hub.GCPIAMCheckMode
+			d.DenyUnknownPolicy = req.Server.Hub.GCPIAMDenyUnknownPolicy
+		}
 		doc = d
 
 	case "lifecycle":
@@ -2435,6 +2523,7 @@ var serverConfigTokenSections = map[string]settingsTokenClass{
 	"lifecycle":         settingsTokenConfiguration, // stall, retention and start timing
 	"telemetry":         settingsTokenConfiguration, // telemetry export
 	"quotas":            settingsTokenConfiguration, // broker quota enforcement switch
+	"gcp_iam":           settingsTokenRefused,       // service account permission check
 	"notifications":     settingsTokenConfiguration, // notification channels
 	"project_defaults":  settingsTokenConfiguration, // see projectDefaultsTokenKeys
 	"artifacts":         settingsTokenConfiguration, // artifact limits

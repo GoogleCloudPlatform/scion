@@ -276,6 +276,11 @@ func TestProgenyListPredicate_NarrowerThanPointRead(t *testing.T) {
 
 	sourceUser := tid("n3-source-user")
 	require.NoError(t, f.store.CreateUser(ctx, &store.User{ID: sourceUser, Email: "n3@golden.test", DisplayName: "n3", Role: "member", Status: "active"}))
+	// A relationship-derived execution-class permission requires the delegator's admission to the agent's project; this role admits without granting template.read.
+	n3Reader, err := f.store.CreateRoleDefinition(ctx, &store.RoleDefinition{Name: "n3-reader", ScopeType: store.RoleScopeProject, Permissions: []string{"project.read"}})
+	require.NoError(t, err)
+	_, err = f.store.CreateRoleBinding(ctx, &store.RoleBinding{RoleDefinitionID: n3Reader.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: sourceUser, ScopeType: store.RoleScopeProject, ScopeID: f.projectAlpha.ID, CreatedBy: "test"})
+	require.NoError(t, err)
 	sourceAgent := tid("n3-source-agent")
 	seedExecutionAgent(t, f.store, sourceAgent, f.projectAlpha.ID, []string{sourceUser}, []string{sourceUser})
 

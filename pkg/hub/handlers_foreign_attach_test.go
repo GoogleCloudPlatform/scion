@@ -131,6 +131,9 @@ func foreignAttachSetup(t *testing.T) (
 		CreatedBy: owner.ID,
 	}
 	require.NoError(t, s.CreateProject(ctx, projectA))
+	// The agents' ancestry root is a member of the project, so they are
+	// in good standing (ptone/scion#3433).
+	ensureStandingRoot(t, s, projectA.ID, owner.ID)
 
 	projectB = &store.Project{
 		ID:   tid("fa-project-b"),

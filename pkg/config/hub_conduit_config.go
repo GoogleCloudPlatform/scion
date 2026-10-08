@@ -43,6 +43,10 @@ const (
 	ConduitGrantKeyNodeRefresh = time.Minute
 	// ConduitMaxReconnectWindow is the highest accepted reconnect_window.
 	ConduitMaxReconnectWindow = 5 * time.Minute
+	// ConduitMinAuthzRecheckInterval and ConduitMaxAuthzRecheckInterval
+	// bound authz_recheck_interval.
+	ConduitMinAuthzRecheckInterval = time.Second
+	ConduitMaxAuthzRecheckInterval = 10 * time.Minute
 )
 
 // ConduitMaxInstanceIDLen is the longest accepted instance_id.
@@ -82,13 +86,34 @@ type HubConduitConfig struct {
 	// the host name plus a random per-process suffix). It must be unique
 	// among live hub processes.
 	InstanceID string `json:"instanceId,omitempty" yaml:"instanceId,omitempty" koanf:"instanceId"`
+	// AuthzRecheckInterval is the period of the re-check sweep of open
+	// user streams ("" = the hub default, 60s; design §3.5): a revoked
+	// stream is re-checked within one interval even if its revocation
+	// event is missed.
+	AuthzRecheckInterval string `json:"authzRecheckInterval,omitempty" yaml:"authzRecheckInterval,omitempty" koanf:"authzRecheckInterval"`
 }
 
 // IsZero reports whether nothing is configured.
 func (c HubConduitConfig) IsZero() bool {
 	return c.GrantKeyActivation == "" && len(c.TCPAllowedPorts) == 0 && c.InternalListen == "" &&
 		c.InternalAdvertise == "" && c.PeerAuth == "" && len(c.PeerServiceAccounts) == 0 && c.PeerAudience == "" &&
-		c.ReconnectWindow == "" && c.InstanceID == ""
+		c.ReconnectWindow == "" && c.InstanceID == "" && c.AuthzRecheckInterval == ""
+}
+
+// AuthzRecheckIntervalDuration parses AuthzRecheckInterval ("" = 0,
+// meaning the hub default). It applies the same bounds as Validate.
+func (c HubConduitConfig) AuthzRecheckIntervalDuration() (time.Duration, error) {
+	if c.AuthzRecheckInterval == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(c.AuthzRecheckInterval)
+	if err != nil {
+		return 0, fmt.Errorf("invalid server.hub.conduit.authz_recheck_interval %q: %w", c.AuthzRecheckInterval, err)
+	}
+	if d < ConduitMinAuthzRecheckInterval || d > ConduitMaxAuthzRecheckInterval {
+		return 0, fmt.Errorf("invalid server.hub.conduit.authz_recheck_interval %q: must be between %s and %s", c.AuthzRecheckInterval, ConduitMinAuthzRecheckInterval, ConduitMaxAuthzRecheckInterval)
+	}
+	return d, nil
 }
 
 // GrantKeyActivationDuration parses GrantKeyActivation ("" = 0, meaning
@@ -142,6 +167,9 @@ func (c HubConduitConfig) Validate() error {
 		errs = append(errs, err)
 	}
 	if _, err := c.ReconnectWindowDuration(); err != nil {
+		errs = append(errs, err)
+	}
+	if _, err := c.AuthzRecheckIntervalDuration(); err != nil {
 		errs = append(errs, err)
 	}
 	seen := map[int]bool{}

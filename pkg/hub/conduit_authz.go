@@ -69,7 +69,9 @@ func conduitAuthzFor(action Action) (Action, string) {
 }
 
 // authorizeConduitAction decides action for identity on agent. It returns a
-// wrapped errConduitForbidden on denial.
+// wrapped errConduitForbidden on denial; a decision that could not be
+// evaluated also wraps errConduitAuthzUnavailable (admission still refuses
+// it as forbidden; a stream re-check defers instead of closing).
 func (s *Server) authorizeConduitAction(ctx context.Context, identity Identity, agent *store.Agent, action Action) error {
 	if identity == nil || agent == nil {
 		return fmt.Errorf("%w: missing identity or agent", errConduitForbidden)
@@ -81,6 +83,9 @@ func (s *Server) authorizeConduitAction(ctx context.Context, identity Identity, 
 	if authzAction == ActionAttach {
 		// The same decision every attach-gated route makes (PTY, keys).
 		if denial := s.authorizeAgentTargetAction(ctx, identity, agent, ActionAttach); denial != nil {
+			if denial.indeterminate {
+				return fmt.Errorf("%w: %w: %s", errConduitForbidden, errConduitAuthzUnavailable, denial.reason)
+			}
 			return fmt.Errorf("%w: %s", errConduitForbidden, denial.reason)
 		}
 		return nil
@@ -123,6 +128,9 @@ func (s *Server) authorizeConduitAction(ctx context.Context, identity Identity, 
 		Permission: permission,
 	})
 	if !decision.Allowed {
+		if decision.IsIndeterminate() {
+			return fmt.Errorf("%w: %w: %s", errConduitForbidden, errConduitAuthzUnavailable, decision.Reason)
+		}
 		return fmt.Errorf("%w: %s", errConduitForbidden, decision.Reason)
 	}
 	return nil
