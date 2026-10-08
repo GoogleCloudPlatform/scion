@@ -18,10 +18,13 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -76,6 +79,10 @@ func TestMergeSectionOnCurrent_GitHubApp(t *testing.T) {
 		{"new private_key_path replaces it", `{"private_key_path": "/k2.pem"}`, func(m map[string]interface{}) { m["private_key_path"] = "/k2.pem" }},
 		{"case-insensitive key clears it", `{"Private_Key_Path": ""}`, func(m map[string]interface{}) { delete(m, "private_key_path") }},
 		{"explicit false webhooks_enabled is stored", `{"webhooks_enabled": false}`, func(m map[string]interface{}) { m["webhooks_enabled"] = false }},
+		{"case-insensitive false webhooks_enabled is stored", `{"Webhooks_Enabled": false}`, func(m map[string]interface{}) { m["webhooks_enabled"] = false }},
+		{"null webhooks_enabled clears it", `{"webhooks_enabled": null}`, func(m map[string]interface{}) { delete(m, "webhooks_enabled") }},
+		// encoding/json folds the long s (U+017F) to s; so does the merge.
+		{"unicode-folded key replaces it", `{"inſtallation_url": "https://github.com/apps/y"}`, func(m map[string]interface{}) { m["installation_url"] = "https://github.com/apps/y" }},
 		{"zero app_id clears it", `{"app_id": 0}`, func(m map[string]interface{}) { delete(m, "app_id") }},
 		{"request-only secret members change nothing", `{"private_key": "", "webhook_secret": ""}`, func(map[string]interface{}) {}},
 		{"empty object changes nothing", `{}`, func(map[string]interface{}) {}},
@@ -119,7 +126,11 @@ func TestMergeSectionOnCurrent_SeededRowDropsEnvOverriddenKeys(t *testing.T) {
 }
 
 // Raw-JSON test: a stored key the section struct does not model survives
-// the merge when the section schema allows extra keys.
+// the merge when the section schema allows extra keys. No section wired to
+// the helper allows them today (github_app sets additionalProperties to
+// false), so the allow path is covered here end to end only through
+// runtimes, where nothing the body sends applies, and at the unit level in
+// TestApplySectionPatch_SentKeyChangesUnmodelledKeySurvives.
 func TestMergeSectionOnCurrent_KeepsUnmodelledKeyWhenSchemaAllows(t *testing.T) {
 	_, fakeStore, ops := newTestDBServer(t)
 	// runtimes allows any top-level key (a map of runtime entries) and
@@ -143,6 +154,72 @@ func TestMergeSectionOnCurrent_KeepsUnmodelledKeyWhenSchemaAllows(t *testing.T) 
 	assert.Equal(t, []string{"s.extra"},
 		dropKeysForbiddenBySchema("s", map[string]interface{}{"properties": props, "additionalProperties": false}, doc2))
 	assert.Equal(t, map[string]json.RawMessage{"known": json.RawMessage(`1`)}, doc2)
+}
+
+// A sent, modelled key changes while a stored key the section does not
+// model survives, under a schema that allows extra keys; under the real
+// github_app schema (additionalProperties: false) the extra key is dropped.
+func TestApplySectionPatch_SentKeyChangesUnmodelledKeySurvives(t *testing.T) {
+	newBase := func() map[string]json.RawMessage {
+		return map[string]json.RawMessage{
+			"app_id":           json.RawMessage(`42`),
+			"private_key_path": json.RawMessage(`"/etc/ghapp/key.pem"`),
+			"future_leaf":      json.RawMessage(`{"x":1}`),
+		}
+	}
+	fp, err := parseFieldPresence([]byte(`{"private_key_path": "/k2.pem", "app_id": null}`))
+	require.NoError(t, err)
+	next := map[string]json.RawMessage{"private_key_path": json.RawMessage(`"/k2.pem"`)}
+
+	base := newBase()
+	sent := applySectionPatch("github_app", base, next, fp)
+	assert.Equal(t, map[string]bool{"private_key_path": true, "app_id": true}, sent)
+	permissive := map[string]interface{}{"type": "object", "properties": map[string]interface{}{
+		"app_id": map[string]interface{}{}, "private_key_path": map[string]interface{}{},
+	}}
+	assert.Empty(t, dropKeysForbiddenBySchema("github_app", permissive, base))
+	assert.Equal(t, map[string]json.RawMessage{
+		"private_key_path": json.RawMessage(`"/k2.pem"`),
+		"future_leaf":      json.RawMessage(`{"x":1}`),
+	}, base)
+
+	base = newBase()
+	applySectionPatch("github_app", base, next, fp)
+	strict, _ := opsettings.SchemaInfo()["github_app"].Schema.(map[string]interface{})
+	require.NotNil(t, strict)
+	assert.Equal(t, []string{"github_app.future_leaf"}, dropKeysForbiddenBySchema("github_app", strict, base))
+	assert.Equal(t, map[string]json.RawMessage{"private_key_path": json.RawMessage(`"/k2.pem"`)}, base)
+}
+
+// A carried-forward (unsent) stored value that fails the section schema is
+// dropped; a sent key is never dropped, and a valid doc is left alone.
+func TestDropInvalidCarriedKeys(t *testing.T) {
+	validate := func(doc json.RawMessage) bool { return len(opsettings.Validate("github_app", doc)) == 0 }
+	schema, _ := opsettings.SchemaInfo()["github_app"].Schema.(map[string]interface{})
+
+	doc := map[string]json.RawMessage{
+		"app_id":           json.RawMessage(`"42"`),
+		"private_key_path": json.RawMessage(`"/etc/ghapp/key.pem"`),
+		"installation_url": json.RawMessage(`"https://github.com/apps/y"`),
+	}
+	dropped := dropInvalidCarriedKeys("github_app", schema, doc, map[string]bool{"installation_url": true}, validate)
+	assert.Equal(t, []string{"github_app.app_id"}, dropped)
+	assert.NotContains(t, doc, "app_id")
+	assert.Len(t, doc, 2)
+
+	// The same invalid value, when sent, stays for the write to reject.
+	doc = map[string]json.RawMessage{"app_id": json.RawMessage(`"42"`)}
+	assert.Empty(t, dropInvalidCarriedKeys("github_app", schema, doc, map[string]bool{"app_id": true}, validate))
+	assert.Contains(t, doc, "app_id")
+
+	// A valid doc: nothing dropped.
+	doc = map[string]json.RawMessage{"app_id": json.RawMessage(`42`)}
+	assert.Empty(t, dropInvalidCarriedKeys("github_app", schema, doc, nil, validate))
+
+	// A schema with top-level required keys is not checked key by key.
+	doc = map[string]json.RawMessage{"app_id": json.RawMessage(`"42"`)}
+	withRequired := map[string]interface{}{"required": []interface{}{"app_id"}}
+	assert.Empty(t, dropInvalidCarriedKeys("github_app", withRequired, doc, nil, validate))
 }
 
 // AC1/AC2 at the handler: a server-config PUT that omits
@@ -284,4 +361,60 @@ func TestPutServerConfigDB_GitHubAppDropsSchemaForbiddenStoredKey(t *testing.T) 
 	out := logs.String()
 	assert.Contains(t, out, "github_app.stale_leaf")
 	assert.False(t, strings.Contains(out, "secret-ish-value"), "the warning must not log the value")
+}
+
+// Finding 5 at the handler: a stored github_app value that fails the schema
+// does not block a save that leaves it out; it is dropped with a warning
+// that names its path and not its value.
+func TestPutServerConfigDB_GitHubAppDropsInvalidCarriedValue(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	logs := captureSlogDefault(t)
+	srv, fakeStore, ops := newTestDBServer(t)
+	fakeStore.seedWithOrigin("github_app",
+		json.RawMessage(`{"app_id":"not-a-number-value","private_key_path":"/etc/ghapp/key.pem"}`), "managed")
+
+	rr := putServerConfigDB(t, srv, ops, `{"server":{"github_app":{"installation_url":"https://github.com/apps/y"}}}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	row := githubAppRowRaw(t, fakeStore)
+	assert.Equal(t, map[string]interface{}{
+		"installation_url": "https://github.com/apps/y",
+		"private_key_path": "/etc/ghapp/key.pem",
+	}, row)
+	out := logs.String()
+	assert.Contains(t, out, "github_app.app_id")
+	assert.False(t, strings.Contains(out, "not-a-number-value"), "the warning must not log the value")
+}
+
+// Masked secrets echoed back from GET (the settings page sends the GitHub
+// App block as GET showed it) neither overwrite nor remove anything in the
+// stored github_app row.
+func TestPutServerConfigDB_GitHubAppMaskedEchoLeavesRowUnchanged(t *testing.T) {
+	settingsPath := setTempScionHome(t)
+	fileSettings := "schema_version: \"1\"\nserver:\n  github_app:\n    app_id: 42\n    webhook_secret: " + rtWebhookSec + "\n"
+	require.NoError(t, os.WriteFile(settingsPath, []byte(fileSettings), 0600))
+	srv, fakeStore, ops := newTestDBServer(t)
+	fakeStore.seedWithOrigin("github_app", json.RawMessage(storedGitHubApp), "managed")
+	_, err := ops.Refresh(context.Background())
+	require.NoError(t, err)
+
+	rr := httptest.NewRecorder()
+	srv.handleGetServerConfigDB(rr, adminRequest(http.MethodGet, "/api/v1/admin/server-config", ""), ops)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	server := getServerSection(t, rr.Body.Bytes())
+	ga := server["github_app"].(map[string]interface{})
+	require.Equal(t, maskedValue, ga["webhook_secret"])
+
+	payload := map[string]interface{}{"server": map[string]interface{}{
+		"hub":        map[string]interface{}{"admin_emails": []string{"b@example.com"}},
+		"github_app": ga,
+	}}
+	body, err := json.Marshal(payload)
+	require.NoError(t, err)
+	rr = putServerConfigDB(t, srv, ops, string(body))
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	var want map[string]interface{}
+	require.NoError(t, json.Unmarshal([]byte(storedGitHubApp), &want))
+	assert.Equal(t, want, githubAppRowRaw(t, fakeStore))
 }

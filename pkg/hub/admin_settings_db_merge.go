@@ -38,26 +38,38 @@ import (
 // (buildSingleSectionDoc). fp is the presence of the section's own object
 // in the raw request body: its keys are section-level JSON keys, and it
 // decides which keys the request sends. The result is the current row's
-// raw JSON with an RFC 7386-style merge patch applied, restricted to the
-// sent keys:
+// raw JSON with an RFC 7386-style merge patch applied to its top-level
+// keys only (a sent object value replaces the stored one; nested objects
+// are not merged), restricted to the sent keys:
 //
 //   - A sent key with a value in requestDoc takes that value.
-//   - A sent key that requestDoc leaves out (an explicit null, "", 0 or [],
-//     dropped by omitempty) is removed from the row, so the bootstrap value
-//     applies again, if there is one.
+//   - A sent key that requestDoc leaves out is removed from the row, so
+//     the bootstrap value applies again, if there is one. Which sent
+//     values are left out follows each field's encoding in requestDoc: an
+//     explicit null, and for omitempty fields their zero value ("", 0, []).
+//     A *bool field carries an explicit false as a value.
 //   - A key the body omits keeps its stored value.
+//
+// Carried-forward keys never block the save and are never dropped
+// silently:
+//
 //   - A stored key the section does not model is kept as stored when the
 //     section schema allows it. When the schema forbids it (the section
 //     object has additionalProperties: false, as github_app does), it is
-//     dropped before the write and a warning names each dropped key path
-//     (never its value), so one stale stored key neither blocks the save
-//     with a validation error nor disappears silently.
+//     dropped before the write.
+//   - A stored key the body does not send whose value fails the section
+//     schema (for example a string where an integer is required) is
+//     dropped before the write.
+//
+// Each dropped key is named by path ("<section>.<key>", never its value)
+// in a warning. A key the body sends is never dropped: if its value is
+// invalid, the write's validation rejects the save as before.
 //
 // Only keys the section models (opsettings.KoanfPathFromSectionKey) are
 // applied, so request-only members (for example the GitHub App secrets,
 // which are never stored in the section) cannot remove a stored key. Sent
-// keys are matched case-insensitively, as the typed request decode matches
-// them.
+// keys are matched to the section's fields with the case-insensitive rule
+// the typed request decode follows (structFieldByJSONName).
 //
 // The row is read fresh from the store (the ops cache can be stale in HA).
 // With no row the base is empty, so absent keys fall back to the bootstrap
@@ -99,22 +111,16 @@ func mergeSectionOnCurrent(ctx context.Context, ops *OperationalSettings, sectio
 		return nil, 0, fmt.Errorf("reading current %s row: %w", section, err)
 	}
 
-	if fp != nil {
-		for sentKey := range fp.raw {
-			key, ok := modelledSectionKey(section, sentKey)
-			if !ok {
-				continue
-			}
-			if v, ok := next[key]; ok && !isJSONNull(v) {
-				base[key] = v
-			} else {
-				delete(base, key)
-			}
-		}
-	}
+	sent := applySectionPatch(section, base, next, fp)
 
-	if dropped := dropSchemaForbiddenKeys(section, base); len(dropped) > 0 {
+	schema, _ := opsettings.SchemaInfo()[section].Schema.(map[string]interface{})
+	if dropped := dropKeysForbiddenBySchema(section, schema, base); len(dropped) > 0 {
 		slog.Warn("admin settings save: dropping stored keys the section schema does not allow",
+			"section", section, "keys", dropped)
+	}
+	validate := func(doc json.RawMessage) bool { return len(opsettings.Validate(section, doc)) == 0 }
+	if dropped := dropInvalidCarriedKeys(section, schema, base, sent, validate); len(dropped) > 0 {
+		slog.Warn("admin settings save: dropping stored keys whose value fails the section schema",
 			"section", section, "keys", dropped)
 	}
 
@@ -125,12 +131,60 @@ func mergeSectionOnCurrent(ctx context.Context, ops *OperationalSettings, sectio
 	return doc, baseRev, nil
 }
 
-// dropSchemaForbiddenKeys removes from doc the top-level keys the
-// section's schema does not allow (see dropKeysForbiddenBySchema) and
-// returns their paths ("<section>.<key>"), sorted.
-func dropSchemaForbiddenKeys(section string, doc map[string]json.RawMessage) []string {
-	schema, _ := opsettings.SchemaInfo()[section].Schema.(map[string]interface{})
-	return dropKeysForbiddenBySchema(section, schema, doc)
+// applySectionPatch applies the keys of fp that the section models onto
+// base, taking their values from next (see mergeSectionOnCurrent), and
+// returns the set of section keys the body sent.
+func applySectionPatch(section string, base, next map[string]json.RawMessage, fp *fieldPresence) map[string]bool {
+	sent := map[string]bool{}
+	if fp == nil {
+		return sent
+	}
+	for sentKey := range fp.raw {
+		key, ok := modelledSectionKey(section, sentKey)
+		if !ok {
+			continue
+		}
+		sent[key] = true
+		// requestDoc is a marshalled section struct for the sections wired
+		// today, so it holds no null; the check keeps a raw request doc
+		// (a future section) from storing an explicit null as a value.
+		if v, ok := next[key]; ok && !isJSONNull(v) {
+			base[key] = v
+		} else {
+			delete(base, key)
+		}
+	}
+	return sent
+}
+
+// dropInvalidCarriedKeys removes from doc the keys the body did not send
+// (not in sent) whose value fails the section schema, and returns their
+// paths ("<section>.<key>"), sorted. validate reports whether a section
+// document is valid. When the whole doc is valid nothing is dropped;
+// otherwise each carried key is checked on its own, as a one-key
+// document. A schema with top-level required keys cannot be checked that
+// way, so for it nothing is dropped and the write's validation decides.
+func dropInvalidCarriedKeys(section string, schema map[string]interface{}, doc map[string]json.RawMessage, sent map[string]bool, validate func(json.RawMessage) bool) []string {
+	if whole, err := json.Marshal(doc); err != nil || validate(whole) {
+		return nil
+	}
+	if req, ok := schema["required"].([]interface{}); ok && len(req) > 0 {
+		return nil
+	}
+	var dropped []string
+	for key, v := range doc {
+		if sent[key] {
+			continue
+		}
+		one, err := json.Marshal(map[string]json.RawMessage{key: v})
+		if err != nil || validate(one) {
+			continue
+		}
+		delete(doc, key)
+		dropped = append(dropped, section+"."+key)
+	}
+	sort.Strings(dropped)
+	return dropped
 }
 
 // dropKeysForbiddenBySchema removes from doc the top-level keys that are
@@ -158,18 +212,30 @@ func dropKeysForbiddenBySchema(section string, schema map[string]interface{}, do
 }
 
 // modelledSectionKey resolves a key sent in the request body to the
-// section-level JSON key the section models: an exact match, otherwise a
-// case-insensitive one. ok is false for a key the section does not model.
+// section-level JSON key the section models. The key is matched to the
+// section struct's fields with structFieldByJSONName (an exact match,
+// otherwise a case-insensitive one, as the typed request decode matches
+// them). ok is false for a key the section does not model.
 func modelledSectionKey(section, sentKey string) (string, bool) {
 	if opsettings.KoanfPathFromSectionKey(section, sentKey) != "" {
 		return sentKey, true
 	}
-	// Section keys are lower-case snake_case, so folding the sent key to
-	// lower case finds the case-insensitive match.
-	if lower := strings.ToLower(sentKey); lower != sentKey && opsettings.KoanfPathFromSectionKey(section, lower) != "" {
-		return lower, true
+	sec := opsettings.SectionByName(section)
+	if sec == nil || sec.New == nil {
+		return "", false
 	}
-	return "", false
+	f, ok := structFieldByJSONName(reflect.TypeOf(sec.New()), sentKey)
+	if !ok {
+		return "", false
+	}
+	key := strings.Split(f.Tag.Get("json"), ",")[0]
+	if key == "" {
+		key = f.Name
+	}
+	if opsettings.KoanfPathFromSectionKey(section, key) == "" {
+		return "", false
+	}
+	return key, true
 }
 
 // dropEnvOverriddenSectionKeys removes the stored keys of a section whose
@@ -214,4 +280,37 @@ func githubAppPresence(rawBody []byte) *fieldPresence {
 		return fp
 	}
 	return nil
+}
+
+// githubAppPresenceFromTop returns the presence of the server.github_app
+// object from the top-level presence of a PUT body, resolved with the same
+// rule as githubAppPresence. It returns nil when fp is nil.
+func githubAppPresenceFromTop(fp *fieldPresence) *fieldPresence {
+	if fp == nil {
+		return nil
+	}
+	b, err := json.Marshal(fp.raw)
+	if err != nil {
+		return nil
+	}
+	return githubAppPresence(b)
+}
+
+// sentFold returns the raw value sent for name: the member named exactly
+// name, otherwise one whose name matches it case-insensitively, as the
+// typed request decode matches members to fields. ok is false when no
+// such member was sent.
+func (fp *fieldPresence) sentFold(name string) (json.RawMessage, bool) {
+	if fp == nil {
+		return nil, false
+	}
+	if v, ok := fp.raw[name]; ok {
+		return v, true
+	}
+	for k, v := range fp.raw {
+		if strings.EqualFold(k, name) {
+			return v, true
+		}
+	}
+	return nil, false
 }

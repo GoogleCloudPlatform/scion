@@ -1896,32 +1896,32 @@ func dropEnvOverriddenAccessFields(base *opsettings.AccessSettings, envKeys []st
 // holds the request's values only; how it is written is decided by the
 // DB-backed PUT (handlePutServerConfigDB).
 //
-// Contract for a DB-backed save (ptone/scion#3718): a save changes only the
-// keys the request body sends.
+// Target contract for a DB-backed save (ptone/scion#3718), met today only
+// by the sections listed below: a save changes only the keys the request
+// body sends.
 //   - OMITTED key → keeps its stored value.
-//   - EXPLICIT empty ("", 0, [], null) → clears the stored value, so the
-//     bootstrap value applies again, if there is one.
-//   - Sent value → replaces the stored value.
-//   - A stored key the section struct does not model is kept when the
-//     section schema allows it, and otherwise dropped with a warning.
+//   - Sent key → replaces the stored value, or clears it when the field's
+//     encoding in this doc leaves the sent value out: an explicit null, and
+//     for omitempty fields their zero value. A *bool field such as
+//     github_app webhooks_enabled carries an explicit false as a value, so
+//     false is stored, not cleared. A cleared key falls back to the
+//     bootstrap value, if there is one.
 //   - The write is a CAS against the row revision the merge read, so a
 //     concurrent write to the section yields a 409, not a lost update.
 //
-// This doc carries the presence needed for that: an omitted field is
-// absent from it, and an explicitly sent empty value is included as its
-// zero value where omitempty would otherwise hide it (fp, the raw JSON
-// presence, distinguishes the two; N6/N7).
+// Sections that meet it:
+//   - github_app, through the shared helper mergeSectionOnCurrent, which
+//     also keeps or drops (with a warning) stored keys the request does not
+//     send; see its doc comment. New sections should use it.
+//   - access, endpoints and lifecycle, through their own carry-forward
+//     builders (buildAccessDocOnCurrent, buildEndpointsDocOnCurrent,
+//     carryForwardLifecycleSettings), and gcp_iam through buildGCPIAMDoc.
+//     Their clear rules are field by field; see each builder.
 //
-// Sections meet the contract in one of two ways:
-//   - github_app goes through the shared helper mergeSectionOnCurrent,
-//     which applies the request's sent keys to the current row's raw JSON.
-//     New sections should use it.
-//   - access, endpoints and lifecycle use their own carry-forward builders
-//     (buildAccessDocOnCurrent, buildEndpointsDocOnCurrent,
-//     carryForwardLifecycleSettings), and gcp_iam uses buildGCPIAMDoc.
-//
-// The other sections still replace the whole row with this doc, so their
-// omitted fields are dropped from the DB.
+// Every other section still replaces the whole row with this doc, so an
+// omitted field is dropped from the DB. For those, fp (the raw JSON
+// presence; N6/N7) only decides whether an explicitly sent empty value is
+// written as the zero value to clear it.
 //
 // The file-mode handler (hub without OperationalSettings) does not use
 // this.
@@ -2038,9 +2038,13 @@ func buildSingleSectionDoc(req *ServerConfigUpdateRequest, secName string, fp *f
 			d.AppID = ga.AppID
 			d.APIBaseURL = ga.APIBaseURL
 			// #391: webhooks_enabled is a plain bool in the request; use
-			// fieldPresence to distinguish explicit false from omitted.
-			githubFP := serverFP.nestedPresence("github_app")
-			if ga.WebhooksEnabled || githubFP.has("webhooks_enabled") {
+			// the raw body to tell an explicit false (stored as false)
+			// from an omitted key or an explicit null (left out, so the
+			// merge keeps or clears it). The member is resolved with the
+			// decode's case-insensitive rule, as mergeSectionOnCurrent
+			// resolves it.
+			v, sent := githubAppPresenceFromTop(fp).sentFold("webhooks_enabled")
+			if ga.WebhooksEnabled || (sent && !isJSONNull(v)) {
 				d.WebhooksEnabled = &ga.WebhooksEnabled
 			}
 			d.InstallationURL = ga.InstallationURL
