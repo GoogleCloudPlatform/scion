@@ -110,6 +110,16 @@ func TestServerEnvToOpsettingsKey(t *testing.T) {
 		{"DEFAULTTEMPLATE", "default_template"},
 		{"DEFAULTMAXTURNS", "default_max_turns"},
 		{"IMAGEREGISTRY", "image_registry"},
+		// ptone/scion#3836: federation is a server sub-key, and the
+		// project_defaults / harness_configs segments map to snake_case.
+		{"FEDERATION_ENABLED", "server.federation.enabled"},
+		{"FEDERATION_TRUSTEDISSUERS", "server.federation.trusted_issuers"},
+		{"FEDERATION_ALGORITHMS", "server.federation.algorithms"},
+		{"FEDERATION_REFRESHINTERVAL", "server.federation.refresh_interval"},
+		{"FEDERATION_DEBOUNCEINTERVAL", "server.federation.debounce_interval"},
+		{"PROJECTDEFAULTS_DEFAULTSCRATCHPAD", "project_defaults.default_scratchpad"},
+		{"HARNESSCONFIGS", "harness_configs"},
+		{"HARNESSCONFIGS_CLAUDE_IMAGE", "harness_configs.claude.image"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.envKey, func(t *testing.T) {
@@ -118,6 +128,28 @@ func TestServerEnvToOpsettingsKey(t *testing.T) {
 				t.Errorf("serverEnvToOpsettingsKey(%q) = %q, want %q", tt.envKey, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestSeedEnvToOpsettingsKey_Issue3836 verifies the SCION_SEED_* spellings
+// of the federation, project_defaults and harness_configs keys
+// (ptone/scion#3836), which go through envKeyToOpsettingsKey with an explicit
+// SERVER_ segment for server keys.
+func TestSeedEnvToOpsettingsKey_Issue3836(t *testing.T) {
+	for envKey, want := range map[string]string{
+		"SERVER_FEDERATION_ENABLED":         "server.federation.enabled",
+		"SERVER_FEDERATION_TRUSTEDISSUERS":  "server.federation.trusted_issuers",
+		"SERVER_FEDERATION_REFRESHINTERVAL": "server.federation.refresh_interval",
+		"PROJECTDEFAULTS_DEFAULTSCRATCHPAD": "project_defaults.default_scratchpad",
+		"HARNESSCONFIGS_CLAUDE_IMAGE":       "harness_configs.claude.image",
+		// Unchanged existing mappings.
+		"SERVER_HUB_ADMINEMAILS":     "server.hub.admin_emails",
+		"AUTOEXPOSEPORTS_ENABLED":    "auto_expose_ports.enabled",
+		"SERVER_HUB_RECONNECTWINDOW": "server.hub.reconnect_window",
+	} {
+		if got := envKeyToOpsettingsKey(envKey); got != want {
+			t.Errorf("envKeyToOpsettingsKey(%q) = %q, want %q", envKey, got, want)
+		}
 	}
 }
 
