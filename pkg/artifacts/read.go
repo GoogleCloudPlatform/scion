@@ -228,6 +228,9 @@ func (s *Service) handleGetArtifact(w http.ResponseWriter, r *http.Request, id s
 		return
 	}
 	resp := ArtifactResponse{Artifact: artifactInfo(a)}
+	if resp.CanManage, ok = s.manageable(w, r, b, a); !ok {
+		return
+	}
 	if a.CurrentSeq > 0 {
 		v, ok := readyVersion(w, r, b, a, 0)
 		if !ok {

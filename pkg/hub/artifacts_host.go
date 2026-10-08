@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"net/http"
 	"path"
 	"slices"
@@ -265,6 +266,30 @@ func (h *artifactHost) CrossScopeSharingAllowed(context.Context) bool {
 	}
 	ops := h.server.GetOperationalSettings()
 	return ops != nil && ops.CrossProjectMessagingEnabled()
+}
+
+var _ artifacts.ScopeChecker = (*artifactHost)(nil)
+
+// ScopesExist implements artifacts.ScopeChecker: a project exists while the
+// store has it. The hub deletes projects outright, so a missing one is
+// gone; any other store error fails the call.
+func (h *artifactHost) ScopesExist(ctx context.Context, refs []string) (map[string]bool, error) {
+	out := make(map[string]bool, len(refs))
+	if h.server == nil {
+		return out, nil
+	}
+	for _, ref := range refs {
+		_, err := h.server.store.GetProject(ctx, ref)
+		switch {
+		case err == nil:
+			out[ref] = true
+		case errors.Is(err, store.ErrNotFound):
+			out[ref] = false
+		default:
+			return nil, err
+		}
+	}
+	return out, nil
 }
 
 var _ artifacts.ScopeExplainer = (*artifactHost)(nil)

@@ -60,6 +60,15 @@ type ArtifactListItem struct {
 	// scope=, for an artifact homed elsewhere and shared with that
 	// project.
 	SharedWithScope bool `json:"sharedWithScope,omitempty"`
+	// ScopeDeleted is true when the artifact's home project no longer
+	// exists (deleting a project never deletes its artifacts).
+	ScopeDeleted bool `json:"scopeDeleted,omitempty"`
+	// CanManage is set only on rows with ScopeDeleted: true when the
+	// caller may move the artifact to another project (see canAdminister).
+	CanManage bool `json:"canManage,omitempty"`
+
+	// src is the stored artifact of the row.
+	src *Artifact
 }
 
 // List item access values.
@@ -138,9 +147,6 @@ func parseListParams(q url.Values) (listParams, string) {
 	switch q.Get("shared") {
 	case "", "0", "false":
 	case "1", "true":
-		if p.scope == "" {
-			return p, "shared=1 needs scope"
-		}
 		p.sharedOnly = true
 	default:
 		return p, "shared must be 1 or 0"
@@ -213,6 +219,11 @@ func (s *Service) handleList(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal", "could not list artifacts")
 		return
 	}
+	if err := s.markDeletedScopes(ctx, b, items); err != nil {
+		slog.ErrorContext(ctx, "artifacts: list failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal", "could not list artifacts")
+		return
+	}
 	resp := ArtifactListResponse{Artifacts: items}
 	if next != nil {
 		cursor, err := host.SealCursor(ctx, formatPosition(*next), p.binding())
@@ -265,11 +276,16 @@ func (s *Service) collect(ctx context.Context, host Host, b backend, q Candidate
 		if !readable {
 			continue
 		}
+		access := listAccess(ctx, host, &c.Artifact)
+		if q.SharedOnly && q.HomeScope == "" && access != AccessShared {
+			continue
+		}
 		items = append(items, ArtifactListItem{
 			ArtifactInfo:    artifactInfo(&c.Artifact),
 			ReviewPending:   c.CurrentKind == VersionKindReview,
-			Access:          listAccess(ctx, host, &c.Artifact),
+			Access:          access,
 			SharedWithScope: q.HomeScope != "" && c.ScopeRef != q.HomeScope,
+			src:             &c.Artifact,
 		})
 		if len(items) > limit {
 			items = items[:limit]
@@ -426,4 +442,41 @@ func listAccess(ctx context.Context, host Host, a *Artifact) string {
 	default:
 		return AccessShared
 	}
+}
+
+// markDeletedScopes sets ScopeDeleted on the items whose home project no
+// longer exists, when the host can tell (ScopeChecker), and CanManage on
+// those the caller may move. It asks the host once per page and reads the
+// grants of deleted-project rows not owned by the caller, at most one page.
+func (s *Service) markDeletedScopes(ctx context.Context, b backend, items []ArtifactListItem) error {
+	checker, ok := s.host.(ScopeChecker)
+	if !ok || len(items) == 0 {
+		return nil
+	}
+	seen := map[string]bool{}
+	var refs []string
+	for _, it := range items {
+		if it.ScopeKind == ScopeKindProject && !seen[it.ScopeRef] {
+			seen[it.ScopeRef] = true
+			refs = append(refs, it.ScopeRef)
+		}
+	}
+	exists, err := checker.ScopesExist(ctx, refs)
+	if err != nil {
+		return err
+	}
+	for i := range items {
+		it := &items[i]
+		if it.ScopeKind != ScopeKindProject {
+			continue
+		}
+		if e, known := exists[it.ScopeRef]; !known || e {
+			continue
+		}
+		it.ScopeDeleted = true
+		if it.CanManage, err = s.canAdminister(ctx, b, it.src); err != nil {
+			return err
+		}
+	}
+	return nil
 }

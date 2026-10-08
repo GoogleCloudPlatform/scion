@@ -16,6 +16,7 @@ package artifacts
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -170,8 +171,7 @@ func (l Limits) linkLifetimes() (def, maxTTL time.Duration) {
 //
 // A failed grant read is an error, never a refusal, so the caller answers
 // 500 rather than a 403 that a working read would not give.
-func (s *Service) canAdminister(r *http.Request, b backend, a *Artifact) (bool, error) {
-	ctx := r.Context()
+func (s *Service) canAdminister(ctx context.Context, b backend, a *Artifact) (bool, error) {
 	kind, ref, _, ok := s.host.Principal(ctx)
 	if !ok || kind != PrincipalKindUser {
 		return false, nil
@@ -198,7 +198,7 @@ func (s *Service) adminArtifact(w http.ResponseWriter, r *http.Request, id strin
 	if !ok {
 		return b, nil, false
 	}
-	allowed, err := s.canAdminister(r, b, a)
+	allowed, err := s.canAdminister(r.Context(), b, a)
 	if err != nil {
 		slog.ErrorContext(r.Context(), "artifacts: list grants failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal", "could not read the artifact's grants")
@@ -209,6 +209,19 @@ func (s *Service) adminArtifact(w http.ResponseWriter, r *http.Request, id strin
 		return b, nil, false
 	}
 	return b, a, true
+}
+
+// manageable reports whether the caller may administer a, which it can
+// read, for a response that offers sharing and changing it. A failed grants
+// read answers 500 and returns ok false.
+func (s *Service) manageable(w http.ResponseWriter, r *http.Request, b backend, a *Artifact) (canManage, ok bool) {
+	allowed, err := s.canAdminister(r.Context(), b, a)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "artifacts: list grants failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal", "could not read the artifact's grants")
+		return false, false
+	}
+	return allowed, true
 }
 
 // handleCreateLink implements POST /{id}/links.

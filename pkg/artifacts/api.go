@@ -68,6 +68,9 @@ type ArtifactResponse struct {
 	Version *VersionInfo `json:"version,omitempty"`
 	// Warnings are notes about the write that did not fail it.
 	Warnings []string `json:"warnings,omitempty"`
+	// CanManage, on a GET of the artifact or of one of its versions, is
+	// true when the caller may share and change it (see canAdminister).
+	CanManage bool `json:"canManage,omitempty"`
 }
 
 // CreateVersionRequest is the body of POST /api/v1/artifacts (create an

@@ -679,3 +679,113 @@ func TestListScopeHidesPendingFromNonOwners(t *testing.T) {
 		t.Errorf("owner, scope=project-1: %v, want its pending artifact", got)
 	}
 }
+
+// scopeCheckHost is a fakeHost that also reports which projects exist.
+type scopeCheckHost struct {
+	*fakeHost
+	gone  map[string]bool
+	err   error
+	calls int
+}
+
+func (h *scopeCheckHost) ScopesExist(_ context.Context, refs []string) (map[string]bool, error) {
+	h.calls++
+	if h.err != nil {
+		return nil, h.err
+	}
+	out := map[string]bool{}
+	for _, r := range refs {
+		out[r] = !h.gone[r]
+	}
+	return out, nil
+}
+
+func listItem(t *testing.T, r ArtifactListResponse, id string) ArtifactListItem {
+	t.Helper()
+	for _, a := range r.Artifacts {
+		if a.ID == id {
+			return a
+		}
+	}
+	t.Fatalf("artifact %s not listed in %v", id, listIDs(r))
+	return ArtifactListItem{}
+}
+
+// TestListAccessAndSharedWithMe: each row says why the caller sees it, and
+// shared=1 without a scope keeps only the rows a grant shows it.
+func TestListAccessAndSharedWithMe(t *testing.T) {
+	f := newFixture(t, false)
+	own := f.publish(userU, "own.md", []byte("o"), "scope=project-1").Artifact.ID
+	project := f.publish(agentA, "project.md", []byte("p"), "").Artifact.ID
+	shared := f.publish(agentX, "shared.md", []byte("s"), "").Artifact.ID
+	f.grantPrincipal(shared, userU)
+
+	all := f.list(&userU, listPath)
+	for id, want := range map[string]string{own: AccessOwned, project: AccessProject, shared: AccessShared} {
+		if got := listItem(t, all, id).Access; got != want {
+			t.Errorf("%s: access %q, want %q", id, got, want)
+		}
+	}
+	got := f.list(&userU, listPath+"&shared=1")
+	if ids := listIDs(got); len(ids) != 1 || ids[0] != shared {
+		t.Errorf("shared=1: %v, want only %s", ids, shared)
+	}
+	if rec := f.do(&userU, http.MethodGet, listPath+"&shared=maybe", nil, nil); rec.Code != http.StatusBadRequest {
+		t.Errorf("shared=maybe: %d", rec.Code)
+	}
+}
+
+// TestListMarksDeletedProjects: rows homed in a deleted project say so,
+// and only on those rows the list says whether the caller may move the
+// artifact. A failed existence check fails the request; a host that cannot
+// tell marks nothing.
+func TestListMarksDeletedProjects(t *testing.T) {
+	f := newFixture(t, false)
+	own := f.publish(userU, "own.md", []byte("o"), "scope=project-1").Artifact.ID
+	project := f.publish(agentA, "project.md", []byte("p"), "").Artifact.ID
+	adminOf := f.publish(agentA, "admin.md", []byte("a"), "").Artifact.ID
+	shared := f.publish(agentX, "shared.md", []byte("s"), "").Artifact.ID
+	f.grantPrincipal(shared, userU)
+	if rec, _ := f.putGrant(userU, own, SubjectPrincipal, PrincipalRef(PrincipalKindUser, outside.ref), GrantRead); rec.Code != http.StatusCreated {
+		t.Fatalf("grant: %d %s", rec.Code, rec.Body.String())
+	}
+	if _, err := f.db.Exec(`INSERT INTO artifact_grant (id, artifact_id, subject_kind, subject_ref, permission, created_at)
+		VALUES ('g-admin', ?, 'principal', ?, 'admin', ?)`, adminOf, PrincipalRef(PrincipalKindUser, userU.ref),
+		time.Now().UTC().Format(sqliteTimeLayout)); err != nil {
+		t.Fatal(err)
+	}
+
+	// No ScopeChecker: nothing is marked.
+	for _, a := range f.list(&userU, listPath).Artifacts {
+		if a.ScopeDeleted || a.CanManage {
+			t.Errorf("%s marked without a checker: %+v", a.ID, a)
+		}
+	}
+
+	h := &scopeCheckHost{fakeHost: f.host, gone: map[string]bool{"project-1": true}}
+	f.svc.host = h
+	got := f.list(&userU, listPath)
+	if h.calls != 1 {
+		t.Errorf("ScopesExist called %d times for one page", h.calls)
+	}
+	for id, want := range map[string][2]bool{
+		own:     {true, true},
+		project: {true, false},
+		adminOf: {true, true},
+		shared:  {false, false},
+	} {
+		a := listItem(t, got, id)
+		if a.ScopeDeleted != want[0] || a.CanManage != want[1] {
+			t.Errorf("%s: scopeDeleted=%v canManage=%v, want %v", id, a.ScopeDeleted, a.CanManage, want)
+		}
+	}
+	// A reader through a grant sees the deleted project but may not move it.
+	if a := listItem(t, f.list(&outside, listPath), own); !a.ScopeDeleted || a.CanManage {
+		t.Errorf("grantee: %+v", a)
+	}
+
+	h.err = errors.New("store down")
+	if rec := f.do(&userU, http.MethodGet, listPath, nil, nil); rec.Code != http.StatusInternalServerError {
+		t.Errorf("failed check: %d, want 500", rec.Code)
+	}
+}

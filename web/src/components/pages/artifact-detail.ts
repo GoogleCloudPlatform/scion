@@ -56,6 +56,7 @@ import {
   rendererFor,
 } from '../../client/artifacts.js';
 import type {
+  Artifact,
   ArtifactFile,
   ArtifactResponse,
   ArtifactRenderer,
@@ -68,6 +69,7 @@ import { principalLabel, principalName } from '../../client/principal-names.js';
 import { getLanguageFromPath } from '../shared/code-editor.js';
 import '../shared/artifact-markdown-frame.js';
 import '../shared/artifact-publish-dialog.js';
+import '../shared/artifact-share-dialog.js';
 import '../shared/code-editor.js';
 import './not-found.js';
 
@@ -115,6 +117,7 @@ export class ScionPageArtifactDetail extends LitElement {
   @state() private editBusy = false;
   @state() private editError: string | null = null;
   @state() private publishOpen = false;
+  @state() private shareOpen = false;
   /** The version a failed Edit publish left pending; the next attempt resumes it. */
   private editPending: PendingPublish | null = null;
 
@@ -630,6 +633,19 @@ export class ScionPageArtifactDetail extends LitElement {
           this.publishOpen = false;
         }}
       ></scion-artifact-publish-dialog>
+      ${this.data?.canManage
+        ? html`<scion-artifact-share-dialog
+            .artifact=${this.data.artifact}
+            .currentUserId=${this.pageData?.user?.id ?? ''}
+            ?open=${this.shareOpen}
+            @artifact-changed=${(e: CustomEvent<Artifact>): void => {
+              if (this.data) this.data = { ...this.data, artifact: e.detail };
+            }}
+            @artifact-share-closed=${(): void => {
+              this.shareOpen = false;
+            }}
+          ></scion-artifact-share-dialog>`
+        : nothing}
     `;
   }
 
@@ -699,6 +715,17 @@ export class ScionPageArtifactDetail extends LitElement {
                   ? html`<sl-button size="small" @click=${this.startEdit}>
                       <sl-icon slot="prefix" name="pencil"></sl-icon>
                       Edit
+                    </sl-button>`
+                  : nothing}
+                ${this.data!.canManage
+                  ? html`<sl-button
+                      size="small"
+                      @click=${(): void => {
+                        this.shareOpen = true;
+                      }}
+                    >
+                      <sl-icon slot="prefix" name="person-plus"></sl-icon>
+                      Share
                     </sl-button>`
                   : nothing}
                 ${v && f && ownFiles.length === 1

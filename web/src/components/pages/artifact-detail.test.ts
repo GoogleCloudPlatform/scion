@@ -699,4 +699,42 @@ describe('artifact page', () => {
     await first;
     expect(priv.view!.url).toBe('/newer/');
   });
+
+  it('offers Share only to who may manage the artifact, and opens the Share dialog', async () => {
+    mockFetch(artifact('notes.md', 'text/markdown'));
+    let el = await mount(true);
+    const shareButton = (): HTMLElement | undefined =>
+      Array.from(el.shadowRoot!.querySelectorAll('.actions sl-button')).find((b) =>
+        b.textContent!.includes('Share')
+      ) as HTMLElement | undefined;
+    expect(shareButton()).toBeUndefined();
+    expect(el.shadowRoot!.querySelector('scion-artifact-share-dialog')).toBeNull();
+    document.body.innerHTML = '';
+
+    mockFetch({ ...artifact('notes.md', 'text/markdown'), canManage: true });
+    el = await mount(true);
+    const dialog = el.shadowRoot!.querySelector('scion-artifact-share-dialog') as HTMLElement & {
+      open: boolean;
+      artifact: { id: string };
+    };
+    expect(dialog.open).toBe(false);
+    expect(dialog.artifact.id).toBe(ID);
+    shareButton()!.click();
+    await el.updateComplete;
+    expect(dialog.open).toBe(true);
+
+    // A saved expiry shows on the page's artifact; closing hides the dialog.
+    dialog.dispatchEvent(
+      new CustomEvent('artifact-changed', {
+        detail: {
+          ...artifact('notes.md', 'text/markdown').artifact,
+          expiresAt: '2026-12-01T00:00:00Z',
+        },
+      })
+    );
+    dialog.dispatchEvent(new CustomEvent('artifact-share-closed'));
+    await el.updateComplete;
+    expect(dialog.open).toBe(false);
+    expect(dialog.artifact).toMatchObject({ expiresAt: '2026-12-01T00:00:00Z' });
+  });
 });

@@ -566,9 +566,63 @@ func TestListAccessAndProjectShares(t *testing.T) {
 	if got := ids(listPath + "&scope=project-1&shared=1"); len(got) != 0 {
 		t.Errorf("expired scope grant listed: %v", got)
 	}
-	for _, q := range []string{"&shared=1", "&scope=project-1&shared=maybe"} {
+	// shared=1 without a scope is the caller's own shared-with-me filter
+	// (TestListAccessAndSharedWithMe); a bad value is refused either way.
+	for _, q := range []string{"&shared=yes", "&scope=project-1&shared=maybe"} {
 		if rec := f.do(&userU, http.MethodGet, listPath+q, nil, nil); rec.Code != http.StatusBadRequest {
 			t.Errorf("%s: %d", q, rec.Code)
+		}
+	}
+}
+
+// TestGetSaysWhoMayManage: GET of an artifact and of a version say
+// whether the caller may share and change it: its owner and a user with an
+// admin grant may, a reader and an agent may not.
+func TestGetSaysWhoMayManage(t *testing.T) {
+	f, id := newLinkFixture(t)
+	get := func(p principal, target string) ArtifactResponse {
+		t.Helper()
+		rec := f.do(&p, http.MethodGet, target, nil, nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s as %s: %d", target, p.ref, rec.Code)
+		}
+		return decodeInto[ArtifactResponse](t, rec)
+	}
+	base := "/api/v1/artifacts/" + id
+	check := func(p principal, want bool) {
+		t.Helper()
+		for _, target := range []string{base, base + "/versions/1"} {
+			if got := get(p, target).CanManage; got != want {
+				t.Errorf("%s as %s: canManage %v, want %v", target, p.ref, got, want)
+			}
+		}
+	}
+	check(userU, true)
+	check(agentA, false)
+	if rec, _ := f.putGrant(userU, id, SubjectPrincipal, PrincipalRef(PrincipalKindUser, outside.ref), GrantRead); rec.Code != http.StatusCreated {
+		t.Fatalf("grant: %d", rec.Code)
+	}
+	check(outside, false)
+	if rec, _ := f.putGrant(userU, id, SubjectPrincipal, PrincipalRef(PrincipalKindUser, outside.ref), GrantAdmin); rec.Code != http.StatusOK {
+		t.Fatalf("raise grant: %d", rec.Code)
+	}
+	check(outside, true)
+}
+
+// TestGrantListReportsCrossProjectSharing: the grants list says whether
+// grants to other projects are turned on.
+func TestGrantListReportsCrossProjectSharing(t *testing.T) {
+	f, id := newLinkFixture(t)
+	for _, on := range []bool{false, true} {
+		f.host.mu.Lock()
+		f.host.crossScope = on
+		f.host.mu.Unlock()
+		rec := f.do(&userU, http.MethodGet, grantsPath(id), nil, nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("list grants: %d", rec.Code)
+		}
+		if got := decodeInto[GrantListResponse](t, rec).CrossProjectSharing; got != on {
+			t.Errorf("crossProjectSharing %v, want %v", got, on)
 		}
 	}
 }
