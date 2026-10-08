@@ -175,10 +175,11 @@ func shellInitialData(t *testing.T, html string) map[string]json.RawMessage {
 }
 
 // TestShellReadinessMarks_Hydration: the shell's initial data carries
-// readinessMarks only for a signed-in user while the setting is on, with
-// the value GET /api/v1/profiling returns to that user. Off, or signed
-// out, the shell is byte-identical to one rendered with no profiling
-// source.
+// readinessMarks only for a signed-in user (member or admin) while the
+// setting is on, with the value GET /api/v1/profiling returns to that
+// user. Off (before it was ever on, and again after it is turned off), or
+// signed out, the shell is byte-identical to one rendered with no
+// profiling source.
 func TestShellReadinessMarks_Hydration(t *testing.T) {
 	srv, s := testServerWithOps(t, nil)
 	admin, member := profilingTestUsers(t, s)
@@ -208,4 +209,22 @@ func TestShellReadinessMarks_Hydration(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &api))
 	require.Equal(t, string(api["readinessMarks"]), string(hydrated))
 	require.Equal(t, "true", string(hydrated))
+
+	// On, signed in as an admin: the same rule, against the admin's own read.
+	adminFields := shellInitialData(t, renderShell(t, srv, admin, "/projects"))
+	adminHydrated, present := adminFields["readinessMarks"]
+	require.True(t, present, "admin shell with the setting on carries readinessMarks")
+	rec = doRequestAsUser(t, srv, admin, http.MethodGet, "/api/v1/profiling", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var adminAPI map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &adminAPI))
+	require.Equal(t, string(adminAPI["readinessMarks"]), string(adminHydrated))
+
+	// Turned off again (an explicit false row, not an absent one): every
+	// shell is byte-identical to its baseline once more.
+	rec = doRequestAsUser(t, srv, admin, http.MethodPut, "/api/v1/admin/profiling", map[string]any{"readiness_marks": false})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.False(t, srv.ReadinessMarksEnabled())
+	require.Equal(t, baselineMember, renderShell(t, srv, member, "/projects"))
+	require.Equal(t, baselineLogin, renderShell(t, srv, nil, "/login"))
 }

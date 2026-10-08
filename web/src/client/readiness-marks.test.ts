@@ -22,6 +22,7 @@ import {
   configureReadinessMarks,
   markReady,
   readinessMarkPending,
+  readinessLoadEpoch,
   readinessNavigationStarted,
   resetReadinessMarks,
 } from './readiness-marks.js';
@@ -113,5 +114,39 @@ describe('readiness marks', () => {
     markReady(READINESS_MARKS.agentsData, 'list');
     expect(readinessMarks()).toHaveLength(1);
     state.disconnect();
+  });
+
+  it('drops a mark deferred to the next frame when the load ends first', () => {
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => frames.push(cb));
+    const runFrames = (): void => {
+      for (const cb of frames.splice(0)) cb(0);
+    };
+    configureReadinessMarks(true);
+
+    // Scheduled the way the pages do it, then a navigation ends the load.
+    let epoch = readinessLoadEpoch();
+    requestAnimationFrame(() => markReady(READINESS_MARKS.rowsGrid, 'grid', epoch));
+    readinessNavigationStarted(2);
+    runFrames();
+    expect(readinessMarks()).toEqual([]);
+    expect(readinessMarkPending(READINESS_MARKS.rowsGrid)).toBe(true);
+
+    // The same through a reset, and through configureReadinessMarks.
+    epoch = readinessLoadEpoch();
+    requestAnimationFrame(() => markReady(READINESS_MARKS.graph, 'graph', epoch));
+    resetReadinessMarks();
+    runFrames();
+    epoch = readinessLoadEpoch();
+    requestAnimationFrame(() => markReady(READINESS_MARKS.graph, 'graph', epoch));
+    configureReadinessMarks(true);
+    runFrames();
+    expect(readinessMarks()).toEqual([]);
+
+    // Within one load the deferred mark is written.
+    epoch = readinessLoadEpoch();
+    requestAnimationFrame(() => markReady(READINESS_MARKS.rowsGrid, 'grid', epoch));
+    runFrames();
+    expect(readinessMarks().map((m) => m.name)).toEqual([READINESS_MARKS.rowsGrid]);
   });
 });

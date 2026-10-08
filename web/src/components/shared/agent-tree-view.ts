@@ -70,7 +70,12 @@ import { getMessageModeDisplay, getDenialMessage } from '../../shared/message-mo
 import type { MessageMode } from '../../shared/types.js';
 import './quick-message-dialog.js';
 import { terminalHref } from '../../client/open-terminal.js';
-import { READINESS_MARKS, markReady } from '../../client/readiness-marks.js';
+import {
+  READINESS_MARKS,
+  markReady,
+  readinessLoadEpoch,
+  readinessMarkPending,
+} from '../../client/readiness-marks.js';
 
 /**
  * Determine edge visual style based on parent/child message mode compatibility.
@@ -1174,6 +1179,11 @@ export class ScionAgentTreeView extends LitElement {
   override render() {
     const agents = this.agents;
     if (agents.length === 0) {
+      // An empty graph is ready once its empty state is on screen.
+      if (readinessMarkPending(READINESS_MARKS.graph)) {
+        const epoch = readinessLoadEpoch();
+        requestAnimationFrame(() => markReady(READINESS_MARKS.graph, 'graph', epoch));
+      }
       return html`
         ${this.renderToolbar()}
         <div class="empty-state">
@@ -1259,6 +1269,7 @@ export class ScionAgentTreeView extends LitElement {
       const focus = this.focusId ? nodes.find((n) => n.agent.id === this.focusId) : undefined;
       const capturedW = width;
       const capturedH = height;
+      const readinessEpoch = readinessLoadEpoch();
       requestAnimationFrame(() => {
         const canvas = this.canvasEl;
         if (canvas) {
@@ -1276,7 +1287,7 @@ export class ScionAgentTreeView extends LitElement {
           this.fitToView(capturedW, capturedH);
         }
         // Laid out and fitted: the graph readiness mark (once per load).
-        markReady(READINESS_MARKS.graph, 'graph');
+        markReady(READINESS_MARKS.graph, 'graph', readinessEpoch);
       });
     }
 

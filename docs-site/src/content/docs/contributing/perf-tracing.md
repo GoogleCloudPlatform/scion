@@ -270,11 +270,11 @@ Then load the page again: the client reads the setting once per full page load, 
 | `scion:ready:agents-data` | the first agent result for the current scope is adopted | project detail (grid, list, graph), standalone graph |
 | `scion:ready:rows-grid` | the first frame that shows the grid's first page of cards, or its empty state | project detail, grid view |
 | `scion:ready:rows-list` | the first frame that shows the list's first page of rows, or its empty state | project detail, list view |
-| `scion:ready:graph` | the graph is laid out and fitted to the viewport | project detail graph view, standalone graph |
+| `scion:ready:graph` | the graph is laid out and fitted to the viewport, or the first frame that shows its empty state | project detail graph view, standalone graph |
 
 - A mark's `startTime` is milliseconds since the document's navigation start. Its `detail` is only `{"view": "grid" | "list" | "graph"}`: marks carry no agent names, ids or row data.
 - Each mark is written **at most once per load**. A load ends on a client-side navigation, on a change of the view scope (for example opening another project) and on a project filter change on the standalone graph; the marks are then cleared so the next load writes them again. Switching between grid, list and graph inside one load does not clear them.
-- The graph mark needs at least one agent: an empty graph view shows the empty state instead of a graph.
+- A mark deferred to the next frame is dropped if the load ends before that frame, so it never lands in the next load.
 
 Read them in the browser console, or from a Playwright script, with:
 

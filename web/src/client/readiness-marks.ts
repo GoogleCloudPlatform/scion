@@ -54,11 +54,23 @@ const ALL_MARKS: readonly ReadinessMarkName[] = Object.values(READINESS_MARKS);
 
 let enabled = false;
 const written = new Set<ReadinessMarkName>();
+/** Bumped whenever a load ends, so a mark scheduled in one load cannot land in the next. */
+let loadEpoch = 0;
 
 /** Sets whether marks are written, once per document, from the shell's initial data. */
 export function configureReadinessMarks(on: boolean): void {
   enabled = on === true;
   written.clear();
+  loadEpoch++;
+}
+
+/**
+ * The current load's epoch. Capture it when deferring a mark (for example
+ * to the next animation frame) and pass it to markReady, which then drops
+ * the mark if the load ended in between.
+ */
+export function readinessLoadEpoch(): number {
+  return loadEpoch;
 }
 
 /** Whether readiness marks are on for this document. */
@@ -71,9 +83,14 @@ export function readinessMarkPending(name: ReadinessMarkName): boolean {
   return enabled && !written.has(name);
 }
 
-/** Writes the named mark, unless marks are off or it was already written in this load. */
-export function markReady(name: ReadinessMarkName, view: ReadinessView): void {
+/**
+ * Writes the named mark, unless marks are off, it was already written in
+ * this load, or `epoch` (from readinessLoadEpoch, when given) belongs to a
+ * load that has ended.
+ */
+export function markReady(name: ReadinessMarkName, view: ReadinessView, epoch?: number): void {
   if (!enabled || written.has(name)) return;
+  if (epoch !== undefined && epoch !== loadEpoch) return;
   written.add(name);
   try {
     performance.mark(name, { detail: { view } });
@@ -94,6 +111,7 @@ export function readinessNavigationStarted(navigationId: number): void {
 /** Ends the current load: clears the written marks so the next load can write them again. */
 export function resetReadinessMarks(): void {
   if (!enabled) return;
+  loadEpoch++;
   written.clear();
   for (const name of ALL_MARKS) {
     try {
