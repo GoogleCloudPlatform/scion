@@ -180,6 +180,8 @@ func TestDescribeAttachClose(t *testing.T) {
 			contains: []string{"permission", "agent 'a1'"}},
 		{name: "upstream timeout", code: wsprotocol.ClosePTYUpstreamTimeout,
 			contains: []string{"did not start the session in time", "scion attach a1"}},
+		{name: "input overflow asks for smaller pastes", code: 1009, reason: "input_overflow",
+			contains: []string{"input was too large for the session", "close code 1009: input_overflow", "Paste in smaller chunks", "scion attach a1"}},
 		{name: "unknown application code is terminal", code: 4999, reason: "new_reason",
 			contains: []string{"the server ended the session", "close code 4999: new_reason", "scion list"}},
 		{name: "unknown retryable code", code: 1014,
@@ -201,6 +203,19 @@ func TestDescribeAttachClose(t *testing.T) {
 			assert.Equal(t, tc.code, ce.Code)
 		})
 	}
+}
+
+// The broker's input-overflow close (1009) gets an actionable message, and
+// stays terminal: the CLI must not suggest the session will recover on its
+// own by retrying the same paste.
+func TestDescribeAttachClose_InputOverflowIsActionableAndTerminal(t *testing.T) {
+	require.Equal(t, wsprotocol.DispositionTerminal, wsprotocol.ClassifyPTYClose(ptyCloseInputTooLarge))
+	err := describeAttachClose(&wsclient.PTYCloseError{Code: ptyCloseInputTooLarge, Reason: "input_overflow"}, "a1")
+	require.Error(t, err)
+	assert.Equal(t, "attach to agent 'a1' ended: the input was too large for the session "+
+		"(more than the runtime broker buffers before the agent reads it) (close code 1009: input_overflow)\n\n"+
+		"Paste in smaller chunks, then reattach with: scion attach a1", err.Error())
+	assert.NotContains(t, err.Error(), "does not reconnect automatically")
 }
 
 func TestDescribeAttachClose_HintFollowsClassifier(t *testing.T) {

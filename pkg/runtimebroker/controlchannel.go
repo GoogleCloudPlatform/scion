@@ -191,6 +191,108 @@ type StreamHandler struct {
 	closeCh    chan struct{}
 	closed     bool
 	closeMu    sync.Mutex
+
+	// input holds client input not yet taken from dataCh. It is set by
+	// handleStreamOpen; handlers built directly (tests) feed dataCh instead.
+	input *streamInputQueue
+}
+
+// StreamInputLimit is the most client input, in bytes, the broker holds for
+// one stream before the PTY consumes it. Input is queued only while the
+// write into the agent's terminal is blocked (the program in the session is
+// not reading stdin fast enough), so the limit is sized well above any
+// realistic paste: 4 MiB is about 200 times the 20 KB paste that already
+// worked, more than a large source file, and four times the 1 MiB
+// control-channel message cap. Exceeding it closes the stream with
+// closeCodeInputOverflow; input is never dropped silently.
+const StreamInputLimit = 4 << 20
+
+// closeCodeInputOverflow (1009, "message too big") is the close code for a
+// stream whose input exceeded StreamInputLimit. The Hub passes it through
+// unchanged and clients classify it as terminal, so the client reports it
+// instead of reconnecting and pasting again.
+const closeCodeInputOverflow = 1009
+
+// closeReasonInputOverflow is the close reason sent with
+// closeCodeInputOverflow.
+const closeReasonInputOverflow = "input_overflow"
+
+// streamInputQueue is a byte-bounded FIFO of input frames for one stream.
+// The control-channel read loop pushes without blocking; run moves frames
+// into the stream's dataCh in order. A frame counts against the limit until
+// the consumer has taken it from dataCh.
+type streamInputQueue struct {
+	mu     sync.Mutex
+	frames [][]byte
+	queued int
+	limit  int
+	notify chan struct{} // capacity 1
+}
+
+func newStreamInputQueue(limit int) *streamInputQueue {
+	return &streamInputQueue{limit: limit, notify: make(chan struct{}, 1)}
+}
+
+// push queues data. It reports false, queueing nothing, if data would take
+// the queue over its limit.
+func (q *streamInputQueue) push(data []byte) bool {
+	if len(data) == 0 {
+		return true
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.queued+len(data) > q.limit {
+		return false
+	}
+	q.frames = append(q.frames, data)
+	q.queued += len(data)
+	select {
+	case q.notify <- struct{}{}:
+	default:
+	}
+	return true
+}
+
+// run delivers queued frames to out, in order, until closeCh is closed.
+func (q *streamInputQueue) run(out chan<- []byte, closeCh <-chan struct{}) {
+	for {
+		q.mu.Lock()
+		var data []byte
+		if len(q.frames) > 0 {
+			data = q.frames[0]
+		}
+		q.mu.Unlock()
+
+		if data == nil {
+			select {
+			case <-q.notify:
+				continue
+			case <-closeCh:
+				q.discard()
+				return
+			}
+		}
+
+		select {
+		case out <- data:
+			q.mu.Lock()
+			q.frames[0] = nil
+			q.frames = q.frames[1:]
+			q.queued -= len(data)
+			q.mu.Unlock()
+		case <-closeCh:
+			q.discard()
+			return
+		}
+	}
+}
+
+// discard drops any queued frames once the stream has closed.
+func (q *streamInputQueue) discard() {
+	q.mu.Lock()
+	q.frames = nil
+	q.queued = 0
+	q.mu.Unlock()
 }
 
 // NewControlChannelClient creates a new control channel client.
@@ -836,14 +938,18 @@ func (c *ControlChannelClient) handleStreamOpen(data []byte) error {
 		streamType: open.StreamType,
 		slug:       open.Slug,
 		projectID:  open.ProjectID,
-		dataCh:     make(chan []byte, 256),
-		resizeCh:   make(chan [2]int, 8),
-		closeCh:    make(chan struct{}),
+		// Unbuffered: input waits in the byte-bounded input queue instead.
+		dataCh:   make(chan []byte),
+		resizeCh: make(chan [2]int, 8),
+		closeCh:  make(chan struct{}),
+		input:    newStreamInputQueue(StreamInputLimit),
 	}
 
 	c.streamMu.Lock()
 	c.streams[open.StreamID] = handler
 	c.streamMu.Unlock()
+
+	go handler.input.run(handler.dataCh, handler.closeCh)
 
 	// Start stream handler based on type
 	switch open.StreamType {
@@ -874,13 +980,59 @@ func (c *ControlChannelClient) handleStreamData(data []byte) error {
 		return nil
 	}
 
-	select {
-	case handler.dataCh <- frame.Data:
-	default:
-		c.log.Warn("Stream buffer full", "streamID", frame.StreamID)
+	if handler.input == nil {
+		// Only handlers built outside handleStreamOpen (tests, with a
+		// buffered dataCh) lack an input queue. Hand off without blocking
+		// the read loop; on a full channel, close with the overflow code
+		// rather than dropping the frame.
+		select {
+		case handler.dataCh <- frame.Data:
+		default:
+			c.closeStreamAsync(frame.StreamID, closeReasonInputOverflow, closeCodeInputOverflow)
+		}
+		return nil
+	}
+
+	if !handler.input.push(frame.Data) {
+		c.log.Warn("Stream input exceeded the buffer limit; closing stream",
+			"streamID", frame.StreamID, "limitBytes", StreamInputLimit)
+		c.closeStreamAsync(frame.StreamID, closeReasonInputOverflow, closeCodeInputOverflow)
 	}
 
 	return nil
+}
+
+// closeStreamAsync closes a stream locally at once and reports the close to
+// the Hub from a separate goroutine, so the read loop never waits on the
+// write. The handler is marked closed before the report is sent, so the PTY
+// goroutine treats the stream as closed and does not send its own close code
+// ahead of this one.
+func (c *ControlChannelClient) closeStreamAsync(streamID, reason string, code int) {
+	c.streamMu.Lock()
+	handler, ok := c.streams[streamID]
+	if ok {
+		delete(c.streams, streamID)
+	}
+	c.streamMu.Unlock()
+	if !ok {
+		return
+	}
+
+	handler.closeMu.Lock()
+	if !handler.closed {
+		handler.closed = true
+		close(handler.closeCh)
+	}
+	handler.closeMu.Unlock()
+
+	closeMsg := wsprotocol.NewStreamCloseMessage(streamID, reason, code)
+	c.wg.Add(1)
+	go func() {
+		defer c.wg.Done()
+		if err := c.conn.WriteJSON(closeMsg); err != nil {
+			c.log.Warn("Failed to report stream close to Hub", "streamID", streamID, "code", code, "error", err)
+		}
+	}()
 }
 
 // handleStreamClose processes a stream close message.

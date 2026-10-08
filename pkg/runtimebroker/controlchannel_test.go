@@ -15,6 +15,7 @@
 package runtimebroker
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -836,5 +837,146 @@ func TestBuildWebSocketURL_Normalization(t *testing.T) {
 				t.Errorf("Expected URL %q, got %q", tc.expectedURL, wsURL)
 			}
 		})
+	}
+}
+
+// --- Stream input backpressure (ptone/scion#3309) ---
+
+// inputTestStreamType is a stream type with no broker handler, so a test
+// can open a stream and act as its consumer through handler.dataCh.
+const inputTestStreamType = "input-test"
+
+// openInputTestStream opens streamID through handleStreamOpen, so it gets
+// the production input queue, and returns its handler.
+func openInputTestStream(t *testing.T, client *ControlChannelClient, streamID string) *StreamHandler {
+	t.Helper()
+	feed(t, client, wsprotocol.NewStreamOpenMessage(streamID, inputTestStreamType, "agent", "project", 80, 24))
+	client.streamMu.RLock()
+	handler := client.streams[streamID]
+	client.streamMu.RUnlock()
+	if handler == nil || handler.input == nil {
+		t.Fatalf("stream %s was not opened with an input queue", streamID)
+	}
+	return handler
+}
+
+// pasteFrames feeds n bytes of patterned input to streamID in 32 KiB frames
+// through the control-channel message handler, and returns what was sent.
+func pasteFrames(t *testing.T, client *ControlChannelClient, streamID string, n int) []byte {
+	t.Helper()
+	const frame = 32 << 10
+	var sent bytes.Buffer
+	for i := 0; sent.Len() < n; i++ {
+		size := frame
+		if rest := n - sent.Len(); rest < size {
+			size = rest
+		}
+		data := make([]byte, size)
+		for j := range data {
+			data[j] = byte((i*31 + j) % 251)
+		}
+		sent.Write(data)
+		feed(t, client, wsprotocol.NewStreamFrame(streamID, data))
+	}
+	return sent.Bytes()
+}
+
+// readInput reads n bytes of input from the handler's consumer channel.
+func readInput(t *testing.T, handler *StreamHandler, n int) []byte {
+	t.Helper()
+	var got bytes.Buffer
+	for got.Len() < n {
+		select {
+		case data := <-handler.dataCh:
+			got.Write(data)
+		case <-time.After(5 * time.Second):
+			t.Fatalf("input stalled after %d of %d bytes", got.Len(), n)
+		}
+	}
+	return got.Bytes()
+}
+
+func isClosed(h *StreamHandler) bool {
+	select {
+	case <-h.closeCh:
+		return true
+	default:
+		return false
+	}
+}
+
+// A paste of exactly StreamInputLimit bytes, sent while the consumer is not
+// reading (the worst case), is held and then delivered intact and in order.
+func TestStreamInput_PasteUpToLimitArrivesIntact(t *testing.T) {
+	client, _ := newCancelTestClient(t, http.NotFoundHandler(), 1)
+	handler := openInputTestStream(t, client, "paste-ok")
+	t.Cleanup(func() { _ = client.CloseStream("paste-ok", "test done", 0) })
+
+	sent := pasteFrames(t, client, "paste-ok", StreamInputLimit)
+	if isClosed(handler) {
+		t.Fatal("a paste within the input limit must not close the stream")
+	}
+	got := readInput(t, handler, len(sent))
+	if !bytes.Equal(sent, got) {
+		t.Fatal("paste did not arrive intact and in order")
+	}
+}
+
+// A paste over StreamInputLimit closes the stream with 1009 input_overflow,
+// reported to the Hub; it is never dropped silently. Another stream on the
+// same control channel keeps receiving input.
+func TestStreamInput_PasteOverLimitClosesWithCode(t *testing.T) {
+	client, hubConn := newCancelTestClient(t, http.NotFoundHandler(), 1)
+	handler := openInputTestStream(t, client, "paste-big")
+	other := openInputTestStream(t, client, "other")
+	t.Cleanup(func() { _ = client.CloseStream("other", "test done", 0) })
+
+	pasteFrames(t, client, "paste-big", StreamInputLimit+1)
+
+	if !isClosed(handler) {
+		t.Fatal("input over the limit must close the stream")
+	}
+	client.streamMu.RLock()
+	_, registered := client.streams["paste-big"]
+	client.streamMu.RUnlock()
+	if registered {
+		t.Fatal("the overflowed stream must be released")
+	}
+
+	if err := hubConn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	var closeMsg wsprotocol.StreamCloseMessage
+	if err := hubConn.ReadJSON(&closeMsg); err != nil {
+		t.Fatalf("read stream close: %v", err)
+	}
+	if closeMsg.Type != wsprotocol.TypeStreamClose || closeMsg.StreamID != "paste-big" ||
+		closeMsg.Code != closeCodeInputOverflow || closeMsg.Reason != closeReasonInputOverflow {
+		t.Fatalf("got close %+v, want stream_close paste-big %d %s", closeMsg, closeCodeInputOverflow, closeReasonInputOverflow)
+	}
+
+	// Later frames for the closed stream are ignored without blocking.
+	feed(t, client, wsprotocol.NewStreamFrame("paste-big", []byte("late")))
+
+	sent := pasteFrames(t, client, "other", 1024)
+	if got := readInput(t, other, len(sent)); !bytes.Equal(sent, got) {
+		t.Fatal("input on another stream must be unaffected")
+	}
+}
+
+// The overflow code passes through the Hub unchanged and clients treat it as
+// terminal, so the client reports it instead of reconnecting.
+func TestStreamInput_OverflowCodeIsTerminalAndPassesThrough(t *testing.T) {
+	if got := wsprotocol.MapBrokerStreamCloseCode(closeCodeInputOverflow); got != closeCodeInputOverflow {
+		t.Fatalf("Hub maps %d to %d, want pass-through", closeCodeInputOverflow, got)
+	}
+	if !wsprotocol.IsSendableCloseCode(closeCodeInputOverflow) {
+		t.Fatalf("%d must be sendable in a close frame", closeCodeInputOverflow)
+	}
+	if d := wsprotocol.ClassifyPTYClose(closeCodeInputOverflow); d != wsprotocol.DispositionTerminal {
+		t.Fatalf("ClassifyPTYClose(%d) = %v, want terminal", closeCodeInputOverflow, d)
+	}
+	if closeCodeInputOverflow != websocket.CloseMessageTooBig {
+		t.Fatalf("closeCodeInputOverflow = %d, want RFC 6455 1009", closeCodeInputOverflow)
 	}
 }

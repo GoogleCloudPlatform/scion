@@ -558,6 +558,12 @@ type ptyCloseMessage struct {
 	Hint    string
 }
 
+// ptyCloseInputTooLarge (1009, "message too big") is the code the runtime
+// broker closes an attach stream with when client input outruns the agent's
+// terminal past its per-stream input buffer (pkg/runtimebroker
+// StreamInputLimit). ClassifyPTYClose treats it as terminal.
+const ptyCloseInputTooLarge = 1009
+
 // ptyCloseMessages maps PTY close codes (see pkg/wsprotocol pty_close.go) to
 // user-facing messages. Codes not listed fall back to a message chosen by
 // wsprotocol.ClassifyPTYClose, so a new code needs at most one row here. The
@@ -578,6 +584,10 @@ var ptyCloseMessages = map[int]ptyCloseMessage{
 	},
 	wsprotocol.ClosePTYTryAgainLater: {
 		Summary: "the Hub is overloaded",
+	},
+	ptyCloseInputTooLarge: {
+		Summary: "the input was too large for the session (more than the runtime broker buffers before the agent reads it)",
+		Hint:    "Paste in smaller chunks, then reattach with: scion attach {agent}",
 	},
 	wsprotocol.ClosePTYAuthRequired: {
 		Summary: "your Hub credentials are no longer valid",
