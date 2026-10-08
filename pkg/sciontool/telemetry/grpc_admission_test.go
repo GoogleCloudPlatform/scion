@@ -326,9 +326,7 @@ func TestBoundedGRPCAdapterRejectsExtraMessageBeforeExport(t *testing.T) {
 	if status.Code(err) != codes.Internal || exports.Load() != 0 {
 		t.Fatalf("extra message error=%v exports=%d", err, exports.Load())
 	}
-	if len(r.decodeSlots) != 0 {
-		t.Fatalf("extra message retained %d slots", len(r.decodeSlots))
-	}
+	waitSlotsDrained(t, r.decodeSlots, "extra message")
 }
 
 func TestBoundedGRPCAdapterCompressedExpansionLimit(t *testing.T) {
@@ -341,9 +339,10 @@ func TestBoundedGRPCAdapterCompressedExpansionLimit(t *testing.T) {
 	if status.Code(err) != codes.ResourceExhausted {
 		t.Fatalf("compressed expansion = %v", err)
 	}
-	if codec.calls.Load() != 0 || compressedIntake.calls.Load() != 1 || len(slots) != 0 {
-		t.Fatalf("oversize decoded=%d decompressed=%d slots=%d", codec.calls.Load(), compressedIntake.calls.Load(), len(slots))
+	if codec.calls.Load() != 0 || compressedIntake.calls.Load() != 1 {
+		t.Fatalf("oversize decoded=%d decompressed=%d", codec.calls.Load(), compressedIntake.calls.Load())
 	}
+	waitSlotsDrained(t, slots, "compressed expansion")
 }
 
 func TestBoundedGRPCAdapterRetainsCanceledWorkAndRejectsSeventeenth(t *testing.T) {
