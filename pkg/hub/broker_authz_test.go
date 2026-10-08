@@ -278,8 +278,8 @@ func TestSendAgentRouted_WithoutAttach(t *testing.T) {
 	req = req.WithContext(contextWithIdentity(req.Context(), outsider))
 
 	rr := httptest.NewRecorder()
-	msgID := srv.sendAgentRouted(rr, req, "topic:"+project.ID, project.ID, outsider,
-		"hello", "outsider@test.com", []*store.Agent{agent}, nil, nil, nil, time.Now(), "", nil, chatSendOptions{})
+	msgID := writeChatSendOutcome(rr)(srv.sendAgentRouted(req.Context(), "topic:"+project.ID, project.ID, outsider,
+		"hello", "outsider@test.com", []*store.Agent{agent}, nil, nil, nil, time.Now(), "", nil, chatSendOptions{}))
 
 	if msgID != "" {
 		t.Errorf("expected empty msgID on denied request, got %q", msgID)
@@ -326,8 +326,8 @@ func TestSendAgentRouted_WithAttach(t *testing.T) {
 	req = req.WithContext(contextWithIdentity(req.Context(), owner))
 
 	rr := httptest.NewRecorder()
-	msgID := srv.sendAgentRouted(rr, req, "topic:"+project.ID, project.ID, owner,
-		"hello", "owner@test.com", []*store.Agent{agent}, nil, nil, nil, time.Now(), "", nil, chatSendOptions{})
+	msgID := writeChatSendOutcome(rr)(srv.sendAgentRouted(req.Context(), "topic:"+project.ID, project.ID, owner,
+		"hello", "owner@test.com", []*store.Agent{agent}, nil, nil, nil, time.Now(), "", nil, chatSendOptions{}))
 
 	if msgID == "" {
 		t.Errorf("expected non-empty msgID, got empty; response: %d: %s", rr.Code, rr.Body.String())
@@ -402,8 +402,8 @@ func TestSendAgentRouted_MentionSkippedWithoutAttach(t *testing.T) {
 	rr := httptest.NewRecorder()
 	agents := []*store.Agent{primaryAgent, mentionAgent}
 	mentionResults := []messages.MentionResult{{Slug: "mention-agent", Status: "delivered"}}
-	msgID := srv.sendAgentRouted(rr, req, "topic:"+project.ID, project.ID, owner,
-		"@mention-agent hello", "owner@test.com", agents, []string{"mention-agent"}, mentionResults, nil, time.Now(), "", nil, chatSendOptions{})
+	msgID := writeChatSendOutcome(rr)(srv.sendAgentRouted(req.Context(), "topic:"+project.ID, project.ID, owner,
+		"@mention-agent hello", "owner@test.com", agents, []string{"mention-agent"}, mentionResults, nil, time.Now(), "", nil, chatSendOptions{}))
 
 	if msgID == "" {
 		t.Errorf("expected non-empty msgID, got empty; response: %d: %s", rr.Code, rr.Body.String())

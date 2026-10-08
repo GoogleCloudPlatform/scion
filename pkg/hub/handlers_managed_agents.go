@@ -203,10 +203,44 @@ func (s *Server) managedAgentDelete(ctx context.Context, agent *store.Agent) err
 }
 
 // Warnings a managed create that lost to a delete reports in the 409's
-// details.warnings (compensateManagedCreate).
+// details.warnings (managedCreateDeleteWon).
 const (
 	managedCreateCompensatedWarning      = "agent was deleted while it was being created; its managed-agent interaction was stopped"
 	managedCreateCompensateFailedWarning = "agent was deleted while it was being created; stopping its managed-agent interaction failed: "
+)
+
+// Warnings a managed create whose post-create write failed reports in the
+// error's details.warnings (writeManagedCreateUnrecorded, ptone/scion#3557).
+const (
+	managedCreateUnrecordedStoppedWarning    = "the managed agent could not be recorded; its managed-agent interaction was stopped"
+	managedCreateUnrecordedStopFailedWarning = "the managed agent could not be recorded; stopping its managed-agent interaction failed: "
+)
+
+// managedCreateCompensation words a managed create's interaction stop
+// (managedCreateStop.warnings) by why the create failed.
+type managedCreateCompensation struct {
+	stoppedWarning    string
+	stopFailedWarning string // prefix; the error follows
+	// namesIDs appends the agent ID and the interaction ID to the
+	// warnings. The unrecorded rollback deletes the row, so after a failed
+	// stop the warning is the only record of what an operator must stop by
+	// hand.
+	namesIDs bool
+}
+
+var (
+	// managedCreateDeleteWon: a delete won the race (ptone/scion#3454).
+	managedCreateDeleteWon = managedCreateCompensation{
+		stoppedWarning:    managedCreateCompensatedWarning,
+		stopFailedWarning: managedCreateCompensateFailedWarning,
+	}
+	// managedCreateUnrecorded: the post-create write failed and the create
+	// is rolled back (ptone/scion#3557).
+	managedCreateUnrecorded = managedCreateCompensation{
+		stoppedWarning:    managedCreateUnrecordedStoppedWarning,
+		stopFailedWarning: managedCreateUnrecordedStopFailedWarning,
+		namesIDs:          true,
+	}
 )
 
 // compensateManagedCreate cleans up the cloud side of a managed (hub-direct)
@@ -237,18 +271,77 @@ const (
 // an interaction running that nothing else can stop. Unlike
 // managedAgentDelete, a failure is reported (stopManagedInteraction).
 func (s *Server) compensateManagedCreate(ctx context.Context, agent *store.Agent, recorded bool) []string {
+	return s.stopManagedCreateInteraction(ctx, agent, recorded).warnings(managedCreateDeleteWon)
+}
+
+// managedCreateStop is the outcome of stopManagedCreateInteraction.
+type managedCreateStop struct {
+	// interactionID is the interaction a stop was tried for; "" when none
+	// was tried.
+	interactionID string
+	agentID       string
+	err           error
+}
+
+// warnings returns the warnings for stop, in why's words; nil when no stop
+// was tried.
+func (stop managedCreateStop) warnings(why managedCreateCompensation) []string {
+	if stop.interactionID == "" {
+		return nil
+	}
+	ids := ""
+	if why.namesIDs {
+		ids = fmt.Sprintf(" (agent %s, interaction %s)", stop.agentID, stop.interactionID)
+	}
+	if stop.err != nil {
+		return []string{why.stopFailedWarning + stop.err.Error() + ids}
+	}
+	return []string{why.stoppedWarning + ids}
+}
+
+// stopManagedCreateInteraction applies compensateManagedCreate's rule and
+// stop (detached, with its own budget), logs a failure, and returns the
+// outcome unworded. A create whose post-create write failed
+// (ptone/scion#3557) only learns whether a delete won after its rollback
+// ran, so it words the outcome afterwards (managedCreateStop.warnings).
+func (s *Server) stopManagedCreateInteraction(ctx context.Context, agent *store.Agent, recorded bool) managedCreateStop {
 	interactionID := agent.Annotations[annotationInteractionID]
 	if recorded || interactionID == "" {
-		return nil
+		return managedCreateStop{}
 	}
 	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), compensatingDeleteTimeout)
 	defer cancel()
+	stop := managedCreateStop{interactionID: interactionID, agentID: agent.ID}
 	if err := stopManagedInteraction(cctx, interactionID); err != nil {
-		s.agentLifecycleLog.Warn("Failed to stop the managed agent interaction of a create that lost to a delete",
+		s.agentLifecycleLog.Warn("Failed to stop the managed agent interaction of a failed managed create",
 			"agent_id", agent.ID, "interaction_id", interactionID, "error", err)
-		return []string{managedCreateCompensateFailedWarning + err.Error()}
+		stop.err = err
 	}
-	return []string{managedCreateCompensatedWarning}
+	return stop
+}
+
+// managedCreateUnrecordedMessage is the message of the 500 a managed create
+// answers when its post-create write failed and the create was rolled back
+// (ptone/scion#3557).
+const managedCreateUnrecordedMessage = "The managed agent was created but could not be recorded; the create was rolled back"
+
+// writeManagedCreateUnrecorded writes the 500 internal_error answer to a
+// managed create whose post-create write failed (ptone/scion#3557). The
+// outcome of stopping its interaction goes in details.warnings. When the
+// rollback of its records did not complete (correlationID != ""), the
+// message says so and details.correlation_id carries the ID, as
+// writeCreateFailure does.
+func writeManagedCreateUnrecorded(w http.ResponseWriter, agentID, correlationID string, warnings []string) {
+	message := managedCreateUnrecordedMessage
+	details := map[string]interface{}{"agentId": agentID}
+	if correlationID != "" {
+		message = "The managed agent was created but could not be recorded, and rolling back its records did not complete; report the correlation ID to an administrator"
+		details["correlation_id"] = correlationID
+	}
+	if len(warnings) > 0 {
+		details["warnings"] = warnings
+	}
+	writeError(w, http.StatusInternalServerError, ErrCodeInternalError, message, details)
 }
 
 // stopManagedInteraction cancels interactionID if it is still in progress,

@@ -254,13 +254,17 @@ test-launch-store-postgres:
 		exit 1; \
 	fi
 	@go test -tags integration -count=1 -timeout 20m -v \
-		-run '^TestProjectDeletionService_LockOrderNoDeadlock$$' \
+		-run '^(TestProjectDeletionService_LockOrderNoDeadlock|TestScheduledSend_TwoHubReplicasPostgres_OneDelivery)$$' \
 		./pkg/hub/ > /tmp/test-launch-store-postgres-hub.log 2>&1; \
 	status=$$?; \
 	cat /tmp/test-launch-store-postgres-hub.log; \
 	if [ $$status -ne 0 ]; then exit $$status; fi; \
 	if ! grep -qE '^[[:space:]]*--- PASS: TestProjectDeletionService_LockOrderNoDeadlock' /tmp/test-launch-store-postgres-hub.log; then \
 		echo "ERROR: the pkg/hub project-delete lock-order test did not run." >&2; \
+		exit 1; \
+	fi; \
+	if ! grep -qE '^[[:space:]]*--- PASS: TestScheduledSend_TwoHubReplicasPostgres_OneDelivery' /tmp/test-launch-store-postgres-hub.log; then \
+		echo "ERROR: the pkg/hub two-replica scheduled send test did not run." >&2; \
 		exit 1; \
 	fi
 
@@ -276,7 +280,8 @@ WEBCHAT_POSTGRES_TESTS := TestListTopicsByProjects_Postgres \
 	TestC4Fix_Postgres_PreExistingDB \
 	TestC4Fix_Postgres_Idempotent \
 	TestC4Fix_Postgres_PreExistingDB_Idempotent \
-	TestUnreadMentionKeys_Postgres
+	TestUnreadMentionKeys_Postgres \
+	TestScheduledStore_Postgres
 
 test-webchat-postgres:
 	@echo "Running web chat store tests against Postgres..."

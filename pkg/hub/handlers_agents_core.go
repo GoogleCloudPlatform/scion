@@ -366,6 +366,11 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// The ids= format check runs before any authorization or store call
+	// (see parseAgentListIDs).
+	if !validateAgentListIDs(w, query, agentListLimit(query), sorted) {
+		return
+	}
 
 	// writeShortCircuit writes the empty list for an unauthenticated or
 	// None-scope caller. In sorted mode it first validates the remaining
@@ -973,6 +978,16 @@ type createRollback struct {
 	// DeleteRuntime deletes the agent's runtime-side resources; nil when
 	// the create has none.
 	DeleteRuntime func(context.Context) error
+	// DeleteWon, when non-nil, makes the row removal conditional
+	// (createCompensation.IfNotDeleteHeld, ptone/scion#3557): a delete that
+	// holds the row when the compensation runs keeps it, and the cleanup
+	// leaves the row, its edge and its quotas to that delete and sets
+	// *DeleteWon. The other steps (revoke, DeleteRuntime) have run by then.
+	// When the fallback's conditional row deletes give up because the row
+	// kept changing (store.ErrVersionConflict), the row, its phase, its edge
+	// and its quotas are likewise left alone, but the compensation failure is
+	// reported (correlation ID) and *DeleteWon stays false.
+	DeleteWon *bool
 }
 
 // cleanupFailedCreate is the single best-effort cleanup for a create that
@@ -1061,6 +1076,10 @@ func (s *Server) cleanupFailedCreate(ctx context.Context, rb createRollback) (co
 			return ""
 		}
 	}
+	// leftContended: in conditional mode the row was left to a concurrent
+	// writer after the fallback's conditional deletes gave up
+	// (ErrVersionConflict).
+	leftContended := false
 	func() {
 		sctx, cancel := detachedCleanupContext(ctx, createCleanupStoreTimeout)
 		defer cancel()
@@ -1071,8 +1090,15 @@ func (s *Server) cleanupFailedCreate(ctx context.Context, rb createRollback) (co
 			OpID:            opID,
 			Stage:           rb.Stage,
 			Cause:           rb.Cause,
+			IfNotDeleteHeld: rb.DeleteWon != nil,
 		})
 		if err == nil {
+			return
+		}
+		if errors.Is(err, errCreateRowDeleteHeld) {
+			s.agentLifecycleLog.Info("Create-failure cleanup: a delete holds the agent row; leaving it to the delete",
+				"agent_id", agent.ID, "stage", rb.Stage)
+			*rb.DeleteWon = true
 			return
 		}
 		compensationFailureCorrelationID = compensationFailureID(ctx)
@@ -1089,7 +1115,27 @@ func (s *Server) cleanupFailedCreate(ctx context.Context, rb createRollback) (co
 		// The row delete is retried a few times; if it still fails, the row
 		// is left visibly failed rather than in phase created with no
 		// message.
-		if derr := s.deleteFailedCreateRow(ctx, agent.ID); derr != nil {
+		derr := s.deleteFailedCreateRow(ctx, agent.ID, rb.DeleteWon != nil)
+		if errors.Is(derr, errCreateRowDeleteHeld) {
+			// A delete claimed the row since: it owns the row and its
+			// edge. The failed compensation's correlation ID is logged
+			// above (logCompensationFailure) and returned, but a caller
+			// that answers 409 for a delete that won does not put it in
+			// the response.
+			*rb.DeleteWon = true
+			return
+		}
+		if rb.DeleteWon != nil && errors.Is(derr, store.ErrVersionConflict) {
+			// Conditional mode, and the row kept changing under the
+			// conditional deletes (the fallback's retries included) until
+			// FinalizeAgentDeletion gave up: something else, most likely a
+			// delete, is writing it. Leave the row, its phase, its edge and
+			// its quotas to that writer; the correlation ID is still
+			// reported (ptone/scion#3557).
+			leftContended = true
+			return
+		}
+		if derr != nil {
 			s.agentLifecycleLog.Warn("Create-failure cleanup: agent row delete failed", "agent_id", agent.ID, "error", derr)
 			mctx, mcancel := detachedCleanupContext(ctx, createCleanupStoreTimeout)
 			defer mcancel()
@@ -1112,6 +1158,10 @@ func (s *Server) cleanupFailedCreate(ctx context.Context, rb createRollback) (co
 			s.agentLifecycleLog.Warn("Create-failure cleanup: edge deactivation failed", "agent_id", agent.ID, "op_id", opID, "error", derr)
 		}
 	}()
+	if leftContended || (rb.DeleteWon != nil && *rb.DeleteWon) {
+		// The delete releases the quotas when it finishes.
+		return compensationFailureCorrelationID
+	}
 	// Detaches from ctx and applies its own timeout internally.
 	s.releaseAgentQuotas(ctx, agent.ID, rb.RuntimeBrokerID)
 	return compensationFailureCorrelationID
@@ -1156,7 +1206,12 @@ func createCleanupRefusedMessage(refused *DeleteRunMismatchError) string {
 // deleteFailedCreateRow removes a failed create's agent row, trying
 // createCleanupDeleteAttempts times with a growing backoff, each attempt on
 // its own detached context. A row already gone counts as removed.
-func (s *Server) deleteFailedCreateRow(ctx context.Context, agentID string) error {
+//
+// When conditional is set (createRollback.DeleteWon, ptone/scion#3557), the
+// row is removed only if no delete holds it (createRowHeldCheck, checked in
+// the delete's transaction); a row a delete holds, or one already gone or
+// soft-deleted, returns errCreateRowDeleteHeld.
+func (s *Server) deleteFailedCreateRow(ctx context.Context, agentID string, conditional bool) error {
 	var err error
 	for attempt := 0; attempt < createCleanupDeleteAttempts; attempt++ {
 		if attempt > 0 {
@@ -1165,8 +1220,19 @@ func (s *Server) deleteFailedCreateRow(ctx context.Context, agentID string) erro
 		func() {
 			sctx, cancel := detachedCleanupContext(ctx, createCleanupStoreTimeout)
 			defer cancel()
-			err = s.store.DeleteAgent(sctx, agentID)
+			if !conditional {
+				err = s.store.DeleteAgent(sctx, agentID)
+				return
+			}
+			var n int
+			n, err = s.store.FinalizeAgentDeletion(sctx, agentID, createRowCompensable(), store.DeletionFinalizeHard, store.DeletionFields{}, createRowHeldCheck(nil))
+			if err == nil && n == 0 {
+				err = errCreateRowDeleteHeld
+			}
 		}()
+		if errors.Is(err, errCreateRowDeleteHeld) {
+			return err
+		}
 		if err == nil || errors.Is(err, store.ErrNotFound) {
 			return nil
 		}
@@ -2388,9 +2454,18 @@ func (s *Server) createAgentInProject(
 		}
 		if err := s.managedAgentCreate(ctx, agent, task); err != nil {
 			// managedAgentCreate mints no agent credential: nothing to revoke.
-			corrID := cleanup(createRollback{Stage: createStageManaged, Cause: err, DeleteRuntime: func(cctx context.Context) error {
+			// The row is removed only if no delete holds it (DeleteWon); a
+			// delete that holds it or removed it wins, and the create
+			// answers 409 as a delete that won does (ptone/scion#3454). No
+			// interaction ID was recorded, so there is nothing to report.
+			deleteWon := false
+			corrID := cleanup(createRollback{Stage: createStageManaged, Cause: err, DeleteWon: &deleteWon, DeleteRuntime: func(cctx context.Context) error {
 				return s.managedAgentDelete(cctx, agent)
 			}})
+			if deleteWon {
+				writeDeletedDuringCreate(w, agent.ID, nil)
+				return
+			}
 			writeCreateFailure(w, corrID, func() { RuntimeError(w, "Failed to create managed agent: "+err.Error()) })
 			return
 		}
@@ -2401,10 +2476,29 @@ func (s *Server) createAgentInProject(
 		} else {
 			agent.Activity = "working"
 		}
-		recorded := true
 		if err := s.store.UpdateAgent(ctx, agent); err != nil {
-			recorded = false
 			s.agentLifecycleLog.Warn("Failed to update managed agent after create", "agent_id", agent.ID, "error", err)
+			// Without this write the row has neither the managed Runtime
+			// nor the interaction ID, so a later delete could not stop the
+			// interaction (ptone/scion#3557). Fail the create: stop the
+			// interaction, then roll back the row, its edge and its quotas.
+			// The row is removed only if no delete holds it, decided in the
+			// rollback's own transaction (DeleteWon); a delete that holds it
+			// or removed it wins, and the create answers 409 as below.
+			var stop managedCreateStop
+			deleteWon := false
+			corrID := cleanup(createRollback{Stage: createStageManagedRecord, Cause: err, DeleteWon: &deleteWon, DeleteRuntime: func(cctx context.Context) error {
+				stop = s.stopManagedCreateInteraction(cctx, agent, false)
+				return nil
+			}})
+			if deleteWon {
+				// Nothing of the create's records was removed: the delete
+				// owns them.
+				writeDeletedDuringCreate(w, agent.ID, stop.warnings(managedCreateDeleteWon))
+				return
+			}
+			writeManagedCreateUnrecorded(w, agent.ID, corrID, stop.warnings(managedCreateUnrecorded))
+			return
 		}
 
 		// A delete that won the race answers 409 with no agent body, as
@@ -2413,7 +2507,10 @@ func (s *Server) createAgentInProject(
 		if !s.publishAgentCreatedIfLive(ctx, agent) {
 			s.agentLifecycleLog.Info("Hub: managed agent was deleted while it was being created; answering 409",
 				"agent_id", agent.ID, "agent", agent.Name)
-			writeDeletedDuringCreate(w, agent.ID, s.compensateManagedCreate(ctx, agent, recorded))
+			// recorded=true: a failed post-create write returned above, so
+			// the write landed before the delete's claim and the delete's
+			// row names the interaction; the delete stops it.
+			writeDeletedDuringCreate(w, agent.ID, s.compensateManagedCreate(ctx, agent, true))
 			return
 		}
 		s.enrichAgent(ctx, agent, project, nil)

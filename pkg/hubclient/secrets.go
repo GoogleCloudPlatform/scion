@@ -16,7 +16,6 @@ package hubclient
 
 import (
 	"context"
-	"fmt"
 	"net/url"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
@@ -168,7 +167,7 @@ func (s *secretService) Get(ctx context.Context, key string, opts *SecretScopeOp
 	}
 	if secret == nil {
 		// A 204 No Content response decodes to nil, nil.
-		return nil, fmt.Errorf("hub returned no content for %q", key)
+		return nil, &noContentError{key: key}
 	}
 	return secret, nil
 }

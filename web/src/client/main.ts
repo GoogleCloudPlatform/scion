@@ -28,6 +28,7 @@ import type { PageData, User } from '../shared/types.js';
 import { stateManager } from './state.js';
 import { debugLog } from './debug-log.js';
 import { setDocumentTitle } from './page-title.js';
+import { setInitialPageData, takeInitialPageData } from './ssr-page-data.js';
 import { CHAT_DM_ROUTE, CHAT_SPACE_ROUTE, CHAT_THREAD_ROUTE } from './chat-routes.js';
 import { chatNotifications } from './chat-notifications.js';
 import { chatUnread, startChatUnreadIfEligible } from './chat-unread.js';
@@ -53,6 +54,7 @@ import {
   SUPERADMIN_ROUTES,
 } from '../lib/admin-permissions.js';
 import { ACCOUNT_TEARDOWN_EVENT, type AccountTeardownDetail } from '../utils/auth.js';
+import { clearAdminStatus, loadAdminStatus } from './admin-status.js';
 import { chatRecentFiles } from './chat-recent-files.js';
 import { pushRouteEntry, type RouteShell } from './route-history.js';
 import { browserPath, stripBasePath } from './navigation.js';
@@ -141,14 +143,11 @@ import '../components/shared/status-badge.js';
 /** Current authenticated user, fetched once on init */
 let currentUser: User | null = null;
 
-/** SSR-prefetched page data, consumed once on initial render */
-let ssrPageData: PageData | null = null;
-
 /**
- * Cached admin-status flags, fetched once on init from
- * GET /api/v1/auth/admin-status. Used by the route guard to allow
- * hub-admin users (not just super-admins) to access admin pages.
- * Includes the permissions array for per-route permission checks.
+ * The admin-status flags the route guard last fetched fresh on entering an
+ * admin page (see client/admin-status.ts). Used to allow hub-admin users
+ * (not just super-admins) into admin pages, with the permissions array for
+ * per-route permission checks.
  */
 let cachedAdminStatus: AdminStatus | null = null;
 let terminalWorkspaceEnabled = false;
@@ -231,26 +230,6 @@ function ensureTerminalCoordinator(): TerminalCoordinator | null {
     });
   });
   return terminalCoordinator;
-}
-
-/**
- * Fetch the current user's admin status from the backend.
- * Returns null when the user is not authenticated or the fetch fails.
- * Includes the permissions array for per-resource permission checks.
- */
-async function fetchAdminStatus(): Promise<AdminStatus | null> {
-  try {
-    const res = await fetch('/api/v1/auth/admin-status', { credentials: 'include' });
-    if (!res.ok) return null;
-    const data = await res.json();
-    return {
-      isAdmin: data.isAdmin === true,
-      isSuperAdmin: data.isSuperAdmin === true,
-      permissions: Array.isArray(data.permissions) ? data.permissions : [],
-    };
-  } catch {
-    return null;
-  }
 }
 
 /**
@@ -620,7 +599,7 @@ const ROUTES: RouteConfig[] = [
   },
   {
     // Artifact page (experiment hub.artifacts; the page renders 404 when off).
-    pattern: /^\/projects\/[^/]+\/artifacts\/[^/]+$/,
+    pattern: /^\/projects\/[^/]+\/artifacts\/[^/]+(?:\/v\/[1-9][0-9]*)?$/,
     tag: 'scion-page-artifact-detail',
     load: () => import('../components/pages/artifact-detail.js'),
   },
@@ -813,8 +792,8 @@ async function init(): Promise<void> {
     if (initialData.user) {
       currentUser = initialData.user;
     }
-    // Preserve the full SSR payload so page components can use prefetched data.
-    ssrPageData = initialData;
+    // Keep the SSR payload for the first render only (see ssr-page-data.ts).
+    setInitialPageData(initialData);
     if (initialData.data) {
       const pageDataObj = initialData.data as {
         agents?: import('../shared/types.js').Agent[];
@@ -856,10 +835,11 @@ async function init(): Promise<void> {
     tzReady = withTimeout(loadPreferredTimeZone(), TZ_LOAD_BUDGET_MS).then(() => undefined);
   }
 
-  // Fetch admin status early so the route guard can use the cached result
-  // instead of blocking on a network call during navigation.
-  if (currentUser) {
-    cachedAdminStatus = await fetchAdminStatus();
+  // Start the shared admin-status request now, without waiting for it: the
+  // nav joins it when it renders (see client/admin-status.ts), so a cold
+  // load sends one request instead of one here plus one per nav instance.
+  if (currentUser?.id) {
+    void loadAdminStatus(currentUser.id);
   }
 
   // Chat notifications are published on user.<id>.notification, so the state
@@ -944,6 +924,8 @@ async function init(): Promise<void> {
   window.addEventListener(ACCOUNT_TEARDOWN_EVENT, (e) => {
     // A chat scroll position belongs to this account's session.
     clearChatScrollAnchor();
+    // So does its admin status: drop it and any request still in flight.
+    clearAdminStatus();
     // Explicit logout only: suspend ingestion and clear this account's
     // persisted key and memory before the logout POST runs, so nothing async
     // can race a response into a store that is no longer this identity's. An
@@ -1043,6 +1025,11 @@ async function renderRoute(path: string): Promise<void> {
   const appContainer = ensureRoots();
   if (!appContainer) return;
   const thisNav = ++navigationId;
+
+  // The SSR payload belongs to this document and is offered to the first
+  // render only, whichever route it is; it is cleared here whether or not it
+  // matches, so a later client-side navigation never receives it.
+  const initialData = takeInitialPageData(path, currentUser);
 
   // Strip query string and hash for route matching
   let pathname = path.split('?')[0].split('#')[0];
@@ -1145,19 +1132,14 @@ async function renderRoute(path: string): Promise<void> {
   const tag = route.tag;
 
   // Build page data with current user context for page components.
-  // Include SSR-prefetched data on the initial render so page components
-  // can skip redundant API fetches.
-  const hasSsrData = ssrPageData && ssrPageData.path === path && ssrPageData.data;
+  // Include SSR-prefetched data on the initial render (see
+  // takeInitialPageData) so page components can skip redundant API fetches.
   const pageData: PageData = {
     path,
     title: 'Scion',
     user: currentUser || undefined,
-    data: hasSsrData ? ssrPageData!.data : undefined,
+    data: initialData,
   };
-  // Consume SSR data so it is not reused on subsequent client-side navigations.
-  if (hasSsrData) {
-    ssrPageData = null;
-  }
 
   // Block non-admin users from admin-only routes.
   // Hub-admin users (who have admin role bindings but not super-admin role)
@@ -1165,15 +1147,16 @@ async function renderRoute(path: string): Promise<void> {
   //
   // Re-fetch admin status on every admin-route navigation so that role
   // grants or revocations made mid-session take effect immediately rather
-  // than being cached for the entire SPA lifetime. The init-time fetch
-  // remains for nav.ts's initial render; this call replaces the cache so
-  // the route guard always uses a fresh result.
+  // than being cached for the entire SPA lifetime. The fresh result also
+  // replaces the shared value (client/admin-status.ts); a nav already on
+  // screen read that value once for this user, so only later nav renders
+  // see it.
   //
   // Per-route permission checks: super-admin-only routes (Diagnostics,
   // Maintenance) require isSuperAdmin; other admin routes require at least
   // one matching permission from ROUTE_PERMISSION_MAP.
   if (ADMIN_ROUTES.has(tag)) {
-    cachedAdminStatus = await fetchAdminStatus();
+    cachedAdminStatus = await loadAdminStatus(currentUser?.id, { fresh: true });
 
     if (SUPERADMIN_ROUTES.has(tag)) {
       if (!cachedAdminStatus?.isSuperAdmin) {

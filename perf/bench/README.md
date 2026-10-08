@@ -492,6 +492,41 @@ total wall-clock time. The report is written incrementally (after every
 scenario and every burst run), so a Chromium crash mid-benchmark loses at
 most the in-flight run, not the whole report.
 
+**The project grid and list are paged.** `project-grid` and `project-list`
+render one page of agents at a time (the pager's page size, 25 by default),
+so for them `populated` means *the first page rendered*: `min(pageSize,
+total)` cards or rows, with the pager idle. The page size and total are read
+from the rendered `<scion-agent-pager>`, not assumed; with no pager the view
+is treated as unpaged and every agent is expected, as before.
+`expectedCount` is that first-page count, and each run adds `agentCount`,
+`pageSize`, `pageTotal` and `pageCount`. A populated run then clicks Next up
+to `--page-changes` times (default 3; fewer when the view has fewer pages)
+and times each change from the click until the pager shows the next page,
+idle, with its `rowsOnPage` rendered and a different first item
+(`pageChanges`: `toPageIndex`, `ok`, `ms`, `rows`). `pageChangesStopReason`
+says how the run's walk ended: `completed` (all requested changes timed),
+`none-requested` (`--page-changes 0`), `no-next-page` (the last page was
+reached), `next-unavailable-before-last-page` (Next disabled although the
+pager's own total says more pages exist: the walk ended early, a product
+behaviour; also reported when every requested change completed but the last
+one landed on such a page), `next-disabled`, `pager-busy`, `timed-out`,
+`no-pager` or `not-populated`; `pageChangesStopPager` records the pager at
+that point. The scenario summary adds `paged`, `pageSize`, `pageCount`,
+`pageChangeAttemptCount`, `pageChangeSuccessCount`,
+`pageChangeFailureCount`, `pageWalkEarlyStopCount` (runs that ended with
+`next-unavailable-before-last-page`; the console paged line prints it) and
+median/min/max/stddev of `pageChangeMs` over completed changes of populated
+runs; the report top level adds `pageChangesPerRun`. The network fields
+(`networkStatus`, `networkFailed`, `networkObservedAtMs`) still describe the
+first load only: the watch is detached before any page change. For grid and
+list, `expectedCount`, `populated` and `navToPopulatedMs` now refer to the
+first page; every other field keeps its meaning. A seed with no agents
+renders the project's empty state instead of a pager; such a run counts as
+populated once that empty state is on screen. Before this, these two
+scenarios waited for one card per agent, which a paged view never renders
+above one page, so at 100 and 500 agents they always ended
+`loaded-not-rendered`.
+
 For the two graph scenarios, a populated run also performs a short
 pan/zoom/hover interaction sequence (hover over up to 5 nodes, wheel-zoom
 in and out, drag-pan) and reports the long-task cost specifically
@@ -509,6 +544,11 @@ long-task delta (`graphInteraction.longTasks`), not `interactionMs`,** as
 the measurement of actual UI cost -- it is the field that scales with agent
 count (near-zero at 25 agents, up to ~733ms at 500 for
 `standalone-graph`) and the one `measurements.md` bases its conclusions on.
+
+The burst scenario below likewise waits only for the grid's first page,
+and picks its target agents from the cards on that page (an agent on
+another page has no badge to observe), so `--burst-count` is effectively
+capped at the number of non-suspended cards on that first page.
 
 It then runs the SSE burst-update scenario `--burst-runs` times (default:
 same as `--runs`; pass `--burst-only` to skip the four view scenarios above

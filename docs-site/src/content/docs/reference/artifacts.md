@@ -9,7 +9,7 @@ Artifacts are behind the `hub.artifacts` experiment, which is **off by default**
 
 An **artifact** is a published file or folder (a *bundle*) with a stable reference, `scion://artifact/<id>`, that works from any runtime broker, in any project the reader can access, and in the web UI. The hub stores the bytes, so a reader never needs access to the publisher's filesystem or shared directories.
 
-This page covers what is available today: publishing files and folders, versions, fetching, the artifact page, and artifact references in messages. Review and share links are planned.
+This page covers what is available today: publishing files and folders, versions, fetching, the web pages, and artifact references in messages. Review and share links are planned.
 
 Each artifact has numbered **versions**. A version is an immutable snapshot of the bundle: its files, one **entry** file (the one the web page opens and `get` prints), an optional note, and who published it. Publishing again under the same `--key` adds a version; the latest one is the artifact's **current** version, and `scion://artifact/<id>@<seq>` names one version for good.
 
@@ -117,7 +117,17 @@ $ scion message @reviewer "Design ready for review." --artifact scion://artifact
 
 **Artifacts list.** The *Artifacts* item in the sidebar, under *Management* beside *Skills*, opens `/artifacts`. It lists the same artifacts as [the list endpoint](#listing): the ones you own, the ones shared with you, and the ones published in your projects, newest first. Each row shows the title (with the key, when the artifact has one), the owner, the home project, when it was last updated and a *Review pending* badge when the current version is a review. Search filters by title or key; *Review pending* and *Owned by me* narrow the list further. *Load more* fetches the next page. A row opens the artifact's page. Owner and project names show as ids when you may not look them up.
 
-**Artifact page.** `/projects/<project-id>/artifacts/<id>` shows the artifact's title, owner, version and reference, and renders the entry file: Markdown as formatted text, text and code (including JSON, YAML, CSV) in a read-only editor, and PNG, JPEG, GIF and WebP images inline. Other types (including HTML, SVG and PDF) are offered as a download. The Markdown preview loads no images from other hosts: they appear as their alt text. Inline (data:) images are shown.
+**Artifact page.** `/projects/<project-id>/artifacts/<id>` shows the current version and `/projects/<project-id>/artifacts/<id>/v/<seq>` an earlier one. The header shows the title, owner, key, last update and the version's reference with a copy button, a **Version** menu listing the versions, **Edit** and, for a single file, **Download**. Three tabs:
+
+- **Preview** renders the entry file: Markdown as formatted text, text and code (including JSON, YAML, CSV) in a read-only editor, PNG, JPEG, GIF and WebP images inline, and HTML in the sandboxed frame described under [HTML artifacts](#html-artifacts), with a border and a bar saying who published it, plus **Full screen** and **Open in new tab**. The view URL lasts 30 minutes; after that the page says the view has expired and offers **Reload view**. Other types (such as SVG and PDF) are offered as a download.
+- **Files** lists the version's files with size and type, marks the entry file, and opens or downloads each one. Copies of remote images are counted, not listed.
+- **History** lists the versions, newest first, with who published each one, when, and its note.
+
+**Markdown preview.** The preview is a frame that runs no scripts and loads images from the hub only. A relative image path loads that file from the same version, and an absolute image URL loads the copy the hub fetched when the version was published. An image without a copy shows "Image not fetched", one whose fetch failed shows "Image could not be fetched", and a relative path that is not in the version shows "Image not in this version". Inline (`data:`) images are shown. Links open in a new tab; a relative link to a file of the version opens that file.
+
+**Edit and new versions.** On the current version, when the entry file is Markdown or text, **Edit** opens it in an editor, and **Publish new version** saves the change as a new version with an optional note; the other files are kept as they are. If a publish fails part-way, publishing again continues it rather than starting over; an unfinished version that is not continued is removed after 24 hours. **Upload new version** (on the History tab) publishes a file or a folder as the next version. Earlier versions are never changed.
+
+**Project page.** With artifacts on, the Files area of a project page has three views: **Artifacts** (shown first), **Shared dirs** and **Workspace**. Artifacts lists the artifacts homed in the project that you can open, newest first, with search, owner, version, last update and a *Review pending* badge; a row opens the artifact page. **New artifact** uploads a file, or a folder with a chosen entry file (hidden files and folders are skipped), with a title, an optional key and an optional note. Shared dirs and Workspace show the project's files as before.
 
 ## API
 
@@ -126,7 +136,7 @@ All routes are under `/api/v1/artifacts` and use the hub's usual authentication 
 | Method and path | Purpose |
 | :--- | :--- |
 | `POST /api/v1/artifacts?name=<file>[&title=<title>][&scope=<project-id>]` | Publish the raw request body as a new single-file artifact. `scope` defaults to the caller's project (agents); users must set it. Optional header `X-Content-SHA256` (hex) is verified. Returns `201` with the artifact, its first version and any publish `warnings`. |
-| `GET /api/v1/artifacts?mine=1[&q=<text>][&review_pending=1][&owner=me][&limit=<n>][&cursor=<c>]` | The artifacts the caller can read among those it owns, those shared with it directly, and those homed in projects it is a member of, newest first. See [Listing](#listing). |
+| `GET /api/v1/artifacts?mine=1[&q=<text>][&review_pending=1][&owner=me][&scope=<project-id>][&limit=<n>][&cursor=<c>]` | The artifacts the caller can read among those it owns, those shared with it directly, and those homed in projects it is a member of, newest first. See [Listing](#listing). |
 | `GET /api/v1/artifacts/{id}` | The artifact and its current version, including the file manifest (`path`, `size`, `sha256`, `mediaType`, and for remote images `origin`, `sourceUrl` and `fetchStatus`; see [Images in Markdown artifacts](#images-in-markdown-artifacts)). |
 | `GET /api/v1/artifacts/{id}/files/{path}` | A file of the current version. |
 | `GET /api/v1/artifacts/{id}/versions/{seq}/files/{path}` | A file of version `seq`. |
@@ -160,10 +170,11 @@ Every listed artifact passes the same check as `GET /api/v1/artifacts/{id}` for 
 | `q` | Keep artifacts whose title or key contains this text (at most 200 characters). Case is ignored for ASCII letters. For other letters, whether case is ignored depends on the database, so search for them in their exact case. |
 | `review_pending=1` | Keep artifacts whose current version is a review awaiting the owner. |
 | `owner=me` | Keep only artifacts the caller owns. |
+| `scope` | Keep only artifacts homed in this project (a project ID). It narrows the list and never adds an artifact the list would not show without it. The project's Artifacts view in the web UI uses it. |
 | `limit` | Page size, 1-100 (default 50). |
 | `cursor` | The `nextCursor` of the previous page. |
 
-The response is `{"artifacts": [...], "nextCursor": "..."}`. Each entry has the same fields as `artifact` in the single-artifact response, plus `reviewPending`. `nextCursor` is absent on the last page. Cursors are opaque and only work for the same caller and the same `q`, `review_pending` and `owner` values. A page may hold fewer than `limit` entries and still have a `nextCursor`, because one request examines a bounded number of rows. Keep following the cursor until it is absent. Artifacts created or updated while you page move to the front of the order: they appear on a fresh listing, not later in the current walk.
+The response is `{"artifacts": [...], "nextCursor": "..."}`. Each entry has the same fields as `artifact` in the single-artifact response, plus `reviewPending`. `nextCursor` is absent on the last page. Cursors are opaque and only work for the same caller and the same `q`, `review_pending`, `owner` and `scope` values. A page may hold fewer than `limit` entries and still have a `nextCursor`, because one request examines a bounded number of rows. Keep following the cursor until it is absent. Artifacts created or updated while you page move to the front of the order: they appear on a fresh listing, not later in the current walk.
 
 **File delivery.** On a hub with local storage the hub streams the bytes. On a hub with object storage (GCS) it answers `302` to a short-lived signed URL; add `?stream=1` to have the hub serve the bytes itself (the web page does this for text). Either way the response carries `Content-Disposition` (`inline` only for plain text, Markdown, CSV, TSV, JSON, YAML, TOML and raster images; `attachment` otherwise) and `X-Content-Type-Options: nosniff`; streamed responses also carry a sandboxing `Content-Security-Policy` and an `ETag`.
 
