@@ -649,10 +649,39 @@ func TestSecurityHeaders(t *testing.T) {
 				t.Errorf("CSP missing %q", check)
 			}
 		}
-		// Nothing is loaded from jsDelivr any more, so the CSP must not allow it.
-		if strings.Contains(csp, "cdn.jsdelivr.net") {
-			t.Errorf("CSP still allows cdn.jsdelivr.net: %q", csp)
+		// Nothing is loaded from jsDelivr or Web Awesome, so the CSP must not
+		// allow either.
+		for _, host := range []string{"cdn.jsdelivr.net", "cdn.webawesome.com"} {
+			if strings.Contains(csp, host) {
+				t.Errorf("CSP still allows %s: %q", host, csp)
+			}
 		}
+
+		// The host sources, per directive, are exactly these. Every source
+		// counts as a host except quoted keywords ('self', 'unsafe-inline'),
+		// bare schemes ending in a colon (data:, blob:, ws:, wss:, and the
+		// https: source in img-src that allows any HTTPS image) and the two
+		// local development origins below, matched exactly.
+		wantHosts := map[string][]string{
+			"style-src":   {"https://fonts.googleapis.com"},
+			"font-src":    {"https://fonts.gstatic.com"},
+			"connect-src": {"https://storage.googleapis.com"},
+		}
+		localDev := map[string]bool{"http://localhost:*": true, "http://127.0.0.1:*": true}
+		gotHosts := map[string][]string{}
+		for _, directive := range strings.Split(csp, ";") {
+			fields := strings.Fields(directive)
+			if len(fields) == 0 {
+				continue
+			}
+			for _, src := range fields[1:] {
+				if strings.HasPrefix(src, "'") || strings.HasSuffix(src, ":") || localDev[src] {
+					continue
+				}
+				gotHosts[fields[0]] = append(gotHosts[fields[0]], src)
+			}
+		}
+		assert.Equal(t, wantHosts, gotHosts, "host sources per directive")
 	}
 
 	// Verify Permissions-Policy is set
