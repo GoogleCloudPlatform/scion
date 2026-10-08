@@ -2455,6 +2455,13 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		util.Debugf("Error checking project link status: %v", err)
 	}
+	// A user access token is scoped to one existing project and cannot
+	// register projects: a 404 on the lookup most likely means the token
+	// lacks project:read. Say so instead of matching by name and trying to
+	// register (ptone/scion#3319).
+	if hubProject == nil && err == nil && authInfo.MethodType == "bearer" && hubsync.IsUserAccessToken(os.Getenv("SCION_HUB_TOKEN")) {
+		return hubsync.ScopedTokenProjectNotFoundError(hubLookupID)
+	}
 
 	if hubProject != nil && hubProject.Name == projectName {
 		// Already linked — still call register so the server can backfill
@@ -2462,7 +2469,7 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 		if _, err := registerProjectOnHub(ctx, client, hubLookupID, projectName, resolvedPath, isGlobal); err != nil {
 			util.Debugf("Failed to register during re-link (non-fatal): %v", err)
 		}
-		fmt.Printf("Project '%s' is already linked to the Hub (ID: %s)\n", projectName, projectID)
+		fmt.Fprintf(os.Stderr, "Project '%s' is already linked to the Hub (ID: %s)\n", projectName, projectID)
 	} else {
 		if hubProject != nil && localHubProjectID != "" {
 			// This project's own hub.projectId points to a different project on the
@@ -2471,7 +2478,7 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 			// project_id with the stale hub project ID. Regenerate from the marker
 			// file or directory to get the true local identity before
 			// re-registering.
-			fmt.Printf("Warning: local project '%s' was linked to hub project '%s' (ID: %s). Re-linking.\n",
+			fmt.Fprintf(os.Stderr, "Warning: local project '%s' was linked to hub project '%s' (ID: %s). Re-linking.\n",
 				projectName, hubProject.Name, hubLookupID)
 
 			// Clear the stale hub project ID
@@ -2519,7 +2526,10 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 
 			baseSlug := api.Slugify(projectName)
 			nextSlug := hubsync.NextSlugFromMatches(baseSlug, matches)
-			choice, selectedID := hubsync.ShowMatchingProjectsPrompt(projectName, matches, nextSlug, autoConfirm)
+			choice, selectedID, err := hubsync.ShowMatchingProjectsPrompt(projectName, matches, nextSlug, autoConfirm, nonInteractive)
+			if err != nil {
+				return err
+			}
 			switch choice {
 			case hubsync.ProjectChoiceCancel:
 				return fmt.Errorf("linking cancelled")
@@ -2536,7 +2546,7 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 					return fmt.Errorf("failed to save hub project ID: %w", err)
 				}
 				hubLookupID = selectedID
-				fmt.Printf("Linked to existing project (ID: %s)\n", selectedID)
+				fmt.Fprintf(os.Stderr, "Linked to existing project (ID: %s)\n", selectedID)
 			case hubsync.ProjectChoiceRegisterNew:
 				// Register as a new project on the Hub using the local project_id.
 				hubProjectID, err := registerProjectOnHub(ctx, client, projectID, projectName, resolvedPath, isGlobal)

@@ -45,12 +45,30 @@ User access tokens (UATs) are scoped, revocable bearer tokens for
 non-interactive authentication. Each token is scoped to a single project
 and carries a set of action permissions.
 
+Most CLI commands that work in a project first look the project up, which
+needs the project:read scope. Include it in tokens used with the CLI.
+Scopes common CLI flows need:
+
+  Any command run in a project   project:read
+  scion list                     project:read, agent:list
+  scion look, scion logs         project:read, agent:read
+  scion start / create           project:read, agent:create, agent:read
+  scion message                  project:read, agent:message
+  scion attach                   project:read, agent:attach
+  scion stop, resume, restart    project:read, agent:lifecycle
+  scion delete                   project:read, agent:delete
+
+A stored interactive login (from scion hub auth login) takes precedence
+over SCION_HUB_TOKEN. To run the CLI under a scoped token, use an
+environment with no stored login: a dedicated OS user, an isolated HOME,
+or log out first.
+
 Examples:
   # Create a token for CI that can create and monitor agents
   scion hub token create \
     --project my-project \
     --name "github-actions" \
-    --scopes agent:create,agent:read \
+    --scopes project:read,agent:create,agent:read,agent:list \
     --expires 90d
 
   # List your tokens
@@ -91,9 +109,13 @@ Expiry (--expires) accepts %s.
 %s.
 Default: 90 days. Maximum: 1 year.
 
+CLI use: most CLI commands look the project up first, which needs
+project:read. See "scion hub token --help" for the scopes common CLI flows
+need.
+
 Examples:
-  scion hub token create --project my-project --name ci-token --scopes agent:create,agent:read
-  scion hub token create --project my-project --name deploy --scopes agent:manage --expires 30d`, permissions.UATScopeHelp(), expiryAcceptedForms, expiryUnitNote),
+  scion hub token create --project my-project --name ci-token --scopes project:read,agent:create,agent:read
+  scion hub token create --project my-project --name deploy --scopes project:read,agent:manage --expires 30d`, permissions.UATScopeHelp(), expiryAcceptedForms, expiryUnitNote),
 	Args: cobra.NoArgs,
 	RunE: runTokenCreate,
 }

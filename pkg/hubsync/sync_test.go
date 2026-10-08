@@ -2514,3 +2514,70 @@ func TestWrapHubError_SuppressesLocalHintForAgents(t *testing.T) {
 		}
 	})
 }
+
+// TestEnsureHubReady_ScopedTokenWithoutProjectRead covers a user access token
+// that lacks project:read: the hub answers the project lookup with 404. The
+// CLI must report the likely missing scope and must not list, link or
+// register projects (ptone/scion#3319).
+func TestEnsureHubReady_ScopedTokenWithoutProjectRead(t *testing.T) {
+	for _, e := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_PROJECT_ID", "SCION_AUTH_TOKEN", "SCION_DEV_TOKEN", "SCION_DEV_TOKEN_FILE"} {
+		setOrUnsetEnv(t, e, "")
+	}
+
+	projectID := "11111111-2222-3333-4444-555555555555"
+	var projectGets, otherProjectCalls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/healthz":
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/"+projectID:
+			projectGets++
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": map[string]string{"code": "not_found", "message": "project not found"},
+			})
+		case strings.HasPrefix(r.URL.Path, "/api/v1/projects"):
+			// List (name matching) or register: neither may happen.
+			otherProjectCalls++
+			w.WriteHeader(http.StatusForbidden)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	tmpHome := t.TempDir()
+	globalDir := filepath.Join(tmpHome, ".scion")
+	if err := os.MkdirAll(globalDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	settingsContent := fmt.Sprintf("project_id: %s\nhub:\n  enabled: true\n  endpoint: %s\n", projectID, server.URL)
+	if err := os.WriteFile(filepath.Join(globalDir, "settings.yaml"), []byte(settingsContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", tmpHome)
+	t.Setenv("SCION_HUB_TOKEN", "scion_pat_testtoken")
+
+	origDir, _ := os.Getwd()
+	if err := os.Chdir(tmpHome); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(origDir) }()
+
+	// Auto-confirm on, as under --yes: the registration path would proceed
+	// without asking, so only the scoped-token check can stop it.
+	_, err := EnsureHubReady("", EnsureHubReadyOptions{AutoConfirm: true, SkipSync: true})
+	if !errors.Is(err, ErrScopedTokenProjectNotFound) {
+		t.Fatalf("error = %v, want ErrScopedTokenProjectNotFound", err)
+	}
+	if !strings.Contains(err.Error(), "project:read") {
+		t.Errorf("error should name the project:read scope, got: %v", err)
+	}
+	if projectGets == 0 {
+		t.Error("expected the project lookup to reach the hub")
+	}
+	if otherProjectCalls != 0 {
+		t.Errorf("expected no list or register calls after the 404, got %d", otherProjectCalls)
+	}
+}

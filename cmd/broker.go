@@ -1261,7 +1261,7 @@ func runBrokerProvide(cmd *cobra.Command, args []string) error {
 	}
 
 	// Show confirmation prompt
-	confirmed, confirmErr := confirmProvide(os.Stdin, os.Stdout, projectName, brokerName, autoConfirm, util.IsTerminal())
+	confirmed, confirmErr := confirmProvide(os.Stdin, os.Stderr, projectName, brokerName, autoConfirm, util.IsTerminal())
 	if confirmErr != nil {
 		return confirmErr
 	}

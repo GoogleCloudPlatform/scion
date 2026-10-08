@@ -32,6 +32,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 )
 
 var (
@@ -430,7 +431,15 @@ func recoverDisplayConstraint(c *store.AccessConstraint, out io.Writer) {
 	_, _ = fmt.Fprintf(out, "  Created:    %s by %s\n", clitime.Format(c.CreatedAt, clitime.Full), c.CreatedBy)
 }
 
+// recoverPromptConfirmation asks a yes/no question, default No. It reads an
+// answer only from a terminal: when the input is a file or pipe that is not a
+// terminal (a script, an agent's idle open stdin) it answers No without
+// reading, because recovery must be confirmed interactively.
 func recoverPromptConfirmation(out io.Writer, question string) bool {
+	if f, ok := recoverConfirmReader.(*os.File); ok && !term.IsTerminal(int(f.Fd())) {
+		_, _ = fmt.Fprintf(out, "%s: answered No (stdin is not a terminal; this confirmation must be answered interactively)\n", question)
+		return false
+	}
 	_, _ = fmt.Fprintf(out, "%s [y/N]: ", question)
 	reader := bufio.NewReader(recoverConfirmReader)
 	response, err := reader.ReadString('\n')

@@ -485,6 +485,7 @@ func skillResolverHubOptions(projectPath string) hubsync.EnsureHubReadyOptions {
 	return hubsync.EnsureHubReadyOptions{
 		NoHub:           noHub,
 		AutoConfirm:     true,
+		NonInteractive:  nonInteractive,
 		SkipSync:        true,
 		ExplicitProject: explicitProjectTargetFor(projectPath),
 	}
