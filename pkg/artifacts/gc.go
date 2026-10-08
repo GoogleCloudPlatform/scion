@@ -25,19 +25,50 @@ import (
 
 // INVARIANT: every digest referenced by a ready, pending or finalizing
 // version of a live artifact is readable from blob storage, at every point
-// of any interleaving of publishes, marks and sweeps (including deletes
-// that fail and still reach the object store later). TestBlobGCInterleavings
-// checks it over random sequences.
+// of any interleaving of writes, marks and sweeps, including deletes that
+// time out and still reach the object store later.
 //
-// Blob garbage collection (design §6). Blobs are shared by content across
-// versions and artifacts, so a blob is deleted only when no live artifact
-// references it (Store.MarkBlobs: a file of a ready, pending or finalizing
-// version of a non-deleted artifact), it has been unreferenced and
-// untouched by a publish for the grace period, and a final check under the
-// blob's state row lock still finds it so (Store.ReclaimBlobs). A
-// soft-deleted artifact is not a reference; the grace period is its undo
-// window. Abandoned pending versions should be reaped (ReapPending) before
-// a sweep, so their files stop counting.
+// Why it holds. The rules, each enforced in one place:
+//
+//  R1. References are the files of every pending, finalizing or ready
+//      version of a non-deleted artifact, whether or not their bytes have
+//      arrived (blobReferencedFrom). A blob is deleted only when, under its
+//      state row's lock (reclaimOne), it has been marked unreferenced since
+//      before the grace period, has not been touched since before it, and
+//      still has no reference.
+//  R2. Every write of bytes goes through storeBlob: it touches the blob
+//      (waiting for a sweep holding the row) and then always uploads,
+//      overwriting any existing object. No write relies on an object that
+//      is already there.
+//  R3. A delete on a provider that versions objects names the generation
+//      the sweep listed (DeleteIfGeneration); a provider without versions
+//      deletes synchronously. A versioned provider without a known
+//      generation gets no delete.
+//
+// The paths that create a reference:
+//
+//   - Single-file publish, PUT of a pending file, fetched remote images at
+//     finalize: storeBlob (R2) before the reference is recorded. The touch
+//     keeps the sweep off the blob for the grace period (R1), longer than
+//     the request; the upload's new generation outlives any delete issued
+//     before it (R3).
+//   - Two-step create or append: its manifest rows are references from the
+//     moment they are written (R1), before any upload; the upload then goes
+//     through storeBlob.
+//   - Carry-forward (a file identical to the current version's needs no
+//     upload): its digest is already referenced by the current version,
+//     continuously since that version's own write (R1, R2), so no delete
+//     can have been decided for it since; a delete issued before that write
+//     names an older generation (R3).
+//
+// Unchanged files still share one stored object: a digest has one object
+// path, which writes overwrite. TestBlobGCInterleavings checks the
+// invariant over random sequences; the deterministic tests pin each path.
+//
+// Blob garbage collection (design §6). A soft-deleted artifact is not a
+// reference; the grace period is its undo window. Abandoned pending
+// versions should be reaped (ReapPending) before a sweep, so their files
+// stop counting.
 
 const (
 	// DefaultGCGrace is the default grace period of the blob sweep.
@@ -62,15 +93,12 @@ var errUnknownGeneration = errors.New("artifacts: blob generation unknown; not d
 
 // deleteBlob deletes the blob at p within gcDeleteTimeout. A timeout rolls
 // the sweep's transaction back and the blob's mark stays. A delete the
-// object store applies after that (it cannot always be called back) is
-// made harmless two ways: when the store versions objects, the delete
-// carries the generation the sweep saw, so content stored since survives;
-// and a writer that touches a still-marked blob stores its bytes again
-// (Store.TouchBlob) instead of relying on the existing object. A missing
-// object or a changed generation counts as done: the bytes the sweep meant
-// to delete are gone or were replaced. A provider that versions objects
-// but gives no generation for this blob gets no delete at all: the blob
-// and its mark stay.
+// object store applies after that is harmless: on a versioned provider it
+// names the generation the sweep saw, and every write since stored a new
+// one (storeBlob always uploads). A missing object or a changed generation
+// counts as done: the bytes the sweep meant to delete are gone or were
+// replaced. A provider that versions objects but gives no generation for
+// this blob gets no delete at all: the blob and its mark stay.
 func deleteBlob(ctx context.Context, blobs storage.Storage, p string, generation int64) error {
 	dctx, cancel := context.WithTimeout(ctx, gcDeleteTimeout)
 	defer cancel()

@@ -40,33 +40,12 @@ const blobReferencedFrom = `artifact_file f
 var blobReferencedStates = []any{VersionStateReady, VersionStatePending, VersionStateFinalizing}
 
 // TouchBlob implements Store.
-func (s *sqlStore) TouchBlob(ctx context.Context, digest string, now time.Time) (bool, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return false, fmt.Errorf("artifacts: begin touch: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-	// The write comes first: it waits for a sweep holding the row, and
-	// the read after it sees what that sweep left. The mark is kept: only
-	// ClearBlobMark, after the bytes are stored again, removes it.
-	if _, err := tx.ExecContext(ctx, s.rebind(`INSERT INTO artifact_blob (sha256, touched_at) VALUES (?, ?)
+func (s *sqlStore) TouchBlob(ctx context.Context, digest string, now time.Time) error {
+	// The upsert waits for a sweep holding the row (Postgres row lock,
+	// SQLite write lock).
+	if _, err := s.db.ExecContext(ctx, s.rebind(`INSERT INTO artifact_blob (sha256, touched_at) VALUES (?, ?)
 		ON CONFLICT (sha256) DO UPDATE SET touched_at = excluded.touched_at`), digest, s.timeArg(now)); err != nil {
-		return false, fmt.Errorf("artifacts: touch blob: %w", err)
-	}
-	var since dbTime
-	if err := tx.QueryRowContext(ctx, s.rebind(`SELECT unreferenced_since FROM artifact_blob WHERE sha256 = ?`), digest).Scan(&since); err != nil {
-		return false, fmt.Errorf("artifacts: read blob state: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return false, fmt.Errorf("artifacts: commit touch: %w", err)
-	}
-	return since.Valid, nil
-}
-
-// ClearBlobMark implements Store.
-func (s *sqlStore) ClearBlobMark(ctx context.Context, digest string) error {
-	if _, err := s.db.ExecContext(ctx, s.rebind(`UPDATE artifact_blob SET unreferenced_since = NULL, generation = NULL WHERE sha256 = ?`), digest); err != nil {
-		return fmt.Errorf("artifacts: clear blob mark: %w", err)
+		return fmt.Errorf("artifacts: touch blob: %w", err)
 	}
 	return nil
 }
