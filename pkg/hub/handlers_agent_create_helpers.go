@@ -1196,8 +1196,9 @@ func resumeInPlaceDecision(phase string, resume, force bool) (resumeInPlace, for
 // (beginStartDispatchHTTP, branches 1 and 2: the quota reservation, the
 // starting-phase write, or a delete claim taking the row) or run-intent
 // bookkeeping, or get a dispatch error, or find, after a start dispatch that
-// landed, that a delete won (409 delete_in_progress; existingAgentDeleteWon,
-// existingAgentGoneAfterLanding). The one exception is a
+// landed, that a delete won, in the post-start step or at the final check
+// before the answer (409 delete_in_progress; existingAgentDeleteWon,
+// existingAgentDeleteWonBeforeAnswer). The one exception is a
 // dispatch-time start-guard refusal reporting a launch already in flight,
 // which is answered like the start gate above → existingAgentStarted.
 // Branch 3 writes an error → existingAgentErrored when recording run intent,
@@ -1361,7 +1362,7 @@ func (s *Server) handleExistingAgent(
 			return existingAgentErrored
 		}
 
-		if afterErr != nil && s.existingAgentGoneAfterLanding(ctx, w, existingAgent.ID, afterErr) {
+		if s.existingAgentDeleteWonBeforeAnswer(ctx, w, existingAgent.ID, afterErr) {
 			return existingAgentErrored
 		}
 
@@ -1490,7 +1491,7 @@ func (s *Server) handleExistingAgent(
 				return existingAgentErrored
 			}
 
-			if afterErr != nil && s.existingAgentGoneAfterLanding(ctx, w, existingAgent.ID, afterErr) {
+			if s.existingAgentDeleteWonBeforeAnswer(ctx, w, existingAgent.ID, afterErr) {
 				return existingAgentErrored
 			}
 
@@ -1677,7 +1678,7 @@ func (s *Server) handleExistingAgent(
 			return existingAgentErrored
 		}
 
-		if afterErr != nil && s.existingAgentGoneAfterLanding(ctx, w, existingAgent.ID, afterErr) {
+		if s.existingAgentDeleteWonBeforeAnswer(ctx, w, existingAgent.ID, afterErr) {
 			return existingAgentErrored
 		}
 
@@ -2411,14 +2412,41 @@ func (s *Server) hasAnyKey(ctx context.Context, agent *store.Agent, keys []strin
 // (ptone/scion#3255). The dispatch has already tried to remove the landed run
 // (compensateLandedRun); its outcome is in the dispatch warnings. The delete
 // engine owns the row and its reservation. Called from the post-start step,
-// before the full-row write, so nothing is written for a delete that won.
-// It reports whether it answered.
+// before the full-row write, so nothing is written for a delete that won,
+// and again before the answer (existingAgentDeleteWonBeforeAnswer). It
+// reports whether it answered.
 func (s *Server) existingAgentDeleteWon(ctx context.Context, w http.ResponseWriter, agentID string) bool {
 	if !s.deleteWonAfterLanding(ctx, agentID) {
 		return false
 	}
 	writeDeleteWon(w, agentID, deletedWhileStartingMessage, dispatchWarningsFromContext(ctx))
 	return true
+}
+
+// existingAgentDeleteWonBeforeAnswer is the final check of a start of an
+// existing agent, run after startAgentCore returned and before the 200
+// answer (and before any notify subscription): it answers 409
+// delete_in_progress, with no agent body and nothing published, when the
+// post-start write found the row gone (afterErr, existingAgentGoneAfterLanding)
+// or when a re-read of the row finds it gone or delete-won
+// (existingAgentDeleteWon, deleteWonOnRead's rule), as the lifecycle start
+// does after its final write (ptone/scion#3546, ptone/scion#3711). A delete
+// that claimed the row after the post-start step's re-read is caught here; a
+// failed delete, or a deleting row whose lease expired, is a live agent and
+// still answers 200, as does a re-read that fails for another reason. A
+// delete that claims the row after this check can still see a 200: a start
+// that completed and then a delete is a valid order. It reports whether it
+// answered.
+func (s *Server) existingAgentDeleteWonBeforeAnswer(ctx context.Context, w http.ResponseWriter, agentID string, afterErr error) bool {
+	// The post-start write already found the row gone: answer from that
+	// rather than rely on the re-read below, which could fail transiently
+	// (any read error other than "row gone" reports no delete) and answer
+	// 200 for an agent whose delete won.
+	// TestCreateExisting_DeleteWinsAfterReRead_HardDelete409 pins this.
+	if afterErr != nil && s.existingAgentGoneAfterLanding(ctx, w, agentID, afterErr) {
+		return true
+	}
+	return s.existingAgentDeleteWon(ctx, w, agentID)
 }
 
 // existingAgentGoneAfterLanding is the same answer when the post-start write

@@ -34,6 +34,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
@@ -65,6 +66,7 @@ type liveInventoryKey struct {
 var positiveCheckExclusions = map[liveInventoryKey]string{
 	{OperationID: "hub.maintenance.execute", Method: "POST", Pattern: "/api/v1/admin/maintenance/restart"}:       "handleAdminRestart (admin_maintenance.go) invokes a real systemd restart subprocess; nothing before it short-circuits for a fake or real target, so there is no safe way to dispatch the declared method",
 	{OperationID: "hub.maintenance.execute", Method: "POST", Pattern: "/api/v1/admin/maintenance/check-updates"}: "handleCheckForUpdates (admin_maintenance.go:662-690) calls the GitHub release channel when MaintenanceConfig.DeploymentTier == \"binary\"; excluded so this test cannot depend on, or accidentally call out based on, server config",
+	{OperationID: "agent.hold.lift", Method: "POST", Pattern: "/api/v1/agents/{id}/hold/lift"}:                   "handleAgentHoldLift (agent_hold_lift.go) clears an agent's holds and writes an audit record: a live POST mutates state, so it is not dispatched against a real target here; TestAgentHoldLift drives it against a real held agent",
 }
 
 // controlCheckExclusions lists HTTP catalog entry points for which
@@ -111,6 +113,50 @@ var controlCheckExclusions = map[liveInventoryKey]string{
 // ever accept an undeclared suffix" — see the test's doc comment for what it
 // does and does not prove.
 var suffixCheckExclusions = map[liveInventoryKey]string{
+	{OperationID: "user.read", Method: "GET", Pattern: "/api/v1/users/{id}"}:                                                     "handleUserByID (handlers_users_core.go) only special-cases the \"revoke-sessions\" suffix; any other suffix, including this check's bogus one, falls through to the same GET handling as the bare ID",
+	{OperationID: "user.update", Method: "PATCH", Pattern: "/api/v1/users/{id}"}:                                                 "same as user.read above: handleUserByID ignores an unrecognized suffix rather than 404ing on it",
+	{OperationID: "user.admin.delete", Method: "DELETE", Pattern: "/api/v1/users/{id}"}:                                          "same as user.read above: handleUserByID ignores an unrecognized suffix rather than 404ing on it",
+	{OperationID: "secret.read", Method: "GET", Pattern: "/api/v1/secrets/{key}"}:                                                "handleSecretByKey (handlers_env_secrets.go) extracts the key with extractID, which truncates at the first '/' after the prefix and discards the suffix, so the request proceeds on the bare key; with no secret backend configured in testServer, getSecret then panics on a nil backend, recovered as a 500 — not a 404/405, but unrelated to the suffix, which the truncation already removed",
+	{OperationID: "secret.write", Method: "PUT", Pattern: "/api/v1/secrets/{key}"}:                                               "extractID truncates the suffix the same way as secret.read above, but setSecret checks the request body's value field before ever touching the secret backend; this test's generic empty PUT body always fails that check with 400 \"value is required\", the same 400 the bare path gets",
+	{OperationID: "secret.write", Method: "DELETE", Pattern: "/api/v1/secrets/{key}"}:                                            "extractID truncates the suffix the same way as secret.read above; deleteSecret then panics on a nil secret backend the same way getSecret does, recovered as a 500",
+	{OperationID: "hub.githubapp.update", Method: "PUT", Pattern: "/api/v1/github-app/installations/{id}"}:                       "parseInstallationIDFromPath (handlers_github_app.go) runs strconv.ParseInt on the entire remainder of the path, not just a leading segment, so a suffix makes parsing fail; the handler answers 400 \"invalid installation ID\", rejecting the suffix rather than ignoring it",
+	{OperationID: "hub.githubapp.update", Method: "DELETE", Pattern: "/api/v1/github-app/installations/{id}"}:                    "same as the PUT installations/{id} entry above",
+	{OperationID: "hub.githubapp.read", Method: "GET", Pattern: "/api/v1/github-app/installations/{id}"}:                         "same as the PUT installations/{id} entry above",
+	{OperationID: "quota.read", Method: "GET", Pattern: "/api/v1/admin/entitlements/{id}"}:                                       "handleAdminEntitlementByID (handlers_quota.go) extracts the ID with extractID, which truncates at the first '/' after the prefix and discards the suffix, so the request proceeds on the real, un-suffixed ID and returns the entitlement (200) exactly as if the suffix were absent",
+	{OperationID: "quota.update", Method: "PUT", Pattern: "/api/v1/admin/entitlements/{id}"}:                                     "same truncation as the GET entitlements/{id} entry above; this test's generic empty PUT body then fails updateEntitlement's validation with 400 before the (correctly extracted) ID is used for anything — the same 400 the bare path gets",
+	{OperationID: "quota.delete", Method: "DELETE", Pattern: "/api/v1/admin/entitlements/{id}"}:                                  "same truncation as the GET entitlements/{id} entry above; deleteEntitlement then deletes the real, un-suffixed entitlement (204) exactly as if the suffix were absent",
+	{OperationID: "quota.read", Method: "GET", Pattern: "/api/v1/admin/limits/{id}"}:                                             "handleAdminLimitByID (handlers_quota.go) splits on the first '/' and only special-cases a second segment of exactly \"entitlements\"; any other suffix is silently discarded, and the request proceeds on the real, un-suffixed ID",
+	{OperationID: "quota.update", Method: "PUT", Pattern: "/api/v1/admin/limits/{id}"}:                                           "handleAdminLimitByID discards the suffix the same way as quota.read above; with a valid update body (see bodyOverrides) updateLimitDefinition succeeds on the real, un-suffixed ID and returns 200 exactly as if the suffix were absent",
+	{OperationID: "quota.delete", Method: "DELETE", Pattern: "/api/v1/admin/limits/{id}"}:                                        "handleAdminLimitByID discards the suffix the same way as quota.read above; deleteLimitDefinition then fails deleting a limit this test's fixture entitlement still references, mapped to 400 — the same 400 happens on the bare path, independent of the suffix",
+	{OperationID: "secret.read", Method: "GET", Pattern: "/api/v1/secrets"}:                                                      "the by-key route \"/api/v1/secrets/\" registers as a prefix, so a suffix on this bare collection route falls through to handleSecretByKey with the suffix as the key; getSecret then panics on a nil secret backend, recovered as a 500",
+	{OperationID: "hub.lifecyclehooks.read", Method: "GET", Pattern: "/api/v1/admin/lifecycle-hooks"}:                            "the by-ID route \"/api/v1/admin/lifecycle-hooks/\" registers as a prefix, so a suffix on this bare collection route falls through to handleAdminLifecycleHookByID with the suffix as the ID; getLifecycleHook then 400s failing to parse it as a UUID",
+	{OperationID: "hub.githubapp.read", Method: "GET", Pattern: "/api/v1/github-app/installations"}:                              "the by-ID route \"/api/v1/github-app/installations/\" registers as a prefix, so a suffix on this bare collection route falls through to handleGitHubAppInstallationByIDRead with the suffix as the ID; parseInstallationIDFromPath then 400s \"invalid installation ID\" failing to parse it as an integer",
+	{OperationID: "agent.stopall", Method: "POST", Pattern: "/api/v1/agents/stop-all"}:                                           "handleAgentByID checks id == \"stop-all\" before it looks at anything after that segment, so a suffix is silently ignored and stop-all runs exactly as it would on the bare path",
+	{OperationID: "quota.read", Method: "GET", Pattern: "/api/v1/admin/usage/{limit}"}:                                           "handleAdminUsageByLimit (handlers_quota.go) extracts limitID with extractID, which truncates at the first '/' and discards everything after it, so the suffix never reaches the lookup",
+	{OperationID: "role.binding.read", Method: "GET", Pattern: "/api/v1/admin/role-bindings/user/{userId}"}:                      "handleAdminRoleBindingByID's \"user/\" branch (handlers_roles.go) takes the entire remaining path as the user ID with no further splitting; a nonexistent literal ID, suffixed or not, just returns an empty binding list (200), never a 404",
+	{OperationID: "env.read", Method: "GET", Pattern: "/api/v1/env/{key}"}:                                                       "handleEnvVarByKey (handlers_env_secrets.go) extracts the key with extractID, which truncates at the first '/' and discards everything after it, so the suffix never reaches the lookup",
+	{OperationID: "hub.lifecyclehooks.read", Method: "GET", Pattern: "/api/v1/admin/lifecycle-hooks/{id}"}:                       "handleAdminLifecycleHookByID (handlers_lifecycle_hooks.go) extracts the ID with extractID, which truncates at the first '/' and discards everything after it, so the suffix never reaches getLifecycleHook's lookup",
+	{OperationID: "hub.lifecyclehooks.update", Method: "PUT", Pattern: "/api/v1/admin/lifecycle-hooks/{id}"}:                     "handleAdminLifecycleHookByID truncates the suffix with extractID the same way as the GET entry above, so the update runs on the real ID; its result (409 for the empty body's version check) is the same as on the bare path",
+	{OperationID: "hub.lifecyclehooks.update", Method: "DELETE", Pattern: "/api/v1/admin/lifecycle-hooks/{id}"}:                  "handleAdminLifecycleHookByID truncates the suffix with extractID the same way as the GET entry above, so a suffixed DELETE would delete the real hook (204) exactly as the bare path does, and leave the positive check nothing to delete",
+	{OperationID: "group.member.remove", Method: "DELETE", Pattern: "/api/v1/groups/{id}/members/{memberType}/{memberId}"}:       "handleGroupMemberByID (handlers_groups.go) splits memberPath into at most two parts, so a trailing suffix is appended onto memberID as one string rather than forming a separate segment; the resulting lookup fails with 400, not a routing 404",
+	{OperationID: "hub.config.update", Method: "DELETE", Pattern: "/api/v1/admin/server-config/sections/{id}"}:                   "handleAdminServerConfigSectionReset (admin_settings.go) requires OperationalSettings and 400s \"Section reset requires DB-backed operational settings\" before it ever parses the section name from the path; testServer wires no OperationalSettings, so the same 400 happens on the bare path, independent of the suffix",
+	{OperationID: "hub.maintenance.execute", Method: "POST", Pattern: "/api/v1/admin/maintenance/operations/{id}/run"}:           "handleAdminMaintenanceOps (admin_maintenance.go) splits the sub-path into at most three parts, so a fourth segment is absorbed into the \"run\" branch's own remainder rather than changing dispatch; combined with this entry's deliberate cross-category key (see patternOverrides), the resulting 400 is the same category-mismatch rejection as the bare path",
+	{OperationID: "hub.metrics.read", Method: "GET", Pattern: "/api/v1/metrics/{name}"}:                                          "the metrics dashboard is not configured in testServer (no telemetry project ID); the resulting pre-dispatch 503 fires before path structure is examined, the same limitation the positive check documents in the test's doc comment",
+	{OperationID: "chat.access", Method: "GET", Pattern: "/api/v1/chat/attachments/{id}"}:                                        "handleAttachmentDownload needs an attachment storage backend testServer does not configure; the resulting pre-dispatch 503 fires regardless of the suffix",
+	{OperationID: "agent.portaccess", Method: "GET", Pattern: "/api/v1/agents/{id}/ports/{port}/proxy"}:                          "proxyAgentPort forwards the entire remaining path as part of the proxied request, with no path-based routing at all — the same design already excluded from the control check above",
+	{OperationID: "agent.portaccess", Method: "POST", Pattern: "/api/v1/agents/{id}/ports/{port}/proxy"}:                         "same as the GET .../proxy suffix entry above",
+	{OperationID: "agent.portaccess", Method: "PUT", Pattern: "/api/v1/agents/{id}/ports/{port}/proxy"}:                          "same as the GET .../proxy suffix entry above",
+	{OperationID: "agent.portaccess", Method: "DELETE", Pattern: "/api/v1/agents/{id}/ports/{port}/proxy"}:                       "same as the GET .../proxy suffix entry above",
+	{OperationID: "agent.portaccess", Method: "GET", Pattern: "/api/v1/agents/{id}/ports/{port}/proxy/{subpath}"}:                "same as the GET .../proxy suffix entry above",
+	{OperationID: "agent.secrets.access", Method: "GET", Pattern: "/api/v1/agents/{id}/secrets"}:                                 "handleAgentSecrets (handlers_env_secrets.go) answers 501 when no secrets backend is configured, before it looks at the key; testServer configures no secrets backend, so a suffixed path gets the same 501 as the bare one",
+	{OperationID: "agent.secrets.access", Method: "GET", Pattern: "/api/v1/agents/{id}/secrets/{key}"}:                           "same as the GET .../secrets suffix entry above",
+	{OperationID: "agent.secrets.access", Method: "PUT", Pattern: "/api/v1/agents/{id}/secrets/{key}"}:                           "same as the GET .../secrets suffix entry above",
+	{OperationID: "hub.policies.removed", Method: "GET", Pattern: "/api/v1/policies"}:                                            "the by-ID route \"/api/v1/policies/\" registers as a prefix, so a suffix on this bare collection route reaches handlePolicyRoutes, which answers 410 Gone for every sub-path by design",
+	{OperationID: "hub.policies.removed", Method: "GET", Pattern: "/api/v1/policies/{id}"}:                                       "handlePolicyRoutes (handlers_policies.go) answers 410 Gone for every sub-path by design, so a suffixed path gets the same 410 as the bare one",
+	{OperationID: "user.admin.invite", Method: "GET", Pattern: "/api/v1/admin/invites/{id}"}:                                     "handleAdminInviteByID (admin_invites.go:65-96) special-cases only a second segment of \"revoke\"; any other suffix, including this check's bogus one, falls through to the same GET handling as the bare ID",
+	{OperationID: "inbox.conversation.create", Method: "POST", Pattern: "/api/v1/conversations/"}:                                "the pattern ends in a slash, so the suffixed path has an empty segment (\"//\"), which the server mux answers with a 307 redirect to the cleaned path before any handler runs",
+	{OperationID: "inbox.conversation.direct.read", Method: "GET", Pattern: "/api/v1/conversations/{id}/messages"}:               "a suffix on the messages collection is the messages/{messageId} route; handleGetConversationMessage checks the direct conversation's key before it looks the message up, and the dev caller is not named in the key, so it answers 403 on any message ID",
+	{OperationID: "user.admin.invite", Method: "DELETE", Pattern: "/api/v1/admin/invites/{id}"}:                                  "same as the GET invites/{id} suffix entry above — and because the suffix is silently ignored, a DELETE with a bogus suffix would delete the real fixture, so this exclusion also protects the positive check that runs after it",
 	{OperationID: "user.read", Method: "GET", Pattern: "/api/v1/users/{id}"}:                                                     "handleUserByID (handlers_users_core.go) only special-cases the \"revoke-sessions\" suffix; any other suffix, including this check's bogus one, falls through to the same GET handling as the bare ID",
 	{OperationID: "user.update", Method: "PATCH", Pattern: "/api/v1/users/{id}"}:                                                 "same as user.read above: handleUserByID ignores an unrecognized suffix rather than 404ing on it",
 	{OperationID: "user.admin.delete", Method: "DELETE", Pattern: "/api/v1/users/{id}"}:                                          "same as user.read above: handleUserByID ignores an unrecognized suffix rather than 404ing on it",
@@ -243,6 +289,99 @@ type idFixtures struct {
 	projectSharedDir        string
 	projectSkillInjection   string
 	projectPreStartHook     string
+	// inbox holds the caller's own messaging records (seedInboxRecords):
+	// the dev user's here, the matrix super-admin's in the bearer
+	// disposition matrix.
+	inbox inboxRecords
+}
+
+// inboxRecords are messaging records owned by one user in one project: a
+// message, a notification with its subscription, a subscription template,
+// a group conversation (with a message) the user takes part in, a second
+// group conversation for the leave entry, and a direct conversation (with
+// a message) between the user and an agent.
+type inboxRecords struct {
+	message             string
+	notification        string
+	subscription        string
+	template            string
+	groupConversation   string
+	groupMessage        string
+	leaveConversation   string
+	directConversation  string
+	directMessage       string
+	createConversations string // display name prefix for conversations a test creates
+}
+
+// seedInboxRecords creates inboxRecords for userID in projectID; agentID
+// is the peer of the direct conversation and the watched agent.
+func seedInboxRecords(t *testing.T, ctx context.Context, s store.Store, userID, projectID, agentID string) inboxRecords {
+	t.Helper()
+	at := time.Now().UTC()
+	r := inboxRecords{createConversations: "inbox-" + uuid.NewString()[:8]}
+
+	r.message = uuid.NewString()
+	require.NoError(t, s.CreateMessage(ctx, &store.Message{
+		ID: r.message, ProjectID: projectID, Sender: "agent:li", Recipient: "user:" + userID, RecipientID: userID,
+		Msg: "inbox record", Type: "instruction", CreatedAt: at,
+	}))
+
+	r.subscription = uuid.NewString()
+	require.NoError(t, s.CreateNotificationSubscription(ctx, &store.NotificationSubscription{
+		ID: r.subscription, Scope: store.SubscriptionScopeAgent, AgentID: agentID,
+		SubscriberType: store.SubscriberTypeUser, SubscriberID: userID, ProjectID: projectID,
+		TriggerActivities: []string{"COMPLETED"}, CreatedBy: userID,
+	}))
+	r.notification = uuid.NewString()
+	require.NoError(t, s.CreateNotification(ctx, &store.Notification{
+		ID: r.notification, SubscriptionID: r.subscription, AgentID: agentID, ProjectID: projectID,
+		SubscriberType: store.SubscriberTypeUser, SubscriberID: userID, Status: "COMPLETED", Message: "inbox record",
+	}))
+	r.template = uuid.NewString()
+	require.NoError(t, s.CreateSubscriptionTemplate(ctx, &store.SubscriptionTemplate{
+		ID: r.template, Name: "inbox-template-" + r.template[:8], Scope: store.SubscriptionScopeProject,
+		TriggerActivities: []string{"COMPLETED"}, ProjectID: projectID, CreatedBy: userID,
+	}))
+
+	group := func(name string) string {
+		id := uuid.NewString()
+		pid := projectID
+		require.NoError(t, s.CreateConversation(ctx, &store.Conversation{
+			ID: id, ProjectID: &pid, Kind: "group", Surface: "native", DisplayName: name,
+			DriftState: "active", LastActivityAt: at, CreatedAt: at,
+		}))
+		require.NoError(t, s.AddParticipant(ctx, &store.ConversationParticipant{
+			ID: uuid.NewString(), ConversationID: id, PrincipalKind: "user", PrincipalID: userID, Role: "member", JoinedAt: at,
+		}))
+		return id
+	}
+	r.groupConversation = group("inbox-group-" + r.template[:8])
+	r.leaveConversation = group("inbox-leave-" + r.template[:8])
+
+	extRef, err := messages.DMConversationKey("user", userID, "agent", agentID)
+	require.NoError(t, err)
+	r.directConversation = uuid.NewString()
+	require.NoError(t, s.CreateConversation(ctx, &store.Conversation{
+		ID: r.directConversation, Kind: "direct", Surface: "native", ExternalRef: extRef,
+		DriftState: "active", LastActivityAt: at, CreatedAt: at,
+	}))
+	for _, p := range []struct{ kind, id string }{{"user", userID}, {"agent", agentID}} {
+		require.NoError(t, s.AddParticipant(ctx, &store.ConversationParticipant{
+			ID: uuid.NewString(), ConversationID: r.directConversation, PrincipalKind: p.kind, PrincipalID: p.id, Role: "member", JoinedAt: at,
+		}))
+	}
+
+	conversationMessage := func(convID string) string {
+		id := uuid.NewString()
+		require.NoError(t, s.CreateMessage(ctx, &store.Message{
+			ID: id, ProjectID: projectID, Sender: "user:" + userID, SenderID: userID, Recipient: "agent:li", RecipientID: agentID,
+			Msg: "inbox conversation record", Type: "instruction", ConversationID: convID, CreatedAt: at,
+		}))
+		return id
+	}
+	r.groupMessage = conversationMessage(r.groupConversation)
+	r.directMessage = conversationMessage(r.directConversation)
+	return r
 }
 
 // seedLiveInventoryFixtures creates one real store row per resource family
@@ -564,6 +703,9 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	require.True(t, srv.experimentEnabled(conduitExperiment))
 	require.True(t, srv.experimentEnabled(experiments.Artifacts))
 
+	// Inbox, conversation and notification records of the dev user.
+	f.inbox = seedInboxRecords(t, ctx, s, DevUserID, f.project, f.agent)
+
 	return f
 }
 
@@ -623,6 +765,14 @@ func opPatternOverrides(f idFixtures) map[overrideKey]map[string]string {
 		{"access.constraint.update", "/api/v1/admin/access-constraints/{id}"}:     {"id": f.accessConstraintUD},
 		{"access.constraint.delete", "/api/v1/admin/access-constraints/{id}"}:     {"id": f.accessConstraintUD},
 		{"project.membership.update", "/api/v1/projects/{id}/members/{memberId}"}: {"id": f.project, "memberId": f.projectMembershipUpdate},
+
+		// Group and direct conversation reads share their patterns.
+		{"project.conversation.read", "/api/v1/conversations/{id}"}:                           {"id": f.inbox.groupConversation},
+		{"project.conversation.read", "/api/v1/conversations/{id}/messages"}:                  {"id": f.inbox.groupConversation},
+		{"project.conversation.read", "/api/v1/conversations/{id}/messages/{messageId}"}:      {"id": f.inbox.groupConversation, "messageId": f.inbox.groupMessage},
+		{"inbox.conversation.direct.read", "/api/v1/conversations/{id}"}:                      {"id": f.inbox.directConversation},
+		{"inbox.conversation.direct.read", "/api/v1/conversations/{id}/messages"}:             {"id": f.inbox.directConversation},
+		{"inbox.conversation.direct.read", "/api/v1/conversations/{id}/messages/{messageId}"}: {"id": f.inbox.directConversation, "messageId": f.inbox.directMessage},
 	}
 }
 
@@ -753,6 +903,11 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/projects/{projectId}/scheduled-events":      {"projectId": f.project},
 		"/api/v1/projects/{projectId}/schedules":             {"projectId": f.project},
 
+		// Schedule sub-actions on the seeded schedule.
+		"/api/v1/projects/{projectId}/schedules/{id}/history": {"projectId": f.project, "id": f.schedule},
+		"/api/v1/projects/{projectId}/schedules/{id}/pause":   {"projectId": f.project, "id": f.schedule},
+		"/api/v1/projects/{projectId}/schedules/{id}/resume":  {"projectId": f.project, "id": f.schedule},
+
 		// --- quota family (read defaults; quota.update/.delete are
 		// re-pointed at the disposable UD instances by opPatternOverrides) ---
 		"/api/v1/admin/limits/{id}":              {"id": f.limit},
@@ -817,6 +972,16 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		// --- lifecycle hooks family ---
 		"/api/v1/admin/lifecycle-hooks/{id}": {"id": f.lifecycleHook},
 
+		// --- inbox, conversation and notification family ---
+		"/api/v1/messages/{id}":                    {"id": f.inbox.message},
+		"/api/v1/messages/{id}/read":               {"id": f.inbox.message},
+		"/api/v1/notifications/{id}/ack":           {"id": f.inbox.notification},
+		"/api/v1/notifications/subscriptions/{id}": {"id": f.inbox.subscription},
+		"/api/v1/notifications/templates/{id}":     {"id": f.inbox.template},
+		"/api/v1/conversations/{id}/default-agent": {"id": f.inbox.groupConversation},
+		"/api/v1/conversations/{id}/participants":  {"id": f.inbox.groupConversation},
+		"/api/v1/conversations/{id}/leave":         {"id": f.inbox.leaveConversation},
+
 		// --- hub pre-start hooks family ---
 		"/api/v1/pre-start-hooks/{id}":          {"id": f.hubPreStartHook},
 		"/api/v1/pre-start-hooks/{id}/activate": {"id": f.hubPreStartHook},
@@ -833,6 +998,8 @@ func queryOverrides(f idFixtures) map[string]string {
 		"/api/v1/chat/prefs": "agentId=" + f.agent,
 		// The single-file publish is selected by ?name= (pkg/artifacts).
 		"/api/v1/artifacts": "name=live-inventory.txt&scope=" + f.project,
+		// handleConversationResolve 400s without a reference.
+		"/api/v1/conversations/resolve": "reference=conv:" + f.inbox.groupConversation,
 	}
 }
 

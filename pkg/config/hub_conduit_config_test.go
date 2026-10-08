@@ -48,6 +48,11 @@ func TestHubConduitConfig_Validate(t *testing.T) {
 		{name: "reconnect window above max", cfg: HubConduitConfig{ReconnectWindow: "6m"}, wantErr: []string{"reconnect_window", "between 0s and 5m0s"}},
 		{name: "reconnect window negative", cfg: HubConduitConfig{ReconnectWindow: "-1s"}, wantErr: []string{"reconnect_window"}},
 		{name: "reconnect window malformed", cfg: HubConduitConfig{ReconnectWindow: "fast"}, wantErr: []string{"reconnect_window"}},
+		{name: "authz recheck interval at min", cfg: HubConduitConfig{AuthzRecheckInterval: "1s"}},
+		{name: "authz recheck interval at max", cfg: HubConduitConfig{AuthzRecheckInterval: "10m"}},
+		{name: "authz recheck interval below min", cfg: HubConduitConfig{AuthzRecheckInterval: "500ms"}, wantErr: []string{"authz_recheck_interval", "between 1s and 10m0s"}},
+		{name: "authz recheck interval above max", cfg: HubConduitConfig{AuthzRecheckInterval: "11m"}, wantErr: []string{"authz_recheck_interval"}},
+		{name: "authz recheck interval malformed", cfg: HubConduitConfig{AuthzRecheckInterval: "often"}, wantErr: []string{"authz_recheck_interval"}},
 		{name: "port out of range", cfg: HubConduitConfig{TCPAllowedPorts: []int{0, 65536}}, wantErr: []string{"port 0 is outside", "port 65536 is outside"}},
 		{name: "port duplicated", cfg: HubConduitConfig{TCPAllowedPorts: []int{22, 22}}, wantErr: []string{"port 22 is listed twice"}},
 		{name: "listen without port", cfg: HubConduitConfig{InternalListen: "10.0.0.5"}, wantErr: []string{"internal_listen"}},
@@ -119,6 +124,7 @@ func TestHubConduitConfig_IsZero(t *testing.T) {
 		"audience":   {PeerAudience: "a"},
 		"window":     {ReconnectWindow: "1s"},
 		"instance":   {InstanceID: "hub-0"},
+		"recheck":    {AuthzRecheckInterval: "30s"},
 	} {
 		assert.False(t, c.IsZero(), name)
 	}
@@ -131,7 +137,7 @@ func TestConduitConfig_V1RoundTrip(t *testing.T) {
 		GrantKeyActivation: "20m", TCPAllowedPorts: []int{22, 8080}, InternalListen: ":9810",
 		InternalAdvertise: "http://10.0.0.5:9810", PeerAuth: "oidc",
 		PeerServiceAccounts: []string{"hub@p.iam.gserviceaccount.com"}, PeerAudience: "aud", ReconnectWindow: "7s",
-		InstanceID: "hub-0",
+		InstanceID: "hub-0", AuthzRecheckInterval: "45s",
 	}
 	v1 := ConvertGlobalToV1ServerConfig(gc)
 	require.NotNil(t, v1.Hub)
@@ -170,6 +176,7 @@ server:
       internal_listen: ":9810"
       peer_auth: hmac
       reconnect_window: 3s
+      authz_recheck_interval: 30s
 `), 0644))
 
 	cfg, err := LoadGlobalConfig(configPath)
@@ -180,6 +187,10 @@ server:
 	assert.Equal(t, ":9810", c.InternalListen)
 	assert.Equal(t, "hmac", c.PeerAuth)
 	assert.Equal(t, "3s", c.ReconnectWindow)
+	assert.Equal(t, "30s", c.AuthzRecheckInterval)
+	d, err := c.AuthzRecheckIntervalDuration()
+	require.NoError(t, err)
+	assert.Equal(t, 30*time.Second, d)
 
 	t.Run("env override", func(t *testing.T) {
 		t.Setenv(conduitSchemaEnvVar(t, "reconnect_window"), "9s")
@@ -210,6 +221,13 @@ server:
 				assert.NoError(t, cfg.Hub.Conduit.Validate())
 			})
 		}
+	})
+
+	t.Run("authz recheck interval env", func(t *testing.T) {
+		t.Setenv(conduitSchemaEnvVar(t, "authz_recheck_interval"), "15s")
+		cfg, err := LoadGlobalConfig(configPath)
+		require.NoError(t, err)
+		assert.Equal(t, "15s", cfg.Hub.Conduit.AuthzRecheckInterval)
 	})
 
 	t.Run("instance id env", func(t *testing.T) {

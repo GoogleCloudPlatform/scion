@@ -194,6 +194,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_webchat_topic_project_name
 		return fmt.Errorf("webchat store: create name uniqueness index: %w", err)
 	}
 
+	// Scheduled chat messages (webchat_scheduled_store*.go).
+	if err := s.initScheduledMessages(); err != nil {
+		return err
+	}
+
 	// Run idempotent migrations.
 	if err := s.runMigrations(); err != nil {
 		return fmt.Errorf("webchat store: migrations: %w", err)

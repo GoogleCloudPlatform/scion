@@ -35,6 +35,8 @@ const (
 	MaxListLimit = 100
 	// maxSearchLength bounds ?q= in characters.
 	maxSearchLength = 200
+	// maxScopeLength bounds ?scope= in bytes.
+	maxScopeLength = 256
 )
 
 // maxListScan caps the candidate rows one request examines, readable or
@@ -64,6 +66,7 @@ type listParams struct {
 	search        string
 	reviewPending bool
 	ownedOnly     bool
+	scope         string
 	limit         int
 	cursor        string
 }
@@ -75,6 +78,9 @@ func (p listParams) binding() string {
 	v.Set("q", p.search)
 	v.Set("review_pending", strconv.FormatBool(p.reviewPending))
 	v.Set("owned", strconv.FormatBool(p.ownedOnly))
+	if p.scope != "" {
+		v.Set("scope", p.scope)
+	}
 	return v.Encode()
 }
 
@@ -105,6 +111,10 @@ func parseListParams(q url.Values) (listParams, string) {
 		p.ownedOnly = true
 	default:
 		return p, "owner must be me"
+	}
+	p.scope = q.Get("scope")
+	if !utf8.ValidString(p.scope) || strings.ContainsRune(p.scope, 0) || len(p.scope) > maxScopeLength {
+		return p, "scope must be a project id"
 	}
 	if v := q.Get("limit"); v != "" {
 		n, err := strconv.Atoi(v)
@@ -167,7 +177,7 @@ func (s *Service) handleList(w http.ResponseWriter, r *http.Request) {
 
 	items, next, err := s.collect(ctx, host, b, CandidateQuery{
 		PrincipalKind: kind, PrincipalRef: ref, ScopeRefs: scopes, OwnedOnly: p.ownedOnly,
-		Search: p.search, ReviewPending: p.reviewPending, After: after,
+		Search: p.search, ReviewPending: p.reviewPending, HomeScope: p.scope, After: after,
 	}, p.limit)
 	if err != nil {
 		slog.ErrorContext(ctx, "artifacts: list failed", "error", err)

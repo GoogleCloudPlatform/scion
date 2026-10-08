@@ -304,11 +304,11 @@ var Registry = []Permission{
 	{ID: "access_constraint.read", Resource: ResourceAccessConstraint, Action: ActionRead, CapabilityKind: CapabilityScope, Description: "Read access constraints", Enforcement: []string{"pkg/hub/handlers_access_constraints.go"}},
 
 	// Scheduled event / recurring schedule permissions (project-scoped)
-	{ID: "scheduled_event.read", Resource: ResourceScheduledEvent, Action: ActionRead, CapabilityKind: CapabilityResource, Description: "Read a scheduled event", Enforcement: []string{"pkg/hub/handlers_scheduled_events.go", "pkg/hub/handlers_schedules.go"}},
-	{ID: "scheduled_event.list", Resource: ResourceScheduledEvent, Action: ActionList, CapabilityKind: CapabilityScope, Description: "List scheduled events", Enforcement: []string{"pkg/hub/handlers_scheduled_events.go", "pkg/hub/handlers_schedules.go"}},
+	{ID: "scheduled_event.read", Resource: ResourceScheduledEvent, Action: ActionRead, CapabilityKind: CapabilityResource, UATScope: "scheduled_event:read", Description: "Read a scheduled event", Enforcement: []string{"pkg/hub/handlers_scheduled_events.go", "pkg/hub/handlers_schedules.go"}},
+	{ID: "scheduled_event.list", Resource: ResourceScheduledEvent, Action: ActionList, CapabilityKind: CapabilityScope, UATScope: "scheduled_event:list", Description: "List scheduled events", Enforcement: []string{"pkg/hub/handlers_scheduled_events.go", "pkg/hub/handlers_schedules.go"}},
 	{ID: "scheduled_event.create", Resource: ResourceScheduledEvent, Action: ActionCreate, CapabilityKind: CapabilityScope, Description: "Create a scheduled event", Enforcement: []string{"pkg/hub/handlers_scheduled_events.go", "pkg/hub/handlers_schedules.go"}},
-	{ID: "scheduled_event.delete", Resource: ResourceScheduledEvent, Action: ActionDelete, CapabilityKind: CapabilityResource, Description: "Cancel a scheduled event or delete a schedule", Enforcement: []string{"pkg/hub/handlers_scheduled_events.go", "pkg/hub/handlers_schedules.go"}},
-	{ID: "scheduled_event.update", Resource: ResourceScheduledEvent, Action: ActionUpdate, CapabilityKind: CapabilityResource, Description: "Update a recurring schedule", Enforcement: []string{"pkg/hub/handlers_schedules.go"}},
+	{ID: "scheduled_event.delete", Resource: ResourceScheduledEvent, Action: ActionDelete, CapabilityKind: CapabilityResource, UATScope: "scheduled_event:delete", Description: "Cancel a scheduled event or delete a schedule", Enforcement: []string{"pkg/hub/handlers_scheduled_events.go", "pkg/hub/handlers_schedules.go"}},
+	{ID: "scheduled_event.update", Resource: ResourceScheduledEvent, Action: ActionUpdate, CapabilityKind: CapabilityResource, UATScope: "scheduled_event:update", Description: "Update, pause or resume a recurring schedule (a user access token may only pause)", Enforcement: []string{"pkg/hub/handlers_schedules.go"}},
 
 	// Extensions to existing resource types (Phase 2 D4 resolution)
 	{ID: "user.invite", Resource: ResourceUser, Action: ActionInvite, CapabilityKind: CapabilityScope, UATScope: "user:invite", Description: "Invite users", Enforcement: []string{"pkg/hub/handlers_users_provision.go:handleProvisionUser"}, NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
@@ -352,8 +352,8 @@ var Registry = []Permission{
 	// access token needs the exact selector, and the target checks in
 	// Server.authorizeSelfScoped apply. Mint eligibility is "the issuer is
 	// an active user"; see permissions.IsSelfPermission.
-	{ID: "inbox.read", Resource: ResourceInbox, Action: ActionRead, UATScope: "inbox:read", Description: "Read your own inbox, notifications and direct messages", NonRouteUse: []string{"pkg/hub/authorize.go:authorizeSelfScoped"}},
-	{ID: "inbox.write", Resource: ResourceInbox, Action: ActionWrite, UATScope: "inbox:write", Description: "Send, change and remove your own inbox items and direct messages", NonRouteUse: []string{"pkg/hub/authorize.go:authorizeSelfScoped"}},
+	{ID: "inbox.read", Resource: ResourceInbox, Action: ActionRead, UATScope: "inbox:read", Description: "Read your own inbox, notifications and direct messages", Enforcement: []string{"pkg/hub/authorize.go:authorizeSelfScoped", "pkg/hub/handlers_messages.go", "pkg/hub/handlers_conversations.go", "pkg/hub/handlers_conversation_resolve.go", "pkg/hub/handlers_notifications.go"}},
+	{ID: "inbox.write", Resource: ResourceInbox, Action: ActionWrite, UATScope: "inbox:write", Description: "Send, change and remove your own inbox items and direct messages", Enforcement: []string{"pkg/hub/authorize.go:authorizeSelfScoped", "pkg/hub/handlers_messages.go", "pkg/hub/handlers_conversations.go", "pkg/hub/handlers_notifications.go"}},
 	{ID: "user_skill_injection.update", Resource: ResourceUserSkillInjection, Action: ActionUpdate, UATScope: "user_skill_injection:update", Description: "Change the skills injected into your own agents", NonRouteUse: []string{"pkg/hub/authorize.go:authorizeSelfScoped"}},
 }
 

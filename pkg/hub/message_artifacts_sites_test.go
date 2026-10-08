@@ -250,8 +250,8 @@ func TestMessageArtifactsSite_ChatV2SendAndHistory(t *testing.T) {
 	rr := httptest.NewRecorder()
 	clientMD := map[string]string{artifacts.MessageMetadataKey: refsValue(
 		artifacts.MessageRef{ArtifactID: f.userOwned}, artifacts.MessageRef{ArtifactID: f.unreadable})}
-	msgID := f.srv.sendAgentRouted(rr, req, key, f.project.ID, user, "notes @"+f.sender.Slug, f.owner.Email,
-		[]*store.Agent{f.target, f.sender}, []string{f.sender.Slug}, nil, nil, time.Now(), "", clientMD, chatSendOptions{})
+	msgID := writeChatSendOutcome(rr)(f.srv.sendAgentRouted(req.Context(), key, f.project.ID, user, "notes @"+f.sender.Slug, f.owner.Email,
+		[]*store.Agent{f.target, f.sender}, []string{f.sender.Slug}, nil, nil, time.Now(), "", clientMD, chatSendOptions{}))
 	require.NotEmpty(t, msgID, "%d: %s", rr.Code, rr.Body.String())
 
 	var resp chatMessageResponse

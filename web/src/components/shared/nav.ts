@@ -24,7 +24,7 @@ import { LitElement, html, css } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import type { User } from '../../shared/types.js';
-import { apiFetch } from '../../client/api.js';
+import { loadAdminStatus } from '../../client/admin-status.js';
 import { ARTIFACTS_FLAG } from '../../client/artifacts.js';
 import { isFeatureEnabled } from '../../utils/feature-flags.js';
 import {
@@ -178,31 +178,13 @@ export class ScionNav extends LitElement {
       return;
     }
 
-    // Call the dedicated admin-status endpoint to detect admin status
-    // and retrieve per-resource permissions.
-    try {
-      const res = await apiFetch('/api/v1/auth/admin-status');
-      // Only apply result if user hasn't changed during the fetch
-      if (this.adminCheckUserId === userId) {
-        if (res.ok) {
-          const data = await res.json();
-          if (data.isAdmin === true) {
-            this.adminStatus = {
-              isAdmin: true,
-              isSuperAdmin: data.isSuperAdmin === true,
-              permissions: Array.isArray(data.permissions) ? data.permissions : [],
-            };
-          } else {
-            this.adminStatus = null;
-          }
-        } else {
-          this.adminStatus = null;
-        }
-      }
-    } catch {
-      if (this.adminCheckUserId === userId) {
-        this.adminStatus = null;
-      }
+    // The admin-status endpoint decides which admin items show for
+    // hub-admin and custom-role users. The request is shared with the
+    // other nav instance and the startup code (client/admin-status.ts).
+    const status = await loadAdminStatus(userId);
+    // Only apply the result if the user hasn't changed during the fetch.
+    if (this.adminCheckUserId === userId) {
+      this.adminStatus = status?.isAdmin === true ? status : null;
     }
   }
 

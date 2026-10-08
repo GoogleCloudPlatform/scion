@@ -1979,3 +1979,51 @@ describe('buildCloudConsoleUrl', () => {
     );
   });
 });
+
+describe('artifact references', () => {
+  const ID = '5f1c2d3e-0000-4000-8000-0000000000aa';
+
+  it('parses canonical references, lowercasing the id', async () => {
+    const { parseArtifactRef } = await import('./chat-file-links.js');
+    expect(parseArtifactRef(`scion://artifact/${ID}`)).toEqual({ id: ID, seq: 0 });
+    expect(parseArtifactRef(`scion://artifact/${ID.toUpperCase()}@12`)).toEqual({
+      id: ID,
+      seq: 12,
+    });
+    expect(parseArtifactRef(`  scion://artifact/${ID}@3  `)).toEqual({ id: ID, seq: 3 });
+  });
+
+  it('rejects malformed references', async () => {
+    const { parseArtifactRef } = await import('./chat-file-links.js');
+    for (const bad of [
+      ID,
+      `scion://artifact/${ID}@0`,
+      `scion://artifact/${ID}@01`,
+      `scion://artifact/${ID}@2x`,
+      'scion://artifact/not-a-uuid',
+      `https://example.com/${ID}`,
+    ]) {
+      expect(parseArtifactRef(bad)).toBeNull();
+    }
+  });
+
+  it('finds references in running text without swallowing what follows', async () => {
+    const { ARTIFACT_REF_PATTERN } = await import('./chat-file-links.js');
+    const re = new RegExp(ARTIFACT_REF_PATTERN.source, 'g');
+    const text = `a scion://artifact/${ID}@2, b scion://artifact/${ID}. c scion://artifact/${ID}@3x`;
+    expect([...text.matchAll(re)].map((m) => m[0])).toEqual([
+      `scion://artifact/${ID}@2`,
+      `scion://artifact/${ID}`,
+    ]);
+  });
+
+  it('builds escaped link markup carrying id and seq', async () => {
+    const { buildArtifactLinkHtml } = await import('./chat-file-links.js');
+    expect(buildArtifactLinkHtml(`scion://artifact/${ID}@2`, { id: ID, seq: 2 })).toBe(
+      `<a class="entity-link artifact-link" data-artifact-id="${ID}" data-artifact-seq="2" href="#" title="Open artifact">scion://artifact/${ID}&#64;2</a>`
+    );
+    expect(buildArtifactLinkHtml('<x>', { id: '"', seq: 0 })).toBe(
+      '<a class="entity-link artifact-link" data-artifact-id="&quot;" href="#" title="Open artifact">&lt;x&gt;</a>'
+    );
+  });
+});
