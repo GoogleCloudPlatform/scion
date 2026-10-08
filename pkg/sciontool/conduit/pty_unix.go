@@ -34,9 +34,8 @@ import (
 )
 
 // ptyHangupGrace is how long Close waits for the tmux client to exit on
-// the pty hangup before it kills the client's process group (a var so
-// tests can shorten it).
-var ptyHangupGrace = 2 * time.Second
+// the pty hangup before it kills the client's process group.
+const ptyHangupGrace = 2 * time.Second
 
 // ptyPassEnv are the variables of this process passed to the tmux client
 // as they are: what it needs to find the server socket and to render.
@@ -79,6 +78,7 @@ type localPTY struct {
 	cmd    *exec.Cmd
 	master *os.File
 	exited chan struct{} // closed once cmd has been reaped
+	grace  time.Duration // hang-up grace before the kill (ptyHangupGrace)
 
 	mu     sync.Mutex // guards closed and ioctls on master
 	closed bool
@@ -123,7 +123,7 @@ func startLocalPTY(user PTYUser, req PTYRequest, name string, args ...string) (*
 		_ = master.Close()
 		return nil, fmt.Errorf("pty: start %s: %w", name, err)
 	}
-	p := &localPTY{cmd: cmd, master: master, exited: make(chan struct{})}
+	p := &localPTY{cmd: cmd, master: master, exited: make(chan struct{}), grace: ptyHangupGrace}
 	go func() {
 		_ = cmd.Wait()
 		close(p.exited)
@@ -190,7 +190,7 @@ func (p *localPTY) control(fn func(fd int) error) error {
 }
 
 // Close hangs up the pty (closing the master), waits up to
-// ptyHangupGrace for the client to exit, then kills its process group,
+// p.grace for the client to exit, then kills its process group,
 // and returns once the client has been reaped.
 func (p *localPTY) Close() error {
 	p.once.Do(func() {
@@ -198,7 +198,7 @@ func (p *localPTY) Close() error {
 		p.closed = true
 		_ = p.master.Close()
 		p.mu.Unlock()
-		t := time.NewTimer(ptyHangupGrace)
+		t := time.NewTimer(p.grace)
 		defer t.Stop()
 		select {
 		case <-p.exited:

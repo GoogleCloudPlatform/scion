@@ -262,9 +262,6 @@ func TestAgentPTYLocalClientSessionEnd(t *testing.T) {
 // TestLocalPTYKillsAfterHangupGrace: a client that ignores the hangup is
 // killed, with the children in its process group, once the grace ends.
 func TestLocalPTYKillsAfterHangupGrace(t *testing.T) {
-	old := ptyHangupGrace
-	ptyHangupGrace = 50 * time.Millisecond
-	t.Cleanup(func() { ptyHangupGrace = old })
 	// Become the subreaper so the orphaned child can be reaped here.
 	if err := unix.Prctl(unix.PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0); err != nil {
 		t.Skipf("cannot become a subreaper: %v", err)
@@ -276,6 +273,7 @@ func TestLocalPTYKillsAfterHangupGrace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	p.grace = 50 * time.Millisecond // before Close, on this instance only
 	line := readLine(t, bufio.NewReader(p), "CHILD:")
 	child, err := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "CHILD:")))
 	if err != nil {
