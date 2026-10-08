@@ -84,6 +84,17 @@ func (s *Server) artifactsHandler() http.Handler {
 	return svc.Handler()
 }
 
+// artifactRefResolver returns the artifact service for resolving message
+// references (resolveArtifactRefs, its only caller). Like artifactsHandler
+// it is built over this server's artifacts.Host; resolveArtifactRefs
+// admits only request-authenticated contexts, so the host still sees only
+// identities derived from request credentials.
+func (s *Server) artifactRefResolver() *artifacts.Service {
+	svc := artifacts.NewService(newArtifactHost(s))
+	svc.SetBackendProvider(s.artifactBackend)
+	return svc
+}
+
 // artifactBackend reports the server's current artifact store, resource
 // storage and hub id.
 func (s *Server) artifactBackend() artifacts.Backend {

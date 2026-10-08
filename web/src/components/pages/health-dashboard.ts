@@ -38,6 +38,8 @@ import type { HealthSummaryAgents } from './health-agents-card.js';
 import './health-agents-card.js';
 import type { HealthSummaryIntegration } from './health-integrations.js';
 import './health-integrations.js';
+import type { HealthSummaryDispatch } from './health-dispatch-card.js';
+import './health-dispatch-card.js';
 
 export { formatHeartbeatAge } from './health-broker-table.js';
 
@@ -67,10 +69,8 @@ interface HealthSummary {
   integrations?: HealthSummaryIntegration[];
   /** Null when the hub could not aggregate agents (not reported). */
   agents: HealthSummaryAgents | null;
-  dispatch: {
-    stuck_messages: number;
-    failed_1h: number;
-  } | null;
+  /** Null when the hub could not count dispatch health (not reported). */
+  dispatch: HealthSummaryDispatch | null;
 }
 
 @customElement('scion-page-health-dashboard')
@@ -479,34 +479,8 @@ export class ScionPageHealthDashboard extends LitElement {
   }
 
   private renderDispatchCard(d: HealthSummary) {
-    if (!d.dispatch) {
-      return html`
-        <div class="card">
-          <div class="card-title">Dispatch Pipeline</div>
-          <div style="font-size:0.875rem;color:var(--scion-text-muted,#64748b)">
-            Dispatch metrics not yet available. A future update will expose dispatch pipeline stats
-            via the health summary API.
-          </div>
-        </div>
-      `;
-    }
     return html`
-      <div class="card">
-        <div class="card-title">Dispatch Pipeline</div>
-        <div class="stat-row">
-          <span class="label">Stuck Messages</span>
-          <span
-            style="color: ${d.dispatch.stuck_messages > 0
-              ? 'var(--scion-error,#ef4444)'
-              : 'inherit'}; font-weight: ${d.dispatch.stuck_messages > 0 ? '600' : 'normal'}"
-          >
-            ${d.dispatch.stuck_messages}
-          </span>
-        </div>
-        <div class="stat-row">
-          <span class="label">Failed (1h)</span><span>${d.dispatch.failed_1h}</span>
-        </div>
-      </div>
+      <scion-health-dispatch-card .dispatch=${d.dispatch ?? null}></scion-health-dispatch-card>
     `;
   }
 }

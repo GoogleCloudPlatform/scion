@@ -18,7 +18,6 @@ package hub
 
 import (
 	"context"
-	"database/sql"
 	"os"
 	"path/filepath"
 	"strings"
@@ -47,9 +46,7 @@ func nfsAttachmentServer(t *testing.T) (srv *Server, project *store.Project, hos
 	hostBase = setNFSSharedDirStorageGlobalSettings(t)
 	srv, s := testServer(t)
 
-	db, err := sql.Open("sqlite3", ":memory:")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = db.Close() })
+	db := openTestMemorySQLite(t, "sqlite3")
 
 	wcs := NewWebChatStore(db, "sqlite3")
 	require.NoError(t, wcs.Init())

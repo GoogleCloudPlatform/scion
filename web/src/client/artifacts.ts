@@ -147,3 +147,103 @@ export function formatBytes(n: number): string {
 
 /** Largest text file the page renders inline. */
 export const MAX_INLINE_TEXT_BYTES = 4 * 1024 * 1024;
+
+/** One row of GET /api/v1/artifacts?mine=1 (pkg/artifacts/list.go). */
+export interface ArtifactListItem extends Artifact {
+  /** The current version is a review awaiting the owner. */
+  reviewPending: boolean;
+}
+
+/** Body of GET /api/v1/artifacts?mine=1. */
+export interface ArtifactListResponse {
+  artifacts: ArtifactListItem[];
+  /** Opaque cursor of the next page; absent on the last page. */
+  nextCursor?: string;
+}
+
+/** Filters of the artifact list. */
+export interface ArtifactListFilters {
+  /** Title or key contains this text. */
+  q?: string;
+  /** Only artifacts whose current version is a review. */
+  reviewPending?: boolean;
+  /** Only artifacts the caller owns. */
+  ownedOnly?: boolean;
+}
+
+/**
+ * URL of one page of the caller's artifact list. Empty filters are left
+ * out, so a cursor (bound by the hub to the exact filters) stays valid.
+ */
+export function artifactListUrl(filters: ArtifactListFilters, cursor?: string): string {
+  const params = new URLSearchParams({ mine: '1' });
+  const q = filters.q?.trim();
+  if (q) params.set('q', q);
+  if (filters.reviewPending) params.set('review_pending', '1');
+  if (filters.ownedOnly) params.set('owner', 'me');
+  if (cursor) params.set('cursor', cursor);
+  return `/api/v1/artifacts?${params.toString()}`;
+}
+
+/** Path of an artifact's page in the web UI. */
+export function artifactPagePath(a: Pick<Artifact, 'id' | 'scopeRef'>): string {
+  return `/projects/${encodeURIComponent(a.scopeRef)}/artifacts/${encodeURIComponent(a.id)}`;
+}
+
+// ---------------------------------------------------------------------------
+// Artifact references in chat messages (ptone/scion#3224)
+// ---------------------------------------------------------------------------
+
+/**
+ * Message metadata key the composer sends artifact references in: a JSON
+ * array of scion://artifact/<id>[@<seq>] strings. The hub keeps only those
+ * the sender can read.
+ */
+export const ARTIFACTS_METADATA_KEY = 'artifacts';
+
+/** Most artifact references one message may carry (hub limit). */
+export const MAX_MESSAGE_ARTIFACTS = 10;
+
+/**
+ * One artifact reference on a message, as the hub resolved it for the
+ * viewer (chat history `messageArtifacts`, send response `artifacts`).
+ * When available is false the viewer cannot read it (or it is gone) and
+ * only ref, id and seq are set.
+ */
+export interface MessageArtifactRef {
+  ref: string;
+  id: string;
+  seq?: number;
+  available: boolean;
+  title?: string;
+  version?: number;
+  ownerKind?: string;
+  ownerRef?: string;
+  ownerName?: string;
+}
+
+/** Canonical reference string of an artifact, pinned to seq when seq > 0. */
+export function formatArtifactRef(id: string, seq?: number): string {
+  return seq && seq > 0 ? `scion://artifact/${id}@${seq}` : `scion://artifact/${id}`;
+}
+
+/**
+ * Orders a message's artifact references by where each artifact first
+ * appears in the message text (the CLI adds the reference URLs to the text
+ * in send order). References whose artifact the text does not name, such
+ * as those attached in the web composer, keep their relative order after
+ * the others: send order right after sending, artifact id order in
+ * history, which is the order the hub returns them in.
+ */
+export function orderArtifactRefs(
+  refs: readonly MessageArtifactRef[],
+  body: string
+): MessageArtifactRef[] {
+  const lower = body.toLowerCase();
+  const indexed = refs.map((r, i) => {
+    const at = lower.indexOf(`scion://artifact/${r.id.toLowerCase()}`);
+    return { r, i, at: at < 0 ? Number.MAX_SAFE_INTEGER : at };
+  });
+  indexed.sort((a, b) => a.at - b.at || a.i - b.i);
+  return indexed.map((x) => x.r);
+}

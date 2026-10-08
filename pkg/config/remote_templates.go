@@ -238,6 +238,37 @@ func fetchGitHubFolder(ctx context.Context, uri string, destPath string, token s
 	return sparseGitCheckout(ctx, parsed, destPath, token)
 }
 
+// GitLsRemoteFunc runs `git ls-remote --heads <repoURL>` and returns its
+// stdout. It is the signature of the ls-remote seam used by resolveGitHubRef.
+type GitLsRemoteFunc func(ctx context.Context, repoURL string) ([]byte, error)
+
+// gitLsRemote is the ls-remote runner used by resolveGitHubRef. It is a
+// package-level variable only so tests can replace it (see
+// SetGitLsRemoteForTest); production code never reassigns it.
+var gitLsRemote GitLsRemoteFunc = execGitLsRemote
+
+// execGitLsRemote is the production ls-remote runner: it shells out to the
+// git binary with terminal prompts disabled.
+func execGitLsRemote(ctx context.Context, repoURL string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, "git", "ls-remote", "--heads", repoURL)
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=echo")
+	return cmd.Output()
+}
+
+// SetGitLsRemoteForTest replaces the git ls-remote runner used when resolving
+// GitHub branch names that contain slashes, and returns a func that restores
+// the previous runner. It exists so tests in other packages (e.g. pkg/hub)
+// can keep remote-import paths hermetic instead of shelling out to a real
+// `git ls-remote` against github.com (ptone/scion#3670).
+//
+// TEST-ONLY: never call this from production code. It mutates package-global
+// state and is not safe for use from parallel tests.
+func SetGitLsRemoteForTest(fn GitLsRemoteFunc) (restore func()) {
+	prev := gitLsRemote
+	gitLsRemote = fn
+	return func() { gitLsRemote = prev }
+}
+
 // resolveGitHubRef uses git ls-remote to disambiguate branch names that may
 // contain slashes. It updates parts.Branch and parts.Path in place.
 // Falls back silently to the naive parse if git is unavailable.
@@ -258,9 +289,7 @@ func resolveGitHubRef(ctx context.Context, parts *GitHubURLParts, token string) 
 		repoURL = fmt.Sprintf("https://github.com/%s/%s.git", parts.Owner, parts.Repo)
 	}
 
-	cmd := exec.CommandContext(ctx, "git", "ls-remote", "--heads", repoURL)
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=echo")
-	output, err := cmd.Output()
+	output, err := gitLsRemote(ctx, repoURL)
 	if err != nil {
 		return
 	}

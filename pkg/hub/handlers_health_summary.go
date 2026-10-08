@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"sort"
@@ -45,7 +46,7 @@ type HealthSummaryResponse struct {
 	Database HealthSummaryDB        `json:"database"`
 	Brokers  HealthSummaryBrokers   `json:"runtime_brokers"`
 	Agents   *HealthSummaryAgents   `json:"agents"`   // nil when the agent aggregate is unavailable
-	Dispatch *HealthSummaryDispatch `json:"dispatch"` // nil when dispatch metrics are unavailable
+	Dispatch *HealthSummaryDispatch `json:"dispatch"` // nil when a dispatch store count failed
 
 	// Integrations lists chat and messaging plugins; never nil. See
 	// health_summary_integrations.go.
@@ -107,7 +108,22 @@ type HealthSummaryBroker struct {
 	Runtime *HealthBrokerRuntime `json:"runtime"`
 	// WorkspaceStorage is null when the broker never reported it.
 	WorkspaceStorage *HealthBrokerStorage `json:"workspace_storage"`
-	Agents           HealthBrokerAgents   `json:"agents"`
+	// Health is the broker's last self-reported health, or null when the
+	// broker never reported it (an older broker). It is as fresh as
+	// LastHeartbeat and never changes Status. For an offline broker it is
+	// the last report before the broker went offline.
+	Health *HealthBrokerSelf  `json:"health"`
+	Agents HealthBrokerAgents `json:"agents"`
+}
+
+// HealthBrokerSelf is a runtime broker's self-reported health.
+type HealthBrokerSelf struct {
+	// Status is healthy, degraded or unhealthy.
+	Status string `json:"status"`
+	// Checks maps each check the broker ran to its result, for example
+	// {"runtime": "unavailable"}. Values are fixed words only (see
+	// api.NormalizeBrokerHealthReport), never free text.
+	Checks map[string]string `json:"checks"`
 }
 
 // HealthBrokerAgents holds per-broker agent counts.
@@ -189,11 +205,24 @@ type HealthAgentRef struct {
 	BrokerID string `json:"broker_id"`
 }
 
-// HealthSummaryDispatch contains dispatch pipeline health.
-// When nil in HealthSummaryResponse, dispatch metrics are not available.
+// healthDispatchFailedWindow is how far back the summary counts failed
+// broker dispatches (failed_broker_dispatch_1h).
+const healthDispatchFailedWindow = time.Hour
+
+// HealthSummaryDispatch contains dispatch pipeline health, counted from the
+// store (messages and broker_dispatch tables), so every hub replica reports
+// the same numbers. Nil in HealthSummaryResponse only when a store count
+// failed ("not reported").
 type HealthSummaryDispatch struct {
+	// StuckMessages: agent-addressed messages still pending after
+	// stuckMessageThreshold (the stuck-message sweep's count).
 	StuckMessages int `json:"stuck_messages"`
-	Failed1h      int `json:"failed_1h"`
+	// StuckBrokerDispatch: broker dispatches in_progress with no update for
+	// dispatchStuckAge (the reaper's staleness threshold).
+	StuckBrokerDispatch int `json:"stuck_broker_dispatch"`
+	// FailedBrokerDispatch1h: broker dispatches that reached failed within
+	// healthDispatchFailedWindow.
+	FailedBrokerDispatch1h int `json:"failed_broker_dispatch_1h"`
 }
 
 // handleHealthSummary handles GET /api/v1/admin/health/summary.
@@ -275,12 +304,13 @@ func (s *Server) handleHealthSummary(w http.ResponseWriter, r *http.Request) {
 		degrade()
 	}
 
-	// Dispatch section: the dispatchmetrics.Recorder does not currently expose a
-	// Stats() method for reading in-process counters. Rather than returning
-	// hardcoded zeros (which would mislead operators), we omit the dispatch data
-	// and let the dashboard render "data not available". TODO: add a Stats()
-	// method to dispatchmetrics.Recorder to populate this section.
-	var dispatchSummary *HealthSummaryDispatch // nil = unavailable
+	// Dispatch section, from the store. A failed count leaves it nil ("not
+	// reported") rather than reading as zero.
+	dispatchSummary, err := s.healthSummaryDispatch(ctx, time.Now().UTC())
+	if err != nil {
+		slog.Error("health summary: failed to count dispatch health", "error", err)
+		degrade()
+	}
 
 	// Propagate unhealthy agent/broker signals into overall status.
 	// Stalled agents never count.
@@ -307,6 +337,25 @@ func (s *Server) handleHealthSummary(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// healthSummaryDispatch builds the dispatch section from the store, reusing
+// the sweep's and the reaper's stuck thresholds. It returns nil and the error
+// if either count fails.
+func (s *Server) healthSummaryDispatch(ctx context.Context, now time.Time) (*HealthSummaryDispatch, error) {
+	stuckMessages, err := s.store.CountStuckPendingMessages(ctx, now.Add(-stuckMessageThreshold))
+	if err != nil {
+		return nil, fmt.Errorf("count stuck pending messages: %w", err)
+	}
+	stuck, failed, err := s.store.CountBrokerDispatchHealth(ctx, now.Add(-dispatchStuckAge), now.Add(-healthDispatchFailedWindow))
+	if err != nil {
+		return nil, fmt.Errorf("count broker dispatch health: %w", err)
+	}
+	return &HealthSummaryDispatch{
+		StuckMessages:          stuckMessages,
+		StuckBrokerDispatch:    stuck,
+		FailedBrokerDispatch1h: failed,
+	}, nil
 }
 
 // healthSummaryAgents builds the agents section from the store aggregate.
@@ -440,9 +489,10 @@ func (s *Server) healthSummaryBrokers(ctx context.Context, agentAgg *store.Agent
 }
 
 // healthSummaryBrokerHasProblem reports whether a runtime broker row needs
-// attention: it is not online, or its NFS workspace share is unhealthy.
+// attention: it is not online, it reports itself degraded or unhealthy, or
+// its NFS workspace share is unhealthy.
 func healthSummaryBrokerHasProblem(b HealthSummaryBroker) bool {
-	if healthSummaryBrokerStatusIsProblem(b.Status) {
+	if healthSummaryBrokerStatusIsProblem(b.Status) || healthSummaryBrokerSelfIsProblem(b.Health) {
 		return true
 	}
 	ws := b.WorkspaceStorage
@@ -458,6 +508,13 @@ func healthSummaryBrokerStatusIsProblem(status string) bool {
 	return status != store.BrokerStatusOnline
 }
 
+// healthSummaryBrokerSelfIsProblem reports whether a broker's self-reported
+// health needs attention: degraded or unhealthy. A broker that never
+// reported its health (nil) is not a problem; it is shown as not reported.
+func healthSummaryBrokerSelfIsProblem(h *HealthBrokerSelf) bool {
+	return h != nil && (h.Status == HealthStatusDegraded || h.Status == HealthStatusUnhealthy)
+}
+
 // healthSummaryBroker builds one runtime broker row of the health summary.
 func healthSummaryBroker(b *store.RuntimeBroker, agentAgg *store.AgentHealthAggregate) HealthSummaryBroker {
 	row := HealthSummaryBroker{
@@ -467,6 +524,7 @@ func healthSummaryBroker(b *store.RuntimeBroker, agentAgg *store.AgentHealthAggr
 		Status:           b.Status,
 		Runtime:          brokerRuntimeSummary(b),
 		WorkspaceStorage: brokerStorageSummary(b.WorkspaceStorage),
+		Health:           brokerSelfHealthSummary(b.Health),
 	}
 	if !b.LastHeartbeat.IsZero() {
 		hb := b.LastHeartbeat
@@ -509,6 +567,23 @@ func brokerStorageSummary(ws *api.BrokerWorkspaceStorage) *HealthBrokerStorage {
 	if ws.Backend == api.WorkspaceStorageBackendNFS {
 		healthy := ws.NFS != nil && ws.NFS.Healthy
 		out.NFSHealthy = &healthy
+	}
+	return out
+}
+
+// brokerSelfHealthSummary converts the health a broker reported on its
+// heartbeat, or returns nil when it never reported one. The stored report
+// is normalised again (api.NormalizeBrokerHealthReport), so the response
+// only ever holds fixed values, whatever the row contains. Checks is never
+// null in the response.
+func brokerSelfHealthSummary(stored *api.BrokerHealthReport) *HealthBrokerSelf {
+	h := api.NormalizeBrokerHealthReport(stored)
+	if h == nil {
+		return nil
+	}
+	out := &HealthBrokerSelf{Status: h.Status, Checks: make(map[string]string, len(h.Checks))}
+	for k, v := range h.Checks {
+		out.Checks[k] = v
 	}
 	return out
 }

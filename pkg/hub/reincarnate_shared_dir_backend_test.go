@@ -78,7 +78,9 @@ func TestReincarnateAgent_SharedDirBackends_DryRunShowsChange(t *testing.T) {
 
 func TestReincarnateAgent_SharedDirBackends_InvalidRequests(t *testing.T) {
 	for name, body := range map[string]ReincarnateAgentRequest{
-		"to local":         {SharedDirBackends: map[string]string{"notes": "local"}},
+		"unknown backend":  {SharedDirBackends: map[string]string{"notes": "gcs"}},
+		"wrong case":       {SharedDirBackends: map[string]string{"notes": "Local"}},
+		"empty backend":    {SharedDirBackends: map[string]string{"notes": ""}},
 		"invalid name":     {SharedDirBackends: map[string]string{"Bad_Name": "nfs"}},
 		"allow empty only": {AllowEmptySharedDir: true},
 	} {
@@ -220,7 +222,9 @@ func TestReincarnateAgent_SharedDirBackends_WithMoveRefused(t *testing.T) {
 		"change":      {DryRun: true, TargetBroker: f.dst.ID, SharedDirBackends: map[string]string{"notes": "nfs"}},
 		"allow empty": {DryRun: true, TargetBroker: f.dst.ID, SharedDirBackends: map[string]string{"notes": "nfs"}, AllowEmptySharedDir: true},
 		// A real move would otherwise run and drop the change.
-		"real move": {Handoff: "h", TargetBroker: f.dst.ID, SharedDirBackends: map[string]string{"notes": "nfs"}},
+		"real move":          {Handoff: "h", TargetBroker: f.dst.ID, SharedDirBackends: map[string]string{"notes": "nfs"}},
+		"to local":           {DryRun: true, TargetBroker: f.dst.ID, SharedDirBackends: map[string]string{"notes": "local"}},
+		"real move to local": {Handoff: "h", TargetBroker: f.dst.ID, SharedDirBackends: map[string]string{"notes": "local"}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			rec := httptest.NewRecorder()
@@ -236,6 +240,11 @@ func TestReincarnateAgent_SharedDirBackends_WithMoveRefused(t *testing.T) {
 	rec := httptest.NewRecorder()
 	f.srv.handleReincarnateAgent(rec, reincarnateRequest(t, f.agent.ID, identity, ReincarnateAgentRequest{
 		DryRun: true, TargetBroker: f.src.ID, SharedDirBackends: map[string]string{"notes": "nfs"},
+	}), f.agent.ID)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	rec = httptest.NewRecorder()
+	f.srv.handleReincarnateAgent(rec, reincarnateRequest(t, f.agent.ID, identity, ReincarnateAgentRequest{
+		DryRun: true, TargetBroker: f.src.ID, SharedDirBackends: map[string]string{"notes": "local"},
 	}), f.agent.ID)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 }
@@ -429,4 +438,100 @@ func TestReincarnateAgent_SharedDirBackends_UnconfirmedChangeFails(t *testing.T)
 	require.NoError(t, err)
 	assert.Equal(t, 1, got.Generation)
 	assert.Nil(t, got.AppliedConfig.SharedDirBackendChanges)
+}
+
+// A change back to local is planned, sent on the reprovision only, and not
+// carried forward, exactly as a change to nfs.
+func TestReincarnateAgent_SharedDirBackends_ToLocal(t *testing.T) {
+	disp := &sharedDirChangeDispatcher{reincarnateTestDispatcher: newReincarnateTestDispatcher()}
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	identity := sessionAdminFor(t, s, project, "sd-local")
+
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, identity, ReincarnateAgentRequest{
+		DryRun: true, SharedDirBackends: map[string]string{"notes": "local"}, AllowEmptySharedDir: true,
+	}), agent.ID)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp ReincarnateAgentResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, map[string]string{"notes": "local"}, resp.Plan.SharedDirBackends)
+	assert.True(t, resp.Plan.AllowEmptySharedDir)
+	assert.Zero(t, disp.reprovisionCalls)
+
+	rec = httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, identity, ReincarnateAgentRequest{
+		Handoff: "h", SharedDirBackends: map[string]string{"notes": "local"}, AllowEmptySharedDir: true,
+	}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	r := waitForReincarnationSettled(t, s, agent.ID)
+	require.Equal(t, store.AgentReincarnationStateCompleted, r.State, r.Error)
+	disp.mu.Lock()
+	assert.Equal(t, map[string]string{"notes": "local"}, disp.changes)
+	assert.True(t, disp.allowEmpty)
+	disp.mu.Unlock()
+
+	rec = httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, identity, ReincarnateAgentRequest{Handoff: "h2"}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	r = waitForReincarnationSettled(t, s, agent.ID)
+	require.Equal(t, store.AgentReincarnationStateCompleted, r.State, r.Error)
+	disp.mu.Lock()
+	assert.Nil(t, disp.changes, "a later reincarnation does not repeat the change")
+	disp.mu.Unlock()
+}
+
+// Round trip local -> nfs -> local through the hub: each change reaches
+// the broker once, and a later reincarnation that fails at reprovision
+// re-renders without repeating the change back to local over a record
+// edited since.
+func TestReincarnateAgent_SharedDirBackends_RoundTrip(t *testing.T) {
+	disp := newSharedDirRecordDispatcher()
+	srv, s, agent, identity := changeBackendToNFS(t, disp)
+	disp.resetReprovisions(nil)
+
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, identity, ReincarnateAgentRequest{
+		Handoff: "h2", SharedDirBackends: map[string]string{"notes": "local"},
+	}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	r := waitForReincarnationSettled(t, s, agent.ID)
+	require.Equal(t, store.AgentReincarnationStateCompleted, r.State, r.Error)
+	assert.Equal(t, "local", disp.backend("notes"))
+	_, cfgs := disp.reprovisionSnapshot()
+	require.Len(t, cfgs, 1)
+	assert.Equal(t, map[string]string{"notes": "local"}, cfgs[0].SharedDirBackendChanges)
+	assert.False(t, cfgs[0].AllowEmptySharedDir)
+	got, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Nil(t, got.AppliedConfig.SharedDirBackendChanges, "the confirmed change is not stored")
+
+	disp.setBackend("notes", "nfs") // edited by hand
+	disp.resetReprovisions(errors.New("broker unavailable"))
+	rec = httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, identity, ReincarnateAgentRequest{Handoff: "h3"}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	r = waitForReincarnationSettled(t, s, agent.ID)
+	require.Equal(t, store.AgentReincarnationStateFailed, r.State)
+	calls, cfgs := disp.reprovisionSnapshot()
+	require.Equal(t, 2, calls, "the failed reprovision and the re-render")
+	for i, cfg := range cfgs {
+		assert.Nil(t, cfg.SharedDirBackendChanges, "reprovision %d", i)
+	}
+	assert.Equal(t, "nfs", disp.backend("notes"), "the re-render does not rewrite the record")
+}
+
+func TestHTTPAgentDispatcher_ReprovisionCarriesSharedDirBackendChangeToLocal(t *testing.T) {
+	d, agent, captured := reprovisionDispatchFixture(t, true)
+	agent.AppliedConfig.SharedDirBackendChanges = map[string]string{"notes": "local"}
+	require.NoError(t, d.DispatchAgentReprovision(context.Background(), agent))
+	assert.True(t, captured.Reprovision)
+	assert.Equal(t, map[string]string{"notes": "local"}, captured.SharedDirBackendChanges)
+	assert.True(t, captured.AllowEmptySharedDir)
+
+	d, agent, _ = reprovisionDispatchFixture(t, false)
+	agent.AppliedConfig.SharedDirBackendChanges = map[string]string{"notes": "local"}
+	err := d.DispatchAgentReprovision(context.Background(), agent)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "did not confirm the shared dir backend change")
 }

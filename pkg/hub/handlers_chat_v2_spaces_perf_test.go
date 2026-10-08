@@ -18,7 +18,6 @@ package hub
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -202,9 +201,7 @@ func newSpacesPerfFixtureOn(t *testing.T, srv *Server, s store.Store, owner, mem
 	t.Helper()
 	ctx := context.Background()
 
-	db, err := sql.Open("sqlite3", ":memory:")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = db.Close() })
+	db := openTestMemorySQLite(t, "sqlite3")
 	base := NewWebChatStore(db, "sqlite3")
 	require.NoError(t, base.Init())
 	wcs := &spacesCountingWCS{WebChatStore: base}
