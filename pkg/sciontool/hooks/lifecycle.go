@@ -217,6 +217,7 @@ func (m *LifecycleManager) runScriptHooks(eventName string) error {
 		for _, pattern := range patterns {
 			if info, err := os.Stat(pattern); err == nil && !info.IsDir() {
 				if err := m.executeScript(pattern, eventName); err != nil {
+					err = m.annotateHarnessProvisionError(eventName, pattern, err)
 					if m.skipRefusedEntry(dir, pattern, err) {
 						continue
 					}
@@ -244,6 +245,10 @@ func (m *LifecycleManager) runScriptHooks(eventName string) error {
 				}
 				scriptPath := filepath.Join(dirPath, entry.Name())
 				if err := m.executeScript(scriptPath, eventName); err != nil {
+					// A failed harness provisioner's recorded (scrubbed)
+					// error is appended so the pre-start failure message
+					// says why, not just "exit status 1".
+					err = m.annotateHarnessProvisionError(eventName, scriptPath, err)
 					if m.skipRefusedEntry(dir, scriptPath, err) {
 						continue
 					}
