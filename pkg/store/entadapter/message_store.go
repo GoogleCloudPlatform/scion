@@ -21,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	"entgo.io/ent/dialect"
 	entsql "entgo.io/ent/dialect/sql"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/message"
@@ -316,30 +317,42 @@ func decodeListCursor(cursor, binding string) (time.Time, uuid.UUID, error) {
 	return ts, id, nil
 }
 
-// messageCreatedCmp returns the predicate "created <op> t" (op is one of <,
-// >, =), with created normalized by timeColumnExpr and t bound by timeArg so
-// both sides compare in the same form on SQLite. On Postgres this is a plain
-// timestamptz comparison, as ent's generated predicates would produce.
-func messageCreatedCmp(op string, t time.Time) predicate.Message {
+// messageCreatedAfter returns the predicate "created is strictly after t".
+//
+// On SQLite created holds Go's default time text, and a row written before
+// the UTC store boundary existed may still carry a monotonic-clock suffix
+// (" m=+0.0336"), while t (bound by timeArg) never does. A raw text
+// comparison then puts a suffixed row at exactly t after t, so the chat
+// "around" read (After = the anchor's read-back CreatedAt) returned the
+// anchor and its same-instant neighbours as newer (ptone/scion#2553). The
+// predicate is therefore
+//
+//	created > t AND timeColumnExpr(created) > t
+//
+// The raw term keeps the range seek on the (…, created, id) indexes, and it
+// is implied by the normalized term (the normalized text is a prefix of the
+// stored text), so it never excludes a row the normalized term keeps. The
+// normalized term drops the same-instant suffixed rows. Both assume UTC text,
+// which the store boundary writes and the utc-timestamp-normalize maintenance
+// operation establishes for legacy rows.
+//
+// Before needs no such treatment: a suffixed row at exactly t already sorts
+// after t's text, so the raw created < t excludes it.
+//
+// On Postgres created is timestamptz and this is a plain comparison.
+func messageCreatedAfter(t time.Time) predicate.Message {
 	return func(s *entsql.Selector) {
-		col := timeColumnExpr(s, message.FieldCreated)
+		if s.Dialect() == dialect.Postgres {
+			message.CreatedGT(t)(s)
+			return
+		}
 		arg := timeArg(s.Dialect(), t)
+		raw := s.C(message.FieldCreated)
+		norm := timeColumnExpr(s, message.FieldCreated)
 		s.Where(entsql.P(func(b *entsql.Builder) {
-			b.WriteString(col).WriteString(" " + op + " ").Arg(arg)
+			b.WriteString(raw).WriteString(" > ").Arg(arg).
+				WriteString(" AND ").WriteString(norm).WriteString(" > ").Arg(arg)
 		}))
-	}
-}
-
-// messageCreatedIDOrder orders by (created, id), both ascending or both
-// descending, with created normalized by timeColumnExpr so the order agrees
-// with messageCreatedCmp's keyset comparisons on ties.
-func messageCreatedIDOrder(ascending bool) message.OrderOption {
-	dir := "DESC"
-	if ascending {
-		dir = "ASC"
-	}
-	return func(s *entsql.Selector) {
-		s.OrderExpr(entsql.Raw(fmt.Sprintf("%s %s, %s %s", timeColumnExpr(s, message.FieldCreated), dir, s.C(message.FieldID), dir)))
 	}
 }
 
@@ -395,16 +408,11 @@ func (s *MessageStore) ListMessages(ctx context.Context, filter store.MessageFil
 		}
 		query.Where(message.ConversationIDEQ(cid))
 	}
-	// created is compared and ordered through timeColumnExpr/timeArg (see
-	// messageCreatedCmp), not ent's generated Created* predicates: on SQLite a
-	// row may still carry a monotonic-clock suffix in its stored text, and a
-	// raw comparison would misjudge ties with a suffix-free bound value
-	// (ptone/scion#2553).
 	if !filter.Before.IsZero() {
-		query.Where(messageCreatedCmp("<", filter.Before))
+		query.Where(message.CreatedLT(filter.Before))
 	}
 	if !filter.After.IsZero() {
-		query.Where(messageCreatedCmp(">", filter.After))
+		query.Where(messageCreatedAfter(filter.After))
 	}
 
 	// totalCount represents the total number of messages matching the base
@@ -431,26 +439,42 @@ func (s *MessageStore) ListMessages(ctx context.Context, filter store.MessageFil
 		}
 		if ascending {
 			query.Where(message.Or(
-				messageCreatedCmp(">", cursorCreated),
+				message.CreatedGT(cursorCreated),
 				message.And(
-					messageCreatedCmp("=", cursorCreated),
+					message.CreatedEQ(cursorCreated),
 					message.IDGT(cursorID),
 				),
 			))
 		} else {
 			query.Where(message.Or(
-				messageCreatedCmp("<", cursorCreated),
+				message.CreatedLT(cursorCreated),
 				message.And(
-					messageCreatedCmp("=", cursorCreated),
+					message.CreatedEQ(cursorCreated),
 					message.IDLT(cursorID),
 				),
 			))
 		}
 	}
 
+	// The keyset cursor and the ORDER BY use the raw created column so the
+	// (conversation_id, channel, created, id) and (thread_id, channel,
+	// created, id) indexes serve both the seek and the order, with no sort.
+	// On SQLite a legacy row whose stored text still carries a
+	// monotonic-clock suffix can therefore order after a suffix-free row at
+	// the same instant, and a page boundary at such a tie can repeat or skip
+	// it. That ordering is left to the utc-timestamp-normalize maintenance
+	// operation, which rewrites legacy rows to canonical text, rather than
+	// paid for with a sort on every page (ptone/scion#2553).
 	limit := clampLimit(opts.Limit)
+	createdOrder := entsql.OrderDesc()
+	idOrder := entsql.OrderDesc()
+	if ascending {
+		createdOrder = entsql.OrderAsc()
+		idOrder = entsql.OrderAsc()
+	}
 	entities, err := query.
-		Order(messageCreatedIDOrder(ascending)).
+		Order(message.ByCreated(createdOrder)).
+		Order(message.ByID(idOrder)).
 		Limit(limit + 1).
 		All(ctx)
 	if err != nil {

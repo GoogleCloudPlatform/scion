@@ -20,9 +20,14 @@ import (
 	"context"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"entgo.io/ent/dialect"
+	entsql "entgo.io/ent/dialect/sql"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/google/uuid"
@@ -40,14 +45,16 @@ func setRawMessageCreatedText(t *testing.T, s *MessageStore, id, createdText str
 	require.NoError(t, err)
 }
 
-// TestListMessages_CreatedComparisonsSurviveMonotonicSuffix is the regression
+// TestListMessages_CreatedFiltersSurviveMonotonicSuffix is the regression
 // test for ptone/scion#2553: on SQLite, rows whose stored created text carries
-// a monotonic-clock suffix must compare and order by instant against
-// suffix-free bound values. It covers the chat "around" shape (After set to
-// an anchor's read-back CreatedAt, ascending), Before, and keyset walks in
-// both directions across a three-row tie at one instant (two rows with a
-// suffix, one without).
-func TestListMessages_CreatedComparisonsSurviveMonotonicSuffix(t *testing.T) {
+// a monotonic-clock suffix must be filtered by instant against suffix-free
+// bound values. It covers the chat "around" shape (After set to an anchor's
+// read-back CreatedAt, ascending) and Before, around a three-row tie at one
+// instant (two rows with a suffix, one without). Keyset ordering of legacy
+// suffixed ties is deliberately not pinned: ListMessages orders on the raw
+// column so the indexes serve the order, and leaves legacy rows to the
+// utc-timestamp-normalize maintenance operation.
+func TestListMessages_CreatedFiltersSurviveMonotonicSuffix(t *testing.T) {
 	enttest.SkipOnPostgres(t, "writes SQLite TEXT timestamps (with a monotonic suffix) that only the SQLite driver produces")
 	ctx := context.Background()
 	s := newTestMessageStore(t)
@@ -59,7 +66,9 @@ func TestListMessages_CreatedComparisonsSurviveMonotonicSuffix(t *testing.T) {
 		{slug: "tie-plain", createdText: "2026-01-01 00:00:05.5 +0000 UTC"},
 		{slug: "tie-suffix", createdText: "2026-01-01 00:00:05.5 +0000 UTC m=+10.2"},
 		{slug: "newer", createdText: "2026-01-01 00:00:06 +0000 UTC"},
+		{slug: "newer-suffix", createdText: "2026-01-01 00:00:05.6 +0000 UTC m=+10.3"},
 		{slug: "older", createdText: "2026-01-01 00:00:04.9 +0000 UTC m=+9"},
+		{slug: "older-plain", createdText: "2026-01-01 00:00:05 +0000 UTC"},
 	}
 	slugByID := map[string]string{}
 	for i := range rows {
@@ -78,66 +87,127 @@ func TestListMessages_CreatedComparisonsSurviveMonotonicSuffix(t *testing.T) {
 	}
 	filter := store.MessageFilter{ProjectID: projectID}
 
-	anchor, err := s.GetMessage(ctx, rows[0].id)
-	require.NoError(t, err)
-
-	after := filter
-	after.After = anchor.CreatedAt
-	res, err := s.ListMessages(ctx, after, store.ListOptions{SortDir: "asc", Limit: 50})
-	require.NoError(t, err)
-	assert.Equal(t, []string{"newer"}, slugs(res.Items), "After must exclude the anchor and its same-instant ties")
-	assert.Equal(t, 1, res.TotalCount)
-
-	before := filter
-	before.Before = anchor.CreatedAt
-	res, err = s.ListMessages(ctx, before, store.ListOptions{Limit: 50})
-	require.NoError(t, err)
-	assert.Equal(t, []string{"older"}, slugs(res.Items), "Before must exclude the anchor and its same-instant ties")
-
-	// Reference order: created by instant (suffix stripped), then id, both in
-	// the walk direction.
-	instant := func(text string) time.Time {
-		if i := strings.Index(text, " m="); i >= 0 {
-			text = text[:i]
+	for _, anchorSlug := range []string{"anchor", "tie-plain"} {
+		var anchorID string
+		for _, r := range rows {
+			if r.slug == anchorSlug {
+				anchorID = r.id
+			}
 		}
-		tm, err := time.Parse("2006-01-02 15:04:05.999999999 -0700 MST", text)
+		anchor, err := s.GetMessage(ctx, anchorID)
 		require.NoError(t, err)
-		return tm
-	}
-	for _, dir := range []string{"asc", "desc"} {
-		ref := append([]row(nil), rows...)
-		sort.Slice(ref, func(i, j int) bool {
-			ti, tj := instant(ref[i].createdText), instant(ref[j].createdText)
-			if !ti.Equal(tj) {
-				if dir == "asc" {
-					return ti.Before(tj)
-				}
-				return ti.After(tj)
-			}
-			if dir == "asc" {
-				return ref[i].id < ref[j].id
-			}
-			return ref[i].id > ref[j].id
-		})
-		want := make([]string, len(ref))
-		for i, r := range ref {
-			want[i] = r.slug
-		}
 
-		for _, pageSize := range []int{1, 2, len(rows)} {
-			opts := store.ListOptions{SortDir: dir, Limit: pageSize, SkipTotalCount: true}
-			var got []store.Message
-			for i := 0; i <= len(rows); i++ {
-				page, err := s.ListMessages(ctx, filter, opts)
-				require.NoError(t, err)
-				got = append(got, page.Items...)
-				if page.NextCursor == "" {
-					break
+		after := filter
+		after.After = anchor.CreatedAt
+		res, err := s.ListMessages(ctx, after, store.ListOptions{SortDir: "asc", Limit: 50})
+		require.NoError(t, err)
+		assert.Equal(t, []string{"newer-suffix", "newer"}, slugs(res.Items),
+			"anchor %s: After must exclude the anchor and its same-instant ties", anchorSlug)
+		assert.Equal(t, 2, res.TotalCount, "anchor %s: count must agree with the page", anchorSlug)
+
+		before := filter
+		before.Before = anchor.CreatedAt
+		res, err = s.ListMessages(ctx, before, store.ListOptions{SortDir: "asc", Limit: 50})
+		require.NoError(t, err)
+		assert.Equal(t, []string{"older", "older-plain"}, slugs(res.Items),
+			"anchor %s: Before must exclude the anchor and its same-instant ties", anchorSlug)
+	}
+}
+
+// planRecordingDriver records every query sent through it, so a test can
+// EXPLAIN the exact SQL a store method built.
+type planRecordingDriver struct {
+	dialect.Driver
+	mu      sync.Mutex
+	queries []recordedQuery
+}
+
+type recordedQuery struct {
+	sql  string
+	args []any
+}
+
+func (d *planRecordingDriver) Query(ctx context.Context, query string, args, v any) error {
+	d.mu.Lock()
+	a, _ := args.([]any)
+	d.queries = append(d.queries, recordedQuery{sql: query, args: append([]any(nil), a...)})
+	d.mu.Unlock()
+	return d.Driver.Query(ctx, query, args, v)
+}
+
+// TestListMessages_TailQueryUsesIndexOrder pins that the conversation+channel
+// tail and history reads keep using the (conversation_id, channel, created,
+// id) index for their ORDER BY, with and without a created range and on a
+// keyset page: the SQLite plan for the exact SQL ListMessages issues must
+// not contain a TEMP B-TREE sort (see the index comment in the message
+// schema, and ptone/scion#2553, which must not trade that index away).
+func TestListMessages_TailQueryUsesIndexOrder(t *testing.T) {
+	enttest.SkipOnPostgres(t, "inspects SQLite EXPLAIN QUERY PLAN output")
+	ctx := context.Background()
+	base := enttest.NewClient(t)
+	rec := &planRecordingDriver{Driver: base.Driver()}
+	s := NewMessageStore(ent.NewClient(ent.Driver(rec)))
+
+	convID := uuid.NewString()
+	projectID := uuid.NewString()
+	at := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	for i := 0; i < 5; i++ {
+		m := newTestMessage(projectID, "agent-plan")
+		m.ConversationID = convID
+		m.Channel = "web"
+		m.CreatedAt = at.Add(time.Duration(i) * time.Second)
+		require.NoError(t, s.CreateMessage(ctx, m))
+	}
+	tail := store.MessageFilter{ConversationID: convID, Channel: "web"}
+	page, err := s.ListMessages(ctx, tail, store.ListOptions{Limit: 2, SkipTotalCount: true})
+	require.NoError(t, err)
+	require.NotEmpty(t, page.NextCursor)
+
+	withBefore, withAfter := tail, tail
+	withBefore.Before = at.Add(3 * time.Second)
+	withAfter.After = at.Add(1 * time.Second)
+	cases := []struct {
+		name   string
+		filter store.MessageFilter
+		opts   store.ListOptions
+	}{
+		{"tail", tail, store.ListOptions{Limit: 2, SkipTotalCount: true}},
+		{"before", withBefore, store.ListOptions{Limit: 2, SkipTotalCount: true}},
+		{"after-asc", withAfter, store.ListOptions{Limit: 2, SortDir: "asc", SkipTotalCount: true}},
+		{"cursor-page", tail, store.ListOptions{Limit: 2, Cursor: page.NextCursor, SkipTotalCount: true}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec.mu.Lock()
+			rec.queries = nil
+			rec.mu.Unlock()
+			_, err := s.ListMessages(ctx, tc.filter, tc.opts)
+			require.NoError(t, err)
+
+			rec.mu.Lock()
+			var q *recordedQuery
+			for i := range rec.queries {
+				if strings.Contains(rec.queries[i].sql, "ORDER BY") {
+					q = &rec.queries[i]
 				}
-				opts.Cursor = page.NextCursor
 			}
-			assert.Equal(t, want, slugs(got), "dir=%s pageSize=%d", dir, pageSize)
-		}
+			rec.mu.Unlock()
+			require.NotNil(t, q, "ListMessages must issue an ordered SELECT")
+
+			rows := &entsql.Rows{}
+			require.NoError(t, base.Driver().Query(ctx, "EXPLAIN QUERY PLAN "+q.sql, q.args, rows))
+			var plan string
+			for rows.Next() {
+				var id, parent, unused int
+				var detail string
+				require.NoError(t, rows.Scan(&id, &parent, &unused, &detail))
+				plan += detail + "\n"
+			}
+			require.NoError(t, rows.Err())
+			require.NoError(t, rows.Close())
+			assert.Contains(t, plan, "message_conversation_id_channel_created_id", "query: %s", q.sql)
+			assert.NotContains(t, plan, "TEMP B-TREE FOR ORDER BY", "query: %s", q.sql)
+		})
 	}
 }
 

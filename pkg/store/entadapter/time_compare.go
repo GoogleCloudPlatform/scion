@@ -33,9 +33,14 @@ import (
 // boundary existed may still carry a monotonic-clock suffix
 // (" m=+0.033607249") from a bare time.Now(); a cursor-decoded or
 // read-back time never does, so the expression strips " m=" onward before
-// comparing, and a row without a suffix is returned unchanged. With every
-// row in UTC, this text compares in time order. A NULL column stays NULL
-// (instr(NULL, ...) is NULL, so the ELSE branch returns the column).
+// comparing, and a row without a suffix is returned unchanged.
+//
+// The result compares in time order only if every row is UTC text. The
+// normalization assumes it: the store boundary writes it, and for rows
+// written before that boundary the utc-timestamp-normalize maintenance
+// operation establishes it (the hub startup check reports tables that still
+// need the operation). A NULL column stays NULL (instr(NULL, ...) is NULL,
+// so the ELSE branch returns the column).
 //
 // On Postgres the columns are native timestamptz, so the bare column is used.
 func timeColumnExpr(s *entsql.Selector, col string) string {
