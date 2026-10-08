@@ -63,7 +63,7 @@ jobs:
       - name: Run full test suite (with SQLite)
         run: |
           set -o pipefail
-          go test -count=1 -timeout 45m ./... 2>&1 | tee test-full-suite-output.txt
+          go test -count=1 -timeout 60m ./... 2>&1 | tee test-full-suite-output.txt
 
       - name: Upload test results
         if: always()

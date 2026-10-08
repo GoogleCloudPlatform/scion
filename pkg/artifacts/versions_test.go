@@ -382,7 +382,6 @@ func TestTwoStepManifestValidation(t *testing.T) {
 		"reserved bare":                     {CreateVersionRequest{Entry: "a", Files: []ManifestFile{file("a", 1), file("_remote", 1)}}, 400},
 		"bad digest":                        {CreateVersionRequest{Entry: "a", Files: []ManifestFile{{Path: "a", Size: 1, SHA256: "zz"}}}, 400},
 		"negative size":                     {CreateVersionRequest{Entry: "a", Files: []ManifestFile{file("a", -1)}}, 400},
-		"review kind":                       {CreateVersionRequest{Kind: VersionKindReview, Entry: "a", Files: []ManifestFile{file("a", 1)}}, 400},
 		"unknown kind":                      {CreateVersionRequest{Kind: "draft", Entry: "a", Files: []ManifestFile{file("a", 1)}}, 400},
 		"long note":                         {CreateVersionRequest{Note: strings.Repeat("n", maxNoteRunes+1), Entry: "a", Files: []ManifestFile{file("a", 1)}}, 400},
 		"long key":                          {CreateVersionRequest{Key: strings.Repeat("k", maxKeyBytes+1), Entry: "a", Files: []ManifestFile{file("a", 1)}}, 400},

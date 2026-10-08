@@ -10,6 +10,8 @@ harness config but should keep its identity, conversations, and lineage, use
 itself) instead of delete-and-recreate; see its `--help` for the contract.
 Patch flags (`--model`, `--image`, `--role`, `--service-account`, `--thinking-level`,
 `--harness-auth`) change that setting on the new generation.
+Reincarnating another agent needs permission to delegate its role, but the agent keeps
+its existing delegator (and so its authority) unless you change its role with `--role`.
 
 ### Moving to another Runtime Broker
 

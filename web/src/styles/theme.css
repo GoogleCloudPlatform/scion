@@ -346,6 +346,12 @@
      neutral-0 is used for input/form backgrounds; neutral-1000 for input text. */
   --sl-color-neutral-0: var(--scion-neutral-800);
   --sl-color-neutral-1000: var(--scion-neutral-50);
+
+  /* Shoelace draws tooltips with neutral-800 behind neutral-0 text, which
+     the mapping above makes the same colour. Give tooltips a light surface
+     with dark text so they stand out against the dark page. */
+  --sl-tooltip-background-color: var(--scion-neutral-100);
+  --sl-tooltip-color: var(--scion-neutral-900);
 }
 
 /* ==========================================================================
@@ -422,6 +428,10 @@
     /* Shoelace extreme-end neutrals */
     --sl-color-neutral-0: var(--scion-neutral-800);
     --sl-color-neutral-1000: var(--scion-neutral-50);
+
+    /* Tooltips: light surface, dark text (see the dark theme block) */
+    --sl-tooltip-background-color: var(--scion-neutral-100);
+    --sl-tooltip-color: var(--scion-neutral-900);
 
     /* Status badge colors */
     --scion-badge-success-bg: rgba(34, 197, 94, 0.2);

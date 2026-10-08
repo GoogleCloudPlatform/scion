@@ -154,6 +154,10 @@ func (s *Server) authorizeChatSend(ctx context.Context, user UserIdentity, key s
 		if !isDMParticipant(key, user.ID()) {
 			return nil, chatSendForbidden()
 		}
+		// The other participant must be a principal the caller may message.
+		if serr := s.authorizeDMPeer(ctx, user, key); serr != nil {
+			return nil, serr
+		}
 		// DMs are not project-scoped; the project is derived from the
 		// agent for an agent DM, and user-user DMs have none.
 		return target, nil
@@ -186,6 +190,92 @@ func (s *Server) authorizeChatSend(ctx context.Context, user UserIdentity, key s
 	target.ProjectID = topic.ProjectID
 	target.Topic = topic
 	return target, nil
+}
+
+// chatSendMessageDenied is the refusal for a sender the messaging rules do
+// not allow to message agent. authorizeDMPeer and sendAgentRouted both use
+// it, so the two refusals are the same.
+func chatSendMessageDenied(reason string, agent *store.Agent) *chatSendError {
+	return newChatSendError(http.StatusForbidden, ErrCodeMessageDenied, "Message delivery denied", map[string]interface{}{
+		"reason":        mapReasonToCode(reason),
+		"senderMode":    "user",
+		"recipientMode": agent.MessageMode,
+	})
+}
+
+// authorizeDMPeer checks the participant of a DM key that is not the
+// caller (the peer). The caller has already been matched to a user slot
+// by isDMParticipant.
+//
+//   - The key must be canonical (messages.DMConversationKey). Anything else
+//     is the same 400 as a malformed key, decided from the key text alone.
+//   - A user peer must exist, not be suspended, and be readable by the
+//     caller (the user directory the chat palette offers).
+//   - An agent peer must exist and authorizeAgentMessage must allow the
+//     caller to message it. A refusal for an agent the caller can read is
+//     the usual MESSAGE_DENIED response.
+//
+// Every other outcome is chatSendForbidden, the same response as for a
+// caller who is not a participant, so the response does not depend on
+// which check failed. A store error other than not found fails closed
+// with 503.
+func (s *Server) authorizeDMPeer(ctx context.Context, user UserIdentity, key string) *chatSendError {
+	kindA, idA, kindB, idB, err := messages.ParseDMKey(key)
+	if err != nil {
+		return chatSendBadRequest("invalid DM key format")
+	}
+	if canonical, cerr := messages.DMConversationKey(kindA, idA, kindB, idB); cerr != nil || canonical != key {
+		return chatSendBadRequest("invalid DM key format")
+	}
+	peerKind, peerID := kindA, idA
+	if kindA == "user" && idA == user.ID() {
+		peerKind, peerID = kindB, idB
+	}
+
+	switch peerKind {
+	case "user":
+		peer, err := s.store.GetUser(ctx, peerID)
+		if err != nil || peer == nil {
+			return s.dmPeerLookupFailure(err)
+		}
+		if peer.Status == store.UserStatusSuspended {
+			return chatSendForbidden()
+		}
+		if !s.authzService.CheckAccess(ctx, user, userResource(peer), ActionRead).Allowed {
+			return chatSendForbidden()
+		}
+		return nil
+	case "agent":
+		agent, err := s.store.GetAgent(ctx, peerID)
+		if err != nil || agent == nil {
+			return s.dmPeerLookupFailure(err)
+		}
+		allowed, reason, _ := s.authorizeAgentMessage(ctx, user, agent, false)
+		if allowed {
+			return nil
+		}
+		if s.authzService.CheckAccess(ctx, user, agentResource(agent), ActionRead).Allowed {
+			slog.Warn("chat v2 message authorization denied",
+				"user", user.ID(),
+				"target_agent", agent.ID,
+				"reason", reason,
+			)
+			return chatSendMessageDenied(reason, agent)
+		}
+		return chatSendForbidden()
+	default:
+		return chatSendForbidden()
+	}
+}
+
+// dmPeerLookupFailure maps a failed DM peer lookup: not found is the
+// uniform refusal, any other store error fails closed.
+func (s *Server) dmPeerLookupFailure(err error) *chatSendError {
+	if err == nil || errors.Is(err, store.ErrNotFound) {
+		return chatSendForbidden()
+	}
+	slog.Warn("chat v2 DM peer lookup failed", "error", err)
+	return newChatSendError(http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Chat not available", nil)
 }
 
 // validateChatSendInput checks the content and attachments of a send and
