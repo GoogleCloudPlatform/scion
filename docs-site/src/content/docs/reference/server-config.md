@@ -1041,9 +1041,9 @@ Settings required before the database connection exists, or that are restart-bou
 | Heartbeat reconcile | `hub.missing_agent_grace` |
 | Conduit relay | `hub.conduit.*` |
 
-### Layer 1 — Operational (Postgres `hub_settings` table)
+### Layer 1 — Operational (`hub_settings` table)
 
-Settings that can be changed at runtime and are shared across all replicas. Stored as section-per-row in the `hub_settings` table. In SQLite/workstation mode, these fall back to `settings.yaml` (unchanged behavior), except for the `maintenance` section which is runtime/API-only and has no `settings.yaml` representation (ephemeral in file/SQLite mode).
+Settings that can be changed at runtime and are shared across all replicas. Stored as section-per-row in the `hub_settings` table of the Hub database on every driver, SQLite included. `settings.yaml` only seeds them and is the fallback for a section with no database row (see the [Admin Settings Model](/scion/reference/admin-settings/)). The `maintenance` section is runtime/API-only: it has no `settings.yaml` representation and starts from `admin_mode` until a row exists.
 
 | Section | Contents |
 | :--- | :--- |
@@ -1053,27 +1053,33 @@ Settings that can be changed at runtime and are shared across all replicas. Stor
 | `telemetry` | Full `telemetry.*` subtree (enabled, cloud, hub, local, filter, resource) |
 | `agent_defaults` | `default_template`, `default_harness_config`, `default_max_turns`, `default_max_model_calls`, `default_max_duration`, `default_resources`, `default_model`, `default_thinking_level`, `default_max_agent_role`, `default_agent_role`, `default_runtime_broker`, `default_timezone`, `default_gcp_identity_mode`, `default_gcp_identity_service_account_id` |
 | `federation` | `enabled`, `trusted_issuers[]`, `algorithms`, `refresh_interval`, `debounce_interval` |
-| `endpoints` | `hub.public_url`, `image_registry` |
+| `endpoints` | `hub.public_url`, `hub.hub_name`, `image_registry` |
 | `github_app` | `app_id`, `api_base_url`, `webhooks_enabled`, `installation_url`, `private_key_path` |
 | `notifications` | `notification_channels[]` |
 | `project_defaults` | `default_scratchpad` |
+| `auto_expose_ports` | `enabled` |
+| `quotas` | `enforce_broker_quotas` |
+| `agent_secrets` | `user_scope_only` |
+| `runtimes` | The whole `runtimes` map |
+| `profiles` | The whole `profiles` map |
+| `harness_configs` | The whole `harness_configs` map |
 | *(reserved)* `global_defaults` | Reserved for future hub-resource design — not implemented |
 
 `agent_defaults.default_timezone` is the Hub default `TZ` for agent containers: an IANA zone name, used only when the agent has no pin and no `TZ` environment variable applies. Empty means no default (the image default, UTC). An invalid name or `Local` is rejected with `422`. In `settings.yaml`, and in the `PUT /api/v1/admin/server-config` request body, it is the top-level `default_timezone` field. It does not change how times are stored or displayed. See [Times and Timezones](/scion/reference/times-and-timezones/#hub-default-timezone).
 
 ### Precedence
 
-In Postgres mode, the effective value for any Layer-1 key is resolved in this order (highest priority first):
+On every driver, the effective value for any Layer-1 key is resolved in this order (highest priority first):
 
-1. **`SCION_SERVER_*` environment variable** — node-local escape hatch
-2. **`hub_settings` DB row** — cluster-shared, set via admin API
-3. **`settings.yaml` Layer-1 fields** — fallback when key absent in DB
-4. **Compiled defaults**
+1. **`hub_settings` DB row** — cluster-shared, set via admin API. A row fully owns its section.
+2. **Bootstrap merge** — used only when the section has no row: `SCION_SERVER_*`, then `settings.yaml`, then `SCION_SEED_*`, then compiled defaults.
+
+A `SCION_SERVER_*` variable on a Layer-1 key therefore does not override a row an admin has saved. It only changes the seed (re-synced into seeded rows at restart) and the fallback, and it is deprecated for Layer-1 keys in favour of `SCION_SEED_*`.
 
 ### Seeding and Migration
 
 - **First startup**: the first replica to start seeds `hub_settings` from its local `settings.yaml` (Layer-1 keys only) under an advisory lock. Subsequent replicas see the seed marker and skip.
-- **Seeding reads file values only** — environment overrides are not baked into shared state.
+- **Seeding reads the bootstrap merge** (`SCION_SEED_*`, `settings.yaml`, then `SCION_SERVER_*`). Sections that no admin has edited re-sync from it on every start; edited (managed) sections are not touched.
 - **DB wins**: once a section is seeded/written to DB, the DB row fully owns that section. Omitted fields within the section fall to compiled defaults, not to the file.
 - **Rollback safety**: older builds ignore the `hub_settings` table entirely and read files — rolling back reverts to pre-change behavior.
 
@@ -1081,9 +1087,9 @@ In Postgres mode, the effective value for any Layer-1 key is resolved in this or
 
 Because env overrides on Layer-1 keys reintroduce per-node drift, the system warns administrators:
 
-- `GET /api/v1/admin/server-config` includes an `env_overrides` array listing which Layer-1 keys are overridden by env vars on the serving node.
+- `GET /api/v1/admin/server-config` includes an `env_overrides` array listing every key, Layer-0 or Layer-1, that a `SCION_SERVER_*` variable sets on the serving node.
 - A startup `WARN` log lists any overridden Layer-1 keys.
-- The admin UI renders a visible warning banner when env overrides are detected.
+- The admin UI renders a visible warning banner when env overrides are detected, and a per-field "Overridden by environment on this node" badge on each affected field.
 
 ### Admin API Behavior Notes
 
