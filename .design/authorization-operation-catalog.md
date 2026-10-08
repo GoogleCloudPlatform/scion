@@ -205,12 +205,19 @@
 
 **Resource Resolver:** project-from-body
 
-**Effects:** `create-resource`
+**Effects:** `create-resource`, `grant-authority`
 
 ### Delegation
 
 - **Kind:** `non_amplification`
 - Actor must hold the role and scopes delegated to the new agent (CanDelegate non-amplification); an agent actor is also evaluated against the delegation ceiling of its live delegation chain for agent.create on the target project
+
+### Audit
+
+- **Event Type:** `agent_delegation`
+- **Context Fields:** actor_id
+- **After Fields:** agent_id, can_delegate_result
+- **Atomic:** Yes
 
 **Denial Codes:** `forbidden`, `conflict`
 
@@ -219,6 +226,7 @@
 - `pkg/hub/authzop:TestCatalogValidation`
 - `pkg/hub:TestAgentCreate_ExplicitRoleAboveParentDenied`
 - `pkg/hub:TestAgentCreate_RequiresLiveDelegator`
+- `pkg/hub:TestCreateAuditFailureRollsBack`
 
 ---
 
@@ -1167,13 +1175,27 @@
 
 **Resource Resolver:** hub-scoped
 
-**Effects:** `create-resource`
+**Effects:** `create-resource`, `grant-authority`
+
+### Delegation
+
+- **Kind:** `non_amplification`
+- The creator is bound to the project-owner role on the project the call creates. A credential with a permission ceiling must cover every permission of that role before any write (projectOwnerGrantDenial); for other callers project.create gates the grant
+
+### Audit
+
+- **Event Type:** `project_member_add`
+- **Context Fields:** actor_id, project_id
+- **After Fields:** user_id, role
+- **Atomic:** Yes
 
 **Denial Codes:** `forbidden`
 
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestOwnerGrantCoverageCheck`
+- `pkg/hub:TestOwnerBindingAuditFailureRollsBack`
 
 ---
 
@@ -1378,13 +1400,27 @@
 
 **Resource Resolver:** project-from-body
 
-**Effects:** `create-resource`
+**Effects:** `create-resource`, `grant-authority`
+
+### Delegation
+
+- **Kind:** `non_amplification`
+- When the call creates the project, the creator is bound to the project-owner role on it; registering an existing project binds no owner. A credential with a permission ceiling must cover every permission of that role before any write (projectOwnerGrantDenial); for other callers project.register gates the grant
+
+### Audit
+
+- **Event Type:** `project_member_add`
+- **Context Fields:** actor_id, project_id
+- **After Fields:** user_id, role
+- **Atomic:** Yes
 
 **Denial Codes:** `forbidden`
 
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestOwnerGrantCoverageCheck`
+- `pkg/hub:TestOwnerBindingAuditFailureRollsBack`
 
 ---
 
@@ -1478,7 +1514,20 @@
 
 **Resource Resolver:** project-from-url
 
-**Effects:** `create-resource`
+**Effects:** `create-resource`, `grant-authority`
+
+### Delegation
+
+- **Kind:** `non_amplification`
+- Only the dispatch_agent event type grants authority. Authoring any event type records the author's frozen effect ceiling (revisionAuthorityCeiling); a dispatch_agent event or schedule then creates an agent at fire time, with a delegation edge from the recorded principal, after CanDelegate for that principal. A message event or schedule grants no authority. Effects are listed per operation, not per event type, so grant-authority is listed for the whole operation
+
+### Audit
+
+- **Event Type:** `agent_delegation`
+- **Context Fields:** actor_id
+- **After Fields:** agent_id, can_delegate_result
+- **Atomic:** No
+- **Non-Atomic Justification:** The authoring write records no mutation audit record: it stores the initiator attribution and the frozen effect ceiling on the event or schedule row in the same insert. The agent_delegation record is written when a dispatch_agent event fires, in the agent-create transaction with the agent row and its delegation edge. A message event writes none
 
 **Denial Codes:** `forbidden`
 
