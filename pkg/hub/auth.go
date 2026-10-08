@@ -244,7 +244,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				}
 				log.Debug("Auth check",
 					slog.String("method", r.Method),
-					slog.String("path", r.URL.Path),
+					slog.String("path", logging.RedactPath(r.URL.Path)),
 					slog.Bool("has_auth", hasAuth),
 					slog.String("auth_prefix", authPrefix),
 				)
@@ -253,7 +253,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 			// Skip auth for unauthenticated endpoints (health checks, CLI OAuth)
 			if isUnauthenticatedEndpoint(r.URL.Path) {
 				if cfg.Debug {
-					log.Debug("Skipping auth for unauthenticated endpoint", "path", r.URL.Path)
+					log.Debug("Skipping auth for unauthenticated endpoint", "path", logging.RedactPath(r.URL.Path))
 				}
 				serveAfterAuth(w, next, r)
 				return
@@ -386,7 +386,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				if !brokerAuthActive(cfg.BrokerAuthSvc) {
 					log.Warn("Rejecting broker-authenticated request: broker authentication is not available",
 						slog.String("broker_id", brokerID),
-						slog.String("path", r.URL.Path),
+						slog.String("path", logging.RedactPath(r.URL.Path)),
 					)
 					writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
 						"broker authentication is not enabled", nil)
@@ -484,6 +484,17 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				// in the path on every request and serves nothing without
 				// one, and the route never uses an identity.
 				if isArtifactViewRequest(r) {
+					ctx = contextWithAuthType(ctx, AuthTypeSignedURL)
+					serveAfterAuth(w, next, r.WithContext(ctx))
+					return
+				}
+
+				// Step 3e: Artifact share link. A credential-less GET or HEAD
+				// under /api/v1/artifacts/shared/ is passed through WITHOUT an
+				// identity, like the view route: the artifact service resolves
+				// the link token in the path on every request, serves nothing
+				// without a live link, and never uses an identity on the route.
+				if isArtifactSharedRequest(r) {
 					ctx = contextWithAuthType(ctx, AuthTypeSignedURL)
 					serveAfterAuth(w, next, r.WithContext(ctx))
 					return

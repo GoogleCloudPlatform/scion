@@ -23,6 +23,7 @@ import (
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
 // DevUserID is the well-known UUID for the development pseudo-user.
@@ -235,7 +236,7 @@ func DevAuthMiddlewareWithDebug(validToken string, userCfg DevUserConfig, debug 
 				if debug {
 					slog.Debug("Auth failed: missing Authorization header",
 						"method", r.Method,
-						"path", r.URL.Path,
+						"path", logging.RedactPath(r.URL.Path),
 					)
 				}
 				writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,

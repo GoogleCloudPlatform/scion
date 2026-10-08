@@ -59,6 +59,8 @@ func (s *Server) artifactLimits(context.Context) artifacts.Limits {
 	c := s.artifactsConfig()
 	return artifacts.Limits{
 		MaxFileBytes: c.MaxFileBytes, MaxBundleBytes: c.MaxBundleBytes, MaxFiles: c.MaxFiles,
+		LinkDefaultTTL: time.Duration(c.LinkDefaultTTLHours) * time.Hour,
+		LinkMaxTTL:     time.Duration(c.LinkMaxTTLHours) * time.Hour,
 		RemoteImages: artifacts.RemoteImageLimits{
 			Enabled:      c.RemoteImagesEnabled,
 			MaxCount:     c.RemoteImageMaxCount,
@@ -81,6 +83,10 @@ func (s *Server) artifactsHandler() http.Handler {
 	svc := artifacts.NewService(newArtifactHost(s))
 	svc.SetLimits(s.artifactLimits)
 	svc.SetBackendProvider(s.artifactBackend)
+	// Share-link reads are rate limited per client address, read through
+	// the hub's trusted proxies the same way as its other pre-auth limits.
+	trusted := parseTrustedProxies(s.config.TrustedProxies)
+	svc.SetClientKey(func(r *http.Request) string { return geExchangeClientIP(r, trusted) })
 	return svc.Handler()
 }
 

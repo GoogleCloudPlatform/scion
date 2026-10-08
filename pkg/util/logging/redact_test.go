@@ -80,3 +80,33 @@ func TestRequestLogMiddleware_RedactsSignature(t *testing.T) {
 		t.Fatalf("request log missing redacted URL: %s", out)
 	}
 }
+
+func TestRedactPath(t *testing.T) {
+	const tok = "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789-_AbCd"
+	for in, want := range map[string]string{
+		"/api/v1/artifacts/shared/" + tok:                        "/api/v1/artifacts/shared/REDACTED",
+		"/api/v1/artifacts/shared/" + tok + "/files/a/b.png":     "/api/v1/artifacts/shared/REDACTED",
+		"/api/v1/artifacts/shared/../shared/" + tok:              "/api/v1/artifacts/shared/REDACTED",
+		"/api/v1//artifacts/shared/" + tok:                       "/api/v1/artifacts/shared/REDACTED",
+		"/api/v1/artifacts/x/../shared/" + tok:                   "/api/v1/artifacts/shared/REDACTED",
+		"/api/v1/artifacts/view/id.1.2.sig/index.html":           "/api/v1/artifacts/view/REDACTED",
+		"/api/v1/artifacts/00000000-0000-4000-8000-000000000001": "/api/v1/artifacts/00000000-0000-4000-8000-000000000001",
+		"/api/v1/agents/a1":                                      "/api/v1/agents/a1",
+		"":                                                       "",
+	} {
+		if got := RedactPath(in); got != want {
+			t.Errorf("RedactPath(%q) = %q, want %q", in, got, want)
+		}
+		if got := RedactPath(in); strings.Contains(got, tok) {
+			t.Errorf("RedactPath(%q) keeps the token", in)
+		}
+	}
+	u, _ := url.Parse("https://hub.example/api/v1/artifacts/%73hared/" + tok + "?sig=x&a=1")
+	got := RedactURL(u)
+	if strings.Contains(got, tok) || strings.Contains(got, "sig=x") {
+		t.Errorf("RedactURL = %q", got)
+	}
+	if !IsCredentialPath("/api/v1/artifacts/shared/x") || IsCredentialPath("/api/v1/artifacts/abc") {
+		t.Errorf("IsCredentialPath")
+	}
+}

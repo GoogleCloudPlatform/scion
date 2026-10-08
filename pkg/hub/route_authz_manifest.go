@@ -260,7 +260,7 @@ var routeAuthzManifest = map[string]string{
 	// ── Artifacts (hub.artifacts experiment) ──────────────────────────
 	"/api/v1/artifacts":         "authenticated", // Artifact collection (publish; ?mine=1 list filtered per row); service checks artifact.* through artifacts.Host; 404 when the experiment is off
 	"/api/v1/artifacts/":        "authenticated", // Artifact by ID; service checks artifact.* through artifacts.Host; 404 when the experiment is off
-	"/api/v1/artifacts/shared/": "authenticated", // Share links (RoutePublic in route metadata); still behind UnifiedAuthMiddleware until token-only access ships; 404 when the experiment is off
+	"/api/v1/artifacts/shared/": "public",        // GET/HEAD: share-link read; the service resolves the link token in the path (hashed, one lookup) and answers 303 to the view route; rate limited; no session used; 404 when the experiment is off
 	"/api/v1/artifacts/view/":   "public",        // GET/HEAD: one version's files under a short-lived view capability in the path, verified by the service on every request (no session used); 404 when the experiment is off
 
 	// ── Agent GCP identity ─────────────────────────────────────────────
