@@ -625,3 +625,108 @@ func TestFetchUnresolvableHost(t *testing.T) {
 		t.Fatalf("%d connections made", env.connections())
 	}
 }
+
+// TestFetchBytesReturnsAnyContent: FetchBytes returns a non-image body
+// unchanged and leaves ContentType empty, while Fetch still refuses it.
+func TestFetchBytesReturnsAnyContent(t *testing.T) {
+	body := []byte("\x1f\x8b\x08 not an image")
+	env := newTestEnv(t, serveBytes(body, "application/gzip"), Config{})
+	res, err := env.fetcher.FetchBytes(context.Background(), env.url("example.com", "/a.tar.gz"))
+	if err != nil {
+		t.Fatalf("FetchBytes: %v", err)
+	}
+	if !bytes.Equal(res.Body, body) || res.ContentType != "" || res.SHA256 == "" {
+		t.Fatalf("unexpected result %+v", res)
+	}
+	if _, err := env.fetcher.Fetch(context.Background(), env.url("example.com", "/a.tar.gz")); reasonOf(t, err) != ReasonType {
+		t.Fatalf("Fetch should still refuse non-images, got %v", err)
+	}
+}
+
+// TestFetchBytesKeepsRequestRules: FetchBytes refuses the same URLs,
+// addresses and sizes Fetch does.
+func TestFetchBytesKeepsRequestRules(t *testing.T) {
+	var env *testEnv
+	env = newTestEnv(t, func(w http.ResponseWriter, r *http.Request) {
+		_, port, _ := net.SplitHostPort(env.srv.Listener.Addr().String())
+		switch r.URL.Path {
+		case "/big":
+			_, _ = w.Write(bytes.Repeat([]byte("x"), 2048))
+		case "/big-chunked":
+			// No Content-Length: the cap must apply while streaming.
+			for i := 0; i < 4; i++ {
+				_, _ = w.Write(bytes.Repeat([]byte("x"), 512))
+				w.(http.Flusher).Flush()
+			}
+		case "/to-metadata":
+			w.Header().Set("Location", "https://169.254.169.254:"+port+"/")
+			w.WriteHeader(http.StatusFound)
+		case "/loop":
+			w.Header().Set("Location", "/loop")
+			w.WriteHeader(http.StatusFound)
+		default:
+			_, _ = w.Write([]byte("ok"))
+		}
+	}, Config{MaxBytes: 1024})
+	_, port, _ := net.SplitHostPort(env.srv.Listener.Addr().String())
+	for name, tc := range map[string]struct {
+		url  string
+		want Reason
+	}{
+		"http":             {"http://example.com:" + port + "/", ReasonScheme},
+		"userinfo":         {"https://u:p@example.com:" + port + "/", ReasonUserinfo},
+		"loopback":         {"https://127.0.0.2:" + port + "/", ReasonDeniedAddress},
+		"private name":     {env.url("private.test", "/"), ReasonDeniedAddress},
+		"metadata":         {env.url("metadata.test", "/"), ReasonDeniedAddress},
+		"redirect meta":    {env.url("example.com", "/to-metadata"), ReasonDeniedAddress},
+		"oversize":         {env.url("example.com", "/big"), ReasonTooLarge},
+		"oversize chunked": {env.url("example.com", "/big-chunked"), ReasonTooLarge},
+		"loop":             {env.url("example.com", "/loop"), ReasonRedirects},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := env.fetcher.FetchBytes(context.Background(), tc.url)
+			if got := reasonOf(t, err); got != tc.want {
+				t.Fatalf("reason %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestFetchAllowedHosts: with AllowedHosts set, the first request and every
+// redirect hop must name an allowed host; a refused hop makes no connection.
+func TestFetchAllowedHosts(t *testing.T) {
+	var env *testEnv
+	env = newTestEnv(t, func(w http.ResponseWriter, r *http.Request) {
+		_, port, _ := net.SplitHostPort(env.srv.Listener.Addr().String())
+		switch r.URL.Path {
+		case "/same":
+			w.Header().Set("Location", "/final")
+			w.WriteHeader(http.StatusFound)
+		case "/off-list":
+			w.Header().Set("Location", "https://other.test:"+port+"/final")
+			w.WriteHeader(http.StatusFound)
+		default:
+			_, _ = w.Write([]byte("ok"))
+		}
+	}, Config{AllowedHosts: []string{"Example.com"}})
+
+	if _, err := env.fetcher.FetchBytes(context.Background(), env.url("example.com", "/same")); err != nil {
+		t.Fatalf("allowed host with same-host redirect: %v", err)
+	}
+	before := env.connections()
+	if _, err := env.fetcher.FetchBytes(context.Background(), env.url("other.test", "/final")); reasonOf(t, err) != ReasonHostNotAllowed {
+		t.Fatalf("first hop off the list: got %v", err)
+	}
+	if _, err := env.fetcher.FetchBytes(context.Background(), env.url("127.0.0.1", "/final")); reasonOf(t, err) != ReasonHostNotAllowed {
+		t.Fatalf("IP literal off the list: got %v", err)
+	}
+	if env.connections() != before {
+		t.Fatalf("refused first hops must not connect")
+	}
+	if _, err := env.fetcher.FetchBytes(context.Background(), env.url("example.com", "/off-list")); reasonOf(t, err) != ReasonHostNotAllowed {
+		t.Fatalf("redirect off the list: got %v", err)
+	}
+	if _, err := env.fetcher.Fetch(context.Background(), env.url("other.test", "/final")); reasonOf(t, err) != ReasonHostNotAllowed {
+		t.Fatalf("Fetch honours AllowedHosts too: got %v", err)
+	}
+}
