@@ -36,7 +36,8 @@ const (
 func TestArtifactReviewRoundTrip(t *testing.T) {
 	svc := realArtifactHub(t)
 	ctx := context.Background()
-	root := writeTree(t, map[string]string{"plan.md": cliReviewParent, "chart.png": "\x89PNG\r\n\x1a\nfake"})
+	// The image holds bytes that read as a mark, so projecting it would show.
+	root := writeTree(t, map[string]string{"plan.md": cliReviewParent, "chart.png": "\x89PNG\r\n\x1a\n{--keep--}"})
 	var out, errOut bytes.Buffer
 	require.NoError(t, publishBundle(ctx, svc, &out, &errOut, "", root, bundlePublishOptions{Key: "plan", Entry: "plan.md"}))
 	m := refLine.FindStringSubmatch(out.String())
@@ -75,7 +76,7 @@ func TestArtifactReviewRoundTrip(t *testing.T) {
 	assert.Equal(t, cliReviewParent, string(got))
 	png, err := os.ReadFile(filepath.Join(dir, "chart.png"))
 	require.NoError(t, err)
-	assert.Equal(t, "\x89PNG\r\n\x1a\nfake", string(png))
+	assert.Equal(t, "\x89PNG\r\n\x1a\n{--keep--}", string(png), "non-text files are not projected")
 
 	// A review of a version that is no longer current is refused locally.
 	err = publishReview(ctx, svc, &out, &errOut, "", review, ref+"@1", bundlePublishOptions{})
@@ -114,4 +115,54 @@ func TestArtifactGetOptions(t *testing.T) {
 	o, err := artifactGetOptions(false, true, "publish")
 	require.NoError(t, err)
 	assert.Equal(t, getOptions{Mode: critic.Accept, Kind: "publish"}, o)
+}
+
+// TestArtifactPublishVersionOf: an artifact published without a key gets
+// its next version by reference. A single file replaces the entry whatever
+// its local name, the bundle's other files carry over without an upload,
+// and a reference to a version that is no longer current is refused.
+func TestArtifactPublishVersionOf(t *testing.T) {
+	svc := realArtifactHub(t)
+	ctx := context.Background()
+	root := writeTree(t, map[string]string{"plan.md": "v1\n", "chart.png": "\x89PNG\r\n\x1a\nfake"})
+	var out, errOut bytes.Buffer
+	require.NoError(t, publishBundle(ctx, svc, &out, &errOut, "", root, bundlePublishOptions{Entry: "plan.md"}))
+	ref := refLine.FindStringSubmatch(out.String())[1]
+
+	edited := filepath.Join(t.TempDir(), "plan-resolved.md")
+	require.NoError(t, os.WriteFile(edited, []byte("v2\n"), 0o644))
+	out.Reset()
+	require.NoError(t, publishVersionOf(ctx, svc, &out, &errOut, "", edited, ref, bundlePublishOptions{Note: "resolved"}))
+	assert.Equal(t, ref+"  (v2)\n", out.String())
+
+	meta, err := svc.Get(ctx, ref[len("scion://artifact/"):])
+	require.NoError(t, err)
+	require.NotNil(t, meta.Version)
+	assert.Equal(t, 2, meta.Version.Seq)
+	assert.Equal(t, "publish", meta.Version.Kind)
+	assert.Equal(t, "plan.md", meta.Version.EntryPath)
+	assert.Equal(t, "resolved", meta.Version.Note)
+	paths := map[string]bool{}
+	for _, f := range meta.Version.Files {
+		paths[f.Path] = true
+	}
+	assert.Equal(t, map[string]bool{"plan.md": true, "chart.png": true}, paths)
+
+	var stdout, stderr bytes.Buffer
+	require.NoError(t, getArtifactWith(ctx, svc, &stdout, &stderr, ref, "", false, getOptions{}))
+	assert.Equal(t, "v2\n", stdout.String())
+
+	err = publishVersionOf(ctx, svc, &out, &errOut, "", edited, ref+"@1", bundlePublishOptions{})
+	assert.ErrorContains(t, err, "not the current version (v2 is)")
+	err = publishVersionOf(ctx, svc, &out, &errOut, "", edited, ref, bundlePublishOptions{Entry: "x.md"})
+	assert.ErrorContains(t, err, "--entry applies to a folder")
+
+	// A folder is the whole bundle; its entry defaults to the current one.
+	dir := writeTree(t, map[string]string{"plan.md": "v3\n", "README.md": "readme"})
+	out.Reset()
+	require.NoError(t, publishVersionOf(ctx, svc, &out, &errOut, "", dir, ref, bundlePublishOptions{}))
+	meta, err = svc.Get(ctx, ref[len("scion://artifact/"):])
+	require.NoError(t, err)
+	assert.Equal(t, "plan.md", meta.Version.EntryPath)
+	assert.Len(t, meta.Version.Files, 2)
 }

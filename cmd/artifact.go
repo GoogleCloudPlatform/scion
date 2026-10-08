@@ -44,6 +44,7 @@ var (
 	artifactPublishNote   string
 	artifactPublishEntry  string
 	artifactPublishReview string
+	artifactPublishOf     string
 	artifactGetOut        string
 	artifactGetForce      bool
 	artifactGetClean      bool
@@ -66,6 +67,7 @@ Artifacts require Hub mode and the hub.artifacts experiment.
 
 Commands:
   scion artifact publish <file|dir> [--title] [--key] [--note] [--entry]
+  scion artifact publish <file|dir> --version-of <ref> [--note]
   scion artifact publish <file|dir> --review <ref> [--note]
   scion artifact get <ref> [--out <path>] [--clean|--accept] [--kind publish]
   scion artifact versions <ref>                List an artifact's versions`,
@@ -89,6 +91,12 @@ With --key, publishing again under the same key adds a new version to the
 same artifact instead of creating another one. Files unchanged since the
 current version are not uploaded again. --note describes the version.
 
+With --version-of <ref>, the file or folder is published as the next
+version of that artifact (yours, or one you may write), keyed or not. A
+single file replaces the current version's entry file, whatever the local
+file is named; the bundle's other files are carried over unchanged. A
+folder is the whole new bundle.
+
 With --review <ref>, the file or folder is published as a review of that
 artifact: a new version of kind review whose text carries CriticMarkup
 marks ({>>comment<<}, {~~old~>new~~}, {++insert++}, {--delete--},
@@ -104,6 +112,7 @@ Examples:
   scion artifact publish report.md --title "Q3 report"
   scion artifact publish design.md --key design --note "round 2"
   scion artifact publish ./site --entry index.html --title "Q3 site"
+  scion artifact publish plan.md --version-of scion://artifact/5f1c2d3e-...
   scion artifact publish plan.md --review scion://artifact/5f1c2d3e-...`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -148,11 +157,17 @@ func publishArtifactCmd(cmd *cobra.Command, settings *config.Settings, client hu
 	if err != nil {
 		return err
 	}
-	if artifactPublishReview != "" {
+	if artifactPublishReview != "" && artifactPublishOf != "" {
+		return errors.New("--review and --version-of cannot be used together")
+	}
+	if artifactPublishReview != "" || artifactPublishOf != "" {
 		if opts.Title != "" || opts.Key != "" {
-			return errors.New("--title and --key do not apply to a review; a review adds a version to the artifact named by --review")
+			return errors.New("--title and --key do not apply with --review or --version-of, which add a version to the artifact they name")
 		}
-		return publishReview(ctx, client.Artifacts(), cmd.OutOrStdout(), cmd.ErrOrStderr(), GetHubEndpoint(settings), file, artifactPublishReview, opts)
+		if artifactPublishReview != "" {
+			return publishReview(ctx, client.Artifacts(), cmd.OutOrStdout(), cmd.ErrOrStderr(), GetHubEndpoint(settings), file, artifactPublishReview, opts)
+		}
+		return publishVersionOf(ctx, client.Artifacts(), cmd.OutOrStdout(), cmd.ErrOrStderr(), GetHubEndpoint(settings), file, artifactPublishOf, opts)
 	}
 	if info.Mode().IsRegular() && opts.Key == "" && opts.Note == "" && opts.Entry == "" {
 		return publishArtifact(ctx, client.Artifacts(), cmd.OutOrStdout(), cmd.ErrOrStderr(), GetHubEndpoint(settings), file, opts.Title, opts.Scope)
@@ -236,6 +251,7 @@ func init() {
 	artifactPublishCmd.Flags().StringVar(&artifactPublishKey, "key", "", "Stable key: publishing again under it adds a version")
 	artifactPublishCmd.Flags().StringVar(&artifactPublishNote, "note", "", "Note describing this version")
 	artifactPublishCmd.Flags().StringVar(&artifactPublishEntry, "entry", "", "Entry file of a folder, relative to it")
+	artifactPublishCmd.Flags().StringVar(&artifactPublishOf, "version-of", "", "Publish as the next version of the artifact with this reference")
 	artifactPublishCmd.Flags().StringVar(&artifactPublishReview, "review", "", "Publish as a review (CriticMarkup marks only) of the artifact with this reference")
 	artifactGetCmd.Flags().StringVarP(&artifactGetOut, "out", "o", "", "Write to this file or directory instead of stdout")
 	artifactGetCmd.Flags().BoolVar(&artifactGetForce, "force", false, "Replace files that already exist under --out")

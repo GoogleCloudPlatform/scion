@@ -28,26 +28,45 @@ import (
 )
 
 // publishReview publishes root as a review (kind review) of the artifact
-// named by ref. A single file is the review of the current version's entry
-// file: it takes the entry's path, and the version's other files are listed
-// unchanged, so the hub needs none of them uploaded. A folder is the whole
-// reviewed bundle; its entry defaults to the current version's.
+// named by ref; see publishToArtifact.
 func publishReview(ctx context.Context, svc hubclient.ArtifactService, out, errOut io.Writer, hubEndpoint, root, ref string, opts bundlePublishOptions) error {
+	return publishToArtifact(ctx, svc, out, errOut, hubEndpoint, root, ref, artifacts.VersionKindReview, opts)
+}
+
+// publishVersionOf publishes root as the next version (kind publish) of the
+// artifact named by ref, which the caller owns or may write; see
+// publishToArtifact.
+func publishVersionOf(ctx context.Context, svc hubclient.ArtifactService, out, errOut io.Writer, hubEndpoint, root, ref string, opts bundlePublishOptions) error {
+	return publishToArtifact(ctx, svc, out, errOut, hubEndpoint, root, ref, artifacts.VersionKindPublish, opts)
+}
+
+// publishToArtifact adds a version of the given kind to the artifact named
+// by ref, through POST /{id}/versions. A single file replaces the current
+// version's entry file: it takes the entry's path whatever the local file
+// is named, and the version's other files are listed unchanged, so the hub
+// needs none of them uploaded. A folder is the whole new bundle; its entry
+// defaults to the current version's. A ref naming a version (@<seq>) must
+// name the current one.
+func publishToArtifact(ctx context.Context, svc hubclient.ArtifactService, out, errOut io.Writer, hubEndpoint, root, ref, kind string, opts bundlePublishOptions) error {
+	flag, verb := "--version-of", "publish"
+	if kind == artifacts.VersionKindReview {
+		flag, verb = "--review", "review"
+	}
 	id, seq, err := artifacts.ParseRef(ref)
 	if err != nil {
-		return fmt.Errorf("--review: %w", err)
+		return fmt.Errorf("%s: %w", flag, err)
 	}
 	meta, err := svc.Get(ctx, id)
 	if err != nil {
 		return fmt.Errorf("get artifact: %w%s", err, artifactErrorHint(err, false))
 	}
 	if meta.Version == nil {
-		return fmt.Errorf("artifact %s has no published version to review", id)
+		return fmt.Errorf("artifact %s has no published version", id)
 	}
 	current := meta.Version
 	if seq > 0 && seq != current.Seq {
-		return fmt.Errorf("%s is not the current version (v%d is); review the current version (scion artifact get %s)",
-			artifacts.FormatRef(id, seq), current.Seq, artifacts.FormatRef(id, current.Seq))
+		return fmt.Errorf("%s is not the current version (v%d is); %s the current version (scion artifact get %s)",
+			artifacts.FormatRef(id, seq), current.Seq, verb, artifacts.FormatRef(id, current.Seq))
 	}
 	files, err := collectBundle(root)
 	if err != nil {
@@ -57,10 +76,10 @@ func publishReview(ctx context.Context, svc hubclient.ArtifactService, out, errO
 	if err != nil {
 		return err
 	}
-	req := &hubclient.CreateVersionRequest{Kind: artifacts.VersionKindReview, Note: opts.Note}
+	req := &hubclient.CreateVersionRequest{Kind: kind, Note: opts.Note}
 	if info.Mode().IsRegular() {
 		if opts.Entry != "" {
-			return errors.New("--entry applies to a folder; a single file reviews the entry file")
+			return errors.New("--entry applies to a folder; a single file replaces the entry file")
 		}
 		files[0].rel = current.EntryPath
 		req.Entry = current.EntryPath
@@ -93,10 +112,10 @@ func publishReview(ctx context.Context, svc hubclient.ArtifactService, out, errO
 	}
 	pend, err := svc.CreateVersion(ctx, id, req)
 	if err != nil {
-		return fmt.Errorf("review failed: %w%s", err, artifactErrorHint(err, true))
+		return fmt.Errorf("%s failed: %w%s", verb, err, artifactErrorHint(err, true))
 	}
 	if pend.Version == nil {
-		return errors.New("review failed: the hub's reply has no version")
+		return fmt.Errorf("%s failed: the hub's reply has no version", verb)
 	}
 	if err := uploadRequired(ctx, svc, id, pend.Version.Seq, pend.Upload.Required, byPath); err != nil {
 		return err
@@ -108,12 +127,16 @@ func publishReview(ctx context.Context, svc hubclient.ArtifactService, out, errO
 			return errors.New("review rejected: it changes text outside CriticMarkup marks. " +
 				"Mark every change, or publish without --review for a plain edit")
 		}
-		return fmt.Errorf("review failed: %w%s", err, artifactErrorHint(err, true))
+		return fmt.Errorf("%s failed: %w%s", verb, err, artifactErrorHint(err, true))
 	}
 	for _, w := range resp.Warnings {
 		_, _ = fmt.Fprintf(errOut, "warning: %s\n", w)
 	}
-	_, _ = fmt.Fprintf(out, "%s  (v%d, review)\n", artifacts.FormatRef(id, 0), pend.Version.Seq)
+	if kind == artifacts.VersionKindReview {
+		_, _ = fmt.Fprintf(out, "%s  (v%d, review)\n", artifacts.FormatRef(id, 0), pend.Version.Seq)
+	} else {
+		_, _ = fmt.Fprintf(out, "%s  (v%d)\n", artifacts.FormatRef(id, 0), pend.Version.Seq)
+	}
 	if page := artifactPageURL(hubEndpoint, resp.Artifact.ScopeRef, id); page != "" {
 		_, _ = fmt.Fprintln(out, page)
 	}
