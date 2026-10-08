@@ -146,10 +146,27 @@ func doTailEntrypointLog(ctx context.Context, logPath, slug, agentID, project st
 	)
 	eofCount := 0
 
+	// drainAndFlush reads to EOF before the final flush. On cancellation
+	// (Delete) the bytes written since the last poll are usually the lines
+	// naming the cause of death; without the drain they were dropped.
+	drainAndFlush := func() {
+		for len(lineBuf) <= tailerBufferCap {
+			n, err := f.Read(readBuf)
+			if n > 0 {
+				lineBuf = append(lineBuf, readBuf[:n]...)
+				lineBuf = emitCompleteLines(lineBuf, emit)
+			}
+			if err != nil || n == 0 {
+				break
+			}
+		}
+		flushPartial(lineBuf, emit)
+	}
+
 	for {
 		// Check context before each iteration.
 		if ctx.Err() != nil {
-			flushPartial(lineBuf, emit)
+			drainAndFlush()
 			return
 		}
 
@@ -198,7 +215,7 @@ func doTailEntrypointLog(ctx context.Context, logPath, slug, agentID, project st
 
 			select {
 			case <-ctx.Done():
-				flushPartial(lineBuf, emit)
+				drainAndFlush()
 				return
 			case <-time.After(sleep):
 			}
