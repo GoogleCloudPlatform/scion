@@ -90,6 +90,25 @@ func TestBrokerAutoProvide_HubMemberOwnerDeniedTurningOnForOwnBroker(t *testing.
 	assertBrokerUnchanged(t, s, broker.ID)
 }
 
+// TestBrokerAutoProvide_PreserveSettingsOwnerReissueLeavesSettingOff: a
+// preserveSettings request that also sets autoProvide issues a join token
+// for the owner's broker and leaves auto-provide off, without needing
+// broker.auto_provide.
+func TestBrokerAutoProvide_PreserveSettingsOwnerReissueLeavesSettingOff(t *testing.T) {
+	srv, s := testServer(t)
+	owner := newHubMemberUser(t, s, "autoprovide-owner-preserve")
+	broker := createReregistrationTestBroker(t, s, "autoprovide-owner-preserve-broker", owner.ID)
+
+	rec := doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+		Name:             broker.Name,
+		AutoProvide:      true,
+		PreserveSettings: true,
+	})
+
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	assert.False(t, getBrokerAutoProvide(t, s, broker.ID), "a preserveSettings request leaves auto-provide off")
+}
+
 func TestBrokerAutoProvide_SuperAdminSessionAllowed(t *testing.T) {
 	srv, s := testServer(t)
 	admin := newSuperAdminUser(t, s, "autoprovide-admin-session")

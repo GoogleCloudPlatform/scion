@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
@@ -93,6 +94,9 @@ func TestBrokerAudit_HubTokenRegistrationRecordsCredential(t *testing.T) {
 		"credential_id":            token.ID,
 		"credential_boundary_kind": string(BoundaryKindHub),
 		"operation":                "register",
+		"join_token_expires_at":    resp.ExpiresAt.UTC().Format(time.RFC3339),
+		"join_token_ttl":           "1h0m0s",
+		"reissued":                 "false",
 	}, e.Details)
 	assertNoSecretInDetails(t, e.Details, key, token.KeyHash, resp.JoinToken)
 }

@@ -181,6 +181,8 @@ func TestBrokerJoinToken_MintThenJoinWithoutUserAuth(t *testing.T) {
 	assert.Equal(t, minter.ID, registerEvent.ActorID)
 	assert.Equal(t, minted.BrokerID, registerEvent.BrokerID)
 	assert.Equal(t, map[string]string{
+		"credential_kind":       string(CredentialKindInteractive),
+		"operation":             "register",
 		"join_token_expires_at": minted.ExpiresAt.UTC().Format(time.RFC3339),
 		"join_token_ttl":        "10m0s",
 		"reissued":              "false",

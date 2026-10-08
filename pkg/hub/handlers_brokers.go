@@ -134,10 +134,10 @@ func (s *Server) createBrokerRegistration(w http.ResponseWriter, r *http.Request
 	// hub, so it needs broker.auto_provide in addition to registration.
 	// Keeping an existing auto-provide setting, or turning it off, needs
 	// nothing extra.
-	// A preserveSettings request writes no settings, but one that sets
-	// autoProvide is held to the same check.
+	// A preserveSettings request never writes auto-provide (the service
+	// stores it off), so it needs no broker.auto_provide check.
 	autoProvideAuthorized := false
-	if req.AutoProvide && (existingBroker == nil || !existingBroker.AutoProvide) {
+	if req.AutoProvide && !req.PreserveSettings && (existingBroker == nil || !existingBroker.AutoProvide) {
 		if !s.authorizeBrokerAutoProvide(w, r) {
 			return
 		}
