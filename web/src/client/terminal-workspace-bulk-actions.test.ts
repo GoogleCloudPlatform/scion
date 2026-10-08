@@ -117,31 +117,114 @@ describe('bulk action eligibility rules', () => {
     expect(mod.isBulkReconnectEligible(status('disconnected', 'network', 'deleted'))).toBe(false);
   });
 
-  it('Remove all inactive applies to deleted, dropped or gone idle sessions only', () => {
-    expect(mod.isInactiveEntry(status('disconnected', 'network'))).toBe(true);
-    expect(mod.isInactiveEntry(status('unavailable', 'agent-stopped'))).toBe(true);
-    expect(mod.isInactiveEntry(status('unavailable', 'agent-deleted'))).toBe(true);
-    expect(mod.isInactiveEntry(status('disconnected', 'network', 'deleted'))).toBe(true);
-    expect(mod.isInactiveEntry(status('connected'))).toBe(false);
-    expect(mod.isInactiveEntry(status('connecting'))).toBe(false);
-    expect(mod.isInactiveEntry(status('loading'))).toBe(false);
-    expect(mod.isInactiveEntry(status('closed'))).toBe(false);
+  it('Remove all inactive counts every not connected state and nothing else', () => {
+    // [connection, reason, availability, phase, inactive]
+    const table: Array<
+      [
+        TerminalSessionState['connection'],
+        TerminalSessionState['disconnectReason'],
+        TerminalAgentMetadata['availability'],
+        AgentPhase | undefined,
+        boolean,
+      ]
+    > = [
+      // Grey "Not connected": idle rows, whatever the agent's phase.
+      ['idle', null, 'ready', 'running', true],
+      ['idle', null, 'ready', undefined, true],
+      ['idle', null, 'loading', undefined, true],
+      ['idle', null, 'ready', 'starting', true],
+      ['idle', null, 'ready', 'suspended', true],
+      ['idle', null, 'ready', 'stopped', true],
+      ['idle', null, 'ready', 'error', true],
+      // Grey: the session is unavailable because the agent stopped.
+      ['unavailable', 'agent-stopped', 'ready', undefined, true],
+      ['unavailable', 'agent-offline', 'loading', undefined, true],
+      // Red: dropped, deleted, or metadata could not be loaded.
+      ['disconnected', 'network', 'ready', undefined, true],
+      ['disconnected', 'auth-401', 'ready', undefined, true],
+      ['disconnected', 'network', 'deleted', undefined, true],
+      ['unavailable', 'agent-deleted', 'deleted', undefined, true],
+      ['idle', null, 'deleted', undefined, true],
+      ['idle', null, 'unavailable', undefined, true],
+      ['idle', null, 'unavailable', 'running', true],
+      // Green and amber never count, even with bad metadata.
+      ['connected', null, 'ready', 'running', false],
+      ['connected', null, 'unavailable', undefined, false],
+      ['connected', null, 'deleted', undefined, false],
+      ['connecting', null, 'ready', undefined, false],
+      ['connecting', null, 'deleted', undefined, false],
+      ['loading', null, 'ready', undefined, false],
+      // Closed rows have already left the list.
+      ['closed', null, 'ready', undefined, false],
+    ];
+    for (const [connection, reason, availability, phase, inactive] of table) {
+      expect(
+        mod.isInactiveEntry(status(connection, reason, availability, phase)),
+        `${connection}/${reason}/${availability}/${phase}`
+      ).toBe(inactive);
+    }
   });
 
-  it('Remove all inactive counts an idle row only when its agent is gone', () => {
-    // Restored rows for live agents stay: after a reload most rows are idle.
-    expect(mod.isInactiveEntry(status('idle', null, 'ready', 'running'))).toBe(false);
-    expect(mod.isInactiveEntry(status('idle', null, 'ready'))).toBe(false);
-    expect(mod.isInactiveEntry(status('idle', null, 'loading'))).toBe(false);
-    expect(mod.isInactiveEntry(status('idle', null, 'ready', 'starting'))).toBe(false);
-    expect(mod.isInactiveEntry(status('idle', null, 'ready', 'suspended'))).toBe(false);
-    // Metadata says the agent is gone.
-    expect(mod.isInactiveEntry(status('idle', null, 'ready', 'stopped'))).toBe(true);
-    expect(mod.isInactiveEntry(status('idle', null, 'ready', 'error'))).toBe(true);
-    expect(mod.isInactiveEntry(status('idle', null, 'deleted'))).toBe(true);
-    // Unavailable can be transient (hub blip), so it alone does not count.
-    expect(mod.isInactiveEntry(status('idle', null, 'unavailable'))).toBe(false);
-    expect(mod.isInactiveEntry(status('idle', null, 'unavailable', 'running'))).toBe(false);
+  it('every grey row is inactive and no green or amber row is', () => {
+    const states: Array<TerminalSessionState['connection']> = [
+      'idle',
+      'loading',
+      'connecting',
+      'connected',
+      'disconnected',
+      'unavailable',
+    ];
+    const reasons: Array<TerminalSessionState['disconnectReason']> = [
+      null,
+      'network',
+      'agent-stopped',
+      'agent-deleted',
+    ];
+    const availabilities: Array<TerminalAgentMetadata['availability']> = [
+      'loading',
+      'ready',
+      'deleted',
+      'unavailable',
+    ];
+    for (const connection of states)
+      for (const reason of reasons)
+        for (const availability of availabilities) {
+          const entry = status(connection, reason, availability);
+          const { colour } = mod.connectionDot(entry);
+          const label = `${connection}/${reason}/${availability}`;
+          // Red rows are inactive too, except a connected row whose
+          // metadata is bad: connected rows always stay.
+          if (colour === 'grey') expect(mod.isInactiveEntry(entry), label).toBe(true);
+          if (colour === 'green' || colour === 'amber')
+            expect(mod.isInactiveEntry(entry), label).toBe(false);
+        }
+  });
+
+  it('maps each state to a dot colour and a short meaning', () => {
+    const dot = (...args: Parameters<typeof status>): ReturnType<Module['connectionDot']> =>
+      mod.connectionDot(status(...args));
+    expect(dot('connected')).toEqual({ colour: 'green', meaning: 'Connected' });
+    expect(dot('connecting')).toEqual({ colour: 'amber', meaning: 'Connecting' });
+    expect(dot('loading')).toEqual({ colour: 'amber', meaning: 'Connecting' });
+    expect(dot('idle')).toEqual({ colour: 'grey', meaning: 'Not connected' });
+    expect(dot('idle', null, 'loading')).toEqual({ colour: 'grey', meaning: 'Not connected' });
+    expect(dot('unavailable', 'agent-stopped')).toEqual({
+      colour: 'grey',
+      meaning: 'Not connected',
+    });
+    expect(dot('disconnected', 'network')).toEqual({ colour: 'red', meaning: 'Disconnected' });
+    expect(dot('unavailable', 'agent-deleted')).toEqual({
+      colour: 'red',
+      meaning: 'Agent deleted',
+    });
+    expect(dot('idle', null, 'deleted')).toEqual({ colour: 'red', meaning: 'Agent deleted' });
+    expect(dot('idle', null, 'unavailable')).toEqual({
+      colour: 'red',
+      meaning: 'Agent status unknown',
+    });
+    expect(mod.connectionDotLabel({ colour: 'grey', meaning: 'Not connected' })).toBe(
+      'Grey dot: Not connected'
+    );
   });
 
   it('the row Reconnect rule matches the bulk rule except for metadata deletion and idle', () => {
@@ -327,7 +410,7 @@ describe('Open terminals bulk actions', () => {
 
     it('Remove all inactive explains there is nothing to remove', () => {
       const tip = tooltipFor(bulkRemove());
-      expect(tip.getAttribute('content')).toBe('No inactive terminals to remove');
+      expect(tip.getAttribute('content')).toBe(mod.BULK_REMOVE_DISABLED_REASON);
       expect(tip.hasAttribute('disabled')).toBe(false);
       expect(bulkRemove().hasAttribute('title')).toBe(false);
     });
@@ -342,7 +425,7 @@ describe('Open terminals bulk actions', () => {
 
     it('the reason reaches assistive tech through aria-describedby', () => {
       expect(describedBy(bulkReconnect())).toBe('No disconnected terminals to reconnect');
-      expect(describedBy(bulkRemove())).toBe('No inactive terminals to remove');
+      expect(describedBy(bulkRemove())).toBe(mod.BULK_REMOVE_DISABLED_REASON);
     });
 
     it('a disabled button stays keyboard focusable so the reason can be reached', () => {
@@ -380,11 +463,11 @@ describe('Open terminals bulk actions', () => {
     expect(bulkReconnect().title).toContain('reconnect 3 terminals');
     expect(bulkReconnect().title).toContain('terminals for deleted agents are left alone');
     expect(bulkReconnect().getAttribute('aria-label')).toBe('Reconnect all (3 eligible)');
-    // Disconnected, deleted and stopped are inactive; the connected row and
-    // the idle row for a running agent are not.
-    expect(bulkRemove().title).toContain('remove 3 terminals');
-    expect(bulkRemove().title).toContain('Connected terminals and not yet opened terminals');
-    expect(bulkRemove().getAttribute('aria-label')).toBe('Remove all inactive (3 eligible)');
+    // Every row but the connected one is inactive, including the grey idle
+    // row for a running agent.
+    expect(bulkRemove().title).toContain('remove 4 terminals that are not connected');
+    expect(bulkRemove().title).toContain('Connected and connecting terminals stay');
+    expect(bulkRemove().getAttribute('aria-label')).toBe('Remove all inactive (4 eligible)');
   });
 
   it('rows restored from the saved list enable both buttons', async () => {
@@ -399,8 +482,8 @@ describe('Open terminals bulk actions', () => {
     expect(isDisabled(bulkReconnect())).toBe(false);
     expect(isDisabled(bulkRemove())).toBe(false);
     expect(bulkReconnect().getAttribute('aria-label')).toBe('Reconnect all (2 eligible)');
-    // Only the idle row whose agent stopped is inactive.
-    expect(bulkRemove().getAttribute('aria-label')).toBe('Remove all inactive (1 eligible)');
+    // Both idle (grey) rows are inactive, whatever their agent's phase.
+    expect(bulkRemove().getAttribute('aria-label')).toBe('Remove all inactive (2 eligible)');
     bulkReconnect().click();
     expect(connectSpies.get(DISCONNECTED)).toHaveBeenCalledTimes(1);
     expect(connectSpies.get(IDLE)).toHaveBeenCalledTimes(1);
@@ -422,23 +505,36 @@ describe('Open terminals bulk actions', () => {
     expect(connectSpies.get(CONNECTED)).toHaveBeenCalledTimes(1);
   });
 
-  it('Remove all inactive leaves idle rows for running agents alone', async () => {
-    // After a reload: the frontmost row connects, the rest are idle and
-    // their agents are running.
-    await open(CONNECTED, IDLE, STOPPED);
+  it('Remove all inactive removes grey idle rows for running agents', async () => {
+    // After a reload: the frontmost row connects, the rest are idle (grey,
+    // "Not connected") and their agents are running. One more row is still
+    // connecting and must stay.
+    const CONNECTING = '66666666-6666-4666-8666-666666666666';
+    await open(CONNECTED, IDLE, STOPPED, CONNECTING);
     setState(sessions.get(CONNECTED)!, { connection: 'connected' });
+    setState(sessions.get(CONNECTING)!, { connection: 'connecting' });
     setMetadata(IDLE, 'ready', 'running');
     setMetadata(STOPPED, 'ready', 'running');
     await flush();
+    const dots = [...root.element.querySelectorAll<HTMLElement>('.terminal-rail-item')].map(
+      (item) => item.dataset.dot
+    );
+    expect(dots.filter((dot) => dot === 'grey')).toHaveLength(2);
+    expect(isDisabled(bulkRemove())).toBe(false);
+    expect(bulkRemove().getAttribute('aria-label')).toBe('Remove all inactive (2 eligible)');
+    expect(bulkRemove().title).toContain('remove 2 terminals');
+    confirmMock.showConfirm.mockResolvedValue(true);
+    expect(await root.removeAllInactive()).toBe(2);
+    const [message, options] = confirmMock.showConfirm.mock.calls[0];
+    expect(message).toMatch(/^Remove 2 terminals from the list\?/);
+    expect(options).toMatchObject({ confirmText: 'Remove 2' });
+    await flush();
+    expect(railAgentIds().sort()).toEqual([CONNECTED, CONNECTING].sort());
     expect(isDisabled(bulkRemove())).toBe(true);
-    expect(bulkRemove().getAttribute('aria-label')).toBe('Remove all inactive (0 eligible)');
-    expect(isDisabled(bulkReconnect())).toBe(false);
-    expect(await root.removeAllInactive()).toBe(0);
-    expect(confirmMock.showConfirm).not.toHaveBeenCalled();
-    expect(railAgentIds()).toHaveLength(3);
+    expect(tooltipFor(bulkRemove()).getAttribute('content')).toBe(mod.BULK_REMOVE_DISABLED_REASON);
   });
 
-  it('Remove all inactive removes idle rows whose agent is gone', async () => {
+  it('Remove all inactive removes idle rows whatever their metadata says', async () => {
     const ERRORED = '66666666-6666-4666-8666-666666666666';
     const UNAVAILABLE = '77777777-7777-4777-8777-777777777777';
     await open(CONNECTED, IDLE, STOPPED, ERRORED, DELETED, UNAVAILABLE);
@@ -449,31 +545,24 @@ describe('Open terminals bulk actions', () => {
     setMetadata(DELETED, 'deleted');
     setMetadata(UNAVAILABLE, 'unavailable');
     await flush();
-    // The deleted row is closed out by the metadata bridge or stays idle;
-    // either way it must not be left behind. The unavailable row stays:
-    // unavailable can be a transient metadata failure.
-    expect(bulkRemove().getAttribute('aria-label')).toBe('Remove all inactive (3 eligible)');
+    expect(bulkRemove().getAttribute('aria-label')).toBe('Remove all inactive (5 eligible)');
     confirmMock.showConfirm.mockResolvedValue(true);
-    expect(await root.removeAllInactive()).toBe(3);
+    expect(await root.removeAllInactive()).toBe(5);
     await flush();
-    expect(railAgentIds().sort()).toEqual([CONNECTED, IDLE, UNAVAILABLE].sort());
+    expect(railAgentIds()).toEqual([CONNECTED]);
   });
 
-  it('Remove all inactive keeps idle rows whose metadata is transiently unavailable', async () => {
-    // A hub blip after a reload marks every restored row unavailable; rows
-    // for running agents must not become removable.
-    const BLIP_RUNNING = '88888888-8888-4888-8888-888888888888';
-    const BLIP_NO_PHASE = '99999999-9999-4999-8999-999999999999';
-    await open(CONNECTED, BLIP_RUNNING, BLIP_NO_PHASE);
+  it('Remove all inactive keeps connected rows even when metadata is unavailable', async () => {
+    await open(CONNECTED, IDLE);
     setState(sessions.get(CONNECTED)!, { connection: 'connected' });
-    setMetadata(BLIP_RUNNING, 'unavailable', 'running');
-    setMetadata(BLIP_NO_PHASE, 'unavailable');
+    setMetadata(CONNECTED, 'unavailable', 'running');
+    setMetadata(IDLE, 'unavailable', 'running');
     await flush();
-    expect(isDisabled(bulkRemove())).toBe(true);
-    expect(bulkRemove().getAttribute('aria-label')).toBe('Remove all inactive (0 eligible)');
-    expect(await root.removeAllInactive()).toBe(0);
-    expect(confirmMock.showConfirm).not.toHaveBeenCalled();
-    expect(railAgentIds().sort()).toEqual([CONNECTED, BLIP_RUNNING, BLIP_NO_PHASE].sort());
+    expect(bulkRemove().getAttribute('aria-label')).toBe('Remove all inactive (1 eligible)');
+    confirmMock.showConfirm.mockResolvedValue(true);
+    expect(await root.removeAllInactive()).toBe(1);
+    await flush();
+    expect(railAgentIds()).toEqual([CONNECTED]);
   });
 
   it('Reconnect all is disabled when the only dropped rows are deleted', async () => {
@@ -507,22 +596,23 @@ describe('Open terminals bulk actions', () => {
 
     expect(confirmMock.showConfirm).toHaveBeenCalledTimes(1);
     const [message, options] = confirmMock.showConfirm.mock.calls[0];
-    expect(message).toMatch(/^Remove 3 terminals from the list\?/);
-    expect(message).toContain('not yet opened terminals for running agents stay');
-    expect(options).toMatchObject({ confirmText: 'Remove 3' });
-    expect(removed).toBe(3);
+    expect(message).toMatch(/^Remove 4 terminals from the list\?/);
+    expect(message).toContain('grey (not connected)');
+    expect(message).toContain('Connected and connecting terminals stay');
+    expect(options).toMatchObject({ confirmText: 'Remove 4' });
+    expect(removed).toBe(4);
     await flush();
-    expect(railAgentIds().sort()).toEqual([CONNECTED, IDLE].sort());
+    expect(railAgentIds()).toEqual([CONNECTED]);
     expect(isDisabled(bulkRemove())).toBe(true);
-    // The idle row for the running agent can still be reconnected.
-    expect(isDisabled(bulkReconnect())).toBe(false);
+    // Reconnect behaviour is unchanged: nothing left needs reconnecting.
+    expect(isDisabled(bulkReconnect())).toBe(true);
   });
 
   it('the button click runs the same confirmation flow', async () => {
     await openMixed();
     confirmMock.showConfirm.mockResolvedValue(true);
     bulkRemove().click();
-    await vi.waitFor(() => expect(railAgentIds()).toHaveLength(2));
+    await vi.waitFor(() => expect(railAgentIds()).toHaveLength(1));
     expect(confirmMock.showConfirm).toHaveBeenCalledTimes(1);
   });
 
@@ -545,9 +635,9 @@ describe('Open terminals bulk actions', () => {
     const pending = root.removeAllInactive();
     setState(sessions.get(DISCONNECTED)!, { connection: 'connected', disconnectReason: null });
     answer(true);
-    expect(await pending).toBe(2);
+    expect(await pending).toBe(3);
     await flush();
-    expect(railAgentIds().sort()).toEqual([CONNECTED, DISCONNECTED, IDLE].sort());
+    expect(railAgentIds().sort()).toEqual([CONNECTED, DISCONNECTED].sort());
   });
 
   it('a row that drops while the dialog is open is not removed', async () => {
@@ -556,16 +646,16 @@ describe('Open terminals bulk actions', () => {
     confirmMock.showConfirm.mockReturnValue(new Promise((resolve) => (answer = resolve)));
     const pending = root.removeAllInactive();
     const [, options] = confirmMock.showConfirm.mock.calls[0];
-    expect(options).toMatchObject({ confirmText: 'Remove 3' });
+    expect(options).toMatchObject({ confirmText: 'Remove 4' });
     setState(sessions.get(CONNECTED)!, {
       connection: 'disconnected',
       disconnectReason: 'network',
     });
     answer(true);
     const removed = await pending;
-    expect(removed).toBe(3);
+    expect(removed).toBe(4);
     await flush();
-    expect(railAgentIds().sort()).toEqual([CONNECTED, IDLE].sort());
+    expect(railAgentIds()).toEqual([CONNECTED]);
   });
 
   /** Mimics the dialog returning focus to its trigger before it resolves. */
@@ -577,20 +667,25 @@ describe('Open terminals bulk actions', () => {
   }
 
   it('after removing, focus moves to Reconnect all while it has rows to act on', async () => {
-    // The idle row for the running agent stays and is still reconnectable.
+    // The connected row drops while the dialog is open: it was not counted,
+    // so it stays, and it can be reconnected.
     await openMixed();
-    confirmReturningFocusTo(bulkRemove());
+    confirmMock.showConfirm.mockImplementation(() => {
+      setState(sessions.get(CONNECTED)!, {
+        connection: 'disconnected',
+        disconnectReason: 'network',
+      });
+      bulkRemove().focus();
+      return Promise.resolve(true);
+    });
     await root.removeAllInactive();
-    expect(isDisabled(bulkRemove())).toBe(true);
+    expect(railAgentIds()).toEqual([CONNECTED]);
     expect(document.activeElement).toBe(bulkReconnect());
   });
 
   it('after removing, focus moves from the disabled button to the first remaining row', async () => {
+    // Only the connected row is left, and it has nothing to reconnect.
     await openMixed();
-    // The idle row's agent stopped, so it is removed too and nothing is
-    // left to reconnect.
-    setMetadata(IDLE, 'ready', 'stopped');
-    await flush();
     confirmReturningFocusTo(bulkRemove());
     await root.removeAllInactive();
     expect(isDisabled(bulkRemove())).toBe(true);
@@ -622,6 +717,51 @@ describe('Open terminals bulk actions', () => {
     await root.removeAllInactive();
     expect(document.activeElement).toBe(elsewhere);
     elsewhere.remove();
+  });
+
+  it('each dot colour has a tooltip and the same meaning in accessible text', async () => {
+    const CONNECTING = '66666666-6666-4666-8666-666666666666';
+    await openMixed();
+    await open(CONNECTING);
+    setState(sessions.get(CONNECTING)!, { connection: 'connecting' });
+    await flush();
+    const rows = new Map(
+      [...root.element.querySelectorAll<HTMLElement>('.terminal-rail-item')].map((item) => {
+        const select = item.querySelector<HTMLButtonElement>('.terminal-rail-select')!;
+        const id = [...sessions].find(
+          ([, s]) => select.dataset.railFocusId === `${s.state.key}:select`
+        )![0];
+        return [id, item];
+      })
+    );
+    const expected: Array<[string, string, string]> = [
+      [CONNECTED, 'green', 'Green dot: Connected'],
+      [CONNECTING, 'amber', 'Amber dot: Connecting'],
+      [IDLE, 'grey', 'Grey dot: Not connected'],
+      [STOPPED, 'grey', 'Grey dot: Not connected'],
+      [DISCONNECTED, 'red', 'Red dot: Disconnected'],
+      [DELETED, 'red', 'Red dot: Agent deleted'],
+    ];
+    for (const [id, colour, text] of expected) {
+      const item = rows.get(id)!;
+      const dot = item.querySelector<HTMLElement>('.terminal-connection-dot')!;
+      const select = item.querySelector<HTMLButtonElement>('.terminal-rail-select')!;
+      expect(item.dataset.dot, id).toBe(colour);
+      // Hover: on the dot itself, and leading the row's title.
+      expect(dot.title, id).toBe(text);
+      expect(select.title.startsWith(`${text} · `), select.title).toBe(true);
+      // Assistive tech: the dot is hidden, so the row's label carries it.
+      expect(dot.getAttribute('aria-hidden')).toBe('true');
+      expect(select.getAttribute('aria-label'), id).toContain(`, ${text}, `);
+    }
+    // A connection label that only repeats the dot's meaning is not doubled.
+    expect(rows.get(IDLE)!.querySelector<HTMLElement>('.terminal-rail-select')!.title).toBe(
+      'Grey dot: Not connected · agent available'
+    );
+    // A more specific reason still follows the dot's meaning.
+    expect(rows.get(STOPPED)!.querySelector<HTMLElement>('.terminal-rail-select')!.title).toBe(
+      'Grey dot: Not connected · Unavailable · metadata pending'
+    );
   });
 
   it('the row Close button still removes a single row', async () => {
