@@ -479,3 +479,50 @@ func TestScrubSecrets_HarnessSecretsDir(t *testing.T) {
 		t.Errorf("rejected override: %q", got)
 	}
 }
+
+// A multi-line staged file is masked as a whole and line by line, so a
+// single line of it in the output is masked too.
+func TestScrubSecrets_MultiLineStagedFileMasksEachLine(t *testing.T) {
+	t.Setenv("SCION_HARNESS_SECRETS_DIR", "")
+	bundle := filepath.Join(t.TempDir(), ".scion", "harness")
+	writeTestFile(t, filepath.Join(bundle, "secrets", "A"),
+		"placeholder-line-one-value\n  placeholder-line-two-value \r\n\n")
+	m := &containerProvisionManifest{HarnessBundleDir: bundle}
+
+	if got := scrubSecrets("found placeholder-line-two-value in config", m); got != "found [REDACTED] in config" {
+		t.Errorf("single line: %q", got)
+	}
+	whole := "placeholder-line-one-value\n  placeholder-line-two-value "
+	if got := scrubSecrets("dump: "+whole+" end", m); got != "dump: [REDACTED] end" {
+		t.Errorf("whole value: %q", got)
+	}
+}
+
+// A staged value shorter than minMaskLen cannot be masked in place, so the
+// output is omitted when it occurs there, and left alone when it does not.
+func TestScrubSecrets_ShortStagedValueOmitsOutput(t *testing.T) {
+	t.Setenv("SCION_HARNESS_SECRETS_DIR", "")
+	bundle := filepath.Join(t.TempDir(), ".scion", "harness")
+	writeTestFile(t, filepath.Join(bundle, "secrets", "SHORT"), "plv-1x\n")
+	writeTestFile(t, filepath.Join(bundle, "secrets", "LONG"), "placeholder-value-1")
+	m := &containerProvisionManifest{HarnessBundleDir: bundle}
+
+	if got := scrubSecrets("auth failed for plv-1x", m); got != provisionerOutputOmitted {
+		t.Errorf("short value present: %q", got)
+	}
+	if got := scrubSecrets("auth failed: placeholder-value-1", m); got != "auth failed: [REDACTED]" {
+		t.Errorf("short value absent: %q", got)
+	}
+}
+
+// A short line of a multi-line staged file is handled like a short value.
+func TestScrubSecrets_ShortLineOfMultiLineFileOmitsOutput(t *testing.T) {
+	t.Setenv("SCION_HARNESS_SECRETS_DIR", "")
+	bundle := filepath.Join(t.TempDir(), ".scion", "harness")
+	writeTestFile(t, filepath.Join(bundle, "secrets", "A"), "placeholder-user-value\nplv-2y\n")
+	m := &containerProvisionManifest{HarnessBundleDir: bundle}
+
+	if got := scrubSecrets("password plv-2y rejected", m); got != provisionerOutputOmitted {
+		t.Errorf("short line present: %q", got)
+	}
+}

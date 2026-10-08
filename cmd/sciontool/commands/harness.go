@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -444,27 +445,63 @@ func (c *capturedStderr) Write(p []byte) (int, error) {
 
 func (c *capturedStderr) String() string { return string(c.buf) }
 
+// minMaskLen is the shortest value scrubSecrets masks in place. Shorter
+// values would also match common, unrelated substrings of the output.
+const minMaskLen = 8
+
+// provisionerOutputOmitted replaces the whole output when a staged secret
+// value too short to mask in place occurs in it.
+const provisionerOutputOmitted = "provisioner output omitted: it contains a staged value too short to mask"
+
 // scrubSecrets replaces obvious secret values in stderr output. It looks for
 // values mentioned in inputs/outputs/auth_candidates files and the contents of
 // staged secret files (written by ContainerScriptHarness.ApplyAuthSettings),
-// then removes their occurrences. This is best-effort — scripts should not
-// echo credentials.
+// then removes their occurrences. A multi-line staged file is masked as a
+// whole and line by line. If a staged value or line shorter than minMaskLen
+// occurs in s, the whole of s is replaced by provisionerOutputOmitted. This is
+// best-effort — scripts should not echo credentials.
 func scrubSecrets(s string, m *containerProvisionManifest) string {
-	out := s
-	for _, val := range loadAuthCandidatesValues(m) {
-		if val != "" && len(val) >= 8 {
-			out = strings.ReplaceAll(out, val, "[REDACTED]")
-		}
-	}
 	// auth-candidates.json holds *names* (and now file paths) but not the raw
 	// secret values; the actual values live as 0600 files under
 	// .scion/harness/secrets/. Read those too so a script that accidentally
 	// echoes its API key still gets redacted.
-	for _, val := range loadStagedSecretValues(m) {
-		if val != "" && len(val) >= 8 {
+	staged := stagedMaskValues(loadStagedSecretValues(m))
+	for _, val := range staged {
+		if len(val) < minMaskLen && strings.Contains(s, val) {
+			return provisionerOutputOmitted
+		}
+	}
+	out := s
+	for _, val := range loadAuthCandidatesValues(m) {
+		if val != "" && len(val) >= minMaskLen {
 			out = strings.ReplaceAll(out, val, "[REDACTED]")
 		}
 	}
+	for _, val := range staged {
+		if len(val) >= minMaskLen {
+			out = strings.ReplaceAll(out, val, "[REDACTED]")
+		}
+	}
+	return out
+}
+
+// stagedMaskValues returns the values to mask for the staged secret values
+// vals: each value, plus each non-empty trimmed line of a multi-line value,
+// longest first so a whole value is masked before its lines.
+func stagedMaskValues(vals []string) []string {
+	var out []string
+	for _, val := range vals {
+		out = append(out, val)
+		if !strings.ContainsAny(val, "\r\n") {
+			continue
+		}
+		for _, line := range strings.Split(val, "\n") {
+			if line = strings.TrimSpace(line); line != "" {
+				out = append(out, line)
+			}
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return len(out[i]) > len(out[j]) })
 	return out
 }
 
