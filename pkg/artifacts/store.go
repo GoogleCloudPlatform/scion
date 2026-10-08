@@ -33,6 +33,10 @@ var ErrConflict = errors.New("artifacts: conflict")
 // has the maximum number of pending versions.
 var ErrTooManyPending = errors.New("artifacts: too many pending versions")
 
+// ErrStaleBase is returned by FinalizeVersion when the artifact's current
+// version is no longer the base version the caller checked against.
+var ErrStaleBase = errors.New("artifacts: current version changed")
+
 // Version kinds.
 const (
 	VersionKindPublish = "publish"
@@ -217,8 +221,17 @@ type Store interface {
 	// fetched remote images) and advances the artifact's current version to
 	// seq unless a later one is already current. It returns ErrConflict when
 	// the version is not finalizing under the given claim, and the updated
-	// artifact otherwise.
-	FinalizeVersion(ctx context.Context, artifactID string, seq int, claim time.Time, extra []File) (*Artifact, error)
+	// artifact otherwise. When base is above 0, the artifact's current
+	// version must still be base, checked under the same lock that advances
+	// it; otherwise it returns ErrStaleBase and changes nothing.
+	FinalizeVersion(ctx context.Context, artifactID string, seq int, claim time.Time, extra []File, base int) (*Artifact, error)
+
+	// DiscardFinalize fails the claimed (finalizing) version seq of an
+	// artifact and drops its manifest, for a finalize that rejected the
+	// version, if the version still holds the given claim. The artifact's
+	// current version does not change. It returns ErrConflict when the
+	// claim no longer holds.
+	DiscardFinalize(ctx context.Context, artifactID string, seq int, claim time.Time) error
 
 	// ListVersions returns up to limit ready versions of an artifact,
 	// newest first, with a seq below before (0 = from the newest).

@@ -129,6 +129,10 @@ func (s *Service) handleCreate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if req.Kind == VersionKindReview {
+		writeError(w, http.StatusConflict, CodeNothingToReview, "a review needs an artifact with a published version")
+		return
+	}
 	now := time.Now().UTC()
 	a := &Artifact{
 		ID: uuid.NewString(), ScopeKind: ScopeKindProject, ScopeRef: scope,
@@ -197,6 +201,10 @@ func (s *Service) appendVersion(w http.ResponseWriter, r *http.Request, b backen
 		writeError(w, http.StatusForbidden, "forbidden", "not allowed to publish versions of this artifact")
 		return
 	}
+	if req.Kind == VersionKindReview && a.CurrentSeq == 0 {
+		writeError(w, http.StatusConflict, CodeNothingToReview, "a review needs an artifact with a published version")
+		return
+	}
 	var current map[string]File
 	if a.CurrentSeq > 0 {
 		if cv, err := b.store.GetVersion(ctx, a.ID, a.CurrentSeq); err == nil {
@@ -233,7 +241,7 @@ func (s *Service) appendVersion(w http.ResponseWriter, r *http.Request, b backen
 // already received.
 func pendingVersion(artifactID string, req *CreateVersionRequest, kind, ref string, now time.Time, current map[string]File) (*Version, []File) {
 	v := &Version{
-		ID: uuid.NewString(), ArtifactID: artifactID, Kind: VersionKindPublish, EntryPath: req.Entry,
+		ID: uuid.NewString(), ArtifactID: artifactID, Kind: versionKind(req.Kind), EntryPath: req.Entry,
 		Note: strings.TrimSpace(req.Note), FileCount: len(req.Files), CreatedByKind: kind, CreatedByRef: ref,
 		CreatedAt: now, State: VersionStatePending,
 	}
@@ -250,6 +258,14 @@ func pendingVersion(artifactID string, req *CreateVersionRequest, kind, ref stri
 		files = append(files, f)
 	}
 	return v, files
+}
+
+// versionKind maps a request's kind to a stored kind; "" means publish.
+func versionKind(k string) string {
+	if k == VersionKindReview {
+		return VersionKindReview
+	}
+	return VersionKindPublish
 }
 
 func writePending(w http.ResponseWriter, a *Artifact, v *Version, files []File) {
@@ -314,9 +330,8 @@ func validateManifest(w http.ResponseWriter, req *CreateVersionRequest, l Limits
 	switch req.Kind {
 	case "", VersionKindPublish:
 	case VersionKindReview:
-		return bad("review versions are not supported yet")
 	default:
-		return bad("kind must be publish")
+		return bad("kind must be publish or review")
 	}
 	if !utf8.ValidString(req.Note) || utf8.RuneCountInString(req.Note) > maxNoteRunes {
 		return bad(fmt.Sprintf("note must be valid UTF-8 of at most %d characters", maxNoteRunes))
@@ -677,8 +692,20 @@ func (s *Service) handleFinalize(w http.ResponseWriter, r *http.Request, id stri
 	// given up, before another one may take its claim over.
 	work, cancel := context.WithTimeout(ctx, finalizeWorkLimit)
 	defer cancel()
+	base := 0
+	if v.Kind == VersionKindReview {
+		var done bool
+		if base, done = s.finalizeReviewCheck(w, r.WithContext(work), b, a, v, files, claim); done {
+			return
+		}
+	}
 	extra, warnings := s.finalizeExtras(w, r.WithContext(work), b, v, files)
-	updated, err := b.store.FinalizeVersion(work, a.ID, seq, claim, extra)
+	updated, err := b.store.FinalizeVersion(work, a.ID, seq, claim, extra, base)
+	if errors.Is(err, ErrStaleBase) {
+		// A version was published between the review check and now.
+		s.discardStaleReview(w, r, b, a.ID, seq, claim)
+		return
+	}
 	if err != nil && !errors.Is(err, ErrConflict) && !errors.Is(err, ErrNotFound) {
 		// Let the publisher try again, unless another request has claimed
 		// the version since.
@@ -706,6 +733,9 @@ func (s *Service) handleFinalize(w http.ResponseWriter, r *http.Request, id stri
 		slog.ErrorContext(ctx, "artifacts: read finalized version failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal", "could not read the version")
 		return
+	}
+	if ready.Kind == VersionKindReview {
+		s.notifyReview(ctx, updated, ready)
 	}
 	writeJSON(w, http.StatusOK, ArtifactResponse{Artifact: artifactInfo(updated), Version: versionInfo(ready, files), Warnings: warnings})
 }

@@ -385,7 +385,7 @@ func (s *sqlStore) MarkReceived(ctx context.Context, versionID, path, mediaType 
 }
 
 // FinalizeVersion implements Store.
-func (s *sqlStore) FinalizeVersion(ctx context.Context, artifactID string, seq int, claim time.Time, extra []File) (*Artifact, error) {
+func (s *sqlStore) FinalizeVersion(ctx context.Context, artifactID string, seq int, claim time.Time, extra []File, base int) (*Artifact, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("artifacts: begin finalize: %w", err)
@@ -414,6 +414,15 @@ func (s *sqlStore) FinalizeVersion(ctx context.Context, artifactID string, seq i
 	}
 	if state != VersionStateFinalizing || !claimedAt.Valid || !claimedAt.Time.Equal(claimToken(claim)) {
 		return nil, ErrConflict
+	}
+	if base > 0 {
+		var current sql.NullInt64
+		if err := tx.QueryRowContext(ctx, s.rebind(`SELECT current_seq FROM artifact WHERE id = ?`), artifactID).Scan(&current); err != nil {
+			return nil, fmt.Errorf("artifacts: read current version: %w", err)
+		}
+		if !current.Valid || int(current.Int64) != base {
+			return nil, ErrStaleBase
+		}
 	}
 	if err := s.insertFiles(ctx, tx, versionID, extra); err != nil {
 		return nil, err
@@ -541,6 +550,40 @@ func (s *sqlStore) ReapPending(ctx context.Context, cutoff time.Time, limit int)
 		}
 	}
 	return reaped, nil
+}
+
+// DiscardFinalize implements Store.
+func (s *sqlStore) DiscardFinalize(ctx context.Context, artifactID string, seq int, claim time.Time) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("artifacts: begin discard: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	// Lock the artifact row first, as FinalizeVersion does.
+	if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE artifact SET updated_at = ? WHERE id = ?`), s.timeArg(time.Now()), artifactID); err != nil {
+		return fmt.Errorf("artifacts: lock artifact: %w", err)
+	}
+	var versionID string
+	err = tx.QueryRowContext(ctx, s.rebind(`SELECT id FROM artifact_version
+		WHERE artifact_id = ? AND seq = ? AND state = ? AND claimed_at = ?`),
+		artifactID, seq, VersionStateFinalizing, s.timeArg(claimToken(claim))).Scan(&versionID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrConflict
+	}
+	if err != nil {
+		return fmt.Errorf("artifacts: discard version: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE artifact_version SET state = ?, claimed_at = NULL WHERE id = ?`),
+		VersionStateFailed, versionID); err != nil {
+		return fmt.Errorf("artifacts: fail version: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, s.rebind(`DELETE FROM artifact_file WHERE version_id = ?`), versionID); err != nil {
+		return fmt.Errorf("artifacts: drop manifest: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("artifacts: commit discard: %w", err)
+	}
+	return nil
 }
 
 // reapVersion fails one pending version and drops its manifest in a

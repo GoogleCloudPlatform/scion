@@ -76,6 +76,8 @@ type Service struct {
 	viewKey  []byte
 	limits   func(context.Context) Limits
 	provider func() Backend
+	// reviewNotifier is told about each finalized review version.
+	reviewNotifier func(context.Context, ReviewNotice)
 
 	// htmlNotice remembers, by entry digest, whether an HTML entry
 	// references remote images (see entryHasRemoteImages).
@@ -126,6 +128,46 @@ const (
 // through host.
 func NewService(host Host) *Service {
 	return &Service{host: host}
+}
+
+// ReviewNotice describes a review version that was just finalized, for the
+// host to tell the artifact's owner (design §8.2). It carries ids only; the
+// host addresses the owner as itself, never as the reviewer.
+type ReviewNotice struct {
+	ArtifactID   string
+	Seq          int
+	ScopeRef     string
+	OwnerKind    string
+	OwnerRef     string
+	ReviewerKind string
+	ReviewerRef  string
+}
+
+// Ref is the notice's versioned reference.
+func (n ReviewNotice) Ref() string { return FormatRef(n.ArtifactID, n.Seq) }
+
+// SetReviewNotifier sets the function told about each finalized review. It
+// runs after the review is recorded, on a context detached from the request
+// (it must not block the response for long; the hub dispatches in the
+// background). A review the owner wrote itself is not announced.
+func (s *Service) SetReviewNotifier(fn func(context.Context, ReviewNotice)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.reviewNotifier = fn
+}
+
+// notifyReview tells the review notifier about review version v of a.
+func (s *Service) notifyReview(ctx context.Context, a *Artifact, v *Version) {
+	s.mu.RLock()
+	fn := s.reviewNotifier
+	s.mu.RUnlock()
+	if fn == nil || (v.CreatedByKind == a.OwnerKind && v.CreatedByRef == a.OwnerRef) {
+		return
+	}
+	fn(context.WithoutCancel(ctx), ReviewNotice{
+		ArtifactID: a.ID, Seq: v.Seq, ScopeRef: a.ScopeRef, OwnerKind: a.OwnerKind, OwnerRef: a.OwnerRef,
+		ReviewerKind: v.CreatedByKind, ReviewerRef: v.CreatedByRef,
+	})
 }
 
 // Host returns the host the service was built with.

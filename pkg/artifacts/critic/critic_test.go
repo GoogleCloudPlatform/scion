@@ -212,14 +212,14 @@ func TestRandomComposition(t *testing.T) {
 
 func TestNormalize(t *testing.T) {
 	cases := map[string]string{
-		"a\r\nb":   "a\nb",
-		"a\rb":     "a\nb",
-		"a\r\r\nb": "a\n\nb",
-		"café":    "café",
-		"café\r\n": "café\n",
-		"":         "",
-		"plain\n":  "plain\n",
-		"\r":       "\n",
+		"a\r\nb":     "a\nb",
+		"a\rb":       "a\nb",
+		"a\r\r\nb":   "a\n\nb",
+		"cafe\u0301": "café",
+		"café\r\n":   "café\n",
+		"":           "",
+		"plain\n":    "plain\n",
+		"\r":         "\n",
 	}
 	for in, want := range cases {
 		if got := string(Normalize([]byte(in))); got != want {

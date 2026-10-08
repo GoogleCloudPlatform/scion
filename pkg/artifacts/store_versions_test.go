@@ -74,7 +74,7 @@ func TestStoreTwoStepVersion(t *testing.T) {
 		if err := claimFin(ctx, st, a.ID, 1); !errors.Is(err, ErrConflict) {
 			t.Fatalf("claim with a missing file: %v, want ErrConflict", err)
 		}
-		if _, err := st.FinalizeVersion(ctx, a.ID, 1, claimOf(a.ID, 1), nil); !errors.Is(err, ErrConflict) {
+		if _, err := st.FinalizeVersion(ctx, a.ID, 1, claimOf(a.ID, 1), nil, 0); !errors.Is(err, ErrConflict) {
 			t.Fatalf("finalize without a claim: %v, want ErrConflict", err)
 		}
 		if err := st.MarkReceived(ctx, v.ID, "nope.txt", "text/plain"); !errors.Is(err, ErrNotFound) {
@@ -103,7 +103,7 @@ func TestStoreTwoStepVersion(t *testing.T) {
 		if err := claimFin(ctx, st, a.ID, 9); !errors.Is(err, ErrNotFound) {
 			t.Errorf("claim of a missing version = %v, want ErrNotFound", err)
 		}
-		got, err = st.FinalizeVersion(ctx, a.ID, 1, claimOf(a.ID, 1), extra)
+		got, err = st.FinalizeVersion(ctx, a.ID, 1, claimOf(a.ID, 1), extra, 0)
 		if err != nil || got.CurrentSeq != 1 {
 			t.Fatalf("FinalizeVersion = %+v, %v", got, err)
 		}
@@ -115,7 +115,7 @@ func TestStoreTwoStepVersion(t *testing.T) {
 		if err != nil || f.Pending || f.MediaType != "image/png" {
 			t.Errorf("received file = %+v, %v", f, err)
 		}
-		if _, err := st.FinalizeVersion(ctx, a.ID, 1, claimOf(a.ID, 1), nil); !errors.Is(err, ErrConflict) {
+		if _, err := st.FinalizeVersion(ctx, a.ID, 1, claimOf(a.ID, 1), nil, 0); !errors.Is(err, ErrConflict) {
 			t.Errorf("second finalize = %v, want ErrConflict", err)
 		}
 		if err := st.MarkReceived(ctx, v.ID, "index.html", "text/html"); !errors.Is(err, ErrConflict) {
@@ -144,10 +144,10 @@ func TestStoreTwoStepVersion(t *testing.T) {
 				t.Fatalf("claim v%d: %v", seq, err)
 			}
 		}
-		if got, err := st.FinalizeVersion(ctx, a.ID, 3, claimOf(a.ID, 3), nil); err != nil || got.CurrentSeq != 3 {
+		if got, err := st.FinalizeVersion(ctx, a.ID, 3, claimOf(a.ID, 3), nil, 0); err != nil || got.CurrentSeq != 3 {
 			t.Fatalf("finalize v3 = %+v, %v", got, err)
 		}
-		if got, err := st.FinalizeVersion(ctx, a.ID, 2, claimOf(a.ID, 2), nil); err != nil || got.CurrentSeq != 3 {
+		if got, err := st.FinalizeVersion(ctx, a.ID, 2, claimOf(a.ID, 2), nil, 0); err != nil || got.CurrentSeq != 3 {
 			t.Errorf("finalize v2 after v3 = %+v, %v; current must stay 3", got, err)
 		}
 		if page, err := st.ListVersions(ctx, a.ID, 3, 1); err != nil || len(page) != 1 || page[0].Seq != 2 {
@@ -236,7 +236,7 @@ func TestStoreReapPending(t *testing.T) {
 		if err := claimFin(ctx, st, kept.ID, 1); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := st.FinalizeVersion(ctx, kept.ID, 1, claimOf(kept.ID, 1), nil); err != nil {
+		if _, err := st.FinalizeVersion(ctx, kept.ID, 1, claimOf(kept.ID, 1), nil, 0); err != nil {
 			t.Fatal(err)
 		}
 		stale := &Version{ID: uuid.NewString(), ArtifactID: kept.ID, Kind: VersionKindPublish, EntryPath: "a.txt",
@@ -278,7 +278,7 @@ func TestStoreReapPending(t *testing.T) {
 		if files, err := st.ListFiles(ctx, stale.ID); err != nil || len(files) != 0 {
 			t.Errorf("reaped version keeps its manifest: %+v, %v", files, err)
 		}
-		if _, err := st.FinalizeVersion(ctx, kept.ID, 2, claimOf(kept.ID, 2), nil); !errors.Is(err, ErrConflict) {
+		if _, err := st.FinalizeVersion(ctx, kept.ID, 2, claimOf(kept.ID, 2), nil, 0); !errors.Is(err, ErrConflict) {
 			t.Errorf("finalizing a reaped version = %v, want ErrConflict", err)
 		}
 		if got, err := st.GetArtifact(ctx, fresh.ID); err != nil || got.ID != fresh.ID {
@@ -320,7 +320,7 @@ func TestStoreConcurrentFinalizes(t *testing.T) {
 			wg.Add(1)
 			go func(i, seq int) {
 				defer wg.Done()
-				_, errs[i] = NewStore(reopen(), driverOf(st)).FinalizeVersion(ctx, a.ID, seq, claimOf(a.ID, seq), nil)
+				_, errs[i] = NewStore(reopen(), driverOf(st)).FinalizeVersion(ctx, a.ID, seq, claimOf(a.ID, seq), nil, 0)
 			}(i, seq)
 		}
 		wg.Wait()
@@ -359,7 +359,7 @@ func TestStoreReapRacesFinalize(t *testing.T) {
 			wg.Add(2)
 			go func() {
 				defer wg.Done()
-				_, finErr = NewStore(reopen(), driverOf(st)).FinalizeVersion(ctx, a.ID, 1, claimOf(a.ID, 1), nil)
+				_, finErr = NewStore(reopen(), driverOf(st)).FinalizeVersion(ctx, a.ID, 1, claimOf(a.ID, 1), nil, 0)
 			}()
 			go func() {
 				defer wg.Done()
@@ -416,10 +416,10 @@ func TestStoreStaleFinalizeClaimIsTakenOver(t *testing.T) {
 		if gv, _ := st.GetVersion(ctx, a.ID, 1); gv.State != VersionStateFinalizing {
 			t.Fatalf("an old claim's release changed the version to %s", gv.State)
 		}
-		if _, err := st.FinalizeVersion(ctx, a.ID, 1, first, nil); !errors.Is(err, ErrConflict) {
+		if _, err := st.FinalizeVersion(ctx, a.ID, 1, first, nil, 0); !errors.Is(err, ErrConflict) {
 			t.Fatalf("finalize under an old claim = %v, want ErrConflict", err)
 		}
-		if got, err := st.FinalizeVersion(ctx, a.ID, 1, claimOf(a.ID, 1), nil); err != nil || got.CurrentSeq != 1 {
+		if got, err := st.FinalizeVersion(ctx, a.ID, 1, claimOf(a.ID, 1), nil, 0); err != nil || got.CurrentSeq != 1 {
 			t.Fatalf("finalize after takeover = %+v, %v", got, err)
 		}
 	})
@@ -445,4 +445,72 @@ func claimOf(id string, seq int) time.Time {
 	v, _ := claims.Load(claimKey(id, seq))
 	c, _ := v.(time.Time)
 	return c
+}
+
+// TestStoreFinalizeBaseAndDiscard covers the review finalize contract:
+// FinalizeVersion with a base refuses (ErrStaleBase, nothing changed) once
+// the current version is no longer that base, and DiscardFinalize fails a
+// claimed version, drops its manifest and leaves the current version.
+func TestStoreFinalizeBaseAndDiscard(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, db *sql.DB, st Store, _ func() *sql.DB) {
+		ctx := context.Background()
+		a, v1 := pendingArtifact(t, st, "k", "a.md")
+		if err := st.MarkReceived(ctx, v1.ID, "a.md", "text/markdown"); err != nil {
+			t.Fatal(err)
+		}
+		if err := claimFin(ctx, st, a.ID, 1); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.FinalizeVersion(ctx, a.ID, 1, claimOf(a.ID, 1), nil, 0); err != nil {
+			t.Fatal(err)
+		}
+		review := func() *Version {
+			v := &Version{ID: uuid.NewString(), ArtifactID: a.ID, Kind: VersionKindReview, EntryPath: "a.md",
+				FileCount: 1, TotalBytes: 1, CreatedAt: time.Now(), State: VersionStatePending}
+			files := []File{{VersionID: v.ID, Path: "a.md", Size: 1, SHA256: strings.Repeat("ab", 32), MediaType: "text/markdown"}}
+			if err := st.CreateVersion(ctx, v, files, 4); err != nil {
+				t.Fatal(err)
+			}
+			if err := claimFin(ctx, st, a.ID, v.Seq); err != nil {
+				t.Fatal(err)
+			}
+			return v
+		}
+		// Wrong base: refused, version still claimed, current unchanged.
+		r2 := review()
+		if _, err := st.FinalizeVersion(ctx, a.ID, r2.Seq, claimOf(a.ID, r2.Seq), nil, 7); !errors.Is(err, ErrStaleBase) {
+			t.Fatalf("stale base: %v, want ErrStaleBase", err)
+		}
+		if got, _ := st.GetVersion(ctx, a.ID, r2.Seq); got.State != VersionStateFinalizing {
+			t.Fatalf("state after stale base: %q", got.State)
+		}
+		if got, _ := st.GetArtifact(ctx, a.ID); got.CurrentSeq != 1 {
+			t.Fatalf("current after stale base: %d", got.CurrentSeq)
+		}
+		// Right base: finalized and current.
+		if got, err := st.FinalizeVersion(ctx, a.ID, r2.Seq, claimOf(a.ID, r2.Seq), nil, 1); err != nil || got.CurrentSeq != r2.Seq {
+			t.Fatalf("finalize on base: %+v, %v", got, err)
+		}
+		// Discard: under another claim it conflicts; under its claim it
+		// fails the version and drops the manifest.
+		r3 := review()
+		if err := st.DiscardFinalize(ctx, a.ID, r3.Seq, time.Now().Add(-time.Hour)); !errors.Is(err, ErrConflict) {
+			t.Fatalf("discard with a wrong claim: %v, want ErrConflict", err)
+		}
+		if err := st.DiscardFinalize(ctx, a.ID, r3.Seq, claimOf(a.ID, r3.Seq)); err != nil {
+			t.Fatal(err)
+		}
+		if got, _ := st.GetVersion(ctx, a.ID, r3.Seq); got.State != VersionStateFailed {
+			t.Fatalf("state after discard: %q", got.State)
+		}
+		if files, err := st.ListFiles(ctx, r3.ID); err != nil || len(files) != 0 {
+			t.Fatalf("manifest after discard: %v, %v", files, err)
+		}
+		if got, _ := st.GetArtifact(ctx, a.ID); got.CurrentSeq != r2.Seq || got.DeletedAt != nil {
+			t.Fatalf("artifact after discard: %+v", got)
+		}
+		if err := st.DiscardFinalize(ctx, a.ID, r3.Seq, claimOf(a.ID, r3.Seq)); !errors.Is(err, ErrConflict) {
+			t.Fatalf("second discard: %v, want ErrConflict", err)
+		}
+	})
 }
