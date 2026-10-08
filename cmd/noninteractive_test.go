@@ -170,6 +170,8 @@ func TestRunHubLink_NonInteractiveAmbiguousProject(t *testing.T) {
 	assert.Zero(t, hub.registers, "no register call")
 }
 
+// NO_COLOR on a terminal is covered in pkg/util (TestColorForHonoursNoColorOnTerminal):
+// under go test stderr is never a terminal, so a NO_COLOR test here could not fail.
 func TestFormatCLIError_PlainWhenNotTerminal(t *testing.T) {
 	f, err := os.Create(filepath.Join(t.TempDir(), "stderr"))
 	require.NoError(t, err)
@@ -178,13 +180,6 @@ func TestFormatCLIError_PlainWhenNotTerminal(t *testing.T) {
 	// The error text itself may carry colour (the agent-container banner).
 	got := formatCLIError(f, errors.New(util.Yellow+"boom"+util.Reset))
 	assert.Equal(t, "\nError: boom\n\n", got)
-}
-
-func TestFormatCLIError_NoColor(t *testing.T) {
-	t.Setenv("NO_COLOR", "1")
-	got := formatCLIError(os.Stderr, errors.New("boom"))
-	assert.NotContains(t, got, "\x1b[")
-	assert.Contains(t, got, "Error: boom")
 }
 
 func TestPromptChoice_NoTerminalErrors(t *testing.T) {

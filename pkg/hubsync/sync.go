@@ -935,7 +935,7 @@ func ExecuteSync(ctx context.Context, hubCtx *HubContext, result *SyncResult, au
 			}
 
 			// Only prompt if interactive and not auto-confirm
-			if autoConfirm || !util.IsTerminal() {
+			if autoConfirm || !stdinIsTerminal() {
 				return fmt.Errorf("failed to register agent '%s': multiple runtime brokers available, specify a broker with --broker <id>", name)
 			}
 

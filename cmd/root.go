@@ -439,8 +439,8 @@ func init() {
 	rootCmd.PersistentFlags().BoolVar(&noHub, "no-hub", false, "Disable Hub integration for this invocation (local-only mode)")
 
 	// Confirmation and non-interactive flags
-	rootCmd.PersistentFlags().BoolVarP(&autoConfirm, "yes", "y", false, "Skip confirmation prompt")
-	rootCmd.PersistentFlags().BoolVar(&nonInteractive, "non-interactive", false, "Non-interactive mode: implies --yes, errors on ambiguous prompts")
+	rootCmd.PersistentFlags().BoolVarP(&autoConfirm, "yes", "y", false, "Answer Yes to every confirmation prompt, including destructive ones (required to confirm when stdin is not a terminal)")
+	rootCmd.PersistentFlags().BoolVar(&nonInteractive, "non-interactive", false, "Non-interactive mode: implies --yes (answers Yes to every confirmation), errors on ambiguous prompts")
 
 	// Display zone for human-readable times (JSON output is always UTC)
 	rootCmd.PersistentFlags().StringVar(&displayTZ, "tz", "", "Show times in this IANA time zone, e.g. America/New_York (default: local zone; JSON output is unchanged)")

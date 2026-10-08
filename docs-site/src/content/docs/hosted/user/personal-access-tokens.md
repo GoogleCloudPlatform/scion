@@ -223,7 +223,7 @@ flows need:
 | `scion start` / `scion create` | `project:read`, `agent:create`, `agent:read` |
 | `scion message` | `project:read`, `agent:message` |
 | `scion attach` | `project:read`, `agent:attach` |
-| `scion stop`, `scion resume`, `scion restart` | `project:read`, `agent:lifecycle` |
+| `scion stop`, `scion suspend`, `scion resume`, `scion restore` | `project:read`, `agent:lifecycle` |
 | `scion delete` | `project:read`, `agent:delete` |
 
 A token without `project:read` gets `404 Not Found` on the project lookup. The CLI reports this

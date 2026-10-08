@@ -14,8 +14,9 @@ agent token and need none of the setup below.
 ## 1. Create a scoped token
 
 Give the coding agent a [user access token](/scion/hosted/user/personal-access-tokens/) that
-covers only what it needs, rather than your interactive login. Create it from your own
-signed-in shell:
+covers only what it needs, rather than your interactive login. The token only takes effect
+where no interactive login is stored; see [step 2](#2-run-the-cli-with-scion_hub_token).
+Create it from your own signed-in shell:
 
 ```bash
 scion hub token create \
@@ -36,10 +37,15 @@ Most CLI commands that run in a project look the project up on the Hub first, wh
 | `scion start` / `scion create` | `project:read`, `agent:create`, `agent:read` |
 | `scion message` | `project:read`, `agent:message` |
 | `scion attach` | `project:read`, `agent:attach` |
-| `scion stop`, `scion resume`, `scion restart` | `project:read`, `agent:lifecycle` |
+| `scion stop`, `scion suspend`, `scion resume`, `scion restore` | `project:read`, `agent:lifecycle` |
 | `scion delete` | `project:read`, `agent:delete` |
 
 Run `scion hub token scopes --project my-project` to see which scopes you can select.
+
+Leave out scopes for actions you do not want the agent to take. When the CLI runs under the
+token (see step 2), the scopes are what limits the agent, not the CLI flags in
+[step 3](#3-choose-how-confirmations-are-answered): for example, a token without
+`agent:delete` cannot delete agents, whatever flags the agent passes.
 
 If the token lacks `project:read`, the Hub answers the project lookup with `404 Not Found`. The
 CLI reports the likely missing `project:read` scope and stops. A user access token cannot
@@ -52,7 +58,7 @@ Pass the token to the coding agent's environment as `SCION_HUB_TOKEN`:
 
 ```bash
 export SCION_HUB_TOKEN="scion_pat_..."
-scion list --non-interactive --format json
+scion list --format json
 ```
 
 :::caution[A stored login takes precedence]
@@ -64,17 +70,32 @@ a dedicated OS user, an isolated `HOME`, or log out first (`scion hub auth logou
 Run `scion hub status` in the agent's environment to check which credential the CLI is
 using.
 
-## 3. Use non-interactive flags
+## 3. Choose how confirmations are answered
 
-Have the agent pass these flags:
+Have the agent pass `--format json` so it gets a result it can parse. Prompts, auto-confirm
+notes and progress messages go to stderr, so stdout holds only the JSON.
 
-- `--non-interactive`: never prompt. It implies `--yes`, and a prompt with no single
-  safe answer, such as several Hub projects with the same name, is an error rather than a guess.
-- `--format json`: print a result the agent can parse. Prompts, auto-confirm notes and
-  progress messages go to stderr, so stdout holds only the JSON.
-- `--yes`: on its own, accepts the default of each confirmation. `--non-interactive` already
-  implies it. Ask for `--yes` explicitly only for the actions you want the agent to confirm
-  unattended. Without it, a confirmation outside a terminal answers No.
+:::danger[`--yes` and `--non-interactive` confirm everything]
+`--yes` answers **Yes** to every confirmation, including destructive ones whose interactive
+default is No, such as deleting a hub project or Runtime Broker, `scion clean`, deregistering a
+broker, withdrawing it from a project or unlinking a project. `--non-interactive` implies
+`--yes`, so it does the same. Some destructive commands, such as `scion delete`, do not ask
+for confirmation at all. Neither flag makes a destructive action safe: what the agent can do is
+limited by the token's scopes, and only when the CLI runs in an environment with no stored login.
+:::
+
+Pick one of these setups:
+
+- **Recommended: no `--yes`.** Leave out `--yes` and `--non-interactive`. Without a terminal,
+  every confirmation answers No, the command stops, and stderr names `--yes`. The agent reports
+  this and you decide whether to run the command yourself or let the agent re-run it with
+  `--yes` for that one action. This does not cover commands that do not ask, such as
+  `scion delete`; leave their scopes out of the token.
+- **`--non-interactive`, with a narrow token.** Pass `--non-interactive` only when the token
+  lacks the scopes for actions you would not confirm yourself, for example no `agent:delete`,
+  and the CLI runs with no stored login. Every confirmation the token allows is then answered
+  Yes. A prompt with no single answer, such as several Hub projects with the same name, is
+  still an error rather than a guess.
 
 ## What the CLI does without a terminal
 
@@ -82,9 +103,10 @@ The CLI decides how to prompt from whether stdin is a terminal, not from the CLI
 
 - **No stdin reads.** When stdin is not a terminal, the CLI does not read answers from it,
   so an idle open stdin (as many tool runners provide) cannot hang a command.
-- **Safe defaults.** A yes/no confirmation without `--yes` answers No and says on stderr that
-  `--yes` confirms. A choice with no safe default fails with an error that names the flag to use.
-  Destructive and registration actions never proceed on a default.
+- **Safe defaults.** Without `--yes` or `--non-interactive`, a yes/no confirmation answers No
+  and says on stderr that `--yes` confirms, and a choice with no safe default fails with an
+  error that names the flag to use. Without those flags, destructive and registration actions
+  never proceed on a default.
 - **Prompts on stderr.** Prompt text and auto-confirm notes such as `auto-confirmed Yes` go
   to stderr, never stdout.
 - **No colour codes.** ANSI colour is used only when the output is a terminal, and never when
@@ -93,7 +115,8 @@ The CLI decides how to prompt from whether stdin is a terminal, not from the CLI
 ## Assistant mode
 
 The CLI also has an `assistant` mode (`SCION_CLI_MODE=assistant`), which limits the command
-set. This page does not rely on it: the token's scopes and the flags above are enough.
+set. This page does not rely on it: the token's scopes and the flags above are enough, provided
+the CLI runs in an environment with no stored login (see the caution in step 2).
 
 ## What's next
 
