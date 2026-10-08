@@ -64,6 +64,8 @@ describe('describeSourceUrl', () => {
     'mailto:secret@example.com',
     'javascript:alert("secret")',
     'not a url secret',
+    'https://github.com/acme/repo?token=secret',
+    'https://github.com/acme/repo#secret',
   ])('never shows credentials embedded in %s', (raw) => {
     const shown = describeSourceUrl(raw);
     expect(shown).not.toBeNull();

@@ -105,15 +105,20 @@ const templateUpdateTimeout = 5 * time.Minute
 const templateListTimeout = time.Minute
 
 // templateSourceRefreshable reports whether a stored template source URL is
-// one the Hub can refresh from (an https URL; the Hub applies the full check).
+// one the Hub can refresh from: an https URL on github.com with no username
+// or password. This matches the Web UI; the Hub applies the full check.
 func templateSourceRefreshable(sourceURL string) bool {
-	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(sourceURL)), "https://")
+	u, err := url.Parse(strings.TrimSpace(sourceURL))
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(u.Scheme, "https") && strings.EqualFold(u.Hostname(), "github.com") && u.User == nil
 }
 
 // displaySourceURL returns sourceURL for printing. The display never shows
 // credentials embedded in a source string: http(s) and builtin:// URLs are
-// shown without any username or password, and any other source is shown as
-// a fixed label.
+// shown without any username, password, query or fragment, and any other
+// source is shown as a fixed label.
 func displaySourceURL(sourceURL string) string {
 	u, err := url.Parse(strings.TrimSpace(sourceURL))
 	if err != nil || u.Opaque != "" || u.Host == "" {
@@ -125,6 +130,10 @@ func displaySourceURL(sourceURL string) string {
 		return "(non-web source)"
 	}
 	u.User = nil
+	u.RawQuery = ""
+	u.ForceQuery = false
+	u.Fragment = ""
+	u.RawFragment = ""
 	return u.String()
 }
 

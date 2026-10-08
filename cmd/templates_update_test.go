@@ -158,12 +158,14 @@ func TestUpdateAllTemplates(t *testing.T) {
 			{ID: "none", Name: "local", Scope: "project"},
 			{ID: "b", Name: "b", Scope: "project", SourceURL: ghSource},
 			{ID: "bad", Name: "bad", Scope: "user", SourceURL: ghSource},
+			{ID: "gitlab", Name: "gitlab", Scope: "global", SourceURL: "https://gitlab.com/acme/repo/-/tree/main/t"},
+			{ID: "creds", Name: "creds", Scope: "global", SourceURL: "https://user:secret@github.com/acme/repo/tree/main/t"},
 		},
 		reimportErr: map[string]error{"bad": errors.New("boom")},
 	}
 	err := updateAllTemplates(context.Background(), svc, "", time.Minute)
 	require.Error(t, err, "a failed reimport makes the command fail")
-	assert.Equal(t, []string{"a", "b", "bad"}, svc.reimported, "templates without an https source are skipped")
+	assert.Equal(t, []string{"a", "b", "bad"}, svc.reimported, "templates without a GitHub source URL are skipped, not attempted")
 	for _, o := range svc.overrides {
 		assert.Empty(t, o)
 	}
@@ -178,6 +180,8 @@ func TestDisplaySourceURL_DropsCredentials(t *testing.T) {
 		"s3://key:secret@bucket/path",
 		"mailto:secret",
 		"not a url secret",
+		"https://github.com/acme/repo?token=secret",
+		"https://github.com/acme/repo#secret",
 	} {
 		assert.NotContains(t, displaySourceURL(raw), "secret", raw)
 	}
@@ -222,5 +226,21 @@ func TestUpdateAllTemplates_PerTemplateDeadline(t *testing.T) {
 		// nothing left (3 x 150ms > 200ms) and fail.
 		assert.Greater(t, left, per/2, "reimport %d started with only %s left", i, left)
 		assert.LessOrEqual(t, left, per)
+	}
+}
+
+func TestTemplateSourceRefreshable(t *testing.T) {
+	for raw, want := range map[string]bool{
+		ghSource:                                  true,
+		"https://GitHub.com/acme/repo":            true,
+		"":                                        false,
+		"builtin://scion/1.0/template/default":    false,
+		"http://github.com/acme/repo":             false,
+		"https://gitlab.com/acme/repo":            false,
+		"https://other.github.com/acme/repo":      false,
+		"https://user:secret@github.com/acme/rep": false,
+		":gcs:bucket/path":                        false,
+	} {
+		assert.Equal(t, want, templateSourceRefreshable(raw), raw)
 	}
 }

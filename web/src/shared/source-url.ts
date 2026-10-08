@@ -52,9 +52,10 @@ export const NON_WEB_SOURCE_LABEL = 'non-web source';
 /**
  * Describes a stored source for display. The display never shows credentials
  * embedded in a source string: http(s) URLs are shown and linked without any
- * username or password (and without a git+ prefix), builtin:// URLs are shown
+ * username, password, query or fragment (and without a git+ prefix), builtin:// URLs are shown
  * as text without any username or password, and every other source is shown
- * as a fixed label rather than its raw text. Returns null for an empty source.
+ * as a fixed label rather than its raw text. Query strings and fragments are
+ * never shown. Returns null for an empty source.
  */
 export function describeSourceUrl(sourceUrl: string | undefined | null): SourceDisplay | null {
   const raw = sourceUrl?.trim();
@@ -68,6 +69,8 @@ export function describeSourceUrl(sourceUrl: string | undefined | null): SourceD
   if (!u.host) return { text: NON_WEB_SOURCE_LABEL, href: null };
   u.username = '';
   u.password = '';
+  u.search = '';
+  u.hash = '';
   if (u.protocol === 'https:' || u.protocol === 'http:') {
     return { text: u.toString(), href: u.toString() };
   }
