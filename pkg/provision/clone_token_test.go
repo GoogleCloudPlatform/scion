@@ -227,3 +227,29 @@ func TestCloneError_WithToken(t *testing.T) {
 	notFound := cloneError("https://github.com/org/gone.git", "remote: Repository not found.\n", nil, true, "")
 	assert.Contains(t, notFound.Error(), "has no access to it")
 }
+
+// runGitClone passes the clone environment's token to cloneError, so a
+// token that git prints is redacted. A fake git on PATH prints the value of
+// GITHUB_TOKEN when asked to clone and fails; other git commands run the
+// real git.
+func TestProvisionShared_CloneWithToken_GitOutputRedacted(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	isolateGitConfig(t)
+	realGit, err := exec.LookPath("git")
+	require.NoError(t, err)
+	binDir := t.TempDir()
+	script := "#!/bin/sh\n" +
+		"if [ \"$1\" = clone ]; then echo \"fatal: unexpected server response for $GITHUB_TOKEN\" >&2; exit 128; fi\n" +
+		"exec '" + realGit + "' \"$@\"\n"
+	require.NoError(t, os.WriteFile(filepath.Join(binDir, "git"), []byte(script), 0o755))
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv(GitTokenEnv, testCloneToken)
+
+	in, stateDir := sharedPlainStateDirInput(t, "https://git.example.invalid/org/private.git")
+	in.CloneWithToken = true
+	err = ProvisionShared(in)
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), testCloneToken)
+	assert.Contains(t, err.Error(), "unexpected server response for "+redactedCredential)
+	assert.NoFileExists(t, filepath.Join(stateDir, ProvisionSentinelFile))
+}
