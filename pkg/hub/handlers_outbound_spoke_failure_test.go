@@ -114,8 +114,14 @@ func (f *outboundSpokeFixture) send(t *testing.T, msg string) *httptest.Response
 
 func (f *outboundSpokeFixture) sendRequest(t *testing.T, outReq OutboundMessageRequest) *httptest.ResponseRecorder {
 	t.Helper()
+	return f.sendRequestWithContext(t, context.Background(), outReq)
+}
+
+// sendRequestWithContext is sendRequest with ctx as the request context.
+func (f *outboundSpokeFixture) sendRequestWithContext(t *testing.T, ctx context.Context, outReq OutboundMessageRequest) *httptest.ResponseRecorder {
+	t.Helper()
 	body, _ := json.Marshal(outReq)
-	req := httptest.NewRequest(http.MethodPost,
+	req := httptest.NewRequestWithContext(ctx, http.MethodPost,
 		"/api/v1/agents/"+f.agent.ID+"/outbound-message", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req = req.WithContext(contextWithIdentity(req.Context(), &agentIdentityWrapper{&AgentTokenClaims{
@@ -281,6 +287,54 @@ func TestHandleAgentOutboundMessage_NoPersistingSubscriberStoresRow(t *testing.T
 		require.NoError(t, json.Unmarshal(evt.Data, &got))
 		require.Equal(t, resp.MessageID, got.ID, "the event names the stored message")
 		require.Equal(t, "hello with only a plugin spoke", got.Msg)
+	case <-time.After(3 * time.Second):
+		t.Fatal("expected a user message event for the stored row")
+	}
+}
+
+// cancellingSpokeBus is a plugin spoke that accepts every publish and then
+// cancels the request context, as when the client goes away once the
+// spokes already have the message.
+type cancellingSpokeBus struct{ cancel context.CancelFunc }
+
+func (b *cancellingSpokeBus) Publish(context.Context, string, *messages.StructuredMessage) error {
+	b.cancel()
+	return nil
+}
+
+func (*cancellingSpokeBus) Subscribe(string, eventbus.EventHandler) (eventbus.Subscription, error) {
+	return nullSub{}, nil
+}
+
+func (*cancellingSpokeBus) Close() error { return nil }
+
+// With no persisting subscriber, a request cancelled after the plugin
+// spoke accepted the message still stores the row and emits the user
+// message event.
+func TestHandleAgentOutboundMessage_NoPersistingSubscriberStoresRowAfterCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	f := newOutboundSpokeFixtureWithPlugin(t, nil, &cancellingSpokeBus{cancel: cancel})
+	ep := NewChannelEventPublisher()
+	t.Cleanup(ep.Close)
+	f.srv.SetEventPublisher(ep)
+	userEvents, unsub := ep.Subscribe("user." + f.user.ID + ".message")
+	t.Cleanup(unsub)
+	f.proxy.Start()
+	t.Cleanup(f.proxy.Stop)
+
+	rr := f.sendRequestWithContext(t, ctx, OutboundMessageRequest{
+		Recipient: "user:" + f.user.Email,
+		Msg:       "hello from a cancelled request",
+	})
+	require.Error(t, ctx.Err(), "the request context is cancelled during publish")
+	f.requireSentOnce(t, rr)
+
+	select {
+	case evt := <-userEvents:
+		var got UserMessageEvent
+		require.NoError(t, json.Unmarshal(evt.Data, &got))
+		require.Equal(t, "hello from a cancelled request", got.Msg)
 	case <-time.After(3 * time.Second):
 		t.Fatal("expected a user message event for the stored row")
 	}
