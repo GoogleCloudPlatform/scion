@@ -544,6 +544,36 @@ func TestHandleHealthSummary_PanickingIntegrationRecovered(t *testing.T) {
 	assert.Equal(t, int32(2), mgr.calls.Load(), "the later summary starts a fresh query")
 }
 
+// TestIntegrationHealthQuery_RemovesOnlyItsOwnFlight: a finishing query
+// does not remove a different flight registered for the same plugin.
+func TestIntegrationHealthQuery_RemovesOnlyItsOwnFlight(t *testing.T) {
+	srv, _ := testServer(t)
+	mgr := &gatedHealthSummaryPluginDouble{
+		healthSummaryPluginDouble: newHealthSummaryPluginDouble("chat"),
+		name:                      "chat",
+		gate:                      make(chan struct{}),
+	}
+	old := srv.integrationHealthQuery(mgr, "chat")
+	require.Eventually(t, func() bool { return mgr.calls.Load() == 1 }, 5*time.Second, 5*time.Millisecond)
+
+	// Replace the running flight, as an eviction or reset would.
+	replacement := &integrationHealthFlight{done: make(chan struct{})}
+	srv.healthIntegrationMu.Lock()
+	srv.healthIntegrationFlights["chat"] = replacement
+	srv.healthIntegrationMu.Unlock()
+
+	close(mgr.gate)
+	select {
+	case <-old.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the original query did not finish")
+	}
+	assert.Equal(t, "healthy", old.row.Health)
+	srv.healthIntegrationMu.Lock()
+	defer srv.healthIntegrationMu.Unlock()
+	assert.Same(t, replacement, srv.healthIntegrationFlights["chat"], "the finished query must not remove the replacement")
+}
+
 // gatedHealthSummaryPluginDouble holds every info query for the named
 // plugin until gate is closed, and counts the queries.
 type gatedHealthSummaryPluginDouble struct {

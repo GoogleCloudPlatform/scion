@@ -151,7 +151,11 @@ func (s *Server) integrationHealthQuery(mgr IntegrationManager, name string) *in
 				f.row = healthSummaryIntegrationFromStatus(name, nil)
 			}
 			s.healthIntegrationMu.Lock()
-			delete(s.healthIntegrationFlights, name)
+			// Remove only this flight: never another query for the
+			// same plugin that replaced it.
+			if s.healthIntegrationFlights[name] == f {
+				delete(s.healthIntegrationFlights, name)
+			}
 			s.healthIntegrationMu.Unlock()
 			close(f.done)
 		}()
