@@ -138,8 +138,9 @@ func skipped(reason Reason) Result {
 //     name rec.OriginalEdgeID and, when rec.BeforeFingerprint is set, match
 //     it;
 //  2. an agent delegator's own hop must already be recorded (top-down);
-//  3. deactivate the original row only if it is active, unrecorded
-//     and unchanged (cause provenance_adopted, op ID rec.ID);
+//  3. deactivate the original row only if it is still active and
+//     unrecorded (cause provenance_adopted, op ID rec.ID; see
+//     writeAdoption);
 //  4. insert the adopted row (the partial unique index on active edges
 //     rejects a second active row).
 //
@@ -194,10 +195,22 @@ func ApplyPlannedAdopt(ctx context.Context, tx store.Store, hop *Hop, opID strin
 	return writeAdoption(ctx, tx, hop, opID, actor)
 }
 
+// writeAdoption deactivates the hop's original row and inserts the adopted
+// row. The guard pins the row by ID, active, provenance version 0 and an
+// unrecorded ceiling. It does not compare the updated time: on SQLite that
+// column is stored as text, and an exact match against the canonical form
+// fails for a row whose stored text is in another form (RFC3339 with Z, a
+// non-UTC offset, a monotonic clock suffix) but names the same instant.
+// Leaving it out loses no change detection. Delegator, delegate, scope, role
+// and grandfathered are never updated in place: every in-place write to an
+// edge either changes active (deactivation, reactivation) or rewrites only
+// the updated text (timestamp normalization). The guard catches the first;
+// the second is not a change. Callers also plan the hop inside the same
+// transaction, and ApplyAdopt checks the hop's fingerprint, which covers the
+// updated time as an instant, against the snapshot.
 func writeAdoption(ctx context.Context, tx store.Store, hop *Hop, opID string, actor Actor) (Result, error) {
-	updated := hop.Edge.UpdatedAt
 	ok, err := tx.DeactivateDelegationEdgeGuarded(ctx, hop.Edge.ID,
-		store.DelegationEdgeDeactivateGuard{Unrecorded: true, UpdatedAt: &updated},
+		store.DelegationEdgeDeactivateGuard{Unrecorded: true},
 		store.EdgeDeactivationProvenanceAdopted, opID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
