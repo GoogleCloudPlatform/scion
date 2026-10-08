@@ -89,6 +89,10 @@ type EventPublisher interface {
 	// participant of the DM on user.<id>.chat.dm.promoted so the client
 	// can close the DM view and navigate to the new thread.
 	PublishDMPromotedEvent(ctx context.Context, dmKey string, topic WebChatTopic)
+	// PublishChatScheduledEvent publishes a change to one of a user's
+	// scheduled chat messages on user.<id>.chat.scheduled. Only the
+	// sender is ever told about a scheduled message.
+	PublishChatScheduledEvent(ctx context.Context, userID string, evt ChatScheduledEvent)
 	// Subscribe returns a channel that receives events matching the given
 	// subject patterns, along with an unsubscribe function. Patterns use
 	// NATS-style wildcards: '*' matches a single token, '>' matches the
@@ -133,6 +137,9 @@ func (noopEventPublisher) PublishChatMessageDeleted(_ context.Context, _ string,
 func (noopEventPublisher) PublishDMPromotedEvent(_ context.Context, _ string, _ WebChatTopic) {}
 func (noopEventPublisher) PublishRaw(_ string, _ interface{})                                 {}
 func (noopEventPublisher) Close()                                                             {}
+
+func (noopEventPublisher) PublishChatScheduledEvent(_ context.Context, _ string, _ ChatScheduledEvent) {
+}
 
 // Subscribe on the no-op publisher returns a nil channel (which blocks forever
 // on receive) and a no-op unsubscribe. Callers that need real subscriptions
@@ -924,6 +931,15 @@ func (p *eventBuilder) PublishDMPromotedEvent(_ context.Context, dmKey string, t
 	for _, userID := range dmUserParticipants(dmKey) {
 		p.sink("user."+userID+".chat.dm.promoted", evt)
 	}
+}
+
+// PublishChatScheduledEvent publishes a scheduled chat message change to its
+// sender only, on user.<userID>.chat.scheduled.
+func (p *eventBuilder) PublishChatScheduledEvent(_ context.Context, userID string, evt ChatScheduledEvent) {
+	if userID == "" {
+		return
+	}
+	p.sink("user."+userID+".chat.scheduled", evt)
 }
 
 // PublishDispatchDone emits a slim completion event when a broker_dispatch row

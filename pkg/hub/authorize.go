@@ -738,18 +738,79 @@ func selfScopedDecision(identity Identity, permissionID, rowProjectID string) (o
 	}
 }
 
+// selfScopeReasonProjectAccess is the deny reason when a project-boundary
+// token's holder is not a current member of the record's project.
+const selfScopeReasonProjectAccess = bearerReasonProjectAccessDenied
+
+// selfScopeCheck applies the self-scope rule to the records of one request.
+// It adds a live check to selfScopedDecision: for a project-boundary token,
+// the holder must currently be a member of the record's project
+// (ProjectMembershipEvidence), checked on every request, as the bearer gate
+// checks current project access for a project target. A lookup error
+// denies. The membership result is remembered per project for the request.
+type selfScopeCheck struct {
+	ctx          context.Context
+	authz        *AuthzService
+	identity     Identity
+	permissionID string
+	member       map[string]bool
+}
+
+func (s *Server) newSelfScopeCheck(ctx context.Context, identity Identity, permissionID string) *selfScopeCheck {
+	return &selfScopeCheck{ctx: ctx, authz: s.authzService, identity: identity, permissionID: permissionID, member: map[string]bool{}}
+}
+
+// decide returns whether the caller may apply the permission to a record of
+// rowProjectID, with a stable reason on denial.
+func (c *selfScopeCheck) decide(rowProjectID string) (bool, string) {
+	ok, reason := selfScopedDecision(c.identity, c.permissionID, rowProjectID)
+	if !ok {
+		return false, reason
+	}
+	token, isToken := c.identity.(*ScopedUserIdentity)
+	if !isToken || token.Boundary().Kind != BoundaryKindProject {
+		return true, ""
+	}
+	// selfScopedDecision admitted a project-boundary token only for a
+	// record of its boundary project, so rowProjectID is that project.
+	member, seen := c.member[rowProjectID]
+	if !seen {
+		member = false
+		if c.authz != nil {
+			var err error
+			member, _, err = c.authz.ProjectMembershipEvidence(c.ctx, principalContextForIdentity(token), rowProjectID)
+			if err != nil {
+				member = false
+			}
+		}
+		c.member[rowProjectID] = member
+	}
+	if !member {
+		return false, selfScopeReasonProjectAccess
+	}
+	return true, ""
+}
+
+// allows reports whether the caller may apply the permission to a record
+// of rowProjectID.
+func (c *selfScopeCheck) allows(rowProjectID string) bool {
+	ok, _ := c.decide(rowProjectID)
+	return ok
+}
+
 // authorizeSelfScoped authorizes the caller to apply permissionID to one of
 // its own records whose project is rowProjectID (empty for a record with no
 // project, such as a direct message between two users). It writes 401 when
 // no identity is present and 403 on denial; see selfScopedDecision for the
-// rule.
+// static rule and selfScopeCheck for the live membership check that applies
+// to a project-boundary token.
 func (s *Server) authorizeSelfScoped(w http.ResponseWriter, r *http.Request, permissionID string, rowProjectID string) bool {
 	identity := GetIdentityFromContext(r.Context())
 	if identity == nil {
 		Unauthorized(w)
 		return false
 	}
-	ok, reason := selfScopedDecision(identity, permissionID, rowProjectID)
+	ok, reason := s.newSelfScopeCheck(r.Context(), identity, permissionID).decide(rowProjectID)
 	if ok {
 		return true
 	}
@@ -771,16 +832,17 @@ func selfPermissionResourceAction(permissionID string) (string, Action) {
 }
 
 // filterSelfScopedRows keeps the rows of the caller's own records that the
-// caller may see with permissionID: projectOf returns a row's project (empty
-// for a row with no project), and each row is checked with the
-// authorizeSelfScoped rule. A caller that may not use permissionID at all
-// gets no rows. List handlers filter the full result first and compute
-// totals and cursors from the filtered rows (pageSelfScopedRows), so neither
-// counts a row the caller cannot see.
-func filterSelfScopedRows[T any](identity Identity, permissionID string, rows []T, projectOf func(T) string) []T {
+// caller may see: projectOf returns a row's project (empty for a row with no
+// project), and check decides each row with the authorizeSelfScoped rule,
+// including the live membership check for a project-boundary token. A
+// caller that may not use the permission at all gets no rows. List handlers
+// filter the full result first and compute totals and cursors from the
+// filtered rows (pageSelfScopedRows), so neither counts a row the caller
+// cannot see.
+func filterSelfScopedRows[T any](check *selfScopeCheck, rows []T, projectOf func(T) string) []T {
 	out := make([]T, 0, len(rows))
 	for _, row := range rows {
-		if ok, _ := selfScopedDecision(identity, permissionID, projectOf(row)); ok {
+		if check.allows(projectOf(row)) {
 			out = append(out, row)
 		}
 	}
@@ -796,11 +858,11 @@ var errInvalidSelfScopedCursor = errors.New("invalid cursor")
 // and nextCursor are offsets into the visible rows. An empty cursor starts
 // at the first row; nextCursor is empty on the last page. limit must be
 // positive.
-func pageSelfScopedRows[T any](identity Identity, permissionID string, rows []T, projectOf func(T) string, cursor string, limit int) (items []T, totalCount int, nextCursor string, err error) {
+func pageSelfScopedRows[T any](check *selfScopeCheck, rows []T, projectOf func(T) string, cursor string, limit int) (items []T, totalCount int, nextCursor string, err error) {
 	if limit <= 0 {
 		return nil, 0, "", errors.New("limit must be positive")
 	}
-	visible := filterSelfScopedRows(identity, permissionID, rows, projectOf)
+	visible := filterSelfScopedRows(check, rows, projectOf)
 	start := 0
 	if cursor != "" {
 		start, err = strconv.Atoi(cursor)

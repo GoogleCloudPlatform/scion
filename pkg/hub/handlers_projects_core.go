@@ -2367,6 +2367,11 @@ var projectAgentRouteActions = map[AgentSubRouteID]string{
 
 // listProjectAgents lists agents within a specific project
 func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, projectID string) {
+	// The ids= format check runs before any authorization or store call
+	// this handler makes (see parseAgentListIDs).
+	if q := r.URL.Query(); !validateAgentListIDs(w, q, agentListLimit(q), isSortedModeRequest(q)) {
+		return
+	}
 	if !checkAgentReadScope(w, r) {
 		return
 	}
