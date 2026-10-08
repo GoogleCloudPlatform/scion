@@ -357,8 +357,8 @@ const saAssignGenericForbiddenMsg = "You don't have permission to assign this GC
 // ancestor; the message does not need to identify which hop failed:
 //   - reincarnate by an authorized user: a user's reincarnate that keeps the
 //     role re-records the edge, with the user as delegator, when the chain
-//     has an unrecorded hop or a missing edge (reincarnateAuthorityFor,
-//     ptone/scion#3948), as a user's role-changing reincarnate always does;
+//     has an unrecorded hop (reincarnateAuthorityFor, ptone/scion#3948), as
+//     a user's role-changing reincarnate always does;
 //   - recreate by an authorized user directly: a user's create writes the
 //     new agent's edge with recorded provenance (commitAgentCreate).
 //

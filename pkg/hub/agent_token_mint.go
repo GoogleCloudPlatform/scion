@@ -286,11 +286,12 @@ func writeAgentTokenIssueError(w http.ResponseWriter, err error) bool {
 // agentTokenDenialMessage is the neutral response message for a mint that
 // the agent's delegation chain does not allow. The default (orphaned)
 // remedy names a user's direct recreate, which writes a new recorded edge
-// and always clears it. A user's reincarnate clears only a missing edge on
-// the chain: it re-records the agent's edge with the user as delegator then
-// (reincarnateAuthorityFor, ptone/scion#3948), but keeps the edge for an
-// ambiguous or looping chain, so the message offers it only for a record
-// that is missing.
+// and always clears it. A user's reincarnate clears only the agent's own
+// missing edge: it records one with the user as delegator then
+// (reincarnateAuthorityFor, ptone/scion#3948). It keeps the edge for an
+// ambiguous chain, and the agent standing gate refuses it for a chain with a
+// missing ancestor edge or a loop, so the message offers it only when the
+// agent's own record is missing.
 func agentTokenDenialMessage(cause DenyCause) string {
 	switch cause {
 	case DenyCauseCeilingSourceNotAllowed:
@@ -298,7 +299,7 @@ func agentTokenDenialMessage(cause DenyCause) string {
 	default:
 		return "The agent's delegation record is missing or inconsistent; " +
 			"have an authorized user recreate it directly (not from another agent). " +
-			"If the record is only missing, a reincarnate by an authorized user also repairs it."
+			"If only the agent's own record is missing, a reincarnate by an authorized user also repairs it."
 	}
 }
 

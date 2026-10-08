@@ -29,10 +29,11 @@ import (
 
 // ptone/scion#3948: a user's reincarnate that keeps the role re-records the
 // agent's edge, with the user as delegator, when the agent's delegation
-// chain is unrecorded (an unrecorded hop, or a missing edge), so the
-// reincarnate repairs a chain that denies with ceiling_unrecorded. A fully
-// recorded chain, and any self or agent-requester reincarnate that keeps the
-// role, keep the edge (ptone/scion#3762).
+// chain has an unrecorded hop or its own edge is missing, so the reincarnate
+// repairs a chain that denies with ceiling_unrecorded. A fully recorded
+// chain, and any self or agent-requester reincarnate that keeps the role,
+// keep the edge (ptone/scion#3762). A chain with a missing ancestor edge or a
+// loop is refused by the agent standing gate before any of this runs.
 
 // repairFixture is a project owned by user U with a full-role agent T
 // created by U, an assign-mode service account, and no delegation edges:
@@ -154,12 +155,24 @@ func (f *repairFixture) saAssignDecision() Decision {
 }
 
 // assertSAAssignAllowed asserts T may assign the service account to a child
-// it creates: the gate's CheckAccess allows, and the SA-assign gate at the
-// create surface admits the request.
+// it creates: the gate's CheckAccess (Layer 1, where the delegation ceiling
+// applies) allows, and the SA-assign gate at the create surface admits the
+// request. For Layer 2 (GCP actAs) T is given the service account as its own
+// assign-mode identity, so the same-account rule admits it without a GCP
+// call; a T with no GCP identity is refused there whatever its chain.
 func (f *repairFixture) assertSAAssignAllowed(t *testing.T) {
 	t.Helper()
 	d := f.saAssignDecision()
 	require.True(t, d.Allowed, "SA assign: reason %q, cause %q", d.Reason, d.DenyCause)
+
+	target := mustGetAgent(t, f.s, f.target.ID)
+	target.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
+		MetadataMode:        store.GCPMetadataModeAssign,
+		ServiceAccountID:    f.sa.ID,
+		ServiceAccountEmail: f.sa.Email,
+		ProjectID:           f.sa.ProjectID,
+	}
+	require.NoError(t, f.s.UpdateAgent(context.Background(), target))
 
 	identity := dcAgentIdentity(f.target.ID, f.project.ID, AgentRoleFull)
 	ctx := contextWithIdentity(context.Background(), identity)
@@ -225,6 +238,20 @@ func TestReincarnateByUserRepairsUnrecordedAncestor(t *testing.T) {
 	f.assertReRecordedByUser(t, old.ID)
 }
 
+// T's own edge and its parent's are both unrecorded (U -> P and P -> T
+// unrecorded): the reincarnate passes the standing gate and re-records T's
+// edge from U.
+func TestReincarnateByUserRepairsUnrecordedOwnAndAncestor(t *testing.T) {
+	f := newRepairFixture(t)
+	parent := f.otherAgent(t, "repair-unrec-both-parent")
+	seedUnrecordedEdge(t, f.s, store.DelegationPrincipalUser, f.userID, parent)
+	old := seedUnrecordedEdge(t, f.s, store.DelegationPrincipalAgent, parent.ID, f.target)
+	assertUnrecordedDeny(t, f.saAssignDecision())
+
+	f.reincarnateAs(t, f.session())
+	f.assertReRecordedByUser(t, old.ID)
+}
+
 // T has no edge at all after the edge backfill completed: the reincarnate
 // records one from U, deactivating nothing.
 func TestReincarnateByUserRepairsMissingOwnEdge(t *testing.T) {
@@ -238,18 +265,31 @@ func TestReincarnateByUserRepairsMissingOwnEdge(t *testing.T) {
 	f.assertReRecordedByUser(t)
 }
 
-// An ancestor has no edge (P has none, P -> T recorded): the reincarnate
-// re-records T's edge from U.
-func TestReincarnateByUserRepairsMissingAncestorEdge(t *testing.T) {
+// assertRefusedByStanding asserts a user's same-role reincarnate of T is
+// refused with 409 by the agent standing gate, on a dry run and a real run,
+// with nothing written: T keeps its single edge old.
+func (f *repairFixture) assertRefusedByStanding(t *testing.T, old *store.DelegationEdge) {
+	t.Helper()
+	target := mustGetAgent(t, f.s, f.target.ID)
+	for _, dryRun := range []bool{true, false} {
+		rec := httptest.NewRecorder()
+		body := ReincarnateAgentRequest{Handoff: "h", DryRun: dryRun}
+		f.srv.handleReincarnateAgent(rec, reincarnateRequest(t, f.target.ID, f.session(), body), f.target.ID)
+		require.Equal(t, http.StatusConflict, rec.Code, "dryRun=%v: %s", dryRun, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "suspended", "dryRun=%v", dryRun)
+	}
+	assertNothingClaimed(t, f.s, target, old)
+}
+
+// An ancestor has no edge (P has none, P -> T recorded): the chain is broken
+// above its first link, so the standing gate refuses the reincarnate before
+// the repair can run.
+func TestReincarnateByUserMissingAncestorEdgeRefusedByStanding(t *testing.T) {
 	f := newRepairFixture(t)
 	markEdgeBackfillComplete(t, f.s)
 	parent := f.otherAgent(t, "repair-orphan-parent")
 	old := seedFullAgentEdge(t, f.s, store.DelegationPrincipalAgent, parent.ID, f.target)
-	d := f.saAssignDecision()
-	require.False(t, d.Allowed, "no ancestor edge: reason %q", d.Reason)
-
-	f.reincarnateAs(t, f.session())
-	f.assertReRecordedByUser(t, old.ID)
+	f.assertRefusedByStanding(t, old)
 }
 
 // A fully recorded chain (U -> P -> T, both recorded) keeps T's edge on a
@@ -264,17 +304,14 @@ func TestReincarnateByUserKeepsRecordedChain(t *testing.T) {
 	assertEdgeKept(t, f.s, f.target.ID, old, f.targetEdge(t))
 }
 
-// A chain that is broken in another way than unrecorded (here a loop:
-// P -> T and T -> P, both recorded) keeps T's edge: only an unrecorded
-// chain is repaired.
-func TestReincarnateByUserKeepsLoopingChain(t *testing.T) {
+// A looping chain (P -> T and T -> P, both recorded) is refused by the
+// standing gate before the repair can run.
+func TestReincarnateByUserLoopingChainRefusedByStanding(t *testing.T) {
 	f := newRepairFixture(t)
 	parent := f.otherAgent(t, "repair-loop-parent")
 	seedFullAgentEdge(t, f.s, store.DelegationPrincipalAgent, f.target.ID, parent)
 	old := seedFullAgentEdge(t, f.s, store.DelegationPrincipalAgent, parent.ID, f.target)
-
-	f.reincarnateAs(t, f.session())
-	assertEdgeKept(t, f.s, f.target.ID, old, f.targetEdge(t))
+	f.assertRefusedByStanding(t, old)
 }
 
 // A self or agent-requester same-role reincarnate keeps the edge whether
