@@ -6215,7 +6215,9 @@ func (s *Server) applyMiddleware(h http.Handler) http.Handler {
 // traceableRequest reports whether r may be traced: not when its path
 // carries a bearer credential (see logging.IsCredentialPath).
 func traceableRequest(r *http.Request) bool {
-	return !logging.IsCredentialPath(r.URL.Path) && !logging.IsCredentialPath(r.URL.EscapedPath())
+	// URL.Path is the decoded path, so an escaped spelling of a credential
+	// route is caught too.
+	return !logging.IsCredentialPath(r.URL.Path)
 }
 
 // corsMiddleware adds CORS headers.

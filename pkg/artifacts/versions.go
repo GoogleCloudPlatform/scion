@@ -468,25 +468,7 @@ func (s *Service) canWritePermitted(ctx context.Context, b backend, a *Artifact,
 		slog.ErrorContext(ctx, "artifacts: list grants failed", "error", err)
 		return false
 	}
-	for _, g := range grants {
-		if g.ExpiresAt != nil && !now.Before(*g.ExpiresAt) {
-			continue
-		}
-		if g.Permission != GrantWrite && g.Permission != GrantAdmin {
-			continue
-		}
-		switch g.SubjectKind {
-		case SubjectPrincipal:
-			if g.SubjectRef == PrincipalRef(kind, ref) {
-				return true
-			}
-		case SubjectScope:
-			if g.SubjectRef != "" && s.host.Authorize(ctx, g.SubjectRef, PermissionCreate) {
-				return true
-			}
-		}
-	}
-	return false
+	return grantAllows(ctx, s.host, a, grants, now, kind, ref, grantsForWrite, PermissionCreate, false)
 }
 
 // writableArtifact loads an artifact the caller may write. An artifact the

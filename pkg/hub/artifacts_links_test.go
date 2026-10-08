@@ -23,6 +23,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -217,4 +218,53 @@ func TestHubHandlerDoesNotTraceCredentialPaths(t *testing.T) {
 	assert.Empty(t, rec.Ended(), "credential paths were traced")
 	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/v1/agents", nil))
 	assert.Len(t, rec.Ended(), 1, "an ordinary request is traced")
+}
+
+// TestShareLinkClientKey: IPv6 clients are keyed on their /64 prefix,
+// IPv4 clients on their address, both read through trusted proxies only.
+func TestShareLinkClientKey(t *testing.T) {
+	trusted := parseTrustedProxies([]string{"10.0.0.0/8"})
+	for _, tc := range []struct{ remote, xff, want string }{
+		{"203.0.113.7:1000", "", "203.0.113.7"},
+		{"[2001:db8:1:2:aaaa::1]:1000", "", "2001:db8:1:2::/64"},
+		{"[2001:db8:1:2:bbbb::9]:1000", "", "2001:db8:1:2::/64"},
+		{"[2001:db8:1:3::1]:1000", "", "2001:db8:1:3::/64"},
+		{"10.1.2.3:1000", "2001:db8:5:6:7::8", "2001:db8:5:6::/64"},
+		{"10.1.2.3:1000", "198.51.100.4", "198.51.100.4"},
+		{"203.0.113.7:1000", "198.51.100.4", "203.0.113.7"}, // untrusted peer: header ignored
+	} {
+		r := httptest.NewRequest(http.MethodGet, "/api/v1/artifacts/shared/x", nil)
+		r.RemoteAddr = tc.remote
+		if tc.xff != "" {
+			r.Header.Set("X-Forwarded-For", tc.xff)
+		}
+		assert.Equal(t, tc.want, shareLinkClientKey(r, trusted), "%s xff=%q", tc.remote, tc.xff)
+	}
+}
+
+// TestArtifactsShareLinkClientsBehindProxy: through the real hub, behind a
+// trusted proxy, distinct forwarded clients are charged to separate
+// buckets, and addresses in one IPv6 /64 to the same one.
+func TestArtifactsShareLinkClientsBehindProxy(t *testing.T) {
+	s, err := newTestStore(t, ":memory:")
+	require.NoError(t, err)
+	require.NoError(t, s.Migrate(context.Background()))
+	cfg := testServerConfig()
+	cfg.TrustedProxies = []string{"192.0.2.0/24"} // httptest's RemoteAddr
+	srv, _ := testServerWithStoreConfig(t, s, cfg)
+	enableArtifactsForTest(t, srv)
+	h := srv.Handler()
+	get := func(xff string) int {
+		r := httptest.NewRequest(http.MethodGet, artifacts.RouteShared+strings.Repeat("A", 43), nil)
+		r.Header.Set("X-Forwarded-For", xff)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, r)
+		return rec.Code
+	}
+	for i := range artifacts.SharedClientBurst {
+		require.Equal(t, http.StatusNotFound, get("2001:db8:7:7::"+strconv.Itoa(i+1)), "request %d", i)
+	}
+	assert.Equal(t, http.StatusTooManyRequests, get("2001:db8:7:7::ffff"), "same /64, budget spent")
+	assert.Equal(t, http.StatusNotFound, get("2001:db8:7:8::1"), "another /64")
+	assert.Equal(t, http.StatusNotFound, get("198.51.100.9"), "another IPv4 client")
 }

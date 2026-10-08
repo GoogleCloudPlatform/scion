@@ -19,6 +19,8 @@ package artifacts
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -493,6 +495,16 @@ func TestLinkViewCapabilityBounds(t *testing.T) {
 	forged := strings.Join([]string{sp[0], sp[1], sp[2], link.Link.ID, sp[3]}, ".")
 	if _, err := parseViewCapability(testViewKey, forged, time.Now()); err == nil {
 		t.Errorf("a session capability with a link id was accepted")
+	}
+	// A 5-part capability signed under the session domain over the same
+	// fields (link id included) is refused: link capabilities have their
+	// own domain.
+	mac := hmac.New(sha256.New, testViewKey)
+	mac.Write([]byte(viewSigDomain + "\n" + parts[0] + "\n" + parts[1] + "\n" + parts[2] + "\n" + parts[3]))
+	crossDomain := strings.Join([]string{parts[0], parts[1], parts[2], parts[3],
+		base64.RawURLEncoding.EncodeToString(mac.Sum(nil))}, ".")
+	if _, err := parseViewCapability(testViewKey, crossDomain, time.Now()); err == nil {
+		t.Errorf("a link capability signed under the session domain was accepted")
 	}
 	// A link id that is not a canonical id is refused, even correctly
 	// signed, so it never reaches the store.
@@ -1003,5 +1015,43 @@ func TestLinkDocumentedValues(t *testing.T) {
 	if DefaultLinkTTL != 168*time.Hour || DefaultLinkMaxTTL != 720*time.Hour || MaxLinksPerArtifact != 50 ||
 		linkTokenBytes != 32 || ViewTTL != 30*time.Minute {
 		t.Errorf("documented link values changed: update docs-site reference/artifacts.md")
+	}
+}
+
+// TestGrantMatchesOnlyItsSubject: a principal grant serves the principal
+// it names and nobody else, for reading and for administering.
+func TestGrantMatchesOnlyItsSubject(t *testing.T) {
+	f, id := newLinkFixture(t)
+	other := principal{PrincipalKindUser, "user-9", ""}
+	f.grantPrincipal(id, outside)
+	if rec := f.do(&outside, http.MethodGet, "/api/v1/artifacts/"+id, nil, nil); rec.Code != http.StatusOK {
+		t.Fatalf("grantee: %d", rec.Code)
+	}
+	if rec := f.do(&other, http.MethodGet, "/api/v1/artifacts/"+id, nil, nil); rec.Code != http.StatusNotFound {
+		t.Errorf("a principal grant served another principal: %d", rec.Code)
+	}
+	f.exec(t, `UPDATE artifact_grant SET permission = 'admin' WHERE subject_kind = 'principal'`)
+	f.host.allow(other, "project-1", PermissionRead)
+	if rec, _ := f.mintLink(other, id, ""); rec.Code != http.StatusForbidden {
+		t.Errorf("an admin grant served another principal: %d", rec.Code)
+	}
+}
+
+// TestReadAsksHostOnceForHome: the read check asks the host about the
+// home project once; the home project's own grant is not asked again.
+func TestReadAsksHostOnceForHome(t *testing.T) {
+	f, id := newLinkFixture(t)
+	f.host.mu.Lock()
+	f.host.calls = nil
+	f.host.mu.Unlock()
+	f.do(&outside, http.MethodGet, "/api/v1/artifacts/"+id, nil, nil)
+	n := 0
+	for _, c := range f.host.calls {
+		if c == "project-1 "+PermissionRead {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("home project asked %d times: %v", n, f.host.calls)
 	}
 }
