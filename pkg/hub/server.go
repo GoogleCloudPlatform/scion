@@ -1789,6 +1789,10 @@ type Server struct {
 	// cross-instance replay protection.
 	nonceCacheStore *NonceCacheStore
 
+	// scheduledSend is the scheduled chat message sweeper's state
+	// (chat_scheduled_send.go); created on first use.
+	scheduledSend *scheduledSendRuntime
+
 	// chatLinkStore is the DB-backed chat link code store (nil when entClient is nil).
 	// When non-nil, Telegram/Discord/Teams link services delegate to it.
 	chatLinkStore *ChatLinkStore
@@ -5493,6 +5497,9 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 		s.oidcKeyManager.StartCleanupLoop(ctx)
 	}
 
+	// Start the scheduled chat message sweeper (exits when ctx is cancelled).
+	s.startScheduledSendSweeper(ctx)
+
 	// Start notification dispatcher (uses the current event publisher).
 	// The dispatcher is resolved lazily so it works even if SetDispatcher
 	// is called after Start().
@@ -5617,6 +5624,10 @@ func (s *Server) CleanupResources(ctx context.Context) error {
 		if s.ctxCancel != nil {
 			s.ctxCancel()
 		}
+
+		// Let a scheduled chat message being delivered finish (bounded)
+		// while the stores and event publisher are still open.
+		s.stopScheduledSendSweeper(ctx)
 
 		// Wait for in-flight audit goroutines.
 		if cc != nil {
