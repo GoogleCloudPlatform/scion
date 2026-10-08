@@ -142,6 +142,7 @@ func getReimportRow(t *testing.T, s store.Store, kind storage.ResourceKind, slug
 			return reimportRow{}, false
 		}
 		require.NoError(t, err)
+		require.NotNil(t, tpl, "GetTemplateBySlug(%q) returned no template and no error", slug)
 		return reimportRow{tpl.ID, tpl.SourceURL, tpl.ContentHash}, true
 	}
 	hc, err := s.GetHarnessConfigBySlug(ctx, slug, store.HarnessConfigScopeGlobal, "")
@@ -149,6 +150,7 @@ func getReimportRow(t *testing.T, s store.Store, kind storage.ResourceKind, slug
 		return reimportRow{}, false
 	}
 	require.NoError(t, err)
+	require.NotNil(t, hc, "GetHarnessConfigBySlug(%q) returned no harness config and no error", slug)
 	return reimportRow{hc.ID, hc.SourceURL, hc.ContentHash}, true
 }
 
@@ -174,12 +176,14 @@ func markReimportRowStale(t *testing.T, s store.Store, kind storage.ResourceKind
 	if kind == storage.ResourceKindTemplate {
 		tpl, err := s.GetTemplate(ctx, id)
 		require.NoError(t, err)
+		require.NotNil(t, tpl, "GetTemplate(%q) returned no template and no error", id)
 		tpl.ContentHash = "stale"
 		require.NoError(t, s.UpdateTemplate(ctx, tpl))
 		return
 	}
 	hc, err := s.GetHarnessConfig(ctx, id)
 	require.NoError(t, err)
+	require.NotNil(t, hc, "GetHarnessConfig(%q) returned no harness config and no error", id)
 	hc.ContentHash = "stale"
 	require.NoError(t, s.UpdateHarnessConfig(ctx, hc))
 }
