@@ -1506,7 +1506,7 @@ const emptyResponseNote = "\n\nThe hub returned an empty response where a result
 //     because disabling the Hub would break orchestration connectivity.
 func wrapHubError(err error) error {
 	if errors.Is(err, apiclient.ErrNoContent) {
-		return fmt.Errorf("%w"+emptyResponseNote, err)
+		return fmt.Errorf("%w%s", err, emptyResponseNote)
 	}
 	if apiclient.IsUnauthorizedError(err) {
 		// `scion hub` is filtered out of the command tree in agent mode, so a
