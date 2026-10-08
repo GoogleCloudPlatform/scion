@@ -43,7 +43,7 @@ LEGACY_END = "<!-- END SCION MANAGED CODEX INSTRUCTIONS -->"
 # A scratch workspace for _test_ctx, so a context never falls back to the
 # real /workspace (ptone/scion#2993). Created in setUpModule and removed in
 # tearDownModule.
-_scratch_workspace: "tempfile.TemporaryDirectory[str] | None" = None
+_scratch_workspace: tempfile.TemporaryDirectory[str] | None = None
 
 
 def setUpModule() -> None:
