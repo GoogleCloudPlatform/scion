@@ -217,9 +217,9 @@ var routeAuthzManifest = map[string]string{
 	// ── Access constraint audit (method-scoped) ────────────────────────
 	"GET /api/v1/admin/access-constraints/{id}/audit": "admin", // Constraint audit history — hub.audit.read (super-admin) via Decide in handler; denials return 404
 
-	// ── Metrics dashboard (intentionally not admin-only) ───────────────
-	"/api/v1/metrics/":                "authenticated", // Metrics dashboard — any session
-	"/api/v1/admin/metrics-dashboard": "authenticated", // Legacy metrics dashboard alias — any session
+	// ── Metrics dashboard (route guard: hub.metrics.read) ──────────────
+	"/api/v1/metrics/":                "admin", // Hub-wide metrics dashboard — hub.metrics.read
+	"/api/v1/admin/metrics-dashboard": "admin", // Legacy metrics dashboard path — hub.metrics.read
 
 	// ── Notifications ──────────────────────────────────────────────────
 	"/api/v1/notifications":  "authenticated", // List notifications

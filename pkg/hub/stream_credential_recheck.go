@@ -1,0 +1,85 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package hub
+
+import (
+	"context"
+	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+)
+
+// Long-lived streams re-check the credential that opened them.
+//
+// A stream authorized once at open keeps running after the request's
+// authorization was decided. A stream that admits user access tokens
+// re-checks the request's credential on a fixed interval and ends when the
+// check fails, so a token that is revoked, expires, belongs to a suspended
+// user or no longer holds the permission stops receiving data within one
+// interval.
+
+// streamCredentialRecheckInterval is how often a long-lived stream
+// re-checks its credential. Tests shorten it.
+var streamCredentialRecheckInterval = 15 * time.Second
+
+// streamCredentialEndedEvent is the SSE event a stream writes before it
+// ends because its credential no longer authorizes it. It is the same for
+// every cause.
+const streamCredentialEndedEvent = "event: error\ndata: {\"message\":\"stream ended: the credential no longer authorizes this stream\"}\n\n"
+
+// streamCredentialStillAuthorized reports whether the credential of the
+// stream request in ctx still authorizes the stream: the authorization
+// decision for permission on resource is allowed again and, for a user
+// access token, the stored token is not revoked or expired, still has a
+// valid boundary and belongs to the same active user. A missing identity,
+// a non-user identity, a token credential without a token ID or any lookup
+// error fails the check.
+func (s *Server) streamCredentialStillAuthorized(ctx context.Context, resource Resource, action Action, permission string) bool {
+	if s.authzService == nil || s.store == nil {
+		return false
+	}
+	user, ok := GetIdentityFromContext(ctx).(UserIdentity)
+	if !ok || isNilIdentity(user) {
+		return false
+	}
+	credential := credentialContextForIdentity(user)
+	if credential.Kind == CredentialKindUAT {
+		if credential.ID == "" {
+			return false
+		}
+		token, err := s.store.GetUserAccessToken(ctx, credential.ID)
+		if err != nil || token == nil || token.Revoked || token.UserID != user.ID() {
+			return false
+		}
+		if token.ExpiresAt != nil && time.Now().After(*token.ExpiresAt) {
+			return false
+		}
+		if token.ValidateBoundary() != nil {
+			return false
+		}
+		owner, err := s.store.GetUser(ctx, token.UserID)
+		if err != nil || owner == nil || owner.Status == store.UserStatusSuspended {
+			return false
+		}
+	}
+	decision := s.authzService.Decide(ctx, AuthzRequest{
+		Principal:  principalContextForIdentity(user),
+		Credential: credential,
+		Resource:   resource,
+		Action:     action,
+		Permission: permission,
+	})
+	return decision.Allowed
+}

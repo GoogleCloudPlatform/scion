@@ -107,6 +107,9 @@ func (s *Server) handleDiagnosticsLogs(w http.ResponseWriter, r *http.Request) {
 // handleDiagnosticsLogsStream handles GET /api/v1/admin/diagnostics/logs/stream
 // It streams log entries from all system log IDs via SSE with source classification.
 // Authorization: enforced by routeGuard via hub.diagnostics.read permission.
+// The stream re-checks its credential every streamCredentialRecheckInterval
+// (streamCredentialStillAuthorized) and ends with streamCredentialEndedEvent
+// once the credential no longer authorizes hub.diagnostics.read.
 func (s *Server) handleDiagnosticsLogsStream(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w, http.MethodGet)
@@ -165,6 +168,9 @@ func (s *Server) handleDiagnosticsLogsStream(w http.ResponseWriter, r *http.Requ
 	heartbeat := time.NewTicker(15 * time.Second)
 	defer heartbeat.Stop()
 
+	recheck := time.NewTicker(streamCredentialRecheckInterval)
+	defer recheck.Stop()
+
 	// Server-side timeout: 10 minutes
 	timeout := time.NewTimer(10 * time.Minute)
 	defer timeout.Stop()
@@ -186,6 +192,12 @@ func (s *Server) handleDiagnosticsLogsStream(w http.ResponseWriter, r *http.Requ
 		case <-heartbeat.C:
 			_, _ = fmt.Fprintf(w, ":heartbeat %d\n\n", time.Now().UnixMilli())
 			flusher.Flush()
+		case <-recheck.C:
+			if !s.streamCredentialStillAuthorized(ctx, Resource{Type: "hub", ID: "hub"}, ActionRead, "hub.diagnostics.read") {
+				_, _ = fmt.Fprint(w, streamCredentialEndedEvent)
+				flusher.Flush()
+				return
+			}
 		case <-timeout.C:
 			_, _ = fmt.Fprintf(w, "event: timeout\ndata: {\"message\":\"Stream timeout\",\"reconnect\":true}\n\n")
 			flusher.Flush()

@@ -244,6 +244,14 @@ var PermissionAllowedBoundaries = map[string][]BoundaryKind{
 	"hub.messaging.update": {BoundaryKindHub}, "hub.experiments.update": {BoundaryKindHub},
 	"hub.lifecycle_hooks.read": {BoundaryKindHub}, "hub.lifecycle_hooks.update": {BoundaryKindHub},
 	"hub.settings.update": {BoundaryKindHub},
+
+	// hub.* integration and observability permissions act on the hub
+	// itself, so their selectors are hub-only.
+	"hub.scheduler.read": {BoundaryKindHub}, "hub.health.read": {BoundaryKindHub},
+	"hub.validate.execute": {BoundaryKindHub}, "hub.metrics.read": {BoundaryKindHub},
+	"hub.integrations.read": {BoundaryKindHub}, "hub.integrations.update": {BoundaryKindHub},
+	"hub.teams_manifest.read": {BoundaryKindHub}, "hub.diagnostics.read": {BoundaryKindHub},
+	"hub.github_app.read": {BoundaryKindHub}, "hub.github_app.update": {BoundaryKindHub},
 }
 
 // SelectorAllowedBoundaries returns the reviewed boundary kinds for a single
@@ -409,6 +417,14 @@ var SupportedTargetClasses = map[string][]TargetClassKind{
 	"hub.messaging.update": {TargetClassKindHubResource}, "hub.experiments.update": {TargetClassKindHubResource},
 	"hub.lifecycle_hooks.read": {TargetClassKindHubResource}, "hub.lifecycle_hooks.update": {TargetClassKindHubResource},
 	"hub.settings.update": {TargetClassKindHubResource},
+
+	// hub.* integration and observability permissions target the hub
+	// instance.
+	"hub.scheduler.read": {TargetClassKindHubResource}, "hub.health.read": {TargetClassKindHubResource},
+	"hub.validate.execute": {TargetClassKindHubResource}, "hub.metrics.read": {TargetClassKindHubResource},
+	"hub.integrations.read": {TargetClassKindHubResource}, "hub.integrations.update": {TargetClassKindHubResource},
+	"hub.teams_manifest.read": {TargetClassKindHubResource}, "hub.diagnostics.read": {TargetClassKindHubResource},
+	"hub.github_app.read": {TargetClassKindHubResource}, "hub.github_app.update": {TargetClassKindHubResource},
 }
 
 // SupportedTargetClassesFor returns the reviewed classes for permissionID.
