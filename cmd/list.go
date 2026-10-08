@@ -979,30 +979,57 @@ func displayAgents(agents []api.AgentInfo, all bool, hubMode bool) error {
 		}
 	}
 	_ = w.Flush()
-	if hint := provisionedOnlyListHint(agents); hint != "" {
-		fmt.Println()
-		fmt.Println(hint)
+	if hint := provisionedOnlyListHint(agents, all); hint != "" {
+		// stderr, so scripts that parse the table on stdout are unaffected.
+		fmt.Fprintln(os.Stderr)
+		fmt.Fprintln(os.Stderr, hint)
 	}
 	return nil
 }
 
+// provisionedOnlyHintMaxNames caps the agent names the scion list hint shows.
+const provisionedOnlyHintMaxNames = 5
+
 // provisionedOnlyListHint returns the line scion list prints after the table
 // when agents are provisioned but not started (ptone/scion#2875), or "".
-func provisionedOnlyListHint(agents []api.AgentInfo) string {
-	var names []string
+// With all (agents from several projects) names carry their project.
+func provisionedOnlyListHint(agents []api.AgentInfo, all bool) string {
+	var pending []api.AgentInfo
 	for _, a := range agents {
 		if a.ProvisionedOnly && a.Phase == string(state.PhaseCreated) {
-			names = append(names, a.Name)
+			pending = append(pending, a)
 		}
 	}
-	switch len(names) {
+	label := func(a api.AgentInfo) string {
+		if all && a.Project != "" {
+			return a.Project + "/" + a.Name
+		}
+		return a.Name
+	}
+	switch len(pending) {
 	case 0:
 		return ""
 	case 1:
-		return createNotStartedHint(names[0])
+		a := pending[0]
+		if all && a.Project != "" {
+			return fmt.Sprintf("Agent '%s' is provisioned but not started. Run '%s' in project %s to start it.",
+				label(a), createStartCommand(a.Name), a.Project)
+		}
+		return createNotStartedHint(a.Name)
 	default:
-		return fmt.Sprintf("%d agents are provisioned but not started (%s). Run '%s' to start one.",
-			len(names), strings.Join(names, ", "), createStartCommand("NAME"))
+		var names []string
+		for _, a := range pending {
+			if len(names) == provisionedOnlyHintMaxNames {
+				break
+			}
+			names = append(names, label(a))
+		}
+		more := ""
+		if extra := len(pending) - len(names); extra > 0 {
+			more = fmt.Sprintf(" and %d more", extra)
+		}
+		return fmt.Sprintf("%d agents are provisioned but not started (%s%s). Run '%s' to start one.",
+			len(pending), strings.Join(names, ", "), more, createStartCommand("NAME"))
 	}
 }
 
