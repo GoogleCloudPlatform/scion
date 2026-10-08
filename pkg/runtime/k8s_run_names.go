@@ -355,10 +355,12 @@ func (r *KubernetesRuntime) deletePodRunObjects(ctx context.Context, namespace, 
 
 // previousPodGone re-reads pod podName after cleanupStalePod and reports
 // whether the pod with UID uid (live, of run podRun, before the cleanup) is
-// gone: NotFound, or a pod of another UID holds the name. A pod still
-// present with that UID (its delete failed or it is still terminating), or
-// a failed read, reports false and is logged, so the run's per-run objects
-// are left (ptone/scion#3753).
+// gone: NotFound, or a pod of another UID and another run (or no run)
+// holds the name. A pod still present with that UID (its delete failed or
+// it is still terminating), a replacement pod of the same run (a retrying
+// start of that run, which mounts those objects), or a failed read,
+// reports false and is logged, so the run's per-run objects are left
+// (ptone/scion#3753).
 func (r *KubernetesRuntime) previousPodGone(ctx context.Context, namespace, podName, podRun string, uid types.UID) bool {
 	p, err := r.Client.Clientset.CoreV1().Pods(namespace).Get(ctx, podName, metav1.GetOptions{})
 	switch {
@@ -368,8 +370,12 @@ func (r *KubernetesRuntime) previousPodGone(ctx context.Context, namespace, podN
 		runtimeLog.Info("Cannot confirm the previous pod is gone; keeping its run's per-run objects",
 			"pod", podName, "namespace", namespace, "pod_uid", uid, "object_run_id", podRun, "error", err)
 		return false
-	case p.UID != uid:
+	case p.UID != uid && p.Labels[api.LabelRunID] != podRun:
 		return true
+	case p.UID != uid:
+		runtimeLog.Info("Previous pod replaced by a pod of the same run; keeping that run's per-run objects",
+			"pod", podName, "namespace", namespace, "pod_uid", uid, "replacement_pod_uid", p.UID, "object_run_id", podRun)
+		return false
 	}
 	runtimeLog.Info("Previous pod still present; keeping its run's per-run objects",
 		"pod", podName, "namespace", namespace, "pod_uid", uid, "object_run_id", podRun)

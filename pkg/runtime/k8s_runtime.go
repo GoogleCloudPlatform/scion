@@ -694,8 +694,9 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 			prevPodRun = livePodRun
 		}
 		// Remaining case: if a start of that previous pod's run is retrying
-		// at this moment (before its pod exists, or with a new pod that
-		// replaced the live one), this also removes that start's objects.
+		// at this moment, before its pod exists, this also removes that
+		// start's objects. (A pod of that run already holding the name
+		// keeps them: previousPodGone reports it not gone.)
 		// The no-run start wins, as a no-run delete does (see the
 		// delete-wins note in CleanupAgentResources); the retrying start
 		// then fails (verifyStartObjects, or its pod create) or its pod

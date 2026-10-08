@@ -959,6 +959,33 @@ func TestK8sRun_NoRunID_PreClean_LivePodReplaced_RemovesItsRunsObjects(t *testin
 	}
 }
 
+// A pod of the same run (a retrying start of that run) holding the name
+// after the previous pod's delete is not the previous pod gone: that
+// run's per-run objects, which the replacement mounts, are kept.
+func TestK8sRun_NoRunID_PreClean_LivePodReplacedBySameRun_ObjectsKept(t *testing.T) {
+	rt, cs, _, _ := newRunScopeRuntime(t)
+	prClock(rt, prNow)
+	x := k8sAgentObjectNames(rsAgent, rsRunA)
+	prSeedPodRefs(t, rt, rsRunA, corev1.PodRunning, x.Secret, x.Auth)
+	prSeedRunObjects(t, rt, rsRunA, "300", prNow)
+	podGVR := corev1.SchemeGroupVersion.WithResource("pods")
+	var once sync.Once
+	cs.PrependReactor("delete", "pods", func(action k8stesting.Action) (bool, k8sruntime.Object, error) {
+		once.Do(func() {
+			_ = cs.Tracker().Delete(podGVR, action.GetNamespace(), rsAgent)
+			_ = cs.Tracker().Add(&corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: rsAgent, Namespace: action.GetNamespace(), UID: "pod-retry", Labels: rsLabels(rsRunA, "start-retry")},
+				Status:     corev1.PodStatus{Phase: corev1.PodPending},
+			})
+		})
+		return true, nil, nil
+	})
+	runUntilPodSubmittedLate(t, rt, cs, rsRunConfig(""))
+	if got := prPresent(t, rt, x); got != prAll {
+		t.Errorf("run objects under a same-run replacement pod = %v, want all", got)
+	}
+}
+
 // --- no-run paths (an older hub) ---
 
 // A delete with no run after the pod is gone reaches the per-run objects
