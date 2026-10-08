@@ -446,6 +446,81 @@ func TestGrantDeleteMalformedIDSkipsStore(t *testing.T) {
 	}
 }
 
+// moveFirstStore moves the artifact to a new home just before PutGrant
+// runs, as a concurrent re-home would.
+type moveFirstStore struct {
+	Store
+	to string
+}
+
+func (m *moveFirstStore) PutGrant(ctx context.Context, g *Grant, max int, cross bool) (bool, error) {
+	if _, err := m.Store.UpdateArtifact(ctx, g.ArtifactID, ArtifactUpdate{
+		HomeGrant: &Grant{ID: "moved-" + g.ID, ArtifactID: g.ArtifactID, SubjectKind: SubjectScope, SubjectRef: m.to,
+			Permission: GrantRead, CreatedAt: time.Now()}, MaxGrants: max}); err != nil {
+		return false, err
+	}
+	return m.Store.PutGrant(ctx, g, max, cross)
+}
+
+// TestGrantHomeRulesUnderLock: the home project's read/write-only rule
+// and the cross-project switch are decided against the home as it is when
+// the grant is written, not as the handler last saw it.
+func TestGrantHomeRulesUnderLock(t *testing.T) {
+	f, id := newLinkFixture(t)
+	f.host.crossScope = true
+	f.svc.SetStore(&moveFirstStore{Store: f.store, to: "project-3"})
+	// project-3 was not home when the handler looked, but is when the
+	// grant is written: admin is refused.
+	if rec, _ := f.putGrant(userU, id, SubjectScope, "project-3", GrantAdmin); rec.Code != http.StatusBadRequest {
+		t.Errorf("admin grant to the new home: %d, want 400", rec.Code)
+	}
+	// The old home (project-1) is now another project: with the switch
+	// off, a grant to it is refused even though the handler saw it as home.
+	f.svc.SetStore(&moveFirstStore{Store: f.store, to: "project-4"})
+	f.host.crossScope = false
+	rec, _ := f.putGrant(userU, id, SubjectScope, "project-3", GrantRead)
+	if rec.Code != http.StatusForbidden || errCode(t, rec) != "cross_project_sharing_disabled" {
+		t.Errorf("grant to the old home after a move with the switch off: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestPatchRehomeTargetAdminGrant: moving to a project that holds an
+// admin grant on the artifact is refused until it is lowered.
+func TestPatchRehomeTargetAdminGrant(t *testing.T) {
+	f, id := newLinkFixture(t)
+	f.host.crossScope = true
+	f.host.allow(userU, "project-3", PermissionRead, PermissionCreate)
+	if rec, _ := f.putGrant(userU, id, SubjectScope, "project-3", GrantAdmin); rec.Code != http.StatusCreated {
+		t.Fatalf("admin grant to project-3: %d", rec.Code)
+	}
+	rec := f.patch(userU, id, `{"scopeRef": "project-3"}`)
+	if rec.Code != http.StatusConflict || errCode(t, rec) != "home_admin_grant" {
+		t.Fatalf("move onto an admin grant: %d %s", rec.Code, rec.Body.String())
+	}
+	f.putGrant(userU, id, SubjectScope, "project-3", GrantWrite)
+	if rec := f.patch(userU, id, `{"scopeRef": "project-3"}`); rec.Code != http.StatusOK {
+		t.Errorf("move after lowering: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestPatchSameScopeIsNotAMove: naming the current home in scopeRef does
+// not run the move gate, so an admin without a publishing role can change
+// the expiry with the same body.
+func TestPatchSameScopeIsNotAMove(t *testing.T) {
+	f, id := newLinkFixture(t)
+	admin := principal{PrincipalKindUser, "user-7", ""}
+	f.host.allow(admin, "project-1", PermissionRead) // no create
+	f.putGrant(userU, id, SubjectPrincipal, PrincipalRef(admin.kind, admin.ref), GrantAdmin)
+	exp := time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339)
+	rec := f.patch(admin, id, `{"scopeRef": "project-1", "expiresAt": "`+exp+`"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("same-scope patch: %d %s", rec.Code, rec.Body.String())
+	}
+	if got := decodeInto[PatchArtifactResponse](t, rec); got.Artifact.ExpiresAt == nil || got.Artifact.ScopeRef != "project-1" {
+		t.Errorf("same-scope patch result %+v", got)
+	}
+}
+
 // TestListAccessAndProjectShares: list rows say why the caller sees them,
 // and a list narrowed to a project includes artifacts shared with it,
 // marked, with shared=1 keeping only those.

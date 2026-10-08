@@ -37,6 +37,16 @@ var ErrTooManyLinks = errors.New("artifacts: too many share links")
 // the maximum number of principal and scope grants.
 var ErrTooManyGrants = errors.New("artifacts: too many grants")
 
+// ErrHomeGrantAdmin is returned when a write would make the scope grant of
+// an artifact's home scope an admin grant (PutGrant), or move an artifact
+// to a scope that holds an admin grant on it (UpdateArtifact). The home
+// project's grant is read or write only.
+var ErrHomeGrantAdmin = errors.New("artifacts: the home scope's grant may only be read or write")
+
+// ErrCrossScopeDisabled is returned by PutGrant for a scope grant to a
+// scope other than the artifact's home while sharing across scopes is off.
+var ErrCrossScopeDisabled = errors.New("artifacts: sharing with other scopes is off")
+
 // ErrTooManyPending is returned by CreateVersion when an artifact already
 // has the maximum number of pending versions.
 var ErrTooManyPending = errors.New("artifacts: too many pending versions")
@@ -295,11 +305,14 @@ type Store interface {
 	// PutGrant adds the principal or scope grant g to its artifact, or,
 	// when the artifact already has a grant for the same subject, sets
 	// that grant's permission to g's (g.ID and g.CreatedAt then take the
-	// stored grant's). created reports which. It refuses with
+	// stored grant's). created reports which. Under the artifact's lock it
+	// reads the artifact's home scope and refuses an admin grant to it
+	// (ErrHomeGrantAdmin) and, unless crossScope, a scope grant to any
+	// other scope (ErrCrossScopeDisabled). It refuses with
 	// ErrTooManyGrants when adding would exceed maxGrants principal and
 	// scope grants, and returns ErrNotFound when the artifact is absent or
 	// deleted.
-	PutGrant(ctx context.Context, g *Grant, maxGrants int) (created bool, err error)
+	PutGrant(ctx context.Context, g *Grant, maxGrants int, crossScope bool) (created bool, err error)
 
 	// DeleteGrant deletes principal or scope grant grantID of artifact
 	// artifactID. It returns ErrNotFound when there is no such grant, and
@@ -316,8 +329,9 @@ type Store interface {
 	// the artifact's lock and returns the updated artifact. It returns
 	// ErrNotFound when the artifact is absent or deleted, ErrConflict when
 	// a move would give the owner two live artifacts with the same key in
-	// the new scope, and ErrTooManyGrants when a move would exceed
-	// u.MaxGrants principal and scope grants.
+	// the new scope, ErrTooManyGrants when a move would exceed u.MaxGrants
+	// principal and scope grants, and ErrHomeGrantAdmin when the new scope
+	// holds an admin grant on the artifact (lower it first).
 	UpdateArtifact(ctx context.Context, artifactID string, u ArtifactUpdate) (*Artifact, error)
 
 	// SweepExpired soft-deletes up to limit live artifacts whose expiry is
@@ -327,23 +341,29 @@ type Store interface {
 
 	// TouchBlob records that a publish is about to rely on blob digest at
 	// now: a writer calls it before checking whether the blob exists, so
-	// the blob sweep spares the blob for the grace period, and waits for
-	// a sweep that is deleting it to finish.
-	TouchBlob(ctx context.Context, digest string, now time.Time) error
+	// the blob sweep spares the blob for the grace period, and it waits
+	// for a sweep that is deleting the blob to finish. marked reports that
+	// the blob was marked unreferenced until this touch: a sweep may have
+	// tried to delete it, and such a delete can still reach the object
+	// store late, so the writer must store the bytes again (a new object
+	// generation) rather than rely on the existing object.
+	TouchBlob(ctx context.Context, digest string, now time.Time) (marked bool, err error)
 
-	// MarkBlobs records, for each digest (at most MaxBlobBatch), whether a
-	// live artifact references it: a referenced digest's state is dropped;
+	// MarkBlobs records, for each blob (at most MaxBlobBatch), whether a
+	// live artifact references it: a referenced blob's state is dropped;
 	// an unreferenced one is marked unreferenced since now unless it
-	// already is.
-	MarkBlobs(ctx context.Context, digests []string, now time.Time) error
+	// already is, and its listed generation is recorded.
+	MarkBlobs(ctx context.Context, blobs []BlobMark, now time.Time) error
 
 	// ReclaimBlobs deletes up to limit blobs marked unreferenced since at
 	// or before cutoff (a touch clears the mark, so such a blob is also
 	// untouched since). For each, in one transaction holding the blob's
-	// state row, it checks the mark and the references again, calls del (which removes the bytes), and drops the row;
-	// a writer touching the blob meanwhile waits for that transaction. It
-	// returns how many blobs it deleted; an error from del ends the pass.
-	ReclaimBlobs(ctx context.Context, cutoff time.Time, limit int, del func(digest string) error) (int, error)
+	// state row, it checks the mark and the references again, calls del
+	// with the digest and the generation recorded at marking (0 when
+	// unknown), which removes the bytes, and drops the row; a writer
+	// touching the blob meanwhile waits for that transaction. It returns
+	// how many blobs it deleted; an error from del ends the pass.
+	ReclaimBlobs(ctx context.Context, cutoff time.Time, limit int, del func(digest string, generation int64) error) (int, error)
 
 	// AddMessageRefs records that message messageID references refs, in the
 	// artifact_message_ref link table. A reference already recorded for the
@@ -355,6 +375,13 @@ type Store interface {
 	// messageIDs, keyed by message id and ordered by artifact id. Messages
 	// without references are absent from the map.
 	ListMessageRefs(ctx context.Context, messageIDs []string) (map[string][]MessageRef, error)
+}
+
+// BlobMark is one listed blob for MarkBlobs.
+type BlobMark struct {
+	Digest string
+	// Generation is the object generation the listing returned, or 0.
+	Generation int64
 }
 
 // ArtifactUpdate is a change UpdateArtifact applies.

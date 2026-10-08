@@ -279,7 +279,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_artifact_grant_link
 // migrationBlobGC adds the table the blob sweep keeps its state in: for
 // each blob digest, when a publish last touched it (writers record this
 // before they check whether the blob exists) and since when no live
-// artifact references it; and the index the expiry sweep finds expired
+// artifact references it, with the object generation the sweep saw when
+// it marked it; and the index the expiry sweep finds expired
 // artifacts by.
 const migrationBlobGC = "0006_blob_gc"
 
@@ -287,7 +288,8 @@ const sqliteBlobGC = `
 CREATE TABLE IF NOT EXISTS artifact_blob (
     sha256             TEXT PRIMARY KEY,
     touched_at         TEXT,
-    unreferenced_since TEXT
+    unreferenced_since TEXT,
+    generation         INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_artifact_blob_unreferenced
     ON artifact_blob (unreferenced_since);
@@ -299,7 +301,8 @@ const postgresBlobGC = `
 CREATE TABLE IF NOT EXISTS artifact_blob (
     sha256             TEXT PRIMARY KEY,
     touched_at         TIMESTAMPTZ,
-    unreferenced_since TIMESTAMPTZ
+    unreferenced_since TIMESTAMPTZ,
+    generation         BIGINT
 );
 CREATE INDEX IF NOT EXISTS idx_artifact_blob_unreferenced
     ON artifact_blob (unreferenced_since);

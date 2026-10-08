@@ -246,16 +246,22 @@ func (s *Service) putBlob(ctx context.Context, b backend, sp *spooled, mediaType
 // spares a blob this publish relies on, and a sweep deleting it finishes
 // before the existence check below.
 func storeBlob(ctx context.Context, b backend, digest, mediaType string, open func() (io.Reader, error)) error {
-	if err := b.store.TouchBlob(ctx, digest, time.Now()); err != nil {
+	marked, err := b.store.TouchBlob(ctx, digest, time.Now())
+	if err != nil {
 		return err
 	}
 	p := BlobPath(b.hubID, digest)
-	exists, err := b.blobs.Exists(ctx, p)
-	if err != nil {
-		return fmt.Errorf("check blob: %w", err)
-	}
-	if exists {
-		return nil
+	// A blob that was marked may have a delete on its way to the object
+	// store; store it again so this publish does not depend on the old
+	// object (see deleteBlob).
+	if !marked {
+		exists, err := b.blobs.Exists(ctx, p)
+		if err != nil {
+			return fmt.Errorf("check blob: %w", err)
+		}
+		if exists {
+			return nil
+		}
 	}
 	body, err := open()
 	if err != nil {

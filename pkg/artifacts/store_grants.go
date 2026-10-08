@@ -42,7 +42,7 @@ func (s *sqlStore) lockLiveArtifact(ctx context.Context, tx *sql.Tx, artifactID 
 }
 
 // PutGrant implements Store.
-func (s *sqlStore) PutGrant(ctx context.Context, g *Grant, maxGrants int) (bool, error) {
+func (s *sqlStore) PutGrant(ctx context.Context, g *Grant, maxGrants int, crossScope bool) (bool, error) {
 	if g == nil || (g.SubjectKind != SubjectPrincipal && g.SubjectKind != SubjectScope) || g.SubjectRef == "" ||
 		(g.Permission != GrantRead && g.Permission != GrantWrite && g.Permission != GrantAdmin) {
 		return false, errors.New("artifacts: PutGrant needs a principal or scope grant with a permission")
@@ -54,6 +54,18 @@ func (s *sqlStore) PutGrant(ctx context.Context, g *Grant, maxGrants int) (bool,
 	defer func() { _ = tx.Rollback() }()
 	if err := s.lockLiveArtifact(ctx, tx, g.ArtifactID); err != nil {
 		return false, err
+	}
+	if g.SubjectKind == SubjectScope {
+		var home string
+		if err := tx.QueryRowContext(ctx, s.rebind(`SELECT scope_ref FROM artifact WHERE id = ?`), g.ArtifactID).Scan(&home); err != nil {
+			return false, fmt.Errorf("artifacts: read home: %w", err)
+		}
+		switch {
+		case g.SubjectRef == home && g.Permission == GrantAdmin:
+			return false, ErrHomeGrantAdmin
+		case g.SubjectRef != home && !crossScope:
+			return false, ErrCrossScopeDisabled
+		}
 	}
 	var (
 		id      string
@@ -201,12 +213,17 @@ func (s *sqlStore) moveArtifact(ctx context.Context, tx *sql.Tx, artifactID stri
 		WHERE artifact_id = ? AND subject_kind = ? AND subject_ref = ?`), artifactID, SubjectScope, old); err != nil {
 		return fmt.Errorf("artifacts: drop old home grant: %w", err)
 	}
-	var have, total int
+	var have, haveAdmin, total int
 	if err := tx.QueryRowContext(ctx, s.rebind(`SELECT
-		COALESCE(SUM(CASE WHEN subject_kind = ? AND subject_ref = ? THEN 1 ELSE 0 END), 0), COUNT(*)
+		COALESCE(SUM(CASE WHEN subject_kind = ? AND subject_ref = ? THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN subject_kind = ? AND subject_ref = ? AND permission = ? THEN 1 ELSE 0 END), 0), COUNT(*)
 		FROM artifact_grant WHERE artifact_id = ? AND subject_kind IN (?, ?)`),
-		SubjectScope, scope, artifactID, SubjectPrincipal, SubjectScope).Scan(&have, &total); err != nil {
+		SubjectScope, scope, SubjectScope, scope, GrantAdmin, artifactID, SubjectPrincipal, SubjectScope).Scan(&have, &haveAdmin, &total); err != nil {
 		return fmt.Errorf("artifacts: count grants: %w", err)
+	}
+	if haveAdmin > 0 {
+		// The home project's grant is read or write only.
+		return ErrHomeGrantAdmin
 	}
 	if have > 0 {
 		return nil
