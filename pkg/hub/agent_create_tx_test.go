@@ -43,7 +43,8 @@ type createTxFaultStore struct {
 	auditErrFor string
 	subErr      error
 	deactErr    error
-	// outerDeleteErr fails DeleteAgent outside a transaction only.
+	// outerDeleteErr fails DeleteAgent outside a transaction, and every
+	// FinalizeAgentDeletion (the conditional compensation's row delete).
 	outerDeleteErr error
 }
 
@@ -56,6 +57,22 @@ func (s *createTxFaultStore) wrap(tx store.Store) *createTxFaultStore {
 
 func (s *createTxFaultStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
 	return s.Store.WithTx(ctx, func(tx store.Store) error { return fn(s.wrap(tx)) })
+}
+
+// FinalizeAgentDeletion is the conditional compensation's transaction
+// (ptone/scion#3557): its hook sees the same faults as WithTx, and
+// outerDeleteErr fails it (it is a row delete outside WithTx).
+func (s *createTxFaultStore) FinalizeAgentDeletion(ctx context.Context, id string, pred store.DeletionPredicate, mode store.DeletionFinalizeMode, set store.DeletionFields, hook store.DeletionFinalizeHook) (int, error) {
+	if s.outerDeleteErr != nil {
+		return 0, s.outerDeleteErr
+	}
+	var wrapped store.DeletionFinalizeHook
+	if hook != nil {
+		wrapped = func(ctx context.Context, tx store.Store, a *store.Agent, m store.DeletionFinalizeMode) error {
+			return hook(ctx, s.wrap(tx), a, m)
+		}
+	}
+	return s.Store.FinalizeAgentDeletion(ctx, id, pred, mode, set, wrapped)
 }
 
 func (s *createTxFaultStore) CreateMutationAudit(ctx context.Context, r *store.MutationAuditRecord) error {
