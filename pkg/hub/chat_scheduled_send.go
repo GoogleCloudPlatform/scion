@@ -390,19 +390,33 @@ func (s *Server) writeScheduledReplay(w http.ResponseWriter, row *ScheduledChatM
 
 // handleScheduledList implements GET …/{key}/scheduled: the caller's own
 // pending, sending and failed messages in the conversation, only while the
-// caller can still access it.
+// caller can still read the topic, or is a participant of the DM.
 func (s *Server) handleScheduledList(w http.ResponseWriter, r *http.Request, key string) {
 	user := scheduledSendCaller(w, r, ActionRead)
 	if user == nil {
 		return
 	}
 	ctx := r.Context()
-	target, serr := s.authorizeChatSend(ctx, user, key)
-	if serr != nil {
-		serr.write(w)
-		return
+	var sms ScheduledMessageStore
+	if strings.HasPrefix(key, "dm:") {
+		// A DM lists for its participants with the first two steps of
+		// authorizeChatSend (the same helper, so the same responses), not
+		// the peer check: a message that failed because the peer changed
+		// stays visible to its sender so it can be dismissed or copied.
+		// The rows are the caller's own, as for cancel and dismiss.
+		if serr := authorizeDMKeyParticipant(key, user.ID()); serr != nil {
+			serr.write(w)
+			return
+		}
+		sms = s.scheduledMessageStore()
+	} else {
+		target, serr := s.authorizeChatSend(ctx, user, key)
+		if serr != nil {
+			serr.write(w)
+			return
+		}
+		sms = scheduledMessageStoreFrom(target.wcs)
 	}
-	sms := scheduledMessageStoreFrom(target.wcs)
 	if sms == nil {
 		writeError(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Chat not available", nil)
 		return
@@ -1132,9 +1146,8 @@ func (s *Server) checkScheduledDMFire(ctx context.Context, user UserIdentity, m 
 
 // scheduledFailureFromSendError maps a sendChatMessage error at fire time
 // to a failure reason. A 404 is a delivery error, not conversation_gone:
-// checkScheduledFire has just shown that the topic and its project exist,
-// and sendChatMessage also answers 404 for a store error while reading
-// them.
+// the conversation checks have just passed, and sendChatMessage also
+// answers 404 for a store error while reading the conversation.
 func scheduledFailureFromSendError(serr *chatSendError) string {
 	if serr.Status == http.StatusForbidden {
 		return ScheduledFailureNoAccess

@@ -189,7 +189,7 @@ func (s *pgWebChatStore) ListScheduledMessages(ctx context.Context, senderUserID
 }
 
 func (s *pgWebChatStore) CancelScheduledMessage(ctx context.Context, senderUserID, id string, now time.Time) (bool, error) {
-	return execOneRow(s.db.ExecContext(ctx,
+	return execOneRow("cancel scheduled message")(s.db.ExecContext(ctx,
 		`UPDATE webchat_scheduled_message SET status = $1, updated_at = $2
 		  WHERE id = $3 AND sender_user_id = $4 AND status = $5`,
 		ScheduledMessageCancelled, now.UTC(), id, senderUserID, ScheduledMessagePending))
@@ -227,35 +227,35 @@ func (s *pgWebChatStore) NextDueScheduledMessage(ctx context.Context, senderUser
 }
 
 func (s *pgWebChatStore) ClaimScheduledMessage(ctx context.Context, id string, now time.Time) (bool, error) {
-	return execOneRow(s.db.ExecContext(ctx,
+	return execOneRow("claim scheduled message")(s.db.ExecContext(ctx,
 		`UPDATE webchat_scheduled_message SET status = $1, claimed_at = $2, updated_at = $2
 		  WHERE id = $3 AND status = $4`,
 		ScheduledMessageSending, now.UTC(), id, ScheduledMessagePending))
 }
 
 func (s *pgWebChatStore) ReleaseScheduledMessage(ctx context.Context, id string, claimedAt, now time.Time) (bool, error) {
-	return execOneRow(s.db.ExecContext(ctx,
+	return execOneRow("release scheduled message")(s.db.ExecContext(ctx,
 		`UPDATE webchat_scheduled_message SET status = $1, claimed_at = NULL, updated_at = $2
 		  WHERE id = $3 AND status = $4 AND claimed_at = $5`,
 		ScheduledMessagePending, now.UTC(), id, ScheduledMessageSending, claimedAt.UTC()))
 }
 
 func (s *pgWebChatStore) MarkScheduledMessageSent(ctx context.Context, id, messageID string, claimedAt, now time.Time) (bool, error) {
-	return execOneRow(s.db.ExecContext(ctx,
+	return execOneRow("mark scheduled message sent")(s.db.ExecContext(ctx,
 		`UPDATE webchat_scheduled_message SET status = $1, message_id = $2, updated_at = $3
 		  WHERE id = $4 AND status = $5 AND claimed_at = $6`,
 		ScheduledMessageSent, messageID, now.UTC(), id, ScheduledMessageSending, claimedAt.UTC()))
 }
 
 func (s *pgWebChatStore) MarkScheduledMessageFailed(ctx context.Context, id, reason string, claimedAt, now time.Time) (bool, error) {
-	return execOneRow(s.db.ExecContext(ctx,
+	return execOneRow("mark scheduled message failed")(s.db.ExecContext(ctx,
 		`UPDATE webchat_scheduled_message SET status = $1, failure_reason = $2, updated_at = $3
 		  WHERE id = $4 AND status = $5 AND claimed_at = $6`,
 		ScheduledMessageFailed, reason, now.UTC(), id, ScheduledMessageSending, claimedAt.UTC()))
 }
 
 func (s *pgWebChatStore) SendNowScheduledMessage(ctx context.Context, senderUserID, id string, fireAt, now time.Time) (bool, error) {
-	return execOneRow(s.db.ExecContext(ctx,
+	return execOneRow("send now scheduled message")(s.db.ExecContext(ctx,
 		`UPDATE webchat_scheduled_message
 		    SET status = $1, fire_at = $2, failure_reason = NULL, message_id = NULL, claimed_at = NULL, updated_at = $3
 		  WHERE id = $4 AND sender_user_id = $5 AND status = $6 AND failure_reason IN ($7, $8)`,
@@ -264,7 +264,7 @@ func (s *pgWebChatStore) SendNowScheduledMessage(ctx context.Context, senderUser
 }
 
 func (s *pgWebChatStore) DismissScheduledMessage(ctx context.Context, senderUserID, id string, now time.Time) (bool, error) {
-	return execOneRow(s.db.ExecContext(ctx,
+	return execOneRow("dismiss scheduled message")(s.db.ExecContext(ctx,
 		`UPDATE webchat_scheduled_message SET status = $1, updated_at = $2
 		  WHERE id = $3 AND sender_user_id = $4 AND status = $5`,
 		ScheduledMessageCancelled, now.UTC(), id, senderUserID, ScheduledMessageFailed))
@@ -283,7 +283,7 @@ func (s *pgWebChatStore) ListStuckScheduledMessages(ctx context.Context, claimed
 }
 
 func (s *pgWebChatStore) MarkScheduledMessageInterrupted(ctx context.Context, id string, claimedAt, now time.Time) (bool, error) {
-	return execOneRow(s.db.ExecContext(ctx,
+	return execOneRow("mark scheduled message interrupted")(s.db.ExecContext(ctx,
 		`UPDATE webchat_scheduled_message SET status = $1, failure_reason = $2, updated_at = $3
 		  WHERE id = $4 AND status = $5 AND claimed_at = $6`,
 		ScheduledMessageFailed, ScheduledFailureInterrupted, now.UTC(),

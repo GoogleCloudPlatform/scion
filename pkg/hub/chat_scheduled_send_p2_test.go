@@ -233,6 +233,20 @@ func testScheduledStorePhase2Transitions(t *testing.T, sms ScheduledMessageStore
 	mustApply(t)(sms.MarkScheduledMessageSent(ctx, fenced.ID, "current", base, base))
 	assert.Equal(t, "current", get("p2-g", fenced.ID).MessageID)
 
+	// A claim with nanoseconds, as production makes, is fenced by the same
+	// value.
+	nanos := create("nanos", "p2-h")
+	nanoClaim := base.Add(123456789 * time.Nanosecond)
+	mustApply(t)(sms.ClaimScheduledMessage(ctx, nanos.ID, nanoClaim))
+	mustApply(t)(sms.MarkScheduledMessageSent(ctx, nanos.ID, "nano-msg", nanoClaim, base))
+	assert.Equal(t, "nano-msg", get("p2-h", nanos.ID).MessageID)
+	nanosFailed := create("nanos-failed", "p2-h")
+	mustApply(t)(sms.ClaimScheduledMessage(ctx, nanosFailed.ID, nanoClaim))
+	mustApply(t)(sms.MarkScheduledMessageFailed(ctx, nanosFailed.ID, ScheduledFailureNoAccess, nanoClaim, base))
+	nanosReleased := create("nanos-released", "p2-h")
+	mustApply(t)(sms.ClaimScheduledMessage(ctx, nanosReleased.ID, nanoClaim))
+	mustApply(t)(sms.ReleaseScheduledMessage(ctx, nanosReleased.ID, nanoClaim, base))
+
 	// Purge: sent and cancelled after 7 days, failed after 30; pending and
 	// sending kept whatever their age.
 	day := 24 * time.Hour

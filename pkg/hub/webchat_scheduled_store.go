@@ -54,9 +54,10 @@ type ScheduledChatMessage struct {
 	ID              string
 	SenderUserID    string
 	ConversationKey string
-	// ProjectID is the topic's project when the message was scheduled. It
-	// is kept for cleanup and filtering only and is never used to decide
-	// access: the fire path resolves the project from the topic again.
+	// ProjectID is the topic's project when the message was scheduled, or
+	// an agent DM's agent's project; empty for user DMs. It is kept for
+	// cleanup and filtering only and is never used to decide access: the
+	// fire path checks the conversation again.
 	ProjectID      string
 	Content        string
 	ReplyToID      string
@@ -372,7 +373,7 @@ func collectSQLiteScheduled(rows *sql.Rows) ([]ScheduledChatMessage, error) {
 }
 
 func (s *sqliteWebChatStore) CancelScheduledMessage(ctx context.Context, senderUserID, id string, now time.Time) (bool, error) {
-	return execOneRow(s.db.ExecContext(ctx,
+	return execOneRow("cancel scheduled message")(s.db.ExecContext(ctx,
 		`UPDATE webchat_scheduled_message SET status = ?, updated_at = ?
 		  WHERE id = ? AND sender_user_id = ? AND status = ?`,
 		ScheduledMessageCancelled, sqliteScheduledTime(now), id, senderUserID, ScheduledMessagePending))
@@ -412,35 +413,35 @@ func (s *sqliteWebChatStore) NextDueScheduledMessage(ctx context.Context, sender
 
 func (s *sqliteWebChatStore) ClaimScheduledMessage(ctx context.Context, id string, now time.Time) (bool, error) {
 	ts := sqliteScheduledTime(now)
-	return execOneRow(s.db.ExecContext(ctx,
+	return execOneRow("claim scheduled message")(s.db.ExecContext(ctx,
 		`UPDATE webchat_scheduled_message SET status = ?, claimed_at = ?, updated_at = ?
 		  WHERE id = ? AND status = ?`,
 		ScheduledMessageSending, ts, ts, id, ScheduledMessagePending))
 }
 
 func (s *sqliteWebChatStore) ReleaseScheduledMessage(ctx context.Context, id string, claimedAt, now time.Time) (bool, error) {
-	return execOneRow(s.db.ExecContext(ctx,
+	return execOneRow("release scheduled message")(s.db.ExecContext(ctx,
 		`UPDATE webchat_scheduled_message SET status = ?, claimed_at = NULL, updated_at = ?
 		  WHERE id = ? AND status = ? AND claimed_at = ?`,
 		ScheduledMessagePending, sqliteScheduledTime(now), id, ScheduledMessageSending, sqliteScheduledTime(claimedAt)))
 }
 
 func (s *sqliteWebChatStore) MarkScheduledMessageSent(ctx context.Context, id, messageID string, claimedAt, now time.Time) (bool, error) {
-	return execOneRow(s.db.ExecContext(ctx,
+	return execOneRow("mark scheduled message sent")(s.db.ExecContext(ctx,
 		`UPDATE webchat_scheduled_message SET status = ?, message_id = ?, updated_at = ?
 		  WHERE id = ? AND status = ? AND claimed_at = ?`,
 		ScheduledMessageSent, messageID, sqliteScheduledTime(now), id, ScheduledMessageSending, sqliteScheduledTime(claimedAt)))
 }
 
 func (s *sqliteWebChatStore) MarkScheduledMessageFailed(ctx context.Context, id, reason string, claimedAt, now time.Time) (bool, error) {
-	return execOneRow(s.db.ExecContext(ctx,
+	return execOneRow("mark scheduled message failed")(s.db.ExecContext(ctx,
 		`UPDATE webchat_scheduled_message SET status = ?, failure_reason = ?, updated_at = ?
 		  WHERE id = ? AND status = ? AND claimed_at = ?`,
 		ScheduledMessageFailed, reason, sqliteScheduledTime(now), id, ScheduledMessageSending, sqliteScheduledTime(claimedAt)))
 }
 
 func (s *sqliteWebChatStore) SendNowScheduledMessage(ctx context.Context, senderUserID, id string, fireAt, now time.Time) (bool, error) {
-	return execOneRow(s.db.ExecContext(ctx,
+	return execOneRow("send now scheduled message")(s.db.ExecContext(ctx,
 		`UPDATE webchat_scheduled_message
 		    SET status = ?, fire_at = ?, failure_reason = NULL, message_id = NULL, claimed_at = NULL, updated_at = ?
 		  WHERE id = ? AND sender_user_id = ? AND status = ? AND failure_reason IN (?, ?)`,
@@ -449,7 +450,7 @@ func (s *sqliteWebChatStore) SendNowScheduledMessage(ctx context.Context, sender
 }
 
 func (s *sqliteWebChatStore) DismissScheduledMessage(ctx context.Context, senderUserID, id string, now time.Time) (bool, error) {
-	return execOneRow(s.db.ExecContext(ctx,
+	return execOneRow("dismiss scheduled message")(s.db.ExecContext(ctx,
 		`UPDATE webchat_scheduled_message SET status = ?, updated_at = ?
 		  WHERE id = ? AND sender_user_id = ? AND status = ?`,
 		ScheduledMessageCancelled, sqliteScheduledTime(now), id, senderUserID, ScheduledMessageFailed))
@@ -488,7 +489,7 @@ func stuckScheduledMessages(rows []ScheduledChatMessage, claimedBefore time.Time
 }
 
 func (s *sqliteWebChatStore) MarkScheduledMessageInterrupted(ctx context.Context, id string, claimedAt, now time.Time) (bool, error) {
-	return execOneRow(s.db.ExecContext(ctx,
+	return execOneRow("mark scheduled message interrupted")(s.db.ExecContext(ctx,
 		`UPDATE webchat_scheduled_message SET status = ?, failure_reason = ?, updated_at = ?
 		  WHERE id = ? AND status = ? AND claimed_at = ?`,
 		ScheduledMessageFailed, ScheduledFailureInterrupted, sqliteScheduledTime(now),
@@ -530,14 +531,17 @@ func scheduledRowsAffected(res sql.Result, err error, what string) (int64, error
 	return n, nil
 }
 
-// execOneRow reports whether an UPDATE affected exactly one row.
-func execOneRow(res sql.Result, err error) (bool, error) {
-	if err != nil {
-		return false, fmt.Errorf("webchat store: update scheduled message: %w", err)
+// execOneRow returns a check that an UPDATE for operation op affected
+// exactly one row; errors name the operation.
+func execOneRow(op string) func(sql.Result, error) (bool, error) {
+	return func(res sql.Result, err error) (bool, error) {
+		if err != nil {
+			return false, fmt.Errorf("webchat store: %s: %w", op, err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return false, fmt.Errorf("webchat store: %s: %w", op, err)
+		}
+		return n == 1, nil
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return false, fmt.Errorf("webchat store: update scheduled message: %w", err)
-	}
-	return n == 1, nil
 }

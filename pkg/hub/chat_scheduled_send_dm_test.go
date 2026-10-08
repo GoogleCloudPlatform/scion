@@ -23,6 +23,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"testing"
 	"time"
@@ -316,4 +317,169 @@ func testScheduledDMDeleteRemovesScheduled(t *testing.T, sms ScheduledMessageSto
 func TestScheduledStore_SQLite_DMDelete(t *testing.T) {
 	sms, _ := openScheduledStorePair(t)
 	testScheduledDMDeleteRemovesScheduled(t, sms[0])
+}
+
+// dmPeerFaultStore fails the DM peer lookups of a scheduled delivery with
+// a store error (not "not found") while armed.
+type dmPeerFaultStore struct {
+	store.Store
+	fault  *storeFaultSwitch
+	peerID string
+}
+
+func (w *dmPeerFaultStore) faulty(ctx context.Context, id string) bool {
+	exec, _ := ExecutorContextFromContext(ctx)
+	return w.fault.Active() && exec.Kind == scheduledSendClientType && id == w.peerID
+}
+
+func (w *dmPeerFaultStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
+	if w.faulty(ctx, id) {
+		return nil, errors.New("injected store error")
+	}
+	return w.Store.GetAgent(ctx, id)
+}
+
+func (w *dmPeerFaultStore) GetUser(ctx context.Context, id string) (*store.User, error) {
+	if w.faulty(ctx, id) {
+		return nil, errors.New("injected store error")
+	}
+	return w.Store.GetUser(ctx, id)
+}
+
+// A store error while checking the DM peer at fire time hands the row back
+// to pending (claim cleared); nothing is sent.
+func TestScheduledSend_DM_PeerLookupError_Released(t *testing.T) {
+	for _, peerKind := range []string{"agent", "user"} {
+		t.Run(peerKind, func(t *testing.T) {
+			srv, s, alice, bob, project, wrapped, fault := setupDemoPolicyTestWithFault(t,
+				func(inner store.Store, fault *storeFaultSwitch) *dmPeerFaultStore {
+					return &dmPeerFaultStore{Store: inner, fault: fault}
+				})
+			f := newScheduledSendFixtureOn(t, srv, s, alice, bob, project)
+			ctx := context.Background()
+			key := scheduledDMKey(t, "agent", f.agent.ID, "user", f.bob.ID)
+			wrapped.peerID = f.agent.ID
+			if peerKind == "user" {
+				key = scheduledDMKey(t, "user", f.alice.ID, "user", f.bob.ID)
+				if key != "dm:user:"+f.alice.ID+":user:"+f.bob.ID {
+					key = scheduledDMKey(t, "user", f.bob.ID, "user", f.alice.ID)
+				}
+				wrapped.peerID = f.alice.ID
+			}
+			sm := f.scheduleIn(t, f.bob, key, "peer lookup fails "+peerKind)
+			fault.Arm()
+
+			f.srv.sweepScheduledMessages(ctx, time.Now().UTC())
+			row := f.row(t, f.bob, sm.ID)
+			assert.Equal(t, ScheduledMessagePending, row.Status)
+			assert.Nil(t, row.ClaimedAt)
+			assert.Empty(t, f.threadMessages(t, key))
+			assert.Empty(t, f.dispatcher.getMessages())
+		})
+	}
+}
+
+// Send now runs the DM checks again before sending: an agent that stopped
+// accepting the sender's messages after Send now gets nothing.
+func TestScheduledSend_DM_SendNowRunsDMChecks(t *testing.T) {
+	f := newScheduledSendFixture(t)
+	ctx := context.Background()
+	key := scheduledDMKey(t, "agent", f.agent.ID, "user", f.bob.ID)
+	now := time.Now().UTC()
+	m := newTestScheduledRow("dm-sn-checks", f.bob.ID, now.Add(-2*time.Hour))
+	m.ConversationKey = key
+	_, _, err := f.sms.CreateScheduledMessage(ctx, m)
+	require.NoError(t, err)
+	failRow(t, f.sms, m.ID, ScheduledFailureMissed, now)
+	rec := doRequestAsUser(t, f.srv, f.bob, http.MethodPost, scheduledConversationPath(key)+"/"+m.ID+"/send-now", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	agent, err := f.store.GetAgent(ctx, f.agent.ID)
+	require.NoError(t, err)
+	agent.MessageMode = store.MessageModeNone
+	require.NoError(t, f.store.UpdateAgent(ctx, agent))
+
+	time.Sleep(time.Until(f.row(t, f.bob, m.ID).FireAt))
+	assert.Equal(t, 1, f.srv.sweepScheduledMessages(ctx, time.Now().UTC()))
+	row := f.row(t, f.bob, m.ID)
+	assert.Equal(t, ScheduledMessageFailed, row.Status)
+	assert.Equal(t, ScheduledFailureNoAccess, row.FailureReason)
+	assert.Empty(t, f.threadMessages(t, key))
+	assert.Empty(t, f.dispatcher.getMessages())
+}
+
+// A DM message that failed because the peer changed stays listed for its
+// sender, who can dismiss it. A non-participant still gets the same
+// refusal as a live send.
+func TestScheduledSend_DM_FailedRowListedAfterPeerChange(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, f *scheduledSendFixture) string
+	}{
+		{"agent stops accepting messages", func(t *testing.T, f *scheduledSendFixture) string {
+			key := scheduledDMKey(t, "agent", f.agent.ID, "user", f.bob.ID)
+			f.scheduleIn(t, f.bob, key, "agent changes")
+			agent, err := f.store.GetAgent(context.Background(), f.agent.ID)
+			require.NoError(t, err)
+			agent.MessageMode = store.MessageModeNone
+			require.NoError(t, f.store.UpdateAgent(context.Background(), agent))
+			return key
+		}},
+		{"peer user suspended", func(t *testing.T, f *scheduledSendFixture) string {
+			peer := &store.User{ID: tid("sched-dm-list-peer"), Email: "list-peer@test.com",
+				DisplayName: "Peer", Role: store.UserRoleMember, Status: store.UserStatusActive, Created: time.Now()}
+			require.NoError(t, f.store.CreateUser(context.Background(), peer))
+			key := scheduledDMKey(t, "user", f.bob.ID, "user", peer.ID)
+			if key != "dm:user:"+f.bob.ID+":user:"+peer.ID {
+				key = scheduledDMKey(t, "user", peer.ID, "user", f.bob.ID)
+			}
+			f.scheduleIn(t, f.bob, key, "peer changes")
+			peer.Status = store.UserStatusSuspended
+			require.NoError(t, f.store.UpdateUser(context.Background(), peer))
+			return key
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newScheduledSendFixture(t)
+			key := tc.setup(t, f)
+			assert.Equal(t, 1, f.srv.sweepScheduledMessages(context.Background(), time.Now().UTC()))
+
+			rec := doRequestAsUser(t, f.srv, f.bob, http.MethodGet, scheduledConversationPath(key), nil)
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			var body struct {
+				ScheduledMessages []scheduledMessageResponse `json:"scheduledMessages"`
+			}
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+			require.Len(t, body.ScheduledMessages, 1)
+			failed := body.ScheduledMessages[0]
+			assert.Equal(t, ScheduledMessageFailed, failed.Status)
+			assert.Equal(t, ScheduledFailureNoAccess, failed.FailureReason)
+
+			rec = doRequestAsUser(t, f.srv, f.bob, http.MethodPost, scheduledConversationPath(key)+"/"+failed.ID+"/dismiss", nil)
+			assert.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+			rec = doRequestAsUser(t, f.srv, f.bob, http.MethodGet, scheduledConversationPath(key), nil)
+			require.Equal(t, http.StatusOK, rec.Code)
+			assert.NotContains(t, rec.Body.String(), failed.ID)
+		})
+	}
+}
+
+// For a non-participant or a malformed key, the DM list answers exactly
+// what a live send answers.
+func TestScheduledSend_DM_ListRefusalsMatchLiveSend(t *testing.T) {
+	f := newScheduledSendFixture(t)
+	outsider := &store.User{ID: tid("sched-dm-outsider"), Email: "dm-outsider@test.com",
+		DisplayName: "Out", Role: store.UserRoleMember, Status: store.UserStatusActive, Created: time.Now()}
+	require.NoError(t, f.store.CreateUser(context.Background(), outsider))
+	for _, key := range []string{
+		scheduledDMKey(t, "agent", f.agent.ID, "user", f.bob.ID), // not a participant
+		"dm:agent:not-a-uuid", // malformed
+	} {
+		list := doRequestAsUser(t, f.srv, outsider, http.MethodGet, scheduledConversationPath(key), nil)
+		live := doRequestAsUser(t, f.srv, outsider, http.MethodPost, "/api/v1/chat/conversations/"+key+"/messages",
+			map[string]interface{}{"content": "hi"})
+		assert.Equal(t, live.Code, list.Code, key)
+		assert.Equal(t, live.Body.String(), list.Body.String(), key)
+		assert.Contains(t, []int{http.StatusForbidden, http.StatusBadRequest}, list.Code)
+	}
 }
