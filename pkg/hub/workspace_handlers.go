@@ -539,10 +539,10 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 			if relaySkillResolutionError(w, err) {
 				return
 			}
-			if relayHarnessConfigRefusal(w, err) {
+			if relayWorkspaceStorageUnconfigured(w, err) {
 				return
 			}
-			if relayWorkspaceStorageUnconfigured(w, err) {
+			if relayHarnessConfigRefusal(w, err) {
 				return
 			}
 			RuntimeError(w, "Failed to dispatch agent: "+err.Error())

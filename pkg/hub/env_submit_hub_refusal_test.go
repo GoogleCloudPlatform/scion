@@ -22,6 +22,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -68,11 +69,18 @@ func TestSubmitAgentEnv_RelaysHubRefusal(t *testing.T) {
 			require.True(t, writeAgentTokenIssueError(want, tc.err) || writeEmptyPerAgentCapabilityError(want, tc.err))
 			require.Equal(t, tc.status, want.Code)
 
-			rec := submitEnvWithFinalizeErr(t, "env-hub-refusal", tc.err)
+			rec, got := submitEnvWithFinalizeErrAgent(t, "env-hub-refusal", tc.err)
 
 			require.Equal(t, tc.status, rec.Code, rec.Body.String())
 			assert.JSONEq(t, want.Body.String(), rec.Body.String(), "relayed exactly as the hub classifies it")
 			assert.Contains(t, rec.Body.String(), `"code":"`+tc.code+`"`)
+
+			// The rollback is unchanged (the change is response-only): a
+			// hub refusal settles the start claim as released
+			// (startOutcomeOf), and the agent stays in provisioning, ready
+			// for another submit.
+			assert.Equal(t, string(state.PhaseProvisioning), got.Phase)
+			assert.Empty(t, got.StartClaimID, "the start claim is released")
 		})
 	}
 }

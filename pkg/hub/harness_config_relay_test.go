@@ -188,6 +188,14 @@ func (d *finalizeEnvErrDispatcher) DispatchFinalizeEnv(context.Context, *store.A
 // finalize-env dispatch fails with err.
 func submitEnvWithFinalizeErr(t *testing.T, name string, err error) *httptest.ResponseRecorder {
 	t.Helper()
+	rec, _ := submitEnvWithFinalizeErrAgent(t, name, err)
+	return rec
+}
+
+// submitEnvWithFinalizeErrAgent is submitEnvWithFinalizeErr that also
+// returns the agent row as stored after the request.
+func submitEnvWithFinalizeErrAgent(t *testing.T, name string, err error) (*httptest.ResponseRecorder, *store.Agent) {
+	t.Helper()
 	srv, s, project := setupCreateAgentServer(t, &finalizeEnvErrDispatcher{err: err})
 	agent := &store.Agent{
 		ID:              tid("agent-" + name),
@@ -198,8 +206,11 @@ func submitEnvWithFinalizeErr(t *testing.T, name string, err error) *httptest.Re
 		Phase:           string(state.PhaseProvisioning),
 	}
 	require.NoError(t, s.CreateAgent(context.Background(), agent))
-	return doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+project.ID+"/agents/"+name+"/env",
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+project.ID+"/agents/"+name+"/env",
 		SubmitEnvRequest{Env: map[string]string{"API_KEY": "v"}})
+	got, gerr := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, gerr)
+	return rec, got
 }
 
 func TestSubmitAgentEnv_RelaysHarnessConfigRefusal(t *testing.T) {
@@ -212,11 +223,17 @@ func TestSubmitAgentEnv_RelaysHarnessConfigRefusal(t *testing.T) {
 }
 
 func TestSubmitAgentEnv_OtherBrokerErrorsStay502(t *testing.T) {
-	for _, err := range []error{
-		brokerHarnessConfigErr(http.StatusInternalServerError, "runtime_error", "boom"),
-		errors.New("dial tcp: connection refused"),
-	} {
-		rec := submitEnvWithFinalizeErr(t, "env-other-fail", err)
-		require.Equal(t, http.StatusBadGateway, rec.Code, rec.Body.String())
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{name: "500 runtime_error", err: brokerHarnessConfigErr(http.StatusInternalServerError, "runtime_error", "boom")},
+		{name: "transport error", err: errors.New("dial tcp: connection refused")},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := submitEnvWithFinalizeErr(t, "env-other-fail", tc.err)
+			require.Equal(t, http.StatusBadGateway, rec.Code, rec.Body.String())
+		})
 	}
 }
