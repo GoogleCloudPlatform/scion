@@ -1346,6 +1346,34 @@ waitLoop:
 		log.Debug("Heartbeat loop stopped")
 	}
 
+	// The harness has exited by now. Determine the final exit code and
+	// whether this was a crash; the session-metrics backstop below needs
+	// it, and it is a local read only. Also recognize ExitCodeLimitsExceeded from the child process itself
+	// (e.g., the harness detected limits before the supervisor signal).
+	if !limitsExceeded && result.code == handlers.ExitCodeLimitsExceeded {
+		limitsExceeded = true
+	}
+
+	// The harness runs as a tmux grandchild, so the supervised child's exit
+	// code (result.code) reflects sh/tmux, not the harness itself. The tmux
+	// agent-window wrapper records the harness's real exit code to a fixed
+	// file; prefer it when present. If absent (e.g. the container was SIGKILLed
+	// or OOM-killed before the harness could write), fall back to result.code.
+	harnessCode := readHarnessExitCode()
+	if harnessCode != nil {
+		log.Info("Recovered harness exit code %d from %s", *harnessCode, state.HarnessExitCodeFile)
+	}
+
+	outcome := classifyExit(result.code, result.err, harnessCode, limitsExceeded, requestedShutdown.Load())
+	finalCode := outcome.exitCode
+	limitsExceeded = outcome.limitsExceeded
+
+	// Report a session whose session-end hook never ran (the stop killed
+	// the harness, or the harness has no session-end hook). This runs
+	// first in the shutdown sequence, before the slower steps below, so it
+	// fits inside the runtime's stop grace period. It is bounded.
+	reportOpenSessionAtShutdown(agentHome, outcome, hub.NewClient)
+
 	// Clean up the GitHub token file on exit
 	if hub.IsGitHubAppEnabled() {
 		tokenPath := hub.GitHubTokenPath()
@@ -1386,27 +1414,6 @@ waitLoop:
 	if err := lifecycleManager.RunSessionEnd(); err != nil {
 		log.Error("Session-end hooks failed: %v", err)
 	}
-
-	// Determine the final exit code and whether this was a crash.
-	// Also recognize ExitCodeLimitsExceeded from the child process itself
-	// (e.g., the harness detected limits before the supervisor signal).
-	if !limitsExceeded && result.code == handlers.ExitCodeLimitsExceeded {
-		limitsExceeded = true
-	}
-
-	// The harness runs as a tmux grandchild, so the supervised child's exit
-	// code (result.code) reflects sh/tmux, not the harness itself. The tmux
-	// agent-window wrapper records the harness's real exit code to a fixed
-	// file; prefer it when present. If absent (e.g. the container was SIGKILLed
-	// or OOM-killed before the harness could write), fall back to result.code.
-	harnessCode := readHarnessExitCode()
-	if harnessCode != nil {
-		log.Info("Recovered harness exit code %d from %s", *harnessCode, state.HarnessExitCodeFile)
-	}
-
-	outcome := classifyExit(result.code, result.err, harnessCode, limitsExceeded, requestedShutdown.Load())
-	finalCode := outcome.exitCode
-	limitsExceeded = outcome.limitsExceeded
 
 	// Update local agent-info.json BEFORE the Hub report so the broker
 	// heartbeat can relay crash/limits state even if the Hub call is slow

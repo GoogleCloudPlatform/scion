@@ -36,7 +36,10 @@ type SessionStateStore interface {
 	// saves agg's state, or deletes it when apply reports that the session
 	// ended. All of this happens under one lock. Update calls apply exactly
 	// once, even when it returns an error, so the event is always counted
-	// in memory.
+	// in memory. The one exception: when the persisted state marks the
+	// event's session as already closed and reported (see
+	// FileSessionState.CloseOpenSession), apply is not called and Update
+	// returns nil, so the event can neither reopen nor report that session.
 	Update(agg *telemetry.Aggregator, event *hooks.Event, apply func() (ended bool)) error
 }
 
@@ -63,6 +66,13 @@ const (
 type sessionStateFile struct {
 	Version    int                       `json:"version"`
 	Aggregator telemetry.AggregatorState `json:"aggregator"`
+
+	// Closed marks a tombstone: the session in Aggregator (only its ID and
+	// start time are kept) was finalized and reported by the init daemon
+	// at shutdown, because its session-end was never handled. Hook events
+	// for that session that arrive afterwards are ignored, so a session-end
+	// hook still in flight at shutdown cannot report it a second time.
+	Closed bool `json:"closed,omitempty"`
 }
 
 // FileSessionState is a SessionStateStore backed by a JSON file. A sibling
@@ -105,7 +115,16 @@ func (s *FileSessionState) Update(agg *telemetry.Aggregator, event *hooks.Event,
 	}
 	defer unlock()
 
-	if st, ok := s.load(); ok {
+	if st, closed, ok := s.load(); ok {
+		if closed {
+			if closedSessionOwnsEvent(st.SessionID, event) {
+				log.Info("Session metrics: ignoring %s event for session %s, already reported at shutdown",
+					event.Name, st.SessionID)
+				return nil
+			}
+			// A new session: the tombstone has done its job.
+			st = telemetry.AggregatorState{}
+		}
 		if st.SessionID != "" && event.Data.SessionID != "" && st.SessionID != event.Data.SessionID {
 			log.Info("Session metrics: %s event for session %s discards the unreported state of session %s",
 				event.Name, event.Data.SessionID, st.SessionID)
@@ -122,6 +141,18 @@ func (s *FileSessionState) Update(agg *telemetry.Aggregator, event *hooks.Event,
 		return nil
 	}
 	return s.save(agg.State())
+}
+
+// closedSessionOwnsEvent reports whether event belongs to the session that a
+// tombstone closed. A session-start always begins a new session (a resumed
+// harness session may reuse the ID; it is counted as a new segment). Any
+// other event belongs to the closed session unless it carries a different
+// session ID.
+func closedSessionOwnsEvent(closedID string, event *hooks.Event) bool {
+	if event.Name == hooks.EventSessionStart {
+		return false
+	}
+	return event.Data.SessionID == "" || event.Data.SessionID == closedID
 }
 
 // lockWait returns how long lock waits for another holder to release it.
@@ -141,10 +172,16 @@ func (s *FileSessionState) lock() (func(), error) {
 	if err != nil {
 		return nil, fmt.Errorf("opening lock file: %w", err)
 	}
-	wait := s.lockWait()
+	return flockWait(f, s.lockWait())
+}
+
+// flockWait takes an exclusive flock on f, polling for up to wait. On
+// success it returns a func that releases the lock and closes f; on failure
+// f is already closed.
+func flockWait(f *os.File, wait time.Duration) (func(), error) {
 	deadline := time.Now().Add(wait)
 	for {
-		err = unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB)
+		err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB)
 		if err == nil {
 			break
 		}
@@ -166,36 +203,46 @@ func (s *FileSessionState) lock() (func(), error) {
 
 // load reads the persisted state. A missing file yields ok=false silently;
 // an unreadable, oversized, corrupt or wrong-version file is logged and also
-// yields ok=false, so the caller starts fresh.
-func (s *FileSessionState) load() (telemetry.AggregatorState, bool) {
+// yields ok=false, so the caller starts fresh. closed reports a tombstone
+// (see sessionStateFile.Closed).
+func (s *FileSessionState) load() (st telemetry.AggregatorState, closed bool, ok bool) {
 	f, err := os.Open(s.Path)
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
 			log.Error("Session metrics: cannot read %s, starting fresh: %v", s.Path, err)
 		}
-		return telemetry.AggregatorState{}, false
+		return telemetry.AggregatorState{}, false, false
 	}
 	defer func() { _ = f.Close() }()
 
 	data, err := io.ReadAll(io.LimitReader(f, sessionStateMaxBytes+1))
 	if err != nil {
 		log.Error("Session metrics: cannot read %s, starting fresh: %v", s.Path, err)
-		return telemetry.AggregatorState{}, false
+		return telemetry.AggregatorState{}, false, false
 	}
+	file, err := decodeSessionState(data)
+	if err != nil {
+		log.Error("Session metrics: %s %v, starting fresh", s.Path, err)
+		return telemetry.AggregatorState{}, false, false
+	}
+	return file.Aggregator, file.Closed, true
+}
+
+// decodeSessionState parses a state file read with a limit of
+// sessionStateMaxBytes+1 bytes. Its errors read as a predicate of the file
+// ("is corrupt: ...").
+func decodeSessionState(data []byte) (sessionStateFile, error) {
 	if len(data) > sessionStateMaxBytes {
-		log.Error("Session metrics: %s is larger than %d bytes, starting fresh", s.Path, sessionStateMaxBytes)
-		return telemetry.AggregatorState{}, false
+		return sessionStateFile{}, fmt.Errorf("is larger than %d bytes", sessionStateMaxBytes)
 	}
 	var file sessionStateFile
 	if err := json.Unmarshal(data, &file); err != nil {
-		log.Error("Session metrics: %s is corrupt, starting fresh: %v", s.Path, err)
-		return telemetry.AggregatorState{}, false
+		return sessionStateFile{}, fmt.Errorf("is corrupt: %v", err)
 	}
 	if file.Version != sessionStateVersion {
-		log.Error("Session metrics: %s has version %d, want %d, starting fresh", s.Path, file.Version, sessionStateVersion)
-		return telemetry.AggregatorState{}, false
+		return sessionStateFile{}, fmt.Errorf("has version %d, want %d", file.Version, sessionStateVersion)
 	}
-	return file.Aggregator, true
+	return file, nil
 }
 
 // save writes the state to a 0600 temp file in the same directory and
