@@ -17,6 +17,7 @@ import (
 // restartAuthEnvKeys are host env vars GatherAuthWithEnv may read outside
 // broker mode; they are blanked so only opts.Env feeds the resolution.
 var restartAuthEnvKeys = []string{
+	"SCION_METADATA_MODE",
 	"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "GOOGLE_APPLICATION_CREDENTIALS",
 	"GOOGLE_CLOUD_PROJECT", "GCLOUD_PROJECT", "CLOUDSDK_CORE_PROJECT", "ANTHROPIC_VERTEX_PROJECT_ID",
 	"GOOGLE_CLOUD_REGION", "CLOUD_ML_REGION", "GOOGLE_CLOUD_LOCATION", "CLAUDE_CODE_USE_VERTEX",
@@ -57,7 +58,7 @@ func readAuthCandidates(t *testing.T, home string) map[string]string {
 	return payload.EnvSecretFiles
 }
 
-// ptone/scion#3810: a restart whose resolution carries only ambient env (a
+// A restart whose resolution carries only ambient env (a
 // region var, as the hub injects) and not the credential supplied at create
 // must restage auth-candidates.json with the recorded credential, so the
 // container-side provisioner can still select an auth method.
@@ -111,7 +112,7 @@ func runStagedClaudeProvision(t *testing.T, home string) (string, error) {
 
 // The real claude provision.py, staged by a real Start, succeeds on the
 // first start and again on a restart whose resolution carries only ambient
-// env (ptone/scion#3810: it used to exit 1 with "no valid auth method").
+// env; it used to exit 1 with "no valid auth method found".
 func TestStart_ClaudeProvisionSucceedsTwiceAcrossRestart(t *testing.T) {
 	if _, err := exec.LookPath("python3"); err != nil {
 		t.Skip("python3 not available")
@@ -148,5 +149,88 @@ func TestStart_ClaudeProvisionSucceedsTwiceAcrossRestart(t *testing.T) {
 	}
 	if resolved.Method != "api-key" {
 		t.Errorf("auth method after restart = %q, want api-key\n%s", resolved.Method, out)
+	}
+}
+
+func provisionedMethod(t *testing.T, home string) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(home, ".scion", "harness", "outputs", "resolved-auth.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var resolved struct {
+		Method string `json:"method"`
+	}
+	if err := json.Unmarshal(data, &resolved); err != nil {
+		t.Fatal(err)
+	}
+	return resolved.Method
+}
+
+// startAndProvision runs Start with env and then the staged claude
+// provision.py, returning the auth method it selected.
+func startAndProvision(t *testing.T, mgr Manager, opts api.StartOptions, env map[string]string, home string) string {
+	t.Helper()
+	opts.Env = env
+	if _, err := mgr.Start(context.Background(), opts); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if out, err := runStagedClaudeProvision(t, home); err != nil {
+		t.Fatalf("provision failed: %v\n%s", err, out)
+	}
+	return provisionedMethod(t, home)
+}
+
+// A restart that switches the agent from an API key to Vertex AI with an
+// ADC file selects vertex-ai: the stale recorded API key is not carried.
+func TestStart_ClaudeRestartSwitchToVertexWithADC(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not available")
+	}
+	e, _ := newClaudeRestartEnv(t)
+	adc := filepath.Join(t.TempDir(), "adc.json")
+	if err := os.WriteFile(adc, []byte(`{"type":"authorized_user","client_id":"c","client_secret":"s","refresh_token":"r"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mgr := policyTestManager(nil)
+	opts := api.StartOptions{Name: "switch-vertex", ProjectPath: e.scion, HarnessConfig: "claude"}
+	home := config.GetAgentHomePath(e.scion, "switch-vertex")
+	if m := startAndProvision(t, mgr, opts, map[string]string{"ANTHROPIC_API_KEY": "sk-ant-test-0123456789abcdefghij"}, home); m != "api-key" {
+		t.Fatalf("first start method = %q, want api-key", m)
+	}
+	m := startAndProvision(t, mgr, opts, map[string]string{
+		"GOOGLE_CLOUD_PROJECT":           "p",
+		"CLOUD_ML_REGION":                "us-east5",
+		"GOOGLE_APPLICATION_CREDENTIALS": adc,
+	}, home)
+	if m != "vertex-ai" {
+		t.Errorf("restart method = %q, want vertex-ai (stale API key carried)", m)
+	}
+}
+
+// With a GCP service account assigned (project and region, no ADC file), a
+// restart selects the same method as the first start with the same inputs:
+// the recorded API key (recorded because it was part of the first start's
+// inputs) wins over vertex-ai in the provisioner's selection order.
+func TestStart_ClaudeRestartWithServiceAccountMatchesFirstStart(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not available")
+	}
+	e, _ := newClaudeRestartEnv(t)
+	t.Setenv("SCION_METADATA_MODE", "assign")
+	mgr := policyTestManager(nil)
+	opts := api.StartOptions{Name: "sa-vertex", ProjectPath: e.scion, HarnessConfig: "claude"}
+	home := config.GetAgentHomePath(e.scion, "sa-vertex")
+	first := startAndProvision(t, mgr, opts, map[string]string{
+		"ANTHROPIC_API_KEY":    "sk-ant-test-0123456789abcdefghij",
+		"GOOGLE_CLOUD_PROJECT": "p",
+		"CLOUD_ML_REGION":      "us-east5",
+	}, home)
+	restart := startAndProvision(t, mgr, opts, map[string]string{
+		"GOOGLE_CLOUD_PROJECT": "p",
+		"CLOUD_ML_REGION":      "us-east5",
+	}, home)
+	if first != "api-key" || restart != first {
+		t.Errorf("first start method = %q, restart method = %q; want both api-key", first, restart)
 	}
 }

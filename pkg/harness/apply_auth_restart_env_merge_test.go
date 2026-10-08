@@ -86,6 +86,12 @@ func (f *restartFixture) firstStart(env map[string]string) map[string][]byte {
 // restored, then ApplyAuthSettings runs with this start's resolution.
 func (f *restartFixture) restart(rec map[string][]byte, env map[string]string) (envSecrets map[string]string) {
 	f.t.Helper()
+	return f.restartResolved(rec, &api.ResolvedAuth{Method: "container-script", EnvVars: env})
+}
+
+// restartResolved is restart with a full resolution (e.g. from ResolveAuth).
+func (f *restartFixture) restartResolved(rec map[string][]byte, resolved *api.ResolvedAuth) (envSecrets map[string]string) {
+	f.t.Helper()
 	if err := os.RemoveAll(f.secretsDir()); err != nil {
 		f.t.Fatal(err)
 	}
@@ -100,7 +106,7 @@ func (f *restartFixture) restart(rec map[string][]byte, env map[string]string) (
 		names = append(names, name)
 	}
 	f.h.SetRecordedSecrets(names)
-	if err := f.h.ApplyAuthSettings(f.agentHome, &api.ResolvedAuth{Method: "container-script", EnvVars: env}); err != nil {
+	if err := f.h.ApplyAuthSettings(f.agentHome, resolved); err != nil {
 		f.t.Fatalf("restart ApplyAuthSettings: %v", err)
 	}
 	data, err := os.ReadFile(filepath.Join(f.agentHome, ".scion", "harness", "inputs", "auth-candidates.json"))
@@ -125,7 +131,7 @@ func (f *restartFixture) secretValue(name string) string {
 	return string(data)
 }
 
-// ptone/scion#3810: a restart whose resolution carries only ambient env (a
+// A restart whose resolution carries only ambient env (a
 // region var) but not the credential must still reference the recorded
 // credential, and must keep it in StagedSecretNames so the record keeps it.
 func TestApplyAuthSettings_RestartWithAmbientEnvCarriesRecordedCredential(t *testing.T) {
@@ -173,11 +179,16 @@ func TestApplyAuthSettings_RestartWithPartialVertexEnvCarriesRecordedCredential(
 func TestApplyAuthSettings_RestartExplicitTypeUnsatisfiedCarriesRecordedCredential(t *testing.T) {
 	f := newRestartFixture(t)
 	rec := f.firstStart(map[string]string{"ANTHROPIC_API_KEY": "sk-ant-first-0123456789"})
-	got := f.restart(rec, map[string]string{
-		"SCION_HARNESS_SELECTED_AUTH":    "api-key",
-		"GOOGLE_CLOUD_PROJECT":           "p",
-		"GOOGLE_CLOUD_REGION":            "us-central1",
-		"GOOGLE_APPLICATION_CREDENTIALS": "/adc.json",
+	// vertex-ai is fully resolved (project, region and the ADC file mapping
+	// ResolveAuth produces), but the explicitly selected type is api-key.
+	got := f.restartResolved(rec, &api.ResolvedAuth{
+		Method: "container-script",
+		EnvVars: map[string]string{
+			"SCION_HARNESS_SELECTED_AUTH": "api-key",
+			"GOOGLE_CLOUD_PROJECT":        "p",
+			"GOOGLE_CLOUD_REGION":         "us-central1",
+		},
+		Files: []api.FileMapping{{ContainerPath: adcContainerPath}},
 	})
 	if _, ok := got["ANTHROPIC_API_KEY"]; !ok {
 		t.Fatalf("recorded ANTHROPIC_API_KEY not carried for explicit api-key: %v", got)
@@ -202,19 +213,6 @@ func TestApplyAuthSettings_RestartRotatedCredentialNotShadowed(t *testing.T) {
 			t.Errorf("stale credential would be re-recorded: %v", f.h.StagedSecretNames())
 		}
 	}
-
-	// Fully satisfied vertex-ai (ADC via its alternative env key) is a
-	// rotation too.
-	f2 := newRestartFixture(t)
-	rec2 := f2.firstStart(map[string]string{"ANTHROPIC_API_KEY": "sk-ant-stale-0123456789"})
-	got2 := f2.restart(rec2, map[string]string{
-		"GOOGLE_CLOUD_PROJECT":           "p",
-		"GOOGLE_CLOUD_REGION":            "us-central1",
-		"GOOGLE_APPLICATION_CREDENTIALS": "/adc.json",
-	})
-	if _, ok := got2["ANTHROPIC_API_KEY"]; ok {
-		t.Fatalf("stale recorded ANTHROPIC_API_KEY shadows a fully resolved vertex-ai: %v", got2)
-	}
 }
 
 // Rotation of the same key: the new value is staged and wins.
@@ -227,5 +225,82 @@ func TestApplyAuthSettings_RestartSameKeyRotatedUsesNewValue(t *testing.T) {
 	}
 	if v := f.secretValue("ANTHROPIC_API_KEY"); v != "sk-ant-new-0123456789" {
 		t.Errorf("ANTHROPIC_API_KEY = %q, want the newly resolved value", v)
+	}
+}
+
+// For every bundled harness whose vertex-ai type requires the gcloud-adc
+// file, the decision is driven through the real ResolveAuth: a restart
+// that resolves only project/region (no ADC) still carries the recorded
+// API key, while a restart that switches to vertex-ai with an ADC file
+// (which ResolveAuth turns into a file mapping, not an env var) does not
+// carry it, so the provisioner selects vertex-ai rather than the stale key.
+func TestApplyAuthSettings_RestartVertexSwitchThroughResolveAuth(t *testing.T) {
+	adc := filepath.Join(t.TempDir(), "adc.json")
+	if err := os.WriteFile(adc, []byte(`{"type":"authorized_user"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ harness, keyEnv string }{
+		{"claude", "ANTHROPIC_API_KEY"},
+		{"gemini-cli", "GEMINI_API_KEY"},
+		{"antigravity", "GEMINI_API_KEY"},
+		{"hermes", "OPENAI_API_KEY"},
+		{"grok-build", "XAI_API_KEY"},
+	} {
+		t.Run(tc.harness, func(t *testing.T) {
+			newFixture := func() *restartFixture {
+				dir, err := filepath.Abs(filepath.Join("..", "..", "harnesses", tc.harness))
+				if err != nil {
+					t.Fatal(err)
+				}
+				hc, err := config.LoadHarnessConfigDir(dir)
+				if err != nil {
+					t.Fatalf("load %s: %v", dir, err)
+				}
+				h, err := NewContainerScriptHarness(dir, hc.Config)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if h.entry.Auth == nil || h.entry.Auth.Types["vertex-ai"].RequiredFiles == nil {
+					t.Fatalf("fixture: %s has no vertex-ai required_files", tc.harness)
+				}
+				return &restartFixture{t: t, h: h, agentHome: t.TempDir()}
+			}
+			resolve := func(f *restartFixture, auth api.AuthConfig) *api.ResolvedAuth {
+				r, err := f.h.ResolveAuth(auth)
+				if err != nil {
+					t.Fatalf("ResolveAuth: %v", err)
+				}
+				return r
+			}
+			first := api.AuthConfig{EnvVars: map[string]string{tc.keyEnv: "key-0123456789abcdef"}}
+
+			// Ambient project/region only: the recorded key is carried.
+			f := newFixture()
+			if err := f.h.ApplyAuthSettings(f.agentHome, resolve(f, first)); err != nil {
+				t.Fatal(err)
+			}
+			rec := map[string][]byte{tc.keyEnv: []byte("key-0123456789abcdef")}
+			got := f.restartResolved(rec, resolve(f, api.AuthConfig{GoogleCloudProject: "p", GoogleCloudRegion: "us-east5"}))
+			if _, ok := got[tc.keyEnv]; !ok {
+				t.Errorf("ambient-only restart: recorded %s not carried: %v", tc.keyEnv, got)
+			}
+
+			// Switch to vertex-ai with an ADC file: the stale key is not carried.
+			f = newFixture()
+			if err := f.h.ApplyAuthSettings(f.agentHome, resolve(f, first)); err != nil {
+				t.Fatal(err)
+			}
+			switched := resolve(f, api.AuthConfig{GoogleCloudProject: "p", GoogleCloudRegion: "us-east5", GoogleAppCredentials: adc})
+			if len(switched.Files) == 0 {
+				t.Fatalf("fixture: ResolveAuth produced no ADC file mapping: %+v", switched)
+			}
+			if _, ok := switched.EnvVars["GOOGLE_APPLICATION_CREDENTIALS"]; ok {
+				t.Fatalf("fixture: ResolveAuth unexpectedly produced GOOGLE_APPLICATION_CREDENTIALS as env")
+			}
+			got = f.restartResolved(rec, switched)
+			if _, ok := got[tc.keyEnv]; ok {
+				t.Errorf("vertex-ai switch: stale recorded %s shadows the resolved ADC: %v", tc.keyEnv, got)
+			}
+		})
 	}
 }

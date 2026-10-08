@@ -283,6 +283,14 @@ func (c *ContainerScriptHarness) InjectSystemPrompt(agentHome string, content []
 	return c.stageInputFile(agentHome, "system-prompt.md", content)
 }
 
+// adcContainerPath is where ResolveAuth maps the GCP ADC file
+// (GOOGLE_APPLICATION_CREDENTIALS / AuthConfig.GoogleAppCredentials), and
+// googleAppCredentialsField is the required_files field that names it.
+const (
+	adcContainerPath          = "~/.config/gcloud/application_default_credentials.json"
+	googleAppCredentialsField = "GoogleAppCredentials"
+)
+
 // ResolveAuth returns a container-side auth plan: env candidates flow as files
 // under .scion/harness/secrets/, and any harness-native file mappings declared
 // in config_dir-bound auth metadata are surfaced to the runtime so the
@@ -322,7 +330,7 @@ func (c *ContainerScriptHarness) ResolveAuth(auth api.AuthConfig) (*api.Resolved
 	if auth.GoogleAppCredentials != "" {
 		resolved.Files = append(resolved.Files, api.FileMapping{
 			SourcePath:    auth.GoogleAppCredentials,
-			ContainerPath: "~/.config/gcloud/application_default_credentials.json",
+			ContainerPath: adcContainerPath,
 		})
 	}
 
@@ -586,19 +594,22 @@ func (c *ContainerScriptHarness) ApplyAuthSettings(agentHome string, resolved *a
 	// (SetRecordedSecrets); no other file in the secrets directory is
 	// considered. Recorded file-type secrets (names matching the harness
 	// config's required_files) are merged when not overridden by the new
-	// resolution. Recorded env-type secrets are merged per key (never
-	// overriding a key the new resolution supplied), unless the new
-	// resolution on its own already satisfies an auth type: then a
-	// credential rotated or switched on the control plane is not shadowed by
-	// a stale recorded one. Ambient, non-credential env (e.g. a region var)
-	// in the new resolution therefore no longer drops a recorded credential
-	// on restart (ptone/scion#3810).
+	// resolution.
+	//
+	// Recorded env-type secrets are merged unless the new resolution on its
+	// own already satisfies an auth type; then a credential rotated or
+	// switched on the control plane is not shadowed by a stale recorded one.
+	// So a restart whose resolution carries only ambient, non-credential env
+	// (e.g. a region var) still references the recorded credential.
+	//
+	// The merge is a plain assignment: a key present in both maps has the
+	// same value ("$HOME/.scion/harness/secrets/<NAME>"), and that file
+	// already holds the new resolution's value because stageEnvSecretFiles
+	// wrote it over the restored one, so the new value wins either way.
 	existingEnvSecrets, existingFileSecrets := c.recordedSecretFiles(agentHome)
-	if !c.resolutionSatisfiesAuthType(selectedAuthType(c.entry.AuthSelectedType, resolved), resolved.EnvVars, envSecretFiles, fileSecretFiles) {
+	if !c.resolutionSatisfiesAuthType(selectedAuthType(c.entry.AuthSelectedType, resolved), resolved.EnvVars, envSecretFiles, fileSecretFiles, resolved.Files) {
 		for k, v := range existingEnvSecrets {
-			if _, exists := envSecretFiles[k]; !exists {
-				envSecretFiles[k] = v
-			}
+			envSecretFiles[k] = v
 		}
 	}
 	for k, v := range existingFileSecrets {
@@ -675,19 +686,22 @@ func selectedAuthType(configured string, resolved *api.ResolvedAuth) string {
 }
 
 // resolutionSatisfiesAuthType reports whether the current resolution alone
-// (its env vars and the env/file secrets staged from it, before anything is
-// carried from the control plane's record) satisfies an auth type declared
-// in the harness-config: the explicitly selected type when there is one,
-// else any declared type.
+// (its env vars, the env/file secrets staged from it and its file mappings,
+// before anything is carried from the control plane's record) satisfies an
+// auth type declared in the harness-config: the explicitly selected type
+// when there is one, else any declared type.
 //
 // A type is satisfied when it declares at least one requirement, every
 // required_env group has a non-empty key in the resolution, and every
-// required_files entry is staged or covered by one of its
-// alternative_env_keys. skipped_when_gcp_service_account_assigned is not
-// honoured here: the resolution does not say whether a service account is
-// attached, and treating such a type as unsatisfied only means recorded
-// credentials are carried, which is the restart-safe direction.
-func (c *ContainerScriptHarness) resolutionSatisfiesAuthType(selected string, envVars map[string]string, envSecretFiles, fileSecretFiles map[string]string) bool {
+// required_files entry is covered by requiredFileResolved.
+//
+// skipped_when_gcp_service_account_assigned is not honoured: an attached
+// service account (project and region, no credential file) is not treated
+// as satisfying vertex-ai, so a recorded credential is still carried. This
+// matches the first start, where the same inputs (the credential, which is
+// why it was recorded, plus project and region) select the credential
+// method in the provisioners' selection order.
+func (c *ContainerScriptHarness) resolutionSatisfiesAuthType(selected string, envVars map[string]string, envSecretFiles, fileSecretFiles map[string]string, files []api.FileMapping) bool {
 	if c.entry.Auth == nil || len(c.entry.Auth.Types) == 0 {
 		return false
 	}
@@ -714,17 +728,7 @@ func (c *ContainerScriptHarness) resolutionSatisfiesAuthType(selected string, en
 			}
 		}
 		for _, rf := range t.RequiredFiles {
-			if _, ok := fileSecretFiles[rf.Name]; ok {
-				continue
-			}
-			ok := false
-			for _, k := range rf.AlternativeEnvKeys {
-				if hasEnv(k) {
-					ok = true
-					break
-				}
-			}
-			if !ok {
+			if !requiredFileResolved(rf, fileSecretFiles, files, hasEnv) {
 				return false
 			}
 		}
@@ -736,6 +740,36 @@ func (c *ContainerScriptHarness) resolutionSatisfiesAuthType(selected string, en
 	}
 	for _, t := range c.entry.Auth.Types {
 		if satisfied(t) {
+			return true
+		}
+	}
+	return false
+}
+
+// requiredFileResolved reports whether the resolution covers required file
+// rf: it was staged as a file secret, one of the resolution's file mappings
+// targets it (its target_suffix, or for the GoogleAppCredentials field the
+// ADC path ResolveAuth maps GOOGLE_APPLICATION_CREDENTIALS to), or one of its
+// alternative_env_keys is set.
+func requiredFileResolved(rf api.HarnessAuthFileRequirement, fileSecretFiles map[string]string, files []api.FileMapping, hasEnv func(string) bool) bool {
+	if _, ok := fileSecretFiles[rf.Name]; ok {
+		return true
+	}
+	suffix := strings.TrimRight(rf.TargetSuffix, "/")
+	if suffix != "" && !strings.HasPrefix(suffix, "/") {
+		suffix = "/" + suffix
+	}
+	for _, f := range files {
+		cp := strings.TrimRight(f.ContainerPath, "/")
+		if suffix != "" && strings.HasSuffix(cp, suffix) {
+			return true
+		}
+		if rf.Field == googleAppCredentialsField && cp == adcContainerPath {
+			return true
+		}
+	}
+	for _, k := range rf.AlternativeEnvKeys {
+		if hasEnv(k) {
 			return true
 		}
 	}
