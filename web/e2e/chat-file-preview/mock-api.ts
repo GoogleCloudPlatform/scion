@@ -73,7 +73,6 @@ async function stubMainClientModule(page: Page): Promise<void> {
           isConnected() { return false; }
           setScope() {}
           setCurrentUserId() {}
-          hydrate() {}
           getAgent() { return undefined; }
           getAgents() { return new Map(); }
           getDeletedAgentIds() { return new Set(); }

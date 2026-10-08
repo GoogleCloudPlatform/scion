@@ -18,6 +18,7 @@ import { TerminalSessionRegistry } from './terminal-sessions.js';
 import type { Agent } from '../shared/types.js';
 import { _appFrameRefCountForTests } from '../components/shared/app-frame.js';
 import {
+  TERMINAL_DRAG_MIME,
   TERMINAL_PALETTE_NEW_AGENT_EVENT,
   type TerminalPaletteNewAgentDetail,
 } from './terminal-workspace-events.js';
@@ -273,6 +274,117 @@ describe('data-effective-layout attribute (#1716)', () => {
   });
 });
 
+describe('empty multi-pane slots show drop targets (ptone/scion#3778)', () => {
+  let root: TerminalWorkspaceRoot;
+  const AGENT_ID = '11111111-1111-4111-8111-111111111111';
+
+  beforeEach(() => {
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      cb(0);
+      return 0;
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve(
+          new Response(JSON.stringify({ id: AGENT_ID, name: 'test', phase: 'running' }), {
+            status: 200,
+          })
+        )
+      )
+    );
+    vi.stubGlobal(
+      'WebSocket',
+      class {
+        onopen = null;
+        onclose = null;
+        send = vi.fn();
+        close = vi.fn();
+        readyState = 0;
+      }
+    );
+    root = new WorkspaceRoot();
+    document.body.append(root.element);
+  });
+
+  afterEach(() => {
+    root.dispose();
+    root.element.remove();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  function placeholders(): HTMLElement[] {
+    return [
+      ...getPaneHost(root).querySelectorAll<HTMLElement>('.terminal-slot-placeholder'),
+    ].filter((ph) => !ph.hidden);
+  }
+
+  /** Overlays that cover the whole pane host when shown. */
+  function visibleOverlays(): HTMLElement[] {
+    return [
+      ...getPaneHost(root).querySelectorAll<HTMLElement>('.terminal-empty, .terminal-status'),
+    ].filter((el) => !el.hidden);
+  }
+
+  function dropOn(el: HTMLElement, sessionKey: string): void {
+    const data = new Map<string, string>([[TERMINAL_DRAG_MIME, sessionKey]]);
+    const event = new Event('drop', { bubbles: true, cancelable: true }) as DragEvent;
+    Object.defineProperty(event, 'dataTransfer', {
+      value: {
+        types: [...data.keys()],
+        getData: (type: string): string => data.get(type) ?? '',
+      },
+    });
+    el.dispatchEvent(event);
+  }
+
+  const presets = [
+    ['two-columns', 2],
+    ['two-rows', 2],
+    ['four', 4],
+  ] as const;
+
+  it.each(presets)('shows %s placeholders with no terminals open', async (preset, count) => {
+    root.layoutManager.setLayout(preset);
+    await flush();
+    expect(placeholders()).toHaveLength(count);
+    expect(visibleOverlays()).toEqual([]);
+  });
+
+  it.each(presets)(
+    'shows %s placeholders that accept a drop when no slot is filled',
+    async (preset, count) => {
+      const registry = new TerminalSessionRegistry({
+        hubUrl: window.location.origin,
+        accountId: 'test',
+      });
+      const session = root.create(registry, AGENT_ID);
+      root.layoutManager.setLayout(preset);
+      await flush();
+
+      expect(root.layoutManager.getVisibleSlots().every((s) => s === null)).toBe(true);
+      const slots = placeholders();
+      expect(slots).toHaveLength(count);
+      expect(slots.map((ph) => ph.dataset.slotIndex)).toEqual(
+        Array.from({ length: count }, (_, i) => String(i))
+      );
+      expect(visibleOverlays()).toEqual([]);
+
+      for (let i = 0; i < count; i++) {
+        const target = getPaneHost(root).querySelector<HTMLElement>(
+          `.terminal-slot-placeholder[data-slot-index="${i}"]`
+        );
+        expect(target).not.toBeNull();
+        dropOn(target!, session.state.key);
+        await flush();
+        const visible = root.layoutManager.getVisibleSlots();
+        expect(visible[i]).toBe(session.state.key);
+        expect(visible.filter((s) => s !== null)).toHaveLength(1);
+      }
+    }
+  );
+});
 describe('focus outline suppression in single-pane mode (#1716)', () => {
   let root: TerminalWorkspaceRoot;
 
@@ -384,6 +496,120 @@ describe('focus outline suppression in single-pane mode (#1716)', () => {
     expect(host.dataset.effectiveLayout).toBe('two-columns');
     // CSS rule now matches again for focused panes
   });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// Pane host background behind empty slot placeholders (ptone/scion#3803)
+// ────────────────────────────────────────────────────────────────────────────
+
+describe('pane host background follows the theme only behind placeholders (#3803)', () => {
+  const AGENT_A = '11111111-1111-4111-8111-111111111111';
+  const AGENT_B = '22222222-2222-4222-8222-222222222222';
+  // --scion-bg values of the light and dark theme blocks in theme.css.
+  const THEMES = { light: 'rgb(248, 250, 252)', dark: 'rgb(15, 23, 42)' } as const;
+  const TERMINAL_HOST_BG = '#111827';
+  let root: TerminalWorkspaceRoot;
+  let reg: TerminalSessionRegistry;
+
+  beforeEach(() => {
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      cb(0);
+      return 0;
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve(
+          new Response(JSON.stringify({ id: AGENT_A, name: 'test', phase: 'running' }), {
+            status: 200,
+          })
+        )
+      )
+    );
+    vi.stubGlobal(
+      'WebSocket',
+      class {
+        onopen = null;
+        onclose = null;
+        send = vi.fn();
+        close = vi.fn();
+        readyState = 0;
+      }
+    );
+    vi.stubGlobal(
+      'EventSource',
+      class extends EventTarget {
+        onopen = null;
+        close = vi.fn();
+        constructor(public url: string) {
+          super();
+        }
+      }
+    );
+    reg = new TerminalSessionRegistry({ hubUrl: window.location.origin, accountId: 'test' });
+    root = new WorkspaceRoot();
+    document.body.append(root.element);
+  });
+
+  afterEach(() => {
+    root.dispose();
+    root.element.remove();
+    document.documentElement.style.removeProperty('--scion-bg');
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  function hostBackground(): string {
+    return getComputedStyle(getPaneHost(root)).backgroundColor;
+  }
+
+  function keyFor(agentId: string): string {
+    const key = root.findSessionKeyByAgentId(agentId);
+    if (!key) throw new Error(`No session for agent ${agentId}`);
+    return key;
+  }
+
+  for (const [theme, bg] of Object.entries(THEMES)) {
+    describe(`${theme} theme`, () => {
+      beforeEach(() => {
+        document.documentElement.style.setProperty('--scion-bg', bg);
+      });
+
+      it('empty multi-pane slots sit on the theme background', async () => {
+        root.layoutManager.setLayout('four');
+        await flush();
+        expect(root.element.querySelectorAll('.terminal-slot-placeholder')).toHaveLength(4);
+        expect(hostBackground()).toBe(bg);
+      });
+
+      it('a partly filled layout keeps the theme background behind its placeholders', async () => {
+        root.layoutManager.setLayout('two-columns');
+        root.create(reg, AGENT_A);
+        root.layoutManager.place(keyFor(AGENT_A), 'two-columns', 0);
+        await flush();
+        expect(root.element.querySelectorAll('.terminal-slot-placeholder')).toHaveLength(1);
+        expect(hostBackground()).toBe(bg);
+      });
+
+      it('a fully populated multi-pane layout keeps the dark terminal host', async () => {
+        root.layoutManager.setLayout('two-columns');
+        root.create(reg, AGENT_A);
+        root.create(reg, AGENT_B);
+        root.layoutManager.place(keyFor(AGENT_A), 'two-columns', 0);
+        root.layoutManager.place(keyFor(AGENT_B), 'two-columns', 1);
+        await flush();
+        expect(root.element.querySelectorAll('.terminal-slot-placeholder')).toHaveLength(0);
+        expect(hostBackground()).toBe(TERMINAL_HOST_BG);
+      });
+
+      it('a single populated pane keeps the dark terminal host', async () => {
+        root.create(reg, AGENT_A);
+        await flush();
+        expect(root.layoutManager.getState().active).toBe('single');
+        expect(hostBackground()).toBe(TERMINAL_HOST_BG);
+      });
+    });
+  }
 });
 
 // ────────────────────────────────────────────────────────────────────────────

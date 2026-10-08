@@ -10,8 +10,11 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	state "github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
@@ -38,20 +41,27 @@ type LimitsState struct {
 }
 
 // LimitsHandler tracks turn and model call counts and enforces configured limits.
-// When a limit is exceeded, it updates the agent status, logs the event, reports
-// to the Hub, and sends SIGUSR1 to PID 1 (sciontool init) to initiate shutdown.
+// When a limit is exceeded, it updates the agent status, logs the event, and
+// signals sciontool init (trigger file, SIGUSR1 fallback) to initiate
+// shutdown. Init, not the hook, reports limits_exceeded to the Hub: init is
+// long-lived and not bound by the harness's hook timeout.
 type LimitsHandler struct {
 	maxTurns        int
 	maxModelCalls   int
 	limitsPath      string
 	triggerFilePath string
 	statusHandler   *StatusHandler
+	// hub reports the updated counts. nil means no Hub reporting.
+	hub *HubHandler
 }
 
 // NewLimitsHandler creates a new limits handler.
 // Reads SCION_MAX_TURNS and SCION_MAX_MODEL_CALLS from the environment.
+// Counts are reported through hubHandler, which may be nil (no Hub). Pass
+// the same HubHandler the hook dispatches to, so both share one client and
+// one budget.
 // Returns nil if no limits are configured.
-func NewLimitsHandler() *LimitsHandler {
+func NewLimitsHandler(hubHandler *HubHandler) *LimitsHandler {
 	maxTurns := ParseEnvInt("SCION_MAX_TURNS")
 	maxModelCalls := ParseEnvInt("SCION_MAX_MODEL_CALLS")
 
@@ -70,6 +80,7 @@ func NewLimitsHandler() *LimitsHandler {
 		limitsPath:      filepath.Join(home, "agent-limits.json"),
 		triggerFilePath: LimitsTriggerFile,
 		statusHandler:   NewStatusHandler(),
+		hub:             hubHandler,
 	}
 }
 
@@ -161,24 +172,26 @@ func (h *LimitsHandler) incrementAndCheck(counterField string, limit int, limitN
 		return nil
 	}
 
-	// Report updated counts to Hub
-	hubHandler := NewHubHandler()
-	if hubHandler != nil {
-		if err := hubHandler.ReportCounts(ls.TurnCount, ls.ModelCallCount); err != nil {
-			log.Error("Failed to report counts to Hub: %v", err)
-		}
-	}
-
-	// Check if the limit is exceeded
+	// Check if the limit is exceeded. The local actions come before any Hub
+	// call so that an unreachable Hub never delays the shutdown signal.
 	if count >= limit {
 		message := fmt.Sprintf("%s of %d exceeded (completed %d)", limitName, limit, count)
 		h.triggerLimitsExceeded(message)
 	}
 
+	// Report updated counts to Hub
+	if h.hub != nil {
+		if err := h.hub.ReportCounts(ls.TurnCount, ls.ModelCallCount); err != nil {
+			log.Error("Failed to report counts to Hub: %v", err)
+		}
+	}
+
 	return nil
 }
 
-// triggerLimitsExceeded updates status, logs the event, and signals PID 1.
+// triggerLimitsExceeded updates status, logs the event, and signals init.
+// It makes no Hub call: init reports limits_exceeded to the Hub when it sees
+// the signal (reportHookLimitsExceeded in cmd/sciontool/commands/init.go).
 func (h *LimitsHandler) triggerLimitsExceeded(message string) {
 	// 1. Update agent-info.json to LIMITS_EXCEEDED (sticky)
 	if err := h.statusHandler.UpdateActivity(state.ActivityLimitsExceeded, ""); err != nil {
@@ -188,16 +201,8 @@ func (h *LimitsHandler) triggerLimitsExceeded(message string) {
 	// 2. Log the event
 	log.TaggedInfo("LIMITS_EXCEEDED", "Agent stopped: %s", message)
 
-	// 3. Report to Hub if configured
-	hubHandler := NewHubHandler()
-	if hubHandler != nil {
-		if err := hubHandler.ReportLimitsExceeded(message); err != nil {
-			log.Error("Failed to report limits_exceeded to Hub: %v", err)
-		}
-	}
-
-	// 4. Signal init process to initiate shutdown (trigger file + SIGUSR1 fallback)
-	if err := h.signalLimitsExceeded(); err != nil {
+	// 3. Signal init process to initiate shutdown (trigger file + SIGUSR1 fallback)
+	if err := h.signalLimitsExceeded(message); err != nil {
 		log.Error("Failed to signal limits exceeded: %v", err)
 	}
 }
@@ -261,13 +266,52 @@ func writeLimitsState(path string, ls *LimitsState, uid, gid int) error {
 }
 
 // LimitsTriggerFile is the well-known path for the limits-exceeded trigger file.
-// When a hook handler detects a limit is exceeded, it creates this file.
-// The init process watches for it to initiate shutdown.
+// When a hook handler detects a limit is exceeded, it creates this file with
+// the limit message as its content. The init process watches for it to
+// initiate shutdown and reports the message to the Hub (see
+// ReadLimitsTriggerMessage).
 const LimitsTriggerFile = "/tmp/scion-limits-exceeded"
 
+// limitsTriggerMaxBytes bounds ReadLimitsTriggerMessage's read. The hook
+// writes a one-line message well under this.
+const limitsTriggerMaxBytes = 1024
+
+// limitsTriggerMessageMaxLen bounds the message ReadLimitsTriggerMessage
+// returns, matching the Hub status message length the hook used to send.
+const limitsTriggerMessageMaxLen = 200
+
+// DefaultLimitsExceededMessage is the message used when the trigger file
+// carries no usable message (absent, empty, refused, or an older hook that
+// wrote a fixed marker).
+const DefaultLimitsExceededMessage = "limits exceeded"
+
+// ReadLimitsTriggerMessage returns the limit message a hook wrote to the
+// trigger file at path, for init to report to the Hub. Init runs as root and
+// the file lives in world-writable /tmp, so the read refuses symlinks, FIFOs
+// and oversize files, and the content is reduced to printable characters
+// and truncated. It never fails: anything unusable yields
+// DefaultLimitsExceededMessage.
+func ReadLimitsTriggerMessage(path string) string {
+	data, err := dirfd.ReadFileNoFollow(path, limitsTriggerMaxBytes)
+	if err != nil {
+		return DefaultLimitsExceededMessage
+	}
+	msg := strings.TrimSpace(strings.Map(func(r rune) rune {
+		if r == utf8.RuneError || !unicode.IsPrint(r) {
+			return -1
+		}
+		return r
+	}, string(data)))
+	if msg == "" || msg == "exceeded" {
+		return DefaultLimitsExceededMessage
+	}
+	return truncateMessage(msg, limitsTriggerMessageMaxLen)
+}
+
 // signalLimitsExceeded notifies PID 1 that a limit has been exceeded.
-// It writes a trigger file and also attempts SIGUSR1 as a fallback.
-func (h *LimitsHandler) signalLimitsExceeded() error {
+// It writes a trigger file holding message and also attempts SIGUSR1 as a
+// fallback.
+func (h *LimitsHandler) signalLimitsExceeded(message string) error {
 	triggerPath := h.triggerFilePath
 	if triggerPath == "" {
 		triggerPath = LimitsTriggerFile
@@ -275,23 +319,30 @@ func (h *LimitsHandler) signalLimitsExceeded() error {
 	// Primary mechanism: create a trigger file that init watches for.
 	// This works regardless of UID differences between the hook process
 	// and PID 1 (init runs as root, hooks run as the scion user).
-	if err := os.WriteFile(triggerPath, []byte("exceeded"), 0666); err != nil {
+	if err := os.WriteFile(triggerPath, []byte(message), 0666); err != nil {
 		log.Error("Failed to write limits trigger file: %v", err)
 	}
 
 	// Fallback: send SIGUSR1 to PID 1. This may fail with EPERM when the
 	// hook process runs as a non-root user and PID 1 runs as root.
-	p, err := os.FindProcess(1)
-	if err != nil {
-		return fmt.Errorf("finding PID 1: %w", err)
-	}
-	if err := p.Signal(syscall.SIGUSR1); err != nil {
+	if err := signalInitFn(syscall.SIGUSR1); err != nil {
 		// Expected to fail when running as non-root; the trigger file
 		// is the reliable mechanism.
 		log.Debug("SIGUSR1 to PID 1 failed (expected if non-root): %v", err)
 		return nil
 	}
 	return nil
+}
+
+// signalInitFn sends sig to PID 1 (sciontool init). Tests replace it so a
+// test run as root inside an agent container can never signal that
+// container's own init.
+var signalInitFn = func(sig syscall.Signal) error {
+	p, err := os.FindProcess(1)
+	if err != nil {
+		return fmt.Errorf("finding PID 1: %w", err)
+	}
+	return p.Signal(sig)
 }
 
 // ParseEnvInt reads an integer from an environment variable. Returns 0 if unset or invalid.

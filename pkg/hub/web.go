@@ -712,6 +712,24 @@ func (ws *WebServer) adminEmails() []string {
 	return ws.accessSettings.AdminEmails()
 }
 
+// conduitEnabledProvider is implemented by an access settings provider
+// that reports whether hub.conduit is on (the hub Server).
+type conduitEnabledProvider interface {
+	ConduitEnabled() bool
+}
+
+// publishConduitAuthzChanged announces a committed change that may revoke
+// conduit stream authorization (see Server.publishConduitAuthzChanged). It
+// is a no-op unless the settings provider reports hub.conduit on and an
+// event publisher is set.
+func (ws *WebServer) publishConduitAuthzChanged(m conduitAuthzMatch) {
+	p, ok := ws.accessSettings.(conduitEnabledProvider)
+	if !ok || !p.ConduitEnabled() || ws.events == nil {
+		return
+	}
+	ws.events.PublishRaw(conduitAuthzChangedSubject, m)
+}
+
 // authorizedDomains returns the live authorized domains list from the access
 // settings provider. Returns nil when no provider is configured.
 func (ws *WebServer) authorizedDomains() []string {
@@ -1108,15 +1126,16 @@ func isHashedAsset(path string) bool {
 
 // resolveAPIPath maps a browser URL path to the Hub API endpoint that should
 // be prefetched for SSR hydration. Returns "" for paths with no prefetch.
+//
+// Only routes whose page consumes the prefetched response are listed. The
+// /agents and /projects list pages load their own windowed or scoped lists,
+// so prefetching the unscoped lists for them was discarded server work (and,
+// for a large agent list, a slower and much larger shell).
 func resolveAPIPath(urlPath string) string {
 	// Trim trailing slash for consistent matching
 	p := strings.TrimRight(urlPath, "/")
 
 	switch {
-	case p == "/agents":
-		return "/api/v1/agents"
-	case p == "/projects":
-		return "/api/v1/projects"
 	case strings.HasPrefix(p, "/agents/") && strings.Count(p, "/") == 2:
 		// /agents/{id} -> /api/v1/agents/{id}
 		return "/api/v1" + p
@@ -1239,6 +1258,14 @@ func (ws *WebServer) detectWebAssets() bool {
 	return false
 }
 
+// perUserPageCacheControl is the Cache-Control of an HTML document that
+// embeds per-user data, such as the SPA shell with its __SCION_DATA__
+// object (the session user and the API response prefetched as that user).
+// no-store keeps the browser and any shared cache from storing it, so a
+// history navigation never restores a copy rendered for an earlier
+// session. Static assets keep their own headers (see serveStaticAsset).
+const perUserPageCacheControl = "no-store"
+
 // spaHandler returns the SPA shell HTML for any route not matched by other handlers.
 func (ws *WebServer) spaHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -1262,7 +1289,7 @@ func (ws *WebServer) spaHandler() http.HandlerFunc {
 		}
 
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Cache-Control", perUserPageCacheControl)
 		w.WriteHeader(http.StatusOK)
 
 		if ws.shellTmpl == nil {
@@ -2205,6 +2232,7 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 		// Find or create user (same pattern as handleOAuthCallback)
 		user, err := ws.store.GetUserByEmail(ctx, proxyUser.Email)
 		syncGrants := true
+		roleChanged := false
 		if err != nil && !errors.Is(err, store.ErrNotFound) {
 			// Genuine DB error — don't treat as "create new user"
 			ws.logger().Error("Proxy auth: failed to look up user", "email", proxyUser.Email, "error", err)
@@ -2287,6 +2315,7 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 					oldRole := user.Role
 					ws.logger().Info("User role changed on proxy login", "email", proxyUser.Email, "old_role", oldRole, "new_role", newRole)
 					user.Role = newRole
+					roleChanged = true
 					if oldRole == "admin" {
 						bindingSuperAdmin = "delete"
 					} else if newRole == "admin" {
@@ -2316,6 +2345,9 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 			if err := syncHubRoleGrants(ctx, ws.store, user.ID, user.Role, store.SystemReconcileCreatedBy); err != nil {
 				ws.logger().Warn("Proxy auth: failed to sync hub role grants", "email", proxyUser.Email, "user_id", user.ID, "role", user.Role, "error", err)
 			}
+		}
+		if syncGrants && roleChanged {
+			ws.publishConduitAuthzChanged(conduitAuthzMatch{UserID: user.ID})
 		}
 
 		// Generate Hub JWT tokens (mirrors devAuthMiddleware / handleOAuthCallback)
@@ -2607,6 +2639,7 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 	// Find or create user
 	user, err := ws.store.GetUserByEmail(ctx, userInfo.Email)
 	syncGrants := true
+	roleChanged := false
 	if err != nil {
 		// Create new user (only reachable in open/domain_restricted modes;
 		// in invite_only mode, checkUserAuthorized already confirmed a User record exists)
@@ -2693,6 +2726,7 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 				oldRole := user.Role
 				ws.logger().Info("User role changed on login", "email", userInfo.Email, "old_role", oldRole, "new_role", newRole)
 				user.Role = newRole
+				roleChanged = true
 				if oldRole == "admin" {
 					bindingSuperAdmin = "delete"
 				} else if newRole == "admin" {
@@ -2722,6 +2756,9 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 		if err := syncHubRoleGrants(ctx, ws.store, user.ID, user.Role, store.SystemReconcileCreatedBy); err != nil {
 			ws.logger().Warn("OAuth login: failed to sync hub role grants", "email", userInfo.Email, "user_id", user.ID, "role", user.Role, "error", err)
 		}
+	}
+	if syncGrants && roleChanged {
+		ws.publishConduitAuthzChanged(conduitAuthzMatch{UserID: user.ID})
 	}
 
 	// Generate Hub tokens if token service is available
@@ -2943,7 +2980,11 @@ func sessionString(session *sessions.Session, key string) string {
 	return ""
 }
 
-// webContentSecurityPolicy is the CSP sent with every web response.
+// webContentSecurityPolicy is the CSP sent with every web response. The
+// client bundles its scripts, styles and Shoelace assets, so the only named
+// external hosts are Google Fonts (stylesheet and font files) and Cloud
+// Storage (signed upload and download URLs); img-src also allows any HTTPS
+// image through its https: source.
 //
 // img-src allows blob: because the chat file preview fetches image bytes
 // with credentials and renders them through URL.createObjectURL (gs://
@@ -2952,9 +2993,9 @@ func sessionString(session *sessions.Session, key string) string {
 // shows a broken image. blob: is allowed for images only, never for
 // scripts or frames.
 const webContentSecurityPolicy = "default-src 'self'; " +
-	"script-src 'self' 'unsafe-inline' https://cdn.webawesome.com; " +
-	"style-src 'self' 'unsafe-inline' https://cdn.webawesome.com https://fonts.googleapis.com; " +
-	"font-src 'self' https://fonts.gstatic.com https://cdn.webawesome.com; " +
+	"script-src 'self' 'unsafe-inline'; " +
+	"style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; " +
+	"font-src 'self' https://fonts.gstatic.com; " +
 	"img-src 'self' data: blob: https:; " +
 	"connect-src 'self' data: ws: wss: http://localhost:* http://127.0.0.1:* https://storage.googleapis.com"
 

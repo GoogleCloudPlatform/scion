@@ -149,6 +149,16 @@ func init() {
 			New: func() any { return &QuotaSettings{} },
 		},
 		{
+			// gcp_iam holds the GCP service-account permission-check
+			// settings (reloadable; see GCPIAMSettings).
+			Name: "gcp_iam",
+			KoanfPaths: []string{
+				"server.hub.gcp_iam_check_mode",
+				"server.hub.gcp_iam_deny_unknown_policy",
+			},
+			New: func() any { return &GCPIAMSettings{} },
+		},
+		{
 			Name: "agent_secrets",
 			KoanfPaths: []string{
 				"agent_secrets.user_scope_only",
@@ -431,6 +441,17 @@ func compileSchemas() {
 		"auto_expose_ports": schemaObject(getSchemaProperty(root, "auto_expose_ports")),
 		"quotas":            schemaObject(getSchemaProperty(root, "quotas")),
 		"agent_secrets":     schemaObject(getSchemaProperty(root, "agent_secrets")),
+		// gcp_iam schema is hand-written -- the keys have no definition in
+		// settings-v1.schema.json. An empty string is not a valid value:
+		// clearing a key is done by resetting the section.
+		"gcp_iam": {
+			"type": "object",
+			"properties": map[string]interface{}{
+				"gcp_iam_check_mode":          map[string]interface{}{"type": "string", "enum": GCPIAMCheckModes},
+				"gcp_iam_deny_unknown_policy": map[string]interface{}{"type": "string", "enum": GCPIAMDenyUnknownPolicies},
+			},
+			"additionalProperties": false,
+		},
 		// experiments schema is hand-written -- it is runtime/API-owned
 		// state with no $defs in settings-v1.schema.json (like maintenance
 		// and messaging). overrides is a map of experiment name -> bool;

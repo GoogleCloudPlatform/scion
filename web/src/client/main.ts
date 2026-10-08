@@ -786,7 +786,7 @@ async function init(): Promise<void> {
   // of the page, so the disposer is not kept.
   installViewportFrame();
 
-  // Get initial data from SSR and hydrate state manager
+  // Get initial data from SSR
   const initialData = getInitialData();
   // Fixed for this document: a change of the setting applies on the next full load.
   configureReadinessMarks(initialData?.readinessMarks === true);
@@ -797,14 +797,6 @@ async function init(): Promise<void> {
     }
     // Keep the SSR payload for the first render only (see ssr-page-data.ts).
     setInitialPageData(initialData);
-    if (initialData.data) {
-      const pageDataObj = initialData.data as {
-        agents?: import('../shared/types.js').Agent[];
-        projects?: import('../shared/types.js').Project[];
-        _capabilities?: import('../shared/types.js').Capabilities;
-      };
-      stateManager.hydrate(pageDataObj, pageDataObj._capabilities);
-    }
   }
 
   // Attach debug logger to state manager to capture all SSE events

@@ -473,6 +473,8 @@ var MutationClassifications = []MutationClassification{
 	// -----------------------------------------------------------------------
 	// pkg/hub/agent_credential_revoke.go — shared best-effort revoke helper
 	// -----------------------------------------------------------------------
+	{File: "pkg/hub/membership_loss.go", Function: "holdAgentsTx", Symbol: "RevokeAgentCredentialsByAgent", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Hub-internal membership loss processor: revokes the credentials of agents it holds after their root user's project access ended, in the same transaction as the hold; reached only from the outbox processor and reconciler, never from a request handler", Scope: "pkg/hub/membership_loss.go"}},
+	{File: "pkg/hub/membership_loss.go", Function: "membershipRestoreHook", Symbol: "RevokeAgentCredentialsByAgent", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Restore transaction hook: revokes the credentials of a restored agent it holds because its root user is not admitted to the project; runs inside the already route-guarded restore transaction", Scope: "pkg/hub/membership_loss.go"}},
 	{File: "pkg/hub/agent_credential_revoke.go", Function: "revokeAgentCredentials", Symbol: "RevokeAgentCredentialsByAgent", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Shared revoke helper (reached via revokeAgentCredentialsBestEffort) called from create/launch dispatch and handler cleanup paths that are themselves already route-guarded, and from the broker-HMAC-authenticated launch report endpoint; mirrors the existing delete and suspend revoke exemptions", Scope: "pkg/hub/agent_credential_revoke.go"}},
 
 	// -----------------------------------------------------------------------
@@ -480,13 +482,12 @@ var MutationClassifications = []MutationClassification{
 	// -----------------------------------------------------------------------
 	{File: "pkg/hub/handlers_projects_core.go", Function: "createProject", Symbol: "DeleteProject", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Project create rollback, deletes on creation failure", Scope: "pkg/hub/handlers_projects_core.go"}},
 	{File: "pkg/hub/handlers_projects_core.go", Function: "createProject", Symbol: "DeleteProject", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Project create rollback, deletes on creation failure", Scope: "pkg/hub/handlers_projects_core.go"}},
-	{File: "pkg/hub/handlers_projects_core.go", Function: "createProject", Symbol: "DeleteProject", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Project create rollback, deletes on creation failure", Scope: "pkg/hub/handlers_projects_core.go"}},
 	{File: "pkg/hub/handlers_projects_core.go", Function: "createProject", Symbol: "DeleteRoleBindingsForScope", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Project create rollback, cleans up bindings on failure", Scope: "pkg/hub/handlers_projects_core.go"}},
 	{File: "pkg/hub/handlers_projects_core.go", Function: "createProject", Symbol: "DeleteRoleBindingsForScope", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Project create rollback, cleans up bindings on failure", Scope: "pkg/hub/handlers_projects_core.go"}},
 	{File: "pkg/hub/handlers_projects_core.go", Function: "createProjectGroup", Symbol: "CreateGroup", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Project create sub-step: creates project groups", Scope: "pkg/hub/handlers_projects_core.go"}},
 	{File: "pkg/hub/handlers_projects_core.go", Function: "createProjectMembersGroup", Symbol: "AddGroupMember", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Project create sub-step: adds creator to members group", Scope: "pkg/hub/handlers_projects_core.go"}},
 	{File: "pkg/hub/handlers_projects_core.go", Function: "createProjectMembersGroup", Symbol: "CreateGroup", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Project create sub-step: creates members group", Scope: "pkg/hub/handlers_projects_core.go"}},
-	{File: "pkg/hub/handlers_projects_core.go", Function: "createProjectOwnerRoleBinding", Symbol: "CreateRoleBinding", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Project create sub-step: creates owner role binding", Scope: "pkg/hub/handlers_projects_core.go"}},
+	{File: "pkg/hub/handlers_projects_core.go", Function: "createProjectOwnerRoleBindingTx", Symbol: "CreateRoleBinding", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Project create sub-step: creates owner role binding", Scope: "pkg/hub/handlers_projects_core.go"}},
 	// RS3: deleteProject handler now delegates to ProjectDeletionService.
 	// Cascade mutations are in the service's cascadeSecurityState method.
 	{File: "pkg/hub/project_deletion_service.go", Function: "cascadeSecurityState", Symbol: "DeleteRoleBindingsForScope", OperationID: "project.lifecycle.delete"},
@@ -494,7 +495,6 @@ var MutationClassifications = []MutationClassification{
 	{File: "pkg/hub/project_deletion_service.go", Function: "cascadeSecurityState", Symbol: "DeleteSecretsByScope", OperationID: "project.lifecycle.delete"},
 	{File: "pkg/hub/project_deletion_service.go", Function: "cascadeSecurityState", Symbol: "DeleteGCPServiceAccount", OperationID: "project.lifecycle.delete"},
 	{File: "pkg/hub/project_deletion_service.go", Function: "Delete", Symbol: "DeleteProject", OperationID: "project.lifecycle.delete"},
-	{File: "pkg/hub/handlers_projects_core.go", Function: "handleProjectRegister", Symbol: "DeleteProject", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Project register rollback, deletes on failure", Scope: "pkg/hub/handlers_projects_core.go"}},
 	{File: "pkg/hub/handlers_projects_core.go", Function: "migrateProjectSlug", Symbol: "UpdateGroup", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Project slug migration, updates group names", Scope: "pkg/hub/handlers_projects_core.go"}},
 	{File: "pkg/hub/handlers_projects_core.go", Function: "migrateProjectSlug", Symbol: "UpdateGroup", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Project slug migration, updates group names", Scope: "pkg/hub/handlers_projects_core.go"}},
 
