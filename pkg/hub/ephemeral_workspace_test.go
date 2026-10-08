@@ -186,28 +186,53 @@ func TestEphemeralWorkspace_CheckFailureDoesNotBlockStop(t *testing.T) {
 	cases := []struct {
 		name string
 		disp *workspaceCheckDispatcher
+		// blockRecord makes the record write block until its context ends.
+		blockRecord bool
 	}{
-		{"ws-exec-error", &workspaceCheckDispatcher{execErr: errors.New("container not found")}},
-		{"ws-exec-timeout", &workspaceCheckDispatcher{block: true}},
-		{"ws-exec-garbage", &workspaceCheckDispatcher{execOutput: "fatal: not a git repository"}},
+		{name: "ws-exec-error", disp: &workspaceCheckDispatcher{execErr: errors.New("container not found")}},
+		{name: "ws-exec-timeout", disp: &workspaceCheckDispatcher{block: true}},
+		{name: "ws-exec-garbage", disp: &workspaceCheckDispatcher{execOutput: "fatal: not a git repository"}},
+		// The exec and the record write both hang: the one check deadline
+		// still bounds the stop (with a separate write timeout the stop
+		// would wait for both).
+		{name: "ws-exec-and-record-timeout", disp: &workspaceCheckDispatcher{block: true}, blockRecord: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, s, broker, project := newWorkspaceCheckServer(t, tc.disp)
 			a := newWorkspaceAgent(t, s, broker, project, tc.name, "kubernetes", api.WorkspacePlacementLocal, state.PhaseRunning)
+			if tc.blockRecord {
+				srv.store = &blockingAnnotationStore{Store: srv.store}
+			}
 
 			start := time.Now()
 			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/stop", nil)
+			elapsed := time.Since(start)
 			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-			assert.Less(t, time.Since(start), 4*time.Second, "the check and its record write stay within the check budget")
+			assert.Less(t, elapsed, workspaceCheckTimeout+1500*time.Millisecond, "the check and its record write stay within the check budget")
 			assert.Empty(t, lifecycleWarnings(t, rec.Body.Bytes()))
 			assert.EqualValues(t, 1, tc.disp.stopCount.Load(), "the stop is dispatched")
 			got, err := s.GetAgent(context.Background(), a.ID)
 			require.NoError(t, err)
 			assert.Equal(t, string(state.PhaseStopped), got.Phase)
+			if tc.blockRecord {
+				assert.NotContains(t, got.Annotations, workspaceAtStopAnnotation, "a write cut off by the deadline leaves no record")
+				return
+			}
 			assert.JSONEq(t, `{"unchecked":true}`, got.Annotations[workspaceAtStopAnnotation])
 		})
 	}
+}
+
+// blockingAnnotationStore is a store whose SetAgentAnnotation hangs until
+// its context ends, as a stalled database write would.
+type blockingAnnotationStore struct {
+	store.Store
+}
+
+func (b *blockingAnnotationStore) SetAgentAnnotation(ctx context.Context, _, _, _ string) error {
+	<-ctx.Done()
+	return ctx.Err()
 }
 
 // The check is skipped for an agent that is not running.
