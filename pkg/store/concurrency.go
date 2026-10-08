@@ -224,7 +224,7 @@ const (
 
 	// LockNotificationOrphanGC guards the periodic removal of acknowledged
 	// notifications whose agent and subscription are both gone.
-	LockNotificationOrphanGC AdvisoryLockKey = 0x5C100026
+	LockNotificationOrphanGC AdvisoryLockKey = 0x5C100027
 )
 
 // AdvisoryLocker is implemented by backends that can take a cluster-wide
