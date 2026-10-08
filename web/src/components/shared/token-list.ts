@@ -499,7 +499,8 @@ const FALLBACK_SCOPES: ScopeOption[] = [
   {
     value: 'hub_integrations:update',
     label: 'hub_integrations:update',
-    description: 'Update integrations',
+    description:
+      'Update integration settings and restart integrations (install, update and credential settings need an interactive session)',
     resource: 'hub',
     isAlias: false,
   },
@@ -534,7 +535,8 @@ const FALLBACK_SCOPES: ScopeOption[] = [
   {
     value: 'hub_github_app:update',
     label: 'hub_github_app:update',
-    description: 'Update GitHub app configuration',
+    description:
+      'Manage GitHub App installations, discover and sync permissions (configuration updates need an interactive session)',
     resource: 'hub',
     isAlias: false,
   },

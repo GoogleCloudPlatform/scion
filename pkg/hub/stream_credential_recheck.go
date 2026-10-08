@@ -40,12 +40,15 @@ var streamCredentialRecheckInterval = 15 * time.Second
 const streamCredentialEndedEvent = "event: error\ndata: {\"message\":\"stream ended: the credential does not authorize this stream\"}\n\n"
 
 // streamCredentialStillAuthorized reports whether the credential of the
-// stream request in ctx still authorizes the stream: the authorization
-// decision for permission on resource is allowed again and, for a user
-// access token, the stored token is not revoked or expired, still has a
-// valid boundary and belongs to the same active user. A missing identity,
-// a non-user identity, a token credential without a token ID or any lookup
-// error fails the check.
+// stream request in ctx still authorizes the stream. The request is built
+// as the route guard evaluated it: the credential recorded on the request
+// (AuthzRequestFromContext), with the identity's credential only when none
+// is recorded. The authorization decision for permission on resource must
+// be allowed again and, when the request's credential is a user access
+// token, the stored token must not be revoked or expired, must still have
+// a valid boundary and must belong to the same active user. A missing
+// identity, a non-user identity, a token credential without a token ID or
+// any lookup error fails the check.
 func (s *Server) streamCredentialStillAuthorized(ctx context.Context, resource Resource, action Action, permission string) bool {
 	if s.authzService == nil || s.store == nil {
 		return false
@@ -54,12 +57,13 @@ func (s *Server) streamCredentialStillAuthorized(ctx context.Context, resource R
 	if !ok || isNilIdentity(user) {
 		return false
 	}
-	credential := credentialContextForIdentity(user)
-	if credential.Kind == CredentialKindUAT {
-		if credential.ID == "" {
+	req := AuthzRequestFromContext(ctx, resource, action)
+	req.Permission = permission
+	if req.Credential.Kind == CredentialKindUAT {
+		if req.Credential.ID == "" {
 			return false
 		}
-		token, err := s.store.GetUserAccessToken(ctx, credential.ID)
+		token, err := s.store.GetUserAccessToken(ctx, req.Credential.ID)
 		if err != nil || token == nil || token.Revoked || token.UserID != user.ID() {
 			return false
 		}
@@ -74,12 +78,5 @@ func (s *Server) streamCredentialStillAuthorized(ctx context.Context, resource R
 			return false
 		}
 	}
-	decision := s.authzService.Decide(ctx, AuthzRequest{
-		Principal:  principalContextForIdentity(user),
-		Credential: credential,
-		Resource:   resource,
-		Action:     action,
-		Permission: permission,
-	})
-	return decision.Allowed
+	return s.authzService.Decide(ctx, req).Allowed
 }

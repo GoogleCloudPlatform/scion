@@ -31,8 +31,10 @@ import (
 // as configuration for that integration in integrationTokenSettingsKeys:
 //   - any entry in secrets is refused (the integration's credentials);
 //   - a settings key that carries or selects credential material, sets
-//     how the integration authenticates or maps identities, or names an
-//     endpoint, network address or host path is refused;
+//     how the integration authenticates or maps identities, names an
+//     endpoint, network address or host path, or selects the integration's
+//     inbound endpoint and its authentication (for telegram, the inbound
+//     mode and webhook registration settings) is refused;
 //   - a settings key not listed for the integration, or any key of an
 //     integration not listed, is refused.
 //
@@ -47,11 +49,9 @@ const integrationSecretsKey = "secrets"
 // credential.
 var integrationTokenSettingsKeys = map[string]map[string]bool{
 	"telegram": {
-		"inbound_mode":     true,
-		"skip_set_webhook": true,
-		"agent_cache_ttl":  true,
-		"send_queue_size":  true,
-		"send_min_delay":   true,
+		"agent_cache_ttl": true,
+		"send_queue_size": true,
+		"send_min_delay":  true,
 	},
 	"discord": {},
 	"slack": {

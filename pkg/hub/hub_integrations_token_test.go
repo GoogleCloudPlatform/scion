@@ -70,8 +70,10 @@ func requireTokenRefusedIntegrationKeys(t *testing.T, rec *httptest.ResponseReco
 
 // TestHubIntegrationSelectors_ProjectBoundaryRefused requires the hub
 // integration and observability selectors to be hub-only: a super-admin
-// who owns a project mints each on a hub token but not on a project token,
-// and a project token reaches none of their routes.
+// who owns a project mints each on a hub token but not on a project token.
+// The mint check and the bearer disposition matrix pin the boundary; the
+// route loop checks that a project token holding project:read reaches none
+// of these routes.
 func TestHubIntegrationSelectors_ProjectBoundaryRefused(t *testing.T) {
 	srv, s := testServer(t)
 	project := tid("hit-project")
@@ -130,6 +132,11 @@ func TestIntegrationInstall_SessionOnlyForTokens(t *testing.T) {
 	requireNoSessionOnlyRefusal(t, rec)
 	require.NotEqual(t, http.StatusForbidden, rec.Code, rec.Body.String())
 	rec = doRequestWithToken(t, srv, key, http.MethodPost, "/api/v1/admin/integrations/telegram/restart", nil)
+	require.NotEqual(t, http.StatusForbidden, rec.Code, rec.Body.String())
+
+	// Reading update status needs hub_integrations:read only.
+	readKey := mintHubConfigToken(t, srv, super, hubBoundary(), "hub_integrations:read")
+	rec = doRequestWithToken(t, srv, readKey, http.MethodGet, "/api/v1/admin/integrations/telegram/update/latest", nil)
 	require.NotEqual(t, http.StatusForbidden, rec.Code, rec.Body.String())
 }
 
@@ -193,7 +200,8 @@ func TestMetricsDashboard_RequiresMetricsSelector(t *testing.T) {
 // token's integration config update to carry configuration settings keys
 // only: any entry in secrets, and every settings key outside the
 // integration's configuration set (credential material, authentication,
-// identity mapping, endpoints, addresses, host paths, unlisted keys), is
+// identity mapping, endpoints, addresses, host paths, the inbound endpoint
+// and its authentication, unlisted keys), is
 // refused with reason CREDENTIAL_MANAGEMENT before anything is written. A
 // session is not subject to the rule.
 func TestIntegrationConfigUpdate_SecretsSessionOnlyForTokens(t *testing.T) {
@@ -220,6 +228,8 @@ func TestIntegrationConfigUpdate_SecretsSessionOnlyForTokens(t *testing.T) {
 		{"user mappings", map[string]interface{}{"settings": map[string]string{"user_mappings": "{}"}}, []string{"settings.user_mappings"}},
 		{"host path", map[string]interface{}{"settings": map[string]string{"db_path": "/tmp/x.db"}}, []string{"settings.db_path"}},
 		{"listen address", map[string]interface{}{"settings": map[string]string{"webhook_listen": ":1"}}, []string{"settings.webhook_listen"}},
+		{"inbound mode", map[string]interface{}{"settings": map[string]string{"inbound_mode": "poll"}}, []string{"settings.inbound_mode"}},
+		{"webhook registration", map[string]interface{}{"settings": map[string]string{"skip_set_webhook": "true"}}, []string{"settings.skip_set_webhook"}},
 		{"wiring key", map[string]interface{}{"settings": map[string]string{"hub_url": "https://x.example.com"}}, []string{"settings.hub_url"}},
 		{"unlisted key", map[string]interface{}{"settings": map[string]string{"not_a_key": "1"}}, []string{"settings.not_a_key"}},
 		{"mixed with configuration", map[string]interface{}{
@@ -239,7 +249,7 @@ func TestIntegrationConfigUpdate_SecretsSessionOnlyForTokens(t *testing.T) {
 
 	t.Run("configuration keys", func(t *testing.T) {
 		rec := doRequestWithToken(t, srv, key, http.MethodPut, path,
-			map[string]interface{}{"settings": map[string]string{"agent_cache_ttl": "1m", "inbound_mode": "poll"}})
+			map[string]interface{}{"settings": map[string]string{"agent_cache_ttl": "1m", "send_queue_size": "8"}})
 		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 		data, err := os.ReadFile(configFile)
 		require.NoError(t, err)
@@ -437,4 +447,55 @@ func TestDiagnosticsLogStream_EndsWhenTokenStopsValidating(t *testing.T) {
 		waitEnded(t, done)
 		assert.NotContains(t, rec.Body.String(), streamCredentialEndedEvent)
 	})
+
+	t.Run("a session keeps the stream open", func(t *testing.T) {
+		userID := newUser("hit-diag-session")
+		u, err := s.GetUser(ctx, userID)
+		require.NoError(t, err)
+		session, _, _, err := srv.userTokenService.GenerateTokenPair(u.ID, u.Email, u.DisplayName, u.Role, ClientTypeWeb)
+		require.NoError(t, err)
+		done, rec, cancel := openStream(session)
+		stillOpen(t, done)
+		cancel()
+		waitEnded(t, done)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		assert.NotContains(t, rec.Body.String(), streamCredentialEndedEvent)
+	})
+
+	t.Run("a dev credential keeps the stream open", func(t *testing.T) {
+		done, rec, cancel := openStream(testDevToken)
+		stillOpen(t, done)
+		cancel()
+		waitEnded(t, done)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		assert.NotContains(t, rec.Body.String(), streamCredentialEndedEvent)
+	})
+}
+
+// TestStreamCredentialRecheck_UsesTheRecordedCredential requires the stream
+// re-check to evaluate the credential recorded on the request, not one
+// derived from the identity type: a request whose recorded credential is a
+// revoked user access token fails the re-check even though its identity
+// alone would read as an interactive session.
+func TestStreamCredentialRecheck_UsesTheRecordedCredential(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	userID := tid("hit-recheck-recorded")
+	createTestUserWithRole(t, s, userID, userID+"@test.com", "member", store.SystemRoleSuperAdmin)
+	ensureHubMembership(ctx, s, userID)
+	_, token, err := srv.uatService.CreateTokenWithParams(rs4MintContext(userID), CreateTokenParams{
+		UserID: userID, Name: "hit-" + tid("rec"), Boundary: hubBoundary(), Scopes: []string{"hub_diagnostics:read"},
+	})
+	require.NoError(t, err)
+	user := NewAuthenticatedUser(userID, userID+"@test.com", "Recheck", "member", "web")
+	hub := Resource{Type: "hub", ID: "hub"}
+
+	session := contextWithCredentialContext(contextWithIdentity(ctx, user), CredentialContext{Kind: CredentialKindInteractive})
+	require.True(t, srv.streamCredentialStillAuthorized(session, hub, ActionRead, "hub.diagnostics.read"),
+		"an interactive session of a super-admin passes")
+
+	require.NoError(t, srv.uatService.RevokeToken(rs4MintContext(userID), userID, token.ID))
+	recorded := contextWithCredentialContext(contextWithIdentity(ctx, user), CredentialContext{Kind: CredentialKindUAT, ID: token.ID})
+	assert.False(t, srv.streamCredentialStillAuthorized(recorded, hub, ActionRead, "hub.diagnostics.read"),
+		"a recorded revoked token fails the re-check")
 }
