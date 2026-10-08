@@ -372,15 +372,21 @@ func TestUpsertConversationByExternalRef_ConcurrentUpsert(t *testing.T) {
 	s := newTestConversationStore(t)
 	ctx := context.Background()
 
-	const goroutines = 5
+	// A losing insert hits the partial unique index, which
+	// isUniqueViolation must classify for the retry to take the update
+	// branch (ptone/scion#3036). The start gate releases every goroutine at
+	// once so the inserts actually race.
+	const goroutines = 8
 	var wg sync.WaitGroup
 	results := make([]*store.Conversation, goroutines)
 	errors := make([]error, goroutines)
+	start := make(chan struct{})
 
 	for i := 0; i < goroutines; i++ {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
+			<-start
 			conv := &store.Conversation{
 				Kind:        "group",
 				Surface:     "telegram",
@@ -390,6 +396,7 @@ func TestUpsertConversationByExternalRef_ConcurrentUpsert(t *testing.T) {
 			results[idx], errors[idx] = s.UpsertConversationByExternalRef(ctx, conv)
 		}(i)
 	}
+	close(start)
 	wg.Wait()
 
 	// All should succeed
@@ -403,6 +410,16 @@ func TestUpsertConversationByExternalRef_ConcurrentUpsert(t *testing.T) {
 	for _, id := range ids {
 		assert.Equal(t, ids[0], id, "concurrent upserts should converge on one conversation")
 	}
+
+	// And exactly one row exists for the external ref.
+	n, err := s.client.Conversation.Query().
+		Where(
+			conversation.SurfaceEQ(conversation.SurfaceTelegram),
+			conversation.ExternalRefEQ("concurrent-test-ref"),
+		).
+		Count(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 1, n, "exactly one row for the external ref")
 }
 
 func TestUpsertConversationByExternalRef_DifferentExternalRefsSameSurface(t *testing.T) {
@@ -1748,47 +1765,6 @@ func TestEnsureParticipant_ExistingRowIsReadOnly(t *testing.T) {
 	for _, q := range rec.queries {
 		assert.NotContains(t, strings.ToUpper(q.sql), "INSERT", "existing participant must not be written: %s", q.sql)
 	}
-}
-
-// TestUpsertConversationByExternalRef_ConcurrentConvergesToOneRow races
-// several upserts for the same (surface, external_ref): every call
-// succeeds and returns the same ID, and exactly one row exists. A losing
-// insert hits the partial unique index, which isUniqueViolation must
-// classify for the retry to take the update branch (ptone/scion#3036).
-func TestUpsertConversationByExternalRef_ConcurrentConvergesToOneRow(t *testing.T) {
-	s := newTestConversationStore(t)
-	ctx := context.Background()
-
-	const goroutines = 8
-	results := make([]*store.Conversation, goroutines)
-	errs := make([]error, goroutines)
-	start := make(chan struct{})
-	var wg sync.WaitGroup
-	for i := 0; i < goroutines; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			<-start
-			results[i], errs[i] = s.UpsertConversationByExternalRef(ctx, &store.Conversation{
-				Kind: "group", Surface: "telegram", ExternalRef: "race-one-row", DisplayName: "race",
-			})
-		}(i)
-	}
-	close(start)
-	wg.Wait()
-
-	for i := range errs {
-		require.NoError(t, errs[i], "goroutine %d", i)
-		assert.Equal(t, results[0].ID, results[i].ID, "goroutine %d: upserts must converge on one conversation", i)
-	}
-	n, err := s.client.Conversation.Query().
-		Where(
-			conversation.SurfaceEQ(conversation.SurfaceTelegram),
-			conversation.ExternalRefEQ("race-one-row"),
-		).
-		Count(ctx)
-	require.NoError(t, err)
-	assert.Equal(t, 1, n, "exactly one row for the external ref")
 }
 
 // TestUpsertConversationByExternalRef_PrimaryKeyClashFails pins that a

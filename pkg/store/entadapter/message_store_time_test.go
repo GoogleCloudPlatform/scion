@@ -149,8 +149,9 @@ func (d *planRecordingDriver) Exec(ctx context.Context, query string, args, v an
 // tail and history reads keep using the (conversation_id, channel, created,
 // id) index for their ORDER BY, with and without a created range and on a
 // keyset page: the SQLite plan for the exact SQL ListMessages issues must
-// not contain a TEMP B-TREE sort (see the index comment in the message
-// schema, and ptone/scion#2553, which must not trade that index away).
+// not contain a TEMP B-TREE sort, and a created range must be an index
+// seek (see the index comment in the message schema, and ptone/scion#2553,
+// which must not trade that index away).
 func TestListMessages_TailQueryUsesIndexOrder(t *testing.T) {
 	enttest.SkipOnPostgres(t, "inspects SQLite EXPLAIN QUERY PLAN output")
 	ctx := context.Background()
@@ -176,15 +177,20 @@ func TestListMessages_TailQueryUsesIndexOrder(t *testing.T) {
 	withBefore, withAfter := tail, tail
 	withBefore.Before = at.Add(3 * time.Second)
 	withAfter.After = at.Add(1 * time.Second)
+	// wantSeek, when set, is the created range the index search must use.
+	// For after-asc it pins that messageCreatedAfter keeps its raw
+	// created > ? term: the normalized term alone filters correctly but
+	// loses the seek.
 	cases := []struct {
-		name   string
-		filter store.MessageFilter
-		opts   store.ListOptions
+		name     string
+		filter   store.MessageFilter
+		opts     store.ListOptions
+		wantSeek string
 	}{
-		{"tail", tail, store.ListOptions{Limit: 2, SkipTotalCount: true}},
-		{"before", withBefore, store.ListOptions{Limit: 2, SkipTotalCount: true}},
-		{"after-asc", withAfter, store.ListOptions{Limit: 2, SortDir: "asc", SkipTotalCount: true}},
-		{"cursor-page", tail, store.ListOptions{Limit: 2, Cursor: page.NextCursor, SkipTotalCount: true}},
+		{"tail", tail, store.ListOptions{Limit: 2, SkipTotalCount: true}, ""},
+		{"before", withBefore, store.ListOptions{Limit: 2, SkipTotalCount: true}, "created<?"},
+		{"after-asc", withAfter, store.ListOptions{Limit: 2, SortDir: "asc", SkipTotalCount: true}, "created>?"},
+		{"cursor-page", tail, store.ListOptions{Limit: 2, Cursor: page.NextCursor, SkipTotalCount: true}, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -217,6 +223,9 @@ func TestListMessages_TailQueryUsesIndexOrder(t *testing.T) {
 			require.NoError(t, rows.Close())
 			assert.Contains(t, plan, "message_conversation_id_channel_created_id", "query: %s", q.sql)
 			assert.NotContains(t, plan, "TEMP B-TREE FOR ORDER BY", "query: %s", q.sql)
+			if tc.wantSeek != "" {
+				assert.Contains(t, plan, tc.wantSeek, "the index search must seek on the created range; plan: %s", plan)
+			}
 		})
 	}
 }
