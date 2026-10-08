@@ -31,35 +31,41 @@ import (
 // hub matches the embedded broker by name, so the hostname must not
 // replace a configured name.
 func TestRegisterProject_BrokerName(t *testing.T) {
-	var gotName string
-	handler := func(w http.ResponseWriter, r *http.Request) {
-		var body struct {
-			Broker *struct {
-				Name string `json:"name"`
-			} `json:"broker"`
-		}
-		_ = json.NewDecoder(r.Body).Decode(&body)
-		if body.Broker != nil {
-			gotName = body.Broker.Name
-		}
-		w.WriteHeader(http.StatusNoContent)
+	// newHandler returns a fresh hub handler and the broker name it
+	// captures, so the subtests share no state.
+	newHandler := func() (http.HandlerFunc, *string) {
+		var gotName string
+		return func(w http.ResponseWriter, r *http.Request) {
+			var body struct {
+				Broker *struct {
+					Name string `json:"name"`
+				} `json:"broker"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			if body.Broker != nil {
+				gotName = body.Broker.Name
+			}
+			w.WriteHeader(http.StatusNoContent)
+		}, &gotName
 	}
 
 	t.Run("hostname by default", func(t *testing.T) {
+		handler, gotName := newHandler()
 		hubCtx, _ := newHintTestHubCtx(t, handler)
 		_ = registerProject(context.Background(), hubCtx, "proj", true)
 		host, err := os.Hostname()
 		require.NoError(t, err)
-		assert.Equal(t, host, gotName)
+		assert.Equal(t, host, *gotName)
 	})
 
 	t.Run("configured name", func(t *testing.T) {
+		handler, gotName := newHandler()
 		hubCtx, _ := newHintTestHubCtx(t, handler)
 		globalDir := filepath.Join(os.Getenv("HOME"), ".scion")
 		require.NoError(t, os.MkdirAll(globalDir, 0755))
 		require.NoError(t, os.WriteFile(filepath.Join(globalDir, "settings.yaml"),
 			[]byte("schema_version: \"1\"\nserver:\n  broker:\n    broker_nickname: rig-broker-2\n"), 0644))
 		_ = registerProject(context.Background(), hubCtx, "proj", true)
-		assert.Equal(t, "rig-broker-2", gotName)
+		assert.Equal(t, "rig-broker-2", *gotName)
 	})
 }
