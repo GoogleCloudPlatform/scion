@@ -61,6 +61,8 @@ export class ScionPageAgentCreate extends LitElement {
   @state() private projects: Project[] = [];
   @state() private brokers: RuntimeBroker[] = [];
   @state() private templates: Template[] = [];
+  /** The template list failed to load; the rest of the form still loads. */
+  @state() private templatesLoadFailed = false;
   @state() private harnessConfigs: HarnessConfigEntry[] = [];
   @state() private gcpServiceAccounts: GCPServiceAccount[] = [];
 
@@ -698,7 +700,19 @@ export class ScionPageAgentCreate extends LitElement {
           // The unfiltered list is already scoped to what the caller may read.
           apiFetch('/api/v1/projects?limit=100'),
           fetch('/api/v1/runtime-brokers?limit=100', { credentials: 'include' }),
-          apiFetchAllPages<Template>(tmplUrl, 'templates'),
+          // Caught on its own: a failed template page leaves the template
+          // list empty with an inline error instead of failing the form.
+          apiFetchAllPages<Template>(tmplUrl, 'templates').then(
+            (list) => {
+              this.templatesLoadFailed = false;
+              return list;
+            },
+            (err: unknown) => {
+              console.error('Failed to load templates:', err);
+              this.templatesLoadFailed = true;
+              return [] as Template[];
+            }
+          ),
           fetch('/api/v1/settings/public', { credentials: 'include' }),
           apiFetch('/api/v1/harness-configs?status=active&limit=100'),
         ]);
@@ -898,7 +912,8 @@ export class ScionPageAgentCreate extends LitElement {
 
     const settings = this.projectId ? await this.fetchProjectSettings(this.projectId) : null;
     if (isStale()) return;
-    const harnessDefault = settings?.defaultHarnessConfig || this.hubDefaultHarnessConfig || 'claude';
+    const harnessDefault =
+      settings?.defaultHarnessConfig || this.hubDefaultHarnessConfig || 'claude';
 
     const harnessFor = (t: { defaultHarnessConfig?: string; harness?: string }) =>
       t.defaultHarnessConfig || t.harness || harnessDefault;
@@ -1597,7 +1612,11 @@ export class ScionPageAgentCreate extends LitElement {
               >`
           )}
         </sl-select>
-        <div class="hint">Agent configuration template.</div>
+        ${this.templatesLoadFailed
+          ? html`<div class="hint" style="color: var(--sl-color-danger-600);">
+              Could not load templates. Reload the page to try again.
+            </div>`
+          : html`<div class="hint">Agent configuration template.</div>`}
       </div>
 
       <!-- Harness Config -->
@@ -2091,9 +2110,10 @@ export class ScionPageAgentCreate extends LitElement {
                       ${this.verifiedGCPServiceAccounts.map(
                         (sa) =>
                           html`<sl-option value=${sa.id}>
-                            ${sa.email}${sa.displayName ? ` (${sa.displayName})` : ''}${
-                              sa.scope === 'hub' ? ' (Hub)' : ''
-                            }
+                            ${sa.email}${sa.displayName ? ` (${sa.displayName})` : ''}${sa.scope ===
+                            'hub'
+                              ? ' (Hub)'
+                              : ''}
                           </sl-option>`
                       )}
                     </sl-select>
