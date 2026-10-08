@@ -259,6 +259,7 @@ var PendingBearerDispositions = []PendingEntry{
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/templates/{id}/files/{path}", Method: "GET", Area: AreaCatalogResources},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/templates/{id}/files/{path}", Method: "PUT", Area: AreaCatalogResources},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/templates/{id}/finalize", Method: "POST", Area: AreaCatalogResources},
+	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/templates/{id}/reimport", Method: "POST", Area: AreaCatalogResources},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/templates/{id}/upload", Method: "POST", Area: AreaCatalogResources},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/templates/{id}/validate", Method: "GET", Area: AreaCatalogResources},
 	// --- brokers ---

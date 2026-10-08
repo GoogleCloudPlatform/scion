@@ -1714,6 +1714,10 @@ type Server struct {
 	// server.hub.perf_trace is on; nil otherwise.
 	perfTraceLog *slog.Logger
 
+	// templateSourceFetcher downloads template sources for reimport. nil
+	// selects the default fetcher (newTemplateSourceFetcher); tests replace it.
+	templateSourceFetcher templateSourceFetcher
+
 	// Cached rate limit info from the most recent GitHub App API call
 	githubAppRateLimit *githubapp.RateLimitInfo
 
