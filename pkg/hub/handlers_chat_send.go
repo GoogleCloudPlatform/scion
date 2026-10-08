@@ -278,9 +278,10 @@ func (s *Server) dmPeerLookupFailure(err error) *chatSendError {
 	return newChatSendError(http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Chat not available", nil)
 }
 
-// validateChatSendInput checks the content and attachments of a send and
-// returns the trimmed content and the attachment references.
-func (s *Server) validateChatSendInput(ctx context.Context, target *chatSendTarget, in chatSendInput) (string, []AttachmentRef, *chatSendError) {
+// validateChatSendInput checks the content, reply target and attachments of
+// a send by user and returns the trimmed content and the attachment
+// references. It writes nothing, so a refused send leaves no trace.
+func (s *Server) validateChatSendInput(ctx context.Context, user UserIdentity, target *chatSendTarget, in chatSendInput) (string, []AttachmentRef, *chatSendError) {
 	content := strings.TrimSpace(in.Content)
 	if content == "" && len(in.Attachments) == 0 {
 		return "", nil, chatSendValidationError("content or attachments required")
@@ -290,6 +291,20 @@ func (s *Server) validateChatSendInput(ctx context.Context, target *chatSendTarg
 	}
 	if len(in.Attachments) > MaxAttachmentsPerMessage {
 		return "", nil, chatSendValidationError(fmt.Sprintf("too many attachments: %d (max %d)", len(in.Attachments), MaxAttachmentsPerMessage))
+	}
+
+	// A reply must target a message of this conversation. A missing message
+	// and a message of another conversation get the same answer.
+	if in.ReplyToID != "" && target.wcs != nil {
+		ok, err := s.messageInChatConversation(ctx, target.wcs, target.Key, in.ReplyToID)
+		if err != nil {
+			slog.Warn("chat v2 reply target lookup failed", "key", target.Key, "error", err)
+			return "", nil, newChatSendError(http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Chat not available", nil)
+		}
+		if !ok {
+			logReferenceRefused(ctx, chatSendPath(target.Key), "reply target is not a message of this conversation", user)
+			return "", nil, chatSendValidationError("reply_to_id does not refer to a message in this conversation")
+		}
 	}
 
 	// W7: Validate attachment IDs and collect metadata.
@@ -340,7 +355,7 @@ func (s *Server) sendChatMessage(ctx context.Context, user UserIdentity, key str
 	}
 
 	// --- Validate ---
-	content, attachmentRefs, serr := s.validateChatSendInput(ctx, target, in)
+	content, attachmentRefs, serr := s.validateChatSendInput(ctx, user, target, in)
 	if serr != nil {
 		return nil, serr
 	}

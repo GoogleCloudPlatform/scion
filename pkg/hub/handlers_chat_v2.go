@@ -1010,7 +1010,7 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 
 	// Validated before the idempotency lookup, so an invalid body is never
 	// answered with a replay. sendChatMessage validates again.
-	content, _, serr := s.validateChatSendInput(ctx, target, in)
+	content, _, serr := s.validateChatSendInput(ctx, user, target, in)
 	if serr != nil {
 		serr.write(w)
 		return
@@ -2630,6 +2630,9 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 	// G3: fallback to channel+thread is REMOVED. Unresolved conversations
 	// return a typed 409 error so failures are observable, not silent.
 	var filter store.MessageFilter
+	// historyConvID is the conversation the page is listed by, when the
+	// envelope switch resolved one; reply previews are matched against it.
+	var historyConvID string
 	if ops := s.GetOperationalSettings(); ops != nil && ops.ConversationEnvelopeSwitch() {
 		var convResult *messaging.ConversationResult
 		if isDM {
@@ -2676,6 +2679,7 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 				Channel:        "web",
 				ConversationID: convResult.ConversationID,
 			}
+			historyConvID = convResult.ConversationID
 		} else if isDM {
 			// DEF-127: a never-used DM is a normal first-use state, not a
 			// defect. Authorization already passed (key-based, line 1825-1832),
@@ -2853,6 +2857,12 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 				if err == nil && len(refMsgs) > 0 {
 					replyPreviews = make(map[string]chatReplyPreview, len(refMsgs))
 					for id, refMsg := range refMsgs {
+						// A preview shows only a message of this
+						// conversation, also for reply rows stored
+						// before the send-time check existed.
+						if !sameConversation(refMsg, key, historyConvID) {
+							continue
+						}
 						content := refMsg.Msg
 						// If the referenced message is deleted, show
 						// "[deleted]" instead of leaking the original text.

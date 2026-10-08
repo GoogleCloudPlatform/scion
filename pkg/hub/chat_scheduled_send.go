@@ -296,7 +296,7 @@ func (s *Server) handleScheduledCreate(w http.ResponseWriter, r *http.Request, k
 		ValidationError(w, fmt.Sprintf("idempotency_key exceeds %d characters", scheduledMaxIdempotencyKeyLen), nil)
 		return
 	}
-	content, _, serr := s.validateChatSendInput(ctx, target, chatSendInput{Content: body.Content})
+	content, _, serr := s.validateChatSendInput(ctx, user, target, chatSendInput{Content: body.Content})
 	if serr != nil {
 		serr.write(w)
 		return
