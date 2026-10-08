@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -84,8 +85,8 @@ func TestHubHandler_BudgetBoundsAllCalls(t *testing.T) {
 	assert.Less(t, elapsed, 2*time.Second, "three calls on a 300ms budget took %s", elapsed)
 }
 
-// Without a budget a call keeps its own per-call cap, so callers outside the
-// hook (init, ask_user) are unaffected.
+// WithBudget and NewHubHandlerForClient are safe on nil inputs, so the hook
+// can chain them when the Hub is not configured.
 func TestHubHandler_WithBudgetNilSafe(t *testing.T) {
 	var h *HubHandler
 	assert.Nil(t, h.WithBudget(context.Background()))
@@ -104,6 +105,7 @@ func TestLimitsHandler_TripSignalsBeforeHubAndLeavesReportToInit(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
 	triggerPath := filepath.Join(tmpDir, "scion-limits-exceeded")
+	signals := stubSignalInit(t)
 
 	var mu sync.Mutex
 	var reqs []recordedHubRequest
@@ -135,6 +137,8 @@ func TestLimitsHandler_TripSignalsBeforeHubAndLeavesReportToInit(t *testing.T) {
 	content, err := os.ReadFile(triggerPath)
 	require.NoError(t, err)
 	assert.Equal(t, "max_turns of 1 exceeded (completed 1)", string(content))
+
+	assert.Equal(t, []syscall.Signal{syscall.SIGUSR1}, signals.get())
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -204,4 +208,33 @@ func TestReadLimitsTriggerMessage(t *testing.T) {
 	link := filepath.Join(dir, "link")
 	require.NoError(t, os.Symlink(secret, link))
 	assert.Equal(t, DefaultLimitsExceededMessage, ReadLimitsTriggerMessage(link), "symlink is refused")
+}
+
+// recordedSignals collects the signals a test's stubbed signalInitFn sent.
+type recordedSignals struct {
+	mu   sync.Mutex
+	sigs []syscall.Signal
+}
+
+func (r *recordedSignals) get() []syscall.Signal {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]syscall.Signal(nil), r.sigs...)
+}
+
+// stubSignalInit replaces signalInitFn for the test so a trip never signals
+// the real PID 1 (an agent container's init, when tests run as root inside
+// one), and records what would have been sent.
+func stubSignalInit(t *testing.T) *recordedSignals {
+	t.Helper()
+	rec := &recordedSignals{}
+	orig := signalInitFn
+	signalInitFn = func(sig syscall.Signal) error {
+		rec.mu.Lock()
+		defer rec.mu.Unlock()
+		rec.sigs = append(rec.sigs, sig)
+		return nil
+	}
+	t.Cleanup(func() { signalInitFn = orig })
+	return rec
 }

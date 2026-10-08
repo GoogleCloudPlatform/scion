@@ -170,6 +170,10 @@ func runHookWithEvent(eventName string) {
 // caps used to add up (10-15s with a black-holed Hub) past harness hook
 // timeouts (antigravity 10s; opencode and grok-build 5s). Together with
 // telemetry's own bound (about 0.75s) this keeps a hook under 5s.
+// The calls run in order, so a slow earlier call (the status update) can use
+// up the budget and the later ones (limits counts, session-end metrics) are
+// then dropped. That is acceptable: those are informational, and
+// limits_exceeded and the final stop status are reported by sciontool init.
 const hookHubBudget = 3 * time.Second
 
 // processHookData parses and handles hook event data.

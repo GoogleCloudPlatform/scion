@@ -136,7 +136,7 @@ When a count-incrementing event is received and the count meets or exceeds the c
 3. Signal PID 1 (sciontool init): write the trigger file `/tmp/scion-limits-exceeded` holding the limit message, then send `SIGUSR1` as a fallback.
 4. Report the updated counts to the Hub (if configured).
 
-The hook does not report `limits_exceeded` to the Hub itself. Init does that when it sees the trigger file or `SIGUSR1`, using the message from the trigger file (ptone/scion#3610). The hook runs under the harness's hook timeout (antigravity 10s, opencode and grok-build 5s), so its Hub calls share one per-process budget (`hookHubBudget`, 3s), and the local actions above come before any Hub call so an unreachable Hub never delays shutdown.
+The hook does not report `limits_exceeded` to the Hub itself. Init does that when it sees the trigger file or `SIGUSR1`, using the message from the trigger file (ptone/scion#3610). The hook runs under the harness's hook timeout (antigravity 10s, opencode and grok-build 5s), so its Hub calls share one per-process budget (`hookHubBudget`, 3s), and the local actions above come before any Hub call so an unreachable Hub never delays shutdown. The calls share the budget in order, so a slow earlier call (the status update) can use it up and the later ones (counts, session-end metrics) are then dropped; this is accepted because `limits_exceeded` and the final stop status come from init.
 
 #### Signaling the Init Process
 

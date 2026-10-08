@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+	"unicode/utf8"
 
 	state "github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
@@ -339,10 +340,15 @@ func (h *HubHandler) ReportCounts(turnCount, modelCallCount int) error {
 	})
 }
 
-// truncateMessage truncates a message to the specified length.
+// truncateMessage truncates a message to at most maxLen bytes, ending in
+// "...". It cuts on a rune boundary so a multibyte character is never split.
 func truncateMessage(msg string, maxLen int) string {
 	if len(msg) <= maxLen {
 		return msg
 	}
-	return msg[:maxLen-3] + "..."
+	cut := maxLen - 3
+	for cut > 0 && !utf8.RuneStart(msg[cut]) {
+		cut--
+	}
+	return msg[:cut] + "..."
 }

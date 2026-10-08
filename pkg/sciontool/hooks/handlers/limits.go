@@ -325,17 +325,24 @@ func (h *LimitsHandler) signalLimitsExceeded(message string) error {
 
 	// Fallback: send SIGUSR1 to PID 1. This may fail with EPERM when the
 	// hook process runs as a non-root user and PID 1 runs as root.
-	p, err := os.FindProcess(1)
-	if err != nil {
-		return fmt.Errorf("finding PID 1: %w", err)
-	}
-	if err := p.Signal(syscall.SIGUSR1); err != nil {
+	if err := signalInitFn(syscall.SIGUSR1); err != nil {
 		// Expected to fail when running as non-root; the trigger file
 		// is the reliable mechanism.
 		log.Debug("SIGUSR1 to PID 1 failed (expected if non-root): %v", err)
 		return nil
 	}
 	return nil
+}
+
+// signalInitFn sends sig to PID 1 (sciontool init). Tests replace it so a
+// test run as root inside an agent container can never signal that
+// container's own init.
+var signalInitFn = func(sig syscall.Signal) error {
+	p, err := os.FindProcess(1)
+	if err != nil {
+		return fmt.Errorf("finding PID 1: %w", err)
+	}
+	return p.Signal(sig)
 }
 
 // ParseEnvInt reads an integer from an environment variable. Returns 0 if unset or invalid.
