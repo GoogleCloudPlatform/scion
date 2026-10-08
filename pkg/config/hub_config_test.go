@@ -1888,7 +1888,11 @@ func TestLoadGlobalConfig_ListFieldNormalization(t *testing.T) {
 	// then SanitizeEmailList trims, lowercases and drops empty entries).
 	admins := func(gc *GlobalConfig) []string { return gc.Hub.AdminEmails }
 	rows = append(rows,
-		row{name: "admins env empty", env: map[string]string{"SCION_SERVER_HUB_ADMINEMAILS": ""}, get: admins, want: []string{}},
+		// An exported but empty variable is unset: the file value stays.
+		row{name: "admins env empty unset", env: map[string]string{"SCION_SERVER_HUB_ADMINEMAILS": ""},
+			legacy: "hub:\n  adminEmails: [\"a@x.com\"]\n",
+			v1:     "  hub:\n    admin_emails: [\"a@x.com\"]\n",
+			get:    admins, want: []string{"a@x.com"}},
 		row{name: "admins env padded single", env: map[string]string{"SCION_SERVER_HUB_ADMINEMAILS": "  A@x.com  "}, get: admins, want: []string{"a@x.com"}},
 	)
 	for _, f := range []struct {

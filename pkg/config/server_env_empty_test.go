@@ -31,8 +31,8 @@ type serverEnvPathResult struct {
 	host    string
 }
 
-// koanfStringList reads key as a list, splitting a comma-separated string
-// (the env-only loaders keep the raw string).
+// koanfStringList reads key as stored, without splitting: a string value (the
+// env-only loaders keep the raw env string) comes back as one element.
 func koanfStringList(k *koanf.Koanf, key string) []string {
 	if !k.Exists(key) {
 		return nil
@@ -41,16 +41,6 @@ func koanfStringList(k *koanf.Koanf, key string) []string {
 		return []string{s}
 	}
 	return k.Strings(key)
-}
-
-func writeTestFile(t *testing.T, path, content string) {
-	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		t.Fatalf("write %s: %v", path, err)
-	}
 }
 
 const serverEnvEmptySettingsYAML = `schema_version: "1"
@@ -90,7 +80,10 @@ func TestServerAndSeedEnv_EmptyValueIsUnset(t *testing.T) {
 		// configured is the result with no env override; defaults to the
 		// shared configured value above.
 		configured *serverEnvPathResult
-		load       func(t *testing.T) serverEnvPathResult
+		// rawList marks the env-only loaders, which keep the env value as
+		// one unsplit string; every other path must split it.
+		rawList bool
+		load    func(t *testing.T) serverEnvPathResult
 	}{
 		{
 			// settings.yaml server section, then applyEnvOverrides.
@@ -98,9 +91,7 @@ func TestServerAndSeedEnv_EmptyValueIsUnset(t *testing.T) {
 			domainsEnv: "SCION_SERVER_AUTH_AUTHORIZEDDOMAINS",
 			hostEnv:    "SCION_SERVER_HUB_HOST",
 			load: func(t *testing.T) serverEnvPathResult {
-				home := t.TempDir()
-				t.Setenv("HOME", home)
-				writeTestFile(t, filepath.Join(home, ".scion", "settings.yaml"), serverEnvEmptySettingsYAML)
+				writeGlobalFiles(t, map[string]string{"settings.yaml": serverEnvEmptySettingsYAML})
 				gc, err := LoadGlobalConfig("")
 				if err != nil {
 					t.Fatalf("LoadGlobalConfig: %v", err)
@@ -114,17 +105,15 @@ func TestServerAndSeedEnv_EmptyValueIsUnset(t *testing.T) {
 			domainsEnv: "SCION_SERVER_AUTH_AUTHORIZEDDOMAINS",
 			hostEnv:    "SCION_SERVER_HUB_HOST",
 			load: func(t *testing.T) serverEnvPathResult {
-				t.Setenv("HOME", t.TempDir())
-				dir := t.TempDir()
-				writeTestFile(t, filepath.Join(dir, "server.yaml"), `
+				writeGlobalFiles(t, map[string]string{"server.yaml": `
 hub:
   host: "10.1.2.3"
 auth:
   authorizedDomains:
     - configured-a.example
     - configured-b.example
-`)
-				gc, err := LoadGlobalConfig(dir)
+`})
+				gc, err := LoadGlobalConfig(filepath.Join(os.Getenv("HOME"), ".scion"))
 				if err != nil {
 					t.Fatalf("LoadGlobalConfig: %v", err)
 				}
@@ -133,6 +122,7 @@ auth:
 		},
 		{
 			name:       "LoadEnvKoanf",
+			rawList:    true,
 			domainsEnv: "SCION_SERVER_AUTH_AUTHORIZEDDOMAINS",
 			hostEnv:    "SCION_SERVER_HUB_HOST",
 			load: func(t *testing.T) serverEnvPathResult {
@@ -143,6 +133,7 @@ auth:
 		},
 		{
 			name:       "LoadSeedEnvKoanf",
+			rawList:    true,
 			domainsEnv: "SCION_SEED_SERVER_AUTH_AUTHORIZEDDOMAINS",
 			hostEnv:    "SCION_SEED_SERVER_HUB_HOST",
 			load: func(t *testing.T) serverEnvPathResult {
@@ -157,11 +148,9 @@ auth:
 			domainsEnv: "SCION_SERVER_AUTH_AUTHORIZEDDOMAINS",
 			hostEnv:    "SCION_SERVER_HUB_HOST",
 			load: func(t *testing.T) serverEnvPathResult {
-				home := t.TempDir()
-				t.Setenv("HOME", home)
-				writeTestFile(t, filepath.Join(home, ".scion", "settings.yaml"), serverEnvEmptySettingsYAML)
+				writeGlobalFiles(t, map[string]string{"settings.yaml": serverEnvEmptySettingsYAML})
 				k := LoadBootstrapKoanf()
-				return serverEnvPathResult{k.Strings("server.auth.authorized_domains"), k.String("server.hub.host")}
+				return serverEnvPathResult{koanfStringList(k, "server.auth.authorized_domains"), k.String("server.hub.host")}
 			},
 		},
 		{
@@ -220,15 +209,13 @@ auth:
 			clearPathEnv(t)
 			t.Setenv(p.domainsEnv, "env-a.example,env-b.example")
 			t.Setenv(p.hostEnv, "10.9.9.9")
-			got := p.load(t)
-			if len(got.domains) == 1 {
-				// The env-only loaders keep the raw comma-separated string.
-				got.domains = parseCommaSeparatedList(got.domains[0])
+			// Assert the list exactly as the path returns it, so a broken
+			// comma split on a splitting path fails here.
+			wantDomains := []string{"env-a.example", "env-b.example"}
+			if p.rawList {
+				wantDomains = []string{"env-a.example,env-b.example"}
 			}
-			check(t, got, serverEnvPathResult{
-				domains: []string{"env-a.example", "env-b.example"},
-				host:    "10.9.9.9",
-			})
+			check(t, p.load(t), serverEnvPathResult{domains: wantDomains, host: "10.9.9.9"})
 		})
 	}
 }
