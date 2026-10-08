@@ -386,3 +386,34 @@ func TestValidateChannelRegistered_UsesRoutingKey(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, rr.Code, "body: %s", rr.Body.String())
 	require.Contains(t, rr.Body.String(), "available channels: gchat")
 }
+
+// A spoke whose ChannelID is the inprocess bus name passes channel
+// validation, but FanOutEventBus.Publish refuses that channel with
+// ErrReservedChannel. The handler reports it as a 400 validation error
+// and stores no row.
+func TestHandleAgentOutboundMessage_ReservedChannelIsBadRequest(t *testing.T) {
+	f := newOutboundSpokeFixture(t, eventbus.NewInProcessEventBus(slog.Default()))
+	fanout := eventbus.NewFanOutEventBus([]eventbus.NamedEventBus{
+		{Name: eventbus.InProcessBusName, Bus: eventbus.NewInProcessEventBus(slog.Default())},
+		{Name: "chatplugin", ChannelID: eventbus.InProcessBusName, Bus: nullSpokeEventBus{}},
+	}, slog.Default())
+	events := NewChannelEventPublisher()
+	t.Cleanup(events.Close)
+	f.proxy = NewMessageBrokerProxy(fanout, f.store, events,
+		func() AgentDispatcher { return noopDispatcher{} }, slog.Default())
+	f.srv.SetMessageBrokerProxy(f.proxy)
+	f.proxy.Start()
+	t.Cleanup(f.proxy.Stop)
+
+	rr := f.sendRequest(t, OutboundMessageRequest{
+		Recipient: "user:" + f.user.Email,
+		Msg:       "hello on a reserved channel",
+		Channel:   eventbus.InProcessBusName,
+	})
+	require.Equal(t, http.StatusBadRequest, rr.Code, "handler response: %s", rr.Body.String())
+	var resp ErrorResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	require.Equal(t, ErrCodeValidationError, resp.Error.Code)
+	require.Contains(t, resp.Error.Message, "reserved for internal use")
+	f.requireStoredRowsStay(t, 0, "a refused send stores no row")
+}
