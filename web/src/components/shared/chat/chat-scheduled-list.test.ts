@@ -31,12 +31,16 @@ import type { ScheduledMessage } from '../../../client/chat-scheduled.js';
 
 const listScheduledMessages = vi.fn();
 const cancelScheduledMessage = vi.fn();
+const sendNowScheduledMessage = vi.fn();
+const dismissScheduledMessage = vi.fn();
 vi.mock('../../../client/chat-scheduled.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../../client/chat-scheduled.js')>();
   return {
     ...actual,
     listScheduledMessages: (...a: unknown[]) => listScheduledMessages(...a),
     cancelScheduledMessage: (...a: unknown[]) => cancelScheduledMessage(...a),
+    sendNowScheduledMessage: (...a: unknown[]) => sendNowScheduledMessage(...a),
+    dismissScheduledMessage: (...a: unknown[]) => dismissScheduledMessage(...a),
   };
 });
 vi.mock('../../../utils/toast.js', () => ({ showToast: vi.fn() }));
@@ -86,6 +90,8 @@ describe('scion-chat-scheduled-list', () => {
     setPreferredTimeZone('Europe/Berlin');
     listScheduledMessages.mockReset();
     cancelScheduledMessage.mockReset();
+    sendNowScheduledMessage.mockReset();
+    dismissScheduledMessage.mockReset();
     listScheduledMessages.mockResolvedValue([sm('b', { fireAt: '2099-10-09T07:00:00Z' }), sm('a')]);
     el = document.createElement('scion-chat-scheduled-list');
     el.conversationKey = 't1';
@@ -140,11 +146,91 @@ describe('scion-chat-scheduled-list', () => {
     expect(items()[0]!.querySelector('.cancel-btn')).not.toBeNull();
   });
 
-  it('cancels and removes the bubble', async () => {
+  it('cancels, removes the bubble and offers the text back to the composer', async () => {
+    const restores: { text: string; onlyIfEmpty: boolean }[] = [];
+    el.addEventListener('chat-scheduled-restore', (e: CustomEvent) => restores.push(e.detail));
     cancelScheduledMessage.mockResolvedValue(undefined);
     (items()[0]!.querySelector('.cancel-btn') as HTMLButtonElement).click();
     await flush(el);
     expect(cancelScheduledMessage).toHaveBeenCalledWith('t1', 'a');
+    expect(items().map((i) => i.dataset.id)).toEqual(['b']);
+    expect(restores).toEqual([{ text: 'content a', onlyIfEmpty: true }]);
+  });
+
+  it('a failed cancel offers nothing to the composer', async () => {
+    const restores: unknown[] = [];
+    el.addEventListener('chat-scheduled-restore', (e: CustomEvent) => restores.push(e.detail));
+    cancelScheduledMessage.mockRejectedValue(new Error('This message is already being sent'));
+    (items()[0]!.querySelector('.cancel-btn') as HTMLButtonElement).click();
+    await flush(el);
+    expect(restores).toEqual([]);
+  });
+
+  it('a missed message offers Send now, Copy to composer and Dismiss', async () => {
+    emit(sm('a', { status: 'failed', failureReason: 'missed' }), 'failed');
+    await flush(el);
+    const row = items()[0]!;
+    expect(row.querySelector('.banner.failed')!.textContent).toContain('scheduled time passed');
+    expect(row.querySelector('.send-now-btn')).not.toBeNull();
+    expect(row.querySelector('.copy-btn')).not.toBeNull();
+    expect(row.querySelector('.dismiss-btn')).not.toBeNull();
+
+    sendNowScheduledMessage.mockResolvedValue(
+      sm('a', { status: 'pending', fireAt: '2026-10-08T07:00:00Z' })
+    );
+    (row.querySelector('.send-now-btn') as HTMLButtonElement).click();
+    await flush(el);
+    expect(sendNowScheduledMessage).toHaveBeenCalledWith('t1', 'a');
+    expect(items()[0]!.dataset.id).toBe('a');
+    expect(items()[0]!.dataset.status).toBe('pending');
+    expect(items()[0]!.querySelector('.cancel-btn')).not.toBeNull();
+  });
+
+  it('an interrupted message offers Send now; other failures do not', async () => {
+    emit(sm('a', { status: 'failed', failureReason: 'interrupted' }), 'failed');
+    emit(
+      sm('b', { fireAt: '2099-10-09T07:00:00Z', status: 'failed', failureReason: 'no_access' }),
+      'failed'
+    );
+    await flush(el);
+    expect(items()[0]!.querySelector('.send-now-btn')).not.toBeNull();
+    expect(items()[1]!.querySelector('.send-now-btn')).toBeNull();
+    expect(items()[1]!.querySelector('.dismiss-btn')).not.toBeNull();
+  });
+
+  it('Copy to composer offers the text without the empty-composer condition', async () => {
+    const restores: { text: string; onlyIfEmpty: boolean }[] = [];
+    el.addEventListener('chat-scheduled-restore', (e: CustomEvent) => restores.push(e.detail));
+    emit(sm('a', { status: 'failed', failureReason: 'no_access' }), 'failed');
+    await flush(el);
+    (items()[0]!.querySelector('.copy-btn') as HTMLButtonElement).click();
+    await flush(el);
+    expect(restores).toEqual([{ text: 'content a', onlyIfEmpty: false }]);
+    expect(items()[0]!.dataset.status).toBe('failed');
+  });
+
+  it('Dismiss removes a failed message; a failure keeps it and reloads', async () => {
+    emit(sm('a', { status: 'failed', failureReason: 'no_access' }), 'failed');
+    await flush(el);
+    dismissScheduledMessage.mockRejectedValueOnce(new Error('nope'));
+    listScheduledMessages.mockResolvedValue([
+      sm('a', { status: 'failed', failureReason: 'no_access' }),
+      sm('b', { fireAt: '2099-10-09T07:00:00Z' }),
+    ]);
+    (items()[0]!.querySelector('.dismiss-btn') as HTMLButtonElement).click();
+    await flush(el);
+    expect(items().map((i) => i.dataset.id)).toEqual(['a', 'b']);
+
+    dismissScheduledMessage.mockResolvedValue(undefined);
+    (items()[0]!.querySelector('.dismiss-btn') as HTMLButtonElement).click();
+    await flush(el);
+    expect(dismissScheduledMessage).toHaveBeenCalledWith('t1', 'a');
+    expect(items().map((i) => i.dataset.id)).toEqual(['b']);
+  });
+
+  it('a dismissed event from another tab removes the message', async () => {
+    emit(sm('a', { status: 'cancelled', failureReason: 'missed' }), 'dismissed');
+    await flush(el);
     expect(items().map((i) => i.dataset.id)).toEqual(['b']);
   });
 

@@ -43,13 +43,13 @@ import { guard } from 'lit/directives/guard.js';
 import { repeat } from 'lit/directives/repeat.js';
 import { apiFetch, extractApiError } from '../../../client/api.js';
 import type { Agent, Message } from '../../../shared/types.js';
-import type { ChatScheduleDetail, ChatSendDetail } from './chat-composer.js';
+import type { ChatScheduleDetail, ChatSendDetail, ScionChatComposer } from './chat-composer.js';
 import {
   conversationSupportsScheduledSend,
   createScheduledMessage,
   scheduledSendEnabled,
 } from '../../../client/chat-scheduled.js';
-import type { ScionChatScheduledList } from './chat-scheduled-list.js';
+import type { ScheduledRestoreDetail, ScionChatScheduledList } from './chat-scheduled-list.js';
 import './chat-scheduled-list.js';
 import { navigateTo, stateManager } from '../../../client/main.js';
 import { agentIndexOf, agentStore } from '../../../client/agent-store.js';
@@ -2644,6 +2644,19 @@ export class ScionChatThread extends LitElement {
   };
 
   /**
+   * Put a scheduled message's text into the composer: after Cancel (only
+   * into an empty composer) or Copy to composer.
+   */
+  private readonly handleScheduledRestore = (e: CustomEvent<ScheduledRestoreDetail>): void => {
+    const composer = this.renderRoot.querySelector<ScionChatComposer>('scion-chat-composer');
+    if (!composer) return;
+    const placed = composer.restoreText(e.detail.text, { onlyIfEmpty: e.detail.onlyIfEmpty });
+    if (!placed && !e.detail.onlyIfEmpty) {
+      showToast('Finish the message being edited first', 'warning');
+    }
+  };
+
+  /**
    * POST one v2 send. With `wake` false the request carries `offer_wake`, so
    * a suspended primary the user may wake answers with a wake offer instead
    * of a failed row; the user is then asked, and a confirmed wake resends the
@@ -5227,6 +5240,7 @@ export class ScionChatThread extends LitElement {
         <scion-chat-scheduled-list
           .conversationKey=${this.conversationKey}
           ?enabled=${this.scheduleSendAvailable}
+          @chat-scheduled-restore=${this.handleScheduledRestore}
         ></scion-chat-scheduled-list>
         ${this.renderSendError()}
         <scion-chat-composer

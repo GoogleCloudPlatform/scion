@@ -55,9 +55,11 @@ import type { ArtifactPickerSelectDetail, PendingArtifact } from './artifact-pic
 import './artifact-picker.js';
 
 /** The touch presentation of the send button's right-click menu. */
-const SEND_SHEET_ITEMS: ActionSheetItem[] = [
-  { id: 'send-interrupt', label: 'Send with interruption', icon: 'lightning-charge' },
-];
+const SEND_SHEET_INTERRUPT: ActionSheetItem = {
+  id: 'send-interrupt',
+  label: 'Send with interruption',
+  icon: 'lightning-charge',
+};
 
 /** Maximum message length in rune count. */
 const MAX_MESSAGE_LENGTH = 2000;
@@ -270,6 +272,9 @@ export class ScionChatComposer extends LitElement {
 
   /** "Send with interruption" was chosen from the sheet; sent once it has closed. */
   private sendInterruptOnSheetClose = false;
+
+  /** "Schedule send…" was chosen from the sheet; its dialog opens once the sheet has closed. */
+  private scheduleOnSheetClose = false;
 
   private readonly sendLongPress = new LongPressController(this);
 
@@ -1266,7 +1271,7 @@ export class ScionChatComposer extends LitElement {
                 : nothing}
               <scion-action-sheet
                 heading="Send options"
-                .items=${SEND_SHEET_ITEMS}
+                .items=${this.sendSheetItems()}
                 .open=${this.showSendSheet && !inEditMode}
                 @action-sheet-select=${this.handleSendSheetSelect}
                 @action-sheet-close=${this.handleSendSheetClose}
@@ -2303,7 +2308,28 @@ export class ScionChatComposer extends LitElement {
 
   private readonly handleSendSheetSelect = (e: CustomEvent<ActionSheetSelectDetail>): void => {
     if (e.detail.id === 'send-interrupt') this.sendInterruptOnSheetClose = true;
+    if (e.detail.id === 'schedule-send' && !this.scheduleBlockedReason()) {
+      this.scheduleOnSheetClose = true;
+    }
   };
+
+  /**
+   * The send sheet's items: "Send with interruption", and "Schedule send…"
+   * when the parent enables it (disabled while it cannot be used, like the
+   * popup's item).
+   */
+  private sendSheetItems(): ActionSheetItem[] {
+    if (!this.scheduleSendEnabled) return [SEND_SHEET_INTERRUPT];
+    return [
+      SEND_SHEET_INTERRUPT,
+      {
+        id: 'schedule-send',
+        label: 'Schedule send…',
+        icon: 'clock',
+        disabled: this.scheduleBlockedReason() !== '',
+      },
+    ];
+  }
 
   /**
    * The sheet has closed, by a choice, Cancel, Esc or the backdrop. The
@@ -2314,6 +2340,11 @@ export class ScionChatComposer extends LitElement {
    */
   private readonly handleSendSheetClose = (): void => {
     this.showSendSheet = false;
+    if (this.scheduleOnSheetClose) {
+      this.scheduleOnSheetClose = false;
+      this.showScheduleDialog = true;
+      return;
+    }
     if (!this.sendInterruptOnSheetClose) return;
     this.sendInterruptOnSheetClose = false;
     this.doSend(true);
@@ -2415,6 +2446,24 @@ export class ScionChatComposer extends LitElement {
         composed: true,
       })
     );
+  }
+
+  /**
+   * Put text back into the composer: the text of a cancelled scheduled
+   * message (`onlyIfEmpty`, so a draft is never replaced) or of a failed
+   * one (Copy to composer, appended to a draft on a new line). Nothing
+   * happens while a message is being edited. Returns whether the text was
+   * placed.
+   */
+  restoreText(text: string, { onlyIfEmpty = false }: { onlyIfEmpty?: boolean } = {}): boolean {
+    if (!text || this.editMessage || this.disabled) return false;
+    const hasDraft =
+      this.text.trim() !== '' || this.pendingFiles.length > 0 || this.pendingArtifacts.length > 0;
+    if (onlyIfEmpty && hasDraft) return false;
+    this.text = this.text.trim() === '' ? text : `${this.text.replace(/\s+$/, '')}\n${text}`;
+    this.runeCount = countRunes(this.text);
+    this.saveDraft();
+    return true;
   }
 
   /**
