@@ -323,7 +323,7 @@ A template the Hub imported from a GitHub folder URL remembers that **source URL
 # Refresh one Hub template from its stored source URL
 scion templates update code-reviewer
 
-# Refresh from a different GitHub folder, and store it as the new source URL
+# Refresh from a different GitHub folder; it becomes the stored source URL if the refresh succeeds
 scion templates update code-reviewer --url https://github.com/myorg/templates/tree/main/code-reviewer
 
 # Refresh every Hub template that has a GitHub source URL

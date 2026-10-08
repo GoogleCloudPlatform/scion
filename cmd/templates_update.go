@@ -154,21 +154,23 @@ func inCurrentProject(t *hubclient.Template, currentProject string) bool {
 }
 
 func updateSingleTemplate(ctx context.Context, svc hubclient.TemplateService, name, urlOverride, scope, currentProject string) error {
-	resp, err := svc.List(ctx, &hubclient.ListTemplatesOptions{
-		Name:   name,
-		Scope:  scope,
-		Status: "active",
-	})
-	if err != nil {
-		return fmt.Errorf("failed to search Hub: %w", err)
-	}
-
 	var matches []*hubclient.Template
-	for i := range resp.Templates {
-		t := &resp.Templates[i]
-		if (t.Name == name || t.Slug == name) && inCurrentProject(t, currentProject) {
-			matches = append(matches, t)
+	opts := &hubclient.ListTemplatesOptions{Name: name, Scope: scope, Status: "active"}
+	for {
+		resp, err := svc.List(ctx, opts)
+		if err != nil {
+			return fmt.Errorf("failed to search Hub: %w", err)
 		}
+		for i := range resp.Templates {
+			t := &resp.Templates[i]
+			if (t.Name == name || t.Slug == name) && inCurrentProject(t, currentProject) {
+				matches = append(matches, t)
+			}
+		}
+		if resp.Page.NextCursor == "" {
+			break
+		}
+		opts.Page.Cursor = resp.Page.NextCursor
 	}
 	if len(matches) == 0 {
 		return fmt.Errorf("template %q not found on Hub", name)
@@ -182,8 +184,11 @@ func updateSingleTemplate(ctx context.Context, svc hubclient.TemplateService, na
 				sameScope = false
 			}
 		}
+		if sameScope && matches[0].Scope == "project" {
+			return fmt.Errorf("template %q exists in several projects, use --project to choose one", name)
+		}
 		if sameScope {
-			return fmt.Errorf("template %q exists in several %s scopes, use --project to choose one",
+			return fmt.Errorf("template %q matches several %s templates and cannot be chosen by name; refresh it from the Web UI",
 				name, matches[0].Scope)
 		}
 		return fmt.Errorf("template %q exists in several scopes (%s), use --scope to choose one",

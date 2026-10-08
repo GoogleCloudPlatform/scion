@@ -17,6 +17,7 @@ package cmd
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -38,10 +39,42 @@ type fakeTemplateUpdateService struct {
 	deadlines []time.Duration
 	// delay is how long each reimport takes.
 	delay time.Duration
+	// pageSize, when set, makes List return results in pages of this size.
+	pageSize int
+}
+
+// listPage serves List results in pages, using the cursor as a start index.
+func (f *fakeTemplateUpdateService) listPage(opts *hubclient.ListTemplatesOptions) (*hubclient.ListTemplatesResponse, error) {
+	var all []hubclient.Template
+	for _, t := range f.templates {
+		if opts.Name != "" && t.Name != opts.Name && t.Slug != opts.Name {
+			continue
+		}
+		if opts.Scope != "" && t.Scope != opts.Scope {
+			continue
+		}
+		all = append(all, t)
+	}
+	start := 0
+	if opts.Page.Cursor != "" {
+		_, _ = fmt.Sscanf(opts.Page.Cursor, "%d", &start)
+	}
+	end := start + f.pageSize
+	if end > len(all) {
+		end = len(all)
+	}
+	resp := &hubclient.ListTemplatesResponse{Templates: all[start:end]}
+	if end < len(all) {
+		resp.Page.NextCursor = fmt.Sprintf("%d", end)
+	}
+	return resp, nil
 }
 
 func (f *fakeTemplateUpdateService) List(_ context.Context, opts *hubclient.ListTemplatesOptions) (*hubclient.ListTemplatesResponse, error) {
 	f.listOpts = append(f.listOpts, *opts)
+	if f.pageSize > 0 {
+		return f.listPage(opts)
+	}
 	var out []hubclient.Template
 	for _, t := range f.templates {
 		if opts.Name != "" && t.Name != opts.Name && t.Slug != opts.Name {
@@ -278,7 +311,7 @@ func TestUpdateTemplates_CurrentProject(t *testing.T) {
 		svc := &fakeTemplateUpdateService{templates: templates}
 		err := updateSingleTemplate(context.Background(), svc, "proj", "", "", "")
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "several project scopes, use --project")
+		assert.Contains(t, err.Error(), "several projects, use --project")
 		assert.Empty(t, svc.reimported)
 	})
 
@@ -312,4 +345,32 @@ func TestUpdateAllTemplates_JSONFailureExitsNonZero(t *testing.T) {
 		templates: []hubclient.Template{{ID: "a", Name: "a", Scope: "global", SourceURL: ghSource}},
 	}
 	require.NoError(t, updateAllTemplates(context.Background(), ok, "", "", time.Minute))
+}
+
+func TestUpdateSingleTemplate_ReadsAllPages(t *testing.T) {
+	templates := []hubclient.Template{
+		{ID: "p1", Name: "proj", Scope: "project", ScopeID: "project-1", SourceURL: ghSource},
+		{ID: "p2", Name: "proj", Scope: "project", ScopeID: "project-2", SourceURL: ghSource},
+		{ID: "p3", Name: "proj", Scope: "project", ScopeID: "project-3", SourceURL: ghSource},
+	}
+	svc := &fakeTemplateUpdateService{templates: templates, pageSize: 1}
+	require.NoError(t, updateSingleTemplate(context.Background(), svc, "proj", "", "", "project-3"))
+	assert.Equal(t, []string{"p3"}, svc.reimported, "a match on a later page is found")
+
+	svc = &fakeTemplateUpdateService{templates: templates, pageSize: 1}
+	err := updateSingleTemplate(context.Background(), svc, "proj", "", "", "")
+	require.Error(t, err, "matches spread over several pages are still seen as ambiguous")
+	assert.Contains(t, err.Error(), "several projects")
+}
+
+func TestUpdateSingleTemplate_AmbiguityMessageIsScopeCorrect(t *testing.T) {
+	svc := &fakeTemplateUpdateService{templates: []hubclient.Template{
+		{ID: "u1", Name: "mine", Scope: "user", ScopeID: "user-1", SourceURL: ghSource},
+		{ID: "u2", Name: "mine", Scope: "user", ScopeID: "user-2", SourceURL: ghSource},
+	}}
+	err := updateSingleTemplate(context.Background(), svc, "mine", "", "", "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "several user templates")
+	assert.NotContains(t, err.Error(), "--project")
+	assert.Empty(t, svc.reimported)
 }
