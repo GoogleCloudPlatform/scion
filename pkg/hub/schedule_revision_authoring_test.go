@@ -328,8 +328,8 @@ func unrecordableMessageWriteCredentials(t *testing.T, srv *Server, s store.Stor
 
 	return []messageWriteCredential{
 		{name: "federated user", identity: fed, cause: "cannot authorize scheduled work"},
-		{name: "agent whose row is not stored", identity: orphan, cause: string(DeniedByDelegationCeiling)},
-		{name: "agent without recorded provenance", identity: agent, cause: string(DeniedByDelegationCeiling)},
+		{name: "agent whose row is not stored", identity: orphan, cause: "delegation record is missing or inconsistent"},
+		{name: "agent without recorded provenance", identity: agent, cause: "delegation record is missing or inconsistent"},
 		{name: "unrecognized local development user", identity: dev, cause: "cannot authorize scheduled work"},
 	}
 }
