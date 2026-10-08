@@ -578,7 +578,22 @@ func (s *Service) handlePutFile(w http.ResponseWriter, r *http.Request, id strin
 		writeError(w, http.StatusInternalServerError, "internal", "could not store the file")
 		return
 	}
-	switch err := b.store.MarkReceived(ctx, v.ID, filePath, mediaType); {
+	// The other pending files of the version with the same bytes share the
+	// stored object: they arrive with this upload, each with the media type
+	// detected for its own path.
+	files, err := b.store.ListFiles(ctx, v.ID)
+	if err != nil {
+		slog.ErrorContext(ctx, "artifacts: list files failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal", "could not record the file")
+		return
+	}
+	siblings := map[string]string{}
+	for _, o := range files {
+		if o.Path != filePath && o.Pending && o.SHA256 == f.SHA256 && fileOrigin(o.Origin) == FileOriginUpload {
+			siblings[o.Path] = detectMediaType(o.Path, o.MediaType, spool.head)
+		}
+	}
+	switch err := b.store.MarkReceived(ctx, v.ID, filePath, mediaType, siblings); {
 	case errors.Is(err, ErrConflict), errors.Is(err, ErrNotFound):
 		// ErrNotFound: the version was reaped since it was loaded.
 		writeError(w, http.StatusConflict, "conflict", "the version is not pending")

@@ -16,13 +16,17 @@ package storage
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -114,7 +118,7 @@ func (s *LocalStorage) Upload(ctx context.Context, objectPath string, reader io.
 	fullPath := s.fullPath(objectPath)
 
 	// Ensure parent directory exists
-	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
+	if err := mkdirAllSynced(filepath.Dir(fullPath)); err != nil {
 		return nil, fmt.Errorf("failed to create directory: %w", err)
 	}
 
@@ -335,7 +339,7 @@ func (s *LocalStorage) Copy(ctx context.Context, srcPath, dstPath string) (*Obje
 	defer func() { _ = src.Close() }()
 
 	// Ensure destination directory exists
-	if err := os.MkdirAll(filepath.Dir(dstFullPath), 0755); err != nil {
+	if err := mkdirAllSynced(filepath.Dir(dstFullPath)); err != nil {
 		return nil, fmt.Errorf("failed to create destination directory: %w", err)
 	}
 
@@ -368,14 +372,16 @@ var _ Storage = (*LocalStorage)(nil)
 const UploadTempPrefix = ".scion-upload-"
 
 // writeFileAtomic writes r to a temporary file in path's directory, syncs
-// it and renames it over path. On any error the temporary file is removed
-// and path is left as it was.
+// it, renames it over path and syncs the directory, so the new content is
+// durable once it returns. On any error the temporary file is removed and
+// path is left as it was. The file is created with mode 0666 less the
+// umask, as os.Create would.
 func writeFileAtomic(path string, r io.Reader) (int64, os.FileInfo, error) {
-	tmp, err := os.CreateTemp(filepath.Dir(path), UploadTempPrefix+filepath.Base(path)+"-*")
+	dir := filepath.Dir(path)
+	tmp, tmpName, err := createTemp(dir, UploadTempPrefix+filepath.Base(path)+"-")
 	if err != nil {
 		return 0, nil, fmt.Errorf("failed to create file: %w", err)
 	}
-	tmpName := tmp.Name()
 	done := false
 	defer func() {
 		if !done {
@@ -399,11 +405,80 @@ func writeFileAtomic(path string, r io.Reader) (int64, os.FileInfo, error) {
 		return 0, nil, fmt.Errorf("failed to move file into place: %w", err)
 	}
 	done = true
+	if err := syncDir(dir); err != nil {
+		return 0, nil, fmt.Errorf("failed to sync directory: %w", err)
+	}
 	info, err := os.Stat(path)
 	if err != nil {
 		return 0, nil, fmt.Errorf("failed to stat file: %w", err)
 	}
 	return size, info, nil
+}
+
+// createTemp creates a new file in dir named prefix followed by random
+// hex, with mode 0666 less the umask (os.CreateTemp would use 0600).
+func createTemp(dir, prefix string) (*os.File, string, error) {
+	for range 10 {
+		var b [8]byte
+		if _, err := rand.Read(b[:]); err != nil {
+			return nil, "", err
+		}
+		name := filepath.Join(dir, prefix+hex.EncodeToString(b[:]))
+		f, err := os.OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o666)
+		if os.IsExist(err) {
+			continue
+		}
+		return f, name, err
+	}
+	return nil, "", errors.New("could not create a unique temporary file")
+}
+
+// syncDirHook, when set (by tests), is called with each directory synced.
+var syncDirHook func(dir string)
+
+// syncDir fsyncs a directory, so a rename or a new entry in it is
+// durable. Platforms and file systems that cannot sync a directory are
+// skipped.
+func syncDir(dir string) error {
+	if syncDirHook != nil {
+		syncDirHook(dir)
+	}
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = d.Close() }()
+	if err := d.Sync(); err != nil && !errors.Is(err, syscall.EINVAL) && !errors.Is(err, syscall.ENOTSUP) {
+		return err
+	}
+	return nil
+}
+
+// mkdirAllSynced is os.MkdirAll that also syncs the parent of each
+// directory it creates, so the new directories are durable.
+func mkdirAllSynced(dir string) error {
+	var created []string
+	for d := dir; ; d = filepath.Dir(d) {
+		if _, err := os.Stat(d); err == nil {
+			break
+		}
+		created = append(created, d)
+		if filepath.Dir(d) == d {
+			break
+		}
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	for i := len(created) - 1; i >= 0; i-- {
+		if err := syncDir(filepath.Dir(created[i])); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // TempCleaner is implemented by providers whose writes leave temporary

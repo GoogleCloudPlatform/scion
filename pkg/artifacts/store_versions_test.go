@@ -68,7 +68,7 @@ func TestStoreTwoStepVersion(t *testing.T) {
 		}
 
 		// Finalize refuses while a file is missing.
-		if err := st.MarkReceived(ctx, v.ID, "index.html", "text/html"); err != nil {
+		if err := st.MarkReceived(ctx, v.ID, "index.html", "text/html", nil); err != nil {
 			t.Fatalf("MarkReceived: %v", err)
 		}
 		if err := claimFin(ctx, st, a.ID, 1); !errors.Is(err, ErrConflict) {
@@ -77,10 +77,10 @@ func TestStoreTwoStepVersion(t *testing.T) {
 		if _, err := st.FinalizeVersion(ctx, a.ID, 1, claimOf(a.ID, 1), nil); !errors.Is(err, ErrConflict) {
 			t.Fatalf("finalize without a claim: %v, want ErrConflict", err)
 		}
-		if err := st.MarkReceived(ctx, v.ID, "nope.txt", "text/plain"); !errors.Is(err, ErrNotFound) {
+		if err := st.MarkReceived(ctx, v.ID, "nope.txt", "text/plain", nil); !errors.Is(err, ErrNotFound) {
 			t.Errorf("MarkReceived(unknown path) = %v, want ErrNotFound", err)
 		}
-		if err := st.MarkReceived(ctx, v.ID, "img/a.png", "image/png"); err != nil {
+		if err := st.MarkReceived(ctx, v.ID, "img/a.png", "image/png", nil); err != nil {
 			t.Fatal(err)
 		}
 		extra := []File{{VersionID: v.ID, Path: "_remote/" + strings.Repeat("cd", 32), Size: 7, SHA256: strings.Repeat("ef", 32),
@@ -91,7 +91,7 @@ func TestStoreTwoStepVersion(t *testing.T) {
 		if err := claimFin(ctx, st, a.ID, 1); !errors.Is(err, ErrConflict) {
 			t.Fatalf("second claim: %v, want ErrConflict", err)
 		}
-		if err := st.MarkReceived(ctx, v.ID, "index.html", "text/html"); !errors.Is(err, ErrConflict) {
+		if err := st.MarkReceived(ctx, v.ID, "index.html", "text/html", nil); !errors.Is(err, ErrConflict) {
 			t.Errorf("upload to a finalizing version = %v, want ErrConflict", err)
 		}
 		if err := st.ReleaseFinalize(ctx, a.ID, 1, claimOf(a.ID, 1)); err != nil {
@@ -118,7 +118,7 @@ func TestStoreTwoStepVersion(t *testing.T) {
 		if _, err := st.FinalizeVersion(ctx, a.ID, 1, claimOf(a.ID, 1), nil); !errors.Is(err, ErrConflict) {
 			t.Errorf("second finalize = %v, want ErrConflict", err)
 		}
-		if err := st.MarkReceived(ctx, v.ID, "index.html", "text/html"); !errors.Is(err, ErrConflict) {
+		if err := st.MarkReceived(ctx, v.ID, "index.html", "text/html", nil); !errors.Is(err, ErrConflict) {
 			t.Errorf("MarkReceived on a ready version = %v, want ErrConflict", err)
 		}
 
@@ -230,7 +230,7 @@ func TestStoreReapPending(t *testing.T) {
 		abandoned, av := pendingArtifact(t, st, "gone", "a.txt")
 		// An artifact with a ready version and an abandoned second one.
 		kept, kv := pendingArtifact(t, st, "", "a.txt")
-		if err := st.MarkReceived(ctx, kv.ID, "a.txt", "text/plain"); err != nil {
+		if err := st.MarkReceived(ctx, kv.ID, "a.txt", "text/plain", nil); err != nil {
 			t.Fatal(err)
 		}
 		if err := claimFin(ctx, st, kept.ID, 1); err != nil {
@@ -246,7 +246,7 @@ func TestStoreReapPending(t *testing.T) {
 		}
 		// The abandoned artifact's version was claimed by a finalize that
 		// never completed: it is reaped like a pending one.
-		if err := st.MarkReceived(ctx, av.ID, "a.txt", "text/plain"); err != nil {
+		if err := st.MarkReceived(ctx, av.ID, "a.txt", "text/plain", nil); err != nil {
 			t.Fatal(err)
 		}
 		if err := claimFin(ctx, st, abandoned.ID, 1); err != nil {
@@ -298,7 +298,7 @@ func TestStoreConcurrentFinalizes(t *testing.T) {
 	forEachBackend(t, func(t *testing.T, db *sql.DB, st Store, reopen func() *sql.DB) {
 		ctx := context.Background()
 		a, v1 := pendingArtifact(t, st, "", "a.txt")
-		if err := st.MarkReceived(ctx, v1.ID, "a.txt", "text/plain"); err != nil {
+		if err := st.MarkReceived(ctx, v1.ID, "a.txt", "text/plain", nil); err != nil {
 			t.Fatal(err)
 		}
 		var seqs []int
@@ -343,7 +343,7 @@ func TestStoreReapRacesFinalize(t *testing.T) {
 		ctx := context.Background()
 		for round := 0; round < 5; round++ {
 			a, v := pendingArtifact(t, st, "", "a.txt")
-			if err := st.MarkReceived(ctx, v.ID, "a.txt", "text/plain"); err != nil {
+			if err := st.MarkReceived(ctx, v.ID, "a.txt", "text/plain", nil); err != nil {
 				t.Fatal(err)
 			}
 			if err := claimFin(ctx, st, a.ID, 1); err != nil {
@@ -391,7 +391,7 @@ func TestStoreStaleFinalizeClaimIsTakenOver(t *testing.T) {
 	forEachBackend(t, func(t *testing.T, db *sql.DB, st Store, _ func() *sql.DB) {
 		ctx := context.Background()
 		a, v := pendingArtifact(t, st, "", "a.txt")
-		if err := st.MarkReceived(ctx, v.ID, "a.txt", "text/plain"); err != nil {
+		if err := st.MarkReceived(ctx, v.ID, "a.txt", "text/plain", nil); err != nil {
 			t.Fatal(err)
 		}
 		if err := claimFin(ctx, st, a.ID, 1); err != nil {

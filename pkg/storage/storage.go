@@ -217,9 +217,10 @@ type UploadOptions struct {
 	// Metadata is custom metadata to attach to the object.
 	Metadata map[string]string
 	// Idempotent says that writing these bytes again is harmless (a
-	// content-addressed object always gets the same bytes), so a provider
-	// may retry transient failures, including rate limiting, a bounded
-	// number of times. The final error is still returned.
+	// content-addressed object always gets the same bytes) and that the
+	// caller retries a failed write itself, with its own bound on attempts
+	// and time: the provider makes one attempt per call (GCS turns off its
+	// client's retrying) and returns its error.
 	Idempotent bool
 }
 

@@ -634,7 +634,9 @@ func TestPendingArtifactVisibleOnlyToItsOwner(t *testing.T) {
 // an upload.
 type reapedStore struct{ Store }
 
-func (reapedStore) MarkReceived(context.Context, string, string, string) error { return ErrNotFound }
+func (reapedStore) MarkReceived(context.Context, string, string, string, map[string]string) error {
+	return ErrNotFound
+}
 
 func TestUploadToAVersionReapedMeanwhile(t *testing.T) {
 	f := newFixture(t, false)

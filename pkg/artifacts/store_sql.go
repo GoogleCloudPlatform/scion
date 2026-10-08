@@ -367,7 +367,7 @@ func (s *sqlStore) GetArtifactByKey(ctx context.Context, scopeKind, scopeRef, ow
 }
 
 // MarkReceived implements Store.
-func (s *sqlStore) MarkReceived(ctx context.Context, versionID, path, mediaType string) error {
+func (s *sqlStore) MarkReceived(ctx context.Context, versionID, path, mediaType string, siblings map[string]string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("artifacts: begin mark received: %w", err)
@@ -392,12 +392,18 @@ func (s *sqlStore) MarkReceived(ctx context.Context, versionID, path, mediaType 
 		return ErrConflict
 	}
 	// Files of the same version with the same digest share the one stored
-	// object, so they arrive together (one upload per digest).
-	if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE artifact_file SET received = ?
-		WHERE version_id = ? AND origin = ? AND received = ?
-		AND sha256 = (SELECT sha256 FROM artifact_file WHERE version_id = ? AND path = ?)`),
-		true, versionID, FileOriginUpload, false, versionID, path); err != nil {
-		return fmt.Errorf("artifacts: mark same-digest files received: %w", err)
+	// object, so they arrive together (one upload per digest), each with
+	// the media type the caller detected for its own path.
+	for p, mt := range siblings {
+		if p == path {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE artifact_file SET received = ?, media_type = ?
+			WHERE version_id = ? AND path = ? AND origin = ? AND received = ?
+			AND sha256 = (SELECT sha256 FROM artifact_file WHERE version_id = ? AND path = ?)`),
+			true, mt, versionID, p, FileOriginUpload, false, versionID, path); err != nil {
+			return fmt.Errorf("artifacts: mark same-digest file received: %w", err)
+		}
 	}
 	return commit(tx)
 }

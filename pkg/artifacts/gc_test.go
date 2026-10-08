@@ -834,7 +834,7 @@ func TestBlobLateDeleteAfterFailedUpload(t *testing.T) {
 		t.Fatal("the late delete did not fail the pass")
 	}
 	vs.late = false
-	vs.failUploads = 1
+	vs.failUploads = blobWriteAttempts
 	rec := f.do(&userU, http.MethodPost, "/api/v1/artifacts?name=a.md&scope=project-1", body, map[string]string{"Content-Type": "application/octet-stream"})
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("publish with a failing upload: %d", rec.Code)
@@ -879,7 +879,7 @@ func TestBlobLateDeleteTwoPublishers(t *testing.T) {
 		vs.mu.Unlock()
 		secondID = f.publish(userU, "second.md", body, "scope=project-1").Artifact.ID
 		vs.mu.Lock()
-		vs.failUploads = 1
+		vs.failUploads = blobWriteAttempts
 		vs.mu.Unlock()
 	}
 	rec := f.do(&userU, http.MethodPost, "/api/v1/artifacts?name=first.md&scope=project-1", body, map[string]string{"Content-Type": "application/octet-stream"})
@@ -944,10 +944,10 @@ func TestBlobGCInterleavings(t *testing.T) {
 		for step := range 150 {
 			name := "f" + strconv.Itoa(step) + ".md"
 			switch op := rng.Intn(15); op {
-			case 0: // publish, maybe with a failing upload
+			case 0: // publish, maybe with an upload that fails once (and is retried) or every time
 				if rng.Intn(2) == 0 {
 					vs.mu.Lock()
-					vs.failUploads = 1
+					vs.failUploads = []int{1, blobWriteAttempts}[rng.Intn(2)]
 					vs.mu.Unlock()
 				}
 				publish(name)
@@ -957,7 +957,7 @@ func TestBlobGCInterleavings(t *testing.T) {
 			case 1: // a publish whose upload fails, retried with the same bytes
 				body := content()
 				vs.mu.Lock()
-				vs.failUploads = 1
+				vs.failUploads = blobWriteAttempts
 				vs.mu.Unlock()
 				publishBody(name, body)
 				vs.mu.Lock()
@@ -981,7 +981,7 @@ func TestBlobGCInterleavings(t *testing.T) {
 					vs.mu.Unlock()
 					publish(name + ".2")
 					vs.mu.Lock()
-					vs.failUploads = 1
+					vs.failUploads = blobWriteAttempts
 					vs.mu.Unlock()
 				}
 				publish(name)
@@ -1023,7 +1023,7 @@ func TestBlobGCInterleavings(t *testing.T) {
 				}
 				if rng.Intn(3) == 0 {
 					vs.mu.Lock()
-					vs.failUploads = 1
+					vs.failUploads = blobWriteAttempts
 					vs.mu.Unlock()
 				}
 				for _, p := range pend.Upload.Required {
@@ -1198,7 +1198,7 @@ func TestBlobWriteIsIdempotentAndFailuresSurface(t *testing.T) {
 	req := files.manifest("b.md")
 	req.Scope = "project-1"
 	pend := f.createPending(userU, "/api/v1/artifacts", req)
-	vs.failUploads = 1
+	vs.failUploads = blobWriteAttempts
 	if rec := f.put(userU, pend.Artifact.ID, 1, "b.md", files["b.md"]); rec.Code != http.StatusInternalServerError {
 		t.Fatalf("PUT with a failing write: %d", rec.Code)
 	}
@@ -1248,6 +1248,29 @@ func TestManifestSameDigestUploadsOnce(t *testing.T) {
 		if rec.Code != http.StatusOK || rec.Body.String() != string(files[p]) {
 			t.Errorf("GET %s: %d", p, rec.Code)
 		}
+	}
+	// Each path gets the media type detected for it, siblings included.
+	same2 := testPNG
+	files2 := bundle{"notes.md": same2, "picture": same2}
+	req2 := files2.manifest("notes.md")
+	req2.Scope = "project-1"
+	pend2 := f.createPending(userU, "/api/v1/artifacts", req2)
+	if len(pend2.Upload.Required) != 1 {
+		t.Fatalf("required = %v", pend2.Upload.Required)
+	}
+	p := pend2.Upload.Required[0]
+	if rec := f.put(userU, pend2.Artifact.ID, 1, p, same2); rec.Code != http.StatusNoContent {
+		t.Fatalf("PUT: %d", rec.Code)
+	}
+	ready := decodeInto[ArtifactResponse](t, f.finalize(userU, pend2.Artifact.ID, 1))
+	types := map[string]string{}
+	for _, fi := range ready.Version.Files {
+		types[fi.Path] = fi.MediaType
+	}
+	// "picture" has no extension: its type comes from its bytes, whichever
+	// path was the one uploaded.
+	if types["notes.md"] != detectMediaType("notes.md", "", same2) || types["picture"] != "image/png" {
+		t.Errorf("media types %v", types)
 	}
 }
 
@@ -1312,5 +1335,75 @@ func TestBlobSweepRemovesStaleUploadTemps(t *testing.T) {
 	}
 	if _, err := os.Stat(fresh); err != nil {
 		t.Errorf("fresh temporary upload file removed: %v", err)
+	}
+}
+
+func init() {
+	// Blob write retries pause briefly in tests.
+	blobWriteBackoff = time.Millisecond
+}
+
+// TestBlobWriteRetryBounded: a failing blob write is retried, at most
+// blobWriteAttempts times in all, and its last error is returned; a write
+// that fails fewer times succeeds.
+func TestBlobWriteRetryBounded(t *testing.T) {
+	f := newFixture(t, false)
+	vs := newVersionedStorage(f.local)
+	f.svc.SetBlobStorage(vs, "hub-1")
+	attempts := 0
+	vs.beforeUpload = func() { attempts++ }
+	vs.failUploads = 1000
+	rec := f.do(&userU, http.MethodPost, "/api/v1/artifacts?name=a.md&scope=project-1", []byte("never stored"),
+		map[string]string{"Content-Type": "application/octet-stream"})
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("publish with a write that always fails: %d", rec.Code)
+	}
+	if attempts != blobWriteAttempts {
+		t.Errorf("%d attempts, want %d", attempts, blobWriteAttempts)
+	}
+	vs.beforeUpload = func() {}
+	vs.failUploads = 2
+	attempts = 0
+	vs.beforeUpload = func() { attempts++ }
+	f.publish(userU, "b.md", []byte("stored on the third attempt"), "scope=project-1")
+	if attempts != 3 {
+		t.Errorf("%d attempts, want 3", attempts)
+	}
+	// The deadline also bounds the retrying.
+	oldDeadline, oldBackoff := blobWriteDeadline, blobWriteBackoff
+	blobWriteDeadline, blobWriteBackoff = 50*time.Millisecond, 40*time.Millisecond
+	t.Cleanup(func() { blobWriteDeadline, blobWriteBackoff = oldDeadline, oldBackoff })
+	vs.failUploads = 1000
+	attempts = 0
+	rec = f.do(&userU, http.MethodPost, "/api/v1/artifacts?name=c.md&scope=project-1", []byte("deadline"),
+		map[string]string{"Content-Type": "application/octet-stream"})
+	if rec.Code != http.StatusInternalServerError || attempts >= blobWriteAttempts {
+		t.Errorf("deadline-bounded write: %d after %d attempts", rec.Code, attempts)
+	}
+}
+
+// failingCleaner is local storage whose temporary-file cleanup fails.
+type failingCleaner struct{ *storage.LocalStorage }
+
+func (failingCleaner) RemoveStaleTemps(context.Context, string, time.Duration) (int, error) {
+	return 0, errors.New("permission denied")
+}
+
+// TestBlobSweepContinuesWhenTempCleanupFails: a failing temporary-file
+// cleanup is logged and the sweep still marks and reclaims blobs.
+func TestBlobSweepContinuesWhenTempCleanupFails(t *testing.T) {
+	f := newFixture(t, false)
+	ctx := context.Background()
+	body := []byte("orphan")
+	if _, err := f.local.Upload(ctx, BlobPath("hub-1", sha(body)), bytes.NewReader(body), storage.UploadOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	g := &BlobSweeper{}
+	fc := failingCleaner{f.local}
+	if listed, _, err := g.Sweep(ctx, f.store, fc, "hub-1", DefaultGCGrace, time.Now().Add(-2*DefaultGCGrace)); err != nil || listed != 1 {
+		t.Fatalf("mark pass: listed %d, %v", listed, err)
+	}
+	if _, deleted, err := g.Sweep(ctx, f.store, fc, "hub-1", DefaultGCGrace, time.Now()); err != nil || deleted != 1 {
+		t.Fatalf("reclaim pass: deleted %d, %v", deleted, err)
 	}
 }

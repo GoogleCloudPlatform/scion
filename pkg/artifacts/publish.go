@@ -229,8 +229,7 @@ func (s *Service) writeMissingScope(w http.ResponseWriter, r *http.Request) bool
 	return true
 }
 
-// putBlob stores the spooled body at its content address unless a blob
-// with that digest already exists.
+// putBlob stores the spooled body at its content address (see storeBlob).
 func (s *Service) putBlob(ctx context.Context, b backend, sp *spooled, mediaType string) error {
 	return storeBlob(ctx, b, sp.digest, mediaType, func() (io.Reader, error) {
 		if _, err := sp.file.Seek(0, io.SeekStart); err != nil {
@@ -244,29 +243,50 @@ func (s *Service) putBlob(ctx context.Context, b backend, sp *spooled, mediaType
 // can run publishes and sweeps on one simulated clock.
 var blobClock = time.Now
 
+// Blob write retries: a blob write is idempotent (the object always gets
+// the same bytes), so a failed write is retried, at most blobWriteAttempts
+// times in all and within blobWriteDeadline, with a growing pause; the
+// last error is returned. Variables so tests can shorten them.
+var (
+	blobWriteAttempts = 5
+	blobWriteDeadline = 60 * time.Second
+	blobWriteBackoff  = 200 * time.Millisecond
+)
+
 // storeBlob stores the bytes open yields at digest's content address. It
 // is the only way bytes are written. It touches the blob first (waiting
 // for a sweep that holds the blob's state, and keeping the sweep off the
 // blob for the grace period), then always uploads, overwriting any object
-// already there: the write never relies on an existing object, so a
-// delete the sweep issued earlier (which names the generation it saw) can
-// never remove the bytes this write stores. There is still one object per
-// digest.
+// already there: the write never relies on an object that is already
+// there, so a delete the sweep issued earlier (which names the generation
+// it saw) can never remove the bytes this write stores. There is still
+// one object per digest. open is called again for each attempt.
 func storeBlob(ctx context.Context, b backend, digest, mediaType string, open func() (io.Reader, error)) error {
 	if err := b.store.TouchBlob(ctx, digest, blobClock()); err != nil {
 		return err
 	}
-	body, err := open()
-	if err != nil {
-		return err
+	ctx, cancel := context.WithTimeout(ctx, blobWriteDeadline)
+	defer cancel()
+	pause := blobWriteBackoff
+	var err error
+	for attempt := 1; attempt <= blobWriteAttempts; attempt++ {
+		if attempt > 1 {
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("upload blob: %w (after %d attempts)", err, attempt-1)
+			case <-time.After(pause):
+			}
+			pause *= 2
+		}
+		var body io.Reader
+		if body, err = open(); err != nil {
+			return err
+		}
+		if _, err = b.blobs.Upload(ctx, BlobPath(b.hubID, digest), body, storage.UploadOptions{ContentType: mediaType, Idempotent: true}); err == nil {
+			return nil
+		}
 	}
-	// Idempotent: the object always gets the same bytes, so the provider
-	// may retry a transient failure (on GCS, a write rate limit on the one
-	// object) a bounded number of times; the last error is returned.
-	if _, err := b.blobs.Upload(ctx, BlobPath(b.hubID, digest), body, storage.UploadOptions{ContentType: mediaType, Idempotent: true}); err != nil {
-		return fmt.Errorf("upload blob: %w", err)
-	}
-	return nil
+	return fmt.Errorf("upload blob: %w (after %d attempts)", err, blobWriteAttempts)
 }
 
 func writeTooLarge(w http.ResponseWriter, limit int64) {
