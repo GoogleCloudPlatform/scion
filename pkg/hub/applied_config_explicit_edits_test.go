@@ -713,10 +713,10 @@ func TestApplyAgentUpdate_UntouchedSavePreservesExplicitTelemetryOptOut(t *testi
 // existed) relies entirely on legacyCreateInputsFromAppliedConfig
 // (reincarnate_config.go) reading its LIVE InlineConfig.Env back at
 // reincarnate time to recover its explicit env -- there is no CreateInputs
-// record to fall back on. Before the R4-1 carve-out, an untouched Save/Start
-// would wipe InlineConfig.Env via the wholesale replace, and reincarnate
-// would then silently lose every one of this agent's explicit env keys with
-// no warning.
+// record to fall back on. applyAgentUpdate keeps InlineConfig.Env when the
+// request omits "env" (mergePresentInlineFields); without that, reincarnate
+// would silently lose every one of this agent's explicit env keys with no
+// warning.
 func TestApplyAgentUpdate_UntouchedSaveThenReincarnateKeepsLegacyAgentExplicitEnv(t *testing.T) {
 	disp := newReincarnateTestDispatcher()
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)

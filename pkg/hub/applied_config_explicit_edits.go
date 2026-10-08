@@ -415,14 +415,11 @@ func recordOtherInlineFieldEdits(ensureInline func() *api.ScionConfig, oldInline
 // reflection so a new ScionConfig field is covered without a hand-written
 // list.
 func mergePresentInlineFields(oldInline, cfg *api.ScionConfig, present map[string]bool) *api.ScionConfig {
+	// deepCopyScionConfig returns nil only for a nil input: a JSON round
+	// trip of api.ScionConfig cannot fail.
 	merged := deepCopyScionConfig(oldInline)
 	if merged == nil {
 		merged = &api.ScionConfig{}
-		if oldInline != nil {
-			// The JSON round trip failed; a shallow copy still keeps
-			// every live field rather than dropping them all.
-			*merged = *oldInline
-		}
 	}
 	if cfg == nil || len(present) == 0 {
 		return merged

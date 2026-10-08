@@ -3989,7 +3989,26 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		// render volumes, skills, MCP servers, services, command args or
 		// kubernetes, and sends telemetry and env only when touched, so a
 		// wholesale replace would wipe them on every Save and Start.
-		agent.AppliedConfig.InlineConfig = mergePresentInlineFields(old.InlineConfig, cfg, presentConfigKeys)
+		merged := mergePresentInlineFields(old.InlineConfig, cfg, presentConfigKeys)
+		// A config PATCH can change the harness (harness or harness_config)
+		// while keys it does not mention are kept, so re-check the merged
+		// config against the harness it now resolves to. When the harness is
+		// unchanged, the check above already covered every key the request
+		// sends, and kept keys are left as they were.
+		probeConfig := *agent.AppliedConfig
+		probeConfig.InlineConfig = merged
+		probe := *agent
+		probe.AppliedConfig = &probeConfig
+		if mergedHarness, mergedCaps := s.resolveAgentHarnessCapabilities(ctx, &probe); mergedHarness != resolvedHarness {
+			if issues := validateConfigAgainstHarnessCapabilities(merged, mergedCaps); len(issues) > 0 {
+				ValidationError(w, "Config contains unsupported fields for harness "+mergedHarness, map[string]interface{}{
+					"harness": mergedHarness,
+					"fields":  issues,
+				})
+				return
+			}
+		}
+		agent.AppliedConfig.InlineConfig = merged
 	}
 
 	// Apply GCP identity update (only allowed for agents in 'created' phase)

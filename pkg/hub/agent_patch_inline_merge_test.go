@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -189,6 +190,14 @@ func TestMergePresentInlineFields(t *testing.T) {
 		assert.Equal(t, old.Volumes, got.Volumes)
 	})
 
+	t.Run("a non-canonical-case key is merged", func(t *testing.T) {
+		// applyAgentUpdate lower-cases the raw keys, as encoding/json
+		// matches field names case-insensitively.
+		present := map[string]bool{strings.ToLower("Max_Turns"): true}
+		got := mergePresentInlineFields(createdInlineConfig(), &api.ScionConfig{MaxTurns: 9}, present)
+		assert.Equal(t, 9, got.MaxTurns)
+	})
+
 	t.Run("result does not alias the old config", func(t *testing.T) {
 		old := createdInlineConfig()
 		old.Env = map[string]string{"A": "1"}
@@ -198,4 +207,56 @@ func TestMergePresentInlineFields(t *testing.T) {
 		assert.Equal(t, "1", old.Env["A"])
 		assert.Equal(t, "/host/data", old.Volumes[0].Source)
 	})
+}
+
+// TestApplyAgentUpdate_PatchMixedCaseKeyIsMerged sends a non-canonical-case
+// key over HTTP: encoding/json decodes it, so it must also reach the merged
+// InlineConfig.
+func TestApplyAgentUpdate_PatchMixedCaseKeyIsMerged(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newInlineMergeTestAgent(t, s, project, broker)
+
+	rec := patchAgentConfig(t, srv, agent.ID, map[string]interface{}{"Max_Turns": 9})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	inline := getAgentViaAPI(t, srv, agent.ID).AppliedConfig.InlineConfig
+	assert.Equal(t, 9, inline.MaxTurns)
+	assert.Equal(t, createdInlineConfig().Volumes, inline.Volumes)
+}
+
+// TestApplyAgentUpdate_HarnessSwitchRevalidatesKeptKeys: a PATCH that
+// switches the harness re-checks the merged config, including kept keys,
+// against the new harness. A claude agent with max_turns cannot switch to
+// the generic harness, which does not support max_turns, and nothing is
+// stored.
+func TestApplyAgentUpdate_HarnessSwitchRevalidatesKeptKeys(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	ctx := context.Background()
+	agent := newInlineMergeTestAgent(t, s, project, broker)
+
+	rec := patchAgentConfig(t, srv, agent.ID, map[string]interface{}{"harness": "generic"})
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	var body struct {
+		Error struct {
+			Code    string                 `json:"code"`
+			Details map[string]interface{} `json:"details"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.Equal(t, "validation_error", body.Error.Code)
+	assert.Equal(t, "generic", body.Error.Details["harness"])
+	fields, _ := body.Error.Details["fields"].(map[string]interface{})
+	assert.Contains(t, fields, "max_turns")
+
+	stored, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "claude", stored.AppliedConfig.InlineConfig.Harness, "a rejected PATCH must store nothing")
+
+	// Clearing max_turns in the same PATCH makes the switch valid.
+	rec = patchAgentConfig(t, srv, agent.ID, map[string]interface{}{"harness": "generic", "max_turns": 0})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	inline := getAgentViaAPI(t, srv, agent.ID).AppliedConfig.InlineConfig
+	assert.Equal(t, "generic", inline.Harness)
+	assert.Equal(t, 0, inline.MaxTurns)
 }
