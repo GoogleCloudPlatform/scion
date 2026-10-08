@@ -383,7 +383,10 @@ type Store interface {
 	// touching the blob meanwhile waits for that transaction. It returns
 	// how many blobs it deleted. An error from del keeps that blob and its
 	// mark and the pass goes on with the others; the pass then returns an
-	// error wrapping the first such failure. Any other error ends the pass.
+	// error wrapping the first such failure. A del error that wraps
+	// context.DeadlineExceeded or context.Canceled, or a third del failure
+	// in a row (an unknown generation does not count), ends the pass, as
+	// does any other error.
 	ReclaimBlobs(ctx context.Context, cutoff time.Time, limit int, del func(digest string, generation int64) error) (int, error)
 
 	// AddMessageRefs records that message messageID references refs, in the
